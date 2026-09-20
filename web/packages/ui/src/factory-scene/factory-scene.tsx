@@ -1,4 +1,5 @@
 import { useLayoutEffect, useEffect, useMemo, useRef, useState, type MouseEvent, type FocusEvent, type PointerEvent, type KeyboardEvent, type ReactNode } from "react";
+import type { PeerQuestionItem } from "@dark-factory/client";
 import type { SceneTask } from "../console-view.js";
 import {
   PADDING,
@@ -19,6 +20,7 @@ import {
 import { DEFAULT_FLOOR_APPEARANCE, type FloorAppearance } from "../floor-appearance.js";
 import { breakRoomHabit, restingItem, workerFrames, workerPhase } from "./appearance.js";
 import { catAt, catBed, chats, gossip, type Seat } from "./idle-life.js";
+import { endsAt, messageAt, observe, send, type FloorMessage, type Seen } from "./messages.js";
 import { directionBetween, pointOnRoute, routeFromCurrent, routeBetween, samePoint, type WorkerMotion } from "./movement.js";
 import { spriteAtlas, spriteSheet, spriteSheetSize } from "./sprites/sprites.generated.js";
 
@@ -30,6 +32,8 @@ export type FactorySceneProps = Readonly<{
   detailNodes?: ReadonlyMap<string, SceneTopology["nodes"][number]>;
   workers: readonly SceneWorker[];
   tasks?: readonly SceneTask[];
+  /** Questions between live tasks: shown as they are asked and answered, and stated while they wait. */
+  peerQuestions?: readonly PeerQuestionItem[];
   selectedTaskId?: string;
   onSelectTask?: (taskId: string) => void;
   onSelectHumanRequest?: (requestId: string) => void;
@@ -53,6 +57,7 @@ export type AgentSpriteProps = Readonly<{
 }>;
 
 const FRAME = spriteAtlas.frame;
+const NO_QUESTIONS: readonly PeerQuestionItem[] = [];
 // Tables stand this far below a seat's centre: over the lap, under the hands.
 const TABLE_DROP = 29;
 // What rests on the table is the chest-height drawing, set down this many sprite pixels.
@@ -227,7 +232,7 @@ function useSceneMotion(layout: ReturnType<typeof layoutScene>, seated: ReturnTy
 }
 
 /** The animation clock updates worker elements without rerendering the floor or atlas. */
-function SceneWorkers({ errands, furniture, restingSeats, layout, placements: seated, nodes, workers, tasks, connected, animate, selectedWorkerId, onSelectWorker, onSelectHumanRequest }: Pick<FactorySceneProps, "workers" | "selectedWorkerId" | "onSelectWorker" | "onSelectHumanRequest"> & {
+function SceneWorkers({ errands, furniture, restingSeats, tray, peerQuestions, layout, placements: seated, nodes, workers, tasks, connected, animate, selectedWorkerId, onSelectWorker, onSelectHumanRequest }: Pick<FactorySceneProps, "workers" | "selectedWorkerId" | "onSelectWorker" | "onSelectHumanRequest"> & {
   layout: ReturnType<typeof layoutScene>;
   placements: ReturnType<typeof placeWorkers>;
   nodes: ReadonlyMap<string, SceneTopology["nodes"][number]>;
@@ -240,15 +245,47 @@ function SceneWorkers({ errands, furniture, restingSeats, layout, placements: se
   errands: boolean;
   /** The break room's seats, where its idle life happens. */
   restingSeats: readonly Seat[];
+  /** Where waiting work is kept, and so where handed-over work comes from. */
+  tray: { x: number; y: number };
+  peerQuestions: readonly PeerQuestionItem[];
 }) {
   // Inventory/dependency metadata may change without changing a route's geometry.
   const geometryKey = useMemo(() => JSON.stringify([layout.width, layout.height, layout.restingTop, layout.corridors, layout.rooms.map(({ id, x, y, width, height, door }) => [id, x, y, width, height, door])]), [layout]);
   const active = useMemo(() => new Set(workers.filter((worker) => worker.location === "working" && worker.activity === "busy" && seated.some((placement) => placement.id === worker.id && placement.area === "room" && layout.rooms.find((room) => room.id === placement.roomId)?.contents.some((item) => item.workSurface))).map((worker) => worker.id)), [workers, seated, layout]);
   const reduced = useReducedMotion();
-  const { placements, positions, pulse } = useSceneMotion(layout, seated, geometryKey, connected && animate, reduced, active, workers, errands, (at) => errands && catAt(restingSeats.filter((seat) => seat.y === restingSeats[0]!.y), at)?.moving === true);
+  const mail = useRef<readonly FloorMessage[]>([]);
+  const { placements, positions, pulse } = useSceneMotion(layout, seated, geometryKey, connected && animate, reduced, active, workers, errands, (at) => mail.current.some((message) => endsAt(message) > at) || errands && catAt(restingSeats.filter((seat) => seat.y === restingSeats[0]!.y), at)?.moving === true);
   const workerById = new Map(workers.map((worker) => [worker.id, worker]));
   // Nobody on the floor, no pulse: what lives there rests as it does under any stopped clock.
   const at = placements.length === 0 ? undefined : pulse;
+  // What changed since the last look is sent across the floor once; with the clock stopped it is only noted.
+  const seen = useRef<Seen>(undefined);
+  const live = useRef(false);
+  live.current = at !== undefined;
+  useEffect(() => {
+    // The floor is mounted before there is any state, and may lose it again: a look only counts while
+    // connected, so the first snapshot after connecting or reconnecting is history, never a burst of old news.
+    if (!connected) { seen.current = undefined; return; }
+    const { seen: next, events } = observe(seen.current, tasks, peerQuestions);
+    seen.current = next;
+    const started = now();
+    mail.current = [...mail.current.filter((message) => endsAt(message) > started), ...(!live.current ? [] : events).flatMap((event) => {
+      const to = seated.find((placement) => placement.id === event.to), from = seated.find((placement) => placement.id === event.from);
+      if (to === undefined || event.from !== undefined && from === undefined || mail.current.some((message) => message.key === event.key)) return [];
+      const origin = from ?? tray;
+      return [send(event, started, origin, from === undefined ? undefined : routeBetween(layout, from, to), Math.hypot(to.x - origin.x, to.y - origin.y))];
+    })].slice(-16);
+  }, [tasks, peerQuestions, connected]);
+  const flights = at === undefined ? [] : mail.current.flatMap((message) => { const to = positions.get(message.to); return to === undefined ? [] : [{ message, ...messageAt(message, to, at) }]; });
+  // The sender raises a hand and says what it is as it leaves; the receiver raises one as it lands.
+  const hailing = new Map<string, 0 | 1>(), calling = new Map<string, "ask" | "tell" | "hum">();
+  for (const { message, hailing: who, sending, landed } of flights) {
+    if (who !== undefined) hailing.set(who === "from" ? message.from! : message.to, who === "from" ? 1 : 0);
+    if (sending) calling.set(message.from!, message.kind === "ask" ? "ask" : "tell");
+    else if (landed && message.kind !== "assign") calling.set(message.to, "hum");
+  }
+  const agentOf = new Map(tasks.map((task) => [task.id, task.agentId]));
+  const waiting = peerQuestions.filter((question) => !question.answered).map((question) => ({ asker: agentOf.get(question.source_task_id), asked: agentOf.get(question.target_task_id) }));
   // Idle life belongs to people sitting still in their seats with nothing to ask of anyone.
   const seats = restingSeats.map((seat): Seat => {
     const id = placements.find((placement) => placement.area === "resting" && samePoint(placement, seat))?.id;
@@ -268,6 +305,11 @@ function SceneWorkers({ errands, furniture, restingSeats, layout, placements: se
   const bed = errands ? catBed(rows[0]!) : undefined;
   return <>{bed === undefined ? null : <g aria-hidden="true" pointerEvents="none" data-cat-bed="" transform={`translate(${bed.x} ${bed.y}) scale(${WORKER_SIZE / FRAME})`}><Frame name="cat.bed" x={3} y={-4} /></g>}
       {cat !== undefined && cat.y !== rows[0]![0]!.y ? puss : null}
+      {/* A question and its answer run along the corridors people walk, under their feet. */}
+      <g aria-hidden="true" pointerEvents="none">{flights.map(({ message, point, trail }) => point === undefined || message.kind === "assign" ? null : <g key={message.key} data-pulse={message.kind} fill={message.kind === "ask" ? "#80ddff" : "#9fe7b0"}>
+        {trail.map((spot, index) => <circle key={index} cx={spot.x} cy={spot.y} r="1.5" opacity={.5 - index * .15} />)}
+        <circle cx={point.x} cy={point.y} r="6" opacity=".22" /><circle cx={point.x} cy={point.y} r="2.5" />
+      </g>)}</g>
       {placements.map((told) => {
         const worker = workerById.get(told.id);
         if (worker === undefined) return null;
@@ -287,7 +329,8 @@ function SceneWorkers({ errands, furniture, restingSeats, layout, placements: se
         const stroking = cat?.pettedBy === worker.id ? cat.pettedFor : undefined;
         const chat = talk.find(({ between }) => between.includes(worker.id));
         const said = chat === undefined ? "" : `\n${workerById.get(chat.between[0])!.name}: ${chat.remark.line}${chat.replied ? `\n${workerById.get(chat.between[1])!.name}: ${chat.remark.reply}` : ""}`;
-        const frames = workerFrames(worker, position.motion, placement.area === "room" || placement.errand !== undefined ? undefined : placement.area === "resting" ? "resting" : "planning", placement.errand, stroking);
+        const frames = workerFrames(worker, position.motion, placement.area === "room" || placement.errand !== undefined ? undefined : placement.area === "resting" ? "resting" : "planning", placement.errand, stroking, hailing.get(worker.id));
+        const asking = waiting.flatMap(({ asker, asked }) => asker === worker.id && workerById.has(asked ?? "") ? [`\nAsked ${workerById.get(asked!)!.name} · waiting for an answer`] : asked === worker.id && workerById.has(asker ?? "") ? [`\nHas a question from ${workerById.get(asker!)!.name}`] : []);
         // A step lifts the whole body a pixel.
         const bob = position.motion.action === "walking" && position.motion.frame === 1 ? -1 : 0;
         // Only a profile facing east is drawn; walking west is its mirror image.
@@ -302,7 +345,7 @@ function SceneWorkers({ errands, furniture, restingSeats, layout, placements: se
             transform={`translate(${position.x} ${position.y})`}
             className={worker.id === selectedWorkerId ? "dfFactoryScene__worker dfFactoryScene__worker--selected" : "dfFactoryScene__worker"}
           >
-            <g role="img" className="dfFactoryScene__target" data-tooltip={`${worker.name} · ${worker.activity}\n${placement.area === "room" ? `Working near ${worker.locationLabel ?? room?.label ?? "observed changes"}` : placement.errand === "shelf" ? "Taking a break · at the bookshelf" : placement.errand === "coffee" ? "Taking a break · at the coffee station" : placement.area === "resting" ? `${worker.paused ? "Paused · taking a break" : "Taking a break"}${stroking === undefined ? "" : " · fussing the cat"}${said}` : worker.location === "unobserved" ? "Planning · location not yet observed" : "Planning · work outside this room"}`} aria-label={`${worker.name}, ${worker.role}, ${worker.activity}, ${location}`} {...sceneAction(onSelectWorker === undefined ? undefined : () => onSelectWorker(worker.id))}>
+            <g role="img" className="dfFactoryScene__target" data-tooltip={`${worker.name} · ${worker.activity}\n${placement.area === "room" ? `Working near ${worker.locationLabel ?? room?.label ?? "observed changes"}` : placement.errand === "shelf" ? "Taking a break · at the bookshelf" : placement.errand === "coffee" ? "Taking a break · at the coffee station" : placement.area === "resting" ? `${worker.paused ? "Paused · taking a break" : "Taking a break"}${stroking === undefined ? "" : " · fussing the cat"}${said}` : worker.location === "unobserved" ? "Planning · location not yet observed" : "Planning · work outside this room"}${[...new Set(asking)].join("")}`} aria-label={`${worker.name}, ${worker.role}, ${worker.activity}, ${location}`} {...sceneAction(onSelectWorker === undefined ? undefined : () => onSelectWorker(worker.id))}>
                 <rect className="dfFactoryScene__focus" x={-12} y={-12} width="24" height="24" rx="3" fill="transparent" />
               {worker.id === selectedWorkerId ? <circle className="dfFactoryScene__selection" cx="0" cy="0" r="12" /> : null}
               <g data-seated={seated ? placement.area === "resting" ? "coffee" : "planning" : undefined} data-active-pose={position.motion.action === "interacting" ? position.motion.frame : undefined}><g transform={`scale(${WORKER_SIZE / FRAME})${bob === 0 ? "" : ` translate(0 ${bob})`}${facingWest ? " scale(-1 1)" : ""}`}>{frames.map((frame) => <Frame key={frame} name={frame} x={-8} y={-8} />)}</g>
@@ -320,7 +363,7 @@ function SceneWorkers({ errands, furniture, restingSeats, layout, placements: se
         const worker = workerById.get(told.id), position = positions.get(told.id), placement = position?.placement ?? told;
         if (worker === undefined || placement.area === "room" || placement.errand !== undefined || position?.motion.action === "walking") return null;
         if (placement.area !== "resting") return !connected ? null : <g key={placement.id} data-planning-light="" aria-hidden="true" pointerEvents="none" transform={`translate(${position?.x ?? placement.x} ${(position?.y ?? placement.y) + TABLE_DROP})`}><circle cx="7" cy="-16" r="14" fill="url(#df-lamplight)" /><path d="M12 -18v-5h-5" fill="none" stroke="#788379" strokeWidth="2" /><path d="M4 -20h6" stroke="#dfc38f" strokeWidth="3" /></g>;
-        const rest = restingItem(worker, worker.activity === "needs-you" || cat?.pettedBy === worker.id ? undefined : position?.motion.at);
+        const rest = restingItem(worker, worker.activity === "needs-you" || cat?.pettedBy === worker.id || hailing.has(worker.id) ? undefined : position?.motion.at);
         return rest.where !== "table" ? null : <g key={placement.id} aria-hidden="true" pointerEvents="none" data-table-item={rest.item} transform={`translate(${position?.x ?? placement.x} ${position?.y ?? placement.y}) scale(${WORKER_SIZE / FRAME})`}>
           <Frame name={`person.held.${rest.item}.chest`} x={-8} y={-8 + SET_DOWN} />
         </g>;
@@ -328,13 +371,15 @@ function SceneWorkers({ errands, furniture, restingSeats, layout, placements: se
       {cat !== undefined && cat.y === rows[0]![0]!.y ? puss : null}
       {/* Said and felt, over everyone's heads: never words on the floor, those are in the tooltip. */}
       <g aria-hidden="true" pointerEvents="none">
+        {[...calling].map(([id, glyph]) => { const position = positions.get(id); return position === undefined ? null : <g key={`call ${id}`} data-bubble={glyph} data-call={id} transform={`translate(${position.x} ${position.y}) scale(${WORKER_SIZE / FRAME})`}><Frame name={`bubble.${glyph}`} x={1} y={-21} /></g>; })}
+        {flights.map(({ message, point }) => point === undefined || message.kind !== "assign" ? null : <g key={message.key} data-paper={message.to} transform={`translate(${point.x} ${point.y}) scale(${WORKER_SIZE / FRAME})`}><Frame name={`paper.${Math.floor(at! / 120) % 2}`} x={-8} y={-8} /></g>)}
         {talk.map(({ speaking }) => { const position = speaking && positions.get(speaking.id); return !position ? null : <g key={speaking.id} data-bubble={speaking.glyph} transform={`translate(${position.x} ${position.y}) scale(${WORKER_SIZE / FRAME})`}><Frame name={`bubble.${speaking.glyph}`} x={1} y={-21} /></g>; })}
         {cat?.pettedBy === undefined || cat.pettedFor! < 600 ? null : <g data-heart="" opacity={cat.pettedFor! > 2800 ? .5 : 1} transform={`translate(${positions.get(cat.pettedBy)!.x} ${positions.get(cat.pettedBy)!.y}) scale(${WORKER_SIZE / FRAME})`}><Frame name="heart" x={-4} y={-24 - Math.floor((cat.pettedFor! - 600) / 450)} /></g>}
       </g></>;
 }
 
 /** A disposable SVG projection of topology and current factory state. */
-export function FactoryScene({ topology, detailNodes, workers, appearance = DEFAULT_FLOOR_APPEARANCE, omittedLocations = 0, enterableRoomIds = [], onEnterRoom, selectedWorkerId, onSelectWorker, tasks = [], selectedTaskId, onSelectTask, onSelectHumanRequest, connected = true }: FactorySceneProps) {
+export function FactoryScene({ topology, detailNodes, workers, appearance = DEFAULT_FLOOR_APPEARANCE, omittedLocations = 0, enterableRoomIds = [], onEnterRoom, selectedWorkerId, onSelectWorker, tasks = [], peerQuestions = NO_QUESTIONS, selectedTaskId, onSelectTask, onSelectHumanRequest, connected = true }: FactorySceneProps) {
   const [selectedRoomId, setSelectedRoomId] = useState<string>();
   const [tooltip, setTooltip] = useState<{ text: string; x: number; y: number; top: number; bottom: number; room: number }>();
   const tooltipElement = useRef<HTMLDivElement>(null);
@@ -376,6 +421,7 @@ export function FactoryScene({ topology, detailNodes, workers, appearance = DEFA
   const enterable = new Set(enterableRoomIds);
   const cabling = useMemo(() => wires(layout, topology), [layout, topology]);
   const queued = tasks.filter((order) => order.status === "queued").length;
+  const tray = useMemo(() => ({ x: ROOM_LEFT + commonWidth - 20, y: layout.restingTop + TABLE_DROP - 25 }), [commonWidth, layout]);
   // A compact scope still needs room for readable labels, not poster-sized
   // sprites; larger scopes retain their existing scrollable viewport.
   const maxWidth = Math.min(640, layout.width * 2);
@@ -498,11 +544,11 @@ export function FactoryScene({ topology, detailNodes, workers, appearance = DEFA
       })}
       {layout.rooms.length === 0 ? <text x={ROOM_LEFT} y="24" fill="#9db1be" fontFamily="ui-monospace, monospace" fontSize="10">EMPTY FLOOR</text> : null}
 
-      <SceneWorkers errands={appearance.scenery !== "off"} restingSeats={seating.resting} furniture={tables} layout={layout} placements={placements} nodes={nodes} workers={workers} tasks={tasks} connected={connected} animate={appearance.animation !== "off"} selectedWorkerId={selectedWorkerId} onSelectWorker={onSelectWorker} onSelectHumanRequest={onSelectHumanRequest} />
+      <SceneWorkers errands={appearance.scenery !== "off"} restingSeats={seating.resting} tray={tray} peerQuestions={peerQuestions} furniture={tables} layout={layout} placements={placements} nodes={nodes} workers={workers} tasks={tasks} connected={connected} animate={appearance.animation !== "off"} selectedWorkerId={selectedWorkerId} onSelectWorker={onSelectWorker} onSelectHumanRequest={onSelectHumanRequest} />
       {/* Waiting work, as the tray it would be on a real desk. Scenery, like
           everything else standing on these tables: the pile says how the queue
           is doing, the Tasks panel is where it is read and changed. */}
-      <g data-floor-inbox={queued} aria-hidden="true" pointerEvents="none" transform={`translate(${ROOM_LEFT + commonWidth - 30} ${layout.restingTop + TABLE_DROP - 21})`}>
+      <g data-floor-inbox={queued} aria-hidden="true" pointerEvents="none" transform={`translate(${tray.x - 10} ${tray.y + 4})`}>
         {[...Array(Math.min(queued, 3))].map((_, index) => <rect key={index} x="1" y={-2 - index * 3} width="18" height="3" fill="#e4dcc0" stroke={tasks.some((task) => task.id === selectedTaskId && task.status === "queued") ? "#80ddff" : "#a6a087"} />)}
         <path d="M-2 -4v6h24v-6 M-2 2h24" fill="none" stroke="#c2b184" strokeWidth="2" />
       </g>

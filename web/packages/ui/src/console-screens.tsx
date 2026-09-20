@@ -107,6 +107,7 @@ export function FactoryFloor({
   const effectiveScope = onProject !== undefined && prepared.roomByID.get(scopeId ?? "")?.project?.id !== projectId ? rootId : scopeId ?? rootId;
   const selected = useMemo(() => selectFloor(prepared, effectiveScope, effectiveScope === scopeId ? page : 0), [prepared, effectiveScope, scopeId, page]);
   const scene = useMemo(() => projectFloor(state, selected, runPaths, lastRunPaths), [state, selected, runPaths, lastRunPaths]);
+  const peerQuestions = useMemo(() => [...(state?.peerQuestions?.values() ?? [])], [state]);
   useEffect(() => {
     if (scopeId !== scene.navigation.scopeId || page !== scene.navigation.page) setView({ scopeId: scene.navigation.scopeId, page: scene.navigation.page });
   }, [scopeId, page, scene.navigation.scopeId, scene.navigation.page]);
@@ -140,6 +141,7 @@ export function FactoryFloor({
       workers={scene.workers}
       connected={connected}
       tasks={scene.tasks}
+      peerQuestions={peerQuestions}
       omittedLocations={scene.omittedLocations}
       enterableRoomIds={scene.navigation.enterableIds}
       onEnterRoom={setScopeId}

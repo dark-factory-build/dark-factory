@@ -1310,6 +1310,9 @@ func projectPublicSnapshot(snapshot kernel.PublicSnapshot, providerDefaults func
 		}
 		result.Tasks = append(result.Tasks, projectTask(item))
 	}
+	for _, item := range snapshot.PeerQuestions {
+		result.PeerQuestions = append(result.PeerQuestions, browserprotocol.PeerQuestionItem{ID: item.ID.String(), SourceTaskID: item.SourceTaskID.String(), TargetTaskID: item.TargetTaskID.String(), Answered: browserprotocol.Bool(item.Answered), Revision: decimalRevision(item.Revision)})
+	}
 	for _, item := range snapshot.HumanRequests {
 		projected, err := projectHumanRequest(item)
 		if err != nil {

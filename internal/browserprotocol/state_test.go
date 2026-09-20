@@ -108,7 +108,7 @@ func TestStateFixturesRoundTrip(t *testing.T) {
 	}
 	// The shared fixture is the cross-language contract: it must carry one of
 	// every public kind so a TypeScript consumer exercises the whole shape.
-	if len(snapshot.Projects) != 1 || len(snapshot.Agents) != 1 || len(snapshot.Tasks) != 1 || len(snapshot.SharedTasks) != 1 || len(snapshot.HumanRequests) != 1 {
+	if len(snapshot.Projects) != 1 || len(snapshot.Agents) != 1 || len(snapshot.Tasks) != 1 || len(snapshot.SharedTasks) != 1 || len(snapshot.HumanRequests) != 1 || len(snapshot.PeerQuestions) != 1 {
 		t.Fatalf("snapshot fixture does not cover every kind: %+v", snapshot)
 	}
 }
@@ -608,6 +608,10 @@ func TestStateMalformedEnvelopeBodyAndGlobalBounds(t *testing.T) {
 		strings.Replace(valid, `"title"`, `"TITLE"`, 1),
 		strings.Replace(valid, `"head":"9007199254740993"`, `"head":"9007199254740993","head":"2"`, 1),
 		valid + `{}`,
+		// A task cannot ask itself, a question is listed once, and it has a revision.
+		strings.Replace(valid, `"target_task_id":"06060606060606060606060606060606"`, `"target_task_id":"03030303030303030303030303030303"`, 1),
+		strings.Replace(valid, `"answered":false,"revision":"1"}]`, `"answered":false,"revision":"1"},{"id":"07070707070707070707070707070707","source_task_id":"03030303030303030303030303030303","target_task_id":"06060606060606060606060606060606","answered":true,"revision":"2"}]`, 1),
+		strings.Replace(valid, `"answered":false,"revision":"1"`, `"answered":false,"revision":"0"`, 1),
 	}
 	// An added item member is tolerated but reaches no field: the decoded
 	// snapshot is identical to the one without it.

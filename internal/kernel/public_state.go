@@ -54,7 +54,22 @@ type PublicSnapshot struct {
 	Tasks         []TaskSummary
 	HumanRequests []HumanRequestProjection
 	Accounts      []AccountSummary
+	PeerQuestions []PeerQuestionSummary
 }
+
+// PeerQuestionSummary says that one live task asked another something and
+// whether it has been answered. The words stay in task detail.
+type PeerQuestionSummary struct {
+	ID           PeerQuestionID
+	SourceTaskID TaskID
+	TargetTaskID TaskID
+	Answered     bool
+	Revision     Revision
+}
+
+// PublicPeerQuestionLimit bounds the newest questions between live tasks that a
+// snapshot carries; they ride outside the entity count because they cannot grow it.
+const PublicPeerQuestionLimit = 32
 
 // ReadPublicSnapshot reads one coherent public snapshot inside a single pinned
 // SQLite read transaction, so no concurrent writer can produce a mixed-head
@@ -99,6 +114,9 @@ func (store *Store) ReadPublicSnapshot(ctx context.Context) (PublicSnapshot, err
 	if snapshot.Accounts, err = readPublicAccounts(ctx, tx.connection); err != nil {
 		return PublicSnapshot{}, err
 	}
+	if snapshot.PeerQuestions, err = readPublicPeerQuestions(ctx, tx.connection); err != nil {
+		return PublicSnapshot{}, err
+	}
 	if 1+len(snapshot.Projects)+len(snapshot.Agents)+len(snapshot.Tasks)+len(snapshot.HumanRequests)+len(snapshot.Accounts) > PublicStateEntityLimit {
 		return PublicSnapshot{}, fmt.Errorf("%w: public snapshot rows disagree with their count", ErrCorruptState)
 	}
@@ -128,6 +146,37 @@ func enforcePublicStateCount(ctx context.Context, connection *sql.Conn) error {
 		return ErrSnapshotTooLarge
 	}
 	return nil
+}
+
+// ponytail: sorts the questions between live tasks on every snapshot; peer_questions is never pruned, but the
+// candidate set is bounded by live tasks through the source-task index. Add an (updated_at_ms) index if that grows.
+func readPublicPeerQuestions(ctx context.Context, connection *sql.Conn) ([]PeerQuestionSummary, error) {
+	rows, err := connection.QueryContext(ctx, `SELECT id, source_task_id, target_task_id, answer_text IS NOT NULL, revision FROM peer_questions
+        WHERE source_task_id IN (SELECT id FROM tasks WHERE status IN ('queued', 'running'))
+        AND target_task_id IN (SELECT id FROM tasks WHERE status IN ('queued', 'running'))
+        ORDER BY updated_at_ms DESC, id DESC LIMIT ?`, PublicPeerQuestionLimit)
+	if err != nil {
+		return nil, fmt.Errorf("read public peer questions: %w", err)
+	}
+	defer rows.Close()
+	var result []PeerQuestionSummary
+	for rows.Next() {
+		var rawID, rawSource, rawTarget []byte
+		var answered bool
+		var revision int64
+		if err := rows.Scan(&rawID, &rawSource, &rawTarget, &answered, &revision); err != nil {
+			return nil, fmt.Errorf("scan public peer question: %w", err)
+		}
+		id, e1 := PeerQuestionIDFromBytes(rawID)
+		source, e2 := TaskIDFromBytes(rawSource)
+		target, e3 := TaskIDFromBytes(rawTarget)
+		rev, e4 := NewRevision(revision)
+		if e1 != nil || e2 != nil || e3 != nil || e4 != nil || source == target {
+			return nil, fmt.Errorf("%w: invalid public peer question", ErrCorruptState)
+		}
+		result = append(result, PeerQuestionSummary{ID: id, SourceTaskID: source, TargetTaskID: target, Answered: answered, Revision: rev})
+	}
+	return result, rows.Err()
 }
 
 // readPublicAccounts serves which logins are linked and where their

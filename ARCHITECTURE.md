@@ -108,7 +108,10 @@ queued/running work, unresolved request origins, and the most recent completion
 per agent so terminal settlement remains visible. Every task item names its
 agent; queued work no worker has claimed yet is served in the additive
 `shared_tasks` member, which a console built before the shared queue ignores
-while a current console folds it into the same task view. The console groups queues
+while a current console folds it into the same task view. The additive
+`peer_questions` member lists the newest questions between queued or running
+tasks (who asked whom, and whether it was answered; never the words, which stay
+behind task detail), so the floor can show them passing. The console groups queues
 by agent; within each queue, the priority/creation-time/ID ordering matches
 admission, including an explicit replacement ahead of that agent's queued
 work. These groups do not predict the global order of starts across agents.

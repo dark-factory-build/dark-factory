@@ -3,6 +3,7 @@ import type {
   AgentItem,
   FactoryItem,
   HumanRequestItem,
+  PeerQuestionItem,
   ProjectItem,
   StateSnapshotBody,
   TaskItem,
@@ -21,6 +22,8 @@ export type StateView = {
   humanRequests: ReadonlyMap<string, HumanRequestItem>;
   /** The provider logins the operator has linked, by account identity. */
   accounts: ReadonlyMap<string, AccountItem>;
+  /** The newest questions between live tasks; absent from views built before the daemon served them. */
+  peerQuestions?: ReadonlyMap<string, PeerQuestionItem>;
 };
 
 /**
@@ -39,6 +42,7 @@ export function snapshotView(body: StateSnapshotBody): StateView {
     tasks: indexByID([...body.tasks, ...(body.shared_tasks ?? [])]),
     humanRequests: indexByID(body.human_requests),
     accounts: indexByID(body.accounts),
+    peerQuestions: indexByID(body.peer_questions ?? []),
   });
 }
 

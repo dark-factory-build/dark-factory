@@ -120,6 +120,10 @@ func TestPeerQuestionClaudeAndCodexExchangeQuestionsAndAnswers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Codex question = %v", err)
 	}
+	if public, err := store.ReadPublicSnapshot(ctx); err != nil || len(public.PeerQuestions) != 1 || public.PeerQuestions[0] != (PeerQuestionSummary{ID: question.ID, SourceTaskID: codex.TaskID, TargetTaskID: claude.TaskID, Revision: question.Revision}) {
+		t.Fatalf("public open question = %+v, %v", public.PeerQuestions, err)
+	}
+	first := question.ID
 	answered, err := store.AnswerPeerQuestionForAttempt(ctx, claude.CredentialDigest, PeerAnswer{QuestionID: question.ID, Expected: question.Revision, IdempotencyKey: peerKey(41), Answer: "Claude answer"}, mustTime(t, 61))
 	if err != nil || answered.Answer != "Claude answer" {
 		t.Fatalf("Claude answer = %+v, %v", answered, err)
@@ -131,6 +135,11 @@ func TestPeerQuestionClaudeAndCodexExchangeQuestionsAndAnswers(t *testing.T) {
 	answered, err = store.AnswerPeerQuestionForAttempt(ctx, codex.CredentialDigest, PeerAnswer{QuestionID: question.ID, Expected: question.Revision, IdempotencyKey: peerKey(43), Answer: "Codex answer"}, mustTime(t, 63))
 	if err != nil || answered.Answer != "Codex answer" {
 		t.Fatalf("Codex answer = %+v, %v", answered, err)
+	}
+	// The floor learns who asked whom and whether it was answered, newest first; never the words.
+	public, err := store.ReadPublicSnapshot(ctx)
+	if err != nil || len(public.PeerQuestions) != 2 || public.PeerQuestions[0].ID != question.ID || public.PeerQuestions[1].ID != first || !public.PeerQuestions[0].Answered || !public.PeerQuestions[1].Answered || public.PeerQuestions[0].SourceTaskID != claude.TaskID {
+		t.Fatalf("public answered questions = %+v, %v", public.PeerQuestions, err)
 	}
 }
 
