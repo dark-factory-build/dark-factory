@@ -14,9 +14,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/dark-factory-build/dark-factory/internal/gitauthor"
 	"github.com/dark-factory-build/dark-factory/internal/install"
 	"golang.org/x/sys/unix"
 )
@@ -201,5 +203,101 @@ func TestHostInitialConnectFencesLegacyControllerUntilCredentialSaved(t *testing
 	}
 	if err := unix.Flock(int(lock.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
 		t.Fatal("durable connect retained fence", err)
+	}
+}
+
+func TestHostGitAuthorPersistsVerifiedUserAndDisconnect(t *testing.T) {
+	parent, err := os.MkdirTemp("/private/tmp", "df-author-test-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(parent)
+	path := filepath.Join(parent, "home")
+	ctx := context.Background()
+	if _, err := install.Init(ctx, path); err != nil {
+		t.Fatal(err)
+	}
+	home, err := install.OpenOperationalHome(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer home.Close()
+	host, err := OpenHost(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secret := strings.Repeat("ab", 32)
+	digest := sha256.Sum256([]byte(secret))
+	id := hex.EncodeToString(digest[:])
+	// Existing credential records have no cached author and fill it on first use.
+	if err := host.save(connectionRecord{ID: id, Secret: secret}); err != nil {
+		t.Fatal(err)
+	}
+	var response atomic.Value
+	response.Store(User{ID: 123, Login: "operator"})
+	var offline atomic.Bool
+	var calls atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(out http.ResponseWriter, request *http.Request) {
+		calls.Add(1)
+		if offline.Load() {
+			out.WriteHeader(503)
+			return
+		}
+		user := response.Load().(User)
+		_ = json.NewEncoder(out).Encode(Status{State: "connected", ConnectionID: id, User: &user, Repositories: []Delegation{}})
+	}))
+	defer server.Close()
+	host.client.origin = server.URL
+	want := gitauthor.Identity{ID: 123, Login: "operator"}
+	if got := host.GitAuthor(ctx); got != want || calls.Load() != 1 {
+		t.Fatalf("verified author: %+v, calls=%d", got, calls.Load())
+	}
+	if err := home.Close(); err != nil {
+		t.Fatal(err)
+	}
+	home, err = install.OpenOperationalHome(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer home.Close()
+	host, err = OpenHost(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	host.client.origin = server.URL
+	offline.Store(true)
+	if got := host.GitAuthor(ctx); got != want || calls.Load() != 1 {
+		t.Fatalf("offline cached author: %+v, calls=%d", got, calls.Load())
+	}
+	offline.Store(false)
+	response.Store(User{ID: 123, Login: "renamed"})
+	if _, err := host.Status(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := host.GitAuthor(ctx); got.Login != "renamed" || got.ID != 123 {
+		t.Fatal(got)
+	}
+	response.Store(User{ID: 456, Login: "other"})
+	if _, err := host.Status(ctx); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("changed user accepted: %v", err)
+	}
+	response.Store(User{ID: 123, Login: "injected\nname"})
+	if _, err := host.Status(ctx); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("invalid author accepted: %v", err)
+	}
+	offline.Store(true)
+	if err := host.Disconnect(ctx); !errors.Is(err, ErrUnavailable) {
+		t.Fatal(err)
+	}
+	before := calls.Load()
+	if got := host.GitAuthor(ctx); got != (gitauthor.Identity{}) || calls.Load() != before {
+		t.Fatalf("disabled author: %+v", got)
+	}
+	restarted, err := OpenHost(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := restarted.GitAuthor(ctx); got != (gitauthor.Identity{}) {
+		t.Fatalf("restart credited disconnected user: %+v", got)
 	}
 }

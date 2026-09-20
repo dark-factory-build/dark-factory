@@ -14,6 +14,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/dark-factory-build/dark-factory/internal/gitauthor"
 	"github.com/dark-factory-build/dark-factory/internal/install"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 	"github.com/dark-factory-build/dark-factory/internal/runner"
@@ -27,8 +28,8 @@ const (
 	// daemon itself exposes no repository or publication operation.
 	maintainerBridge = "dark-factory-maintainer-mcp-bridge"
 	// GitIdentityName and GitIdentityEmail author a worker's local commits.
-	GitIdentityName      = "Dark Factory Worker"
-	GitIdentityEmail     = "worker@darkfactory.build"
+	GitIdentityName      = gitauthor.AutomationName
+	GitIdentityEmail     = gitauthor.AutomationEmail
 	codexTool            = "codex"
 	maxPathBytes         = 4096
 	claudeConfigDir      = ".claude"
@@ -193,6 +194,7 @@ func (Installation) GoString() string { return "provider.Installation{private}" 
 // capabilities that make these paths true immediately around Build and exec.
 // This value is never authority by itself.
 type RuntimePaths struct {
+	gitAuthor                                                                gitauthor.Identity
 	customerMaintainer                                                       bool
 	localCILeaseDir                                                          string
 	home, temp, socket, token, factoryctl, gitCeiling, toolPath, accountHome string
@@ -241,6 +243,14 @@ func (runtime RuntimePaths) WithRetainedSourceReview(sourcePath, gitDirectory st
 		return RuntimePaths{}, ErrInvalid
 	}
 	runtime.sourceReviewPath, runtime.sourceReviewGitDir = sourcePath, gitDirectory
+	return runtime, nil
+}
+
+func (runtime RuntimePaths) WithGitAuthor(author gitauthor.Identity) (RuntimePaths, error) {
+	if !author.Valid() {
+		return RuntimePaths{}, ErrInvalid
+	}
+	runtime.gitAuthor = author
 	return runtime, nil
 }
 
@@ -1009,18 +1019,17 @@ func (runtime RuntimePaths) environment(kind kernel.Provider) []string {
 	if runtime.localCILeaseDir != "" {
 		environment = append(environment, "DARK_FACTORY_LOCAL_CI_DIRECTORY="+runtime.localCILeaseDir)
 	}
-	// Commits on the Change branch carry the factory's own identity; the
-	// operator's Git configuration is not read, so without these git commit
-	// would refuse. The published commit is authored by the Maintainer App.
+	// Attribution comes from the daemon-verified operator, never host Git config.
+	// Publication still uses the Maintainer App and its operation receipts.
 	return append(environment,
 		"LANG=C",
 		"LC_ALL=C",
 		"TERM=xterm-256color",
 		"SHELL=/bin/sh",
-		"GIT_AUTHOR_NAME="+GitIdentityName,
-		"GIT_AUTHOR_EMAIL="+GitIdentityEmail,
-		"GIT_COMMITTER_NAME="+GitIdentityName,
-		"GIT_COMMITTER_EMAIL="+GitIdentityEmail,
+		"GIT_AUTHOR_NAME="+runtime.gitAuthor.Name(),
+		"GIT_AUTHOR_EMAIL="+runtime.gitAuthor.Email(),
+		"GIT_COMMITTER_NAME="+runtime.gitAuthor.Name(),
+		"GIT_COMMITTER_EMAIL="+runtime.gitAuthor.Email(),
 		"GIT_CEILING_DIRECTORIES="+runtime.gitCeiling,
 		"GIT_DISCOVERY_ACROSS_FILESYSTEM=0",
 		"GIT_CONFIG_NOSYSTEM=1",

@@ -17,6 +17,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/dark-factory-build/dark-factory/internal/gitauthor"
 	"github.com/dark-factory-build/dark-factory/internal/install"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 	"github.com/dark-factory-build/dark-factory/internal/runner"
@@ -1677,5 +1678,26 @@ func TestCustomerMaintainerUsesInstalledBridgeWithoutExternalExecutable(t *testi
 				}
 			}
 		})
+	}
+}
+
+func TestGitAuthorEnvironmentUsesVerifiedOperator(t *testing.T) {
+	runtime := runtimeFixture(t, "/usr/bin:/bin", filepath.Join(t.TempDir(), "account"))
+	author := gitauthor.Identity{ID: 123, Login: "operator"}
+	var err error
+	runtime, err = runtime.WithGitAuthor(author)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, kind := range []kernel.Provider{kernel.ProviderShell, kernel.ProviderCodex, kernel.ProviderClaudeCode} {
+		env := runtime.environment(kind)
+		for _, want := range []string{"GIT_AUTHOR_NAME=operator", "GIT_AUTHOR_EMAIL=123+operator@users.noreply.github.com", "GIT_COMMITTER_NAME=operator", "GIT_COMMITTER_EMAIL=123+operator@users.noreply.github.com"} {
+			if !slices.Contains(env, want) {
+				t.Fatalf("%s missing %s", kind, want)
+			}
+		}
+	}
+	if _, err := runtime.WithGitAuthor(gitauthor.Identity{ID: 123, Login: "spoof\nAuthor"}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("malformed author: %v", err)
 	}
 }

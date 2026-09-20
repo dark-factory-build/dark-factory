@@ -5,6 +5,8 @@ package change
 import (
 	"context"
 	"runtime"
+
+	"github.com/dark-factory-build/dark-factory/internal/gitauthor"
 )
 
 func SelectGit(context.Context, string, string, string, RepositoryIdentity) (Selection, error) {
@@ -39,6 +41,6 @@ func ReadContentSource(context.Context, string, string, RepositoryIdentity, Cont
 	return "", &UnsupportedError{Platform: runtime.GOOS}
 }
 
-func WriteContentSource(context.Context, string, string, RepositoryIdentity, *ContentSource, string, string, string) (ContentSource, error) {
+func WriteContentSource(context.Context, string, string, RepositoryIdentity, *ContentSource, string, string, string, gitauthor.Identity) (ContentSource, error) {
 	return ContentSource{}, &UnsupportedError{Platform: runtime.GOOS}
 }

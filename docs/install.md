@@ -224,6 +224,13 @@ in a file and run `factoryctl github delegate --repositories FILE`. This
 replaces the whole selection. An empty array removes all repository access.
 Delegation does not register a checkout or subscribe to an issue backlog.
 
+The connected GitHub account also supplies commit attribution automatically;
+there is no separate author setting. New local worker and generated content
+commits use its login and GitHub no-reply address. New publications use that
+verified operator as author while the Maintainer App remains the publisher.
+Existing history is unchanged. Without a verified connected identity, local
+work uses one DF fallback identity. See [provider attribution](providers.md).
+
 Use `factoryctl github status` or `factoryctl github refresh` to check live
 access. Lost authorization never falls back to a different operator's account.
 `factoryctl github disconnect` disables new host operations before contacting

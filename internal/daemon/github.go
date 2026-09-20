@@ -5,6 +5,7 @@ import (
 	"errors"
 
 	"github.com/dark-factory-build/dark-factory/internal/api"
+	"github.com/dark-factory-build/dark-factory/internal/gitauthor"
 	"github.com/dark-factory-build/dark-factory/internal/install"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 	"github.com/dark-factory-build/dark-factory/internal/maintainer"
@@ -86,4 +87,11 @@ func (daemon *Daemon) GitHubConnection(ctx context.Context, input api.GitHubConn
 	default:
 		return api.GitHubConnectionResult{State: "unavailable"}
 	}
+}
+
+func (daemon *Daemon) gitAuthor(ctx context.Context) gitauthor.Identity {
+	if daemon.github == nil {
+		return gitauthor.Identity{}
+	}
+	return daemon.github.GitAuthor(ctx)
 }

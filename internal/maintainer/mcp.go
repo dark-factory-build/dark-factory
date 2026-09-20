@@ -45,7 +45,7 @@ func (host *Host) authorizeRepositories(ctx context.Context, repositories map[st
 	if err != nil {
 		return Credential{}, err
 	}
-	status, err := host.client.Status(ctx, credential)
+	status, err := host.status(ctx, credential)
 	if err != nil {
 		return Credential{}, err
 	}

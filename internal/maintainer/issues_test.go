@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"github.com/dark-factory-build/dark-factory/internal/gitauthor"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -33,10 +34,10 @@ func TestIssueReaderExactIdentityAndUnavailablePages(t *testing.T) {
 			_, _ = out.Write([]byte(payload))
 			return
 		}
-		_ = json.NewEncoder(out).Encode(Status{State: "connected", ConnectionID: id, Repositories: []Delegation{{Repository: "team/repo", RepositoryID: 7, InstallationID: 1}}})
+		_ = json.NewEncoder(out).Encode(Status{State: "connected", User: &User{ID: 123, Login: "operator"}, ConnectionID: id, Repositories: []Delegation{{Repository: "team/repo", RepositoryID: 7, InstallationID: 1}}})
 	}))
 	defer server.Close()
-	host := &Host{client: NewClient(), connection: connectionRecord{ID: id, Secret: secret}}
+	host := &Host{client: NewClient(), connection: connectionRecord{ID: id, Secret: secret, Author: gitauthor.Identity{ID: 123, Login: "operator"}}}
 	host.client.origin = server.URL
 	page, err := host.Issues(context.Background(), "team/repo", 7, 1, "", 9)
 	if err != nil || len(page.Issues) != 1 || page.Issues[0].Body != "exact snapshot" || page.Issues[0].State != "closed" {

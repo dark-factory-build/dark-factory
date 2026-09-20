@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"github.com/dark-factory-build/dark-factory/internal/gitauthor"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -31,10 +32,10 @@ func TestHostMCPRechecksNumericIdentityAndRevocation(t *testing.T) {
 			out.WriteHeader(statusCode)
 			return
 		}
-		_ = json.NewEncoder(out).Encode(Status{State: "connected", ConnectionID: id, Repositories: []Delegation{{Repository: "team/repo", RepositoryID: remoteID, InstallationID: 1}}})
+		_ = json.NewEncoder(out).Encode(Status{State: "connected", User: &User{ID: 123, Login: "operator"}, ConnectionID: id, Repositories: []Delegation{{Repository: "team/repo", RepositoryID: remoteID, InstallationID: 1}}})
 	}))
 	defer server.Close()
-	host := &Host{client: NewClient(), connection: connectionRecord{ID: id, Secret: secret}}
+	host := &Host{client: NewClient(), connection: connectionRecord{ID: id, Secret: secret, Author: gitauthor.Identity{ID: 123, Login: "operator"}}}
 	host.client.origin = server.URL
 	request := json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"observe_operation","arguments":{"repository":"team/repo","operation_id":"opaque-original-uuid"}}}`)
 	if err := host.AuthorizeRepositories(context.Background(), map[string]uint64{"team/repo": 7}); err != nil || calls != 0 {

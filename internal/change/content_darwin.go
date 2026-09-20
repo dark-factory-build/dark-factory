@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/hex"
 	"fmt"
+	"github.com/dark-factory-build/dark-factory/internal/gitauthor"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -93,8 +94,8 @@ func ReadContentSource(ctx context.Context, gitExecutable, repositoryRoot string
 // changing HEAD, the checked-out files, or the ordinary repository index.
 // Git's commit author identifies this generated object only; the daemon keeps
 // the authenticated actor in SQLite.
-func WriteContentSource(ctx context.Context, gitExecutable, repositoryRoot string, expected RepositoryIdentity, parent *ContentSource, file, body, durableRef string) (ContentSource, error) {
-	if err := validateContentPath(file); err != nil || len(body) > maxContentSourceBytes || !utf8.ValidString(body) || !validContentRef(durableRef) {
+func WriteContentSource(ctx context.Context, gitExecutable, repositoryRoot string, expected RepositoryIdentity, parent *ContentSource, file, body, durableRef string, author gitauthor.Identity) (ContentSource, error) {
+	if err := validateContentPath(file); err != nil || !author.Valid() || len(body) > maxContentSourceBytes || !utf8.ValidString(body) || !validContentRef(durableRef) {
 		return ContentSource{}, &ValidationError{Reason: "content write is invalid"}
 	}
 	authority, err := openGitAuthority(gitExecutable, repositoryRoot, expected, nil, true)
@@ -168,7 +169,7 @@ func WriteContentSource(ctx context.Context, gitExecutable, repositoryRoot strin
 	if err != nil {
 		return ContentSource{}, err
 	}
-	commitEnv := append(env, "GIT_AUTHOR_NAME=Dark Factory", "GIT_AUTHOR_EMAIL=dark-factory@localhost", "GIT_COMMITTER_NAME=Dark Factory", "GIT_COMMITTER_EMAIL=dark-factory@localhost")
+	commitEnv := append(env, "GIT_AUTHOR_NAME="+author.Name(), "GIT_AUTHOR_EMAIL="+author.Email(), "GIT_COMMITTER_NAME="+author.Name(), "GIT_COMMITTER_EMAIL="+author.Email())
 	commitOutput, err := authority.succeedWithEnvironment(ctx, maxGitSelectionOutput, commitEnv, contentWriteGitArguments(repositoryRoot, "commit-tree", tree.Hex(), "-p", baseID.Hex(), "-m", "Update project content")...)
 	if err != nil {
 		return ContentSource{}, err
