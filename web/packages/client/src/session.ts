@@ -480,14 +480,15 @@ export class BrowserSession {
     return result;
   }
 
-  /** Edit one still-queued task: its brief, priority, assignment, or cancel it. A blocked task can only be cancelled. */
-  updateTask(request: { taskId: string; expectedRevision: bigint; title?: string; body?: string; priority?: number; assignedAgentId?: string; cancel?: boolean }): Promise<TaskUpdateResult> {
+  /** Edit one still-queued task: its brief, priority, assignment, or cancel it. A blocked task can only be cancelled or retried. */
+  updateTask(request: { taskId: string; expectedRevision: bigint; title?: string; body?: string; priority?: number; assignedAgentId?: string; cancel?: boolean; retry?: boolean }): Promise<TaskUpdateResult> {
     const body: TaskUpdateBody = { task_id: request.taskId, expected_revision: request.expectedRevision };
     if (request.title !== undefined) body.title = request.title;
     if (request.body !== undefined) body.body = request.body;
     if (request.priority !== undefined) body.priority = request.priority;
     if (request.assignedAgentId !== undefined) body.assigned_agent_id = request.assignedAgentId;
     if (request.cancel === true) body.status = "cancelled";
+    else if (request.retry === true) body.status = "queued";
     if (
       (request.title !== undefined && (request.title.length === 0 || bounded(request.title, MAX_TASK_TITLE_BYTES))) ||
       bounded(request.body, MAX_TASK_INSTRUCTION_BYTES) ||

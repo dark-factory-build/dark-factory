@@ -671,7 +671,7 @@ func (backend *browserBackend) UpdateTask(ctx context.Context, rawClient [browse
 	if err != nil {
 		return browserprotocol.TaskUpdateResult{}, browser.ErrStale
 	}
-	patch := kernel.TaskPatch{Title: request.Title, Body: request.Body, Priority: request.Priority, Cancel: request.Status != nil}
+	patch := kernel.TaskPatch{Title: request.Title, Body: request.Body, Priority: request.Priority, Cancel: request.Status != nil && *request.Status == "cancelled"}
 	if request.AssignedAgentID != nil {
 		assigned, err := browserID(*request.AssignedAgentID, kernel.AgentIDFromBytes)
 		if err != nil {
@@ -679,14 +679,29 @@ func (backend *browserBackend) UpdateTask(ctx context.Context, rawClient [browse
 		}
 		patch.AssignedAgentID = &assigned
 	}
-	if err := prepareQueuedTaskPatch(ctx, backend.store, taskID, expected, patch); err != nil {
+	retry := request.Status != nil && *request.Status == "queued"
+	var assigned kernel.AgentID
+	if patch.AssignedAgentID != nil {
+		assigned = *patch.AssignedAgentID
+	}
+	if retry {
+		err = prepareTaskRetry(ctx, backend.store, taskID, expected, assigned)
+	} else {
+		err = prepareQueuedTaskPatch(ctx, backend.store, taskID, expected, patch)
+	}
+	if err != nil {
 		return browserprotocol.TaskUpdateResult{}, consoleUpdateError(err)
 	}
 	at, err := backend.timestamp()
 	if err != nil {
 		return browserprotocol.TaskUpdateResult{}, mapBrowserError(err)
 	}
-	task, err := backend.store.UpdateTask(ctx, taskID, expected, patch, at)
+	var task kernel.Task
+	if retry {
+		task, err = backend.store.RetryTaskForOperator(ctx, taskID, expected, assigned, at)
+	} else {
+		task, err = backend.store.UpdateTask(ctx, taskID, expected, patch, at)
+	}
 	if err != nil {
 		return browserprotocol.TaskUpdateResult{}, consoleUpdateError(err)
 	}

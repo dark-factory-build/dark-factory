@@ -509,6 +509,13 @@ test("console edits and topology carry exact bodies and correlate their results"
   socket.reply(encodeServerControl({ type: "TASK_UPDATE_RESULT", id: taskFrame.id, body: { task_id: taskId, revision: 4n } }));
   assert.deepEqual(await taskPending, { taskId, revision: 4n });
 
+  // Retrying a blocked task is the same verb with the status it returns to.
+  const retryPending = session.updateTask({ taskId, expectedRevision: 4n, retry: true });
+  const retryFrame = decodeClientControl(socket.sent.at(-1));
+  assert.deepEqual(retryFrame.body, { task_id: taskId, expected_revision: 4n, status: "queued" });
+  socket.reply(encodeServerControl({ type: "TASK_UPDATE_RESULT", id: retryFrame.id, body: { task_id: taskId, revision: 5n } }));
+  assert.deepEqual(await retryPending, { taskId, revision: 5n });
+
   const node = { id: "a1".repeat(32), parent_id: "", kind: "repository", path: ".", label: "repo", language: "", size_bucket: "medium" };
   const topologyPending = session.getTopology(projectId);
   const topologyFrame = decodeClientControl(socket.sent.at(-1));

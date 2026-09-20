@@ -575,7 +575,7 @@ export class FactoryAppController {
   }
 
   /** Edit one queued task against its exact revision. */
-  async editTask(task: Pick<TaskItem, "id" | "revision">, change: { title?: string; body?: string; priority?: number; assignedAgentId?: string; cancel?: boolean }): Promise<boolean> {
+  async editTask(task: Pick<TaskItem, "id" | "revision">, change: { title?: string; body?: string; priority?: number; assignedAgentId?: string; cancel?: boolean; retry?: boolean }): Promise<boolean> {
     const session = this.#client?.session;
     if (this.#closed || this.#status !== "ready" || session === undefined || this.#edit?.pending === true) return false;
     const generation = this.#generation;

@@ -86,6 +86,19 @@ func TestBrowserConsoleUpdatesAdvanceTheExactRevision(t *testing.T) {
 		t.Fatalf("replayed agent update = %v", err)
 	}
 
+	// "queued" asks for a retry, which only a worker's settled blocked or
+	// failed task can take: this orchestrator's queued one is refused by the
+	// retry path, not edited, and left exactly as it was.
+	retry := "queued"
+	if _, err := fixture.backend.UpdateTask(ctx, client, browserprotocol.TaskUpdate{
+		TaskID: fixture.task.ID.String(), ExpectedRevision: decimalRevision(fixture.task.Revision), Status: &retry,
+	}); !errors.Is(err, browser.ErrUnauthorized) {
+		t.Fatalf("retry of a queued task = %v", err)
+	}
+	if unchanged, _, err := fixture.store.Task(ctx, fixture.task.ID); err != nil || unchanged.Revision != fixture.task.Revision {
+		t.Fatalf("refused retry changed the task: %+v, %v", unchanged, err)
+	}
+
 	title, body, priority, status := "edited", "replacement instruction", int64(5), "cancelled"
 	taskResult, err := fixture.backend.UpdateTask(ctx, client, browserprotocol.TaskUpdate{
 		TaskID: fixture.task.ID.String(), ExpectedRevision: decimalRevision(fixture.task.Revision),

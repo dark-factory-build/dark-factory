@@ -701,6 +701,8 @@ test("Tasks lists blocked work, hides orchestrator passes, flags dispatch off an
   assert.match(markup, /Needs a human to resolve a merge conflict &lt;script&gt;/);
   await act(async () => { panel.findByProps({ "aria-label": "Cancel Stuck on a prerequisite" }).props.onClick(); });
   assert.deepEqual(edits, [["b1".repeat(16), { cancel: true }]], "a blocked task is cleared in one step");
+  await act(async () => { panel.findByProps({ "aria-label": "Retry Stuck on a prerequisite" }).props.onClick(); });
+  assert.deepEqual(edits.at(-1), ["b1".repeat(16), { retry: true }], "or sent round again in one step");
   assert.ok(!panel.findAllByType("button").some((button) => button.children.join("") === "Standing instruction"), "an orchestrator pass is not a task row");
   assert.match(panel.findByProps({ role: "status" }).children.join(""), /Dispatch is off/);
   const form = panel.findByProps({ "aria-label": "New task" });

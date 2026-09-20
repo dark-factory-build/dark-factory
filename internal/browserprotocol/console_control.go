@@ -212,7 +212,8 @@ func validateRepository(value Repository) error {
 }
 
 // TaskUpdate edits one still-queued task. Status is the only member that is
-// not free: it may say "cancelled" and nothing else.
+// not free: "cancelled" retires the task, "queued" retries a blocked or failed
+// one, and it says nothing else.
 type TaskUpdate struct {
 	TaskID           string  `json:"task_id"`
 	ExpectedRevision Decimal `json:"expected_revision"`
@@ -604,7 +605,7 @@ func validConsoleControl(kind MessageType, body any) error {
 			value.Body != nil && validateBoundedText(*value.Body, 0, MaxTaskInstructionBytes) != nil ||
 			value.Priority != nil && (*value.Priority < -MaxTaskPriority || *value.Priority > MaxTaskPriority) ||
 			value.AssignedAgentID != nil && validateDynamicID(*value.AssignedAgentID) != nil ||
-			value.Status != nil && *value.Status != "cancelled" {
+			value.Status != nil && *value.Status != "cancelled" && *value.Status != "queued" {
 			return bad()
 		}
 	case TaskUpdateResult:
