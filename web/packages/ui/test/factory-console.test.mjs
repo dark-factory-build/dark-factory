@@ -1987,7 +1987,7 @@ test("floor objects select the exact existing task detail and question route", a
   await act(async () => { tree.update(createElement(Harness, { editable: true })); });
   await act(async () => { tree.root.findByProps({ "aria-label": "Task details" }).props.onClose(); });
   const queuedRow = tree.root.findAllByProps({ className: "dfConsoleItem__summary" }).find((row) => row.findAllByType("strong").some((strong) => strong.children.join("") === queuedTask.title));
-  await act(async () => { queuedRow.props.onClick({ preventDefault() {} }); });
+  assert.equal(queuedRow.props.onClick, undefined, "expanding a queued row selects nothing, so its later start cannot open a dialog unasked");
   assert.equal(tree.root.findAllByProps({ "aria-label": "Task details" }).length, 0, "editable queued work stays in its inline editor");
   await act(async () => { tree.root.findByProps({ "data-human-request-id": ids.request }).props.onClick(); });
   assert.equal(questions[0], fixtureState.humanRequests.get(ids.request));
