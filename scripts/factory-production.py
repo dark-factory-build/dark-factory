@@ -33,6 +33,7 @@ MAX_DELIVERIES = 128
 MAX_REVIEWERS = 256
 MAX_DOCUMENT = 32768
 MAX_INPUT = 240 << 10
+MAINTENANCE_REPOSITORY = "dark-factory-build/dark-factory"
 
 
 def text(value, limit=500):
@@ -126,6 +127,92 @@ def process_start(pid):
         return value if result.returncode == 0 and value else ""
     except (OSError, subprocess.SubprocessError):
         return ""
+
+
+def _maintenance_identity(value):
+    if not isinstance(value, dict) or value.get("release") is not True:
+        return None
+    fields = {key: text(value.get(key), 256) for key in ("version", "source", "target", "build_id")}
+    if not all(fields.values()):
+        return None
+    fields["release"] = True
+    return fields
+
+
+def _maintenance_binary(path):
+    try:
+        completed = subprocess.run([str(path), "--build-identity"], capture_output=True,
+                                   text=True, timeout=15, env={})
+        if completed.returncode or len(completed.stdout.encode()) > 4096:
+            return None
+        return _maintenance_identity(json.loads(completed.stdout))
+    except (OSError, subprocess.SubprocessError, ValueError, json.JSONDecodeError):
+        return None
+
+
+def maintenance(config):
+    """Observe the host release and runtime through existing read-only paths."""
+    home = Path(config["factory_home"]).resolve()
+    available = {"version": "", "url": "", "state": "unknown"}
+    installed = {key: "" for key in ("version", "source", "target", "build_id")}
+    installed.update({"release": False, "state": "unknown"})
+    running = dict(installed)
+    result = {"destination": "runtime:" + str(home), "available": available,
+              "installed": installed, "running": running, "state": "unknown"}
+    if config.get("repository") != MAINTENANCE_REPOSITORY:
+        available["state"] = result["state"] = "unavailable"
+        installed["state"] = running["state"] = "unavailable"
+        return result
+    try:
+        release = github(MAINTENANCE_REPOSITORY, "/releases/latest")
+        version = text(release.get("tag_name"), 128) if isinstance(release, dict) else ""
+        release_url = url(release.get("html_url"), 512) if isinstance(release, dict) else ""
+        if version and release_url:
+            available.update({"version": version, "url": release_url, "state": "available"})
+        else:
+            available["state"] = "unavailable"
+    except (intake.IntakeError, ValueError, json.JSONDecodeError, OSError):
+        available["state"] = "unavailable"
+    binary_root = Path(str(home) + ".service") / "bin" / "current"
+    identities = []
+    for name in ("factoryctl", "factoryd", "factory-runner"):
+        binary = binary_root / name
+        if not binary.is_file():
+            installed["state"] = "unavailable"
+            identities = []
+            break
+        identity = _maintenance_binary(binary)
+        if identity is None:
+            installed["state"] = "unknown"
+            identities = []
+            break
+        identities.append(identity)
+    if len(identities) == 3 and all(identity == identities[0] for identity in identities[1:]):
+        installed.update(identities[0])
+        installed["state"] = "verified"
+    factoryctl = binary_root / "factoryctl"
+    if installed["state"] == "unavailable" or not factoryctl.is_file():
+        running["state"] = "unavailable"
+    else:
+        env = {"DARK_FACTORY_SOCKET": str(home / "runtimes" / "factory.sock"),
+               "DARK_FACTORY_OPERATOR_TOKEN_FILE": str(home / "operator.token")}
+        try:
+            completed = subprocess.run([str(factoryctl), "web", "status"], capture_output=True,
+                                       text=True, timeout=15, env=env)
+            status = json.loads(completed.stdout) if not completed.returncode and len(completed.stdout.encode()) <= 4096 else None
+            identity = _maintenance_identity(status.get("build")) if isinstance(status, dict) else None
+            if identity is None:
+                running["state"] = "unknown"
+            else:
+                running.update(identity)
+                running["state"] = "ready" if status.get("ready") is True else "observed"
+        except (OSError, subprocess.SubprocessError, ValueError, json.JSONDecodeError):
+            running["state"] = "unknown"
+    if available["state"] == "available" and installed["state"] == "verified" and running["state"] == "ready":
+        result["state"] = "ready"
+    elif "unavailable" in (available["state"], installed["state"], running["state"]):
+        result["state"] = "unavailable"
+    return result
 
 
 def active_review(config, operation):
@@ -338,7 +425,7 @@ def collect(config):
         markers = {} # An old controller ALLOW cannot overrule an unseen formal BLOCK.
     deliveries, release_unavailable, delivery_overflow = release_receipts(release_paths, config["repository"])
     observation = {"repository": config["repository"], "observed_at": int(time.time() * 1000), "pull_requests": [], "checks": [],
-                   "reviewers": reviewers, "deliveries": deliveries}
+                   "reviewers": reviewers, "deliveries": deliveries, "maintenance": maintenance(config)}
     unavailable = []
     if formal_unavailable:
         unavailable.append("formal_reviews")
