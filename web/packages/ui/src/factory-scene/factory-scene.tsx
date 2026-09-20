@@ -228,13 +228,15 @@ function SceneWorkers({ errands, furniture, layout, placements, nodes, workers, 
   const reduced = useReducedMotion();
   const moving = connected && animate && !reduced && (typeof document === "undefined" || document.visibilityState === "visible");
   const errandClock = moving && errandBeat?.floor === geometryKey ? errandBeat.clock : undefined;
+  // Who holds which piece, so that a visit outlasts changes among the others resting.
+  const errandsBefore = useRef<ReturnType<typeof placeWorkers>>([]);
   const seatedPlacements = placements;
   placements = useMemo(() => {
     const nook = breakRoomNook(layout, seatedPlacements.filter((placement) => placement.area === "resting").length, seatedPlacements.filter((placement) => placement.area !== "room" && placement.area !== "resting").length);
     // With the scenery off there is no furniture to walk to.
-    if (errandClock === undefined || !errands) return seatedPlacements;
+    if (errandClock === undefined || !errands) return errandsBefore.current = seatedPlacements;
     const byId = new Map(workers.map((worker) => [worker.id, worker]));
-    return placeErrands(seatedPlacements, nook, (id) => { const worker = byId.get(id); return worker === undefined ? undefined : breakRoomHabit(worker); }, errandClock);
+    return errandsBefore.current = placeErrands(seatedPlacements, nook, (id) => { const worker = byId.get(id); return worker === undefined ? undefined : breakRoomHabit(worker); }, errandClock, errandsBefore.current);
   }, [seatedPlacements, errandClock, errands, layout, workers]);
   const { positions, pulse } = useSceneMotion(layout, placements, geometryKey, connected && animate, reduced, active);
   // Turns run on the time this floor has actually been moving: a hidden tab, stilled

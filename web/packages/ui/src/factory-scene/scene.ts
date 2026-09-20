@@ -197,20 +197,24 @@ export function breakRoomNook(layout: SceneLayout, restingCount: number, plannin
 const TURN = 24000, FREE = 8000;
 
 /**
- * Turns at the furniture are fair and are never cut short: for each piece, each
+ * Turns at the furniture are fair, and a visit ends only when its turn does or its visitor
+ * stops resting — given the placements it last returned as `before`: for each piece, each
  * turn belongs to one of the seated workers whose habit it suits, drawn afresh
  * every turn, and to nobody when there are few of them, so a lone reader is not
  * forever on their feet. The pieces are out of step, and every turn starts free,
  * so a floor that has just loaded stays seated for a while.
  */
-export function placeErrands(placements: readonly SceneWorkerPlacement[], nook: ReturnType<typeof breakRoomNook>, habitOf: (id: string) => BreakRoomErrand | undefined, at: number): readonly SceneWorkerPlacement[] {
+export function placeErrands(placements: readonly SceneWorkerPlacement[], nook: ReturnType<typeof breakRoomNook>, habitOf: (id: string) => BreakRoomErrand | undefined, at: number, before: readonly SceneWorkerPlacement[] = []): readonly SceneWorkerPlacement[] {
   if (nook === undefined) return placements;
   const visiting = new Map<string, (typeof nook.furniture)[number]>();
   for (const [index, piece] of nook.furniture.entries()) {
     // Later pieces run behind the first, so every piece's first turn begins free.
     const clock = at - index * TURN / 2, turn = Math.floor(clock / TURN);
     const suited = placements.filter((placement) => placement.area === "resting" && habitOf(placement.id) === piece.errand);
-    const visitor = clock < 0 || clock - turn * TURN < FREE ? undefined : suited[(Math.imul(turn + 1, 2654435761) >>> 0) % Math.max(suited.length, 4)];
+    // Whoever has the piece keeps it for as long as they rest and the turn runs, whoever else
+    // sits down or leaves meanwhile. (Every turn starts free, so nobody is carried into the next.)
+    const holder = before.find((placement) => placement.errand === piece.errand)?.id;
+    const visitor = clock < 0 || clock - turn * TURN < FREE ? undefined : suited.find((placement) => placement.id === holder) ?? suited[(Math.imul(turn + 1, 2654435761) >>> 0) % Math.max(suited.length, 4)];
     if (visitor !== undefined) visiting.set(visitor.id, piece);
   }
   return placements.map((placement) => { const piece = visiting.get(placement.id); return piece === undefined ? placement : { ...placement, errand: piece.errand, ...piece.stand }; });

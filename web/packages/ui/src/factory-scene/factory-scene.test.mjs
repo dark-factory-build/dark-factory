@@ -663,8 +663,10 @@ test("resting workers take fair, uninterrupted turns at the break-room furniture
   const habits = new Map([...crowd, person("asking", { activity: "needs-you" })].map((worker) => [worker.id, breakRoomHabit(worker)]));
   const visits = new Map(), running = new Map();
   let cutShort = 0;
+  let before = [];
   for (let at = 0; at < 1800000; at += 2000) {
-    const away = placeErrands(placements, nook, (id) => habits.get(id), at).filter((placement) => placement.errand !== undefined);
+    before = placeErrands(placements, nook, (id) => habits.get(id), at, before);
+    const away = before.filter((placement) => placement.errand !== undefined);
     assert.equal(new Set(away.map((placement) => placement.errand)).size, away.length, "one visitor a piece");
     for (const placement of away) { assert.equal(habits.get(placement.id), placement.errand); assert.notEqual(placement.id, "planner"); }
     for (const piece of nook.furniture) {
@@ -680,6 +682,24 @@ test("resting workers take fair, uninterrupted turns at the break-room furniture
     assert.ok(Math.min(...shares) > 0 && Math.max(...shares) <= 4 * Math.min(...shares), `${piece.errand} turns are shared: ${shares}`);
   }
   assert.equal(visits.has("asking"), false);
+  // A visit outlasts comings and goings among the others: someone suited sitting down ahead of
+  // the visitor in the order, or another leaving, mid-turn changes nothing; it ends with the turn,
+  // or when the visitor themselves stops resting.
+  let mid = 0, held = [];
+  for (let at = 0, last = []; at < 1800000 && mid === 0; at += 2000) { last = placeErrands(placements, nook, (id) => habits.get(id), at, last); if (last.filter((placement) => placement.errand !== undefined).length === nook.furniture.length) { mid = at; held = last; } }
+  const holders = held.filter((placement) => placement.errand !== undefined);
+  assert.equal(holders.length, nook.furniture.length, "a moment with every piece occupied");
+  const newcomer = person("aaa-first-in-order"), joined = placeWorkers(wide, [...crowd, newcomer, person("planner", { location: "unobserved" }), person("asking", { activity: "needs-you" })]);
+  for (const suits of ["shelf", "coffee"]) {
+    const habit = (id) => id === newcomer.id ? suits : habits.get(id);
+    assert.deepEqual(placeErrands(joined, nook, habit, mid + 2000, held).filter((placement) => placement.errand !== undefined).map(({ id, errand }) => [id, errand]), holders.map(({ id, errand }) => [id, errand]), `a newcomer suited to the ${suits} takes nobody's place`);
+    assert.notDeepEqual(placeErrands(joined, nook, habit, mid + 2000).filter((placement) => placement.errand !== undefined).map(({ id }) => id), holders.map(({ id }) => id), "the sample does change who would be drawn afresh");
+  }
+  const leaving = new Set(placements.filter((placement) => placement.area === "resting" && !holders.some((holder) => holder.id === placement.id)).slice(0, 3).map((placement) => placement.id));
+  const departed = placements.filter((placement) => !leaving.has(placement.id));
+  assert.deepEqual(placeErrands(departed, nook, (id) => habits.get(id), mid + 2000, held).filter((placement) => placement.errand !== undefined).map(({ id }) => id), holders.map(({ id }) => id), "others leaving takes nobody's place");
+  const withoutVisitor = placements.filter((placement) => placement.id !== holders[0].id);
+  assert.equal(placeErrands(withoutVisitor, nook, (id) => habits.get(id), mid + 2000, held).some((placement) => placement.id === holders[0].id), false);
   assert.equal(placeErrands(placements, undefined, (id) => habits.get(id), 60000), placements);
   // A lone reader is not forever on their feet.
   const lone = placeWorkers(wide, [crowd.find((worker) => breakRoomHabit(worker) === "shelf")]);
