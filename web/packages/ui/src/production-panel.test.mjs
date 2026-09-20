@@ -24,3 +24,11 @@ test("production panel exposes evidence and external links without authority con
   assert.doesNotMatch(markup, />Merge</);
   assert.doesNotMatch(markup, />Run CI</);
 });
+
+test("production panel uses a native bounded selector and does not mount every task detail", () => {
+  const withTasks = { ...item, tasks: ["task-1", "task-2"] };
+  const markup = renderToStaticMarkup(createElement(ProductionPanel, { items: [withTasks], onSelect() {}, selected: "project:change:1", connected: true }));
+  assert.match(markup, /<select/);
+  assert.match(markup, /task-1/);
+  assert.doesNotMatch(markup, /Work details/);
+});
