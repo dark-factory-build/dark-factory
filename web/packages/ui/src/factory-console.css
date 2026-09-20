@@ -298,6 +298,7 @@
 }
 
 .dfFactoryConsole__reply button { justify-self: start; }
+.dfFactoryConsole__reply select { box-sizing: border-box; width: 100%; min-width: 0; }
 
 .dfFactoryConsole__humanActions {
   display: flex;
@@ -1112,7 +1113,6 @@ summary.dfConsoleItem__summary { cursor: pointer; }
 }
 
 
-.dfTaskBack { margin: .75rem 0; }
 .dfConsoleSidebar__panel > h3 { margin: .75rem 0; font-size: .875rem; }
 .dfConsoleSidebar h3 > span { color: var(--df-console-muted); font-weight: 400; }
 .dfConsoleSidebar .dfRecentWorkDetail > p { margin: 0; }

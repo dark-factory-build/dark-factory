@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -479,4 +480,58 @@ func publicIDs(count int, at func(int) string) []string {
 		result = append(result, at(index))
 	}
 	return result
+}
+
+func TestPublicSnapshotCarriesBlockedWorkerTasksButOnlyAnOrchestratorsLatest(t *testing.T) {
+	store, run, _ := runningOrchestratorRun(t)
+	defer store.Close()
+	ctx := context.Background()
+	worker, err := store.CreateAgent(ctx, NewAgent{ID: publicAgentID(t, 1), ProjectID: run.ProjectID, Name: "worker", Role: RoleWorker, Provider: ProviderCodex, ToolBudgetLimit: 1}, mustTime(t, 500))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Two more worker tasks than the bound, then two orchestrator passes.
+	const workerTasks = 66
+	titles := make([]string, 0, workerTasks+2)
+	for index := range workerTasks {
+		titles = append(titles, fmt.Sprintf("worker task %02d", index))
+	}
+	titles = append(titles, "older pass", "newer pass")
+	for index, title := range titles {
+		owner := worker.ID
+		if index >= workerTasks {
+			owner = run.AgentID
+		}
+		incarnation, err := IncarnationIDFromBytes(publicRawID(0xa4, index+1))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.EnqueueTask(ctx, NewTask{ID: publicTaskID(t, index+1), ProjectID: run.ProjectID, AssignedAgentID: owner, IncarnationID: incarnation, Title: title}, mustTime(t, int64(600+index))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Blocked after the last write: every write validates run history first.
+	for index := range titles {
+		corruptSQL(t, store, `UPDATE tasks SET status = 'blocked', blocked_reason = 'waiting', updated_at_ms = ? WHERE id = ?`, 700+index, publicTaskID(t, index+1).Bytes())
+	}
+	// Hand-blocked rows have no run history, so read the public selection itself.
+	rows, err := store.writer.QueryContext(ctx, publicTaskIDs+`SELECT title FROM tasks WHERE status = 'blocked' AND id IN (SELECT id FROM public_task_ids)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var blocked []string
+	for rows.Next() {
+		var title string
+		if err := rows.Scan(&title); err != nil {
+			t.Fatal(err)
+		}
+		blocked = append(blocked, title)
+	}
+	slices.Sort(blocked)
+	// The newest 64 worker tasks and the orchestrator's latest pass; the two
+	// oldest worker tasks page through ReadTaskList instead.
+	if !slices.Equal(blocked, append([]string{"newer pass"}, titles[2:workerTasks]...)) {
+		t.Fatalf("blocked public tasks = %q", blocked)
+	}
 }

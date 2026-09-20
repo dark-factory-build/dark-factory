@@ -201,8 +201,8 @@ func (store *Store) UpdateTask(ctx context.Context, id TaskID, expected Revision
 	return store.updateTask(ctx, nil, id, expected, patch, at)
 }
 
-// UpdateTaskForOverseer edits a queued worker task in the running
-// orchestrator's project, with authorization checked in the update transaction.
+// UpdateTaskForOverseer edits a queued worker task, or cancels a blocked one,
+// in the running orchestrator's project, with authorization checked in the update transaction.
 func (store *Store) UpdateTaskForOverseer(ctx context.Context, digest AttemptDigest, id TaskID, expected Revision, patch TaskPatch, at UnixMillis) (Task, error) {
 	return store.updateTask(ctx, &digest, id, expected, patch, at)
 }
@@ -283,7 +283,11 @@ func (store *Store) updateTask(ctx context.Context, digest *AttemptDigest, id Ta
 			return Task{}, tx.Rollback(err)
 		}
 	}
-	if task.Status != TaskQueued {
+	// A blocked task can only be cancelled. Its settled run stays matched to the
+	// old work revision, so the cancelled row takes the next one, exactly as a
+	// retry followed by a queued cancel would leave it.
+	retire := task.Status == TaskBlocked && patch.Cancel && patch.Title == nil && patch.Body == nil && patch.Priority == nil && patch.AssignedAgentID == nil
+	if task.Status != TaskQueued && !retire {
 		return Task{}, tx.Rollback(ErrConflict)
 	}
 	if task.Revision != expected || at.Int64() < task.UpdatedAt.Int64() {
@@ -332,6 +336,10 @@ func (store *Store) updateTask(ctx context.Context, digest *AttemptDigest, id Ta
 			return Task{}, tx.Rollback(err)
 		}
 	}
+	bump := 0
+	if retire {
+		bump = 1
+	}
 	status, completed := task.Status.String(), any(nil)
 	if patch.Cancel {
 		status, completed = TaskCancelled.String(), at.Int64()
@@ -343,8 +351,8 @@ func (store *Store) updateTask(ctx context.Context, digest *AttemptDigest, id Ta
 	if task.SentBackInstructionBytes != nil {
 		sentBack = *task.SentBackInstructionBytes
 	}
-	result, err := tx.connection.ExecContext(ctx, `UPDATE tasks SET title = ?, body = ?, sent_back_instruction_bytes = ?, priority = ?, assigned_agent_id = ?, status = ?, completed_at_ms = ?, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND status = 'queued' AND revision = ?`,
-		task.Title, task.Body, sentBack, task.Priority, nullableAgentID(task.AssignedAgentID), status, completed, at.Int64(), id.Bytes(), expected.Int64())
+	result, err := tx.connection.ExecContext(ctx, `UPDATE tasks SET title = ?, body = ?, sent_back_instruction_bytes = ?, priority = ?, assigned_agent_id = ?, status = ?, completed_at_ms = ?, blocked_reason = NULL, work_revision = work_revision + ?, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND status = ? AND revision = ?`,
+		task.Title, task.Body, sentBack, task.Priority, nullableAgentID(task.AssignedAgentID), status, completed, bump, at.Int64(), id.Bytes(), task.Status.String(), expected.Int64())
 	if err := requireOneRow(result, err); err != nil {
 		return Task{}, tx.Rollback(err)
 	}

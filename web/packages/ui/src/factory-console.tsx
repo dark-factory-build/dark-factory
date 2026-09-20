@@ -3,7 +3,7 @@ import type { DiscoveredAccount, AccountItem, AgentItem, GitHubConnectionBody, P
 import { BROWSER_HOST, type FactoryAgentSelection, type FactoryAppSnapshot, type FactoryHumanRequestView } from "./factory-app-controller.js";
 import type { FactoryGitHubView } from "./factory-settings-coordinator.js";
 import { AgentList, FactoryFloor } from "./console-screens.js";
-import { AgentPanel, HumanRequestPanel, QueuePanel, TaskDetail, SettingsDialog, editErrorCopy, type AgentConfigEdit, type AgentPanelView, type TaskEdit, type TaskBrief } from "./console-sidebar.js";
+import { AgentPanel, ConsoleDialog, HumanRequestPanel, QueuePanel, TaskDetail, SettingsDialog, editErrorCopy, type AgentConfigEdit, type AgentPanelView, type TaskEdit, type TaskBrief } from "./console-sidebar.js";
 import { ProjectLibrary, type ProjectContentCall } from "./project-library.js";
 import { RemoteInvitePanel } from "./remote-invite.js";
 import { factoryCounters } from "./console-view.js";
@@ -35,6 +35,7 @@ export type FactoryConsoleProps = FactoryAppSnapshot & {
   onCloseAppearance?: () => void;
   onSaveProjectLimits?: (project: Pick<ProjectItem, "id" | "revision">, limits: { runBudget: bigint; maxRunSeconds: number }) => void;
   onEditTask?: (task: TaskItem, change: TaskEdit) => Promise<boolean>;
+  onAddTask?: (agent: AgentItem, instruction: string, mode: "queue" | "any") => Promise<boolean>;
   onLoadTaskDetail?: (task: TaskItem, peerOffset?: bigint, expectedHead?: bigint) => Promise<TaskBrief>;
   onLoadTaskHistory?: (task: TaskItem) => Promise<TaskHistoryView>;
   onLoadTaskList?: (agentId: string, cursor?: { beforeUpdatedAtMs?: bigint; beforeTaskId?: string }) => Promise<TaskListView>;
@@ -124,6 +125,7 @@ export function FactoryConsole({
   onCloseAppearance,
   onSaveProjectLimits,
   onEditTask,
+  onAddTask,
   onLoadTaskDetail,
   onLoadTaskHistory,
   onLoadTaskList,
@@ -221,7 +223,7 @@ export function FactoryConsole({
         {onDetail === undefined ? null : <nav className="dfMobileNav dfConsoleViewToggle" aria-label="Console views">
           <button type="button" aria-pressed={detail === "floor" && view === "floor"} disabled={!ready} onClick={() => { onView?.("floor"); onDetail("floor"); }}>Floor</button>
           <button type="button" aria-pressed={detail === "floor" && view === "agents"} disabled={!ready || onView === undefined} onClick={() => { onView?.("agents"); onDetail("floor"); }}>Agents</button>
-          <button type="button" aria-pressed={detail === "queue"} disabled={!ready} onClick={() => onDetail("queue")}>Queue</button>
+          <button type="button" aria-pressed={detail === "queue"} disabled={!ready} onClick={() => onDetail("queue")}>Tasks</button>
           <button type="button" aria-pressed={detail !== "floor" && selectedDetail === "needs-you"} disabled={!ready} onClick={() => onDetail("needs-you")}>Needs you {counters.needsYou || ""}</button>
         </nav>}
         <div className="dfConsoleLayout">
@@ -250,7 +252,7 @@ export function FactoryConsole({
           <aside className="dfConsoleSidebar" aria-label="Selected detail">
             <div className="dfConsoleViewToggle" role="group" aria-label="Right panel">
               <button type="button" aria-pressed={selectedDetail === "needs-you"} disabled={!ready || onDetail === undefined} onClick={() => onDetail?.("needs-you")}>Needs you <span>{counters.needsYou ?? "—"}</span></button>
-              <button type="button" aria-pressed={selectedDetail === "queue"} disabled={!ready || onDetail === undefined} onClick={() => onDetail?.("queue")}>Queue</button>
+              <button type="button" aria-pressed={selectedDetail === "queue"} disabled={!ready || onDetail === undefined} onClick={() => onDetail?.("queue")}>Tasks</button>
               <button type="button" aria-pressed={selectedDetail === "agent"} disabled={!ready || onDetail === undefined} onClick={() => onDetail?.("agent")}>Agent</button>
             </div>
             {editError === undefined ? null : <p className="dfFactoryConsole__terminalError" role="alert">{editError}</p>}
@@ -272,19 +274,16 @@ export function FactoryConsole({
               />
             </div>
             <div hidden={selectedDetail !== "queue"}>
-              {selectedTask === undefined ? null : <TaskBack key={selectedTask.id} onBack={() => onSelectTask?.(undefined)} />}
-              <div hidden={selectedTask !== undefined && !(selectedTask.status === "queued" && onEditTask !== undefined)}><QueuePanel
+              <QueuePanel
                 state={state}
                 edit={edit}
                 ready={ready}
                 onEditTask={onEditTask}
+                onAddTask={onAddTask}
                 onLoadTaskDetail={onLoadTaskDetail}
                 selectedTaskId={selectedTask?.id}
                 onSelectTask={ready ? selectTask : undefined}
-              /></div>
-              {selectedTask === undefined || (selectedTask.status === "queued" && onEditTask !== undefined) ? null : <section className="dfConsoleSidebar__panel" aria-label="Task details">
-                <TaskDetail key={`${selectedTask.id}:${selectedTask.revision}`} task={selectedTask} onLoadTaskDetail={onLoadTaskDetail} onLoadTaskHistory={onLoadTaskHistory} />
-              </section>}
+              />
             </div>
             <div hidden={selectedDetail !== "agent"}>
               {agent === undefined ? <p className="dfFactoryConsole__empty">SELECT AN AGENT TO OPEN CONTROLS</p> : <AgentPanel
@@ -304,7 +303,9 @@ export function FactoryConsole({
                 onPanel={onAgentPanel}
               />}
             </div>
-            {ready && onProjectContent !== undefined ? <ProjectLibrary state={state} call={onProjectContent} draft={onDraftLibraryTask} /> : null}
+            {selectedTask === undefined || (selectedTask.status === "queued" && onEditTask !== undefined) ? null : <ConsoleDialog key={selectedTask.id} label="Task details" title="TASK" onClose={() => onSelectTask?.(undefined)}>
+              <TaskDetail key={`${selectedTask.id}:${selectedTask.revision}`} task={selectedTask} onLoadTaskDetail={onLoadTaskDetail} onLoadTaskHistory={onLoadTaskHistory} />
+            </ConsoleDialog>}
           </aside>
         </div>
       </main>
@@ -340,6 +341,7 @@ export function FactoryConsole({
           pairing={pairing ?? (!remoteInviteAllowed ? undefined : (
             <RemoteInvitePanel invite={remoteInvite} error={remoteInviteError} onInvite={onInviteRemote} onDismiss={onDismissRemoteInvite} devices={devices} devicesError={devicesError} ownClientId={ownClientId} onLoadDevices={onLoadDevices} onRevokeDevice={onRevokeDevice} />
           ))}
+          library={ready && onProjectContent !== undefined ? <ProjectLibrary state={state} call={onProjectContent} draft={(agent, instruction) => { onToggleSettings?.(); onDraftLibraryTask?.(agent, instruction); }} /> : undefined}
           onClose={onToggleSettings}
         />
       )}
@@ -405,10 +407,4 @@ function entityLabel(entities: ReadonlyMap<string, { name?: string; title?: stri
 
 function shortID(value: string): string {
   return value.slice(0, 8);
-}
-
-function TaskBack({ onBack }: { onBack: () => void }) {
-  const button = useRef<HTMLButtonElement>(null);
-  useEffect(() => { button.current?.focus(); }, []);
-  return <button ref={button} type="button" className="dfTaskBack" onClick={onBack}>Back to tasks</button>;
 }

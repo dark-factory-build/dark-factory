@@ -168,12 +168,12 @@ test("one screen keeps Factory and the operator panels together", () => {
   assert.equal(markup.includes("<dt>QUEUED</dt>"), false);
   assert.equal(markup.includes("<dt>NEEDS YOU</dt>"), false);
   assert.match(markup, /Needs you <span>1<\/span>/);
-  assert.match(markup, />Queue<\/button>/);
+  assert.match(markup, />Tasks<\/button>/);
   assert.match(markup, /Builder One asks/);
   assert.match(markup, /Review the state projection/);
   assert.match(markup, /North Workshop · Review the state projection/);
   assert.equal(markup.includes("DECISION NEEDED"), false, "an unopened request stays brief");
-  assert.match(render({ detail: "queue" }), /aria-label="Queue"/);
+  assert.match(render({ detail: "queue" }), /aria-label="Tasks"/);
   // No screen union survives: there is no navigation away from this screen.
   assert.equal(markup.includes("dfFactoryConsole__homeLink"), false);
   assert.equal(markup.includes("BUILDING STATE UNAVAILABLE"), false);
@@ -670,7 +670,39 @@ test("Queue keeps running tasks visible without a second queue", () => {
   assert.doesNotMatch(render({ detail: "queue", state: queuedOnly }), /Briefs are editable while queued/);
   assert.match(markup, /class="dfConsoleItem__taskTitle"/);
   assert.match(markup, /Review the state projection/);
-  assert.equal((markup.match(/aria-label="Queue"/g) ?? []).length, 1, "one queue panel");
+  assert.equal((markup.match(/aria-label="Tasks"/g) ?? []).length, 1, "one queue panel");
+});
+
+test("Tasks lists blocked work, hides orchestrator passes, flags dispatch off and queues new work", async () => {
+  const running = fixtureState.tasks.get(ids.task);
+  const supervisor = fixtureState.agents.get(ids.orchestrator);
+  const state = baseState({
+    factory: { ...fixtureState.factory, dispatch_enabled: false },
+    tasks: new Map([
+      ...fixtureState.tasks,
+      ["b1".repeat(16), { ...running, id: "b1".repeat(16), title: "Stuck on a prerequisite", status: "blocked" }],
+      ["b2".repeat(16), { ...running, id: "b2".repeat(16), title: "Standing instruction", status: "running", assigned_agent_id: supervisor.id }],
+    ]),
+  });
+  const added = [];
+  const edits = [];
+  let renderer;
+  await act(async () => { renderer = create(createElement(FactoryConsole, { status: "ready", detail: "queue", state, onDetail() {}, onEditTask: async (task, change) => { edits.push([task.id, change]); return true; }, onAddTask: async (agent, instruction, mode) => { added.push([agent.id, instruction, mode]); return true; } })); });
+  const panel = renderer.root.findByProps({ "aria-label": "Tasks" });
+  assert.equal(panel.findByProps({ "aria-label": "Blocked tasks" }).findAllByType("button")[0].children.join(""), "Stuck on a prerequisite");
+  await act(async () => { panel.findByProps({ "aria-label": "Cancel Stuck on a prerequisite" }).props.onClick(); });
+  assert.deepEqual(edits, [["b1".repeat(16), { cancel: true }]], "a blocked task is cleared in one step");
+  assert.ok(!panel.findAllByType("button").some((button) => button.children.join("") === "Standing instruction"), "an orchestrator pass is not a task row");
+  assert.match(panel.findByProps({ role: "status" }).children.join(""), /Dispatch is off/);
+  const form = panel.findByProps({ "aria-label": "New task" });
+  const values = { target: `any:${ids.project}`, instruction: " Ship it " };
+  const nativeFormData = globalThis.FormData;
+  globalThis.FormData = class { get(name) { return values[name]; } };
+  try { await act(async () => { form.props.onSubmit({ preventDefault() {}, currentTarget: { reset() {} } }); }); }
+  finally { globalThis.FormData = nativeFormData; }
+  assert.equal(added.length, 1);
+  assert.deepEqual(added[0].slice(1), [" Ship it ", "any"]);
+  assert.equal(fixtureState.agents.get(added[0][0]).role, "worker", "shared work is queued through a worker of that project");
 });
 
 test("a terminal blocked task is neither building nor current agent work", () => {
@@ -697,7 +729,7 @@ test("an unavailable snapshot is explicit and does not invent runtime state", ()
   assert.match(markup, /Waiting for the latest state…/);
   assert.match(markup, /Waiting for the latest state…/);
   assert.match(markup, /Connection status: SYNCING/);
-  assert.match(markup, />Queue<\/button>/);
+  assert.match(markup, />Tasks<\/button>/);
   assert.equal(markup.includes("NO QUEUED TASKS"), false);
   assert.equal(markup.includes("all quiet"), false);
   assert.match(render({ state: undefined, status: "syncing", view: "agents" }), /waiting for the factory/);
@@ -881,7 +913,7 @@ test("the queued task row keeps served order and changes its exact priority", as
     await act(async () => { renderer = create(createElement(FactoryConsole, props)); });
     const buttons = renderer.root.findAllByType("button");
     const byLabel = (label) => buttons.find((button) => button.props["aria-label"] === label);
-    const queueRows = renderer.root.findByProps({ "aria-label": "Queue" }).findAllByType("details").filter((row) => row.props.className === "dfConsoleItem");
+    const queueRows = renderer.root.findByProps({ "aria-label": "Tasks" }).findAllByType("details").filter((row) => row.props.className === "dfConsoleItem");
     assert.deepEqual(queueRows.map((row) => row.findByType("strong").props.children), [queued.title, other.title], "the queue keeps the server's per-agent order, rather than re-sorting priority");
     assert.ok(!renderer.root.findAllByType("p").some((paragraph) => paragraph.props.children === "Grouped by agent · no global start order"));
     assert.ok(renderer.root.findAllByType("span").some((span) => (Array.isArray(span.props.children) ? span.props.children.join("") : String(span.props.children)).includes("QUEUED · PRIORITY 2")));
@@ -900,7 +932,7 @@ test("the queued task row keeps served order and changes its exact priority", as
     await act(async () => { renderer.update(createElement(FactoryConsole, props)); });
 
     const editBrief = () => renderer.root.findAllByType("button").find((button) => button.props.children === "EDIT BRIEF");
-    const firstRow = renderer.root.findByProps({ "aria-label": "Queue" }).findAllByType("details").find((row) => row.props.className === "dfConsoleItem");
+    const firstRow = renderer.root.findByProps({ "aria-label": "Tasks" }).findAllByType("details").find((row) => row.props.className === "dfConsoleItem");
     assert.equal(firstRow.props.open, undefined, "queue rows start collapsed");
     assert.deepEqual(detailReads, [], "collapsed queued rows do not read private briefs");
     await act(async () => { firstRow.props.onToggle({ currentTarget: { open: true } }); });
@@ -1943,17 +1975,17 @@ test("floor objects select the exact existing task detail and question route", a
   await act(async () => { tree.root.findAllByType("button").find((button) => button.children.join("") === "Back").props.onClick(); });
   assert.equal(tree.root.findByProps({ "aria-label": "Task details" }).findByType("h3").children.join(""), task.title, "navigation retains the existing detail selection");
   await act(async () => { tree.root.findByProps({ "data-enter-room-id": kernelID }).props.onClick(); });
-  await act(async () => { tree.root.findAllByType("button").find((button) => button.children.join("") === "Back to tasks").props.onClick(); });
+  await act(async () => { tree.root.findByProps({ "aria-label": "Task details" }).props.onClose(); });
   const running = tree.root.findByProps({ "aria-label": "Running tasks" }).findByType("button");
   await act(async () => { running.props.onClick(); });
   assert.deepEqual(queueSelections, [task.id, undefined, task.id]);
   assert.equal(tree.root.findByProps({ "aria-label": "Task details" }).findByType("h3").children.join(""), task.title);
   await act(async () => { tree.root.findByProps({ "data-floor-queue": "" }).props.onKeyDown({ key: "Enter", preventDefault() {} }); });
-  assert.equal(tree.root.findAllByProps({ "aria-label": "Queue" }).length, 1, "queue remains one canonical panel");
+  assert.equal(tree.root.findAllByProps({ "aria-label": "Tasks" }).length, 1, "queue remains one canonical panel");
   assert.equal(tree.root.findAllByProps({ "data-floor-queue": "" }).length, 1);
   const queuedTask = fixtureState.tasks.get("32".repeat(16));
   await act(async () => { tree.update(createElement(Harness, { editable: true })); });
-  await act(async () => { tree.root.findAllByType("button").find((button) => button.children.join("") === "Back to tasks").props.onClick(); });
+  await act(async () => { tree.root.findByProps({ "aria-label": "Task details" }).props.onClose(); });
   const queuedRow = tree.root.findAllByProps({ className: "dfConsoleItem__summary" }).find((row) => row.findAllByType("strong").some((strong) => strong.children.join("") === queuedTask.title));
   await act(async () => { queuedRow.props.onClick({ preventDefault() {} }); });
   assert.equal(tree.root.findAllByProps({ "aria-label": "Task details" }).length, 0, "editable queued work stays in its inline editor");

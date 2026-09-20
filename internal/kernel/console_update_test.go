@@ -491,3 +491,37 @@ func TestUpdateTaskCancelsATaskRequeuedAfterATerminalRun(t *testing.T) {
 		t.Fatalf("public snapshot after cancelling a re-queued task: %v", err)
 	}
 }
+
+func TestUpdateTaskRetiresABlockedTaskButNeverEditsIt(t *testing.T) {
+	for _, role := range []AgentRole{RoleWorker, RoleOrchestrator} {
+		blocked, _ := NewBlockedProposal("external prerequisite")
+		store, finalizing := finalizingReleasedRun(t, role, VerificationNone, blocked)
+		func() {
+			defer store.Close()
+			ctx := context.Background()
+			terminal, err := finalizeTestRun(t, store, finalizing, 70)
+			if err != nil {
+				t.Fatal(err)
+			}
+			task, found, err := store.Task(ctx, terminal.TaskID)
+			if err != nil || !found || task.Status != TaskBlocked {
+				t.Fatalf("%s blocked task = %+v, found=%v, err=%v", role, task, found, err)
+			}
+			title := "renamed"
+			if _, err := store.UpdateTask(ctx, task.ID, task.Revision, TaskPatch{Title: &title, Cancel: true}, mustTime(t, 90)); !errors.Is(err, ErrConflict) {
+				t.Fatalf("%s edit of a blocked task = %v", role, err)
+			}
+			retired, err := store.UpdateTask(ctx, task.ID, task.Revision, TaskPatch{Cancel: true}, mustTime(t, 91))
+			if err != nil || retired.Status != TaskCancelled || retired.BlockedReason != "" || retired.WorkRevision.Int64() != task.WorkRevision.Int64()+1 {
+				t.Fatalf("%s retired task = %+v, %v", role, retired, err)
+			}
+			// The durable validator runs on every read.
+			if _, _, err := store.Run(ctx, terminal.ID); err != nil {
+				t.Fatalf("%s run topology after retiring a blocked task: %v", role, err)
+			}
+			if _, err := store.ReadPublicSnapshot(ctx); err != nil {
+				t.Fatalf("%s public snapshot after retiring a blocked task: %v", role, err)
+			}
+		}()
+	}
+}

@@ -143,6 +143,22 @@ function pullRequests(value: string): readonly Readonly<{ href: string; label: s
   return [...found].map(([href, label]) => ({ href, label }));
 }
 
+/**
+ * The one modal shell: <dialog> owns ESC, the backdrop, the focus trap and
+ * focus return, so every exit goes through close().
+ */
+export function ConsoleDialog({ label, title, className = "", onClose, children }: { label: string; title: string; className?: string; onClose?: () => void; children: ReactNode }) {
+  const dialog = useRef<HTMLDialogElement>(null);
+  useEffect(() => { if (!dialog.current?.open) dialog.current?.showModal(); }, []);
+  const close = () => dialog.current?.close();
+  return <dialog ref={dialog} className={`dfConsoleDialog ${className}`.trim()} aria-label={label} onClose={onClose} onClick={(event) => { if (event.target === dialog.current) close(); }}>
+    <div className="dfConsoleSidebar__panel">
+      <div className="dfConsoleSidebar__heading"><h2>{title}</h2>{onClose === undefined ? null : <button type="button" onClick={close}>CLOSE</button>}</div>
+      {children}
+    </div>
+  </dialog>;
+}
+
 /** Private completed-task detail, kept bounded until the operator opens it. */
 function RecentWork({
   agent, completionRevision, onLoadTaskList, onLoadTaskDetail, onLoadTaskHistory,
@@ -160,7 +176,6 @@ function RecentWork({
   const [hasMore, setHasMore] = useState(false);
   const [pending, setPending] = useState(false);
   const [failed, setFailed] = useState(false);
-  const dialog = useRef<HTMLDialogElement>(null);
   const request = useRef(0);
   const load = (append: boolean) => {
     const loader = onLoadTaskList;
@@ -179,16 +194,13 @@ function RecentWork({
   };
   useEffect(() => {
     if (!open) return;
-    if (!dialog.current?.open) dialog.current?.showModal();
     load(false);
     return () => { ++request.current; };
   }, [open, agent.id, completionRevision]);
   const selected = page.find((task) => task.id === selectedId) ?? page[0];
   return <div className="dfConsoleRecentWork dfConsoleSidebar__section">
     <button type="button" onClick={() => setOpen(true)}>RECENT WORK{total === undefined ? "" : ` · ${total}`}</button>
-    {!open ? null : <dialog ref={dialog} className="dfConsoleDialog dfRecentWorkDialog" aria-label={`Recent work for ${agent.name}`} onClose={() => setOpen(false)} onClick={(event) => { if (event.target === dialog.current) dialog.current?.close(); }}>
-      <div className="dfConsoleSidebar__panel">
-        <div className="dfConsoleSidebar__heading"><h2>RECENT WORK · {agent.name}</h2><button type="button" onClick={() => dialog.current?.close()}>CLOSE</button></div>
+    {!open ? null : <ConsoleDialog className="dfRecentWorkDialog" label={`Recent work for ${agent.name}`} title={`RECENT WORK · ${agent.name}`} onClose={() => setOpen(false)}>
         {failed ? <p role="alert">RECENT WORK UNAVAILABLE <button type="button" onClick={() => load(false)}>RETRY</button></p> : null}
         <div className="dfRecentWorkLayout">
           <nav aria-label="Completed work">
@@ -202,8 +214,7 @@ function RecentWork({
           </nav>
           {selected === undefined ? <p>{pending ? "Loading recent work…" : "No completed or blocked tasks."}</p> : <TaskDetail key={`${selected.id}:${selected.revision}`} task={selected} onLoadTaskDetail={onLoadTaskDetail} onLoadTaskHistory={onLoadTaskHistory} />}
         </div>
-      </div>
-    </dialog>}
+    </ConsoleDialog>}
   </div>;
 }
 
@@ -257,6 +268,7 @@ export function QueuePanel({
   edit,
   ready,
   onEditTask,
+  onAddTask,
   onLoadTaskDetail,
   selectedTaskId,
   onSelectTask,
@@ -267,49 +279,83 @@ export function QueuePanel({
   edit?: FactoryEditView;
   ready: boolean;
   onEditTask?: (task: TaskItem, change: TaskEdit) => Promise<boolean>;
+  onAddTask?: (agent: AgentItem, instruction: string, mode: "queue" | "any") => Promise<boolean>;
   onLoadTaskDetail?: (task: TaskItem, peerOffset?: bigint, expectedHead?: bigint) => Promise<TaskBrief>;
 }) {
-  const agents = state === undefined ? [] : [...state.agents.values()];
-  const tasks = state === undefined ? [] : [...state.tasks.values()];
-  const running = tasks.filter((task) => task.status === "running");
-  const queued = [
-    ...agents.flatMap((agent) => {
-      const assigned = tasks
-        .filter((task) => task.assigned_agent_id === agent.id && task.status === "queued");
-      return assigned.length === 0 ? [] : [{ projectId: agent.project_id, tasks: assigned }];
-    }),
-    // Shared work waits under its project until an eligible worker claims it.
-    ...(state === undefined ? [] : [...state.projects.values()]).flatMap((project) => {
-      const shared = tasks.filter((task) => task.assigned_agent_id === "" && task.project_id === project.id && task.status === "queued");
-      return shared.length === 0 ? [] : [{ projectId: project.id, tasks: shared }];
-    }),
-  ];
-  return <section className="dfConsoleSidebar__panel" aria-label="Queue">
-    {state === undefined ? <p className="dfFactoryConsole__empty">Waiting for the latest state…</p>
-      : <>
-        {running.length === 0 || selectedTaskId !== undefined ? null : <section className="dfConsoleSidebar__section" aria-label="Running tasks">
-          <h3>Running <span>{running.length}</span></h3>
-          <ul className="dfConsoleItems">{running.map((task) => <li className="dfConsoleItem" key={task.id}><div className="dfConsoleItem__summary">
-            <button type="button" className="dfConsoleItem__taskTitle" disabled={!ready || onSelectTask === undefined} aria-pressed={selectedTaskId === task.id} onClick={() => onSelectTask?.(task.id)}>{task.title}</button>
-            <span className="dfConsoleItem__meta">{agents.find((agent) => agent.id === task.assigned_agent_id)?.name ?? "AGENT"}</span>
-          </div></li>)}</ul>
-        </section>}
-        {queued.length === 0 ? running.length > 0 ? null : <p className="dfFactoryConsole__empty">No queued tasks</p> : <>{selectedTaskId === undefined ? <h3>Queued <span>{queued.reduce((count, group) => count + group.tasks.length, 0)}</span></h3> : null}<ul className="dfConsoleItems">{queued.flatMap(({ projectId, tasks }) => {
-          const peers = agents.filter((peer) => peer.project_id === projectId);
-          return tasks.filter((task) => selectedTaskId === undefined || task.id === selectedTaskId).map((task) => <QueuedTask
-              selected={selectedTaskId === task.id}
-              onSelectTask={onSelectTask}
-              key={task.id}
-              task={task}
-              peers={peers}
-              pending={edit?.pending === true}
-              ready={ready}
-              onEditTask={onEditTask}
-              onLoadTaskDetail={onLoadTaskDetail}
-            />);
-        })}</ul></>}
-      </>}
+  if (state === undefined) return <section className="dfConsoleSidebar__panel" aria-label="Tasks"><p className="dfFactoryConsole__empty">Waiting for the latest state…</p></section>;
+  const agents = [...state.agents.values()];
+  const name = (task: TaskItem) => task.assigned_agent_id === "" ? "Any eligible worker" : state.agents.get(task.assigned_agent_id)?.name ?? "Agent";
+  const tasks = [...state.tasks.values()];
+  // Served order: a global priority sort would present a false next-start order.
+  const queued = tasks.filter((task) => task.status === "queued");
+  const opened = (status: TaskItem["status"], label: string) => {
+    // An orchestrator's passes are its own rule at work; they live on its Agent tab.
+    const rows = tasks.filter((task) => task.status === status && state.agents.get(task.assigned_agent_id)?.role !== "orchestrator");
+    return rows.length === 0 ? null : <section className="dfConsoleSidebar__section" aria-label={`${label} tasks`}>
+      <h3>{label} <span>{rows.length}</span></h3>
+      <ul className="dfConsoleItems">{rows.map((task) => <li className="dfConsoleItem" key={task.id}><div className="dfConsoleItem__summary">
+        <button type="button" className="dfConsoleItem__taskTitle" disabled={!ready || onSelectTask === undefined} aria-pressed={selectedTaskId === task.id} onClick={() => onSelectTask?.(task.id)}>{task.title}</button>
+        <span className="dfConsoleItem__meta">{name(task)}{status === "blocked" && task.updated_at_ms !== undefined ? ` · since ${dateLabel(task.updated_at_ms)}` : ""}</span>
+        {status !== "blocked" || onEditTask === undefined ? null : <button type="button" aria-label={`Cancel ${task.title}`} disabled={!ready || edit?.pending === true} onClick={() => { void onEditTask(task, { cancel: true }); }}>Cancel</button>}
+      </div></li>)}</ul>
+      {status === "blocked" && rows.length >= 64 ? <p>Showing the newest 64. Older blocked tasks are in each agent’s Recent work.</p> : null}
+    </section>;
+  };
+  return <section className="dfConsoleSidebar__panel" aria-label="Tasks">
+    {state.factory.dispatch_enabled ? null : <p role="status">Dispatch is off — queued tasks will not start. Run factoryctl dispatch on.</p>}
+    {onAddTask === undefined ? null : <NewTask agents={agents} state={state} disabled={!ready || edit?.pending === true} onAddTask={onAddTask} />}
+    {opened("blocked", "Blocked")}
+    {opened("running", "Running")}
+    <section className="dfConsoleSidebar__section" aria-label="Queued tasks">
+      <h3>Queued <span>{queued.length}</span></h3>
+      {queued.length === 0 ? <p className="dfFactoryConsole__empty">No queued tasks</p> : <ul className="dfConsoleItems">{queued.map((task) => <QueuedTask
+        selected={selectedTaskId === task.id}
+        onSelectTask={onSelectTask}
+        key={task.id}
+        task={task}
+        peers={agents.filter((peer) => peer.project_id === (state.agents.get(task.assigned_agent_id)?.project_id ?? task.project_id))}
+        pending={edit?.pending === true}
+        ready={ready}
+        onEditTask={onEditTask}
+        onLoadTaskDetail={onLoadTaskDetail}
+      />)}</ul>}
+    </section>
   </section>;
+}
+
+/** The target is one agent, or "any:" plus a project whose first worker names the shared queue. */
+function NewTask({ agents, state, disabled, onAddTask }: {
+  agents: readonly AgentItem[];
+  state: StateView;
+  disabled: boolean;
+  onAddTask: (agent: AgentItem, instruction: string, mode: "queue" | "any") => Promise<boolean>;
+}) {
+  const live = agents.filter((agent) => !agent.archived);
+  const shared = [...state.projects.values()].flatMap((project) => {
+    const worker = live.find((agent) => agent.project_id === project.id && agent.role === "worker");
+    return worker === undefined ? [] : [{ project, worker }];
+  });
+  return <details className="dfConsoleSidebar__section"><summary>New task</summary>
+    <form className="dfFactoryConsole__reply" aria-label="New task" onSubmit={(event) => {
+      event.preventDefault();
+      const form = event.currentTarget;
+      const data = new FormData(form);
+      const target = String(data.get("target"));
+      const agent = target.startsWith("any:") ? shared.find(({ project }) => project.id === target.slice(4))?.worker : state.agents.get(target);
+      const instruction = String(data.get("instruction"));
+      if (agent === undefined || instruction.trim() === "") return;
+      void onAddTask(agent, instruction, target.startsWith("any:") ? "any" : "queue").then((added) => { if (added) form.reset(); });
+    }}>
+      <label htmlFor="df-new-task-target">For</label>
+      <select id="df-new-task-target" name="target" required disabled={disabled}>
+        {shared.map(({ project }) => <option key={project.id} value={`any:${project.id}`}>Any eligible worker · {project.name}</option>)}
+        {live.map((agent) => <option key={agent.id} value={agent.id}>{agent.name}</option>)}
+      </select>
+      <label htmlFor="df-new-task-instruction">Instruction</label>
+      <textarea id="df-new-task-instruction" name="instruction" rows={4} required disabled={disabled} />
+      <button disabled={disabled}>Add to queue</button>
+    </form>
+  </details>;
 }
 
 /**
@@ -543,6 +589,7 @@ export function SettingsDialog({
   onLoadIntake,
   onIntakeAction,
   pairing,
+  library,
   onClose,
 }: {
   floorAppearance: FloorAppearance;
@@ -571,10 +618,9 @@ export function SettingsDialog({
   intake?: ReadonlyMap<string, IntakeView>; intakePending?: ReadonlySet<string>; intakeErrors?: ReadonlyMap<string, string>; onLoadIntake?: (projectId: string) => void; onIntakeAction?: (projectId: string, request: IntakeBody) => void;
   /** A self-contained "PAIR A PHONE" surface mounts here. */
   pairing?: ReactNode;
+  library?: ReactNode;
   onClose?: () => void;
 }) {
-  const dialog = useRef<HTMLDialogElement>(null);
-  useEffect(() => { dialog.current?.showModal(); }, []);
   // Discovery is an observation of the daemon's machine, so it is asked for
   // when the dialog opens rather than carried in the durable snapshot.
   const load = useRef(onLoadAccounts);
@@ -583,20 +629,8 @@ export function SettingsDialog({
   const loadGitHub = useRef(onGitHub);
   loadGitHub.current = onGitHub;
   useEffect(() => { if (ready) loadGitHub.current?.({ action: "status" }); }, [ready]);
-  const close = () => dialog.current?.close();
   return (
-    <dialog
-      className="dfConsoleDialog"
-      ref={dialog}
-      aria-label="Settings"
-      onClose={onClose}
-      onClick={(event) => { if (event.target === dialog.current) close(); }}
-    >
-      <div className="dfConsoleSidebar__panel">
-        <div className="dfConsoleSidebar__heading">
-          <h2>Settings</h2>
-          {onClose === undefined ? null : <button type="button" onClick={close}>CLOSE</button>}
-        </div>
+    <ConsoleDialog label="Settings" title="Settings" onClose={onClose}>
         <div className="dfConsoleSidebar__section" aria-label="PAIRING">
           <h3>Devices &amp; pairing</h3>
           {pairing ?? <p className="dfFactoryConsole__empty">Pairing unavailable</p>}
@@ -616,6 +650,7 @@ export function SettingsDialog({
           <summary>Run limits</summary>
           <ProjectLimitsSection state={state} edit={edit} ready={ready} onSave={onSaveProjectLimits} />
         </details>
+        {library}
         <FloorAppearanceSection appearance={floorAppearance} onChange={onFloorAppearanceChange} onReset={onResetFloorAppearance} />
         <section className="dfConsoleSidebar__section" aria-label="Help and feedback">
           <h3>Help and feedback</h3>
@@ -624,8 +659,7 @@ export function SettingsDialog({
           <p><a href="https://darkfactory.build/backlog" target="_blank" rel="noopener noreferrer">Public backlog · Vote on GitHub</a></p>
           <p>Review and submit reports on GitHub. Reporting and voting do not start factory work.</p>
         </section>
-      </div>
-    </dialog>
+    </ConsoleDialog>
   );
 }
 
