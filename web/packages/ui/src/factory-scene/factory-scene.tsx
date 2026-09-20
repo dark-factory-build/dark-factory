@@ -211,7 +211,9 @@ function SceneWorkers({ errands, furniture, layout, placements, nodes, workers, 
   // The break room keeps no clock of its own: every couple of seconds of the
   // floor's pulse it asks who has got up. Where motion is stilled the pulse is
   // absent, and everyone stays seated.
-  const [errandClock, setErrandClock] = useState<number>();
+  // The count belongs to the floor it was taken on: one left over from another floor is ignored at once.
+  const [errandBeat, setErrandBeat] = useState<Readonly<{ floor: string; clock: number }>>();
+  const errandClock = errandBeat?.floor === geometryKey ? errandBeat.clock : undefined;
   const seatedPlacements = placements;
   placements = useMemo(() => {
     const nook = breakRoomNook(layout, seatedPlacements.filter((placement) => placement.area === "resting").length, seatedPlacements.filter((placement) => placement.area !== "room" && placement.area !== "resting").length);
@@ -229,7 +231,8 @@ function SceneWorkers({ errands, furniture, layout, placements, nodes, workers, 
     if (time.floor !== geometryKey) Object.assign(time, { floor: geometryKey, total: 0, last: undefined });
     if (pulse !== undefined && time.last !== undefined && pulse - time.last < 1000) time.total += pulse - time.last;
     time.last = pulse;
-    setErrandClock(pulse === undefined ? undefined : Math.floor(time.total / 2000) * 2000);
+    const clock = Math.floor(time.total / 2000) * 2000;
+    setErrandBeat((beat) => pulse === undefined ? undefined : beat?.floor === geometryKey && beat.clock === clock ? beat : { floor: geometryKey, clock });
   }, [pulse, geometryKey]);
   const workerById = new Map(workers.map((worker) => [worker.id, worker]));
   return <>{placements.map((placement) => {

@@ -773,7 +773,17 @@ test("a floor mounted late still starts seated, then someone gets up, stands at 
     assert.ok(away().length > 0, "someone is up when the floor changes");
     const another = { ...inventoryTopology, digest: "another-floor", nodes: [...inventoryTopology.nodes, { ...inventoryTopology.nodes[0], id: "extra-1", path: "extra-1" }, { ...inventoryTopology.nodes[0], id: "extra-2", path: "extra-2" }] };
     await act(async () => { renderer.update(createElement(FactoryScene, { topology: another, workers: resting, connected: true })); });
-    for (let step = 0; step < 70; step++) { await tick(); assert.equal(away().length, 0, `someone is up ${step / 10}s into a new floor`); }
+    // Judged by what is drawn, from the very first render of the new floor: nobody at the
+    // furniture, nobody walking, nobody on their feet with a book or a cup.
+    const seatedAsDrawn = (when) => {
+      assert.equal(away().length, 0, `someone is at the furniture ${when}`);
+      for (const worker of renderer.root.findAll((node) => node.props["data-worker-id"] !== undefined)) {
+        assert.notEqual(worker.props["data-worker-action"], "walking", `${worker.props["data-worker-id"]} is walking ${when}`);
+        assert.ok(worker.findAll((node) => node.props["data-seated"] === "coffee").length === 1, `${worker.props["data-worker-id"]} is not in their seat ${when}`);
+      }
+    };
+    seatedAsDrawn("as the new floor appears");
+    for (let step = 0; step < 70; step++) { await tick(); seatedAsDrawn(`${step / 10}s into the new floor`); }
   } finally {
     if (renderer) await act(async () => renderer.unmount());
     for (const [key, value] of Object.entries(saved)) { if (value === undefined) delete globalThis[key]; else globalThis[key] = value; }
