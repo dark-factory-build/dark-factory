@@ -605,7 +605,9 @@ func validConsoleControl(kind MessageType, body any) error {
 			value.Body != nil && validateBoundedText(*value.Body, 0, MaxTaskInstructionBytes) != nil ||
 			value.Priority != nil && (*value.Priority < -MaxTaskPriority || *value.Priority > MaxTaskPriority) ||
 			value.AssignedAgentID != nil && validateDynamicID(*value.AssignedAgentID) != nil ||
-			value.Status != nil && *value.Status != "cancelled" && *value.Status != "queued" {
+			value.Status != nil && *value.Status != "cancelled" && *value.Status != "queued" ||
+			// A retry re-queues the task as it stands; an edit beside it would be dropped.
+			value.Status != nil && *value.Status == "queued" && (value.Title != nil || value.Body != nil || value.Priority != nil) {
 			return bad()
 		}
 	case TaskUpdateResult:

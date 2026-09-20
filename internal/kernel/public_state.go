@@ -144,8 +144,9 @@ func readPublicAccounts(ctx context.Context, connection *sql.Conn) ([]AccountSum
 	return result, nil
 }
 
-// Each read below selects only public columns. Private durable data is not
-// loaded at all, so it cannot reach a projection by accident.
+// Each read below selects only public columns, plus a blocked task's reason,
+// which leaves as a bounded excerpt. Other private durable data is not loaded
+// at all, so it cannot reach a projection by accident.
 
 func readPublicProjects(ctx context.Context, connection *sql.Conn) ([]ProjectSummary, error) {
 	rows, err := connection.QueryContext(ctx, `SELECT id, name, run_budget_limit, runs_used, max_run_seconds, revision FROM projects ORDER BY id`)

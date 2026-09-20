@@ -490,6 +490,7 @@ export class BrowserSession {
     if (request.cancel === true) body.status = "cancelled";
     else if (request.retry === true) body.status = "queued";
     if (
+      (request.retry === true && (request.cancel === true || request.title !== undefined || request.body !== undefined || request.priority !== undefined)) ||
       (request.title !== undefined && (request.title.length === 0 || bounded(request.title, MAX_TASK_TITLE_BYTES))) ||
       bounded(request.body, MAX_TASK_INSTRUCTION_BYTES) ||
       (request.priority !== undefined && (!Number.isSafeInteger(request.priority) || Math.abs(request.priority) > MAX_TASK_PRIORITY)) ||

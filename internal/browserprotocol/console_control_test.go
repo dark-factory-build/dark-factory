@@ -20,6 +20,7 @@ func TestConsoleControlBounds(t *testing.T) {
 		`{"type":"AGENT_UPDATE","id":"x","body":{"agent_id":"` + agent + `","expected_revision":"7"}}`,
 		`{"type":"PROJECT_LIMITS","id":"x","body":{"project_id":"` + agent + `","expected_revision":"7","run_budget":"12","max_run_seconds":900}}`,
 		`{"type":"TASK_UPDATE","id":"x","body":{"task_id":"` + task + `","expected_revision":"7"}}`,
+		`{"type":"TASK_UPDATE","id":"x","body":{"task_id":"` + task + `","expected_revision":"7","status":"queued"}}`,
 	} {
 		if _, err := DecodeClientControl([]byte(frame)); err != nil {
 			t.Fatalf("optional members refused: %v", err)
@@ -33,6 +34,8 @@ func TestConsoleControlBounds(t *testing.T) {
 		`{"type":"AGENT_UPDATE","id":"x","body":{"agent_id":"` + agent + `","expected_revision":"7","reasoning_effort":"` + strings.Repeat("e", MaxAgentModelBytes+1) + `"}}`,
 		// Cancellation is the only status transition the console may ask for.
 		`{"type":"TASK_UPDATE","id":"x","body":{"task_id":"` + task + `","expected_revision":"7","status":"succeeded"}}`,
+		// A retry re-queues the task as it stands; an edit beside it would be dropped.
+		`{"type":"TASK_UPDATE","id":"x","body":{"task_id":"` + task + `","expected_revision":"7","status":"queued","title":"renamed"}}`,
 		`{"type":"TASK_UPDATE","id":"x","body":{"task_id":"` + task + `","expected_revision":"7","priority":1000001}}`,
 		`{"type":"TASK_UPDATE","id":"x","body":{"task_id":"` + task + `","expected_revision":"7","title":""}}`,
 		`{"type":"TOPOLOGY_GET","id":"x","body":{"project_id":"0000000000000000000000000000000"}}`,
