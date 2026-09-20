@@ -72,7 +72,7 @@ func TestV22MigrationKeepsExplicitUnverifiedSourceUntilHostProof(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, statement := range []string{"DROP TABLE attachment_retention", "DROP TABLE task_attachments", "DROP TABLE intake_acceptance_reviews", "DROP TABLE intake_source_priorities", "DROP TABLE intake_legacy_suppressions", "DROP TABLE intake_legacy_migrations", "DROP TABLE intake_task_bindings", "DROP TABLE intake_source_trusted_logins", "DROP TABLE intake_acceptances", "DROP TABLE intake_sources", "DROP TABLE repository_source_identities"} {
+	for _, statement := range []string{"DROP TABLE run_tokens", "DROP TABLE project_tokens", "DROP TABLE attachment_retention", "DROP TABLE task_attachments", "DROP TABLE intake_acceptance_reviews", "DROP TABLE intake_source_priorities", "DROP TABLE intake_legacy_suppressions", "DROP TABLE intake_legacy_migrations", "DROP TABLE intake_task_bindings", "DROP TABLE intake_source_trusted_logins", "DROP TABLE intake_acceptances", "DROP TABLE intake_sources", "DROP TABLE repository_source_identities"} {
 		if _, err := store.writer.Exec(statement); err != nil {
 			t.Fatal(err)
 		}

@@ -386,15 +386,15 @@ func (store *Store) Snapshot(ctx context.Context) (DashboardSnapshot, error) {
 		Factory: FactorySummary{DispatchEnabled: state.DispatchEnabled, Capacity: state.Capacity, ActiveRuns: activeRuns, Revision: state.Revision},
 	}
 	count := 0
-	projectRows, err := tx.connection.QueryContext(ctx, `SELECT id, name, run_budget_limit, runs_used, max_run_seconds, revision FROM projects ORDER BY id LIMIT ?`, SnapshotEntityLimit+1)
+	projectRows, err := tx.connection.QueryContext(ctx, `SELECT p.id, p.name, p.run_budget_limit, p.runs_used, p.max_run_seconds, p.revision, COALESCE(k.token_limit, 0), COALESCE(k.tokens_used, 0) FROM projects AS p LEFT JOIN project_tokens AS k ON k.project_id = p.id ORDER BY p.id LIMIT ?`, SnapshotEntityLimit+1)
 	if err != nil {
 		return DashboardSnapshot{}, fmt.Errorf("read project summaries: %w", err)
 	}
 	for projectRows.Next() {
 		var rawID []byte
 		var name string
-		var runBudget, runsUsed, maxRunSeconds, rawRevision int64
-		if err := projectRows.Scan(&rawID, &name, &runBudget, &runsUsed, &maxRunSeconds, &rawRevision); err != nil {
+		var runBudget, runsUsed, maxRunSeconds, rawRevision, tokenLimit, tokensUsed int64
+		if err := projectRows.Scan(&rawID, &name, &runBudget, &runsUsed, &maxRunSeconds, &rawRevision, &tokenLimit, &tokensUsed); err != nil {
 			projectRows.Close()
 			return DashboardSnapshot{}, fmt.Errorf("scan project summary: %w", err)
 		}
@@ -409,7 +409,7 @@ func (store *Store) Snapshot(ctx context.Context) (DashboardSnapshot, error) {
 			projectRows.Close()
 			return DashboardSnapshot{}, ErrSnapshotTooLarge
 		}
-		snapshot.Projects = append(snapshot.Projects, ProjectSummary{ID: id, Name: name, RunBudgetLimit: uint64(runBudget), RunsUsed: uint64(runsUsed), MaxRunSeconds: uint32(maxRunSeconds), Revision: revision})
+		snapshot.Projects = append(snapshot.Projects, ProjectSummary{ID: id, Name: name, RunBudgetLimit: uint64(runBudget), RunsUsed: uint64(runsUsed), MaxRunSeconds: uint32(maxRunSeconds), Tokens: ProjectTokens{TokenLimit: uint64(tokenLimit), TokensUsed: uint64(tokensUsed)}, Revision: revision})
 	}
 	if err := projectRows.Close(); err != nil {
 		return DashboardSnapshot{}, err
