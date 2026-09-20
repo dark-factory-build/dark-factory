@@ -726,7 +726,10 @@ test("resting workers take fair, uninterrupted turns at the break-room furniture
 });
 
 test("a floor mounted late still starts seated, then someone gets up, stands at the furniture, and comes back", async () => {
-  const saved = { setTimeout: globalThis.setTimeout, clearTimeout: globalThis.clearTimeout, performance: globalThis.performance, requestAnimationFrame: globalThis.requestAnimationFrame, cancelAnimationFrame: globalThis.cancelAnimationFrame };
+  const saved = { setTimeout: globalThis.setTimeout, clearTimeout: globalThis.clearTimeout, performance: globalThis.performance, requestAnimationFrame: globalThis.requestAnimationFrame, cancelAnimationFrame: globalThis.cancelAnimationFrame, window: globalThis.window, document: globalThis.document };
+  let visibility;
+  globalThis.window = { matchMedia: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }) };
+  globalThis.document = { visibilityState: "visible", addEventListener: (_event, listener) => { visibility = listener; }, removeEventListener() {} };
   // The page has been open a while: well past any first free turn counted from zero.
   let clock = 47000, next = 0;
   const timers = new Map(), frames = new Map();
@@ -739,15 +742,25 @@ test("a floor mounted late still starts seated, then someone gets up, stands at 
   let renderer;
   try {
     await act(async () => { renderer = create(createElement(FactoryScene, { topology: inventoryTopology, workers: resting, connected: true })); });
-    const mounted = clock;
     const pieces = breakRoomNook(layoutScene(inventoryTopology), resting.length, 0).furniture.length;
     const away = () => renderer.root.findAll((node) => typeof node.props["data-tooltip"] === "string" && /at the (bookshelf|coffee station)/.test(node.props["data-tooltip"]));
     const standingWithIt = () => away().some((node) => node.parent.props["data-worker-action"] === "still" && node.findAllByType("use").some((use) => /held\.(book|cup)\.chest/.test(use.props.href)));
-    let firstAway, stood = false, cameBack = false;
-    for (let step = 0; step < 1500 && !cameBack; step++) {
+    const tick = async () => {
       clock += 100;
       const due = [...frames.values(), ...timers.values()]; frames.clear(); timers.clear();
       await act(async () => { for (const callback of due) callback(clock); });
+    };
+    // A second of movement, most of a minute hidden, and the floor is still in its first free turn:
+    // time it was not moving does not count.
+    for (let step = 0; step < 10; step++) await tick();
+    await act(async () => { globalThis.document.visibilityState = "hidden"; visibility(); });
+    clock += 45000;
+    await act(async () => { globalThis.document.visibilityState = "visible"; visibility(); });
+    for (let step = 0; step < 60; step++) { await tick(); assert.equal(away().length, 0, `someone got up ${step / 10}s after the tab came back`); }
+    const mounted = clock - 7000;
+    let firstAway, stood = false, cameBack = false;
+    for (let step = 0; step < 1500 && !cameBack; step++) {
+      await tick();
       if (away().length > 0) { firstAway ??= clock - mounted; stood ||= standingWithIt(); }
       else if (stood) cameBack = true;
       assert.ok(away().length <= pieces, "never more visitors than furniture");
@@ -755,6 +768,12 @@ test("a floor mounted late still starts seated, then someone gets up, stands at 
     assert.ok(firstAway >= 8000, `nobody gets up during the floor's first free turn, however long the page has been open: ${firstAway}`);
     assert.ok(stood, "the visitor arrives and stands with the thing in hand");
     assert.ok(cameBack, "and sits down again");
+    // Another floor starts again from seated, however long this one had been going.
+    for (let step = 0; step < 3000 && away().length === 0; step++) await tick();
+    assert.ok(away().length > 0, "someone is up when the floor changes");
+    const another = { ...inventoryTopology, digest: "another-floor", nodes: [...inventoryTopology.nodes, { ...inventoryTopology.nodes[0], id: "extra-1", path: "extra-1" }, { ...inventoryTopology.nodes[0], id: "extra-2", path: "extra-2" }] };
+    await act(async () => { renderer.update(createElement(FactoryScene, { topology: another, workers: resting, connected: true })); });
+    for (let step = 0; step < 70; step++) { await tick(); assert.equal(away().length, 0, `someone is up ${step / 10}s into a new floor`); }
   } finally {
     if (renderer) await act(async () => renderer.unmount());
     for (const [key, value] of Object.entries(saved)) { if (value === undefined) delete globalThis[key]; else globalThis[key] = value; }

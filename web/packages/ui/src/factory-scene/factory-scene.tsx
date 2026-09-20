@@ -221,13 +221,16 @@ function SceneWorkers({ errands, furniture, layout, placements, nodes, workers, 
     return placeErrands(seatedPlacements, nook, (id) => { const worker = byId.get(id); return worker === undefined ? undefined : breakRoomHabit(worker); }, errandClock);
   }, [seatedPlacements, errandClock, errands, layout, workers]);
   const { positions, pulse } = useSceneMotion(layout, placements, geometryKey, connected && animate, active);
-  // Turns are counted from when this floor first moved, not from when the page opened,
-  // so a floor mounted late still begins with everyone seated.
-  // (The pulse itself reads zero on a first render, so the start is read on mount.)
-  const floorStarted = useRef<number | undefined>(undefined);
-  useEffect(() => { floorStarted.current = now(); }, []);
-  const errandBeat = pulse === undefined || floorStarted.current === undefined || pulse < floorStarted.current ? undefined : Math.floor((pulse - floorStarted.current) / 2000) * 2000;
-  useEffect(() => setErrandClock(errandBeat), [errandBeat]);
+  // Turns run on the time this floor has actually been moving: a hidden tab, stilled
+  // motion or a long gap adds nothing, and a different floor starts again from seated.
+  const moving = useRef({ floor: geometryKey, total: 0, last: undefined as number | undefined });
+  useEffect(() => {
+    const time = moving.current;
+    if (time.floor !== geometryKey) Object.assign(time, { floor: geometryKey, total: 0, last: undefined });
+    if (pulse !== undefined && time.last !== undefined && pulse - time.last < 1000) time.total += pulse - time.last;
+    time.last = pulse;
+    setErrandClock(pulse === undefined ? undefined : Math.floor(time.total / 2000) * 2000);
+  }, [pulse, geometryKey]);
   const workerById = new Map(workers.map((worker) => [worker.id, worker]));
   return <>{placements.map((placement) => {
         const worker = workerById.get(placement.id);
