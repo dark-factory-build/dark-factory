@@ -18,6 +18,7 @@ import {
 } from "./scene.js";
 import { DEFAULT_FLOOR_APPEARANCE, type FloorAppearance } from "../floor-appearance.js";
 import { breakRoomHabit, restingItem, workerFrames, workerPhase } from "./appearance.js";
+import { catAt, catBed, chats, gossip, type Seat } from "./idle-life.js";
 import { directionBetween, pointOnRoute, routeFromCurrent, routeBetween, samePoint, type WorkerMotion } from "./movement.js";
 import { spriteAtlas, spriteSheet, spriteSheetSize } from "./sprites/sprites.generated.js";
 
@@ -121,7 +122,7 @@ function useReducedMotion() {
 }
 
 /** One browser clock; source state only ever supplies the next local destination. */
-function useSceneMotion(layout: ReturnType<typeof layoutScene>, seated: ReturnType<typeof placeWorkers>, topologyDigest: string, connected: boolean, reduced: boolean, active: ReadonlySet<string>, workers: FactorySceneProps["workers"], errands: boolean) {
+function useSceneMotion(layout: ReturnType<typeof layoutScene>, seated: ReturnType<typeof placeWorkers>, topologyDigest: string, connected: boolean, reduced: boolean, active: ReadonlySet<string>, workers: FactorySceneProps["workers"], errands: boolean, restless: (at: number) => boolean) {
   const motions = useRef(new Map<string, MotionState>());
   const priorTopology = useRef<string | undefined>(undefined);
   const priorConnected = useRef<boolean | undefined>(undefined);
@@ -185,7 +186,8 @@ function useSceneMotion(layout: ReturnType<typeof layoutScene>, seated: ReturnTy
   useEffect(() => {
     if (!connected || reduced || typeof document !== "undefined" && document.visibilityState !== "visible" || typeof requestAnimationFrame !== "function") return;
     const at = now();
-    if ([...motions.current.values()].some((motion) => motionPoint(motion, at).walking)) {
+    // On an empty floor the clock is stopped for what lives there too, so nothing there asks for frames.
+    if (placements.length > 0 && restless(at) || [...motions.current.values()].some((motion) => motionPoint(motion, at).walking)) {
       const frame = requestAnimationFrame((time) => setClock(time));
       return () => cancelAnimationFrame(frame);
     }
@@ -221,11 +223,11 @@ function useSceneMotion(layout: ReturnType<typeof layoutScene>, seated: ReturnTy
         : { action: active.has(placement.id) ? "interacting" : "still", frame: at === undefined ? 0 : Math.floor(at / (380 + workerPhase(placement.id) % 140)) % 2 as 0 | 1, at },
     });
   }
-  return { placements, positions: output };
+  return { placements, positions: output, pulse: moving ? clock : undefined };
 }
 
 /** The animation clock updates worker elements without rerendering the floor or atlas. */
-function SceneWorkers({ errands, furniture, layout, placements: seated, nodes, workers, tasks, connected, animate, selectedWorkerId, onSelectWorker, onSelectHumanRequest }: Pick<FactorySceneProps, "workers" | "selectedWorkerId" | "onSelectWorker" | "onSelectHumanRequest"> & {
+function SceneWorkers({ errands, furniture, restingSeats, layout, placements: seated, nodes, workers, tasks, connected, animate, selectedWorkerId, onSelectWorker, onSelectHumanRequest }: Pick<FactorySceneProps, "workers" | "selectedWorkerId" | "onSelectWorker" | "onSelectHumanRequest"> & {
   layout: ReturnType<typeof layoutScene>;
   placements: ReturnType<typeof placeWorkers>;
   nodes: ReadonlyMap<string, SceneTopology["nodes"][number]>;
@@ -234,16 +236,39 @@ function SceneWorkers({ errands, furniture, layout, placements: seated, nodes, w
   animate: boolean;
   /** Drawn over the workers: tables stand in front of whoever sits at them. */
   furniture: ReactNode;
-  /** Whether the break-room furniture is there to be visited. */
+  /** Whether the break-room furniture is there to be visited, and the cat to be found. */
   errands: boolean;
+  /** The break room's seats, where its idle life happens. */
+  restingSeats: readonly Seat[];
 }) {
   // Inventory/dependency metadata may change without changing a route's geometry.
   const geometryKey = useMemo(() => JSON.stringify([layout.width, layout.height, layout.restingTop, layout.corridors, layout.rooms.map(({ id, x, y, width, height, door }) => [id, x, y, width, height, door])]), [layout]);
   const active = useMemo(() => new Set(workers.filter((worker) => worker.location === "working" && worker.activity === "busy" && seated.some((placement) => placement.id === worker.id && placement.area === "room" && layout.rooms.find((room) => room.id === placement.roomId)?.contents.some((item) => item.workSurface))).map((worker) => worker.id)), [workers, seated, layout]);
   const reduced = useReducedMotion();
-  const { placements, positions } = useSceneMotion(layout, seated, geometryKey, connected && animate, reduced, active, workers, errands);
+  const { placements, positions, pulse } = useSceneMotion(layout, seated, geometryKey, connected && animate, reduced, active, workers, errands, (at) => errands && catAt(restingSeats.filter((seat) => seat.y === restingSeats[0]!.y), at)?.moving === true);
   const workerById = new Map(workers.map((worker) => [worker.id, worker]));
-  return <>{placements.map((told) => {
+  // Nobody on the floor, no pulse: what lives there rests as it does under any stopped clock.
+  const at = placements.length === 0 ? undefined : pulse;
+  // Idle life belongs to people sitting still in their seats with nothing to ask of anyone.
+  const seats = restingSeats.map((seat): Seat => {
+    const id = placements.find((placement) => placement.area === "resting" && samePoint(placement, seat))?.id;
+    return { ...seat, id, free: id !== undefined && positions.get(id)?.motion.action === "still" && workerById.get(id)?.activity !== "needs-you" };
+  });
+  const rows = [...new Set(seats.map((seat) => seat.y))].map((y) => seats.filter((seat) => seat.y === y));
+  // The cat has the first table; every table has its talk.
+  const cat = errands ? catAt(rows[0]!, at) : undefined;
+  const news = useMemo(() => gossip(workers, tasks), [workers, tasks]);
+  const talk = rows.flatMap((row) => chats(row, news, at));
+  const catDoing = cat === undefined ? "" : cat.pettedBy !== undefined ? `Being fussed over by ${workerById.get(cat.pettedBy)?.name}` : cat.frame.startsWith("sleep") ? "Asleep" : cat.moving ? "On the prowl" : "Supervising";
+  // On the table the cat is in front of everyone; on the floor behind it, behind them.
+  const puss = cat === undefined ? null : <g data-cat={cat.frame} role="img" aria-label={`The cat, ${catDoing.toLowerCase()}`} className="dfFactoryScene__target" data-tooltip={`The cat\n${catDoing}`} transform={`translate(${cat.x} ${cat.y}) scale(${WORKER_SIZE / FRAME})`}>
+        <rect x="4" y="2" width="12" height="10" fill="transparent" />
+        <g aria-hidden="true" transform={cat.west ? "translate(22 0) scale(-1 1)" : undefined}><Frame name={`cat.${cat.frame}`} x={3} y={-4} /></g>
+      </g>;
+  const bed = errands ? catBed(rows[0]!) : undefined;
+  return <>{bed === undefined ? null : <g aria-hidden="true" pointerEvents="none" data-cat-bed="" transform={`translate(${bed.x} ${bed.y}) scale(${WORKER_SIZE / FRAME})`}><Frame name="cat.bed" x={3} y={-4} /></g>}
+      {cat !== undefined && cat.y !== rows[0]![0]!.y ? puss : null}
+      {placements.map((told) => {
         const worker = workerById.get(told.id);
         if (worker === undefined) return null;
         const position = positions.get(told.id) ?? { ...told, placement: told, motion: { action: "still", frame: 0 } as WorkerMotion };
@@ -259,7 +284,10 @@ function SceneWorkers({ errands, furniture, layout, placements: seated, nodes, w
 
         const attention = tasks.flatMap((order) => order.agentId === worker.id ? order.humanRequestIds : []);
         const seated = placement.area !== "room" && placement.errand === undefined && position.motion.action !== "walking";
-        const frames = workerFrames(worker, position.motion, placement.area === "room" || placement.errand !== undefined ? undefined : placement.area === "resting" ? "resting" : "planning", placement.errand);
+        const stroking = cat?.pettedBy === worker.id ? cat.pettedFor : undefined;
+        const chat = talk.find(({ between }) => between.includes(worker.id));
+        const said = chat === undefined ? "" : `\n${workerById.get(chat.between[0])!.name}: ${chat.remark.line}${chat.replied ? `\n${workerById.get(chat.between[1])!.name}: ${chat.remark.reply}` : ""}`;
+        const frames = workerFrames(worker, position.motion, placement.area === "room" || placement.errand !== undefined ? undefined : placement.area === "resting" ? "resting" : "planning", placement.errand, stroking);
         // A step lifts the whole body a pixel.
         const bob = position.motion.action === "walking" && position.motion.frame === 1 ? -1 : 0;
         // Only a profile facing east is drawn; walking west is its mirror image.
@@ -274,7 +302,7 @@ function SceneWorkers({ errands, furniture, layout, placements: seated, nodes, w
             transform={`translate(${position.x} ${position.y})`}
             className={worker.id === selectedWorkerId ? "dfFactoryScene__worker dfFactoryScene__worker--selected" : "dfFactoryScene__worker"}
           >
-            <g role="img" className="dfFactoryScene__target" data-tooltip={`${worker.name} · ${worker.activity}\n${placement.area === "room" ? `Working near ${worker.locationLabel ?? room?.label ?? "observed changes"}` : placement.errand === "shelf" ? "Taking a break · at the bookshelf" : placement.errand === "coffee" ? "Taking a break · at the coffee station" : placement.area === "resting" ? worker.paused ? "Paused · taking a break" : "Taking a break" : worker.location === "unobserved" ? "Planning · location not yet observed" : "Planning · work outside this room"}`} aria-label={`${worker.name}, ${worker.role}, ${worker.activity}, ${location}`} {...sceneAction(onSelectWorker === undefined ? undefined : () => onSelectWorker(worker.id))}>
+            <g role="img" className="dfFactoryScene__target" data-tooltip={`${worker.name} · ${worker.activity}\n${placement.area === "room" ? `Working near ${worker.locationLabel ?? room?.label ?? "observed changes"}` : placement.errand === "shelf" ? "Taking a break · at the bookshelf" : placement.errand === "coffee" ? "Taking a break · at the coffee station" : placement.area === "resting" ? `${worker.paused ? "Paused · taking a break" : "Taking a break"}${stroking === undefined ? "" : " · fussing the cat"}${said}` : worker.location === "unobserved" ? "Planning · location not yet observed" : "Planning · work outside this room"}`} aria-label={`${worker.name}, ${worker.role}, ${worker.activity}, ${location}`} {...sceneAction(onSelectWorker === undefined ? undefined : () => onSelectWorker(worker.id))}>
                 <rect className="dfFactoryScene__focus" x={-12} y={-12} width="24" height="24" rx="3" fill="transparent" />
               {worker.id === selectedWorkerId ? <circle className="dfFactoryScene__selection" cx="0" cy="0" r="12" /> : null}
               <g data-seated={seated ? placement.area === "resting" ? "coffee" : "planning" : undefined} data-active-pose={position.motion.action === "interacting" ? position.motion.frame : undefined}><g transform={`scale(${WORKER_SIZE / FRAME})${bob === 0 ? "" : ` translate(0 ${bob})`}${facingWest ? " scale(-1 1)" : ""}`}>{frames.map((frame) => <Frame key={frame} name={frame} x={-8} y={-8} />)}</g>
@@ -292,11 +320,17 @@ function SceneWorkers({ errands, furniture, layout, placements: seated, nodes, w
         const worker = workerById.get(told.id), position = positions.get(told.id), placement = position?.placement ?? told;
         if (worker === undefined || placement.area === "room" || placement.errand !== undefined || position?.motion.action === "walking") return null;
         if (placement.area !== "resting") return !connected ? null : <g key={placement.id} data-planning-light="" aria-hidden="true" pointerEvents="none" transform={`translate(${position?.x ?? placement.x} ${(position?.y ?? placement.y) + TABLE_DROP})`}><circle cx="7" cy="-16" r="14" fill="url(#df-lamplight)" /><path d="M12 -18v-5h-5" fill="none" stroke="#788379" strokeWidth="2" /><path d="M4 -20h6" stroke="#dfc38f" strokeWidth="3" /></g>;
-        const rest = restingItem(worker, worker.activity === "needs-you" ? undefined : position?.motion.at);
+        const rest = restingItem(worker, worker.activity === "needs-you" || cat?.pettedBy === worker.id ? undefined : position?.motion.at);
         return rest.where !== "table" ? null : <g key={placement.id} aria-hidden="true" pointerEvents="none" data-table-item={rest.item} transform={`translate(${position?.x ?? placement.x} ${position?.y ?? placement.y}) scale(${WORKER_SIZE / FRAME})`}>
           <Frame name={`person.held.${rest.item}.chest`} x={-8} y={-8 + SET_DOWN} />
         </g>;
-      })}</>;
+      })}
+      {cat !== undefined && cat.y === rows[0]![0]!.y ? puss : null}
+      {/* Said and felt, over everyone's heads: never words on the floor, those are in the tooltip. */}
+      <g aria-hidden="true" pointerEvents="none">
+        {talk.map(({ speaking }) => { const position = speaking && positions.get(speaking.id); return !position ? null : <g key={speaking.id} data-bubble={speaking.glyph} transform={`translate(${position.x} ${position.y}) scale(${WORKER_SIZE / FRAME})`}><Frame name={`bubble.${speaking.glyph}`} x={1} y={-21} /></g>; })}
+        {cat?.pettedBy === undefined || cat.pettedFor! < 600 ? null : <g data-heart="" opacity={cat.pettedFor! > 2800 ? .5 : 1} transform={`translate(${positions.get(cat.pettedBy)!.x} ${positions.get(cat.pettedBy)!.y}) scale(${WORKER_SIZE / FRAME})`}><Frame name="heart" x={-4} y={-24 - Math.floor((cat.pettedFor! - 600) / 450)} /></g>}
+      </g></>;
 }
 
 /** A disposable SVG projection of topology and current factory state. */
@@ -454,7 +488,7 @@ export function FactoryScene({ topology, detailNodes, workers, appearance = DEFA
       ].filter(({ seats }) => seats.length > 0).map(({ label, seats, planning, occupied }) => {
         const top = seats[0]!.y;
         return <g key={label} role="group" aria-label={label}>
-          <text x={seats[0]!.x - 18} y={top - 16} fill="#9db1be" fontFamily="ui-monospace, monospace" fontSize="8">{label}</text>
+          <text x={seats[0]!.x - 18} y={top - 27} fill="#9db1be" fontFamily="ui-monospace, monospace" fontSize="8">{label}</text>
           {/* A stool only where someone sits; the tables stand in front of them, drawn after the workers. */}
           {seats.slice(0, occupied).map((seat, index) => <g key={index} aria-hidden="true" data-common-seat={planning ? "planning" : "resting"} transform={`translate(${seat.x} ${seat.y})`}>
             <rect x="-7" y="3" width="14" height="6" rx="2" fill="#655948" stroke="#897c61" />
@@ -464,7 +498,7 @@ export function FactoryScene({ topology, detailNodes, workers, appearance = DEFA
       })}
       {layout.rooms.length === 0 ? <text x={ROOM_LEFT} y="24" fill="#9db1be" fontFamily="ui-monospace, monospace" fontSize="10">EMPTY FLOOR</text> : null}
 
-      <SceneWorkers errands={appearance.scenery !== "off"} furniture={tables} layout={layout} placements={placements} nodes={nodes} workers={workers} tasks={tasks} connected={connected} animate={appearance.animation !== "off"} selectedWorkerId={selectedWorkerId} onSelectWorker={onSelectWorker} onSelectHumanRequest={onSelectHumanRequest} />
+      <SceneWorkers errands={appearance.scenery !== "off"} restingSeats={seating.resting} furniture={tables} layout={layout} placements={placements} nodes={nodes} workers={workers} tasks={tasks} connected={connected} animate={appearance.animation !== "off"} selectedWorkerId={selectedWorkerId} onSelectWorker={onSelectWorker} onSelectHumanRequest={onSelectHumanRequest} />
       {/* Waiting work, as the tray it would be on a real desk. Scenery, like
           everything else standing on these tables: the pile says how the queue
           is doing, the Tasks panel is where it is read and changed. */}

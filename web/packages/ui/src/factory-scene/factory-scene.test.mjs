@@ -406,7 +406,7 @@ test("every generated person layer is reachable, including fallbacks", () => {
     for (const provider of ["claude_code", "codex", "shell"]) {
       for (const activity of ["busy", "waiting", "needs-you", "idle"]) {
         const base = { automatic: false, skin: 0, hair: 0, hair_colour: 0, face: 0, outfit: 0, clothes_colour: 0, shoes: 0, tool: 0, headwear: 0 };
-        const add = (appearance) => { for (const motion of moments) for (const seat of [undefined, "resting", "planning"]) for (const frame of workerFrames({ id: "agent", name: "Agent", role, provider, activity, appearance }, motion, seat)) reached.add(frame); };
+        const add = (appearance) => { for (const motion of moments) for (const [seat, stroking] of [[], ["resting"], ["resting", 0], ["resting", 400], ["planning"]]) for (const frame of workerFrames({ id: "agent", name: "Agent", role, provider, activity, appearance }, motion, seat, undefined, stroking)) reached.add(frame); };
         for (const field of ["skin", "face", "shoes", "tool", "headwear"]) for (let index = 0; index < spriteOptions[field].length; index++) add({ ...base, [field]: index });
         for (let hair = 0; hair < spriteOptions.hair.length; hair++) for (let hair_colour = 0; hair_colour < spriteOptions.hair_colour.length; hair_colour++) add({ ...base, hair, hair_colour });
         for (let outfit = 0; outfit < spriteOptions.outfit.length; outfit++) for (let clothes_colour = 0; clothes_colour < spriteOptions.clothes_colour.length; clothes_colour++) add({ ...base, outfit, clothes_colour });

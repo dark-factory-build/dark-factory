@@ -128,7 +128,7 @@ function githubFixture(mode: GitHubFixtureMode): NonNullable<FactoryConsoleProps
 function FixtureTour() {
   const fixture = new URLSearchParams(window.location.search).get("fixture");
   const crowded = fixture === "crowded" || fixture === "inventory-crowded";
-  const actual = fixture === "actual" || fixture === "actual-idle";
+  const actual = fixture === "actual" || fixture === "actual-idle" || fixture === "actual-crowded";
   const inventoryFixture = actual || fixture === "inventory" || fixture === "inventory-idle" || fixture === "inventory-crowded";
   const terminalFixture = fixture === "terminal";
   const repositoryFixture = fixture === "repositories";
@@ -187,7 +187,7 @@ function FixtureTour() {
         selectedTaskId={selectedTaskId}
         onSelectTask={setSelectedTaskId}
         status={connected ? "ready" : "closed"}
-        state={actual ? { ...fixtureInventoryState, projects: new Map([[actualTopology.projectId, { ...fixtureInventoryState.projects.get(actualTopology.projectId)!, name: "dark-factory" }]]), ...(fixture === "actual-idle" ? { tasks: new Map(), agents: new Map() } : {}) } : inventoryFixture ? fixture === "inventory-idle" ? { ...fixtureInventoryState, tasks: new Map(), agents: new Map() } : crowded ? { ...fixtureCrowdedState, humanRequests: new Map() } : fixtureInventoryState : intakeFixture ? fixtureIntakeState : archiveFixture ? archiveFixtureState(archivedWorker) : returned ? fixtureReturnedState : crowded ? fixtureCrowdedState : fixtureFloorState}
+        state={actual ? { ...fixtureInventoryState, projects: new Map([[actualTopology.projectId, { ...fixtureInventoryState.projects.get(actualTopology.projectId)!, name: "dark-factory" }]]), ...(fixture === "actual-idle" ? { tasks: new Map(), agents: new Map() } : fixture === "actual-crowded" ? { tasks: fixtureCrowdedState.tasks, agents: fixtureCrowdedState.agents } : {}) } : inventoryFixture ? fixture === "inventory-idle" ? { ...fixtureInventoryState, tasks: new Map(), agents: new Map() } : crowded ? { ...fixtureCrowdedState, humanRequests: new Map() } : fixtureInventoryState : intakeFixture ? fixtureIntakeState : archiveFixture ? archiveFixtureState(archivedWorker) : returned ? fixtureReturnedState : crowded ? fixtureCrowdedState : fixtureFloorState}
         topologies={actual ? new Map([[actualTopology.projectId, actualTopology]]) : inventoryFixture ? fixtureInventoryTopologies : fixture === "paging" ? fixturePagedTopologies : changedTopology ? fixtureChangedTopologies : hierarchy ? fixtureHierarchyTopologies : fixtureTopologies}
         runPaths={returned ? fixtureRunPaths : crowded ? routeStep === 0 ? fixtureTourCrowdedRunPaths : fixtureMovementCrowdedRunPaths : fixtureRapidRunPaths[routeStep]!}
         view={view}
