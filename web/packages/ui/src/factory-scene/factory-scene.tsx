@@ -238,7 +238,7 @@ function useSceneMotion(layout: ReturnType<typeof layoutScene>, seated: ReturnTy
 }
 
 /** The animation clock updates worker elements without rerendering the floor or atlas. */
-function SceneWorkers({ errands, furniture, restingSeats, tray, peerQuestions, layout, placements: seated, nodes, workers, tasks, connected, animate, selectedWorkerId, onSelectWorker, onSelectHumanRequest }: Pick<FactorySceneProps, "workers" | "selectedWorkerId" | "onSelectWorker" | "onSelectHumanRequest"> & {
+function SceneWorkers({ errands, furniture, restingSeats, tray, peerQuestions, layout, placements: seated, nodes, workers, tasks, connected, animate, selectedWorkerId, onSelectWorker, onSelectTask, onSelectHumanRequest }: Pick<FactorySceneProps, "workers" | "selectedWorkerId" | "onSelectWorker" | "onSelectTask" | "onSelectHumanRequest"> & {
   layout: ReturnType<typeof layoutScene>;
   placements: ReturnType<typeof placeWorkers>;
   nodes: ReadonlyMap<string, SceneTopology["nodes"][number]>;
@@ -343,6 +343,7 @@ function SceneWorkers({ errands, furniture, restingSeats, tray, peerQuestions, l
         const frames = workerFrames(worker, position.motion, placement.area === "room" || placement.errand !== undefined ? undefined : placement.area === "resting" ? "resting" : "planning", placement.errand, stroking, hailing.get(worker.id));
         const asking = waiting.flatMap(({ asker, asked }) => asker === worker.id && workerById.has(asked ?? "") ? [`\nAsked ${workerById.get(asked!)!.name} · waiting for an answer`] : asked === worker.id && workerById.has(asker ?? "") ? [`\nHas a question from ${workerById.get(asker!)!.name}`] : []);
         const peerQuestionCount = peerQuestionsByAgent.get(worker.id) ?? 0;
+        const peerTaskID = peerQuestions.find((question) => !question.answered && (agentOf.get(question.source_task_id) === worker.id || agentOf.get(question.target_task_id) === worker.id))?.source_task_id;
         // A step lifts the whole body a pixel.
         const bob = position.motion.action === "walking" && position.motion.frame === 1 ? -1 : 0;
         // Only a profile facing east is drawn; walking west is its mirror image.
@@ -366,7 +367,7 @@ function SceneWorkers({ errands, furniture, restingSeats, tray, peerQuestions, l
             {attention.length === 0 ? null : <g {...sceneAction(onSelectHumanRequest === undefined ? undefined : () => onSelectHumanRequest(attention[0]!))} aria-label={`Question from ${worker.name}`} data-human-request-id={attention[0]}>
               <rect x="10" y="-20" width="22" height="22" rx="3" fill="#f0c777" /><text x="21" y="-5" textAnchor="middle" fill="#172330" fontSize="16" fontWeight="700">!</text>
             </g>}
-            {peerQuestionCount === 0 ? null : <g {...sceneAction(onSelectWorker === undefined ? undefined : () => onSelectWorker(worker.id))} aria-label={`${peerQuestionCount} peer question${peerQuestionCount === 1 ? "" : "s"}`} data-peer-question-count={peerQuestionCount}>
+            {peerQuestionCount === 0 ? null : <g {...sceneAction(peerTaskID !== undefined && onSelectTask !== undefined ? () => onSelectTask(peerTaskID) : onSelectWorker === undefined ? undefined : () => onSelectWorker(worker.id))} aria-label={`${peerQuestionCount} peer question${peerQuestionCount === 1 ? "" : "s"}`} data-peer-question-count={peerQuestionCount}>
               <rect x="-32" y="-20" width="22" height="22" rx="3" fill="#80ddff" /><text x="-21" y="-5" textAnchor="middle" fill="#172330" fontSize="11" fontWeight="700">{peerQuestionCount}</text>
             </g>}
           </g>
@@ -436,7 +437,8 @@ export function FactoryScene({ topology, detailNodes, workers, appearance = DEFA
   const enterable = new Set(enterableRoomIds);
   const cabling = useMemo(() => wires(layout, topology), [layout, topology]);
   const queued = tasks.filter((order) => order.status === "queued").length;
-  const tray = useMemo(() => ({ x: ROOM_LEFT + commonWidth - 20, y: layout.restingTop + TABLE_DROP - 25 }), [commonWidth, layout]);
+  // Keep the hit target one clear worker-width beyond the last common-room seat.
+  const tray = useMemo(() => ({ x: ROOM_LEFT + commonWidth + 20, y: layout.restingTop + TABLE_DROP - 25 }), [commonWidth, layout]);
   // A compact scope still needs room for readable labels, not poster-sized
   // sprites; larger scopes retain their existing scrollable viewport.
   const maxWidth = Math.min(640, layout.width * 2);
@@ -445,13 +447,16 @@ export function FactoryScene({ topology, detailNodes, workers, appearance = DEFA
   // Keep one clearly reachable planning station even when no overseer is seated.
   // The synthetic row is only furniture geometry; it never creates a worker.
   const planningSeats = seating.planning.length === 0
-    ? [{ x: ROOM_LEFT + 16, y: layout.restingTop }]
+    // Place the empty station above the common seats, leaving its focus area
+    // clear of both the seated workers and the queue tray.
+    ? [{ x: ROOM_LEFT + 16, y: layout.restingTop - 48 }]
     : seating.planning;
   const tables = [{ seats: seating.resting, planning: false }, { seats: planningSeats, planning: true }].flatMap(({ seats, planning }) =>
     [...new Set(seats.map((seat) => seat.y))].map((y) => { const row = seats.filter((seat) => seat.y === y), first = row[0]!;
       const action = planning ? onOpenMissions : undefined;
       const project = projectId;
       return <g key={`${planning} ${y}`} data-common-table={planning ? "planning" : "resting"} data-tooltip={planning ? "Missions · inspect objectives" : undefined} aria-label={planning ? "Open Missions" : undefined} className={planning ? "dfFactoryScene__target" : undefined} {...(planning ? sceneAction(action === undefined ? undefined : () => action(project)) : { "aria-hidden": true, pointerEvents: "none" })} transform={`translate(${first.x} ${y + TABLE_DROP})`}>
+        {planning ? <rect x="-22" y="-54" width="44" height="44" fill="transparent" /> : null}
         <rect x="-18" y="-21" width={row.at(-1)!.x - first.x + 36} height="10" fill={planning ? "#455c5e" : "#655d4c"} stroke="#8c8871" />
         {!planning ? null : <g><rect x="-12" y="-19" width="24" height="6" fill="#9fae9e" /><path d="M-9 -17h12v3H-3v-3 M5 -16h4" fill="none" stroke="#536e70" /></g>}
       </g>; }));
@@ -567,11 +572,11 @@ export function FactoryScene({ topology, detailNodes, workers, appearance = DEFA
       })}
       {layout.rooms.length === 0 ? <text x={ROOM_LEFT} y="24" fill="#9db1be" fontFamily="ui-monospace, monospace" fontSize="10">EMPTY FLOOR</text> : null}
 
-      <SceneWorkers errands={appearance.scenery !== "off"} restingSeats={seating.resting} tray={tray} peerQuestions={peerQuestions} furniture={tables} layout={layout} placements={placements} nodes={nodes} workers={workers} tasks={tasks} connected={connected} animate={appearance.animation !== "off"} selectedWorkerId={selectedWorkerId} onSelectWorker={onSelectWorker} onSelectHumanRequest={onSelectHumanRequest} />
-      {/* Waiting work, as the tray it would be on a real desk. Scenery, like
-          everything else standing on these tables: the pile says how the queue
-          is doing, the Tasks panel is where it is read and changed. */}
+      <SceneWorkers errands={appearance.scenery !== "off"} restingSeats={seating.resting} tray={tray} peerQuestions={peerQuestions} furniture={tables} layout={layout} placements={placements} nodes={nodes} workers={workers} tasks={tasks} connected={connected} animate={appearance.animation !== "off"} selectedWorkerId={selectedWorkerId} onSelectWorker={onSelectWorker} onSelectTask={onSelectTask} onSelectHumanRequest={onSelectHumanRequest} />
+      {/* Waiting work, as the tray it would be on a real desk. The pile says
+          how the queue is doing; the target opens the existing Tasks panel. */}
       <g data-floor-inbox={queued} data-tooltip={queued === 0 ? "Tasks · queue is empty" : `Tasks · ${queued} queued`} aria-label="Open Tasks" {...sceneAction(onOpenTasks === undefined ? undefined : () => onOpenTasks(projectId))} transform={`translate(${tray.x - 10} ${tray.y + 4})`}>
+        {onOpenTasks === undefined ? null : <rect x="-22" y="-22" width="44" height="44" fill="transparent" />}
         {[...Array(Math.min(queued, 3))].map((_, index) => <rect key={index} x="1" y={-2 - index * 3} width="18" height="3" fill="#e4dcc0" stroke={tasks.some((task) => task.id === selectedTaskId && task.status === "queued") ? "#80ddff" : "#a6a087"} />)}
         <path d="M-2 -4v6h24v-6 M-2 2h24" fill="none" stroke="#c2b184" strokeWidth="2" />
       </g>

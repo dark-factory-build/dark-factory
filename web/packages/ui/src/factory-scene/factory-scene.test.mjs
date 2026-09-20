@@ -1042,6 +1042,38 @@ test("the tray and planning table expose stable project actions", () => {
   assert.match(markup, /data-common-table="planning"[^>]*data-tooltip="Missions · inspect objectives"[^>]*aria-label="Open Missions"[^>]*role="button"[^>]*tabindex="0"/);
 });
 
+test("floor action hit areas invoke existing task and mission routes", async () => {
+  let tasksOpened;
+  let missionsOpened;
+  let conversationTask;
+  const task = { id: "task-peer", agentId: "worker-b", projectId: "project", title: "Peer work", status: "running", roomIds: [], humanRequestIds: [] };
+  let renderer;
+  await act(async () => {
+    renderer = create(createElement(FactoryScene, {
+      topology,
+      projectId: "project",
+      workers,
+      tasks: [task],
+      peerQuestions: [{ id: "peer-1", source_task_id: "task-peer", target_task_id: "task-other", answered: false, revision: 1n }],
+      onOpenTasks: (projectId) => { tasksOpened = projectId; },
+      onOpenMissions: (projectId) => { missionsOpened = projectId; },
+      onSelectTask: (taskId) => { conversationTask = taskId; },
+      connected: false,
+    }));
+  });
+  const tray = renderer.root.findByProps({ "data-floor-inbox": 0 });
+  const planning = renderer.root.findByProps({ "data-common-table": "planning" });
+  assert.equal(Number(tray.findAllByType("rect").find((node) => Number(node.props.width) === 44).props.width), 44);
+  assert.equal(Number(planning.findAllByType("rect").find((node) => Number(node.props.width) === 44).props.width), 44);
+  await act(async () => tray.props.onClick());
+  await act(async () => planning.props.onClick());
+  assert.equal(tasksOpened, "project");
+  assert.equal(missionsOpened, "project");
+  await act(async () => renderer.root.findByProps({ "data-peer-question-count": 1 }).props.onClick());
+  assert.equal(conversationTask, "task-peer");
+  await act(async () => renderer.unmount());
+});
+
 
 test("queue selection picks the exact task sharing a representative workstation", () => {
   const tasks = ["first", "second"].map((id) => ({ id, agentId: "worker-b", projectId: "project", title: id, status: "running", roomIds: ["src"], representativeRoomId: "src", humanRequestIds: [] }));
