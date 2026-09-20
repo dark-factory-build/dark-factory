@@ -2403,3 +2403,39 @@ test("attachment retention reads and saves through administration traffic", asyn
   await assert.rejects(observer.session.attachmentRetention(true), (error) => error.code === "unauthorized");
   observer.session.close();
 });
+
+test("factory dispatch is fenced, revisioned, and exact-correlated", async () => {
+  const closed = await openHumanSession();
+  const sentBeforeClose = closed.socket.sent.length;
+  closed.session.close();
+  await assert.rejects(closed.session.setDispatch({ expectedRevision: 1n, enabled: false }), (error) => error instanceof SessionError && error.code === "closed");
+  assert.equal(closed.socket.sent.length, sentBeforeClose);
+
+  const observer = await openHumanSession(undefined, CAPABILITIES.observe);
+  const observerSent = observer.socket.sent.length;
+  await assert.rejects(observer.session.setDispatch({ expectedRevision: 1n, enabled: false }), (error) => error instanceof SessionError && error.code === "unauthorized");
+  assert.equal(observer.socket.sent.length, observerSent);
+  observer.session.close();
+
+  const { session, socket } = await openHumanSession(undefined, CAPABILITIES.observe | CAPABILITIES.administration);
+  const success = session.setDispatch({ expectedRevision: 4n, enabled: false });
+  const request = lastFrame(socket, "FACTORY_DISPATCH");
+  assert.deepEqual(request.body, { expected_revision: 4n, enabled: false });
+  socket.reply(encodeServerControl({ type: "FACTORY_DISPATCH_RESULT", id: request.id, body: { revision: 5n, enabled: false } }));
+  assert.deepEqual(await success, { revision: 5n, enabled: false });
+
+  const stale = session.setDispatch({ expectedRevision: 5n, enabled: true });
+  const staleRequest = lastFrame(socket, "FACTORY_DISPATCH");
+  socket.reply(encodeServerError({ code: "stale", retryable: true }, staleRequest.id));
+  await assert.rejects(stale, (error) => error instanceof SessionError && error.code === "stale" && error.retryable);
+
+  session.close();
+  for (const body of [{ revision: 7n, enabled: true }, { revision: 6n, enabled: false }]) {
+    const mismatchSession = await openHumanSession(undefined, CAPABILITIES.observe | CAPABILITIES.administration);
+    const mismatch = mismatchSession.session.setDispatch({ expectedRevision: 5n, enabled: true });
+    const mismatchRequest = lastFrame(mismatchSession.socket, "FACTORY_DISPATCH");
+    mismatchSession.socket.reply(encodeServerControl({ type: "FACTORY_DISPATCH_RESULT", id: mismatchRequest.id, body }));
+    await assert.rejects(mismatch, (error) => error instanceof ProtocolError && error.code === "malformed");
+    assert.equal(mismatchSession.session.status, "closed");
+  }
+});
