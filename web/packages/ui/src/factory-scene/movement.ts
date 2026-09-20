@@ -1,4 +1,4 @@
-import { ROOM_LEFT, WORKER_GAP, WORKER_SIZE, type SceneLayout, type ScenePoint, type SceneWorkerPlacement } from "./scene.js";
+import { WORKER_GAP, WORKER_SIZE, type SceneLayout, type ScenePoint, type SceneWorkerPlacement } from "./scene.js";
 
 // An aisle runs this far behind each row of seats.
 const AISLE = 16;
@@ -122,9 +122,10 @@ export function routeBetween(
   const mainSpine = spine(layout);
   if (mainSpine === undefined) return undefined;
   const center = mainSpine.x + mainSpine.width / 2;
-  const sourceRoute = source === undefined ? [{ x: center, y: from.y }] : leaveRoom(layout, source, from, center);
-  const destinationRoute = destination === undefined ? [{ x: center, y: to.y }, to] : enterRoom(layout, destination, to, center);
-  if (sourceRoute === undefined || destinationRoute === undefined) return undefined;
+  const sourceRoute = source === undefined ? commonRoomLanes(layout, from, { x: center, y: layout.restingTop - AISLE }, center) : leaveRoom(layout, source, from, center);
+  if (sourceRoute === undefined) return undefined;
+  const destinationRoute = destination === undefined ? [...commonRoomLanes(layout, sourceRoute.at(-1) ?? from, to, center), to] : enterRoom(layout, destination, to, center);
+  if (destinationRoute === undefined) return undefined;
   const points = [
     ...sourceRoute,
     ...destinationRoute,
@@ -164,7 +165,8 @@ export function routeFromSpine(layout: SceneLayout, from: ScenePoint, to: SceneW
   const mainSpine = spine(layout);
   if (to.area === "room" && destination === undefined || mainSpine === undefined) return undefined;
   const center = mainSpine.x + mainSpine.width / 2;
-  if (from.x >= ROOM_LEFT && from.y >= layout.restingTop - 30) {
+  // The spine beside the common room is one of its lanes, so it counts as inside.
+  if (from.y >= layout.restingTop - 30) {
     // Out of the common room by its lanes; to a room, the spine takes over from there.
     if (destination === undefined) return route([from, ...commonRoomLanes(layout, from, to, center), to]);
     const out = commonRoomLanes(layout, from, { x: center, y: layout.restingTop - AISLE }, center);
@@ -173,12 +175,10 @@ export function routeFromSpine(layout: SceneLayout, from: ScenePoint, to: SceneW
   }
   const currentCorridor = corridorAt(layout, from);
   const clear = currentCorridor === undefined ? undefined : laneY(currentCorridor);
-  const destinationRoute = destination === undefined ? [{ x: center, y: to.y }, to] : enterRoom(layout, destination, to, center);
+  const toSpine = clear === undefined ? [{ x: center, y: from.y }] : [{ x: from.x, y: clear }, { x: center, y: clear }];
+  const destinationRoute = destination === undefined ? [...commonRoomLanes(layout, toSpine.at(-1)!, to, center), to] : enterRoom(layout, destination, to, center);
   if (destinationRoute === undefined) return undefined;
-  return route([from,
-    ...(clear === undefined ? [{ x: center, y: from.y }] : [{ x: from.x, y: clear }, { x: center, y: clear }]),
-    ...destinationRoute,
-  ]);
+  return route([from, ...toSpine, ...destinationRoute]);
 }
 
 /** Retarget from the rendered point, never a previously intended room. */

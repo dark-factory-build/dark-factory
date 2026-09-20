@@ -692,7 +692,11 @@ test("resting workers take fair, uninterrupted turns at the break-room furniture
   const stands = nook.furniture.map((piece) => ({ id: "x", area: "resting", errand: piece.errand, ...piece.stand }));
   const asSeat = (seat) => ({ id: "x", area: "resting", ...seat });
   const room = placeWorkers(wide, [{ ...workers[0], nodeId: "room-5" }])[0];
-  const walks = [...seats.flatMap((from) => [...seats.filter((to) => to !== from).map(asSeat), ...stands].map((to) => [from, to])), ...stands.flatMap((from) => [...seats.map(asSeat), room].map((to) => [from, to])), ...seats.map((from) => [from, room])];
+  // Arrivals count too: from a room, and from anywhere on the spine — above the common room,
+  // level with an aisle, level with a row of seats, and between rows — as a retarget mid-walk would be.
+  const spineX = PADDING + 16, onSpine = [wide.restingTop - 120, wide.restingTop - 16, wide.restingTop, wide.restingTop + 24, wide.restingTop + 40].map((y) => ({ x: spineX, y }));
+  const walks = [...seats.flatMap((from) => [...seats.filter((to) => to !== from).map(asSeat), ...stands].map((to) => [from, to])), ...stands.flatMap((from) => [...seats.map(asSeat), room].map((to) => [from, to])), ...seats.map((from) => [from, room]),
+    ...[room, ...onSpine].flatMap((from) => [...seats.map(asSeat), ...stands].map((to) => [from, to]))];
   assert.ok(seating.resting.some((seat) => seat.y !== seating.resting[0].y), "the sample has more than one row");
   for (const [from, to] of walks) {
     const path = routeFromCurrent(wide, from, to);
