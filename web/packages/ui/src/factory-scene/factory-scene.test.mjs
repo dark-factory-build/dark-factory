@@ -10,7 +10,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { act, create } from "react-test-renderer";
 import { AgentSprite, FactoryScene } from "../../dist/src/factory-scene/factory-scene.js";
 import { PADDING, WORKER_SIZE, commonSeating, layoutScene, placeWorkers } from "../../dist/src/factory-scene/scene.js";
-import { resolvedAppearance, spriteOptions, workerFrames } from "../../dist/src/factory-scene/appearance.js";
+import { resolvedAppearance, restingItem, spriteOptions, workerFrames, workerPhase } from "../../dist/src/factory-scene/appearance.js";
 import { pointOnRoute, routeBetween, routeFromCurrent, routeFromSpine } from "../../dist/src/factory-scene/movement.js";
 import { spriteAtlas, spriteSheet, spriteSheetSize } from "../../dist/src/factory-scene/sprites/sprites.generated.js";
 
@@ -189,8 +189,8 @@ test("the pure scene model feeds a deterministic SVG renderer", () => {
   const placements = placeWorkers(layout, workers);
   assert.deepEqual(placements, placeWorkers(layout, [...workers].reverse()));
   assert.equal(workerFrames(workers[0]).length, 9);
-  assert.equal(workerFrames(workers[0]).at(-1), "person.system.worker.codex");
-  assert.equal(workerFrames({ ...workers[0], provider: "made_up" }).at(-1), "person.system.worker.shell");
+  assert.deepEqual(workerFrames(workers[0]).slice(-2), ["person.system.worker.codex", "person.held.keyboard"], "what is held is drawn over the badge");
+  assert.ok(workerFrames({ ...workers[0], provider: "made_up" }).includes("person.system.worker.shell"));
   assert.equal(workerFrames(workers[1]).at(-1), "person.alert", "the alert rides above whoever needs you");
 
   const first = render();
@@ -224,9 +224,11 @@ test("the pure scene model feeds a deterministic SVG renderer", () => {
     const rendered = first.slice(first.indexOf(`data-worker-id="${worker.id}"`));
     const frame = rendered.slice(0, rendered.indexOf("</g>")).match(/href="#df-frame-([^"]+)"/g)
       .map((match) => match.slice('href="#df-frame-'.length, -1));
-    // Off the floor of a room a worker sits: resting with a cup on the table, or planning.
+    // Off the floor of a room a worker sits, resting or planning. A first render
+    // starts every clock at zero, so each worker stands at their own phase.
     const seat = worker.location === "working" ? undefined : worker.location === "unobserved" ? "planning" : "resting";
-    assert.deepEqual(frame, [...workerFrames(worker, undefined, seat), ...(seat === "resting" ? ["person.held.cup"] : [])]);
+    const action = rendered.match(/data-worker-action="([^"]+)"/)[1];
+    assert.deepEqual(frame, workerFrames(worker, { action, frame: 0, at: workerPhase(worker.id) }, seat));
     if (seat !== undefined) assert.equal(frame.some((name) => name.startsWith("person.tool.")), false, "tools are put down at a table");
     for (const name of frame) assert.ok(name in spriteAtlas.frames, name);
   }
@@ -412,7 +414,15 @@ test("every generated person layer is reachable, including fallbacks", () => {
     }
   }
   const fallback = { id: idForIdentity(2), name: "Fallback", role: "worker", provider: "unknown", activity: "debugging" };
-  assert.match(workerFrames(fallback).at(-1), /^person\.system\.worker\.shell$/);
+  assert.ok(workerFrames(fallback).includes("person.system.worker.shell"));
+  // Workers with nothing suitable in hand each have their own habit at the table.
+  const habits = new Set();
+  for (let index = 0; index < 40; index++) for (const at of [0, 500]) {
+    const worker = { id: `habit-${index}`, name: "Habit", role: "worker", provider: "codex", activity: "idle" };
+    habits.add(restingItem(worker).item);
+    for (const name of workerFrames(worker, { action: "still", frame: 0, at }, "resting")) reached.add(name);
+  }
+  assert.deepEqual([...habits].sort(), ["book", "cup", "snack"]);
   assert.ok(workerFrames(fallback).includes("person.skin.2.idle") || workerFrames(fallback).some((name) => /^person\.skin\.\d\.idle$/.test(name)), "an unknown activity stands idle");
   const personFrames = Object.keys(spriteAtlas.frames).filter((name) => name.startsWith("person."));
   assert.deepEqual([...reached].sort(), personFrames.sort());
@@ -436,6 +446,27 @@ test("every generated person layer is reachable, including fallbacks", () => {
   for (const direction of ["north", "east"]) assert.notDeepEqual(walk(direction, 0), walk(direction, 1));
   // Standing still never turns away, whatever direction was last walked.
   assert.ok(workerFrames(fallback, { action: "still", frame: 0, at: 0, direction: "north" }).every((name) => !/\.(back|side)/.test(name)));
+  // What is carried decides what is rested with, where it suits a table.
+  const carrying = (name) => ({ ...fallback, appearance: { automatic: false, skin: 0, hair: 0, hair_colour: 0, face: 0, outfit: 0, clothes_colour: 0, shoes: 0, tool: spriteOptions.tool.findIndex((tool) => tool.name === name), headwear: 0 } });
+  assert.deepEqual(["mug", "tablet", "clipboard"].map((name) => restingItem(carrying(name)).item), ["cup", "tablet", "clipboard"]);
+  // Nothing jumps from the table to the mouth: sampled at the floor's own pulse,
+  // a thing only ever moves one stage at a time, and everything is used and put back.
+  const stages = ["table", "chest", "mouth"];
+  for (const worker of [carrying("mug"), carrying("tablet"), carrying("clipboard"), ...Array.from({ length: 12 }, (_, index) => ({ ...fallback, id: `habit-${index}` }))]) {
+    const visited = new Set();
+    let previous = restingItem(worker, 0).where;
+    for (let at = 0; at <= 30000; at += 200) {
+      const { item, where } = restingItem(worker, at);
+      assert.ok(Math.abs(stages.indexOf(where) - stages.indexOf(previous)) <= 1, `${item} jumped from ${previous} to ${where} at ${at}`);
+      const frames = workerFrames(worker, { action: "still", frame: 0, at }, "resting");
+      assert.deepEqual(frames.filter((name) => name.startsWith("person.held.")), where === "table" ? [] : [`person.held.${item}.${where}`]);
+      assert.ok(frames.some((name) => name.endsWith(where === "mouth" ? ".sip" : where === "chest" ? ".hold" : ".idle")), `${where}: ${frames}`);
+      visited.add(where); previous = where;
+    }
+    assert.ok(visited.has("table") && visited.has("chest"), `${restingItem(worker).item}: ${[...visited]}`);
+    assert.equal(visited.has("mouth"), ["cup", "snack"].includes(restingItem(worker).item));
+  }
+  assert.equal(restingItem(fallback, undefined).where, "table", "a stilled clock leaves everything on the table");
   // At the bench a carried tool is worked with; empty hands and mugs type.
   const bench = (tool, frame) => workerFrames({ ...fallback, activity: "busy", appearance: { automatic: false, skin: 0, hair: 0, hair_colour: 0, face: 0, outfit: 0, clothes_colour: 0, shoes: 0, tool, headwear: 0 } }, { action: "interacting", frame });
   const toolNames = spriteOptions.tool.map(({ name }) => name);
@@ -580,6 +611,29 @@ test("retargets leave the current room or corridor through a clear lane", () => 
   const fromSpine = routeFromSpine(layout, { x: center, y: row.y - row.height / 2 }, destination);
   assert.ok(fromSpine);
   assertRouteGeometry(layout, { x: center, y: row.y - row.height / 2 }, fromSpine, "direct spine route");
+});
+
+test("tables stand in front of whoever sits at them, with each resting worker's one thing on top", () => {
+  const seatedWorkers = [
+    ...Array.from({ length: 9 }, (_, index) => ({ ...workers[0], id: `habit-${index}`, activity: "idle", location: "resting", nodeId: undefined })),
+    { ...workers[0], id: "asking", activity: "needs-you", location: "resting", nodeId: undefined },
+    { ...workers[0], id: "planner", location: "unobserved", nodeId: undefined },
+  ];
+  const markup = render({ workers: seatedWorkers });
+  const lastWorker = markup.lastIndexOf("data-worker-id="), firstTable = markup.indexOf("data-common-table="), firstItem = markup.indexOf("data-table-item=");
+  assert.ok(lastWorker < firstTable && firstTable < firstItem, "workers, then the tables over their laps, then what lies on the tables");
+  assert.equal((markup.match(/data-common-table="resting"/g) ?? []).length, new Set(commonSeating(layoutScene(topology), 10, 1).resting.map((seat) => seat.y)).size, "one table a row");
+  // A first render puts each clock at the worker's own phase: a thing is on the table exactly when it is not in hand.
+  for (const worker of seatedWorkers.filter((candidate) => candidate.location === "resting")) {
+    const rest = restingItem(worker, worker.activity === "needs-you" ? undefined : workerPhase(worker.id));
+    const own = markup.slice(markup.indexOf(`data-worker-id="${worker.id}"`)), held = own.slice(0, own.indexOf("</g>")).includes("person.held.");
+    assert.equal(held, rest.where !== "table", `${worker.id}: ${JSON.stringify(rest)}`);
+  }
+  const onTables = seatedWorkers.filter((worker) => worker.location === "resting" && restingItem(worker, worker.activity === "needs-you" ? undefined : workerPhase(worker.id)).where === "table").length;
+  assert.equal((markup.match(/data-table-item=/g) ?? []).length, onTables);
+  assert.ok(onTables > 0 && onTables < 10, "the sample has things both in hand and on the table");
+  assert.match(markup, /data-worker-id="asking"[\s\S]*?wave\./, "someone asking for you waves; their thing waits on the table");
+  assert.equal((markup.match(/data-planning-light=""/g) ?? []).length, 1);
 });
 
 test("a walking worker is drawn facing where they go, and only a westward walk is mirrored", async () => {
@@ -928,7 +982,7 @@ test("stationary active workers animate while idle, reduced, hidden and disconne
     await act(async () => { renderer.update(createElement(FactoryScene, { topology, workers: planningWorkers, connected: true, appearance: { scenery: "subtle", animation: "off" } })); });
     assert.equal(timers.size, 0, "animation-off stops the clock");
     assert.equal(frames.size, 0, "animation-off stops movement");
-    assert.equal(renderer.root.findByProps({ "data-worker-id": "planning" }).findAllByProps({ "data-planning-light": "" }).length, 1, "connected planning lamp stays lit with animation off");
+    assert.equal(renderer.root.findAllByProps({ "data-planning-light": "" }).length, 1, "connected planning lamp stays lit with animation off");
     await act(async () => { renderer.update(createElement(FactoryScene, { topology, workers: planningWorkers, connected: false, appearance: { scenery: "subtle", animation: "off" } })); });
     assert.equal(renderer.root.findAllByProps({ "data-planning-light": "" }).length, 0, "disconnect extinguishes planning lamps");
     await act(async () => { renderer.update(createElement(FactoryScene, { topology, workers: workers.map((worker) => ({ ...worker, activity: "waiting", location: "resting" })), connected: false })); });

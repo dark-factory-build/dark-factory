@@ -1,4 +1,4 @@
-import { useLayoutEffect, useEffect, useMemo, useRef, useState, type MouseEvent, type FocusEvent, type PointerEvent, type KeyboardEvent } from "react";
+import { useLayoutEffect, useEffect, useMemo, useRef, useState, type MouseEvent, type FocusEvent, type PointerEvent, type KeyboardEvent, type ReactNode } from "react";
 import type { SceneTask } from "../console-view.js";
 import {
   PADDING,
@@ -15,7 +15,7 @@ import {
   type SceneWorker,
 } from "./scene.js";
 import { DEFAULT_FLOOR_APPEARANCE, type FloorAppearance } from "../floor-appearance.js";
-import { workerFrames, workerPhase } from "./appearance.js";
+import { restingItem, workerFrames, workerPhase } from "./appearance.js";
 import { directionBetween, pointOnRoute, routeFromCurrent, routeBetween, samePoint, type WorkerMotion } from "./movement.js";
 import { spriteAtlas, spriteSheet, spriteSheetSize } from "./sprites/sprites.generated.js";
 
@@ -51,6 +51,10 @@ export type AgentSpriteProps = Readonly<{
 }>;
 
 const FRAME = spriteAtlas.frame;
+// Tables stand this far below a seat's centre: over the lap, under the hands.
+const TABLE_DROP = 29;
+// What rests on the table is the chest-height drawing, set down this many sprite pixels.
+const SET_DOWN = 6;
 const LABEL_SEGMENTS = new Intl.Segmenter("en", { granularity: "grapheme" });
 
 function shortLabel(label: string, limit = 18) {
@@ -188,13 +192,15 @@ function useSceneMotion(layout: ReturnType<typeof layoutScene>, placements: Retu
 }
 
 /** The animation clock updates worker elements without rerendering the floor or atlas. */
-function SceneWorkers({ layout, placements, nodes, workers, tasks, connected, animate, selectedWorkerId, onSelectWorker, onSelectHumanRequest }: Pick<FactorySceneProps, "workers" | "selectedWorkerId" | "onSelectWorker" | "onSelectHumanRequest"> & {
+function SceneWorkers({ furniture, layout, placements, nodes, workers, tasks, connected, animate, selectedWorkerId, onSelectWorker, onSelectHumanRequest }: Pick<FactorySceneProps, "workers" | "selectedWorkerId" | "onSelectWorker" | "onSelectHumanRequest"> & {
   layout: ReturnType<typeof layoutScene>;
   placements: ReturnType<typeof placeWorkers>;
   nodes: ReadonlyMap<string, SceneTopology["nodes"][number]>;
   tasks: readonly SceneTask[];
   connected: boolean;
   animate: boolean;
+  /** Drawn over the workers: tables stand in front of whoever sits at them. */
+  furniture: ReactNode;
 }) {
   // Inventory/dependency metadata may change without changing a route's geometry.
   const geometryKey = useMemo(() => JSON.stringify([layout.width, layout.height, layout.restingTop, layout.corridors, layout.rooms.map(({ id, x, y, width, height, door }) => [id, x, y, width, height, door])]), [layout]);
@@ -216,7 +222,6 @@ function SceneWorkers({ layout, placements, nodes, workers, tasks, connected, an
         const attention = tasks.flatMap((order) => order.agentId === worker.id ? order.humanRequestIds : []);
         const seated = placement.area !== "room" && position.motion.action !== "walking";
         const frames = workerFrames(worker, position.motion, placement.area === "room" ? undefined : placement.area === "resting" ? "resting" : "planning");
-        const sipping = frames.includes("person.held.cup");
         // A step lifts the whole body a pixel.
         const bob = position.motion.action === "walking" && position.motion.frame === 1 ? -1 : 0;
         // Only a profile facing east is drawn; walking west is its mirror image.
@@ -234,16 +239,25 @@ function SceneWorkers({ layout, placements, nodes, workers, tasks, connected, an
             <g role="img" className="dfFactoryScene__target" data-tooltip={`${worker.name} · ${worker.activity}\n${placement.area === "room" ? `Working near ${worker.locationLabel ?? room?.label ?? "observed changes"}` : placement.area === "resting" ? worker.paused ? "Paused · taking a break" : "Taking a break" : worker.location === "unobserved" ? "Planning · location not yet observed" : "Planning · work outside this room"}`} aria-label={`${worker.name}, ${worker.role}, ${worker.activity}, ${location}`} {...sceneAction(onSelectWorker === undefined ? undefined : () => onSelectWorker(worker.id))}>
                 <rect className="dfFactoryScene__focus" x={-12} y={-12} width="24" height="24" rx="3" fill="transparent" />
               {worker.id === selectedWorkerId ? <circle className="dfFactoryScene__selection" cx="0" cy="0" r="12" /> : null}
-              <g data-seated={seated ? placement.area === "resting" ? "coffee" : "planning" : undefined} data-active-pose={position.motion.action === "interacting" ? position.motion.frame : undefined}><g transform={`scale(${WORKER_SIZE / FRAME})${bob === 0 ? "" : ` translate(0 ${bob})`}${facingWest ? " scale(-1 1)" : ""}`}>{frames.map((frame) => <Frame key={frame} name={frame} x={-8} y={-8} />)}
-                {/* One cup each: on the table in front of them until it is at their lips. */}
-                {seated && placement.area === "resting" && !sipping ? <Frame name="person.held.cup" x={-6} y={-21} /> : null}</g>
-              {!seated || placement.area === "resting" || !connected ? null : <g data-planning-light="" aria-hidden="true"><circle cx="7" cy="-16" r="14" fill="url(#df-lamplight)" /><path d="M12 -18v-5h-5" fill="none" stroke="#788379" strokeWidth="2" /><path d="M4 -20h6" stroke="#dfc38f" strokeWidth="3" /></g>}</g>
+              <g data-seated={seated ? placement.area === "resting" ? "coffee" : "planning" : undefined} data-active-pose={position.motion.action === "interacting" ? position.motion.frame : undefined}><g transform={`scale(${WORKER_SIZE / FRAME})${bob === 0 ? "" : ` translate(0 ${bob})`}${facingWest ? " scale(-1 1)" : ""}`}>{frames.map((frame) => <Frame key={frame} name={frame} x={-8} y={-8} />)}</g>
+              </g>
             </g>
             {attention.length === 0 ? null : <g {...sceneAction(onSelectHumanRequest === undefined ? undefined : () => onSelectHumanRequest(attention[0]!))} aria-label={`Question from ${worker.name}`} data-human-request-id={attention[0]}>
               <rect x="10" y="-20" width="22" height="22" rx="3" fill="#f0c777" /><text x="21" y="-5" textAnchor="middle" fill="#172330" fontSize="16" fontWeight="700">!</text>
             </g>}
           </g>
         );
+      })}
+      {furniture}
+      {/* On the table in front of each of them: a planner's lit lamp, or the one thing a resting worker has until it is in their hand. */}
+      {placements.map((placement) => {
+        const worker = workerById.get(placement.id), position = positions.get(placement.id);
+        if (worker === undefined || placement.area === "room" || position?.motion.action === "walking") return null;
+        if (placement.area !== "resting") return !connected ? null : <g key={placement.id} data-planning-light="" aria-hidden="true" pointerEvents="none" transform={`translate(${position?.x ?? placement.x} ${(position?.y ?? placement.y) + TABLE_DROP})`}><circle cx="7" cy="-16" r="14" fill="url(#df-lamplight)" /><path d="M12 -18v-5h-5" fill="none" stroke="#788379" strokeWidth="2" /><path d="M4 -20h6" stroke="#dfc38f" strokeWidth="3" /></g>;
+        const rest = restingItem(worker, worker.activity === "needs-you" ? undefined : position?.motion.at);
+        return rest.where !== "table" ? null : <g key={placement.id} aria-hidden="true" pointerEvents="none" data-table-item={rest.item} transform={`translate(${position?.x ?? placement.x} ${position?.y ?? placement.y}) scale(${WORKER_SIZE / FRAME})`}>
+          <Frame name={`person.held.${rest.item}.chest`} x={-8} y={-8 + SET_DOWN} />
+        </g>;
       })}</>;
 }
 
@@ -292,6 +306,13 @@ export function FactoryScene({ topology, detailNodes, workers, appearance = DEFA
   // A compact scope still needs room for readable labels, not poster-sized
   // sprites; larger scopes retain their existing scrollable viewport.
   const maxWidth = Math.min(640, layout.width * 2);
+  // One table per row, as long as the row, standing between the viewer and the
+  // people at it: it covers their laps, and what they rest with sits on it.
+  const tables = [{ seats: seating.resting, planning: false }, { seats: seating.planning, planning: true }].flatMap(({ seats, planning }) =>
+    [...new Set(seats.map((seat) => seat.y))].map((y) => { const row = seats.filter((seat) => seat.y === y), first = row[0]!; return <g key={`${planning} ${y}`} aria-hidden="true" pointerEvents="none" data-common-table={planning ? "planning" : "resting"} transform={`translate(${first.x} ${y + TABLE_DROP})`}>
+      <rect x="-18" y="-21" width={row.at(-1)!.x - first.x + 36} height="10" fill={planning ? "#455c5e" : "#655d4c"} stroke="#8c8871" />
+      {!planning ? null : <g><rect x="-12" y="-19" width="24" height="6" fill="#9fae9e" /><path d="M-9 -17h12v3H-3v-3 M5 -16h4" fill="none" stroke="#536e70" /></g>}
+    </g>; }));
 
   return (
     <>
@@ -390,13 +411,8 @@ export function FactoryScene({ topology, detailNodes, workers, appearance = DEFA
       ].filter(({ seats }) => seats.length > 0).map(({ label, seats, planning, occupied }) => {
         const top = seats[0]!.y;
         return <g key={label} role="group" aria-label={label}>
-          <text x={seats[0]!.x - 18} y={top - 25} fill="#9db1be" fontFamily="ui-monospace, monospace" fontSize="8">{label}</text>
-          {/* One table per row, as long as the people at it; a stool only where someone sits. */}
-          {[...new Set(seats.map((seat) => seat.y))].map((y) => { const row = seats.filter((seat) => seat.y === y), first = row[0]!; return <g key={y} aria-hidden="true" data-common-table={planning ? "planning" : "resting"} transform={`translate(${first.x} ${y})`}>
-            <rect x="-18" y="-21" width={row.at(-1)!.x - first.x + 36} height="10" fill={planning ? "#455c5e" : "#655d4c"} stroke="#8c8871" />
-            {!planning ? null : <g><rect x="-12" y="-19" width="24" height="6" fill="#9fae9e" /><path d="M-9 -17h12v3H-3v-3 M5 -16h4" fill="none" stroke="#536e70" />
-              <path d="M12 -18v-5h-5" fill="none" stroke="#788379" strokeWidth="2" /><path data-planning-light={connected} d="M4 -20h6" stroke={connected ? "#dfc38f" : "#626c64"} strokeWidth="3" /></g>}
-          </g>; })}
+          <text x={seats[0]!.x - 18} y={top - 16} fill="#9db1be" fontFamily="ui-monospace, monospace" fontSize="8">{label}</text>
+          {/* A stool only where someone sits; the tables stand in front of them, drawn after the workers. */}
           {seats.slice(0, occupied).map((seat, index) => <g key={index} aria-hidden="true" data-common-seat={planning ? "planning" : "resting"} transform={`translate(${seat.x} ${seat.y})`}>
             <rect x="-7" y="3" width="14" height="6" rx="2" fill="#655948" stroke="#897c61" />
             <path d="M-5 9v3 M5 9v3" stroke="#3f4540" strokeWidth="3" />
@@ -405,7 +421,7 @@ export function FactoryScene({ topology, detailNodes, workers, appearance = DEFA
       })}
       {layout.rooms.length === 0 ? <text x={ROOM_LEFT} y="24" fill="#9db1be" fontFamily="ui-monospace, monospace" fontSize="10">EMPTY FLOOR</text> : null}
 
-      <SceneWorkers layout={layout} placements={placements} nodes={nodes} workers={workers} tasks={tasks} connected={connected} animate={appearance.animation !== "off"} selectedWorkerId={selectedWorkerId} onSelectWorker={onSelectWorker} onSelectHumanRequest={onSelectHumanRequest} />
+      <SceneWorkers furniture={tables} layout={layout} placements={placements} nodes={nodes} workers={workers} tasks={tasks} connected={connected} animate={appearance.animation !== "off"} selectedWorkerId={selectedWorkerId} onSelectWorker={onSelectWorker} onSelectHumanRequest={onSelectHumanRequest} />
 
       {queued === 0 ? null : <g data-floor-queue="" {...sceneAction(onOpenQueue)} aria-label={`Open queue, ${queued} tasks`}>
         {[...Array(Math.min(queued, 3))].map((_, index) => <rect key={index} x={ROOM_LEFT + index * 3} y={boardTop + index * 3} width="24" height="28" fill="#d9d2b5" stroke={tasks.some((task) => task.id === selectedTaskId && task.status === "queued") ? "#80ddff" : "#a6a087"} />)}

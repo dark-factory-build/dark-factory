@@ -44,6 +44,30 @@ export function resolvedAppearance(worker: Pick<SceneWorker, "id" | "role" | "ap
   ]) as SpriteAppearance;
 }
 
+// How often each thing on the table is picked up, and for how long it is used.
+// Food and drink pause at the chest on the way to the mouth and back; anything
+// read stays at the chest. A new thing to rest with is one entry here and its
+// art in the generator.
+const RESTING = {
+  cup: { every: 5600, use: 1000, mouth: true },
+  snack: { every: 4700, use: 600, mouth: true },
+  book: { every: 12000, use: 7000, mouth: false },
+  clipboard: { every: 10000, use: 5000, mouth: false },
+  tablet: { every: 11000, use: 6000, mouth: false },
+} as const;
+const LIFT = 500;
+
+/** What a worker rests with, and where it is right now: what they carry if it suits a table, else their own habit. */
+export function restingItem(worker: SceneWorker, at?: number): Readonly<{ item: keyof typeof RESTING; where: "table" | "chest" | "mouth" }> {
+  const carried = spriteOptions.tool[resolvedAppearance(worker).tool]?.name;
+  const item = carried === "mug" ? "cup" : carried === "clipboard" || carried === "tablet" ? carried : (["cup", "book", "snack"] as const)[hash(worker.id) % 3]!;
+  const { every, use, mouth } = RESTING[item];
+  if (at === undefined || !Number.isFinite(at) || at < 0) return { item, where: "table" };
+  const t = at % every;
+  if (!mouth) return { item, where: t < use ? "chest" : "table" };
+  return { item, where: t < LIFT ? "chest" : t < LIFT + use ? "mouth" : t < LIFT * 2 + use ? "chest" : "table" };
+}
+
 /**
  * The aligned atlas layers for one worker. Status and motion choose a pose; the
  * person's own layers ride on it unchanged. `motion.at` is the worker's own
@@ -57,7 +81,8 @@ export function workerFrames(worker: SceneWorker, motion?: WorkerMotion, seat?: 
   const at = motion?.at !== undefined && Number.isFinite(motion.at) && motion.at >= 0 ? motion.at : undefined;
   const walking = motion?.action === "walking";
   const seated = seat !== undefined && !walking;
-  // Planners write in bursts; resting workers lift the cup now and then.
+  const rest = restingItem(worker, at);
+  // Planners write in bursts; resting workers pick up what is in front of them now and then.
   const scribble = at !== undefined && at % 2600 < 1300 ? Math.floor(at / 325) % 2 : 0;
   // At the bench a wrench, tablet or clipboard is worked with: the carrying arm
   // reaches forward and back. Empty hands, or a mug, leave the keyboard.
@@ -67,7 +92,7 @@ export function workerFrames(worker: SceneWorker, motion?: WorkerMotion, seat?: 
     : motion?.action === "interacting" ? `type.${motion.frame}`
     : worker.activity === "needs-you" ? `wave.${at === undefined ? 0 : Math.floor(at / 400) % 2}`
     : seat === "planning" ? `type.${scribble}`
-    : seat === "resting" ? at !== undefined && at % 5200 < 900 ? "sip" : "idle"
+    : seat === "resting" ? rest.where === "mouth" ? "sip" : rest.where === "chest" ? "hold" : "idle"
     : worker.activity === "busy" ? "type.0"
     : worker.activity === "waiting" ? "waiting" : "idle";
   const cloth = appearance.outfit === 1 ? appearance.clothes_colour : "plain";
@@ -100,7 +125,7 @@ export function workerFrames(worker: SceneWorker, motion?: WorkerMotion, seat?: 
   const step = walking ? pose : "stand";
   const blinking = at !== undefined && at % (3000 + hash(worker.id) % 4000) < 200;
   const glasses = spriteOptions.face[appearance.face]?.name === "glasses";
-  const held = pose === "sip" ? ["person.held.cup"]
+  const held = pose === "sip" || pose === "hold" ? [`person.held.${rest.item}.${rest.where}`]
     : seat === "planning" && pose.startsWith("type") ? [`person.held.pencil.${scribble}`]
     : pose.startsWith("type") ? ["person.held.keyboard"]
     : seated ? [] : [`person.tool.${appearance.tool}.${pose === "walk.1" ? "high" : "low"}`];
@@ -114,8 +139,9 @@ export function workerFrames(worker: SceneWorker, motion?: WorkerMotion, seat?: 
     ...(blinking && glasses ? ["person.blink.glasses"] : []),
     `person.shoes.${appearance.shoes}.${step}`,
     `person.headwear.${appearance.headwear}`,
-    ...held,
     `person.system.${role}.${provider}`,
+    // Held last: in front of a headset's boom, and over the chest badge.
+    ...held,
     ...alert,
   ];
 }
