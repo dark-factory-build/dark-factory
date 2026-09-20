@@ -785,6 +785,8 @@ test("stationary tasks expose affected areas and link the existing queue and que
   // The tray is scenery standing on a table, so it takes no pointer: a seated
   // worker shares those pixels, and whichever is drawn last would eat the other's clicks.
   assert.match(markup, /data-floor-inbox="10" aria-hidden="true" pointer-events="none"/);
+  // Selecting queued work in the panel still lights its pile on the floor.
+  assert.match(render({ tasks, selectedTaskId: "task-1", onSelectTask() {} }), /data-floor-inbox="10"[\s\S]*?stroke="#80ddff"/);
   // The tray is furniture: it stays when nothing waits, and says so.
   const idle = render({ tasks: [tasks[0]], onSelectTask() {} });
   assert.match(idle, /data-floor-inbox="0"/);

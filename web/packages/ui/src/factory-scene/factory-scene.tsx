@@ -425,7 +425,7 @@ export function FactoryScene({ topology, detailNodes, workers, appearance = DEFA
           everything else standing on these tables: the pile says how the queue
           is doing, the Tasks panel is where it is read and changed. */}
       <g data-floor-inbox={queued} aria-hidden="true" pointerEvents="none" transform={`translate(${ROOM_LEFT + commonWidth - 30} ${layout.restingTop + TABLE_DROP - 21})`}>
-        {[...Array(Math.min(queued, 3))].map((_, index) => <rect key={index} x="1" y={-2 - index * 3} width="18" height="3" fill="#e4dcc0" stroke="#a6a087" />)}
+        {[...Array(Math.min(queued, 3))].map((_, index) => <rect key={index} x="1" y={-2 - index * 3} width="18" height="3" fill="#e4dcc0" stroke={tasks.some((task) => task.id === selectedTaskId && task.status === "queued") ? "#80ddff" : "#a6a087"} />)}
         <path d="M-2 -4v6h24v-6 M-2 2h24" fill="none" stroke="#c2b184" strokeWidth="2" />
       </g>
 
