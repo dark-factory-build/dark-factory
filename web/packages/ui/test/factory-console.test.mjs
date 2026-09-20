@@ -1985,15 +1985,26 @@ test("floor objects select the exact existing task detail and question route", a
   assert.equal(tree.root.findAllByProps({ "data-floor-queue": "" }).length, 1);
   const queuedTask = fixtureState.tasks.get("32".repeat(16));
   await act(async () => { tree.update(createElement(Harness, { editable: true })); });
-  await act(async () => { tree.root.findByProps({ "aria-label": "Task details" }).props.onClose(); });
-  const queuedRow = tree.root.findAllByProps({ className: "dfConsoleItem__summary" }).find((row) => row.findAllByType("strong").some((strong) => strong.children.join("") === queuedTask.title));
-  assert.equal(queuedRow.props.onClick, undefined, "expanding a queued row selects nothing, so its later start cannot open a dialog unasked");
+  // The selected running task is retried: a queued, editable task has its inline editor, not a dialog.
+  const requeued = new Map(fixtureState.tasks).set(task.id, { ...task, status: "queued" });
+  await act(async () => { tree.update(createElement(Harness, { editable: true, state: { ...fixtureState, tasks: requeued } })); });
   assert.equal(tree.root.findAllByProps({ "aria-label": "Task details" }).length, 0, "editable queued work stays in its inline editor");
+  await act(async () => { tree.update(createElement(Harness, { editable: true })); });
+  await act(async () => { tree.root.findByProps({ "aria-label": "Task details" }).props.onClose(); });
+  // Expanding a queued row selects nothing, so its start cannot open a dialog unasked.
+  const queuedRow = tree.root.findAllByType("details").find((row) => row.props.className === "dfConsoleItem" && row.findAllByType("strong").some((strong) => strong.children.join("") === queuedTask.title));
+  await act(async () => { queuedRow.findByType("summary").props.onClick?.({}); queuedRow.props.onToggle({ currentTarget: { open: true } }); });
+  const started = new Map(fixtureState.tasks).set(queuedTask.id, { ...queuedTask, status: "running" });
+  await act(async () => { tree.update(createElement(Harness, { editable: true, state: { ...fixtureState, tasks: started } })); });
+  assert.equal(tree.root.findAllByProps({ "aria-label": "Task details" }).length, 0, "a queued task that starts running opens no dialog");
+  await act(async () => { tree.update(createElement(Harness, { editable: true })); });
   await act(async () => { tree.root.findByProps({ "data-human-request-id": ids.request }).props.onClick(); });
   assert.equal(questions[0], fixtureState.humanRequests.get(ids.request));
   assert.equal(tree.root.findByProps({ "aria-label": "Selected question" }).findByProps({ className: "dfFactoryConsole__question" }).children.join(""), "Should the migration also cover the users table? The plan only names accounts.");
+  await act(async () => { tree.root.findByProps({ "aria-label": "Running tasks" }).findByType("button").props.onClick(); });
+  assert.equal(tree.root.findAllByProps({ "aria-label": "Task details" }).length, 1);
   const tasks = new Map(fixtureState.tasks);
-  tasks.delete(queuedTask.id);
+  tasks.delete(task.id);
   await act(async () => { tree.update(createElement(Harness, { state: { ...fixtureState, tasks } })); });
   assert.equal(tree.root.findAllByProps({ "aria-label": "Task details" }).length, 0, "removed work is not retained as invented history");
   await act(async () => tree.unmount());
