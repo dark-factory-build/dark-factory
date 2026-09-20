@@ -324,7 +324,7 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 				if len(objective) > 240 {
 					objective = append(objective[:240], '…')
 				}
-				items = append(items, map[string]any{"id": item.ID.String(), "objective": string(objective), "state": item.State, "stale": item.Stale})
+				items = append(items, map[string]any{"id": item.ID.String(), "kind": "mission", "objective": string(objective), "state": item.State, "stale": item.Stale})
 			}
 			output = map[string]any{"items": items, "next_offset": page.NextOffset}
 			break
