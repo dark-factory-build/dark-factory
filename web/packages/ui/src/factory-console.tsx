@@ -26,6 +26,7 @@ export type FactoryConsoleProps = FactoryAppSnapshot & {
   onToggleSettings?: () => void;
   selectedAgent?: FactoryAgentSelection;
   onSelectAgent?: (agent: AgentItem) => void;
+  onAttachmentRetention?: (enabled?: boolean) => Promise<boolean>;
   onProjectContent?: ProjectContentCall;
   onDraftLibraryTask?: (agent: AgentItem, instruction: string) => void;
   onSaveAgentConfig?: (config: AgentConfigEdit) => void;
@@ -116,6 +117,7 @@ export function FactoryConsole({
   selectedHumanRequest,
   selectedAgent,
   onSelectAgent,
+  onAttachmentRetention,
   onProjectContent,
   onDraftLibraryTask,
   onSaveAgentConfig,
@@ -327,6 +329,7 @@ export function FactoryConsole({
       </main>
       {settingsOpen !== true ? null : (
         <SettingsDialog
+          onAttachmentRetention={ready ? onAttachmentRetention : undefined}
           projectId={projectId}
           floorAppearance={floorAppearance}
           onFloorAppearanceChange={changeFloorAppearance}

@@ -64,6 +64,8 @@ export const CONTROL_MANIFEST = [
   { type: "HUMAN_REQUEST_REPLY_RESULT", direction: "server", id: "required", fixture: "human_request_reply_result.json" },
   { type: "HUMAN_REQUEST_CANCEL_RUN", direction: "client", id: "required", fixture: "human_request_cancel_run.json" },
   { type: "HUMAN_REQUEST_CANCEL_RUN_RESULT", direction: "server", id: "required", fixture: "human_request_cancel_run_result.json" },
+  { type: "ATTACHMENT_RETENTION", direction: "client", id: "required", fixture: "attachment_retention.json" },
+  { type: "ATTACHMENT_RETENTION_RESULT", direction: "server", id: "required", fixture: "attachment_retention_result.json" },
   { type: "TASK_ATTACHMENT", direction: "client", id: "required", fixture: "task_attachment.json" },
   { type: "TASK_ATTACHMENT_RESULT", direction: "server", id: "required", fixture: "task_attachment_result.json" },
   { type: "TASK_ENQUEUE", direction: "client", id: "required", fixture: "task_enqueue.json" },

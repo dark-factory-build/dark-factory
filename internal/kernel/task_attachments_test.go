@@ -66,7 +66,7 @@ func TestV27MigrationPreservesTaskAndAddsEmptyAttachments(t *testing.T) {
 	}
 	before := snapshotSchemaRows(t, ctx, connection, v27SchemaStatements(), false)
 	connection.Close()
-	if _, err := store.writer.ExecContext(ctx, `DROP TABLE task_attachments; PRAGMA user_version = 27`); err != nil {
+	if _, err := store.writer.ExecContext(ctx, `DROP TABLE attachment_retention; DROP TABLE task_attachments; PRAGMA user_version = 27`); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.Close(); err != nil {
@@ -193,5 +193,93 @@ func TestAttachmentCleanupAndCompactionPreserveHistory(t *testing.T) {
 	files, err = store.TaskAttachments(ctx, id)
 	if err != nil || len(files) != 1 || !files[0].Removed {
 		t.Fatalf("reopened removal: %+v %v", files, err)
+	}
+}
+
+func TestAutomaticAttachmentRetention(t *testing.T) {
+	ctx := context.Background()
+	store, path, _, agent := newAdmissionStore(t, RoleWorker, 1)
+	client := terminalTargetClient(t, store, browserTestID(t, 180), BrowserCapabilityHumanActions|BrowserCapabilityObserve)
+	id := taskID(t, 181)
+	created, err := store.EnqueueTaskForBrowserAgentRepositoryMode(ctx, client.ID, id, incarnationID(t, 182), agent.ID, agent.Revision, RepositoryID{}, "Inspect", BrowserEnqueueQueue, mustTime(t, 102), TaskAttachment{Name: "test.png", Data: []byte("image")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Simulate the exact released v28 database and preserve its attachment bytes.
+	if _, err := store.writer.ExecContext(ctx, `DROP TABLE attachment_retention; PRAGMA user_version = 28`); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if enabled, err := store.AttachmentRetention(ctx, nil); err != nil || enabled {
+		t.Fatalf("migration default: %v %v", enabled, err)
+	}
+	const age = int64(30 * 24 * 60 * 60 * 1000)
+	check := func(removed bool) {
+		t.Helper()
+		files, err := store.TaskAttachments(ctx, id)
+		if err != nil || len(files) != 1 || files[0].Removed != removed || files[0].Name != "test.png" {
+			t.Fatalf("files: %+v %v", files, err)
+		}
+	}
+	if err := store.ExpireTaskAttachments(ctx, mustTime(t, age+1000)); err != nil {
+		t.Fatal(err)
+	}
+	check(false)
+	enabled := true
+	if _, err := store.AttachmentRetention(ctx, &enabled); err != nil {
+		t.Fatal(err)
+	}
+	// Queued tasks are protected, even when old.
+	if err := store.ExpireTaskAttachments(ctx, mustTime(t, age+1000)); err != nil {
+		t.Fatal(err)
+	}
+	check(false)
+	cancelled, err := store.UpdateTask(ctx, id, created.Task.Revision, TaskPatch{Cancel: true}, mustTime(t, 103))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if enabled, err := store.AttachmentRetention(ctx, nil); err != nil || !enabled {
+		t.Fatalf("persisted: %v %v", enabled, err)
+	}
+	if err := store.ExpireTaskAttachments(ctx, mustTime(t, age+102)); err != nil {
+		t.Fatal(err)
+	}
+	check(false)
+	enabled = false
+	if _, err := store.AttachmentRetention(ctx, &enabled); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ExpireTaskAttachments(ctx, mustTime(t, age+103)); err != nil {
+		t.Fatal(err)
+	}
+	check(false)
+	enabled = true
+	if _, err := store.AttachmentRetention(ctx, &enabled); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if err := store.ExpireTaskAttachments(ctx, mustTime(t, age+103)); err != nil {
+			t.Fatal(err)
+		}
+		check(true)
+	}
+	got, _, err := store.Task(ctx, id)
+	if err != nil || !reflect.DeepEqual(got, cancelled) {
+		t.Fatalf("history changed: %+v %v", got, err)
 	}
 }

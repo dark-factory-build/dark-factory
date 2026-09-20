@@ -1422,3 +1422,18 @@ func mapBrowserError(err error) error {
 		return err
 	}
 }
+
+func (backend *browserBackend) AttachmentRetention(ctx context.Context, rawClient [browserprotocol.ClientIDSize]byte, request browserprotocol.AttachmentRetention) (browserprotocol.AttachmentRetentionResult, error) {
+	_, release, _, err := backend.authorize(ctx, rawClient, kernel.BrowserCapabilityAdministration)
+	if err != nil {
+		return browserprotocol.AttachmentRetentionResult{}, err
+	}
+	defer release()
+	var enabled *bool
+	if request.Enabled != nil {
+		value := bool(*request.Enabled)
+		enabled = &value
+	}
+	value, err := backend.store.AttachmentRetention(ctx, enabled)
+	return browserprotocol.AttachmentRetentionResult{Enabled: browserprotocol.Bool(value)}, mapBrowserError(err)
+}

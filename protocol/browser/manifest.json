@@ -147,6 +147,18 @@
       "fixture": "human_request_cancel_run_result.json"
     },
     {
+      "type": "ATTACHMENT_RETENTION",
+      "direction": "client",
+      "id": "required",
+      "fixture": "attachment_retention.json"
+    },
+    {
+      "type": "ATTACHMENT_RETENTION_RESULT",
+      "direction": "server",
+      "id": "required",
+      "fixture": "attachment_retention_result.json"
+    },
+    {
       "type": "TASK_ATTACHMENT",
       "direction": "client",
       "id": "required",

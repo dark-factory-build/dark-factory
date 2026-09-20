@@ -217,7 +217,7 @@ export type TerminalServerControlFrame =
   | { type: "TERMINAL_EXIT"; id: string; body: TerminalExitBody }
   | { type: "TERMINAL_RESET"; id: string; body: TerminalResetBody };
 
-export type ServerControlFrame = { type: "PROJECT_CONTENT_RESULT"; id: string; body: ProjectContentResult } | HelloFrame | PairResultFrame | AuthResultFrame | StateSnapshotFrame | StateChangedFrame | HumanRequestDetailFrame
+export type ServerControlFrame = { type: "ATTACHMENT_RETENTION_RESULT"; id: string; body: { enabled: boolean } } | { type: "PROJECT_CONTENT_RESULT"; id: string; body: ProjectContentResult } | HelloFrame | PairResultFrame | AuthResultFrame | StateSnapshotFrame | StateChangedFrame | HumanRequestDetailFrame
   | { type: "HUMAN_REQUEST_REPLY_RESULT"; id: string; body: HumanRequestReplyResultBody }
   | { type: "HUMAN_REQUEST_CANCEL_RUN_RESULT"; id: string; body: HumanRequestCancelRunResultBody }
   | { type: "TASK_ATTACHMENT_RESULT"; id: string; body: TaskAttachmentResultBody }
@@ -245,7 +245,7 @@ export type ServerControlFrame = { type: "PROJECT_CONTENT_RESULT"; id: string; b
   | { type: "REMOTE_INVITE_RESULT"; id: string; body: RemoteInviteResultBody }
   | { type: "PUSH_SUBSCRIBE_RESULT"; id: string; body: PushSubscribeResultBody }
   | TerminalServerControlFrame | ErrorFrame;
-export type ClientControlFrame = { type: "PROJECT_CONTENT"; id: string; body: ProjectContentRequest } | PairProveFrame | AuthProveFrame | StateGetFrame | StateWatchFrame | HumanRequestDetailGetFrame
+export type ClientControlFrame = { type: "ATTACHMENT_RETENTION"; id: string; body: { enabled?: boolean } } | { type: "PROJECT_CONTENT"; id: string; body: ProjectContentRequest } | PairProveFrame | AuthProveFrame | StateGetFrame | StateWatchFrame | HumanRequestDetailGetFrame
   | { type: "HUMAN_REQUEST_REPLY"; id: string; body: HumanRequestReplyBody }
   | { type: "HUMAN_REQUEST_CANCEL_RUN"; id: string; body: HumanRequestCancelRunBody }
   | { type: "TASK_ATTACHMENT"; id: string; body: TaskAttachmentBody }
@@ -401,6 +401,15 @@ function validateControlID(type: ControlType, hasID: boolean, id: unknown): void
 function validateBody(type: ControlType, body: unknown, wire: boolean): ControlBody {
   if (!isObject(body)) malformed();
   switch (type) {
+    case "ATTACHMENT_RETENTION":
+      requireKeys(body, [], wire, ["enabled"]);
+      if (!present(body, "enabled")) return {};
+      if (typeof body.enabled !== "boolean") malformed();
+      return { enabled: body.enabled };
+    case "ATTACHMENT_RETENTION_RESULT":
+      requireKeys(body, ["enabled"], wire);
+      if (typeof body.enabled !== "boolean") malformed();
+      return { enabled: body.enabled };
     case "PROJECT_CONTENT": requireKeys(body, ["operation", "input"], wire); return { operation: projectContentOperation(body.operation), input: projectContentObject(body.input) };
     case "PROJECT_CONTENT_RESULT": requireKeys(body, ["operation", "output"], wire); return { operation: projectContentOperation(body.operation), output: projectContentObject(body.output) };
     case "HELLO": requireKeys(body, ["daemon_id", "boot_id", "connection_nonce"], wire); return { daemon_id: fixedHex(body.daemon_id, HEX_BYTES.daemon_id), boot_id: fixedHex(body.boot_id, HEX_BYTES.boot_id), connection_nonce: fixedHex(body.connection_nonce, HEX_BYTES.connection_nonce) };

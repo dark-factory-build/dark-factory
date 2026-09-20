@@ -2379,3 +2379,18 @@ test("closing during attachment file reading rejects without sending or hanging"
   await rejected;
   assert.equal(socket.sent.length, sent);
 });
+
+test("attachment retention reads and saves through administration traffic", async () => {
+  const { session, socket } = await openHumanSession(undefined, CAPABILITIES.observe | CAPABILITIES.administration);
+  for (const value of [undefined, true, false]) {
+    const pending = session.attachmentRetention(value);
+    const frame = lastFrame(socket, "ATTACHMENT_RETENTION");
+    assert.deepEqual(frame.body, value === undefined ? {} : { enabled: value });
+    socket.reply(encodeServerControl({ type: "ATTACHMENT_RETENTION_RESULT", id: frame.id, body: { enabled: value ?? false } }));
+    assert.equal(await pending, value ?? false);
+  }
+  session.close();
+  const observer = await openHumanSession(undefined, CAPABILITIES.observe);
+  await assert.rejects(observer.session.attachmentRetention(true), (error) => error.code === "unauthorized");
+  observer.session.close();
+});
