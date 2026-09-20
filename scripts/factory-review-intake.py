@@ -471,14 +471,39 @@ def launch_review(config, path, pr, operation):
         for key in ("DARK_FACTORY_OPERATOR_TOKEN_FILE", "DARK_FACTORY_ATTEMPT_TOKEN_FILE", "DARK_FACTORY_SOCKET", "GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"):
             env.pop(key, None)
     with (directory / "launch.log").open("w") as output:
-        return subprocess.run(["/bin/sh", "-c", '. "$1"; shift; go_gate_run_bounded "$@"', "review-process-owner",
-                               str(HERE / "go-gate-environment.sh"), "1200", str(HERE / "cold-review.sh"),
-                               config["repository"], str(pr["number"]), operation["head"], operation["base"], str(body)],
-                              cwd=directory, env=env, stdout=output, stderr=subprocess.STDOUT, pass_fds=() if intake.CONTROLLER_LOCK_FD is None else (intake.CONTROLLER_LOCK_FD,)).returncode
+        process = subprocess.Popen(["/bin/sh", "-c", '. "$1"; shift; go_gate_run_bounded "$@"', "review-process-owner",
+                                    str(HERE / "go-gate-environment.sh"), "1200", str(HERE / "cold-review.sh"),
+                                    config["repository"], str(pr["number"]), operation["head"], operation["base"], str(body)],
+                                   cwd=directory, env=env, stdout=output, stderr=subprocess.STDOUT,
+                                   pass_fds=() if intake.CONTROLLER_LOCK_FD is None else (intake.CONTROLLER_LOCK_FD,))
+        started = process_start(process.pid)
+        activity = {"operation": operation["review_operation"], "pr": pr["number"], "head": operation["head"],
+                    "repository": config["repository"], "pid": process.pid, "process_start": started,
+                    "started_at": int(time.time() * 1000)}
+        if started:
+            intake.atomic_json(review_activity_path(config, pr, operation), activity)
+        status = process.wait()
+        if started:
+            activity.update({"finished_at": int(time.time() * 1000), "exit": status})
+            intake.atomic_json(review_activity_path(config, pr, operation), activity)
+        return status
+
+
+def process_start(pid):
+    try:
+        result = subprocess.run(["/bin/ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True, timeout=5)
+        value = result.stdout.strip()
+        return value if result.returncode == 0 and value else ""
+    except (OSError, subprocess.SubprocessError):
+        return ""
 
 
 def review_body_path(config, pr, operation):
     return Path(config["journal"]).parent / ("review-" + str(pr["number"]) + "-" + operation["head"]) / "body.md"
+
+
+def review_activity_path(config, pr, operation):
+    return Path(config["journal"]).parent / ("review-" + str(pr["number"]) + "-" + operation["head"]) / "activity.json"
 
 
 def verify_review_body(config, pr, operation):

@@ -36,7 +36,7 @@ class ProductionFixtures(unittest.TestCase):
                 calls.append(argv)
                 endpoint = argv[2]
                 if endpoint.endswith("/pulls?state=open&per_page=100"):
-                    return json.dumps([{"number": 7, "title": "Real", "html_url": "https://github.com/o/r/pull/7", "state": "open", "head": {"sha": SHA, "ref": "real"}, "base": {"ref": "main"}}])
+                    return json.dumps([{"number": 7, "title": "Real", "html_url": "https://github.com/o/r/pull/7", "state": "open", "merge_commit_sha": OLD, "head": {"sha": SHA, "ref": "real"}, "base": {"ref": "main"}}])
                 if endpoint.endswith("/pulls?state=closed&sort=updated&direction=desc&per_page=100"):
                     return json.dumps([{"number": 8, "title": "Merged", "html_url": "https://github.com/o/r/pull/8", "state": "closed", "merged_at": "2026-09-20T10:00:00Z", "merge_commit_sha": OLD, "head": {"sha": OLD, "ref": "old"}, "base": {"ref": "main"}}])
                 if endpoint.endswith("/actions/runs?per_page=100"):
@@ -60,7 +60,8 @@ class ProductionFixtures(unittest.TestCase):
             self.assertEqual([(item["id"], item["scope"], item["pull_requests"], item.get("overflow")) for item in result["checks"]], [("1", "head", [7], 1), ("2", "merge_group", [7, 8], 1)])
             self.assertEqual(len(result["checks"][0]["jobs"][0]["name"]), 256)
             self.assertEqual(result["reviewers"][-1]["state"], "unknown")
-            self.assertEqual(result["deliveries"], [{"id": "site:app.darkfactory.build:deploy-1", "kind": "release", "destination": "site:app.darkfactory.build", "revision": SHA, "state": "verified", "url": "https://deploy.example/1", "pull_requests": [7, 8], "verified_at": 9000}])
+            self.assertNotIn("merge", result["pull_requests"][0])
+            self.assertEqual(result["deliveries"], [{"id": "site:app.darkfactory.build:release:" + SHA, "kind": "release", "destination": "site:app.darkfactory.build", "revision": SHA, "state": "verified", "url": "https://deploy.example/1", "pull_requests": [7, 8], "verified_at": 9000}])
             self.assertEqual(len([call for call in calls if "/actions/runs/1/jobs" in call[2]]), 1)
 
     def test_customer_config_has_no_github_or_credential_fallback(self):
@@ -68,6 +69,25 @@ class ProductionFixtures(unittest.TestCase):
             result = production.collect({"repository": "o/r"})
         self.assertEqual(result["unavailable"], "host_controller_only")
         command.assert_not_called()
+
+    def test_running_reviewer_requires_matching_live_sidecar_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            journal = Path(directory) / "intake.json"
+            review_path = Path(str(journal) + ".reviews.json")
+            operation = {"pr": 7, "head": SHA, "review_operation": "review-7", "review_attempted": True}
+            review_path.write_text(json.dumps({"version": 2, "pulls": {"7:" + SHA: operation}}))
+            activity = review_path.parent / ("review-7-" + SHA) / "activity.json"
+            activity.parent.mkdir()
+            activity.write_text(json.dumps({"operation": "review-7", "pr": 7, "head": SHA, "repository": "o/r", "pid": 99, "process_start": "Sat Sep 20 12:00:00 2026", "started_at": 1000}))
+            entry = {"path": str(review_path), "repository": "o/r"}
+            with mock.patch.object(production, "process_start", return_value="Sat Sep 20 12:00:00 2026"):
+                reviewers, _, _, unavailable, _ = production.review_receipts([entry], "o/r")
+            self.assertFalse(unavailable)
+            self.assertEqual(reviewers[0]["state"], "running")
+            activity.write_text(json.dumps({"operation": "wrong", "pr": 7, "head": SHA, "repository": "o/r", "pid": 99, "process_start": "Sat Sep 20 12:00:00 2026"}))
+            with mock.patch.object(production, "process_start", return_value="Sat Sep 20 12:00:00 2026"):
+                reviewers, _, _, _, _ = production.review_receipts([entry], "o/r")
+            self.assertEqual(reviewers[0]["state"], "unknown")
 
     def test_full_pr_pages_and_actions_total_count_are_explicit_overflow(self):
         config = {"repository": "o/r", "project_id": "1" * 32, "overseer_agent_id": "2" * 32,
@@ -96,6 +116,23 @@ class ProductionFixtures(unittest.TestCase):
                 self.assertTrue(production.record(config, {"repository": "o/r"}))
             self.assertEqual(run.call_args.args[0], [str(factoryctl), "production", "observe", "--json-stdin"])
             self.assertEqual(run.call_args.kwargs["env"], {"DARK_FACTORY_SOCKET": str(home / "runtimes" / "factory.sock"), "DARK_FACTORY_OPERATOR_TOKEN_FILE": str(home / "operator.token")})
+
+    def test_record_chunks_large_observations_without_losing_health_facts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory) / "home"
+            factoryctl = Path(str(home) + ".service") / "bin" / "current" / "factoryctl"
+            factoryctl.parent.mkdir(parents=True)
+            factoryctl.write_text("")
+            config = {"factory_home": str(home), "project_id": "1" * 32}
+            observation = {"repository": "o/r", "observed_at": 1000, "unavailable": "jobs", "overflow": 3,
+                           "pull_requests": [{"number": index, "title": "x" * 1000} for index in range(1, 257)], "checks": [], "reviewers": [], "deliveries": []}
+            with mock.patch.object(production, "host_config", return_value=config), mock.patch.object(production.subprocess, "run", return_value=mock.Mock(returncode=0)) as run:
+                self.assertTrue(production.record(config, observation))
+            self.assertGreater(run.call_count, 1)
+            for call in run.call_args_list:
+                document = json.loads(call.kwargs["input"])
+                self.assertLessEqual(len(call.kwargs["input"].encode()), production.MAX_INPUT)
+                self.assertEqual({"repository": "o/r", "observed_at": 1000, "unavailable": "jobs", "overflow": 3}, {key: document["observation"][key] for key in ("repository", "observed_at", "unavailable", "overflow")})
 
 
 if __name__ == "__main__":
