@@ -186,11 +186,11 @@ test("a selected decision names the action and keeps one collapse control", () =
   assert.equal(markup.includes(">CLOSE</button>"), false);
 });
 
-test("suggested answers fill the reply without sending it", () => {
+test("a suggested answer sends on the one tap it looks like", () => {
   const calls = [];
-  const elements = consoleElements({ status: "ready", state: baseState(), selectedHumanRequest: selectedRequest({ options: ["Continue", "Stop"] }), onHumanReplyChange: (value) => calls.push(value) });
+  const elements = consoleElements({ status: "ready", state: baseState(), selectedHumanRequest: selectedRequest({ options: ["Continue", "Stop"] }), onHumanReplyChange: (value) => calls.push(value), onReplyHumanRequest: () => calls.push("sent") });
   elements.find((element) => element.type === "button" && Array.isArray(element.props.children) && element.props.children[0] === "Continue").props.onClick();
-  assert.deepEqual(calls, ["Continue"]);
+  assert.deepEqual(calls, ["Continue", "sent"], "the floor sends too: one shared control, one behaviour");
   const markup = render({ selectedHumanRequest: selectedRequest({ options: ["Continue", "Stop"] }) });
   assert.match(markup, />Continue · RECOMMENDED<\/button>/);
   assert.match(markup, />Stop<\/button>/);

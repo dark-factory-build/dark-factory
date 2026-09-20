@@ -311,7 +311,36 @@ test("REPLY sends the bounded answer once and a second press during it does noth
   });
 });
 
-test("a suggested answer fills the draft and waits for explicit reply", async () => {
+test("the question card is a native modal whose every exit clears the selection", async () => {
+  const detail = detailFor(northRequest, { options: ["Continue", "Stop"] });
+  const session = fakeSession({ detail: () => detail });
+  const manager = fakeManager([northFactory()], new Map([[NORTH, session]]));
+  const calls = [];
+  const node = { open: false, showModal() { this.open = true; calls.push("showModal"); }, close() { this.open = false; calls.push("close"); } };
+  const previous = globalThis.IS_REACT_ACT_ENVIRONMENT;
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+  let renderer;
+  try {
+    await act(async () => { renderer = create(createElement(RemoteApp, props(manager)), { createNodeMock: () => node }); });
+    await settle();
+    await act(async () => { buttons(renderer, "dfRemote__answer")[0].props.onClick(); });
+    await settle();
+    assert.deepEqual(calls, ["showModal"], "the card opens as a native modal, so Escape and the backdrop work");
+    const card = renderer.root.findByProps({ "aria-label": "Selected question" });
+    await act(async () => { button(renderer, "dfRemote__close").props.onClick(); });
+    assert.deepEqual(calls, ["showModal", "close"], "CLOSE goes through the dialog, not around it");
+    // A browser may close the dialog without asking; the card must not be left
+    // rendered-but-hidden behind an inert page.
+    await act(async () => { card.props.onClose(); });
+    await settle();
+    assert.equal(findNode(renderer.toJSON(), "dfRemote__detail"), undefined);
+  } finally {
+    if (renderer !== undefined) await act(async () => { renderer.unmount(); });
+    globalThis.IS_REACT_ACT_ENVIRONMENT = previous;
+  }
+});
+
+test("a suggested answer sends as soon as it is tapped", async () => {
   const detail = detailFor(northRequest, { options: ["Continue", "Stop"] });
   const session = fakeSession({ detail: () => detail });
   const manager = fakeManager([northFactory()], new Map([[NORTH, session]]));
@@ -320,10 +349,7 @@ test("a suggested answer fills the draft and waits for explicit reply", async ()
     const suggested = allButtons(renderer).find((control) => flat(control.props.children) === "Continue · RECOMMENDED");
     assert.ok(suggested !== undefined);
     await act(async () => { suggested.props.onClick(); });
-    assert.equal(renderer.root.findByProps({ className: "dfRemote__replyText" }).props.value, "Continue");
-    assert.equal(session.calls.reply.length, 0);
-    await act(async () => { button(renderer, "dfRemote__replyAction").props.onClick(); });
-    assert.deepEqual(session.calls.reply.map((call) => call.reply), ["Continue"]);
+    assert.deepEqual(session.calls.reply.map((call) => call.reply), ["Continue"], "one tap answers; a second, separate tap is a trap on a card that looks like a button");
   });
 });
 
