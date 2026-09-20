@@ -780,9 +780,14 @@ test("stationary tasks expose affected areas and link the existing queue and que
     humanRequestIds: index === 0 ? ["question-1"] : [],
   }));
   const markup = render({ tasks, onSelectTask() {}, onOpenQueue() {}, onSelectHumanRequest() {} });
-  assert.equal((markup.match(/data-floor-queue=/g) ?? []).length, 1);
+  assert.equal((markup.match(/data-floor-inbox="10"/g) ?? []).length, 1);
   assert.equal((markup.match(/data-work-footprint=/g) ?? []).length, 2);
-  assert.match(markup, /Open queue, 10 tasks/);
+  assert.match(markup, /Tasks, 10 waiting/);
+  // The tray is furniture: it stays when nothing waits, and says so.
+  const idle = render({ tasks: [tasks[0]], onSelectTask() {}, onOpenQueue() {} });
+  assert.match(idle, /data-floor-inbox="0"/);
+  assert.match(idle, /In-tray · nothing waiting/);
+  assert.doesNotMatch(idle, /QUEUE/);
   assert.match(markup, /data-workbench-task-id="task-0"/);
   assert.match(markup, /data-human-request-id="question-1"/);
   assert.match(markup, /aria-label="Question from Builder"/);

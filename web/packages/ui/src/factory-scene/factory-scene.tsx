@@ -298,7 +298,7 @@ export function FactoryScene({ topology, detailNodes, workers, appearance = DEFA
   const commonBottom = Math.max(...seats.map(({ y }) => y)) + 24;
   const commonWidth = Math.max(...seats.map(({ x }) => x)) + 24 - ROOM_LEFT;
   const boardTop = Math.max(layout.height, commonBottom, ...placements.map((placement) => placement.y + 24)) + PADDING;
-  const sceneHeight = boardTop + (tasks.some((task) => task.status === "queued") ? 48 : 0) + PADDING;
+  const sceneHeight = boardTop + PADDING;
   const affected = new Map(layout.rooms.map((room) => [room.id, tasks.filter((order) => order.status === "running" && (order.displayRoomIds ?? order.roomIds).includes(room.id))]));
   const enterable = new Set(enterableRoomIds);
   const cabling = useMemo(() => wires(layout, topology), [layout, topology]);
@@ -419,14 +419,18 @@ export function FactoryScene({ topology, detailNodes, workers, appearance = DEFA
           </g>)}
         </g>;
       })}
+      <g data-floor-inbox={queued} className="dfFactoryScene__target" transform={`translate(${ROOM_LEFT + commonWidth - 30} ${layout.restingTop - 21})`}
+        data-tooltip={queued === 0 ? "In-tray · nothing waiting" : `In-tray · ${queued} waiting`}
+        aria-label={queued === 0 ? "Tasks, nothing waiting" : `Tasks, ${queued} waiting`}
+        {...sceneAction(onOpenQueue)}>
+        <rect className="dfFactoryScene__focus" x="-4" y="-12" width="28" height="24" rx="2" fill="transparent" />
+        {[...Array(Math.min(queued, 3))].map((_, index) => <rect key={index} x="2" y={-1 - index * 3} width="16" height="3" fill="#d9d2b5" stroke={tasks.some((task) => task.id === selectedTaskId && task.status === "queued") ? "#80ddff" : "#a6a087"} />)}
+        <path d="M0 2h20v4H0z M3 6v3 M17 6v3" fill="#5d5a4c" stroke="#8c8871" />
+      </g>
       {layout.rooms.length === 0 ? <text x={ROOM_LEFT} y="24" fill="#9db1be" fontFamily="ui-monospace, monospace" fontSize="10">EMPTY FLOOR</text> : null}
 
       <SceneWorkers furniture={tables} layout={layout} placements={placements} nodes={nodes} workers={workers} tasks={tasks} connected={connected} animate={appearance.animation !== "off"} selectedWorkerId={selectedWorkerId} onSelectWorker={onSelectWorker} onSelectHumanRequest={onSelectHumanRequest} />
 
-      {queued === 0 ? null : <g data-floor-queue="" {...sceneAction(onOpenQueue)} aria-label={`Open queue, ${queued} tasks`}>
-        {[...Array(Math.min(queued, 3))].map((_, index) => <rect key={index} x={ROOM_LEFT + index * 3} y={boardTop + index * 3} width="24" height="28" fill="#d9d2b5" stroke={tasks.some((task) => task.id === selectedTaskId && task.status === "queued") ? "#80ddff" : "#a6a087"} />)}
-        <text x={ROOM_LEFT + 40} y={boardTop + 18} fill="#b9cad5" fontFamily="ui-monospace, monospace" fontSize="10">QUEUE · {queued}</text>
-      </g>}
 
     </svg>
     {tooltip === undefined ? null : <div ref={tooltipElement} className="dfFactoryTooltip" role="tooltip" style={{ left: tooltip.x, top: tooltip.y, maxHeight: tooltip.room }}>{tooltip.text}</div>}
