@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -618,7 +619,10 @@ func Build(request Request) (Launch, error) {
 			taskDelivery: TaskDeliveryFD11,
 		}, nil
 	case kernel.ProviderClaudeCode:
-		argv := []string{path, "--dangerously-skip-permissions"}
+		// No user, project or local settings are read: a checkout's own
+		// .claude/settings.json could otherwise merge rules that widen the
+		// boundary below. The account login lives outside those files.
+		argv := []string{path, "--permission-mode", "dontAsk", "--setting-sources", ""}
 		if request.role == kernel.RoleWorker {
 			id, resume, err := claudeSessionSelection(request.runtime, request.workingDirectory, request.agentID, request.taskIncarnationID)
 			if err != nil {
@@ -660,13 +664,16 @@ func Build(request Request) (Launch, error) {
 			servers["maintainer"] = map[string]string{"command": bridge}
 			environment = append(environment, "DARK_FACTORY_MAINTAINER_BRIDGE="+bridge)
 		}
-		if len(servers) > 0 {
-			config, err := json.Marshal(map[string]any{"mcpServers": servers})
-			if err != nil || len(config) > runner.MaxArgumentBytes {
-				return Launch{}, ErrInvalid
-			}
-			argv = append(argv, "--mcp-config", string(config))
+		settings, err := claudeSettings(request, slices.Sorted(maps.Keys(servers)))
+		if err != nil {
+			return Launch{}, err
 		}
+		argv = append(argv, "--settings", settings)
+		config, err := json.Marshal(map[string]any{"mcpServers": servers})
+		if err != nil || len(config) > runner.MaxArgumentBytes {
+			return Launch{}, ErrInvalid
+		}
+		argv = append(argv, "--mcp-config", string(config))
 		return Launch{
 			executable: request.installation.executable, argv: argv,
 			environment: environment, taskDelivery: TaskDeliveryStartupTerminal,
@@ -747,44 +754,56 @@ func Build(request Request) (Launch, error) {
 // The provider keeps its account/model configuration, but local commands get
 // only the Change, disposable runtime paths and the attempt API inputs. Codex's
 // minimal platform profile still includes its documented system/temp exceptions.
-func codexPermissions(request Request) (string, error) {
-	entries := []string{`":root"="deny"`, `":minimal"="read"`}
+// grant is one path a native provider's local commands may reach.
+type grant struct {
+	path  string
+	write bool
+}
+
+// sandboxGrants is the single filesystem grant both native providers receive:
+// the Change, disposable runtime paths, the attempt API inputs and the frozen
+// toolchain. Each provider renders it in its own sandbox dialect.
+func sandboxGrants(request Request) []grant {
+	var grants []grant
 	writePaths := []string{request.workingDirectory, request.runtime.home, request.runtime.temp}
 	for i, path := range writePaths {
-		if slices.Contains(writePaths[:i], path) {
-			continue
+		if !slices.Contains(writePaths[:i], path) {
+			grants = append(grants, grant{path, true})
 		}
-		entries = append(entries, tomlBasicString(path)+`="write"`)
 	}
 	for _, path := range []string{request.installation.executable.Path(), request.runtime.factoryctl, request.runtime.token, request.runtime.socket} {
-		entries = append(entries, tomlBasicString(path)+`="read"`)
+		grants = append(grants, grant{path, false})
 	}
 	// Node/Corepack reads the system OpenSSL configuration before dispatch.
 	// Permit this file, not the surrounding directory or operator configuration.
-	entries = append(entries, tomlBasicString("/System/Library/OpenSSL/openssl.cnf")+`="read"`)
+	grants = append(grants, grant{"/System/Library/OpenSSL/openssl.cnf", false})
 	for _, root := range filepath.SplitList(request.runtime.toolchainReadRoots) {
-		entries = append(entries, tomlBasicString(root)+`="read"`)
+		grants = append(grants, grant{root, false})
 	}
 	if request.runtime.localCILeaseDir != "" {
-		entries = append(entries, tomlBasicString(request.runtime.localCILeaseDir)+`="write"`)
 		// The lease wrapper uses macOS Ruby's built-in setsid for its owned
 		// process group. Grant only the interpreter, not a standard-library tree.
-		entries = append(entries, tomlBasicString("/usr/bin/ruby")+`="read"`)
+		grants = append(grants, grant{request.runtime.localCILeaseDir, true}, grant{"/usr/bin/ruby", false})
 	}
 	if request.runtime.gitCommonDir != "" {
-		access := "read"
-		if request.runtime.gitCommonDirWritable && request.runtime.gitCommonDir != request.runtime.sourceReviewGitDir {
-			access = "write"
-		}
-		entries = append(entries, tomlBasicString(request.runtime.gitCommonDir)+`="`+access+`"`)
+		grants = append(grants, grant{request.runtime.gitCommonDir, request.runtime.gitCommonDirWritable && request.runtime.gitCommonDir != request.runtime.sourceReviewGitDir})
 	}
 	for _, path := range []string{request.runtime.sourceReviewPath, request.runtime.sourceReviewGitDir} {
-		if path != "" {
-			if path == request.workingDirectory || path == request.runtime.gitCommonDir {
-				continue
-			}
-			entries = append(entries, tomlBasicString(path)+`="read"`)
+		if path != "" && path != request.workingDirectory && path != request.runtime.gitCommonDir {
+			grants = append(grants, grant{path, false})
 		}
+	}
+	return grants
+}
+
+func codexPermissions(request Request) (string, error) {
+	entries := []string{`":root"="deny"`, `":minimal"="read"`}
+	for _, grant := range sandboxGrants(request) {
+		access := "read"
+		if grant.write {
+			access = "write"
+		}
+		entries = append(entries, tomlBasicString(grant.path)+`="`+access+`"`)
 	}
 	// Codex merges profile tables. Use the existing private runtime identity
 	// rather than a shared name that could inherit an account profile.
@@ -793,6 +812,59 @@ func codexPermissions(request Request) (string, error) {
 		return "", ErrInvalid
 	}
 	return value, nil
+}
+
+// claudeSettings confines a Claude Code run to the same grants Codex gets.
+// dontAsk refuses every tool call no rule allows, which covers the file
+// tools; the OS sandbox covers Bash, where user data is unreadable except for
+// the granted paths. Network stays open, as it is for Codex; no Unix socket is.
+// Denying every read crashes ordinary tools on macOS, so the denied regions
+// are where user data lives, with the grants and the CLI's own per-user
+// scratch directory (where it captures Bash output) re-allowed. System
+// locations stay readable, as they are under Codex's minimal profile.
+// ponytail: a home or volume mounted elsewhere needs its own entry.
+var claudeDeniedReads = []string{"//Users", "//Volumes", "//Network", "//private/tmp", "//private/var/folders", "//private/var/root"}
+
+func claudeSettings(request Request, servers []string) (string, error) {
+	allow := []string{"Bash", "WebFetch", "WebSearch"}
+	for _, server := range servers {
+		allow = append(allow, "mcp__"+server)
+	}
+	read, write := []string{}, []string{}
+	// The attempt socket and its token are withheld: outcomes go through the
+	// factory_attempt tool, a child of the CLI outside this sandbox, so Bash
+	// and the file tools get no route to the attempt API at all.
+	grants := slices.DeleteFunc(sandboxGrants(request), func(given grant) bool {
+		return given.path == request.runtime.token || given.path == request.runtime.socket
+	})
+	// Claude names files by their resolved path, and a Change is reached
+	// through a link, so each grant is allowed under both spellings.
+	for _, given := range slices.Clone(grants) {
+		if resolved, err := filepath.EvalSymlinks(given.path); err == nil && resolved != given.path {
+			grants = append(grants, grant{resolved, given.write})
+		}
+	}
+	for _, grant := range grants {
+		rule := "/" + grant.path // a leading "//" is Claude's absolute path
+		read = append(read, rule)
+		allow = append(allow, "Read("+rule+")", "Read("+rule+"/**)")
+		if grant.write {
+			write = append(write, rule)
+			allow = append(allow, "Edit("+rule+"/**)")
+		}
+	}
+	settings, err := json.Marshal(map[string]any{
+		"permissions": map[string]any{"allow": allow},
+		"sandbox": map[string]any{
+			"enabled": true, "failIfUnavailable": true, "allowUnsandboxedCommands": false, "autoAllowBashIfSandboxed": true,
+			"filesystem": map[string]any{"allowWrite": write, "denyRead": claudeDeniedReads, "allowRead": append(read, fmt.Sprintf("//private/tmp/claude-%d", os.Getuid()))},
+			"network":    map[string]any{"allowedDomains": []string{"*"}, "allowLocalBinding": true},
+		},
+	})
+	if err != nil || len(settings) > runner.MaxArgumentBytes {
+		return "", ErrInvalid
+	}
+	return string(settings), nil
 }
 
 func codexPermissionName(runtime RuntimePaths) string {
@@ -1001,9 +1073,10 @@ func (runtime RuntimePaths) environment(kind kernel.Provider) []string {
 	// A run whose agent selects an account points that CLI at the account's
 	// own configuration directory. No account leaves the environment exactly
 	// as it was.
-	switch kind {
-	case kernel.ProviderCodex:
-		environment = append(environment, "CODEX_HOME="+codexConfigHome(runtime),
+	// Both native providers confine local commands to the grants above, so
+	// build caches live in the private runtime home rather than the account's.
+	if kind != kernel.ProviderShell {
+		environment = append(environment,
 			"GOCACHE="+filepath.Join(runtime.home, ".cache", "go-build"),
 			"GOPATH="+filepath.Join(runtime.home, "go"),
 			"GOMODCACHE="+filepath.Join(runtime.home, "go", "pkg", "mod"),
@@ -1012,6 +1085,10 @@ func (runtime RuntimePaths) environment(kind kernel.Provider) []string {
 			"COREPACK_HOME="+filepath.Join(runtime.home, ".cache", "corepack"),
 			"npm_config_cache="+filepath.Join(runtime.home, ".cache", "npm"),
 			"XDG_CACHE_HOME="+filepath.Join(runtime.home, ".cache"))
+	}
+	switch kind {
+	case kernel.ProviderCodex:
+		environment = append(environment, "CODEX_HOME="+codexConfigHome(runtime))
 	case kernel.ProviderClaudeCode:
 		// Only a directory beside the default one is named. The default is
 		// what the CLI already reaches through HOME, and its OAuth account
