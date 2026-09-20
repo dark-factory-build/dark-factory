@@ -10,7 +10,13 @@ import subprocess
 import sys
 
 
-def observe(home, expected_sha):
+def runtime_status_matches_revision(status, revision):
+    build = status.get('build') if isinstance(status, dict) else None
+    return (isinstance(build, dict) and build.get('source') == revision
+            and status.get('ready') is True)
+
+
+def observe(home, expected_sha=None):
     binary_root = Path(str(home) + '.service') / 'bin' / 'current'
     go = shutil.which('go')
     if go is None:
@@ -33,10 +39,10 @@ def observe(home, expected_sha):
         raise ValueError('installed binaries have different build receipts')
     env = dict(os.environ, DARK_FACTORY_SOCKET=str(home / 'runtimes' / 'factory.sock'), DARK_FACTORY_OPERATOR_TOKEN_FILE=str(home / 'operator.token'))
     status = json.loads(subprocess.run([str(binary_root / 'factoryctl'), 'web', 'status'], env=env, check=True, capture_output=True, text=True, timeout=15).stdout)
-    build = status.get('build')
-    if not isinstance(build, dict) or build.get('source') != expected_sha:
-        raise ValueError('running daemon build identity disagrees with requested source')
-    return {'sha': revisions.pop(), 'healthy': status.get('ready') is True, 'daemon_source': build['source']}
+    revision = revisions.pop()
+    if not runtime_status_matches_revision(status, revision):
+        raise ValueError('running daemon build identity disagrees with installed source')
+    return {'sha': revision, 'healthy': True, 'daemon_source': revision}
 
 
 if __name__ == '__main__':

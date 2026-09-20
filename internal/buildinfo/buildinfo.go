@@ -43,12 +43,16 @@ func VCSRevision() string {
 	if !ok {
 		return ""
 	}
+	revision := ""
 	for _, setting := range information.Settings {
+		if setting.Key == "vcs.modified" && setting.Value != "false" {
+			return ""
+		}
 		if setting.Key == "vcs.revision" && validSource(setting.Value) {
-			return setting.Value
+			revision = setting.Value
 		}
 	}
-	return ""
+	return revision
 }
 
 func (identity Identity) Version() string { return identity.version }
