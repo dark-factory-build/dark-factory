@@ -203,7 +203,7 @@ test("the pure scene model feeds a deterministic SVG renderer", () => {
   assert.equal(first.includes(">STAGED</text>"), false);
   assert.match(first, /data-room-id="src"/);
   assert.match(first, /package · subtree/);
-  assert.doesNotMatch(first, /dfRoomDetails|Inspect room|PACKAGE · SUBTREE/);
+  assert.match(first, /Inspect room/);
   const compact = renderToStaticMarkup(createElement(FactoryScene, {
     topology: { digest: "compact", nodes: [{ id: "p", path: ".", label: "Project", kind: "repository", sizeBucket: "large" }] },
     workers: [], omittedLocations: 1,
@@ -784,7 +784,7 @@ test("narrow bays truncate full-width titles while retaining their accessible na
     const nodes = ["a", "b"].map((id) => ({ ...inventoryTopology.nodes[0], id, path: ".", label }));
     const markup = render({ topology: { digest: "wide-titles", nodes }, workers: [] });
     assert.match(markup, new RegExp(`>${glyph.repeat(6)}…</text>`));
-    assert.match(markup, new RegExp(`aria-label="${label}`), "full title remains accessible");
+    assert.match(markup, new RegExp(`aria-label="Inspect ${label}`), "full title remains accessible");
     assert.doesNotMatch(markup, new RegExp(`>${label}</text>`));
   }
 });
@@ -815,7 +815,7 @@ test("pictured contents and occupied surface slots leave door routes clear in ev
   }
 });
 
-test("compact tooltips open on hover, focus and tap and dismiss without a detail panel", async () => {
+test("compact tooltips open on hover, focus and tap without opening component details", async () => {
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   const priorWindow = globalThis.window;
   const priorDocument = globalThis.document;
@@ -848,7 +848,7 @@ test("compact tooltips open on hover, focus and tap and dismiss without a detail
     await act(async () => map.props.onPointerOver({ target: { closest: () => ({ querySelector: () => null, getBoundingClientRect: () => ({ left: 10, top: 145, bottom: 169 }), getAttribute: () => target.props["data-tooltip"] }) } }));
     const tight = renderer.root.findByProps({ role: "tooltip" }).props.style;
     assert.ok(tight.top >= 169 && tight.top + tight.maxHeight <= 312, `crammed tooltip must clear its target: ${JSON.stringify(tight)}`);
-    assert.equal(renderer.root.findAllByType("select").length, 0);
+    assert.equal(renderer.root.findAllByType("select").length, 1);
     assert.equal(renderer.root.findAllByType("table").length, 0);
   } finally {
     await act(async () => renderer?.unmount());
@@ -982,4 +982,28 @@ test("dependencies are cabled between shown rooms, routes light on inspection, a
     }
     assert.match(renderer.root.findAll((node) => node.props["data-tooltip"]?.includes("Wired to"))[0].props["data-tooltip"], /Wired to (lib|src|hidden)$/);
   } finally { globalThis.window = priorWindow; }
+});
+
+test("component and dependency selection inspect every supplied link without navigating", async () => {
+  const links = Array.from({ length: 10 }, (_, index) => ({ nodeId: `hidden-${index}`, label: `Hidden ${index}`, path: `area-${index}`, direction: "to", weight: 1 }));
+  const root = { ...topology.nodes[0], components: [{ id: "hidden-0", label: "Hidden 0" }], dependencies: { omitted: 3, links } };
+  const detailNodes = new Map([root, ...links.map((link) => ({ ...root, id: link.nodeId, label: link.label, path: link.path, dependencies: { omitted: 0, links: [] } }))].map((node) => [node.id, node]));
+  const entered = [];
+  let tree;
+  await act(async () => { tree = create(createElement(FactoryScene, { topology: { ...topology, nodes: [root] }, detailNodes, workers: [], onEnterRoom: (id) => entered.push(id) })); });
+  const select = () => tree.root.findByProps({ "aria-label": "Inspect room" });
+  const details = () => tree.root.findByProps({ "aria-label": "Room details" });
+  await act(async () => tree.root.findByProps({ "aria-label": `Inspect ${root.label}` }).props.onKeyDown({ key: "Enter", preventDefault() {} }));
+  const dependencies = details().findAllByType("li").filter((item) => item.children.includes("Depends on "));
+  assert.equal(dependencies.length, 10);
+  await act(async () => dependencies[9].findByType("button").props.onClick());
+  assert.equal(select().props.value, "hidden-9");
+  assert.deepEqual(entered, []);
+  assert.equal(tree.root.findAllByProps({ "data-room-id": root.id }).length, 1);
+  await act(async () => details().findAllByType("button").find((button) => button.children.join("") === "Hidden 0").props.onClick());
+  assert.equal(select().props.value, "hidden-0");
+  assert.deepEqual(entered, []);
+  await act(async () => details().findAllByType("button").find((button) => button.children.join("") === "Open contents").props.onClick());
+  assert.deepEqual(entered, ["hidden-0"]);
+  await act(async () => tree.unmount());
 });

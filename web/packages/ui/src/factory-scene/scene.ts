@@ -89,7 +89,7 @@ export function compareText(left: string, right: string) {
 export function layoutScene(topology: SceneTopology): SceneLayout {
   const nodes = [...topology.nodes].sort((left, right) =>
     compareText(left.project?.name ?? "", right.project?.name ?? "") || compareText(left.project?.id ?? "", right.project?.id ?? "")
-    || compareText(left.path, right.path) || compareText(left.id, right.id));
+    || compareText(left.path, right.path) || compareText(left.label, right.label) || compareText(left.id, right.id));
   const groups = new Map<string, SceneNode[]>();
   for (const node of nodes) groups.set(node.project?.id ?? "", [...(groups.get(node.project?.id ?? "") ?? []), node]);
   const widestGroup = Math.max(1, ...[...groups.values()].map((group) => group.length));

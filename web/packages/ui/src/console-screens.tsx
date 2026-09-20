@@ -16,6 +16,10 @@ function shortID(value: string): string {
   return value.slice(0, 8);
 }
 
+function projectLabel(state: StateView | undefined, projectID: string): string {
+  return state?.projects.get(projectID)?.name ?? `project ${shortID(projectID)}`;
+}
+
 /** The phone's floor: every agent as its own sprite, with what it is doing. */
 export function AgentStrip({ state, ask }: { state: StateView | undefined; ask?: (agentId: string) => (() => void) | undefined }) {
   return (
@@ -31,7 +35,7 @@ export function AgentStrip({ state, ask }: { state: StateView | undefined; ask?:
             const cell = (
               <>
                 <AgentSprite agent={agent} activity={agentActivity(agent, state)} />
-                <span className="dfConsoleStrip__agentName">{agent.name}</span>
+                <span className="dfConsoleStrip__agentName">{agent.name} · {projectLabel(state, agent.project_id)}</span>
                 <span className="dfConsoleStrip__agentPhase">{status === "needs-you" ? "! needs you" : status}</span>
               </>
             );
@@ -75,7 +79,7 @@ export function StageMeter({ stage }: { stage: TaskItem["status"] }) {
 /** The floor shares the normal task detail and HumanRequest routes. */
 export function FactoryFloor({
   state, topologies, runPaths, lastRunPaths, selectedAgentId, onSelectAgent,
-  onSelectHumanRequest, selectedTaskId, onSelectTask, onOpenQueue, connected = true, floorAppearance,
+  onSelectHumanRequest, selectedTaskId, onSelectTask, onOpenQueue, connected = true, floorAppearance, projectId, onProject,
 }: {
   state: StateView | undefined;
   topologies: ReadonlyMap<string, TopologyView> | undefined;
@@ -89,13 +93,20 @@ export function FactoryFloor({
   onSelectHumanRequest?: (request: HumanRequestItem) => void;
   connected?: boolean;
   floorAppearance: FloorAppearance;
+  projectId?: string;
+  onProject?: (projectId: string | undefined) => void;
 }) {
   const [{ scopeId, page }, setView] = useState<{ scopeId?: string; page: number }>({ page: 0 });
-  const setScopeId = (scopeId: string | undefined) => setView({ scopeId, page: 0 });
   // Snapshot decoding replaces the projects Map even when only live work changed.
   const projectsKey = JSON.stringify([...state?.projects.values() ?? []].map(({ id, name }) => [id, name]).sort(([left], [right]) => left!.localeCompare(right!)));
   const prepared = useMemo(() => prepareFloor(state?.projects, topologies), [projectsKey, topologies]);
-  const selected = useMemo(() => selectFloor(prepared, scopeId, page), [prepared, scopeId, page]);
+  const rootId = prepared.hierarchies.find((hierarchy) => hierarchy.project.id === projectId)?.projectRoom.id;
+  const setScopeId = (scopeId: string | undefined) => {
+    setView({ scopeId, page: 0 });
+    onProject?.(scopeId === undefined ? undefined : prepared.roomByID.get(scopeId)?.project?.id);
+  };
+  const effectiveScope = onProject !== undefined && prepared.roomByID.get(scopeId ?? "")?.project?.id !== projectId ? rootId : scopeId ?? rootId;
+  const selected = useMemo(() => selectFloor(prepared, effectiveScope, effectiveScope === scopeId ? page : 0), [prepared, effectiveScope, scopeId, page]);
   const scene = useMemo(() => projectFloor(state, selected, runPaths, lastRunPaths), [state, selected, runPaths, lastRunPaths]);
   useEffect(() => {
     if (scopeId !== scene.navigation.scopeId || page !== scene.navigation.page) setView({ scopeId: scene.navigation.scopeId, page: scene.navigation.page });
@@ -126,6 +137,7 @@ export function FactoryFloor({
       selectedWorkerId={selectedAgentId}
       selectedTaskId={selectedTaskId}
       topology={scene.topology}
+      detailNodes={prepared.roomByID}
       workers={scene.workers}
       connected={connected}
       tasks={scene.tasks}
@@ -217,11 +229,11 @@ function AgentRow({
   const task = agentCurrentTask(agent, state);
   let queued = 0;
   for (const item of state.tasks.values()) if (item.assigned_agent_id === agent.id && item.status === "queued") queued += 1;
-  const label = `${agent.name}: ${activity}`;
+  const label = `${agent.name}: ${activity} · ${projectLabel(state, agent.project_id)}`;
   const cells = (
     <>
       <AgentSprite agent={agent} activity={agentActivity(agent, state)} />
-      <span className="dfConsoleRow__title">{agent.name}</span>
+      <span className="dfConsoleRow__title">{agent.name} · {projectLabel(state, agent.project_id)}</span>
       <span className="dfAgentList__provider">{agent.effective_model === "" ? agent.provider : `${agent.provider} · ${agent.effective_model}`}</span>
       <span className="dfAgentList__activity">{agent.archived ? "archived" : activity === "needs-you" ? "! needs you" : activity}</span>
       <span className="dfConsoleRow__agent">{task?.title ?? "no current task"}</span>
