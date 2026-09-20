@@ -194,7 +194,7 @@ export type RunPathsView = Readonly<{ agentId: string; runId: string; paths: rea
 export type TaskListView = Readonly<{ agentId: string; head: bigint; total: bigint; tasks: readonly TaskItem[]; hasMore: boolean }>;
 type InvitePending = { resolve: (value: RemoteInvite) => void; reject: (error: unknown) => void };
 type PushPending = { resolve: () => void; reject: (error: unknown) => void };
-type AccountPending = { operation?: ProjectContentOperation; kind: "ATTACHMENT_RETENTION_RESULT" | "PROJECT_CONTENT_RESULT" | "ACCOUNTS" | "ACCOUNT_LINK_RESULT" | "ACCOUNT_UPDATE_RESULT" | "BROWSER_CLIENTS" | "BROWSER_CLIENT_REVOKE_RESULT" | "PROJECT_CREATE_RESULT" | "REPOSITORIES" | "REPOSITORY_MUTATE_RESULT"; accountId?: string; entityId?: string; expectedRevision?: bigint; action?: RepositoryMutateBody["action"]; resolve: (value: never) => void; reject: (error: unknown) => void };
+type AccountPending = { operation?: ProjectContentOperation; kind: "ATTACHMENT_RETENTION_RESULT" | "FACTORY_DISPATCH_RESULT" | "PROJECT_CONTENT_RESULT" | "ACCOUNTS" | "ACCOUNT_LINK_RESULT" | "ACCOUNT_UPDATE_RESULT" | "BROWSER_CLIENTS" | "BROWSER_CLIENT_REVOKE_RESULT" | "PROJECT_CREATE_RESULT" | "REPOSITORIES" | "REPOSITORY_MUTATE_RESULT"; accountId?: string; entityId?: string; expectedRevision?: bigint; enabled?: boolean; action?: RepositoryMutateBody["action"]; resolve: (value: never) => void; reject: (error: unknown) => void };
 
 type GitHubPending = { resolve: (value: GitHubConnectionResult) => void; reject: (error: unknown) => void };
 
@@ -206,6 +206,7 @@ export type BrowserClientsView = Readonly<{ clients: readonly BrowserClientView[
 export type DiscoveredAccountView = AccountsBody["accounts"][number];
 export type AccountLinkResult = Readonly<{ accountId: string; revision: bigint }>;
 export type AccountUpdateResult = Readonly<{ accountId: string; revision: bigint }>;
+export type FactoryDispatchResult = Readonly<{ revision: bigint; enabled: boolean }>;
 export type RepositoryView = Readonly<RepositoryItem>;
 export type ProjectCreateResult = Readonly<{ projectId: string; revision: bigint }>;
 export type RepositoryMutation =
@@ -516,9 +517,15 @@ export class BrowserSession {
     return result.enabled;
   }
 
+  /** Enable or pause factory scheduling at an exact durable factory revision. */
+  async setDispatch(request: { expectedRevision: bigint; enabled: boolean }): Promise<FactoryDispatchResult> {
+    if (request.expectedRevision < 1n || request.expectedRevision > MAX_SQLITE_INTEGER) return Promise.reject(new SessionError("invalid_request"));
+    return this.#accountRequest<FactoryDispatchResult>("FACTORY_DISPATCH_RESULT", CAPABILITIES.administration, "factory-dispatch", (id) => encodeClientControl({ type: "FACTORY_DISPATCH", id, body: { expected_revision: request.expectedRevision, enabled: request.enabled } }), { expectedRevision: request.expectedRevision, enabled: request.enabled });
+  }
+
   projectContent(operation: ProjectContentOperation, input: ProjectContentInput): Promise<ProjectContentOutput> {
     try { projectContentOperation(operation); } catch (error) { return Promise.reject(error); }
-    const write = operation === "create" || operation === "revise" || operation === "deprecate" || operation === "evidence" || operation === "attach" || operation === "outcome_write";
+    const write = operation === "create" || operation === "revise" || operation === "deprecate" || operation === "evidence" || operation === "attach" || operation === "outcome_write" || (operation as string) === "mission_create";
     const capability = CAPABILITIES.private_human_request_detail | (write ? CAPABILITIES.human_actions : 0);
     if ((this.#capabilities & capability) !== capability) return Promise.reject(new SessionError("unauthorized"));
     return this.#accountRequest("PROJECT_CONTENT_RESULT", capability, "project-content", (id) => encodeClientControl({ type: "PROJECT_CONTENT", id, body: { operation, input } }), { operation });
@@ -915,7 +922,7 @@ export class BrowserSession {
       pending.resolve();
       return;
     }
-    if (frame.type === "ATTACHMENT_RETENTION_RESULT" || frame.type === "PROJECT_CONTENT_RESULT" || frame.type === "ACCOUNTS" || frame.type === "ACCOUNT_LINK_RESULT" || frame.type === "ACCOUNT_UPDATE_RESULT" || frame.type === "BROWSER_CLIENTS" || frame.type === "BROWSER_CLIENT_REVOKE_RESULT" || frame.type === "PROJECT_CREATE_RESULT" || frame.type === "REPOSITORIES" || frame.type === "REPOSITORY_MUTATE_RESULT") {
+    if (frame.type === "ATTACHMENT_RETENTION_RESULT" || frame.type === "FACTORY_DISPATCH_RESULT" || frame.type === "PROJECT_CONTENT_RESULT" || frame.type === "ACCOUNTS" || frame.type === "ACCOUNT_LINK_RESULT" || frame.type === "ACCOUNT_UPDATE_RESULT" || frame.type === "BROWSER_CLIENTS" || frame.type === "BROWSER_CLIENT_REVOKE_RESULT" || frame.type === "PROJECT_CREATE_RESULT" || frame.type === "REPOSITORIES" || frame.type === "REPOSITORY_MUTATE_RESULT") {
       this.#accountResult(frame);
       return;
     }
@@ -1316,7 +1323,7 @@ export class BrowserSession {
 
 
   /** One shape for account requests; updates also correlate the returned revision. */
-  #accountRequest<T>(kind: AccountPending["kind"], capability: number, prefix: string, encode: (id: string) => string, correlation?: Pick<AccountPending, "accountId" | "entityId" | "expectedRevision" | "operation" | "action">): Promise<T> {
+  #accountRequest<T>(kind: AccountPending["kind"], capability: number, prefix: string, encode: (id: string) => string, correlation?: Pick<AccountPending, "accountId" | "entityId" | "expectedRevision" | "enabled" | "operation" | "action">): Promise<T> {
     try { this.#ensureLive(); } catch (error) { return Promise.reject(error); }
     if (!this.#authenticated) return Promise.reject(new SessionError("unauthorized"));
     if ((this.#capabilities & capability) === 0) return Promise.reject(new SessionError("unauthorized"));
@@ -1329,10 +1336,14 @@ export class BrowserSession {
     return result;
   }
 
-  #accountResult(frame: Extract<ServerControlFrame, { type: "ATTACHMENT_RETENTION_RESULT" | "PROJECT_CONTENT_RESULT" | "ACCOUNTS" | "ACCOUNT_LINK_RESULT" | "ACCOUNT_UPDATE_RESULT" | "BROWSER_CLIENTS" | "BROWSER_CLIENT_REVOKE_RESULT" | "PROJECT_CREATE_RESULT" | "REPOSITORIES" | "REPOSITORY_MUTATE_RESULT" }>): void {
+  #accountResult(frame: Extract<ServerControlFrame, { type: "ATTACHMENT_RETENTION_RESULT" | "FACTORY_DISPATCH_RESULT" | "PROJECT_CONTENT_RESULT" | "ACCOUNTS" | "ACCOUNT_LINK_RESULT" | "ACCOUNT_UPDATE_RESULT" | "BROWSER_CLIENTS" | "BROWSER_CLIENT_REVOKE_RESULT" | "PROJECT_CREATE_RESULT" | "REPOSITORIES" | "REPOSITORY_MUTATE_RESULT" }>): void {
     const pending = this.#accountPending.get(frame.id);
     if (pending === undefined || pending.kind !== frame.type) throw new ProtocolError("malformed");
     if (frame.type === "ATTACHMENT_RETENTION_RESULT") { this.#accountPending.delete(frame.id); pending.resolve(Object.freeze(frame.body) as never); return; }
+    if (frame.type === "FACTORY_DISPATCH_RESULT") {
+      if (pending.expectedRevision === undefined || pending.enabled === undefined || frame.body.revision !== pending.expectedRevision + 1n || frame.body.enabled !== pending.enabled) throw new ProtocolError("malformed");
+      this.#accountPending.delete(frame.id); pending.resolve(Object.freeze(frame.body) as never); return;
+    }
     if (frame.type === "PROJECT_CONTENT_RESULT") {
       if (pending.operation !== frame.body.operation) throw new ProtocolError("malformed");
       this.#accountPending.delete(frame.id);

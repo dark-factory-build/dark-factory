@@ -159,6 +159,18 @@
       "fixture": "attachment_retention_result.json"
     },
     {
+      "type": "FACTORY_DISPATCH",
+      "direction": "client",
+      "id": "required",
+      "fixture": "factory_dispatch.json"
+    },
+    {
+      "type": "FACTORY_DISPATCH_RESULT",
+      "direction": "server",
+      "id": "required",
+      "fixture": "factory_dispatch_result.json"
+    },
+    {
       "type": "TASK_ATTACHMENT",
       "direction": "client",
       "id": "required",
