@@ -320,11 +320,11 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 		if input.Kind == "mission" {
 			items := make([]map[string]any, 0, len(page.Items))
 			for _, item := range page.Items {
-				objective := []rune(item.Document.Objective)
+				objective := []rune(item.Objective)
 				if len(objective) > 240 {
 					objective = append(objective[:240], '…')
 				}
-				items = append(items, map[string]any{"id": item.ID.String(), "objective": string(objective), "state": item.Document.State, "stale": item.Stale})
+				items = append(items, map[string]any{"id": item.ID.String(), "objective": string(objective), "state": item.State, "stale": item.Stale})
 			}
 			output = map[string]any{"items": items, "next_offset": page.NextOffset}
 			break
