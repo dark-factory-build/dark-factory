@@ -21,6 +21,9 @@ export type Cat = ScenePoint & Readonly<{
   pettedFor?: number;
 }>;
 
+/** A well-mixed number from a weak one: every bit of the result depends on every bit given. */
+const roll = (value: number) => { value = Math.imul(value ^ value >>> 16, 0x85ebca6b); value = Math.imul(value ^ value >>> 13, 0xc2b2ae35); return (value ^ value >>> 16) >>> 0; };
+
 const CAT_EPOCH = 45_000;
 const HOP = 300;
 const PROWL = 48;
@@ -45,9 +48,9 @@ export function catAt(row: readonly Seat[], at: number | undefined): Cat | undef
   const gaps = row.slice(0, -1);
   if (gaps.length === 0) return undefined;
   if (at === undefined || !Number.isFinite(at) || at < 0) return { ...catBed(row)!, frame: "sleep.0", west: false, moving: false };
-  // The pick does not depend on how long the table is: someone sitting down or leaving moves the cat only off
-  // a gap that is gone, or off the last gap of the shorter table, where picks past its end are gathered.
-  const haunt = (epoch: number) => { const pick = hash(`cat ${epoch}`) % 16; return pick % 3 === 0 ? { ...catBed(row)!, y: row[0]!.y, behind: true } : { ...gaps[Math.min(pick >> 1, gaps.length - 1)]!, behind: false }; };
+  // Where it goes and whether it naps there are separate rolls: fields of one hash line up whenever the number of
+  // gaps is a power of two, and then it only ever sleeps at some gaps and is only ever stroked at the others.
+  const haunt = (epoch: number) => { const pick = roll(hash(`cat ${epoch}`)); return pick % 3 === 0 ? { ...catBed(row)!, y: row[0]!.y, behind: true } : { ...gaps[(pick >>> 8) % gaps.length]!, behind: false }; };
   const epoch = Math.floor(at / CAT_EPOCH), t = at % CAT_EPOCH;
   const to = haunt(epoch), from = epoch === 0 ? to : haunt(epoch - 1);
   const up = from.behind ? 0 : HOP, prowl = Math.abs(to.x - from.x) / PROWL * 1000, down = to.behind ? 0 : HOP;
@@ -60,8 +63,8 @@ export function catAt(row: readonly Seat[], at: number | undefined): Cat | undef
   }
   const settled = t - travel, stroked = settled - PETTING.after;
   const still = { x: to.x, y: to.y + (to.behind ? BEHIND : 0), west: false, moving: false };
-  // Its bed is for sleeping. Elsewhere, a different bit from the one that chose the haunt decides.
-  const sleepy = to.behind || (hash(`cat ${epoch}`) >>> 9) % 2 === 0;
+  // Its bed is for sleeping. Elsewhere, a roll of its own decides.
+  const sleepy = to.behind || roll(hash(`cat ${epoch}`) + 1) % 2 === 0;
   // In its bed it goes straight to sleep; on the table it sits a while first.
   if (sleepy && (to.behind || settled > 4000)) return { ...still, frame: `sleep.${Math.floor(settled / 1400) % 2}` as "sleep.0" | "sleep.1" };
   if (!sleepy && !to.behind && to.free && to.id !== undefined && stroked >= 0 && stroked < PETTING.lasts) return { ...still, frame: "pet", pettedBy: to.id, pettedFor: stroked };

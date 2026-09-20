@@ -296,9 +296,9 @@ function SceneWorkers({ errands, furniture, restingSeats, tray, peerQuestions, l
   const cat = errands ? catAt(rows[0]!, at) : undefined;
   const news = useMemo(() => gossip(workers, tasks), [workers, tasks]);
   const talk = rows.flatMap((row) => chats(row, news, at));
-  const catDoing = cat === undefined ? "" : cat.pettedBy !== undefined ? `Being fussed over by ${workerById.get(cat.pettedBy)?.name}` : cat.frame.startsWith("sleep") ? "Asleep" : cat.moving ? "On the prowl" : "Supervising";
+  const catDoing = cat === undefined ? "" : cat.pettedBy !== undefined ? `being fussed over by ${workerById.get(cat.pettedBy)?.name}` : cat.frame.startsWith("sleep") ? "asleep" : cat.moving ? "on the prowl" : "supervising";
   // On the table the cat is in front of everyone; on the floor behind it, behind them.
-  const puss = cat === undefined ? null : <g data-cat={cat.frame} role="img" aria-label={`The cat, ${catDoing.toLowerCase()}`} className="dfFactoryScene__target" data-tooltip={`The cat\n${catDoing}`} transform={`translate(${cat.x} ${cat.y}) scale(${WORKER_SIZE / FRAME})`}>
+  const puss = cat === undefined ? null : <g data-cat={cat.frame} role="img" aria-label={`The cat, ${catDoing}`} className="dfFactoryScene__target" data-tooltip={`The cat\n${catDoing.charAt(0).toUpperCase()}${catDoing.slice(1)}`} transform={`translate(${cat.x} ${cat.y}) scale(${WORKER_SIZE / FRAME})`}>
         <rect x="4" y="2" width="12" height="10" fill="transparent" />
         <g aria-hidden="true" transform={cat.west ? "translate(22 0) scale(-1 1)" : undefined}><Frame name={`cat.${cat.frame}`} x={3} y={-4} /></g>
       </g>;

@@ -148,8 +148,9 @@ func enforcePublicStateCount(ctx context.Context, connection *sql.Conn) error {
 	return nil
 }
 
-// ponytail: sorts the questions between live tasks on every snapshot; peer_questions is never pruned, but the
-// candidate set is bounded by live tasks through the source-task index. Add an (updated_at_ms) index if that grows.
+// ponytail: sorts the questions between live tasks on every snapshot. peer_questions is never pruned, but rows are
+// found by source task (the leading column of peer_questions_source_key_unique), so the sort is over live tasks'
+// questions, not the table. Add an (updated_at_ms) index if one task ever asks thousands.
 func readPublicPeerQuestions(ctx context.Context, connection *sql.Conn) ([]PeerQuestionSummary, error) {
 	rows, err := connection.QueryContext(ctx, `SELECT id, source_task_id, target_task_id, answer_text IS NOT NULL, revision FROM peer_questions
         WHERE source_task_id IN (SELECT id FROM tasks WHERE status IN ('queued', 'running'))
