@@ -4,14 +4,19 @@ import argparse
 import importlib.util
 import json
 import re
+import subprocess
 import time
 from pathlib import Path
+from urllib.parse import urlparse
 
 
 HERE = Path(__file__).resolve().parent
 SPEC = importlib.util.spec_from_file_location("factory_intake", HERE / "factory-intake.py")
 intake = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(intake)
+REVIEW_SPEC = importlib.util.spec_from_file_location("factory_review_intake", HERE / "factory-review-intake.py")
+review = importlib.util.module_from_spec(REVIEW_SPEC)
+REVIEW_SPEC.loader.exec_module(review)
 
 REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}$")
 SHA = re.compile(r"^[0-9a-f]{40}$")
@@ -19,6 +24,9 @@ MAX_PRS = 100
 MAX_RUNS = 100
 MAX_JOBS = 32
 MAX_JOURNAL = 4 << 20
+MAX_LINKS = 32
+MAX_DELIVERIES = 128
+MAX_DOCUMENT = 32768
 
 
 def text(value, limit=500):
@@ -31,6 +39,17 @@ def sha(value):
 
 def number(value):
     return value if type(value) is int and value > 0 else None
+
+
+def url(value):
+    if not isinstance(value, str) or len(value) > 1000:
+        return ""
+    parsed = urlparse(value)
+    return value if parsed.scheme == "https" and parsed.netloc else ""
+
+
+def milliseconds(value):
+    return value * 1000 if type(value) is int and value > 0 else 0
 
 
 def read_journal(path):
@@ -49,12 +68,40 @@ def read_journal(path):
         return {}, "journal"
 
 
-def configured_paths(config, key):
-    paths = config.get("observation_journals", {})
-    value = paths.get(key, []) if isinstance(paths, dict) else []
-    if not isinstance(value, list) or len(value) > 32 or any(not isinstance(path, str) or not Path(path).is_absolute() for path in value):
-        raise ValueError("observation journal paths must be absolute lists")
+def host_config(config):
+    """Use the existing legacy host guard; customer routes have no gh fallback."""
+    value = intake.validate_config(config)
+    review.require_legacy_home(value)
     return value
+
+
+def release_destination(config, release):
+    destination = release.get("destination")
+    if isinstance(destination, str) and destination and len(destination) <= 160:
+        return destination
+    verifier = release.get("verify_argv")
+    if isinstance(verifier, list) and any(isinstance(arg, str) and arg.endswith("verify-live-runtime.py") for arg in verifier):
+        return "runtime:" + str(Path(config["factory_home"]).resolve())
+    if isinstance(verifier, list) and any(isinstance(arg, str) and arg.endswith("verify-live-site.py") for arg in verifier):
+        return "site:app.darkfactory.build"
+    return ""
+
+
+def journal_paths(config):
+    reviews = [{"path": config["journal"] + ".reviews.json", "repository": config["repository"]}]
+    releases, unavailable = [], False
+    values = config.get("release_configs", [])
+    if not isinstance(values, list) or len(values) > 32:
+        return reviews, releases, True
+    for path in values:
+        release, error = read_journal(path)
+        destination = release_destination(config, release)
+        if error or not isinstance(release.get("repository"), str) or not REPOSITORY.fullmatch(release["repository"]) \
+                or not isinstance(release.get("journal"), str) or not Path(release["journal"]).is_absolute() or not destination:
+            unavailable = True
+            continue
+        releases.append({"path": release["journal"], "repository": release["repository"], "destination": destination})
+    return reviews, releases, unavailable
 
 
 def github(repository, endpoint):
@@ -66,10 +113,13 @@ def github(repository, endpoint):
     return value
 
 
-def review_receipts(paths):
+def review_receipts(paths, repository):
     reviewers, markers, merges, unavailable = [], {}, {}, False
-    for path in paths:
-        journal, error = read_journal(path)
+    for entry in paths:
+        if entry["repository"].casefold() != repository.casefold():
+            unavailable = True
+            continue
+        journal, error = read_journal(entry["path"])
         if error or journal.get("version") != 2 or not isinstance(journal.get("pulls"), dict):
             unavailable = True
             continue
@@ -97,10 +147,13 @@ def review_receipts(paths):
     return reviewers, markers, merges, unavailable
 
 
-def release_receipts(paths):
+def release_receipts(paths, repository):
     deliveries, unavailable = {}, False
-    for path in paths:
-        journal, error = read_journal(path)
+    for entry in paths:
+        if entry["repository"].casefold() != repository.casefold():
+            unavailable = True
+            continue
+        journal, error = read_journal(entry["path"])
         if error or journal.get("version") != 1 or not isinstance(journal.get("releases"), dict):
             unavailable = True
             continue
@@ -113,34 +166,40 @@ def release_receipts(paths):
             verification = receipt.get("verification") if isinstance(receipt.get("verification"), dict) else {}
             verified = (receipt.get("state") == "verified" and verification.get("healthy") is True
                         and verification.get("sha") == revision)
-            identity = text(verification.get("id"), 128) or text(receipt.get("deployment_id"), 128) or "release:" + revision
-            destination = text(verification.get("destination"), 160) or text(receipt.get("destination"), 160) or "production"
+            deployment = text(verification.get("deployment_id"), 128) or text(verification.get("id"), 128) or text(receipt.get("deployment_id"), 128)
+            if not deployment:
+                unavailable = True
+                continue
+            destination = entry["destination"]
+            identity = destination + ":" + deployment
             key = (identity, destination, revision)
             delivery = deliveries.setdefault(key, {"id": identity, "kind": "release", "destination": destination,
                                                     "revision": revision, "state": "verified" if verified else "unknown",
                                                     "pull_requests": []})
             if not verified and delivery["state"] != "verified":
                 delivery["state"] = text(receipt.get("state"), 32) or "unknown"
-            url = text(verification.get("url"), 1000) or text(receipt.get("url"), 1000)
-            if url:
-                delivery["url"] = url
-            if verified and type(receipt.get("verified_at")) is int:
-                delivery["verified_at"] = receipt["verified_at"]
+            receipt_url = url(verification.get("url")) or url(receipt.get("url"))
+            if receipt_url:
+                delivery["url"] = receipt_url
+            verified_at = milliseconds(receipt.get("verified_at"))
+            if verified and verified_at:
+                delivery["verified_at"] = verified_at
             sources = receipt.get("delivery_sources")
             if not isinstance(sources, list):
-                sources = [{"pr": receipt.get("pr")}]
+                sources = []
             for source in sources:
                 source_pr = number(source.get("pr")) if isinstance(source, dict) else None
-                if source_pr is not None and source_pr not in delivery["pull_requests"]:
+                source_repository = source.get("repository", entry["repository"]) if isinstance(source, dict) else ""
+                if source_pr is not None and isinstance(source_repository, str) and source_repository.casefold() == repository.casefold() and source_pr not in delivery["pull_requests"] and len(delivery["pull_requests"]) < MAX_LINKS:
                     delivery["pull_requests"].append(source_pr)
-    return list(deliveries.values()), unavailable
+    return list(deliveries.values())[:MAX_DELIVERIES], unavailable, max(0, len(deliveries) - MAX_DELIVERIES)
 
 
-def pull_requests(value, markers, merges):
+def pull_requests(value, markers, queues):
     if not isinstance(value, list):
         raise ValueError
     result, heads = [], {}
-    for item in value[:MAX_PRS]:
+    for item in value:
         if not isinstance(item, dict):
             continue
         pr, head = number(item.get("number")), sha((item.get("head") or {}).get("sha") if isinstance(item.get("head"), dict) else "")
@@ -148,15 +207,21 @@ def pull_requests(value, markers, merges):
             continue
         branch = text(item["head"].get("ref"), 240)
         review = markers.get((pr, head), {"head": head, "state": "unknown"})
-        record = {"number": pr, "title": text(item.get("title")), "url": text(item.get("html_url"), 1000),
+        record = {"number": pr, "title": text(item.get("title")), "url": url(item.get("html_url")),
                   "head": head, "branch": branch, "base": text((item.get("base") or {}).get("ref") if isinstance(item.get("base"), dict) else "", 240),
                   "state": text(item.get("state"), 32) or "unknown", "review": review}
-        merge = merges.get((pr, head), "")
+        merge = sha(item.get("merge_commit_sha"))
         if merge:
             record["merge"] = merge
+        merged_at = text(item.get("merged_at"), 64)
+        if merged_at and merge:
+            record["merged_at"] = merged_at
+        queue = queues.get((pr, head), "")
+        if queue:
+            record["merge_queue"] = queue
         result.append(record)
         heads.setdefault(head, []).append(pr)
-    return result, heads, max(0, len(value) - MAX_PRS)
+    return result, heads
 
 
 def run_pull_requests(run, heads):
@@ -167,13 +232,14 @@ def run_pull_requests(run, heads):
             pr = number(item.get("number")) if isinstance(item, dict) else None
             if pr is not None:
                 linked.add(pr)
-    return sorted(linked)
+    linked = sorted(linked)
+    return linked[:MAX_LINKS], max(0, len(linked) - MAX_LINKS)
 
 
 def checks(repository, value, heads):
     if not isinstance(value, dict) or not isinstance(value.get("workflow_runs"), list):
         raise ValueError
-    result, seen, overflow = [], set(), 0
+    result, seen, unavailable = [], set(), 0
     for run in value["workflow_runs"][:MAX_RUNS]:
         if not isinstance(run, dict) or number(run.get("id")) is None:
             continue
@@ -181,7 +247,7 @@ def checks(repository, value, heads):
         if run_id in seen:
             continue
         seen.add(run_id)
-        linked = run_pull_requests(run, heads)
+        linked, link_overflow = run_pull_requests(run, heads)
         if not linked:
             continue
         jobs, omitted = [], 0
@@ -194,45 +260,56 @@ def checks(repository, value, heads):
             for job in values[:MAX_JOBS]:
                 if not isinstance(job, dict) or number(job.get("id")) is None:
                     continue
-                jobs.append({"id": str(job["id"]), "name": text(job.get("name")),
+                jobs.append({"id": str(job["id"]), "name": text(job.get("name"), 256),
                              "state": text(job.get("status"), 32) or "unknown",
-                             "conclusion": text(job.get("conclusion"), 32), "url": text(job.get("html_url"), 1000)})
+                             "conclusion": text(job.get("conclusion"), 32), "url": url(job.get("html_url"))})
         except (intake.IntakeError, ValueError, json.JSONDecodeError):
-            overflow += 1
+            unavailable += 1
         check = {"id": run_id, "name": text(run.get("name")), "revision": sha(run.get("head_sha")),
-                 "scope": text(run.get("event"), 64), "state": text(run.get("status"), 32) or "unknown",
-                 "conclusion": text(run.get("conclusion"), 32), "url": text(run.get("html_url"), 1000),
+                 "scope": "merge_group" if run.get("event") == "merge_group" else "head", "state": text(run.get("status"), 32) or "unknown",
+                 "conclusion": text(run.get("conclusion"), 32), "url": url(run.get("html_url")),
                  "pull_requests": linked, "jobs": jobs}
-        if omitted:
-            check["overflow"] = omitted
+        if omitted or link_overflow:
+            check["overflow"] = omitted + link_overflow
         result.append(check)
-    return result, overflow + max(0, len(value["workflow_runs"]) - MAX_RUNS)
+    total = value.get("total_count")
+    run_overflow = max(0, total - MAX_RUNS) if type(total) is int else (1 if len(value["workflow_runs"]) >= MAX_RUNS else 0)
+    return result, run_overflow, unavailable
 
 
 def collect(config):
     """Return one read-only ProductionObservation-compatible mapping."""
-    if not isinstance(config, dict) or not isinstance(config.get("repository"), str) or not REPOSITORY.fullmatch(config["repository"]):
+    repository = config.get("repository") if isinstance(config, dict) else ""
+    if not isinstance(repository, str) or not REPOSITORY.fullmatch(repository):
         raise ValueError("repository must be OWNER/REPOSITORY")
-    # Customer routes use the Maintainer App; this collector deliberately has
-    # no credential or bridge fallback outside the host controller's own path.
-    if config.get("host_controller") is not True:
-        return {"repository": config["repository"], "observed_at": int(time.time()), "pull_requests": [], "checks": [], "reviewers": [], "deliveries": [], "unavailable": "host_controller_only"}
-    review_paths, release_paths = configured_paths(config, "reviews"), configured_paths(config, "releases")
-    reviewers, markers, merges, review_unavailable = review_receipts(review_paths)
-    deliveries, release_unavailable = release_receipts(release_paths)
-    observation = {"repository": config["repository"], "observed_at": int(time.time()), "pull_requests": [], "checks": [],
+    try:
+        config = host_config(config)
+    except (ValueError, intake.IntakeError, review.ReviewError, OSError):
+        return {"repository": repository, "observed_at": int(time.time() * 1000), "pull_requests": [], "checks": [], "reviewers": [], "deliveries": [], "unavailable": "host_controller_only"}
+    review_paths, release_paths, path_unavailable = journal_paths(config)
+    reviewers, markers, queues, review_unavailable = review_receipts(review_paths, config["repository"])
+    deliveries, release_unavailable, delivery_overflow = release_receipts(release_paths, config["repository"])
+    observation = {"repository": config["repository"], "observed_at": int(time.time() * 1000), "pull_requests": [], "checks": [],
                    "reviewers": reviewers, "deliveries": deliveries}
     unavailable = []
     if review_unavailable:
         unavailable.append("review_journal")
     if release_unavailable:
         unavailable.append("release_journal")
+    if path_unavailable:
+        unavailable.append("release_config")
     try:
-        prs = github(config["repository"], "/pulls?state=open&per_page=" + str(MAX_PRS))
-        observation["pull_requests"], heads, pr_overflow = pull_requests(prs, markers, merges)
+        open_prs = github(config["repository"], "/pulls?state=open&per_page=" + str(MAX_PRS))
+        closed_prs = github(config["repository"], "/pulls?state=closed&sort=updated&direction=desc&per_page=" + str(MAX_PRS))
+        if not isinstance(open_prs, list) or not isinstance(closed_prs, list):
+            raise ValueError
+        observation["pull_requests"], heads = pull_requests(open_prs + closed_prs, markers, queues)
+        pr_overflow = int(len(open_prs) >= MAX_PRS) + int(len(closed_prs) >= MAX_PRS)
         runs = github(config["repository"], "/actions/runs?per_page=" + str(MAX_RUNS))
-        observation["checks"], run_overflow = checks(config["repository"], runs, heads)
-        observation["overflow"] = pr_overflow + run_overflow
+        observation["checks"], run_overflow, job_unavailable = checks(config["repository"], runs, heads)
+        observation["overflow"] = pr_overflow + run_overflow + delivery_overflow
+        if job_unavailable:
+            unavailable.append("jobs")
     except (intake.IntakeError, ValueError, json.JSONDecodeError):
         unavailable.append("github")
     if observation.get("overflow") == 0:
@@ -242,11 +319,40 @@ def collect(config):
     return observation
 
 
+def record(config, observation):
+    try:
+        config = host_config(config)
+    except (ValueError, intake.IntakeError, review.ReviewError, OSError):
+        return False
+    home = Path(config["factory_home"])
+    factoryctl = Path(str(home) + ".service") / "bin" / "current" / "factoryctl"
+    if not factoryctl.is_file():
+        return False
+    env = {"DARK_FACTORY_SOCKET": str(home / "runtimes" / "factory.sock"),
+           "DARK_FACTORY_OPERATOR_TOKEN_FILE": str(home / "operator.token")}
+    document = json.dumps({"project_id": config["project_id"], "observation": observation})
+    if len(document.encode()) > MAX_DOCUMENT:
+        return False
+    try:
+        completed = subprocess.run([str(factoryctl), "production", "observe", "--json-stdin"],
+                                   input=document,
+                                   text=True, capture_output=True, timeout=30, env=env)
+        return completed.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("config", type=Path)
+    parser.add_argument("--record", action="store_true")
     args = parser.parse_args(argv)
-    print(json.dumps(collect(json.loads(args.config.read_text(encoding="utf-8"))), sort_keys=True))
+    config = json.loads(args.config.read_text(encoding="utf-8"))
+    observation = collect(config)
+    if args.record and not record(config, observation):
+        print("factory-production: record unavailable", file=__import__("sys").stderr)
+        raise SystemExit(1)
+    print(json.dumps(observation, sort_keys=True))
 
 
 if __name__ == "__main__":
