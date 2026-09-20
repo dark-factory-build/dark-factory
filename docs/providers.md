@@ -396,7 +396,24 @@ factoryctl agent select-model --agent AGENT_ID --revision REVISION --model gpt-5
 
 Use the current agent revision from `factoryctl status`. The update refuses a stale revision or unsupported provider controls. An already admitted run keeps its model and effort. Omitting effort clears the explicit override for future runs.
 
-Every provider's local commands get the same Git identity for commits on the
-Change branch, `Dark Factory Worker <worker@darkfactory.build>`, with no
-credential helper, SSH command, prompt or `gh` configuration: a worker can
-commit, and only the Maintainer App publishes.
+Every provider's local commits and generated project-content commits use the
+GitHub operator connected in Settings: their login and GitHub-provided
+`ID+LOGIN@users.noreply.github.com` address. The host caches the verified public
+identity for offline local work; GitHub status/refresh updates it, including
+username changes. A home without a verified connected identity uses the single
+fallback `Dark Factory <worker@darkfactory.build>`. Disconnect immediately stops
+using the cached operator identity for new work.
+
+Workers still receive no credential helper, SSH command, prompt or `gh`
+configuration. The Maintainer App publishes with its installation token and
+existing operation provenance, deriving each new commit author from the live
+connection user rather than worker arguments. Existing commits, co-authors,
+and already-landed publication receipts are preserved across upgrades and
+renames. Legacy Access publication without a connected GitHub operator retains
+its App author. GitHub's final squash attribution follows repository merge
+settings; operator authorship/co-authorship can receive contribution credit
+when the commit reaches an eligible branch.
+
+Older GitHub accounts using a username-only noreply address may need to enable
+the ID-based address in [GitHub email settings](https://github.com/settings/emails)
+for contribution credit; DF does not request access to private email addresses.

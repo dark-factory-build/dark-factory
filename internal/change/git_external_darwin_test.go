@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/dark-factory-build/dark-factory/internal/change"
+	"github.com/dark-factory-build/dark-factory/internal/gitauthor"
 )
 
 func TestPublicSelectGitFortyCallsHaveExactZeroFDDeltaWithoutGC(t *testing.T) {
@@ -95,18 +96,21 @@ func TestPinContentSourceKeepsAnExactFileReachableAfterBranchCleanup(t *testing.
 	if body, err := change.ReadContentSource(context.Background(), git, repository, identity, source); err != nil || body != "# release\n" {
 		t.Fatalf("pinned body = %q, %v", body, err)
 	}
-	generated, err := change.WriteContentSource(context.Background(), git, repository, identity, nil, ".dark-factory/content/00112233445566778899aabbccddeeff.md", "# generated\n", "refs/dark-factory/content/00112233445566778899aabbccddeeff/2")
+	generated, err := change.WriteContentSource(context.Background(), git, repository, identity, nil, ".dark-factory/content/00112233445566778899aabbccddeeff.md", "# generated\n", "refs/dark-factory/content/00112233445566778899aabbccddeeff/2", gitauthor.Identity{ID: 123, Login: "operator"})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if got := runExternalGit(t, root, git, repository, "show", "-s", "--format=%an <%ae>%n%cn <%ce>", generated.Commit.Hex()); got != "operator <123+operator@users.noreply.github.com>\noperator <123+operator@users.noreply.github.com>" {
+		t.Fatalf("generated attribution: %q", got)
 	}
 	if body, err := change.ReadContentSource(context.Background(), git, repository, identity, generated); err != nil || body != "# generated\n" {
 		t.Fatalf("generated body = %q, %v", body, err)
 	}
-	replayed, err := change.WriteContentSource(context.Background(), git, repository, identity, nil, generated.Path, "# generated\n", "refs/dark-factory/content/00112233445566778899aabbccddeeff/2")
+	replayed, err := change.WriteContentSource(context.Background(), git, repository, identity, nil, generated.Path, "# generated\n", "refs/dark-factory/content/00112233445566778899aabbccddeeff/2", gitauthor.Identity{ID: 123, Login: "renamed"})
 	if err != nil || replayed.Commit.Hex() != generated.Commit.Hex() {
 		t.Fatalf("generated replay = %s, %v", replayed.Commit.Hex(), err)
 	}
-	if _, err := change.WriteContentSource(context.Background(), git, repository, identity, nil, generated.Path, "different\n", "refs/dark-factory/content/00112233445566778899aabbccddeeff/2"); err == nil {
+	if _, err := change.WriteContentSource(context.Background(), git, repository, identity, nil, generated.Path, "different\n", "refs/dark-factory/content/00112233445566778899aabbccddeeff/2", gitauthor.Identity{ID: 123, Login: "operator"}); err == nil {
 		t.Fatal("different body reused immutable content ref")
 	}
 	if err := os.Remove(hook); err != nil {

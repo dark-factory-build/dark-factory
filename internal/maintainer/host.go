@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"sync"
 
+	"github.com/dark-factory-build/dark-factory/internal/gitauthor"
 	"github.com/dark-factory-build/dark-factory/internal/install"
 )
 
@@ -17,9 +18,10 @@ type Host struct {
 	connection connectionRecord
 }
 type connectionRecord struct {
-	ID       string `json:"id"`
-	Secret   string `json:"credential"`
-	Disabled bool   `json:"disabled"`
+	ID       string             `json:"id"`
+	Secret   string             `json:"credential"`
+	Disabled bool               `json:"disabled"`
+	Author   gitauthor.Identity `json:"author,omitempty"`
 }
 
 func (connectionRecord) String() string   { return "MaintainerConnection(<redacted>)" }
@@ -35,6 +37,9 @@ func OpenHost(home *install.OperationalHome) (*Host, error) {
 	host := &Host{home: home, client: NewClient()}
 	if len(data) > 0 {
 		if json.Unmarshal(data, &host.connection) != nil {
+			return nil, ErrInvalid
+		}
+		if !host.connection.Author.Valid() {
 			return nil, ErrInvalid
 		}
 		if host.connection.ID != "" {
@@ -112,7 +117,7 @@ func (host *Host) Status(ctx context.Context) (Status, error) {
 	if err != nil {
 		return Status{}, err
 	}
-	return host.client.Status(ctx, credential)
+	return host.status(ctx, credential)
 }
 
 func (host *Host) Confirm(ctx context.Context, code string) error {
@@ -170,4 +175,45 @@ func (host *Host) Disconnect(ctx context.Context) error {
 		return err
 	}
 	return host.save(connectionRecord{Disabled: true})
+}
+
+// GitAuthor reads the cached verified identity without requiring a network call
+// on every launch. Older connected homes fill the cache on their first use.
+func (host *Host) GitAuthor(ctx context.Context) gitauthor.Identity {
+	host.mu.Lock()
+	defer host.mu.Unlock()
+	if host.connection.Disabled || host.connection.ID == "" {
+		return gitauthor.Identity{}
+	}
+	if host.connection.Author.ID == 0 {
+		if credential, err := host.credential(); err == nil {
+			_, _ = host.status(ctx, credential)
+		}
+	}
+	return host.connection.Author
+}
+
+func (host *Host) status(ctx context.Context, credential Credential) (Status, error) {
+	status, err := host.client.Status(ctx, credential)
+	if err != nil {
+		return Status{}, err
+	}
+	author := gitauthor.Identity{}
+	if status.State == "connected" {
+		if status.User == nil {
+			return Status{}, ErrInvalid
+		}
+		author = gitauthor.Identity{ID: status.User.ID, Login: status.User.Login}
+		if author.ID == 0 || !author.Valid() || host.connection.Author.ID != 0 && host.connection.Author.ID != author.ID {
+			return Status{}, ErrInvalid
+		}
+	}
+	if author != host.connection.Author {
+		record := host.connection
+		record.Author = author
+		if err := host.save(record); err != nil {
+			return Status{}, err
+		}
+	}
+	return status, nil
 }

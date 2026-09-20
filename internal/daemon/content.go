@@ -116,7 +116,7 @@ func (daemon *Daemon) writeContentSource(ctx context.Context, spec kernel.NewCon
 	if spec.Commit != "" {
 		source, err = change.PinContentSource(ctx, git, repository.Root, identity, spec.Commit, spec.Path, ref)
 	} else {
-		source, err = change.WriteContentSource(ctx, git, repository.Root, identity, parent, path, spec.Body, ref)
+		source, err = change.WriteContentSource(ctx, git, repository.Root, identity, parent, path, spec.Body, ref, daemon.gitAuthor(ctx))
 	}
 	if err != nil {
 		return kernel.NewContent{}, err
