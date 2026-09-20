@@ -68,16 +68,20 @@ export type SceneWorkerPlacement = Readonly<{
   id: string;
   area: "room" | "resting" | "staging" | "outside" | "overflow";
   roomId?: string;
+  /** A resting worker who has got up for a while stands here instead of sitting. */
+  errand?: BreakRoomErrand;
   x: number;
   y: number;
 }>;
+
+export type BreakRoomErrand = "shelf" | "coffee";
 
 // Staggered workshop bays share walls; dimensions never depend on live work.
 const CORRIDOR = 32;
 export const PADDING = 16;
 export const ROOM_LEFT = PADDING + CORRIDOR;
 const FLOOR_TOP = 48;
-const WORKER_GAP = 40;
+export const WORKER_GAP = 40;
 export const WORKER_SIZE = 20;
 
 /** Ordering for the floor: byte order over served fields, never a locale. */
@@ -156,7 +160,8 @@ export function placeWorkers(layout: SceneLayout, workers: readonly SceneWorker[
 /** Two compact seating sections share one bay, growing down only when crowded. */
 export function commonSeating(layout: SceneLayout, restingCount: number, planningCount: number) {
   const available = layout.width - ROOM_LEFT - PADDING;
-  const capacity = (available - 16) / 2;
+  // The break-room furniture keeps whatever two seats a section can spare it.
+  const capacity = (available - 16 - nookWidth(layout)) / 2;
   const columns = Math.max(2, Math.min(Math.floor((capacity - 48) / WORKER_GAP) + 1, Math.max(restingCount, planningCount)));
   const width = (columns - 1) * WORKER_GAP + 48;
   const seats = (count: number, left: number, top: number) => Array.from({ length: Math.max(2, count) }, (_, slot) => ({
@@ -169,6 +174,37 @@ export function commonSeating(layout: SceneLayout, restingCount: number, plannin
   return { resting, planning };
 }
 
+
+// Each piece of break-room furniture wants this much of the back wall.
+const PIECE = 30;
+const nookWidth = (layout: SceneLayout) => Math.max(0, Math.min(2 * PIECE + 4, layout.width - ROOM_LEFT - PADDING - (2 * 88 + 16)));
+
+/**
+ * Furniture along the break room's back wall, right of the last seats, with one
+ * standing place in front of each piece: a bookshelf where there is room for
+ * one thing, a coffee station beside it where there is room for two. On a floor
+ * with room for neither, workers simply stay seated.
+ */
+export function breakRoomNook(layout: SceneLayout, restingCount: number, planningCount: number) {
+  const width = nookWidth(layout), pieces = Math.floor(width / PIECE);
+  if (pieces === 0) return undefined;
+  const seating = commonSeating(layout, restingCount, planningCount);
+  const left = Math.max(...[...seating.resting, ...seating.planning].map((seat) => seat.x)) + 24;
+  return { width, furniture: (["shelf", "coffee"] as const).slice(0, pieces).map((errand, index) => ({ errand, x: left + 5 + index * PIECE, y: layout.restingTop - 38, stand: { x: left + 15 + index * PIECE, y: layout.restingTop - 8 } })) };
+}
+
+/** One standing place a piece: the first to want it has it, and the rest stay in their seats. */
+export function placeErrands(placements: readonly SceneWorkerPlacement[], nook: ReturnType<typeof breakRoomNook>, errandOf: (id: string) => BreakRoomErrand | undefined): readonly SceneWorkerPlacement[] {
+  if (nook === undefined) return placements;
+  const free = new Map(nook.furniture.map((piece) => [piece.errand, piece.stand]));
+  return placements.map((placement) => {
+    const errand = placement.area === "resting" ? errandOf(placement.id) : undefined;
+    const stand = errand === undefined ? undefined : free.get(errand);
+    if (errand === undefined || stand === undefined) return placement;
+    free.delete(errand);
+    return { ...placement, errand, ...stand };
+  });
+}
 
 /** Pictured surface slots also determine standing destinations; no parallel workstation map. */
 export function workPositions(room: SceneRoomLayout): readonly ScenePoint[] {

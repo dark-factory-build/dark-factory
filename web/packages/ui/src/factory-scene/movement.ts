@@ -1,4 +1,7 @@
-import { WORKER_SIZE, type SceneLayout, type ScenePoint, type SceneWorkerPlacement } from "./scene.js";
+import { ROOM_LEFT, WORKER_GAP, WORKER_SIZE, type SceneLayout, type ScenePoint, type SceneWorkerPlacement } from "./scene.js";
+
+// An aisle runs this far behind each row of seats.
+const AISLE = 16;
 
 type WalkingDirection = "north" | "south" | "east" | "west";
 
@@ -134,8 +137,21 @@ function route(points: readonly ScenePoint[]): Route {
   return { points: compact.slice(1), length: compact.slice(1).reduce((total, point, index) => total + distance(compact[index]!, point), 0) };
 }
 
+/**
+ * A stroll inside the common room never goes out to the spine. Each row of seats
+ * has an aisle behind it; the walk runs along the aisle of whichever end is a
+ * seat, and changes rows down the side where the break-room furniture stands.
+ */
+function commonRoomRoute(layout: SceneLayout, from: ScenePoint, to: ScenePoint): Route {
+  const seatRow = (point: ScenePoint) => point.y >= layout.restingTop && (point.y - layout.restingTop) % WORKER_GAP === 0;
+  const aisle = (point: ScenePoint) => seatRow(point) ? point.y - AISLE : point.y;
+  const side = seatRow(to) ? from.x : to.x;
+  return route([from, { x: from.x, y: aisle(from) }, { x: side, y: aisle(from) }, { x: side, y: aisle(to) }, { x: to.x, y: aisle(to) }, to]);
+}
+
 /** Continue from a point already in a corridor or the spine to a known room or common space. */
 export function routeFromSpine(layout: SceneLayout, from: ScenePoint, to: SceneWorkerPlacement): Route | undefined {
+  if (to.area !== "room" && from.x >= ROOM_LEFT && from.y >= layout.restingTop - 30) return commonRoomRoute(layout, from, to);
   const destination = to.roomId === undefined ? undefined : layout.rooms.find((room) => room.id === to.roomId);
   const mainSpine = spine(layout);
   if (to.area === "room" && destination === undefined || mainSpine === undefined) return undefined;
