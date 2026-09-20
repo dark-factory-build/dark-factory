@@ -746,6 +746,11 @@ test("a floor mounted late still starts seated, then someone gets up, stands at 
     const commits = [];
     const scene = (props) => createElement(Profiler, { id: "floor", onRender: () => commits.push(1) }, createElement(FactoryScene, { topology: inventoryTopology, workers: resting, connected: true, ...props }));
     await act(async () => { renderer = create(scene({})); });
+    // Where each sprite is actually drawn, against the seat it belongs in.
+    const outOfSeat = (floor) => {
+      const seatOf = new Map(placeWorkers(layoutScene(floor), resting).map((placement) => [placement.id, `translate(${placement.x} ${placement.y})`]));
+      return renderer.root.findAll((node) => node.props["data-worker-id"] !== undefined).filter((node) => node.props.transform !== seatOf.get(node.props["data-worker-id"])).length;
+    };
     const pieces = breakRoomNook(layoutScene(inventoryTopology), resting.length, 0).furniture.length;
     const away = () => renderer.root.findAll((node) => typeof node.props["data-tooltip"] === "string" && /at the (bookshelf|coffee station)/.test(node.props["data-tooltip"]));
     const standingWithIt = () => away().some((node) => node.parent.props["data-worker-action"] === "still" && node.findAllByType("use").some((use) => /held\.(book|cup)\.chest/.test(use.props.href)));
@@ -784,8 +789,8 @@ test("a floor mounted late still starts seated, then someone gets up, stands at 
     ]) {
       await untilSomeoneStands();
       const seen = [];
-      await act(async () => { renderer.update(createElement(Profiler, { id: "floor", onRender: () => seen.push(away().length) }, createElement(FactoryScene, { topology: inventoryTopology, workers: resting, connected: true, ...still }))); });
-      assert.ok(seen.length > 0 && seen.every((count) => count === 0), `${how}: someone was drawn at the furniture in a commit after the floor was stilled: ${seen}`);
+      await act(async () => { renderer.update(createElement(Profiler, { id: "floor", onRender: () => seen.push(away().length + outOfSeat(inventoryTopology)) }, createElement(FactoryScene, { topology: inventoryTopology, workers: resting, connected: true, ...still }))); });
+      assert.ok(seen.length > 0 && seen.every((count) => count === 0), `${how}: someone was drawn at or placed by the furniture in a commit after the floor was stilled: ${seen}`);
       seatedNow(how);
       await act(async () => { renderer.update(scene(resume)); });
     }
@@ -797,7 +802,9 @@ test("a floor mounted late still starts seated, then someone gets up, stands at 
     for (let step = 0; step < 3000 && away().length === 0; step++) await tick();
     assert.ok(away().length > 0, "someone is up when the floor changes");
     const another = { ...inventoryTopology, digest: "another-floor", nodes: [...inventoryTopology.nodes, { ...inventoryTopology.nodes[0], id: "extra-1", path: "extra-1" }, { ...inventoryTopology.nodes[0], id: "extra-2", path: "extra-2" }] };
-    await act(async () => { renderer.update(scene({ topology: another })); });
+    const floorCommits = [];
+    await act(async () => { renderer.update(createElement(Profiler, { id: "floor", onRender: () => floorCommits.push(away().length + outOfSeat(another)) }, createElement(FactoryScene, { topology: another, workers: resting, connected: true }))); });
+    assert.ok(floorCommits.length > 0 && floorCommits.every((count) => count === 0), `someone was drawn out of their seat in a commit of the new floor: ${floorCommits}`);
     // Judged by what is drawn, from the very first render of the new floor: nobody at the
     // furniture, nobody walking, nobody on their feet with a book or a cup.
     const seatedAsDrawn = (when) => {

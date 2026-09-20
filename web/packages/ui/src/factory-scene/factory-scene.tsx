@@ -125,6 +125,7 @@ function useSceneMotion(layout: ReturnType<typeof layoutScene>, placements: Retu
   const motions = useRef(new Map<string, MotionState>());
   const priorTopology = useRef<string | undefined>(undefined);
   const priorConnected = useRef<boolean | undefined>(undefined);
+  const motionsFloor = useRef(topologyDigest);
   const [clock, setClock] = useState(0);
 
   useEffect(() => {
@@ -154,6 +155,7 @@ function useSceneMotion(layout: ReturnType<typeof layoutScene>, placements: Retu
         : { placement, point: current, route, startedAt: at });
     }
     motions.current = next;
+    motionsFloor.current = topologyDigest;
     setClock(at);
   }, [connected, layout, placements, reduced, topologyDigest]);
 
@@ -180,11 +182,14 @@ function useSceneMotion(layout: ReturnType<typeof layoutScene>, placements: Retu
     return () => document.removeEventListener("visibilitychange", reconcile);
   }, []);
 
+  // Remembered motion lags a render behind what it is told. Where nothing may move, or the
+  // floor it was worked out on has been replaced, everyone is simply drawn where they belong.
+  const moving = connected && !reduced && (typeof document === "undefined" || document.visibilityState === "visible");
   const output = new Map<string, Readonly<{ x: number; y: number; motion: WorkerMotion }>>();
   for (const placement of placements) {
-    const state = motions.current.get(placement.id);
+    const state = moving && motionsFloor.current === topologyDigest ? motions.current.get(placement.id) : undefined;
     const current = state === undefined ? { point: placement, walking: false } : motionPoint(state, clock);
-    const at = connected && !reduced && (typeof document === "undefined" || document.visibilityState === "visible") ? clock + workerPhase(placement.id) : undefined;
+    const at = moving ? clock + workerPhase(placement.id) : undefined;
     output.set(placement.id, {
       ...current.point,
       motion: current.walking
@@ -192,7 +197,7 @@ function useSceneMotion(layout: ReturnType<typeof layoutScene>, placements: Retu
         : { action: active.has(placement.id) ? "interacting" : "still", frame: at === undefined ? 0 : Math.floor(at / (380 + workerPhase(placement.id) % 140)) % 2 as 0 | 1, at },
     });
   }
-  return { positions: output, pulse: connected && !reduced && (typeof document === "undefined" || document.visibilityState === "visible") ? clock : undefined };
+  return { positions: output, pulse: moving ? clock : undefined };
 }
 
 /** The animation clock updates worker elements without rerendering the floor or atlas. */
