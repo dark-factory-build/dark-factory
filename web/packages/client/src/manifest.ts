@@ -4,6 +4,9 @@
 export const BROWSER_PROTOCOL_NAME = "dark-factory/browser" as const;
 /** The fixed third byte of every binary terminal frame, beside the "DF" magic. */
 export const TERMINAL_FRAME_VERSION = 1 as const;
+export const MAX_TASK_ATTACHMENTS = 8;
+export const MAX_TASK_ATTACHMENT_BYTES = 8 * 1024 * 1024;
+export const TASK_ATTACHMENT_CHUNK_BYTES = 24 * 1024;
 export const MAX_CONTROL_BYTES = 64 * 1024;
 export const MAX_TERMINAL_PAYLOAD = 8 * 1024;
 export const TERMINAL_HEADER_BYTES = 40;
@@ -61,6 +64,8 @@ export const CONTROL_MANIFEST = [
   { type: "HUMAN_REQUEST_REPLY_RESULT", direction: "server", id: "required", fixture: "human_request_reply_result.json" },
   { type: "HUMAN_REQUEST_CANCEL_RUN", direction: "client", id: "required", fixture: "human_request_cancel_run.json" },
   { type: "HUMAN_REQUEST_CANCEL_RUN_RESULT", direction: "server", id: "required", fixture: "human_request_cancel_run_result.json" },
+  { type: "TASK_ATTACHMENT", direction: "client", id: "required", fixture: "task_attachment.json" },
+  { type: "TASK_ATTACHMENT_RESULT", direction: "server", id: "required", fixture: "task_attachment_result.json" },
   { type: "TASK_ENQUEUE", direction: "client", id: "required", fixture: "task_enqueue.json" },
   { type: "TASK_ENQUEUE_RESULT", direction: "server", id: "required", fixture: "task_enqueue_result.json" },
   { type: "TERMINAL_TARGET_GET", direction: "client", id: "required", fixture: "terminal_target_get.json" },

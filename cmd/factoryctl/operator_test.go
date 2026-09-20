@@ -708,3 +708,20 @@ func TestRepositoryAddMintsIDWhenOmitted(t *testing.T) {
 		t.Fatal(result.err)
 	}
 }
+
+func TestParseAttachmentCleanupAndCompaction(t *testing.T) {
+	command, help, ok := parse([]string{"task", "update", "--task", strings.Repeat("01", 16), "--revision", "2", "--remove-attachments"})
+	if !ok || help || !command.operatorControl || !command.removeAttachments {
+		t.Fatalf("cleanup parse: %+v %v %v", command, help, ok)
+	}
+	for _, extra := range [][]string{{"--retry"}, {"--cancel"}, {"--body", "changed"}, {"--remove-attachments"}} {
+		args := append([]string{"task", "update", "--task", strings.Repeat("01", 16), "--revision", "2", "--remove-attachments"}, extra...)
+		if _, _, ok := parse(args); ok {
+			t.Fatalf("mixed cleanup accepted: %v", args)
+		}
+	}
+	command, help, ok = parse([]string{"storage", "compact"})
+	if !ok || help || command.kind != commandCompactStorage {
+		t.Fatalf("compact parse: %+v %v %v", command, help, ok)
+	}
+}

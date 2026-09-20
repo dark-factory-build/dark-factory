@@ -11,7 +11,7 @@ import {
   MAX_AGENT_NAME_BYTES,
   MAX_MODEL_SOURCE_BYTES,
   MAX_ARRAY_ITEMS,
-  MAX_CONTROL_BYTES,
+  MAX_CONTROL_BYTES, MAX_TASK_ATTACHMENTS, MAX_TASK_ATTACHMENT_BYTES, TASK_ATTACHMENT_CHUNK_BYTES,
   MAX_FACTORY_CAPACITY,
   MAX_HUMAN_QUESTION_BYTES,
   MAX_HUMAN_REPLY_BYTES,
@@ -88,7 +88,9 @@ export type HumanRequestReplyResultBody = { request_id: string; revision: bigint
 export type HumanRequestCancelRunBody = { request_id: string; expected_request_revision: bigint; expected_run_revision: bigint };
 export type HumanRequestCancelRunResultBody = { run_id: string; run_revision: bigint; request_id: string; request_revision: bigint };
 /** `mode` "any" queues the instruction for any eligible worker in the pane agent's project. */
-export type TaskEnqueueBody = { task_id: string; incarnation_id: string; agent_id: string; repository_id?: string; expected_agent_revision: bigint; instruction: string; mode?: "now" | "queue" | "any" };
+export type TaskAttachmentBody = { index: number; offset: bigint; size: bigint; name: string; data: string };
+export type TaskAttachmentResultBody = { offset: bigint };
+export type TaskEnqueueBody = { task_id: string; incarnation_id: string; agent_id: string; repository_id?: string; expected_agent_revision: bigint; instruction: string; mode?: "now" | "queue" | "any"; attachment_count?: number };
 export type TaskEnqueueResultBody = { task_id: string; revision: bigint; agent_revision: bigint };
 export type AgentControlAction = "message" | "interrupt" | "stop" | "replace";
 export type AgentControlBody = { operation_id: string; task_id: string; run_id: string; expected_task_revision: bigint; expected_run_revision: bigint; action: AgentControlAction; instruction: string; successor_task_id: string; successor_incarnation_id: string };
@@ -218,6 +220,7 @@ export type TerminalServerControlFrame =
 export type ServerControlFrame = { type: "PROJECT_CONTENT_RESULT"; id: string; body: ProjectContentResult } | HelloFrame | PairResultFrame | AuthResultFrame | StateSnapshotFrame | StateChangedFrame | HumanRequestDetailFrame
   | { type: "HUMAN_REQUEST_REPLY_RESULT"; id: string; body: HumanRequestReplyResultBody }
   | { type: "HUMAN_REQUEST_CANCEL_RUN_RESULT"; id: string; body: HumanRequestCancelRunResultBody }
+  | { type: "TASK_ATTACHMENT_RESULT"; id: string; body: TaskAttachmentResultBody }
   | { type: "TASK_ENQUEUE_RESULT"; id: string; body: TaskEnqueueResultBody }
   | { type: "AGENT_CONTROL_RESULT"; id: string; body: AgentControlResultBody }
   | { type: "TASK_HISTORY"; id: string; body: TaskHistoryBody }
@@ -245,6 +248,7 @@ export type ServerControlFrame = { type: "PROJECT_CONTENT_RESULT"; id: string; b
 export type ClientControlFrame = { type: "PROJECT_CONTENT"; id: string; body: ProjectContentRequest } | PairProveFrame | AuthProveFrame | StateGetFrame | StateWatchFrame | HumanRequestDetailGetFrame
   | { type: "HUMAN_REQUEST_REPLY"; id: string; body: HumanRequestReplyBody }
   | { type: "HUMAN_REQUEST_CANCEL_RUN"; id: string; body: HumanRequestCancelRunBody }
+  | { type: "TASK_ATTACHMENT"; id: string; body: TaskAttachmentBody }
   | { type: "TASK_ENQUEUE"; id: string; body: TaskEnqueueBody }
   | { type: "AGENT_CONTROL"; id: string; body: AgentControlBody }
   | { type: "TASK_HISTORY_GET"; id: string; body: TaskHistoryGetBody }
@@ -284,6 +288,8 @@ export function encodeStateWatch(id: string, body: StateWatchBody): string { ret
 export function encodeHumanRequestDetailGet(id: string, body: HumanRequestDetailGetBody): string { return encodeClientControl({ type: "HUMAN_REQUEST_DETAIL_GET", id, body }); }
 export function encodeHumanRequestReply(id: string, body: HumanRequestReplyBody): string { return encodeClientControl({ type: "HUMAN_REQUEST_REPLY", id, body }); }
 export function encodeHumanRequestCancelRun(id: string, body: HumanRequestCancelRunBody): string { return encodeClientControl({ type: "HUMAN_REQUEST_CANCEL_RUN", id, body }); }
+export function encodeTaskAttachment(id: string, body: TaskAttachmentBody): string { return encodeClientControl({ type: "TASK_ATTACHMENT", id, body }); }
+export function encodeTaskAttachmentResult(id: string, body: TaskAttachmentResultBody): string { return encodeServerControl({ type: "TASK_ATTACHMENT_RESULT", id, body }); }
 export function encodeTaskEnqueue(id: string, body: TaskEnqueueBody): string { return encodeClientControl({ type: "TASK_ENQUEUE", id, body }); }
 export function encodeProjectCreate(id: string, body: ProjectCreateBody): string { return encodeClientControl({ type: "PROJECT_CREATE", id, body }); }
 export function encodeRepositoriesGet(id: string, body: RepositoriesGetBody): string { return encodeClientControl({ type: "REPOSITORIES_GET", id, body }); }
@@ -427,12 +433,25 @@ function validateBody(type: ControlType, body: unknown, wire: boolean): ControlB
     case "HUMAN_REQUEST_REPLY_RESULT": requireKeys(body, ["request_id", "revision", "status"], wire); if (body.status !== "resolved" && body.status !== "delivery_unknown") malformed(); return { request_id: dynamicID(body.request_id), revision: decimal(body.revision, wire, true), status: body.status };
     case "HUMAN_REQUEST_CANCEL_RUN": requireKeys(body, ["request_id", "expected_request_revision", "expected_run_revision"], wire); return { request_id: dynamicID(body.request_id), expected_request_revision: decimal(body.expected_request_revision, wire, true), expected_run_revision: decimal(body.expected_run_revision, wire, true) };
     case "HUMAN_REQUEST_CANCEL_RUN_RESULT": requireKeys(body, ["run_id", "run_revision", "request_id", "request_revision"], wire); return { run_id: dynamicID(body.run_id), run_revision: decimal(body.run_revision, wire, true), request_id: dynamicID(body.request_id), request_revision: decimal(body.request_revision, wire, true) };
+    case "TASK_ATTACHMENT": {
+      requireKeys(body, ["index", "offset", "size", "name", "data"], wire);
+      const index = integer(body.index, 0, MAX_TASK_ATTACHMENTS - 1), offset = decimal(body.offset, wire), size = decimal(body.size, wire, true);
+      const name = boundedText(body.name, 1, 255), data = boundedText(body.data, 4, TASK_ATTACHMENT_CHUNK_BYTES / 3 * 4);
+      if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(data)) malformed();
+      const bytes = data.length / 4 * 3 - (data.endsWith("==") ? 2 : data.endsWith("=") ? 1 : 0);
+      if (size > BigInt(MAX_TASK_ATTACHMENT_BYTES) || offset + BigInt(bytes) > size) malformed();
+      return { index, offset, size, name, data };
+    }
+    case "TASK_ATTACHMENT_RESULT": {
+      requireKeys(body, ["offset"], wire); const offset = decimal(body.offset, wire, true);
+      if (offset > BigInt(MAX_TASK_ATTACHMENT_BYTES)) malformed(); return { offset };
+    }
     case "TASK_ENQUEUE": {
-      requireKeys(body, ["task_id", "incarnation_id", "agent_id", "expected_agent_revision", "instruction"], wire, ["repository_id", "mode"]);
+      requireKeys(body, ["task_id", "incarnation_id", "agent_id", "expected_agent_revision", "instruction"], wire, ["repository_id", "mode", "attachment_count"]);
       const mode = present(body, "mode") ? body.mode : undefined;
       if (mode !== undefined && mode !== "now" && mode !== "queue" && mode !== "any") malformed();
       const repository_id = present(body, "repository_id") ? dynamicID(body.repository_id) : undefined;
-      return { task_id: dynamicID(body.task_id), incarnation_id: dynamicID(body.incarnation_id), agent_id: dynamicID(body.agent_id), ...(repository_id === undefined ? {} : { repository_id }), expected_agent_revision: decimal(body.expected_agent_revision, wire, true), instruction: boundedText(body.instruction, 1, MAX_TASK_INSTRUCTION_BYTES), ...(mode === undefined ? {} : { mode }) };
+      return { ...(present(body, "attachment_count") ? { attachment_count: integer(body.attachment_count, 0, MAX_TASK_ATTACHMENTS) } : {}), task_id: dynamicID(body.task_id), incarnation_id: dynamicID(body.incarnation_id), agent_id: dynamicID(body.agent_id), ...(repository_id === undefined ? {} : { repository_id }), expected_agent_revision: decimal(body.expected_agent_revision, wire, true), instruction: boundedText(body.instruction, 1, MAX_TASK_INSTRUCTION_BYTES), ...(mode === undefined ? {} : { mode }) };
     }
     case "TASK_ENQUEUE_RESULT": requireKeys(body, ["task_id", "revision", "agent_revision"], wire); return { task_id: dynamicID(body.task_id), revision: decimal(body.revision, wire, true), agent_revision: decimal(body.agent_revision, wire, true) };
     case "AGENT_CONTROL": {

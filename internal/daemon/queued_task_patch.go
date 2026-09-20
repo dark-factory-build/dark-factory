@@ -37,8 +37,12 @@ func prepareQueuedTaskPatch(ctx context.Context, store *kernel.Store, id kernel.
 	if patch.AssignedAgentID != nil {
 		task.AssignedAgentID = *patch.AssignedAgentID
 	}
+	attachments, err := store.TaskAttachments(ctx, id)
+	if err != nil {
+		return err
+	}
 	if task.AssignedAgentID == (kernel.AgentID{}) {
-		return prepareSharedTaskText(task.Title, task.Body)
+		return prepareSharedTaskText(task.Title, task.Body, attachments...)
 	}
 	agent, found, err := store.Agent(ctx, task.AssignedAgentID)
 	if err != nil {
@@ -47,16 +51,16 @@ func prepareQueuedTaskPatch(ctx context.Context, store *kernel.Store, id kernel.
 	if !found || agent.ProjectID != task.ProjectID {
 		return kernel.ErrConflict
 	}
-	return prepareTaskText(agent.Provider, task.Title, task.Body)
+	return prepareTaskText(agent.Provider, task.Title, task.Body, attachments...)
 }
 
 // prepareSharedTaskText bounds work any eligible worker may claim: the text
 // must fit every native provider, since the claimant is not known yet.
 // ponytail: fit-all bound; a per-provider eligibility predicate in admission
 // is the upgrade if a project needs shared work only some providers can hold.
-func prepareSharedTaskText(title, body string) error {
+func prepareSharedTaskText(title, body string, attachments ...kernel.TaskAttachment) error {
 	for _, kind := range []kernel.Provider{kernel.ProviderClaudeCode, kernel.ProviderCodex} {
-		if err := prepareTaskText(kind, title, body); err != nil {
+		if err := prepareTaskText(kind, title, body, attachments...); err != nil {
 			return err
 		}
 	}
@@ -77,6 +81,10 @@ func prepareTaskRetry(ctx context.Context, store *kernel.Store, id kernel.TaskID
 	if task.Revision != expected {
 		return kernel.ErrRevisionConflict
 	}
+	attachments, err := store.TaskAttachments(ctx, id)
+	if err != nil {
+		return err
+	}
 	if assigned == (kernel.AgentID{}) {
 		assigned = task.AssignedAgentID
 	}
@@ -87,7 +95,7 @@ func prepareTaskRetry(ctx context.Context, store *kernel.Store, id kernel.TaskID
 	if !found || agent.ProjectID != task.ProjectID || agent.Role != kernel.RoleWorker {
 		return kernel.ErrUnauthorized
 	}
-	return prepareTaskText(agent.Provider, task.Title, task.Body)
+	return prepareTaskText(agent.Provider, task.Title, task.Body, attachments...)
 }
 
 // Existing IDs and unauthorized targets go straight to the kernel's canonical
@@ -109,10 +117,14 @@ func prepareTaskEnqueue(ctx context.Context, store *kernel.Store, task kernel.Ne
 	return prepareTaskText(agent.Provider, task.Title, task.Body)
 }
 
-func prepareTaskText(kind kernel.Provider, title, body string) error {
+func prepareTaskText(kind kernel.Provider, title, body string, attachments ...kernel.TaskAttachment) error {
 	effectiveBody := body
 	if effectiveBody == "" && kind != kernel.ProviderShell {
 		effectiveBody = title
+	}
+	effectiveBody, err := kernel.TaskAttachmentInstruction(effectiveBody, attachments)
+	if err != nil {
+		return err
 	}
 	if _, _, err := provider.PrepareTask(kind, []byte(effectiveBody)); err != nil {
 		return fmt.Errorf("%w: task does not fit provider", kernel.ErrInvalidValue)

@@ -161,7 +161,7 @@ export type FactoryAppStatus =
 
 type HumanSession = Pick<BrowserSession, "getHumanRequestDetail" | "replyHumanRequest" | "cancelHumanRequest">;
 type TerminalSession = Pick<BrowserSession, "resolveAgentTerminal" | "openTerminal" | "close">;
-type AgentTaskSession = Pick<BrowserSession, "enqueueAgentTask" | "controlAgent" | "getTaskHistory" | "getTaskDetail" | "resolveAgentTerminal">;
+type AgentTaskSession = Pick<BrowserSession, "enqueueAgentTaskWithFiles" | "enqueueAgentTask" | "controlAgent" | "getTaskHistory" | "getTaskDetail" | "resolveAgentTerminal">;
 type ConsoleSession = Pick<BrowserSession, "updateAgent" | "setProjectLimits" | "createProject" | "getRepositories" | "mutateRepository" | "intake" | "updateTask" | "getTopology" | "getRunPaths" | "getTaskList" | "discoverAccounts" | "linkAccount" | "updateAccount" | "listBrowserClients" | "revokeBrowserClient" | "githubConnection" | "clientId">;
 type RemoteInviteSession = Pick<BrowserSession, "inviteRemote" | "capabilities">;
 type ControlledClient = Pick<BrowserClient, "connect" | "close"> & { readonly session?: HumanSession & TerminalSession & AgentTaskSession & ConsoleSession & RemoteInviteSession & Partial<Pick<BrowserSession, "projectContent">> };
@@ -605,7 +605,7 @@ export class FactoryAppController {
   }
 
   /** Queue work from the Tasks panel: for one agent, or for any eligible worker in its project. */
-  async addTask(agent: Pick<AgentItem, "id" | "revision">, instruction: string, mode: "queue" | "any"): Promise<boolean> {
+  async addTask(agent: Pick<AgentItem, "id" | "revision">, instruction: string, mode: "queue" | "any", files: readonly File[] = []): Promise<boolean> {
     const session = this.#client?.session;
     if (this.#closed || this.#status !== "ready" || session === undefined || this.#edit?.pending === true) return false;
     const generation = this.#generation;
@@ -613,7 +613,9 @@ export class FactoryAppController {
     this.#edit = edit;
     this.#publish();
     try {
-      await session.enqueueAgentTask({ agentId: agent.id, expectedAgentRevision: agent.revision, instruction: instruction.trim(), mode });
+      const request = { agentId: agent.id, expectedAgentRevision: agent.revision, instruction: instruction.trim(), mode };
+      if (files.length === 0) await session.enqueueAgentTask(request);
+      else await session.enqueueAgentTaskWithFiles(request, files);
       if (!this.#current(generation) || this.#edit !== edit) return false;
       this.#edit = undefined;
       this.#publish();

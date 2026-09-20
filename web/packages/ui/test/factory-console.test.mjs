@@ -2637,3 +2637,32 @@ test("floor project changes clear task selection without restoring an old dialog
   assert.equal(tree.root.findAllByProps({ "aria-label": "Task details" }).length, 0);
   await act(async () => tree.unmount());
 });
+
+test("new task retains pasted files on failure, supports removal, and clears on success", async () => {
+  const state = baseState();
+  const attempts = [];
+  let succeed = false, renderer;
+  await act(async () => { renderer = create(createElement(FactoryConsole, { status: "ready", detail: "queue", state, onDetail() {}, onAddTask: async (...args) => { attempts.push(args); return succeed; } })); });
+  const form = () => renderer.root.findByProps({ "aria-label": "New task" });
+  const file = new File(["attachment"], "notes.txt", { type: "text/plain" });
+  let prevented = false;
+  await act(async () => { form().props.onPaste({ clipboardData: { files: [file] }, preventDefault() { prevented = true; } }); });
+  assert.equal(prevented, true);
+  const nativeFormData = globalThis.FormData;
+  globalThis.FormData = class { get(name) { return name === "target" ? `any:${ids.project}` : "Inspect this"; } };
+  let resets = 0;
+  const submit = () => form().props.onSubmit({ preventDefault() {}, currentTarget: { reset() { resets++; } } });
+  try {
+    await act(async () => { submit(); });
+    assert.deepEqual(attempts[0][3], [file]);
+    assert.equal(resets, 0);
+    assert.equal(renderer.root.findAllByProps({ "aria-label": "Remove notes.txt" }).length, 1);
+    await act(async () => { renderer.root.findByProps({ "aria-label": "Remove notes.txt" }).props.onClick(); });
+    assert.equal(renderer.root.findAllByProps({ "aria-label": "Remove notes.txt" }).length, 0);
+    await act(async () => { form().props.onDrop({ dataTransfer: { files: [file] }, preventDefault() {} }); });
+    succeed = true;
+    await act(async () => { submit(); });
+    assert.equal(resets, 1);
+    assert.equal(renderer.root.findAllByProps({ "aria-label": "Task attachments" }).length, 0);
+  } finally { globalThis.FormData = nativeFormData; await act(async () => renderer.unmount()); }
+});

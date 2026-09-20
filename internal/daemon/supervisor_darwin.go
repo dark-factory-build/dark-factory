@@ -305,6 +305,15 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 	if run.Provider != kernel.ProviderShell && len(rawProviderTask) == 0 {
 		rawProviderTask = []byte(task.Title)
 	}
+	attachments, err := daemon.store.TaskAttachments(ctx, run.TaskID)
+	if err != nil {
+		return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureInternal, err)
+	}
+	instruction, err := kernel.TaskAttachmentInstruction(string(rawProviderTask), attachments)
+	if err != nil {
+		return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureInternal, err)
+	}
+	rawProviderTask = []byte(instruction)
 	rawProviderTask, err = providerTaskForContinuationLaunch(run.Provider, rawProviderTask, run.ContinuationContexts)
 	if err != nil {
 		return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSpawn, err)
@@ -501,6 +510,10 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 	}()
 	home, err := binding.ProviderHome()
 	if err != nil {
+		_ = childControl.Close()
+		return daemon.failRun(run, kernel.FailureSpawn, err)
+	}
+	if err := materializeTaskAttachments(home, attachments); err != nil {
 		_ = childControl.Close()
 		return daemon.failRun(run, kernel.FailureSpawn, err)
 	}

@@ -147,6 +147,18 @@
       "fixture": "human_request_cancel_run_result.json"
     },
     {
+      "type": "TASK_ATTACHMENT",
+      "direction": "client",
+      "id": "required",
+      "fixture": "task_attachment.json"
+    },
+    {
+      "type": "TASK_ATTACHMENT_RESULT",
+      "direction": "server",
+      "id": "required",
+      "fixture": "task_attachment_result.json"
+    },
+    {
       "type": "TASK_ENQUEUE",
       "direction": "client",
       "id": "required",

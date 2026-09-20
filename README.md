@@ -56,6 +56,29 @@ short CLI setup is still required; once the worker appears, use its console
 panel to inspect results and queue more work. Try one small documentation
 correction before handing over a larger goal.
 
+The Tasks panel's **New task** form accepts pasted images, dropped files, or
+files selected with **Attach files** (up to 8 files and 8 MiB total). Add an
+instruction, review or remove the previews, then submit. Attachments commit
+with the task in the local daemon database and remain there with its history.
+Each attempt gets a fresh copy in its private runtime home, available through
+`$DARK_FACTORY_TASK_ATTACHMENTS`; uploads do not enter your Git checkout.
+Unsubmitted uploads are temporary and discarded when the connection closes.
+File contents remain unchanged; interpretation depends on the provider's tools.
+
+Attachment cleanup is manual. After a task succeeds or is cancelled, run
+`factoryctl task update --task ID --revision REVISION --remove-attachments`.
+Queued, running, failed, and blocked tasks are protected. `factoryctl task read`
+keeps the original filenames with `removed: true`; sending cleaned tasks back
+is refused, so create a new task and attach any required files instead. Normal
+runtime cleanup already removes worker copies.
+
+Deletion frees database space for reuse. To return unused space to disk, turn
+`factoryctl dispatch off`, let all runs settle, then run
+`factoryctl storage compact`. It uses SQLite VACUUM and a WAL checkpoint while
+holding the daemon's writer gate. Compaction is optional, may need temporary
+free disk space up to twice the database size, and leaves dispatch off.
+There is no automatic deletion or background compaction.
+
 ## Status and further reading
 
 Repository management and issue intake ship in v0.4.0. **Hosted GitHub

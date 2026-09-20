@@ -30,6 +30,7 @@ const (
 	CallEnqueueTask
 	CallSetDispatch
 	CallSetCapacity
+	CallCompactStorage
 	CallAccountsDiscover
 	CallAccountLink
 	CallAgentSelectAccount
@@ -876,6 +877,10 @@ func decodeCall(domain byte, bearer credential, encoded []byte) (Call, RemoteErr
 		if err := decodeExact(request.Params, &call.taskRead); err != nil || !validID(call.taskRead.TaskID) || call.taskRead.ExpectedRevision == 0 || call.taskRead.Offset > uint64(^uint64(0)>>1) {
 			return Call{}, RemoteInvalidRequest
 		}
+	case CallCompactStorage:
+		if err := decodeExact(request.Params, &struct{}{}); err != nil {
+			return Call{}, RemoteInvalidRequest
+		}
 	case CallSetDispatch:
 		var input struct {
 			ExpectedRevision uint64 `json:"expected_revision"`
@@ -965,7 +970,7 @@ func decodeCall(domain byte, bearer credential, encoded []byte) (Call, RemoteErr
 			return Call{}, RemoteInvalidRequest
 		}
 	case CallOverseerUpdateTask, CallOperatorUpdateTask:
-		if err := decodeExact(request.Params, &call.overseerTaskEdit); err != nil || !validOverseerTaskUpdateInput(call.overseerTaskEdit) {
+		if err := decodeExact(request.Params, &call.overseerTaskEdit); err != nil || !validOverseerTaskUpdateInput(call.overseerTaskEdit) || kind == CallOverseerUpdateTask && call.overseerTaskEdit.RemoveAttachments {
 			return Call{}, RemoteInvalidRequest
 		}
 	case CallOverseerUpdateAgent, CallOperatorUpdateAgent:
@@ -1096,6 +1101,8 @@ func methodKind(method string) (CallKind, byte) {
 		return CallEnqueueTask, operatorDomain
 	case "set_dispatch":
 		return CallSetDispatch, operatorDomain
+	case "compact_storage":
+		return CallCompactStorage, operatorDomain
 	case "set_capacity":
 		return CallSetCapacity, operatorDomain
 	case "accounts_discover":
@@ -1328,7 +1335,7 @@ func replyMatches(kind CallKind, reply replyKind) bool {
 		return reply == replyOverseerSnapshot
 	case CallProjectRepository:
 		return reply == replyContent
-	case CallCreateProject, CallProjectLimits, CallCreateAgent, CallAgentIdlePolicy, CallAccountLink, CallAgentSelectAccount, CallAgentSelectModel, CallEnqueueTask, CallSetDispatch, CallSetCapacity, CallSucceed, CallBlock, CallFail, CallRequestHuman, CallPeerAsk, CallPeerAnswer, CallSendBack, CallSendBackTask, CallOverseerEnqueueTask, CallOverseerUpdateTask, CallOverseerUpdateAgent, CallOverseerStopRun, CallOverseerReplaceRun, CallOverseerMessageWorker, CallOverseerInterruptWorker, CallOverseerReplyHuman, CallOperatorUpdateTask, CallOperatorUpdateAgent, CallOperatorStopRun, CallOperatorReplaceRun, CallOperatorMessageWorker, CallOperatorInterruptWorker, CallHumanReply:
+	case CallCreateProject, CallProjectLimits, CallCreateAgent, CallAgentIdlePolicy, CallAccountLink, CallAgentSelectAccount, CallAgentSelectModel, CallEnqueueTask, CallSetDispatch, CallSetCapacity, CallCompactStorage, CallSucceed, CallBlock, CallFail, CallRequestHuman, CallPeerAsk, CallPeerAnswer, CallSendBack, CallSendBackTask, CallOverseerEnqueueTask, CallOverseerUpdateTask, CallOverseerUpdateAgent, CallOverseerStopRun, CallOverseerReplaceRun, CallOverseerMessageWorker, CallOverseerInterruptWorker, CallOverseerReplyHuman, CallOperatorUpdateTask, CallOperatorUpdateAgent, CallOperatorStopRun, CallOperatorReplaceRun, CallOperatorMessageWorker, CallOperatorInterruptWorker, CallHumanReply:
 		return reply == replyMutation
 	case CallWebStatus:
 		return reply == replyWebStatus
