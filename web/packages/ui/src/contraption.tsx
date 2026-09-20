@@ -1,4 +1,3 @@
-import { useEffect, useState } from "react";
 import { hash } from "./factory-scene/appearance.js";
 
 export type ContraptionProps = Readonly<{
@@ -8,16 +7,13 @@ export type ContraptionProps = Readonly<{
   correction: boolean;
   active: boolean;
   reducedMotion: boolean;
+  /** Shared scene clock in milliseconds; omitted clocks leave the machine at rest. */
+  pulse?: number;
 }>;
 
-function useTick(active: boolean, reducedMotion: boolean) {
-  const [tick, setTick] = useState(0);
-  useEffect(() => {
-    if (!active || reducedMotion) { setTick(0); return; }
-    const timer = setInterval(() => setTick((frame) => (frame + 1) % 4), 360);
-    return () => clearInterval(timer);
-  }, [active, reducedMotion]);
-  return tick;
+function tickFor(active: boolean, reducedMotion: boolean, pulse: number | undefined) {
+  if (!active || reducedMotion || pulse === undefined || !Number.isFinite(pulse)) return 0;
+  return Math.floor(Math.max(0, pulse) / 360) % 4;
 }
 
 function Bolt({ x, y }: { x: number; y: number }) {
@@ -33,9 +29,9 @@ function Spanner() {
 }
 
 /** A compact, identity-stable factory machine. Supplied operation facts only add overlays. */
-export function Contraption({ identity, construction, correction, active, reducedMotion }: ContraptionProps) {
+export function Contraption({ identity, construction, correction, active, reducedMotion, pulse }: ContraptionProps) {
   const design = hash(identity) % 3;
-  const tick = useTick(active, reducedMotion);
+  const tick = tickFor(active, reducedMotion, pulse);
   const lamp = active ? tick % 2 === 0 ? "#e5c58b" : "#80ddff" : "#53605b";
   return <svg viewBox="0 0 64 64" role="img" aria-label="Factory contraption" data-contraption-variant={design} data-contraption-active={active || undefined} style={{ display: "block", width: 64, height: 64, imageRendering: "pixelated" }}>
     <g data-contraption-frame={design} shapeRendering="crispEdges">
