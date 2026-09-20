@@ -89,3 +89,9 @@ test("tied delivery timestamps never let success hide an unresolved attempt", ()
     }
   }
 });
+
+
+test("re-reading an old running release receipt does not prove continuing installation activity", () => {
+  const view = deriveProductionView([record("delivery", "attempt", "", { destination: "host", state: "running", updated_at: 1, pull_requests: [] }, { observed_at: 200_000 })], 200_000);
+  assert.equal(sharedDeliveries(view)[0].state, "stale");
+});

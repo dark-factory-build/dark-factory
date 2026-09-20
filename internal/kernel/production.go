@@ -1,6 +1,7 @@
 package kernel
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"database/sql"
@@ -62,150 +63,86 @@ func productionURL(value string) bool {
 }
 
 func canonicalProductionRuntime(value string) string {
-	if !strings.HasPrefix(value, "runtime:") || strings.HasPrefix(value, "runtime:host-") {
+	if !strings.HasPrefix(value, "runtime:/") {
 		return value
 	}
-	path := strings.TrimPrefix(value, "runtime:")
-	if !strings.HasPrefix(path, "/") {
-		return value
-	}
-	digest := sha256.Sum256([]byte(path))
+	digest := sha256.Sum256([]byte(strings.TrimPrefix(value, "runtime:")))
 	return "runtime:host-" + hex.EncodeToString(digest[:8])
 }
 
-func canonicalProductionDelivery(delivery ProductionDelivery) ProductionDelivery {
-	oldDestination := delivery.Destination
-	delivery.Destination = canonicalProductionRuntime(oldDestination)
-	if delivery.ID == oldDestination {
-		delivery.ID = delivery.Destination
-	} else if strings.HasPrefix(delivery.ID, oldDestination+":") {
-		delivery.ID = delivery.Destination + delivery.ID[len(oldDestination):]
+// Normalize legacy records at the private read boundary as well as on writes.
+// Keeping unknown document fields avoids dropping evidence during an upgrade.
+func canonicalProductionRecord(item *ProductionRecord) error {
+	if (item.Kind != "delivery" && item.Kind != "repository") || !strings.Contains(string(item.Document), "runtime:/") {
+		return nil
 	}
-	return delivery
-}
-
-func canonicalProductionIdentity(identity, oldDestination, newDestination string) string {
-	if oldDestination != newDestination && strings.HasPrefix(identity, oldDestination+":") {
-		return newDestination + identity[len(oldDestination):]
+	var document map[string]any
+	decoder := json.NewDecoder(bytes.NewReader(item.Document))
+	decoder.UseNumber()
+	if err := decoder.Decode(&document); err != nil {
+		return err
 	}
-	return identity
+	target := document
+	if item.Kind == "repository" {
+		target, _ = document["maintenance"].(map[string]any)
+	}
+	old, _ := target["destination"].(string)
+	destination := canonicalProductionRuntime(old)
+	if old == destination {
+		return nil
+	}
+	target["destination"] = destination
+	if item.Kind == "delivery" {
+		item.ID = strings.Replace(item.ID, old, destination, 1)
+		if id, ok := document["id"].(string); ok {
+			document["id"] = strings.Replace(id, old, destination, 1)
+		}
+	}
+	body, err := json.Marshal(document)
+	item.Document = body
+	return err
 }
-
-const maxProductionLegacyRuntimeRows = 128
 
 func migrateProductionRuntimeRecords(ctx context.Context, c *sql.Conn, project ProjectID, repository string) error {
-	rows, err := c.QueryContext(ctx, `SELECT repository, kind, identity, visual_id, document, observed_at_ms
-        FROM production_records
+	// ponytail: migrate at most 128 legacy rows per observation; private reads
+	// normalize immediately and subsequent controller batches finish the rest.
+	rows, err := c.QueryContext(ctx, `SELECT kind, identity, visual_id, document, observed_at_ms FROM production_records
         WHERE project_id = ? AND repository = ? AND kind IN ('delivery', 'repository')
-          AND (identity LIKE 'runtime:/%' OR document LIKE '%runtime:/%')
-        LIMIT ?`, project.Bytes(), repository, maxProductionLegacyRuntimeRows)
+        AND document LIKE '%runtime:/%' LIMIT 128`, project.Bytes(), repository)
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
+	var records []ProductionRecord
 	for rows.Next() {
-		var rowRepository, kind, identity, visual, document string
-		var observedAt int64
-		if err := rows.Scan(&rowRepository, &kind, &identity, &visual, &document, &observedAt); err != nil {
+		var item ProductionRecord
+		var body string
+		if err := rows.Scan(&item.Kind, &item.ID, &item.VisualID, &body, &item.ObservedAt); err != nil {
+			rows.Close()
 			return err
 		}
-		newIdentity, newDocument := identity, document
-		if kind == "delivery" {
-			var delivery ProductionDelivery
-			if json.Unmarshal([]byte(document), &delivery) != nil {
-				continue
-			}
-			oldDestination := delivery.Destination
-			delivery = canonicalProductionDelivery(delivery)
-			newIdentity = canonicalProductionIdentity(identity, oldDestination, delivery.Destination)
-			if newIdentity == identity && delivery.Destination == "" {
-				continue
-			}
-			body, marshalErr := json.Marshal(delivery)
-			if marshalErr != nil {
-				return marshalErr
-			}
-			newDocument = string(body)
-		} else {
-			var envelope map[string]json.RawMessage
-			if json.Unmarshal([]byte(document), &envelope) != nil {
-				continue
-			}
-			var maintenance ProductionMaintenance
-			raw, ok := envelope["maintenance"]
-			if !ok || json.Unmarshal(raw, &maintenance) != nil {
-				continue
-			}
-			oldDestination := maintenance.Destination
-			maintenance.Destination = canonicalProductionRuntime(oldDestination)
-			if maintenance.Destination == oldDestination {
-				continue
-			}
-			raw, marshalErr := json.Marshal(maintenance)
-			if marshalErr != nil {
-				return marshalErr
-			}
-			envelope["maintenance"] = raw
-			body, marshalErr := json.Marshal(envelope)
-			if marshalErr != nil {
-				return marshalErr
-			}
-			newDocument = string(body)
-		}
-		if newIdentity == identity && newDocument == document {
-			continue
-		}
-		if _, err := c.ExecContext(ctx, `INSERT INTO production_records (project_id, repository, kind, identity, visual_id, document, observed_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(project_id, repository, kind, identity) DO UPDATE SET visual_id = excluded.visual_id, document = excluded.document, observed_at_ms = excluded.observed_at_ms
-            WHERE excluded.observed_at_ms >= production_records.observed_at_ms`, project.Bytes(), rowRepository, kind, newIdentity, visual, newDocument, observedAt); err != nil {
+		item.Document = json.RawMessage(body)
+		records = append(records, item)
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return err
+	}
+	for _, item := range records {
+		oldID := item.ID
+		if err := canonicalProductionRecord(&item); err != nil {
 			return err
 		}
-		if newIdentity != identity {
-			if _, err := c.ExecContext(ctx, `DELETE FROM production_records WHERE project_id = ? AND repository = ? AND kind = ? AND identity = ?`, project.Bytes(), rowRepository, kind, identity); err != nil {
+		if err := productionRecordOnConnection(ctx, c, project, repository, item.Kind, item.ID, item.VisualID, item.Document, item.ObservedAt); err != nil {
+			return err
+		}
+		if oldID != item.ID {
+			if _, err := c.ExecContext(ctx, `DELETE FROM production_records WHERE project_id = ? AND repository = ? AND kind = ? AND identity = ?`, project.Bytes(), repository, item.Kind, oldID); err != nil {
 				return err
 			}
 		}
 	}
-	return rows.Err()
-}
-
-func canonicalProductionRecord(item *ProductionRecord) {
-	if item.Kind == "delivery" {
-		var delivery ProductionDelivery
-		if json.Unmarshal(item.Document, &delivery) != nil {
-			return
-		}
-		oldDestination := delivery.Destination
-		delivery = canonicalProductionDelivery(delivery)
-		item.ID = canonicalProductionIdentity(item.ID, oldDestination, delivery.Destination)
-		if body, err := json.Marshal(delivery); err == nil {
-			item.Document = body
-		}
-		return
-	}
-	if item.Kind != "repository" {
-		return
-	}
-	var envelope map[string]json.RawMessage
-	if json.Unmarshal(item.Document, &envelope) != nil {
-		return
-	}
-	var maintenance ProductionMaintenance
-	raw, ok := envelope["maintenance"]
-	if !ok || json.Unmarshal(raw, &maintenance) != nil {
-		return
-	}
-	oldDestination := maintenance.Destination
-	maintenance.Destination = canonicalProductionRuntime(oldDestination)
-	if maintenance.Destination == oldDestination {
-		return
-	}
-	if raw, err := json.Marshal(maintenance); err == nil {
-		envelope["maintenance"] = raw
-		if body, err := json.Marshal(envelope); err == nil {
-			item.Document = body
-		}
-	}
+	return nil
 }
 
 func validProductionPull(pr ProductionPullRequest) bool {
@@ -220,6 +157,11 @@ func productionRecordOnConnection(ctx context.Context, c *sql.Conn, project Proj
 	if err != nil || len(body) > 32768 {
 		return ErrInvalidValue
 	}
+	item := ProductionRecord{Kind: kind, ID: id, Document: body}
+	if err := canonicalProductionRecord(&item); err != nil {
+		return err
+	}
+	id, body = item.ID, item.Document
 	_, err = c.ExecContext(ctx, `INSERT INTO production_records (project_id, repository, kind, identity, visual_id, document, observed_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(project_id, repository, kind, identity) DO UPDATE SET document = excluded.document, observed_at_ms = excluded.observed_at_ms
         WHERE excluded.observed_at_ms >= production_records.observed_at_ms`, project.Bytes(), repo, kind, id, visual, string(body), at)
@@ -248,14 +190,6 @@ func (store *Store) RecordProductionObservation(ctx context.Context, project Pro
 		return ErrInvalidValue
 	}
 	observation.Repository = strings.ToLower(observation.Repository)
-	if observation.Maintenance != nil {
-		maintenance := *observation.Maintenance
-		maintenance.Destination = canonicalProductionRuntime(maintenance.Destination)
-		observation.Maintenance = &maintenance
-	}
-	for index := range observation.Deliveries {
-		observation.Deliveries[index] = canonicalProductionDelivery(observation.Deliveries[index])
-	}
 	tx, err := store.beginValidatedWrite(ctx)
 	if err != nil {
 		return err
@@ -426,7 +360,9 @@ func (store *Store) Production(ctx context.Context, project ProjectID, offset, l
 		}
 		size += len(body)
 		item.Document = json.RawMessage(body)
-		canonicalProductionRecord(&item)
+		if err := canonicalProductionRecord(&item); err != nil {
+			return page, err
+		}
 		page.Records = append(page.Records, item)
 	}
 	if err := rows.Err(); err != nil {

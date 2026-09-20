@@ -157,6 +157,26 @@ func TestProductionCanonicalizesLegacyRuntimeDestinationsAndDeduplicates(t *test
 	if _, err := store.writer.ExecContext(ctx, `INSERT INTO production_records (project_id, repository, kind, identity, visual_id, document, observed_at_ms) VALUES (?, ?, 'delivery', ?, '', ?, ?)`, project.ID.Bytes(), "example/factory", canonicalID, string(newerBody), 12); err != nil {
 		t.Fatal(err)
 	}
+	before, err := store.Production(ctx, project.ID, 0, 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range before.Records {
+		if strings.Contains(string(item.Document), "/Users/") || strings.Contains(item.ID, "/Users/") {
+			t.Fatal("legacy read exposed a runtime path")
+		}
+	}
+	// Migration must not replace a newer opaque receipt with legacy success.
+	if err := store.RecordProductionObservation(ctx, project.ID, ProductionObservation{Repository: "example/factory", ObservedAt: 18}, mustTime(t, 18)); err != nil {
+		t.Fatal(err)
+	}
+	var retained string
+	if err := store.writer.QueryRowContext(ctx, `SELECT document FROM production_records WHERE project_id = ? AND kind = 'delivery'`, project.ID.Bytes()).Scan(&retained); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(retained, `"state":"blocked"`) {
+		t.Fatal("legacy migration rewound newer evidence")
+	}
 	maintenance := &ProductionMaintenance{Destination: path, State: "ready"}
 	observation := ProductionObservation{Repository: "example/factory", ObservedAt: 20, Maintenance: maintenance,
 		Deliveries: []ProductionDelivery{{ID: legacyID, Kind: "release", Destination: path, Revision: revision, State: "verified", PullRequests: []uint64{7, 8}}}}

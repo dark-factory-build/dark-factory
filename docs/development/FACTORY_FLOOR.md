@@ -263,3 +263,10 @@ at that time, not a perpetual claim about the current destination. Host installa
 continues through the existing safe deployment script; there is no browser updater
 or new automatic-update policy. Older merged items compact into an explicit
 inspectable dispatch rack without shrinking phone targets.
+
+Runtime destinations use stable opaque host identities, never home paths.
+Legacy destination records are normalized before private browser reads and
+transactionally migrated in bounded batches on the next observation. Tied
+receipt timestamps do not prove a newer success: unresolved evidence wins a tie
+until a later verification establishes ordering. Re-reading an old running
+receipt does not refresh its activity timestamp.
