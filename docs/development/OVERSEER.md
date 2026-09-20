@@ -191,12 +191,13 @@ eligible same-project handoffs can be read in one attempt.
   non-shell overseer request atomically yields the run, releases its lane and
   revokes its bearer; the next fresh-authority run resumes after the reply.
   Shell overseers retain their live-request behavior.
-
 - A worker block you cannot clear (its sandbox, the platform, an authority
   you lack) is not yours to retry and not a reason to block your own pass.
-  Raise it once with `attempt request-human`, naming the task and its block
-  reason, and cancel the task if its target has already merged. A blocked
-  task nobody was told about helps no one.
+  First cancel the task if its target has already merged; then raise the
+  block once with `attempt request-human`, naming the task and its reason.
+  The order matters: the request yields your run and revokes its credential,
+  so nothing you issue after it lands. A blocked task nobody was told about
+  helps no one.
 
 For unattended projects, also follow [UNATTENDED.md](UNATTENDED.md).
 
