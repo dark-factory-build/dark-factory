@@ -77,10 +77,17 @@ func (daemon *Daemon) attemptMaintainer(ctx context.Context, call api.Call) api.
 			return failure("unavailable")
 		}
 		if found {
+			if accepted.Snapshot.LinearTeamID != "" {
+				// A distinct broker method fails closed against older deployments.
+				request.Method = "factory/tools/call_private"
+			}
 			if accepted.WithdrawnAt != nil {
 				return failure("denied")
 			}
 			if params.Name == "list_issues" {
+				return failure("accepted_snapshot_required")
+			}
+			if params.Name == "observe_issue" && accepted.Snapshot.LinearTeamID != "" {
 				return failure("accepted_snapshot_required")
 			}
 			if params.Name == "observe_issue" {
@@ -99,7 +106,19 @@ func (daemon *Daemon) attemptMaintainer(ctx context.Context, call api.Call) api.
 				}
 				observedAcceptance = &accepted
 			}
-			if params.Name == "create_pull_request" {
+			if params.Name == "create_pull_request" && accepted.Snapshot.LinearTeamID != "" {
+				// Source provenance comes from the accepted receipt, never the model.
+				params.Arguments["external_source_url"], _ = json.Marshal(accepted.Snapshot.URL)
+				params.Arguments["issue_number"] = json.RawMessage("0")
+				params.Arguments["close_on_merge"] = json.RawMessage("false")
+				delete(params.Arguments, "source_repository")
+				source = ""
+				request.Params, err = encodeMaintainerToolCall(params)
+				if err != nil {
+					return failure("invalid")
+				}
+			}
+			if params.Name == "create_pull_request" && accepted.Snapshot.LinearTeamID == "" {
 				var number uint64
 				if json.Unmarshal(params.Arguments["issue_number"], &number) != nil || number != accepted.Snapshot.IssueNumber {
 					return failure("denied")
@@ -122,7 +141,10 @@ func (daemon *Daemon) attemptMaintainer(ctx context.Context, call api.Call) api.
 				return failure("repository_unbound")
 			}
 			targets = map[string]uint64{strings.ToLower(target.PublicationRepository): id}
-			sources = map[string]uint64{strings.ToLower(accepted.SourceRepository): accepted.Snapshot.GitHubRepositoryID}
+			sources = map[string]uint64{}
+			if accepted.Snapshot.LinearTeamID == "" {
+				sources[strings.ToLower(accepted.SourceRepository)] = accepted.Snapshot.GitHubRepositoryID
+			}
 		}
 		name := strings.ToLower(repository)
 		id := targets[name]
@@ -243,7 +265,7 @@ func (daemon *Daemon) projectMaintainerRepositories(ctx context.Context, project
 		return nil, nil, nil, err
 	}
 	for _, source := range intake {
-		if source.Enabled {
+		if source.Enabled && source.LinearTeamID == "" {
 			sources[strings.ToLower(source.GitHubRepositoryName)] = source.GitHubRepositoryID
 		}
 	}

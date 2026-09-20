@@ -547,11 +547,11 @@ func inspectOperationalHome(ctx context.Context, home *os.File) error {
 }
 
 func readOperationalCensus(home *os.File) (map[string]bool, error) {
-	names, err := home.Readdirnames(memberCount + 6)
+	names, err := home.Readdirnames(memberCount + 8)
 	if err != nil && !errors.Is(err, io.EOF) {
 		return nil, fmt.Errorf("enumerate operational home: %w", err)
 	}
-	if len(names) < memberCount || len(names) > memberCount+5 {
+	if len(names) < memberCount || len(names) > memberCount+7 {
 		return nil, fmt.Errorf("%w: operational home census has %d entries", ErrInvalidHome, len(names))
 	}
 	seen := make(map[string]bool, len(names))
@@ -565,6 +565,7 @@ func readOperationalCensus(home *os.File) (map[string]bool, error) {
 		// reopen its own home.
 		RelayDirectoryName:       true,
 		maintainerCredentialName: true, maintainerCredentialStage: true,
+		"linear.json": true, "linear.json.staging": true,
 	}
 	for _, name := range names {
 		if seen[name] {

@@ -354,6 +354,7 @@ export function FactoryConsole({
           intakeErrors={intakeErrors}
           onLoadIntake={onLoadIntake}
           onIntakeAction={onIntakeAction}
+          onSelectTask={selectTask === undefined ? undefined : (id) => { onToggleSettings?.(); selectTask(id); }}
           github={github}
           onGitHub={onGitHub}
           edit={edit}

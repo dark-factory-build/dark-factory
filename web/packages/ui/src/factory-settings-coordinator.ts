@@ -99,19 +99,22 @@ export class FactorySettingsCoordinator {
   async intakeAction(projectId: string, request: Parameters<BrowserSession["intake"]>[0]): Promise<void> {
     const session = this.#owner.session(); if (!this.#owner.ready() || session === undefined) return;
     const generation = this.#owner.generation();
-    if (request.action === "preview" || request.action === "refresh") {
+    if (["preview","refresh","accept","update"].includes(request.action)) {
       const prior = this.#intake.get(projectId);
       if (prior !== undefined) this.#intake.set(projectId, { ...prior, candidates: undefined, reviewed_revision: undefined, next_page: undefined });
     }
     this.#intakePending.add(projectId); this.#owner.publish();
     try {
-      const result = await session.intake(request);
+      let result = await session.intake(request);
+      if (!this.#current(generation, session)) return;
+      if (request.action === "accept" && result.state === "accepted" && result.acceptance_id !== undefined) result = await session.intake({action:"import", acceptance_id:result.acceptance_id});
       if (!this.#current(generation, session)) return;
       const prior = this.#intake.get(projectId);
       const sources = result.sources === undefined ? prior?.sources : request.action === "list" || prior?.sources === undefined ? result.sources : mergeIntakeSources(prior.sources, result.sources);
       this.#intake.set(projectId, Object.freeze({
         ...prior,
         ...result,
+        ...(request.action === "linear_disconnect" ? {linear_teams:undefined}:{}),
         ...(sources === undefined ? {} : { sources }),
         ...(result.candidates === undefined && !["update", "accept", "preview", "refresh"].includes(request.action) ? prior?.candidates === undefined ? {} : { candidates: prior.candidates } : {}),
         ...(request.action === "withdraw" && (result.state === "withdrawn" || result.state === "withdrawal_pending") ? { candidates: prior?.candidates?.map((candidate) => candidate.acceptance_id === request.acceptance_id ? { ...candidate, reason: result.state } : candidate) } : {}),
@@ -119,6 +122,11 @@ export class FactorySettingsCoordinator {
         ...(result.imported_tasks === undefined ? { imported_tasks: [] } : {}),
       }));
       this.#intakeErrors.delete(projectId);
+      if (request.action === "accept" && result.state === "imported" && request.source_id !== undefined) {
+        const preview = await session.intake({action:"preview",source_id:request.source_id,page:1});
+        if (!this.#current(generation,session)) return;
+        this.#intake.set(projectId,{...this.#intake.get(projectId),...preview});
+      }
     }
     catch (error) { if (this.#current(generation, session)) this.#intakeErrors.set(projectId, this.#owner.errorCode(error)); }
     finally { if (this.#current(generation, session)) this.#intakePending.delete(projectId); }

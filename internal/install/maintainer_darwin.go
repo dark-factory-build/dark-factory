@@ -8,7 +8,7 @@ import (
 	"io"
 )
 
-func (state *operationalHomeState) readMaintainerCredential() ([]byte, error) {
+func (state *operationalHomeState) readCredential(name string) ([]byte, error) {
 	state.mu.Lock()
 	defer state.mu.Unlock()
 	if state.closed {
@@ -17,7 +17,7 @@ func (state *operationalHomeState) readMaintainerCredential() ([]byte, error) {
 	if err := recheckOperationalCoreIdentityByState(state); err != nil {
 		return nil, err
 	}
-	file, stat, err := openMember(state.home, maintainerCredentialName)
+	file, stat, err := openMember(state.home, name)
 	if errors.Is(err, unix.ENOENT) {
 		return nil, nil
 	}
@@ -35,13 +35,17 @@ func (state *operationalHomeState) readMaintainerCredential() ([]byte, error) {
 	if int64(len(data)) != stat.Size {
 		return nil, ErrInvalidHome
 	}
-	if err := recheckIdentityBinding(state.home, maintainerCredentialName, toIdentity(stat)); err != nil {
+	if err := recheckIdentityBinding(state.home, name, toIdentity(stat)); err != nil {
 		return nil, err
 	}
 	return data, nil
 }
 
-func (state *operationalHomeState) writeMaintainerCredential(data []byte) error {
+func (state *operationalHomeState) writeCredential(name string, data []byte) error {
+	stage := name + ".staging"
+	if name == maintainerCredentialName {
+		stage = maintainerCredentialStage
+	}
 	state.mu.Lock()
 	defer state.mu.Unlock()
 	if state.closed {
@@ -52,8 +56,8 @@ func (state *operationalHomeState) writeMaintainerCredential(data []byte) error 
 	}
 	// A crashed staging write is never used as authority. Validate its shape
 	// before removing it; the home lease excludes another legitimate writer.
-	for _, name := range []string{maintainerCredentialName, maintainerCredentialStage} {
-		file, _, err := openMember(state.home, name)
+	for _, member := range []string{name, stage} {
+		file, _, err := openMember(state.home, member)
 		if errors.Is(err, unix.ENOENT) {
 			continue
 		}
@@ -63,16 +67,16 @@ func (state *operationalHomeState) writeMaintainerCredential(data []byte) error 
 		if err := file.Close(); err != nil {
 			return err
 		}
-		if name == maintainerCredentialStage {
-			if err := unix.Unlinkat(int(state.home.Fd()), name, 0); err != nil {
+		if member == stage {
+			if err := unix.Unlinkat(int(state.home.Fd()), member, 0); err != nil {
 				return err
 			}
 		}
 	}
-	if err := writeMember(state.home, maintainerCredentialStage, data, phase("maintainer credential")); err != nil {
+	if err := writeMember(state.home, stage, data, phase("maintainer credential")); err != nil {
 		return err
 	}
-	if err := unix.Renameat(int(state.home.Fd()), maintainerCredentialStage, int(state.home.Fd()), maintainerCredentialName); err != nil {
+	if err := unix.Renameat(int(state.home.Fd()), stage, int(state.home.Fd()), name); err != nil {
 		return err
 	}
 	return syncFile(int(state.home.Fd()))

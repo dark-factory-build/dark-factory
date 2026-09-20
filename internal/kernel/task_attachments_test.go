@@ -66,7 +66,8 @@ func TestV27MigrationPreservesTaskAndAddsEmptyAttachments(t *testing.T) {
 	}
 	before := snapshotSchemaRows(t, ctx, connection, v27SchemaStatements(), false)
 	connection.Close()
-	if _, err := store.writer.ExecContext(ctx, `DROP TABLE run_tokens; DROP TABLE project_tokens; DROP TABLE attachment_retention; DROP TABLE task_attachments; PRAGMA user_version = 27`); err != nil {
+	downgradeIntakeToV29(t, store)
+	if _, err := store.writer.ExecContext(ctx, `DROP TABLE attachment_retention; DROP TABLE task_attachments; PRAGMA user_version = 27`); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.Close(); err != nil {
@@ -206,7 +207,8 @@ func TestAutomaticAttachmentRetention(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Simulate the exact released v28 database and preserve its attachment bytes.
-	if _, err := store.writer.ExecContext(ctx, `DROP TABLE run_tokens; DROP TABLE project_tokens; DROP TABLE attachment_retention; PRAGMA user_version = 28`); err != nil {
+	downgradeIntakeToV29(t, store)
+	if _, err := store.writer.ExecContext(ctx, `DROP TABLE attachment_retention; PRAGMA user_version = 28`); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.Close(); err != nil {

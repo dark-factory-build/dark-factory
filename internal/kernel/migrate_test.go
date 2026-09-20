@@ -679,7 +679,8 @@ func TestSchemaDigestsArePinned(t *testing.T) {
 		statements []string
 		digest     string
 	}{
-		{"current", schemaStatements, "7c5dc48e5c613b958f3d799f869c984134a1f2915d85083abe432a9d32555b45"},
+		{"current", schemaStatements, "81cc4369f300bd3b7471836c3a65686a2f480af9f1adf2de79176dea26cd4922"},
+		{"v30", v30SchemaStatements(), "7c5dc48e5c613b958f3d799f869c984134a1f2915d85083abe432a9d32555b45"},
 		{"v29", v29SchemaStatements(), "cf8d4931509a6b1f45fe4b59b7b8559f00817508e09acac698b50f9540bb47f5"},
 		{"v28", v28SchemaStatements(), "957c54938f8a79fcc453995b825fe0289a18434d509b14f2daf075b97d7bfe82"},
 		{"v27", v27SchemaStatements(), "099f40bd70ce7e61dc3b8c9554c06bc733b221ee36345aeef9fd6f1e230c8b67"},
@@ -789,5 +790,94 @@ func TestRefusedMigrationReturnsTheWriterConnection(t *testing.T) {
 	}
 	if stats := store.writer.Stats(); stats.OpenConnections != 1 || stats.Idle != 1 {
 		t.Fatalf("refused migration did not return the writer connection: open=%d idle=%d", stats.OpenConnections, stats.Idle)
+	}
+}
+
+// Keep a populated pre-Linear database, including its frozen receipts, readable.
+func TestV30IntakeMigrationPreservesReceiptsAndReplay(t *testing.T) {
+	ctx := context.Background()
+	store, path := newTestStore(t)
+	project, err := store.CreateProject(ctx, NewProject{ID: projectID(t, 210), Name: "migration", Root: "/migration"}, mustTime(t, 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, _ := IntakeSourceIDFromBytes(bytes.Repeat([]byte{211}, IDBytes))
+	source, err := store.CreateIntakeSource(ctx, NewIntakeSource{ID: id, GitHubRepositoryID: 42, GitHubRepositoryName: "owner/repository", ProjectID: project.ID, TargetRepositoryID: RepositoryID(project.ID), Policy: IntakePolicyManual, PollSeconds: 60, AdmissionLimit: 25}, mustTime(t, 2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	accepted, err := store.AcceptIntakeSnapshot(ctx, id, intakeSnapshotForTest(), mustTime(t, 3))
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := store.ImportIntakeAcceptance(ctx, accepted.ID, mustTime(t, 4), source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	downgradeIntakeToV30(t, store)
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	got, found, err := store.IntakeAcceptance(ctx, accepted.ID)
+	// Author metadata is not part of the durable accepted content.
+	accepted.Snapshot.AuthorLogin = ""
+	accepted.Snapshot.AuthorType = ""
+	if err != nil || !found || !reflect.DeepEqual(got, accepted) {
+		t.Fatalf("receipt changed: %+v, %v", got, err)
+	}
+	replay, err := store.ImportIntakeAcceptance(ctx, accepted.ID, mustTime(t, 5))
+	if err != nil || !reflect.DeepEqual(replay, task) {
+		t.Fatalf("task replay changed: %+v, %v", replay, err)
+	}
+}
+
+func downgradeIntakeToV30(t *testing.T, store *Store) {
+	t.Helper()
+	ctx := context.Background()
+	connection, err := store.writer.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.Close()
+	err = migrateWithoutForeignKeys(ctx, connection, func(ctx context.Context, connection *sql.Conn) error {
+		target := expectedSchemaOf(v30SchemaStatements())
+		if err := rebuildTable(ctx, connection, target, "intake_sources", strings.TrimSuffix(intakeSourceColumns, ", linear_team_id"), "intake_sources_repository_destination", "", ""); err != nil {
+			return err
+		}
+		if err := rebuildTable(ctx, connection, target, "intake_acceptances", strings.TrimSuffix(intakeAcceptanceColumns, ", linear_team_id, source_url"), "", ""); err != nil {
+			return err
+		}
+		if _, err := connection.ExecContext(ctx, "PRAGMA user_version = 30"); err != nil {
+			return err
+		}
+		return validateSchemaVersion(ctx, connection, v30UserVersion, v30SchemaStatements())
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func downgradeIntakeToV27(t *testing.T, store *Store) {
+	t.Helper()
+	downgradeIntakeToV29(t, store)
+	for _, statement := range []string{"DROP TABLE attachment_retention", "DROP TABLE task_attachments", "PRAGMA user_version = 27"} {
+		if _, err := store.writer.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func downgradeIntakeToV29(t *testing.T, store *Store) {
+	t.Helper()
+	downgradeIntakeToV30(t, store)
+	for _, statement := range []string{"DROP TABLE run_tokens", "DROP TABLE project_tokens", "PRAGMA user_version = 29"} {
+		if _, err := store.writer.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
 	}
 }

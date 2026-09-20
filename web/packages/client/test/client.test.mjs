@@ -422,3 +422,14 @@ test("private issue controls have exact action shapes and bounded controller sta
   const invalid = { ...result, body: { ...result.body, sources: [{ ...result.body.sources[0], sync: { ...result.body.sources[0].sync, state: "mystery" } }] } };
   expectMalformed(() => decodeServerControl(JSON.stringify(invalid)));
 });
+
+test("Linear shares intake controls without a fabricated GitHub identity or key in replies", () => {
+  const connect={type:"INTAKE",id:"connect",body:{action:"linear_connect",api_key:"private-test-key"}};
+  assert.deepEqual(decodeClientControl(encodeClientControl(connect)),connect);
+  expectMalformed(()=>encodeClientControl({...connect,body:{...connect.body,source_id:"11".repeat(16)}}));
+  const source={id:"11".repeat(16),project_id:"22".repeat(16),linear_team_id:"11111111-1111-4111-8111-111111111111",github_repository_id:"0",repository:"Engineering",target_repository_id:"33".repeat(16),overseer_agent_id:"",label:"",policy:"manual",trusted_authors:[],poll_seconds:60,admission_limit:25,enabled:true,revision:"1"};
+  const result={type:"INTAKE_RESULT",id:"sources",body:{state:"ok",sources:[source],source_id:source.id}};
+  assert.equal(decodeServerControl(JSON.stringify(result)).body.sources[0].github_repository_id,0n);
+  assert.equal(decodeServerControl(JSON.stringify({...result,body:{...result.body,api_key:"private-test-key"}})).body.api_key,undefined);
+  expectMalformed(()=>decodeServerControl(JSON.stringify({...result,body:{...result.body,sources:[{...source,github_repository_id:"42"}]}})));
+});

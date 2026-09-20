@@ -9,7 +9,7 @@ import (
 
 const (
 	applicationID = 0x4446474f
-	userVersion   = 30
+	userVersion   = 31
 
 	// SQLite reserves the exact lower-case "sqlite_" prefix. Use a literal,
 	// binary prefix test: LIKE would treat '_' as a wildcard and hide names
@@ -109,8 +109,9 @@ var schemaStatements = []string{
 ) STRICT, WITHOUT ROWID`,
 	`CREATE TABLE intake_sources (
     id BLOB PRIMARY KEY CHECK (length(id) = 16 AND id <> zeroblob(16)),
-    github_repository_id INTEGER NOT NULL CHECK (github_repository_id > 0),
-    github_repository_name TEXT NOT NULL CHECK (length(CAST(github_repository_name AS BLOB)) BETWEEN 3 AND 140),
+    linear_team_id TEXT NOT NULL DEFAULT '' CHECK (linear_team_id = '' OR length(linear_team_id) = 36),
+    github_repository_id INTEGER NOT NULL CHECK (github_repository_id >= 0),
+    github_repository_name TEXT NOT NULL CHECK (length(CAST(github_repository_name AS BLOB)) BETWEEN 1 AND 140),
     project_id BLOB NOT NULL CHECK (length(project_id) = 16) REFERENCES projects(id),
     target_repository_id BLOB NOT NULL CHECK (length(target_repository_id) = 16) REFERENCES project_repositories(id),
     overseer_agent_id BLOB CHECK (overseer_agent_id IS NULL OR length(overseer_agent_id) = 16) REFERENCES agents(id),
@@ -122,17 +123,20 @@ var schemaStatements = []string{
     revision INTEGER NOT NULL CHECK (revision >= 1),
     created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
     updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= created_at_ms)
+,CHECK ((linear_team_id = '' AND github_repository_id > 0) OR (linear_team_id <> '' AND github_repository_id = 0))
 ) STRICT, WITHOUT ROWID`,
-	`CREATE UNIQUE INDEX intake_sources_repository_destination ON intake_sources(github_repository_id, project_id, target_repository_id, label_filter)`,
+	`CREATE UNIQUE INDEX intake_sources_repository_destination ON intake_sources(linear_team_id, github_repository_id, project_id, target_repository_id, label_filter)`,
 	`CREATE TABLE intake_source_trusted_logins (
     source_id BLOB NOT NULL CHECK (length(source_id) = 16) REFERENCES intake_sources(id),
     login TEXT NOT NULL CHECK (length(CAST(login AS BLOB)) BETWEEN 1 AND 39),
     PRIMARY KEY(source_id, login)
 ) STRICT, WITHOUT ROWID`,
 	`CREATE TABLE intake_acceptances (
-    source_repository TEXT NOT NULL CHECK (length(source_repository) BETWEEN 3 AND 140),
+    source_url TEXT NOT NULL DEFAULT '' CHECK (length(CAST(source_url AS BLOB)) <= 512),
+    source_repository TEXT NOT NULL CHECK (length(source_repository) BETWEEN 1 AND 140),
     id BLOB PRIMARY KEY CHECK (length(id) = 16 AND id <> zeroblob(16)),
-    github_repository_id INTEGER NOT NULL CHECK (github_repository_id > 0),
+    linear_team_id TEXT NOT NULL DEFAULT '' CHECK (linear_team_id = '' OR length(linear_team_id) = 36),
+    github_repository_id INTEGER NOT NULL CHECK (github_repository_id >= 0),
     issue_number INTEGER NOT NULL CHECK (issue_number > 0),
     issue_node_id TEXT NOT NULL CHECK (length(CAST(issue_node_id AS BLOB)) BETWEEN 1 AND 256),
     title TEXT NOT NULL CHECK (length(CAST(title AS BLOB)) BETWEEN 1 AND 900),
@@ -145,8 +149,9 @@ var schemaStatements = []string{
     incarnation_id BLOB NOT NULL UNIQUE CHECK (length(incarnation_id) = 16 AND incarnation_id <> zeroblob(16)),
     withdrawn_at_ms INTEGER CHECK (withdrawn_at_ms IS NULL OR withdrawn_at_ms >= 0),
     created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
-    UNIQUE(github_repository_id, issue_number, issue_node_id, title, body_hash, project_id, repository_id),
+    UNIQUE(linear_team_id, github_repository_id, issue_number, issue_node_id, title, body_hash, project_id, repository_id),
     CHECK (withdrawn_at_ms IS NULL OR withdrawn_at_ms >= created_at_ms)
+,CHECK ((linear_team_id = '' AND github_repository_id > 0) OR (linear_team_id <> '' AND github_repository_id = 0))
 ) STRICT, WITHOUT ROWID`,
 	`CREATE TABLE intake_acceptance_reviews (
     acceptance_id BLOB NOT NULL REFERENCES intake_acceptances(id),

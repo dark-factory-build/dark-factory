@@ -278,6 +278,8 @@ func validWorkerOperation(value WorkerOperation) bool {
 // AttemptTask is the exact private task text visible only to the authenticated
 // live attempt that owns it.
 type IntakeTaskSource struct {
+	LinearTeamID       string `json:"linear_team_id,omitempty"`
+	SourceURL          string `json:"source_url,omitempty"`
 	AcceptanceID       string `json:"acceptance_id"`
 	Repository         string `json:"repository"`
 	RepositoryID       uint64 `json:"repository_id"`

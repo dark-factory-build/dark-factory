@@ -54,6 +54,7 @@ const (
 	v27UserVersion      = 27
 	v28UserVersion      = 28
 	v29UserVersion      = 29
+	v30UserVersion      = 30
 	// v13Changes is the changes table before managed Git worktrees. It bound a
 	// Git-free published tree by a manifest digest, its entry and byte counts
 	// and its root inode. v14 names the tree's own branch head instead and
@@ -589,9 +590,59 @@ func v25SchemaStatements() []string {
 	return statements
 }
 
+func v30SchemaStatements() []string {
+	statements := make([]string, 0, len(schemaStatements))
+	for _, statement := range schemaStatements {
+		_, name := schemaObjectIdentity(statement)
+		switch name {
+		case "intake_sources":
+			statement = `CREATE TABLE intake_sources (
+    id BLOB PRIMARY KEY CHECK (length(id) = 16 AND id <> zeroblob(16)),
+    github_repository_id INTEGER NOT NULL CHECK (github_repository_id > 0),
+    github_repository_name TEXT NOT NULL CHECK (length(CAST(github_repository_name AS BLOB)) BETWEEN 3 AND 140),
+    project_id BLOB NOT NULL CHECK (length(project_id) = 16) REFERENCES projects(id),
+    target_repository_id BLOB NOT NULL CHECK (length(target_repository_id) = 16) REFERENCES project_repositories(id),
+    overseer_agent_id BLOB CHECK (overseer_agent_id IS NULL OR length(overseer_agent_id) = 16) REFERENCES agents(id),
+    label_filter TEXT NOT NULL CHECK (length(CAST(label_filter AS BLOB)) <= 100),
+    enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+    policy TEXT NOT NULL CHECK (policy IN ('manual', 'trusted_authors')),
+    poll_seconds INTEGER NOT NULL CHECK (poll_seconds BETWEEN 5 AND 86400),
+    admission_limit INTEGER NOT NULL CHECK (admission_limit BETWEEN 1 AND 200),
+    revision INTEGER NOT NULL CHECK (revision >= 1),
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= created_at_ms)
+) STRICT, WITHOUT ROWID`
+		case "intake_acceptances":
+			statement = `CREATE TABLE intake_acceptances (
+    source_repository TEXT NOT NULL CHECK (length(source_repository) BETWEEN 3 AND 140),
+    id BLOB PRIMARY KEY CHECK (length(id) = 16 AND id <> zeroblob(16)),
+    github_repository_id INTEGER NOT NULL CHECK (github_repository_id > 0),
+    issue_number INTEGER NOT NULL CHECK (issue_number > 0),
+    issue_node_id TEXT NOT NULL CHECK (length(CAST(issue_node_id AS BLOB)) BETWEEN 1 AND 256),
+    title TEXT NOT NULL CHECK (length(CAST(title AS BLOB)) BETWEEN 1 AND 900),
+    body TEXT NOT NULL CHECK (length(CAST(body AS BLOB)) <= 5000),
+    body_hash BLOB NOT NULL CHECK (length(body_hash) = 32),
+    project_id BLOB NOT NULL CHECK (length(project_id) = 16) REFERENCES projects(id),
+    repository_id BLOB NOT NULL CHECK (length(repository_id) = 16) REFERENCES project_repositories(id),
+    overseer_agent_id BLOB CHECK (overseer_agent_id IS NULL OR length(overseer_agent_id) = 16) REFERENCES agents(id),
+    task_id BLOB NOT NULL UNIQUE CHECK (length(task_id) = 16 AND task_id <> zeroblob(16)),
+    incarnation_id BLOB NOT NULL UNIQUE CHECK (length(incarnation_id) = 16 AND incarnation_id <> zeroblob(16)),
+    withdrawn_at_ms INTEGER CHECK (withdrawn_at_ms IS NULL OR withdrawn_at_ms >= 0),
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    UNIQUE(github_repository_id, issue_number, issue_node_id, title, body_hash, project_id, repository_id),
+    CHECK (withdrawn_at_ms IS NULL OR withdrawn_at_ms >= created_at_ms)
+) STRICT, WITHOUT ROWID`
+		case "intake_sources_repository_destination":
+			statement = `CREATE UNIQUE INDEX intake_sources_repository_destination ON intake_sources(github_repository_id, project_id, target_repository_id, label_filter)`
+		}
+		statements = append(statements, statement)
+	}
+	return statements
+}
+
 func v29SchemaStatements() []string {
 	var statements []string
-	for _, statement := range schemaStatements {
+	for _, statement := range v30SchemaStatements() {
 		_, name := schemaObjectIdentity(statement)
 		if name != "project_tokens" && name != "run_tokens" {
 			statements = append(statements, statement)
@@ -763,6 +814,8 @@ func migratableSchema(version int) ([]string, bool) {
 		return v27SchemaStatements(), true
 	case v28UserVersion:
 		return v28SchemaStatements(), true
+	case v30UserVersion:
+		return v30SchemaStatements(), true
 	case v29UserVersion:
 		return v29SchemaStatements(), true
 	}
@@ -790,7 +843,7 @@ func (store *Store) migrateLegacy(ctx context.Context) error {
 		releaseUncertainConnection(connection)
 		return err
 	}
-	all := []func(context.Context, *sql.Conn) error{migrateLegacyTransaction, migratePreviousTransaction, migratePriorTransaction, migrateV4Transaction, migrateV5Transaction, migrateV6Transaction, migrateV7Transaction, migrateV8Transaction, migrateV9Transaction, migrateV10Transaction, migrateV11Transaction, migrateV12Transaction, migrateV13Transaction, migrateV14Transaction, migrateV15Transaction, migrateV16Transaction, migrateV17Transaction, migrateV18Transaction, migrateV19Transaction, migrateV20Transaction, migrateV21Transaction, migrateV22Transaction, migrateV23Transaction, migrateV24Transaction, migrateV25Transaction, migrateV26Transaction, migrateV27Transaction, migrateV28Transaction, migrateV29Transaction}
+	all := []func(context.Context, *sql.Conn) error{migrateLegacyTransaction, migratePreviousTransaction, migratePriorTransaction, migrateV4Transaction, migrateV5Transaction, migrateV6Transaction, migrateV7Transaction, migrateV8Transaction, migrateV9Transaction, migrateV10Transaction, migrateV11Transaction, migrateV12Transaction, migrateV13Transaction, migrateV14Transaction, migrateV15Transaction, migrateV16Transaction, migrateV17Transaction, migrateV18Transaction, migrateV19Transaction, migrateV20Transaction, migrateV21Transaction, migrateV22Transaction, migrateV23Transaction, migrateV24Transaction, migrateV25Transaction, migrateV26Transaction, migrateV27Transaction, migrateV28Transaction, migrateV29Transaction, migrateV30Transaction}
 	var steps []func(context.Context, *sql.Conn) error
 	switch version {
 	case legacyUserVersion:
@@ -849,6 +902,8 @@ func (store *Store) migrateLegacy(ctx context.Context) error {
 		steps = all[26:]
 	case v28UserVersion:
 		steps = all[27:]
+	case v30UserVersion:
+		steps = all[29:]
 	case v29UserVersion:
 		steps = all[28:]
 	default:
@@ -1474,6 +1529,23 @@ func migrateV29Transaction(ctx context.Context, connection *sql.Conn) error {
 		if _, err := connection.ExecContext(ctx, expectedSchemaOf(schemaStatements)[table].sql); err != nil {
 			return err
 		}
+	}
+	if _, err := connection.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", v30UserVersion)); err != nil {
+		return err
+	}
+	return validateSchemaVersion(ctx, connection, v30UserVersion, v30SchemaStatements())
+}
+
+func migrateV30Transaction(ctx context.Context, connection *sql.Conn) error {
+	if err := validateSchemaVersion(ctx, connection, v30UserVersion, v30SchemaStatements()); err != nil {
+		return err
+	}
+	target := expectedSchemaOf(schemaStatements)
+	if err := rebuildTable(ctx, connection, target, "intake_sources", strings.TrimSuffix(intakeSourceColumns, ", linear_team_id"), "intake_sources_repository_destination", "linear_team_id", "''"); err != nil {
+		return err
+	}
+	if err := rebuildTable(ctx, connection, target, "intake_acceptances", strings.TrimSuffix(intakeAcceptanceColumns, ", linear_team_id, source_url"), "linear_team_id, source_url", "'', ''"); err != nil {
+		return err
 	}
 	if _, err := connection.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", userVersion)); err != nil {
 		return err

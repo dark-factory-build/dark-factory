@@ -10,6 +10,7 @@ import (
 // Intake uses the same private operator actions for CLI, console and the
 // installed controller. Candidates cannot supply their own author or content.
 type IntakeConfiguration struct {
+	LinearTeamID       string           `json:"linear_team_id,omitempty"`
 	PriorityDefault    int64            `json:"priority_default,omitempty"`
 	PriorityByLabel    map[string]int64 `json:"priority_by_label,omitempty"`
 	Repository         string           `json:"repository"`
@@ -22,6 +23,7 @@ type IntakeConfiguration struct {
 	AdmissionLimit     uint16           `json:"admission_limit"`
 }
 type IntakeInput struct {
+	APIKey           string               `json:"api_key,omitempty"`
 	Review           *IntakeReviewInput   `json:"review,omitempty"`
 	Legacy           *LegacyIntakeInput   `json:"legacy,omitempty"`
 	AcceptanceCursor string               `json:"acceptance_cursor,omitempty"`
@@ -44,6 +46,7 @@ type IntakeSync struct {
 	Error         string `json:"error"`
 }
 type IntakeSource struct {
+	LinearTeamID    string           `json:"linear_team_id,omitempty"`
 	PriorityDefault int64            `json:"priority_default,omitempty"`
 	PriorityByLabel map[string]int64 `json:"priority_by_label,omitempty"`
 	Sync            *IntakeSync      `json:"sync,omitempty"`
@@ -75,7 +78,14 @@ type IntakeCandidate struct {
 	TaskID       string   `json:"task_id,omitempty"`
 	Truncated    bool     `json:"truncated,omitempty"`
 }
+type IntakeTeam struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	Key  string `json:"key"`
+}
 type IntakeResult struct {
+	SourceID           string              `json:"source_id,omitempty"`
+	LinearTeams        []IntakeTeam        `json:"linear_teams,omitempty"`
 	Review             *IntakeReviewResult `json:"review,omitempty"`
 	Legacy             *LegacyIntakePlan   `json:"legacy,omitempty"`
 	AcceptanceProgress bool                `json:"acceptance_progress,omitempty"`
@@ -97,6 +107,11 @@ func ValidIntakeInput(input IntakeInput) bool {
 	allowed := IntakeInput{Action: input.Action}
 	valid := false
 	switch input.Action {
+	case "linear_connect":
+		allowed.APIKey = input.APIKey
+		valid = validText(input.APIKey, 10, 512)
+	case "linear_disconnect", "linear_teams":
+		valid = true
 	case "legacy_preview", "legacy_commit", "legacy_lineage", "review":
 		allowed.SourceID, allowed.ProjectID, allowed.Configuration, allowed.Legacy = input.SourceID, input.ProjectID, input.Configuration, input.Legacy
 		valid = validID(input.SourceID) && validID(input.ProjectID) && input.Configuration != nil && input.Legacy != nil && validLegacyIntakeInput(*input.Legacy, input.Action == "legacy_commit")

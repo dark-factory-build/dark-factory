@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
+import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { MAX_TASK_ATTACHMENTS, MAX_TASK_ATTACHMENT_BYTES, MAX_TASK_PRIORITY, type IntakeView, type IntakeBody, type DiscoveredAccount, type AccountItem, type AgentItem, type GitHubConnectionBody, type GitHubDelegationBody, type ProjectItem, type RepositoryMutation, type RepositoryView, type StateView, type TaskHistoryView, type TaskItem, type TaskListView, type TaskPeerQuestion } from "@dark-factory/client";
 import type { FactoryEditView, FactoryHumanRequestView } from "./factory-app-controller.js";
 import type { FactoryGitHubView } from "./factory-settings-coordinator.js";
@@ -625,6 +625,7 @@ export function SettingsDialog({
   intakeErrors,
   onLoadIntake,
   onIntakeAction,
+  onSelectTask,
   pairing,
   library,
   onClose,
@@ -654,6 +655,7 @@ export function SettingsDialog({
   onLoadRepositories?: (projectId: string) => void;
   onMutateRepository?: (request: RepositoryMutation) => void;
   onCreateProject?: (request: { name: string; root: string }) => void;
+  onSelectTask?: (id:string)=>void;
   intake?: ReadonlyMap<string, IntakeView>; intakePending?: ReadonlySet<string>; intakeErrors?: ReadonlyMap<string, string>; onLoadIntake?: (projectId: string) => void; onIntakeAction?: (projectId: string, request: IntakeBody) => void;
   /** A self-contained "PAIR A PHONE" surface mounts here. */
   pairing?: ReactNode;
@@ -668,12 +670,21 @@ export function SettingsDialog({
   const loadGitHub = useRef(onGitHub);
   loadGitHub.current = onGitHub;
   useEffect(() => { if (ready) loadGitHub.current?.({ action: "status" }); }, [ready]);
-  return (
-    <ConsoleDialog label="Settings" title="Settings" onClose={onClose}>
-        <div className="dfConsoleSidebar__section" aria-label="PAIRING">
-          <h3>Devices &amp; pairing</h3>
-          {pairing ?? <p className="dfFactoryConsole__empty">Pairing unavailable</p>}
-        </div><AccountsSection
+  const [tab, setTab] = useState(0);
+  const settingsId = useId();
+  const tabs = [
+    { label: "Projects", content: <>
+        <RepositoriesSection state={state} repositories={repositories} pending={repositoryPending} errors={repositoryErrors} onLoad={onLoadRepositories} onMutate={onMutateRepository} onCreateProject={onCreateProject} />
+        <IntakeSection github={github} onSelectTask={onSelectTask} state={state} repositories={repositories} intake={intake} pending={intakePending} errors={intakeErrors} onLoad={onLoadIntake} onLoadRepositories={onLoadRepositories} onAction={onIntakeAction} />
+        {library}
+        <AttachmentRetentionSection call={ready ? onAttachmentRetention : undefined} />
+        <details className="dfConsoleSidebar__section" aria-label="Run limits">
+          <summary>Run limits</summary>
+          <ProjectLimitsSection projectId={projectId} state={state} edit={edit} ready={ready} onSave={onSaveProjectLimits} />
+        </details>
+    </> },
+    { label: "Connections", content: <>
+        <AccountsSection
           state={state}
           accounts={accounts}
           pending={accountsPending === true}
@@ -683,24 +694,39 @@ export function SettingsDialog({
           onRefresh={onLoadAccounts}
         />
         <GitHubSection github={github} onGitHub={onGitHub} />
-        <RepositoriesSection state={state} repositories={repositories} pending={repositoryPending} errors={repositoryErrors} onLoad={onLoadRepositories} onMutate={onMutateRepository} onCreateProject={onCreateProject} />
-        <IntakeSection state={state} repositories={repositories} intake={intake} pending={intakePending} errors={intakeErrors} onLoad={onLoadIntake} onLoadRepositories={onLoadRepositories} onAction={onIntakeAction} />
-        <details className="dfConsoleSidebar__section" aria-label="Run limits">
-          <summary>Run limits</summary>
-          <ProjectLimitsSection projectId={projectId} state={state} edit={edit} ready={ready} onSave={onSaveProjectLimits} />
-        </details>
-        <AttachmentRetentionSection call={ready ? onAttachmentRetention : undefined} />
-        {library}
-        <FloorAppearanceSection appearance={floorAppearance} onChange={onFloorAppearanceChange} onReset={onResetFloorAppearance} />
-        <section className="dfConsoleSidebar__section" aria-label="Help and feedback">
-          <h3>Help and feedback</h3>
-          <p><a href="https://darkfactory.build/feedback?kind=bug" target="_blank" rel="noopener noreferrer">Report a Dark Factory problem</a></p>
-          <p><a href="https://darkfactory.build/feedback?kind=feature" target="_blank" rel="noopener noreferrer">Request a feature</a></p>
-          <p><a href="https://darkfactory.build/backlog" target="_blank" rel="noopener noreferrer">Public backlog · Vote on GitHub</a></p>
-          <p>Review and submit reports on GitHub. Reporting and voting do not start factory work.</p>
-        </section>
-    </ConsoleDialog>
-  );
+    </> },
+    { label: "Devices", content: <section className="dfConsoleSidebar__section" aria-label="PAIRING">
+        <h3>Devices &amp; pairing</h3>
+        {pairing ?? <p className="dfFactoryConsole__empty">Pairing unavailable</p>}
+    </section> },
+    { label: "Appearance", content: <FloorAppearanceSection appearance={floorAppearance} onChange={onFloorAppearanceChange} onReset={onResetFloorAppearance} /> },
+    { label: "Help", content: <section className="dfConsoleSidebar__section" aria-label="Help and feedback">
+        <h3>Help and feedback</h3>
+        <p><a href="https://darkfactory.build/feedback?kind=bug" target="_blank" rel="noopener noreferrer">Report a problem</a></p>
+        <p><a href="https://darkfactory.build/feedback?kind=feature" target="_blank" rel="noopener noreferrer">Request a feature</a></p>
+        <p><a href="https://darkfactory.build/backlog" target="_blank" rel="noopener noreferrer">Public backlog</a></p>
+    </section> },
+  ];
+  return <ConsoleDialog label="Settings" title="Settings" onClose={onClose}>
+    <div className="dfSettingsTabs" role="tablist" aria-label="Settings sections">
+      {tabs.map(({ label }, index) => <button key={label} type="button" role="tab"
+        id={`${settingsId}-tab-${index}`} aria-controls={`${settingsId}-panel-${index}`}
+        aria-selected={tab === index} tabIndex={tab === index ? 0 : -1}
+        onClick={() => setTab(index)} onKeyDown={(event) => {
+          const next = event.key === "Home" ? 0 : event.key === "End" ? tabs.length - 1
+            : event.key === "ArrowRight" ? (index + 1) % tabs.length
+            : event.key === "ArrowLeft" ? (index + tabs.length - 1) % tabs.length : undefined;
+          if (next === undefined) return;
+          event.preventDefault();
+          setTab(next);
+          event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>('[role="tab"]')[next]?.focus();
+        }}>{label}</button>)}
+    </div>
+    {tabs.map(({ label, content }, index) => <div key={label} role="tabpanel" className="dfSettingsPanel"
+      id={`${settingsId}-panel-${index}`} aria-labelledby={`${settingsId}-tab-${index}`} hidden={tab !== index} tabIndex={0}>
+      {content}
+    </div>)}
+  </ConsoleDialog>;
 }
 
 function RepositoriesSection({ state, repositories, pending, errors, onLoad, onMutate, onCreateProject }: {
@@ -722,10 +748,10 @@ function RepositoriesSection({ state, repositories, pending, errors, onLoad, onM
   useEffect(() => { if (open && canLoad && projectId) load.current?.(projectId); }, [open, projectId, canLoad]);
   return <details className="dfConsoleSidebar__section" aria-label="Repositories" onToggle={(event) => { if (event.target === event.currentTarget) setOpen(event.currentTarget.open); }}>
     <summary>Repositories</summary>
-    <p className="dfConsoleSidebar__inherit">Register an existing checkout on the factory host. Each task keeps its chosen repository.</p>
+    <p className="dfConsoleSidebar__inherit">Use a checkout on the factory’s Mac.</p>
     {projects.length > 1 ? <label>Project<select value={projectId} onChange={(event) => setSelection(event.currentTarget.value)}>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label> : null}
     {projects.filter((project) => project.id === projectId).map((project) => <RepositoryProject key={project.id} project={project} items={repositories?.get(project.id)} pending={pending?.has(project.id) === true} error={errors?.get(project.id)} onMutate={onMutate} />)}
-    <ProjectCreateForm onCreate={onCreateProject} error={errors?.get("create")} />
+    <details><summary>New project</summary><ProjectCreateForm onCreate={onCreateProject} error={errors?.get("create")} /></details>
   </details>;
 }
 
@@ -733,7 +759,7 @@ function ProjectCreateForm({ onCreate, error }: { onCreate?: (request: { name: s
   const [name, setName] = useState("");
   const [root, setRoot] = useState("");
   return <form className="dfConsoleSidebar__section" onSubmit={(event) => { event.preventDefault(); if (name.trim() && root.startsWith("/")) onCreate?.({ name: name.trim(), root }); }}>
-    <h3>NEW PROJECT</h3>{error === undefined ? null : <p role="alert">{error}</p>}
+    {error === undefined ? null : <p role="alert">{error}</p>}
     <label>Name<input value={name} onChange={(event) => setName(event.currentTarget.value)} /></label>
     <label>Existing checkout<input value={root} placeholder="/absolute/path" onChange={(event) => setRoot(event.currentTarget.value)} /></label>
     <button type="submit" disabled={onCreate === undefined || !name.trim() || !root.startsWith("/")}>CREATE PROJECT</button>
@@ -745,7 +771,7 @@ function RepositoryProject({ project, items, pending, error, onMutate }: { proje
   return <section className="dfConsoleSidebar__section" aria-label={`Repositories for ${project.name}`}>
     <h3>{project.name}</h3>{error === undefined ? null : <p role="alert">{error}</p>}
     {items === undefined ? <p className="dfFactoryConsole__empty">{pending ? "LOADING REPOSITORIES" : "REPOSITORIES UNAVAILABLE"}</p> : <ul className="dfFactoryConsole__list">{items.map((item) => <RepositoryRow key={`${item.id}:${item.revision}`} project={project} item={item} pending={pending} onMutate={onMutate} />)}</ul>}
-    <details><summary>Add repository</summary><p>Connect GitHub above to publish reviewed work. Enter the local checkout and its intended base branch.</p><form onSubmit={(event) => { event.preventDefault(); if (name.trim() && root.startsWith("/") && baseRef.trim()) onMutate?.({ projectId: project.id, action: "add", name: name.trim(), root, baseRef: baseRef.trim() }); }}>
+    <details><summary>Add repository</summary><form onSubmit={(event) => { event.preventDefault(); if (name.trim() && root.startsWith("/") && baseRef.trim()) onMutate?.({ projectId: project.id, action: "add", name: name.trim(), root, baseRef: baseRef.trim() }); }}>
       <label>Name<input value={name} onChange={(event) => setName(event.currentTarget.value)} /></label>
       <label>Existing checkout<input value={root} placeholder="/absolute/path" onChange={(event) => setRoot(event.currentTarget.value)} /></label>
       <label>Base branch<input value={baseRef} placeholder="Repository’s base branch" onChange={(event) => setBaseRef(event.currentTarget.value)} /></label>
@@ -767,7 +793,7 @@ function RepositoryRow({ project, item, pending, onMutate }: { project: ProjectI
   const publicationState = item.publication_state ?? "unchecked";
   const githubID = item.github_repository_id === undefined ? undefined : item.github_repository_id.toString();
   return <li className="dfConsoleSidebar__account"><p className="dfConsoleRow__title">{item.name}{item.default ? " · DEFAULT" : ""}</p><p>{item.base_ref}{item.enabled ? "" : " · Disabled"}</p>
-    <div aria-label="Repository readiness"><p className="dfFactoryConsole__eyebrow">FETCH: {fetchState.toUpperCase()}</p><p className="dfFactoryConsole__eyebrow">PUBLICATION: {publicationState === "ready" ? "IDENTITY VERIFIED" : publicationState.toUpperCase()}</p>{fetchState === "setup_required" ? <p role="status">Check this checkout’s base branch and repository-local Git authentication on the host, then open Edit to retry the fetch check.</p> : null}{item.readiness_message === undefined ? null : <p role="status">{item.readiness_message}</p>}
+    <div aria-label="Repository readiness"><p className="dfFactoryConsole__eyebrow">FETCH: {fetchState.toUpperCase()}</p><p className="dfFactoryConsole__eyebrow">PUBLICATION: {publicationState === "ready" ? "IDENTITY VERIFIED" : publicationState.toUpperCase()}</p>{fetchState === "setup_required" ? <p role="status">Check the base branch and Git login on the factory’s Mac, then retry in Edit.</p> : null}{item.readiness_message === undefined ? null : <p role="status">{item.readiness_message}</p>}
     </div>
     <details><summary>Edit</summary><p>{item.root}{githubID === undefined ? "" : ` · GitHub ID ${githubID}`}</p>
       <button type="button" disabled={pending} onClick={() => request("fetch")}>{fetchState === "ready" ? "REFRESH FETCH READINESS" : "CHECK FETCH READINESS"}</button><button type="button" disabled={pending} onClick={() => request("github")}>{publicationState === "ready" ? "REFRESH GITHUB BINDING" : "VERIFY GITHUB BINDING"}</button>
@@ -844,21 +870,21 @@ function GitHubSection({ github, onGitHub }: { github?: FactoryGitHubView; onGit
   }, [repositories, installationID]);
   return <section className="dfConsoleSidebar__section" aria-label="GITHUB SETTINGS">
     <h3>GITHUB</h3>
-    <p className="dfConsoleSidebar__inherit">PRIVATE OPERATOR CONNECTION · {status.toUpperCase().replaceAll("_", " ")}</p>
-    {status === "legacy_overseers_running" ? <p className="dfFactoryConsole__terminalError" role="alert">STOP EXISTING LEGACY REVIEW OR CONTROLLER ACTIVITY THROUGH FACTORY CONTROLS BEFORE CONNECTING GITHUB.</p> : null}
-    {status === "denied" ? <p className="dfFactoryConsole__terminalError" role="alert">GITHUB ACCESS WAS DENIED OR EXPIRED. REFRESH ACCESS.</p> : null}
-    {status === "unavailable" ? <p className="dfFactoryConsole__terminalError" role="alert">GITHUB IS UNAVAILABLE. RETRY WHEN THE MAINTAINER IS REACHABLE.</p> : null}
+    <p className="dfConsoleSidebar__inherit">{status.toUpperCase().replaceAll("_", " ")}</p>
+    {status === "legacy_overseers_running" ? <p className="dfFactoryConsole__terminalError" role="alert">Stop the legacy controller and review runs before connecting.</p> : null}
+    {status === "denied" ? <p className="dfFactoryConsole__terminalError" role="alert">Access expired or was denied. Reconnect GitHub.</p> : null}
+    {status === "unavailable" ? <p className="dfFactoryConsole__terminalError" role="alert">GitHub is unavailable. Try again.</p> : null}
     {github?.error === undefined ? null : <p className="dfFactoryConsole__terminalError" role="alert">GITHUB SETTINGS UNAVAILABLE · {github.error.toUpperCase()}</p>}
     {canConnect ? <button type="button" disabled={busy || onGitHub === undefined} onClick={() => load({ action: recoveryAction })}>{status === "disconnected" && connectionID === "" ? "CONNECT GITHUB" : status === "disconnect_pending" ? "RETRY DISCONNECT" : status === "pending" || status === "awaiting_confirmation" || status === "denied" || status === "disconnected" ? "RESET GITHUB ACCESS" : "RETRY GITHUB ACCESS"}</button> : null}
     {result?.authorization?.authorization_url === undefined ? null : <p><a href={result.authorization.authorization_url} target="_blank" rel="noreferrer">AUTHORIZE ON GITHUB</a></p>}
-    {result?.authorization !== undefined ? <form onSubmit={(event) => { event.preventDefault(); if (/^[0-9A-F]{10}$/.test(code)) load({ action: "confirm", code }); }}><label htmlFor="df-github-code">CALLBACK CODE</label><input id="df-github-code" value={code} maxLength={10} inputMode="text" onChange={(event) => setCode(event.currentTarget.value.toUpperCase())} /><button type="submit" disabled={busy || code.length !== 10}>CONFIRM</button></form> : null}
+    {result?.authorization !== undefined ? <form onSubmit={(event) => { event.preventDefault(); if (/^[0-9A-F]{10}$/.test(code)) load({ action: "confirm", code }); }}><label htmlFor="df-github-code">Confirmation code</label><input id="df-github-code" value={code} maxLength={10} inputMode="text" onChange={(event) => setCode(event.currentTarget.value.toUpperCase())} /><button type="submit" disabled={busy || code.length !== 10}>CONFIRM</button></form> : null}
     {connected ? <div className="dfConsoleSidebar__taskActions"><button type="button" disabled={busy} onClick={() => { setInstallationPage(1); setInstallationSeen(false); load({ action: "refresh" }); }}>REFRESH ACCESS</button><button type="button" disabled={busy} onClick={() => load({ action: "disconnect" })}>DISCONNECT</button></div> : null}
-    {!connected ? null : <>
-      <h4>INSTALLATIONS</h4>
-      {installations === undefined ? <p className="dfFactoryConsole__empty">REFRESH TO LIST INSTALLATIONS</p> : installations.installations.length === 0 ? <><p className="dfFactoryConsole__empty">NO INSTALLATIONS AVAILABLE · AN ORGANIZATION OWNER MAY NEED TO APPROVE THE DARK FACTORY APP IN GITHUB SETTINGS.</p>{!installationSeen && installations.next_page === undefined && nativeInstallURL(installations.installation_url) !== undefined ? <p><a href={nativeInstallURL(installations.installation_url)} target="_blank" rel="noreferrer">INSTALL OR REQUEST GITHUB APP ACCESS</a></p> : null}</> : <ul className="dfFactoryConsole__list">{installations.installations.map((item) => { const manage = nativeManageURL(item.html_url); return <li key={item.id} className="dfConsoleSidebar__account"><p className="dfConsoleRow__title">{item.account.login} · {item.eligibility || "available"}</p>{item.suspended_at !== null ? <p className="dfConsoleSidebar__inherit">SUSPENDED · ASK GITHUB TO RESTORE THIS INSTALLATION.</p> : null}<div className="dfConsoleSidebar__taskActions"><button type="button" disabled={busy || item.suspended_at !== null} onClick={() => { setInstallationID(item.id); setLoadedRepositories(undefined); setRepositoryPage(1); load({ action: "repositories", installation_id: item.id, page: 1 }); }}>CHOOSE REPOSITORIES</button>{manage === undefined ? null : <a href={manage} target="_blank" rel="noreferrer">MANAGE ON GITHUB</a>}</div></li>; })}</ul>}
+    {!connected ? null : <details open={(result?.status?.repositories.length ?? 0) === 0}><summary>Repository access</summary>
+      <h4>Accounts</h4>
+      {installations === undefined ? <p className="dfFactoryConsole__empty">Refresh to find GitHub accounts.</p> : installations.installations.length === 0 ? <><p className="dfFactoryConsole__empty">An organization owner may need to approve the Dark Factory app.</p>{!installationSeen && installations.next_page === undefined && nativeInstallURL(installations.installation_url) !== undefined ? <p><a href={nativeInstallURL(installations.installation_url)} target="_blank" rel="noreferrer">INSTALL OR REQUEST GITHUB APP ACCESS</a></p> : null}</> : <ul className="dfFactoryConsole__list">{installations.installations.map((item) => { const manage = nativeManageURL(item.html_url); return <li key={item.id} className="dfConsoleSidebar__account"><p className="dfConsoleRow__title">{item.account.login} · {item.eligibility || "available"}</p>{item.suspended_at !== null ? <p className="dfConsoleSidebar__inherit">Suspended. Restore access on GitHub.</p> : null}<div className="dfConsoleSidebar__taskActions"><button type="button" disabled={busy || item.suspended_at !== null} onClick={() => { setInstallationID(item.id); setLoadedRepositories(undefined); setRepositoryPage(1); load({ action: "repositories", installation_id: item.id, page: 1 }); }}>CHOOSE REPOSITORIES</button>{manage === undefined ? null : <a href={manage} target="_blank" rel="noreferrer">MANAGE ON GITHUB</a>}</div></li>; })}</ul>}
       <div className="dfConsoleSidebar__taskActions">{installationPage > 1 ? <button type="button" disabled={busy} onClick={() => { const page = installationPage - 1; setInstallationPage(page); load({ action: "installations", page }); }}>PREVIOUS INSTALLATIONS</button> : null}{installations?.next_page === undefined ? null : <button type="button" disabled={busy} onClick={() => { const page = installations.next_page!; setInstallationPage(page); load({ action: "installations", page }); }}>MORE INSTALLATIONS</button>}</div>
-      {installationID === undefined || visibleRepositories === undefined ? null : <><h4>REPOSITORIES · PAGE {repositoryPage}</h4>{visibleRepositories.repositories.length === 0 ? <p className="dfFactoryConsole__empty">NO REPOSITORIES AVAILABLE</p> : <ul className="dfConsoleSidebar__list">{visibleRepositories.repositories.map((item) => { const key = `${installationID}:${item.id}`; const chosen = selected[key]; return <li key={item.id}><label><input type="checkbox" checked={chosen !== undefined} disabled={busy || selectedItems.length >= 100 && chosen === undefined} onChange={(event) => setSelected((current) => { const next = { ...current }; if (event.currentTarget.checked) next[key] = { installation_id: installationID, repository_id: item.id, repository: item.full_name }; else delete next[key]; return next; })} /> {item.full_name}{item.permissions.push ? "" : " · READ ONLY"}</label></li>; })}</ul>}<div className="dfConsoleSidebar__taskActions"><button type="button" disabled={busy} onClick={() => load({ action: "delegate", repositories: selectedItems })}>DELEGATE SELECTED ({selectedItems.length}/100)</button>{visibleRepositories.next_page === undefined ? null : <button type="button" disabled={busy} onClick={() => { const page = visibleRepositories.next_page!; setRepositoryPage(page); load({ action: "repositories", installation_id: installationID, page }); }}>MORE REPOSITORIES</button>}</div></>}
-    </>}
+      {installationID === undefined || visibleRepositories === undefined ? null : <><h4>REPOSITORIES · PAGE {repositoryPage}</h4>{visibleRepositories.repositories.length === 0 ? <p className="dfFactoryConsole__empty">NO REPOSITORIES AVAILABLE</p> : <ul className="dfConsoleSidebar__list">{visibleRepositories.repositories.map((item) => { const key = `${installationID}:${item.id}`; const chosen = selected[key]; return <li key={item.id}><label><input type="checkbox" checked={chosen !== undefined} disabled={busy || selectedItems.length >= 100 && chosen === undefined} onChange={(event) => setSelected((current) => { const next = { ...current }; if (event.currentTarget.checked) next[key] = { installation_id: installationID, repository_id: item.id, repository: item.full_name }; else delete next[key]; return next; })} /> {item.full_name}{item.permissions.push ? "" : " · READ ONLY"}</label></li>; })}</ul>}<div className="dfConsoleSidebar__taskActions"><button type="button" disabled={busy} onClick={() => load({ action: "delegate", repositories: selectedItems })}>Save access ({selectedItems.length}/100)</button>{visibleRepositories.next_page === undefined ? null : <button type="button" disabled={busy} onClick={() => { const page = visibleRepositories.next_page!; setRepositoryPage(page); load({ action: "repositories", installation_id: installationID, page }); }}>MORE REPOSITORIES</button>}</div></>}
+    </details>}
   </section>;
 }
 
@@ -869,7 +895,7 @@ function FloorAppearanceSection({ appearance, onChange, onReset }: {
 }) {
   return <section className="dfConsoleSidebar__section" aria-label="FLOOR APPEARANCE">
     <h3>Floor appearance</h3>
-    <p>Saved in this browser. Does not change how the factory runs.</p>
+    <p>Saved in this browser.</p>
     <label>Scenery<select value={appearance.scenery} onChange={(event) => onChange({ ...appearance, scenery: event.currentTarget.value as FloorAppearance["scenery"] })}><option value="off">Off</option><option value="subtle">Subtle</option><option value="rich">Rich</option></select></label>
     <label>Animation<select value={appearance.animation} onChange={(event) => onChange({ ...appearance, animation: event.currentTarget.value as FloorAppearance["animation"] })}><option value="follow-device">Follow device</option><option value="off">Off</option></select></label>
     <button type="button" onClick={onReset}>Reset floor appearance</button>
@@ -930,7 +956,7 @@ function ProjectLimitsForm({ project, edit, ready, onSave }: {
     <label htmlFor={`df-project-seconds-${project.id}`}>MAX SECONDS PER RUN (0 = UNLIMITED)</label>
     <input id={`df-project-seconds-${project.id}`} inputMode="numeric" value={seconds} disabled={pending || !ready} onChange={(event) => { setSeconds(event.currentTarget.value); setLocalError(undefined); }} />
     {error === undefined ? null : <p className="dfFactoryConsole__terminalError" role="alert">{error}</p>}
-    {remaining === 0n && project.run_budget_limit !== 0n && !unlimited ? <p className="dfConsoleSidebar__inherit">THIS ALLOWANCE IS EXHAUSTED · ENTER A POSITIVE RENEWAL OR CHECK UNLIMITED</p> : null}
+    {remaining === 0n && project.run_budget_limit !== 0n && !unlimited ? <p className="dfConsoleSidebar__inherit">No runs left. Add runs or choose Unlimited.</p> : null}
     <button type="submit" disabled={pending || !ready || onSave === undefined}>{pending ? "SAVING" : "SAVE"}</button>
   </form>;
 }
@@ -961,40 +987,40 @@ function AccountsSection({
   const unlinked = (accounts ?? []).filter((login) => login.linked_id === "");
   return (
     <div className="dfConsoleSidebar__section" aria-label="ACCOUNTS">
-      <h3>PROVIDER LOGINS</h3>
-      <p className="dfConsoleSidebar__inherit">{accounts !== undefined && linked.length === 0 && unlinked.length === 0 ? "Sign in with your provider CLI on this Mac, then refresh." : "Link a login already available on this Mac."}</p>
+      <h3>Agent accounts</h3>
+      {accounts !== undefined && linked.length === 0 && unlinked.length === 0 ? <p>Sign in with your provider CLI on this Mac, then refresh.</p> : null}
       <button type="button" disabled={pending || onRefresh === undefined} onClick={onRefresh}>{pending ? "REFRESHING" : "REFRESH ACCOUNTS"}</button>
       {error === undefined ? null : <p className="dfFactoryConsole__terminalError" role="alert">{EDIT_ERRORS.get(error) ?? "THE FACTORY REFUSED THIS"}</p>}
-      {linked.length === 0 ? <p className="dfFactoryConsole__empty">NO ACCOUNTS LINKED</p> : (
+      {linked.length === 0 ? <p className="dfFactoryConsole__empty">No accounts linked.</p> : (
         <ul className="dfFactoryConsole__list">
           {linked.map((account) => {
             const login = (accounts ?? []).find((candidate) => candidate.linked_id === account.id);
             const identity = [login?.email, login?.organization].filter((part) => part !== undefined && part !== "").join(" · ");
             return (
               <li key={`${account.id}:${account.revision}`} className="dfConsoleSidebar__account">
-                <p className="dfConsoleRow__title">{account.label} · {account.provider}</p>
-                <p>{identity === "" ? `${account.provider} login linked` : identity}</p>
+                <p className="dfConsoleRow__title">{account.label} · {account.provider.replaceAll("_", " ")}</p>
+                {identity === "" ? null : <p>{identity}</p>}
                 {!login?.unavailable_reason ? null : <p className="dfConsoleSidebar__inherit">ACCOUNT UNAVAILABLE · {login.unavailable_reason}. Sign in again using <code>{account.home}</code>, then refresh.</p>}
-                <div className="dfConsoleSidebar__taskActions">
+                <details><summary>Edit account</summary><div className="dfConsoleSidebar__taskActions">
                   <label className="dfFactoryConsole__visuallyHidden" htmlFor={`df-linked-account-${account.id}`}>Label for {account.label}</label>
                   <input id={`df-linked-account-${account.id}`} value={labels[`${account.id}:${account.revision}`] ?? account.label} disabled={pending || onUpdate === undefined} onChange={(event) => { const value = event.currentTarget.value; setLabels((current) => ({ ...current, [`${account.id}:${account.revision}`]: value })); }} />
                   <button type="button" disabled={pending || onUpdate === undefined || !(labels[`${account.id}:${account.revision}`] ?? account.label).trim() || (labels[`${account.id}:${account.revision}`] ?? account.label) === account.label} onClick={() => onUpdate?.(account, { label: labels[`${account.id}:${account.revision}`] ?? account.label })}>SAVE LABEL</button>
-                  <button type="button" disabled={pending || onUpdate === undefined || [...(state?.agents.values() ?? [])].some((agent) => agent.account_id === account.id)} onClick={() => onUpdate?.(account, { remove: true })}>UNLINK</button>
+                  <button type="button" disabled={pending || onUpdate === undefined || [...(state?.agents.values() ?? [])].some((agent) => agent.account_id === account.id)} onClick={() => onUpdate?.(account, { remove: true })} title="Keeps the provider signed in">UNLINK</button>
                 </div>
-                {[...(state?.agents.values() ?? [])].some((agent) => agent.account_id === account.id) ? <p className="dfConsoleSidebar__inherit">In use. Reassign its agents before unlinking.</p> : null}
+                {[...(state?.agents.values() ?? [])].some((agent) => agent.account_id === account.id) ? <p className="dfConsoleSidebar__inherit">In use. Reassign its agents before unlinking.</p> : null}</details>
               </li>
             );
           })}
         </ul>
       )}
-      <p className="dfConsoleSidebar__inherit">Unlinking keeps the provider login and credentials.</p>
-      <h3>AVAILABLE LOGINS</h3>
-      {accounts === undefined ? <p className="dfFactoryConsole__empty">{pending ? "LOOKING" : "NOT LOOKED YET"}</p>
-        : unlinked.length === 0 ? <p className="dfFactoryConsole__empty">NO UNLINKED LOGINS FOUND</p> : (
+
+      <h3>Available accounts</h3>
+      {accounts === undefined ? <p className="dfFactoryConsole__empty">{pending ? "LOOKING" : "Refresh to find accounts."}</p>
+        : unlinked.length === 0 ? <p className="dfFactoryConsole__empty">No other accounts found.</p> : (
         <ul className="dfFactoryConsole__list">
           {unlinked.map((login, index) => (
             <li key={login.home} className="dfConsoleSidebar__account">
-              <p className="dfConsoleRow__title">{login.provider} login</p>
+              <p className="dfConsoleRow__title">{login.provider.replaceAll("_", " ")} login</p>
               <p className="dfFactoryConsole__eyebrow">{[login.email, login.organization].filter((part) => part !== "").join(" · ") || "Ready to link"}</p>
               <div className="dfConsoleSidebar__taskActions">
                 <label className="dfFactoryConsole__visuallyHidden" htmlFor={`df-account-label-${login.provider}-${index}`}>Label for {login.provider} login</label>
@@ -1055,61 +1081,87 @@ export function HumanRequestPanel({
   );
 }
 
-function IntakeSection({ state, repositories, intake, pending, errors, onLoad, onLoadRepositories, onAction }: { state: StateView | undefined; repositories?: ReadonlyMap<string, readonly RepositoryView[]>; intake?: ReadonlyMap<string, IntakeView>; pending?: ReadonlySet<string>; errors?: ReadonlyMap<string, string>; onLoad?: (projectId: string) => void; onLoadRepositories?: (projectId: string) => void; onAction?: (projectId: string, request: IntakeBody) => void }) {
+function IntakeSection({ state, repositories, intake, pending, errors, onLoad, onLoadRepositories, onAction, github, onSelectTask }: { state: StateView | undefined; repositories?: ReadonlyMap<string, readonly RepositoryView[]>; intake?: ReadonlyMap<string, IntakeView>; pending?: ReadonlySet<string>; errors?: ReadonlyMap<string, string>; onLoad?: (projectId: string) => void; onLoadRepositories?: (projectId: string) => void; onAction?: (projectId: string, request: IntakeBody) => void; github?: FactoryGitHubView; onSelectTask?: (id:string)=>void }) {
   const projects = state === undefined ? [] : [...state.projects.values()];
-  const linkedTask = (id: string) => <span title={`Task ${id}`}>{state?.tasks.get(id)?.title ?? `Task ${id.slice(0, 8)}`}</span>;
-  const [candidateSources, setCandidateSources] = useState<Record<string, string>>({});
-  const load = useRef(onLoad);
-  load.current = onLoad;
-  const [open, setOpen] = useState(false);
-  const [selection, setSelection] = useState("");
+  const [open, setOpen] = useState(false), [selection, setSelection] = useState(""), [sourceSelection, setSourceSelection] = useState("");
   const projectId = projects.find((project) => project.id === selection)?.id ?? projects[0]?.id;
-  const canLoad = onLoad !== undefined;
-  useEffect(() => { if (open && canLoad && projectId) load.current?.(projectId); }, [open, projectId, canLoad]);
-  const loadRepositories = useRef(onLoadRepositories);
-  loadRepositories.current = onLoadRepositories;
-  const canLoadRepositories = onLoadRepositories !== undefined;
-  useEffect(() => { if (open && canLoadRepositories && projectId) loadRepositories.current?.(projectId); }, [open, projectId, canLoadRepositories]);
-  return <details className="dfConsoleSidebar__section" aria-label="Issue intake" onToggle={(event) => { if (event.target === event.currentTarget) setOpen(event.currentTarget.open); }}><summary>Issue inbox</summary><p className="dfConsoleSidebar__inherit">Review issues before they become work. Preview reads GitHub without starting an agent.</p>{projects.length > 1 ? <label>Project<select value={projectId} onChange={(event) => setSelection(event.currentTarget.value)}>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label> : null}{projects.filter((project) => project.id === projectId).map((project) => {
-    const result = intake?.get(project.id);
-    const sources = result?.sources ?? [];
-    const candidateSource = sources.find((source) => source.id === candidateSources[project.id]);
-    const busy = pending?.has(project.id) ?? false;
-    return <section key={project.id}><h3>{project.name}</h3>
-      {errors?.get(project.id) === undefined ? null : <p role="alert">{errors.get(project.id)}</p>}
-      <button type="button" disabled={busy} onClick={() => onLoad?.(project.id)}>REFRESH SOURCES</button>
-      {result === undefined ? <p>{busy ? "LOADING PRIVATE SOURCES…" : "PRIVATE SOURCES UNAVAILABLE"}</p> : sources.length === 0 ? <p>NO ISSUE SOURCES</p> : null}
-      {result?.state === "withdrawal_pending" ? <p role="status">WITHDRAWAL PENDING{result.task_id === undefined ? "" : <> · {linkedTask(result.task_id)}</>}</p> : result !== undefined && result.state !== "ok" ? <p role="status">{result.state.replaceAll("_", " ").toUpperCase()}{result.task_id === undefined ? "" : <> · {linkedTask(result.task_id)}</>}</p> : null}
-      {result?.imported_tasks === undefined || result.imported_tasks.length === 0 ? null : <p role="status">IMPORTED TASKS · {result.imported_tasks.length}</p>}
-      <IntakeForm project={project} state={state} repositories={repositories?.get(project.id)} onAction={onAction}/>
-      {sources.map((source) => {
-        const reviewed = candidateSources[project.id] === source.id ? result?.reviewed_revision : undefined;
-        const canEnable = reviewed === source.revision;
-        return <div key={source.id}><p>{source.repository} · {source.enabled ? "ENABLED" : "PAUSED"}</p><p>Work goes to {repositories?.get(project.id)?.find((item) => item.id === source.target_repository_id)?.name ?? "the configured repository"}.</p>
-          {source.sync === undefined ? <p role="status">Waiting for the first check. If intake is not installed, run <code>factoryctl intake service install --home /path/to/factory-home</code> on the host.</p> : <p role="status">LAST SUCCESS · {source.sync.last_success_at === 0n ? "none yet" : new Date(Number(source.sync.last_success_at) * 1000).toLocaleString()} · {source.sync.imported_tasks} IMPORTED · {source.sync.state.toUpperCase()}</p>}
-          {source.sync?.error === "" || source.sync?.error === undefined ? null : <p role="alert">SYNC ERROR · {source.sync.error} · CHECK <code>factoryctl intake service status --home /path/to/factory-home</code> ON THE HOST.</p>}
-          {source.enabled ? <button type="button" disabled={busy} onClick={() => onAction?.(project.id, { action: "pause", source_id: source.id, expected_revision: source.revision })}>PAUSE</button> : <button type="button" disabled={busy || !canEnable} onClick={() => onAction?.(project.id, { action: "enable", source_id: source.id, expected_revision: source.revision, reviewed_revision: reviewed! })}>ENABLE AFTER PREVIEW</button>}
-          {!source.enabled && !canEnable ? <p>Preview this source before enabling. Pausing stops new imports; existing work continues.</p> : null}
-          <button type="button" disabled={busy} onClick={() => { setCandidateSources((current) => ({ ...current, [project.id]: source.id })); onAction?.(project.id, { action: "preview", source_id: source.id, page: 1 }); }}>PREVIEW</button>
-          <IntakeForm key={`${source.id}:${source.revision}`} project={project} state={state} repositories={repositories?.get(project.id)} source={source} onAction={onAction}/>
-        </div>;
-      })}
-      {candidateSource === undefined || result?.next_page === undefined ? null : <button type="button" disabled={busy} onClick={() => onAction?.(project.id, { action: "preview", source_id: candidateSource.id, page: result.next_page! })}>NEXT ISSUE PAGE</button>}
-      {result?.candidates?.map((candidate) => <article key={`${candidate.number}:${candidate.content_hash}`}><p><a href={candidate.url} target="_blank" rel="noreferrer">{candidate.title}</a> · {candidate.reason.replaceAll("_", " ")}{candidate.task_id === undefined ? "" : <> · {linkedTask(candidate.task_id)}</>}</p><details><summary>Review issue content</summary><p style={{ whiteSpace: "pre-wrap" }}>{candidate.body}</p><p>Accepting uses this exact title and body. Later edits need your approval again.</p>{candidate.truncated ? <p>CONTENT TOO LARGE TO ACCEPT</p> : candidate.acceptance_id !== undefined && candidate.reason !== "content_changed" ? null : candidateSource === undefined ? <p>PREVIEW A SOURCE BEFORE ACCEPTING.</p> : result?.reviewed_revision !== candidateSource.revision ? <p>PREVIEW THIS SOURCE AGAIN BEFORE ACCEPTING.</p> : <button type="button" disabled={busy} onClick={() => onAction?.(project.id, { action: "accept", source_id: candidateSource.id, expected_revision: candidateSource.revision, issue_number: candidate.number, content_hash: candidate.content_hash })}>ACCEPT REVIEWED CONTENT</button>}{candidate.acceptance_id === undefined || candidate.reason === "withdrawn" || candidate.reason === "withdrawal_pending" ? null : <button type="button" disabled={busy} onClick={() => onAction?.(project.id, { action: "withdraw", acceptance_id: candidate.acceptance_id })}>WITHDRAW</button>}</details></article>)}
-    </section>;
-  })}</details>;
+  const result = projectId === undefined ? undefined : intake?.get(projectId);
+  const sources = result?.sources ?? [];
+  const source = sources.find((item) => item.id === sourceSelection) ?? sources[0];
+  const busy = projectId !== undefined && (pending?.has(projectId) ?? false);
+  const callbacks = useRef({onLoad,onLoadRepositories,onAction}); callbacks.current={onLoad,onLoadRepositories,onAction};
+  useEffect(() => { if (open && projectId) { callbacks.current.onLoad?.(projectId); callbacks.current.onLoadRepositories?.(projectId); } }, [open,projectId,onLoad !== undefined,onLoadRepositories !== undefined]);
+  useEffect(() => { if (open && projectId && source) callbacks.current.onAction?.(projectId,{action:"preview",source_id:source.id,page:1}); }, [open,projectId,source?.id,source?.revision]);
+  const act = (request:IntakeBody) => { if(projectId) onAction?.(projectId,request); };
+  const project = projects.find((item)=>item.id===projectId);
+  const current = source !== undefined && result?.source_id === source.id && result?.reviewed_revision === source.revision;
+  return <details className="dfConsoleSidebar__section" aria-label="Issue intake" onToggle={(event)=>{if(event.target===event.currentTarget)setOpen(event.currentTarget.open);}}><summary>Issue inbox</summary>
+    {projects.length>1 ? <label>Project<select value={projectId} onChange={(event)=>{setSelection(event.currentTarget.value);setSourceSelection("");}}>{projects.map((item)=><option key={item.id} value={item.id}>{item.name}</option>)}</select></label>:null}
+    {projectId && errors?.get(projectId) ? <p role="alert">Could not check issues. Try again.</p>:null}
+    {result && !["ok","accepted","imported"].includes(result.state) ? <p role="status">{result.state === "unavailable" ? "Connection unavailable. Check access and try again." : result.state.replaceAll("_"," ")}</p>:null}
+    {source ? <>
+      {sources.length>1 ? <label>Backlog<select value={source.id} onChange={(event)=>setSourceSelection(event.currentTarget.value)}>{sources.map((item)=><option key={item.id} value={item.id}>{item.repository}</option>)}</select></label>:<p>{source.repository}</p>}
+      <button type="button" disabled={busy} onClick={()=>act({action:"preview",source_id:source.id,page:1})}>Refresh</button>
+      <details><summary>Backlog settings</summary>
+        <p>{source.enabled ? "Active" : "Paused"}</p>
+        <button type="button" disabled={busy || (!source.enabled && source.policy!=="manual" && !current)} onClick={()=>act(source.enabled ? {action:"pause",source_id:source.id,expected_revision:source.revision}:{action:"enable",source_id:source.id,expected_revision:source.revision,reviewed_revision:source.revision})}>{source.enabled ? "Pause" : "Resume"}</button>
+        {source.sync?.error ? <p role="alert">Checking failed. Check the connection and refresh.</p>:null}
+        {project ? <IntakeForm key={`${source.id}:${source.revision}`} project={project} state={state} repositories={repositories?.get(project.id)} source={source} result={result} github={github} busy={busy} onAction={onAction}/>:null}
+      </details>
+      {current ? result?.candidates?.map((candidate)=>{
+        const imported = candidate.task_id !== undefined && state?.tasks.has(candidate.task_id);
+        const canAccept = !candidate.truncated && ["needs_manual_acceptance","untrusted_author","content_changed","eligible_trusted_author"].includes(candidate.reason);
+        const status = imported ? "Added" : candidate.reason === "content_changed" ? "Updated" : canAccept ? "Needs approval" : candidate.reason.replaceAll("_"," ");
+        return <article key={`${source.id}:${candidate.number}:${candidate.content_hash}`}><p><a href={candidate.url} target="_blank" rel="noreferrer">{candidate.title}</a> · {status}</p>
+          <details><summary>Details</summary><p style={{whiteSpace:"pre-wrap"}}>{candidate.body}</p>
+          {canAccept ? <button type="button" disabled={busy || !source.enabled} onClick={()=>act({action:"accept",source_id:source.id,expected_revision:source.revision,issue_number:candidate.number,content_hash:candidate.content_hash})}>Add to queue</button>:null}</details>
+          {imported ? <button type="button" disabled={onSelectTask===undefined} onClick={()=>onSelectTask?.(candidate.task_id!)}>View task</button>:null}
+          {candidate.acceptance_id && !["withdrawn","withdrawal_pending"].includes(candidate.reason) ? <button type="button" disabled={busy} onClick={()=>act({action:"withdraw",acceptance_id:candidate.acceptance_id})}>Withdraw</button>:null}
+        </article>;
+      }):null}
+      {current && result?.next_page ? <button type="button" disabled={busy} onClick={()=>act({action:"preview",source_id:source.id,page:result.next_page!})}>More issues</button>:null}
+    </>:<p>{busy ? "Checking…" : "Add a backlog to see issues here."}</p>}
+    {project ? <IntakeForm project={project} state={state} repositories={repositories?.get(project.id)} result={result} github={github} busy={busy} onAction={onAction}/>:null}
+  </details>;
 }
 
-function IntakeForm({ project, state, repositories, source, onAction }: { project: ProjectItem; state: StateView | undefined; repositories?: readonly RepositoryView[]; source?: import("@dark-factory/client").IntakeSource; onAction?: (projectId: string, request: IntakeBody) => void }) {
-  const [repository, setRepository] = useState(source?.repository ?? ""); const [label, setLabel] = useState(source?.label ?? ""); const [target, setTarget] = useState(source?.target_repository_id ?? ""); const [agent, setAgent] = useState(source?.overseer_agent_id ?? ""); const [policy, setPolicy] = useState(source?.policy ?? "manual"); const [authors, setAuthors] = useState(source?.trusted_authors.join(", ") ?? ""); const [poll, setPoll] = useState(String(source?.poll_seconds ?? 60)); const [limit, setLimit] = useState(String(source?.admission_limit ?? 25));
-  const agents = state === undefined ? [] : [...state.agents.values()].filter((item) => item.project_id === project.id && item.role === "orchestrator");
-  const soleAgent = agents.length === 1 ? agents[0]?.id : undefined;
-  useEffect(() => { if (source === undefined && agent === "" && soleAgent) setAgent(soleAgent); }, [source, agent, soleAgent]);
-  const targets = repositories?.filter((item) => item.enabled) ?? [];
-  const targetIds = targets.map((item) => item.id).join(" ");
-  useEffect(() => { if (source === undefined && target === "") setTarget(targets.find((item) => item.default)?.id ?? (targets.length === 1 ? targets.at(0)?.id ?? "" : "")); }, [source, target, targetIds]);
-  const submit = (event: FormEvent) => { event.preventDefault(); const pollSeconds = Number(poll), admissionLimit = Number(limit); if (!/^\d+$/.test(poll) || !/^\d+$/.test(limit) || !repository.trim() || !target || !agent || policy === "trusted_authors" && authors.trim() === "") return; const configuration = { ...(source?.priority_default === undefined ? {} : { priority_default: source.priority_default }), ...(source?.priority_by_label === undefined ? {} : { priority_by_label: source.priority_by_label }), repository: repository.trim(), target_repository_id: target, overseer_agent_id: agent, label: label.trim(), policy, trusted_authors: authors.split(",").map((value) => value.trim()).filter(Boolean), poll_seconds: pollSeconds, admission_limit: admissionLimit } as const; onAction?.(project.id, source === undefined ? { action: "create", project_id: project.id, configuration } : { action: "update", source_id: source.id, project_id: project.id, expected_revision: source.revision, configuration }); };
-  return <details><summary>{source === undefined ? "Add issue source" : "Source settings"}</summary><form onSubmit={submit}><label>GitHub repository<input value={repository} placeholder="owner/repository" onChange={(event) => setRepository(event.currentTarget.value)}/></label><label>Destination repository<select value={target} onChange={(event) => setTarget(event.currentTarget.value)}><option value="">{targets.length === 0 ? "No enabled checkout" : "Choose a checkout"}</option>{targets.map((item) => <option key={item.id} value={item.id}>{item.name}{item.default ? " (default)" : ""}</option>)}</select></label>{targets.length === 0 ? <p role="status">ADD AN ENABLED CHECKOUT IN REPOSITORIES BEFORE SAVING THIS SOURCE.</p> : null}<label>Label filter (optional)<input value={label} onChange={(event) => setLabel(event.currentTarget.value)}/></label><label>Overseer<select value={agent} onChange={(event) => setAgent(event.currentTarget.value)}><option value="">Choose an overseer</option>{agents.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>{agents.length === 0 ? <p role="status">CREATE AN ORCHESTRATOR FOR THIS PROJECT BEFORE SAVING THIS SOURCE.</p> : null}<label>Which issues can become work?<select value={policy} onChange={(event) => { setPolicy(event.currentTarget.value as "manual" | "trusted_authors"); if (event.currentTarget.value === "trusted_authors" && authors === "") setAuthors("@me"); }}><option value="manual">Require my approval</option><option value="trusted_authors">Allow trusted authors</option></select></label>{policy === "trusted_authors" ? <><label>Trusted authors<input value={authors} onChange={(event) => setAuthors(event.currentTarget.value)} placeholder="@me, login"/></label><p>@me means your connected GitHub account. Other authors wait for your approval. Edited issue content always needs approval again.</p></> : null}<details><summary>Advanced</summary><label>Check every (seconds)<input value={poll} onChange={(event) => setPoll(event.currentTarget.value)}/></label><label>Maximum imports per check<input value={limit} onChange={(event) => setLimit(event.currentTarget.value)}/></label></details><button type="submit" disabled={!target || !agent || agents.length === 0}>{source === undefined ? "CREATE PAUSED SOURCE" : "SAVE PAUSED SOURCE"}</button></form></details>;
+function IntakeForm({ project, state, repositories, source, result, github, busy, onAction }: { project: ProjectItem; state: StateView | undefined; repositories?: readonly RepositoryView[]; source?: import("@dark-factory/client").IntakeSource; result?: IntakeView; github?: FactoryGitHubView; busy:boolean; onAction?: (projectId:string,request:IntakeBody)=>void }) {
+  const [provider,setProvider]=useState(source?.linear_team_id ? "linear":"github"), [team,setTeam]=useState(source?.linear_team_id ?? ""), [key,setKey]=useState("");
+  const [repository,setRepository]=useState(source?.repository ?? ""),[label,setLabel]=useState(source?.label ?? ""),[target,setTarget]=useState(source?.target_repository_id ?? ""),[agent,setAgent]=useState(source?.overseer_agent_id ?? "");
+  const [policy,setPolicy]=useState(source?.policy ?? "manual"),[authors,setAuthors]=useState(source?.trusted_authors.join(", ") ?? "@me"),[poll,setPoll]=useState(String(source?.poll_seconds ?? 60)),[limit,setLimit]=useState(String(source?.admission_limit ?? 25));
+  const targets=repositories?.filter((item)=>item.enabled) ?? [];
+  const destination=target || targets.find((item)=>item.default)?.id || (targets.length===1 ? targets[0]!.id:"");
+  const agents=state===undefined ? []:[...state.agents.values()].filter((item)=>item.project_id===project.id && item.role==="orchestrator" && !item.archived);
+  const overseer=agent || (agents.length===1 ? agents[0]!.id:"");
+  const teams=result?.linear_teams ?? [];
+  const selectedTeam=teams.find((item)=>item.id===team) ?? (teams.length===1 ? teams[0]:undefined);
+  const githubRepositories=github?.result?.status?.repositories ?? [];
+  const selectedRepository=repository || (githubRepositories.length===1 ? githubRepositories[0]!.repository:"");
+  const act=(request:IntakeBody)=>onAction?.(project.id,request);
+  const submit=(event:FormEvent)=>{
+    event.preventDefault();
+    if (!destination || !/^\d+$/.test(poll) || !/^\d+$/.test(limit)) return;
+    const linearId=selectedTeam?.id || source?.linear_team_id;
+    if (provider==="linear" ? !linearId:!selectedRepository) return;
+    const configuration={...(source?.priority_default===undefined ? {}:{priority_default:source.priority_default}),...(source?.priority_by_label===undefined ? {}:{priority_by_label:source.priority_by_label}),...(provider==="linear" ? {linear_team_id:linearId}:{}),repository:provider==="linear" ? selectedTeam?.name ?? source?.repository ?? "Linear":selectedRepository,target_repository_id:destination,overseer_agent_id:overseer,label:label.trim(),policy:provider==="linear" ? "manual" as const:policy,trusted_authors:provider==="linear"||policy==="manual" ? []:authors.split(",").map((value)=>value.trim()).filter(Boolean),poll_seconds:Number(poll),admission_limit:Number(limit)};
+    act(source ? {action:"update",source_id:source.id,project_id:project.id,expected_revision:source.revision,configuration}:{action:"create",project_id:project.id,configuration});
+  };
+  return <details><summary>{source ? "Edit backlog":"Add backlog"}</summary><form onSubmit={submit}>
+    {source ? null:<label>Source<select value={provider} onChange={(event)=>{setProvider(event.currentTarget.value);if(event.currentTarget.value==="linear")act({action:"linear_teams"});}}><option value="github">GitHub Issues</option><option value="linear">Linear</option></select></label>}
+    {provider==="linear" ? <>
+      {teams.length ? <label>Team<select value={selectedTeam?.id ?? ""} onChange={(event)=>setTeam(event.currentTarget.value)}><option value="">Choose a team</option>{teams.map((item)=><option key={item.id} value={item.id}>{item.name}</option>)}</select></label>:<label>Linear read-only API key<input type="password" value={key} autoComplete="off" maxLength={512} onChange={(event)=>setKey(event.currentTarget.value)}/></label>}
+      {teams.length ? <button type="button" disabled={busy} onClick={()=>act({action:"linear_disconnect"})}>Disconnect Linear</button>:<button type="button" disabled={busy || key.length<10} onClick={()=>{act({action:"linear_connect",api_key:key});setKey("");}}>Connect Linear</button>}
+    </>:<label>GitHub backlog<select value={selectedRepository} onChange={(event)=>setRepository(event.currentTarget.value)}><option value="">Choose a repository</option>{githubRepositories.map((item)=><option key={item.repository_id} value={item.repository}>{item.repository}</option>)}{source && !githubRepositories.some((item)=>item.repository===source.repository) ? <option value={source.repository}>{source.repository}</option>:null}</select></label>}
+    <label>Label (optional)<input value={label} onChange={(event)=>setLabel(event.currentTarget.value)}/></label>
+    {!destination ? <p>Add a code repository to this project first.</p>:null}
+    <details><summary>Advanced</summary>
+      <label>Code repository<select value={destination} onChange={(event)=>setTarget(event.currentTarget.value)}>{targets.map((item)=><option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
+      {agents.length>1 ? <label>Overseer<select value={overseer} onChange={(event)=>setAgent(event.currentTarget.value)}><option value="">Any eligible worker</option>{agents.map((item)=><option key={item.id} value={item.id}>{item.name}</option>)}</select></label>:null}
+      {provider==="github" ? <><label>Approval<select value={policy} onChange={(event)=>setPolicy(event.currentTarget.value as "manual"|"trusted_authors")}><option value="manual">Require my approval</option><option value="trusted_authors">Allow trusted authors</option></select></label>{policy==="trusted_authors" ? <label>Trusted authors<input value={authors} onChange={(event)=>setAuthors(event.currentTarget.value)}/></label>:null}</>:null}
+      <label>Check every (seconds)<input value={poll} onChange={(event)=>setPoll(event.currentTarget.value)}/></label><label>Maximum imports per check<input value={limit} onChange={(event)=>setLimit(event.currentTarget.value)}/></label>
+    </details>
+    <button type="submit" disabled={busy || !destination}>{source ? "Save":"Add backlog"}</button>
+  </form></details>;
 }
 
 function AttachmentRetentionSection({ call }: { call?: (enabled?: boolean) => Promise<boolean> }) {

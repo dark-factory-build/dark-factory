@@ -93,6 +93,7 @@ func TestV29MigrationPreservesHomeAndAddsEmptyTokenLedger(t *testing.T) {
 	}
 	before := snapshotSchemaRows(t, ctx, connection, v29SchemaStatements(), false)
 	connection.Close()
+	downgradeIntakeToV30(t, store)
 	if _, err := store.writer.ExecContext(ctx, `DROP TABLE run_tokens; DROP TABLE project_tokens; PRAGMA user_version = 29`); err != nil {
 		t.Fatal(err)
 	}

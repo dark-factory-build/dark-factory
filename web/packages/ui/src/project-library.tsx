@@ -66,8 +66,8 @@ export function ProjectLibrary({ state, call, draft }: { state?: StateView; call
     setEvidence(rows(result.items)); setEvidenceNext(Number(result.next_offset ?? 0));
   };
   return <details className="dfConsoleSidebar__panel dfProjectLibrary">
-    <summary>Project library &amp; outcomes</summary>
-    <p>Reusable instructions and test procedures for agents. A task keeps the exact version you attach.</p>
+    <summary>Instructions &amp; outcomes</summary>
+    <p>Reusable instructions and checks. Tasks keep the version you attach.</p>
     <label>Project <select value={projectID} disabled={pending} onChange={(event) => { epoch.current++; setProject(event.target.value); setItems([]); setSelected(undefined); setEditing(false); setNext(0); }}>
       {projects.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
     </select></label>

@@ -274,6 +274,8 @@ fn rejection_for_status(status: u16) -> Option<RejectionKinds> {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct CreatePullRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) external_source_url: Option<String>,
     pub(crate) repository: String,
     pub(crate) operation_id: String,
     pub(crate) issue_number: i64,
@@ -1550,7 +1552,7 @@ impl AppAuthority {
             ("metadata", "read"),
             ("pull_requests", "write"),
         ]);
-        if request.cross_repository_source().is_none() {
+        if request.cross_repository_source().is_none() && request.external_source_url.is_none() {
             permissions.insert("issues", "read");
         }
         let token = self.0.installation_token(repository, permissions).await?;
@@ -1568,26 +1570,31 @@ impl AppAuthority {
                 .map_err(|_| OperationError::Unavailable)?;
             return Err(OperationError::Indeterminate);
         }
-        let issue = if let Some(source) = request.cross_repository_source() {
-            let source_token = self
-                .0
-                .installation_token(
-                    RepositoryName::new(source.to_owned())?,
-                    BTreeMap::from([("issues", "read"), ("metadata", "read")]),
-                )
-                .await?;
-            let source_metadata = self.0.repository_metadata(&source_token).await?;
-            // Unknown visibility fails closed. A private backlog cannot be
-            // disclosed by linking it from a public pull request.
-            validate_source_visibility(source_metadata.private, repository.private)?;
-            self.0
-                .read_issue(&source_token, request.issue_number)
-                .await?
+        if request.external_source_url.is_some() {
+            // Linear is a private backlog; a provider cannot authorize disclosure.
+            validate_source_visibility(Some(true), repository.private)?;
         } else {
-            self.0.read_issue(&token, request.issue_number).await?
-        };
-        if !issue.is_real_open_issue() {
-            return Err(OperationError::Conflict);
+            let issue = if let Some(source) = request.cross_repository_source() {
+                let source_token = self
+                    .0
+                    .installation_token(
+                        RepositoryName::new(source.to_owned())?,
+                        BTreeMap::from([("issues", "read"), ("metadata", "read")]),
+                    )
+                    .await?;
+                let source_metadata = self.0.repository_metadata(&source_token).await?;
+                // Unknown visibility fails closed. A private backlog cannot be
+                // disclosed by linking it from a public pull request.
+                validate_source_visibility(source_metadata.private, repository.private)?;
+                self.0
+                    .read_issue(&source_token, request.issue_number)
+                    .await?
+            } else {
+                self.0.read_issue(&token, request.issue_number).await?
+            };
+            if !issue.is_real_open_issue() {
+                return Err(OperationError::Conflict);
+            }
         }
         self.0
             .verify_ref(&token, &request.head, &request.head_sha)
@@ -3206,7 +3213,23 @@ impl CreatePullRequest {
         if let Some(source) = self.source_repository.as_mut() {
             RepositoryName::requested(source)?;
         }
-        valid_exact_integer(self.issue_number)?;
+        if let Some(url) = &self.external_source_url {
+            if self.issue_number != 0
+                || self.source_repository.is_some()
+                || self.close_on_merge
+                || url.len() > 512
+                || !url.starts_with("https://linear.app/")
+                || !url.contains("/issue/")
+                || url
+                    .bytes()
+                    .any(|c| c.is_ascii_whitespace() || c.is_ascii_control())
+                || url.contains(['?', '#'])
+            {
+                return Err(OperationError::InvalidInput);
+            }
+        } else {
+            valid_exact_integer(self.issue_number)?;
+        }
         valid_ref(&self.head)?;
         valid_ref(&self.base)?;
         valid_sha(&self.head_sha)?;
@@ -3235,7 +3258,9 @@ impl CreatePullRequest {
 
     fn marked_body(&self) -> Result<String, OperationError> {
         let cross_source = self.cross_repository_source();
-        let footer = if let Some(source) = cross_source {
+        let footer = if let Some(url) = &self.external_source_url {
+            format!("Refs {url}")
+        } else if let Some(source) = cross_source {
             format!("Refs {source}#{}", self.issue_number)
         } else if self.close_on_merge {
             format!("Closes #{}", self.issue_number)
@@ -3246,7 +3271,9 @@ impl CreatePullRequest {
             character == '\n' || character == '\r' || character == ' ' || character == '\t'
         });
         while let Some(line) = body.rsplit('\n').next() {
-            if cross_source.is_some() && line.trim() == footer {
+            if (cross_source.is_some() || self.external_source_url.is_some())
+                && line.trim() == footer
+            {
                 body = body[..body.len() - line.len()].trim_end();
                 continue;
             }
@@ -3258,7 +3285,9 @@ impl CreatePullRequest {
             } else {
                 "Refs"
             };
-            if cross_source.is_some() || kind != expected_kind || issue_number != self.issue_number
+            if (cross_source.is_some() || self.external_source_url.is_some())
+                || kind != expected_kind
+                || issue_number != self.issue_number
             {
                 return Err(OperationError::InvalidInput);
             }
@@ -3266,7 +3295,7 @@ impl CreatePullRequest {
                 character == '\n' || character == '\r' || character == ' ' || character == '\t'
             });
         }
-        if cross_source.is_some() {
+        if cross_source.is_some() || self.external_source_url.is_some() {
             // Cross-repository source references must be qualified. Reject
             // automatic-closing prose too, rather than closing a shared source
             // when only this pull request has finished.
@@ -10783,6 +10812,7 @@ mod tests {
         );
 
         let mut create = CreatePullRequest {
+            external_source_url: None,
             repository: "dark-factory-build/dark-factory".into(),
             operation_id: "1c8a5c44-7f1f-11f0-952e-acde48001122".into(),
             issue_number: 390,
@@ -10804,6 +10834,19 @@ mod tests {
                 .get("source_repository")
                 .is_none()
         );
+        let mut linear = create.clone();
+        linear.external_source_url = Some("https://linear.app/acme/issue/ENG-7/intake".into());
+        linear.issue_number = 0;
+        linear.close_on_merge = false;
+        assert!(linear.validate().is_ok());
+        let body = linear.marked_body().unwrap();
+        assert!(body.contains("Refs https://linear.app/acme/issue/ENG-7/intake"));
+        assert!(!body.contains("#0") && !body.contains("Closes"));
+        linear.close_on_merge = true;
+        assert!(linear.validate().is_err());
+        linear.close_on_merge = false;
+        linear.external_source_url = Some("https://attacker.example/issue/7".into());
+        assert!(linear.validate().is_err());
         let original_digest = request_digest(&create).unwrap();
         let decoded: CreatePullRequest =
             serde_json::from_value(serde_json::to_value(&create).unwrap()).unwrap();
@@ -10930,6 +10973,7 @@ mod tests {
         );
         assert!(
             CreatePullRequest {
+                external_source_url: None,
                 repository: "dark-factory-build/dark-factory".into(),
                 issue_number: 0,
                 ..create.clone()
@@ -10939,6 +10983,7 @@ mod tests {
         );
         assert!(
             CreatePullRequest {
+                external_source_url: None,
                 repository: "dark-factory-build/dark-factory".into(),
                 head: "../main".into(),
                 ..create.clone()
@@ -10948,6 +10993,7 @@ mod tests {
         );
         assert!(
             CreatePullRequest {
+                external_source_url: None,
                 repository: "dark-factory-build/dark-factory".into(),
                 head_sha: "A".repeat(40),
                 ..create.clone()
@@ -10957,6 +11003,7 @@ mod tests {
         );
         assert!(
             CreatePullRequest {
+                external_source_url: None,
                 repository: "dark-factory-build/dark-factory".into(),
                 base_sha: create.head_sha.clone(),
                 ..create
