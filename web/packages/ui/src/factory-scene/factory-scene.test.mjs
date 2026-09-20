@@ -1008,12 +1008,11 @@ test("stationary tasks expose affected areas and link the existing queue and que
     ...(index === 0 ? { representativeRoomId: "src" } : {}),
     humanRequestIds: index === 0 ? ["question-1"] : [],
   }));
-  const markup = render({ tasks, onSelectTask() {}, onSelectHumanRequest() {} });
+  const markup = render({ tasks, onSelectTask() {}, onSelectHumanRequest() {}, onOpenTasks() {} });
   assert.equal((markup.match(/data-floor-inbox="10"/g) ?? []).length, 1);
   assert.equal((markup.match(/data-work-footprint=/g) ?? []).length, 2);
-  // The tray is scenery standing on a table, so it takes no pointer: a seated
-  // worker shares those pixels, and whichever is drawn last would eat the other's clicks.
-  assert.match(markup, /data-floor-inbox="10" aria-hidden="true" pointer-events="none"/);
+  // The tray is a distinct, keyboard reachable route into the existing Tasks panel.
+  assert.match(markup, /data-floor-inbox="10"[^>]*aria-label="Open Tasks"[^>]*role="button"[^>]*tabindex="0"/);
   // Selecting queued work in the panel still lights its pile on the floor.
   assert.match(render({ tasks, selectedTaskId: "task-1", onSelectTask() {} }), /data-floor-inbox="10"[\s\S]*?stroke="#80ddff"/);
   // The tray is furniture: it stays when nothing waits, and says so.
@@ -1035,6 +1034,12 @@ test("stationary tasks expose affected areas and link the existing queue and que
   assert.doesNotMatch(render({ tasks: tasks.map((task) => ({ ...task, status: "succeeded" })) }), /data-room-operating="true"/);
   const noObservation = render({ tasks: [{ ...tasks[0], roomIds: [], humanRequestIds: [] }] });
   assert.doesNotMatch(noObservation, /data-work-footprint=|data-human-request-id=/);
+});
+
+test("the tray and planning table expose stable project actions", () => {
+  const markup = render({ projectId: "project-a", onOpenTasks() {}, onOpenMissions() {} });
+  assert.match(markup, /data-floor-inbox="0"[^>]*aria-label="Open Tasks"[^>]*role="button"[^>]*tabindex="0"/);
+  assert.match(markup, /data-common-table="planning"[^>]*data-tooltip="Missions · inspect objectives"[^>]*aria-label="Open Missions"[^>]*role="button"[^>]*tabindex="0"/);
 });
 
 

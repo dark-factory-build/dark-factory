@@ -29,6 +29,8 @@ import { spriteAtlas, spriteSheet, spriteSheetSize } from "./sprites/sprites.gen
 export type FactorySceneProps = Readonly<{
   appearance?: FloorAppearance;
   topology: SceneTopology;
+  /** Current project scope, when the floor has one. */
+  projectId?: string;
   detailNodes?: ReadonlyMap<string, SceneTopology["nodes"][number]>;
   workers: readonly SceneWorker[];
   tasks?: readonly SceneTask[];
@@ -36,6 +38,10 @@ export type FactorySceneProps = Readonly<{
   peerQuestions?: readonly PeerQuestionItem[];
   selectedTaskId?: string;
   onSelectTask?: (taskId: string) => void;
+  /** Open the existing project task queue from the floor inbox. */
+  onOpenTasks?: (projectId?: string) => void;
+  /** Open the operator's objective view from the planning table. */
+  onOpenMissions?: (projectId?: string) => void;
   onSelectHumanRequest?: (requestId: string) => void;
   /** A dropped session reconciles to its latest snapshot instead of replaying local motion. */
   connected?: boolean;
@@ -286,6 +292,11 @@ function SceneWorkers({ errands, furniture, restingSeats, tray, peerQuestions, l
   }
   const agentOf = new Map(tasks.map((task) => [task.id, task.agentId]));
   const waiting = peerQuestions.filter((question) => !question.answered).map((question) => ({ asker: agentOf.get(question.source_task_id), asked: agentOf.get(question.target_task_id) }));
+  const peerQuestionsByAgent = new Map<string, number>();
+  for (const { asker, asked } of waiting) {
+    if (asker !== undefined) peerQuestionsByAgent.set(asker, (peerQuestionsByAgent.get(asker) ?? 0) + 1);
+    if (asked !== undefined) peerQuestionsByAgent.set(asked, (peerQuestionsByAgent.get(asked) ?? 0) + 1);
+  }
   // Idle life belongs to people sitting still in their seats with nothing to ask of anyone.
   const seats = restingSeats.map((seat): Seat => {
     const id = placements.find((placement) => placement.area === "resting" && samePoint(placement, seat))?.id;
@@ -331,6 +342,7 @@ function SceneWorkers({ errands, furniture, restingSeats, tray, peerQuestions, l
         const said = chat === undefined ? "" : `\n${workerById.get(chat.between[0])!.name}: ${chat.remark.line}${chat.replied ? `\n${workerById.get(chat.between[1])!.name}: ${chat.remark.reply}` : ""}`;
         const frames = workerFrames(worker, position.motion, placement.area === "room" || placement.errand !== undefined ? undefined : placement.area === "resting" ? "resting" : "planning", placement.errand, stroking, hailing.get(worker.id));
         const asking = waiting.flatMap(({ asker, asked }) => asker === worker.id && workerById.has(asked ?? "") ? [`\nAsked ${workerById.get(asked!)!.name} · waiting for an answer`] : asked === worker.id && workerById.has(asker ?? "") ? [`\nHas a question from ${workerById.get(asker!)!.name}`] : []);
+        const peerQuestionCount = peerQuestionsByAgent.get(worker.id) ?? 0;
         // A step lifts the whole body a pixel.
         const bob = position.motion.action === "walking" && position.motion.frame === 1 ? -1 : 0;
         // Only a profile facing east is drawn; walking west is its mirror image.
@@ -353,6 +365,9 @@ function SceneWorkers({ errands, furniture, restingSeats, tray, peerQuestions, l
             </g>
             {attention.length === 0 ? null : <g {...sceneAction(onSelectHumanRequest === undefined ? undefined : () => onSelectHumanRequest(attention[0]!))} aria-label={`Question from ${worker.name}`} data-human-request-id={attention[0]}>
               <rect x="10" y="-20" width="22" height="22" rx="3" fill="#f0c777" /><text x="21" y="-5" textAnchor="middle" fill="#172330" fontSize="16" fontWeight="700">!</text>
+            </g>}
+            {peerQuestionCount === 0 ? null : <g {...sceneAction(onSelectWorker === undefined ? undefined : () => onSelectWorker(worker.id))} aria-label={`${peerQuestionCount} peer question${peerQuestionCount === 1 ? "" : "s"}`} data-peer-question-count={peerQuestionCount}>
+              <rect x="-32" y="-20" width="22" height="22" rx="3" fill="#80ddff" /><text x="-21" y="-5" textAnchor="middle" fill="#172330" fontSize="11" fontWeight="700">{peerQuestionCount}</text>
             </g>}
           </g>
         );
@@ -379,7 +394,7 @@ function SceneWorkers({ errands, furniture, restingSeats, tray, peerQuestions, l
 }
 
 /** A disposable SVG projection of topology and current factory state. */
-export function FactoryScene({ topology, detailNodes, workers, appearance = DEFAULT_FLOOR_APPEARANCE, omittedLocations = 0, enterableRoomIds = [], onEnterRoom, selectedWorkerId, onSelectWorker, tasks = [], peerQuestions = NO_QUESTIONS, selectedTaskId, onSelectTask, onSelectHumanRequest, connected = true }: FactorySceneProps) {
+export function FactoryScene({ topology, detailNodes, workers, appearance = DEFAULT_FLOOR_APPEARANCE, omittedLocations = 0, enterableRoomIds = [], onEnterRoom, selectedWorkerId, onSelectWorker, tasks = [], peerQuestions = NO_QUESTIONS, selectedTaskId, onSelectTask, onOpenTasks, onOpenMissions, onSelectHumanRequest, projectId, connected = true }: FactorySceneProps) {
   const [selectedRoomId, setSelectedRoomId] = useState<string>();
   const [tooltip, setTooltip] = useState<{ text: string; x: number; y: number; top: number; bottom: number; room: number }>();
   const tooltipElement = useRef<HTMLDivElement>(null);
@@ -427,11 +442,19 @@ export function FactoryScene({ topology, detailNodes, workers, appearance = DEFA
   const maxWidth = Math.min(640, layout.width * 2);
   // One table per row, as long as the row, standing between the viewer and the
   // people at it: it covers their laps, and what they rest with sits on it.
-  const tables = [{ seats: seating.resting, planning: false }, { seats: seating.planning, planning: true }].flatMap(({ seats, planning }) =>
-    [...new Set(seats.map((seat) => seat.y))].map((y) => { const row = seats.filter((seat) => seat.y === y), first = row[0]!; return <g key={`${planning} ${y}`} aria-hidden="true" pointerEvents="none" data-common-table={planning ? "planning" : "resting"} transform={`translate(${first.x} ${y + TABLE_DROP})`}>
-      <rect x="-18" y="-21" width={row.at(-1)!.x - first.x + 36} height="10" fill={planning ? "#455c5e" : "#655d4c"} stroke="#8c8871" />
-      {!planning ? null : <g><rect x="-12" y="-19" width="24" height="6" fill="#9fae9e" /><path d="M-9 -17h12v3H-3v-3 M5 -16h4" fill="none" stroke="#536e70" /></g>}
-    </g>; }));
+  // Keep one clearly reachable planning station even when no overseer is seated.
+  // The synthetic row is only furniture geometry; it never creates a worker.
+  const planningSeats = seating.planning.length === 0
+    ? [{ x: ROOM_LEFT + 16, y: layout.restingTop }]
+    : seating.planning;
+  const tables = [{ seats: seating.resting, planning: false }, { seats: planningSeats, planning: true }].flatMap(({ seats, planning }) =>
+    [...new Set(seats.map((seat) => seat.y))].map((y) => { const row = seats.filter((seat) => seat.y === y), first = row[0]!;
+      const action = planning ? onOpenMissions : undefined;
+      const project = projectId;
+      return <g key={`${planning} ${y}`} data-common-table={planning ? "planning" : "resting"} data-tooltip={planning ? "Missions · inspect objectives" : undefined} aria-label={planning ? "Open Missions" : undefined} className={planning ? "dfFactoryScene__target" : undefined} {...(planning ? sceneAction(action === undefined ? undefined : () => action(project)) : { "aria-hidden": true, pointerEvents: "none" })} transform={`translate(${first.x} ${y + TABLE_DROP})`}>
+        <rect x="-18" y="-21" width={row.at(-1)!.x - first.x + 36} height="10" fill={planning ? "#455c5e" : "#655d4c"} stroke="#8c8871" />
+        {!planning ? null : <g><rect x="-12" y="-19" width="24" height="6" fill="#9fae9e" /><path d="M-9 -17h12v3H-3v-3 M5 -16h4" fill="none" stroke="#536e70" /></g>}
+      </g>; }));
 
   return (
     <>
@@ -548,7 +571,7 @@ export function FactoryScene({ topology, detailNodes, workers, appearance = DEFA
       {/* Waiting work, as the tray it would be on a real desk. Scenery, like
           everything else standing on these tables: the pile says how the queue
           is doing, the Tasks panel is where it is read and changed. */}
-      <g data-floor-inbox={queued} aria-hidden="true" pointerEvents="none" transform={`translate(${tray.x - 10} ${tray.y + 4})`}>
+      <g data-floor-inbox={queued} data-tooltip={queued === 0 ? "Tasks · queue is empty" : `Tasks · ${queued} queued`} aria-label="Open Tasks" {...sceneAction(onOpenTasks === undefined ? undefined : () => onOpenTasks(projectId))} transform={`translate(${tray.x - 10} ${tray.y + 4})`}>
         {[...Array(Math.min(queued, 3))].map((_, index) => <rect key={index} x="1" y={-2 - index * 3} width="18" height="3" fill="#e4dcc0" stroke={tasks.some((task) => task.id === selectedTaskId && task.status === "queued") ? "#80ddff" : "#a6a087"} />)}
         <path d="M-2 -4v6h24v-6 M-2 2h24" fill="none" stroke="#c2b184" strokeWidth="2" />
       </g>
