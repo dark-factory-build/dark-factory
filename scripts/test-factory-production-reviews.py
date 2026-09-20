@@ -18,17 +18,23 @@ def review(state, commit=HEAD, body="Dark-Factory-Review: allow " + HEAD, actor=
 class ProductionReviewsTest(unittest.TestCase):
     def test_block_wins_shared_gate(self):
         block = "Dark-Factory-Review: block " + HEAD + " dark-factory-operation:op-1:"
-        result = reviews.verify_exact_head(HEAD, [{"head": HEAD, "state": "block", "findings": block}, {"head": HEAD, "state": "allow", "findings": "allow"}])
+        result = reviews.verify_exact_head(HEAD, [{"commit_id": HEAD, "state": "COMMENTED", "author_id": "7", "body": block}, {"commit_id": HEAD, "state": "APPROVED", "author_id": "8", "body": "allow"}])
         self.assertNotEqual(result.returncode, 0)
 
     def test_correction_is_delegated_to_shared_gate(self):
         block = "Dark-Factory-Review: block " + HEAD + " <!-- dark-factory-operation:deadbeef:old -->"
         allow = "Dark-Factory-Review: allow " + HEAD + " Dark-Factory-Review-Correction: deadbeef <!-- dark-factory-operation:cafebabe:new -->"
-        result = reviews.verify_exact_head(HEAD, [{"head": HEAD, "state": "note", "findings": block}, {"head": HEAD, "state": "allow", "findings": allow}])
+        result = reviews.verify_exact_head(HEAD, [{"commit_id": HEAD, "state": "COMMENTED", "author_id": "7", "body": block}, {"commit_id": HEAD, "state": "APPROVED", "author_id": "7", "body": allow}])
         self.assertEqual(result.returncode, 0)
 
+    def test_different_publisher_correction_cannot_clear_block(self):
+        block = "Dark-Factory-Review: block " + HEAD + " <!-- dark-factory-operation:deadbeef:old -->"
+        allow = "Dark-Factory-Review: allow " + HEAD + " Dark-Factory-Review-Correction: deadbeef <!-- dark-factory-operation:cafebabe:new -->"
+        result = reviews.verify_exact_head(HEAD, [{"commit_id": HEAD, "state": "COMMENTED", "author_id": "7", "body": block}, {"commit_id": HEAD, "state": "APPROVED", "author_id": "8", "body": allow}])
+        self.assertNotEqual(result.returncode, 0)
+
     def test_old_head_never_approves_current(self):
-        result = reviews.verify_exact_head(HEAD, [{"head": OLD, "state": "allow", "findings": "Dark-Factory-Review: allow " + OLD}])
+        result = reviews.verify_exact_head(HEAD, [{"commit_id": OLD, "state": "APPROVED", "author_id": "7", "body": "Dark-Factory-Review: allow " + OLD}])
         self.assertNotEqual(result.returncode, 0)
 
     def test_truncated_history_is_unknown(self):
@@ -51,6 +57,26 @@ class ProductionReviewsTest(unittest.TestCase):
             reviews._read_graphql = original
         self.assertEqual(facts[(5, HEAD)]["state"], "unknown")
         self.assertIn("review_actor", unavailable)
+
+    def test_plain_approval_does_not_allow_and_dismissed_block_is_ignored(self):
+        original = reviews._read_graphql
+        reviews._read_graphql = lambda _: {"pageInfo": {}, "nodes": [{"number": 6, "headRefOid": HEAD, "mergeQueueEntry": None, "reviews": {"pageInfo": {"hasPreviousPage": False}, "nodes": [review("APPROVED", body="plain approval"), review("DISMISSED", body="Dark-Factory-Review: block " + HEAD)]}}]}
+        try:
+            facts, _, _, unavailable = reviews.collect("example/repository")
+        finally:
+            reviews._read_graphql = original
+        self.assertEqual(facts[(6, HEAD)]["state"], "unknown")
+        self.assertEqual(unavailable, "")
+
+    def test_commented_marker_allows(self):
+        original = reviews._read_graphql
+        reviews._read_graphql = lambda _: {"pageInfo": {}, "nodes": [{"number": 7, "headRefOid": HEAD, "mergeQueueEntry": None, "reviews": {"pageInfo": {"hasPreviousPage": False}, "nodes": [review("COMMENTED")]}}]}
+        try:
+            facts, _, _, unavailable = reviews.collect("example/repository")
+        finally:
+            reviews._read_graphql = original
+        self.assertEqual(facts[(7, HEAD)]["state"], "allow")
+        self.assertEqual(unavailable, "")
 
 
 if __name__ == "__main__":

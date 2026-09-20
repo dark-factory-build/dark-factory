@@ -22,6 +22,7 @@ REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}$")
 SHA = re.compile(r"^[0-9a-f]{40}$")
 MAX_PULL_REQUESTS = 100
 MAX_REVIEWS = 32
+MAX_GATE_BODY_BYTES = 65536
 MAX_FINDINGS_BYTES = 8192
 
 QUERY = """
@@ -93,15 +94,22 @@ def _review_facts(nodes, number, head, unavailable):
             unavailable.append("review_shape")
             continue
         commit = (review.get("commit") or {}).get("oid")
-        if not SHA.fullmatch(commit or "") or commit != head:
+        if not SHA.fullmatch(commit or ""):
             continue
         author = review.get("author")
         actor = author.get("databaseId") if isinstance(author, dict) else None
         if type(actor) is not int or actor < 1:
             unavailable.append("review_actor")
             continue
-        state = review.get("state") if review.get("state") in {"APPROVED", "CHANGES_REQUESTED", "COMMENTED"} else "COMMENTED"
-        facts.append({"state": state, "url": review.get("url") if isinstance(review.get("url"), str) else "", "findings": _bounded_text(review.get("body"))})
+        state = review.get("state")
+        if state not in {"APPROVED", "CHANGES_REQUESTED", "COMMENTED"}:
+            continue
+        body = review.get("body")
+        if not isinstance(body, str) or len(body.encode("utf-8", "replace")) > MAX_GATE_BODY_BYTES:
+            unavailable.append("review_body")
+            continue
+        facts.append({"commit_id": commit, "state": state, "author_id": str(actor),
+                      "body": body, "url": review.get("url") if isinstance(review.get("url"), str) else ""})
     return facts, truncated
 
 
@@ -129,22 +137,25 @@ def collect(repository):
         queue = (pr.get("mergeQueueEntry") or {}).get("state")
         if isinstance(queue, str) and queue:
             queues[key] = queue[:64]
-        facts, truncated = _review_facts(pr.get("reviews"), number, head, unavailable)
+        reasons = []
+        facts, truncated = _review_facts(pr.get("reviews"), number, head, reasons)
+        unavailable.extend(reasons)
         if truncated:
             overflow += 1
-        if any(fact["state"] == "CHANGES_REQUESTED" for fact in facts):
-            selected = next(fact for fact in facts if fact["state"] == "CHANGES_REQUESTED")
+        current_facts = [fact for fact in facts if fact["commit_id"] == head]
+        result = verify_exact_head(head, facts)
+        blocking = "blocking verdict(s)" in (result.stderr or "")
+        if blocking:
             state = "block"
-        elif truncated:
-            selected = facts[-1] if facts else {"url": "", "findings": ""}
-            state = "unknown"
-        elif facts:
-            selected = facts[-1]
-            state = "allow" if selected["state"] == "APPROVED" else "note"
+        elif result.returncode == 0 and not truncated and not reasons:
+            state = "allow"
         else:
-            selected = {"url": "", "findings": ""}
             state = "unknown"
-        reviews[key] = {"head": head, "state": state, "url": selected["url"], "findings": _bounded_text(selected["findings"])}
+        selected = next((fact for fact in reversed(current_facts) if fact["state"] == "CHANGES_REQUESTED"), None)
+        if selected is None and state == "allow":
+            selected = next((fact for fact in reversed(current_facts) if "Dark-Factory-Review: allow " + head in fact["body"]), None)
+        selected = selected or (current_facts[-1] if current_facts else {"url": "", "body": ""})
+        reviews[key] = {"head": head, "state": state, "url": selected["url"], "findings": _bounded_text(selected["body"])}
     return reviews, queues, overflow, ",".join(sorted(set(unavailable)))
 
 
@@ -152,9 +163,8 @@ def review_lines(head, reviews):
     """Encode collector facts for the existing exact-head review verifier."""
     lines = []
     for fact in reviews:
-        body = str(fact.get("findings", "")).replace("\t", " ").replace("\r", " ").replace("\n", " ")
-        state = {"block": "CHANGES_REQUESTED", "allow": "APPROVED"}.get(fact.get("state"), "COMMENTED")
-        lines.append("\t".join((fact.get("head", head), state, "1", body)))
+        body = str(fact.get("body", "")).replace("\t", " ").replace("\r", " ").replace("\n", " ")
+        lines.append("\t".join((fact.get("commit_id", head), fact.get("state", ""), fact.get("author_id", ""), body)))
     return "\n".join(lines) + ("\n" if lines else "")
 
 
