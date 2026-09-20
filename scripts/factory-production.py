@@ -301,7 +301,8 @@ def release_receipts(paths, repository):
                                                     "pull_requests": []})
             updated_at = milliseconds(receipt.get("updated_at"))
             verified_at = milliseconds(receipt.get("verified_at"))
-            rank = (updated_at or verified_at, sequence)
+            # A journal order is not proof of recency when second-resolution times tie.
+            rank = (updated_at or verified_at, not verified, sequence)
             if key not in metadata_ranks or rank >= metadata_ranks[key]:
                 metadata_ranks[key] = rank
                 delivery["state"] = "verified" if verified else text(receipt.get("state"), 32) or "unknown"

@@ -128,6 +128,24 @@ class ProductionFixtures(unittest.TestCase):
             self.assertNotIn("url", deliveries[0])
             self.assertEqual(deliveries[0]["pull_requests"], [958, 959])
 
+    def test_tied_same_revision_receipts_keep_unresolved_evidence_in_both_orders(self):
+        verified = {"pr": 7, "sha": SHA, "state": "verified", "updated_at": 20,
+                    "verified_at": 20, "verification": {"healthy": True, "sha": SHA}}
+        with tempfile.TemporaryDirectory() as directory:
+            journal = Path(directory) / "release.json"
+            for state in ("blocked", "running", "unknown"):
+                unresolved = {"pr": 8, "sha": SHA, "state": state, "updated_at": 20}
+                for receipts in ([unresolved, verified], [verified, unresolved]):
+                    journal.write_text(json.dumps({"version": 1, "releases": dict(enumerate(receipts))}))
+                    deliveries, unavailable, _ = production.release_receipts([
+                        {"path": str(journal), "repository": "o/r", "destination": "site:example"}
+                    ], "o/r")
+                    self.assertFalse(unavailable)
+                    self.assertEqual(len(deliveries), 1)
+                    self.assertEqual(deliveries[0]["state"], state)
+                    self.assertNotIn("verified_at", deliveries[0])
+                    self.assertEqual(sorted(deliveries[0]["pull_requests"]), [7, 8])
+
     def test_customer_config_has_no_github_or_credential_fallback(self):
         with mock.patch.object(production.intake, "command") as command:
             result = production.collect({"repository": "o/r"})
