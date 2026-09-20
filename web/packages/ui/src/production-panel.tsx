@@ -37,11 +37,10 @@ export function ProductionPanel({ items, selected, onSelect, state, call, connec
   const taskFor = (entry: ProductionContraption, taskId: string) => tasks?.get(taskId) ?? loadedTasks[`${entry.projectId}:${taskId}`];
   const loadTask = async (entry: ProductionContraption, taskId: string) => {
     if (!connected) return;
-    const known = taskFor(entry, taskId);
-    if (known !== undefined) { setSelectedTaskId(taskId); return; }
-    if (call === undefined) { setTaskError("Task detail is unavailable while disconnected."); return; }
     const generation = ++epoch.current;
     selectedTaskRef.current = taskId; setSelectedTaskId(taskId); setTaskError("");
+    if (taskFor(entry, taskId) !== undefined) return;
+    if (call === undefined) { setTaskError("Task detail is unavailable."); return; }
     try {
       const result = await call("task_read", { project_id: entry.projectId, task_id: taskId });
       if (generation !== epoch.current || active !== `${entry.projectId}:${entry.visualId}` || selectedTaskRef.current !== taskId) return;
@@ -80,6 +79,7 @@ export function ProductionPanel({ items, selected, onSelect, state, call, connec
       {item.missions.map((mission) => <button key={mission} type="button" disabled={!connected || onMission === undefined} onClick={() => onMission?.(item.projectId, mission)}>Open mission {mission.slice(0, 8)}</button>)}
       {item.linksOverflow ? <p role="status">Additional task or mission links exist. Open the pull request for the complete publication context.</p> : null}
       {item.tasks.length ? <><h4>Related tasks</h4><ul>{item.tasks.map((taskId) => { const task = taskFor(item, taskId); return <li key={taskId}><button type="button" disabled={!connected} onClick={() => void loadTask(item, taskId)}>{task?.title || taskId} · {task?.status || "inspect"}</button></li>; })}</ul>{selectedTask ? <TaskDetail task={selectedTask} onLoadTaskDetail={onLoadTaskDetail} onLoadTaskHistory={onLoadTaskHistory} /> : null}</> : null}
+      {selectedTaskId !== undefined && selectedTask === undefined && !taskError ? <p role="status">Loading task…</p> : null}
       {taskError ? <p role="alert">{taskError}</p> : null}
     </article>}
   </section>;
