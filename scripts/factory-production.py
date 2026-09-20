@@ -311,6 +311,11 @@ def release_receipts(paths, repository):
                     delivery["verified_at"] = verified_at
                 else:
                     delivery.pop("verified_at", None)
+            own_pr = number(receipt.get("pr"))
+            superseded = receipt.get("superseded_by")
+            own_pr_current = not isinstance(superseded, dict) or superseded.get("sha") == revision
+            if own_pr is not None and own_pr_current and own_pr not in delivery["pull_requests"]:
+                delivery["pull_requests"].append(own_pr)
             sources = receipt.get("included_pull_requests", receipt.get("delivery_sources"))
             if not isinstance(sources, list):
                 sources = []

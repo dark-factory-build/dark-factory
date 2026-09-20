@@ -108,6 +108,26 @@ class ProductionFixtures(unittest.TestCase):
             self.assertEqual(deliveries[0]["pull_requests"], [7, 8])
             self.assertEqual(deliveries[0]["url"], "https://new.example")
 
+    def test_newer_failed_receipt_replaces_older_verified_metadata_and_keeps_own_pr(self):
+        with tempfile.TemporaryDirectory() as directory:
+            journal = Path(directory) / "release.json"
+            journal.write_text(json.dumps({"version": 1, "releases": {
+                "old": {"pr": 958, "sha": SHA, "state": "verified", "verified_at": 10,
+                         "verification": {"healthy": True, "sha": SHA, "url": "https://old.example"},
+                         "included_pull_requests": [{"pr": 959}]},
+                "new": {"pr": 959, "sha": SHA, "state": "blocked", "phase": "deploying",
+                         "error": "new failure", "updated_at": 20},
+            }}))
+            deliveries, unavailable, _ = production.release_receipts([
+                {"path": str(journal), "repository": "o/r", "destination": "site:example"}
+            ], "o/r")
+            self.assertFalse(unavailable)
+            self.assertEqual(deliveries[0]["state"], "blocked")
+            self.assertEqual(deliveries[0]["phase"], "deploying")
+            self.assertEqual(deliveries[0]["reason"], "new failure")
+            self.assertNotIn("url", deliveries[0])
+            self.assertEqual(deliveries[0]["pull_requests"], [958, 959])
+
     def test_customer_config_has_no_github_or_credential_fallback(self):
         with mock.patch.object(production.intake, "command") as command:
             result = production.collect({"repository": "o/r"})
