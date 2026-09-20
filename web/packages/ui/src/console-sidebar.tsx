@@ -596,6 +596,7 @@ function QueuedTask({
  * focus trap and focus return, so every exit goes through close().
  */
 export function SettingsDialog({
+  onAttachmentRetention,
   floorAppearance,
   onFloorAppearanceChange,
   onResetFloorAppearance,
@@ -628,6 +629,7 @@ export function SettingsDialog({
   library,
   onClose,
 }: {
+  onAttachmentRetention?: (enabled?: boolean) => Promise<boolean>;
   floorAppearance: FloorAppearance;
   onFloorAppearanceChange: (appearance: FloorAppearance) => void;
   onResetFloorAppearance: () => void;
@@ -687,6 +689,7 @@ export function SettingsDialog({
           <summary>Run limits</summary>
           <ProjectLimitsSection projectId={projectId} state={state} edit={edit} ready={ready} onSave={onSaveProjectLimits} />
         </details>
+        <AttachmentRetentionSection call={ready ? onAttachmentRetention : undefined} />
         {library}
         <FloorAppearanceSection appearance={floorAppearance} onChange={onFloorAppearanceChange} onReset={onResetFloorAppearance} />
         <section className="dfConsoleSidebar__section" aria-label="Help and feedback">
@@ -1107,4 +1110,36 @@ function IntakeForm({ project, state, repositories, source, onAction }: { projec
   useEffect(() => { if (source === undefined && target === "") setTarget(targets.find((item) => item.default)?.id ?? (targets.length === 1 ? targets.at(0)?.id ?? "" : "")); }, [source, target, targetIds]);
   const submit = (event: FormEvent) => { event.preventDefault(); const pollSeconds = Number(poll), admissionLimit = Number(limit); if (!/^\d+$/.test(poll) || !/^\d+$/.test(limit) || !repository.trim() || !target || !agent || policy === "trusted_authors" && authors.trim() === "") return; const configuration = { ...(source?.priority_default === undefined ? {} : { priority_default: source.priority_default }), ...(source?.priority_by_label === undefined ? {} : { priority_by_label: source.priority_by_label }), repository: repository.trim(), target_repository_id: target, overseer_agent_id: agent, label: label.trim(), policy, trusted_authors: authors.split(",").map((value) => value.trim()).filter(Boolean), poll_seconds: pollSeconds, admission_limit: admissionLimit } as const; onAction?.(project.id, source === undefined ? { action: "create", project_id: project.id, configuration } : { action: "update", source_id: source.id, project_id: project.id, expected_revision: source.revision, configuration }); };
   return <details><summary>{source === undefined ? "Add issue source" : "Source settings"}</summary><form onSubmit={submit}><label>GitHub repository<input value={repository} placeholder="owner/repository" onChange={(event) => setRepository(event.currentTarget.value)}/></label><label>Destination repository<select value={target} onChange={(event) => setTarget(event.currentTarget.value)}><option value="">{targets.length === 0 ? "No enabled checkout" : "Choose a checkout"}</option>{targets.map((item) => <option key={item.id} value={item.id}>{item.name}{item.default ? " (default)" : ""}</option>)}</select></label>{targets.length === 0 ? <p role="status">ADD AN ENABLED CHECKOUT IN REPOSITORIES BEFORE SAVING THIS SOURCE.</p> : null}<label>Label filter (optional)<input value={label} onChange={(event) => setLabel(event.currentTarget.value)}/></label><label>Overseer<select value={agent} onChange={(event) => setAgent(event.currentTarget.value)}><option value="">Choose an overseer</option>{agents.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>{agents.length === 0 ? <p role="status">CREATE AN ORCHESTRATOR FOR THIS PROJECT BEFORE SAVING THIS SOURCE.</p> : null}<label>Which issues can become work?<select value={policy} onChange={(event) => { setPolicy(event.currentTarget.value as "manual" | "trusted_authors"); if (event.currentTarget.value === "trusted_authors" && authors === "") setAuthors("@me"); }}><option value="manual">Require my approval</option><option value="trusted_authors">Allow trusted authors</option></select></label>{policy === "trusted_authors" ? <><label>Trusted authors<input value={authors} onChange={(event) => setAuthors(event.currentTarget.value)} placeholder="@me, login"/></label><p>@me means your connected GitHub account. Other authors wait for your approval. Edited issue content always needs approval again.</p></> : null}<details><summary>Advanced</summary><label>Check every (seconds)<input value={poll} onChange={(event) => setPoll(event.currentTarget.value)}/></label><label>Maximum imports per check<input value={limit} onChange={(event) => setLimit(event.currentTarget.value)}/></label></details><button type="submit" disabled={!target || !agent || agents.length === 0}>{source === undefined ? "CREATE PAUSED SOURCE" : "SAVE PAUSED SOURCE"}</button></form></details>;
+}
+
+function AttachmentRetentionSection({ call }: { call?: (enabled?: boolean) => Promise<boolean> }) {
+  const [enabled, setEnabled] = useState<boolean>();
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string>();
+  const request = useRef(call);
+  request.current = call;
+  const available = call !== undefined;
+  useEffect(() => {
+    let cancelled = false;
+    setEnabled(undefined);
+    setError(undefined);
+    if (available) request.current?.().then((value) => { if (!cancelled) setEnabled(value); }, () => { if (!cancelled) setError("Could not load attachment cleanup settings. Reopen Settings to retry."); });
+    return () => { cancelled = true; };
+  }, [available]);
+  const save = async (value: boolean) => {
+    if (pending || request.current === undefined) return;
+    setPending(true);
+    setError(undefined);
+    try { setEnabled(await request.current(value)); }
+    catch { setError("Could not save attachment cleanup settings. Try again."); }
+    finally { setPending(false); }
+  };
+  return <section className="dfConsoleSidebar__section" aria-label="Attachment storage">
+    <h3>Attachment storage</h3>
+    <label><input type="checkbox" checked={enabled === true} disabled={!available || enabled === undefined || pending} onChange={(event) => { void save(event.currentTarget.checked); }} />Automatically remove attachments after 30 days</label>
+    <p>Applies to all tasks 30 days after success or cancellation, including existing tasks. Other tasks keep their attachments. Checks run hourly while the factory is running.</p>
+    <p>Task history and filenames remain. Once attachments are removed, the task cannot be sent back; create a new task with any required files.</p>
+    {pending ? <p role="status">Saving…</p> : null}
+    {error === undefined ? null : <p role="alert">{error}</p>}
+  </section>;
 }

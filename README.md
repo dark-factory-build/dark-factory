@@ -65,7 +65,10 @@ Each attempt gets a fresh copy in its private runtime home, available through
 Unsubmitted uploads are temporary and discarded when the connection closes.
 File contents remain unchanged; interpretation depends on the provider's tools.
 
-Attachment cleanup is manual. After a task succeeds or is cancelled, run
+In **Settings → Attachment storage**, enable **Automatically remove attachments
+after 30 days** to clean up succeeded and cancelled tasks hourly while the daemon
+is running. This saved factory-wide setting is off by default and also applies
+to existing tasks. Turning it off stops future cleanup. To remove files sooner, run
 `factoryctl task update --task ID --revision REVISION --remove-attachments`.
 Queued, running, failed, and blocked tasks are protected. `factoryctl task read`
 keeps the original filenames with `removed: true`; sending cleaned tasks back
@@ -77,7 +80,8 @@ Deletion frees database space for reuse. To return unused space to disk, turn
 `factoryctl storage compact`. It uses SQLite VACUUM and a WAL checkpoint while
 holding the daemon's writer gate. Compaction is optional, may need temporary
 free disk space up to twice the database size, and leaves dispatch off.
-There is no automatic deletion or background compaction.
+Compaction remains explicit; automatic attachment cleanup frees database space
+for reuse without running VACUUM.
 
 ## Status and further reading
 

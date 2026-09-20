@@ -466,7 +466,7 @@ func newLegacyDatabase(t *testing.T, persistWAL bool, version int, extra ...stri
 			t.Fatal(err)
 		}
 	}
-	downgrade := []string{"DROP TABLE task_attachments", "DROP TABLE intake_acceptance_reviews", "DROP TABLE intake_source_priorities", "DROP TABLE intake_legacy_suppressions", "DROP TABLE intake_legacy_migrations", "DROP TABLE intake_task_bindings", "DROP TABLE intake_source_trusted_logins", "DROP TABLE intake_acceptances", "DROP TABLE intake_sources", "DROP TABLE repository_source_identities", "DROP TABLE content_repository_bindings", "DROP TABLE task_repository_bindings", "DROP TABLE project_repositories", "DROP TABLE continuations", fmt.Sprintf("PRAGMA user_version = %d", version), "COMMIT"}
+	downgrade := []string{"DROP TABLE attachment_retention", "DROP TABLE task_attachments", "DROP TABLE intake_acceptance_reviews", "DROP TABLE intake_source_priorities", "DROP TABLE intake_legacy_suppressions", "DROP TABLE intake_legacy_migrations", "DROP TABLE intake_task_bindings", "DROP TABLE intake_source_trusted_logins", "DROP TABLE intake_acceptances", "DROP TABLE intake_sources", "DROP TABLE repository_source_identities", "DROP TABLE content_repository_bindings", "DROP TABLE task_repository_bindings", "DROP TABLE project_repositories", "DROP TABLE continuations", fmt.Sprintf("PRAGMA user_version = %d", version), "COMMIT"}
 	if version < v19UserVersion {
 		downgrade = append([]string{"DROP TABLE terminal_diagnostics"}, downgrade...)
 	}
@@ -679,7 +679,8 @@ func TestSchemaDigestsArePinned(t *testing.T) {
 		statements []string
 		digest     string
 	}{
-		{"current", schemaStatements, "957c54938f8a79fcc453995b825fe0289a18434d509b14f2daf075b97d7bfe82"},
+		{"current", schemaStatements, "cf8d4931509a6b1f45fe4b59b7b8559f00817508e09acac698b50f9540bb47f5"},
+		{"v28", v28SchemaStatements(), "957c54938f8a79fcc453995b825fe0289a18434d509b14f2daf075b97d7bfe82"},
 		{"v27", v27SchemaStatements(), "099f40bd70ce7e61dc3b8c9554c06bc733b221ee36345aeef9fd6f1e230c8b67"},
 		{"v26", v26SchemaStatements(), "426ec115fe03bc59524e6f98b7dcf5282e8d8b235c9c0175c0b03af932d0e00f"},
 		{"v25", v25SchemaStatements(), "eeb13a93e6195caed12237d22d706fd176a1964734d3a25b6eebcfe386bf2fb4"},

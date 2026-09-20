@@ -194,7 +194,7 @@ export type RunPathsView = Readonly<{ agentId: string; runId: string; paths: rea
 export type TaskListView = Readonly<{ agentId: string; head: bigint; total: bigint; tasks: readonly TaskItem[]; hasMore: boolean }>;
 type InvitePending = { resolve: (value: RemoteInvite) => void; reject: (error: unknown) => void };
 type PushPending = { resolve: () => void; reject: (error: unknown) => void };
-type AccountPending = { operation?: ProjectContentOperation; kind: "PROJECT_CONTENT_RESULT" | "ACCOUNTS" | "ACCOUNT_LINK_RESULT" | "ACCOUNT_UPDATE_RESULT" | "BROWSER_CLIENTS" | "BROWSER_CLIENT_REVOKE_RESULT" | "PROJECT_CREATE_RESULT" | "REPOSITORIES" | "REPOSITORY_MUTATE_RESULT"; accountId?: string; entityId?: string; expectedRevision?: bigint; action?: RepositoryMutateBody["action"]; resolve: (value: never) => void; reject: (error: unknown) => void };
+type AccountPending = { operation?: ProjectContentOperation; kind: "ATTACHMENT_RETENTION_RESULT" | "PROJECT_CONTENT_RESULT" | "ACCOUNTS" | "ACCOUNT_LINK_RESULT" | "ACCOUNT_UPDATE_RESULT" | "BROWSER_CLIENTS" | "BROWSER_CLIENT_REVOKE_RESULT" | "PROJECT_CREATE_RESULT" | "REPOSITORIES" | "REPOSITORY_MUTATE_RESULT"; accountId?: string; entityId?: string; expectedRevision?: bigint; action?: RepositoryMutateBody["action"]; resolve: (value: never) => void; reject: (error: unknown) => void };
 
 type GitHubPending = { resolve: (value: GitHubConnectionResult) => void; reject: (error: unknown) => void };
 
@@ -509,6 +509,11 @@ export class BrowserSession {
 
   /** Private, cursor-paged completed work for one agent. */
   /** Explicit optional library access; it does not subscribe or prefetch. */
+  async attachmentRetention(enabled?: boolean): Promise<boolean> {
+    const result = await this.#accountRequest<{ enabled: boolean }>("ATTACHMENT_RETENTION_RESULT", CAPABILITIES.administration, "attachment-retention", (id) => encodeClientControl({ type: "ATTACHMENT_RETENTION", id, body: enabled === undefined ? {} : { enabled } }));
+    return result.enabled;
+  }
+
   projectContent(operation: ProjectContentOperation, input: ProjectContentInput): Promise<ProjectContentOutput> {
     try { projectContentOperation(operation); } catch (error) { return Promise.reject(error); }
     const write = operation === "create" || operation === "revise" || operation === "deprecate" || operation === "evidence" || operation === "attach" || operation === "outcome_write";
@@ -908,7 +913,7 @@ export class BrowserSession {
       pending.resolve();
       return;
     }
-    if (frame.type === "PROJECT_CONTENT_RESULT" || frame.type === "ACCOUNTS" || frame.type === "ACCOUNT_LINK_RESULT" || frame.type === "ACCOUNT_UPDATE_RESULT" || frame.type === "BROWSER_CLIENTS" || frame.type === "BROWSER_CLIENT_REVOKE_RESULT" || frame.type === "PROJECT_CREATE_RESULT" || frame.type === "REPOSITORIES" || frame.type === "REPOSITORY_MUTATE_RESULT") {
+    if (frame.type === "ATTACHMENT_RETENTION_RESULT" || frame.type === "PROJECT_CONTENT_RESULT" || frame.type === "ACCOUNTS" || frame.type === "ACCOUNT_LINK_RESULT" || frame.type === "ACCOUNT_UPDATE_RESULT" || frame.type === "BROWSER_CLIENTS" || frame.type === "BROWSER_CLIENT_REVOKE_RESULT" || frame.type === "PROJECT_CREATE_RESULT" || frame.type === "REPOSITORIES" || frame.type === "REPOSITORY_MUTATE_RESULT") {
       this.#accountResult(frame);
       return;
     }
@@ -1322,9 +1327,10 @@ export class BrowserSession {
     return result;
   }
 
-  #accountResult(frame: Extract<ServerControlFrame, { type: "PROJECT_CONTENT_RESULT" | "ACCOUNTS" | "ACCOUNT_LINK_RESULT" | "ACCOUNT_UPDATE_RESULT" | "BROWSER_CLIENTS" | "BROWSER_CLIENT_REVOKE_RESULT" | "PROJECT_CREATE_RESULT" | "REPOSITORIES" | "REPOSITORY_MUTATE_RESULT" }>): void {
+  #accountResult(frame: Extract<ServerControlFrame, { type: "ATTACHMENT_RETENTION_RESULT" | "PROJECT_CONTENT_RESULT" | "ACCOUNTS" | "ACCOUNT_LINK_RESULT" | "ACCOUNT_UPDATE_RESULT" | "BROWSER_CLIENTS" | "BROWSER_CLIENT_REVOKE_RESULT" | "PROJECT_CREATE_RESULT" | "REPOSITORIES" | "REPOSITORY_MUTATE_RESULT" }>): void {
     const pending = this.#accountPending.get(frame.id);
     if (pending === undefined || pending.kind !== frame.type) throw new ProtocolError("malformed");
+    if (frame.type === "ATTACHMENT_RETENTION_RESULT") { this.#accountPending.delete(frame.id); pending.resolve(Object.freeze(frame.body) as never); return; }
     if (frame.type === "PROJECT_CONTENT_RESULT") {
       if (pending.operation !== frame.body.operation) throw new ProtocolError("malformed");
       this.#accountPending.delete(frame.id);

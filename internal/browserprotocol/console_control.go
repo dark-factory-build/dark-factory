@@ -7,6 +7,18 @@ import (
 	"strings"
 )
 
+// AttachmentRetention reads the setting when Enabled is absent, or saves it.
+type AttachmentRetention struct {
+	Enabled *Bool `json:"enabled,omitempty"`
+}
+type AttachmentRetentionResult struct {
+	Enabled Bool `json:"enabled"`
+}
+
+func EncodeAttachmentRetentionResult(id string, value AttachmentRetentionResult) ([]byte, error) {
+	return encodeControl(TypeAttachmentRetentionResult, id, value)
+}
+
 // AgentUpdate is the console's bounded agent-configuration edit. Model,
 // ReasoningEffort and Paused are each optional: an absent member leaves the
 // durable value alone, so one console screen can edit one control at a time.
@@ -507,6 +519,8 @@ func validConsoleControl(kind MessageType, body any) error {
 		if validateDynamicID(value.AgentID) != nil || value.Revision == 0 {
 			return bad()
 		}
+	case AttachmentRetention, AttachmentRetentionResult:
+		return nil
 	case ProjectLimits:
 		if validateDynamicID(value.ProjectID) != nil || value.ExpectedRevision == 0 || uint64(value.RunBudget) > MaxSQLiteInteger || value.MaxRunSeconds > 86400 {
 			return bad()

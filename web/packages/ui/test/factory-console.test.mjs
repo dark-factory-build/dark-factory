@@ -2666,3 +2666,26 @@ test("new task retains pasted files on failure, supports removal, and clears on 
     assert.equal(renderer.root.findAllByProps({ "aria-label": "Task attachments" }).length, 0);
   } finally { globalThis.FormData = nativeFormData; await act(async () => renderer.unmount()); }
 });
+
+test("Settings persists automatic attachment cleanup and keeps saved value on failure", async () => {
+  let saved = false, fail = false, renderer;
+  const calls = [];
+  const props = { status: "ready", state: fixtureState, settingsOpen: true, onToggleSettings() {}, onAttachmentRetention: async (enabled) => { calls.push(enabled); if (fail) throw new Error("offline"); if (enabled !== undefined) saved = enabled; return saved; } };
+  await act(async () => { renderer = create(createElement(FactoryConsole, props)); });
+  const checkbox = () => renderer.root.findByProps({ "aria-label": "Attachment storage" }).findByType("input");
+  try {
+    assert.equal(checkbox().props.checked, false);
+    await act(async () => { checkbox().props.onChange({ currentTarget: { checked: true } }); });
+    assert.equal(saved, true);
+    assert.equal(checkbox().props.checked, true);
+    fail = true;
+    await act(async () => { checkbox().props.onChange({ currentTarget: { checked: false } }); });
+    assert.equal(checkbox().props.checked, true);
+    assert.ok(renderer.root.findAllByProps({ role: "alert" }).some((node) => JSON.stringify(node.children).includes("Could not save attachment")));
+    fail = false;
+    await act(async () => { renderer.update(createElement(FactoryConsole, { ...props, settingsOpen: false })); });
+    await act(async () => { renderer.update(createElement(FactoryConsole, props)); });
+    assert.equal(checkbox().props.checked, true);
+    assert.deepEqual(calls, [undefined, true, false, undefined]);
+  } finally { await act(async () => renderer.unmount()); }
+});

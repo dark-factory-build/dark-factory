@@ -125,6 +125,7 @@ export function FactoryApp({ onStatusChange, browserPort }: FactoryAppProps = {}
       settingsOpen={settingsOpen}
       onToggleSettings={() => setSettingsOpen((open) => !open)}
       onSelectAgent={(agent) => { setDetail("agent"); setAgentPanel("terminal"); owner.current?.selectAgent(agent); }}
+      onAttachmentRetention={(enabled) => owner.current?.attachmentRetention(enabled) ?? Promise.reject(new Error("closed"))}
       onProjectContent={(operation, input) => owner.current?.projectContent(operation, input) ?? Promise.reject(new Error("closed"))}
       onDraftLibraryTask={(agent, instruction) => { setDetail("agent"); setAgentPanel("terminal"); owner.current?.selectAgent(agent); owner.current?.setAgentInstructionDraft(instruction); }}
       onSaveAgentConfig={(config) => { void owner.current?.updateAgentConfig(config); }}

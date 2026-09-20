@@ -129,3 +129,47 @@ func (store *Store) RemoveTaskAttachments(ctx context.Context, id TaskID, expect
 	}
 	return task, nil
 }
+
+// AttachmentRetention reads or replaces the opt-in factory-wide setting.
+// A missing row is disabled, including immediately after migration.
+func (store *Store) AttachmentRetention(ctx context.Context, enabled *bool) (bool, error) {
+	if enabled == nil {
+		tx, err := store.beginRead(ctx)
+		if err != nil {
+			return false, err
+		}
+		defer tx.Close()
+		var value bool
+		err = tx.connection.QueryRowContext(ctx, `SELECT COALESCE((SELECT enabled FROM attachment_retention WHERE singleton = 1), 0)`).Scan(&value)
+		return value, err
+	}
+	tx, err := store.beginValidatedWrite(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Close()
+	if _, err := tx.connection.ExecContext(ctx, `INSERT INTO attachment_retention(singleton, enabled) VALUES(1, ?) ON CONFLICT(singleton) DO UPDATE SET enabled = excluded.enabled`, *enabled); err != nil {
+		return false, tx.Rollback(err)
+	}
+	return *enabled, tx.Commit(ctx)
+}
+
+// ExpireTaskAttachments rechecks the setting and terminal state under the same
+// writer gate as send-back. Names and terminal task/run history stay intact.
+// ponytail: one hourly scan holds the writer gate; batch cleanup if large
+// attachment histories make this pause noticeable.
+func (store *Store) ExpireTaskAttachments(ctx context.Context, at UnixMillis) error {
+	tx, err := store.beginValidatedWrite(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Close()
+	_, err = tx.connection.ExecContext(ctx, `UPDATE task_attachments SET data = NULL
+ WHERE data IS NOT NULL AND EXISTS (SELECT 1 FROM attachment_retention WHERE enabled = 1)
+ AND task_id IN (SELECT id FROM tasks WHERE status IN ('succeeded', 'cancelled') AND updated_at_ms <= ?
+ AND NOT EXISTS (SELECT 1 FROM runs WHERE runs.task_id = tasks.id AND phase <> 'terminal'))`, at.Int64()-30*24*60*60*1000)
+	if err != nil {
+		return tx.Rollback(err)
+	}
+	return tx.Commit(ctx)
+}

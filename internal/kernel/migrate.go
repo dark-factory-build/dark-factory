@@ -52,6 +52,7 @@ const (
 	v25UserVersion      = 25
 	v26UserVersion      = 26
 	v27UserVersion      = 27
+	v28UserVersion      = 28
 	// v13Changes is the changes table before managed Git worktrees. It bound a
 	// Git-free published tree by a manifest digest, its entry and byte counts
 	// and its root inode. v14 names the tree's own branch head instead and
@@ -587,9 +588,20 @@ func v25SchemaStatements() []string {
 	return statements
 }
 
-func v27SchemaStatements() []string {
+func v28SchemaStatements() []string {
 	var statements []string
 	for _, statement := range schemaStatements {
+		_, name := schemaObjectIdentity(statement)
+		if name != "attachment_retention" {
+			statements = append(statements, statement)
+		}
+	}
+	return statements
+}
+
+func v27SchemaStatements() []string {
+	var statements []string
+	for _, statement := range v28SchemaStatements() {
 		_, name := schemaObjectIdentity(statement)
 		if name != "task_attachments" {
 			statements = append(statements, statement)
@@ -737,6 +749,8 @@ func migratableSchema(version int) ([]string, bool) {
 		return v26SchemaStatements(), true
 	case v27UserVersion:
 		return v27SchemaStatements(), true
+	case v28UserVersion:
+		return v28SchemaStatements(), true
 	}
 	return nil, false
 }
@@ -762,7 +776,7 @@ func (store *Store) migrateLegacy(ctx context.Context) error {
 		releaseUncertainConnection(connection)
 		return err
 	}
-	all := []func(context.Context, *sql.Conn) error{migrateLegacyTransaction, migratePreviousTransaction, migratePriorTransaction, migrateV4Transaction, migrateV5Transaction, migrateV6Transaction, migrateV7Transaction, migrateV8Transaction, migrateV9Transaction, migrateV10Transaction, migrateV11Transaction, migrateV12Transaction, migrateV13Transaction, migrateV14Transaction, migrateV15Transaction, migrateV16Transaction, migrateV17Transaction, migrateV18Transaction, migrateV19Transaction, migrateV20Transaction, migrateV21Transaction, migrateV22Transaction, migrateV23Transaction, migrateV24Transaction, migrateV25Transaction, migrateV26Transaction, migrateV27Transaction}
+	all := []func(context.Context, *sql.Conn) error{migrateLegacyTransaction, migratePreviousTransaction, migratePriorTransaction, migrateV4Transaction, migrateV5Transaction, migrateV6Transaction, migrateV7Transaction, migrateV8Transaction, migrateV9Transaction, migrateV10Transaction, migrateV11Transaction, migrateV12Transaction, migrateV13Transaction, migrateV14Transaction, migrateV15Transaction, migrateV16Transaction, migrateV17Transaction, migrateV18Transaction, migrateV19Transaction, migrateV20Transaction, migrateV21Transaction, migrateV22Transaction, migrateV23Transaction, migrateV24Transaction, migrateV25Transaction, migrateV26Transaction, migrateV27Transaction, migrateV28Transaction}
 	var steps []func(context.Context, *sql.Conn) error
 	switch version {
 	case legacyUserVersion:
@@ -819,6 +833,8 @@ func (store *Store) migrateLegacy(ctx context.Context) error {
 		steps = all[25:]
 	case v27UserVersion:
 		steps = all[26:]
+	case v28UserVersion:
+		steps = all[27:]
 	default:
 		return connection.Close()
 	}
@@ -1413,6 +1429,19 @@ func migrateV27Transaction(ctx context.Context, connection *sql.Conn) error {
 		return err
 	}
 	if _, err := connection.ExecContext(ctx, expectedSchemaOf(schemaStatements)["task_attachments"].sql); err != nil {
+		return err
+	}
+	if _, err := connection.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", v28UserVersion)); err != nil {
+		return err
+	}
+	return validateSchemaVersion(ctx, connection, v28UserVersion, v28SchemaStatements())
+}
+
+func migrateV28Transaction(ctx context.Context, connection *sql.Conn) error {
+	if err := validateSchemaVersion(ctx, connection, v28UserVersion, v28SchemaStatements()); err != nil {
+		return err
+	}
+	if _, err := connection.ExecContext(ctx, expectedSchemaOf(schemaStatements)["attachment_retention"].sql); err != nil {
 		return err
 	}
 	if _, err := connection.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", userVersion)); err != nil {
