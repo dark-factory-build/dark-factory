@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/dark-factory-build/dark-factory/internal/change"
+	"github.com/dark-factory-build/dark-factory/internal/gitauthor"
 	"github.com/dark-factory-build/dark-factory/internal/install"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 	"github.com/dark-factory-build/dark-factory/internal/runner"
@@ -17,6 +18,7 @@ import (
 func TestConfigRoundTripIsExactBoundedAndPrivate(t *testing.T) {
 	want := configFixture(t)
 	want.CustomerMaintainer = true
+	want.GitAuthor = gitauthor.Identity{ID: 123, Login: "operator"}
 	encoded, err := EncodeConfig(want)
 	if err != nil {
 		t.Fatal(err)

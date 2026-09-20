@@ -186,11 +186,11 @@ test("a selected decision names the action and keeps one collapse control", () =
   assert.equal(markup.includes(">CLOSE</button>"), false);
 });
 
-test("suggested answers fill the reply without sending it", () => {
+test("a suggested answer sends on the one tap it looks like", () => {
   const calls = [];
-  const elements = consoleElements({ status: "ready", state: baseState(), selectedHumanRequest: selectedRequest({ options: ["Continue", "Stop"] }), onHumanReplyChange: (value) => calls.push(value) });
+  const elements = consoleElements({ status: "ready", state: baseState(), selectedHumanRequest: selectedRequest({ options: ["Continue", "Stop"] }), onHumanReplyChange: (value) => calls.push(value), onReplyHumanRequest: () => calls.push("sent") });
   elements.find((element) => element.type === "button" && Array.isArray(element.props.children) && element.props.children[0] === "Continue").props.onClick();
-  assert.deepEqual(calls, ["Continue"]);
+  assert.deepEqual(calls, ["Continue", "sent"], "the floor sends too: one shared control, one behaviour");
   const markup = render({ selectedHumanRequest: selectedRequest({ options: ["Continue", "Stop"] }) });
   assert.match(markup, />Continue · RECOMMENDED<\/button>/);
   assert.match(markup, />Stop<\/button>/);
@@ -1965,7 +1965,6 @@ test("floor objects select the exact existing task detail and question route", a
       ...(editable ? { onEditTask: async () => true } : {}),
       selectedHumanRequest,
       onSelectHumanRequest: (request) => { questions.push(request); setSelectedHumanRequest(selectedRequest({ request, question: "Should the migration also cover the users table? The plan only names accounts." })); setDetail("needs-you"); },
-      onOpenQueue: () => setDetail("queue"),
     });
   }
   let tree;
@@ -1989,9 +1988,8 @@ test("floor objects select the exact existing task detail and question route", a
   assert.deepEqual(queueSelections, [task.id, undefined, task.id]);
   assert.equal(tree.root.findByProps({ "aria-label": "Task details" }).findByType("h3").children.join(""), task.title);
   await act(async () => { tree.root.findByProps({ "aria-label": "Project" }).props.onChange({ currentTarget: { value: "" } }); });
-  await act(async () => { tree.root.findByProps({ "data-floor-queue": "" }).props.onKeyDown({ key: "Enter", preventDefault() {} }); });
   assert.equal(tree.root.findAllByProps({ "aria-label": "Tasks" }).length, 1, "queue remains one canonical panel");
-  assert.equal(tree.root.findAllByProps({ "data-floor-queue": "" }).length, 1);
+  assert.equal(tree.root.findAllByProps({ "data-floor-inbox": 1 }).length, 1, "the floor shows the pile; the panel is where it is read");
   const queuedTask = fixtureState.tasks.get("32".repeat(16));
   await act(async () => { tree.update(createElement(Harness, { editable: true })); });
   await act(async () => { tree.root.findByProps({ "aria-label": "Running tasks" }).findByType("button").props.onClick(); });
@@ -2670,4 +2668,56 @@ test("settings tabs hide other sections, support keyboard navigation and retain 
     if (renderer) await act(async()=>renderer.unmount());
     globalThis.IS_REACT_ACT_ENVIRONMENT=previous;
   }
+});
+
+test("new task retains pasted files on failure, supports removal, and clears on success", async () => {
+  const state = baseState();
+  const attempts = [];
+  let succeed = false, renderer;
+  await act(async () => { renderer = create(createElement(FactoryConsole, { status: "ready", detail: "queue", state, onDetail() {}, onAddTask: async (...args) => { attempts.push(args); return succeed; } })); });
+  const form = () => renderer.root.findByProps({ "aria-label": "New task" });
+  const file = new File(["attachment"], "notes.txt", { type: "text/plain" });
+  let prevented = false;
+  await act(async () => { form().props.onPaste({ clipboardData: { files: [file] }, preventDefault() { prevented = true; } }); });
+  assert.equal(prevented, true);
+  const nativeFormData = globalThis.FormData;
+  globalThis.FormData = class { get(name) { return name === "target" ? `any:${ids.project}` : "Inspect this"; } };
+  let resets = 0;
+  const submit = () => form().props.onSubmit({ preventDefault() {}, currentTarget: { reset() { resets++; } } });
+  try {
+    await act(async () => { submit(); });
+    assert.deepEqual(attempts[0][3], [file]);
+    assert.equal(resets, 0);
+    assert.equal(renderer.root.findAllByProps({ "aria-label": "Remove notes.txt" }).length, 1);
+    await act(async () => { renderer.root.findByProps({ "aria-label": "Remove notes.txt" }).props.onClick(); });
+    assert.equal(renderer.root.findAllByProps({ "aria-label": "Remove notes.txt" }).length, 0);
+    await act(async () => { form().props.onDrop({ dataTransfer: { files: [file] }, preventDefault() {} }); });
+    succeed = true;
+    await act(async () => { submit(); });
+    assert.equal(resets, 1);
+    assert.equal(renderer.root.findAllByProps({ "aria-label": "Task attachments" }).length, 0);
+  } finally { globalThis.FormData = nativeFormData; await act(async () => renderer.unmount()); }
+});
+
+test("Settings persists automatic attachment cleanup and keeps saved value on failure", async () => {
+  let saved = false, fail = false, renderer;
+  const calls = [];
+  const props = { status: "ready", state: fixtureState, settingsOpen: true, onToggleSettings() {}, onAttachmentRetention: async (enabled) => { calls.push(enabled); if (fail) throw new Error("offline"); if (enabled !== undefined) saved = enabled; return saved; } };
+  await act(async () => { renderer = create(createElement(FactoryConsole, props)); });
+  const checkbox = () => renderer.root.findByProps({ "aria-label": "Attachment storage" }).findByType("input");
+  try {
+    assert.equal(checkbox().props.checked, false);
+    await act(async () => { checkbox().props.onChange({ currentTarget: { checked: true } }); });
+    assert.equal(saved, true);
+    assert.equal(checkbox().props.checked, true);
+    fail = true;
+    await act(async () => { checkbox().props.onChange({ currentTarget: { checked: false } }); });
+    assert.equal(checkbox().props.checked, true);
+    assert.ok(renderer.root.findAllByProps({ role: "alert" }).some((node) => JSON.stringify(node.children).includes("Could not save attachment")));
+    fail = false;
+    await act(async () => { renderer.update(createElement(FactoryConsole, { ...props, settingsOpen: false })); });
+    await act(async () => { renderer.update(createElement(FactoryConsole, props)); });
+    assert.equal(checkbox().props.checked, true);
+    assert.deepEqual(calls, [undefined, true, false, undefined]);
+  } finally { await act(async () => renderer.unmount()); }
 });

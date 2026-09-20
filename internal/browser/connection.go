@@ -61,6 +61,9 @@ type connection struct {
 	subscriptionHead    browserprotocol.Decimal
 	subscriptionHeadSet bool
 
+	taskAttachments    []browserprotocol.TaskAttachment
+	taskAttachmentSize browserprotocol.Decimal
+
 	attachment        TerminalAttachment
 	terminalEvents    <-chan TerminalEvent
 	terminalAttachID  string
@@ -489,6 +492,20 @@ func (current *connection) dispatch(frame browserprotocol.ControlFrame) bool {
 			return false
 		}
 		payload, err = browserprotocol.EncodeTaskDetail(frame.ID, result)
+	case browserprotocol.AttachmentRetention:
+		backend, ok := current.server.backend.(interface {
+			AttachmentRetention(context.Context, [browserprotocol.ClientIDSize]byte, browserprotocol.AttachmentRetention) (browserprotocol.AttachmentRetentionResult, error)
+		})
+		if !ok {
+			err = ErrUnauthorized
+			break
+		}
+		result, backendErr := backend.AttachmentRetention(ctx, current.principal.ClientID, body)
+		if backendErr != nil {
+			err = backendErr
+			break
+		}
+		payload, err = browserprotocol.EncodeAttachmentRetentionResult(frame.ID, result)
 	case browserprotocol.ProjectContent:
 		backend, ok := current.server.backend.(ContentBackend)
 		if !ok {
@@ -508,7 +525,56 @@ func (current *connection) dispatch(frame browserprotocol.ControlFrame) bool {
 		if errors.Is(err, browserprotocol.ErrOversized) {
 			err = ErrTooLarge
 		}
+	case browserprotocol.TaskAttachmentChunk:
+		authorizer, ok := current.server.taskBackend.(interface {
+			AuthorizeTaskAttachments(context.Context, [browserprotocol.ClientIDSize]byte) error
+		})
+		if !ok {
+			err = ErrUnauthorized
+			break
+		}
+		if err = authorizer.AuthorizeTaskAttachments(ctx, current.principal.ClientID); err != nil {
+			break
+		}
+		if body.Index == 0 && body.Offset == 0 {
+			current.taskAttachments = nil
+			current.taskAttachmentSize = 0
+		}
+		if body.Offset == 0 {
+			if body.Index != len(current.taskAttachments) || len(current.taskAttachments) > 0 && len(current.taskAttachments[len(current.taskAttachments)-1].Data) != int(current.taskAttachmentSize) {
+				err = ErrInvalidRequest
+				break
+			}
+			total := int(body.Size)
+			for _, item := range current.taskAttachments {
+				total += len(item.Data)
+			}
+			if total > browserprotocol.MaxTaskAttachmentBytes {
+				err = ErrTooLarge
+				break
+			}
+			current.taskAttachments = append(current.taskAttachments, browserprotocol.TaskAttachment{Name: body.Name})
+			current.taskAttachmentSize = body.Size
+		}
+		if body.Index != len(current.taskAttachments)-1 || body.Size != current.taskAttachmentSize {
+			err = ErrInvalidRequest
+			break
+		}
+		item := &current.taskAttachments[body.Index]
+		if item.Name != body.Name || len(item.Data) != int(body.Offset) {
+			err = ErrInvalidRequest
+			break
+		}
+		item.Data = append(item.Data, body.Data...)
+		payload, err = browserprotocol.EncodeTaskAttachmentResult(frame.ID, browserprotocol.TaskAttachmentResult{Offset: browserprotocol.Decimal(len(item.Data))})
 	case browserprotocol.TaskEnqueue:
+		if body.AttachmentCount > 0 {
+			if body.AttachmentCount != len(current.taskAttachments) || len(current.taskAttachments[body.AttachmentCount-1].Data) != int(current.taskAttachmentSize) {
+				err = ErrInvalidRequest
+				break
+			}
+			body.Attachments = current.taskAttachments
+		}
 		if current.server.taskBackend == nil {
 			err = ErrUnauthorized
 			break
@@ -522,6 +588,8 @@ func (current *connection) dispatch(frame browserprotocol.ControlFrame) bool {
 			current.sendError(frame.ID, browserprotocol.ErrorInternal, false)
 			return false
 		}
+		current.taskAttachments = nil
+		current.taskAttachmentSize = 0
 		payload, err = browserprotocol.EncodeTaskEnqueueResult(frame.ID, result)
 	case browserprotocol.AgentUpdate:
 		if current.server.consoleBackend == nil {

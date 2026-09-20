@@ -629,12 +629,13 @@ type TaskReadInput struct {
 }
 
 type TaskText struct {
-	TaskID      string  `json:"task_id"`
-	Revision    uint64  `json:"revision"`
-	Instruction string  `json:"instruction"`
-	Feedback    string  `json:"feedback"`
-	Outcome     *string `json:"outcome,omitempty"`
-	NextOffset  *uint64 `json:"next_offset,omitempty"`
+	Attachments []kernel.TaskAttachment `json:"attachments,omitempty"`
+	TaskID      string                  `json:"task_id"`
+	Revision    uint64                  `json:"revision"`
+	Instruction string                  `json:"instruction"`
+	Feedback    string                  `json:"feedback"`
+	Outcome     *string                 `json:"outcome,omitempty"`
+	NextOffset  *uint64                 `json:"next_offset,omitempty"`
 }
 
 type TaskRecovery struct {
@@ -972,14 +973,15 @@ type TaskPrerequisiteInput struct {
 }
 
 type OverseerTaskUpdateInput struct {
-	TaskID           string  `json:"task_id"`
-	ExpectedRevision uint64  `json:"expected_revision"`
-	Title            *string `json:"title,omitempty"`
-	Body             *string `json:"body,omitempty"`
-	Priority         *int64  `json:"priority,omitempty"`
-	AssignedAgentID  *string `json:"assigned_agent_id,omitempty"`
-	Cancel           bool    `json:"cancel,omitempty"`
-	Retry            bool    `json:"retry,omitempty"`
+	TaskID            string  `json:"task_id"`
+	ExpectedRevision  uint64  `json:"expected_revision"`
+	Title             *string `json:"title,omitempty"`
+	Body              *string `json:"body,omitempty"`
+	Priority          *int64  `json:"priority,omitempty"`
+	AssignedAgentID   *string `json:"assigned_agent_id,omitempty"`
+	Cancel            bool    `json:"cancel,omitempty"`
+	Retry             bool    `json:"retry,omitempty"`
+	RemoveAttachments bool    `json:"remove_attachments,omitempty"`
 }
 
 type OverseerAgentUpdateInput struct {

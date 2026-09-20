@@ -75,6 +75,34 @@ struct Authority {
     // Name -> (installation ID, repository ID), proved by live user access.
     // None is the legacy Access authority; Some binds every customer token.
     repository_grants: Option<BTreeMap<String, (i64, i64)>>,
+    commit_author: Option<GitAuthor>,
+}
+
+// Constructed only from the live GitHub user verified by the connection DO.
+// It is deliberately absent from caller-controlled MCP publication arguments.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub(crate) struct GitAuthor {
+    name: String,
+    email: String,
+}
+impl GitAuthor {
+    pub(crate) fn from_github(id: i64, login: &str) -> Result<Self, OperationError> {
+        if id <= 0
+            || login.is_empty()
+            || login.len() > 39
+            || login.starts_with('-')
+            || login.ends_with('-')
+            || !login
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || c == b'-')
+        {
+            return Err(OperationError::InvalidInput);
+        }
+        Ok(Self {
+            name: login.into(),
+            email: format!("{id}+{login}@users.noreply.github.com"),
+        })
+    }
 }
 
 struct PrivateKey(Vec<u8>);
@@ -1030,9 +1058,14 @@ pub(crate) struct ControlPlaneDeployObservationResult {
 }
 
 impl AppAuthority {
-    pub(crate) fn for_connection(&self, grants: BTreeMap<String, (i64, i64)>) -> Self {
+    pub(crate) fn for_connection(
+        &self,
+        grants: BTreeMap<String, (i64, i64)>,
+        author: GitAuthor,
+    ) -> Self {
         let mut authority = (*self.0).clone();
         authority.repository_grants = Some(grants);
+        authority.commit_author = Some(author);
         Self(Arc::new(authority))
     }
 
@@ -1055,6 +1088,7 @@ impl AppAuthority {
             app_id,
             private_key: Arc::new(PrivateKey(private_key)),
             repository_grants: None,
+            commit_author: None,
         })))
     }
 
@@ -5004,6 +5038,7 @@ impl Authority {
                 message: request.marked_message()?,
                 tree: &tree,
                 parents: request.parents(),
+                author: self.commit_author.as_ref(),
             }),
         )
         .await?;
@@ -5119,7 +5154,9 @@ impl Authority {
 
     /// Did this exact operation already land? The trailer makes the commit
     /// self-identifying, so a retry after an indeterminate failure reads the
-    /// branch instead of guessing.
+    /// branch instead of guessing. Attribution is assigned only on creation:
+    /// preserve receipts for already-landed commits across upgrades and GitHub
+    /// renames rather than rewriting history or changing operation digests.
     async fn reconcile_commit(
         &self,
         token: &RepositoryToken,
@@ -6820,9 +6857,11 @@ struct GitTreeEntry {
     sha: String,
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", test))]
 #[derive(Serialize)]
 struct CommitRequest<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    author: Option<&'a GitAuthor>,
     message: String,
     tree: &'a str,
     parents: Vec<&'a str>,
@@ -9867,6 +9906,69 @@ mod tests {
             .validate()
             .is_err()
         );
+    }
+
+    #[test]
+    fn publication_author_is_connection_bound_and_preserves_operation_identity() {
+        let author = GitAuthor::from_github(123, "operator").unwrap();
+        let renamed = GitAuthor::from_github(123, "renamed-user").unwrap();
+        for (id, login) in [
+            (0, "operator"),
+            (-1, "operator"),
+            (123, ""),
+            (123, "-bad"),
+            (123, "bad-"),
+            (123, "bad@email"),
+            (123, "bad\nname"),
+            (123, "名前"),
+        ] {
+            assert!(GitAuthor::from_github(id, login).is_err());
+        }
+        let key = general_purpose::STANDARD.encode(vec![b'x'; 1000]);
+        let app = AppAuthority::new(4_673_420, key, PERMISSION_REVISION.into()).unwrap();
+        assert!(app.0.commit_author.is_none()); // Legacy Access still uses the App.
+        let scoped = app.for_connection(BTreeMap::new(), author.clone());
+        assert_eq!(scoped.0.commit_author, Some(author.clone()));
+        let mut request = PublishCommit {
+            repository: "team/repo".into(),
+            operation_id: "11111111-2222-3333-4444-555555555555".into(),
+            branch: "agent/work".into(),
+            expected_head_sha: "a".repeat(40),
+            merge_parent_sha: None,
+            message: "Change".into(),
+            changes: vec![FileChange {
+                path: "file.txt".into(),
+                content_base64: Some("aGk=".into()),
+                mode: None,
+            }],
+        };
+        request.validate().unwrap();
+        let digest = request_digest(&request).unwrap();
+        let original = request.marked_message().unwrap();
+        for identity in [None, Some(&author), Some(&renamed)] {
+            let body = serde_json::to_value(CommitRequest {
+                author: identity,
+                message: request.marked_message().unwrap(),
+                tree: "tree",
+                parents: request.parents(),
+            })
+            .unwrap();
+            assert_eq!(body["message"], original);
+            assert_eq!(request_digest(&request).unwrap(), digest);
+            assert!(body.get("committer").is_none()); // App token remains the publisher.
+            if let Some(identity) = identity {
+                assert_eq!(body["author"], serde_json::to_value(identity).unwrap());
+            } else {
+                assert!(body.get("author").is_none());
+            }
+        }
+        assert_eq!(
+            serde_json::to_value(author).unwrap(),
+            serde_json::json!({"name":"operator", "email":"123+operator@users.noreply.github.com"})
+        );
+        let mut spoofed = serde_json::to_value(&request).unwrap();
+        spoofed["author"] = serde_json::json!({"name":"other", "email":"other@example.com"});
+        assert!(serde_json::from_value::<PublishCommit>(spoofed).is_err());
     }
 
     #[test]

@@ -60,6 +60,7 @@ func (daemon *Daemon) RunScheduler(ctx context.Context, spec SupervisorSpec) err
 	events := make(chan schedulerEvent, (kernel.MaxFactoryCapacity+1)*2)
 	owners := make(map[uint64]*scheduledOwner, kernel.MaxFactoryCapacity+1)
 	var nextID, probeID uint64
+	var nextAttachmentCleanup time.Time
 	stopping := false
 	var resultErr error
 	// Dispatch is an advisory scheduling gate; admission still validates the
@@ -128,6 +129,13 @@ func (daemon *Daemon) RunScheduler(ctx context.Context, spec SupervisorSpec) err
 			}
 		case <-pollEvents:
 			if !stopping && resultErr == nil {
+				if now := daemon.now(); !now.Before(nextAttachmentCleanup) {
+					if at, err := kernel.NewUnixMillis(now.UnixMilli()); err == nil {
+						if err := daemon.store.ExpireTaskAttachments(ownedCtx, at); err == nil {
+							nextAttachmentCleanup = now.Add(time.Hour)
+						}
+					}
+				}
 				// Worker idle rules and event-driven overseer wakeups are enqueued
 				// on enabled ticks ahead of the probe that admits them. Pausing
 				// defers automatic tasks without consuming their causal events. A round that

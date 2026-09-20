@@ -25,6 +25,8 @@ test('two principals: callback, pagination, refresh, replay, grants and revocati
   let unavailable = '', unavailableStatus = 503, sourceVisible = true, wrongGrant = false, wrongInstallation = false, replacedPath = false, repositoryReads = 0, sourceReads = 0;
   const permissionSet = { contents: 'write', issues: 'write', metadata: 'read', pull_requests: 'write' };
   const grants = [], requestedPermissions = [];
+  const publishedCommits = [];
+  let aliceLogin = 'alice';
   const pull = { number: 12, node_id: 'PR_fixture', html_url: 'https://github.com/team/shared/pull/12', title: 'review', body: 'Refs team/backlog#9', draft: false, head: { ref: 'topic', sha: 'b'.repeat(40) }, base: { ref: 'release+hotfix', sha: 'a'.repeat(40) }, state: 'open' };
   const repository = name => ({ id: 2, full_name: 'team/shared', permissions: { pull: true, push: name === 'alice' ? push : bobWrite } });
   const mf = new Miniflare(convertV4MiniflareOptions({ durableObjectsPersist: persistence, name: "fixture",
@@ -60,7 +62,20 @@ test('two principals: callback, pagination, refresh, replay, grants and revocati
       if (request.headers.get('authorization')?.startsWith('Bearer app-')) {
         repositoryReads++;
         if (replacedPath) { assert.equal(request.headers.get('authorization'), 'Bearer app-2-fixture-installation-token'); return json({}, 404); }
-        if (url.pathname.includes('/git/ref/')) return json({ ref: 'refs/heads/main', object: { type: 'commit', sha: 'a'.repeat(40) } });
+        if (url.pathname === '/repos/team/shared/git/commits' && request.method === 'POST') {
+          publishedCommits.push(await request.json());
+          return json({ sha: 'c'.repeat(40) }, 201);
+        }
+        if (url.pathname.startsWith('/repos/team/shared/git/commits/')) return json({ message: 'base', tree: { sha: 'd'.repeat(40) }, parents: [] });
+        if (url.pathname === '/repos/team/shared/git/trees' && request.method === 'POST') return json({ sha: 'e'.repeat(40) }, 201);
+        if (url.pathname.startsWith('/repos/team/shared/git/trees/')) return json({ tree: [], truncated: false });
+        if (url.pathname === '/repos/team/shared/git/blobs') return json({ sha: 'f'.repeat(40) }, 201);
+        if (url.pathname.startsWith('/repos/team/shared/git/refs/heads/') && request.method === 'PATCH') {
+          const body = await request.json();
+          assert.equal(body.force, false);
+          return json({ ref: `refs/heads/${url.pathname.split('/').at(-1)}`, object: { type: 'commit', sha: body.sha } });
+        }
+        if (url.pathname.includes('/git/ref/')) return json({ ref: `refs/heads/${url.pathname.split('/').at(-1)}`, object: { type: 'commit', sha: 'a'.repeat(40) } });
         if (url.pathname.endsWith('/pulls')) {
           if (url.searchParams.get('state') === 'open' && url.searchParams.get('sort') === 'created') {
             assert.equal(url.searchParams.get('per_page'), '1');
@@ -88,7 +103,7 @@ test('two principals: callback, pagination, refresh, replay, grants and revocati
       const who = request.headers.get('authorization')?.replace('Bearer ', '').split('-')[0];
       assert.ok(['alice', 'bob'].includes(who), 'only broker-held user tokens leave for GitHub');
       if (revoked && who === 'alice') return json({}, 401);
-      if (url.pathname === '/user') return json({ id: who === 'alice' ? 10 : 20, login: who });
+      if (url.pathname === '/user') return json({ id: who === 'alice' ? 10 : 20, login: who === 'alice' ? aliceLogin : who });
       if (url.pathname === '/user/installations') return json({ installations: url.searchParams.get('page') === '1'
         ? Array.from({ length: 100 }, (_, i) => ({ id: i + 100, app_id: 999, repository_selection: 'selected', suspended_at: null, account: { id: 1, login: 'other' } }))
         : [{ id: 7, app_id: 5678, repository_selection: 'selected', suspended_at: null, account: { id: 1, login: 'team', type: 'Organization' }, html_url: 'https://github.com/organizations/team/settings/installations/7' }, { id: 8, app_id: 5678, repository_selection: 'selected', suspended_at: '2026-09-18', account: { id: 1, login: 'team' } }, { id: 9, app_id: 5678, repository_selection: 'all', suspended_at: null, account: { id: 1, login: 'team' } }] });
@@ -170,6 +185,20 @@ test('two principals: callback, pagination, refresh, replay, grants and revocati
     assert.equal(repos.repositories[0].id, 2);
     for (const c of [alice, bob]) assert.equal((await send(`${c.path}/repositories`, 'PUT', { repositories: [{ installation_id: 7, repository_id: 2, repository: 'team/shared' }] }, c.credential)).status, 200);
     assert.equal(refreshed, 1);
+    const call = (c, name, arguments_) => send(`${c.path}/mcp`, 'POST', { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: arguments_ } }, c.credential);
+    const publication = { repository: 'team/shared', operation_id: '7d1f0f8e-7f1f-11f0-952e-acde48001122', branch: 'attribution', expected_head_sha: 'a'.repeat(40), message: 'Operator change', changes: [{ path: 'notes.txt', content_base64: 'aGk=' }] };
+    const firstPublication = await (await call(alice, 'publish_commit', publication)).json();
+    assert.equal(firstPublication.result.isError, false, JSON.stringify(firstPublication));
+    assert.deepEqual(publishedCommits[0].author, { name: 'alice', email: '10+alice@users.noreply.github.com' });
+    assert.equal(publishedCommits[0].committer, undefined, 'App token publishes without inventing another identity');
+    aliceLogin = 'alice-renamed';
+    const replayPublication = await (await call(alice, 'publish_commit', publication)).json();
+    assert.deepEqual(replayPublication.result.structuredContent, firstPublication.result.structuredContent);
+    assert.equal(publishedCommits.length, 1, 'rename does not republish a completed operation');
+    const renamedPublication = await (await call(alice, 'publish_commit', { ...publication, operation_id: '7d1f0f8e-7f1f-11f0-952e-acde48001123' })).json();
+    assert.equal(renamedPublication.result.isError, false, JSON.stringify(renamedPublication));
+    assert.deepEqual(publishedCommits[1].author, { name: 'alice-renamed', email: '10+alice-renamed@users.noreply.github.com' });
+    aliceLogin = 'alice';
     const id = '6d1f0f8e-7f1f-11f0-952e-acde48001122';
     const args = { repository: 'team/shared', operation_id: id, title: 'private fixture', body: 'accepted bytes' };
     const operation = { operation_id: id, kind: 'create_issue', request_digest: hash(JSON.stringify(args)) };
@@ -178,7 +207,6 @@ test('two principals: callback, pagination, refresh, replay, grants and revocati
     const shard = namespace.get(namespace.idFromName(`maintainer:5678:operation:${hash(id).slice(0, 2)}`));
     for (const [path, extra] of [['begin', {}], ['mark', { transition: { completed: JSON.stringify({ number: 123, url: 'https://github.com/team/shared/issues/123' }) } }]])
       assert.equal((await shard.fetch(`https://journal.internal/operation/${path}`, { method: 'POST', body: JSON.stringify({ operation, scope, ...extra }) })).status, 200);
-    const call = (c, name, arguments_) => send(`${c.path}/mcp`, 'POST', { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: arguments_ } }, c.credential);
     const legacyArgs = {repository:'team/shared',operation_id:'ad1f0f8e-7f1f-11f0-952e-acde48001122',title:'legacy work',body:'retained original body'};
     const legacyOperation = {operation_id:legacyArgs.operation_id,kind:'create_issue',request_digest:hash(JSON.stringify(legacyArgs))};
     const legacyShard = namespace.get(namespace.idFromName(`maintainer:5678:operation:${hash(legacyArgs.operation_id).slice(0,2)}`));

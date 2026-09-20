@@ -122,9 +122,10 @@ pub(crate) async fn connection_dispatch(
     owner: &str,
     repository: Option<&str>,
     grants: std::collections::BTreeMap<String, (i64, i64)>,
+    author: crate::github_app::GitAuthor,
 ) -> Response {
     let mut scoped = mcp.clone();
-    scoped.app = mcp.app.for_connection(grants);
+    scoped.app = mcp.app.for_connection(grants, author);
     if let Some(repository) = repository {
         scoped.journal = match mcp.journal.for_connection(owner, repository) {
             Ok(journal) => journal,

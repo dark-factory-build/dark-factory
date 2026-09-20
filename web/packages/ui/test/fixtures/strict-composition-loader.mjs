@@ -8,6 +8,8 @@ export const MAX_TERMINAL_PAYLOAD = 4096;
 export const MAX_TERMINAL_ROWS = 4096;
 export const MAX_TERMINAL_COLS = 4096;
 export const MAX_TASK_INSTRUCTION_BYTES = 32768;
+export const MAX_TASK_ATTACHMENTS = 8;
+export const MAX_TASK_ATTACHMENT_BYTES = 8 * 1024 * 1024;
 export const MAX_TASK_PRIORITY = 1000000;
 export const CAPABILITIES = { observe: 1, private_human_request_detail: 2, human_actions: 4, terminal_input: 8 };
 export function randomOperationID() { return "41".repeat(16); }

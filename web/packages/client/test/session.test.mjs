@@ -2334,3 +2334,63 @@ test("a refused intake request stays scoped to that request", async () => {
   session.close();
   await assert.rejects(next, (error) => error.code === "closed");
 });
+
+test("task files upload in bounded chunks before atomic enqueue and reject on disconnect", async () => {
+  const { session, socket } = await openHumanSession();
+  const bytes = new Uint8Array(30_000).fill(255);
+  const file = new File([bytes], "screenshot.png", { type: "image/png" });
+  const request = { agentId: "77".repeat(16), expectedAgentRevision: 7n, instruction: "Inspect screenshot", mode: "queue" };
+  const pending = session.enqueueAgentTaskWithFiles(request, [file]);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const first = decodeClientControl(socket.sent.at(-1));
+  assert.equal(first.type, "TASK_ATTACHMENT");
+  assert.equal(first.body.offset, 0n);
+  assert.equal(first.body.size, 30_000n);
+  assert.equal(Buffer.from(first.body.data, "base64").length, 24 * 1024);
+  socket.reply(encodeServerControl({ type: "TASK_ATTACHMENT_RESULT", id: first.id, body: { offset: 24576n } }));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const second = decodeClientControl(socket.sent.at(-1));
+  assert.equal(second.type, "TASK_ATTACHMENT");
+  assert.equal(second.body.offset, 24576n);
+  assert.deepEqual(Buffer.concat([Buffer.from(first.body.data, "base64"), Buffer.from(second.body.data, "base64")]), Buffer.from(bytes));
+  socket.reply(encodeServerControl({ type: "TASK_ATTACHMENT_RESULT", id: second.id, body: { offset: 30000n } }));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const enqueue = decodeClientControl(socket.sent.at(-1));
+  assert.equal(enqueue.type, "TASK_ENQUEUE");
+  assert.equal(enqueue.body.attachment_count, 1);
+  socket.reply(encodeTaskEnqueueResult(enqueue.id, { task_id: enqueue.body.task_id, revision: 1n, agent_revision: 7n }));
+  await pending;
+  const interrupted = session.enqueueAgentTaskWithFiles(request, [file]);
+  const rejected = assert.rejects(interrupted, (error) => error instanceof SessionError);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  session.close();
+  await rejected;
+});
+
+test("closing during attachment file reading rejects without sending or hanging", async () => {
+  const { session, socket } = await openHumanSession();
+  let release;
+  const file = { name: "x.txt", size: 1, slice() { return { arrayBuffer: () => new Promise((resolve) => { release = resolve; }) }; } };
+  const pending = session.enqueueAgentTaskWithFiles({ agentId: "77".repeat(16), expectedAgentRevision: 7n, instruction: "Read this" }, [file]);
+  const rejected = assert.rejects(pending, (error) => error instanceof SessionError);
+  const sent = socket.sent.length;
+  session.close();
+  release(new Uint8Array([1]).buffer);
+  await rejected;
+  assert.equal(socket.sent.length, sent);
+});
+
+test("attachment retention reads and saves through administration traffic", async () => {
+  const { session, socket } = await openHumanSession(undefined, CAPABILITIES.observe | CAPABILITIES.administration);
+  for (const value of [undefined, true, false]) {
+    const pending = session.attachmentRetention(value);
+    const frame = lastFrame(socket, "ATTACHMENT_RETENTION");
+    assert.deepEqual(frame.body, value === undefined ? {} : { enabled: value });
+    socket.reply(encodeServerControl({ type: "ATTACHMENT_RETENTION_RESULT", id: frame.id, body: { enabled: value ?? false } }));
+    assert.equal(await pending, value ?? false);
+  }
+  session.close();
+  const observer = await openHumanSession(undefined, CAPABILITIES.observe);
+  await assert.rejects(observer.session.attachmentRetention(true), (error) => error.code === "unauthorized");
+  observer.session.close();
+});

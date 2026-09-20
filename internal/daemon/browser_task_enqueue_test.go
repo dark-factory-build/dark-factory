@@ -3,14 +3,19 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/dark-factory-build/dark-factory/internal/browserprotocol"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
+	"github.com/dark-factory-build/dark-factory/internal/runner"
 )
 
 func TestBrowserTaskEnqueueCreatesPrivateDurableTaskAndWakesScheduler(t *testing.T) {
@@ -46,12 +51,38 @@ func TestBrowserTaskEnqueueCreatesPrivateDurableTaskAndWakesScheduler(t *testing
 	default:
 	}
 	instruction := "PRIVATE_BROWSER_INSTRUCTION_SENTINEL"
+	data := bytes.Repeat([]byte{0, 1, 255}, 10000)
+	for offset := 0; offset < len(data); offset += browserprotocol.TaskAttachmentChunkBytes {
+		end := min(offset+browserprotocol.TaskAttachmentChunkBytes, len(data))
+		upload, err := browserprotocol.EncodeTaskAttachment(fmt.Sprintf("upload-%d", offset), browserprotocol.TaskAttachmentChunk{Index: 0, Offset: browserprotocol.Decimal(offset), Size: browserprotocol.Decimal(len(data)), Name: "screenshot.png", Data: data[offset:end]})
+		if err != nil {
+			t.Fatal(err)
+		}
+		adapterWrite(t, connection, upload)
+		frame := adapterRead(t, connection)
+		if frame.Type != browserprotocol.TypeTaskAttachmentResult || frame.Body.(browserprotocol.TaskAttachmentResult).Offset != browserprotocol.Decimal(end) {
+			t.Fatalf("upload: %+v", frame)
+		}
+		if offset == 0 {
+			partial, err := browserprotocol.EncodeTaskEnqueue("partial", browserprotocol.TaskEnqueue{TaskID: taskID.String(), IncarnationID: incarnationID.String(), AgentID: agent.ID.String(), ExpectedAgentRevision: browserprotocol.Decimal(agent.Revision.Int64()), Instruction: instruction, AttachmentCount: 1})
+			if err != nil {
+				t.Fatal(err)
+			}
+			adapterWrite(t, connection, partial)
+			rejected := adapterRead(t, connection)
+			if rejected.Type != browserprotocol.TypeError || rejected.Body.(browserprotocol.Error).Code != browserprotocol.ErrorInvalidRequest {
+				t.Fatalf("partial upload enqueued: %+v", rejected)
+			}
+		}
+
+	}
 	request := browserprotocol.TaskEnqueue{
 		TaskID:                taskID.String(),
 		IncarnationID:         incarnationID.String(),
 		AgentID:               agent.ID.String(),
 		ExpectedAgentRevision: browserprotocol.Decimal(agent.Revision.Int64()),
 		Instruction:           instruction,
+		AttachmentCount:       1,
 	}
 	payload, err := browserprotocol.EncodeTaskEnqueue("enqueue", request)
 	if err != nil {
@@ -77,6 +108,18 @@ func TestBrowserTaskEnqueueCreatesPrivateDurableTaskAndWakesScheduler(t *testing
 	}
 	if stored.ProjectID != project.ID || stored.AssignedAgentID != agent.ID || stored.IncarnationID != incarnationID || stored.Title != "Direct instruction" || stored.Body != instruction || stored.Status != kernel.TaskQueued || stored.Priority != 0 {
 		t.Fatalf("durable task = %+v", stored)
+	}
+	files, err := fixture.store.TaskAttachments(context.Background(), taskID)
+	if err != nil || len(files) != 1 || !bytes.Equal(files[0].Data, data) || files[0].Name != "screenshot.png" {
+		t.Fatalf("durable files: count=%d err=%v", len(files), err)
+	}
+	home := t.TempDir()
+	if err := materializeTaskAttachments(home, files); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(filepath.Join(home, "task-attachments", "attachment-1.png"))
+	if err != nil || !bytes.Equal(got, data) {
+		t.Fatalf("worker bytes differ: %v", err)
 	}
 	snapshot, err := fixture.store.Snapshot(context.Background())
 	if err != nil {
@@ -139,5 +182,19 @@ func TestBrowserTaskEnqueueRejectsMissingCapabilityAndStaleAgent(t *testing.T) {
 			default:
 			}
 		})
+	}
+}
+
+func TestTaskAttachmentsCountTowardsProviderInputLimit(t *testing.T) {
+	files := []kernel.TaskAttachment{{Name: "reference.png", Data: []byte{1}}}
+	body := strings.Repeat("x", runner.MaxCodexTaskBytes)
+	if err := prepareTaskText(kernel.ProviderCodex, "title", body); err != nil {
+		t.Fatal(err)
+	}
+	if err := prepareTaskText(kernel.ProviderCodex, "title", body, files...); err == nil {
+		t.Fatal("attachments exceeded provider limit without rejection")
+	}
+	if err := prepareTaskText(kernel.ProviderCodex, "title fallback", "", files...); err != nil {
+		t.Fatal(err)
 	}
 }

@@ -466,7 +466,7 @@ func newLegacyDatabase(t *testing.T, persistWAL bool, version int, extra ...stri
 			t.Fatal(err)
 		}
 	}
-	downgrade := []string{"DROP TABLE intake_acceptance_reviews", "DROP TABLE intake_source_priorities", "DROP TABLE intake_legacy_suppressions", "DROP TABLE intake_legacy_migrations", "DROP TABLE intake_task_bindings", "DROP TABLE intake_source_trusted_logins", "DROP TABLE intake_acceptances", "DROP TABLE intake_sources", "DROP TABLE repository_source_identities", "DROP TABLE content_repository_bindings", "DROP TABLE task_repository_bindings", "DROP TABLE project_repositories", "DROP TABLE continuations", fmt.Sprintf("PRAGMA user_version = %d", version), "COMMIT"}
+	downgrade := []string{"DROP TABLE attachment_retention", "DROP TABLE task_attachments", "DROP TABLE intake_acceptance_reviews", "DROP TABLE intake_source_priorities", "DROP TABLE intake_legacy_suppressions", "DROP TABLE intake_legacy_migrations", "DROP TABLE intake_task_bindings", "DROP TABLE intake_source_trusted_logins", "DROP TABLE intake_acceptances", "DROP TABLE intake_sources", "DROP TABLE repository_source_identities", "DROP TABLE content_repository_bindings", "DROP TABLE task_repository_bindings", "DROP TABLE project_repositories", "DROP TABLE continuations", fmt.Sprintf("PRAGMA user_version = %d", version), "COMMIT"}
 	if version < v19UserVersion {
 		downgrade = append([]string{"DROP TABLE terminal_diagnostics"}, downgrade...)
 	}
@@ -679,7 +679,9 @@ func TestSchemaDigestsArePinned(t *testing.T) {
 		statements []string
 		digest     string
 	}{
-		{"current", schemaStatements, "c2069b6b85dca60a4a4043df55e292104af26548cf8dcc916a6ea9e330adf989"},
+		{"current", schemaStatements, "b4dc6ce3feb952d1f6b1f524069c487e7cdae4a90ae57f12e689bde449d478a4"},
+		{"v29", v29SchemaStatements(), "cf8d4931509a6b1f45fe4b59b7b8559f00817508e09acac698b50f9540bb47f5"},
+		{"v28", v28SchemaStatements(), "957c54938f8a79fcc453995b825fe0289a18434d509b14f2daf075b97d7bfe82"},
 		{"v27", v27SchemaStatements(), "099f40bd70ce7e61dc3b8c9554c06bc733b221ee36345aeef9fd6f1e230c8b67"},
 		{"v26", v26SchemaStatements(), "426ec115fe03bc59524e6f98b7dcf5282e8d8b235c9c0175c0b03af932d0e00f"},
 		{"v25", v25SchemaStatements(), "eeb13a93e6195caed12237d22d706fd176a1964734d3a25b6eebcfe386bf2fb4"},
@@ -791,7 +793,7 @@ func TestRefusedMigrationReturnsTheWriterConnection(t *testing.T) {
 }
 
 // Keep a populated pre-Linear database, including its frozen receipts, readable.
-func TestV27IntakeMigrationPreservesReceiptsAndReplay(t *testing.T) {
+func TestV29IntakeMigrationPreservesReceiptsAndReplay(t *testing.T) {
 	ctx := context.Background()
 	store, path := newTestStore(t)
 	project, err := store.CreateProject(ctx, NewProject{ID: projectID(t, 210), Name: "migration", Root: "/migration"}, mustTime(t, 1))
@@ -811,7 +813,7 @@ func TestV27IntakeMigrationPreservesReceiptsAndReplay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	downgradeIntakeToV27(t, store)
+	downgradeIntakeToV29(t, store)
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -833,7 +835,7 @@ func TestV27IntakeMigrationPreservesReceiptsAndReplay(t *testing.T) {
 	}
 }
 
-func downgradeIntakeToV27(t *testing.T, store *Store) {
+func downgradeIntakeToV29(t *testing.T, store *Store) {
 	t.Helper()
 	ctx := context.Background()
 	connection, err := store.writer.Conn(ctx)
@@ -842,19 +844,29 @@ func downgradeIntakeToV27(t *testing.T, store *Store) {
 	}
 	defer connection.Close()
 	err = migrateWithoutForeignKeys(ctx, connection, func(ctx context.Context, connection *sql.Conn) error {
-		target := expectedSchemaOf(v27SchemaStatements())
+		target := expectedSchemaOf(v29SchemaStatements())
 		if err := rebuildTable(ctx, connection, target, "intake_sources", strings.TrimSuffix(intakeSourceColumns, ", linear_team_id"), "intake_sources_repository_destination", "", ""); err != nil {
 			return err
 		}
 		if err := rebuildTable(ctx, connection, target, "intake_acceptances", strings.TrimSuffix(intakeAcceptanceColumns, ", linear_team_id, source_url"), "", ""); err != nil {
 			return err
 		}
-		if _, err := connection.ExecContext(ctx, "PRAGMA user_version = 27"); err != nil {
+		if _, err := connection.ExecContext(ctx, "PRAGMA user_version = 29"); err != nil {
 			return err
 		}
-		return validateSchemaVersion(ctx, connection, v27UserVersion, v27SchemaStatements())
+		return validateSchemaVersion(ctx, connection, v29UserVersion, v29SchemaStatements())
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+func downgradeIntakeToV27(t *testing.T, store *Store) {
+	t.Helper()
+	downgradeIntakeToV29(t, store)
+	for _, statement := range []string{"DROP TABLE attachment_retention", "DROP TABLE task_attachments", "PRAGMA user_version = 27"} {
+		if _, err := store.writer.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
 	}
 }

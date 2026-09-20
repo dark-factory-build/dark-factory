@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from "react";
-import { MAX_TASK_PRIORITY, type IntakeView, type IntakeBody, type DiscoveredAccount, type AccountItem, type AgentItem, type GitHubConnectionBody, type GitHubDelegationBody, type ProjectItem, type RepositoryMutation, type RepositoryView, type StateView, type TaskHistoryView, type TaskItem, type TaskListView, type TaskPeerQuestion } from "@dark-factory/client";
+import { MAX_TASK_ATTACHMENTS, MAX_TASK_ATTACHMENT_BYTES, MAX_TASK_PRIORITY, type IntakeView, type IntakeBody, type DiscoveredAccount, type AccountItem, type AgentItem, type GitHubConnectionBody, type GitHubDelegationBody, type ProjectItem, type RepositoryMutation, type RepositoryView, type StateView, type TaskHistoryView, type TaskItem, type TaskListView, type TaskPeerQuestion } from "@dark-factory/client";
 import type { FactoryEditView, FactoryHumanRequestView } from "./factory-app-controller.js";
 import type { FactoryGitHubView } from "./factory-settings-coordinator.js";
 import { rankLabel } from "./console-screens.js";
@@ -280,7 +280,7 @@ export function QueuePanel({
   edit?: FactoryEditView;
   ready: boolean;
   onEditTask?: (task: TaskItem, change: TaskEdit) => Promise<boolean>;
-  onAddTask?: (agent: AgentItem, instruction: string, mode: "queue" | "any") => Promise<boolean>;
+  onAddTask?: (agent: AgentItem, instruction: string, mode: "queue" | "any", files?: readonly File[]) => Promise<boolean>;
   onLoadTaskDetail?: (task: TaskItem, peerOffset?: bigint, expectedHead?: bigint) => Promise<TaskBrief>;
 }) {
   if (state === undefined) return <section className="dfConsoleSidebar__panel" aria-label="Tasks"><p className="dfFactoryConsole__empty">Waiting for the latest state…</p></section>;
@@ -330,34 +330,65 @@ function NewTask({ agents, state, disabled, onAddTask }: {
   agents: readonly AgentItem[];
   state: StateView;
   disabled: boolean;
-  onAddTask: (agent: AgentItem, instruction: string, mode: "queue" | "any") => Promise<boolean>;
+  onAddTask: (agent: AgentItem, instruction: string, mode: "queue" | "any", files?: readonly File[]) => Promise<boolean>;
 }) {
+  const [files, setFiles] = useState<readonly File[]>([]);
+  const [fileError, setFileError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const busy = disabled || submitting;
+  const addFiles = (incoming: readonly File[]) => {
+    if (busy || incoming.length === 0) return;
+    const next = [...files, ...incoming];
+    if (next.length > MAX_TASK_ATTACHMENTS || next.reduce((total, file) => total + file.size, 0) > MAX_TASK_ATTACHMENT_BYTES) { setFileError("Attach up to 8 files, totalling 8 MiB."); return; }
+    if (incoming.some((file) => file.size === 0 || new TextEncoder().encode(file.name).length > 255 || /[\u0000-\u001f\u007f-\u009f]/u.test(file.name))) { setFileError("Choose nonempty files with names under 256 bytes and no control characters."); return; }
+    setFiles(next); setFileError("");
+  };
   const live = agents.filter((agent) => !agent.archived);
   const shared = [...state.projects.values()].flatMap((project) => {
     const worker = live.find((agent) => agent.project_id === project.id && agent.role === "worker");
     return worker === undefined ? [] : [{ project, worker }];
   });
   return <details className="dfConsoleSidebar__section"><summary>New task</summary>
-    <form className="dfFactoryConsole__reply" aria-label="New task" onSubmit={(event) => {
+    <form className="dfFactoryConsole__reply" aria-label="New task"
+      onDragOver={(event) => { if (event.dataTransfer.types.includes("Files")) event.preventDefault(); }}
+      onDrop={(event) => { if (event.dataTransfer.files.length > 0) { event.preventDefault(); addFiles(Array.from(event.dataTransfer.files)); } }}
+      onPaste={(event) => { const pasted = Array.from(event.clipboardData.files); if (pasted.length > 0) { event.preventDefault(); addFiles(pasted); } }}
+      onSubmit={(event) => {
       event.preventDefault();
       const form = event.currentTarget;
       const data = new FormData(form);
       const target = String(data.get("target"));
       const agent = target.startsWith("any:") ? shared.find(({ project }) => project.id === target.slice(4))?.worker : state.agents.get(target);
       const instruction = String(data.get("instruction"));
-      if (agent === undefined || instruction.trim() === "") return;
-      void onAddTask(agent, instruction, target.startsWith("any:") ? "any" : "queue").then((added) => { if (added) form.reset(); });
+      if (busy || agent === undefined || instruction.trim() === "") return;
+      setSubmitting(true);
+      void onAddTask(agent, instruction, target.startsWith("any:") ? "any" : "queue", files).then((added) => { if (added) { form.reset(); setFiles([]); setFileError(""); } }).catch(() => setFileError("Submission failed. Your files are still here; try again.")).finally(() => setSubmitting(false));
     }}>
       <label htmlFor="df-new-task-target">For</label>
-      <select id="df-new-task-target" name="target" required disabled={disabled}>
+      <select id="df-new-task-target" name="target" required disabled={busy}>
         {shared.map(({ project }) => <option key={project.id} value={`any:${project.id}`}>Any eligible worker · {project.name}</option>)}
         {live.map((agent) => <option key={agent.id} value={agent.id}>{agent.name}</option>)}
       </select>
       <label htmlFor="df-new-task-instruction">Instruction</label>
-      <textarea id="df-new-task-instruction" name="instruction" rows={4} required disabled={disabled} />
-      <button disabled={disabled}>Add to queue</button>
+      <textarea id="df-new-task-instruction" name="instruction" rows={4} required disabled={busy} />
+      <label htmlFor="df-new-task-files">Attach files</label>
+      <input id="df-new-task-files" type="file" multiple disabled={busy} onChange={(event) => { addFiles(Array.from(event.currentTarget.files ?? [])); event.currentTarget.value = ""; }} />
+      <small>Paste images or drop files here. Up to 8 files, 8 MiB total.</small>
+      {files.length === 0 ? null : <ul aria-label="Task attachments">{files.map((file, index) => <li key={index}><AttachmentPreview file={file} /><span>{file.name} · {Math.ceil(file.size / 1024)} KiB</span><button type="button" aria-label={`Remove ${file.name}`} disabled={busy} onClick={() => { setFiles(files.filter((_, i) => i !== index)); setFileError(""); }}>Remove</button></li>)}</ul>}
+      {fileError === "" ? null : <p role="alert">{fileError}</p>}
+      <button disabled={busy}>{submitting ? "Adding task…" : "Add to queue"}</button>
     </form>
   </details>;
+}
+
+function AttachmentPreview({ file }: { file: File }) {
+  const [url, setURL] = useState<string>();
+  useEffect(() => {
+    if (!["image/png", "image/jpeg", "image/gif", "image/webp"].includes(file.type)) { setURL(undefined); return; }
+    const next = URL.createObjectURL(file); setURL(next);
+    return () => URL.revokeObjectURL(next);
+  }, [file]);
+  return url === undefined ? null : <img src={url} alt={`Preview of ${file.name}`} style={{ maxWidth: 160, maxHeight: 120, objectFit: "contain" }} />;
 }
 
 /**
@@ -565,6 +596,7 @@ function QueuedTask({
  * focus trap and focus return, so every exit goes through close().
  */
 export function SettingsDialog({
+  onAttachmentRetention,
   floorAppearance,
   onFloorAppearanceChange,
   onResetFloorAppearance,
@@ -598,6 +630,7 @@ export function SettingsDialog({
   library,
   onClose,
 }: {
+  onAttachmentRetention?: (enabled?: boolean) => Promise<boolean>;
   floorAppearance: FloorAppearance;
   onFloorAppearanceChange: (appearance: FloorAppearance) => void;
   onResetFloorAppearance: () => void;
@@ -644,6 +677,7 @@ export function SettingsDialog({
         <RepositoriesSection state={state} repositories={repositories} pending={repositoryPending} errors={repositoryErrors} onLoad={onLoadRepositories} onMutate={onMutateRepository} onCreateProject={onCreateProject} />
         <IntakeSection github={github} onSelectTask={onSelectTask} state={state} repositories={repositories} intake={intake} pending={intakePending} errors={intakeErrors} onLoad={onLoadIntake} onLoadRepositories={onLoadRepositories} onAction={onIntakeAction} />
         {library}
+        <AttachmentRetentionSection call={ready ? onAttachmentRetention : undefined} />
         <details className="dfConsoleSidebar__section" aria-label="Run limits">
           <summary>Run limits</summary>
           <ProjectLimitsSection projectId={projectId} state={state} edit={edit} ready={ready} onSave={onSaveProjectLimits} />
@@ -1128,4 +1162,36 @@ function IntakeForm({ project, state, repositories, source, result, github, busy
     </details>
     <button type="submit" disabled={busy || !destination}>{source ? "Save":"Add backlog"}</button>
   </form></details>;
+}
+
+function AttachmentRetentionSection({ call }: { call?: (enabled?: boolean) => Promise<boolean> }) {
+  const [enabled, setEnabled] = useState<boolean>();
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string>();
+  const request = useRef(call);
+  request.current = call;
+  const available = call !== undefined;
+  useEffect(() => {
+    let cancelled = false;
+    setEnabled(undefined);
+    setError(undefined);
+    if (available) request.current?.().then((value) => { if (!cancelled) setEnabled(value); }, () => { if (!cancelled) setError("Could not load attachment cleanup settings. Reopen Settings to retry."); });
+    return () => { cancelled = true; };
+  }, [available]);
+  const save = async (value: boolean) => {
+    if (pending || request.current === undefined) return;
+    setPending(true);
+    setError(undefined);
+    try { setEnabled(await request.current(value)); }
+    catch { setError("Could not save attachment cleanup settings. Try again."); }
+    finally { setPending(false); }
+  };
+  return <section className="dfConsoleSidebar__section" aria-label="Attachment storage">
+    <h3>Attachment storage</h3>
+    <label><input type="checkbox" checked={enabled === true} disabled={!available || enabled === undefined || pending} onChange={(event) => { void save(event.currentTarget.checked); }} />Automatically remove attachments after 30 days</label>
+    <p>Applies to all tasks 30 days after success or cancellation, including existing tasks. Other tasks keep their attachments. Checks run hourly while the factory is running.</p>
+    <p>Task history and filenames remain. Once attachments are removed, the task cannot be sent back; create a new task with any required files.</p>
+    {pending ? <p role="status">Saving…</p> : null}
+    {error === undefined ? null : <p role="alert">{error}</p>}
+  </section>;
 }

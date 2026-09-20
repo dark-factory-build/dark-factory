@@ -394,6 +394,10 @@ func (client *OperatorClient) UpdateTask(ctx context.Context, input OverseerTask
 	return client.client.mutate(ctx, "operator_update_task", input)
 }
 
+func (client *OperatorClient) CompactStorage(ctx context.Context) (MutationResult, error) {
+	return client.client.mutate(ctx, "compact_storage", struct{}{})
+}
+
 func (client *OperatorClient) UpdateAgent(ctx context.Context, input OverseerAgentUpdateInput) (MutationResult, error) {
 	if !validID(input.AgentID) || input.ExpectedRevision == 0 {
 		return MutationResult{}, ErrInvalidInput
@@ -1112,6 +1116,9 @@ func validOverseerTaskCreateInput(input OverseerTaskCreateInput) bool {
 }
 
 func validOverseerTaskUpdateInput(input OverseerTaskUpdateInput) bool {
+	if input.RemoveAttachments {
+		return validID(input.TaskID) && input.ExpectedRevision > 0 && input.Title == nil && input.Body == nil && input.Priority == nil && input.AssignedAgentID == nil && !input.Cancel && !input.Retry
+	}
 	if !validID(input.TaskID) || input.ExpectedRevision == 0 || input.Title == nil && input.Body == nil && input.Priority == nil && input.AssignedAgentID == nil && !input.Cancel && !input.Retry {
 		return false
 	}

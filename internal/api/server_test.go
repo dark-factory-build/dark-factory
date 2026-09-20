@@ -295,6 +295,7 @@ func TestServerDecodesClosedMethodMatrix(t *testing.T) {
 				t.Fatalf("dispatch = %d, %t, %t", revision, enabled, ok)
 			}
 		}},
+		{name: "compact storage", domain: operatorDomain, bearer: operatorBearer, body: `{"method":"compact_storage","params":{}}`, kind: CallCompactStorage, check: func(t *testing.T, call Call) {}},
 		{name: "set capacity", domain: operatorDomain, bearer: operatorBearer, body: `{"method":"set_capacity","params":{"expected_revision":3,"capacity":2}}`, kind: CallSetCapacity, check: func(t *testing.T, call Call) {
 			revision, capacity, ok := call.Capacity()
 			if !ok || revision != 3 || capacity != 2 {
@@ -486,6 +487,8 @@ func TestServerRejectsDomainFallbackAndInvalidRequests(t *testing.T) {
 		{name: "operator domain cannot read attempt task", domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"task","params":{}}`), code: RemoteForbidden},
 		{name: "attempt domain cannot read operator paths", domain: attemptDomain, bearer: attemptBearer, body: []byte(`{"method":"agent_paths","params":{"agent_id":"` + id('2') + `"}}`), code: RemoteForbidden},
 		{name: "attempt domain cannot set capacity", domain: attemptDomain, bearer: attemptBearer, body: []byte(`{"method":"set_capacity","params":{"expected_revision":1,"capacity":2}}`), code: RemoteForbidden},
+		{name: "attempt cannot compact", domain: attemptDomain, bearer: attemptBearer, body: []byte(`{"method":"compact_storage","params":{}}`), code: RemoteForbidden},
+		{name: "overseer cannot remove task attachments", domain: attemptDomain, bearer: attemptBearer, body: []byte(`{"method":"overseer_update_task","params":{"task_id":"` + id('3') + `","expected_revision":1,"remove_attachments":true}}`), code: RemoteInvalidRequest},
 		{name: "unknown method", domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"delete_all","params":{}}`), code: RemoteInvalidRequest},
 		{name: "null params", domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"health","params":null}`), code: RemoteInvalidRequest},
 		{name: "array params", domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"health","params":[]}`), code: RemoteInvalidRequest},

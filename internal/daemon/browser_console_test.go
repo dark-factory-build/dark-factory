@@ -783,3 +783,48 @@ func TestProjectTopologyPrioritizesDependenciesAndCountsOverFilenames(t *testing
 		t.Fatal("projection is not deterministic")
 	}
 }
+
+func TestBrowserAttachmentRetentionRequiresAdministration(t *testing.T) {
+	for _, capability := range []kernel.BrowserCapabilityMask{kernel.BrowserCapabilityObserve, kernel.BrowserCapabilityAdministration} {
+		fixture := newAdapterFixture(t, capability|kernel.BrowserCapabilityObserve)
+		fixture.pair(t)
+		enabled := browserprotocol.Bool(true)
+		result, err := fixture.backend.AttachmentRetention(context.Background(), rawBrowserClient(fixture.client.ID), browserprotocol.AttachmentRetention{Enabled: &enabled})
+		if capability == kernel.BrowserCapabilityObserve {
+			if !errors.Is(err, browser.ErrUnauthorized) {
+				t.Fatalf("unauthorized update: %v", err)
+			}
+			value, err := fixture.store.AttachmentRetention(context.Background(), nil)
+			if err != nil || value {
+				t.Fatalf("unauthorized effect: %v %v", value, err)
+			}
+		} else {
+			if err != nil || !bool(result.Enabled) {
+				t.Fatalf("save: %+v %v", result, err)
+			}
+			result, err = fixture.backend.AttachmentRetention(context.Background(), rawBrowserClient(fixture.client.ID), browserprotocol.AttachmentRetention{})
+			if err != nil || !bool(result.Enabled) {
+				t.Fatalf("read: %+v %v", result, err)
+			}
+		}
+	}
+}
+
+func TestBrowserAttachmentRetentionRoundTrip(t *testing.T) {
+	fixture := newAdapterFixture(t, kernel.BrowserCapabilityObserve|kernel.BrowserCapabilityAdministration)
+	connection := fixture.pair(t)
+	defer connection.CloseNow()
+	for i, body := range []string{`{}`, `{"enabled":true}`, `{}`, `{"enabled":false}`} {
+		id := fmt.Sprintf("retention-%d", i)
+		adapterWrite(t, connection, []byte(fmt.Sprintf(`{"type":"ATTACHMENT_RETENTION","id":%q,"body":%s}`, id, body)))
+		frame := adapterRead(t, connection)
+		result, ok := frame.Body.(browserprotocol.AttachmentRetentionResult)
+		if !ok || frame.ID != id {
+			t.Fatalf("retention reply: %+v", frame)
+		}
+		stored, err := fixture.store.AttachmentRetention(context.Background(), nil)
+		if err != nil || stored != bool(result.Enabled) {
+			t.Fatalf("saved setting: %v %+v %v", stored, result, err)
+		}
+	}
+}

@@ -890,12 +890,19 @@ mod cloudflare {
             let Some(mcp) = state.mcp else {
                 return denied();
             };
+            let Some(user) = connection.user.as_ref() else {
+                return denied();
+            };
+            let Ok(author) = crate::github_app::GitAuthor::from_github(user.id, &user.login) else {
+                return denied();
+            };
             let response = crate::mcp::connection_dispatch(
                 rpc,
                 &mcp,
                 &connection.id,
                 repository.as_deref(),
                 grants,
+                author,
             )
             .await;
             return response.try_into();
@@ -935,9 +942,12 @@ mod cloudflare {
             .as_ref()
             .ok_or(GitHubError::Rejected(401))?;
         let user: User = github_json("https://api.github.com/user", &tokens.access_token).await?;
-        if connection.user.as_ref().map(|u| u.id) != Some(user.id) {
+        if connection.user.as_ref().map(|u| u.id) != Some(user.id)
+            || crate::github_app::GitAuthor::from_github(user.id, &user.login).is_err()
+        {
             return Err(GitHubError::Rejected(401));
         }
+        connection.user = Some(user);
         Ok(())
     }
     #[derive(Deserialize)]

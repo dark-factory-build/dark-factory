@@ -11,6 +11,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/dark-factory-build/dark-factory/internal/change"
+	"github.com/dark-factory-build/dark-factory/internal/gitauthor"
 	"github.com/dark-factory-build/dark-factory/internal/install"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 	"github.com/dark-factory-build/dark-factory/internal/provider"
@@ -31,6 +32,7 @@ const (
 var ErrInvalidContract = errors.New("Change worker: invalid private contract")
 
 type Config struct {
+	GitAuthor          gitauthor.Identity
 	CustomerMaintainer bool
 	Provider           kernel.Provider
 	// Role decides whether the run works in a Change. A worker's Change is
@@ -121,35 +123,36 @@ type resultWire struct {
 }
 
 type configWire struct {
-	CustomerMaintainer       bool              `json:"customer_maintainer"`
-	Provider                 string            `json:"provider"`
-	Role                     string            `json:"role"`
-	Model                    string            `json:"model"`
-	ReasoningEffort          string            `json:"reasoning_effort"`
-	AgentID                  string            `json:"agent_id"`
-	TaskIncarnationID        string            `json:"task_incarnation_id"`
-	PreviousWorkingDirectory string            `json:"previous_working_directory,omitempty"`
-	RuntimePath              string            `json:"runtime_path"`
-	RuntimeIdentity          identityWire      `json:"runtime_identity"`
-	GitExecutable            string            `json:"git_executable"`
-	FactoryctlExecutable     string            `json:"factoryctl_executable"`
-	ToolPath                 string            `json:"tool_path"`
-	ToolchainReadRoots       string            `json:"toolchain_read_roots,omitempty"`
-	LocalCILeaseDir          string            `json:"local_ci_lease_directory,omitempty"`
-	AccountHome              string            `json:"account_home"`
-	AccountConfigDir         string            `json:"account_config_dir"`
-	RepositoryRoot           string            `json:"repository_root"`
-	RepositoryIdentity       identityWire      `json:"repository_identity"`
-	RepositoryGitIdentity    identityWire      `json:"repository_git_identity"`
-	RepositoryOriginDigest   [32]byte          `json:"repository_origin_digest"`
-	GitCommonDir             string            `json:"git_common_dir"`
-	Revision                 string            `json:"revision"`
-	ChangeParent             string            `json:"change_parent"`
-	FinalName                string            `json:"final_name"`
-	AttemptSocket            string            `json:"attempt_socket"`
-	Retained                 *resultWire       `json:"retained,omitempty"`
-	RetainedSourceReview     *sourceReviewWire `json:"retained_source_review,omitempty"`
-	ProviderTask             []byte            `json:"provider_task"`
+	GitAuthor                gitauthor.Identity `json:"git_author"`
+	CustomerMaintainer       bool               `json:"customer_maintainer"`
+	Provider                 string             `json:"provider"`
+	Role                     string             `json:"role"`
+	Model                    string             `json:"model"`
+	ReasoningEffort          string             `json:"reasoning_effort"`
+	AgentID                  string             `json:"agent_id"`
+	TaskIncarnationID        string             `json:"task_incarnation_id"`
+	PreviousWorkingDirectory string             `json:"previous_working_directory,omitempty"`
+	RuntimePath              string             `json:"runtime_path"`
+	RuntimeIdentity          identityWire       `json:"runtime_identity"`
+	GitExecutable            string             `json:"git_executable"`
+	FactoryctlExecutable     string             `json:"factoryctl_executable"`
+	ToolPath                 string             `json:"tool_path"`
+	ToolchainReadRoots       string             `json:"toolchain_read_roots,omitempty"`
+	LocalCILeaseDir          string             `json:"local_ci_lease_directory,omitempty"`
+	AccountHome              string             `json:"account_home"`
+	AccountConfigDir         string             `json:"account_config_dir"`
+	RepositoryRoot           string             `json:"repository_root"`
+	RepositoryIdentity       identityWire       `json:"repository_identity"`
+	RepositoryGitIdentity    identityWire       `json:"repository_git_identity"`
+	RepositoryOriginDigest   [32]byte           `json:"repository_origin_digest"`
+	GitCommonDir             string             `json:"git_common_dir"`
+	Revision                 string             `json:"revision"`
+	ChangeParent             string             `json:"change_parent"`
+	FinalName                string             `json:"final_name"`
+	AttemptSocket            string             `json:"attempt_socket"`
+	Retained                 *resultWire        `json:"retained,omitempty"`
+	RetainedSourceReview     *sourceReviewWire  `json:"retained_source_review,omitempty"`
+	ProviderTask             []byte             `json:"provider_task"`
 }
 
 type sourceReviewWire struct {
@@ -167,7 +170,7 @@ func EncodeConfig(config Config) ([]byte, error) {
 	if err := validateConfig(config); err != nil {
 		return nil, err
 	}
-	wire := configWire{CustomerMaintainer: config.CustomerMaintainer,
+	wire := configWire{GitAuthor: config.GitAuthor, CustomerMaintainer: config.CustomerMaintainer,
 		Provider: config.Provider.String(), Role: config.Role.String(), Model: config.Model, ReasoningEffort: config.ReasoningEffort,
 		AgentID: config.AgentID, TaskIncarnationID: config.TaskIncarnationID, PreviousWorkingDirectory: config.PreviousWorkingDirectory,
 		RuntimePath: config.RuntimePath, RuntimeIdentity: identityWire{Device: config.RuntimeIdentity.Device, Inode: config.RuntimeIdentity.Inode},
@@ -219,7 +222,7 @@ func DecodeConfig(encoded []byte) (Config, error) {
 		r := wire.RetainedSourceReview
 		sourceReview = &SourceReview{r.TaskID, r.ChangeID, r.TaskWorkRevision, r.ChangeRevision, r.BaseCommit, r.HeadCommit, r.SourcePath, r.GitDirectory}
 	}
-	config := Config{CustomerMaintainer: wire.CustomerMaintainer,
+	config := Config{GitAuthor: wire.GitAuthor, CustomerMaintainer: wire.CustomerMaintainer,
 		Provider: providerKind, Role: role, Model: wire.Model, ReasoningEffort: wire.ReasoningEffort,
 		AgentID: wire.AgentID, TaskIncarnationID: wire.TaskIncarnationID, PreviousWorkingDirectory: wire.PreviousWorkingDirectory,
 		RuntimePath: wire.RuntimePath, RuntimeIdentity: runner.FileIdentity{Device: wire.RuntimeIdentity.Device, Inode: wire.RuntimeIdentity.Inode},
@@ -237,6 +240,9 @@ func DecodeConfig(encoded []byte) (Config, error) {
 }
 
 func validateConfig(config Config) error {
+	if !config.GitAuthor.Valid() {
+		return ErrInvalidContract
+	}
 	paths := []string{config.RuntimePath, config.GitExecutable, config.FactoryctlExecutable, config.AccountHome, config.RepositoryRoot, config.ChangeParent, config.AttemptSocket, config.GitCommonDir}
 	for _, path := range paths {
 		if !validAbsolute(path, maximumLocatorBytes) {

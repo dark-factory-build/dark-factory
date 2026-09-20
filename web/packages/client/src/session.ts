@@ -1,3 +1,4 @@
+import { MAX_TASK_ATTACHMENTS, MAX_TASK_ATTACHMENT_BYTES, TASK_ATTACHMENT_CHUNK_BYTES } from "./manifest.js";
 import { projectContentOperation, type ProjectContentOperation, type ProjectContentInput, type ProjectContentOutput } from "./project-content.js";
 import {
   decodeServerControl,
@@ -12,7 +13,7 @@ import {
   encodeRemoteInvite,
   encodeStateGet,
   encodeStateWatch,
-  encodeTaskEnqueue,
+  encodeTaskEnqueue, encodeTaskAttachment,
   encodeProjectCreate,
   encodeRepositoriesGet,
   encodeRepositoryMutate,
@@ -193,7 +194,7 @@ export type RunPathsView = Readonly<{ agentId: string; runId: string; paths: rea
 export type TaskListView = Readonly<{ agentId: string; head: bigint; total: bigint; tasks: readonly TaskItem[]; hasMore: boolean }>;
 type InvitePending = { resolve: (value: RemoteInvite) => void; reject: (error: unknown) => void };
 type PushPending = { resolve: () => void; reject: (error: unknown) => void };
-type AccountPending = { operation?: ProjectContentOperation; kind: "PROJECT_CONTENT_RESULT" | "ACCOUNTS" | "ACCOUNT_LINK_RESULT" | "ACCOUNT_UPDATE_RESULT" | "BROWSER_CLIENTS" | "BROWSER_CLIENT_REVOKE_RESULT" | "PROJECT_CREATE_RESULT" | "REPOSITORIES" | "REPOSITORY_MUTATE_RESULT"; accountId?: string; entityId?: string; expectedRevision?: bigint; action?: RepositoryMutateBody["action"]; resolve: (value: never) => void; reject: (error: unknown) => void };
+type AccountPending = { operation?: ProjectContentOperation; kind: "ATTACHMENT_RETENTION_RESULT" | "PROJECT_CONTENT_RESULT" | "ACCOUNTS" | "ACCOUNT_LINK_RESULT" | "ACCOUNT_UPDATE_RESULT" | "BROWSER_CLIENTS" | "BROWSER_CLIENT_REVOKE_RESULT" | "PROJECT_CREATE_RESULT" | "REPOSITORIES" | "REPOSITORY_MUTATE_RESULT"; accountId?: string; entityId?: string; expectedRevision?: bigint; action?: RepositoryMutateBody["action"]; resolve: (value: never) => void; reject: (error: unknown) => void };
 
 type GitHubPending = { resolve: (value: GitHubConnectionResult) => void; reject: (error: unknown) => void };
 
@@ -291,6 +292,8 @@ export class BrowserSession {
   #rejectConnect: ((error: unknown) => void) | undefined;
   #terminalHandles = new Set<InternalTerminalHandle>();
   #humanPending = new Map<string, HumanPending>();
+  #attachmentPending = new Map<string, { offset: bigint; resolve: () => void; reject: (error: unknown) => void }>();
+  #uploading = false;
   #taskPending = new Map<string, TaskPending>();
   #agentControlPending = new Map<string, AgentControlPending>();
   #consolePending = new Map<string, ConsolePending>();
@@ -314,9 +317,10 @@ export class BrowserSession {
   get pairingBlocked(): boolean { return this.#pairingBlocked; }
   get authAttempted(): boolean { return this.#authAttempted; }
 
-  enqueueAgentTask(request: { agentId: string; expectedAgentRevision: bigint; repositoryId?: string; instruction: string; mode?: "now" | "queue" | "any" }): Promise<{ taskId: string; revision: bigint }> {
+  enqueueAgentTask(request: { agentId: string; expectedAgentRevision: bigint; repositoryId?: string; instruction: string; mode?: "now" | "queue" | "any"; attachmentCount?: number }): Promise<{ taskId: string; revision: bigint }> {
     try { this.#ensureLive(); } catch (error) { return Promise.reject(error); }
     if (!this.#authenticated) return Promise.reject(new SessionError("unauthorized"));
+    if (this.#uploading && request.attachmentCount === undefined) return Promise.reject(new SessionError("rate_limited"));
     if ((this.#capabilities & CAPABILITIES.human_actions) === 0) return Promise.reject(new SessionError("unauthorized"));
     if (!validDynamicID(request.agentId) || request.repositoryId !== undefined && !validDynamicID(request.repositoryId) || request.expectedAgentRevision < 1n || request.expectedAgentRevision > MAX_SQLITE_INTEGER || request.mode !== undefined && request.mode !== "now" && request.mode !== "queue" && request.mode !== "any") return Promise.reject(new SessionError("invalid_request"));
     const bytes = new TextEncoder().encode(request.instruction).length;
@@ -326,10 +330,34 @@ export class BrowserSession {
     try { taskId = this.#randomID(); incarnationId = this.#randomID(); } catch (error) { return Promise.reject(error); }
     const id = this.#nextID("task-enqueue");
     let payload: string;
-    try { payload = encodeTaskEnqueue(id, { task_id: taskId, incarnation_id: incarnationId, agent_id: request.agentId, ...(request.repositoryId === undefined ? {} : { repository_id: request.repositoryId }), expected_agent_revision: request.expectedAgentRevision, instruction: request.instruction, ...(request.mode === "queue" || request.mode === "any" ? { mode: request.mode } : {}) }); } catch (error) { return Promise.reject(error); }
+    try { payload = encodeTaskEnqueue(id, { task_id: taskId, incarnation_id: incarnationId, agent_id: request.agentId, ...(request.attachmentCount ? { attachment_count: request.attachmentCount } : {}), ...(request.repositoryId === undefined ? {} : { repository_id: request.repositoryId }), expected_agent_revision: request.expectedAgentRevision, instruction: request.instruction, ...(request.mode === "queue" || request.mode === "any" ? { mode: request.mode } : {}) }); } catch (error) { return Promise.reject(error); }
     const result = new Promise<{ taskId: string; revision: bigint }>((resolve, reject) => this.#taskPending.set(id, { taskId, expectedAgentRevision: request.expectedAgentRevision, resolve, reject }));
     try { this.#send(payload); } catch { this.#fail(new SessionError("connection")); }
     return result;
+  }
+
+  /** Chunks share the existing bounded transport, including remote connections. */
+  async enqueueAgentTaskWithFiles(request: Parameters<BrowserSession["enqueueAgentTask"]>[0], files: readonly File[]): Promise<{ taskId: string; revision: bigint }> {
+    this.#ensureLive();
+    if (!this.#authenticated || (this.#capabilities & CAPABILITIES.human_actions) === 0) throw new SessionError("unauthorized");
+    if (this.#uploading) throw new SessionError("rate_limited");
+    if (files.length > MAX_TASK_ATTACHMENTS || files.reduce((n, file) => n + file.size, 0) > MAX_TASK_ATTACHMENT_BYTES || files.some((file) => file.size === 0)) throw new SessionError("too_large");
+    this.#uploading = true;
+    try {
+      for (const [index, file] of files.entries()) {
+        for (let offset = 0; offset < file.size; offset += TASK_ATTACHMENT_CHUNK_BYTES) {
+          const bytes = new Uint8Array(await file.slice(offset, offset + TASK_ATTACHMENT_CHUNK_BYTES).arrayBuffer());
+          this.#ensureLive();
+          if (!this.#authenticated) throw new SessionError("connection");
+          const id = this.#nextID("task-attachment");
+          const payload = encodeTaskAttachment(id, { index, offset: BigInt(offset), size: BigInt(file.size), name: file.name, data: btoa(String.fromCharCode(...bytes)) });
+          const ack = new Promise<void>((resolve, reject) => this.#attachmentPending.set(id, { offset: BigInt(offset + bytes.length), resolve, reject }));
+          try { this.#send(payload); } catch { this.#fail(new SessionError("connection")); }
+          await ack;
+        }
+      }
+      return await this.enqueueAgentTask({ ...request, attachmentCount: files.length });
+    } finally { this.#uploading = false; }
   }
 
   /** One explicit control against the exact task/run the UI just resolved. */
@@ -481,6 +509,11 @@ export class BrowserSession {
 
   /** Private, cursor-paged completed work for one agent. */
   /** Explicit optional library access; it does not subscribe or prefetch. */
+  async attachmentRetention(enabled?: boolean): Promise<boolean> {
+    const result = await this.#accountRequest<{ enabled: boolean }>("ATTACHMENT_RETENTION_RESULT", CAPABILITIES.administration, "attachment-retention", (id) => encodeClientControl({ type: "ATTACHMENT_RETENTION", id, body: enabled === undefined ? {} : { enabled } }));
+    return result.enabled;
+  }
+
   projectContent(operation: ProjectContentOperation, input: ProjectContentInput): Promise<ProjectContentOutput> {
     try { projectContentOperation(operation); } catch (error) { return Promise.reject(error); }
     const write = operation === "create" || operation === "revise" || operation === "deprecate" || operation === "evidence" || operation === "attach" || operation === "outcome_write";
@@ -848,6 +881,11 @@ export class BrowserSession {
       this.#terminalTarget(frame);
       return;
     }
+    if (frame.type === "TASK_ATTACHMENT_RESULT") {
+      const pending = this.#attachmentPending.get(frame.id);
+      if (pending === undefined || pending.offset !== frame.body.offset) throw new ProtocolError("malformed");
+      this.#attachmentPending.delete(frame.id); pending.resolve(); return;
+    }
     if (frame.type === "TASK_ENQUEUE_RESULT") {
       this.#taskResult(frame.body, frame.id);
       return;
@@ -875,7 +913,7 @@ export class BrowserSession {
       pending.resolve();
       return;
     }
-    if (frame.type === "PROJECT_CONTENT_RESULT" || frame.type === "ACCOUNTS" || frame.type === "ACCOUNT_LINK_RESULT" || frame.type === "ACCOUNT_UPDATE_RESULT" || frame.type === "BROWSER_CLIENTS" || frame.type === "BROWSER_CLIENT_REVOKE_RESULT" || frame.type === "PROJECT_CREATE_RESULT" || frame.type === "REPOSITORIES" || frame.type === "REPOSITORY_MUTATE_RESULT") {
+    if (frame.type === "ATTACHMENT_RETENTION_RESULT" || frame.type === "PROJECT_CONTENT_RESULT" || frame.type === "ACCOUNTS" || frame.type === "ACCOUNT_LINK_RESULT" || frame.type === "ACCOUNT_UPDATE_RESULT" || frame.type === "BROWSER_CLIENTS" || frame.type === "BROWSER_CLIENT_REVOKE_RESULT" || frame.type === "PROJECT_CREATE_RESULT" || frame.type === "REPOSITORIES" || frame.type === "REPOSITORY_MUTATE_RESULT") {
       this.#accountResult(frame);
       return;
     }
@@ -964,6 +1002,8 @@ export class BrowserSession {
         if (error.retryable) this.#fail(error);
         return;
       }
+      const upload = this.#attachmentPending.get(id);
+      if (upload !== undefined) { this.#attachmentPending.delete(id); upload.reject(new SessionError(frame.body.code, frame.body.retryable)); return; }
       const task = this.#taskPending.get(id);
       if (task !== undefined) {
         this.#taskPending.delete(id);
@@ -1203,7 +1243,7 @@ export class BrowserSession {
 
   /** Every request still waiting on a result learns the session is gone, once. */
   #closePending(error: SessionError | ProtocolError): void {
-    for (const pending of [this.#targetPending, this.#taskPending, this.#agentControlPending, this.#consolePending, this.#invitePending, this.#pushPending, this.#accountPending, this.#intakePending, this.#githubPending, this.#humanPending]) {
+    for (const pending of [this.#attachmentPending, this.#targetPending, this.#taskPending, this.#agentControlPending, this.#consolePending, this.#invitePending, this.#pushPending, this.#accountPending, this.#intakePending, this.#githubPending, this.#humanPending]) {
       for (const entry of pending.values()) entry.reject(error);
       pending.clear();
     }
@@ -1287,9 +1327,10 @@ export class BrowserSession {
     return result;
   }
 
-  #accountResult(frame: Extract<ServerControlFrame, { type: "PROJECT_CONTENT_RESULT" | "ACCOUNTS" | "ACCOUNT_LINK_RESULT" | "ACCOUNT_UPDATE_RESULT" | "BROWSER_CLIENTS" | "BROWSER_CLIENT_REVOKE_RESULT" | "PROJECT_CREATE_RESULT" | "REPOSITORIES" | "REPOSITORY_MUTATE_RESULT" }>): void {
+  #accountResult(frame: Extract<ServerControlFrame, { type: "ATTACHMENT_RETENTION_RESULT" | "PROJECT_CONTENT_RESULT" | "ACCOUNTS" | "ACCOUNT_LINK_RESULT" | "ACCOUNT_UPDATE_RESULT" | "BROWSER_CLIENTS" | "BROWSER_CLIENT_REVOKE_RESULT" | "PROJECT_CREATE_RESULT" | "REPOSITORIES" | "REPOSITORY_MUTATE_RESULT" }>): void {
     const pending = this.#accountPending.get(frame.id);
     if (pending === undefined || pending.kind !== frame.type) throw new ProtocolError("malformed");
+    if (frame.type === "ATTACHMENT_RETENTION_RESULT") { this.#accountPending.delete(frame.id); pending.resolve(Object.freeze(frame.body) as never); return; }
     if (frame.type === "PROJECT_CONTENT_RESULT") {
       if (pending.operation !== frame.body.operation) throw new ProtocolError("malformed");
       this.#accountPending.delete(frame.id);
