@@ -66,19 +66,6 @@ export function FactoryApp({ onStatusChange, browserPort }: FactoryAppProps = {}
     previousSelectedAgentID.current = selectedAgentID;
   }, [selectedAgentID]);
 
-  // A lone decision has no competing context. Open it once; a collapsed item
-  // remains collapsed until the factory asks a different question.
-  const openedHumanRequest = useRef<string | undefined>(undefined);
-  const loneHumanRequest = snapshot.state !== undefined && snapshot.state.humanRequests.size === 1 ? snapshot.state.humanRequests.values().next().value : undefined;
-  useEffect(() => {
-    const controller = owner.current;
-    const request = loneHumanRequest;
-    if (controller === undefined || snapshot.status !== "ready" || snapshot.selectedHumanRequest !== undefined || request === undefined || openedHumanRequest.current === request.id) return;
-    openedHumanRequest.current = request.id;
-    setDetail("needs-you");
-    void controller.selectHumanRequest(request);
-  }, [snapshot.status, snapshot.selectedHumanRequest, loneHumanRequest]);
-
   // The floor's rooms are regenerable, so they are fetched when the floor is
   // shown, whenever a fresh session becomes ready, and whenever the set of
   // projects changes under them.
@@ -125,6 +112,7 @@ export function FactoryApp({ onStatusChange, browserPort }: FactoryAppProps = {}
       settingsOpen={settingsOpen}
       onToggleSettings={() => setSettingsOpen((open) => !open)}
       onSelectAgent={(agent) => { setDetail("agent"); setAgentPanel("terminal"); owner.current?.selectAgent(agent); }}
+      onSetDispatch={snapshot.dispatchAllowed ? (revision, enabled) => owner.current?.setDispatch(revision, enabled) ?? Promise.reject(new Error("closed")) : undefined}
       onAttachmentRetention={(enabled) => owner.current?.attachmentRetention(enabled) ?? Promise.reject(new Error("closed"))}
       onProjectContent={(operation, input) => owner.current?.projectContent(operation, input) ?? Promise.reject(new Error("closed"))}
       onDraftLibraryTask={(agent, instruction) => { setDetail("agent"); setAgentPanel("terminal"); owner.current?.selectAgent(agent); owner.current?.setAgentInstructionDraft(instruction); }}

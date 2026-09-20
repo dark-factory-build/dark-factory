@@ -794,13 +794,13 @@ func listOutcomesOnConnection(ctx context.Context, c *sql.Conn, project ProjectI
 	if limit == 0 {
 		limit = 16
 	}
-	query := "SELECT id, MAX(revision) FROM project_outcome_revisions WHERE project_id = ?"
+	query := "SELECT id, revision FROM project_outcome_revisions current WHERE project_id = ? AND revision = (SELECT MAX(revision) FROM project_outcome_revisions latest WHERE latest.id = current.id)"
 	args := []any{project.Bytes()}
 	if kind != "" {
 		query += " AND json_extract(document, '$.kind') = ?"
 		args = append(args, kind)
 	}
-	query += " GROUP BY id ORDER BY id LIMIT ? OFFSET ?"
+	query += " ORDER BY id LIMIT ? OFFSET ?"
 	args = append(args, limit+1, offset)
 	rows, err := c.QueryContext(ctx, query, args...)
 	if err != nil {

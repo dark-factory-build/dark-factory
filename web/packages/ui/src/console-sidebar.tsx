@@ -307,7 +307,7 @@ export function QueuePanel({
     </section>;
   };
   return <section className="dfConsoleSidebar__panel" aria-label="Tasks">
-    {state.factory.dispatch_enabled ? null : <p role="status">Dispatch is off — queued tasks will not start. Run factoryctl dispatch on.</p>}
+    {state.factory.dispatch_enabled ? null : <p role="status">New work is paused. Queued tasks wait; active processes continue. An administrator can resume new work above.</p>}
     {onAddTask === undefined ? null : <NewTask agents={agents} state={state} disabled={!ready || edit?.pending === true} onAddTask={onAddTask} />}
     {opened("blocked", "Blocked")}
     {opened("running", "Running")}

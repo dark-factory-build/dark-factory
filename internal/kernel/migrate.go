@@ -593,11 +593,8 @@ func v25SchemaStatements() []string {
 
 func v30SchemaStatements() []string {
 	statements := make([]string, 0, len(schemaStatements))
-	for _, statement := range schemaStatements {
+	for _, statement := range v31SchemaStatements() {
 		_, name := schemaObjectIdentity(statement)
-		if name == "mission_task_bindings" || name == "mission_task_bindings_mission" {
-			continue
-		}
 		switch name {
 		case "intake_sources":
 			statement = `CREATE TABLE intake_sources (
@@ -644,7 +641,16 @@ func v30SchemaStatements() []string {
 	return statements
 }
 
-func v31SchemaStatements() []string { return v30SchemaStatements() }
+func v31SchemaStatements() []string {
+	var statements []string
+	for _, statement := range schemaStatements {
+		_, name := schemaObjectIdentity(statement)
+		if name != "mission_task_bindings" && name != "mission_task_bindings_mission" {
+			statements = append(statements, statement)
+		}
+	}
+	return statements
+}
 
 func v29SchemaStatements() []string {
 	var statements []string
@@ -1550,7 +1556,7 @@ func migrateV30Transaction(ctx context.Context, connection *sql.Conn) error {
 	if err := validateSchemaVersion(ctx, connection, v30UserVersion, v30SchemaStatements()); err != nil {
 		return err
 	}
-	target := expectedSchemaOf(schemaStatements)
+	target := expectedSchemaOf(v31SchemaStatements())
 	if err := rebuildTable(ctx, connection, target, "intake_sources", strings.TrimSuffix(intakeSourceColumns, ", linear_team_id"), "intake_sources_repository_destination", "linear_team_id", "''"); err != nil {
 		return err
 	}

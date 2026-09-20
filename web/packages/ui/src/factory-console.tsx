@@ -5,13 +5,14 @@ import type { FactoryGitHubView } from "./factory-settings-coordinator.js";
 import { AgentList, FactoryFloor } from "./console-screens.js";
 import { AgentPanel, ConsoleDialog, HumanRequestPanel, QueuePanel, TaskDetail, SettingsDialog, editErrorCopy, type AgentConfigEdit, type AgentPanelView, type TaskEdit, type TaskBrief } from "./console-sidebar.js";
 import { ProjectLibrary, type ProjectContentCall } from "./project-library.js";
+import { MissionsPanel } from "./missions-panel.js";
 import { RemoteInvitePanel } from "./remote-invite.js";
 import { factoryCounters } from "./console-view.js";
 import { SpriteEditor } from "./factory-scene/sprite-editor.js";
 import { DEFAULT_FLOOR_APPEARANCE, loadFloorAppearance, resetFloorAppearance, saveFloorAppearance, type FloorAppearance } from "./floor-appearance.js";
 
 export type ConsoleView = "floor" | "agents";
-export type ConsoleDetail = "needs-you" | "queue" | "agent" | "floor";
+export type ConsoleDetail = "needs-you" | "queue" | "missions" | "agent" | "floor";
 
 export type FactoryConsoleProps = FactoryAppSnapshot & {
   view?: ConsoleView;
@@ -26,6 +27,7 @@ export type FactoryConsoleProps = FactoryAppSnapshot & {
   onToggleSettings?: () => void;
   selectedAgent?: FactoryAgentSelection;
   onSelectAgent?: (agent: AgentItem) => void;
+  onSetDispatch?: (expectedRevision: bigint, enabled: boolean) => Promise<{ revision: bigint; enabled: boolean }>;
   onAttachmentRetention?: (enabled?: boolean) => Promise<boolean>;
   onProjectContent?: ProjectContentCall;
   onDraftLibraryTask?: (agent: AgentItem, instruction: string) => void;
@@ -117,6 +119,7 @@ export function FactoryConsole({
   selectedHumanRequest,
   selectedAgent,
   onSelectAgent,
+  onSetDispatch,
   onAttachmentRetention,
   onProjectContent,
   onDraftLibraryTask,
@@ -186,6 +189,9 @@ export function FactoryConsole({
     resetFloorAppearance();
     setFloorAppearance(DEFAULT_FLOOR_APPEARANCE);
   };
+  const [dispatchPending, setDispatchPending] = useState(false);
+  const [dispatchNotice, setDispatchNotice] = useState("");
+  const [dispatchError, setDispatchError] = useState("");
   const [chosenProjectId, setProjectId] = useState<string>();
   const projectId = chosenProjectId !== undefined && state?.projects.has(chosenProjectId) ? chosenProjectId : undefined;
   const selectProject = (next: string | undefined) => {
@@ -219,6 +225,11 @@ export function FactoryConsole({
             {[...state?.projects.values() ?? []].sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id)).map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
           </select></label>
           <div className="dfConsoleBar__actions">
+            <button type="button" disabled={!ready || state === undefined || onSetDispatch === undefined || dispatchPending} title={onSetDispatch === undefined ? "Administrator access is required to change new-work admission." : "Controls admission of new work. Active processes continue."} onClick={() => {
+              if (state === undefined || onSetDispatch === undefined || dispatchPending) return;
+              setDispatchPending(true); setDispatchError(""); setDispatchNotice("");
+              void onSetDispatch(state.factory.revision, !state.factory.dispatch_enabled).then((result) => setDispatchNotice(result.enabled ? "New work resumed." : "New work paused. Active processes continue."), () => setDispatchError("The admission change could not be confirmed. Check connection and administrator access, then refresh before retrying.")).finally(() => setDispatchPending(false));
+            }}>{dispatchPending ? "Waiting…" : state?.factory.dispatch_enabled ? "Pause new work" : "Resume new work"}</button>
             <button type="button" aria-pressed={settingsOpen === true} disabled={onToggleSettings === undefined} onClick={onToggleSettings}>Settings</button>
           </div>
           <div
@@ -232,6 +243,9 @@ export function FactoryConsole({
           </div>
         </header>
 
+        {ready && onSetDispatch === undefined ? <p className="dfConsoleSidebar__inherit">Administrator access is required to pause or resume new work.</p> : null}
+        {dispatchNotice === "" ? null : <p className="dfConsoleSidebar__status" role="status">{dispatchNotice}</p>}
+        {dispatchError === "" ? null : <p role="alert">{dispatchError}</p>}
         {error === undefined ? null : (
           <p className="dfFactoryConsole__error" role="alert">
             {ERROR_LABELS.get(error.code) ?? "The connection could not continue."}
@@ -241,6 +255,7 @@ export function FactoryConsole({
         {onDetail === undefined ? null : <nav className="dfMobileNav dfConsoleViewToggle" aria-label="Console views">
           <button type="button" aria-pressed={detail === "floor" && view === "floor"} disabled={!ready} onClick={() => { onView?.("floor"); onDetail("floor"); }}>Floor</button>
           <button type="button" aria-pressed={detail === "floor" && view === "agents"} disabled={!ready || onView === undefined} onClick={() => { onView?.("agents"); onDetail("floor"); }}>Agents</button>
+          <button type="button" aria-pressed={detail === "missions"} disabled={!ready} onClick={() => onDetail("missions")}>Missions</button>
           <button type="button" aria-pressed={detail === "queue"} disabled={!ready} onClick={() => onDetail("queue")}>Tasks</button>
           <button type="button" aria-pressed={detail !== "floor" && selectedDetail === "needs-you"} disabled={!ready} onClick={() => onDetail("needs-you")}>Needs you {counters.needsYou || ""}</button>
         </nav>}
@@ -263,13 +278,14 @@ export function FactoryConsole({
               </div>
             </div>
             {view === "floor"
-              ? <FactoryFloor projectId={projectId} onProject={selectProject} floorAppearance={floorAppearance} selectedTaskId={selectedTask?.id} onSelectTask={ready ? selectTask : undefined} selectedAgentId={selectedDetail === "agent" ? selectedAgent?.id : undefined} state={scopedState} topologies={topologies} runPaths={runPaths} lastRunPaths={lastRunPaths} onSelectAgent={ready ? onSelectAgent : undefined} onSelectHumanRequest={ready ? onSelectHumanRequest : undefined} connected={ready} />
+              ? <FactoryFloor onOpenTasks={ready ? (id) => { selectProject(id); onDetail?.("queue"); } : undefined} onOpenMissions={ready ? (id) => { selectProject(id); onDetail?.("missions"); } : undefined} projectId={projectId} onProject={selectProject} floorAppearance={floorAppearance} selectedTaskId={selectedTask?.id} onSelectTask={ready ? selectTask : undefined} selectedAgentId={selectedDetail === "agent" ? selectedAgent?.id : undefined} state={scopedState} topologies={topologies} runPaths={runPaths} lastRunPaths={lastRunPaths} onSelectAgent={ready ? onSelectAgent : undefined} onSelectHumanRequest={ready ? onSelectHumanRequest : undefined} connected={ready} />
               : <AgentList state={scopedState} selectedAgentId={selectedAgent?.id} ready={ready} onSelectAgent={ready ? onSelectAgent : undefined} />}
           </section>
 
           <aside className="dfConsoleSidebar" aria-label="Selected detail">
             <div className="dfConsoleViewToggle" role="group" aria-label="Right panel">
               <button type="button" aria-pressed={selectedDetail === "needs-you"} disabled={!ready || onDetail === undefined} onClick={() => onDetail?.("needs-you")}>Needs you <span>{counters.needsYou ?? "—"}</span></button>
+              <button type="button" aria-pressed={selectedDetail === "missions"} disabled={!ready || onDetail === undefined} onClick={() => onDetail?.("missions")}>Missions</button>
               <button type="button" aria-pressed={selectedDetail === "queue"} disabled={!ready || onDetail === undefined} onClick={() => onDetail?.("queue")}>Tasks</button>
               <button type="button" aria-pressed={selectedDetail === "agent"} disabled={!ready || onDetail === undefined} onClick={() => onDetail?.("agent")}>Agent</button>
             </div>
@@ -291,6 +307,7 @@ export function FactoryConsole({
                 />}
               />
             </div>
+            <div hidden={selectedDetail !== "missions"}><MissionsPanel onLoadTaskDetail={onLoadTaskDetail} onLoadTaskHistory={onLoadTaskHistory} state={state} projectId={projectId} active={selectedDetail === "missions"} call={ready ? onProjectContent : undefined} onProject={selectProject} onSelectAgent={ready ? onSelectAgent : undefined} onSelectTask={ready ? selectTask : undefined} /></div>
             <div hidden={selectedDetail !== "queue"}>
               <QueuePanel
                 state={scopedState}
@@ -321,8 +338,8 @@ export function FactoryConsole({
                 onPanel={onAgentPanel}
               />}
             </div>
-            {selectedTask === undefined || (selectedTask.status === "queued" && onEditTask !== undefined) ? null : <ConsoleDialog key={selectedTask.id} label="Task details" title="TASK" onClose={() => onSelectTask?.(undefined)}>
-              <TaskDetail key={`${selectedTask.id}:${selectedTask.revision}`} task={selectedTask} onLoadTaskDetail={onLoadTaskDetail} onLoadTaskHistory={onLoadTaskHistory} />
+            {(onDetail !== undefined && selectedDetail !== "queue") || selectedTask === undefined || (selectedTask.status === "queued" && onEditTask !== undefined) ? null : <ConsoleDialog key={selectedTask.id} label="Task details" title="TASK" onClose={() => onSelectTask?.(undefined)}>
+              <TaskDetail key={selectedTask.id} task={selectedTask} onLoadTaskDetail={onLoadTaskDetail} onLoadTaskHistory={onLoadTaskHistory} />
             </ConsoleDialog>}
           </aside>
         </div>

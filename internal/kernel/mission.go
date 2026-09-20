@@ -4,7 +4,9 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/json"
 	"fmt"
+	"unicode/utf8"
 )
 
 // MissionCreate is the one transaction that establishes a mission's durable
@@ -32,7 +34,22 @@ func (store *Store) ListMissionTasks(ctx context.Context, project ProjectID, mis
 		return nil, 0, err
 	}
 	defer tx.Close()
-	rows, err := tx.connection.QueryContext(ctx, `SELECT task_id FROM mission_task_bindings WHERE project_id = ? AND mission_id = ? ORDER BY created_at_ms, task_id LIMIT ? OFFSET ?`, project.Bytes(), mission.Bytes(), limit+1, offset)
+	objective, err := outcomeOnConnection(ctx, tx.connection, project, mission, 0)
+	if err != nil {
+		return nil, 0, err
+	}
+	if objective.Document.Kind != "mission" {
+		return nil, 0, ErrInvalidValue
+	}
+	links, err := json.Marshal(objective.Document.Links)
+	if err != nil {
+		return nil, 0, err
+	}
+	rows, err := tx.connection.QueryContext(ctx, `SELECT id FROM tasks WHERE project_id = ? AND (
+        id IN (SELECT task_id FROM mission_task_bindings WHERE mission_id = ?)
+        OR lower(hex(id)) = ?
+        OR lower(hex(id)) IN (SELECT json_extract(value, '$.task_id') FROM json_each(?)))
+        ORDER BY created_at_ms, id LIMIT ? OFFSET ?`, project.Bytes(), mission.Bytes(), objective.Document.AnchorTaskID, string(links), limit+1, offset)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -112,9 +129,9 @@ func (store *Store) CreateMissionForBrowser(ctx context.Context, clientID Browse
 		return MissionCreateResult{}, tx.Rollback(ErrRevisionConflict)
 	}
 	title := spec.Objective
-	for byteLen(title) > 1024 {
-		title = title[:len(title)-1]
-		for len(title) > 0 && title[len(title)-1]&0xc0 == 0x80 {
+	if len(title) > 1024 {
+		title = title[:1024]
+		for !utf8.ValidString(title) {
 			title = title[:len(title)-1]
 		}
 	}
@@ -154,14 +171,20 @@ func (store *Store) CreateMissionForBrowser(ctx context.Context, clientID Browse
 	if err != nil {
 		return MissionCreateResult{}, tx.Rollback(err)
 	}
-	if err = tx.Commit(ctx); err != nil {
-		return MissionCreateResult{}, err
-	}
+	// writeOutcomeTx commits the anchor, binding and outcome together.
 	return MissionCreateResult{Mission: mission, Anchor: anchor}, nil
 }
 
 // BindMissionChild records delegation from a mission-owned parent task.
 func bindMissionChild(ctx context.Context, connection *sql.Conn, parent, child TaskID, project ProjectID, at UnixMillis) error {
-	_, err := connection.ExecContext(ctx, `INSERT INTO mission_task_bindings (mission_id, task_id, parent_task_id, project_id, created_at_ms) SELECT mission_id, ?, ?, ?, ? FROM mission_task_bindings WHERE task_id = ?`, child.Bytes(), parent.Bytes(), project.Bytes(), at.Int64(), parent.Bytes())
+	_, err := connection.ExecContext(ctx, `INSERT INTO mission_task_bindings (mission_id, task_id, parent_task_id, project_id, created_at_ms)
+        SELECT mission_id, ?, ?, ?, ? FROM mission_task_bindings WHERE task_id = ?
+        UNION
+        SELECT id, ?, ?, ?, ? FROM project_outcome_revisions current WHERE project_id = ?
+        AND revision = (SELECT MAX(revision) FROM project_outcome_revisions latest WHERE latest.id = current.id)
+        AND json_extract(document, '$.kind') = 'mission'
+        AND (json_extract(document, '$.anchor_task_id') = ? OR ? IN (SELECT json_extract(value, '$.task_id') FROM json_each(document, '$.links')))`,
+		child.Bytes(), parent.Bytes(), project.Bytes(), at.Int64(), parent.Bytes(),
+		child.Bytes(), parent.Bytes(), project.Bytes(), at.Int64(), project.Bytes(), parent.String(), parent.String())
 	return err
 }

@@ -159,9 +159,8 @@ var schemaStatements = []string{
     PRIMARY KEY(acceptance_id, reviewed_at_ms)
 ) STRICT, WITHOUT ROWID`,
 	`CREATE TABLE intake_task_bindings (
-    task_id BLOB NOT NULL CHECK (length(task_id) = 16) REFERENCES tasks(id),
-    acceptance_id BLOB NOT NULL CHECK (length(acceptance_id) = 16) REFERENCES intake_acceptances(id),
-    PRIMARY KEY (task_id)
+    task_id BLOB PRIMARY KEY CHECK (length(task_id) = 16) REFERENCES tasks(id),
+    acceptance_id BLOB NOT NULL CHECK (length(acceptance_id) = 16) REFERENCES intake_acceptances(id)
 ) STRICT, WITHOUT ROWID`,
 	`CREATE INDEX intake_task_bindings_acceptance ON intake_task_bindings(acceptance_id, task_id)`,
 	`CREATE UNIQUE INDEX project_repositories_root_unique ON project_repositories(root)`,
