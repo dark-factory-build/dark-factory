@@ -725,6 +725,42 @@ test("resting workers take fair, uninterrupted turns at the break-room furniture
   assert.equal((render({ appearance: { scenery: "off", animation: "on" } }).match(/data-break-room=/g) ?? []).length, 0);
 });
 
+test("a floor mounted late still starts seated, then someone gets up, stands at the furniture, and comes back", async () => {
+  const saved = { setTimeout: globalThis.setTimeout, clearTimeout: globalThis.clearTimeout, performance: globalThis.performance, requestAnimationFrame: globalThis.requestAnimationFrame, cancelAnimationFrame: globalThis.cancelAnimationFrame };
+  // The page has been open a while: well past any first free turn counted from zero.
+  let clock = 47000, next = 0;
+  const timers = new Map(), frames = new Map();
+  globalThis.performance = { now: () => clock };
+  globalThis.setTimeout = (callback) => { timers.set(++next, callback); return next; };
+  globalThis.clearTimeout = (id) => timers.delete(id);
+  globalThis.requestAnimationFrame = (callback) => { frames.set(++next, callback); return next; };
+  globalThis.cancelAnimationFrame = (id) => frames.delete(id);
+  const resting = Array.from({ length: 10 }, (_, index) => ({ ...workers[0], id: `habit-${String(index).padStart(2, "0")}`, activity: "idle", location: "resting", nodeId: undefined }));
+  let renderer;
+  try {
+    await act(async () => { renderer = create(createElement(FactoryScene, { topology: inventoryTopology, workers: resting, connected: true })); });
+    const mounted = clock;
+    const pieces = breakRoomNook(layoutScene(inventoryTopology), resting.length, 0).furniture.length;
+    const away = () => renderer.root.findAll((node) => typeof node.props["data-tooltip"] === "string" && /at the (bookshelf|coffee station)/.test(node.props["data-tooltip"]));
+    const standingWithIt = () => away().some((node) => node.parent.props["data-worker-action"] === "still" && node.findAllByType("use").some((use) => /held\.(book|cup)\.chest/.test(use.props.href)));
+    let firstAway, stood = false, cameBack = false;
+    for (let step = 0; step < 1500 && !cameBack; step++) {
+      clock += 100;
+      const due = [...frames.values(), ...timers.values()]; frames.clear(); timers.clear();
+      await act(async () => { for (const callback of due) callback(clock); });
+      if (away().length > 0) { firstAway ??= clock - mounted; stood ||= standingWithIt(); }
+      else if (stood) cameBack = true;
+      assert.ok(away().length <= pieces, "never more visitors than furniture");
+    }
+    assert.ok(firstAway >= 8000, `nobody gets up during the floor's first free turn, however long the page has been open: ${firstAway}`);
+    assert.ok(stood, "the visitor arrives and stands with the thing in hand");
+    assert.ok(cameBack, "and sits down again");
+  } finally {
+    if (renderer) await act(async () => renderer.unmount());
+    for (const [key, value] of Object.entries(saved)) { if (value === undefined) delete globalThis[key]; else globalThis[key] = value; }
+  }
+});
+
 test("a walking worker is drawn facing where they go, and only a westward walk is mirrored", async () => {
   const topology = inventoryTopology;
   const saved = { requestAnimationFrame: globalThis.requestAnimationFrame, cancelAnimationFrame: globalThis.cancelAnimationFrame, performance: globalThis.performance };

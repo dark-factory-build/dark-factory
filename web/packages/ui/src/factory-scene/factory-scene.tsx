@@ -221,7 +221,12 @@ function SceneWorkers({ errands, furniture, layout, placements, nodes, workers, 
     return placeErrands(seatedPlacements, nook, (id) => { const worker = byId.get(id); return worker === undefined ? undefined : breakRoomHabit(worker); }, errandClock);
   }, [seatedPlacements, errandClock, errands, layout, workers]);
   const { positions, pulse } = useSceneMotion(layout, placements, geometryKey, connected && animate, active);
-  const errandBeat = pulse === undefined ? undefined : Math.floor(pulse / 2000) * 2000;
+  // Turns are counted from when this floor first moved, not from when the page opened,
+  // so a floor mounted late still begins with everyone seated.
+  // (The pulse itself reads zero on a first render, so the start is read on mount.)
+  const floorStarted = useRef<number | undefined>(undefined);
+  useEffect(() => { floorStarted.current = now(); }, []);
+  const errandBeat = pulse === undefined || floorStarted.current === undefined || pulse < floorStarted.current ? undefined : Math.floor((pulse - floorStarted.current) / 2000) * 2000;
   useEffect(() => setErrandClock(errandBeat), [errandBeat]);
   const workerById = new Map(workers.map((worker) => [worker.id, worker]));
   return <>{placements.map((placement) => {
