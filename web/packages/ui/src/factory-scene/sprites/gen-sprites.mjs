@@ -367,6 +367,215 @@ add('person.held.cup', pixels => draw(pixels, cup, 8, 6));
 add('person.held.pencil.0', pixels => draw(pixels, grid(`..y\n.y.\no..`), 10, 9));
 // The pencil tips upright between strokes, beside the hand rather than over it.
 add('person.held.pencil.1', pixels => draw(pixels, grid(`y\ny\no`), 11, 8));
+// Walking away and walking across are their own drawings, not the front view
+// slid sideways. The back has no face and carries its tool on the other side;
+// the profile has one eye, one visible arm and scissoring legs. West is east
+// mirrored by the scene, so only east is drawn.
+const headBack = grid(`
+  .oooo.
+  oaaaao
+  oaaaao
+  oaaaao
+  .obbo.
+  ..bb..
+`);
+const headSide = grid(`
+  .oooo..
+  oaaaao.
+  oaaaoo.
+  oaaaaao
+  .obbbo.
+  ..ba...
+`);
+const hairBack = [
+  grid(`
+    ..oooo..
+    .ouuuuo.
+    .ouuuuo.
+    .ouuuuo.
+  `),
+  grid(`
+    .oooooo.
+    .ouumuo.
+    .ouumuo.
+    .ouuuuo.
+  `),
+  grid(`
+    ..oo.oo.
+    .ouuouuo
+    ouuuuuuo
+    ouuuuuuo
+    .ouuuuo.
+  `),
+  grid(`
+    ..oooo..
+    .ouuuuo.
+    .ouuuuo.
+    .ouuuuo.
+    ..ouuo..
+    ...uu...
+    ...uu...
+  `),
+];
+const hairSide = [
+  grid(`
+    ..oooo..
+    .ouuuuo.
+    .ouu....
+    .ou.....
+  `),
+  grid(`
+    .oooooo.
+    .ouumuo.
+    .ouu....
+    .ou.....
+  `),
+  grid(`
+    ..oo.oo.
+    .ouuouuo
+    ouuu....
+    ouu.....
+    .u......
+  `),
+  grid(`
+    ..oooo..
+    .ouuuuo.
+    ouuu....
+    uou.....
+    uo......
+    uo......
+  `),
+];
+const outfitsBack = [
+  grid(`
+    ........
+    ..o..o..
+    .ouuuuo.
+    ouuuuuuo
+    ouuuuuuo
+    ouuuuuuo
+    ouo..ouo
+  `),
+  grid(`
+    ........
+    ........
+    .ouppuo.
+    oppuuppo
+    opuuuupo
+    ouuuuuuo
+    .ouuuuo.
+  `),
+  grid(`
+    ........
+    ........
+    ..ouuo..
+    .ouuuuo.
+    .ouuuuo.
+    .ouuuuo.
+    ..oooo..
+  `),
+  grid(`
+    .ouuuuo.
+    ouuuuuuo
+    ouummuuo
+    .ouuuuo.
+    ouuuuuuo
+    ouuuuuuo
+    .oooooo.
+  `),
+];
+const outfitsSide = [
+  grid(`
+    ........
+    ...oo...
+    .ouuupo.
+    .ouuupo.
+    .ouuupo.
+    .ouuupo.
+    .ouuuuo.
+  `),
+  grid(`
+    ........
+    ........
+    .opuuuo.
+    .opuuuo.
+    .ouuuuo.
+    .ouuuuo.
+    .ouuuuo.
+  `),
+  grid(`
+    ........
+    ........
+    ..ouuo..
+    ..ouuuo.
+    ..ouuuo.
+    ..ouuuo.
+    ..ooooo.
+  `),
+  grid(`
+    ..ouo...
+    .ouuuo..
+    .ouuuuo.
+    .ouuuuo.
+    .ouupuo.
+    .ouuumo.
+    .oooooo.
+  `),
+];
+// The near arm swings ahead of the body on one step and behind it on the next.
+// It is outlined on its trailing edge only, so the torso keeps its colour.
+const swingingArm = grid(`
+  .uo.
+  .uo.
+  ..ao
+  ..oo
+`);
+const views = {
+  back: { head: headBack, hair: hairBack, outfits: outfitsBack, arms: pose => arms(pose).map((part, index) => [part, ...armPosition(pose, index)]) },
+  side: { head: headSide, hair: hairSide, outfits: outfitsSide, arms: pose => [pose === 'walk.0' ? [swingingArm, 7, 9] : [mirror(swingingArm), 4, 9]] },
+};
+const strides = ['walk.0', 'walk.1'];
+for (const [view, art] of Object.entries(views)) {
+  for (const [skinIndex, tone] of skinTones.entries()) for (const pose of strides) add(`person.skin.${skinIndex}.${view}.${pose}`, pixels => {
+    const colour = rows => rows.map(row => row.replace(/[ab]/g, key => key === 'a' ? tone.skin : tone.shadow));
+    draw(pixels, colour(art.head), 5, 2);
+    for (const [part, x, y] of art.arms(pose)) draw(pixels, keep(colour(part).map(row => row.replaceAll('u', tone.skin)), [tone.skin, tone.shadow]), x, y);
+  });
+  for (const [outfitIndex, outfit] of art.outfits.entries()) for (const [colourIndex, colour] of clothesColours.entries()) for (const pose of strides) add(`person.outfit.${outfitIndex}.${colourIndex}.${view}.${pose}`, pixels => {
+    draw(pixels, tint(outfit, colour.colour), 4, 6);
+    // As from the front, the back of a pair of overalls keeps the split between its legs.
+    if (outfitIndex === 1 && view === 'back') draw(pixels, [legs[0].replaceAll('m', colour.colour)], 4, 12);
+    for (let [part, x, y] of art.arms(pose)) {
+      if (outfitIndex === 2) part = part.map((row, dy) => y + dy === 9 ? row : row.replaceAll('u', 'a'));
+      part.forEach((row, dy) => [...row].forEach((key, dx) => { if (key === 'a' || key === 'b') pixels[y + dy][x + dx] = '.'; }));
+      draw(pixels, keep(tint(part, colour.colour), ['o', colour.colour]), x, y);
+    }
+  });
+  for (const [hairIndex, style] of art.hair.entries()) for (const [colourIndex, colour] of hairColours.entries()) add(`person.hair.${hairIndex}.${colourIndex}.${view}`, pixels => draw(pixels, tint(style, colour.colour), 4, 1));
+}
+// From behind a cap has no peak and a headset no boom; in profile the headset
+// shows one cup with the boom reaching forward. A hard hat is round all the way.
+const headwearViews = {
+  back: [[], hat, grid(`..oooo..\n.otttto.\n.otttto.`), grid(`..ssssss..\n.s......s.\n.s......s.\nss......ss\nss......ss`)],
+  side: [[], hat, headwear[2].part, grid(`...ssss...\n...s......\n...s......\n...sss....\n...sts....\n....ssss..\n.......s..`)],
+};
+for (const [view, parts] of Object.entries(headwearViews)) for (const [hatIndex, part] of parts.entries()) add(`person.headwear.${hatIndex}.${view}`, pixels => draw(pixels, part, headwear[hatIndex].x, headwear[hatIndex].y));
+const faceSide = [[], grid(`sso`), grid(`hh\n.h`), grid(`hh`)];
+for (const [featureIndex, part] of faceSide.entries()) add(`person.face.${featureIndex}.side`, pixels => draw(pixels, part, featureIndex === 1 ? 7 : 8, featureIndex === 1 ? 4 : 6));
+const sideStride = { 'walk.0': grid(`..ommo..\n.omoomo.\n.oo..oo.`), 'walk.1': grid(`..ommo..\n..ommo..\n..oooo..`) };
+for (const [cloth, colour] of [['plain', 'm'], ...clothesColours.map(({ colour }, index) => [index, colour])]) for (const [pose, part] of Object.entries(sideStride)) {
+  add(`person.legs.${cloth}.side.${pose}`, pixels => draw(pixels, part.map(row => row.replaceAll('m', colour)), 4, cloth === 'plain' ? 13 : 12));
+}
+const sideShoes = { 'walk.0': grid(`........\n.uu..uu.\n.ouo.ouo`), 'walk.1': grid(`........\n...uu...\n...ouuo.`) };
+for (const [shoeIndex, colour] of shoes.entries()) for (const [pose, part] of Object.entries(sideShoes)) add(`person.shoes.${shoeIndex}.side.${pose}`, pixels => draw(pixels, tint(part, colour.colour), 4, 13));
+// The tool stays in its hand: mirrored across the body from behind, and out
+// ahead or trailing with the swinging arm in profile.
+for (const [toolIndex, tool] of tools.entries()) {
+  const wide = tool.part[0]?.length ?? 0;
+  for (const [grip, lift] of [['low', 0], ['high', 1]]) add(`person.tool.${toolIndex}.back.${grip}`, pixels => draw(pixels, mirror(tool.part), 16 - tool.x - wide, tool.y - lift));
+  add(`person.tool.${toolIndex}.side.walk.0`, pixels => draw(pixels, tool.part, 10, tool.y));
+  add(`person.tool.${toolIndex}.side.walk.1`, pixels => draw(pixels, mirror(tool.part), 5 - wide, tool.y));
+}
 // Compare finished portraits: transparent layer differences can disappear in composition.
 const legPose = pose => pose.startsWith('walk') ? pose : 'stand';
 // Busy hands put the tool down: a cup, a keyboard or a pencil takes its place.
@@ -433,6 +642,44 @@ for (const pose of poses) for (const [group, options] of Object.entries(optionGr
 }
 assert.deepEqual([...new Set(report)], [], 'A feature hides a pose');
 for (const pose of ['idle', 'wave.0', 'walk.0', 'sip']) assert.equal(portrait(pose, { outfit: 1 })[12].slice(7, 9).join(''), 'oo', `Overalls lost the split between their legs: ${pose}`);
+// The same promises hold walking away and walking across: every choice a person
+// can make still tells them apart where it can be seen, both steps differ, and
+// nothing worn hides the swinging hand.
+const turned = (view, pose, appearance = {}) => {
+  const v = { skin: 1, hair: 0, hair_colour: 1, face: 0, outfit: 0, clothes_colour: 0, shoes: 0, tool: 0, headwear: 0, ...appearance };
+  const cloth = v.outfit === 1 ? v.clothes_colour : 'plain';
+  const names = view === 'back'
+    ? [`skin.${v.skin}.back.${pose}`, `legs.${cloth}.${pose}`, `outfit.${v.outfit}.${v.clothes_colour}.back.${pose}`, `hair.${v.hair}.${v.hair_colour}.back`, `shoes.${v.shoes}.${pose}`, `headwear.${v.headwear}.back`, `tool.${v.tool}.back.${pose === 'walk.0' ? 'high' : 'low'}`]
+    : [`skin.${v.skin}.side.${pose}`, `legs.${cloth}.side.${pose}`, `outfit.${v.outfit}.${v.clothes_colour}.side.${pose}`, `hair.${v.hair}.${v.hair_colour}.side`, `face.${v.face}.side`, `shoes.${v.shoes}.side.${pose}`, `headwear.${v.headwear}.side`, `tool.${v.tool}.side.${pose}`, 'system.worker.codex'];
+  const pixels = blank();
+  for (const name of names) draw(pixels, sprites.get(`person.${name}`).map(row => row.join('')));
+  return pixels;
+};
+for (const [view, art] of Object.entries(views)) {
+  assert.notDeepEqual(turned(view, 'walk.0'), turned(view, 'walk.1'), `Indistinguishable steps: ${view}`);
+  assert.notDeepEqual(turned(view, 'walk.0'), portrait('walk.0'), `${view} reads as the front`);
+  for (const pose of strides) for (const [group, options] of Object.entries(optionGroups)) {
+    if (view === 'back' && group === 'face') continue; // A face cannot be seen from behind.
+    assert.equal(new Set(options.map((_, index) => JSON.stringify(turned(view, pose, { [group]: index })))).size, options.length, `Indistinguishable ${group}: ${view}/${pose}`);
+    if (group === 'tool') {
+      // The tool stays in the hand that carries it: the first arm drawn in both views.
+      const [part, x, y] = art.arms(pose)[0];
+      for (const [option] of options.entries()) if (option > 0) {
+        const tool = sprites.get(view === 'back' ? `person.tool.${option}.back.${pose === 'walk.0' ? 'high' : 'low'}` : `person.tool.${option}.side.${pose}`);
+        const held = part.some((row, dy) => [...row].some((key, dx) => key === 'a' && [-1, 0, 1].some(ny => [-1, 0, 1].some(nx => (tool[y + dy + ny]?.[x + dx + nx] ?? '.') !== '.'))));
+        assert(held, `Tool floats free of the hand: ${view}/${pose} tool=${option}`);
+      }
+      continue;
+    }
+    for (const [option] of options.entries()) {
+      const pixels = turned(view, pose, { [group]: option }), tone = skinTones[group === 'skin' ? option : 1];
+      for (const [part, x, y] of art.arms(pose)) part.forEach((row, dy) => [...row].forEach((key, dx) => {
+        if (key === 'a' || key === 'b') assert.equal(pixels[y + dy][x + dx], key === 'a' ? tone.skin : tone.shadow, `Hidden hand: ${view}/${pose} ${group}=${option}`);
+      }));
+    }
+  }
+}
+for (const pose of strides) assert.equal(turned('back', pose, { outfit: 1 })[12].slice(7, 9).join(''), 'oo', `Overalls lost the split between their legs from behind: ${pose}`);
 // Every pose must read as a different body, or the animation is invisible.
 assert.equal(new Set(poses.map(pose => JSON.stringify(portrait(pose)))).size, poses.length, 'Indistinguishable poses');
 function tile(name, rows) {

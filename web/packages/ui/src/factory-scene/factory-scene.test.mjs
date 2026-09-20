@@ -399,7 +399,7 @@ test("the selected scene worker has a ring without changing its sprite", () => {
 test("every generated person layer is reachable, including fallbacks", () => {
   const reached = new Set();
   // Still, frozen, and every beat of a worker's own clock; on the floor and at both tables.
-  const moments = [undefined, ...[0, 100, 350, 500, 1000, 1500].flatMap((at) => ["still", "interacting", "walking"].flatMap((action) => [0, 1].map((frame) => ({ action, frame, at, direction: "east" }))))];
+  const moments = [undefined, ...[0, 100, 350, 500, 1000, 1500].flatMap((at) => ["still", "interacting", "walking"].flatMap((action) => [0, 1].flatMap((frame) => (action === "walking" ? ["north", "south", "east", "west", undefined] : [undefined]).map((direction) => ({ action, frame, at, direction })))))];
   for (const role of ["worker", "orchestrator"]) {
     for (const provider of ["claude_code", "codex", "shell"]) {
       for (const activity of ["busy", "waiting", "needs-you", "idle"]) {
@@ -422,6 +422,20 @@ test("every generated person layer is reachable, including fallbacks", () => {
     assert.ok(frames.filter((name) => name.startsWith("person.held.") || name.startsWith("person.tool.")).length <= 1, `${activity}/${seat}: ${frames}`);
     assert.equal(new Set(frames).size, frames.length);
   }
+  // Walking away shows a back with no face, badge or blink; walking across shows
+  // a profile; towards the viewer, or with no direction known, the front.
+  const walk = (direction, frame = 0) => workerFrames({ ...fallback, activity: "needs-you" }, { action: "walking", frame, at: 0, direction });
+  const layers = (names) => names.map((name) => name.split(".")[1]);
+  assert.deepEqual(layers(walk("north")), ["skin", "legs", "outfit", "hair", "shoes", "headwear", "tool", "alert"]);
+  assert.ok(walk("north").filter((name) => !/legs|shoes|alert/.test(name)).every((name) => name.includes(".back")));
+  assert.deepEqual(layers(walk("east")), ["skin", "legs", "outfit", "hair", "face", "shoes", "headwear", "tool", "system", "alert"]);
+  assert.deepEqual(walk("west"), walk("east"), "west is east, mirrored by the scene");
+  assert.ok(walk("east").filter((name) => !/system|alert/.test(name)).every((name) => name.includes(".side")));
+  assert.deepEqual(walk("south"), walk(undefined));
+  assert.ok(walk("south").every((name) => !/\.(back|side)/.test(name)));
+  for (const direction of ["north", "east"]) assert.notDeepEqual(walk(direction, 0), walk(direction, 1));
+  // Standing still never turns away, whatever direction was last walked.
+  assert.ok(workerFrames(fallback, { action: "still", frame: 0, at: 0, direction: "north" }).every((name) => !/\.(back|side)/.test(name)));
   // At the bench a carried tool is worked with; empty hands and mugs type.
   const bench = (tool, frame) => workerFrames({ ...fallback, activity: "busy", appearance: { automatic: false, skin: 0, hair: 0, hair_colour: 0, face: 0, outfit: 0, clothes_colour: 0, shoes: 0, tool, headwear: 0 } }, { action: "interacting", frame });
   const toolNames = spriteOptions.tool.map(({ name }) => name);
@@ -566,6 +580,45 @@ test("retargets leave the current room or corridor through a clear lane", () => 
   const fromSpine = routeFromSpine(layout, { x: center, y: row.y - row.height / 2 }, destination);
   assert.ok(fromSpine);
   assertRouteGeometry(layout, { x: center, y: row.y - row.height / 2 }, fromSpine, "direct spine route");
+});
+
+test("a walking worker is drawn facing where they go, and only a westward walk is mirrored", async () => {
+  const topology = inventoryTopology;
+  const saved = { requestAnimationFrame: globalThis.requestAnimationFrame, cancelAnimationFrame: globalThis.cancelAnimationFrame, performance: globalThis.performance };
+  let clock = 0, pending;
+  globalThis.performance = { now: () => clock };
+  globalThis.requestAnimationFrame = (callback) => { pending = callback; return 1; };
+  globalThis.cancelAnimationFrame = () => { pending = undefined; };
+  let renderer;
+  try {
+    await act(async () => { renderer = create(createElement(FactoryScene, { topology, workers, connected: true })); });
+    const drawn = () => {
+      const worker = renderer.root.findByProps({ "data-worker-id": workers[0].id });
+      const sprite = worker.findAll((node) => node.type === "g" && typeof node.props.transform === "string" && node.props.transform.startsWith("scale("))[0];
+      return { action: worker.props["data-worker-action"], facing: worker.props["data-worker-facing"], transform: sprite.props.transform, frames: sprite.findAllByType("use").map((node) => node.props.href) };
+    };
+    const seen = new Set();
+    const check = () => {
+      const { action, facing, transform, frames } = drawn();
+      assert.equal(transform.includes("scale(-1 1)"), action === "walking" && facing === "west", `${action}/${facing}: ${transform}`);
+      assert.equal(facing !== undefined, action === "walking");
+      assert.equal(frames.some((name) => name.includes(".back")), facing === "north", `${facing}: ${frames}`);
+      assert.equal(frames.some((name) => name.includes(".side")), facing === "east" || facing === "west", `${facing}: ${frames}`);
+      seen.add(facing);
+    };
+    check();
+    // There and back again covers both horizontal directions of the same route.
+    for (const nodeId of ["lib", "src"]) {
+      await act(async () => { renderer.update(createElement(FactoryScene, { topology, workers: [{ ...workers[0], nodeId }, workers[1]], connected: true })); });
+      for (let step = 0; step < 400 && pending !== undefined; step++) { const tick = pending; pending = undefined; clock += 40; await act(async () => { tick(clock); }); check(); }
+      assert.notEqual(drawn().action, "walking", "the route ends");
+    }
+    assert.ok(seen.has("west") && seen.has("east"), `both profiles were walked: ${[...seen]}`);
+    assert.ok(seen.has("north") || seen.has("south"), `a vertical leg was walked: ${[...seen]}`);
+  } finally {
+    if (renderer) await act(async () => renderer.unmount());
+    for (const [key, value] of Object.entries(saved)) { if (value === undefined) delete globalThis[key]; else globalThis[key] = value; }
+  }
 });
 
 test("the production scene stops motion on disconnect and unmount", async () => {

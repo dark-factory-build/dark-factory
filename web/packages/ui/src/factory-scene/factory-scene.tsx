@@ -217,19 +217,22 @@ function SceneWorkers({ layout, placements, nodes, workers, tasks, connected, an
         const sipping = frames.includes("person.held.cup");
         // A step lifts the whole body a pixel.
         const bob = position.motion.action === "walking" && position.motion.frame === 1 ? -1 : 0;
+        // Only a profile facing east is drawn; walking west is its mirror image.
+        const facingWest = position.motion.action === "walking" && position.motion.direction === "west";
         return (
           <g
             key={worker.id}
             data-worker-id={worker.id}
             data-worker-location={worker.location ?? "resting"}
             data-worker-action={position.motion.action}
+            data-worker-facing={position.motion.action === "walking" ? position.motion.direction : undefined}
             transform={`translate(${position.x} ${position.y})`}
             className={worker.id === selectedWorkerId ? "dfFactoryScene__worker dfFactoryScene__worker--selected" : "dfFactoryScene__worker"}
           >
             <g role="img" className="dfFactoryScene__target" data-tooltip={`${worker.name} · ${worker.activity}\n${placement.area === "room" ? `Working near ${worker.locationLabel ?? room?.label ?? "observed changes"}` : placement.area === "resting" ? worker.paused ? "Paused · taking a break" : "Taking a break" : worker.location === "unobserved" ? "Planning · location not yet observed" : "Planning · work outside this room"}`} aria-label={`${worker.name}, ${worker.role}, ${worker.activity}, ${location}`} {...sceneAction(onSelectWorker === undefined ? undefined : () => onSelectWorker(worker.id))}>
                 <rect className="dfFactoryScene__focus" x={-12} y={-12} width="24" height="24" rx="3" fill="transparent" />
               {worker.id === selectedWorkerId ? <circle className="dfFactoryScene__selection" cx="0" cy="0" r="12" /> : null}
-              <g data-seated={seated ? placement.area === "resting" ? "coffee" : "planning" : undefined} data-active-pose={position.motion.action === "interacting" ? position.motion.frame : undefined}><g transform={`scale(${WORKER_SIZE / FRAME})${bob === 0 ? "" : ` translate(0 ${bob})`}`}>{frames.map((frame) => <Frame key={frame} name={frame} x={-8} y={-8} />)}
+              <g data-seated={seated ? placement.area === "resting" ? "coffee" : "planning" : undefined} data-active-pose={position.motion.action === "interacting" ? position.motion.frame : undefined}><g transform={`scale(${WORKER_SIZE / FRAME})${bob === 0 ? "" : ` translate(0 ${bob})`}${facingWest ? " scale(-1 1)" : ""}`}>{frames.map((frame) => <Frame key={frame} name={frame} x={-8} y={-8} />)}
                 {/* One cup each: on the table in front of them until it is at their lips. */}
                 {seated && placement.area === "resting" && !sipping ? <Frame name="person.held.cup" x={-6} y={-21} /> : null}</g>
               {!seated || placement.area === "resting" || !connected ? null : <g data-planning-light="" aria-hidden="true"><circle cx="7" cy="-16" r="14" fill="url(#df-lamplight)" /><path d="M12 -18v-5h-5" fill="none" stroke="#788379" strokeWidth="2" /><path d="M4 -20h6" stroke="#dfc38f" strokeWidth="3" /></g>}</g>

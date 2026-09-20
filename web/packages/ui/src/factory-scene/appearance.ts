@@ -70,6 +70,33 @@ export function workerFrames(worker: SceneWorker, motion?: WorkerMotion, seat?: 
     : seat === "resting" ? at !== undefined && at % 5200 < 900 ? "sip" : "idle"
     : worker.activity === "busy" ? "type.0"
     : worker.activity === "waiting" ? "waiting" : "idle";
+  const cloth = appearance.outfit === 1 ? appearance.clothes_colour : "plain";
+  const alert = worker.activity === "needs-you" ? ["person.alert"] : [];
+  // Walking away shows a back, walking across a profile (the scene mirrors east
+  // for west). Only the front has a face to blink or a chest to badge.
+  if (walking && motion.direction === "north") return [
+    `person.skin.${appearance.skin}.back.${pose}`,
+    `person.legs.${cloth}.${pose}`,
+    `person.outfit.${appearance.outfit}.${appearance.clothes_colour}.back.${pose}`,
+    `person.hair.${appearance.hair}.${appearance.hair_colour}.back`,
+    `person.shoes.${appearance.shoes}.${pose}`,
+    `person.headwear.${appearance.headwear}.back`,
+    // Seen from behind the carrying arm is on the other side, and so is its step.
+    `person.tool.${appearance.tool}.back.${pose === "walk.0" ? "high" : "low"}`,
+    ...alert,
+  ];
+  if (walking && (motion.direction === "east" || motion.direction === "west")) return [
+    `person.skin.${appearance.skin}.side.${pose}`,
+    `person.legs.${cloth}.side.${pose}`,
+    `person.outfit.${appearance.outfit}.${appearance.clothes_colour}.side.${pose}`,
+    `person.hair.${appearance.hair}.${appearance.hair_colour}.side`,
+    `person.face.${appearance.face}.side`,
+    `person.shoes.${appearance.shoes}.side.${pose}`,
+    `person.headwear.${appearance.headwear}.side`,
+    `person.tool.${appearance.tool}.side.${pose}`,
+    `person.system.${role}.${provider}`,
+    ...alert,
+  ];
   const step = walking ? pose : "stand";
   const blinking = at !== undefined && at % (3000 + hash(worker.id) % 4000) < 200;
   const glasses = spriteOptions.face[appearance.face]?.name === "glasses";
@@ -79,7 +106,7 @@ export function workerFrames(worker: SceneWorker, motion?: WorkerMotion, seat?: 
     : seated ? [] : [`person.tool.${appearance.tool}.${pose === "walk.1" ? "high" : "low"}`];
   return [
     `person.skin.${appearance.skin}.${pose}`,
-    `person.legs.${appearance.outfit === 1 ? appearance.clothes_colour : "plain"}.${seated ? "sit" : step}`,
+    `person.legs.${cloth}.${seated ? "sit" : step}`,
     `person.outfit.${appearance.outfit}.${appearance.clothes_colour}.${pose}`,
     `person.hair.${appearance.hair}.${appearance.hair_colour}`,
     ...(blinking && !glasses ? [`person.blink.${appearance.skin}`] : []),
@@ -89,7 +116,7 @@ export function workerFrames(worker: SceneWorker, motion?: WorkerMotion, seat?: 
     `person.headwear.${appearance.headwear}`,
     ...held,
     `person.system.${role}.${provider}`,
-    ...(worker.activity === "needs-you" ? ["person.alert"] : []),
+    ...alert,
   ];
 }
 
