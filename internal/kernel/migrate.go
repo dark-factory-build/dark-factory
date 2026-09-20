@@ -55,6 +55,7 @@ const (
 	v28UserVersion      = 28
 	v29UserVersion      = 29
 	v30UserVersion      = 30
+	v31UserVersion      = 31
 	// v13Changes is the changes table before managed Git worktrees. It bound a
 	// Git-free published tree by a manifest digest, its entry and byte counts
 	// and its root inode. v14 names the tree's own branch head instead and
@@ -594,6 +595,9 @@ func v30SchemaStatements() []string {
 	statements := make([]string, 0, len(schemaStatements))
 	for _, statement := range schemaStatements {
 		_, name := schemaObjectIdentity(statement)
+		if name == "mission_task_bindings" || name == "mission_task_bindings_mission" {
+			continue
+		}
 		switch name {
 		case "intake_sources":
 			statement = `CREATE TABLE intake_sources (
@@ -639,6 +643,8 @@ func v30SchemaStatements() []string {
 	}
 	return statements
 }
+
+func v31SchemaStatements() []string { return v30SchemaStatements() }
 
 func v29SchemaStatements() []string {
 	var statements []string
@@ -816,6 +822,8 @@ func migratableSchema(version int) ([]string, bool) {
 		return v28SchemaStatements(), true
 	case v30UserVersion:
 		return v30SchemaStatements(), true
+	case v31UserVersion:
+		return v31SchemaStatements(), true
 	case v29UserVersion:
 		return v29SchemaStatements(), true
 	}
@@ -843,7 +851,7 @@ func (store *Store) migrateLegacy(ctx context.Context) error {
 		releaseUncertainConnection(connection)
 		return err
 	}
-	all := []func(context.Context, *sql.Conn) error{migrateLegacyTransaction, migratePreviousTransaction, migratePriorTransaction, migrateV4Transaction, migrateV5Transaction, migrateV6Transaction, migrateV7Transaction, migrateV8Transaction, migrateV9Transaction, migrateV10Transaction, migrateV11Transaction, migrateV12Transaction, migrateV13Transaction, migrateV14Transaction, migrateV15Transaction, migrateV16Transaction, migrateV17Transaction, migrateV18Transaction, migrateV19Transaction, migrateV20Transaction, migrateV21Transaction, migrateV22Transaction, migrateV23Transaction, migrateV24Transaction, migrateV25Transaction, migrateV26Transaction, migrateV27Transaction, migrateV28Transaction, migrateV29Transaction, migrateV30Transaction}
+	all := []func(context.Context, *sql.Conn) error{migrateLegacyTransaction, migratePreviousTransaction, migratePriorTransaction, migrateV4Transaction, migrateV5Transaction, migrateV6Transaction, migrateV7Transaction, migrateV8Transaction, migrateV9Transaction, migrateV10Transaction, migrateV11Transaction, migrateV12Transaction, migrateV13Transaction, migrateV14Transaction, migrateV15Transaction, migrateV16Transaction, migrateV17Transaction, migrateV18Transaction, migrateV19Transaction, migrateV20Transaction, migrateV21Transaction, migrateV22Transaction, migrateV23Transaction, migrateV24Transaction, migrateV25Transaction, migrateV26Transaction, migrateV27Transaction, migrateV28Transaction, migrateV29Transaction, migrateV30Transaction, migrateV31Transaction}
 	var steps []func(context.Context, *sql.Conn) error
 	switch version {
 	case legacyUserVersion:
@@ -904,6 +912,8 @@ func (store *Store) migrateLegacy(ctx context.Context) error {
 		steps = all[27:]
 	case v30UserVersion:
 		steps = all[29:]
+	case v31UserVersion:
+		steps = all[30:]
 	case v29UserVersion:
 		steps = all[28:]
 	default:
@@ -1546,6 +1556,22 @@ func migrateV30Transaction(ctx context.Context, connection *sql.Conn) error {
 	}
 	if err := rebuildTable(ctx, connection, target, "intake_acceptances", strings.TrimSuffix(intakeAcceptanceColumns, ", linear_team_id, source_url"), "linear_team_id, source_url", "'', ''"); err != nil {
 		return err
+	}
+	if _, err := connection.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", v31UserVersion)); err != nil {
+		return err
+	}
+	return validateSchemaVersion(ctx, connection, v31UserVersion, v31SchemaStatements())
+}
+
+func migrateV31Transaction(ctx context.Context, connection *sql.Conn) error {
+	if err := validateSchemaVersion(ctx, connection, v31UserVersion, v31SchemaStatements()); err != nil {
+		return err
+	}
+	target := expectedSchemaOf(schemaStatements)
+	for _, name := range []string{"mission_task_bindings", "mission_task_bindings_mission"} {
+		if _, err := connection.ExecContext(ctx, target[name].sql); err != nil {
+			return err
+		}
 	}
 	if _, err := connection.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", userVersion)); err != nil {
 		return err
