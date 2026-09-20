@@ -783,6 +783,9 @@ test("stationary tasks expose affected areas and link the existing queue and que
   assert.equal((markup.match(/data-floor-inbox="10"/g) ?? []).length, 1);
   assert.equal((markup.match(/data-work-footprint=/g) ?? []).length, 2);
   assert.match(markup, /Tasks, 10 waiting/);
+  // The tray stands on the table with the workers' own things: a worker's hit
+  // rect drawn after it would take the click meant for the tray.
+  assert.ok(markup.indexOf("data-floor-inbox") > markup.lastIndexOf("data-worker-id"), "the tray is drawn after the workers");
   // The tray is furniture: it stays when nothing waits, and says so.
   const idle = render({ tasks: [tasks[0]], onSelectTask() {}, onOpenQueue() {} });
   assert.match(idle, /data-floor-inbox="0"/);

@@ -421,6 +421,7 @@ export function FactoryScene({ topology, detailNodes, workers, appearance = DEFA
       })}
       {layout.rooms.length === 0 ? <text x={ROOM_LEFT} y="24" fill="#9db1be" fontFamily="ui-monospace, monospace" fontSize="10">EMPTY FLOOR</text> : null}
 
+      <SceneWorkers furniture={tables} layout={layout} placements={placements} nodes={nodes} workers={workers} tasks={tasks} connected={connected} animate={appearance.animation !== "off"} selectedWorkerId={selectedWorkerId} onSelectWorker={onSelectWorker} onSelectHumanRequest={onSelectHumanRequest} />
       <g data-floor-inbox={queued} className="dfFactoryScene__target" transform={`translate(${ROOM_LEFT + commonWidth - 30} ${layout.restingTop + TABLE_DROP - 21})`}
         data-tooltip={queued === 0 ? "In-tray · nothing waiting" : `In-tray · ${queued} waiting`}
         aria-label={queued === 0 ? "Tasks, nothing waiting" : `Tasks, ${queued} waiting`}
@@ -430,7 +431,6 @@ export function FactoryScene({ topology, detailNodes, workers, appearance = DEFA
         {/* An open tray, not another mug on the table: two walls and a base. */}
         <path d="M-2 -4v6h24v-6 M-2 2h24" fill="none" stroke="#c2b184" strokeWidth="2" />
       </g>
-      <SceneWorkers furniture={tables} layout={layout} placements={placements} nodes={nodes} workers={workers} tasks={tasks} connected={connected} animate={appearance.animation !== "off"} selectedWorkerId={selectedWorkerId} onSelectWorker={onSelectWorker} onSelectHumanRequest={onSelectHumanRequest} />
 
 
     </svg>
