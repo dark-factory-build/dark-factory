@@ -765,6 +765,7 @@ export class BrowserSession {
       this.#fail(error instanceof ProtocolError ? error : new ProtocolError("malformed"));
       return;
     }
+    if (frame.type === "UNKNOWN") return;
     try {
       if (this.#hello === undefined) {
         if (frame.type !== "HELLO") throw new ProtocolError("wrong_direction");

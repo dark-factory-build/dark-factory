@@ -2008,6 +2008,20 @@ test("a verb the daemon does not know refuses that request alone", async () => {
   session.close();
 });
 
+test("unknown server frames are ignored and unknown errors reject only their request", async () => {
+  const { session, socket } = await openHumanSession();
+  socket.reply('{"type":"STATE_FUTURE","id":"future","body":{"added":true}}');
+  await tick();
+  assert.equal(session.status, "ready");
+
+  const pending = session.discoverAccounts();
+  const request = decodeClientControl(socket.sent.at(-1));
+  socket.reply(JSON.stringify({ type: "ERROR", id: request.id, body: { code: "future_error", retryable: true } }));
+  await assert.rejects(pending, (error) => error instanceof SessionError && error.code === "internal" && !error.retryable);
+  assert.equal(session.status, "ready");
+  session.close();
+});
+
 test("an agent's idle rule travels on AGENT_UPDATE and comes back on the snapshot", async () => {
   const { session, socket } = await openHumanSession();
   const agentId = "7c".repeat(16);

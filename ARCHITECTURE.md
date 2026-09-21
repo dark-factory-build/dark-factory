@@ -163,8 +163,9 @@ wrong direction remain finite refusals that end the connection. A client
 control type the daemon does not know is answered by its request id with
 `ERROR` code `unsupported` and the daemon keeps its side open, so a console
 that knows that code degrades one feature instead of losing its session. The
-other direction is still closed: the console decoder ends the session on a
-server frame type or an `ERROR` code it does not know (#556).
+console likewise ignores unknown server frame types, and treats an unknown
+`ERROR` code as a non-retryable generic refusal of its correlated request;
+both directions therefore tolerate additive protocol changes (#556).
 
 ## Browser HumanRequest authority
 

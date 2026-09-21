@@ -114,13 +114,14 @@ test("control role, envelope, field and capability validation is closed", () => 
   expectMalformed(() => decodeServerControl(fixture("pair_prove.json")));
   expectIgnoredMember(fixture("auth_result.json"), fixture("auth_result.json").replace('"client_id":', '"extra":1,"client_id":'), "server");
   for (const mutation of [
-    (s) => s.replace('"type":"AUTH_RESULT"', '"type":"NOPE"'),
     (s) => s.replace('"client_id":"', '"client_id":"0'),
     (s) => s.replace('"capabilities":9', '"capabilities":8'),
     (s) => s.replace('"capabilities":9', '"capabilities":32'),
     (s) => s.replace('{"type"', '{"type":"AUTH_RESULT","type"'),
     (s) => s.replace('"id":"auth-1"', '"id":"auth-1","id":"other"'),
   ]) expectMalformed(() => decodeServerControl(mutation(fixture("auth_result.json"))));
+  assert.equal(decodeServerControl(fixture("auth_result.json").replace('"type":"AUTH_RESULT"', '"type":"NOPE"')).type, "UNKNOWN");
+  assert.deepEqual(decodeServerControl('{"type":"ERROR","body":{"code":"secret","retryable":true}}').body, { code: "internal", retryable: false });
   expectMalformed(() => decodeClientControl('{"type":"ERROR","body":{"code":"secret","retryable":false}}'));
   // A daemon diagnostic added beside the finite error code reaches no field,
   // so it can never be rendered; the decoded body is code and retryable only.
@@ -185,7 +186,7 @@ test("browser terminal and HumanRequest controls are typed, directional, and bou
   // Residue from the deleted generic action shape carries no meaning.
   expectIgnoredMember(humanDetail, humanDetail.replace('"cancel_run":{', '"cancel_run":{"action":"cancel_run",'), "server");
   expectIgnoredMember(humanCancelResult, humanCancelResult.replace('"run_id":', '"action":"cancel_run","run_id":'), "server");
-  expectMalformed(() => decodeServerControl(humanCancelResult.replace('"type":"HUMAN_REQUEST_CANCEL_RUN_RESULT"', '"type":"HUMAN_REQUEST_ACTION_RESULT"')));
+  assert.equal(decodeServerControl(humanCancelResult.replace('"type":"HUMAN_REQUEST_CANCEL_RUN_RESULT"', '"type":"HUMAN_REQUEST_ACTION_RESULT"')).type, "UNKNOWN");
   const lease = fixture("terminal_lease_result.json");
   const target = fixture("terminal_target.json");
   const targetGet = fixture("terminal_target_get.json");
