@@ -740,6 +740,10 @@ func prepareActiveAttempt(t *testing.T, fixture *dispatchFixture, seed byte) act
 }
 
 func prepareActiveAttemptInProject(t *testing.T, fixture *dispatchFixture, seed byte, projectID, role string, enqueue ...func()) activeAttempt {
+	return prepareActiveAttemptInProjectWithProvider(t, fixture, seed, projectID, role, "shell", enqueue...)
+}
+
+func prepareActiveAttemptInProjectWithProvider(t *testing.T, fixture *dispatchFixture, seed byte, projectID, role, provider string, enqueue ...func()) activeAttempt {
 	t.Helper()
 	ctx := context.Background()
 	agentID, taskID, incarnationID := testID(seed+1), testID(seed+2), testID(seed+3)
@@ -769,7 +773,7 @@ func prepareActiveAttemptInProject(t *testing.T, fixture *dispatchFixture, seed 
 		})
 	}
 	call(func() error {
-		_, err := operator.CreateAgent(ctx, api.CreateAgentInput{ID: agentID, ProjectID: projectID, Name: "agent", Role: role, Provider: "shell", ToolBudgetLimit: 10})
+		_, err := operator.CreateAgent(ctx, api.CreateAgentInput{ID: agentID, ProjectID: projectID, Name: "agent", Role: role, Provider: provider, ToolBudgetLimit: 10})
 		return err
 	})
 	if len(enqueue) == 1 {
@@ -1678,6 +1682,58 @@ func TestDaemonSourceRefusesProviderWithoutReadOnlyBoundary(t *testing.T) {
 	var remote *api.RemoteError
 	if !errors.As(err, &remote) || remote.Code() != api.RemoteUnavailable {
 		t.Fatalf("unprotected source = %v", err)
+	}
+	waitDispatch(t, done)
+}
+
+func registerDispatchLiveAttempt(t *testing.T, fixture *dispatchFixture, active activeAttempt) {
+	t.Helper()
+	session, found, err := fixture.store.TerminalSessionForRun(context.Background(), active.run.ID)
+	if err != nil || !found {
+		t.Fatalf("terminal session = %+v, found=%v, err=%v", session, found, err)
+	}
+	live := newLiveAttempt(fixture.daemon, active.run.ID, session.ID, nil)
+	if err := fixture.daemon.registerLiveAttempt(live); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { fixture.daemon.unregisterLiveAttempt(active.run.ID, live) })
+}
+
+func TestDaemonSourceAllowsClaudeOrchestratorRoute(t *testing.T) {
+	fixture := newDispatchFixture(t)
+	active := prepareActiveAttemptInProjectWithProvider(t, fixture, 72, testID(72), "orchestrator", "claude_code")
+	registerDispatchLiveAttempt(t, fixture, active)
+	done := fixture.serve(t)
+	_, err := active.client.Source(context.Background(), testID(73))
+	var remote *api.RemoteError
+	if !errors.As(err, &remote) || remote.Code() != api.RemoteNotFound {
+		t.Fatalf("Claude orchestrator source = %v", err)
+	}
+	waitDispatch(t, done)
+}
+
+func TestDaemonSourceTitleOnlyWorkerUsesEffectiveHandoff(t *testing.T) {
+	fixture := newDispatchFixture(t)
+	const seed = 74
+	target := testID(73)
+	title := "review handoff " + target + " " + testID(75) + " " + strings.Repeat("c", 40) + " 1 1"
+	active := prepareActiveAttemptInProjectWithProvider(t, fixture, seed, testID(seed), "worker", "claude_code", func() {
+		incarnation, err := kernel.IncarnationIDFromBytes(mustIDBytes(t, testID(seed+3)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := fixture.store.EnqueueTask(context.Background(), kernel.NewTask{
+			ID: mustTaskID(t, testID(seed+2)), ProjectID: mustProjectID(t, testID(seed)), AssignedAgentID: mustAgentID(t, testID(seed+1)), IncarnationID: incarnation, Title: title,
+		}, mustKernelTime(t, 10)); err != nil {
+			t.Fatal(err)
+		}
+	})
+	registerDispatchLiveAttempt(t, fixture, active)
+	done := fixture.serve(t)
+	_, err := active.client.Source(context.Background(), target)
+	var remote *api.RemoteError
+	if !errors.As(err, &remote) || remote.Code() != api.RemoteNotFound {
+		t.Fatalf("title-only worker source = %v", err)
 	}
 	waitDispatch(t, done)
 }
