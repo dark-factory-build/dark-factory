@@ -20,6 +20,10 @@ import (
 // asks never reaches out at all.
 const (
 	releaseTagURL = "https://github.com/dark-factory-build/dark-factory/releases/tag/"
+	// GitHub's REST API requires a User-Agent naming the application, and a
+	// library default names nothing. It deliberately carries no version or host
+	// detail: this identifies the program, not the factory making the request.
+	releaseUserAgent = "dark-factory-daemon (+https://github.com/dark-factory-build/dark-factory)"
 	// One attempt per window, whether or not it succeeds. A refused read must
 	// not make a rate-limited or offline host reach out more often than a
 	// healthy one; the cached answer, or none, stands until the next window.
@@ -69,6 +73,7 @@ func readPublishedRelease(ctx context.Context, client *http.Client, endpoint str
 		return api.PublishedRelease{}, err
 	}
 	request.Header.Set("Accept", "application/vnd.github+json")
+	request.Header.Set("User-Agent", releaseUserAgent)
 	response, err := client.Do(request)
 	if err != nil {
 		return api.PublishedRelease{}, err

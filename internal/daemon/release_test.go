@@ -17,7 +17,16 @@ func init() { releaseNext = time.Now().Add(24 * time.Hour) }
 
 func TestPublishedReleaseIsValidatedCachedAndNeverBlocksTheConsole(t *testing.T) {
 	bodies := make(chan string, 1)
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+	agents := make(chan string, 16)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		agent := request.Header.Get("User-Agent")
+		agents <- agent
+		// GitHub refuses a REST request that does not name its application, so
+		// every assertion below depends on this request carrying that name.
+		if agent != releaseUserAgent {
+			writer.WriteHeader(http.StatusForbidden)
+			return
+		}
 		_, _ = io.WriteString(writer, <-bodies)
 	}))
 	defer server.Close()
@@ -29,6 +38,9 @@ func TestPublishedReleaseIsValidatedCachedAndNeverBlocksTheConsole(t *testing.T)
 	value, err := read(`{"tag_name":"v0.4.2","html_url":"https://evil.test/anything"}`)
 	if err != nil || value != (api.PublishedRelease{Version: "v0.4.2", URL: releaseTagURL + "v0.4.2"}) {
 		t.Fatalf("release = %+v, err = %v", value, err)
+	}
+	if agent := <-agents; agent != releaseUserAgent {
+		t.Fatalf("user agent = %q, want %q", agent, releaseUserAgent)
 	}
 	for _, body := range []string{
 		`{"tag_name":"v0.4.2","draft":true}`,
