@@ -3,7 +3,6 @@ package kernel
 // ProductionObservation is a projection of existing external authorities, not
 // a workflow. Shared checks and deliveries have one identity and name their PRs.
 type ProductionObservation struct {
-	Maintenance  *ProductionMaintenance  `json:"maintenance,omitempty"`
 	Repository   string                  `json:"repository"`
 	ObservedAt   int64                   `json:"observed_at"`
 	PullRequests []ProductionPullRequest `json:"pull_requests"`
@@ -82,26 +81,4 @@ type ProductionDelivery struct {
 	Phase        string   `json:"phase,omitempty"`
 	Reason       string   `json:"reason,omitempty"`
 	Overflow     int      `json:"overflow,omitempty"`
-}
-
-// ProductionMaintenance projects existing host release/install observations.
-// A receipt on disk and the process serving the console remain separate facts.
-type ProductionMaintenance struct {
-	Destination string `json:"destination"`
-	State       string `json:"state"`
-	Available   struct {
-		Version string `json:"version"`
-		URL     string `json:"url"`
-		State   string `json:"state"`
-	} `json:"available"`
-	Installed ProductionBuild `json:"installed"`
-	Running   ProductionBuild `json:"running"`
-}
-type ProductionBuild struct {
-	Version string `json:"version"`
-	Source  string `json:"source"`
-	Target  string `json:"target"`
-	BuildID string `json:"build_id"`
-	Release bool   `json:"release"`
-	State   string `json:"state"`
 }

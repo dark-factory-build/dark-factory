@@ -14,8 +14,12 @@ import (
 )
 
 // The browser uses the operator DTO vocabulary, with an explicit project on
-// every request. Paired private-detail authority is factory-wide; resource
-// membership is still checked so a selected project never returns another's data.
+// every request that reads project data. Paired private-detail authority is
+// factory-wide; resource membership is still checked so a selected project
+// never returns another's data. A production read is the one request that may
+// omit the project: it then answers with the factory's own build facts and no
+// records, which is how a factory holding no project at all still reports the
+// version it runs.
 type browserContentInput struct {
 	api.ContentInput
 	Document              kernel.OutcomeDocument `json:"document"`
@@ -50,8 +54,9 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 	if err := json.Unmarshal(request.Input, &input); err != nil {
 		return browserprotocol.ProjectContentResult{}, browser.ErrInvalidRequest
 	}
+	factoryOnly := request.Operation == "production" && input.ProjectID == ""
 	project, err := browserContentProject(input.ProjectID)
-	if err != nil {
+	if err != nil && !factoryOnly {
 		return browserprotocol.ProjectContentResult{}, browser.ErrInvalidRequest
 	}
 	read := request.Operation == "list" || request.Operation == "read" || request.Operation == "body" || request.Operation == "evidence_list" || request.Operation == "attachments" || request.Operation == "outcome_list" || request.Operation == "outcome_read" || request.Operation == "mission_tasks" || request.Operation == "production" || request.Operation == "task_read"
@@ -111,14 +116,19 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 		}
 		output = browserTaskSummary(task)
 	case "production":
-		page, e := backend.store.Production(ctx, project, int(input.Offset), int(input.Limit))
-		if e != nil {
-			return result, mapBrowserError(e)
+		page := kernel.ProductionPage{Records: []kernel.ProductionRecord{}}
+		if !factoryOnly {
+			observed, e := backend.store.Production(ctx, project, int(input.Offset), int(input.Limit))
+			if e != nil {
+				return result, mapBrowserError(e)
+			}
+			page = observed
 		}
 		output = struct {
 			kernel.ProductionPage
-			Runtime api.BuildIdentity `json:"runtime"`
-		}{page, currentDaemonBuild()}
+			Runtime api.BuildIdentity    `json:"runtime"`
+			Release api.PublishedRelease `json:"release,omitzero"`
+		}{page, currentDaemonBuild(), latestPublishedRelease()}
 	case "list":
 		page, e := backend.store.ListContent(ctx, project, kernel.ContentKind(input.Kind), int(input.Offset), int(input.Limit))
 		if e != nil {

@@ -6,8 +6,7 @@ import { AgentList, FactoryFloor } from "./console-screens.js";
 import { AgentPanel, ConsoleDialog, HumanRequestPanel, QueuePanel, TaskDetail, SettingsDialog, editErrorCopy, type AgentConfigEdit, type AgentPanelView, type TaskEdit, type TaskBrief } from "./console-sidebar.js";
 import { ProjectLibrary, type ProjectContentCall } from "./project-library.js";
 import { useProduction } from "./production-data.js";
-import type { FactoryMaintenance } from "./factory-maintenance.js";
-import { deriveProductionView, inProgressProduction, sharedDeliveries } from "./production-view.js";
+import { deriveProductionView, inProgressProduction } from "./production-view.js";
 import { ProductionPanel } from "./production-panel.js";
 import { MissionsPanel } from "./missions-panel.js";
 import { RemoteInvitePanel } from "./remote-invite.js";
@@ -214,9 +213,6 @@ export function FactoryConsole({
   const productionData = useProduction([...(scopedState?.projects.keys() ?? [])].sort(), ready ? onProjectContent : undefined);
   const productionView = deriveProductionView(productionData.records, Date.now());
   const productionItems = Object.values(productionView.contraptions).sort((a, b) => Number(a.completed) - Number(b.completed) || (a.completed ? a.completedAt - b.completedAt : 0) || a.visualId.localeCompare(b.visualId));
-  const productionDeliveries = sharedDeliveries(productionView);
-  const maintenanceRecord = productionData.records.find((record) => record.kind === "repository" && record.repository === "dark-factory-build/dark-factory" && record.document.maintenance);
-  const maintenance = { maintenance: maintenanceRecord?.document.maintenance as FactoryMaintenance | undefined, runtime: productionData.runtime, connected: ready, sourceFresh: !productionData.error && maintenanceRecord !== undefined && Date.now() - maintenanceRecord.observed_at <= 180_000, hostedSource: typeof document === "undefined" ? undefined : document.querySelector<HTMLMetaElement>('meta[name="dark-factory-artifact-source"]')?.content, deliveries: productionDeliveries.filter((delivery) => delivery.destination.startsWith("runtime:") || delivery.destination === "site:app.darkfactory.build") };
   const inProgressItems = productionItems.filter(inProgressProduction).sort((a, b) => {
     const priority = (item: typeof a) => item.pullRequest?.state === "merged" ? 2 : item.construction?.status === "succeeded" ? 3 : 0;
     return priority(a) - priority(b) || b.completedAt - a.completedAt || a.visualId.localeCompare(b.visualId);
@@ -302,7 +298,7 @@ export function FactoryConsole({
               </div>
             </div>
             {view === "floor"
-              ? <FactoryFloor production={{ view: productionView, items: productionFloor, hiddenItems: inProgressItems.length - productionFloor.length, selected: selectedProduction, onSelect: selectProduction }} onOpenTasks={ready ? (id) => { selectProject(id); onDetail?.("queue"); } : undefined} onOpenMissions={ready ? (id) => { selectProject(id); onDetail?.("missions"); } : undefined} projectId={projectId} onProject={selectProject} floorAppearance={floorAppearance} selectedTaskId={selectedTask?.id} onSelectTask={ready ? selectTask : undefined} selectedAgentId={selectedDetail === "agent" ? selectedAgent?.id : undefined} state={scopedState} topologies={topologies} runPaths={runPaths} lastRunPaths={lastRunPaths} onSelectAgent={ready ? onSelectAgent : undefined} onSelectHumanRequest={ready ? onSelectHumanRequest : undefined} connected={ready} />
+              ? <FactoryFloor production={{ items: productionFloor, hiddenItems: inProgressItems.length - productionFloor.length, selected: selectedProduction, onSelect: selectProduction }} onOpenTasks={ready ? (id) => { selectProject(id); onDetail?.("queue"); } : undefined} onOpenMissions={ready ? (id) => { selectProject(id); onDetail?.("missions"); } : undefined} projectId={projectId} onProject={selectProject} floorAppearance={floorAppearance} selectedTaskId={selectedTask?.id} onSelectTask={ready ? selectTask : undefined} selectedAgentId={selectedDetail === "agent" ? selectedAgent?.id : undefined} state={scopedState} topologies={topologies} runPaths={runPaths} lastRunPaths={lastRunPaths} onSelectAgent={ready ? onSelectAgent : undefined} onSelectHumanRequest={ready ? onSelectHumanRequest : undefined} connected={ready} />
               : <AgentList state={scopedState} selectedAgentId={selectedAgent?.id} ready={ready} onSelectAgent={ready ? onSelectAgent : undefined} />}
           </section>
 
@@ -332,7 +328,7 @@ export function FactoryConsole({
                 />}
               />
             </div>
-            <div hidden={selectedDetail !== "production"}><ProductionPanel maintenance={maintenance} deliveries={productionDeliveries.filter((delivery) => !delivery.destination.startsWith("runtime:") && delivery.destination !== "site:app.darkfactory.build")} items={[...inProgressItems, ...productionItems.filter((item) => !inProgressProduction(item))]} selected={selectedProduction} onSelect={selectProduction} state={state} call={ready ? onProjectContent : undefined} connected={ready} error={[productionData.error, ...productionData.notices].filter(Boolean).join(" ")} overflow={productionData.overflow} loadMore={productionData.loadMore} loading={productionData.loading} active={selectedDetail === "production"} onMission={(projectId, id) => { selectProject(projectId); setRequestedMission({ projectId, id }); onDetail?.("missions"); }} onAgent={ready ? onSelectAgent : undefined} onOpenTask={setRelatedTask} /></div>
+            <div hidden={selectedDetail !== "production"}><ProductionPanel items={[...inProgressItems, ...productionItems.filter((item) => !inProgressProduction(item))]} selected={selectedProduction} onSelect={selectProduction} state={state} call={ready ? onProjectContent : undefined} connected={ready} error={[productionData.error, ...productionData.notices].filter(Boolean).join(" ")} overflow={productionData.overflow} loadMore={productionData.loadMore} loading={productionData.loading} active={selectedDetail === "production"} onMission={(projectId, id) => { selectProject(projectId); setRequestedMission({ projectId, id }); onDetail?.("missions"); }} onAgent={ready ? onSelectAgent : undefined} onOpenTask={setRelatedTask} /></div>
             <div hidden={selectedDetail !== "missions"}><MissionsPanel production={productionItems} onProduction={selectProduction} requestedMission={requestedMission} state={state} projectId={projectId} active={selectedDetail === "missions"} call={ready ? onProjectContent : undefined} onProject={selectProject} onSelectAgent={ready ? onSelectAgent : undefined} onOpenTask={ready ? setRelatedTask : undefined} /></div>
             <div hidden={selectedDetail !== "queue"}>
               <QueuePanel
@@ -407,6 +403,8 @@ export function FactoryConsole({
             <RemoteInvitePanel invite={remoteInvite} error={remoteInviteError} onInvite={onInviteRemote} onDismiss={onDismissRemoteInvite} devices={devices} devicesError={devicesError} ownClientId={ownClientId} onLoadDevices={onLoadDevices} onRevokeDevice={onRevokeDevice} />
           ))}
           library={ready && onProjectContent !== undefined ? <ProjectLibrary state={state} call={onProjectContent} draft={(agent, instruction) => { onToggleSettings?.(); onDraftLibraryTask?.(agent, instruction); }} /> : undefined}
+          runtime={productionData.runtime}
+          release={productionData.release}
           onClose={onToggleSettings}
         />
       )}

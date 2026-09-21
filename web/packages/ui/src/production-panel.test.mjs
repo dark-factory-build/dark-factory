@@ -17,6 +17,14 @@ test("production queue excludes completed work and shows simultaneous review and
   assert.doesNotMatch(markup, /<select/);
 });
 
+test("a pull request's delivery receipt is never read as current confirmation while disconnected", () => {
+  const delivered = { ...completed, deliveries: [{ repository: "owner/repo", id: "release", kind: "release", destination: "runtime:host-1", revision: "b".repeat(40), state: "verified", pull_requests: [7], verified_at: 1000 }] };
+  const markup = (props) => renderToStaticMarkup(createElement(ProductionPanel, { items: [delivered], selected: "project:change:2", onSelect() {}, ...props }));
+  assert.match(markup({ connected: true }), /runtime:host-1 · verified/);
+  assert.match(markup({ connected: false }), /last recorded verified; not current confirmation/);
+  assert.match(renderToStaticMarkup(createElement(ProductionPanel, { items: [active], selected: "project:change:1", onSelect() {}, connected: true })), /No delivery evidence recorded/);
+});
+
 test("a selected completed item remains inspectable", () => {
   const markup = renderToStaticMarkup(createElement(ProductionPanel, { items: [active, completed], selected: "project:change:2", onSelect() {}, connected: true }));
   assert.match(markup, /Delivered/);

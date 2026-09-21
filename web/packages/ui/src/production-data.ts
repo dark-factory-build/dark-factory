@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import type { ProjectContentCall } from "./project-library.js";
 
 export type RuntimeBuild = { version: string; source: string; target: string; build_id: string; release: boolean };
+/** The newest release the daemon has observed. Absent is no answer, not current. */
+export type PublishedRelease = { version: string; url: string };
 
 export type ProductionRecord = {
   project_id: string; repository: string; kind: string; id: string; visual_id: string;
@@ -12,6 +14,7 @@ export type ProductionRecord = {
  * to the existing host controller; neither sprites nor panels poll GitHub. */
 export function useProduction(projects: readonly string[], call: ProjectContentCall | undefined) {
   const [runtime, setRuntime] = useState<RuntimeBuild>();
+  const [release, setRelease] = useState<PublishedRelease>();
   const [records, setRecords] = useState<ProductionRecord[]>([]);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
@@ -32,22 +35,26 @@ export function useProduction(projects: readonly string[], call: ProjectContentC
       try {
         const next: ProductionRecord[] = [];
         let remaining = 0;
-        let currentRuntime: RuntimeBuild | undefined;
-        for (const project_id of projects) {
+        let currentRuntime: RuntimeBuild | undefined, currentRelease: PublishedRelease | undefined;
+        // The daemon's own build and the published release ride on every
+        // production read. A factory with no project still asks once, with no
+        // project, so those two facts never depend on a project existing.
+        for (const project_id of projects.length > 0 ? projects : [""]) {
           let offset = 0;
           // ponytail: at most 256 records per project per refresh; explicit
           // overflow keeps a crowded source visible with an explicit load-more control.
           for (let page = 0; page < pages; page++) {
-            const result = await caller.current!("production", { project_id, offset, limit: 8 }) as { records: Omit<ProductionRecord, "project_id">[]; next_offset: number; total: number; runtime?: RuntimeBuild };
+            const result = await caller.current!("production", { project_id, offset, limit: 8 }) as { records: Omit<ProductionRecord, "project_id">[]; next_offset: number; total: number; runtime?: RuntimeBuild; release?: PublishedRelease };
             if (stopped || generation.current !== current) return;
             currentRuntime = result.runtime;
+            currentRelease = result.release;
             next.push(...result.records.map((record) => ({ ...record, project_id })));
             offset = result.next_offset;
             if (offset === 0) break;
             if (page === pages - 1) remaining += Math.max(0, result.total - offset);
           }
         }
-        if (!stopped) { runtimeGeneration.current = current; setRuntime(currentRuntime); setRecords(next); setOverflow(remaining); setError(""); }
+        if (!stopped) { runtimeGeneration.current = current; setRuntime(currentRuntime); setRelease(currentRelease); setRecords(next); setOverflow(remaining); setError(""); }
       } catch { if (!stopped) setError("Production observation unavailable. Previously read work is retained."); }
       finally { busy = false; if (!stopped) setLoading(false); }
     };
@@ -59,5 +66,7 @@ export function useProduction(projects: readonly string[], call: ProjectContentC
   }, [key, connected, pages]);
   const scoped = records.filter((record) => projects.includes(record.project_id));
   const notices = scoped.filter((record) => record.kind === "repository" && (record.document.unavailable || record.document.overflow)).map((record) => `${record.repository}: ${record.document.unavailable ? "some external evidence is unavailable" : "observation is bounded"}${record.document.overflow ? "; additional external records exist" : ""}.`);
-  return { runtime: connected && runtimeGeneration.current === generation.current ? runtime : undefined, notices, records: records.filter((record) => projects.includes(record.project_id)), error, overflow, loading: connected && loading, loadMore: () => setPages((value) => value + 32) };
+  // The runtime identity belongs to this connection and is dropped when it goes;
+  // the published release is a repository fact that no reconnect invalidates.
+  return { runtime: connected && runtimeGeneration.current === generation.current ? runtime : undefined, release, notices, records: records.filter((record) => projects.includes(record.project_id)), error, overflow, loading: connected && loading, loadMore: () => setPages((value) => value + 32) };
 }
