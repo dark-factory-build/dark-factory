@@ -29,7 +29,28 @@ MAX_FINDINGS_BYTES = 8192
 QUERY = """
 query($owner:String!, $name:String!) {
   repository(owner:$owner, name:$name) {
-    pullRequests(first:100, states:[OPEN, MERGED], orderBy:{field:UPDATED_AT, direction:DESC}) {
+    open: pullRequests(first:100, states:OPEN, orderBy:{field:UPDATED_AT, direction:DESC}) {
+      pageInfo { hasNextPage }
+      nodes {
+        number
+        headRefOid
+        mergeQueueEntry { state }
+        reviews(last:32) {
+          pageInfo { hasPreviousPage }
+          nodes {
+            commit { oid }
+            state
+            body
+            url
+            author {
+              ... on User { databaseId }
+              ... on Bot { databaseId }
+            }
+          }
+        }
+      }
+    }
+    merged: pullRequests(first:100, states:MERGED, orderBy:{field:UPDATED_AT, direction:DESC}) {
       pageInfo { hasNextPage }
       nodes {
         number
@@ -77,8 +98,10 @@ def _read_graphql(repository):
     value = json.loads(encoded)
     if not isinstance(value, dict) or value.get("errors"):
         raise ValueError("GitHub review query failed")
-    pull_requests = ((value.get("data") or {}).get("repository") or {}).get("pullRequests")
-    if not isinstance(pull_requests, dict) or not isinstance(pull_requests.get("nodes"), list):
+    repository = (value.get("data") or {}).get("repository") or {}
+    pull_requests = {name: repository.get(name) for name in ("open", "merged")}
+    if any(not isinstance(connection, dict) or not isinstance(connection.get("nodes"), list)
+           for connection in pull_requests.values()):
         raise ValueError("GitHub review query returned an invalid shape")
     return pull_requests
 
@@ -126,39 +149,46 @@ def collect(repository):
     list of fail-closed query/shape reasons.
     """
     pull_requests = _read_graphql(repository)
+    # Keep accepting the old single-connection shape for callers with a
+    # captured response; live queries always provide both bounded connections.
+    if "nodes" in pull_requests:
+        pull_requests = {"open": pull_requests}
     reviews, queues, unavailable = {}, {}, []
-    overflow = 1 if pull_requests.get("pageInfo", {}).get("hasNextPage") else 0
-    nodes = pull_requests.get("nodes", [])
-    if len(nodes) > MAX_PULL_REQUESTS:
-        overflow += len(nodes) - MAX_PULL_REQUESTS
-    for pr in nodes[:MAX_PULL_REQUESTS]:
-        if not isinstance(pr, dict) or type(pr.get("number")) is not int or pr["number"] < 1 or not SHA.fullmatch(pr.get("headRefOid") or ""):
-            unavailable.append("pull_request_shape")
-            continue
-        number, head = pr["number"], pr["headRefOid"]
-        key = (number, head)
-        queue = (pr.get("mergeQueueEntry") or {}).get("state")
-        if isinstance(queue, str) and queue:
-            queues[key] = queue[:64]
-        reasons = []
-        facts, truncated = _review_facts(pr.get("reviews"), number, head, reasons)
-        unavailable.extend(reasons)
-        if truncated:
-            overflow += 1
-        current_facts = [fact for fact in facts if fact["commit_id"] == head]
-        result = verify_exact_head(head, facts)
-        blocking = "blocking verdict(s)" in (result.stderr or "")
-        if blocking and (not truncated and not reasons or any(fact["state"] == "CHANGES_REQUESTED" for fact in current_facts)):
-            state = "block"
-        elif result.returncode == 0 and not truncated and not reasons:
-            state = "allow"
-        else:
-            state = "unknown"
-        selected = next((fact for fact in reversed(current_facts) if fact["state"] == "CHANGES_REQUESTED"), None)
-        if selected is None and state == "allow":
-            selected = next((fact for fact in reversed(current_facts) if "Dark-Factory-Review: allow " + head in fact["body"]), None)
-        selected = selected or (current_facts[-1] if current_facts else {"url": "", "body": ""})
-        reviews[key] = {"head": head, "state": state, "url": selected["url"], "findings": _bounded_text(selected["body"])}
+    overflow = 0
+    for connection in pull_requests.values():
+        page = connection.get("pageInfo", {})
+        overflow += int(page.get("hasNextPage") is True)
+        nodes = connection.get("nodes", [])
+        if len(nodes) > MAX_PULL_REQUESTS:
+            overflow += len(nodes) - MAX_PULL_REQUESTS
+        for pr in nodes[:MAX_PULL_REQUESTS]:
+            if not isinstance(pr, dict) or type(pr.get("number")) is not int or pr["number"] < 1 or not SHA.fullmatch(pr.get("headRefOid") or ""):
+                unavailable.append("pull_request_shape")
+                continue
+            number, head = pr["number"], pr["headRefOid"]
+            key = (number, head)
+            queue = (pr.get("mergeQueueEntry") or {}).get("state")
+            if isinstance(queue, str) and queue:
+                queues[key] = queue[:64]
+            reasons = []
+            facts, truncated = _review_facts(pr.get("reviews"), number, head, reasons)
+            unavailable.extend(reasons)
+            if truncated:
+                overflow += 1
+            current_facts = [fact for fact in facts if fact["commit_id"] == head]
+            result = verify_exact_head(head, facts)
+            blocking = "blocking verdict(s)" in (result.stderr or "")
+            if blocking and (not truncated and not reasons or any(fact["state"] == "CHANGES_REQUESTED" for fact in current_facts)):
+                state = "block"
+            elif result.returncode == 0 and not truncated and not reasons:
+                state = "allow"
+            else:
+                state = "unknown"
+            selected = next((fact for fact in reversed(current_facts) if fact["state"] == "CHANGES_REQUESTED"), None)
+            if selected is None and state == "allow":
+                selected = next((fact for fact in reversed(current_facts) if "Dark-Factory-Review: allow " + head in fact["body"]), None)
+            selected = selected or (current_facts[-1] if current_facts else {"url": "", "body": ""})
+            reviews[key] = {"head": head, "state": state, "url": selected["url"], "findings": _bounded_text(selected["body"])}
     return reviews, queues, overflow, ",".join(sorted(set(unavailable)))
 
 

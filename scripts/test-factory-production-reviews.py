@@ -105,6 +105,25 @@ class ProductionReviewsTest(unittest.TestCase):
             reviews._read_graphql = original
         self.assertEqual(facts[(9, HEAD)]["state"], "unknown")
 
+    def test_recent_merges_do_not_displace_open_prs(self):
+        original = reviews._read_graphql
+        empty_reviews = {"pageInfo": {"hasPreviousPage": False}, "nodes": []}
+        merged = []
+        for number in range(100, 200):
+            merged.append({"number": number, "headRefOid": OLD, "mergeQueueEntry": None, "reviews": empty_reviews})
+        reviews._read_graphql = lambda _: {
+            "open": {"pageInfo": {"hasNextPage": False}, "nodes": [
+                {"number": 10, "headRefOid": HEAD, "mergeQueueEntry": None, "reviews": {"pageInfo": {"hasPreviousPage": False}, "nodes": [review("COMMENTED")]}}
+            ]},
+            "merged": {"pageInfo": {"hasNextPage": True}, "nodes": merged},
+        }
+        try:
+            facts, _, overflow, _ = reviews.collect("example/repository")
+        finally:
+            reviews._read_graphql = original
+        self.assertEqual(facts[(10, HEAD)]["state"], "allow")
+        self.assertEqual(overflow, 1)
+
 
 if __name__ == "__main__":
     unittest.main()
