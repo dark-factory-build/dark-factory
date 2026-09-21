@@ -308,6 +308,56 @@ class ReleaseFixtures(unittest.TestCase):
             self.assertEqual(repeated["baseline_live_tip"]["sha"], OLD)
             self.assertTrue(repeated["baseline_live_tip"]["healthy"])
 
+    def test_reconcile_settles_a_named_barrier_contained_in_the_healthy_build(self):
+        current = snapshot()
+        old_snapshot = tuple([dict(current[0], mergeCommitSha=OLD), OLD, [], current[3]])
+        def journal_with(state, barrier_sha=OLD):
+            return {"version": 1, "live_tip": {"sha": OLD, "healthy": True},
+                    "releases": {"631": {"pr": 631, "sha": OLD, "state": state, "error": "keep", "config_fingerprint": "f" * 64}},
+                    "unresolved_deployment": {"pr": 631, "sha": barrier_sha, "config_fingerprint": "f" * 64, "error": "ambiguous"}}
+        def compare(status):
+            def gh(argv, *args, **kwargs):
+                base = argv[2].split("/")[-1].split("...")[0]
+                return json.dumps({"status": status if base == OLD else "identical", "merge_base_commit": {"sha": base}})
+            return gh
+        for state in ("blocked", "running"):
+            with self.subTest(state=state), tempfile.TemporaryDirectory() as directory:
+                journal = Path(directory) / "release.json"
+                cfg = config(journal)
+                release.atomic_json(journal, journal_with(state))
+                with mock.patch.object(release, "gh_snapshot", side_effect=[current, old_snapshot]), \
+                     mock.patch.object(release, "review_gate"), \
+                     mock.patch.object(release, "probe", return_value={"sha": SHA, "healthy": True}), \
+                     mock.patch.object(release, "run", side_effect=compare("ahead")):
+                    release.reconcile(cfg, 633, SHA, [631], baseline_current=True)
+                saved = release.load(journal)
+                self.assertNotIn("unresolved_deployment", saved)
+                self.assertEqual("blocked", saved["releases"]["631"]["state"])
+                self.assertEqual("keep", saved["releases"]["631"]["error"])
+                self.assertEqual(633, saved["releases"]["631"]["superseded_by"]["pr"])
+                newer = (dict(current[0], mergeCommitSha=SECOND), SECOND, current[2], current[3])
+                with mock.patch.object(release, "gh_snapshot", return_value=newer), \
+                     mock.patch.object(release, "review_gate"), \
+                     mock.patch.object(release, "probe", return_value={"sha": SHA, "healthy": True}), \
+                     mock.patch.object(release, "range_sources", return_value=([], "range")), \
+                     mock.patch.object(release, "verify", return_value={"sha": SECOND, "healthy": True}), \
+                     mock.patch.object(release, "run", side_effect=lambda argv, *a, **kw: json.dumps({"object": {"sha": SECOND}}) if argv[:2] == ["gh", "api"] else ""):
+                    self.assertEqual("verified", release.once(cfg, 634)["state"])
+        for refusal, named, status, barrier_sha in (("earlier unresolved", [], "ahead", OLD), ("not an ancestor", [631], "diverged", OLD),
+                                                    ("not blocked", [631], "ahead", "e" * 40)):
+            with self.subTest(refusal=refusal), tempfile.TemporaryDirectory() as directory:
+                journal = Path(directory) / "release.json"
+                cfg = config(journal)
+                before = journal_with("blocked", barrier_sha)
+                release.atomic_json(journal, before)
+                with mock.patch.object(release, "gh_snapshot", side_effect=[current, old_snapshot]), \
+                     mock.patch.object(release, "review_gate"), \
+                     mock.patch.object(release, "probe", return_value={"sha": SHA, "healthy": True}), \
+                     mock.patch.object(release, "run", side_effect=compare(status)), \
+                     self.assertRaisesRegex(release.ReleaseError, refusal):
+                    release.reconcile(cfg, 633, SHA, named, baseline_current=True)
+                self.assertEqual(before, release.load(journal))
+
     def test_supersede_rejects_active_or_malformed_or_diverged_receipt_without_write(self):
         for old_state, old_sha, comparison in (("running", OLD, "ahead"), ("blocked", "bad", "ahead"), ("blocked", OLD, "diverged")):
             with self.subTest(old_state=old_state, old_sha=old_sha, comparison=comparison), tempfile.TemporaryDirectory() as directory:
@@ -680,7 +730,15 @@ class ReleaseFixtures(unittest.TestCase):
                 stored = release.load(journal)
                 self.assertEqual("blocked", stored["releases"]["633"]["state"])
                 self.assertEqual(barrier, "unresolved_deployment" in stored)
-                self.assertEqual(not barrier, release.predeploy_blocked(stored["releases"]["633"]))
+                if barrier:
+                    continue
+                with mock.patch.object(release, "gh_snapshot", return_value=snapshot()), \
+                     mock.patch.object(release, "review_gate"), \
+                     mock.patch.object(release, "probe", return_value={"sha": OLD, "healthy": True}), \
+                     mock.patch.object(release, "range_sources", return_value=([], "range")), \
+                     mock.patch.object(release, "verify", return_value={"sha": SHA, "healthy": True}), \
+                     mock.patch.object(release, "run", side_effect=lambda argv, *a, **kw: json.dumps({"object": {"sha": SHA}}) if argv[:2] == ["gh", "api"] else ""):
+                    self.assertEqual("verified", release.once(cfg, 633, retry=True)["state"])
 
     def test_explicit_recovery_clears_barrier_and_allows_subsequent_release(self):
         with tempfile.TemporaryDirectory() as directory:
