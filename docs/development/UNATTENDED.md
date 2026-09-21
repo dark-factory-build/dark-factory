@@ -212,6 +212,10 @@ configured default branch, an independent Maintainer ALLOW at its exact head,
 and completed passing checks. It records the plan before executing the fixed
 hook, then independently probes the live target. A crash or ambiguous effect
 is observed before retrying; blocked receipts require explicit `--retry`.
+A hook that exits 75 declares that it failed before any effect on the target
+(`deploy-runtime.py` does so only when its non-destructive `--prepare` build
+fails): the receipt is blocked as pre-deployment and leaves no unresolved
+barrier, so `--retry` or a later release may follow. Any other failure keeps it.
 The runtime hook drains active work with dispatch off, uses the stock reinstall
 script, checks all three binaries and browser health, and restores dispatch
 only if no later operator change superseded its pause. Each hook starts in an

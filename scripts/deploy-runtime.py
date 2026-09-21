@@ -113,4 +113,6 @@ if __name__ == '__main__':
             # redacts whole labels and then keeps the tail.
             print(str(cause.stderr or '') + '\nstage: ' + ' '.join(Path(str(arg)).name for arg in cause.cmd[:5])
                   + ' exit=' + str(getattr(cause, 'returncode', 'timeout')), file=sys.stderr)
-        raise SystemExit(1)
+        # 75 tells the release controller the failure was the non-destructive
+        # preparation: nothing was drained, stopped, swapped or migrated.
+        raise SystemExit(75 if isinstance(cause, subprocess.SubprocessError) and '--prepare' in cause.cmd else 1)
