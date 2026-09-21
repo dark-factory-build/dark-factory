@@ -111,6 +111,24 @@ func TestMoveHomeKeepsPublishedDestinationLockedUntilValidation(t *testing.T) {
 	}
 }
 
+func TestMoveHomeRefusesEmptyServiceArtifact(t *testing.T) {
+	parent := t.TempDir()
+	from := filepath.Join(parent, "old")
+	to := filepath.Join(parent, "new")
+	if _, err := Init(context.Background(), from); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(ServiceDirectoryPath(from), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := MoveHome(context.Background(), from, to); !errors.Is(err, ErrBusy) {
+		t.Fatalf("move with empty service artifact = %v, want busy", err)
+	}
+	if _, err := os.Stat(from); err != nil {
+		t.Fatalf("source changed after empty service-artifact refusal: %v", err)
+	}
+}
+
 func TestRepairMovedWorktreesRestoresExternalMetadataOnVerificationFailure(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
@@ -189,6 +207,25 @@ func TestRepairMovedWorktreesRestoresExternalMetadataOnVerificationFailure(t *te
 	after := string(runGit(t, repository, "worktree", "list", "--porcelain"))
 	if before != after {
 		t.Fatalf("external Git metadata changed after failed repair:\nbefore=%s\nafter=%s", before, after)
+	}
+	raw, err = sql.Open("sqlite3", "file:"+filepath.Join(to, databaseName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`UPDATE changes SET repository_dev = repository_dev + 1`); err != nil {
+		raw.Close()
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	before = string(runGit(t, repository, "worktree", "list", "--porcelain"))
+	if _, err := repairMovedWorktrees(ctx, filepath.Join(to, databaseName), to); err == nil {
+		t.Fatal("repair accepted a replacement repository identity")
+	}
+	after = string(runGit(t, repository, "worktree", "list", "--porcelain"))
+	if before != after {
+		t.Fatalf("external Git metadata changed after identity refusal:\nbefore=%s\nafter=%s", before, after)
 	}
 }
 

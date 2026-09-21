@@ -55,11 +55,9 @@ func moveHome(ctx context.Context, from, to string) (resultErr error) {
 	}
 	defer func() { resultErr = errors.Join(resultErr, lockedHome.closeForMove()) }()
 	if _, err := os.Lstat(ServiceDirectoryPath(from)); err == nil {
-		if status, inspectErr := InspectService(ctx, from); inspectErr == nil && status.State != ServiceAbsent {
-			return ErrBusy
-		} else if inspectErr != nil && !errors.Is(inspectErr, ErrUnsupported) {
-			return inspectErr
-		}
+		return ErrBusy
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
 	}
 	backupDir := filepath.Join(filepath.Dir(from), "."+filepath.Base(from)+".move-backup-"+fmt.Sprint(time.Now().UnixNano()))
 	stage := filepath.Join(filepath.Dir(to), "."+filepath.Base(to)+".move-stage-"+fmt.Sprint(time.Now().UnixNano()))
@@ -266,23 +264,25 @@ func repairMovedWorktrees(ctx context.Context, path, home string) (worktreeRepai
 		return worktreeRepairRollback{}, err
 	}
 	defer db.Close()
-	rows, err := db.QueryContext(ctx, `SELECT changes.id, projects.root, changes.head_commit FROM changes JOIN projects ON projects.id = changes.project_id WHERE changes.phase IN ('available', 'retained')`)
+	rows, err := db.QueryContext(ctx, `SELECT changes.id, projects.root, changes.repository_dev, changes.repository_inode, changes.head_commit FROM changes JOIN projects ON projects.id = changes.project_id WHERE changes.phase IN ('available', 'retained')`)
 	if err != nil {
 		return worktreeRepairRollback{}, err
 	}
 	type changeRepair struct {
 		id, head []byte
 		root     string
+		dev, ino int64
 	}
 	var repairs []changeRepair
 	for rows.Next() {
 		var id, head []byte
 		var root string
-		if err := rows.Scan(&id, &root, &head); err != nil {
+		var dev, ino int64
+		if err := rows.Scan(&id, &root, &dev, &ino, &head); err != nil {
 			rows.Close()
 			return worktreeRepairRollback{}, err
 		}
-		repairs = append(repairs, changeRepair{id: append([]byte(nil), id...), head: append([]byte(nil), head...), root: root})
+		repairs = append(repairs, changeRepair{id: append([]byte(nil), id...), head: append([]byte(nil), head...), root: root, dev: dev, ino: ino})
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()
@@ -337,6 +337,14 @@ func repairMovedWorktrees(ctx context.Context, path, home string) (worktreeRepai
 		root := repair.root
 		if info, statErr := os.Stat(root); statErr != nil || !info.IsDir() {
 			return worktreeRepairRollback{}, errors.Join(fmt.Errorf("registered Change repository is missing: %s", root), cleanup())
+		}
+		info, statErr := os.Stat(root)
+		if statErr != nil {
+			return worktreeRepairRollback{}, errors.Join(fmt.Errorf("registered Change repository is missing: %s", root), cleanup())
+		}
+		identity, ok := info.Sys().(*syscall.Stat_t)
+		if !ok || int64(identity.Dev) != repair.dev || int64(identity.Ino) != repair.ino {
+			return worktreeRepairRollback{}, errors.Join(fmt.Errorf("registered Change repository identity changed: %s", root), cleanup())
 		}
 		commonOutput, runErr := exec.CommandContext(ctx, git, "-C", root, "rev-parse", "--git-common-dir").Output()
 		if runErr != nil {
