@@ -248,6 +248,59 @@ func TestProductionPublicationUsesOwnedChangeForTransformedHead(t *testing.T) {
 	}
 }
 
+func TestProductionObservationUsesVerifiedHeadRepositoryForTransformedHead(t *testing.T) {
+	ctx := context.Background()
+	proposal, err := NewSuccessProposal("published")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, finalizing := finalizingReleasedRun(t, RoleWorker, VerificationNone, proposal)
+	defer store.Close()
+	change, found, err := store.Change(ctx, *finalizing.ChangeID)
+	if err != nil || !found || change.HeadCommit == nil {
+		t.Fatalf("settled change = %+v, found=%v, err=%v", change, found, err)
+	}
+	settlement, err := NewRetainedChangeSettlement(change.Revision, change.HeadCommit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	terminal, err := store.FinalizeWorkerRun(ctx, finalizing.ID, finalizing.Revision, settlement, mustTime(t, 79))
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := [32]byte{1}
+	if _, err := store.writer.ExecContext(ctx, `UPDATE repository_source_identities SET root_dev = 61, root_inode = 62, git_dev = 61, git_inode = 63, origin_digest = ?, publication_repository = 'example/factory' WHERE repository_id = (SELECT repository_id FROM task_repository_bindings WHERE task_id = ?)`, digest[:], terminal.TaskID.Bytes()); err != nil {
+		t.Fatal(err)
+	}
+	pr := ProductionPullRequest{Number: 7, Title: "Ship the transformed tree", URL: "https://github.com/example/factory/pull/7", Head: strings.Repeat("b", 40), HeadRepository: "example/factory", Branch: "factory/" + change.ID.String()[:12], Base: "main", State: "open", Review: ProductionReview{Head: strings.Repeat("b", 40), State: "allow"}}
+	if err := store.RecordProductionObservation(ctx, terminal.ProjectID, ProductionObservation{Repository: "example/factory", ObservedAt: 80, PullRequests: []ProductionPullRequest{pr}}, mustTime(t, 80)); err != nil {
+		t.Fatal(err)
+	}
+	page, err := store.Production(ctx, terminal.ProjectID, 0, 8)
+	item := productionRecord(t, page, "pull_request", "7")
+	if err != nil || item == nil || item.VisualID != "change:"+change.ID.String() || !containsString(item.Tasks, terminal.TaskID.String()) || productionRecord(t, page, "construction", "") != nil {
+		t.Fatalf("verified transformed observation = %+v, err=%v", page, err)
+	}
+	for _, headRepository := range []string{"", "other/factory"} {
+		fork := pr
+		fork.Number = 8
+		fork.URL = "https://github.com/example/factory/pull/8"
+		fork.HeadRepository = headRepository
+		if err := store.RecordProductionObservation(ctx, terminal.ProjectID, ProductionObservation{Repository: "example/factory", ObservedAt: 81, PullRequests: []ProductionPullRequest{fork}}, mustTime(t, 81)); err != nil {
+			t.Fatal(err)
+		}
+		page, err = store.Production(ctx, terminal.ProjectID, 0, 8)
+		item := productionRecord(t, page, "pull_request", "8")
+		if err != nil || item == nil || item.VisualID != "example/factory#8" {
+			t.Fatalf("unverified head repository %q associated Change: %+v, err=%v", headRepository, item, err)
+		}
+		var linked int
+		if err := store.writer.QueryRowContext(ctx, `SELECT count(*) FROM publication_tasks WHERE project_id = ? AND repository = 'example/factory' AND pull_number = 8 AND change_id IS NOT NULL`, terminal.ProjectID.Bytes()).Scan(&linked); err != nil || linked != 0 {
+			t.Fatalf("unverified head repository %q linked Change rows = %d, err=%v", headRepository, linked, err)
+		}
+	}
+}
+
 func TestProductionSurvivesReopen(t *testing.T) {
 	ctx := context.Background()
 	store, path := newTestStore(t)

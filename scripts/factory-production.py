@@ -354,6 +354,9 @@ def pull_requests(value, markers, queues):
         record = {"number": pr, "title": text(item.get("title")), "url": url(item.get("html_url")),
                   "head": head, "branch": branch, "base": text((item.get("base") or {}).get("ref") if isinstance(item.get("base"), dict) else "", 240),
                   "state": text(item.get("state"), 32) or "unknown", "review": review}
+        head_repository = (item["head"].get("repo") or {}).get("full_name") if isinstance(item["head"].get("repo"), dict) else ""
+        if isinstance(head_repository, str) and REPOSITORY.fullmatch(head_repository):
+            record["head_repository"] = head_repository
         merge = sha(item.get("merge_commit_sha"))
         if merge:
             merged_at = text(item.get("merged_at"), 64)

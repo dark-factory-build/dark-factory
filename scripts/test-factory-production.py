@@ -42,7 +42,7 @@ class ProductionFixtures(unittest.TestCase):
                 calls.append(argv)
                 endpoint = argv[2]
                 if endpoint.endswith("/pulls?state=open&per_page=100"):
-                    return json.dumps([{"number": 7, "title": "Real", "html_url": "https://github.com/o/r/pull/7", "state": "open", "merge_commit_sha": OLD, "head": {"sha": SHA, "ref": "real"}, "base": {"ref": "main"}}])
+                    return json.dumps([{"number": 7, "title": "Real", "html_url": "https://github.com/o/r/pull/7", "state": "open", "merge_commit_sha": OLD, "head": {"sha": SHA, "ref": "real", "repo": {"full_name": "o/r"}}, "base": {"ref": "main"}}])
                 if endpoint.endswith("/pulls?state=closed&sort=updated&direction=desc&per_page=100"):
                     return json.dumps([{"number": 8, "title": "Merged", "html_url": "https://github.com/o/r/pull/8", "state": "closed", "merged_at": "2026-09-20T10:00:00Z", "merge_commit_sha": OLD, "head": {"sha": OLD, "ref": "old"}, "base": {"ref": "main"}}])
                 if endpoint.endswith("/actions/runs?per_page=100"):
@@ -60,6 +60,7 @@ class ProductionFixtures(unittest.TestCase):
             with mock.patch.object(production, "host_config", return_value=config), mock.patch.object(production.intake, "command", side_effect=command), mock.patch.object(production.time, "time", return_value=10), mock.patch.object(production.formal, "collect", return_value=(merged_review, {}, 0, "")):
                 result = production.collect(config)
             self.assertEqual(result["pull_requests"][0]["review"], {"head": SHA, "state": "allow"})
+            self.assertEqual(result["pull_requests"][0]["head_repository"], "o/r")
             self.assertEqual(result["pull_requests"][0]["merge_queue"], "QUEUED")
             self.assertEqual(result["observed_at"], 10000)
             self.assertEqual(result["pull_requests"][1]["merge"], OLD)
