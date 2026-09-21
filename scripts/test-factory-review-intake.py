@@ -444,7 +444,7 @@ class ReviewIntakeTest(unittest.TestCase):
         snapshot = Path(self.config['journal']).parent / ('review-9-' + SHA)
         snapshot.mkdir()
         (snapshot / 'body.md').write_text(old_body)
-        self.observe.side_effect = ['block', 'missing', 'block', 'missing', 'block']
+        self.observe.side_effect = ['block', 'missing', 'block', 'missing']
         with patch.object(review, 'mirror', return_value=Path('/mirror')), \
              patch.object(review, 'list_prs', return_value=[{'number': 9, 'headRefOid': SHA, 'body': new_body}]), \
              patch.object(review, 'verify_existing'), patch.object(review, 'app_update_receipt', return_value=True), \
@@ -452,7 +452,7 @@ class ReviewIntakeTest(unittest.TestCase):
              patch.object(review.intake, 'task_state', return_value={'status': 'queued'}):
             review.run_once(self.config)
             review.run_once(self.config)
-        self.assertEqual(2, launch.call_count)
+        self.assertEqual(1, launch.call_count)
         corrected = json.loads(Path(self.config['journal'] + '.reviews.json').read_text())['pulls']['9:' + SHA]
         self.assertEqual(operation['review_operation'], corrected['prior_review_operation'])
         self.assertEqual('block', corrected['prior_review_state'])

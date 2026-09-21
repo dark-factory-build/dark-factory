@@ -724,10 +724,11 @@ def run_locked(config, path, journal, journal_path, managed=None):
                 snapshot_path.write_text(pr["body"])
                 intake.atomic_json(journal_path, receipts)
                 state = observe_review(config, operation)
-        if state == "missing" and not launched and operation.get("review_attempted") and operation.get("review_retries", 0) < 1:
-            # A missing receipt after a persisted launch is the recoverable
-            # crash window: the reviewer may have died before the App journal
-            # write. Use one new operation, never replay the old one.
+        if state == "missing" and not launched and operation.get("review_state") == "failed" \
+                and operation.get("review_exit", 0) != 0 and operation.get("review_retries", 0) < 1:
+            # Only a controller-observed terminal nonzero launch is retryable.
+            # A bare missing receipt may belong to a reviewer still running
+            # after this controller crashed, so never use it to launch again.
             previous = operation["review_operation"]
             operation["review_operation"] = str(uuid.uuid5(uuid.NAMESPACE_URL,
                 "dark-factory:host-review-retry:" + previous))
@@ -756,6 +757,11 @@ def run_locked(config, path, journal, journal_path, managed=None):
             intake.atomic_json(journal_path, receipts)
             launched = True
             operation["review_exit"] = launch_review(config, path, pr, operation)
+            if operation["review_exit"] != 0:
+                # Record the terminal host failure before asking the App about
+                # its operation; an unavailable observation must not erase the
+                # local proof that the owned reviewer exited unsuccessfully.
+                operation["review_state"] = "failed"
             intake.atomic_json(journal_path, receipts)
             state = observe_review(config, operation)
             if state == "missing" and operation["review_exit"] != 0:
