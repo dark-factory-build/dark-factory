@@ -29,6 +29,29 @@ func retainedSourceReviewProviderSQL() (string, []any) {
 	return strings.Join(placeholders, ", "), args
 }
 
+// EffectiveTaskText is the single task-text projection used by admission,
+// authentication, and provider launch.
+func EffectiveTaskText(provider Provider, title, body string) string {
+	if provider != ProviderShell && body == "" {
+		return title
+	}
+	return body
+}
+
+// retainedSourceReviewTaskSQL mirrors ParseRetainedSourceReviewTask's first
+// line tokenization for the admission query.
+func retainedSourceReviewTaskSQL() string {
+	normalized := `ltrim(replace(replace(replace(CASE WHEN a.provider <> 'shell' AND t.body = '' THEN t.title ELSE t.body END, char(9), ' '), char(10), ' '), char(13), ' '), ' ')`
+	first := `ltrim(substr(` + normalized + `, 8), ' ')`
+	return `(substr(` + normalized + `, 1, 6) = 'review' AND substr(` + normalized + `, 7, 1) = ' ' AND substr(` + first + `, 1, 7) = 'handoff' AND (substr(` + first + `, 8, 1) = ' ' OR substr(` + first + `, 8, 1) = ''))`
+}
+
+func retainedSourceReviewFields(line string) []string {
+	return strings.FieldsFunc(line, func(r rune) bool {
+		return r == ' ' || r == '\t' || r == '\n' || r == '\r'
+	})
+}
+
 // validateRetainedSourceReviewRoute is the installed capability table for
 // exact retained-source reads.
 func validateRetainedSourceReviewRoute(taskBody string, agent Agent) error {
@@ -51,12 +74,11 @@ func validateRetainedSourceReviewRoute(taskBody string, agent Agent) error {
 // ParseRetainedSourceReviewTask reads the exact retained identity from the
 // task's first line. Later lines are reviewer instructions, never authority.
 func ParseRetainedSourceReviewTask(taskBody string) (RetainedChangeHandoff, bool, error) {
-	// The same prefix admission matches in SQL, so both classify one body alike.
-	if !strings.HasPrefix(taskBody, "review handoff ") {
+	line, _, _ := strings.Cut(taskBody, "\n")
+	fields := retainedSourceReviewFields(line)
+	if len(fields) < 2 || fields[0] != "review" || fields[1] != "handoff" {
 		return RetainedChangeHandoff{}, false, nil
 	}
-	line, _, _ := strings.Cut(taskBody, "\n")
-	fields := strings.Fields(line)
 	if len(fields) != 7 {
 		return RetainedChangeHandoff{}, true, ErrInvalidValue
 	}

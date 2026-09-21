@@ -14,16 +14,16 @@ func reviewHandoffTask() string {
 
 func TestParseRetainedSourceReviewTaskBindsFirstLine(t *testing.T) {
 	want := reviewHandoffTask()
-	parsed, review, err := ParseRetainedSourceReviewTask(want + "  \r\nFACTORY_SOURCE owner/repo#1\nreview this exact source")
+	parsed, review, err := ParseRetainedSourceReviewTask(" \t" + want + "  \r\nFACTORY_SOURCE owner/repo#1\nreview this exact source")
 	if err != nil || !review || parsed.TaskID.String() != strings.Repeat("a", 32) || parsed.ChangeID.String() != strings.Repeat("b", 32) || parsed.BaseCommit != strings.Repeat("c", 40) || parsed.TaskWorkRevision.Int64() != 3 || parsed.ChangeRevision.Int64() != 7 {
 		t.Fatalf("parsed handoff = %+v, review=%v, err=%v", parsed, review, err)
 	}
 	for _, body := range []string{
 		"ordinary worker task",
-		// Admission matches this prefix in SQL, so the parser must not see more.
-		" \t" + want,
-		"review  handoff" + strings.TrimPrefix(want, "review handoff"),
 		"FACTORY_SOURCE owner/repo#1\nreview handoff is prose below the first line",
+		"review handoffx " + strings.Repeat("a", 32),
+		"\vreview handoff " + strings.Repeat("a", 32),
+		"\u2003review handoff " + strings.Repeat("a", 32),
 	} {
 		if _, review, err := ParseRetainedSourceReviewTask(body); err != nil || review {
 			t.Fatalf("ordinary task classified as review: %q review=%v err=%v", body, review, err)
@@ -288,7 +288,7 @@ func TestRetainedSourceReviewAdmissionUsesDeclaredProviderSet(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 3), ProjectID: project.ID, AssignedAgentID: agent.ID, IncarnationID: incarnationID(t, 3), Title: "review", Body: reviewHandoffTask()}, mustTime(t, 4)); err != nil {
+			if _, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 3), ProjectID: project.ID, AssignedAgentID: agent.ID, IncarnationID: incarnationID(t, 3), Title: " \t" + reviewHandoffTask(), Body: ""}, mustTime(t, 4)); err != nil {
 				t.Fatal(err)
 			}
 			result, err := store.AdmitNext(ctx, admissionKeys(t, byte(20+index), nil), mustTime(t, 5))

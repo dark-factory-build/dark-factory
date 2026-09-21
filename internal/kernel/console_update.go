@@ -332,7 +332,7 @@ func (store *Store) updateTask(ctx context.Context, digest *AttemptDigest, id Ta
 		if !found {
 			return Task{}, tx.Rollback(ErrCorruptState)
 		}
-		if err := validateRetainedSourceReviewRoute(task.Body, assigned); err != nil {
+		if err := validateRetainedSourceReviewRoute(EffectiveTaskText(assigned.Provider, task.Title, task.Body), assigned); err != nil {
 			return Task{}, tx.Rollback(err)
 		}
 	}

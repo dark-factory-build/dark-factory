@@ -1021,8 +1021,7 @@ func TestSupervisorClaudeReviewerLaunchReceivesExactRetainedChangeReceipt(t *tes
 			handoff := fmt.Sprintf("review handoff %s %s %x %d %d  \r\nFACTORY_SOURCE owner/repo#1\nreview this exact source", worker.TaskID, changeState.ID, changeState.Selection.Commit().Bytes(), worker.AdmittedTaskWorkRevision.Int64(), changeState.Revision.Int64())
 			title, taskBody := "review retained Change", handoff
 			if titleOnly {
-				// A handoff is its body's first line: admission and the supervisor read
-				// only the body, so a title grants no source.
+				// Native task authority uses the title when the body is empty.
 				title, taskBody = strings.SplitN(handoff, "  \r", 2)[0], ""
 			}
 			reviewerID := supervisorAgentID(t, 22)
@@ -1052,10 +1051,6 @@ func TestSupervisorClaudeReviewerLaunchReceivesExactRetainedChangeReceipt(t *tes
 			reviewer, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
 			if err != nil {
 				t.Fatalf("Claude reviewer RunNext: %v", err)
-			}
-			if titleOnly {
-				fixture.assertTerminal(t, reviewer, kernel.OutcomeFailed)
-				return
 			}
 			fixture.assertTerminal(t, reviewer, kernel.OutcomeSucceeded)
 			if reviewer.Role != kernel.RoleWorker || reviewer.Provider != kernel.ProviderClaudeCode || reviewer.Proposal == nil || !strings.Contains(reviewer.Proposal.Result(), "review handoff ") {

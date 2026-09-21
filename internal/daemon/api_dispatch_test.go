@@ -740,6 +740,10 @@ func prepareActiveAttempt(t *testing.T, fixture *dispatchFixture, seed byte) act
 }
 
 func prepareActiveAttemptInProject(t *testing.T, fixture *dispatchFixture, seed byte, projectID, role string, enqueue ...func()) activeAttempt {
+	return prepareActiveAttemptInProjectWithProvider(t, fixture, seed, projectID, role, "shell", enqueue...)
+}
+
+func prepareActiveAttemptInProjectWithProvider(t *testing.T, fixture *dispatchFixture, seed byte, projectID, role, provider string, enqueue ...func()) activeAttempt {
 	t.Helper()
 	ctx := context.Background()
 	agentID, taskID, incarnationID := testID(seed+1), testID(seed+2), testID(seed+3)
@@ -769,7 +773,7 @@ func prepareActiveAttemptInProject(t *testing.T, fixture *dispatchFixture, seed 
 		})
 	}
 	call(func() error {
-		_, err := operator.CreateAgent(ctx, api.CreateAgentInput{ID: agentID, ProjectID: projectID, Name: "agent", Role: role, Provider: "shell", ToolBudgetLimit: 10})
+		_, err := operator.CreateAgent(ctx, api.CreateAgentInput{ID: agentID, ProjectID: projectID, Name: "agent", Role: role, Provider: provider, ToolBudgetLimit: 10})
 		return err
 	})
 	if len(enqueue) == 1 {
@@ -1678,6 +1682,18 @@ func TestDaemonSourceRefusesProviderWithoutReadOnlyBoundary(t *testing.T) {
 	var remote *api.RemoteError
 	if !errors.As(err, &remote) || remote.Code() != api.RemoteUnavailable {
 		t.Fatalf("unprotected source = %v", err)
+	}
+	waitDispatch(t, done)
+}
+
+func TestDaemonSourceAllowsClaudeOrchestratorRoute(t *testing.T) {
+	fixture := newDispatchFixture(t)
+	active := prepareActiveAttemptInProjectWithProvider(t, fixture, 72, testID(72), "orchestrator", "claude_code")
+	done := fixture.serve(t)
+	_, err := active.client.Source(context.Background(), testID(73))
+	var remote *api.RemoteError
+	if !errors.As(err, &remote) || remote.Code() != api.RemoteNotFound {
+		t.Fatalf("Claude orchestrator source = %v", err)
 	}
 	waitDispatch(t, done)
 }

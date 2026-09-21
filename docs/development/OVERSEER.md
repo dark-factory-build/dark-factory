@@ -160,7 +160,8 @@ instructions guide agents; they do not add an OS filesystem sandbox.
 
 Everything below assumes the launch-scoped private runtime home and `TMPDIR`,
 no `gh` credential, git without any remote credential, and the Maintainer App
-as the one MCP server (`maintainer`). A Codex overseer has no daemon database,
+as its publication MCP server. A native overseer also receives the
+authenticated `factory_attempt` MCP boundary. A Codex overseer has no daemon database,
 Changes-parent, or operator-home access; it reads a settled Change's work
 from the project repository's Git directory, which its local commands are
 granted read-only, by the branch head an explicit source request names. Each

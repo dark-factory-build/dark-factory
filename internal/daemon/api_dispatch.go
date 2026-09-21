@@ -741,6 +741,13 @@ func (daemon *Daemon) attemptSource(ctx context.Context, call api.Call) api.Repl
 	if !kernel.RetainedSourceReviewSupported(authority.Provider) {
 		return newErrorReply(api.RemoteUnavailable)
 	}
+	if authority.Role == kernel.RoleWorker {
+		expected, review, parseErr := kernel.ParseRetainedSourceReviewTask(authority.Task())
+		targetText, present := call.AttemptSourceTaskID()
+		if parseErr != nil || !review || !present || expected.TaskID.String() != targetText {
+			return newErrorReply(api.RemoteUnauthorized)
+		}
+	}
 	taskIDText, ok := call.AttemptSourceTaskID()
 	if !ok {
 		return newErrorReply(api.RemoteInvalidRequest)
