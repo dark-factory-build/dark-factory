@@ -3247,6 +3247,13 @@ impl CreatePullRequest {
         valid_text(&self.title, 1, 256, false)?;
         valid_text(&self.body, 0, 30_000, true)?;
         free_of_operation_marker(&self.body)?;
+        if self.external_source_url.is_none()
+            && self.source_repository.is_none()
+            && self.issue_number == 0
+            && has_closing_directive(&self.body)
+        {
+            return Err(OperationError::InvalidInput);
+        }
         if self.head == self.base || self.head_sha == self.base_sha {
             return Err(OperationError::InvalidInput);
         }
@@ -11020,6 +11027,7 @@ mod tests {
         assert!(!operator_body.contains("Closes #"));
         assert!(operator_body.ends_with(&operator.marker().unwrap()));
         operator.body = "Closes #123".into();
+        assert_eq!(operator.validate().err(), Some(OperationError::InvalidInput));
         assert_eq!(operator.marked_body().err(), Some(OperationError::InvalidInput));
         operator.close_on_merge = true;
         assert!(operator.validate().is_err());
@@ -11972,6 +11980,7 @@ fn installation_route_uses_only_a_valid_app_slug() {
             .is_err()
         );
     }
+
     assert!(
         AppIdentity {
             id: 0,
@@ -11980,4 +11989,32 @@ fn installation_route_uses_only_a_valid_app_slug() {
         .installation_url()
         .is_err()
     );
+}
+
+#[cfg(all(test, feature = "development-sqlite"))]
+#[tokio::test]
+async fn source_less_closing_directive_is_rejected_before_journal_claim() {
+    let request = CreatePullRequest {
+        external_source_url: None,
+        repository: "dark-factory-build/dark-factory".into(),
+        operation_id: "2c8a5c44-7f1f-11f0-952e-acde48001122".into(),
+        issue_number: 0,
+        source_repository: None,
+        head: "feature/operator".into(),
+        head_sha: "a".repeat(40),
+        base: "main".into(),
+        base_sha: "b".repeat(40),
+        title: "Operator publication".into(),
+        body: "Closes #123".into(),
+        draft: false,
+        close_on_merge: false,
+    };
+    let operation_id = request.operation_id.clone();
+    let directory = tempfile::tempdir().unwrap();
+    let journal = crate::journal::DeliveryJournal::open_development(
+        &directory.path().join("journal.db"),
+    )
+    .unwrap();
+    assert_eq!(request.validate().err(), Some(OperationError::InvalidInput));
+    assert!(journal.observe_operation(&operation_id).await.unwrap().is_none());
 }
