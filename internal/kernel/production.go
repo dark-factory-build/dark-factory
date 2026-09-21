@@ -146,7 +146,7 @@ func migrateProductionRuntimeRecords(ctx context.Context, c *sql.Conn, project P
 }
 
 func validProductionPull(pr ProductionPullRequest) bool {
-	return pr.Number > 0 && pr.Number <= 1<<53-1 && validOutcomeText(pr.Title, 1024) && pr.Title != "" && productionURL(pr.URL) && productionSHA(pr.Head) && productionSHA(pr.Merge) && productionSHA(pr.Review.Head) && validOutcomeText(pr.Branch, 256) && validOutcomeText(pr.Base, 256) && validOutcomeText(pr.MergeQueue, 64) && validOutcomeText(pr.MergedAt, 64) && validOutcomeText(pr.NextAction, 2048) && validOutcomeText(pr.Review.State, 64) && validOutcomeText(pr.Review.Findings, 8192) && productionURL(pr.Review.URL) && (pr.State == "open" || pr.State == "closed" || pr.State == "merged")
+	return pr.Number > 0 && pr.Number <= 1<<53-1 && validOutcomeText(pr.Title, 1024) && pr.Title != "" && productionURL(pr.URL) && productionSHA(pr.Head) && productionSHA(pr.Merge) && productionSHA(pr.Review.Head) && (pr.HeadRepository == "" || productionRepository.MatchString(pr.HeadRepository)) && validOutcomeText(pr.Branch, 256) && validOutcomeText(pr.Base, 256) && validOutcomeText(pr.MergeQueue, 64) && validOutcomeText(pr.MergedAt, 64) && validOutcomeText(pr.NextAction, 2048) && validOutcomeText(pr.Review.State, 64) && validOutcomeText(pr.Review.Findings, 8192) && productionURL(pr.Review.URL) && (pr.State == "open" || pr.State == "closed" || pr.State == "merged")
 }
 
 func productionRecordOnConnection(ctx context.Context, c *sql.Conn, project ProjectID, repo, kind, id, visual string, value any, at int64) error {
@@ -249,7 +249,7 @@ func (store *Store) RecordProductionObservation(ctx context.Context, project Pro
 }
 
 // A recorded branch and exact settled commit identify a Change. A successful
-// orchestrator publication receipt may also authorize a transformed head.
+// orchestrator receipt or verified same-repository branch also links a transformed head.
 // Titles and transient worker locations are not identity evidence.
 func linkProductionChange(ctx context.Context, c *sql.Conn, project ProjectID, repo string, pr ProductionPullRequest, at int64) (string, error) {
 	key := repo + "#" + strconv.FormatUint(pr.Number, 10)
@@ -269,7 +269,25 @@ func linkProductionChange(ctx context.Context, c *sql.Conn, project ProjectID, r
 			return "", err
 		}
 		if err == sql.ErrNoRows {
-			err = c.QueryRowContext(ctx, `SELECT c.id, c.task_id FROM changes c WHERE c.project_id = ? AND substr(lower(hex(c.id)), 1, 12) = ? AND EXISTS (SELECT 1 FROM publication_tasks p JOIN tasks t ON t.id = p.task_id AND t.project_id = p.project_id JOIN agents a ON a.id = t.assigned_agent_id AND a.project_id = t.project_id AND a.role = 'orchestrator' WHERE p.project_id = ? AND p.repository = ? AND p.pull_number = ?) GROUP BY c.project_id HAVING count(*) = 1`, project.Bytes(), strings.TrimPrefix(pr.Branch, "factory/"), project.Bytes(), repo, pr.Number).Scan(&change, &task)
+			prefix := strings.TrimPrefix(pr.Branch, "factory/")
+			err = c.QueryRowContext(ctx, `SELECT c.id, c.task_id FROM changes c
+				WHERE c.project_id = ? AND substr(lower(hex(c.id)), 1, 12) = ?
+				  AND (SELECT count(*) FROM changes c2
+				       WHERE c2.project_id = c.project_id
+				         AND substr(lower(hex(c2.id)), 1, 12) = ?) = 1
+				  AND (EXISTS (SELECT 1 FROM publication_tasks p
+				              JOIN tasks t ON t.id = p.task_id AND t.project_id = p.project_id
+				              JOIN agents a ON a.id = t.assigned_agent_id
+				                         AND a.project_id = t.project_id
+				                         AND a.role = 'orchestrator'
+				              WHERE p.project_id = ? AND p.repository = ? AND p.pull_number = ?)
+				       OR (? <> '' AND lower(?) = lower(?) AND EXISTS (
+				              SELECT 1 FROM task_repository_bindings b
+				              JOIN repository_source_identities i ON i.repository_id = b.repository_id
+				              WHERE b.task_id = c.task_id
+				                AND lower(i.publication_repository) = lower(?))))`,
+				project.Bytes(), prefix, prefix, project.Bytes(), repo, pr.Number,
+				pr.HeadRepository, pr.HeadRepository, repo, repo).Scan(&change, &task)
 			if err != nil && err != sql.ErrNoRows {
 				return "", err
 			}
