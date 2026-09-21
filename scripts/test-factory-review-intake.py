@@ -646,7 +646,7 @@ class ReviewIntakeTest(unittest.TestCase):
             operation['enqueue_base'] = 'main'
             operation['enqueue_state'] = 'queued'
         with patch.object(review, 'mirror', return_value=Path('/mirror')), \
-             patch.object(review, 'list_prs', return_value=[{'number': 9, 'headRefOid': SHA, 'body': 'Refs #7'}]), \
+             patch.object(review, 'list_prs', return_value=[{'number': 9, 'headRefOid': SHA, 'body': SHA + '\nRefs #7'}]), \
              patch.object(review, 'ready', return_value=queued_operation), patch.object(review, 'verify_existing'), \
              patch.object(review, 'verify_review_body', side_effect=lambda _config, _pr, operation: operation.update(reviewed_body_digest='sha256:' + ('0' * 64))), \
              patch.object(review, 'enqueue_allowed', side_effect=mark_queued), patch.object(review, 'observe_merge', return_value={'state': 'NOT_QUEUED', 'pull_state': 'open'}), \
@@ -661,9 +661,13 @@ class ReviewIntakeTest(unittest.TestCase):
         self.assertEqual(1, send_back.call_count)
 
     def test_dropped_entry_sends_bounded_merge_group_failure_to_source_task(self):
-        operation = dict(self.operation, enqueue_operation='44444444-4444-4444-8444-444444444444')
-        run = {'workflow_runs': [{'id': 71, 'event': 'merge_group', 'head_sha': SHA,
-                                  'pull_requests': [{'number': 9}]}]}
+        operation = dict(self.operation, enqueue_operation='44444444-4444-4444-8444-444444444444',
+                         enqueue_observed_at=100, merge_observed_at=200)
+        run = {'workflow_runs': [
+            {'id': 70, 'event': 'merge_group', 'head_sha': 'b' * 40, 'created_at': '1970-01-01T00:01:00Z',
+             'pull_requests': [{'number': 9}]},
+            {'id': 71, 'event': 'merge_group', 'head_sha': SHA, 'created_at': '1970-01-01T00:02:30Z',
+             'pull_requests': [{'number': 9}]}]}
         jobs = {'jobs': [{'id': 72, 'name': 'macOS full gate', 'conclusion': 'failure'},
                          {'id': 73, 'name': 'required', 'conclusion': 'success'}]}
         calls = []
@@ -681,6 +685,29 @@ class ReviewIntakeTest(unittest.TestCase):
         self.assertEqual('merge queue CI failed: jobs=macOS full gate; tests=TestDaemonSourceTitleOnlyWorkerUsesEffectiveHandoff. Exact head ' + SHA + '.', note)
         send_back = calls[-1]
         self.assertEqual(['factoryctl', 'task', 'send-back', '--task', 'c' * 32, '--note', note], send_back)
+
+    def test_failed_pre_review_gate_is_persisted_and_not_rerun(self):
+        bare = Path(self.temp.name) / 'bare'
+        bare.mkdir()
+        (bare / 'HEAD').write_text('ref: refs/heads/main\n')
+        operation = dict(self.operation, review_operation='11111111-1111-4111-8111-111111111111')
+        evidence = Path(self.temp.name) / 'gate.json'
+        evidence.write_text(json.dumps({'head': SHA, 'base': operation['base'], 'exit_code': 1}))
+        (Path(self.temp.name) / 'gate.log').write_text('FAIL TestGateFixture\n')
+        self.observe.return_value = 'missing'
+        with patch.object(review, 'mirror', return_value=bare), \
+             patch.object(review, 'list_prs', return_value=[{'number': 9, 'headRefOid': SHA, 'body': SHA + '\nRefs #7'}]), \
+             patch.object(review, 'ready', return_value=operation), patch.object(review, 'verify_existing'), \
+             patch.object(review, 'run_full_gate', return_value=evidence) as gate, \
+             patch.object(review, 'send_back_source_task', return_value='sent') as send_back:
+            first = review.run_once(self.config)
+            second = review.run_once(self.config)
+        self.assertEqual(1, gate.call_count)
+        self.assertEqual(1, send_back.call_count)
+        self.assertIn('pre-review gate failure', first[0])
+        self.assertEqual([], second)
+        receipt = json.loads(Path(self.config['journal'] + '.reviews.json').read_text())['pulls']['9:' + SHA]
+        self.assertEqual(('failed', True), (receipt['gate_state'], receipt['gate_failure_sent_back']))
 
     def test_merge_observation_reuses_reviewed_digest_after_body_edit(self):
         operation = dict(self.operation, enqueue_operation='44444444-4444-4444-8444-444444444444',

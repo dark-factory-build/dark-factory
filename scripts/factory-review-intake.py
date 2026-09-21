@@ -2,6 +2,7 @@
 """Run one independent host review and wake its overseer with the App receipt."""
 import argparse
 import contextlib
+from datetime import datetime
 import fcntl
 import hashlib
 import importlib.util
@@ -398,9 +399,25 @@ def _merge_group_failure(config, operation):
     runs = value.get("workflow_runs") if isinstance(value, dict) else None
     if not isinstance(runs, list):
         raise ReviewError("merge_group run listing is invalid")
-    run = next((item for item in runs if isinstance(item, dict) and item.get("conclusion") not in {"success", "cancelled"} and
-        (item.get("head_sha") == operation["head"] or
-         any(isinstance(pr, dict) and pr.get("number") == operation["pr"] for pr in item.get("pull_requests", [])))), None)
+    lower_bound = operation.get("enqueue_observed_at")
+    upper_bound = operation.get("merge_observed_at")
+    if type(lower_bound) is not int or type(upper_bound) is not int:
+        return [], []
+    candidates = []
+    for item in runs:
+        if not isinstance(item, dict) or item.get("event") != "merge_group" or item.get("conclusion") in {"success", "cancelled"}:
+            continue
+        if not any(isinstance(pr, dict) and pr.get("number") == operation["pr"] for pr in item.get("pull_requests", [])):
+            continue
+        stamp = item.get("created_at") or item.get("run_started_at") or item.get("updated_at")
+        try:
+            stamp = int(datetime.fromisoformat(stamp.replace("Z", "+00:00")).timestamp())
+        except (AttributeError, TypeError, ValueError):
+            continue
+        if type(lower_bound) is int and stamp < lower_bound or type(upper_bound) is int and stamp > upper_bound + 300:
+            continue
+        candidates.append((stamp, item))
+    run = max(candidates, key=lambda value: value[0])[1] if candidates else None
     if not isinstance(run, dict) or not isinstance(run.get("id"), int):
         return [], []
     jobs_raw = intake.command(["gh", "api", "repos/" + config["repository"] + "/actions/runs/" + str(run["id"]) + "/jobs?per_page=32"], timeout=30)
@@ -443,11 +460,24 @@ def merge_failure_note(config, operation):
     return "merge queue CI failed: " + "; ".join(details) + ". Exact head " + operation["head"] + "."
 
 
+def gate_failure_note(receipt, operation):
+    tests = []
+    log = receipt.with_suffix(".log")
+    try:
+        tests = list(dict.fromkeys(re.findall(r"\b(?:Test|test)[A-Za-z0-9_./:-]{2,120}", log.read_text(encoding="utf-8"))))[:16]
+    except OSError:
+        pass
+    return "pre-review full gate failed: tests=" + (", ".join(tests) if tests else "unavailable") + ". Exact head " + operation["head"] + "."
+
+
 def send_back_merge_failure(config, operation):
+    return send_back_source_task(config, operation, merge_failure_note(config, operation))
+
+
+def send_back_source_task(config, operation, note):
     task_id = _source_task_id(config, operation)
     if not task_id:
         raise ReviewError("original source task is unavailable")
-    note = merge_failure_note(config, operation)
     home = Path(config["factory_home"])
     env = os.environ.copy()
     env["DARK_FACTORY_SOCKET"] = str(home / "runtimes" / "factory.sock")
@@ -491,6 +521,8 @@ def enqueue_allowed(config, operation, journal_path, receipts):
     elif state != "queued":
         state = "unresolved"
     operation["enqueue_state"] = state
+    if state == "queued":
+        operation.setdefault("enqueue_observed_at", int(time.time()))
     intake.atomic_json(journal_path, receipts)
 
 
@@ -577,8 +609,6 @@ def run_full_gate(path, operation, destination):
                                      cwd=worktree, stdout=output, stderr=subprocess.STDOUT, timeout=1860)
         receipt = destination.with_suffix(".gate.json")
         receipt.write_text(json.dumps({"head": operation["head"], "base": operation["base"], "exit_code": process.returncode}) + "\n", encoding="utf-8")
-        if process.returncode != 0:
-            raise ReviewError("full exact-head gate failed; independent review was not requested")
         return receipt
     finally:
         subprocess.run(["git", "-C", str(path), "worktree", "remove", "--force", str(worktree)], check=False,
@@ -801,6 +831,14 @@ def run_locked(config, path, journal, journal_path, managed=None):
                 snapshot_path.write_text(pr["body"])
                 intake.atomic_json(journal_path, receipts)
                 state = observe_review(config, operation)
+        if operation.get("gate_state") == "failed":
+            if not operation.get("gate_failure_sent_back"):
+                note = operation.get("gate_failure_note", "pre-review full gate failed: tests=unavailable. Exact head " + operation["head"] + ".")
+                send_back_source_task(config, operation, note)
+                operation["gate_failure_sent_back"] = True
+                intake.atomic_json(journal_path, receipts)
+                messages.append("sent back PR #" + str(pr["number"]) + " pre-review gate failure: " + note)
+            continue
         if state == "missing" and not operation.get("review_attempted"):
             if operation["head"] not in pr["body"]:
                 # The body still describes a predecessor head. A review would
@@ -812,11 +850,33 @@ def run_locked(config, path, journal, journal_path, managed=None):
                 continue
             if launched:
                 continue
+            if (path / "HEAD").is_file():
+                try:
+                    evidence = run_full_gate(path, operation, review_body_path(config, pr, operation))
+                    operation["gate_evidence"] = str(evidence)
+                    receipt = json.loads(evidence.read_text(encoding="utf-8"))
+                    if receipt.get("exit_code") != 0:
+                        operation["gate_state"] = "failed"
+                        operation["gate_failure_note"] = gate_failure_note(evidence, operation)
+                        intake.atomic_json(journal_path, receipts)
+                        send_back_source_task(config, operation, operation["gate_failure_note"])
+                        operation["gate_failure_sent_back"] = True
+                        intake.atomic_json(journal_path, receipts)
+                        messages.append("sent back PR #" + str(pr["number"]) + " pre-review gate failure: " + operation["gate_failure_note"])
+                        continue
+                    operation["gate_state"] = "passed"
+                except (OSError, ValueError, json.JSONDecodeError, intake.IntakeError, ReviewError, subprocess.SubprocessError) as exc:
+                    operation["gate_state"] = "failed"
+                    operation["gate_failure_note"] = "pre-review full gate unavailable: " + str(exc)[:300] + ". Exact head " + operation["head"] + "."
+                    intake.atomic_json(journal_path, receipts)
+                    send_back_source_task(config, operation, operation["gate_failure_note"])
+                    operation["gate_failure_sent_back"] = True
+                    intake.atomic_json(journal_path, receipts)
+                    messages.append("sent back PR #" + str(pr["number"]) + " pre-review gate failure: " + operation["gate_failure_note"])
+                    continue
             # Persist before launching: a crash cannot authorize a second model
             # run while the first may still be submitting its exact-head verdict.
             operation["review_attempted"] = True
-            if (path / "HEAD").is_file():
-                operation["gate_evidence"] = str(run_full_gate(path, operation, review_body_path(config, pr, operation)))
             intake.atomic_json(journal_path, receipts)
             launched = True
             operation["review_exit"] = launch_review(config, path, pr, operation)
