@@ -135,7 +135,7 @@ func TestProductionMaintenanceRoundTripsAndInvalidObservationRollsBack(t *testin
 }
 
 func TestProductionPrioritizesLiveFactsOverTerminalConstruction(t *testing.T) {
-	store, _, project, _ := newAdmissionStore(t, RoleOrchestrator, 2)
+	store, _, project, agent := newAdmissionStore(t, RoleOrchestrator, 2)
 	defer store.Close()
 	ctx := context.Background()
 	insert := func(kind, id, document string) {
@@ -209,6 +209,20 @@ func TestProductionPrioritizesLiveFactsOverTerminalConstruction(t *testing.T) {
 			t.Fatalf("construction %d has_changes = %#v, want %#v", index, construction["has_changes"], want)
 		}
 	}
+	// More than a page of receipts must not displace queued/running/blocked work.
+	for index := 0; index < 9; index++ {
+		insert("delivery", fmt.Sprintf("delivery:%d", index+10), `{"state":"verified"}`)
+	}
+	for _, status := range []string{"queued", "running", "blocked"} {
+		if _, err := store.writer.ExecContext(ctx, `UPDATE tasks SET assigned_agent_id = ?, status = ?, completed_at_ms = NULL, blocked_reason = CASE WHEN ? = 'blocked' THEN 'dependency_failed' ELSE NULL END WHERE title = 'terminal-000'`, agent.ID.Bytes(), status, status); err != nil {
+			t.Fatal(err)
+		}
+		page, err = store.Production(ctx, project.ID, 0, 8)
+		if err != nil || len(page.Records) != 8 || page.Records[2].Kind != "construction" {
+			t.Fatalf("%s construction must precede deliveries: %+v, %v", status, page, err)
+		}
+	}
+
 }
 
 func TestProductionCanonicalizesLegacyRuntimeDestinationsAndDeduplicates(t *testing.T) {
