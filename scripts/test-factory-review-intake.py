@@ -666,9 +666,11 @@ class ReviewIntakeTest(unittest.TestCase):
         run = {'workflow_runs': [
             {'id': 70, 'event': 'merge_group', 'head_sha': 'b' * 40, 'created_at': '1970-01-01T00:01:00Z',
              'pull_requests': [{'number': 9}]},
-            {'id': 71, 'event': 'merge_group', 'head_sha': SHA, 'created_at': '1970-01-01T00:02:30Z',
+            # Merge queues run the synthetic combined tree, not the PR head.
+            {'id': 71, 'event': 'merge_group', 'head_sha': 'c' * 40, 'created_at': '1970-01-01T00:02:30Z',
              'pull_requests': [{'number': 9}]}]}
-        jobs = {'jobs': [{'id': 72, 'name': 'macOS full gate', 'conclusion': 'failure'},
+        jobs = {'jobs': [{'id': 72, 'name': 'control-plane', 'conclusion': 'failure',
+                          'steps': [{'name': 'Run the control-plane authoritative gate', 'conclusion': 'failure'}]},
                          {'id': 73, 'name': 'required', 'conclusion': 'success'}]}
         calls = []
         def command(argv, **kwargs):
@@ -678,11 +680,13 @@ class ReviewIntakeTest(unittest.TestCase):
             if any('/actions/runs/71/jobs' in item for item in argv):
                 return json.dumps(jobs)
             if argv[1:3] == ['run', 'view']:
-                return 'macOS full gate / TestDaemonSourceTitleOnlyWorkerUsesEffectiveHandoff failed\n'
+                return 'control-plane / Run the control-plane authoritative gate: cargo fmt failed\n' + ('x' * 4000)
             return '{}'
         with patch.object(review.intake, 'command', side_effect=command):
             note = review.send_back_merge_failure(self.config, operation)
-        self.assertEqual('merge queue CI failed: jobs=macOS full gate; tests=TestDaemonSourceTitleOnlyWorkerUsesEffectiveHandoff. Exact head ' + SHA + '.', note)
+        self.assertTrue(note.startswith('merge queue CI failed: failures=control-plane / Run the control-plane authoritative gate; log=control-plane / Run the control-plane authoritative gate: cargo fmt failed'))
+        self.assertIn('Exact head ' + SHA + '.', note)
+        self.assertLessEqual(len(note), 1500)
         send_back = calls[-1]
         self.assertEqual(['factoryctl', 'task', 'send-back', '--task', 'c' * 32, '--note', note], send_back)
 
