@@ -29,7 +29,8 @@ class ReviewIntakeTest(unittest.TestCase):
                        'journal': str(root / 'intake.json'), 'review_mirror_root': str(root / 'mirrors')}
         Path(self.config['factory_home']).mkdir(mode=0o700)
         review.intake.atomic_json(Path(self.config['journal']), {'version': 2, 'updated_at': 0, 'config_fingerprint': review.intake.config_fingerprint(self.config),
-            'issues': {'o/r#7': {'number': 7, 'managed': True}}})
+            'issues': {'o/r#7': {'number': 7, 'managed': True, 'desired_fingerprint': 'e' * 64,
+                                  'operation': {'task_id': 'c' * 32, 'incarnation_id': 'd' * 32}}}})
         self.observe = patch.object(review, 'observe_review', return_value='block').start()
         # No test may reach a live bridge; tests that need one substitute a fake.
         patch.object(review, 'bridge_call', side_effect=review.ReviewError('maintainer bridge is unavailable')).start()
@@ -649,19 +650,37 @@ class ReviewIntakeTest(unittest.TestCase):
              patch.object(review, 'ready', return_value=queued_operation), patch.object(review, 'verify_existing'), \
              patch.object(review, 'verify_review_body', side_effect=lambda _config, _pr, operation: operation.update(reviewed_body_digest='sha256:' + ('0' * 64))), \
              patch.object(review, 'enqueue_allowed', side_effect=mark_queued), patch.object(review, 'observe_merge', return_value={'state': 'NOT_QUEUED', 'pull_state': 'open'}), \
+             patch.object(review, 'send_back_merge_failure', return_value='merge queue CI failed: jobs=checks; tests=TestFixture') as send_back, \
              patch.object(review.intake, 'task_state', side_effect=[None, {'status': 'queued'}, {'status': 'queued'}, {'status': 'queued'}]), \
              patch.object(review.intake, 'enqueue') as enqueue:
             first = review.run_once(self.config)
             second = review.run_once(self.config)
-        self.assertEqual(['woke PR #9 queue failure'], first)
+        self.assertEqual(['sent back PR #9 queue failure: merge queue CI failed: jobs=checks; tests=TestFixture', 'woke PR #9 review allow'], first)
         self.assertEqual([], second)
         self.assertEqual(1, enqueue.call_count)
-        self.assertIn('NOT_QUEUED', enqueue.call_args.args[1]['body'])
-        self.assertIn('44444444-4444-4444-8444-444444444444', enqueue.call_args.args[1]['body'])
-        self.assertIn(self.operation['source_marker'], enqueue.call_args.args[1]['body'])
-        self.assertIn('ordinary source correction', enqueue.call_args.args[1]['body'])
-        self.assertNotIn('human request', enqueue.call_args.args[1]['body'])
-        self.assertNotIn('alter source/PR state', enqueue.call_args.args[1]['body'])
+        self.assertEqual(1, send_back.call_count)
+
+    def test_dropped_entry_sends_bounded_merge_group_failure_to_source_task(self):
+        operation = dict(self.operation, enqueue_operation='44444444-4444-4444-8444-444444444444')
+        run = {'workflow_runs': [{'id': 71, 'event': 'merge_group', 'head_sha': SHA,
+                                  'pull_requests': [{'number': 9}]}]}
+        jobs = {'jobs': [{'id': 72, 'name': 'macOS full gate', 'conclusion': 'failure'},
+                         {'id': 73, 'name': 'required', 'conclusion': 'success'}]}
+        calls = []
+        def command(argv, **kwargs):
+            calls.append(argv)
+            if argv[1] == 'api' and '/actions/runs?' in argv[2]:
+                return json.dumps(run)
+            if any('/actions/runs/71/jobs' in item for item in argv):
+                return json.dumps(jobs)
+            if argv[1:3] == ['run', 'view']:
+                return 'macOS full gate / TestDaemonSourceTitleOnlyWorkerUsesEffectiveHandoff failed\n'
+            return '{}'
+        with patch.object(review.intake, 'command', side_effect=command):
+            note = review.send_back_merge_failure(self.config, operation)
+        self.assertEqual('merge queue CI failed: jobs=macOS full gate; tests=TestDaemonSourceTitleOnlyWorkerUsesEffectiveHandoff. Exact head ' + SHA + '.', note)
+        send_back = calls[-1]
+        self.assertEqual(['factoryctl', 'task', 'send-back', '--task', 'c' * 32, '--note', note], send_back)
 
     def test_merge_observation_reuses_reviewed_digest_after_body_edit(self):
         operation = dict(self.operation, enqueue_operation='44444444-4444-4444-8444-444444444444',
@@ -689,9 +708,10 @@ class ReviewIntakeTest(unittest.TestCase):
              patch.object(review, 'list_prs', return_value=[{'number': 9, 'headRefOid': SHA, 'body': 'edited after enqueue\nRefs #7'}]), \
              patch.object(review, 'ready', return_value=operation), patch.object(review, 'verify_existing'), \
              patch.object(review, 'verify_review_body') as verify, patch.object(review, 'enqueue_allowed'), \
-             patch.object(review, 'observe_merge', return_value={'state': 'NOT_QUEUED', 'pull_state': 'open'}), \
+                     patch.object(review, 'observe_merge', return_value={'state': 'NOT_QUEUED', 'pull_state': 'open'}), \
+                     patch.object(review, 'send_back_merge_failure', return_value='merge queue CI failed: jobs=checks; tests=TestFixture'), \
              patch.object(review.intake, 'task_state', side_effect=[None, {'status': 'queued'}]), patch.object(review.intake, 'enqueue') as enqueue:
-            self.assertEqual(['woke PR #9 queue failure'], review.run_once(self.config))
+            self.assertEqual(['sent back PR #9 queue failure: merge queue CI failed: jobs=checks; tests=TestFixture', 'woke PR #9 review allow'], review.run_once(self.config))
         verify.assert_not_called()
         self.assertEqual(1, enqueue.call_count)
 
