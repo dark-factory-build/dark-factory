@@ -135,7 +135,7 @@ func TestProductionMaintenanceRoundTripsAndInvalidObservationRollsBack(t *testin
 }
 
 func TestProductionPrioritizesLiveFactsOverTerminalConstruction(t *testing.T) {
-	store, _, project, _ := newAdmissionStore(t, RoleOrchestrator, 2)
+	store, _, project, agent := newAdmissionStore(t, RoleOrchestrator, 2)
 	defer store.Close()
 	ctx := context.Background()
 	insert := func(kind, id, document string) {
@@ -176,22 +176,27 @@ func TestProductionPrioritizesLiveFactsOverTerminalConstruction(t *testing.T) {
 	}
 	insert("repository", "example/factory", `{"overflow":0}`)
 	insert("pull_request", "7", `{"number":7,"title":"current","state":"open","head":"`+strings.Repeat("a", 40)+`","review":{"head":"`+strings.Repeat("a", 40)+`","state":"allow"}}`)
+	insert("pull_request", "8", `{"number":8,"state":"merged"}`)
 	insert("check", "workflow:7", `{"id":"workflow:7","state":"completed"}`)
 	insert("delivery", "delivery:7", `{"id":"delivery:7","state":"verified"}`)
 	page, err := store.Production(ctx, project.ID, 0, 8)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if page.Total != 254 || len(page.Records) != 8 {
+	if page.Total != 255 || len(page.Records) != 8 {
 		t.Fatalf("page total/size = %d/%d", page.Total, len(page.Records))
 	}
-	want := []string{"repository", "pull_request", "delivery", "check"}
+	want := []string{"repository", "pull_request", "delivery", "pull_request", "check"}
 	for index, kind := range want {
 		if page.Records[index].Kind != kind {
 			t.Fatalf("record %d = %+v, want %s", index, page.Records[index], kind)
 		}
 	}
-	page, err = store.Production(ctx, project.ID, 4, 3)
+	page, err = store.Production(ctx, project.ID, 2, 1)
+	if err != nil || len(page.Records) != 1 || page.Records[0].Kind != "delivery" {
+		t.Fatalf("delivery must precede merged work across pages: %+v, %v", page, err)
+	}
+	page, err = store.Production(ctx, project.ID, 5, 3)
 	if err != nil || len(page.Records) != 3 {
 		t.Fatalf("construction page = %+v, %v", page, err)
 	}
@@ -204,6 +209,20 @@ func TestProductionPrioritizesLiveFactsOverTerminalConstruction(t *testing.T) {
 			t.Fatalf("construction %d has_changes = %#v, want %#v", index, construction["has_changes"], want)
 		}
 	}
+	// More than a page of receipts must not displace queued/running/blocked work.
+	for index := 0; index < 9; index++ {
+		insert("delivery", fmt.Sprintf("delivery:%d", index+10), `{"state":"verified"}`)
+	}
+	for _, status := range []string{"queued", "running", "blocked"} {
+		if _, err := store.writer.ExecContext(ctx, `UPDATE tasks SET assigned_agent_id = ?, status = ?, completed_at_ms = NULL, blocked_reason = CASE WHEN ? = 'blocked' THEN 'dependency_failed' ELSE NULL END WHERE title = 'terminal-000'`, agent.ID.Bytes(), status, status); err != nil {
+			t.Fatal(err)
+		}
+		page, err = store.Production(ctx, project.ID, 0, 8)
+		if err != nil || len(page.Records) != 8 || page.Records[2].Kind != "construction" {
+			t.Fatalf("%s construction must precede deliveries: %+v, %v", status, page, err)
+		}
+	}
+
 }
 
 func TestProductionCanonicalizesLegacyRuntimeDestinationsAndDeduplicates(t *testing.T) {
