@@ -34,6 +34,17 @@ test("production panel uses a native bounded selector and does not mount every t
   assert.doesNotMatch(markup, /Work details/);
 });
 
+test("review prose hides the canonical terminal receipt, preserving human examples", () => {
+  const marker = `<!-- dark-factory-operation:12345678-1234-1234-1234-123456789abc:${"e".repeat(64)} -->`;
+  const render = (findings) => renderToStaticMarkup(createElement(ProductionPanel, { items: [{ ...item, review: { ...item.review, findings } }], onSelect() {}, selected: "project:change:1", connected: true }));
+  const markup = render(`Useful finding.\nKeep this conclusion.\n\n${marker}\n`);
+  assert.match(markup, /Useful finding\./);
+  assert.match(markup, /Keep this conclusion\./);
+  assert.doesNotMatch(markup, /dark-factory-operation|12345678/);
+  assert.match(render("Human example: <!-- dark-factory-operation:deadbeef -->"), /deadbeef/);
+  assert.match(render(`${marker}\nHuman explanation after the example.`), /12345678/);
+  assert.match(render(`Inline example ${marker}`), /12345678/);
+});
 
 test("switching from a pending task to a known task fences the old failure", async () => {
   let reject;
