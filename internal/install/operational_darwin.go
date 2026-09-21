@@ -38,6 +38,7 @@ type operationalHomeState struct {
 	localAPI     *LocalAPIAuthority
 	closed       bool
 	closeErr     error
+	borrowedLock bool
 }
 
 type retainedMember struct {
@@ -67,6 +68,10 @@ type operationalSource struct {
 }
 
 func openOperationalHome(ctx context.Context, home string) (_ *OperationalHome, resultErr error) {
+	return openOperationalHomeWithLock(ctx, home, nil)
+}
+
+func openOperationalHomeWithLock(ctx context.Context, home string, heldLock *os.File) (_ *OperationalHome, resultErr error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -101,6 +106,7 @@ func openOperationalHome(ctx context.Context, home string) (_ *OperationalHome, 
 	var anchorStat unix.Stat_t
 	var members map[string]retainedMember
 	locked := false
+	borrowedLock := false
 	defer func() {
 		if cleanup {
 			if locked {
@@ -124,18 +130,33 @@ func openOperationalHome(ctx context.Context, home string) (_ *OperationalHome, 
 		return nil, err
 	}
 
-	lockFile, lockStat, anchorFile, anchorStat, err = openOperationalLockPair(homeFile)
+	if heldLock == nil {
+		lockFile, lockStat, anchorFile, anchorStat, err = openOperationalLockPair(homeFile)
+	} else {
+		lockFile, lockStat, anchorFile, anchorStat, err = openOperationalLockPairWithSharedLinks(homeFile)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("open operational home lock: %w", err)
 	}
-	if err := unix.Flock(int(lockFile.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+	if heldLock != nil {
+		var heldStat unix.Stat_t
+		if err := unix.Fstat(int(heldLock.Fd()), &heldStat); err != nil {
+			return nil, err
+		}
+		if heldStat.Dev != lockStat.Dev || heldStat.Ino != lockStat.Ino {
+			return nil, errors.Join(ErrBusy, fmt.Errorf("published home lock is not the held lease"))
+		}
+		borrowedLock = true
+	} else if err := unix.Flock(int(lockFile.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
 		if errors.Is(err, unix.EWOULDBLOCK) || errors.Is(err, unix.EAGAIN) {
 			return nil, errors.Join(ErrBusy, err)
 		}
 		return nil, fmt.Errorf("acquire operational home lock: %w", err)
 	}
-	locked = true
-	if err := recheckOperationalIdentity(parent, base, homeFile, homeStat, lockFile, lockStat, anchorFile, anchorStat); err != nil {
+	if !borrowedLock {
+		locked = true
+	}
+	if err := recheckOperationalIdentity(parent, base, homeFile, homeStat, lockFile, lockStat, anchorFile, anchorStat, borrowedLock); err != nil {
 		return nil, err
 	}
 	if err := inspectOperationalHome(ctx, homeFile); err != nil {
@@ -145,7 +166,7 @@ func openOperationalHome(ctx context.Context, home string) (_ *OperationalHome, 
 	if err != nil {
 		return nil, err
 	}
-	if err := recheckOperationalIdentity(parent, base, homeFile, homeStat, lockFile, lockStat, anchorFile, anchorStat); err != nil {
+	if err := recheckOperationalIdentity(parent, base, homeFile, homeStat, lockFile, lockStat, anchorFile, anchorStat, borrowedLock); err != nil {
 		return nil, err
 	}
 	if err := recheckOperationalCensus(parent, base, toIdentity(homeStat), members); err != nil {
@@ -169,6 +190,7 @@ func openOperationalHome(ctx context.Context, home string) (_ *OperationalHome, 
 		lockID:       toIdentity(lockStat),
 		anchorID:     toIdentity(anchorStat),
 		members:      members,
+		borrowedLock: borrowedLock,
 	}}, nil
 }
 
@@ -338,8 +360,10 @@ func (state *operationalHomeState) closeWithIdentityCheck(checkIdentity bool) er
 	// effects. The anchor is only an identity binding; closing it above does
 	// not release this descriptor's flock.
 	if state.lock != nil {
-		if err := unix.Flock(int(state.lock.Fd()), unix.LOCK_UN); err != nil {
-			result = errors.Join(result, errors.Join(ErrUncertain, fmt.Errorf("release operational home lock: %w", err)))
+		if !state.borrowedLock {
+			if err := unix.Flock(int(state.lock.Fd()), unix.LOCK_UN); err != nil {
+				result = errors.Join(result, errors.Join(ErrUncertain, fmt.Errorf("release operational home lock: %w", err)))
+			}
 		}
 		if err := state.lock.Close(); err != nil {
 			result = errors.Join(result, errors.Join(ErrUncertain, fmt.Errorf("close operational home lock: %w", err)))
@@ -437,7 +461,7 @@ func recheckOperationalCoreIdentityByState(state *operationalHomeState) error {
 	return nil
 }
 
-func recheckOperationalIdentity(parent *homeParent, name string, home *os.File, homeStat unix.Stat_t, lock *os.File, lockStat unix.Stat_t, anchor *os.File, anchorStat unix.Stat_t) error {
+func recheckOperationalIdentity(parent *homeParent, name string, home *os.File, homeStat unix.Stat_t, lock *os.File, lockStat unix.Stat_t, anchor *os.File, anchorStat unix.Stat_t, shared bool) error {
 	if err := parent.recheck(); err != nil {
 		return err
 	}
@@ -462,7 +486,11 @@ func recheckOperationalIdentity(parent *homeParent, name string, home *os.File, 
 	if err := recheckBinding(home, lockAnchorName, anchorStat); err != nil {
 		return err
 	}
-	if lockStat.Dev != anchorStat.Dev || lockStat.Ino != anchorStat.Ino || lockStat.Nlink != 2 || anchorStat.Nlink != 2 {
+	wantLinks := uint16(2)
+	if shared {
+		wantLinks = 4
+	}
+	if lockStat.Dev != anchorStat.Dev || lockStat.Ino != anchorStat.Ino || lockStat.Nlink != wantLinks || anchorStat.Nlink != wantLinks {
 		return fmt.Errorf("%w: operational home lock pair differs", ErrInvalidHome)
 	}
 	return nil
@@ -594,19 +622,31 @@ func readOperationalCensus(home *os.File) (map[string]bool, error) {
 }
 
 func openOperationalLockPair(home *os.File) (*os.File, unix.Stat_t, *os.File, unix.Stat_t, error) {
+	return openOperationalLockPairWithLinks(home, false)
+}
+
+func openOperationalLockPairWithSharedLinks(home *os.File) (*os.File, unix.Stat_t, *os.File, unix.Stat_t, error) {
+	return openOperationalLockPairWithLinks(home, true)
+}
+
+func openOperationalLockPairWithLinks(home *os.File, shared bool) (*os.File, unix.Stat_t, *os.File, unix.Stat_t, error) {
 	// Keeping both names bound to one exact two-link inode defeats replacement
 	// of either pathname. Replacing both names with a new pair concurrently is
 	// a stronger same-EUID namespace attack outside this home contract.
-	lock, lockStat, err := openLockMemberRW(home, lockName)
+	lock, lockStat, err := openLockMemberRW(home, lockName, shared)
 	if err != nil {
 		return nil, unix.Stat_t{}, nil, unix.Stat_t{}, err
 	}
-	anchor, anchorStat, err := openLockMemberRW(home, lockAnchorName)
+	anchor, anchorStat, err := openLockMemberRW(home, lockAnchorName, shared)
 	if err != nil {
 		_ = lock.Close()
 		return nil, unix.Stat_t{}, nil, unix.Stat_t{}, err
 	}
-	if lockStat.Dev != anchorStat.Dev || lockStat.Ino != anchorStat.Ino || lockStat.Nlink != 2 || anchorStat.Nlink != 2 {
+	wantLinks := uint16(2)
+	if shared {
+		wantLinks = 4
+	}
+	if lockStat.Dev != anchorStat.Dev || lockStat.Ino != anchorStat.Ino || lockStat.Nlink != wantLinks || anchorStat.Nlink != wantLinks {
 		_ = anchor.Close()
 		_ = lock.Close()
 		return nil, unix.Stat_t{}, nil, unix.Stat_t{}, fmt.Errorf("%w: operational home lock pair differs", ErrInvalidHome)
@@ -614,7 +654,7 @@ func openOperationalLockPair(home *os.File) (*os.File, unix.Stat_t, *os.File, un
 	return lock, lockStat, anchor, anchorStat, nil
 }
 
-func openLockMemberRW(home *os.File, name string) (*os.File, unix.Stat_t, error) {
+func openLockMemberRW(home *os.File, name string, shared bool) (*os.File, unix.Stat_t, error) {
 	fd, err := unix.Openat(int(home.Fd()), name, unix.O_RDWR|unix.O_NONBLOCK|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 	if err != nil {
 		return nil, unix.Stat_t{}, err
@@ -629,7 +669,15 @@ func openLockMemberRW(home *os.File, name string) (*os.File, unix.Stat_t, error)
 		_ = file.Close()
 		return nil, unix.Stat_t{}, err
 	}
-	if stat.Mode&unix.S_IFMT != unix.S_IFREG || !exactMode(uint32(stat.Mode), 0o600) || !exactOwner(uint32(stat.Uid)) || stat.Nlink != 2 || stat.Size != 0 {
+	wantLinks := uint16(2)
+	if shared {
+		wantLinks = 4
+	}
+	if !shared && stat.Nlink == 4 {
+		_ = file.Close()
+		return nil, unix.Stat_t{}, errors.Join(ErrBusy, fmt.Errorf("home lock is held by relocation"))
+	}
+	if stat.Mode&unix.S_IFMT != unix.S_IFREG || !exactMode(uint32(stat.Mode), 0o600) || !exactOwner(uint32(stat.Uid)) || stat.Nlink != wantLinks || stat.Size != 0 {
 		_ = file.Close()
 		return nil, unix.Stat_t{}, fmt.Errorf("%w: operational home lock member is not exact owner-only regular 0600", ErrInvalidHome)
 	}

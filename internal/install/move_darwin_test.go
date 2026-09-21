@@ -81,6 +81,30 @@ func TestMoveHomeRefusesConcurrentOperationalWriter(t *testing.T) {
 	}
 }
 
+func TestMoveHomeKeepsPublishedDestinationLockedUntilValidation(t *testing.T) {
+	parent := t.TempDir()
+	from := filepath.Join(parent, "old")
+	to := filepath.Join(parent, "new")
+	if _, err := Init(context.Background(), from); err != nil {
+		t.Fatal(err)
+	}
+	var openErr error
+	moveAfterPublishHook = func() {
+		opened, err := OpenOperationalHome(context.Background(), to)
+		openErr = err
+		if opened != nil {
+			_ = opened.Close()
+		}
+	}
+	defer func() { moveAfterPublishHook = nil }()
+	if err := MoveHome(context.Background(), from, to); err != nil {
+		t.Fatal(err)
+	}
+	if !errors.Is(openErr, ErrBusy) {
+		t.Fatalf("post-publish operational open = %v, want busy", openErr)
+	}
+}
+
 func TestRepairMovedWorktreesRestoresExternalMetadataOnVerificationFailure(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()

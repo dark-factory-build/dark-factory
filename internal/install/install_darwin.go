@@ -346,6 +346,10 @@ func initHome(ctx context.Context, home string) (result Result, resultErr error)
 }
 
 func inspectHome(ctx context.Context, home string) (result Result, resultErr error) {
+	return inspectHomeWithLock(ctx, home, nil)
+}
+
+func inspectHomeWithLock(ctx context.Context, home string, heldLock *os.File) (result Result, resultErr error) {
 	if _, err := inspectStable(ctx, home, phaseBeforeDoctorSecond); err == nil {
 		return Result{State: Ready}, nil
 	} else {
@@ -353,7 +357,7 @@ func inspectHome(ctx context.Context, home string) (result Result, resultErr err
 		// project, Change, or terminal-run members. The fresh-home census above
 		// remains the stricter path for bootstrap; the retained-home validator
 		// checks the populated census and database without modifying it.
-		opened, openErr := openOperationalHome(ctx, home)
+		opened, openErr := openOperationalHomeWithLock(ctx, home, heldLock)
 		if openErr == nil {
 			closeErr := opened.Close()
 			if closeErr == nil {

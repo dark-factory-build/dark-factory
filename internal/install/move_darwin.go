@@ -20,6 +20,10 @@ import (
 	_ "github.com/ncruces/go-sqlite3/driver"
 )
 
+// moveAfterPublishHook is package-local test instrumentation for the narrow
+// interval where the destination is visible but the source lease is retained.
+var moveAfterPublishHook func()
+
 func moveHome(ctx context.Context, from, to string) (resultErr error) {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -87,6 +91,9 @@ func moveHome(ctx context.Context, from, to string) (resultErr error) {
 	if _, err := Doctor(ctx, stage); err != nil {
 		return cleanupBeforePublish(err)
 	}
+	if err := bindMoveLock(stage, from); err != nil {
+		return cleanupBeforePublish(err)
+	}
 	old := from + ".move-old"
 	if _, err := os.Lstat(old); err == nil || !errors.Is(err, os.ErrNotExist) {
 		return cleanupBeforePublish(fmt.Errorf("move recovery path already exists: %s", old))
@@ -97,11 +104,14 @@ func moveHome(ctx context.Context, from, to string) (resultErr error) {
 	if err := os.Rename(stage, to); err != nil {
 		return errors.Join(err, rollbackMove(to, old, nil), fmt.Errorf("backup retained at %s", backupDir))
 	}
+	if moveAfterPublishHook != nil {
+		moveAfterPublishHook()
+	}
 	worktreeRestore, err := repairMovedWorktrees(ctx, filepath.Join(to, databaseName), to)
 	if err != nil {
 		return errors.Join(err, rollbackMove(to, old, nil), fmt.Errorf("backup retained at %s", backupDir))
 	}
-	if _, err := Doctor(ctx, to); err != nil {
+	if _, err := inspectHomeWithLock(ctx, to, lockedHome.state.lock); err != nil {
 		return errors.Join(err, worktreeRestore.rollback(), rollbackMove(to, old, nil), fmt.Errorf("backup retained at %s", backupDir))
 	}
 	if err := worktreeRestore.cleanup(); err != nil {
@@ -112,6 +122,20 @@ func moveHome(ctx context.Context, from, to string) (resultErr error) {
 	}
 	if err := os.RemoveAll(backupDir); err != nil {
 		return err
+	}
+	return nil
+}
+
+func bindMoveLock(stage, source string) error {
+	for _, name := range []string{lockAnchorName, lockName} {
+		if err := os.Remove(filepath.Join(stage, name)); err != nil {
+			return err
+		}
+	}
+	for _, name := range []string{lockName, lockAnchorName} {
+		if err := os.Link(filepath.Join(source, lockName), filepath.Join(stage, name)); err != nil {
+			return err
+		}
 	}
 	return nil
 }
