@@ -78,6 +78,33 @@ class ProductionReviewsTest(unittest.TestCase):
         self.assertEqual(facts[(7, HEAD)]["state"], "allow")
         self.assertEqual(unavailable, "")
 
+    def test_merged_pr_retains_formal_review_after_reload(self):
+        original = reviews._read_graphql
+        payload = {"pageInfo": {"hasNextPage": False}, "nodes": [
+            {"number": 8, "headRefOid": HEAD, "mergeQueueEntry": None,
+             "reviews": {"pageInfo": {"hasPreviousPage": False}, "nodes": [review("COMMENTED")]}}
+        ]}
+        reviews._read_graphql = lambda _: payload
+        try:
+            first = reviews.collect("example/repository")[0]
+            second = reviews.collect("example/repository")[0]
+        finally:
+            reviews._read_graphql = original
+        self.assertEqual(first[(8, HEAD)]["state"], "allow")
+        self.assertEqual(second[(8, HEAD)]["state"], "allow")
+
+    def test_review_for_old_head_never_marks_new_head(self):
+        original = reviews._read_graphql
+        reviews._read_graphql = lambda _: {"pageInfo": {}, "nodes": [
+            {"number": 9, "headRefOid": HEAD, "mergeQueueEntry": None,
+             "reviews": {"pageInfo": {"hasPreviousPage": False}, "nodes": [review("APPROVED", commit=OLD, body="Dark-Factory-Review: allow " + OLD)]}}
+        ]}
+        try:
+            facts, _, _, _ = reviews.collect("example/repository")
+        finally:
+            reviews._read_graphql = original
+        self.assertEqual(facts[(9, HEAD)]["state"], "unknown")
+
 
 if __name__ == "__main__":
     unittest.main()

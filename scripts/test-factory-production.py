@@ -56,13 +56,15 @@ class ProductionFixtures(unittest.TestCase):
                     return json.dumps({"total_count": 33, "jobs": [{"id": 11, "name": "x" * 300, "status": "completed", "conclusion": "success", "html_url": "https://github.com/o/r/actions/jobs/11"}]})
                 self.fail(endpoint)
             config = {"repository": "o/r", "project_id": "1" * 32, "overseer_agent_id": "2" * 32, "label": "factory:ready", "allowed_authors": ["owner"], "factory_home": str(root), "journal": str(journal), "release_configs": [str(release_config)]}
-            with mock.patch.object(production, "host_config", return_value=config), mock.patch.object(production.intake, "command", side_effect=command), mock.patch.object(production.time, "time", return_value=10):
+            merged_review = {(8, OLD): {"head": OLD, "state": "allow"}}
+            with mock.patch.object(production, "host_config", return_value=config), mock.patch.object(production.intake, "command", side_effect=command), mock.patch.object(production.time, "time", return_value=10), mock.patch.object(production.formal, "collect", return_value=(merged_review, {}, 0, "")):
                 result = production.collect(config)
             self.assertEqual(result["pull_requests"][0]["review"], {"head": SHA, "state": "allow"})
             self.assertEqual(result["pull_requests"][0]["merge_queue"], "QUEUED")
             self.assertEqual(result["observed_at"], 10000)
             self.assertEqual(result["pull_requests"][1]["merge"], OLD)
             self.assertEqual(result["pull_requests"][1]["merged_at"], "2026-09-20T10:00:00Z")
+            self.assertEqual(result["pull_requests"][1]["review"], {"head": OLD, "state": "allow"})
             self.assertEqual([(item["id"], item["scope"], item["pull_requests"], item.get("overflow")) for item in result["checks"]], [("1", "head", [7], 1), ("2", "merge_group", [7, 8], 1)])
             self.assertEqual(len(result["checks"][0]["jobs"][0]["name"]), 256)
             self.assertEqual(result["reviewers"][-1]["state"], "unknown")

@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Read formal GitHub reviews for the production observation projection.
 
-This module has no publication path.  It reads the first 100 open pull
-requests in one GraphQL request and returns bounded, exact-head review facts.
+This module has no publication path.  It reads the first 100 open or recently
+merged pull requests in one GraphQL request and returns bounded, exact-head
+review facts.
 The existing ``verify-adversarial-review.sh`` remains the verdict policy.
 """
 import importlib.util
@@ -28,7 +29,7 @@ MAX_FINDINGS_BYTES = 8192
 QUERY = """
 query($owner:String!, $name:String!) {
   repository(owner:$owner, name:$name) {
-    pullRequests(first:100, states:OPEN) {
+    pullRequests(first:100, states:[OPEN, MERGED], orderBy:{field:UPDATED_AT, direction:DESC}) {
       pageInfo { hasNextPage }
       nodes {
         number
@@ -115,9 +116,10 @@ def _review_facts(nodes, number, head, unavailable):
 
 
 def collect(repository):
-    """Return ``(reviews, queues, overflow, unavailable)`` for open PRs.
+    """Return ``(reviews, queues, overflow, unavailable)`` for current PRs.
 
-    ``reviews`` is keyed by ``(number, head)`` and each value contains only
+    Open and recently merged PRs are returned.  ``reviews`` is keyed by
+    ``(number, head)`` and each value contains only
     ``head``, ``state``, ``url`` and bounded ``findings``.  Missing review
     history is ``unknown``; a present ``CHANGES_REQUESTED`` review remains a
     proven block even when older reviews were truncated.  ``unavailable`` is a
