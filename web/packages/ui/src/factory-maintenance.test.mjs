@@ -27,3 +27,12 @@ test("a new installed receipt cannot confirm an old running process", () => {
   assert.doesNotMatch(markup, /running host matches/);
   assert.match(markup, /b{40}/);
 });
+
+test("delivery pagination exposes the remaining count outside the control", () => {
+  const deliveries = Array.from({ length: 9 }, (_, index) => ({ repository: "o/r", id: `delivery-${index}`, kind: "release", destination: `runtime-${index}`, revision: "a".repeat(40), state: "verified", pull_requests: [] }));
+  const markup = render({ deliveries });
+  assert.match(markup, /1 more delivery receipts available\./);
+  assert.match(markup, /aria-describedby="delivery-evidence-remaining"/);
+  assert.match(markup, />Show more delivery evidence</);
+  assert.doesNotMatch(markup, /Show more delivery evidence \(1 remaining\)/);
+});

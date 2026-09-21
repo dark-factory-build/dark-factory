@@ -24,6 +24,7 @@ const observedAt = (value: number | undefined) => {
 /** One receipt inspector for project deliveries and factory maintenance. */
 export function DeliveryEvidence({ deliveries, current = true }: { deliveries: readonly ProductionDelivery[]; current?: boolean }) {
   const [limit, setLimit] = useState(8);
+  const remaining = deliveries.length - limit;
   return <>{deliveries.length === 0 ? <p>No delivery evidence recorded.</p> : deliveries.slice(0, limit).map((delivery) => <details key={`${delivery.repository}:${delivery.id}`}>
     <summary style={{overflowWrap:"anywhere"}}>{delivery.destination} · {current ? delivery.state : `last recorded ${delivery.state}; not current confirmation`} · {delivery.pull_requests.length} linked PR{delivery.pull_requests.length === 1 ? "" : "s"}</summary>
     <p>{delivery.phase}{delivery.reason ? ` · ${delivery.reason}` : ""}</p>
@@ -33,7 +34,7 @@ export function DeliveryEvidence({ deliveries, current = true }: { deliveries: r
     {link(delivery.url || "") ? <p><a href={delivery.url} target="_blank" rel="noreferrer">Open delivery</a></p> : null}
     <ul>{delivery.pull_requests.map((number) => <li key={number}><a href={`https://github.com/${delivery.repository}/pull/${number}`} target="_blank" rel="noreferrer">{delivery.repository} #{number}</a></li>)}</ul>
     {delivery.overflow ? <p>{delivery.overflow} additional links are outside this observation.</p> : null}
-  </details>)}{deliveries.length > limit ? <button type="button" onClick={() => setLimit((value) => value + 8)}>Show more delivery evidence ({deliveries.length - limit} remaining)</button> : null}</>;
+  </details>)}{remaining > 0 ? <><p id="delivery-evidence-remaining">{remaining} more delivery receipts available.</p><button type="button" aria-describedby="delivery-evidence-remaining" onClick={() => setLimit((value) => value + 8)}>Show more delivery evidence</button></> : null}</>;
 }
 
 function Identity({ value, state }: { value: FactoryBuild; state?: string }) {
@@ -54,11 +55,15 @@ export function FactoryMaintenancePanel({ maintenance, runtime, connected, sourc
     {!current ? <p role="status">Disconnected or stale observation. No runtime update is confirmed.</p> : null}
     {serviceSourcesMatch ? <p role="status">The running host matches the verified installed source.</p> : null}
     <div className="dfFactoryConsole__list">
-      <article className="dfFactoryConsole__card"><h3>Available release</h3>{maintenance ? <><p>{maintenance.available.state} · <code>{maintenance.available.version || "not observed"}</code></p>{link(maintenance.available.url) ? <p><a href={maintenance.available.url} target="_blank" rel="noreferrer">Open release</a></p> : <p>No release link observed.</p>}</> : <p>Not observed.</p>}</article>
-      <article className="dfFactoryConsole__card"><h3>Installed service files</h3>{maintenance ? <Identity value={maintenance.installed} state={maintenance.installed.state} /> : <p>Not observed.</p>}</article>
-      <article className="dfFactoryConsole__card"><h3>Running host</h3>{running ? <Identity value={running} state={runtime && connected ? "observed through this connection" : "last observed"} /> : <p>Not observed.</p>}</article>
-      <article className="dfFactoryConsole__card"><h3>Loaded hosted console</h3><p>source <code style={{ overflowWrap: "anywhere" }}>{hostedSource || "not provided"}</code></p><p>The console bundle and host runtime can run different revisions.</p></article>
-      <article className="dfFactoryConsole__card"><h3>Delivery evidence</h3><DeliveryEvidence deliveries={deliveries} current={current} /></article>
+      <section aria-labelledby="factory-host-heading"><h4 id="factory-host-heading">Host</h4>
+        <article className="dfFactoryConsole__card"><h5>Available release</h5>{maintenance ? <><p>{maintenance.available.state} · <code>{maintenance.available.version || "not observed"}</code></p>{link(maintenance.available.url) ? <p><a href={maintenance.available.url} target="_blank" rel="noreferrer">Open release</a></p> : <p>No release link observed.</p>}</> : <p>Not observed.</p>}</article>
+        <article className="dfFactoryConsole__card"><h5>Installed service files</h5>{maintenance ? <Identity value={maintenance.installed} state={maintenance.installed.state} /> : <p>Not observed.</p>}</article>
+        <article className="dfFactoryConsole__card"><h5>Running host</h5>{running ? <Identity value={running} state={runtime && connected ? "observed through this connection" : "last observed"} /> : <p>Not observed.</p>}</article>
+      </section>
+      <section aria-labelledby="factory-hosted-heading"><h4 id="factory-hosted-heading">Hosted console</h4>
+        <article className="dfFactoryConsole__card"><p>Source <code style={{ overflowWrap: "anywhere" }}>{hostedSource || "not provided"}</code></p><p>The console bundle and host runtime can run different revisions.</p></article>
+        <article className="dfFactoryConsole__card"><h5>Delivery evidence</h5><DeliveryEvidence deliveries={deliveries} current={current} /></article>
+      </section>
     </div>
     <details><summary>Host update instructions</summary><p>This console has no host installation command. On the configured host, use the existing safe runtime deployment path with an exact merged revision:</p><code style={{overflowWrap:"anywhere"}}>python3 scripts/deploy-runtime.py --home FACTORY_HOME MERGED_SHA</code><p>The release controller uses this same path. It prepares the update, preserves adoptable work, verifies the running version and restores admission. An available release does not enable automatic updates.</p></details>
   </section>;
