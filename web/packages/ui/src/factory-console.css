@@ -873,6 +873,26 @@ summary.dfConsoleItem__summary { cursor: pointer; }
    console's 0.7rem micro-labels are too small for.
    ------------------------------------------------------------------------ */
 
+.dfProduction { display: grid; gap: .6rem; padding: .75rem; }
+.dfProduction :where(h2, h3, p) { margin: 0; }
+.dfProduction__heading { display: flex; align-items: baseline; justify-content: space-between; gap: .5rem; }
+.dfProduction__heading span, .dfProduction__notice, .dfProduction small { color: var(--df-console-muted); font-size: .875rem; }
+.dfProduction__notice { border: 1px solid var(--df-console-rule); padding: .35rem .45rem; }
+.dfProduction__notice p { margin-top: .4rem; }
+.dfProduction__docks { display: flex; gap: .4rem; }
+.dfProduction__queue { display: grid; gap: .35rem; }
+.dfProduction__row { display: grid; gap: .25rem; width: 100%; padding: .45rem .55rem; text-align: left; text-transform: none; }
+.dfProduction__row strong { font-size: .875rem; }
+.dfProduction__detail { min-width: 0; overflow-wrap: anywhere; }
+.dfProduction__row strong, .dfProduction__row small { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dfProduction__stages { display: flex; flex-wrap: wrap; gap: .2rem; }
+.dfProduction__stages :where(span, i) { border: 1px solid var(--df-console-rule); padding: .05rem .25rem; color: var(--df-console-accent); font-size: .875rem; font-style: normal; white-space: nowrap; }
+.dfProduction__detail, .dfProduction__dock { display: grid; gap: .55rem; }
+.dfProduction__detail > details, .dfProduction__detail details { border-top: 1px solid var(--df-console-rule); padding-top: .45rem; }
+.dfProduction__detail details > :not(summary) { margin-top: .45rem; }
+.dfProduction__detail details button { margin: .2rem .2rem .2rem 0; }
+.dfProduction__back { justify-self: start; padding: 0; border: 0; color: var(--df-console-accent); background: transparent; }
+
 .dfRemote {
   display: block;
   min-height: 100%;

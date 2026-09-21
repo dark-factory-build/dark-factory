@@ -7,7 +7,7 @@ import { AgentPanel, ConsoleDialog, HumanRequestPanel, QueuePanel, TaskDetail, S
 import { ProjectLibrary, type ProjectContentCall } from "./project-library.js";
 import { useProduction } from "./production-data.js";
 import type { FactoryMaintenance } from "./factory-maintenance.js";
-import { deriveProductionView, sharedDeliveries } from "./production-view.js";
+import { deriveProductionView, inProgressProduction, sharedDeliveries } from "./production-view.js";
 import { ProductionPanel } from "./production-panel.js";
 import { MissionsPanel } from "./missions-panel.js";
 import { RemoteInvitePanel } from "./remote-invite.js";
@@ -217,10 +217,13 @@ export function FactoryConsole({
   const productionDeliveries = sharedDeliveries(productionView);
   const maintenanceRecord = productionData.records.find((record) => record.kind === "repository" && record.repository === "dark-factory-build/dark-factory" && record.document.maintenance);
   const maintenance = { maintenance: maintenanceRecord?.document.maintenance as FactoryMaintenance | undefined, runtime: productionData.runtime, connected: ready, sourceFresh: !productionData.error && maintenanceRecord !== undefined && Date.now() - maintenanceRecord.observed_at <= 180_000, hostedSource: typeof document === "undefined" ? undefined : document.querySelector<HTMLMetaElement>('meta[name="dark-factory-artifact-source"]')?.content, deliveries: productionDeliveries.filter((delivery) => delivery.destination.startsWith("runtime:") || delivery.destination === "site:app.darkfactory.build") };
-  const awaitingDelivery = productionItems.filter((item) => !item.completed && item.pullRequest?.state === "merged");
-  const productionFloor = [...productionItems.filter((item) => !item.completed && item.pullRequest?.state !== "merged"), ...awaitingDelivery.slice(-8), ...productionItems.filter((item) => item.completed).slice(-8)];
+  const inProgressItems = productionItems.filter(inProgressProduction).sort((a, b) => {
+    const priority = (item: typeof a) => item.pullRequest?.state === "merged" ? 2 : item.construction?.status === "succeeded" ? 3 : 0;
+    return priority(a) - priority(b) || b.completedAt - a.completedAt || a.visualId.localeCompare(b.visualId);
+  });
+  const productionFloor = inProgressItems.slice(0, 12);
   const [selectedProduction, setSelectedProduction] = useState<string>();
-  const selectedFloorItem = productionItems.find((item) => `${item.projectId}:${item.visualId}` === selectedProduction);
+  const selectedFloorItem = inProgressItems.find((item) => `${item.projectId}:${item.visualId}` === selectedProduction);
   if (selectedFloorItem && !productionFloor.includes(selectedFloorItem)) productionFloor.push(selectedFloorItem);
   const [requestedMission, setRequestedMission] = useState<{ projectId: string; id: string }>();
   const selectProduction = (key: string) => { setSelectedProduction(key); onDetail?.("production"); };
@@ -296,7 +299,7 @@ export function FactoryConsole({
               </div>
             </div>
             {view === "floor"
-              ? <FactoryFloor production={{ view: productionView, items: productionFloor, hiddenItems: productionItems.length - productionFloor.length, selected: selectedProduction, onSelect: selectProduction }} onOpenTasks={ready ? (id) => { selectProject(id); onDetail?.("queue"); } : undefined} onOpenMissions={ready ? (id) => { selectProject(id); onDetail?.("missions"); } : undefined} projectId={projectId} onProject={selectProject} floorAppearance={floorAppearance} selectedTaskId={selectedTask?.id} onSelectTask={ready ? selectTask : undefined} selectedAgentId={selectedDetail === "agent" ? selectedAgent?.id : undefined} state={scopedState} topologies={topologies} runPaths={runPaths} lastRunPaths={lastRunPaths} onSelectAgent={ready ? onSelectAgent : undefined} onSelectHumanRequest={ready ? onSelectHumanRequest : undefined} connected={ready} />
+              ? <FactoryFloor production={{ view: productionView, items: productionFloor, hiddenItems: inProgressItems.length - productionFloor.length, selected: selectedProduction, onSelect: selectProduction }} onOpenTasks={ready ? (id) => { selectProject(id); onDetail?.("queue"); } : undefined} onOpenMissions={ready ? (id) => { selectProject(id); onDetail?.("missions"); } : undefined} projectId={projectId} onProject={selectProject} floorAppearance={floorAppearance} selectedTaskId={selectedTask?.id} onSelectTask={ready ? selectTask : undefined} selectedAgentId={selectedDetail === "agent" ? selectedAgent?.id : undefined} state={scopedState} topologies={topologies} runPaths={runPaths} lastRunPaths={lastRunPaths} onSelectAgent={ready ? onSelectAgent : undefined} onSelectHumanRequest={ready ? onSelectHumanRequest : undefined} connected={ready} />
               : <AgentList state={scopedState} selectedAgentId={selectedAgent?.id} ready={ready} onSelectAgent={ready ? onSelectAgent : undefined} />}
           </section>
 
@@ -326,7 +329,7 @@ export function FactoryConsole({
                 />}
               />
             </div>
-            <div hidden={selectedDetail !== "production"}><ProductionPanel maintenance={maintenance} deliveries={productionDeliveries.filter((delivery) => !delivery.destination.startsWith("runtime:") && delivery.destination !== "site:app.darkfactory.build")} items={productionItems} selected={selectedProduction} onSelect={selectProduction} state={state} call={ready ? onProjectContent : undefined} connected={ready} error={[productionData.error, ...productionData.notices].filter(Boolean).join(" ")} overflow={productionData.overflow} loadMore={productionData.loadMore} onMission={(projectId, id) => { selectProject(projectId); setRequestedMission({ projectId, id }); onDetail?.("missions"); }} onAgent={ready ? onSelectAgent : undefined} onLoadTaskDetail={onLoadTaskDetail} onLoadTaskHistory={onLoadTaskHistory} /></div>
+            <div hidden={selectedDetail !== "production"}><ProductionPanel maintenance={maintenance} deliveries={productionDeliveries.filter((delivery) => !delivery.destination.startsWith("runtime:") && delivery.destination !== "site:app.darkfactory.build")} items={[...inProgressItems, ...productionItems.filter((item) => !inProgressProduction(item))]} selected={selectedProduction} onSelect={selectProduction} state={state} call={ready ? onProjectContent : undefined} connected={ready} error={[productionData.error, ...productionData.notices].filter(Boolean).join(" ")} overflow={productionData.overflow} loadMore={productionData.loadMore} onMission={(projectId, id) => { selectProject(projectId); setRequestedMission({ projectId, id }); onDetail?.("missions"); }} onAgent={ready ? onSelectAgent : undefined} onLoadTaskDetail={onLoadTaskDetail} onLoadTaskHistory={onLoadTaskHistory} /></div>
             <div hidden={selectedDetail !== "missions"}><MissionsPanel production={productionItems} onProduction={selectProduction} requestedMission={requestedMission} onLoadTaskDetail={onLoadTaskDetail} onLoadTaskHistory={onLoadTaskHistory} state={state} projectId={projectId} active={selectedDetail === "missions"} call={ready ? onProjectContent : undefined} onProject={selectProject} onSelectAgent={ready ? onSelectAgent : undefined} onSelectTask={ready ? selectTask : undefined} /></div>
             <div hidden={selectedDetail !== "queue"}>
               <QueuePanel

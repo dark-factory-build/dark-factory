@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -129,6 +130,78 @@ func TestProductionMaintenanceRoundTripsAndInvalidObservationRollsBack(t *testin
 	for _, record := range page.Records {
 		if record.Repository == "example/rollback" {
 			t.Fatalf("rolled-back maintenance record = %+v", record)
+		}
+	}
+}
+
+func TestProductionPrioritizesLiveFactsOverTerminalConstruction(t *testing.T) {
+	store, _, project, _ := newAdmissionStore(t, RoleOrchestrator, 2)
+	defer store.Close()
+	ctx := context.Background()
+	insert := func(kind, id, document string) {
+		t.Helper()
+		if _, err := store.writer.ExecContext(ctx, `INSERT INTO production_records(project_id, repository, kind, identity, visual_id, document, observed_at_ms) VALUES(?, 'example/factory', ?, ?, '', ?, 1)`, project.ID.Bytes(), kind, id, document); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for index := 0; index < 250; index++ {
+		id := make([]byte, IDBytes)
+		id[0] = byte(index + 1)
+		base := "main"
+		baseCommit := []byte(strings.Repeat("\x01", 20))
+		head := []byte(strings.Repeat("\x01", 20))
+		if index%3 == 1 {
+			baseCommit = []byte(strings.Repeat("\x02", 20))
+			head = []byte(strings.Repeat("\x01", 20))
+		} else if index%3 == 2 {
+			baseCommit = nil
+			head = []byte(strings.Repeat("\x02", 20))
+			head = nil
+		}
+		if _, err := store.writer.ExecContext(ctx, `INSERT INTO tasks(id, project_id, assigned_agent_id, incarnation_id, work_revision, title, body, status, priority, completed_at_ms, revision, created_at_ms, updated_at_ms) VALUES(?, ?, NULL, ?, 1, ?, '', 'cancelled', 0, ?, 1, 0, ?)`, id, project.ID.Bytes(), append([]byte{byte(index + 1)}, make([]byte, IDBytes-1)...), fmt.Sprintf("terminal-%03d", index), index+1, index+1); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.writer.ExecContext(ctx, `INSERT INTO task_repository_bindings(task_id, repository_id, base_ref) VALUES(?, ?, ?)`, id, project.ID.Bytes(), base); err != nil {
+			t.Fatal(err)
+		}
+		var err error
+		if baseCommit == nil {
+			_, err = store.writer.ExecContext(ctx, `INSERT INTO changes(id, project_id, task_id, task_incarnation_id, phase, revision, created_at_ms, updated_at_ms) VALUES(?, ?, ?, ?, 'reserved', 1, 0, 2)`, id, project.ID.Bytes(), id, append([]byte{byte(index + 1)}, make([]byte, IDBytes-1)...))
+		} else {
+			_, err = store.writer.ExecContext(ctx, `INSERT INTO changes(id, project_id, task_id, task_incarnation_id, phase, object_format, base_commit, repository_dev, repository_inode, head_commit, prepared_at_ms, available_at_ms, revision, created_at_ms, updated_at_ms) VALUES(?, ?, ?, ?, 'available', 'sha1', ?, 1, 1, ?, 1, 2, 1, 0, 2)`, id, project.ID.Bytes(), id, append([]byte{byte(index + 1)}, make([]byte, IDBytes-1)...), baseCommit, head)
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	insert("repository", "example/factory", `{"overflow":0}`)
+	insert("pull_request", "7", `{"number":7,"title":"current","state":"open","head":"`+strings.Repeat("a", 40)+`","review":{"head":"`+strings.Repeat("a", 40)+`","state":"allow"}}`)
+	insert("check", "workflow:7", `{"id":"workflow:7","state":"completed"}`)
+	insert("delivery", "delivery:7", `{"id":"delivery:7","state":"verified"}`)
+	page, err := store.Production(ctx, project.ID, 0, 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if page.Total != 254 || len(page.Records) != 8 {
+		t.Fatalf("page total/size = %d/%d", page.Total, len(page.Records))
+	}
+	want := []string{"repository", "pull_request", "delivery", "check"}
+	for index, kind := range want {
+		if page.Records[index].Kind != kind {
+			t.Fatalf("record %d = %+v, want %s", index, page.Records[index], kind)
+		}
+	}
+	page, err = store.Production(ctx, project.ID, 4, 3)
+	if err != nil || len(page.Records) != 3 {
+		t.Fatalf("construction page = %+v, %v", page, err)
+	}
+	for index, want := range []any{false, true, nil} {
+		var construction map[string]any
+		if err := json.Unmarshal(page.Records[index].Document, &construction); err != nil {
+			t.Fatal(err)
+		}
+		if construction["has_changes"] != want {
+			t.Fatalf("construction %d has_changes = %#v, want %#v", index, construction["has_changes"], want)
 		}
 	}
 }

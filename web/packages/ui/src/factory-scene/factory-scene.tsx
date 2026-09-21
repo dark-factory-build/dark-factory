@@ -320,7 +320,7 @@ function SceneWorkers({ production, productionTop, errands, furniture, restingSe
         <g aria-hidden="true" transform={cat.west ? "translate(22 0) scale(-1 1)" : undefined}><Frame name={`cat.${cat.frame}`} x={3} y={-4} /></g>
       </g>;
   const bed = errands ? catBed(rows[0]!) : undefined;
-  return <>{production === undefined ? null : <ProductionArea {...production} width={layout.width} top={productionTop} pulse={pulse} />}
+  return <>{production === undefined ? null : <ProductionArea {...production} width={Math.max(320, layout.width)} top={productionTop} pulse={pulse} />}
       {bed === undefined ? null : <g aria-hidden="true" pointerEvents="none" data-cat-bed="" transform={`translate(${bed.x} ${bed.y}) scale(${WORKER_SIZE / FRAME})`}><Frame name="cat.bed" x={3} y={-4} /></g>}
       {cat !== undefined && cat.y !== rows[0]![0]!.y ? puss : null}
       {/* A question and its answer run along the corridors people walk, under their feet. */}
@@ -444,7 +444,8 @@ export function FactoryScene({ production, topology, detailNodes, workers, appea
   const station = { missions: { x: ROOM_LEFT + 32, y: stationTop }, tasks: { x: ROOM_LEFT + 112, y: stationTop } };
   const commonAreaWidth = Math.max(commonWidth + (nook?.width ?? 0), station.tasks.x + 24 - ROOM_LEFT);
   const boardTop = Math.max(layout.height, commonBottom, stationTop + 24, ...placements.map((placement) => placement.y + 24)) + PADDING;
-  const sceneHeight = boardTop + PADDING + (production === undefined ? 0 : productionHeight(layout.width, production.items.length, sharedChecks(production.items).length));
+  const sceneWidth = production === undefined ? layout.width : Math.max(320, layout.width);
+  const sceneHeight = boardTop + PADDING + (production === undefined ? 0 : productionHeight(sceneWidth, production.items.length, sharedChecks(production.items).length));
   const affected = new Map(layout.rooms.map((room) => [room.id, tasks.filter((order) => order.status === "running" && (order.displayRoomIds ?? order.roomIds).includes(room.id))]));
   const enterable = new Set(enterableRoomIds);
   const cabling = useMemo(() => wires(layout, topology), [layout, topology]);
@@ -453,7 +454,7 @@ export function FactoryScene({ production, topology, detailNodes, workers, appea
   const tray = station.tasks;
   // A compact scope still needs room for readable labels, not poster-sized
   // sprites; larger scopes retain their existing scrollable viewport.
-  const maxWidth = Math.min(640, layout.width * 2);
+  const maxWidth = Math.min(640, sceneWidth * 1.5);
   // One table per row, as long as the row, standing between the viewer and the
   // people at it: it covers their laps, and what they rest with sits on it.
   const tables = [{ seats: seating.resting, planning: false }, { seats: seating.planning, planning: true }].flatMap(({ seats, planning }) =>
@@ -467,11 +468,11 @@ export function FactoryScene({ production, topology, detailNodes, workers, appea
     <>
     <div className="dfFactoryFloor__map" onClick={inspect} onPointerOver={inspect} onFocus={inspect} onPointerLeave={() => { retainFocusedTooltip(); setLinkedFrom(undefined); }} onBlur={() => { setTooltip(undefined); setLinkedFrom(undefined); }} onScroll={retainFocusedTooltip} onKeyDown={(event) => { if (event.key === "Escape") { setTooltip(undefined); setLinkedFrom(undefined); } }} role="region" aria-label="Scrollable codebase floor" tabIndex={0}>
     <svg
-      viewBox={`0 0 ${layout.width} ${sceneHeight}`}
+      viewBox={`0 0 ${sceneWidth} ${sceneHeight}`}
       role="group"
       aria-label="Dark Factory codebase floor"
       data-topology-digest={topology.digest}
-      style={{ display: "block", width: "100%", minWidth: layout.width, maxWidth, height: "auto", margin: "0 auto", background: "#08131d" }}
+      style={{ display: "block", width: "100%", minWidth: sceneWidth, maxWidth, height: "auto", margin: "0 auto", background: "#08131d" }}
     >
       <desc>{`${layout.rooms.length} topology spaces, ${workers.length} workers${omittedLocations === 0 ? "" : `, ${omittedLocations} current locations not shown in this view`}`}</desc>
       <defs>

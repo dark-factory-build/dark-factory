@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Read formal GitHub reviews for the production observation projection.
 
-This module has no publication path.  It reads the first 100 open pull
-requests in one GraphQL request and returns bounded, exact-head review facts.
+This module has no publication path.  It reads the first 100 open or recently
+merged pull requests in one GraphQL request and returns bounded, exact-head
+review facts.
 The existing ``verify-adversarial-review.sh`` remains the verdict policy.
 """
 import importlib.util
@@ -28,25 +29,34 @@ MAX_FINDINGS_BYTES = 8192
 QUERY = """
 query($owner:String!, $name:String!) {
   repository(owner:$owner, name:$name) {
-    pullRequests(first:100, states:OPEN) {
+    open: pullRequests(first:100, states:OPEN, orderBy:{field:UPDATED_AT, direction:DESC}) {
       pageInfo { hasNextPage }
       nodes {
-        number
-        headRefOid
-        mergeQueueEntry { state }
-        reviews(last:32) {
-          pageInfo { hasPreviousPage }
-          nodes {
-            commit { oid }
-            state
-            body
-            url
-            author {
-              ... on User { databaseId }
-              ... on Bot { databaseId }
-            }
-          }
-        }
+        ...PullRequestReviewFields
+      }
+    }
+    merged: pullRequests(first:100, states:MERGED, orderBy:{field:UPDATED_AT, direction:DESC}) {
+      pageInfo { hasNextPage }
+      nodes {
+        ...PullRequestReviewFields
+      }
+    }
+  }
+}
+fragment PullRequestReviewFields on PullRequest {
+  number
+  headRefOid
+  mergeQueueEntry { state }
+  reviews(last:32) {
+    pageInfo { hasPreviousPage }
+    nodes {
+      commit { oid }
+      state
+      body
+      url
+      author {
+        ... on User { databaseId }
+        ... on Bot { databaseId }
       }
     }
   }
@@ -76,8 +86,10 @@ def _read_graphql(repository):
     value = json.loads(encoded)
     if not isinstance(value, dict) or value.get("errors"):
         raise ValueError("GitHub review query failed")
-    pull_requests = ((value.get("data") or {}).get("repository") or {}).get("pullRequests")
-    if not isinstance(pull_requests, dict) or not isinstance(pull_requests.get("nodes"), list):
+    repository = (value.get("data") or {}).get("repository") or {}
+    pull_requests = {name: repository.get(name) for name in ("open", "merged")}
+    if any(not isinstance(connection, dict) or not isinstance(connection.get("nodes"), list)
+           for connection in pull_requests.values()):
         raise ValueError("GitHub review query returned an invalid shape")
     return pull_requests
 
@@ -115,9 +127,10 @@ def _review_facts(nodes, number, head, unavailable):
 
 
 def collect(repository):
-    """Return ``(reviews, queues, overflow, unavailable)`` for open PRs.
+    """Return ``(reviews, queues, overflow, unavailable)`` for current PRs.
 
-    ``reviews`` is keyed by ``(number, head)`` and each value contains only
+    Open and recently merged PRs are returned.  ``reviews`` is keyed by
+    ``(number, head)`` and each value contains only
     ``head``, ``state``, ``url`` and bounded ``findings``.  Missing review
     history is ``unknown``; a present ``CHANGES_REQUESTED`` review remains a
     proven block even when older reviews were truncated.  ``unavailable`` is a
@@ -125,38 +138,41 @@ def collect(repository):
     """
     pull_requests = _read_graphql(repository)
     reviews, queues, unavailable = {}, {}, []
-    overflow = 1 if pull_requests.get("pageInfo", {}).get("hasNextPage") else 0
-    nodes = pull_requests.get("nodes", [])
-    if len(nodes) > MAX_PULL_REQUESTS:
-        overflow += len(nodes) - MAX_PULL_REQUESTS
-    for pr in nodes[:MAX_PULL_REQUESTS]:
-        if not isinstance(pr, dict) or type(pr.get("number")) is not int or pr["number"] < 1 or not SHA.fullmatch(pr.get("headRefOid") or ""):
-            unavailable.append("pull_request_shape")
-            continue
-        number, head = pr["number"], pr["headRefOid"]
-        key = (number, head)
-        queue = (pr.get("mergeQueueEntry") or {}).get("state")
-        if isinstance(queue, str) and queue:
-            queues[key] = queue[:64]
-        reasons = []
-        facts, truncated = _review_facts(pr.get("reviews"), number, head, reasons)
-        unavailable.extend(reasons)
-        if truncated:
-            overflow += 1
-        current_facts = [fact for fact in facts if fact["commit_id"] == head]
-        result = verify_exact_head(head, facts)
-        blocking = "blocking verdict(s)" in (result.stderr or "")
-        if blocking and (not truncated and not reasons or any(fact["state"] == "CHANGES_REQUESTED" for fact in current_facts)):
-            state = "block"
-        elif result.returncode == 0 and not truncated and not reasons:
-            state = "allow"
-        else:
-            state = "unknown"
-        selected = next((fact for fact in reversed(current_facts) if fact["state"] == "CHANGES_REQUESTED"), None)
-        if selected is None and state == "allow":
-            selected = next((fact for fact in reversed(current_facts) if "Dark-Factory-Review: allow " + head in fact["body"]), None)
-        selected = selected or (current_facts[-1] if current_facts else {"url": "", "body": ""})
-        reviews[key] = {"head": head, "state": state, "url": selected["url"], "findings": _bounded_text(selected["body"])}
+    overflow = 0
+    for connection in pull_requests.values():
+        page = connection.get("pageInfo", {})
+        overflow += int(page.get("hasNextPage") is True)
+        nodes = connection.get("nodes", [])
+        if len(nodes) > MAX_PULL_REQUESTS:
+            overflow += len(nodes) - MAX_PULL_REQUESTS
+        for pr in nodes[:MAX_PULL_REQUESTS]:
+            if not isinstance(pr, dict) or type(pr.get("number")) is not int or pr["number"] < 1 or not SHA.fullmatch(pr.get("headRefOid") or ""):
+                unavailable.append("pull_request_shape")
+                continue
+            number, head = pr["number"], pr["headRefOid"]
+            key = (number, head)
+            queue = (pr.get("mergeQueueEntry") or {}).get("state")
+            if isinstance(queue, str) and queue:
+                queues[key] = queue[:64]
+            reasons = []
+            facts, truncated = _review_facts(pr.get("reviews"), number, head, reasons)
+            unavailable.extend(reasons)
+            if truncated:
+                overflow += 1
+            current_facts = [fact for fact in facts if fact["commit_id"] == head]
+            result = verify_exact_head(head, facts)
+            blocking = "blocking verdict(s)" in (result.stderr or "")
+            if blocking and (not truncated and not reasons or any(fact["state"] == "CHANGES_REQUESTED" for fact in current_facts)):
+                state = "block"
+            elif result.returncode == 0 and not truncated and not reasons:
+                state = "allow"
+            else:
+                state = "unknown"
+            selected = next((fact for fact in reversed(current_facts) if fact["state"] == "CHANGES_REQUESTED"), None)
+            if selected is None and state == "allow":
+                selected = next((fact for fact in reversed(current_facts) if "Dark-Factory-Review: allow " + head in fact["body"]), None)
+            selected = selected or (current_facts[-1] if current_facts else {"url": "", "body": ""})
+            reviews[key] = {"head": head, "state": state, "url": selected["url"], "findings": _bounded_text(selected["body"])}
     return reviews, queues, overflow, ",".join(sorted(set(unavailable)))
 
 

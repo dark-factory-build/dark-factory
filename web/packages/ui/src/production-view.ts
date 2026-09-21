@@ -31,7 +31,7 @@ type PullRequest = Readonly<{
   merge?: string; merge_queue?: string; merged_at?: string; review?: Readonly<{ head?: string; state?: string; url?: string; findings?: string }>;
   next_action?: string;
 }>;
-type Construction = Readonly<{ title?: string; phase?: string; status?: string; head?: string; task_id?: string; blocked_reason?: string }>;
+type Construction = Readonly<{ title?: string; phase?: string; status?: string; head?: string; task_id?: string; blocked_reason?: string; has_changes?: boolean }>;
 type Scoped = Readonly<{ projectId: string; repository: string }>;
 
 export type ProductionContraption = Readonly<{
@@ -100,7 +100,7 @@ function nextAction(pr: PullRequest, review: ProductionContraption["review"], ch
   if (pr.state === "closed" && !pr.merge) return "Closed without merge.";
   if (pr.state === "merged") return deliveries.length > 0 && latestDestinations(deliveries).every((delivery) => delivery.verified) ? "Delivery verified at all recorded destinations." : "Merged; delivery verification is pending.";
   if (pr.next_action) return pr.next_action;
-  if (review.state === "block" && review.findings) return review.findings;
+  if (review.current && review.state === "block") return "Changes requested; inspect the review findings.";
   if (!review.current) return review.head ? "Review is stale for the current head." : "Independent review is required.";
   if (!review.sourceFresh) return "Production source observation is stale or unavailable.";
   if (review.state !== "allow") return "Independent review is required.";
@@ -108,6 +108,47 @@ function nextAction(pr: PullRequest, review: ProductionContraption["review"], ch
   if (checks.some((check) => check.applicable && ["unknown", "stale", "unavailable", "skipped", "notapplicable"].includes(check.state))) return "A current-head check is unavailable or incomplete.";
   if (checks.some((check) => check.applicable && check.conclusion && check.conclusion !== "success")) return "A current-head check is not successful.";
   return "Awaiting the next recorded publication observation.";
+}
+
+function constructionNextAction(doc: Record<string, unknown>) {
+  if (text(doc.blocked_reason)) return text(doc.blocked_reason);
+  switch (text(doc.status)) {
+    case "running": return "Work is running.";
+    case "queued": return "Waiting for a worker.";
+    case "succeeded": return doc.has_changes === false ? "Work finished without a source change." : "Work finished; no linked publication is recorded.";
+    case "failed": return "Work failed; inspect the task result.";
+    case "cancelled": return "Work was cancelled.";
+    case "blocked": return "Work is blocked; inspect the task.";
+    default: return "Work state is unavailable.";
+  }
+}
+
+/** Shared queue membership and stage labels for the floor and inspector. */
+export function inProgressProduction(item: ProductionContraption): boolean {
+  if (item.completed) return false;
+  if (item.pullRequest) return true;
+  return item.construction?.status !== "cancelled"
+    && !(item.construction?.has_changes === false && item.construction.status === "succeeded");
+}
+
+export function productionStages(item: ProductionContraption): string[] {
+  if (item.completed) return [item.status === "delivered" ? "Delivered" : "Closed"];
+  const pr = item.pullRequest;
+  if (!pr) {
+    const status = item.construction?.status;
+    return [status === "running" ? "Construction" : status === "queued" ? "Queued" : status === "blocked" ? "Blocked" : status === "failed" ? "Failed" : status === "cancelled" ? "Cancelled" : status === "succeeded" ? item.construction?.has_changes === false ? "Finished" : "Publication unrecorded" : "Work unknown"];
+  }
+  if (pr.state === "merged") {
+    const destinations = latestDestinations(item.deliveries);
+    return ["Merged", destinations.some((receipt) => receipt.state === "blocked" || receipt.state === "failed") ? "Delivery blocked" : destinations.some((receipt) => receipt.state === "running") ? "Deploying" : "Delivery unverified"];
+  }
+  const checks = item.checks.filter((check) => check.applicable);
+  const failed = checks.some((check) => ["failure", "timed_out", "action_required"].includes(check.conclusion));
+  const ci = !item.review.sourceFresh ? "CI stale" : failed ? "CI failed" : checks.some((check) => ["running", "in_progress"].includes(check.state)) ? "CI running" : checks.some((check) => ["queued", "waiting", "pending", "requested"].includes(check.state)) ? "CI queued" : checks.some((check) => check.state === "cancelled" || check.conclusion === "cancelled") ? "CI cancelled" : checks.some((check) => check.state === "skipped" || check.conclusion === "skipped") ? "CI skipped" : checks.length > 0 && checks.every((check) => check.state === "completed" && check.conclusion === "success") ? "CI passed" : "CI unknown";
+  const correction = item.review.current && item.review.state === "block" || failed;
+  const review = !item.review.sourceFresh ? "Review stale" : item.review.allowed ? "Review passed" : (item.review.current && item.review.state === "running" || item.reviewers.some((reviewer) => reviewer.state === "running")) ? "Review running" : "Review pending";
+  const merge = pr.merge_queue && !["none", "unknown"].includes(pr.merge_queue) ? "Merge queued" : item.review.allowed && ci === "CI passed" ? "Merge" : undefined;
+  return correction ? ["Correction", ci] : merge ? [merge, ci] : [review, ci];
 }
 
 /** Pure, bounded derivation. `now` is an explicit observation time, never a timer. */
@@ -143,7 +184,7 @@ export function deriveProductionView(records: readonly ProductionRecord[], now =
     const closedUnmerged = pr?.state === "closed" && !pr.merge;
     const completed = closedUnmerged || pr?.state === "merged" && pullDeliveries.length > 0 && latestDestinations(pullDeliveries).every((delivery) => delivery.verified);
     const doc = construction ? object(construction.document) : {};
-    contraptions[key] = { visualId: item.visualId, projectId: item.scope.projectId, repository: item.scope.repository, construction: construction ? { title: text(doc.title), phase: text(doc.phase), status: text(doc.status), head: text(doc.head), task_id: text(doc.task_id), blocked_reason: text(doc.blocked_reason) } : undefined, pullRequest: pr, tasks: [...new Set([...(construction?.tasks ?? []), ...(pull?.tasks ?? [])])], missions: [...new Set([...(construction?.missions ?? []), ...(pull?.missions ?? [])])], linksOverflow: Boolean(construction?.links_overflow || pull?.links_overflow), review: reviewView, checks: pullChecks, deliveries: pullDeliveries, reviewers: assigned, completed: Boolean(completed), completedAt: Date.parse(pr?.merged_at ?? "") || pull?.observed_at || 0, status: completed ? (closedUnmerged ? "closed-unmerged" : "delivered") : text(pr?.state) || text(doc.status) || text(doc.phase) || "construction", nextAction: pr ? nextAction(pr, reviewView, pullChecks, pullDeliveries) : text(doc.blocked_reason) || "Construction is in progress." };
+    contraptions[key] = { visualId: item.visualId, projectId: item.scope.projectId, repository: item.scope.repository, construction: construction ? { title: text(doc.title), phase: text(doc.phase), status: text(doc.status), head: text(doc.head), task_id: text(doc.task_id), blocked_reason: text(doc.blocked_reason), has_changes: typeof doc.has_changes === "boolean" ? doc.has_changes : undefined } : undefined, pullRequest: pr, tasks: [...new Set([...(construction?.tasks ?? []), ...(pull?.tasks ?? [])])], missions: [...new Set([...(construction?.missions ?? []), ...(pull?.missions ?? [])])], linksOverflow: Boolean(construction?.links_overflow || pull?.links_overflow), review: reviewView, checks: pullChecks, deliveries: pullDeliveries, reviewers: assigned, completed: Boolean(completed), completedAt: Date.parse(pr?.merged_at ?? "") || pull?.observed_at || 0, status: completed ? (closedUnmerged ? "closed-unmerged" : "delivered") : text(pr?.state) || text(doc.status) || text(doc.phase) || "construction", nextAction: pr ? nextAction(pr, reviewView, pullChecks, pullDeliveries) : constructionNextAction(doc) };
   }
   return { contraptions, checks, deliveries, reviewers };
 }
