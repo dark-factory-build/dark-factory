@@ -324,7 +324,7 @@ func (store *Store) RecordPublication(ctx context.Context, project ProjectID, ta
 const productionRows = `SELECT repository, kind, identity, visual_id, document, observed_at_ms FROM production_records WHERE project_id = ?
  UNION ALL SELECT COALESCE(r.name, ''), 'construction', lower(hex(c.id)), 'change:' || lower(hex(c.id)),
 		json_object('title', t.title, 'phase', c.phase, 'status', t.status, 'head', lower(hex(c.head_commit)), 'task_id', lower(hex(t.id)), 'blocked_reason', t.blocked_reason,
-			'has_changes', CASE WHEN c.head_commit IS NULL OR length(b.base_ref) NOT IN (40, 64) THEN NULL WHEN lower(hex(c.head_commit)) = lower(b.base_ref) THEN json('false') ELSE json('true') END), c.updated_at_ms
+			'has_changes', CASE WHEN c.head_commit IS NULL OR c.base_commit IS NULL THEN NULL WHEN c.head_commit = c.base_commit THEN json('false') ELSE json('true') END), c.updated_at_ms
  FROM changes c JOIN tasks t ON t.id = c.task_id
  LEFT JOIN task_repository_bindings b ON b.task_id = t.id
  LEFT JOIN project_repositories r ON r.id = b.repository_id

@@ -147,14 +147,16 @@ func TestProductionPrioritizesLiveFactsOverTerminalConstruction(t *testing.T) {
 	for index := 0; index < 250; index++ {
 		id := make([]byte, IDBytes)
 		id[0] = byte(index + 1)
-		base := strings.Repeat("01", 20)
+		base := "main"
+		baseCommit := []byte(strings.Repeat("\x01", 20))
 		head := []byte(strings.Repeat("\x01", 20))
 		if index%3 == 1 {
-			base = strings.Repeat("02", 20)
+			baseCommit = []byte(strings.Repeat("\x02", 20))
 			head = []byte(strings.Repeat("\x01", 20))
 		} else if index%3 == 2 {
-			base = "main"
+			baseCommit = nil
 			head = []byte(strings.Repeat("\x02", 20))
+			head = nil
 		}
 		if _, err := store.writer.ExecContext(ctx, `INSERT INTO tasks(id, project_id, assigned_agent_id, incarnation_id, work_revision, title, body, status, priority, completed_at_ms, revision, created_at_ms, updated_at_ms) VALUES(?, ?, NULL, ?, 1, ?, '', 'cancelled', 0, ?, 1, 0, ?)`, id, project.ID.Bytes(), append([]byte{byte(index + 1)}, make([]byte, IDBytes-1)...), fmt.Sprintf("terminal-%03d", index), index+1, index+1); err != nil {
 			t.Fatal(err)
@@ -162,7 +164,13 @@ func TestProductionPrioritizesLiveFactsOverTerminalConstruction(t *testing.T) {
 		if _, err := store.writer.ExecContext(ctx, `INSERT INTO task_repository_bindings(task_id, repository_id, base_ref) VALUES(?, ?, ?)`, id, project.ID.Bytes(), base); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := store.writer.ExecContext(ctx, `INSERT INTO changes(id, project_id, task_id, task_incarnation_id, phase, object_format, base_commit, repository_dev, repository_inode, head_commit, prepared_at_ms, available_at_ms, revision, created_at_ms, updated_at_ms) VALUES(?, ?, ?, ?, 'available', 'sha1', zeroblob(20), 1, 1, ?, 1, 2, 1, 0, 2)`, id, project.ID.Bytes(), id, append([]byte{byte(index + 1)}, make([]byte, IDBytes-1)...), head); err != nil {
+		var err error
+		if baseCommit == nil {
+			_, err = store.writer.ExecContext(ctx, `INSERT INTO changes(id, project_id, task_id, task_incarnation_id, phase, revision, created_at_ms, updated_at_ms) VALUES(?, ?, ?, ?, 'reserved', 1, 0, 2)`, id, project.ID.Bytes(), id, append([]byte{byte(index + 1)}, make([]byte, IDBytes-1)...))
+		} else {
+			_, err = store.writer.ExecContext(ctx, `INSERT INTO changes(id, project_id, task_id, task_incarnation_id, phase, object_format, base_commit, repository_dev, repository_inode, head_commit, prepared_at_ms, available_at_ms, revision, created_at_ms, updated_at_ms) VALUES(?, ?, ?, ?, 'available', 'sha1', ?, 1, 1, ?, 1, 2, 1, 0, 2)`, id, project.ID.Bytes(), id, append([]byte{byte(index + 1)}, make([]byte, IDBytes-1)...), baseCommit, head)
+		}
+		if err != nil {
 			t.Fatal(err)
 		}
 	}
