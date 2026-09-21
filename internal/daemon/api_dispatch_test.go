@@ -1698,6 +1698,31 @@ func TestDaemonSourceAllowsClaudeOrchestratorRoute(t *testing.T) {
 	waitDispatch(t, done)
 }
 
+func TestDaemonSourceTitleOnlyWorkerUsesEffectiveHandoff(t *testing.T) {
+	fixture := newDispatchFixture(t)
+	const seed = 74
+	target := testID(73)
+	title := "review handoff " + target + " " + testID(75) + " " + strings.Repeat("c", 40) + " 1 1"
+	active := prepareActiveAttemptInProjectWithProvider(t, fixture, seed, testID(seed), "worker", "claude_code", func() {
+		incarnation, err := kernel.IncarnationIDFromBytes(mustIDBytes(t, testID(seed+3)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := fixture.store.EnqueueTask(context.Background(), kernel.NewTask{
+			ID: mustTaskID(t, testID(seed+2)), ProjectID: mustProjectID(t, testID(seed)), AssignedAgentID: mustAgentID(t, testID(seed+1)), IncarnationID: incarnation, Title: title,
+		}, mustKernelTime(t, 10)); err != nil {
+			t.Fatal(err)
+		}
+	})
+	done := fixture.serve(t)
+	_, err := active.client.Source(context.Background(), target)
+	var remote *api.RemoteError
+	if !errors.As(err, &remote) || remote.Code() != api.RemoteNotFound {
+		t.Fatalf("title-only worker source = %v", err)
+	}
+	waitDispatch(t, done)
+}
+
 // An unavailable notification transport must not turn a durable conversation
 // into a failed or unreadable operation. No live terminal is registered here.
 func TestPeerConversationSurvivesUnavailableNotification(t *testing.T) {
