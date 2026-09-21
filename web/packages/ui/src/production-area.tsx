@@ -6,19 +6,28 @@ import { productionStages, type ProductionContraption } from "./production-view.
 export const productionColumns = (width: number) => Math.max(1, Math.min(4, Math.floor(width / 160)));
 export const sharedChecks = (items: readonly ProductionContraption[]) => [...new Map(items.filter((item) => item.pullRequest?.state !== "merged").flatMap((item) => item.checks.filter((check) => check.applicable || check.scope === "merge_group").map((check) => [`${check.repository}:${check.id}`, check] as const))).values()];
 export const productionHeight = (width: number, count: number, checks = 0) => 68 + Math.ceil(count / productionColumns(width)) * 132 + Math.ceil(checks / productionColumns(width)) * 104 + 48;
+export type ProductionRoomRect = Readonly<{ x: number; y: number; width: number; height: number }>;
+export const productionConnector = (upper: ProductionRoomRect, lower: ProductionRoomRect) => {
+  const width = Math.min(32, upper.width, lower.width);
+  return { x: upper.x, y: upper.y + upper.height, width, height: lower.y - (upper.y + upper.height) };
+};
 const label = (text: string) => text.length > 23 ? `${text.slice(0, 22)}…` : text;
 const activate = (select: () => void) => ({ role: "button", tabIndex: 0, onClick: select, onKeyDown: (event: KeyboardEvent<SVGGElement>) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); select(); } } });
 
 /** Station props show concurrent evidence beside the same machine. No animation
  * advances work or moves a PR past an authority's decision. */
-export function ProductionArea({ items, hiddenItems = 0, width, top, pulse, onSelect, selected }: {
+export function ProductionArea({ items, hiddenItems = 0, width, top, pulse, onSelect, selected, upperRoom }: {
   hiddenItems?: number; items: readonly ProductionContraption[]; width: number; top: number; pulse?: number;
-  onSelect: (id: string) => void; selected?: string;
+  onSelect: (id: string) => void; selected?: string; upperRoom: ProductionRoomRect;
 }) {
   const columns = productionColumns(width), cell = width / columns, executions = sharedChecks(items);
+  const lowerRoom = { x: 8, y: top + 8, width: width - 16, height: productionHeight(width, items.length, executions.length) - 16 };
+  const connector = productionConnector(upperRoom, lowerRoom), localConnector = { ...connector, y: connector.y - top };
+  const openingEnd = connector.x + connector.width;
   return <g transform={`translate(0 ${top})`} role="group" aria-label="Production area">
-    <path d="M24 -24v32h24" stroke="#526360" strokeWidth="18" fill="none" />
-    <rect x="8" y="8" width={width - 16} height={productionHeight(width, items.length, executions.length) - 16} fill="url(#df-floor)" stroke="#465355" strokeWidth="3" />
+    <rect {...localConnector} fill="url(#df-floor)" />
+    <rect {...lowerRoom} y={lowerRoom.y - top} fill="url(#df-floor)" />
+    <path d={`M${lowerRoom.x} 8H${connector.x} M${openingEnd} 8H${lowerRoom.x + lowerRoom.width} V${lowerRoom.y + lowerRoom.height - top} H${lowerRoom.x} V8`} fill="none" stroke="#465355" strokeWidth="1" />
     <text x="24" y="30" fill="#c2b184" fontFamily="ui-monospace, monospace" fontSize="11">PRODUCTION · INSPECT WORK</text>
     {items.length === 0 ? <text x="24" y="52" fill="#8fa4ac" fontFamily="ui-monospace, monospace" fontSize="10">No work in progress.</text> : null}
     {items.map((item, index) => {
