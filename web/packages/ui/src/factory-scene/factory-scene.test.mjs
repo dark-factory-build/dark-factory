@@ -1042,6 +1042,15 @@ test("the tray and planning table expose stable project actions", () => {
   assert.match(markup, /data-common-table="planning"[^>]*data-tooltip="Missions · inspect objectives"[^>]*aria-label="Open Missions"[^>]*role="button"[^>]*tabindex="0"/);
 });
 
+test("planning table detail stays within the tabletop for multi-worker rows", () => {
+  const planningWorkers = [0, 1].map((index) => ({ ...workers[0], id: `planner-${index}`, location: "unobserved", nodeId: undefined }));
+  const markup = render({ workers: planningWorkers });
+  const seats = commonSeating(layoutScene(topology), 0, planningWorkers.length).planning;
+  const tableWidth = seats.at(-1).x - seats[0].x + 36;
+  assert.match(markup, new RegExp(`M${tableWidth - 22} -17h4`), "detail line ends at the tabletop edge");
+  assert.doesNotMatch(markup, new RegExp(`M${tableWidth - 13} -17h4`), "detail line does not extend beyond the tabletop");
+});
+
 test("floor action hit areas invoke existing task and mission routes", async () => {
   let tasksOpened;
   let missionsOpened;

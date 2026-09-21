@@ -1,12 +1,12 @@
 {
   "fixture": "http://127.0.0.1:5196/?fixture=actual",
   "before_commit": "6915d8328b0a8b8c32d359a9fcd3a7da08ac1349",
-  "after_commit": "b8ccd6587c895114a13ddf542482e20704669ed5",
+  "after_commit": "4922eae307b1c778555547f78b01700c10412034",
   "rendered_source": {
-    "tree_oid": "f6a16b221a1daad18204cdf48207e56047173a85",
+    "tree_oid": "b327ac635c6cbb77ebfd7315e287bcdecd3bdeef",
     "blob": "web/packages/ui/src/factory-scene/factory-scene.tsx",
-    "blob_oid": "c02f6832bfc5fca5508ce7b0c73320c5ce37e87e",
-    "blob_sha256": "22e748a46bf3a7908936929da5770abe476695bfe2d2ae4ab78f8bc6db3ef3bc"
+    "blob_oid": "133f81f60aa1914dd5ef8b77e5c80c11dbbb8e50",
+    "blob_sha256": "68b6a85f96fad765446d1cd767800a63633456012832ce4870c6c739053abee1"
   },
   "capture_steps": "For each source commit, build client and UI with node web/node_modules/typescript/bin/tsc using web/tsconfig.build.json and web/packages/ui/tsconfig.json, restart Vite from web/apps/dev on 127.0.0.1:5196, navigate to ?fixture=actual, resize to 1280x720 and 390x844, and capture the complete SVG floor element at each viewport so both desks and their lower legs are visible.",
   "viewports": {
@@ -27,9 +27,9 @@
   },
   "sha256": {
     "before-desktop.png": "8c4acb2235eb8d55b56e66d7e95f21e38bbe1bce95ec0e43a1f76620dbee31e8",
-    "after-desktop.png": "4da296e482cac9e2e210397eebd08d4866a1171a1e71dce3596ae83be35cdc3b",
+    "after-desktop.png": "ff7f1edeb77d133e723369e695eaa5aa7f66b8c6e3fed9221e6e1d962c0d02f5",
     "before-phone.png": "55f0f7f0e8d0c658f601baae9325d0150c33fda330481736dd0587ff251a2b40",
-    "after-phone.png": "5c6d82bdddbd54cce50b6fe71f50824f6548e47498ab63a8f14d4bbf7322ab2f"
+    "after-phone.png": "89de2c6fd6b1ddf6a4989cb6327440ac8a965cb29c30355c4d36bfe0db2cbd6e"
   },
   "inspection": [
     "Tasks tray artwork is centered within the Tasks tabletop.",
