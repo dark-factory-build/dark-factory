@@ -6,5 +6,7 @@ test("shared CI is one execution across PRs but repository identities remain dis
   const check = { id: "ci:1", repository: "owner/one", scope: "merge_group" };
   const items = [{ checks: [check] }, { checks: [check, { ...check, repository: "owner/two" }] }];
   assert.equal(sharedChecks(items).length, 2);
+  assert.equal(sharedChecks([{ checks: [check], pullRequest: { state: "merged" } }]).length, 0);
+  assert.ok(productionHeight(320, 0) < productionHeight(320, 1));
   assert.ok(productionHeight(320, 20) > productionHeight(320, 2));
 });

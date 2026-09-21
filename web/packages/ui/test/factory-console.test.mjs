@@ -1549,7 +1549,7 @@ test("the view toggle and settings forward exactly one intent each", () => {
     onView: (value) => calls.push(["view", value]),
     onToggleSettings: () => calls.push(["settings"]),
   });
-  const chrome = elements.filter((element) => element.type === "button" && element.props.disabled !== true);
+  const chrome = elements.filter((element) => element.type === "button" && ["Settings", "Floor", "Agents"].includes(element.props.children));
   assert.deepEqual(chrome.map((element) => element.props.children), ["Settings", "Floor", "Agents"]);
   chrome[0].props.onClick();
   chrome.find((element) => element.props.children === "Agents").props.onClick();

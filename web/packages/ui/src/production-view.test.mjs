@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { deriveProductionView, sharedDeliveries } from "./production-view.ts";
+import { deriveProductionView, inProgressProduction, productionStages, sharedDeliveries } from "./production-view.ts";
 
 const record = (kind, id, visual_id, document, extra = {}) => ({ repository: "owner/repo", project_id: "project", kind, id, visual_id, observed_at: 10, document, tasks: [], missions: [], ...extra });
 const head = "a".repeat(40);
@@ -94,4 +94,28 @@ test("tied delivery timestamps never let success hide an unresolved attempt", ()
 test("re-reading an old running release receipt does not prove continuing installation activity", () => {
   const view = deriveProductionView([record("delivery", "attempt", "", { destination: "host", state: "running", updated_at: 1, pull_requests: [] }, { observed_at: 200_000 })], 200_000);
   assert.equal(sharedDeliveries(view)[0].state, "stale");
+});
+
+
+test("in-progress membership excludes delivered and proven unchanged finished work", () => {
+  const make = (document) => Object.values(deriveProductionView([record("construction", "c", "change:c", document)]).contraptions)[0];
+  const finished = make({ status: "succeeded", phase: "retained", has_changes: false });
+  assert.equal(inProgressProduction(finished), false);
+  assert.match(finished.nextAction, /finished without a source change/);
+  const unpublished = make({ status: "succeeded", phase: "retained", has_changes: true });
+  assert.equal(inProgressProduction(unpublished), true);
+  assert.deepEqual(productionStages(unpublished), ["Publication unrecorded"]);
+  assert.doesNotMatch(unpublished.nextAction, /in progress/);
+  assert.equal(inProgressProduction(make({ status: "blocked", has_changes: false })), true);
+  assert.equal(inProgressProduction(make({ status: "cancelled", has_changes: true })), false);
+  assert.equal(inProgressProduction({ ...unpublished, completed: true }), false);
+});
+
+test("stage labels retain parallel review and CI and distinguish unverified delivery", () => {
+  const records = [record("repository", "owner/repo", "", {}), record("pull_request", "7", "change:1", { number: 7, title: "Machine", head, state: "open", review: { head, state: "running" } }), record("check", "ci", "", { revision: head, scope: "head", state: "running", pull_requests: [7] })];
+  const machine = deriveProductionView(records).contraptions[key];
+  assert.deepEqual(productionStages(machine), ["Review running", "CI running"]);
+  assert.deepEqual(productionStages({ ...machine, review: { ...machine.review, state: "unknown" }, reviewers: [{ state: "running" }] }), ["Review running", "CI running"]);
+  assert.deepEqual(productionStages({ ...machine, pullRequest: { ...machine.pullRequest, state: "merged" } }), ["Merged", "Delivery unverified"]);
+  assert.deepEqual(productionStages({ ...machine, review: { ...machine.review, sourceFresh: false } }), ["Review stale", "CI stale"]);
 });
