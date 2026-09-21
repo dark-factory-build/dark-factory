@@ -8,6 +8,9 @@ type ProductionObservation struct {
 	// DeliveryDestinations is the daemon's observed project release configuration.
 	// A missing receipt for one of these destinations is still pending work.
 	DeliveryDestinations []string                `json:"delivery_destinations,omitempty"`
+	// DeliveryDestinationsObserved distinguishes an observed empty configuration
+	// from an observation that did not include release configuration.
+	DeliveryDestinationsObserved bool             `json:"delivery_destinations_observed,omitempty"`
 	ObservedAt           int64                   `json:"observed_at"`
 	PullRequests         []ProductionPullRequest `json:"pull_requests"`
 	Checks               []ProductionCheck       `json:"checks"`

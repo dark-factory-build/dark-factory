@@ -35,11 +35,23 @@ test("merged work waits for the daemon's configured destination fact", () => {
   const base = { number: 7, title: "Machine", head, merge: "d".repeat(40), state: "merged", review: { head, state: "allow" }, destination: "production" };
   const view = deriveProductionView([record("pull_request", "7", "change:1", base)], Date.now()).contraptions[key];
   assert.deepEqual(view.deliveryDestinations, ["production"]);
+  assert.equal(view.deliveryDestinationsObserved, true);
   assert.equal(view.completed, false);
   assert.deepEqual(productionStickers(view).slice(-1), ["Delivery pending"]);
-  const noDestination = deriveProductionView([record("pull_request", "7", "change:1", { ...base, destination: "" })], Date.now()).contraptions[key];
+  const noDestination = deriveProductionView([record("repository", "owner/repo", "", { delivery_destinations: [], delivery_destinations_observed: true }), record("pull_request", "7", "change:1", { ...base, destination: undefined })], Date.now()).contraptions[key];
+  assert.equal(noDestination.deliveryDestinationsObserved, true);
   assert.equal(noDestination.completed, true);
   assert.match(noDestination.nextAction, /no delivery destination/);
+  const unknown = deriveProductionView([record("pull_request", "7", "change:1", { ...base, destination: undefined })], Date.now()).contraptions[key];
+  assert.equal(unknown.deliveryDestinationsObserved, false);
+  assert.equal(unknown.completed, false);
+  assert.doesNotMatch(unknown.nextAction, /no delivery destination/);
+});
+
+test("closed unmerged work is distinct from merged work", () => {
+  const view = deriveProductionView([record("pull_request", "7", "change:1", { number: 7, title: "Machine", head, state: "closed" })]).contraptions[key];
+  assert.equal(view.completed, true);
+  assert.deepEqual(productionStickers(view), ["Merge closed"]);
 });
 
 test("blocked construction always carries its reason into the sticker", () => {

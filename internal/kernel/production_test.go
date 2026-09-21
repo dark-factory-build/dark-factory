@@ -90,7 +90,7 @@ func TestProductionObservationPersistsConfiguredDeliveryDestinations(t *testing.
 	store, _, project, _ := newAdmissionStore(t, RoleOrchestrator, 2)
 	defer store.Close()
 	if err := store.RecordProductionObservation(context.Background(), project.ID, ProductionObservation{
-		Repository: "example/factory", ObservedAt: 10, DeliveryDestinations: []string{"production"},
+		Repository: "example/factory", ObservedAt: 10, DeliveryDestinations: []string{"production"}, DeliveryDestinationsObserved: true,
 	}, mustTime(t, 10)); err != nil {
 		t.Fatal(err)
 	}
