@@ -36,7 +36,10 @@ export function useProduction(projects: readonly string[], call: ProjectContentC
         const next: ProductionRecord[] = [];
         let remaining = 0;
         let currentRuntime: RuntimeBuild | undefined, currentRelease: PublishedRelease | undefined;
-        for (const project_id of projects) {
+        // The daemon's own build and the published release ride on every
+        // production read. A factory with no project still asks once, with no
+        // project, so those two facts never depend on a project existing.
+        for (const project_id of projects.length > 0 ? projects : [""]) {
           let offset = 0;
           // ponytail: at most 256 records per project per refresh; explicit
           // overflow keeps a crowded source visible with an explicit load-more control.
