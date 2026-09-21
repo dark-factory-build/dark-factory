@@ -43,6 +43,23 @@ func withServiceMutation(ctx context.Context, home string, operation func(*servi
 		}
 		return ServiceStatus{}, errors.Join(ErrServiceAmbiguous, err, closeErr)
 	}
+	serviceLock, _, serviceAnchor, _, lockErr := openOperationalLockPair(capability.home)
+	if lockErr != nil {
+		closeErr := capability.close()
+		return ServiceStatus{}, errors.Join(ErrServiceAmbiguous, lockErr, closeErr)
+	}
+	if err := unix.Flock(int(serviceLock.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		closeErr := errors.Join(serviceAnchor.Close(), serviceLock.Close(), capability.close())
+		if errors.Is(err, unix.EWOULDBLOCK) || errors.Is(err, unix.EAGAIN) {
+			return ServiceStatus{}, errors.Join(ErrServiceAmbiguous, ErrBusy, err, closeErr)
+		}
+		return ServiceStatus{}, errors.Join(ErrServiceAmbiguous, err, closeErr)
+	}
+	defer func() {
+		_ = unix.Flock(int(serviceLock.Fd()), unix.LOCK_UN)
+		_ = serviceAnchor.Close()
+		_ = serviceLock.Close()
+	}()
 	defer func() {
 		verifyErr := errors.Join(capability.recheck(ctx), capability.stageAbsent())
 		unlockErr := unix.Flock(int(capability.home.Fd()), unix.LOCK_UN)

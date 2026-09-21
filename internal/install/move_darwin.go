@@ -49,6 +49,11 @@ func moveHome(ctx context.Context, from, to string) (resultErr error) {
 			return err
 		}
 	}
+	lockedHome, err := OpenOperationalHome(ctx, from)
+	if err != nil {
+		return err
+	}
+	defer func() { resultErr = errors.Join(resultErr, lockedHome.closeForMove()) }()
 	if _, err := os.Lstat(ServiceDirectoryPath(from)); err == nil {
 		if status, inspectErr := InspectService(ctx, from); inspectErr == nil && status.State != ServiceAbsent {
 			return ErrBusy
@@ -56,11 +61,6 @@ func moveHome(ctx context.Context, from, to string) (resultErr error) {
 			return inspectErr
 		}
 	}
-	lockedHome, err := OpenOperationalHome(ctx, from)
-	if err != nil {
-		return err
-	}
-	defer func() { resultErr = errors.Join(resultErr, lockedHome.closeForMove()) }()
 	backupDir := filepath.Join(filepath.Dir(from), "."+filepath.Base(from)+".move-backup-"+fmt.Sprint(time.Now().UnixNano()))
 	stage := filepath.Join(filepath.Dir(to), "."+filepath.Base(to)+".move-stage-"+fmt.Sprint(time.Now().UnixNano()))
 	for _, artifact := range []string{backupDir, stage} {

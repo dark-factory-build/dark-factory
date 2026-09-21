@@ -502,17 +502,14 @@ func TestServiceMutationLockRejectsEveryConcurrentVerbBeforeLaunchctl(t *testing
 	}
 }
 
-func TestServiceMutationLockIsIndependentFromOperationalHomeLock(t *testing.T) {
+func TestServiceMutationLockSharesOperationalHomeLock(t *testing.T) {
 	t.Run("service then operational", func(t *testing.T) {
 		fixture := newManageFixture(t)
 		_, err := withServiceMutation(context.Background(), fixture.home, func(*serviceHomeCapability) (ServiceStatus, error) {
-			home, err := OpenOperationalHome(context.Background(), fixture.home)
-			if err != nil {
-				return ServiceStatus{}, err
-			}
-			return ServiceStatus{State: ServiceAbsent}, home.Close()
+			_, err := OpenOperationalHome(context.Background(), fixture.home)
+			return ServiceStatus{}, err
 		})
-		if err != nil {
+		if !errors.Is(err, ErrBusy) {
 			t.Fatalf("operational lock while service lock held: %v", err)
 		}
 	})
@@ -530,7 +527,7 @@ func TestServiceMutationLockIsIndependentFromOperationalHomeLock(t *testing.T) {
 		}()
 		if _, err := withServiceMutation(context.Background(), fixture.home, func(*serviceHomeCapability) (ServiceStatus, error) {
 			return ServiceStatus{State: ServiceAbsent}, nil
-		}); err != nil {
+		}); !errors.Is(err, ErrBusy) {
 			t.Fatalf("service lock while operational lock held: %v", err)
 		}
 	})

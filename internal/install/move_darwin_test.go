@@ -76,6 +76,12 @@ func TestMoveHomeRefusesConcurrentOperationalWriter(t *testing.T) {
 	if err := MoveHome(context.Background(), from, to); !errors.Is(err, ErrBusy) {
 		t.Fatalf("move with concurrent writer = %v, want busy", err)
 	}
+	if _, err := withServiceMutation(context.Background(), from, func(*serviceHomeCapability) (ServiceStatus, error) {
+		t.Fatal("service mutation entered while operational lease was held")
+		return ServiceStatus{}, nil
+	}); !errors.Is(err, ErrBusy) {
+		t.Fatalf("service mutation with operational writer = %v, want busy", err)
+	}
 	if _, err := Doctor(context.Background(), from); err != nil {
 		t.Fatalf("source after concurrent-writer refusal = %v", err)
 	}
