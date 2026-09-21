@@ -1,11 +1,11 @@
 import { AgentSprite } from "./factory-scene/factory-scene.js";
 import type { KeyboardEvent } from "react";
 import { Contraption } from "./contraption.js";
-import { sharedDeliveries, type ProductionContraption, type ProductionView } from "./production-view.js";
+import { productionStages, sharedDeliveries, type ProductionContraption, type ProductionView } from "./production-view.js";
 
 export const productionColumns = (width: number) => Math.max(1, Math.min(4, Math.floor(width / 160)));
-export const sharedChecks = (items: readonly ProductionContraption[]) => [...new Map(items.flatMap((item) => item.checks.filter((check) => check.applicable || check.scope === "merge_group").map((check) => [`${check.repository}:${check.id}`, check] as const))).values()];
-export const productionHeight = (width: number, count: number, checks = 0) => 68 + Math.max(1, Math.ceil(count / productionColumns(width))) * 144 + Math.ceil(checks / productionColumns(width)) * 104 + Math.ceil(2 / productionColumns(width)) * 120 + 48;
+export const sharedChecks = (items: readonly ProductionContraption[]) => [...new Map(items.filter((item) => item.pullRequest?.state !== "merged").flatMap((item) => item.checks.filter((check) => check.applicable || check.scope === "merge_group").map((check) => [`${check.repository}:${check.id}`, check] as const))).values()];
+export const productionHeight = (width: number, count: number, checks = 0) => 68 + Math.ceil(count / productionColumns(width)) * 132 + Math.ceil(checks / productionColumns(width)) * 104 + Math.ceil(2 / productionColumns(width)) * 120 + 48;
 const label = (text: string) => text.length > 23 ? `${text.slice(0, 22)}…` : text;
 const activate = (select: () => void) => ({ role: "button", tabIndex: 0, onClick: select, onKeyDown: (event: KeyboardEvent<SVGGElement>) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); select(); } } });
 
@@ -19,24 +19,21 @@ export function ProductionArea({ view, items, hiddenItems = 0, width, top, pulse
   const deliveries = sharedDeliveries(view);
   const factoryDeliveries = deliveries.filter((delivery) => delivery.destination.startsWith("runtime:") || delivery.destination === "site:app.darkfactory.build");
   const projectDeliveries = deliveries.filter((delivery) => !factoryDeliveries.includes(delivery));
-  const dockTop = 68 + Math.max(1, Math.ceil(items.length / columns)) * 144 + Math.ceil(executions.length / columns) * 104;
+  const dockTop = 68 + Math.ceil(items.length / columns) * 132 + Math.ceil(executions.length / columns) * 104;
   return <g transform={`translate(0 ${top})`} role="group" aria-label="Production area">
     <path d="M24 -24v32h24" stroke="#526360" strokeWidth="18" fill="none" />
     <rect x="8" y="8" width={width - 16} height={productionHeight(width, items.length, executions.length) - 16} fill="url(#df-floor)" stroke="#465355" strokeWidth="3" />
     <text x="24" y="30" fill="#c2b184" fontFamily="ui-monospace, monospace" fontSize="11">PRODUCTION · INSPECT WORK</text>
-    {items.length === 0 ? <text x="24" y="72" fill="#8fa4ac" fontFamily="ui-monospace, monospace" fontSize="10">No production records in this scope.</text> : null}
+    {items.length === 0 ? <text x="24" y="52" fill="#8fa4ac" fontFamily="ui-monospace, monospace" fontSize="10">No work in progress.</text> : null}
     {items.map((item, index) => {
-      const x = 16 + index % columns * cell, y = 52 + Math.floor(index / columns) * 144;
+      const x = 16 + index % columns * cell, y = 52 + Math.floor(index / columns) * 132;
       const checks = item.checks.filter((check) => check.applicable);
       const failure = checks.some((check) => check.state === "completed" && ["failure", "timed_out", "action_required"].includes(check.conclusion));
       const running = checks.some((check) => ["running", "in_progress"].includes(check.state));
-      const queued = checks.some((check) => ["queued", "waiting", "pending", "requested"].includes(check.state));
-      const cancelled = checks.some((check) => check.state === "cancelled" || check.conclusion === "cancelled");
-      const skipped = checks.some((check) => check.state === "skipped" || check.conclusion === "skipped");
       const correction = item.review.current && item.review.state === "block" || failure || item.construction?.status === "blocked";
       const active = pulse !== undefined && (!item.pullRequest || item.review.sourceFresh) && (running || item.construction?.status === "running");
       const title = item.pullRequest?.title ?? item.construction?.title ?? "Work";
-      const checkState = !item.review.sourceFresh ? "stale" : failure ? "failed" : running ? "running" : queued ? "queued" : cancelled ? "cancelled" : skipped ? "skipped" : checks.length === 0 ? "unknown" : checks.every((check) => check.state === "completed" && check.conclusion === "success") ? "passed" : "inspect";
+      const stages = productionStages(item);
       const color = correction ? "#d49b7d" : "#8fa4ac";
       return <g key={item.projectId + ":" + item.visualId} transform={`translate(${x} ${y})`}>
         <path d={`M0 79h${cell - 16}`} stroke="#455653" strokeWidth="12" />
@@ -55,8 +52,8 @@ export function ProductionArea({ view, items, hiddenItems = 0, width, top, pulse
           {item.reviewers.length > 2 ? <text x={85 + Math.min(2, item.reviewers.length) * 20} y="24" fill="#c2b184" fontSize="9" fontFamily="ui-monospace, monospace">+{item.reviewers.length - 2}</text> : null}
           <path d="M122 57v17m0-17h9" stroke={item.pullRequest?.state === "merged" ? "#9fe7b0" : "#a08f68"} strokeWidth="3" />
           <text x="0" y="96" fill="#c9d3d0" fontSize="10" fontFamily="ui-monospace, monospace">{label(title)}</text>
-          <text x="0" y="110" fill={color} fontSize="9" fontFamily="ui-monospace, monospace">{item.construction ? "Assembly · " : ""}Review {item.review.current ? item.review.state : "unknown"}</text>
-          <text x="0" y="123" fill="#8fa4ac" fontSize="9" fontFamily="ui-monospace, monospace">{`CI ${item.review.sourceFresh ? checkState : "stale"} · ${item.pullRequest?.merge_queue || (item.pullRequest?.state === "merged" ? item.completed ? "delivered" : "delivery pending" : item.construction?.status ?? item.pullRequest?.state ?? "unpublished")}`}</text>
+          <text x="0" y="110" fill={color} fontSize="9" fontFamily="ui-monospace, monospace">{stages[0]}</text>
+          <text x="0" y="123" fill="#8fa4ac" fontSize="9" fontFamily="ui-monospace, monospace">{stages.slice(1).join(" · ")}</text>
         </g>
         <g {...activate(() => onSelect(item.projectId + ":" + item.visualId))} aria-label={`Inspect ${title}`} className="dfFactoryScene__target">
           <rect className="dfFactoryScene__focus" x="0" y="0" width={cell - 24} height="128" fill="transparent" stroke={selected === item.projectId + ":" + item.visualId ? "#80ddff" : "none"} />
@@ -67,17 +64,17 @@ export function ProductionArea({ view, items, hiddenItems = 0, width, top, pulse
       const item = items.find((item) => item.checks.some((candidate) => candidate.repository === check.repository && candidate.id === check.id));
       const running = item?.review.sourceFresh && ["running", "in_progress"].includes(check.state) && pulse !== undefined;
       const passed = item?.review.sourceFresh && check.state === "completed" && check.conclusion === "success";
-      return <g key={`${check.repository}:${check.id}`} transform={`translate(${16 + index % columns * cell} ${60 + Math.max(1, Math.ceil(items.length / columns)) * 144 + Math.floor(index / columns) * 104})`} {...activate(() => { if (item) onSelect(item.projectId + ":" + item.visualId); })} aria-label={`Inspect shared check ${check.name}`} className="dfFactoryScene__target">
+      return <g key={`${check.repository}:${check.id}`} transform={`translate(${16 + index % columns * cell} ${60 + Math.ceil(items.length / columns) * 132 + Math.floor(index / columns) * 104})`} {...activate(() => { if (item) onSelect(item.projectId + ":" + item.visualId); })} aria-label={`Inspect shared check ${check.name}`} className="dfFactoryScene__target">
         <rect className="dfFactoryScene__focus" width={cell - 24} height="92" fill="transparent" />
         <rect x="8" y="4" width="100" height="46" fill="#303e40" stroke="#788379" strokeWidth="2" />
         <rect x="16" y="12" width="38" height="26" fill="#182c35" stroke="#536e70" />
         <path d={running && Math.floor(pulse / 400) % 2 ? "M20 26h6l4-8 5 14 5-6h9" : "M20 26h29"} stroke={passed ? "#9fe7b0" : check.conclusion === "failure" ? "#d49b7d" : "#8fa4ac"} fill="none" />
         <path d="M64 18h30m-30 8h30m-30 8h20M16 50v6m84-6v6" stroke="#9aa69c" strokeWidth="2" />
         <text y="70" fill="#c9d3d0" fontSize="10" fontFamily="ui-monospace, monospace">{label(check.name)}</text>
-        <text y="84" fill="#8fa4ac" fontSize="9" fontFamily="ui-monospace, monospace">{check.pull_requests.length} PRs · {check.conclusion || check.state}</text>
+        <text y="84" fill="#8fa4ac" fontSize="9" fontFamily="ui-monospace, monospace">{check.pull_requests.length} PRs · {item?.review.sourceFresh ? check.conclusion || check.state : "stale"}</text>
       </g>;
     })}
-    {[{ key: "maintenance", title: "FACTORY SERVICE", receipts: factoryDeliveries }, { key: "delivery", title: "DELIVERY DOCK", receipts: projectDeliveries }].map((dock, index) => {
+    {[{ key: "maintenance", title: "FACTORY UPDATES", receipts: factoryDeliveries }, { key: "delivery", title: "DEPLOYMENTS", receipts: projectDeliveries }].map((dock, index) => {
       const latest = dock.receipts[0], applying = latest?.state === "running";
       return <g key={dock.key} transform={`translate(${16 + index % columns * cell} ${dockTop + Math.floor(index / columns) * 120})`}>
         <g aria-hidden="true" pointerEvents="none">
@@ -86,11 +83,11 @@ export function ProductionArea({ view, items, hiddenItems = 0, width, top, pulse
           {dock.key === "maintenance" ? <><rect x="16" y="17" width="33" height="42" fill="#182c35" stroke="#9aa69c" /><path d="M21 24h20m-20 8h20m-20 8h20" stroke="#536e70" strokeWidth="3" /><path d="M62 26l14 18m-17-21 5-5 5 7-5 5m10 12 5 5" stroke="#c2b184" strokeWidth="3" /></> : <><path d="M15 58V28h38v30M22 28v-8h24v8" fill="#665f4e" stroke="#a08f68" strokeWidth="2" /><path d="M34 30v27m-18-19h36M68 59h22v-26H68z" fill="none" stroke="#9aa69c" strokeWidth="2" /></>}
           <rect x={cell - 48} y="16" width="7" height="7" fill={applying ? pulse !== undefined && Math.floor(pulse / 500) % 2 ? "#e5c58b" : "#a08f68" : latest?.state === "blocked" ? "#d49b7d" : "#536e70"} />
           <text x="8" y="91" fill="#c2b184" fontFamily="ui-monospace, monospace" fontSize="10">{dock.title}</text>
-          <text x="8" y="105" fill="#8fa4ac" fontFamily="ui-monospace, monospace" fontSize="9">{latest ? label(`${latest.destination.startsWith("runtime:") ? "Runtime" : latest.destination.startsWith("site:") ? "Console" : "Delivery"} · ${latest.state === "running" ? latest.phase || latest.state : latest.state}`) : "No delivery evidence · inspect"}</text>
+          <text x="8" y="105" fill="#8fa4ac" fontFamily="ui-monospace, monospace" fontSize="9">{dock.key === "maintenance" ? "Host + console versions" : "Project releases"}</text>
         </g>
         <g {...activate(() => onSelect(dock.key))} aria-label={`Inspect ${dock.title.toLowerCase()}`} className="dfFactoryScene__target"><rect className="dfFactoryScene__focus" width={cell - 24} height="112" fill="transparent" stroke={selected === dock.key ? "#80ddff" : "none"} /></g>
       </g>;
     })}
-    {hiddenItems > 0 ? <g transform={`translate(16 ${productionHeight(width, items.length, executions.length) - 40})`} {...activate(() => onSelect(""))} aria-label={`Inspect all work, ${hiddenItems} more items in dispatch racks`} className="dfFactoryScene__target"><rect className="dfFactoryScene__focus" width={width - 40} height="32" fill="#263638" /><text x="8" y="21" fill="#c2b184" fontSize="10" fontFamily="ui-monospace, monospace">{hiddenItems} more in dispatch racks · inspect all</text></g> : null}
+    {hiddenItems > 0 ? <g transform={`translate(16 ${productionHeight(width, items.length, executions.length) - 40})`} {...activate(() => onSelect(""))} aria-label={`View ${hiddenItems} more in-progress items`} className="dfFactoryScene__target"><rect className="dfFactoryScene__focus" width={width - 40} height="32" fill="#263638" /><text x="8" y="21" fill="#c2b184" fontSize="10" fontFamily="ui-monospace, monospace">{hiddenItems} more in progress · open list</text></g> : null}
   </g>;
 }

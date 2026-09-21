@@ -115,6 +115,7 @@ test("stage labels retain parallel review and CI and distinguish unverified deli
   const records = [record("repository", "owner/repo", "", {}), record("pull_request", "7", "change:1", { number: 7, title: "Machine", head, state: "open", review: { head, state: "running" } }), record("check", "ci", "", { revision: head, scope: "head", state: "running", pull_requests: [7] })];
   const machine = deriveProductionView(records).contraptions[key];
   assert.deepEqual(productionStages(machine), ["Review running", "CI running"]);
-  assert.deepEqual(productionStages({ ...machine, pullRequest: { ...machine.pullRequest, state: "merged" } }), ["Delivery unverified"]);
+  assert.deepEqual(productionStages({ ...machine, review: { ...machine.review, state: "unknown" }, reviewers: [{ state: "running" }] }), ["Review running", "CI running"]);
+  assert.deepEqual(productionStages({ ...machine, pullRequest: { ...machine.pullRequest, state: "merged" } }), ["Merged", "Delivery unverified"]);
   assert.deepEqual(productionStages({ ...machine, review: { ...machine.review, sourceFresh: false } }), ["Review stale", "CI stale"]);
 });

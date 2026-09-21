@@ -100,7 +100,7 @@ function nextAction(pr: PullRequest, review: ProductionContraption["review"], ch
   if (pr.state === "closed" && !pr.merge) return "Closed without merge.";
   if (pr.state === "merged") return deliveries.length > 0 && latestDestinations(deliveries).every((delivery) => delivery.verified) ? "Delivery verified at all recorded destinations." : "Merged; delivery verification is pending.";
   if (pr.next_action) return pr.next_action;
-  if (review.state === "block" && review.findings) return review.findings;
+  if (review.current && review.state === "block") return "Changes requested; inspect the review findings.";
   if (!review.current) return review.head ? "Review is stale for the current head." : "Independent review is required.";
   if (!review.sourceFresh) return "Production source observation is stale or unavailable.";
   if (review.state !== "allow") return "Independent review is required.";
@@ -140,13 +140,13 @@ export function productionStages(item: ProductionContraption): string[] {
   }
   if (pr.state === "merged") {
     const destinations = latestDestinations(item.deliveries);
-    return [destinations.some((receipt) => receipt.state === "blocked" || receipt.state === "failed") ? "Delivery blocked" : destinations.some((receipt) => receipt.state === "running") ? "Deploying" : "Delivery unverified"];
+    return ["Merged", destinations.some((receipt) => receipt.state === "blocked" || receipt.state === "failed") ? "Delivery blocked" : destinations.some((receipt) => receipt.state === "running") ? "Deploying" : "Delivery unverified"];
   }
   const checks = item.checks.filter((check) => check.applicable);
   const failed = checks.some((check) => ["failure", "timed_out", "action_required"].includes(check.conclusion));
   const ci = !item.review.sourceFresh ? "CI stale" : failed ? "CI failed" : checks.some((check) => ["running", "in_progress"].includes(check.state)) ? "CI running" : checks.some((check) => ["queued", "waiting", "pending", "requested"].includes(check.state)) ? "CI queued" : checks.some((check) => check.state === "cancelled" || check.conclusion === "cancelled") ? "CI cancelled" : checks.some((check) => check.state === "skipped" || check.conclusion === "skipped") ? "CI skipped" : checks.length > 0 && checks.every((check) => check.state === "completed" && check.conclusion === "success") ? "CI passed" : "CI unknown";
   const correction = item.review.current && item.review.state === "block" || failed;
-  const review = !item.review.sourceFresh ? "Review stale" : item.review.allowed ? "Review passed" : item.review.current && item.review.state === "running" ? "Review running" : "Review pending";
+  const review = !item.review.sourceFresh ? "Review stale" : item.review.allowed ? "Review passed" : (item.review.current && item.review.state === "running" || item.reviewers.some((reviewer) => reviewer.state === "running")) ? "Review running" : "Review pending";
   const merge = pr.merge_queue && !["none", "unknown"].includes(pr.merge_queue) ? "Merge queued" : item.review.allowed && ci === "CI passed" ? "Merge" : undefined;
   return correction ? ["Correction", ci] : merge ? [merge, ci] : [review, ci];
 }
