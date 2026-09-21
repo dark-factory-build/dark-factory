@@ -237,6 +237,7 @@ type attemptCommand struct {
 
 	kind              commandKind
 	removeAttachments bool
+	publicationState  string
 	operatorControl   bool
 	home              string
 	idempotencyKey    string
@@ -2141,6 +2142,14 @@ func parseOverseer(args []string) (attemptCommand, bool, bool) {
 			index++
 			continue
 		}
+		if name == "--publication-state" && command.kind == commandOverseerTaskUpdate {
+			if seen[name] || index+1 >= len(args) || args[index+1] != "succeeded" && args[index+1] != "failed" {
+				return attemptCommand{}, false, false
+			}
+			seen[name], command.publicationState = true, args[index+1]
+			index += 2
+			continue
+		}
 		if name == "--remove-attachments" && command.kind == commandOverseerTaskUpdate {
 			if seen[name] {
 				return attemptCommand{}, false, false
@@ -2702,7 +2711,7 @@ func runOperator(ctx context.Context, command attemptCommand, getenv func(string
 		}
 		return writeJSON(stdout, result)
 	case commandOverseerTaskUpdate:
-		input := api.OverseerTaskUpdateInput{TaskID: command.id, ExpectedRevision: command.expectedRevision, Cancel: command.cancel, Retry: command.retry, RemoveAttachments: command.removeAttachments}
+		input := api.OverseerTaskUpdateInput{TaskID: command.id, ExpectedRevision: command.expectedRevision, Cancel: command.cancel, Retry: command.retry, RemoveAttachments: command.removeAttachments, PublicationState: command.publicationState}
 		if command.title != "" {
 			input.Title = &command.title
 		}

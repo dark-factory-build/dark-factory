@@ -4,7 +4,64 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 )
+
+// IsPublicationTask identifies the controller-owned publication task.
+func IsPublicationTask(task Task) bool {
+	return strings.HasPrefix(task.Title, "Resume publication review for GitHub PR #")
+}
+
+// IsPublicationWaitTask identifies a publication task held until the external
+// merge queue answers. The body marker excludes legacy tasks from admission;
+// settlement still recognizes those legacy blocked rows by title.
+func IsPublicationWaitTask(task Task) bool {
+	return IsPublicationTask(task) && strings.Contains(task.Body, "Factory publication wait")
+}
+
+// SettlePublicationTask records an external publication result without
+// admitting a provider. A blocked predecessor advances its work revision so
+// its old provider run remains historical rather than being rewritten.
+func (store *Store) SettlePublicationTask(ctx context.Context, id TaskID, expected Revision, state string, at UnixMillis) (Task, error) {
+	if id.zero() || expected.Int64() < 1 || state != "succeeded" && state != "failed" {
+		return Task{}, fmt.Errorf("%w: invalid publication settlement", ErrInvalidValue)
+	}
+	tx, err := store.beginValidatedWrite(ctx)
+	if err != nil {
+		return Task{}, err
+	}
+	defer tx.Close()
+	task, found, err := taskByID(ctx, tx.connection, id)
+	if err != nil {
+		return Task{}, tx.Rollback(err)
+	}
+	if !found || !IsPublicationTask(task) {
+		return Task{}, tx.Rollback(ErrConflict)
+	}
+	if task.Revision != expected || task.Status != TaskQueued && task.Status != TaskBlocked || at.Int64() < task.UpdatedAt.Int64() {
+		return Task{}, tx.Rollback(ErrRevisionConflict)
+	}
+	work := task.WorkRevision.Int64()
+	if task.Status == TaskBlocked {
+		work++
+	}
+	result := "publication " + state
+	status := state
+	if _, err := tx.connection.ExecContext(ctx, `UPDATE tasks SET work_revision=?, status=?, blocked_reason=NULL, result=CASE WHEN ?='succeeded' THEN ? ELSE NULL END, completed_at_ms=?, revision=revision+1, updated_at_ms=? WHERE id=? AND revision=?`, work, status, state, result, at.Int64(), at.Int64(), id.Bytes(), expected.Int64()); err != nil {
+		return Task{}, tx.Rollback(err)
+	}
+	updated, found, err := taskByID(ctx, tx.connection, id)
+	if err != nil || !found {
+		if err == nil {
+			err = ErrCorruptState
+		}
+		return Task{}, tx.Rollback(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Task{}, err
+	}
+	return updated, nil
+}
 
 // AgentPatch is the console's agent-configuration edit. A nil member is not
 // part of the edit and leaves the durable column alone.

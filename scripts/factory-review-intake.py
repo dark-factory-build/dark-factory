@@ -209,6 +209,27 @@ def list_prs(config, page=1):
     return normalized
 
 
+def journaled_pr(config, number, expected_head):
+    """Read one journaled PR even after it leaves the open discovery set."""
+    if CUSTOMER_REVIEW is not None:
+        value = bridge_call("list_pull_requests", {"page": 1, "pull_number": number}).get("structuredContent")
+        pulls = value.get("pull_requests") if isinstance(value, dict) else None
+        if not isinstance(pulls, list) or len(pulls) != 1 or not isinstance(pulls[0], dict):
+            return None
+        item = pulls[0]
+        if item.get("number") != number or item.get("head_sha") != expected_head or not isinstance(item.get("body"), str):
+            return None
+        return {"number": number, "headRefOid": item["head_sha"], "body": item["body"]}
+    raw = intake.command(["gh", "pr", "view", str(number), "--repo", config["repository"], "--json", "number,body,headRefOid"], timeout=int(config.get("command_timeout", 30)))
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(value, dict) or value.get("number") != number or value.get("headRefOid") != expected_head or not isinstance(value.get("body"), str):
+        return None
+    return {"number": number, "headRefOid": value["headRefOid"], "body": value["body"]}
+
+
 def ready(config, path, pr, issue):
     base = pr.get("baseRefName") if CUSTOMER_REVIEW is not None else config.get("base", "main")
     if CUSTOMER_REVIEW is not None:
@@ -390,7 +411,13 @@ def observe_merge(config, operation):
             or value.get("state") not in {"ACTIVE_QUEUE", "MERGED_AFTER_ENQUEUE_ATTEMPT", "NOT_QUEUED"} \
             or value.get("pull_state") not in {"open", "closed"}:
         raise ReviewError("merge observation does not match the exact enqueue")
-    return {"state": value["state"], "pull_state": value["pull_state"]}
+    queue_state = value.get("queue_state")
+    if queue_state is not None and queue_state not in {"QUEUED", "AWAITING_CHECKS", "MERGEABLE", "UNMERGEABLE", "LOCKED"}:
+        raise ReviewError("merge observation has an invalid queue state")
+    result = {"state": value["state"], "pull_state": value["pull_state"]}
+    if queue_state is not None:
+        result["queue_state"] = queue_state
+    return result
 
 
 def _merge_group_failure(config, operation):
@@ -484,6 +511,46 @@ def send_back_source_task(config, operation, note):
     env["DARK_FACTORY_OPERATOR_TOKEN_FILE"] = str(home / "operator.token")
     intake.command(["factoryctl", "task", "send-back", "--task", task_id, "--note", note], env=env, timeout=int(config.get("command_timeout", 30)))
     return note
+
+
+def settle_publication_task(config, followup, current=None):
+    """Settle a controller-owned publication task without admitting a provider."""
+    if current is None:
+        current = intake.task_state(config, followup)
+    if not isinstance(current, dict) or current.get("status") not in {"queued", "blocked"} or not isinstance(current.get("revision"), int):
+        return False
+    home = Path(config["factory_home"])
+    env = os.environ.copy()
+    env["DARK_FACTORY_SOCKET"] = str(home / "runtimes" / "factory.sock")
+    env["DARK_FACTORY_OPERATOR_TOKEN_FILE"] = str(home / "operator.token")
+    intake.command(["factoryctl", "task", "update", "--task", followup["task_id"], "--revision", str(current["revision"]), "--publication-state", "succeeded"], env=env, timeout=int(config.get("command_timeout", 30)))
+    return True
+
+
+def fail_publication_task(config, followup, current=None):
+    if current is None:
+        current = intake.task_state(config, followup)
+    if not isinstance(current, dict) or current.get("status") not in {"queued", "blocked"} or not isinstance(current.get("revision"), int):
+        return False
+    home = Path(config["factory_home"])
+    env = os.environ.copy()
+    env["DARK_FACTORY_SOCKET"] = str(home / "runtimes" / "factory.sock")
+    env["DARK_FACTORY_OPERATOR_TOKEN_FILE"] = str(home / "operator.token")
+    intake.command(["factoryctl", "task", "update", "--task", followup["task_id"], "--revision", str(current["revision"]), "--publication-state", "failed"], env=env, timeout=int(config.get("command_timeout", 30)))
+    return True
+
+
+def admit_publication_followup(config, followup):
+    """Remove the wait marker from an existing queued follow-up before dispatch."""
+    current = intake.task_state(config, followup)
+    if not isinstance(current, dict) or current.get("status") != "queued" or not isinstance(current.get("revision"), int):
+        return False
+    home = Path(config["factory_home"])
+    env = os.environ.copy()
+    env["DARK_FACTORY_SOCKET"] = str(home / "runtimes" / "factory.sock")
+    env["DARK_FACTORY_OPERATOR_TOKEN_FILE"] = str(home / "operator.token")
+    intake.command(["factoryctl", "task", "update", "--task", followup["task_id"], "--revision", str(current["revision"]), "--body", followup["body"]], env=env, timeout=int(config.get("command_timeout", 30)))
+    return True
 
 
 def enqueue_allowed(config, operation, journal_path, receipts):
@@ -637,7 +704,7 @@ def verify_review_body(config, pr, operation):
     operation["reviewed_body_digest"] = "sha256:" + hashlib.sha256(body.encode()).hexdigest()
 
 
-def review_followup(config, operation, state):
+def review_followup(config, operation, state, publication_wait=False):
     task = {"priority": operation["priority"], "title": "Resume publication review for GitHub PR #" + str(operation["pr"])}
     enqueue = operation.get("enqueue_state", "")
     task["task_id"] = intake.sha_id("review-result", config["project_id"], config["repository"], str(operation["pr"]), operation["head"], state + (":" + enqueue if enqueue else ""))
@@ -654,7 +721,8 @@ def review_followup(config, operation, state):
                   "stating this head, the cumulative production-line delta to it and only checks run on it; keep the standalone source-issue footer. Host intake reviews it on its next pass. ")
     else:
         action = "The launch or submission is unresolved. Observe this operation; do not start another reviewer or invent a verdict. Report the concrete infrastructure blocker. "
-    task["body"] = ("Resume publication for " + operation["source_marker"] + ". Host independent review for PR #" + str(operation["pr"]) +
+    wait_prefix = "Factory publication wait\n" if publication_wait else ""
+    task["body"] = (wait_prefix + "Resume publication for " + operation["source_marker"] + ". Host independent review for PR #" + str(operation["pr"]) +
                     " at exact head " + operation["head"] + " and base " + operation["base"] +
                     " has App operation " + operation["review_operation"] + " with state " + state + ". Host review exit: " + str(operation.get("review_exit", "not launched")) + ". " + action +
                     "Never submit your own verdict or run a nested cold-review. Merge and deployment remain separate delivery gates.")
@@ -763,6 +831,42 @@ def enqueue_followup(config, followup, pr, journal, managed):
     return True
 
 
+def reconcile_journaled_merge(config, operation, pr, journal, receipts, journal_path, managed):
+    """Settle a queued publication whose PR is no longer in open discovery."""
+    if operation.get("enqueue_state") != "queued" or operation.get("publication_settled"):
+        return []
+    state = operation.get("review_state", "allow")
+    followup = review_followup(config, operation, state)
+    current = intake.task_state(config, followup)
+    if isinstance(current, dict) and current.get("status") in {"succeeded", "failed", "cancelled"}:
+        operation["publication_settled"] = True
+        intake.atomic_json(journal_path, receipts)
+        return []
+    merge = observe_merge(config, operation)
+    operation["merge_state"] = merge["state"]
+    operation["merge_pull_state"] = merge["pull_state"]
+    operation["merge_queue_state"] = merge.get("queue_state")
+    operation["merge_observed_at"] = int(time.time())
+    intake.atomic_json(journal_path, receipts)
+    if merge["state"] != "MERGED_AFTER_ENQUEUE_ATTEMPT":
+        if merge["state"] == "NOT_QUEUED" and not operation.get("merge_failure_sent_back"):
+            note = send_back_merge_failure(config, operation)
+            operation["merge_failure_sent_back"] = True
+            operation["merge_failure_note"] = note
+            intake.atomic_json(journal_path, receipts)
+        if merge["state"] == "NOT_QUEUED" and operation.get("merge_failure_sent_back") and fail_publication_task(config, followup, current):
+            operation["publication_settled"] = True
+            intake.atomic_json(journal_path, receipts)
+            return ["settled PR #" + str(pr["number"]) + " dropped publication"]
+        return []
+    if settle_publication_task(config, followup, current):
+        operation["publication_settled"] = True
+        operation["publication_waiting"] = False
+        intake.atomic_json(journal_path, receipts)
+        return ["settled PR #" + str(pr["number"]) + " merged publication"]
+    return []
+
+
 def run_locked(config, path, journal, journal_path, managed=None):
     provider = review_provider(config)
     if journal_path.exists():
@@ -783,10 +887,12 @@ def run_locked(config, path, journal, journal_path, managed=None):
     batch = discovery_batch_size(config)
     next_page = next_discovery_page(config, page, len(discovered))
     launched = False
+    processed = set()
     for pr in discovered:
         key = str(pr["number"]) + ":" + pr["headRefOid"]
         if config.get("source_repository", config["repository"]).casefold() != config["repository"].casefold():
             key = config["repository"].casefold() + ":" + key
+        processed.add(key)
         existing = receipts["pulls"].get(key)
         try:
             issue = linked_issue(config, pr, journal, existing, managed)
@@ -902,6 +1008,7 @@ def run_locked(config, path, journal, journal_path, managed=None):
                 merge = observe_merge(config, operation)
                 operation["merge_state"] = merge["state"]
                 operation["merge_pull_state"] = merge["pull_state"]
+                operation["merge_queue_state"] = merge.get("queue_state")
                 operation["merge_observed_at"] = int(time.time())
                 intake.atomic_json(journal_path, receipts)
                 if merge["state"] == "NOT_QUEUED" and merge["pull_state"] == "open" and not operation.get("merge_failure_sent_back"):
@@ -910,9 +1017,46 @@ def run_locked(config, path, journal, journal_path, managed=None):
                     operation["merge_failure_note"] = note
                     intake.atomic_json(journal_path, receipts)
                     messages.append("sent back PR #" + str(pr["number"]) + " queue failure: " + note)
-        followup = review_followup(config, operation, state)
-        if intake.task_state(config, followup) is None and enqueue_followup(config, followup, pr, journal, managed):
-            messages.append("woke PR #" + str(pr["number"]) + " review " + state)
+        waiting = operation.get("merge_state") == "ACTIVE_QUEUE" and operation.get("merge_queue_state") in {"QUEUED", "AWAITING_CHECKS", "MERGEABLE"}
+        followup = review_followup(config, operation, state, publication_wait=waiting)
+        if waiting:
+            # The daemon keeps this durable task queued but out of admission;
+            # the controller is the bounded poller and spends zero tokens.
+            operation["publication_waiting"] = True
+            if intake.task_state(config, followup) is None and enqueue_followup(config, followup, pr, journal, managed):
+                messages.append("waiting PR #" + str(pr["number"]) + " merge queue")
+        elif operation.get("merge_state") == "MERGED_AFTER_ENQUEUE_ATTEMPT":
+            operation["publication_waiting"] = False
+            settled = settle_publication_task(config, followup)
+            if settled:
+                operation["publication_settled"] = True
+                messages.append("settled PR #" + str(pr["number"]) + " merged publication")
+            elif intake.task_state(config, followup) is None and enqueue_followup(config, followup, pr, journal, managed) and settle_publication_task(config, followup):
+                messages.append("settled PR #" + str(pr["number"]) + " merged publication")
+        else:
+            admitted = operation.get("merge_state") == "ACTIVE_QUEUE" and operation.get("merge_queue_state") in {"UNMERGEABLE", "LOCKED"} and admit_publication_followup(config, followup)
+            if admitted:
+                messages.append("made PR #" + str(pr["number"]) + " publication followup admissible")
+            elif intake.task_state(config, followup) is None and enqueue_followup(config, followup, pr, journal, managed):
+                messages.append("woke PR #" + str(pr["number"]) + " review " + state)
+        if operation.get("merge_state") == "NOT_QUEUED" and operation.get("merge_pull_state") == "open" and operation.get("merge_failure_sent_back"):
+            if fail_publication_task(config, followup):
+                operation["publication_settled"] = True
+                messages.append("settled PR #" + str(pr["number"]) + " dropped publication")
+    # A merged PR disappears from state=open discovery. Re-observe only the
+    # bounded set of journaled queued operations, binding the fetch to the
+    # exact retained head before settling its durable follow-up.
+    for key, operation in receipts["pulls"].items():
+        if key in processed or not isinstance(operation, dict) or operation.get("enqueue_state") != "queued":
+            continue
+        number = operation.get("pr")
+        expected_head = operation.get("head")
+        if type(number) is not int or not isinstance(expected_head, str) or not SHA.fullmatch(expected_head):
+            continue
+        pr = journaled_pr(config, number, expected_head)
+        if pr is None:
+            continue
+        messages.extend(reconcile_journaled_merge(config, operation, pr, journal, receipts, journal_path, managed))
     receipts["discovery_page"] = next_page
     intake.atomic_json(journal_path, receipts)
     return messages

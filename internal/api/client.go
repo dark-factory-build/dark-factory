@@ -1116,6 +1116,9 @@ func validOverseerTaskCreateInput(input OverseerTaskCreateInput) bool {
 }
 
 func validOverseerTaskUpdateInput(input OverseerTaskUpdateInput) bool {
+	if input.PublicationState != "" {
+		return validID(input.TaskID) && input.ExpectedRevision > 0 && input.Title == nil && input.Body == nil && input.Priority == nil && input.AssignedAgentID == nil && !input.Cancel && !input.Retry && !input.RemoveAttachments && (input.PublicationState == "succeeded" || input.PublicationState == "failed")
+	}
 	if input.RemoveAttachments {
 		return validID(input.TaskID) && input.ExpectedRevision > 0 && input.Title == nil && input.Body == nil && input.Priority == nil && input.AssignedAgentID == nil && !input.Cancel && !input.Retry
 	}

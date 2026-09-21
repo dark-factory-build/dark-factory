@@ -746,6 +746,7 @@ class ReviewIntakeTest(unittest.TestCase):
         for observation in (
             {'state': 'NOT_QUEUED', 'pull_state': 'closed'},
             {'state': 'ACTIVE_QUEUE', 'pull_state': 'open'},
+            {'state': 'ACTIVE_QUEUE', 'pull_state': 'open', 'queue_state': 'AWAITING_CHECKS'},
             {'state': 'MERGED_AFTER_ENQUEUE_ATTEMPT', 'pull_state': 'closed'},
         ):
             with self.subTest(observation=observation):
@@ -763,6 +764,122 @@ class ReviewIntakeTest(unittest.TestCase):
                     self.assertEqual([], review.run_once(self.config))
                 verify.assert_not_called()
                 enqueue.assert_not_called()
+
+    def test_merge_queue_wait_task_settles_without_a_provider_run(self):
+        self.observe.return_value = 'allow'
+        operation = dict(self.operation)
+        def mark_queued(_config, current, _journal_path, _receipts):
+            current.update(enqueue_operation='44444444-4444-4444-8444-444444444444', enqueue_base='main', enqueue_state='queued')
+        observations = [
+            {'state': 'ACTIVE_QUEUE', 'pull_state': 'open', 'queue_state': 'AWAITING_CHECKS'},
+            {'state': 'MERGED_AFTER_ENQUEUE_ATTEMPT', 'pull_state': 'closed'},
+        ]
+        with patch.object(review, 'mirror', return_value=Path('/mirror')), \
+             patch.object(review, 'list_prs', return_value=[{'number': 9, 'headRefOid': SHA, 'body': 'Refs #7'}]), \
+             patch.object(review, 'ready', return_value=operation), patch.object(review, 'verify_existing'), \
+             patch.object(review, 'verify_review_body', side_effect=lambda _config, _pr, current: current.update(reviewed_body_digest='sha256:' + ('0' * 64))), \
+             patch.object(review, 'enqueue_allowed', side_effect=mark_queued), patch.object(review, 'observe_merge', side_effect=observations), \
+             patch.object(review.intake, 'task_state', side_effect=[None, {'status': 'blocked', 'revision': 3}]), \
+             patch.object(review.intake, 'enqueue') as enqueue, patch.object(review.intake, 'command', return_value='') as command, \
+             patch.object(review, 'launch_review') as launch:
+            first = review.run_once(self.config)
+            second = review.run_once(self.config)
+        self.assertEqual(['waiting PR #9 merge queue'], first)
+        self.assertEqual(['settled PR #9 merged publication'], second)
+        self.assertEqual(1, enqueue.call_count)
+        launch.assert_not_called()
+        self.assertIn('--publication-state', command.call_args.args[0])
+        self.assertIn('succeeded', command.call_args.args[0])
+
+    def test_merged_journaled_pr_is_reconciled_when_absent_from_open_discovery(self):
+        self.observe.return_value = 'allow'
+        operation = dict(self.operation)
+        def mark_queued(_config, current, _journal_path, _receipts):
+            current.update(enqueue_operation='44444444-4444-4444-8444-444444444444', enqueue_base='main', enqueue_state='queued')
+        merge_states = [
+            {'state': 'ACTIVE_QUEUE', 'pull_state': 'open', 'queue_state': 'AWAITING_CHECKS'},
+            {'state': 'MERGED_AFTER_ENQUEUE_ATTEMPT', 'pull_state': 'closed'},
+        ]
+        lists = [[{'number': 9, 'headRefOid': SHA, 'body': 'Refs #7'}], [], []]
+        with patch.object(review, 'mirror', return_value=Path('/mirror')), \
+             patch.object(review, 'list_prs', side_effect=lists), \
+             patch.object(review, 'ready', return_value=operation), patch.object(review, 'verify_existing'), \
+             patch.object(review, 'verify_review_body', side_effect=lambda _config, _pr, current: current.update(reviewed_body_digest='sha256:' + ('0' * 64))), \
+             patch.object(review, 'enqueue_allowed', side_effect=mark_queued), patch.object(review, 'observe_merge', side_effect=merge_states), \
+             patch.object(review, 'journaled_pr', return_value={'number': 9, 'headRefOid': SHA, 'body': 'Refs #7'}), \
+             patch.object(review.intake, 'task_state', side_effect=[None, {'status': 'blocked', 'revision': 3}]), \
+             patch.object(review.intake, 'enqueue') as enqueue, patch.object(review.intake, 'command', return_value='') as command, \
+             patch.object(review, 'launch_review') as launch:
+            self.assertEqual(['waiting PR #9 merge queue'], review.run_once(self.config))
+            self.assertEqual(['settled PR #9 merged publication'], review.run_once(self.config))
+            self.assertEqual([], review.run_once(self.config))
+        launch.assert_not_called()
+        self.assertEqual(1, enqueue.call_count)
+        task_id = enqueue.call_args.args[1]['task_id']
+        update = command.call_args.args[0]
+        self.assertEqual(task_id, update[update.index('--task') + 1])
+        self.assertIn('succeeded', update)
+
+    def test_closed_unmerged_journaled_pr_routes_failure_when_absent_from_open_discovery(self):
+        self.observe.return_value = 'allow'
+        operation = dict(self.operation)
+        def mark_queued(_config, current, _journal_path, _receipts):
+            current.update(enqueue_operation='44444444-4444-4444-8444-444444444444', enqueue_base='main', enqueue_state='queued')
+        merge_states = [
+            {'state': 'ACTIVE_QUEUE', 'pull_state': 'open', 'queue_state': 'AWAITING_CHECKS'},
+            {'state': 'NOT_QUEUED', 'pull_state': 'closed'},
+        ]
+        with patch.object(review, 'mirror', return_value=Path('/mirror')), \
+             patch.object(review, 'list_prs', side_effect=[[{'number': 9, 'headRefOid': SHA, 'body': 'Refs #7'}], []]), \
+             patch.object(review, 'ready', return_value=operation), patch.object(review, 'verify_existing'), \
+             patch.object(review, 'verify_review_body', side_effect=lambda _config, _pr, current: current.update(reviewed_body_digest='sha256:' + ('0' * 64))), \
+             patch.object(review, 'enqueue_allowed', side_effect=mark_queued), patch.object(review, 'observe_merge', side_effect=merge_states), \
+             patch.object(review, 'journaled_pr', return_value={'number': 9, 'headRefOid': SHA, 'body': 'Refs #7'}), \
+             patch.object(review, 'send_back_merge_failure', return_value='dropped after enqueue') as send_back, \
+             patch.object(review.intake, 'task_state', side_effect=[None, {'status': 'queued', 'revision': 4}]), \
+             patch.object(review.intake, 'enqueue') as enqueue, patch.object(review.intake, 'command', return_value='') as command:
+            self.assertEqual(['waiting PR #9 merge queue'], review.run_once(self.config))
+            self.assertEqual(['settled PR #9 dropped publication'], review.run_once(self.config))
+        send_back.assert_called_once()
+        self.assertEqual(1, enqueue.call_count)
+        update = command.call_args.args[0]
+        self.assertIn('--publication-state', update)
+        self.assertIn('failed', update)
+
+    def test_blocked_review_followup_is_admissible(self):
+        task = Mock()
+        with patch.object(review, 'mirror', return_value=Path('/mirror')), \
+             patch.object(review, 'list_prs', return_value=[{'number': 9, 'headRefOid': SHA, 'body': 'Refs #7'}]), \
+             patch.object(review, 'ready', return_value=dict(self.operation)), patch.object(review, 'verify_existing'), \
+             patch.object(review.intake, 'task_state', return_value=None), patch.object(review.intake, 'enqueue', side_effect=task) as enqueue:
+            self.assertEqual(['woke PR #9 review block'], review.run_once(self.config))
+        self.assertEqual(1, enqueue.call_count)
+        self.assertNotIn('Factory publication wait', enqueue.call_args.args[1]['body'])
+
+    def test_waiting_task_becomes_admissible_after_unmergeable_transition(self):
+        self.observe.return_value = 'allow'
+        operation = dict(self.operation)
+        def mark_queued(_config, current, _journal_path, _receipts):
+            current.update(enqueue_operation='44444444-4444-4444-8444-444444444444', enqueue_base='main', enqueue_state='queued')
+        observations = [
+            {'state': 'ACTIVE_QUEUE', 'pull_state': 'open', 'queue_state': 'AWAITING_CHECKS'},
+            {'state': 'ACTIVE_QUEUE', 'pull_state': 'open', 'queue_state': 'UNMERGEABLE'},
+        ]
+        with patch.object(review, 'mirror', return_value=Path('/mirror')), \
+             patch.object(review, 'list_prs', return_value=[{'number': 9, 'headRefOid': SHA, 'body': SHA + '\nRefs #7'}]), \
+             patch.object(review, 'ready', return_value=operation), patch.object(review, 'verify_existing'), \
+             patch.object(review, 'verify_review_body', side_effect=lambda _config, _pr, current: current.update(reviewed_body_digest='sha256:' + ('0' * 64))), \
+             patch.object(review, 'enqueue_allowed', side_effect=mark_queued), \
+             patch.object(review, 'observe_merge', side_effect=observations), \
+             patch.object(review.intake, 'task_state', side_effect=[None, {'status': 'queued', 'revision': 3}]), \
+             patch.object(review.intake, 'enqueue') as enqueue, patch.object(review.intake, 'command', return_value='') as command:
+            self.assertEqual(['waiting PR #9 merge queue'], review.run_once(self.config))
+            self.assertEqual(['made PR #9 publication followup admissible'], review.run_once(self.config))
+        self.assertEqual(1, enqueue.call_count)
+        task_id = enqueue.call_args.args[1]['task_id']
+        self.assertEqual(task_id, command.call_args.args[0][command.call_args.args[0].index('--task') + 1])
+        self.assertIn('--body', command.call_args.args[0])
+        self.assertNotIn('Factory publication wait', command.call_args.args[0][command.call_args.args[0].index('--body') + 1])
 
     def test_closed_not_queued_merge_observation_stays_quiet(self):
         self.observe.return_value = 'allow'
