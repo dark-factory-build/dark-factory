@@ -248,8 +248,9 @@ func (store *Store) RecordProductionObservation(ctx context.Context, project Pro
 	return tx.Commit(ctx)
 }
 
-// A recorded branch AND its exact settled commit are evidence of a Change;
-// titles and transient worker locations are not. Existing bindings survive rebases.
+// A recorded branch and exact settled commit identify a Change. A successful
+// orchestrator publication receipt may also authorize a transformed head.
+// Titles and transient worker locations are not identity evidence.
 func linkProductionChange(ctx context.Context, c *sql.Conn, project ProjectID, repo string, pr ProductionPullRequest, at int64) (string, error) {
 	key := repo + "#" + strconv.FormatUint(pr.Number, 10)
 	var existing string
@@ -257,11 +258,21 @@ func linkProductionChange(ctx context.Context, c *sql.Conn, project ProjectID, r
 	if err != nil && err != sql.ErrNoRows {
 		return "", err
 	}
+	fallback := key
+	if existing != "" && existing != fallback {
+		return existing, nil
+	}
 	var change, task []byte
 	if strings.HasPrefix(pr.Branch, "factory/") && len(pr.Branch) == 20 && pr.Head != "" {
 		err = c.QueryRowContext(ctx, `SELECT id, task_id FROM changes WHERE project_id = ? AND substr(lower(hex(id)), 1, 12) = ? AND lower(hex(head_commit)) = ?`, project.Bytes(), strings.TrimPrefix(pr.Branch, "factory/"), pr.Head).Scan(&change, &task)
 		if err != nil && err != sql.ErrNoRows {
 			return "", err
+		}
+		if err == sql.ErrNoRows {
+			err = c.QueryRowContext(ctx, `SELECT c.id, c.task_id FROM changes c WHERE c.project_id = ? AND substr(lower(hex(c.id)), 1, 12) = ? AND EXISTS (SELECT 1 FROM publication_tasks p JOIN tasks t ON t.id = p.task_id AND t.project_id = p.project_id JOIN agents a ON a.id = t.assigned_agent_id AND a.project_id = t.project_id AND a.role = 'orchestrator' WHERE p.project_id = ? AND p.repository = ? AND p.pull_number = ?)`, project.Bytes(), strings.TrimPrefix(pr.Branch, "factory/"), project.Bytes(), repo, pr.Number).Scan(&change, &task)
+			if err != nil && err != sql.ErrNoRows {
+				return "", err
+			}
 		}
 		if err == nil {
 			if _, err = c.ExecContext(ctx, `INSERT INTO publication_tasks (project_id, repository, pull_number, task_id, change_id, created_at_ms) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(project_id, repository, pull_number, task_id) DO UPDATE SET change_id = excluded.change_id WHERE publication_tasks.change_id IS NULL`, project.Bytes(), repo, pr.Number, task, change, at); err != nil {
@@ -277,8 +288,10 @@ func linkProductionChange(ctx context.Context, c *sql.Conn, project ProjectID, r
 			}
 		}
 	}
-	if existing != "" {
-		key = existing
+	if existing != "" && key != existing {
+		if _, err := c.ExecContext(ctx, `UPDATE production_records SET visual_id = ? WHERE project_id = ? AND repository = ? AND kind = 'pull_request' AND identity = ? AND visual_id = ?`, key, project.Bytes(), repo, strconv.FormatUint(pr.Number, 10), existing); err != nil {
+			return "", err
+		}
 	}
 	return key, nil
 }
