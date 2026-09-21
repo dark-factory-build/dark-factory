@@ -3,10 +3,30 @@
 package daemon
 
 import (
+	"bytes"
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/dark-factory-build/dark-factory/internal/kernel"
 )
+
+func TestProductionRefreshFreshnessIsProjectScoped(t *testing.T) {
+	projectA, _ := kernel.ProjectIDFromBytes(bytes.Repeat([]byte{0x61}, kernel.IDBytes))
+	projectB, _ := kernel.ProjectIDFromBytes(bytes.Repeat([]byte{0x62}, kernel.IDBytes))
+	daemon := &Daemon{}
+	first := time.Unix(100, 0)
+	if !daemon.productionRefreshAllowed(projectA, first) {
+		t.Fatal("first project refresh was suppressed")
+	}
+	if daemon.productionRefreshAllowed(projectA, first.Add(time.Second)) {
+		t.Fatal("same project refreshed before interval")
+	}
+	if !daemon.productionRefreshAllowed(projectB, first.Add(time.Second)) {
+		t.Fatal("different project was suppressed by another project's refresh")
+	}
+}
 
 func TestProductionRefreshConsumesExactMaintainerPullShapeForMergedPR(t *testing.T) {
 	var page struct {

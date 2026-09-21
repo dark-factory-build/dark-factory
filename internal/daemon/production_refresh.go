@@ -20,14 +20,9 @@ func (daemon *Daemon) refreshProduction(ctx context.Context, project kernel.Proj
 	if daemon == nil || daemon.github == nil || project == (kernel.ProjectID{}) {
 		return nil
 	}
-	now := daemon.now()
-	daemon.productionRefreshMu.Lock()
-	if now.Before(daemon.productionRefreshedAt.Add(productionRefreshInterval)) {
-		daemon.productionRefreshMu.Unlock()
+	if !daemon.productionRefreshAllowed(project, daemon.now()) {
 		return nil
 	}
-	daemon.productionRefreshedAt = now
-	daemon.productionRefreshMu.Unlock()
 	repositories, err := daemon.store.ProjectRepositories(ctx, project)
 	if err != nil {
 		return err
@@ -59,6 +54,19 @@ func (daemon *Daemon) refreshProduction(ctx context.Context, project kernel.Proj
 		}
 	}
 	return nil
+}
+
+func (daemon *Daemon) productionRefreshAllowed(project kernel.ProjectID, now time.Time) bool {
+	daemon.productionRefreshMu.Lock()
+	defer daemon.productionRefreshMu.Unlock()
+	if daemon.productionRefreshAt == nil {
+		daemon.productionRefreshAt = make(map[kernel.ProjectID]time.Time)
+	}
+	if now.Before(daemon.productionRefreshAt[project].Add(productionRefreshInterval)) {
+		return false
+	}
+	daemon.productionRefreshAt[project] = now
+	return true
 }
 
 type maintainerPullRequest struct {
