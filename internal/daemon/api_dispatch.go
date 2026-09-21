@@ -463,6 +463,18 @@ func (daemon *Daemon) taskRead(ctx context.Context, call api.Call) api.Reply {
 	if outcomeText == "" {
 		outcomeText = task.BlockedReason
 	}
+	if outcomeText == "" && task.Status == kernel.TaskFailed {
+		// Infrastructure failures are recorded on the terminal run proposal;
+		// task.result is intentionally empty for them. Include that durable
+		// diagnosis in the operator's task read so it does not require SQLite.
+		recovery, recoveryFound, recoveryErr := daemon.store.TaskRecovery(ctx, id, task.IncarnationID)
+		if recoveryErr != nil {
+			return newErrorReply(remoteErrorCode(recoveryErr))
+		}
+		if recoveryFound && recovery.Run != nil && recovery.Run.Terminal != nil {
+			outcomeText = recovery.Run.Terminal.Detail()
+		}
+	}
 	outcome, outcomeMore := taskDetailTextChunk(outcomeText, input.Offset)
 	attachments, err := daemon.store.TaskAttachments(ctx, id)
 	if err != nil {

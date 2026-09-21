@@ -186,6 +186,10 @@ func TestFailureDetailTruncatesWholeRunes(t *testing.T) {
 	if failureDetail(nil) == "" {
 		t.Fatal("a nil cause produced an empty detail")
 	}
+	invalidPrefix := failureDetail(errors.New(string([]byte{0xff}) + strings.Repeat("a", maxFailureDetailBytes)))
+	if !utf8.ValidString(invalidPrefix) || !strings.Contains(invalidPrefix, strings.Repeat("a", 128)) {
+		t.Fatalf("invalid prefix discarded the diagnosis: valid=%t detail length=%d", utf8.ValidString(invalidPrefix), len(invalidPrefix))
+	}
 	short := errors.New("kept whole")
 	if failureDetail(short) != "kept whole" {
 		t.Fatalf("a short cause was altered: %q", failureDetail(short))
