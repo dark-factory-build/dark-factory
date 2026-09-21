@@ -11,7 +11,7 @@ const href = (value: unknown) => {
   if (typeof value !== "string") return undefined;
   try { const url = new URL(value); return url.protocol === "https:" && url.username === "" && url.password === "" ? url.href : undefined; } catch { return undefined; }
 };
-const reviewProse = (value: string) => value.replace(/<!--\s*dark-factory-operation:[\s\S]*?-->/gi, "").replace(/\n{3,}/g, "\n\n").trim();
+const reviewProse = (value: string) => value.replace(/(?:^|\n)<!-- dark-factory-operation:[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}:[0-9a-f]{64} -->\s*$/i, "").trim();
 function ReviewNotes({ findings }: { findings: string }) {
   const prose = reviewProse(findings);
   if (!prose) return null;
