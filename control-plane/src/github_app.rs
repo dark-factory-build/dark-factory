@@ -1552,7 +1552,7 @@ impl AppAuthority {
             ("metadata", "read"),
             ("pull_requests", "write"),
         ]);
-        if request.cross_repository_source().is_none() && request.external_source_url.is_none() {
+        if request.needs_issue_read() {
             permissions.insert("issues", "read");
         }
         let token = self.0.installation_token(repository, permissions).await?;
@@ -1573,7 +1573,7 @@ impl AppAuthority {
         if request.external_source_url.is_some() {
             // Linear is a private backlog; a provider cannot authorize disclosure.
             validate_source_visibility(Some(true), repository.private)?;
-        } else {
+        } else if request.needs_issue_read() {
             let issue = if let Some(source) = request.cross_repository_source() {
                 let source_token = self
                     .0
@@ -3208,6 +3208,11 @@ impl AppAuthority {
 }
 
 impl CreatePullRequest {
+    fn needs_issue_read(&self) -> bool {
+        self.external_source_url.is_none()
+            && (self.cross_repository_source().is_some() || self.issue_number != 0)
+    }
+
     fn validate(&mut self) -> Result<(), OperationError> {
         canonical_operation_id(&mut self.operation_id)?;
         if let Some(source) = self.source_repository.as_mut() {
@@ -11001,6 +11006,7 @@ mod tests {
         operator.close_on_merge = false;
         operator.body = "Operator task carries its complete publication context.".into();
         assert!(operator.validate().is_ok());
+        assert!(!operator.needs_issue_read());
         let operator_body = operator.marked_body().unwrap();
         assert!(operator_body.contains(operator.body.as_str()));
         assert!(!operator_body.contains("Refs #0"));
@@ -11008,6 +11014,7 @@ mod tests {
         assert!(operator_body.ends_with(&operator.marker().unwrap()));
         operator.close_on_merge = true;
         assert!(operator.validate().is_err());
+        assert!(create.needs_issue_read());
         assert!(
             CreatePullRequest {
                 external_source_url: None,
