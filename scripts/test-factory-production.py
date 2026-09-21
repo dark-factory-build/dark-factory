@@ -155,6 +155,21 @@ class ProductionFixtures(unittest.TestCase):
         self.assertEqual(result["unavailable"], "host_controller_only")
         command.assert_not_called()
 
+    def test_empty_release_configuration_is_an_observed_empty_destination_set(self):
+        config = {"repository": "o/r", "project_id": "1" * 32, "overseer_agent_id": "2" * 32,
+                  "label": "factory:ready", "allowed_authors": ["owner"], "factory_home": "/tmp/factory",
+                  "journal": "/tmp/journal", "release_configs": []}
+        def github(repository, endpoint):
+            if endpoint.endswith("/pulls?state=open&per_page=100") or endpoint.endswith("/pulls?state=closed&sort=updated&direction=desc&per_page=100"):
+                return []
+            if endpoint.endswith("/actions/runs?per_page=100"):
+                return {"workflow_runs": []}
+            self.fail(endpoint)
+        with mock.patch.object(production, "host_config", return_value=config), mock.patch.object(production, "github", side_effect=github):
+            result = production.collect(config)
+        self.assertEqual(result["delivery_destinations"], [])
+        self.assertTrue(result["delivery_destinations_observed"])
+
     def test_running_reviewer_requires_matching_live_sidecar_identity(self):
         with tempfile.TemporaryDirectory() as directory:
             journal = Path(directory) / "intake.json"
@@ -210,6 +225,7 @@ class ProductionFixtures(unittest.TestCase):
             factoryctl.write_text("")
             config = {"factory_home": str(home), "project_id": "1" * 32}
             observation = {"repository": "o/r", "observed_at": 1000, "unavailable": "jobs", "overflow": 3,
+                           "delivery_destinations": [], "delivery_destinations_observed": True,
                            "pull_requests": [{"number": index, "title": "x" * 1000} for index in range(1, 257)], "checks": [], "reviewers": [], "deliveries": []}
             with mock.patch.object(production, "host_config", return_value=config), mock.patch.object(production.subprocess, "run", return_value=mock.Mock(returncode=0)) as run:
                 self.assertTrue(production.record(config, observation))
@@ -217,7 +233,7 @@ class ProductionFixtures(unittest.TestCase):
             for call in run.call_args_list:
                 document = json.loads(call.kwargs["input"])
                 self.assertLessEqual(len(call.kwargs["input"].encode()), production.MAX_INPUT)
-                self.assertEqual({"repository": "o/r", "observed_at": 1000, "unavailable": "jobs", "overflow": 3}, {key: document["observation"][key] for key in ("repository", "observed_at", "unavailable", "overflow")})
+                self.assertEqual({"repository": "o/r", "observed_at": 1000, "unavailable": "jobs", "overflow": 3, "delivery_destinations": [], "delivery_destinations_observed": True}, {key: document["observation"][key] for key in ("repository", "observed_at", "unavailable", "overflow", "delivery_destinations", "delivery_destinations_observed")})
 
     def test_maintenance_requires_coherent_release_identity_and_trusted_status(self):
         with tempfile.TemporaryDirectory() as directory:

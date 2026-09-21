@@ -450,7 +450,9 @@ def collect(config):
         markers = {} # An old controller ALLOW cannot overrule an unseen formal BLOCK.
     deliveries, release_unavailable, delivery_overflow = release_receipts(release_paths, config["repository"])
     observation = {"repository": config["repository"], "observed_at": int(time.time() * 1000), "pull_requests": [], "checks": [],
-                   "reviewers": reviewers, "deliveries": deliveries, "maintenance": maintenance(config)}
+                   "reviewers": reviewers, "deliveries": deliveries, "maintenance": maintenance(config),
+                   "delivery_destinations": sorted({entry["destination"] for entry in release_paths}),
+                   "delivery_destinations_observed": not path_unavailable}
     unavailable = []
     if formal_unavailable:
         unavailable.append("formal_reviews")
@@ -497,7 +499,7 @@ def record(config, observation):
         return False
     env = {"DARK_FACTORY_SOCKET": str(home / "runtimes" / "factory.sock"),
            "DARK_FACTORY_OPERATOR_TOKEN_FILE": str(home / "operator.token")}
-    common = {key: observation.get(key) for key in ("repository", "observed_at", "unavailable", "overflow", "maintenance") if key in observation}
+    common = {key: observation.get(key) for key in ("repository", "observed_at", "unavailable", "overflow", "maintenance", "delivery_destinations", "delivery_destinations_observed") if key in observation}
     batches, batch = [], dict(common, pull_requests=[], checks=[], reviewers=[], deliveries=[])
     for name in ("pull_requests", "checks", "reviewers", "deliveries"):
         for item in observation.get(name, []):
