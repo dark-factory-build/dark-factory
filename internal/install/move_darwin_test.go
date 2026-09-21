@@ -7,6 +7,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -57,6 +58,26 @@ func TestMoveHomeRefusesExistingTargetWithoutMutation(t *testing.T) {
 	}
 	if _, err := Doctor(context.Background(), from); err != nil {
 		t.Fatalf("source changed after refusal: %v", err)
+	}
+}
+
+func TestMoveHomeRefusesConcurrentOperationalWriter(t *testing.T) {
+	parent := t.TempDir()
+	from := filepath.Join(parent, "old")
+	to := filepath.Join(parent, "new")
+	if _, err := Init(context.Background(), from); err != nil {
+		t.Fatal(err)
+	}
+	writer, err := OpenOperationalHome(context.Background(), from)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+	if err := MoveHome(context.Background(), from, to); !errors.Is(err, ErrBusy) {
+		t.Fatalf("move with concurrent writer = %v, want busy", err)
+	}
+	if _, err := Doctor(context.Background(), from); err != nil {
+		t.Fatalf("source after concurrent-writer refusal = %v", err)
 	}
 }
 

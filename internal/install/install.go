@@ -210,3 +210,14 @@ func (home *OperationalHome) Close() error {
 	}
 	return home.state.close()
 }
+
+// closeForMove releases a home lifetime lease after its pathname has been
+// deliberately renamed. The move owns the retained descriptors, so identity
+// revalidation would reject the expected rename; all child shutdown and lock
+// release ordering remains identical to Close.
+func (home *OperationalHome) closeForMove() error {
+	if home == nil || home.state == nil {
+		return nil
+	}
+	return home.state.closeWithIdentityCheck(false)
+}

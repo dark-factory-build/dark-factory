@@ -257,6 +257,10 @@ func duplicateOperationalFile(source *os.File, label string) (*os.File, error) {
 }
 
 func (state *operationalHomeState) close() error {
+	return state.closeWithIdentityCheck(true)
+}
+
+func (state *operationalHomeState) closeWithIdentityCheck(checkIdentity bool) error {
 	if state == nil {
 		return nil
 	}
@@ -296,9 +300,11 @@ func (state *operationalHomeState) close() error {
 		state.closeErr = errors.Join(ErrUncertain, result)
 		return state.closeErr
 	}
-	identityErr := recheckOperationalIdentityByState(state)
-	if identityErr != nil {
-		result = errors.Join(result, errors.Join(ErrUncertain, identityErr))
+	if checkIdentity {
+		identityErr := recheckOperationalIdentityByState(state)
+		if identityErr != nil {
+			result = errors.Join(result, errors.Join(ErrUncertain, identityErr))
+		}
 	}
 	// Close every retained descriptor even when identity is no longer
 	// resolvable. The lock is deliberately released after all other handles.

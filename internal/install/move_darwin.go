@@ -20,7 +20,7 @@ import (
 	_ "github.com/ncruces/go-sqlite3/driver"
 )
 
-func moveHome(ctx context.Context, from, to string) error {
+func moveHome(ctx context.Context, from, to string) (resultErr error) {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -52,9 +52,11 @@ func moveHome(ctx context.Context, from, to string) error {
 			return inspectErr
 		}
 	}
-	if _, err := Doctor(ctx, from); err != nil {
+	lockedHome, err := OpenOperationalHome(ctx, from)
+	if err != nil {
 		return err
 	}
+	defer func() { resultErr = errors.Join(resultErr, lockedHome.closeForMove()) }()
 	backupDir := filepath.Join(filepath.Dir(from), "."+filepath.Base(from)+".move-backup-"+fmt.Sprint(time.Now().UnixNano()))
 	stage := filepath.Join(filepath.Dir(to), "."+filepath.Base(to)+".move-stage-"+fmt.Sprint(time.Now().UnixNano()))
 	for _, artifact := range []string{backupDir, stage} {
