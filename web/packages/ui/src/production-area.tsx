@@ -34,7 +34,7 @@ export function ProductionArea({ view, items, hiddenItems = 0, width, top, pulse
       const active = pulse !== undefined && (!item.pullRequest || item.review.sourceFresh) && (running || item.construction?.status === "running");
       const title = item.pullRequest?.title ?? item.construction?.title ?? "Work";
       const stages = productionStages(item);
-      const color = correction ? "#d49b7d" : "#8fa4ac";
+      const color = correction ? "#d49b7d" : "#c2b184";
       return <g key={item.projectId + ":" + item.visualId} transform={`translate(${x} ${y})`}>
         <path d={`M0 79h${cell - 16}`} stroke="#455653" strokeWidth="12" />
         {Array.from({length: 7}, (_, i) => <path key={i} d={`M${8 + i * (cell - 32) / 7} 75v8`} stroke="#273134" strokeWidth="2" />)}
@@ -52,7 +52,7 @@ export function ProductionArea({ view, items, hiddenItems = 0, width, top, pulse
           {item.reviewers.length > 2 ? <text x={85 + Math.min(2, item.reviewers.length) * 20} y="24" fill="#c2b184" fontSize="9" fontFamily="ui-monospace, monospace">+{item.reviewers.length - 2}</text> : null}
           <path d="M122 57v17m0-17h9" stroke={item.pullRequest?.state === "merged" ? "#9fe7b0" : "#a08f68"} strokeWidth="3" />
           <text x="0" y="96" fill="#c9d3d0" fontSize="10" fontFamily="ui-monospace, monospace">{label(title)}</text>
-          <text x="0" y="110" fill={color} fontSize="9" fontFamily="ui-monospace, monospace">{stages[0]}</text>
+          <text x="0" y="110" fill={color} fontSize="10" fontWeight="bold" fontFamily="ui-monospace, monospace">{stages[0]}</text>
           <text x="0" y="123" fill="#8fa4ac" fontSize="9" fontFamily="ui-monospace, monospace">{stages.slice(1).join(" · ")}</text>
         </g>
         <g {...activate(() => onSelect(item.projectId + ":" + item.visualId))} aria-label={`Inspect ${title}`} className="dfFactoryScene__target">

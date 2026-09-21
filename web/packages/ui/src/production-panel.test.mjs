@@ -27,7 +27,7 @@ test("a queue row selects controlled detail and review prose hides its receipt m
   function Controlled() { const [selected, setSelected] = useState(); return createElement(ProductionPanel, { items: [active], selected, onSelect: setSelected, connected: true }); }
   let tree;
   await act(async () => { tree = create(createElement(Controlled)); });
-  await act(async () => { tree.root.findAllByType("button").find((node) => node.children.join("").includes("Machine")).props.onClick(); });
+  await act(async () => { tree.root.findAllByType("button").find((node) => node.findAllByType("strong").some((title) => title.children.join("") === "Machine")).props.onClick(); });
   assert.match(JSON.stringify(tree.toJSON()), /Work queue/);
   const marker = `<!-- dark-factory-operation:12345678-1234-1234-1234-123456789abc:${"e".repeat(64)} -->`;
   const markup = renderToStaticMarkup(createElement(ProductionPanel, { items: [{ ...active, review: { ...active.review, findings: `Useful finding.\n${marker}` } }], selected: "project:change:1", onSelect() {}, connected: true }));
@@ -46,4 +46,16 @@ test("switching tasks fences an old request and keeps the selected known task", 
   await act(async () => { reject(new Error("old request")); await pending.catch(() => {}); });
   assert.doesNotMatch(JSON.stringify(tree.toJSON()), /Task details are unavailable|Loading task/);
   await act(async () => tree.unmount());
+});
+
+test("review prose hides the canonical terminal receipt, preserving human examples", () => {
+  const marker = `<!-- dark-factory-operation:12345678-1234-1234-1234-123456789abc:${"e".repeat(64)} -->`;
+  const render = (findings) => renderToStaticMarkup(createElement(ProductionPanel, { items: [{ ...active, review: { ...active.review, findings } }], onSelect() {}, selected: "project:change:1", connected: true }));
+  const markup = render(`Useful finding.\nKeep this conclusion.\n\n${marker}\n`);
+  assert.match(markup, /Useful finding\./);
+  assert.match(markup, /Keep this conclusion\./);
+  assert.doesNotMatch(markup, /dark-factory-operation|12345678/);
+  assert.match(render("Human example: <!-- dark-factory-operation:deadbeef -->"), /deadbeef/);
+  assert.match(render(`${marker}\nHuman explanation after the example.`), /12345678/);
+  assert.match(render(`Inline example ${marker}`), /12345678/);
 });

@@ -882,6 +882,8 @@ summary.dfConsoleItem__summary { cursor: pointer; }
 .dfProduction__docks { display: flex; gap: .4rem; }
 .dfProduction__queue { display: grid; gap: .35rem; }
 .dfProduction__row { display: grid; gap: .25rem; width: 100%; padding: .45rem .55rem; text-align: left; text-transform: none; }
+.dfProduction__row strong { font-size: .875rem; }
+.dfProduction__detail { min-width: 0; overflow-wrap: anywhere; }
 .dfProduction__row strong, .dfProduction__row small { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dfProduction__stages { display: flex; flex-wrap: wrap; gap: .2rem; }
 .dfProduction__stages :where(span, i) { border: 1px solid var(--df-console-rule); padding: .05rem .25rem; color: var(--df-console-accent); font-size: .875rem; font-style: normal; white-space: nowrap; }
