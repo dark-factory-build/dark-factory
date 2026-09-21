@@ -1899,3 +1899,35 @@ func TestDaemonSelectOverseerAccountPreservesSelectionGuards(t *testing.T) {
 		t.Fatalf("active account edit: %v", err)
 	}
 }
+
+// TestRefusalRepliesCarryABoundedReason pins the one normalization a refusal
+// reason needs before it can cross the local API: without it a reason the
+// grammar rejects would silently fall back to a bare code, which is the
+// failure this detail exists to end.
+func TestRefusalRepliesCarryABoundedReason(t *testing.T) {
+	refusal := kernel.NewOutcomeRefusal(fmt.Errorf("%w: %s (%w)", errDirtyWorkerChange, testID(0x21), kernel.ErrConflict))
+	var unwrapped *kernel.OutcomeRefusal
+	if !errors.As(refusal, &unwrapped) {
+		t.Fatalf("refusal = %v", refusal)
+	}
+	detail := boundedDetail(unwrapped.Unwrap())
+	if !strings.HasPrefix(detail, errDirtyWorkerChange.Error()) || !strings.Contains(detail, testID(0x21)) {
+		t.Fatalf("dirty refusal detail = %q", detail)
+	}
+	if _, err := api.NewErrorDetailReply(api.RemoteConflict, detail); err != nil {
+		t.Fatalf("dirty refusal detail rejected by the wire grammar: %v", err)
+	}
+	// A cause with controls or over the bound still reaches the caller.
+	for name, cause := range map[string]error{
+		"controls":  errors.New("refused\nfor\ttwo\x9breasons"),
+		"unbounded": errors.New(strings.Repeat("reason ", api.MaxRemoteErrorDetail)),
+	} {
+		bounded := boundedDetail(cause)
+		if _, err := api.NewErrorDetailReply(api.RemoteConflict, bounded); err != nil {
+			t.Fatalf("%s cause left the caller with a bare code: %v", name, err)
+		}
+	}
+	if boundedDetail(nil) != "" {
+		t.Fatalf("nil cause detail = %q", boundedDetail(nil))
+	}
+}

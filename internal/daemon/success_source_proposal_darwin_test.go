@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/dark-factory-build/dark-factory/internal/api"
@@ -45,6 +46,12 @@ func TestProposeOutcomeRefusesBeforeDurableProposalForLiveWorker(t *testing.T) {
 		var remote *api.RemoteError
 		if !errors.As(err, &remote) || remote.Code() != api.RemoteConflict {
 			t.Fatalf("dirty-source refusal = %v", err)
+		}
+		// The reason must reach the worker. A refused worker that learns only
+		// the code retries the same rejected call until it has no way left to
+		// report finished work.
+		if !strings.Contains(remote.Error(), "injected source mutation after clean snapshot") {
+			t.Fatalf("refusal did not tell the worker what happened: %q", remote.Error())
 		}
 	}
 	waitDispatch(t, done)

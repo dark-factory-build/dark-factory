@@ -417,6 +417,7 @@ type Reply struct {
 	workerOperation     WorkerOperation
 	humanRequests       HumanRequestList
 	code                RemoteErrorCode
+	detail              string
 }
 
 func (Reply) String() string   { return "Reply(<redacted>)" }
@@ -572,10 +573,17 @@ func NewRemoteStatusReply(status RemoteStatus) (Reply, error) {
 }
 
 func NewErrorReply(code RemoteErrorCode) (Reply, error) {
-	if !validRemoteCode(code) {
+	return NewErrorDetailReply(code, "")
+}
+
+// NewErrorDetailReply refuses a request with the bounded reason its caller
+// needs to act on. A refused worker that only learns a code is left with
+// finished work and no way to report it.
+func NewErrorDetailReply(code RemoteErrorCode, detail string) (Reply, error) {
+	if !validRemoteCode(code) || !validRemoteDetail(detail) {
 		return Reply{}, ErrInvalidInput
 	}
-	return Reply{kind: replyError, code: code}, nil
+	return Reply{kind: replyError, code: code, detail: detail}, nil
 }
 func NewContentReply(value any) Reply { return Reply{kind: replyContent, content: value} }
 
@@ -1438,6 +1446,7 @@ func (connection *Connection) writeReply(reply Reply) error {
 		envelope.Data = data
 	} else {
 		envelope.Error = reply.code
+		envelope.Detail = reply.detail
 	}
 	encoded, err := json.Marshal(envelope)
 	if err != nil {
