@@ -9,6 +9,7 @@ import { FactoryApp, FactoryConsole } from "../dist/src/index.js";
 import { layoutScene } from "../dist/src/factory-scene/scene.js";
 import { prepareFloor, selectFloor, projectFloor } from "../dist/src/console-view.js";
 import { FactoryFloor, StageMeter } from "../dist/src/console-screens.js";
+import { SettingsDialog } from "../dist/src/console-sidebar.js";
 import { FactoryScene } from "../dist/src/factory-scene/factory-scene.js";
 import { TerminalPanel } from "../dist/src/factory-app.js";
 import { DEFAULT_FLOOR_APPEARANCE, readFloorAppearance } from "../dist/src/floor-appearance.js";
@@ -2660,6 +2661,22 @@ test("floor project changes clear task selection without restoring an old dialog
   await act(async () => tree.unmount());
 });
 
+test("settings reports the running version and the update command without any production record", () => {
+  const settings = (props) => renderToStaticMarkup(createElement(SettingsDialog, {
+    floorAppearance: DEFAULT_FLOOR_APPEARANCE, onFloorAppearanceChange() {}, onResetFloorAppearance() {},
+    state: undefined, ready: false, address: "127.0.0.1:43123", ...props,
+  }));
+  const markup = settings({ runtime: { version: "v0.4.2", source: "a".repeat(40), target: "darwin/arm64", build_id: "build", release: true } });
+  assert.match(markup, /Running version <code>v0\.4\.2<\/code>/);
+  assert.match(markup, /Latest release not observed/);
+  assert.match(markup, /factoryctl service uninstall --home/);
+  assert.match(markup, /factoryctl service install --home/);
+  assert.doesNotMatch(markup, /deploy-runtime\.py|up to date/i);
+  const published = settings({ release: { version: "v0.4.3", url: "https://github.com/dark-factory-build/dark-factory/releases/tag/v0.4.3" } });
+  assert.match(published, /Running version <code>not observed<\/code>/);
+  assert.match(published, /releases\/tag\/v0\.4\.3"[^>]*><code>v0\.4\.3<\/code>/);
+});
+
 test("settings tabs hide other sections, support keyboard navigation and retain drafts", async () => {
   const previous = globalThis.IS_REACT_ACT_ENVIRONMENT;
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
@@ -2668,7 +2685,7 @@ test("settings tabs hide other sections, support keyboard navigation and retain 
     await act(async () => { renderer = create(createElement(FactoryConsole, {status:"ready",state:baseState(),settingsOpen:true,onToggleSettings(){},onCreateProject(){}})); });
     const tabs = () => renderer.root.findAllByProps({role:"tab"});
     const panels = () => renderer.root.findAllByProps({role:"tabpanel"});
-    assert.deepEqual(tabs().map(tab=>tab.props.children),["Projects","Connections","Devices","Appearance","Help"]);
+    assert.deepEqual(tabs().map(tab=>tab.props.children),["Projects","Connections","Devices","Appearance","Help","Updates"]);
     const selected = (index) => {
       assert.deepEqual(tabs().map(tab=>tab.props["aria-selected"]),tabs().map((_,i)=>i===index));
       assert.equal(panels().filter(panel=>!panel.props.hidden).length,1);
@@ -2686,7 +2703,7 @@ test("settings tabs hide other sections, support keyboard navigation and retain 
     selected(1);
     let focused=-1;
     const parentElement={querySelectorAll(){return tabs().map((_,i)=>({focus(){focused=i;}}));}};
-    for (const [key,want] of [["End",4],["ArrowRight",0],["ArrowLeft",4],["Home",0]]) {
+    for (const [key,want] of [["End",5],["ArrowRight",0],["ArrowLeft",5],["Home",0]]) {
       let prevented=false;
       await act(async()=>tabs().find(tab=>tab.props["aria-selected"]).props.onKeyDown({key,preventDefault(){prevented=true;},currentTarget:{parentElement}}));
       assert.equal(prevented,true);assert.equal(focused,want);selected(want);

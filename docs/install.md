@@ -46,6 +46,13 @@ binaries, plist, and receipt are replaced; the data home is untouched. An
 installation that used `--relay-origin` must repeat that flag on the install
 after the uninstall, or the new job comes back loopback-only.
 
+Settings → Updates in the console shows the same two commands beside the
+running version and the latest published release. To find that release the
+daemon reads the public GitHub releases endpoint for this repository at most
+once every six hours, and only while a paired console is open; an offline or
+rate-limited host shows no release rather than claiming this build is current.
+Nothing in the console installs an update.
+
 Before upgrading across a schema change, copy the database to a directory
 outside the home. Never into the home itself, and add nothing else there
 either: the daemon refuses to open a home holding anything it did not put

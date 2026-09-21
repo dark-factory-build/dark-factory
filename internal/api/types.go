@@ -136,6 +136,14 @@ type BuildIdentity struct {
 	Release bool   `json:"release"`
 }
 
+// PublishedRelease is the newest public release the daemon has observed. It is
+// information for the operator, never an update: a zero value only means the
+// daemon has no answer, not that this build is current.
+type PublishedRelease struct {
+	Version string `json:"version"`
+	URL     string `json:"url"`
+}
+
 type WebClient struct {
 	ID             string  `json:"id"`
 	CapabilityMask uint8   `json:"capability_mask"`

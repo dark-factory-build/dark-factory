@@ -7,6 +7,7 @@ import { AgentSprite } from "./factory-scene/factory-scene.js";
 import { agentStatus, agentCurrentTask, agentActivity } from "./console-view.js";
 import { AnswerControls } from "./console-interactions.js";
 import type { FloorAppearance } from "./floor-appearance.js";
+import type { PublishedRelease, RuntimeBuild } from "./production-data.js";
 
 /** Only the controls the operator actually changed; the rest are left alone. */
 export type AgentConfigEdit = Readonly<{ model?: string; reasoningEffort?: string; accountId?: string; paused?: boolean; archived?: boolean; idlePolicy?: "wait" | "standing_instruction"; idleAfterSeconds?: number; idleInstruction?: string; idleRunBudget?: number }>;
@@ -644,6 +645,8 @@ export function SettingsDialog({
   onSelectTask,
   pairing,
   library,
+  runtime,
+  release,
   onClose,
 }: {
   onAttachmentRetention?: (enabled?: boolean) => Promise<boolean>;
@@ -676,6 +679,9 @@ export function SettingsDialog({
   /** A self-contained "PAIR A PHONE" surface mounts here. */
   pairing?: ReactNode;
   library?: ReactNode;
+  /** The build of the daemon answering this connection, observed not asserted. */
+  runtime?: RuntimeBuild;
+  release?: PublishedRelease;
   onClose?: () => void;
 }) {
   // Discovery is an observation of the daemon's machine, so it is asked for
@@ -722,6 +728,7 @@ export function SettingsDialog({
         <p><a href="https://darkfactory.build/feedback?kind=feature" target="_blank" rel="noopener noreferrer">Request a feature</a></p>
         <p><a href="https://darkfactory.build/backlog" target="_blank" rel="noopener noreferrer">Public backlog</a></p>
     </section> },
+    { label: "Updates", content: <UpdatesSection runtime={runtime} release={release} /> },
   ];
   return <ConsoleDialog label="Settings" title="Settings" onClose={onClose}>
     <div className="dfSettingsTabs" role="tablist" aria-label="Settings sections">
@@ -743,6 +750,19 @@ export function SettingsDialog({
       {content}
     </div>)}
   </ConsoleDialog>;
+}
+
+/** Two observations and one command. Nothing here installs anything, and a
+ * missing release is no answer from GitHub rather than proof of being current. */
+function UpdatesSection({ runtime, release }: { runtime?: RuntimeBuild; release?: PublishedRelease }) {
+  return <section className="dfConsoleSidebar__section" aria-label="Updates">
+    <h3>Updates</h3>
+    <p>Running version <code>{runtime?.version || "not observed"}</code>{runtime !== undefined && !runtime.release ? " · source build" : ""}</p>
+    <p>Latest release {release === undefined ? "not observed" : <a href={release.url} target="_blank" rel="noopener noreferrer"><code>{release.version}</code></a>}</p>
+    <p>Update this factory from a terminal on its Mac, using the new <code>factoryctl</code>:</p>
+    <pre style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}><code>factoryctl service uninstall --home &quot;$HOME/.dark-factory&quot;{"\n"}factoryctl service install --home &quot;$HOME/.dark-factory&quot;</code></pre>
+    <p>Only the service binaries, plist and receipt are replaced. Repeat any <code>--relay-origin</code> on the install, and back the database up before a schema change; see the installation guide.</p>
+  </section>;
 }
 
 function RepositoriesSection({ state, repositories, pending, errors, onLoad, onMutate, onCreateProject }: {
