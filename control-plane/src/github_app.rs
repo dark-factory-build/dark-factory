@@ -3272,6 +3272,9 @@ impl CreatePullRequest {
             let body = self.body.trim_end_matches(|character: char| {
                 character == '\n' || character == '\r' || character == ' ' || character == '\t'
             });
+            if has_closing_directive(body) {
+                return Err(OperationError::InvalidInput);
+            }
             return if body.is_empty() {
                 Ok(self.marker()?)
             } else {
@@ -3326,19 +3329,8 @@ impl CreatePullRequest {
             }) {
                 return Err(OperationError::InvalidInput);
             }
-            for pair in words.windows(2) {
-                let keyword = pair[0].trim_matches(|c: char| !c.is_ascii_alphabetic());
-                let target = pair[1].trim_start_matches(['(', '[']);
-                if [
-                    "close", "closes", "closed", "fix", "fixes", "fixed", "resolve", "resolves",
-                    "resolved",
-                ]
-                .iter()
-                .any(|word| keyword.eq_ignore_ascii_case(word))
-                    && (target.contains('#') || target.contains("/issues/"))
-                {
-                    return Err(OperationError::InvalidInput);
-                }
+            if has_closing_directive(body) {
+                return Err(OperationError::InvalidInput);
             }
         }
         if body.is_empty() {
@@ -3353,6 +3345,21 @@ impl CreatePullRequest {
             .as_deref()
             .filter(|source| !source.eq_ignore_ascii_case(&self.repository))
     }
+}
+
+fn has_closing_directive(body: &str) -> bool {
+    let words: Vec<_> = body.split_whitespace().collect();
+    words.windows(2).any(|pair| {
+        let keyword = pair[0].trim_matches(|c: char| !c.is_ascii_alphabetic());
+        let target = pair[1].trim_start_matches(['(', '[', '*', '_', '`']);
+        [
+            "close", "closes", "closed", "fix", "fixes", "fixed", "resolve", "resolves",
+            "resolved",
+        ]
+        .iter()
+        .any(|word| keyword.eq_ignore_ascii_case(word))
+            && (target.contains('#') || target.contains("/issues/"))
+    })
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
@@ -11012,6 +11019,8 @@ mod tests {
         assert!(!operator_body.contains("Refs #0"));
         assert!(!operator_body.contains("Closes #"));
         assert!(operator_body.ends_with(&operator.marker().unwrap()));
+        operator.body = "Closes #123".into();
+        assert_eq!(operator.marked_body().err(), Some(OperationError::InvalidInput));
         operator.close_on_merge = true;
         assert!(operator.validate().is_err());
         assert!(create.needs_issue_read());
