@@ -1,19 +1,39 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import type { AgentItem, StateView, TaskItem } from "@dark-factory/client";
 import type { ProjectContentCall } from "./project-library.js";
-import { DeliveryEvidence, FactoryMaintenancePanel, type FactoryMaintenanceProps } from "./factory-maintenance.js";
 import { inProgressProduction, productionStages, type ProductionContraption, type ProductionDelivery } from "./production-view.js";
 
 const text = (v: unknown) => typeof v === "string" ? v : "";
 const href = (v: unknown) => { try { const u = new URL(text(v)); return u.protocol === "https:" && !u.username && !u.password ? u.href : undefined; } catch { return undefined; } };
+const observedAt = (value: number | undefined) => {
+  if (value === undefined || !Number.isFinite(value) || value <= 0) return "";
+  try { return new Date(value).toISOString(); } catch { return ""; }
+};
+
+/** The receipts recorded for one pull request's own deliveries. */
+function DeliveryEvidence({ deliveries, current = true }: { deliveries: readonly ProductionDelivery[]; current?: boolean }) {
+  const [limit, setLimit] = useState(8);
+  const remaining = deliveries.length - limit, remainingId = useId();
+  return <>{deliveries.length === 0 ? <p>No delivery evidence recorded.</p> : deliveries.slice(0, limit).map((delivery) => <details key={`${delivery.repository}:${delivery.id}`}>
+    <summary style={{overflowWrap:"anywhere"}}>{delivery.destination} · {current ? delivery.state : `last recorded ${delivery.state}; not current confirmation`} · {delivery.pull_requests.length} linked PR{delivery.pull_requests.length === 1 ? "" : "s"}</summary>
+    <p>{delivery.phase}{delivery.reason ? ` · ${delivery.reason}` : ""}</p>
+    <p>Revision <code style={{overflowWrap:"anywhere"}}>{delivery.revision || "not observed"}</code></p>
+    {observedAt(delivery.updated_at) ? <p>Updated {observedAt(delivery.updated_at)}</p> : null}
+    {observedAt(delivery.verified_at) ? <p>Verified {observedAt(delivery.verified_at)}</p> : <p>Delivery not verified.</p>}
+    {href(delivery.url) ? <p><a href={delivery.url} target="_blank" rel="noreferrer">Open delivery</a></p> : null}
+    <ul>{delivery.pull_requests.map((number) => <li key={number}><a href={`https://github.com/${delivery.repository}/pull/${number}`} target="_blank" rel="noreferrer">{delivery.repository} #{number}</a></li>)}</ul>
+    {delivery.overflow ? <p>{delivery.overflow} additional links are outside this observation.</p> : null}
+  </details>)}{remaining > 0 ? <><p id={remainingId}>{remaining} more delivery receipts available.</p><button type="button" aria-describedby={remainingId} onClick={() => setLimit((value) => value + 8)}>Show more</button></> : null}</>;
+}
+
 const reviewProse = (v: string) => v.replace(/(?:^|\n)<!-- dark-factory-operation:[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}:[0-9a-f]{64} -->\s*$/i, "").trim();
 function ReviewNotes({ findings }: { findings: string }) { const prose = reviewProse(findings); return prose ? <p className="dfRecentWorkText">{prose}</p> : null; }
 const title = (v: ProductionContraption) => v.pullRequest?.title || v.construction?.title || "Work";
 const keyOf = (v: ProductionContraption) => `${v.projectId}:${v.visualId}`;
 const asTask = (v: Record<string, unknown>, project: string): TaskItem => ({ id: text(v.task_id) || text(v.id), project_id: text(v.project_id) || project, assigned_agent_id: text(v.assigned_agent_id), title: text(v.title) || "Untitled task", status: text(v.status) as TaskItem["status"] || "blocked", blocked_reason: text(v.blocked_reason) || undefined, priority: Number(v.priority) || 0, revision: BigInt(text(v.revision) || "0"), updated_at_ms: text(v.updated_at_ms) ? BigInt(text(v.updated_at_ms)) : undefined });
 
-export function ProductionPanel({ maintenance, deliveries = [], items, selected, onSelect, state, call, connected = true, error, overflow = 0, loadMore, loading = false, active = true, onMission, onAgent, onOpenTask }: {
-  maintenance?: FactoryMaintenanceProps; deliveries?: readonly ProductionDelivery[]; items: readonly ProductionContraption[]; selected?: string; onSelect: (key: string) => void; state?: StateView; call?: ProjectContentCall; connected?: boolean; error?: string; overflow?: number; loadMore?: () => void; loading?: boolean; active?: boolean; onMission?: (projectId: string, missionId: string) => void; onAgent?: (agent: AgentItem) => void; onOpenTask?: (task: TaskItem) => void;
+export function ProductionPanel({ items, selected, onSelect, state, call, connected = true, error, overflow = 0, loadMore, loading = false, active = true, onMission, onAgent, onOpenTask }: {
+  items: readonly ProductionContraption[]; selected?: string; onSelect: (key: string) => void; state?: StateView; call?: ProjectContentCall; connected?: boolean; error?: string; overflow?: number; loadMore?: () => void; loading?: boolean; active?: boolean; onMission?: (projectId: string, missionId: string) => void; onAgent?: (agent: AgentItem) => void; onOpenTask?: (task: TaskItem) => void;
 }) {
   const [shown, setShown] = useState(12), [selectedTaskId, setSelectedTaskId] = useState<string>(), [loadedTasks, setLoadedTasks] = useState<Record<string, TaskItem>>({}), [taskError, setTaskError] = useState("");
   const epoch = useRef(0), selectedTaskRef = useRef<string | undefined>(undefined);
@@ -44,8 +64,7 @@ export function ProductionPanel({ maintenance, deliveries = [], items, selected,
       </details>
       {ownerAgent ? <button type="button" disabled={!connected || !onAgent} onClick={() => onAgent?.(ownerAgent)}>Talk to {ownerAgent.name}</button> : null}{item.missions.map((id) => <button key={id} type="button" disabled={!connected || !onMission} onClick={() => onMission?.(item.projectId, id)}>Open mission {id.slice(0, 8)}</button>)}
       {item.tasks.length ? <details><summary>Tasks · {item.tasks.length}</summary>{item.tasks.map((id) => { const task = taskFor(item, id); return <button key={id} type="button" disabled={!connected || !onOpenTask} onClick={() => void loadTask(item, id)}>Open {task?.title || id} · {task?.status || "inspect"}</button>; })}{selectedTaskId && !taskError ? <p role="status">Loading task…</p> : null}{taskError ? <p role="alert">{taskError}</p> : null}</details> : null}
-    </article> : selected === "maintenance" && maintenance ? <section className="dfProduction__dock" aria-label="Factory updates"><button type="button" className="dfConsoleBack" onClick={back}>← Back to Production</button><FactoryMaintenancePanel {...maintenance} /></section> : selected === "delivery" ? <section className="dfProduction__dock" aria-label="Deployments"><button type="button" className="dfConsoleBack" onClick={back}>← Back to Production</button><h3>Deployments</h3><p>Project delivery receipts.</p><DeliveryEvidence deliveries={deliveries} current={connected && !error} /></section> : <>
-      <div className="dfProduction__docks"><button type="button" disabled={!connected} onClick={() => inspect("maintenance")}>Factory updates</button><button type="button" disabled={!connected} onClick={() => inspect("delivery")}>Deployments</button></div>
+    </article> : <>
       {visible.length ? <div className="dfProduction__queue">{visible.map((v) => <button key={keyOf(v)} type="button" disabled={!connected} className="dfProduction__row" onClick={() => inspect(keyOf(v))}><strong>{title(v)}</strong><span className="dfProduction__stages">{productionStages(v).map((stage) => <span className="dfStatus" data-stage={stage} key={stage}>{stage}</span>)}</span><small>{v.nextAction}</small></button>)}</div> : <p className="dfFactoryConsole__empty">{loading ? "Loading work…" : "No work is in progress."}</p>}{queue.length > shown ? <button type="button" disabled={!connected} onClick={() => setShown((n) => n + 12)}>Show more</button> : null}{queue.length <= shown && overflow > 0 && loadMore ? <button type="button" disabled={!connected || loading} onClick={loadMore}>{loading ? "Loading…" : "Show more"}</button> : null}
     </>}
   </section>;

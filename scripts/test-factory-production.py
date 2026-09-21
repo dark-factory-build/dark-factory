@@ -2,7 +2,6 @@
 """Offline facts-only fixtures for the production observation collector."""
 import importlib.util
 import json
-import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -234,37 +233,6 @@ class ProductionFixtures(unittest.TestCase):
                 document = json.loads(call.kwargs["input"])
                 self.assertLessEqual(len(call.kwargs["input"].encode()), production.MAX_INPUT)
                 self.assertEqual({"repository": "o/r", "observed_at": 1000, "unavailable": "jobs", "overflow": 3, "delivery_destinations": [], "delivery_destinations_observed": True}, {key: document["observation"][key] for key in ("repository", "observed_at", "unavailable", "overflow", "delivery_destinations", "delivery_destinations_observed")})
-
-    def test_maintenance_requires_coherent_release_identity_and_trusted_status(self):
-        with tempfile.TemporaryDirectory() as directory:
-            home = Path(directory) / "factory"
-            binary_root = Path(str(home) + ".service") / "bin" / "current"
-            binary_root.mkdir(parents=True)
-            for name in ("factoryctl", "factoryd", "factory-runner"):
-                (binary_root / name).write_text("")
-            config = {"repository": "dark-factory-build/dark-factory", "factory_home": str(home)}
-            identity = {"version": "1.2.3", "source": SHA, "target": "darwin/arm64", "build_id": "build", "release": True}
-            def command(argv, **kwargs):
-                if argv[-1] == "--build-identity":
-                    self.assertEqual(kwargs["env"], {})
-                    return subprocess.CompletedProcess(argv, 0, json.dumps(identity), "")
-                self.assertEqual(argv[-2:], ["web", "status"])
-                resolved = home.resolve()
-                self.assertEqual(kwargs["env"], {"DARK_FACTORY_SOCKET": str(resolved / "runtimes" / "factory.sock"),
-                                                  "DARK_FACTORY_OPERATOR_TOKEN_FILE": str(resolved / "operator.token")})
-                status = dict(identity, **{"ready": True})
-                return subprocess.CompletedProcess(argv, 0, json.dumps({"ready": True, "build": status}), "")
-            with mock.patch.object(production, "github", return_value={"tag_name": "v1.2.3", "html_url": "https://github.com/dark-factory-build/dark-factory/releases/tag/v1.2.3"}), \
-                 mock.patch.object(production.subprocess, "run", side_effect=command):
-                result = production.maintenance(config)
-            self.assertEqual(result["state"], "ready")
-            self.assertEqual(result["destination"], production.runtime_destination(home))
-            self.assertTrue(result["destination"].startswith("runtime:host-"))
-            self.assertNotIn(str(home.resolve()), result["destination"])
-            self.assertEqual(result["available"]["state"], "available")
-            self.assertEqual(result["installed"]["state"], "verified")
-            self.assertEqual(result["running"]["state"], "ready")
-            self.assertEqual(result["running"]["build_id"], "build")
 
     def test_runtime_release_destination_is_stable_and_opaque(self):
         home = Path("/private/tmp/factory-release-home")
