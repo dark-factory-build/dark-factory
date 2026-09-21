@@ -322,9 +322,12 @@ func (store *Store) RecordPublication(ctx context.Context, project ProjectID, ta
 // Current construction comes from Changes even after its worker finishes. The
 // projection replaces it only when normal publication records the association.
 const productionRows = `SELECT repository, kind, identity, visual_id, document, observed_at_ms FROM production_records WHERE project_id = ?
- UNION ALL SELECT '', 'construction', lower(hex(c.id)), 'change:' || lower(hex(c.id)),
- json_object('title', t.title, 'phase', c.phase, 'status', t.status, 'head', lower(hex(c.head_commit)), 'task_id', lower(hex(t.id)), 'blocked_reason', t.blocked_reason), c.updated_at_ms
+ UNION ALL SELECT COALESCE(r.name, ''), 'construction', lower(hex(c.id)), 'change:' || lower(hex(c.id)),
+		json_object('title', t.title, 'phase', c.phase, 'status', t.status, 'head', lower(hex(c.head_commit)), 'task_id', lower(hex(t.id)), 'blocked_reason', t.blocked_reason,
+			'has_changes', CASE WHEN c.head_commit IS NULL OR length(b.base_ref) NOT IN (40, 64) THEN NULL WHEN lower(hex(c.head_commit)) = lower(b.base_ref) THEN json('false') ELSE json('true') END), c.updated_at_ms
  FROM changes c JOIN tasks t ON t.id = c.task_id
+ LEFT JOIN task_repository_bindings b ON b.task_id = t.id
+ LEFT JOIN project_repositories r ON r.id = b.repository_id
  WHERE c.project_id = ? AND NOT EXISTS (SELECT 1 FROM publication_tasks p WHERE p.change_id = c.id)`
 
 func (store *Store) Production(ctx context.Context, project ProjectID, offset, limit int) (ProductionPage, error) {
@@ -340,7 +343,9 @@ func (store *Store) Production(ctx context.Context, project ProjectID, offset, l
 	if err := tx.connection.QueryRowContext(ctx, "SELECT count(*) FROM ("+productionRows+")", project.Bytes(), project.Bytes()).Scan(&page.Total); err != nil {
 		return page, err
 	}
-	rows, err := tx.connection.QueryContext(ctx, "SELECT * FROM ("+productionRows+") ORDER BY CASE kind WHEN 'repository' THEN 0 WHEN 'construction' THEN 1 WHEN 'pull_request' THEN 2 WHEN 'check' THEN 3 WHEN 'delivery' THEN 4 ELSE 5 END, repository, identity LIMIT ? OFFSET ?", project.Bytes(), project.Bytes(), limit, offset)
+	rows, err := tx.connection.QueryContext(ctx, "SELECT * FROM ("+productionRows+") ORDER BY CASE\n"+
+		" WHEN kind = 'repository' THEN 0\n"+
+		" WHEN kind = 'pull_request' AND json_extract(document, '$.state') = 'open' THEN 1\n"+" WHEN kind = 'construction' AND json_extract(document, '$.status') IN ('queued', 'running', 'blocked') THEN 2\n"+" WHEN kind IN ('pull_request', 'check', 'reviewer', 'delivery') THEN 3\n"+" WHEN kind = 'construction' THEN 4\n"+" ELSE 5 END, repository, identity LIMIT ? OFFSET ?", project.Bytes(), project.Bytes(), limit, offset)
 	if err != nil {
 		return page, err
 	}
