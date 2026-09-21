@@ -685,7 +685,11 @@ func (client client) call(ctx context.Context, method string, params, output any
 	}
 	defer cancel()
 	before, err := inspectSocket(client.socketPath)
-	if err != nil || !before.same(client.socket) {
+	// The daemon deliberately rebinds this canonical socket during a clean
+	// handover. The path and its private parent remain the authority; the
+	// socket inode is generation-scoped and must not be pinned in a client
+	// that can outlive one daemon generation.
+	if err != nil {
 		return ErrInvalidClient
 	}
 	connection, err := (&net.Dialer{}).DialContext(ctx, "unix", client.socketPath)
