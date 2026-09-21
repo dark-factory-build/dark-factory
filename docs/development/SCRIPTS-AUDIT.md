@@ -25,7 +25,7 @@ repository/domain.
 | `factory-production-reviews.py` | PRODUCT | owner-host `gh` review collection feeding Production; issue #975 |
 | `factory-production.py` | PRODUCT | hard-coded `dark-factory-build/dark-factory` and local operator home; issue #976 |
 | `factory-publication.py` | DEV | pure publication-footer contract library |
-| `factory-release.example.json` | DEV | documented release fixture/config example |
+| `factory-release.example.json` | DEAD | no workflow, documentation, test, service-packaging path, or script references it |
 | `factory-release.py` | PRODUCT | release controller using operator `release_configs`, `gh`, and host hooks; issue #977 |
 | `factory-review-intake.py` | PRODUCT | legacy owner-only review controller and maintainer bridge; issue #978 |
 | `github-repo-settings.sh` | DEV | repository configuration script |
@@ -85,8 +85,8 @@ repository/domain.
 | `with-cloudflare-env.sh` | DEV | Cloudflare credential boundary |
 | `with-local-ci-lease.sh` | DEV | local gate lease wrapper |
 
-There is no deletion in this audit because every file is referenced by a
-workflow, documentation, test, launchd/service packaging path, or another
-script. PRODUCT follow-ups are tracked as one issue per script; each issue
+The DEAD set contains only `factory-release.example.json`; it had no
+repository consumer and is deleted by this change. PRODUCT follow-ups are
+tracked as one issue per script; each issue
 names the daemon or `factoryctl` home as the destination and the repository
 copy/legacy fixture set to delete after cutover.
