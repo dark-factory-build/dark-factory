@@ -321,7 +321,10 @@ reconcile its receipt without deploying with:
 the exact merged PR, current independent review, a healthy live probe for that
 SHA, and a complete prior-to-target source range. It writes only the verified
 receipt under the release lock; it does not invoke the deployment hook or
-change dispatch. Unresolved or running receipts must be settled first. When an
+change dispatch. Unresolved or running receipts must be settled first, by
+reconciling that PR or by naming it with `--supersede-pr` when the healthy
+observed build already contains it; this is the exit for a barrier left behind
+once a later build is installed. When an
 older blocked receipt is known to be historical, repeat `--supersede-pr N` for
 each receipt (up to 100); the controller verifies its exact merged SHA and
 strict ancestry before adding a provenance link to the verified reconciliation.

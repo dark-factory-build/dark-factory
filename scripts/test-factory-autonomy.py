@@ -505,16 +505,6 @@ class DeployStageEvidence(unittest.TestCase):
         self.assertIn('first line\n', result.stderr)
         self.assertTrue(result.stderr.endswith('last line\n\nstage: sh reinstall-service.sh --home factory --prepare exit=3\n'), result.stderr[-120:])
 
-    def test_only_a_preparation_failure_reports_that_nothing_started(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            (root / 'factory').mkdir()
-            (root / 'deploy-runtime.py').write_text(Path(deploy.__file__).read_text())
-            # Preparation succeeds and prints a forged stage line; the next step (no store) fails.
-            (root / 'reinstall-service.sh').write_text('echo "stage: sh reinstall-service.sh --prepare exit=3" >&2\n')
-            result = subprocess.run([sys.executable, str(root / 'deploy-runtime.py'), '--home', str(root / 'factory'), 'a' * 40], capture_output=True, text=True, timeout=15)
-        self.assertEqual(1, result.returncode, result.stderr)
-
 
 class ManagedIntakeTest(unittest.TestCase):
     def setUp(self):

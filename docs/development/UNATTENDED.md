@@ -225,8 +225,10 @@ blocked.
 Before deployment the release journal records the actually observed live SHA
 and maps every merged factory PR in the bounded ancestor range to its one
 App-rendered `Refs #N` or `Closes #N` footer. The App operation marker follows
-that footer and is accepted. Missing or ambiguous source links, incomplete
-range results, and unexpected live tips block deployment. On the first probe,
+that footer and is accepted, and it is what marks a body as factory-written: a
+marked body whose footer is malformed blocks deployment, while an unmarked PR
+without a valid footer is source-less and is skipped. Incomplete
+range results and unexpected live tips block deployment. On the first probe,
 an already-current live SHA becomes an explicit baseline with no historical
 issue sweep; an older observed SHA is mapped before deployment even when it is
 unhealthy. A non-ancestor baseline requires explicit

@@ -386,7 +386,7 @@ def clear_unresolved(journal, entry):
 
 
 def predeploy_blocked(receipt):
-    """Return whether a blocked receipt is known to predate the hook.
+    """Return whether a blocked receipt is known to predate any hook effect.
 
     Receipts written by the current controller carry an explicit phase.  The
     error checks preserve recovery for older receipts created by the
@@ -673,26 +673,25 @@ def reconcile(config, number, expected, supersede_prs=(), baseline_current=False
                          and unresolved.get("sha") == entry.get("sha"))):
             raise ReleaseError("journal receipt belongs to a different repository or hook configuration")
         matching_unresolved = False
+        supersede_prs = list(supersede_prs)
         if unresolved is not None:
             if (not isinstance(unresolved, dict) or not isinstance(unresolved.get("pr"), int)
                     or not SHA.fullmatch(str(unresolved.get("sha", "")))):
                 raise ReleaseError("release journal has an invalid unresolved deployment barrier")
-            if unresolved["pr"] != number:
+            # --supersede-pr may name the barrier: a healthy later build containing it settles it.
+            if unresolved["pr"] != number and unresolved["pr"] not in supersede_prs:
                 raise ReleaseError("an earlier unresolved deployment blocks reconciliation")
-            if (entry is None or entry.get("state") not in {"blocked", "running"}
-                    or entry.get("sha") != unresolved["sha"]):
+            if unresolved["pr"] == number and (entry is None or entry.get("state") not in {"blocked", "running"}
+                                               or entry.get("sha") != unresolved["sha"]):
                 raise ReleaseError("release receipt is not the unresolved deployment")
-            matching_unresolved = True
-        supersede_prs = list(supersede_prs)
+            matching_unresolved = unresolved["pr"] == number
         if len(supersede_prs) > MAX_SUPERSEDED_PRS or len(set(supersede_prs)) != len(supersede_prs):
             raise ReleaseError("superseded pull requests must be distinct and no more than 100")
         if any(type(pr) is not int or pr < 1 or pr == number for pr in supersede_prs):
             raise ReleaseError("superseded pull requests must be positive and cannot target the reconciled pull request")
-        if supersede_prs and any(unresolved is not None and unresolved.get("pr") == pr for pr in supersede_prs):
-            raise ReleaseError("an unresolved deployment cannot be superseded")
         for receipt_number, receipt in journal["releases"].items():
             if isinstance(receipt, dict) and receipt.get("state") == "running":
-                if not (matching_unresolved and str(receipt_number) == str(number) and receipt is entry):
+                if not (unresolved is not None and str(receipt_number) == str(unresolved["pr"])):
                     raise ReleaseError("release journal has an unresolved running deployment")
         pr, default, reviews, checks = gh_snapshot(config, number)
         sha = pr.get("mergeCommitSha")
@@ -742,13 +741,13 @@ def reconcile(config, number, expected, supersede_prs=(), baseline_current=False
         superseded_records = []
         for old_pr in supersede_prs:
             old = journal["releases"].get(str(old_pr))
+            barrier = unresolved is not None and unresolved["pr"] == old_pr
             if (not isinstance(old, dict) or old.get("pr") != old_pr
-                    or old.get("state") != "blocked"
-                    or not SHA.fullmatch(str(old.get("sha", "")))):
+                    # Only the barrier's receipt can still be running here: others were refused above.
+                    or old.get("state") not in {"blocked", "running"}
+                    or not SHA.fullmatch(str(old.get("sha", "")))
+                    or (barrier and old["sha"] != unresolved["sha"])):
                 raise ReleaseError("superseded receipt is missing, malformed, or not blocked")
-            old_unresolved = journal.get("unresolved_deployment")
-            if isinstance(old_unresolved, dict) and old_unresolved.get("pr") == old_pr:
-                raise ReleaseError("an unresolved deployment cannot be superseded")
             old_pr_data, _, _, _ = gh_snapshot(config, old_pr)
             old_sha = old_pr_data.get("mergeCommitSha")
             if (old_pr_data.get("state") != "MERGED" or old_pr_data.get("baseRefName") != config["base"]
@@ -759,6 +758,8 @@ def reconcile(config, number, expected, supersede_prs=(), baseline_current=False
             target_is_ancestor(config, old.get("sha"), expected)
             old["superseded_by"] = {"pr": number, "sha": expected,
                                      "source_pr": old_pr, "source_sha": old.get("sha")}
+            old["state"] = "blocked"
+            clear_unresolved(journal, old)
             superseded_records.append({"pr": old_pr, "sha": old.get("sha")})
         if superseded_records:
             combined = list(previous_superseded)
