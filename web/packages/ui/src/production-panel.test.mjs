@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createElement } from "react";
+import { createElement, useState } from "react";
 import { act, create } from "react-test-renderer";
 import { renderToStaticMarkup } from "react-dom/server";
 import { ProductionPanel } from "../dist/src/production-panel.js";
@@ -21,6 +21,19 @@ test("a selected completed item remains inspectable", () => {
   const markup = renderToStaticMarkup(createElement(ProductionPanel, { items: [active, completed], selected: "project:change:2", onSelect() {}, connected: true }));
   assert.match(markup, /Delivered/);
   assert.match(markup, /Work queue/);
+});
+
+test("a queue row selects controlled detail and review prose hides its receipt marker", async () => {
+  function Controlled() { const [selected, setSelected] = useState(); return createElement(ProductionPanel, { items: [active], selected, onSelect: setSelected, connected: true }); }
+  let tree;
+  await act(async () => { tree = create(createElement(Controlled)); });
+  await act(async () => { tree.root.findAllByType("button").find((node) => node.children.join("").includes("Machine")).props.onClick(); });
+  assert.match(JSON.stringify(tree.toJSON()), /Work queue/);
+  const marker = `<!-- dark-factory-operation:12345678-1234-1234-1234-123456789abc:${"e".repeat(64)} -->`;
+  const markup = renderToStaticMarkup(createElement(ProductionPanel, { items: [{ ...active, review: { ...active.review, findings: `Useful finding.\n${marker}` } }], selected: "project:change:1", onSelect() {}, connected: true }));
+  assert.match(markup, /Useful finding/);
+  assert.doesNotMatch(markup, /dark-factory-operation/);
+  await act(async () => tree.unmount());
 });
 
 test("switching tasks fences an old request and keeps the selected known task", async () => {
