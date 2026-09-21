@@ -9,7 +9,7 @@ const render = (props = {}) => renderToStaticMarkup(createElement(FactoryMainten
 
 test("maintenance keeps release, files, host and console observations separate", () => {
   const markup = render();
-  for (const heading of ["Available release", "Installed service files", "Running host", "Loaded hosted console"]) assert.match(markup, new RegExp(heading));
+  for (const heading of ["Available release", "Installed service files", "Running host", "Hosted console"]) assert.match(markup, new RegExp(heading));
   assert.match(markup, /Open release/);
   assert.match(markup, /scripts\/deploy-runtime\.py/);
   assert.doesNotMatch(markup, /up to date/i);
@@ -26,4 +26,13 @@ test("a new installed receipt cannot confirm an old running process", () => {
   const markup = render({ runtime: { ...build, source: "b".repeat(40) } });
   assert.doesNotMatch(markup, /running host matches/);
   assert.match(markup, /b{40}/);
+});
+
+test("delivery pagination exposes the remaining count outside the control", () => {
+  const deliveries = Array.from({ length: 9 }, (_, index) => ({ repository: "o/r", id: `delivery-${index}`, kind: "release", destination: `runtime-${index}`, revision: "a".repeat(40), state: "verified", pull_requests: [] }));
+  const markup = render({ deliveries });
+  assert.match(markup, /1 more delivery receipts available\./);
+  assert.match(markup, /aria-describedby="[^"]+"/);
+  assert.match(markup, />Show more</);
+  assert.doesNotMatch(markup, /Show more delivery evidence \(1 remaining\)/);
 });
