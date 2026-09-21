@@ -34,6 +34,14 @@ test("production panel uses a native bounded selector and does not mount every t
   assert.doesNotMatch(markup, /Work details/);
 });
 
+test("review prose removes only stored operation markers", () => {
+  const findings = "Useful finding.\n<!-- dark-factory-operation:deadbeef -->\nKeep this conclusion.";
+  const markup = renderToStaticMarkup(createElement(ProductionPanel, { items: [{ ...item, review: { ...item.review, findings } }], onSelect() {}, selected: "project:change:1", connected: true }));
+  assert.match(markup, /Useful finding\./);
+  assert.match(markup, /Keep this conclusion\./);
+  assert.doesNotMatch(markup, /dark-factory-operation|deadbeef/);
+});
+
 
 test("switching from a pending task to a known task fences the old failure", async () => {
   let reject;
