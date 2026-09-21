@@ -111,6 +111,7 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 		}
 		output = browserTaskSummary(task)
 	case "production":
+		_ = backend.owner.refreshProduction(ctx, project)
 		page, e := backend.store.Production(ctx, project, int(input.Offset), int(input.Limit))
 		if e != nil {
 			return result, mapBrowserError(e)

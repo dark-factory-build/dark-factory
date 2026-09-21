@@ -350,6 +350,34 @@ func (store *Store) RecordPublication(ctx context.Context, project ProjectID, ta
 	return tx.Commit(ctx)
 }
 
+// RecordProductionReview preserves the exact commit covered by a review.
+// Refreshes may move the live PR to a newer head; that older head is evidence,
+// not permission to rewrite the review onto the new source.
+func (store *Store) RecordProductionReview(ctx context.Context, project ProjectID, repo string, number uint64, review ProductionReview, at UnixMillis) error {
+	if project.zero() || !productionRepository.MatchString(repo) || number == 0 || number > 1<<53-1 || !productionSHA(review.Head) || !validOutcomeText(review.State, 64) || !validOutcomeText(review.Findings, 8192) || !productionURL(review.URL) {
+		return ErrInvalidValue
+	}
+	repo = strings.ToLower(repo)
+	tx, err := store.beginValidatedWrite(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Close()
+	var visual, body string
+	if err := tx.connection.QueryRowContext(ctx, `SELECT visual_id, document FROM production_records WHERE project_id = ? AND repository = ? AND kind = 'pull_request' AND identity = ?`, project.Bytes(), repo, strconv.FormatUint(number, 10)).Scan(&visual, &body); err != nil {
+		return tx.Rollback(err)
+	}
+	var pr ProductionPullRequest
+	if json.Unmarshal([]byte(body), &pr) != nil || pr.Number != number || !validProductionPull(pr) {
+		return tx.Rollback(ErrCorruptState)
+	}
+	pr.Review = review
+	if err := productionRecordOnConnection(ctx, tx.connection, project, repo, "pull_request", strconv.FormatUint(number, 10), visual, pr, at.Int64()); err != nil {
+		return tx.Rollback(err)
+	}
+	return tx.Commit(ctx)
+}
+
 // Current construction comes from Changes even after its worker finishes. The
 // projection replaces it only when normal publication records the association.
 const productionRows = `SELECT repository, kind, identity, visual_id, document, observed_at_ms FROM production_records WHERE project_id = ?

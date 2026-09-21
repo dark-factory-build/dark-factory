@@ -22,6 +22,25 @@ test("production view scopes same PR numbers and refuses stale review or merge-g
   assert.equal(machine.checks.some((check) => check.id === "ci-other-repo"), false);
 });
 
+test("a review for an older head is visibly stale", () => {
+  const current = "b".repeat(40);
+  const machine = Object.values(deriveProductionView([
+    record("pull_request", "7", "change:1", { number: 7, title: "Machine", head: current, state: "open", review: { head, state: "allow" } }),
+  ]).contraptions)[0];
+  assert.equal(machine.review.current, false);
+  assert.equal(machine.review.allowed, false);
+  assert.deepEqual(productionStages(machine), ["Review stale", "CI unknown"]);
+});
+
+test("a fresh daemon PR row is actionable without stale labels", () => {
+  const machine = Object.values(deriveProductionView([
+    record("repository", "owner/repo", "", {}, { observed_at: 200_000 }),
+    record("pull_request", "7", "change:1", { number: 7, title: "Machine", head, state: "open", review: { head, state: "allow" } }, { observed_at: 200_000 }),
+  ], 200_000).contraptions)[0];
+  assert.equal(machine.review.sourceFresh, true);
+  assert.doesNotMatch(productionStages(machine).join(" "), /stale/);
+});
+
 test("merged is incomplete until every known destination is verified", () => {
   const base = { number: 7, title: "Machine", head, merge: "d".repeat(40), state: "merged", review: { head, state: "allow" } };
   const incomplete = deriveProductionView([record("pull_request", "7", "change:1", base), record("delivery", "deploy-site", "", { kind: "site", destination: "production", revision: base.merge, state: "verified", verified_at: 20, pull_requests: [7] }), record("delivery", "deploy-runtime", "", { kind: "runtime", destination: "mac", revision: base.merge, state: "running", pull_requests: [7] })]).contraptions[key];
@@ -119,4 +138,11 @@ test("stage labels retain parallel review and CI and distinguish unverified deli
   assert.deepEqual(productionStages({ ...machine, review: { ...machine.review, state: "unknown" }, reviewers: [{ state: "running" }] }), ["Review running", "CI running"]);
   assert.deepEqual(productionStages({ ...machine, pullRequest: { ...machine.pullRequest, state: "merged" } }), ["Merged", "Delivery unverified"]);
   assert.deepEqual(productionStages({ ...machine, review: { ...machine.review, sourceFresh: false } }), ["Review stale", "CI stale"]);
+});
+
+test("merged work without a delivery destination leaves the active queue", () => {
+  const machine = Object.values(deriveProductionView([
+    record("pull_request", "7", "change:1", { number: 7, title: "Machine", head, merge: "b".repeat(40), state: "merged" }),
+  ]).contraptions)[0];
+  assert.equal(inProgressProduction(machine), false);
 });

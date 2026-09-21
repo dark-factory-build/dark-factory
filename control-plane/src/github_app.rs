@@ -570,6 +570,10 @@ pub(crate) struct PullRequestCandidate {
     pub(crate) head_sha: String,
     pub(crate) base_sha: String,
     pub(crate) base_ref: String,
+    pub(crate) title: String,
+    pub(crate) url: String,
+    pub(crate) head_ref: String,
+    pub(crate) state: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -6537,6 +6541,10 @@ fn pull_request_page(
             head_sha: pull.head.sha,
             base_sha: pull.base.sha,
             base_ref: pull.base.name,
+            title: pull.title,
+            url: pull.html_url,
+            head_ref: pull.head.name,
+            state: if pull.merged { "merged".to_owned() } else { pull.state },
         });
     }
     Ok(PullRequestPage {
