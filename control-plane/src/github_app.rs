@@ -3228,7 +3228,12 @@ impl CreatePullRequest {
                 return Err(OperationError::InvalidInput);
             }
         } else {
-            valid_exact_integer(self.issue_number)?;
+            let source_less = self.source_repository.is_none() && self.issue_number == 0;
+            if !source_less {
+                valid_exact_integer(self.issue_number)?;
+            } else if self.close_on_merge {
+                return Err(OperationError::InvalidInput);
+            }
         }
         valid_ref(&self.head)?;
         valid_ref(&self.base)?;
@@ -3258,6 +3263,16 @@ impl CreatePullRequest {
 
     fn marked_body(&self) -> Result<String, OperationError> {
         let cross_source = self.cross_repository_source();
+        if self.external_source_url.is_none() && cross_source.is_none() && self.issue_number == 0 {
+            let body = self.body.trim_end_matches(|character: char| {
+                character == '\n' || character == '\r' || character == ' ' || character == '\t'
+            });
+            return if body.is_empty() {
+                Ok(self.marker()?)
+            } else {
+                Ok(format!("{}\n\n{}", body, self.marker()?))
+            };
+        }
         let footer = if let Some(url) = &self.external_source_url {
             format!("Refs {url}")
         } else if let Some(source) = cross_source {
@@ -10981,6 +10996,18 @@ mod tests {
             .validate()
             .is_err()
         );
+        let mut operator = create.clone();
+        operator.issue_number = 0;
+        operator.close_on_merge = false;
+        operator.body = "Operator task carries its complete publication context.".into();
+        assert!(operator.validate().is_ok());
+        let operator_body = operator.marked_body().unwrap();
+        assert!(operator_body.contains(operator.body.as_str()));
+        assert!(!operator_body.contains("Refs #0"));
+        assert!(!operator_body.contains("Closes #"));
+        assert!(operator_body.ends_with(&operator.marker().unwrap()));
+        operator.close_on_merge = true;
+        assert!(operator.validate().is_err());
         assert!(
             CreatePullRequest {
                 external_source_url: None,

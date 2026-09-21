@@ -459,15 +459,15 @@ not in this run's directory takes its body the same way. Then go to the review.
 For GitHub-imported work, preserve its `FACTORY_SOURCE OWNER/REPO#NUMBER` marker in
 worker tasks and reuse that issue here. Observe its current state before
 publication; withdrawn or changed sources require reconciliation. Create a new
-tracking issue only when the task has no source issue.
+tracking issue only when another publication dependency requires one; an
+operator-sourced task normally has no source issue and needs no tracking issue.
 
-`create_pull_request` needs an issue. `create_issue` with `opid "$change_id" issue`, the
-task title (cut to 256 characters, the App's bound), and a body of the task
-text plus the change id; it returns the issue number. Then read
+For an operator-sourced task with no source issue, do not create a tracking
+issue. Read
 `observe_ref` for `main` again, immediately before the call, and use that
-answer: `create_pull_request` with `opid "$change_id" pr`, `issue_number` from that
-result, `head = branch`, `head_sha` = the last published commit, `base =
-main`, `close_on_merge = false` when acceptance requires deployment, `base_sha` = main's head as just read (the App verifies the base
+answer in `create_pull_request` with `opid "$change_id" pr`, `issue_number: 0`,
+`close_on_merge: false`, `head = branch`, `head_sha` = the last published commit, `base =
+main`, `base_sha` = main's head as just read (the App verifies the base
 branch is at that commit at that moment; `base_commit` is wrong whenever
 main moved, and a stale read is wrong whenever main moves between the read
 and the call), `draft = false`, the same title, and a body in this
@@ -475,6 +475,10 @@ repository's shape. An operation
 id belongs to the exact request it was first sent with, so a request the App
 refuses for its content cannot be corrected under the same id: that is a
 human request, not a retry.
+
+For a task with a source issue, reuse that issue as described above. The App
+requires its positive issue number and renders the source footer; only the
+operator-sourced path is source-less.
 
 - What changed and why: from the task and the diff, in prose.
 - Production-line delta: added minus deleted outside tests, docs and fixtures,
