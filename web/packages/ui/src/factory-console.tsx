@@ -226,6 +226,9 @@ export function FactoryConsole({
   const counters = factoryCounters(state);
   const agent = selectedAgent === undefined ? undefined : scopedState?.agents.get(selectedAgent.id);
   const selectedDetail = (detail === "floor" ? "needs-you" : detail) ?? (selectedAgent === undefined ? "needs-you" : "agent");
+  const [relatedTask, setRelatedTask] = useState<TaskItem>();
+  useEffect(() => { setRelatedTask(undefined); }, [selectedDetail, projectId]);
+  const inspectedTask = relatedTask ? state?.tasks.get(relatedTask.id) ?? relatedTask : (onDetail === undefined || selectedDetail === "queue") && !(selectedTask?.status === "queued" && onEditTask) ? selectedTask : undefined;
   const appearanceAgent = appearanceAgentId === undefined ? undefined : state?.agents.get(appearanceAgentId);
   const editError = edit !== undefined && state?.projects.has(edit.target) ? undefined : editErrorCopy(edit);
 
@@ -325,8 +328,8 @@ export function FactoryConsole({
                 />}
               />
             </div>
-            <div hidden={selectedDetail !== "production"}><ProductionPanel items={[...inProgressItems, ...productionItems.filter((item) => !inProgressProduction(item))]} selected={selectedProduction} onSelect={selectProduction} state={state} call={ready ? onProjectContent : undefined} connected={ready} error={[productionData.error, ...productionData.notices].filter(Boolean).join(" ")} overflow={productionData.overflow} loadMore={productionData.loadMore} onMission={(projectId, id) => { selectProject(projectId); setRequestedMission({ projectId, id }); onDetail?.("missions"); }} onAgent={ready ? onSelectAgent : undefined} onLoadTaskDetail={onLoadTaskDetail} onLoadTaskHistory={onLoadTaskHistory} /></div>
-            <div hidden={selectedDetail !== "missions"}><MissionsPanel production={productionItems} onProduction={selectProduction} requestedMission={requestedMission} onLoadTaskDetail={onLoadTaskDetail} onLoadTaskHistory={onLoadTaskHistory} state={state} projectId={projectId} active={selectedDetail === "missions"} call={ready ? onProjectContent : undefined} onProject={selectProject} onSelectAgent={ready ? onSelectAgent : undefined} onSelectTask={ready ? selectTask : undefined} /></div>
+            <div hidden={selectedDetail !== "production"}><ProductionPanel items={[...inProgressItems, ...productionItems.filter((item) => !inProgressProduction(item))]} selected={selectedProduction} onSelect={selectProduction} state={state} call={ready ? onProjectContent : undefined} connected={ready} error={[productionData.error, ...productionData.notices].filter(Boolean).join(" ")} overflow={productionData.overflow} loadMore={productionData.loadMore} loading={productionData.loading} active={selectedDetail === "production"} onMission={(projectId, id) => { selectProject(projectId); setRequestedMission({ projectId, id }); onDetail?.("missions"); }} onAgent={ready ? onSelectAgent : undefined} onOpenTask={setRelatedTask} /></div>
+            <div hidden={selectedDetail !== "missions"}><MissionsPanel production={productionItems} onProduction={selectProduction} requestedMission={requestedMission} state={state} projectId={projectId} active={selectedDetail === "missions"} call={ready ? onProjectContent : undefined} onProject={selectProject} onSelectAgent={ready ? onSelectAgent : undefined} onOpenTask={ready ? setRelatedTask : undefined} /></div>
             <div hidden={selectedDetail !== "queue"}>
               <QueuePanel
                 state={scopedState}
@@ -357,8 +360,9 @@ export function FactoryConsole({
                 onPanel={onAgentPanel}
               />}
             </div>
-            {(onDetail !== undefined && selectedDetail !== "queue") || selectedTask === undefined || (selectedTask.status === "queued" && onEditTask !== undefined) ? null : <ConsoleDialog key={selectedTask.id} label="Task details" title="TASK" onClose={() => onSelectTask?.(undefined)}>
-              <TaskDetail key={selectedTask.id} task={selectedTask} onLoadTaskDetail={onLoadTaskDetail} onLoadTaskHistory={onLoadTaskHistory} />
+            {inspectedTask === undefined ? null : <ConsoleDialog key={inspectedTask.id} label="Task details" title="TASK" onClose={() => { if (relatedTask) setRelatedTask(undefined); else onSelectTask?.(undefined); }}>
+              <TaskDetail key={inspectedTask.id} task={inspectedTask} onLoadTaskDetail={onLoadTaskDetail} onLoadTaskHistory={onLoadTaskHistory} />
+              {relatedTask?.status === "queued" && state?.tasks.has(relatedTask.id) && selectTask ? <button type="button" disabled={!ready} onClick={() => { setRelatedTask(undefined); selectTask(relatedTask.id); }}>Open in Tasks</button> : null}
             </ConsoleDialog>}
           </aside>
         </div>

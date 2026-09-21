@@ -1,6 +1,5 @@
-import { useEffect, useRef, useState } from "react";
-import type { AgentItem, StateView, TaskHistoryView, TaskItem } from "@dark-factory/client";
-import { TaskDetail, type TaskBrief } from "./console-sidebar.js";
+import { useEffect, useId, useRef, useState } from "react";
+import type { AgentItem, StateView, TaskItem } from "@dark-factory/client";
 import type { ProjectContentCall } from "./project-library.js";
 import { inProgressProduction, productionStages, type ProductionContraption, type ProductionDelivery } from "./production-view.js";
 
@@ -14,6 +13,7 @@ const observedAt = (value: number | undefined) => {
 /** The receipts recorded for one pull request's own deliveries. */
 function DeliveryEvidence({ deliveries, current = true }: { deliveries: readonly ProductionDelivery[]; current?: boolean }) {
   const [limit, setLimit] = useState(8);
+  const remaining = deliveries.length - limit, remainingId = useId();
   return <>{deliveries.length === 0 ? <p>No delivery evidence recorded.</p> : deliveries.slice(0, limit).map((delivery) => <details key={`${delivery.repository}:${delivery.id}`}>
     <summary style={{overflowWrap:"anywhere"}}>{delivery.destination} · {current ? delivery.state : `last recorded ${delivery.state}; not current confirmation`} · {delivery.pull_requests.length} linked PR{delivery.pull_requests.length === 1 ? "" : "s"}</summary>
     <p>{delivery.phase}{delivery.reason ? ` · ${delivery.reason}` : ""}</p>
@@ -23,7 +23,7 @@ function DeliveryEvidence({ deliveries, current = true }: { deliveries: readonly
     {href(delivery.url) ? <p><a href={delivery.url} target="_blank" rel="noreferrer">Open delivery</a></p> : null}
     <ul>{delivery.pull_requests.map((number) => <li key={number}><a href={`https://github.com/${delivery.repository}/pull/${number}`} target="_blank" rel="noreferrer">{delivery.repository} #{number}</a></li>)}</ul>
     {delivery.overflow ? <p>{delivery.overflow} additional links are outside this observation.</p> : null}
-  </details>)}{deliveries.length > limit ? <button type="button" onClick={() => setLimit((value) => value + 8)}>Show more delivery evidence ({deliveries.length - limit} remaining)</button> : null}</>;
+  </details>)}{remaining > 0 ? <><p id={remainingId}>{remaining} more delivery receipts available.</p><button type="button" aria-describedby={remainingId} onClick={() => setLimit((value) => value + 8)}>Show more</button></> : null}</>;
 }
 
 const reviewProse = (v: string) => v.replace(/(?:^|\n)<!-- dark-factory-operation:[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}:[0-9a-f]{64} -->\s*$/i, "").trim();
@@ -32,39 +32,40 @@ const title = (v: ProductionContraption) => v.pullRequest?.title || v.constructi
 const keyOf = (v: ProductionContraption) => `${v.projectId}:${v.visualId}`;
 const asTask = (v: Record<string, unknown>, project: string): TaskItem => ({ id: text(v.task_id) || text(v.id), project_id: text(v.project_id) || project, assigned_agent_id: text(v.assigned_agent_id), title: text(v.title) || "Untitled task", status: text(v.status) as TaskItem["status"] || "blocked", blocked_reason: text(v.blocked_reason) || undefined, priority: Number(v.priority) || 0, revision: BigInt(text(v.revision) || "0"), updated_at_ms: text(v.updated_at_ms) ? BigInt(text(v.updated_at_ms)) : undefined });
 
-export function ProductionPanel({ items, selected, onSelect, state, call, connected = true, error, overflow = 0, loadMore, onMission, onAgent, onLoadTaskDetail, onLoadTaskHistory }: {
-  items: readonly ProductionContraption[]; selected?: string; onSelect: (key: string) => void; state?: StateView; call?: ProjectContentCall; connected?: boolean; error?: string; overflow?: number; loadMore?: () => void; onMission?: (projectId: string, missionId: string) => void; onAgent?: (agent: AgentItem) => void; onLoadTaskDetail?: (task: TaskItem, peerOffset?: bigint, expectedHead?: bigint) => Promise<TaskBrief>; onLoadTaskHistory?: (task: TaskItem) => Promise<TaskHistoryView>;
+export function ProductionPanel({ items, selected, onSelect, state, call, connected = true, error, overflow = 0, loadMore, loading = false, active = true, onMission, onAgent, onOpenTask }: {
+  items: readonly ProductionContraption[]; selected?: string; onSelect: (key: string) => void; state?: StateView; call?: ProjectContentCall; connected?: boolean; error?: string; overflow?: number; loadMore?: () => void; loading?: boolean; active?: boolean; onMission?: (projectId: string, missionId: string) => void; onAgent?: (agent: AgentItem) => void; onOpenTask?: (task: TaskItem) => void;
 }) {
   const [shown, setShown] = useState(12), [selectedTaskId, setSelectedTaskId] = useState<string>(), [loadedTasks, setLoadedTasks] = useState<Record<string, TaskItem>>({}), [taskError, setTaskError] = useState("");
   const epoch = useRef(0), selectedTaskRef = useRef<string | undefined>(undefined);
-  const active = selected, item = items.find((v) => keyOf(v) === active), queue = items.filter(inProgressProduction), visible = queue.slice(0, shown);
+  const item = items.find((v) => keyOf(v) === selected), queue = items.filter(inProgressProduction), visible = queue.slice(0, shown);
   const taskFor = (v: ProductionContraption, id: string) => state?.tasks.get(id) ?? loadedTasks[`${v.projectId}:${id}`];
-  useEffect(() => { epoch.current++; selectedTaskRef.current = undefined; setSelectedTaskId(undefined); setTaskError(""); }, [active]);
+  useEffect(() => { epoch.current++; selectedTaskRef.current = undefined; setSelectedTaskId(undefined); setTaskError(""); }, [selected, connected, active]);
   useEffect(() => () => { epoch.current++; }, []);
   const inspect = (key: string) => { epoch.current++; selectedTaskRef.current = undefined; setSelectedTaskId(undefined); setTaskError(""); onSelect(key); };
   const back = () => onSelect("");
   const loadTask = async (entry: ProductionContraption, id: string) => {
-    if (!connected) return;
-    if (taskFor(entry, id)) { epoch.current++; selectedTaskRef.current = id; setSelectedTaskId(id); setTaskError(""); return; }
+    if (!connected || !active || !onOpenTask) return;
+    const known = taskFor(entry, id);
+    if (known) { epoch.current++; selectedTaskRef.current = id; setSelectedTaskId(undefined); setTaskError(""); onOpenTask(known); return; }
     if (!call) { setTaskError("Task details are unavailable."); return; }
     const generation = ++epoch.current; selectedTaskRef.current = id; setSelectedTaskId(id); setTaskError("");
-    try { const result = await call("task_read", { project_id: entry.projectId, task_id: id }); if (generation === epoch.current && active === keyOf(entry) && selectedTaskRef.current === id) setLoadedTasks((old) => ({ ...old, [`${entry.projectId}:${id}`]: asTask(result, entry.projectId) })); } catch { if (generation === epoch.current) setTaskError("Task details are unavailable."); }
+    try { const result = await call("task_read", { project_id: entry.projectId, task_id: id }); if (generation === epoch.current && selected === keyOf(entry) && selectedTaskRef.current === id) { const task = asTask(result, entry.projectId); setLoadedTasks((old) => ({ ...old, [`${entry.projectId}:${id}`]: task })); setSelectedTaskId(undefined); onOpenTask(task); } } catch { if (generation === epoch.current) setTaskError("Task details are unavailable."); }
   };
-  const project = item && state?.projects.get(item.projectId), owner = item?.tasks.map((id) => taskFor(item, id)).find(Boolean)?.assigned_agent_id, ownerAgent = owner ? state?.agents.get(owner) : undefined, selectedTask = item && selectedTaskId ? taskFor(item, selectedTaskId) : undefined;
+  const project = item && state?.projects.get(item.projectId), owner = item?.tasks.map((id) => taskFor(item, id)).find(Boolean)?.assigned_agent_id, ownerAgent = owner ? state?.agents.get(owner) : undefined;
   return <section className="dfConsoleSidebar__panel dfProduction" aria-label="Production inspection">
     <div className="dfProduction__heading"><h2>Production</h2><span>{queue.length} in progress{overflow > 0 ? " (loaded)" : ""}</span></div>
     {!connected || error || overflow > 0 ? <details className="dfProduction__notice"><summary>{!connected ? "Last observed state" : error ? "Observation needs attention" : "Partial observation"}</summary>{!connected ? <p>Disconnected. This is the last observed state.</p> : null}{error ? <p role="alert">{error}</p> : null}{overflow > 0 ? <p>{overflow} more records are available.</p> : null}</details> : null}
     {item ? <article className="dfProduction__detail" aria-label={`Production details for ${title(item)}`}>
-      <button type="button" className="dfProduction__back" onClick={back}>← Work queue</button><h3>{title(item)}</h3><p className="dfProduction__stages">{productionStages(item).map((stage) => <span key={stage}>{stage}</span>)}</p><p>{item.nextAction}</p>
+      <button type="button" className="dfConsoleBack" onClick={back}>← Back to Production</button><h3>{title(item)}</h3><p className="dfProduction__stages">{productionStages(item).map((stage) => <span className="dfStatus" data-stage={stage} key={stage}>{stage}</span>)}</p><p>{item.nextAction}</p>
       <details><summary>Evidence</summary><p>{project?.name || item.projectId} · {item.repository}{item.pullRequest ? ` · PR #${item.pullRequest.number}` : ""}</p>{item.pullRequest ? <p>Revision <code>{item.pullRequest.head}</code> · {item.pullRequest.merge ? `merged ${item.pullRequest.merge}` : item.pullRequest.state === "closed" ? "closed without merge" : "not merged"}{item.pullRequest.merge_queue ? ` · ${item.pullRequest.merge_queue}` : ""}</p> : null}{item.pullRequest && href(item.pullRequest.url) ? <p><a href={item.pullRequest.url} target="_blank" rel="noreferrer">Open pull request</a> <a href={`${item.pullRequest.url}/files`} target="_blank" rel="noreferrer">Open diff</a></p> : null}{item.construction?.head ? <p>Revision <code>{item.construction.head}</code></p> : null}{item.construction?.blocked_reason ? <p role="alert">{item.construction.blocked_reason}</p> : null}{item.linksOverflow ? <p>Additional task or mission links are outside this observation.</p> : null}
         <details><summary>Review · {item.review.state}</summary><p>{item.review.current ? "Current head" : item.review.head ? "Stale head" : "No head recorded"}{item.review.sourceFresh ? "" : " · observation is stale or unavailable"}</p><ReviewNotes findings={item.review.findings} />{href(item.review.url) ? <a href={item.review.url} target="_blank" rel="noreferrer">Open review</a> : null}{item.reviewers.map((v) => <details key={v.id}><summary>{v.name} · {v.provider} · {v.state}</summary><p>Head <code>{v.head}</code></p><ReviewNotes findings={v.findings ?? ""} />{href(v.url) ? <a href={v.url} target="_blank" rel="noreferrer">Evidence</a> : null}</details>)}</details>
         <details><summary>Checks · {item.checks.length}</summary>{item.checks.length ? item.checks.map((v) => <details key={`${v.repository}:${v.id}`}><summary>{v.name} · {v.state} · {v.conclusion || "pending"}</summary><p>{v.scope} · {v.applicable ? "current head" : "separate revision"}{v.overflow ? ` · +${v.overflow} omitted` : ""}{v.pull_requests.length > 1 ? ` · shared by ${v.pull_requests.length} PRs` : ""}</p>{v.jobs.map((job) => <p key={job.id}>{job.name} · {job.state} · {job.conclusion}{href(job.url) ? <> · <a href={job.url} target="_blank" rel="noreferrer">Job</a></> : null}</p>)}{href(v.url) ? <a href={v.url} target="_blank" rel="noreferrer">Open check</a> : null}</details>) : <p>No check evidence recorded.</p>}</details>
         <details><summary>Deployments · {item.deliveries.length}</summary><DeliveryEvidence deliveries={item.deliveries} current={connected && !error} /></details>
       </details>
       {ownerAgent ? <button type="button" disabled={!connected || !onAgent} onClick={() => onAgent?.(ownerAgent)}>Talk to {ownerAgent.name}</button> : null}{item.missions.map((id) => <button key={id} type="button" disabled={!connected || !onMission} onClick={() => onMission?.(item.projectId, id)}>Open mission {id.slice(0, 8)}</button>)}
-      {item.tasks.length ? <details><summary>Tasks · {item.tasks.length}</summary>{item.tasks.map((id) => { const task = taskFor(item, id); return <button key={id} type="button" disabled={!connected} onClick={() => void loadTask(item, id)}>{task?.title || id} · {task?.status || "inspect"}</button>; })}{selectedTaskId && !selectedTask && !taskError ? <p role="status">Loading task…</p> : null}{taskError ? <p role="alert">{taskError}</p> : null}{selectedTask ? <details><summary>Task outcome</summary><TaskDetail task={selectedTask} onLoadTaskDetail={onLoadTaskDetail} onLoadTaskHistory={onLoadTaskHistory} /></details> : null}</details> : null}
+      {item.tasks.length ? <details><summary>Tasks · {item.tasks.length}</summary>{item.tasks.map((id) => { const task = taskFor(item, id); return <button key={id} type="button" disabled={!connected || !onOpenTask} onClick={() => void loadTask(item, id)}>Open {task?.title || id} · {task?.status || "inspect"}</button>; })}{selectedTaskId && !taskError ? <p role="status">Loading task…</p> : null}{taskError ? <p role="alert">{taskError}</p> : null}</details> : null}
     </article> : <>
-      {visible.length ? <div className="dfProduction__queue">{visible.map((v) => <button key={keyOf(v)} type="button" disabled={!connected} className="dfProduction__row" onClick={() => inspect(keyOf(v))}><strong>{title(v)}</strong><span className="dfProduction__stages">{productionStages(v).map((stage) => <i key={stage}>{stage}</i>)}</span><small>{v.nextAction}</small></button>)}</div> : <p className="dfFactoryConsole__empty">No work is in progress.</p>}{queue.length > shown ? <button type="button" disabled={!connected} onClick={() => setShown((n) => n + 12)}>Show {Math.min(12, queue.length - shown)} more</button> : null}{overflow > 0 && loadMore ? <button type="button" disabled={!connected} onClick={loadMore}>Load more observations</button> : null}
+      {visible.length ? <div className="dfProduction__queue">{visible.map((v) => <button key={keyOf(v)} type="button" disabled={!connected} className="dfProduction__row" onClick={() => inspect(keyOf(v))}><strong>{title(v)}</strong><span className="dfProduction__stages">{productionStages(v).map((stage) => <span className="dfStatus" data-stage={stage} key={stage}>{stage}</span>)}</span><small>{v.nextAction}</small></button>)}</div> : <p className="dfFactoryConsole__empty">{loading ? "Loading work…" : "No work is in progress."}</p>}{queue.length > shown ? <button type="button" disabled={!connected} onClick={() => setShown((n) => n + 12)}>Show more</button> : null}{queue.length <= shown && overflow > 0 && loadMore ? <button type="button" disabled={!connected || loading} onClick={loadMore}>{loading ? "Loading…" : "Show more"}</button> : null}
     </>}
   </section>;
 }

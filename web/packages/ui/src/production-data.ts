@@ -17,6 +17,7 @@ export function useProduction(projects: readonly string[], call: ProjectContentC
   const [release, setRelease] = useState<PublishedRelease>();
   const [records, setRecords] = useState<ProductionRecord[]>([]);
   const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
   const [overflow, setOverflow] = useState(0);
   const [pages, setPages] = useState(32);
   const generation = useRef(0);
@@ -30,7 +31,7 @@ export function useProduction(projects: readonly string[], call: ProjectContentC
     let stopped = false, busy = false;
     const refresh = async () => {
       if (busy || stopped || document.visibilityState === "hidden") return;
-      busy = true;
+      busy = true; setLoading(true);
       try {
         const next: ProductionRecord[] = [];
         let remaining = 0;
@@ -52,7 +53,7 @@ export function useProduction(projects: readonly string[], call: ProjectContentC
         }
         if (!stopped) { runtimeGeneration.current = current; setRuntime(currentRuntime); setRelease(currentRelease); setRecords(next); setOverflow(remaining); setError(""); }
       } catch { if (!stopped) setError("Production observation unavailable. Previously read work is retained."); }
-      finally { busy = false; }
+      finally { busy = false; if (!stopped) setLoading(false); }
     };
     void refresh();
     const timer = setInterval(() => { void refresh(); }, 30000);
@@ -64,5 +65,5 @@ export function useProduction(projects: readonly string[], call: ProjectContentC
   const notices = scoped.filter((record) => record.kind === "repository" && (record.document.unavailable || record.document.overflow)).map((record) => `${record.repository}: ${record.document.unavailable ? "some external evidence is unavailable" : "observation is bounded"}${record.document.overflow ? "; additional external records exist" : ""}.`);
   // The runtime identity belongs to this connection and is dropped when it goes;
   // the published release is a repository fact that no reconnect invalidates.
-  return { runtime: connected && runtimeGeneration.current === generation.current ? runtime : undefined, release, notices, records: records.filter((record) => projects.includes(record.project_id)), error, overflow, loadMore: () => setPages((value) => value + 32) };
+  return { runtime: connected && runtimeGeneration.current === generation.current ? runtime : undefined, release, notices, records: records.filter((record) => projects.includes(record.project_id)), error, overflow, loading: connected && loading, loadMore: () => setPages((value) => value + 32) };
 }

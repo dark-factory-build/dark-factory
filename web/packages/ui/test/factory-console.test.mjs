@@ -2785,3 +2785,21 @@ test("new-work admission reports acknowledgement and preserves active work", asy
   assert.match(JSON.stringify(tree.toJSON()), fixtureState.factory.dispatch_enabled ? /New work paused\. Active processes continue\./ : /New work resumed\./);
   await act(async () => tree.unmount());
 });
+
+test("Missions and Production share the task dialog and preserve their origin on close", async () => {
+  const { MissionsPanel } = await import("../dist/src/missions-panel.js");
+  const { ProductionPanel } = await import("../dist/src/production-panel.js");
+  const historical = { ...fixtureState.tasks.get(ids.task), id: "fe".repeat(16), status: "succeeded", title: "Delivered historical task" };
+  for (const [origin, Panel] of [["missions", MissionsPanel], ["production", ProductionPanel]]) {
+    const navigations = [], selections = []; let tree;
+    await act(async () => { tree = create(createElement(FactoryConsole, {status: "ready", state: fixtureState, detail: origin, onDetail: value => navigations.push(value), onSelectTask: id => selections.push(id), onLoadTaskDetail: async task => ({taskId: task.id, revision: task.revision, instruction: "Retained instruction", feedback: "", peerQuestions: []})})); });
+    await act(async () => tree.root.findByType(Panel).props.onOpenTask(historical));
+    assert.equal(tree.root.findAllByProps({"aria-label": "Task details"}).length, 1);
+    assert.equal(tree.root.findByProps({"aria-label": "Work details"}).findByType("h3").children.join(""), historical.title);
+    await act(async () => tree.root.findByProps({"aria-label": "Task details"}).props.onClose());
+    assert.equal(tree.root.findAllByProps({"aria-label": "Task details"}).length, 0);
+    assert.deepEqual(navigations, []);
+    assert.deepEqual(selections, []);
+    await act(async () => tree.unmount());
+  }
+});
