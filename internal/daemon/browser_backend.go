@@ -178,7 +178,7 @@ func (backend *browserBackend) Authenticate(ctx context.Context, request browser
 }
 
 func (backend *browserBackend) StateSnapshot(ctx context.Context, rawClient [browserprotocol.ClientIDSize]byte) (browserprotocol.StateSnapshot, error) {
-	_, release, _, err := backend.authorize(ctx, rawClient, kernel.BrowserCapabilityObserve)
+	_, release, client, err := backend.authorize(ctx, rawClient, kernel.BrowserCapabilityObserve)
 	if err != nil {
 		return browserprotocol.StateSnapshot{}, err
 	}
@@ -187,7 +187,7 @@ func (backend *browserBackend) StateSnapshot(ctx context.Context, rawClient [bro
 	if err != nil {
 		return browserprotocol.StateSnapshot{}, mapBrowserError(err)
 	}
-	return projectPublicSnapshot(snapshot, backend.owner.providerAccountDefaults)
+	return projectPublicSnapshotForClient(snapshot, backend.owner.providerAccountDefaults, client.CapabilityMask.Has(kernel.BrowserCapabilityAdministration))
 }
 
 func (backend *browserBackend) HumanRequestDetail(ctx context.Context, rawClient [browserprotocol.ClientIDSize]byte, request browserprotocol.HumanRequestDetailGet) (browserprotocol.HumanRequestDetail, error) {
@@ -1306,6 +1306,10 @@ func projectBrowserAuthentication(client kernel.BrowserClient) (browser.Authenti
 // projectPublicSnapshot is the one positive-allowlist conversion from the
 // kernel public snapshot to the wire. Nothing private is reachable from here.
 func projectPublicSnapshot(snapshot kernel.PublicSnapshot, providerDefaults func(string, string) (string, string, string)) (browserprotocol.StateSnapshot, error) {
+	return projectPublicSnapshotForClient(snapshot, providerDefaults, true)
+}
+
+func projectPublicSnapshotForClient(snapshot kernel.PublicSnapshot, providerDefaults func(string, string) (string, string, string), administration bool) (browserprotocol.StateSnapshot, error) {
 	result := browserprotocol.StateSnapshot{
 		Head:          decimalSequence(snapshot.Head),
 		Factory:       projectFactory(snapshot.Factory),
@@ -1325,7 +1329,7 @@ func projectPublicSnapshot(snapshot kernel.PublicSnapshot, providerDefaults func
 		homes[item.ID] = item.Home
 	}
 	for _, item := range snapshot.Agents {
-		result.Agents = append(result.Agents, projectAgent(item, homes[item.AccountID], providerDefaults))
+		result.Agents = append(result.Agents, projectAgentForClient(item, homes[item.AccountID], providerDefaults, administration))
 	}
 	for _, item := range snapshot.Tasks {
 		if item.AssignedAgentID == (kernel.AgentID{}) {
@@ -1345,7 +1349,11 @@ func projectPublicSnapshot(snapshot kernel.PublicSnapshot, providerDefaults func
 		result.HumanRequests = append(result.HumanRequests, projected)
 	}
 	for _, item := range snapshot.Accounts {
-		result.Accounts = append(result.Accounts, browserprotocol.AccountItem{ID: item.ID.String(), Provider: item.Provider, Home: item.Home, Label: item.Label, Revision: decimalRevision(item.Revision)})
+		home := item.Home
+		if !administration {
+			home = ""
+		}
+		result.Accounts = append(result.Accounts, browserprotocol.AccountItem{ID: item.ID.String(), Provider: item.Provider, Home: home, Label: item.Label, Revision: decimalRevision(item.Revision)})
 	}
 	return result, nil
 }
@@ -1366,6 +1374,10 @@ func projectProject(item kernel.ProjectSummary) browserprotocol.ProjectItem {
 // the one that account will actually launch with; empty means the operator's
 // own login, which is what the daemon falls back to.
 func projectAgent(item kernel.AgentSummary, configHome string, providerDefaults func(string, string) (string, string, string)) browserprotocol.AgentItem {
+	return projectAgentForClient(item, configHome, providerDefaults, true)
+}
+
+func projectAgentForClient(item kernel.AgentSummary, configHome string, providerDefaults func(string, string) (string, string, string), administration bool) browserprotocol.AgentItem {
 	defaultModel, defaultEffort, source := providerDefaults(item.Provider, configHome)
 	effectiveModel, effectiveEffort := item.Model, item.ReasoningEffort
 	if effectiveModel == "" {
@@ -1376,6 +1388,9 @@ func projectAgent(item kernel.AgentSummary, configHome string, providerDefaults 
 	}
 	if item.Model != "" {
 		source = "agent"
+	}
+	if !administration {
+		source = ""
 	}
 	projected := browserprotocol.AgentItem{ID: item.ID.String(), ProjectID: item.ProjectID.String(), Name: item.Name, Role: item.Role, Provider: item.Provider, Paused: browserprotocol.Bool(item.Paused), Archived: browserprotocol.Bool(item.Archived), Appearance: browserprotocol.SpriteAppearance{Automatic: browserprotocol.Bool(item.Appearance.Automatic), Skin: item.Appearance.Skin, Hair: item.Appearance.Hair, HairColour: item.Appearance.HairColour, Face: item.Appearance.Face, Outfit: item.Appearance.Outfit, ClothesColour: item.Appearance.ClothesColour, Shoes: item.Appearance.Shoes, Tool: item.Appearance.Tool, Headwear: item.Appearance.Headwear}, Model: item.Model, ReasoningEffort: item.ReasoningEffort, EffectiveModel: effectiveModel, EffectiveReasoningEffort: effectiveEffort, ModelSource: source, Revision: decimalRevision(item.Revision),
 		IdlePolicy: string(item.Idle.Policy), IdleAfterSeconds: item.Idle.AfterSeconds, IdleInstruction: item.Idle.Instruction, IdleRunBudget: item.Idle.RunBudget, IdleRunsUsed: item.Idle.RunsUsed}

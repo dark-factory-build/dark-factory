@@ -236,3 +236,33 @@ func TestProjectAgentReadsTheSelectedAccountsDefaults(t *testing.T) {
 		t.Fatalf("served account = %q", item.AccountID)
 	}
 }
+
+func TestProjectPublicSnapshotHidesAccountPathsFromObservers(t *testing.T) {
+	accountID, err := kernel.AccountIDFromBytes(mustIDBytes(t, testID(54)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	accountHome := "/Users/operator/.codex-second"
+	snapshot := kernel.PublicSnapshot{
+		Accounts: []kernel.AccountSummary{{ID: accountID, Provider: "codex", Home: accountHome, Label: "second", Revision: mustRevision(t, 1)}},
+		Agents:   []kernel.AgentSummary{{ID: mustAgentID(t, testID(55)), ProjectID: mustProjectID(t, testID(56)), Name: "worker", Role: "worker", Provider: "codex", AccountID: accountID, Revision: mustRevision(t, 1)}},
+	}
+	defaults := func(string, string) (string, string, string) {
+		return "gpt-7-nova", "high", accountHome + "/config.toml"
+	}
+
+	observer, err := projectPublicSnapshotForClient(snapshot, defaults, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if observer.Accounts[0].Home != "" || observer.Agents[0].ModelSource != "" {
+		t.Fatalf("observer received private paths: accounts=%+v agents=%+v", observer.Accounts, observer.Agents)
+	}
+	administrator, err := projectPublicSnapshotForClient(snapshot, defaults, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if administrator.Accounts[0].Home != accountHome || administrator.Agents[0].ModelSource != accountHome+"/config.toml" {
+		t.Fatalf("administrator lost private paths: accounts=%+v agents=%+v", administrator.Accounts, administrator.Agents)
+	}
+}
