@@ -41,7 +41,9 @@ func EffectiveTaskText(provider Provider, title, body string) string {
 // retainedSourceReviewTaskSQL mirrors ParseRetainedSourceReviewTask's first
 // line tokenization for the admission query.
 func retainedSourceReviewTaskSQL() string {
-	normalized := `ltrim(replace(replace(replace(CASE WHEN a.provider <> 'shell' AND t.body = '' THEN t.title ELSE t.body END, char(9), ' '), char(10), ' '), char(13), ' '), ' ')`
+	taskText := `CASE WHEN a.provider <> 'shell' AND t.body = '' THEN t.title ELSE t.body END`
+	firstLine := `substr(` + taskText + `, 1, instr(` + taskText + ` || char(10), char(10)) - 1)`
+	normalized := `ltrim(replace(replace(` + firstLine + `, char(9), ' '), char(13), ' '), ' ')`
 	first := `ltrim(substr(` + normalized + `, 8), ' ')`
 	return `(substr(` + normalized + `, 1, 6) = 'review' AND substr(` + normalized + `, 7, 1) = ' ' AND substr(` + first + `, 1, 7) = 'handoff' AND (substr(` + first + `, 8, 1) = ' ' OR substr(` + first + `, 8, 1) = ''))`
 }

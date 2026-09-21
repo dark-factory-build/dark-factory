@@ -101,6 +101,13 @@ func TestRetainedSourceReviewRouteBlocksUnsupportedTaskCreation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	factory, err := store.Factory(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.SetDispatch(ctx, factory.Revision, true, mustTime(t, 12)); err != nil {
+		t.Fatal(err)
+	}
 	body := reviewHandoffTask()
 	if _, err := store.EnqueueTask(ctx, NewTask{
 		ID: taskID(t, 4), ProjectID: project.ID, AssignedAgentID: shell.ID, IncarnationID: incarnationID(t, 4),
@@ -114,6 +121,17 @@ func TestRetainedSourceReviewRouteBlocksUnsupportedTaskCreation(t *testing.T) {
 	}, mustTime(t, 14))
 	if err != nil || task.Status != TaskQueued {
 		t.Fatalf("review handoff task assigned to Claude worker = %+v, err=%v", task, err)
+	}
+	ordinary, err := store.EnqueueTask(ctx, NewTask{
+		ID: taskID(t, 6), ProjectID: project.ID, AssignedAgentID: shell.ID, IncarnationID: incarnationID(t, 6),
+		Title: "ordinary newline task", Body: "review\nhandoff " + strings.Repeat("a", 32), Priority: 1,
+	}, mustTime(t, 15))
+	if err != nil || ordinary.Status != TaskQueued {
+		t.Fatalf("newline-separated ordinary shell task = %+v, err=%v", ordinary, err)
+	}
+	result, err := store.AdmitNext(ctx, admissionKeys(t, 16, nil), mustTime(t, 16))
+	if err != nil || !result.Admitted() || result.Run.AgentID != shell.ID {
+		t.Fatalf("newline-separated ordinary shell admission = %+v, err=%v", result, err)
 	}
 }
 
