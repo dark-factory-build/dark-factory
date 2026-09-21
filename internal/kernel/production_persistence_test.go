@@ -1,9 +1,11 @@
 package kernel
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
@@ -32,6 +34,16 @@ func TestProductionPersistsFinalizedConstructionPublicationAndRebase(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Make the retained Change's committed head differ from its base so this
+	// fixture exercises the attention flag rather than the no-op path.
+	moved, err := NewCommitID(change.Selection.format, bytes.Repeat([]byte{0xd2}, change.Selection.format.oidLength()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.writer.ExecContext(ctx, `UPDATE changes SET head_commit = ? WHERE id = ?`, moved.Bytes(), change.ID.Bytes()); err != nil {
+		t.Fatal(err)
+	}
+	change.HeadCommit = &moved
 	page, err := store.Production(ctx, terminal.ProjectID, 0, 8)
 	if err != nil {
 		t.Fatal(err)
@@ -39,6 +51,10 @@ func TestProductionPersistsFinalizedConstructionPublicationAndRebase(t *testing.
 	construction := productionRecord(t, page, "construction", "")
 	if construction == nil || construction.VisualID != "change:"+change.ID.String() {
 		t.Fatalf("finalized construction = %+v", construction)
+	}
+	var constructionDocument map[string]any
+	if err := json.Unmarshal(construction.Document, &constructionDocument); err != nil || constructionDocument["needs_you"] != true {
+		t.Fatalf("stale unpublished construction needs_you = %#v, err=%v", constructionDocument["needs_you"], err)
 	}
 	hexHead := hex.EncodeToString(change.HeadCommit.Bytes())
 	branch := "factory/" + change.ID.String()[:12]
@@ -72,6 +88,9 @@ func TestProductionPersistsFinalizedConstructionPublicationAndRebase(t *testing.
 	published := productionRecord(t, page, "pull_request", "7")
 	if published == nil || published.VisualID != identity.VisualID || !containsString(published.Tasks, terminal.TaskID.String()) {
 		t.Fatalf("published association = %+v", published)
+	}
+	if construction := productionRecord(t, page, "construction", ""); construction != nil {
+		t.Fatalf("publication did not clear needs_you construction = %+v", construction)
 	}
 
 	rebased := pr

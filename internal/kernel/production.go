@@ -12,7 +12,12 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 )
+
+// PublicationAttentionAfter is the quiet period before a successful Change
+// without a publication receipt needs another operator/overseer look.
+const PublicationAttentionAfter = 3 * time.Minute
 
 var productionRepository = regexp.MustCompile(`^[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}$`)
 
@@ -342,7 +347,10 @@ func (store *Store) RecordPublication(ctx context.Context, project ProjectID, ta
 const productionRows = `SELECT repository, kind, identity, visual_id, document, observed_at_ms FROM production_records WHERE project_id = ?
  UNION ALL SELECT COALESCE(r.name, ''), 'construction', lower(hex(c.id)), 'change:' || lower(hex(c.id)),
 		json_object('title', t.title, 'phase', c.phase, 'status', t.status, 'head', lower(hex(c.head_commit)), 'task_id', lower(hex(t.id)), 'blocked_reason', t.blocked_reason,
-			'has_changes', CASE WHEN c.head_commit IS NULL OR c.base_commit IS NULL THEN NULL WHEN c.head_commit = c.base_commit THEN json('false') ELSE json('true') END), c.updated_at_ms
+			'has_changes', CASE WHEN c.head_commit IS NULL OR c.base_commit IS NULL THEN NULL WHEN c.head_commit = c.base_commit THEN json('false') ELSE json('true') END,
+			'needs_you', CASE WHEN t.status = 'succeeded' AND c.head_commit IS NOT NULL AND c.base_commit IS NOT NULL AND c.head_commit <> c.base_commit
+				AND c.updated_at_ms + ? <= CAST(strftime('%s','now') AS INTEGER) * 1000
+				THEN json('true') ELSE json('false') END), c.updated_at_ms
  FROM changes c JOIN tasks t ON t.id = c.task_id
  LEFT JOIN task_repository_bindings b ON b.task_id = t.id
  LEFT JOIN project_repositories r ON r.id = b.repository_id
@@ -358,13 +366,14 @@ func (store *Store) Production(ctx context.Context, project ProjectID, offset, l
 	}
 	defer tx.Close()
 	page := ProductionPage{Records: []ProductionRecord{}}
-	if err := tx.connection.QueryRowContext(ctx, "SELECT count(*) FROM ("+productionRows+")", project.Bytes(), project.Bytes()).Scan(&page.Total); err != nil {
+	attentionAfter := PublicationAttentionAfter.Milliseconds()
+	if err := tx.connection.QueryRowContext(ctx, "SELECT count(*) FROM ("+productionRows+")", project.Bytes(), attentionAfter, project.Bytes()).Scan(&page.Total); err != nil {
 		return page, err
 	}
 	// Load delivery evidence before merged PRs so bounded reads can identify completed work.
 	rows, err := tx.connection.QueryContext(ctx, "SELECT * FROM ("+productionRows+") ORDER BY CASE\n"+
 		" WHEN kind = 'repository' THEN 0\n"+
-		" WHEN kind = 'pull_request' AND json_extract(document, '$.state') = 'open' THEN 1\n"+" WHEN kind = 'construction' AND json_extract(document, '$.status') IN ('queued', 'running', 'blocked') THEN 2\n"+" WHEN kind = 'delivery' THEN 3\n"+" WHEN kind IN ('pull_request', 'check', 'reviewer') THEN 4\n"+" WHEN kind = 'construction' THEN 5\n"+" ELSE 6 END, repository, identity LIMIT ? OFFSET ?", project.Bytes(), project.Bytes(), limit, offset)
+		" WHEN kind = 'pull_request' AND json_extract(document, '$.state') = 'open' THEN 1\n"+" WHEN kind = 'construction' AND json_extract(document, '$.status') IN ('queued', 'running', 'blocked') THEN 2\n"+" WHEN kind = 'delivery' THEN 3\n"+" WHEN kind IN ('pull_request', 'check', 'reviewer') THEN 4\n"+" WHEN kind = 'construction' THEN 5\n"+" ELSE 6 END, repository, identity LIMIT ? OFFSET ?", project.Bytes(), attentionAfter, project.Bytes(), limit, offset)
 	if err != nil {
 		return page, err
 	}
