@@ -249,7 +249,11 @@ func unpublishedPublicationTargets(ctx context.Context, connection *sql.Conn, pr
 		  AND c.head_commit <> c.base_commit AND c.updated_at_ms + ? <= ?
 		  AND NOT EXISTS (SELECT 1 FROM publication_tasks AS p WHERE p.change_id = c.id)
 		  AND NOT EXISTS (SELECT 1 FROM tasks AS prior WHERE prior.assigned_agent_id = ?
-		      AND instr(prior.body, 'publication_change=' || lower(hex(c.id)) || ':' || c.revision || ':' || lower(hex(c.head_commit))) > 0)
+		      AND (instr(prior.body, 'publication_change=' || lower(hex(c.id)) || ':' || c.revision || ':' || lower(hex(c.head_commit))) > 0
+		           OR (instr(prior.body, 'publication attention overflow: full reconciliation required') > 0
+		               AND c.updated_at_ms <= prior.updated_at_ms)
+		           OR (prior.body = (SELECT idle_instruction FROM agents WHERE agents.id = prior.assigned_agent_id)
+		               AND c.updated_at_ms <= prior.updated_at_ms)))
 		ORDER BY c.updated_at_ms, c.id LIMIT 32`, projectID.Bytes(), PublicationAttentionAfter.Milliseconds(), at, agentID.Bytes())
 	if err != nil {
 		return nil, err
@@ -289,15 +293,32 @@ func overseerWakeInstructionWithPublication(provider Provider, instruction strin
 		markers = append(markers, "publication_change="+target.ChangeID.String()+":"+strconv.FormatInt(target.ChangeRevision.Int64(), 10)+":"+target.HeadCommitDigest)
 	}
 	body += " Publication attention: task_ids=" + strings.Join(tasks, ",") + "; change_ids=" + strings.Join(changes, ",") + "; " + strings.Join(markers, " ") + ". Reconcile publication for each exact task and Change."
+	if publicationBodyFits(provider, body) {
+		return body, true
+	}
+	// The durable candidates remain queryable, so an overfull causal envelope
+	// must become a bounded full reconciliation rather than a failed wake.
+	body, fits = overseerWakeInstruction(provider, instruction, nil, prior, true)
+	if !fits {
+		return body, false
+	}
+	attention := body + " publication attention overflow: full reconciliation required."
+	if publicationBodyFits(provider, attention) {
+		return attention, true
+	}
+	return body, true
+}
+
+func publicationBodyFits(provider Provider, body string) bool {
 	if provider == ProviderClaudeCode {
 		_, err := runner.PrepareClaudeTask([]byte(body))
-		return body, err == nil
+		return err == nil
 	}
 	limit := runner.MaxProviderTaskBytes
 	if provider == ProviderCodex {
 		limit = runner.MaxCodexTaskBytes
 	}
-	return body, byteLen(body) <= limit
+	return byteLen(body) <= limit
 }
 
 func overseerWakeInstruction(provider Provider, instruction string, targets []TaskID, prior *TaskID, full bool) (string, bool) {
