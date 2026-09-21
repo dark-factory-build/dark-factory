@@ -83,10 +83,11 @@ type maintainerPullRequest struct {
 }
 
 func (daemon *Daemon) pullRequestObservation(ctx context.Context, repository string, githubID uint64, known []kernel.ProductionPullRequest) (kernel.ProductionObservation, error) {
-	open, err := daemon.readMaintainerPullRequests(ctx, repository, githubID, map[string]any{"repository": repository, "page": 1, "per_page": productionRefreshPRLimit})
+	page, err := daemon.readMaintainerPullRequests(ctx, repository, githubID, map[string]any{"repository": repository, "page": 1, "per_page": productionRefreshPRLimit})
 	if err != nil {
 		return kernel.ProductionObservation{}, err
 	}
+	open := page.PullRequests
 	seen := make(map[uint64]bool, len(open))
 	for _, pull := range open {
 		seen[pull.Number] = true
@@ -97,7 +98,7 @@ func (daemon *Daemon) pullRequestObservation(ctx context.Context, repository str
 		}
 		exact, err := daemon.readMaintainerPullRequests(ctx, repository, githubID, map[string]any{"repository": repository, "page": 1, "per_page": 1, "pull_number": prior.Number})
 		if err == nil {
-			open = append(open, exact...)
+			open = append(open, exact.PullRequests...)
 		}
 	}
 	prior := make(map[uint64]kernel.ProductionReview, len(known))
@@ -105,6 +106,7 @@ func (daemon *Daemon) pullRequestObservation(ctx context.Context, repository str
 		prior[pull.Number] = pull.Review
 	}
 	result := kernel.ProductionObservation{Repository: repository, PullRequests: []kernel.ProductionPullRequest{}}
+	result.Overflow = productionPullRequestOverflow(page)
 	for _, value := range open {
 		if value.Number == 0 || len(value.Head) != 40 || strings.Trim(value.Head, "0123456789abcdef") != "" {
 			return kernel.ProductionObservation{}, fmt.Errorf("invalid pull request head")
@@ -116,6 +118,13 @@ func (daemon *Daemon) pullRequestObservation(ctx context.Context, repository str
 		result.PullRequests = append(result.PullRequests, pr)
 	}
 	return result, nil
+}
+
+func productionPullRequestOverflow(page maintainerPullRequestPage) int {
+	if page.NextPage != nil {
+		return 1
+	}
+	return 0
 }
 
 func productionPullRequest(value maintainerPullRequest) kernel.ProductionPullRequest {
@@ -136,17 +145,22 @@ func productionPullRequest(value maintainerPullRequest) kernel.ProductionPullReq
 	return kernel.ProductionPullRequest{Number: value.Number, Title: value.Title, URL: value.URL, Head: value.Head, HeadRepository: value.HeadRepository, Branch: value.Branch, Base: value.Base, State: state, Review: review}
 }
 
-func (daemon *Daemon) readMaintainerPullRequests(ctx context.Context, repository string, githubID uint64, arguments map[string]any) ([]maintainerPullRequest, error) {
+type maintainerPullRequestPage struct {
+	PullRequests []maintainerPullRequest `json:"pull_requests"`
+	NextPage     *int                    `json:"next_page"`
+}
+
+func (daemon *Daemon) readMaintainerPullRequests(ctx context.Context, repository string, githubID uint64, arguments map[string]any) (maintainerPullRequestPage, error) {
 	request, err := json.Marshal(map[string]any{
 		"jsonrpc": "2.0", "id": 1, "method": "tools/call",
 		"params": map[string]any{"name": "list_pull_requests", "arguments": arguments},
 	})
 	if err != nil {
-		return nil, err
+		return maintainerPullRequestPage{}, err
 	}
 	response, err := daemon.github.MCP(ctx, request, map[string]uint64{repository: githubID})
 	if err != nil {
-		return nil, err
+		return maintainerPullRequestPage{}, err
 	}
 	var envelope struct {
 		Result struct {
@@ -156,20 +170,26 @@ func (daemon *Daemon) readMaintainerPullRequests(ctx context.Context, repository
 		Error json.RawMessage `json:"error"`
 	}
 	if json.Unmarshal(response, &envelope) != nil || envelope.Result.IsError || len(envelope.Error) != 0 {
-		return nil, fmt.Errorf("invalid pull request response")
+		return maintainerPullRequestPage{}, fmt.Errorf("invalid pull request response")
 	}
-	var page struct {
-		PullRequests []maintainerPullRequest `json:"pull_requests"`
+	page, err := parseMaintainerPullRequestPage(envelope.Result.Content)
+	if err != nil {
+		return maintainerPullRequestPage{}, err
 	}
-	if json.Unmarshal(envelope.Result.Content, &page) != nil || len(page.PullRequests) > productionRefreshPRLimit {
-		return nil, fmt.Errorf("invalid pull request page")
+	return page, nil
+}
+
+func parseMaintainerPullRequestPage(content []byte) (maintainerPullRequestPage, error) {
+	var page maintainerPullRequestPage
+	if json.Unmarshal(content, &page) != nil || len(page.PullRequests) > productionRefreshPRLimit || (page.NextPage != nil && (*page.NextPage < 2 || *page.NextPage > 1000)) {
+		return maintainerPullRequestPage{}, fmt.Errorf("invalid pull request page")
 	}
 	for _, value := range page.PullRequests {
 		if value.Number == 0 || len(value.Head) != 40 || strings.Trim(value.Head, "0123456789abcdef") != "" {
-			return nil, fmt.Errorf("invalid pull request head")
+			return maintainerPullRequestPage{}, fmt.Errorf("invalid pull request head")
 		}
 	}
-	return page.PullRequests, nil
+	return page, nil
 }
 
 func (daemon *Daemon) knownProductionPulls(ctx context.Context, project kernel.ProjectID, repository string) ([]kernel.ProductionPullRequest, error) {

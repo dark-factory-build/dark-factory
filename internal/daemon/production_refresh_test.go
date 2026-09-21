@@ -44,3 +44,26 @@ func TestProductionRefreshConsumesExactMaintainerPullShapeForMergedPR(t *testing
 		t.Fatalf("pull = %+v", pull)
 	}
 }
+
+func TestProductionRefreshPreservesPullRequestOverflow(t *testing.T) {
+	pulls := make([]maintainerPullRequest, 100)
+	for index := range pulls {
+		pulls[index] = maintainerPullRequest{Number: uint64(index + 1), Head: strings.Repeat("a", 40)}
+	}
+	payload, err := json.Marshal(maintainerPullRequestPage{PullRequests: pulls, NextPage: intPointer(2)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, err := parseMaintainerPullRequestPage(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.PullRequests) != 100 || page.NextPage == nil || *page.NextPage != 2 {
+		t.Fatalf("page = %+v", page)
+	}
+	if productionPullRequestOverflow(page) != 1 {
+		t.Fatal("paginated page was not marked incomplete")
+	}
+}
+
+func intPointer(value int) *int { return &value }
