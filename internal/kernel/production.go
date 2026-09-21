@@ -264,12 +264,12 @@ func linkProductionChange(ctx context.Context, c *sql.Conn, project ProjectID, r
 	}
 	var change, task []byte
 	if strings.HasPrefix(pr.Branch, "factory/") && len(pr.Branch) == 20 && pr.Head != "" {
-		err = c.QueryRowContext(ctx, `SELECT id, task_id FROM changes WHERE project_id = ? AND substr(lower(hex(id)), 1, 12) = ? AND lower(hex(head_commit)) = ?`, project.Bytes(), strings.TrimPrefix(pr.Branch, "factory/"), pr.Head).Scan(&change, &task)
+		err = c.QueryRowContext(ctx, `SELECT id, task_id FROM changes WHERE project_id = ? AND substr(lower(hex(id)), 1, 12) = ? AND lower(hex(head_commit)) = ? GROUP BY project_id HAVING count(*) = 1`, project.Bytes(), strings.TrimPrefix(pr.Branch, "factory/"), pr.Head).Scan(&change, &task)
 		if err != nil && err != sql.ErrNoRows {
 			return "", err
 		}
 		if err == sql.ErrNoRows {
-			err = c.QueryRowContext(ctx, `SELECT c.id, c.task_id FROM changes c WHERE c.project_id = ? AND substr(lower(hex(c.id)), 1, 12) = ? AND EXISTS (SELECT 1 FROM publication_tasks p JOIN tasks t ON t.id = p.task_id AND t.project_id = p.project_id JOIN agents a ON a.id = t.assigned_agent_id AND a.project_id = t.project_id AND a.role = 'orchestrator' WHERE p.project_id = ? AND p.repository = ? AND p.pull_number = ?)`, project.Bytes(), strings.TrimPrefix(pr.Branch, "factory/"), project.Bytes(), repo, pr.Number).Scan(&change, &task)
+			err = c.QueryRowContext(ctx, `SELECT c.id, c.task_id FROM changes c WHERE c.project_id = ? AND substr(lower(hex(c.id)), 1, 12) = ? AND EXISTS (SELECT 1 FROM publication_tasks p JOIN tasks t ON t.id = p.task_id AND t.project_id = p.project_id JOIN agents a ON a.id = t.assigned_agent_id AND a.project_id = t.project_id AND a.role = 'orchestrator' WHERE p.project_id = ? AND p.repository = ? AND p.pull_number = ?) GROUP BY c.project_id HAVING count(*) = 1`, project.Bytes(), strings.TrimPrefix(pr.Branch, "factory/"), project.Bytes(), repo, pr.Number).Scan(&change, &task)
 			if err != nil && err != sql.ErrNoRows {
 				return "", err
 			}

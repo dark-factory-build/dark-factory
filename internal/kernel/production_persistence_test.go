@@ -207,6 +207,43 @@ func TestProductionPublicationUsesOwnedChangeForTransformedHead(t *testing.T) {
 			if unrelatedChange != nil {
 				t.Fatalf("unrelated publication acquired Change %x", unrelatedChange)
 			}
+			// Two valid Changes may share the shortened branch prefix.
+			collisionTask, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 246), IncarnationID: incarnationID(t, 247), ProjectID: terminal.ProjectID, AssignedAgentID: terminal.AgentID, Priority: 100, Title: "colliding Change"}, mustTime(t, 82))
+			if err != nil {
+				t.Fatal(err)
+			}
+			collisionBytes := change.ID.Bytes()
+			collisionBytes[15] ^= 1
+			collision, err := ChangeIDFromBytes(collisionBytes)
+			if err != nil {
+				t.Fatal(err)
+			}
+			admission, err := store.AdmitNext(ctx, admissionKeys(t, 210, &collision), mustTime(t, 82))
+			if err != nil || admission.Run == nil || admission.Run.TaskID != collisionTask.ID {
+				t.Fatalf("collision admission = %+v, %v", admission, err)
+			}
+			prepared, err := store.RecordChangePrepared(ctx, collision, mustRevision(t, 1), *change.Selection, mustTime(t, 82))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.MarkChangeAvailable(ctx, collision, prepared.Revision, change.Selection.commit, mustTime(t, 82)); err != nil {
+				t.Fatal(err)
+			}
+			ambiguous := pr
+			ambiguous.Number = 9
+			ambiguous.URL = "https://github.com/example/factory/pull/9"
+			if err := store.RecordPublication(ctx, terminal.ProjectID, publisher.ID, "example/factory", ambiguous, mustTime(t, 83)); err != nil {
+				t.Fatal(err)
+			}
+			page, err = store.Production(ctx, terminal.ProjectID, 0, 8)
+			if err != nil || productionRecord(t, page, "pull_request", "9").VisualID != "example/factory#9" {
+				t.Fatalf("ambiguous publication = %+v, %v", page, err)
+			}
+			var linked int
+			if err := store.writer.QueryRowContext(ctx, `SELECT count(*) FROM publication_tasks WHERE project_id = ? AND repository = 'example/factory' AND pull_number = 9 AND change_id IS NOT NULL`, terminal.ProjectID.Bytes()).Scan(&linked); err != nil || linked != 0 {
+				t.Fatalf("ambiguous Change links = %d, %v", linked, err)
+			}
+
 		})
 	}
 }
