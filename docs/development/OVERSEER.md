@@ -516,9 +516,11 @@ launching a nested provider from the worker sandbox.
 
 Host operators can still invoke `scripts/cold-review.sh` directly with the
 repository, PR, exact head, pinned base and body file. Optional exact-head gate
-evidence supplements rather than replaces required checks. Blocking findings
-need a concrete reproducer or reachable code path through the current guards;
-unavailable read-only checks are deferred delivery conditions, not defects.
+evidence supplements rather than replaces required checks. Screenshots are
+illustrative only and never blocking evidence; UI correctness is established
+by render tests and source behavior. Blocking findings need a concrete
+reproducer or reachable code path through the current guards; unavailable
+read-only checks are deferred delivery conditions, not defects.
 
 - Unresolved: observe the supplied operation and report its concrete host
   infrastructure failure. Do not manufacture a verdict or start another review.
