@@ -189,14 +189,3 @@ export function deriveProductionView(records: readonly ProductionRecord[], now =
   }
   return { contraptions, checks, deliveries, reviewers };
 }
-
-
-/** Shared executions appear once even when several projects refer to them. */
-export function sharedDeliveries(view: ProductionView): readonly ProductionDelivery[] {
-  const shared = new Map<string, ProductionDelivery>();
-  for (const delivery of Object.values(view.deliveries).sort(deliveryOrder)) {
-    const key = `${delivery.repository}:${delivery.id}`;
-    if (!shared.has(key)) shared.set(key, delivery);
-  }
-  return [...shared.values()];
-}

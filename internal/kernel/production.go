@@ -84,6 +84,8 @@ func canonicalProductionRecord(item *ProductionRecord) error {
 	}
 	target := document
 	if item.Kind == "repository" {
+		// Repository rows written before the maintenance panel was removed still
+		// carry that object; normalizing it converges the legacy migration below.
 		target, _ = document["maintenance"].(map[string]any)
 	}
 	old, _ := target["destination"].(string)
@@ -168,25 +170,10 @@ func productionRecordOnConnection(ctx context.Context, c *sql.Conn, project Proj
 	return err
 }
 
-func validProductionMaintenance(value *ProductionMaintenance) bool {
-	if value == nil {
-		return true
-	}
-	if !validOutcomeText(value.Destination, 256) || !validOutcomeText(value.State, 64) || !validOutcomeText(value.Available.Version, 128) || !validOutcomeText(value.Available.State, 64) || !productionURL(value.Available.URL) {
-		return false
-	}
-	for _, build := range []ProductionBuild{value.Installed, value.Running} {
-		if !validOutcomeText(build.Version, 256) || !validOutcomeText(build.Source, 64) || !validOutcomeText(build.Target, 64) || !validOutcomeText(build.BuildID, 128) || !validOutcomeText(build.State, 64) {
-			return false
-		}
-	}
-	return true
-}
-
 // RecordProductionObservation accepts facts only from the operator authority.
 // An unavailable read updates the source's health without erasing prior work.
 func (store *Store) RecordProductionObservation(ctx context.Context, project ProjectID, observation ProductionObservation, at UnixMillis) error {
-	if project.zero() || !validProductionMaintenance(observation.Maintenance) || !productionRepository.MatchString(observation.Repository) || observation.ObservedAt < 1 || observation.ObservedAt > at.Int64()+5000 || observation.Overflow < 0 || !validOutcomeText(observation.Unavailable, 256) || len(observation.PullRequests) > 256 || len(observation.Checks) > 256 || len(observation.Reviewers) > 256 || len(observation.Deliveries) > 128 {
+	if project.zero() || !productionRepository.MatchString(observation.Repository) || observation.ObservedAt < 1 || observation.ObservedAt > at.Int64()+5000 || observation.Overflow < 0 || !validOutcomeText(observation.Unavailable, 256) || len(observation.PullRequests) > 256 || len(observation.Checks) > 256 || len(observation.Reviewers) > 256 || len(observation.Deliveries) > 128 {
 		return ErrInvalidValue
 	}
 	observation.Repository = strings.ToLower(observation.Repository)
@@ -242,7 +229,7 @@ func (store *Store) RecordProductionObservation(ctx context.Context, project Pro
 			return tx.Rollback(err)
 		}
 	}
-	if err := write("repository", observation.Repository, "", map[string]any{"unavailable": observation.Unavailable, "overflow": observation.Overflow, "maintenance": observation.Maintenance}); err != nil {
+	if err := write("repository", observation.Repository, "", map[string]any{"unavailable": observation.Unavailable, "overflow": observation.Overflow}); err != nil {
 		return tx.Rollback(err)
 	}
 	return tx.Commit(ctx)

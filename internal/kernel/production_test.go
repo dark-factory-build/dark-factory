@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"reflect"
 	"strings"
 	"testing"
 )
@@ -86,32 +85,27 @@ func TestProductionPersistsRevisionEvidenceWithoutRewinding(t *testing.T) {
 	}
 }
 
-func TestProductionMaintenanceRoundTripsAndInvalidObservationRollsBack(t *testing.T) {
+func TestProductionHealthRoundTripsAndInvalidObservationRollsBack(t *testing.T) {
 	store, _, project, _ := newAdmissionStore(t, RoleOrchestrator, 2)
 	defer store.Close()
 	ctx := context.Background()
-	maintenance := &ProductionMaintenance{Destination: "production", State: "verified"}
-	maintenance.Available.Version = "0.5.0"
-	maintenance.Available.URL = "https://example.test/releases/0.5.0"
-	maintenance.Available.State = "available"
-	maintenance.Installed = ProductionBuild{Version: "0.4.0", Source: strings.Repeat("a", 40), Target: "darwin/arm64", BuildID: strings.Repeat("b", 64), Release: true, State: "installed"}
-	maintenance.Running = ProductionBuild{Version: "0.4.0", Source: strings.Repeat("a", 40), Target: "darwin/arm64", BuildID: strings.Repeat("b", 64), Release: true, State: "ready"}
-	observation := ProductionObservation{Repository: "example/maintenance", ObservedAt: 20, Maintenance: maintenance}
+	observation := ProductionObservation{Repository: "example/health", ObservedAt: 20, Unavailable: "jobs", Overflow: 3}
 	if err := store.RecordProductionObservation(ctx, project.ID, observation, mustTime(t, 20)); err != nil {
 		t.Fatal(err)
 	}
 	page, err := store.Production(ctx, project.ID, 0, 8)
 	if err != nil || len(page.Records) != 1 {
-		t.Fatalf("maintenance page = %+v, err=%v", page, err)
+		t.Fatalf("health page = %+v, err=%v", page, err)
 	}
 	var envelope struct {
-		Maintenance ProductionMaintenance `json:"maintenance"`
+		Unavailable string `json:"unavailable"`
+		Overflow    int    `json:"overflow"`
 	}
 	if err := json.Unmarshal(page.Records[0].Document, &envelope); err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(envelope.Maintenance, *maintenance) {
-		t.Fatalf("maintenance roundtrip = %+v, want %+v", envelope.Maintenance, *maintenance)
+	if envelope.Unavailable != "jobs" || envelope.Overflow != 3 {
+		t.Fatalf("health roundtrip = %+v", envelope)
 	}
 
 	bad := observation
@@ -129,7 +123,7 @@ func TestProductionMaintenanceRoundTripsAndInvalidObservationRollsBack(t *testin
 	}
 	for _, record := range page.Records {
 		if record.Repository == "example/rollback" {
-			t.Fatalf("rolled-back maintenance record = %+v", record)
+			t.Fatalf("rolled-back health record = %+v", record)
 		}
 	}
 }
@@ -269,8 +263,7 @@ func TestProductionCanonicalizesLegacyRuntimeDestinationsAndDeduplicates(t *test
 	if !strings.Contains(retained, `"state":"blocked"`) {
 		t.Fatal("legacy migration rewound newer evidence")
 	}
-	maintenance := &ProductionMaintenance{Destination: path, State: "ready"}
-	observation := ProductionObservation{Repository: "example/factory", ObservedAt: 20, Maintenance: maintenance,
+	observation := ProductionObservation{Repository: "example/factory", ObservedAt: 20,
 		Deliveries: []ProductionDelivery{{ID: legacyID, Kind: "release", Destination: path, Revision: revision, State: "verified", PullRequests: []uint64{7, 8}}}}
 	if err := store.RecordProductionObservation(ctx, project.ID, observation, mustTime(t, 20)); err != nil {
 		t.Fatal(err)
