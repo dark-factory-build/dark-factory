@@ -346,10 +346,23 @@ func initHome(ctx context.Context, home string) (result Result, resultErr error)
 }
 
 func inspectHome(ctx context.Context, home string) (result Result, resultErr error) {
-	if _, err := inspectStable(ctx, home, phaseBeforeDoctorSecond); err != nil {
-		return Result{}, err
+	if _, err := inspectStable(ctx, home, phaseBeforeDoctorSecond); err == nil {
+		return Result{State: Ready}, nil
+	} else {
+		// Doctor also proves a stopped operational home after it has acquired
+		// project, Change, or terminal-run members. The fresh-home census above
+		// remains the stricter path for bootstrap; the retained-home validator
+		// checks the populated census and database without modifying it.
+		opened, openErr := openOperationalHome(ctx, home)
+		if openErr == nil {
+			closeErr := opened.Close()
+			if closeErr == nil {
+				return Result{State: Ready}, nil
+			}
+			return Result{}, errors.Join(err, closeErr)
+		}
+		return Result{}, errors.Join(err, openErr)
 	}
-	return Result{State: Ready}, nil
 }
 
 func inspectStable(ctx context.Context, home string, secondPhase phase) (treeSnapshot, error) {
