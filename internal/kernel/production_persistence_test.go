@@ -273,6 +273,21 @@ func TestProductionObservationUsesVerifiedHeadRepositoryForTransformedHead(t *te
 		t.Fatal(err)
 	}
 	pr := ProductionPullRequest{Number: 7, Title: "Ship the transformed tree", URL: "https://github.com/example/factory/pull/7", Head: strings.Repeat("b", 40), HeadRepository: "example/factory", Branch: "factory/" + change.ID.String()[:12], Base: "main", State: "open", Review: ProductionReview{Head: strings.Repeat("b", 40), State: "allow"}}
+	for _, repository := range []string{"", "other/factory"} {
+		if _, err := store.writer.ExecContext(ctx, `UPDATE repository_source_identities SET publication_repository = ? WHERE repository_id = (SELECT repository_id FROM task_repository_bindings WHERE task_id = ?)`, repository, terminal.TaskID.Bytes()); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.RecordProductionObservation(ctx, terminal.ProjectID, ProductionObservation{Repository: "example/factory", ObservedAt: 79, PullRequests: []ProductionPullRequest{pr}}, mustTime(t, 79)); err != nil {
+			t.Fatal(err)
+		}
+		page, err := store.Production(ctx, terminal.ProjectID, 0, 8)
+		if err != nil || containsString(productionRecord(t, page, "pull_request", "7").Tasks, terminal.TaskID.String()) {
+			t.Fatalf("unverified task repository linked producer: %+v, %v", page, err)
+		}
+	}
+	if _, err := store.writer.ExecContext(ctx, `UPDATE repository_source_identities SET publication_repository = 'example/factory' WHERE repository_id = (SELECT repository_id FROM task_repository_bindings WHERE task_id = ?)`, terminal.TaskID.Bytes()); err != nil {
+		t.Fatal(err)
+	}
 	if err := store.RecordProductionObservation(ctx, terminal.ProjectID, ProductionObservation{Repository: "example/factory", ObservedAt: 80, PullRequests: []ProductionPullRequest{pr}}, mustTime(t, 80)); err != nil {
 		t.Fatal(err)
 	}
