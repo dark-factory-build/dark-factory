@@ -196,7 +196,7 @@ func TestPTYResizeRejectsNonPTYAndClosedMaster(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	spec, err := PrepareExecSpec(ExecSpec{Target: "/bin/sh", Args: []string{"-c", "sleep 2"}, Env: []string{"PATH=/usr/bin:/bin", "LANG=C", "TERM=xterm"}, Cwd: ptyFixture.cwd})
+	spec, err := PrepareExecSpec(ExecSpec{Target: "/bin/sh", Args: []string{"-c", "sleep 30"}, Env: []string{"PATH=/usr/bin:/bin", "LANG=C", "TERM=xterm"}, Cwd: ptyFixture.cwd})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -220,6 +220,9 @@ func TestPTYResizeRejectsNonPTYAndClosedMaster(t *testing.T) {
 	// The owner no longer has a usable master, but still owns the live child;
 	// discard the closed descriptor before ordinary lifecycle cleanup.
 	ptyChild.ptyMaster = nil
+	if err := ptyChild.signalGroup(unix.SIGTERM); err != nil {
+		t.Fatalf("terminate closed-master fixture: %v", err)
+	}
 	if _, err := ptyChild.FinishAfterExit(2 * time.Second); err != nil {
 		t.Fatal(err)
 	}
