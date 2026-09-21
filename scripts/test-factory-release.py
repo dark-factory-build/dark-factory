@@ -655,6 +655,33 @@ class ReleaseFixtures(unittest.TestCase):
             self.assertEqual(receipt["state"], "running")
             self.assertEqual(release.load(journal)["unresolved_deployment"]["sha"], SHA)
 
+    def test_hook_that_reports_nothing_started_leaves_no_barrier(self):
+        real_run = release.run
+        def failing(code, at):
+            def hook(argv, *args, **kwargs):
+                if argv[:2] == ["gh", "api"]:
+                    return json.dumps({"object": {"sha": SHA}})
+                if at == "verify" and argv[0] != "/bin/echo":
+                    return ""
+                return real_run([sys.executable, "-c", "import sys; sys.exit(%d)" % code])
+            return hook
+        for code, at, barrier in ((75, "deploy", False), (1, "deploy", True), (75, "verify", True)):
+            with self.subTest(code=code, at=at), tempfile.TemporaryDirectory() as directory:
+                journal = Path(directory) / "release.json"
+                cfg = config(journal)
+                cfg["verify_argv"] = ["/bin/echo"]
+                with mock.patch.object(release, "gh_snapshot", return_value=snapshot()), \
+                     mock.patch.object(release, "review_gate"), \
+                     mock.patch.object(release, "probe", return_value={"sha": OLD, "healthy": True}), \
+                     mock.patch.object(release, "range_sources", return_value=([], "range")), \
+                     mock.patch.object(release, "run", side_effect=failing(code, at)), \
+                     self.assertRaisesRegex(release.ReleaseError, "exit=%d" % code):
+                    release.once(cfg, 633)
+                stored = release.load(journal)
+                self.assertEqual("blocked", stored["releases"]["633"]["state"])
+                self.assertEqual(barrier, "unresolved_deployment" in stored)
+                self.assertEqual(not barrier, release.predeploy_blocked(stored["releases"]["633"]))
+
     def test_explicit_recovery_clears_barrier_and_allows_subsequent_release(self):
         with tempfile.TemporaryDirectory() as directory:
             journal = Path(directory) / "release.json"

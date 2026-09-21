@@ -31,6 +31,7 @@ SHA = re.compile(r"^[0-9a-f]{40}$")
 MAX_RANGE_COMMITS = 100
 MAX_RANGE_PULLS = 100
 MAX_SUPERSEDED_PRS = 100
+HOOK_NOT_STARTED = 75  # deploy hook exit status: failed before any destructive effect
 GENERATOR_TRAILER = re.compile(
     r"(?mi)^[ \t]*(?:Generated with Codex\.?|🤖 Generated with \[Claude Code\]\(https://claude\.com/claude-code\))[ \t]*$"
 )
@@ -59,7 +60,9 @@ def run(argv, timeout=60, env=None):
     except OSError as exc:
         raise ReleaseError(f"command failed: {argv[0]}: {exc.strerror}") from exc
     if process.returncode:
-        raise ReleaseError(f"command failed: {' '.join(Path(arg).name for arg in argv[:2])} exit={process.returncode}: {failure_tail(stderr)}")
+        error = ReleaseError(f"command failed: {' '.join(Path(arg).name for arg in argv[:2])} exit={process.returncode}: {failure_tail(stderr)}")
+        error.returncode = process.returncode
+        raise error
     return stdout
 
 
@@ -623,13 +626,21 @@ def once(config, number, retry=False):
         # ``--latest`` invocation replay it against the same runtime.
         record_unresolved(journal, entry, "deployment outcome is ambiguous; inspect before retrying")
         atomic_json(journal_path, journal)
+        hook_ended = False
         try:
             run(config["deploy_argv"] + [sha], timeout=None)
+            hook_ended = True
             value = verify(config, sha)
         except ReleaseError as exc:
             entry["state"] = "blocked"
             entry["error"] = str(exc)
-            record_unresolved(journal, entry, entry["error"])
+            if not hook_ended and getattr(exc, "returncode", None) == HOOK_NOT_STARTED:
+                # The hook's own exit status, not its output, says it failed
+                # before any effect: an ordinary --retry or a later release may follow.
+                entry["phase"] = "predeploy"
+                clear_unresolved(journal, entry)
+            else:
+                record_unresolved(journal, entry, entry["error"])
             atomic_json(journal_path, journal)
             raise
         entry.update({"state": "verified", "verification": value, "verified_at": int(time.time())})

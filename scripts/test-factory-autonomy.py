@@ -373,7 +373,8 @@ print(json.dumps({'enabled': bool(target), 'revision': revision}))
                 if len(install_calls) == 2:
                     self.assertIn('--install-prepared', install_calls[1])
                 if failing_action:
-                    self.assertNotEqual(0, result.returncode)
+                    # A stage after preparation never claims that nothing started.
+                    self.assertEqual(1, result.returncode)
                     self.assertEqual('', result.stdout)
                     self.assertIn('fixture dispatch refused', result.stderr)
                     self.assertIn('stage: factoryctl dispatch ' + failing_action + ' --revision', result.stderr)
@@ -500,9 +501,20 @@ class DeployStageEvidence(unittest.TestCase):
             (root / 'deploy-runtime.py').write_text(Path(deploy.__file__).read_text())
             (root / 'reinstall-service.sh').write_text('printf "first line\\n%03000d\\nlast line\\n" 0 >&2\nexit 3\n')
             result = subprocess.run([sys.executable, str(root / 'deploy-runtime.py'), '--home', str(root / 'factory'), 'a' * 40], capture_output=True, text=True, timeout=15)
-        self.assertEqual(1, result.returncode)
+        self.assertEqual(75, result.returncode)
         self.assertIn('first line\n', result.stderr)
         self.assertTrue(result.stderr.endswith('last line\n\nstage: sh reinstall-service.sh --home factory --prepare exit=3\n'), result.stderr[-120:])
+
+    def test_only_a_preparation_failure_reports_that_nothing_started(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'factory').mkdir()
+            (root / 'deploy-runtime.py').write_text(Path(deploy.__file__).read_text())
+            # Preparation succeeds and prints a forged stage line; the next step (no store) fails.
+            (root / 'reinstall-service.sh').write_text('echo "stage: sh reinstall-service.sh --prepare exit=3" >&2\n')
+            result = subprocess.run([sys.executable, str(root / 'deploy-runtime.py'), '--home', str(root / 'factory'), 'a' * 40], capture_output=True, text=True, timeout=15)
+        self.assertEqual(1, result.returncode, result.stderr)
+
 
 class ManagedIntakeTest(unittest.TestCase):
     def setUp(self):
