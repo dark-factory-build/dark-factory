@@ -1686,9 +1686,23 @@ func TestDaemonSourceRefusesProviderWithoutReadOnlyBoundary(t *testing.T) {
 	waitDispatch(t, done)
 }
 
+func registerDispatchLiveAttempt(t *testing.T, fixture *dispatchFixture, active activeAttempt) {
+	t.Helper()
+	session, found, err := fixture.store.TerminalSessionForRun(context.Background(), active.run.ID)
+	if err != nil || !found {
+		t.Fatalf("terminal session = %+v, found=%v, err=%v", session, found, err)
+	}
+	live := newLiveAttempt(fixture.daemon, active.run.ID, session.ID, nil)
+	if err := fixture.daemon.registerLiveAttempt(live); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { fixture.daemon.unregisterLiveAttempt(active.run.ID, live) })
+}
+
 func TestDaemonSourceAllowsClaudeOrchestratorRoute(t *testing.T) {
 	fixture := newDispatchFixture(t)
 	active := prepareActiveAttemptInProjectWithProvider(t, fixture, 72, testID(72), "orchestrator", "claude_code")
+	registerDispatchLiveAttempt(t, fixture, active)
 	done := fixture.serve(t)
 	_, err := active.client.Source(context.Background(), testID(73))
 	var remote *api.RemoteError
@@ -1714,6 +1728,7 @@ func TestDaemonSourceTitleOnlyWorkerUsesEffectiveHandoff(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
+	registerDispatchLiveAttempt(t, fixture, active)
 	done := fixture.serve(t)
 	_, err := active.client.Source(context.Background(), target)
 	var remote *api.RemoteError
