@@ -491,7 +491,7 @@ fn tools() -> Value {
                 "repository_id": {"type": "integer", "minimum": 1}, "next_page": {"type": ["integer", "null"], "minimum": 2, "maximum": 1000},
                 "pull_requests": {"type": "array", "maxItems": 100, "items": {
                     "type": "object", "additionalProperties": false, "required": ["number", "body", "head_sha", "base_sha", "base_ref"],
-                    "properties": {"number": {"type": "integer", "minimum": 1}, "body": {"type": "string", "maxLength": 262144}, "head_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"}, "base_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"}, "base_ref": {"type": "string"}}
+                    "properties": {"number": {"type": "integer", "minimum": 1}, "body": {"type": "string", "maxLength": 262144}, "head_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"}, "base_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"}, "base_ref": {"type": "string"}, "mergeable": {"type": "boolean"}, "merge_state_status": {"type": "string"}}
                 }}
             }
         },

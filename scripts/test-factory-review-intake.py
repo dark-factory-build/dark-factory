@@ -59,6 +59,33 @@ class ReviewIntakeTest(unittest.TestCase):
         with patch.object(review,'mirror',return_value=Path('/mirror')), patch.object(review,'list_prs',return_value=[]):
             self.assertEqual([],review.run_once(self.config))
 
+    def test_conflicting_pull_is_sent_back_to_original_source_task_for_rebase(self):
+        journal = json.loads(Path(self.config['journal']).read_text())
+        journal['issues']['o/r#7']['operation'] = {
+            'task_id': 'e' * 32, 'incarnation_id': 'f' * 32,
+            'fingerprint': 'a' * 64,
+        }
+        Path(self.config['journal']).write_text(json.dumps(journal))
+        commands = []
+        pull = {'number': 9, 'headRefOid': SHA, 'body': 'Refs #7',
+                'mergeable': False, 'mergeStateStatus': 'DIRTY'}
+        with patch.object(review, 'mirror', return_value=Path('/mirror')), \
+             patch.object(review, 'list_prs', return_value=[pull]), \
+             patch.object(review, 'ready', return_value=dict(self.operation)), \
+             patch.object(review, 'verify_existing'), \
+             patch.object(review.intake, 'command', side_effect=lambda argv, **kwargs: commands.append(argv) or ''), \
+             patch.object(review.intake, 'task_state', return_value={'status': 'running'}), \
+             patch.object(review, 'launch_review') as launch:
+            self.assertEqual(['sent back PR #9 for rebase'], review.run_once(self.config))
+        launch.assert_not_called()
+        send_back = next(argv for argv in commands if argv[1:3] == ['task', 'send-back'])
+        self.assertEqual('e' * 32, send_back[send_back.index('--task') + 1])
+        self.assertIn('merge conflict with main', send_back[send_back.index('--note') + 1])
+
+    def test_unknown_mergeability_stops_review(self):
+        with self.assertRaisesRegex(review.ReviewError, 'mergeability is unresolved'):
+            review.require_mergeable({'mergeable': None, 'mergeStateStatus': 'UNKNOWN'})
+
     def test_customer_companion_reviews_and_enqueues_exact_target_without_legacy_auth(self):
         (Path(self.config['factory_home'])/'maintainer.json').write_text('{"id":"fixture"}')
         request = {'source_id':'a'*32,'project_id':self.config['project_id'],
@@ -67,7 +94,7 @@ class ReviewIntakeTest(unittest.TestCase):
         controller = Mock()
         managed = controller, {'request':request}, Path('/installed/factoryctl')
         operations, calls, enqueued = {}, [], set()
-        pull = {'number':9,'body':'Reviewed publication '+SHA+'\n\nRefs o/r#7','head_sha':SHA,'base_sha':'b'*40,'base_ref':'release+candidate'}
+        pull = {'number':9,'body':'Reviewed publication '+SHA+'\n\nRefs o/r#7','head_sha':SHA,'base_sha':'b'*40,'base_ref':'release+candidate', 'mergeable':True, 'merge_state_status':'CLEAN'}
         def api(_binary, _home, _args, value):
             if value['action']=='legacy_lineage':
                 return {'state':'legacy_existing_work','task_id':'d'*32}  # Daemon-proven historical work.

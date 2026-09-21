@@ -3,7 +3,7 @@ set -eu
 
 usage() {
     echo "usage: scripts/new-worktree.sh <slug>" >&2
-    echo "  creates .worktrees/<slug> on a new branch <slug>, without contacting a remote" >&2
+    echo "  creates .worktrees/<slug> on a new branch <slug>, from a freshly fetched origin default branch when available" >&2
 }
 
 slug="${1:-}"
@@ -35,8 +35,11 @@ if git -C "$repository_root" show-ref --verify --quiet "refs/heads/$branch"; the
     exit 1
 fi
 
-if git -C "$repository_root" show-ref --verify --quiet refs/remotes/origin/main; then
-    base="origin/main"
+if git -C "$repository_root" remote get-url origin >/dev/null 2>&1; then
+    default_ref=$(git -C "$repository_root" symbolic-ref --quiet refs/remotes/origin/HEAD 2>/dev/null || printf '%s\n' refs/remotes/origin/main)
+    default_branch=${default_ref#refs/remotes/origin/}
+    git -C "$repository_root" fetch --no-tags origin "refs/heads/$default_branch:refs/remotes/origin/$default_branch"
+    base="origin/$default_branch"
 else
     base="main"
 fi
