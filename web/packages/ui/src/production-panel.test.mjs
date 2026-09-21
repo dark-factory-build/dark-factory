@@ -42,7 +42,6 @@ test("review prose removes only stored operation markers", () => {
   assert.doesNotMatch(markup, /dark-factory-operation|deadbeef/);
 });
 
-
 test("switching from a pending task to a known task fences the old failure", async () => {
   let reject;
   const pending = new Promise((_, fail) => { reject = fail; });
