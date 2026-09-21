@@ -1,0 +1,27 @@
+{
+  "fixture": "http://127.0.0.1:5196/?fixture=actual",
+  "before_commit": "6915d8328b0a8b8c32d359a9fcd3a7da08ac1349",
+  "after_commit": "dab2bc44eb5f16dc6c76666694acffb93d7e236d",
+  "capture_steps": "For each source commit, build client and UI with node web/node_modules/typescript/bin/tsc using web/tsconfig.build.json and web/packages/ui/tsconfig.json, restart Vite from web/apps/dev on 127.0.0.1:5196, navigate to ?fixture=actual, resize to 1280x720 and 390x844, and capture the complete SVG floor element at each viewport so both desks and their lower legs are visible.",
+  "viewports": {
+    "desktop": [1280, 720],
+    "phone": [390, 844]
+  },
+  "captures": {
+    "before_desktop": "before-desktop.png",
+    "after_desktop": "after-desktop.png",
+    "before_phone": "before-phone.png",
+    "after_phone": "after-phone.png"
+  },
+  "sha256": {
+    "before_desktop.png": "8c4acb2235eb8d55b56e66d7e95f21e38bbe1bce95ec0e43a1f76620dbee31e8",
+    "after_desktop.png": "4da296e482cac9e2e210397eebd08d4866a1171a1e71dce3596ae83be35cdc3b",
+    "before_phone.png": "55f0f7f0e8d0c658f601baae9325d0150c33fda330481736dd0587ff251a2b40",
+    "after_phone.png": "5c6d82bdddbd54cce50b6fe71f50824f6548e47498ab63a8f14d4bbf7322ab2f"
+  },
+  "inspection": [
+    "Tasks tray artwork is centered within the Tasks tabletop.",
+    "Missions and Work tables maps cover their tabletops with a one-pixel inset.",
+    "Break room coffee station is rendered with two support brackets; bookshelf remains visible as a separate fixture."
+  ]
+}
