@@ -19,9 +19,11 @@ import (
 // rate-limited host keeps the previous answer or none, and a daemon no console
 // asks never reaches out at all.
 const (
-	releaseTagURL   = "https://github.com/dark-factory-build/dark-factory/releases/tag/"
+	releaseTagURL = "https://github.com/dark-factory-build/dark-factory/releases/tag/"
+	// One attempt per window, whether or not it succeeds. A refused read must
+	// not make a rate-limited or offline host reach out more often than a
+	// healthy one; the cached answer, or none, stands until the next window.
 	releaseInterval = 6 * time.Hour
-	releaseRetry    = 10 * time.Minute
 )
 
 var (
@@ -53,9 +55,9 @@ func refreshPublishedRelease() {
 	value, err := readPublishedRelease(context.Background(), client, endpoint)
 	releaseMu.Lock()
 	defer releaseMu.Unlock()
-	releasePending, releaseNext = false, time.Now().Add(releaseRetry)
+	releasePending, releaseNext = false, time.Now().Add(releaseInterval)
 	if err == nil {
-		releaseValue, releaseNext = value, time.Now().Add(releaseInterval)
+		releaseValue = value
 	}
 }
 

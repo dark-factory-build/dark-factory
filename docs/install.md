@@ -49,9 +49,11 @@ after the uninstall, or the new job comes back loopback-only.
 Settings → Updates in the console shows the same two commands beside the
 running version and the latest published release. To find that release the
 daemon reads the public GitHub releases endpoint for this repository at most
-once every six hours, and only while a paired console is open; an offline or
-rate-limited host shows no release rather than claiming this build is current.
-Nothing in the console installs an update.
+once every six hours, and only while a paired console is open. That bound
+holds whether the read succeeds or not: a refused read leaves the previously
+cached release, or none, in place until the next six-hourly attempt, so an
+offline or rate-limited host neither retries more often than a healthy one nor
+claims that this build is current. Nothing in the console installs an update.
 
 Before upgrading across a schema change, copy the database to a directory
 outside the home. Never into the home itself, and add nothing else there

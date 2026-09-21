@@ -43,26 +43,62 @@ func TestPublishedReleaseIsValidatedCachedAndNeverBlocksTheConsole(t *testing.T)
 		}
 	}
 
+	// Waits for the started refresh to finish and reports the window it left.
+	settle := func() time.Time {
+		t.Helper()
+		deadline := time.Now().Add(10 * time.Second)
+		for {
+			releaseMu.Lock()
+			pending, next := releasePending, releaseNext
+			releaseMu.Unlock()
+			if !pending {
+				return next
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("the release refresh never settled")
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	open := func(body string) {
+		t.Helper()
+		releaseMu.Lock()
+		cached := releaseValue
+		releaseNext = time.Time{}
+		releaseMu.Unlock()
+		bodies <- body
+		// The refresh cannot retake the lock before this call returns, so a
+		// console request is answered from the cache it had, never from GitHub.
+		if served := latestPublishedRelease(); served != cached {
+			t.Fatalf("a console request waited for GitHub: %+v", served)
+		}
+	}
+
 	releaseMu.Lock()
 	releaseEndpoint, releaseClient = server.URL, server.Client()
-	releaseValue, releaseNext, releasePending = api.PublishedRelease{}, time.Time{}, false
+	releaseValue, releasePending = api.PublishedRelease{}, false
 	releaseMu.Unlock()
-	if first := latestPublishedRelease(); first != (api.PublishedRelease{}) {
-		t.Fatalf("a console request waited for GitHub: %+v", first)
+
+	// A refused read closes the window exactly as a served one does, so a
+	// rate-limited or offline host never reaches out more often than a healthy one.
+	open(`not json`)
+	refused := settle()
+	if value := latestPublishedRelease(); value != (api.PublishedRelease{}) {
+		t.Fatalf("a refused read invented a release: %+v", value)
 	}
-	bodies <- `{"tag_name":"v0.4.3"}`
-	deadline := time.Now().Add(10 * time.Second)
-	for latestPublishedRelease().Version != "v0.4.3" {
-		if time.Now().After(deadline) {
-			t.Fatal("the cached release never arrived")
-		}
-		time.Sleep(10 * time.Millisecond)
+	if refused.Before(time.Now().Add(releaseInterval - time.Minute)) {
+		t.Fatalf("a refused read reopened the window early: %v", refused)
+	}
+
+	open(`{"tag_name":"v0.4.3"}`)
+	served := settle()
+	if value := latestPublishedRelease(); value.Version != "v0.4.3" {
+		t.Fatalf("the cached release never arrived: %+v", value)
+	}
+	if served.Before(time.Now().Add(releaseInterval - time.Minute)) {
+		t.Fatalf("a served release did not cache: %v", served)
 	}
 	releaseMu.Lock()
-	next, pending := releaseNext, releasePending
 	releaseNext = time.Now().Add(24 * time.Hour)
 	releaseMu.Unlock()
-	if pending || next.Before(time.Now().Add(releaseInterval-time.Minute)) {
-		t.Fatalf("a served release did not cache: pending=%v next=%v", pending, next)
-	}
 }
