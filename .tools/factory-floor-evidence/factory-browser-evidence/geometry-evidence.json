@@ -1,7 +1,13 @@
 {
   "fixture": "http://127.0.0.1:5196/?fixture=actual",
   "before_commit": "6915d8328b0a8b8c32d359a9fcd3a7da08ac1349",
-  "after_commit": "171bf285077586b5aca45ff9114e7379ae872259",
+  "after_commit": "b8ccd6587c895114a13ddf542482e20704669ed5",
+  "rendered_source": {
+    "tree_oid": "f6a16b221a1daad18204cdf48207e56047173a85",
+    "blob": "web/packages/ui/src/factory-scene/factory-scene.tsx",
+    "blob_oid": "c02f6832bfc5fca5508ce7b0c73320c5ce37e87e",
+    "blob_sha256": "22e748a46bf3a7908936929da5770abe476695bfe2d2ae4ab78f8bc6db3ef3bc"
+  },
   "capture_steps": "For each source commit, build client and UI with node web/node_modules/typescript/bin/tsc using web/tsconfig.build.json and web/packages/ui/tsconfig.json, restart Vite from web/apps/dev on 127.0.0.1:5196, navigate to ?fixture=actual, resize to 1280x720 and 390x844, and capture the complete SVG floor element at each viewport so both desks and their lower legs are visible.",
   "viewports": {
     "desktop": [1280, 720],
@@ -13,11 +19,17 @@
     "before_phone": "before-phone.png",
     "after_phone": "after-phone.png"
   },
+  "pixel_dimensions": {
+    "before_desktop.png": [481, 883],
+    "after_desktop.png": [481, 883],
+    "before_phone.png": [332, 611],
+    "after_phone.png": [332, 611]
+  },
   "sha256": {
-    "before_desktop.png": "8c4acb2235eb8d55b56e66d7e95f21e38bbe1bce95ec0e43a1f76620dbee31e8",
-    "after_desktop.png": "4da296e482cac9e2e210397eebd08d4866a1171a1e71dce3596ae83be35cdc3b",
-    "before_phone.png": "55f0f7f0e8d0c658f601baae9325d0150c33fda330481736dd0587ff251a2b40",
-    "after_phone.png": "5c6d82bdddbd54cce50b6fe71f50824f6548e47498ab63a8f14d4bbf7322ab2f"
+    "before-desktop.png": "8c4acb2235eb8d55b56e66d7e95f21e38bbe1bce95ec0e43a1f76620dbee31e8",
+    "after-desktop.png": "4da296e482cac9e2e210397eebd08d4866a1171a1e71dce3596ae83be35cdc3b",
+    "before-phone.png": "55f0f7f0e8d0c658f601baae9325d0150c33fda330481736dd0587ff251a2b40",
+    "after-phone.png": "5c6d82bdddbd54cce50b6fe71f50824f6548e47498ab63a8f14d4bbf7322ab2f"
   },
   "inspection": [
     "Tasks tray artwork is centered within the Tasks tabletop.",
