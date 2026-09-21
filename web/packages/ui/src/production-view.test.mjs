@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { deriveProductionView, inProgressProduction, productionStages, sharedDeliveries } from "./production-view.ts";
+import { deriveProductionView, inProgressProduction, productionStages, productionStickers, sharedDeliveries } from "./production-view.ts";
 
 const record = (kind, id, visual_id, document, extra = {}) => ({ repository: "owner/repo", project_id: "project", kind, id, visual_id, observed_at: 10, document, tasks: [], missions: [], ...extra });
 const head = "a".repeat(40);
@@ -29,6 +29,22 @@ test("merged is incomplete until every known destination is verified", () => {
   assert.equal(incomplete.deliveries.length, 2);
   const complete = deriveProductionView([record("pull_request", "7", "change:1", base), record("delivery", "deploy-site", "", { kind: "site", destination: "production", revision: base.merge, state: "verified", verified_at: 20, pull_requests: [7] }), record("delivery", "deploy-runtime", "", { kind: "runtime", destination: "mac", revision: base.merge, state: "verified", verified_at: 21, pull_requests: [7] })]).contraptions[key];
   assert.equal(complete.completed, true);
+});
+
+test("merged work waits for the daemon's configured destination fact", () => {
+  const base = { number: 7, title: "Machine", head, merge: "d".repeat(40), state: "merged", review: { head, state: "allow" }, destination: "production" };
+  const view = deriveProductionView([record("pull_request", "7", "change:1", base)], Date.now()).contraptions[key];
+  assert.deepEqual(view.deliveryDestinations, ["production"]);
+  assert.equal(view.completed, false);
+  assert.deepEqual(productionStickers(view).slice(-1), ["Delivery pending"]);
+  const noDestination = deriveProductionView([record("pull_request", "7", "change:1", { ...base, destination: "" })], Date.now()).contraptions[key];
+  assert.equal(noDestination.completed, true);
+  assert.match(noDestination.nextAction, /no delivery destination/);
+});
+
+test("blocked construction always carries its reason into the sticker", () => {
+  const view = deriveProductionView([record("construction", "c1", "change:blocked", { title: "Waiting", status: "blocked", blocked_reason: "Needs your answer" })], Date.now()).contraptions["project\0owner/repo\0change:blocked"];
+  assert.deepEqual(productionStickers(view), ["Blocked: Needs your answer"]);
 });
 
 test("stale repository health blocks actionability but preserves historical review", () => {

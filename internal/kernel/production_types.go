@@ -3,15 +3,18 @@ package kernel
 // ProductionObservation is a projection of existing external authorities, not
 // a workflow. Shared checks and deliveries have one identity and name their PRs.
 type ProductionObservation struct {
-	Maintenance  *ProductionMaintenance  `json:"maintenance,omitempty"`
-	Repository   string                  `json:"repository"`
-	ObservedAt   int64                   `json:"observed_at"`
-	PullRequests []ProductionPullRequest `json:"pull_requests"`
-	Checks       []ProductionCheck       `json:"checks"`
-	Reviewers    []ProductionReviewer    `json:"reviewers"`
-	Deliveries   []ProductionDelivery    `json:"deliveries"`
-	Unavailable  string                  `json:"unavailable,omitempty"`
-	Overflow     int                     `json:"overflow,omitempty"`
+	Maintenance *ProductionMaintenance `json:"maintenance,omitempty"`
+	Repository  string                 `json:"repository"`
+	// DeliveryDestinations is the daemon's observed project release configuration.
+	// A missing receipt for one of these destinations is still pending work.
+	DeliveryDestinations []string                `json:"delivery_destinations,omitempty"`
+	ObservedAt           int64                   `json:"observed_at"`
+	PullRequests         []ProductionPullRequest `json:"pull_requests"`
+	Checks               []ProductionCheck       `json:"checks"`
+	Reviewers            []ProductionReviewer    `json:"reviewers"`
+	Deliveries           []ProductionDelivery    `json:"deliveries"`
+	Unavailable          string                  `json:"unavailable,omitempty"`
+	Overflow             int                     `json:"overflow,omitempty"`
 }
 
 type ProductionPullRequest struct {

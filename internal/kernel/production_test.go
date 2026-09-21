@@ -86,6 +86,36 @@ func TestProductionPersistsRevisionEvidenceWithoutRewinding(t *testing.T) {
 	}
 }
 
+func TestProductionObservationPersistsConfiguredDeliveryDestinations(t *testing.T) {
+	store, _, project, _ := newAdmissionStore(t, RoleOrchestrator, 2)
+	defer store.Close()
+	if err := store.RecordProductionObservation(context.Background(), project.ID, ProductionObservation{
+		Repository: "example/factory", ObservedAt: 10, DeliveryDestinations: []string{"production"},
+	}, mustTime(t, 10)); err != nil {
+		t.Fatal(err)
+	}
+	page, err := store.Production(context.Background(), project.ID, 0, 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, record := range page.Records {
+		if record.Kind != "repository" {
+			continue
+		}
+		var document struct {
+			DeliveryDestinations []string `json:"delivery_destinations"`
+		}
+		if err := json.Unmarshal(record.Document, &document); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(document.DeliveryDestinations, []string{"production"}) {
+			t.Fatalf("destination fact = %#v", document.DeliveryDestinations)
+		}
+		return
+	}
+	t.Fatal("repository projection missing")
+}
+
 func TestProductionMaintenanceRoundTripsAndInvalidObservationRollsBack(t *testing.T) {
 	store, _, project, _ := newAdmissionStore(t, RoleOrchestrator, 2)
 	defer store.Close()
