@@ -11027,8 +11027,14 @@ mod tests {
         assert!(!operator_body.contains("Closes #"));
         assert!(operator_body.ends_with(&operator.marker().unwrap()));
         operator.body = "Closes #123".into();
-        assert_eq!(operator.validate().err(), Some(OperationError::InvalidInput));
-        assert_eq!(operator.marked_body().err(), Some(OperationError::InvalidInput));
+        assert_eq!(
+            operator.validate().err(),
+            Some(OperationError::InvalidInput)
+        );
+        assert_eq!(
+            operator.marked_body().err(),
+            Some(OperationError::InvalidInput)
+        );
         operator.close_on_merge = true;
         assert!(operator.validate().is_err());
         assert!(create.needs_issue_read());
