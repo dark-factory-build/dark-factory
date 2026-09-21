@@ -107,6 +107,7 @@ test("in-progress membership excludes delivered and proven unchanged finished wo
   assert.deepEqual(productionStages(unpublished), ["Publication unrecorded"]);
   assert.doesNotMatch(unpublished.nextAction, /in progress/);
   assert.equal(inProgressProduction(make({ status: "blocked", has_changes: false })), true);
+  assert.equal(inProgressProduction(make({ status: "failed", has_changes: false })), true);
   assert.equal(inProgressProduction(make({ status: "cancelled", has_changes: true })), false);
   assert.equal(inProgressProduction({ ...unpublished, completed: true }), false);
 });

@@ -128,7 +128,7 @@ export function inProgressProduction(item: ProductionContraption): boolean {
   if (item.completed) return false;
   if (item.pullRequest) return true;
   return item.construction?.status !== "cancelled"
-    && !(item.construction?.has_changes === false && ["succeeded", "failed"].includes(item.construction.status ?? ""));
+    && !(item.construction?.has_changes === false && item.construction.status === "succeeded");
 }
 
 export function productionStages(item: ProductionContraption): string[] {
