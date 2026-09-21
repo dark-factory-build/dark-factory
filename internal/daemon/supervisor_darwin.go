@@ -12,9 +12,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
-	"unicode/utf8"
 
 	"github.com/dark-factory-build/dark-factory/internal/change"
 	"github.com/dark-factory-build/dark-factory/internal/changeworker"
@@ -1164,14 +1164,10 @@ func failureDetail(cause error) string {
 	if len(detail) <= maxFailureDetailBytes {
 		return detail
 	}
-	// The bound is on bytes, so the cut can land inside a rune. Drop bytes off
-	// the end until what remains decodes, rather than storing a truncated
-	// encoding in a column that is meant to be readable.
-	detail = detail[:maxFailureDetailBytes]
-	for len(detail) > 0 && !utf8.ValidString(detail) {
-		detail = detail[:len(detail)-1]
-	}
-	return detail
+	// The bound is on bytes, so the cut can land inside a rune. Sanitize the
+	// bounded prefix itself: validity is not a property of the tail, and an
+	// invalid byte near the beginning must not discard the diagnosis after it.
+	return strings.ToValidUTF8(detail[:maxFailureDetailBytes], "")
 }
 
 const maxFailureDetailBytes = 4096
