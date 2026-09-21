@@ -356,9 +356,10 @@ func (store *Store) Production(ctx context.Context, project ProjectID, offset, l
 	if err := tx.connection.QueryRowContext(ctx, "SELECT count(*) FROM ("+productionRows+")", project.Bytes(), project.Bytes()).Scan(&page.Total); err != nil {
 		return page, err
 	}
+	// Load delivery evidence before merged PRs so bounded reads can identify completed work.
 	rows, err := tx.connection.QueryContext(ctx, "SELECT * FROM ("+productionRows+") ORDER BY CASE\n"+
 		" WHEN kind = 'repository' THEN 0\n"+
-		" WHEN kind = 'pull_request' AND json_extract(document, '$.state') = 'open' THEN 1\n"+" WHEN kind = 'construction' AND json_extract(document, '$.status') IN ('queued', 'running', 'blocked') THEN 2\n"+" WHEN kind IN ('pull_request', 'check', 'reviewer', 'delivery') THEN 3\n"+" WHEN kind = 'construction' THEN 4\n"+" ELSE 5 END, repository, identity LIMIT ? OFFSET ?", project.Bytes(), project.Bytes(), limit, offset)
+		" WHEN kind = 'pull_request' AND json_extract(document, '$.state') = 'open' THEN 1\n"+" WHEN kind = 'delivery' OR (kind = 'construction' AND json_extract(document, '$.status') IN ('queued', 'running', 'blocked')) THEN 2\n"+" WHEN kind IN ('pull_request', 'check', 'reviewer') THEN 3\n"+" WHEN kind = 'construction' THEN 4\n"+" ELSE 5 END, repository, identity LIMIT ? OFFSET ?", project.Bytes(), project.Bytes(), limit, offset)
 	if err != nil {
 		return page, err
 	}

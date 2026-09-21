@@ -176,22 +176,27 @@ func TestProductionPrioritizesLiveFactsOverTerminalConstruction(t *testing.T) {
 	}
 	insert("repository", "example/factory", `{"overflow":0}`)
 	insert("pull_request", "7", `{"number":7,"title":"current","state":"open","head":"`+strings.Repeat("a", 40)+`","review":{"head":"`+strings.Repeat("a", 40)+`","state":"allow"}}`)
+	insert("pull_request", "8", `{"number":8,"state":"merged"}`)
 	insert("check", "workflow:7", `{"id":"workflow:7","state":"completed"}`)
 	insert("delivery", "delivery:7", `{"id":"delivery:7","state":"verified"}`)
 	page, err := store.Production(ctx, project.ID, 0, 8)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if page.Total != 254 || len(page.Records) != 8 {
+	if page.Total != 255 || len(page.Records) != 8 {
 		t.Fatalf("page total/size = %d/%d", page.Total, len(page.Records))
 	}
-	want := []string{"repository", "pull_request", "delivery", "check"}
+	want := []string{"repository", "pull_request", "delivery", "pull_request", "check"}
 	for index, kind := range want {
 		if page.Records[index].Kind != kind {
 			t.Fatalf("record %d = %+v, want %s", index, page.Records[index], kind)
 		}
 	}
-	page, err = store.Production(ctx, project.ID, 4, 3)
+	page, err = store.Production(ctx, project.ID, 2, 1)
+	if err != nil || len(page.Records) != 1 || page.Records[0].Kind != "delivery" {
+		t.Fatalf("delivery must precede merged work across pages: %+v, %v", page, err)
+	}
+	page, err = store.Production(ctx, project.ID, 5, 3)
 	if err != nil || len(page.Records) != 3 {
 		t.Fatalf("construction page = %+v, %v", page, err)
 	}
