@@ -32,43 +32,31 @@ query($owner:String!, $name:String!) {
     open: pullRequests(first:100, states:OPEN, orderBy:{field:UPDATED_AT, direction:DESC}) {
       pageInfo { hasNextPage }
       nodes {
-        number
-        headRefOid
-        mergeQueueEntry { state }
-        reviews(last:32) {
-          pageInfo { hasPreviousPage }
-          nodes {
-            commit { oid }
-            state
-            body
-            url
-            author {
-              ... on User { databaseId }
-              ... on Bot { databaseId }
-            }
-          }
-        }
+        ...PullRequestReviewFields
       }
     }
     merged: pullRequests(first:100, states:MERGED, orderBy:{field:UPDATED_AT, direction:DESC}) {
       pageInfo { hasNextPage }
       nodes {
-        number
-        headRefOid
-        mergeQueueEntry { state }
-        reviews(last:32) {
-          pageInfo { hasPreviousPage }
-          nodes {
-            commit { oid }
-            state
-            body
-            url
-            author {
-              ... on User { databaseId }
-              ... on Bot { databaseId }
-            }
-          }
-        }
+        ...PullRequestReviewFields
+      }
+    }
+  }
+}
+fragment PullRequestReviewFields on PullRequest {
+  number
+  headRefOid
+  mergeQueueEntry { state }
+  reviews(last:32) {
+    pageInfo { hasPreviousPage }
+    nodes {
+      commit { oid }
+      state
+      body
+      url
+      author {
+        ... on User { databaseId }
+        ... on Bot { databaseId }
       }
     }
   }
@@ -149,10 +137,6 @@ def collect(repository):
     list of fail-closed query/shape reasons.
     """
     pull_requests = _read_graphql(repository)
-    # Keep accepting the old single-connection shape for callers with a
-    # captured response; live queries always provide both bounded connections.
-    if "nodes" in pull_requests:
-        pull_requests = {"open": pull_requests}
     reviews, queues, unavailable = {}, {}, []
     overflow = 0
     for connection in pull_requests.values():

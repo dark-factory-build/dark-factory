@@ -15,6 +15,11 @@ def review(state, commit=HEAD, body="Dark-Factory-Review: allow " + HEAD, actor=
     return {"commit": {"oid": commit}, "state": state, "body": body, "url": "https://github.com/example/review/1", "author": {"databaseId": actor}}
 
 
+def graphql(open_nodes=(), merged_nodes=(), open_page=None, merged_page=None):
+    return {"open": {"pageInfo": open_page or {}, "nodes": list(open_nodes)},
+            "merged": {"pageInfo": merged_page or {}, "nodes": list(merged_nodes)}}
+
+
 class ProductionReviewsTest(unittest.TestCase):
     def test_block_wins_shared_gate(self):
         block = "Dark-Factory-Review: block " + HEAD + " dark-factory-operation:op-1:"
@@ -39,7 +44,7 @@ class ProductionReviewsTest(unittest.TestCase):
 
     def test_truncated_history_is_unknown(self):
         original = reviews._read_graphql
-        reviews._read_graphql = lambda _: {"pageInfo": {"hasNextPage": False}, "nodes": [{"number": 4, "headRefOid": HEAD, "mergeQueueEntry": None, "reviews": {"pageInfo": {"hasPreviousPage": True}, "nodes": [review("APPROVED")]}}]}
+        reviews._read_graphql = lambda _: graphql([{"number": 4, "headRefOid": HEAD, "mergeQueueEntry": None, "reviews": {"pageInfo": {"hasPreviousPage": True}, "nodes": [review("APPROVED")]}}], open_page={"hasNextPage": False})
         try:
             facts, queues, overflow, unavailable = reviews.collect("example/repository")
         finally:
@@ -50,7 +55,7 @@ class ProductionReviewsTest(unittest.TestCase):
 
     def test_missing_actor_fails_closed(self):
         original = reviews._read_graphql
-        reviews._read_graphql = lambda _: {"pageInfo": {}, "nodes": [{"number": 5, "headRefOid": HEAD, "mergeQueueEntry": None, "reviews": {"pageInfo": {"hasPreviousPage": False}, "nodes": [review("APPROVED", actor=None)]}}]}
+        reviews._read_graphql = lambda _: graphql([{"number": 5, "headRefOid": HEAD, "mergeQueueEntry": None, "reviews": {"pageInfo": {"hasPreviousPage": False}, "nodes": [review("APPROVED", actor=None)]}}])
         try:
             facts, _, _, unavailable = reviews.collect("example/repository")
         finally:
@@ -60,7 +65,7 @@ class ProductionReviewsTest(unittest.TestCase):
 
     def test_plain_approval_does_not_allow_and_dismissed_block_is_ignored(self):
         original = reviews._read_graphql
-        reviews._read_graphql = lambda _: {"pageInfo": {}, "nodes": [{"number": 6, "headRefOid": HEAD, "mergeQueueEntry": None, "reviews": {"pageInfo": {"hasPreviousPage": False}, "nodes": [review("APPROVED", body="plain approval"), review("DISMISSED", body="Dark-Factory-Review: block " + HEAD)]}}]}
+        reviews._read_graphql = lambda _: graphql([{"number": 6, "headRefOid": HEAD, "mergeQueueEntry": None, "reviews": {"pageInfo": {"hasPreviousPage": False}, "nodes": [review("APPROVED", body="plain approval"), review("DISMISSED", body="Dark-Factory-Review: block " + HEAD)]}}])
         try:
             facts, _, _, unavailable = reviews.collect("example/repository")
         finally:
@@ -70,7 +75,7 @@ class ProductionReviewsTest(unittest.TestCase):
 
     def test_commented_marker_allows(self):
         original = reviews._read_graphql
-        reviews._read_graphql = lambda _: {"pageInfo": {}, "nodes": [{"number": 7, "headRefOid": HEAD, "mergeQueueEntry": None, "reviews": {"pageInfo": {"hasPreviousPage": False}, "nodes": [review("COMMENTED")]}}]}
+        reviews._read_graphql = lambda _: graphql([{"number": 7, "headRefOid": HEAD, "mergeQueueEntry": None, "reviews": {"pageInfo": {"hasPreviousPage": False}, "nodes": [review("COMMENTED")]}}])
         try:
             facts, _, _, unavailable = reviews.collect("example/repository")
         finally:
@@ -80,10 +85,10 @@ class ProductionReviewsTest(unittest.TestCase):
 
     def test_merged_pr_retains_formal_review_after_reload(self):
         original = reviews._read_graphql
-        payload = {"pageInfo": {"hasNextPage": False}, "nodes": [
+        payload = graphql([
             {"number": 8, "headRefOid": HEAD, "mergeQueueEntry": None,
              "reviews": {"pageInfo": {"hasPreviousPage": False}, "nodes": [review("COMMENTED")]}}
-        ]}
+        ], open_page={"hasNextPage": False})
         reviews._read_graphql = lambda _: payload
         try:
             first = reviews.collect("example/repository")[0]
@@ -95,10 +100,10 @@ class ProductionReviewsTest(unittest.TestCase):
 
     def test_review_for_old_head_never_marks_new_head(self):
         original = reviews._read_graphql
-        reviews._read_graphql = lambda _: {"pageInfo": {}, "nodes": [
+        reviews._read_graphql = lambda _: graphql([
             {"number": 9, "headRefOid": HEAD, "mergeQueueEntry": None,
              "reviews": {"pageInfo": {"hasPreviousPage": False}, "nodes": [review("APPROVED", commit=OLD, body="Dark-Factory-Review: allow " + OLD)]}}
-        ]}
+        ])
         try:
             facts, _, _, _ = reviews.collect("example/repository")
         finally:
