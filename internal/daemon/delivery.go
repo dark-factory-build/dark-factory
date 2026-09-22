@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -70,7 +69,7 @@ func (daemon *Daemon) reconcileDelivery(ctx context.Context, input api.DeliveryI
 		if repository == "" {
 			repository = input.Repository
 		}
-		if repository != input.Repository {
+		if !strings.EqualFold(repository, input.Repository) {
 			continue
 		}
 		id := deliveryTaskID("delivery", input.ProjectID, input.Repository, fmt.Sprint(source.PR), fmt.Sprint(source.Issue), receipt.SHA)
@@ -80,7 +79,7 @@ func (daemon *Daemon) reconcileDelivery(ctx context.Context, input api.DeliveryI
 		if _, found, readErr := daemon.store.TaskRecovery(ctx, id, incarnation); readErr != nil {
 			return api.DeliveryResult{}, readErr
 		} else if !found {
-			if _, enqueueErr := daemon.store.EnqueueTask(ctx, kernel.NewTask{ID: id, ProjectID: project, AssignedAgentID: agent, IncarnationID: incarnation, Title: title, Body: body, Priority: input.PriorityDefault}, at); enqueueErr != nil && !errors.Is(enqueueErr, kernel.ErrConflict) {
+			if _, enqueueErr := daemon.store.EnqueueTask(ctx, kernel.NewTask{ID: id, ProjectID: project, AssignedAgentID: agent, IncarnationID: incarnation, Title: title, Body: body, Priority: input.PriorityDefault}, at); enqueueErr != nil {
 				return api.DeliveryResult{}, enqueueErr
 			}
 		}
