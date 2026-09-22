@@ -1,5 +1,5 @@
 import { useLayoutEffect, useEffect, useMemo, useRef, useState, type MouseEvent, type FocusEvent, type PointerEvent, type KeyboardEvent, type ReactNode } from "react";
-import { ProductionArea, productionHeight, sharedChecks } from "../production-area.js";
+import { ProductionArea, productionHeight, sharedChecks, type ProductionRoomRect } from "../production-area.js";
 import type { ProductionContraption } from "../production-view.js";
 import type { PeerQuestionItem } from "@dark-factory/client";
 import type { SceneTask } from "../console-view.js";
@@ -243,9 +243,10 @@ function useSceneMotion(layout: ReturnType<typeof layoutScene>, seated: ReturnTy
 }
 
 /** The animation clock updates worker elements without rerendering the floor or atlas. */
-function SceneWorkers({ production, productionTop, errands, furniture, restingSeats, tray, peerQuestions, layout, placements: seated, nodes, workers, tasks, connected, animate, selectedWorkerId, onSelectWorker, onSelectTask, onSelectHumanRequest }: Pick<FactorySceneProps, "workers" | "selectedWorkerId" | "onSelectWorker" | "onSelectTask" | "onSelectHumanRequest"> & {
+function SceneWorkers({ production, productionTop, upperRoom, errands, furniture, restingSeats, tray, peerQuestions, layout, placements: seated, nodes, workers, tasks, connected, animate, selectedWorkerId, onSelectWorker, onSelectTask, onSelectHumanRequest }: Pick<FactorySceneProps, "workers" | "selectedWorkerId" | "onSelectWorker" | "onSelectTask" | "onSelectHumanRequest"> & {
   production?: FactorySceneProps["production"];
   productionTop: number;
+  upperRoom: ProductionRoomRect;
   layout: ReturnType<typeof layoutScene>;
   placements: ReturnType<typeof placeWorkers>;
   nodes: ReadonlyMap<string, SceneTopology["nodes"][number]>;
@@ -321,7 +322,7 @@ function SceneWorkers({ production, productionTop, errands, furniture, restingSe
         <g aria-hidden="true" transform={cat.west ? "translate(22 0) scale(-1 1)" : undefined}><Frame name={`cat.${cat.frame}`} x={3} y={-4} /></g>
       </g>;
   const bed = errands ? catBed(rows[0]!) : undefined;
-  return <>{production === undefined ? null : <ProductionArea {...production} width={Math.max(320, layout.width)} top={productionTop} pulse={pulse} />}
+  return <>{production === undefined ? null : <ProductionArea {...production} width={Math.max(320, layout.width)} top={productionTop} pulse={pulse} upperRoom={upperRoom} />}
       {bed === undefined ? null : <g aria-hidden="true" pointerEvents="none" data-cat-bed="" transform={`translate(${bed.x} ${bed.y}) scale(${WORKER_SIZE / FRAME})`}><Frame name="cat.bed" x={3} y={-4} /></g>}
       {cat !== undefined && cat.y !== rows[0]![0]!.y ? puss : null}
       {/* A question and its answer run along the corridors people walk, under their feet. */}
@@ -444,6 +445,7 @@ export function FactoryScene({ production, topology, detailNodes, workers, appea
   const stationTop = commonBottom + 32;
   const station = { missions: { x: ROOM_LEFT + 32, y: stationTop }, tasks: { x: ROOM_LEFT + 112, y: stationTop } };
   const commonAreaWidth = Math.max(commonWidth + (nook?.width ?? 0), station.tasks.x + 24 - ROOM_LEFT);
+  const upperRoom = { x: ROOM_LEFT, y: layout.restingTop - 40, width: commonAreaWidth, height: stationTop + 24 - (layout.restingTop - 40) };
   const boardTop = Math.max(layout.height, commonBottom, stationTop + 24, ...placements.map((placement) => placement.y + 24)) + PADDING;
   const sceneWidth = production === undefined ? layout.width : Math.max(320, layout.width);
   const sceneHeight = boardTop + PADDING + (production === undefined ? 0 : productionHeight(sceneWidth, production.items.length, sharedChecks(production.items).length));
@@ -556,7 +558,7 @@ export function FactoryScene({ production, topology, detailNodes, workers, appea
         {cabling.routes.filter((wire) => linkedFrom === wire.from || linkedFrom === wire.to).map((wire) =>
           <path key={`${wire.from} ${wire.to}`} data-wire={`${wire.from} ${wire.to}`} d={wire.d} stroke="#e5c58b" strokeWidth="1.5" opacity=".9" />)}
       </g>}
-      <Area width={commonAreaWidth} top={layout.restingTop - 40} bottom={stationTop + 24} />
+      <Area width={commonAreaWidth} top={upperRoom.y} bottom={upperRoom.y + upperRoom.height} connector={production === undefined ? undefined : { x: upperRoom.x, width: Math.min(32, upperRoom.width) }} />
       {/* Somewhere to go other than the table: against the back wall, muted like the rest of the furniture. */}
       {appearance.scenery === "off" ? null : nook?.furniture.map((piece) => <g key={piece.errand} aria-hidden="true" data-break-room={piece.errand} opacity=".8" transform={`translate(${piece.x} ${piece.y}) scale(${WORKER_SIZE / FRAME})`}>
         <Frame name={piece.errand === "shelf" ? "prop.bookshelf" : "prop.coffeestation"} x={0} y={0} />
@@ -578,7 +580,7 @@ export function FactoryScene({ production, topology, detailNodes, workers, appea
       })}
       {layout.rooms.length === 0 ? <text x={ROOM_LEFT} y="24" fill="#9db1be" fontFamily="ui-monospace, monospace" fontSize="10">EMPTY FLOOR</text> : null}
 
-      <SceneWorkers production={production} productionTop={boardTop} errands={appearance.scenery !== "off"} restingSeats={seating.resting} tray={tray} peerQuestions={peerQuestions} furniture={tables} layout={layout} placements={placements} nodes={nodes} workers={workers} tasks={tasks} connected={connected} animate={appearance.animation !== "off"} selectedWorkerId={selectedWorkerId} onSelectWorker={onSelectWorker} onSelectTask={onSelectTask} onSelectHumanRequest={onSelectHumanRequest} />
+      <SceneWorkers production={production} productionTop={boardTop} upperRoom={upperRoom} errands={appearance.scenery !== "off"} restingSeats={seating.resting} tray={tray} peerQuestions={peerQuestions} furniture={tables} layout={layout} placements={placements} nodes={nodes} workers={workers} tasks={tasks} connected={connected} animate={appearance.animation !== "off"} selectedWorkerId={selectedWorkerId} onSelectWorker={onSelectWorker} onSelectTask={onSelectTask} onSelectHumanRequest={onSelectHumanRequest} />
       <g data-common-table="planning" data-tooltip="Missions · inspect objectives" aria-label="Open Missions" className={onOpenMissions === undefined ? undefined : "dfFactoryScene__target"} {...sceneAction(onOpenMissions === undefined ? undefined : () => onOpenMissions(projectId))} transform={`translate(${station.missions.x} ${station.missions.y})`}>
         {onOpenMissions === undefined ? null : <rect className="dfFactoryScene__focus" x="-22" y="-22" width="44" height="44" fill="transparent" />}
         <rect x="-22" y="-8" width="44" height="16" fill="#455c5e" stroke="#8c8871" />
@@ -637,11 +639,15 @@ function sceneAction(select: (() => void) | undefined) {
   } };
 }
 
-function Area({ width, top, bottom }: { width: number; top: number; bottom: number }) {
+function Area({ width, top, bottom, connector }: { width: number; top: number; bottom: number; connector?: { x: number; width: number } }) {
+  const openingEnd = connector === undefined ? undefined : connector.x + connector.width;
   return (
     <g role="group" aria-label="Common room">
       <rect x={ROOM_LEFT} y={top} width={width} height={bottom - top} fill="url(#df-floor)" />
-      <path d={`M${ROOM_LEFT} ${top + 24}v-24h${width}v${bottom - top}H${ROOM_LEFT}v-8`} fill="none" stroke="#465355" strokeWidth="3" />
+      <path d={connector === undefined
+        ? `M${ROOM_LEFT} ${top + 24}v-24h${width}v${bottom - top}H${ROOM_LEFT}v-8`
+        : `M${ROOM_LEFT} ${top + 24}v-24h${width}v${bottom - top}H${openingEnd} M${ROOM_LEFT} ${bottom - 8}V${top + 24}`}
+        fill="none" stroke="#465355" strokeWidth="1" />
     </g>
   );
 }

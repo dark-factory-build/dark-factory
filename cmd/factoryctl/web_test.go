@@ -204,6 +204,66 @@ func TestWebRevokeReportsCommittedCleanupUncertainty(t *testing.T) {
 	}
 }
 
+// TestWebRevokeAcknowledgedAfterPostCommitCleanup replays the exact reported
+// sequence: the local API commits the revocation, spends the rest of its
+// dispatch budget tearing down the sockets that revocation revokes, and only
+// then writes the reply carrying the committed revision. factoryctl must print
+// that revision rather than a timeout its own next command contradicts.
+func TestWebRevokeAcknowledgedAfterPostCommitCleanup(t *testing.T) {
+	fixture := newAPIFixture(t)
+	defer fixture.close(t)
+	id := "0123456789abcdef0123456789abcdef"
+	// Longer than the five seconds factoryctl once allowed a whole call, and
+	// inside the ten-second budget the daemon gives an ordinary dispatch.
+	const cleanup = 6 * time.Second
+	done := serveOneAfter(fixture.listener, cleanup, func(call api.Call) api.Reply {
+		input, ok := call.WebClientRevocationInput()
+		if !ok || input.ID != id || input.ExpectedRevision != 9 {
+			return mustWebErrorReply(t, api.RemoteInvalidRequest)
+		}
+		reply, err := api.NewWebRevokeReply(api.WebRevokeResult{ID: id, Revision: 10})
+		if err != nil {
+			return mustWebErrorReply(t, api.RemoteInternal)
+		}
+		return reply
+	})
+	var stdout, stderr bytes.Buffer
+	exit := runWithOpener(context.Background(), []string{"web", "revoke", id, "--revision", "9"}, webEnvironment(fixture), &stdout, &stderr, nil)
+	result := awaitServer(t, done)
+	if exit != 0 || result.err != nil || stderr.Len() != 0 || !strings.Contains(stdout.String(), `"revision":10`) {
+		t.Fatalf("late acknowledgement = exit %d stdout %q stderr %q server %v", exit, stdout.String(), stderr.String(), result.err)
+	}
+}
+
+// serveOneAfter answers exactly one call the way the daemon does when work
+// after the durable commit precedes the reply: receive, spend delay, then
+// refresh the dispatch deadline and respond.
+func serveOneAfter(listener *api.Listener, delay time.Duration, reply func(api.Call) api.Reply) <-chan serverResult {
+	done := make(chan serverResult, 1)
+	go func() {
+		connection, err := listener.Accept()
+		if err != nil {
+			done <- serverResult{err: err}
+			return
+		}
+		defer connection.Close()
+		ctx, cancel := context.WithTimeout(context.Background(), delay+5*time.Second)
+		defer cancel()
+		call, err := connection.Receive(ctx)
+		if err == nil {
+			time.Sleep(delay)
+			if err = connection.RefreshDeadline(ctx); err == nil {
+				var response api.Reply
+				if response, err = connection.Dispatch(reply); err == nil {
+					err = connection.Respond(response)
+				}
+			}
+		}
+		done <- serverResult{call: call, err: err}
+	}()
+	return done
+}
+
 func webEnvironment(fixture *apiFixture) func(string) string {
 	return func(name string) string {
 		switch name {

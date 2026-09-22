@@ -65,18 +65,20 @@ func (daemon *Daemon) revokeBrowserClientHeld(ctx context.Context, id kernel.Bro
 	// cannot admit this client, because the daemon reloads the committed
 	// revocation on every authentication.
 	daemon.revokeRelayClient(id)
+	// A link handed out before this revocation must not still pair after it:
+	// the durable challenge is the only thing that outlives the closed sockets,
+	// and nothing binds one to the client that minted it. Revocation has
+	// already committed, so cancelling the caller must not report a clean
+	// revocation as unresolved, but one budget for the whole teardown rather
+	// than a fresh one per transport keeps the reply proving that commit from
+	// being held behind the sockets it closes.
+	cleanupContext, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), browserCleanupTimeout)
+	defer cleanupCancel()
 	cleanupErrors := []error{effectCleanupErr}
 	for _, runtime := range runtimes {
 		cleanupErrors = append(cleanupErrors, runtime.closeClient(id))
-		// A link handed out before this revocation must not still pair after
-		// it. The durable challenge is the only thing that outlives the
-		// closed sockets, and nothing binds one to the client that minted it.
-		// Revocation has already committed, so this runs on its own deadline:
-		// a cancelled request must not report a clean revocation as unresolved.
 		if runtime.backend != nil {
-			cleanupContext, cleanupCancel := context.WithTimeout(context.Background(), browserCleanupTimeout)
 			cleanupErrors = append(cleanupErrors, daemon.store.InvalidateBrowserPairingChallenges(cleanupContext, runtime.backend.boot))
-			cleanupCancel()
 		}
 	}
 	if cleanupErr := errors.Join(cleanupErrors...); cleanupErr != nil {

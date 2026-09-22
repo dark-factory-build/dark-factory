@@ -4,7 +4,6 @@ package daemon
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"path/filepath"
 
@@ -79,11 +78,11 @@ func (daemon *Daemon) validateSuccessSource(ctx context.Context, live *liveAttem
 		return unverifiableSuccessSource(fmt.Sprintf("Change worktree facts unavailable: %v", err))
 	}
 	if facts.Dirty() {
-		return kernel.NewOutcomeRefusal(errors.Join(kernel.ErrConflict, fmt.Errorf("%w: %s", errDirtyWorkerChange, changeState.ID.String())))
+		return kernel.NewOutcomeRefusal(fmt.Errorf("%w: %s (%w)", errDirtyWorkerChange, changeState.ID.String(), kernel.ErrConflict))
 	}
 	return nil
 }
 
 func unverifiableSuccessSource(reason string) error {
-	return kernel.NewOutcomeRefusal(errors.Join(kernel.ErrConflict, fmt.Errorf("cannot verify worker source before success: %s", reason)))
+	return kernel.NewOutcomeRefusal(fmt.Errorf("cannot verify worker source before success: %s (%w)", reason, kernel.ErrConflict))
 }

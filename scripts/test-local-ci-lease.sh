@@ -10,7 +10,9 @@ temporary=$(mktemp -d "${TMPDIR:-/tmp}/dark-factory-local-ci-lease-test.XXXXXX")
 first="$temporary/first"
 second="$temporary/second"
 background_pids=
-wait_timeout_seconds=5
+# local-ci-lease.sh retries acquisition every 1s; allow ten retry intervals
+# for variable hosted-runner IO before diagnosing a stuck fixture.
+wait_timeout_seconds=10
 
 process_parent() {
     ps -p "$1" -o ppid= 2>/dev/null | tr -d ' '
