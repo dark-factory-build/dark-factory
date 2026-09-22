@@ -467,12 +467,12 @@ func (daemon *Daemon) taskRead(ctx context.Context, call api.Call) api.Reply {
 		// Infrastructure failures are recorded on the terminal run proposal;
 		// task.result is intentionally empty for them. Include that durable
 		// diagnosis in the operator's task read so it does not require SQLite.
-		recovery, recoveryFound, recoveryErr := daemon.store.TaskRecovery(ctx, id, task.IncarnationID)
-		if recoveryErr != nil {
-			return newErrorReply(remoteErrorCode(recoveryErr))
+		run, runFound, runErr := daemon.store.LatestTaskRun(ctx, id, task.IncarnationID)
+		if runErr != nil {
+			return newErrorReply(remoteErrorCode(runErr))
 		}
-		if recoveryFound && recovery.Run != nil && recovery.Run.Terminal != nil {
-			outcomeText = recovery.Run.Terminal.Detail()
+		if runFound && run.Terminal != nil {
+			outcomeText = run.Terminal.Detail()
 		}
 	}
 	outcome, outcomeMore := taskDetailTextChunk(outcomeText, input.Offset)

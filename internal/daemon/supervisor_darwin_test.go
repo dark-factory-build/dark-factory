@@ -727,6 +727,17 @@ func TestSupervisorMissingWorktreeFailsTheRunVisibly(t *testing.T) {
 	if err != nil || !found || task.Status != kernel.TaskFailed {
 		t.Fatalf("task after refusal = %+v, found=%v, %v", task, found, err)
 	}
+	// The operator's task read carries that diagnosis; task.result is empty
+	// for an infrastructure failure.
+	apiHomePath := filepath.Join(fixture.root, "api-home")
+	client, err := api.NewOperatorClient(install.LocalAPISocketPath(apiHomePath), filepath.Join(apiHomePath, "operator.token"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text, err := client.ReadTask(context.Background(), api.TaskReadInput{TaskID: task.ID.String(), ExpectedRevision: uint64(task.Revision.Int64())})
+	if err != nil || text.Outcome == nil || !strings.Contains(*text.Outcome, "worktree is gone") {
+		t.Fatalf("task read after refusal = %+v, %v", text, err)
+	}
 	changeState, found, err := fixture.store.Change(context.Background(), *run.ChangeID)
 	if err != nil || !found || changeState.Phase != kernel.ChangeAbandoned || changeState.SettledRunID == nil || *changeState.SettledRunID != run.ID {
 		t.Fatalf("change after refusal = %+v, found=%v, %v", changeState, found, err)
