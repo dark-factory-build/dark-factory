@@ -547,7 +547,10 @@ def gate_failure_note(receipt, operation):
     tests = []
     log = receipt.with_suffix(".log")
     try:
-        tests = list(dict.fromkeys(re.findall(r"\b(?:Test|test)[A-Za-z0-9_./:-]{2,120}", log.read_text(encoding="utf-8"))))[:16]
+        # Only failure lines name a test: Go's "--- FAIL: Name" (subtests are
+        # indented), unittest's "FAIL: name" / "ERROR: name". Matching every
+        # "test" word reported "test-renderer" and "testing" from ordinary log text.
+        tests = list(dict.fromkeys(re.findall(r"(?m)^\s*(?:--- FAIL|FAIL|ERROR): (\S+)", log.read_text(encoding="utf-8"))))[:16]
     except OSError:
         pass
     return "pre-review full gate failed: tests=" + (", ".join(tests) if tests else "unavailable") + ". Exact head " + operation["head"] + "."
