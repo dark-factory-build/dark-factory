@@ -512,6 +512,23 @@ type ProductionInput struct {
 type ProductionResult struct {
 	State string `json:"state"`
 }
+
+type DeliveryInput struct {
+	ProjectID       string          `json:"project_id"`
+	Repository      string          `json:"repository"`
+	OverseerAgentID string          `json:"overseer_agent_id"`
+	PriorityDefault int64           `json:"priority_default"`
+	Release         DeliveryRelease `json:"release"`
+	Receipt         json.RawMessage `json:"receipt"`
+}
+
+type DeliveryRelease struct {
+	Repository string `json:"repository"`
+}
+
+type DeliveryResult struct {
+	TaskIDs []string `json:"task_ids"`
+}
 type ContentInput struct {
 	ID               string `json:"id"`
 	ProjectID        string `json:"project_id"`

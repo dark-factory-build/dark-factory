@@ -356,6 +356,16 @@ func (daemon *Daemon) dispatch(ctx context.Context, call api.Call) api.Reply {
 			return newErrorReply(remoteErrorCode(err))
 		}
 		return api.NewContentReply(api.ProductionResult{State: "recorded"})
+	case api.CallDeliveryReconcile:
+		input, ok := call.DeliveryInput()
+		if !ok {
+			return newErrorReply(api.RemoteInvalidRequest)
+		}
+		result, err := daemon.reconcileDelivery(ctx, input)
+		if err != nil {
+			return newErrorReply(remoteErrorCode(err))
+		}
+		return api.NewContentReply(result)
 	case api.CallGitHubConnection:
 		input, ok := call.GitHubConnectionInput()
 		if !ok {

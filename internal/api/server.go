@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"strings"
 	"sync"
 	"time"
 
@@ -89,6 +90,7 @@ const (
 	CallGitHubConnection
 	CallIntake
 	CallProductionObserve
+	CallDeliveryReconcile
 	CallMaintainer
 )
 
@@ -154,6 +156,7 @@ type Call struct {
 	outcomeRead         OutcomeReadInput
 	outcomeList         OutcomeListInput
 	production          ProductionInput
+	delivery            DeliveryInput
 	webClient           WebClientRevocationInput
 	webAfter            string
 	expectedRevision    uint64
@@ -168,6 +171,9 @@ type Call struct {
 }
 
 func (call Call) IntakeInput() (IntakeInput, bool) { return call.intake, call.kind == CallIntake }
+func (call Call) DeliveryInput() (DeliveryInput, bool) {
+	return call.delivery, call.kind == CallDeliveryReconcile
+}
 
 func (call Call) GitHubConnectionInput() (GitHubConnectionInput, bool) {
 	return call.githubConnection, call.kind == CallGitHubConnection
@@ -1070,6 +1076,10 @@ func decodeCall(domain byte, bearer credential, encoded []byte) (Call, RemoteErr
 		if err := decodeExact(request.Params, &call.production); err != nil || !validProductionInput(call.production) {
 			return Call{}, RemoteInvalidRequest
 		}
+	case CallDeliveryReconcile:
+		if err := decodeExact(request.Params, &call.delivery); err != nil || !validDeliveryInput(call.delivery) {
+			return Call{}, RemoteInvalidRequest
+		}
 	case CallHumanReply:
 		if err := decodeExact(request.Params, &call.humanReply); err != nil || !validID(call.humanReply.OperationID) || !validID(call.humanReply.RequestID) || call.humanReply.ExpectedRevision == 0 || !validText(call.humanReply.Reply, 1, 8192) {
 			return Call{}, RemoteInvalidRequest
@@ -1099,6 +1109,14 @@ func jsonObject(encoded []byte) bool {
 
 func validProductionInput(input ProductionInput) bool {
 	return validID(input.ProjectID) && validText(input.Observation.Repository, 1, 4096)
+}
+
+func validDeliveryInput(input DeliveryInput) bool {
+	return validID(input.ProjectID) && validRepository(input.Repository) && validID(input.OverseerAgentID) && input.PriorityDefault >= -1_000_000 && input.PriorityDefault <= 1_000_000 && validRepository(input.Release.Repository) && len(input.Receipt) > 0 && jsonObject(input.Receipt)
+}
+
+func validRepository(value string) bool {
+	return validText(value, 3, 140) && strings.Count(value, "/") == 1
 }
 
 func methodKind(method string) (CallKind, byte) {
@@ -1249,6 +1267,8 @@ func methodKind(method string) (CallKind, byte) {
 		return CallOutcomeList, operatorDomain
 	case "production_observe":
 		return CallProductionObserve, operatorDomain
+	case "delivery_reconcile":
+		return CallDeliveryReconcile, operatorDomain
 	case "attempt_outcome_write":
 		return CallOutcomeWrite, attemptDomain
 	case "attempt_outcome_read":
