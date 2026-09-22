@@ -474,10 +474,23 @@ def send_back_merge_failure(config, operation):
     return send_back_source_task(config, operation, merge_failure_note(config, operation))
 
 
+def gate_ran(operation):
+    """True when the journaled gate failure is a real gate exit, not a wrapper refusal."""
+    try:
+        code = json.loads(Path(operation["gate_evidence"]).read_text(encoding="utf-8")).get("exit_code")
+    except (KeyError, TypeError, OSError, ValueError):
+        return False
+    return isinstance(code, int) and code != 0 and code not in {64, 125, 126, 127}
+
+
 def send_back_source_task(config, operation, note):
     task_id = _source_task_id(config, operation)
     if not task_id:
-        raise ReviewError("original source task is unavailable")
+        # An operator-created Change has no intake issue to route through.
+        # Keep the finding on the receipt; raising here stopped every
+        # other pull request in the tick.
+        operation["send_back_unroutable"] = note
+        return note
     home = Path(config["factory_home"])
     env = os.environ.copy()
     env["DARK_FACTORY_SOCKET"] = str(home / "runtimes" / "factory.sock")
@@ -776,6 +789,7 @@ def run_locked(config, path, journal, journal_path, managed=None):
     else:
         receipts = {"version": 2, "config_fingerprint": config_fingerprint(config), "pulls": {}}
     messages = []
+    failures = []
     page = receipts.get("discovery_page", 1)
     if type(page) is not int or page < 1:
         raise ReviewError("review receipt discovery page is invalid")
@@ -790,138 +804,151 @@ def run_locked(config, path, journal, journal_path, managed=None):
         existing = receipts["pulls"].get(key)
         try:
             issue = linked_issue(config, pr, journal, existing, managed)
+            if issue is None:
+                continue
+            config["_review_issue"] = issue
+            if existing is None:
+                operation = ready(config, path, pr, issue)
+                operation["provider"] = provider
+                receipts["pulls"][key] = operation
+                intake.atomic_json(journal_path, receipts)
+            else:
+                operation = existing
+                if operation.get("provider", "codex") != provider:
+                    raise ReviewError("review provider changed for an existing exact-head receipt")
+                verify_existing(path, pr, operation)
+            operation.setdefault("review_operation", str(uuid.uuid5(uuid.NAMESPACE_URL, "dark-factory:host-review:" + config["repository"] + ":" + str(pr["number"]) + ":" + operation["head"])))
+            state = observe_review(config, operation)
+            if state == "block" and not operation.get("prior_review_operation"):
+                snapshot_path = review_body_path(config, pr, operation)
+                try:
+                    snapshot = snapshot_path.read_text()
+                except FileNotFoundError:
+                    snapshot = pr["body"]
+                except OSError as exc:
+                    raise ReviewError("stale review body snapshot is unavailable") from exc
+                if snapshot != pr["body"]:
+                    if not app_update_receipt(pr["body"], pr["number"], config["repository"]):
+                        raise ReviewError("changed review body has no completed App metadata update receipt")
+                    prior = operation["review_operation"]
+                    operation["prior_review_operation"] = prior
+                    operation["prior_review_state"] = "block"
+                    operation["review_operation"] = str(uuid.uuid5(uuid.NAMESPACE_URL,
+                        "dark-factory:host-review-correction:" + config["repository"] + ":" + str(pr["number"]) + ":" + operation["head"] + ":" + prior))
+                    operation["review_attempted"] = False
+                    operation.pop("review_exit", None)
+                    operation.pop("review_state", None)
+                    operation["correction_body"] = pr["body"]
+                    snapshot_path.write_text(pr["body"])
+                    intake.atomic_json(journal_path, receipts)
+                    state = observe_review(config, operation)
+            if operation.get("gate_state") == "failed" and not gate_ran(operation):
+                # Host error, not a test result (the pre-#1028 wrapper exit 64
+                # receipts): forget it so the repaired host gates this head again.
+                for stale in ("gate_state", "gate_failure_note", "gate_evidence", "gate_failure_sent_back"):
+                    operation.pop(stale, None)
+                intake.atomic_json(journal_path, receipts)
+            if operation.get("gate_state") == "failed":
+                if not operation.get("gate_failure_sent_back"):
+                    note = operation.get("gate_failure_note", "pre-review full gate failed: tests=unavailable. Exact head " + operation["head"] + ".")
+                    send_back_source_task(config, operation, note)
+                    operation["gate_failure_sent_back"] = True
+                    intake.atomic_json(journal_path, receipts)
+                    messages.append("sent back PR #" + str(pr["number"]) + " pre-review gate failure: " + note)
+                continue
+            if state == "missing" and not operation.get("review_attempted"):
+                if operation["head"] not in pr["body"]:
+                    # The body still describes a predecessor head. A review would
+                    # only block on it, so wake the overseer and wait for the body.
+                    # One wake per distinct body: a rewrite that still omits the head wakes again.
+                    followup = review_followup(config, operation, "stale-body:" + hashlib.sha256(pr["body"].encode()).hexdigest())
+                    if intake.task_state(config, followup) is None and enqueue_followup(config, followup, pr, journal, managed):
+                        messages.append("woke PR #" + str(pr["number"]) + " stale body")
+                    continue
+                if launched:
+                    continue
+                if (path / "HEAD").is_file():
+                    try:
+                        evidence = run_full_gate(path, operation, review_body_path(config, pr, operation))
+                        receipt = json.loads(evidence.read_text(encoding="utf-8"))
+                    except (OSError, ValueError, json.JSONDecodeError, intake.IntakeError, ReviewError, subprocess.SubprocessError) as exc:
+                        operation["gate_state"] = "failed"
+                        operation["gate_failure_note"] = "pre-review full gate unavailable: " + str(exc)[:300] + ". Exact head " + operation["head"] + "."
+                        intake.atomic_json(journal_path, receipts)
+                        send_back_source_task(config, operation, operation["gate_failure_note"])
+                        operation["gate_failure_sent_back"] = True
+                        intake.atomic_json(journal_path, receipts)
+                        messages.append("sent back PR #" + str(pr["number"]) + " pre-review gate failure: " + operation["gate_failure_note"])
+                        continue
+                    # go_gate_run_bounded's own statuses (64 refused arguments,
+                    # 125..127 supervisor or exec failure) mean nothing ran: name
+                    # the host blocker instead of sending a working head back, and
+                    # journal no gate verdict so the repaired host gates it again.
+                    if receipt.get("exit_code") in {64, 125, 126, 127}:
+                        raise ReviewError("pre-review gate could not run: bounded gate wrapper exit " + str(receipt["exit_code"]) +
+                                          ", nothing ran. Exact head " + operation["head"] + ".")
+                    operation["gate_evidence"] = str(evidence)
+                    if receipt.get("exit_code") != 0:
+                        operation["gate_state"] = "failed"
+                        operation["gate_failure_note"] = gate_failure_note(evidence, operation)
+                        intake.atomic_json(journal_path, receipts)
+                        send_back_source_task(config, operation, operation["gate_failure_note"])
+                        operation["gate_failure_sent_back"] = True
+                        intake.atomic_json(journal_path, receipts)
+                        messages.append("sent back PR #" + str(pr["number"]) + " pre-review gate failure: " + operation["gate_failure_note"])
+                        continue
+                    operation["gate_state"] = "passed"
+                # Persist before launching: a crash cannot authorize a second model
+                # run while the first may still be submitting its exact-head verdict.
+                operation["review_attempted"] = True
+                intake.atomic_json(journal_path, receipts)
+                launched = True
+                operation["review_exit"] = launch_review(config, path, pr, operation)
+                intake.atomic_json(journal_path, receipts)
+                state = observe_review(config, operation)
+            if state not in {"allow", "block"}:
+                state = "unresolved"
+            operation["review_state"] = state
+            intake.atomic_json(journal_path, receipts)
+            if state == "allow":
+                # The body is an authorization input only before enqueue. Once a
+                # completed enqueue is journaled, later metadata edits must not
+                # block read-only merge reconciliation; the App receipt remains
+                # bound to the persisted reviewed_body_digest.
+                if not operation.get("reviewed_body_digest"):
+                    existing_enqueue = observe_enqueue(config, operation) if operation.get("enqueue_operation") else "missing"
+                    if existing_enqueue == "missing":
+                        verify_review_body(config, pr, operation)
+                    elif existing_enqueue == "queued":
+                        operation["enqueue_state"] = "queued"
+                enqueue_allowed(config, operation, journal_path, receipts)
+                if operation.get("enqueue_state") == "queued":
+                    merge = observe_merge(config, operation)
+                    operation["merge_state"] = merge["state"]
+                    operation["merge_pull_state"] = merge["pull_state"]
+                    operation["merge_observed_at"] = int(time.time())
+                    intake.atomic_json(journal_path, receipts)
+                    if merge["state"] == "NOT_QUEUED" and merge["pull_state"] == "open" and not operation.get("merge_failure_sent_back"):
+                        note = send_back_merge_failure(config, operation)
+                        operation["merge_failure_sent_back"] = True
+                        operation["merge_failure_note"] = note
+                        intake.atomic_json(journal_path, receipts)
+                        messages.append("sent back PR #" + str(pr["number"]) + " queue failure: " + note)
+            followup = review_followup(config, operation, state)
+            if intake.task_state(config, followup) is None and enqueue_followup(config, followup, pr, journal, managed):
+                messages.append("woke PR #" + str(pr["number"]) + " review " + state)
         except Unproven as exc:
             messages.append("skipped PR #" + str(pr["number"]) + ": " + str(exc))
             continue
-        if issue is None:
+        except (ReviewError, intake.IntakeError) as exc:
+            # One pull request's host failure must not starve the others;
+            # the tick still fails closed with every blocker named.
+            failures.append("PR #" + str(pr["number"]) + ": " + str(exc))
             continue
-        config["_review_issue"] = issue
-        if existing is None:
-            operation = ready(config, path, pr, issue)
-            operation["provider"] = provider
-            receipts["pulls"][key] = operation
-            intake.atomic_json(journal_path, receipts)
-        else:
-            operation = existing
-            if operation.get("provider", "codex") != provider:
-                raise ReviewError("review provider changed for an existing exact-head receipt")
-            verify_existing(path, pr, operation)
-        operation.setdefault("review_operation", str(uuid.uuid5(uuid.NAMESPACE_URL, "dark-factory:host-review:" + config["repository"] + ":" + str(pr["number"]) + ":" + operation["head"])))
-        state = observe_review(config, operation)
-        if state == "block" and not operation.get("prior_review_operation"):
-            snapshot_path = review_body_path(config, pr, operation)
-            try:
-                snapshot = snapshot_path.read_text()
-            except FileNotFoundError:
-                snapshot = pr["body"]
-            except OSError as exc:
-                raise ReviewError("stale review body snapshot is unavailable") from exc
-            if snapshot != pr["body"]:
-                if not app_update_receipt(pr["body"], pr["number"], config["repository"]):
-                    raise ReviewError("changed review body has no completed App metadata update receipt")
-                prior = operation["review_operation"]
-                operation["prior_review_operation"] = prior
-                operation["prior_review_state"] = "block"
-                operation["review_operation"] = str(uuid.uuid5(uuid.NAMESPACE_URL,
-                    "dark-factory:host-review-correction:" + config["repository"] + ":" + str(pr["number"]) + ":" + operation["head"] + ":" + prior))
-                operation["review_attempted"] = False
-                operation.pop("review_exit", None)
-                operation.pop("review_state", None)
-                operation["correction_body"] = pr["body"]
-                snapshot_path.write_text(pr["body"])
-                intake.atomic_json(journal_path, receipts)
-                state = observe_review(config, operation)
-        if operation.get("gate_state") == "failed":
-            if not operation.get("gate_failure_sent_back"):
-                note = operation.get("gate_failure_note", "pre-review full gate failed: tests=unavailable. Exact head " + operation["head"] + ".")
-                send_back_source_task(config, operation, note)
-                operation["gate_failure_sent_back"] = True
-                intake.atomic_json(journal_path, receipts)
-                messages.append("sent back PR #" + str(pr["number"]) + " pre-review gate failure: " + note)
-            continue
-        if state == "missing" and not operation.get("review_attempted"):
-            if operation["head"] not in pr["body"]:
-                # The body still describes a predecessor head. A review would
-                # only block on it, so wake the overseer and wait for the body.
-                # One wake per distinct body: a rewrite that still omits the head wakes again.
-                followup = review_followup(config, operation, "stale-body:" + hashlib.sha256(pr["body"].encode()).hexdigest())
-                if intake.task_state(config, followup) is None and enqueue_followup(config, followup, pr, journal, managed):
-                    messages.append("woke PR #" + str(pr["number"]) + " stale body")
-                continue
-            if launched:
-                continue
-            if (path / "HEAD").is_file():
-                try:
-                    evidence = run_full_gate(path, operation, review_body_path(config, pr, operation))
-                    receipt = json.loads(evidence.read_text(encoding="utf-8"))
-                except (OSError, ValueError, json.JSONDecodeError, intake.IntakeError, ReviewError, subprocess.SubprocessError) as exc:
-                    operation["gate_state"] = "failed"
-                    operation["gate_failure_note"] = "pre-review full gate unavailable: " + str(exc)[:300] + ". Exact head " + operation["head"] + "."
-                    intake.atomic_json(journal_path, receipts)
-                    send_back_source_task(config, operation, operation["gate_failure_note"])
-                    operation["gate_failure_sent_back"] = True
-                    intake.atomic_json(journal_path, receipts)
-                    messages.append("sent back PR #" + str(pr["number"]) + " pre-review gate failure: " + operation["gate_failure_note"])
-                    continue
-                # go_gate_run_bounded's own statuses (64 refused arguments,
-                # 125..127 supervisor or exec failure) mean nothing ran: name
-                # the host blocker instead of sending a working head back, and
-                # journal no gate verdict so the repaired host gates it again.
-                if receipt.get("exit_code") in {64, 125, 126, 127}:
-                    raise ReviewError("pre-review gate could not run: bounded gate wrapper exit " + str(receipt["exit_code"]) +
-                                      ", nothing ran. Exact head " + operation["head"] + ".")
-                operation["gate_evidence"] = str(evidence)
-                if receipt.get("exit_code") != 0:
-                    operation["gate_state"] = "failed"
-                    operation["gate_failure_note"] = gate_failure_note(evidence, operation)
-                    intake.atomic_json(journal_path, receipts)
-                    send_back_source_task(config, operation, operation["gate_failure_note"])
-                    operation["gate_failure_sent_back"] = True
-                    intake.atomic_json(journal_path, receipts)
-                    messages.append("sent back PR #" + str(pr["number"]) + " pre-review gate failure: " + operation["gate_failure_note"])
-                    continue
-                operation["gate_state"] = "passed"
-            # Persist before launching: a crash cannot authorize a second model
-            # run while the first may still be submitting its exact-head verdict.
-            operation["review_attempted"] = True
-            intake.atomic_json(journal_path, receipts)
-            launched = True
-            operation["review_exit"] = launch_review(config, path, pr, operation)
-            intake.atomic_json(journal_path, receipts)
-            state = observe_review(config, operation)
-        if state not in {"allow", "block"}:
-            state = "unresolved"
-        operation["review_state"] = state
-        intake.atomic_json(journal_path, receipts)
-        if state == "allow":
-            # The body is an authorization input only before enqueue. Once a
-            # completed enqueue is journaled, later metadata edits must not
-            # block read-only merge reconciliation; the App receipt remains
-            # bound to the persisted reviewed_body_digest.
-            if not operation.get("reviewed_body_digest"):
-                existing_enqueue = observe_enqueue(config, operation) if operation.get("enqueue_operation") else "missing"
-                if existing_enqueue == "missing":
-                    verify_review_body(config, pr, operation)
-                elif existing_enqueue == "queued":
-                    operation["enqueue_state"] = "queued"
-            enqueue_allowed(config, operation, journal_path, receipts)
-            if operation.get("enqueue_state") == "queued":
-                merge = observe_merge(config, operation)
-                operation["merge_state"] = merge["state"]
-                operation["merge_pull_state"] = merge["pull_state"]
-                operation["merge_observed_at"] = int(time.time())
-                intake.atomic_json(journal_path, receipts)
-                if merge["state"] == "NOT_QUEUED" and merge["pull_state"] == "open" and not operation.get("merge_failure_sent_back"):
-                    note = send_back_merge_failure(config, operation)
-                    operation["merge_failure_sent_back"] = True
-                    operation["merge_failure_note"] = note
-                    intake.atomic_json(journal_path, receipts)
-                    messages.append("sent back PR #" + str(pr["number"]) + " queue failure: " + note)
-        followup = review_followup(config, operation, state)
-        if intake.task_state(config, followup) is None and enqueue_followup(config, followup, pr, journal, managed):
-            messages.append("woke PR #" + str(pr["number"]) + " review " + state)
     receipts["discovery_page"] = next_page
     intake.atomic_json(journal_path, receipts)
+    if failures:
+        raise ReviewError("; ".join(failures))
     return messages
 
 
