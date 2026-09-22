@@ -160,8 +160,13 @@ func productionRecordOnConnection(ctx context.Context, c *sql.Conn, project Proj
 			var document string
 			if err := c.QueryRowContext(ctx, `SELECT document FROM production_records WHERE project_id = ? AND repository = ? AND kind = 'pull_request' AND identity = ?`, project.Bytes(), repo, id).Scan(&document); err == nil {
 				var prior ProductionPullRequest
-				if json.Unmarshal([]byte(document), &prior) == nil && prior.Publication != nil {
-					current.Publication = prior.Publication
+				if json.Unmarshal([]byte(document), &prior) == nil {
+					if prior.Publication != nil {
+						current.Publication = prior.Publication
+					}
+					if current.Body == "" {
+						current.Body = prior.Body
+					}
 					value = current
 				}
 			}
@@ -389,7 +394,7 @@ func (store *Store) RecordChangePublication(ctx context.Context, project string,
 	if receipt.PublishedHead != "" {
 		pr.Publication.PublishedHead = receipt.PublishedHead
 	}
-	if receipt.Delta != 0 {
+	if receipt.Delta != 0 || receipt.DeltaSet {
 		pr.Publication.Delta = receipt.Delta
 	}
 	if receipt.PublishOperation != "" {

@@ -321,7 +321,7 @@ func (daemon *Daemon) publishAndRefreshChange(ctx context.Context, event ChangeP
 		return err
 	}
 	publishedHead := published.Result.StructuredContent.CommitSHA
-	if err := daemon.store.RecordChangePublication(ctx, event.ProjectID, event.Repository, event.PullNumber, kernel.PublicationReceipt{SourceHead: event.SettledHead, PublishedHead: publishedHead, Delta: delta, PublishOperation: publishOperation}, nil, "", at); err != nil {
+	if err := daemon.store.RecordChangePublication(ctx, event.ProjectID, event.Repository, event.PullNumber, kernel.PublicationReceipt{SourceHead: event.SettledHead, PublishedHead: publishedHead, Delta: delta, DeltaSet: true, PublishOperation: publishOperation}, nil, "", at); err != nil {
 		return err
 	}
 	body = RefreshChangeBody(event.Body, publishedHead, event.Base, strconv.FormatInt(delta, 10))

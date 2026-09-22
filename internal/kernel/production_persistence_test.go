@@ -96,6 +96,17 @@ func TestProductionPersistsFinalizedConstructionPublicationAndRebase(t *testing.
 	if err := store.RecordProductionObservation(ctx, terminal.ProjectID, observation, mustTime(t, 82)); err != nil {
 		t.Fatal(err)
 	}
+	facts, err = store.ChangePublicationFacts(ctx)
+	if err != nil || len(facts) != 1 || facts[0].Body != body {
+		t.Fatalf("bodyless observation erased daemon body = %+v, err=%v", facts, err)
+	}
+	if err := store.RecordChangePublication(ctx, terminal.ProjectID.String(), "example/factory", 7, PublicationReceipt{PublishedHead: remoteHead, Delta: 0, DeltaSet: true, BodyOperation: "body-retry"}, &body, "", mustTime(t, 82)); err != nil {
+		t.Fatal(err)
+	}
+	facts, err = store.ChangePublicationFacts(ctx)
+	if err != nil || len(facts) != 1 || facts[0].Delta != 0 || facts[0].BodyOperation != "body-retry" {
+		t.Fatalf("zero delta retry did not overwrite prior delta = %+v, err=%v", facts, err)
+	}
 	page, err = store.Production(ctx, terminal.ProjectID, 0, 8)
 	if err != nil {
 		t.Fatal(err)

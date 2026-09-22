@@ -37,6 +37,7 @@ type PublicationReceipt struct {
 	SourceHead             string `json:"source_head"`
 	PublishedHead          string `json:"published_head"`
 	Delta                  int64  `json:"delta"`
+	DeltaSet               bool   `json:"-"`
 	PublishOperation       string `json:"publish_operation"`
 	BodyOperation          string `json:"body_operation,omitempty"`
 	ReviewRequestOperation string `json:"review_request_operation,omitempty"`
