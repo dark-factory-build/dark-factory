@@ -9,6 +9,27 @@ import (
 	"testing"
 )
 
+func TestProductionReviewUpsertsBeforeRefresh(t *testing.T) {
+	store, _, project, _ := newAdmissionStore(t, RoleOrchestrator, 2)
+	defer store.Close()
+	ctx := context.Background()
+	head := strings.Repeat("a", 40)
+	if err := store.RecordProductionReview(ctx, project.ID, "example/factory", 7, ProductionReview{Head: head, State: "allow"}, mustTime(t, 10)); err != nil {
+		t.Fatal(err)
+	}
+	page, err := store.Production(ctx, project.ID, 0, 8)
+	if err != nil || len(page.Records) != 1 {
+		t.Fatalf("page=%+v err=%v", page, err)
+	}
+	var pull ProductionPullRequest
+	if err := json.Unmarshal(page.Records[0].Document, &pull); err != nil {
+		t.Fatal(err)
+	}
+	if pull.Number != 7 || pull.Head != head || pull.Review.Head != head || pull.Review.State != "allow" {
+		t.Fatalf("pull=%+v", pull)
+	}
+}
+
 // A refresh reads the known reviews, waits on the remote, then writes a
 // snapshot carrying that copy. A verdict recorded during the wait must
 // survive the later write.

@@ -371,7 +371,16 @@ func (store *Store) RecordProductionReview(ctx context.Context, project ProjectI
 	}
 	defer tx.Close()
 	var visual, body string
-	if err := tx.connection.QueryRowContext(ctx, `SELECT visual_id, document FROM production_records WHERE project_id = ? AND repository = ? AND kind = 'pull_request' AND identity = ?`, project.Bytes(), repo, strconv.FormatUint(number, 10)).Scan(&visual, &body); err != nil {
+	identity := strconv.FormatUint(number, 10)
+	err = tx.connection.QueryRowContext(ctx, `SELECT visual_id, document FROM production_records WHERE project_id = ? AND repository = ? AND kind = 'pull_request' AND identity = ?`, project.Bytes(), repo, identity).Scan(&visual, &body)
+	if err == sql.ErrNoRows {
+		pr := ProductionPullRequest{Number: number, Title: "Pull request #" + identity, Head: review.Head, State: "open", Review: review}
+		if err := productionRecordOnConnection(ctx, tx.connection, project, repo, "pull_request", identity, repo+"#"+identity, pr, at.Int64()); err != nil {
+			return tx.Rollback(err)
+		}
+		return tx.Commit(ctx)
+	}
+	if err != nil {
 		return tx.Rollback(err)
 	}
 	var pr ProductionPullRequest
@@ -379,7 +388,7 @@ func (store *Store) RecordProductionReview(ctx context.Context, project ProjectI
 		return tx.Rollback(ErrCorruptState)
 	}
 	pr.Review = review
-	if err := productionRecordOnConnection(ctx, tx.connection, project, repo, "pull_request", strconv.FormatUint(number, 10), visual, pr, at.Int64()); err != nil {
+	if err := productionRecordOnConnection(ctx, tx.connection, project, repo, "pull_request", identity, visual, pr, at.Int64()); err != nil {
 		return tx.Rollback(err)
 	}
 	return tx.Commit(ctx)
