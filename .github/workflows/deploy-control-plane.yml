@@ -224,6 +224,42 @@ jobs:
           [ "${missing}" -eq 0 ] || exit 1
           echo "all eight authority secrets are present on ${VERSION_ID}"
 
+      # Access is an external dependency of the Worker. Read its live shape
+      # before promotion so a missing service-auth policy cannot turn the
+      # headless path into an interactive login redirect.
+      - name: Verify the Cloudflare Access policy shape
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          api="https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}"
+          auth=( -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" )
+          apps="$(curl -sS --fail-with-body --max-time 30 "${auth[@]}" \
+            "${api}/access/apps?per_page=100")"
+          app_id="$(printf '%s' "${apps}" | jq -er --arg domain "${PRODUCTION_HOSTNAME}/mcp" '
+            if .success != true then error("Access application listing failed") else
+              [.result[] | select(.domain == $domain)]
+              | if length == 1 then .[0].id else error("expected exactly one /mcp Access application") end
+            end')"
+          policies="$(curl -sS --fail-with-body --max-time 30 "${auth[@]}" \
+            "${api}/access/apps/${app_id}/policies?per_page=100")"
+          printf '%s' "${policies}" | jq -e '
+            if .success != true then error("Access policy listing failed") else
+              def empty_lists: ((.exclude // []) | length == 0) and ((.require // []) | length == 0);
+              def operator: .decision == "allow"
+                and ((.include // []) | length == 1)
+                and (.include[0].email.email? != null)
+                and empty_lists;
+              def service_auth: .decision == "non_identity"
+                and ((.include // []) | length == 1)
+                and (.include[0].service_token.token_id? != null)
+                and empty_lists;
+              ([.result[] | select(operator)] | length == 1)
+                and ([.result[] | select(service_auth)] | length == 1)
+                or error("expected one operator allow policy and one service-auth policy")
+            end'
+          echo "Cloudflare Access policy shape is valid for ${PRODUCTION_HOSTNAME}/mcp"
+
       - name: Promote the version to production traffic
         if: ${{ inputs.promote }}
         working-directory: control-plane
