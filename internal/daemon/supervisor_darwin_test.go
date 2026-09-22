@@ -709,6 +709,34 @@ func TestSupervisorWorkerFilesSettleUnderThePrivateServiceUmask(t *testing.T) {
 // the run ends as a visible source failure naming it, the Change is
 // abandoned, the task fails, and the task's own retry makes a fresh
 // worktree on the same branch.
+// An attempt that fails with no detail leaves an empty terminal detail; the
+// operator's task read still returns a non-empty outcome.
+func TestSupervisorAttemptFailWithoutDetailReadsFallbackOutcome(t *testing.T) {
+	program := "set -eu\nprintf x >> __WITNESS__\n" + quoteShell(supervisorTestExecutable(t)) + " --supervisor-attempt-fail ''\n"
+	fixture := newSupervisorFixture(t, program)
+	run, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
+	if err != nil {
+		t.Fatalf("RunNext: %v", err)
+	}
+	fixture.assertTerminal(t, run, kernel.OutcomeFailed)
+	if run.Terminal == nil || run.Terminal.Detail() != "" {
+		t.Fatalf("terminal detail = %+v, want empty", run.Terminal)
+	}
+	task, found, err := fixture.store.Task(context.Background(), run.TaskID)
+	if err != nil || !found || task.Status != kernel.TaskFailed {
+		t.Fatalf("task = %+v, found=%v, %v", task, found, err)
+	}
+	apiHomePath := filepath.Join(fixture.root, "api-home")
+	client, err := api.NewOperatorClient(install.LocalAPISocketPath(apiHomePath), filepath.Join(apiHomePath, "operator.token"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text, err := client.ReadTask(context.Background(), api.TaskReadInput{TaskID: task.ID.String(), ExpectedRevision: uint64(task.Revision.Int64())})
+	if err != nil || text.Outcome == nil || *text.Outcome != "run failed without a recorded cause" {
+		t.Fatalf("task read after detail-less failure = %+v, %v", text, err)
+	}
+}
+
 func TestSupervisorMissingWorktreeFailsTheRunVisibly(t *testing.T) {
 	// The first run deletes its own worktree; the retry, which finds the
 	// witness of the first, does not.
@@ -726,6 +754,17 @@ func TestSupervisorMissingWorktreeFailsTheRunVisibly(t *testing.T) {
 	task, found, err := fixture.store.Task(context.Background(), run.TaskID)
 	if err != nil || !found || task.Status != kernel.TaskFailed {
 		t.Fatalf("task after refusal = %+v, found=%v, %v", task, found, err)
+	}
+	// The operator's task read carries that diagnosis; task.result is empty
+	// for an infrastructure failure.
+	apiHomePath := filepath.Join(fixture.root, "api-home")
+	client, err := api.NewOperatorClient(install.LocalAPISocketPath(apiHomePath), filepath.Join(apiHomePath, "operator.token"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text, err := client.ReadTask(context.Background(), api.TaskReadInput{TaskID: task.ID.String(), ExpectedRevision: uint64(task.Revision.Int64())})
+	if err != nil || text.Outcome == nil || !strings.Contains(*text.Outcome, "worktree is gone") {
+		t.Fatalf("task read after refusal = %+v, %v", text, err)
 	}
 	changeState, found, err := fixture.store.Change(context.Background(), *run.ChangeID)
 	if err != nil || !found || changeState.Phase != kernel.ChangeAbandoned || changeState.SettledRunID == nil || *changeState.SettledRunID != run.ID {
@@ -1021,8 +1060,7 @@ func TestSupervisorClaudeReviewerLaunchReceivesExactRetainedChangeReceipt(t *tes
 			handoff := fmt.Sprintf("review handoff %s %s %x %d %d  \r\nFACTORY_SOURCE owner/repo#1\nreview this exact source", worker.TaskID, changeState.ID, changeState.Selection.Commit().Bytes(), worker.AdmittedTaskWorkRevision.Int64(), changeState.Revision.Int64())
 			title, taskBody := "review retained Change", handoff
 			if titleOnly {
-				// A handoff is its body's first line: admission and the supervisor read
-				// only the body, so a title grants no source.
+				// Native task authority uses the title when the body is empty.
 				title, taskBody = strings.SplitN(handoff, "  \r", 2)[0], ""
 			}
 			reviewerID := supervisorAgentID(t, 22)
@@ -1052,10 +1090,6 @@ func TestSupervisorClaudeReviewerLaunchReceivesExactRetainedChangeReceipt(t *tes
 			reviewer, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
 			if err != nil {
 				t.Fatalf("Claude reviewer RunNext: %v", err)
-			}
-			if titleOnly {
-				fixture.assertTerminal(t, reviewer, kernel.OutcomeFailed)
-				return
 			}
 			fixture.assertTerminal(t, reviewer, kernel.OutcomeSucceeded)
 			if reviewer.Role != kernel.RoleWorker || reviewer.Provider != kernel.ProviderClaudeCode || reviewer.Proposal == nil || !strings.Contains(reviewer.Proposal.Result(), "review handoff ") {

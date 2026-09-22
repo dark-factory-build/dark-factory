@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
+import contextlib
 import importlib.util
+import io
 import json
 from pathlib import Path
 import socket
@@ -174,9 +176,21 @@ class AutonomyTest(unittest.TestCase):
     def test_launchd_results_do_not_retain_child_output(self):
         config = {'factory_home': '/private/tmp/factory', 'journal': '/private/tmp/journal'}
         secret = 'token=should-not-appear'
-        with patch.object(autonomy.subprocess, 'run', return_value=subprocess.CompletedProcess([], 1, secret, secret)):
+        with patch.object(autonomy.subprocess, 'run', return_value=subprocess.CompletedProcess([], 1, secret, 'gate refused: ' + secret)), \
+             contextlib.redirect_stderr(io.StringIO()) as log:
             result = autonomy.tick(Path('/private/tmp/config'), config)
         self.assertEqual([{'component': 'factory-intake', 'ok': False, 'error': 'exit_1'}], result)
+        # A bare status named no cause for four hours of identical ticks: the
+        # controller's own log carries the redacted diagnostic the receipt must not.
+        self.assertEqual('factory-intake exit_1: gate refused: token=***', log.getvalue().strip())
+        self.assertNotIn('should-not-appear', log.getvalue())
+
+    def test_silent_component_failure_still_names_itself_on_the_controller_log(self):
+        config = {'factory_home': '/private/tmp/factory', 'journal': '/private/tmp/journal'}
+        with patch.object(autonomy.subprocess, 'run', return_value=subprocess.CompletedProcess([], 2, '', '')), \
+             contextlib.redirect_stderr(io.StringIO()) as log:
+            autonomy.tick(Path('/private/tmp/config'), config)
+        self.assertEqual('factory-intake exit_2: no stderr diagnostic', log.getvalue().strip())
 
     def test_health_receipt_is_private_and_finite(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -3,7 +3,7 @@ set -eu
 
 usage() {
     echo "usage: scripts/new-worktree.sh <slug>" >&2
-    echo "  creates .worktrees/<slug> on a new branch <slug>, without contacting a remote" >&2
+    echo "  creates .worktrees/<slug> on a new branch <slug>, from a freshly fetched origin default branch when available" >&2
 }
 
 slug="${1:-}"
@@ -35,8 +35,16 @@ if git -C "$repository_root" show-ref --verify --quiet "refs/heads/$branch"; the
     exit 1
 fi
 
-if git -C "$repository_root" show-ref --verify --quiet refs/remotes/origin/main; then
-    base="origin/main"
+if git -C "$repository_root" remote get-url origin >/dev/null 2>&1; then
+    # The remote is authoritative for its default branch; the local origin/HEAD only mirrors it at clone time.
+    default_branch=$(git -C "$repository_root" ls-remote --symref origin HEAD 2>/dev/null \
+        | awk '$1 == "ref:" && $3 == "HEAD" { sub("^refs/heads/", "", $2); print $2; exit }')
+    if [ -z "$default_branch" ]; then
+        default_ref=$(git -C "$repository_root" symbolic-ref --quiet refs/remotes/origin/HEAD 2>/dev/null || printf '%s\n' refs/remotes/origin/main)
+        default_branch=${default_ref#refs/remotes/origin/}
+    fi
+    git -C "$repository_root" fetch --no-tags origin "refs/heads/$default_branch:refs/remotes/origin/$default_branch"
+    base="origin/$default_branch"
 else
     base="main"
 fi

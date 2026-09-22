@@ -85,6 +85,34 @@ func TestSupervisorLateRunnerDeathNamesExitFromOwnerClose(t *testing.T) {
 	t.Logf("reported failure:\n%v", err)
 }
 
+// A checkpoint-stage EOF is reported by the outer runner itself. Its stderr
+// must remain attached to the durable failure record rather than the daemon's
+// inherited stderr, where an operator cannot inspect it later.
+func TestSupervisorCheckpointEOFPersistsOuterRunnerStderr(t *testing.T) {
+	// A base the repository does not have makes the outer runner's selection
+	// stage fail, so the runner exits with its own diagnostic on stderr and
+	// the daemon sees the control stream end at that checkpoint.
+	fixture := newSupervisorFixture(t, supervisorProgram(t, false, false))
+	fixture.spec.BaseRevision = "refs/heads/nonexistent-source"
+	run, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
+	if err == nil {
+		t.Fatal("a checkpoint EOF produced no error")
+	}
+	t.Logf("checkpoint EOF: %v", err)
+	stored, found, readErr := fixture.store.Run(context.Background(), run.ID)
+	if readErr != nil || !found {
+		t.Fatalf("read back run: found=%v err=%v", found, readErr)
+	}
+	if stored.Proposal == nil {
+		t.Fatal("a checkpoint EOF carries no failure proposal")
+	}
+	// The test binary stands in for factory-runner and prints this line where
+	// the production runner prints "factory-runner: attempt runner failed: ...".
+	if !strings.Contains(stored.Proposal.Detail(), `stderr="supervisor helper failed`) {
+		t.Fatalf("durable failure detail does not include outer runner stderr: %q", stored.Proposal.Detail())
+	}
+}
+
 // A run that already carries its own reason must not gain an exit line. The
 // runner is alive and converged by the daemon here, so its exit is a
 // consequence of the daemon's own action rather than evidence about the
@@ -183,11 +211,41 @@ func TestFailureDetailTruncatesWholeRunes(t *testing.T) {
 			}
 		}
 	}
-	if failureDetail(nil) == "" {
-		t.Fatal("a nil cause produced an empty detail")
+	// The one invariant every caller relies on: the detail is never empty.
+	for name, cause := range map[string]error{"nil": nil, "empty text": errors.New(""), "blank text": errors.New(" \t"), "only invalid bytes": errors.New(string([]byte{0xff}))} {
+		detail := failureDetail(cause)
+		if strings.TrimSpace(detail) == "" || !utf8.ValidString(detail) {
+			t.Fatalf("%s cause produced detail %q", name, detail)
+		}
+	}
+	if detail := failureDetail(errors.New("")); !strings.Contains(detail, "*errors.errorString") {
+		t.Fatalf("empty cause fallback does not name the error type: %q", detail)
+	}
+	invalidPrefix := failureDetail(errors.New(string([]byte{0xff}) + strings.Repeat("a", maxFailureDetailBytes)))
+	if !utf8.ValidString(invalidPrefix) || !strings.Contains(invalidPrefix, strings.Repeat("a", 128)) {
+		t.Fatalf("invalid prefix discarded the diagnosis: valid=%t detail length=%d", utf8.ValidString(invalidPrefix), len(invalidPrefix))
 	}
 	short := errors.New("kept whole")
 	if failureDetail(short) != "kept whole" {
 		t.Fatalf("a short cause was altered: %q", failureDetail(short))
+	}
+	// Invalid input of any length must persist as valid, non-empty UTF-8 the
+	// kernel accepts and the operator can read.
+	for name, raw := range map[string]string{
+		"short invalid":          string([]byte{0xff, 0xfe}),
+		"long invalid":           strings.Repeat(string([]byte{0xff}), 2*maxFailureDetailBytes),
+		"long invalid with text": strings.Repeat("x"+string([]byte{0xc0}), maxFailureDetailBytes),
+		"multibyte cut at bound": strings.Repeat("😀", maxFailureDetailBytes),
+	} {
+		detail := failureDetail(errors.New(raw))
+		if detail == "" || !utf8.ValidString(detail) || len(detail) > maxFailureDetailBytes {
+			t.Fatalf("%s: detail=%q valid=%t len=%d", name, detail, utf8.ValidString(detail), len(detail))
+		}
+		if _, err := kernel.NewFailureProposal(kernel.FailureInternal, detail); err != nil {
+			t.Fatalf("%s: kernel rejected the detail: %v", name, err)
+		}
+	}
+	if detail := failureDetail(errors.New(strings.Repeat("x"+string([]byte{0xc0}), maxFailureDetailBytes))); !strings.HasPrefix(detail, "x\uFFFDx\uFFFD") {
+		t.Fatalf("long invalid cause lost its readable prefix: %q", detail[:16])
 	}
 }

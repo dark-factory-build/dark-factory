@@ -222,6 +222,61 @@ func TestTaskRecoveryRefusesTopologyBeyondBound(t *testing.T) {
 	}
 }
 
+// A task retried past the recovery projection's run bound is still readable
+// through LatestTaskRun, which carries the last run's terminal diagnosis.
+func TestLatestTaskRunReadsPastRecoveryBound(t *testing.T) {
+	store, terminal, _ := terminalPreRunningWorker(t)
+	defer store.Close()
+	ctx := context.Background()
+	loopID := func(kind, i byte) []byte { return append(bytes.Repeat([]byte{0xF0, kind}, IDBytes/2-1), i, 0xF0) }
+	for i := byte(0); i < MaxRecoveryRuns; i++ {
+		at := int64(100 + int64(i)*10)
+		corruptSQL(t, store, `UPDATE tasks SET work_revision = work_revision + 1, status = 'queued', blocked_reason = NULL, result = NULL, completed_at_ms = NULL, revision = revision + 1, updated_at_ms = ? WHERE id = ?`, at, terminal.TaskID.Bytes())
+		digest, _ := AttemptDigestFromBytes(bytes.Repeat([]byte{0xF0, i}, DigestBytes/2))
+		proof, _ := ResultProofDigestFromBytes(bytes.Repeat([]byte{0xF1, i}, DigestBytes/2))
+		runID, _ := RunIDFromBytes(loopID(1, i))
+		session, _ := TerminalSessionIDFromBytes(loopID(2, i))
+		candidate, _ := ChangeIDFromBytes(loopID(3, i))
+		resource := func(kind byte) ResourceID { id, _ := ResourceIDFromBytes(loopID(kind, i)); return id }
+		keys := AdmissionKeys{RunID: runID, TerminalSessionID: session, AttemptDigest: digest, ResultProofDigest: proof, CandidateChangeID: candidate, RuntimeRoot: "/runtime/loop-" + string(rune('a'+i%26)) + string(rune('a'+i/26)),
+			Resources: AdmissionResourceIDs{RuntimeRoot: resource(4), RunnerProcess: resource(5), ProviderProcess: resource(6), ProviderGroup: resource(7)}}
+		admission, err := store.AdmitNext(ctx, keys, mustTime(t, at+1))
+		if err != nil || !admission.Admitted() {
+			t.Fatalf("retry %d admission = %+v, %v", i, admission, err)
+		}
+		run := *admission.Run
+		runtime := resourceOfKind(t, resourcesForRunTest(t, store, run.ID), ResourceRuntimeRoot)
+		identity, _ := NewPathResourceIdentity(1000+int64(i), 2000+int64(i))
+		if _, err := store.ActivateResource(ctx, run.ID, runtime.ID, runtime.Revision, identity, mustTime(t, at+2)); err != nil {
+			t.Fatal(err)
+		}
+		failure, _ := NewFailureProposal(FailureInternal, "refusal "+string(rune('A'+i%26)))
+		finalizing, err := store.FailRun(ctx, run.ID, run.Revision, failure, mustTime(t, at+3))
+		if err != nil {
+			t.Fatal(err)
+		}
+		runtime = resourceOfKind(t, resourcesForRunTest(t, store, run.ID), ResourceRuntimeRoot)
+		if _, err := store.ReleaseResource(ctx, run.ID, runtime.ID, runtime.Revision, runtime.Identity, mustTime(t, at+4)); err != nil {
+			t.Fatal(err)
+		}
+		settlement, _ := NewAbandonedChangeSettlement(*run.AdmittedChangeRevision)
+		if _, err := store.FinalizeWorkerRun(ctx, run.ID, finalizing.Revision, settlement, mustTime(t, at+5)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	task, found, err := store.Task(ctx, terminal.TaskID)
+	if err != nil || !found || task.Status != TaskFailed {
+		t.Fatalf("task = %+v, found=%v, err=%v", task, found, err)
+	}
+	if _, _, err := store.TaskRecovery(ctx, task.ID, task.IncarnationID); !errors.Is(err, ErrRecoveryBounds) {
+		t.Fatalf("bounded recovery past %d runs = %v", MaxRecoveryRuns, err)
+	}
+	run, found, err := store.LatestTaskRun(ctx, task.ID, task.IncarnationID)
+	if err != nil || !found || run.Terminal == nil || run.Terminal.Detail() != "refusal "+string(rune('A'+(MaxRecoveryRuns-1)%26)) {
+		t.Fatalf("latest run = %+v, found=%v, err=%v", run, found, err)
+	}
+}
+
 func TestTaskRecoveryRefusesMismatchedIncarnation(t *testing.T) {
 	store, run, _ := admittedOrchestratorRun(t)
 	defer store.Close()
