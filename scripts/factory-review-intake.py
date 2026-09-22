@@ -30,6 +30,7 @@ FORMAL_SPEC = importlib.util.spec_from_file_location("factory_production_reviews
 formal = importlib.util.module_from_spec(FORMAL_SPEC)
 FORMAL_SPEC.loader.exec_module(formal)
 SHA = re.compile(r"^[0-9a-f]{40}$")
+REVIEW_REQUEST = re.compile(r"^<!-- dark-factory:review-request=([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}):([0-9a-f]{40}) -->$")
 # ponytail: the existing controller owns one sequential review pass per home.
 CUSTOMER_REVIEW = None
 
@@ -392,6 +393,24 @@ def observe_review(config, operation, external_reviews=None):
     if result["verdict"] == "allow" and operation.get("prior_review_operation") and not correction_review_is_explicit(config, operation, result):
         raise ReviewError("correction ALLOW does not explicitly correct the prior App BLOCK")
     return result["verdict"]
+
+
+def observe_host_review_request(pr, operation):
+    """Require the daemon's completed body handoff before launching a host review."""
+    for line in (pr.get("body") or "").splitlines():
+        match = REVIEW_REQUEST.fullmatch(line.strip())
+        if match is None:
+            continue
+        request_id, head = match.groups()
+        if head != operation["head"]:
+            raise ReviewError("host review request does not match the exact head")
+        value = observe_operation(request_id)
+        result = value.get("result")
+        if value.get("state") != "completed" or value.get("kind") != "update_pull_request_body" \
+                or not isinstance(result, dict) or result.get("head_sha") != head or result.get("number") != operation["pr"]:
+            return "waiting"
+        return "requested"
+    return "legacy"
 
 
 def correction_review_is_explicit(config, operation, result):
@@ -911,6 +930,8 @@ def run_locked(config, path, journal, journal_path, managed=None):
                 if operation.get("provider", "codex") != provider:
                     raise ReviewError("review provider changed for an existing exact-head receipt")
                 verify_existing(path, pr, operation)
+            if observe_host_review_request(pr, operation) == "waiting":
+                continue
             if merge_conflict(pr):
                 send_back_merge_conflict(config, operation, journal_path, receipts, messages, pr)
                 continue

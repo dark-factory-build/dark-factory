@@ -556,6 +556,19 @@ class ReviewIntakeTest(unittest.TestCase):
             self.assertTrue(review.app_update_receipt(body, 9, 'o/r'))
             self.assertFalse(review.app_update_receipt('changed\n\n' + body, 9, 'o/r'))
 
+    def test_daemon_review_request_requires_completed_exact_body_handoff(self):
+        operation = dict(self.operation, pr=9, head=SHA)
+        request_id = '22222222-2222-4222-8222-222222222222'
+        marker = '<!-- dark-factory:review-request=%s:%s -->' % (request_id, SHA)
+        value = {'state': 'completed', 'kind': 'update_pull_request_body',
+                 'result': {'number': 9, 'head_sha': SHA}}
+        with patch.object(review, 'observe_operation', return_value=value) as observe:
+            self.assertEqual('requested', review.observe_host_review_request({'body': marker}, operation))
+            observe.assert_called_once_with(request_id)
+        with patch.object(review, 'observe_operation', return_value={'state': 'missing'}):
+            self.assertEqual('waiting', review.observe_host_review_request({'body': marker}, operation))
+        self.assertEqual('legacy', review.observe_host_review_request({'body': 'Refs #7'}, operation))
+
     def test_app_receipt_urls_match_only_the_canonical_object(self):
         operation_id = '22222222-2222-4222-8222-222222222222'
         request = {'repository': 'o/r', 'operation_id': operation_id, 'pull_number': 9, 'body': 'verified'}

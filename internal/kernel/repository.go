@@ -120,6 +120,22 @@ func (store *Store) TaskRepository(ctx context.Context, taskID TaskID) (ProjectR
 	return taskRepository(ctx, read.connection, taskID)
 }
 
+func (store *Store) RepositoryGitHubIDByName(ctx context.Context, name string) (uint64, error) {
+	read, err := store.beginRead(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer read.Close()
+	var id int64
+	if err := read.connection.QueryRowContext(ctx, `SELECT github_repository_id FROM repository_source_identities WHERE lower(publication_repository) = lower(?)`, name).Scan(&id); err != nil {
+		return 0, err
+	}
+	if id <= 0 {
+		return 0, ErrNotFound
+	}
+	return uint64(id), nil
+}
+
 func taskRepository(ctx context.Context, connection *sql.Conn, taskID TaskID) (ProjectRepository, bool, error) {
 	return scanProjectRepository(connection.QueryRowContext(ctx, `SELECT r.id, r.project_id, r.name, r.root, b.base_ref, r.enabled, r.is_default, r.revision, r.created_at_ms, r.updated_at_ms FROM project_repositories AS r JOIN task_repository_bindings AS b ON b.repository_id = r.id JOIN tasks AS t ON t.id = b.task_id AND t.project_id = r.project_id WHERE b.task_id = ?`, taskID.Bytes()))
 }
