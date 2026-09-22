@@ -96,6 +96,8 @@ def release_destination(config, release):
         return runtime_destination(config["factory_home"])
     if isinstance(verifier, list) and any(isinstance(arg, str) and arg.endswith("verify-live-site.py") for arg in verifier):
         return "site:app.darkfactory.build"
+    if isinstance(verifier, list) and "production" in verifier and "verify" in verifier:
+        return "site:configured"
     return ""
 
 

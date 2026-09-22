@@ -210,7 +210,13 @@ For this repository use Python with `scripts/deploy-runtime.py` and
 `scripts/verify-live-runtime.py`. For a non-default factory, include
 `"--home", "/absolute/factory-home"` in both arrays before the appended SHA.
 For the site use `/bin/sh` with
-`scripts/deploy-site.sh` and Python with `scripts/verify-live-site.py`.
+`scripts/deploy-site.sh` and the credential-free `factoryctl production verify`
+command with one `--url` per configured public URL. It checks HTTP 200 and the
+configured source-commit meta tag on every page; it does not use Vercel or a
+browser session.
+The registered site configuration is `https://app.darkfactory.build/` and
+`https://www.darkfactory.build/`, using the
+`dark-factory-artifact-source` meta tag.
 `review_verifier` runs `/bin/sh` with `scripts/verify-adversarial-review.sh`.
 A probe emits the actually installed `sha` and boolean `healthy`; unavailable
 or malformed observations block deployment. It must never echo the requested

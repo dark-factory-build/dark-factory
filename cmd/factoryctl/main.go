@@ -156,6 +156,7 @@ const (
   factoryctl outcome read --project ID --id ID [--revision N]
   factoryctl outcome list --project ID [--offset N] [--limit N]
   factoryctl production observe --json-stdin
+  factoryctl production verify --url URL [--url URL ...] [--meta-tag NAME] EXPECTED_SHA
 `
 )
 
@@ -191,6 +192,7 @@ const (
 	commandProjectRepository
 	commandIntake
 	commandProductionObserve
+	commandProductionVerify
 	commandAgentCreate
 	commandAgentIdlePolicy
 	commandAccountsDiscover
@@ -292,6 +294,9 @@ type attemptCommand struct {
 	contentKind      string
 	intake           api.IntakeInput
 	production       api.ProductionInput
+	verificationURLs []string
+	metaTag          string
+	expectedSHA      string
 	contentID        string
 	contentRevision  uint64
 	description      string
@@ -401,6 +406,9 @@ func runWithDependencies(ctx context.Context, args []string, getenv func(string)
 	}
 	if command.kind == commandProductionObserve {
 		return runProductionObserve(ctx, getenv, stdout, stderr)
+	}
+	if command.kind == commandProductionVerify {
+		return runProductionVerify(ctx, command, stdout, stderr)
 	}
 	if command.kind == commandAgentPaths || command.kind == commandOperatorTerminalObserve || command.kind == commandWorkerOperation || command.kind == commandProjectCreate || command.kind == commandProjectRepository || command.kind == commandIntake || command.kind == commandProjectLimits || command.kind == commandAgentCreate || command.kind == commandAgentIdlePolicy || command.kind == commandAccountsDiscover || command.kind == commandAccountsList || command.kind == commandAccountLink || command.kind == commandAgentSelectAccount || command.kind == commandAgentSelectModel || command.kind == commandTaskAdd || command.kind == commandTaskSendBack || command.kind == commandTaskRecovery || command.kind == commandTaskRead || command.kind == commandDispatch || command.kind == commandCapacity || command.kind == commandStatus || command.kind == commandCompactStorage || command.kind == commandHumanList || command.kind == commandHumanReply {
 		return runOperator(ctx, command, getenv, stdout, stderr)
@@ -655,6 +663,36 @@ func parse(args []string) (attemptCommand, bool, bool) {
 	}
 	if len(args) == 3 && args[0] == "production" && args[1] == "observe" && args[2] == "--json-stdin" {
 		return attemptCommand{kind: commandProductionObserve}, false, true
+	}
+	if len(args) >= 4 && args[0] == "production" && args[1] == "verify" {
+		command := attemptCommand{kind: commandProductionVerify, metaTag: "dark-factory-artifact-source"}
+		seen := map[string]bool{}
+		for index := 2; index < len(args)-1; {
+			if index+1 >= len(args) || args[index] == "--meta-tag" && seen[args[index]] {
+				return attemptCommand{}, false, false
+			}
+			switch args[index] {
+			case "--url":
+				if !validVerificationURL(args[index+1]) {
+					return attemptCommand{}, false, false
+				}
+				command.verificationURLs = append(command.verificationURLs, args[index+1])
+			case "--meta-tag":
+				if !validOperatorText(args[index+1], 1, 128) {
+					return attemptCommand{}, false, false
+				}
+				command.metaTag = args[index+1]
+				seen[args[index]] = true
+			default:
+				return attemptCommand{}, false, false
+			}
+			index += 2
+		}
+		if len(command.verificationURLs) == 0 || !validSHA(args[len(args)-1]) {
+			return attemptCommand{}, false, false
+		}
+		command.expectedSHA = args[len(args)-1]
+		return command, false, true
 	}
 	if len(args) >= 1 && (args[0] == "status" || args[0] == "storage" || args[0] == "content" || args[0] == "outcome" || args[0] == "project" || args[0] == "agent" || args[0] == "account" || args[0] == "task" || args[0] == "worker" || args[0] == "dispatch" || args[0] == "capacity" || args[0] == "intake") {
 		return parseOperator(args)
