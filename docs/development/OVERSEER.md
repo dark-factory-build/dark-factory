@@ -160,7 +160,8 @@ instructions guide agents; they do not add an OS filesystem sandbox.
 
 Everything below assumes the launch-scoped private runtime home and `TMPDIR`,
 no `gh` credential, git without any remote credential, and the Maintainer App
-as the one MCP server (`maintainer`). A Codex overseer has no daemon database,
+as its publication MCP server. A native overseer also receives the
+authenticated `factory_attempt` MCP boundary. A Codex overseer has no daemon database,
 Changes-parent, or operator-home access; it reads a settled Change's work
 from the project repository's Git directory, which its local commands are
 granted read-only, by the branch head an explicit source request names. Each
@@ -516,9 +517,11 @@ launching a nested provider from the worker sandbox.
 
 Host operators can still invoke `scripts/cold-review.sh` directly with the
 repository, PR, exact head, pinned base and body file. Optional exact-head gate
-evidence supplements rather than replaces required checks. Blocking findings
-need a concrete reproducer or reachable code path through the current guards;
-unavailable read-only checks are deferred delivery conditions, not defects.
+evidence supplements rather than replaces required checks. Screenshots are
+illustrative only and never blocking evidence; UI correctness is established
+by render tests and source behavior. Blocking findings need a concrete
+reproducer or reachable code path through the current guards; unavailable
+read-only checks are deferred delivery conditions, not defects.
 
 - Unresolved: observe the supplied operation and report its concrete host
   infrastructure failure. Do not manufacture a verdict or start another review.

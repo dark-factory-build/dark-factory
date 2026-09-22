@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -741,6 +742,13 @@ func (daemon *Daemon) attemptSource(ctx context.Context, call api.Call) api.Repl
 	if !kernel.RetainedSourceReviewSupported(authority.Provider) {
 		return newErrorReply(api.RemoteUnavailable)
 	}
+	if authority.Role == kernel.RoleWorker {
+		expected, review, parseErr := kernel.ParseRetainedSourceReviewTask(authority.Task())
+		targetText, present := call.AttemptSourceTaskID()
+		if parseErr != nil || !review || !present || expected.TaskID.String() != targetText {
+			return newErrorReply(api.RemoteUnauthorized)
+		}
+	}
 	taskIDText, ok := call.AttemptSourceTaskID()
 	if !ok {
 		return newErrorReply(api.RemoteInvalidRequest)
@@ -750,16 +758,7 @@ func (daemon *Daemon) attemptSource(ctx context.Context, call api.Call) api.Repl
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
 	// An overseer reads any settled Change in its project; a worker reads only
-	// the target its own handoff line names, in the body the supervisor parsed.
-	if authority.Role == kernel.RoleWorker {
-		task, _, err := daemon.store.Task(ctx, authority.TaskID)
-		if err != nil {
-			return newErrorReply(remoteErrorCode(err))
-		}
-		if expected, review, err := kernel.ParseRetainedSourceReviewTask(task.Body); err != nil || !review || expected.TaskID != targetTaskID {
-			return newErrorReply(api.RemoteUnauthorized)
-		}
-	}
+	// the target its authenticated effective handoff line names.
 	daemon.attemptMu.Lock()
 	live := daemon.attempts[authority.RunID]
 	daemon.attemptMu.Unlock()
@@ -1487,14 +1486,14 @@ func (daemon *Daemon) proposeOutcome(ctx context.Context, call api.Call) (api.Re
 	// observed between the first inspection and proposal is refused.
 	if err := daemon.validateSuccessSource(ctx, live, proposal); err != nil {
 		daemon.operationMu.Unlock()
-		return newErrorReply(remoteErrorCode(err)), nil
+		return newRefusalReply(err), nil
 	}
 	if daemon.beforeSuccessProposal != nil {
 		daemon.beforeSuccessProposal()
 	}
 	if err := daemon.validateSuccessSource(ctx, live, proposal); err != nil {
 		daemon.operationMu.Unlock()
-		return newErrorReply(remoteErrorCode(err)), nil
+		return newRefusalReply(err), nil
 	}
 	// This durable transition and the owner-side attach check share one
 	// linearization gate. Whichever operation acquires it first owns the
@@ -1537,7 +1536,7 @@ func (daemon *Daemon) proposeOutcome(ctx context.Context, call api.Call) (api.Re
 			live.pendingOutcome = nil
 		}
 		daemon.operationMu.Unlock()
-		return newErrorReply(remoteErrorCode(err)), nil
+		return newRefusalReply(err), nil
 	}
 	daemon.operationMu.Unlock()
 	return daemon.mutation(ctx, run.Revision), attempt
@@ -2432,6 +2431,40 @@ func newErrorReply(code api.RemoteErrorCode) api.Reply {
 		return api.Reply{}
 	}
 	return reply
+}
+
+// newRefusalReply answers a refused attempt outcome with the exact reason the
+// daemon computed. Only a kernel refusal qualifies: it is raised after the
+// bearer matched this run, and its cause is daemon-authored text, so it says
+// what moved and what the worker must do before reporting again. Any other
+// error stays a bare code.
+func newRefusalReply(err error) api.Reply {
+	code := remoteErrorCode(err)
+	var refusal *kernel.OutcomeRefusal
+	if errors.As(err, &refusal) {
+		if reply, replyErr := api.NewErrorDetailReply(code, boundedDetail(refusal.Unwrap())); replyErr == nil {
+			return reply
+		}
+	}
+	return newErrorReply(code)
+}
+
+// boundedDetail renders a cause as one bounded, terminal-safe line: the worker
+// reads it inside its provider terminal.
+func boundedDetail(cause error) string {
+	if cause == nil {
+		return ""
+	}
+	detail := strings.Map(func(character rune) rune {
+		if character < 0x20 || character >= 0x7f && character <= 0x9f {
+			return ' '
+		}
+		return character
+	}, cause.Error())
+	if len(detail) > api.MaxRemoteErrorDetail {
+		detail = strings.ToValidUTF8(detail[:api.MaxRemoteErrorDetail], "")
+	}
+	return detail
 }
 
 func remoteErrorCode(err error) api.RemoteErrorCode {
