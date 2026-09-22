@@ -798,6 +798,26 @@ class ReviewIntakeTest(unittest.TestCase):
         # The second pull request still reached its review launch.
         self.assertEqual(1, launch.call_count)
 
+    def test_lineage_failure_on_one_pull_request_does_not_starve_the_next_one(self):
+        bare = Path(self.temp.name) / 'bare'
+        bare.mkdir()
+        (bare / 'HEAD').write_text('ref: refs/heads/main\n')
+        self.observe.return_value = 'missing'
+        second_sha = 'e' * 40
+        evidence = Path(self.temp.name) / 'ok.gate.json'
+        evidence.write_text(json.dumps({'head': second_sha, 'base': self.operation['base'], 'exit_code': 0}))
+        second = dict(self.operation, head=second_sha, review_operation='22222222-2222-4222-8222-222222222222')
+        prs = [{'number': 9, 'headRefOid': SHA, 'body': SHA + '\nRefs #7'},
+               {'number': 10, 'headRefOid': second_sha, 'body': second_sha + '\nRefs #7'}]
+        with patch.object(review, 'mirror', return_value=bare), patch.object(review, 'list_prs', return_value=prs), \
+             patch.object(review, 'linked_issue', side_effect=[review.intake.IntakeError('lineage unavailable'), 7]), \
+             patch.object(review, 'ready', return_value=dict(second)), patch.object(review, 'run_full_gate', return_value=evidence), \
+             patch.object(review, 'launch_review', return_value=0) as launch, patch.object(review.intake, 'enqueue'), \
+             patch.object(review.intake, 'task_state', return_value=None):
+            with self.assertRaisesRegex(review.ReviewError, 'PR #9: lineage unavailable'):
+                review.run_once(self.config)
+        self.assertEqual(1, launch.call_count)
+
     def test_send_back_without_a_routable_task_keeps_the_note_on_the_receipt(self):
         operation = dict(self.operation)
         with patch.object(review, '_source_task_id', return_value=''), patch.object(review.intake, 'command') as command:

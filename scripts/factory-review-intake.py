@@ -804,12 +804,8 @@ def run_locked(config, path, journal, journal_path, managed=None):
         existing = receipts["pulls"].get(key)
         try:
             issue = linked_issue(config, pr, journal, existing, managed)
-        except Unproven as exc:
-            messages.append("skipped PR #" + str(pr["number"]) + ": " + str(exc))
-            continue
-        if issue is None:
-            continue
-        try:
+            if issue is None:
+                continue
             config["_review_issue"] = issue
             if existing is None:
                 operation = ready(config, path, pr, issue)
@@ -941,6 +937,9 @@ def run_locked(config, path, journal, journal_path, managed=None):
             followup = review_followup(config, operation, state)
             if intake.task_state(config, followup) is None and enqueue_followup(config, followup, pr, journal, managed):
                 messages.append("woke PR #" + str(pr["number"]) + " review " + state)
+        except Unproven as exc:
+            messages.append("skipped PR #" + str(pr["number"]) + ": " + str(exc))
+            continue
         except (ReviewError, intake.IntakeError) as exc:
             # One pull request's host failure must not starve the others;
             # the tick still fails closed with every blocker named.
