@@ -9676,6 +9676,8 @@ mod tests {
                 },
                 state: "open".into(),
                 merged: false,
+                mergeable: None,
+                merge_state_status: None,
             })
         };
         let digest = request.reviewed_body_digest.as_deref().unwrap();
@@ -10773,6 +10775,8 @@ mod tests {
             },
             state: state.into(),
             merged,
+            mergeable: None,
+            merge_state_status: None,
         };
         assert!(
             pull("open", false, close.head_sha.clone())
@@ -11067,6 +11071,8 @@ mod tests {
             },
             state: "open".into(),
             merged: false,
+            mergeable: None,
+            merge_state_status: None,
         };
         assert_eq!(
             updated_pull.body_result(&update).unwrap().unwrap().head_sha,

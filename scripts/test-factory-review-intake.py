@@ -428,7 +428,7 @@ class ReviewIntakeTest(unittest.TestCase):
              patch.object(review, 'launch_review', return_value=1) as launch, \
              patch.object(review.intake, 'task_state', side_effect=[None, {'status': 'queued'}]), \
              patch.object(review.intake, 'enqueue', side_effect=review.intake.IntakeError('lost response')) as enqueue:
-            with self.assertRaises(review.intake.IntakeError):
+            with self.assertRaisesRegex(review.ReviewError, 'PR #9: lost response'):
                 review.run_once(self.config)
             self.assertEqual([], review.run_once(self.config))
         self.assertEqual(1, launch.call_count)
@@ -797,6 +797,84 @@ class ReviewIntakeTest(unittest.TestCase):
                 self.assertNotIn('gate_state', receipt)
                 self.assertNotIn('gate_evidence', receipt)
                 self.assertNotIn('review_attempted', receipt)
+
+    def test_one_unroutable_pull_request_does_not_starve_the_next_one(self):
+        # 22 Sep 2026: five operator-created PRs carried a journaled gate failure
+        # with no intake task to route to; the first raise ended the tick and no
+        # PR was reviewed for hours. Every PR is processed, then the tick fails
+        # closed naming each blocker.
+        bare = Path(self.temp.name) / 'bare'
+        bare.mkdir()
+        (bare / 'HEAD').write_text('ref: refs/heads/main\n')
+        self.observe.return_value = 'missing'
+        first = dict(self.operation, review_operation='11111111-1111-4111-8111-111111111111')
+        second_sha = 'e' * 40
+        evidence = Path(self.temp.name) / 'ok.gate.json'
+        evidence.write_text(json.dumps({'head': second_sha, 'base': self.operation['base'], 'exit_code': 0}))
+        second = dict(self.operation, head=second_sha, review_operation='22222222-2222-4222-8222-222222222222')
+        prs = [{'number': 9, 'headRefOid': SHA, 'body': SHA + '\nRefs #7'},
+               {'number': 10, 'headRefOid': second_sha, 'body': second_sha + '\nRefs #7'}]
+        with patch.object(review, 'mirror', return_value=bare), patch.object(review, 'list_prs', return_value=prs), \
+             patch.object(review, 'ready', side_effect=[dict(first), dict(second)]), patch.object(review, 'verify_existing'), \
+             patch.object(review, 'run_full_gate', side_effect=[review.ReviewError('host gate exploded'), evidence]), \
+             patch.object(review, 'send_back_source_task', side_effect=review.intake.IntakeError('original source task is unavailable')), \
+             patch.object(review, 'launch_review', return_value=0) as launch, patch.object(review.intake, 'enqueue'), \
+             patch.object(review.intake, 'task_state', return_value=None):
+            with self.assertRaisesRegex(review.ReviewError, 'PR #9: original source task is unavailable'):
+                review.run_once(self.config)
+        # The second pull request still reached its review launch.
+        self.assertEqual(1, launch.call_count)
+
+    def test_lineage_failure_on_one_pull_request_does_not_starve_the_next_one(self):
+        bare = Path(self.temp.name) / 'bare'
+        bare.mkdir()
+        (bare / 'HEAD').write_text('ref: refs/heads/main\n')
+        self.observe.return_value = 'missing'
+        second_sha = 'e' * 40
+        evidence = Path(self.temp.name) / 'ok.gate.json'
+        evidence.write_text(json.dumps({'head': second_sha, 'base': self.operation['base'], 'exit_code': 0}))
+        second = dict(self.operation, head=second_sha, review_operation='22222222-2222-4222-8222-222222222222')
+        prs = [{'number': 9, 'headRefOid': SHA, 'body': SHA + '\nRefs #7'},
+               {'number': 10, 'headRefOid': second_sha, 'body': second_sha + '\nRefs #7'}]
+        with patch.object(review, 'mirror', return_value=bare), patch.object(review, 'list_prs', return_value=prs), \
+             patch.object(review, 'linked_issue', side_effect=[review.intake.IntakeError('lineage unavailable'), 7]), \
+             patch.object(review, 'ready', return_value=dict(second)), patch.object(review, 'run_full_gate', return_value=evidence), \
+             patch.object(review, 'launch_review', return_value=0) as launch, patch.object(review.intake, 'enqueue'), \
+             patch.object(review.intake, 'task_state', return_value=None):
+            with self.assertRaisesRegex(review.ReviewError, 'PR #9: lineage unavailable'):
+                review.run_once(self.config)
+        self.assertEqual(1, launch.call_count)
+
+    def test_send_back_without_a_routable_task_keeps_the_note_on_the_receipt(self):
+        operation = dict(self.operation)
+        with patch.object(review, '_source_task_id', return_value=''), patch.object(review.intake, 'command') as command:
+            self.assertEqual('note', review.send_back_source_task(self.config, operation, 'note'))
+        command.assert_not_called()
+        self.assertEqual('note', operation['send_back_unroutable'])
+
+    def test_journaled_gate_failure_whose_gate_never_ran_is_gated_again(self):
+        bare = Path(self.temp.name) / 'bare'
+        bare.mkdir()
+        (bare / 'HEAD').write_text('ref: refs/heads/main\n')
+        stale = Path(self.temp.name) / 'stale.gate.json'
+        stale.write_text(json.dumps({'head': SHA, 'base': self.operation['base'], 'exit_code': 64}))
+        journal = Path(self.config['journal'] + '.reviews.json')
+        journal.write_text(json.dumps({'version': 2, 'config_fingerprint': review.config_fingerprint(self.config), 'pulls': {'9:' + SHA: dict(
+            self.operation, review_operation='11111111-1111-4111-8111-111111111111', gate_state='failed',
+            gate_failure_note='pre-review full gate unavailable: original source task is unavailable',
+            gate_evidence=str(stale))}}))
+        fresh = Path(self.temp.name) / 'fresh.gate.json'
+        fresh.write_text(json.dumps({'head': SHA, 'base': self.operation['base'], 'exit_code': 0}))
+        self.observe.return_value = 'missing'
+        with patch.object(review, 'mirror', return_value=bare), \
+             patch.object(review, 'list_prs', return_value=[{'number': 9, 'headRefOid': SHA, 'body': SHA + '\nRefs #7'}]), \
+             patch.object(review, 'verify_existing'), patch.object(review, 'run_full_gate', return_value=fresh) as gate, \
+             patch.object(review, 'send_back_source_task') as send_back, patch.object(review, 'launch_review', return_value=0) as launch, \
+             patch.object(review.intake, 'enqueue'), patch.object(review.intake, 'task_state', return_value=None):
+            review.run_once(self.config)
+        self.assertEqual(1, gate.call_count)
+        send_back.assert_not_called()
+        self.assertEqual(1, launch.call_count)
 
     def test_merge_observation_reuses_reviewed_digest_after_body_edit(self):
         operation = dict(self.operation, enqueue_operation='44444444-4444-4444-8444-444444444444',
