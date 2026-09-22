@@ -363,7 +363,7 @@ func (store *Store) RecordChangePublication(ctx context.Context, project string,
 		return ErrInvalidValue
 	}
 	projectID, err := ProjectIDFromBytes(raw)
-	if err != nil || !productionRepository.MatchString(repo) || pull == 0 || (receipt.PublishedHead == "" && reviewOperation == "" && receipt.Failure == "") {
+	if err != nil || !productionRepository.MatchString(repo) || pull == 0 || (receipt.PublishedHead == "" && reviewOperation == "") {
 		return ErrInvalidValue
 	}
 	tx, err := store.beginValidatedWrite(ctx)
@@ -388,6 +388,15 @@ func (store *Store) RecordChangePublication(ctx context.Context, project string,
 	if pr.Publication == nil {
 		pr.Publication = &PublicationReceipt{}
 	}
+	if receipt.PublishedHead != "" && receipt.PublishedHead != pr.Publication.PublishedHead {
+		pr.Publication.BodyOperation = ""
+		pr.Publication.ReviewRequestOperation = ""
+		pr.Publication.ReviewOperation = ""
+		pr.Review.Head = ""
+		pr.Review.State = ""
+		pr.Review.Findings = ""
+		pr.Review.URL = ""
+	}
 	if receipt.SourceHead != "" {
 		pr.Publication.SourceHead = receipt.SourceHead
 	}
@@ -409,7 +418,6 @@ func (store *Store) RecordChangePublication(ctx context.Context, project string,
 	if reviewOperation != "" {
 		pr.Publication.ReviewOperation = reviewOperation
 	}
-	pr.Publication.Failure = receipt.Failure
 	updated, err := json.Marshal(pr)
 	if err != nil {
 		return tx.Rollback(err)

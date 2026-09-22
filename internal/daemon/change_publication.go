@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha1"
 	"crypto/sha256"
@@ -58,12 +59,6 @@ const (
 // the remote write.
 func PlanChangePublication(event ChangePublicationEvent) ChangePublicationAction {
 	if event.ChangeID == "" || !event.Clean || event.SettledHead == "" {
-		return ChangePublicationNone
-	}
-	// A pull request recorded before the daemon owned publication has a head
-	// but no source head. Its branch may be merged, closed or moved, so it is
-	// never republished; host review keeps covering it.
-	if event.PublishedSourceHead == "" && event.PublishOperation == "" && event.PublishedHead != "" {
 		return ChangePublicationNone
 	}
 	if event.SettledHead != event.PublishedSourceHead {
@@ -171,9 +166,6 @@ func terminalIssueFooter(line string) bool {
 type ChangePublicationActions struct {
 	PublishAndRefresh func(context.Context, ChangePublicationEvent, string) error
 	RequestReview     func(context.Context, ChangePublicationEvent) error
-	// RecordFailure persists one Change's failed transition so the loop
-	// returns only store errors; a nil RecordFailure surfaces the cause.
-	RecordFailure func(context.Context, ChangePublicationEvent, error) error
 }
 
 func (daemon *Daemon) processChangePublications(ctx context.Context) error {
@@ -194,24 +186,18 @@ func (daemon *Daemon) durableChangePublicationEvents(ctx context.Context) ([]Cha
 	}
 	result := make([]ChangePublicationEvent, 0, len(facts))
 	for _, fact := range facts {
-		result = append(result, ChangePublicationEvent{ProjectID: fact.ProjectID, ChangeID: fact.ChangeID, TaskID: fact.TaskID, Repository: fact.Repository, PullNumber: fact.PullNumber, Branch: fact.Branch, Title: fact.Title, SettledHead: fact.SettledHead, PublishedHead: fact.PublishedHead, PublishedSourceHead: fact.PublishedSourceHead, PublishOperation: fact.PublishOperation, BodyOperation: fact.BodyOperation, ReviewRequestOperation: fact.ReviewRequestOperation, ReviewOperation: fact.ReviewOperation, ReviewHead: fact.ReviewHead, ReviewState: fact.ReviewState, Clean: true, Body: fact.Body, Base: fact.Base, BaseCommit: fact.BaseCommit, Delta: fmt.Sprint(fact.Delta)})
+		result = append(result, changePublicationEventFromFact(fact))
 	}
 	return result, nil
 }
 
-func (daemon *Daemon) configureChangePublication() {
-	daemon.changePublicationEvents = daemon.durableChangePublicationEvents
-	daemon.changePublicationActions = ChangePublicationActions{PublishAndRefresh: daemon.publishAndRefreshChange, RequestReview: daemon.requestChangeReview, RecordFailure: daemon.recordChangePublicationFailure}
+func changePublicationEventFromFact(fact kernel.ChangePublicationFact) ChangePublicationEvent {
+	return ChangePublicationEvent{ProjectID: fact.ProjectID, ChangeID: fact.ChangeID, TaskID: fact.TaskID, Repository: fact.Repository, PullNumber: fact.PullNumber, Branch: fact.Branch, Title: fact.Title, SettledHead: fact.SettledHead, PublishedHead: fact.PublishedHead, PublishedSourceHead: fact.PublishedSourceHead, PublishOperation: fact.PublishOperation, BodyOperation: fact.BodyOperation, ReviewRequestOperation: fact.ReviewRequestOperation, ReviewOperation: fact.ReviewOperation, ReviewHead: fact.ReviewHead, ReviewState: fact.ReviewState, Clean: true, Body: fact.Body, Base: fact.Base, BaseCommit: fact.BaseCommit, Delta: fmt.Sprint(fact.Delta)}
 }
 
-// recordChangePublicationFailure keeps the cause on the pull request's
-// publication receipt; the next pass retries the idempotent operation.
-func (daemon *Daemon) recordChangePublicationFailure(ctx context.Context, event ChangePublicationEvent, cause error) error {
-	at, err := daemon.timestamp()
-	if err != nil {
-		return err
-	}
-	return daemon.store.RecordChangePublication(ctx, event.ProjectID, event.Repository, event.PullNumber, kernel.PublicationReceipt{Failure: boundedDetail(cause)}, nil, "", at)
+func (daemon *Daemon) configureChangePublication() {
+	daemon.changePublicationEvents = daemon.durableChangePublicationEvents
+	daemon.changePublicationActions = ChangePublicationActions{PublishAndRefresh: daemon.publishAndRefreshChange, RequestReview: daemon.requestChangeReview}
 }
 
 func operationID(kind, repository, changeID, head string) string {
@@ -244,15 +230,25 @@ func (daemon *Daemon) maintainerCall(ctx context.Context, repository string, ope
 	if err != nil {
 		return nil, err
 	}
-	var envelope struct {
-		Result struct {
-			IsError bool `json:"isError"`
-		} `json:"result"`
-	}
-	if err := json.Unmarshal(response, &envelope); err != nil || envelope.Result.IsError {
+	if !validMaintainerResponse(response) {
 		return nil, fmt.Errorf("maintainer %s refused", name)
 	}
 	return response, nil
+}
+
+func validMaintainerResponse(response []byte) bool {
+	var envelope struct {
+		JSONRPC string          `json:"jsonrpc"`
+		ID      json.RawMessage `json:"id"`
+		Result  *struct {
+			IsError bool `json:"isError"`
+		} `json:"result"`
+		Error json.RawMessage `json:"error"`
+	}
+	if json.Unmarshal(response, &envelope) != nil || envelope.JSONRPC != "2.0" || !bytes.Equal(bytes.TrimSpace(envelope.ID), []byte("1")) || envelope.Result == nil || envelope.Result.IsError {
+		return false
+	}
+	return len(envelope.Error) == 0 || bytes.Equal(bytes.TrimSpace(envelope.Error), []byte("null"))
 }
 
 func (daemon *Daemon) requestChangeReview(ctx context.Context, event ChangePublicationEvent) error {
@@ -449,9 +445,6 @@ func ProcessChangePublicationEvents(ctx context.Context, events []ChangePublicat
 				} else {
 					err = actions.RequestReview(ctx, event)
 				}
-			}
-			if err != nil && actions.RecordFailure != nil {
-				err = actions.RecordFailure(ctx, event, err)
 			}
 			if err != nil {
 				errors <- err

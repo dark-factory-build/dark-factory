@@ -2,10 +2,11 @@ package daemon
 
 import (
 	"context"
-	"errors"
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/dark-factory-build/dark-factory/internal/kernel"
 )
 
 func TestNewDaemonWiresProductionChangePublicationLoop(t *testing.T) {
@@ -18,14 +19,26 @@ func TestNewDaemonWiresProductionChangePublicationLoop(t *testing.T) {
 	}
 }
 
-func TestPlanChangePublicationTransitions(t *testing.T) {
-	legacy := ChangePublicationEvent{ChangeID: "one", SettledHead: "new", PublishedHead: "old", Clean: true}
-	if got := PlanChangePublication(legacy); got != ChangePublicationNone {
-		t.Fatalf("legacy published head without a source head action = %v", got)
+func TestMaintainerResponseValidationRejectsTopLevelErrors(t *testing.T) {
+	valid := []byte(`{"jsonrpc":"2.0","id":1,"result":{"isError":false}}`)
+	if !validMaintainerResponse(valid) {
+		t.Fatal("valid maintainer response was rejected")
 	}
-	base := ChangePublicationEvent{ChangeID: "one", SettledHead: "new", PublishedHead: "old", PublishedSourceHead: "old", PublishOperation: "publish-old", BodyOperation: "body-old", Clean: true}
+	for _, response := range [][]byte{
+		[]byte(`{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"failed"}}`),
+		[]byte(`{"jsonrpc":"2.0","id":1,"result":{"isError":true}}`),
+		[]byte(`{"jsonrpc":"2.0","id":2,"result":{"isError":false}}`),
+	} {
+		if validMaintainerResponse(response) {
+			t.Fatalf("failed maintainer response was accepted: %s", response)
+		}
+	}
+}
+
+func TestPlanChangePublicationTransitions(t *testing.T) {
+	base := ChangePublicationEvent{ChangeID: "one", SettledHead: "new", PublishedHead: "old", Clean: true}
 	if got := PlanChangePublication(base); got != ChangePublicationPublishAndRefresh {
-		t.Fatalf("corrected clean head action = %v", got)
+		t.Fatalf("unpublished clean head action = %v", got)
 	}
 	base.PublishedHead = "new"
 	base.PublishedSourceHead = "new"
@@ -36,9 +49,24 @@ func TestPlanChangePublicationTransitions(t *testing.T) {
 	if got := PlanChangePublication(base); got != ChangePublicationNone {
 		t.Fatalf("settled head action = %v", got)
 	}
+	base.ReviewOperation = "old-review"
+	base.SettledHead = "newer"
+	base.PublishedHead = "newer"
+	base.PublishedSourceHead = "newer"
+	base.ReviewHead = "new"
+	if got := PlanChangePublication(base); got != ChangePublicationRequestReview {
+		t.Fatalf("new published head with stale review action = %v", got)
+	}
 	base.Clean = false
 	if got := PlanChangePublication(base); got != ChangePublicationNone {
 		t.Fatalf("dirty head action = %v", got)
+	}
+}
+
+func TestPersistedPublicationFactPlansFreshReviewAfterHeadChange(t *testing.T) {
+	fact := kernel.ChangePublicationFact{ChangeID: "persisted", SettledHead: strings.Repeat("c", 40), PublishedHead: strings.Repeat("c", 40), PublishedSourceHead: strings.Repeat("c", 40), PublishOperation: "publish-new", BodyOperation: "body-new", ReviewHead: strings.Repeat("b", 40), ReviewState: "allow"}
+	if got := PlanChangePublication(changePublicationEventFromFact(fact)); got != ChangePublicationRequestReview {
+		t.Fatalf("persisted old-head review fact action = %v", got)
 	}
 }
 
@@ -87,46 +115,10 @@ func TestPublicationDiffBaseUsesLocalFactsForLegacyPublishedPR(t *testing.T) {
 	}
 }
 
-func TestProcessChangePublicationEventsRecordsFailureAndContinues(t *testing.T) {
-	events := []ChangePublicationEvent{
-		{ChangeID: "broken", SettledHead: "new", PublishedHead: "old", PublishedSourceHead: "old", PublishOperation: "p", BodyOperation: "b", Clean: true},
-		{ChangeID: "fine", SettledHead: "new", PublishedHead: "old", PublishedSourceHead: "old", PublishOperation: "p", BodyOperation: "b", Clean: true},
-	}
-	var mu sync.Mutex
-	published, recorded := map[string]bool{}, map[string]string{}
-	actions := ChangePublicationActions{
-		PublishAndRefresh: func(_ context.Context, event ChangePublicationEvent, _ string) error {
-			mu.Lock()
-			defer mu.Unlock()
-			published[event.ChangeID] = true
-			if event.ChangeID == "broken" {
-				return errors.New("publish_commit refused")
-			}
-			return nil
-		},
-		RecordFailure: func(_ context.Context, event ChangePublicationEvent, cause error) error {
-			mu.Lock()
-			defer mu.Unlock()
-			recorded[event.ChangeID] = cause.Error()
-			return nil
-		},
-	}
-	if err := ProcessChangePublicationEvents(context.Background(), events, actions); err != nil {
-		t.Fatalf("a recorded publication failure reached the scheduler: %v", err)
-	}
-	if !published["fine"] || recorded["broken"] != "publish_commit refused" || len(recorded) != 1 {
-		t.Fatalf("published=%v recorded=%v", published, recorded)
-	}
-	actions.RecordFailure = func(context.Context, ChangePublicationEvent, error) error { return errors.New("store closed") }
-	if err := ProcessChangePublicationEvents(context.Background(), events[:1], actions); err == nil || !strings.Contains(err.Error(), "store closed") {
-		t.Fatalf("store failure while recording = %v", err)
-	}
-}
-
 func TestProcessChangePublicationEventsRunsChangesConcurrently(t *testing.T) {
 	events := []ChangePublicationEvent{
-		{ChangeID: "one", SettledHead: "one-new", PublishedHead: "one-old", PublishedSourceHead: "one-old", PublishOperation: "p", BodyOperation: "b", Clean: true},
-		{ChangeID: "two", SettledHead: "two-new", PublishedHead: "two-old", PublishedSourceHead: "two-old", PublishOperation: "p", BodyOperation: "b", Clean: true},
+		{ChangeID: "one", SettledHead: "one-new", PublishedHead: "one-old", Clean: true},
+		{ChangeID: "two", SettledHead: "two-new", PublishedHead: "two-old", Clean: true},
 	}
 	started := make(chan string, len(events))
 	gate := make(chan struct{})
