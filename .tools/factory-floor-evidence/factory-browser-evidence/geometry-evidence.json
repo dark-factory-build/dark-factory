@@ -1,9 +1,9 @@
 {
   "fixture": "http://127.0.0.1:5196/?fixture=actual",
   "before_commit": "ebf4254e491c420d46a8ba53ea990aaa8de17f9e",
-  "after_commit": "4192f1bb4d2762e448c2eb6143e753faff950c8c",
+  "after_commit": "84ea1020e874332b4145c6152bd3691dbf6f4942",
   "rendered_source": {
-    "tree_oid": "2b397565bf21496c50693ce1bb4fd9f0d694f931",
+    "tree_oid": "05ea95b2dbe5b8bd0c3932523b728f572e33244c",
     "source_tree_oid": "c4e10d5e78eb2c6981ac9c9b946d68ba0fae4a7f",
     "blob": "web/packages/ui/src/factory-scene/factory-scene.tsx",
     "blob_oid": "8e617fb1478526de7395f7372bf5c40e4e9b9625",
@@ -32,9 +32,9 @@
   },
   "sha256": {
     "before-desktop.png": "917381948180dbc802b07565f4bedbf490e7312f560898f0642ce82acf3f4d53",
-    "after-desktop.png": "b873cded151bf286af10070bb9d550cbf3c22f1ba87fc54f19851507d347bad7",
+    "after-desktop.png": "4b6abf78beff768779d5ca5917a78e99b4a3674646fece2994188742f2701eba",
     "before-phone.png": "8c39920a278b17f618653298361003a1ccd55867700ed4f98f602b42a6c7a5f4",
-    "after-phone.png": "a0efd4c1b72b4ebc62f085ac98a44b768a6ceaf283334bfb727db514d362426e"
+    "after-phone.png": "c7a959f7a8d088909a91ece34940a01d049140eb80ad1eff7f0ca7e1f1a33623"
   },
   "inspection": [
     "Tasks tray artwork is centered within the Tasks tabletop.",

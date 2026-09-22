@@ -194,8 +194,8 @@ export function breakRoomNook(layout: SceneLayout, restingCount: number, plannin
   return { width, furniture: (["shelf", "coffee"] as const).slice(0, pieces).map((errand, index) => ({
     errand,
     x: compact ? compactX : left + 5 + index * PIECE,
-    y: layout.restingTop - 38 - (compact ? index * 24 : 0),
-    stand: { x: compact ? compactX + 10 : left + 15 + index * PIECE, y: layout.restingTop - 8 - (compact ? index * 24 : 0) },
+    y: layout.restingTop - 38 + (compact ? index * 24 : 0),
+    stand: { x: compact ? compactX + 10 : left + 15 + index * PIECE, y: layout.restingTop - 8 + (compact ? index * 24 : 0) },
   })) };
 }
 
