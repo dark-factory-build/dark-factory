@@ -332,7 +332,7 @@ func runAttemptWorkerHelper(args []string) error {
 		// native-raw greets with more than the terminal's output buffer and
 		// only then takes the terminal out of canonical mode, as an
 		// interactive CLI does while it starts; native-chatty then keeps
-		// printing for two seconds while it waits for its line; native-exit
+		// printing for one second while it waits for its line; native-exit
 		// dies at once.
 		greeting := ""
 		switch mode {
@@ -925,7 +925,7 @@ func TestAttemptRunnerTypesTheStartupPromptOnlyOnceTheProviderIsRaw(t *testing.T
 }
 
 // The submitting CR waits for the provider's output to go quiet: a provider
-// that keeps printing for two seconds after the prompt is typed gets its
+// that keeps printing for one second after the prompt is typed gets its
 // line completed after that, well before the five-second ceiling.
 func TestAttemptRunnerSubmitsTheStartupPromptOnlyOnceTheProviderIsQuiet(t *testing.T) {
 	f := newAttemptFixture(t, "native-chatty", "")
@@ -950,8 +950,9 @@ func TestAttemptRunnerSubmitsTheStartupPromptOnlyOnceTheProviderIsQuiet(t *testi
 	// chatter leaves about three times the nominal duration before the
 	// ceiling: on 22 Sep 2026 a loaded host stretched the earlier two
 	// seconds of chatter past the ceiling and failed every pre-review gate.
-	if elapsed < startupEnterFloor || elapsed >= startupEnterCeiling {
-		t.Fatalf("startup line completed %v after ready, want after the %v floor and before the %v ceiling", elapsed, startupEnterFloor, startupEnterCeiling)
+	chatter := time.Second
+	if elapsed < chatter+startupEnterQuiet || elapsed >= startupEnterCeiling {
+		t.Fatalf("startup line completed %v after ready, want after the chatter's %v plus the %v quiet spell and before the %v ceiling", elapsed, chatter, startupEnterQuiet, startupEnterCeiling)
 	}
 	if err := os.WriteFile(filepath.Join(f.root, "finish"), nil, 0o600); err != nil {
 		t.Fatal(err)
