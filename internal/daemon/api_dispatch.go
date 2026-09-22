@@ -474,6 +474,11 @@ func (daemon *Daemon) taskRead(ctx context.Context, call api.Call) api.Reply {
 		if runFound && run.Terminal != nil {
 			outcomeText = run.Terminal.Detail()
 		}
+		// A worker may fail its attempt with no detail. The operator still
+		// sees an outcome rather than a failed task with nothing to read.
+		if strings.TrimSpace(outcomeText) == "" {
+			outcomeText = "run failed without a recorded cause"
+		}
 	}
 	outcome, outcomeMore := taskDetailTextChunk(outcomeText, input.Offset)
 	attachments, err := daemon.store.TaskAttachments(ctx, id)
