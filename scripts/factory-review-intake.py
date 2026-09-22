@@ -604,7 +604,7 @@ def run_full_gate(path, operation, destination):
         intake.command(["git", "-C", str(path), "worktree", "add", "--detach", str(worktree), operation["head"]], timeout=120)
         log = destination.with_suffix(".gate.log")
         with log.open("w", encoding="utf-8") as output:
-            process = subprocess.run(["/bin/sh", "-c", '. "$1"; go_gate_run_bounded "$@"', "review-gate-owner",
+            process = subprocess.run(["/bin/sh", "-c", '. "$1"; shift; go_gate_run_bounded "$@"', "review-gate-owner",
                                       str(HERE / "go-gate-environment.sh"), "1800", str(worktree / "scripts/local-ci.sh")],
                                      cwd=worktree, stdout=output, stderr=subprocess.STDOUT, timeout=1860)
         receipt = destination.with_suffix(".gate.json")
@@ -853,18 +853,7 @@ def run_locked(config, path, journal, journal_path, managed=None):
             if (path / "HEAD").is_file():
                 try:
                     evidence = run_full_gate(path, operation, review_body_path(config, pr, operation))
-                    operation["gate_evidence"] = str(evidence)
                     receipt = json.loads(evidence.read_text(encoding="utf-8"))
-                    if receipt.get("exit_code") != 0:
-                        operation["gate_state"] = "failed"
-                        operation["gate_failure_note"] = gate_failure_note(evidence, operation)
-                        intake.atomic_json(journal_path, receipts)
-                        send_back_source_task(config, operation, operation["gate_failure_note"])
-                        operation["gate_failure_sent_back"] = True
-                        intake.atomic_json(journal_path, receipts)
-                        messages.append("sent back PR #" + str(pr["number"]) + " pre-review gate failure: " + operation["gate_failure_note"])
-                        continue
-                    operation["gate_state"] = "passed"
                 except (OSError, ValueError, json.JSONDecodeError, intake.IntakeError, ReviewError, subprocess.SubprocessError) as exc:
                     operation["gate_state"] = "failed"
                     operation["gate_failure_note"] = "pre-review full gate unavailable: " + str(exc)[:300] + ". Exact head " + operation["head"] + "."
@@ -874,6 +863,24 @@ def run_locked(config, path, journal, journal_path, managed=None):
                     intake.atomic_json(journal_path, receipts)
                     messages.append("sent back PR #" + str(pr["number"]) + " pre-review gate failure: " + operation["gate_failure_note"])
                     continue
+                # go_gate_run_bounded's own statuses (64 refused arguments,
+                # 125..127 supervisor or exec failure) mean nothing ran: name
+                # the host blocker instead of sending a working head back, and
+                # journal no gate verdict so the repaired host gates it again.
+                if receipt.get("exit_code") in {64, 125, 126, 127}:
+                    raise ReviewError("pre-review gate could not run: bounded gate wrapper exit " + str(receipt["exit_code"]) +
+                                      ", nothing ran. Exact head " + operation["head"] + ".")
+                operation["gate_evidence"] = str(evidence)
+                if receipt.get("exit_code") != 0:
+                    operation["gate_state"] = "failed"
+                    operation["gate_failure_note"] = gate_failure_note(evidence, operation)
+                    intake.atomic_json(journal_path, receipts)
+                    send_back_source_task(config, operation, operation["gate_failure_note"])
+                    operation["gate_failure_sent_back"] = True
+                    intake.atomic_json(journal_path, receipts)
+                    messages.append("sent back PR #" + str(pr["number"]) + " pre-review gate failure: " + operation["gate_failure_note"])
+                    continue
+                operation["gate_state"] = "passed"
             # Persist before launching: a crash cannot authorize a second model
             # run while the first may still be submitting its exact-head verdict.
             operation["review_attempted"] = True
