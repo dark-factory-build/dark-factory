@@ -4,18 +4,24 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/dark-factory-build/dark-factory/internal/runner"
 )
 
-const overseerHeartbeatMillis int64 = 60 * 60 * 1000
+type publicationWakeTarget struct {
+	TaskID           TaskID
+	ChangeID         ChangeID
+	ChangeRevision   Revision
+	HeadCommitDigest string
+}
 
 // EnqueueOverseerWakeups consumes worker activity from the durable
 // invalidation journal. A cursor is deliberately left behind a queued or
 // running overseer, so activity while it works causes one follow-up after it
-// exits. Unchanged input is not reconsidered after every quiet interval; a
-// bounded heartbeat remains as a safety net for an input missed by the journal.
+// exits. Unfinished work is reconsidered after the configured quiet interval
+// even without new events; a failed coordination run cannot strand the backlog.
 func (store *Store) EnqueueOverseerWakeups(ctx context.Context, at UnixMillis) ([]Task, error) {
 	tx, err := store.beginUncheckedWrite(ctx)
 	if err != nil {
@@ -69,8 +75,8 @@ func (store *Store) EnqueueOverseerWakeups(ctx context.Context, at UnixMillis) (
 			continue
 		}
 		// A missing cursor is the one initial inspection for a newly enabled
-		// rule. Worker events retain targeted context; unchanged history is not
-		// a reason to launch another provider run.
+		// rule. Worker events retain targeted context; an unchanged backlog is
+		// deliberately quiet so a standing overseer cannot become a paid poll.
 		fullReconciliation := !found || cursor < factory.Floor.Int64()-1
 		var targets []TaskID
 		if !fullReconciliation {
@@ -79,12 +85,9 @@ func (store *Store) EnqueueOverseerWakeups(ctx context.Context, at UnixMillis) (
 				return nil, tx.Rollback(err)
 			}
 		}
-		if !fullReconciliation && len(targets) == 0 {
-			lastRunAt, foundRun, err := latestOverseerRunAt(ctx, tx.connection, agent.ID)
-			if err != nil {
-				return nil, tx.Rollback(err)
-			}
-			fullReconciliation = foundRun && at.Int64()-lastRunAt >= overseerHeartbeatMillis
+		publicationTargets, err := unpublishedPublicationTargets(ctx, tx.connection, agent.ProjectID, agent.ID, at.Int64())
+		if err != nil {
+			return nil, tx.Rollback(err)
 		}
 		// Validate once, before the first task or cursor write; an unchanged
 		// poll rolls back without scanning unrelated retained history.
@@ -93,7 +96,7 @@ func (store *Store) EnqueueOverseerWakeups(ctx context.Context, at UnixMillis) (
 				return nil, tx.Rollback(err)
 			}
 		}
-		if fullReconciliation || len(targets) != 0 {
+		if fullReconciliation || len(targets) != 0 || len(publicationTargets) != 0 {
 			prior, err := latestOverseerTask(ctx, tx.connection, agent.ID)
 			if err != nil {
 				return nil, tx.Rollback(err)
@@ -102,13 +105,13 @@ func (store *Store) EnqueueOverseerWakeups(ctx context.Context, at UnixMillis) (
 				fullReconciliation = true
 				targets = nil
 			}
-			body, fits := overseerWakeInstruction(agent.Provider, agent.Idle.Instruction, targets, prior, fullReconciliation)
+			body, fits := overseerWakeInstructionWithPublication(agent.Provider, agent.Idle.Instruction, targets, prior, fullReconciliation, publicationTargets)
 			if !fits {
 				// Retaining every causal identity would exceed the exact task-delivery
 				// bound. Say so explicitly and make the next run reconcile instead of
 				// silently dropping an event or failing a legal standing instruction.
 				fullReconciliation = true
-				body, fits = overseerWakeInstruction(agent.Provider, agent.Idle.Instruction, nil, prior, true)
+				body, fits = overseerWakeInstructionWithPublication(agent.Provider, agent.Idle.Instruction, nil, prior, true, publicationTargets)
 				if !fits {
 					return nil, tx.Rollback(fmt.Errorf("%w: overseer wake instruction exceeds task bound", ErrInvalidValue))
 				}
@@ -163,23 +166,6 @@ func latestOverseerTask(ctx context.Context, connection *sql.Conn, agentID Agent
 	return &id, nil
 }
 
-func latestOverseerRunAt(ctx context.Context, connection *sql.Conn, agentID AgentID) (int64, bool, error) {
-	var endedAt sql.NullInt64
-	err := connection.QueryRowContext(ctx, `SELECT terminal_at_ms FROM runs
-		WHERE agent_id = ? AND role = 'orchestrator' AND phase = 'terminal'
-		ORDER BY terminal_at_ms DESC, id DESC LIMIT 1`, agentID.Bytes()).Scan(&endedAt)
-	if err == sql.ErrNoRows {
-		return 0, false, nil
-	}
-	if err != nil {
-		return 0, false, err
-	}
-	if !endedAt.Valid || endedAt.Int64 < 0 {
-		return 0, false, fmt.Errorf("%w: invalid overseer terminal time", ErrCorruptState)
-	}
-	return endedAt.Int64, true, nil
-}
-
 func overseerWakeCursor(ctx context.Context, connection *sql.Conn, agentID AgentID) (int64, bool, error) {
 	var sequence int64
 	err := connection.QueryRowContext(ctx, `SELECT invalidation_sequence FROM overseer_wake_cursors WHERE agent_id = ?`, agentID.Bytes()).Scan(&sequence)
@@ -223,9 +209,7 @@ func workerInvalidationTargetsAfter(ctx context.Context, connection *sql.Conn, p
 		WHERE i.sequence > ? AND i.sequence <= ? AND i.entity_kind = 'peer_question' AND q.project_id = ?
 		UNION ALL SELECT i.sequence, q.target_task_id FROM invalidations AS i JOIN peer_questions AS q ON q.id = i.entity_id
 		WHERE i.sequence > ? AND i.sequence <= ? AND i.entity_kind = 'peer_question' AND q.project_id = ?
-		UNION ALL SELECT i.sequence, c.task_id FROM invalidations AS i JOIN changes AS c ON c.id = i.entity_id
-		WHERE i.sequence > ? AND i.sequence <= ? AND i.entity_kind = 'change' AND c.project_id = ?
-	) ORDER BY sequence, task_id`, cursor, head, projectID.Bytes(), cursor, head, projectID.Bytes(), cursor, head, projectID.Bytes(), cursor, head, projectID.Bytes(), cursor, head, projectID.Bytes(), cursor, head, projectID.Bytes())
+	) ORDER BY sequence, task_id`, cursor, head, projectID.Bytes(), cursor, head, projectID.Bytes(), cursor, head, projectID.Bytes(), cursor, head, projectID.Bytes(), cursor, head, projectID.Bytes())
 	if err != nil {
 		return nil, err
 	}
@@ -250,6 +234,84 @@ func workerInvalidationTargetsAfter(ctx context.Context, connection *sql.Conn, p
 		return nil, err
 	}
 	return tasks, nil
+}
+
+func unpublishedPublicationTargets(ctx context.Context, connection *sql.Conn, projectID ProjectID, agentID AgentID, at int64) ([]publicationWakeTarget, error) {
+	rows, err := connection.QueryContext(ctx, `SELECT c.task_id, c.id, c.revision, lower(hex(c.head_commit)) FROM changes AS c JOIN tasks AS t ON t.id = c.task_id
+		WHERE c.project_id = ? AND t.status = 'succeeded' AND c.head_commit IS NOT NULL AND c.base_commit IS NOT NULL
+		  AND c.head_commit <> c.base_commit AND c.updated_at_ms + ? <= ?
+		  AND NOT EXISTS (SELECT 1 FROM publication_tasks AS p WHERE p.change_id = c.id)
+		  AND NOT EXISTS (SELECT 1 FROM tasks AS prior WHERE prior.assigned_agent_id = ?
+		      AND (instr(prior.body, 'publication_change=' || lower(hex(c.id)) || ':' || c.revision || ':' || lower(hex(c.head_commit))) > 0
+		           OR (instr(prior.body, 'publication attention overflow: full reconciliation required') > 0
+		               AND c.updated_at_ms <= prior.updated_at_ms)
+		           OR (prior.body = (SELECT idle_instruction FROM agents WHERE agents.id = prior.assigned_agent_id)
+		               AND c.updated_at_ms <= prior.updated_at_ms)))
+		ORDER BY c.updated_at_ms, c.id LIMIT 32`, projectID.Bytes(), PublicationAttentionAfter.Milliseconds(), at, agentID.Bytes())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []publicationWakeTarget
+	for rows.Next() {
+		var taskRaw, changeRaw []byte
+		var revision int64
+		var head string
+		if err := rows.Scan(&taskRaw, &changeRaw, &revision, &head); err != nil {
+			return nil, err
+		}
+		task, taskErr := TaskIDFromBytes(taskRaw)
+		change, changeErr := ChangeIDFromBytes(changeRaw)
+		changeRevision, revisionErr := NewRevision(revision)
+		if taskErr != nil || changeErr != nil || revisionErr != nil || head == "" {
+			return nil, fmt.Errorf("%w: invalid publication wake identity", ErrCorruptState)
+		}
+		result = append(result, publicationWakeTarget{TaskID: task, ChangeID: change, ChangeRevision: changeRevision, HeadCommitDigest: head})
+	}
+	return result, rows.Err()
+}
+
+func overseerWakeInstructionWithPublication(provider Provider, instruction string, targets []TaskID, prior *TaskID, full bool, publications []publicationWakeTarget) (string, bool) {
+	body, fits := overseerWakeInstruction(provider, instruction, targets, prior, full)
+	if len(publications) == 0 || !fits {
+		return body, fits
+	}
+	tasks, changes := make([]string, 0, len(publications)), make([]string, 0, len(publications))
+	for _, target := range publications {
+		tasks = append(tasks, target.TaskID.String())
+		changes = append(changes, target.ChangeID.String())
+	}
+	markers := make([]string, 0, len(publications))
+	for _, target := range publications {
+		markers = append(markers, "publication_change="+target.ChangeID.String()+":"+strconv.FormatInt(target.ChangeRevision.Int64(), 10)+":"+target.HeadCommitDigest)
+	}
+	body += " Publication attention: task_ids=" + strings.Join(tasks, ",") + "; change_ids=" + strings.Join(changes, ",") + "; " + strings.Join(markers, " ") + ". Reconcile publication for each exact task and Change."
+	if publicationBodyFits(provider, body) {
+		return body, true
+	}
+	// The durable candidates remain queryable, so an overfull causal envelope
+	// must become a bounded full reconciliation rather than a failed wake.
+	body, fits = overseerWakeInstruction(provider, instruction, nil, prior, true)
+	if !fits {
+		return body, false
+	}
+	attention := body + " publication attention overflow: full reconciliation required."
+	if publicationBodyFits(provider, attention) {
+		return attention, true
+	}
+	return body, true
+}
+
+func publicationBodyFits(provider Provider, body string) bool {
+	if provider == ProviderClaudeCode {
+		_, err := runner.PrepareClaudeTask([]byte(body))
+		return err == nil
+	}
+	limit := runner.MaxProviderTaskBytes
+	if provider == ProviderCodex {
+		limit = runner.MaxCodexTaskBytes
+	}
+	return byteLen(body) <= limit
 }
 
 func overseerWakeInstruction(provider Provider, instruction string, targets []TaskID, prior *TaskID, full bool) (string, bool) {
