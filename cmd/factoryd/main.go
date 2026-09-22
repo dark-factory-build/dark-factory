@@ -442,6 +442,7 @@ func openProcess(ctx context.Context, configuration config) (_ *process, resultE
 		defer close(owner.schedulerDone)
 		owner.schedulerErr = owner.daemon.RunScheduler(ownedContext, owner.supervisorSpec)
 	}()
+	go func() { _ = owner.daemon.RunIntake(ownedContext) }()
 	startupPhase("scheduler")
 	keep = true
 	return owner, nil

@@ -32,6 +32,8 @@ const (
 // caller accepts and hands one connection to HandleConnection.
 type Daemon struct {
 	intakeMu             sync.Mutex
+	intakeTickMu         sync.Mutex
+	intakeTicks          map[kernel.IntakeSourceID]intakeTickState
 	linear               *linear.Host
 	github               *maintainer.Host
 	intakeControllerHome string
@@ -131,6 +133,12 @@ type supervisorRegistration struct {
 	result error
 }
 
+type intakeTickState struct {
+	next             time.Time
+	page             uint32
+	acceptanceCursor string
+}
+
 // NewDaemon creates an API composition root using the wall clock for durable
 // timestamps. The Store is never replaced or wrapped by the daemon.
 func NewDaemon(store *kernel.Store) (*Daemon, error) {
@@ -142,7 +150,7 @@ func newDaemon(store *kernel.Store, now func() time.Time) (*Daemon, error) {
 		return nil, fmt.Errorf("%w: invalid daemon", kernel.ErrInvalidValue)
 	}
 	cleanupCtx, cleanupCancel := context.WithCancel(context.Background())
-	return &Daemon{store: store, now: now, cleanupCtx: cleanupCtx, cleanupCancel: cleanupCancel, browsers: make(map[*BrowserRuntime]struct{}), browserClientGates: &browserClientGates{}, attempts: make(map[kernel.RunID]*liveAttempt), supervisors: make(map[*supervisorRegistration]struct{}), schedulerWake: make(chan struct{}, 1)}, nil
+	return &Daemon{store: store, now: now, cleanupCtx: cleanupCtx, cleanupCancel: cleanupCancel, browsers: make(map[*BrowserRuntime]struct{}), browserClientGates: &browserClientGates{}, attempts: make(map[kernel.RunID]*liveAttempt), supervisors: make(map[*supervisorRegistration]struct{}), schedulerWake: make(chan struct{}, 1), intakeTicks: make(map[kernel.IntakeSourceID]intakeTickState)}, nil
 }
 
 // HandleConnection synchronously consumes exactly one authenticated request,

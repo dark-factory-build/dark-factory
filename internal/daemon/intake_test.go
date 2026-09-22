@@ -124,6 +124,39 @@ func TestIntakeAcceptedContentSurvivesLargeBacklogAndMetadataChanges(t *testing.
 	}
 }
 
+func TestIntakeRunnerPollsEnabledSourcesAndHonorsPollInterval(t *testing.T) {
+	fixture := newDispatchFixture(t)
+	ctx := context.Background()
+	project := mustProjectID(t, testID(240))
+	agent := mustAgentID(t, testID(241))
+	if _, err := fixture.store.CreateProject(ctx, kernel.NewProject{ID: project, Name: "runner", Root: "/runner"}, mustKernelTime(t, 101)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.store.CreateAgent(ctx, kernel.NewAgent{ID: agent, ProjectID: project, Name: "overseer", Role: kernel.RoleOrchestrator, Provider: kernel.ProviderShell, ToolBudgetLimit: 1}, mustKernelTime(t, 102)); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := hex.DecodeString(testID(242))
+	id, _ := kernel.IntakeSourceIDFromBytes(raw)
+	source, err := fixture.store.CreateIntakeSource(ctx, kernel.NewIntakeSource{ID: id, ProjectID: project, TargetRepositoryID: kernel.RepositoryID(project), OverseerAgentID: agent, GitHubRepositoryID: 42, GitHubRepositoryName: "team/issues", Policy: kernel.IntakePolicyManual, PollSeconds: 60, AdmissionLimit: 1}, mustKernelTime(t, 103))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.store.SetIntakeSourceEnabled(ctx, id, source.Revision, true, mustKernelTime(t, 104)); err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	fixture.daemon.intakeIssues = func(context.Context, string, uint64, uint32, string, uint64) (maintainer.IssuePage, error) {
+		calls++
+		return maintainer.IssuePage{RepositoryID: 42}, nil
+	}
+	if err := fixture.daemon.tickIntake(ctx); err != nil || calls != 1 {
+		t.Fatalf("first daemon tick: err=%v calls=%d", err, calls)
+	}
+	if err := fixture.daemon.tickIntake(ctx); err != nil || calls != 1 {
+		t.Fatalf("poll interval ignored: err=%v calls=%d", err, calls)
+	}
+}
+
 func TestIntakeWithdrawFailureReportsOnlyDurableWithdrawalAsPending(t *testing.T) {
 	fixture := newDispatchFixture(t)
 	ctx := context.Background()
