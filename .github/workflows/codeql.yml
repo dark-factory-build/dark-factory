@@ -25,7 +25,7 @@ jobs:
           - language: go
             build-mode: autobuild
           - language: rust
-            build-mode: manual
+            build-mode: none
     steps:
       - name: Check out source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
@@ -35,11 +35,6 @@ jobs:
         with:
           languages: ${{ matrix.language }}
           build-mode: ${{ matrix.build-mode }}
-
-      - name: Build control-plane Rust
-        if: matrix.language == 'rust'
-        working-directory: control-plane
-        run: cargo build --locked
 
       - name: Perform CodeQL analysis
         uses: github/codeql-action/analyze@03e4368ac7daa2bd82b3e85262f3bf87ee112f57 # v3.36.0
