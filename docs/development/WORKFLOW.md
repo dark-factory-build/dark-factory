@@ -21,6 +21,8 @@ The routine source check is:
 ./scripts/go-check.sh
 ```
 
+For a quick ordinary-change signal, scripts/check-fast.sh runs formatting, lint, and ordinary unit tests in parallel; scripts/local-ci.sh remains the authoritative serialized gate.
+
 It runs Go formatting, vetting, ordinary short tests, the TypeScript build and
 tests, and `git diff --check`. It does not acquire the process lease. During
 implementation, run this check plus focused tests for the changed package.
