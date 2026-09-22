@@ -14,6 +14,8 @@ import (
 	"strings"
 )
 
+const maxProductionReviewFindings = 16000
+
 var productionRepository = regexp.MustCompile(`^[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}$`)
 
 type ProductionRecord struct {
@@ -148,7 +150,7 @@ func migrateProductionRuntimeRecords(ctx context.Context, c *sql.Conn, project P
 }
 
 func validProductionPull(pr ProductionPullRequest) bool {
-	return pr.Number > 0 && pr.Number <= 1<<53-1 && validOutcomeText(pr.Title, 1024) && pr.Title != "" && productionURL(pr.URL) && productionSHA(pr.Head) && productionSHA(pr.Merge) && productionSHA(pr.Review.Head) && (pr.HeadRepository == "" || productionRepository.MatchString(pr.HeadRepository)) && validOutcomeText(pr.Branch, 256) && validOutcomeText(pr.Base, 256) && validOutcomeText(pr.MergeQueue, 64) && validOutcomeText(pr.MergedAt, 64) && validOutcomeText(pr.NextAction, 2048) && validOutcomeText(pr.Review.State, 64) && validOutcomeText(pr.Review.Findings, 8192) && productionURL(pr.Review.URL) && (pr.State == "open" || pr.State == "closed" || pr.State == "merged")
+	return pr.Number > 0 && pr.Number <= 1<<53-1 && validOutcomeText(pr.Title, 1024) && pr.Title != "" && productionURL(pr.URL) && productionSHA(pr.Head) && productionSHA(pr.Merge) && productionSHA(pr.Review.Head) && (pr.HeadRepository == "" || productionRepository.MatchString(pr.HeadRepository)) && validOutcomeText(pr.Branch, 256) && validOutcomeText(pr.Base, 256) && validOutcomeText(pr.MergeQueue, 64) && validOutcomeText(pr.MergedAt, 64) && validOutcomeText(pr.NextAction, 2048) && validOutcomeText(pr.Review.State, 64) && validOutcomeText(pr.Review.Findings, maxProductionReviewFindings) && productionURL(pr.Review.URL) && (pr.State == "open" || pr.State == "closed" || pr.State == "merged")
 }
 
 func productionRecordOnConnection(ctx context.Context, c *sql.Conn, project ProjectID, repo, kind, id, visual string, value any, at int64) error {
@@ -341,7 +343,7 @@ func (store *Store) RecordPublication(ctx context.Context, project ProjectID, ta
 // Refreshes may move the live PR to a newer head; that older head is evidence,
 // not permission to rewrite the review onto the new source.
 func (store *Store) RecordProductionReview(ctx context.Context, project ProjectID, repo string, number uint64, review ProductionReview, at UnixMillis) error {
-	if project.zero() || !productionRepository.MatchString(repo) || number == 0 || number > 1<<53-1 || !productionSHA(review.Head) || !validOutcomeText(review.State, 64) || !validOutcomeText(review.Findings, 8192) || !productionURL(review.URL) {
+	if project.zero() || !productionRepository.MatchString(repo) || number == 0 || number > 1<<53-1 || !productionSHA(review.Head) || !validOutcomeText(review.State, 64) || !validOutcomeText(review.Findings, maxProductionReviewFindings) || !productionURL(review.URL) {
 		return ErrInvalidValue
 	}
 	repo = strings.ToLower(repo)

@@ -19,6 +19,12 @@ func TestProductionPersistsRevisionEvidenceWithoutRewinding(t *testing.T) {
 	if err := store.RecordProductionObservation(ctx, project.ID, observation, mustTime(t, 10)); err != nil {
 		t.Fatal(err)
 	}
+	if err := store.RecordProductionReview(ctx, project.ID, "example/factory", 7, ProductionReview{Head: head, State: "block", Findings: strings.Repeat("f", 8193)}, mustTime(t, 10)); err != nil {
+		t.Fatalf("review findings boundary: %v", err)
+	}
+	if err := store.RecordProductionReview(ctx, project.ID, "example/factory", 7, ProductionReview{Head: head, State: "block", Findings: strings.Repeat("f", 16001)}, mustTime(t, 10)); !errors.Is(err, ErrInvalidValue) {
+		t.Fatalf("oversized review findings = %v", err)
+	}
 	page, err := store.Production(ctx, project.ID, 0, 8)
 	if err != nil || len(page.Records) != 3 {
 		t.Fatalf("page=%+v err=%v", page, err)
