@@ -183,8 +183,15 @@ func TestFailureDetailTruncatesWholeRunes(t *testing.T) {
 			}
 		}
 	}
-	if failureDetail(nil) == "" {
-		t.Fatal("a nil cause produced an empty detail")
+	// The one invariant every caller relies on: the detail is never empty.
+	for name, cause := range map[string]error{"nil": nil, "empty text": errors.New(""), "blank text": errors.New(" \t"), "only invalid bytes": errors.New(string([]byte{0xff}))} {
+		detail := failureDetail(cause)
+		if strings.TrimSpace(detail) == "" || !utf8.ValidString(detail) {
+			t.Fatalf("%s cause produced detail %q", name, detail)
+		}
+	}
+	if detail := failureDetail(errors.New("")); !strings.Contains(detail, "*errors.errorString") {
+		t.Fatalf("empty cause fallback does not name the error type: %q", detail)
 	}
 	invalidPrefix := failureDetail(errors.New(string([]byte{0xff}) + strings.Repeat("a", maxFailureDetailBytes)))
 	if !utf8.ValidString(invalidPrefix) || !strings.Contains(invalidPrefix, strings.Repeat("a", 128)) {

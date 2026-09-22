@@ -1155,13 +1155,17 @@ func kernelProcessExit(exit runner.Exit, at kernel.UnixMillis) (kernel.ProcessEx
 // one durable free-form field a failed run carries, it survives to terminal,
 // and it was storing a constant while the cause was discarded.
 func failureDetail(cause error) string {
-	if cause == nil {
-		return "daemon attempt failure"
-	}
 	// Every invalid byte run becomes one replacement rune, so an invalid
-	// cause of any length stays readable and non-empty; the byte bound then
-	// cuts on a rune boundary so the stored prefix is itself valid.
-	detail := strings.ToValidUTF8(cause.Error(), "\uFFFD")
+	// cause of any length stays readable; the byte bound then cuts on a rune
+	// boundary so the stored prefix is itself valid. A nil or blank cause
+	// still names the failure, so a failed run never carries an empty detail.
+	detail := ""
+	if cause != nil {
+		detail = strings.ToValidUTF8(cause.Error(), "\uFFFD")
+	}
+	if strings.TrimSpace(detail) == "" {
+		return fmt.Sprintf("run failed without a cause (%T)", cause)
+	}
 	if len(detail) <= maxFailureDetailBytes {
 		return detail
 	}
