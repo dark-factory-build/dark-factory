@@ -363,7 +363,7 @@ func (store *Store) RecordChangePublication(ctx context.Context, project string,
 		return ErrInvalidValue
 	}
 	projectID, err := ProjectIDFromBytes(raw)
-	if err != nil || !productionRepository.MatchString(repo) || pull == 0 || (receipt.PublishedHead == "" && reviewOperation == "") {
+	if err != nil || !productionRepository.MatchString(repo) || pull == 0 || (receipt.PublishedHead == "" && reviewOperation == "" && receipt.Failure == "") {
 		return ErrInvalidValue
 	}
 	tx, err := store.beginValidatedWrite(ctx)
@@ -409,6 +409,7 @@ func (store *Store) RecordChangePublication(ctx context.Context, project string,
 	if reviewOperation != "" {
 		pr.Publication.ReviewOperation = reviewOperation
 	}
+	pr.Publication.Failure = receipt.Failure
 	updated, err := json.Marshal(pr)
 	if err != nil {
 		return tx.Rollback(err)

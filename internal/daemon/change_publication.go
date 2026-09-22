@@ -60,6 +60,12 @@ func PlanChangePublication(event ChangePublicationEvent) ChangePublicationAction
 	if event.ChangeID == "" || !event.Clean || event.SettledHead == "" {
 		return ChangePublicationNone
 	}
+	// A pull request recorded before the daemon owned publication has a head
+	// but no source head. Its branch may be merged, closed or moved, so it is
+	// never republished; host review keeps covering it.
+	if event.PublishedSourceHead == "" && event.PublishOperation == "" && event.PublishedHead != "" {
+		return ChangePublicationNone
+	}
 	if event.SettledHead != event.PublishedSourceHead {
 		return ChangePublicationPublishAndRefresh
 	}
@@ -165,6 +171,9 @@ func terminalIssueFooter(line string) bool {
 type ChangePublicationActions struct {
 	PublishAndRefresh func(context.Context, ChangePublicationEvent, string) error
 	RequestReview     func(context.Context, ChangePublicationEvent) error
+	// RecordFailure persists one Change's failed transition so the loop
+	// returns only store errors; a nil RecordFailure surfaces the cause.
+	RecordFailure func(context.Context, ChangePublicationEvent, error) error
 }
 
 func (daemon *Daemon) processChangePublications(ctx context.Context) error {
@@ -192,7 +201,17 @@ func (daemon *Daemon) durableChangePublicationEvents(ctx context.Context) ([]Cha
 
 func (daemon *Daemon) configureChangePublication() {
 	daemon.changePublicationEvents = daemon.durableChangePublicationEvents
-	daemon.changePublicationActions = ChangePublicationActions{PublishAndRefresh: daemon.publishAndRefreshChange, RequestReview: daemon.requestChangeReview}
+	daemon.changePublicationActions = ChangePublicationActions{PublishAndRefresh: daemon.publishAndRefreshChange, RequestReview: daemon.requestChangeReview, RecordFailure: daemon.recordChangePublicationFailure}
+}
+
+// recordChangePublicationFailure keeps the cause on the pull request's
+// publication receipt; the next pass retries the idempotent operation.
+func (daemon *Daemon) recordChangePublicationFailure(ctx context.Context, event ChangePublicationEvent, cause error) error {
+	at, err := daemon.timestamp()
+	if err != nil {
+		return err
+	}
+	return daemon.store.RecordChangePublication(ctx, event.ProjectID, event.Repository, event.PullNumber, kernel.PublicationReceipt{Failure: boundedDetail(cause)}, nil, "", at)
 }
 
 func operationID(kind, repository, changeID, head string) string {
@@ -430,6 +449,9 @@ func ProcessChangePublicationEvents(ctx context.Context, events []ChangePublicat
 				} else {
 					err = actions.RequestReview(ctx, event)
 				}
+			}
+			if err != nil && actions.RecordFailure != nil {
+				err = actions.RecordFailure(ctx, event, err)
 			}
 			if err != nil {
 				errors <- err

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
@@ -337,6 +338,52 @@ func TestProductionObservationUsesVerifiedHeadRepositoryForTransformedHead(t *te
 		if err := store.writer.QueryRowContext(ctx, `SELECT count(*) FROM publication_tasks WHERE project_id = ? AND repository = 'example/factory' AND pull_number = 8 AND change_id IS NOT NULL`, terminal.ProjectID.Bytes()).Scan(&linked); err != nil || linked != 0 {
 			t.Fatalf("unverified head repository %q linked Change rows = %d, err=%v", headRepository, linked, err)
 		}
+	}
+}
+
+func TestRecordChangePublicationKeepsFailureUntilSuccess(t *testing.T) {
+	ctx := context.Background()
+	store, _ := newTestStore(t)
+	defer store.Close()
+	project, err := store.CreateProject(ctx, NewProject{ID: projectID(t, 253), Name: "production", Root: "/production"}, mustTime(t, 2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 254), IncarnationID: incarnationID(t, 255), ProjectID: project.ID, Title: "durable task"}, mustTime(t, 3))
+	if err != nil {
+		t.Fatal(err)
+	}
+	head := strings.Repeat("d", 40)
+	pr := ProductionPullRequest{Number: 12, Title: "Failing PR", URL: "https://github.com/example/factory/pull/12", Head: head, Branch: "feature/failing", Base: "main", State: "open", Review: ProductionReview{Head: head, State: "unknown"}}
+	if err := store.RecordPublication(ctx, project.ID, task.ID, "example/factory", pr, mustTime(t, 4)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecordChangePublication(ctx, project.ID.String(), "example/factory", 12, PublicationReceipt{}, nil, "", mustTime(t, 5)); !errors.Is(err, ErrInvalidValue) {
+		t.Fatalf("empty receipt = %v", err)
+	}
+	if err := store.RecordChangePublication(ctx, project.ID.String(), "example/factory", 12, PublicationReceipt{Failure: "publish_commit refused"}, nil, "", mustTime(t, 5)); err != nil {
+		t.Fatal(err)
+	}
+	read := func() ProductionPullRequest {
+		t.Helper()
+		page, err := store.Production(ctx, project.ID, 0, 8)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got ProductionPullRequest
+		if err := json.Unmarshal([]byte(productionRecord(t, page, "pull_request", "12").Document), &got); err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	if got := read(); got.Publication == nil || got.Publication.Failure != "publish_commit refused" || got.Head != head {
+		t.Fatalf("failed publication = %+v", got.Publication)
+	}
+	if err := store.RecordChangePublication(ctx, project.ID.String(), "example/factory", 12, PublicationReceipt{SourceHead: strings.Repeat("e", 40), PublishedHead: strings.Repeat("f", 40), PublishOperation: "publish"}, nil, "", mustTime(t, 6)); err != nil {
+		t.Fatal(err)
+	}
+	if got := read(); got.Publication == nil || got.Publication.Failure != "" || got.Publication.PublishOperation != "publish" {
+		t.Fatalf("successful publication kept the failure: %+v", got.Publication)
 	}
 }
 

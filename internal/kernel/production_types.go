@@ -42,6 +42,8 @@ type PublicationReceipt struct {
 	BodyOperation          string `json:"body_operation,omitempty"`
 	ReviewRequestOperation string `json:"review_request_operation,omitempty"`
 	ReviewOperation        string `json:"review_operation,omitempty"`
+	// Failure is the last publication attempt's cause; a later success clears it.
+	Failure string `json:"failure,omitempty"`
 }
 
 // ChangePublicationFact joins durable Change settlement with the last
