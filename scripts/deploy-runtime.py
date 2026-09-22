@@ -80,7 +80,6 @@ def deploy(sha, home=None):
     # Preparation is non-destructive and leaves working agents running.
     subprocess.run(['/bin/sh', str(scripts / 'reinstall-service.sh'), '--home', str(home), '--prepare', sha], env=env, check=True, timeout=600, capture_output=True, text=True)
     enabled, original_revision, _ = state(home)
-    subprocess.run([str(control), 'dispatch', 'off', '--revision', str(original_revision)], env=env, check=True, timeout=15, stdout=subprocess.DEVNULL)
     def paused_state():
         current_enabled, revision, active = state(home)
         expected = original_revision + 1
@@ -92,30 +91,24 @@ def deploy(sha, home=None):
         subprocess.run([str(control), 'dispatch', 'on', '--revision', str(revision)], env=env, check=True, timeout=15,
                        stdout=subprocess.DEVNULL)
 
-    paused_state()
-    while True:
-        drained_revision, active = paused_state()
-        if active == 0:
-            break
-        time.sleep(1)
-    try:
-        subprocess.run(['/bin/sh', str(scripts / 'reinstall-service.sh'), '--home', str(home), '--install-prepared', sha], env=env, check=True, timeout=600,
-                       capture_output=True, text=True)
-        observed = json.loads(subprocess.run([sys.executable, str(scripts / 'verify-live-runtime.py'), '--home', str(home), sha], env=env, capture_output=True, text=True, check=True, timeout=60).stdout)
-        if observed.get('sha') != sha or observed.get('healthy') is not True:
-            raise ValueError('runtime verification failed')
-    except (OSError, ValueError, json.JSONDecodeError, subprocess.SubprocessError) as exc:
-        # The drain paused the factory, and a lost deployment must not leave it
-        # paused: it would sit idle on the old build until an operator looked.
-        # Restore under the same guard the success path uses.
+    def recover(exc, owned_revision):
+        """Undo exactly the pause this invocation owns and report what is left.
+
+        The daemon can commit a control change and still lose its response, so
+        the owned revision is reconciled from the store rather than from what
+        this process believes it did. A control revision beyond the owned one
+        is a later operator decision and is left alone. The receipt states the
+        store and the socket as observed: a read that failed is recorded as
+        unknown, never as a paused factory nobody saw.
+        """
         try:
             current_enabled, revision, active = state(home)
             store_read = active >= 0
         except (OSError, sqlite3.Error):
             current_enabled, revision, store_read = None, None, False
-        if store_read and enabled and not current_enabled and revision == drained_revision:
+        if store_read and enabled and not current_enabled and revision == owned_revision:
             try:
-                restore_dispatch(drained_revision)
+                restore_dispatch(owned_revision)
             except (OSError, subprocess.SubprocessError):
                 pass
         # The evidence is what the factory was left with, never what this
@@ -123,22 +116,45 @@ def deploy(sha, home=None):
         # the failed installation, and a timed-out restore may still have been
         # applied. A receipt that contradicts the live factory is worse than none.
         try:
-            dispatching = store_read and bool(state(home)[0])
+            dispatching = bool(state(home)[0]) if store_read else None
         except (OSError, sqlite3.Error):
-            dispatching, store_read = False, False
+            dispatching = None
         reachable = service_reachable(home)
         failure_receipt(sha, reachable, dispatching)
-        error = ValueError('deployment failed; dispatch '
-                           + ('is on so the factory keeps working on the old build' if dispatching else 'remains off')
-                           + '; service_reachable=' + str(reachable).lower())
+        if dispatching is None:
+            note = 'state is unreadable; run factoryctl dispatch status before retrying'
+        else:
+            note = 'is on so the factory keeps working on the old build' if dispatching else 'remains off'
+        error = ValueError('deployment failed; dispatch ' + note + '; service_reachable=' + str(reachable).lower())
         # A refusal over a run it could not adopt installed nothing, so a later
-        # attempt may simply proceed once the factory is dispatching again.
-        error.retryable = store_read and (dispatching or not enabled) and getattr(exc, 'returncode', None) == REFUSED
-        raise error from exc
+        # attempt may simply proceed once the factory is dispatching again. An
+        # unknown dispatch state is never that proof.
+        error.retryable = store_read and (dispatching is True or not enabled) and getattr(exc, 'returncode', None) == REFUSED
+        return error
+
+    # One compensation scope: the pause, the drain reads it depends on, and the
+    # installation all own the same revision, so every way of losing the
+    # deployment from here leaves the factory reconciled and recorded.
+    owned_revision = original_revision + 1
+    try:
+        subprocess.run([str(control), 'dispatch', 'off', '--revision', str(original_revision)], env=env, check=True, timeout=15, stdout=subprocess.DEVNULL)
+        paused_state()
+        while True:
+            active = paused_state()[1]
+            if active == 0:
+                break
+            time.sleep(1)
+        subprocess.run(['/bin/sh', str(scripts / 'reinstall-service.sh'), '--home', str(home), '--install-prepared', sha], env=env, check=True, timeout=600,
+                       capture_output=True, text=True)
+        observed = json.loads(subprocess.run([sys.executable, str(scripts / 'verify-live-runtime.py'), '--home', str(home), sha], env=env, capture_output=True, text=True, check=True, timeout=60).stdout)
+        if observed.get('sha') != sha or observed.get('healthy') is not True:
+            raise ValueError('runtime verification failed')
+    except (OSError, ValueError, json.JSONDecodeError, subprocess.SubprocessError) as exc:
+        raise recover(exc, owned_revision) from exc
     current_enabled, revision, active = state(home)
     # A subsequent explicit operator dispatch change wins over our restoration.
-    if enabled and not current_enabled and active == 0 and revision == drained_revision:
-        restore_dispatch(drained_revision)
+    if enabled and not current_enabled and active == 0 and revision == owned_revision:
+        restore_dispatch(owned_revision)
     print(json.dumps({'sha': sha, 'healthy': True, 'dispatch_enabled': bool(state(home)[0])}))
 
 
@@ -158,6 +174,10 @@ if __name__ == '__main__':
             # redacts whole labels and then keeps the tail.
             print(str(cause.stderr or '') + '\nstage: ' + ' '.join(Path(str(arg)).name for arg in cause.cmd[:5])
                   + ' exit=' + str(getattr(cause, 'returncode', 'timeout')), file=sys.stderr)
+        elif cause is not error:
+            # The compensation summary says what the factory was left with; the
+            # cause says what went wrong. An operator needs both.
+            print('cause: ' + str(cause), file=sys.stderr)
         # 75 tells the release controller the failure left no effect to undo:
         # the non-destructive preparation, or a refusal to restart over a run
         # it could not adopt, after which the factory is working as before.
