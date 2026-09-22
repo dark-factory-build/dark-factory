@@ -17,6 +17,8 @@ use crate::maintainer::MAX_EXACT_INTEGER;
 pub(crate) const PRIVATE_KEY_BINDING: &str = "DARK_FACTORY_MAINTAINER_PRIVATE_KEY_PKCS8";
 pub(crate) const PERMISSION_REVISION_BINDING: &str = "DARK_FACTORY_MAINTAINER_PERMISSION_REVISION";
 pub(crate) const PERMISSION_REVISION: &str = "maintainer-operations-v6";
+const MAINTAINER_BOT: &str = "dark-factory-maintainer[bot]";
+const MAINTAINER_BOT_ID: &str = "319516570";
 const GITHUB_API_VERSION: &str = "2026-03-10";
 // GitHub list endpoints below request at most 100 records. Issue comments and
 // review bodies can each be 65,536 characters, so a webhook-sized 64 KiB cap
@@ -195,6 +197,16 @@ pub(crate) enum RefusalReason {
     /// Determinate: the same commit truncates every time.
     #[error("the commit's tree is too large for GitHub to return whole")]
     TreeTruncated,
+    #[error("the created commit was not verified by GitHub")]
+    CommitUnverified,
+    #[error("the created commit has an unexpected verification reason")]
+    CommitVerificationReason,
+    #[error("the created commit has an unexpected author")]
+    CommitAuthorMismatch,
+    #[error("the created commit has an unexpected bot committer")]
+    CommitCommitterMismatch,
+    #[error("the created commit has an unexpected tree")]
+    CommitTreeMismatch,
     #[error("the direct merge preconditions are not satisfied")]
     MergePreconditions,
     #[error("the pull request checks are not complete and successful")]
@@ -5027,7 +5039,7 @@ impl Authority {
         branch_exists: bool,
     ) -> Result<CommitResult, OperationError> {
         let tree = self.materialize_tree(token, request).await?;
-        let commit: GitObjectId = github_json_request(
+        let commit: CreatedCommit = github_json_request(
             worker::Method::Post,
             &format!(
                 "https://api.github.com/repos/{}/{}/git/commits",
@@ -5042,7 +5054,11 @@ impl Authority {
             }),
         )
         .await?;
-        valid_sha(&commit.sha)?;
+        let commit_sha = validate_created_commit(
+            &commit,
+            &tree,
+            self.commit_author.as_ref(),
+        )?;
         // Git objects are immutable. The only persistent publication is this
         // final non-forced ref write, so a failure cannot strand an empty
         // branch and a moved branch cannot be overwritten.
@@ -5057,7 +5073,7 @@ impl Authority {
                 ),
                 token.as_str(),
                 Some(&RefUpdate {
-                    sha: &commit.sha,
+                    sha: &commit_sha,
                     force: false,
                 }),
             )
@@ -5072,15 +5088,15 @@ impl Authority {
                 token.as_str(),
                 Some(&RefCreate {
                     reference: &format!("refs/heads/{}", request.branch),
-                    sha: &commit.sha,
+                    sha: &commit_sha,
                 }),
             )
             .await?
         };
-        (updated.object.kind == "commit" && updated.object.sha == commit.sha)
+        (updated.object.kind == "commit" && updated.object.sha == commit_sha)
             .then_some(CommitResult {
                 branch: request.branch.clone(),
-                commit_sha: commit.sha,
+                commit_sha,
                 parent_sha: request.expected_head_sha.clone(),
             })
             .ok_or(OperationError::Indeterminate)
@@ -6883,9 +6899,94 @@ struct RefCreate<'a> {
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct GitObjectId {
     sha: String,
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+#[derive(Deserialize, Serialize)]
+struct CreatedCommit {
+    sha: String,
+    tree: GitObjectId,
+    author: Option<GitIdentity>,
+    committer: Option<GitIdentity>,
+    verification: GitVerification,
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+#[derive(Deserialize, Serialize)]
+struct GitIdentity {
+    name: Option<String>,
+    email: Option<String>,
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+#[derive(Deserialize, Serialize)]
+struct GitVerification {
+    verified: bool,
+    reason: String,
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn validate_created_commit(
+    commit: &CreatedCommit,
+    expected_tree: &str,
+    expected_author: Option<&GitAuthor>,
+) -> Result<String, OperationError> {
+    valid_sha(&commit.sha)?;
+    if !commit.verification.verified {
+        return Err(OperationError::Refused(RefusalReason::CommitUnverified));
+    }
+    if commit.verification.reason != "valid" {
+        return Err(OperationError::Refused(
+            RefusalReason::CommitVerificationReason,
+        ));
+    }
+    if commit.tree.sha != expected_tree {
+        return Err(OperationError::Refused(RefusalReason::CommitTreeMismatch));
+    }
+    let github_committer = GitAuthor {
+        name: "GitHub".into(),
+        email: "noreply@github.com".into(),
+    };
+    if !identity_matches(commit.committer.as_ref(), &github_committer) {
+        return Err(OperationError::Refused(
+            RefusalReason::CommitCommitterMismatch,
+        ));
+    }
+    match expected_author {
+        Some(author) if !identity_matches(commit.author.as_ref(), author) => {
+            return Err(OperationError::Refused(RefusalReason::CommitAuthorMismatch));
+        }
+        None if !is_maintainer_bot(commit.author.as_ref()) => {
+            return Err(OperationError::Refused(RefusalReason::CommitAuthorMismatch));
+        }
+        _ => {}
+    }
+    Ok(commit.sha.clone())
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn identity_matches(identity: Option<&GitIdentity>, expected: &GitAuthor) -> bool {
+    identity.is_some_and(|identity| {
+        identity.name.as_deref() == Some(expected.name.as_str())
+            && identity.email.as_deref() == Some(expected.email.as_str())
+    })
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn is_maintainer_bot(identity: Option<&GitIdentity>) -> bool {
+    identity.is_some_and(|identity| {
+        identity.name.as_deref() == Some(MAINTAINER_BOT)
+            && identity.email.as_deref().is_some_and(|email| {
+                let Some((id, suffix)) = email.split_once('+') else {
+                    return false;
+                };
+                id == MAINTAINER_BOT_ID
+                    && suffix == "dark-factory-maintainer[bot]@users.noreply.github.com"
+            })
+    })
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
@@ -9969,6 +10070,52 @@ mod tests {
         let mut spoofed = serde_json::to_value(&request).unwrap();
         spoofed["author"] = serde_json::json!({"name":"other", "email":"other@example.com"});
         assert!(serde_json::from_value::<PublishCommit>(spoofed).is_err());
+    }
+
+    #[test]
+    fn created_commit_response_requires_github_proof_identity_and_tree() {
+        let sha = "a".repeat(40);
+        let tree = "b".repeat(40);
+        let response = format!(
+            r#"{{
+                "sha":"{sha}",
+                "tree":{{"sha":"{tree}"}},
+                "author":{{"name":"{MAINTAINER_BOT}","email":"319516570+{MAINTAINER_BOT}@users.noreply.github.com"}},
+                "committer":{{"name":"GitHub","email":"noreply@github.com"}},
+                "verification":{{"verified":true,"reason":"valid"}}
+            }}"#
+        );
+        let commit: CreatedCommit = serde_json::from_str(&response).unwrap();
+        assert_eq!(
+            validate_created_commit(&commit, &tree, None).unwrap(),
+            sha
+        );
+
+        let mut wrong_bot = serde_json::to_value(&commit).unwrap();
+        wrong_bot["author"]["email"] = serde_json::Value::String(
+            "1+dark-factory-maintainer[bot]@users.noreply.github.com".into(),
+        );
+        let wrong_bot: CreatedCommit = serde_json::from_value(wrong_bot).unwrap();
+        assert_eq!(
+            validate_created_commit(&wrong_bot, &tree, None),
+            Err(OperationError::Refused(RefusalReason::CommitAuthorMismatch))
+        );
+
+        let mut unverified = serde_json::to_value(&commit).unwrap();
+        unverified["verification"]["verified"] = serde_json::Value::Bool(false);
+        let unverified: CreatedCommit = serde_json::from_value(unverified).unwrap();
+        assert_eq!(
+            validate_created_commit(&unverified, &tree, None),
+            Err(OperationError::Refused(RefusalReason::CommitUnverified))
+        );
+
+        let mut wrong_tree = serde_json::to_value(&commit).unwrap();
+        wrong_tree["tree"]["sha"] = serde_json::Value::String("c".repeat(40));
+        let wrong_tree: CreatedCommit = serde_json::from_value(wrong_tree).unwrap();
+        assert_eq!(
+            validate_created_commit(&wrong_tree, &tree, None),
+            Err(OperationError::Refused(RefusalReason::CommitTreeMismatch))
+        );
     }
 
     #[test]
