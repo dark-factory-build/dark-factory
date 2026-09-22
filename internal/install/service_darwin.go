@@ -254,11 +254,24 @@ func inspectServiceWithCapabilityAt(ctx context.Context, home, userHome string, 
 }
 
 type serviceHomeCapability struct {
-	parent *homeParent
-	home   *os.File
-	base   string
-	stat   unix.Stat_t
-	image  serviceHomeImage
+	parent              *homeParent
+	home                *os.File
+	serviceLock         *os.File
+	serviceLockReleased bool
+	base                string
+	stat                unix.Stat_t
+	image               serviceHomeImage
+}
+
+func (capability *serviceHomeCapability) releaseOperationalLease() error {
+	if capability == nil || capability.serviceLock == nil || capability.serviceLockReleased {
+		return nil
+	}
+	if err := unix.Flock(int(capability.serviceLock.Fd()), unix.LOCK_UN); err != nil {
+		return err
+	}
+	capability.serviceLockReleased = true
+	return nil
 }
 
 func openServiceHomeCapability(ctx context.Context, path string) (_ *serviceHomeCapability, resultErr error) {

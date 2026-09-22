@@ -230,12 +230,8 @@ func TestRunReportsStartupFailureAndUsage(t *testing.T) {
 	}
 	stdout.Reset()
 	stderr.Reset()
-	parent, err := filepath.EvalSymlinks(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	home := filepath.Join(parent, "missing")
-	if exit := run(context.Background(), []string{"--home", home}, &stdout, &stderr); exit != exitFailure || stdout.Len() != 0 || !strings.HasPrefix(stderr.String(), "factoryd: ") || !strings.Contains(stderr.String(), "open operational home") || stderr.String() == "factoryd: runtime unavailable\n" {
+	home := filepath.Join(t.TempDir(), "missing")
+	if exit := run(context.Background(), []string{"--home", home}, &stdout, &stderr); exit != exitFailure || stdout.Len() != 0 || !strings.HasPrefix(stderr.String(), "factoryd: ") || !strings.Contains(stderr.String(), "open home parent component") || stderr.String() == "factoryd: runtime unavailable\n" {
 		t.Fatalf("failure = exit %d stdout %q stderr %q", exit, stdout.String(), stderr.String())
 	}
 }

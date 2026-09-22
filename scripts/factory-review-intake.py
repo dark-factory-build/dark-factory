@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import sqlite3
 import stat
 import subprocess
 import tempfile
@@ -533,7 +534,23 @@ def _source_task_id(config, operation):
             return record["operation"]["task_id"]
         if isinstance(fingerprint, str) and fingerprint:
             return intake.sha_id("source", marker, fingerprint)
-    return ""
+    # An operator-created Change has no intake issue, but the daemon binds
+    # every pull request it publishes to the task that produced it. Without
+    # this, every finding on a worker's PR was journaled as unroutable and
+    # nobody acted on it (22 Sep 2026).
+    number = operation.get("pr")
+    if type(number) is not int:
+        return ""
+    try:
+        with sqlite3.connect(Path(config["factory_home"], "factory.sqlite3").as_uri() + "?mode=ro", uri=True) as connection:
+            # The publishing overseer task is bound too, without a Change;
+            # the worker that owns the Change is the one to correct it.
+            row = connection.execute("SELECT lower(hex(task_id)) FROM publication_tasks WHERE project_id = ? AND lower(repository) = lower(?) AND pull_number = ? "
+                                     "ORDER BY (change_id IS NOT NULL) DESC, created_at_ms DESC, lower(hex(task_id)) LIMIT 1",
+                                     (bytes.fromhex(config["project_id"]), config["repository"], number)).fetchone()
+    except sqlite3.Error:
+        return ""
+    return row[0] if row and intake.ID_RE.fullmatch(row[0]) else ""
 
 
 def merge_failure_note(config, operation):
@@ -547,7 +564,10 @@ def gate_failure_note(receipt, operation):
     tests = []
     log = receipt.with_suffix(".log")
     try:
-        tests = list(dict.fromkeys(re.findall(r"\b(?:Test|test)[A-Za-z0-9_./:-]{2,120}", log.read_text(encoding="utf-8"))))[:16]
+        # Only failure lines name a test: Go's "--- FAIL: Name" (subtests are
+        # indented), unittest's "FAIL: name" / "ERROR: name". Matching every
+        # "test" word reported "test-renderer" and "testing" from ordinary log text.
+        tests = list(dict.fromkeys(re.findall(r"(?m)^\s*(?:--- FAIL|FAIL|ERROR): (\S+)", log.read_text(encoding="utf-8"))))[:16]
     except OSError:
         pass
     return "pre-review full gate failed: tests=" + (", ".join(tests) if tests else "unavailable") + ". Exact head " + operation["head"] + "."
@@ -887,7 +907,7 @@ def run_locked(config, path, journal, journal_path, managed=None):
     discovered = list_prs(config, page)
     batch = discovery_batch_size(config)
     next_page = next_discovery_page(config, page, len(discovered))
-    launched = False
+    launched = gated = deferred = False
     for pr in discovered:
         key = str(pr["number"]) + ":" + pr["headRefOid"]
         if config.get("source_repository", config["repository"]).casefold() != config["repository"].casefold():
@@ -966,9 +986,15 @@ def run_locked(config, path, journal, journal_path, managed=None):
                     if intake.task_state(config, followup) is None and enqueue_followup(config, followup, pr, journal, managed):
                         messages.append("woke PR #" + str(pr["number"]) + " stale body")
                     continue
-                if launched:
+                if launched or gated:
+                    deferred = deferred or gated
                     continue
                 if (path / "HEAD").is_file():
+                    # One full gate per tick, pass or fail: the tick holds the
+                    # controller lock, and on 22 Sep 2026 a run of failing gates
+                    # held it for hours while the release lane waited. A deferred
+                    # PR keeps this discovery page for the next tick.
+                    gated = True
                     try:
                         evidence = run_full_gate(path, operation, review_body_path(config, pr, operation))
                         receipt = json.loads(evidence.read_text(encoding="utf-8"))
@@ -1059,7 +1085,7 @@ def run_locked(config, path, journal, journal_path, managed=None):
             # the tick still fails closed with every blocker named.
             failures.append("PR #" + str(pr["number"]) + ": " + str(exc))
             continue
-    receipts["discovery_page"] = next_page
+    receipts["discovery_page"] = page if deferred else next_page
     intake.atomic_json(journal_path, receipts)
     if failures:
         raise ReviewError("; ".join(failures))

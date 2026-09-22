@@ -9,7 +9,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -18,18 +17,13 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"golang.org/x/sys/unix"
-
 	_ "github.com/ncruces/go-sqlite3/driver"
+	"golang.org/x/sys/unix"
 )
 
 // moveAfterPublishHook is package-local test instrumentation for the narrow
 // interval where the destination is visible but the source lease is retained.
 var moveAfterPublishHook func()
-
-// moveBeforePublishHook runs after the source is set aside and before the
-// exclusive publication rename; tests use it to race a foreign destination.
-var moveBeforePublishHook func()
 
 func moveHome(ctx context.Context, from, to string) (resultErr error) {
 	if err := ctx.Err(); err != nil {
@@ -56,6 +50,15 @@ func moveHome(ctx context.Context, from, to string) (resultErr error) {
 			return err
 		}
 	}
+	moveLease, err := unix.Open(from, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return err
+	}
+	defer unix.Close(moveLease)
+	if err := unix.Flock(moveLease, unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		return errors.Join(ErrBusy, err)
+	}
+	defer unix.Flock(moveLease, unix.LOCK_UN)
 	lockedHome, err := OpenOperationalHome(ctx, from)
 	if err != nil {
 		return err
@@ -93,9 +96,6 @@ func moveHome(ctx context.Context, from, to string) (resultErr error) {
 	if err := rewriteDatabasePaths(ctx, filepath.Join(stage, databaseName), from, to); err != nil {
 		return cleanupBeforePublish(err)
 	}
-	if err := restoreSidecarModes(stage); err != nil {
-		return cleanupBeforePublish(err)
-	}
 	stagedHome, err := OpenOperationalHome(ctx, stage)
 	if err != nil {
 		return cleanupBeforePublish(err)
@@ -113,22 +113,8 @@ func moveHome(ctx context.Context, from, to string) (resultErr error) {
 	if err := os.Rename(from, old); err != nil {
 		return cleanupBeforePublish(err)
 	}
-	if moveBeforePublishHook != nil {
-		moveBeforePublishHook()
-	}
-	// RENAME_EXCL: a directory that appeared at the destination since the
-	// absence check above is never replaced; the move fails and restores
-	// the source instead.
-	parent, err := os.Open(filepath.Dir(to))
-	if err != nil {
-		return errors.Join(err, os.Rename(old, from), cleanupBeforePublish(nil))
-	}
-	err = unix.RenameatxNp(int(parent.Fd()), filepath.Base(stage), int(parent.Fd()), filepath.Base(to), unix.RENAME_EXCL)
-	if err = errors.Join(err, parent.Close()); err != nil {
-		if restoreErr := os.Rename(old, from); restoreErr != nil {
-			return errors.Join(fmt.Errorf("publish home: %w", err), restoreErr, fmt.Errorf("old home retained at %s; backup retained at %s", old, backupDir))
-		}
-		return cleanupBeforePublish(fmt.Errorf("publish home: %w", err))
+	if err := os.Rename(stage, to); err != nil {
+		return errors.Join(err, rollbackMove(to, old, nil), fmt.Errorf("backup retained at %s", backupDir))
 	}
 	if moveAfterPublishHook != nil {
 		moveAfterPublishHook()
@@ -136,9 +122,6 @@ func moveHome(ctx context.Context, from, to string) (resultErr error) {
 	worktreeRestore, err := repairMovedWorktrees(ctx, filepath.Join(to, databaseName), to)
 	if err != nil {
 		return errors.Join(err, rollbackMove(to, old, nil), fmt.Errorf("backup retained at %s", backupDir))
-	}
-	if err := restoreSidecarModes(to); err != nil {
-		return errors.Join(err, worktreeRestore.rollback(), rollbackMove(to, old, nil), fmt.Errorf("backup retained at %s", backupDir))
 	}
 	publishedHome, err := openOperationalHomeWithLock(ctx, to, lockedHome.state.lock)
 	if err != nil {
@@ -182,20 +165,6 @@ func rollbackMove(destination, old string, restore func() error) error {
 		return errors.Join(restoreErr, err)
 	}
 	return errors.Join(restoreErr, os.Rename(old, strings.TrimSuffix(old, ".move-old")))
-}
-
-// The relocation opens the copied database through the WASM sqlite driver,
-// which creates any missing -wal and -shm sidecars with 0666 less the
-// umask and leaves them behind. An operational home requires every member
-// to be owner-only 0600, so put the sidecars back before validating.
-func restoreSidecarModes(home string) error {
-	for _, suffix := range []string{"-wal", "-shm"} {
-		name := filepath.Join(home, databaseName+suffix)
-		if err := os.Chmod(name, 0o600); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("restore %s mode: %w", filepath.Base(name), err)
-		}
-	}
-	return nil
 }
 
 func copyTree(src, dst string) error {
@@ -308,7 +277,7 @@ func (r worktreeRepairRollback) rollback() error {
 }
 
 func repairMovedWorktrees(ctx context.Context, path, home string) (worktreeRepairRollback, error) {
-	db, err := sql.Open("sqlite3", sqliteDataSource(path, url.Values{"mode": {"ro"}}))
+	db, err := sql.Open("sqlite3", "file:"+path+"?mode=ro")
 	if err != nil {
 		return worktreeRepairRollback{}, err
 	}
@@ -453,15 +422,8 @@ func repairMovedWorktrees(ctx context.Context, path, home string) (worktreeRepai
 	return worktreeRepairRollback{restore: restore, cleanup: cleanup}, nil
 }
 
-// sqliteDataSource escapes the path like the kernel's data-source builders:
-// a canonical home may contain "?" or "#", which a bare "file:"+path URI
-// would read as the query or fragment delimiter and open a sibling path.
-func sqliteDataSource(path string, query url.Values) string {
-	return (&url.URL{Scheme: "file", Path: path, RawQuery: query.Encode()}).String()
-}
-
 func rewriteDatabasePaths(ctx context.Context, path, from, to string) error {
-	db, err := sql.Open("sqlite3", sqliteDataSource(path, nil))
+	db, err := sql.Open("sqlite3", "file:"+path)
 	if err != nil {
 		return err
 	}

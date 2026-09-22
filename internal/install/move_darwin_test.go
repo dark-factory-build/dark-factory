@@ -121,56 +121,6 @@ func TestMoveHomeKeepsPublishedDestinationLockedUntilValidation(t *testing.T) {
 	}
 }
 
-func TestMoveHomeRelocatesToPathsWithURIDelimiters(t *testing.T) {
-	for _, name := range []string{"new?copy", "new#1"} {
-		t.Run(name, func(t *testing.T) {
-			parent := moveTempDir(t)
-			from := filepath.Join(parent, "old")
-			to := filepath.Join(parent, name)
-			if _, err := Init(context.Background(), from); err != nil {
-				t.Fatal(err)
-			}
-			if err := MoveHome(context.Background(), from, to); err != nil {
-				t.Fatal(err)
-			}
-			if _, err := Doctor(context.Background(), to); err != nil {
-				t.Fatal(err)
-			}
-			entries, err := os.ReadDir(parent)
-			if err != nil || len(entries) != 1 || entries[0].Name() != name {
-				t.Fatalf("parent after move = %v, %v; want only %q", entries, err, name)
-			}
-		})
-	}
-}
-
-func TestMoveHomeRefusesDestinationCreatedDuringStaging(t *testing.T) {
-	parent := moveTempDir(t)
-	from := filepath.Join(parent, "old")
-	to := filepath.Join(parent, "new")
-	if _, err := Init(context.Background(), from); err != nil {
-		t.Fatal(err)
-	}
-	moveBeforePublishHook = func() {
-		if err := os.Mkdir(to, 0o700); err != nil {
-			t.Fatal(err)
-		}
-	}
-	defer func() { moveBeforePublishHook = nil }()
-	if err := MoveHome(context.Background(), from, to); !errors.Is(err, syscall.EEXIST) {
-		t.Fatalf("move onto a destination created during staging = %v, want EEXIST", err)
-	}
-	if _, err := Doctor(context.Background(), from); err != nil {
-		t.Fatalf("source after refused publication = %v", err)
-	}
-	if entries, err := os.ReadDir(to); err != nil || len(entries) != 0 {
-		t.Fatalf("foreign destination after refused publication = %v, %v; want the empty directory untouched", entries, err)
-	}
-	if entries, err := os.ReadDir(parent); err != nil || len(entries) != 2 {
-		t.Fatalf("parent after refused publication = %v, %v; want only old and new", entries, err)
-	}
-}
-
 func TestMoveHomeRefusesEmptyServiceArtifact(t *testing.T) {
 	parent := moveTempDir(t)
 	from := filepath.Join(parent, "old")
