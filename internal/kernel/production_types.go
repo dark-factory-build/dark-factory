@@ -42,6 +42,7 @@ type PublicationReceipt struct {
 	BodyOperation          string `json:"body_operation,omitempty"`
 	ReviewRequestOperation string `json:"review_request_operation,omitempty"`
 	ReviewOperation        string `json:"review_operation,omitempty"`
+	Failure                string `json:"failure,omitempty"`
 }
 
 // ChangePublicationFact joins durable Change settlement with the last
@@ -66,6 +67,7 @@ type ChangePublicationFact struct {
 	BodyOperation          string
 	ReviewRequestOperation string
 	ReviewOperation        string
+	Failure                string
 	ReviewHead             string
 	ReviewState            string
 }

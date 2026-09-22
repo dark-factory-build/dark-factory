@@ -471,6 +471,13 @@ func (daemon *Daemon) taskRead(ctx context.Context, call api.Call) api.Reply {
 	if outcomeText == "" {
 		outcomeText = task.BlockedReason
 	}
+	if outcomeText == "" {
+		if recovery, recoveryFound, recoveryErr := daemon.store.TaskRecovery(ctx, task.ID, task.IncarnationID); recoveryErr != nil {
+			return newErrorReply(remoteErrorCode(recoveryErr))
+		} else if recoveryFound && recovery.Run != nil && recovery.Run.Terminal != nil && recovery.Run.Terminal.Kind() == kernel.OutcomeFailed {
+			outcomeText = recovery.Run.Terminal.Detail()
+		}
+	}
 	outcome, outcomeMore := taskDetailTextChunk(outcomeText, input.Offset)
 	attachments, err := daemon.store.TaskAttachments(ctx, id)
 	if err != nil {

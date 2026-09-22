@@ -363,7 +363,7 @@ func (store *Store) RecordChangePublication(ctx context.Context, project string,
 		return ErrInvalidValue
 	}
 	projectID, err := ProjectIDFromBytes(raw)
-	if err != nil || !productionRepository.MatchString(repo) || pull == 0 || (receipt.PublishedHead == "" && reviewOperation == "") {
+	if err != nil || !productionRepository.MatchString(repo) || pull == 0 || !validOutcomeText(receipt.Failure, 2048) || (receipt.PublishedHead == "" && reviewOperation == "" && receipt.Failure == "") {
 		return ErrInvalidValue
 	}
 	tx, err := store.beginValidatedWrite(ctx)
@@ -418,6 +418,9 @@ func (store *Store) RecordChangePublication(ctx context.Context, project string,
 	if reviewOperation != "" {
 		pr.Publication.ReviewOperation = reviewOperation
 	}
+	if receipt.Failure != "" {
+		pr.Publication.Failure = receipt.Failure
+	}
 	updated, err := json.Marshal(pr)
 	if err != nil {
 		return tx.Rollback(err)
@@ -437,7 +440,7 @@ func (store *Store) ChangePublicationFacts(ctx context.Context) ([]ChangePublica
 		return nil, err
 	}
 	defer read.Close()
-	rows, err := read.connection.QueryContext(ctx, `SELECT lower(hex(c.project_id)), lower(hex(c.id)), lower(hex(c.task_id)), pr.repository, COALESCE(json_extract(pr.document, '$.number'), 0), COALESCE(json_extract(pr.document, '$.branch'), ''), COALESCE(json_extract(pr.document, '$.base'), ''), COALESCE(json_extract(pr.document, '$.title'), ''), COALESCE(json_extract(pr.document, '$.body'), ''), lower(hex(c.base_commit)), lower(hex(c.head_commit)), COALESCE(json_extract(pr.document, '$.head'), ''), COALESCE(json_extract(pr.document, '$.publication.source_head'), ''), COALESCE(json_extract(pr.document, '$.publication.delta'), 0), COALESCE(json_extract(pr.document, '$.publication.publish_operation'), ''), COALESCE(json_extract(pr.document, '$.publication.body_operation'), ''), COALESCE(json_extract(pr.document, '$.publication.review_request_operation'), ''), COALESCE(json_extract(pr.document, '$.publication.review_operation'), ''), COALESCE(json_extract(pr.document, '$.review.head'), ''), COALESCE(json_extract(pr.document, '$.review.state'), '')
+	rows, err := read.connection.QueryContext(ctx, `SELECT lower(hex(c.project_id)), lower(hex(c.id)), lower(hex(c.task_id)), pr.repository, COALESCE(json_extract(pr.document, '$.number'), 0), COALESCE(json_extract(pr.document, '$.branch'), ''), COALESCE(json_extract(pr.document, '$.base'), ''), COALESCE(json_extract(pr.document, '$.title'), ''), COALESCE(json_extract(pr.document, '$.body'), ''), lower(hex(c.base_commit)), lower(hex(c.head_commit)), COALESCE(json_extract(pr.document, '$.head'), ''), COALESCE(json_extract(pr.document, '$.publication.source_head'), ''), COALESCE(json_extract(pr.document, '$.publication.delta'), 0), COALESCE(json_extract(pr.document, '$.publication.publish_operation'), ''), COALESCE(json_extract(pr.document, '$.publication.body_operation'), ''), COALESCE(json_extract(pr.document, '$.publication.review_request_operation'), ''), COALESCE(json_extract(pr.document, '$.publication.review_operation'), ''), COALESCE(json_extract(pr.document, '$.publication.failure'), ''), COALESCE(json_extract(pr.document, '$.review.head'), ''), COALESCE(json_extract(pr.document, '$.review.state'), '')
 		FROM changes c JOIN publication_tasks p ON p.project_id = c.project_id AND (p.change_id = c.id OR (p.change_id IS NULL AND p.task_id = c.task_id))
 		JOIN production_records pr ON pr.project_id = p.project_id AND pr.repository = p.repository AND pr.kind = 'pull_request' AND pr.identity = CAST(p.pull_number AS TEXT)
         WHERE c.phase = 'retained' AND c.head_commit IS NOT NULL
@@ -449,7 +452,7 @@ func (store *Store) ChangePublicationFacts(ctx context.Context) ([]ChangePublica
 	result := make([]ChangePublicationFact, 0, 16)
 	for rows.Next() {
 		var fact ChangePublicationFact
-		if err := rows.Scan(&fact.ProjectID, &fact.ChangeID, &fact.TaskID, &fact.Repository, &fact.PullNumber, &fact.Branch, &fact.Base, &fact.Title, &fact.Body, &fact.BaseCommit, &fact.SettledHead, &fact.PublishedHead, &fact.PublishedSourceHead, &fact.Delta, &fact.PublishOperation, &fact.BodyOperation, &fact.ReviewRequestOperation, &fact.ReviewOperation, &fact.ReviewHead, &fact.ReviewState); err != nil {
+		if err := rows.Scan(&fact.ProjectID, &fact.ChangeID, &fact.TaskID, &fact.Repository, &fact.PullNumber, &fact.Branch, &fact.Base, &fact.Title, &fact.Body, &fact.BaseCommit, &fact.SettledHead, &fact.PublishedHead, &fact.PublishedSourceHead, &fact.Delta, &fact.PublishOperation, &fact.BodyOperation, &fact.ReviewRequestOperation, &fact.ReviewOperation, &fact.Failure, &fact.ReviewHead, &fact.ReviewState); err != nil {
 			return nil, err
 		}
 		result = append(result, fact)

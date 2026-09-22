@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -36,7 +37,7 @@ func TestMaintainerResponseValidationRejectsTopLevelErrors(t *testing.T) {
 }
 
 func TestPlanChangePublicationTransitions(t *testing.T) {
-	base := ChangePublicationEvent{ChangeID: "one", SettledHead: "new", PublishedHead: "old", Clean: true}
+	base := ChangePublicationEvent{ChangeID: "one", SettledHead: "new", PublishedHead: "old", PublishedSourceHead: "old", Clean: true}
 	if got := PlanChangePublication(base); got != ChangePublicationPublishAndRefresh {
 		t.Fatalf("unpublished clean head action = %v", got)
 	}
@@ -49,7 +50,7 @@ func TestPlanChangePublicationTransitions(t *testing.T) {
 	if got := PlanChangePublication(base); got != ChangePublicationNone {
 		t.Fatalf("settled head action = %v", got)
 	}
-	base.ReviewOperation = "old-review"
+	base.ReviewOperation = ""
 	base.SettledHead = "newer"
 	base.PublishedHead = "newer"
 	base.PublishedSourceHead = "newer"
@@ -115,10 +116,17 @@ func TestPublicationDiffBaseUsesLocalFactsForLegacyPublishedPR(t *testing.T) {
 	}
 }
 
+func TestPlanChangePublicationSkipsLegacyPublishedPRWithoutSourceHead(t *testing.T) {
+	event := ChangePublicationEvent{ChangeID: "legacy", SettledHead: strings.Repeat("c", 40), PublishedHead: strings.Repeat("b", 40), BaseCommit: strings.Repeat("a", 40), Clean: true}
+	if got := PlanChangePublication(event); got != ChangePublicationNone {
+		t.Fatalf("legacy publication action = %v", got)
+	}
+}
+
 func TestProcessChangePublicationEventsRunsChangesConcurrently(t *testing.T) {
 	events := []ChangePublicationEvent{
-		{ChangeID: "one", SettledHead: "one-new", PublishedHead: "one-old", Clean: true},
-		{ChangeID: "two", SettledHead: "two-new", PublishedHead: "two-old", Clean: true},
+		{ChangeID: "one", SettledHead: "one-new", PublishedHead: "one-old", PublishedSourceHead: "one-old", Clean: true},
+		{ChangeID: "two", SettledHead: "two-new", PublishedHead: "two-old", PublishedSourceHead: "two-old", Clean: true},
 	}
 	started := make(chan string, len(events))
 	gate := make(chan struct{})
@@ -146,5 +154,29 @@ func TestProcessChangePublicationEventsRunsChangesConcurrently(t *testing.T) {
 	}
 	if len(seen) != len(events) {
 		t.Fatalf("processed changes = %v", seen)
+	}
+}
+
+func TestProcessChangePublicationEventsRecordsFailureAndContinues(t *testing.T) {
+	events := []ChangePublicationEvent{
+		{ChangeID: "failed", SettledHead: "failed-new", PublishedHead: "failed-old", PublishedSourceHead: "failed-old", Clean: true},
+		{ChangeID: "continued", SettledHead: "continued-new", PublishedHead: "continued-old", PublishedSourceHead: "continued-old", Clean: true},
+	}
+	var failed, continued bool
+	err := ProcessChangePublicationEvents(context.Background(), events, ChangePublicationActions{
+		PublishAndRefresh: func(ctx context.Context, event ChangePublicationEvent, body string) error {
+			if event.ChangeID == "failed" {
+				return fmt.Errorf("remote failure")
+			}
+			continued = true
+			return nil
+		},
+		RecordFailure: func(ctx context.Context, event ChangePublicationEvent, err error) error {
+			failed = event.ChangeID == "failed" && err.Error() == "remote failure"
+			return nil
+		},
+	})
+	if err != nil || !failed || !continued {
+		t.Fatalf("failure persistence/continuation = err %v, failed %v, continued %v", err, failed, continued)
 	}
 }

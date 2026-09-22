@@ -43,6 +43,7 @@ type ChangePublicationEvent struct {
 	Delta                  string
 	ReviewOperation        string
 	ReviewRequestOperation string
+	Failure                string
 }
 
 type ChangePublicationAction uint8
@@ -59,6 +60,9 @@ const (
 // the remote write.
 func PlanChangePublication(event ChangePublicationEvent) ChangePublicationAction {
 	if event.ChangeID == "" || !event.Clean || event.SettledHead == "" {
+		return ChangePublicationNone
+	}
+	if event.PublishedHead != "" && event.PublishedSourceHead == "" && event.PublishOperation == "" {
 		return ChangePublicationNone
 	}
 	if event.SettledHead != event.PublishedSourceHead {
@@ -166,6 +170,7 @@ func terminalIssueFooter(line string) bool {
 type ChangePublicationActions struct {
 	PublishAndRefresh func(context.Context, ChangePublicationEvent, string) error
 	RequestReview     func(context.Context, ChangePublicationEvent) error
+	RecordFailure     func(context.Context, ChangePublicationEvent, error) error
 }
 
 func (daemon *Daemon) processChangePublications(ctx context.Context) error {
@@ -192,12 +197,27 @@ func (daemon *Daemon) durableChangePublicationEvents(ctx context.Context) ([]Cha
 }
 
 func changePublicationEventFromFact(fact kernel.ChangePublicationFact) ChangePublicationEvent {
-	return ChangePublicationEvent{ProjectID: fact.ProjectID, ChangeID: fact.ChangeID, TaskID: fact.TaskID, Repository: fact.Repository, PullNumber: fact.PullNumber, Branch: fact.Branch, Title: fact.Title, SettledHead: fact.SettledHead, PublishedHead: fact.PublishedHead, PublishedSourceHead: fact.PublishedSourceHead, PublishOperation: fact.PublishOperation, BodyOperation: fact.BodyOperation, ReviewRequestOperation: fact.ReviewRequestOperation, ReviewOperation: fact.ReviewOperation, ReviewHead: fact.ReviewHead, ReviewState: fact.ReviewState, Clean: true, Body: fact.Body, Base: fact.Base, BaseCommit: fact.BaseCommit, Delta: fmt.Sprint(fact.Delta)}
+	return ChangePublicationEvent{ProjectID: fact.ProjectID, ChangeID: fact.ChangeID, TaskID: fact.TaskID, Repository: fact.Repository, PullNumber: fact.PullNumber, Branch: fact.Branch, Title: fact.Title, SettledHead: fact.SettledHead, PublishedHead: fact.PublishedHead, PublishedSourceHead: fact.PublishedSourceHead, PublishOperation: fact.PublishOperation, BodyOperation: fact.BodyOperation, ReviewRequestOperation: fact.ReviewRequestOperation, ReviewOperation: fact.ReviewOperation, Failure: fact.Failure, ReviewHead: fact.ReviewHead, ReviewState: fact.ReviewState, Clean: true, Body: fact.Body, Base: fact.Base, BaseCommit: fact.BaseCommit, Delta: fmt.Sprint(fact.Delta)}
 }
 
 func (daemon *Daemon) configureChangePublication() {
 	daemon.changePublicationEvents = daemon.durableChangePublicationEvents
-	daemon.changePublicationActions = ChangePublicationActions{PublishAndRefresh: daemon.publishAndRefreshChange, RequestReview: daemon.requestChangeReview}
+	daemon.changePublicationActions = ChangePublicationActions{PublishAndRefresh: daemon.publishAndRefreshChange, RequestReview: daemon.requestChangeReview, RecordFailure: daemon.recordChangePublicationFailure}
+}
+
+func (daemon *Daemon) recordChangePublicationFailure(ctx context.Context, event ChangePublicationEvent, failure error) error {
+	if failure == nil {
+		return nil
+	}
+	at, err := daemon.timestamp()
+	if err != nil {
+		return err
+	}
+	detail := failure.Error()
+	if len(detail) > 2048 {
+		detail = detail[:2048]
+	}
+	return daemon.store.RecordChangePublication(ctx, event.ProjectID, event.Repository, event.PullNumber, kernel.PublicationReceipt{Failure: detail}, nil, "", at)
 }
 
 func operationID(kind, repository, changeID, head string) string {
@@ -447,7 +467,11 @@ func ProcessChangePublicationEvents(ctx context.Context, events []ChangePublicat
 				}
 			}
 			if err != nil {
-				errors <- err
+				if actions.RecordFailure == nil {
+					errors <- err
+				} else if recordErr := actions.RecordFailure(ctx, event, err); recordErr != nil {
+					errors <- recordErr
+				}
 			}
 		}()
 	}
