@@ -3470,10 +3470,9 @@ impl PublishCommit {
                 return Err(OperationError::InvalidInput);
             }
         }
-        // Keep caller text to one headline and reserve the body for the
-        // operation trailer so the full message is byte-exact and trivial to
-        // reconcile.
-        valid_text(&self.message, 1, 4_096, false)?;
+        // Keep the operation trailer separate from caller text while allowing
+        // the normal multi-line commit messages GitHub accepts.
+        valid_text(&self.message, 1, 4_096, true)?;
         free_of_operation_marker(&self.message)?;
         if !(1..=MAX_COMMIT_FILES).contains(&self.changes.len()) {
             return Err(OperationError::InvalidInput);
@@ -10148,7 +10147,7 @@ mod tests {
         let mut different_tree = request.clone();
         different_tree.changes[0].content_base64 = Some("ZGlmZmVyZW50".into());
         assert_ne!(trailer, different_tree.trailer().unwrap());
-        assert!(forged("Two\nlines").validate().is_err());
+        assert!(forged("Two\nlines").validate().is_ok());
         // A worker that integrated main publishes the merge it made: the
         // branch head stays first parent, the integrated commit is second, and
         // the changes are its diff from that commit rather than a copy of it.
