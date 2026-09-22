@@ -5050,14 +5050,16 @@ impl Authority {
                 message: request.marked_message()?,
                 tree: &tree,
                 parents: request.parents(),
-                author: self.commit_author.as_ref(),
+                // GitHub can only verify an App-authored commit when the
+                // authenticated bot supplies the author itself. A custom
+                // connection author makes the response unverifiable.
+                author: None,
             }),
         )
         .await?;
         let commit_sha = validate_created_commit(
             &commit,
             &tree,
-            self.commit_author.as_ref(),
         )?;
         // Git objects are immutable. The only persistent publication is this
         // final non-forced ref write, so a failure cannot strand an empty
@@ -6932,7 +6934,6 @@ struct GitVerification {
 fn validate_created_commit(
     commit: &CreatedCommit,
     expected_tree: &str,
-    expected_author: Option<&GitAuthor>,
 ) -> Result<String, OperationError> {
     valid_sha(&commit.sha)?;
     if !commit.verification.verified {
@@ -6955,14 +6956,8 @@ fn validate_created_commit(
             RefusalReason::CommitCommitterMismatch,
         ));
     }
-    match expected_author {
-        Some(author) if !identity_matches(commit.author.as_ref(), author) => {
-            return Err(OperationError::Refused(RefusalReason::CommitAuthorMismatch));
-        }
-        None if !is_maintainer_bot(commit.author.as_ref()) => {
-            return Err(OperationError::Refused(RefusalReason::CommitAuthorMismatch));
-        }
-        _ => {}
+    if !is_maintainer_bot(commit.author.as_ref()) {
+        return Err(OperationError::Refused(RefusalReason::CommitAuthorMismatch));
     }
     Ok(commit.sha.clone())
 }
@@ -10087,7 +10082,7 @@ mod tests {
         );
         let commit: CreatedCommit = serde_json::from_str(&response).unwrap();
         assert_eq!(
-            validate_created_commit(&commit, &tree, None).unwrap(),
+            validate_created_commit(&commit, &tree).unwrap(),
             sha
         );
 
@@ -10097,7 +10092,7 @@ mod tests {
         );
         let wrong_bot: CreatedCommit = serde_json::from_value(wrong_bot).unwrap();
         assert_eq!(
-            validate_created_commit(&wrong_bot, &tree, None),
+            validate_created_commit(&wrong_bot, &tree),
             Err(OperationError::Refused(RefusalReason::CommitAuthorMismatch))
         );
 
@@ -10105,7 +10100,7 @@ mod tests {
         unverified["verification"]["verified"] = serde_json::Value::Bool(false);
         let unverified: CreatedCommit = serde_json::from_value(unverified).unwrap();
         assert_eq!(
-            validate_created_commit(&unverified, &tree, None),
+            validate_created_commit(&unverified, &tree),
             Err(OperationError::Refused(RefusalReason::CommitUnverified))
         );
 
@@ -10113,7 +10108,7 @@ mod tests {
         wrong_tree["tree"]["sha"] = serde_json::Value::String("c".repeat(40));
         let wrong_tree: CreatedCommit = serde_json::from_value(wrong_tree).unwrap();
         assert_eq!(
-            validate_created_commit(&wrong_tree, &tree, None),
+            validate_created_commit(&wrong_tree, &tree),
             Err(OperationError::Refused(RefusalReason::CommitTreeMismatch))
         );
     }
