@@ -33,7 +33,11 @@ run is adoptable when it is `running` and its runner still publishes
 `runtimes/<run id>/takeover.sock`: the new daemon takes that runner's control
 capability over at boot and the provider never stops. Every other non-terminal
 run — a run still being admitted or finalizing, or an older runner with no
-endpoint — still has to drain. In one coordinated maintenance window, run
+endpoint — still has to drain. A finalizing run is the transient case: its
+runner has already exited and the daemon commits the terminal result on its
+own, so the check waits up to two minutes for it to settle and only then
+refuses. Every refusal here precedes the uninstall and exits 75, so the caller
+knows nothing was installed. In one coordinated maintenance window, run
 `factoryctl dispatch off`, wait for the work that cannot be adopted to drain,
 and keep dispatch off until the reinstall exits and the new service is healthy;
 then run `factoryctl dispatch on`. Binaries land in
@@ -55,6 +59,29 @@ loop uses the same running-plus-endpoint predicate — then calls
 That phase validates the clean exact source and all three binaries’ VCS and
 release identities without compiling or waiting for the compiler lease.
 Preparation does not back up, migrate a browser profile, or alter the service.
+The pause, the drain reads and the installation share one compensation scope,
+and a pause is compensated only when the daemon accepted it. Because every
+accepted control command advances the revision, landing on
+`original_revision + 1` is not proof of ownership — a concurrent operator
+`dispatch off` lands on the same number. A `dispatch off` the daemon did not
+accept therefore restores nothing and says so: the hook reports that it cannot
+prove whose pause is standing and names the decision (`factoryctl status`,
+then `factoryctl dispatch on` to resume). A non-zero exit is not evidence of
+refusal either, since the CLI can fail after the daemon committed the change.
+Only an accepted pause is read back out of the store and restored at its own
+unchanged revision.
+For an accepted pause the factory therefore keeps working on the old build,
+and the failure receipt
+states what it was left with rather than what the hook attempted:
+`dispatch_enabled` comes from the store, so an operator who re-enabled dispatch
+themselves is not reported as a paused factory, and is `null` when the store
+cannot be read, because an unreadable store is an unknown state and not an off
+one. `service_reachable` is a connect on `runtimes/factory.sock`, not a store
+read, so a daemon that died during the install is not reported as serving.
+A failure that left nothing to undo exits
+75, and the release lane then
+re-plans that blocked receipt once on its next tick; a blocker that survives
+that attempt still needs an explicit `--retry`.
 
 `scripts/local-ci.sh` runs `scripts/test-reinstall-service.sh` and
 `scripts/test-deploy-site.sh`, which exercise both scripts against fakes.

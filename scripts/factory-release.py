@@ -530,7 +530,13 @@ def once(config, number, retry=False):
             except ReleaseError as exc:
                 raise ReleaseError("deployment outcome is ambiguous; reconcile the live runtime before retrying") from exc
             raise ReleaseError("deployment outcome is ambiguous; reconcile the live runtime before retrying")
-        if entry and entry.get("state") == "blocked" and not retry:
+        # The hook proved this blocked receipt left no effect to undo, so the
+        # lane re-plans it on the next tick instead of parking the factory on a
+        # transient blocker. Exactly one automatic attempt: a blocker that
+        # survives it is a genuine failure and still needs --retry.
+        automatic = bool(entry and entry.get("state") == "blocked" and not retry
+                         and entry.get("auto_retry") is True and unresolved is None)
+        if entry and entry.get("state") == "blocked" and not retry and not automatic:
             raise ReleaseError("release is blocked; inspect the receipt and use --retry explicitly")
         if entry and entry.get("state") == "running":
             try:
@@ -556,6 +562,7 @@ def once(config, number, retry=False):
         entry = entry or {"pr": number, "sha": sha, "state": "planned"}
         entry.update({"sha": sha, "state": "planned", "phase": "predeploy",
                       "config_fingerprint": fingerprint, "updated_at": int(time.time())})
+        entry.pop("auto_retry", None)
         journal["releases"][str(number)] = entry
         atomic_json(journal_path, journal)
         try:
@@ -627,6 +634,8 @@ def once(config, number, retry=False):
                 # The hook's own exit status, not its output, says it failed
                 # before any effect: an ordinary --retry or a later release may follow.
                 entry["phase"] = "predeploy"
+                # A blocker the hook survived intact earns the next tick, once.
+                entry["auto_retry"] = not automatic
                 # Keep the hook's last known installed identity with the
                 # receipt.  This lets an operator reconcile a failed prepare
                 # against the journal tip without pretending the target was
