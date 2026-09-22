@@ -661,9 +661,10 @@ type requestEnvelope struct {
 }
 
 type responseEnvelope struct {
-	OK    *bool           `json:"ok"`
-	Data  json.RawMessage `json:"data,omitempty"`
-	Error RemoteErrorCode `json:"error,omitempty"`
+	OK     *bool           `json:"ok"`
+	Data   json.RawMessage `json:"data,omitempty"`
+	Error  RemoteErrorCode `json:"error,omitempty"`
+	Detail string          `json:"detail,omitempty"`
 }
 
 func (client client) call(ctx context.Context, method string, params, output any) error {
@@ -875,7 +876,7 @@ func decodeResponse(encoded []byte, output any) error {
 		return ErrProtocol
 	}
 	if *envelope.OK {
-		if envelope.Error != "" || len(envelope.Data) == 0 || bytes.Equal(envelope.Data, []byte("null")) {
+		if envelope.Error != "" || envelope.Detail != "" || len(envelope.Data) == 0 || bytes.Equal(envelope.Data, []byte("null")) {
 			return ErrProtocol
 		}
 		if err := decodeExact(envelope.Data, output); err != nil {
@@ -883,10 +884,10 @@ func decodeResponse(encoded []byte, output any) error {
 		}
 		return nil
 	}
-	if len(envelope.Data) != 0 || !validRemoteCode(envelope.Error) {
+	if len(envelope.Data) != 0 || !validRemoteCode(envelope.Error) || !validRemoteDetail(envelope.Detail) {
 		return ErrProtocol
 	}
-	return &RemoteError{code: envelope.Error}
+	return &RemoteError{code: envelope.Error, detail: envelope.Detail}
 }
 
 // decodeExact reads one bounded JSON value with this protocol's exact grammar.

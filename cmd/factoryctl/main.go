@@ -26,7 +26,10 @@ import (
 )
 
 const (
-	attemptRequestTimeout           = 5 * time.Second
+	// Covers the daemon's ten-second dispatch budget: a shorter one abandons a
+	// mutation the daemon is still allowed to finish and reports the durable
+	// write it did make as a timeout.
+	attemptRequestTimeout           = 15 * time.Second
 	retainedSourceRequestTimeout    = 10 * time.Minute
 	storageCompactionRequestTimeout = 10 * time.Minute
 	serviceRequestTimeout           = 30 * time.Second

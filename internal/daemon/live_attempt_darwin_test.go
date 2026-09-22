@@ -494,9 +494,10 @@ func TestLiveAttemptOwnerClosesControllerBeforeFallbackResult(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := peer.Close(); err != nil {
-		t.Fatal(err)
-	}
+	// A wrong-version frame is a read error that does not spend the
+	// capability. The owner's close, rather than EOF's transport cleanup, must
+	// therefore make the assertion below true.
+	writeTerminalEffectWire(t, peer, terminalEffectWireFrame{Version: 0, Kind: string(runner.TerminalReady)})
 	attempt := newLiveAttempt(daemon, runID, sessionID, controller)
 	attempt.releaseSent = true
 	if err := daemon.registerLiveAttempt(attempt); err != nil {
