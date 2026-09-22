@@ -144,8 +144,23 @@ class ReviewIntakeTest(unittest.TestCase):
         launch.assert_not_called()
 
     def test_unknown_mergeability_stops_review(self):
-        with self.assertRaisesRegex(review.ReviewError, 'mergeability is unresolved'):
-            review.require_mergeable({'mergeable': None, 'mergeStateStatus': 'UNKNOWN'})
+        for pr in ({'mergeable': None, 'mergeStateStatus': 'UNKNOWN'}, {'mergeable': True, 'mergeStateStatus': 'UNKNOWN'},
+                   {'mergeable': True, 'mergeStateStatus': ''}, {'mergeable': True}, {'mergeable': True, 'mergeStateStatus': 'DRAFT'}):
+            with self.subTest(pr=pr), self.assertRaisesRegex(review.ReviewError, 'mergeability is unresolved'):
+                review.require_mergeable(pr)
+        for state in ('CLEAN', 'BLOCKED', 'BEHIND', 'HAS_HOOKS', 'UNSTABLE'):
+            self.assertTrue(review.require_mergeable({'mergeable': True, 'mergeStateStatus': state}))
+        self.assertFalse(review.require_mergeable({'mergeable': False, 'mergeStateStatus': 'DIRTY'}))
+
+    def test_mergeable_flag_with_unknown_state_is_refused_before_review(self):
+        pull = {'number': 9, 'headRefOid': SHA, 'body': 'Refs #7', 'mergeable': True, 'mergeStateStatus': 'UNKNOWN'}
+        with patch.object(review, 'mirror', return_value=Path('/mirror')), patch.object(review, 'list_prs', return_value=[pull]), \
+             patch.object(review, 'ready', return_value=dict(self.operation)), patch.object(review, 'verify_existing'), \
+             patch.object(review.intake, 'task_state', return_value=None), patch.object(review, 'launch_review') as launch:
+            with self.assertRaisesRegex(review.ReviewError, 'PR #9: pull request mergeability is unresolved'):
+                review.run_once(self.config)
+        launch.assert_not_called()
+        self.mergeability.assert_not_called()
 
     def test_customer_companion_reviews_and_enqueues_exact_target_without_legacy_auth(self):
         (Path(self.config['factory_home'])/'maintainer.json').write_text('{"id":"fixture"}')

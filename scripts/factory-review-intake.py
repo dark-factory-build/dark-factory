@@ -223,10 +223,15 @@ def merge_conflict(pr):
     return pr.get("mergeable") is False or pr.get("mergeStateStatus") in {"DIRTY", "CONFLICTING", "UNMERGEABLE"}
 
 
+# GitHub's resolved, non-conflicting merge states. UNKNOWN (or a missing state) means
+# GitHub has not computed mergeability for this head yet, whatever `mergeable` says.
+RESOLVED_MERGE_STATES = {"CLEAN", "BLOCKED", "BEHIND", "HAS_HOOKS", "UNSTABLE"}
+
+
 def require_mergeable(pr):
     if merge_conflict(pr):
         return False
-    if pr.get("mergeable") is not True or not pr.get("mergeStateStatus"):
+    if pr.get("mergeable") is not True or pr.get("mergeStateStatus") not in RESOLVED_MERGE_STATES:
         raise ReviewError("pull request mergeability is unresolved")
     return True
 
