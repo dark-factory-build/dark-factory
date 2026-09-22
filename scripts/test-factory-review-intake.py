@@ -985,7 +985,9 @@ class ReviewIntakeTest(unittest.TestCase):
         bound = 'f' * 32
         with sqlite3.connect(Path(self.config['factory_home']) / 'factory.sqlite3') as connection:
             connection.execute('CREATE TABLE publication_tasks (project_id BLOB, repository TEXT, pull_number INTEGER, task_id BLOB, change_id BLOB, created_at_ms INTEGER)')
-            connection.execute('INSERT INTO publication_tasks VALUES (?, ?, ?, ?, NULL, ?)', (b'\x01' * 16, 'o/r', 9, bytes.fromhex(bound), 5))
+            # The overseer's publish task is bound at the same instant, without a Change.
+            connection.execute('INSERT INTO publication_tasks VALUES (?, ?, ?, ?, NULL, ?)', (b'\x01' * 16, 'o/r', 9, bytes.fromhex('a' * 32), 5))
+            connection.execute('INSERT INTO publication_tasks VALUES (?, ?, ?, ?, ?, ?)', (b'\x01' * 16, 'o/r', 9, bytes.fromhex(bound), b'\x02' * 16, 5))
         operation = dict(self.operation, source_marker='o/r#404')
         with patch.object(review.intake, 'command') as command:
             review.send_back_source_task(self.config, operation, 'note')
