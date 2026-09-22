@@ -495,7 +495,7 @@ print(json.dumps({'enabled': bool(target), 'revision': revision}))
             deploy.deploy('a' * 40)
         self.assertFalse(any('on' in call.args[0] for call in run.call_args_list))
 
-    def test_runtime_failure_restores_dispatch_and_records_what_it_left(self):
+    def test_runtime_failure_records_the_dispatch_state_it_actually_left(self):
         def installer(refuses_restore):
             def command(argv, **_kwargs):
                 if Path(argv[1]).name == 'reinstall-service.sh' and '--prepare' not in argv:
@@ -504,17 +504,24 @@ print(json.dumps({'enabled': bool(target), 'revision': revision}))
                     raise subprocess.CalledProcessError(1, argv, stderr='factoryctl: dispatch revision is stale\n')
                 return subprocess.CompletedProcess(argv, 0, '', '')
             return command
-        for refuses_restore, restored, note in (
-                (False, True, 'restored so the factory keeps working on the old build'),
-                (True, False, 'remains off')):
-            with self.subTest(refuses_restore=refuses_restore):
-                with patch.object(deploy, 'state', side_effect=[(True, 4, 0), (False, 5, 0), (False, 5, 0), (False, 5, 0)]), \
+        # The fourth state is the read that decides the restore, the fifth the
+        # read the receipt states. Dispatch this process did not turn on still
+        # counts: the receipt says what the factory was left with, not what it
+        # attempted.
+        for name, tail, refuses_restore, dispatching, restores in (
+                ('restored', [(False, 5, 0), (True, 6, 0)], False, True, 1),
+                ('restore refused', [(False, 5, 0), (False, 5, 0)], True, False, 1),
+                ('operator turned it on first', [(True, 6, 0), (True, 6, 0)], False, True, 0)):
+            with self.subTest(name=name):
+                note = 'is on so the factory keeps working on the old build' if dispatching else 'remains off'
+                with patch.object(deploy, 'state', side_effect=[(True, 4, 0), (False, 5, 0), (False, 5, 0)] + tail), \
+                     patch.object(deploy, 'service_reachable', return_value=True), \
                      patch.object(deploy.subprocess, 'run', side_effect=installer(refuses_restore)) as run, \
                      patch.object(deploy, 'failure_receipt') as receipt:
                     with self.assertRaisesRegex(ValueError, 'dispatch ' + note + '; service_reachable=true'):
                         deploy.deploy('a' * 40)
-                receipt.assert_called_once_with('a' * 40, True, restored)
-                self.assertEqual([['on', '--revision', '5']], [call.args[0][-3:] for call in run.call_args_list if 'on' in call.args[0]])
+                receipt.assert_called_once_with('a' * 40, True, dispatching)
+                self.assertEqual(restores, sum('on' in call.args[0] for call in run.call_args_list))
 
     def test_runtime_failure_leaves_an_untouched_factory_dispatching_and_retryable(self):
         # The live failure of PR #1045's release: the restart was refused over
@@ -547,13 +554,34 @@ with sqlite3.connect(home / 'factory.sqlite3') as connection:
                                     env=dict(os.environ, HOME=str(root)), capture_output=True, text=True, timeout=15)
             # 75: no effect to undo, so the release lane may simply try again.
             self.assertEqual(75, result.returncode, result.stderr)
-            self.assertIn('dispatch restored so the factory keeps working on the old build', result.stderr)
+            self.assertIn('dispatch is on so the factory keeps working on the old build', result.stderr)
             self.assertEqual(['off', 'on'], (home / 'dispatch-calls').read_text().split())
             with sqlite3.connect(home / 'factory.sqlite3') as connection:
                 self.assertEqual(1, connection.execute('SELECT dispatch_enabled FROM factory').fetchone()[0])
             receipt = json.loads((root / '.dark-factory-backups' / ('deploy-' + 'a' * 40 + '.json')).read_text())
+            # The fixture has a readable store and no daemon, which is exactly
+            # the pair the receipt must not conflate.
             self.assertEqual({'sha': 'a' * 40, 'healthy': False, 'dispatch_enabled': True,
-                              'service_reachable': True, 'error': 'deployment_failed'}, receipt)
+                              'service_reachable': False, 'error': 'deployment_failed'}, receipt)
+
+    def test_service_reachability_is_a_connect_not_a_readable_store(self):
+        # Short root: sockaddr_un's sun_path is 104 bytes, and the default
+        # temporary directory plus a runtime name already crowds it.
+        with tempfile.TemporaryDirectory(dir='/private/tmp') as directory:
+            home = Path(directory) / 'f'
+            (home / 'runtimes').mkdir(parents=True)
+            with sqlite3.connect(home / 'factory.sqlite3') as connection:
+                connection.executescript('CREATE TABLE factory(singleton INTEGER, dispatch_enabled INTEGER, revision INTEGER); CREATE TABLE runs(phase TEXT, id BLOB);')
+                connection.execute('INSERT INTO factory VALUES(1, 1, 4)')
+            # A perfectly readable store is not a service.
+            self.assertEqual(0, deploy.state(home)[2])
+            self.assertFalse(deploy.service_reachable(home))
+            with socket.socket(socket.AF_UNIX) as daemon:
+                daemon.bind(str(home / 'runtimes/factory.sock'))
+                # A socket file nothing listens on is still not reachable.
+                self.assertFalse(deploy.service_reachable(home))
+                daemon.listen(1)
+                self.assertTrue(deploy.service_reachable(home))
 
 
 class DeployStageEvidence(unittest.TestCase):

@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import re
+import socket
 import sqlite3
 import subprocess
 import sys
@@ -30,6 +31,22 @@ def state(home):
 
 def adoptable(home, phase, run):
     return phase == 'running' and (home / 'runtimes' / run / 'takeover.sock').is_socket()
+
+
+def service_reachable(home):
+    """A connect, the same probe reinstall-service.sh waits on.
+
+    A readable store proves only that the file is there. After a failed
+    install the daemon may be gone while its store still reads perfectly, so
+    the receipt's reachability has to come from something that serves.
+    """
+    with socket.socket(socket.AF_UNIX) as probe:
+        probe.settimeout(5)
+        try:
+            probe.connect(str(home / 'runtimes' / 'factory.sock'))
+        except OSError:
+            return False
+    return True
 
 
 def failure_receipt(sha, reachable, dispatch_enabled):
@@ -90,27 +107,33 @@ def deploy(sha, home=None):
     except (OSError, ValueError, json.JSONDecodeError, subprocess.SubprocessError) as exc:
         # The drain paused the factory, and a lost deployment must not leave it
         # paused: it would sit idle on the old build until an operator looked.
-        # Restore under the same guard the success path uses, and record what
-        # the factory was actually left with rather than what was intended.
-        restored = False
+        # Restore under the same guard the success path uses.
         try:
             current_enabled, revision, active = state(home)
-            reachable = active >= 0
+            store_read = active >= 0
         except (OSError, sqlite3.Error):
-            current_enabled, revision, reachable = None, None, False
-        if reachable and enabled and not current_enabled and revision == drained_revision:
+            current_enabled, revision, store_read = None, None, False
+        if store_read and enabled and not current_enabled and revision == drained_revision:
             try:
                 restore_dispatch(drained_revision)
-                restored = True
             except (OSError, subprocess.SubprocessError):
                 pass
-        failure_receipt(sha, reachable, restored)
+        # The evidence is what the factory was left with, never what this
+        # process attempted: an operator may have re-enabled dispatch during
+        # the failed installation, and a timed-out restore may still have been
+        # applied. A receipt that contradicts the live factory is worse than none.
+        try:
+            dispatching = store_read and bool(state(home)[0])
+        except (OSError, sqlite3.Error):
+            dispatching, store_read = False, False
+        reachable = service_reachable(home)
+        failure_receipt(sha, reachable, dispatching)
         error = ValueError('deployment failed; dispatch '
-                           + ('restored so the factory keeps working on the old build' if restored else 'remains off')
+                           + ('is on so the factory keeps working on the old build' if dispatching else 'remains off')
                            + '; service_reachable=' + str(reachable).lower())
-        # A refusal over a run it could not adopt installed nothing and left
-        # the factory dispatching, so a later attempt may simply proceed.
-        error.retryable = (not enabled or restored) and getattr(exc, 'returncode', None) == REFUSED
+        # A refusal over a run it could not adopt installed nothing, so a later
+        # attempt may simply proceed once the factory is dispatching again.
+        error.retryable = store_read and (dispatching or not enabled) and getattr(exc, 'returncode', None) == REFUSED
         raise error from exc
     current_enabled, revision, active = state(home)
     # A subsequent explicit operator dispatch change wins over our restoration.

@@ -60,8 +60,13 @@ That phase validates the clean exact source and all three binaries’ VCS and
 release identities without compiling or waiting for the compiler lease.
 Preparation does not back up, migrate a browser profile, or alter the service.
 Any failure after the pause turns dispatch back on, so the factory keeps
-working on the old build, and the failure receipt records whether it managed
-to. A failure that left nothing to undo exits 75, and the release lane then
+working on the old build, and the failure receipt states what the factory was
+left with rather than what the hook attempted: `dispatch_enabled` is read back
+out of the store, so an operator who re-enabled dispatch themselves is not
+reported as a paused factory, and `service_reachable` is a connect on
+`runtimes/factory.sock`, not a store read, so a daemon that died during the
+install is not reported as serving. A failure that left nothing to undo exits
+75, and the release lane then
 re-plans that blocked receipt once on its next tick; a blocker that survives
 that attempt still needs an explicit `--retry`.
 
