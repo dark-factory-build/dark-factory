@@ -875,10 +875,13 @@ def run_locked(config, path, journal, journal_path, managed=None):
             if merge_conflict(pr):
                 send_back_merge_conflict(config, operation, journal_path, receipts, messages, pr)
                 continue
-            if CUSTOMER_REVIEW is not None and ("mergeable" not in pr or "mergeStateStatus" not in pr):
+            if "mergeable" not in pr or "mergeStateStatus" not in pr:
+                # GitHub's list endpoint omits mergeability; only the exact PR read has it.
                 pr.update(refresh_mergeability(config, pr["number"]))
-            if "mergeable" in pr or "mergeStateStatus" in pr:
-                require_mergeable(pr)
+                if merge_conflict(pr):
+                    send_back_merge_conflict(config, operation, journal_path, receipts, messages, pr)
+                    continue
+            require_mergeable(pr)
             operation.setdefault("review_operation", str(uuid.uuid5(uuid.NAMESPACE_URL, "dark-factory:host-review:" + config["repository"] + ":" + str(pr["number"]) + ":" + operation["head"])))
             state = observe_review(config, operation)
             if state == "block" and not operation.get("prior_review_operation"):
@@ -983,12 +986,11 @@ def run_locked(config, path, journal, journal_path, managed=None):
                         verify_review_body(config, pr, operation)
                     elif existing_enqueue == "queued":
                         operation["enqueue_state"] = "queued"
-                if CUSTOMER_REVIEW is not None or "mergeable" in pr or "mergeStateStatus" in pr:
-                    current = refresh_mergeability(config, pr["number"])
-                    if merge_conflict(current):
-                        send_back_merge_conflict(config, operation, journal_path, receipts, messages, pr)
-                        continue
-                    require_mergeable(current)
+                current = refresh_mergeability(config, pr["number"])
+                if merge_conflict(current):
+                    send_back_merge_conflict(config, operation, journal_path, receipts, messages, pr)
+                    continue
+                require_mergeable(current)
                 enqueue_allowed(config, operation, journal_path, receipts)
                 if operation.get("enqueue_state") == "refused":
                     try:

@@ -32,6 +32,8 @@ class ReviewIntakeTest(unittest.TestCase):
             'issues': {'o/r#7': {'number': 7, 'managed': True, 'desired_fingerprint': 'e' * 64,
                                   'operation': {'task_id': 'c' * 32, 'incarnation_id': 'd' * 32}}}})
         self.observe = patch.object(review, 'observe_review', return_value='block').start()
+        # Listings here omit mergeability, so every pass would read the exact PR; tests that care substitute their own.
+        self.mergeability = patch.object(review, 'refresh_mergeability', return_value={'mergeable': True, 'mergeStateStatus': 'CLEAN'}).start()
         # No test may reach a live bridge; tests that need one substitute a fake.
         patch.object(review, 'bridge_call', side_effect=review.ReviewError('maintainer bridge is unavailable')).start()
         self.addCleanup(patch.stopall)
@@ -82,6 +84,17 @@ class ReviewIntakeTest(unittest.TestCase):
         send_back = next(argv for argv in commands if argv[1:3] == ['task', 'send-back'])
         self.assertEqual('e' * 32, send_back[send_back.index('--task') + 1])
         self.assertIn('merge conflict with main', send_back[send_back.index('--note') + 1])
+
+    def test_listing_without_mergeability_reads_the_exact_pull_and_refuses_unknown(self):
+        pull = {'number': 9, 'headRefOid': SHA, 'body': 'Refs #7'}
+        self.mergeability.return_value = {'number': 9, 'mergeable': None, 'mergeStateStatus': 'UNKNOWN'}
+        with patch.object(review, 'mirror', return_value=Path('/mirror')), patch.object(review, 'list_prs', return_value=[pull]), \
+             patch.object(review, 'ready', return_value=dict(self.operation)), patch.object(review, 'verify_existing'), \
+             patch.object(review.intake, 'task_state', return_value=None), patch.object(review, 'launch_review') as launch:
+            with self.assertRaisesRegex(review.ReviewError, 'PR #9: pull request mergeability is unresolved'):
+                review.run_once(self.config)
+        self.assertEqual([9], [call.args[1] for call in self.mergeability.call_args_list])
+        launch.assert_not_called()
 
     def test_unknown_mergeability_stops_review(self):
         with self.assertRaisesRegex(review.ReviewError, 'mergeability is unresolved'):
