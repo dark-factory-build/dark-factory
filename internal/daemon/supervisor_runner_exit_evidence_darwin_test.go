@@ -85,6 +85,34 @@ func TestSupervisorLateRunnerDeathNamesExitFromOwnerClose(t *testing.T) {
 	t.Logf("reported failure:\n%v", err)
 }
 
+// A checkpoint-stage EOF is reported by the outer runner itself. Its stderr
+// must remain attached to the durable failure record rather than the daemon's
+// inherited stderr, where an operator cannot inspect it later.
+func TestSupervisorCheckpointEOFPersistsOuterRunnerStderr(t *testing.T) {
+	// A base the repository does not have makes the outer runner's selection
+	// stage fail, so the runner exits with its own diagnostic on stderr and
+	// the daemon sees the control stream end at that checkpoint.
+	fixture := newSupervisorFixture(t, supervisorProgram(t, false, false))
+	fixture.spec.BaseRevision = "refs/heads/nonexistent-source"
+	run, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
+	if err == nil {
+		t.Fatal("a checkpoint EOF produced no error")
+	}
+	t.Logf("checkpoint EOF: %v", err)
+	stored, found, readErr := fixture.store.Run(context.Background(), run.ID)
+	if readErr != nil || !found {
+		t.Fatalf("read back run: found=%v err=%v", found, readErr)
+	}
+	if stored.Proposal == nil {
+		t.Fatal("a checkpoint EOF carries no failure proposal")
+	}
+	// The test binary stands in for factory-runner and prints this line where
+	// the production runner prints "factory-runner: attempt runner failed: ...".
+	if !strings.Contains(stored.Proposal.Detail(), `stderr="supervisor helper failed`) {
+		t.Fatalf("durable failure detail does not include outer runner stderr: %q", stored.Proposal.Detail())
+	}
+}
+
 // A run that already carries its own reason must not gain an exit line. The
 // runner is alive and converged by the daemon here, so its exit is a
 // consequence of the daemon's own action rather than evidence about the
