@@ -198,6 +198,12 @@ func (store *Store) RecordProductionObservation(ctx context.Context, project Pro
 		if err != nil {
 			return tx.Rollback(err)
 		}
+		// The observation's review is a copy read before a remote wait. A
+		// verdict recorded meanwhile lives only here, so the stored review
+		// wins inside this transaction rather than being erased.
+		if stored, ok := storedProductionReview(ctx, tx.connection, project, observation.Repository, pr.Number); ok {
+			pr.Review = stored
+		}
 		if err := write("pull_request", strconv.FormatUint(pr.Number, 10), visual, pr); err != nil {
 			return tx.Rollback(err)
 		}
@@ -342,6 +348,18 @@ func (store *Store) RecordPublication(ctx context.Context, project ProjectID, ta
 // RecordProductionReview preserves the exact commit covered by a review.
 // Refreshes may move the live PR to a newer head; that older head is evidence,
 // not permission to rewrite the review onto the new source.
+func storedProductionReview(ctx context.Context, c *sql.Conn, project ProjectID, repo string, number uint64) (ProductionReview, bool) {
+	var body string
+	if c.QueryRowContext(ctx, `SELECT document FROM production_records WHERE project_id = ? AND repository = ? AND kind = 'pull_request' AND identity = ?`, project.Bytes(), repo, strconv.FormatUint(number, 10)).Scan(&body) != nil {
+		return ProductionReview{}, false
+	}
+	var pr ProductionPullRequest
+	if json.Unmarshal([]byte(body), &pr) != nil || pr.Review.Head == "" {
+		return ProductionReview{}, false
+	}
+	return pr.Review, true
+}
+
 func (store *Store) RecordProductionReview(ctx context.Context, project ProjectID, repo string, number uint64, review ProductionReview, at UnixMillis) error {
 	if project.zero() || !productionRepository.MatchString(repo) || number == 0 || number > 1<<53-1 || !productionSHA(review.Head) || !validOutcomeText(review.State, 64) || !validOutcomeText(review.Findings, maxProductionReviewFindings) || !productionURL(review.URL) {
 		return ErrInvalidValue

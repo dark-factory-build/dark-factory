@@ -9,6 +9,47 @@ import (
 	"testing"
 )
 
+// A refresh reads the known reviews, waits on the remote, then writes a
+// snapshot carrying that copy. A verdict recorded during the wait must
+// survive the later write.
+func TestProductionObservationKeepsAReviewRecordedDuringTheRefresh(t *testing.T) {
+	store, _, project, _ := newAdmissionStore(t, RoleOrchestrator, 2)
+	defer store.Close()
+	ctx := context.Background()
+	head := strings.Repeat("a", 40)
+	pr := ProductionPullRequest{Number: 7, Title: "A machine", Head: head, State: "open"}
+	snapshot := ProductionObservation{Repository: "example/factory", ObservedAt: 10, PullRequests: []ProductionPullRequest{pr}}
+	if err := store.RecordProductionObservation(ctx, project.ID, snapshot, mustTime(t, 10)); err != nil {
+		t.Fatal(err)
+	}
+	// The refresh has read its snapshot (no review); the verdict lands now.
+	if err := store.RecordProductionReview(ctx, project.ID, "example/factory", 7, ProductionReview{Head: head, State: "allow"}, mustTime(t, 11)); err != nil {
+		t.Fatal(err)
+	}
+	snapshot.ObservedAt = 12
+	if err := store.RecordProductionObservation(ctx, project.ID, snapshot, mustTime(t, 12)); err != nil {
+		t.Fatal(err)
+	}
+	page, err := store.Production(ctx, project.ID, 0, 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range page.Records {
+		if item.Kind != "pull_request" {
+			continue
+		}
+		var got ProductionPullRequest
+		if err := json.Unmarshal(item.Document, &got); err != nil {
+			t.Fatal(err)
+		}
+		if got.Review.Head != head || got.Review.State != "allow" {
+			t.Fatalf("review erased by the stale snapshot: %+v", got.Review)
+		}
+		return
+	}
+	t.Fatal("pull request record missing")
+}
+
 func TestProductionPersistsRevisionEvidenceWithoutRewinding(t *testing.T) {
 	store, _, project, _ := newAdmissionStore(t, RoleOrchestrator, 2)
 	defer store.Close()
