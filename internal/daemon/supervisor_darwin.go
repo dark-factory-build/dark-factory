@@ -33,6 +33,46 @@ type supervisorKeys struct {
 	proof     [32]byte
 }
 
+func (daemon *Daemon) orchestratorRetainedSourceReviews(ctx context.Context, digest kernel.AttemptDigest) ([]changeworker.SourceReview, error) {
+	var reviews []changeworker.SourceReview
+	seen := make(map[string]bool)
+	var offset uint64
+	var head kernel.EventSequence
+	for {
+		request := kernel.OverseerSnapshotRequest{Offset: offset, ExpectedHead: head}
+		snapshot, err := daemon.store.OverseerSnapshotForAttempt(ctx, digest, request)
+		if err != nil {
+			if errors.Is(err, kernel.ErrRevisionConflict) {
+				offset, head = 0, kernel.EventSequence{}
+				continue
+			}
+			return nil, err
+		}
+		if head.Int64() == 0 {
+			head = snapshot.Head
+		}
+		for _, handoff := range snapshot.Handoffs {
+			if seen[handoff.ChangeID.String()] {
+				continue
+			}
+			receipt, err := daemon.attemptSourceHandoff(ctx, handoff)
+			if err != nil {
+				return nil, err
+			}
+			reviews = append(reviews, changeworker.SourceReview{
+				TaskID: handoff.TaskID.String(), ChangeID: handoff.ChangeID.String(),
+				TaskWorkRevision: uint64(handoff.TaskWorkRevision.Int64()), ChangeRevision: uint64(handoff.ChangeRevision.Int64()),
+				BaseCommit: handoff.BaseCommit, HeadCommit: receipt.HeadCommit, SourcePath: receipt.SourcePath, GitDirectory: receipt.GitDirectory,
+			})
+			seen[handoff.ChangeID.String()] = true
+		}
+		if snapshot.NextOffset == nil {
+			return reviews, nil
+		}
+		offset = *snapshot.NextOffset
+	}
+}
+
 // supervisorAttemptOwner owns the outer runner until the live attempt is
 // registered. After registration, the per-attempt owner loop owns all
 // controller operations; this outer owner only joins that loop and then
@@ -337,6 +377,7 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 	var changeState kernel.Change
 	var retained *changeworker.Result
 	var retainedSourceReview *changeworker.SourceReview
+	var retainedSourceReviews []changeworker.SourceReview
 	if kernel.RetainedSourceReviewSupported(run.Provider) && run.Role == kernel.RoleWorker {
 		expected, review, parseErr := kernel.ParseRetainedSourceReviewTask(kernel.EffectiveTaskText(run.Provider, task.Title, task.Body))
 		if parseErr != nil {
@@ -462,19 +503,39 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 	if _, err := runtimeValue.PublishAttemptToken(ctx, keys.token); err != nil {
 		return daemon.failRun(run, kernel.FailureSpawn, err)
 	}
+	at, err = daemon.timestamp()
+	if err != nil {
+		return daemon.failRun(run, kernel.FailureInternal, err)
+	}
+	session, found, err := daemon.store.TerminalSessionForRun(ctx, run.ID)
+	if err != nil || !found {
+		if err == nil {
+			err = kernel.ErrCorruptState
+		}
+		return daemon.failRun(run, kernel.FailureInternal, err)
+	}
+	run, err = daemon.store.ActivateRun(ctx, run.ID, session.ID, run.Revision, session.Revision, at)
+	if err != nil {
+		return daemon.failRun(run, kernel.FailureActivation, err)
+	}
+	if run.Role == kernel.RoleOrchestrator && kernel.RetainedSourceReviewSupported(run.Provider) {
+		retainedSourceReviews, err = daemon.orchestratorRetainedSourceReviews(ctx, run.CredentialDigest)
+		if err != nil {
+			return daemon.failRun(run, kernel.FailureSource, err)
+		}
+	}
 	config := changeworker.Config{
 		GitAuthor: daemon.gitAuthor(ctx), CustomerMaintainer: customerMaintainer, Provider: run.Provider, Role: run.Role, Model: run.Model, ReasoningEffort: run.ReasoningEffort,
 		AgentID: run.AgentID.String(), TaskIncarnationID: run.TaskIncarnationID.String(), PreviousWorkingDirectory: previousWorkingDirectory,
 		RuntimePath: gotRuntimePath, RuntimeIdentity: runtimeFileIdentity,
 		GitExecutable: spec.GitExecutable, FactoryctlExecutable: factoryctl.Path(), ToolPath: spec.ToolPath, ToolchainReadRoots: spec.ToolchainReadRoots, LocalCILeaseDir: localCILeaseDir, AccountHome: spec.AccountHome, AccountConfigDir: accountConfigDir, RepositoryRoot: repository.Root, RepositoryIdentity: repositoryIdentity, RepositoryGitIdentity: repositoryGitIdentity, RepositoryOriginDigest: repositoryOriginDigest, GitCommonDir: gitCommonDir,
 		Revision: repository.BaseRef, ChangeParent: spec.ChangeParent, FinalName: finalName,
-		AttemptSocket: spec.AttemptSocket, Retained: retained, RetainedSourceReview: retainedSourceReview, ProviderTask: providerTask,
+		AttemptSocket: spec.AttemptSocket, Retained: retained, RetainedSourceReview: retainedSourceReview, RetainedSourceReviews: retainedSourceReviews, ProviderTask: providerTask,
 	}
 	workerConfig, err := changeworker.EncodeConfig(config)
 	if err != nil {
 		return daemon.failRun(run, kernel.FailureSource, err)
 	}
-
 	runtimeDirectory, lifetime, err := runtimeValue.DuplicateRunnerFiles()
 	if err != nil {
 		return daemon.failRun(run, kernel.FailureSpawn, err)
@@ -700,21 +761,6 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 		case !kernelCommitEqual(*changeState.HeadCommit, head):
 			return daemon.failRun(run, kernel.FailureSource, errInvalidContract)
 		}
-	}
-	at, err = daemon.timestamp()
-	if err != nil {
-		return daemon.failRun(run, kernel.FailureInternal, err)
-	}
-	session, found, err := daemon.store.TerminalSessionForRun(ctx, run.ID)
-	if err != nil || !found {
-		if err == nil {
-			err = kernel.ErrCorruptState
-		}
-		return daemon.failRun(run, kernel.FailureInternal, err)
-	}
-	run, err = daemon.store.ActivateRun(ctx, run.ID, session.ID, run.Revision, session.Revision, at)
-	if err != nil {
-		return daemon.failRun(run, kernel.FailureActivation, err)
 	}
 	// Register the owner before provider release. The owner is not attachable
 	// until it observes TerminalReady, but it already owns the controller and

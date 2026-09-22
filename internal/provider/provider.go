@@ -211,9 +211,10 @@ type RuntimePaths struct {
 	// environment still has no Git credential helper, SSH or prompt.
 	gitCommonDir         string
 	gitCommonDirWritable bool
-	sourceReviewPath     string
-	sourceReviewGitDir   string
+	sourceReviewPaths    []retainedSourcePath
 }
+
+type retainedSourcePath struct{ source, git string }
 
 // WithLocalCILeaseDirectory carries daemon-resolved lease storage below the
 // Git directory into a worker.
@@ -237,13 +238,14 @@ func (runtime RuntimePaths) WithGitCommonDirectory(path string, writable bool) (
 }
 
 // WithRetainedSourceReview grants one daemon-resolved retained Change to a
-// reviewer. Both paths come from the authenticated, revision-checked source
-// receipt; local commands may read them but never write them.
+// reviewer. Both paths come from an authenticated, revision-checked source
+// receipt; local commands may read them but never write them. Repeated calls
+// are used by an orchestrator that may inspect several handoffs.
 func (runtime RuntimePaths) WithRetainedSourceReview(sourcePath, gitDirectory string) (RuntimePaths, error) {
 	if !validAbsolute(sourcePath, maxPathBytes) || !validAbsolute(gitDirectory, maxPathBytes) || filepath.Base(gitDirectory) != ".git" || sourcePath == runtime.home || sourcePath == runtime.temp {
 		return RuntimePaths{}, ErrInvalid
 	}
-	runtime.sourceReviewPath, runtime.sourceReviewGitDir = sourcePath, gitDirectory
+	runtime.sourceReviewPaths = append(runtime.sourceReviewPaths, retainedSourcePath{sourcePath, gitDirectory})
 	return runtime, nil
 }
 
@@ -786,11 +788,20 @@ func sandboxGrants(request Request) []grant {
 		grants = append(grants, grant{request.runtime.localCILeaseDir, true}, grant{"/usr/bin/ruby", false})
 	}
 	if request.runtime.gitCommonDir != "" {
-		grants = append(grants, grant{request.runtime.gitCommonDir, request.runtime.gitCommonDirWritable && request.runtime.gitCommonDir != request.runtime.sourceReviewGitDir})
+		writable := request.runtime.gitCommonDirWritable
+		for _, review := range request.runtime.sourceReviewPaths {
+			if request.runtime.gitCommonDir == review.git {
+				writable = false
+				break
+			}
+		}
+		grants = append(grants, grant{request.runtime.gitCommonDir, writable})
 	}
-	for _, path := range []string{request.runtime.sourceReviewPath, request.runtime.sourceReviewGitDir} {
-		if path != "" && path != request.workingDirectory && path != request.runtime.gitCommonDir {
-			grants = append(grants, grant{path, false})
+	for _, review := range request.runtime.sourceReviewPaths {
+		for _, path := range []string{review.source, review.git} {
+			if path != request.workingDirectory && path != request.runtime.gitCommonDir && !slices.ContainsFunc(grants, func(given grant) bool { return given.path == path }) {
+				grants = append(grants, grant{path, false})
+			}
 		}
 	}
 	return grants
