@@ -368,14 +368,54 @@ class ReviewIntakeTest(unittest.TestCase):
         self.observe.return_value = 'block'
         with patch.object(review, 'mirror', return_value=Path('/mirror')), patch.object(review, 'list_prs', return_value=prs), \
              patch.object(review, 'ready', return_value=self.operation), patch.object(review.intake, 'task_state', side_effect=[None, {'status': 'queued'}]), \
-             patch.object(review.intake, 'enqueue') as enqueue, patch.object(review, 'verify_existing'):
-            self.assertEqual(['woke PR #9 review block'], review.run_once(self.config))
+             patch.object(review.intake, 'enqueue') as enqueue, patch.object(review, 'verify_existing'), \
+             patch.object(review, 'send_back_source_task', return_value='sent') as send_back:
+            messages = review.run_once(self.config)
+            self.assertEqual(2, len(messages))
+            self.assertIn('review rejection', messages[0])
+            self.assertIn('woke PR #9 review block', messages[1])
+            send_back.assert_called_once()
             self.assertEqual([], review.run_once(self.config))
         self.assertEqual(1, enqueue.call_count)
         self.assertIn("state block", enqueue.call_args.args[1]["body"])
         receipt = json.loads(Path(self.config['journal'] + '.reviews.json').read_text())
         self.assertEqual("block", receipt['pulls']['9:' + SHA]["review_state"])
         self.assertNotIn("enqueue_attempted", receipt['pulls']['9:' + SHA])
+        self.assertTrue(receipt['pulls']['9:' + SHA]['review_failure_sent_back'])
+
+    def test_review_rejection_routes_operator_published_change_to_bound_worker(self):
+        home = Path(self.config['factory_home'])
+        with sqlite3.connect(home / 'factory.sqlite3') as connection:
+            connection.execute('CREATE TABLE publication_tasks (project_id BLOB, repository TEXT, pull_number INTEGER, task_id BLOB, change_id BLOB, created_at_ms INTEGER)')
+            connection.execute('INSERT INTO publication_tasks VALUES (?, ?, ?, ?, ?, ?)',
+                               (bytes.fromhex(self.config['project_id']), 'o/r', 9,
+                                bytes.fromhex('f' * 32), bytes.fromhex('e' * 16), 1))
+        operation = dict(self.operation, source_marker='FACTORY_SOURCE o/r#404')
+        with patch.object(review, 'send_back_source_task') as send_back:
+            note = review.review_failure_note(dict(operation, review_operation='d' * 36))
+            review.send_back_source_task(self.config, operation, note)
+        send_back.assert_called_once_with(self.config, operation, note)
+
+    def test_review_rejection_retries_failed_worker_handoff_without_duplicate_review(self):
+        prs = [{'number': 9, 'headRefOid': SHA, 'body': 'text\nRefs #7\n'}]
+        self.observe.return_value = 'block'
+        transient = review.intake.IntakeError('operator API unavailable')
+        with patch.object(review, 'mirror', return_value=Path('/mirror')), patch.object(review, 'list_prs', return_value=prs), \
+             patch.object(review, 'ready', return_value=self.operation), patch.object(review, 'verify_existing'), \
+             patch.object(review, 'send_back_source_task', side_effect=[transient, None]) as send_back, \
+             patch.object(review, 'launch_review') as launch, patch.object(review.intake, 'task_state', return_value={'status': 'queued'}):
+            first = review.run_once(self.config)
+            receipt = json.loads(Path(self.config['journal'] + '.reviews.json').read_text())['pulls']['9:' + SHA]
+            self.assertIn('handoff pending', first[0])
+            self.assertNotIn('review_failure_sent_back', receipt)
+            self.assertEqual('operator API unavailable', receipt['review_send_back_error'])
+            second = review.run_once(self.config)
+        self.assertTrue(any('sent back PR #9 review rejection' in message for message in second))
+        self.assertEqual(2, send_back.call_count)
+        launch.assert_not_called()
+        receipt = json.loads(Path(self.config['journal'] + '.reviews.json').read_text())['pulls']['9:' + SHA]
+        self.assertTrue(receipt['review_failure_sent_back'])
+        self.assertNotIn('review_send_back_error', receipt)
 
     def test_crlf_terminal_footer_links_managed_pr(self):
         journal = json.loads(Path(self.config['journal']).read_text())
@@ -391,7 +431,7 @@ class ReviewIntakeTest(unittest.TestCase):
         with patch.object(review, 'mirror', return_value=Path('/mirror')), patch.object(review, 'list_prs', return_value=[{'number': 9, 'headRefOid': SHA, 'body': 'Refs #8\nRefs #7'}]), \
              patch.object(review, 'ready', return_value=self.operation), patch.object(review, 'verify_existing'), \
              patch.object(review.intake, 'task_state', return_value={'status': 'queued'}):
-            self.assertEqual([], review.run_once(self.config))
+            self.assertTrue(any('review rejection' in message for message in review.run_once(self.config)))
         self.assertEqual(7, review.linked_issue(self.config, {'number': 9, 'body': 'Refs #8\nRefs #7'}, json.loads(Path(self.config['journal']).read_text())))
 
     def test_managed_earlier_footer_is_ignored_when_unmanaged_footer_is_terminal(self):
@@ -423,7 +463,7 @@ class ReviewIntakeTest(unittest.TestCase):
         with patch.object(review, 'mirror', return_value=Path('/mirror')), patch.object(review, 'list_prs', return_value=[{'number': 9, 'headRefOid': SHA, 'body': 'Refs #7'}]), \
              patch.object(review, 'ready', side_effect=AssertionError('must reuse persisted base')), patch.object(review, 'verify_existing') as verify, \
              patch.object(review.intake, 'task_state', return_value={'status': 'queued'}):
-            self.assertEqual([], review.run_once(self.config))
+            self.assertTrue(any('review rejection' in message for message in review.run_once(self.config)))
         self.assertEqual(1, verify.call_count)
         self.assertEqual('b' * 40, verify.call_args.args[2]['base'])
 
@@ -438,7 +478,7 @@ class ReviewIntakeTest(unittest.TestCase):
         with patch.object(review, 'mirror', return_value=Path('/mirror')), patch.object(review, 'list_prs', return_value=[{'number': 9, 'headRefOid': SHA, 'body': 'Refs #7'}]), \
              patch.object(review, 'ready', side_effect=AssertionError('must reuse the pre-change receipt')), patch.object(review, 'verify_existing') as verify, \
              patch.object(review.intake, 'task_state', return_value={'status': 'queued'}):
-            self.assertEqual([], review.run_once(self.config))
+            self.assertTrue(any('review rejection' in message for message in review.run_once(self.config)))
         self.assertEqual(1, verify.call_count)
 
     def test_receipt_rejects_mirror_config_change(self):
@@ -506,7 +546,7 @@ class ReviewIntakeTest(unittest.TestCase):
              patch.object(review.intake, 'enqueue', side_effect=review.intake.IntakeError('lost response')) as enqueue:
             with self.assertRaisesRegex(review.ReviewError, 'PR #9: lost response'):
                 review.run_once(self.config)
-            self.assertEqual([], review.run_once(self.config))
+            self.assertTrue(any('review rejection handoff pending' in message for message in review.run_once(self.config)))
         self.assertEqual(1, launch.call_count)
         self.assertEqual(1, enqueue.call_count)
         self.assertIn('state block', enqueue.call_args.args[1]['body'])
@@ -1321,9 +1361,10 @@ class ReviewIntakeTest(unittest.TestCase):
              patch.object(review, 'ready', return_value=operation) as ready, patch.object(review, 'verify_existing'), \
              patch.object(review.intake, 'task_state', return_value={'status': 'queued'}):
             messages = review.run_once(self.config)
-        self.assertEqual(1, len(messages))
+        self.assertEqual(2, len(messages))
         self.assertIn('skipped PR #9', messages[0])
         self.assertIn('body exceeds the intake limit', messages[0])
+        self.assertIn('could not route PR #10 review rejection', messages[1])
         self.assertEqual(1, ready.call_count)
         self.assertEqual(10, ready.call_args.args[2]['number'])
 

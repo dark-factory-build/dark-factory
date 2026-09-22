@@ -573,6 +573,19 @@ def gate_failure_note(receipt, operation):
     return "pre-review full gate failed: tests=" + (", ".join(tests) if tests else "unavailable") + ". Exact head " + operation["head"] + "."
 
 
+def review_failure_note(operation):
+    """Describe a blocking review without copying untrusted review prose.
+
+    The original worker owns the retained Change, so a BLOCK must return that
+    task to its queue.  The review operation and exact head are enough for the
+    worker to retrieve the authoritative GitHub finding; putting arbitrary
+    review text into the task body would make the host an authority boundary.
+    """
+    return ("independent review requested changes; read the completed review operation "
+            + operation["review_operation"] + " for the findings, correct this retained Change, "
+            + "rerun focused checks, and republish. Exact head " + operation["head"] + ".")
+
+
 def send_back_merge_failure(config, operation):
     return send_back_source_task(config, operation, merge_failure_note(config, operation))
 
@@ -1074,6 +1087,36 @@ def run_locked(config, path, journal, journal_path, managed=None):
                         operation["merge_failure_note"] = note
                         intake.atomic_json(journal_path, receipts)
                         messages.append("sent back PR #" + str(pr["number"]) + " queue failure: " + note)
+            elif state == "block":
+                # A review rejection is a correction request for the worker
+                # that owns this Change, not a fresh task for an unrelated
+                # overseer.  Persist the marker after the send-back so a lost
+                # response cannot duplicate the transition on the next tick.
+                if not operation.get("review_failure_sent_back") and not operation.get("review_failure_unroutable"):
+                    note = operation.get("review_failure_note") or review_failure_note(operation)
+                    sent_back = False
+                    try:
+                        send_back_source_task(config, operation, note)
+                        if operation.get("send_back_unroutable"):
+                            operation["review_failure_unroutable"] = True
+                        else:
+                            sent_back = True
+                    except intake.IntakeError as exc:
+                        # Keep the exact finding durable and let the next
+                        # owned tick retry the worker handoff; a transient
+                        # operator API failure must not launch a second review.
+                        operation["review_send_back_error"] = str(exc)[:300]
+                    operation["review_failure_note"] = note
+                    if sent_back:
+                        operation["review_failure_sent_back"] = True
+                        operation.pop("review_send_back_error", None)
+                    intake.atomic_json(journal_path, receipts)
+                    if sent_back:
+                        messages.append("sent back PR #" + str(pr["number"]) + " review rejection: " + note)
+                    elif operation.get("review_failure_unroutable"):
+                        messages.append("could not route PR #" + str(pr["number"]) + " review rejection: " + note)
+                    else:
+                        messages.append("review rejection handoff pending for PR #" + str(pr["number"]) + ": " + note)
             followup = review_followup(config, operation, state)
             if intake.task_state(config, followup) is None and enqueue_followup(config, followup, pr, journal, managed):
                 messages.append("woke PR #" + str(pr["number"]) + " review " + state)
