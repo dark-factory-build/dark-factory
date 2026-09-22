@@ -709,6 +709,68 @@ class ReviewIntakeTest(unittest.TestCase):
         receipt = json.loads(Path(self.config['journal'] + '.reviews.json').read_text())['pulls']['9:' + SHA]
         self.assertEqual(('failed', True), (receipt['gate_state'], receipt['gate_failure_sent_back']))
 
+    def test_full_gate_records_the_status_of_the_worktree_gate_it_actually_ran(self):
+        # go_gate_run_bounded takes (timeout, command...). Without the shift the
+        # sourced environment script stayed $1, so its timeout validation saw a
+        # path and refused with 64 before any gate ran, and every receipt since
+        # recorded that refusal as the pull request's own gate failure.
+        source = Path(self.temp.name) / 'source'
+        (source / 'scripts').mkdir(parents=True)
+        gate = source / 'scripts' / 'local-ci.sh'
+        identity = {'GIT_AUTHOR_NAME': 'fixture', 'GIT_AUTHOR_EMAIL': 'fixture@example.invalid',
+                    'GIT_COMMITTER_NAME': 'fixture', 'GIT_COMMITTER_EMAIL': 'fixture@example.invalid'}
+        def git(*arguments, capture=False):
+            result = subprocess.run(['git', '-C', str(source), *arguments], check=True, text=True,
+                                    capture_output=True, env=dict(os.environ, **identity))
+            return result.stdout.strip() if capture else None
+        git('init', '--quiet')
+        heads = {}
+        for status in (0, 3):
+            gate.write_text('#!/bin/sh\nprintf gate-ran\nexit ' + str(status) + '\n')
+            gate.chmod(0o755)
+            git('add', '-A')
+            git('commit', '--quiet', '-m', 'gate exits ' + str(status))
+            heads[status] = git('rev-parse', 'HEAD', capture=True)
+        bare = Path(self.temp.name) / 'bare'
+        subprocess.run(['git', 'clone', '--quiet', '--bare', str(source), str(bare)], check=True, capture_output=True)
+        for status, head in heads.items():
+            with self.subTest(status=status):
+                destination = Path(self.temp.name) / ('body-' + str(status) + '.md')
+                receipt = review.run_full_gate(bare, {'head': head, 'base': 'b' * 40}, destination)
+                self.assertEqual({'head': head, 'base': 'b' * 40, 'exit_code': status}, json.loads(receipt.read_text()))
+                self.assertIn('gate-ran', destination.with_suffix('.gate.log').read_text())
+
+    def test_gate_that_could_not_run_is_a_host_blocker_not_a_failed_review(self):
+        bare = Path(self.temp.name) / 'bare'
+        bare.mkdir()
+        (bare / 'HEAD').write_text('ref: refs/heads/main\n')
+        operation = dict(self.operation, review_operation='11111111-1111-4111-8111-111111111111')
+        evidence = Path(self.temp.name) / 'gate.json'
+        self.observe.return_value = 'missing'
+        # 64 refused arguments, 125..127 supervisor or exec failure: the bounded
+        # wrapper's own statuses mean nothing ran, so no head earns a send-back
+        # and the next pass must gate it again once the host is repaired.
+        for status in (64, 125, 126, 127):
+            with self.subTest(status=status):
+                evidence.write_text(json.dumps({'head': SHA, 'base': operation['base'], 'exit_code': status}))
+                with patch.object(review, 'mirror', return_value=bare), \
+                     patch.object(review, 'list_prs', return_value=[{'number': 9, 'headRefOid': SHA, 'body': SHA + '\nRefs #7'}]), \
+                     patch.object(review, 'ready', return_value=dict(operation)), patch.object(review, 'verify_existing'), \
+                     patch.object(review, 'run_full_gate', return_value=evidence) as gate, \
+                     patch.object(review, 'send_back_source_task') as send_back, \
+                     patch.object(review, 'launch_review') as launch, \
+                     patch.object(review.intake, 'enqueue') as enqueue:
+                    with self.assertRaisesRegex(review.ReviewError, 'gate could not run: bounded gate wrapper exit ' + str(status)):
+                        review.run_once(self.config)
+                    self.assertEqual(1, gate.call_count)
+                    send_back.assert_not_called()
+                    launch.assert_not_called()
+                    enqueue.assert_not_called()
+                receipt = json.loads(Path(self.config['journal'] + '.reviews.json').read_text())['pulls']['9:' + SHA]
+                self.assertNotIn('gate_state', receipt)
+                self.assertNotIn('gate_evidence', receipt)
+                self.assertNotIn('review_attempted', receipt)
+
     def test_merge_observation_reuses_reviewed_digest_after_body_edit(self):
         operation = dict(self.operation, enqueue_operation='44444444-4444-4444-8444-444444444444',
                          enqueue_base='main', reviewed_body_digest='sha256:' + ('0' * 64))
