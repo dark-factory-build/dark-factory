@@ -222,12 +222,16 @@ and completed passing checks. It records the plan before executing the fixed
 hook, then independently probes the live target. A crash or ambiguous effect
 is observed before retrying; blocked receipts require explicit `--retry`.
 A hook that exits 75 declares that it failed before any effect on the target
-(`deploy-runtime.py` does so only when its non-destructive `--prepare` build
-fails): the receipt is blocked as pre-deployment and leaves no unresolved
-barrier, so `--retry` or a later release may follow. Any other failure keeps it.
+(`deploy-runtime.py` does so for its non-destructive `--prepare` build, and for
+a restart refused over a run it could not adopt, which installs nothing and
+leaves dispatch as it found it): the receipt is blocked as pre-deployment and
+leaves no unresolved barrier, so the next tick re-plans it automatically, once.
+A blocker that survives that attempt, like any other failure, keeps the barrier
+and needs `--retry`.
 The runtime hook drains active work with dispatch off, uses the stock reinstall
 script, checks all three binaries and browser health, and restores dispatch
-only if no later operator change superseded its pause. Each hook starts in an
+only if no later operator change superseded its pause — on failure too, so a
+lost deployment does not leave the whole factory paused. Each hook starts in an
 owned process group; a timeout terminates that group before the receipt is
 blocked.
 

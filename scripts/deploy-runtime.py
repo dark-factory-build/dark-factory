@@ -11,6 +11,10 @@ import sys
 import tempfile
 import time
 
+# reinstall-service.sh refuses a run it cannot adopt with this status, and the
+# release controller reads the same number back as "no effect; retryable".
+REFUSED = 75
+
 
 def state(home):
     with sqlite3.connect((home / 'factory.sqlite3').as_uri() + '?mode=ro', uri=True) as connection:
@@ -28,14 +32,14 @@ def adoptable(home, phase, run):
     return phase == 'running' and (home / 'runtimes' / run / 'takeover.sock').is_socket()
 
 
-def failure_receipt(sha, reachable):
+def failure_receipt(sha, reachable, dispatch_enabled):
     directory = Path.home() / '.dark-factory-backups'
     directory.mkdir(mode=0o700, exist_ok=True)
     target = directory / ('deploy-' + sha + '.json')
     fd, temporary = tempfile.mkstemp(prefix='.deploy-', dir=directory)
     try:
         with os.fdopen(fd, 'w', encoding='utf-8') as stream:
-            json.dump({'sha': sha, 'healthy': False, 'dispatch_enabled': False,
+            json.dump({'sha': sha, 'healthy': False, 'dispatch_enabled': dispatch_enabled,
                        'service_reachable': reachable, 'error': 'deployment_failed'}, stream, sort_keys=True)
             stream.write('\n')
         os.replace(temporary, target)
@@ -84,12 +88,30 @@ def deploy(sha, home=None):
         if observed.get('sha') != sha or observed.get('healthy') is not True:
             raise ValueError('runtime verification failed')
     except (OSError, ValueError, json.JSONDecodeError, subprocess.SubprocessError) as exc:
+        # The drain paused the factory, and a lost deployment must not leave it
+        # paused: it would sit idle on the old build until an operator looked.
+        # Restore under the same guard the success path uses, and record what
+        # the factory was actually left with rather than what was intended.
+        restored = False
         try:
-            reachable = state(home)[2] >= 0
+            current_enabled, revision, active = state(home)
+            reachable = active >= 0
         except (OSError, sqlite3.Error):
-            reachable = False
-        failure_receipt(sha, reachable)
-        raise ValueError('deployment failed; dispatch remains off; service_reachable=' + str(reachable).lower()) from exc
+            current_enabled, revision, reachable = None, None, False
+        if reachable and enabled and not current_enabled and revision == drained_revision:
+            try:
+                restore_dispatch(drained_revision)
+                restored = True
+            except (OSError, subprocess.SubprocessError):
+                pass
+        failure_receipt(sha, reachable, restored)
+        error = ValueError('deployment failed; dispatch '
+                           + ('restored so the factory keeps working on the old build' if restored else 'remains off')
+                           + '; service_reachable=' + str(reachable).lower())
+        # A refusal over a run it could not adopt installed nothing and left
+        # the factory dispatching, so a later attempt may simply proceed.
+        error.retryable = (not enabled or restored) and getattr(exc, 'returncode', None) == REFUSED
+        raise error from exc
     current_enabled, revision, active = state(home)
     # A subsequent explicit operator dispatch change wins over our restoration.
     if enabled and not current_enabled and active == 0 and revision == drained_revision:
@@ -113,6 +135,8 @@ if __name__ == '__main__':
             # redacts whole labels and then keeps the tail.
             print(str(cause.stderr or '') + '\nstage: ' + ' '.join(Path(str(arg)).name for arg in cause.cmd[:5])
                   + ' exit=' + str(getattr(cause, 'returncode', 'timeout')), file=sys.stderr)
-        # 75 tells the release controller the failure was the non-destructive
-        # preparation: nothing was drained, stopped, swapped or migrated.
-        raise SystemExit(75 if isinstance(cause, subprocess.SubprocessError) and '--prepare' in cause.cmd else 1)
+        # 75 tells the release controller the failure left no effect to undo:
+        # the non-destructive preparation, or a refusal to restart over a run
+        # it could not adopt, after which the factory is working as before.
+        raise SystemExit(REFUSED if getattr(error, 'retryable', False)
+                         or (isinstance(cause, subprocess.SubprocessError) and '--prepare' in cause.cmd) else 1)

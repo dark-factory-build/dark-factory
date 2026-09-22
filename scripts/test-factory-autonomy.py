@@ -3,6 +3,7 @@ import contextlib
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
 import socket
 import sqlite3
@@ -494,17 +495,65 @@ print(json.dumps({'enabled': bool(target), 'revision': revision}))
             deploy.deploy('a' * 40)
         self.assertFalse(any('on' in call.args[0] for call in run.call_args_list))
 
-    def test_runtime_failure_records_a_safe_receipt(self):
-        def timeout_install(argv, **_kwargs):
-            if Path(argv[1]).name == 'reinstall-service.sh' and '--prepare' not in argv:
-                raise subprocess.TimeoutExpired(argv, 600)
-            return subprocess.CompletedProcess(argv, 0, '', '')
-        with patch.object(deploy, 'state', side_effect=[(True, 4, 0), (False, 5, 0), (False, 5, 0), (False, 5, 0)]), \
-             patch.object(deploy.subprocess, 'run', side_effect=timeout_install), \
-             patch.object(deploy, 'failure_receipt') as receipt:
-            with self.assertRaisesRegex(ValueError, 'dispatch remains off; service_reachable=true'):
-                deploy.deploy('a' * 40)
-        receipt.assert_called_once_with('a' * 40, True)
+    def test_runtime_failure_restores_dispatch_and_records_what_it_left(self):
+        def installer(refuses_restore):
+            def command(argv, **_kwargs):
+                if Path(argv[1]).name == 'reinstall-service.sh' and '--prepare' not in argv:
+                    raise subprocess.TimeoutExpired(argv, 600)
+                if refuses_restore and 'on' in argv:
+                    raise subprocess.CalledProcessError(1, argv, stderr='factoryctl: dispatch revision is stale\n')
+                return subprocess.CompletedProcess(argv, 0, '', '')
+            return command
+        for refuses_restore, restored, note in (
+                (False, True, 'restored so the factory keeps working on the old build'),
+                (True, False, 'remains off')):
+            with self.subTest(refuses_restore=refuses_restore):
+                with patch.object(deploy, 'state', side_effect=[(True, 4, 0), (False, 5, 0), (False, 5, 0), (False, 5, 0)]), \
+                     patch.object(deploy.subprocess, 'run', side_effect=installer(refuses_restore)) as run, \
+                     patch.object(deploy, 'failure_receipt') as receipt:
+                    with self.assertRaisesRegex(ValueError, 'dispatch ' + note + '; service_reachable=true'):
+                        deploy.deploy('a' * 40)
+                receipt.assert_called_once_with('a' * 40, True, restored)
+                self.assertEqual([['on', '--revision', '5']], [call.args[0][-3:] for call in run.call_args_list if 'on' in call.args[0]])
+
+    def test_runtime_failure_leaves_an_untouched_factory_dispatching_and_retryable(self):
+        # The live failure of PR #1045's release: the restart was refused over
+        # a run it could not adopt, after which nothing had been installed.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            home = root / 'factory'
+            (home / 'runtimes').mkdir(parents=True)
+            with sqlite3.connect(home / 'factory.sqlite3') as connection:
+                connection.executescript('CREATE TABLE factory(singleton INTEGER, dispatch_enabled INTEGER, revision INTEGER); CREATE TABLE runs(phase TEXT, id BLOB);')
+                connection.execute('INSERT INTO factory VALUES(1, 1, 4)')
+            (root / 'deploy-runtime.py').write_text(Path(deploy.__file__).read_text())
+            (root / 'reinstall-service.sh').write_text(
+                'case "$*" in *--prepare*) exit 0 ;; esac\n'
+                'echo "refusing: 1 non-adoptable non-terminal run(s)" >&2\nexit 75\n')
+            control = Path(str(home) + '.service/bin/current/factoryctl')
+            control.parent.mkdir(parents=True)
+            control.write_text('#!' + sys.executable + '\n' + r"""
+import os, pathlib, sqlite3, sys
+home = pathlib.Path(os.environ['DARK_FACTORY_OPERATOR_TOKEN_FILE']).parent
+with (home / 'dispatch-calls').open('a') as stream:
+    stream.write(sys.argv[2] + '\n')
+with sqlite3.connect(home / 'factory.sqlite3') as connection:
+    revision = connection.execute('SELECT revision FROM factory').fetchone()[0]
+    assert revision == int(sys.argv[-1])
+    connection.execute('UPDATE factory SET dispatch_enabled=?, revision=?', (int(sys.argv[2] == 'on'), revision + 1))
+""")
+            control.chmod(0o700)
+            result = subprocess.run([sys.executable, str(root / 'deploy-runtime.py'), '--home', str(home), 'a' * 40],
+                                    env=dict(os.environ, HOME=str(root)), capture_output=True, text=True, timeout=15)
+            # 75: no effect to undo, so the release lane may simply try again.
+            self.assertEqual(75, result.returncode, result.stderr)
+            self.assertIn('dispatch restored so the factory keeps working on the old build', result.stderr)
+            self.assertEqual(['off', 'on'], (home / 'dispatch-calls').read_text().split())
+            with sqlite3.connect(home / 'factory.sqlite3') as connection:
+                self.assertEqual(1, connection.execute('SELECT dispatch_enabled FROM factory').fetchone()[0])
+            receipt = json.loads((root / '.dark-factory-backups' / ('deploy-' + 'a' * 40 + '.json')).read_text())
+            self.assertEqual({'sha': 'a' * 40, 'healthy': False, 'dispatch_enabled': True,
+                              'service_reachable': True, 'error': 'deployment_failed'}, receipt)
 
 
 class DeployStageEvidence(unittest.TestCase):

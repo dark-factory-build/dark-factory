@@ -33,7 +33,11 @@ run is adoptable when it is `running` and its runner still publishes
 `runtimes/<run id>/takeover.sock`: the new daemon takes that runner's control
 capability over at boot and the provider never stops. Every other non-terminal
 run — a run still being admitted or finalizing, or an older runner with no
-endpoint — still has to drain. In one coordinated maintenance window, run
+endpoint — still has to drain. A finalizing run is the transient case: its
+runner has already exited and the daemon commits the terminal result on its
+own, so the check waits up to two minutes for it to settle and only then
+refuses. Every refusal here precedes the uninstall and exits 75, so the caller
+knows nothing was installed. In one coordinated maintenance window, run
 `factoryctl dispatch off`, wait for the work that cannot be adopted to drain,
 and keep dispatch off until the reinstall exits and the new service is healthy;
 then run `factoryctl dispatch on`. Binaries land in
@@ -55,6 +59,11 @@ loop uses the same running-plus-endpoint predicate — then calls
 That phase validates the clean exact source and all three binaries’ VCS and
 release identities without compiling or waiting for the compiler lease.
 Preparation does not back up, migrate a browser profile, or alter the service.
+Any failure after the pause turns dispatch back on, so the factory keeps
+working on the old build, and the failure receipt records whether it managed
+to. A failure that left nothing to undo exits 75, and the release lane then
+re-plans that blocked receipt once on its next tick; a blocker that survives
+that attempt still needs an explicit `--retry`.
 
 `scripts/local-ci.sh` runs `scripts/test-reinstall-service.sh` and
 `scripts/test-deploy-site.sh`, which exercise both scripts against fakes.
