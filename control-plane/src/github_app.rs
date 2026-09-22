@@ -8236,12 +8236,20 @@ fn app_jwt_endpoint(url: &str) -> bool {
     // (`.../pulls?x=/installation`), and dot segments are collapsed by the URL
     // parser after this check runs.
     let path = &url[..url.find(['?', '#']).unwrap_or(url.len())];
-    if path.contains("..") {
+    if path == "https://api.github.com/app" {
+        return true;
+    }
+    let Some(path) = path.strip_prefix("https://api.github.com/") else {
+        return false;
+    };
+    if path
+        .split('/')
+        .any(|segment| segment.is_empty() || segment == "..")
+    {
         return false;
     }
-    path == "https://api.github.com/app"
-        || path.starts_with("https://api.github.com/app/installations/")
-        || (path.starts_with("https://api.github.com/repos/") && path.ends_with("/installation"))
+    path.starts_with("app/installations/")
+        || (path.starts_with("repos/") && path.ends_with("/installation"))
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -10569,6 +10577,9 @@ mod tests {
             "https://api.github.com/repos/dark-factory-build/dark-factory/installation"
         ));
         assert!(app_jwt_endpoint(
+            "https://api.github.com/repos/dark-factory-build/a..b/installation"
+        ));
+        assert!(app_jwt_endpoint(
             "https://api.github.com/app/installations/155853844/access_tokens"
         ));
         // Readiness once proved repository identity by fetching this URL with
@@ -10592,7 +10603,7 @@ mod tests {
         ));
         // Dot segments are collapsed by the URL parser after this check runs.
         assert!(!app_jwt_endpoint(
-            "https://api.github.com/app/installations/../../repos/dark-factory-build/dark-factory/pulls"
+            "https://api.github.com/repos/dark-factory-build/../dark-factory/installation"
         ));
         // Userinfo must not be mistaken for the host.
         assert!(!app_jwt_endpoint("https://api.github.com@evil.example/app"));
