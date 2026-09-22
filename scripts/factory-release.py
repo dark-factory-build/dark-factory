@@ -627,6 +627,19 @@ def once(config, number, retry=False):
                 # The hook's own exit status, not its output, says it failed
                 # before any effect: an ordinary --retry or a later release may follow.
                 entry["phase"] = "predeploy"
+                # Keep the hook's last known installed identity with the
+                # receipt.  This lets an operator reconcile a failed prepare
+                # against the journal tip without pretending the target was
+                # installed.
+                unchanged_sha = entry.get("delivery_from_sha")
+                if isinstance(unchanged_sha, str) and SHA.fullmatch(unchanged_sha):
+                    try:
+                        observed = probe(config, unchanged_sha)
+                    except ReleaseError:
+                        observed = None
+                    if (isinstance(observed, dict) and observed.get("sha") == unchanged_sha
+                            and observed.get("healthy") is True):
+                        entry["runtime_unchanged"] = observed
                 clear_unresolved(journal, entry)
             else:
                 record_unresolved(journal, entry, entry["error"])
@@ -682,6 +695,32 @@ def reconcile(config, number, expected, supersede_prs=(), baseline_current=False
             if isinstance(receipt, dict) and receipt.get("state") == "running":
                 if not (unresolved is not None and str(receipt_number) == str(unresolved["pr"])):
                     raise ReleaseError("release journal has an unresolved running deployment")
+        prior_tip = journal.get("live_tip")
+        # A non-destructive deploy hook failure can leave the target blocked
+        # while the runtime remains at the journal's healthy tip.  In that
+        # case the operator-provided SHA proves the target never landed; do
+        # not require it to equal the blocked PR's merge SHA.
+        if (entry is not None and entry.get("state") == "blocked"
+                and entry.get("phase") == "predeploy"
+                and (matching_unresolved or unresolved is None)
+                and isinstance(prior_tip, dict) and prior_tip.get("healthy") is True
+                and prior_tip.get("sha") == expected):
+            try:
+                value = probe(config, expected)
+            except ReleaseError as exc:
+                raise ReleaseError("live probe did not prove the expected healthy SHA") from exc
+            if value.get("sha") != expected or value.get("healthy") is not True:
+                raise ReleaseError("live probe did not prove the expected healthy SHA")
+            entry["state"] = "blocked"
+            entry["phase"] = "predeploy"
+            entry["runtime_unchanged"] = {"sha": expected, "healthy": True}
+            entry["reconciliation"] = {"mode": "operator_observed", "observed_sha": expected,
+                                         "runtime_unchanged": True}
+            entry["updated_at"] = int(time.time())
+            record_live_tip(journal, prior_tip)
+            clear_unresolved(journal, entry)
+            atomic_json(journal_path, journal)
+            return entry
         pr, default, reviews, checks = gh_snapshot(config, number)
         sha = pr.get("mergeCommitSha")
         reviewed_merge_gate(pr, reviews, checks, config, sha)
@@ -693,7 +732,6 @@ def reconcile(config, number, expected, supersede_prs=(), baseline_current=False
         value = probe(config, expected)
         if value.get("sha") != expected or value.get("healthy") is not True:
             raise ReleaseError("live probe did not prove the expected healthy SHA")
-        prior_tip = journal.get("live_tip")
         previous = prior_tip.get("sha") if isinstance(prior_tip, dict) else None
         included_pull_requests = []
         if (isinstance(entry, dict) and entry.get("sha") == expected
