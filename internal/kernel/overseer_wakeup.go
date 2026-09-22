@@ -75,8 +75,8 @@ func (store *Store) EnqueueOverseerWakeups(ctx context.Context, at UnixMillis) (
 			continue
 		}
 		// A missing cursor is the one initial inspection for a newly enabled
-		// rule. Worker events retain targeted context; an unchanged unfinished
-		// backlog gets a full reconciliation after the same quiet interval.
+		// rule. Worker events retain targeted context; an unchanged backlog is
+		// deliberately quiet so a standing overseer cannot become a paid poll.
 		fullReconciliation := !found || cursor < factory.Floor.Int64()-1
 		var targets []TaskID
 		if !fullReconciliation {
@@ -84,13 +84,6 @@ func (store *Store) EnqueueOverseerWakeups(ctx context.Context, at UnixMillis) (
 			if err != nil {
 				return nil, tx.Rollback(err)
 			}
-		}
-		if !fullReconciliation && len(targets) == 0 {
-			var unfinished bool
-			if err := tx.connection.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM tasks WHERE project_id = ? AND status IN ('queued', 'running', 'blocked', 'failed'))`, agent.ProjectID.Bytes()).Scan(&unfinished); err != nil {
-				return nil, tx.Rollback(err)
-			}
-			fullReconciliation = unfinished
 		}
 		publicationTargets, err := unpublishedPublicationTargets(ctx, tx.connection, agent.ProjectID, agent.ID, at.Int64())
 		if err != nil {

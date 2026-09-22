@@ -171,6 +171,7 @@ grep -q 'reachable code-path evidence' "$args" || fail "prompt does not require 
 grep -q 'current implementation and its existing guards' "$args" || fail "prompt does not require inspecting existing guards"
 grep -q 'documented threat model' "$args" || fail "prompt does not require inspecting the threat model"
 grep -q 'deferred note, not a block' "$args" || fail "prompt does not demote unproven concerns"
+grep -q 'Screenshots are illustrative only and never blocking evidence' "$args" || fail "prompt does not demote screenshot provenance"
 # The session must not run inside the checkout, whose CLAUDE.md, AGENTS.md
 # or .claude directory would otherwise become its own instructions.
 case "$(sed -n 's/^cwd=//p' "$args")" in

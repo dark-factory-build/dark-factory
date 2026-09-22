@@ -628,10 +628,7 @@ func authenticateAttempt(ctx context.Context, connection *sql.Conn, digest Attem
 	if err != nil {
 		return AttemptAuthority{}, err
 	}
-	effectiveTask := relationships.task.Body
-	if run.Provider != ProviderShell && effectiveTask == "" {
-		effectiveTask = relationships.task.Title
-	}
+	effectiveTask := EffectiveTaskText(run.Provider, relationships.task.Title, relationships.task.Body)
 	var currentChangeRevision *Revision
 	var baseCommit []byte
 	if relationships.change != nil {
