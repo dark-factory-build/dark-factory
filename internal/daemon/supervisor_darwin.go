@@ -12,6 +12,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 	"unicode/utf8"
@@ -1248,21 +1249,25 @@ func kernelProcessExit(exit runner.Exit, at kernel.UnixMillis) (kernel.ProcessEx
 // one durable free-form field a failed run carries, it survives to terminal,
 // and it was storing a constant while the cause was discarded.
 func failureDetail(cause error) string {
-	if cause == nil {
-		return "daemon attempt failure"
+	// Every invalid byte run becomes one replacement rune, so an invalid
+	// cause of any length stays readable; the byte bound then cuts on a rune
+	// boundary so the stored prefix is itself valid. A nil or blank cause
+	// still names the failure, so a failed run never carries an empty detail.
+	detail := ""
+	if cause != nil {
+		detail = strings.ToValidUTF8(cause.Error(), "\uFFFD")
 	}
-	detail := cause.Error()
+	if strings.TrimSpace(detail) == "" {
+		return fmt.Sprintf("run failed without a cause (%T)", cause)
+	}
 	if len(detail) <= maxFailureDetailBytes {
 		return detail
 	}
-	// The bound is on bytes, so the cut can land inside a rune. Drop bytes off
-	// the end until what remains decodes, rather than storing a truncated
-	// encoding in a column that is meant to be readable.
-	detail = detail[:maxFailureDetailBytes]
-	for len(detail) > 0 && !utf8.ValidString(detail) {
-		detail = detail[:len(detail)-1]
+	cut := maxFailureDetailBytes
+	for !utf8.RuneStart(detail[cut]) {
+		cut--
 	}
-	return detail
+	return detail[:cut]
 }
 
 const maxFailureDetailBytes = 4096

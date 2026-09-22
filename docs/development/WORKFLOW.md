@@ -4,7 +4,8 @@ This is a reference for local development, checks, releases, and installation.
 
 ## Local development
 
-The worktree helper creates a branch and checkout without contacting a remote:
+The worktree helper fetches the configured origin default branch before creating
+the branch and checkout:
 
 ```sh
 ./scripts/new-worktree.sh <slug>

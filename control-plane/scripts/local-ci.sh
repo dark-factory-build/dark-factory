@@ -5,6 +5,21 @@ script_dir=$(CDPATH='' cd -- "$(dirname "$0")" && pwd)
 repo_root=$(CDPATH='' cd -- "$script_dir/.." && pwd)
 cd "$repo_root"
 
+require_tool() {
+    tool=$1
+    command -v "$tool" >/dev/null 2>&1 || {
+        echo "control-plane local-ci: $tool is unavailable; add Rustup's .cargo/bin to factoryd --tool-path and the account's .rustup directory to --toolchain-read-roots" >&2
+        exit 1
+    }
+}
+
+require_tool cargo
+require_tool rustup
+if ! cargo +1.88.0 fmt --version >/dev/null 2>&1; then
+    echo "control-plane local-ci: Rust toolchain 1.88.0 with rustfmt is unavailable; install it and grant its Rustup roots through factoryd --tool-path/--toolchain-read-roots" >&2
+    exit 1
+fi
+
 if find . -maxdepth 1 -type f \( -name '.env*' -o -name '.dev.vars*' \) | grep -q .; then
     echo "local environment files are forbidden in the control-plane tree" >&2
     exit 1

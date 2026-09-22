@@ -147,7 +147,11 @@ a release waits for productive runs to drain. Use the controller for scheduled w
 hooks are operator tools.
 Each tick writes a mode-0600 `.autonomy.json` health receipt beside the intake
 journal, containing component names, finite status codes, and fixed source-refresh refusal details for bounded
-automation health diagnostics.
+automation health diagnostics. A status code alone names no cause, so each
+failing component also prints one line to the controller's own log (its launchd
+`StandardErrorPath`): the component name, that status code, and a bounded,
+single-line tail of the component's stderr with labelled credentials and GitHub
+tokens starred. The durable receipt itself still retains no child output.
 For private repositories, optionally set `review_mirror_root` to an existing
 bare mirror at `ROOT/OWNER/REPOSITORY` whose `origin` is the configured HTTPS
 GitHub repository. Create it with `git clone --bare https://github.com/OWNER/REPOSITORY ROOT/OWNER/REPOSITORY` so it retains base history. The host fetches only the base and `refs/pull/N/head` into
@@ -175,6 +179,11 @@ wake the configured overseer to enqueue or return findings to the original task.
 A blocked review is a completed review, not an infrastructure failure. The host
 must reconcile an unresolved launch before explicitly authorizing another; do
 not erase the attempted marker to retry an ambiguous submission.
+Before that review the pass runs the repository's own full gate on the exact
+head and keeps its receipt. A nonzero gate status sends the source task back;
+the bounded wrapper's own statuses (64 refused arguments, 125..127 supervisor or
+exec failure) mean no gate ran, so they are reported as a host blocker on the
+controller's log, journal no gate verdict, and are gated again next pass.
 
 Bind the controller config to the actual `factory_home`, `project_id`,
 `overseer_agent_id`, external `journal`, and verified `review_mirror_root`; its

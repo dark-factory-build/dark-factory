@@ -49,6 +49,14 @@ class DeliveryFixtures(unittest.TestCase):
         with mock.patch.object(delivery, "load_intake", return_value=self.intake), self.assertRaisesRegex(ValueError, "source mapping"):
             delivery.deliver(self.config, {"repository": "example/factory"}, self.receipt)
 
+    def test_unchanged_reverification_keeps_membership_without_a_second_sweep(self):
+        # The release journal retains delivery_sources across re-verification
+        # of the same tip; that is not a baseline error and enqueues nothing.
+        self.receipt.update({"delivery_mode": "unchanged"})
+        with mock.patch.object(delivery, "load_intake", return_value=self.intake):
+            self.assertEqual(delivery.deliver(self.config, {"repository": "example/factory"}, self.receipt), [])
+        self.assertEqual(self.enqueued, [])
+
     def test_baseline_has_no_delivery_sweep(self):
         self.receipt.update({"delivery_mode": "baseline_current", "delivery_sources": []})
         with mock.patch.object(delivery, "load_intake", return_value=self.intake):
