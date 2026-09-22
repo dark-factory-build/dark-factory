@@ -17,6 +17,7 @@ import (
 type publicReviewBackend struct {
 	killed, submitAmbiguous    bool
 	reviews, submits, enqueues int
+	journal                    map[string]string
 }
 
 func (b *publicReviewBackend) CloneReadOnly(context.Context, review.Request) (string, func(), error) {
@@ -29,15 +30,30 @@ func (b *publicReviewBackend) Review(context.Context, string, review.Request) (r
 	}
 	return review.Verdict{Event: "ALLOW", Body: "fixture allow"}, nil
 }
-func (b *publicReviewBackend) Submit(context.Context, review.Operation, review.Verdict) error {
+func (b *publicReviewBackend) Submit(_ context.Context, operation review.Operation, _ review.Verdict) error {
 	b.submits++
+	if err := b.record("submit_pull_request_review", operation.ID); err != nil {
+		return err
+	}
 	if b.submitAmbiguous {
 		return errors.New("submit timeout after Maintainer write")
 	}
 	return nil
 }
-func (b *publicReviewBackend) Enqueue(context.Context, review.Operation) error {
+func (b *publicReviewBackend) Enqueue(_ context.Context, operation review.Operation) error {
 	b.enqueues++
+	return b.record("enqueue_pull_request", operation.EnqueueID)
+}
+
+func (b *publicReviewBackend) record(kind, id string) error {
+	if b.journal == nil {
+		b.journal = map[string]string{}
+	}
+	// The Maintainer journal binds one UUID to one operation kind.
+	if previous, exists := b.journal[id]; exists && previous != kind {
+		return errors.New("journal rejected operation UUID reuse")
+	}
+	b.journal[id] = kind
 	return nil
 }
 
@@ -56,7 +72,7 @@ func TestPublicReviewPathPersistsKilledProviderFailureAndRetries(t *testing.T) {
 	backend.killed = false
 	retry := api.IntakeInput{Action: "review_pr", ProjectID: project.String(), ReviewRequest: &api.ReviewRequest{RetryOperation: op.ID}}
 	result := fixture.daemon.Intake(context.Background(), retry)
-	if result.State != "ok" || backend.reviews != 2 || backend.submits != 1 || backend.enqueues != 1 {
+	if result.State != "ok" || backend.reviews != 2 || backend.submits != 1 || backend.enqueues != 1 || len(backend.journal) != 2 {
 		t.Fatalf("retry result=%+v operation=%+v backend=%+v", result, lastDurableReview(t, fixture.store, project), backend)
 	}
 }
