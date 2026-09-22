@@ -55,6 +55,7 @@ test("merged work waits for the daemon's configured destination fact", () => {
   assert.equal(incomplete.deliveryDestinationsObserved, false);
   assert.equal(incomplete.completed, false);
   assert.match(incomplete.nextAction, /delivery verification is pending/);
+  assert.deepEqual(productionStickers(incomplete).slice(-1), ["Delivery pending"]);
 });
 
 test("closed unmerged work is distinct from merged work", () => {

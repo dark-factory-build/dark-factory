@@ -188,7 +188,7 @@ export function productionStickers(item: ProductionContraption): string[] {
   else if (pr.merge_queue && !["none", "unknown"].includes(pr.merge_queue)) result.push("Merge queued");
   const destination = latestDestinations(item.deliveries);
   const configured = item.deliveryDestinations ?? [];
-  if (configured.length > 0 || destination.length > 0) result.push(configured.length > 0 && configured.some((name) => !destination.some((delivery) => delivery.destination === name && delivery.verified)) || destination.some((delivery) => !delivery.verified) ? "Delivery pending" : "Delivery passed");
+  if (configured.length > 0 || destination.length > 0) result.push(configured.length > 0 && (item.deliveryDestinationsObserved === false || configured.some((name) => !destination.some((delivery) => delivery.destination === name && delivery.verified))) || destination.some((delivery) => !delivery.verified) ? "Delivery pending" : "Delivery passed");
   return result;
 }
 
