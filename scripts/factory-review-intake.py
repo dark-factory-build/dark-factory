@@ -941,7 +941,7 @@ def run_locked(config, path, journal, journal_path, managed=None):
             followup = review_followup(config, operation, state)
             if intake.task_state(config, followup) is None and enqueue_followup(config, followup, pr, journal, managed):
                 messages.append("woke PR #" + str(pr["number"]) + " review " + state)
-        except ReviewError as exc:
+        except (ReviewError, intake.IntakeError) as exc:
             # One pull request's host failure must not starve the others;
             # the tick still fails closed with every blocker named.
             failures.append("PR #" + str(pr["number"]) + ": " + str(exc))

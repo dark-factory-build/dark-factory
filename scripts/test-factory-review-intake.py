@@ -401,7 +401,7 @@ class ReviewIntakeTest(unittest.TestCase):
              patch.object(review, 'launch_review', return_value=1) as launch, \
              patch.object(review.intake, 'task_state', side_effect=[None, {'status': 'queued'}]), \
              patch.object(review.intake, 'enqueue', side_effect=review.intake.IntakeError('lost response')) as enqueue:
-            with self.assertRaises(review.intake.IntakeError):
+            with self.assertRaisesRegex(review.ReviewError, 'PR #9: lost response'):
                 review.run_once(self.config)
             self.assertEqual([], review.run_once(self.config))
         self.assertEqual(1, launch.call_count)
@@ -790,8 +790,9 @@ class ReviewIntakeTest(unittest.TestCase):
         with patch.object(review, 'mirror', return_value=bare), patch.object(review, 'list_prs', return_value=prs), \
              patch.object(review, 'ready', side_effect=[dict(first), dict(second)]), patch.object(review, 'verify_existing'), \
              patch.object(review, 'run_full_gate', side_effect=[review.ReviewError('host gate exploded'), evidence]), \
-             patch.object(review, 'send_back_source_task', side_effect=review.ReviewError('original source task is unavailable')), \
-             patch.object(review, 'launch_review', return_value=0) as launch, patch.object(review.intake, 'enqueue'):
+             patch.object(review, 'send_back_source_task', side_effect=review.intake.IntakeError('original source task is unavailable')), \
+             patch.object(review, 'launch_review', return_value=0) as launch, patch.object(review.intake, 'enqueue'), \
+             patch.object(review.intake, 'task_state', return_value=None):
             with self.assertRaisesRegex(review.ReviewError, 'PR #9: original source task is unavailable'):
                 review.run_once(self.config)
         # The second pull request still reached its review launch.
@@ -822,7 +823,7 @@ class ReviewIntakeTest(unittest.TestCase):
              patch.object(review, 'list_prs', return_value=[{'number': 9, 'headRefOid': SHA, 'body': SHA + '\nRefs #7'}]), \
              patch.object(review, 'verify_existing'), patch.object(review, 'run_full_gate', return_value=fresh) as gate, \
              patch.object(review, 'send_back_source_task') as send_back, patch.object(review, 'launch_review', return_value=0) as launch, \
-             patch.object(review.intake, 'enqueue'):
+             patch.object(review.intake, 'enqueue'), patch.object(review.intake, 'task_state', return_value=None):
             review.run_once(self.config)
         self.assertEqual(1, gate.call_count)
         send_back.assert_not_called()
