@@ -942,10 +942,10 @@ class ReviewIntakeTest(unittest.TestCase):
         receipt = Path(self.temp.name) / 'body.gate.json'
         receipt.with_suffix('.log').write_text(
             'react-test-renderer is deprecated\nok  \tinternal/kernel\t1.0s\n'
-            '--- FAIL: TestAttemptRunnerSubmitsTheStartupPrompt (5.25s)\nFAIL\tinternal/runner\t58s\n'
+            '--- FAIL: TestAttemptRunnerSubmitsTheStartupPrompt (5.25s)\n    --- FAIL: TestParent/child (0.01s)\n--- FAIL: TestParent (0.02s)\nFAIL\tinternal/runner\t58s\n'
             'FAIL: test_conflicting_pull (__main__.ReviewIntakeTest)\nERROR: test_lineage (__main__.ReviewIntakeTest)\n')
         note = review.gate_failure_note(receipt, self.operation)
-        self.assertEqual('pre-review full gate failed: tests=TestAttemptRunnerSubmitsTheStartupPrompt, test_conflicting_pull, test_lineage. Exact head ' + SHA + '.', note)
+        self.assertEqual('pre-review full gate failed: tests=TestAttemptRunnerSubmitsTheStartupPrompt, TestParent/child, TestParent, test_conflicting_pull, test_lineage. Exact head ' + SHA + '.', note)
 
     def test_send_back_without_a_routable_task_keeps_the_note_on_the_receipt(self):
         operation = dict(self.operation)
