@@ -545,9 +545,9 @@ def _source_task_id(config, operation):
         with sqlite3.connect(Path(config["factory_home"], "factory.sqlite3").as_uri() + "?mode=ro", uri=True) as connection:
             # The publishing overseer task is bound too, without a Change;
             # the worker that owns the Change is the one to correct it.
-            row = connection.execute("SELECT lower(hex(task_id)) FROM publication_tasks WHERE repository = ? AND pull_number = ? "
+            row = connection.execute("SELECT lower(hex(task_id)) FROM publication_tasks WHERE project_id = ? AND lower(repository) = lower(?) AND pull_number = ? "
                                      "ORDER BY (change_id IS NOT NULL) DESC, created_at_ms DESC, lower(hex(task_id)) LIMIT 1",
-                                     (config["repository"], number)).fetchone()
+                                     (bytes.fromhex(config["project_id"]), config["repository"], number)).fetchone()
     except sqlite3.Error:
         return ""
     return row[0] if row and intake.ID_RE.fullmatch(row[0]) else ""
