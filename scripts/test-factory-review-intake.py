@@ -113,6 +113,36 @@ class ReviewIntakeTest(unittest.TestCase):
             with patch.object(review.intake, 'command', return_value=json.dumps({'number': 10, 'head': {'sha': SHA}})):
                 review.refresh_mergeability(self.config, 9, SHA)
 
+    def test_customer_listing_head_and_exact_mergeability_head_race_refuses_the_listed_head(self):
+        # Listed head A, exact read head B: B's mergeability must never authorize A.
+        self.mergeability_patch.stop()
+        (Path(self.config['factory_home']) / 'maintainer.json').write_text('{"id":"fixture"}')
+        request = {'source_id': 'a' * 32, 'project_id': self.config['project_id'],
+                   'configuration': {'repository': 'o/r', 'target_repository_id': 'b' * 32},
+                   'legacy': {'plan_hash': 'c' * 64, 'config_hash': 'd' * 64, 'journal_hash': 'e' * 64}}
+        controller = Mock()
+        managed = controller, {'request': request}, Path('/installed/factoryctl')
+        listed = {'number': 9, 'body': 'Reviewed publication ' + SHA + '\n\nRefs o/r#7', 'head_sha': SHA, 'base_sha': 'b' * 40, 'base_ref': 'main'}
+        exact = dict(listed, head_sha='f' * 40, mergeable=True, merge_state_status='CLEAN')
+        def api(_binary, _home, _args, value):
+            if value['action'] == 'legacy_lineage':
+                return {'state': 'legacy_existing_work', 'task_id': 'd' * 32}
+            item = value['review']; tool = item['tool']
+            if tool == 'configuration':
+                return {'state': 'ok', 'review': {'repository': 'delivery/target', 'repository_id': 42}}
+            self.assertEqual('list_pull_requests', tool)
+            result = {'pull_requests': [exact if item.get('pull_number') == 9 else listed], 'repository_id': 42, 'next_page': None}
+            return {'state': 'ok', 'review': {'repository': 'delivery/target', 'repository_id': 42, 'response': json.dumps({'jsonrpc': '2.0', 'id': 1, 'result': {'structuredContent': result, 'isError': False}})}}
+        controller.managed_api.side_effect = api
+        def git(argv, **_kwargs):
+            return (SHA if argv[-1].startswith('refs/pull/') else 'b' * 40) if 'rev-parse' in argv else ''
+        with patch.object(review, 'bridge_call', side_effect=CUSTOMER_BRIDGE), patch.object(review, 'mirror', return_value=Path('/mirror')), \
+             patch.object(review.intake, 'command', side_effect=git), patch.object(review, 'launch_review') as launch, \
+             patch.object(review.intake, 'task_state', return_value=None), patch.object(review.intake, 'enqueue'):
+            with self.assertRaisesRegex(review.ReviewError, 'PR #9: pull request head moved from ' + SHA + ' to ' + 'f' * 40):
+                review.run_once(self.config, managed)
+        launch.assert_not_called()
+
     def test_unknown_mergeability_stops_review(self):
         with self.assertRaisesRegex(review.ReviewError, 'mergeability is unresolved'):
             review.require_mergeable({'mergeable': None, 'mergeStateStatus': 'UNKNOWN'})

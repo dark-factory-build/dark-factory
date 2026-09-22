@@ -186,13 +186,7 @@ def list_prs(config, page=1):
                 if type(item.get('mergeable')) is not bool or not isinstance(item.get('merge_state_status'), str):
                     raise ReviewError('customer pull request mergeability is invalid')
                 normalized_item.update(mergeable=item['mergeable'], mergeStateStatus=item['merge_state_status'].upper())
-            else:
-                detail = bridge_call('list_pull_requests', {'page': 1, 'pull_number': item['number']}).get('structuredContent')
-                detail_pulls = detail.get('pull_requests') if isinstance(detail, dict) else None
-                if isinstance(detail_pulls, list) and len(detail_pulls) == 1:
-                    detail_item = detail_pulls[0]
-                    if type(detail_item.get('mergeable')) is bool and isinstance(detail_item.get('merge_state_status'), str):
-                        normalized_item.update(mergeable=detail_item['mergeable'], mergeStateStatus=detail_item['merge_state_status'].upper())
+            # A listing without mergeability is read exactly, bound to this listed head, by refresh_mergeability.
             normalized.append(normalized_item)
         return normalized
     batch = discovery_batch_size(config)
