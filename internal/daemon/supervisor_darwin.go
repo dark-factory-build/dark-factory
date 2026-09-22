@@ -15,6 +15,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/dark-factory-build/dark-factory/internal/change"
 	"github.com/dark-factory-build/dark-factory/internal/changeworker"
@@ -1157,14 +1158,18 @@ func failureDetail(cause error) string {
 	if cause == nil {
 		return "daemon attempt failure"
 	}
-	detail := cause.Error()
+	// Every invalid byte run becomes one replacement rune, so an invalid
+	// cause of any length stays readable and non-empty; the byte bound then
+	// cuts on a rune boundary so the stored prefix is itself valid.
+	detail := strings.ToValidUTF8(cause.Error(), "\uFFFD")
 	if len(detail) <= maxFailureDetailBytes {
 		return detail
 	}
-	// The bound is on bytes, so the cut can land inside a rune. Sanitize the
-	// bounded prefix itself: validity is not a property of the tail, and an
-	// invalid byte near the beginning must not discard the diagnosis after it.
-	return strings.ToValidUTF8(detail[:maxFailureDetailBytes], "")
+	cut := maxFailureDetailBytes
+	for !utf8.RuneStart(detail[cut]) {
+		cut--
+	}
+	return detail[:cut]
 }
 
 const maxFailureDetailBytes = 4096

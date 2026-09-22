@@ -194,4 +194,23 @@ func TestFailureDetailTruncatesWholeRunes(t *testing.T) {
 	if failureDetail(short) != "kept whole" {
 		t.Fatalf("a short cause was altered: %q", failureDetail(short))
 	}
+	// Invalid input of any length must persist as valid, non-empty UTF-8 the
+	// kernel accepts and the operator can read.
+	for name, raw := range map[string]string{
+		"short invalid":          string([]byte{0xff, 0xfe}),
+		"long invalid":           strings.Repeat(string([]byte{0xff}), 2*maxFailureDetailBytes),
+		"long invalid with text": strings.Repeat("x"+string([]byte{0xc0}), maxFailureDetailBytes),
+		"multibyte cut at bound": strings.Repeat("😀", maxFailureDetailBytes),
+	} {
+		detail := failureDetail(errors.New(raw))
+		if detail == "" || !utf8.ValidString(detail) || len(detail) > maxFailureDetailBytes {
+			t.Fatalf("%s: detail=%q valid=%t len=%d", name, detail, utf8.ValidString(detail), len(detail))
+		}
+		if _, err := kernel.NewFailureProposal(kernel.FailureInternal, detail); err != nil {
+			t.Fatalf("%s: kernel rejected the detail: %v", name, err)
+		}
+	}
+	if detail := failureDetail(errors.New(strings.Repeat("x"+string([]byte{0xc0}), maxFailureDetailBytes))); !strings.HasPrefix(detail, "x\uFFFDx\uFFFD") {
+		t.Fatalf("long invalid cause lost its readable prefix: %q", detail[:16])
+	}
 }
