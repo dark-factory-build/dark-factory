@@ -4,6 +4,7 @@ import fcntl
 import sys
 import json
 import tempfile
+import sqlite3
 import subprocess
 import shutil
 import os
@@ -978,6 +979,28 @@ class ReviewIntakeTest(unittest.TestCase):
             'FAIL: test_conflicting_pull (__main__.ReviewIntakeTest)\nERROR: test_lineage (__main__.ReviewIntakeTest)\n')
         note = review.gate_failure_note(receipt, self.operation)
         self.assertEqual('pre-review full gate failed: tests=TestAttemptRunnerSubmitsTheStartupPrompt, TestParent/child, TestParent, test_conflicting_pull, test_lineage. Exact head ' + SHA + '.', note)
+
+    def test_send_back_routes_a_published_pull_request_to_its_bound_task(self):
+        # No intake issue for this PR, but the daemon's publication binding names the worker task.
+        bound = 'f' * 32
+        with sqlite3.connect(Path(self.config['factory_home']) / 'factory.sqlite3') as connection:
+            connection.execute('CREATE TABLE publication_tasks (project_id BLOB, repository TEXT, pull_number INTEGER, task_id BLOB, change_id BLOB, created_at_ms INTEGER)')
+            # The overseer's publish task is bound at the same instant, without a Change;
+            # another project's binding for the same repository and number is not ours;
+            # the daemon stores the repository lowercase whatever the configuration's case.
+            project = bytes.fromhex(self.config['project_id'])
+            connection.execute('INSERT INTO publication_tasks VALUES (?, ?, ?, ?, NULL, ?)', (project, 'o/r', 9, bytes.fromhex('a' * 32), 5))
+            connection.execute('INSERT INTO publication_tasks VALUES (?, ?, ?, ?, ?, ?)', (b'\x09' * 16, 'o/r', 9, bytes.fromhex('b' * 32), b'\x03' * 16, 9))
+            connection.execute('INSERT INTO publication_tasks VALUES (?, ?, ?, ?, ?, ?)', (project, 'o/r', 9, bytes.fromhex(bound), b'\x02' * 16, 5))
+        operation = dict(self.operation, source_marker='o/r#404')
+        with patch.object(review.intake, 'command') as command:
+            review.send_back_source_task(dict(self.config, repository='O/R'), operation, 'note')
+        self.assertEqual(['factoryctl', 'task', 'send-back', '--task', bound, '--note', 'note'], command.call_args.args[0])
+        self.assertNotIn('send_back_unroutable', operation)
+        # A PR the daemon never published stays unroutable.
+        with patch.object(review.intake, 'command') as command:
+            review.send_back_source_task(self.config, dict(self.operation, pr=10, source_marker='o/r#404'), 'note')
+        command.assert_not_called()
 
     def test_send_back_without_a_routable_task_keeps_the_note_on_the_receipt(self):
         operation = dict(self.operation)

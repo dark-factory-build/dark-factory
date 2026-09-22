@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import sqlite3
 import stat
 import subprocess
 import tempfile
@@ -533,7 +534,23 @@ def _source_task_id(config, operation):
             return record["operation"]["task_id"]
         if isinstance(fingerprint, str) and fingerprint:
             return intake.sha_id("source", marker, fingerprint)
-    return ""
+    # An operator-created Change has no intake issue, but the daemon binds
+    # every pull request it publishes to the task that produced it. Without
+    # this, every finding on a worker's PR was journaled as unroutable and
+    # nobody acted on it (22 Sep 2026).
+    number = operation.get("pr")
+    if type(number) is not int:
+        return ""
+    try:
+        with sqlite3.connect(Path(config["factory_home"], "factory.sqlite3").as_uri() + "?mode=ro", uri=True) as connection:
+            # The publishing overseer task is bound too, without a Change;
+            # the worker that owns the Change is the one to correct it.
+            row = connection.execute("SELECT lower(hex(task_id)) FROM publication_tasks WHERE project_id = ? AND lower(repository) = lower(?) AND pull_number = ? "
+                                     "ORDER BY (change_id IS NOT NULL) DESC, created_at_ms DESC, lower(hex(task_id)) LIMIT 1",
+                                     (bytes.fromhex(config["project_id"]), config["repository"], number)).fetchone()
+    except sqlite3.Error:
+        return ""
+    return row[0] if row and intake.ID_RE.fullmatch(row[0]) else ""
 
 
 def merge_failure_note(config, operation):
