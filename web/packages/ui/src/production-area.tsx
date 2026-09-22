@@ -4,7 +4,7 @@ import { productionStickers, type ProductionContraption } from "./production-vie
 
 export const productionColumns = (width: number) => Math.max(1, Math.min(4, Math.floor(width / 160)));
 export const sharedChecks = (items: readonly ProductionContraption[]) => [...new Map(items.filter((item) => item.pullRequest?.state !== "merged").flatMap((item) => item.checks.filter((check) => check.applicable || check.scope === "merge_group").map((check) => [`${check.repository}:${check.id}`, check] as const))).values()];
-export const productionHeight = (width: number, count: number, _checks = 0) => 68 + Math.ceil(count / productionColumns(width)) * 132 + 48;
+export const productionHeight = (width: number, count: number, checks = 0) => 68 + Math.ceil(count / productionColumns(width)) * 132 + Math.ceil(checks / productionColumns(width)) * 104 + 48;
 export type ProductionRoomRect = Readonly<{ x: number; y: number; width: number; height: number }>;
 export const productionConnector = (upper: ProductionRoomRect, lower: ProductionRoomRect) => {
   const width = Math.min(32, upper.width, lower.width);
@@ -20,10 +20,10 @@ export function ProductionArea({ items, hiddenItems = 0, width, top, pulse, onSe
   onSelect: (id: string) => void; selected?: string; upperRoom: ProductionRoomRect;
 }) {
   const columns = productionColumns(width), cell = width / columns;
-  const reviewMotion = useRef(new Map<string, { reviewer: ProductionContraption["reviewers"][number]; at: number; running: boolean }>());
   const lowerRoom = { x: 8, y: top + 8, width: width - 16, height: productionHeight(width, items.length) - 16 };
   const connector = productionConnector(upperRoom, lowerRoom), localConnector = { ...connector, y: connector.y - top };
   const openingEnd = connector.x + connector.width;
+  const reviewMotion = useRef(new Map<string, { reviewer: ProductionContraption["reviewers"][number]; at: number; running: boolean }>());
   return <g transform={`translate(0 ${top})`} role="group" aria-label="Production area">
     <rect {...localConnector} fill="url(#df-floor)" />
     <rect {...lowerRoom} y={lowerRoom.y - top} fill="url(#df-floor)" />

@@ -169,6 +169,28 @@ class ProductionFixtures(unittest.TestCase):
         self.assertEqual(result["delivery_destinations"], [])
         self.assertTrue(result["delivery_destinations_observed"])
 
+    def test_mixed_release_configuration_preserves_unknown_destination_observation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            release_journal = root / "release-journal.json"
+            release_journal.write_text(json.dumps({"version": 1, "releases": {}}))
+            release_config = root / "release.json"
+            release_config.write_text(json.dumps({"repository": "o/r", "journal": str(release_journal), "destination": "production"}))
+            config = {"repository": "o/r", "project_id": "1" * 32, "overseer_agent_id": "2" * 32,
+                      "label": "factory:ready", "allowed_authors": ["owner"], "factory_home": "/tmp/factory",
+                      "journal": str(root / "intake.json"), "release_configs": [str(release_config), str(root / "unreadable.json")]}
+            def github(repository, endpoint):
+                if endpoint.endswith("/pulls?state=open&per_page=100") or endpoint.endswith("/pulls?state=closed&sort=updated&direction=desc&per_page=100"):
+                    return []
+                if endpoint.endswith("/actions/runs?per_page=100"):
+                    return {"workflow_runs": []}
+                self.fail(endpoint)
+            with mock.patch.object(production, "host_config", return_value=config), mock.patch.object(production, "github", side_effect=github):
+                result = production.collect(config)
+        self.assertEqual(result["delivery_destinations"], ["production"])
+        self.assertFalse(result["delivery_destinations_observed"])
+        self.assertIn("release_config", result["unavailable"])
+
     def test_running_reviewer_requires_matching_live_sidecar_identity(self):
         with tempfile.TemporaryDirectory() as directory:
             journal = Path(directory) / "intake.json"

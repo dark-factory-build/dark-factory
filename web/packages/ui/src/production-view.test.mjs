@@ -46,6 +46,15 @@ test("merged work waits for the daemon's configured destination fact", () => {
   assert.equal(unknown.deliveryDestinationsObserved, false);
   assert.equal(unknown.completed, false);
   assert.doesNotMatch(unknown.nextAction, /no delivery destination/);
+  const incomplete = deriveProductionView([
+    record("repository", "owner/repo", "", { delivery_destinations: ["production"], delivery_destinations_observed: false }),
+    record("pull_request", "7", "change:1", { ...base, destination: undefined }),
+    record("delivery", "deploy-site", "", { destination: "production", revision: base.merge, state: "verified", verified_at: 20, pull_requests: [7] }),
+  ], Date.now()).contraptions[key];
+  assert.deepEqual(incomplete.deliveryDestinations, ["production"]);
+  assert.equal(incomplete.deliveryDestinationsObserved, false);
+  assert.equal(incomplete.completed, false);
+  assert.match(incomplete.nextAction, /delivery verification is pending/);
 });
 
 test("closed unmerged work is distinct from merged work", () => {

@@ -116,6 +116,37 @@ func TestProductionObservationPersistsConfiguredDeliveryDestinations(t *testing.
 	t.Fatal("repository projection missing")
 }
 
+func TestProductionObservationPreservesIncompleteDeliveryConfiguration(t *testing.T) {
+	store, _, project, _ := newAdmissionStore(t, RoleOrchestrator, 2)
+	defer store.Close()
+	if err := store.RecordProductionObservation(context.Background(), project.ID, ProductionObservation{
+		Repository: "example/factory", ObservedAt: 10, DeliveryDestinations: []string{"production"}, DeliveryDestinationsObserved: false,
+	}, mustTime(t, 10)); err != nil {
+		t.Fatal(err)
+	}
+	page, err := store.Production(context.Background(), project.ID, 0, 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, record := range page.Records {
+		if record.Kind != "repository" {
+			continue
+		}
+		var document struct {
+			DeliveryDestinations         []string `json:"delivery_destinations"`
+			DeliveryDestinationsObserved bool     `json:"delivery_destinations_observed"`
+		}
+		if err := json.Unmarshal(record.Document, &document); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(document.DeliveryDestinations, []string{"production"}) || document.DeliveryDestinationsObserved {
+			t.Fatalf("incomplete destination fact = %+v", document)
+		}
+		return
+	}
+	t.Fatal("repository projection missing")
+}
+
 func TestProductionMaintenanceRoundTripsAndInvalidObservationRollsBack(t *testing.T) {
 	store, _, project, _ := newAdmissionStore(t, RoleOrchestrator, 2)
 	defer store.Close()

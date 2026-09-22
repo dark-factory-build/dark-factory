@@ -247,8 +247,7 @@ func (store *Store) RecordProductionObservation(ctx context.Context, project Pro
 			return tx.Rollback(err)
 		}
 	}
-	deliveryDestinationsObserved := observation.DeliveryDestinationsObserved || len(observation.DeliveryDestinations) > 0
-	if err := write("repository", observation.Repository, "", map[string]any{"unavailable": observation.Unavailable, "overflow": observation.Overflow, "maintenance": observation.Maintenance, "delivery_destinations": observation.DeliveryDestinations, "delivery_destinations_observed": deliveryDestinationsObserved}); err != nil {
+	if err := write("repository", observation.Repository, "", map[string]any{"unavailable": observation.Unavailable, "overflow": observation.Overflow, "maintenance": observation.Maintenance, "delivery_destinations": observation.DeliveryDestinations, "delivery_destinations_observed": observation.DeliveryDestinationsObserved}); err != nil {
 		return tx.Rollback(err)
 	}
 	return tx.Commit(ctx)

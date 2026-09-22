@@ -14,6 +14,17 @@ test("shared CI is one execution across PRs but repository identities remain dis
   assert.ok(productionHeight(320, 20) > productionHeight(320, 2));
 });
 
+test("production connector is rendered from the two room rectangles", () => {
+  const upper = { x: 48, y: 120, width: 200, height: 80 };
+  const lower = { x: 8, y: 240, width: 304, height: 120 };
+  assert.deepEqual(productionConnector(upper, lower), { x: 48, y: 200, width: 32, height: 40 });
+  const markup = renderToStaticMarkup(createElement(ProductionArea, {
+    items: [], width: 320, top: lower.y - 8, upperRoom: upper, onSelect() {},
+  }));
+  assert.match(markup, /<rect x="48" y="-32" width="32" height="40" fill="url\(#df-floor\)"><\/rect>/);
+  assert.match(markup, /M8 8H48 M80 8H312/);
+});
+
 test("production boxes expose result stickers and only show a live reviewer", () => {
   const item = {
     projectId: "project", visualId: "change:1", repository: "owner/repo", tasks: [], missions: [], linksOverflow: false,
@@ -23,7 +34,7 @@ test("production boxes expose result stickers and only show a live reviewer", ()
     deliveries: [], reviewers: [{ id: "reviewer", number: 1, head: "a", name: "Rae", provider: "codex", state: "running" }],
     completed: false, completedAt: 0, status: "open", nextAction: "", blockedReason: "",
   };
-  const render = (value) => renderToStaticMarkup(createElement(ProductionArea, { upperRoom: { x: 8, y: -100, width: 304, height: 60 }, items: [value], width: 320, top: 0, pulse: 1000, onSelect: () => {} }));
+  const render = (value) => renderToStaticMarkup(createElement(ProductionArea, { items: [value], width: 320, top: 0, upperRoom: { x: 8, y: -80, width: 304, height: 40 }, pulse: 1000, onSelect: () => {} }));
   const live = render(item);
   assert.match(live, /Review running/);
   assert.match(live, /CI passed/);
@@ -46,7 +57,7 @@ test("production boxes render every result sticker set", () => {
     review: { head: "a", state: "allow", current: true, allowed: true, sourceFresh: true, findings: "", url: "" }, checks: [], deliveries: [], deliveryDestinations: [], reviewers: [],
     completed: false, completedAt: 0, status: "open", nextAction: "", blockedReason: "",
   };
-  const render = (value) => renderToStaticMarkup(createElement(ProductionArea, { upperRoom: { x: 8, y: -100, width: 304, height: 60 }, items: [value], width: 320, top: 0, onSelect: () => {} }));
+  const render = (value) => renderToStaticMarkup(createElement(ProductionArea, { items: [value], width: 320, top: 0, upperRoom: { x: 8, y: -80, width: 304, height: 40 }, onSelect: () => {} }));
   assert.match(render(base), /Review passed/);
   assert.match(render({ ...base, review: { ...base.review, allowed: false, state: "pending" } }), /Review pending/);
   assert.match(render({ ...base, review: { ...base.review, current: false, head: "b" } }), /Review stale/);
@@ -66,7 +77,7 @@ test("a running reviewer stays at the box after the walk-in window", async () =>
     checks: [], deliveries: [], reviewers: [{ id: "reviewer", number: 1, head: "a", name: "Rae", provider: "codex", state: "running" }],
     completed: false, completedAt: 0, status: "open", nextAction: "", blockedReason: "",
   };
-  const props = { upperRoom: { x: 8, y: -100, width: 304, height: 60 }, items: [item], width: 320, top: 0, pulse: 0, onSelect: () => {} };
+  const props = { items: [item], width: 320, top: 0, upperRoom: { x: 8, y: -80, width: 304, height: 40 }, pulse: 0, onSelect: () => {} };
   let renderer;
   await act(async () => { renderer = create(createElement(ProductionArea, props)); });
   await act(async () => { renderer.update(createElement(ProductionArea, { ...props, pulse: 2_000 })); });
@@ -82,7 +93,7 @@ test("a finished reviewer remains in leaving motion until its exit window ends",
     checks: [], deliveries: [], reviewers: [{ id: "reviewer", number: 1, head: "a", name: "Rae", provider: "codex", state: "running" }],
     completed: false, completedAt: 0, status: "open", nextAction: "", blockedReason: "",
   };
-  const props = { upperRoom: { x: 8, y: -100, width: 304, height: 60 }, items: [item], width: 320, top: 0, pulse: 0, onSelect: () => {} };
+  const props = { items: [item], width: 320, top: 0, upperRoom: { x: 8, y: -80, width: 304, height: 40 }, pulse: 0, onSelect: () => {} };
   let renderer;
   await act(async () => { renderer = create(createElement(ProductionArea, props)); });
   const finished = { ...item, review: { ...item.review, state: "allow", allowed: true }, reviewers: [] };
@@ -93,15 +104,4 @@ test("a finished reviewer remains in leaving motion until its exit window ends",
   await act(async () => { renderer.update(createElement(ProductionArea, { ...props, items: [finished], pulse: 2_000 })); });
   assert.doesNotMatch(JSON.stringify(renderer.toJSON()), /Rae, reviewer, leaving/);
   await act(async () => renderer.unmount());
-});
-
-test("production connector is rendered from the two room rectangles", () => {
-  const upper = { x: 48, y: 120, width: 200, height: 80 };
-  const lower = { x: 8, y: 240, width: 304, height: 120 };
-  assert.deepEqual(productionConnector(upper, lower), { x: 48, y: 200, width: 32, height: 40 });
-  const markup = renderToStaticMarkup(createElement(ProductionArea, {
-    items: [], width: 320, top: lower.y - 8, upperRoom: upper, onSelect() {},
-  }));
-  assert.match(markup, /<rect x="48" y="-32" width="32" height="40" fill="url\(#df-floor\)"><\/rect>/);
-  assert.match(markup, /M8 8H48 M80 8H312/);
 });
