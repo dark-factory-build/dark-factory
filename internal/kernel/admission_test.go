@@ -69,6 +69,32 @@ func TestAdmitNextSelectsGlobalPriorityWithoutCallerNomination(t *testing.T) {
 	}
 }
 
+func TestAdmissionHoldsOnlyPublicationWaitTasks(t *testing.T) {
+	store, _, project, agent := newAdmissionStore(t, RoleOrchestrator, 4)
+	defer store.Close()
+	ctx := context.Background()
+	waiting, err := store.EnqueueTask(ctx, NewTask{
+		ID: taskID(t, 25), ProjectID: project.ID, AssignedAgentID: agent.ID, IncarnationID: incarnationID(t, 26),
+		Title: "Resume publication review for GitHub PR #9", Body: "Factory publication wait\nResume publication.", Priority: 9,
+	}, mustTime(t, 5))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// An ordinary task may mention the marker in prose; only the controller's
+	// publication task is held out of admission.
+	ordinary, err := store.EnqueueTask(ctx, NewTask{
+		ID: taskID(t, 27), ProjectID: project.ID, AssignedAgentID: agent.ID, IncarnationID: incarnationID(t, 28),
+		Title: "Document the Factory publication wait marker", Body: "Explain Factory publication wait in the runbook.", Priority: 1,
+	}, mustTime(t, 6))
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := store.AdmitNext(ctx, admissionKeys(t, 29, nil), mustTime(t, 7))
+	if err != nil || !result.Admitted() || result.Run.TaskID != ordinary.ID || result.Run.TaskID == waiting.ID {
+		t.Fatalf("admission with a publication wait queued = %+v, %v", result, err)
+	}
+}
+
 func TestAdmissionSerializesOnlyDeclaredConflictPaths(t *testing.T) {
 	ctx := context.Background()
 	store, _, project, firstAgent := newAdmissionStore(t, RoleWorker, 2)

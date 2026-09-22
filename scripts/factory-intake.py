@@ -239,7 +239,10 @@ def task_state(config: dict, operation: dict) -> dict | None:
         raise IntakeError("deterministic intake task identity conflicts with factory state")
     if value.get("status") not in ("queued", "running", "blocked", "succeeded", "failed", "cancelled") or type(value.get("needs_operator_recovery")) is not bool:
         raise IntakeError("factory task state response is incomplete")
-    return {"status": value["status"], "needs_operator_recovery": value["needs_operator_recovery"]}
+    result = {"status": value["status"], "needs_operator_recovery": value["needs_operator_recovery"]}
+    if type(value.get("revision")) is int and value["revision"] > 0:
+        result["revision"] = value["revision"]
+    return result
 
 
 def source_marker(config: dict, issue: dict) -> str:

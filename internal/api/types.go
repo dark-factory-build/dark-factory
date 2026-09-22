@@ -1039,6 +1039,7 @@ type OverseerTaskUpdateInput struct {
 	Cancel            bool    `json:"cancel,omitempty"`
 	Retry             bool    `json:"retry,omitempty"`
 	RemoveAttachments bool    `json:"remove_attachments,omitempty"`
+	PublicationState  string  `json:"publication_state,omitempty"`
 }
 
 type OverseerAgentUpdateInput struct {

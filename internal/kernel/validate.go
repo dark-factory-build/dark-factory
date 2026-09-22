@@ -1078,10 +1078,13 @@ func validateTaskRunTopologyWithLimit(ctx context.Context, connection *sql.Conn,
 	if !found {
 		// A queued task the console cancels before it is ever admitted has no
 		// run history and never will.
-		if (task.Status == TaskQueued || task.Status == TaskCancelled) && task.WorkRevision.Int64() == 1 {
+		if (task.Status == TaskQueued || task.Status == TaskCancelled || IsPublicationTask(task) && (task.Status == TaskSucceeded || task.Status == TaskFailed)) && task.WorkRevision.Int64() == 1 {
 			return nil
 		}
 		return fmt.Errorf("%w: task has no run history", ErrCorruptState)
+	}
+	if IsPublicationTask(task) && task.WorkRevision.Int64() > latest.AdmittedTaskWorkRevision.Int64() && (task.Status == TaskSucceeded || task.Status == TaskFailed) {
+		return nil
 	}
 	delta := task.WorkRevision.Int64() - latest.AdmittedTaskWorkRevision.Int64()
 	switch delta {

@@ -1918,6 +1918,17 @@ func (daemon *Daemon) operatorUpdateTask(ctx context.Context, call api.Call) api
 	if err != nil {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
+	if input.PublicationState != "" {
+		at, err := daemon.timestamp()
+		if err != nil {
+			return newErrorReply(api.RemoteInternal)
+		}
+		task, err := daemon.store.SettlePublicationTask(ctx, id, expected, input.PublicationState, at)
+		if err != nil {
+			return newErrorReply(remoteErrorCode(err))
+		}
+		return daemon.mutation(ctx, task.Revision)
+	}
 	if input.RemoveAttachments {
 		task, err := daemon.store.RemoveTaskAttachments(ctx, id, expected)
 		if err != nil {
