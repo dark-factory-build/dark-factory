@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -307,7 +308,7 @@ func (r worktreeRepairRollback) rollback() error {
 }
 
 func repairMovedWorktrees(ctx context.Context, path, home string) (worktreeRepairRollback, error) {
-	db, err := sql.Open("sqlite3", "file:"+path+"?mode=ro")
+	db, err := sql.Open("sqlite3", sqliteDataSource(path, url.Values{"mode": {"ro"}}))
 	if err != nil {
 		return worktreeRepairRollback{}, err
 	}
@@ -452,8 +453,15 @@ func repairMovedWorktrees(ctx context.Context, path, home string) (worktreeRepai
 	return worktreeRepairRollback{restore: restore, cleanup: cleanup}, nil
 }
 
+// sqliteDataSource escapes the path like the kernel's data-source builders:
+// a canonical home may contain "?" or "#", which a bare "file:"+path URI
+// would read as the query or fragment delimiter and open a sibling path.
+func sqliteDataSource(path string, query url.Values) string {
+	return (&url.URL{Scheme: "file", Path: path, RawQuery: query.Encode()}).String()
+}
+
 func rewriteDatabasePaths(ctx context.Context, path, from, to string) error {
-	db, err := sql.Open("sqlite3", "file:"+path)
+	db, err := sql.Open("sqlite3", sqliteDataSource(path, nil))
 	if err != nil {
 		return err
 	}

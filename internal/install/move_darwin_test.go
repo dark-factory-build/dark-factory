@@ -121,6 +121,29 @@ func TestMoveHomeKeepsPublishedDestinationLockedUntilValidation(t *testing.T) {
 	}
 }
 
+func TestMoveHomeRelocatesToPathsWithURIDelimiters(t *testing.T) {
+	for _, name := range []string{"new?copy", "new#1"} {
+		t.Run(name, func(t *testing.T) {
+			parent := moveTempDir(t)
+			from := filepath.Join(parent, "old")
+			to := filepath.Join(parent, name)
+			if _, err := Init(context.Background(), from); err != nil {
+				t.Fatal(err)
+			}
+			if err := MoveHome(context.Background(), from, to); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Doctor(context.Background(), to); err != nil {
+				t.Fatal(err)
+			}
+			entries, err := os.ReadDir(parent)
+			if err != nil || len(entries) != 1 || entries[0].Name() != name {
+				t.Fatalf("parent after move = %v, %v; want only %q", entries, err, name)
+			}
+		})
+	}
+}
+
 func TestMoveHomeRefusesDestinationCreatedDuringStaging(t *testing.T) {
 	parent := moveTempDir(t)
 	from := filepath.Join(parent, "old")
