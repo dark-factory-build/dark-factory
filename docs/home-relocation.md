@@ -71,7 +71,8 @@ a different process may still own it.
 The checked-in proof covers a disposable initialized home, refusal that leaves
 the source unchanged, and a populated project with a registered linked Change
 and terminal run; it opens the moved home with `OpenOperationalHome` and reads
-a store snapshot at the new path. Worktree-repair failure snapshots and restores the external Git
+a store snapshot at the new path. Worktree-repair failure snapshots and
+restores the external Git
 administration before rolling the home rename back, so a failed move cannot
 leave links pointing at the unpublished destination.
 
@@ -83,7 +84,8 @@ with `doctor` (a fresh home) or by starting the service there and reading
 verified home. Remove only the
 unselected stage/backup after the selected home is healthy; if `.move-old` and
 the destination both exist, use the destination only after that validation
-and status pass, otherwise restore `.move-old` to the original name. Reinstall the
+and status pass, otherwise restore `.move-old` to the original name. Reinstall
+the
 service only after one canonical home remains. This procedure is the supported
 collision recovery boundary because launchd and external Git metadata cannot
 be committed in the same filesystem rename transaction.
