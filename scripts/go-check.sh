@@ -11,12 +11,18 @@ repository_root=$(CDPATH= cd -- "$script_dir/.." && pwd)
 CDPATH= cd -- "$repository_root"
 . "$script_dir/local-ci-environment.sh"
 
+go=${DF_CI_GO-}
+[ -n "$go" ] || {
+    echo "go-check: Go is unavailable; add Go's bin directory to factoryd --tool-path (and its install root to --toolchain-read-roots)" >&2
+    exit 1
+}
+
 export GOTOOLCHAIN=local
 required_go_series=$(awk '
     $1 == "go" { count++; parts=split($2, version, "."); if (parts == 3) series="go" version[1] "." version[2] }
     END { if (count != 1 || series == "") exit 1; print series }
 ' go.mod)
-actual_go=$(go env GOVERSION)
+actual_go=$("$go" env GOVERSION)
 case "$actual_go" in
     "$required_go_series".[0-9]*)
         actual_patch=${actual_go#"$required_go_series".}
@@ -29,13 +35,13 @@ esac
 }
 
 echo "go-check: download and verify Go modules"
-go mod download
-go mod verify
+"$go" mod download
+"$go" mod verify
 
 if [ "$go_check_mode" = source ]; then
 
     echo "go-check: gofmt"
-    if ! gofmt_output=$(git ls-files -z -- '*.go' | xargs -0 gofmt -l); then
+    if ! gofmt_output=$(git ls-files -z -- '*.go' | xargs -0 "$(dirname "$go")/gofmt" -l); then
         echo "go-check: gofmt failed" >&2
         exit 1
     fi
@@ -46,12 +52,12 @@ if [ "$go_check_mode" = source ]; then
     }
 
     echo "go-check: go vet ./..."
-    go vet ./...
+    "$go" vet ./...
 
     # These packages contain ordinary source and data-contract tests. Packages
     # that create sockets, PTYs, subprocesses, or services run in the process gate.
     echo "go-check: ordinary Go tests"
-    go test -short -timeout=20m \
+    "$go" test -short -timeout=20m \
         ./cmd/cloudflare-admin \
         ./internal/browserprotocol \
         ./internal/cloudflareadmin \

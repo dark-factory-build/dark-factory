@@ -301,10 +301,7 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 		}
 		return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureInternal, err)
 	}
-	rawProviderTask := []byte(task.Body)
-	if run.Provider != kernel.ProviderShell && len(rawProviderTask) == 0 {
-		rawProviderTask = []byte(task.Title)
-	}
+	rawProviderTask := []byte(kernel.EffectiveTaskText(run.Provider, task.Title, task.Body))
 	attachments, err := daemon.store.TaskAttachments(ctx, run.TaskID)
 	if err != nil {
 		return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureInternal, err)
@@ -341,7 +338,7 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 	var retained *changeworker.Result
 	var retainedSourceReview *changeworker.SourceReview
 	if kernel.RetainedSourceReviewSupported(run.Provider) && run.Role == kernel.RoleWorker {
-		expected, review, parseErr := kernel.ParseRetainedSourceReviewTask(task.Body)
+		expected, review, parseErr := kernel.ParseRetainedSourceReviewTask(kernel.EffectiveTaskText(run.Provider, task.Title, task.Body))
 		if parseErr != nil {
 			return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSource, parseErr)
 		}

@@ -29,7 +29,8 @@ class ReviewIntakeTest(unittest.TestCase):
                        'journal': str(root / 'intake.json'), 'review_mirror_root': str(root / 'mirrors')}
         Path(self.config['factory_home']).mkdir(mode=0o700)
         review.intake.atomic_json(Path(self.config['journal']), {'version': 2, 'updated_at': 0, 'config_fingerprint': review.intake.config_fingerprint(self.config),
-            'issues': {'o/r#7': {'number': 7, 'managed': True}}})
+            'issues': {'o/r#7': {'number': 7, 'managed': True, 'desired_fingerprint': 'e' * 64,
+                                  'operation': {'task_id': 'c' * 32, 'incarnation_id': 'd' * 32}}}})
         self.observe = patch.object(review, 'observe_review', return_value='block').start()
         # No test may reach a live bridge; tests that need one substitute a fake.
         patch.object(review, 'bridge_call', side_effect=review.ReviewError('maintainer bridge is unavailable')).start()
@@ -672,23 +673,130 @@ class ReviewIntakeTest(unittest.TestCase):
             operation['enqueue_base'] = 'main'
             operation['enqueue_state'] = 'queued'
         with patch.object(review, 'mirror', return_value=Path('/mirror')), \
-             patch.object(review, 'list_prs', return_value=[{'number': 9, 'headRefOid': SHA, 'body': 'Refs #7'}]), \
+             patch.object(review, 'list_prs', return_value=[{'number': 9, 'headRefOid': SHA, 'body': SHA + '\nRefs #7'}]), \
              patch.object(review, 'ready', return_value=queued_operation), patch.object(review, 'verify_existing'), \
              patch.object(review, 'verify_review_body', side_effect=lambda _config, _pr, operation: operation.update(reviewed_body_digest='sha256:' + ('0' * 64))), \
              patch.object(review, 'enqueue_allowed', side_effect=mark_queued), patch.object(review, 'observe_merge', return_value={'state': 'NOT_QUEUED', 'pull_state': 'open'}), \
+             patch.object(review, 'send_back_merge_failure', return_value='merge queue CI failed: jobs=checks; tests=TestFixture') as send_back, \
              patch.object(review.intake, 'task_state', side_effect=[None, {'status': 'queued'}, {'status': 'queued'}, {'status': 'queued'}]), \
              patch.object(review.intake, 'enqueue') as enqueue:
             first = review.run_once(self.config)
             second = review.run_once(self.config)
-        self.assertEqual(['woke PR #9 queue failure'], first)
+        self.assertEqual(['sent back PR #9 queue failure: merge queue CI failed: jobs=checks; tests=TestFixture', 'woke PR #9 review allow'], first)
         self.assertEqual([], second)
         self.assertEqual(1, enqueue.call_count)
-        self.assertIn('NOT_QUEUED', enqueue.call_args.args[1]['body'])
-        self.assertIn('44444444-4444-4444-8444-444444444444', enqueue.call_args.args[1]['body'])
-        self.assertIn(self.operation['source_marker'], enqueue.call_args.args[1]['body'])
-        self.assertIn('ordinary source correction', enqueue.call_args.args[1]['body'])
-        self.assertNotIn('human request', enqueue.call_args.args[1]['body'])
-        self.assertNotIn('alter source/PR state', enqueue.call_args.args[1]['body'])
+        self.assertEqual(1, send_back.call_count)
+
+    def test_dropped_entry_sends_bounded_merge_group_failure_to_source_task(self):
+        operation = dict(self.operation, enqueue_operation='44444444-4444-4444-8444-444444444444',
+                         enqueue_observed_at=100, merge_observed_at=200)
+        run = {'workflow_runs': [
+            {'id': 70, 'event': 'merge_group', 'head_sha': 'b' * 40, 'created_at': '1970-01-01T00:01:00Z',
+             'pull_requests': [{'number': 9}]},
+            {'id': 71, 'event': 'merge_group', 'head_sha': SHA, 'created_at': '1970-01-01T00:02:30Z',
+             'pull_requests': [{'number': 9}]}]}
+        jobs = {'jobs': [{'id': 72, 'name': 'macOS full gate', 'conclusion': 'failure'},
+                         {'id': 73, 'name': 'required', 'conclusion': 'success'}]}
+        calls = []
+        def command(argv, **kwargs):
+            calls.append(argv)
+            if argv[1] == 'api' and '/actions/runs?' in argv[2]:
+                return json.dumps(run)
+            if any('/actions/runs/71/jobs' in item for item in argv):
+                return json.dumps(jobs)
+            if argv[1:3] == ['run', 'view']:
+                return 'macOS full gate / TestDaemonSourceTitleOnlyWorkerUsesEffectiveHandoff failed\n'
+            return '{}'
+        with patch.object(review.intake, 'command', side_effect=command):
+            note = review.send_back_merge_failure(self.config, operation)
+        self.assertEqual('merge queue CI failed: jobs=macOS full gate; tests=TestDaemonSourceTitleOnlyWorkerUsesEffectiveHandoff. Exact head ' + SHA + '.', note)
+        send_back = calls[-1]
+        self.assertEqual(['factoryctl', 'task', 'send-back', '--task', 'c' * 32, '--note', note], send_back)
+
+    def test_failed_pre_review_gate_is_persisted_and_not_rerun(self):
+        bare = Path(self.temp.name) / 'bare'
+        bare.mkdir()
+        (bare / 'HEAD').write_text('ref: refs/heads/main\n')
+        operation = dict(self.operation, review_operation='11111111-1111-4111-8111-111111111111')
+        evidence = Path(self.temp.name) / 'gate.json'
+        evidence.write_text(json.dumps({'head': SHA, 'base': operation['base'], 'exit_code': 1}))
+        (Path(self.temp.name) / 'gate.log').write_text('FAIL TestGateFixture\n')
+        self.observe.return_value = 'missing'
+        with patch.object(review, 'mirror', return_value=bare), \
+             patch.object(review, 'list_prs', return_value=[{'number': 9, 'headRefOid': SHA, 'body': SHA + '\nRefs #7'}]), \
+             patch.object(review, 'ready', return_value=operation), patch.object(review, 'verify_existing'), \
+             patch.object(review, 'run_full_gate', return_value=evidence) as gate, \
+             patch.object(review, 'send_back_source_task', return_value='sent') as send_back:
+            first = review.run_once(self.config)
+            second = review.run_once(self.config)
+        self.assertEqual(1, gate.call_count)
+        self.assertEqual(1, send_back.call_count)
+        self.assertIn('pre-review gate failure', first[0])
+        self.assertEqual([], second)
+        receipt = json.loads(Path(self.config['journal'] + '.reviews.json').read_text())['pulls']['9:' + SHA]
+        self.assertEqual(('failed', True), (receipt['gate_state'], receipt['gate_failure_sent_back']))
+
+    def test_full_gate_records_the_status_of_the_worktree_gate_it_actually_ran(self):
+        # go_gate_run_bounded takes (timeout, command...). Without the shift the
+        # sourced environment script stayed $1, so its timeout validation saw a
+        # path and refused with 64 before any gate ran, and every receipt since
+        # recorded that refusal as the pull request's own gate failure.
+        source = Path(self.temp.name) / 'source'
+        (source / 'scripts').mkdir(parents=True)
+        gate = source / 'scripts' / 'local-ci.sh'
+        identity = {'GIT_AUTHOR_NAME': 'fixture', 'GIT_AUTHOR_EMAIL': 'fixture@example.invalid',
+                    'GIT_COMMITTER_NAME': 'fixture', 'GIT_COMMITTER_EMAIL': 'fixture@example.invalid'}
+        def git(*arguments, capture=False):
+            result = subprocess.run(['git', '-C', str(source), *arguments], check=True, text=True,
+                                    capture_output=True, env=dict(os.environ, **identity))
+            return result.stdout.strip() if capture else None
+        git('init', '--quiet')
+        heads = {}
+        for status in (0, 3):
+            gate.write_text('#!/bin/sh\nprintf gate-ran\nexit ' + str(status) + '\n')
+            gate.chmod(0o755)
+            git('add', '-A')
+            git('commit', '--quiet', '-m', 'gate exits ' + str(status))
+            heads[status] = git('rev-parse', 'HEAD', capture=True)
+        bare = Path(self.temp.name) / 'bare'
+        subprocess.run(['git', 'clone', '--quiet', '--bare', str(source), str(bare)], check=True, capture_output=True)
+        for status, head in heads.items():
+            with self.subTest(status=status):
+                destination = Path(self.temp.name) / ('body-' + str(status) + '.md')
+                receipt = review.run_full_gate(bare, {'head': head, 'base': 'b' * 40}, destination)
+                self.assertEqual({'head': head, 'base': 'b' * 40, 'exit_code': status}, json.loads(receipt.read_text()))
+                self.assertIn('gate-ran', destination.with_suffix('.gate.log').read_text())
+
+    def test_gate_that_could_not_run_is_a_host_blocker_not_a_failed_review(self):
+        bare = Path(self.temp.name) / 'bare'
+        bare.mkdir()
+        (bare / 'HEAD').write_text('ref: refs/heads/main\n')
+        operation = dict(self.operation, review_operation='11111111-1111-4111-8111-111111111111')
+        evidence = Path(self.temp.name) / 'gate.json'
+        self.observe.return_value = 'missing'
+        # 64 refused arguments, 125..127 supervisor or exec failure: the bounded
+        # wrapper's own statuses mean nothing ran, so no head earns a send-back
+        # and the next pass must gate it again once the host is repaired.
+        for status in (64, 125, 126, 127):
+            with self.subTest(status=status):
+                evidence.write_text(json.dumps({'head': SHA, 'base': operation['base'], 'exit_code': status}))
+                with patch.object(review, 'mirror', return_value=bare), \
+                     patch.object(review, 'list_prs', return_value=[{'number': 9, 'headRefOid': SHA, 'body': SHA + '\nRefs #7'}]), \
+                     patch.object(review, 'ready', return_value=dict(operation)), patch.object(review, 'verify_existing'), \
+                     patch.object(review, 'run_full_gate', return_value=evidence) as gate, \
+                     patch.object(review, 'send_back_source_task') as send_back, \
+                     patch.object(review, 'launch_review') as launch, \
+                     patch.object(review.intake, 'enqueue') as enqueue:
+                    with self.assertRaisesRegex(review.ReviewError, 'gate could not run: bounded gate wrapper exit ' + str(status)):
+                        review.run_once(self.config)
+                    self.assertEqual(1, gate.call_count)
+                    send_back.assert_not_called()
+                    launch.assert_not_called()
+                    enqueue.assert_not_called()
+                receipt = json.loads(Path(self.config['journal'] + '.reviews.json').read_text())['pulls']['9:' + SHA]
+                self.assertNotIn('gate_state', receipt)
+                self.assertNotIn('gate_evidence', receipt)
+                self.assertNotIn('review_attempted', receipt)
 
     def test_merge_observation_reuses_reviewed_digest_after_body_edit(self):
         operation = dict(self.operation, enqueue_operation='44444444-4444-4444-8444-444444444444',
@@ -716,9 +824,10 @@ class ReviewIntakeTest(unittest.TestCase):
              patch.object(review, 'list_prs', return_value=[{'number': 9, 'headRefOid': SHA, 'body': 'edited after enqueue\nRefs #7'}]), \
              patch.object(review, 'ready', return_value=operation), patch.object(review, 'verify_existing'), \
              patch.object(review, 'verify_review_body') as verify, patch.object(review, 'enqueue_allowed'), \
-             patch.object(review, 'observe_merge', return_value={'state': 'NOT_QUEUED', 'pull_state': 'open'}), \
+                     patch.object(review, 'observe_merge', return_value={'state': 'NOT_QUEUED', 'pull_state': 'open'}), \
+                     patch.object(review, 'send_back_merge_failure', return_value='merge queue CI failed: jobs=checks; tests=TestFixture'), \
              patch.object(review.intake, 'task_state', side_effect=[None, {'status': 'queued'}]), patch.object(review.intake, 'enqueue') as enqueue:
-            self.assertEqual(['woke PR #9 queue failure'], review.run_once(self.config))
+            self.assertEqual(['sent back PR #9 queue failure: merge queue CI failed: jobs=checks; tests=TestFixture', 'woke PR #9 review allow'], review.run_once(self.config))
         verify.assert_not_called()
         self.assertEqual(1, enqueue.call_count)
 

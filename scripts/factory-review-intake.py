@@ -2,6 +2,7 @@
 """Run one independent host review and wake its overseer with the App receipt."""
 import argparse
 import contextlib
+from datetime import datetime
 import fcntl
 import hashlib
 import importlib.util
@@ -12,6 +13,7 @@ import re
 import shutil
 import stat
 import subprocess
+import tempfile
 import time
 from urllib.parse import urlparse
 import uuid
@@ -453,15 +455,97 @@ def observe_merge(config, operation):
     return {"state": value["state"], "pull_state": value["pull_state"]}
 
 
-def merge_failure_followup(config, operation):
-    task_id = intake.sha_id("queue-failure", config["project_id"], config["repository"], str(operation["pr"]), operation["head"], operation["enqueue_operation"])
-    return {"task_id": task_id, "incarnation_id": intake.sha_id("incarnation", task_id),
-            "priority": operation["priority"],
-            "title": "Reconcile dropped merge-queue entry for GitHub PR #" + str(operation["pr"]),
-            "body": ("The completed App enqueue operation " + operation["enqueue_operation"] + " for " + config["repository"] + " PR #" + str(operation["pr"]) +
-                     " at exact head " + operation["head"] + " was observed at " + str(operation["merge_observed_at"]) +
-                     " as NOT_QUEUED while the pull request remained open. The queue run may have failed or dropped the entry. Route this causal notification to the original source owner/task " +
-                     operation["source_marker"] + ". Inspect the exact queue/CI failure in that existing task and apply any ordinary source correction there. Do not create a replacement task, enqueue again, or replay the review. If App observation or authority is unresolved, escalate that capability failure with this receipt." )}
+def _merge_group_failure(config, operation):
+    raw = intake.command(["gh", "api", "repos/" + config["repository"] + "/actions/runs?event=merge_group&per_page=100"], timeout=30)
+    value = json.loads(raw)
+    runs = value.get("workflow_runs") if isinstance(value, dict) else None
+    if not isinstance(runs, list):
+        raise ReviewError("merge_group run listing is invalid")
+    lower_bound = operation.get("enqueue_observed_at")
+    upper_bound = operation.get("merge_observed_at")
+    if type(lower_bound) is not int or type(upper_bound) is not int:
+        return [], []
+    candidates = []
+    for item in runs:
+        if not isinstance(item, dict) or item.get("event") != "merge_group" or item.get("conclusion") in {"success", "cancelled"}:
+            continue
+        if not any(isinstance(pr, dict) and pr.get("number") == operation["pr"] for pr in item.get("pull_requests", [])):
+            continue
+        stamp = item.get("created_at") or item.get("run_started_at") or item.get("updated_at")
+        try:
+            stamp = int(datetime.fromisoformat(stamp.replace("Z", "+00:00")).timestamp())
+        except (AttributeError, TypeError, ValueError):
+            continue
+        if type(lower_bound) is int and stamp < lower_bound or type(upper_bound) is int and stamp > upper_bound + 300:
+            continue
+        candidates.append((stamp, item))
+    run = max(candidates, key=lambda value: value[0])[1] if candidates else None
+    if not isinstance(run, dict) or not isinstance(run.get("id"), int):
+        return [], []
+    jobs_raw = intake.command(["gh", "api", "repos/" + config["repository"] + "/actions/runs/" + str(run["id"]) + "/jobs?per_page=32"], timeout=30)
+    jobs_value = json.loads(jobs_raw)
+    jobs = jobs_value.get("jobs") if isinstance(jobs_value, dict) else None
+    if not isinstance(jobs, list):
+        raise ReviewError("merge_group job listing is invalid")
+    failed = [job for job in jobs if isinstance(job, dict) and job.get("conclusion") not in {"success", "skipped", None}]
+    names = [str(job.get("name"))[:160] for job in failed[:8] if isinstance(job.get("name"), str) and job.get("name")]
+    tests = []
+    try:
+        logs = intake.command(["gh", "run", "view", str(run["id"]), "--repo", config["repository"], "--log-failed"], timeout=30)
+        tests = list(dict.fromkeys(re.findall(r"\b(?:Test|test)[A-Za-z0-9_./:-]{2,120}", logs)))[:16]
+    except intake.IntakeError:
+        pass
+    return names, tests
+
+
+def _source_task_id(config, operation):
+    journal = intake.load_journal(Path(config["journal"]))
+    marker = operation["source_marker"]
+    for record in journal.get("issues", {}).values():
+        if not isinstance(record, dict) or not record.get("managed") or not isinstance(record.get("number"), int):
+            continue
+        source = intake.source_marker(source_config(config), {"number": record["number"]})
+        if source != marker:
+            continue
+        fingerprint = record.get("desired_fingerprint") or record.get("processed_fingerprint")
+        if isinstance(record.get("operation"), dict) and intake.ID_RE.fullmatch(record["operation"].get("task_id", "")):
+            return record["operation"]["task_id"]
+        if isinstance(fingerprint, str) and fingerprint:
+            return intake.sha_id("source", marker, fingerprint)
+    return ""
+
+
+def merge_failure_note(config, operation):
+    jobs, tests = _merge_group_failure(config, operation)
+    details = ["jobs=" + (", ".join(jobs) if jobs else "unavailable")]
+    details.append("tests=" + (", ".join(tests) if tests else "unavailable"))
+    return "merge queue CI failed: " + "; ".join(details) + ". Exact head " + operation["head"] + "."
+
+
+def gate_failure_note(receipt, operation):
+    tests = []
+    log = receipt.with_suffix(".log")
+    try:
+        tests = list(dict.fromkeys(re.findall(r"\b(?:Test|test)[A-Za-z0-9_./:-]{2,120}", log.read_text(encoding="utf-8"))))[:16]
+    except OSError:
+        pass
+    return "pre-review full gate failed: tests=" + (", ".join(tests) if tests else "unavailable") + ". Exact head " + operation["head"] + "."
+
+
+def send_back_merge_failure(config, operation):
+    return send_back_source_task(config, operation, merge_failure_note(config, operation))
+
+
+def send_back_source_task(config, operation, note):
+    task_id = _source_task_id(config, operation)
+    if not task_id:
+        raise ReviewError("original source task is unavailable")
+    home = Path(config["factory_home"])
+    env = os.environ.copy()
+    env["DARK_FACTORY_SOCKET"] = str(home / "runtimes" / "factory.sock")
+    env["DARK_FACTORY_OPERATOR_TOKEN_FILE"] = str(home / "operator.token")
+    intake.command(["factoryctl", "task", "send-back", "--task", task_id, "--note", note], env=env, timeout=int(config.get("command_timeout", 30)))
+    return note
 
 
 def enqueue_allowed(config, operation, journal_path, receipts):
@@ -499,6 +583,8 @@ def enqueue_allowed(config, operation, journal_path, receipts):
     elif state != "queued":
         state = "unresolved"
     operation["enqueue_state"] = state
+    if state == "queued":
+        operation.setdefault("enqueue_observed_at", int(time.time()))
     intake.atomic_json(journal_path, receipts)
 
 
@@ -532,6 +618,8 @@ def launch_review(config, path, pr, operation):
         env["DARK_FACTORY_REVIEW_ADAPTER_CONTEXT"] = str(context)
         for key in ("DARK_FACTORY_OPERATOR_TOKEN_FILE", "DARK_FACTORY_ATTEMPT_TOKEN_FILE", "DARK_FACTORY_SOCKET", "GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"):
             env.pop(key, None)
+    if operation.get("gate_evidence"):
+        env["DARK_FACTORY_REVIEW_EVIDENCE_FILE"] = operation["gate_evidence"]
     with (directory / "launch.log").open("w") as output:
         process = subprocess.Popen(["/bin/sh", "-c", '. "$1"; shift; go_gate_run_bounded "$@"', "review-process-owner",
                                     str(HERE / "go-gate-environment.sh"), "1200", str(HERE / "cold-review.sh"),
@@ -566,6 +654,27 @@ def review_body_path(config, pr, operation):
 
 def review_activity_path(config, pr, operation):
     return Path(config["journal"]).parent / ("review-" + str(pr["number"]) + "-" + operation["head"]) / "activity.json"
+
+
+def run_full_gate(path, operation, destination):
+    if not (path / "HEAD").is_file():
+        raise ReviewError("review mirror is not a usable bare repository")
+    destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    worktree = Path(tempfile.mkdtemp(prefix="gate-", dir=destination.parent))
+    worktree.rmdir()
+    try:
+        intake.command(["git", "-C", str(path), "worktree", "add", "--detach", str(worktree), operation["head"]], timeout=120)
+        log = destination.with_suffix(".gate.log")
+        with log.open("w", encoding="utf-8") as output:
+            process = subprocess.run(["/bin/sh", "-c", '. "$1"; shift; go_gate_run_bounded "$@"', "review-gate-owner",
+                                      str(HERE / "go-gate-environment.sh"), "1800", str(worktree / "scripts/local-ci.sh")],
+                                     cwd=worktree, stdout=output, stderr=subprocess.STDOUT, timeout=1860)
+        receipt = destination.with_suffix(".gate.json")
+        receipt.write_text(json.dumps({"head": operation["head"], "base": operation["base"], "exit_code": process.returncode}) + "\n", encoding="utf-8")
+        return receipt
+    finally:
+        subprocess.run(["git", "-C", str(path), "worktree", "remove", "--force", str(worktree)], check=False,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 def verify_review_body(config, pr, operation):
@@ -796,6 +905,14 @@ def run_locked(config, path, journal, journal_path, managed=None):
                 snapshot_path.write_text(pr["body"])
                 intake.atomic_json(journal_path, receipts)
                 state = observe_review(config, operation)
+        if operation.get("gate_state") == "failed":
+            if not operation.get("gate_failure_sent_back"):
+                note = operation.get("gate_failure_note", "pre-review full gate failed: tests=unavailable. Exact head " + operation["head"] + ".")
+                send_back_source_task(config, operation, note)
+                operation["gate_failure_sent_back"] = True
+                intake.atomic_json(journal_path, receipts)
+                messages.append("sent back PR #" + str(pr["number"]) + " pre-review gate failure: " + note)
+            continue
         if state == "missing" and not operation.get("review_attempted"):
             if operation["head"] not in pr["body"]:
                 # The body still describes a predecessor head. A review would
@@ -807,6 +924,37 @@ def run_locked(config, path, journal, journal_path, managed=None):
                 continue
             if launched:
                 continue
+            if (path / "HEAD").is_file():
+                try:
+                    evidence = run_full_gate(path, operation, review_body_path(config, pr, operation))
+                    receipt = json.loads(evidence.read_text(encoding="utf-8"))
+                except (OSError, ValueError, json.JSONDecodeError, intake.IntakeError, ReviewError, subprocess.SubprocessError) as exc:
+                    operation["gate_state"] = "failed"
+                    operation["gate_failure_note"] = "pre-review full gate unavailable: " + str(exc)[:300] + ". Exact head " + operation["head"] + "."
+                    intake.atomic_json(journal_path, receipts)
+                    send_back_source_task(config, operation, operation["gate_failure_note"])
+                    operation["gate_failure_sent_back"] = True
+                    intake.atomic_json(journal_path, receipts)
+                    messages.append("sent back PR #" + str(pr["number"]) + " pre-review gate failure: " + operation["gate_failure_note"])
+                    continue
+                # go_gate_run_bounded's own statuses (64 refused arguments,
+                # 125..127 supervisor or exec failure) mean nothing ran: name
+                # the host blocker instead of sending a working head back, and
+                # journal no gate verdict so the repaired host gates it again.
+                if receipt.get("exit_code") in {64, 125, 126, 127}:
+                    raise ReviewError("pre-review gate could not run: bounded gate wrapper exit " + str(receipt["exit_code"]) +
+                                      ", nothing ran. Exact head " + operation["head"] + ".")
+                operation["gate_evidence"] = str(evidence)
+                if receipt.get("exit_code") != 0:
+                    operation["gate_state"] = "failed"
+                    operation["gate_failure_note"] = gate_failure_note(evidence, operation)
+                    intake.atomic_json(journal_path, receipts)
+                    send_back_source_task(config, operation, operation["gate_failure_note"])
+                    operation["gate_failure_sent_back"] = True
+                    intake.atomic_json(journal_path, receipts)
+                    messages.append("sent back PR #" + str(pr["number"]) + " pre-review gate failure: " + operation["gate_failure_note"])
+                    continue
+                operation["gate_state"] = "passed"
             # Persist before launching: a crash cannot authorize a second model
             # run while the first may still be submitting its exact-head verdict.
             operation["review_attempted"] = True
@@ -859,10 +1007,12 @@ def run_locked(config, path, journal, journal_path, managed=None):
                 operation["merge_pull_state"] = merge["pull_state"]
                 operation["merge_observed_at"] = int(time.time())
                 intake.atomic_json(journal_path, receipts)
-                if merge["state"] == "NOT_QUEUED" and merge["pull_state"] == "open":
-                    followup = merge_failure_followup(config, operation)
-                    if intake.task_state(config, followup) is None and enqueue_followup(config, followup, pr, journal, managed):
-                        messages.append("woke PR #" + str(pr["number"]) + " queue failure")
+                if merge["state"] == "NOT_QUEUED" and merge["pull_state"] == "open" and not operation.get("merge_failure_sent_back"):
+                    note = send_back_merge_failure(config, operation)
+                    operation["merge_failure_sent_back"] = True
+                    operation["merge_failure_note"] = note
+                    intake.atomic_json(journal_path, receipts)
+                    messages.append("sent back PR #" + str(pr["number"]) + " queue failure: " + note)
         followup = review_followup(config, operation, state)
         if intake.task_state(config, followup) is None and enqueue_followup(config, followup, pr, journal, managed):
             messages.append("woke PR #" + str(pr["number"]) + " review " + state)
