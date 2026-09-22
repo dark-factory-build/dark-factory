@@ -366,11 +366,38 @@ class ReviewIntakeTest(unittest.TestCase):
             self.assertEqual(1, launch.call_count)
             review.run_once(self.config)
             self.assertEqual(2, launch.call_count)
-            self.assertEqual([9, 10], [call.args[2]['number'] for call in launch.call_args_list])
+            self.assertEqual([9, 9], [call.args[2]['number'] for call in launch.call_args_list])
             review.run_once(self.config)
-            self.assertEqual(2, launch.call_count)
+            self.assertEqual(3, launch.call_count)
+            self.assertEqual([9, 9, 10], [call.args[2]['number'] for call in launch.call_args_list])
         receipts = json.loads(Path(self.config['journal'] + '.reviews.json').read_text())['pulls']
-        self.assertTrue(all(v['review_attempted'] and v['review_state'] == 'unresolved' for v in receipts.values()))
+        self.assertTrue(all(v['review_attempted'] and v['review_state'] == 'failed' for v in receipts.values()))
+
+    def test_launch_failure_is_recorded_and_retried_once_with_new_operation(self):
+        operations = []
+        self.observe.return_value = 'missing'
+        def launch(_config, _path, _pr, operation):
+            receipt = json.loads(Path(self.config['journal'] + '.reviews.json').read_text())['pulls']['9:' + SHA]
+            self.assertEqual('launching', receipt['review_state'])
+            self.assertEqual(operation['review_operation'], receipt['review_operation'])
+            operations.append(operation['review_operation'])
+            return 3
+        with patch.object(review, 'mirror', return_value=Path('/mirror/o/r')), \
+             patch.object(review, 'list_prs', return_value=[{'number': 9, 'headRefOid': SHA, 'body': SHA + '\nRefs #7'}]), \
+             patch.object(review, 'ready', return_value=dict(self.operation)), patch.object(review, 'verify_existing'), \
+             patch.object(review, 'launch_review', side_effect=launch), \
+             patch.object(review.intake, 'task_state', return_value={'status': 'queued'}):
+            review.run_once(self.config)
+            receipt = json.loads(Path(self.config['journal'] + '.reviews.json').read_text())['pulls']['9:' + SHA]
+            self.assertEqual('failed', receipt['review_state'])
+            self.assertEqual(0, receipt.get('review_retries', 0))
+            review.run_once(self.config)
+            receipt = json.loads(Path(self.config['journal'] + '.reviews.json').read_text())['pulls']['9:' + SHA]
+            self.assertEqual(1, receipt['review_retries'])
+            self.assertEqual(operations[0], receipt['review_retry_of'])
+            review.run_once(self.config)
+        self.assertEqual(2, len(operations))
+        self.assertNotEqual(operations[0], operations[1])
 
     def test_body_naming_a_predecessor_head_wakes_overseer_without_spending_a_review(self):
         self.observe.return_value = 'missing'

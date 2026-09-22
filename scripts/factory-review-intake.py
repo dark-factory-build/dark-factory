@@ -652,6 +652,8 @@ def review_followup(config, operation, state):
     elif state.startswith("stale-body:"):
         action = ("No review was launched: the pull request body does not name this exact head, so it describes a predecessor. Replace the body with update_pull_request_body, "
                   "stating this head, the cumulative production-line delta to it and only checks run on it; keep the standalone source-issue footer. Host intake reviews it on its next pass. ")
+    elif state == "failed":
+        action = "The reviewer exited before recording a completed App operation. One host retry is exhausted; inspect the launch failure and report the infrastructure blocker. "
     else:
         action = "The launch or submission is unresolved. Observe this operation; do not start another reviewer or invent a verdict. Report the concrete infrastructure blocker. "
     task["body"] = ("Resume publication for " + operation["source_marker"] + ". Host independent review for PR #" + str(operation["pr"]) +
@@ -839,6 +841,21 @@ def run_locked(config, path, journal, journal_path, managed=None):
                 intake.atomic_json(journal_path, receipts)
                 messages.append("sent back PR #" + str(pr["number"]) + " pre-review gate failure: " + note)
             continue
+        if state == "missing" and not launched and operation.get("review_state") == "failed" \
+                and operation.get("review_exit", 0) != 0 and operation.get("review_retries", 0) < 1:
+            # Only a controller-observed terminal nonzero launch is retryable.
+            # A bare missing receipt may belong to a reviewer still running
+            # after this controller crashed, so never use it to launch again.
+            previous = operation["review_operation"]
+            operation["review_operation"] = str(uuid.uuid5(uuid.NAMESPACE_URL,
+                "dark-factory:host-review-retry:" + previous))
+            operation["review_retry_of"] = previous
+            operation["review_retries"] = operation.get("review_retries", 0) + 1
+            operation["review_attempted"] = False
+            operation.pop("review_exit", None)
+            operation.pop("review_state", None)
+            intake.atomic_json(journal_path, receipts)
+            state = "missing"
         if state == "missing" and not operation.get("review_attempted"):
             if operation["head"] not in pr["body"]:
                 # The body still describes a predecessor head. A review would
@@ -884,12 +901,22 @@ def run_locked(config, path, journal, journal_path, managed=None):
             # Persist before launching: a crash cannot authorize a second model
             # run while the first may still be submitting its exact-head verdict.
             operation["review_attempted"] = True
+            operation["review_state"] = "launching"
             intake.atomic_json(journal_path, receipts)
             launched = True
             operation["review_exit"] = launch_review(config, path, pr, operation)
+            if operation["review_exit"] != 0:
+                # Record the terminal host failure before asking the App about
+                # its operation; an unavailable observation must not erase the
+                # local proof that the owned reviewer exited unsuccessfully.
+                operation["review_state"] = "failed"
             intake.atomic_json(journal_path, receipts)
             state = observe_review(config, operation)
-        if state not in {"allow", "block"}:
+            if state == "missing" and operation["review_exit"] != 0:
+                state = "failed"
+        if state == "missing" and operation.get("review_exit", 0) != 0:
+            state = "failed"
+        if state not in {"allow", "block", "failed"}:
             state = "unresolved"
         operation["review_state"] = state
         intake.atomic_json(journal_path, receipts)
