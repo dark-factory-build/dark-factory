@@ -426,14 +426,20 @@ def _merge_group_failure(config, operation):
     if not isinstance(jobs, list):
         raise ReviewError("merge_group job listing is invalid")
     failed = [job for job in jobs if isinstance(job, dict) and job.get("conclusion") not in {"success", "skipped", None}]
-    names = [str(job.get("name"))[:160] for job in failed[:8] if isinstance(job.get("name"), str) and job.get("name")]
-    tests = []
+    failures = []
+    for job in failed[:8]:
+        name = job.get("name") if isinstance(job.get("name"), str) else "unknown job"
+        steps = [step.get("name") for step in job.get("steps", [])
+                 if isinstance(step, dict) and step.get("conclusion") not in {"success", "skipped", None}
+                 and isinstance(step.get("name"), str) and step.get("name")]
+        failures.append((name[:160], ", ".join(step[:160] for step in steps[:4]) or "unknown step"))
+    excerpt = ""
     try:
         logs = intake.command(["gh", "run", "view", str(run["id"]), "--repo", config["repository"], "--log-failed"], timeout=30)
-        tests = list(dict.fromkeys(re.findall(r"\b(?:Test|test)[A-Za-z0-9_./:-]{2,120}", logs)))[:16]
+        excerpt = " ".join(logs.split())[:1200]
     except intake.IntakeError:
         pass
-    return names, tests
+    return failures, excerpt
 
 
 def _source_task_id(config, operation):
@@ -454,9 +460,9 @@ def _source_task_id(config, operation):
 
 
 def merge_failure_note(config, operation):
-    jobs, tests = _merge_group_failure(config, operation)
-    details = ["jobs=" + (", ".join(jobs) if jobs else "unavailable")]
-    details.append("tests=" + (", ".join(tests) if tests else "unavailable"))
+    failures, excerpt = _merge_group_failure(config, operation)
+    details = ["failures=" + (", ".join(name + " / " + step for name, step in failures) if failures else "unavailable")]
+    details.append("log=" + (excerpt if excerpt else "unavailable"))
     return "merge queue CI failed: " + "; ".join(details) + ". Exact head " + operation["head"] + "."
 
 
