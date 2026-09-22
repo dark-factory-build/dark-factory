@@ -42,9 +42,10 @@ main() {
           and ((.include // []) | length == 1)
           and (.include[0].service_token.token_id? != null)
           and empty_lists;
-        ([.[] | select(operator)] | length == 1)
+        (length == 2)
+          and ([.[] | select(operator)] | length == 1)
           and ([.[] | select(service_auth)] | length == 1)
-          or error("expected one operator allow policy and one service-auth policy")
+          or error("expected exactly one operator allow policy and one service-auth policy and nothing else")
     '
 }
 
