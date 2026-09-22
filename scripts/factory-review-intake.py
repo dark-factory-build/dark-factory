@@ -184,7 +184,13 @@ def list_prs(config, page=1):
         for item in value['pull_requests']:
             if not isinstance(item, dict) or type(item.get('number')) is not int or item['number'] < 1 or not isinstance(item.get('body'), str) or not isinstance(item.get('head_sha'), str) or not SHA.fullmatch(item['head_sha']) or not isinstance(item.get('base_sha'), str) or not SHA.fullmatch(item['base_sha']) or not isinstance(item.get('base_ref'), str):
                 raise ReviewError('customer pull request is invalid')
-            normalized.append({'number': item['number'], 'body': item['body'], 'headRefOid': item['head_sha'], 'baseRefName': item['base_ref'], 'baseRefOid': item['base_sha']})
+            normalized_item = {'number': item['number'], 'body': item['body'], 'headRefOid': item['head_sha'], 'baseRefName': item['base_ref'], 'baseRefOid': item['base_sha']}
+            if 'mergeable' in item or 'merge_state_status' in item:
+                if type(item.get('mergeable')) is not bool or not isinstance(item.get('merge_state_status'), str):
+                    raise ReviewError('customer pull request mergeability is invalid')
+                normalized_item.update(mergeable=item['mergeable'], mergeStateStatus=item['merge_state_status'].upper())
+            # A listing without mergeability is read exactly, bound to this listed head, by refresh_mergeability.
+            normalized.append(normalized_item)
         return normalized
     batch = discovery_batch_size(config)
     if type(page) is not int or page < 1:
@@ -208,8 +214,64 @@ def list_prs(config, page=1):
                 or not isinstance(value.get("body"), (str, type(None))) or not isinstance(head, dict) \
                 or not isinstance(head.get("sha"), str) or not SHA.fullmatch(head["sha"]):
             raise ReviewError("gh returned an invalid pull request")
-        normalized.append({"number": value["number"], "headRefOid": head["sha"], "body": value.get("body") or ""})
+        item = {"number": value["number"], "headRefOid": head["sha"], "body": value.get("body") or ""}
+        if "mergeable" in value or "mergeable_state" in value:
+            item.update(mergeable=value.get("mergeable"), mergeStateStatus=str(value.get("mergeable_state", "")).upper())
+        normalized.append(item)
     return normalized
+
+
+def merge_conflict(pr):
+    """Return whether GitHub has proved this exact head conflicts with its base."""
+    return pr.get("mergeable") is False or pr.get("mergeStateStatus") in {"DIRTY", "CONFLICTING", "UNMERGEABLE"}
+
+
+# GitHub's resolved, non-conflicting merge states. UNKNOWN (or a missing state) means
+# GitHub has not computed mergeability for this head yet, whatever `mergeable` says.
+RESOLVED_MERGE_STATES = {"CLEAN", "BLOCKED", "BEHIND", "HAS_HOOKS", "UNSTABLE"}
+
+
+def require_mergeable(pr):
+    if merge_conflict(pr):
+        return False
+    if pr.get("mergeable") is not True or pr.get("mergeStateStatus") not in RESOLVED_MERGE_STATES:
+        raise ReviewError("pull request mergeability is unresolved")
+    return True
+
+
+def refresh_mergeability(config, number, head):
+    """Read the exact pull request's mergeability; it only counts for the head under review."""
+    if CUSTOMER_REVIEW is not None:
+        value = bridge_call("list_pull_requests", {"page": 1, "pull_number": number}).get("structuredContent")
+        pulls = value.get("pull_requests") if isinstance(value, dict) else None
+        if not isinstance(pulls, list) or len(pulls) != 1:
+            raise ReviewError("exact pull request mergeability is unavailable")
+        item = pulls[0]
+        current = {"number": item.get("number"), "headRefOid": item.get("head_sha"), "mergeable": item.get("mergeable"), "mergeStateStatus": str(item.get("merge_state_status", "")).upper()}
+    else:
+        raw = intake.command(["gh", "api", "repos/" + config["repository"] + "/pulls/" + str(number)], timeout=int(config.get("command_timeout", 30)))
+        try:
+            value = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise ReviewError("exact pull request mergeability is unavailable") from exc
+        if not isinstance(value, dict):
+            raise ReviewError("exact pull request mergeability is unavailable")
+        current = {"number": value.get("number"), "headRefOid": (value.get("head") or {}).get("sha") if isinstance(value.get("head"), dict) else None,
+                   "mergeable": value.get("mergeable"), "mergeStateStatus": str(value.get("mergeable_state", "")).upper()}
+    if current["number"] != number:
+        raise ReviewError("exact pull request read returned PR #" + str(current["number"]) + " instead of #" + str(number))
+    if current["headRefOid"] != head:
+        raise ReviewError("pull request head moved from " + str(head) + " to " + str(current["headRefOid"]) + " since discovery; this head is no longer under review")
+    return current
+
+
+def send_back_merge_conflict(config, operation, journal_path, receipts, messages, pr):
+    """Send a proven conflict back to its source task once; the exact head then waits for a rebase."""
+    if not operation.get("merge_conflict_sent_back"):
+        send_back_source_task(config, operation, "merge conflict with main; rebase this Change onto the current main branch, then rerun the focused checks and republish.")
+        operation["merge_conflict_sent_back"] = True
+        intake.atomic_json(journal_path, receipts)
+        messages.append("sent back PR #" + str(pr["number"]) + " for rebase")
 
 
 def ready(config, path, pr, issue):
@@ -846,6 +908,16 @@ def run_locked(config, path, journal, journal_path, managed=None):
                 if operation.get("provider", "codex") != provider:
                     raise ReviewError("review provider changed for an existing exact-head receipt")
                 verify_existing(path, pr, operation)
+            if merge_conflict(pr):
+                send_back_merge_conflict(config, operation, journal_path, receipts, messages, pr)
+                continue
+            if "mergeable" not in pr or "mergeStateStatus" not in pr:
+                # GitHub's list endpoint omits mergeability; only the exact PR read has it.
+                pr.update(refresh_mergeability(config, pr["number"], operation["head"]))
+                if merge_conflict(pr):
+                    send_back_merge_conflict(config, operation, journal_path, receipts, messages, pr)
+                    continue
+            require_mergeable(pr)
             operation.setdefault("review_operation", str(uuid.uuid5(uuid.NAMESPACE_URL, "dark-factory:host-review:" + config["repository"] + ":" + str(pr["number"]) + ":" + operation["head"])))
             state = observe_review(config, operation, external_reviews)
             if state == "block" and not operation.get("prior_review_operation"):
@@ -950,7 +1022,20 @@ def run_locked(config, path, journal, journal_path, managed=None):
                         verify_review_body(config, pr, operation)
                     elif existing_enqueue == "queued":
                         operation["enqueue_state"] = "queued"
+                current = refresh_mergeability(config, pr["number"], operation["head"])
+                if merge_conflict(current):
+                    send_back_merge_conflict(config, operation, journal_path, receipts, messages, pr)
+                    continue
+                require_mergeable(current)
                 enqueue_allowed(config, operation, journal_path, receipts)
+                if operation.get("enqueue_state") == "refused":
+                    try:
+                        current = refresh_mergeability(config, pr["number"], operation["head"])
+                    except (ReviewError, intake.IntakeError):
+                        current = None
+                    if current is not None and merge_conflict(current):
+                        send_back_merge_conflict(config, operation, journal_path, receipts, messages, pr)
+                        continue
                 if operation.get("enqueue_state") == "queued":
                     merge = observe_merge(config, operation)
                     operation["merge_state"] = merge["state"]

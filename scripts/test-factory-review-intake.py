@@ -32,6 +32,9 @@ class ReviewIntakeTest(unittest.TestCase):
             'issues': {'o/r#7': {'number': 7, 'managed': True, 'desired_fingerprint': 'e' * 64,
                                   'operation': {'task_id': 'c' * 32, 'incarnation_id': 'd' * 32}}}})
         self.observe = patch.object(review, 'observe_review', return_value='block').start()
+        # Listings here omit mergeability, so every pass would read the exact PR; tests that care substitute their own.
+        self.mergeability_patch = patch.object(review, 'refresh_mergeability', return_value={'mergeable': True, 'mergeStateStatus': 'CLEAN'})
+        self.mergeability = self.mergeability_patch.start()
         # No test may reach a live bridge; tests that need one substitute a fake.
         patch.object(review, 'bridge_call', side_effect=review.ReviewError('maintainer bridge is unavailable')).start()
         self.addCleanup(patch.stopall)
@@ -60,6 +63,105 @@ class ReviewIntakeTest(unittest.TestCase):
         with patch.object(review,'mirror',return_value=Path('/mirror')), patch.object(review,'list_prs',return_value=[]):
             self.assertEqual([],review.run_once(self.config))
 
+    def test_conflicting_pull_is_sent_back_to_original_source_task_for_rebase(self):
+        journal = json.loads(Path(self.config['journal']).read_text())
+        journal['issues']['o/r#7']['operation'] = {
+            'task_id': 'e' * 32, 'incarnation_id': 'f' * 32,
+            'fingerprint': 'a' * 64,
+        }
+        Path(self.config['journal']).write_text(json.dumps(journal))
+        commands = []
+        pull = {'number': 9, 'headRefOid': SHA, 'body': 'Refs #7',
+                'mergeable': False, 'mergeStateStatus': 'DIRTY'}
+        with patch.object(review, 'mirror', return_value=Path('/mirror')), \
+             patch.object(review, 'list_prs', return_value=[pull]), \
+             patch.object(review, 'ready', return_value=dict(self.operation)), \
+             patch.object(review, 'verify_existing'), \
+             patch.object(review.intake, 'command', side_effect=lambda argv, **kwargs: commands.append(argv) or ''), \
+             patch.object(review.intake, 'task_state', return_value={'status': 'running'}), \
+             patch.object(review, 'launch_review') as launch:
+            self.assertEqual(['sent back PR #9 for rebase'], review.run_once(self.config))
+        launch.assert_not_called()
+        send_back = next(argv for argv in commands if argv[1:3] == ['task', 'send-back'])
+        self.assertEqual('e' * 32, send_back[send_back.index('--task') + 1])
+        self.assertIn('merge conflict with main', send_back[send_back.index('--note') + 1])
+
+    def test_listing_without_mergeability_reads_the_exact_pull_and_refuses_unknown(self):
+        pull = {'number': 9, 'headRefOid': SHA, 'body': 'Refs #7'}
+        self.mergeability.return_value = {'number': 9, 'mergeable': None, 'mergeStateStatus': 'UNKNOWN'}
+        with patch.object(review, 'mirror', return_value=Path('/mirror')), patch.object(review, 'list_prs', return_value=[pull]), \
+             patch.object(review, 'ready', return_value=dict(self.operation)), patch.object(review, 'verify_existing'), \
+             patch.object(review.intake, 'task_state', return_value=None), patch.object(review, 'launch_review') as launch:
+            with self.assertRaisesRegex(review.ReviewError, 'PR #9: pull request mergeability is unresolved'):
+                review.run_once(self.config)
+        self.assertEqual([9], [call.args[1] for call in self.mergeability.call_args_list])
+        launch.assert_not_called()
+
+    def test_exact_mergeability_for_a_moved_head_refuses_the_discovered_head(self):
+        self.mergeability_patch.stop()
+        pull = {'number': 9, 'headRefOid': SHA, 'body': 'Refs #7'}
+        moved = json.dumps({'number': 9, 'head': {'sha': 'f' * 40}, 'mergeable': True, 'mergeable_state': 'clean'})
+        with patch.object(review, 'mirror', return_value=Path('/mirror')), patch.object(review, 'list_prs', return_value=[pull]), \
+             patch.object(review, 'ready', return_value=dict(self.operation)), patch.object(review, 'verify_existing'), \
+             patch.object(review.intake, 'command', return_value=moved) as command, \
+             patch.object(review.intake, 'task_state', return_value=None), patch.object(review, 'launch_review') as launch:
+            with self.assertRaisesRegex(review.ReviewError, 'PR #9: pull request head moved from ' + SHA + ' to ' + 'f' * 40):
+                review.run_once(self.config)
+        self.assertEqual(['gh', 'api', 'repos/o/r/pulls/9'], command.call_args.args[0])
+        launch.assert_not_called()
+        with self.assertRaisesRegex(review.ReviewError, 'returned PR #10 instead of #9'):
+            with patch.object(review.intake, 'command', return_value=json.dumps({'number': 10, 'head': {'sha': SHA}})):
+                review.refresh_mergeability(self.config, 9, SHA)
+
+    def test_customer_listing_head_and_exact_mergeability_head_race_refuses_the_listed_head(self):
+        # Listed head A, exact read head B: B's mergeability must never authorize A.
+        self.mergeability_patch.stop()
+        (Path(self.config['factory_home']) / 'maintainer.json').write_text('{"id":"fixture"}')
+        request = {'source_id': 'a' * 32, 'project_id': self.config['project_id'],
+                   'configuration': {'repository': 'o/r', 'target_repository_id': 'b' * 32},
+                   'legacy': {'plan_hash': 'c' * 64, 'config_hash': 'd' * 64, 'journal_hash': 'e' * 64}}
+        controller = Mock()
+        managed = controller, {'request': request}, Path('/installed/factoryctl')
+        listed = {'number': 9, 'body': 'Reviewed publication ' + SHA + '\n\nRefs o/r#7', 'head_sha': SHA, 'base_sha': 'b' * 40, 'base_ref': 'main'}
+        exact = dict(listed, head_sha='f' * 40, mergeable=True, merge_state_status='CLEAN')
+        def api(_binary, _home, _args, value):
+            if value['action'] == 'legacy_lineage':
+                return {'state': 'legacy_existing_work', 'task_id': 'd' * 32}
+            item = value['review']; tool = item['tool']
+            if tool == 'configuration':
+                return {'state': 'ok', 'review': {'repository': 'delivery/target', 'repository_id': 42}}
+            self.assertEqual('list_pull_requests', tool)
+            result = {'pull_requests': [exact if item.get('pull_number') == 9 else listed], 'repository_id': 42, 'next_page': None}
+            return {'state': 'ok', 'review': {'repository': 'delivery/target', 'repository_id': 42, 'response': json.dumps({'jsonrpc': '2.0', 'id': 1, 'result': {'structuredContent': result, 'isError': False}})}}
+        controller.managed_api.side_effect = api
+        def git(argv, **_kwargs):
+            return (SHA if argv[-1].startswith('refs/pull/') else 'b' * 40) if 'rev-parse' in argv else ''
+        with patch.object(review, 'bridge_call', side_effect=CUSTOMER_BRIDGE), patch.object(review, 'mirror', return_value=Path('/mirror')), \
+             patch.object(review.intake, 'command', side_effect=git), patch.object(review, 'launch_review') as launch, \
+             patch.object(review.intake, 'task_state', return_value=None), patch.object(review.intake, 'enqueue'):
+            with self.assertRaisesRegex(review.ReviewError, 'PR #9: pull request head moved from ' + SHA + ' to ' + 'f' * 40):
+                review.run_once(self.config, managed)
+        launch.assert_not_called()
+
+    def test_unknown_mergeability_stops_review(self):
+        for pr in ({'mergeable': None, 'mergeStateStatus': 'UNKNOWN'}, {'mergeable': True, 'mergeStateStatus': 'UNKNOWN'},
+                   {'mergeable': True, 'mergeStateStatus': ''}, {'mergeable': True}, {'mergeable': True, 'mergeStateStatus': 'DRAFT'}):
+            with self.subTest(pr=pr), self.assertRaisesRegex(review.ReviewError, 'mergeability is unresolved'):
+                review.require_mergeable(pr)
+        for state in ('CLEAN', 'BLOCKED', 'BEHIND', 'HAS_HOOKS', 'UNSTABLE'):
+            self.assertTrue(review.require_mergeable({'mergeable': True, 'mergeStateStatus': state}))
+        self.assertFalse(review.require_mergeable({'mergeable': False, 'mergeStateStatus': 'DIRTY'}))
+
+    def test_mergeable_flag_with_unknown_state_is_refused_before_review(self):
+        pull = {'number': 9, 'headRefOid': SHA, 'body': 'Refs #7', 'mergeable': True, 'mergeStateStatus': 'UNKNOWN'}
+        with patch.object(review, 'mirror', return_value=Path('/mirror')), patch.object(review, 'list_prs', return_value=[pull]), \
+             patch.object(review, 'ready', return_value=dict(self.operation)), patch.object(review, 'verify_existing'), \
+             patch.object(review.intake, 'task_state', return_value=None), patch.object(review, 'launch_review') as launch:
+            with self.assertRaisesRegex(review.ReviewError, 'PR #9: pull request mergeability is unresolved'):
+                review.run_once(self.config)
+        launch.assert_not_called()
+        self.mergeability.assert_not_called()
+
     def test_customer_companion_reviews_and_enqueues_exact_target_without_legacy_auth(self):
         (Path(self.config['factory_home'])/'maintainer.json').write_text('{"id":"fixture"}')
         request = {'source_id':'a'*32,'project_id':self.config['project_id'],
@@ -68,7 +170,7 @@ class ReviewIntakeTest(unittest.TestCase):
         controller = Mock()
         managed = controller, {'request':request}, Path('/installed/factoryctl')
         operations, calls, enqueued = {}, [], set()
-        pull = {'number':9,'body':'Reviewed publication '+SHA+'\n\nRefs o/r#7','head_sha':SHA,'base_sha':'b'*40,'base_ref':'release+candidate'}
+        pull = {'number':9,'body':'Reviewed publication '+SHA+'\n\nRefs o/r#7','head_sha':SHA,'base_sha':'b'*40,'base_ref':'release+candidate', 'mergeable':True, 'merge_state_status':'CLEAN'}
         def api(_binary, _home, _args, value):
             if value['action']=='legacy_lineage':
                 return {'state':'legacy_existing_work','task_id':'d'*32}  # Daemon-proven historical work.

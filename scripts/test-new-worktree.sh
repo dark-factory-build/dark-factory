@@ -40,4 +40,27 @@ git -C "$test_repository/.worktrees/fixture-worktree" diff --quiet \
 test "$(git -C "$test_repository/.worktrees/fixture-worktree" branch --show-current)" = fixture-worktree \
     || fail "created worktree has the wrong branch"
 
+# A clone whose local origin/HEAD still says trunk follows the remote's current default branch.
+remote=$temporary/remote.git
+clone=$temporary/clone
+git clone -q --bare "$test_repository" "$remote"
+git -C "$remote" symbolic-ref HEAD refs/heads/trunk
+git -C "$remote" branch -q trunk main
+git clone -q "$remote" "$clone"
+git -C "$clone" config user.name fixture
+git -C "$clone" config user.email fixture@example.invalid
+git -C "$clone" -c core.hooksPath=/dev/null checkout -q -b develop
+printf 'develop\n' >"$clone/DEVELOP.md"
+git -C "$clone" add DEVELOP.md
+git -C "$clone" commit -q -m develop
+git -C "$clone" push -q origin develop
+git -C "$remote" symbolic-ref HEAD refs/heads/develop
+test "$(git -C "$clone" symbolic-ref refs/remotes/origin/HEAD)" = refs/remotes/origin/trunk \
+    || fail "fixture clone should still point origin/HEAD at trunk"
+mkdir -p "$clone/scripts"
+cp "$repository_root/scripts/new-worktree.sh" "$clone/scripts/new-worktree.sh"
+"$clone/scripts/new-worktree.sh" remote-default >/dev/null
+test "$(git -C "$clone/.worktrees/remote-default" rev-parse HEAD)" = "$(git -C "$remote" rev-parse refs/heads/develop)" \
+    || fail "created worktree does not start from the remote's current default branch"
+
 echo "new-worktree tests passed"
