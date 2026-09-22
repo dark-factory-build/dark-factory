@@ -91,8 +91,8 @@ def tick(config_path, config, release_only=False, skip_intake=False, environment
     # entries and checks; release-only passes retain the same single poller.
     if config.get('repository') and config.get('project_id'):
         calls.append([sys.executable, str(scripts / 'factory-production.py'), str(config_path), '--record'])
-    if not release_only and not skip_intake:
-        calls.append([sys.executable, str(scripts / 'factory-intake.py'), str(config_path), '--once'])
+    # GitHub/Linear source polling belongs to factoryd. The controller still
+    # owns release and review projections, plus the one-time legacy migration.
     releases = config.get('release_configs', []) if release_only else []
     for release_config in releases:
         calls.append([sys.executable, str(scripts / 'factory-release.py'), release_config, '--latest', '--once'])
@@ -103,7 +103,7 @@ def tick(config_path, config, release_only=False, skip_intake=False, environment
     results = []
     for argv in calls:
         try:
-            completed = subprocess.run(argv, capture_output=True, text=True, env=environment, pass_fds=() if controller_lock_fd is None else (controller_lock_fd,), timeout=1300 if Path(argv[1]).name == 'factory-intake.py' else None)
+            completed = subprocess.run(argv, capture_output=True, text=True, env=environment, pass_fds=() if controller_lock_fd is None else (controller_lock_fd,), timeout=None)
             result = {'component': Path(argv[1]).stem, 'ok': completed.returncode == 0}
             if completed.returncode:
                 result['error'] = 'legacy_review_customer_unsupported: use the installed customer publication workflow' if Path(argv[1]).name == 'factory-review-intake.py' and 'Legacy review is owner-only' in completed.stderr else 'exit_' + str(completed.returncode)

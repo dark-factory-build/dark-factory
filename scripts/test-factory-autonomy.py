@@ -165,32 +165,23 @@ class AutonomyTest(unittest.TestCase):
             self.assertEqual([], list(home.iterdir()))
             self.assertFalse(Path(str(home.resolve()) + '.autonomy.lock').exists())
 
-    def test_intake_failure_is_retained_in_health(self):
+    def test_source_polling_is_not_host_owned(self):
         config = {'factory_home': '/private/tmp/factory', 'journal': '/private/tmp/journal'}
-        with patch.object(autonomy.subprocess, 'run', return_value=subprocess.CompletedProcess([], 1, '', 'GitHub unavailable')) as run:
-            result = autonomy.tick(Path('/private/tmp/config'), config)
-        self.assertFalse(result[0]['ok'])
-        self.assertEqual(1, len(result))
-        self.assertIn('factory-intake.py', run.call_args_list[0].args[0][1])
+        with patch.object(autonomy.subprocess, 'run') as run:
+            self.assertEqual([], autonomy.tick(Path('/private/tmp/config'), config))
+        run.assert_not_called()
 
-    def test_launchd_results_do_not_retain_child_output(self):
+    def test_source_polling_does_not_write_host_diagnostics(self):
         config = {'factory_home': '/private/tmp/factory', 'journal': '/private/tmp/journal'}
-        secret = 'token=should-not-appear'
-        with patch.object(autonomy.subprocess, 'run', return_value=subprocess.CompletedProcess([], 1, secret, 'gate refused: ' + secret)), \
-             contextlib.redirect_stderr(io.StringIO()) as log:
-            result = autonomy.tick(Path('/private/tmp/config'), config)
-        self.assertEqual([{'component': 'factory-intake', 'ok': False, 'error': 'exit_1'}], result)
-        # A bare status named no cause for four hours of identical ticks: the
-        # controller's own log carries the redacted diagnostic the receipt must not.
-        self.assertEqual('factory-intake exit_1: gate refused: token=***', log.getvalue().strip())
-        self.assertNotIn('should-not-appear', log.getvalue())
+        with contextlib.redirect_stderr(io.StringIO()) as log:
+            self.assertEqual([], autonomy.tick(Path('/private/tmp/config'), config))
+        self.assertEqual('', log.getvalue())
 
-    def test_silent_component_failure_still_names_itself_on_the_controller_log(self):
+    def test_source_polling_failure_is_owned_by_daemon(self):
         config = {'factory_home': '/private/tmp/factory', 'journal': '/private/tmp/journal'}
-        with patch.object(autonomy.subprocess, 'run', return_value=subprocess.CompletedProcess([], 2, '', '')), \
-             contextlib.redirect_stderr(io.StringIO()) as log:
-            autonomy.tick(Path('/private/tmp/config'), config)
-        self.assertEqual('factory-intake exit_2: no stderr diagnostic', log.getvalue().strip())
+        with patch.object(autonomy.subprocess, 'run') as run:
+            self.assertEqual([], autonomy.tick(Path('/private/tmp/config'), config))
+        run.assert_not_called()
 
     def test_health_receipt_is_private_and_finite(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -256,7 +247,7 @@ class AutonomyTest(unittest.TestCase):
                     time.sleep(.01)
                 normal = subprocess.run([sys.executable, str(script), str(config), '--once'], capture_output=True, text=True, timeout=5)
                 self.assertEqual(0, normal.returncode, normal.stderr)
-                self.assertEqual(['factory-intake', 'factory-review-intake'],
+                self.assertEqual(['factory-review-intake'],
                                  [item['component'] for item in json.loads(normal.stdout)['components']])
                 duplicate = subprocess.run([sys.executable, str(script), str(config), '--once', '--release-only'], capture_output=True, text=True, timeout=5)
                 self.assertNotEqual(0, duplicate.returncode)
