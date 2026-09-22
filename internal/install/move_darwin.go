@@ -17,12 +17,18 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"golang.org/x/sys/unix"
+
 	_ "github.com/ncruces/go-sqlite3/driver"
 )
 
 // moveAfterPublishHook is package-local test instrumentation for the narrow
 // interval where the destination is visible but the source lease is retained.
 var moveAfterPublishHook func()
+
+// moveBeforePublishHook runs after the source is set aside and before the
+// exclusive publication rename; tests use it to race a foreign destination.
+var moveBeforePublishHook func()
 
 func moveHome(ctx context.Context, from, to string) (resultErr error) {
 	if err := ctx.Err(); err != nil {
@@ -106,8 +112,22 @@ func moveHome(ctx context.Context, from, to string) (resultErr error) {
 	if err := os.Rename(from, old); err != nil {
 		return cleanupBeforePublish(err)
 	}
-	if err := os.Rename(stage, to); err != nil {
-		return errors.Join(err, rollbackMove(to, old, nil), fmt.Errorf("backup retained at %s", backupDir))
+	if moveBeforePublishHook != nil {
+		moveBeforePublishHook()
+	}
+	// RENAME_EXCL: a directory that appeared at the destination since the
+	// absence check above is never replaced; the move fails and restores
+	// the source instead.
+	parent, err := os.Open(filepath.Dir(to))
+	if err != nil {
+		return errors.Join(err, os.Rename(old, from), cleanupBeforePublish(nil))
+	}
+	err = unix.RenameatxNp(int(parent.Fd()), filepath.Base(stage), int(parent.Fd()), filepath.Base(to), unix.RENAME_EXCL)
+	if err = errors.Join(err, parent.Close()); err != nil {
+		if restoreErr := os.Rename(old, from); restoreErr != nil {
+			return errors.Join(fmt.Errorf("publish home: %w", err), restoreErr, fmt.Errorf("old home retained at %s; backup retained at %s", old, backupDir))
+		}
+		return cleanupBeforePublish(fmt.Errorf("publish home: %w", err))
 	}
 	if moveAfterPublishHook != nil {
 		moveAfterPublishHook()

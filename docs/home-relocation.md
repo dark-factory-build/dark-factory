@@ -19,8 +19,11 @@ The move operation must therefore:
 1. Refuse a non-absolute, equal, existing, symlinked, or operator-unowned
    source/target; refuse unless the service is stopped and every run is
    terminal.
-2. Verify the source with `doctor`, take a mode-preserving verified backup,
-   and stage the destination beside the source.
+2. Open and lease the source with the operational-home validation (the same
+   `OpenOperationalHome` the daemon uses: exact member census, owner-only
+   modes, format and token, database with its WAL sidecars, runtime and
+   change directories present but not traversed), take a mode-preserving
+   verified backup, and stage the destination beside the source.
 3. Rewrite only path-bearing durable values from the exact old prefix to the
    exact new prefix in one SQLite transaction. Reject a value that is not an
    exact path or path descendant; never do an unrestricted byte replacement.
@@ -29,10 +32,14 @@ The move operation must therefore:
 5. Refuse relocation while a service artifact exists. The supported service
    procedure below stops and uninstalls it first, then reinstalls it at the
    destination after publication.
-6. Run `doctor` against the staged destination, publish it with an atomic
-   rename, then repair external Git metadata and run doctor plus a status read
-   at the destination. A post-publish failure restores the old home and the
-   saved Git metadata; the verified backup remains for manual recovery.
+6. Validate the staged destination with `OpenOperationalHome`, publish it
+   with an exclusive rename (`RENAME_EXCL`: a directory that appeared at the
+   destination meanwhile is never replaced; the move fails and restores the
+   source), then repair external Git metadata and validate the published home
+   with `OpenOperationalHome` again, holding the source's lease throughout.
+   Strict `doctor` is for fresh homes only and refuses a populated one. A
+   post-publish failure restores the old home and the saved Git metadata; the
+   verified backup remains for manual recovery.
 
 Recovery cannot atomically replace a live service receipt: launchd stores its
 label and plist outside the home, and the receipt digest is part of the
@@ -54,7 +61,6 @@ factoryctl service status --home OLD
 factoryctl service uninstall --home OLD
 factoryctl home move --from OLD --to NEW
 factoryctl service install --home NEW
-factoryctl doctor --home NEW
 factoryctl status
 ```
 
@@ -64,18 +70,20 @@ a different process may still own it.
 
 The checked-in proof covers a disposable initialized home, refusal that leaves
 the source unchanged, and a populated project with a registered linked Change
-and terminal run; it runs doctor and a status-equivalent store snapshot at the
-new path. Worktree-repair failure snapshots and restores the external Git
+and terminal run; it opens the moved home with `OpenOperationalHome` and reads
+a store snapshot at the new path. Worktree-repair failure snapshots and restores the external Git
 administration before rolling the home rename back, so a failed move cannot
 leave links pointing at the unpublished destination.
 
 If a process crash leaves `.move-old`, `.move-stage-*`, or
 `.move-backup-*`, do not delete either home or any backup blindly. Stop and
 uninstall the service, confirm no run is non-terminal, inspect the candidates
-with `doctor`, and retain the newest complete verified home. Remove only the
+with `doctor` (a fresh home) or by starting the service there and reading
+`factoryctl status` (a populated home), and retain the newest complete
+verified home. Remove only the
 unselected stage/backup after the selected home is healthy; if `.move-old` and
-the destination both exist, use the destination only after doctor and status
-pass, otherwise restore `.move-old` to the original name. Reinstall the
+the destination both exist, use the destination only after that validation
+and status pass, otherwise restore `.move-old` to the original name. Reinstall the
 service only after one canonical home remains. This procedure is the supported
 collision recovery boundary because launchd and external Git metadata cannot
 be committed in the same filesystem rename transaction.
