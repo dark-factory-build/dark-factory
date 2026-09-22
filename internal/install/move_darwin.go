@@ -86,6 +86,9 @@ func moveHome(ctx context.Context, from, to string) (resultErr error) {
 	if err := rewriteDatabasePaths(ctx, filepath.Join(stage, databaseName), from, to); err != nil {
 		return cleanupBeforePublish(err)
 	}
+	if err := restoreSidecarModes(stage); err != nil {
+		return cleanupBeforePublish(err)
+	}
 	stagedHome, err := OpenOperationalHome(ctx, stage)
 	if err != nil {
 		return cleanupBeforePublish(err)
@@ -112,6 +115,9 @@ func moveHome(ctx context.Context, from, to string) (resultErr error) {
 	worktreeRestore, err := repairMovedWorktrees(ctx, filepath.Join(to, databaseName), to)
 	if err != nil {
 		return errors.Join(err, rollbackMove(to, old, nil), fmt.Errorf("backup retained at %s", backupDir))
+	}
+	if err := restoreSidecarModes(to); err != nil {
+		return errors.Join(err, worktreeRestore.rollback(), rollbackMove(to, old, nil), fmt.Errorf("backup retained at %s", backupDir))
 	}
 	publishedHome, err := openOperationalHomeWithLock(ctx, to, lockedHome.state.lock)
 	if err != nil {
@@ -155,6 +161,20 @@ func rollbackMove(destination, old string, restore func() error) error {
 		return errors.Join(restoreErr, err)
 	}
 	return errors.Join(restoreErr, os.Rename(old, strings.TrimSuffix(old, ".move-old")))
+}
+
+// The relocation opens the copied database through the WASM sqlite driver,
+// which creates any missing -wal and -shm sidecars with 0666 less the
+// umask and leaves them behind. An operational home requires every member
+// to be owner-only 0600, so put the sidecars back before validating.
+func restoreSidecarModes(home string) error {
+	for _, suffix := range []string{"-wal", "-shm"} {
+		name := filepath.Join(home, databaseName+suffix)
+		if err := os.Chmod(name, 0o600); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("restore %s mode: %w", filepath.Base(name), err)
+		}
+	}
+	return nil
 }
 
 func copyTree(src, dst string) error {
