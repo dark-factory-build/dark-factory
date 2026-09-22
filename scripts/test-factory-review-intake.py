@@ -491,6 +491,20 @@ class ReviewIntakeTest(unittest.TestCase):
         activity = json.loads(review.review_activity_path(self.config, {'number': 9}, operation).read_text())
         self.assertEqual({'operation': operation['review_operation'], 'pr': 9, 'head': SHA, 'repository': 'o/r', 'pid': 123, 'process_start': 'Sat Sep 20 12:00:00 2026', 'exit': 0}, {key: activity[key] for key in ('operation', 'pr', 'head', 'repository', 'pid', 'process_start', 'exit')})
 
+    def test_pre_review_gate_shifts_environment_script_before_timeout(self):
+        mirror = Path(self.temp.name) / 'mirror'
+        mirror.mkdir()
+        (mirror / 'HEAD').write_text('ref: refs/heads/main\n')
+        destination = Path(self.temp.name) / 'gate.json'
+        with patch.object(review.intake, 'command') as command, \
+             patch.object(review.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0)) as run:
+            receipt = review.run_full_gate(mirror, self.operation, destination)
+        self.assertEqual(destination.with_suffix('.gate.json'), receipt)
+        argv = run.call_args_list[0].args[0]
+        self.assertIn('. "$1"; shift; go_gate_run_bounded "$@"', argv[2])
+        self.assertEqual('1800', argv[-2])
+        command.assert_called_once()
+
     def test_app_receipt_is_exact_and_observation_does_not_write(self):
         # Resolve the original function from a separate module, not the fixture mock.
         spec = importlib.util.spec_from_file_location('real_review', Path(review.__file__))

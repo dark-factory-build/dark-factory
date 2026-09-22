@@ -1,0 +1,144 @@
+// Package review contains the daemon-owned exact-head review state machine.
+package review
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"regexp"
+	"strings"
+	"time"
+)
+
+var shaRE = regexp.MustCompile(`^[0-9a-f]{40}$`)
+
+type Request struct {
+	Repository string
+	PullNumber uint64
+	Head       string
+	Base       string
+	Body       string
+	Provider   string
+}
+
+type Operation struct {
+	ID        string    `json:"id"`
+	Request   Request   `json:"request"`
+	State     string    `json:"state"`
+	Verdict   string    `json:"verdict,omitempty"`
+	Detail    string    `json:"detail,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+type Verdict struct {
+	Event string
+	Body  string
+}
+
+type Store interface {
+	Create(context.Context, Operation) error
+	Update(context.Context, Operation) error
+}
+
+type Backend interface {
+	CloneReadOnly(context.Context, Request) (string, func(), error)
+	Review(context.Context, string, Request) (Verdict, error)
+	Submit(context.Context, Operation, Verdict) error
+	Enqueue(context.Context, Operation) error
+}
+
+type Coordinator struct {
+	Store   Store
+	Backend Backend
+	Now     func() time.Time
+}
+
+func (c Coordinator) Start(ctx context.Context, request Request) (Operation, error) {
+	if err := validate(request); err != nil || c.Store == nil || c.Backend == nil || c.Now == nil {
+		if err == nil {
+			err = errors.New("review: incomplete coordinator")
+		}
+		return Operation{}, err
+	}
+	id, err := operationID()
+	if err != nil {
+		return Operation{}, err
+	}
+	now := c.Now()
+	op := Operation{ID: id, Request: request, State: "running", CreatedAt: now, UpdatedAt: now}
+	// The record is durable before any provider or clone is started. A crash
+	// after this point is therefore observable and retryable, never invisible.
+	if err := c.Store.Create(ctx, op); err != nil {
+		return Operation{}, err
+	}
+	checkout, cleanup, err := c.Backend.CloneReadOnly(ctx, request)
+	if err != nil {
+		return c.fail(ctx, op, err)
+	}
+	defer cleanup()
+	verdict, err := c.Backend.Review(ctx, checkout, request)
+	if err != nil {
+		return c.fail(ctx, op, err)
+	}
+	if verdict.Event != "ALLOW" && verdict.Event != "REQUEST_CHANGES" {
+		return c.fail(ctx, op, errors.New("review: provider returned no valid verdict"))
+	}
+	op.Verdict, op.Detail, op.UpdatedAt = strings.ToLower(verdict.Event), verdict.Body, c.Now()
+	if err := c.Store.Update(ctx, op); err != nil {
+		return Operation{}, err
+	}
+	if err := c.Backend.Submit(ctx, op, verdict); err != nil {
+		return c.fail(ctx, op, err)
+	}
+	if verdict.Event == "ALLOW" {
+		if err := c.Backend.Enqueue(ctx, op); err != nil {
+			return c.fail(ctx, op, err)
+		}
+		op.State = "enqueued"
+	} else {
+		op.State = "completed"
+	}
+	op.UpdatedAt = c.Now()
+	if err := c.Store.Update(ctx, op); err != nil {
+		return Operation{}, err
+	}
+	return op, nil
+}
+
+// Retry starts a new durable attempt for a failed operation. The original
+// failure remains immutable history; the request is reused so the retry cannot
+// silently move to a different pull-request head.
+func (c Coordinator) Retry(ctx context.Context, failed Operation) (Operation, error) {
+	if failed.State != "failed" {
+		return Operation{}, errors.New("review: only failed operations are retryable")
+	}
+	return c.Start(ctx, failed.Request)
+}
+
+func (c Coordinator) fail(ctx context.Context, op Operation, cause error) (Operation, error) {
+	op.State, op.Detail, op.UpdatedAt = "failed", cause.Error(), c.Now()
+	if err := c.Store.Update(ctx, op); err != nil {
+		return Operation{}, errors.Join(cause, err)
+	}
+	return op, cause
+}
+
+func validate(r Request) error {
+	if !strings.Contains(r.Repository, "/") || r.PullNumber == 0 || !shaRE.MatchString(r.Head) || !shaRE.MatchString(r.Base) || r.Body == "" || (r.Provider != "codex" && r.Provider != "claude") {
+		return errors.New("review: invalid exact-head request")
+	}
+	return nil
+}
+
+func operationID() (string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	b[6] = (b[6] & 0x0f) | 0x40
+	b[8] = (b[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%s-%s-%s-%s-%s", hex.EncodeToString(b[:4]), hex.EncodeToString(b[4:6]), hex.EncodeToString(b[6:8]), hex.EncodeToString(b[8:10]), hex.EncodeToString(b[10:])), nil
+}

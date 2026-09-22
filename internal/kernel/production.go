@@ -337,6 +337,31 @@ func (store *Store) RecordPublication(ctx context.Context, project ProjectID, ta
 	return tx.Commit(ctx)
 }
 
+// RecordReviewOperation keeps review lifecycle state in the same durable
+// production projection as the published pull request. The caller writes the
+// initial running record before launching an untrusted provider.
+func (store *Store) RecordReviewOperation(ctx context.Context, project ProjectID, repo, operationID string, document any, at UnixMillis) error {
+	if project.zero() || !productionRepository.MatchString(repo) || !validOutcomeText(operationID, 128) {
+		return ErrInvalidValue
+	}
+	tx, err := store.beginValidatedWrite(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Close()
+	body, err := json.Marshal(document)
+	if err != nil {
+		return tx.Rollback(err)
+	}
+	if len(body) < 2 || len(body) > 65536 {
+		return tx.Rollback(ErrInvalidValue)
+	}
+	if err := productionRecordOnConnection(ctx, tx.connection, project, strings.ToLower(repo), "reviewer", operationID, "", document, at.Int64()); err != nil {
+		return tx.Rollback(err)
+	}
+	return tx.Commit(ctx)
+}
+
 // Current construction comes from Changes even after its worker finishes. The
 // projection replaces it only when normal publication records the association.
 const productionRows = `SELECT repository, kind, identity, visual_id, document, observed_at_ms FROM production_records WHERE project_id = ?

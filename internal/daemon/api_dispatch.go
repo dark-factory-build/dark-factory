@@ -35,6 +35,11 @@ type Daemon struct {
 	linear               *linear.Host
 	github               *maintainer.Host
 	intakeControllerHome string
+	// reviewOperation is a package-test seam; production uses reviewCoordinator.
+	reviewOperation func(context.Context, kernel.ProjectID, api.ReviewRequest) (string, error)
+	// reviewPublished is a package-test seam for the publication transition;
+	// production resolves the just-published PR through Maintainer first.
+	reviewPublished func(context.Context, kernel.ProjectID, api.ReviewRequest) (string, error)
 	// intakeIssues is a package-test-only remote failure/race seam.
 	intakeIssues func(context.Context, string, uint64, uint32, string, uint64) (maintainer.IssuePage, error)
 	// browserRemote is a package-test-only seam for operator calls that wait

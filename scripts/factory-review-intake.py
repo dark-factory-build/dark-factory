@@ -604,7 +604,7 @@ def run_full_gate(path, operation, destination):
         intake.command(["git", "-C", str(path), "worktree", "add", "--detach", str(worktree), operation["head"]], timeout=120)
         log = destination.with_suffix(".gate.log")
         with log.open("w", encoding="utf-8") as output:
-            process = subprocess.run(["/bin/sh", "-c", '. "$1"; go_gate_run_bounded "$@"', "review-gate-owner",
+            process = subprocess.run(["/bin/sh", "-c", '. "$1"; shift; go_gate_run_bounded "$@"', "review-gate-owner",
                                       str(HERE / "go-gate-environment.sh"), "1800", str(worktree / "scripts/local-ci.sh")],
                                      cwd=worktree, stdout=output, stderr=subprocess.STDOUT, timeout=1860)
         receipt = destination.with_suffix(".gate.json")

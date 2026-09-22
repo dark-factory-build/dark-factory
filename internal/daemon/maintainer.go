@@ -223,6 +223,8 @@ func (daemon *Daemon) recordMaintainerPublication(ctx context.Context, project k
 				Number uint64 `json:"number"`
 				URL    string `json:"url"`
 				Head   string `json:"head_sha"`
+				Base   string `json:"base_sha"`
+				Body   string `json:"body"`
 			} `json:"structuredContent"`
 		} `json:"result"`
 	}
@@ -239,7 +241,20 @@ func (daemon *Daemon) recordMaintainerPublication(ctx context.Context, project k
 	if err != nil {
 		return err
 	}
-	return daemon.store.RecordPublication(ctx, project, task, repo, kernel.ProductionPullRequest{Number: reply.Result.Pull.Number, Title: title, URL: reply.Result.Pull.URL, Head: reply.Result.Pull.Head, Branch: branch, Base: base, State: "open", Review: kernel.ProductionReview{Head: reply.Result.Pull.Head, State: "unknown"}}, at)
+	if err := daemon.store.RecordPublication(ctx, project, task, repo, kernel.ProductionPullRequest{Number: reply.Result.Pull.Number, Title: title, URL: reply.Result.Pull.URL, Head: reply.Result.Pull.Head, Branch: branch, Base: base, State: "open", Review: kernel.ProductionReview{Head: reply.Result.Pull.Head, State: "unknown"}}, at); err != nil {
+		return err
+	}
+	// The publication is durable before the independent review is launched.
+	// Keep this transition in the daemon, so a corrected publication follows
+	// the same exact-head path instead of the legacy host lane.
+	if daemon.reviewPublished != nil {
+		_, _ = daemon.reviewPublished(ctx, project, api.ReviewRequest{Repository: strings.ToLower(repo), PullNumber: reply.Result.Pull.Number, Head: strings.ToLower(reply.Result.Pull.Head), Base: strings.ToLower(reply.Result.Pull.Base), Body: reply.Result.Pull.Body, Provider: "codex"})
+	} else if daemon.github != nil && daemon.cleanupCtx != nil {
+		go func() {
+			_, _ = daemon.reviewPublishedPR(daemon.cleanupCtx, project, repo, reply.Result.Pull.Number, reply.Result.Pull.Head)
+		}()
+	}
+	return nil
 }
 
 // decodeMaintainerToolCall re-encodes the exact repository fields that local
