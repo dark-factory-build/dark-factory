@@ -26,6 +26,9 @@ SPEC.loader.exec_module(intake)
 PUBLICATION_SPEC = importlib.util.spec_from_file_location("factory_publication", HERE / "factory-publication.py")
 publication = importlib.util.module_from_spec(PUBLICATION_SPEC)
 PUBLICATION_SPEC.loader.exec_module(publication)
+FORMAL_SPEC = importlib.util.spec_from_file_location("factory_production_reviews", HERE / "factory-production-reviews.py")
+formal = importlib.util.module_from_spec(FORMAL_SPEC)
+FORMAL_SPEC.loader.exec_module(formal)
 SHA = re.compile(r"^[0-9a-f]{40}$")
 # ponytail: the existing controller owns one sequential review pass per home.
 CUSTOMER_REVIEW = None
@@ -299,7 +302,19 @@ def observe_operation(operation_id):
     return value
 
 
-def observe_review(config, operation):
+def observe_review(config, operation, external_reviews=None):
+    # External reviewers do not create a broker operation.  The bounded
+    # controller poll is therefore the durable event boundary for an ALLOW or
+    # BLOCK that names this exact published head.
+    if external_reviews is not None and CUSTOMER_REVIEW is None:
+        external = external_reviews.get((operation["pr"], operation["head"]))
+        if isinstance(external, dict) and external.get("state") in {"allow", "block"}:
+            operation["external_review"] = {
+                "head": operation["head"],
+                "state": external["state"],
+                "observed_at": int(time.time()),
+            }
+            return external["state"]
     value = observe_operation(operation["review_operation"])
     if value["state"] != "completed":
         return value["state"]
@@ -775,6 +790,14 @@ def run_locked(config, path, journal, journal_path, managed=None):
             raise ReviewError("review receipt is invalid")
     else:
         receipts = {"version": 2, "config_fingerprint": config_fingerprint(config), "pulls": {}}
+    external_reviews = {}
+    if CUSTOMER_REVIEW is None:
+        try:
+            external_reviews, _, _, _ = formal.collect(config["repository"])
+        except (intake.IntakeError, formal.intake.IntakeError, ValueError, json.JSONDecodeError, OSError):
+            # The App/customer route remains authoritative when configured;
+            # an unavailable poll is not evidence for either verdict.
+            external_reviews = {}
     messages = []
     page = receipts.get("discovery_page", 1)
     if type(page) is not int or page < 1:
@@ -807,7 +830,7 @@ def run_locked(config, path, journal, journal_path, managed=None):
                 raise ReviewError("review provider changed for an existing exact-head receipt")
             verify_existing(path, pr, operation)
         operation.setdefault("review_operation", str(uuid.uuid5(uuid.NAMESPACE_URL, "dark-factory:host-review:" + config["repository"] + ":" + str(pr["number"]) + ":" + operation["head"])))
-        state = observe_review(config, operation)
+        state = observe_review(config, operation, external_reviews)
         if state == "block" and not operation.get("prior_review_operation"):
             snapshot_path = review_body_path(config, pr, operation)
             try:
@@ -830,7 +853,7 @@ def run_locked(config, path, journal, journal_path, managed=None):
                 operation["correction_body"] = pr["body"]
                 snapshot_path.write_text(pr["body"])
                 intake.atomic_json(journal_path, receipts)
-                state = observe_review(config, operation)
+                state = observe_review(config, operation, external_reviews)
         if operation.get("gate_state") == "failed":
             if not operation.get("gate_failure_sent_back"):
                 note = operation.get("gate_failure_note", "pre-review full gate failed: tests=unavailable. Exact head " + operation["head"] + ".")
@@ -881,7 +904,7 @@ def run_locked(config, path, journal, journal_path, managed=None):
             launched = True
             operation["review_exit"] = launch_review(config, path, pr, operation)
             intake.atomic_json(journal_path, receipts)
-            state = observe_review(config, operation)
+            state = observe_review(config, operation, external_reviews)
         if state not in {"allow", "block"}:
             state = "unresolved"
         operation["review_state"] = state
