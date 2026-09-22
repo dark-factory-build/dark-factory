@@ -13,7 +13,8 @@ read_all_pages() {
             .success == true
             and (.result_info.page? == $expected_page)
             and ((.result_info.total_pages? // 0) >= $expected_page)' >/dev/null
-        result="$(printf '%s' "${response}" | jq -ce '.result // []')"
+        printf '%s' "${response}" | jq -e '.result? | type == "array"' >/dev/null
+        result="$(printf '%s' "${response}" | jq -ce '.result')"
         all="$(jq -cn --argjson all "${all}" --argjson result "${result}" '$all + $result')"
         total_pages="$(printf '%s' "${response}" | jq -er '.result_info.total_pages')"
         [ "${page}" -ge "${total_pages}" ] && break

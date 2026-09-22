@@ -38,11 +38,19 @@ curl() {
             https://*) url=${argument} ;;
         esac
     done
-    printf '%s\n' '{"success":true,"result":[{"id":"app","domain":"maintainer.darkfactory.build/mcp"}]}'
+    case ${url} in
+        *access/apps?per_page=100\&page=1)
+            printf '%s\n' '{"success":true,"result":[{"id":"app","domain":"maintainer.darkfactory.build/mcp"}],"result_info":{"page":1,"total_pages":2}}' ;;
+        *access/apps?per_page=100\&page=2)
+            printf '%s\n' '{"success":true,"result_info":{"page":2,"total_pages":2}}' ;;
+        *)
+            echo "unexpected URL: ${url}" >&2
+            return 1 ;;
+    esac
 }
 
 if CLOUDFLARE_ACCESS_POLICY_TEST=1 main >/dev/null 2>&1; then
-    echo 'incomplete policy metadata was accepted' >&2
+    echo 'missing page result was accepted' >&2
     exit 1
 fi
 
