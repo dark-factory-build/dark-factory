@@ -151,6 +151,11 @@ func (daemon *Daemon) RunScheduler(ctx context.Context, spec SupervisorSpec) err
 				} else if at, err := daemon.timestamp(); err == nil && dispatchEnabled() {
 					_, _ = daemon.store.EnqueueIdleInstructions(ownedCtx, at)
 					_, _ = daemon.store.EnqueueOverseerWakeups(ownedCtx, at)
+					if err := daemon.processChangePublications(ownedCtx); err != nil {
+						resultErr = err
+						stopping = true
+						cancel()
+					}
 					if _, promoteErr := daemon.store.PromoteQueuedContinuations(ownedCtx, at); promoteErr != nil {
 						if cancellation := ownedCtx.Err(); cancellation == nil || !schedulerOnlyCancellation(promoteErr, cancellation) {
 							resultErr = promoteErr

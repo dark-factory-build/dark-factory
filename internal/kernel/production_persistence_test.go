@@ -62,6 +62,10 @@ func TestProductionPersistsFinalizedConstructionPublicationAndRebase(t *testing.
 	if err := store.RecordPublication(ctx, terminal.ProjectID, terminal.TaskID, "example/factory", pr, mustTime(t, 81)); err != nil {
 		t.Fatal(err)
 	}
+	facts, err := store.ChangePublicationFacts(ctx)
+	if err != nil || len(facts) != 1 || facts[0].PublishedSourceHead != "" || facts[0].BaseCommit != hex.EncodeToString(change.Selection.Commit().Bytes()) {
+		t.Fatalf("legacy publication fact = %+v, err=%v", facts, err)
+	}
 	page, err = store.Production(ctx, terminal.ProjectID, 0, 8)
 	if err != nil {
 		t.Fatal(err)
@@ -73,9 +77,18 @@ func TestProductionPersistsFinalizedConstructionPublicationAndRebase(t *testing.
 	if published == nil || published.VisualID != identity.VisualID || !containsString(published.Tasks, terminal.TaskID.String()) {
 		t.Fatalf("published association = %+v", published)
 	}
+	remoteHead := strings.Repeat("b", 40)
+	body := "Ship the machine.\n<!-- dark-factory:head=" + remoteHead + " -->\n"
+	if err := store.RecordChangePublication(ctx, terminal.ProjectID.String(), "example/factory", 7, PublicationReceipt{SourceHead: hexHead, PublishedHead: remoteHead, Delta: 12, PublishOperation: "publish-op", BodyOperation: "body-op"}, &body, "", mustTime(t, 81)); err != nil {
+		t.Fatal(err)
+	}
+	facts, err = store.ChangePublicationFacts(ctx)
+	if err != nil || len(facts) != 1 || facts[0].PublishedHead != remoteHead || facts[0].PublishedSourceHead != hexHead || facts[0].Delta != 12 || facts[0].Body != body {
+		t.Fatalf("durable publication receipt = %+v, err=%v", facts, err)
+	}
 
 	rebased := pr
-	rebased.Head = strings.Repeat("b", 40)
+	rebased.Head = remoteHead
 	rebased.Review.Head = rebased.Head
 	rebased.Review.State = "changes_requested"
 	observation.ObservedAt = 82

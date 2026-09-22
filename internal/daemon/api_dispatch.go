@@ -54,6 +54,12 @@ type Daemon struct {
 	// scheduledRun is a package-test-only seam for the scheduler's terminal
 	// completion reread. Production reads from the concrete Store.
 	scheduledRun func(context.Context, kernel.RunID) (kernel.Run, bool, error)
+	// changePublicationEvents and changePublicationActions are the daemon-owned
+	// publication loop. The event reader is durable (normally backed by the
+	// invalidation journal); nil keeps homes without a configured publisher
+	// unchanged.
+	changePublicationEvents  func(context.Context) ([]ChangePublicationEvent, error)
+	changePublicationActions ChangePublicationActions
 	// successSource* are package-test-only seams for failure-injection coverage;
 	// production source validation always reads the concrete Store.
 	successSourceRun        func(context.Context, kernel.RunID) (kernel.Run, bool, error)
@@ -142,7 +148,9 @@ func newDaemon(store *kernel.Store, now func() time.Time) (*Daemon, error) {
 		return nil, fmt.Errorf("%w: invalid daemon", kernel.ErrInvalidValue)
 	}
 	cleanupCtx, cleanupCancel := context.WithCancel(context.Background())
-	return &Daemon{store: store, now: now, cleanupCtx: cleanupCtx, cleanupCancel: cleanupCancel, browsers: make(map[*BrowserRuntime]struct{}), browserClientGates: &browserClientGates{}, attempts: make(map[kernel.RunID]*liveAttempt), supervisors: make(map[*supervisorRegistration]struct{}), schedulerWake: make(chan struct{}, 1)}, nil
+	daemon := &Daemon{store: store, now: now, cleanupCtx: cleanupCtx, cleanupCancel: cleanupCancel, browsers: make(map[*BrowserRuntime]struct{}), browserClientGates: &browserClientGates{}, attempts: make(map[kernel.RunID]*liveAttempt), supervisors: make(map[*supervisorRegistration]struct{}), schedulerWake: make(chan struct{}, 1)}
+	daemon.configureChangePublication()
+	return daemon, nil
 }
 
 // HandleConnection synchronously consumes exactly one authenticated request,

@@ -229,8 +229,11 @@ func (daemon *Daemon) recordMaintainerPublication(ctx context.Context, project k
 	if json.Unmarshal(response, &reply) != nil || reply.Result.IsError || reply.Result.Pull.Number == 0 {
 		return nil
 	}
-	var repo, title, branch, base string
-	for name, target := range map[string]*string{"repository": &repo, "title": &title, "head": &branch, "base": &base} {
+	var repo, title, branch, base, body string
+	for name, target := range map[string]*string{"repository": &repo, "title": &title, "head": &branch, "base": &base, "body": &body} {
+		if name == "body" && params.Arguments[name] == nil {
+			continue
+		}
 		if err := json.Unmarshal(params.Arguments[name], target); err != nil {
 			return err
 		}
@@ -239,7 +242,7 @@ func (daemon *Daemon) recordMaintainerPublication(ctx context.Context, project k
 	if err != nil {
 		return err
 	}
-	return daemon.store.RecordPublication(ctx, project, task, repo, kernel.ProductionPullRequest{Number: reply.Result.Pull.Number, Title: title, URL: reply.Result.Pull.URL, Head: reply.Result.Pull.Head, Branch: branch, Base: base, State: "open", Review: kernel.ProductionReview{Head: reply.Result.Pull.Head, State: "unknown"}}, at)
+	return daemon.store.RecordPublication(ctx, project, task, repo, kernel.ProductionPullRequest{Number: reply.Result.Pull.Number, Title: title, URL: reply.Result.Pull.URL, Head: reply.Result.Pull.Head, Branch: branch, Base: base, Body: body, State: "open", Review: kernel.ProductionReview{Head: reply.Result.Pull.Head, State: "unknown"}}, at)
 }
 
 // decodeMaintainerToolCall re-encodes the exact repository fields that local

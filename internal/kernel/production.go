@@ -155,6 +155,18 @@ func productionRecordOnConnection(ctx context.Context, c *sql.Conn, project Proj
 	if id == "" || !validOutcomeText(id, 256) {
 		return ErrInvalidValue
 	}
+	if kind == "pull_request" {
+		if current, ok := value.(ProductionPullRequest); ok && current.Publication == nil {
+			var document string
+			if err := c.QueryRowContext(ctx, `SELECT document FROM production_records WHERE project_id = ? AND repository = ? AND kind = 'pull_request' AND identity = ?`, project.Bytes(), repo, id).Scan(&document); err == nil {
+				var prior ProductionPullRequest
+				if json.Unmarshal([]byte(document), &prior) == nil && prior.Publication != nil {
+					current.Publication = prior.Publication
+					value = current
+				}
+			}
+		}
+	}
 	body, err := json.Marshal(value)
 	if err != nil || len(body) > 32768 {
 		return ErrInvalidValue
@@ -335,6 +347,100 @@ func (store *Store) RecordPublication(ctx context.Context, project ProjectID, ta
 		return tx.Rollback(err)
 	}
 	return tx.Commit(ctx)
+}
+
+// RecordChangePublication advances only daemon-owned publication facts. The
+// remote operation journal is the write authority; this projection makes its
+// completed receipt visible to the next scheduler pass.
+func (store *Store) RecordChangePublication(ctx context.Context, project string, repo string, pull uint64, receipt PublicationReceipt, body *string, reviewOperation string, at UnixMillis) error {
+	raw, err := hex.DecodeString(project)
+	if err != nil {
+		return ErrInvalidValue
+	}
+	projectID, err := ProjectIDFromBytes(raw)
+	if err != nil || !productionRepository.MatchString(repo) || pull == 0 || (receipt.PublishedHead == "" && reviewOperation == "") {
+		return ErrInvalidValue
+	}
+	tx, err := store.beginValidatedWrite(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Close()
+	var document string
+	if err := tx.connection.QueryRowContext(ctx, `SELECT document FROM production_records WHERE project_id = ? AND repository = ? AND kind = 'pull_request' AND identity = ?`, projectID.Bytes(), strings.ToLower(repo), strconv.FormatUint(pull, 10)).Scan(&document); err != nil {
+		return tx.Rollback(err)
+	}
+	var pr ProductionPullRequest
+	if err := json.Unmarshal([]byte(document), &pr); err != nil {
+		return tx.Rollback(ErrCorruptState)
+	}
+	if receipt.PublishedHead != "" {
+		pr.Head = receipt.PublishedHead
+	}
+	if body != nil {
+		pr.Body = *body
+	}
+	if pr.Publication == nil {
+		pr.Publication = &PublicationReceipt{}
+	}
+	if receipt.SourceHead != "" {
+		pr.Publication.SourceHead = receipt.SourceHead
+	}
+	if receipt.PublishedHead != "" {
+		pr.Publication.PublishedHead = receipt.PublishedHead
+	}
+	if receipt.Delta != 0 {
+		pr.Publication.Delta = receipt.Delta
+	}
+	if receipt.PublishOperation != "" {
+		pr.Publication.PublishOperation = receipt.PublishOperation
+	}
+	if receipt.BodyOperation != "" {
+		pr.Publication.BodyOperation = receipt.BodyOperation
+	}
+	if receipt.ReviewRequestOperation != "" {
+		pr.Publication.ReviewRequestOperation = receipt.ReviewRequestOperation
+	}
+	if reviewOperation != "" {
+		pr.Publication.ReviewOperation = reviewOperation
+	}
+	updated, err := json.Marshal(pr)
+	if err != nil {
+		return tx.Rollback(err)
+	}
+	if _, err := tx.connection.ExecContext(ctx, `UPDATE production_records SET document = ?, observed_at_ms = ? WHERE project_id = ? AND repository = ? AND kind = 'pull_request' AND identity = ?`, string(updated), at.Int64(), projectID.Bytes(), strings.ToLower(repo), strconv.FormatUint(pull, 10)); err != nil {
+		return tx.Rollback(err)
+	}
+	return tx.Commit(ctx)
+}
+
+// ChangePublicationFacts reads only retained Changes that already have a
+// recorded pull request. The rows are durable facts and safe to replay after
+// a daemon restart; callers must make each remote operation idempotent.
+func (store *Store) ChangePublicationFacts(ctx context.Context) ([]ChangePublicationFact, error) {
+	read, err := store.beginRead(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer read.Close()
+	rows, err := read.connection.QueryContext(ctx, `SELECT lower(hex(c.project_id)), lower(hex(c.id)), lower(hex(c.task_id)), pr.repository, COALESCE(json_extract(pr.document, '$.number'), 0), COALESCE(json_extract(pr.document, '$.branch'), ''), COALESCE(json_extract(pr.document, '$.base'), ''), COALESCE(json_extract(pr.document, '$.title'), ''), COALESCE(json_extract(pr.document, '$.body'), ''), lower(hex(c.base_commit)), lower(hex(c.head_commit)), COALESCE(json_extract(pr.document, '$.head'), ''), COALESCE(json_extract(pr.document, '$.publication.source_head'), ''), COALESCE(json_extract(pr.document, '$.publication.delta'), 0), COALESCE(json_extract(pr.document, '$.publication.publish_operation'), ''), COALESCE(json_extract(pr.document, '$.publication.body_operation'), ''), COALESCE(json_extract(pr.document, '$.publication.review_request_operation'), ''), COALESCE(json_extract(pr.document, '$.publication.review_operation'), ''), COALESCE(json_extract(pr.document, '$.review.head'), ''), COALESCE(json_extract(pr.document, '$.review.state'), '')
+		FROM changes c JOIN publication_tasks p ON p.project_id = c.project_id AND (p.change_id = c.id OR (p.change_id IS NULL AND p.task_id = c.task_id))
+		JOIN production_records pr ON pr.project_id = p.project_id AND pr.repository = p.repository AND pr.kind = 'pull_request' AND pr.identity = CAST(p.pull_number AS TEXT)
+        WHERE c.phase = 'retained' AND c.head_commit IS NOT NULL
+        ORDER BY c.updated_at_ms, c.id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make([]ChangePublicationFact, 0, 16)
+	for rows.Next() {
+		var fact ChangePublicationFact
+		if err := rows.Scan(&fact.ProjectID, &fact.ChangeID, &fact.TaskID, &fact.Repository, &fact.PullNumber, &fact.Branch, &fact.Base, &fact.Title, &fact.Body, &fact.BaseCommit, &fact.SettledHead, &fact.PublishedHead, &fact.PublishedSourceHead, &fact.Delta, &fact.PublishOperation, &fact.BodyOperation, &fact.ReviewRequestOperation, &fact.ReviewOperation, &fact.ReviewHead, &fact.ReviewState); err != nil {
+			return nil, err
+		}
+		result = append(result, fact)
+	}
+	return result, rows.Err()
 }
 
 // Current construction comes from Changes even after its worker finishes. The

@@ -14,19 +14,59 @@ type ProductionObservation struct {
 }
 
 type ProductionPullRequest struct {
-	Number         uint64           `json:"number"`
-	Title          string           `json:"title"`
-	URL            string           `json:"url"`
-	Head           string           `json:"head"`
-	HeadRepository string           `json:"head_repository,omitempty"`
-	Branch         string           `json:"branch"`
-	Base           string           `json:"base"`
-	State          string           `json:"state"`
-	Merge          string           `json:"merge,omitempty"`
-	MergeQueue     string           `json:"merge_queue,omitempty"`
-	MergedAt       string           `json:"merged_at,omitempty"`
-	Review         ProductionReview `json:"review"`
-	NextAction     string           `json:"next_action,omitempty"`
+	Number         uint64              `json:"number"`
+	Title          string              `json:"title"`
+	URL            string              `json:"url"`
+	Head           string              `json:"head"`
+	HeadRepository string              `json:"head_repository,omitempty"`
+	Branch         string              `json:"branch"`
+	Base           string              `json:"base"`
+	State          string              `json:"state"`
+	Merge          string              `json:"merge,omitempty"`
+	MergeQueue     string              `json:"merge_queue,omitempty"`
+	MergedAt       string              `json:"merged_at,omitempty"`
+	Review         ProductionReview    `json:"review"`
+	NextAction     string              `json:"next_action,omitempty"`
+	Body           string              `json:"body,omitempty"`
+	Publication    *PublicationReceipt `json:"publication,omitempty"`
+}
+
+// PublicationReceipt is the daemon's durable handoff record. Head is the
+// remote branch head; SourceHead is the retained worker head that produced it.
+type PublicationReceipt struct {
+	SourceHead             string `json:"source_head"`
+	PublishedHead          string `json:"published_head"`
+	Delta                  int64  `json:"delta"`
+	PublishOperation       string `json:"publish_operation"`
+	BodyOperation          string `json:"body_operation,omitempty"`
+	ReviewRequestOperation string `json:"review_request_operation,omitempty"`
+	ReviewOperation        string `json:"review_operation,omitempty"`
+}
+
+// ChangePublicationFact joins durable Change settlement with the last
+// recorded pull-request observation. It is a read-only event projection; the
+// daemon owns the remote transition.
+type ChangePublicationFact struct {
+	ProjectID              string
+	ChangeID               string
+	TaskID                 string
+	Repository             string
+	PullNumber             uint64
+	Branch                 string
+	Base                   string
+	Title                  string
+	Body                   string
+	BaseCommit             string
+	SettledHead            string
+	PublishedHead          string
+	PublishedSourceHead    string
+	Delta                  int64
+	PublishOperation       string
+	BodyOperation          string
+	ReviewRequestOperation string
+	ReviewOperation        string
+	ReviewHead             string
+	ReviewState            string
 }
 
 type ProductionReview struct {
