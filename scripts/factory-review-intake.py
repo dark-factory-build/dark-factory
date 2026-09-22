@@ -237,22 +237,30 @@ def require_mergeable(pr):
     return True
 
 
-def refresh_mergeability(config, number):
+def refresh_mergeability(config, number, head):
+    """Read the exact pull request's mergeability; it only counts for the head under review."""
     if CUSTOMER_REVIEW is not None:
         value = bridge_call("list_pull_requests", {"page": 1, "pull_number": number}).get("structuredContent")
         pulls = value.get("pull_requests") if isinstance(value, dict) else None
         if not isinstance(pulls, list) or len(pulls) != 1:
             raise ReviewError("exact pull request mergeability is unavailable")
         item = pulls[0]
-        return {"number": item.get("number"), "mergeable": item.get("mergeable"), "mergeStateStatus": str(item.get("merge_state_status", "")).upper()}
-    raw = intake.command(["gh", "api", "repos/" + config["repository"] + "/pulls/" + str(number)], timeout=int(config.get("command_timeout", 30)))
-    try:
-        value = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise ReviewError("exact pull request mergeability is unavailable") from exc
-    if not isinstance(value, dict):
-        raise ReviewError("exact pull request mergeability is unavailable")
-    return {"number": value.get("number"), "mergeable": value.get("mergeable"), "mergeStateStatus": str(value.get("mergeable_state", "")).upper()}
+        current = {"number": item.get("number"), "headRefOid": item.get("head_sha"), "mergeable": item.get("mergeable"), "mergeStateStatus": str(item.get("merge_state_status", "")).upper()}
+    else:
+        raw = intake.command(["gh", "api", "repos/" + config["repository"] + "/pulls/" + str(number)], timeout=int(config.get("command_timeout", 30)))
+        try:
+            value = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise ReviewError("exact pull request mergeability is unavailable") from exc
+        if not isinstance(value, dict):
+            raise ReviewError("exact pull request mergeability is unavailable")
+        current = {"number": value.get("number"), "headRefOid": (value.get("head") or {}).get("sha") if isinstance(value.get("head"), dict) else None,
+                   "mergeable": value.get("mergeable"), "mergeStateStatus": str(value.get("mergeable_state", "")).upper()}
+    if current["number"] != number:
+        raise ReviewError("exact pull request read returned PR #" + str(current["number"]) + " instead of #" + str(number))
+    if current["headRefOid"] != head:
+        raise ReviewError("pull request head moved from " + str(head) + " to " + str(current["headRefOid"]) + " since discovery; this head is no longer under review")
+    return current
 
 
 def send_back_merge_conflict(config, operation, journal_path, receipts, messages, pr):
@@ -877,7 +885,7 @@ def run_locked(config, path, journal, journal_path, managed=None):
                 continue
             if "mergeable" not in pr or "mergeStateStatus" not in pr:
                 # GitHub's list endpoint omits mergeability; only the exact PR read has it.
-                pr.update(refresh_mergeability(config, pr["number"]))
+                pr.update(refresh_mergeability(config, pr["number"], operation["head"]))
                 if merge_conflict(pr):
                     send_back_merge_conflict(config, operation, journal_path, receipts, messages, pr)
                     continue
@@ -986,7 +994,7 @@ def run_locked(config, path, journal, journal_path, managed=None):
                         verify_review_body(config, pr, operation)
                     elif existing_enqueue == "queued":
                         operation["enqueue_state"] = "queued"
-                current = refresh_mergeability(config, pr["number"])
+                current = refresh_mergeability(config, pr["number"], operation["head"])
                 if merge_conflict(current):
                     send_back_merge_conflict(config, operation, journal_path, receipts, messages, pr)
                     continue
@@ -994,7 +1002,7 @@ def run_locked(config, path, journal, journal_path, managed=None):
                 enqueue_allowed(config, operation, journal_path, receipts)
                 if operation.get("enqueue_state") == "refused":
                     try:
-                        current = refresh_mergeability(config, pr["number"])
+                        current = refresh_mergeability(config, pr["number"], operation["head"])
                     except (ReviewError, intake.IntakeError):
                         current = None
                     if current is not None and merge_conflict(current):

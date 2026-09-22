@@ -33,7 +33,8 @@ class ReviewIntakeTest(unittest.TestCase):
                                   'operation': {'task_id': 'c' * 32, 'incarnation_id': 'd' * 32}}}})
         self.observe = patch.object(review, 'observe_review', return_value='block').start()
         # Listings here omit mergeability, so every pass would read the exact PR; tests that care substitute their own.
-        self.mergeability = patch.object(review, 'refresh_mergeability', return_value={'mergeable': True, 'mergeStateStatus': 'CLEAN'}).start()
+        self.mergeability_patch = patch.object(review, 'refresh_mergeability', return_value={'mergeable': True, 'mergeStateStatus': 'CLEAN'})
+        self.mergeability = self.mergeability_patch.start()
         # No test may reach a live bridge; tests that need one substitute a fake.
         patch.object(review, 'bridge_call', side_effect=review.ReviewError('maintainer bridge is unavailable')).start()
         self.addCleanup(patch.stopall)
@@ -95,6 +96,22 @@ class ReviewIntakeTest(unittest.TestCase):
                 review.run_once(self.config)
         self.assertEqual([9], [call.args[1] for call in self.mergeability.call_args_list])
         launch.assert_not_called()
+
+    def test_exact_mergeability_for_a_moved_head_refuses_the_discovered_head(self):
+        self.mergeability_patch.stop()
+        pull = {'number': 9, 'headRefOid': SHA, 'body': 'Refs #7'}
+        moved = json.dumps({'number': 9, 'head': {'sha': 'f' * 40}, 'mergeable': True, 'mergeable_state': 'clean'})
+        with patch.object(review, 'mirror', return_value=Path('/mirror')), patch.object(review, 'list_prs', return_value=[pull]), \
+             patch.object(review, 'ready', return_value=dict(self.operation)), patch.object(review, 'verify_existing'), \
+             patch.object(review.intake, 'command', return_value=moved) as command, \
+             patch.object(review.intake, 'task_state', return_value=None), patch.object(review, 'launch_review') as launch:
+            with self.assertRaisesRegex(review.ReviewError, 'PR #9: pull request head moved from ' + SHA + ' to ' + 'f' * 40):
+                review.run_once(self.config)
+        self.assertEqual(['gh', 'api', 'repos/o/r/pulls/9'], command.call_args.args[0])
+        launch.assert_not_called()
+        with self.assertRaisesRegex(review.ReviewError, 'returned PR #10 instead of #9'):
+            with patch.object(review.intake, 'command', return_value=json.dumps({'number': 10, 'head': {'sha': SHA}})):
+                review.refresh_mergeability(self.config, 9, SHA)
 
     def test_unknown_mergeability_stops_review(self):
         with self.assertRaisesRegex(review.ReviewError, 'mergeability is unresolved'):
