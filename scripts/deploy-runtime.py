@@ -92,21 +92,23 @@ def deploy(sha, home=None):
                        stdout=subprocess.DEVNULL)
 
     def recover(exc, owned_revision):
-        """Undo exactly the pause this invocation owns and report what is left.
+        """Report what the factory was left with, undoing only a proven pause.
 
-        The daemon can commit a control change and still lose its response, so
-        the owned revision is reconciled from the store rather than from what
-        this process believes it did. A control revision beyond the owned one
-        is a later operator decision and is left alone. The receipt states the
-        store and the socket as observed: a read that failed is recorded as
-        unknown, never as a paused factory nobody saw.
+        The daemon advances its control revision on every accepted command, so
+        landing on ``original_revision + 1`` is not proof that this deployment
+        paused the factory: a concurrent operator ``dispatch off`` lands on the
+        same number. ``owned_revision`` is set only once the daemon accepted
+        ours, and stays None otherwise, which keeps a refused or unanswered
+        pause from undoing an operator's. The receipt states the store and the
+        socket as observed; a read that failed is unknown, never a paused
+        factory nobody saw.
         """
         try:
             current_enabled, revision, active = state(home)
             store_read = active >= 0
         except (OSError, sqlite3.Error):
             current_enabled, revision, store_read = None, None, False
-        if store_read and enabled and not current_enabled and revision == owned_revision:
+        if owned_revision is not None and store_read and enabled and not current_enabled and revision == owned_revision:
             try:
                 restore_dispatch(owned_revision)
             except (OSError, subprocess.SubprocessError):
@@ -122,22 +124,31 @@ def deploy(sha, home=None):
         reachable = service_reachable(home)
         failure_receipt(sha, reachable, dispatching)
         if dispatching is None:
-            note = 'state is unreadable; run factoryctl dispatch status before retrying'
+            note = 'state is unreadable; run factoryctl status before deciding whether to resume'
+        elif dispatching:
+            note = 'is on so the factory keeps working on the old build'
+        elif owned_revision is not None or not enabled:
+            note = 'remains off'
         else:
-            note = 'is on so the factory keeps working on the old build' if dispatching else 'remains off'
+            # The pause was never accepted, so it and an operator's are the
+            # same revision from here and guessing would undo theirs. A
+            # non-zero exit is no better evidence than no answer at all: the
+            # CLI can also fail after the daemon committed the change.
+            note = 'is off and this deployment cannot prove whose pause it is; run factoryctl status, then decide whether to resume (factoryctl dispatch on)'
         error = ValueError('deployment failed; dispatch ' + note + '; service_reachable=' + str(reachable).lower())
         # A refusal over a run it could not adopt installed nothing, so a later
         # attempt may simply proceed once the factory is dispatching again. An
         # unknown dispatch state is never that proof.
-        error.retryable = store_read and (dispatching is True or not enabled) and getattr(exc, 'returncode', None) == REFUSED
+        error.retryable = dispatching is not None and (dispatching or not enabled) and getattr(exc, 'returncode', None) == REFUSED
         return error
 
-    # One compensation scope: the pause, the drain reads it depends on, and the
-    # installation all own the same revision, so every way of losing the
-    # deployment from here leaves the factory reconciled and recorded.
-    owned_revision = original_revision + 1
+    # One compensation scope: the pause, the drain reads that depend on it, and
+    # the installation. Ownership is earned, not assumed -- only an accepted
+    # `dispatch off` gives this deployment a revision of its own to undo.
+    owned_revision = None
     try:
         subprocess.run([str(control), 'dispatch', 'off', '--revision', str(original_revision)], env=env, check=True, timeout=15, stdout=subprocess.DEVNULL)
+        owned_revision = original_revision + 1
         paused_state()
         while True:
             active = paused_state()[1]
@@ -149,7 +160,7 @@ def deploy(sha, home=None):
         observed = json.loads(subprocess.run([sys.executable, str(scripts / 'verify-live-runtime.py'), '--home', str(home), sha], env=env, capture_output=True, text=True, check=True, timeout=60).stdout)
         if observed.get('sha') != sha or observed.get('healthy') is not True:
             raise ValueError('runtime verification failed')
-    except (OSError, ValueError, json.JSONDecodeError, subprocess.SubprocessError) as exc:
+    except (OSError, ValueError, json.JSONDecodeError, sqlite3.Error, subprocess.SubprocessError) as exc:
         raise recover(exc, owned_revision) from exc
     current_enabled, revision, active = state(home)
     # A subsequent explicit operator dispatch change wins over our restoration.

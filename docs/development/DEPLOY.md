@@ -60,11 +60,18 @@ That phase validates the clean exact source and all three binaries’ VCS and
 release identities without compiling or waiting for the compiler lease.
 Preparation does not back up, migrate a browser profile, or alter the service.
 The pause, the drain reads and the installation share one compensation scope,
-so a `dispatch off` whose response is lost after the daemon committed it is
-reconciled like any later failure: the hook restores exactly the control
-revision it owns, reads that decision back out of the store rather than
-trusting its own call, and leaves a revision beyond it alone as the operator’s.
-The factory therefore keeps working on the old build, and the failure receipt
+and a pause is compensated only when the daemon accepted it. Because every
+accepted control command advances the revision, landing on
+`original_revision + 1` is not proof of ownership — a concurrent operator
+`dispatch off` lands on the same number. A `dispatch off` the daemon did not
+accept therefore restores nothing and says so: the hook reports that it cannot
+prove whose pause is standing and names the decision (`factoryctl status`,
+then `factoryctl dispatch on` to resume). A non-zero exit is not evidence of
+refusal either, since the CLI can fail after the daemon committed the change.
+Only an accepted pause is read back out of the store and restored at its own
+unchanged revision.
+For an accepted pause the factory therefore keeps working on the old build,
+and the failure receipt
 states what it was left with rather than what the hook attempted:
 `dispatch_enabled` comes from the store, so an operator who re-enabled dispatch
 themselves is not reported as a paused factory, and is `null` when the store

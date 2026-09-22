@@ -27,7 +27,7 @@ test('two principals: callback, pagination, refresh, replay, grants and revocati
   const grants = [], requestedPermissions = [];
   const publishedCommits = [];
   let aliceLogin = 'alice';
-  const pull = { number: 12, node_id: 'PR_fixture', html_url: 'https://github.com/team/shared/pull/12', title: 'review', body: 'Refs team/backlog#9', draft: false, head: { ref: 'topic', sha: 'b'.repeat(40) }, base: { ref: 'release+hotfix', sha: 'a'.repeat(40) }, state: 'open' };
+  const pull = { number: 12, node_id: 'PR_fixture', html_url: 'https://github.com/team/shared/pull/12', title: 'review', body: 'Refs team/backlog#9', draft: false, head: { ref: 'topic', sha: 'b'.repeat(40) }, base: { ref: 'release+hotfix', sha: 'a'.repeat(40) }, state: 'open', mergeable: true, mergeable_state: 'clean' };
   const repository = name => ({ id: 2, full_name: 'team/shared', permissions: { pull: true, push: name === 'alice' ? push : bobWrite } });
   const mf = new Miniflare(convertV4MiniflareOptions({ durableObjectsPersist: persistence, name: "fixture",
     modules: [{ type: 'ESModule', path: resolve('build/index.js'), contents: await readFile('build/index.js', 'utf8') }, { type: 'CompiledWasm', path: resolve('build/index_bg.wasm'), contents: await readFile('build/index_bg.wasm') }],
@@ -233,7 +233,7 @@ test('two principals: callback, pagination, refresh, replay, grants and revocati
     // the App's publication authority or its optional merge/deploy grants.
     const pullArgs = {repository: 'team/shared', page: 1, per_page: 1};
     const pulls = (await (await call(bob, 'list_pull_requests', pullArgs)).json()).result.structuredContent;
-    assert.deepEqual(pulls, {repository_id: 2, pull_requests: [{number: 12, body: pull.body, head_sha: pull.head.sha, base_sha: pull.base.sha, base_ref: 'release+hotfix'}], next_page: 2});
+    assert.deepEqual(pulls, {repository_id: 2, pull_requests: [{number: 12, body: pull.body, head_sha: pull.head.sha, base_sha: pull.base.sha, base_ref: 'release+hotfix', title: 'review', url: 'https://github.com/team/shared/pull/12', head_ref: 'topic', state: 'open', mergeable: true, merge_state_status: 'clean'}], next_page: 2});
     assert.deepEqual(requestedPermissions.at(-1), {metadata: 'read', pull_requests: 'read'});
     assert.deepEqual((await (await call(bob, 'list_pull_requests', {...pullArgs, page: 2})).json()).result.structuredContent.pull_requests, []);
     const exactPull = (await (await call(bob, 'list_pull_requests', {...pullArgs, pull_number: 12})).json()).result.structuredContent;

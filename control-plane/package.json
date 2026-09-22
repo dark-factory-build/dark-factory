@@ -8,6 +8,9 @@
   "scripts": {
     "test:worker": "node --test tests/worker.integration.test.mjs tests/connections.integration.test.mjs"
   },
+  "overrides": {
+    "sharp": "0.35.4"
+  },
   "devDependencies": {
     "wrangler": "4.125.0"
   }

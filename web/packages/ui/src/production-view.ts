@@ -126,6 +126,7 @@ function constructionNextAction(doc: Record<string, unknown>) {
 /** Shared queue membership and stage labels for the floor and inspector. */
 export function inProgressProduction(item: ProductionContraption): boolean {
   if (item.completed) return false;
+  if (item.pullRequest?.state === "merged" && item.deliveries.length === 0) return false;
   if (item.pullRequest) return true;
   return item.construction?.status !== "cancelled"
     && !(item.construction?.has_changes === false && item.construction.status === "succeeded");
@@ -146,7 +147,7 @@ export function productionStages(item: ProductionContraption): string[] {
   const failed = checks.some((check) => ["failure", "timed_out", "action_required"].includes(check.conclusion));
   const ci = !item.review.sourceFresh ? "CI stale" : failed ? "CI failed" : checks.some((check) => ["running", "in_progress"].includes(check.state)) ? "CI running" : checks.some((check) => ["queued", "waiting", "pending", "requested"].includes(check.state)) ? "CI queued" : checks.some((check) => check.state === "cancelled" || check.conclusion === "cancelled") ? "CI cancelled" : checks.some((check) => check.state === "skipped" || check.conclusion === "skipped") ? "CI skipped" : checks.length > 0 && checks.every((check) => check.state === "completed" && check.conclusion === "success") ? "CI passed" : "CI unknown";
   const correction = item.review.current && item.review.state === "block" || failed;
-  const review = !item.review.sourceFresh ? "Review stale" : item.review.allowed ? "Review passed" : (item.review.current && item.review.state === "running" || item.reviewers.some((reviewer) => reviewer.state === "running")) ? "Review running" : "Review pending";
+  const review = !item.review.current ? "Review stale" : !item.review.sourceFresh ? "Review stale" : item.review.allowed ? "Review passed" : (item.review.current && item.review.state === "running" || item.reviewers.some((reviewer) => reviewer.state === "running")) ? "Review running" : "Review pending";
   const merge = pr.merge_queue && !["none", "unknown"].includes(pr.merge_queue) ? "Merge queued" : item.review.allowed && ci === "CI passed" ? "Merge" : undefined;
   return correction ? ["Correction", ci] : merge ? [merge, ci] : [review, ci];
 }

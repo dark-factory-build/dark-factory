@@ -728,11 +728,17 @@ func startGitChild(spec gitCommandSpec) (*gitChild, error) {
 	command := spec.command()
 	pgid := unix.Getpgrp()
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pgid: pgid}
+	// Darwin has no kqueue1, and the daemon runs Git children beside starting
+	// runs, so exclude a concurrent fork/exec as os.Pipe below already does.
+	syscall.ForkLock.RLock()
 	kq, err := unix.Kqueue()
+	if err == nil {
+		unix.CloseOnExec(kq)
+	}
+	syscall.ForkLock.RUnlock()
 	if err != nil {
 		return nil, newGitError(gitFailureProcess)
 	}
-	unix.CloseOnExec(kq)
 	stdout, childStdout, err := os.Pipe()
 	if err != nil {
 		unix.Close(kq)

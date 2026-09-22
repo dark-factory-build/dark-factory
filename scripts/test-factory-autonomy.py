@@ -582,58 +582,100 @@ with sqlite3.connect(home / 'factory.sqlite3') as connection:
             self.assertEqual({'sha': 'a' * 40, 'healthy': False, 'dispatch_enabled': True,
                               'service_reachable': False, 'error': 'deployment_failed'}, receipt)
 
-    def test_dispatch_off_that_loses_its_response_restores_the_pause_it_owns(self):
-        # The daemon commits dispatch off at revision+1 and the client never
-        # hears back. The pause is this invocation's to undo; a revision beyond
-        # it is the operator's and stays.
-        for name, lost, bump, dispatching, restores in (
-                ('timeout', subprocess.TimeoutExpired(['factoryctl', 'dispatch', 'off'], 15), 1, True, 1),
-                ('lost response', subprocess.CalledProcessError(1, ['factoryctl', 'dispatch', 'off']), 1, True, 1),
-                ('operator moved past it', subprocess.TimeoutExpired(['factoryctl', 'dispatch', 'off'], 15), 2, False, 0)):
+    def test_only_an_accepted_pause_is_this_deployment_s_to_undo(self):
+        # Every accepted control command advances the revision, so landing on
+        # original+1 proves nothing: a concurrent operator pause lands there
+        # too. Only an accepted `dispatch off` is compensated. A non-zero exit
+        # is no better evidence than a lost response -- the CLI can fail after
+        # the daemon committed -- so both leave the pause alone and say so.
+        unproven = ('is off and this deployment cannot prove whose pause it is;'
+                    ' run factoryctl status, then decide whether to resume (factoryctl dispatch on)')
+        for name, outcome, bump, left_on, restores, said in (
+                ('accepted then the install fails', None, 1, True, 1,
+                 'is on so the factory keeps working on the old build'),
+                ('operator pause collides at +1',
+                 subprocess.CalledProcessError(1, ['factoryctl', 'dispatch', 'off'], stderr='dispatch revision is stale\n'),
+                 1, False, 0, unproven),
+                # Same non-zero exit, opposite cause: our own pause committed
+                # and the CLI lost the connection reporting it. Indistinguishable
+                # from the collision above, and it must stay that way.
+                ('non-zero exit after transport loss',
+                 subprocess.CalledProcessError(1, ['factoryctl', 'dispatch', 'off'], stderr='connection reset by peer\n'),
+                 1, False, 0, unproven),
+                ('response lost at +1', subprocess.TimeoutExpired(['factoryctl', 'dispatch', 'off'], 15), 1, False, 0,
+                 unproven)):
             with self.subTest(name=name):
                 store = {'enabled': True, 'revision': 4}
                 def command(argv, **_kwargs):
                     if 'dispatch' in argv and 'off' in argv:
+                        # The operator's pause, or ours: the store cannot say.
                         store.update(enabled=False, revision=store['revision'] + bump)
-                        raise lost
-                    if 'dispatch' in argv and 'on' in argv:
+                        if outcome is not None:
+                            raise outcome
+                    elif 'dispatch' in argv and 'on' in argv:
                         store.update(enabled=True, revision=store['revision'] + 1)
+                    elif Path(argv[1]).name == 'reinstall-service.sh' and '--prepare' not in argv:
+                        raise subprocess.TimeoutExpired(argv, 600)
                     return subprocess.CompletedProcess(argv, 0, '', '')
                 with patch.object(deploy, 'state', side_effect=lambda _home: (store['enabled'], store['revision'], 0)), \
                      patch.object(deploy, 'service_reachable', return_value=True), \
                      patch.object(deploy.subprocess, 'run', side_effect=command) as run, \
                      patch.object(deploy, 'failure_receipt') as receipt:
-                    with self.assertRaises(ValueError):
+                    with self.assertRaises(ValueError) as caught:
                         deploy.deploy('a' * 40)
-                self.assertEqual(dispatching, store['enabled'])
+                self.assertEqual(left_on, bool(store['enabled']))
                 self.assertEqual(restores, sum('on' in call.args[0] for call in run.call_args_list))
-                self.assertFalse(any('--install-prepared' in call.args[0] for call in run.call_args_list))
-                receipt.assert_called_once_with('a' * 40, True, dispatching)
+                self.assertIn(said, str(caught.exception))
+                receipt.assert_called_once_with('a' * 40, True, left_on)
 
     def test_unreadable_store_records_an_unknown_dispatch_state_not_a_false_off(self):
         # The last read is the receipt's only authority. When it fails, the
         # state is unknown: claiming "off" would send an operator to restart a
-        # factory that may be running.
-        reads = iter([(True, 4, 0), (False, 5, 0), (False, 5, 0), (False, 5, 0)])
+        # factory that may be running. An initially paused factory is the case
+        # that used to slip through as proof of a no-effect refusal.
+        for initially_enabled in (True, False):
+            with self.subTest(initially_enabled=initially_enabled):
+                reads = iter([(initially_enabled, 4, 0), (False, 5, 0), (False, 5, 0), (False, 5, 0)])
+                def store(_home):
+                    try:
+                        return next(reads)
+                    except StopIteration:
+                        raise sqlite3.OperationalError('disk I/O error')
+                def command(argv, **_kwargs):
+                    if Path(argv[1]).name == 'reinstall-service.sh' and '--prepare' not in argv:
+                        # The exit status a refusal over an unadoptable run uses.
+                        raise subprocess.CalledProcessError(deploy.REFUSED, argv, stderr='refusing: 1 non-adoptable non-terminal run(s)\n')
+                    return subprocess.CompletedProcess(argv, 0, '', '')
+                with patch.object(deploy, 'state', side_effect=store), \
+                     patch.object(deploy, 'service_reachable', return_value=True), \
+                     patch.object(deploy.subprocess, 'run', side_effect=command), \
+                     patch.object(deploy, 'failure_receipt') as receipt:
+                    with self.assertRaises(ValueError) as caught:
+                        deploy.deploy('a' * 40)
+                self.assertIn('dispatch state is unreadable; run factoryctl status before deciding whether to resume',
+                              str(caught.exception))
+                receipt.assert_called_once_with('a' * 40, True, None)
+                # Unknown is never the proof a no-effect refusal needs.
+                self.assertFalse(getattr(caught.exception, 'retryable', False))
+
+    def test_an_unreadable_store_during_the_drain_is_compensated_not_escaped(self):
+        # sqlite3.Error is not an OSError: a drain read that fails has to reach
+        # the same compensation as any other lost deployment.
+        reads = iter([(True, 4, 0), (False, 5, 0)])
         def store(_home):
             try:
                 return next(reads)
             except StopIteration:
-                raise sqlite3.OperationalError('disk I/O error')
-        def command(argv, **_kwargs):
-            if Path(argv[1]).name == 'reinstall-service.sh' and '--prepare' not in argv:
-                raise subprocess.TimeoutExpired(argv, 600)
-            return subprocess.CompletedProcess(argv, 0, '', '')
+                raise sqlite3.OperationalError('database is locked')
         with patch.object(deploy, 'state', side_effect=store), \
-             patch.object(deploy, 'service_reachable', return_value=True), \
-             patch.object(deploy.subprocess, 'run', side_effect=command), \
+             patch.object(deploy, 'service_reachable', return_value=False), \
+             patch.object(deploy.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, '', '')) as run, \
              patch.object(deploy, 'failure_receipt') as receipt:
             with self.assertRaises(ValueError) as caught:
                 deploy.deploy('a' * 40)
-        self.assertIn('dispatch state is unreadable; run factoryctl dispatch status', str(caught.exception))
-        receipt.assert_called_once_with('a' * 40, True, None)
-        # Unknown is never the proof a no-effect refusal needs.
-        self.assertFalse(getattr(caught.exception, 'retryable', False))
+        self.assertIn('deployment failed', str(caught.exception))
+        receipt.assert_called_once_with('a' * 40, False, None)
+        self.assertFalse(any('--install-prepared' in call.args[0] for call in run.call_args_list))
 
     def test_service_reachability_is_a_connect_not_a_readable_store(self):
         # Short root: sockaddr_un's sun_path is 104 bytes, and the default
