@@ -513,6 +513,20 @@ class ReviewIntakeTest(unittest.TestCase):
             with self.assertRaisesRegex(real.ReviewError, 'exact head'):
                 real.observe_review(self.config, operation)
 
+    def test_external_review_event_is_exact_head_admission_change(self):
+        spec = importlib.util.spec_from_file_location('real_review', Path(review.__file__))
+        real = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(real)
+        operation = dict(self.operation, pr=7)
+        with patch.object(real, 'observe_operation', side_effect=AssertionError('unchanged poll must not use an App operation')):
+            self.assertEqual('allow', real.observe_review(self.config, operation, {(7, SHA): {'head': SHA, 'state': 'allow'}}))
+        self.assertEqual({'head': SHA, 'state': 'allow'}, {key: operation['external_review'][key] for key in ('head', 'state')})
+
+        unchanged = dict(operation, review_operation='11111111-1111-4111-8111-111111111111')
+        unchanged.pop('external_review', None)
+        with patch.object(real, 'observe_operation', return_value={'state': 'missing'}):
+            self.assertEqual('missing', real.observe_review(self.config, unchanged, {}))
+
     def test_correction_allow_must_name_prior_block_in_app_rendered_review(self):
         spec = importlib.util.spec_from_file_location('real_review', Path(review.__file__))
         real = importlib.util.module_from_spec(spec)
