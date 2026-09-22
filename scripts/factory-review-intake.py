@@ -887,7 +887,7 @@ def run_locked(config, path, journal, journal_path, managed=None):
     discovered = list_prs(config, page)
     batch = discovery_batch_size(config)
     next_page = next_discovery_page(config, page, len(discovered))
-    launched = False
+    launched = gated = False
     for pr in discovered:
         key = str(pr["number"]) + ":" + pr["headRefOid"]
         if config.get("source_repository", config["repository"]).casefold() != config["repository"].casefold():
@@ -966,9 +966,13 @@ def run_locked(config, path, journal, journal_path, managed=None):
                     if intake.task_state(config, followup) is None and enqueue_followup(config, followup, pr, journal, managed):
                         messages.append("woke PR #" + str(pr["number"]) + " stale body")
                     continue
-                if launched:
+                if launched or gated:
                     continue
                 if (path / "HEAD").is_file():
+                    # One full gate per tick, pass or fail: the tick holds the
+                    # controller lock, and on 22 Sep 2026 a run of failing gates
+                    # held it for hours while the release lane waited.
+                    gated = True
                     try:
                         evidence = run_full_gate(path, operation, review_body_path(config, pr, operation))
                         receipt = json.loads(evidence.read_text(encoding="utf-8"))
