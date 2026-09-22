@@ -417,6 +417,28 @@ class ReviewIntakeTest(unittest.TestCase):
         self.assertTrue(receipt['review_failure_sent_back'])
         self.assertNotIn('review_send_back_error', receipt)
 
+    def test_review_rejection_reconciles_committed_send_back_after_lost_response(self):
+        prs = [{'number': 9, 'headRefOid': SHA, 'body': 'text\nRefs #7\n'}]
+        self.observe.return_value = 'block'
+        lost = review.intake.IntakeError('operator response lost')
+        before = {'task_id': 'f' * 32, 'status': 'failed', 'work_revision': 1}
+        after = {'task_id': 'f' * 32, 'status': 'queued', 'work_revision': 2}
+        with patch.object(review, 'mirror', return_value=Path('/mirror')), patch.object(review, 'list_prs', return_value=prs), \
+             patch.object(review, 'ready', return_value=self.operation), patch.object(review, 'verify_existing'), \
+             patch.object(review, 'source_task_state', side_effect=[before, after]), \
+             patch.object(review, 'send_back_source_task', side_effect=lost) as send_back, \
+             patch.object(review, 'launch_review') as launch, patch.object(review.intake, 'task_state', return_value={'status': 'queued'}):
+            first = review.run_once(self.config)
+            self.assertIn('handoff pending', first[0])
+            second = review.run_once(self.config)
+        self.assertTrue(any('sent back PR #9 review rejection' in message for message in second))
+        send_back.assert_called_once()
+        launch.assert_not_called()
+        receipt = json.loads(Path(self.config['journal'] + '.reviews.json').read_text())['pulls']['9:' + SHA]
+        self.assertEqual(1, receipt['review_send_back_source_work_revision'])
+        self.assertTrue(receipt['review_failure_sent_back'])
+        self.assertNotIn('review_send_back_error', receipt)
+
     def test_crlf_terminal_footer_links_managed_pr(self):
         journal = json.loads(Path(self.config['journal']).read_text())
         self.assertEqual(7, review.linked_issue(self.config, {'number': 9, 'body': "Summary\r\nRefs #7\r\n"}, journal))

@@ -615,6 +615,27 @@ def send_back_source_task(config, operation, note):
     return note
 
 
+def source_task_state(config, operation):
+    """Read the authoritative source task state used to reconcile send-back.
+
+    The operator command may commit and then lose its response.  A later tick
+    can prove that transition from the normal task row: send-back increments
+    work_revision and returns the task to queued.  This is evidence, not a
+    second controller journal.
+    """
+    task_id = _source_task_id(config, operation)
+    if not task_id:
+        return None
+    try:
+        with sqlite3.connect(Path(config["factory_home"], "factory.sqlite3").as_uri() + "?mode=ro", uri=True) as connection:
+            row = connection.execute("SELECT status, work_revision FROM tasks WHERE id = ?", (bytes.fromhex(task_id),)).fetchone()
+    except (sqlite3.Error, ValueError):
+        return None
+    if not row or row[0] not in {"queued", "running", "blocked", "succeeded", "failed", "cancelled"} or type(row[1]) is not int or row[1] < 1:
+        return None
+    return {"task_id": task_id, "status": row[0], "work_revision": row[1]}
+
+
 def enqueue_allowed(config, operation, journal_path, receipts):
     require_legacy_home(config)
     # One durable id per exact head, journaled before the write; an id an
@@ -1090,22 +1111,34 @@ def run_locked(config, path, journal, journal_path, managed=None):
             elif state == "block":
                 # A review rejection is a correction request for the worker
                 # that owns this Change, not a fresh task for an unrelated
-                # overseer.  Persist the marker after the send-back so a lost
-                # response cannot duplicate the transition on the next tick.
+                # overseer. Persist the pre-call work revision so a later tick
+                # can reconcile a committed send-back whose response was lost.
                 if not operation.get("review_failure_sent_back") and not operation.get("review_failure_unroutable"):
                     note = operation.get("review_failure_note") or review_failure_note(operation)
                     sent_back = False
-                    try:
-                        send_back_source_task(config, operation, note)
-                        if operation.get("send_back_unroutable"):
-                            operation["review_failure_unroutable"] = True
-                        else:
-                            sent_back = True
-                    except intake.IntakeError as exc:
-                        # Keep the exact finding durable and let the next
-                        # owned tick retry the worker handoff; a transient
-                        # operator API failure must not launch a second review.
-                        operation["review_send_back_error"] = str(exc)[:300]
+                    source_state = source_task_state(config, operation)
+                    baseline = operation.get("review_send_back_source_work_revision")
+                    if type(baseline) is int and source_state is not None \
+                            and source_state["status"] == "queued" and source_state["work_revision"] > baseline:
+                        # The prior call committed and only its response was
+                        # lost.  Normal Task evidence proves delivery, so do
+                        # not issue a duplicate send-back against queued work.
+                        sent_back = True
+                    else:
+                        if baseline is None and source_state is not None:
+                            operation["review_send_back_source_work_revision"] = source_state["work_revision"]
+                            intake.atomic_json(journal_path, receipts)
+                        try:
+                            send_back_source_task(config, operation, note)
+                            if operation.get("send_back_unroutable"):
+                                operation["review_failure_unroutable"] = True
+                            else:
+                                sent_back = True
+                        except intake.IntakeError as exc:
+                            # Keep the exact finding durable and let the next
+                            # owned tick retry the worker handoff; a transient
+                            # operator API failure must not launch a second review.
+                            operation["review_send_back_error"] = str(exc)[:300]
                     operation["review_failure_note"] = note
                     if sent_back:
                         operation["review_failure_sent_back"] = True
