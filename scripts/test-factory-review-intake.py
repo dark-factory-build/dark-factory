@@ -902,6 +902,8 @@ class ReviewIntakeTest(unittest.TestCase):
         self.observe.return_value = 'missing'
         first = dict(self.operation, review_operation='11111111-1111-4111-8111-111111111111')
         second_sha = 'e' * 40
+        failed = Path(self.temp.name) / 'failed.gate.json'
+        failed.write_text(json.dumps({'head': SHA, 'base': self.operation['base'], 'exit_code': 1}))
         evidence = Path(self.temp.name) / 'ok.gate.json'
         evidence.write_text(json.dumps({'head': second_sha, 'base': self.operation['base'], 'exit_code': 0}))
         second = dict(self.operation, head=second_sha, review_operation='22222222-2222-4222-8222-222222222222')
@@ -909,17 +911,21 @@ class ReviewIntakeTest(unittest.TestCase):
                {'number': 10, 'headRefOid': second_sha, 'body': second_sha + '\nRefs #7'}]
         with patch.object(review, 'mirror', return_value=bare), patch.object(review, 'list_prs', return_value=prs), \
              patch.object(review, 'ready', side_effect=[dict(first), dict(second)]), patch.object(review, 'verify_existing'), \
-             patch.object(review, 'run_full_gate', side_effect=[review.ReviewError('host gate exploded'), evidence]), \
+             patch.object(review, 'run_full_gate', side_effect=[failed, evidence]) as gate, \
              patch.object(review, 'send_back_source_task', side_effect=review.intake.IntakeError('original source task is unavailable')), \
              patch.object(review, 'launch_review', return_value=0) as launch, patch.object(review.intake, 'enqueue'), \
              patch.object(review.intake, 'task_state', return_value=None):
             with self.assertRaisesRegex(review.ReviewError, 'PR #9: original source task is unavailable'):
                 review.run_once(self.config)
             # One full gate per tick: the second pull request's gate and
-            # launch come on the next tick, and the first no longer blocks it.
+            # launch come on the next tick, and the first, whose failed gate
+            # is journaled, no longer blocks it.
             launch.assert_not_called()
-            review.run_once(self.config)
+            with self.assertRaisesRegex(review.ReviewError, 'PR #9: original source task is unavailable'):
+                review.run_once(self.config)
+        self.assertEqual(2, gate.call_count)
         self.assertEqual(1, launch.call_count)
+        self.assertEqual(10, launch.call_args.args[2]['number'])
 
     def test_lineage_failure_on_one_pull_request_does_not_starve_the_next_one(self):
         bare = Path(self.temp.name) / 'bare'
@@ -946,6 +952,8 @@ class ReviewIntakeTest(unittest.TestCase):
         bare.mkdir()
         (bare / 'HEAD').write_text('ref: refs/heads/main\n')
         self.observe.return_value = 'missing'
+        # Two discovered PRs fill a two-entry page, which would otherwise advance.
+        self.config['max_issues'] = 2
         second_sha = 'e' * 40
         first = dict(self.operation, review_operation='11111111-1111-4111-8111-111111111111')
         second = dict(self.operation, head=second_sha, review_operation='22222222-2222-4222-8222-222222222222')
@@ -958,9 +966,10 @@ class ReviewIntakeTest(unittest.TestCase):
              patch.object(review, 'launch_review', return_value=0) as launch, patch.object(review.intake, 'enqueue'), \
              patch.object(review.intake, 'task_state', return_value=None):
             review.run_once(self.config)
-        # The second pull request's gate waits for the next tick.
+        # The second pull request's gate waits for the next tick, on the same page.
         self.assertEqual(1, gate.call_count)
         launch.assert_not_called()
+        self.assertEqual(1, json.loads(Path(self.config['journal'] + '.reviews.json').read_text())['discovery_page'])
 
     def test_send_back_without_a_routable_task_keeps_the_note_on_the_receipt(self):
         operation = dict(self.operation)
