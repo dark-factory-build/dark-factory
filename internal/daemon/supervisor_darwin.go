@@ -44,6 +44,8 @@ func (daemon *Daemon) orchestratorRetainedSourceReviews(ctx context.Context, dig
 		if err != nil {
 			if errors.Is(err, kernel.ErrRevisionConflict) {
 				offset, head = 0, kernel.EventSequence{}
+				reviews = nil
+				seen = make(map[string]bool)
 				continue
 			}
 			return nil, err
