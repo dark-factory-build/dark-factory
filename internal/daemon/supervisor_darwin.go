@@ -12,6 +12,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 	"unicode/utf8"
@@ -49,7 +50,68 @@ type supervisorAttemptOwner struct {
 	// controller onto the runner's own takeover endpoint during shutdown.
 	// The outer child is then reparented and must never be waited, reaped,
 	// or signalled by this owner.
-	handedOver bool
+	handedOver      bool
+	outerStderr     *boundedOutput
+	outerStderrText string
+}
+
+const maxOuterStderrBytes = 4096
+
+type boundedOutput struct {
+	reader *os.File
+	writer *os.File
+	done   chan string
+}
+
+func newBoundedOutput() (*boundedOutput, error) {
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		return nil, err
+	}
+	capture := &boundedOutput{reader: reader, writer: writer, done: make(chan string, 1)}
+	go func() {
+		defer reader.Close()
+		body := make([]byte, 0, maxOuterStderrBytes)
+		buffer := make([]byte, 32<<10)
+		for {
+			n, readErr := reader.Read(buffer)
+			if n > 0 && len(body) < maxOuterStderrBytes {
+				body = append(body, buffer[:min(n, maxOuterStderrBytes-len(body))]...)
+			}
+			if readErr != nil {
+				break
+			}
+		}
+		capture.done <- string(body)
+	}()
+	return capture, nil
+}
+
+func (capture *boundedOutput) finish() string {
+	if capture == nil {
+		return ""
+	}
+	_ = capture.writer.Close()
+	return <-capture.done
+}
+
+func (capture *boundedOutput) discard() {
+	if capture == nil {
+		return
+	}
+	_ = capture.writer.Close()
+	_ = capture.reader.Close()
+	<-capture.done
+}
+
+func (capture *boundedOutput) detach() {
+	if capture == nil {
+		return
+	}
+	// The reparented runner still owns its inherited writer. Keep the reader
+	// alive so a late diagnostic cannot turn into SIGPIPE; the drainer exits
+	// when that runner eventually closes its descriptor.
+	_ = capture.writer.Close()
 }
 
 // reap waits the exact outer child and keeps what it learned. The status is the
@@ -82,7 +144,11 @@ func (owner *supervisorAttemptOwner) outerRunnerEvidence() error {
 	if exit.LaunchErr != "" {
 		launch = fmt.Sprintf(" launch=%q", exit.LaunchErr)
 	}
-	return fmt.Errorf("daemon: outer runner exit code=%d signal=%d%s", exit.Code, exit.Signal, launch)
+	stderr := ""
+	if owner.outerStderrText != "" {
+		stderr = fmt.Sprintf(" stderr=%q", owner.outerStderrText)
+	}
+	return fmt.Errorf("daemon: outer runner exit code=%d signal=%d%s%s", exit.Code, exit.Signal, launch, stderr)
 }
 
 func (owner *supervisorAttemptOwner) close() error {
@@ -117,6 +183,10 @@ func (owner *supervisorAttemptOwner) close() error {
 		// would terminate an unwaited, activated child, which is exactly the
 		// live provider group this handover keeps alive.
 		owner.child = nil
+		if owner.outerStderr != nil {
+			owner.outerStderr.detach()
+			owner.outerStderr = nil
+		}
 		return errors.Join(terminationErr, controllerErr)
 	}
 	if owner.child != nil {
@@ -141,7 +211,19 @@ func (owner *supervisorAttemptOwner) close() error {
 		}
 		owner.child = nil
 	}
+	if owner.outerStderr != nil {
+		owner.outerStderrText = owner.outerStderr.finish()
+		owner.outerStderr = nil
+	}
 	return errors.Join(terminationErr, controllerErr)
+}
+
+func (owner *supervisorAttemptOwner) closeWithEvidence() error {
+	closeErr := owner.close()
+	if owner.controller != nil && owner.controller.Spent() {
+		return errors.Join(closeErr, owner.outerRunnerEvidence())
+	}
+	return closeErr
 }
 
 func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultRun kernel.Run, resultErr error) {
@@ -530,9 +612,21 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 		_ = childControl.Close()
 		return daemon.failRun(run, kernel.FailureProtocol, err)
 	}
+	outerStderr, err := newBoundedOutput()
+	if err != nil {
+		_ = childControl.Close()
+		return daemon.failRun(run, kernel.FailureSpawn, err)
+	}
+	outerStderrOwned := true
+	defer func() {
+		if outerStderrOwned {
+			outerStderr.discard()
+		}
+	}()
 	outer, err := runner.PrepareExecSpec(runner.ExecSpec{
 		Target: spec.RunnerExecutable, Args: []string{"--attempt-runner"},
 		Env: []string{"PATH=/usr/bin:/bin", "LANG=C"}, Cwd: home, Stdin: workerConfig, Control: childControl,
+		Stderr: outerStderr.writer,
 	})
 	if err != nil {
 		_ = childControl.Close()
@@ -566,7 +660,8 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 		controllerOpen = false
 		return daemon.convergeUnstartedRunner(run, &supervisorAttemptOwner{controller: controller}, keys.resources.RunnerProcess, err)
 	}
-	owner := &supervisorAttemptOwner{controller: controller, child: child}
+	owner := &supervisorAttemptOwner{controller: controller, child: child, outerStderr: outerStderr}
+	outerStderrOwned = false
 	controllerOpen = false
 	defer func() {
 		closeErr := owner.close()
@@ -619,7 +714,7 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 
 	selectionEvent, err := releaseCheckpoint(controller, runner.StageSelection)
 	if err != nil {
-		return daemon.failRun(run, kernel.FailureSource, err)
+		return daemon.failRun(run, kernel.FailureSource, errors.Join(err, owner.closeWithEvidence()))
 	}
 	if len(selectionEvent.Payload) != 0 {
 		return daemon.failRun(run, kernel.FailureSource, errInvalidContract)
@@ -636,7 +731,7 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 	}
 	preparationEvent, err := releaseCheckpoint(controller, runner.StagePreparation)
 	if err != nil {
-		return daemon.failRun(run, kernel.FailureSource, err)
+		return daemon.failRun(run, kernel.FailureSource, errors.Join(err, owner.closeWithEvidence()))
 	}
 	var workerResult changeworker.Result
 	var selection kernel.ChangeSelection
@@ -664,7 +759,7 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 	}
 	populationEvent, err := releaseCheckpoint(controller, runner.StagePopulation)
 	if err != nil {
-		return daemon.failRun(run, kernel.FailureSource, err)
+		return daemon.failRun(run, kernel.FailureSource, errors.Join(err, owner.closeWithEvidence()))
 	}
 	if len(populationEvent.Payload) != 0 {
 		return daemon.failRun(run, kernel.FailureSource, errInvalidContract)
@@ -1154,21 +1249,25 @@ func kernelProcessExit(exit runner.Exit, at kernel.UnixMillis) (kernel.ProcessEx
 // one durable free-form field a failed run carries, it survives to terminal,
 // and it was storing a constant while the cause was discarded.
 func failureDetail(cause error) string {
-	if cause == nil {
-		return "daemon attempt failure"
+	// Every invalid byte run becomes one replacement rune, so an invalid
+	// cause of any length stays readable; the byte bound then cuts on a rune
+	// boundary so the stored prefix is itself valid. A nil or blank cause
+	// still names the failure, so a failed run never carries an empty detail.
+	detail := ""
+	if cause != nil {
+		detail = strings.ToValidUTF8(cause.Error(), "\uFFFD")
 	}
-	detail := cause.Error()
+	if strings.TrimSpace(detail) == "" {
+		return fmt.Sprintf("run failed without a cause (%T)", cause)
+	}
 	if len(detail) <= maxFailureDetailBytes {
 		return detail
 	}
-	// The bound is on bytes, so the cut can land inside a rune. Drop bytes off
-	// the end until what remains decodes, rather than storing a truncated
-	// encoding in a column that is meant to be readable.
-	detail = detail[:maxFailureDetailBytes]
-	for len(detail) > 0 && !utf8.ValidString(detail) {
-		detail = detail[:len(detail)-1]
+	cut := maxFailureDetailBytes
+	for !utf8.RuneStart(detail[cut]) {
+		cut--
 	}
-	return detail
+	return detail[:cut]
 }
 
 const maxFailureDetailBytes = 4096
