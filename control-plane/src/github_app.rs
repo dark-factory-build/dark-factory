@@ -570,6 +570,10 @@ pub(crate) struct PullRequestCandidate {
     pub(crate) head_sha: String,
     pub(crate) base_sha: String,
     pub(crate) base_ref: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) mergeable: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) merge_state_status: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -6537,6 +6541,8 @@ fn pull_request_page(
             head_sha: pull.head.sha,
             base_sha: pull.base.sha,
             base_ref: pull.base.name,
+            mergeable: pull.mergeable,
+            merge_state_status: pull.merge_state_status,
         });
     }
     Ok(PullRequestPage {
@@ -7048,6 +7054,10 @@ struct PullRequest {
     state: String,
     #[serde(default)]
     merged: bool,
+    #[serde(default)]
+    mergeable: Option<bool>,
+    #[serde(default, rename = "mergeable_state")]
+    merge_state_status: Option<String>,
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
@@ -9666,6 +9676,8 @@ mod tests {
                 },
                 state: "open".into(),
                 merged: false,
+                mergeable: None,
+                merge_state_status: None,
             })
         };
         let digest = request.reviewed_body_digest.as_deref().unwrap();
@@ -10763,6 +10775,8 @@ mod tests {
             },
             state: state.into(),
             merged,
+            mergeable: None,
+            merge_state_status: None,
         };
         assert!(
             pull("open", false, close.head_sha.clone())
@@ -11057,6 +11071,8 @@ mod tests {
             },
             state: "open".into(),
             merged: false,
+            mergeable: None,
+            merge_state_status: None,
         };
         assert_eq!(
             updated_pull.body_result(&update).unwrap().unwrap().head_sha,

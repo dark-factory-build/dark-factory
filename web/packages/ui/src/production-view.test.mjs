@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { deriveProductionView, inProgressProduction, productionStages, sharedDeliveries } from "./production-view.ts";
+import { deriveProductionView, inProgressProduction, productionStages } from "./production-view.ts";
 
 const record = (kind, id, visual_id, document, extra = {}) => ({ repository: "owner/repo", project_id: "project", kind, id, visual_id, observed_at: 10, document, tasks: [], missions: [], ...extra });
 const head = "a".repeat(40);
@@ -62,15 +62,14 @@ test("fresh repository reads cannot keep old active processes running", () => {
 });
 
 
-test("a later verified attempt supersedes failure at the same destination and shared deliveries remain one execution", () => {
+test("a later verified attempt supersedes failure at the same destination", () => {
   const pr = { number: 7, title: "Machine", head, merge: "d".repeat(40), state: "merged" };
   const failed = record("delivery", "old", "", { destination: "site", state: "failed", updated_at: 15, pull_requests: [7, 8] });
   const verified = record("delivery", "new", "", { destination: "site", state: "verified", updated_at: 25, verified_at: 25, pull_requests: [7, 8] });
   const view = deriveProductionView([record("pull_request", "7", "change:1", pr), failed, verified, { ...verified, project_id: "second-project" }]);
   assert.equal(view.contraptions[key].completed, true);
   assert.equal(view.contraptions[key].deliveries.length, 2);
-  assert.equal(sharedDeliveries(view).length, 2);
-  assert.deepEqual(sharedDeliveries(view)[0].pull_requests, [7, 8]);
+  assert.deepEqual(view.contraptions[key].deliveries.map((delivery) => delivery.pull_requests), [[7, 8], [7, 8]]);
   const pending = deriveProductionView([record("pull_request", "7", "change:1", pr), verified, { ...failed, document: { ...failed.document, updated_at: 30 } }]);
   assert.equal(pending.contraptions[key].completed, false);
 });
@@ -85,7 +84,7 @@ test("tied delivery timestamps never let success hide an unresolved attempt", ()
       const view = deriveProductionView([pr, ...order]);
       assert.equal(view.contraptions[key].completed, false);
       assert.match(view.contraptions[key].nextAction, /pending/);
-      assert.equal(sharedDeliveries(view)[0].state, state);
+      assert.equal(view.deliveries["project\0owner/repo\0newer"].state, state);
     }
   }
 });
@@ -93,7 +92,7 @@ test("tied delivery timestamps never let success hide an unresolved attempt", ()
 
 test("re-reading an old running release receipt does not prove continuing installation activity", () => {
   const view = deriveProductionView([record("delivery", "attempt", "", { destination: "host", state: "running", updated_at: 1, pull_requests: [] }, { observed_at: 200_000 })], 200_000);
-  assert.equal(sharedDeliveries(view)[0].state, "stale");
+  assert.equal(view.deliveries["project\0owner/repo\0attempt"].state, "stale");
 });
 
 

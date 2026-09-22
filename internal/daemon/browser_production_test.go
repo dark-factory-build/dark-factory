@@ -65,3 +65,38 @@ func TestBrowserProductionIsPrivateAndProjectScoped(t *testing.T) {
 		t.Fatalf("public read=%v", err)
 	}
 }
+
+// A factory holding no project must still report the version it runs, so this
+// one read may omit the project. It then answers with the build facts alone.
+func TestBrowserProductionWithoutProjectReportsOnlyTheFactoryBuild(t *testing.T) {
+	f := newAdapterFixture(t, kernel.BrowserCapabilityObserve|kernel.BrowserCapabilityPrivateHumanRequestDetail)
+	conn := f.pair(t)
+	defer conn.Close(websocket.StatusNormalClosure, "")
+	ctx := context.Background()
+	input, _ := json.Marshal(map[string]any{"project_id": "", "limit": 8})
+	result, err := f.backend.ProjectContent(ctx, rawBrowserClient(f.client.ID), browserprotocol.ProjectContent{Operation: "production", Input: input})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var output struct {
+		kernel.ProductionPage
+		Runtime api.BuildIdentity `json:"runtime"`
+	}
+	if err := json.Unmarshal(result.Output, &output); err != nil {
+		t.Fatal(err)
+	}
+	if output.Runtime != currentDaemonBuild() || output.Total != 0 || len(output.Records) != 0 {
+		t.Fatalf("projectless read = %+v", output)
+	}
+	for _, operation := range []string{"task_read", "mission_tasks"} {
+		if _, err := f.backend.ProjectContent(ctx, rawBrowserClient(f.client.ID), browserprotocol.ProjectContent{Operation: operation, Input: input}); err == nil {
+			t.Fatalf("%s accepted no project", operation)
+		}
+	}
+	noPrivate := newAdapterFixture(t, kernel.BrowserCapabilityObserve)
+	public := noPrivate.pair(t)
+	defer public.Close(websocket.StatusNormalClosure, "")
+	if _, err := noPrivate.backend.ProjectContent(ctx, rawBrowserClient(noPrivate.client.ID), browserprotocol.ProjectContent{Operation: "production", Input: input}); !errors.Is(err, browser.ErrUnauthorized) {
+		t.Fatalf("public projectless read=%v", err)
+	}
+}

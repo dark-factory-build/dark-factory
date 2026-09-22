@@ -269,9 +269,9 @@ grep -F '/usr/bin/dirname' "$repository_root/scripts/local-ci.sh" >/dev/null \
     || fail "local-ci bootstrap uses ambient dirname"
 grep -F '. "$script_dir/local-ci-environment.sh"' "$repository_root/scripts/local-ci.sh" >/dev/null \
     || fail "local-ci does not source the shared bootstrap"
-grep -F 'export PATH=/opt/homebrew/bin:/usr/bin:/bin' \
+grep -F 'export PATH="$ci_original_path"' \
     "$repository_root/scripts/local-ci-environment.sh" >/dev/null \
-    || fail "shared bootstrap lost its fixed PATH"
+    || fail "shared bootstrap lost the worker tool path"
 grep -F 'GIT_CONFIG_GLOBAL=/dev/null' \
     "$repository_root/scripts/local-ci-environment.sh" >/dev/null \
     || fail "shared bootstrap lost Git environment scrubbing"
@@ -307,7 +307,7 @@ printf '%s\n' "$non_git_output" | /usr/bin/grep -F \
 [ ! -e "$non_git_fixture/.tools" ] && [ ! -L "$non_git_fixture/.tools" ] \
     || fail "non-Git local-ci refusal created cache artifacts"
 local_fixture="$temporary/local"
-/bin/mkdir -p "$local_fixture/scripts" "$local_fixture/poison"
+/bin/mkdir -p "$local_fixture/scripts" "$local_fixture/poison" "$local_fixture/configured"
 /usr/bin/env -i PATH=/usr/bin:/bin HOME=/dev/null /usr/bin/git init -q "$local_fixture"
 /bin/cp "$repository_root/scripts/local-ci.sh" "$local_fixture/scripts/local-ci.sh"
 /bin/cp "$repository_root/scripts/local-ci-environment.sh" "$local_fixture/scripts/local-ci-environment.sh"
@@ -383,6 +383,9 @@ EOF
 /bin/chmod 755 "$local_fixture/poison/dirname" "$local_fixture/poison/node" \
     "$local_fixture/poison/corepack" "$local_fixture/poison/go" \
     "$local_fixture/scripts/go-check.sh"
+/bin/cp "$local_fixture/poison/node" "$local_fixture/poison/corepack" "$local_fixture/configured/"
+/bin/ln -s /opt/homebrew/Cellar/go/1.27.0/libexec/bin/go "$local_fixture/configured/go"
+/bin/chmod 755 "$local_fixture/configured/node" "$local_fixture/configured/corepack"
 for local_child in \
     check-toolchain-pins.sh test-local-ci-environment.sh test-new-worktree.sh \
     test-reinstall-service.sh test-deploy-site.sh test-cold-review.sh \
@@ -395,7 +398,8 @@ for local_child in \
     /bin/ln -s stub "$local_fixture/scripts/$local_child"
 done
 printf 'pass\n' >"$local_fixture/scripts/test-verify-live-runtime.py"
-printf 'process.exit(0);\n' >"$local_fixture/scripts/test-verification-profile.mjs"
+printf '#!/bin/sh\nexit 0\n' >"$local_fixture/scripts/test-verification-profile.mjs"
+/bin/chmod 755 "$local_fixture/scripts/test-verification-profile.mjs"
 
 for local_python in production production-reviews browser intake release autonomy delivery review-intake; do
     printf 'pass\n' >"$local_fixture/scripts/test-factory-$local_python.py"
@@ -407,7 +411,7 @@ run_local_fault() {
     set +e
     local_output=$(CDPATH= cd -- "$local_fixture" && DARK_FACTORY_LOCAL_CI_LEASE_HELD=1 \
         DF_GATE_FAULT="$local_mode" \
-        PATH="$local_fixture/poison:/opt/homebrew/bin:/usr/bin:/bin" \
+        PATH="$local_fixture/configured:/opt/homebrew/bin:/usr/bin:/bin" \
         /bin/sh ./scripts/local-ci.sh "$local_gate_mode" 2>&1)
     local_status=$?
     set -e
@@ -428,7 +432,7 @@ set +e
 local_output=$(CDPATH= cd -- "$local_fixture" && \
     DARK_FACTORY_LOCAL_CI_LEASE_HELD=1 DF_GATE_FAULT=env \
     OPENAI_API_KEY=probe-secret \
-    PATH="$local_fixture/poison:/opt/homebrew/bin:/usr/bin:/bin" \
+    PATH="$local_fixture/configured:/opt/homebrew/bin:/usr/bin:/bin" \
     GIT_DIR="$temporary/poisoned-git" GIT_WORK_TREE="$temporary/poisoned-tree" \
     GIT_CONFIG_GLOBAL="$temporary/poisoned-global" GIT_CONFIG_SYSTEM="$temporary/poisoned-system" \
     GIT_CONFIG_NOSYSTEM=0 /bin/sh ./scripts/local-ci.sh 2>&1)
@@ -448,7 +452,7 @@ local_cache_root=$(sed -n '2p' "$local_fixture/cache-roots")
 run_local_mode() {
     selected_mode=$1
     local_output=$(CDPATH= cd -- "$local_fixture" && DARK_FACTORY_LOCAL_CI_LEASE_HELD=1 \
-        PATH="$local_fixture/poison:/opt/homebrew/bin:/usr/bin:/bin" \
+        PATH="$local_fixture/configured:/opt/homebrew/bin:/usr/bin:/bin" \
         /bin/sh ./scripts/local-ci.sh "$selected_mode" 2>&1)
     printf '%s\n' "$local_output" | /usr/bin/grep -F "local-ci: PASS (${selected_mode#--})" >/dev/null \
         || fail "$selected_mode did not report its selected scope: $local_output"
@@ -460,7 +464,7 @@ run_local_mode --runtime
 run_local_mode --release
 : >"$local_fixture/lease-calls"
 local_output=$(CDPATH= cd -- "$local_fixture" && DARK_FACTORY_LOCAL_CI_LEASE_HELD=1 \
-    PATH="$local_fixture/poison:/opt/homebrew/bin:/usr/bin:/bin" \
+    PATH="$local_fixture/configured:/opt/homebrew/bin:/usr/bin:/bin" \
     /bin/sh ./scripts/local-ci.sh --ui 2>&1)
 printf '%s\n' "$local_output" | /usr/bin/grep -F 'local-ci: PASS (ui)' >/dev/null \
     || fail "UI gate did not complete: $local_output"
@@ -468,13 +472,13 @@ printf '%s\n' "$local_output" | /usr/bin/grep -F 'local-ci: PASS (ui)' >/dev/nul
 for selected_mode in --ui --release --runtime; do
     : >"$local_fixture/lease-calls"
     local_output=$(CDPATH= cd -- "$local_fixture" && DARK_FACTORY_LOCAL_CI_LEASE_HELD=0 \
-        PATH="$local_fixture/poison:/opt/homebrew/bin:/usr/bin:/bin" \
+        PATH="$local_fixture/configured:/opt/homebrew/bin:/usr/bin:/bin" \
         /bin/sh ./scripts/local-ci.sh "$selected_mode" 2>&1)
     [ -s "$local_fixture/lease-calls" ] || fail "$selected_mode ran heavy checks without the lease"
 done
 set +e
 local_output=$(CDPATH= cd -- "$local_fixture" && DARK_FACTORY_LOCAL_CI_LEASE_HELD=1 \
-    DF_GATE_FAULT=ui PATH="$local_fixture/poison:/opt/homebrew/bin:/usr/bin:/bin" \
+    DF_GATE_FAULT=ui PATH="$local_fixture/configured:/opt/homebrew/bin:/usr/bin:/bin" \
     /bin/sh ./scripts/local-ci.sh --ui 2>&1)
 local_status=$?
 set -e

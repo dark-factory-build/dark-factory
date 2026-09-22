@@ -39,6 +39,11 @@ type RetainedChangeHandoff struct {
 
 const OverseerSnapshotPageSize = 4
 
+// OverseerTerminalTaskLimit keeps old terminal history out of the standing
+// reconciliation set. A targeted task read remains available for explicit
+// operator investigation.
+const OverseerTerminalTaskLimit = 32
+
 type OverseerSnapshotRequest struct {
 	TaskID       *TaskID
 	Offset       uint64
@@ -165,7 +170,7 @@ func (store *Store) OverseerSnapshotForAttempt(ctx context.Context, digest Attem
 			return OverseerSnapshot{}, err
 		}
 	}
-	taskQuery, taskArgs := `SELECT id, project_id, assigned_agent_id, incarnation_id, work_revision, title, body, sent_back_instruction_bytes, status, priority, blocked_reason, result, completed_at_ms, revision, created_at_ms, updated_at_ms FROM tasks WHERE project_id = ? AND (status IN ('queued', 'running', 'blocked', 'failed') OR id IN (SELECT id FROM tasks WHERE project_id = ? AND status IN ('succeeded', 'cancelled') ORDER BY updated_at_ms DESC, id DESC LIMIT 32)) ORDER BY priority DESC, created_at_ms ASC, id ASC LIMIT ? OFFSET ?`, []any{authority.ProjectID.Bytes(), authority.ProjectID.Bytes(), OverseerSnapshotPageSize + 1, offset}
+	taskQuery, taskArgs := `SELECT id, project_id, assigned_agent_id, incarnation_id, work_revision, title, body, sent_back_instruction_bytes, status, priority, blocked_reason, result, completed_at_ms, revision, created_at_ms, updated_at_ms FROM tasks WHERE project_id = ? AND (status IN ('queued', 'running') OR id IN (SELECT id FROM tasks WHERE project_id = ? AND status IN ('blocked', 'failed', 'succeeded', 'cancelled') ORDER BY updated_at_ms DESC, id DESC LIMIT ?)) ORDER BY priority DESC, created_at_ms ASC, id ASC LIMIT ? OFFSET ?`, []any{authority.ProjectID.Bytes(), authority.ProjectID.Bytes(), OverseerTerminalTaskLimit, OverseerSnapshotPageSize + 1, offset}
 	if request.TaskID != nil {
 		taskQuery, taskArgs = `SELECT id, project_id, assigned_agent_id, incarnation_id, work_revision, title, body, sent_back_instruction_bytes, status, priority, blocked_reason, result, completed_at_ms, revision, created_at_ms, updated_at_ms FROM tasks WHERE project_id = ? AND id = ?`, []any{authority.ProjectID.Bytes(), request.TaskID.Bytes()}
 	}
