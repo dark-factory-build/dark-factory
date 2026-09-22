@@ -18,8 +18,18 @@ import (
 	_ "github.com/ncruces/go-sqlite3/driver"
 )
 
+func moveTempDir(t *testing.T) string {
+	t.Helper()
+	path := t.TempDir()
+	canonical, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return canonical
+}
+
 func TestMoveHomeRelocatesStoppedTemporaryHome(t *testing.T) {
-	parent := t.TempDir()
+	parent := moveTempDir(t)
 	from := filepath.Join(parent, "old")
 	to := filepath.Join(parent, "new")
 	if _, err := Init(context.Background(), from); err != nil {
@@ -44,7 +54,7 @@ func TestMoveHomeRelocatesStoppedTemporaryHome(t *testing.T) {
 }
 
 func TestMoveHomeRefusesExistingTargetWithoutMutation(t *testing.T) {
-	parent := t.TempDir()
+	parent := moveTempDir(t)
 	from := filepath.Join(parent, "old")
 	to := filepath.Join(parent, "new")
 	if _, err := Init(context.Background(), from); err != nil {
@@ -62,7 +72,7 @@ func TestMoveHomeRefusesExistingTargetWithoutMutation(t *testing.T) {
 }
 
 func TestMoveHomeRefusesConcurrentOperationalWriter(t *testing.T) {
-	parent := t.TempDir()
+	parent := moveTempDir(t)
 	from := filepath.Join(parent, "old")
 	to := filepath.Join(parent, "new")
 	if _, err := Init(context.Background(), from); err != nil {
@@ -88,7 +98,7 @@ func TestMoveHomeRefusesConcurrentOperationalWriter(t *testing.T) {
 }
 
 func TestMoveHomeKeepsPublishedDestinationLockedUntilValidation(t *testing.T) {
-	parent := t.TempDir()
+	parent := moveTempDir(t)
 	from := filepath.Join(parent, "old")
 	to := filepath.Join(parent, "new")
 	if _, err := Init(context.Background(), from); err != nil {
@@ -112,7 +122,7 @@ func TestMoveHomeKeepsPublishedDestinationLockedUntilValidation(t *testing.T) {
 }
 
 func TestMoveHomeRefusesEmptyServiceArtifact(t *testing.T) {
-	parent := t.TempDir()
+	parent := moveTempDir(t)
 	from := filepath.Join(parent, "old")
 	to := filepath.Join(parent, "new")
 	if _, err := Init(context.Background(), from); err != nil {
@@ -131,7 +141,7 @@ func TestMoveHomeRefusesEmptyServiceArtifact(t *testing.T) {
 
 func TestRepairMovedWorktreesRestoresExternalMetadataOnVerificationFailure(t *testing.T) {
 	ctx := context.Background()
-	root := t.TempDir()
+	root := moveTempDir(t)
 	repository := filepath.Join(root, "repository")
 	if err := os.Mkdir(repository, 0o700); err != nil {
 		t.Fatal(err)
@@ -236,7 +246,7 @@ func mustTimeForMove(value int64) kernel.UnixMillis {
 
 func TestMoveHomeRelocatesPopulatedProjectChangeAndTerminalRun(t *testing.T) {
 	ctx := context.Background()
-	root := t.TempDir()
+	root := moveTempDir(t)
 	repository := filepath.Join(root, "repository")
 	if err := os.Mkdir(repository, 0o700); err != nil {
 		t.Fatal(err)
@@ -339,7 +349,11 @@ func TestMoveHomeRelocatesPopulatedProjectChangeAndTerminalRun(t *testing.T) {
 	if err := MoveHome(ctx, from, to); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Doctor(ctx, to); err != nil {
+	validated, err := OpenOperationalHome(ctx, to)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validated.Close(); err != nil {
 		t.Fatal(err)
 	}
 	newHome, err := OpenOperationalHome(ctx, to)

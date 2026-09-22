@@ -346,27 +346,10 @@ func initHome(ctx context.Context, home string) (result Result, resultErr error)
 }
 
 func inspectHome(ctx context.Context, home string) (result Result, resultErr error) {
-	return inspectHomeWithLock(ctx, home, nil)
-}
-
-func inspectHomeWithLock(ctx context.Context, home string, heldLock *os.File) (result Result, resultErr error) {
-	if _, err := inspectStable(ctx, home, phaseBeforeDoctorSecond); err == nil {
-		return Result{State: Ready}, nil
-	} else {
-		// Doctor also proves a stopped operational home after it has acquired
-		// project, Change, or terminal-run members. The fresh-home census above
-		// remains the stricter path for bootstrap; the retained-home validator
-		// checks the populated census and database without modifying it.
-		opened, openErr := openOperationalHomeWithLock(ctx, home, heldLock)
-		if openErr == nil {
-			closeErr := opened.Close()
-			if closeErr == nil {
-				return Result{State: Ready}, nil
-			}
-			return Result{}, errors.Join(err, closeErr)
-		}
-		return Result{}, errors.Join(err, openErr)
+	if _, err := inspectStable(ctx, home, phaseBeforeDoctorSecond); err != nil {
+		return Result{}, err
 	}
+	return Result{State: Ready}, nil
 }
 
 func inspectStable(ctx context.Context, home string, secondPhase phase) (treeSnapshot, error) {
@@ -442,6 +425,9 @@ func openParent(path string) (*homeParent, error) {
 		fd, openErr := unix.Openat(int(p.file.Fd()), name, flag|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 		if openErr != nil {
 			_ = p.close()
+			if errors.Is(openErr, unix.ELOOP) || errors.Is(openErr, unix.ENOTDIR) {
+				return nil, fmt.Errorf("%w: home parent contains a symlink or non-directory component; use a canonical path", ErrInvalidHome)
+			}
 			return nil, fmt.Errorf("open home parent component: %w", openErr)
 		}
 		file := os.NewFile(uintptr(fd), filepath.Join(path, name))

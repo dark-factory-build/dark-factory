@@ -86,7 +86,11 @@ func moveHome(ctx context.Context, from, to string) (resultErr error) {
 	if err := rewriteDatabasePaths(ctx, filepath.Join(stage, databaseName), from, to); err != nil {
 		return cleanupBeforePublish(err)
 	}
-	if _, err := Doctor(ctx, stage); err != nil {
+	stagedHome, err := OpenOperationalHome(ctx, stage)
+	if err != nil {
+		return cleanupBeforePublish(err)
+	}
+	if err := stagedHome.Close(); err != nil {
 		return cleanupBeforePublish(err)
 	}
 	if err := bindMoveLock(stage, from); err != nil {
@@ -109,7 +113,11 @@ func moveHome(ctx context.Context, from, to string) (resultErr error) {
 	if err != nil {
 		return errors.Join(err, rollbackMove(to, old, nil), fmt.Errorf("backup retained at %s", backupDir))
 	}
-	if _, err := inspectHomeWithLock(ctx, to, lockedHome.state.lock); err != nil {
+	publishedHome, err := openOperationalHomeWithLock(ctx, to, lockedHome.state.lock)
+	if err != nil {
+		return errors.Join(err, worktreeRestore.rollback(), rollbackMove(to, old, nil), fmt.Errorf("backup retained at %s", backupDir))
+	}
+	if err := publishedHome.Close(); err != nil {
 		return errors.Join(err, worktreeRestore.rollback(), rollbackMove(to, old, nil), fmt.Errorf("backup retained at %s", backupDir))
 	}
 	if err := worktreeRestore.cleanup(); err != nil {
