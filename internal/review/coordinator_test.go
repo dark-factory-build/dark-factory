@@ -20,6 +20,7 @@ func (s *memoryStore) Update(_ context.Context, op Operation) error {
 
 type fakeBackend struct {
 	killed              bool
+	submitErr           error
 	submitted, enqueued bool
 }
 
@@ -34,7 +35,7 @@ func (b *fakeBackend) Review(context.Context, string, Request) (Verdict, error) 
 }
 func (b *fakeBackend) Submit(context.Context, Operation, Verdict) error {
 	b.submitted = true
-	return nil
+	return b.submitErr
 }
 func (b *fakeBackend) Enqueue(context.Context, Operation) error { b.enqueued = true; return nil }
 
@@ -42,7 +43,7 @@ func TestStartPersistsBeforeProviderAndEnqueuesExactHead(t *testing.T) {
 	store, backend := &memoryStore{}, &fakeBackend{}
 	c := Coordinator{Store: store, Backend: backend, Now: func() time.Time { return time.Unix(10, 0) }}
 	op, err := c.Start(context.Background(), Request{Repository: "org/repo", PullNumber: 7, Head: "a" + "000000000000000000000000000000000000000", Base: "b" + "000000000000000000000000000000000000000", Body: "body", Provider: "codex"})
-	if err != nil || op.State != "enqueued" || !backend.submitted || !backend.enqueued {
+	if err != nil || op.State != "enqueued" || op.EnqueueID == "" || op.EnqueueID == op.ID || !backend.submitted || !backend.enqueued {
 		t.Fatalf("operation=%+v err=%v backend=%+v", op, err, backend)
 	}
 	if len(store.values) < 1 || store.values[0].State != "running" {
@@ -54,8 +55,22 @@ func TestStartRecordsProviderFailureForRetry(t *testing.T) {
 	store, backend := &memoryStore{}, &fakeBackend{killed: true}
 	c := Coordinator{Store: store, Backend: backend, Now: time.Now}
 	op, err := c.Start(context.Background(), Request{Repository: "org/repo", PullNumber: 7, Head: "a" + "000000000000000000000000000000000000000", Base: "b" + "000000000000000000000000000000000000000", Body: "body", Provider: "claude"})
-	if err == nil || op.State != "failed" || len(store.values) < 2 || store.values[len(store.values)-1].State != "failed" {
+	if err == nil || op.State != "failed" || !op.Retryable || len(store.values) < 2 || store.values[len(store.values)-1].State != "failed" {
 		t.Fatalf("operation=%+v err=%v records=%+v", op, err, store.values)
+	}
+}
+
+func TestSubmitFailureIsDurableButNotRetryable(t *testing.T) {
+	store := &memoryStore{}
+	backend := &fakeBackend{}
+	backend.submitErr = errors.New("submit timeout after write")
+	c := Coordinator{Store: store, Backend: backend, Now: time.Now}
+	op, err := c.Start(context.Background(), Request{Repository: "org/repo", PullNumber: 7, Head: "a" + "000000000000000000000000000000000000000", Base: "b" + "000000000000000000000000000000000000000", Body: "body", Provider: "codex"})
+	if err == nil || op.State != "failed" || op.Retryable {
+		t.Fatalf("operation=%+v err=%v", op, err)
+	}
+	if _, err := c.Retry(context.Background(), op); err == nil {
+		t.Fatal("post-submit ambiguity was retryable")
 	}
 }
 

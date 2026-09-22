@@ -19,6 +19,7 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/linear"
 	"github.com/dark-factory-build/dark-factory/internal/maintainer"
 	"github.com/dark-factory-build/dark-factory/internal/provider"
+	"github.com/dark-factory-build/dark-factory/internal/review"
 )
 
 const (
@@ -40,6 +41,9 @@ type Daemon struct {
 	// reviewPublished is a package-test seam for the publication transition;
 	// production resolves the just-published PR through Maintainer first.
 	reviewPublished func(context.Context, kernel.ProjectID, api.ReviewRequest) (string, error)
+	// reviewBackend is a package-test seam; production always uses the
+	// Maintainer-backed daemonReviewBackend.
+	reviewBackend func(string, uint64) review.Backend
 	// intakeIssues is a package-test-only remote failure/race seam.
 	intakeIssues func(context.Context, string, uint64, uint32, string, uint64) (maintainer.IssuePage, error)
 	// browserRemote is a package-test-only seam for operator calls that wait

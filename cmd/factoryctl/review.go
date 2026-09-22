@@ -22,6 +22,7 @@ func runReview(ctx context.Context, args []string, getenv func(string) string, s
 	flags.StringVar(&request.Base, "base", "", "exact base SHA")
 	flags.StringVar(&request.Body, "body", "", "pull request body")
 	flags.StringVar(&request.Provider, "provider", "codex", "codex or claude")
+	flags.StringVar(&request.RetryOperation, "retry-operation", "", "retry a failed daemon review operation")
 	if flags.Parse(args) != nil || flags.NArg() != 0 || project == "" {
 		return exitUsage
 	}

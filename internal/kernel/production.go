@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"regexp"
@@ -360,6 +361,27 @@ func (store *Store) RecordReviewOperation(ctx context.Context, project ProjectID
 		return tx.Rollback(err)
 	}
 	return tx.Commit(ctx)
+}
+
+// ReviewOperation returns the last durable state for a daemon-owned review.
+func (store *Store) ReviewOperation(ctx context.Context, project ProjectID, operationID string) ([]byte, bool, error) {
+	if project.zero() || !validOutcomeText(operationID, 128) {
+		return nil, false, ErrInvalidValue
+	}
+	tx, err := store.beginRead(ctx)
+	if err != nil {
+		return nil, false, err
+	}
+	defer tx.Close()
+	var document string
+	err = tx.connection.QueryRowContext(ctx, `SELECT document FROM production_records WHERE project_id = ? AND kind = 'reviewer' AND identity = ?`, project.Bytes(), operationID).Scan(&document)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	return []byte(document), true, nil
 }
 
 // Current construction comes from Changes even after its worker finishes. The

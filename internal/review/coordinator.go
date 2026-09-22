@@ -25,8 +25,10 @@ type Request struct {
 
 type Operation struct {
 	ID        string    `json:"id"`
+	EnqueueID string    `json:"enqueue_id,omitempty"`
 	Request   Request   `json:"request"`
 	State     string    `json:"state"`
+	Retryable bool      `json:"retryable,omitempty"`
 	Verdict   string    `json:"verdict,omitempty"`
 	Detail    string    `json:"detail,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
@@ -76,26 +78,34 @@ func (c Coordinator) Start(ctx context.Context, request Request) (Operation, err
 	}
 	checkout, cleanup, err := c.Backend.CloneReadOnly(ctx, request)
 	if err != nil {
-		return c.fail(ctx, op, err)
+		return c.fail(ctx, op, err, true)
 	}
 	defer cleanup()
 	verdict, err := c.Backend.Review(ctx, checkout, request)
 	if err != nil {
-		return c.fail(ctx, op, err)
+		return c.fail(ctx, op, err, true)
 	}
 	if verdict.Event != "ALLOW" && verdict.Event != "REQUEST_CHANGES" {
-		return c.fail(ctx, op, errors.New("review: provider returned no valid verdict"))
+		return c.fail(ctx, op, errors.New("review: provider returned no valid verdict"), true)
 	}
 	op.Verdict, op.Detail, op.UpdatedAt = strings.ToLower(verdict.Event), verdict.Body, c.Now()
 	if err := c.Store.Update(ctx, op); err != nil {
 		return Operation{}, err
 	}
 	if err := c.Backend.Submit(ctx, op, verdict); err != nil {
-		return c.fail(ctx, op, err)
+		return c.fail(ctx, op, err, false)
 	}
 	if verdict.Event == "ALLOW" {
+		op.EnqueueID, err = operationID()
+		if err != nil {
+			return c.fail(ctx, op, err, false)
+		}
+		op.UpdatedAt = c.Now()
+		if err := c.Store.Update(ctx, op); err != nil {
+			return Operation{}, err
+		}
 		if err := c.Backend.Enqueue(ctx, op); err != nil {
-			return c.fail(ctx, op, err)
+			return c.fail(ctx, op, err, false)
 		}
 		op.State = "enqueued"
 	} else {
@@ -112,14 +122,14 @@ func (c Coordinator) Start(ctx context.Context, request Request) (Operation, err
 // failure remains immutable history; the request is reused so the retry cannot
 // silently move to a different pull-request head.
 func (c Coordinator) Retry(ctx context.Context, failed Operation) (Operation, error) {
-	if failed.State != "failed" {
-		return Operation{}, errors.New("review: only failed operations are retryable")
+	if failed.State != "failed" || !failed.Retryable {
+		return Operation{}, errors.New("review: only pre-submit launch failures are retryable")
 	}
 	return c.Start(ctx, failed.Request)
 }
 
-func (c Coordinator) fail(ctx context.Context, op Operation, cause error) (Operation, error) {
-	op.State, op.Detail, op.UpdatedAt = "failed", cause.Error(), c.Now()
+func (c Coordinator) fail(ctx context.Context, op Operation, cause error, retryable bool) (Operation, error) {
+	op.State, op.Detail, op.Retryable, op.UpdatedAt = "failed", cause.Error(), retryable, c.Now()
 	if err := c.Store.Update(ctx, op); err != nil {
 		return Operation{}, errors.Join(cause, err)
 	}

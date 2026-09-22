@@ -41,12 +41,13 @@ type IntakeInput struct {
 }
 
 type ReviewRequest struct {
-	Repository string `json:"repository"`
-	PullNumber uint64 `json:"pull_number"`
-	Head       string `json:"head"`
-	Base       string `json:"base"`
-	Body       string `json:"body"`
-	Provider   string `json:"provider"`
+	Repository     string `json:"repository"`
+	PullNumber     uint64 `json:"pull_number"`
+	Head           string `json:"head"`
+	Base           string `json:"base"`
+	Body           string `json:"body"`
+	Provider       string `json:"provider"`
+	RetryOperation string `json:"retry_operation,omitempty"`
 }
 type IntakeSync struct {
 	LastAttemptAt int64  `json:"last_attempt_at"`
@@ -178,6 +179,9 @@ func ValidIntakeInput(input IntakeInput) bool {
 }
 
 func validReviewRequest(value ReviewRequest) bool {
+	if value.RetryOperation != "" {
+		return reviewUUID(value.RetryOperation) && value.Repository == "" && value.PullNumber == 0 && value.Head == "" && value.Base == "" && value.Body == "" && value.Provider == ""
+	}
 	return validText(value.Repository, 3, 140) && value.PullNumber > 0 && validHex(value.Head, 20) && validHex(value.Base, 20) && validText(value.Body, 1, 65536) && (value.Provider == "codex" || value.Provider == "claude")
 }
 

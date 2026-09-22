@@ -22,6 +22,21 @@ func (daemon *Daemon) reviewPR(ctx context.Context, project kernel.ProjectID, re
 	if daemon.reviewOperation != nil {
 		return daemon.reviewOperation(ctx, project, request)
 	}
+	var failed review.Operation
+	if request.RetryOperation != "" {
+		document, found, err := daemon.store.ReviewOperation(ctx, project, request.RetryOperation)
+		if err != nil || !found {
+			return "", errors.New("review: retry operation not found")
+		}
+		if err := json.Unmarshal(document, &failed); err != nil || failed.State != "failed" || !failed.Retryable {
+			return "", errors.New("review: operation is not failed")
+		}
+		request = api.ReviewRequest{Repository: failed.Request.Repository, PullNumber: failed.Request.PullNumber, Head: failed.Request.Head, Base: failed.Request.Base, Body: failed.Request.Body, Provider: failed.Request.Provider}
+	}
+	return daemon.startReview(ctx, project, request, failed)
+}
+
+func (daemon *Daemon) startReview(ctx context.Context, project kernel.ProjectID, request api.ReviewRequest, failed review.Operation) (string, error) {
 	targets, _, unbound, err := daemon.projectMaintainerRepositories(ctx, project)
 	if err != nil {
 		return "", err
@@ -34,12 +49,20 @@ func (daemon *Daemon) reviewPR(ctx context.Context, project kernel.ProjectID, re
 		}
 		return "", kernel.ErrUnauthorized
 	}
-	if daemon.github == nil {
+	if daemon.github == nil && daemon.reviewBackend == nil {
 		return "", errors.New("review: Maintainer unavailable")
 	}
-	backend := &daemonReviewBackend{daemon: daemon, repository: repository, repositoryID: repositoryID}
+	var backend review.Backend = &daemonReviewBackend{daemon: daemon, repository: repository, repositoryID: repositoryID}
+	if daemon.reviewBackend != nil {
+		backend = daemon.reviewBackend(repository, repositoryID)
+	}
 	coordinator := review.Coordinator{Store: durableReviewStore{store: daemon.store, project: project, repository: repository, now: daemon.now}, Backend: backend, Now: daemon.now}
-	op, err := coordinator.Start(ctx, review.Request{Repository: repository, PullNumber: request.PullNumber, Head: request.Head, Base: request.Base, Body: request.Body, Provider: request.Provider})
+	var op review.Operation
+	if failed.ID != "" {
+		op, err = coordinator.Retry(ctx, failed)
+	} else {
+		op, err = coordinator.Start(ctx, review.Request{Repository: repository, PullNumber: request.PullNumber, Head: request.Head, Base: request.Base, Body: request.Body, Provider: request.Provider})
+	}
 	if err != nil {
 		return op.ID, err
 	}
@@ -59,8 +82,7 @@ func (daemon *Daemon) reviewPublishedPR(ctx context.Context, project kernel.Proj
 	if repositoryID == 0 || daemon.github == nil {
 		return "", errors.New("review: published repository unavailable")
 	}
-	request := map[string]any{"name": "list_pull_requests", "arguments": map[string]any{"repository": repository, "page": 1, "pull_number": pull}}
-	response, err := (&daemonReviewBackend{daemon: daemon, repository: repository, repositoryID: repositoryID}).callResponse(ctx, "list_pull_requests", request["arguments"].(map[string]any))
+	response, err := (&daemonReviewBackend{daemon: daemon, repository: repository, repositoryID: repositoryID}).callResponse(ctx, "list_pull_requests", map[string]any{"repository": repository, "page": 1, "pull_number": pull})
 	if err != nil {
 		return "", err
 	}
@@ -174,7 +196,7 @@ func (b *daemonReviewBackend) Submit(ctx context.Context, operation review.Opera
 }
 func (b *daemonReviewBackend) Enqueue(ctx context.Context, operation review.Operation) error {
 	digest := sha256.Sum256([]byte(operation.Request.Body))
-	return b.call(ctx, "enqueue_pull_request", map[string]any{"repository": b.repository, "pull_number": operation.Request.PullNumber, "head_sha": operation.Request.Head, "base": operation.Request.Base, "operation_id": operation.ID, "reviewed_body_digest": "sha256:" + hex.EncodeToString(digest[:])})
+	return b.call(ctx, "enqueue_pull_request", map[string]any{"repository": b.repository, "pull_number": operation.Request.PullNumber, "head_sha": operation.Request.Head, "base": operation.Request.Base, "operation_id": operation.EnqueueID, "reviewed_body_digest": "sha256:" + hex.EncodeToString(digest[:])})
 }
 func (b *daemonReviewBackend) call(ctx context.Context, name string, arguments map[string]any) error {
 	_, err := b.callResponse(ctx, name, arguments)
