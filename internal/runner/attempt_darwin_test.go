@@ -339,7 +339,7 @@ func runAttemptWorkerHelper(args []string) error {
 		case "native-raw":
 			greeting = "head -c 2048 /dev/zero | tr '\\0' x; sleep 0.3; stty -icanon || exit 96; "
 		case "native-chatty":
-			greeting = "stty -icanon || exit 96; (i=0; while [ $i -lt 20 ]; do printf .; sleep 0.1; i=$((i+1)); done) & "
+			greeting = "stty -icanon || exit 96; (i=0; while [ $i -lt 10 ]; do printf .; sleep 0.1; i=$((i+1)); done) & "
 		case "native-exit":
 			greeting = "exit 3; "
 		}
@@ -945,10 +945,13 @@ func TestAttemptRunnerSubmitsTheStartupPromptOnlyOnceTheProviderIsQuiet(t *testi
 	if body, err := os.ReadFile(startup); err != nil || string(body) != "native-startup" {
 		t.Fatalf("provider.startup=%q err=%v", body, err)
 	}
-	// Printing lasts about two seconds from the prompt; the CR follows the
-	// quiet spell after it, and never waits for the ceiling.
-	if elapsed < 2*time.Second || elapsed >= startupEnterCeiling {
-		t.Fatalf("startup line completed %v after ready, want after the chatter's two seconds and before the %v ceiling", elapsed, startupEnterCeiling)
+	// Printing lasts about one second from the prompt; the CR follows the
+	// quiet spell after it, and never waits for the ceiling. One second of
+	// chatter leaves about three times the nominal duration before the
+	// ceiling: on 22 Sep 2026 a loaded host stretched the earlier two
+	// seconds of chatter past the ceiling and failed every pre-review gate.
+	if elapsed < startupEnterFloor || elapsed >= startupEnterCeiling {
+		t.Fatalf("startup line completed %v after ready, want after the %v floor and before the %v ceiling", elapsed, startupEnterFloor, startupEnterCeiling)
 	}
 	if err := os.WriteFile(filepath.Join(f.root, "finish"), nil, 0o600); err != nil {
 		t.Fatal(err)
