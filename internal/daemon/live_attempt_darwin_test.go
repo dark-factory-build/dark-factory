@@ -9,6 +9,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -352,6 +353,56 @@ func TestLiveAttemptConsumesRefusalAfterReturnedResult(t *testing.T) {
 	}
 	if stop, err := foreign.processLifecycle(context.Background()); err != nil || stop || foreign.terminationSent {
 		t.Fatalf("foreign lifecycle = stop=%v err=%v terminated=%v", stop, err, foreign.terminationSent)
+	}
+}
+
+// Issue #1065: a provider that reports an exhausted account and then idles at
+// an interactive prompt must end its attempt with a failed outcome, not hold
+// the run (and its agent's account selection) indefinitely.
+func TestLiveAttemptProviderUsageLimitFailsTheRun(t *testing.T) {
+	fixture := newDispatchFixture(t)
+	active := prepareActiveAttempt(t, fixture, 116)
+	session, found, err := fixture.store.TerminalSessionForRun(context.Background(), active.run.ID)
+	if err != nil || !found {
+		t.Fatalf("terminal session = %+v, found=%v, err=%v", session, found, err)
+	}
+	controller, peer := readyTerminalEffectController(t)
+	t.Cleanup(func() {
+		_ = controller.Close()
+		_ = peer.Close()
+	})
+	attempt := newLiveAttempt(fixture.daemon, active.run.ID, session.ID, controller)
+	attempt.attemptDigest = active.run.CredentialDigest
+	attempt.creditOutstanding = liveAttemptCredit
+	output := func(text string) {
+		t.Helper()
+		if err := attempt.routeFrame(runner.TerminalFrame{Kind: runner.TerminalOutput, Payload: []byte(text)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Task text or tool output quoting the report is not the provider's report.
+	output("issue: The terminal shows `You've hit your usage limit ... try again at Sep 25th`\r\n")
+	if stop, err := attempt.processLifecycle(context.Background()); err != nil || stop || attempt.terminationSent {
+		t.Fatalf("quoted report lifecycle = stop=%v err=%v terminated=%v", stop, err, attempt.terminationSent)
+	}
+
+	// Codex's own error cell, styled and split across output frames.
+	output("\x1b[31m■ You've hit your us")
+	output("age limit. Upgrade to Pro or try again at Sep 25th, 3:00 PM.\x1b[39m\r\n\x1b[1mApproaching rate limits\x1b[0m")
+	if stop, err := attempt.processLifecycle(context.Background()); err != nil || stop || !attempt.terminationSent || !attempt.terminationDelivered {
+		t.Fatalf("usage limit lifecycle = stop=%v err=%v sent=%v delivered=%v", stop, err, attempt.terminationSent, attempt.terminationDelivered)
+	}
+	if frame := readTerminalEffectWire(t, peer); frame.Kind != "terminate" {
+		t.Fatalf("usage limit controller frame = %+v", frame)
+	}
+	run, found, err := fixture.store.Run(context.Background(), active.run.ID)
+	if err != nil || !found || run.Phase != kernel.RunFinalizing || run.Proposal == nil {
+		t.Fatalf("usage limit run = %+v, found=%v, err=%v", run, found, err)
+	}
+	if proposal := *run.Proposal; proposal.Kind() != kernel.OutcomeFailed || proposal.Code() != kernel.FailureProviderExit ||
+		!strings.HasPrefix(proposal.Detail(), "provider usage limit") || !strings.Contains(proposal.Detail(), "You've hit your usage limit. Upgrade to Pro or try again at Sep 25th, 3:00 PM.") {
+		t.Fatalf("usage limit proposal = %v %v %q", proposal.Kind(), proposal.Code(), proposal.Detail())
 	}
 }
 

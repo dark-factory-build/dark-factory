@@ -289,6 +289,11 @@ type liveAttempt struct {
 	// owner-bound chance to commit it. It is not terminal authority and is never
 	// recovered or replayed after this owner is gone.
 	pendingOutcome *kernel.Proposal
+	// usageLimit is a provider usage-limit report seen in live output and owed
+	// as a failed outcome; usageScan carries the tail across a frame boundary.
+	// Both belong to the owner goroutine.
+	usageLimit string
+	usageScan  []byte
 
 	subs            map[*TerminalAttachment]struct{}
 	correlations    map[uint64]*TerminalAttachment

@@ -3,6 +3,7 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -282,6 +283,21 @@ func (attempt *liveAttempt) processLifecycle(ctx context.Context) (bool, error) 
 	if attempt.resultReturned {
 		attempt.daemon.operationMu.Unlock()
 		return false, nil
+	}
+	if attempt.usageLimit != "" {
+		// The same durable edge as the provider's own `attempt fail`, under the
+		// same gate; the finalizing check below then terminates the provider.
+		// An outcome that won first leaves the run unauthorized for this one.
+		proposal, err := kernel.NewFailureProposal(kernel.FailureProviderExit, attempt.usageLimit)
+		at, timeErr := attempt.daemon.timestamp()
+		if err = errors.Join(err, timeErr); err == nil {
+			storeCtx, cancel := context.WithTimeout(context.Background(), liveAttemptStoreTimeout)
+			_, err = attempt.daemon.store.ProposeAttemptOutcome(storeCtx, attempt.attemptDigest, proposal, at)
+			cancel()
+		}
+		if err == nil || errors.Is(err, kernel.ErrUnauthorized) {
+			attempt.usageLimit = ""
+		}
 	}
 	storeCtx, cancel := context.WithTimeout(context.Background(), liveAttemptStoreTimeout)
 	run, found, err := attempt.daemon.store.Run(storeCtx, attempt.runID)
@@ -745,6 +761,7 @@ func (attempt *liveAttempt) routeFrame(frame runner.TerminalFrame) error {
 			}
 		} else if frame.Correlation == 0 {
 			attempt.retainDiagnosticOutput(frame.Start, frame.End, frame.Payload)
+			attempt.scanUsageLimit(frame.Payload)
 			for subscriber := range attempt.subs {
 				attempt.routeLive(subscriber, frame)
 			}
@@ -788,6 +805,28 @@ func (attempt *liveAttempt) routeFrame(frame runner.TerminalFrame) error {
 	default:
 		return runner.ErrState
 	}
+}
+
+// codexUsageLimit is Codex's error cell for an exhausted account. Codex then
+// idles at an interactive prompt and never exits, so the report itself ends
+// the attempt. The "■ " error marker keeps task text or tool output that only
+// quotes the message from matching.
+// ponytail: a fixed string of one provider's TUI; recognise a structured
+// provider event instead if Codex ever reports this outside its screen.
+var codexUsageLimit = []byte("■ You've hit your usage limit")
+
+func (attempt *liveAttempt) scanUsageLimit(payload []byte) {
+	if attempt.usageLimit != "" {
+		return
+	}
+	attempt.usageScan = append(attempt.usageScan, payload...)
+	if index := bytes.Index(attempt.usageScan, codexUsageLimit); index >= 0 {
+		report := attempt.usageScan[index+len("■ "):]
+		attempt.usageLimit = "provider usage limit (retry after its reset or select another account): " + terminalTextProjection(report[:min(len(report), 1024)], false, 1024)
+		attempt.usageScan = nil
+		return
+	}
+	attempt.usageScan = append(attempt.usageScan[:0], attempt.usageScan[max(0, len(attempt.usageScan)-len(codexUsageLimit)+1):]...)
 }
 
 func (attempt *liveAttempt) routeAttached(frame runner.TerminalFrame) error {
