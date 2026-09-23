@@ -64,6 +64,17 @@ func TestShellProviderDelegateFanInPRProposal(t *testing.T) {
 		if run.Proposal == nil || run.Proposal.Result() != name {
 			shellProviderFatal(t, name+" result", run, nil)
 		}
+		if run.ChangeID == nil {
+			shellProviderFatal(t, name+" Change", run, fmt.Errorf("worker completed without a persisted Change"))
+		}
+		changeState, found, changeErr := fixture.store.Change(ctx, *run.ChangeID)
+		if changeErr != nil || !found || changeState.Selection == nil {
+			shellProviderFatal(t, name+" persisted Change", run, fmt.Errorf("found=%v err=%v Change=%+v", found, changeErr, changeState))
+		}
+		changePath := filepath.Join(fixture.changeParent, run.ChangeID.String())
+		if body, readErr := os.ReadFile(filepath.Join(changePath, "payload.txt")); readErr != nil || string(body) != "exact source\n" {
+			shellProviderFatal(t, name+" source worktree", run, fmt.Errorf("payload=%q err=%v", body, readErr))
+		}
 		workerRuns = append(workerRuns, run)
 	}
 

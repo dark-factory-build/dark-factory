@@ -41,7 +41,9 @@ class ReviewIntakeTest(unittest.TestCase):
         self.addCleanup(patch.stopall)
         self.operation = {'pr': 9, 'head': SHA, 'base': 'b' * 40, 'source_marker': 'FACTORY_SOURCE o/r#7',
                           'task_id': 'c' * 32, 'incarnation_id': 'd' * 32, 'priority': 0,
-                          'title': 'resume', 'body': 'mirror'}
+                          'title': 'resume', 'body': 'mirror',
+                          'blocking_review_url': 'https://github.com/o/r/pull/9#pullrequestreview-77',
+                          'blocking_review_findings': 'Replace placeholder with reviewed-value.'}
 
     def tearDown(self):
         self.temp.cleanup()
@@ -247,6 +249,66 @@ class ReviewIntakeTest(unittest.TestCase):
         self.assertIsNone(review.linked_issue(self.config, {'number': 9, 'body': 'Refs other/backlog#7'}, journal))
         self.assertEqual(7, review.linked_issue(self.config, {'number': 9, 'body': 'Refs O/R#7'}, journal))
 
+    def test_legacy_review_discovers_both_origins_from_change_publication_binding(self):
+        journal = json.loads(Path(self.config['journal']).read_text())
+        bound = 'f' * 32
+        with sqlite3.connect(Path(self.config['factory_home']) / 'factory.sqlite3') as connection:
+            connection.execute('CREATE TABLE publication_tasks (project_id BLOB, repository TEXT, pull_number INTEGER, task_id BLOB, change_id BLOB, created_at_ms INTEGER)')
+            connection.execute('INSERT INTO publication_tasks VALUES (?, ?, ?, ?, ?, ?)',
+                               (bytes.fromhex(self.config['project_id']), 'O/R', 9, bytes.fromhex(bound), b'\x02' * 16, 5))
+            connection.execute('INSERT INTO publication_tasks VALUES (?, ?, ?, ?, ?, ?)',
+                               (b'\x09' * 16, 'o/r', 10, bytes.fromhex('a' * 32), b'\x03' * 16, 6))
+            connection.execute('INSERT INTO publication_tasks VALUES (?, ?, ?, ?, NULL, ?)',
+                               (bytes.fromhex(self.config['project_id']), 'o/r', 11, bytes.fromhex('b' * 32), 7))
+        # An operator PR has no issue footer; an unmanaged human issue footer
+        # is metadata only. Both are reviewable because the exact PR is bound
+        # to this project's retained Change.
+        self.assertEqual(bound, review.linked_issue(self.config, {'number': 9, 'body': 'Operator publication'}, journal))
+        self.assertEqual(bound, review.linked_issue(self.config, {'number': 9, 'body': 'Human issue work\n\nRefs #930'}, journal))
+        # An accepted intake issue retains its issue authority rather than
+        # being rewritten as a publication-only source.
+        self.assertEqual(7, review.linked_issue(self.config, {'number': 9, 'body': 'Accepted work\n\nRefs #7'}, journal))
+        self.assertIsNone(review.linked_issue(self.config, {'number': 10, 'body': 'Other project'}, journal))
+        self.assertIsNone(review.linked_issue(self.config, {'number': 11, 'body': 'No Change association'}, journal))
+        with self.assertRaises(review.Unproven):
+            review.linked_issue(self.config, {'number': 12, 'body': 'Unbound human issue\n\nRefs #930'}, journal)
+
+        commands = iter(['', SHA, 'b' * 40])
+        with patch.object(review.intake, 'command', side_effect=lambda *_args, **_kwargs: next(commands)):
+            operation = review.ready(self.config, Path('/mirror'), {'number': 9, 'headRefOid': SHA}, bound)
+        self.assertEqual('FACTORY_PUBLICATION o/r#9', operation['source_marker'])
+
+    def test_legacy_review_tick_routes_both_persisted_publication_origins(self):
+        operator_task, human_task = 'e' * 32, 'f' * 32
+        with sqlite3.connect(Path(self.config['factory_home']) / 'factory.sqlite3') as connection:
+            connection.execute('CREATE TABLE publication_tasks (project_id BLOB, repository TEXT, pull_number INTEGER, task_id BLOB, change_id BLOB, created_at_ms INTEGER)')
+            for number, task, change in ((9, operator_task, b'\x04' * 16), (10, human_task, b'\x05' * 16)):
+                connection.execute('INSERT INTO publication_tasks VALUES (?, ?, ?, ?, ?, ?)',
+                                   (bytes.fromhex(self.config['project_id']), 'o/r', number, bytes.fromhex(task), change, number))
+        pulls = [
+            {'number': 9, 'headRefOid': SHA, 'body': 'Operator publication'},
+            {'number': 10, 'headRefOid': 'b' * 40, 'body': 'Human-authored issue work\n\nRefs #930'},
+        ]
+        tasks = {9: operator_task, 10: human_task}
+        def ready(_config, _path, pr, authority):
+            self.assertEqual(tasks[pr['number']], authority)
+            operation = dict(self.operation, pr=pr['number'], head=pr['headRefOid'],
+                             source_marker='FACTORY_PUBLICATION o/r#' + str(pr['number']))
+            return operation
+        def source_state(_config, operation):
+            return {'task_id': tasks[operation['pr']], 'status': 'succeeded', 'work_revision': 1, 'feedback': ''}
+        commands = []
+        with patch.object(review, 'mirror', return_value=Path('/mirror')), patch.object(review, 'list_prs', return_value=pulls), \
+             patch.object(review, 'ready', side_effect=ready), patch.object(review, 'verify_existing'), \
+             patch.object(review, 'source_task_state', side_effect=source_state), \
+             patch.object(review.intake, 'task_state', return_value={'status': 'queued'}), \
+             patch.object(review.intake, 'command', side_effect=lambda argv, **_kwargs: commands.append(argv) or ''):
+            messages = review.run_once(self.config)
+        self.assertEqual(2, len([message for message in messages if 'review rejection' in message]))
+        handoffs = [argv for argv in commands if argv[1:3] == ['task', 'send-back']]
+        self.assertEqual([operator_task, human_task], [argv[argv.index('--task') + 1] for argv in handoffs])
+        self.assertTrue(all('Replace placeholder with reviewed-value.' in argv[argv.index('--note') + 1] for argv in handoffs))
+
     def test_post_cutover_human_issue_uses_imported_lineage_not_frozen_journal(self):
         journal = json.loads(Path(self.config['journal']).read_text())
         before = json.dumps(journal, sort_keys=True)
@@ -368,14 +430,177 @@ class ReviewIntakeTest(unittest.TestCase):
         self.observe.return_value = 'block'
         with patch.object(review, 'mirror', return_value=Path('/mirror')), patch.object(review, 'list_prs', return_value=prs), \
              patch.object(review, 'ready', return_value=self.operation), patch.object(review.intake, 'task_state', side_effect=[None, {'status': 'queued'}]), \
-             patch.object(review.intake, 'enqueue') as enqueue, patch.object(review, 'verify_existing'):
-            self.assertEqual(['woke PR #9 review block'], review.run_once(self.config))
+             patch.object(review.intake, 'enqueue') as enqueue, patch.object(review, 'verify_existing'), \
+             patch.object(review, 'source_task_state', return_value={'task_id': 'c' * 32, 'status': 'succeeded', 'work_revision': 1, 'feedback': ''}), \
+             patch.object(review, 'send_back_source_task', return_value='sent') as send_back:
+            messages = review.run_once(self.config)
+            self.assertEqual(2, len(messages))
+            self.assertIn('review rejection', messages[0])
+            self.assertIn('woke PR #9 review block', messages[1])
+            send_back.assert_called_once()
             self.assertEqual([], review.run_once(self.config))
         self.assertEqual(1, enqueue.call_count)
         self.assertIn("state block", enqueue.call_args.args[1]["body"])
         receipt = json.loads(Path(self.config['journal'] + '.reviews.json').read_text())
         self.assertEqual("block", receipt['pulls']['9:' + SHA]["review_state"])
         self.assertNotIn("enqueue_attempted", receipt['pulls']['9:' + SHA])
+        self.assertTrue(receipt['pulls']['9:' + SHA]['review_failure_sent_back'])
+
+    def test_review_rejection_routes_operator_published_change_to_bound_worker(self):
+        home = Path(self.config['factory_home'])
+        with sqlite3.connect(home / 'factory.sqlite3') as connection:
+            connection.execute('CREATE TABLE publication_tasks (project_id BLOB, repository TEXT, pull_number INTEGER, task_id BLOB, change_id BLOB, created_at_ms INTEGER)')
+            connection.execute('INSERT INTO publication_tasks VALUES (?, ?, ?, ?, ?, ?)',
+                               (bytes.fromhex(self.config['project_id']), 'o/r', 9,
+                                bytes.fromhex('f' * 32), bytes.fromhex('e' * 16), 1))
+        operation = dict(self.operation, source_marker='FACTORY_SOURCE o/r#404')
+        with patch.object(review, 'send_back_source_task') as send_back:
+            note = review.review_failure_note(self.config, dict(operation, review_operation='d' * 36))
+            review.send_back_source_task(self.config, operation, note)
+        send_back.assert_called_once_with(self.config, operation, note)
+
+    def test_review_rejection_retries_failed_worker_handoff_without_duplicate_review(self):
+        prs = [{'number': 9, 'headRefOid': SHA, 'body': 'text\nRefs #7\n'}]
+        self.observe.return_value = 'block'
+        transient = review.intake.IntakeError('operator API unavailable')
+        with patch.object(review, 'mirror', return_value=Path('/mirror')), patch.object(review, 'list_prs', return_value=prs), \
+             patch.object(review, 'ready', return_value=self.operation), patch.object(review, 'verify_existing'), \
+             patch.object(review, 'source_task_state', return_value={'task_id': 'c' * 32, 'status': 'succeeded', 'work_revision': 1, 'feedback': ''}), \
+             patch.object(review, 'send_back_source_task', side_effect=[transient, None]) as send_back, \
+             patch.object(review, 'launch_review') as launch, patch.object(review.intake, 'task_state', return_value={'status': 'queued'}):
+            first = review.run_once(self.config)
+            receipt = json.loads(Path(self.config['journal'] + '.reviews.json').read_text())['pulls']['9:' + SHA]
+            self.assertIn('handoff pending', first[0])
+            self.assertNotIn('review_failure_sent_back', receipt)
+            self.assertEqual('operator API unavailable', receipt['review_send_back_error'])
+            second = review.run_once(self.config)
+        self.assertTrue(any('sent back PR #9 review rejection' in message for message in second))
+        self.assertEqual(2, send_back.call_count)
+        launch.assert_not_called()
+        receipt = json.loads(Path(self.config['journal'] + '.reviews.json').read_text())['pulls']['9:' + SHA]
+        self.assertTrue(receipt['review_failure_sent_back'])
+        self.assertNotIn('review_send_back_error', receipt)
+
+    def test_review_rejection_reconciles_committed_send_back_after_lost_response(self):
+        prs = [{'number': 9, 'headRefOid': SHA, 'body': 'text\nRefs #7\n'}]
+        self.observe.return_value = 'block'
+        for status in ('queued', 'running', 'succeeded'):
+            with self.subTest(status=status):
+                Path(self.config['journal'] + '.reviews.json').unlink(missing_ok=True)
+                calls = 0
+                def source_state(_config, operation):
+                    nonlocal calls
+                    calls += 1
+                    feedback = '' if calls == 1 else review.sent_back_feedback(2, review.review_failure_note(self.config, operation))
+                    return {'task_id': 'f' * 32, 'status': 'failed' if calls == 1 else status,
+                            'work_revision': 1 if calls == 1 else 2, 'feedback': feedback}
+                lost = review.intake.IntakeError('operator response lost')
+                with patch.object(review, 'mirror', return_value=Path('/mirror')), patch.object(review, 'list_prs', return_value=prs), \
+                     patch.object(review, 'ready', return_value=dict(self.operation)), patch.object(review, 'verify_existing'), \
+                     patch.object(review, 'source_task_state', side_effect=source_state), \
+                     patch.object(review, 'send_back_source_task', side_effect=lost) as send_back, \
+                     patch.object(review, 'launch_review') as launch, patch.object(review.intake, 'task_state', return_value={'status': 'queued'}):
+                    first = review.run_once(self.config)
+                    self.assertIn('handoff pending', first[0])
+                    second = review.run_once(self.config)
+                self.assertTrue(any('sent back PR #9 review rejection' in message for message in second))
+                send_back.assert_called_once()
+                launch.assert_not_called()
+                receipt = json.loads(Path(self.config['journal'] + '.reviews.json').read_text())['pulls']['9:' + SHA]
+                self.assertEqual(1, receipt['review_send_back_source_work_revision'])
+                self.assertTrue(receipt['review_failure_sent_back'])
+                self.assertNotIn('review_send_back_error', receipt)
+
+    def test_review_rejection_waits_for_durable_pre_call_revision(self):
+        prs = [{'number': 9, 'headRefOid': SHA, 'body': 'text\nRefs #7\n'}]
+        self.observe.return_value = 'block'
+        with patch.object(review, 'mirror', return_value=Path('/mirror')), patch.object(review, 'list_prs', return_value=prs), \
+             patch.object(review, 'ready', return_value=dict(self.operation)), patch.object(review, 'verify_existing'), \
+             patch.object(review, '_source_task_id', return_value='f' * 32), patch.object(review, 'source_task_state', return_value=None), \
+             patch.object(review, 'send_back_source_task') as send_back, patch.object(review.intake, 'task_state', return_value={'status': 'queued'}):
+            first = review.run_once(self.config)
+            second = review.run_once(self.config)
+        self.assertIn('handoff pending', first[0])
+        self.assertIn('handoff pending', second[0])
+        send_back.assert_not_called()
+        receipt = json.loads(Path(self.config['journal'] + '.reviews.json').read_text())['pulls']['9:' + SHA]
+        self.assertNotIn('review_send_back_source_work_revision', receipt)
+        self.assertEqual('source task state unavailable before handoff', receipt['review_send_back_error'])
+
+    def test_unavailable_baseline_then_lost_response_reconciles_completed_worker(self):
+        prs = [{'number': 9, 'headRefOid': SHA, 'body': 'text\nRefs #7\n'}]
+        self.observe.return_value = 'block'
+        operation = dict(self.operation, blocking_review_findings=(
+            'Replace placeholder with reviewed-value.\n\n'
+            'Preserve this second paragraph with unicode: café 🙂.\n' + ('long finding 🙂 ' * 300)))
+        calls = 0
+        def source_state(_config, operation):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return None
+            note = review.review_failure_note(self.config, operation)
+            return {'task_id': 'f' * 32, 'status': 'succeeded', 'work_revision': 1, 'feedback': ''} if calls == 2 else \
+                   {'task_id': 'f' * 32, 'status': 'succeeded', 'work_revision': 2,
+                    'feedback': review.sent_back_feedback(2, note)}
+        with patch.object(review, 'mirror', return_value=Path('/mirror')), patch.object(review, 'list_prs', return_value=prs), \
+             patch.object(review, 'ready', return_value=operation), patch.object(review, 'verify_existing'), \
+             patch.object(review, '_source_task_id', return_value='f' * 32), patch.object(review, 'source_task_state', side_effect=source_state), \
+             patch.object(review, 'send_back_source_task', side_effect=review.intake.IntakeError('response lost')) as send_back, \
+             patch.object(review.intake, 'task_state', return_value={'status': 'queued'}):
+            self.assertIn('handoff pending', review.run_once(self.config)[0])
+            self.assertIn('handoff pending', review.run_once(self.config)[0])
+            final = review.run_once(self.config)
+        self.assertTrue(any('sent back PR #9 review rejection' in message for message in final))
+        send_back.assert_called_once()
+        receipt = json.loads(Path(self.config['journal'] + '.reviews.json').read_text())['pulls']['9:' + SHA]
+        self.assertEqual(1, receipt['review_send_back_source_work_revision'])
+        self.assertTrue(receipt['review_failure_sent_back'])
+        note = send_back.call_args.args[2]
+        self.assertIn('Replace placeholder with reviewed-value.\n\nPreserve this second paragraph', note)
+        self.assertIn('café 🙂', note)
+        self.assertLessEqual(len(note.encode('utf-8')), review.REVIEW_FAILURE_NOTE_MAX_BYTES)
+
+    def test_block_feedback_contains_validated_bounded_untrusted_finding(self):
+        operation = dict(self.operation, review_operation='11111111-1111-4111-8111-111111111111',
+                         blocking_review_id=77, blocking_review_url='https://github.com/o/r/pull/9#pullrequestreview-77')
+        finding = 'Replace placeholder with reviewed-value.\x00' + ('x' * 3000)
+        observed = {'isError': False, 'structuredContent': {'id': 77, 'commit_id': SHA, 'body': finding}}
+        with patch.object(review, 'bridge_call', return_value=observed):
+            operation.pop('blocking_review_findings')
+            note = review.review_failure_note(self.config, operation)
+        self.assertIn('https://github.com/o/r/pull/9#pullrequestreview-77', note)
+        self.assertIn('Untrusted independent-review findings', note)
+        self.assertIn('Replace placeholder with reviewed-value.', note)
+        self.assertNotIn('\x00', note)
+        self.assertLessEqual(len(note.encode()), review.REVIEW_FAILURE_NOTE_MAX_BYTES)
+        self.assertLess(len(review.sent_back_feedback((1 << 63) - 1, note)), 2048)
+        with patch.object(review, 'bridge_call', return_value={'isError': False, 'structuredContent': {'id': 77, 'commit_id': 'b' * 40, 'body': 'wrong'}}):
+            with self.assertRaisesRegex(review.ReviewError, 'exact head'):
+                review.review_failure_note(self.config, operation)
+
+    def test_review_rejection_does_not_reconcile_unrelated_newer_feedback(self):
+        prs = [{'number': 9, 'headRefOid': SHA, 'body': 'text\nRefs #7\n'}]
+        self.observe.return_value = 'block'
+        states = [
+            {'task_id': 'f' * 32, 'status': 'failed', 'work_revision': 1, 'feedback': ''},
+            {'task_id': 'f' * 32, 'status': 'running', 'work_revision': 2,
+             'feedback': '\n\n## Sent back for work revision 2\n\nunrelated operator feedback'},
+        ]
+        lost = review.intake.IntakeError('operator response lost')
+        with patch.object(review, 'mirror', return_value=Path('/mirror')), patch.object(review, 'list_prs', return_value=prs), \
+             patch.object(review, 'ready', return_value=dict(self.operation)), patch.object(review, 'verify_existing'), \
+             patch.object(review, 'source_task_state', side_effect=states), \
+             patch.object(review, 'send_back_source_task', side_effect=lost) as send_back, \
+             patch.object(review, 'launch_review') as launch, patch.object(review.intake, 'task_state', return_value={'status': 'queued'}):
+            self.assertIn('handoff pending', review.run_once(self.config)[0])
+            second = review.run_once(self.config)
+        self.assertIn('handoff pending', second[0])
+        self.assertEqual(2, send_back.call_count)
+        launch.assert_not_called()
+        receipt = json.loads(Path(self.config['journal'] + '.reviews.json').read_text())['pulls']['9:' + SHA]
+        self.assertNotIn('review_failure_sent_back', receipt)
+        self.assertEqual('operator response lost', receipt['review_send_back_error'])
 
     def test_crlf_terminal_footer_links_managed_pr(self):
         journal = json.loads(Path(self.config['journal']).read_text())
@@ -391,7 +616,7 @@ class ReviewIntakeTest(unittest.TestCase):
         with patch.object(review, 'mirror', return_value=Path('/mirror')), patch.object(review, 'list_prs', return_value=[{'number': 9, 'headRefOid': SHA, 'body': 'Refs #8\nRefs #7'}]), \
              patch.object(review, 'ready', return_value=self.operation), patch.object(review, 'verify_existing'), \
              patch.object(review.intake, 'task_state', return_value={'status': 'queued'}):
-            self.assertEqual([], review.run_once(self.config))
+            self.assertTrue(any('review rejection' in message for message in review.run_once(self.config)))
         self.assertEqual(7, review.linked_issue(self.config, {'number': 9, 'body': 'Refs #8\nRefs #7'}, json.loads(Path(self.config['journal']).read_text())))
 
     def test_managed_earlier_footer_is_ignored_when_unmanaged_footer_is_terminal(self):
@@ -423,7 +648,7 @@ class ReviewIntakeTest(unittest.TestCase):
         with patch.object(review, 'mirror', return_value=Path('/mirror')), patch.object(review, 'list_prs', return_value=[{'number': 9, 'headRefOid': SHA, 'body': 'Refs #7'}]), \
              patch.object(review, 'ready', side_effect=AssertionError('must reuse persisted base')), patch.object(review, 'verify_existing') as verify, \
              patch.object(review.intake, 'task_state', return_value={'status': 'queued'}):
-            self.assertEqual([], review.run_once(self.config))
+            self.assertTrue(any('review rejection' in message for message in review.run_once(self.config)))
         self.assertEqual(1, verify.call_count)
         self.assertEqual('b' * 40, verify.call_args.args[2]['base'])
 
@@ -438,7 +663,7 @@ class ReviewIntakeTest(unittest.TestCase):
         with patch.object(review, 'mirror', return_value=Path('/mirror')), patch.object(review, 'list_prs', return_value=[{'number': 9, 'headRefOid': SHA, 'body': 'Refs #7'}]), \
              patch.object(review, 'ready', side_effect=AssertionError('must reuse the pre-change receipt')), patch.object(review, 'verify_existing') as verify, \
              patch.object(review.intake, 'task_state', return_value={'status': 'queued'}):
-            self.assertEqual([], review.run_once(self.config))
+            self.assertTrue(any('review rejection' in message for message in review.run_once(self.config)))
         self.assertEqual(1, verify.call_count)
 
     def test_receipt_rejects_mirror_config_change(self):
@@ -506,7 +731,7 @@ class ReviewIntakeTest(unittest.TestCase):
              patch.object(review.intake, 'enqueue', side_effect=review.intake.IntakeError('lost response')) as enqueue:
             with self.assertRaisesRegex(review.ReviewError, 'PR #9: lost response'):
                 review.run_once(self.config)
-            self.assertEqual([], review.run_once(self.config))
+            self.assertTrue(any('review rejection handoff pending' in message for message in review.run_once(self.config)))
         self.assertEqual(1, launch.call_count)
         self.assertEqual(1, enqueue.call_count)
         self.assertIn('state block', enqueue.call_args.args[1]['body'])
@@ -629,6 +854,16 @@ class ReviewIntakeTest(unittest.TestCase):
         unchanged.pop('external_review', None)
         with patch.object(real, 'observe_operation', return_value={'state': 'missing'}):
             self.assertEqual('missing', real.observe_review(self.config, unchanged, {}))
+
+        finding = 'Change the exact failing behavior.\n\nKeep the regression focused.'
+        blocked = dict(self.operation, pr=7)
+        event = {'head': SHA, 'state': 'block', 'url': 'https://github.com/o/r/pull/7#pullrequestreview-8', 'findings': finding}
+        self.assertEqual('block', real.observe_review(self.config, blocked, {(7, SHA): event}))
+        self.assertEqual(finding, blocked['blocking_review_findings'])
+        self.assertEqual(event['url'], blocked['blocking_review_url'])
+        for invalid in ({'head': SHA, 'state': 'block'}, dict(event, findings=''), dict(event, url='https://github.com/o/r/pull/8')):
+            with self.assertRaisesRegex(real.ReviewError, 'findings are unavailable'):
+                real.observe_review(self.config, dict(self.operation, pr=7), {(7, SHA): invalid})
 
     def test_correction_allow_must_name_prior_block_in_app_rendered_review(self):
         spec = importlib.util.spec_from_file_location('real_review', Path(review.__file__))
@@ -1002,6 +1237,19 @@ class ReviewIntakeTest(unittest.TestCase):
             review.send_back_source_task(self.config, dict(self.operation, pr=10, source_marker='o/r#404'), 'note')
         command.assert_not_called()
 
+    def test_intake_pull_routes_to_change_worker_before_issue_orchestrator(self):
+        worker = 'f' * 32
+        with sqlite3.connect(Path(self.config['factory_home']) / 'factory.sqlite3') as connection:
+            connection.execute('CREATE TABLE publication_tasks (project_id BLOB, repository TEXT, pull_number INTEGER, task_id BLOB, change_id BLOB, created_at_ms INTEGER)')
+            connection.execute('INSERT INTO publication_tasks VALUES (?, ?, ?, ?, ?, ?)',
+                               (bytes.fromhex(self.config['project_id']), 'o/r', 9, bytes.fromhex(worker), b'\x02' * 16, 5))
+        # setUp's intake journal binds this source marker to task c...c, the
+        # issue orchestrator.  The exact PR publication instead binds f...f,
+        # the worker Change that must receive REQUEST_CHANGES.
+        with patch.object(review.intake, 'command') as command:
+            review.send_back_source_task(self.config, dict(self.operation), 'note')
+        self.assertEqual(['factoryctl', 'task', 'send-back', '--task', worker, '--note', 'note'], command.call_args.args[0])
+
     def test_send_back_without_a_routable_task_keeps_the_note_on_the_receipt(self):
         operation = dict(self.operation)
         with patch.object(review, '_source_task_id', return_value=''), patch.object(review.intake, 'command') as command:
@@ -1321,9 +1569,10 @@ class ReviewIntakeTest(unittest.TestCase):
              patch.object(review, 'ready', return_value=operation) as ready, patch.object(review, 'verify_existing'), \
              patch.object(review.intake, 'task_state', return_value={'status': 'queued'}):
             messages = review.run_once(self.config)
-        self.assertEqual(1, len(messages))
+        self.assertEqual(2, len(messages))
         self.assertIn('skipped PR #9', messages[0])
         self.assertIn('body exceeds the intake limit', messages[0])
+        self.assertIn('could not route PR #10 review rejection', messages[1])
         self.assertEqual(1, ready.call_count)
         self.assertEqual(10, ready.call_args.args[2]['number'])
 
