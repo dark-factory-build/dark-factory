@@ -321,6 +321,16 @@ test('two principals: callback, pagination, refresh, replay, grants and revocati
     sourceVisible = false;
     assert.equal((await call(alice, 'create_pull_request', cross)).status, 401, 'lost source access refuses replay before App authority');
     sourceVisible = true;
+    // #1071: a malformed qualified trailing footer is refused before any token,
+    // journal claim, or create POST.
+    const badCross = { ...cross, source_repository: 'Team/Backlog', operation_id: '6d1f0f8e-7f1f-11f0-952e-acde48001128', body: 'accepted bytes\n\nRefs team/backlog#1x' };
+    const grantsBeforeBadCross = grants.length;
+    const badCrossReply = (await (await call(alice, 'create_pull_request', badCross)).json()).result;
+    assert.equal(badCrossReply.isError, true);
+    assert.match(badCrossReply.content[0].text, /^invalid_input:.*trailing footer `Refs team\/backlog#1x`/);
+    assert.equal(grants.length, grantsBeforeBadCross, 'an invalid footer mints no repository token');
+    assert.equal(recoveryPostCount, 0, 'an invalid footer makes no create POST');
+    assert.equal((await (await call(alice, 'observe_operation', { repository: badCross.repository, operation_id: badCross.operation_id })).json()).result.structuredContent.state, 'missing', 'an invalid footer is never marked executing');
     const recovery = { repository: 'team/shared', issue_number: 10, head: 'topic-recovery', head_sha: 'b'.repeat(40),
       base: 'main', base_sha: 'a'.repeat(40), title: 'recover publication', body: 'exact work', draft: false };
     const recoveredRequest = { ...recovery, operation_id: '6d1f0f8e-7f1f-11f0-952e-acde48001124' };

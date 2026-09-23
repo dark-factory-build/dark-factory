@@ -3339,20 +3339,28 @@ impl CreatePullRequest {
         let mut body = self.body.trim_end_matches(|character: char| {
             character == '\n' || character == '\r' || character == ' ' || character == '\t'
         });
-        // Only the trailing footer is owned: copies of it collapse into the one
-        // appended below, and any other `Refs #`/`Closes #` line in that place
-        // is refused. The same line above the owned footer is ordinary caller
-        // text (cross-repository sources still refuse it as unqualified below).
+        // Only the trailing footer is owned: copies of it (in any case) collapse
+        // into the one appended below, and any other footer-shaped line in that
+        // place is refused. The same line above the owned footer is ordinary
+        // caller text (cross-repository sources still refuse unqualified ones).
         let mut owned = false;
         while let Some(raw) = body.rsplit('\n').next() {
             let line = raw.trim();
-            if line == footer {
+            if line.eq_ignore_ascii_case(&footer) {
                 body = body[..body.len() - raw.len()].trim_end();
                 owned = true;
                 continue;
             }
-            let lower = line.to_ascii_lowercase();
-            if !owned && (lower.starts_with("refs #") || lower.starts_with("closes #")) {
+            // Footer-shaped: `Refs`/`Closes`, any case, then an unqualified,
+            // qualified (`owner/repo#N`), or URL reference.
+            let shaped = line
+                .split_once(char::is_whitespace)
+                .is_some_and(|(keyword, target)| {
+                    (keyword.eq_ignore_ascii_case("refs")
+                        || keyword.eq_ignore_ascii_case("closes"))
+                        && (target.contains('#') || target.contains("://"))
+                });
+            if !owned && shaped {
                 return Err(OperationError::InvalidFooter(
                     line.chars().take(80).collect(),
                 ));
@@ -10965,6 +10973,29 @@ mod tests {
                 .matches("Refs team/backlog#390")
                 .count(),
             1
+        );
+        // Qualified trailing footers are owned only when they are the source's
+        // own; a malformed or conflicting one is refused before any claim.
+        for footer in ["Refs team/backlog#390x", "REFS Team/Backlog#391"] {
+            cross.source_repository = Some("Team/Backlog".into());
+            cross.body = format!("Change.\n\n{footer}\n");
+            assert_eq!(
+                cross.validate().err(),
+                Some(OperationError::InvalidFooter(footer.into()))
+            );
+        }
+        cross.body = "Change.\n\nRefs Team/Backlog#390\n".into();
+        assert!(cross.validate().is_ok());
+        let rendered = cross.marked_body().unwrap();
+        assert!(!rendered.contains("Team/Backlog"));
+        assert_eq!(rendered.matches("Refs team/backlog#390").count(), 1);
+        cross.body = "Change.\n\nRefs team/backlog#391\n\nRefs team/backlog#390\n".into();
+        assert!(cross.validate().is_ok());
+        assert!(
+            cross
+                .marked_body()
+                .unwrap()
+                .contains("Refs team/backlog#391\n\nRefs team/backlog#390\n\n<!--")
         );
         assert!(validate_source_visibility(Some(false), Some(false)).is_ok());
         assert!(validate_source_visibility(Some(false), Some(true)).is_ok());
