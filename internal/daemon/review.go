@@ -31,9 +31,22 @@ func (daemon *Daemon) reviewPR(ctx context.Context, project kernel.ProjectID, re
 		if err := json.Unmarshal(document, &failed); err != nil || failed.State != "failed" || !failed.Retryable {
 			return "", errors.New("review: operation is not failed")
 		}
-		request = api.ReviewRequest{Repository: failed.Request.Repository, PullNumber: failed.Request.PullNumber, Head: failed.Request.Head, Base: failed.Request.Base, Body: failed.Request.Body, Provider: failed.Request.Provider}
+		request = api.ReviewRequest{Repository: failed.Request.Repository, PullNumber: failed.Request.PullNumber, Head: failed.Request.Head, Base: failed.Request.Base, BaseRef: failed.Request.BaseRef, Body: failed.Request.Body, Provider: failed.Request.Provider}
 	}
 	return daemon.startReview(ctx, project, request, failed)
+}
+
+// RecoverReviewOperations closes the startup window left by a daemon that
+// stopped after publication claimed a review and before its provider resumed.
+func (daemon *Daemon) RecoverReviewOperations(ctx context.Context) (int, error) {
+	if daemon == nil || daemon.store == nil || daemon.now == nil {
+		return 0, fmt.Errorf("%w: invalid review recovery", kernel.ErrInvalidValue)
+	}
+	at, err := kernel.NewUnixMillis(daemon.now().UnixMilli())
+	if err != nil {
+		return 0, err
+	}
+	return daemon.store.RecoverRunningReviewOperations(ctx, at)
 }
 
 func (daemon *Daemon) startReview(ctx context.Context, project kernel.ProjectID, request api.ReviewRequest, failed review.Operation) (string, error) {
@@ -61,8 +74,49 @@ func (daemon *Daemon) startReview(ctx context.Context, project kernel.ProjectID,
 	if failed.ID != "" {
 		op, err = coordinator.Retry(ctx, failed)
 	} else {
-		op, err = coordinator.Start(ctx, review.Request{Repository: repository, PullNumber: request.PullNumber, Head: request.Head, Base: request.Base, Body: request.Body, Provider: request.Provider})
+		op, err = coordinator.Start(ctx, review.Request{Repository: repository, PullNumber: request.PullNumber, Head: request.Head, Base: request.Base, BaseRef: request.BaseRef, Body: request.Body, Provider: request.Provider})
 	}
+	if err != nil {
+		return op.ID, err
+	}
+	if op.Verdict == "request_changes" {
+		note := op.Detail
+		if len(note) > kernel.MaxSendBackNoteBytes-160 {
+			note = note[:kernel.MaxSendBackNoteBytes-160]
+		}
+		at, timeErr := kernel.NewUnixMillis(daemon.now().UnixMilli())
+		if timeErr != nil {
+			return op.ID, timeErr
+		}
+		if _, routeErr := daemon.store.SendBackPublishedReview(ctx, project, repository, op.Request.PullNumber, op.ID, op.Request.Head, note, at); routeErr != nil && !errors.Is(routeErr, kernel.ErrNotFound) {
+			return op.ID, routeErr
+		}
+	}
+	return op.ID, nil
+}
+
+func (daemon *Daemon) resumeReview(ctx context.Context, project kernel.ProjectID, op review.Operation) (string, error) {
+	targets, _, unbound, err := daemon.projectMaintainerRepositories(ctx, project)
+	if err != nil {
+		return op.ID, err
+	}
+	repository := strings.ToLower(op.Request.Repository)
+	repositoryID := targets[repository]
+	if repositoryID == 0 {
+		if unbound[repository] {
+			return op.ID, kernel.ErrConflict
+		}
+		return op.ID, kernel.ErrUnauthorized
+	}
+	if daemon.github == nil && daemon.reviewBackend == nil {
+		return op.ID, errors.New("review: Maintainer unavailable")
+	}
+	var backend review.Backend = &daemonReviewBackend{daemon: daemon, repository: repository, repositoryID: repositoryID}
+	if daemon.reviewBackend != nil {
+		backend = daemon.reviewBackend(repository, repositoryID)
+	}
+	coordinator := review.Coordinator{Store: durableReviewStore{store: daemon.store, project: project, repository: repository, now: daemon.now}, Backend: backend, Now: daemon.now}
+	op, err = coordinator.Resume(ctx, op)
 	if err != nil {
 		return op.ID, err
 	}
@@ -104,6 +158,7 @@ func (daemon *Daemon) reviewPublishedPR(ctx context.Context, project kernel.Proj
 			Number  uint64 `json:"number"`
 			HeadSHA string `json:"head_sha"`
 			BaseSHA string `json:"base_sha"`
+			BaseRef string `json:"base_ref"`
 			Body    string `json:"body"`
 		} `json:"pull_requests"`
 	}
@@ -114,7 +169,7 @@ func (daemon *Daemon) reviewPublishedPR(ctx context.Context, project kernel.Proj
 	if pullValue.Number != pull || !strings.EqualFold(pullValue.HeadSHA, publishedHead) {
 		return "", errors.New("review: publication head changed before review")
 	}
-	reviewRequest := api.ReviewRequest{Repository: repository, PullNumber: pull, Head: strings.ToLower(pullValue.HeadSHA), Base: strings.ToLower(pullValue.BaseSHA), Body: pullValue.Body, Provider: "codex"}
+	reviewRequest := api.ReviewRequest{Repository: repository, PullNumber: pull, Head: strings.ToLower(pullValue.HeadSHA), Base: strings.ToLower(pullValue.BaseSHA), BaseRef: pullValue.BaseRef, Body: pullValue.Body, Provider: "codex"}
 	if daemon.reviewPublished != nil {
 		return daemon.reviewPublished(ctx, project, reviewRequest)
 	}
@@ -254,7 +309,7 @@ func (b *daemonReviewBackend) Submit(ctx context.Context, operation review.Opera
 }
 func (b *daemonReviewBackend) Enqueue(ctx context.Context, operation review.Operation) error {
 	digest := sha256.Sum256([]byte(operation.Request.Body))
-	return b.call(ctx, "enqueue_pull_request", map[string]any{"repository": b.repository, "pull_number": operation.Request.PullNumber, "head_sha": operation.Request.Head, "base": operation.Request.Base, "operation_id": operation.EnqueueID, "reviewed_body_digest": "sha256:" + hex.EncodeToString(digest[:])})
+	return b.call(ctx, "enqueue_pull_request", map[string]any{"repository": b.repository, "pull_number": operation.Request.PullNumber, "head_sha": operation.Request.Head, "base": operation.Request.BaseRef, "operation_id": operation.EnqueueID, "reviewed_body_digest": "sha256:" + hex.EncodeToString(digest[:])})
 }
 func (b *daemonReviewBackend) call(ctx context.Context, name string, arguments map[string]any) error {
 	_, err := b.callResponse(ctx, name, arguments)

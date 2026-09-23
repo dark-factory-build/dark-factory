@@ -42,7 +42,7 @@ func (b *fakeBackend) Enqueue(context.Context, Operation) error { b.enqueued = t
 func TestStartPersistsBeforeProviderAndEnqueuesExactHead(t *testing.T) {
 	store, backend := &memoryStore{}, &fakeBackend{}
 	c := Coordinator{Store: store, Backend: backend, Now: func() time.Time { return time.Unix(10, 0) }}
-	op, err := c.Start(context.Background(), Request{Repository: "org/repo", PullNumber: 7, Head: "a" + "000000000000000000000000000000000000000", Base: "b" + "000000000000000000000000000000000000000", Body: "body", Provider: "codex"})
+	op, err := c.Start(context.Background(), Request{Repository: "org/repo", PullNumber: 7, Head: "a" + "000000000000000000000000000000000000000", Base: "b" + "000000000000000000000000000000000000000", BaseRef: "main", Body: "body", Provider: "codex"})
 	if err != nil || op.State != "enqueued" || op.EnqueueID == "" || op.EnqueueID == op.ID || !backend.submitted || !backend.enqueued {
 		t.Fatalf("operation=%+v err=%v backend=%+v", op, err, backend)
 	}
@@ -54,7 +54,7 @@ func TestStartPersistsBeforeProviderAndEnqueuesExactHead(t *testing.T) {
 func TestStartRecordsProviderFailureForRetry(t *testing.T) {
 	store, backend := &memoryStore{}, &fakeBackend{killed: true}
 	c := Coordinator{Store: store, Backend: backend, Now: time.Now}
-	op, err := c.Start(context.Background(), Request{Repository: "org/repo", PullNumber: 7, Head: "a" + "000000000000000000000000000000000000000", Base: "b" + "000000000000000000000000000000000000000", Body: "body", Provider: "claude"})
+	op, err := c.Start(context.Background(), Request{Repository: "org/repo", PullNumber: 7, Head: "a" + "000000000000000000000000000000000000000", Base: "b" + "000000000000000000000000000000000000000", BaseRef: "main", Body: "body", Provider: "claude"})
 	if err == nil || op.State != "failed" || !op.Retryable || len(store.values) < 2 || store.values[len(store.values)-1].State != "failed" {
 		t.Fatalf("operation=%+v err=%v records=%+v", op, err, store.values)
 	}
@@ -65,7 +65,7 @@ func TestSubmitFailureIsDurableButNotRetryable(t *testing.T) {
 	backend := &fakeBackend{}
 	backend.submitErr = errors.New("submit timeout after write")
 	c := Coordinator{Store: store, Backend: backend, Now: time.Now}
-	op, err := c.Start(context.Background(), Request{Repository: "org/repo", PullNumber: 7, Head: "a" + "000000000000000000000000000000000000000", Base: "b" + "000000000000000000000000000000000000000", Body: "body", Provider: "codex"})
+	op, err := c.Start(context.Background(), Request{Repository: "org/repo", PullNumber: 7, Head: "a" + "000000000000000000000000000000000000000", Base: "b" + "000000000000000000000000000000000000000", BaseRef: "main", Body: "body", Provider: "codex"})
 	if err == nil || op.State != "failed" || op.Retryable {
 		t.Fatalf("operation=%+v err=%v", op, err)
 	}
@@ -77,7 +77,7 @@ func TestSubmitFailureIsDurableButNotRetryable(t *testing.T) {
 func TestRetryRerunsTheSameExactHeadAfterProviderLaunchFailure(t *testing.T) {
 	store, backend := &memoryStore{}, &fakeBackend{killed: true}
 	c := Coordinator{Store: store, Backend: backend, Now: time.Now}
-	first, err := c.Start(context.Background(), Request{Repository: "org/repo", PullNumber: 7, Head: "a" + "000000000000000000000000000000000000000", Base: "b" + "000000000000000000000000000000000000000", Body: "body", Provider: "codex"})
+	first, err := c.Start(context.Background(), Request{Repository: "org/repo", PullNumber: 7, Head: "a" + "000000000000000000000000000000000000000", Base: "b" + "000000000000000000000000000000000000000", BaseRef: "main", Body: "body", Provider: "codex"})
 	if err == nil || first.State != "failed" {
 		t.Fatalf("first operation=%+v err=%v", first, err)
 	}

@@ -13,6 +13,7 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/api"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 	"github.com/dark-factory-build/dark-factory/internal/maintainer"
+	"github.com/dark-factory-build/dark-factory/internal/review"
 )
 
 type maintainerRequest struct {
@@ -277,20 +278,25 @@ func (daemon *Daemon) recordMaintainerPublication(ctx context.Context, project k
 	if err != nil {
 		return err
 	}
-	if err := daemon.store.RecordPublication(ctx, project, task, repo, kernel.ProductionPullRequest{Number: reply.Result.Pull.Number, Title: title, URL: reply.Result.Pull.URL, Head: reply.Result.Pull.Head, Branch: branch, Base: base, State: "open", Review: kernel.ProductionReview{Head: reply.Result.Pull.Head, State: "unknown"}}, at); err != nil {
-		return err
-	}
-	// The publication is durable before the independent review is launched.
-	// Keep this transition in the daemon, so a corrected publication follows
-	// the same exact-head path instead of the legacy host lane.
+	reviewRequest := api.ReviewRequest{Repository: strings.ToLower(repo), PullNumber: reply.Result.Pull.Number, Head: strings.ToLower(reply.Result.Pull.Head), Base: strings.ToLower(reply.Result.Pull.Base), BaseRef: base, Body: reply.Result.Pull.Body, Provider: "codex"}
 	if daemon.reviewPublished != nil {
-		_, _ = daemon.reviewPublished(ctx, project, api.ReviewRequest{Repository: strings.ToLower(repo), PullNumber: reply.Result.Pull.Number, Head: strings.ToLower(reply.Result.Pull.Head), Base: strings.ToLower(reply.Result.Pull.Base), Body: reply.Result.Pull.Body, Provider: "codex"})
-	} else if daemon.github != nil && daemon.cleanupCtx != nil {
-		go func() {
-			_, _ = daemon.reviewPublishedPR(daemon.cleanupCtx, project, repo, reply.Result.Pull.Number, reply.Result.Pull.Head)
-		}()
+		if err := daemon.store.RecordPublication(ctx, project, task, repo, kernel.ProductionPullRequest{Number: reply.Result.Pull.Number, Title: title, URL: reply.Result.Pull.URL, Head: reply.Result.Pull.Head, Branch: branch, Base: base, State: "open", Review: kernel.ProductionReview{Head: reply.Result.Pull.Head, State: "unknown"}}, at); err != nil {
+			return err
+		}
+		_, err = daemon.reviewPublished(ctx, project, reviewRequest)
+	} else if daemon.github != nil || daemon.reviewBackend != nil {
+		prepared, prepareErr := review.Prepare(review.Request{Repository: reviewRequest.Repository, PullNumber: reviewRequest.PullNumber, Head: reviewRequest.Head, Base: reviewRequest.Base, BaseRef: reviewRequest.BaseRef, Body: reviewRequest.Body, Provider: reviewRequest.Provider}, daemon.now)
+		if prepareErr != nil {
+			return prepareErr
+		}
+		if err := daemon.store.RecordPublicationWithReviewOperation(ctx, project, task, repo, kernel.ProductionPullRequest{Number: reply.Result.Pull.Number, Title: title, URL: reply.Result.Pull.URL, Head: reply.Result.Pull.Head, Branch: branch, Base: base, State: "open", Review: kernel.ProductionReview{Head: reply.Result.Pull.Head, State: "unknown"}}, prepared.ID, prepared, at); err != nil {
+			return err
+		}
+		_, err = daemon.resumeReview(ctx, project, prepared)
+	} else {
+		err = daemon.store.RecordPublication(ctx, project, task, repo, kernel.ProductionPullRequest{Number: reply.Result.Pull.Number, Title: title, URL: reply.Result.Pull.URL, Head: reply.Result.Pull.Head, Branch: branch, Base: base, State: "open", Review: kernel.ProductionReview{Head: reply.Result.Pull.Head, State: "unknown"}}, at)
 	}
-	return nil
+	return err
 }
 
 // decodeMaintainerToolCall re-encodes the exact repository fields that local

@@ -43,7 +43,7 @@ func TestIntakeReviewClosedPublicationVocabulary(t *testing.T) {
 }
 
 func TestReviewRequestIsClosedAndExactHeadBound(t *testing.T) {
-	input := IntakeInput{Action: "review_pr", ProjectID: strings.Repeat("a", 32), ReviewRequest: &ReviewRequest{Repository: "team/repo", PullNumber: 7, Head: strings.Repeat("a", 40), Base: strings.Repeat("b", 40), Body: "body", Provider: "codex"}}
+	input := IntakeInput{Action: "review_pr", ProjectID: strings.Repeat("a", 32), ReviewRequest: &ReviewRequest{Repository: "team/repo", PullNumber: 7, Head: strings.Repeat("a", 40), Base: strings.Repeat("b", 40), BaseRef: "main", Body: "body", Provider: "codex"}}
 	if !ValidIntakeInput(input) {
 		t.Fatal("valid review request rejected")
 	}

@@ -5,6 +5,7 @@ package api
 import (
 	"context"
 	"encoding/hex"
+	"strings"
 )
 
 // Intake uses the same private operator actions for CLI, console and the
@@ -45,6 +46,7 @@ type ReviewRequest struct {
 	PullNumber     uint64 `json:"pull_number"`
 	Head           string `json:"head"`
 	Base           string `json:"base"`
+	BaseRef        string `json:"base_ref"`
 	Body           string `json:"body"`
 	Provider       string `json:"provider"`
 	RetryOperation string `json:"retry_operation,omitempty"`
@@ -180,9 +182,9 @@ func ValidIntakeInput(input IntakeInput) bool {
 
 func validReviewRequest(value ReviewRequest) bool {
 	if value.RetryOperation != "" {
-		return reviewUUID(value.RetryOperation) && value.Repository == "" && value.PullNumber == 0 && value.Head == "" && value.Base == "" && value.Body == "" && value.Provider == ""
+		return reviewUUID(value.RetryOperation) && value.Repository == "" && value.PullNumber == 0 && value.Head == "" && value.Base == "" && value.BaseRef == "" && value.Body == "" && value.Provider == ""
 	}
-	return validText(value.Repository, 3, 140) && value.PullNumber > 0 && validHex(value.Head, 20) && validHex(value.Base, 20) && validText(value.Body, 1, 65536) && (value.Provider == "codex" || value.Provider == "claude")
+	return validText(value.Repository, 3, 140) && value.PullNumber > 0 && validHex(value.Head, 20) && validHex(value.Base, 20) && validText(value.BaseRef, 1, 240) && !strings.ContainsAny(value.BaseRef, "\x00\r\n") && validText(value.Body, 1, 65536) && (value.Provider == "codex" || value.Provider == "claude")
 }
 
 func (client *OperatorClient) Intake(ctx context.Context, input IntakeInput) (IntakeResult, error) {

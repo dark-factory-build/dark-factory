@@ -17,6 +17,7 @@ import (
 type publicReviewBackend struct {
 	killed, submitAmbiguous    bool
 	reviews, submits, enqueues int
+	enqueuedBase, enqueuedSHA  string
 	journal                    map[string]string
 }
 
@@ -42,6 +43,7 @@ func (b *publicReviewBackend) Submit(_ context.Context, operation review.Operati
 }
 func (b *publicReviewBackend) Enqueue(_ context.Context, operation review.Operation) error {
 	b.enqueues++
+	b.enqueuedBase, b.enqueuedSHA = operation.Request.BaseRef, operation.Request.Base
 	return b.record("enqueue_pull_request", operation.EnqueueID)
 }
 
@@ -61,7 +63,7 @@ func TestPublicReviewPathPersistsKilledProviderFailureAndRetries(t *testing.T) {
 	fixture, project := reviewPublicFixture(t)
 	backend := &publicReviewBackend{killed: true}
 	fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return backend }
-	input := api.IntakeInput{Action: "review_pr", ProjectID: project.String(), ReviewRequest: &api.ReviewRequest{Repository: "team/repo", PullNumber: 7, Head: strings.Repeat("a", 40), Base: strings.Repeat("b", 40), Body: "fixture", Provider: "codex"}}
+	input := api.IntakeInput{Action: "review_pr", ProjectID: project.String(), ReviewRequest: &api.ReviewRequest{Repository: "team/repo", PullNumber: 7, Head: strings.Repeat("a", 40), Base: strings.Repeat("b", 40), BaseRef: "main", Body: "fixture", Provider: "codex"}}
 	if result := fixture.daemon.Intake(context.Background(), input); result.State == "ok" {
 		t.Fatal("killed provider unexpectedly succeeded")
 	}
@@ -81,7 +83,7 @@ func TestPublicReviewPathRefusesRetryAfterAmbiguousSubmit(t *testing.T) {
 	fixture, project := reviewPublicFixture(t)
 	backend := &publicReviewBackend{submitAmbiguous: true}
 	fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return backend }
-	input := api.IntakeInput{Action: "review_pr", ProjectID: project.String(), ReviewRequest: &api.ReviewRequest{Repository: "team/repo", PullNumber: 8, Head: strings.Repeat("c", 40), Base: strings.Repeat("d", 40), Body: "fixture", Provider: "claude"}}
+	input := api.IntakeInput{Action: "review_pr", ProjectID: project.String(), ReviewRequest: &api.ReviewRequest{Repository: "team/repo", PullNumber: 8, Head: strings.Repeat("c", 40), Base: strings.Repeat("d", 40), BaseRef: "main", Body: "fixture", Provider: "claude"}}
 	if result := fixture.daemon.Intake(context.Background(), input); result.State == "ok" {
 		t.Fatal("ambiguous submit unexpectedly succeeded")
 	}

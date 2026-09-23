@@ -366,6 +366,9 @@ func openProcess(ctx context.Context, configuration config) (_ *process, resultE
 	if err != nil {
 		return nil, err
 	}
+	if _, err := owner.daemon.RecoverReviewOperations(ownedContext); err != nil {
+		return nil, err
+	}
 	if err := owner.daemon.ConfigureMaintainer(owner.home); err != nil {
 		return nil, err
 	}

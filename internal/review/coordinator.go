@@ -19,6 +19,7 @@ type Request struct {
 	PullNumber uint64
 	Head       string
 	Base       string
+	BaseRef    string
 	Body       string
 	Provider   string
 }
@@ -59,9 +60,28 @@ type Coordinator struct {
 }
 
 func (c Coordinator) Start(ctx context.Context, request Request) (Operation, error) {
-	if err := validate(request); err != nil || c.Store == nil || c.Backend == nil || c.Now == nil {
+	if c.Store == nil || c.Backend == nil {
+		return Operation{}, errors.New("review: incomplete coordinator")
+	}
+	op, err := Prepare(request, c.Now)
+	if err != nil {
+		return Operation{}, err
+	}
+	// The record is durable before any provider or clone is started. A crash
+	// after this point is therefore observable and retryable, never invisible.
+	if err := c.Store.Create(ctx, op); err != nil {
+		return Operation{}, err
+	}
+	return c.Resume(ctx, op)
+}
+
+// Prepare mints the durable operation identity without performing external
+// work. Publication uses it to claim the review in the same transaction as
+// the pull request record.
+func Prepare(request Request, now func() time.Time) (Operation, error) {
+	if err := validate(request); err != nil || now == nil {
 		if err == nil {
-			err = errors.New("review: incomplete coordinator")
+			err = errors.New("review: incomplete operation")
 		}
 		return Operation{}, err
 	}
@@ -69,19 +89,24 @@ func (c Coordinator) Start(ctx context.Context, request Request) (Operation, err
 	if err != nil {
 		return Operation{}, err
 	}
-	now := c.Now()
-	op := Operation{ID: id, Request: request, State: "running", CreatedAt: now, UpdatedAt: now}
-	// The record is durable before any provider or clone is started. A crash
-	// after this point is therefore observable and retryable, never invisible.
-	if err := c.Store.Create(ctx, op); err != nil {
+	stamp := now()
+	return Operation{ID: id, Request: request, State: "running", CreatedAt: stamp, UpdatedAt: stamp}, nil
+}
+
+// Resume continues an operation already durably claimed by the caller.
+func (c Coordinator) Resume(ctx context.Context, op Operation) (Operation, error) {
+	if err := validate(op.Request); err != nil || c.Store == nil || c.Backend == nil || c.Now == nil || op.ID == "" || op.State != "running" {
+		if err == nil {
+			err = errors.New("review: incomplete coordinator")
+		}
 		return Operation{}, err
 	}
-	checkout, cleanup, err := c.Backend.CloneReadOnly(ctx, request)
+	checkout, cleanup, err := c.Backend.CloneReadOnly(ctx, op.Request)
 	if err != nil {
 		return c.fail(ctx, op, err, true)
 	}
 	defer cleanup()
-	verdict, err := c.Backend.Review(ctx, checkout, request)
+	verdict, err := c.Backend.Review(ctx, checkout, op.Request)
 	if err != nil {
 		return c.fail(ctx, op, err, true)
 	}
@@ -137,7 +162,7 @@ func (c Coordinator) fail(ctx context.Context, op Operation, cause error, retrya
 }
 
 func validate(r Request) error {
-	if !strings.Contains(r.Repository, "/") || r.PullNumber == 0 || !shaRE.MatchString(r.Head) || !shaRE.MatchString(r.Base) || r.Body == "" || (r.Provider != "codex" && r.Provider != "claude") {
+	if !strings.Contains(r.Repository, "/") || r.PullNumber == 0 || !shaRE.MatchString(r.Head) || !shaRE.MatchString(r.Base) || r.BaseRef == "" || len(r.BaseRef) > 240 || strings.ContainsAny(r.BaseRef, "\x00\r\n") || r.Body == "" || (r.Provider != "codex" && r.Provider != "claude") {
 		return errors.New("review: invalid exact-head request")
 	}
 	return nil

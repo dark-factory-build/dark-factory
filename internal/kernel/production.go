@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 )
 
 const maxProductionReviewFindings = 16000
@@ -346,6 +347,50 @@ func (store *Store) RecordPublication(ctx context.Context, project ProjectID, ta
 	return tx.Commit(ctx)
 }
 
+// RecordPublicationWithReviewOperation claims the independent review in the
+// same transaction as publication. This closes the shutdown window between
+// the publication record and review operation creation.
+func (store *Store) RecordPublicationWithReviewOperation(ctx context.Context, project ProjectID, task TaskID, repo string, pr ProductionPullRequest, operationID string, operation any, at UnixMillis) error {
+	if !productionRepository.MatchString(repo) || !validProductionPull(pr) || !validOutcomeText(operationID, 128) {
+		return ErrInvalidValue
+	}
+	body, err := json.Marshal(operation)
+	if err != nil || len(body) < 2 || len(body) > 65536 {
+		return ErrInvalidValue
+	}
+	repo = strings.ToLower(repo)
+	tx, err := store.beginValidatedWrite(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Close()
+	owner, found, err := taskByID(ctx, tx.connection, task)
+	if err != nil {
+		return tx.Rollback(err)
+	}
+	if !found || owner.ProjectID != project {
+		return tx.Rollback(ErrUnauthorized)
+	}
+	if _, err = tx.connection.ExecContext(ctx, `INSERT INTO publication_tasks (project_id, repository, pull_number, task_id, created_at_ms) VALUES (?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`, project.Bytes(), repo, pr.Number, task.Bytes(), at.Int64()); err != nil {
+		return tx.Rollback(err)
+	}
+	visual, err := linkProductionChange(ctx, tx.connection, project, repo, pr, at.Int64())
+	if err != nil {
+		return tx.Rollback(err)
+	}
+	publication, err := json.Marshal(pr)
+	if err != nil {
+		return tx.Rollback(err)
+	}
+	if _, err = tx.connection.ExecContext(ctx, `INSERT INTO production_records (project_id, repository, kind, identity, visual_id, document, observed_at_ms) VALUES (?, ?, 'pull_request', ?, ?, ?, ?) ON CONFLICT DO NOTHING`, project.Bytes(), repo, strconv.FormatUint(pr.Number, 10), visual, string(publication), at.Int64()); err != nil {
+		return tx.Rollback(err)
+	}
+	if err := productionRecordOnConnection(ctx, tx.connection, project, repo, "reviewer", operationID, "", operation, at.Int64()); err != nil {
+		return tx.Rollback(err)
+	}
+	return tx.Commit(ctx)
+}
+
 // RecordProductionReview preserves the exact commit covered by a review.
 // Refreshes may move the live PR to a newer head; that older head is evidence,
 // not permission to rewrite the review onto the new source.
@@ -439,6 +484,93 @@ func (store *Store) ReviewOperation(ctx context.Context, project ProjectID, oper
 		return nil, false, err
 	}
 	return []byte(document), true, nil
+}
+
+// RecoverRunningReviewOperations makes a review claim left by a stopped
+// daemon visible as a failure. Only a claim with no verdict or enqueue receipt
+// is retryable; an external reviewer observation uses the same projection kind
+// but does not have the durable operation request object.
+func (store *Store) RecoverRunningReviewOperations(ctx context.Context, at UnixMillis) (int, error) {
+	tx, err := store.beginValidatedWrite(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Close()
+	rows, err := tx.connection.QueryContext(ctx, `SELECT project_id, repository, identity, document FROM production_records
+        WHERE kind = 'reviewer' AND json_extract(document, '$.state') = 'running'
+          AND json_type(document, '$.request') = 'object'`)
+	if err != nil {
+		return 0, err
+	}
+	type candidate struct {
+		project    ProjectID
+		repository string
+		identity   string
+		document   map[string]json.RawMessage
+	}
+	var candidates []candidate
+	for rows.Next() {
+		var projectBytes []byte
+		var repository, identity, document string
+		if err := rows.Scan(&projectBytes, &repository, &identity, &document); err != nil {
+			rows.Close()
+			return 0, tx.Rollback(err)
+		}
+		project, err := ProjectIDFromBytes(projectBytes)
+		if err != nil {
+			rows.Close()
+			return 0, tx.Rollback(err)
+		}
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(document), &fields); err != nil {
+			rows.Close()
+			return 0, tx.Rollback(fmt.Errorf("%w: review operation", ErrCorruptState))
+		}
+		var operationID string
+		if err := json.Unmarshal(fields["id"], &operationID); err != nil || operationID == "" {
+			continue
+		}
+		var verdict, enqueueID string
+		_ = json.Unmarshal(fields["verdict"], &verdict)
+		_ = json.Unmarshal(fields["enqueue_id"], &enqueueID)
+		retryable, _ := json.Marshal(verdict == "" && enqueueID == "")
+		fields["retryable"] = retryable
+		candidates = append(candidates, candidate{project: project, repository: repository, identity: identity, document: fields})
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return 0, tx.Rollback(err)
+	}
+	if err := rows.Close(); err != nil {
+		return 0, tx.Rollback(err)
+	}
+	updatedAt, err := json.Marshal(time.UnixMilli(at.Int64()).UTC())
+	if err != nil {
+		return 0, tx.Rollback(err)
+	}
+	detail, err := json.Marshal("review interrupted before resume; retry the recorded operation")
+	if err != nil {
+		return 0, tx.Rollback(err)
+	}
+	for _, item := range candidates {
+		item.document["state"] = json.RawMessage(`"failed"`)
+		var verdict, enqueueID string
+		_ = json.Unmarshal(item.document["verdict"], &verdict)
+		_ = json.Unmarshal(item.document["enqueue_id"], &enqueueID)
+		if verdict == "" && enqueueID == "" {
+			item.document["detail"] = detail
+		} else {
+			item.document["detail"] = json.RawMessage(`"review interrupted after an external write may have occurred; observe the original operation"`)
+		}
+		item.document["updated_at"] = updatedAt
+		if err := productionRecordOnConnection(ctx, tx.connection, item.project, item.repository, "reviewer", item.identity, "", item.document, at.Int64()); err != nil {
+			return 0, tx.Rollback(err)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, err
+	}
+	return len(candidates), nil
 }
 
 // Current construction comes from Changes even after its worker finishes. The
