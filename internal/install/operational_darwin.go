@@ -18,7 +18,6 @@ import (
 const (
 	operationalMaxDatabaseBytes = 256 << 20
 	operationalMaxWALBytes      = 272 << 20
-	operationalMinSHMBytes      = 32768
 	operationalMaxSHMBytes      = 4 << 20
 )
 
@@ -856,7 +855,9 @@ func operationalSidecarBounds(name string) (int64, int64) {
 	case databaseName + "-wal":
 		return 0, operationalMaxWALBytes
 	case databaseName + "-shm":
-		return operationalMinSHMBytes, operationalMaxSHMBytes
+		// SQLite grows the live WAL-index while it is initializing. A fixed
+		// page-sized floor races that valid initialization window.
+		return 0, operationalMaxSHMBytes
 	default:
 		return 0, 0
 	}
@@ -927,6 +928,14 @@ func copyAndValidateOperationalDatabase(ctx context.Context, sources []operation
 	for _, source := range sources {
 		if err := copyOperationalSource(ctx, source, filepath.Join(directory, source.name)); err != nil {
 			return err
+		}
+		if source.name == databaseName+"-shm" && source.stat.Size < 32768 {
+			// The live WAL-index may be observed between SQLite growth writes.
+			// Pad only the disposable validator image; the retained source and
+			// its immutable snapshot remain byte-exact.
+			if err := os.Truncate(filepath.Join(directory, source.name), 32768); err != nil {
+				return fmt.Errorf("pad operational SQLite scratch SHM: %w", err)
+			}
 		}
 	}
 	store, err := kernel.Open(ctx, databasePath)

@@ -144,6 +144,50 @@ func TestOperationalHomeAcceptsValidWALRestartLayout(t *testing.T) {
 	}
 }
 
+func TestOperationalHomeAcceptsShortLiveSHMInitialization(t *testing.T) {
+	parent := installTempDir(t)
+	homePath := filepath.Join(parent, "home")
+	if _, err := Init(context.Background(), homePath); err != nil {
+		t.Fatal(err)
+	}
+	databasePath := filepath.Join(homePath, databaseName)
+	raw, err := sql.Open("sqlite3", "file:"+databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	if _, err := raw.Exec("PRAGMA journal_mode=WAL"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec("UPDATE factory SET updated_at_ms = updated_at_ms"); err != nil {
+		t.Fatal(err)
+	}
+	shmPath := databasePath + "-shm"
+	if err := os.Chmod(databasePath+"-wal", 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(shmPath, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Truncate(shmPath, 3); err != nil {
+		t.Fatal(err)
+	}
+	home, err := OpenOperationalHome(context.Background(), homePath)
+	if err != nil {
+		t.Fatalf("open short live SHM home: %v", err)
+	}
+	store, err := home.OpenStore(context.Background())
+	if err != nil {
+		t.Fatalf("activate short live SHM home: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := home.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestOperationalHomeRejectsMalformedSQLiteSidecarsWithoutMutation(t *testing.T) {
 	for _, test := range []struct {
 		name  string
@@ -156,7 +200,7 @@ func TestOperationalHomeRejectsMalformedSQLiteSidecarsWithoutMutation(t *testing
 			if err := os.WriteFile(filepath.Join(homePath, databaseName+"-wal"), []byte("wal"), 0o600); err != nil {
 				return err
 			}
-			return os.WriteFile(filepath.Join(homePath, databaseName+"-shm"), make([]byte, operationalMinSHMBytes), 0o600)
+			return os.WriteFile(filepath.Join(homePath, databaseName+"-shm"), make([]byte, 32768), 0o600)
 		}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -595,7 +639,7 @@ func TestOperationalHomeStoreRejectsLaterSidecarReplacement(t *testing.T) {
 			}
 			replacement := []byte("replacement-sidecar")
 			if suffix == "-shm" {
-				replacement = bytes.Repeat([]byte{9}, operationalMinSHMBytes)
+				replacement = bytes.Repeat([]byte{9}, 32768)
 			}
 			if err := os.WriteFile(target, replacement, 0o600); err != nil {
 				t.Fatal(err)

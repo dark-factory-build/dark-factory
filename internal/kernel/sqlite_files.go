@@ -48,7 +48,7 @@ func Open(ctx context.Context, absolutePath string) (*Store, error) {
 // uncertain and its authority must remain retained. install.OperationalHome
 // is the sole production caller and keeps that Store as its child lease.
 func OpenOperational(ctx context.Context, absolutePath string, home, database *os.File) (*Store, error) {
-	files, err := openBoundDatabaseFiles(absolutePath, home, database)
+	files, err := openBoundDatabaseFiles(absolutePath, home, database, true)
 	if err != nil {
 		return nil, err
 	}
@@ -226,11 +226,12 @@ type databaseFile struct {
 }
 
 type databaseFiles struct {
-	authority *databasePathAuthority
-	directory *os.File
-	main      *databaseFile
-	wal       *databaseFile
-	shm       *databaseFile
+	authority     *databasePathAuthority
+	directory     *os.File
+	allowShortSHM bool
+	main          *databaseFile
+	wal           *databaseFile
+	shm           *databaseFile
 }
 
 type databasePathComponent struct {
@@ -400,7 +401,7 @@ func openDatabaseFiles(path string) (_ *databaseFiles, resultErr error) {
 	return files, nil
 }
 
-func openBoundDatabaseFiles(path string, retainedHome, retainedMain *os.File) (_ *databaseFiles, resultErr error) {
+func openBoundDatabaseFiles(path string, retainedHome, retainedMain *os.File, allowShortSHM bool) (_ *databaseFiles, resultErr error) {
 	if retainedHome == nil || retainedMain == nil {
 		var closeErr error
 		if retainedHome != nil {
@@ -416,8 +417,9 @@ func openBoundDatabaseFiles(path string, retainedHome, retainedMain *os.File) (_
 		return nil, errors.Join(err, retainedMain.Close(), retainedHome.Close())
 	}
 	files := &databaseFiles{
-		authority: authority,
-		directory: authority.directory(),
+		authority:     authority,
+		directory:     authority.directory(),
+		allowShortSHM: allowShortSHM,
 	}
 	defer func() {
 		if resultErr != nil {
@@ -500,11 +502,15 @@ func populateDatabaseFiles(files *databaseFiles, path string, retainedMain *os.F
 	if err != nil {
 		return err
 	}
-	files.shm, err = files.openDatabaseFile(base+"-shm", "SHM", walIndexRegionSize, maxSQLiteSHMSize)
+	shmMinimum := int64(walIndexRegionSize)
+	if files.allowShortSHM {
+		shmMinimum = 0
+	}
+	files.shm, err = files.openDatabaseFile(base+"-shm", "SHM", shmMinimum, maxSQLiteSHMSize)
 	if err != nil {
 		return err
 	}
-	if files.shm.info.Size()%walIndexRegionSize != 0 {
+	if !files.allowShortSHM && files.shm.info.Size()%walIndexRegionSize != 0 {
 		return fmt.Errorf("%w: SHM size %d is not a positive multiple of %d", ErrCorruptState, files.shm.info.Size(), walIndexRegionSize)
 	}
 	pageSize, err := databasePageSize(files.main.file)
@@ -608,7 +614,7 @@ func (files *databaseFiles) refreshPinnedInfo() error {
 	if files.wal == nil {
 		return nil
 	}
-	if files.shm.info.Size()%walIndexRegionSize != 0 {
+	if !files.allowShortSHM && files.shm.info.Size()%walIndexRegionSize != 0 {
 		return fmt.Errorf("%w: SHM size %d is not a positive multiple of %d", ErrCorruptState, files.shm.info.Size(), walIndexRegionSize)
 	}
 	pageSize, err := databasePageSize(files.main.file)
