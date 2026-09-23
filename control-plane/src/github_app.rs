@@ -3356,8 +3356,7 @@ impl CreatePullRequest {
             let shaped = line
                 .split_once(char::is_whitespace)
                 .is_some_and(|(keyword, target)| {
-                    (keyword.eq_ignore_ascii_case("refs")
-                        || keyword.eq_ignore_ascii_case("closes"))
+                    (keyword.eq_ignore_ascii_case("refs") || keyword.eq_ignore_ascii_case("closes"))
                         && (target.contains('#') || target.contains("://"))
                 });
             if !owned && shaped {
