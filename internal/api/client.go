@@ -43,7 +43,6 @@ type client struct {
 	socketPath string
 	tokenPath  string
 	token      tokenRecord
-	socket     socketRecord
 	domain     byte
 }
 
@@ -86,11 +85,10 @@ func newClient(socketPath, tokenPath string, domain byte) (client, error) {
 	if err != nil {
 		return client{}, err
 	}
-	socket, err := inspectSocket(socketPath)
-	if err != nil {
+	if _, err := inspectSocket(socketPath); err != nil {
 		return client{}, err
 	}
-	return client{socketPath: socketPath, tokenPath: tokenPath, token: token, socket: socket, domain: domain}, nil
+	return client{socketPath: socketPath, tokenPath: tokenPath, token: token, domain: domain}, nil
 }
 
 func (client *OperatorClient) Health(ctx context.Context) (HealthStatus, error) {
