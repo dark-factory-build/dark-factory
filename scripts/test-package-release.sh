@@ -320,6 +320,9 @@ assert "docs/development/UNATTENDED.md" not in body
 auto_spec = importlib.util.spec_from_file_location("installed_autonomy", Path(sys.argv[1]).with_name("factory-autonomy.py"))
 auto = importlib.util.module_from_spec(auto_spec)
 auto_spec.loader.exec_module(auto)
+delivery_spec = importlib.util.spec_from_file_location("installed_delivery", Path(sys.argv[1]).with_name("factory-delivery.py"))
+delivery = importlib.util.module_from_spec(delivery_spec)
+delivery_spec.loader.exec_module(delivery)
 assert auto.controller_checkout(Path(sys.argv[1]).parent) is None
 PY
 ) || fail "installed intake did not read its relative guidance"
