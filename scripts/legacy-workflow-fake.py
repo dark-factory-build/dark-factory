@@ -312,6 +312,31 @@ def provider():
         transaction(lambda current: current["workers"].__setitem__(key, worker))
         call("attempt", "succeed", "--result", f"Delegated {worker}")
         return
+    if state["case"] == "restart" and not state.get("restart_retry_issued") and state["workers"].get("7"):
+        # OVERSEER.md permits one same-task retry only for a proven refusal
+        # before execution. This is an ordinary overseer provider decision,
+        # after reading product task and Change receipts; the driver does not
+        # call task update or any controller pass.
+        worker_id = state["workers"]["7"]
+        snapshot = call("overseer", "status", "--task", worker_id)
+        failed = [row for row in snapshot["tasks"] if row["id"] == worker_id and row["status"] == "failed"]
+        if failed:
+            source = call("attempt", "source", "--task", worker_id)
+            old_head = state.get("source_head", {}).get("7")
+            old_pr = state["prs"].get(str(state.get("source_pr", {}).get("7")))
+            attempts = state["worker_attempts"].get("7", [])
+            safe = len(failed) == 1 and "checkout reader connection: context canceled" in failed[0]["result"] and \
+                source.get("task_id") == worker_id and source.get("task_work_revision") == 2 and \
+                source.get("change_id") == state.get("source_change", {}).get("7") and \
+                source.get("head_commit") == old_head and source.get("dirty") is False and old_pr is not None and \
+                source.get("branch") == old_pr["branch"] and old_pr["head"] == old_head and \
+                len(attempts) == 1 and attempts[0]["work_revision"] == 1 and attempts[0]["head"] == old_head
+            if safe:
+                call("overseer", "task", "update", "--task", worker_id,
+                     "--revision", str(failed[0]["revision"]), "--retry")
+                transaction(lambda current: current.__setitem__("restart_retry_issued", True))
+                call("attempt", "succeed", "--result", "Retried proven pre-execution failure on original worker")
+                return
     # A standing wake can mention the preceding source even after its head
     # was published. Pick a still-unpublished retained head, never replay an
     # already satisfied publication merely because it was named in context.
@@ -331,6 +356,7 @@ def provider():
         return
     branch = "factory/" + source["change_id"][:12]
     head = source["head_commit"]
+    transaction(lambda current: current.setdefault("source_change", {}).__setitem__(key, source["change_id"]))
     transaction(lambda current: current.setdefault("git_dirs", {}).__setitem__(branch, source["git_directory"]))
     filename = f"fixture-{issue}.txt"
     content = Path(source["source_path"], filename).read_bytes()

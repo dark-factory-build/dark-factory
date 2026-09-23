@@ -197,6 +197,18 @@ def assert_completed(state, receipt, home, operator, case, review_journal, resta
             if len(source) != 1 or source[0][1] != "Delegated " + worker or \
                     (title == "Operator origin fixture" and source[0][0] != operator):
                 raise AssertionError(f"original source task did not durably delegate {worker}")
+        if case == "restart" and state.get("restart_retry_issued"):
+            worker = bytes.fromhex(state["worker_attempts"]["7"][0]["task_id"])
+            preactivation = connection.execute(
+                """SELECT r.running_at_ms, r.terminal_kind, r.provider_exit_kind, r.runner_exit_kind,
+                          (SELECT count(*) FROM resources x WHERE x.run_id = r.id
+                           AND x.kind IN ('provider_group', 'provider_process', 'runner_process')
+                           AND (x.activated_at_ms IS NOT NULL OR x.pid IS NOT NULL OR x.pgid IS NOT NULL
+                                OR x.birth_digest IS NOT NULL))
+                   FROM runs r WHERE r.task_id = ? AND r.admitted_task_work_revision = 2""",
+                (worker,)).fetchall()
+            if len(preactivation) != 1 or preactivation[0] != (None, "failed", None, None, 0):
+                raise AssertionError("restart retry did not follow a settled pre-activation failure")
     if "8" not in state["issues"] or "<!-- dark-factory-operation:" not in state["issues"]["8"]["body"]:
         raise AssertionError("operator origin has no App-owned tracking issue")
 
