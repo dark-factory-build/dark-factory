@@ -410,6 +410,24 @@ print(json.dumps({'enabled': bool(target), 'revision': revision}))
                     self.assertEqual({'sha': 'a' * 40, 'healthy': True, 'dispatch_enabled': initially_enabled}, json.loads(result.stdout))
                     self.assertEqual(1, len(result.stdout.splitlines()))
 
+    def test_runtime_lookup_closes_connection_on_success_and_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            for valid in (True, False):
+                connection = sqlite3.connect(':memory:')
+                if valid:
+                    connection.executescript('CREATE TABLE factory(singleton, dispatch_enabled, revision); INSERT INTO factory VALUES(1, 1, 4); CREATE TABLE runs(phase, id);')
+                with patch.object(deploy.sqlite3, 'connect', return_value=connection):
+                    if valid:
+                        self.assertEqual((1, 4, 0), deploy.state(home))
+                    else:
+                        with self.assertRaises(sqlite3.OperationalError):
+                            deploy.state(home)
+                # Holding a reference deliberately prevents garbage collection
+                # from hiding a lookup that only ends its transaction.
+                with self.assertRaises(sqlite3.ProgrammingError):
+                    connection.execute('SELECT 1')
+
     def test_runtime_drain_counts_only_runs_a_new_daemon_cannot_adopt(self):
         # Short root: sockaddr_un's sun_path is 104 bytes, and the default
         # temporary directory plus a runtime name already crowds it.

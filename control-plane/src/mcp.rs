@@ -1468,6 +1468,13 @@ fn operation_error(id: Value, error: OperationError) -> Response {
             "refused",
             &format!("The request was refused: {reason}."),
         ),
+        OperationError::PullRequestUncertain(reason) => tool_error(
+            id,
+            "indeterminate",
+            &format!(
+                "{reason}. Preserve this operation UUID and exact request. Repeating that same create_pull_request request reconciles existing work without another POST while uncertain. If it remains unresolved, request an operator decision with this evidence; do not create a replacement operation or keep polling."
+            ),
+        ),
         OperationError::Indeterminate => tool_error(
             id,
             "indeterminate",

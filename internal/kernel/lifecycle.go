@@ -943,10 +943,11 @@ func (store *Store) finalizeRun(ctx context.Context, runID RunID, expected Revis
 		}
 		// A worktree Change keeps a head from the moment it exists; a settlement
 		// that observed none would erase that fact. A Change still Git-free at
-		// settlement has no head to observe and stays that way. Before the
-		// worker ran, nothing can have moved the branch: only the base settles.
+		// settlement has no head to observe and stays that way. Before this
+		// worker ran, nothing can have moved its admitted head. A correction
+		// reuses the prior retained head, which may differ from the base.
 		if settlement.phase == ChangeRetained && (settlingChange.HeadCommit != nil && settlement.head == nil || settlingChange.HeadCommit == nil && settlement.head != nil ||
-			settlement.head != nil && (settlement.head.format != settlingChange.Selection.format || run.RunningAt == nil && !settlement.head.equal(settlingChange.Selection.commit))) {
+			settlement.head != nil && (settlement.head.format != settlingChange.Selection.format || run.RunningAt == nil && !settlement.head.equal(*settlingChange.HeadCommit))) {
 			return Run{}, tx.Rollback(ErrConflict)
 		}
 		changeRevision = settlingChange.Revision.Int64() + 1

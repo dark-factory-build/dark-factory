@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Drain, reinstall an exact runtime revision, verify, and restore dispatch."""
 import argparse
+import contextlib
 import json
 import os
 from pathlib import Path
@@ -18,7 +19,7 @@ REFUSED = 75
 
 
 def state(home):
-    with sqlite3.connect((home / 'factory.sqlite3').as_uri() + '?mode=ro', uri=True) as connection:
+    with contextlib.closing(sqlite3.connect((home / 'factory.sqlite3').as_uri() + '?mode=ro', uri=True)) as connection:
         # Controls and non-terminal runs are read from the same SQLite snapshot.
         connection.execute('BEGIN')
         enabled, revision = connection.execute('SELECT dispatch_enabled, revision FROM factory WHERE singleton=1').fetchone()

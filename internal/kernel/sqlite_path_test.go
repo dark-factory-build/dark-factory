@@ -93,6 +93,14 @@ func TestOperationalOpenCancellationOwnsPhysicalConnectContext(t *testing.T) {
 	if physicalCalls != 1 {
 		t.Fatalf("physical sqlite Connect calls = %d, want exactly one", physicalCalls)
 	}
+	// Operational validation takes a real SQLite read snapshot. SQLite may
+	// update its shared-memory read marks, but must retain the same safe file.
+	afterSHM := captureSQLiteSet(t, path).files["-shm"]
+	beforeSHM := before.files["-shm"]
+	if !afterSHM.exists || !os.SameFile(beforeSHM.info, afterSHM.info) || afterSHM.info.Mode() != beforeSHM.info.Mode() || afterSHM.info.Size() != beforeSHM.info.Size() {
+		t.Fatal("operational inspection replaced or changed SHM authority")
+	}
+	before.files["-shm"] = afterSHM
 	assertSQLiteSetUnchanged(t, path, before)
 	afterEntries, err := os.ReadDir("/dev/fd")
 	if err != nil || len(afterEntries) != len(baselineEntries) {

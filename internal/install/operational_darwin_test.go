@@ -1255,3 +1255,123 @@ func TestOperationalHomeDescriptorCensus(t *testing.T) {
 		}
 	}
 }
+
+func TestOperationalHomeValidatesDuringSQLiteWriterAndCheckpoint(t *testing.T) {
+	for _, checkpoint := range []struct {
+		name  string
+		query string
+	}{
+		{name: "passive", query: "PRAGMA wal_checkpoint(PASSIVE)"},
+		{name: "truncate", query: "PRAGMA wal_checkpoint(TRUNCATE)"},
+	} {
+		checkpoint := checkpoint
+		t.Run(checkpoint.name, func(t *testing.T) {
+			parent := installTempDir(t)
+			homePath := filepath.Join(parent, "home")
+			if _, err := Init(context.Background(), homePath); err != nil {
+				t.Fatal(err)
+			}
+			databasePath := filepath.Join(homePath, databaseName)
+			raw, err := sql.Open("sqlite3", "file:"+databasePath+"?_pragma=busy_timeout(5000)")
+			if err != nil {
+				t.Fatal(err)
+			}
+			raw.SetMaxOpenConns(1)
+			defer raw.Close()
+			if _, err := raw.Exec("PRAGMA journal_mode=WAL"); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := raw.Exec("PRAGMA wal_autocheckpoint=0"); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := raw.Exec("UPDATE factory SET updated_at_ms = updated_at_ms + 1"); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(databasePath+"-wal", 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(databasePath+"-shm", 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			// Give full logical/integrity validation enough real, valid rows that the
+			// concurrent writer and checkpoint run across the startup validation.
+			seed, err := raw.Begin()
+			if err != nil {
+				t.Fatal(err)
+			}
+			for i := 0; i < 3000; i++ {
+				if _, err := seed.Exec("INSERT INTO browser_security_events(kind, client_id, occurred_at_ms) VALUES ('challenge_minted', NULL, ?)", i); err != nil {
+					_ = seed.Rollback()
+					t.Fatal(err)
+				}
+			}
+			if err := seed.Commit(); err != nil {
+				t.Fatal(err)
+			}
+
+			start := make(chan struct{})
+			stop := make(chan struct{})
+			writerDone := make(chan error, 1)
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+			var activities []time.Time
+			var writeMu sync.Mutex
+			go func() {
+				<-start
+				for {
+					select {
+					case <-stop:
+						writerDone <- nil
+						return
+					default:
+					}
+					if _, err := raw.ExecContext(ctx, "UPDATE factory SET updated_at_ms = updated_at_ms + 1"); err != nil {
+						writerDone <- err
+						return
+					}
+					var busy, frames, done int
+					if err := raw.QueryRowContext(ctx, checkpoint.query).Scan(&busy, &frames, &done); err != nil {
+						writerDone <- err
+						return
+					}
+					writeMu.Lock()
+					// TRUNCATE checkpoints report zero frames after a successful
+					// truncation. PASSIVE must have advanced at least one frame.
+					if checkpoint.name == "truncate" && busy == 0 || checkpoint.name == "passive" && done > 0 {
+						activities = append(activities, time.Now())
+					}
+					writeMu.Unlock()
+				}
+			}()
+			began := time.Now()
+			close(start)
+			home, openErr := OpenOperationalHome(ctx, homePath)
+			var store *kernel.Store
+			var storeErr error
+			if openErr == nil {
+				store, storeErr = home.OpenStore(ctx)
+			}
+			ended := time.Now()
+			close(stop)
+			writerErr := <-writerDone
+			if store != nil {
+				storeErr = errors.Join(storeErr, store.Close())
+			}
+			if home != nil {
+				openErr = errors.Join(openErr, home.Close())
+			}
+			if err := errors.Join(openErr, storeErr, writerErr); err != nil {
+				t.Fatalf("operational startup with concurrent SQLite writer/checkpointer: %v", err)
+			}
+			writeMu.Lock()
+			defer writeMu.Unlock()
+			for _, activity := range activities {
+				if !activity.Before(began) && !activity.After(ended) {
+					return
+				}
+			}
+			t.Fatalf("no SQLite commit plus %s checkpoint overlapped OpenOperationalHome -> OpenStore interval (%d iterations)", checkpoint.name, len(activities))
+		})
+	}
+}
