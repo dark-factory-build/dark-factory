@@ -27,6 +27,9 @@ func runReview(ctx context.Context, args []string, getenv func(string) string, s
 	if flags.Parse(args) != nil || flags.NArg() != 0 || project == "" {
 		return exitUsage
 	}
+	if request.RetryOperation != "" {
+		request = api.ReviewRequest{RetryOperation: request.RetryOperation}
+	}
 	if getenv("DARK_FACTORY_ATTEMPT_TOKEN_FILE") != "" {
 		return exitFailure
 	}
