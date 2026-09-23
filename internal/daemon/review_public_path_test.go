@@ -102,6 +102,26 @@ func TestPublicReviewPathRefusesRetryAfterAmbiguousSubmit(t *testing.T) {
 	}
 }
 
+func TestRestartDoesNotRouteRequestChangesBeforeSubmit(t *testing.T) {
+	fixture, project := reviewPublicFixture(t)
+	request := review.Request{Repository: "team/repo", PullNumber: 13, Head: strings.Repeat("a", 40), Base: strings.Repeat("b", 40), BaseRef: "main", Body: "fixture body", Provider: "codex"}
+	operation := review.Operation{ID: "request-changes-before-submit", Request: request, State: "running", Verdict: "request_changes", Detail: "not submitted", CreatedAt: time.Unix(1, 0), UpdatedAt: time.Unix(1, 0)}
+	if err := fixture.store.RecordReviewOperation(context.Background(), project, request.Repository, operation.ID, operation, mustKernelTime(t, 1001)); err != nil {
+		t.Fatal(err)
+	}
+	restarted, err := newDaemon(fixture.store, func() time.Time { return time.Unix(2, 0) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count, err := restarted.RecoverReviewOperations(context.Background()); err != nil || count != 1 {
+		t.Fatalf("pre-submit restart recovery count=%d err=%v", count, err)
+	}
+	recovered := lastDurableReview(t, fixture.store, project)
+	if recovered.State != "failed" || recovered.RoutePending || recovered.Submitted {
+		t.Fatalf("pre-submit operation became routable=%+v", recovered)
+	}
+}
+
 func TestRestartRoutesCompletedRequestChangesWithoutResubmitting(t *testing.T) {
 	fixture, project := reviewPublicFixture(t)
 	ctx := context.Background()
@@ -201,7 +221,7 @@ func TestRestartRoutesCompletedRequestChangesWithoutResubmitting(t *testing.T) {
 	now := func() time.Time { return time.Unix(1011, 0) }
 	coordinator := review.Coordinator{Store: durableReviewStore{store: fixture.store, project: project, repository: "team/repo", now: now}, Backend: backend, Now: now}
 	op, err := coordinator.Start(ctx, review.Request{Repository: "team/repo", PullNumber: 12, Head: head, Base: base, BaseRef: "main", Body: "fixture body", Provider: "codex"})
-	if err != nil || op.State != "completed" || !op.RoutePending || backend.submits != 1 {
+	if err != nil || op.State != "completed" || !op.Submitted || !op.RoutePending || backend.submits != 1 {
 		t.Fatalf("completed request-changes operation=%+v err=%v backend=%+v", op, err, backend)
 	}
 

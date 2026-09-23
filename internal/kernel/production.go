@@ -586,8 +586,9 @@ func (store *Store) PendingReviewOperations(ctx context.Context) ([]PendingRevie
 }
 
 // RecoverRunningReviewOperations reconciles review claims left by a stopped
-// daemon. A REQUEST_CHANGES verdict without an enqueue receipt remains a
-// completed, route-pending operation; other interrupted claims become failures.
+// daemon. A REQUEST_CHANGES verdict with a durable submit receipt and without
+// an enqueue receipt remains a completed, route-pending operation; other
+// interrupted claims become failures.
 // An external reviewer observation uses the same projection kind but does not
 // have the durable operation request object.
 func (store *Store) RecoverRunningReviewOperations(ctx context.Context, at UnixMillis) (int, error) {
@@ -631,8 +632,10 @@ func (store *Store) RecoverRunningReviewOperations(ctx context.Context, at UnixM
 			continue
 		}
 		var verdict, enqueueID string
+		var submitted bool
 		_ = json.Unmarshal(fields["verdict"], &verdict)
 		_ = json.Unmarshal(fields["enqueue_id"], &enqueueID)
+		_ = json.Unmarshal(fields["submitted"], &submitted)
 		retryable, _ := json.Marshal(verdict == "" && enqueueID == "")
 		fields["retryable"] = retryable
 		candidates = append(candidates, candidate{project: project, repository: repository, identity: identity, document: fields})
@@ -654,9 +657,11 @@ func (store *Store) RecoverRunningReviewOperations(ctx context.Context, at UnixM
 	}
 	for _, item := range candidates {
 		var verdict, enqueueID string
+		var submitted bool
 		_ = json.Unmarshal(item.document["verdict"], &verdict)
 		_ = json.Unmarshal(item.document["enqueue_id"], &enqueueID)
-		if verdict == "request_changes" && enqueueID == "" {
+		_ = json.Unmarshal(item.document["submitted"], &submitted)
+		if verdict == "request_changes" && submitted && enqueueID == "" {
 			// The provider write and completed state may already be durable,
 			// while task routing was interrupted immediately afterward.
 			// Preserve a recoverable route marker instead of converting this

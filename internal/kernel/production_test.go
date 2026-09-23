@@ -131,9 +131,10 @@ func TestRequestChangesReviewRecoveryPreservesRoutePending(t *testing.T) {
 	ctx := context.Background()
 	operationID := "request-changes-recovery"
 	operation := map[string]any{
-		"id":      operationID,
-		"state":   "running",
-		"verdict": "request_changes",
+		"id":        operationID,
+		"state":     "running",
+		"verdict":   "request_changes",
+		"submitted": true,
 		"request": map[string]any{
 			"repository":  "example/factory",
 			"pull_number": 7,
@@ -164,6 +165,47 @@ func TestRequestChangesReviewRecoveryPreservesRoutePending(t *testing.T) {
 	pending, err := store.PendingReviewOperations(ctx)
 	if err != nil || len(pending) != 1 || pending[0].ID != operationID {
 		t.Fatalf("pending request-changes operations=%+v err=%v", pending, err)
+	}
+}
+
+func TestRequestChangesBeforeSubmitDoesNotBecomeRoutePending(t *testing.T) {
+	store, _, project, _ := newAdmissionStore(t, RoleOrchestrator, 2)
+	defer store.Close()
+	ctx := context.Background()
+	operationID := "request-changes-before-submit"
+	operation := map[string]any{
+		"id":      operationID,
+		"state":   "running",
+		"verdict": "request_changes",
+		"request": map[string]any{
+			"repository":  "example/factory",
+			"pull_number": 7,
+			"head":        strings.Repeat("a", 40),
+			"base":        strings.Repeat("b", 40),
+			"base_ref":    "main",
+			"body":        "review",
+			"provider":    "codex",
+		},
+	}
+	if err := store.RecordReviewOperation(ctx, project.ID, "example/factory", operationID, operation, mustTime(t, 10)); err != nil {
+		t.Fatal(err)
+	}
+	if count, err := store.RecoverRunningReviewOperations(ctx, mustTime(t, 11)); err != nil || count != 1 {
+		t.Fatalf("recovered pre-submit count=%d err=%v", count, err)
+	}
+	document, found, err := store.ReviewOperation(ctx, project.ID, operationID)
+	if err != nil || !found {
+		t.Fatalf("recovered pre-submit document found=%v err=%v", found, err)
+	}
+	var recovered map[string]any
+	if err := json.Unmarshal(document, &recovered); err != nil {
+		t.Fatal(err)
+	}
+	if recovered["state"] != "failed" || recovered["route_pending"] == true {
+		t.Fatalf("pre-submit operation became routable=%v", recovered)
+	}
+	if pending, err := store.PendingReviewOperations(ctx); err != nil || len(pending) != 0 {
+		t.Fatalf("pre-submit pending operations=%+v err=%v", pending, err)
 	}
 }
 

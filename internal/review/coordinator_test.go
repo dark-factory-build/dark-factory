@@ -87,3 +87,19 @@ func TestRetryRerunsTheSameExactHeadAfterProviderLaunchFailure(t *testing.T) {
 		t.Fatalf("retry operation=%+v err=%v backend=%+v", second, err, backend)
 	}
 }
+
+func TestRetryAllowsOnlyOneNewPreSubmitOperation(t *testing.T) {
+	store, backend := &memoryStore{}, &fakeBackend{killed: true}
+	c := Coordinator{Store: store, Backend: backend, Now: time.Now}
+	first, err := c.Start(context.Background(), Request{Repository: "org/repo", PullNumber: 7, Head: "a" + "000000000000000000000000000000000000000", Base: "b" + "000000000000000000000000000000000000000", BaseRef: "main", Body: "body", Provider: "codex"})
+	if err == nil || first.State != "failed" || !first.Retryable {
+		t.Fatalf("first operation=%+v err=%v", first, err)
+	}
+	second, err := c.Retry(context.Background(), first)
+	if err == nil || second.State != "failed" || !second.Retryable || second.RetryOf != first.ID {
+		t.Fatalf("single retry operation=%+v err=%v", second, err)
+	}
+	if _, err := c.Retry(context.Background(), second); err == nil {
+		t.Fatal("second pre-submit retry unexpectedly accepted")
+	}
+}

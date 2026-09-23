@@ -30,8 +30,10 @@ type Operation struct {
 	Request      Request   `json:"request"`
 	State        string    `json:"state"`
 	Retryable    bool      `json:"retryable,omitempty"`
+	RetryOf      string    `json:"retry_of,omitempty"`
 	Verdict      string    `json:"verdict,omitempty"`
 	Detail       string    `json:"detail,omitempty"`
+	Submitted    bool      `json:"submitted,omitempty"`
 	RoutePending bool      `json:"route_pending,omitempty"`
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
@@ -61,6 +63,10 @@ type Coordinator struct {
 }
 
 func (c Coordinator) Start(ctx context.Context, request Request) (Operation, error) {
+	return c.start(ctx, request, "")
+}
+
+func (c Coordinator) start(ctx context.Context, request Request, retryOf string) (Operation, error) {
 	if c.Store == nil || c.Backend == nil {
 		return Operation{}, errors.New("review: incomplete coordinator")
 	}
@@ -68,6 +74,7 @@ func (c Coordinator) Start(ctx context.Context, request Request) (Operation, err
 	if err != nil {
 		return Operation{}, err
 	}
+	op.RetryOf = retryOf
 	// The record is durable before any provider or clone is started. A crash
 	// after this point is therefore observable and retryable, never invisible.
 	if err := c.Store.Create(ctx, op); err != nil {
@@ -135,6 +142,11 @@ func (c Coordinator) Resume(ctx context.Context, op Operation) (Operation, error
 		}
 		op.State = "enqueued"
 	} else {
+		op.Submitted = true
+		op.UpdatedAt = c.Now()
+		if err := c.Store.Update(ctx, op); err != nil {
+			return Operation{}, err
+		}
 		op.State = "completed"
 		// Routing task feedback is a separate durable step. Keep the
 		// completed operation recoverable until that step has committed.
@@ -151,10 +163,10 @@ func (c Coordinator) Resume(ctx context.Context, op Operation) (Operation, error
 // failure remains immutable history; the request is reused so the retry cannot
 // silently move to a different pull-request head.
 func (c Coordinator) Retry(ctx context.Context, failed Operation) (Operation, error) {
-	if failed.State != "failed" || !failed.Retryable {
+	if failed.State != "failed" || !failed.Retryable || failed.ID == "" || failed.RetryOf != "" {
 		return Operation{}, errors.New("review: only pre-submit launch failures are retryable")
 	}
-	return c.Start(ctx, failed.Request)
+	return c.start(ctx, failed.Request, failed.ID)
 }
 
 func (c Coordinator) fail(ctx context.Context, op Operation, cause error, retryable bool) (Operation, error) {
