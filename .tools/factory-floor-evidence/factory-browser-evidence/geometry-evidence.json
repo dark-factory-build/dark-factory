@@ -1,15 +1,19 @@
 {
   "fixture": "http://127.0.0.1:5196/?fixture=actual",
-  "before_commit": "6915d8328b0a8b8c32d359a9fcd3a7da08ac1349",
-  "after_commit": "1aad62cb9ed9aff4a5462f1067c0ff9253b3ec45",
+  "before_commit": "ebf4254e491c420d46a8ba53ea990aaa8de17f9e",
+  "after_commit": "84ea1020e874332b4145c6152bd3691dbf6f4942",
   "rendered_source": {
-    "tree_oid": "ea28843a1f3888dfe81c588b089bac04d2c95ad1",
-    "source_tree_oid": "b327ac635c6cbb77ebfd7315e287bcdecd3bdeef",
+    "tree_oid": "05ea95b2dbe5b8bd0c3932523b728f572e33244c",
+    "source_tree_oid": "c4e10d5e78eb2c6981ac9c9b946d68ba0fae4a7f",
     "blob": "web/packages/ui/src/factory-scene/factory-scene.tsx",
-    "blob_oid": "133f81f60aa1914dd5ef8b77e5c80c11dbbb8e50",
-    "blob_sha256": "68b6a85f96fad765446d1cd767800a63633456012832ce4870c6c739053abee1"
+    "blob_oid": "8e617fb1478526de7395f7372bf5c40e4e9b9625",
+    "blob_sha256": "88eda0f1d40a1e42de99da2c1bc87835edb095dda13650c5d17f167ae3f3aa2e",
+    "before_tree_oid": "a745361e33cae2316cb5199d49d9e328220ab6c7",
+    "before_source_tree_oid": "34d17b6b3fe3476aac5ea6d2c553541ee9d2b52e",
+    "before_blob_oid": "e1fd832e2a4ee5d956330dcc2517b0b388e7edf6",
+    "before_blob_sha256": "79701a0d8178623ade2359e447458a7e97f6f6a3b47d8891cc6ac90823fc32aa"
   },
-  "capture_steps": "For each source commit, build client and UI with node web/node_modules/typescript/bin/tsc using web/tsconfig.build.json and web/packages/ui/tsconfig.json, restart Vite from web/apps/dev on 127.0.0.1:5196, navigate to ?fixture=actual, resize to 1280x720 and 390x844, and capture the complete SVG floor element at each viewport so both desks and their lower legs are visible.",
+  "capture_steps": "For each source commit, build client and UI with node web/node_modules/typescript/bin/tsc using web/tsconfig.build.json and web/packages/ui/tsconfig.json, restart Vite from web/apps/dev on 127.0.0.1:5196, navigate to ?fixture=actual, resize to 1280x720 and 390x844, and capture the complete SVG floor element at each viewport so both desks and the compact break-room shelf and coffee station are visible.",
   "viewports": {
     "desktop": [1280, 720],
     "phone": [390, 844]
@@ -21,16 +25,16 @@
     "after_phone": "after-phone.png"
   },
   "pixel_dimensions": {
-    "before_desktop.png": [481, 883],
-    "after_desktop.png": [481, 883],
-    "before_phone.png": [332, 611],
-    "after_phone.png": [332, 611]
+    "before_desktop.png": [481, 703],
+    "after_desktop.png": [481, 703],
+    "before_phone.png": [332, 486],
+    "after_phone.png": [332, 486]
   },
   "sha256": {
-    "before-desktop.png": "8c4acb2235eb8d55b56e66d7e95f21e38bbe1bce95ec0e43a1f76620dbee31e8",
-    "after-desktop.png": "ff7f1edeb77d133e723369e695eaa5aa7f66b8c6e3fed9221e6e1d962c0d02f5",
-    "before-phone.png": "55f0f7f0e8d0c658f601baae9325d0150c33fda330481736dd0587ff251a2b40",
-    "after-phone.png": "89de2c6fd6b1ddf6a4989cb6327440ac8a965cb29c30355c4d36bfe0db2cbd6e"
+    "before-desktop.png": "917381948180dbc802b07565f4bedbf490e7312f560898f0642ce82acf3f4d53",
+    "after-desktop.png": "4b6abf78beff768779d5ca5917a78e99b4a3674646fece2994188742f2701eba",
+    "before-phone.png": "8c39920a278b17f618653298361003a1ccd55867700ed4f98f602b42a6c7a5f4",
+    "after-phone.png": "c7a959f7a8d088909a91ece34940a01d049140eb80ad1eff7f0ca7e1f1a33623"
   },
   "inspection": [
     "Tasks tray artwork is centered within the Tasks tabletop.",
