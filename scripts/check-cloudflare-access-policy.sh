@@ -33,19 +33,20 @@ main() {
     ')"
     policies="$(read_all_pages "/access/apps/${app_id}/policies?per_page=100")"
     printf '%s' "${policies}" | jq -e '
-        def empty_lists: ((.exclude // []) | length == 0) and ((.require // []) | length == 0);
-        def operator: .decision == "allow"
-          and ((.include // []) | length == 1)
-          and (.include[0].email.email? != null)
-          and empty_lists;
-        def service_auth: .decision == "non_identity"
-          and ((.include // []) | length == 1)
-          and (.include[0].service_token.token_id? != null)
-          and empty_lists;
-        (length == 2)
-          and ([.[] | select(operator)] | length == 1)
-          and ([.[] | select(service_auth)] | length == 1)
-          or error("expected exactly one operator allow policy and one service-auth policy and nothing else")
+        # Every include must name a principal: exact emails for people, exact
+        # service tokens for the bridge. Require/exclude rules only narrow a
+        # policy, so they are accepted; anything that widens access (bypass,
+        # everyone, domains, IPs, any-valid-token) is refused.
+        def names(key; field): ((.include // []) | length >= 1)
+          and all(.include[]; keys == [key] and (.[key][field]? | type == "string"));
+        def operator: .decision == "allow" and names("email"; "email");
+        def service_auth: .decision == "non_identity" and names("service_token"; "token_id");
+        def shape: {decision, include: [(.include // [])[] | keys[]],
+          require: [(.require // [])[] | keys[]], exclude: [(.exclude // [])[] | keys[]]};
+        all(.[]; operator or service_auth)
+          and any(.[]; operator)
+          and any(.[]; service_auth)
+          or error("expected only named-email allow and service-token service-auth policies, at least one of each; live shape: " + ([.[] | shape] | tojson))
     '
 }
 
