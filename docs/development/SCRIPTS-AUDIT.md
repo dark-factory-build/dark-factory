@@ -81,7 +81,7 @@ repository/domain.
 | `verify-adversarial-review.sh` | DEV | exact-head review gate |
 | `verify-live-browser.mjs` | DEV | documented hosted-console smoke verifier |
 | `verify-live-runtime.py` | DEV | parameterized installed-runtime verifier |
-| `verify-live-site.py` | PRODUCT | owner Vercel/browser environment and hosted-domain verifier; issue #979 |
+| `verify-live-site.py` | DELETED | replaced by credential-free `factoryctl production verify`; issue #979 |
 | `with-cloudflare-env.sh` | DEV | Cloudflare credential boundary |
 | `with-local-ci-lease.sh` | DEV | local gate lease wrapper |
 
