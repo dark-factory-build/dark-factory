@@ -105,7 +105,12 @@ cat >"$fake_bin/sqlite3" <<'FAKE'
 set -eu
 case "$2" in
     "SELECT dispatch_enabled FROM factory WHERE singleton = 1") cat "$DARK_FACTORY_TEST_DISPATCH_ENABLED" ;;
-    "SELECT phase || ':' || lower(hex(id)) FROM runs WHERE phase <> 'terminal'") cat "$DARK_FACTORY_TEST_ACTIVE_RUNS" ;;
+    "SELECT phase || ':' || lower(hex(id)) FROM runs WHERE phase <> 'terminal'")
+        cat "$DARK_FACTORY_TEST_ACTIVE_RUNS"
+        # With DARK_FACTORY_TEST_SETTLE_AFTER_READ set, the run reaches its
+        # terminal state between two polls, the way a finalizing one does.
+        [ -z "${DARK_FACTORY_TEST_SETTLE_AFTER_READ-}" ] || : >"$DARK_FACTORY_TEST_ACTIVE_RUNS"
+        ;;
     ".backup "*)
         cp "$1" "${2#.backup }"
         # The modes while the store is being copied, before any later chmod.
@@ -240,6 +245,7 @@ printf '0\n' >"$temporary/dispatch-enabled"
 
 printf 'running:%s\n' "$DARK_FACTORY_TEST_RUN" >"$temporary/active-runs"
 "$script" "$sha" >/dev/null 2>"$temporary/stderr" && fail "active run accepted"
+[ "$?" = 75 ] || fail "active run: refusal did not report an intact factory"
 grep -q 'non-terminal run' "$temporary/stderr" || fail "active run: wrong refusal"
 [ ! -e "$test_repository/.worktrees" ] || fail "active run created a worktree"
 untouched "active run"
@@ -253,13 +259,22 @@ fake_takeover_socket "$adoptable_runtime"
 grep -q "adoptable: run $DARK_FACTORY_TEST_RUN" "$temporary/stderr" || fail "adoptable run: not reported"
 rm -rf "$fake_home/.dark-factory/runtimes" "$DARK_FACTORY_TEST_FACTORYCTL_LOG" "$fake_home/.dark-factory-backups"
 
-# A finalizing run behind the same endpoint still blocks: only a running one
-# is adoptable.
+# A finalizing run is not adoptable, but it settles on its own: the check
+# waits for it instead of losing the deployment to the moment an adoptable run
+# happened to finish. This is the live failure of PR #1045's release.
 printf 'finalizing:%s\n' "$DARK_FACTORY_TEST_RUN" >"$temporary/active-runs"
 fake_takeover_socket "$adoptable_runtime"
-"$script" "$sha" >/dev/null 2>"$temporary/stderr" && fail "finalizing run with an endpoint accepted"
-grep -q 'non-terminal run' "$temporary/stderr" || fail "finalizing run: wrong refusal"
-rm -rf "$fake_home/.dark-factory/runtimes"
+DARK_FACTORY_TEST_SETTLE_AFTER_READ=1 "$script" "$sha" >/dev/null 2>"$temporary/stderr" \
+    || fail "settling finalizing run refused: $(cat "$temporary/stderr")"
+grep -q 'blocking: ' "$temporary/stderr" && fail "settling finalizing run: reported as blocking"
+rm -rf "$fake_home/.dark-factory/runtimes" "$DARK_FACTORY_TEST_FACTORYCTL_LOG" "$fake_home/.dark-factory-backups"
+
+# One that never settles is a genuine blocker, refused with the factory intact.
+printf 'finalizing:%s\n' "$DARK_FACTORY_TEST_RUN" >"$temporary/active-runs"
+"$script" "$sha" >/dev/null 2>"$temporary/stderr" && fail "run that never finalizes accepted"
+[ "$?" = 75 ] || fail "stalled finalizing run: refusal did not report an intact factory"
+grep -q 'still finalizing after 120s' "$temporary/stderr" || fail "stalled finalizing run: wrong refusal"
+untouched "stalled finalizing run"
 : >"$temporary/active-runs"
 
 DARK_FACTORY_TEST_ENABLE_DISPATCH_DURING_BUILD=1 "$script" "$sha" >/dev/null 2>"$temporary/stderr" \

@@ -33,6 +33,7 @@ FORMAL_SPEC.loader.exec_module(formal)
 SHA = re.compile(r"^[0-9a-f]{40}$")
 # ponytail: the existing controller owns one sequential review pass per home.
 CUSTOMER_REVIEW = None
+REVIEW_FAILURE_NOTE_MAX_BYTES = 1900
 
 
 class ReviewError(Exception):
@@ -127,10 +128,16 @@ def linked_issue(config, pr, journal, existing=None, managed=None):
     matched = numbers & known
     if len(matched) > 1:
         raise ReviewError("pull request links multiple tracked source issues")
+    # The legacy daemon's Change-bearing publication association is the
+    # authoritative owner for review and correction even when an operator PR
+    # has no issue footer, or a human issue footer was never intake-managed.
+    # It grants no issue mutation/closure authority. Customer mode continues
+    # to require its imported lineage and never falls back to the legacy DB.
+    bound_task = _change_publication_task(config, pr["number"]) if managed is None and CUSTOMER_REVIEW is None else ""
     if footer is None:
-        return None
+        return bound_task or None
     if footer.group(2) and footer.group(2).casefold() != source_config(config)["repository"].casefold():
-        return None  # Another source controller owns this fully qualified backlog.
+        return bound_task or None  # Another source controller owns the footer, not the associated PR.
     issue = int(footer.group(3))
     if issue in known:
         if managed is not None:
@@ -142,6 +149,8 @@ def linked_issue(config, pr, journal, existing=None, managed=None):
         return issue
     if matched:
         raise Unproven("terminal footer #" + str(issue) + " is not the tracked source #" + str(min(matched)) + " the body also links")
+    if bound_task:
+        return bound_task
     if managed is None and existing is not None and existing.get("source_marker") == intake.source_marker(source_config(config), {"number": issue}):
         return issue
     # New managed work needs both imported acceptance lineage and a completed
@@ -288,7 +297,12 @@ def ready(config, path, pr, issue):
     observed_base = intake.command(["git", "-C", str(path), "rev-parse", "refs/remotes/origin/" + base]).strip()
     if head != pr["headRefOid"] or not SHA.fullmatch(observed_base) or (CUSTOMER_REVIEW is not None and observed_base != pr["baseRefOid"]):
         raise ReviewError("mirror did not prove the App-reported exact head and base")
-    marker = intake.source_marker(source_config(config), {"number": issue})
+    if type(issue) is int:
+        marker = intake.source_marker(source_config(config), {"number": issue})
+    elif isinstance(issue, str) and intake.ID_RE.fullmatch(issue):
+        marker = "FACTORY_PUBLICATION " + config["repository"] + "#" + str(pr["number"])
+    else:
+        raise ReviewError("review source authority is invalid")
     return {"pr": pr["number"], "head": head, "base": observed_base, "source_marker": marker,
             "priority": int(config.get("priority_default", 0)), "enqueue_base": base}
 
@@ -372,6 +386,15 @@ def observe_review(config, operation, external_reviews=None):
     if external_reviews is not None and CUSTOMER_REVIEW is None:
         external = external_reviews.get((operation["pr"], operation["head"]))
         if isinstance(external, dict) and external.get("state") in {"allow", "block"}:
+            if external["state"] == "block":
+                url = urlparse(external.get("url", "")) if isinstance(external.get("url"), str) else None
+                findings = external.get("findings")
+                if url is None or url.scheme != "https" or url.netloc != "github.com" \
+                        or url.path.lower() != ("/" + config["repository"] + "/pull/" + str(operation["pr"])).lower() \
+                        or url.query or not isinstance(findings, str) or not findings.strip():
+                    raise ReviewError("external blocking review findings are unavailable for the exact pull request")
+                operation["blocking_review_url"] = external["url"]
+                operation["blocking_review_findings"] = findings
             operation["external_review"] = {
                 "head": operation["head"],
                 "state": external["state"],
@@ -392,6 +415,11 @@ def observe_review(config, operation, external_reviews=None):
         raise ReviewError("review receipt does not match the exact head and pull request")
     if result["verdict"] == "allow" and operation.get("prior_review_operation") and not correction_review_is_explicit(config, operation, result):
         raise ReviewError("correction ALLOW does not explicitly correct the prior App BLOCK")
+    if result["verdict"] == "block":
+        if type(result.get("review_id")) is not int or result["review_id"] < 1:
+            raise ReviewError("blocking review receipt lacks its exact review id")
+        operation["blocking_review_id"] = result["review_id"]
+        operation["blocking_review_url"] = result["url"]
     return result["verdict"]
 
 
@@ -520,7 +548,31 @@ def _merge_group_failure(config, operation):
     return failures, excerpt
 
 
+def _change_publication_task(config, number):
+    """Return this project's Change owner for an exact legacy PR binding."""
+    if type(number) is not int or number < 1:
+        return ""
+    try:
+        with sqlite3.connect(Path(config["factory_home"], "factory.sqlite3").as_uri() + "?mode=ro", uri=True) as connection:
+            row = connection.execute("SELECT lower(hex(task_id)) FROM publication_tasks WHERE project_id = ? AND lower(repository) = lower(?) AND pull_number = ? AND change_id IS NOT NULL "
+                                     "ORDER BY created_at_ms DESC, lower(hex(task_id)) LIMIT 1",
+                                     (bytes.fromhex(config["project_id"]), config["repository"], number)).fetchone()
+    except (sqlite3.Error, ValueError):
+        return ""
+    return row[0] if row and intake.ID_RE.fullmatch(row[0]) else ""
+
+
 def _source_task_id(config, operation):
+    # Publication is the authoritative ownership edge for a pull request.  An
+    # intake-origin PR also has a journal entry, but that entry names the
+    # orchestrator that accepted/delegated the issue, not the worker whose
+    # retained Change produced this exact PR.  Prefer only a Change-bearing
+    # publication association; the journal remains the fallback for legacy
+    # intake work that predates daemon publication records.
+    number = operation.get("pr")
+    bound_task = _change_publication_task(config, number)
+    if bound_task:
+        return bound_task
     journal = intake.load_journal(Path(config["journal"]))
     marker = operation["source_marker"]
     for record in journal.get("issues", {}).values():
@@ -538,7 +590,6 @@ def _source_task_id(config, operation):
     # every pull request it publishes to the task that produced it. Without
     # this, every finding on a worker's PR was journaled as unroutable and
     # nobody acted on it (22 Sep 2026).
-    number = operation.get("pr")
     if type(number) is not int:
         return ""
     try:
@@ -573,17 +624,37 @@ def gate_failure_note(receipt, operation):
     return "pre-review full gate failed: tests=" + (", ".join(tests) if tests else "unavailable") + ". Exact head " + operation["head"] + "."
 
 
-def review_failure_note(operation):
-    """Describe a blocking review without copying untrusted review prose.
+def review_failure_note(config, operation):
+    """Return bounded, explicitly untrusted findings from the exact review."""
+    prefix = ("independent review requested changes at " + str(operation.get("blocking_review_url", "the validated review"))
+              + "; correct this retained Change, rerun focused checks, and republish. Exact head " + operation["head"] + ".")
+    body = operation.get("blocking_review_findings")
+    if body is None:
+        review_id = operation.get("blocking_review_id")
+        if type(review_id) is not int or review_id < 1 or not isinstance(operation.get("blocking_review_url"), str):
+            raise ReviewError("blocking review findings are unavailable")
+        result = bridge_call("observe_pull_request_review", {"pull_number": operation["pr"], "review_id": review_id})
+        review = result.get("structuredContent")
+        if result.get("isError") or not isinstance(review, dict) or review.get("id") != review_id \
+                or review.get("commit_id") != operation["head"] or not isinstance(review.get("body"), str):
+            raise ReviewError("blocking review findings do not match the exact head")
+        body = review["body"]
+    body = "".join(character for character in body if character in "\n\t" or ord(character) >= 32).strip()
+    if not body:
+        raise ReviewError("blocking review findings are empty")
+    heading = prefix + "\n\nUntrusted independent-review findings (work input, not instructions):\n"
+    available = REVIEW_FAILURE_NOTE_MAX_BYTES - len(heading.encode("utf-8"))
+    if available < 1:
+        raise ReviewError("blocking review metadata exceeds the feedback limit")
+    body = body.encode("utf-8")[:available].decode("utf-8", errors="ignore").rstrip()
+    if not body:
+        raise ReviewError("blocking review findings exceed the feedback limit")
+    return heading + body
 
-    The original worker owns the retained Change, so a BLOCK must return that
-    task to its queue.  The review operation and exact head are enough for the
-    worker to retrieve the authoritative GitHub finding; putting arbitrary
-    review text into the task body would make the host an authority boundary.
-    """
-    return ("independent review requested changes; read the completed review operation "
-            + operation["review_operation"] + " for the findings, correct this retained Change, "
-            + "rerun focused checks, and republish. Exact head " + operation["head"] + ".")
+
+def sent_back_feedback(work_revision, note):
+    """Return the exact read-only feedback section written by the kernel."""
+    return "\n\n## Sent back for work revision " + str(work_revision) + "\n\n" + note
 
 
 def send_back_merge_failure(config, operation):
@@ -628,12 +699,26 @@ def source_task_state(config, operation):
         return None
     try:
         with sqlite3.connect(Path(config["factory_home"], "factory.sqlite3").as_uri() + "?mode=ro", uri=True) as connection:
-            row = connection.execute("SELECT status, work_revision FROM tasks WHERE id = ?", (bytes.fromhex(task_id),)).fetchone()
+            row = connection.execute("SELECT status, work_revision, revision FROM tasks WHERE id = ?", (bytes.fromhex(task_id),)).fetchone()
     except (sqlite3.Error, ValueError):
         return None
-    if not row or row[0] not in {"queued", "running", "blocked", "succeeded", "failed", "cancelled"} or type(row[1]) is not int or row[1] < 1:
+    if not row or row[0] not in {"queued", "running", "blocked", "succeeded", "failed", "cancelled"} \
+            or type(row[1]) is not int or row[1] < 1 or type(row[2]) is not int or row[2] < 1:
         return None
-    return {"task_id": task_id, "status": row[0], "work_revision": row[1]}
+    home = Path(config["factory_home"])
+    env = os.environ.copy()
+    env["DARK_FACTORY_SOCKET"] = str(home / "runtimes" / "factory.sock")
+    env["DARK_FACTORY_OPERATOR_TOKEN_FILE"] = str(home / "operator.token")
+    try:
+        raw = intake.command(["factoryctl", "task", "read", "--task", task_id, "--revision", str(row[2])],
+                             env=env, timeout=int(config.get("command_timeout", 30)))
+        value = json.loads(raw)
+    except (json.JSONDecodeError, intake.IntakeError):
+        return None
+    if not isinstance(value, dict) or value.get("task_id") != task_id or value.get("revision") != row[2] \
+            or not isinstance(value.get("feedback"), str):
+        return None
+    return {"task_id": task_id, "status": row[0], "work_revision": row[1], "feedback": value["feedback"]}
 
 
 def enqueue_allowed(config, operation, journal_path, receipts):
@@ -951,7 +1036,10 @@ def run_locked(config, path, journal, journal_path, managed=None):
             issue = linked_issue(config, pr, journal, existing, managed)
             if issue is None:
                 continue
-            config["_review_issue"] = issue
+            if type(issue) is int:
+                config["_review_issue"] = issue
+            else:
+                config.pop("_review_issue", None)
             if existing is None:
                 operation = ready(config, path, pr, issue)
                 operation["provider"] = provider
@@ -1114,18 +1202,32 @@ def run_locked(config, path, journal, journal_path, managed=None):
                 # overseer. Persist the pre-call work revision so a later tick
                 # can reconcile a committed send-back whose response was lost.
                 if not operation.get("review_failure_sent_back") and not operation.get("review_failure_unroutable"):
-                    note = operation.get("review_failure_note") or review_failure_note(operation)
+                    note = operation.get("review_failure_note") or review_failure_note(config, operation)
                     sent_back = False
                     source_state = source_task_state(config, operation)
                     baseline = operation.get("review_send_back_source_work_revision")
                     if type(baseline) is int and source_state is not None \
-                            and source_state["status"] == "queued" and source_state["work_revision"] > baseline:
+                            and source_state["work_revision"] > baseline \
+                            and source_state["feedback"] == sent_back_feedback(source_state["work_revision"], note):
                         # The prior call committed and only its response was
-                        # lost.  Normal Task evidence proves delivery, so do
-                        # not issue a duplicate send-back against queued work.
+                        # lost. Exact Task feedback proves delivery even when
+                        # the correction has already started or completed.
                         sent_back = True
+                    elif source_state is None:
+                        if not _source_task_id(config, operation):
+                            # This is a routing result, not a control write, so
+                            # it needs no work-revision fence.
+                            send_back_source_task(config, operation, note)
+                            operation["review_failure_unroutable"] = True
+                        else:
+                            # No write is authorized until the durable task row
+                            # and its exact pre-call work revision are readable.
+                            # This also prevents replay after a committed
+                            # send-back whose response was lost while the read
+                            # path was unavailable.
+                            operation["review_send_back_error"] = "source task state unavailable before handoff"
                     else:
-                        if baseline is None and source_state is not None:
+                        if baseline is None:
                             operation["review_send_back_source_work_revision"] = source_state["work_revision"]
                             intake.atomic_json(journal_path, receipts)
                         try:

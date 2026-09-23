@@ -775,6 +775,33 @@ class ReleaseFixtures(unittest.TestCase):
                     snapshot_call.assert_not_called()
                     probe_call.assert_called_once_with(cfg, OLD)
 
+    def test_hook_refusal_that_left_no_effect_earns_exactly_one_automatic_retry(self):
+        real_run = release.run
+        def refusing(argv, *args, **kwargs):
+            if argv[:2] == ["gh", "api"]:
+                return json.dumps({"object": {"sha": SHA}})
+            return real_run([sys.executable, "-c", "import sys; sys.exit(75)"])
+        with tempfile.TemporaryDirectory() as directory:
+            journal = Path(directory) / "release.json"
+            cfg = config(journal)
+            def tick():
+                with mock.patch.object(release, "gh_snapshot", return_value=snapshot()), \
+                     mock.patch.object(release, "review_gate"), \
+                     mock.patch.object(release, "probe", return_value={"sha": OLD, "healthy": True}), \
+                     mock.patch.object(release, "range_sources", return_value=([], "range")), \
+                     mock.patch.object(release, "run", side_effect=refusing):
+                    release.once(cfg, 633)
+            with self.assertRaisesRegex(release.ReleaseError, "exit=75"):
+                tick()
+            self.assertIs(True, release.load(journal)["releases"]["633"]["auto_retry"])
+            # The next tick re-plans by itself rather than parking the factory.
+            with self.assertRaisesRegex(release.ReleaseError, "exit=75"):
+                tick()
+            self.assertIs(False, release.load(journal)["releases"]["633"]["auto_retry"])
+            # A blocker that survived the automatic attempt is a real failure.
+            with self.assertRaisesRegex(release.ReleaseError, "use --retry explicitly"):
+                tick()
+
     def test_explicit_recovery_clears_barrier_and_allows_subsequent_release(self):
         with tempfile.TemporaryDirectory() as directory:
             journal = Path(directory) / "release.json"
