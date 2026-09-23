@@ -10764,6 +10764,41 @@ mod tests {
     }
 
     #[test]
+    fn publication_footer_tracks_issue_completion_without_closing_other_sources() {
+        let mut request = CreatePullRequest {
+            external_source_url: None,
+            repository: "team/repo".into(),
+            operation_id: "1c8a5c44-7f1f-11f0-952e-acde48001122".into(),
+            issue_number: 390,
+            source_repository: None,
+            head: "feature/change".into(),
+            head_sha: "a".repeat(40),
+            base: "main".into(),
+            base_sha: "b".repeat(40),
+            title: "Complete issue".into(),
+            body: "Published change.".into(),
+            draft: false,
+            close_on_merge: true,
+        };
+        request.validate().unwrap();
+        let completed = request.marked_body().unwrap();
+        assert!(completed.contains("\n\nCloses #390\n\n"));
+        assert!(!completed.contains("Refs #390"));
+
+        request.close_on_merge = false;
+        let umbrella = request.marked_body().unwrap();
+        assert!(umbrella.contains("\n\nRefs #390\n\n"));
+        assert!(!umbrella.contains("Closes #390"));
+
+        request.external_source_url = Some("https://linear.app/acme/issue/ENG-7/change".into());
+        request.issue_number = 0;
+        request.validate().unwrap();
+        let non_github = request.marked_body().unwrap();
+        assert!(non_github.contains("\n\nRefs https://linear.app/acme/issue/ENG-7/change\n\n"));
+        assert!(!non_github.contains("Closes"));
+    }
+
+    #[test]
     fn typed_operation_inputs_are_exact_head_bound_and_bounded() {
         let mut issue = CreateIssue {
             repository: "dark-factory-build/dark-factory".into(),
