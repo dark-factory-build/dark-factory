@@ -456,6 +456,36 @@ func TestRecoverySweepSettlesRunWhoseRunnerNeverStarted(t *testing.T) {
 	}
 }
 
+// A restart between CreateRuntime and its durable binding leaves an unbound
+// runtime directory. Recovery adopts that exact layout, binds it, and settles
+// the run instead of leaving it admitted and its agent blocked.
+func TestRecoverySweepSettlesRunWhoseRuntimeWasNeverBound(t *testing.T) {
+	fixture := newRecoveryFixture(t, 0x1b)
+	runtime, err := CreateRuntime(fixture.parent, fixture.run.ID.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.Close(); err != nil {
+		t.Fatal(err)
+	}
+	disposition := fixture.sweep(t)
+	if disposition.Err != nil {
+		t.Fatalf("disposition = %+v", disposition)
+	}
+	run := fixture.currentRun(t)
+	if run.Phase != kernel.RunTerminal || run.Terminal == nil {
+		t.Fatalf("recovered run = %+v", run)
+	}
+	for kind, resource := range fixture.resourceStates(t) {
+		if resource.State != kernel.ResourceReleased {
+			t.Fatalf("recovered %s = %+v", kind, resource)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(fixture.parentPath, run.ID.String())); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("recovered runtime directory persists: %v", err)
+	}
+}
+
 func TestRecoverySweepConvergesStartingRunnerWithoutResidue(t *testing.T) {
 	fixture := newRecoveryFixture(t, 0x20)
 	fixture.stageRuntime(t)
