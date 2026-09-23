@@ -77,6 +77,23 @@ func TestRetainedSourceReviewConfigRoundTripPreservesReceiptIdentity(t *testing.
 	}
 }
 
+func TestOrchestratorRetainedSourceReviewsRoundTrip(t *testing.T) {
+	want := configFixture(t)
+	want.Role, want.FinalName = kernel.RoleOrchestrator, ""
+	want.RetainedSourceReviews = []SourceReview{
+		{TaskID: "task-a", ChangeID: "change-a", TaskWorkRevision: 3, ChangeRevision: 7, BaseCommit: "base-a", HeadCommit: "head-a", SourcePath: "/private/change-a", GitDirectory: "/private/repo-a/.git"},
+		{TaskID: "task-b", ChangeID: "change-b", TaskWorkRevision: 4, ChangeRevision: 8, BaseCommit: "base-b", HeadCommit: "head-b", SourcePath: "/private/change-b", GitDirectory: "/private/repo-b/.git"},
+	}
+	encoded, err := EncodeConfig(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := DecodeConfig(encoded)
+	if err != nil || !reflect.DeepEqual(got, want) {
+		t.Fatalf("orchestrator source reviews changed: %v", err)
+	}
+}
+
 // An orchestrator's config names no Change: its names and retained result
 // are empty, and a worker's may not be.
 func TestOrchestratorConfigCarriesNoChange(t *testing.T) {

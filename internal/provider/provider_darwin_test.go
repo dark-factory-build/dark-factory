@@ -1602,62 +1602,83 @@ func TestCodexLaunchGrantsTheRepositoryGitDirectoryByRole(t *testing.T) {
 	}
 }
 
-func TestCodexLaunchGrantsOnlyAuthenticatedRetainedReviewPathsReadOnly(t *testing.T) {
+func TestOrchestratorLaunchGrantsOnlyAuthenticatedRetainedReviewPathsReadOnly(t *testing.T) {
+	for _, kind := range []kernel.Provider{kernel.ProviderCodex, kernel.ProviderClaudeCode} {
+		t.Run(kind.String(), func(t *testing.T) {
+			installation, runtime, _ := nativeFixture(t, kind)
+			runtime = runtime.WithCustomerMaintainer(true)
+			owned, err := runtime.WithGitCommonDirectory("/private/reviewer/.git", true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			granted, err := owned.WithRetainedSourceReview("/private/producer-change", "/private/producer-repo/.git")
+			if err != nil {
+				t.Fatal(err)
+			}
+			request := roleRequestFor(t, kind, installation, granted, "", "", kernel.RoleOrchestrator)
+			launch, err := Build(request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if kind == kernel.ProviderCodex {
+				policy := ""
+				for _, argument := range launch.Argv() {
+					if strings.HasPrefix(argument, "permissions."+codexPermissionName(granted)+"=") {
+						policy = argument
+					}
+				}
+				for _, path := range []string{"/private/producer-change", "/private/producer-repo/.git"} {
+					if !strings.Contains(policy, tomlBasicString(path)+`="read"`) || strings.Contains(policy, tomlBasicString(path)+`="write"`) {
+						t.Fatalf("retained review path %q is not read-only: %q", path, policy)
+					}
+				}
+				if !strings.Contains(policy, tomlBasicString("/private/reviewer/.git")+`="write"`) {
+					t.Fatalf("reviewer's distinct Git directory lost its write grant: %q", policy)
+				}
+				for _, path := range []string{"/private/producer-repo", "/private/dark-factory/changes"} {
+					if strings.Contains(policy, tomlBasicString(path)+`="`) {
+						t.Fatalf("retained review grant widened to %q: %q", path, policy)
+					}
+				}
+				return
+			}
+			settings := wantClaudeSettings(t, request)
+			for _, path := range []string{"//private/producer-change", "//private/producer-repo/.git"} {
+				if !strings.Contains(settings, `"`+path+`"`) {
+					t.Fatalf("retained review path %q missing Claude read grant: %s", path, settings)
+				}
+			}
+			if strings.Contains(settings, `"//private/producer-change/**"`) {
+				t.Fatalf("retained review worktree grant unexpectedly widened: %s", settings)
+			}
+		})
+	}
+}
+
+func TestRetainedReviewGitDirectoryRemainsReadOnlyWhenShared(t *testing.T) {
 	installation, runtime, _ := nativeFixture(t, kernel.ProviderCodex)
+	runtime = runtime.WithCustomerMaintainer(true)
 	owned, err := runtime.WithGitCommonDirectory("/private/reviewer/.git", true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	granted, err := owned.WithRetainedSourceReview("/private/producer-change", "/private/producer-repo/.git")
-	if err != nil {
-		t.Fatal(err)
-	}
-	launch, err := Build(requestFor(t, kernel.ProviderCodex, installation, granted, "", ""))
-	if err != nil {
-		t.Fatal(err)
-	}
-	policy := ""
-	for _, argument := range launch.Argv() {
-		if strings.HasPrefix(argument, "permissions."+codexPermissionName(granted)+"=") {
-			policy = argument
-		}
-	}
-	for _, path := range []string{"/private/producer-change", "/private/producer-repo/.git"} {
-		if !strings.Contains(policy, tomlBasicString(path)+`="read"`) {
-			t.Fatalf("retained review path %q missing read grant: %q", path, policy)
-		}
-		if strings.Contains(policy, tomlBasicString(path)+`="write"`) {
-			t.Fatalf("retained review path %q writable: %q", path, policy)
-		}
-	}
-	if !strings.Contains(policy, tomlBasicString("/private/reviewer/.git")+`="write"`) {
-		t.Fatalf("reviewer's distinct Git directory lost its write grant: %q", policy)
-	}
-	for _, path := range []string{"/private/producer-repo", "/private/dark-factory/changes"} {
-		if strings.Contains(policy, tomlBasicString(path)+`="`) {
-			t.Fatalf("retained review grant widened to %q: %q", path, policy)
-		}
-	}
-	// The canonical layout shares the Git directory with the reviewer's own
-	// Change; the existing write grant remains the sole entry and is not
-	// duplicated as a second, conflicting TOML key.
 	shared, err := owned.WithRetainedSourceReview("/private/producer-change", "/private/reviewer/.git")
 	if err != nil {
 		t.Fatal(err)
 	}
-	sharedLaunch, err := Build(requestFor(t, kernel.ProviderCodex, installation, shared, "", ""))
+	launch, err := Build(roleRequestFor(t, kernel.ProviderCodex, installation, shared, "", "", kernel.RoleOrchestrator))
 	if err != nil {
 		t.Fatalf("shared canonical Git directory rejected: %v", err)
 	}
-	sharedPolicy := ""
-	for _, argument := range sharedLaunch.Argv() {
+	policy := ""
+	for _, argument := range launch.Argv() {
 		if strings.HasPrefix(argument, "permissions."+codexPermissionName(shared)+"=") {
-			sharedPolicy = argument
+			policy = argument
 			break
 		}
 	}
-	if !strings.Contains(sharedPolicy, tomlBasicString("/private/reviewer/.git")+`="read"`) || strings.Contains(sharedPolicy, tomlBasicString("/private/reviewer/.git")+`="write"`) {
-		t.Fatalf("canonical shared Git grant is not read-only: %q", sharedPolicy)
+	if !strings.Contains(policy, tomlBasicString("/private/reviewer/.git")+`="read"`) || strings.Contains(policy, tomlBasicString("/private/reviewer/.git")+`="write"`) {
+		t.Fatalf("canonical shared Git grant is not read-only: %q", policy)
 	}
 }
 

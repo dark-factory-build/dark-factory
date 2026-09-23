@@ -81,8 +81,10 @@ type Config struct {
 	// Retained is the Change to reopen instead of making a fresh worktree.
 	Retained *Result
 	// RetainedSourceReview is a daemon-authenticated exact source receipt for
-	// an independent Codex reviewer. It is absent for ordinary workers.
-	RetainedSourceReview *SourceReview
+	// an independent reviewer. RetainedSourceReviews carries the exact set of
+	// receipts an orchestrator may inspect during supervision.
+	RetainedSourceReview  *SourceReview
+	RetainedSourceReviews []SourceReview
 	// ProviderTask selects and verifies the provider's closed delivery path.
 	// Shell seals it on fd 11 and Claude receives a terminal-safe prompt. It is
 	// empty for Codex, whose task remains in the daemon behind the attempt API.
@@ -152,6 +154,7 @@ type configWire struct {
 	AttemptSocket            string             `json:"attempt_socket"`
 	Retained                 *resultWire        `json:"retained,omitempty"`
 	RetainedSourceReview     *sourceReviewWire  `json:"retained_source_review,omitempty"`
+	RetainedSourceReviews    []sourceReviewWire `json:"retained_source_reviews,omitempty"`
 	ProviderTask             []byte             `json:"provider_task"`
 }
 
@@ -188,6 +191,9 @@ func EncodeConfig(config Config) ([]byte, error) {
 		r := config.RetainedSourceReview
 		wire.RetainedSourceReview = &sourceReviewWire{r.TaskID, r.ChangeID, r.TaskWorkRevision, r.ChangeRevision, r.BaseCommit, r.HeadCommit, r.SourcePath, r.GitDirectory}
 	}
+	for _, r := range config.RetainedSourceReviews {
+		wire.RetainedSourceReviews = append(wire.RetainedSourceReviews, sourceReviewWire{r.TaskID, r.ChangeID, r.TaskWorkRevision, r.ChangeRevision, r.BaseCommit, r.HeadCommit, r.SourcePath, r.GitDirectory})
+	}
 	return encodeJSON(wire, ConfigLimit)
 }
 
@@ -222,6 +228,10 @@ func DecodeConfig(encoded []byte) (Config, error) {
 		r := wire.RetainedSourceReview
 		sourceReview = &SourceReview{r.TaskID, r.ChangeID, r.TaskWorkRevision, r.ChangeRevision, r.BaseCommit, r.HeadCommit, r.SourcePath, r.GitDirectory}
 	}
+	var sourceReviews []SourceReview
+	for _, r := range wire.RetainedSourceReviews {
+		sourceReviews = append(sourceReviews, SourceReview{r.TaskID, r.ChangeID, r.TaskWorkRevision, r.ChangeRevision, r.BaseCommit, r.HeadCommit, r.SourcePath, r.GitDirectory})
+	}
 	config := Config{GitAuthor: wire.GitAuthor, CustomerMaintainer: wire.CustomerMaintainer,
 		Provider: providerKind, Role: role, Model: wire.Model, ReasoningEffort: wire.ReasoningEffort,
 		AgentID: wire.AgentID, TaskIncarnationID: wire.TaskIncarnationID, PreviousWorkingDirectory: wire.PreviousWorkingDirectory,
@@ -231,7 +241,7 @@ func DecodeConfig(encoded []byte) (Config, error) {
 		RepositoryRoot: wire.RepositoryRoot, RepositoryIdentity: repositoryIdentity, GitCommonDir: wire.GitCommonDir, Revision: wire.Revision,
 		ChangeParent: wire.ChangeParent, FinalName: wire.FinalName,
 		AttemptSocket: wire.AttemptSocket, Retained: retained, ProviderTask: bytes.Clone(wire.ProviderTask),
-		RetainedSourceReview: sourceReview,
+		RetainedSourceReview: sourceReview, RetainedSourceReviews: sourceReviews,
 	}
 	if err := validateConfig(config); err != nil {
 		return Config{}, err
@@ -290,6 +300,11 @@ func validateConfig(config Config) error {
 	}
 	if config.RetainedSourceReview != nil && validateSourceReview(*config.RetainedSourceReview) != nil {
 		return invalidContract(nil)
+	}
+	for _, review := range config.RetainedSourceReviews {
+		if validateSourceReview(review) != nil {
+			return invalidContract(nil)
+		}
 	}
 	return nil
 }
