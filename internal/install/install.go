@@ -36,6 +36,12 @@ func Init(ctx context.Context, home string) (Result, error) { return initHome(ct
 // Doctor validates one stopped fresh Go home without modifying the filesystem.
 func Doctor(ctx context.Context, home string) (Result, error) { return inspectHome(ctx, home) }
 
+// MoveHome relocates a stopped operational home and rewrites its exact path
+// descendants in durable state. The operation is intentionally explicit: a
+// running home cannot be moved safely because its SQLite WAL and Git
+// registrations are live external state.
+func MoveHome(ctx context.Context, from, to string) error { return moveHome(ctx, from, to) }
+
 // OperationalHome is the retained authority for one live Go home. The home
 // lifetime lock remains held until Close returns.
 type OperationalHome struct {
@@ -203,4 +209,15 @@ func (home *OperationalHome) Close() error {
 		return nil
 	}
 	return home.state.close()
+}
+
+// closeForMove releases a home lifetime lease after its pathname has been
+// deliberately renamed. The move owns the retained descriptors, so identity
+// revalidation would reject the expected rename; all child shutdown and lock
+// release ordering remains identical to Close.
+func (home *OperationalHome) closeForMove() error {
+	if home == nil || home.state == nil {
+		return nil
+	}
+	return home.state.closeWithIdentityCheck(false)
 }

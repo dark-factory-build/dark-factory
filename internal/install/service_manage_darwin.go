@@ -26,8 +26,9 @@ const (
 var serviceBinaryNames = [3]string{"factoryd", "factoryctl", "factory-runner"}
 
 // withServiceMutation serializes every lifecycle mutation on the exact home
-// directory. factoryd's lifetime flock is on the separate factory.lock inode,
-// so launchctl may start or stop the daemon while this lock remains held.
+// directory. The home-directory flock remains held through bootstrap so a
+// move cannot race the daemon launch; the operational home lock is released
+// immediately before launchctl so factoryd can acquire it.
 func withServiceMutation(ctx context.Context, home string, operation func(*serviceHomeCapability) (ServiceStatus, error)) (status ServiceStatus, resultErr error) {
 	if ctx == nil || operation == nil {
 		return ServiceStatus{}, fmt.Errorf("%w: invalid service mutation", ErrServiceAmbiguous)
@@ -43,6 +44,26 @@ func withServiceMutation(ctx context.Context, home string, operation func(*servi
 		}
 		return ServiceStatus{}, errors.Join(ErrServiceAmbiguous, err, closeErr)
 	}
+	serviceLock, _, serviceAnchor, _, lockErr := openOperationalLockPair(capability.home)
+	if lockErr != nil {
+		closeErr := capability.close()
+		return ServiceStatus{}, errors.Join(ErrServiceAmbiguous, lockErr, closeErr)
+	}
+	if err := unix.Flock(int(serviceLock.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		closeErr := errors.Join(serviceAnchor.Close(), serviceLock.Close(), capability.close())
+		if errors.Is(err, unix.EWOULDBLOCK) || errors.Is(err, unix.EAGAIN) {
+			return ServiceStatus{}, errors.Join(ErrServiceAmbiguous, ErrBusy, err, closeErr)
+		}
+		return ServiceStatus{}, errors.Join(ErrServiceAmbiguous, err, closeErr)
+	}
+	capability.serviceLock = serviceLock
+	defer func() {
+		if !capability.serviceLockReleased {
+			_ = unix.Flock(int(serviceLock.Fd()), unix.LOCK_UN)
+		}
+		_ = serviceAnchor.Close()
+		_ = serviceLock.Close()
+	}()
 	defer func() {
 		verifyErr := errors.Join(capability.recheck(ctx), capability.stageAbsent())
 		unlockErr := unix.Flock(int(capability.home.Fd()), unix.LOCK_UN)
@@ -277,6 +298,9 @@ func serviceInstallLockedAt(ctx context.Context, home, userHome string, config S
 	if err := writeExactFile(plistDirectory, config.plistName(), plistBytes, 0o600); err != nil {
 		return ServiceStatus{}, err
 	}
+	if err := capability.releaseOperationalLease(); err != nil {
+		return ServiceStatus{}, errors.Join(ErrServiceAmbiguous, err)
+	}
 	uid := strconv.Itoa(os.Geteuid())
 	result := launchctl(ctx, "bootstrap", "gui/"+uid, plistPath)
 	if result.err != nil || result.status != 0 {
@@ -324,6 +348,9 @@ func serviceStartLockedAt(ctx context.Context, home, userHome string, config Ser
 	}
 	_, plistPath := servicePlistLocation(userHome, config)
 	uid := strconv.Itoa(os.Geteuid())
+	if err := capability.releaseOperationalLease(); err != nil {
+		return ServiceStatus{}, errors.Join(ErrServiceAmbiguous, err)
+	}
 	result := launchctl(ctx, "bootstrap", "gui/"+uid, plistPath)
 	if result.err != nil || result.status != 0 {
 		return ServiceStatus{State: ServiceInstalled}, fmt.Errorf("%w: bootstrap status %d: %v", ErrServiceLaunchctl, result.status, result.err)

@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -22,6 +23,15 @@ import (
 )
 
 const manageTestLabel = "com.dark-factory.test.manage"
+
+func TestServiceBootstrapOperationalHomeHelper(t *testing.T) {
+	if os.Getenv("DARK_FACTORY_SERVICE_BOOTSTRAP_HELPER") != "1" {
+		return
+	}
+	if _, err := OpenOperationalHome(context.Background(), os.Getenv("DARK_FACTORY_SERVICE_BOOTSTRAP_HOME")); err != nil {
+		t.Fatal(err)
+	}
+}
 
 type manageFixture struct {
 	root      string
@@ -502,17 +512,14 @@ func TestServiceMutationLockRejectsEveryConcurrentVerbBeforeLaunchctl(t *testing
 	}
 }
 
-func TestServiceMutationLockIsIndependentFromOperationalHomeLock(t *testing.T) {
+func TestServiceMutationLockSharesOperationalHomeLock(t *testing.T) {
 	t.Run("service then operational", func(t *testing.T) {
 		fixture := newManageFixture(t)
 		_, err := withServiceMutation(context.Background(), fixture.home, func(*serviceHomeCapability) (ServiceStatus, error) {
-			home, err := OpenOperationalHome(context.Background(), fixture.home)
-			if err != nil {
-				return ServiceStatus{}, err
-			}
-			return ServiceStatus{State: ServiceAbsent}, home.Close()
+			_, err := OpenOperationalHome(context.Background(), fixture.home)
+			return ServiceStatus{}, err
 		})
-		if err != nil {
+		if !errors.Is(err, ErrBusy) {
 			t.Fatalf("operational lock while service lock held: %v", err)
 		}
 	})
@@ -530,10 +537,40 @@ func TestServiceMutationLockIsIndependentFromOperationalHomeLock(t *testing.T) {
 		}()
 		if _, err := withServiceMutation(context.Background(), fixture.home, func(*serviceHomeCapability) (ServiceStatus, error) {
 			return ServiceStatus{State: ServiceAbsent}, nil
-		}); err != nil {
+		}); !errors.Is(err, ErrBusy) {
 			t.Fatalf("service lock while operational lock held: %v", err)
 		}
 	})
+}
+
+func TestServiceBootstrapReleasesOperationalLockForFactoryd(t *testing.T) {
+	fixture := newManageFixture(t)
+	var bootstrapped atomic.Bool
+	launchctl := func(_ context.Context, arguments ...string) launchctlResult {
+		switch arguments[0] {
+		case "print":
+			if bootstrapped.Load() && len(arguments) > 1 && arguments[1] == fixture.service() {
+				return fixture.printRunning(501)
+			}
+			return launchctlResult{status: launchctlNotFound}
+		case "error":
+			return launchctlResult{status: 0, stdout: []byte(launchctlNotFoundText + "\n")}
+		case "bootstrap":
+			command := exec.Command(os.Args[0], "-test.run", "^TestServiceBootstrapOperationalHomeHelper$", "-test.v")
+			command.Env = append(os.Environ(), "DARK_FACTORY_SERVICE_BOOTSTRAP_HELPER=1", "DARK_FACTORY_SERVICE_BOOTSTRAP_HOME="+fixture.home)
+			if output, err := command.CombinedOutput(); err != nil {
+				return launchctlResult{status: -1, err: fmt.Errorf("factoryd lock probe: %w: %s", err, output)}
+			}
+			bootstrapped.Store(true)
+			return launchctlResult{status: 0}
+		default:
+			return launchctlResult{status: -1, err: fmt.Errorf("unexpected launchctl verb %q", arguments[0])}
+		}
+	}
+	status, err := serviceInstallAt(context.Background(), fixture.home, fixture.userHome, fixture.config, fixture.sourceDir, launchctl)
+	if err != nil || status != (ServiceStatus{State: ServiceRunning, PID: 501}) {
+		t.Fatalf("install with process bootstrap = %+v, %v", status, err)
+	}
 }
 
 func TestServiceUninstallIsEvidenceFirst(t *testing.T) {

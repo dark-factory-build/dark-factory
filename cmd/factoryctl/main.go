@@ -143,6 +143,7 @@ const (
   factoryctl remote status
   factoryctl init --home ABSOLUTE
   factoryctl doctor --home ABSOLUTE
+  factoryctl home move --from ABSOLUTE --to ABSOLUTE
   factoryctl service status --home ABSOLUTE [--label LABEL] [--plist-dir ABSOLUTE]
   factoryctl service install --home ABSOLUTE [--label LABEL] [--plist-dir ABSOLUTE] [--relay-origin WSS_ORIGIN] [--development-browser-address LOOPBACK] [--tool-path PATH] [--toolchain-read-roots PATH_LIST]
   factoryctl service start --home ABSOLUTE [--label LABEL] [--plist-dir ABSOLUTE]
@@ -181,6 +182,7 @@ const (
 	commandRemoteStatus
 	commandInit
 	commandDoctor
+	commandHomeMove
 	commandServiceStatus
 	commandServiceInstall
 	commandServiceStart
@@ -242,6 +244,7 @@ type attemptCommand struct {
 	removeAttachments bool
 	operatorControl   bool
 	home              string
+	moveTo            string
 	idempotencyKey    string
 	text              string
 	options           []string
@@ -387,7 +390,7 @@ func runWithDependencies(ctx context.Context, args []string, getenv func(string)
 		_, _ = io.WriteString(stderr, usage)
 		return exitUsage
 	}
-	if command.kind == commandInit || command.kind == commandDoctor {
+	if command.kind == commandInit || command.kind == commandDoctor || command.kind == commandHomeMove {
 		return runHome(ctx, command, stdout, stderr)
 	}
 	if command.kind == commandServiceStatus || command.kind == commandServiceInstall || command.kind == commandServiceStart || command.kind == commandServiceStop || command.kind == commandServiceUninstall {
@@ -641,6 +644,9 @@ func parse(args []string) (attemptCommand, bool, bool) {
 			}
 			return attemptCommand{kind: kind, home: args[2]}, false, true
 		}
+	}
+	if len(args) == 6 && args[0] == "home" && args[1] == "move" && args[2] == "--from" && args[4] == "--to" && validHomeArg(args[3]) && validHomeArg(args[5]) {
+		return attemptCommand{kind: commandHomeMove, home: args[3], moveTo: args[5]}, false, true
 	}
 	if len(args) == 2 && (args[0] == "init" || args[0] == "doctor") && helpFlag(args[1]) {
 		return attemptCommand{}, true, true
@@ -1475,7 +1481,13 @@ func validHomeArg(value string) bool {
 func runHome(ctx context.Context, command attemptCommand, stdout, stderr io.Writer) int {
 	var result install.Result
 	var err error
-	if command.kind == commandInit {
+	if command.kind == commandHomeMove {
+		err = install.MoveHome(ctx, command.home, command.moveTo)
+		if err == nil {
+			_, _ = io.WriteString(stdout, "home moved\n")
+			return 0
+		}
+	} else if command.kind == commandInit {
 		result, err = install.Init(ctx, command.home)
 	} else {
 		result, err = install.Doctor(ctx, command.home)
@@ -1492,6 +1504,8 @@ func runHome(ctx context.Context, command attemptCommand, stdout, stderr io.Writ
 			_, _ = io.WriteString(stderr, "factoryctl: Go home operations are unsupported on this platform\n")
 		case errors.Is(err, install.ErrInvalidHome):
 			_, _ = io.WriteString(stderr, "factoryctl: home is invalid or not an exact stopped Go home\n")
+		case errors.Is(err, install.ErrBusy):
+			_, _ = io.WriteString(stderr, "factoryctl: home move requires a stopped service and no non-terminal runs\n")
 		default:
 			_, _ = io.WriteString(stderr, "factoryctl: home operation failed\n")
 		}

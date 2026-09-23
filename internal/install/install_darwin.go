@@ -425,6 +425,9 @@ func openParent(path string) (*homeParent, error) {
 		fd, openErr := unix.Openat(int(p.file.Fd()), name, flag|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 		if openErr != nil {
 			_ = p.close()
+			if errors.Is(openErr, unix.ELOOP) || errors.Is(openErr, unix.ENOTDIR) {
+				return nil, fmt.Errorf("%w: home parent contains a symlink or non-directory component; use a canonical path", ErrInvalidHome)
+			}
 			return nil, fmt.Errorf("open home parent component: %w", openErr)
 		}
 		file := os.NewFile(uintptr(fd), filepath.Join(path, name))
