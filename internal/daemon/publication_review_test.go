@@ -49,8 +49,8 @@ func TestPublishedFixtureTriggersExactHeadReview(t *testing.T) {
 		got = request
 		return "review-op", nil
 	}
-	request := maintainerRequest{Method: "tools/call", Params: json.RawMessage(`{"name":"create_pull_request","arguments":{"repository":"team/repo","title":"Ship it","head":"feature/ship","base":"main"}}`)}
-	response := json.RawMessage(`{"result":{"isError":false,"structuredContent":{"number":7,"url":"https://github.com/team/repo/pull/7","head_sha":"` + head + `","base_sha":"` + base + `","base_ref":"main","body":"fixture body"}}}`)
+	request := maintainerRequest{Method: "tools/call", Params: json.RawMessage(`{"name":"create_pull_request","arguments":{"repository":"team/repo","title":"Ship it","head":"feature/ship","base":"main","body":"fixture body"}}`)}
+	response := json.RawMessage(`{"result":{"isError":false,"structuredContent":{"number":7,"url":"https://github.com/team/repo/pull/7","head_sha":"` + head + `","base_sha":"` + base + `","base_ref":"main"}}}`)
 	if err := fixture.daemon.recordMaintainerPublication(context.Background(), projectID, task.ID, request, response); err != nil {
 		t.Fatal(err)
 	}
@@ -72,12 +72,12 @@ func TestPublishedFixtureEnqueuesWithBaseRef(t *testing.T) {
 	backend := &publicReviewBackend{}
 	fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return backend }
 	head, base := strings.Repeat("a", 40), strings.Repeat("b", 40)
-	response := json.RawMessage(`{"result":{"isError":false,"structuredContent":{"number":7,"url":"https://github.com/team/repo/pull/7","head_sha":"` + head + `","base_sha":"` + base + `","body":"fixture body"}}}`)
-	request := maintainerRequest{Method: "tools/call", Params: json.RawMessage(`{"name":"create_pull_request","arguments":{"repository":"team/repo","title":"Ship it","head":"feature/ship","base":"main"}}`)}
+	request := maintainerRequest{Method: "tools/call", Params: json.RawMessage(`{"name":"create_pull_request","arguments":{"repository":"team/repo","title":"Ship it","head":"feature/ship","base":"main","body":"fixture body"}}`)}
+	response := json.RawMessage(`{"result":{"isError":false,"structuredContent":{"number":7,"url":"https://github.com/team/repo/pull/7","head_sha":"` + head + `","base_sha":"` + base + `"}}}`)
 	if err := fixture.daemon.recordMaintainerPublication(context.Background(), projectID, task.ID, request, response); err != nil {
 		t.Fatal(err)
 	}
-	op := lastDurableReview(t, fixture.store, projectID)
+	op := waitForDurableReview(t, fixture.store, projectID, func(op review.Operation) bool { return op.State == "enqueued" })
 	if backend.reviews != 1 || backend.submits != 1 || backend.enqueues != 1 || backend.enqueuedBase != "main" || backend.enqueuedSHA != base || op.Request.Base != base || op.Request.BaseRef != "main" {
 		t.Fatalf("publication review enqueue=%+v operation=%+v", backend, op)
 	}
@@ -96,12 +96,12 @@ func TestPublishedReviewOperationIsDurableBeforeProviderFailure(t *testing.T) {
 	backend := &publicReviewBackend{killed: true}
 	fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return backend }
 	head := strings.Repeat("a", 40)
-	response := json.RawMessage(`{"result":{"isError":false,"structuredContent":{"number":7,"url":"https://github.com/team/repo/pull/7","head_sha":"` + head + `","base_sha":"` + strings.Repeat("b", 40) + `","body":"fixture body"}}}`)
-	request := maintainerRequest{Method: "tools/call", Params: json.RawMessage(`{"name":"create_pull_request","arguments":{"repository":"team/repo","title":"Ship it","head":"feature/ship","base":"main"}}`)}
-	if err := fixture.daemon.recordMaintainerPublication(context.Background(), projectID, task.ID, request, response); err == nil {
-		t.Fatal("killed publication review unexpectedly succeeded")
+	response := json.RawMessage(`{"result":{"isError":false,"structuredContent":{"number":7,"url":"https://github.com/team/repo/pull/7","head_sha":"` + head + `","base_sha":"` + strings.Repeat("b", 40) + `"}}}`)
+	request := maintainerRequest{Method: "tools/call", Params: json.RawMessage(`{"name":"create_pull_request","arguments":{"repository":"team/repo","title":"Ship it","head":"feature/ship","base":"main","body":"fixture body"}}`)}
+	if err := fixture.daemon.recordMaintainerPublication(context.Background(), projectID, task.ID, request, response); err != nil {
+		t.Fatalf("publication acknowledgement failed: %v", err)
 	}
-	op := lastDurableReview(t, fixture.store, projectID)
+	op := waitForDurableReview(t, fixture.store, projectID, func(op review.Operation) bool { return op.State == "failed" })
 	if op.State != "failed" || backend.reviews != 1 {
 		t.Fatalf("publication review was not durably started: operation=%+v backend=%+v", op, backend)
 	}

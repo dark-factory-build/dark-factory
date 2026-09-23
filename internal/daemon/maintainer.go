@@ -261,15 +261,14 @@ func (daemon *Daemon) recordMaintainerPublication(ctx context.Context, project k
 				URL    string `json:"url"`
 				Head   string `json:"head_sha"`
 				Base   string `json:"base_sha"`
-				Body   string `json:"body"`
 			} `json:"structuredContent"`
 		} `json:"result"`
 	}
 	if json.Unmarshal(response, &reply) != nil || reply.Result.IsError || reply.Result.Pull.Number == 0 {
 		return nil
 	}
-	var repo, title, branch, base string
-	for name, target := range map[string]*string{"repository": &repo, "title": &title, "head": &branch, "base": &base} {
+	var repo, title, branch, base, body string
+	for name, target := range map[string]*string{"repository": &repo, "title": &title, "head": &branch, "base": &base, "body": &body} {
 		if err := json.Unmarshal(params.Arguments[name], target); err != nil {
 			return err
 		}
@@ -278,7 +277,7 @@ func (daemon *Daemon) recordMaintainerPublication(ctx context.Context, project k
 	if err != nil {
 		return err
 	}
-	reviewRequest := api.ReviewRequest{Repository: strings.ToLower(repo), PullNumber: reply.Result.Pull.Number, Head: strings.ToLower(reply.Result.Pull.Head), Base: strings.ToLower(reply.Result.Pull.Base), BaseRef: base, Body: reply.Result.Pull.Body, Provider: "codex"}
+	reviewRequest := api.ReviewRequest{Repository: strings.ToLower(repo), PullNumber: reply.Result.Pull.Number, Head: strings.ToLower(reply.Result.Pull.Head), Base: strings.ToLower(reply.Result.Pull.Base), BaseRef: base, Body: body, Provider: "codex"}
 	if daemon.reviewPublished != nil {
 		if err := daemon.store.RecordPublication(ctx, project, task, repo, kernel.ProductionPullRequest{Number: reply.Result.Pull.Number, Title: title, URL: reply.Result.Pull.URL, Head: reply.Result.Pull.Head, Branch: branch, Base: base, State: "open", Review: kernel.ProductionReview{Head: reply.Result.Pull.Head, State: "unknown"}}, at); err != nil {
 			return err
@@ -292,7 +291,8 @@ func (daemon *Daemon) recordMaintainerPublication(ctx context.Context, project k
 		if err := daemon.store.RecordPublicationWithReviewOperation(ctx, project, task, repo, kernel.ProductionPullRequest{Number: reply.Result.Pull.Number, Title: title, URL: reply.Result.Pull.URL, Head: reply.Result.Pull.Head, Branch: branch, Base: base, State: "open", Review: kernel.ProductionReview{Head: reply.Result.Pull.Head, State: "unknown"}}, prepared.ID, prepared, at); err != nil {
 			return err
 		}
-		_, err = daemon.resumeReview(ctx, project, prepared)
+		daemon.launchReview(project, prepared)
+		err = nil
 	} else {
 		err = daemon.store.RecordPublication(ctx, project, task, repo, kernel.ProductionPullRequest{Number: reply.Result.Pull.Number, Title: title, URL: reply.Result.Pull.URL, Head: reply.Result.Pull.Head, Branch: branch, Base: base, State: "open", Review: kernel.ProductionReview{Head: reply.Result.Pull.Head, State: "unknown"}}, at)
 	}

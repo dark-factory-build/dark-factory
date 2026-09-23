@@ -25,15 +25,16 @@ type Request struct {
 }
 
 type Operation struct {
-	ID        string    `json:"id"`
-	EnqueueID string    `json:"enqueue_id,omitempty"`
-	Request   Request   `json:"request"`
-	State     string    `json:"state"`
-	Retryable bool      `json:"retryable,omitempty"`
-	Verdict   string    `json:"verdict,omitempty"`
-	Detail    string    `json:"detail,omitempty"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ID           string    `json:"id"`
+	EnqueueID    string    `json:"enqueue_id,omitempty"`
+	Request      Request   `json:"request"`
+	State        string    `json:"state"`
+	Retryable    bool      `json:"retryable,omitempty"`
+	Verdict      string    `json:"verdict,omitempty"`
+	Detail       string    `json:"detail,omitempty"`
+	RoutePending bool      `json:"route_pending,omitempty"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
 }
 
 type Verdict struct {
@@ -135,6 +136,9 @@ func (c Coordinator) Resume(ctx context.Context, op Operation) (Operation, error
 		op.State = "enqueued"
 	} else {
 		op.State = "completed"
+		// Routing task feedback is a separate durable step. Keep the
+		// completed operation recoverable until that step has committed.
+		op.RoutePending = true
 	}
 	op.UpdatedAt = c.Now()
 	if err := c.Store.Update(ctx, op); err != nil {

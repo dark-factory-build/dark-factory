@@ -71,6 +71,102 @@ func TestProductionObservationKeepsAReviewRecordedDuringTheRefresh(t *testing.T)
 	t.Fatal("pull request record missing")
 }
 
+func TestCorrectedProductionHeadStoresRecoverableReviewClaimAtomically(t *testing.T) {
+	store, path, project, _ := newAdmissionStore(t, RoleOrchestrator, 2)
+	ctx := context.Background()
+	oldHead := strings.Repeat("a", 40)
+	newHead := strings.Repeat("b", 40)
+	old := ProductionObservation{Repository: "example/factory", ObservedAt: 10, PullRequests: []ProductionPullRequest{{Number: 7, Title: "A machine", Head: oldHead, State: "open"}}}
+	if err := store.RecordProductionObservation(ctx, project.ID, old, mustTime(t, 10)); err != nil {
+		store.Close()
+		t.Fatal(err)
+	}
+	operationID := "corrected-review"
+	operation := map[string]any{"id": operationID, "state": "running", "request": map[string]any{"repository": "example/factory", "head": newHead}}
+	corrected := ProductionObservation{Repository: "example/factory", ObservedAt: 20, PullRequests: []ProductionPullRequest{{Number: 7, Title: "A machine", Head: newHead, State: "open"}}}
+	if err := store.RecordProductionObservationWithReviewOperations(ctx, project.ID, corrected, []ProductionReviewOperation{{ID: operationID, Document: operation}}, mustTime(t, 20)); err != nil {
+		store.Close()
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	restarted, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restarted.Close()
+	if count, err := restarted.RecoverRunningReviewOperations(ctx, mustTime(t, 21)); err != nil || count != 1 {
+		t.Fatalf("recovered corrected review count=%d err=%v", count, err)
+	}
+	page, err := restarted.Production(ctx, project.ID, 0, 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var foundHead, foundState string
+	for _, record := range page.Records {
+		switch record.Kind {
+		case "pull_request":
+			var pull ProductionPullRequest
+			if err := json.Unmarshal(record.Document, &pull); err != nil {
+				t.Fatal(err)
+			}
+			foundHead = pull.Head
+		case "reviewer":
+			var claim map[string]any
+			if err := json.Unmarshal(record.Document, &claim); err != nil {
+				t.Fatal(err)
+			}
+			foundState, _ = claim["state"].(string)
+		}
+	}
+	if foundHead != newHead || foundState != "failed" {
+		t.Fatalf("corrected head/review after restart = %q/%q", foundHead, foundState)
+	}
+}
+
+func TestRequestChangesReviewRecoveryPreservesRoutePending(t *testing.T) {
+	store, _, project, _ := newAdmissionStore(t, RoleOrchestrator, 2)
+	defer store.Close()
+	ctx := context.Background()
+	operationID := "request-changes-recovery"
+	operation := map[string]any{
+		"id":      operationID,
+		"state":   "running",
+		"verdict": "request_changes",
+		"request": map[string]any{
+			"repository":  "example/factory",
+			"pull_number": 7,
+			"head":        strings.Repeat("a", 40),
+			"base":        strings.Repeat("b", 40),
+			"base_ref":    "main",
+			"body":        "review",
+			"provider":    "codex",
+		},
+	}
+	if err := store.RecordReviewOperation(ctx, project.ID, "example/factory", operationID, operation, mustTime(t, 10)); err != nil {
+		t.Fatal(err)
+	}
+	if count, err := store.RecoverRunningReviewOperations(ctx, mustTime(t, 11)); err != nil || count != 1 {
+		t.Fatalf("recovered request-changes count=%d err=%v", count, err)
+	}
+	document, found, err := store.ReviewOperation(ctx, project.ID, operationID)
+	if err != nil || !found {
+		t.Fatalf("recovered request-changes document found=%v err=%v", found, err)
+	}
+	var recovered map[string]any
+	if err := json.Unmarshal(document, &recovered); err != nil {
+		t.Fatal(err)
+	}
+	if recovered["state"] != "completed" || recovered["route_pending"] != true {
+		t.Fatalf("recovered request-changes operation=%v", recovered)
+	}
+	pending, err := store.PendingReviewOperations(ctx)
+	if err != nil || len(pending) != 1 || pending[0].ID != operationID {
+		t.Fatalf("pending request-changes operations=%+v err=%v", pending, err)
+	}
+}
+
 func TestProductionPersistsRevisionEvidenceWithoutRewinding(t *testing.T) {
 	store, _, project, _ := newAdmissionStore(t, RoleOrchestrator, 2)
 	defer store.Close()
@@ -128,7 +224,7 @@ func TestProductionPersistsRevisionEvidenceWithoutRewinding(t *testing.T) {
 		if err := json.Unmarshal(item.Document, &current); err != nil {
 			t.Fatal(err)
 		}
-		if item.VisualID != identity || current.Head != strings.Repeat("b", 40) || current.Review.Head != head {
+		if item.VisualID != identity || current.Head != strings.Repeat("b", 40) || current.Review.Head != strings.Repeat("b", 40) || current.Review.State != "unknown" {
 			t.Fatalf("lost identity/revision: %+v %+v", item, current)
 		}
 	}

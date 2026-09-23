@@ -2,7 +2,9 @@ package daemon
 
 import (
 	"context"
+	"crypto/sha1"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -42,11 +44,41 @@ func (daemon *Daemon) RecoverReviewOperations(ctx context.Context) (int, error) 
 	if daemon == nil || daemon.store == nil || daemon.now == nil {
 		return 0, fmt.Errorf("%w: invalid review recovery", kernel.ErrInvalidValue)
 	}
+	pendingBefore, err := daemon.store.PendingReviewOperations(ctx)
+	if err != nil {
+		return 0, err
+	}
 	at, err := kernel.NewUnixMillis(daemon.now().UnixMilli())
 	if err != nil {
 		return 0, err
 	}
-	return daemon.store.RecoverRunningReviewOperations(ctx, at)
+	recovered, err := daemon.store.RecoverRunningReviewOperations(ctx, at)
+	if err != nil {
+		return 0, err
+	}
+	pending, err := daemon.store.PendingReviewOperations(ctx)
+	if err != nil {
+		return 0, err
+	}
+	prior := make(map[string]struct{}, len(pendingBefore))
+	for _, operation := range pendingBefore {
+		prior[operation.Project.String()+"/"+operation.ID] = struct{}{}
+	}
+	for _, operation := range pending {
+		var op review.Operation
+		if err := json.Unmarshal(operation.Document, &op); err != nil || op.ID == "" || op.ID != operation.ID {
+			return 0, fmt.Errorf("%w: review operation", kernel.ErrCorruptState)
+		}
+		if err := daemon.finishReviewRouting(ctx, operation.Project, operation.Repository, op); err != nil {
+			return 0, err
+		}
+		if _, existed := prior[operation.Project.String()+"/"+operation.ID]; existed {
+			// RecoverRunningReviewOperations counted newly promoted claims.
+			// Existing completed claims are counted as startup work here.
+			recovered++
+		}
+	}
+	return recovered, nil
 }
 
 func (daemon *Daemon) startReview(ctx context.Context, project kernel.ProjectID, request api.ReviewRequest, failed review.Operation) (string, error) {
@@ -79,18 +111,8 @@ func (daemon *Daemon) startReview(ctx context.Context, project kernel.ProjectID,
 	if err != nil {
 		return op.ID, err
 	}
-	if op.Verdict == "request_changes" {
-		note := op.Detail
-		if len(note) > kernel.MaxSendBackNoteBytes-160 {
-			note = note[:kernel.MaxSendBackNoteBytes-160]
-		}
-		at, timeErr := kernel.NewUnixMillis(daemon.now().UnixMilli())
-		if timeErr != nil {
-			return op.ID, timeErr
-		}
-		if _, routeErr := daemon.store.SendBackPublishedReview(ctx, project, repository, op.Request.PullNumber, op.ID, op.Request.Head, note, at); routeErr != nil && !errors.Is(routeErr, kernel.ErrNotFound) {
-			return op.ID, routeErr
-		}
+	if err := daemon.finishReviewRouting(ctx, project, repository, op); err != nil {
+		return op.ID, err
 	}
 	return op.ID, nil
 }
@@ -120,38 +142,99 @@ func (daemon *Daemon) resumeReview(ctx context.Context, project kernel.ProjectID
 	if err != nil {
 		return op.ID, err
 	}
-	if op.Verdict == "request_changes" {
-		note := op.Detail
-		if len(note) > kernel.MaxSendBackNoteBytes-160 {
-			note = note[:kernel.MaxSendBackNoteBytes-160]
-		}
-		at, timeErr := kernel.NewUnixMillis(daemon.now().UnixMilli())
-		if timeErr != nil {
-			return op.ID, timeErr
-		}
-		if _, routeErr := daemon.store.SendBackPublishedReview(ctx, project, repository, op.Request.PullNumber, op.ID, op.Request.Head, note, at); routeErr != nil && !errors.Is(routeErr, kernel.ErrNotFound) {
-			return op.ID, routeErr
-		}
+	if err := daemon.finishReviewRouting(ctx, project, repository, op); err != nil {
+		return op.ID, err
 	}
 	return op.ID, nil
+}
+
+// finishReviewRouting completes the second half of a REQUEST_CHANGES result.
+// SendBackPublishedReview is idempotent by operation/head marker, so replaying
+// this helper after a daemon stop cannot resubmit the provider review or route
+// task feedback twice.
+func (daemon *Daemon) finishReviewRouting(ctx context.Context, project kernel.ProjectID, repository string, op review.Operation) error {
+	if op.Verdict != "request_changes" {
+		return nil
+	}
+	note := op.Detail
+	if len(note) > kernel.MaxSendBackNoteBytes-160 {
+		note = note[:kernel.MaxSendBackNoteBytes-160]
+	}
+	at, err := kernel.NewUnixMillis(daemon.now().UnixMilli())
+	if err != nil {
+		return err
+	}
+	if _, err := daemon.store.SendBackPublishedReview(ctx, project, repository, op.Request.PullNumber, op.ID, op.Request.Head, note, at); err != nil && !errors.Is(err, kernel.ErrNotFound) {
+		return err
+	}
+	if op.RoutePending {
+		op.RoutePending = false
+		op.UpdatedAt = daemon.now()
+		return (durableReviewStore{store: daemon.store, project: project, repository: repository, now: daemon.now}).Update(ctx, op)
+	}
+	return nil
+}
+
+// launchReview keeps publication acknowledgement independent from provider
+// work. The operation is already durable when this is called, so a shutdown
+// before the goroutine starts is recovered as an interrupted review.
+func (daemon *Daemon) launchReview(project kernel.ProjectID, op review.Operation) {
+	ctx := daemon.cleanupCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	go func() { _, _ = daemon.resumeReview(ctx, project, op) }()
+}
+
+func (daemon *Daemon) launchPublishedReview(project kernel.ProjectID, repository string, pull uint64, head string) {
+	ctx := daemon.cleanupCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	go func() {
+		if daemon.reviewPublished != nil {
+			_, _ = daemon.reviewPublished(ctx, project, api.ReviewRequest{Repository: repository, PullNumber: pull, Head: head, Provider: "codex"})
+			return
+		}
+		_, _ = daemon.reviewPublishedPR(ctx, project, repository, pull, head)
+	}()
 }
 
 // reviewPublishedPR observes the PR after publication, rather than trusting
 // the branch/base names supplied to create_pull_request. This makes corrected
 // publications naturally create a new exact-head operation as well.
 func (daemon *Daemon) reviewPublishedPR(ctx context.Context, project kernel.ProjectID, repository string, pull uint64, publishedHead string) (string, error) {
-	targets, _, _, err := daemon.projectMaintainerRepositories(ctx, project)
+	reviewRequest, err := daemon.publishedReviewRequest(ctx, project, repository, pull, publishedHead)
 	if err != nil {
 		return "", err
+	}
+	if daemon.reviewPublished != nil {
+		return daemon.reviewPublished(ctx, project, reviewRequest)
+	}
+	return daemon.reviewPR(ctx, project, reviewRequest)
+}
+
+func (daemon *Daemon) preparePublishedReview(ctx context.Context, project kernel.ProjectID, repository string, pull uint64, publishedHead string) (review.Operation, error) {
+	request, err := daemon.publishedReviewRequest(ctx, project, repository, pull, publishedHead)
+	if err != nil {
+		return review.Operation{}, err
+	}
+	return review.Prepare(review.Request{Repository: request.Repository, PullNumber: request.PullNumber, Head: request.Head, Base: request.Base, BaseRef: request.BaseRef, Body: request.Body, Provider: request.Provider}, daemon.now)
+}
+
+func (daemon *Daemon) publishedReviewRequest(ctx context.Context, project kernel.ProjectID, repository string, pull uint64, publishedHead string) (api.ReviewRequest, error) {
+	targets, _, _, err := daemon.projectMaintainerRepositories(ctx, project)
+	if err != nil {
+		return api.ReviewRequest{}, err
 	}
 	repository = strings.ToLower(repository)
 	repositoryID := targets[repository]
 	if repositoryID == 0 || daemon.github == nil {
-		return "", errors.New("review: published repository unavailable")
+		return api.ReviewRequest{}, errors.New("review: published repository unavailable")
 	}
 	response, err := (&daemonReviewBackend{daemon: daemon, repository: repository, repositoryID: repositoryID}).callResponse(ctx, "list_pull_requests", map[string]any{"repository": repository, "page": 1, "pull_number": pull})
 	if err != nil {
-		return "", err
+		return api.ReviewRequest{}, err
 	}
 	var value struct {
 		PullRequests []struct {
@@ -163,17 +246,13 @@ func (daemon *Daemon) reviewPublishedPR(ctx context.Context, project kernel.Proj
 		} `json:"pull_requests"`
 	}
 	if err := json.Unmarshal(response, &value); err != nil || len(value.PullRequests) != 1 {
-		return "", errors.New("review: published pull not found")
+		return api.ReviewRequest{}, errors.New("review: published pull not found")
 	}
 	pullValue := value.PullRequests[0]
 	if pullValue.Number != pull || !strings.EqualFold(pullValue.HeadSHA, publishedHead) {
-		return "", errors.New("review: publication head changed before review")
+		return api.ReviewRequest{}, errors.New("review: publication head changed before review")
 	}
-	reviewRequest := api.ReviewRequest{Repository: repository, PullNumber: pull, Head: strings.ToLower(pullValue.HeadSHA), Base: strings.ToLower(pullValue.BaseSHA), BaseRef: pullValue.BaseRef, Body: pullValue.Body, Provider: "codex"}
-	if daemon.reviewPublished != nil {
-		return daemon.reviewPublished(ctx, project, reviewRequest)
-	}
-	return daemon.reviewPR(ctx, project, reviewRequest)
+	return api.ReviewRequest{Repository: repository, PullNumber: pull, Head: strings.ToLower(pullValue.HeadSHA), Base: strings.ToLower(pullValue.BaseSHA), BaseRef: pullValue.BaseRef, Body: pullValue.Body, Provider: "codex"}, nil
 }
 
 type durableReviewStore struct {
@@ -210,21 +289,222 @@ func (b *daemonReviewBackend) CloneReadOnly(ctx context.Context, request review.
 	}
 	cleanup := func() { _ = os.RemoveAll(root) }
 	repo := filepath.Join(root, "repo")
-	clone := exec.CommandContext(ctx, "/usr/bin/git", "clone", "--filter=blob:none", "--no-checkout", "https://github.com/"+request.Repository, repo)
-	clone.Env = reviewEnvironment(root)
-	if output, err := clone.CombinedOutput(); err != nil {
+	base, err := b.reviewTree(ctx, request.Repository, request.Base)
+	if err != nil {
 		cleanup()
-		return "", nil, fmt.Errorf("review clone: %s", strings.TrimSpace(string(output)))
+		return "", nil, fmt.Errorf("review base: %w", err)
 	}
-	for _, args := range [][]string{{"-C", repo, "fetch", "origin", "refs/pull/" + fmt.Sprint(request.PullNumber) + "/head"}, {"-C", repo, "checkout", "--detach", request.Head}} {
-		command := exec.CommandContext(ctx, "/usr/bin/git", args...)
-		command.Env = reviewEnvironment(root)
-		if output, err := command.CombinedOutput(); err != nil {
-			cleanup()
-			return "", nil, fmt.Errorf("review checkout: %s", strings.TrimSpace(string(output)))
-		}
+	head, err := b.reviewTree(ctx, request.Repository, request.Head)
+	if err != nil {
+		cleanup()
+		return "", nil, fmt.Errorf("review head: %w", err)
+	}
+	if err := b.materializeReviewRepository(ctx, root, repo, base, head, request.Repository); err != nil {
+		cleanup()
+		return "", nil, err
 	}
 	return repo, cleanup, nil
+}
+
+type reviewTree struct {
+	CommitSHA string            `json:"commit_sha"`
+	Entries   []reviewTreeEntry `json:"entries"`
+}
+
+type reviewTreeEntry struct {
+	Path string `json:"path"`
+	Kind string `json:"kind"`
+	Mode string `json:"mode"`
+	SHA  string `json:"sha"`
+}
+
+type reviewFile struct {
+	Path          string  `json:"path"`
+	CommitSHA     string  `json:"commit_sha"`
+	ContentBase64 *string `json:"content_base64"`
+}
+
+func (b *daemonReviewBackend) reviewTree(ctx context.Context, repository, commit string) (reviewTree, error) {
+	response, err := b.callResponse(ctx, "observe_tree", map[string]any{"repository": repository, "commit_sha": commit})
+	if err != nil {
+		return reviewTree{}, err
+	}
+	var tree reviewTree
+	if err := json.Unmarshal(response, &tree); err != nil || tree.CommitSHA != commit {
+		return reviewTree{}, errors.New("review: Maintainer returned an invalid tree")
+	}
+	return tree, nil
+}
+
+func (b *daemonReviewBackend) reviewFile(ctx context.Context, repository, commit string, entry reviewTreeEntry) ([]byte, error) {
+	response, err := b.callResponse(ctx, "observe_file", map[string]any{"repository": repository, "commit_sha": commit, "path": entry.Path})
+	if err != nil {
+		return nil, err
+	}
+	var file reviewFile
+	if err := json.Unmarshal(response, &file); err != nil || file.Path != entry.Path || file.CommitSHA != commit || file.ContentBase64 == nil {
+		return nil, errors.New("review: Maintainer returned invalid file content")
+	}
+	content, err := base64.StdEncoding.DecodeString(*file.ContentBase64)
+	if err != nil {
+		return nil, errors.New("review: Maintainer returned invalid file encoding")
+	}
+	digest := sha1.New()
+	_, _ = fmt.Fprintf(digest, "blob %d\x00", len(content))
+	_, _ = digest.Write(content)
+	if !strings.EqualFold(hex.EncodeToString(digest.Sum(nil)), entry.SHA) {
+		return nil, errors.New("review: Maintainer returned content for the wrong blob")
+	}
+	return content, nil
+}
+
+func (b *daemonReviewBackend) materializeReviewRepository(ctx context.Context, root, repo string, base, head reviewTree, repository string) error {
+	baseDir := filepath.Join(root, "base")
+	headDir := filepath.Join(root, "head")
+	if err := os.MkdirAll(baseDir, 0700); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(headDir, 0700); err != nil {
+		return err
+	}
+	contents := make(map[string][]byte)
+	for _, snapshot := range []struct {
+		tree reviewTree
+		dir  string
+	}{
+		{tree: base, dir: baseDir},
+		{tree: head, dir: headDir},
+	} {
+		for _, entry := range snapshot.tree.Entries {
+			if entry.Kind == "tree" {
+				continue
+			}
+			if entry.Kind != "blob" {
+				return fmt.Errorf("review: unsupported repository entry %q", entry.Path)
+			}
+			path, err := safeReviewPath(entry.Path)
+			if err != nil {
+				return err
+			}
+			content, ok := contents[entry.SHA]
+			if !ok {
+				content, err = b.reviewFile(ctx, repository, snapshot.tree.CommitSHA, entry)
+				if err != nil {
+					return fmt.Errorf("review: read %s: %w", path, err)
+				}
+				contents[entry.SHA] = content
+			}
+			if err := writeReviewFile(snapshot.dir, path, content, entry.Mode); err != nil {
+				return err
+			}
+		}
+	}
+	if err := runReviewGit(ctx, root, "init", "--quiet", repo); err != nil {
+		return fmt.Errorf("review repository: %w", err)
+	}
+	if err := copyReviewSnapshot(baseDir, repo); err != nil {
+		return err
+	}
+	if err := commitReviewSnapshot(ctx, root, repo, "review base"); err != nil {
+		return err
+	}
+	if err := clearReviewWorktree(repo); err != nil {
+		return err
+	}
+	if err := copyReviewSnapshot(headDir, repo); err != nil {
+		return err
+	}
+	if err := commitReviewSnapshot(ctx, root, repo, "review head"); err != nil {
+		return err
+	}
+	return nil
+}
+
+func runReviewGit(ctx context.Context, root string, args ...string) error {
+	command := exec.CommandContext(ctx, "/usr/bin/git", args...)
+	command.Env = reviewEnvironment(root)
+	if output, err := command.CombinedOutput(); err != nil {
+		return fmt.Errorf("%s: %s", err, strings.TrimSpace(string(output)))
+	}
+	return nil
+}
+
+func copyReviewSnapshot(source, destination string) error {
+	return filepath.Walk(source, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		relative, err := filepath.Rel(source, path)
+		if err != nil {
+			return err
+		}
+		if relative == "." {
+			return nil
+		}
+		target := filepath.Join(destination, relative)
+		if info.IsDir() {
+			return os.MkdirAll(target, 0700)
+		}
+		if !info.Mode().IsRegular() {
+			return errors.New("review: non-regular snapshot entry")
+		}
+		content, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(target, content, info.Mode().Perm())
+	})
+}
+
+func clearReviewWorktree(repo string) error {
+	entries, err := os.ReadDir(repo)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if entry.Name() == ".git" {
+			continue
+		}
+		if err := os.RemoveAll(filepath.Join(repo, entry.Name())); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func commitReviewSnapshot(ctx context.Context, root, repo, message string) error {
+	if err := runReviewGit(ctx, root, "-C", repo, "add", "--all", "--force"); err != nil {
+		return fmt.Errorf("review snapshot: %w", err)
+	}
+	if err := runReviewGit(ctx, root, "-C", repo, "-c", "user.name=Dark Factory review", "-c", "user.email=review@darkfactory.invalid", "commit", "--quiet", "--allow-empty", "-m", message); err != nil {
+		return fmt.Errorf("review snapshot commit: %w", err)
+	}
+	return nil
+}
+
+func safeReviewPath(value string) (string, error) {
+	if value == "" || strings.IndexByte(value, 0) >= 0 || filepath.IsAbs(value) {
+		return "", errors.New("review: invalid repository path")
+	}
+	clean := filepath.Clean(filepath.FromSlash(value))
+	if clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) || clean == ".git" || strings.HasPrefix(clean, ".git"+string(filepath.Separator)) {
+		return "", errors.New("review: invalid repository path")
+	}
+	return clean, nil
+}
+
+func writeReviewFile(root, path string, content []byte, mode string) error {
+	target := filepath.Join(root, path)
+	if err := os.MkdirAll(filepath.Dir(target), 0700); err != nil {
+		return err
+	}
+	fileMode := os.FileMode(0600)
+	if mode == "100755" {
+		fileMode = 0700
+	} else if mode != "100644" && mode != "120000" {
+		return fmt.Errorf("review: unsupported file mode %q", mode)
+	}
+	return os.WriteFile(target, content, fileMode)
 }
 
 func (b *daemonReviewBackend) Review(ctx context.Context, checkout string, request review.Request) (review.Verdict, error) {
@@ -270,14 +550,13 @@ func terminalReviewVerdict(output string) (string, error) {
 }
 
 func filteredReviewEnvironment() []string {
-	result := make([]string, 0, len(os.Environ()))
+	result := make([]string, 0, 8)
+	allowed := map[string]bool{"PATH": true, "LANG": true, "LC_ALL": true, "LC_CTYPE": true, "TERM": true, "USER": true, "LOGNAME": true, "SHELL": true}
 	for _, value := range os.Environ() {
 		name := strings.SplitN(value, "=", 2)[0]
-		upper := strings.ToUpper(name)
-		if strings.Contains(upper, "TOKEN") || strings.Contains(upper, "CREDENTIAL") || name == "GH_TOKEN" || name == "GITHUB_TOKEN" || name == "HOME" || strings.HasPrefix(name, "XDG_") || name == "TMPDIR" || strings.HasPrefix(name, "GIT_CONFIG") || strings.HasSuffix(name, "ASKPASS") || name == "GIT_SSH_COMMAND" || name == "SSH_AUTH_SOCK" || strings.HasPrefix(name, "DARK_FACTORY_REVIEW_") || strings.HasPrefix(name, "CLAUDE_CODE_") || strings.HasPrefix(name, "CODEX_") {
-			continue
+		if allowed[name] {
+			result = append(result, value)
 		}
-		result = append(result, value)
 	}
 	return result
 }

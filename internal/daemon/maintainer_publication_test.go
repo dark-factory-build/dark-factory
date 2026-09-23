@@ -28,7 +28,7 @@ func TestRecordMaintainerPublicationPersistsTaskAndPullRequest(t *testing.T) {
 		t.Fatal(err)
 	}
 	head := strings.Repeat("a", 40)
-	request := maintainerRequest{Method: "tools/call", Params: json.RawMessage(`{"name":"create_pull_request","arguments":{"repository":"team/repo","title":"Ship it","head":"feature/ship","base":"main"}}`)}
+	request := maintainerRequest{Method: "tools/call", Params: json.RawMessage(`{"name":"create_pull_request","arguments":{"repository":"team/repo","title":"Ship it","head":"feature/ship","base":"main","body":"fixture body"}}`)}
 	response := json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"isError":false,"structuredContent":{"number":7,"url":"https://github.com/team/repo/pull/7","head_sha":"` + head + `"}}}`)
 	if err := fixture.daemon.recordMaintainerPublication(ctx, projectID, task.ID, request, response); err != nil {
 		t.Fatal(err)
@@ -64,7 +64,7 @@ func TestRecordMaintainerPublicationPersistsReviewCoveredHead(t *testing.T) {
 		t.Fatal(err)
 	}
 	head := strings.Repeat("a", 40)
-	create := maintainerRequest{Method: "tools/call", Params: json.RawMessage(`{"name":"create_pull_request","arguments":{"repository":"team/repo","title":"Ship it","head":"feature/ship","base":"main"}}`)}
+	create := maintainerRequest{Method: "tools/call", Params: json.RawMessage(`{"name":"create_pull_request","arguments":{"repository":"team/repo","title":"Ship it","head":"feature/ship","base":"main","body":"fixture body"}}`)}
 	response := json.RawMessage(`{"result":{"isError":false,"structuredContent":{"number":7,"url":"https://github.com/team/repo/pull/7","head_sha":"` + head + `"}}}`)
 	if err := fixture.daemon.recordMaintainerPublication(ctx, projectID, task.ID, create, response); err != nil {
 		t.Fatal(err)
@@ -133,7 +133,7 @@ func TestRecordMaintainerPublicationIgnoresUnrelatedResponsesAndEnforcesProject(
 	if err != nil {
 		t.Fatal(err)
 	}
-	request := maintainerRequest{Method: "tools/call", Params: json.RawMessage(`{"name":"create_pull_request","arguments":{"repository":"team/repo","title":"Ship it","head":"feature/ship","base":"main"}}`)}
+	request := maintainerRequest{Method: "tools/call", Params: json.RawMessage(`{"name":"create_pull_request","arguments":{"repository":"team/repo","title":"Ship it","head":"feature/ship","base":"main","body":"fixture body"}}`)}
 	failed := json.RawMessage(`{"result":{"isError":true,"structuredContent":{"number":7,"url":"https://github.com/team/repo/pull/7","head_sha":"` + strings.Repeat("b", 40) + `"}}}`)
 	if err := fixture.daemon.recordMaintainerPublication(ctx, projectID, task.ID, request, failed); err != nil {
 		t.Fatal(err)
