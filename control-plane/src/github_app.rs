@@ -1572,7 +1572,7 @@ impl AppAuthority {
             ("metadata", "read"),
             ("pull_requests", "write"),
         ]);
-        if request.cross_repository_source().is_none() && request.external_source_url.is_none() {
+        if request.needs_issue_read() {
             permissions.insert("issues", "read");
         }
         // A refused lookup says nothing about a prior mutation's outcome.
@@ -1616,7 +1616,7 @@ impl AppAuthority {
         if request.external_source_url.is_some() {
             // Linear is a private backlog; a provider cannot authorize disclosure.
             validate_source_visibility(Some(true), repository.private)?;
-        } else {
+        } else if request.needs_issue_read() {
             let issue = if let Some(source) = request.cross_repository_source() {
                 let source_token = self
                     .0
@@ -3272,6 +3272,11 @@ impl AppAuthority {
 }
 
 impl CreatePullRequest {
+    fn needs_issue_read(&self) -> bool {
+        self.external_source_url.is_none()
+            && (self.cross_repository_source().is_some() || self.issue_number != 0)
+    }
+
     fn validate(&mut self) -> Result<(), OperationError> {
         canonical_operation_id(&mut self.operation_id)?;
         if let Some(source) = self.source_repository.as_mut() {
@@ -3292,7 +3297,12 @@ impl CreatePullRequest {
                 return Err(OperationError::InvalidInput);
             }
         } else {
-            valid_exact_integer(self.issue_number)?;
+            let source_less = self.source_repository.is_none() && self.issue_number == 0;
+            if !source_less {
+                valid_exact_integer(self.issue_number)?;
+            } else if self.close_on_merge {
+                return Err(OperationError::InvalidInput);
+            }
         }
         valid_ref(&self.head)?;
         valid_ref(&self.base)?;
@@ -3301,6 +3311,13 @@ impl CreatePullRequest {
         valid_text(&self.title, 1, 256, false)?;
         valid_text(&self.body, 0, 30_000, true)?;
         free_of_operation_marker(&self.body)?;
+        if self.external_source_url.is_none()
+            && self.source_repository.is_none()
+            && self.issue_number == 0
+            && has_closing_directive(&self.body)
+        {
+            return Err(OperationError::InvalidInput);
+        }
         if self.head == self.base || self.head_sha == self.base_sha {
             return Err(OperationError::InvalidInput);
         }
@@ -3322,6 +3339,19 @@ impl CreatePullRequest {
 
     fn marked_body(&self) -> Result<String, OperationError> {
         let cross_source = self.cross_repository_source();
+        if self.external_source_url.is_none() && cross_source.is_none() && self.issue_number == 0 {
+            let body = self.body.trim_end_matches(|character: char| {
+                character == '\n' || character == '\r' || character == ' ' || character == '\t'
+            });
+            if has_closing_directive(body) {
+                return Err(OperationError::InvalidInput);
+            }
+            return if body.is_empty() {
+                Ok(self.marker()?)
+            } else {
+                Ok(format!("{}\n\n{}", body, self.marker()?))
+            };
+        }
         let footer = if let Some(url) = &self.external_source_url {
             format!("Refs {url}")
         } else if let Some(source) = cross_source {
@@ -3370,19 +3400,8 @@ impl CreatePullRequest {
             }) {
                 return Err(OperationError::InvalidInput);
             }
-            for pair in words.windows(2) {
-                let keyword = pair[0].trim_matches(|c: char| !c.is_ascii_alphabetic());
-                let target = pair[1].trim_start_matches(['(', '[']);
-                if [
-                    "close", "closes", "closed", "fix", "fixes", "fixed", "resolve", "resolves",
-                    "resolved",
-                ]
-                .iter()
-                .any(|word| keyword.eq_ignore_ascii_case(word))
-                    && (target.contains('#') || target.contains("/issues/"))
-                {
-                    return Err(OperationError::InvalidInput);
-                }
+            if has_closing_directive(body) {
+                return Err(OperationError::InvalidInput);
             }
         }
         if body.is_empty() {
@@ -3397,6 +3416,21 @@ impl CreatePullRequest {
             .as_deref()
             .filter(|source| !source.eq_ignore_ascii_case(&self.repository))
     }
+}
+
+fn has_closing_directive(body: &str) -> bool {
+    let words: Vec<_> = body.split_whitespace().collect();
+    words.windows(2).any(|pair| {
+        let keyword = pair[0].trim_matches(|c: char| !c.is_ascii_alphabetic());
+        let target = pair[1].trim_start_matches(['(', '[', '*', '_', '`']);
+        [
+            "close", "closes", "closed", "fix", "fixes", "fixed", "resolve", "resolves",
+            "resolved",
+        ]
+        .iter()
+        .any(|word| keyword.eq_ignore_ascii_case(word))
+            && (target.contains('#') || target.contains("/issues/"))
+    })
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
@@ -11073,6 +11107,29 @@ mod tests {
             .validate()
             .is_err()
         );
+        let mut operator = create.clone();
+        operator.issue_number = 0;
+        operator.close_on_merge = false;
+        operator.body = "Operator task carries its complete publication context.".into();
+        assert!(operator.validate().is_ok());
+        assert!(!operator.needs_issue_read());
+        let operator_body = operator.marked_body().unwrap();
+        assert!(operator_body.contains(operator.body.as_str()));
+        assert!(!operator_body.contains("Refs #0"));
+        assert!(!operator_body.contains("Closes #"));
+        assert!(operator_body.ends_with(&operator.marker().unwrap()));
+        operator.body = "Closes #123".into();
+        assert_eq!(
+            operator.validate().err(),
+            Some(OperationError::InvalidInput)
+        );
+        assert_eq!(
+            operator.marked_body().err(),
+            Some(OperationError::InvalidInput)
+        );
+        operator.close_on_merge = true;
+        assert!(operator.validate().is_err());
+        assert!(create.needs_issue_read());
         assert!(
             CreatePullRequest {
                 external_source_url: None,
@@ -12023,6 +12080,7 @@ fn installation_route_uses_only_a_valid_app_slug() {
             .is_err()
         );
     }
+
     assert!(
         AppIdentity {
             id: 0,
@@ -12031,4 +12089,32 @@ fn installation_route_uses_only_a_valid_app_slug() {
         .installation_url()
         .is_err()
     );
+}
+
+#[cfg(all(test, feature = "development-sqlite"))]
+#[tokio::test]
+async fn source_less_closing_directive_is_rejected_before_journal_claim() {
+    let request = CreatePullRequest {
+        external_source_url: None,
+        repository: "dark-factory-build/dark-factory".into(),
+        operation_id: "2c8a5c44-7f1f-11f0-952e-acde48001122".into(),
+        issue_number: 0,
+        source_repository: None,
+        head: "feature/operator".into(),
+        head_sha: "a".repeat(40),
+        base: "main".into(),
+        base_sha: "b".repeat(40),
+        title: "Operator publication".into(),
+        body: "Closes #123".into(),
+        draft: false,
+        close_on_merge: false,
+    };
+    let operation_id = request.operation_id.clone();
+    let directory = tempfile::tempdir().unwrap();
+    let journal = crate::journal::DeliveryJournal::open_development(
+        &directory.path().join("journal.db"),
+    )
+    .unwrap();
+    assert_eq!(request.validate().err(), Some(OperationError::InvalidInput));
+    assert!(journal.observe_operation(&operation_id).await.unwrap().is_none());
 }
