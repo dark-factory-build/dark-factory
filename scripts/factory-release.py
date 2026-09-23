@@ -26,6 +26,7 @@ INTAKE_SPEC = importlib.util.spec_from_file_location("factory_intake", Path(__fi
 intake = importlib.util.module_from_spec(INTAKE_SPEC)
 INTAKE_SPEC.loader.exec_module(intake)
 atomic_json = intake.atomic_json
+failure_tail = intake.failure_tail
 
 SHA = re.compile(r"^[0-9a-f]{40}$")
 MAX_RANGE_COMMITS = 100
@@ -64,18 +65,6 @@ def run(argv, timeout=60, env=None):
         error.returncode = process.returncode
         raise error
     return stdout
-
-
-AUTHORIZATION = re.compile(r"(?i)(authorization\W{1,4})[^\r\n]+")
-SECRET = re.compile(r"(?i)(bearer|api[_-]?key|password|token|secret)(\W{1,4})\S+|\b(gh[pousr]_|github_pat_)\w+")
-
-
-def failure_tail(stderr):
-    # Hooks may write credentials or private task text to stderr, and receipts
-    # are durable: keep only a bounded, single-line tail with labelled values
-    # and GitHub tokens starred and the operator's home shortened.
-    text = SECRET.sub(lambda match: (match.group(1) or "") + (match.group(2) or "") + "***", AUTHORIZATION.sub(r"\1***", stderr.replace(str(Path.home()), "~")))
-    return " ".join(re.sub(r"[\x00-\x1f\x7f-\x9f]", " ", text).split())[-2000:]
 
 
 def valid_argv(value, name):
@@ -541,7 +530,13 @@ def once(config, number, retry=False):
             except ReleaseError as exc:
                 raise ReleaseError("deployment outcome is ambiguous; reconcile the live runtime before retrying") from exc
             raise ReleaseError("deployment outcome is ambiguous; reconcile the live runtime before retrying")
-        if entry and entry.get("state") == "blocked" and not retry:
+        # The hook proved this blocked receipt left no effect to undo, so the
+        # lane re-plans it on the next tick instead of parking the factory on a
+        # transient blocker. Exactly one automatic attempt: a blocker that
+        # survives it is a genuine failure and still needs --retry.
+        automatic = bool(entry and entry.get("state") == "blocked" and not retry
+                         and entry.get("auto_retry") is True and unresolved is None)
+        if entry and entry.get("state") == "blocked" and not retry and not automatic:
             raise ReleaseError("release is blocked; inspect the receipt and use --retry explicitly")
         if entry and entry.get("state") == "running":
             try:
@@ -567,6 +562,7 @@ def once(config, number, retry=False):
         entry = entry or {"pr": number, "sha": sha, "state": "planned"}
         entry.update({"sha": sha, "state": "planned", "phase": "predeploy",
                       "config_fingerprint": fingerprint, "updated_at": int(time.time())})
+        entry.pop("auto_retry", None)
         journal["releases"][str(number)] = entry
         atomic_json(journal_path, journal)
         try:
@@ -638,6 +634,21 @@ def once(config, number, retry=False):
                 # The hook's own exit status, not its output, says it failed
                 # before any effect: an ordinary --retry or a later release may follow.
                 entry["phase"] = "predeploy"
+                # A blocker the hook survived intact earns the next tick, once.
+                entry["auto_retry"] = not automatic
+                # Keep the hook's last known installed identity with the
+                # receipt.  This lets an operator reconcile a failed prepare
+                # against the journal tip without pretending the target was
+                # installed.
+                unchanged_sha = entry.get("delivery_from_sha")
+                if isinstance(unchanged_sha, str) and SHA.fullmatch(unchanged_sha):
+                    try:
+                        observed = probe(config, unchanged_sha)
+                    except ReleaseError:
+                        observed = None
+                    if (isinstance(observed, dict) and observed.get("sha") == unchanged_sha
+                            and observed.get("healthy") is True):
+                        entry["runtime_unchanged"] = observed
                 clear_unresolved(journal, entry)
             else:
                 record_unresolved(journal, entry, entry["error"])
@@ -693,6 +704,32 @@ def reconcile(config, number, expected, supersede_prs=(), baseline_current=False
             if isinstance(receipt, dict) and receipt.get("state") == "running":
                 if not (unresolved is not None and str(receipt_number) == str(unresolved["pr"])):
                     raise ReleaseError("release journal has an unresolved running deployment")
+        prior_tip = journal.get("live_tip")
+        # A non-destructive deploy hook failure can leave the target blocked
+        # while the runtime remains at the journal's healthy tip.  In that
+        # case the operator-provided SHA proves the target never landed; do
+        # not require it to equal the blocked PR's merge SHA.
+        if (entry is not None and entry.get("state") == "blocked"
+                and entry.get("phase") == "predeploy"
+                and (matching_unresolved or unresolved is None)
+                and isinstance(prior_tip, dict) and prior_tip.get("healthy") is True
+                and prior_tip.get("sha") == expected):
+            try:
+                value = probe(config, expected)
+            except ReleaseError as exc:
+                raise ReleaseError("live probe did not prove the expected healthy SHA") from exc
+            if value.get("sha") != expected or value.get("healthy") is not True:
+                raise ReleaseError("live probe did not prove the expected healthy SHA")
+            entry["state"] = "blocked"
+            entry["phase"] = "predeploy"
+            entry["runtime_unchanged"] = {"sha": expected, "healthy": True}
+            entry["reconciliation"] = {"mode": "operator_observed", "observed_sha": expected,
+                                         "runtime_unchanged": True}
+            entry["updated_at"] = int(time.time())
+            record_live_tip(journal, prior_tip)
+            clear_unresolved(journal, entry)
+            atomic_json(journal_path, journal)
+            return entry
         pr, default, reviews, checks = gh_snapshot(config, number)
         sha = pr.get("mergeCommitSha")
         reviewed_merge_gate(pr, reviews, checks, config, sha)
@@ -704,7 +741,6 @@ def reconcile(config, number, expected, supersede_prs=(), baseline_current=False
         value = probe(config, expected)
         if value.get("sha") != expected or value.get("healthy") is not True:
             raise ReleaseError("live probe did not prove the expected healthy SHA")
-        prior_tip = journal.get("live_tip")
         previous = prior_tip.get("sha") if isinstance(prior_tip, dict) else None
         included_pull_requests = []
         if (isinstance(entry, dict) and entry.get("sha") == expected

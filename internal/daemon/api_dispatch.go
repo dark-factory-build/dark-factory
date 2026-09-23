@@ -48,10 +48,12 @@ type Daemon struct {
 	intakeIssues func(context.Context, string, uint64, uint32, string, uint64) (maintainer.IssuePage, error)
 	// browserRemote is a package-test-only seam for operator calls that wait
 	// outside a paired client's gate.
-	browserRemote func(context.Context, string)
-	maintainerMu  sync.Mutex
-	store         *kernel.Store
-	now           func() time.Time
+	browserRemote       func(context.Context, string)
+	maintainerMu        sync.Mutex
+	productionRefreshMu sync.Mutex
+	productionRefreshAt map[kernel.ProjectID]time.Time
+	store               *kernel.Store
+	now                 func() time.Time
 
 	// Cleanup survives caller cancellation but remains interruptible by daemon shutdown.
 	cleanupCtx    context.Context
@@ -151,7 +153,7 @@ func newDaemon(store *kernel.Store, now func() time.Time) (*Daemon, error) {
 		return nil, fmt.Errorf("%w: invalid daemon", kernel.ErrInvalidValue)
 	}
 	cleanupCtx, cleanupCancel := context.WithCancel(context.Background())
-	return &Daemon{store: store, now: now, cleanupCtx: cleanupCtx, cleanupCancel: cleanupCancel, browsers: make(map[*BrowserRuntime]struct{}), browserClientGates: &browserClientGates{}, attempts: make(map[kernel.RunID]*liveAttempt), supervisors: make(map[*supervisorRegistration]struct{}), schedulerWake: make(chan struct{}, 1)}, nil
+	return &Daemon{store: store, now: now, cleanupCtx: cleanupCtx, cleanupCancel: cleanupCancel, browsers: make(map[*BrowserRuntime]struct{}), browserClientGates: &browserClientGates{}, attempts: make(map[kernel.RunID]*liveAttempt), supervisors: make(map[*supervisorRegistration]struct{}), schedulerWake: make(chan struct{}, 1), productionRefreshAt: make(map[kernel.ProjectID]time.Time)}, nil
 }
 
 // HandleConnection synchronously consumes exactly one authenticated request,
@@ -471,6 +473,23 @@ func (daemon *Daemon) taskRead(ctx context.Context, call api.Call) api.Reply {
 	outcomeText := task.Result
 	if outcomeText == "" {
 		outcomeText = task.BlockedReason
+	}
+	if outcomeText == "" && task.Status == kernel.TaskFailed {
+		// Infrastructure failures are recorded on the terminal run proposal;
+		// task.result is intentionally empty for them. Include that durable
+		// diagnosis in the operator's task read so it does not require SQLite.
+		run, runFound, runErr := daemon.store.LatestTaskRun(ctx, id, task.IncarnationID)
+		if runErr != nil {
+			return newErrorReply(remoteErrorCode(runErr))
+		}
+		if runFound && run.Terminal != nil {
+			outcomeText = run.Terminal.Detail()
+		}
+		// A worker may fail its attempt with no detail. The operator still
+		// sees an outcome rather than a failed task with nothing to read.
+		if strings.TrimSpace(outcomeText) == "" {
+			outcomeText = "run failed without a recorded cause"
+		}
 	}
 	outcome, outcomeMore := taskDetailTextChunk(outcomeText, input.Offset)
 	attachments, err := daemon.store.TaskAttachments(ctx, id)

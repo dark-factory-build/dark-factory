@@ -66,6 +66,19 @@ func (daemon *Daemon) startReview(ctx context.Context, project kernel.ProjectID,
 	if err != nil {
 		return op.ID, err
 	}
+	if op.Verdict == "request_changes" {
+		note := op.Detail
+		if len(note) > kernel.MaxSendBackNoteBytes-160 {
+			note = note[:kernel.MaxSendBackNoteBytes-160]
+		}
+		at, timeErr := kernel.NewUnixMillis(daemon.now().UnixMilli())
+		if timeErr != nil {
+			return op.ID, timeErr
+		}
+		if _, routeErr := daemon.store.SendBackPublishedReview(ctx, project, repository, op.Request.PullNumber, op.ID, op.Request.Head, note, at); routeErr != nil && !errors.Is(routeErr, kernel.ErrNotFound) {
+			return op.ID, routeErr
+		}
+	}
 	return op.ID, nil
 }
 
@@ -170,13 +183,31 @@ func (b *daemonReviewBackend) Review(ctx context.Context, checkout string, reque
 		return review.Verdict{}, err
 	}
 	text := string(output)
-	if strings.Contains(text, "VERDICT: ALLOW") {
-		return review.Verdict{Event: "ALLOW", Body: text}, nil
+	event, err := terminalReviewVerdict(text)
+	if err != nil {
+		return review.Verdict{}, err
 	}
-	if strings.Contains(text, "VERDICT: REQUEST_CHANGES") {
-		return review.Verdict{Event: "REQUEST_CHANGES", Body: text}, nil
+	return review.Verdict{Event: event, Body: text}, nil
+}
+
+func terminalReviewVerdict(output string) (string, error) {
+	lines := strings.Split(output, "\n")
+	verdicts := make([]string, 0, 1)
+	last := ""
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed != "" {
+			last = trimmed
+		}
+		switch trimmed {
+		case "VERDICT: ALLOW", "VERDICT: REQUEST_CHANGES":
+			verdicts = append(verdicts, strings.TrimPrefix(trimmed, "VERDICT: "))
+		}
 	}
-	return review.Verdict{}, errors.New("review: provider returned no verdict")
+	if len(verdicts) != 1 || last != "VERDICT: "+verdicts[0] {
+		return "", errors.New("review: provider verdict must be one terminal verdict")
+	}
+	return verdicts[0], nil
 }
 
 func filteredReviewEnvironment() []string {

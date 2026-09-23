@@ -3,8 +3,60 @@ package kernel
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"strings"
 )
+
+// SendBackPublishedReview routes one exact REQUEST_CHANGES result to the
+// worker that owns the published pull request. The operation/head marker in
+// the retained feedback makes response loss and daemon restart idempotent.
+func (store *Store) SendBackPublishedReview(ctx context.Context, project ProjectID, repository string, pull uint64, operationID, head, note string, at UnixMillis) (Task, error) {
+	if project.zero() || !productionRepository.MatchString(repository) || pull == 0 || !validOutcomeText(operationID, 128) || !productionSHA(head) || byteLen(note) < 1 || byteLen(note) > MaxSendBackNoteBytes-160 {
+		return Task{}, fmt.Errorf("%w: invalid published review send-back", ErrInvalidValue)
+	}
+	marker := "review-operation: " + operationID + "\nreview-head: " + head + "\n\n"
+	tx, err := store.beginValidatedWrite(ctx)
+	if err != nil {
+		return Task{}, err
+	}
+	defer tx.Close()
+	repository = strings.ToLower(repository)
+	var taskBytes, document string
+	if err := tx.connection.QueryRowContext(ctx, `SELECT p.task_id, r.document FROM publication_tasks p JOIN production_records r ON r.project_id = p.project_id AND r.repository = p.repository AND r.kind = 'pull_request' AND r.identity = CAST(p.pull_number AS TEXT) WHERE p.project_id = ? AND p.repository = ? AND p.pull_number = ? ORDER BY p.created_at_ms DESC LIMIT 1`, project.Bytes(), repository, pull).Scan(&taskBytes, &document); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return Task{}, tx.Rollback(ErrNotFound)
+		}
+		return Task{}, tx.Rollback(err)
+	}
+	var published ProductionPullRequest
+	if json.Unmarshal([]byte(document), &published) != nil || !strings.EqualFold(published.Head, head) {
+		return Task{}, tx.Rollback(ErrConflict)
+	}
+	taskID, err := TaskIDFromBytes([]byte(taskBytes))
+	if err != nil {
+		return Task{}, tx.Rollback(err)
+	}
+	task, found, err := taskByID(ctx, tx.connection, taskID)
+	if err != nil || !found {
+		if err == nil {
+			err = ErrNotFound
+		}
+		return Task{}, tx.Rollback(err)
+	}
+	if strings.Contains(TaskFeedback(task), marker) {
+		return task, tx.Rollback(nil)
+	}
+	updated, err := sendBackTask(ctx, tx.connection, task, marker+note, at)
+	if err != nil {
+		return Task{}, tx.Rollback(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Task{}, err
+	}
+	return updated, nil
+}
 
 // MaxSendBackNoteBytes bounds the note a send-back leaves at the end of a
 // task's body.

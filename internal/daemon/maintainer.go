@@ -213,8 +213,44 @@ func (daemon *Daemon) recordMaintainerPublication(ctx context.Context, project k
 		return nil
 	}
 	params, _, err := decodeMaintainerToolCall(request.Params)
-	if err != nil || params.Name != "create_pull_request" {
+	if err != nil {
 		return err
+	}
+	if params.Name == "submit_pull_request_review" {
+		var repo, head, event, body string
+		var number uint64
+		for name, target := range map[string]any{"repository": &repo, "pull_number": &number, "head_sha": &head, "event": &event, "body": &body} {
+			if err := json.Unmarshal(params.Arguments[name], target); err != nil {
+				return err
+			}
+		}
+		var reply struct {
+			Result struct {
+				IsError bool `json:"isError"`
+				Review  struct {
+					Head    string `json:"head_sha"`
+					Verdict string `json:"verdict"`
+				} `json:"structuredContent"`
+			} `json:"result"`
+		}
+		if json.Unmarshal(response, &reply) != nil || reply.Result.IsError {
+			return nil
+		}
+		state := "block"
+		if event == "ALLOW" {
+			state = "allow"
+		}
+		if reply.Result.Review.Head != head || reply.Result.Review.Verdict != state {
+			return nil
+		}
+		at, err := daemon.timestamp()
+		if err != nil {
+			return err
+		}
+		return daemon.store.RecordProductionReview(ctx, project, repo, number, kernel.ProductionReview{Head: head, State: state, Findings: body}, at)
+	}
+	if params.Name != "create_pull_request" {
+		return nil
 	}
 	var reply struct {
 		Result struct {

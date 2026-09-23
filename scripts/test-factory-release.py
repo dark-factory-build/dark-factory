@@ -732,6 +732,8 @@ class ReleaseFixtures(unittest.TestCase):
                 self.assertEqual(barrier, "unresolved_deployment" in stored)
                 if barrier:
                     continue
+                self.assertEqual({"sha": OLD, "healthy": True},
+                                 stored["releases"]["633"]["runtime_unchanged"])
                 with mock.patch.object(release, "gh_snapshot", return_value=snapshot()), \
                      mock.patch.object(release, "review_gate"), \
                      mock.patch.object(release, "probe", return_value={"sha": OLD, "healthy": True}), \
@@ -739,6 +741,66 @@ class ReleaseFixtures(unittest.TestCase):
                      mock.patch.object(release, "verify", return_value={"sha": SHA, "healthy": True}), \
                      mock.patch.object(release, "run", side_effect=lambda argv, *a, **kw: json.dumps({"object": {"sha": SHA}}) if argv[:2] == ["gh", "api"] else ""):
                     self.assertEqual("verified", release.once(cfg, 633, retry=True)["state"])
+
+    def test_reconcile_settles_predeploy_failure_at_journal_live_tip(self):
+        with tempfile.TemporaryDirectory() as directory:
+            journal = Path(directory) / "release.json"
+            cfg = config(journal)
+            original = {
+                "version": 1,
+                "live_tip": {"sha": OLD, "healthy": True},
+                "releases": {"633": {
+                    "pr": 633, "sha": SHA, "state": "blocked", "phase": "predeploy",
+                    "config_fingerprint": release.config_fingerprint(cfg),
+                }},
+            }
+            for observed in (
+                    {"sha": OLD, "healthy": True},
+                    {"sha": SHA, "healthy": True},
+                    {"sha": OLD, "healthy": False}):
+                with self.subTest(observed=observed):
+                    release.atomic_json(journal, original)
+                    with mock.patch.object(release, "gh_snapshot") as snapshot_call, \
+                         mock.patch.object(release, "probe", return_value=observed) as probe_call:
+                        if observed["sha"] == OLD and observed["healthy"]:
+                            result = release.reconcile(cfg, 633, OLD)
+                            self.assertEqual("blocked", result["state"])
+                            self.assertEqual("predeploy", result["phase"])
+                            self.assertEqual({"sha": OLD, "healthy": True}, result["runtime_unchanged"])
+                            self.assertNotIn("unresolved_deployment", release.load(journal))
+                        else:
+                            with self.assertRaisesRegex(release.ReleaseError, "live probe"):
+                                release.reconcile(cfg, 633, OLD)
+                            self.assertEqual(original, release.load(journal))
+                    snapshot_call.assert_not_called()
+                    probe_call.assert_called_once_with(cfg, OLD)
+
+    def test_hook_refusal_that_left_no_effect_earns_exactly_one_automatic_retry(self):
+        real_run = release.run
+        def refusing(argv, *args, **kwargs):
+            if argv[:2] == ["gh", "api"]:
+                return json.dumps({"object": {"sha": SHA}})
+            return real_run([sys.executable, "-c", "import sys; sys.exit(75)"])
+        with tempfile.TemporaryDirectory() as directory:
+            journal = Path(directory) / "release.json"
+            cfg = config(journal)
+            def tick():
+                with mock.patch.object(release, "gh_snapshot", return_value=snapshot()), \
+                     mock.patch.object(release, "review_gate"), \
+                     mock.patch.object(release, "probe", return_value={"sha": OLD, "healthy": True}), \
+                     mock.patch.object(release, "range_sources", return_value=([], "range")), \
+                     mock.patch.object(release, "run", side_effect=refusing):
+                    release.once(cfg, 633)
+            with self.assertRaisesRegex(release.ReleaseError, "exit=75"):
+                tick()
+            self.assertIs(True, release.load(journal)["releases"]["633"]["auto_retry"])
+            # The next tick re-plans by itself rather than parking the factory.
+            with self.assertRaisesRegex(release.ReleaseError, "exit=75"):
+                tick()
+            self.assertIs(False, release.load(journal)["releases"]["633"]["auto_retry"])
+            # A blocker that survived the automatic attempt is a real failure.
+            with self.assertRaisesRegex(release.ReleaseError, "use --retry explicitly"):
+                tick()
 
     def test_explicit_recovery_clears_barrier_and_allows_subsequent_release(self):
         with tempfile.TemporaryDirectory() as directory:

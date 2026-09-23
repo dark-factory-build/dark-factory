@@ -570,6 +570,14 @@ pub(crate) struct PullRequestCandidate {
     pub(crate) head_sha: String,
     pub(crate) base_sha: String,
     pub(crate) base_ref: String,
+    pub(crate) title: String,
+    pub(crate) url: String,
+    pub(crate) head_ref: String,
+    pub(crate) state: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) mergeable: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) merge_state_status: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -3466,10 +3474,9 @@ impl PublishCommit {
                 return Err(OperationError::InvalidInput);
             }
         }
-        // Keep caller text to one headline and reserve the body for the
-        // operation trailer so the full message is byte-exact and trivial to
-        // reconcile.
-        valid_text(&self.message, 1, 4_096, false)?;
+        // Keep the operation trailer separate from caller text while allowing
+        // the normal multi-line commit messages GitHub accepts.
+        valid_text(&self.message, 1, 4_096, true)?;
         free_of_operation_marker(&self.message)?;
         if !(1..=MAX_COMMIT_FILES).contains(&self.changes.len()) {
             return Err(OperationError::InvalidInput);
@@ -6537,6 +6544,16 @@ fn pull_request_page(
             head_sha: pull.head.sha,
             base_sha: pull.base.sha,
             base_ref: pull.base.name,
+            title: pull.title,
+            url: pull.html_url,
+            head_ref: pull.head.name,
+            state: if pull.merged {
+                "merged".to_owned()
+            } else {
+                pull.state
+            },
+            mergeable: pull.mergeable,
+            merge_state_status: pull.merge_state_status,
         });
     }
     Ok(PullRequestPage {
@@ -7048,6 +7065,10 @@ struct PullRequest {
     state: String,
     #[serde(default)]
     merged: bool,
+    #[serde(default)]
+    mergeable: Option<bool>,
+    #[serde(default, rename = "mergeable_state")]
+    merge_state_status: Option<String>,
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
@@ -8226,12 +8247,20 @@ fn app_jwt_endpoint(url: &str) -> bool {
     // (`.../pulls?x=/installation`), and dot segments are collapsed by the URL
     // parser after this check runs.
     let path = &url[..url.find(['?', '#']).unwrap_or(url.len())];
-    if path.contains("..") {
+    if path == "https://api.github.com/app" {
+        return true;
+    }
+    let Some(path) = path.strip_prefix("https://api.github.com/") else {
+        return false;
+    };
+    if path
+        .split('/')
+        .any(|segment| segment.is_empty() || segment == "..")
+    {
         return false;
     }
-    path == "https://api.github.com/app"
-        || path.starts_with("https://api.github.com/app/installations/")
-        || (path.starts_with("https://api.github.com/repos/") && path.ends_with("/installation"))
+    path.starts_with("app/installations/")
+        || (path.starts_with("repos/") && path.ends_with("/installation"))
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -9666,6 +9695,8 @@ mod tests {
                 },
                 state: "open".into(),
                 merged: false,
+                mergeable: None,
+                merge_state_status: None,
             })
         };
         let digest = request.reviewed_body_digest.as_deref().unwrap();
@@ -10128,7 +10159,7 @@ mod tests {
         let mut different_tree = request.clone();
         different_tree.changes[0].content_base64 = Some("ZGlmZmVyZW50".into());
         assert_ne!(trailer, different_tree.trailer().unwrap());
-        assert!(forged("Two\nlines").validate().is_err());
+        assert!(forged("Two\nlines").validate().is_ok());
         // A worker that integrated main publishes the merge it made: the
         // branch head stays first parent, the integrated commit is second, and
         // the changes are its diff from that commit rather than a copy of it.
@@ -10557,6 +10588,9 @@ mod tests {
             "https://api.github.com/repos/dark-factory-build/dark-factory/installation"
         ));
         assert!(app_jwt_endpoint(
+            "https://api.github.com/repos/dark-factory-build/a..b/installation"
+        ));
+        assert!(app_jwt_endpoint(
             "https://api.github.com/app/installations/155853844/access_tokens"
         ));
         // Readiness once proved repository identity by fetching this URL with
@@ -10580,7 +10614,7 @@ mod tests {
         ));
         // Dot segments are collapsed by the URL parser after this check runs.
         assert!(!app_jwt_endpoint(
-            "https://api.github.com/app/installations/../../repos/dark-factory-build/dark-factory/pulls"
+            "https://api.github.com/repos/dark-factory-build/../dark-factory/installation"
         ));
         // Userinfo must not be mistaken for the host.
         assert!(!app_jwt_endpoint("https://api.github.com@evil.example/app"));
@@ -10763,6 +10797,8 @@ mod tests {
             },
             state: state.into(),
             merged,
+            mergeable: None,
+            merge_state_status: None,
         };
         assert!(
             pull("open", false, close.head_sha.clone())
@@ -11057,6 +11093,8 @@ mod tests {
             },
             state: "open".into(),
             merged: false,
+            mergeable: None,
+            merge_state_status: None,
         };
         assert_eq!(
             updated_pull.body_result(&update).unwrap().unwrap().head_sha,

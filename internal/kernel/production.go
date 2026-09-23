@@ -15,6 +15,8 @@ import (
 	"strings"
 )
 
+const maxProductionReviewFindings = 16000
+
 var productionRepository = regexp.MustCompile(`^[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}$`)
 
 type ProductionRecord struct {
@@ -149,7 +151,7 @@ func migrateProductionRuntimeRecords(ctx context.Context, c *sql.Conn, project P
 }
 
 func validProductionPull(pr ProductionPullRequest) bool {
-	return pr.Number > 0 && pr.Number <= 1<<53-1 && validOutcomeText(pr.Title, 1024) && pr.Title != "" && productionURL(pr.URL) && productionSHA(pr.Head) && productionSHA(pr.Merge) && productionSHA(pr.Review.Head) && (pr.HeadRepository == "" || productionRepository.MatchString(pr.HeadRepository)) && validOutcomeText(pr.Branch, 256) && validOutcomeText(pr.Base, 256) && validOutcomeText(pr.MergeQueue, 64) && validOutcomeText(pr.MergedAt, 64) && validOutcomeText(pr.NextAction, 2048) && validOutcomeText(pr.Review.State, 64) && validOutcomeText(pr.Review.Findings, 8192) && productionURL(pr.Review.URL) && (pr.State == "open" || pr.State == "closed" || pr.State == "merged")
+	return pr.Number > 0 && pr.Number <= 1<<53-1 && validOutcomeText(pr.Title, 1024) && pr.Title != "" && productionURL(pr.URL) && productionSHA(pr.Head) && productionSHA(pr.Merge) && productionSHA(pr.Review.Head) && (pr.HeadRepository == "" || productionRepository.MatchString(pr.HeadRepository)) && validOutcomeText(pr.Branch, 256) && validOutcomeText(pr.Base, 256) && validOutcomeText(pr.MergeQueue, 64) && validOutcomeText(pr.MergedAt, 64) && validOutcomeText(pr.NextAction, 2048) && validOutcomeText(pr.Review.State, 64) && validOutcomeText(pr.Review.Findings, maxProductionReviewFindings) && productionURL(pr.Review.URL) && (pr.State == "open" || pr.State == "closed" || pr.State == "merged")
 }
 
 func productionRecordOnConnection(ctx context.Context, c *sql.Conn, project ProjectID, repo, kind, id, visual string, value any, at int64) error {
@@ -196,6 +198,12 @@ func (store *Store) RecordProductionObservation(ctx context.Context, project Pro
 		visual, err := linkProductionChange(ctx, tx.connection, project, observation.Repository, pr, observation.ObservedAt)
 		if err != nil {
 			return tx.Rollback(err)
+		}
+		// The observation's review is a copy read before a remote wait. A
+		// verdict recorded meanwhile lives only here, so the stored review
+		// wins inside this transaction rather than being erased.
+		if stored, ok := storedProductionReview(ctx, tx.connection, project, observation.Repository, pr.Number); ok {
+			pr.Review = stored
 		}
 		if err := write("pull_request", strconv.FormatUint(pr.Number, 10), visual, pr); err != nil {
 			return tx.Rollback(err)
@@ -333,6 +341,55 @@ func (store *Store) RecordPublication(ctx context.Context, project ProjectID, ta
 		return tx.Rollback(err)
 	}
 	if _, err = tx.connection.ExecContext(ctx, `INSERT INTO production_records (project_id, repository, kind, identity, visual_id, document, observed_at_ms) VALUES (?, ?, 'pull_request', ?, ?, ?, ?) ON CONFLICT DO NOTHING`, project.Bytes(), repo, strconv.FormatUint(pr.Number, 10), visual, string(body), at.Int64()); err != nil {
+		return tx.Rollback(err)
+	}
+	return tx.Commit(ctx)
+}
+
+// RecordProductionReview preserves the exact commit covered by a review.
+// Refreshes may move the live PR to a newer head; that older head is evidence,
+// not permission to rewrite the review onto the new source.
+func storedProductionReview(ctx context.Context, c *sql.Conn, project ProjectID, repo string, number uint64) (ProductionReview, bool) {
+	var body string
+	if c.QueryRowContext(ctx, `SELECT document FROM production_records WHERE project_id = ? AND repository = ? AND kind = 'pull_request' AND identity = ?`, project.Bytes(), repo, strconv.FormatUint(number, 10)).Scan(&body) != nil {
+		return ProductionReview{}, false
+	}
+	var pr ProductionPullRequest
+	if json.Unmarshal([]byte(body), &pr) != nil || pr.Review.Head == "" {
+		return ProductionReview{}, false
+	}
+	return pr.Review, true
+}
+
+func (store *Store) RecordProductionReview(ctx context.Context, project ProjectID, repo string, number uint64, review ProductionReview, at UnixMillis) error {
+	if project.zero() || !productionRepository.MatchString(repo) || number == 0 || number > 1<<53-1 || !productionSHA(review.Head) || !validOutcomeText(review.State, 64) || !validOutcomeText(review.Findings, maxProductionReviewFindings) || !productionURL(review.URL) {
+		return ErrInvalidValue
+	}
+	repo = strings.ToLower(repo)
+	tx, err := store.beginValidatedWrite(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Close()
+	var visual, body string
+	identity := strconv.FormatUint(number, 10)
+	err = tx.connection.QueryRowContext(ctx, `SELECT visual_id, document FROM production_records WHERE project_id = ? AND repository = ? AND kind = 'pull_request' AND identity = ?`, project.Bytes(), repo, identity).Scan(&visual, &body)
+	if err == sql.ErrNoRows {
+		pr := ProductionPullRequest{Number: number, Title: "Pull request #" + identity, Head: review.Head, State: "open", Review: review}
+		if err := productionRecordOnConnection(ctx, tx.connection, project, repo, "pull_request", identity, repo+"#"+identity, pr, at.Int64()); err != nil {
+			return tx.Rollback(err)
+		}
+		return tx.Commit(ctx)
+	}
+	if err != nil {
+		return tx.Rollback(err)
+	}
+	var pr ProductionPullRequest
+	if json.Unmarshal([]byte(body), &pr) != nil || pr.Number != number || !validProductionPull(pr) {
+		return tx.Rollback(ErrCorruptState)
+	}
+	pr.Review = review
+	if err := productionRecordOnConnection(ctx, tx.connection, project, repo, "pull_request", identity, visual, pr, at.Int64()); err != nil {
 		return tx.Rollback(err)
 	}
 	return tx.Commit(ctx)
