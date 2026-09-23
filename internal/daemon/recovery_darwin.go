@@ -141,6 +141,23 @@ func (daemon *Daemon) recoverReturnedRun(ctx context.Context, parent *RuntimePar
 }
 
 func (daemon *Daemon) recoverRun(ctx context.Context, parent *RuntimeParent, changeParent string, recoverable kernel.RecoverableRun) (RecoveredRunAction, error) {
+	action, err := daemon.recoverRunOnce(ctx, parent, changeParent, recoverable)
+	if err != nil || action != RecoveredNoResultUnresolved {
+		return action, err
+	}
+	// Failing an attempt whose runner never started releases every process
+	// resource, which leaves only runtime removal and settlement. Re-read so
+	// that happens now; otherwise the run stays finalizing until another
+	// daemon start. Unresolved provider residue makes this pass a no-op.
+	next, found, err := daemon.store.RecoverableRun(ctx, recoverable.Run.ID)
+	if err != nil || !found {
+		return action, err
+	}
+	_, err = daemon.recoverRunOnce(ctx, parent, changeParent, next)
+	return action, err
+}
+
+func (daemon *Daemon) recoverRunOnce(ctx context.Context, parent *RuntimeParent, changeParent string, recoverable kernel.RecoverableRun) (RecoveredRunAction, error) {
 	run := recoverable.Run
 	var runtimeRoot, runnerProcess, providerProcess, providerGroup kernel.Resource
 	for _, resource := range recoverable.Resources {

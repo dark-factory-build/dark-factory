@@ -431,6 +431,31 @@ func TestRecoverySweepSettlesAfterRuntimeReleaseBeforeFinalization(t *testing.T)
 	}
 }
 
+// A restart between runtime creation and runner start leaves nothing unresolved:
+// failing the run releases the never-started processes, so the same sweep must
+// remove the runtime and settle rather than strand the run in finalizing until
+// another daemon start.
+func TestRecoverySweepSettlesRunWhoseRunnerNeverStarted(t *testing.T) {
+	fixture := newRecoveryFixture(t, 0x1a)
+	fixture.stageRuntime(t)
+	disposition := fixture.sweep(t)
+	if disposition.Action != RecoveredNoResultUnresolved || disposition.Err != nil {
+		t.Fatalf("disposition = %+v", disposition)
+	}
+	run := fixture.currentRun(t)
+	if run.Phase != kernel.RunTerminal || run.Terminal == nil || run.Terminal.Code() != kernel.FailureInternal {
+		t.Fatalf("recovered run = %+v", run)
+	}
+	for kind, resource := range fixture.resourceStates(t) {
+		if resource.State != kernel.ResourceReleased {
+			t.Fatalf("recovered %s = %+v", kind, resource)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(fixture.parentPath, run.ID.String())); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("recovered runtime directory persists: %v", err)
+	}
+}
+
 func TestRecoverySweepConvergesStartingRunnerWithoutResidue(t *testing.T) {
 	fixture := newRecoveryFixture(t, 0x20)
 	fixture.stageRuntime(t)
