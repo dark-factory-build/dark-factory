@@ -3,6 +3,7 @@
 package e2e_test
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -14,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dark-factory-build/dark-factory/internal/api"
 	"github.com/dark-factory-build/dark-factory/internal/changeworker"
 	"github.com/dark-factory-build/dark-factory/internal/install"
 )
@@ -60,6 +62,15 @@ func TestBlackBoxDaemonHandoverReplacesFactorydUnderALiveProvider(t *testing.T) 
 	// process — not merely "a provider" — is what the assertions follow.
 	providerPID := fixture.awaitProviderPID(t, 30*time.Second)
 	runID := fixture.soleRuntimeName(t)
+	// Keep the exact attempt client created by generation A. Its canonical
+	// socket path survives the handover, but the socket inode does not; this
+	// is the launcher/adoption boundary that previously made live tool calls
+	// report invalid configuration after generation B took ownership.
+	t.Setenv("DARK_FACTORY_ATTEMPT_TOKEN_FILE", filepath.Join(install.RuntimesPath(fixture.home), runID, changeworker.AttemptTokenName))
+	attemptClient, err := api.NewAttemptClientFromEnvironment(install.LocalAPISocketPath(fixture.home))
+	if err != nil {
+		t.Fatalf("attempt client before the handover: %v", err)
+	}
 	runnersBefore := fixture.runnerPIDs(t)
 	if len(runnersBefore) != 1 {
 		t.Fatalf("live runners before the handover = %v, want exactly one", runnersBefore)
@@ -108,6 +119,9 @@ func TestBlackBoxDaemonHandoverReplacesFactorydUnderALiveProvider(t *testing.T) 
 	}
 	if got := fixture.soleRuntimeName(t); got != runID {
 		t.Fatalf("runtime after adoption = %q, want %q", got, runID)
+	}
+	if task, err := attemptClient.Task(context.Background()); err != nil || task.TaskID != taskID {
+		t.Fatalf("attempt client after adoption = %+v, %v", task, err)
 	}
 
 	// The terminal is the same ring, still filling: everything generation A
