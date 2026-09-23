@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { deriveProductionView, inProgressProduction, productionStages } from "./production-view.ts";
+import { deriveProductionView, inProgressProduction, productionStages, productionStickers } from "./production-view.ts";
 
 const record = (kind, id, visual_id, document, extra = {}) => ({ repository: "owner/repo", project_id: "project", kind, id, visual_id, observed_at: 10, document, tasks: [], missions: [], ...extra });
 const head = "a".repeat(40);
@@ -48,6 +48,44 @@ test("merged is incomplete until every known destination is verified", () => {
   assert.equal(incomplete.deliveries.length, 2);
   const complete = deriveProductionView([record("pull_request", "7", "change:1", base), record("delivery", "deploy-site", "", { kind: "site", destination: "production", revision: base.merge, state: "verified", verified_at: 20, pull_requests: [7] }), record("delivery", "deploy-runtime", "", { kind: "runtime", destination: "mac", revision: base.merge, state: "verified", verified_at: 21, pull_requests: [7] })]).contraptions[key];
   assert.equal(complete.completed, true);
+});
+
+test("merged work waits for the daemon's configured destination fact", () => {
+  const base = { number: 7, title: "Machine", head, merge: "d".repeat(40), state: "merged", review: { head, state: "allow" }, destination: "production" };
+  const view = deriveProductionView([record("pull_request", "7", "change:1", base)], Date.now()).contraptions[key];
+  assert.deepEqual(view.deliveryDestinations, ["production"]);
+  assert.equal(view.deliveryDestinationsObserved, true);
+  assert.equal(view.completed, false);
+  assert.deepEqual(productionStickers(view).slice(-1), ["Delivery pending"]);
+  const noDestination = deriveProductionView([record("repository", "owner/repo", "", { delivery_destinations: [], delivery_destinations_observed: true }), record("pull_request", "7", "change:1", { ...base, destination: undefined })], Date.now()).contraptions[key];
+  assert.equal(noDestination.deliveryDestinationsObserved, true);
+  assert.equal(noDestination.completed, true);
+  assert.match(noDestination.nextAction, /no delivery destination/);
+  const unknown = deriveProductionView([record("pull_request", "7", "change:1", { ...base, destination: undefined })], Date.now()).contraptions[key];
+  assert.equal(unknown.deliveryDestinationsObserved, false);
+  assert.equal(unknown.completed, false);
+  assert.doesNotMatch(unknown.nextAction, /no delivery destination/);
+  const incomplete = deriveProductionView([
+    record("repository", "owner/repo", "", { delivery_destinations: ["production"], delivery_destinations_observed: false }),
+    record("pull_request", "7", "change:1", { ...base, destination: undefined }),
+    record("delivery", "deploy-site", "", { destination: "production", revision: base.merge, state: "verified", verified_at: 20, pull_requests: [7] }),
+  ], Date.now()).contraptions[key];
+  assert.deepEqual(incomplete.deliveryDestinations, ["production"]);
+  assert.equal(incomplete.deliveryDestinationsObserved, false);
+  assert.equal(incomplete.completed, false);
+  assert.match(incomplete.nextAction, /delivery verification is pending/);
+  assert.deepEqual(productionStickers(incomplete).slice(-1), ["Delivery pending"]);
+});
+
+test("closed unmerged work is distinct from merged work", () => {
+  const view = deriveProductionView([record("pull_request", "7", "change:1", { number: 7, title: "Machine", head, state: "closed" })]).contraptions[key];
+  assert.equal(view.completed, true);
+  assert.deepEqual(productionStickers(view), ["Merge closed"]);
+});
+
+test("blocked construction always carries its reason into the sticker", () => {
+  const view = deriveProductionView([record("construction", "c1", "change:blocked", { title: "Waiting", status: "blocked", blocked_reason: "Needs your answer" })], Date.now()).contraptions["project\0owner/repo\0change:blocked"];
+  assert.deepEqual(productionStickers(view), ["Blocked: Needs your answer"]);
 });
 
 test("stale repository health blocks actionability but preserves historical review", () => {

@@ -63,6 +63,7 @@ export type FactorySceneProps = Readonly<{
 export type AgentSpriteProps = Readonly<{
   agent: Pick<SceneWorker, "id" | "name" | "role" | "provider" | "appearance">;
   activity: SceneWorker["activity"];
+  motion?: WorkerMotion;
   size?: number;
 }>;
 
@@ -90,8 +91,8 @@ function Frame({ name, x, y, className }: { name: string; x: number; y: number; 
 }
 
 /** A standalone crop of the shared sheet for lists and detail panels. */
-export function AgentSprite({ agent, activity, size }: AgentSpriteProps) {
-  const frames = workerFrames({ ...agent, activity });
+export function AgentSprite({ agent, activity, motion, size }: AgentSpriteProps) {
+  const frames = workerFrames({ ...agent, activity }, motion);
   return <svg viewBox={`0 0 ${FRAME} ${FRAME}`} overflow="hidden" width={size} height={size} style={size === undefined ? undefined : { width: size, height: size }} role="img" aria-label={`${agent.name}, ${agent.role}, ${activity}`} className="dfAgentSprite">
     {frames.map((frame) => { const cell = spriteAtlas.frames[frame as keyof typeof spriteAtlas.frames]; return <image key={frame} href={spriteSheet} x={-cell.x} y={-cell.y} width={spriteSheetSize.width} height={spriteSheetSize.height} style={{ imageRendering: "pixelated" }} />; })}
   </svg>;

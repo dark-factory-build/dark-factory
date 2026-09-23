@@ -29,7 +29,7 @@ export type ProductionReviewer = Readonly<{
 type PullRequest = Readonly<{
   number: number; title: string; url?: string; head: string; branch?: string; base?: string; state: string;
   merge?: string; merge_queue?: string; merged_at?: string; review?: Readonly<{ head?: string; state?: string; url?: string; findings?: string }>;
-  next_action?: string;
+  next_action?: string; destination?: string; delivery_destination?: string; destinations?: readonly string[]; delivery_destinations?: readonly string[];
 }>;
 type Construction = Readonly<{ title?: string; phase?: string; status?: string; head?: string; task_id?: string; blocked_reason?: string; has_changes?: boolean }>;
 type Scoped = Readonly<{ projectId: string; repository: string }>;
@@ -40,8 +40,10 @@ export type ProductionContraption = Readonly<{
   review: Readonly<{ head: string; state: string; current: boolean; allowed: boolean; sourceFresh: boolean; findings: string; url: string }>;
   checks: readonly (ProductionCheck & { applicable: boolean })[];
   deliveries: readonly (ProductionDelivery & { verified: boolean })[];
+  deliveryDestinations: readonly string[];
+  deliveryDestinationsObserved: boolean;
   reviewers: readonly ProductionReviewer[];
-  completed: boolean; completedAt: number; status: string; nextAction: string;
+  completed: boolean; completedAt: number; status: string; nextAction: string; blockedReason: string;
 }>;
 export type ProductionView = Readonly<{
   contraptions: Readonly<Record<string, ProductionContraption>>;
@@ -95,6 +97,27 @@ function latestDestinations(deliveries: readonly ProductionContraption["deliveri
     if (previous === undefined || deliveryOrder(delivery, previous) < 0) latest.set(delivery.destination, delivery);
   }
   return [...latest.values()];
+}
+function destinationFacts(pr: PullRequest | undefined, repository: ProductionRecord | undefined): readonly string[] {
+  const pull = pr === undefined ? {} : pr as Record<string, unknown>;
+  const repositoryDocument = object(repository?.document);
+  const releaseConfig = object(repositoryDocument.release_config);
+  return [...new Set([
+    text(pull.destination), text(pull.delivery_destination),
+    ...list(pull.destinations), ...list(pull.delivery_destinations),
+    text(repositoryDocument.destination), text(repositoryDocument.delivery_destination),
+    ...list(repositoryDocument.destinations), ...list(repositoryDocument.delivery_destinations),
+    text(releaseConfig.destination), ...list(releaseConfig.destinations),
+  ].filter(Boolean))];
+}
+function destinationFactsObserved(pr: PullRequest | undefined, repository: ProductionRecord | undefined, destinations: readonly string[]) {
+	const repositoryDocument = object(repository?.document);
+	if (repositoryDocument.delivery_destinations_observed !== undefined) return repositoryDocument.delivery_destinations_observed === true;
+	if (destinations.length > 0) return true;
+	const pull = pr === undefined ? {} : pr as Record<string, unknown>;
+	return pull.destination !== undefined || pull.delivery_destination !== undefined
+    || pull.destinations !== undefined || pull.delivery_destinations !== undefined
+    || repositoryDocument.delivery_destinations_observed === true;
 }
 function nextAction(pr: PullRequest, review: ProductionContraption["review"], checks: readonly (ProductionCheck & { applicable: boolean })[], deliveries: readonly ProductionContraption["deliveries"][number][]) {
   if (pr.state === "closed" && !pr.merge) return "Closed without merge.";
@@ -152,6 +175,24 @@ export function productionStages(item: ProductionContraption): string[] {
   return correction ? ["Correction", ci] : merge ? [merge, ci] : [review, ci];
 }
 
+/** The small, stable vocabulary printed on every production box. */
+export function productionStickers(item: ProductionContraption): string[] {
+  if (item.completed) return [item.status === "delivered" ? "Delivery passed" : item.status === "closed-unmerged" ? "Merge closed" : "Merge merged"];
+  const pr = item.pullRequest;
+  if (pr === undefined) return item.construction?.status === "blocked" ? [`Blocked: ${item.blockedReason || "Worker could not report its result."}`] : [];
+  const checks = item.checks.filter((check) => check.applicable);
+  const failed = checks.some((check) => ["failure", "timed_out", "action_required"].includes(check.conclusion));
+  const ci = checks.length === 0 ? "CI none" : failed ? "CI failed" : checks.some((check) => ["running", "in_progress", "queued", "waiting", "pending", "requested"].includes(check.state)) ? "CI running" : checks.every((check) => check.state === "completed" && check.conclusion === "success") ? "CI passed" : "CI none";
+  const review = item.review.head && !item.review.current ? "Review stale" : item.review.allowed ? "Review passed" : item.review.state === "running" || item.reviewers.some((reviewer) => reviewer.state === "running") ? "Review running" : "Review pending";
+  const result = [review, ci];
+  if (pr.state === "merged") result.push("Merge merged");
+  else if (pr.merge_queue && !["none", "unknown"].includes(pr.merge_queue)) result.push("Merge queued");
+  const destination = latestDestinations(item.deliveries);
+  const configured = item.deliveryDestinations ?? [];
+  if (configured.length > 0 || destination.length > 0) result.push(configured.length > 0 && (item.deliveryDestinationsObserved === false || configured.some((name) => !destination.some((delivery) => delivery.destination === name && delivery.verified))) || destination.some((delivery) => !delivery.verified) ? "Delivery pending" : "Delivery passed");
+  return result;
+}
+
 /** Pure, bounded derivation. `now` is an explicit observation time, never a timer. */
 export function deriveProductionView(records: readonly ProductionRecord[], now = 0): ProductionView {
   const latest = latestRecords(records);
@@ -183,9 +224,18 @@ export function deriveProductionView(records: readonly ProductionRecord[], now =
     const review = pr?.review ?? {};
     const reviewView = { head: text(review.head), state: text(review.state) || "unknown", current: text(review.head) !== "" && text(review.head) === pr?.head, allowed: sourceFresh && text(review.head) !== "" && text(review.head) === pr?.head && text(review.state) === "allow", sourceFresh, findings: text(review.findings), url: text(review.url) };
     const closedUnmerged = pr?.state === "closed" && !pr.merge;
-    const completed = closedUnmerged || pr?.state === "merged" && pullDeliveries.length > 0 && latestDestinations(pullDeliveries).every((delivery) => delivery.verified);
+    const repositoryDocument = object(repositoryRecord?.document);
+    const deliveryDestinations = destinationFacts(pr, repositoryRecord);
+    const deliveryDestinationsObserved = destinationFactsObserved(pr, repositoryRecord, deliveryDestinations);
+    const latestDelivery = latestDestinations(pullDeliveries);
+    const destinations = deliveryDestinations.length > 0 ? deliveryDestinations : latestDelivery.map((delivery) => delivery.destination);
+    const destinationsKnown = repositoryDocument.delivery_destinations_observed !== undefined ? deliveryDestinationsObserved : deliveryDestinationsObserved || destinations.length > 0;
+    const completed = closedUnmerged || pr?.state === "merged" && destinationsKnown && destinations.every((destination) => latestDelivery.some((delivery) => delivery.destination === destination && delivery.verified));
     const doc = construction ? object(construction.document) : {};
-    contraptions[key] = { visualId: item.visualId, projectId: item.scope.projectId, repository: item.scope.repository, construction: construction ? { title: text(doc.title), phase: text(doc.phase), status: text(doc.status), head: text(doc.head), task_id: text(doc.task_id), blocked_reason: text(doc.blocked_reason), has_changes: typeof doc.has_changes === "boolean" ? doc.has_changes : undefined } : undefined, pullRequest: pr, tasks: [...new Set([...(construction?.tasks ?? []), ...(pull?.tasks ?? [])])], missions: [...new Set([...(construction?.missions ?? []), ...(pull?.missions ?? [])])], linksOverflow: Boolean(construction?.links_overflow || pull?.links_overflow), review: reviewView, checks: pullChecks, deliveries: pullDeliveries, reviewers: assigned, completed: Boolean(completed), completedAt: Date.parse(pr?.merged_at ?? "") || pull?.observed_at || 0, status: completed ? (closedUnmerged ? "closed-unmerged" : "delivered") : text(pr?.state) || text(doc.status) || text(doc.phase) || "construction", nextAction: pr ? nextAction(pr, reviewView, pullChecks, pullDeliveries) : constructionNextAction(doc) };
+    const blockedReason = text(doc.blocked_reason) || (pr && reviewView.current && reviewView.state === "block" ? reviewView.findings || "Review found problems." : pr?.state === "merged" && pullDeliveries.some((delivery) => ["blocked", "failed"].includes(delivery.state)) ? "Publication could not be verified." : construction && text(doc.status) === "blocked" ? "Worker could not report its result." : "");
+    const action = pr ? nextAction(pr, reviewView, pullChecks, pullDeliveries) : constructionNextAction(doc);
+    const completionAction = completed && pr?.state === "merged" && destinations.length === 0 && deliveryDestinationsObserved ? "Merged; no delivery destination configured." : pr?.state === "merged" && !destinationsKnown ? "Merged; delivery verification is pending." : action;
+    contraptions[key] = { visualId: item.visualId, projectId: item.scope.projectId, repository: item.scope.repository, construction: construction ? { title: text(doc.title), phase: text(doc.phase), status: text(doc.status), head: text(doc.head), task_id: text(doc.task_id), blocked_reason: text(doc.blocked_reason), has_changes: typeof doc.has_changes === "boolean" ? doc.has_changes : undefined } : undefined, pullRequest: pr, tasks: [...new Set([...(construction?.tasks ?? []), ...(pull?.tasks ?? [])])], missions: [...new Set([...(construction?.missions ?? []), ...(pull?.missions ?? [])])], linksOverflow: Boolean(construction?.links_overflow || pull?.links_overflow), review: reviewView, checks: pullChecks, deliveries: pullDeliveries, deliveryDestinations, deliveryDestinationsObserved, reviewers: assigned, completed: Boolean(completed), completedAt: Date.parse(pr?.merged_at ?? "") || pull?.observed_at || 0, status: completed ? (closedUnmerged ? "closed-unmerged" : deliveryDestinations.length || pullDeliveries.length ? "delivered" : "merged") : text(pr?.state) || text(doc.status) || text(doc.phase) || "construction", nextAction: completionAction, blockedReason };
   }
   return { contraptions, checks, deliveries, reviewers };
 }

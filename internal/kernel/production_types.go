@@ -3,14 +3,21 @@ package kernel
 // ProductionObservation is a projection of existing external authorities, not
 // a workflow. Shared checks and deliveries have one identity and name their PRs.
 type ProductionObservation struct {
-	Repository   string                  `json:"repository"`
-	ObservedAt   int64                   `json:"observed_at"`
-	PullRequests []ProductionPullRequest `json:"pull_requests"`
-	Checks       []ProductionCheck       `json:"checks"`
-	Reviewers    []ProductionReviewer    `json:"reviewers"`
-	Deliveries   []ProductionDelivery    `json:"deliveries"`
-	Unavailable  string                  `json:"unavailable,omitempty"`
-	Overflow     int                     `json:"overflow,omitempty"`
+	Maintenance *ProductionMaintenance `json:"maintenance,omitempty"`
+	Repository  string                 `json:"repository"`
+	// DeliveryDestinations is the daemon's observed project release configuration.
+	// A missing receipt for one of these destinations is still pending work.
+	DeliveryDestinations []string `json:"delivery_destinations,omitempty"`
+	// DeliveryDestinationsObserved distinguishes an observed empty configuration
+	// from an observation that did not include release configuration.
+	DeliveryDestinationsObserved bool                    `json:"delivery_destinations_observed,omitempty"`
+	ObservedAt                   int64                   `json:"observed_at"`
+	PullRequests                 []ProductionPullRequest `json:"pull_requests"`
+	Checks                       []ProductionCheck       `json:"checks"`
+	Reviewers                    []ProductionReviewer    `json:"reviewers"`
+	Deliveries                   []ProductionDelivery    `json:"deliveries"`
+	Unavailable                  string                  `json:"unavailable,omitempty"`
+	Overflow                     int                     `json:"overflow,omitempty"`
 }
 
 type ProductionPullRequest struct {
@@ -81,4 +88,26 @@ type ProductionDelivery struct {
 	Phase        string   `json:"phase,omitempty"`
 	Reason       string   `json:"reason,omitempty"`
 	Overflow     int      `json:"overflow,omitempty"`
+}
+
+// ProductionMaintenance projects existing host release/install observations.
+// A receipt on disk and the process serving the console remain separate facts.
+type ProductionMaintenance struct {
+	Destination string `json:"destination"`
+	State       string `json:"state"`
+	Available   struct {
+		Version string `json:"version"`
+		URL     string `json:"url"`
+		State   string `json:"state"`
+	} `json:"available"`
+	Installed ProductionBuild `json:"installed"`
+	Running   ProductionBuild `json:"running"`
+}
+type ProductionBuild struct {
+	Version string `json:"version"`
+	Source  string `json:"source"`
+	Target  string `json:"target"`
+	BuildID string `json:"build_id"`
+	Release bool   `json:"release"`
+	State   string `json:"state"`
 }
