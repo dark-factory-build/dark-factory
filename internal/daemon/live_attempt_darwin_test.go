@@ -358,51 +358,80 @@ func TestLiveAttemptConsumesRefusalAfterReturnedResult(t *testing.T) {
 
 // Issue #1065: a provider that reports an exhausted account and then idles at
 // an interactive prompt must end its attempt with a failed outcome, not hold
-// the run (and its agent's account selection) indefinitely.
+// the run (and its agent's account selection) indefinitely. A daemon that
+// adopted the run after the report sees it only in the retained replay.
 func TestLiveAttemptProviderUsageLimitFailsTheRun(t *testing.T) {
-	fixture := newDispatchFixture(t)
-	active := prepareActiveAttempt(t, fixture, 116)
-	session, found, err := fixture.store.TerminalSessionForRun(context.Background(), active.run.ID)
-	if err != nil || !found {
-		t.Fatalf("terminal session = %+v, found=%v, err=%v", session, found, err)
-	}
-	controller, peer := readyTerminalEffectController(t)
-	t.Cleanup(func() {
-		_ = controller.Close()
-		_ = peer.Close()
-	})
-	attempt := newLiveAttempt(fixture.daemon, active.run.ID, session.ID, controller)
-	attempt.attemptDigest = active.run.CredentialDigest
-	attempt.creditOutstanding = liveAttemptCredit
-	output := func(text string) {
-		t.Helper()
-		if err := attempt.routeFrame(runner.TerminalFrame{Kind: runner.TerminalOutput, Payload: []byte(text)}); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	// Task text or tool output quoting the report is not the provider's report.
-	output("issue: The terminal shows `You've hit your usage limit ... try again at Sep 25th`\r\n")
-	if stop, err := attempt.processLifecycle(context.Background()); err != nil || stop || attempt.terminationSent {
-		t.Fatalf("quoted report lifecycle = stop=%v err=%v terminated=%v", stop, err, attempt.terminationSent)
-	}
-
+	quoted := "issue: The terminal shows `You've hit your usage limit ... try again at Sep 25th`\r\n"
 	// Codex's own error cell, styled and split across output frames.
-	output("\x1b[31m■ You've hit your us")
-	output("age limit. Upgrade to Pro or try again at Sep 25th, 3:00 PM.\x1b[39m\r\n\x1b[1mApproaching rate limits\x1b[0m")
-	if stop, err := attempt.processLifecycle(context.Background()); err != nil || stop || !attempt.terminationSent || !attempt.terminationDelivered {
-		t.Fatalf("usage limit lifecycle = stop=%v err=%v sent=%v delivered=%v", stop, err, attempt.terminationSent, attempt.terminationDelivered)
-	}
-	if frame := readTerminalEffectWire(t, peer); frame.Kind != "terminate" {
-		t.Fatalf("usage limit controller frame = %+v", frame)
-	}
-	run, found, err := fixture.store.Run(context.Background(), active.run.ID)
-	if err != nil || !found || run.Phase != kernel.RunFinalizing || run.Proposal == nil {
-		t.Fatalf("usage limit run = %+v, found=%v, err=%v", run, found, err)
-	}
-	if proposal := *run.Proposal; proposal.Kind() != kernel.OutcomeFailed || proposal.Code() != kernel.FailureProviderExit ||
-		!strings.HasPrefix(proposal.Detail(), "provider usage limit") || !strings.Contains(proposal.Detail(), "You've hit your usage limit. Upgrade to Pro or try again at Sep 25th, 3:00 PM.") {
-		t.Fatalf("usage limit proposal = %v %v %q", proposal.Kind(), proposal.Code(), proposal.Detail())
+	report := []string{"\x1b[31m■ You've hit your us", "age limit. Upgrade to Pro or try again at Sep 25th, 3:00 PM.\x1b[39m\r\n\x1b[1mApproaching rate limits\x1b[0m"}
+	for _, adopted := range []bool{false, true} {
+		t.Run(map[bool]string{false: "live", true: "adopted replay"}[adopted], func(t *testing.T) {
+			fixture := newDispatchFixture(t)
+			active := prepareActiveAttempt(t, fixture, 116)
+			session, found, err := fixture.store.TerminalSessionForRun(context.Background(), active.run.ID)
+			if err != nil || !found {
+				t.Fatalf("terminal session = %+v, found=%v, err=%v", session, found, err)
+			}
+			controller, peer := readyTerminalEffectController(t)
+			t.Cleanup(func() {
+				_ = controller.Close()
+				_ = peer.Close()
+			})
+			attempt := newLiveAttempt(fixture.daemon, active.run.ID, session.ID, controller)
+			attempt.attemptDigest = active.run.CredentialDigest
+			var correlation uint64
+			if adopted {
+				head := uint64(len(quoted) + len(report[0]) + len(report[1]))
+				if stop, err := attempt.handleRunnerEvent(runner.AttemptEvent{Kind: runner.AttemptHandoverAttached, Floor: 0, Head: head}); err != nil || stop {
+					t.Fatalf("handover attached = stop %v err %v", stop, err)
+				}
+				attach := readTerminalEffectWire(t, peer)
+				if attach.Kind != string(runner.TerminalAttach) || attach.Correlation == 0 {
+					t.Fatalf("diagnostic replay attach = %+v", attach)
+				}
+				if credit := readTerminalEffectWire(t, peer); credit.Kind != string(runner.TerminalCredit) {
+					t.Fatalf("diagnostic replay credit = %+v", credit)
+				}
+				correlation = attach.Correlation
+				if err := attempt.routeFrame(runner.TerminalFrame{Kind: runner.TerminalAttached, Correlation: correlation, Floor: 0, Head: head, Status: runner.TerminalResultOK}); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				attempt.creditOutstanding = liveAttemptCredit
+			}
+			var cursor uint64
+			output := func(text string) {
+				t.Helper()
+				next := cursor + uint64(len(text))
+				if err := attempt.routeFrame(runner.TerminalFrame{Kind: runner.TerminalOutput, Correlation: correlation, Start: cursor, End: next, Payload: []byte(text)}); err != nil {
+					t.Fatal(err)
+				}
+				cursor = next
+			}
+
+			// Task text or tool output quoting the report is not the provider's report.
+			output(quoted)
+			if stop, err := attempt.processLifecycle(context.Background()); err != nil || stop || attempt.terminationSent {
+				t.Fatalf("quoted report lifecycle = stop=%v err=%v terminated=%v", stop, err, attempt.terminationSent)
+			}
+			for _, text := range report {
+				output(text)
+			}
+			if stop, err := attempt.processLifecycle(context.Background()); err != nil || stop || !attempt.terminationSent || !attempt.terminationDelivered {
+				t.Fatalf("usage limit lifecycle = stop=%v err=%v sent=%v delivered=%v", stop, err, attempt.terminationSent, attempt.terminationDelivered)
+			}
+			if frame := readTerminalEffectWire(t, peer); frame.Kind != "terminate" {
+				t.Fatalf("usage limit controller frame = %+v", frame)
+			}
+			run, found, err := fixture.store.Run(context.Background(), active.run.ID)
+			if err != nil || !found || run.Phase != kernel.RunFinalizing || run.Proposal == nil {
+				t.Fatalf("usage limit run = %+v, found=%v, err=%v", run, found, err)
+			}
+			if proposal := *run.Proposal; proposal.Kind() != kernel.OutcomeFailed || proposal.Code() != kernel.FailureProviderExit ||
+				!strings.HasPrefix(proposal.Detail(), "provider usage limit") || !strings.Contains(proposal.Detail(), "You've hit your usage limit. Upgrade to Pro or try again at Sep 25th, 3:00 PM.") {
+				t.Fatalf("usage limit proposal = %v %v %q", proposal.Kind(), proposal.Code(), proposal.Detail())
+			}
+		})
 	}
 }
 

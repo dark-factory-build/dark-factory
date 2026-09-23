@@ -756,12 +756,13 @@ func (attempt *liveAttempt) routeFrame(frame runner.TerminalFrame) error {
 	case runner.TerminalOutput:
 		if attempt.diagnosticReplayCorrelation != 0 && frame.Correlation == attempt.diagnosticReplayCorrelation {
 			attempt.retainDiagnosticOutput(frame.Start, frame.End, frame.Payload)
+			attempt.scanUsageLimit(frame.Start, frame.End, frame.Payload)
 			if frame.End >= attempt.diagnosticReplayHead {
 				attempt.diagnosticReplayCorrelation = 0
 			}
 		} else if frame.Correlation == 0 {
 			attempt.retainDiagnosticOutput(frame.Start, frame.End, frame.Payload)
-			attempt.scanUsageLimit(frame.Payload)
+			attempt.scanUsageLimit(frame.Start, frame.End, frame.Payload)
 			for subscriber := range attempt.subs {
 				attempt.routeLive(subscriber, frame)
 			}
@@ -815,7 +816,20 @@ func (attempt *liveAttempt) routeFrame(frame runner.TerminalFrame) error {
 // provider event instead if Codex ever reports this outside its screen.
 var codexUsageLimit = []byte("■ You've hit your usage limit")
 
-func (attempt *liveAttempt) scanUsageLimit(payload []byte) {
+// scanUsageLimit reads each output byte once by its stream offset, whether it
+// arrives live or in an adopted owner's retained replay: the report may exist
+// only in that replay when Codex hit the limit before a handover.
+func (attempt *liveAttempt) scanUsageLimit(start, end uint64, payload []byte) {
+	if end < start || end <= attempt.usageScanned {
+		return
+	}
+	payload = payload[:min(len(payload), int(end-start))]
+	if start > attempt.usageScanned {
+		attempt.usageScan = attempt.usageScan[:0] // not adjacent: never join the ranges
+	} else {
+		payload = payload[min(len(payload), int(attempt.usageScanned-start)):]
+	}
+	attempt.usageScanned = end
 	if attempt.usageLimit != "" {
 		return
 	}
