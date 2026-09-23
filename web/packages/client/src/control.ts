@@ -206,6 +206,8 @@ export type StateChangedFrame = { type: "STATE_CHANGED"; id: string; body: State
 export type HumanRequestDetailGetFrame = { type: "HUMAN_REQUEST_DETAIL_GET"; id: string; body: HumanRequestDetailGetBody };
 export type HumanRequestDetailFrame = { type: "HUMAN_REQUEST_DETAIL"; id: string; body: HumanRequestDetailBody };
 export type ErrorFrame = { type: "ERROR"; id?: string; body: ErrorBody };
+/** A newer daemon may add server frames an older console does not know. */
+export type UnknownServerControlFrame = { type: "UNKNOWN"; unknownType: string; id?: string; body: unknown };
 export type TerminalControlFrame =
   | { type: "TERMINAL_ATTACH"; id: string; body: TerminalAttachBody }
   | { type: "TERMINAL_ACK"; body: TerminalAckBody }
@@ -251,7 +253,7 @@ export type ServerControlFrame = { type: "ATTACHMENT_RETENTION_RESULT"; id: stri
   | { type: "TERMINAL_TARGET"; id: string; body: TerminalTargetBody }
   | { type: "REMOTE_INVITE_RESULT"; id: string; body: RemoteInviteResultBody }
   | { type: "PUSH_SUBSCRIBE_RESULT"; id: string; body: PushSubscribeResultBody }
-  | TerminalServerControlFrame | ErrorFrame;
+  | TerminalServerControlFrame | ErrorFrame | UnknownServerControlFrame;
 export type ClientControlFrame = { type: "ATTACHMENT_RETENTION"; id: string; body: { enabled?: boolean } } | { type: "FACTORY_DISPATCH"; id: string; body: FactoryDispatchBody } | { type: "PROJECT_CONTENT"; id: string; body: ProjectContentRequest } | PairProveFrame | AuthProveFrame | StateGetFrame | StateWatchFrame | HumanRequestDetailGetFrame
   | { type: "HUMAN_REQUEST_REPLY"; id: string; body: HumanRequestReplyBody }
   | { type: "HUMAN_REQUEST_CANCEL_RUN"; id: string; body: HumanRequestCancelRunBody }
@@ -358,7 +360,7 @@ function encode(frame: ClientControlFrame | ServerControlFrame, body: ControlBod
   if (Object.prototype.hasOwnProperty.call(frame, "id") && "id" in frame) envelope.id = frame.id;
   envelope.body = wireValue(body);
   const result = JSON.stringify(envelope);
-  if (new TextEncoder().encode(result).length > controlLimit(frame.type)) throw new ProtocolError("oversized");
+  if (frame.type !== "UNKNOWN" && new TextEncoder().encode(result).length > controlLimit(frame.type)) throw new ProtocolError("oversized");
   return result;
 }
 function wireValue(value: unknown): unknown {
@@ -385,12 +387,18 @@ function decodeControl(data: string | Uint8Array, role: "client" | "server"): Cl
   try { value = JSON.parse(text) as unknown; } catch { malformed(); }
   if (!isObject(value)) malformed();
   requireKeys(value, ["type", "body"], true, ["id"]);
-  if (!isControlType(value.type)) malformed();
+  if (!isControlType(value.type)) {
+    if (role !== "server" || typeof value.type !== "string" || value.type.length === 0) malformed();
+    const hasID = Object.prototype.hasOwnProperty.call(value, "id");
+    if (hasID && (typeof value.id !== "string" || !validID(value.id))) malformed();
+    return { type: "UNKNOWN", unknownType: value.type, ...(hasID ? { id: value.id as string } : {}), body: value.body } as UnknownServerControlFrame;
+  }
   if (encodedLength > controlLimit(value.type)) malformed();
   const hasID = Object.prototype.hasOwnProperty.call(value, "id");
   validateControlID(value.type, hasID, value.id);
   if (role === "client" && !CLIENT_TYPES.includes(value.type)) throw new ProtocolError("wrong_direction");
   if (role === "server" && !SERVER_TYPES.includes(value.type)) throw new ProtocolError("wrong_direction");
+  if (role === "client" && value.type === "ERROR" && isObject(value.body) && typeof value.body.code === "string" && !(ERROR_CODES as readonly string[]).includes(value.body.code)) malformed();
   const body = validateBody(value.type, value.body, true);
   return { type: value.type, ...(hasID ? { id: value.id as string } : {}), body } as ClientControlFrame | ServerControlFrame;
 }
@@ -573,7 +581,7 @@ function validateBody(type: ControlType, body: unknown, wire: boolean): ControlB
     case "PUSH_SUBSCRIBE": requireKeys(body, ["endpoint", "public_key", "private_key"], wire); { const endpoint = boundedText(body.endpoint, 9, MAX_PUSH_ENDPOINT_BYTES); if (/[\u0000-\u001f\u007f]/.test(endpoint) || !pushServiceEndpoint(endpoint) || typeof body.public_key !== "string" || body.public_key.length !== 87 || !BASE64URL.test(body.public_key) || typeof body.private_key !== "string" || body.private_key.length === 0 || body.private_key.length > 512 || !BASE64URL.test(body.private_key)) malformed(); return { endpoint, public_key: body.public_key, private_key: body.private_key }; }
     case "PUSH_SUBSCRIBE_RESULT": requireKeys(body, [], wire); return {};
     case "REMOTE_INVITE_RESULT": requireKeys(body, ["link", "expires_at_ms", "svg"], wire); { const link = boundedText(body.link, 1, MAX_REMOTE_INVITE_LINK_BYTES); const svg = boundedText(body.svg, 1, MAX_REMOTE_INVITE_SVG_BYTES); if (!link.startsWith(REMOTE_INVITE_LINK_PREFIX) || /[\u0000-\u001f\u007f]/.test(link) || !svg.startsWith("<svg")) malformed(); return { link, expires_at_ms: decimal(body.expires_at_ms, wire, true), svg }; }
-    case "ERROR": requireKeys(body, ["code", "retryable"], wire); if (typeof body.code !== "string" || !(ERROR_CODES as readonly string[]).includes(body.code) || typeof body.retryable !== "boolean") malformed(); return { code: body.code as ErrorCode, retryable: body.retryable };
+    case "ERROR": requireKeys(body, ["code", "retryable"], wire); if (typeof body.code !== "string" || typeof body.retryable !== "boolean") malformed(); if (!(ERROR_CODES as readonly string[]).includes(body.code)) return { code: "internal", retryable: false }; return { code: body.code as ErrorCode, retryable: body.retryable };
   }
 }
 
