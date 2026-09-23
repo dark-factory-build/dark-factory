@@ -325,8 +325,9 @@ def provider():
             old_head = state.get("source_head", {}).get("7")
             old_pr = state["prs"].get(str(state.get("source_pr", {}).get("7")))
             attempts = state["worker_attempts"].get("7", [])
-            safe = len(failed) == 1 and "checkout reader connection: context canceled" in failed[0]["result"] and \
-                source.get("task_id") == worker_id and source.get("task_work_revision") == 2 and \
+            # The documented criteria, not one cancellation message: which
+            # setup step the restart interrupts decides the settled detail.
+            safe = len(failed) == 1 and source.get("task_id") == worker_id and source.get("task_work_revision") == 2 and \
                 source.get("change_id") == state.get("source_change", {}).get("7") and \
                 source.get("head_commit") == old_head and source.get("dirty") is False and old_pr is not None and \
                 source.get("branch") == old_pr["branch"] and old_pr["head"] == old_head and \
