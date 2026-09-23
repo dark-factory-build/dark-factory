@@ -339,6 +339,15 @@ test('two principals: callback, pagination, refresh, replay, grants and revocati
     assert.equal(recoveryPostCount, 1, 'the same operation reconciles a lost success without another POST');
     assert.equal((await (await call(alice, 'observe_operation', { repository: recovery.repository, operation_id: recoveredRequest.operation_id })).json()).result.structuredContent.state, 'completed');
 
+    // #1071: a body refused while rendering is a caller error, settled before
+    // the journal claims execution or GitHub is asked to create anything.
+    const badFooter = { ...recovery, operation_id: '6d1f0f8e-7f1f-11f0-952e-acde48001127', body: 'exact work\n\nRefs #11\n' };
+    const badFooterReply = (await (await call(alice, 'create_pull_request', badFooter)).json()).result;
+    assert.equal(badFooterReply.isError, true);
+    assert.match(badFooterReply.content[0].text, /^invalid_input:.*trailing footer `Refs #11`/);
+    assert.equal(recoveryPostCount, 1, 'an invalid footer makes no create POST');
+    assert.equal((await (await call(alice, 'observe_operation', { repository: recovery.repository, operation_id: badFooter.operation_id })).json()).result.structuredContent.state, 'missing', 'an invalid footer is never marked executing');
+
     recoveryPullVisible = false;
     recoveryPostMode = 'refused';
     const refusedRequest = { ...recovery, operation_id: '6d1f0f8e-7f1f-11f0-952e-acde48001125' };

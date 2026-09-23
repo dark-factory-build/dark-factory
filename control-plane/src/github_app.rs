@@ -132,6 +132,8 @@ pub(crate) enum Error {
 pub(crate) enum OperationError {
     #[error("maintainer operation input is invalid")]
     InvalidInput,
+    #[error("pull request body ends with a source footer it does not own: {0}")]
+    InvalidFooter(String),
     #[error("operation ID is already bound to a different request")]
     Conflict,
     /// The request was refused determinately. Distinct from `Indeterminate`,
@@ -3304,7 +3306,10 @@ impl CreatePullRequest {
         if self.head == self.base || self.head_sha == self.base_sha {
             return Err(OperationError::InvalidInput);
         }
-        Ok(())
+        // Render now: a body refused only while building the POST would do so
+        // after the journal says executing, turning a caller error into an
+        // uncertain create (#1071).
+        self.marked_body().map(drop)
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -3334,30 +3339,25 @@ impl CreatePullRequest {
         let mut body = self.body.trim_end_matches(|character: char| {
             character == '\n' || character == '\r' || character == ' ' || character == '\t'
         });
-        while let Some(line) = body.rsplit('\n').next() {
-            if (cross_source.is_some() || self.external_source_url.is_some())
-                && line.trim() == footer
-            {
-                body = body[..body.len() - line.len()].trim_end();
+        // Only the trailing footer is owned: copies of it collapse into the one
+        // appended below, and any other `Refs #`/`Closes #` line in that place
+        // is refused. The same line above the owned footer is ordinary caller
+        // text (cross-repository sources still refuse it as unqualified below).
+        let mut owned = false;
+        while let Some(raw) = body.rsplit('\n').next() {
+            let line = raw.trim();
+            if line == footer {
+                body = body[..body.len() - raw.len()].trim_end();
+                owned = true;
                 continue;
             }
-            let Some((kind, issue_number)) = pull_request_footer(line) else {
-                break;
-            };
-            let expected_kind = if self.close_on_merge {
-                "Closes"
-            } else {
-                "Refs"
-            };
-            if (cross_source.is_some() || self.external_source_url.is_some())
-                || kind != expected_kind
-                || issue_number != self.issue_number
-            {
-                return Err(OperationError::InvalidInput);
+            let lower = line.to_ascii_lowercase();
+            if !owned && (lower.starts_with("refs #") || lower.starts_with("closes #")) {
+                return Err(OperationError::InvalidFooter(
+                    line.chars().take(80).collect(),
+                ));
             }
-            body = body[..body.len() - line.len()].trim_end_matches(|character: char| {
-                character == '\n' || character == '\r' || character == ' ' || character == '\t'
-            });
+            break;
         }
         if cross_source.is_some() || self.external_source_url.is_some() {
             // Cross-repository source references must be qualified. Reject
@@ -3408,16 +3408,6 @@ fn validate_source_visibility(
         (Some(false), Some(_)) | (Some(true), Some(true)) => Ok(()),
         _ => Err(OperationError::InvalidInput),
     }
-}
-
-fn pull_request_footer(line: &str) -> Option<(&str, i64)> {
-    let line = line.trim();
-    let (kind, issue) = line.split_once(" #")?;
-    if kind != "Refs" && kind != "Closes" {
-        return None;
-    }
-    let issue_number = issue.parse::<i64>().ok()?;
-    (issue_number > 0).then_some((kind, issue_number))
 }
 
 impl UpdatePullRequestBody {
@@ -10998,18 +10988,27 @@ mod tests {
         );
         let mut conflicting_footer = create.clone();
         conflicting_footer.body.push_str("\n\nRefs #391\n");
+        // The create path validates before its journal claim (#1071), so a
+        // refusal here is one made before execution or any POST.
         assert_eq!(
-            conflicting_footer.marked_body().err(),
-            Some(OperationError::InvalidInput)
+            conflicting_footer.validate().err(),
+            Some(OperationError::InvalidFooter("Refs #391".into()))
         );
-        let mut whitespace_separated_conflict = create.clone();
-        whitespace_separated_conflict
+        let mut malformed_footer = create.clone();
+        malformed_footer.body.push_str("\n\ncloses #390x\n");
+        assert_eq!(
+            malformed_footer.validate().err(),
+            Some(OperationError::InvalidFooter("closes #390x".into()))
+        );
+        // Another reference above the owned trailing footer is caller text.
+        let mut reference_above_footer = create.clone();
+        reference_above_footer
             .body
             .push_str("\n\nRefs #391\n \t\nCloses #390\n");
-        assert_eq!(
-            whitespace_separated_conflict.marked_body().err(),
-            Some(OperationError::InvalidInput)
-        );
+        assert!(reference_above_footer.validate().is_ok());
+        let rendered = reference_above_footer.marked_body().unwrap();
+        assert!(rendered.contains("Refs #391\n\nCloses #390\n\n<!--"));
+        assert_eq!(rendered.matches("Closes #390").count(), 1);
         let mut whitespace_separated_duplicates = create.clone();
         whitespace_separated_duplicates
             .body

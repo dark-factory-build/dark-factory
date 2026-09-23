@@ -1448,6 +1448,13 @@ fn operation_error(id: Value, error: OperationError) -> Response {
         OperationError::InvalidInput => {
             tool_error(id, "invalid_input", "Operation input is invalid.")
         }
+        OperationError::InvalidFooter(line) => tool_error(
+            id,
+            "invalid_input",
+            &format!(
+                "Operation input is invalid: the body's trailing footer `{line}` is not this pull request's source footer."
+            ),
+        ),
         // Not only heads: a read whose answer does not match what was asked
         // for -- a path that is a directory, a symlink, or a submodule -- is
         // the same class of "you did not get what you named", and an
