@@ -155,12 +155,16 @@ func (b *daemonReviewBackend) CloneReadOnly(ctx context.Context, request review.
 	}
 	cleanup := func() { _ = os.RemoveAll(root) }
 	repo := filepath.Join(root, "repo")
-	if output, err := exec.CommandContext(ctx, "/usr/bin/git", "clone", "--filter=blob:none", "--no-checkout", "https://github.com/"+request.Repository, repo).CombinedOutput(); err != nil {
+	clone := exec.CommandContext(ctx, "/usr/bin/git", "clone", "--filter=blob:none", "--no-checkout", "https://github.com/"+request.Repository, repo)
+	clone.Env = reviewEnvironment(root)
+	if output, err := clone.CombinedOutput(); err != nil {
 		cleanup()
 		return "", nil, fmt.Errorf("review clone: %s", strings.TrimSpace(string(output)))
 	}
 	for _, args := range [][]string{{"-C", repo, "fetch", "origin", "refs/pull/" + fmt.Sprint(request.PullNumber) + "/head"}, {"-C", repo, "checkout", "--detach", request.Head}} {
-		if output, err := exec.CommandContext(ctx, "/usr/bin/git", args...).CombinedOutput(); err != nil {
+		command := exec.CommandContext(ctx, "/usr/bin/git", args...)
+		command.Env = reviewEnvironment(root)
+		if output, err := command.CombinedOutput(); err != nil {
 			cleanup()
 			return "", nil, fmt.Errorf("review checkout: %s", strings.TrimSpace(string(output)))
 		}
@@ -172,12 +176,12 @@ func (b *daemonReviewBackend) Review(ctx context.Context, checkout string, reque
 	prompt := "You are an independent adversarial reviewer. Read the exact-head checkout at " + checkout + ", pull request body: " + request.Body + ". Review only this change and finish with exactly VERDICT: ALLOW or VERDICT: REQUEST_CHANGES."
 	var command *exec.Cmd
 	if request.Provider == "claude" {
-		command = exec.CommandContext(ctx, "claude", "-p", prompt, "--permission-mode", "plan")
+		command = exec.CommandContext(ctx, "claude", "-p", prompt, "--permission-mode", "plan", "--safe-mode", "--restricted", "--setting-sources", "", "--strict-mcp-config", "--tools", "Read,Grep,Glob,Bash(git -C "+checkout+":*)", "--allowedTools", "Read,Grep,Glob,Bash(git -C "+checkout+":*)")
 	} else {
-		command = exec.CommandContext(ctx, "codex", "exec", "--sandbox", "read-only", "--skip-git-repo-check", prompt)
+		command = exec.CommandContext(ctx, "codex", "exec", "--disable", "computer_use", "--disable", "browser_use", "--disable", "plugins", "--ephemeral", "--ignore-user-config", "--strict-config", "-c", "approval_policy={ granular={sandbox_approval=false,rules=false,mcp_elicitations=false,request_permissions=false,skill_approval=false}}", "--sandbox", "read-only", "--ignore-rules", "--skip-git-repo-check", prompt)
 	}
 	command.Dir = checkout
-	command.Env = filteredReviewEnvironment()
+	command.Env = reviewEnvironment(filepath.Dir(checkout))
 	output, err := command.CombinedOutput()
 	if err != nil {
 		return review.Verdict{}, err
@@ -214,11 +218,34 @@ func filteredReviewEnvironment() []string {
 	result := make([]string, 0, len(os.Environ()))
 	for _, value := range os.Environ() {
 		name := strings.SplitN(value, "=", 2)[0]
-		if strings.Contains(strings.ToUpper(name), "TOKEN") || strings.Contains(strings.ToUpper(name), "CREDENTIAL") || name == "GH_TOKEN" || name == "GITHUB_TOKEN" {
+		upper := strings.ToUpper(name)
+		if strings.Contains(upper, "TOKEN") || strings.Contains(upper, "CREDENTIAL") || name == "GH_TOKEN" || name == "GITHUB_TOKEN" || name == "HOME" || strings.HasPrefix(name, "XDG_") || name == "TMPDIR" || strings.HasPrefix(name, "GIT_CONFIG") || strings.HasSuffix(name, "ASKPASS") || name == "GIT_SSH_COMMAND" || name == "SSH_AUTH_SOCK" || strings.HasPrefix(name, "DARK_FACTORY_REVIEW_") || strings.HasPrefix(name, "CLAUDE_CODE_") || strings.HasPrefix(name, "CODEX_") {
 			continue
 		}
 		result = append(result, value)
 	}
+	return result
+}
+
+func reviewEnvironment(root string) []string {
+	home := filepath.Join(root, ".review-home")
+	tmp := filepath.Join(root, ".review-tmp")
+	_ = os.MkdirAll(home, 0700)
+	_ = os.MkdirAll(tmp, 0700)
+	result := filteredReviewEnvironment()
+	result = append(result,
+		"HOME="+home,
+		"TMPDIR="+tmp,
+		"GIT_CONFIG_NOSYSTEM=1",
+		"GIT_CONFIG_GLOBAL=/dev/null",
+		"GIT_CONFIG_SYSTEM=/dev/null",
+		"GIT_TERMINAL_PROMPT=0",
+		"GIT_ASKPASS=/usr/bin/false",
+		"SSH_ASKPASS=/usr/bin/false",
+		"GIT_CONFIG_COUNT=1",
+		"GIT_CONFIG_KEY_0=credential.helper",
+		"GIT_CONFIG_VALUE_0=",
+	)
 	return result
 }
 
