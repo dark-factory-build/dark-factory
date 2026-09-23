@@ -128,7 +128,7 @@ pub(crate) enum Error {
     Rejected(u16),
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub(crate) enum OperationError {
     #[error("maintainer operation input is invalid")]
     InvalidInput,
@@ -149,6 +149,8 @@ pub(crate) enum OperationError {
     Refused(RefusalReason),
     #[error("operation outcome requires reconciliation")]
     Indeterminate,
+    #[error("pull request creation requires reconciliation: {0}")]
+    PullRequestUncertain(String),
     #[error("maintainer operation authority is unavailable")]
     Unavailable,
 }
@@ -245,6 +247,16 @@ impl std::fmt::Display for RejectionKinds {
         }
         Ok(())
     }
+}
+
+// Once a create may have executed, a refused or ambiguous read is not proof
+// that the write was refused. Keep the diagnostic without enabling a retry.
+fn uncertain_pull_request_lookup(error: OperationError) -> OperationError {
+    OperationError::PullRequestUncertain(match error {
+        OperationError::Indeterminate =>
+            "the create outcome is unknown and GitHub returned ambiguous or invalid matching pull requests".into(),
+        error => format!("the create outcome is unknown and its reconciliation lookup failed: {error}"),
+    })
 }
 
 impl From<Error> for OperationError {
@@ -1563,9 +1575,29 @@ impl AppAuthority {
         if request.cross_repository_source().is_none() && request.external_source_url.is_none() {
             permissions.insert("issues", "read");
         }
-        let token = self.0.installation_token(repository, permissions).await?;
-        let repository = self.0.repository_metadata(&token).await?;
-        if let Some(result) = self.0.reconcile_pull_request(&token, &request).await? {
+        // A refused lookup says nothing about a prior mutation's outcome.
+        let reconcile_error = |error| match state {
+            OperationRecord::Executing | OperationRecord::Indeterminate => {
+                uncertain_pull_request_lookup(error)
+            }
+            _ => error,
+        };
+        let token = self
+            .0
+            .installation_token(repository, permissions)
+            .await
+            .map_err(reconcile_error)?;
+        let repository = self
+            .0
+            .repository_metadata(&token)
+            .await
+            .map_err(reconcile_error)?;
+        if let Some(result) = self
+            .0
+            .reconcile_pull_request(&token, &request)
+            .await
+            .map_err(reconcile_error)?
+        {
             return complete(journal, &operation, result).await;
         }
         if matches!(
@@ -1576,7 +1608,10 @@ impl AppAuthority {
                 .mark_operation(&operation, OperationTransition::Indeterminate)
                 .await
                 .map_err(|_| OperationError::Unavailable)?;
-            return Err(OperationError::Indeterminate);
+            return Err(OperationError::PullRequestUncertain(
+                "the earlier request may have reached GitHub, but no exact pull request was found"
+                    .into(),
+            ));
         }
         if request.external_source_url.is_some() {
             // Linear is a private backlog; a provider cannot authorize disclosure.
@@ -1621,10 +1656,17 @@ impl AppAuthority {
             }
             OperationRecord::Conflict => return Err(OperationError::Conflict),
             OperationRecord::Executing | OperationRecord::Indeterminate => {
-                if let Some(result) = self.0.reconcile_pull_request(&token, &request).await? {
+                if let Some(result) = self
+                    .0
+                    .reconcile_pull_request(&token, &request)
+                    .await
+                    .map_err(uncertain_pull_request_lookup)?
+                {
                     return complete(journal, &operation, result).await;
                 }
-                return Err(OperationError::Indeterminate);
+                return Err(OperationError::PullRequestUncertain(
+                    "the earlier request may have reached GitHub, but no exact pull request was found".into(),
+                ));
             }
             OperationRecord::New | OperationRecord::Planned => {
                 return Err(OperationError::Unavailable);
@@ -1633,14 +1675,28 @@ impl AppAuthority {
         match self.0.post_pull_request(&token, &request).await {
             Ok(result) => complete(journal, &operation, result).await,
             Err(OperationError::Refused(reason)) => refuse(journal, &operation, reason).await,
-            Err(_) => {
-                if let Some(result) = self.0.reconcile_pull_request(&token, &request).await? {
-                    return complete(journal, &operation, result).await;
-                }
+            Err(error) => {
+                // Persist uncertainty before a fallible lookup. A rejected
+                // GET cannot turn an unanswered POST into a safe refusal.
                 let _ = journal
                     .mark_operation(&operation, OperationTransition::Indeterminate)
                     .await;
-                Err(OperationError::Indeterminate)
+                if let Some(result) = self
+                    .0
+                    .reconcile_pull_request(&token, &request)
+                    .await
+                    .map_err(uncertain_pull_request_lookup)?
+                {
+                    return complete(journal, &operation, result).await;
+                }
+                Err(OperationError::PullRequestUncertain(match error {
+                    OperationError::Indeterminate => {
+                        "GitHub returned a pull request that did not match the requested identity or heads".into()
+                    }
+                    error => format!(
+                        "the create request failed without an authoritative rejection; no exact pull request was found: {error}"
+                    ),
+                }))
             }
         }
     }

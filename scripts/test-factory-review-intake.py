@@ -249,6 +249,27 @@ class ReviewIntakeTest(unittest.TestCase):
         self.assertIsNone(review.linked_issue(self.config, {'number': 9, 'body': 'Refs other/backlog#7'}, journal))
         self.assertEqual(7, review.linked_issue(self.config, {'number': 9, 'body': 'Refs O/R#7'}, journal))
 
+    def test_publication_lookups_close_connections_even_on_missing_schema(self):
+        for lookup in (lambda: review._change_publication_task(self.config, 9),
+                       lambda: review._source_task_id(self.config, dict(self.operation, source_marker='absent')),
+                       lambda: review.source_task_state(self.config, self.operation)):
+            connections = []
+            connect = sqlite3.connect
+            def tracked(*args, **kwargs):
+                connection = connect(*args, **kwargs)
+                connections.append(connection)
+                return connection
+            # Missing tables exercise the handled SQL error paths, too.
+            with connect(Path(self.config['factory_home']) / 'factory.sqlite3') as setup:
+                setup.execute('PRAGMA user_version=1')
+            setup.close()
+            with patch.object(review.sqlite3, 'connect', side_effect=tracked):
+                lookup()
+            self.assertTrue(connections)
+            for connection in connections:
+                with self.assertRaises(sqlite3.ProgrammingError):
+                    connection.execute('SELECT 1')
+
     def test_legacy_review_discovers_both_origins_from_change_publication_binding(self):
         journal = json.loads(Path(self.config['journal']).read_text())
         bound = 'f' * 32

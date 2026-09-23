@@ -26,6 +26,8 @@ test('two principals: callback, pagination, refresh, replay, grants and revocati
   const permissionSet = { contents: 'write', issues: 'write', metadata: 'read', pull_requests: 'write' };
   const grants = [], requestedPermissions = [];
   const publishedCommits = [];
+  const recoveryPulls = [];
+  let recoveryPostMode = '', recoveryPostCount = 0, recoveryPullVisible = false;
   let aliceLogin = 'alice';
   const pull = { number: 12, node_id: 'PR_fixture', html_url: 'https://github.com/team/shared/pull/12', title: 'review', body: 'Refs team/backlog#9', draft: false, head: { ref: 'topic', sha: 'b'.repeat(40) }, base: { ref: 'release+hotfix', sha: 'a'.repeat(40) }, state: 'open', mergeable: true, mergeable_state: 'clean' };
   const repository = name => ({ id: 2, full_name: 'team/shared', permissions: { pull: true, push: name === 'alice' ? push : bobWrite } });
@@ -75,8 +77,23 @@ test('two principals: callback, pagination, refresh, replay, grants and revocati
           assert.equal(body.force, false);
           return json({ ref: `refs/heads/${url.pathname.split('/').at(-1)}`, object: { type: 'commit', sha: body.sha } });
         }
-        if (url.pathname.includes('/git/ref/')) return json({ ref: `refs/heads/${url.pathname.split('/').at(-1)}`, object: { type: 'commit', sha: 'a'.repeat(40) } });
+        if (url.pathname.includes('/git/ref/')) return json({ ref: `refs/heads/${url.pathname.split('/').at(-1)}`, object: { type: 'commit', sha: (url.pathname.endsWith('/topic-recovery') ? 'b' : 'a').repeat(40) } });
         if (url.pathname.endsWith('/pulls')) {
+          if (request.method === 'POST') {
+            recoveryPostCount++;
+            const body = await request.json();
+            if (recoveryPostMode === 'refused') return json({ message: 'Validation Failed' }, 422);
+            if (recoveryPostMode === 'created' || recoveryPostMode === 'success') recoveryPulls.push({
+              number: 100 + recoveryPostCount, node_id: `PR_recovery_${recoveryPostCount}`,
+              html_url: `https://github.com/team/shared/pull/${100 + recoveryPostCount}`,
+              title: body.title, body: body.body, draft: body.draft,
+              head: { ref: body.head, sha: 'b'.repeat(40) }, base: { ref: body.base, sha: 'a'.repeat(40) },
+              state: 'open', mergeable: true, mergeable_state: 'clean',
+            });
+            if (recoveryPostMode === 'success') return json(recoveryPulls.at(-1), 201);
+            return json({}, 503);
+          }
+          if (url.searchParams.get('state') === 'all') return json(recoveryPullVisible ? recoveryPulls : []);
           if (url.searchParams.get('state') === 'open' && url.searchParams.get('sort') === 'created') {
             assert.equal(url.searchParams.get('per_page'), '1');
             return json(url.searchParams.get('page') === '1' ? [pull] : []);
@@ -85,13 +102,13 @@ test('two principals: callback, pagination, refresh, replay, grants and revocati
         }
         if (url.pathname === '/repos/team/shared/pulls/12') return json({...pull, state: 'closed'});
         if (url.pathname === '/repos/team/shared/pulls/12/reviews/55') return json({id: 55, html_url: 'https://github.com/team/shared/pull/12#pullrequestreview-55', commit_id: pull.head.sha, body: 'BLOCK: exact reviewed body', state: 'COMMENTED'});
-        if (url.pathname === '/repos/team/shared/issues' || url.pathname === '/repos/team/shared/issues/9') {
+        if (url.pathname === '/repos/team/shared/issues' || url.pathname === '/repos/team/shared/issues/9' || url.pathname === '/repos/team/shared/issues/10') {
           if (url.pathname.endsWith('/issues')) {
             assert.equal(url.searchParams.get('per_page'), '25');
             assert.ok(['needs triage', '', 'é'.repeat(50)].includes(url.searchParams.get('labels')));
           }
           const issue = { id: 81, node_id: 'I_fixture', number: 9, html_url: 'https://github.com/team/shared/issues/9', title: 'review me', body: 'exact content', user: { login: 'outsider', type: 'User' }, state: 'open', updated_at: '2026-09-18T12:00:00Z', labels: [{ name: 'needs triage' }, { name: 'bug, urgent' }] };
-          return json(url.pathname.endsWith('/9') ? {...issue, state: 'closed'} : [issue]);
+          return json(url.pathname.endsWith('/9') ? {...issue, state: 'closed'} : url.pathname.endsWith('/10') ? {...issue, number: 10} : [issue]);
         }
         if (url.pathname === '/repos/team/backlog/issues/1') {
           assert.equal(request.headers.get('authorization'), 'Bearer app-3-fixture-installation-token'); sourceReads++;
@@ -304,6 +321,64 @@ test('two principals: callback, pagination, refresh, replay, grants and revocati
     sourceVisible = false;
     assert.equal((await call(alice, 'create_pull_request', cross)).status, 401, 'lost source access refuses replay before App authority');
     sourceVisible = true;
+    const recovery = { repository: 'team/shared', issue_number: 10, head: 'topic-recovery', head_sha: 'b'.repeat(40),
+      base: 'main', base_sha: 'a'.repeat(40), title: 'recover publication', body: 'exact work', draft: false };
+    const recoveredRequest = { ...recovery, operation_id: '6d1f0f8e-7f1f-11f0-952e-acde48001124' };
+    recoveryPostMode = 'created';
+    const lostResponse = (await (await call(alice, 'create_pull_request', recoveredRequest)).json()).result;
+    assert.equal(lostResponse.isError, true);
+    assert.match(lostResponse.content[0].text, /^indeterminate:.*create request failed without an authoritative rejection/);
+    assert.match(lostResponse.content[0].text, /Preserve this operation UUID and exact request.*request an operator decision.*do not create a replacement operation or keep polling/);
+    assert.equal(recoveryPostCount, 1);
+    assert.equal((await (await call(alice, 'observe_operation', { repository: recovery.repository, operation_id: recoveredRequest.operation_id })).json()).result.structuredContent.state, 'indeterminate');
+    recoveryPullVisible = true;
+    const recovered = (await (await call(alice, 'create_pull_request', recoveredRequest)).json()).result;
+    assert.equal(recovered.isError, false, JSON.stringify(recovered));
+    assert.equal(recovered.structuredContent.number, 101);
+    assert.equal(recovered.structuredContent.head_sha, recovery.head_sha);
+    assert.equal(recoveryPostCount, 1, 'the same operation reconciles a lost success without another POST');
+    assert.equal((await (await call(alice, 'observe_operation', { repository: recovery.repository, operation_id: recoveredRequest.operation_id })).json()).result.structuredContent.state, 'completed');
+
+    recoveryPullVisible = false;
+    recoveryPostMode = 'refused';
+    const refusedRequest = { ...recovery, operation_id: '6d1f0f8e-7f1f-11f0-952e-acde48001125' };
+    const refused = (await (await call(alice, 'create_pull_request', refusedRequest)).json()).result;
+    assert.equal(refused.isError, true);
+    assert.match(refused.content[0].text, /^refused:.*UNPROCESSABLE/);
+    assert.equal(recoveryPostCount, 2);
+    assert.equal(recoveryPulls.length, 1, 'definite refusal created no pull request');
+    assert.equal((await (await call(alice, 'observe_operation', { repository: recovery.repository, operation_id: refusedRequest.operation_id })).json()).result.structuredContent.state, 'planned', 'definite rejection releases the executing claim');
+    recoveryPostMode = 'success';
+    const correctedPrecondition = (await (await call(alice, 'create_pull_request', refusedRequest)).json()).result;
+    assert.equal(correctedPrecondition.isError, false, JSON.stringify(correctedPrecondition));
+    assert.equal(correctedPrecondition.structuredContent.number, 103);
+    assert.equal(recoveryPostCount, 3, 'a definite refusal permits the same request after its precondition changes');
+    const completedReplay = (await (await call(alice, 'create_pull_request', refusedRequest)).json()).result;
+    assert.deepEqual(completedReplay.structuredContent, correctedPrecondition.structuredContent);
+    assert.equal(recoveryPostCount, 3, 'a completed retry replays without another POST');
+
+    recoveryPostMode = 'absent';
+    const absentRequest = { ...recovery, operation_id: '6d1f0f8e-7f1f-11f0-952e-acde48001126' };
+    const absent = (await (await call(alice, 'create_pull_request', absentRequest)).json()).result;
+    assert.equal(absent.isError, true);
+    assert.match(absent.content[0].text, /^indeterminate:.*create request failed without an authoritative rejection/);
+    assert.match(absent.content[0].text, /Preserve this operation UUID and exact request.*request an operator decision.*do not create a replacement operation or keep polling/);
+    assert.equal((await (await call(alice, 'observe_operation', { repository: recovery.repository, operation_id: absentRequest.operation_id })).json()).result.structuredContent.state, 'indeterminate');
+    const stillAbsent = (await (await call(alice, 'create_pull_request', absentRequest)).json()).result;
+    assert.equal(stillAbsent.isError, true);
+    assert.match(stillAbsent.content[0].text, /^indeterminate:.*earlier request may have reached GitHub, but no exact pull request was found/);
+    assert.match(stillAbsent.content[0].text, /Preserve this operation UUID and exact request.*request an operator decision.*do not create a replacement operation or keep polling/);
+    assert.equal(recoveryPostCount, 4, 'absence after an ambiguous POST does not authorize a second POST');
+    assert.equal(recoveryPulls.length, 2, 'the ambiguous failure created no pull request in this fixture');
+    unavailable = '/repos/team/shared/pulls';
+    unavailableStatus = 403;
+    const unavailableReconciliation = (await (await call(alice, 'create_pull_request', absentRequest)).json()).result;
+    assert.equal(unavailableReconciliation.isError, true);
+    assert.match(unavailableReconciliation.content[0].text, /^indeterminate:.*reconciliation lookup failed:.*FORBIDDEN/);
+    assert.equal(recoveryPostCount, 4, 'a refused lookup cannot authorize retrying an uncertain create');
+    unavailable = '';
+    unavailableStatus = 503;
+
     const readArgs = { repository: 'team/shared', branch: 'main' };
     assert.equal((await (await call(alice, 'observe_ref', readArgs)).json()).result.structuredContent.head_sha, 'a'.repeat(40));
     wrongGrant = true;

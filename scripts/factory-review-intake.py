@@ -553,7 +553,7 @@ def _change_publication_task(config, number):
     if type(number) is not int or number < 1:
         return ""
     try:
-        with sqlite3.connect(Path(config["factory_home"], "factory.sqlite3").as_uri() + "?mode=ro", uri=True) as connection:
+        with contextlib.closing(sqlite3.connect(Path(config["factory_home"], "factory.sqlite3").as_uri() + "?mode=ro", uri=True)) as connection:
             row = connection.execute("SELECT lower(hex(task_id)) FROM publication_tasks WHERE project_id = ? AND lower(repository) = lower(?) AND pull_number = ? AND change_id IS NOT NULL "
                                      "ORDER BY created_at_ms DESC, lower(hex(task_id)) LIMIT 1",
                                      (bytes.fromhex(config["project_id"]), config["repository"], number)).fetchone()
@@ -593,7 +593,7 @@ def _source_task_id(config, operation):
     if type(number) is not int:
         return ""
     try:
-        with sqlite3.connect(Path(config["factory_home"], "factory.sqlite3").as_uri() + "?mode=ro", uri=True) as connection:
+        with contextlib.closing(sqlite3.connect(Path(config["factory_home"], "factory.sqlite3").as_uri() + "?mode=ro", uri=True)) as connection:
             # The publishing overseer task is bound too, without a Change;
             # the worker that owns the Change is the one to correct it.
             row = connection.execute("SELECT lower(hex(task_id)) FROM publication_tasks WHERE project_id = ? AND lower(repository) = lower(?) AND pull_number = ? "
@@ -698,7 +698,7 @@ def source_task_state(config, operation):
     if not task_id:
         return None
     try:
-        with sqlite3.connect(Path(config["factory_home"], "factory.sqlite3").as_uri() + "?mode=ro", uri=True) as connection:
+        with contextlib.closing(sqlite3.connect(Path(config["factory_home"], "factory.sqlite3").as_uri() + "?mode=ro", uri=True)) as connection:
             row = connection.execute("SELECT status, work_revision, revision FROM tasks WHERE id = ?", (bytes.fromhex(task_id),)).fetchone()
     except (sqlite3.Error, ValueError):
         return None

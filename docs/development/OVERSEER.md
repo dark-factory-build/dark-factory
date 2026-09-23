@@ -295,8 +295,30 @@ each write call `observe_operation` with its id. `completed` means that write
 already happened: take its result (for a commit, the head it returned) and go
 on to the next step, which for a multi-commit publication is the next commit,
 not the pull request. Never received or `planned` means it has not happened.
-`executing` or `indeterminate` means stop and raise a human request with the
-id.
+For `create_pull_request`, prepare and retain the exact request and UUID before
+sending. If the attempt ends before the call, include both in
+`attempt succeed --result` and use that durable result on the next standing
+wake. There is no in-flight checkpoint command. If an interrupted attempt has
+no recorded request/UUID, raise a human request rather than guessing or minting
+a replacement. If its response is lost and observation reports
+`executing` or `indeterminate`, submit that **identical request and UUID once**
+to the existing App controller. For an uncertain creation the App reconciles
+GitHub's existing PR and never issues a second POST. Consume a completed result
+and continue the normal publication path. `observe_operation` alone only reads
+the journal; it does not perform that reconciliation.
+
+If this bounded reconciliation still cannot find a unique matching PR, use
+`attempt request-human` on the original task. Include the exact request, UUID,
+request digest, branch/head, original error and reconciliation result. Name the
+decision: abandon this publication, or investigate GitHub's missing outcome
+before authorizing any replacement. Absence from a listing is not proof that
+the original request never reached GitHub. Do not silently block, poll forever,
+or mint another UUID. For other operations, `executing` or `indeterminate`
+still requires a human request with the operation ID.
+
+A definite `refused` reply is different: preserve its typed reason and correct
+that precondition before retrying the same request and UUID. Do not retry a
+refusal unchanged or treat an uncertain result as a definite refusal.
 
 Every successful Maintainer MCP reply carries the authoritative typed result in
 `structuredContent`; its short text `content` is only an acknowledgement. Consume

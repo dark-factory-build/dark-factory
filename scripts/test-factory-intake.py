@@ -210,10 +210,14 @@ class IntakeTest(unittest.TestCase):
             INTAKE.issue_from_json(issue(body="x" * 5001))
 
     def test_largest_valid_issue_stays_within_generated_task_bound(self):
-        value = issue(body="x" * INTAKE.MAX_ISSUE_BODY)
-        value["title"] = "t" * INTAKE.MAX_TITLE
-        operation = INTAKE.operation_for(self.config, INTAKE.issue_from_json(value), "f" * 64)
-        self.assertLessEqual(len(operation["body"].encode()), INTAKE.MAX_BODY)
+        for repository in ("o/r", "dark-factory-build/dark-factory"):
+            with self.subTest(repository=repository):
+                value = issue(body="x" * INTAKE.MAX_ISSUE_BODY)
+                value["title"] = "t" * INTAKE.MAX_TITLE
+                value["url"] = "https://github.com/" + repository + "/issues/7"
+                config = dict(self.config, repository=repository)
+                operation = INTAKE.operation_for(config, INTAKE.issue_from_json(value), "f" * 64)
+                self.assertLessEqual(len(operation["body"].encode()), INTAKE.MAX_BODY)
 
     def test_stale_human_decision_waits_for_a_material_source_edit(self):
         INTAKE.run_once(self.config)

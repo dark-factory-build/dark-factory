@@ -1,6 +1,7 @@
 package kernel
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"database/sql"
@@ -13,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -55,6 +57,19 @@ func OpenOperational(ctx context.Context, absolutePath string, home, database *o
 	return openExistingFiles(ctx, absolutePath, files, true)
 }
 
+// InspectOperational validates one SQLite-consistent snapshot of an
+// operational database without activating a writer or changing its main file
+// or WAL. It takes ownership of home and database and keeps their path
+// authority pinned until validation and the final binding checks complete.
+func InspectOperational(ctx context.Context, absolutePath string, home, database *os.File) (resultErr error) {
+	files, err := openBoundDatabaseFiles(absolutePath, home, database, true)
+	if err != nil {
+		return err
+	}
+	defer func() { resultErr = errors.Join(resultErr, files.Close()) }()
+	return inspectOperationalSnapshot(ctx, absolutePath, files)
+}
+
 func openExisting(ctx context.Context, absolutePath string, retainBinding bool) (*Store, error) {
 	files, err := openDatabaseFiles(absolutePath)
 	if err != nil {
@@ -67,12 +82,18 @@ func openExistingFiles(ctx context.Context, absolutePath string, files *database
 	if err := files.refreshPinnedInfo(); err != nil {
 		return nil, errors.Join(err, files.Close())
 	}
-	snapshot, err := preflightExisting(ctx, files)
-	if err != nil {
-		return nil, errors.Join(err, files.Close())
-	}
-	if err := files.verifySnapshot(ctx, snapshot); err != nil {
-		return nil, errors.Join(err, files.Close())
+	if files.allowShortSHM {
+		if err := inspectOperationalSnapshot(ctx, absolutePath, files); err != nil {
+			return nil, errors.Join(err, files.Close())
+		}
+	} else {
+		snapshot, err := preflightExisting(ctx, files)
+		if err != nil {
+			return nil, errors.Join(err, files.Close())
+		}
+		if err := files.verifySnapshot(ctx, snapshot); err != nil {
+			return nil, errors.Join(err, files.Close())
+		}
 	}
 	if err := files.recheckPaths(); err != nil {
 		return nil, errors.Join(err, files.Close())
@@ -84,6 +105,7 @@ func openExistingFiles(ctx context.Context, absolutePath string, files *database
 		}
 	}
 	var store *Store
+	var err error
 	if retainBinding {
 		store = newStore()
 		store.pathBinding = files
@@ -140,6 +162,61 @@ func openExistingFiles(ctx context.Context, absolutePath string, files *database
 		}
 	}
 	return store, nil
+}
+
+// Operational databases may have concurrent SQLite readers and writers that
+// do not take the application's home lock. Retain all header, bounds and file
+// authority checks; validate their content through one SQLite read snapshot,
+// rather than requiring mutable main/WAL/SHM bytes to stay identical.
+func inspectOperationalSnapshot(ctx context.Context, path string, files *databaseFiles) (resultErr error) {
+	if ctx == nil {
+		return fmt.Errorf("nil sqlite inspection context")
+	}
+	// Opening a WAL-mode main file without sidecars can create them even in
+	// read-only mode. Keep the existing non-mutating inspection for that case.
+	if files.wal == nil {
+		snapshot, err := preflightExisting(ctx, files)
+		if err != nil {
+			return err
+		}
+		return files.verifySnapshot(ctx, snapshot)
+	}
+	inspectionCtx, cancel := context.WithTimeout(ctx, 2*time.Duration(busyMilliseconds)*time.Millisecond)
+	defer cancel()
+	if err := files.recheckPaths(); err != nil {
+		return err
+	}
+	pool, err := sql.Open(driverName, operationalInspectDataSource(path))
+	if err != nil {
+		return fmt.Errorf("open read-only operational SQLite inspection: %w", err)
+	}
+	pool.SetMaxOpenConns(1)
+	pool.SetMaxIdleConns(0)
+	defer func() {
+		resultErr = errors.Join(resultErr, pool.Close())
+	}()
+	connection, err := pool.Conn(inspectionCtx)
+	if err != nil {
+		return fmt.Errorf("checkout operational SQLite inspection: %w", err)
+	}
+	tx, err := beginPinnedRead(inspectionCtx, connection)
+	if err != nil {
+		return err
+	}
+	var schemaVersion int
+	if err := tx.connection.QueryRowContext(inspectionCtx, "PRAGMA user_version").Scan(&schemaVersion); err != nil {
+		return errors.Join(fmt.Errorf("pin operational SQLite snapshot: %w", err), tx.Close())
+	}
+	if err := validateOpenableSnapshot(inspectionCtx, tx.connection); err != nil {
+		return errors.Join(fmt.Errorf("validate operational SQLite snapshot: %w", err), tx.Close())
+	}
+	if err := tx.Close(); err != nil {
+		return fmt.Errorf("close operational SQLite snapshot: %w", err)
+	}
+	if err := files.recheckPaths(); err != nil {
+		return err
+	}
+	return nil
 }
 
 func closeFailedActivation(files *databaseFiles, cause error) error {
@@ -517,7 +594,7 @@ func populateDatabaseFiles(files *databaseFiles, path string, retainedMain *os.F
 	if err != nil {
 		return err
 	}
-	return validateWAL(files.wal.file, files.wal.info.Size(), pageSize)
+	return files.validateWAL(pageSize)
 }
 
 func inspectRetainedDatabaseFile(file *os.File, name, kind string, minimum, maximum int64) (*databaseFile, error) {
@@ -621,7 +698,22 @@ func (files *databaseFiles) refreshPinnedInfo() error {
 	if err != nil {
 		return err
 	}
-	return validateWAL(files.wal.file, files.wal.info.Size(), pageSize)
+	return files.validateWAL(pageSize)
+}
+
+func (files *databaseFiles) validateWAL(pageSize uint32) error {
+	if !files.allowShortSHM {
+		return validateWAL(files.wal.file, files.wal.info.Size(), pageSize)
+	}
+	// A checkpoint may truncate the WAL after fstat. Validate the header we
+	// actually read, including the valid empty-WAL case, rather than a stale
+	// size. Partial headers still fail; all format/checksum checks remain.
+	header := make([]byte, walHeaderSize)
+	n, err := files.wal.file.ReadAt(header, 0)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return fmt.Errorf("%w: read WAL header: %w", ErrCorruptState, err)
+	}
+	return validateWAL(bytes.NewReader(header[:n]), int64(n), pageSize)
 }
 
 func digestDatabaseFile(ctx context.Context, source *databaseFile) (databaseDigest, error) {
@@ -992,6 +1084,15 @@ func validatePrivateDirectory(path string) error {
 		return fmt.Errorf("%w: sqlite scratch directory is not exact owner-only 0700", ErrForeignDatabase)
 	}
 	return nil
+}
+
+func operationalInspectDataSource(path string) string {
+	query := url.Values{"mode": {"ro"}}
+	query["_pragma"] = []string{
+		fmt.Sprintf("busy_timeout(%d)", busyMilliseconds),
+		"foreign_keys(ON)", "query_only(ON)", "temp_store(MEMORY)",
+	}
+	return (&url.URL{Scheme: "file", Path: path, RawQuery: query.Encode()}).String()
 }
 
 func walPreflightDataSource(path string) string {

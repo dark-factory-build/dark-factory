@@ -141,6 +141,23 @@ func (daemon *Daemon) recoverReturnedRun(ctx context.Context, parent *RuntimePar
 }
 
 func (daemon *Daemon) recoverRun(ctx context.Context, parent *RuntimeParent, changeParent string, recoverable kernel.RecoverableRun) (RecoveredRunAction, error) {
+	action, err := daemon.recoverRunOnce(ctx, parent, changeParent, recoverable)
+	if err != nil || action != RecoveredNoResultUnresolved {
+		return action, err
+	}
+	// Failing an attempt whose runner never started releases every process
+	// resource, which leaves only runtime removal and settlement. Re-read so
+	// that happens now; otherwise the run stays finalizing until another
+	// daemon start. Unresolved provider residue makes this pass a no-op.
+	next, found, err := daemon.store.RecoverableRun(ctx, recoverable.Run.ID)
+	if err != nil || !found {
+		return action, err
+	}
+	_, err = daemon.recoverRunOnce(ctx, parent, changeParent, next)
+	return action, err
+}
+
+func (daemon *Daemon) recoverRunOnce(ctx context.Context, parent *RuntimeParent, changeParent string, recoverable kernel.RecoverableRun) (RecoveredRunAction, error) {
 	run := recoverable.Run
 	var runtimeRoot, runnerProcess, providerProcess, providerGroup kernel.Resource
 	for _, resource := range recoverable.Resources {
@@ -314,10 +331,26 @@ func (daemon *Daemon) recoverBeforeRuntime(ctx context.Context, parent *RuntimeP
 		return RecoveredUncertain, err
 	}
 	if present {
-		// A directory exists but was never durably bound; its create was
-		// uncertain. Conclude nothing until an operator or a later pass with
-		// stronger evidence resolves it.
-		return RecoveredUncertain, nil
+		// A directory exists but was never durably bound: CreateRuntime died
+		// before activation. AdoptRuntime accepts only that exact pre-binding
+		// layout, under its lifetime lease; anything else concludes nothing.
+		// Once bound, the ordinary grammar fails and settles the run.
+		adopted, err := AdoptRuntime(parent, run.ID.String())
+		if err != nil {
+			if errors.Is(err, errRuntimeBusy) {
+				return RecoveredLiveHolder, nil
+			}
+			return RecoveredUncertain, err
+		}
+		err = daemon.bindAdoptedRuntime(ctx, parent, run.ID, runtimeRoot.ID, adopted)
+		if err = errors.Join(err, adopted.Close()); err != nil {
+			return RecoveredUncertain, err
+		}
+		next, found, err := daemon.store.RecoverableRun(ctx, run.ID)
+		if err != nil || !found {
+			return RecoveredUncertain, errors.Join(err, errInvalidContract)
+		}
+		return daemon.recoverRun(ctx, parent, changeParent, next)
 	}
 	failed, failErr := daemon.failRunBeforeRuntime(ctx, run, runtimeRoot.ID, kernel.FailureSpawn, fmt.Errorf("daemon: runtime absent at recovery"))
 	if failErr != nil && failed.Phase != kernel.RunFinalizing {
@@ -680,6 +713,28 @@ func (daemon *Daemon) recordPreSessionRunnerAbsence(ctx context.Context, runID k
 		lastErr = absenceErr
 	}
 	return kernel.Run{}, kernel.NewOutcomeUnknownError(fmt.Errorf("daemon: pre-session runner absence: %w", lastErr))
+}
+
+// bindAdoptedRuntime records the adopted runtime's identity exactly as the
+// supervisor would have after CreateRuntime.
+func (daemon *Daemon) bindAdoptedRuntime(ctx context.Context, parent *RuntimeParent, runID kernel.RunID, resourceID kernel.ResourceID, adopted *Runtime) error {
+	binding, err := adopted.Binding()
+	if err != nil {
+		return err
+	}
+	path, fileIdentity, err := binding.Values()
+	if err != nil {
+		return err
+	}
+	if expected, err := runtimeChildPath(parent, runID.String()); err != nil || path != expected {
+		return errors.Join(err, errInvalidContract)
+	}
+	identity, err := pathResourceIdentity(fileIdentity)
+	if err != nil {
+		return err
+	}
+	_, err = daemon.activateResource(ctx, runID, resourceID, identity)
+	return err
 }
 
 // runtimeChildPresent is the by-name presence probe for a runtime that never

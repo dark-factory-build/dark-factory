@@ -59,12 +59,6 @@ var openOperationalStore = kernel.OpenOperational
 // at the child lifetime boundary. Production always calls Store.Close.
 var closeOperationalStore = func(store *kernel.Store) error { return store.Close() }
 
-type operationalSource struct {
-	name string
-	file *os.File
-	stat unix.Stat_t
-}
-
 func openOperationalHome(ctx context.Context, home string) (_ *OperationalHome, resultErr error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -137,7 +131,7 @@ func openOperationalHome(ctx context.Context, home string) (_ *OperationalHome, 
 	if err := recheckOperationalIdentity(parent, base, homeFile, homeStat, lockFile, lockStat, anchorFile, anchorStat); err != nil {
 		return nil, err
 	}
-	if err := inspectOperationalHome(ctx, homeFile); err != nil {
+	if err := inspectOperationalHome(ctx, home, homeFile); err != nil {
 		return nil, err
 	}
 	members, err = retainOperationalMembers(homeFile)
@@ -522,7 +516,7 @@ func sameIdentityBinding(expected, actual identity) error {
 	return nil
 }
 
-func inspectOperationalHome(ctx context.Context, home *os.File) error {
+func inspectOperationalHome(ctx context.Context, path string, home *os.File) error {
 	names, err := readOperationalCensus(home)
 	if err != nil {
 		return err
@@ -542,7 +536,7 @@ func inspectOperationalHome(ctx context.Context, home *os.File) error {
 			return fmt.Errorf("close operational home %s: %w", name, err)
 		}
 	}
-	return inspectOperationalDatabase(ctx, home, names[databaseName+"-wal"], names[databaseName+"-shm"])
+	return inspectOperationalDatabase(ctx, path, home, names[databaseName+"-wal"], names[databaseName+"-shm"])
 }
 
 func readOperationalCensus(home *os.File) (map[string]bool, error) {
@@ -863,124 +857,23 @@ func operationalSidecarBounds(name string) (int64, int64) {
 	}
 }
 
-func inspectOperationalDatabase(ctx context.Context, home *os.File, walPresent, shmPresent bool) error {
+// The kernel validates a SQLite read transaction under the retained path
+// authority. Copying live sidecars here duplicated validation and raced normal
+// SQLite writers and WAL-index initialization.
+func inspectOperationalDatabase(ctx context.Context, path string, home *os.File, walPresent, shmPresent bool) error {
 	if walPresent != shmPresent {
 		return fmt.Errorf("%w: operational SQLite WAL sidecars are incomplete", ErrInvalidHome)
 	}
-	sources := make([]operationalSource, 0, 3)
-	for _, name := range []string{databaseName, databaseName + "-wal", databaseName + "-shm"} {
-		if name != databaseName && !walPresent {
-			continue
-		}
-		file, stat, err := openMember(home, name)
-		if err != nil {
-			return fmt.Errorf("inspect operational SQLite %s: %w", name, err)
-		}
-		minimum, maximum := int64(100), int64(operationalMaxDatabaseBytes)
-		if name != databaseName {
-			minimum, maximum = operationalSidecarBounds(name)
-		}
-		if stat.Size < minimum || stat.Size > maximum {
-			file.Close()
-			return fmt.Errorf("%w: operational SQLite %s size is outside bounds", ErrInvalidHome, name)
-		}
-		sources = append(sources, operationalSource{name: name, file: file, stat: stat})
-	}
-	defer func() {
-		for _, source := range sources {
-			_ = source.file.Close()
-		}
-	}()
-	if err := copyAndValidateOperationalDatabase(ctx, sources); err != nil {
+	database, _, err := openMember(home, databaseName)
+	if err != nil {
 		return err
 	}
-	for _, source := range sources {
-		if err := recheckOperationalSource(home, source); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func recheckOperationalSource(home *os.File, source operationalSource) error {
-	var current unix.Stat_t
-	if err := unix.Fstat(int(source.file.Fd()), &current); err != nil {
-		return fmt.Errorf("recheck operational SQLite %s: %w", source.name, err)
-	}
-	if toIdentity(current) != toIdentity(source.stat) {
-		return fmt.Errorf("%w: operational SQLite %s changed during validation", ErrInvalidHome, source.name)
-	}
-	return recheckBinding(home, source.name, source.stat)
-}
-
-func copyAndValidateOperationalDatabase(ctx context.Context, sources []operationalSource) error {
-	// kernel.Open intentionally rejects symlinked ancestors; /tmp is a
-	// symlink on Darwin, so keep this disposable copy below its real parent.
-	directory, err := os.MkdirTemp("/private/tmp", "dark-factory-operational-")
+	boundHome, err := duplicateOperationalFile(home, "sqlite inspection home")
 	if err != nil {
-		return fmt.Errorf("create operational SQLite scratch: %w", err)
+		return errors.Join(err, database.Close())
 	}
-	defer os.RemoveAll(directory)
-	if err := os.Chmod(directory, 0o700); err != nil {
-		return fmt.Errorf("secure operational SQLite scratch: %w", err)
-	}
-	databasePath := filepath.Join(directory, databaseName)
-	for _, source := range sources {
-		if err := copyOperationalSource(ctx, source, filepath.Join(directory, source.name)); err != nil {
-			return err
-		}
-		if source.name == databaseName+"-shm" && source.stat.Size < 32768 {
-			// The live WAL-index may be observed between SQLite growth writes.
-			// Pad only the disposable validator image; the retained source and
-			// its immutable snapshot remain byte-exact.
-			if err := os.Truncate(filepath.Join(directory, source.name), 32768); err != nil {
-				return fmt.Errorf("pad operational SQLite scratch SHM: %w", err)
-			}
-		}
-	}
-	store, err := kernel.Open(ctx, databasePath)
-	if err != nil {
-		return fmt.Errorf("validate operational SQLite database: %w", err)
-	}
-	if err := store.Close(); err != nil {
-		return fmt.Errorf("close operational SQLite validation store: %w", err)
-	}
-	return nil
-}
-
-func copyOperationalSource(ctx context.Context, source operationalSource, target string) error {
-	file, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if err != nil {
-		return fmt.Errorf("create operational SQLite scratch member %s: %w", source.name, err)
-	}
-	closeFile := func(cause error) error { return errors.Join(cause, file.Close()) }
-	buffer := make([]byte, 128<<10)
-	for offset := int64(0); offset < source.stat.Size; {
-		if err := ctx.Err(); err != nil {
-			return closeFile(err)
-		}
-		want := int64(len(buffer))
-		if remain := source.stat.Size - offset; want > remain {
-			want = remain
-		}
-		read, readErr := source.file.ReadAt(buffer[:int(want)], offset)
-		if read != int(want) {
-			return closeFile(errors.Join(io.ErrUnexpectedEOF, readErr))
-		}
-		if readErr != nil {
-			return closeFile(readErr)
-		}
-		written, writeErr := file.Write(buffer[:read])
-		if written != read || writeErr != nil {
-			return closeFile(errors.Join(io.ErrShortWrite, writeErr))
-		}
-		offset += int64(read)
-	}
-	if err := file.Sync(); err != nil {
-		return closeFile(err)
-	}
-	if err := file.Close(); err != nil {
-		return err
+	if err := kernel.InspectOperational(ctx, filepath.Join(path, databaseName), boundHome, database); err != nil {
+		return fmt.Errorf("%w: inspect operational SQLite: %w", ErrInvalidHome, err)
 	}
 	return nil
 }
