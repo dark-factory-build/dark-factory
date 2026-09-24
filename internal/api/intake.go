@@ -5,6 +5,7 @@ package api
 import (
 	"context"
 	"encoding/hex"
+	"strings"
 )
 
 // Intake uses the same private operator actions for CLI, console and the
@@ -25,6 +26,7 @@ type IntakeConfiguration struct {
 type IntakeInput struct {
 	APIKey           string               `json:"api_key,omitempty"`
 	Review           *IntakeReviewInput   `json:"review,omitempty"`
+	ReviewRequest    *ReviewRequest       `json:"review_request,omitempty"`
 	Legacy           *LegacyIntakeInput   `json:"legacy,omitempty"`
 	AcceptanceCursor string               `json:"acceptance_cursor,omitempty"`
 	Action           string               `json:"action"`
@@ -37,6 +39,17 @@ type IntakeInput struct {
 	IssueNumber      uint64               `json:"issue_number,omitempty"`
 	ContentHash      string               `json:"content_hash,omitempty"`
 	AcceptanceID     string               `json:"acceptance_id,omitempty"`
+}
+
+type ReviewRequest struct {
+	Repository     string `json:"repository"`
+	PullNumber     uint64 `json:"pull_number"`
+	Head           string `json:"head"`
+	Base           string `json:"base"`
+	BaseRef        string `json:"base_ref"`
+	Body           string `json:"body"`
+	Provider       string `json:"provider"`
+	RetryOperation string `json:"retry_operation,omitempty"`
 }
 type IntakeSync struct {
 	LastAttemptAt int64  `json:"last_attempt_at"`
@@ -87,6 +100,7 @@ type IntakeResult struct {
 	SourceID           string              `json:"source_id,omitempty"`
 	LinearTeams        []IntakeTeam        `json:"linear_teams,omitempty"`
 	Review             *IntakeReviewResult `json:"review,omitempty"`
+	ReviewOperation    string              `json:"review_operation,omitempty"`
 	Legacy             *LegacyIntakePlan   `json:"legacy,omitempty"`
 	AcceptanceProgress bool                `json:"acceptance_progress,omitempty"`
 	AcceptanceCursor   string              `json:"acceptance_cursor,omitempty"`
@@ -112,6 +126,9 @@ func ValidIntakeInput(input IntakeInput) bool {
 		valid = validText(input.APIKey, 10, 512)
 	case "linear_disconnect", "linear_teams":
 		valid = true
+	case "review_pr":
+		allowed.ProjectID, allowed.ReviewRequest = input.ProjectID, input.ReviewRequest
+		valid = validID(input.ProjectID) && input.ReviewRequest != nil && validReviewRequest(*input.ReviewRequest)
 	case "legacy_preview", "legacy_commit", "legacy_lineage", "review":
 		allowed.SourceID, allowed.ProjectID, allowed.Configuration, allowed.Legacy = input.SourceID, input.ProjectID, input.Configuration, input.Legacy
 		valid = validID(input.SourceID) && validID(input.ProjectID) && input.Configuration != nil && input.Legacy != nil && validLegacyIntakeInput(*input.Legacy, input.Action == "legacy_commit")
@@ -161,6 +178,13 @@ func ValidIntakeInput(input IntakeInput) bool {
 		valid = validID(input.AcceptanceID)
 	}
 	return valid && allowed == input
+}
+
+func validReviewRequest(value ReviewRequest) bool {
+	if value.RetryOperation != "" {
+		return reviewUUID(value.RetryOperation) && value.Repository == "" && value.PullNumber == 0 && value.Head == "" && value.Base == "" && value.BaseRef == "" && value.Body == "" && value.Provider == ""
+	}
+	return validText(value.Repository, 3, 140) && value.PullNumber > 0 && validHex(value.Head, 20) && validHex(value.Base, 20) && validText(value.BaseRef, 1, 240) && !strings.ContainsAny(value.BaseRef, "\x00\r\n") && validText(value.Body, 1, 65536) && (value.Provider == "codex" || value.Provider == "claude")
 }
 
 func (client *OperatorClient) Intake(ctx context.Context, input IntakeInput) (IntakeResult, error) {

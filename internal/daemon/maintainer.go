@@ -13,6 +13,7 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/api"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 	"github.com/dark-factory-build/dark-factory/internal/maintainer"
+	"github.com/dark-factory-build/dark-factory/internal/review"
 )
 
 type maintainerRequest struct {
@@ -259,14 +260,15 @@ func (daemon *Daemon) recordMaintainerPublication(ctx context.Context, project k
 				Number uint64 `json:"number"`
 				URL    string `json:"url"`
 				Head   string `json:"head_sha"`
+				Base   string `json:"base_sha"`
 			} `json:"structuredContent"`
 		} `json:"result"`
 	}
 	if json.Unmarshal(response, &reply) != nil || reply.Result.IsError || reply.Result.Pull.Number == 0 {
 		return nil
 	}
-	var repo, title, branch, base string
-	for name, target := range map[string]*string{"repository": &repo, "title": &title, "head": &branch, "base": &base} {
+	var repo, title, branch, base, body string
+	for name, target := range map[string]*string{"repository": &repo, "title": &title, "head": &branch, "base": &base, "body": &body} {
 		if err := json.Unmarshal(params.Arguments[name], target); err != nil {
 			return err
 		}
@@ -275,7 +277,26 @@ func (daemon *Daemon) recordMaintainerPublication(ctx context.Context, project k
 	if err != nil {
 		return err
 	}
-	return daemon.store.RecordPublication(ctx, project, task, repo, kernel.ProductionPullRequest{Number: reply.Result.Pull.Number, Title: title, URL: reply.Result.Pull.URL, Head: reply.Result.Pull.Head, Branch: branch, Base: base, State: "open", Review: kernel.ProductionReview{Head: reply.Result.Pull.Head, State: "unknown"}}, at)
+	reviewRequest := api.ReviewRequest{Repository: strings.ToLower(repo), PullNumber: reply.Result.Pull.Number, Head: strings.ToLower(reply.Result.Pull.Head), Base: strings.ToLower(reply.Result.Pull.Base), BaseRef: base, Body: body, Provider: "codex"}
+	if daemon.reviewPublished != nil {
+		if err := daemon.store.RecordPublication(ctx, project, task, repo, kernel.ProductionPullRequest{Number: reply.Result.Pull.Number, Title: title, URL: reply.Result.Pull.URL, Head: reply.Result.Pull.Head, Branch: branch, Base: base, State: "open", Review: kernel.ProductionReview{Head: reply.Result.Pull.Head, State: "unknown"}}, at); err != nil {
+			return err
+		}
+		_, err = daemon.reviewPublished(ctx, project, reviewRequest)
+	} else if daemon.github != nil || daemon.reviewBackend != nil {
+		prepared, prepareErr := review.Prepare(review.Request{Repository: reviewRequest.Repository, PullNumber: reviewRequest.PullNumber, Head: reviewRequest.Head, Base: reviewRequest.Base, BaseRef: reviewRequest.BaseRef, Body: reviewRequest.Body, Provider: reviewRequest.Provider}, daemon.now)
+		if prepareErr != nil {
+			return prepareErr
+		}
+		if err := daemon.store.RecordPublicationWithReviewOperation(ctx, project, task, repo, kernel.ProductionPullRequest{Number: reply.Result.Pull.Number, Title: title, URL: reply.Result.Pull.URL, Head: reply.Result.Pull.Head, Branch: branch, Base: base, State: "open", Review: kernel.ProductionReview{Head: reply.Result.Pull.Head, State: "unknown"}}, prepared.ID, prepared, at); err != nil {
+			return err
+		}
+		daemon.launchReview(project, prepared)
+		err = nil
+	} else {
+		err = daemon.store.RecordPublication(ctx, project, task, repo, kernel.ProductionPullRequest{Number: reply.Result.Pull.Number, Title: title, URL: reply.Result.Pull.URL, Head: reply.Result.Pull.Head, Branch: branch, Base: base, State: "open", Review: kernel.ProductionReview{Head: reply.Result.Pull.Head, State: "unknown"}}, at)
+	}
+	return err
 }
 
 // decodeMaintainerToolCall re-encodes the exact repository fields that local

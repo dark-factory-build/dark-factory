@@ -7,11 +7,13 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 )
 
 const maxProductionReviewFindings = 16000
@@ -172,75 +174,134 @@ func productionRecordOnConnection(ctx context.Context, c *sql.Conn, project Proj
 	return err
 }
 
+type ProductionReviewOperation struct {
+	ID       string
+	Document any
+}
+
+// PendingReviewOperation is a completed REQUEST_CHANGES operation whose task
+// feedback has not yet been durably acknowledged by the daemon.
+type PendingReviewOperation struct {
+	Project    ProjectID
+	Repository string
+	ID         string
+	Document   []byte
+}
+
+func validProductionObservation(project ProjectID, observation ProductionObservation, at UnixMillis) bool {
+	return !project.zero() && productionRepository.MatchString(observation.Repository) && observation.ObservedAt >= 1 && observation.ObservedAt <= at.Int64()+5000 && observation.Overflow >= 0 && validOutcomeText(observation.Unavailable, 256) && len(observation.PullRequests) <= 256 && len(observation.Checks) <= 256 && len(observation.Reviewers) <= 256 && len(observation.Deliveries) <= 128
+}
+
 // RecordProductionObservation accepts facts only from the operator authority.
 // An unavailable read updates the source's health without erasing prior work.
 func (store *Store) RecordProductionObservation(ctx context.Context, project ProjectID, observation ProductionObservation, at UnixMillis) error {
-	if project.zero() || !productionRepository.MatchString(observation.Repository) || observation.ObservedAt < 1 || observation.ObservedAt > at.Int64()+5000 || observation.Overflow < 0 || !validOutcomeText(observation.Unavailable, 256) || len(observation.PullRequests) > 256 || len(observation.Checks) > 256 || len(observation.Reviewers) > 256 || len(observation.Deliveries) > 128 {
+	if !validProductionObservation(project, observation, at) {
 		return ErrInvalidValue
 	}
-	observation.Repository = strings.ToLower(observation.Repository)
 	tx, err := store.beginValidatedWrite(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Close()
-	if err := migrateProductionRuntimeRecords(ctx, tx.connection, project, observation.Repository); err != nil {
+	if err := store.recordProductionObservation(ctx, tx.connection, project, observation, at); err != nil {
 		return tx.Rollback(err)
 	}
+	return tx.Commit(ctx)
+}
+
+// RecordProductionObservationWithReviewOperations atomically stores a changed
+// published head and its prepared review claims. A refresh can therefore not
+// make a corrected head durable and then lose the review in the launch window.
+func (store *Store) RecordProductionObservationWithReviewOperations(ctx context.Context, project ProjectID, observation ProductionObservation, claims []ProductionReviewOperation, at UnixMillis) error {
+	if !validProductionObservation(project, observation, at) {
+		return ErrInvalidValue
+	}
+	for _, claim := range claims {
+		if !validOutcomeText(claim.ID, 128) {
+			return ErrInvalidValue
+		}
+		body, err := json.Marshal(claim.Document)
+		if err != nil || len(body) < 2 || len(body) > 32768 {
+			return ErrInvalidValue
+		}
+	}
+	tx, err := store.beginValidatedWrite(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Close()
+	if err := store.recordProductionObservation(ctx, tx.connection, project, observation, at); err != nil {
+		return tx.Rollback(err)
+	}
+	repo := strings.ToLower(observation.Repository)
+	for _, claim := range claims {
+		if err := productionRecordOnConnection(ctx, tx.connection, project, repo, "reviewer", claim.ID, "", claim.Document, at.Int64()); err != nil {
+			return tx.Rollback(err)
+		}
+	}
+	return tx.Commit(ctx)
+}
+
+func (store *Store) recordProductionObservation(ctx context.Context, c *sql.Conn, project ProjectID, observation ProductionObservation, at UnixMillis) error {
+	observation.Repository = strings.ToLower(observation.Repository)
+	if err := migrateProductionRuntimeRecords(ctx, c, project, observation.Repository); err != nil {
+		return err
+	}
 	write := func(kind, id, visual string, value any) error {
-		return productionRecordOnConnection(ctx, tx.connection, project, observation.Repository, kind, id, visual, value, observation.ObservedAt)
+		return productionRecordOnConnection(ctx, c, project, observation.Repository, kind, id, visual, value, observation.ObservedAt)
 	}
 	for _, pr := range observation.PullRequests {
 		if !validProductionPull(pr) {
-			return tx.Rollback(ErrInvalidValue)
+			return ErrInvalidValue
 		}
-		visual, err := linkProductionChange(ctx, tx.connection, project, observation.Repository, pr, observation.ObservedAt)
+		visual, err := linkProductionChange(ctx, c, project, observation.Repository, pr, observation.ObservedAt)
 		if err != nil {
-			return tx.Rollback(err)
+			return err
 		}
-		// The observation's review is a copy read before a remote wait. A
-		// verdict recorded meanwhile lives only here, so the stored review
-		// wins inside this transaction rather than being erased.
-		if stored, ok := storedProductionReview(ctx, tx.connection, project, observation.Repository, pr.Number); ok {
+		// A verdict recorded meanwhile wins only when it covers this exact
+		// head. A corrected PR invalidates older review authority.
+		if stored, ok := storedProductionReview(ctx, c, project, observation.Repository, pr.Number); ok && strings.EqualFold(stored.Head, pr.Head) {
 			pr.Review = stored
+		} else if !strings.EqualFold(pr.Review.Head, pr.Head) {
+			pr.Review = ProductionReview{Head: pr.Head, State: "unknown"}
 		}
 		if err := write("pull_request", strconv.FormatUint(pr.Number, 10), visual, pr); err != nil {
-			return tx.Rollback(err)
+			return err
 		}
 	}
 	for _, check := range observation.Checks {
 		if !productionSHA(check.Revision) || !productionURL(check.URL) || !validOutcomeText(check.Name, 256) || !validOutcomeText(check.State, 64) || !validOutcomeText(check.Conclusion, 64) || (check.Scope != "head" && check.Scope != "merge_group") || !productionNumbers(check.PullRequests) || len(check.Jobs) > 32 || check.Overflow < 0 {
-			return tx.Rollback(ErrInvalidValue)
+			return ErrInvalidValue
 		}
 		for _, job := range check.Jobs {
 			if !validOutcomeText(job.ID, 256) || !validOutcomeText(job.Name, 256) || !validOutcomeText(job.State, 64) || !validOutcomeText(job.Conclusion, 64) || !productionURL(job.URL) {
-				return tx.Rollback(ErrInvalidValue)
+				return ErrInvalidValue
 			}
 		}
 		if err := write("check", check.ID, "", check); err != nil {
-			return tx.Rollback(err)
+			return err
 		}
 	}
 	for _, reviewer := range observation.Reviewers {
 		if reviewer.Number == 0 || reviewer.Number > 1<<53-1 || !productionSHA(reviewer.Head) || !validOutcomeText(reviewer.Name, 128) || !validOutcomeText(reviewer.Provider, 64) || !validOutcomeText(reviewer.State, 64) || !validOutcomeText(reviewer.Findings, 8192) || !productionURL(reviewer.URL) {
-			return tx.Rollback(ErrInvalidValue)
+			return ErrInvalidValue
 		}
 		if err := write("reviewer", reviewer.ID, "", reviewer); err != nil {
-			return tx.Rollback(err)
+			return err
 		}
 	}
 	for _, delivery := range observation.Deliveries {
 		if !productionSHA(delivery.Revision) || !validOutcomeText(delivery.Kind, 64) || !validOutcomeText(delivery.Destination, 256) || !validOutcomeText(delivery.State, 64) || !productionURL(delivery.URL) || !productionNumbers(delivery.PullRequests) || delivery.UpdatedAt < 0 || delivery.UpdatedAt > at.Int64()+5000 || !validOutcomeText(delivery.Phase, 64) || !validOutcomeText(delivery.Reason, 2048) || delivery.Overflow < 0 || delivery.VerifiedAt < 0 || delivery.VerifiedAt > at.Int64()+5000 {
-			return tx.Rollback(ErrInvalidValue)
+			return ErrInvalidValue
 		}
 		if err := write("delivery", delivery.ID, "", delivery); err != nil {
-			return tx.Rollback(err)
+			return err
 		}
 	}
 	if err := write("repository", observation.Repository, "", map[string]any{"unavailable": observation.Unavailable, "overflow": observation.Overflow}); err != nil {
-		return tx.Rollback(err)
+		return err
 	}
-	return tx.Commit(ctx)
+	return nil
 }
 
 // A recorded branch and exact settled commit identify a Change. A successful
@@ -345,6 +406,50 @@ func (store *Store) RecordPublication(ctx context.Context, project ProjectID, ta
 	return tx.Commit(ctx)
 }
 
+// RecordPublicationWithReviewOperation claims the independent review in the
+// same transaction as publication. This closes the shutdown window between
+// the publication record and review operation creation.
+func (store *Store) RecordPublicationWithReviewOperation(ctx context.Context, project ProjectID, task TaskID, repo string, pr ProductionPullRequest, operationID string, operation any, at UnixMillis) error {
+	if !productionRepository.MatchString(repo) || !validProductionPull(pr) || !validOutcomeText(operationID, 128) {
+		return ErrInvalidValue
+	}
+	body, err := json.Marshal(operation)
+	if err != nil || len(body) < 2 || len(body) > 65536 {
+		return ErrInvalidValue
+	}
+	repo = strings.ToLower(repo)
+	tx, err := store.beginValidatedWrite(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Close()
+	owner, found, err := taskByID(ctx, tx.connection, task)
+	if err != nil {
+		return tx.Rollback(err)
+	}
+	if !found || owner.ProjectID != project {
+		return tx.Rollback(ErrUnauthorized)
+	}
+	if _, err = tx.connection.ExecContext(ctx, `INSERT INTO publication_tasks (project_id, repository, pull_number, task_id, created_at_ms) VALUES (?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`, project.Bytes(), repo, pr.Number, task.Bytes(), at.Int64()); err != nil {
+		return tx.Rollback(err)
+	}
+	visual, err := linkProductionChange(ctx, tx.connection, project, repo, pr, at.Int64())
+	if err != nil {
+		return tx.Rollback(err)
+	}
+	publication, err := json.Marshal(pr)
+	if err != nil {
+		return tx.Rollback(err)
+	}
+	if _, err = tx.connection.ExecContext(ctx, `INSERT INTO production_records (project_id, repository, kind, identity, visual_id, document, observed_at_ms) VALUES (?, ?, 'pull_request', ?, ?, ?, ?) ON CONFLICT DO NOTHING`, project.Bytes(), repo, strconv.FormatUint(pr.Number, 10), visual, string(publication), at.Int64()); err != nil {
+		return tx.Rollback(err)
+	}
+	if err := productionRecordOnConnection(ctx, tx.connection, project, repo, "reviewer", operationID, "", operation, at.Int64()); err != nil {
+		return tx.Rollback(err)
+	}
+	return tx.Commit(ctx)
+}
+
 // RecordProductionReview preserves the exact commit covered by a review.
 // Refreshes may move the live PR to a newer head; that older head is evidence,
 // not permission to rewrite the review onto the new source.
@@ -392,6 +497,233 @@ func (store *Store) RecordProductionReview(ctx context.Context, project ProjectI
 		return tx.Rollback(err)
 	}
 	return tx.Commit(ctx)
+}
+
+// RecordReviewOperation keeps review lifecycle state in the same durable
+// production projection as the published pull request. The caller writes the
+// initial running record before launching an untrusted provider.
+func (store *Store) RecordReviewOperation(ctx context.Context, project ProjectID, repo, operationID string, document any, at UnixMillis) error {
+	if project.zero() || !productionRepository.MatchString(repo) || !validOutcomeText(operationID, 128) {
+		return ErrInvalidValue
+	}
+	tx, err := store.beginValidatedWrite(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Close()
+	body, err := json.Marshal(document)
+	if err != nil {
+		return tx.Rollback(err)
+	}
+	if len(body) < 2 || len(body) > 65536 {
+		return tx.Rollback(ErrInvalidValue)
+	}
+	if err := productionRecordOnConnection(ctx, tx.connection, project, strings.ToLower(repo), "reviewer", operationID, "", document, at.Int64()); err != nil {
+		return tx.Rollback(err)
+	}
+	return tx.Commit(ctx)
+}
+
+// ReviewOperation returns the last durable state for a daemon-owned review.
+func (store *Store) ReviewOperation(ctx context.Context, project ProjectID, operationID string) ([]byte, bool, error) {
+	if project.zero() || !validOutcomeText(operationID, 128) {
+		return nil, false, ErrInvalidValue
+	}
+	tx, err := store.beginRead(ctx)
+	if err != nil {
+		return nil, false, err
+	}
+	defer tx.Close()
+	var document string
+	err = tx.connection.QueryRowContext(ctx, `SELECT document FROM production_records WHERE project_id = ? AND kind = 'reviewer' AND identity = ?`, project.Bytes(), operationID).Scan(&document)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	return []byte(document), true, nil
+}
+
+// PendingReviewOperations returns completed REQUEST_CHANGES operations that
+// still need their exactly-once task routing. The operation document remains
+// the source of the exact pull-request head and idempotency marker.
+func (store *Store) PendingReviewOperations(ctx context.Context) ([]PendingReviewOperation, error) {
+	tx, err := store.beginRead(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Close()
+	rows, err := tx.connection.QueryContext(ctx, `SELECT project_id, repository, identity, document FROM production_records
+        WHERE kind = 'reviewer' AND json_extract(document, '$.state') = 'completed'
+          AND json_extract(document, '$.verdict') = 'request_changes'
+          AND json_extract(document, '$.route_pending') = 1
+          AND json_type(document, '$.request') = 'object'`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var pending []PendingReviewOperation
+	for rows.Next() {
+		var projectBytes []byte
+		var repository, operationID, document string
+		if err := rows.Scan(&projectBytes, &repository, &operationID, &document); err != nil {
+			return nil, err
+		}
+		project, err := ProjectIDFromBytes(projectBytes)
+		if err != nil {
+			return nil, err
+		}
+		if !json.Valid([]byte(document)) {
+			return nil, fmt.Errorf("%w: review operation", ErrCorruptState)
+		}
+		pending = append(pending, PendingReviewOperation{Project: project, Repository: repository, ID: operationID, Document: []byte(document)})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return pending, nil
+}
+
+// InFlightReviewOperations returns review writes whose external receipts may
+// have been lost. The coordinator reconciles these operation IDs before any
+// new write is attempted.
+func (store *Store) InFlightReviewOperations(ctx context.Context) ([]PendingReviewOperation, error) {
+	tx, err := store.beginRead(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Close()
+	rows, err := tx.connection.QueryContext(ctx, `SELECT project_id, repository, identity, document FROM production_records
+        WHERE kind = 'reviewer' AND json_extract(document, '$.state') IN ('submitting', 'enqueuing')
+          AND json_type(document, '$.request') = 'object'`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var pending []PendingReviewOperation
+	for rows.Next() {
+		var projectBytes []byte
+		var repository, operationID, document string
+		if err := rows.Scan(&projectBytes, &repository, &operationID, &document); err != nil {
+			return nil, err
+		}
+		project, err := ProjectIDFromBytes(projectBytes)
+		if err != nil {
+			return nil, err
+		}
+		if !json.Valid([]byte(document)) {
+			return nil, fmt.Errorf("%w: review operation", ErrCorruptState)
+		}
+		pending = append(pending, PendingReviewOperation{Project: project, Repository: repository, ID: operationID, Document: []byte(document)})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return pending, nil
+}
+
+// RecoverRunningReviewOperations reconciles review claims left by a stopped
+// daemon. A REQUEST_CHANGES verdict with a durable submit receipt and without
+// an enqueue receipt remains a completed, route-pending operation; other
+// interrupted claims become failures.
+// An external reviewer observation uses the same projection kind but does not
+// have the durable operation request object.
+func (store *Store) RecoverRunningReviewOperations(ctx context.Context, at UnixMillis) (int, error) {
+	tx, err := store.beginValidatedWrite(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Close()
+	rows, err := tx.connection.QueryContext(ctx, `SELECT project_id, repository, identity, document FROM production_records
+        WHERE kind = 'reviewer' AND json_extract(document, '$.state') = 'running'
+          AND json_type(document, '$.request') = 'object'`)
+	if err != nil {
+		return 0, err
+	}
+	type candidate struct {
+		project    ProjectID
+		repository string
+		identity   string
+		document   map[string]json.RawMessage
+	}
+	var candidates []candidate
+	for rows.Next() {
+		var projectBytes []byte
+		var repository, identity, document string
+		if err := rows.Scan(&projectBytes, &repository, &identity, &document); err != nil {
+			rows.Close()
+			return 0, tx.Rollback(err)
+		}
+		project, err := ProjectIDFromBytes(projectBytes)
+		if err != nil {
+			rows.Close()
+			return 0, tx.Rollback(err)
+		}
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(document), &fields); err != nil {
+			rows.Close()
+			return 0, tx.Rollback(fmt.Errorf("%w: review operation", ErrCorruptState))
+		}
+		var operationID string
+		if err := json.Unmarshal(fields["id"], &operationID); err != nil || operationID == "" {
+			continue
+		}
+		var verdict, enqueueID string
+		var submitted bool
+		_ = json.Unmarshal(fields["verdict"], &verdict)
+		_ = json.Unmarshal(fields["enqueue_id"], &enqueueID)
+		_ = json.Unmarshal(fields["submitted"], &submitted)
+		retryable, _ := json.Marshal(verdict == "" && enqueueID == "")
+		fields["retryable"] = retryable
+		candidates = append(candidates, candidate{project: project, repository: repository, identity: identity, document: fields})
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return 0, tx.Rollback(err)
+	}
+	if err := rows.Close(); err != nil {
+		return 0, tx.Rollback(err)
+	}
+	updatedAt, err := json.Marshal(time.UnixMilli(at.Int64()).UTC())
+	if err != nil {
+		return 0, tx.Rollback(err)
+	}
+	detail, err := json.Marshal("review interrupted before resume; retry the recorded operation")
+	if err != nil {
+		return 0, tx.Rollback(err)
+	}
+	for _, item := range candidates {
+		var verdict, enqueueID string
+		var submitted bool
+		_ = json.Unmarshal(item.document["verdict"], &verdict)
+		_ = json.Unmarshal(item.document["enqueue_id"], &enqueueID)
+		_ = json.Unmarshal(item.document["submitted"], &submitted)
+		if verdict == "request_changes" && submitted && enqueueID == "" {
+			// The provider write and completed state may already be durable,
+			// while task routing was interrupted immediately afterward.
+			// Preserve a recoverable route marker instead of converting this
+			// exact result into an unretryable failure.
+			item.document["state"] = json.RawMessage(`"completed"`)
+			item.document["route_pending"] = json.RawMessage(`true`)
+			delete(item.document, "detail")
+		} else {
+			item.document["state"] = json.RawMessage(`"failed"`)
+			if verdict == "" && enqueueID == "" {
+				item.document["detail"] = detail
+			} else {
+				item.document["detail"] = json.RawMessage(`"review interrupted after an external write may have occurred; observe the original operation"`)
+			}
+		}
+		item.document["updated_at"] = updatedAt
+		if err := productionRecordOnConnection(ctx, tx.connection, item.project, item.repository, "reviewer", item.identity, "", item.document, at.Int64()); err != nil {
+			return 0, tx.Rollback(err)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, err
+	}
+	return len(candidates), nil
 }
 
 // Current construction comes from Changes even after its worker finishes. The

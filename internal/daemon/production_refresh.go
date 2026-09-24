@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
+	"github.com/dark-factory-build/dark-factory/internal/review"
 )
 
 const productionRefreshPRLimit = 100
@@ -39,21 +40,61 @@ func (daemon *Daemon) refreshProduction(ctx context.Context, project kernel.Proj
 		if !verified || !pinned || identity.PublicationRepository == "" {
 			continue
 		}
-		known, _ := daemon.knownProductionPulls(ctx, project, identity.PublicationRepository)
+		known, published, _ := daemon.knownProductionPulls(ctx, project, identity.PublicationRepository)
 		observation, err := daemon.pullRequestObservation(ctx, identity.PublicationRepository, githubID, known)
 		if err != nil {
 			continue
 		}
+		corrections := changedProductionHeads(known, observation.PullRequests)
 		at, err := daemon.timestamp()
 		if err != nil {
 			return err
 		}
 		observation.ObservedAt = at.Int64()
-		if err := daemon.store.RecordProductionObservation(ctx, project, observation, at); err != nil {
-			return err
+		prepared := make([]review.Operation, 0, len(corrections))
+		for _, correction := range corrections {
+			if !published[correction.Number] {
+				continue
+			}
+			op, err := daemon.preparePublishedReview(ctx, project, identity.PublicationRepository, correction.Number, correction.Head)
+			if err != nil {
+				return err
+			}
+			prepared = append(prepared, op)
+		}
+		if len(prepared) == 0 {
+			if err := daemon.store.RecordProductionObservation(ctx, project, observation, at); err != nil {
+				return err
+			}
+		} else {
+			claims := make([]kernel.ProductionReviewOperation, 0, len(prepared))
+			for _, op := range prepared {
+				claims = append(claims, kernel.ProductionReviewOperation{ID: op.ID, Document: op})
+			}
+			if err := daemon.store.RecordProductionObservationWithReviewOperations(ctx, project, observation, claims, at); err != nil {
+				return err
+			}
+		}
+		for _, op := range prepared {
+			daemon.launchReview(project, op)
 		}
 	}
 	return nil
+}
+
+func changedProductionHeads(known []kernel.ProductionPullRequest, observed []kernel.ProductionPullRequest) []kernel.ProductionPullRequest {
+	prior := make(map[uint64]kernel.ProductionPullRequest, len(known))
+	for _, pull := range known {
+		prior[pull.Number] = pull
+	}
+	changed := make([]kernel.ProductionPullRequest, 0)
+	for _, pull := range observed {
+		old, ok := prior[pull.Number]
+		if ok && old.Head != "" && !strings.EqualFold(old.Head, pull.Head) && pull.State == "open" {
+			changed = append(changed, pull)
+		}
+	}
+	return changed
 }
 
 func (daemon *Daemon) productionRefreshAllowed(project kernel.ProjectID, now time.Time) bool {
@@ -112,7 +153,7 @@ func (daemon *Daemon) pullRequestObservation(ctx context.Context, repository str
 			return kernel.ProductionObservation{}, fmt.Errorf("invalid pull request head")
 		}
 		pr := productionPullRequest(value)
-		if review, ok := prior[value.Number]; ok && review.Head != "" {
+		if review, ok := prior[value.Number]; ok && strings.EqualFold(review.Head, value.Head) {
 			pr.Review = review
 		}
 		result.PullRequests = append(result.PullRequests, pr)
@@ -192,12 +233,13 @@ func parseMaintainerPullRequestPage(content []byte) (maintainerPullRequestPage, 
 	return page, nil
 }
 
-func (daemon *Daemon) knownProductionPulls(ctx context.Context, project kernel.ProjectID, repository string) ([]kernel.ProductionPullRequest, error) {
+func (daemon *Daemon) knownProductionPulls(ctx context.Context, project kernel.ProjectID, repository string) ([]kernel.ProductionPullRequest, map[uint64]bool, error) {
 	known := []kernel.ProductionPullRequest{}
+	published := make(map[uint64]bool)
 	for offset, pages := 0, 0; pages < 128; pages++ {
 		page, err := daemon.store.Production(ctx, project, offset, 8)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		for _, record := range page.Records {
 			if record.Kind != "pull_request" || !strings.EqualFold(record.Repository, repository) {
@@ -206,9 +248,12 @@ func (daemon *Daemon) knownProductionPulls(ctx context.Context, project kernel.P
 			var pull kernel.ProductionPullRequest
 			if json.Unmarshal(record.Document, &pull) == nil {
 				known = append(known, pull)
+				if len(record.Tasks) > 0 {
+					published[pull.Number] = true
+				}
 			}
 			if len(known) == productionRefreshPRLimit {
-				return known, nil
+				return known, published, nil
 			}
 		}
 		if page.NextOffset <= offset || page.NextOffset >= page.Total {
@@ -216,5 +261,5 @@ func (daemon *Daemon) knownProductionPulls(ctx context.Context, project kernel.P
 		}
 		offset = page.NextOffset
 	}
-	return known, nil
+	return known, published, nil
 }

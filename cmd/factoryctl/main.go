@@ -46,6 +46,7 @@ const (
 	pairListenPatience = 10 * time.Second
 
 	usage = `usage:
+	factoryctl review --project ID --repository OWNER/REPO --pull N --head SHA --base SHA --base-ref REF --body TEXT [--provider codex|claude] | --retry-operation UUID
   factoryctl github connect [--open] | confirm CODE | status | refresh | disconnect
   factoryctl github installations [--page N]
   factoryctl github repositories --installation ID [--page N]
@@ -341,6 +342,9 @@ func runWithOpener(ctx context.Context, args []string, getenv func(string) strin
 type serviceInspector func(context.Context, string) (install.ServiceStatus, error)
 
 func runWithDependencies(ctx context.Context, args []string, getenv func(string) string, stdout, stderr io.Writer, opener browserOpener, inspect serviceInspector) int {
+	if len(args) > 0 && args[0] == "review" {
+		return runReview(ctx, args[1:], getenv, stdout, stderr)
+	}
 	if len(args) > 0 && args[0] == "github" {
 		return runGitHub(ctx, args[1:], getenv, stdout, stderr, opener)
 	}
