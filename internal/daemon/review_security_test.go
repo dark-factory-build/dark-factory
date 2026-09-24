@@ -3,6 +3,8 @@
 package daemon
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -33,6 +35,27 @@ func TestSafeReviewPathRefusesCheckoutMetadataAndTraversal(t *testing.T) {
 	}
 	if _, err := safeReviewPath("internal/daemon/review.go"); err != nil {
 		t.Fatalf("safeReviewPath refused ordinary path: %v", err)
+	}
+}
+
+func TestReviewSnapshotPreservesGitSymlinks(t *testing.T) {
+	source, destination := t.TempDir(), t.TempDir()
+	if err := writeReviewFile(source, "link", []byte("target"), "120000"); err != nil {
+		t.Fatal(err)
+	}
+	if err := copyReviewSnapshot(source, destination); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(destination, "link")
+	info, err := os.Lstat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("snapshot entry mode=%v, want symlink", info.Mode())
+	}
+	if target, err := os.Readlink(path); err != nil || target != "target" {
+		t.Fatalf("snapshot symlink target=%q err=%v", target, err)
 	}
 }
 

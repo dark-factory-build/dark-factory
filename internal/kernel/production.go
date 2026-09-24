@@ -585,6 +585,44 @@ func (store *Store) PendingReviewOperations(ctx context.Context) ([]PendingRevie
 	return pending, nil
 }
 
+// InFlightReviewOperations returns review writes whose external receipts may
+// have been lost. The coordinator reconciles these operation IDs before any
+// new write is attempted.
+func (store *Store) InFlightReviewOperations(ctx context.Context) ([]PendingReviewOperation, error) {
+	tx, err := store.beginRead(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Close()
+	rows, err := tx.connection.QueryContext(ctx, `SELECT project_id, repository, identity, document FROM production_records
+        WHERE kind = 'reviewer' AND json_extract(document, '$.state') IN ('submitting', 'enqueuing')
+          AND json_type(document, '$.request') = 'object'`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var pending []PendingReviewOperation
+	for rows.Next() {
+		var projectBytes []byte
+		var repository, operationID, document string
+		if err := rows.Scan(&projectBytes, &repository, &operationID, &document); err != nil {
+			return nil, err
+		}
+		project, err := ProjectIDFromBytes(projectBytes)
+		if err != nil {
+			return nil, err
+		}
+		if !json.Valid([]byte(document)) {
+			return nil, fmt.Errorf("%w: review operation", ErrCorruptState)
+		}
+		pending = append(pending, PendingReviewOperation{Project: project, Repository: repository, ID: operationID, Document: []byte(document)})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return pending, nil
+}
+
 // RecoverRunningReviewOperations reconciles review claims left by a stopped
 // daemon. A REQUEST_CHANGES verdict with a durable submit receipt and without
 // an enqueue receipt remains a completed, route-pending operation; other

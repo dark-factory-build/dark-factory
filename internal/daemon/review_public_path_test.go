@@ -20,6 +20,7 @@ type publicReviewBackend struct {
 	reviews, submits, enqueues              int
 	enqueuedBase, enqueuedSHA               string
 	journal                                 map[string]string
+	observations                            map[string]review.Receipt
 }
 
 func (b *publicReviewBackend) CloneReadOnly(context.Context, review.Request) (string, func(), error) {
@@ -49,6 +50,13 @@ func (b *publicReviewBackend) Enqueue(_ context.Context, operation review.Operat
 	b.enqueues++
 	b.enqueuedBase, b.enqueuedSHA = operation.Request.BaseRef, operation.Request.Base
 	return b.record("enqueue_pull_request", operation.EnqueueID)
+}
+
+func (b *publicReviewBackend) Observe(_ context.Context, operationID string) (review.Receipt, error) {
+	if receipt, ok := b.observations[operationID]; ok {
+		return receipt, nil
+	}
+	return review.Receipt{State: "missing"}, nil
 }
 
 func (b *publicReviewBackend) record(kind, id string) error {

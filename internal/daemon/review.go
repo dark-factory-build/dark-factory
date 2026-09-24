@@ -52,9 +52,22 @@ func (daemon *Daemon) RecoverReviewOperations(ctx context.Context) (int, error) 
 	if err != nil {
 		return 0, err
 	}
+	inFlight, err := daemon.store.InFlightReviewOperations(ctx)
+	if err != nil {
+		return 0, err
+	}
 	recovered, err := daemon.store.RecoverRunningReviewOperations(ctx, at)
 	if err != nil {
 		return 0, err
+	}
+	for _, operation := range inFlight {
+		var op review.Operation
+		if err := json.Unmarshal(operation.Document, &op); err != nil || op.ID == "" || op.ID != operation.ID {
+			return 0, fmt.Errorf("%w: review operation", kernel.ErrCorruptState)
+		}
+		if _, err := daemon.resumeReview(ctx, operation.Project, op); err == nil {
+			recovered++
+		}
 	}
 	pending, err := daemon.store.PendingReviewOperations(ctx)
 	if err != nil {
@@ -445,6 +458,13 @@ func copyReviewSnapshot(source, destination string) error {
 		if info.IsDir() {
 			return os.MkdirAll(target, 0700)
 		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			link, err := os.Readlink(path)
+			if err != nil {
+				return err
+			}
+			return os.Symlink(link, target)
+		}
 		if !info.Mode().IsRegular() {
 			return errors.New("review: non-regular snapshot entry")
 		}
@@ -498,10 +518,13 @@ func writeReviewFile(root, path string, content []byte, mode string) error {
 	if err := os.MkdirAll(filepath.Dir(target), 0700); err != nil {
 		return err
 	}
+	if mode == "120000" {
+		return os.Symlink(string(content), target)
+	}
 	fileMode := os.FileMode(0600)
 	if mode == "100755" {
 		fileMode = 0700
-	} else if mode != "100644" && mode != "120000" {
+	} else if mode != "100644" {
 		return fmt.Errorf("review: unsupported file mode %q", mode)
 	}
 	return os.WriteFile(target, content, fileMode)
@@ -590,6 +613,60 @@ func reviewEnvironment(root string) []string {
 func (b *daemonReviewBackend) Submit(ctx context.Context, operation review.Operation, verdict review.Verdict) error {
 	return b.call(ctx, "submit_pull_request_review", map[string]any{"repository": b.repository, "pull_number": operation.Request.PullNumber, "head_sha": operation.Request.Head, "operation_id": operation.ID, "event": verdict.Event, "body": verdict.Body})
 }
+
+func (b *daemonReviewBackend) Observe(ctx context.Context, operationID string) (review.Receipt, error) {
+	response, err := b.callResponse(ctx, "observe_operation", map[string]any{"operation_id": operationID})
+	if err != nil {
+		return review.Receipt{}, err
+	}
+	var observation struct {
+		OperationID string          `json:"operation_id"`
+		State       string          `json:"state"`
+		Kind        string          `json:"kind"`
+		Result      json.RawMessage `json:"result"`
+	}
+	if err := json.Unmarshal(response, &observation); err != nil || observation.OperationID != operationID {
+		return review.Receipt{}, errors.New("review: Maintainer returned an invalid operation observation")
+	}
+	receipt := review.Receipt{State: observation.State, Kind: observation.Kind}
+	if observation.State != "completed" {
+		if observation.State != "missing" && observation.State != "planned" && observation.State != "executing" && observation.State != "indeterminate" {
+			return review.Receipt{}, errors.New("review: Maintainer returned an invalid operation state")
+		}
+		return receipt, nil
+	}
+	switch observation.Kind {
+	case "submit_pull_request_review":
+		var result struct {
+			Head    string `json:"head_sha"`
+			Verdict string `json:"verdict"`
+		}
+		if err := json.Unmarshal(observation.Result, &result); err != nil {
+			return review.Receipt{}, errors.New("review: Maintainer returned an invalid review receipt")
+		}
+		receipt.Head = strings.ToLower(result.Head)
+		switch result.Verdict {
+		case "allow":
+			receipt.Event = "ALLOW"
+		case "block":
+			receipt.Event = "REQUEST_CHANGES"
+		default:
+			return review.Receipt{}, errors.New("review: Maintainer returned an invalid review verdict")
+		}
+	case "enqueue_pull_request":
+		var result struct {
+			Head string `json:"head_sha"`
+		}
+		if err := json.Unmarshal(observation.Result, &result); err != nil {
+			return review.Receipt{}, errors.New("review: Maintainer returned an invalid enqueue receipt")
+		}
+		receipt.Head = strings.ToLower(result.Head)
+	default:
+		return review.Receipt{}, errors.New("review: Maintainer returned an invalid operation kind")
+	}
+	return receipt, nil
+}
+
 func (b *daemonReviewBackend) Enqueue(ctx context.Context, operation review.Operation) error {
 	digest := sha256.Sum256([]byte(operation.Request.Body))
 	return b.call(ctx, "enqueue_pull_request", map[string]any{"repository": b.repository, "pull_number": operation.Request.PullNumber, "head_sha": operation.Request.Head, "base": operation.Request.BaseRef, "operation_id": operation.EnqueueID, "reviewed_body_digest": "sha256:" + hex.EncodeToString(digest[:])})

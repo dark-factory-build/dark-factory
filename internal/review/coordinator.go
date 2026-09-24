@@ -44,6 +44,20 @@ type Verdict struct {
 	Body  string
 }
 
+// Receipt is the durable broker observation for a write operation. A receipt
+// is the only authority that turns a response-loss phase into a completed
+// external effect.
+type Receipt struct {
+	State string
+	Kind  string
+	Head  string
+	Event string
+}
+
+type Observer interface {
+	Observe(context.Context, string) (Receipt, error)
+}
+
 type Store interface {
 	Create(context.Context, Operation) error
 	Update(context.Context, Operation) error
@@ -103,11 +117,17 @@ func Prepare(request Request, now func() time.Time) (Operation, error) {
 
 // Resume continues an operation already durably claimed by the caller.
 func (c Coordinator) Resume(ctx context.Context, op Operation) (Operation, error) {
-	if err := validate(op.Request); err != nil || c.Store == nil || c.Backend == nil || c.Now == nil || op.ID == "" || op.State != "running" {
+	if err := validate(op.Request); err != nil || c.Store == nil || c.Backend == nil || c.Now == nil || op.ID == "" || (op.State != "running" && op.State != "submitting" && op.State != "enqueuing") {
 		if err == nil {
 			err = errors.New("review: incomplete coordinator")
 		}
 		return Operation{}, err
+	}
+	if op.State == "submitting" {
+		return c.reconcileSubmitting(ctx, op, nil)
+	}
+	if op.State == "enqueuing" {
+		return c.reconcileEnqueuing(ctx, op, nil)
 	}
 	checkout, cleanup, err := c.Backend.CloneReadOnly(ctx, op.Request)
 	if err != nil {
@@ -121,32 +141,39 @@ func (c Coordinator) Resume(ctx context.Context, op Operation) (Operation, error
 	if verdict.Event != "ALLOW" && verdict.Event != "REQUEST_CHANGES" {
 		return c.fail(ctx, op, errors.New("review: provider returned no valid verdict"), true)
 	}
-	op.Verdict, op.Detail, op.UpdatedAt = strings.ToLower(verdict.Event), verdict.Body, c.Now()
+	op.Verdict, op.Detail, op.State, op.UpdatedAt = strings.ToLower(verdict.Event), verdict.Body, "submitting", c.Now()
 	if err := c.Store.Update(ctx, op); err != nil {
 		return Operation{}, err
 	}
 	if err := c.Backend.Submit(ctx, op, verdict); err != nil {
+		if _, ok := c.Backend.(Observer); ok {
+			return c.reconcileSubmitting(ctx, op, err)
+		}
 		return c.fail(ctx, op, err, false)
 	}
-	if verdict.Event == "ALLOW" {
+	return c.finishSubmitted(ctx, op)
+}
+
+func (c Coordinator) finishSubmitted(ctx context.Context, op Operation) (Operation, error) {
+	op.Submitted = true
+	if op.Verdict == "allow" {
+		var err error
 		op.EnqueueID, err = operationID()
 		if err != nil {
 			return c.fail(ctx, op, err, false)
 		}
-		op.UpdatedAt = c.Now()
+		op.State, op.UpdatedAt = "enqueuing", c.Now()
 		if err := c.Store.Update(ctx, op); err != nil {
 			return Operation{}, err
 		}
 		if err := c.Backend.Enqueue(ctx, op); err != nil {
+			if _, ok := c.Backend.(Observer); ok {
+				return c.reconcileEnqueuing(ctx, op, err)
+			}
 			return c.fail(ctx, op, err, false)
 		}
 		op.State = "enqueued"
 	} else {
-		op.Submitted = true
-		op.UpdatedAt = c.Now()
-		if err := c.Store.Update(ctx, op); err != nil {
-			return Operation{}, err
-		}
 		op.State = "completed"
 		// Routing task feedback is a separate durable step. Keep the
 		// completed operation recoverable until that step has committed.
@@ -157,6 +184,82 @@ func (c Coordinator) Resume(ctx context.Context, op Operation) (Operation, error
 		return Operation{}, err
 	}
 	return op, nil
+}
+
+func (c Coordinator) reconcileSubmitting(ctx context.Context, op Operation, cause error) (Operation, error) {
+	observer, ok := c.Backend.(Observer)
+	if !ok {
+		if cause == nil {
+			cause = errors.New("review: submit receipt observer unavailable")
+		}
+		return c.fail(ctx, op, cause, false)
+	}
+	receipt, err := observer.Observe(ctx, op.ID)
+	if err != nil {
+		if cause != nil {
+			return op, errors.Join(cause, err)
+		}
+		return op, err
+	}
+	switch receipt.State {
+	case "completed":
+		if receipt.Kind != "submit_pull_request_review" || receipt.Head != op.Request.Head || receipt.Event != strings.ToUpper(op.Verdict) {
+			return c.fail(ctx, op, errors.New("review: submit receipt does not match operation"), false)
+		}
+		return c.finishSubmitted(ctx, op)
+	case "missing":
+		if cause == nil {
+			cause = errors.New("review: submit operation is missing")
+		}
+		return c.fail(ctx, op, cause, false)
+	case "planned", "executing", "indeterminate":
+		if cause == nil {
+			cause = fmt.Errorf("review: submit operation is %s", receipt.State)
+		}
+		return op, cause
+	default:
+		return op, errors.New("review: invalid submit operation state")
+	}
+}
+
+func (c Coordinator) reconcileEnqueuing(ctx context.Context, op Operation, cause error) (Operation, error) {
+	observer, ok := c.Backend.(Observer)
+	if !ok {
+		if cause == nil {
+			cause = errors.New("review: enqueue receipt observer unavailable")
+		}
+		return c.fail(ctx, op, cause, false)
+	}
+	receipt, err := observer.Observe(ctx, op.EnqueueID)
+	if err != nil {
+		if cause != nil {
+			return op, errors.Join(cause, err)
+		}
+		return op, err
+	}
+	switch receipt.State {
+	case "completed":
+		if receipt.Kind != "enqueue_pull_request" || receipt.Head != op.Request.Head {
+			return c.fail(ctx, op, errors.New("review: enqueue receipt does not match operation"), false)
+		}
+		op.State, op.UpdatedAt = "enqueued", c.Now()
+		if err := c.Store.Update(ctx, op); err != nil {
+			return Operation{}, err
+		}
+		return op, nil
+	case "missing":
+		if cause == nil {
+			cause = errors.New("review: enqueue operation is missing")
+		}
+		return c.fail(ctx, op, cause, false)
+	case "planned", "executing", "indeterminate":
+		if cause == nil {
+			cause = fmt.Errorf("review: enqueue operation is %s", receipt.State)
+		}
+		return op, cause
+	default:
+		return op, errors.New("review: invalid enqueue operation state")
+	}
 }
 
 // Retry starts a new durable attempt for a failed operation. The original

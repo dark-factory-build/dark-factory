@@ -174,7 +174,7 @@ func TestRestartReconcilesPublicationReviewAndRetriesWithoutDuplicateSubmit(t *t
 	}
 }
 
-func TestRestartRefusesRetryAfterUncertainExternalReviewWrites(t *testing.T) {
+func TestRestartReconcilesUncertainExternalReviewWritesWithoutDuplicateWrites(t *testing.T) {
 	for _, test := range []struct {
 		name         string
 		failAt       int
@@ -197,25 +197,34 @@ func TestRestartRefusesRetryAfterUncertainExternalReviewWrites(t *testing.T) {
 			}
 			before := lastDurableReview(t, fixture.store, projectID)
 			hasEnqueueReceipt := before.EnqueueID != ""
-			if before.State != "running" || before.Verdict != "allow" || before.Request.Head != head || hasEnqueueReceipt != (test.wantEnqueues == 1) || backend.submits != test.wantSubmits || backend.enqueues != test.wantEnqueues {
+			wantState := "submitting"
+			if test.wantEnqueues == 1 {
+				wantState = "enqueuing"
+			}
+			if before.State != wantState || before.Verdict != "allow" || before.Request.Head != head || hasEnqueueReceipt != (test.wantEnqueues == 1) || before.Submitted != (test.wantEnqueues == 1) || backend.submits != test.wantSubmits || backend.enqueues != test.wantEnqueues {
 				t.Fatalf("boundary operation=%+v backend=%+v", before, backend)
+			}
+			backend.observations = map[string]review.Receipt{}
+			if before.State == "submitting" {
+				backend.observations[before.ID] = review.Receipt{State: "completed", Kind: "submit_pull_request_review", Head: head, Event: "ALLOW"}
+			} else {
+				backend.observations[before.EnqueueID] = review.Receipt{State: "completed", Kind: "enqueue_pull_request", Head: head}
 			}
 
 			restarted, err := newDaemon(fixture.store, func() time.Time { return time.Unix(7, 0) })
 			if err != nil {
 				t.Fatal(err)
 			}
+			restarted.reviewBackend = func(string, uint64) review.Backend { return backend }
 			if count, err := restarted.RecoverReviewOperations(context.Background()); err != nil || count != 1 {
 				t.Fatalf("reconciliation count=%d err=%v", count, err)
 			}
 			recovered := lastDurableReview(t, fixture.store, projectID)
-			if recovered.State != "failed" || recovered.Retryable || recovered.Request.Head != head || recovered.ID != before.ID {
+			if recovered.State != "enqueued" || recovered.Retryable || recovered.Request.Head != head || recovered.ID != before.ID || backend.submits != 1 || backend.enqueues != 1 {
 				t.Fatalf("uncertain operation=%+v", recovered)
 			}
-			restarted.reviewBackend = func(string, uint64) review.Backend { return backend }
-			result := restarted.Intake(context.Background(), api.IntakeInput{Action: "review_pr", ProjectID: projectID.String(), ReviewRequest: &api.ReviewRequest{RetryOperation: recovered.ID}})
-			if result.State == "ok" || backend.submits != test.wantSubmits || backend.enqueues != test.wantEnqueues {
-				t.Fatalf("uncertain retry result=%+v operation=%+v backend=%+v", result, recovered, backend)
+			if count, err := restarted.RecoverReviewOperations(context.Background()); err != nil || count != 0 {
+				t.Fatalf("duplicate reconciliation count=%d err=%v", count, err)
 			}
 		})
 	}
