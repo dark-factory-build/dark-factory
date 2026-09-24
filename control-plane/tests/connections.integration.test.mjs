@@ -357,6 +357,13 @@ test('two principals: callback, pagination, refresh, replay, grants and revocati
     assert.match(badFooterReply.content[0].text, /^invalid_input:.*trailing footer `Refs #11`/);
     assert.equal(recoveryPostCount, 1, 'an invalid footer makes no create POST');
     assert.equal((await (await call(alice, 'observe_operation', { repository: recovery.repository, operation_id: badFooter.operation_id })).json()).result.structuredContent.state, 'missing', 'an invalid footer is never marked executing');
+    // A trailing keyword line missing its `#N` delimiter is malformed too.
+    const undelimited = { ...recovery, operation_id: '6d1f0f8e-7f1f-11f0-952e-acde48001129', body: 'exact work\n\nRefs team/backlog' };
+    const undelimitedReply = (await (await call(alice, 'create_pull_request', undelimited)).json()).result;
+    assert.equal(undelimitedReply.isError, true);
+    assert.match(undelimitedReply.content[0].text, /^invalid_input:.*trailing footer `Refs team\/backlog`/);
+    assert.equal(recoveryPostCount, 1, 'an undelimited footer makes no create POST');
+    assert.equal((await (await call(alice, 'observe_operation', { repository: recovery.repository, operation_id: undelimited.operation_id })).json()).result.structuredContent.state, 'missing', 'an undelimited footer is never marked executing');
 
     recoveryPullVisible = false;
     recoveryPostMode = 'refused';

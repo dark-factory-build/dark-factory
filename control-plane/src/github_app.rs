@@ -3352,14 +3352,14 @@ impl CreatePullRequest {
                 continue;
             }
             // Footer-shaped: `Refs`/`Closes`, any case, then an unqualified,
-            // qualified (`owner/repo#N`), or URL reference.
-            let shaped = line
-                .split_once(char::is_whitespace)
-                .is_some_and(|(keyword, target)| {
-                    (keyword.eq_ignore_ascii_case("refs") || keyword.eq_ignore_ascii_case("closes"))
-                        && (target.contains('#') || target.contains("://"))
-                });
-            if !owned && shaped {
+            // qualified (`owner/repo#N`), or URL reference, or a lone (or no)
+            // target such as `Refs team/backlog` that lacks its `#N`. A
+            // keyword opening prose of several words without either stays text.
+            let (keyword, target) = line.split_once(char::is_whitespace).unwrap_or((line, ""));
+            let keyword = matches!(keyword.to_ascii_lowercase().as_str(), "refs" | "closes");
+            let reference = target.contains('#') || target.contains("://");
+            let lone = !target.trim().contains(char::is_whitespace);
+            if !owned && keyword && (reference || lone) {
                 return Err(OperationError::InvalidFooter(
                     line.chars().take(80).collect(),
                 ));
@@ -11024,12 +11024,22 @@ mod tests {
             conflicting_footer.validate().err(),
             Some(OperationError::InvalidFooter("Refs #391".into()))
         );
-        let mut malformed_footer = create.clone();
-        malformed_footer.body.push_str("\n\ncloses #390x\n");
-        assert_eq!(
-            malformed_footer.validate().err(),
-            Some(OperationError::InvalidFooter("closes #390x".into()))
-        );
+        for footer in [
+            "closes #390x",
+            "Refs team/backlog",
+            "Closes team/backlog",
+            "Refs",
+        ] {
+            let mut malformed_footer = create.clone();
+            malformed_footer.body.push_str(&format!("\n\n{footer}\n"));
+            assert_eq!(
+                malformed_footer.validate().err(),
+                Some(OperationError::InvalidFooter(footer.into()))
+            );
+        }
+        let mut closing_prose = create.clone();
+        closing_prose.body.push_str("\n\nCloses the old gap.");
+        assert!(closing_prose.validate().is_ok());
         // Another reference above the owned trailing footer is caller text.
         let mut reference_above_footer = create.clone();
         reference_above_footer
