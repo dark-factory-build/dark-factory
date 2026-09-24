@@ -3351,15 +3351,14 @@ impl CreatePullRequest {
                 owned = true;
                 continue;
             }
-            // Footer-shaped: `Refs`/`Closes`, any case, then an unqualified,
-            // qualified (`owner/repo#N`), or URL reference, or a lone (or no)
-            // target such as `Refs team/backlog` that lacks its `#N`. A
-            // keyword opening prose of several words without either stays text.
+            // Footer-shaped: `Refs`/`Closes`, any case, then at most one token,
+            // whatever it is (`#N`, `owner/repo#N`, a URL, or a malformed one
+            // such as `team/backlog`). A keyword opening prose of several words
+            // stays text, even when that prose mentions `#N` or a URL.
             let (keyword, target) = line.split_once(char::is_whitespace).unwrap_or((line, ""));
             let keyword = matches!(keyword.to_ascii_lowercase().as_str(), "refs" | "closes");
-            let reference = target.contains('#') || target.contains("://");
             let lone = !target.trim().contains(char::is_whitespace);
-            if !owned && keyword && (reference || lone) {
+            if !owned && keyword && lone {
                 return Err(OperationError::InvalidFooter(
                     line.chars().take(80).collect(),
                 ));
@@ -11037,9 +11036,16 @@ mod tests {
                 Some(OperationError::InvalidFooter(footer.into()))
             );
         }
-        let mut closing_prose = create.clone();
-        closing_prose.body.push_str("\n\nCloses the old gap.");
-        assert!(closing_prose.validate().is_ok());
+        for prose in [
+            "Closes the old gap.",
+            "Closes the old gap in issue #123.",
+            "Refs the notes at https://example.com/notes for context.",
+        ] {
+            let mut closing_prose = create.clone();
+            closing_prose.body.push_str(&format!("\n\n{prose}"));
+            assert!(closing_prose.validate().is_ok(), "refused prose: {prose}");
+            assert!(closing_prose.marked_body().unwrap().contains(prose));
+        }
         // Another reference above the owned trailing footer is caller text.
         let mut reference_above_footer = create.clone();
         reference_above_footer
