@@ -104,8 +104,24 @@ grep -F -x "XDG_DATA_HOME=$repository_root/.tools/local-ci-state/data" "$child_e
 grep -F -x "XDG_STATE_HOME=$repository_root/.tools/local-ci-state/state" "$child_environment" >/dev/null \
     || fail "safe XDG state directory was not installed"
 
+shared_go_module_cache="$temporary_root/shared-account/Library/Caches/dark-factory/local-ci/trusted/go-mod"
+/bin/mkdir -p "$shared_go_module_cache"
+shared_child_environment=$temporary/shared-child.env
+(
+    export DF_CI_GO_MODULE_CACHE="$shared_go_module_cache"
+    # shellcheck source=scripts/local-ci-environment.sh
+    . "$boundary"
+    env
+) >"$shared_child_environment"
+grep -F -x "DF_CI_GO_MODULE_CACHE=$shared_go_module_cache" "$shared_child_environment" >/dev/null \
+    || fail "shared Go module cache projection was lost"
+grep -F -x "GOMODCACHE=$shared_go_module_cache" "$shared_child_environment" >/dev/null \
+    || fail "Go did not use the projected shared module cache"
+grep -F -x 'GOPROXY=off' "$shared_child_environment" >/dev/null \
+    || fail "projected Go module cache did not disable network fallback"
+
 fixture=$temporary/fixture
-/bin/mkdir -p "$fixture/scripts" "$fixture/.tools-target"
+/bin/mkdir -p "$fixture/scripts" "$fixture/.tools-target" "$fixture/cache"
 /bin/cp "$boundary" "$fixture/scripts/local-ci-environment.sh"
 /bin/cat >"$fixture/scripts/entry.sh" <<'EOF'
 #!/bin/sh
@@ -132,6 +148,31 @@ set -e
 printf '%s\n' "$state_output" | grep -F 'refusing unsafe .tools/local-ci-state path' >/dev/null \
     || fail "symlink private state refusal was unclear: $state_output"
 /bin/rm -rf "$fixture/.tools"
+
+/bin/mkdir "$temporary/untrusted-module-cache"
+for invalid_module_cache in / "$fixture/cache" "$temporary/untrusted-module-cache" "$temporary/does-not-exist"; do
+    if (CDPATH='' cd -- "$fixture" && DF_CI_GO_MODULE_CACHE="$invalid_module_cache" HOME="$temporary/fixture-home" /bin/sh ./scripts/entry.sh) >"$temporary/invalid-module-cache.out" 2>&1; then
+        fail "unsafe or unavailable shared Go module cache was accepted: $invalid_module_cache"
+    fi
+done
+
+/bin/mkdir -p "$temporary/real-account/Library/Caches/dark-factory/local-ci/trusted/go-mod"
+/bin/ln -s "$temporary/real-account" "$temporary/linked-account"
+linked_module_cache="$temporary/linked-account/Library/Caches/dark-factory/local-ci/trusted/go-mod"
+if (CDPATH='' cd -- "$fixture" && DF_CI_GO_MODULE_CACHE="$linked_module_cache" HOME="$temporary/fixture-home" /bin/sh ./scripts/entry.sh) >"$temporary/invalid-module-cache.out" 2>&1; then
+    fail "symlink account-home ancestor was accepted"
+fi
+
+/bin/mkdir "$temporary/module-cache-target"
+/bin/ln -s "$temporary/module-cache-target" "$temporary/module-cache-link"
+if (CDPATH='' cd -- "$fixture" && DF_CI_GO_MODULE_CACHE="$temporary/module-cache-link" HOME="$temporary/fixture-home" /bin/sh ./scripts/entry.sh) >"$temporary/invalid-module-cache.out" 2>&1; then
+    fail "symlink shared Go module cache was accepted"
+fi
+
+: >"$temporary/module-cache-file"
+if (CDPATH='' cd -- "$fixture" && DF_CI_GO_MODULE_CACHE="$temporary/module-cache-file" HOME="$temporary/fixture-home" /bin/sh ./scripts/entry.sh) >"$temporary/invalid-module-cache.out" 2>&1; then
+    fail "regular-file shared Go module cache was accepted"
+fi
 
 /bin/mkdir -p "$temporary/explicit-cache"
 explicit_root="$temporary_root/explicit-cache/root"

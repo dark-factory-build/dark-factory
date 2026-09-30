@@ -780,6 +780,12 @@ func sandboxGrants(request Request) []grant {
 	// Node/Corepack reads the system OpenSSL configuration before dispatch.
 	// Permit this file, not the surrounding directory or operator configuration.
 	grants = append(grants, grant{"/System/Library/OpenSSL/openssl.cnf", false})
+	// Go downloads are prepared by the trusted local-CI boundary. Workers may
+	// consume that cache, but never mutate the operator home or the cache that
+	// belongs to another trust context.
+	if request.installation.provider != kernel.ProviderShell {
+		grants = append(grants, grant{goModuleCachePath(request.runtime.accountHome), false})
+	}
 	for _, root := range filepath.SplitList(request.runtime.toolchainReadRoots) {
 		grants = append(grants, grant{root, false})
 	}
@@ -1080,9 +1086,13 @@ func (runtime RuntimePaths) environment(kind kernel.Provider) []string {
 	// build caches live in the private runtime home rather than the account's.
 	if kind != kernel.ProviderShell {
 		environment = append(environment,
+			"GOENV=off",
+			"GOTOOLCHAIN=local",
 			"GOCACHE="+filepath.Join(runtime.home, ".cache", "go-build"),
 			"GOPATH="+filepath.Join(runtime.home, "go"),
-			"GOMODCACHE="+filepath.Join(runtime.home, "go", "pkg", "mod"),
+			"GOMODCACHE="+goModuleCachePath(runtime.accountHome),
+			"GOPROXY=off",
+			"DF_CI_GO_MODULE_CACHE="+goModuleCachePath(runtime.accountHome),
 			"CARGO_HOME="+filepath.Join(runtime.home, ".cargo"),
 			"RUSTUP_HOME="+filepath.Join(runtime.accountHome, ".rustup"),
 			"COREPACK_HOME="+filepath.Join(runtime.home, ".cache", "corepack"),
@@ -1125,6 +1135,13 @@ func (runtime RuntimePaths) environment(kind kernel.Provider) []string {
 		"GIT_SSH_COMMAND=/usr/bin/false",
 		"GH_CONFIG_DIR=/dev/null",
 	)
+}
+
+// goModuleCachePath is the one shared-cache path native workers may see. It
+// matches local-ci-environment.sh's trusted cache layout and deliberately
+// leaves the rest of the account home outside the provider grant.
+func goModuleCachePath(accountHome string) string {
+	return filepath.Join(accountHome, "Library", "Caches", "dark-factory", "local-ci", "trusted", "go-mod")
 }
 
 func validAbsolute(value string, limit int) bool {
