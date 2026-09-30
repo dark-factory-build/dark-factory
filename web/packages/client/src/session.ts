@@ -1076,6 +1076,12 @@ export class BrowserSession {
     }
     if (id !== undefined && this.#pending.has(id)) {
       this.#pending.delete(id);
+      this.#refreshID = undefined;
+      const error = new SessionError(frame.body.code, frame.body.retryable);
+      if (!error.retryable) {
+        notify(this.#options.onError, error);
+        return;
+      }
     }
     throw new SessionError(frame.body.code, frame.body.retryable);
   }
