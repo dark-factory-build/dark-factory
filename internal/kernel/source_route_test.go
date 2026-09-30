@@ -83,6 +83,9 @@ func TestRetainedSourceReviewRouteLeavesOrdinaryTasksProviderAgnostic(t *testing
 		if err := validateRetainedSourceReviewRoute("ordinary worker task", Agent{Role: RoleWorker, Provider: provider}); err != nil {
 			t.Fatalf("ordinary %s task rejected: %v", provider, err)
 		}
+		if err := validateRetainedSourceReviewRoute("FACTORY_SOURCE owner/repo#1\nimplement the requested change", Agent{Role: RoleWorker, Provider: provider}); err != nil {
+			t.Fatalf("ordinary marked %s task rejected: %v", provider, err)
+		}
 	}
 }
 
@@ -174,7 +177,7 @@ func TestRetainedSourceReviewRouteRejectsUnassignedMalformedIntentBeforeRun(t *t
 		t.Fatal(err)
 	}
 	for seed, malformed := range map[byte]string{
-		23: "FACTORY_SOURCE dark-factory-build/dark-factory#1065\nproducer task and Change are only in prose below",
+		23: "FACTORY_SOURCE dark-factory-build/dark-factory#1065\nIndependent exact-source review; producer task and Change are only in prose below",
 		24: "Independent exact-source review of #978 work revision 19\nproducer task and Change are only in prose below",
 	} {
 		task, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, seed), ProjectID: project.ID, IncarnationID: incarnationID(t, seed), Title: "malformed source review", Body: malformed}, mustTime(t, int64(seed)))
@@ -193,6 +196,14 @@ func TestRetainedSourceReviewRouteRejectsUnassignedMalformedIntentBeforeRun(t *t
 		if err != nil || !found || queued.Status != TaskQueued {
 			t.Fatalf("malformed source-review task %d changed after refusal: %+v found=%v err=%v", seed, queued, found, err)
 		}
+	}
+	ordinary, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 25), ProjectID: project.ID, IncarnationID: incarnationID(t, 25), Title: "ordinary source task", Body: "FACTORY_SOURCE owner/repo#1\nimplement the requested change"}, mustTime(t, 25))
+	if err != nil || ordinary.Status != TaskQueued {
+		t.Fatalf("ordinary marked task enqueue = %+v err=%v", ordinary, err)
+	}
+	result, err := store.AdmitNext(ctx, admissionKeys(t, 55, nil), mustTime(t, 55))
+	if err != nil || !result.Admitted() || result.Run == nil || result.Run.TaskID != ordinary.ID {
+		t.Fatalf("ordinary marked task admission = %+v err=%v", result, err)
 	}
 }
 

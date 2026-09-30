@@ -50,11 +50,12 @@ func retainedSourceReviewTaskSQL() string {
 }
 
 // retainedSourceReviewIntentSQL also catches malformed source-review tasks
-// whose authority line is missing entirely.
+// whose authority line is missing entirely. FACTORY_SOURCE alone is ordinary
+// provenance and is intentionally not enough to identify a review.
 func retainedSourceReviewIntentSQL() string {
 	taskText := `CASE WHEN a.provider <> 'shell' AND t.body = '' THEN t.title ELSE t.body END`
 	text := `lower(replace(` + taskText + `, '-', ' '))`
-	return `(` + retainedSourceReviewTaskSQL() + ` OR instr(` + taskText + `, 'FACTORY_SOURCE ') > 0 OR instr(` + text + `, 'attempt source') > 0 OR instr(` + text + `, 'retained change') > 0 OR instr(` + text + `, 'exact retained source') > 0 OR (instr(` + text + `, 'exact source') > 0 AND instr(` + text + `, 'review') > 0))`
+	return `(` + retainedSourceReviewTaskSQL() + ` OR instr(` + text + `, 'attempt source') > 0 OR instr(` + text + `, 'retained change') > 0 OR instr(` + text + `, 'exact retained source') > 0 OR (instr(` + text + `, 'exact source') > 0 AND instr(` + text + `, 'review') > 0) OR (instr(` + taskText + `, 'FACTORY_SOURCE ') > 0 AND instr(` + text + `, 'review') > 0))`
 }
 
 func retainedSourceReviewFields(line string) []string {
@@ -83,19 +84,18 @@ func validateRetainedSourceReviewRoute(taskBody string, agent Agent) error {
 }
 
 // retainedSourceReviewIntent catches source-review tasks whose authority line
-// is missing or malformed. A source marker or an explicit retained-source
-// instruction is not ordinary work: it must be paired with the exact first
-// line parsed by ParseRetainedSourceReviewTask.
+// is missing or malformed. A source marker remains ordinary provenance unless
+// the task also contains explicit review intent.
 func retainedSourceReviewIntent(taskBody string) bool {
 	if _, review, _ := ParseRetainedSourceReviewTask(taskBody); review {
 		return true
 	}
 	lower := strings.NewReplacer("-", " ").Replace(strings.ToLower(taskBody))
-	return strings.Contains(taskBody, "FACTORY_SOURCE ") ||
-		strings.Contains(lower, "attempt source") ||
+	return strings.Contains(lower, "attempt source") ||
 		strings.Contains(lower, "retained change") ||
 		strings.Contains(lower, "exact retained source") ||
-		strings.Contains(lower, "exact source") && strings.Contains(lower, "review")
+		strings.Contains(lower, "exact source") && strings.Contains(lower, "review") ||
+		strings.Contains(taskBody, "FACTORY_SOURCE ") && strings.Contains(lower, "review")
 }
 
 // ParseRetainedSourceReviewTask reads the exact retained identity from the
