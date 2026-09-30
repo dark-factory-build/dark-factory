@@ -491,7 +491,7 @@ fn tools() -> Value {
                 "repository_id": {"type": "integer", "minimum": 1}, "next_page": {"type": ["integer", "null"], "minimum": 2, "maximum": 1000},
                 "pull_requests": {"type": "array", "maxItems": 100, "items": {
                     "type": "object", "additionalProperties": false, "required": ["number", "body", "head_sha", "base_sha", "base_ref"],
-                    "properties": {"number": {"type": "integer", "minimum": 1}, "body": {"type": "string", "maxLength": 262144}, "head_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"}, "base_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"}, "base_ref": {"type": "string"}}
+                    "properties": {"number": {"type": "integer", "minimum": 1}, "body": {"type": "string", "maxLength": 262144}, "head_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"}, "base_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"}, "base_ref": {"type": "string"}, "title": {"type": "string"}, "url": {"type": "string"}, "head_ref": {"type": "string"}, "state": {"type": "string", "enum": ["open", "closed", "merged"]}, "mergeable": {"type": "boolean"}, "merge_state_status": {"type": "string"}}
                 }}
             }
         },
@@ -1448,6 +1448,13 @@ fn operation_error(id: Value, error: OperationError) -> Response {
         OperationError::InvalidInput => {
             tool_error(id, "invalid_input", "Operation input is invalid.")
         }
+        OperationError::InvalidFooter(line) => tool_error(
+            id,
+            "invalid_input",
+            &format!(
+                "Operation input is invalid: the body's trailing footer `{line}` is not this pull request's source footer."
+            ),
+        ),
         // Not only heads: a read whose answer does not match what was asked
         // for -- a path that is a directory, a symlink, or a submodule -- is
         // the same class of "you did not get what you named", and an
@@ -1467,6 +1474,13 @@ fn operation_error(id: Value, error: OperationError) -> Response {
             id,
             "refused",
             &format!("The request was refused: {reason}."),
+        ),
+        OperationError::PullRequestUncertain(reason) => tool_error(
+            id,
+            "indeterminate",
+            &format!(
+                "{reason}. Preserve this operation UUID and exact request. Repeating that same create_pull_request request reconciles existing work without another POST while uncertain. If it remains unresolved, request an operator decision with this evidence; do not create a replacement operation or keep polling."
+            ),
         ),
         OperationError::Indeterminate => tool_error(
             id,

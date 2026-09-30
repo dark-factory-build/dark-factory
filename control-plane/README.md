@@ -219,6 +219,24 @@ before the route receives traffic. A service token needs a `non_identity`
 not match a service token and silently falls through to interactive IdP login,
 which a headless caller cannot complete.
 
+The deployment gate reads the live application and its policies before
+promotion and requires this policy shape for the `/mcp` application:
+
+- exactly one application whose domain is `maintainer.darkfactory.build/mcp` (the
+  Cloudflare API's hostname-and-path form, without the scheme);
+- every policy is either an `allow` policy whose includes are all exact emails
+  or exact `service_token`s, with at least one email, or a `non_identity` policy
+  whose includes are all exact `service_token`s; and
+- at least one of each.
+
+`require` and `exclude` entries only narrow a policy and are accepted. Anything
+that widens access (a `bypass` policy, or an `everyone`, email-domain, IP,
+group or any-valid-service-token include) fails the deployment, as does either
+missing principal. A refusal prints the live shape as decisions and rule kinds
+only, never emails or token IDs. The gate never reads or changes the token
+value; the Worker still binds the JWT's `common_name` to its injected
+`DARK_FACTORY_CLOUDFLARE_ACCESS_SERVICE_TOKEN_ID` secret.
+
 The Worker also validates the injected JWT independently: it fetches the
 bounded key set from the configured team domain, matches one RS256 signing key
 by `kid`, verifies the signature with WebCrypto, and binds issuer, single

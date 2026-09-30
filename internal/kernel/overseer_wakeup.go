@@ -91,7 +91,7 @@ func (store *Store) EnqueueOverseerWakeups(ctx context.Context, at UnixMillis) (
 		}
 		// Validate once, before the first task or cursor write; an unchanged
 		// poll rolls back without scanning unrelated retained history.
-		if !changed && (fullReconciliation || len(targets) != 0 || cursor != factory.Head.Int64()) {
+		if !changed && (fullReconciliation || len(targets) != 0 || len(publicationTargets) != 0 || cursor != factory.Head.Int64()) {
 			if err := validateDurableControls(ctx, tx.connection); err != nil {
 				return nil, tx.Rollback(err)
 			}
@@ -244,9 +244,7 @@ func unpublishedPublicationTargets(ctx context.Context, connection *sql.Conn, pr
 		  AND NOT EXISTS (SELECT 1 FROM tasks AS prior WHERE prior.assigned_agent_id = ?
 		      AND (instr(prior.body, 'publication_change=' || lower(hex(c.id)) || ':' || c.revision || ':' || lower(hex(c.head_commit))) > 0
 		           OR (instr(prior.body, 'publication attention overflow: full reconciliation required') > 0
-		               AND c.updated_at_ms <= prior.updated_at_ms)
-		           OR (prior.body = (SELECT idle_instruction FROM agents WHERE agents.id = prior.assigned_agent_id)
-		               AND c.updated_at_ms <= prior.updated_at_ms)))
+	               AND c.updated_at_ms <= prior.updated_at_ms)))
 		ORDER BY c.updated_at_ms, c.id LIMIT 32`, projectID.Bytes(), PublicationAttentionAfter.Milliseconds(), at, agentID.Bytes())
 	if err != nil {
 		return nil, err

@@ -167,7 +167,7 @@ test("STATE_GET carries no selector and STATE_CHANGED carries only a head", () =
   expectMalformed(() => decodeServerControl(`{"type":"STATE_CHANGED","id":"watch","body":{}}`));
 });
 
-test("retired state frames are refused and the deleted envelope generation is ignored", () => {
+test("retired state frames are ignored and the deleted envelope generation is ignored", () => {
   // The envelope has no generation to refuse: an older console's `v` member is
   // an unknown member like any other, so it is ignored.
   assert.deepEqual(
@@ -178,7 +178,7 @@ test("retired state frames are refused and the deleted envelope generation is ig
     expectMalformed(() => decodeClientControl(`{"type":"${type}","id":"x","body":{}}`));
   }
   for (const type of ["STATE_RESTART", "STATE_EVENT", "STATE_ENTITY"]) {
-    expectMalformed(() => decodeServerControl(`{"type":"${type}","id":"x","body":{}}`));
+    assert.equal(decodeServerControl(`{"type":"${type}","id":"x","body":{}}`).type, "UNKNOWN");
   }
 });
 
@@ -418,9 +418,12 @@ test("the client tolerates added members but nothing else", () => {
   expectMalformed(() => decodeClientControl(watch.replace('"after_head":"1"', `"after_head":"1","future":[${wide}]`)));
   const deep = "[".repeat(18) + "0" + "]".repeat(18);
   expectMalformed(() => decodeClientControl(watch.replace('"after_head":"1"', `"after_head":"1","future":${deep}`)));
-  // Only members are tolerated: an unknown type and a wrong direction remain
-  // finite refusals.
-  expectMalformed(() => decodeServerControl(snapshot.replace('"STATE_SNAPSHOT"', '"STATE_FUTURE"')));
+  // Only client-direction unknown types remain refusals. Server-direction
+  // unknown types are additive and ignored by the session.
+  const future = decodeServerControl(snapshot.replace('"STATE_SNAPSHOT"', '"STATE_FUTURE"'));
+  assert.equal(future.type, "UNKNOWN");
+  assert.equal(future.unknownType, "STATE_FUTURE");
+  expectMalformed(() => decodeClientControl(snapshot.replace('"STATE_SNAPSHOT"', '"STATE_FUTURE"')));
   expectMalformed(() => decodeClientControl(snapshot.replace('"body":{', '"future":1,"body":{')));
 });
 

@@ -2008,6 +2008,36 @@ test("a verb the daemon does not know refuses that request alone", async () => {
   session.close();
 });
 
+test("unknown server frames are ignored and unknown errors reject only their request", async () => {
+  const { session, socket } = await openHumanSession();
+  socket.reply('{"type":"STATE_FUTURE","id":"future","body":{"added":true}}');
+  await tick();
+  assert.equal(session.status, "ready");
+
+  const pending = session.discoverAccounts();
+  const request = decodeClientControl(socket.sent.at(-1));
+  socket.reply(JSON.stringify({ type: "ERROR", id: request.id, body: { code: "future_error", retryable: true } }));
+  await assert.rejects(pending, (error) => error instanceof SessionError && error.code === "internal" && !error.retryable);
+  assert.equal(session.status, "ready");
+  session.close();
+});
+
+test("unknown errors on a generic STATE_GET refuse only that refresh", async () => {
+  const errors = [];
+  const { session, socket } = await openControlledStateSession({ onError: (error) => errors.push(error) });
+  const watch = lastFrame(socket, "STATE_WATCH");
+  socket.reply(encodeStateChanged(watch.id, { head: 2n }));
+  await tick();
+  const refresh = decodeClientControl(socket.sent.at(-1));
+  assert.equal(refresh.type, "STATE_GET");
+  socket.reply(JSON.stringify({ type: "ERROR", id: refresh.id, body: { code: "future_error", retryable: true } }));
+  await tick();
+  assert.equal(session.status, "ready");
+  assert.equal(errors.at(-1).code, "internal");
+  assert.equal(errors.at(-1).retryable, false);
+  session.close();
+});
+
 test("an agent's idle rule travels on AGENT_UPDATE and comes back on the snapshot", async () => {
   const { session, socket } = await openHumanSession();
   const agentId = "7c".repeat(16);

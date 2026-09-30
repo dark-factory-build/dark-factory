@@ -332,14 +332,14 @@ func runAttemptWorkerHelper(args []string) error {
 		// native-raw greets with more than the terminal's output buffer and
 		// only then takes the terminal out of canonical mode, as an
 		// interactive CLI does while it starts; native-chatty then keeps
-		// printing for two seconds while it waits for its line; native-exit
+		// printing for one second while it waits for its line; native-exit
 		// dies at once.
 		greeting := ""
 		switch mode {
 		case "native-raw":
 			greeting = "head -c 2048 /dev/zero | tr '\\0' x; sleep 0.3; stty -icanon || exit 96; "
 		case "native-chatty":
-			greeting = "stty -icanon || exit 96; (i=0; while [ $i -lt 20 ]; do printf .; sleep 0.1; i=$((i+1)); done) & "
+			greeting = fmt.Sprintf("stty -icanon || exit 96; (i=0; while [ $i -lt 10 ]; do sleep 0.1; printf .; i=$((i+1)); done; : > %q) & ", filepath.Join(root, "chatter.done"))
 		case "native-exit":
 			greeting = "exit 3; "
 		}
@@ -925,7 +925,7 @@ func TestAttemptRunnerTypesTheStartupPromptOnlyOnceTheProviderIsRaw(t *testing.T
 }
 
 // The submitting CR waits for the provider's output to go quiet: a provider
-// that keeps printing for two seconds after the prompt is typed gets its
+// that keeps printing for one second after the prompt is typed gets its
 // line completed after that, well before the five-second ceiling.
 func TestAttemptRunnerSubmitsTheStartupPromptOnlyOnceTheProviderIsQuiet(t *testing.T) {
 	f := newAttemptFixture(t, "native-chatty", "")
@@ -945,10 +945,24 @@ func TestAttemptRunnerSubmitsTheStartupPromptOnlyOnceTheProviderIsQuiet(t *testi
 	if body, err := os.ReadFile(startup); err != nil || string(body) != "native-startup" {
 		t.Fatalf("provider.startup=%q err=%v", body, err)
 	}
-	// Printing lasts about two seconds from the prompt; the CR follows the
-	// quiet spell after it, and never waits for the ceiling.
-	if elapsed < 2*time.Second || elapsed >= startupEnterCeiling {
-		t.Fatalf("startup line completed %v after ready, want after the chatter's two seconds and before the %v ceiling", elapsed, startupEnterCeiling)
+	// The CR follows the quiet spell after the provider's last output,
+	// measured from the witness the chatter writes as it finishes (ready
+	// arrives after the chatter starts, so time since ready undercounts),
+	// and never waits for the ceiling. One second of chatter leaves about
+	// three times the nominal duration before the ceiling: on 22 Sep 2026
+	// a loaded host stretched two seconds of chatter past the ceiling and
+	// failed every pre-review gate.
+	chatterDone, err := os.Stat(filepath.Join(f.root, "chatter.done"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	submitted, err := os.Stat(startup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	quiet := submitted.ModTime().Sub(chatterDone.ModTime())
+	if quiet < startupEnterQuiet-startupEnterTick || elapsed >= startupEnterCeiling {
+		t.Fatalf("startup line completed %v after the chatter's last output and %v after ready, want at least the %v quiet spell (less one %v tick of skew) and before the %v ceiling", quiet, elapsed, startupEnterQuiet, startupEnterTick, startupEnterCeiling)
 	}
 	if err := os.WriteFile(filepath.Join(f.root, "finish"), nil, 0o600); err != nil {
 		t.Fatal(err)

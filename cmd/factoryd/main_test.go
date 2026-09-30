@@ -237,7 +237,7 @@ func TestRunReportsStartupFailureAndUsage(t *testing.T) {
 }
 
 func TestStartupCancellationIsCleanAtEveryStartupPhase(t *testing.T) {
-	for _, phase := range []string{"home", "store", "runtime parent", "supervisor spec", "daemon", "recovery sweep", "local API", "listener", "browser", "scheduler"} {
+	for _, phase := range []string{"home", "store", "runtime parent", "supervisor spec", "daemon", "maintainer", "review recovery", "recovery sweep", "local API", "listener", "browser", "scheduler"} {
 		t.Run(phase, func(t *testing.T) {
 			home := initializedHome(t)
 			ctx, cancel := context.WithCancel(context.Background())
@@ -260,6 +260,34 @@ func TestStartupCancellationIsCleanAtEveryStartupPhase(t *testing.T) {
 				t.Fatal(err)
 			}
 		})
+	}
+}
+
+func TestReviewRecoveryRunsAfterMaintainerConfiguration(t *testing.T) {
+	home := initializedHome(t)
+	var phases []string
+	startupPhaseHook = func(observed string) { phases = append(phases, observed) }
+	defer func() { startupPhaseHook = nil }()
+
+	owner, err := openProcess(context.Background(), testConfig(home))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := owner.close(); err != nil {
+		t.Fatal(err)
+	}
+
+	maintainer, recovery := -1, -1
+	for index, phase := range phases {
+		switch phase {
+		case "maintainer":
+			maintainer = index
+		case "review recovery":
+			recovery = index
+		}
+	}
+	if maintainer == -1 || recovery == -1 || maintainer > recovery {
+		t.Fatalf("startup phase order = %v", phases)
 	}
 }
 

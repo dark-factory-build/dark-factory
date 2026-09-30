@@ -224,6 +224,17 @@ jobs:
           [ "${missing}" -eq 0 ] || exit 1
           echo "all eight authority secrets are present on ${VERSION_ID}"
 
+      # Access is an external dependency of the Worker. Read its live shape
+      # before promotion so a missing service-auth policy cannot turn the
+      # headless path into an interactive login redirect.
+      - name: Verify the Cloudflare Access policy shape
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          ./scripts/check-cloudflare-access-policy.sh
+          echo "Cloudflare Access policy shape is valid for ${PRODUCTION_HOSTNAME}/mcp"
+
       - name: Promote the version to production traffic
         if: ${{ inputs.promote }}
         working-directory: control-plane

@@ -1340,6 +1340,60 @@ func TestSocketParentSwapAfterDialIsRejected(t *testing.T) {
 	}
 }
 
+func TestClientSurvivesDaemonSocketRebind(t *testing.T) {
+	bearer := testCredential('H')
+	directory := privateTestDirectory(t)
+	token := filepath.Join(directory, "token")
+	writeTestToken(t, token, bearer)
+	listener, socket := testListener(t, directory)
+	client, err := NewOperatorClient(socket, token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serveHealth := func(listener *net.UnixListener) <-chan error {
+		done := make(chan error, 1)
+		go func() {
+			connection, acceptErr := listener.Accept()
+			if acceptErr != nil {
+				done <- acceptErr
+				return
+			}
+			defer connection.Close()
+			if _, readErr := readTestFrame(connection); readErr != nil {
+				done <- readErr
+				return
+			}
+			done <- writeTestResponse(connection, wireOperatorDomain, successResponse(`{"ready":true}`))
+		}()
+		return done
+	}
+	firstDone := serveHealth(listener)
+	if _, err := client.Health(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-firstDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	replacement, err := net.ListenUnix("unix", &net.UnixAddr{Name: socket, Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer replacement.Close()
+	if err := os.Chmod(socket, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	secondDone := serveHealth(replacement)
+	if _, err := client.Health(context.Background()); err != nil {
+		t.Fatalf("health after daemon socket rebind = %v", err)
+	}
+	if err := <-secondDone; err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestInputBoundsFailBeforeConnection(t *testing.T) {
 	bearer := testCredential('B')
 	directory := privateTestDirectory(t)
