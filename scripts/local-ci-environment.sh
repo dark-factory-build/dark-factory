@@ -111,10 +111,36 @@ IFS=$ci_old_ifs
 
 ci_script_dir=$(CDPATH= cd -- "$(/usr/bin/dirname "$0")" && pwd -P)
 ci_repository_root=$(CDPATH= cd -- "$ci_script_dir/.." && pwd -P)
+ci_skip_cache_setup=0
 if [ -n "$ci_requested_cache_root" ]; then
-    ci_cache_root=$ci_requested_cache_root
+    if [ "$ci_requested_cache_root" = /var/empty ] \
+        || [ "$ci_requested_cache_root" = /private/var/empty ]; then
+        # /var/empty is the deliberate no-cache sentinel exported by the
+        # unwritable-HOME fallback below. Preserve it across nested sources.
+        ci_cache_root=/var/empty
+        ci_skip_cache_setup=1
+    else
+        ci_cache_root=$ci_requested_cache_root
+    fi
 elif [ -n "$ci_original_home" ] && [ "$ci_original_home" != /dev/null ]; then
-    ci_cache_root="$ci_original_home/Library/Caches/dark-factory/local-ci/trusted"
+    ci_home_can_host_cache=0
+    if [ -d "$ci_original_home" ] && [ -w "$ci_original_home" ]; then
+        ci_home_can_host_cache=1
+    elif [ ! -e "$ci_original_home" ]; then
+        ci_home_parent=$(/usr/bin/dirname -- "$ci_original_home")
+        if [ -d "$ci_home_parent" ] && [ -w "$ci_home_parent" ]; then
+            ci_home_can_host_cache=1
+        fi
+    fi
+    if [ "$ci_home_can_host_cache" -eq 1 ]; then
+        ci_cache_root="$ci_original_home/Library/Caches/dark-factory/local-ci/trusted"
+    else
+        # Some repository-contract fixtures intentionally run after the
+        # boundary has installed HOME=/var/empty. Do not probe that HOME by
+        # creating Library/Caches there; run without a trusted cache instead.
+        ci_cache_root=/var/empty
+        ci_skip_cache_setup=1
+    fi
 else
     echo "local-ci: HOME is required when DF_CI_CACHE_ROOT is unset" >&2
     return 1
@@ -226,19 +252,21 @@ for ci_private_child in data state; do
 done
 /bin/mkdir -p "$ci_private_root/data" "$ci_private_root/state"
 /bin/chmod 700 "$ci_private_root"
-/bin/mkdir -p -m 700 "$ci_cache_root"
-ci_cache_children='corepack go-build go-mod go cache npm pnpm-store'
-for ci_cache_child in $ci_cache_children; do
-    ci_cache_path="$ci_cache_root/$ci_cache_child"
-    if [ -L "$ci_cache_path" ] || { [ -e "$ci_cache_path" ] && [ ! -d "$ci_cache_path" ]; }; then
-        echo "local-ci: refusing unsafe cache/$ci_cache_child path" >&2
-        return 1
-    fi
-done
-for ci_cache_child in $ci_cache_children; do
-    ci_cache_path="$ci_cache_root/$ci_cache_child"
-    [ -d "$ci_cache_path" ] || /bin/mkdir "$ci_cache_path"
-done
+if [ "$ci_skip_cache_setup" -eq 0 ]; then
+    /bin/mkdir -p -m 700 "$ci_cache_root"
+    ci_cache_children='corepack go-build go-mod go cache npm pnpm-store'
+    for ci_cache_child in $ci_cache_children; do
+        ci_cache_path="$ci_cache_root/$ci_cache_child"
+        if [ -L "$ci_cache_path" ] || { [ -e "$ci_cache_path" ] && [ ! -d "$ci_cache_path" ]; }; then
+            echo "local-ci: refusing unsafe cache/$ci_cache_child path" >&2
+            return 1
+        fi
+    done
+    for ci_cache_child in $ci_cache_children; do
+        ci_cache_path="$ci_cache_root/$ci_cache_child"
+        [ -d "$ci_cache_path" ] || /bin/mkdir "$ci_cache_path"
+    done
+fi
 
 if [ -n "$ci_saved_local_ci_directory" ]; then
     export DARK_FACTORY_LOCAL_CI_DIRECTORY="$ci_saved_local_ci_directory"
