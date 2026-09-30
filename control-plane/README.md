@@ -224,8 +224,9 @@ promotion and requires this policy shape for the `/mcp` application:
 
 - exactly one application whose domain is `maintainer.darkfactory.build/mcp` (the
   Cloudflare API's hostname-and-path form, without the scheme);
-- every policy is either an `allow` policy whose includes are all exact emails,
-  or a `non_identity` policy whose includes are all exact `service_token`s; and
+- every policy is either an `allow` policy whose includes are all exact emails
+  or exact `service_token`s, with at least one email, or a `non_identity` policy
+  whose includes are all exact `service_token`s; and
 - at least one of each.
 
 `require` and `exclude` entries only narrow a policy and are accepted. Anything

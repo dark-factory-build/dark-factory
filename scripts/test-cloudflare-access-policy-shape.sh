@@ -131,11 +131,20 @@ if ! CLOUDFLARE_ACCESS_POLICY_TEST=1 main >/dev/null 2>&1; then
     exit 1
 fi
 
+# Accepted: the live shape, where the operator allow policy also names the token.
+policies_are "[{\"decision\":\"allow\",\"include\":[{\"email\":{\"email\":\"o@example.com\"}},{\"service_token\":{\"token_id\":\"0123456789abcdef0123456789abcdef.access\"}}]},${service}]"
+if ! CLOUDFLARE_ACCESS_POLICY_TEST=1 main >/dev/null 2>&1; then
+    echo 'named token beside named people in the allow policy was rejected' >&2
+    exit 1
+fi
+
 for widening in \
     "[${operator},{\"decision\":\"allow\",\"include\":[{\"email_domain\":{\"domain\":\"example.com\"}}]},${service}]" \
     "[${operator},{\"decision\":\"bypass\",\"include\":[{\"email\":{\"email\":\"x@example.com\"}}]},${service}]" \
     "[${operator},{\"decision\":\"non_identity\",\"include\":[{\"any_valid_service_token\":{}}]},${service}]" \
     "[{\"decision\":\"allow\",\"include\":[{\"email\":{\"email\":\"o@example.com\"}},{\"ip\":{\"ip\":\"0.0.0.0/0\"}}]},${service}]" \
+    "[{\"decision\":\"allow\",\"include\":[{\"service_token\":{\"token_id\":\"0123456789abcdef0123456789abcdef.access\"}}]},${service}]" \
+    "[{\"decision\":\"allow\",\"include\":[{\"email\":{\"email\":\"o@example.com\"}},{\"any_valid_service_token\":{}}]},${service}]" \
     "[${operator}]" \
     "[${service}]"; do
     policies_are "${widening}"
