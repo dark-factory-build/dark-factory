@@ -65,6 +65,19 @@ func TestRetainedSourceReviewRouteUsesInstalledProviderCapability(t *testing.T) 
 	}
 }
 
+func TestRetainedSourceReviewRouteRejectsMalformedSourceIntent(t *testing.T) {
+	for _, task := range []string{
+		"FACTORY_SOURCE owner/repo#1\nreview this exact source",
+		"review this exact source from the retained Change",
+		"please use attempt source for the retained Change",
+		"Independent exact-source review of #1065 usage-limit fix",
+	} {
+		if err := validateRetainedSourceReviewRoute(task, Agent{Role: RoleWorker, Provider: ProviderClaudeCode}); !errors.Is(err, ErrConflict) {
+			t.Fatalf("malformed source-review task accepted: %q err=%v", task, err)
+		}
+	}
+}
+
 func TestRetainedSourceReviewRouteLeavesOrdinaryTasksProviderAgnostic(t *testing.T) {
 	for _, provider := range []Provider{ProviderClaudeCode, ProviderCodex, ProviderShell} {
 		if err := validateRetainedSourceReviewRoute("ordinary worker task", Agent{Role: RoleWorker, Provider: provider}); err != nil {
@@ -115,6 +128,17 @@ func TestRetainedSourceReviewRouteBlocksUnsupportedTaskCreation(t *testing.T) {
 	}, mustTime(t, 13)); !errors.Is(err, ErrConflict) {
 		t.Fatalf("review handoff task assigned to shell worker: err=%v, want ErrConflict", err)
 	}
+	for seed, malformed := range map[byte]string{
+		7: "FACTORY_SOURCE owner/repo#1\nreview this exact source",
+		8: "Independent exact-source review of #978 work revision 19",
+	} {
+		if _, err := store.EnqueueTask(ctx, NewTask{
+			ID: taskID(t, seed), ProjectID: project.ID, AssignedAgentID: claude.ID, IncarnationID: incarnationID(t, seed),
+			Title: "malformed source review", Body: malformed,
+		}, mustTime(t, int64(seed))); !errors.Is(err, ErrConflict) {
+			t.Fatalf("malformed source-review task %d enqueued: err=%v", seed, err)
+		}
+	}
 	task, err := store.EnqueueTask(ctx, NewTask{
 		ID: taskID(t, 5), ProjectID: project.ID, AssignedAgentID: claude.ID, IncarnationID: incarnationID(t, 5),
 		Title: "task", Body: body, Priority: 0,
@@ -132,6 +156,43 @@ func TestRetainedSourceReviewRouteBlocksUnsupportedTaskCreation(t *testing.T) {
 	result, err := store.AdmitNext(ctx, admissionKeys(t, 16, nil), mustTime(t, 16))
 	if err != nil || !result.Admitted() || result.Run.AgentID != shell.ID {
 		t.Fatalf("newline-separated ordinary shell admission = %+v, err=%v", result, err)
+	}
+}
+
+func TestRetainedSourceReviewRouteRejectsUnassignedMalformedIntentBeforeRun(t *testing.T) {
+	store, err := createTestStore(context.Background(), filepath.Join(t.TempDir(), "kernel.db"), FactoryConfig{DispatchEnabled: true, Capacity: 2}, mustTime(t, 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	project, err := store.CreateProject(ctx, NewProject{ID: projectID(t, 21), Name: "project", Root: filepath.Join(t.TempDir(), "root")}, mustTime(t, 2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 22), ProjectID: project.ID, Name: "reviewer", Role: RoleWorker, Provider: ProviderClaudeCode, ToolBudgetLimit: 10}, mustTime(t, 3)); err != nil {
+		t.Fatal(err)
+	}
+	for seed, malformed := range map[byte]string{
+		23: "FACTORY_SOURCE dark-factory-build/dark-factory#1065\nproducer task and Change are only in prose below",
+		24: "Independent exact-source review of #978 work revision 19\nproducer task and Change are only in prose below",
+	} {
+		task, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, seed), ProjectID: project.ID, IncarnationID: incarnationID(t, seed), Title: "malformed source review", Body: malformed}, mustTime(t, int64(seed)))
+		if err != nil || task.Status != TaskQueued {
+			t.Fatalf("malformed source-review task %d enqueue = %+v err=%v", seed, task, err)
+		}
+		before := admissionFootprint(t, store)
+		result, err := store.AdmitNext(ctx, admissionKeys(t, seed+30, nil), mustTime(t, int64(seed+30)))
+		if err != nil || result.Admitted() {
+			t.Fatalf("malformed source-review task %d admitted: %+v err=%v", seed, result, err)
+		}
+		if after := admissionFootprint(t, store); after != before {
+			t.Fatalf("malformed source-review task %d spent admission resources: before=%+v after=%+v", seed, before, after)
+		}
+		queued, found, err := store.Task(ctx, task.ID)
+		if err != nil || !found || queued.Status != TaskQueued {
+			t.Fatalf("malformed source-review task %d changed after refusal: %+v found=%v err=%v", seed, queued, found, err)
+		}
 	}
 }
 
