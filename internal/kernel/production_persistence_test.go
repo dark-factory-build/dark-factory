@@ -19,7 +19,6 @@ func TestProductionPersistsFinalizedConstructionPublicationAndRebase(t *testing.
 	}
 	store, finalizing := finalizingReleasedRun(t, RoleWorker, VerificationNone, proposal)
 	defer store.Close()
-
 	change, found, err := store.Change(ctx, *finalizing.ChangeID)
 	if err != nil || !found || change.HeadCommit == nil {
 		t.Fatalf("settled change = %+v, found=%v, err=%v", change, found, err)
@@ -109,6 +108,41 @@ func TestProductionPersistsFinalizedConstructionPublicationAndRebase(t *testing.
 	other := productionRecord(t, page, "pull_request", "8")
 	if other == nil || other.VisualID == published.VisualID || !containsString(other.Tasks, terminal.TaskID.String()) {
 		t.Fatalf("second PR collapsed or lost task = %+v", other)
+	}
+}
+
+func TestPublishedReviewChangesAreSentBackToOriginExactlyOnce(t *testing.T) {
+	ctx := context.Background()
+	proposal, err := NewSuccessProposal("published")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, finalizing := finalizingReleasedRun(t, RoleWorker, VerificationNone, proposal)
+	defer store.Close()
+	change, found, err := store.Change(ctx, *finalizing.ChangeID)
+	if err != nil || !found {
+		t.Fatalf("change=%+v found=%v err=%v", change, found, err)
+	}
+	settlement, err := NewRetainedChangeSettlement(change.Revision, change.HeadCommit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	finalizing, err = store.FinalizeWorkerRun(ctx, finalizing.ID, finalizing.Revision, settlement, mustTime(t, 60))
+	if err != nil {
+		t.Fatal(err)
+	}
+	head := strings.Repeat("a", 40)
+	pr := ProductionPullRequest{Number: 77, Title: "Review me", URL: "https://github.com/example/factory/pull/77", Head: head, Branch: "factory/review", Base: "main", State: "open", Review: ProductionReview{Head: head, State: "unknown"}}
+	if err := store.RecordPublication(ctx, finalizing.ProjectID, finalizing.TaskID, "example/factory", pr, mustTime(t, 81)); err != nil {
+		t.Fatal(err)
+	}
+	first, err := store.SendBackPublishedReview(ctx, finalizing.ProjectID, "example/factory", 77, "review-op-1", head, "fix the findings", mustTime(t, 82))
+	if err != nil || !strings.Contains(TaskFeedback(first), "review-operation: review-op-1") {
+		t.Fatalf("first review send-back=%+v err=%v", first, err)
+	}
+	second, err := store.SendBackPublishedReview(ctx, finalizing.ProjectID, "example/factory", 77, "review-op-1", head, "fix the findings", mustTime(t, 83))
+	if err != nil || second.Revision != first.Revision || !strings.Contains(TaskFeedback(second), "fix the findings") {
+		t.Fatalf("replayed review send-back=%+v first=%+v err=%v", second, first, err)
 	}
 }
 

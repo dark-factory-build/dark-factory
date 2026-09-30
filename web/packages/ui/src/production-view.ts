@@ -126,6 +126,7 @@ function constructionNextAction(doc: Record<string, unknown>) {
 /** Shared queue membership and stage labels for the floor and inspector. */
 export function inProgressProduction(item: ProductionContraption): boolean {
   if (item.completed) return false;
+  if (item.pullRequest?.state === "merged" && item.deliveries.length === 0) return false;
   if (item.pullRequest) return true;
   return item.construction?.status !== "cancelled"
     && !(item.construction?.has_changes === false && item.construction.status === "succeeded");
@@ -146,7 +147,7 @@ export function productionStages(item: ProductionContraption): string[] {
   const failed = checks.some((check) => ["failure", "timed_out", "action_required"].includes(check.conclusion));
   const ci = !item.review.sourceFresh ? "CI stale" : failed ? "CI failed" : checks.some((check) => ["running", "in_progress"].includes(check.state)) ? "CI running" : checks.some((check) => ["queued", "waiting", "pending", "requested"].includes(check.state)) ? "CI queued" : checks.some((check) => check.state === "cancelled" || check.conclusion === "cancelled") ? "CI cancelled" : checks.some((check) => check.state === "skipped" || check.conclusion === "skipped") ? "CI skipped" : checks.length > 0 && checks.every((check) => check.state === "completed" && check.conclusion === "success") ? "CI passed" : "CI unknown";
   const correction = item.review.current && item.review.state === "block" || failed;
-  const review = !item.review.sourceFresh ? "Review stale" : item.review.allowed ? "Review passed" : (item.review.current && item.review.state === "running" || item.reviewers.some((reviewer) => reviewer.state === "running")) ? "Review running" : "Review pending";
+  const review = !item.review.current ? "Review stale" : !item.review.sourceFresh ? "Review stale" : item.review.allowed ? "Review passed" : (item.review.current && item.review.state === "running" || item.reviewers.some((reviewer) => reviewer.state === "running")) ? "Review running" : "Review pending";
   const merge = pr.merge_queue && !["none", "unknown"].includes(pr.merge_queue) ? "Merge queued" : item.review.allowed && ci === "CI passed" ? "Merge" : undefined;
   return correction ? ["Correction", ci] : merge ? [merge, ci] : [review, ci];
 }
@@ -187,15 +188,4 @@ export function deriveProductionView(records: readonly ProductionRecord[], now =
     contraptions[key] = { visualId: item.visualId, projectId: item.scope.projectId, repository: item.scope.repository, construction: construction ? { title: text(doc.title), phase: text(doc.phase), status: text(doc.status), head: text(doc.head), task_id: text(doc.task_id), blocked_reason: text(doc.blocked_reason), has_changes: typeof doc.has_changes === "boolean" ? doc.has_changes : undefined } : undefined, pullRequest: pr, tasks: [...new Set([...(construction?.tasks ?? []), ...(pull?.tasks ?? [])])], missions: [...new Set([...(construction?.missions ?? []), ...(pull?.missions ?? [])])], linksOverflow: Boolean(construction?.links_overflow || pull?.links_overflow), review: reviewView, checks: pullChecks, deliveries: pullDeliveries, reviewers: assigned, completed: Boolean(completed), completedAt: Date.parse(pr?.merged_at ?? "") || pull?.observed_at || 0, status: completed ? (closedUnmerged ? "closed-unmerged" : "delivered") : text(pr?.state) || text(doc.status) || text(doc.phase) || "construction", nextAction: pr ? nextAction(pr, reviewView, pullChecks, pullDeliveries) : constructionNextAction(doc) };
   }
   return { contraptions, checks, deliveries, reviewers };
-}
-
-
-/** Shared executions appear once even when several projects refer to them. */
-export function sharedDeliveries(view: ProductionView): readonly ProductionDelivery[] {
-  const shared = new Map<string, ProductionDelivery>();
-  for (const delivery of Object.values(view.deliveries).sort(deliveryOrder)) {
-    const key = `${delivery.repository}:${delivery.id}`;
-    if (!shared.has(key)) shared.set(key, delivery);
-  }
-  return [...shared.values()];
 }

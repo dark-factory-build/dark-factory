@@ -49,5 +49,9 @@ export DARK_FACTORY_E2E_FACTORYD="$e2e_root/factoryd"
 export DARK_FACTORY_E2E_FACTORYCTL="$e2e_root/factoryctl"
 export DARK_FACTORY_E2E_RUNNER="$e2e_root/factory-runner"
 
+"$go" test -timeout=2m -count=1 -p 1 -run TestOperationalHomeValidatesDuringSQLiteWriterAndCheckpoint ./internal/install
 "$go" test -timeout=8m -count=1 -p 1 -run TestBlackBoxServiceLifecycle ./internal/e2e
+for workflow_case in ${DARK_FACTORY_LEGACY_CASES:-base ci conflict restart lost-response}; do
+    PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 "$script_dir/test-legacy-workflow-e2e.py" --case "$workflow_case"
+done
 echo "go-service-e2e: PASS"

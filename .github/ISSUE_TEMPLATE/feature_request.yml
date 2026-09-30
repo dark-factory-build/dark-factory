@@ -1,6 +1,6 @@
 name: Feature request
 description: A capability Dark Factory should have
-labels: ["enhancement"]
+labels: ["enhancement", "factory:candidate"]
 body:
   - type: textarea
     id: problem

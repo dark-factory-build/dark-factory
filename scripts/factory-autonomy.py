@@ -75,12 +75,21 @@ def refresh_controller(checkout, release_config, receipt):
     git('merge', '--ff-only', sha)
 
 
+def shared_intake():
+    """Load the sibling intake module for its shared redaction helper."""
+    spec = importlib.util.spec_from_file_location('factory_intake', Path(__file__).resolve().with_name('factory-intake.py'))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def tick(config_path, config, release_only=False, skip_intake=False, environment=None, review_arguments=(), controller_lock_fd=None):
     scripts = Path(__file__).resolve().parent
     calls = []
-    # The existing release lane also observes production. It can see a reviewer
-    # while the normal lane waits for that process; there is no second poller.
-    if release_only and config.get('repository') and config.get('project_id'):
+    # Observe the published repository on every bounded controller pass. The
+    # production projection is the durable event stream for reviews, queue
+    # entries and checks; release-only passes retain the same single poller.
+    if config.get('repository') and config.get('project_id'):
         calls.append([sys.executable, str(scripts / 'factory-production.py'), str(config_path), '--record'])
     if not release_only and not skip_intake:
         calls.append([sys.executable, str(scripts / 'factory-intake.py'), str(config_path), '--once'])
@@ -98,6 +107,11 @@ def tick(config_path, config, release_only=False, skip_intake=False, environment
             result = {'component': Path(argv[1]).stem, 'ok': completed.returncode == 0}
             if completed.returncode:
                 result['error'] = 'legacy_review_customer_unsupported: use the installed customer publication workflow' if Path(argv[1]).name == 'factory-review-intake.py' and 'Legacy review is owner-only' in completed.stderr else 'exit_' + str(completed.returncode)
+                # A status alone names no cause: 'exit_1' left one broken tick
+                # indistinguishable from the next for hours. The receipt keeps
+                # its finite codes and no child output; this controller's own
+                # log carries the bounded, redacted diagnostic.
+                print(result['component'] + ' ' + result['error'] + ': ' + (shared_intake().failure_tail(completed.stderr) or 'no stderr diagnostic'), file=sys.stderr, flush=True)
             results.append(result)
             if completed.returncode == 0 and Path(argv[1]).name == 'factory-release.py':
                 receipt = json.loads(completed.stdout)

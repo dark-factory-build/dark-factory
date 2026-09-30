@@ -5,10 +5,209 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"reflect"
 	"strings"
 	"testing"
 )
+
+func TestProductionReviewUpsertsBeforeRefresh(t *testing.T) {
+	store, _, project, _ := newAdmissionStore(t, RoleOrchestrator, 2)
+	defer store.Close()
+	ctx := context.Background()
+	head := strings.Repeat("a", 40)
+	if err := store.RecordProductionReview(ctx, project.ID, "example/factory", 7, ProductionReview{Head: head, State: "allow"}, mustTime(t, 10)); err != nil {
+		t.Fatal(err)
+	}
+	page, err := store.Production(ctx, project.ID, 0, 8)
+	if err != nil || len(page.Records) != 1 {
+		t.Fatalf("page=%+v err=%v", page, err)
+	}
+	var pull ProductionPullRequest
+	if err := json.Unmarshal(page.Records[0].Document, &pull); err != nil {
+		t.Fatal(err)
+	}
+	if pull.Number != 7 || pull.Head != head || pull.Review.Head != head || pull.Review.State != "allow" {
+		t.Fatalf("pull=%+v", pull)
+	}
+}
+
+// A refresh reads the known reviews, waits on the remote, then writes a
+// snapshot carrying that copy. A verdict recorded during the wait must
+// survive the later write.
+func TestProductionObservationKeepsAReviewRecordedDuringTheRefresh(t *testing.T) {
+	store, _, project, _ := newAdmissionStore(t, RoleOrchestrator, 2)
+	defer store.Close()
+	ctx := context.Background()
+	head := strings.Repeat("a", 40)
+	pr := ProductionPullRequest{Number: 7, Title: "A machine", Head: head, State: "open"}
+	snapshot := ProductionObservation{Repository: "example/factory", ObservedAt: 10, PullRequests: []ProductionPullRequest{pr}}
+	if err := store.RecordProductionObservation(ctx, project.ID, snapshot, mustTime(t, 10)); err != nil {
+		t.Fatal(err)
+	}
+	// The refresh has read its snapshot (no review); the verdict lands now.
+	if err := store.RecordProductionReview(ctx, project.ID, "example/factory", 7, ProductionReview{Head: head, State: "allow"}, mustTime(t, 11)); err != nil {
+		t.Fatal(err)
+	}
+	snapshot.ObservedAt = 12
+	if err := store.RecordProductionObservation(ctx, project.ID, snapshot, mustTime(t, 12)); err != nil {
+		t.Fatal(err)
+	}
+	page, err := store.Production(ctx, project.ID, 0, 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range page.Records {
+		if item.Kind != "pull_request" {
+			continue
+		}
+		var got ProductionPullRequest
+		if err := json.Unmarshal(item.Document, &got); err != nil {
+			t.Fatal(err)
+		}
+		if got.Review.Head != head || got.Review.State != "allow" {
+			t.Fatalf("review erased by the stale snapshot: %+v", got.Review)
+		}
+		return
+	}
+	t.Fatal("pull request record missing")
+}
+
+func TestCorrectedProductionHeadStoresRecoverableReviewClaimAtomically(t *testing.T) {
+	store, path, project, _ := newAdmissionStore(t, RoleOrchestrator, 2)
+	ctx := context.Background()
+	oldHead := strings.Repeat("a", 40)
+	newHead := strings.Repeat("b", 40)
+	old := ProductionObservation{Repository: "example/factory", ObservedAt: 10, PullRequests: []ProductionPullRequest{{Number: 7, Title: "A machine", Head: oldHead, State: "open"}}}
+	if err := store.RecordProductionObservation(ctx, project.ID, old, mustTime(t, 10)); err != nil {
+		store.Close()
+		t.Fatal(err)
+	}
+	operationID := "corrected-review"
+	operation := map[string]any{"id": operationID, "state": "running", "request": map[string]any{"repository": "example/factory", "head": newHead}}
+	corrected := ProductionObservation{Repository: "example/factory", ObservedAt: 20, PullRequests: []ProductionPullRequest{{Number: 7, Title: "A machine", Head: newHead, State: "open"}}}
+	if err := store.RecordProductionObservationWithReviewOperations(ctx, project.ID, corrected, []ProductionReviewOperation{{ID: operationID, Document: operation}}, mustTime(t, 20)); err != nil {
+		store.Close()
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	restarted, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restarted.Close()
+	if count, err := restarted.RecoverRunningReviewOperations(ctx, mustTime(t, 21)); err != nil || count != 1 {
+		t.Fatalf("recovered corrected review count=%d err=%v", count, err)
+	}
+	page, err := restarted.Production(ctx, project.ID, 0, 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var foundHead, foundState string
+	for _, record := range page.Records {
+		switch record.Kind {
+		case "pull_request":
+			var pull ProductionPullRequest
+			if err := json.Unmarshal(record.Document, &pull); err != nil {
+				t.Fatal(err)
+			}
+			foundHead = pull.Head
+		case "reviewer":
+			var claim map[string]any
+			if err := json.Unmarshal(record.Document, &claim); err != nil {
+				t.Fatal(err)
+			}
+			foundState, _ = claim["state"].(string)
+		}
+	}
+	if foundHead != newHead || foundState != "failed" {
+		t.Fatalf("corrected head/review after restart = %q/%q", foundHead, foundState)
+	}
+}
+
+func TestRequestChangesReviewRecoveryPreservesRoutePending(t *testing.T) {
+	store, _, project, _ := newAdmissionStore(t, RoleOrchestrator, 2)
+	defer store.Close()
+	ctx := context.Background()
+	operationID := "request-changes-recovery"
+	operation := map[string]any{
+		"id":        operationID,
+		"state":     "running",
+		"verdict":   "request_changes",
+		"submitted": true,
+		"request": map[string]any{
+			"repository":  "example/factory",
+			"pull_number": 7,
+			"head":        strings.Repeat("a", 40),
+			"base":        strings.Repeat("b", 40),
+			"base_ref":    "main",
+			"body":        "review",
+			"provider":    "codex",
+		},
+	}
+	if err := store.RecordReviewOperation(ctx, project.ID, "example/factory", operationID, operation, mustTime(t, 10)); err != nil {
+		t.Fatal(err)
+	}
+	if count, err := store.RecoverRunningReviewOperations(ctx, mustTime(t, 11)); err != nil || count != 1 {
+		t.Fatalf("recovered request-changes count=%d err=%v", count, err)
+	}
+	document, found, err := store.ReviewOperation(ctx, project.ID, operationID)
+	if err != nil || !found {
+		t.Fatalf("recovered request-changes document found=%v err=%v", found, err)
+	}
+	var recovered map[string]any
+	if err := json.Unmarshal(document, &recovered); err != nil {
+		t.Fatal(err)
+	}
+	if recovered["state"] != "completed" || recovered["route_pending"] != true {
+		t.Fatalf("recovered request-changes operation=%v", recovered)
+	}
+	pending, err := store.PendingReviewOperations(ctx)
+	if err != nil || len(pending) != 1 || pending[0].ID != operationID {
+		t.Fatalf("pending request-changes operations=%+v err=%v", pending, err)
+	}
+}
+
+func TestRequestChangesBeforeSubmitDoesNotBecomeRoutePending(t *testing.T) {
+	store, _, project, _ := newAdmissionStore(t, RoleOrchestrator, 2)
+	defer store.Close()
+	ctx := context.Background()
+	operationID := "request-changes-before-submit"
+	operation := map[string]any{
+		"id":      operationID,
+		"state":   "running",
+		"verdict": "request_changes",
+		"request": map[string]any{
+			"repository":  "example/factory",
+			"pull_number": 7,
+			"head":        strings.Repeat("a", 40),
+			"base":        strings.Repeat("b", 40),
+			"base_ref":    "main",
+			"body":        "review",
+			"provider":    "codex",
+		},
+	}
+	if err := store.RecordReviewOperation(ctx, project.ID, "example/factory", operationID, operation, mustTime(t, 10)); err != nil {
+		t.Fatal(err)
+	}
+	if count, err := store.RecoverRunningReviewOperations(ctx, mustTime(t, 11)); err != nil || count != 1 {
+		t.Fatalf("recovered pre-submit count=%d err=%v", count, err)
+	}
+	document, found, err := store.ReviewOperation(ctx, project.ID, operationID)
+	if err != nil || !found {
+		t.Fatalf("recovered pre-submit document found=%v err=%v", found, err)
+	}
+	var recovered map[string]any
+	if err := json.Unmarshal(document, &recovered); err != nil {
+		t.Fatal(err)
+	}
+	if recovered["state"] != "failed" || recovered["route_pending"] == true {
+		t.Fatalf("pre-submit operation became routable=%v", recovered)
+	}
+	if pending, err := store.PendingReviewOperations(ctx); err != nil || len(pending) != 0 {
+		t.Fatalf("pre-submit pending operations=%+v err=%v", pending, err)
+	}
+}
 
 func TestProductionPersistsRevisionEvidenceWithoutRewinding(t *testing.T) {
 	store, _, project, _ := newAdmissionStore(t, RoleOrchestrator, 2)
@@ -19,6 +218,12 @@ func TestProductionPersistsRevisionEvidenceWithoutRewinding(t *testing.T) {
 	observation := ProductionObservation{Repository: "Example/Factory", ObservedAt: 10, PullRequests: []ProductionPullRequest{pr}, Checks: []ProductionCheck{{ID: "workflow:12", Name: "CI", Revision: head, Scope: "head", State: "completed", Conclusion: "success", PullRequests: []uint64{7, 8}}}}
 	if err := store.RecordProductionObservation(ctx, project.ID, observation, mustTime(t, 10)); err != nil {
 		t.Fatal(err)
+	}
+	if err := store.RecordProductionReview(ctx, project.ID, "example/factory", 7, ProductionReview{Head: head, State: "block", Findings: strings.Repeat("f", 8193)}, mustTime(t, 10)); err != nil {
+		t.Fatalf("review findings boundary: %v", err)
+	}
+	if err := store.RecordProductionReview(ctx, project.ID, "example/factory", 7, ProductionReview{Head: head, State: "block", Findings: strings.Repeat("f", 16001)}, mustTime(t, 10)); !errors.Is(err, ErrInvalidValue) {
+		t.Fatalf("oversized review findings = %v", err)
 	}
 	page, err := store.Production(ctx, project.ID, 0, 8)
 	if err != nil || len(page.Records) != 3 {
@@ -61,7 +266,7 @@ func TestProductionPersistsRevisionEvidenceWithoutRewinding(t *testing.T) {
 		if err := json.Unmarshal(item.Document, &current); err != nil {
 			t.Fatal(err)
 		}
-		if item.VisualID != identity || current.Head != strings.Repeat("b", 40) || current.Review.Head != head {
+		if item.VisualID != identity || current.Head != strings.Repeat("b", 40) || current.Review.Head != strings.Repeat("b", 40) || current.Review.State != "unknown" {
 			t.Fatalf("lost identity/revision: %+v %+v", item, current)
 		}
 	}
@@ -86,32 +291,27 @@ func TestProductionPersistsRevisionEvidenceWithoutRewinding(t *testing.T) {
 	}
 }
 
-func TestProductionMaintenanceRoundTripsAndInvalidObservationRollsBack(t *testing.T) {
+func TestProductionHealthRoundTripsAndInvalidObservationRollsBack(t *testing.T) {
 	store, _, project, _ := newAdmissionStore(t, RoleOrchestrator, 2)
 	defer store.Close()
 	ctx := context.Background()
-	maintenance := &ProductionMaintenance{Destination: "production", State: "verified"}
-	maintenance.Available.Version = "0.5.0"
-	maintenance.Available.URL = "https://example.test/releases/0.5.0"
-	maintenance.Available.State = "available"
-	maintenance.Installed = ProductionBuild{Version: "0.4.0", Source: strings.Repeat("a", 40), Target: "darwin/arm64", BuildID: strings.Repeat("b", 64), Release: true, State: "installed"}
-	maintenance.Running = ProductionBuild{Version: "0.4.0", Source: strings.Repeat("a", 40), Target: "darwin/arm64", BuildID: strings.Repeat("b", 64), Release: true, State: "ready"}
-	observation := ProductionObservation{Repository: "example/maintenance", ObservedAt: 20, Maintenance: maintenance}
+	observation := ProductionObservation{Repository: "example/health", ObservedAt: 20, Unavailable: "jobs", Overflow: 3}
 	if err := store.RecordProductionObservation(ctx, project.ID, observation, mustTime(t, 20)); err != nil {
 		t.Fatal(err)
 	}
 	page, err := store.Production(ctx, project.ID, 0, 8)
 	if err != nil || len(page.Records) != 1 {
-		t.Fatalf("maintenance page = %+v, err=%v", page, err)
+		t.Fatalf("health page = %+v, err=%v", page, err)
 	}
 	var envelope struct {
-		Maintenance ProductionMaintenance `json:"maintenance"`
+		Unavailable string `json:"unavailable"`
+		Overflow    int    `json:"overflow"`
 	}
 	if err := json.Unmarshal(page.Records[0].Document, &envelope); err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(envelope.Maintenance, *maintenance) {
-		t.Fatalf("maintenance roundtrip = %+v, want %+v", envelope.Maintenance, *maintenance)
+	if envelope.Unavailable != "jobs" || envelope.Overflow != 3 {
+		t.Fatalf("health roundtrip = %+v", envelope)
 	}
 
 	bad := observation
@@ -129,7 +329,7 @@ func TestProductionMaintenanceRoundTripsAndInvalidObservationRollsBack(t *testin
 	}
 	for _, record := range page.Records {
 		if record.Repository == "example/rollback" {
-			t.Fatalf("rolled-back maintenance record = %+v", record)
+			t.Fatalf("rolled-back health record = %+v", record)
 		}
 	}
 }
@@ -269,8 +469,7 @@ func TestProductionCanonicalizesLegacyRuntimeDestinationsAndDeduplicates(t *test
 	if !strings.Contains(retained, `"state":"blocked"`) {
 		t.Fatal("legacy migration rewound newer evidence")
 	}
-	maintenance := &ProductionMaintenance{Destination: path, State: "ready"}
-	observation := ProductionObservation{Repository: "example/factory", ObservedAt: 20, Maintenance: maintenance,
+	observation := ProductionObservation{Repository: "example/factory", ObservedAt: 20,
 		Deliveries: []ProductionDelivery{{ID: legacyID, Kind: "release", Destination: path, Revision: revision, State: "verified", PullRequests: []uint64{7, 8}}}}
 	if err := store.RecordProductionObservation(ctx, project.ID, observation, mustTime(t, 20)); err != nil {
 		t.Fatal(err)

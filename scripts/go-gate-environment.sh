@@ -11,105 +11,76 @@ go_gate_run_bounded() {
         ''|*[!0-9]*|0) return 64 ;;
     esac
 
-    /usr/bin/perl -e '
-use strict;
-use warnings;
-use POSIX qw(setpgid WIFEXITED WEXITSTATUS WIFSIGNALED WTERMSIG);
-use Time::HiRes qw(usleep);
-
-my $seconds = shift @ARGV;
-die "invalid timeout\n" unless defined $seconds && $seconds =~ /^\d+$/ && $seconds > 0;
-die "missing command\n" unless @ARGV;
-pipe(my $ready_r, my $ready_w) or die "pipe: $!\n";
-pipe(my $go_r, my $go_w) or die "pipe: $!\n";
-my $pid = fork();
-die "fork failed: $!\n" unless defined $pid;
-if ($pid == 0) {
-    close $ready_r; close $go_w;
-    if (!setpgid(0, 0)) { syswrite($ready_w, "E"); exit 125; }
-    syswrite($ready_w, "R") or exit 125;
-    my $ack = "";
-    sysread($go_r, $ack, 1) == 1 or exit 125;
-    close $ready_w; close $go_r;
-    exec @ARGV;
-    exit 127;
-}
-close $ready_w; close $go_r;
-my $ready = "";
-if (sysread($ready_r, $ready, 1) != 1 || $ready ne "R") {
-    kill "TERM", $pid;
-    waitpid($pid, 0);
-    exit 125;
-}
-if (!setpgid($pid, $pid)) {
-    kill "TERM", $pid;
-    waitpid($pid, 0);
-    exit 125;
-}
-syswrite($go_w, "G") == 1 or do { kill "TERM", -$pid; waitpid($pid, 0); exit 125; };
-close $ready_r; close $go_w;
-
-my $timed_out = 0;
-my $term_sent = 0;
-sub request_stop {
-    $timed_out = 1;
-    if (!$term_sent) { kill "TERM", -$pid; $term_sent = 1; alarm 1; }
-    else { kill "KILL", -$pid; alarm 1; }
-}
-$SIG{ALRM} = \&request_stop;
-$SIG{TERM} = \&request_stop;
-$SIG{HUP} = \&request_stop;
-$SIG{INT} = \&request_stop;
-alarm $seconds;
-waitpid($pid, 0);
-alarm 0;
-my $status = $?;
-
-sub group_state {
-    return "live" if kill 0, -$pid;
-    return "gone" if $!{ESRCH};
-    return "unknown";
-}
-sub stop_group {
-    my $state = group_state();
-    if ($state eq "unknown") {
-        for (1..10) {
-            usleep(100_000);
-            $state = group_state();
-            return 1 if $state eq "gone";
-            return 0 if $state eq "live";
-        }
-        return 0;
-    }
-    return 1 if $state eq "gone";
-    return 0 if $state eq "unknown";
-    unless (kill "TERM", -$pid) {
-        return 1 if $!{ESRCH};
-        return 0;
-    }
-    for (1..10) {
-        usleep(100_000);
-        $state = group_state();
-        return 2 if $state eq "gone";
-        return 0 if $state eq "unknown";
-    }
-    unless (kill "KILL", -$pid) {
-        return 1 if $!{ESRCH};
-        return 0;
-    }
-    for (1..10) {
-        usleep(100_000);
-        $state = group_state();
-        return 2 if $state eq "gone";
-        return 0 if $state eq "unknown";
-    }
-    return 0;
-}
-
-my $group_clean = stop_group();
-exit 125 if $group_clean == 0 || $group_clean == 2;
-exit 124 if $timed_out;
-exit (WIFEXITED($status) ? WEXITSTATUS($status) : 128 + WTERMSIG($status));
+    /usr/bin/ruby --disable-gems -e '
+seconds = Integer(ARGV.shift)
+abort "missing command" if ARGV.empty?
+ready_r, ready_w = IO.pipe
+go_r, go_w = IO.pipe
+pid = fork do
+  ready_r.close
+  go_w.close
+  begin
+    Process.setpgid(0, 0)
+    ready_w.write("R")
+    go_r.read(1) == "G" or exit 125
+    ready_w.close
+    go_r.close
+    exec(*ARGV)
+  rescue SystemCallError
+    exit 127
+  end
+end
+ready_w.close
+go_r.close
+exit 125 unless ready_r.read(1) == "R"
+begin
+  Process.setpgid(pid, pid)
+  go_w.write("G")
+rescue SystemCallError
+  Process.kill("TERM", pid) rescue nil
+  Process.wait(pid)
+  exit 125
+end
+ready_r.close
+go_w.close
+timed_out = false
+term_sent = false
+stop = lambda do |_signal|
+  timed_out = true
+  if !term_sent
+    Process.kill("TERM", -pid) rescue nil
+    term_sent = true
+    Thread.new { sleep 1; Process.kill("KILL", -pid) rescue nil }
+  else
+    Process.kill("KILL", -pid) rescue nil
+  end
+end
+Signal.trap("ALRM", &stop)
+Signal.trap("TERM", &stop)
+Signal.trap("HUP", &stop)
+Signal.trap("INT", &stop)
+timer = Thread.new { sleep seconds; Process.kill("ALRM", Process.pid) rescue nil }
+_, status = Process.waitpid2(pid)
+timer.kill
+begin
+  Process.kill(0, -pid)
+  group_live = true
+rescue Errno::ESRCH
+  exit(timed_out ? 124 : (status.exited? ? status.exitstatus : 128 + status.termsig))
+else
+  Process.kill("TERM", -pid) rescue nil
+  10.times do
+    sleep 0.1
+    begin
+      Process.kill(0, -pid)
+    rescue Errno::ESRCH
+      exit 125 if timed_out || group_live
+      exit(status.exited? ? status.exitstatus : 128 + status.termsig)
+    end
+  end
+  Process.kill("KILL", -pid) rescue nil
+  exit 125
+end
 ' "$go_gate_timeout_seconds" "$@" &
     go_gate_supervisor_pid=$!
     if wait "$go_gate_supervisor_pid"; then

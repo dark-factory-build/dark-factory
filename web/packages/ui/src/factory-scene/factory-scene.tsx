@@ -1,6 +1,6 @@
 import { useLayoutEffect, useEffect, useMemo, useRef, useState, type MouseEvent, type FocusEvent, type PointerEvent, type KeyboardEvent, type ReactNode } from "react";
-import { ProductionArea, productionHeight, sharedChecks } from "../production-area.js";
-import type { ProductionView, ProductionContraption } from "../production-view.js";
+import { ProductionArea, productionHeight, sharedChecks, type ProductionRoomRect } from "../production-area.js";
+import type { ProductionContraption } from "../production-view.js";
 import type { PeerQuestionItem } from "@dark-factory/client";
 import type { SceneTask } from "../console-view.js";
 import {
@@ -29,7 +29,7 @@ import { spriteAtlas, spriteSheet, spriteSheetSize } from "./sprites/sprites.gen
 
 
 export type FactorySceneProps = Readonly<{
-  production?: { hiddenItems?: number; view: ProductionView; items: readonly ProductionContraption[]; selected?: string; onSelect: (id: string) => void };
+  production?: { hiddenItems?: number; items: readonly ProductionContraption[]; selected?: string; onSelect: (id: string) => void };
   appearance?: FloorAppearance;
   topology: SceneTopology;
   /** Current project scope, when the floor has one. */
@@ -242,9 +242,10 @@ function useSceneMotion(layout: ReturnType<typeof layoutScene>, seated: ReturnTy
 }
 
 /** The animation clock updates worker elements without rerendering the floor or atlas. */
-function SceneWorkers({ production, productionTop, errands, furniture, restingSeats, tray, peerQuestions, layout, placements: seated, nodes, workers, tasks, connected, animate, selectedWorkerId, onSelectWorker, onSelectTask, onSelectHumanRequest }: Pick<FactorySceneProps, "workers" | "selectedWorkerId" | "onSelectWorker" | "onSelectTask" | "onSelectHumanRequest"> & {
+function SceneWorkers({ production, productionTop, upperRoom, errands, furniture, restingSeats, tray, peerQuestions, layout, placements: seated, nodes, workers, tasks, connected, animate, selectedWorkerId, onSelectWorker, onSelectTask, onSelectHumanRequest }: Pick<FactorySceneProps, "workers" | "selectedWorkerId" | "onSelectWorker" | "onSelectTask" | "onSelectHumanRequest"> & {
   production?: FactorySceneProps["production"];
   productionTop: number;
+  upperRoom: ProductionRoomRect;
   layout: ReturnType<typeof layoutScene>;
   placements: ReturnType<typeof placeWorkers>;
   nodes: ReadonlyMap<string, SceneTopology["nodes"][number]>;
@@ -266,7 +267,7 @@ function SceneWorkers({ production, productionTop, errands, furniture, restingSe
   const active = useMemo(() => new Set(workers.filter((worker) => worker.location === "working" && worker.activity === "busy" && seated.some((placement) => placement.id === worker.id && placement.area === "room" && layout.rooms.find((room) => room.id === placement.roomId)?.contents.some((item) => item.workSurface))).map((worker) => worker.id)), [workers, seated, layout]);
   const reduced = useReducedMotion();
   const mail = useRef<readonly FloorMessage[]>([]);
-  const { placements, positions, pulse } = useSceneMotion(layout, seated, geometryKey, connected && animate, reduced, active, workers, errands, (at) => mail.current.some((message) => endsAt(message) > at) || errands && catAt(restingSeats.filter((seat) => seat.y === restingSeats[0]!.y), at)?.moving === true, Object.values(production?.view.deliveries ?? {}).some((delivery) => delivery.state === "running") || production?.items.some((item) => item.reviewers.some((reviewer) => reviewer.state === "running") || item.checks.some((check) => ["running", "in_progress"].includes(check.state))) === true);
+  const { placements, positions, pulse } = useSceneMotion(layout, seated, geometryKey, connected && animate, reduced, active, workers, errands, (at) => mail.current.some((message) => endsAt(message) > at) || errands && catAt(restingSeats.filter((seat) => seat.y === restingSeats[0]!.y), at)?.moving === true, production?.items.some((item) => item.deliveries.some((delivery) => delivery.state === "running") || item.reviewers.some((reviewer) => reviewer.state === "running") || item.checks.some((check) => ["running", "in_progress"].includes(check.state))) === true);
   const workerById = new Map(workers.map((worker) => [worker.id, worker]));
   // Nobody on the floor, no pulse: what lives there rests as it does under any stopped clock.
   const at = placements.length === 0 ? undefined : pulse;
@@ -320,7 +321,7 @@ function SceneWorkers({ production, productionTop, errands, furniture, restingSe
         <g aria-hidden="true" transform={cat.west ? "translate(22 0) scale(-1 1)" : undefined}><Frame name={`cat.${cat.frame}`} x={3} y={-4} /></g>
       </g>;
   const bed = errands ? catBed(rows[0]!) : undefined;
-  return <>{production === undefined ? null : <ProductionArea {...production} width={Math.max(320, layout.width)} top={productionTop} pulse={pulse} />}
+  return <>{production === undefined ? null : <ProductionArea {...production} width={Math.max(320, layout.width)} top={productionTop} pulse={pulse} upperRoom={upperRoom} />}
       {bed === undefined ? null : <g aria-hidden="true" pointerEvents="none" data-cat-bed="" transform={`translate(${bed.x} ${bed.y}) scale(${WORKER_SIZE / FRAME})`}><Frame name="cat.bed" x={3} y={-4} /></g>}
       {cat !== undefined && cat.y !== rows[0]![0]!.y ? puss : null}
       {/* A question and its answer run along the corridors people walk, under their feet. */}
@@ -443,6 +444,7 @@ export function FactoryScene({ production, topology, detailNodes, workers, appea
   const stationTop = commonBottom + 32;
   const station = { missions: { x: ROOM_LEFT + 32, y: stationTop }, tasks: { x: ROOM_LEFT + 112, y: stationTop } };
   const commonAreaWidth = Math.max(commonWidth + (nook?.width ?? 0), station.tasks.x + 24 - ROOM_LEFT);
+  const upperRoom = { x: ROOM_LEFT, y: layout.restingTop - 40, width: commonAreaWidth, height: stationTop + 24 - (layout.restingTop - 40) };
   const boardTop = Math.max(layout.height, commonBottom, stationTop + 24, ...placements.map((placement) => placement.y + 24)) + PADDING;
   const sceneWidth = production === undefined ? layout.width : Math.max(320, layout.width);
   const sceneHeight = boardTop + PADDING + (production === undefined ? 0 : productionHeight(sceneWidth, production.items.length, sharedChecks(production.items).length));
@@ -459,9 +461,10 @@ export function FactoryScene({ production, topology, detailNodes, workers, appea
   // people at it: it covers their laps, and what they rest with sits on it.
   const tables = [{ seats: seating.resting, planning: false }, { seats: seating.planning, planning: true }].flatMap(({ seats, planning }) =>
     [...new Set(seats.map((seat) => seat.y))].map((y) => { const row = seats.filter((seat) => seat.y === y), first = row[0]!;
+      const tableWidth = row.at(-1)!.x - first.x + 36;
       return <g key={`${planning} ${y}`} data-common-table={planning ? "planning-workers" : "resting"} aria-hidden="true" pointerEvents="none" transform={`translate(${first.x} ${y + TABLE_DROP})`}>
-        <rect x="-18" y="-21" width={row.at(-1)!.x - first.x + 36} height="10" fill={planning ? "#455c5e" : "#655d4c"} stroke="#8c8871" />
-        {!planning ? null : <g><rect x="-12" y="-19" width="24" height="6" fill="#9fae9e" /><path d="M-9 -17h12v3H-3v-3 M5 -16h4" fill="none" stroke="#536e70" /></g>}
+        <rect x="-18" y="-21" width={tableWidth} height="10" fill={planning ? "#455c5e" : "#655d4c"} stroke="#8c8871" />
+        {!planning ? null : <g><rect x="-17" y="-20" width={tableWidth - 2} height="8" fill="#9fae9e" /><path d={`M-14 -18h${Math.max(12, tableWidth - 18)}v3h-7v-3 M${tableWidth - 22} -17h4`} fill="none" stroke="#536e70" /></g>}
       </g>; }));
 
   return (
@@ -554,10 +557,11 @@ export function FactoryScene({ production, topology, detailNodes, workers, appea
         {cabling.routes.filter((wire) => linkedFrom === wire.from || linkedFrom === wire.to).map((wire) =>
           <path key={`${wire.from} ${wire.to}`} data-wire={`${wire.from} ${wire.to}`} d={wire.d} stroke="#e5c58b" strokeWidth="1.5" opacity=".9" />)}
       </g>}
-      <Area width={commonAreaWidth} top={layout.restingTop - 40} bottom={stationTop + 24} />
+      <Area width={commonAreaWidth} top={upperRoom.y} bottom={upperRoom.y + upperRoom.height} connector={production === undefined ? undefined : { x: upperRoom.x, width: Math.min(32, upperRoom.width) }} />
       {/* Somewhere to go other than the table: against the back wall, muted like the rest of the furniture. */}
       {appearance.scenery === "off" ? null : nook?.furniture.map((piece) => <g key={piece.errand} aria-hidden="true" data-break-room={piece.errand} opacity=".8" transform={`translate(${piece.x} ${piece.y}) scale(${WORKER_SIZE / FRAME})`}>
         <Frame name={piece.errand === "shelf" ? "prop.bookshelf" : "prop.coffeestation"} x={0} y={0} />
+        {piece.errand !== "coffee" ? null : <path d="M2 15v3 M14 15v3" stroke="#303b3b" strokeWidth="2" />}
       </g>)}
       {[
         { label: "Break room", seats: seating.resting, planning: false, occupied: resting.length },
@@ -575,12 +579,12 @@ export function FactoryScene({ production, topology, detailNodes, workers, appea
       })}
       {layout.rooms.length === 0 ? <text x={ROOM_LEFT} y="24" fill="#9db1be" fontFamily="ui-monospace, monospace" fontSize="10">EMPTY FLOOR</text> : null}
 
-      <SceneWorkers production={production} productionTop={boardTop} errands={appearance.scenery !== "off"} restingSeats={seating.resting} tray={tray} peerQuestions={peerQuestions} furniture={tables} layout={layout} placements={placements} nodes={nodes} workers={workers} tasks={tasks} connected={connected} animate={appearance.animation !== "off"} selectedWorkerId={selectedWorkerId} onSelectWorker={onSelectWorker} onSelectTask={onSelectTask} onSelectHumanRequest={onSelectHumanRequest} />
+      <SceneWorkers production={production} productionTop={boardTop} upperRoom={upperRoom} errands={appearance.scenery !== "off"} restingSeats={seating.resting} tray={tray} peerQuestions={peerQuestions} furniture={tables} layout={layout} placements={placements} nodes={nodes} workers={workers} tasks={tasks} connected={connected} animate={appearance.animation !== "off"} selectedWorkerId={selectedWorkerId} onSelectWorker={onSelectWorker} onSelectTask={onSelectTask} onSelectHumanRequest={onSelectHumanRequest} />
       <g data-common-table="planning" data-tooltip="Missions · inspect objectives" aria-label="Open Missions" className={onOpenMissions === undefined ? undefined : "dfFactoryScene__target"} {...sceneAction(onOpenMissions === undefined ? undefined : () => onOpenMissions(projectId))} transform={`translate(${station.missions.x} ${station.missions.y})`}>
         {onOpenMissions === undefined ? null : <rect className="dfFactoryScene__focus" x="-22" y="-22" width="44" height="44" fill="transparent" />}
         <rect x="-22" y="-8" width="44" height="16" fill="#455c5e" stroke="#8c8871" />
         <path d="M-17 8v7 M17 8v7" stroke="#393f3c" strokeWidth="3" />
-        <rect x="-12" y="-6" width="24" height="6" fill="#9fae9e" /><path d="M-9 -4h12v3H-3v-3 M5 -3h4" fill="none" stroke="#536e70" />
+        <rect x="-21" y="-7" width="42" height="14" fill="#9fae9e" /><path d="M-18 -5h24v4H-6v-4 M9 -4h6" fill="none" stroke="#536e70" />
         <text x="0" y="-12" textAnchor="middle" fill="#d4ddd2" fontFamily="ui-monospace, monospace" fontSize="10">MISSIONS</text>
       </g>
       <g aria-hidden="true" pointerEvents="none" data-floor-tray-desk="" transform={`translate(${tray.x} ${tray.y})`}>
@@ -592,8 +596,8 @@ export function FactoryScene({ production, topology, detailNodes, workers, appea
           how the queue is doing; the target opens the existing Tasks panel. */}
       <g data-floor-inbox={queued} data-tooltip={queued === 0 ? "Tasks · queue is empty" : `Tasks · ${queued} queued`} aria-label="Open Tasks" className={onOpenTasks === undefined ? undefined : "dfFactoryScene__target"} {...sceneAction(onOpenTasks === undefined ? undefined : () => onOpenTasks(projectId))} transform={`translate(${tray.x} ${tray.y})`}>
         {onOpenTasks === undefined ? null : <rect className="dfFactoryScene__focus" x="-22" y="-22" width="44" height="44" fill="transparent" />}
-        {[...Array(Math.min(queued, 3))].map((_, index) => <rect key={index} x="1" y={-2 - index * 3} width="18" height="3" fill="#e4dcc0" stroke={tasks.some((task) => task.id === selectedTaskId && task.status === "queued") ? "#80ddff" : "#a6a087"} />)}
-        <path d="M-2 -4v6h24v-6 M-2 2h24" fill="none" stroke="#c2b184" strokeWidth="2" />
+        {[...Array(Math.min(queued, 3))].map((_, index) => <rect key={index} x="-10" y={-2 - index * 3} width="18" height="3" fill="#e4dcc0" stroke={tasks.some((task) => task.id === selectedTaskId && task.status === "queued") ? "#80ddff" : "#a6a087"} />)}
+        <path d="M-12 -4v6h24v-6 M-12 2h24" fill="none" stroke="#c2b184" strokeWidth="2" />
       </g>
 
 
@@ -634,11 +638,15 @@ function sceneAction(select: (() => void) | undefined) {
   } };
 }
 
-function Area({ width, top, bottom }: { width: number; top: number; bottom: number }) {
+function Area({ width, top, bottom, connector }: { width: number; top: number; bottom: number; connector?: { x: number; width: number } }) {
+  const openingEnd = connector === undefined ? undefined : connector.x + connector.width;
   return (
     <g role="group" aria-label="Common room">
       <rect x={ROOM_LEFT} y={top} width={width} height={bottom - top} fill="url(#df-floor)" />
-      <path d={`M${ROOM_LEFT} ${top + 24}v-24h${width}v${bottom - top}H${ROOM_LEFT}v-8`} fill="none" stroke="#465355" strokeWidth="3" />
+      <path d={connector === undefined
+        ? `M${ROOM_LEFT} ${top + 24}v-24h${width}v${bottom - top}H${ROOM_LEFT}v-8`
+        : `M${ROOM_LEFT} ${top + 24}v-24h${width}v${bottom - top}H${openingEnd} M${ROOM_LEFT} ${bottom - 8}V${top + 24}`}
+        fill="none" stroke="#465355" strokeWidth="1" />
     </g>
   );
 }

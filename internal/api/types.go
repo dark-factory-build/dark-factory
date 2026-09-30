@@ -17,6 +17,9 @@ const (
 	MaxContentPageItems = 4
 	maxSnapshotEntries  = 4096
 	credentialBytes     = 32
+	// MaxRemoteErrorDetail bounds the reason a refused request may carry back
+	// to its caller. A code alone cannot say what moved or what to do next.
+	MaxRemoteErrorDetail = 1024
 )
 
 var (
@@ -43,10 +46,18 @@ const (
 )
 
 type RemoteError struct {
-	code RemoteErrorCode
+	code   RemoteErrorCode
+	detail string
 }
 
 func (err *RemoteError) Error() string {
+	if err.detail != "" {
+		return err.message() + ": " + err.detail
+	}
+	return err.message()
+}
+
+func (err *RemoteError) message() string {
 	switch err.code {
 	case RemoteInvalidRequest:
 		return "local API rejected the request"
@@ -74,6 +85,21 @@ func (err *RemoteError) Error() string {
 }
 
 func (err *RemoteError) Code() RemoteErrorCode { return err.code }
+
+// validRemoteDetail keeps a refusal reason safe to print in the provider
+// terminal that will read it: bounded, valid UTF-8, and free of the C0/C1
+// controls a terminal emulator would act on instead of display.
+func validRemoteDetail(value string) bool {
+	if !validText(value, 0, MaxRemoteErrorDetail) {
+		return false
+	}
+	for _, character := range value {
+		if character < 0x20 || character >= 0x7f && character <= 0x9f {
+			return false
+		}
+	}
+	return true
+}
 
 type HealthStatus struct {
 	Ready bool `json:"ready"`
@@ -134,6 +160,14 @@ type BuildIdentity struct {
 	Target  string `json:"target"`
 	BuildID string `json:"build_id"`
 	Release bool   `json:"release"`
+}
+
+// PublishedRelease is the newest public release the daemon has observed. It is
+// information for the operator, never an update: a zero value only means the
+// daemon has no answer, not that this build is current.
+type PublishedRelease struct {
+	Version string `json:"version"`
+	URL     string `json:"url"`
 }
 
 type WebClient struct {

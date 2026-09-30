@@ -115,6 +115,25 @@ func (store *Store) TaskRecovery(ctx context.Context, id TaskID, incarnation Inc
 	return result, true, nil
 }
 
+// LatestTaskRun is the task's newest run for that incarnation, read without
+// the recovery projection's run bound: a task retried past MaxRecoveryRuns
+// keeps its terminal diagnosis readable.
+func (store *Store) LatestTaskRun(ctx context.Context, id TaskID, incarnation IncarnationID) (Run, bool, error) {
+	if id.zero() || incarnation.zero() {
+		return Run{}, false, ErrInvalidValue
+	}
+	read, err := store.beginRead(ctx)
+	if err != nil {
+		return Run{}, false, err
+	}
+	defer read.Close()
+	task, found, err := taskByID(ctx, read.connection, id)
+	if err != nil || !found || task.IncarnationID != incarnation {
+		return Run{}, false, err
+	}
+	return latestRunForTask(ctx, read.connection, task)
+}
+
 // lastProgressForTask is the newest transition among every record scoped to
 // the task: the task row, its runs, human requests and peer questions on
 // them, and interventions against it. A meaningful exchange on any of these

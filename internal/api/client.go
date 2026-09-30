@@ -43,7 +43,6 @@ type client struct {
 	socketPath string
 	tokenPath  string
 	token      tokenRecord
-	socket     socketRecord
 	domain     byte
 }
 
@@ -86,11 +85,10 @@ func newClient(socketPath, tokenPath string, domain byte) (client, error) {
 	if err != nil {
 		return client{}, err
 	}
-	socket, err := inspectSocket(socketPath)
-	if err != nil {
+	if _, err := inspectSocket(socketPath); err != nil {
 		return client{}, err
 	}
-	return client{socketPath: socketPath, tokenPath: tokenPath, token: token, socket: socket, domain: domain}, nil
+	return client{socketPath: socketPath, tokenPath: tokenPath, token: token, domain: domain}, nil
 }
 
 func (client *OperatorClient) Health(ctx context.Context) (HealthStatus, error) {
@@ -661,9 +659,10 @@ type requestEnvelope struct {
 }
 
 type responseEnvelope struct {
-	OK    *bool           `json:"ok"`
-	Data  json.RawMessage `json:"data,omitempty"`
-	Error RemoteErrorCode `json:"error,omitempty"`
+	OK     *bool           `json:"ok"`
+	Data   json.RawMessage `json:"data,omitempty"`
+	Error  RemoteErrorCode `json:"error,omitempty"`
+	Detail string          `json:"detail,omitempty"`
 }
 
 func (client client) call(ctx context.Context, method string, params, output any) error {
@@ -685,7 +684,11 @@ func (client client) call(ctx context.Context, method string, params, output any
 	}
 	defer cancel()
 	before, err := inspectSocket(client.socketPath)
-	if err != nil || !before.same(client.socket) {
+	// The daemon deliberately rebinds this canonical socket during a clean
+	// handover. The path and its private parent remain the authority; the
+	// socket inode is generation-scoped and must not be pinned in a client
+	// that can outlive one daemon generation.
+	if err != nil {
 		return ErrInvalidClient
 	}
 	connection, err := (&net.Dialer{}).DialContext(ctx, "unix", client.socketPath)
@@ -875,7 +878,7 @@ func decodeResponse(encoded []byte, output any) error {
 		return ErrProtocol
 	}
 	if *envelope.OK {
-		if envelope.Error != "" || len(envelope.Data) == 0 || bytes.Equal(envelope.Data, []byte("null")) {
+		if envelope.Error != "" || envelope.Detail != "" || len(envelope.Data) == 0 || bytes.Equal(envelope.Data, []byte("null")) {
 			return ErrProtocol
 		}
 		if err := decodeExact(envelope.Data, output); err != nil {
@@ -883,10 +886,10 @@ func decodeResponse(encoded []byte, output any) error {
 		}
 		return nil
 	}
-	if len(envelope.Data) != 0 || !validRemoteCode(envelope.Error) {
+	if len(envelope.Data) != 0 || !validRemoteCode(envelope.Error) || !validRemoteDetail(envelope.Detail) {
 		return ErrProtocol
 	}
-	return &RemoteError{code: envelope.Error}
+	return &RemoteError{code: envelope.Error, detail: envelope.Detail}
 }
 
 // decodeExact reads one bounded JSON value with this protocol's exact grammar.

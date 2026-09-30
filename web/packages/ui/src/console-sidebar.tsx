@@ -7,6 +7,7 @@ import { AgentSprite } from "./factory-scene/factory-scene.js";
 import { agentStatus, agentCurrentTask, agentActivity } from "./console-view.js";
 import { AnswerControls } from "./console-interactions.js";
 import type { FloorAppearance } from "./floor-appearance.js";
+import type { PublishedRelease, RuntimeBuild } from "./production-data.js";
 
 /** Only the controls the operator actually changed; the rest are left alone. */
 export type AgentConfigEdit = Readonly<{ model?: string; reasoningEffort?: string; accountId?: string; paused?: boolean; archived?: boolean; idlePolicy?: "wait" | "standing_instruction"; idleAfterSeconds?: number; idleInstruction?: string; idleRunBudget?: number }>;
@@ -18,7 +19,7 @@ export type AgentPanelView = "terminal" | "config";
 /** One private peer-conversation page, shared by queued and completed work. */
 export function TaskConversation({ brief, onOlder, pending = false }: { brief: TaskBrief; onOlder?: () => void; pending?: boolean }) {
   const waiting = brief.peerQuestions.filter((question) => question.answer === undefined || question.answer === "").length;
-  return <section aria-label={`Task conversation${waiting === 0 ? "" : ` · ${waiting} awaiting answer`}`}><h3>Conversation {waiting === 0 ? null : <span aria-label={`${waiting} unanswered peer questions`}>· {waiting} awaiting answer</span>}</h3>{brief.peerQuestions.length === 0 ? <p>No peer questions</p> : <ol>{brief.peerQuestions.map((question) => <li key={question.id}><strong>Question · {question.source_task_id} → {question.target_task_id}</strong><span>{question.question}</span><small>Recipient delivery · {question.recipient_delivery_state.replaceAll("_", " ")}</small>{question.answer === undefined || question.answer === "" ? null : <><span>Answer · {question.answer}</span><small>Answer delivery · {question.answer_delivery_state.replaceAll("_", " ")}</small></>}</li>)}</ol>}{brief.nextPeerOffset === undefined || onOlder === undefined ? null : <button type="button" disabled={pending} onClick={onOlder}>Older conversation</button>}</section>;
+  return <section className="dfTaskConversation" aria-label={`Task conversation${waiting === 0 ? "" : ` · ${waiting} awaiting answer`}`}><h3>Conversation {waiting === 0 ? null : <span aria-label={`${waiting} unanswered peer questions`}>· {waiting} awaiting answer</span>}</h3>{brief.peerQuestions.length === 0 ? <p>No peer questions</p> : <ol>{brief.peerQuestions.map((question) => <li key={question.id}><strong>Question · {question.source_task_id} → {question.target_task_id}</strong><span>{question.question}</span><small>Recipient delivery · {question.recipient_delivery_state.replaceAll("_", " ")}</small>{question.answer === undefined || question.answer === "" ? null : <><span>Answer · {question.answer}</span><small>Answer delivery · {question.answer_delivery_state.replaceAll("_", " ")}</small></>}</li>)}</ol>}{brief.nextPeerOffset === undefined || onOlder === undefined ? null : <button type="button" disabled={pending} onClick={onOlder}>Older conversation</button>}</section>;
 }
 
 const EDIT_ERRORS = new Map<string, string>([
@@ -644,6 +645,8 @@ export function SettingsDialog({
   onSelectTask,
   pairing,
   library,
+  runtime,
+  release,
   onClose,
 }: {
   onAttachmentRetention?: (enabled?: boolean) => Promise<boolean>;
@@ -676,6 +679,9 @@ export function SettingsDialog({
   /** A self-contained "PAIR A PHONE" surface mounts here. */
   pairing?: ReactNode;
   library?: ReactNode;
+  /** The build of the daemon answering this connection, observed not asserted. */
+  runtime?: RuntimeBuild;
+  release?: PublishedRelease;
   onClose?: () => void;
 }) {
   // Discovery is an observation of the daemon's machine, so it is asked for
@@ -722,6 +728,7 @@ export function SettingsDialog({
         <p><a href="https://darkfactory.build/feedback?kind=feature" target="_blank" rel="noopener noreferrer">Request a feature</a></p>
         <p><a href="https://darkfactory.build/backlog" target="_blank" rel="noopener noreferrer">Public backlog</a></p>
     </section> },
+    { label: "Updates", content: <UpdatesSection runtime={runtime} release={release} /> },
   ];
   return <ConsoleDialog label="Settings" title="Settings" onClose={onClose}>
     <div className="dfSettingsTabs" role="tablist" aria-label="Settings sections">
@@ -743,6 +750,19 @@ export function SettingsDialog({
       {content}
     </div>)}
   </ConsoleDialog>;
+}
+
+/** Two observations and one command. Nothing here installs anything, and a
+ * missing release is no answer from GitHub rather than proof of being current. */
+function UpdatesSection({ runtime, release }: { runtime?: RuntimeBuild; release?: PublishedRelease }) {
+  return <section className="dfConsoleSidebar__section" aria-label="Updates">
+    <h3>Updates</h3>
+    <p>Running version <code>{runtime?.version || "not observed"}</code>{runtime !== undefined && !runtime.release ? " · source build" : ""}</p>
+    <p>Latest release {release === undefined ? "not observed" : <a href={release.url} target="_blank" rel="noopener noreferrer"><code>{release.version}</code></a>}</p>
+    <p>Update this factory from a terminal on its Mac, using the new <code>factoryctl</code>:</p>
+    <pre style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}><code>factoryctl service uninstall --home &quot;$HOME/.dark-factory&quot;{"\n"}factoryctl service install --home &quot;$HOME/.dark-factory&quot;</code></pre>
+    <p>Only the service binaries, plist and receipt are replaced. Repeat any <code>--relay-origin</code> on the install, and back the database up before a schema change; see the installation guide.</p>
+  </section>;
 }
 
 function RepositoriesSection({ state, repositories, pending, errors, onLoad, onMutate, onCreateProject }: {

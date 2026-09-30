@@ -81,3 +81,22 @@ test("an open mission reconciles after reconnect without discarding a draft", as
   assert.match(JSON.stringify(tree.toJSON()), /Deliver/);
   await act(async () => tree.unmount());
 });
+
+test("mission details lead with action and open related tasks without a nested inspector", async () => {
+  const opened = [], mission = { id: "mission", objective: "Deliver changes", state: "open" };
+  const task = { task_id: "task", project_id: project, title: "Related task", status: "succeeded", revision: "1", priority: 0 };
+  let tree;
+  const call = async operation => operation === "outcome_list" ? {items: [mission]} : operation === "mission_tasks" ? {tasks: [task]} : {...mission, document: {...mission, criteria: "Acceptance evidence", remaining_work: "Deploy it"}};
+  await act(async () => { tree = create(createElement(MissionsPanel, {state: fixtureState, projectId: project, active: true, call, onProject() {}, onOpenTask: task => opened.push(task)})); });
+  await act(async () => tree.root.findAllByType("button").find(node => node.children[0] === mission.objective).props.onClick());
+  const details = tree.root.findAllByType("details").find(node => node.findByType("summary").children.join("") === "Acceptance criteria");
+  assert.ok(!details.props.open);
+  const output = JSON.stringify(tree.toJSON());
+  assert.ok(output.indexOf("Deploy it") < output.indexOf("Acceptance evidence"));
+  await act(async () => tree.root.findAllByType("button").find(node => node.children.join("").includes("Related task")).props.onClick());
+  assert.equal(opened[0].id, "task");
+  assert.equal(tree.root.findAllByProps({"aria-label": "Work details"}).length, 0);
+  await act(async () => button(tree, "← Back to Missions").props.onClick());
+  assert.ok(tree.root.findAllByType("button").some(node => node.children[0] === mission.objective));
+  await act(async () => tree.unmount());
+});

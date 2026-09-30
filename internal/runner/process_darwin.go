@@ -491,11 +491,16 @@ func prepareBlocked(lease *GateLease, gateExecutable string, spec *LaunchSpec, k
 	}
 	lifetimeFile := os.NewFile(uintptr(lifetimeDup), "runtime-lifetime")
 	prepared.startFiles = append(prepared.startFiles, lifetimeFile)
+	// Darwin has no kqueue1; see newControlSocketPair for the fork window.
+	syscall.ForkLock.RLock()
 	kq, err := unix.Kqueue()
+	if err == nil {
+		unix.CloseOnExec(kq)
+	}
+	syscall.ForkLock.RUnlock()
 	if err != nil {
 		return nil, err
 	}
-	unix.CloseOnExec(kq)
 	prepared.kq = kq
 	cmd := exec.Command(gate, "--exec-gate")
 	cmd.Env = []string{}

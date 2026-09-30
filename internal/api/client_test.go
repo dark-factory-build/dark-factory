@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -1339,6 +1340,60 @@ func TestSocketParentSwapAfterDialIsRejected(t *testing.T) {
 	}
 }
 
+func TestClientSurvivesDaemonSocketRebind(t *testing.T) {
+	bearer := testCredential('H')
+	directory := privateTestDirectory(t)
+	token := filepath.Join(directory, "token")
+	writeTestToken(t, token, bearer)
+	listener, socket := testListener(t, directory)
+	client, err := NewOperatorClient(socket, token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serveHealth := func(listener *net.UnixListener) <-chan error {
+		done := make(chan error, 1)
+		go func() {
+			connection, acceptErr := listener.Accept()
+			if acceptErr != nil {
+				done <- acceptErr
+				return
+			}
+			defer connection.Close()
+			if _, readErr := readTestFrame(connection); readErr != nil {
+				done <- readErr
+				return
+			}
+			done <- writeTestResponse(connection, wireOperatorDomain, successResponse(`{"ready":true}`))
+		}()
+		return done
+	}
+	firstDone := serveHealth(listener)
+	if _, err := client.Health(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-firstDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	replacement, err := net.ListenUnix("unix", &net.UnixAddr{Name: socket, Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer replacement.Close()
+	if err := os.Chmod(socket, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	secondDone := serveHealth(replacement)
+	if _, err := client.Health(context.Background()); err != nil {
+		t.Fatalf("health after daemon socket rebind = %v", err)
+	}
+	if err := <-secondDone; err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestInputBoundsFailBeforeConnection(t *testing.T) {
 	bearer := testCredential('B')
 	directory := privateTestDirectory(t)
@@ -1552,5 +1607,52 @@ func TestTerminalObserveBindsReturnedSnapshotToRequest(t *testing.T) {
 			}
 			fixture.wait(t)
 		})
+	}
+}
+
+// TestErrorReplyCarriesItsRefusalReason pins the grammar that lets a refused
+// caller learn what to do: a bounded, terminal-safe detail beside the code,
+// absent by default, never on a successful reply, and never unbounded.
+func TestErrorReplyCarriesItsRefusalReason(t *testing.T) {
+	const reason = "uncommitted implementation in Change worktree; commit it or clean it up before reporting success"
+	reply, err := NewErrorDetailReply(RemoteConflict, reason)
+	if err != nil || reply.code != RemoteConflict || reply.detail != reason {
+		t.Fatalf("detailed error reply = %+v, %v", reply, err)
+	}
+	if bare, err := NewErrorReply(RemoteConflict); err != nil || bare.detail != "" {
+		t.Fatalf("bare error reply = %+v, %v", bare, err)
+	}
+	for name, detail := range map[string]string{
+		"over the bound":  strings.Repeat("x", MaxRemoteErrorDetail+1),
+		"C0 control":      "refused\nreason",
+		"C1 control":      "refused\u009breason",
+		"NUL":             "refused\x00reason",
+		"invalid unicode": "refused \xff",
+	} {
+		if _, err := NewErrorDetailReply(RemoteConflict, detail); !errors.Is(err, ErrInvalidInput) {
+			t.Fatalf("%s detail accepted: %v", name, err)
+		}
+	}
+
+	var decoded MutationResult
+	err = decodeResponse([]byte(`{"ok":false,"error":"conflict","detail":`+strconv.Quote(reason)+`}`), &decoded)
+	var remote *RemoteError
+	if !errors.As(err, &remote) || remote.Code() != RemoteConflict {
+		t.Fatalf("decoded refusal = %v", err)
+	}
+	if remote.Error() != "local API request conflicts with durable state: "+reason {
+		t.Fatalf("refusal message = %q", remote.Error())
+	}
+	// An older daemon sends no detail; its message is exactly what it was.
+	err = decodeResponse([]byte(`{"ok":false,"error":"conflict"}`), &decoded)
+	if !errors.As(err, &remote) || remote.Error() != "local API request conflicts with durable state" {
+		t.Fatalf("detail-free refusal = %v", err)
+	}
+	// A detail on a successful reply is not this grammar.
+	if err := decodeResponse([]byte(`{"ok":true,"detail":"x","data":{"head":1,"revision":1}}`), &decoded); !errors.Is(err, ErrProtocol) {
+		t.Fatalf("detail on a success reply = %v", err)
+	}
+	if err := decodeResponse([]byte(`{"ok":false,"error":"conflict","detail":"refused\nreason"}`), &decoded); !errors.Is(err, ErrProtocol) {
+		t.Fatalf("control character in a refusal detail = %v", err)
 	}
 }

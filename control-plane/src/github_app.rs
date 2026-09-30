@@ -128,10 +128,12 @@ pub(crate) enum Error {
     Rejected(u16),
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub(crate) enum OperationError {
     #[error("maintainer operation input is invalid")]
     InvalidInput,
+    #[error("pull request body ends with a source footer it does not own: {0}")]
+    InvalidFooter(String),
     #[error("operation ID is already bound to a different request")]
     Conflict,
     /// The request was refused determinately. Distinct from `Indeterminate`,
@@ -149,6 +151,8 @@ pub(crate) enum OperationError {
     Refused(RefusalReason),
     #[error("operation outcome requires reconciliation")]
     Indeterminate,
+    #[error("pull request creation requires reconciliation: {0}")]
+    PullRequestUncertain(String),
     #[error("maintainer operation authority is unavailable")]
     Unavailable,
 }
@@ -245,6 +249,16 @@ impl std::fmt::Display for RejectionKinds {
         }
         Ok(())
     }
+}
+
+// Once a create may have executed, a refused or ambiguous read is not proof
+// that the write was refused. Keep the diagnostic without enabling a retry.
+fn uncertain_pull_request_lookup(error: OperationError) -> OperationError {
+    OperationError::PullRequestUncertain(match error {
+        OperationError::Indeterminate =>
+            "the create outcome is unknown and GitHub returned ambiguous or invalid matching pull requests".into(),
+        error => format!("the create outcome is unknown and its reconciliation lookup failed: {error}"),
+    })
 }
 
 impl From<Error> for OperationError {
@@ -570,6 +584,14 @@ pub(crate) struct PullRequestCandidate {
     pub(crate) head_sha: String,
     pub(crate) base_sha: String,
     pub(crate) base_ref: String,
+    pub(crate) title: String,
+    pub(crate) url: String,
+    pub(crate) head_ref: String,
+    pub(crate) state: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) mergeable: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) merge_state_status: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1555,9 +1577,29 @@ impl AppAuthority {
         if request.cross_repository_source().is_none() && request.external_source_url.is_none() {
             permissions.insert("issues", "read");
         }
-        let token = self.0.installation_token(repository, permissions).await?;
-        let repository = self.0.repository_metadata(&token).await?;
-        if let Some(result) = self.0.reconcile_pull_request(&token, &request).await? {
+        // A refused lookup says nothing about a prior mutation's outcome.
+        let reconcile_error = |error| match state {
+            OperationRecord::Executing | OperationRecord::Indeterminate => {
+                uncertain_pull_request_lookup(error)
+            }
+            _ => error,
+        };
+        let token = self
+            .0
+            .installation_token(repository, permissions)
+            .await
+            .map_err(reconcile_error)?;
+        let repository = self
+            .0
+            .repository_metadata(&token)
+            .await
+            .map_err(reconcile_error)?;
+        if let Some(result) = self
+            .0
+            .reconcile_pull_request(&token, &request)
+            .await
+            .map_err(reconcile_error)?
+        {
             return complete(journal, &operation, result).await;
         }
         if matches!(
@@ -1568,7 +1610,10 @@ impl AppAuthority {
                 .mark_operation(&operation, OperationTransition::Indeterminate)
                 .await
                 .map_err(|_| OperationError::Unavailable)?;
-            return Err(OperationError::Indeterminate);
+            return Err(OperationError::PullRequestUncertain(
+                "the earlier request may have reached GitHub, but no exact pull request was found"
+                    .into(),
+            ));
         }
         if request.external_source_url.is_some() {
             // Linear is a private backlog; a provider cannot authorize disclosure.
@@ -1613,10 +1658,17 @@ impl AppAuthority {
             }
             OperationRecord::Conflict => return Err(OperationError::Conflict),
             OperationRecord::Executing | OperationRecord::Indeterminate => {
-                if let Some(result) = self.0.reconcile_pull_request(&token, &request).await? {
+                if let Some(result) = self
+                    .0
+                    .reconcile_pull_request(&token, &request)
+                    .await
+                    .map_err(uncertain_pull_request_lookup)?
+                {
                     return complete(journal, &operation, result).await;
                 }
-                return Err(OperationError::Indeterminate);
+                return Err(OperationError::PullRequestUncertain(
+                    "the earlier request may have reached GitHub, but no exact pull request was found".into(),
+                ));
             }
             OperationRecord::New | OperationRecord::Planned => {
                 return Err(OperationError::Unavailable);
@@ -1625,14 +1677,28 @@ impl AppAuthority {
         match self.0.post_pull_request(&token, &request).await {
             Ok(result) => complete(journal, &operation, result).await,
             Err(OperationError::Refused(reason)) => refuse(journal, &operation, reason).await,
-            Err(_) => {
-                if let Some(result) = self.0.reconcile_pull_request(&token, &request).await? {
-                    return complete(journal, &operation, result).await;
-                }
+            Err(error) => {
+                // Persist uncertainty before a fallible lookup. A rejected
+                // GET cannot turn an unanswered POST into a safe refusal.
                 let _ = journal
                     .mark_operation(&operation, OperationTransition::Indeterminate)
                     .await;
-                Err(OperationError::Indeterminate)
+                if let Some(result) = self
+                    .0
+                    .reconcile_pull_request(&token, &request)
+                    .await
+                    .map_err(uncertain_pull_request_lookup)?
+                {
+                    return complete(journal, &operation, result).await;
+                }
+                Err(OperationError::PullRequestUncertain(match error {
+                    OperationError::Indeterminate => {
+                        "GitHub returned a pull request that did not match the requested identity or heads".into()
+                    }
+                    error => format!(
+                        "the create request failed without an authoritative rejection; no exact pull request was found: {error}"
+                    ),
+                }))
             }
         }
     }
@@ -3240,7 +3306,10 @@ impl CreatePullRequest {
         if self.head == self.base || self.head_sha == self.base_sha {
             return Err(OperationError::InvalidInput);
         }
-        Ok(())
+        // Render now: a body refused only while building the POST would do so
+        // after the journal says executing, turning a caller error into an
+        // uncertain create (#1071).
+        self.marked_body().map(drop)
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -3270,30 +3339,31 @@ impl CreatePullRequest {
         let mut body = self.body.trim_end_matches(|character: char| {
             character == '\n' || character == '\r' || character == ' ' || character == '\t'
         });
-        while let Some(line) = body.rsplit('\n').next() {
-            if (cross_source.is_some() || self.external_source_url.is_some())
-                && line.trim() == footer
-            {
-                body = body[..body.len() - line.len()].trim_end();
+        // Only the trailing footer is owned: copies of it (in any case) collapse
+        // into the one appended below, and any other footer-shaped line in that
+        // place is refused. The same line above the owned footer is ordinary
+        // caller text (cross-repository sources still refuse unqualified ones).
+        let mut owned = false;
+        while let Some(raw) = body.rsplit('\n').next() {
+            let line = raw.trim();
+            if line.eq_ignore_ascii_case(&footer) {
+                body = body[..body.len() - raw.len()].trim_end();
+                owned = true;
                 continue;
             }
-            let Some((kind, issue_number)) = pull_request_footer(line) else {
-                break;
-            };
-            let expected_kind = if self.close_on_merge {
-                "Closes"
-            } else {
-                "Refs"
-            };
-            if (cross_source.is_some() || self.external_source_url.is_some())
-                || kind != expected_kind
-                || issue_number != self.issue_number
-            {
-                return Err(OperationError::InvalidInput);
+            // Footer-shaped: `Refs`/`Closes`, any case, then at most one token,
+            // whatever it is (`#N`, `owner/repo#N`, a URL, or a malformed one
+            // such as `team/backlog`). A keyword opening prose of several words
+            // stays text, even when that prose mentions `#N` or a URL.
+            let (keyword, target) = line.split_once(char::is_whitespace).unwrap_or((line, ""));
+            let keyword = matches!(keyword.to_ascii_lowercase().as_str(), "refs" | "closes");
+            let lone = !target.trim().contains(char::is_whitespace);
+            if !owned && keyword && lone {
+                return Err(OperationError::InvalidFooter(
+                    line.chars().take(80).collect(),
+                ));
             }
-            body = body[..body.len() - line.len()].trim_end_matches(|character: char| {
-                character == '\n' || character == '\r' || character == ' ' || character == '\t'
-            });
+            break;
         }
         if cross_source.is_some() || self.external_source_url.is_some() {
             // Cross-repository source references must be qualified. Reject
@@ -3344,16 +3414,6 @@ fn validate_source_visibility(
         (Some(false), Some(_)) | (Some(true), Some(true)) => Ok(()),
         _ => Err(OperationError::InvalidInput),
     }
-}
-
-fn pull_request_footer(line: &str) -> Option<(&str, i64)> {
-    let line = line.trim();
-    let (kind, issue) = line.split_once(" #")?;
-    if kind != "Refs" && kind != "Closes" {
-        return None;
-    }
-    let issue_number = issue.parse::<i64>().ok()?;
-    (issue_number > 0).then_some((kind, issue_number))
 }
 
 impl UpdatePullRequestBody {
@@ -3466,10 +3526,9 @@ impl PublishCommit {
                 return Err(OperationError::InvalidInput);
             }
         }
-        // Keep caller text to one headline and reserve the body for the
-        // operation trailer so the full message is byte-exact and trivial to
-        // reconcile.
-        valid_text(&self.message, 1, 4_096, false)?;
+        // Keep the operation trailer separate from caller text while allowing
+        // the normal multi-line commit messages GitHub accepts.
+        valid_text(&self.message, 1, 4_096, true)?;
         free_of_operation_marker(&self.message)?;
         if !(1..=MAX_COMMIT_FILES).contains(&self.changes.len()) {
             return Err(OperationError::InvalidInput);
@@ -6537,6 +6596,16 @@ fn pull_request_page(
             head_sha: pull.head.sha,
             base_sha: pull.base.sha,
             base_ref: pull.base.name,
+            title: pull.title,
+            url: pull.html_url,
+            head_ref: pull.head.name,
+            state: if pull.merged {
+                "merged".to_owned()
+            } else {
+                pull.state
+            },
+            mergeable: pull.mergeable,
+            merge_state_status: pull.merge_state_status,
         });
     }
     Ok(PullRequestPage {
@@ -7048,6 +7117,10 @@ struct PullRequest {
     state: String,
     #[serde(default)]
     merged: bool,
+    #[serde(default)]
+    mergeable: Option<bool>,
+    #[serde(default, rename = "mergeable_state")]
+    merge_state_status: Option<String>,
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
@@ -8226,12 +8299,20 @@ fn app_jwt_endpoint(url: &str) -> bool {
     // (`.../pulls?x=/installation`), and dot segments are collapsed by the URL
     // parser after this check runs.
     let path = &url[..url.find(['?', '#']).unwrap_or(url.len())];
-    if path.contains("..") {
+    if path == "https://api.github.com/app" {
+        return true;
+    }
+    let Some(path) = path.strip_prefix("https://api.github.com/") else {
+        return false;
+    };
+    if path
+        .split('/')
+        .any(|segment| segment.is_empty() || segment == "..")
+    {
         return false;
     }
-    path == "https://api.github.com/app"
-        || path.starts_with("https://api.github.com/app/installations/")
-        || (path.starts_with("https://api.github.com/repos/") && path.ends_with("/installation"))
+    path.starts_with("app/installations/")
+        || (path.starts_with("repos/") && path.ends_with("/installation"))
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -9666,6 +9747,8 @@ mod tests {
                 },
                 state: "open".into(),
                 merged: false,
+                mergeable: None,
+                merge_state_status: None,
             })
         };
         let digest = request.reviewed_body_digest.as_deref().unwrap();
@@ -10128,7 +10211,7 @@ mod tests {
         let mut different_tree = request.clone();
         different_tree.changes[0].content_base64 = Some("ZGlmZmVyZW50".into());
         assert_ne!(trailer, different_tree.trailer().unwrap());
-        assert!(forged("Two\nlines").validate().is_err());
+        assert!(forged("Two\nlines").validate().is_ok());
         // A worker that integrated main publishes the merge it made: the
         // branch head stays first parent, the integrated commit is second, and
         // the changes are its diff from that commit rather than a copy of it.
@@ -10557,6 +10640,9 @@ mod tests {
             "https://api.github.com/repos/dark-factory-build/dark-factory/installation"
         ));
         assert!(app_jwt_endpoint(
+            "https://api.github.com/repos/dark-factory-build/a..b/installation"
+        ));
+        assert!(app_jwt_endpoint(
             "https://api.github.com/app/installations/155853844/access_tokens"
         ));
         // Readiness once proved repository identity by fetching this URL with
@@ -10580,7 +10666,7 @@ mod tests {
         ));
         // Dot segments are collapsed by the URL parser after this check runs.
         assert!(!app_jwt_endpoint(
-            "https://api.github.com/app/installations/../../repos/dark-factory-build/dark-factory/pulls"
+            "https://api.github.com/repos/dark-factory-build/../dark-factory/installation"
         ));
         // Userinfo must not be mistaken for the host.
         assert!(!app_jwt_endpoint("https://api.github.com@evil.example/app"));
@@ -10674,41 +10760,6 @@ mod tests {
     }
 
     #[test]
-    fn publication_footer_tracks_issue_completion_without_closing_other_sources() {
-        let mut request = CreatePullRequest {
-            external_source_url: None,
-            repository: "team/repo".into(),
-            operation_id: "1c8a5c44-7f1f-11f0-952e-acde48001122".into(),
-            issue_number: 390,
-            source_repository: None,
-            head: "feature/change".into(),
-            head_sha: "a".repeat(40),
-            base: "main".into(),
-            base_sha: "b".repeat(40),
-            title: "Complete issue".into(),
-            body: "Published change.".into(),
-            draft: false,
-            close_on_merge: true,
-        };
-        request.validate().unwrap();
-        let completed = request.marked_body().unwrap();
-        assert!(completed.contains("\n\nCloses #390\n\n"));
-        assert!(!completed.contains("Refs #390"));
-
-        request.close_on_merge = false;
-        let umbrella = request.marked_body().unwrap();
-        assert!(umbrella.contains("\n\nRefs #390\n\n"));
-        assert!(!umbrella.contains("Closes #390"));
-
-        request.external_source_url = Some("https://linear.app/acme/issue/ENG-7/change".into());
-        request.issue_number = 0;
-        request.validate().unwrap();
-        let non_github = request.marked_body().unwrap();
-        assert!(non_github.contains("\n\nRefs https://linear.app/acme/issue/ENG-7/change\n\n"));
-        assert!(!non_github.contains("Closes"));
-    }
-
-    #[test]
     fn typed_operation_inputs_are_exact_head_bound_and_bounded() {
         let mut issue = CreateIssue {
             repository: "dark-factory-build/dark-factory".into(),
@@ -10798,6 +10849,8 @@ mod tests {
             },
             state: state.into(),
             merged,
+            mergeable: None,
+            merge_state_status: None,
         };
         assert!(
             pull("open", false, close.head_sha.clone())
@@ -10919,6 +10972,29 @@ mod tests {
                 .count(),
             1
         );
+        // Qualified trailing footers are owned only when they are the source's
+        // own; a malformed or conflicting one is refused before any claim.
+        for footer in ["Refs team/backlog#390x", "REFS Team/Backlog#391"] {
+            cross.source_repository = Some("Team/Backlog".into());
+            cross.body = format!("Change.\n\n{footer}\n");
+            assert_eq!(
+                cross.validate().err(),
+                Some(OperationError::InvalidFooter(footer.into()))
+            );
+        }
+        cross.body = "Change.\n\nRefs Team/Backlog#390\n".into();
+        assert!(cross.validate().is_ok());
+        let rendered = cross.marked_body().unwrap();
+        assert!(!rendered.contains("Team/Backlog"));
+        assert_eq!(rendered.matches("Refs team/backlog#390").count(), 1);
+        cross.body = "Change.\n\nRefs team/backlog#391\n\nRefs team/backlog#390\n".into();
+        assert!(cross.validate().is_ok());
+        assert!(
+            cross
+                .marked_body()
+                .unwrap()
+                .contains("Refs team/backlog#391\n\nRefs team/backlog#390\n\n<!--")
+        );
         assert!(validate_source_visibility(Some(false), Some(false)).is_ok());
         assert!(validate_source_visibility(Some(false), Some(true)).is_ok());
         assert!(validate_source_visibility(Some(true), Some(true)).is_ok());
@@ -10941,18 +11017,44 @@ mod tests {
         );
         let mut conflicting_footer = create.clone();
         conflicting_footer.body.push_str("\n\nRefs #391\n");
+        // The create path validates before its journal claim (#1071), so a
+        // refusal here is one made before execution or any POST.
         assert_eq!(
-            conflicting_footer.marked_body().err(),
-            Some(OperationError::InvalidInput)
+            conflicting_footer.validate().err(),
+            Some(OperationError::InvalidFooter("Refs #391".into()))
         );
-        let mut whitespace_separated_conflict = create.clone();
-        whitespace_separated_conflict
+        for footer in [
+            "closes #390x",
+            "Refs team/backlog",
+            "Closes team/backlog",
+            "Refs",
+        ] {
+            let mut malformed_footer = create.clone();
+            malformed_footer.body.push_str(&format!("\n\n{footer}\n"));
+            assert_eq!(
+                malformed_footer.validate().err(),
+                Some(OperationError::InvalidFooter(footer.into()))
+            );
+        }
+        for prose in [
+            "Closes the old gap.",
+            "Closes the old gap in issue #123.",
+            "Refs the notes at https://example.com/notes for context.",
+        ] {
+            let mut closing_prose = create.clone();
+            closing_prose.body.push_str(&format!("\n\n{prose}"));
+            assert!(closing_prose.validate().is_ok(), "refused prose: {prose}");
+            assert!(closing_prose.marked_body().unwrap().contains(prose));
+        }
+        // Another reference above the owned trailing footer is caller text.
+        let mut reference_above_footer = create.clone();
+        reference_above_footer
             .body
             .push_str("\n\nRefs #391\n \t\nCloses #390\n");
-        assert_eq!(
-            whitespace_separated_conflict.marked_body().err(),
-            Some(OperationError::InvalidInput)
-        );
+        assert!(reference_above_footer.validate().is_ok());
+        let rendered = reference_above_footer.marked_body().unwrap();
+        assert!(rendered.contains("Refs #391\n\nCloses #390\n\n<!--"));
+        assert_eq!(rendered.matches("Closes #390").count(), 1);
         let mut whitespace_separated_duplicates = create.clone();
         whitespace_separated_duplicates
             .body
@@ -11092,6 +11194,8 @@ mod tests {
             },
             state: "open".into(),
             merged: false,
+            mergeable: None,
+            merge_state_status: None,
         };
         assert_eq!(
             updated_pull.body_result(&update).unwrap().unwrap().head_sha,
