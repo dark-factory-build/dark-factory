@@ -123,6 +123,7 @@ test("control role, envelope, field and capability validation is closed", () => 
   assert.equal(decodeServerControl(fixture("auth_result.json").replace('"type":"AUTH_RESULT"', '"type":"NOPE"')).type, "UNKNOWN");
   assert.deepEqual(decodeServerControl('{"type":"ERROR","body":{"code":"secret","retryable":true}}').body, { code: "internal", retryable: false });
   expectMalformed(() => decodeClientControl('{"type":"ERROR","body":{"code":"secret","retryable":false}}'));
+  expectMalformed(() => encodeServerError({ code: "secret", retryable: true }));
   // A daemon diagnostic added beside the finite error code reaches no field,
   // so it can never be rendered; the decoded body is code and retryable only.
   expectIgnoredMember('{"type":"ERROR","body":{"code":"internal","retryable":false}}', '{"type":"ERROR","body":{"code":"internal","retryable":false,"message":"private"}}');
