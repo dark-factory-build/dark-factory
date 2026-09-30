@@ -222,9 +222,12 @@ func (daemon *Daemon) recordMaintainerPublication(ctx context.Context, project k
 		return err
 	}
 	if params.Name == "submit_pull_request_review" {
-		var repo, head, event, body string
+		var repo, head, event, body, operationID, correctsOperationID string
 		var number uint64
-		for name, target := range map[string]any{"repository": &repo, "pull_number": &number, "head_sha": &head, "event": &event, "body": &body} {
+		for name, target := range map[string]any{"repository": &repo, "pull_number": &number, "head_sha": &head, "event": &event, "body": &body, "operation_id": &operationID, "corrects_review_operation_id": &correctsOperationID} {
+			if params.Arguments[name] == nil {
+				continue
+			}
 			if err := json.Unmarshal(params.Arguments[name], target); err != nil {
 				return err
 			}
@@ -252,7 +255,7 @@ func (daemon *Daemon) recordMaintainerPublication(ctx context.Context, project k
 		if err != nil {
 			return err
 		}
-		return daemon.store.RecordProductionReview(ctx, project, repo, number, kernel.ProductionReview{Head: head, State: state, Findings: body}, at)
+		return daemon.store.RecordProductionReview(ctx, project, repo, number, kernel.ProductionReview{Head: head, State: state, Findings: body, OperationID: operationID, CorrectsReviewOperationID: correctsOperationID}, at)
 	}
 	if params.Name != "create_pull_request" {
 		return nil

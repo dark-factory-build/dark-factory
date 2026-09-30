@@ -30,10 +30,12 @@ type ProductionPullRequest struct {
 }
 
 type ProductionReview struct {
-	Head     string `json:"head"`
-	State    string `json:"state"`
-	URL      string `json:"url,omitempty"`
-	Findings string `json:"findings,omitempty"`
+	Head                      string `json:"head"`
+	State                     string `json:"state"`
+	URL                       string `json:"url,omitempty"`
+	Findings                  string `json:"findings,omitempty"`
+	OperationID               string `json:"operation_id,omitempty"`
+	CorrectsReviewOperationID string `json:"corrects_review_operation_id,omitempty"`
 }
 
 type ProductionCheck struct {

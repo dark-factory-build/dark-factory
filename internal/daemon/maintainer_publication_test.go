@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -168,6 +169,59 @@ func TestRecordMaintainerPublicationPersistsReviewCoveredHead(t *testing.T) {
 		return
 	}
 	t.Fatal("pull request record was not persisted")
+}
+
+func TestRecordMaintainerPublicationPreservesBlockUntilCorrection(t *testing.T) {
+	ctx := context.Background()
+	fixture := newDispatchFixture(t)
+	projectID := mustProjectID(t, testID(246))
+	if _, err := fixture.store.CreateProject(ctx, kernel.NewProject{ID: projectID, Name: "review-correction", Root: "/review-correction"}, mustKernelTime(t, 2)); err != nil {
+		t.Fatal(err)
+	}
+	head := strings.Repeat("a", 40)
+	blockOperation := "11111111-1111-4111-8111-111111111111"
+	var taskID kernel.TaskID
+	blockRequest := maintainerRequest{Method: "tools/call", Params: json.RawMessage(`{"name":"submit_pull_request_review","arguments":{"repository":"team/repo","pull_number":7,"head_sha":"` + head + `","operation_id":"` + blockOperation + `","event":"REQUEST_CHANGES","body":"fix the exact finding"}}`)}
+	blockResponse := json.RawMessage(`{"result":{"isError":false,"structuredContent":{"head_sha":"` + head + `","verdict":"block"}}}`)
+	if err := fixture.daemon.recordMaintainerPublication(ctx, projectID, taskID, blockRequest, blockResponse); err != nil {
+		t.Fatal(err)
+	}
+	plainAllow := maintainerRequest{Method: "tools/call", Params: json.RawMessage(`{"name":"submit_pull_request_review","arguments":{"repository":"team/repo","pull_number":7,"head_sha":"` + head + `","operation_id":"22222222-2222-4222-8222-222222222222","event":"ALLOW","body":"looks good"}}`)}
+	plainAllowResponse := json.RawMessage(`{"result":{"isError":false,"structuredContent":{"head_sha":"` + head + `","verdict":"allow"}}}`)
+	if err := fixture.daemon.recordMaintainerPublication(ctx, projectID, taskID, plainAllow, plainAllowResponse); err != nil {
+		t.Fatal(err)
+	}
+	pull := readProductionPull(t, fixture.store, projectID, 7)
+	if pull.Review.State != "block" || pull.Review.Findings != "fix the exact finding" {
+		t.Fatalf("plain allow suppressed block: %+v", pull.Review)
+	}
+	correction := maintainerRequest{Method: "tools/call", Params: json.RawMessage(`{"name":"submit_pull_request_review","arguments":{"repository":"team/repo","pull_number":7,"head_sha":"` + head + `","operation_id":"33333333-3333-4333-8333-333333333333","corrects_review_operation_id":"` + blockOperation + `","event":"ALLOW","body":"the exact finding is refuted"}}`)}
+	if err := fixture.daemon.recordMaintainerPublication(ctx, projectID, taskID, correction, plainAllowResponse); err != nil {
+		t.Fatal(err)
+	}
+	pull = readProductionPull(t, fixture.store, projectID, 7)
+	if pull.Review.State != "allow" || pull.Review.CorrectsReviewOperationID != blockOperation {
+		t.Fatalf("valid correction did not supersede block: %+v", pull.Review)
+	}
+}
+
+func readProductionPull(t *testing.T, store *kernel.Store, project kernel.ProjectID, number uint64) kernel.ProductionPullRequest {
+	t.Helper()
+	page, err := store.Production(context.Background(), project, 0, 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, record := range page.Records {
+		if record.Kind == "pull_request" && record.ID == fmt.Sprint(number) {
+			var pull kernel.ProductionPullRequest
+			if err := json.Unmarshal(record.Document, &pull); err != nil {
+				t.Fatal(err)
+			}
+			return pull
+		}
+	}
+	t.Fatalf("pull request #%d missing", number)
+	return kernel.ProductionPullRequest{}
 }
 
 func TestRecordMaintainerPublicationIgnoresUnrelatedResponsesAndEnforcesProject(t *testing.T) {
