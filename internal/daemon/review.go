@@ -288,6 +288,13 @@ func (s durableReviewStore) Create(ctx context.Context, op review.Operation) err
 func (s durableReviewStore) Update(ctx context.Context, op review.Operation) error {
 	return s.write(ctx, op)
 }
+func (s durableReviewStore) CreateRetry(ctx context.Context, failed, retry review.Operation) error {
+	at, err := kernel.NewUnixMillis(s.now().UnixMilli())
+	if err != nil {
+		return err
+	}
+	return s.store.RecordReviewRetry(ctx, s.project, s.repository, failed.ID, retry.ID, retry, at)
+}
 
 type daemonReviewBackend struct {
 	daemon       *Daemon

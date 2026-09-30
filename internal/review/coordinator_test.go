@@ -3,6 +3,7 @@ package review
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -15,6 +16,19 @@ func (s *memoryStore) Create(_ context.Context, op Operation) error {
 }
 func (s *memoryStore) Update(_ context.Context, op Operation) error {
 	s.values = append(s.values, op)
+	return nil
+}
+func (s *memoryStore) CreateRetry(_ context.Context, failed, retry Operation) error {
+	for index := len(s.values) - 1; index >= 0; index-- {
+		if s.values[index].ID == failed.ID {
+			if !s.values[index].Retryable {
+				return errors.New("retry already reserved")
+			}
+			break
+		}
+	}
+	failed.Retryable = false
+	s.values = append(s.values, failed, retry)
 	return nil
 }
 
@@ -104,6 +118,22 @@ func TestRetryRerunsTheSameExactHeadAfterProviderLaunchFailure(t *testing.T) {
 	if err != nil || second.State != "enqueued" || second.Request.Head != first.Request.Head || !backend.enqueued {
 		t.Fatalf("retry operation=%+v err=%v backend=%+v", second, err, backend)
 	}
+	if _, err := c.Retry(context.Background(), first); err == nil {
+		t.Fatal("original launch failure remained retryable after its retry was reserved")
+	}
+}
+
+func TestRetryFailureIsExhaustedOnlyAfterTheSingleRetry(t *testing.T) {
+	store, backend := &memoryStore{}, &fakeBackend{killed: true}
+	c := Coordinator{Store: store, Backend: backend, Now: time.Now}
+	first, err := c.Start(context.Background(), reviewRequest())
+	if err == nil || !first.Retryable || strings.Contains(first.Detail, "retries exhausted") {
+		t.Fatalf("first failure=%+v err=%v", first, err)
+	}
+	second, err := c.Retry(context.Background(), first)
+	if err == nil || second.Retryable || !strings.Contains(second.Detail, "review retries exhausted") {
+		t.Fatalf("exhausted retry=%+v err=%v", second, err)
+	}
 }
 
 func TestRetryAllowsOnlyOneNewPreSubmitOperation(t *testing.T) {
@@ -114,7 +144,7 @@ func TestRetryAllowsOnlyOneNewPreSubmitOperation(t *testing.T) {
 		t.Fatalf("first operation=%+v err=%v", first, err)
 	}
 	second, err := c.Retry(context.Background(), first)
-	if err == nil || second.State != "failed" || !second.Retryable || second.RetryOf != first.ID {
+	if err == nil || second.State != "failed" || second.Retryable || second.RetryOf != first.ID {
 		t.Fatalf("single retry operation=%+v err=%v", second, err)
 	}
 	if _, err := c.Retry(context.Background(), second); err == nil {
