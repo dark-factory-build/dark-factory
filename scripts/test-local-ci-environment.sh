@@ -104,6 +104,20 @@ grep -F -x "XDG_DATA_HOME=$repository_root/.tools/local-ci-state/data" "$child_e
 grep -F -x "XDG_STATE_HOME=$repository_root/.tools/local-ci-state/state" "$child_environment" >/dev/null \
     || fail "safe XDG state directory was not installed"
 
+empty_home_environment=$temporary/empty-home.env
+empty_home_cache_root=$(CDPATH= cd -- /var/empty && pwd -P)
+(
+    unset DF_CI_CACHE_ROOT DF_CI_GO_MODULE_CACHE
+    export HOME=/var/empty
+    # shellcheck source=scripts/local-ci-environment.sh
+    . "$boundary"
+    env
+) >"$empty_home_environment"
+grep -F -x "DF_CI_CACHE_ROOT=$empty_home_cache_root" "$empty_home_environment" >/dev/null \
+    || fail "unwritable HOME did not select the no-cache sentinel"
+grep -F -x "GOCACHE=$empty_home_cache_root/go-build" "$empty_home_environment" >/dev/null \
+    || fail "unwritable HOME did not skip trusted cache setup"
+
 shared_go_module_cache="$temporary_root/shared-account/Library/Caches/dark-factory/local-ci/trusted/go-mod"
 /bin/mkdir -p "$shared_go_module_cache"
 shared_child_environment=$temporary/shared-child.env
