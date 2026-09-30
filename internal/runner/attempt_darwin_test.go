@@ -328,7 +328,7 @@ func runAttemptWorkerHelper(args []string) error {
 	var provider ExecSpec
 	var providerTask []byte
 	switch mode {
-	case "native-input", "native-raw", "native-chatty", "native-drop-submit", "native-exit":
+	case "native-input", "native-raw", "native-chatty", "native-drop-submit", "native-delayed-submit", "native-exit":
 		// native-raw greets with more than the terminal's output buffer and
 		// only then takes the terminal out of canonical mode, as an
 		// interactive CLI does while it starts; native-chatty then keeps
@@ -342,6 +342,8 @@ func runAttemptWorkerHelper(args []string) error {
 			greeting = fmt.Sprintf("stty -icanon || exit 96; (i=0; while [ $i -lt 10 ]; do sleep 0.1; printf .; i=$((i+1)); done; : > %q) & ", filepath.Join(root, "chatter.done"))
 		case "native-drop-submit":
 			greeting = "stty -echo || exit 96; "
+		case "native-delayed-submit":
+			greeting = "stty -echo || exit 96; "
 		case "native-exit":
 			greeting = "exit 3; "
 		}
@@ -350,6 +352,8 @@ func runAttemptWorkerHelper(args []string) error {
 		script := fmt.Sprintf("test ! -e /dev/fd/11 || exit 97; %sIFS= read -r startup || exit 98; %s || exit 99; ", greeting, startupWitness)
 		if mode == "native-drop-submit" {
 			script += fmt.Sprintf("IFS= read -r retry || exit 102; : > %q; printf 'work-started\\n'; IFS= read -r interactive || exit 100; %s || exit 101; while test ! -f %q; do sleep 0.01; done", filepath.Join(root, "provider.started"), interactiveWitness, filepath.Join(root, "finish"))
+		} else if mode == "native-delayed-submit" {
+			script += "sleep 0.8; printf 'delayed-banner\\n'; while :; do sleep 1; done"
 		} else {
 			script += fmt.Sprintf("IFS= read -r interactive || exit 100; %s || exit 101; while test ! -f %q; do sleep 0.01; done", interactiveWitness, filepath.Join(root, "finish"))
 		}
@@ -505,7 +509,7 @@ func runAttemptWorkerHelper(args []string) error {
 		}
 	}
 	var task *os.File
-	if mode != "native-input" && mode != "native-raw" && mode != "native-chatty" && mode != "native-drop-submit" && mode != "native-exit" {
+	if mode != "native-input" && mode != "native-raw" && mode != "native-chatty" && mode != "native-drop-submit" && mode != "native-delayed-submit" && mode != "native-exit" {
 		if len(providerTask) == 0 {
 			providerTask = []byte("test-provider-task\n")
 		}
@@ -1013,8 +1017,8 @@ func TestAttemptRunnerSubmitsTheStartupPromptOnlyOnceTheProviderIsQuiet(t *testi
 // The second CR is accepted by the same PTY submission path and its output is
 // the evidence that the bounded recovery reached the provider.
 func TestAttemptRunnerResendsDroppedStartupCarriageReturn(t *testing.T) {
-	testStartupSubmitRetryInterval = 10 * time.Millisecond
-	defer func() { testStartupSubmitRetryInterval = 0 }()
+	testStartupSubmitRetryInterval.Store(int64(10 * time.Millisecond))
+	defer func() { testStartupSubmitRetryInterval.Store(0) }()
 	f := newAttemptFixture(t, "native-drop-submit", "")
 	f.spec.StartupInput = []byte("native-startup\r")
 	inner := f.activateOuter()
@@ -1045,6 +1049,30 @@ func TestAttemptRunnerResendsDroppedStartupCarriageReturn(t *testing.T) {
 	record := f.finishAndAck()
 	if record.Terminal.Process != inner || record.Terminal.Exit.Code != 0 {
 		t.Fatalf("terminal=%+v", record.Terminal)
+	}
+}
+
+// A delayed banner is not evidence that the startup task was consumed. The
+// runner exhausts its bounded retries and surfaces the stable diagnostic
+// instead of leaving the provider running indefinitely.
+func TestAttemptRunnerRejectsDelayedUnrelatedStartupOutput(t *testing.T) {
+	testStartupSubmitRetryInterval.Store(int64(500 * time.Millisecond))
+	defer func() { testStartupSubmitRetryInterval.Store(0) }()
+	f := newAttemptFixture(t, "native-delayed-submit", "")
+	f.spec.StartupInput = []byte("native-startup\r")
+	inner := f.activateOuter()
+	f.advanceToProvider()
+	if err := f.controller.Release(StageProvider); err != nil {
+		t.Fatal(err)
+	}
+	if ready := f.nextTerminal(TerminalReady, 0); ready.Kind != TerminalReady {
+		t.Fatalf("terminal ready=%+v", ready)
+	}
+	if record := f.finishAndAck(false); record.Terminal.Process != inner {
+		t.Fatalf("terminal=%+v", record.Terminal)
+	}
+	if output := f.output(); !strings.Contains(output, ErrStartupUnverified.Error()) {
+		t.Fatalf("runner output=%q, want %q", output, ErrStartupUnverified)
 	}
 }
 

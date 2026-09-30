@@ -303,6 +303,7 @@ type liveAttempt struct {
 	lastTerminalOutputAt time.Time
 	lastAttemptAPICallAt time.Time
 	terminalOutputBytes  uint64
+	livenessReported     bool
 
 	subs            map[*TerminalAttachment]struct{}
 	correlations    map[uint64]*TerminalAttachment
@@ -363,6 +364,7 @@ func (attempt *liveAttempt) markTerminalOutput(at time.Time, end uint64) {
 	if end > attempt.terminalOutputBytes {
 		attempt.terminalOutputBytes = end
 		attempt.lastTerminalOutputAt = at
+		attempt.livenessReported = false
 	}
 	attempt.livenessMu.Unlock()
 }
@@ -373,16 +375,24 @@ func (attempt *liveAttempt) markAttemptAPICall(at time.Time) {
 	}
 	attempt.livenessMu.Lock()
 	attempt.lastAttemptAPICallAt = at
+	attempt.livenessReported = false
 	attempt.livenessMu.Unlock()
 }
 
-func (attempt *liveAttempt) liveness() liveAttemptLiveness {
+func (attempt *liveAttempt) livenessReport(now time.Time, threshold time.Duration) (liveAttemptLiveness, bool) {
 	if attempt == nil {
-		return liveAttemptLiveness{}
+		return liveAttemptLiveness{}, false
 	}
 	attempt.livenessMu.Lock()
 	defer attempt.livenessMu.Unlock()
-	return liveAttemptLiveness{startedAt: attempt.startedAt, lastTerminalOutputAt: attempt.lastTerminalOutputAt, lastAttemptAPICallAt: attempt.lastAttemptAPICallAt, terminalOutputBytes: attempt.terminalOutputBytes}
+	activity := liveAttemptLiveness{startedAt: attempt.startedAt, lastTerminalOutputAt: attempt.lastTerminalOutputAt, lastAttemptAPICallAt: attempt.lastAttemptAPICallAt, terminalOutputBytes: attempt.terminalOutputBytes}
+	if attempt.livenessReported || !stalledRunLiveness(now, activity.startedAt, activity.lastTerminalOutputAt, activity.lastAttemptAPICallAt, threshold) {
+		return activity, false
+	}
+	// Emit one edge per quiet interval. Terminal output growth or an attempt
+	// API call clears this bit and re-arms the next genuinely new stall.
+	attempt.livenessReported = true
+	return activity, true
 }
 
 func stalledRunLiveness(now, started, lastOutput, lastAPICall time.Time, threshold time.Duration) bool {

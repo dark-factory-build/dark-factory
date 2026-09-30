@@ -53,4 +53,21 @@ func TestAddOverseerLivenessReportsActionableContext(t *testing.T) {
 	if report.Detail == "" {
 		t.Fatal("liveness report omitted actionable detail")
 	}
+	projected = api.OverseerSnapshot{}
+	daemon.addOverseerLiveness(&projected, []kernel.OverseerRunSummary{{ID: runID, TaskID: taskID, Provider: kernel.ProviderClaudeCode}}, now)
+	if len(projected.LivenessReports) != 0 {
+		t.Fatalf("repeated quiet snapshot reports=%d, want 0", len(projected.LivenessReports))
+	}
+	attempt.markTerminalOutput(now, 1)
+	projected = api.OverseerSnapshot{}
+	daemon.addOverseerLiveness(&projected, []kernel.OverseerRunSummary{{ID: runID, TaskID: taskID, Provider: kernel.ProviderClaudeCode}}, now)
+	if len(projected.LivenessReports) != 0 {
+		t.Fatalf("active snapshot reports=%d, want 0", len(projected.LivenessReports))
+	}
+	later := now.Add(stalledRunLivenessThreshold)
+	projected = api.OverseerSnapshot{}
+	daemon.addOverseerLiveness(&projected, []kernel.OverseerRunSummary{{ID: runID, TaskID: taskID, Provider: kernel.ProviderClaudeCode}}, later)
+	if len(projected.LivenessReports) != 1 {
+		t.Fatalf("re-armed snapshot reports=%d, want 1", len(projected.LivenessReports))
+	}
 }

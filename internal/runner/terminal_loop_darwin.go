@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -168,20 +169,25 @@ const (
 	startupEnterCeiling        = 5 * time.Second
 	startupEnterTick           = 100 * time.Millisecond
 	startupSubmitRetryInterval = time.Second
-	startupSubmitMaxAttempts   = 3 // initial CR plus two bounded retries
-	terminalPayloadWriteLimit  = 250 * time.Millisecond
+	// Output outside this causal window is treated as an unrelated delayed
+	// banner or heartbeat. It cannot prove that the latest CR was consumed.
+	startupSubmitEvidenceWindow = 250 * time.Millisecond
+	startupSubmitMaxAttempts    = 3 // initial CR plus two bounded retries
+	terminalPayloadWriteLimit   = 250 * time.Millisecond
 	// DeferredSubmitBudget is the extra daemon effect budget for a deferred
 	// Codex submit: its paste, ceiling/tick, and standalone CR write.
 	DeferredSubmitBudget = startupEnterCeiling + 2*terminalPayloadWriteLimit + startupEnterTick
 )
 
 // testStartupSubmitRetryInterval keeps the actual PTY submission test fast;
-// production uses the fixed one-second recovery interval.
-var testStartupSubmitRetryInterval time.Duration
+// production uses the fixed one-second recovery interval. The atomic seam is
+// package-test-only because Darwin runner tests execute real child processes
+// and may run concurrently under -race.
+var testStartupSubmitRetryInterval atomic.Int64
 
 func startupSubmitRetryWait() time.Duration {
-	if testStartupSubmitRetryInterval > 0 {
-		return testStartupSubmitRetryInterval
+	if interval := time.Duration(testStartupSubmitRetryInterval.Load()); interval > 0 {
+		return interval
 	}
 	return startupSubmitRetryInterval
 }
@@ -257,9 +263,17 @@ func (o *terminalOwner) submitPending() error {
 // remains silent after the fixed retry budget is a failed run, not an
 // indefinitely running one.
 func (o *terminalOwner) verifyStartupSubmit() error {
-	if !o.startupSubmitPending || o.ring.Head() > o.startupSubmitHead {
-		o.startupSubmitPending = false
+	if !o.startupSubmitPending {
 		return nil
+	}
+	if o.ring.Head() > o.startupSubmitHead {
+		if time.Since(o.startupSubmitLast) <= startupSubmitEvidenceWindow {
+			o.startupSubmitPending = false
+			return nil
+		}
+		// A delayed banner/heartbeat arrived outside the causal window. Drop
+		// it as evidence and continue waiting for the bounded retry.
+		o.startupSubmitHead = o.ring.Head()
 	}
 	if time.Since(o.startupSubmitLast) < startupSubmitRetryWait() {
 		return nil
@@ -273,6 +287,7 @@ func (o *terminalOwner) verifyStartupSubmit() error {
 		stopErr := o.stop()
 		return errors.Join(fmt.Errorf("%w: retry submit %s", ErrStartupUnverified, status), stopErr)
 	}
+	o.startupSubmitHead = o.ring.Head()
 	o.startupSubmitAttempts++
 	o.startupSubmitLast = time.Now()
 	return nil
@@ -870,9 +885,6 @@ func (o *terminalOwner) consumePTY(data []byte, readErr error) error {
 		}
 		if appendErr := o.ring.Append(data); appendErr != nil {
 			return appendErr
-		}
-		if o.startupSubmitPending && o.ring.Head() > o.startupSubmitHead {
-			o.startupSubmitPending = false
 		}
 		if flushErr := o.flush(); flushErr != nil {
 			return flushErr

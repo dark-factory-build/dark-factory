@@ -1817,8 +1817,8 @@ func (daemon *Daemon) addOverseerLiveness(projected *api.OverseerSnapshot, runs 
 		if attempt == nil {
 			continue
 		}
-		activity := attempt.liveness()
-		if !stalledRunLiveness(now, activity.startedAt, activity.lastTerminalOutputAt, activity.lastAttemptAPICallAt, stalledRunLivenessThreshold) {
+		activity, report := attempt.livenessReport(now, stalledRunLivenessThreshold)
+		if !report {
 			continue
 		}
 		millis := func(value time.Time) uint64 {
