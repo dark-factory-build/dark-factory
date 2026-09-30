@@ -186,11 +186,17 @@ const nookWidth = (layout: SceneLayout) => Math.max(0, Math.min(2 * PIECE + 4, l
  * with room for neither, workers simply stay seated.
  */
 export function breakRoomNook(layout: SceneLayout, restingCount: number, planningCount: number) {
-  const width = nookWidth(layout), pieces = Math.floor(width / PIECE);
+  const width = nookWidth(layout), compact = width < 2 * PIECE + 4, pieces = compact ? 2 : Math.floor(width / PIECE);
   if (pieces === 0) return undefined;
   const seating = commonSeating(layout, restingCount, planningCount);
   const left = Math.max(...[...seating.resting, ...seating.planning].map((seat) => seat.x)) + 24;
-  return { width, furniture: (["shelf", "coffee"] as const).slice(0, pieces).map((errand, index) => ({ errand, x: left + 5 + index * PIECE, y: layout.restingTop - 38, stand: { x: left + 15 + index * PIECE, y: layout.restingTop - 8 } })) };
+  const compactX = layout.width - PADDING - WORKER_SIZE;
+  return { width, furniture: (["shelf", "coffee"] as const).slice(0, pieces).map((errand, index) => ({
+    errand,
+    x: compact ? compactX : left + 5 + index * PIECE,
+    y: layout.restingTop - 38 + (compact ? index * 24 : 0),
+    stand: { x: compact ? compactX + 10 : left + 15 + index * PIECE, y: layout.restingTop - 8 + (compact ? index * 24 : 0) },
+  })) };
 }
 
 // Each piece of furniture is visited in turns: free for the first part of a turn, then one visitor.
