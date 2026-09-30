@@ -141,6 +141,20 @@ if [ -n "$ci_requested_go_module_cache" ]; then
         return 1
     }
     ci_go_module_cache=$(CDPATH= cd -- "$ci_requested_go_module_cache" && pwd -P)
+    ci_go_module_cache_prefix=${ci_go_module_cache%/Library/Caches/dark-factory/local-ci/trusted/go-mod}
+    case "$ci_go_module_cache" in
+        */Library/Caches/dark-factory/local-ci/trusted/go-mod) ;;
+        *)
+            echo "local-ci: shared Go module cache must be the trusted go-mod directory" >&2
+            return 1
+            ;;
+    esac
+    case "$ci_go_module_cache_prefix" in
+        ''|/|/System|/System/*|/Library|/Library/*|/private/var|/private/var/*|/Volumes|/Volumes/*|/Network|/Network/*)
+            echo "local-ci: shared Go module cache has an unsafe account root" >&2
+            return 1
+            ;;
+    esac
     case "$ci_go_module_cache" in
         "$ci_repository_root"|"$ci_repository_root"/*)
             echo "local-ci: shared Go module cache must be outside the checkout" >&2

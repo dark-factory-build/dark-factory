@@ -104,8 +104,8 @@ grep -F -x "XDG_DATA_HOME=$repository_root/.tools/local-ci-state/data" "$child_e
 grep -F -x "XDG_STATE_HOME=$repository_root/.tools/local-ci-state/state" "$child_environment" >/dev/null \
     || fail "safe XDG state directory was not installed"
 
-shared_go_module_cache="$temporary_root/shared-go-mod"
-/bin/mkdir "$shared_go_module_cache"
+shared_go_module_cache="$temporary_root/shared-account/Library/Caches/dark-factory/local-ci/trusted/go-mod"
+/bin/mkdir -p "$shared_go_module_cache"
 shared_child_environment=$temporary/shared-child.env
 (
     export DF_CI_GO_MODULE_CACHE="$shared_go_module_cache"
@@ -149,7 +149,8 @@ printf '%s\n' "$state_output" | grep -F 'refusing unsafe .tools/local-ci-state p
     || fail "symlink private state refusal was unclear: $state_output"
 /bin/rm -rf "$fixture/.tools"
 
-for invalid_module_cache in "$fixture/cache" "$temporary/does-not-exist"; do
+/bin/mkdir "$temporary/untrusted-module-cache"
+for invalid_module_cache in / "$fixture/cache" "$temporary/untrusted-module-cache" "$temporary/does-not-exist"; do
     if (CDPATH='' cd -- "$fixture" && DF_CI_GO_MODULE_CACHE="$invalid_module_cache" HOME="$temporary/fixture-home" /bin/sh ./scripts/entry.sh) >"$temporary/invalid-module-cache.out" 2>&1; then
         fail "unsafe or unavailable shared Go module cache was accepted: $invalid_module_cache"
     fi
