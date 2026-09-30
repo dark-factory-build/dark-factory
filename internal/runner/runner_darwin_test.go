@@ -28,7 +28,11 @@ import (
 
 func TestMain(m *testing.M) {
 	if os.Getenv("RUNNER_TEST_OWNER") == "1" {
-		if err := runParentDeathOwner(); err != nil {
+		owner := runParentDeathOwner
+		if os.Getenv("RUNNER_TEST_OWNER_MODE") == "pty" {
+			owner = runParentDeathPTYOwner
+		}
+		if err := owner(); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(98)
 		}
@@ -404,6 +408,9 @@ func runPTYProviderHelper(root string) error {
 			return fmt.Errorf("provider inherited fd %d: %v", fd, err)
 		}
 	}
+	if err := watchTestOwner(root); err != nil {
+		return err
+	}
 	if err := os.WriteFile(filepath.Join(root, "provider.effect"), []byte("provider-started"), 0o600); err != nil {
 		return err
 	}
@@ -419,6 +426,9 @@ func runPTYProviderHelper(root string) error {
 const ptyExitPressureChunk = 8 << 10
 
 func runPTYExitPressureHelper(ready string) error {
+	if err := watchTestOwner(filepath.Dir(ready)); err != nil {
+		return err
+	}
 	term := make(chan os.Signal, 1)
 	signal.Notify(term, unix.SIGTERM)
 	defer signal.Stop(term)
@@ -1365,6 +1375,88 @@ func runParentDeathOwner() error {
 	}
 }
 
+func runParentDeathPTYOwner() error {
+	root := os.Getenv("RUNNER_TEST_ROOT")
+	if root == "" {
+		return errors.New("runner test PTY owner: missing root")
+	}
+	ownerFD, err := unix.Open(filepath.Join(root, "test-owner.lock"), unix.O_RDWR|unix.O_CREAT|unix.O_EXCL|unix.O_CLOEXEC, 0o600)
+	if err != nil {
+		return err
+	}
+	defer unix.Close(ownerFD)
+	if err := unix.Flock(ownerFD, unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		return err
+	}
+	if err := os.Mkdir(filepath.Join(root, "work"), 0o700); err != nil {
+		return err
+	}
+	dir, err := os.Open(root)
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	lifetime := createTestRuntimeLifetimeTest(dir)
+	if lifetime == nil {
+		return errors.New("runner test PTY owner: lifetime lease")
+	}
+	defer lifetime.Close()
+	lease, _, err := CreateGateLease(dir, lifetime, OuterActivationMarkerName)
+	if err != nil {
+		return err
+	}
+	defer lease.Close()
+	rootPath := filepath.Clean(root)
+	target, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	spec, err := PrepareExecSpec(ExecSpec{
+		Target: target,
+		Args:   []string{"--pty-provider", rootPath},
+		Env:    []string{"PATH=/usr/bin:/bin", "LANG=C", "TERM=xterm"},
+		Cwd:    filepath.Join(rootPath, "work"),
+	})
+	if err != nil {
+		return err
+	}
+	gate, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	child, err := StartBlockedPTY(lease, gate, spec, false)
+	if err != nil {
+		return err
+	}
+	defer child.Close()
+	if _, err := child.Activate(); err != nil {
+		return err
+	}
+	deadline := time.Now().Add(4 * time.Second)
+	for {
+		if _, err := os.Stat(filepath.Join(rootPath, "provider.effect")); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			return errors.New("runner test PTY owner: helper did not start")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	report := os.NewFile(3, "owner-pty-report")
+	if report == nil {
+		return errors.New("runner test PTY owner: missing report capability")
+	}
+	if err := writeFrame(report, gateFrame{Kind: "owned-pty", Identity: child.Identity()}, maxFrameBytes); err != nil {
+		return err
+	}
+	if err := report.Close(); err != nil {
+		return err
+	}
+	for {
+		time.Sleep(time.Hour)
+	}
+}
+
 func waitKqueueExit(t *testing.T, kq int, want Identity) {
 	t.Helper()
 	deadline := time.Now().Add(4 * time.Second)
@@ -1516,6 +1608,74 @@ func TestRealParentSIGKILLAbortsInertGate(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(root, "effect")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("provider ran after its real owner was SIGKILLed before activation")
 	}
+}
+
+func TestRealParentSIGKILLReapsDetachedPTYHelper(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Chmod(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	reportR, reportW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reportR.Close()
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner := exec.Command(executable, "-test.run=^$")
+	owner.Env = append(os.Environ(), "RUNNER_TEST_OWNER=1", "RUNNER_TEST_OWNER_MODE=pty", "RUNNER_TEST_ROOT="+root, "TMPDIR="+root)
+	owner.ExtraFiles = []*os.File{reportW}
+	diagnostic := outputFile(t, filepath.Join(root, "owner-output"))
+	owner.Stdout = diagnostic
+	owner.Stderr = diagnostic
+	owner.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := owner.Start(); err != nil {
+		t.Fatal(err)
+	}
+	_ = reportW.Close()
+	ownerWaited := false
+	var helper Identity
+	defer func() {
+		if !ownerWaited {
+			_ = owner.Process.Kill()
+			_ = owner.Wait()
+		}
+		if helper.Valid() {
+			waitExactAbsence(t, helper)
+		}
+	}()
+	if err := reportR.SetReadDeadline(time.Now().Add(4 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	var report gateFrame
+	if err := readFrame(reportR, &report, maxFrameBytes); err != nil {
+		body, _ := os.ReadFile(filepath.Join(root, "owner-output"))
+		entries, _ := os.ReadDir(root)
+		t.Fatalf("owner PTY report: %v (owner output=%q entries=%v)", err, body, entries)
+	}
+	helper = report.Identity
+	if report.Kind != "owned-pty" || !helper.Valid() || helper.PID != helper.PGID {
+		t.Fatalf("bad PTY owner report %+v", report)
+	}
+	kq, err := unix.Kqueue()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unix.Close(kq)
+	if err := registerExit(kq, helper.PID); err != nil {
+		t.Fatal(err)
+	}
+	if err := owner.Process.Signal(unix.SIGKILL); err != nil {
+		t.Fatal(err)
+	}
+	if err := owner.Wait(); err == nil {
+		t.Fatal("owner survived SIGKILL")
+	}
+	ownerWaited = true
+	waitKqueueExit(t, kq, helper)
+	waitExactAbsence(t, helper)
 }
 
 func TestBlockedActivateExecutesOnceWithExactIdentityAndInput(t *testing.T) {
