@@ -1123,6 +1123,29 @@ func TestAttemptRunnerKeepsAHealthyContinuouslyStreamingProvider(t *testing.T) {
 	}
 }
 
+// A continuously readable PTY cannot starve the startup watchdog. Without
+// authenticated evidence, output alone is unrelated to task submission and
+// the bounded retry budget must still terminate the provider.
+func TestAttemptRunnerExhaustsStartupRetriesDuringContinuousOutput(t *testing.T) {
+	f := newAttemptFixture(t, "native-continuous-submit", "")
+	f.spec.startupSubmitRetryInterval = 10 * time.Millisecond
+	f.spec.StartupInput = []byte("native-startup\r")
+	inner := f.activateOuter()
+	f.advanceToProvider()
+	if err := f.controller.Release(StageProvider); err != nil {
+		t.Fatal(err)
+	}
+	if ready := f.nextTerminal(TerminalReady, 0); ready.Kind != TerminalReady {
+		t.Fatalf("terminal ready=%+v", ready)
+	}
+	if record := f.finishAndAck(false); record.Terminal.Process != inner {
+		t.Fatalf("terminal=%+v", record.Terminal)
+	}
+	if output := f.output(); !strings.Contains(output, ErrStartupUnverified.Error()) {
+		t.Fatalf("runner output=%q, want %q", output, ErrStartupUnverified)
+	}
+}
+
 // A provider that dies while the runner waits for its terminal is reported
 // as the exit it was, not as a prompt that could not be typed.
 func TestAttemptRunnerReportsAProviderThatDiesBeforeItsPrompt(t *testing.T) {

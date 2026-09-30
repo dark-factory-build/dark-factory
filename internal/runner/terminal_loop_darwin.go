@@ -419,6 +419,11 @@ func (o *terminalOwner) serve() (bool, error) {
 			if err := o.consumePTY(ev.bytes, ev.err); err != nil {
 				return o.daemonOpen, err
 			}
+			// A continuously readable PTY must not starve the bounded startup
+			// watchdog. Check it after every read as well as on the idle tick.
+			if err := o.verifyStartupSubmit(); err != nil {
+				return o.daemonOpen, err
+			}
 			if stopped, err := o.handoverStep(); stopped || err != nil {
 				return o.daemonOpen, err
 			}

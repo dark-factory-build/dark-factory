@@ -169,7 +169,12 @@ func (daemon *Daemon) HandleConnection(ctx context.Context, connection *api.Conn
 	if err != nil {
 		return err
 	}
-	daemon.markAttemptAPICall(call)
+	// The overseer snapshot is observation, not provider work. Counting the
+	// request itself would make a snapshot unable to report the quiet interval
+	// it is observing; authenticated attempt work calls still re-arm liveness.
+	if call.Kind() != api.CallOverseerSnapshot {
+		daemon.markAttemptAPICall(call)
+	}
 	dispatchContext, cancel := context.WithTimeout(ctx, defaultDispatchTimeout)
 	defer cancel()
 	if call.Kind() == api.CallMaintainer || call.Kind() == api.CallIntake {
