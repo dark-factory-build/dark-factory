@@ -765,6 +765,7 @@ export class BrowserSession {
       this.#fail(error instanceof ProtocolError ? error : new ProtocolError("malformed"));
       return;
     }
+    if (frame.type === "UNKNOWN") return;
     try {
       if (this.#hello === undefined) {
         if (frame.type !== "HELLO") throw new ProtocolError("wrong_direction");
@@ -1075,6 +1076,12 @@ export class BrowserSession {
     }
     if (id !== undefined && this.#pending.has(id)) {
       this.#pending.delete(id);
+      this.#refreshID = undefined;
+      const error = new SessionError(frame.body.code, frame.body.retryable);
+      if (!error.retryable) {
+        notify(this.#options.onError, error);
+        return;
+      }
     }
     throw new SessionError(frame.body.code, frame.body.retryable);
   }
