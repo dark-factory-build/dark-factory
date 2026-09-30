@@ -65,6 +65,15 @@ IFS=$ci_old_ifs
     echo "local-ci: no coherent Node >=22/Corepack pair found" >&2
     return 1
 }
+ci_go=$(PATH="$ci_original_path" command -v go 2>/dev/null || true)
+case "$ci_go" in
+    /*) [ -x "$ci_go" ] || ci_go= ;;
+    *) ci_go= ;;
+esac
+[ -n "$ci_go" ] || {
+    echo "local-ci: go is unavailable; add Go's bin directory to factoryd --tool-path (and its install root to --toolchain-read-roots)" >&2
+    return 1
+}
 
 ci_saved_df_gate_fault=${DF_GATE_FAULT-}
 ci_have_df_gate_fault=${DF_GATE_FAULT+yes}
@@ -183,10 +192,12 @@ if [ -n "$ci_saved_local_ci_directory" ]; then
     export DARK_FACTORY_LOCAL_CI_DIRECTORY="$ci_saved_local_ci_directory"
     if [ -n "$ci_saved_local_ci_factoryctl" ]; then export DARK_FACTORY_FACTORYCTL="$ci_saved_local_ci_factoryctl"; fi
 fi
-export DF_CI_NODE="$ci_node" DF_CI_COREPACK="$ci_corepack"
-export DARK_FACTORY_E2E_NODE="$ci_node" DARK_FACTORY_E2E_COREPACK="$ci_corepack"
+export DF_CI_NODE="$ci_node" DF_CI_COREPACK="$ci_corepack" DF_CI_GO="$ci_go"
+export DARK_FACTORY_E2E_GO="$ci_go" DARK_FACTORY_E2E_NODE="$ci_node" DARK_FACTORY_E2E_COREPACK="$ci_corepack"
 export DF_CI_CACHE_ROOT="$ci_cache_root"
-export PATH=/opt/homebrew/bin:/usr/bin:/bin
+# Keep the daemon's exact, startup-owned tool path: replacing it here makes
+# Go invisible inside a worker attempt even though factoryd granted it.
+export PATH="$ci_original_path"
 export HOME=/var/empty TMPDIR=/tmp GOENV=off
 export XDG_CONFIG_HOME=/var/empty XDG_CACHE_HOME="$ci_cache_root/cache"
 export XDG_DATA_HOME="$ci_private_root/data" XDG_STATE_HOME="$ci_private_root/state"

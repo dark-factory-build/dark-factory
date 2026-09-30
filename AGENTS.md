@@ -24,6 +24,9 @@ changed risk. Process-sensitive Go tests use `-count=1` and must run through
 `./scripts/with-local-ci-lease.sh`; this keeps one heavy process run on the
 Mac without making source checks wait. Use `./scripts/local-ci.sh --ui`,
 `--runtime`, or `--release` when working across that component boundary.
+Agent-posted issue or pull-request comments must use
+`./scripts/gh-comment.sh`; pass the comment body through `--body-file` or
+stdin, never as a command-line argument.
 For CI changes, run the affected gate fixtures and source checks; use the
 explicit `./scripts/local-ci.sh` full gate when the risk needs broad local
 integration proof. Before review, record the exact head and checks run.

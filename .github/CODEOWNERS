@@ -4,3 +4,4 @@
 /.github/CODEOWNERS                  @baziyer
 /scripts/github-repo-settings.sh     @baziyer
 /scripts/verify-adversarial-review.sh @baziyer
+/docs/development/WORKFLOW.md        @baziyer

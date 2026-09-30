@@ -261,7 +261,7 @@ func insertTaskOnConnection(ctx context.Context, connection *sql.Conn, spec NewT
 		if !found || agent.ProjectID != spec.ProjectID || agent.Archived {
 			return Task{}, ErrConflict
 		}
-		if err := validateRetainedSourceReviewRoute(spec.Body, agent); err != nil {
+		if err := validateRetainedSourceReviewRoute(EffectiveTaskText(agent.Provider, spec.Title, spec.Body), agent); err != nil {
 			return Task{}, err
 		}
 	}

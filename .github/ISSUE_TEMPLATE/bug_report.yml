@@ -1,6 +1,6 @@
 name: Bug report
 description: Something the daemon, CLI, web console, or a provider attempt does wrong
-labels: ["bug"]
+labels: ["bug", "factory:candidate"]
 body:
   - type: textarea
     id: symptom

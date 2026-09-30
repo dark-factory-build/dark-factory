@@ -28,6 +28,10 @@ def deliver(intake_config, release_config, receipt):
     sources = receipt.get('delivery_sources')
     if mode not in {'range', 'baseline_current', 'unchanged', 'nonancestor_baseline'} or not isinstance(sources, list):
         raise ValueError('deployment receipt has no bounded source mapping')
+    if mode == 'unchanged':
+        # Re-verification retains the delivered range's PR membership; its
+        # follow-ups were enqueued when the range was first delivered.
+        return []
     if mode != 'range' and sources:
         raise ValueError('baseline delivery receipt must not contain source issues')
     task_ids = []

@@ -23,22 +23,27 @@ trap 'go_gate_signal 2' INT
 trap 'go_gate_signal 15' TERM
 
 export GOTOOLCHAIN=local
+go=${DF_CI_GO-}
+[ -n "$go" ] || {
+    echo "go-ci: Go is unavailable; add Go's bin directory to factoryd --tool-path (and its install root to --toolchain-read-roots)" >&2
+    exit 1
+}
 # These three packages own process boundaries that have demonstrated cross-
 # package scheduling sensitivity. Keep each causal stage uncached and isolated;
 # every other package is discovered below so a new package cannot silently skip
 # tests. The five ordinary packages and internal/e2e have their own gates.
 echo "go-ci: Git boundary resource census"
-go_gate_stage 1200 go test -short -timeout=20m -count=1 ./internal/change
+go_gate_stage 1200 "$go" test -short -timeout=20m -count=1 ./internal/change
 
 echo "go-ci: Change worker process tests"
-go_gate_stage 1200 go test -short -timeout=20m -count=1 ./internal/changeworker
+go_gate_stage 1200 "$go" test -short -timeout=20m -count=1 ./internal/changeworker
 
 echo "go-ci: daemon process tests"
-go_gate_stage 1200 go test -short -timeout=20m -count=1 ./internal/daemon
+go_gate_stage 1200 "$go" test -short -timeout=20m -count=1 ./internal/daemon
 
 echo "go-ci: process-sensitive Go tests"
 set --
-packages=$(go list ./...)
+packages=$("$go" list ./...)
 for package in $packages; do
     case "$package" in
         github.com/dark-factory-build/dark-factory/cmd/cloudflare-admin|\
@@ -55,7 +60,7 @@ for package in $packages; do
     esac
 done
 if [ "$#" -gt 0 ]; then
-    go_gate_stage 1200 go test -short -timeout=20m -count=1 "$@"
+    go_gate_stage 1200 "$go" test -short -timeout=20m -count=1 "$@"
 fi
 
 echo "go-ci: browser, daemon and runner E2E"

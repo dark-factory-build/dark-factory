@@ -205,7 +205,7 @@ func TestSettleRunReadsTheWorktreeHeadWhileTheClockAdvances(t *testing.T) {
 func TestSuccessfulWorkerOutcomeRefusesDirtySourceUntilCorrection(t *testing.T) {
 	fixture := newRecoveryFixtureWithRole(t, 0x6e, kernel.RoleWorker)
 	ctx := context.Background()
-	_, path := fixture.settlementWorktree(t)
+	worktreeChange, path := fixture.settlementWorktree(t)
 	success, err := kernel.NewSuccessProposal("done")
 	if err != nil {
 		t.Fatal(err)
@@ -217,8 +217,19 @@ func TestSuccessfulWorkerOutcomeRefusesDirtySourceUntilCorrection(t *testing.T) 
 	if err := os.WriteFile(filepath.Join(path, "uncommitted.txt"), []byte("work\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := fixture.daemon.validateSuccessSource(ctx, live, success); !errors.Is(err, errDirtyWorkerChange) || !errors.Is(err, kernel.ErrConflict) {
-		t.Fatalf("dirty success refusal = %v", err)
+	refused := fixture.daemon.validateSuccessSource(ctx, live, success)
+	if !errors.Is(refused, errDirtyWorkerChange) || !errors.Is(refused, kernel.ErrConflict) {
+		t.Fatalf("dirty success refusal = %v", refused)
+	}
+	// This is the reason the worker is answered with. A refusal that says only
+	// that something conflicts leaves finished work with no way to report it.
+	var refusal *kernel.OutcomeRefusal
+	if !errors.As(refused, &refusal) {
+		t.Fatalf("dirty success refusal is not an outcome refusal: %v", refused)
+	}
+	detail := boundedDetail(refusal.Unwrap())
+	if !strings.Contains(detail, errDirtyWorkerChange.Error()) || !strings.Contains(detail, worktreeChange.ID.String()) {
+		t.Fatalf("dirty refusal detail does not say what to do: %q", detail)
 	}
 	settlementGit(t, change.TrustedGitExecutable, path, "add", "uncommitted.txt")
 	settlementGit(t, change.TrustedGitExecutable, path, "commit", "-q", "-m", "corrected")

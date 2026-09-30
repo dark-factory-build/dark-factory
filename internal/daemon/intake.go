@@ -43,6 +43,17 @@ func (daemon *Daemon) Intake(ctx context.Context, input api.IntakeInput) api.Int
 	if !api.ValidIntakeInput(input) {
 		return api.IntakeResult{State: "invalid"}
 	}
+	if input.Action == "review_pr" {
+		project, parseErr := browserID(input.ProjectID, kernel.ProjectIDFromBytes)
+		if parseErr != nil || input.ReviewRequest == nil {
+			return api.IntakeResult{State: "invalid"}
+		}
+		operation, err := daemon.reviewPR(ctx, project, *input.ReviewRequest)
+		if err != nil {
+			return intakeFailure(err)
+		}
+		return api.IntakeResult{State: "ok", ReviewOperation: operation}
+	}
 	if strings.HasPrefix(input.Action, "linear_") {
 		if daemon.linear == nil {
 			return api.IntakeResult{State: "unavailable"}

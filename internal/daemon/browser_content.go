@@ -116,6 +116,7 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 		}
 		output = browserTaskSummary(task)
 	case "production":
+		_ = backend.owner.refreshProduction(ctx, project)
 		page := kernel.ProductionPage{Records: []kernel.ProductionRecord{}}
 		if !factoryOnly {
 			observed, e := backend.store.Production(ctx, project, int(input.Offset), int(input.Limit))

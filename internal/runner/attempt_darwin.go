@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 	"unicode/utf8"
 
@@ -83,10 +84,24 @@ func (c *AttemptController) spend() error {
 // buffer to exactly the size asked or refuses, so the set is the check.
 const controlSocketBytes = maxConfigBytes + maxFrameBytes
 
-// newControlSocketPair makes one non-blocking Unix stream pair whose buffers
-// hold the largest frame either side writes with no reader at the peer.
+// newControlSocketPair makes one non-blocking, close-on-exec Unix stream pair
+// whose buffers hold the largest frame either side writes with no reader at
+// the peer.
+//
+// Darwin has no SOCK_CLOEXEC, so syscall.ForkLock must exclude a concurrent
+// fork/exec from the window between socketpair and the two fcntls, exactly as
+// os.Pipe does here. Without it a run admitted at the same moment forks a gate
+// that inherits this pair and carries it through exec into its own runner and
+// worker, so the control socket outlives the two processes that own it and
+// neither side ever reads the other's close.
 func newControlSocketPair() ([2]int, error) {
+	syscall.ForkLock.RLock()
 	fds, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_STREAM, 0)
+	if err == nil {
+		unix.CloseOnExec(fds[0])
+		unix.CloseOnExec(fds[1])
+	}
+	syscall.ForkLock.RUnlock()
 	if err != nil {
 		return [2]int{}, err
 	}
@@ -113,8 +128,6 @@ func NewAttemptController() (*AttemptController, *os.File, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	unix.CloseOnExec(fds[0])
-	unix.CloseOnExec(fds[1])
 	parent := os.NewFile(uintptr(fds[0]), "attempt-daemon-control")
 	child := os.NewFile(uintptr(fds[1]), "attempt-runner-control")
 	if _, err := commitControl(parent); err != nil {
@@ -663,10 +676,9 @@ func (w *WorkerControl) await(stage AttemptStage, before, after workerState) err
 	if w == nil || w.file == nil || w.state != before {
 		return ErrState
 	}
-	if err := w.file.SetReadDeadline(time.Now().Add(attemptControlTimeout)); err != nil {
-		return err
-	}
-	defer w.file.SetReadDeadline(time.Time{})
+	// No deadline: a release follows daemon work (git inspection, store
+	// writes) that slows under concurrent admission. The runner waits for the
+	// daemon without one and closes this socket on any failure, ending the read.
 	var frame attemptFrame
 	if err := readFrame(w.file, &frame, maxFrameBytes); err != nil {
 		return err
@@ -1436,8 +1448,6 @@ func newControlPair(parentName, childName string) (*os.File, *os.File, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	unix.CloseOnExec(fds[0])
-	unix.CloseOnExec(fds[1])
 	return os.NewFile(uintptr(fds[0]), parentName), os.NewFile(uintptr(fds[1]), childName), nil
 }
 

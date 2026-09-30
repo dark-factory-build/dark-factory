@@ -9,11 +9,13 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/runner"
 )
 
+const overseerHeartbeatMillis int64 = 60 * 60 * 1000
+
 // EnqueueOverseerWakeups consumes worker activity from the durable
 // invalidation journal. A cursor is deliberately left behind a queued or
 // running overseer, so activity while it works causes one follow-up after it
-// exits. Unfinished work is reconsidered after the configured quiet interval
-// even without new events; a failed coordination run cannot strand the backlog.
+// exits. Unchanged input is not reconsidered after every quiet interval; a
+// bounded heartbeat remains as a safety net for an input missed by the journal.
 func (store *Store) EnqueueOverseerWakeups(ctx context.Context, at UnixMillis) ([]Task, error) {
 	tx, err := store.beginUncheckedWrite(ctx)
 	if err != nil {
@@ -67,8 +69,8 @@ func (store *Store) EnqueueOverseerWakeups(ctx context.Context, at UnixMillis) (
 			continue
 		}
 		// A missing cursor is the one initial inspection for a newly enabled
-		// rule. Worker events retain targeted context; an unchanged unfinished
-		// backlog gets a full reconciliation after the same quiet interval.
+		// rule. Worker events retain targeted context; unchanged history is not
+		// a reason to launch another provider run.
 		fullReconciliation := !found || cursor < factory.Floor.Int64()-1
 		var targets []TaskID
 		if !fullReconciliation {
@@ -78,11 +80,11 @@ func (store *Store) EnqueueOverseerWakeups(ctx context.Context, at UnixMillis) (
 			}
 		}
 		if !fullReconciliation && len(targets) == 0 {
-			var unfinished bool
-			if err := tx.connection.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM tasks WHERE project_id = ? AND status IN ('queued', 'running', 'blocked', 'failed'))`, agent.ProjectID.Bytes()).Scan(&unfinished); err != nil {
+			lastRunAt, foundRun, err := latestOverseerRunAt(ctx, tx.connection, agent.ID)
+			if err != nil {
 				return nil, tx.Rollback(err)
 			}
-			fullReconciliation = unfinished
+			fullReconciliation = foundRun && at.Int64()-lastRunAt >= overseerHeartbeatMillis
 		}
 		// Validate once, before the first task or cursor write; an unchanged
 		// poll rolls back without scanning unrelated retained history.
@@ -161,6 +163,23 @@ func latestOverseerTask(ctx context.Context, connection *sql.Conn, agentID Agent
 	return &id, nil
 }
 
+func latestOverseerRunAt(ctx context.Context, connection *sql.Conn, agentID AgentID) (int64, bool, error) {
+	var endedAt sql.NullInt64
+	err := connection.QueryRowContext(ctx, `SELECT terminal_at_ms FROM runs
+		WHERE agent_id = ? AND role = 'orchestrator' AND phase = 'terminal'
+		ORDER BY terminal_at_ms DESC, id DESC LIMIT 1`, agentID.Bytes()).Scan(&endedAt)
+	if err == sql.ErrNoRows {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, err
+	}
+	if !endedAt.Valid || endedAt.Int64 < 0 {
+		return 0, false, fmt.Errorf("%w: invalid overseer terminal time", ErrCorruptState)
+	}
+	return endedAt.Int64, true, nil
+}
+
 func overseerWakeCursor(ctx context.Context, connection *sql.Conn, agentID AgentID) (int64, bool, error) {
 	var sequence int64
 	err := connection.QueryRowContext(ctx, `SELECT invalidation_sequence FROM overseer_wake_cursors WHERE agent_id = ?`, agentID.Bytes()).Scan(&sequence)
@@ -204,7 +223,9 @@ func workerInvalidationTargetsAfter(ctx context.Context, connection *sql.Conn, p
 		WHERE i.sequence > ? AND i.sequence <= ? AND i.entity_kind = 'peer_question' AND q.project_id = ?
 		UNION ALL SELECT i.sequence, q.target_task_id FROM invalidations AS i JOIN peer_questions AS q ON q.id = i.entity_id
 		WHERE i.sequence > ? AND i.sequence <= ? AND i.entity_kind = 'peer_question' AND q.project_id = ?
-	) ORDER BY sequence, task_id`, cursor, head, projectID.Bytes(), cursor, head, projectID.Bytes(), cursor, head, projectID.Bytes(), cursor, head, projectID.Bytes(), cursor, head, projectID.Bytes())
+		UNION ALL SELECT i.sequence, c.task_id FROM invalidations AS i JOIN changes AS c ON c.id = i.entity_id
+		WHERE i.sequence > ? AND i.sequence <= ? AND i.entity_kind = 'change' AND c.project_id = ?
+	) ORDER BY sequence, task_id`, cursor, head, projectID.Bytes(), cursor, head, projectID.Bytes(), cursor, head, projectID.Bytes(), cursor, head, projectID.Bytes(), cursor, head, projectID.Bytes(), cursor, head, projectID.Bytes())
 	if err != nil {
 		return nil, err
 	}

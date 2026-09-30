@@ -160,7 +160,8 @@ instructions guide agents; they do not add an OS filesystem sandbox.
 
 Everything below assumes the launch-scoped private runtime home and `TMPDIR`,
 no `gh` credential, git without any remote credential, and the Maintainer App
-as the one MCP server (`maintainer`). A Codex overseer has no daemon database,
+as its publication MCP server. A native overseer also receives the
+authenticated `factory_attempt` MCP boundary. A Codex overseer has no daemon database,
 Changes-parent, or operator-home access; it reads a settled Change's work
 from the project repository's Git directory, which its local commands are
 granted read-only, by the branch head an explicit source request names. Each
@@ -294,8 +295,30 @@ each write call `observe_operation` with its id. `completed` means that write
 already happened: take its result (for a commit, the head it returned) and go
 on to the next step, which for a multi-commit publication is the next commit,
 not the pull request. Never received or `planned` means it has not happened.
-`executing` or `indeterminate` means stop and raise a human request with the
-id.
+For `create_pull_request`, prepare and retain the exact request and UUID before
+sending. If the attempt ends before the call, include both in
+`attempt succeed --result` and use that durable result on the next standing
+wake. There is no in-flight checkpoint command. If an interrupted attempt has
+no recorded request/UUID, raise a human request rather than guessing or minting
+a replacement. If its response is lost and observation reports
+`executing` or `indeterminate`, submit that **identical request and UUID once**
+to the existing App controller. For an uncertain creation the App reconciles
+GitHub's existing PR and never issues a second POST. Consume a completed result
+and continue the normal publication path. `observe_operation` alone only reads
+the journal; it does not perform that reconciliation.
+
+If this bounded reconciliation still cannot find a unique matching PR, use
+`attempt request-human` on the original task. Include the exact request, UUID,
+request digest, branch/head, original error and reconciliation result. Name the
+decision: abandon this publication, or investigate GitHub's missing outcome
+before authorizing any replacement. Absence from a listing is not proof that
+the original request never reached GitHub. Do not silently block, poll forever,
+or mint another UUID. For other operations, `executing` or `indeterminate`
+still requires a human request with the operation ID.
+
+A definite `refused` reply is different: preserve its typed reason and correct
+that precondition before retrying the same request and UUID. Do not retry a
+refusal unchanged or treat an uncertain result as a definite refusal.
 
 Every successful Maintainer MCP reply carries the authoritative typed result in
 `structuredContent`; its short text `content` is only an acknowledgement. Consume
@@ -467,7 +490,10 @@ text plus the change id; it returns the issue number. Then read
 `observe_ref` for `main` again, immediately before the call, and use that
 answer: `create_pull_request` with `opid "$change_id" pr`, `issue_number` from that
 result, `head = branch`, `head_sha` = the last published commit, `base =
-main`, `close_on_merge = false` when acceptance requires deployment, `base_sha` = main's head as just read (the App verifies the base
+main`, `close_on_merge = true` when the Change completes its source issue; use
+`close_on_merge = false` when the PR only advances an umbrella issue, so the
+App renders `Closes #N` or `Refs #N` respectively. For a non-GitHub source,
+use its qualified reference and never a closing footer. `base_sha` = main's head as just read (the App verifies the base
 branch is at that commit at that moment; `base_commit` is wrong whenever
 main moved, and a stale read is wrong whenever main moves between the read
 and the call), `draft = false`, the same title, and a body in this
@@ -516,9 +542,11 @@ launching a nested provider from the worker sandbox.
 
 Host operators can still invoke `scripts/cold-review.sh` directly with the
 repository, PR, exact head, pinned base and body file. Optional exact-head gate
-evidence supplements rather than replaces required checks. Blocking findings
-need a concrete reproducer or reachable code path through the current guards;
-unavailable read-only checks are deferred delivery conditions, not defects.
+evidence supplements rather than replaces required checks. Screenshots are
+illustrative only and never blocking evidence; UI correctness is established
+by render tests and source behavior. Blocking findings need a concrete
+reproducer or reachable code path through the current guards; unavailable
+read-only checks are deferred delivery conditions, not defects.
 
 - Unresolved: observe the supplied operation and report its concrete host
   infrastructure failure. Do not manufacture a verdict or start another review.

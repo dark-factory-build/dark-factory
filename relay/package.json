@@ -8,6 +8,9 @@
   "scripts": {
     "test:relay": "node --test tests/*.test.mjs"
   },
+  "overrides": {
+    "sharp": "0.35.4"
+  },
   "devDependencies": {
     "@cloudflare/workers-types": "5.20260822.1",
     "typescript": "5.9.3",

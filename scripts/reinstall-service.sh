@@ -76,19 +76,43 @@ refuse_dispatch_enabled() {
 # still running behind its runner's takeover endpoint is adopted by the next
 # daemon and survives the restart, so it does not block; every other
 # non-terminal run — including an older runner with no endpoint — still does.
-refuse_active_runs() {
+# A finalizing run is the transient case: its runner has already exited and the
+# daemon commits the terminal result unaided, so this waits for it to settle
+# rather than losing a deployment to the moment an adoptable run happened to
+# finish. Every refusal here precedes the uninstall, so it exits 75: nothing
+# was installed and the caller may simply try again.
+adoption_settled() {
+    rows=$(sqlite3 "$db" "SELECT phase || ':' || lower(hex(id)) FROM runs WHERE phase <> 'terminal'") \
+        || { echo "refusing: cannot read the runs in $db" >&2; exit 1; }
     blocking=0
-    for row in $(sqlite3 "$db" "SELECT phase || ':' || lower(hex(id)) FROM runs WHERE phase <> 'terminal'"); do
+    finalizing=0
+    adoptable=
+    for row in $rows; do
         phase=${row%%:*}
         run=${row#*:}
         if [ "$phase" = running ] && [ -S "$runtime_home/runtimes/$run/takeover.sock" ]; then
-            echo "adoptable: run $run keeps running across the restart" >&2
+            adoptable="$adoptable$run "
+            continue
+        fi
+        if [ "$phase" = finalizing ]; then
+            finalizing=$((finalizing + 1))
             continue
         fi
         echo "blocking: run $run is $phase and cannot be adopted" >&2
         blocking=$((blocking + 1))
     done
-    [ "$blocking" = 0 ] || { echo "refusing: $blocking non-adoptable non-terminal run(s) in $db" >&2; exit 1; }
+    [ "$blocking" = 0 ] || { echo "refusing: $blocking non-adoptable non-terminal run(s) in $db" >&2; exit 75; }
+    [ "$finalizing" = 0 ] || return 1
+    for run in $adoptable; do
+        echo "adoptable: run $run keeps running across the restart" >&2
+    done
+}
+finalizing_stalled() {
+    echo "refusing: $finalizing run(s) in $db are still finalizing after 120s and cannot be adopted" >&2
+    exit 75
+}
+refuse_active_runs() {
+    await adoption_settled finalizing_stalled 120
 }
 
 # A connect, as the service e2e probes: nc -z cannot scan Unix sockets on macOS.
@@ -104,11 +128,11 @@ home_released() {
 previous_left() {
     ! listening && home_released
 }
-# Polls the predicate for up to 60 x 1s, then hands over to the timeout handler.
+# Polls the predicate for up to ${3:-60} x 1s, then hands over to the timeout handler.
 await() {
     waited=0
     until "$1"; do
-        [ "$waited" -lt 60 ] || "$2"
+        [ "$waited" -lt "${3:-60}" ] || "$2"
         sleep 1
         waited=$((waited + 1))
     done

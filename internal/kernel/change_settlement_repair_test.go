@@ -273,6 +273,92 @@ func TestRunningWorkerSettlementMayUpdateContentOnStableTree(t *testing.T) {
 	}
 }
 
+func TestPreProviderRetainedRetryKeepsPublishedHead(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		head func(Change) *CommitID
+		ok   bool
+	}{
+		{name: "same retained head", head: func(change Change) *CommitID { return change.HeadCommit }, ok: true},
+		{name: "base head", head: func(change Change) *CommitID { return &change.Selection.commit }},
+		{name: "foreign head", head: func(change Change) *CommitID {
+			foreign, _ := NewCommitID(change.Selection.format, bytes.Repeat([]byte{0xe3}, change.Selection.format.oidLength()))
+			return &foreign
+		}},
+		{name: "forgotten head", head: func(Change) *CommitID { return nil }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			blocked, _ := NewBlockedProposal("retain published edits")
+			store, firstFinalizing := finalizingReleasedRun(t, RoleWorker, VerificationNone, blocked)
+			defer store.Close()
+			firstChange, found, err := store.Change(context.Background(), *firstFinalizing.ChangeID)
+			if err != nil || !found || firstChange.HeadCommit == nil {
+				t.Fatalf("first Change = %+v, found=%v, err=%v", firstChange, found, err)
+			}
+			published, _ := NewCommitID(firstChange.Selection.format, bytes.Repeat([]byte{0xe1}, firstChange.Selection.format.oidLength()))
+			firstSettlement, _ := NewRetainedChangeSettlement(firstChange.Revision, &published)
+			firstTerminal, err := store.FinalizeWorkerRun(context.Background(), firstFinalizing.ID, firstFinalizing.Revision, firstSettlement, mustTime(t, 81))
+			if err != nil || firstTerminal.Phase != RunTerminal {
+				t.Fatalf("first worker settlement = %+v, %v", firstTerminal, err)
+			}
+
+			task, found, err := store.Task(context.Background(), firstTerminal.TaskID)
+			if err != nil || !found {
+				t.Fatalf("task after first settlement = %+v, found=%v, err=%v", task, found, err)
+			}
+			if _, err := store.SendBackTask(context.Background(), task.ID, task.Revision, "continue the retained correction", mustTime(t, 90)); err != nil {
+				t.Fatalf("send task back for correction: %v", err)
+			}
+			candidate := changeID(t, 230)
+			keys := admissionKeys(t, 220, &candidate)
+			admission, err := store.AdmitNext(context.Background(), keys, mustTime(t, 91))
+			if err != nil || !admission.Admitted() {
+				t.Fatalf("retained retry admission = %+v, %v", admission, err)
+			}
+			run := *admission.Run
+			resources := resourcesForRunTest(t, store, run.ID)
+			runtime := resourceOfKind(t, resources, ResourceRuntimeRoot)
+			runtimeIdentity, _ := NewPathResourceIdentity(810, 811)
+			if _, err := store.ActivateResource(context.Background(), run.ID, runtime.ID, runtime.Revision, runtimeIdentity, mustTime(t, 92)); err != nil {
+				t.Fatalf("activate retry runtime: %v", err)
+			}
+			failure, _ := NewFailureProposal(FailureActivation, "provider was not activated")
+			finalizing, err := store.FailRun(context.Background(), run.ID, run.Revision, failure, mustTime(t, 93))
+			if err != nil {
+				t.Fatalf("finalize retry before provider activation: %v", err)
+			}
+			releaseAllRunResources(t, store, run.ID, 94)
+			change, found, err := store.Change(context.Background(), *run.ChangeID)
+			if err != nil || !found || change.Phase != ChangeAvailable || change.HeadCommit == nil || !change.HeadCommit.equal(published) {
+				t.Fatalf("reopened Change = %+v, found=%v, err=%v", change, found, err)
+			}
+			finalizing, found, err = store.Run(context.Background(), run.ID)
+			if err != nil || !found || finalizing.Phase != RunFinalizing {
+				t.Fatalf("finalizing retry after resource release = %+v, found=%v, err=%v", finalizing, found, err)
+			}
+			settlement, _ := NewRetainedChangeSettlement(change.Revision, test.head(change))
+			before := captureWriteFootprint(t, store)
+			terminal, err := store.FinalizeWorkerRun(context.Background(), finalizing.ID, finalizing.Revision, settlement, mustTime(t, 97))
+			if !test.ok {
+				if !errors.Is(err, ErrConflict) {
+					t.Fatalf("wrong retained retry settlement = %v, want conflict", err)
+				}
+				if after := captureWriteFootprint(t, store); after != before {
+					t.Fatalf("rejected settlement footprint before=%+v after=%+v", before, after)
+				}
+				return
+			}
+			if err != nil || terminal.Phase != RunTerminal {
+				t.Fatalf("same-head retained retry settlement = %+v, %v", terminal, err)
+			}
+			retained, found, err := store.Change(context.Background(), change.ID)
+			if err != nil || !found || retained.Phase != ChangeRetained || retained.HeadCommit == nil || !retained.HeadCommit.equal(published) || retained.SettledRunID == nil || *retained.SettledRunID != run.ID {
+				t.Fatalf("settled retry Change = %+v, found=%v, err=%v", retained, found, err)
+			}
+		})
+	}
+}
+
 func TestRetainedRetryHistoryLoadsAndHistoricalFinalizationReplays(t *testing.T) {
 	store, first := terminalPreRunningAvailableWorker(t)
 	defer store.Close()

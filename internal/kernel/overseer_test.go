@@ -117,7 +117,7 @@ func TestOverseerSnapshotPagesWithHeadFenceAndTaskTextChunks(t *testing.T) {
 	}
 }
 
-func TestOverseerSnapshotIncludesAllActionableTasksBeyondHistoryWindow(t *testing.T) {
+func TestOverseerSnapshotBoundsTerminalHistoryButKeepsActionableTasks(t *testing.T) {
 	ctx := context.Background()
 	store, run, _ := runningOrchestratorRun(t)
 	defer store.Close()
@@ -163,8 +163,11 @@ func TestOverseerSnapshotIncludesAllActionableTasksBeyondHistoryWindow(t *testin
 		}
 		offset = *page.NextOffset
 	}
-	if !seen[blockedID] || !seen[failedID] {
-		t.Fatalf("actionable history omitted: blocked=%v failed=%v", seen[blockedID], seen[failedID])
+	if seen[blockedID] || seen[failedID] {
+		t.Fatalf("old terminal history remained in reconciliation set: blocked=%v failed=%v", seen[blockedID], seen[failedID])
+	}
+	if !seen[run.TaskID] {
+		t.Fatalf("actionable running task omitted: %v", run.TaskID)
 	}
 	detail, err := store.OverseerSnapshotForAttempt(ctx, run.CredentialDigest, OverseerSnapshotRequest{TaskID: &blockedID})
 	if err != nil || len(detail.Tasks) != 1 || detail.Tasks[0].Status != TaskBlocked {
