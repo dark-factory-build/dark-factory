@@ -1165,6 +1165,37 @@ func goModuleCachePath(accountHome string) string {
 	return filepath.Join(accountHome, "Library", "Caches", "dark-factory", "local-ci", "trusted", "go-mod")
 }
 
+// PrepareGoModuleCache provisions the exact trusted directory that native
+// workers consume read-only. It runs before the provider sandbox is built;
+// the local-CI boundary still validates the complete path before use.
+func (runtime RuntimePaths) PrepareGoModuleCache() error {
+	if !validAbsolute(runtime.accountHome, maxPathBytes-len("/"+codexConfigDir)) {
+		return ErrInvalid
+	}
+	path := goModuleCachePath(runtime.accountHome)
+	current := string(filepath.Separator)
+	for _, component := range strings.Split(strings.TrimPrefix(path, current), current) {
+		if component == "" {
+			continue
+		}
+		current = filepath.Join(current, component)
+		info, err := os.Lstat(current)
+		if errors.Is(err, os.ErrNotExist) {
+			if err := os.Mkdir(current, 0o700); err != nil {
+				return fmt.Errorf("provider: create trusted Go module cache directory: %w", err)
+			}
+			info, err = os.Lstat(current)
+		}
+		if err != nil {
+			return fmt.Errorf("provider: inspect trusted Go module cache directory: %w", err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			return fmt.Errorf("provider: trusted Go module cache path is not a directory")
+		}
+	}
+	return nil
+}
+
 func validAbsolute(value string, limit int) bool {
 	return validValue(value, limit) && filepath.IsAbs(value) && filepath.Clean(value) == value && value != string(filepath.Separator)
 }

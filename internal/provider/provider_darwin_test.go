@@ -93,6 +93,58 @@ func roleRequestFor(t *testing.T, kind kernel.Provider, installation Installatio
 	return request
 }
 
+func TestPrepareGoModuleCacheCreatesTrustedTree(t *testing.T) {
+	if err := (RuntimePaths{}).PrepareGoModuleCache(); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("invalid runtime account home error = %v", err)
+	}
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	accountHome := filepath.Join(root, "account")
+	runtime := runtimeFixture(t, "/usr/bin:/bin", accountHome)
+	if err := runtime.PrepareGoModuleCache(); err != nil {
+		t.Fatal(err)
+	}
+	cache := goModuleCachePath(accountHome)
+	info, err := os.Stat(cache)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !info.IsDir() {
+		t.Fatalf("trusted Go module cache is not a directory: %s", cache)
+	}
+	if info.Mode().Perm() != 0o700 {
+		t.Fatalf("trusted Go module cache mode = %o, want 700", info.Mode().Perm())
+	}
+}
+
+func TestPrepareGoModuleCacheRejectsSymlinkAncestor(t *testing.T) {
+	accountRoot, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	linked, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	accountHome := filepath.Join(accountRoot, "account")
+	linked = filepath.Join(linked, "linked-library")
+	if err := os.Mkdir(accountHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(linked, filepath.Join(accountHome, "Library")); err != nil {
+		t.Fatal(err)
+	}
+	runtime := runtimeFixture(t, "/usr/bin:/bin", accountHome)
+	if err := runtime.PrepareGoModuleCache(); err == nil {
+		t.Fatal("symlinked trusted Go module cache ancestor was accepted")
+	}
+	if _, err := os.Stat(filepath.Join(linked, "Caches")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("symlink target was modified: %v", err)
+	}
+}
+
 // wantClaudeWorkerSessionFlag computes the exact --session-id/--resume pair
 // Build derives for a Claude Code worker request, so exact-argv tests can
 // splice in the value without hardcoding a UUID that depends on per-test
