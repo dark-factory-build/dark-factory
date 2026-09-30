@@ -28,7 +28,7 @@ func TestRecordMaintainerPublicationPersistsTaskAndPullRequest(t *testing.T) {
 		t.Fatal(err)
 	}
 	head := strings.Repeat("a", 40)
-	request := maintainerRequest{Method: "tools/call", Params: json.RawMessage(`{"name":"create_pull_request","arguments":{"repository":"team/repo","title":"Ship it","head":"feature/ship","base":"main","body":"fixture body"}}`)}
+	request := maintainerRequest{JSONRPC: "2.0", ID: json.RawMessage(`1`), Method: "tools/call", Params: json.RawMessage(`{"name":"create_pull_request","arguments":{"repository":"team/repo","title":"Ship it","head":"feature/ship","base":"main","body":"fixture body"}}`)}
 	response := json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"isError":false,"structuredContent":{"number":7,"url":"https://github.com/team/repo/pull/7","head_sha":"` + head + `"}}}`)
 	if err := fixture.daemon.recordMaintainerPublication(ctx, projectID, task.ID, request, response); err != nil {
 		t.Fatal(err)
@@ -48,6 +48,40 @@ func TestRecordMaintainerPublicationPersistsTaskAndPullRequest(t *testing.T) {
 	t.Fatal("publication record was not persisted")
 }
 
+func TestRecordMaintainerPublicationRejectsTopLevelJSONRPCError(t *testing.T) {
+	request := maintainerRequest{
+		JSONRPC: "2.0",
+		ID:      json.RawMessage(`1`),
+		Method:  "tools/call",
+		Params:  json.RawMessage(`{"name":"update_pull_request_body","arguments":{"repository":"team/repo","operation_id":"11111111-1111-4111-8111-111111111111","pull_number":7,"body":"corrected body"}}`),
+	}
+	response := json.RawMessage(`{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"operation refused"}}`)
+	if err := (&Daemon{}).recordMaintainerPublication(context.Background(), kernel.ProjectID{}, kernel.TaskID{}, request, response); err == nil {
+		t.Fatal("top-level JSON-RPC error was accepted as a successful publication response")
+	}
+}
+
+func TestValidateMaintainerResponseRequiresMatchingResultEnvelope(t *testing.T) {
+	request := maintainerRequest{JSONRPC: "2.0", ID: json.RawMessage(`1`)}
+	for _, test := range []struct {
+		name     string
+		response string
+		valid    bool
+	}{
+		{name: "matching result", response: `{"jsonrpc":"2.0","id":1,"result":{"isError":true}}`, valid: true},
+		{name: "top-level error", response: `{"jsonrpc":"2.0","id":1,"error":{"code":-32602,"message":"invalid params"}}`},
+		{name: "wrong id", response: `{"jsonrpc":"2.0","id":2,"result":{}}`},
+		{name: "missing result", response: `{"jsonrpc":"2.0","id":1}`, valid: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := validateMaintainerResponse(request, json.RawMessage(test.response))
+			if (err == nil) != test.valid {
+				t.Fatalf("validation error=%v, want valid=%v", err, test.valid)
+			}
+		})
+	}
+}
+
 func TestRecordMaintainerPublicationPersistsReviewCoveredHead(t *testing.T) {
 	ctx := context.Background()
 	fixture := newDispatchFixture(t)
@@ -64,14 +98,14 @@ func TestRecordMaintainerPublicationPersistsReviewCoveredHead(t *testing.T) {
 		t.Fatal(err)
 	}
 	head := strings.Repeat("a", 40)
-	create := maintainerRequest{Method: "tools/call", Params: json.RawMessage(`{"name":"create_pull_request","arguments":{"repository":"team/repo","title":"Ship it","head":"feature/ship","base":"main","body":"fixture body"}}`)}
-	response := json.RawMessage(`{"result":{"isError":false,"structuredContent":{"number":7,"url":"https://github.com/team/repo/pull/7","head_sha":"` + head + `"}}}`)
+	create := maintainerRequest{JSONRPC: "2.0", ID: json.RawMessage(`1`), Method: "tools/call", Params: json.RawMessage(`{"name":"create_pull_request","arguments":{"repository":"team/repo","title":"Ship it","head":"feature/ship","base":"main","body":"fixture body"}}`)}
+	response := json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"isError":false,"structuredContent":{"number":7,"url":"https://github.com/team/repo/pull/7","head_sha":"` + head + `"}}}`)
 	if err := fixture.daemon.recordMaintainerPublication(ctx, projectID, task.ID, create, response); err != nil {
 		t.Fatal(err)
 	}
 	covered := strings.Repeat("b", 40)
-	review := maintainerRequest{Method: "tools/call", Params: json.RawMessage(`{"name":"submit_pull_request_review","arguments":{"repository":"team/repo","pull_number":7,"head_sha":"` + covered + `","event":"ALLOW","body":"independent"}}`)}
-	failedReview := json.RawMessage(`{"result":{"isError":true,"structuredContent":{}}}`)
+	review := maintainerRequest{JSONRPC: "2.0", ID: json.RawMessage(`1`), Method: "tools/call", Params: json.RawMessage(`{"name":"submit_pull_request_review","arguments":{"repository":"team/repo","pull_number":7,"head_sha":"` + covered + `","event":"ALLOW","body":"independent"}}`)}
+	failedReview := json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"isError":true,"structuredContent":{}}}`)
 	if err := fixture.daemon.recordMaintainerPublication(ctx, projectID, task.ID, review, failedReview); err != nil {
 		t.Fatal(err)
 	}
@@ -91,7 +125,7 @@ func TestRecordMaintainerPublicationPersistsReviewCoveredHead(t *testing.T) {
 			t.Fatalf("failed review projected = %+v", pull.Review)
 		}
 	}
-	successReview := json.RawMessage(`{"result":{"isError":false,"structuredContent":{"head_sha":"` + covered + `","verdict":"allow"}}}`)
+	successReview := json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"isError":false,"structuredContent":{"head_sha":"` + covered + `","verdict":"allow"}}}`)
 	if err := fixture.daemon.recordMaintainerPublication(ctx, projectID, task.ID, review, successReview); err != nil {
 		t.Fatal(err)
 	}
@@ -133,16 +167,16 @@ func TestRecordMaintainerPublicationIgnoresUnrelatedResponsesAndEnforcesProject(
 	if err != nil {
 		t.Fatal(err)
 	}
-	request := maintainerRequest{Method: "tools/call", Params: json.RawMessage(`{"name":"create_pull_request","arguments":{"repository":"team/repo","title":"Ship it","head":"feature/ship","base":"main","body":"fixture body"}}`)}
-	failed := json.RawMessage(`{"result":{"isError":true,"structuredContent":{"number":7,"url":"https://github.com/team/repo/pull/7","head_sha":"` + strings.Repeat("b", 40) + `"}}}`)
+	request := maintainerRequest{JSONRPC: "2.0", ID: json.RawMessage(`1`), Method: "tools/call", Params: json.RawMessage(`{"name":"create_pull_request","arguments":{"repository":"team/repo","title":"Ship it","head":"feature/ship","base":"main","body":"fixture body"}}`)}
+	failed := json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"isError":true,"structuredContent":{"number":7,"url":"https://github.com/team/repo/pull/7","head_sha":"` + strings.Repeat("b", 40) + `"}}}`)
 	if err := fixture.daemon.recordMaintainerPublication(ctx, projectID, task.ID, request, failed); err != nil {
 		t.Fatal(err)
 	}
-	other := maintainerRequest{Method: "tools/call", Params: json.RawMessage(`{"name":"observe_operation","arguments":{}}`)}
+	other := maintainerRequest{JSONRPC: "2.0", ID: json.RawMessage(`1`), Method: "tools/call", Params: json.RawMessage(`{"name":"observe_operation","arguments":{}}`)}
 	if err := fixture.daemon.recordMaintainerPublication(ctx, projectID, task.ID, other, failed); err != nil {
 		t.Fatal(err)
 	}
-	valid := json.RawMessage(`{"result":{"isError":false,"structuredContent":{"number":8,"url":"https://github.com/team/repo/pull/8","head_sha":"` + strings.Repeat("c", 40) + `"}}}`)
+	valid := json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"isError":false,"structuredContent":{"number":8,"url":"https://github.com/team/repo/pull/8","head_sha":"` + strings.Repeat("c", 40) + `"}}}`)
 	if err := fixture.daemon.recordMaintainerPublication(ctx, projectID, task.ID, request, valid); !errors.Is(err, kernel.ErrUnauthorized) {
 		t.Fatalf("cross-project publication = %v", err)
 	}

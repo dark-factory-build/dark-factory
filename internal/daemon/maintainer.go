@@ -210,6 +210,9 @@ func (daemon *Daemon) attemptMaintainer(ctx context.Context, call api.Call) api.
 }
 
 func (daemon *Daemon) recordMaintainerPublication(ctx context.Context, project kernel.ProjectID, task kernel.TaskID, request maintainerRequest, response json.RawMessage) error {
+	if err := validateMaintainerResponse(request, response); err != nil {
+		return err
+	}
 	if request.Method != "tools/call" && request.Method != "factory/tools/call_private" {
 		return nil
 	}
@@ -297,6 +300,30 @@ func (daemon *Daemon) recordMaintainerPublication(ctx context.Context, project k
 		err = daemon.store.RecordPublication(ctx, project, task, repo, kernel.ProductionPullRequest{Number: reply.Result.Pull.Number, Title: title, URL: reply.Result.Pull.URL, Head: reply.Result.Pull.Head, Branch: branch, Base: base, State: "open", Review: kernel.ProductionReview{Head: reply.Result.Pull.Head, State: "unknown"}}, at)
 	}
 	return err
+}
+
+// validateMaintainerResponse keeps a protocol-level error from looking like a
+// successful MCP call. It runs immediately before any publication or review
+// receipt can be persisted; tool-level isError results remain valid replies.
+func validateMaintainerResponse(request maintainerRequest, response json.RawMessage) error {
+	if !api.ValidMaintainerJSON(response) {
+		return errors.New("invalid Maintainer response")
+	}
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(response, &envelope); err != nil {
+		return errors.New("invalid Maintainer response")
+	}
+	var jsonrpc string
+	if err := json.Unmarshal(envelope["jsonrpc"], &jsonrpc); err != nil || jsonrpc != "2.0" || len(envelope["id"]) == 0 || !bytes.Equal(bytes.TrimSpace(envelope["id"]), bytes.TrimSpace(request.ID)) {
+		return errors.New("invalid Maintainer response envelope")
+	}
+	if errorValue, found := envelope["error"]; found && string(bytes.TrimSpace(errorValue)) != "null" {
+		return errors.New("Maintainer returned a JSON-RPC error")
+	}
+	if result, found := envelope["result"]; !found || string(bytes.TrimSpace(result)) == "null" {
+		return errors.New("invalid Maintainer response envelope")
+	}
+	return nil
 }
 
 // decodeMaintainerToolCall re-encodes the exact repository fields that local
