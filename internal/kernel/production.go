@@ -501,10 +501,10 @@ func (store *Store) RecordProductionReview(ctx context.Context, project ProjectI
 	if json.Unmarshal([]byte(body), &pr) != nil || pr.Number != number || !validProductionPull(pr) {
 		return tx.Rollback(ErrCorruptState)
 	}
-	if review.State == "allow" && pr.Review.Head == review.Head && pr.Review.State == "block" &&
-		(pr.Review.OperationID == "" || review.CorrectsReviewOperationID != pr.Review.OperationID) {
-		// A plain or unrelated ALLOW is not a correction. Keep the exact-head
-		// finding authoritative until its blocking operation is named.
+	correction := pr.Review.OperationID != "" && review.CorrectsReviewOperationID == pr.Review.OperationID
+	if review.State == "allow" && pr.Review.Head == review.Head && pr.Review.State == "block" && !correction {
+		// A plain or unrelated ALLOW is not a correction. An identity-less
+		// block cannot be implicitly corrected by an empty identity.
 		return tx.Commit(ctx)
 	}
 	pr.Review = review
