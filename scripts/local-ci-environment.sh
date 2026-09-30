@@ -6,6 +6,7 @@
 ci_original_path=${PATH-}
 ci_original_home=${HOME-}
 ci_requested_cache_root=${DF_CI_CACHE_ROOT-}
+ci_requested_go_module_cache=${DF_CI_GO_MODULE_CACHE-}
 ci_node=${DF_CI_NODE-}
 ci_corepack=${DF_CI_COREPACK-}
 ci_old_ifs=$IFS
@@ -118,6 +119,35 @@ else
     echo "local-ci: HOME is required when DF_CI_CACHE_ROOT is unset" >&2
     return 1
 fi
+
+ci_go_module_cache=
+if [ -n "$ci_requested_go_module_cache" ]; then
+    case "$ci_requested_go_module_cache" in
+        /*) ;;
+        *) echo "local-ci: shared Go module cache must be absolute" >&2; return 1 ;;
+    esac
+    case "$ci_requested_go_module_cache" in
+        ''|*/../*|*/..|*/./*|*/.)
+            echo "local-ci: shared Go module cache must be canonical" >&2
+            return 1
+            ;;
+    esac
+    if [ -L "$ci_requested_go_module_cache" ] || { [ -e "$ci_requested_go_module_cache" ] && [ ! -d "$ci_requested_go_module_cache" ]; }; then
+        echo "local-ci: refusing unsafe shared Go module cache path" >&2
+        return 1
+    fi
+    [ -d "$ci_requested_go_module_cache" ] || {
+        echo "local-ci: shared Go module cache is unavailable" >&2
+        return 1
+    }
+    ci_go_module_cache=$(CDPATH= cd -- "$ci_requested_go_module_cache" && pwd -P)
+    case "$ci_go_module_cache" in
+        "$ci_repository_root"|"$ci_repository_root"/*)
+            echo "local-ci: shared Go module cache must be outside the checkout" >&2
+            return 1
+            ;;
+    esac
+fi
 case "$ci_cache_root" in
     /)
         echo "local-ci: cache root must be canonical and non-root" >&2
@@ -207,7 +237,12 @@ export npm_config_globalconfig=/var/empty/.npmrc-global NPM_CONFIG_GLOBALCONFIG=
 export npm_config_cache="$ci_cache_root/npm" NPM_CONFIG_CACHE="$ci_cache_root/npm"
 export pnpm_config_store_dir="$ci_cache_root/pnpm-store"
 export NETRC=/dev/null
-export GOPATH="$ci_cache_root/go" GOCACHE="$ci_cache_root/go-build" GOMODCACHE="$ci_cache_root/go-mod"
+export GOPATH="$ci_cache_root/go" GOCACHE="$ci_cache_root/go-build"
+if [ -n "$ci_go_module_cache" ]; then
+    export DF_CI_GO_MODULE_CACHE="$ci_go_module_cache" GOMODCACHE="$ci_go_module_cache" GOPROXY=off
+else
+    export GOMODCACHE="$ci_cache_root/go-mod"
+fi
 # Keep module directories removable when retiring a cache root.
 export GOFLAGS=-modcacherw
 export LC_ALL=C

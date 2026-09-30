@@ -1281,7 +1281,7 @@ func TestCodexPermissionsBoundReadsAndRejectOversizedPolicy(t *testing.T) {
 			t.Fatalf("policy omitted rule %q", rule)
 		}
 	}
-	if strings.Contains(policy, request.runtime.accountHome) || strings.Contains(policy, request.runtime.gitCeiling) {
+	if strings.Contains(policy, tomlBasicString(request.runtime.accountHome)+`="`) || strings.Contains(policy, request.runtime.gitCeiling) {
 		t.Fatal("local commands were granted account or other Change access")
 	}
 	other := request.runtime
@@ -1318,7 +1318,7 @@ func TestCodexToolchainRootsAndCachesStaySeparateFromAccount(t *testing.T) {
 	if _, err := runner.PrepareCommittedExecSpec(launch.Executable(), launch.Argv(), launch.Environment(), t.TempDir()); err != nil {
 		t.Fatalf("generated Codex environment rejected by runner: %v", err)
 	}
-	for _, prefix := range []string{"GOCACHE=", "GOPATH=", "GOMODCACHE=", "CARGO_HOME=", "COREPACK_HOME=", "npm_config_cache=", "XDG_CACHE_HOME="} {
+	for _, prefix := range []string{"GOCACHE=", "GOPATH=", "CARGO_HOME=", "COREPACK_HOME=", "npm_config_cache=", "XDG_CACHE_HOME="} {
 		found := false
 		for _, value := range launch.Environment() {
 			if strings.HasPrefix(value, prefix+runtime.home+"/") {
@@ -1328,6 +1328,19 @@ func TestCodexToolchainRootsAndCachesStaySeparateFromAccount(t *testing.T) {
 		if !found {
 			t.Fatalf("cache %s not private", prefix)
 		}
+	}
+	sharedModuleCache := "DF_CI_GO_MODULE_CACHE=" + goModuleCachePath(runtime.accountHome)
+	if !slices.Contains(launch.Environment(), sharedModuleCache) || !slices.Contains(launch.Environment(), "GOMODCACHE="+goModuleCachePath(runtime.accountHome)) {
+		t.Fatalf("Go module cache was not projected to the trusted shared path: %q", launch.Environment())
+	}
+	if !slices.Contains(launch.Environment(), "GOPROXY=off") {
+		t.Fatal("native Go launches must not depend on sandbox TLS or network")
+	}
+	if !strings.Contains(policy, tomlBasicString(goModuleCachePath(runtime.accountHome))+`="read"`) || strings.Contains(policy, tomlBasicString(goModuleCachePath(runtime.accountHome))+`="write"`) {
+		t.Fatalf("shared Go module cache grant is not read-only: %s", policy)
+	}
+	if strings.Contains(policy, tomlBasicString(runtime.accountHome)+`="read"`) || strings.Contains(policy, tomlBasicString(runtime.accountHome)+`="write"`) {
+		t.Fatalf("account home was granted broadly: %s", policy)
 	}
 	if !slices.Contains(launch.Environment(), "RUSTUP_HOME="+runtime.accountHome+"/.rustup") {
 		t.Fatal("rustup metadata must remain in the selected account installation")
