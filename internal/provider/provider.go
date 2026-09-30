@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"unicode/utf8"
 
 	"github.com/dark-factory-build/dark-factory/internal/gitauthor"
@@ -962,9 +963,8 @@ const maxClaudeConfigBytes = 16 << 20
 // numbers as their own digits and strings unescaped, and a file whose shape
 // is not the CLI's is refused rather than rewritten.
 // ponytail: a read-modify-write like the CLI's own sessions do on the same
-// file, published by rename so a reader never sees a torn file; a concurrent
-// writer's key can still be lost between read and rename. Take a lock file
-// if a lost update is ever observed. Every Change adds one entry that nothing
+// file, published by rename so a reader never sees a torn file. Every Change
+// adds one entry that nothing
 // removes; past maxClaudeConfigBytes every Claude launch on the account is
 // refused. Prune entries whose directory is gone if that ceiling nears.
 func TrustClaudeDirectory(runtime RuntimePaths, cwd string) error {
@@ -972,6 +972,21 @@ func TrustClaudeDirectory(runtime RuntimePaths, cwd string) error {
 		return ErrInvalid
 	}
 	path := ClaudeConfigFile(runtime.accountHome, runtime.accountConfig)
+	// Claude workers for one linked account are separate processes. Keep the
+	// lock beside the config so their read-modify-rename operations cannot lose
+	// one another's trusted working directory.
+	lock, err := os.OpenFile(path+".lock", os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		return errClaudeConfiguration
+	}
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+		_ = lock.Close()
+		return errClaudeConfiguration
+	}
+	defer func() {
+		_ = syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+		_ = lock.Close()
+	}()
 	config := map[string]any{}
 	if raw, err := readClaudeConfig(path); err != nil {
 		return err
