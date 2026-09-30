@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/dark-factory-build/dark-factory/internal/browser"
@@ -273,10 +274,11 @@ type liveAttempt struct {
 	diagnosticReplayCorrelation uint64
 	diagnosticReplayHead        uint64
 
-	commands chan liveAttemptCommand
-	wake     chan struct{}
-	done     chan struct{}
-	result   chan liveAttemptResult
+	commands        chan liveAttemptCommand
+	wake            chan struct{}
+	done            chan struct{}
+	result          chan liveAttemptResult
+	startupEvidence atomic.Bool
 
 	// outcomeReceiptPending is set and cleared only under daemon.operationMu.
 	// It spans durable finalization through the reporting client's validated
@@ -298,12 +300,15 @@ type liveAttempt struct {
 	usageScan    []byte
 	usageScanned uint64
 
-	livenessMu           sync.Mutex
-	startedAt            time.Time
-	lastTerminalOutputAt time.Time
-	lastAttemptAPICallAt time.Time
-	terminalOutputBytes  uint64
-	livenessReported     bool
+	livenessMu               sync.Mutex
+	startedAt                time.Time
+	lastTerminalOutputAt     time.Time
+	lastAttemptAPICallAt     time.Time
+	terminalOutputBytes      uint64
+	livenessReported         bool
+	livenessInFlight         bool
+	livenessInFlightRevision uint64
+	livenessRevision         uint64
 
 	subs            map[*TerminalAttachment]struct{}
 	correlations    map[uint64]*TerminalAttachment
@@ -365,6 +370,8 @@ func (attempt *liveAttempt) markTerminalOutput(at time.Time, end uint64) {
 		attempt.terminalOutputBytes = end
 		attempt.lastTerminalOutputAt = at
 		attempt.livenessReported = false
+		attempt.livenessInFlight = false
+		attempt.livenessRevision++
 	}
 	attempt.livenessMu.Unlock()
 }
@@ -376,23 +383,66 @@ func (attempt *liveAttempt) markAttemptAPICall(at time.Time) {
 	attempt.livenessMu.Lock()
 	attempt.lastAttemptAPICallAt = at
 	attempt.livenessReported = false
+	attempt.livenessInFlight = false
+	attempt.livenessRevision++
 	attempt.livenessMu.Unlock()
+	attempt.startupEvidence.Store(true)
+	select {
+	case attempt.wake <- struct{}{}:
+	default:
+	}
 }
 
-func (attempt *liveAttempt) livenessReport(now time.Time, threshold time.Duration) (liveAttemptLiveness, bool) {
+// deliverStartupEvidence is the sole owner-loop write for the authenticated
+// provider-work signal. Keeping it here preserves controller serialization and
+// makes the runner's evidence arrival causal rather than timing-based PTY
+// inference.
+func (attempt *liveAttempt) deliverStartupEvidence() error {
+	if attempt == nil || !attempt.startupEvidence.Load() || !attempt.readySeen || attempt.controller == nil {
+		return nil
+	}
+	if err := attempt.controller.SendTerminalCommand(runner.TerminalCommand{Kind: runner.TerminalStartupEvidence}); err != nil {
+		return err
+	}
+	attempt.startupEvidence.Store(false)
+	return nil
+}
+
+type livenessReportDelivery struct {
+	attempt  *liveAttempt
+	revision uint64
+}
+
+func (attempt *liveAttempt) beginLivenessReport(now time.Time, threshold time.Duration) (liveAttemptLiveness, livenessReportDelivery, bool) {
 	if attempt == nil {
-		return liveAttemptLiveness{}, false
+		return liveAttemptLiveness{}, livenessReportDelivery{}, false
 	}
 	attempt.livenessMu.Lock()
 	defer attempt.livenessMu.Unlock()
 	activity := liveAttemptLiveness{startedAt: attempt.startedAt, lastTerminalOutputAt: attempt.lastTerminalOutputAt, lastAttemptAPICallAt: attempt.lastAttemptAPICallAt, terminalOutputBytes: attempt.terminalOutputBytes}
-	if attempt.livenessReported || !stalledRunLiveness(now, activity.startedAt, activity.lastTerminalOutputAt, activity.lastAttemptAPICallAt, threshold) {
-		return activity, false
+	if attempt.livenessReported || attempt.livenessInFlight || !stalledRunLiveness(now, activity.startedAt, activity.lastTerminalOutputAt, activity.lastAttemptAPICallAt, threshold) {
+		return activity, livenessReportDelivery{}, false
 	}
-	// Emit one edge per quiet interval. Terminal output growth or an attempt
-	// API call clears this bit and re-arms the next genuinely new stall.
-	attempt.livenessReported = true
-	return activity, true
+	attempt.livenessInFlight = true
+	attempt.livenessInFlightRevision = attempt.livenessRevision
+	return activity, livenessReportDelivery{attempt: attempt, revision: attempt.livenessRevision}, true
+}
+
+func (delivery livenessReportDelivery) finish(delivered bool) {
+	if delivery.attempt == nil {
+		return
+	}
+	delivery.attempt.livenessMu.Lock()
+	defer delivery.attempt.livenessMu.Unlock()
+	if !delivery.attempt.livenessInFlight || delivery.attempt.livenessInFlightRevision != delivery.revision {
+		return
+	}
+	delivery.attempt.livenessInFlight = false
+	if delivered && delivery.attempt.livenessRevision == delivery.revision {
+		// Emit one edge per quiet interval. Terminal output growth or an attempt
+		// API call clears this bit and re-arms the next genuinely new stall.
+		delivery.attempt.livenessReported = true
+	}
 }
 
 func stalledRunLiveness(now, started, lastOutput, lastAPICall time.Time, threshold time.Duration) bool {

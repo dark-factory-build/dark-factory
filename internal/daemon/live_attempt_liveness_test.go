@@ -42,7 +42,7 @@ func TestAddOverseerLivenessReportsActionableContext(t *testing.T) {
 	attempt.markStarted(started)
 	daemon := &Daemon{attempts: map[kernel.RunID]*liveAttempt{runID: attempt}}
 	projected := api.OverseerSnapshot{}
-	daemon.addOverseerLiveness(&projected, []kernel.OverseerRunSummary{{ID: runID, TaskID: taskID, Provider: kernel.ProviderClaudeCode}}, now)
+	deliveries := daemon.addOverseerLiveness(&projected, []kernel.OverseerRunSummary{{ID: runID, TaskID: taskID, Provider: kernel.ProviderClaudeCode}}, now)
 	if len(projected.LivenessReports) != 1 {
 		t.Fatalf("liveness reports=%d, want 1", len(projected.LivenessReports))
 	}
@@ -53,10 +53,19 @@ func TestAddOverseerLivenessReportsActionableContext(t *testing.T) {
 	if report.Detail == "" {
 		t.Fatal("liveness report omitted actionable detail")
 	}
+	if len(deliveries) != 1 {
+		t.Fatalf("liveness deliveries=%d, want 1", len(deliveries))
+	}
+	deliveries[0].finish(false)
 	projected = api.OverseerSnapshot{}
-	daemon.addOverseerLiveness(&projected, []kernel.OverseerRunSummary{{ID: runID, TaskID: taskID, Provider: kernel.ProviderClaudeCode}}, now)
-	if len(projected.LivenessReports) != 0 {
-		t.Fatalf("repeated quiet snapshot reports=%d, want 0", len(projected.LivenessReports))
+	deliveries = daemon.addOverseerLiveness(&projected, []kernel.OverseerRunSummary{{ID: runID, TaskID: taskID, Provider: kernel.ProviderClaudeCode}}, now)
+	if len(projected.LivenessReports) != 1 || len(deliveries) != 1 {
+		t.Fatalf("failed-delivery retry reports=%d deliveries=%d, want one each", len(projected.LivenessReports), len(deliveries))
+	}
+	deliveries[0].finish(true)
+	projected = api.OverseerSnapshot{}
+	if deliveries = daemon.addOverseerLiveness(&projected, []kernel.OverseerRunSummary{{ID: runID, TaskID: taskID, Provider: kernel.ProviderClaudeCode}}, now); len(projected.LivenessReports) != 0 || len(deliveries) != 0 {
+		t.Fatalf("acknowledged quiet snapshot reports=%d deliveries=%d, want zero", len(projected.LivenessReports), len(deliveries))
 	}
 	attempt.markTerminalOutput(now, 1)
 	projected = api.OverseerSnapshot{}
@@ -64,6 +73,7 @@ func TestAddOverseerLivenessReportsActionableContext(t *testing.T) {
 	if len(projected.LivenessReports) != 0 {
 		t.Fatalf("active snapshot reports=%d, want 0", len(projected.LivenessReports))
 	}
+	attempt.markAttemptAPICall(now)
 	later := now.Add(stalledRunLivenessThreshold)
 	projected = api.OverseerSnapshot{}
 	daemon.addOverseerLiveness(&projected, []kernel.OverseerRunSummary{{ID: runID, TaskID: taskID, Provider: kernel.ProviderClaudeCode}}, later)

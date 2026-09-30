@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"sync/atomic"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -17,7 +16,7 @@ import (
 // It never returns with an unjoined goroutine: the outer attempt runner owns
 // the PTY, child group, two capability sockets and every terminal cursor.
 func runReleasedProvider(child *OwnedChild, daemon, worker *os.File, reads *attemptReadSet, stagePTY *ptyStageSink, retained *terminalByteRing, startup []byte) (bool, error) {
-	return runReleasedProviderWithHandover(child, daemon, worker, reads, stagePTY, retained, startup, nil)
+	return runReleasedProviderWithHandover(child, daemon, worker, reads, stagePTY, retained, startup, nil, 0)
 }
 
 // HandoverTransport belongs to the runner loop. The endpoint sends only
@@ -49,7 +48,7 @@ func handoverGrace() time.Duration {
 
 // The endpoint admits only a fenced replacement and passes its still-open
 // duplex connection here. A nil channel retains protocol-1 close-and-drain.
-func runReleasedProviderWithHandover(child *OwnedChild, daemon, worker *os.File, reads *attemptReadSet, stagePTY *ptyStageSink, retained *terminalByteRing, startup []byte, handover *HandoverTransport) (bool, error) {
+func runReleasedProviderWithHandover(child *OwnedChild, daemon, worker *os.File, reads *attemptReadSet, stagePTY *ptyStageSink, retained *terminalByteRing, startup []byte, handover *HandoverTransport, retryInterval time.Duration) (bool, error) {
 	if child == nil || daemon == nil || worker == nil || reads == nil || child.ptyMaster == nil || retained == nil {
 		return false, ErrState
 	}
@@ -57,7 +56,7 @@ func runReleasedProviderWithHandover(child *OwnedChild, daemon, worker *os.File,
 	// worker output is already retained in exact order. The stage sink and this
 	// loop share that one ring by pointer: any copy here would silently drop
 	// every byte the worker writes between adoption and provider exec.
-	loop := terminalOwner{child: child, daemon: daemon, worker: worker, reads: reads, daemonOpen: true, workerOpen: true, ring: retained, handover: handover}
+	loop := terminalOwner{child: child, daemon: daemon, worker: worker, reads: reads, daemonOpen: true, workerOpen: true, ring: retained, handover: handover, startupSubmitRetryInterval: retryInterval}
 	if handover != nil {
 		handover.Current = daemon
 	}
@@ -148,10 +147,11 @@ type terminalOwner struct {
 	// lastOutput is when the provider last wrote, so the CR follows a quiet
 	// prompt rather than a banner still being drawn.
 	enterAfter, enterBy, lastOutput time.Time
-	startupSubmitHead               uint64
 	startupSubmitAttempts           uint8
 	startupSubmitLast               time.Time
 	startupSubmitPending            bool
+	startupSubmitVerified           bool
+	startupSubmitRetryInterval      time.Duration
 	humanReplyCorrelation           uint64
 	humanReplyCount                 uint32
 }
@@ -169,25 +169,16 @@ const (
 	startupEnterCeiling        = 5 * time.Second
 	startupEnterTick           = 100 * time.Millisecond
 	startupSubmitRetryInterval = time.Second
-	// Output outside this causal window is treated as an unrelated delayed
-	// banner or heartbeat. It cannot prove that the latest CR was consumed.
-	startupSubmitEvidenceWindow = 250 * time.Millisecond
-	startupSubmitMaxAttempts    = 3 // initial CR plus two bounded retries
-	terminalPayloadWriteLimit   = 250 * time.Millisecond
+	startupSubmitMaxAttempts   = 3 // initial CR plus two bounded retries
+	terminalPayloadWriteLimit  = 250 * time.Millisecond
 	// DeferredSubmitBudget is the extra daemon effect budget for a deferred
 	// Codex submit: its paste, ceiling/tick, and standalone CR write.
 	DeferredSubmitBudget = startupEnterCeiling + 2*terminalPayloadWriteLimit + startupEnterTick
 )
 
-// testStartupSubmitRetryInterval keeps the actual PTY submission test fast;
-// production uses the fixed one-second recovery interval. The atomic seam is
-// package-test-only because Darwin runner tests execute real child processes
-// and may run concurrently under -race.
-var testStartupSubmitRetryInterval atomic.Int64
-
-func startupSubmitRetryWait() time.Duration {
-	if interval := time.Duration(testStartupSubmitRetryInterval.Load()); interval > 0 {
-		return interval
+func (o *terminalOwner) startupSubmitRetryWait() time.Duration {
+	if o.startupSubmitRetryInterval > 0 {
+		return o.startupSubmitRetryInterval
 	}
 	return startupSubmitRetryInterval
 }
@@ -246,10 +237,11 @@ func (o *terminalOwner) submitPending() error {
 	}
 	switch status {
 	case TerminalResultOK:
-		o.startupSubmitHead = o.ring.Head()
-		o.startupSubmitAttempts = 1
-		o.startupSubmitLast = time.Now()
-		o.startupSubmitPending = true
+		if !o.startupSubmitVerified {
+			o.startupSubmitAttempts = 1
+			o.startupSubmitLast = time.Now()
+			o.startupSubmitPending = true
+		}
 		return nil
 	case TerminalResultRejected:
 		return nil
@@ -266,16 +258,7 @@ func (o *terminalOwner) verifyStartupSubmit() error {
 	if !o.startupSubmitPending {
 		return nil
 	}
-	if o.ring.Head() > o.startupSubmitHead {
-		if time.Since(o.startupSubmitLast) <= startupSubmitEvidenceWindow {
-			o.startupSubmitPending = false
-			return nil
-		}
-		// A delayed banner/heartbeat arrived outside the causal window. Drop
-		// it as evidence and continue waiting for the bounded retry.
-		o.startupSubmitHead = o.ring.Head()
-	}
-	if time.Since(o.startupSubmitLast) < startupSubmitRetryWait() {
+	if time.Since(o.startupSubmitLast) < o.startupSubmitRetryWait() {
 		return nil
 	}
 	if o.startupSubmitAttempts >= startupSubmitMaxAttempts {
@@ -287,7 +270,6 @@ func (o *terminalOwner) verifyStartupSubmit() error {
 		stopErr := o.stop()
 		return errors.Join(fmt.Errorf("%w: retry submit %s", ErrStartupUnverified, status), stopErr)
 	}
-	o.startupSubmitHead = o.ring.Head()
 	o.startupSubmitAttempts++
 	o.startupSubmitLast = time.Now()
 	return nil
@@ -605,6 +587,10 @@ func (o *terminalOwner) command(raw attemptFrame) error {
 		return o.resize(command)
 	case TerminalHumanReply:
 		return o.humanReply(command)
+	case TerminalStartupEvidence:
+		o.startupSubmitVerified = true
+		o.startupSubmitPending = false
+		return nil
 	default:
 		return ErrState
 	}

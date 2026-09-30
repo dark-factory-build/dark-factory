@@ -103,6 +103,9 @@ func (attempt *liveAttempt) loop(ctx context.Context) error {
 			}
 			continue
 		}
+		if err := attempt.deliverStartupEvidence(); err != nil {
+			return err
+		}
 
 		if stop, err := attempt.processLifecycle(ctx); err != nil {
 			return err
