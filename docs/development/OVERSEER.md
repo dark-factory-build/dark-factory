@@ -490,7 +490,10 @@ text plus the change id; it returns the issue number. Then read
 `observe_ref` for `main` again, immediately before the call, and use that
 answer: `create_pull_request` with `opid "$change_id" pr`, `issue_number` from that
 result, `head = branch`, `head_sha` = the last published commit, `base =
-main`, `close_on_merge = false` when acceptance requires deployment, `base_sha` = main's head as just read (the App verifies the base
+main`, `close_on_merge = true` when the Change completes its source issue; use
+`close_on_merge = false` when the PR only advances an umbrella issue, so the
+App renders `Closes #N` or `Refs #N` respectively. For a non-GitHub source,
+use its qualified reference and never a closing footer. `base_sha` = main's head as just read (the App verifies the base
 branch is at that commit at that moment; `base_commit` is wrong whenever
 main moved, and a stale read is wrong whenever main moves between the read
 and the call), `draft = false`, the same title, and a body in this
