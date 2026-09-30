@@ -368,6 +368,18 @@ func TestSupervisorRunsRegisteredShellWorkerToTypedSuccess(t *testing.T) {
 	}
 }
 
+// A provider release slower than the worker's former 4s read deadline made
+// the worker exit 70 and the daemon's release write fail with a broken pipe.
+func TestSupervisorToleratesSlowProviderRelease(t *testing.T) {
+	fixture := newSupervisorFixture(t, supervisorProgram(t, false, false))
+	fixture.spec.beforeProviderRelease = func() { time.Sleep(5 * time.Second) }
+	run, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
+	if err != nil {
+		t.Fatalf("RunNext: %v", err)
+	}
+	fixture.assertTerminal(t, run, kernel.OutcomeSucceeded)
+}
+
 func TestSupervisorOptionalCILeaseRefusalDoesNotFailFreshWork(t *testing.T) {
 	program := "test -z \"${DARK_FACTORY_LOCAL_CI_DIRECTORY-}\" || exit 90\n" + supervisorProgram(t, false, false)
 	fixture := newSupervisorFixture(t, program)

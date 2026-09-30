@@ -676,10 +676,9 @@ func (w *WorkerControl) await(stage AttemptStage, before, after workerState) err
 	if w == nil || w.file == nil || w.state != before {
 		return ErrState
 	}
-	if err := w.file.SetReadDeadline(time.Now().Add(attemptControlTimeout)); err != nil {
-		return err
-	}
-	defer w.file.SetReadDeadline(time.Time{})
+	// No deadline: a release follows daemon work (git inspection, store
+	// writes) that slows under concurrent admission. The runner waits for the
+	// daemon without one and closes this socket on any failure, ending the read.
 	var frame attemptFrame
 	if err := readFrame(w.file, &frame, maxFrameBytes); err != nil {
 		return err
