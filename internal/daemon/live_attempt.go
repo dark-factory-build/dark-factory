@@ -22,13 +22,14 @@ const (
 	// browser's smaller ACK window resumes its attachment reader. Keep that
 	// bounded replay plus its attach control event instead of treating it as a
 	// slow observer.
-	terminalSubscriberEventCap = liveAttemptCredit/terminalPayloadCap + 1
-	terminalPendingCap         = 64
-	terminalPayloadCap         = 8 << 10
-	terminalPendingBytesCap    = 256 << 10
-	liveAttemptCredit          = 1 << 20
-	liveAttemptStoreTimeout    = 2 * time.Second
-	liveAttemptEffectLimit     = 4 * time.Second
+	terminalSubscriberEventCap  = liveAttemptCredit/terminalPayloadCap + 1
+	terminalPendingCap          = 64
+	terminalPayloadCap          = 8 << 10
+	terminalPendingBytesCap     = 256 << 10
+	liveAttemptCredit           = 1 << 20
+	liveAttemptStoreTimeout     = 2 * time.Second
+	liveAttemptEffectLimit      = 4 * time.Second
+	stalledRunLivenessThreshold = 2 * time.Minute
 )
 
 var (
@@ -297,6 +298,12 @@ type liveAttempt struct {
 	usageScan    []byte
 	usageScanned uint64
 
+	livenessMu           sync.Mutex
+	startedAt            time.Time
+	lastTerminalOutputAt time.Time
+	lastAttemptAPICallAt time.Time
+	terminalOutputBytes  uint64
+
 	subs            map[*TerminalAttachment]struct{}
 	correlations    map[uint64]*TerminalAttachment
 	lastCorrelation uint64
@@ -323,6 +330,72 @@ type liveAttempt struct {
 	beforeRenewCommit        func()
 	beforeAttachEffect       func()
 	beforeProviderStateCheck func() error
+}
+
+type liveAttemptLiveness struct {
+	startedAt, lastTerminalOutputAt, lastAttemptAPICallAt time.Time
+	terminalOutputBytes                                   uint64
+}
+
+func (attempt *liveAttempt) markStarted(at time.Time) {
+	if attempt == nil || at.IsZero() {
+		return
+	}
+	attempt.livenessMu.Lock()
+	if attempt.startedAt.IsZero() {
+		attempt.startedAt = at
+	}
+	attempt.livenessMu.Unlock()
+}
+
+func (attempt *liveAttempt) now() time.Time {
+	if attempt != nil && attempt.daemon != nil && attempt.daemon.now != nil {
+		return attempt.daemon.now()
+	}
+	return time.Now()
+}
+
+func (attempt *liveAttempt) markTerminalOutput(at time.Time, end uint64) {
+	if attempt == nil || at.IsZero() {
+		return
+	}
+	attempt.livenessMu.Lock()
+	if end > attempt.terminalOutputBytes {
+		attempt.terminalOutputBytes = end
+		attempt.lastTerminalOutputAt = at
+	}
+	attempt.livenessMu.Unlock()
+}
+
+func (attempt *liveAttempt) markAttemptAPICall(at time.Time) {
+	if attempt == nil || at.IsZero() {
+		return
+	}
+	attempt.livenessMu.Lock()
+	attempt.lastAttemptAPICallAt = at
+	attempt.livenessMu.Unlock()
+}
+
+func (attempt *liveAttempt) liveness() liveAttemptLiveness {
+	if attempt == nil {
+		return liveAttemptLiveness{}
+	}
+	attempt.livenessMu.Lock()
+	defer attempt.livenessMu.Unlock()
+	return liveAttemptLiveness{startedAt: attempt.startedAt, lastTerminalOutputAt: attempt.lastTerminalOutputAt, lastAttemptAPICallAt: attempt.lastAttemptAPICallAt, terminalOutputBytes: attempt.terminalOutputBytes}
+}
+
+func stalledRunLiveness(now, started, lastOutput, lastAPICall time.Time, threshold time.Duration) bool {
+	if now.IsZero() || started.IsZero() || threshold <= 0 || now.Before(started) {
+		return false
+	}
+	if lastOutput.IsZero() {
+		lastOutput = started
+	}
+	if lastAPICall.IsZero() {
+		lastAPICall = started
+	}
+	return now.Sub(started) >= threshold && now.Sub(lastOutput) >= threshold && now.Sub(lastAPICall) >= threshold
 }
 
 func (attempt *liveAttempt) retainDiagnosticOutput(start, end uint64, payload []byte) {

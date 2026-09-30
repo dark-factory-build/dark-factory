@@ -169,6 +169,7 @@ func (daemon *Daemon) HandleConnection(ctx context.Context, connection *api.Conn
 	if err != nil {
 		return err
 	}
+	daemon.markAttemptAPICall(ctx, call)
 	dispatchContext, cancel := context.WithTimeout(ctx, defaultDispatchTimeout)
 	defer cancel()
 	if call.Kind() == api.CallMaintainer || call.Kind() == api.CallIntake {
@@ -212,6 +213,30 @@ func (daemon *Daemon) HandleConnection(ctx context.Context, connection *api.Conn
 		return err
 	}
 	return connection.Respond(reply)
+}
+
+// markAttemptAPICall is intentionally best-effort telemetry. Authentication
+// and request handling remain authoritative below; liveness must never turn a
+// healthy API request into a failed attempt or a new termination path.
+func (daemon *Daemon) markAttemptAPICall(ctx context.Context, call api.Call) {
+	raw, ok := call.AttemptDigest()
+	if !ok {
+		return
+	}
+	digest, err := attemptDigest(raw)
+	if err != nil {
+		return
+	}
+	authority, err := daemon.store.AuthenticateAttempt(ctx, digest)
+	if err != nil {
+		return
+	}
+	daemon.attemptMu.Lock()
+	attempt := daemon.attempts[authority.RunID]
+	daemon.attemptMu.Unlock()
+	if attempt != nil {
+		attempt.markAttemptAPICall(daemon.now())
+	}
 }
 
 // dispatch is intentionally one closed switch. API validation belongs to the
@@ -1773,11 +1798,43 @@ func (daemon *Daemon) overseerSnapshot(ctx context.Context, call api.Call) api.R
 	if err != nil {
 		return newErrorReply(api.RemoteUnavailable)
 	}
+	daemon.addOverseerLiveness(&projected, snapshot.Runs, daemon.now())
 	reply, err := api.NewOverseerSnapshotReply(projected)
 	if err != nil {
 		return newErrorReply(api.RemoteInternal)
 	}
 	return reply
+}
+
+func (daemon *Daemon) addOverseerLiveness(projected *api.OverseerSnapshot, runs []kernel.OverseerRunSummary, now time.Time) {
+	if daemon == nil || projected == nil || now.IsZero() {
+		return
+	}
+	daemon.attemptMu.Lock()
+	defer daemon.attemptMu.Unlock()
+	for _, run := range runs {
+		attempt := daemon.attempts[run.ID]
+		if attempt == nil {
+			continue
+		}
+		activity := attempt.liveness()
+		if !stalledRunLiveness(now, activity.startedAt, activity.lastTerminalOutputAt, activity.lastAttemptAPICallAt, stalledRunLivenessThreshold) {
+			continue
+		}
+		millis := func(value time.Time) uint64 {
+			if value.IsZero() || value.UnixMilli() < 0 {
+				return 0
+			}
+			return uint64(value.UnixMilli())
+		}
+		projected.LivenessReports = append(projected.LivenessReports, api.OverseerLivenessReport{
+			RunID: run.ID.String(), TaskID: run.TaskID.String(), Provider: run.Provider.String(), Stalled: true,
+			ThresholdMs: uint64(stalledRunLivenessThreshold.Milliseconds()), StartedAtMs: millis(activity.startedAt),
+			LastTerminalOutputAtMs: millis(activity.lastTerminalOutputAt), LastAttemptAPICallAtMs: millis(activity.lastAttemptAPICallAt),
+			TerminalOutputBytes: activity.terminalOutputBytes,
+			Detail:              fmt.Sprintf("run %s task %s provider %s has had no terminal-output growth and no attempt API calls for %s after startup", run.ID, run.TaskID, run.Provider, stalledRunLivenessThreshold),
+		})
+	}
 }
 
 func (daemon *Daemon) overseerEnqueueTask(ctx context.Context, call api.Call) api.Reply {

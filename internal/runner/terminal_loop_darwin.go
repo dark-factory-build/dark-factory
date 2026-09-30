@@ -147,6 +147,10 @@ type terminalOwner struct {
 	// lastOutput is when the provider last wrote, so the CR follows a quiet
 	// prompt rather than a banner still being drawn.
 	enterAfter, enterBy, lastOutput time.Time
+	startupSubmitHead               uint64
+	startupSubmitAttempts           uint8
+	startupSubmitLast               time.Time
+	startupSubmitPending            bool
 	humanReplyCorrelation           uint64
 	humanReplyCount                 uint32
 }
@@ -158,16 +162,29 @@ type terminalOwner struct {
 // startupEnterCeiling regardless. Recognise the provider's own prompt if
 // these ever prove wrong for a CLI.
 const (
-	startupRawCeiling         = 2 * time.Second
-	startupEnterFloor         = time.Second
-	startupEnterQuiet         = 500 * time.Millisecond
-	startupEnterCeiling       = 5 * time.Second
-	startupEnterTick          = 100 * time.Millisecond
-	terminalPayloadWriteLimit = 250 * time.Millisecond
+	startupRawCeiling          = 2 * time.Second
+	startupEnterFloor          = time.Second
+	startupEnterQuiet          = 500 * time.Millisecond
+	startupEnterCeiling        = 5 * time.Second
+	startupEnterTick           = 100 * time.Millisecond
+	startupSubmitRetryInterval = time.Second
+	startupSubmitMaxAttempts   = 3 // initial CR plus two bounded retries
+	terminalPayloadWriteLimit  = 250 * time.Millisecond
 	// DeferredSubmitBudget is the extra daemon effect budget for a deferred
 	// Codex submit: its paste, ceiling/tick, and standalone CR write.
 	DeferredSubmitBudget = startupEnterCeiling + 2*terminalPayloadWriteLimit + startupEnterTick
 )
+
+// testStartupSubmitRetryInterval keeps the actual PTY submission test fast;
+// production uses the fixed one-second recovery interval.
+var testStartupSubmitRetryInterval time.Duration
+
+func startupSubmitRetryWait() time.Duration {
+	if testStartupSubmitRetryInterval > 0 {
+		return testStartupSubmitRetryInterval
+	}
+	return startupSubmitRetryInterval
+}
 
 // awaitRawMode waits, up to the ceiling, for the provider to clear canonical
 // input on its terminal, draining what it prints meanwhile so a provider that
@@ -222,11 +239,43 @@ func (o *terminalOwner) submitPending() error {
 		return o.send(TerminalFrame{Kind: TerminalHumanReplyResult, Correlation: correlation, Count: count, Status: status})
 	}
 	switch status {
-	case TerminalResultOK, TerminalResultRejected:
+	case TerminalResultOK:
+		o.startupSubmitHead = o.ring.Head()
+		o.startupSubmitAttempts = 1
+		o.startupSubmitLast = time.Now()
+		o.startupSubmitPending = true
+		return nil
+	case TerminalResultRejected:
 		return nil
 	default:
 		return fmt.Errorf("runner: provider startup submit %s", status)
 	}
+}
+
+// verifyStartupSubmit gives the provider a bounded opportunity to show that
+// the startup line was consumed. A dropped CR is recoverable; a provider that
+// remains silent after the fixed retry budget is a failed run, not an
+// indefinitely running one.
+func (o *terminalOwner) verifyStartupSubmit() error {
+	if !o.startupSubmitPending || o.ring.Head() > o.startupSubmitHead {
+		o.startupSubmitPending = false
+		return nil
+	}
+	if time.Since(o.startupSubmitLast) < startupSubmitRetryWait() {
+		return nil
+	}
+	if o.startupSubmitAttempts >= startupSubmitMaxAttempts {
+		stopErr := o.stop()
+		return errors.Join(fmt.Errorf("%w after %d carriage returns", ErrStartupUnverified, o.startupSubmitAttempts), stopErr)
+	}
+	_, status := o.writeTerminalPayload([]byte{'\r'})
+	if status != TerminalResultOK {
+		stopErr := o.stop()
+		return errors.Join(fmt.Errorf("%w: retry submit %s", ErrStartupUnverified, status), stopErr)
+	}
+	o.startupSubmitAttempts++
+	o.startupSubmitLast = time.Now()
+	return nil
 }
 
 func (o *terminalOwner) rejectHumanReply() error {
@@ -339,6 +388,9 @@ func (o *terminalOwner) serve() (bool, error) {
 			if err := o.submitPending(); err != nil {
 				return o.daemonOpen, err
 			}
+			if err := o.verifyStartupSubmit(); err != nil {
+				return o.daemonOpen, err
+			}
 		case sourceChild:
 			if err := o.rejectHumanReply(); err != nil {
 				return o.daemonOpen, err
@@ -448,7 +500,7 @@ func (o *terminalOwner) nextEvent() (terminalReady, error) {
 		// While a startup CR is owed the wait is bounded, so the quiet prompt
 		// is noticed without any event arriving.
 		var timeout *unix.Timespec
-		if !o.enterBy.IsZero() || o.handover != nil {
+		if !o.enterBy.IsZero() || o.startupSubmitPending || o.handover != nil {
 			tick := unix.NsecToTimespec(int64(startupEnterTick))
 			timeout = &tick
 		}
@@ -818,6 +870,9 @@ func (o *terminalOwner) consumePTY(data []byte, readErr error) error {
 		}
 		if appendErr := o.ring.Append(data); appendErr != nil {
 			return appendErr
+		}
+		if o.startupSubmitPending && o.ring.Head() > o.startupSubmitHead {
+			o.startupSubmitPending = false
 		}
 		if flushErr := o.flush(); flushErr != nil {
 			return flushErr

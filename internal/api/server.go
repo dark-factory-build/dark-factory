@@ -458,6 +458,7 @@ func NewOverseerSnapshotReply(snapshot OverseerSnapshot) (Reply, error) {
 	snapshot.Questions = append([]OverseerQuestion{}, snapshot.Questions...)
 	snapshot.PeerQuestions = append([]PeerQuestion{}, snapshot.PeerQuestions...)
 	snapshot.History = append([]OverseerIntervention{}, snapshot.History...)
+	snapshot.LivenessReports = append([]OverseerLivenessReport{}, snapshot.LivenessReports...)
 	if !validOverseerSnapshot(snapshot) {
 		return Reply{}, ErrInvalidInput
 	}
