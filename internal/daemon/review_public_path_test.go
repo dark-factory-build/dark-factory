@@ -89,6 +89,9 @@ func TestPublicReviewPathPersistsKilledProviderFailureAndRetries(t *testing.T) {
 	if result.State != "ok" || backend.reviews != 2 || backend.submits != 1 || backend.enqueues != 1 || len(backend.journal) != 2 {
 		t.Fatalf("retry result=%+v operation=%+v backend=%+v", result, lastDurableReview(t, fixture.store, project), backend)
 	}
+	if result := fixture.daemon.Intake(context.Background(), retry); result.State == "ok" || backend.reviews != 2 || backend.submits != 1 || backend.enqueues != 1 {
+		t.Fatalf("original failure was replayed after its one retry: result=%+v backend=%+v", result, backend)
+	}
 }
 
 func TestPublicReviewPathRefusesRetryAfterAmbiguousSubmit(t *testing.T) {
