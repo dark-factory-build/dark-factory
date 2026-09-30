@@ -132,7 +132,15 @@ if [ -n "$ci_requested_go_module_cache" ]; then
             return 1
             ;;
     esac
-    if [ -L "$ci_requested_go_module_cache" ] || { [ -e "$ci_requested_go_module_cache" ] && [ ! -d "$ci_requested_go_module_cache" ]; }; then
+    ci_go_module_cache_probe=$ci_requested_go_module_cache
+    while [ "$ci_go_module_cache_probe" != / ]; do
+        if [ -L "$ci_go_module_cache_probe" ]; then
+            echo "local-ci: refusing symlink ancestor in shared Go module cache path" >&2
+            return 1
+        fi
+        ci_go_module_cache_probe=$(/usr/bin/dirname -- "$ci_go_module_cache_probe")
+    done
+    if [ -e "$ci_requested_go_module_cache" ] && [ ! -d "$ci_requested_go_module_cache" ]; then
         echo "local-ci: refusing unsafe shared Go module cache path" >&2
         return 1
     fi

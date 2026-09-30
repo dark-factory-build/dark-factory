@@ -156,6 +156,13 @@ for invalid_module_cache in / "$fixture/cache" "$temporary/untrusted-module-cach
     fi
 done
 
+/bin/mkdir -p "$temporary/real-account/Library/Caches/dark-factory/local-ci/trusted/go-mod"
+/bin/ln -s "$temporary/real-account" "$temporary/linked-account"
+linked_module_cache="$temporary/linked-account/Library/Caches/dark-factory/local-ci/trusted/go-mod"
+if (CDPATH='' cd -- "$fixture" && DF_CI_GO_MODULE_CACHE="$linked_module_cache" HOME="$temporary/fixture-home" /bin/sh ./scripts/entry.sh) >"$temporary/invalid-module-cache.out" 2>&1; then
+    fail "symlink account-home ancestor was accepted"
+fi
+
 /bin/mkdir "$temporary/module-cache-target"
 /bin/ln -s "$temporary/module-cache-target" "$temporary/module-cache-link"
 if (CDPATH='' cd -- "$fixture" && DF_CI_GO_MODULE_CACHE="$temporary/module-cache-link" HOME="$temporary/fixture-home" /bin/sh ./scripts/entry.sh) >"$temporary/invalid-module-cache.out" 2>&1; then
