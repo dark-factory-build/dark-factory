@@ -39,7 +39,12 @@ main() {
         # everyone, domains, IPs, any-valid-token) is refused.
         def names(key; field): ((.include // []) | length >= 1)
           and all(.include[]; keys == [key] and (.[key][field]? | type == "string"));
-        def operator: .decision == "allow" and names("email"; "email");
+        # An allow policy may also name the bridge token beside its people; a
+        # token in an identity policy admits nobody beyond that token.
+        def principal: (keys == ["email"] and (.email.email? | type == "string"))
+          or (keys == ["service_token"] and (.service_token.token_id? | type == "string"));
+        def operator: .decision == "allow" and ((.include // []) | length >= 1)
+          and all(.include[]; principal) and any(.include[]; keys == ["email"]);
         def service_auth: .decision == "non_identity" and names("service_token"; "token_id");
         def shape: {decision, include: [(.include // [])[] | keys[]],
           require: [(.require // [])[] | keys[]], exclude: [(.exclude // [])[] | keys[]]};
