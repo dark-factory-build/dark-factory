@@ -247,8 +247,19 @@ type terminalReplay struct {
 }
 
 func (o *terminalOwner) awaitProviderExec(stagePTY *ptyStageSink) error {
+	handoffAwaitingAck := false
 	for {
 		frame, source, err := nextAttemptFrame(o.child, o.daemon, o.worker, o.daemonOpen, o.workerOpen, stagePTY, 0)
+		if handoffAwaitingAck {
+			if source != sourceDaemon || err != nil || !validProviderHandoffAck(frame) {
+				return protocolError("provider handoff ack", source, err)
+			}
+			if err := o.writeWorkerFrame(frame); err != nil {
+				return err
+			}
+			handoffAwaitingAck = false
+			continue
+		}
 		switch source {
 		case sourceChild:
 			if err == nil {
@@ -275,6 +286,17 @@ func (o *terminalOwner) awaitProviderExec(stagePTY *ptyStageSink) error {
 			}
 			if validProviderErrorFrame(frame) {
 				return fmt.Errorf("runner: provider exec: %s", frame.Payload)
+			}
+			if validProviderHandoffCheck(frame) {
+				// The worker has completed every provider check and is paused
+				// immediately before exec. Forward that exact fence to the
+				// daemon and require its acknowledgement before allowing the
+				// worker to hand the PTY and startup input to the provider.
+				if err := o.writeDaemonFrame(frame); err != nil {
+					return err
+				}
+				handoffAwaitingAck = true
+				continue
 			}
 			if !validCurrentExecCheck(frame) {
 				return ErrState
