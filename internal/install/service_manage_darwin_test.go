@@ -822,6 +822,38 @@ func TestStagedWritersRefuseCollisionsInsteadOfDeleting(t *testing.T) {
 	}
 }
 
+func TestServiceInstallStagesTheCompletePackageBeforePublishing(t *testing.T) {
+	fixture := newManageFixture(t)
+	runner := filepath.Join(fixture.sourceDir, "factory-runner")
+	original, err := os.ReadFile(runner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(runner); err != nil {
+		t.Fatal(err)
+	}
+	absent := &recordedLaunchctl{results: fixture.printAbsent()}
+	if _, err := serviceInstallAt(context.Background(), fixture.home, fixture.userHome, fixture.config, fixture.sourceDir, absent.run); err == nil {
+		t.Fatal("incomplete package was accepted")
+	}
+	for _, path := range []string{
+		filepath.Join(ServiceDirectoryPath(fixture.home), "bin", "current"),
+		filepath.Join(ServiceDirectoryPath(fixture.home), "bin", ".current.stage"),
+	} {
+		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("incomplete package left %s: %v", path, err)
+		}
+	}
+	if err := os.WriteFile(runner, original, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	full := &recordedLaunchctl{results: append(fixture.printAbsent(), launchctlResult{status: 0}, fixture.printRunning(91))}
+	status, err := serviceInstallAt(context.Background(), fixture.home, fixture.userHome, fixture.config, fixture.sourceDir, full.run)
+	if err != nil || status != (ServiceStatus{State: ServiceRunning, PID: 91}) {
+		t.Fatalf("install after failed staging = %+v, %v", status, err)
+	}
+}
+
 func TestServiceArgumentsSurviveInstallStatusAndUninstall(t *testing.T) {
 	const origin = "wss://relay.darkfactory.build"
 	const address = "127.0.0.1:0"
