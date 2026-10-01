@@ -1077,7 +1077,7 @@ class ReviewIntakeTest(unittest.TestCase):
         send_back = calls[-1]
         self.assertEqual(['factoryctl', 'task', 'send-back', '--task', 'c' * 32, '--note', note], send_back)
 
-    def test_failed_pre_review_gate_is_persisted_and_not_rerun(self):
+    def test_reproduced_pre_review_gate_failure_is_persisted_and_not_rerun_again(self):
         bare = Path(self.temp.name) / 'bare'
         bare.mkdir()
         (bare / 'HEAD').write_text('ref: refs/heads/main\n')
@@ -1091,14 +1091,138 @@ class ReviewIntakeTest(unittest.TestCase):
              patch.object(review, 'ready', return_value=operation), patch.object(review, 'verify_existing'), \
              patch.object(review, 'run_full_gate', return_value=evidence) as gate, \
              patch.object(review, 'send_back_source_task', return_value='sent') as send_back:
+            rerun = review.run_once(self.config)
             first = review.run_once(self.config)
             second = review.run_once(self.config)
-        self.assertEqual(1, gate.call_count)
+        self.assertEqual(2, gate.call_count)
         self.assertEqual(1, send_back.call_count)
+        self.assertIn('re-gating PR #9 at the same head', rerun[0])
         self.assertIn('pre-review gate failure', first[0])
         self.assertEqual([], second)
         receipt = json.loads(Path(self.config['journal'] + '.reviews.json').read_text())['pulls']['9:' + SHA]
         self.assertEqual(('failed', True), (receipt['gate_state'], receipt['gate_failure_sent_back']))
+
+    def test_gate_failure_unrelated_only_when_no_failing_package_reaches_a_changed_path(self):
+        # #1076: PR #1074 changed only control-plane/ and failed in internal/kernel;
+        # PR #1070 changed only internal/daemon and failed in internal/runner.
+        source = Path(self.temp.name) / 'source'
+        module = 'github.com/dark-factory-build/dark-factory/'
+        files = {'internal/kernel/store.go': 'package kernel\n',
+                 'internal/runner/runner.go': 'package runner\n',
+                 'internal/daemon/daemon.go': 'package daemon\nimport _ "' + module + 'internal/runner"\n',
+                 'internal/buildinfo/artifact_test.go': 'package buildinfo\nvar _ = []string{"go", "build"}\n',
+                 'control-plane/src/github_app.rs': 'fn main() {}\n', 'scripts/local-ci.sh': 'exit 0\n'}
+        env = dict(os.environ, GIT_AUTHOR_NAME='fixture', GIT_AUTHOR_EMAIL='fixture@example.invalid',
+                   GIT_COMMITTER_NAME='fixture', GIT_COMMITTER_EMAIL='fixture@example.invalid')
+        def commit(changes):
+            for name, body in changes.items():
+                (source / name).parent.mkdir(parents=True, exist_ok=True)
+                (source / name).write_text(body)
+            subprocess.run(['git', '-C', str(source), 'add', '-A'], check=True, env=env)
+            subprocess.run(['git', '-C', str(source), 'commit', '--quiet', '-m', 'fixture'], check=True, env=env)
+            return subprocess.run(['git', '-C', str(source), 'rev-parse', 'HEAD'], check=True, text=True, capture_output=True).stdout.strip()
+        subprocess.run(['git', 'init', '--quiet', str(source)], check=True)
+        base = commit(files)
+        heads = {}
+        for name in ('control-plane/src/github_app.rs', 'internal/daemon/daemon.go', 'internal/runner/runner.go', 'scripts/local-ci.sh'):
+            subprocess.run(['git', '-C', str(source), 'checkout', '--quiet', base], check=True)
+            heads[name] = commit({name: files[name] + '// changed\n'})
+        receipt = Path(self.temp.name) / 'body.gate.json'
+        def unrelated(changed, log):
+            receipt.with_suffix('.log').write_text(log)
+            return review.gate_failure_unrelated(source, {'base': base, 'head': heads[changed]}, receipt)
+        def fail(package):
+            return '--- FAIL: TestX (1.00s)\nFAIL\n' + 'FAIL\t' + module + package + '\t12.345s\n'
+        self.assertTrue(unrelated('control-plane/src/github_app.rs', fail('internal/kernel')))
+        self.assertTrue(unrelated('internal/daemon/daemon.go', fail('internal/runner')))
+        # Fail closed: the failing package reaches the change, the change is outside the
+        # proven non-Go trees, the package builds binaries, or the failure is not a Go test verdict.
+        self.assertFalse(unrelated('internal/daemon/daemon.go', fail('internal/daemon')))
+        self.assertFalse(unrelated('internal/runner/runner.go', fail('internal/daemon')))
+        self.assertFalse(unrelated('scripts/local-ci.sh', fail('internal/kernel')))
+        self.assertFalse(unrelated('internal/daemon/daemon.go', fail('internal/buildinfo')))
+        self.assertFalse(unrelated('internal/daemon/daemon.go', fail('internal/e2e')))
+        self.assertFalse(unrelated('control-plane/src/github_app.rs', fail('internal/kernel') + 'FAIL: test_lineage (__main__.T)\n'))
+        self.assertFalse(unrelated('control-plane/src/github_app.rs', 'FAIL\t' + module + 'internal/kernel [build failed]\n'))
+        self.assertFalse(unrelated('control-plane/src/github_app.rs', 'local-ci: repository contract fixtures\nmkdir: denied\n'))
+        self.assertFalse(review.gate_failure_unrelated(Path(self.temp.name) / 'missing', {'base': base, 'head': heads['internal/daemon/daemon.go']}, receipt))
+
+    def test_failed_gate_regates_the_same_head_within_a_bounded_allowance(self):
+        bare = Path(self.temp.name) / 'bare'
+        bare.mkdir()
+        (bare / 'HEAD').write_text('ref: refs/heads/main\n')
+        operation = dict(self.operation, review_operation='11111111-1111-4111-8111-111111111111')
+        failed = Path(self.temp.name) / 'gate.json'
+        failed.write_text(json.dumps({'head': SHA, 'base': operation['base'], 'exit_code': 1}))
+        passed = Path(self.temp.name) / 'pass.json'
+        passed.write_text(json.dumps({'head': SHA, 'base': operation['base'], 'exit_code': 0}))
+        def gate(*_):
+            failed.with_suffix('.log').write_text('--- FAIL: TestExplicitFactoryControlInvalidatesEarlierPauseAuthority (0.10s)\n')
+            return failed
+        self.observe.return_value = 'missing'
+        # (unrelated, gate outcomes per tick, send-backs, launches, flakes kept): a reachable
+        # failure gets one exact-head rerun; an unrelated one up to GATE_FLAKE_RETRIES.
+        for unrelated, outcomes, sent_back, launched, kept in (
+                (False, [gate, lambda *_: passed], 0, 1, 1), (False, [gate, gate], 1, 0, 1),
+                (True, [gate, lambda *_: passed], 0, 1, 1), (True, [gate, gate, gate], 1, 0, 2)):
+            with self.subTest(unrelated=unrelated, outcomes=len(outcomes)):
+                Path(self.config['journal'] + '.reviews.json').unlink(missing_ok=True)
+                with patch.object(review, 'mirror', return_value=bare), \
+                     patch.object(review, 'list_prs', return_value=[{'number': 9, 'headRefOid': SHA, 'body': SHA + '\nRefs #7'}]), \
+                     patch.object(review, 'ready', return_value=dict(operation)), patch.object(review, 'verify_existing'), \
+                     patch.object(review, 'run_full_gate', side_effect=lambda *arguments, pending=iter(outcomes): next(pending)(*arguments)) as full_gate, \
+                     patch.object(review, 'gate_failure_unrelated', return_value=unrelated), \
+                     patch.object(review, 'launch_review', return_value=0) as launch, patch.object(review.intake, 'enqueue'), \
+                     patch.object(review.intake, 'task_state', return_value=None), \
+                     patch.object(review, 'send_back_source_task', return_value='sent') as send_back:
+                    messages = [review.run_once(self.config) for _ in outcomes]
+                self.assertEqual((len(outcomes), sent_back, launched), (full_gate.call_count, send_back.call_count, launch.call_count))
+                self.assertIn('re-gating PR #9 at the same head after a gate failure: pre-review full gate failed: tests=TestExplicitFactoryControlInvalidatesEarlierPauseAuthority', messages[0][0])
+                if sent_back:
+                    self.assertIn('sent back PR #9 pre-review gate failure', messages[-1][0])
+                receipt = json.loads(Path(self.config['journal'] + '.reviews.json').read_text())['pulls']['9:' + SHA]
+                flakes = receipt['gate_flakes']
+                self.assertEqual(kept, len(flakes))
+                self.assertIn('TestExplicitFactoryControl', Path(flakes[0]['log']).read_text())
+                self.assertEqual('passed' if launched else 'failed', receipt['gate_state'])
+
+    def test_gate_rerun_fails_closed_without_kept_evidence_or_valid_retry_state(self):
+        bare = Path(self.temp.name) / 'bare'
+        bare.mkdir()
+        (bare / 'HEAD').write_text('ref: refs/heads/main\n')
+        failed = Path(self.temp.name) / 'gate.json'
+        failed.write_text(json.dumps({'head': SHA, 'base': self.operation['base'], 'exit_code': 1}))
+        self.observe.return_value = 'missing'
+        def tick(flakes, replace_error=None):
+            Path(self.config['journal'] + '.reviews.json').unlink(missing_ok=True)
+            failed.with_suffix('.log').write_text('--- FAIL: TestOriginal (0.10s)\n')
+            operation = dict(self.operation, review_operation='11111111-1111-4111-8111-111111111111')
+            if flakes is not ...:
+                operation['gate_flakes'] = flakes
+            with patch.object(review, 'mirror', return_value=bare), \
+                 patch.object(review, 'list_prs', return_value=[{'number': 9, 'headRefOid': SHA, 'body': SHA + '\nRefs #7'}]), \
+                 patch.object(review, 'ready', return_value=operation), patch.object(review, 'verify_existing'), \
+                 patch.object(review, 'run_full_gate', return_value=failed), \
+                 patch.object(review, 'gate_failure_unrelated', return_value=True), \
+                 patch.object(Path, 'replace', side_effect=replace_error or Path.replace, autospec=replace_error is None), \
+                 patch.object(review, 'send_back_source_task', return_value='sent') as send_back:
+                try:
+                    messages = review.run_once(self.config)
+                except review.ReviewError as exc:
+                    messages = [str(exc)]
+            return messages, send_back.call_count, json.loads(Path(self.config['journal'] + '.reviews.json').read_text())['pulls']['9:' + SHA]
+        # The original log cannot be kept, so no rerun may overwrite it: route normally.
+        messages, sent_back, receipt = tick(..., OSError('read-only'))
+        self.assertEqual((1, 'failed'), (sent_back, receipt['gate_state']))
+        self.assertNotIn('gate_flakes', receipt)
+        self.assertIn('TestOriginal', failed.with_suffix('.log').read_text())
+        # Malformed durable retry state is neither counted nor routed.
+        for flakes in (None, {}, 'x', [1], {'note': 'n'}):
+            with self.subTest(flakes=flakes):
+                messages, sent_back, receipt = tick(flakes)
+                self.assertIn('pre-review gate flake receipt is invalid', messages[0])
+                self.assertEqual(0, sent_back)
+                self.assertNotIn('gate_state', receipt)
 
     def test_full_gate_records_the_status_of_the_worktree_gate_it_actually_ran(self):
         # go_gate_run_bounded takes (timeout, command...). Without the shift the
@@ -1171,7 +1295,8 @@ class ReviewIntakeTest(unittest.TestCase):
         bare.mkdir()
         (bare / 'HEAD').write_text('ref: refs/heads/main\n')
         self.observe.return_value = 'missing'
-        first = dict(self.operation, review_operation='11111111-1111-4111-8111-111111111111')
+        # PR #9's same-head rerun already failed once, so this failure reproduces it.
+        first = dict(self.operation, review_operation='11111111-1111-4111-8111-111111111111', gate_flakes=[{'note': 'earlier', 'log': None}])
         second_sha = 'e' * 40
         failed = Path(self.temp.name) / 'failed.gate.json'
         failed.write_text(json.dumps({'head': SHA, 'base': self.operation['base'], 'exit_code': 1}))
