@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"unicode/utf8"
 
 	"github.com/dark-factory-build/dark-factory/internal/gitauthor"
@@ -1098,6 +1099,9 @@ func (runtime RuntimePaths) environment(kind kernel.Provider) []string {
 			"COREPACK_HOME="+filepath.Join(runtime.home, ".cache", "corepack"),
 			"npm_config_cache="+filepath.Join(runtime.home, ".cache", "npm"),
 			"XDG_CACHE_HOME="+filepath.Join(runtime.home, ".cache"))
+		if kind == kernel.ProviderClaudeCode {
+			environment = append(environment, "DF_CI_CACHE_ROOT="+filepath.Join(runtime.home, ".cache", "dark-factory", "local-ci", "trusted"))
+		}
 	}
 	switch kind {
 	case kernel.ProviderCodex:
@@ -1142,6 +1146,56 @@ func (runtime RuntimePaths) environment(kind kernel.Provider) []string {
 // leaves the rest of the account home outside the provider grant.
 func goModuleCachePath(accountHome string) string {
 	return filepath.Join(accountHome, "Library", "Caches", "dark-factory", "local-ci", "trusted", "go-mod")
+}
+
+// PrepareGoModuleCache provisions the exact trusted directory that native
+// workers consume read-only. It runs before the provider sandbox is built;
+// the local-CI boundary still validates the complete path before use.
+func (runtime RuntimePaths) PrepareGoModuleCache() error {
+	if !validAbsolute(runtime.accountHome, maxPathBytes-len("/"+codexConfigDir)) {
+		return ErrInvalid
+	}
+	if err := validateGoModuleCacheDirectory(runtime.accountHome); err != nil {
+		return err
+	}
+	current := runtime.accountHome
+	for _, component := range []string{"Library", "Caches", "dark-factory", "local-ci", "trusted", "go-mod"} {
+		current = filepath.Join(current, component)
+		info, err := os.Lstat(current)
+		if errors.Is(err, os.ErrNotExist) {
+			mkdirErr := os.Mkdir(current, 0o700)
+			if mkdirErr != nil && !errors.Is(mkdirErr, os.ErrExist) {
+				return fmt.Errorf("provider: create trusted Go module cache directory: %w", mkdirErr)
+			}
+			info, err = os.Lstat(current)
+		}
+		if err != nil {
+			return fmt.Errorf("provider: inspect trusted Go module cache directory: %w", err)
+		}
+		if err := validateGoModuleCacheDirectoryInfo(info); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateGoModuleCacheDirectory(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return fmt.Errorf("provider: inspect trusted Go module cache directory: %w", err)
+	}
+	return validateGoModuleCacheDirectoryInfo(info)
+}
+
+func validateGoModuleCacheDirectoryInfo(info os.FileInfo) error {
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return fmt.Errorf("provider: trusted Go module cache path is not a directory")
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || uint64(stat.Uid) != uint64(os.Geteuid()) || info.Mode().Perm()&0o022 != 0 {
+		return fmt.Errorf("provider: trusted Go module cache directory has unsafe ownership or mode")
+	}
+	return nil
 }
 
 func validAbsolute(value string, limit int) bool {

@@ -117,6 +117,37 @@ grep -F -x "DF_CI_CACHE_ROOT=$empty_home_cache_root" "$empty_home_environment" >
     || fail "unwritable HOME did not select the no-cache sentinel"
 grep -F -x "GOCACHE=$empty_home_cache_root/go-build" "$empty_home_environment" >/dev/null \
     || fail "unwritable HOME did not skip trusted cache setup"
+grep -F -x 'GOPROXY=off' "$empty_home_environment" >/dev/null \
+    || fail "unwritable HOME did not disable Go network fallback"
+
+no_network_module=$temporary/no-network-module
+/bin/mkdir -p "$no_network_module"
+printf '%s\n' \
+    'module fixture.invalid/no-network' \
+    '' \
+    'go 1.22' \
+    '' \
+    'require example.invalid/missing v0.0.0' \
+    >"$no_network_module/go.mod"
+printf '%s\n' \
+    'package fixture' \
+    '' \
+    'import _ "example.invalid/missing"' \
+    >"$no_network_module/fixture.go"
+no_network_output=$temporary/no-network.out
+if (
+    unset DF_CI_CACHE_ROOT DF_CI_GO_MODULE_CACHE
+    export HOME=/var/empty
+    # shellcheck source=scripts/local-ci-environment.sh
+    . "$boundary"
+    cd "$no_network_module"
+    GOMODCACHE="$temporary/no-network-cache" GOCACHE="$temporary/no-network-build-cache" \
+        go list -mod=mod -deps ./...
+) >"$no_network_output" 2>&1; then
+    fail "unwritable HOME unexpectedly permitted a network-dependent Go lookup"
+fi
+grep -F 'module lookup disabled by GOPROXY=off' "$no_network_output" >/dev/null \
+    || fail "no-cache Go lookup did not fail at the offline boundary"
 
 shared_go_module_cache="$temporary_root/shared-account/Library/Caches/dark-factory/local-ci/trusted/go-mod"
 /bin/mkdir -p "$shared_go_module_cache"
@@ -150,6 +181,21 @@ EOF
 cache_root_one=$(CDPATH='' cd -- "$fixture" && HOME="$temporary/fixture-home" /bin/sh ./scripts/entry.sh)
 fixture_root=$(CDPATH='' cd -- "$fixture" && pwd -P)
 [ "$cache_root_one" = "$temporary_root/fixture-home/Library/Caches/dark-factory/local-ci/trusted" ] || fail "direct cache root changed"
+
+claude_account_home="$temporary_root/claude-account"
+claude_module_cache="$claude_account_home/Library/Caches/dark-factory/local-ci/trusted/go-mod"
+claude_runtime_cache="$temporary_root/claude-runtime/.cache/dark-factory/local-ci/trusted"
+/bin/mkdir -p "$claude_module_cache"
+claude_cache_root=$(CDPATH='' cd -- "$fixture" && \
+    HOME="$claude_account_home" \
+    DF_CI_GO_MODULE_CACHE="$claude_module_cache" \
+    DF_CI_CACHE_ROOT="$claude_runtime_cache" \
+    /bin/sh ./scripts/entry.sh)
+claude_runtime_cache=$(CDPATH= cd -- "$claude_runtime_cache" && pwd -P)
+[ "$claude_cache_root" = "$claude_runtime_cache" ] || fail "Claude cache root was not runtime-local"
+[ -d "$claude_runtime_cache/go-build" ] || fail "Claude runtime-local Go cache was not created"
+[ ! -d "$claude_account_home/Library/Caches/dark-factory/local-ci/trusted/go-build" ] \
+    || fail "Claude created writable cache children under the account home"
 
 /bin/rm -rf "$fixture/.tools"
 /bin/mkdir -p "$fixture/.tools"
