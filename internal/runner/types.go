@@ -129,14 +129,15 @@ func (commitment ExecutableCommitment) Path() string {
 }
 
 type LaunchSpec struct {
-	commit           launchCommitment
-	stdin            []byte
-	stdout           *os.File
-	stderr           *os.File
-	control          *os.File
-	controlID        *descriptorCommitment
-	testFinal        *os.File // package-test-only barrier after the final pathname check
-	testCurrentFinal bool     // package-test-only barrier for same-process exec
+	commit                   launchCommitment
+	stdin                    []byte
+	stdout                   *os.File
+	stderr                   *os.File
+	control                  *os.File
+	controlID                *descriptorCommitment
+	testFinal                *os.File // package-test-only barrier after the final pathname check
+	testCurrentFinal         bool     // package-test-only barrier for same-process exec
+	testProviderHandoffClose bool     // package-test-only worker EOF before handoff ack
 }
 
 type descriptorCommitment struct {
