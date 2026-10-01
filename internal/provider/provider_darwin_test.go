@@ -1466,6 +1466,26 @@ func TestCodexToolchainRootsAndCachesStaySeparateFromAccount(t *testing.T) {
 	}
 }
 
+func TestClaudeLocalCICacheStaysInRuntimeHome(t *testing.T) {
+	installation, runtime, _ := nativeFixture(t, kernel.ProviderClaudeCode)
+	request := requestFor(t, kernel.ProviderClaudeCode, installation, runtime, "", "")
+	request.workingDirectory = t.TempDir()
+	launch, err := Build(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantCacheRoot := "DF_CI_CACHE_ROOT=" + filepath.Join(runtime.home, ".cache", "dark-factory", "local-ci", "trusted")
+	if !slices.Contains(launch.Environment(), wantCacheRoot) {
+		t.Fatalf("Claude local-CI cache root = %q, want %q", launch.Environment(), wantCacheRoot)
+	}
+	if !slices.Contains(launch.Environment(), "DF_CI_GO_MODULE_CACHE="+goModuleCachePath(runtime.accountHome)) {
+		t.Fatalf("Claude lost the trusted shared Go module cache: %q", launch.Environment())
+	}
+	if _, err := runner.PrepareCommittedExecSpec(launch.Executable(), launch.Argv(), launch.Environment(), request.workingDirectory); err != nil {
+		t.Fatalf("generated Claude environment rejected by runner: %v", err)
+	}
+}
+
 // Opt-in local proof with an installed Codex CLI; no model or account access.
 // Keep fixtures outside the system temp roots permitted by :minimal.
 func TestCodexToolchainSandbox(t *testing.T) {

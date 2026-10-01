@@ -1114,6 +1114,9 @@ func (runtime RuntimePaths) environment(kind kernel.Provider) []string {
 			"COREPACK_HOME="+filepath.Join(runtime.home, ".cache", "corepack"),
 			"npm_config_cache="+filepath.Join(runtime.home, ".cache", "npm"),
 			"XDG_CACHE_HOME="+filepath.Join(runtime.home, ".cache"))
+		if kind == kernel.ProviderClaudeCode {
+			environment = append(environment, "DF_CI_CACHE_ROOT="+filepath.Join(runtime.home, ".cache", "dark-factory", "local-ci", "trusted"))
+		}
 	}
 	switch kind {
 	case kernel.ProviderCodex:

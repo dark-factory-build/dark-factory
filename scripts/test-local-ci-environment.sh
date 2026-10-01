@@ -182,6 +182,21 @@ cache_root_one=$(CDPATH='' cd -- "$fixture" && HOME="$temporary/fixture-home" /b
 fixture_root=$(CDPATH='' cd -- "$fixture" && pwd -P)
 [ "$cache_root_one" = "$temporary_root/fixture-home/Library/Caches/dark-factory/local-ci/trusted" ] || fail "direct cache root changed"
 
+claude_account_home="$temporary_root/claude-account"
+claude_module_cache="$claude_account_home/Library/Caches/dark-factory/local-ci/trusted/go-mod"
+claude_runtime_cache="$temporary_root/claude-runtime/.cache/dark-factory/local-ci/trusted"
+/bin/mkdir -p "$claude_module_cache"
+claude_cache_root=$(CDPATH='' cd -- "$fixture" && \
+    HOME="$claude_account_home" \
+    DF_CI_GO_MODULE_CACHE="$claude_module_cache" \
+    DF_CI_CACHE_ROOT="$claude_runtime_cache" \
+    /bin/sh ./scripts/entry.sh)
+claude_runtime_cache=$(CDPATH= cd -- "$claude_runtime_cache" && pwd -P)
+[ "$claude_cache_root" = "$claude_runtime_cache" ] || fail "Claude cache root was not runtime-local"
+[ -d "$claude_runtime_cache/go-build" ] || fail "Claude runtime-local Go cache was not created"
+[ ! -d "$claude_account_home/Library/Caches/dark-factory/local-ci/trusted/go-build" ] \
+    || fail "Claude created writable cache children under the account home"
+
 /bin/rm -rf "$fixture/.tools"
 /bin/mkdir -p "$fixture/.tools"
 /bin/ln -s "$fixture/.tools-target" "$fixture/.tools/local-ci-state"
