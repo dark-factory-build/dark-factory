@@ -51,6 +51,12 @@ type AttemptController struct {
 	attemptID     string
 	inner         Identity
 	terminalReady bool
+	// manualProviderHandoff is a package-test-only seam. Production
+	// controllers acknowledge the final provider liveness fence inline; the
+	// deterministic race test holds it so it can close the daemon before or
+	// after that exact causal boundary.
+	manualProviderHandoff  bool
+	providerHandoffPending bool
 }
 
 // writeFrame is the controller's only authoritative write path. A failed
@@ -183,97 +189,126 @@ func (c *AttemptController) Next(timeout time.Duration) (AttemptEvent, error) {
 	if timeout <= 0 {
 		timeout = attemptControlTimeout
 	}
-	if err := c.file.SetReadDeadline(time.Now().Add(timeout)); err != nil {
+	deadline := time.Now().Add(timeout)
+	if err := c.file.SetReadDeadline(deadline); err != nil {
 		return AttemptEvent{}, err
 	}
 	defer c.file.SetReadDeadline(time.Time{})
-	var frame attemptFrame
-	if err := readFrame(c.file, &frame, maxConfigBytes); err != nil {
-		// These two errors, and only these two, mean the read stopped because
-		// the stream ended: readFrame gets them from io.ReadFull, and
-		// decodeFrameBody renames the decoder's identically-named answers so a
-		// malformed body cannot reach here. A deadline reports itself
-		// separately and never lands here.
-		//
-		// The stream ending is conclusive rather than transient, because this
-		// control socket is only ever closed outright. Nothing in the tree
-		// half-closes it with shutdown(2), which is the one way a live peer
-		// could show a reader EOF while still accepting writes. Given that,
-		// no further frame can arrive and no later write can be delivered, so
-		// spending the capability makes ErrState — rather than a broken pipe
-		// from a write nobody could have received — the answer to every call
-		// that follows.
-		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
-			return AttemptEvent{}, errors.Join(err, c.spend())
-		}
-		return AttemptEvent{}, err
-	}
-	if frame.Kind == string(AttemptHandoverQuiesced) && c.state == controllerProviderReleased && validHandoverCursorFrame(frame) {
-		floor, head := frame.Floor, frame.Head
-		if err := c.spend(); err != nil {
+	for {
+		var frame attemptFrame
+		if err := readFrame(c.file, &frame, maxConfigBytes); err != nil {
+			// These two errors, and only these two, mean the read stopped because
+			// the stream ended: readFrame gets them from io.ReadFull, and
+			// decodeFrameBody renames the decoder's identically-named answers so a
+			// malformed body cannot reach here. A deadline reports itself
+			// separately and never lands here.
+			//
+			// The stream ending is conclusive rather than transient, because this
+			// control socket is only ever closed outright. Nothing in the tree
+			// half-closes it with shutdown(2), which is the one way a live peer
+			// could show a reader EOF while still accepting writes. Given that,
+			// no further frame can arrive and no later write can be delivered, so
+			// spending the capability makes ErrState — rather than a broken pipe
+			// from a write nobody could have received — the answer to every call
+			// that follows.
+			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+				return AttemptEvent{}, errors.Join(err, c.spend())
+			}
 			return AttemptEvent{}, err
 		}
-		return AttemptEvent{Kind: AttemptHandoverQuiesced, Floor: floor, Head: head}, nil
-	}
-	if frame.Kind == string(AttemptHandoverAttached) && c.state == controllerProviderReleased && validHandoverCursorFrame(frame) {
-		return AttemptEvent{Kind: AttemptHandoverAttached, Floor: frame.Floor, Head: frame.Head}, nil
-	}
-	if frame.Kind == string(AttemptHandoverRejected) && c.state == controllerProviderReleased && validHandoverCursorFrame(frame) {
-		return AttemptEvent{Kind: AttemptHandoverRejected, Floor: frame.Floor, Head: frame.Head}, nil
-	}
-	if frame.Version != 1 {
-		return AttemptEvent{}, ErrIdentity
-	}
-	if frame.Kind == string(AttemptResultReady) {
-		return c.acceptAttemptResult(frame)
-	}
-	if frame.Kind == "provider-exec-error" {
-		switch c.state {
-		case controllerSelectionReleased, controllerPreparationReleased, controllerPopulationReleased:
-			if validProviderErrorFrame(frame) {
-				return AttemptEvent{}, errors.Join(fmt.Errorf("runner: worker preparation: %s", frame.Payload), c.spend())
+		if frame.Kind == "provider-handoff-check" && c.state == controllerProviderReleased && validProviderHandoffCheck(frame) {
+			if c.manualProviderHandoff {
+				c.providerHandoffPending = true
+				return AttemptEvent{Kind: AttemptProviderHandoff}, nil
 			}
-		}
-		return AttemptEvent{}, ErrState
-	}
-	switch c.state {
-	case controllerConfigured:
-		if frame.Kind != "inner-ready" || !frame.Identity.Valid() || frame.Identity.PID != frame.Identity.PGID || frame.Stage != "" || len(frame.Payload) != 0 || frame.FileIdentity != nil || frame.Digest != "" || !noTerminalFields(frame) {
-			return AttemptEvent{}, ErrState
-		}
-		c.state = controllerInnerReady
-		c.inner = frame.Identity
-		return AttemptEvent{Kind: AttemptInnerReady, Identity: frame.Identity}, nil
-	case controllerSelectionReleased:
-		return c.acceptCheckpoint(frame, StageSelection, controllerSelectionReported)
-	case controllerPreparationReleased:
-		return c.acceptCheckpoint(frame, StagePreparation, controllerPreparationReported)
-	case controllerPopulationReleased:
-		return c.acceptCheckpoint(frame, StagePopulation, controllerPopulationReported)
-	case controllerProviderReleased:
-		if isTerminalEventKind(frame.Kind) {
-			if frame.Version != commandVersion || !validTerminalEnvelope(frame, false) {
-				return AttemptEvent{}, ErrState
-			}
-			event, err := terminalEventFromFrame(frame)
-			if err != nil {
+			if err := c.writeFrame(attemptFrame{Version: commandVersion, Kind: "provider-handoff-ack"}, maxFrameBytes); err != nil {
 				return AttemptEvent{}, err
 			}
-			if event.Kind == TerminalReady {
-				if c.terminalReady {
+			// This is an internal liveness fence, not a daemon-visible lifecycle
+			// event. Continue to the next externally meaningful frame so existing
+			// controller callers keep the same release/result grammar. The fixed
+			// deadline above is deliberately retained: acknowledging this fence
+			// must not grant a second full timeout to the caller.
+			continue
+		}
+		if frame.Kind == string(AttemptHandoverQuiesced) && c.state == controllerProviderReleased && validHandoverCursorFrame(frame) {
+			floor, head := frame.Floor, frame.Head
+			if err := c.spend(); err != nil {
+				return AttemptEvent{}, err
+			}
+			return AttemptEvent{Kind: AttemptHandoverQuiesced, Floor: floor, Head: head}, nil
+		}
+		if frame.Kind == string(AttemptHandoverAttached) && c.state == controllerProviderReleased && validHandoverCursorFrame(frame) {
+			return AttemptEvent{Kind: AttemptHandoverAttached, Floor: frame.Floor, Head: frame.Head}, nil
+		}
+		if frame.Kind == string(AttemptHandoverRejected) && c.state == controllerProviderReleased && validHandoverCursorFrame(frame) {
+			return AttemptEvent{Kind: AttemptHandoverRejected, Floor: frame.Floor, Head: frame.Head}, nil
+		}
+		if frame.Version != 1 {
+			return AttemptEvent{}, ErrIdentity
+		}
+		if frame.Kind == string(AttemptResultReady) {
+			return c.acceptAttemptResult(frame)
+		}
+		if frame.Kind == "provider-exec-error" {
+			switch c.state {
+			case controllerSelectionReleased, controllerPreparationReleased, controllerPopulationReleased:
+				if validProviderErrorFrame(frame) {
+					return AttemptEvent{}, errors.Join(fmt.Errorf("runner: worker preparation: %s", frame.Payload), c.spend())
+				}
+			}
+			return AttemptEvent{}, ErrState
+		}
+		switch c.state {
+		case controllerConfigured:
+			if frame.Kind != "inner-ready" || !frame.Identity.Valid() || frame.Identity.PID != frame.Identity.PGID || frame.Stage != "" || len(frame.Payload) != 0 || frame.FileIdentity != nil || frame.Digest != "" || !noTerminalFields(frame) {
+				return AttemptEvent{}, ErrState
+			}
+			c.state = controllerInnerReady
+			c.inner = frame.Identity
+			return AttemptEvent{Kind: AttemptInnerReady, Identity: frame.Identity}, nil
+		case controllerSelectionReleased:
+			return c.acceptCheckpoint(frame, StageSelection, controllerSelectionReported)
+		case controllerPreparationReleased:
+			return c.acceptCheckpoint(frame, StagePreparation, controllerPreparationReported)
+		case controllerPopulationReleased:
+			return c.acceptCheckpoint(frame, StagePopulation, controllerPopulationReported)
+		case controllerProviderReleased:
+			if isTerminalEventKind(frame.Kind) {
+				if frame.Version != commandVersion || !validTerminalEnvelope(frame, false) {
 					return AttemptEvent{}, ErrState
 				}
-				c.terminalReady = true
+				event, err := terminalEventFromFrame(frame)
+				if err != nil {
+					return AttemptEvent{}, err
+				}
+				if event.Kind == TerminalReady {
+					if c.terminalReady {
+						return AttemptEvent{}, ErrState
+					}
+					c.terminalReady = true
+				}
+				return AttemptEvent{Kind: AttemptTerminalFrame, Frame: &event}, nil
 			}
-			return AttemptEvent{Kind: AttemptTerminalFrame, Frame: &event}, nil
+			if frame.Kind == "current-exec-check" && noLegacyFields(frame) && noTerminalFields(frame) && len(frame.Payload) == 0 {
+				return AttemptEvent{Kind: AttemptCheckpoint, Stage: StageProvider}, nil
+			}
+			return AttemptEvent{}, ErrState
+		default:
+			return AttemptEvent{}, ErrState
 		}
-		if frame.Kind == "current-exec-check" && noLegacyFields(frame) && noTerminalFields(frame) && len(frame.Payload) == 0 {
-			return AttemptEvent{Kind: AttemptCheckpoint, Stage: StageProvider}, nil
-		}
-		return AttemptEvent{}, ErrState
-	default:
-		return AttemptEvent{}, ErrState
 	}
+}
+
+// acknowledgeProviderHandoff completes the package-test-only manual fence.
+// Production Next acknowledges this frame inline, keeping the causal point
+// immediately before the worker's final exec invisible to lifecycle callers.
+func (c *AttemptController) acknowledgeProviderHandoff() error {
+	if c == nil || c.file == nil || c.state != controllerProviderReleased || !c.providerHandoffPending {
+		return ErrState
+	}
+	c.providerHandoffPending = false
+	return c.writeFrame(attemptFrame{Version: commandVersion, Kind: "provider-handoff-ack"}, maxFrameBytes)
 }
 
 func (c *AttemptController) acceptAttemptResult(frame attemptFrame) (AttemptEvent, error) {
@@ -843,8 +878,37 @@ func execPreparedCurrent(spec *LaunchSpec, cwd, task *os.File, worker *WorkerCon
 	if err := sealProviderDescriptors(hasProviderTask); err != nil {
 		return fmt.Errorf("runner: seal provider descriptors: %w", err)
 	}
+	// All source, cwd, lifetime and descriptor checks are complete. The
+	// released daemon must still confirm liveness at this final causal point;
+	// EOF before this acknowledgement leaves the provider inert, while EOF
+	// after it is post-handoff and the provider owns the attempt.
+	if err := providerHandoff(worker, spec.testProviderHandoffClose); err != nil {
+		return err
+	}
 	if err := unix.Exec(spec.commit.Executable.Path, spec.commit.Argv, spec.commit.Env); err != nil {
 		return fmt.Errorf("runner: current exec: %w", err)
+	}
+	return nil
+}
+
+func providerHandoff(worker *WorkerControl, closeBeforeAck bool) error {
+	if worker == nil || worker.file == nil {
+		return ErrState
+	}
+	if err := writeControlFrame(worker.file, attemptFrame{Version: commandVersion, Kind: "provider-handoff-check"}, maxFrameBytes); err != nil {
+		return err
+	}
+	if closeBeforeAck {
+		closeErr := worker.file.Close()
+		worker.file = nil
+		return errors.Join(errors.New("runner: test worker closed before provider handoff ack"), closeErr)
+	}
+	var ack attemptFrame
+	if err := readFrame(worker.file, &ack, maxFrameBytes); err != nil {
+		return fmt.Errorf("runner: provider handoff: %w", err)
+	}
+	if !validProviderHandoffAck(ack) {
+		return ErrState
 	}
 	return nil
 }
