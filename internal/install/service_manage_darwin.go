@@ -234,15 +234,40 @@ func serviceInstallLockedAt(ctx context.Context, home, userHome string, config S
 	}
 	serviceDir := ServiceDirectoryPath(home)
 	for _, path := range []string{serviceDir, filepath.Join(serviceDir, "bin"), filepath.Join(serviceDir, "bin", "current")} {
+		if path == filepath.Join(serviceDir, "bin", "current") {
+			continue
+		}
 		if err := ensureOwnedDirectory(path); err != nil {
 			return ServiceStatus{}, err
 		}
 	}
+	binDirectory := filepath.Join(serviceDir, "bin")
+	currentDirectory := filepath.Join(binDirectory, "current")
+	stageDirectory := filepath.Join(binDirectory, ".current.stage")
+	if _, err := os.Lstat(currentDirectory); err == nil {
+		return ServiceStatus{State: ServiceAmbiguous}, fmt.Errorf("%w: current package appeared during install", ErrServiceResidue)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return ServiceStatus{}, fmt.Errorf("%w: inspect current package: %v", ErrServiceAmbiguous, err)
+	}
+	if _, err := os.Lstat(stageDirectory); err == nil {
+		return ServiceStatus{State: ServiceAmbiguous}, fmt.Errorf("%w: stale package stage; run factoryctl service uninstall", ErrServiceResidue)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return ServiceStatus{}, fmt.Errorf("%w: inspect package stage: %v", ErrServiceAmbiguous, err)
+	}
+	if err := os.Mkdir(stageDirectory, 0o700); err != nil {
+		return ServiceStatus{}, fmt.Errorf("%w: create package stage: %v", ErrServiceAmbiguous, err)
+	}
+	cleanupStage := func() {
+		_ = removeOwnedTree(stageDirectory)
+		_ = removeEmptyOwnedDirectory(binDirectory)
+		_ = removeEmptyOwnedDirectory(serviceDir)
+	}
 	var programDigest string
 	for _, name := range serviceBinaryNames {
-		digest, err := copyServiceBinary(filepath.Join(sourceDir, name), filepath.Join(serviceDir, "bin", "current"), name)
-		if err != nil {
-			return ServiceStatus{}, err
+		digest, copyErr := copyServiceBinary(filepath.Join(sourceDir, name), stageDirectory, name)
+		if copyErr != nil {
+			cleanupStage()
+			return ServiceStatus{}, copyErr
 		}
 		if name == "factoryd" {
 			programDigest = digest
@@ -259,22 +284,40 @@ func serviceInstallLockedAt(ctx context.Context, home, userHome string, config S
 	}
 	body, err := encodeServiceReceipt(receipt)
 	if err != nil {
+		cleanupStage()
 		return ServiceStatus{}, err
 	}
 	stderr, err := os.OpenFile(serviceStderrPath(home), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
+		cleanupStage()
 		return ServiceStatus{}, fmt.Errorf("%w: reserve stderr log: %v", ErrServiceAmbiguous, err)
 	}
 	if err := stderr.Close(); err != nil {
+		cleanupStage()
 		return ServiceStatus{}, fmt.Errorf("%w: close stderr log: %v", ErrServiceAmbiguous, err)
 	}
 	// The receipt is published before the plist so the argument list is on
 	// disk whenever the plist is. A crash in the other order would leave a
 	// plist nothing could re-render, which uninstall could never resolve.
 	if err := writeExactFile(serviceDir, serviceReceiptName, body, 0o600); err != nil {
+		cleanupStage()
+		_ = removeOwnedFile(serviceDir, serviceStderrLogName)
 		return ServiceStatus{}, err
 	}
 	if err := writeExactFile(plistDirectory, config.plistName(), plistBytes, 0o600); err != nil {
+		cleanupStage()
+		_ = removeExactFile(serviceDir, serviceReceiptName, body)
+		_ = removeOwnedFile(serviceDir, serviceStderrLogName)
+		return ServiceStatus{}, err
+	}
+	if err := os.Rename(stageDirectory, currentDirectory); err != nil {
+		cleanupStage()
+		_ = removeExactFile(serviceDir, serviceReceiptName, body)
+		_ = removeExactFile(plistDirectory, config.plistName(), plistBytes)
+		_ = removeOwnedFile(serviceDir, serviceStderrLogName)
+		return ServiceStatus{}, fmt.Errorf("%w: publish package: %v", ErrServiceAmbiguous, err)
+	}
+	if err := syncServiceDirectory(binDirectory); err != nil {
 		return ServiceStatus{}, err
 	}
 	uid := strconv.Itoa(os.Geteuid())
@@ -461,6 +504,11 @@ func serviceUninstallLockedAt(ctx context.Context, home, userHome string, config
 			}
 		}
 		for _, path := range []string{current, filepath.Join(ServiceDirectoryPath(home), "bin")} {
+			if path == filepath.Join(ServiceDirectoryPath(home), "bin") {
+				if err := removeOwnedTree(filepath.Join(path, ".current.stage")); err != nil {
+					return ServiceStatus{State: ServiceAmbiguous}, err
+				}
+			}
 			if err := removeEmptyOwnedDirectory(path); err != nil {
 				return ServiceStatus{State: ServiceAmbiguous}, err
 			}
@@ -693,6 +741,42 @@ func removeOwnedFile(directory, name string) error {
 	}
 	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("%w: remove %s", ErrServiceAmbiguous, name)
+	}
+	return nil
+}
+
+func removeOwnedTree(path string) error {
+	var stat unix.Stat_t
+	err := unix.Lstat(path, &stat)
+	if errors.Is(err, unix.ENOENT) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("%w: probe %s", ErrServiceAmbiguous, filepath.Base(path))
+	}
+	if stat.Uid != uint32(os.Geteuid()) {
+		return fmt.Errorf("%w: %s is not this installation's tree", ErrServiceForeign, filepath.Base(path))
+	}
+	if stat.Mode&unix.S_IFMT == unix.S_IFDIR {
+		entries, err := os.ReadDir(path)
+		if err != nil {
+			return fmt.Errorf("%w: enumerate %s", ErrServiceAmbiguous, filepath.Base(path))
+		}
+		for _, entry := range entries {
+			if err := removeOwnedTree(filepath.Join(path, entry.Name())); err != nil {
+				return err
+			}
+		}
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("%w: remove directory %s", ErrServiceAmbiguous, filepath.Base(path))
+		}
+		return nil
+	}
+	if stat.Mode&unix.S_IFMT != unix.S_IFREG {
+		return fmt.Errorf("%w: %s is not a regular file", ErrServiceForeign, filepath.Base(path))
+	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("%w: remove %s", ErrServiceAmbiguous, filepath.Base(path))
 	}
 	return nil
 }

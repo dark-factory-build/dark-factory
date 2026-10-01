@@ -132,7 +132,7 @@ previous_left() {
 await() {
     waited=0
     until "$1"; do
-        [ "$waited" -lt "${3:-60}" ] || "$2"
+        [ "$waited" -lt "${3:-60}" ] || { "$2"; return 1; }
         sleep 1
         waited=$((waited + 1))
     done
@@ -145,10 +145,18 @@ uninstall_stalled() {
     exit 1
 }
 install_stalled() {
-    echo "factoryd did not listen on $socket within 60s" >&2
-    echo "check 'factoryctl service status --home $runtime_home --label $label --plist-dir $plist_dir' and the daemon log; after a failed migration" >&2
-    echo "run 'factoryctl service uninstall --home $runtime_home --label $label --plist-dir $plist_dir', confirm $runtime_home/home.lock is free, then restore $backup/factory.sqlite3 over $db, remove $db-wal and $db-shm, and reinstall the previous bin-*" >&2
-    exit 1
+	echo "factoryd did not listen on $socket within 60s" >&2
+	echo "check 'factoryctl service status --home $runtime_home --label $label --plist-dir $plist_dir' and the daemon log; after a failed migration" >&2
+	echo "run 'factoryctl service uninstall --home $runtime_home --label $label --plist-dir $plist_dir', confirm $runtime_home/home.lock is free, then restore $backup/factory.sqlite3 over $db, remove $db-wal and $db-shm, and reinstall the previous bin-*" >&2
+	return 1
+}
+rollback_stalled() {
+	echo "previous factoryd did not listen on $socket within 60s; rollback is not verified" >&2
+	return 1
+}
+rollback_uninstall_stalled() {
+	echo "failed installation still owns $runtime_home; rollback is not safe" >&2
+	return 1
 }
 
 [ -f "$db" ] || { echo "no store at $db" >&2; exit 1; }
@@ -273,10 +281,91 @@ backup=$(umask 077 && mkdir -p "$HOME/.dark-factory-backups" && \
 (umask 077 && sqlite3 "$db" ".backup $backup/factory.sqlite3")
 echo "backup: $backup (user_version $(sqlite3 "$backup/factory.sqlite3" 'PRAGMA user_version'))"
 
+# Keep a complete, independently addressable copy of the currently installed
+# package before the destructive uninstall. The receipt was already parsed
+# above, but copying and hashing it here makes its rollback binding explicit.
+rollback_bin="$backup/previous-service/bin/current"
+rollback_receipt="$backup/previous-service/receipt"
+mkdir -p "$rollback_bin"
+[ -f "$runtime_home.service/receipt" ] && [ ! -L "$runtime_home.service/receipt" ] \
+    || { echo "previous service receipt is absent or unsafe; refusing uninstall" >&2; exit 1; }
+for name in factoryd factoryctl factory-runner; do
+	old="$runtime_home.service/bin/current/$name"
+	[ -f "$old" ] && [ ! -L "$old" ] \
+		|| { echo "previous service package is missing $name; refusing uninstall" >&2; exit 1; }
+	cp -p "$old" "$rollback_bin/$name"
+done
+cp -p "$runtime_home.service/receipt" "$rollback_receipt"
+[ "$(shasum -a 256 "$rollback_receipt")" = "$service_receipt_hash" ] \
+	|| { echo "previous service receipt changed while preparing rollback; refusing uninstall" >&2; exit 1; }
+
+rollback_needed=0
+rollback_in_progress=0
+rollback_previous() {
+	set +e
+	echo "rollback: removing failed installation" >&2
+	"$bin/factoryctl" service uninstall --home "$runtime_home" --label "$label" --plist-dir "$plist_dir"
+	remove_status=$?
+	if [ "$remove_status" -ne 0 ]; then
+		echo "rollback failed: could not remove the failed installation (exit $remove_status)" >&2
+		set -e
+		return 1
+	fi
+	if ! await previous_left rollback_uninstall_stalled; then
+		set -e
+		return 1
+	fi
+	set -- service install --home "$runtime_home" --label "$label" --plist-dir "$plist_dir"
+	[ -z "$relay_origin" ] || set -- "$@" --relay-origin "$relay_origin"
+	[ -z "$tool_path" ] || set -- "$@" --tool-path "$tool_path"
+	[ -z "$toolchain_read_roots" ] || set -- "$@" --toolchain-read-roots "$toolchain_read_roots"
+	[ -z "$development_browser_address" ] || set -- "$@" --development-browser-address "$development_browser_address"
+	"$rollback_bin/factoryctl" "$@"
+	install_status=$?
+	if [ "$install_status" -ne 0 ]; then
+		echo "rollback failed: previous service install exited $install_status" >&2
+		set -e
+		return 1
+	fi
+	if ! await listening rollback_stalled; then
+		set -e
+		return 1
+	fi
+	"$rollback_bin/factoryctl" service status --home "$runtime_home" --label "$label" --plist-dir "$plist_dir"
+	status_status=$?
+	"$rollback_bin/factoryctl" web status
+	web_status=$?
+	"$rollback_bin/factoryctl" remote status
+	remote_status=$?
+	set -e
+	if [ "$status_status" -ne 0 ] || [ "$web_status" -ne 0 ] || [ "$remote_status" -ne 0 ]; then
+		echo "rollback failed: previous service health was not verified" >&2
+		return 1
+	fi
+	echo "rollback: previous service restored and verified" >&2
+	return 0
+}
+on_exit() {
+	status=$?
+	if [ "$rollback_needed" = 1 ] && [ "$rollback_in_progress" = 0 ]; then
+		rollback_in_progress=1
+		if ! rollback_previous; then
+			status=1
+		fi
+		rollback_in_progress=0
+	fi
+	exit "$status"
+}
+trap on_exit EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
 refuse_dispatch_enabled
 refuse_active_runs
 [ "$(shasum -a 256 "$runtime_home.service/receipt")" = "$service_receipt_hash" ] \
-    || { echo "service settings changed during preparation; retry from the current receipt" >&2; exit 1; }
+	|| { echo "service settings changed during preparation; retry from the current receipt" >&2; exit 1; }
+rollback_needed=1
 "$bin/factoryctl" service uninstall --home "$runtime_home" --label "$label" --plist-dir "$plist_dir"
 # bootout returns once launchd forgets the job; factoryd unlinks its socket
 # before it closes the store and releases the home flock. A socket file that
@@ -300,3 +389,4 @@ export DARK_FACTORY_OPERATOR_TOKEN_FILE="$runtime_home/operator.token"
 "$bin/factoryctl" remote status
 echo "user_version now: $(sqlite3 "$db" 'PRAGMA user_version')"
 echo "binaries: $bin (keep the previous bin-* for rollback; after a failed migration restore $backup/factory.sqlite3 over $db and remove $db-wal and $db-shm)"
+rollback_needed=0
