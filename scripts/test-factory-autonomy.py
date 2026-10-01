@@ -598,7 +598,8 @@ with sqlite3.connect(home / 'factory.sqlite3') as connection:
             # The fixture has a readable store and no daemon, which is exactly
             # the pair the receipt must not conflate.
             self.assertEqual({'sha': 'a' * 40, 'healthy': False, 'dispatch_enabled': True,
-                              'service_reachable': False, 'error': 'deployment_failed'}, receipt)
+                              'service_reachable': False, 'error': 'deployment_failed',
+                              'install_output': 'stdout:\n\nstderr:\nrefusing: 1 non-adoptable non-terminal run(s)\n'}, receipt)
 
     def test_only_an_accepted_pause_is_this_deployment_s_to_undo(self):
         # Every accepted control command advances the revision, so landing on
@@ -672,7 +673,8 @@ with sqlite3.connect(home / 'factory.sqlite3') as connection:
                         deploy.deploy('a' * 40)
                 self.assertIn('dispatch state is unreadable; run factoryctl status before deciding whether to resume',
                               str(caught.exception))
-                receipt.assert_called_once_with('a' * 40, True, None)
+                receipt.assert_called_once_with('a' * 40, True, None,
+                                                'stdout:\n\nstderr:\nrefusing: 1 non-adoptable non-terminal run(s)\n')
                 # Unknown is never the proof a no-effect refusal needs.
                 self.assertFalse(getattr(caught.exception, 'retryable', False))
 
@@ -726,6 +728,35 @@ class DeployStageEvidence(unittest.TestCase):
         self.assertEqual(75, result.returncode)
         self.assertIn('first line\n', result.stderr)
         self.assertTrue(result.stderr.endswith('last line\n\nstage: sh reinstall-service.sh --home factory --prepare exit=3\n'), result.stderr[-120:])
+
+    def test_failed_install_receipt_keeps_bounded_redacted_output(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            home = root / 'factory'
+            (home / 'runtimes').mkdir(parents=True)
+            with sqlite3.connect(home / 'factory.sqlite3') as connection:
+                connection.executescript('CREATE TABLE factory(singleton INTEGER, dispatch_enabled INTEGER, revision INTEGER); CREATE TABLE runs(phase TEXT, id BLOB);')
+                connection.execute('INSERT INTO factory VALUES(1, 1, 4)')
+            (root / 'deploy-runtime.py').write_text(Path(deploy.__file__).read_text())
+            control = Path(str(home) + '.service/bin/current/factoryctl')
+            control.parent.mkdir(parents=True)
+            control.write_text('#!/bin/sh\nexit 0\n')
+            control.chmod(0o700)
+            calls = []
+            def command(argv, **kwargs):
+                calls.append(argv)
+                if '--install-prepared' in argv:
+                    raise subprocess.CalledProcessError(3, argv, output='stdout token=private\n', stderr='stderr bearer secret\n')
+                return subprocess.CompletedProcess(argv, 0, '', '')
+            states = iter([(True, 4, 0), (False, 5, 0), (False, 5, 0), (False, 5, 0), (True, 6, 0)])
+            with patch.dict(os.environ, {'HOME': str(root)}), patch.object(deploy, 'state', side_effect=lambda _home: next(states)), patch.object(deploy.subprocess, 'run', side_effect=command):
+                with self.assertRaises(ValueError):
+                    deploy.deploy('a' * 40, home)
+            receipt = root / '.dark-factory-backups' / ('deploy-' + 'a' * 40 + '.json')
+            value = json.loads(receipt.read_text())
+            self.assertEqual('stdout:\nstdout token=***\n\nstderr:\nstderr bearer ***\n', value['install_output'])
+            self.assertNotIn('private', value['install_output'])
+            self.assertNotIn('secret', value['install_output'])
 
 
 class ManagedIntakeTest(unittest.TestCase):
@@ -908,6 +939,15 @@ class ManagedIntakeTest(unittest.TestCase):
         plist.unlink()
         with patch.object(autonomy,'managed_plist_root',return_value=self.plists), patch.object(autonomy,'managed_launchctl',return_value=absent):
             self.assertEqual('absent',autonomy.managed_service(self.home,self.factoryctl,'uninstall')['state'])
+
+    def test_empty_stale_lock_directory_without_receipt_is_absent(self):
+        state = Path(str(self.home) + '.intake')
+        (state / 'service.lock').mkdir(parents=True)
+        absent = subprocess.CompletedProcess([], 113, '', '')
+        with patch.object(autonomy, '__file__', str(self.script)), patch.object(autonomy, 'managed_plist_root', return_value=self.plists), patch.object(autonomy, 'managed_launchctl', return_value=absent):
+            self.assertEqual('absent', autonomy.managed_service(self.home, self.factoryctl, 'status')['state'])
+        self.assertTrue((state / 'service.lock').is_file())
+        self.assertFalse((state / 'service.json').exists())
 
     @unittest.skipUnless(autonomy.os.environ.get('DARK_FACTORY_INTAKE_SERVICE_E2E') == '1', 'disposable launchd gate only')
     def test_real_disposable_service_lifecycle(self):

@@ -87,7 +87,7 @@ case "$1" in
             [ "$1" = -o ] && out=$2
             shift
         done
-        printf '#!/bin/sh\n# vcs.revision=%s\n# vcs.modified=%s\n# pins GOTOOLCHAIN=%s GOENV=%s GOAUTH=%s\nexec factoryctl "$@"\n' \
+        printf '#!/bin/sh\n# vcs.revision=%s\n# vcs.modified=%s\n# pins GOTOOLCHAIN=%s GOENV=%s GOAUTH=%s\nDARK_FACTORY_TEST_INSTALL_ORIGIN=prepared exec factoryctl "$@"\n' \
             "${DARK_FACTORY_TEST_VCS_REVISION-$(git rev-parse HEAD)}" "${DARK_FACTORY_TEST_VCS_MODIFIED-false}" \
             "${GOTOOLCHAIN-unset}" "${GOENV-unset}" "${GOAUTH-unset}" >"$out"
         chmod 755 "$out"
@@ -166,6 +166,10 @@ case "$1 $2" in
         esac
         ;;
     "service install")
+        if [ -n "${DARK_FACTORY_TEST_INSTALL_FAIL-}" ] && [ "${DARK_FACTORY_TEST_INSTALL_ORIGIN-}" = prepared ]; then
+            echo "fixture: prepared service install failed" >&2
+            exit 7
+        fi
         previous=""
         for argument in "$@"; do
             if [ "$previous" = "--relay-origin" ] && [ -z "$argument" ]; then
@@ -184,12 +188,24 @@ case "$1 $2" in
         ;;
 esac
 FAKE
+cat >"$fake_bin/shasum" <<'FAKE'
+#!/bin/sh
+exec openssl dgst -sha256 -r "$3"
+FAKE
 # The script's bounded waits poll 60 times with sleep between. A no-op sleep
 # makes a timeout case take about a second (macOS stretches short real sleeps
 # to well over 100 ms), and the probe each poll spawns still outlasts the fake
 # listener's 200 ms of startup.
 printf '#!/bin/sh\n' >"$fake_bin/sleep"
 chmod 755 "$fake_bin"/*
+# The real service keeps a complete previous package available to the
+# deployment rollback boundary. The fixture starts with that same shape.
+mkdir -p "$fake_home/.dark-factory.service/bin/current"
+cp "$fake_bin/factoryctl" "$fake_home/.dark-factory.service/bin/current/factoryctl"
+for name in factoryd factory-runner; do
+    printf '#!/bin/sh\nexit 0\n' >"$fake_home/.dark-factory.service/bin/current/$name"
+    chmod 755 "$fake_home/.dark-factory.service/bin/current/$name"
+done
 export PATH="$fake_bin:$PATH" HOME="$fake_home"
 export DARK_FACTORY_TEST_ACTIVE_RUNS="$temporary/active-runs"
 # One fixture run id, the 32 lowercase hex characters a runtime directory is
@@ -238,7 +254,7 @@ untouched "usage error"
 
 printf '1\n' >"$temporary/dispatch-enabled"
 "$script" "$sha" >/dev/null 2>"$temporary/stderr" && fail "dispatch enabled accepted"
-grep -q 'dispatch is enabled' "$temporary/stderr" || fail "dispatch enabled: wrong refusal"
+grep -q 'dispatch is enabled' "$temporary/stderr" || fail "dispatch enabled: wrong refusal: $(cat "$temporary/stderr")"
 [ ! -e "$test_repository/.worktrees" ] || fail "dispatch enabled created a worktree"
 untouched "dispatch enabled"
 printf '0\n' >"$temporary/dispatch-enabled"
@@ -321,6 +337,20 @@ grep -qx 'current session' "$unsafe_home/.dark-factory-verification-browser/sess
 no_service_change "symlinked runtime home"
 
 "$script" "$sha" >"$temporary/stdout" || fail "clean reinstall exited non-zero"
+
+# A failed prepared install must restore the copied old package after the
+# destructive uninstall and verify that the old service is healthy.
+before_rollback_receipt=$(cat "$fake_home/.dark-factory.service/receipt")
+DARK_FACTORY_TEST_INSTALL_FAIL=1 "$script" "$sha" >"$temporary/stdout" 2>"$temporary/stderr" \
+    && fail "failed prepared install accepted"
+grep -q 'fixture: prepared service install failed' "$temporary/stderr" \
+    || fail "failed prepared install: fixture failure was not reached"
+grep -q 'rollback: previous service restored and verified' "$temporary/stderr" \
+    || fail "failed prepared install: rollback was not verified"
+[ "$(cat "$fake_home/.dark-factory.service/receipt")" = "$before_rollback_receipt" ] \
+    || fail "failed prepared install: service receipt changed"
+rm "$DARK_FACTORY_TEST_FACTORYCTL_LOG"
+
 backup=$(find "$fake_home/.dark-factory-backups" -name factory.sqlite3)
 case "$backup" in
     "$fake_home/.dark-factory-backups/"[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]-"$sha".??????/factory.sqlite3) ;;
