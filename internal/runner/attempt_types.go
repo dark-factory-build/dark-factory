@@ -30,6 +30,9 @@ type AttemptSpec struct {
 	// The attempt runner writes it once after provider exec and before
 	// TerminalReady. Codex instead reads its task through the attempt API.
 	StartupInput []byte
+	// startupSubmitRetryInterval is a package-test seam carried through the
+	// re-exec config; production leaves it zero for the fixed bound.
+	startupSubmitRetryInterval time.Duration
 }
 
 type AttemptEventKind string
@@ -61,6 +64,7 @@ const (
 	TerminalInput             TerminalCommandKind = "terminal-input"
 	TerminalResize            TerminalCommandKind = "terminal-resize"
 	TerminalHumanReply        TerminalCommandKind = "terminal-human-reply"
+	TerminalStartupEvidence   TerminalCommandKind = "terminal-startup-evidence"
 )
 
 type TerminalEventKind string
@@ -162,6 +166,10 @@ func (c TerminalCommand) validate() error {
 		// the daemon has already resolved the exact HumanRequest/run before
 		// sending this one-shot payload to its owner.
 		if !validTerminalCorrelation(c.Correlation) || c.Generation != 0 || c.Sequence != 0 || c.Credit != 0 || c.Rows != 0 || c.Cols != 0 || len(c.Payload) == 0 || len(c.Payload) > maxTerminalFramePayload {
+			return ErrState
+		}
+	case TerminalStartupEvidence:
+		if c.Correlation != 0 || c.Generation != 0 || c.Sequence != 0 || c.Credit != 0 || c.Rows != 0 || c.Cols != 0 || len(c.Payload) != 0 || c.Submit {
 			return ErrState
 		}
 	case TerminalResize:
