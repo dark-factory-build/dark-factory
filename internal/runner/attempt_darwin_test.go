@@ -573,9 +573,23 @@ type attemptFixture struct {
 	diagnostic *os.File
 }
 
+// attemptFixtureRoot is longer than macOS's 104-byte sun_path, so the outer
+// runner can never bind takeover.sock and daemon EOF after provider exec
+// always takes protocol-1 close-and-drain. A bare t.TempDir() root made that
+// depend on its random suffix under the gate's TMPDIR=/tmp, where a bound
+// endpoint holds the runner for handoverDetachedGrace instead (#1100).
+func attemptFixtureRoot(t *testing.T) string {
+	t.Helper()
+	root := filepath.Join(t.TempDir(), strings.Repeat("r", 104))
+	if err := os.Mkdir(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
 func newAttemptFixture(t *testing.T, mode string, target string) *attemptFixture {
 	t.Helper()
-	root := t.TempDir()
+	root := attemptFixtureRoot(t)
 	if err := os.Chmod(root, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -1631,6 +1645,12 @@ func TestAttemptRunnerDaemonEOFCuts(t *testing.T) {
 			t.Fatal(err)
 		}
 		waitFile(t, filepath.Join(f.root, "provider.pid"))
+		// The runner tries its takeover endpoint before provider exec. With
+		// one bound, daemon EOF detaches rather than draining (see
+		// TestAttemptFixtureRootCannotBindTakeover).
+		if _, err := os.Stat(filepath.Join(f.root, TakeoverSocketName)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("outer runner bound %s: %v", TakeoverSocketName, err)
+		}
 		if err := f.controller.Close(); err != nil {
 			t.Fatal(err)
 		}
@@ -1638,6 +1658,7 @@ func TestAttemptRunnerDaemonEOFCuts(t *testing.T) {
 		if err != nil || exit.Code == 0 && exit.Signal == 0 {
 			t.Fatalf("outer exit=%+v err=%v output=%q", exit, err, f.output())
 		}
+		waitExactAbsence(t, inner)
 		record := loadAttemptResultForTest(t, f.dir, f.spec.AttemptID, nil)
 		if record.Terminal.Process != inner {
 			t.Fatalf("post-handoff result=%+v", record)
@@ -1664,6 +1685,28 @@ func TestAttemptRunnerDaemonEOFCuts(t *testing.T) {
 			t.Fatalf("result=%+v", record)
 		}
 	})
+}
+
+// TestAttemptFixtureRootCannotBindTakeover pins the #1100 cause under the
+// gate's TMPDIR=/tmp: a short root binds the real takeover endpoint, while
+// the subprocess fixture root never can, whatever its random suffix.
+func TestAttemptFixtureRootCannotBindTakeover(t *testing.T) {
+	t.Setenv("TMPDIR", "/tmp")
+	for _, tc := range []struct {
+		root string
+		bind bool
+	}{{t.TempDir(), true}, {attemptFixtureRoot(t), false}} {
+		dir, err := os.Open(tc.root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		transport, closeEndpoint := startTakeoverEndpoint(dir, "attempt-1")
+		closeEndpoint()
+		_ = dir.Close()
+		if bound := transport != nil; bound != tc.bind {
+			t.Fatalf("root %q (%d bytes) bound takeover endpoint=%v, want %v", tc.root, len(tc.root), bound, tc.bind)
+		}
+	}
 }
 
 func TestAttemptRunnerReapsInertInnerExitBeforeSelection(t *testing.T) {
