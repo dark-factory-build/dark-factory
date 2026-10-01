@@ -92,6 +92,118 @@ func roleRequestFor(t *testing.T, kind kernel.Provider, installation Installatio
 	return request
 }
 
+func TestPrepareGoModuleCacheCreatesTrustedTree(t *testing.T) {
+	if err := (RuntimePaths{}).PrepareGoModuleCache(); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("invalid runtime account home error = %v", err)
+	}
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	accountHome := filepath.Join(root, "account")
+	if err := os.Mkdir(accountHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runtime := runtimeFixture(t, "/usr/bin:/bin", accountHome)
+	if err := runtime.PrepareGoModuleCache(); err != nil {
+		t.Fatal(err)
+	}
+	cache := goModuleCachePath(accountHome)
+	info, err := os.Stat(cache)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !info.IsDir() {
+		t.Fatalf("trusted Go module cache is not a directory: %s", cache)
+	}
+	if info.Mode().Perm() != 0o700 {
+		t.Fatalf("trusted Go module cache mode = %o, want 700", info.Mode().Perm())
+	}
+}
+
+func TestPrepareGoModuleCacheConvergesConcurrentCreation(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	accountHome := filepath.Join(root, "account")
+	if err := os.Mkdir(accountHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runtime := runtimeFixture(t, "/usr/bin:/bin", accountHome)
+	const workers = 16
+	errorsFound := make(chan error, workers)
+	var group sync.WaitGroup
+	group.Add(workers)
+	for range workers {
+		go func() {
+			defer group.Done()
+			errorsFound <- runtime.PrepareGoModuleCache()
+		}()
+	}
+	group.Wait()
+	close(errorsFound)
+	for err := range errorsFound {
+		if err != nil {
+			t.Fatalf("concurrent trusted Go module cache preparation failed: %v", err)
+		}
+	}
+}
+
+func TestPrepareGoModuleCacheRejectsUnsafeExistingMode(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	accountHome := filepath.Join(root, "account")
+	if err := os.MkdirAll(filepath.Join(accountHome, "Library"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(filepath.Join(accountHome, "Library"), 0o777); err != nil {
+		t.Fatal(err)
+	}
+	runtime := runtimeFixture(t, "/usr/bin:/bin", accountHome)
+	if err := runtime.PrepareGoModuleCache(); err == nil {
+		t.Fatal("group/other-writable trusted Go module cache ancestor was accepted")
+	}
+}
+
+func TestPrepareGoModuleCacheRejectsUnsafeExistingOwner(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("ownership fixture requires a non-root managed account")
+	}
+	runtime := runtimeFixture(t, "/usr/bin:/bin", "/private")
+	if err := runtime.PrepareGoModuleCache(); err == nil {
+		t.Fatal("root-owned trusted Go module cache account was accepted")
+	}
+}
+
+func TestPrepareGoModuleCacheRejectsSymlinkAncestor(t *testing.T) {
+	accountRoot, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	linked, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	accountHome := filepath.Join(accountRoot, "account")
+	linked = filepath.Join(linked, "linked-library")
+	if err := os.Mkdir(accountHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(linked, filepath.Join(accountHome, "Library")); err != nil {
+		t.Fatal(err)
+	}
+	runtime := runtimeFixture(t, "/usr/bin:/bin", accountHome)
+	if err := runtime.PrepareGoModuleCache(); err == nil {
+		t.Fatal("symlinked trusted Go module cache ancestor was accepted")
+	}
+	if _, err := os.Stat(filepath.Join(linked, "Caches")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("symlink target was modified: %v", err)
+	}
+}
+
 // wantClaudeWorkerSessionFlag computes the exact --session-id/--resume pair
 // Build derives for a Claude Code worker request, so exact-argv tests can
 // splice in the value without hardcoding a UUID that depends on per-test
@@ -1260,7 +1372,7 @@ func TestCodexPermissionsBoundReadsAndRejectOversizedPolicy(t *testing.T) {
 			t.Fatalf("policy omitted rule %q", rule)
 		}
 	}
-	if strings.Contains(policy, request.runtime.accountHome) || strings.Contains(policy, request.runtime.gitCeiling) {
+	if strings.Contains(policy, tomlBasicString(request.runtime.accountHome)+`="`) || strings.Contains(policy, request.runtime.gitCeiling) {
 		t.Fatal("local commands were granted account or other Change access")
 	}
 	other := request.runtime
@@ -1297,7 +1409,7 @@ func TestCodexToolchainRootsAndCachesStaySeparateFromAccount(t *testing.T) {
 	if _, err := runner.PrepareCommittedExecSpec(launch.Executable(), launch.Argv(), launch.Environment(), t.TempDir()); err != nil {
 		t.Fatalf("generated Codex environment rejected by runner: %v", err)
 	}
-	for _, prefix := range []string{"GOCACHE=", "GOPATH=", "GOMODCACHE=", "CARGO_HOME=", "COREPACK_HOME=", "npm_config_cache=", "XDG_CACHE_HOME="} {
+	for _, prefix := range []string{"GOCACHE=", "GOPATH=", "CARGO_HOME=", "COREPACK_HOME=", "npm_config_cache=", "XDG_CACHE_HOME="} {
 		found := false
 		for _, value := range launch.Environment() {
 			if strings.HasPrefix(value, prefix+runtime.home+"/") {
@@ -1308,6 +1420,19 @@ func TestCodexToolchainRootsAndCachesStaySeparateFromAccount(t *testing.T) {
 			t.Fatalf("cache %s not private", prefix)
 		}
 	}
+	sharedModuleCache := "DF_CI_GO_MODULE_CACHE=" + goModuleCachePath(runtime.accountHome)
+	if !slices.Contains(launch.Environment(), sharedModuleCache) || !slices.Contains(launch.Environment(), "GOMODCACHE="+goModuleCachePath(runtime.accountHome)) {
+		t.Fatalf("Go module cache was not projected to the trusted shared path: %q", launch.Environment())
+	}
+	if !slices.Contains(launch.Environment(), "GOPROXY=off") {
+		t.Fatal("native Go launches must not depend on sandbox TLS or network")
+	}
+	if !strings.Contains(policy, tomlBasicString(goModuleCachePath(runtime.accountHome))+`="read"`) || strings.Contains(policy, tomlBasicString(goModuleCachePath(runtime.accountHome))+`="write"`) {
+		t.Fatalf("shared Go module cache grant is not read-only: %s", policy)
+	}
+	if strings.Contains(policy, tomlBasicString(runtime.accountHome)+`="read"`) || strings.Contains(policy, tomlBasicString(runtime.accountHome)+`="write"`) {
+		t.Fatalf("account home was granted broadly: %s", policy)
+	}
 	if !slices.Contains(launch.Environment(), "RUSTUP_HOME="+runtime.accountHome+"/.rustup") {
 		t.Fatal("rustup metadata must remain in the selected account installation")
 	}
@@ -1317,6 +1442,26 @@ func TestCodexToolchainRootsAndCachesStaySeparateFromAccount(t *testing.T) {
 		if _, err := NewRequest(kernel.ProviderCodex, installation, "", "", invalid, request.workingDirectory, kernel.RoleWorker, testAgentID, testIncarnationID); err == nil {
 			t.Fatalf("accepted private read root %q", root)
 		}
+	}
+}
+
+func TestClaudeLocalCICacheStaysInRuntimeHome(t *testing.T) {
+	installation, runtime, _ := nativeFixture(t, kernel.ProviderClaudeCode)
+	request := requestFor(t, kernel.ProviderClaudeCode, installation, runtime, "", "")
+	request.workingDirectory = t.TempDir()
+	launch, err := Build(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantCacheRoot := "DF_CI_CACHE_ROOT=" + filepath.Join(runtime.home, ".cache", "dark-factory", "local-ci", "trusted")
+	if !slices.Contains(launch.Environment(), wantCacheRoot) {
+		t.Fatalf("Claude local-CI cache root = %q, want %q", launch.Environment(), wantCacheRoot)
+	}
+	if !slices.Contains(launch.Environment(), "DF_CI_GO_MODULE_CACHE="+goModuleCachePath(runtime.accountHome)) {
+		t.Fatalf("Claude lost the trusted shared Go module cache: %q", launch.Environment())
+	}
+	if _, err := runner.PrepareCommittedExecSpec(launch.Executable(), launch.Argv(), launch.Environment(), request.workingDirectory); err != nil {
+		t.Fatalf("generated Claude environment rejected by runner: %v", err)
 	}
 }
 

@@ -195,6 +195,13 @@ for untrusted code. Factory runtime homes remain separate trust contexts under
 their existing filesystem grants. Test homes, generated outputs and XDG
 data/state remain local or temporary; `git clean -ffdx` still removes them.
 
+Native workers consume only the trusted `go-mod` subtree from that cache as a
+read-only `GOMODCACHE` with `GOPROXY=off`; their Go build cache remains in the
+disposable runtime home. The local-CI environment accepts this projection only
+when the path is an existing, canonical directory outside the checkout, so an
+empty or unsafe shared module cache fails closed instead of falling back to
+proxy TLS or operator state.
+
 Actions restores only the reusable directories under `RUNNER_TEMP` using
 `actions/cache`, keyed by platform, actual Go version, Node version and dependency
 locks. Cache hits never skip checks. GitHub scopes saved caches by ref; a manual
