@@ -291,7 +291,7 @@ export GOPATH="$ci_cache_root/go" GOCACHE="$ci_cache_root/go-build"
 if [ -n "$ci_go_module_cache" ]; then
     export DF_CI_GO_MODULE_CACHE="$ci_go_module_cache" GOMODCACHE="$ci_go_module_cache" GOPROXY=off
 else
-    export GOMODCACHE="$ci_cache_root/go-mod"
+    export GOMODCACHE="$ci_cache_root/go-mod" GOPROXY=off
 fi
 # Keep module directories removable when retiring a cache root.
 export GOFLAGS=-modcacherw

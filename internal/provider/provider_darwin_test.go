@@ -102,6 +102,9 @@ func TestPrepareGoModuleCacheCreatesTrustedTree(t *testing.T) {
 		t.Fatal(err)
 	}
 	accountHome := filepath.Join(root, "account")
+	if err := os.Mkdir(accountHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	runtime := runtimeFixture(t, "/usr/bin:/bin", accountHome)
 	if err := runtime.PrepareGoModuleCache(); err != nil {
 		t.Fatal(err)
@@ -116,6 +119,63 @@ func TestPrepareGoModuleCacheCreatesTrustedTree(t *testing.T) {
 	}
 	if info.Mode().Perm() != 0o700 {
 		t.Fatalf("trusted Go module cache mode = %o, want 700", info.Mode().Perm())
+	}
+}
+
+func TestPrepareGoModuleCacheConvergesConcurrentCreation(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	accountHome := filepath.Join(root, "account")
+	if err := os.Mkdir(accountHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runtime := runtimeFixture(t, "/usr/bin:/bin", accountHome)
+	const workers = 16
+	errorsFound := make(chan error, workers)
+	var group sync.WaitGroup
+	group.Add(workers)
+	for range workers {
+		go func() {
+			defer group.Done()
+			errorsFound <- runtime.PrepareGoModuleCache()
+		}()
+	}
+	group.Wait()
+	close(errorsFound)
+	for err := range errorsFound {
+		if err != nil {
+			t.Fatalf("concurrent trusted Go module cache preparation failed: %v", err)
+		}
+	}
+}
+
+func TestPrepareGoModuleCacheRejectsUnsafeExistingMode(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	accountHome := filepath.Join(root, "account")
+	if err := os.MkdirAll(filepath.Join(accountHome, "Library"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(filepath.Join(accountHome, "Library"), 0o777); err != nil {
+		t.Fatal(err)
+	}
+	runtime := runtimeFixture(t, "/usr/bin:/bin", accountHome)
+	if err := runtime.PrepareGoModuleCache(); err == nil {
+		t.Fatal("group/other-writable trusted Go module cache ancestor was accepted")
+	}
+}
+
+func TestPrepareGoModuleCacheRejectsUnsafeExistingOwner(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("ownership fixture requires a non-root managed account")
+	}
+	runtime := runtimeFixture(t, "/usr/bin:/bin", "/private")
+	if err := runtime.PrepareGoModuleCache(); err == nil {
+		t.Fatal("root-owned trusted Go module cache account was accepted")
 	}
 }
 

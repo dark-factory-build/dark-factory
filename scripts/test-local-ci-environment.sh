@@ -117,6 +117,37 @@ grep -F -x "DF_CI_CACHE_ROOT=$empty_home_cache_root" "$empty_home_environment" >
     || fail "unwritable HOME did not select the no-cache sentinel"
 grep -F -x "GOCACHE=$empty_home_cache_root/go-build" "$empty_home_environment" >/dev/null \
     || fail "unwritable HOME did not skip trusted cache setup"
+grep -F -x 'GOPROXY=off' "$empty_home_environment" >/dev/null \
+    || fail "unwritable HOME did not disable Go network fallback"
+
+no_network_module=$temporary/no-network-module
+/bin/mkdir -p "$no_network_module"
+printf '%s\n' \
+    'module fixture.invalid/no-network' \
+    '' \
+    'go 1.22' \
+    '' \
+    'require example.invalid/missing v0.0.0' \
+    >"$no_network_module/go.mod"
+printf '%s\n' \
+    'package fixture' \
+    '' \
+    'import _ "example.invalid/missing"' \
+    >"$no_network_module/fixture.go"
+no_network_output=$temporary/no-network.out
+if (
+    unset DF_CI_CACHE_ROOT DF_CI_GO_MODULE_CACHE
+    export HOME=/var/empty
+    # shellcheck source=scripts/local-ci-environment.sh
+    . "$boundary"
+    cd "$no_network_module"
+    GOMODCACHE="$temporary/no-network-cache" GOCACHE="$temporary/no-network-build-cache" \
+        go list -mod=mod -deps ./...
+) >"$no_network_output" 2>&1; then
+    fail "unwritable HOME unexpectedly permitted a network-dependent Go lookup"
+fi
+grep -F 'module lookup disabled by GOPROXY=off' "$no_network_output" >/dev/null \
+    || fail "no-cache Go lookup did not fail at the offline boundary"
 
 shared_go_module_cache="$temporary_root/shared-account/Library/Caches/dark-factory/local-ci/trusted/go-mod"
 /bin/mkdir -p "$shared_go_module_cache"

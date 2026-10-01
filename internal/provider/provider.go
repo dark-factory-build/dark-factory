@@ -1172,26 +1172,45 @@ func (runtime RuntimePaths) PrepareGoModuleCache() error {
 	if !validAbsolute(runtime.accountHome, maxPathBytes-len("/"+codexConfigDir)) {
 		return ErrInvalid
 	}
-	path := goModuleCachePath(runtime.accountHome)
-	current := string(filepath.Separator)
-	for _, component := range strings.Split(strings.TrimPrefix(path, current), current) {
-		if component == "" {
-			continue
-		}
+	if err := validateGoModuleCacheDirectory(runtime.accountHome); err != nil {
+		return err
+	}
+	current := runtime.accountHome
+	for _, component := range []string{"Library", "Caches", "dark-factory", "local-ci", "trusted", "go-mod"} {
 		current = filepath.Join(current, component)
 		info, err := os.Lstat(current)
 		if errors.Is(err, os.ErrNotExist) {
-			if err := os.Mkdir(current, 0o700); err != nil {
-				return fmt.Errorf("provider: create trusted Go module cache directory: %w", err)
+			mkdirErr := os.Mkdir(current, 0o700)
+			if mkdirErr != nil && !errors.Is(mkdirErr, os.ErrExist) {
+				return fmt.Errorf("provider: create trusted Go module cache directory: %w", mkdirErr)
 			}
 			info, err = os.Lstat(current)
 		}
 		if err != nil {
 			return fmt.Errorf("provider: inspect trusted Go module cache directory: %w", err)
 		}
-		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-			return fmt.Errorf("provider: trusted Go module cache path is not a directory")
+		if err := validateGoModuleCacheDirectoryInfo(info); err != nil {
+			return err
 		}
+	}
+	return nil
+}
+
+func validateGoModuleCacheDirectory(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return fmt.Errorf("provider: inspect trusted Go module cache directory: %w", err)
+	}
+	return validateGoModuleCacheDirectoryInfo(info)
+}
+
+func validateGoModuleCacheDirectoryInfo(info os.FileInfo) error {
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return fmt.Errorf("provider: trusted Go module cache path is not a directory")
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || uint64(stat.Uid) != uint64(os.Geteuid()) || info.Mode().Perm()&0o022 != 0 {
+		return fmt.Errorf("provider: trusted Go module cache directory has unsafe ownership or mode")
 	}
 	return nil
 }
