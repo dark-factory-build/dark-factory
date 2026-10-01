@@ -22,6 +22,11 @@ const maxProductionReviewFindings = 16000
 // without a publication receipt needs another operator/overseer look.
 const PublicationAttentionAfter = 3 * time.Minute
 
+// PublicationRetryAfter re-arms publication attention whose carrying overseer
+// task blocked, failed or was cancelled without handling it, bounded so a
+// persistent blocker costs at most one wake per interval.
+const PublicationRetryAfter = 30 * time.Minute
+
 var productionRepository = regexp.MustCompile(`^[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}$`)
 
 type ProductionRecord struct {

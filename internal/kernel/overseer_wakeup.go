@@ -242,10 +242,11 @@ func unpublishedPublicationTargets(ctx context.Context, connection *sql.Conn, pr
 		  AND c.head_commit <> c.base_commit AND c.updated_at_ms + ? <= ?
 		  AND NOT EXISTS (SELECT 1 FROM publication_tasks AS p WHERE p.change_id = c.id)
 		  AND NOT EXISTS (SELECT 1 FROM tasks AS prior WHERE prior.assigned_agent_id = ?
+		      AND (prior.status IN ('queued', 'running', 'succeeded') OR prior.updated_at_ms + ? > ?)
 		      AND (instr(prior.body, 'publication_change=' || lower(hex(c.id)) || ':' || c.revision || ':' || lower(hex(c.head_commit))) > 0
 		           OR (instr(prior.body, 'publication attention overflow: full reconciliation required') > 0
 	               AND c.updated_at_ms <= prior.updated_at_ms)))
-		ORDER BY c.updated_at_ms, c.id LIMIT 32`, projectID.Bytes(), PublicationAttentionAfter.Milliseconds(), at, agentID.Bytes())
+		ORDER BY c.updated_at_ms, c.id LIMIT 32`, projectID.Bytes(), PublicationAttentionAfter.Milliseconds(), at, agentID.Bytes(), PublicationRetryAfter.Milliseconds(), at)
 	if err != nil {
 		return nil, err
 	}
