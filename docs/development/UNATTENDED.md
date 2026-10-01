@@ -19,7 +19,8 @@ The overseer may choose among these workers, pause, reorder, stop, and send
 work back; it cannot raise model, account, or project limits through its
 scoped controls.
 
-Set a finite per-run duration before enabling intake; zero run budget means unlimited:
+Set a finite per-run duration before enabling intake; zero disables the project
+ceiling for workers, while overseer turns retain the controller backstop:
 
 ```sh
 factoryctl status

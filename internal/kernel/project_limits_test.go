@@ -67,6 +67,33 @@ func TestProjectLimitsUseAdditionalAllowanceAndDefaultToDisabled(t *testing.T) {
 	}
 }
 
+func TestOverseerRunHasFiniteBackstopWhenProjectLimitIsDisabled(t *testing.T) {
+	for _, role := range []AgentRole{RoleOrchestrator, RoleWorker} {
+		t.Run(role.String(), func(t *testing.T) {
+			store, _, project, agent := newAdmissionStore(t, role, 1)
+			defer store.Close()
+			ctx := context.Background()
+			if _, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 220), ProjectID: project.ID, AssignedAgentID: agent.ID, IncarnationID: incarnationID(t, 221), Title: "external gate"}, mustTime(t, 4)); err != nil {
+				t.Fatal(err)
+			}
+			admitted, err := store.AdmitNext(ctx, admissionKeys(t, 222, nil), mustTime(t, 5))
+			if err != nil || !admitted.Admitted() {
+				t.Fatalf("admission = %+v, %v", admitted, err)
+			}
+			due, err := store.OverdueRuns(ctx, mustTime(t, 5+int64(MaxOverseerRunSeconds)*1000))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if role == RoleOrchestrator && (len(due) != 1 || due[0].ID != admitted.Run.ID) {
+				t.Fatalf("overseer backstop = %+v", due)
+			}
+			if role == RoleWorker && len(due) != 0 {
+				t.Fatalf("worker inherited overseer backstop = %+v", due)
+			}
+		})
+	}
+}
+
 func TestAdmissionSkipsExhaustedProjectBeforePriority(t *testing.T) {
 	for _, role := range []AgentRole{RoleWorker, RoleOrchestrator} {
 		t.Run(role.String(), func(t *testing.T) {

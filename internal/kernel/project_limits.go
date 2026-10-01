@@ -7,6 +7,13 @@ import (
 
 const maxProjectRunSeconds = 86400
 
+// MaxOverseerRunSeconds is the hard backstop for a supervision turn. The
+// prompt asks an overseer to checkpoint and exit as soon as its next event is
+// external; this bound prevents a non-conforming provider from holding the
+// single overseer lane indefinitely when a project has no configured run
+// ceiling. A project ceiling below it remains the effective limit.
+const MaxOverseerRunSeconds = 300
+
 // SetProjectLimits replaces a project's future run allowance and per-run
 // wall-clock ceiling. An allowance is additional to the lifetime count already
 // recorded; zero disables the count ceiling without erasing that history.
@@ -79,7 +86,13 @@ func (store *Store) OverdueRuns(ctx context.Context, at UnixMillis) ([]Run, erro
 		return nil, err
 	}
 	defer tx.Close()
-	rows, err := tx.connection.QueryContext(ctx, `SELECT `+runColumns+` FROM runs AS r WHERE r.phase IN ('admitted', 'running') AND r.admitted_at_ms + (SELECT p.max_run_seconds FROM projects AS p WHERE p.id = r.project_id) * 1000 <= ? AND (SELECT p.max_run_seconds FROM projects AS p WHERE p.id = r.project_id) > 0 ORDER BY r.admitted_at_ms, r.id`, at.Int64())
+	rows, err := tx.connection.QueryContext(ctx, `SELECT `+runColumns+` FROM runs AS r WHERE r.id IN (
+		SELECT r2.id FROM runs AS r2 JOIN projects AS p ON p.id = r2.project_id
+		WHERE r2.phase IN ('admitted', 'running') AND (
+			(r2.role = 'orchestrator' AND r2.admitted_at_ms + CASE WHEN p.max_run_seconds > 0 AND p.max_run_seconds < ? THEN p.max_run_seconds ELSE ? END * 1000 <= ?)
+			OR (r2.role <> 'orchestrator' AND p.max_run_seconds > 0 AND r2.admitted_at_ms + p.max_run_seconds * 1000 <= ?)
+		)
+	) ORDER BY r.admitted_at_ms, r.id`, MaxOverseerRunSeconds, MaxOverseerRunSeconds, at.Int64(), at.Int64())
 	if err != nil {
 		return nil, err
 	}
