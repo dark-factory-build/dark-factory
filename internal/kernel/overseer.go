@@ -72,6 +72,7 @@ type OverseerRunSummary struct {
 	ID       RunID
 	AgentID  AgentID
 	TaskID   TaskID
+	Provider Provider
 	Phase    RunPhase
 	Revision Revision
 }
@@ -298,7 +299,7 @@ func (store *Store) OverseerSnapshotForAttempt(ctx context.Context, digest Attem
 			hasMore = true
 			break
 		}
-		summary := OverseerRunSummary{ID: run.ID, AgentID: run.AgentID, TaskID: run.TaskID, Phase: run.Phase, Revision: run.Revision}
+		summary := OverseerRunSummary{ID: run.ID, AgentID: run.AgentID, TaskID: run.TaskID, Provider: run.Provider, Phase: run.Phase, Revision: run.Revision}
 		result.Runs = append(result.Runs, summary)
 	}
 	if err := runs.Err(); err != nil {

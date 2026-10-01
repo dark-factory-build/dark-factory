@@ -269,8 +269,23 @@ func unregisteredRunnerConvergedPostcondition(run Run, footprint lifecycleFootpr
 // ConsumeAttemptResult atomically consumes one exact runtime/attempt-bound
 // result according to the closed admitted/running/finalizing matrix.
 func (store *Store) ConsumeAttemptResult(ctx context.Context, result AttemptResult, expected Revision, at UnixMillis) (Run, error) {
+	return store.consumeAttemptResult(ctx, result, expected, at, nil)
+}
+
+// ConsumeAttemptResultWithFailure preserves a bounded daemon-side failure
+// cause discovered while the authenticated runner result was being
+// converged. The result remains the lifecycle authority; this optional
+// proposal only selects the stable terminal classification for that result.
+func (store *Store) ConsumeAttemptResultWithFailure(ctx context.Context, result AttemptResult, expected Revision, at UnixMillis, failure *Proposal) (Run, error) {
+	return store.consumeAttemptResult(ctx, result, expected, at, failure)
+}
+
+func (store *Store) consumeAttemptResult(ctx context.Context, result AttemptResult, expected Revision, at UnixMillis, failure *Proposal) (Run, error) {
 	if !result.valid() {
 		return Run{}, fmt.Errorf("%w: malformed attempt result", ErrInvalidValue)
+	}
+	if failure != nil && (!failure.valid() || failure.Kind() != OutcomeFailed) {
+		return Run{}, fmt.Errorf("%w: malformed attempt failure", ErrInvalidValue)
 	}
 	tx, err := store.beginValidatedWrite(ctx)
 	if err != nil {
@@ -310,6 +325,9 @@ func (store *Store) ConsumeAttemptResult(ctx context.Context, result AttemptResu
 			failureCode, detail = FailureSpawn, "runner converged without a registered inner process"
 		} else if run.Phase == RunRunning {
 			failureCode, detail = FailureProviderExit, "provider exited before an attempt outcome"
+		}
+		if failure != nil {
+			failureCode, detail = failure.Code(), failure.Detail()
 		}
 		proposal, _ := NewFailureProposal(failureCode, detail)
 		kind, code, proposalDetail, proposalResult := proposalSQL(proposal)

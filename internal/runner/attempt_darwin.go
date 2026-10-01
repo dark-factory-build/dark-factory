@@ -166,7 +166,7 @@ func (c *AttemptController) Configure(spec AttemptSpec) error {
 	cfg := attemptConfig{
 		Version: 1, AttemptID: spec.AttemptID, Wrapper: spec.Wrapper.commit,
 		MarkerName: spec.MarkerName, ResultName: spec.ResultName, ResultProof: proof,
-		StartupInput: append([]byte(nil), spec.StartupInput...),
+		StartupInput: append([]byte(nil), spec.StartupInput...), StartupSubmitRetryInterval: spec.startupSubmitRetryInterval,
 	}
 	if err := c.writeFrame(cfg, maxConfigBytes); err != nil {
 		return err
@@ -1050,6 +1050,9 @@ func validateAttemptConfig(cfg attemptConfig) error {
 	if len(cfg.StartupInput) > MaxProviderTaskBytes || len(cfg.StartupInput) > 0 && (!utf8.Valid(cfg.StartupInput) || bytes.IndexByte(cfg.StartupInput, 0) >= 0) {
 		return ErrIdentity
 	}
+	if cfg.StartupSubmitRetryInterval < 0 || cfg.StartupSubmitRetryInterval > startupSubmitRetryInterval {
+		return ErrIdentity
+	}
 	if cfg.Wrapper.Executable.Path == "" || cfg.Wrapper.Cwd.Path == "" {
 		return ErrIdentity
 	}
@@ -1199,7 +1202,7 @@ func runAttempt(daemon, dir, lifetime *os.File, cfg attemptConfig, workerConfig 
 	// runs, just without handover capability, exactly like a protocol-1
 	// runner that never gets sent a handover-quiesce.
 	transport, closeTakeover := startTakeoverEndpoint(dir, cfg.AttemptID)
-	daemonOpen, err := runReleasedProviderWithHandover(child, daemon, workerParent, &reads, stagePTY, retained, cfg.StartupInput, transport)
+	daemonOpen, err := runReleasedProviderWithHandover(child, daemon, workerParent, &reads, stagePTY, retained, cfg.StartupInput, transport, cfg.StartupSubmitRetryInterval)
 	// The endpoint closes before the result is published: a daemon that
 	// adopted a runner already past its provider would own a control
 	// capability nothing answers, and the runtime is removable from the

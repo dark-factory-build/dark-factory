@@ -103,6 +103,9 @@ func (attempt *liveAttempt) loop(ctx context.Context) error {
 			}
 			continue
 		}
+		if err := attempt.deliverStartupEvidence(); err != nil {
+			return err
+		}
 
 		if stop, err := attempt.processLifecycle(ctx); err != nil {
 			return err
@@ -707,6 +710,7 @@ func (attempt *liveAttempt) handleRunnerEvent(event runner.AttemptEvent) (bool, 
 			return false, runner.ErrState
 		}
 		attempt.readySeen = true
+		attempt.markStarted(attempt.now())
 		correlation, err := attempt.nextCorrelation()
 		if err != nil {
 			return false, err
@@ -750,6 +754,7 @@ func (attempt *liveAttempt) routeFrame(frame runner.TerminalFrame) error {
 			return runner.ErrState
 		}
 		attempt.readySeen = true
+		attempt.markStarted(attempt.now())
 		return nil
 	case runner.TerminalAttached:
 		return attempt.routeAttached(frame)
@@ -761,6 +766,7 @@ func (attempt *liveAttempt) routeFrame(frame runner.TerminalFrame) error {
 				attempt.diagnosticReplayCorrelation = 0
 			}
 		} else if frame.Correlation == 0 {
+			attempt.markTerminalOutput(attempt.now(), frame.End)
 			attempt.retainDiagnosticOutput(frame.Start, frame.End, frame.Payload)
 			attempt.scanUsageLimit(frame.Start, frame.End, frame.Payload)
 			for subscriber := range attempt.subs {

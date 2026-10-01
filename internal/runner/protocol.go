@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"time"
 )
 
 const maxAttemptReportBytes = 32 << 10
@@ -29,13 +30,14 @@ type gateFrame struct {
 }
 
 type attemptConfig struct {
-	Version      int              `json:"version"`
-	AttemptID    string           `json:"attempt_id"`
-	Wrapper      launchCommitment `json:"wrapper"`
-	MarkerName   string           `json:"marker_name"`
-	ResultName   string           `json:"result_name"`
-	ResultProof  string           `json:"result_proof"`
-	StartupInput []byte           `json:"startup_input,omitempty"`
+	Version                    int              `json:"version"`
+	AttemptID                  string           `json:"attempt_id"`
+	Wrapper                    launchCommitment `json:"wrapper"`
+	MarkerName                 string           `json:"marker_name"`
+	ResultName                 string           `json:"result_name"`
+	ResultProof                string           `json:"result_proof"`
+	StartupInput               []byte           `json:"startup_input,omitempty"`
+	StartupSubmitRetryInterval time.Duration    `json:"startup_submit_retry_interval,omitempty"`
 }
 
 // String, GoString and Format keep the hex result proof out of every

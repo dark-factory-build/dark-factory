@@ -651,6 +651,7 @@ func Build(request Request) (Launch, error) {
 			},
 		}
 		environment := request.runtime.environment(request.provider)
+		environment = append(environment, "DISABLE_AUTOUPDATER=1")
 		if browser != "" {
 			servers["factory_browser"] = map[string]any{"command": browser, "args": browserArgs}
 		}
