@@ -3,6 +3,7 @@ package kernel
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"testing"
 )
 
@@ -50,8 +51,7 @@ func TestTerminalDiagnosticsKeepOnlyTheNewestRows(t *testing.T) {
 	if _, err := store.ProposeAttemptOutcome(ctx, keys.AttemptDigest, proposal, mustTime(t, 40)); err != nil {
 		t.Fatal(err)
 	}
-	// The validator refuses synthetic runs, so the MaxRetainedTerminalDiagnostics
-	// older rows are seeded directly for run ids that have no runs row.
+	// The validator refuses synthetic runs, so the 64 older rows are seeded directly for run ids that have no runs row.
 	connection, err := store.writer.Conn(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -60,8 +60,13 @@ func TestTerminalDiagnosticsKeepOnlyTheNewestRows(t *testing.T) {
 	if _, err := connection.ExecContext(ctx, `PRAGMA foreign_keys = OFF`); err != nil {
 		t.Fatal(err)
 	}
-	for i := range MaxRetainedTerminalDiagnostics {
-		if _, err := connection.ExecContext(ctx, `INSERT INTO terminal_diagnostics(run_id, floor, head, payload, captured_at_ms) VALUES(?, 0, 1, x'78', ?)`, runID(t, byte(192+i)).Bytes(), 100+i); err != nil {
+	seeded := func(i int) []byte {
+		id := bytes.Repeat([]byte{0xee}, IDBytes)
+		binary.BigEndian.PutUint64(id[IDBytes-8:], uint64(i))
+		return id
+	}
+	for i := range 64 {
+		if _, err := connection.ExecContext(ctx, `INSERT INTO terminal_diagnostics(run_id, floor, head, payload, captured_at_ms) VALUES(?, 0, 1, x'78', ?)`, seeded(i), 100+i); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -75,8 +80,8 @@ func TestTerminalDiagnosticsKeepOnlyTheNewestRows(t *testing.T) {
 		t.Fatal(err)
 	}
 	var count, oldest int
-	if err := store.writer.QueryRowContext(ctx, `SELECT COUNT(*), COUNT(*) FILTER (WHERE run_id = ?) FROM terminal_diagnostics`, runID(t, 192).Bytes()).Scan(&count, &oldest); err != nil || count != MaxRetainedTerminalDiagnostics || oldest != 0 {
-		t.Fatalf("rows = %d oldest = %d err=%v, want %d rows without the oldest", count, oldest, err, MaxRetainedTerminalDiagnostics)
+	if err := store.writer.QueryRowContext(ctx, `SELECT COUNT(*), COUNT(*) FILTER (WHERE run_id = ?) FROM terminal_diagnostics`, seeded(0)).Scan(&count, &oldest); err != nil || count != 64 || oldest != 0 {
+		t.Fatalf("rows = %d oldest = %d err=%v, want 64 rows without the oldest", count, oldest, err)
 	}
 	if _, found, err := store.TerminalDiagnostics(ctx, run.ID); err != nil || !found {
 		t.Fatalf("newest diagnostics found=%v err=%v", found, err)
