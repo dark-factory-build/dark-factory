@@ -38,9 +38,6 @@ type Daemon struct {
 	intakeControllerHome string
 	// reviewOperation is a package-test seam; production uses reviewCoordinator.
 	reviewOperation func(context.Context, kernel.ProjectID, api.ReviewRequest) (string, error)
-	// reviewPublished is a package-test seam for the publication transition;
-	// production resolves the just-published PR through Maintainer first.
-	reviewPublished func(context.Context, kernel.ProjectID, api.ReviewRequest) (string, error)
 	// reviewBackend is a package-test seam; production always uses the
 	// Maintainer-backed daemonReviewBackend.
 	reviewBackend func(string, uint64) review.Backend
@@ -56,8 +53,12 @@ type Daemon struct {
 	maintainerMu        sync.Mutex
 	productionRefreshMu sync.Mutex
 	productionRefreshAt map[kernel.ProjectID]time.Time
-	store               *kernel.Store
-	now                 func() time.Time
+	// The scheduler's merge-pipeline pass (tickMergePipeline): the next pass
+	// time, read only by the scheduler loop, and whether a pass is running.
+	pipelineAt   time.Time
+	pipelineBusy atomic.Bool
+	store        *kernel.Store
+	now          func() time.Time
 	// livenessClock is deliberately separate from now. The latter is also
 	// used by supervisor ordering tests and may be an injected, blocking
 	// clock; liveness telemetry must never enter that ordering boundary.

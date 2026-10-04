@@ -168,6 +168,74 @@ func TestPublishedReviewChangesAreSentBackToOriginExactlyOnce(t *testing.T) {
 	}
 }
 
+// The overseer publishes a worker's Change, so the pull request has two
+// publication rows. A review send-back must reach the worker, even when the
+// overseer's row is the newer one, and an escalation must reach the overseer
+// exactly once.
+func TestPublishedReviewSendBackReachesTheWorkerNotThePublisher(t *testing.T) {
+	ctx := context.Background()
+	proposal, err := NewSuccessProposal("published")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, finalizing := finalizingReleasedRun(t, RoleWorker, VerificationNone, proposal)
+	defer store.Close()
+	change, found, err := store.Change(ctx, *finalizing.ChangeID)
+	if err != nil || !found || change.HeadCommit == nil {
+		t.Fatalf("settled change = %+v, found=%v, err=%v", change, found, err)
+	}
+	settlement, err := NewRetainedChangeSettlement(change.Revision, change.HeadCommit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker, err := store.FinalizeWorkerRun(ctx, finalizing.ID, finalizing.Revision, settlement, mustTime(t, 79))
+	if err != nil {
+		t.Fatal(err)
+	}
+	overseer, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 240), ProjectID: worker.ProjectID, Name: "publisher", Role: RoleOrchestrator, Provider: ProviderCodex, ToolBudgetLimit: 4}, mustTime(t, 79))
+	if err != nil {
+		t.Fatal(err)
+	}
+	publisher, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 241), IncarnationID: incarnationID(t, 242), ProjectID: worker.ProjectID, AssignedAgentID: overseer.ID, Title: "publish"}, mustTime(t, 79))
+	if err != nil {
+		t.Fatal(err)
+	}
+	head := hex.EncodeToString(change.HeadCommit.Bytes())
+	pr := ProductionPullRequest{Number: 7, Title: "Ship it", URL: "https://github.com/example/factory/pull/7", Head: head, Branch: "factory/" + change.ID.String()[:12], Base: "main", State: "open", Review: ProductionReview{Head: head, State: "unknown"}}
+	if err := store.RecordPublication(ctx, worker.ProjectID, publisher.ID, "example/factory", pr, mustTime(t, 80)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.writer.ExecContext(ctx, `UPDATE publication_tasks SET created_at_ms = 90 WHERE task_id = ?`, publisher.ID.Bytes()); err != nil {
+		t.Fatal(err)
+	}
+	routed, err := store.SendBackPublishedReview(ctx, worker.ProjectID, "example/factory", 7, "review-op", head, "fix the finding", mustTime(t, 91))
+	if err != nil || routed.ID != worker.TaskID || !strings.Contains(TaskFeedback(routed), "review-operation: review-op\n") || routed.WorkRevision.Int64() != 2 {
+		t.Fatalf("send-back reached %v (worker %v), err=%v", routed.ID, worker.TaskID, err)
+	}
+	if _, err := store.SendBackPublishedReview(ctx, worker.ProjectID, "example/factory", 7, "stale-op", strings.Repeat("c", 40), "an older head", mustTime(t, 92)); !errors.Is(err, ErrSuperseded) {
+		t.Fatalf("a superseded head err=%v, want ErrSuperseded", err)
+	}
+	// A conflict is "escalated already" only when the escalation task exists.
+	if _, err := store.writer.ExecContext(ctx, `UPDATE agents SET archived = 1 WHERE id = ?`, overseer.ID.Bytes()); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.EscalatePublishedPull(ctx, worker.ProjectID, "example/factory", 7, "past two repair rounds", mustTime(t, 93)); !errors.Is(err, ErrConflict) {
+		t.Fatalf("escalation to an archived overseer err=%v, want the conflict", err)
+	}
+	if _, err := store.writer.ExecContext(ctx, `UPDATE agents SET archived = 0 WHERE id = ?`, overseer.ID.Bytes()); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if err := store.EscalatePublishedPull(ctx, worker.ProjectID, "example/factory", 7, "past two repair rounds", mustTime(t, 93)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var escalations int
+	if err := store.writer.QueryRowContext(ctx, `SELECT COUNT(*) FROM tasks WHERE assigned_agent_id = ? AND body = 'past two repair rounds'`, overseer.ID.Bytes()).Scan(&escalations); err != nil || escalations != 1 {
+		t.Fatalf("overseer escalations = %d, err=%v; want exactly one", escalations, err)
+	}
+}
+
 func TestOverseerWakeForStalePublicationIsEdgeTriggeredAndRearmsOnChange(t *testing.T) {
 	ctx := context.Background()
 	proposal, err := NewSuccessProposal("published")

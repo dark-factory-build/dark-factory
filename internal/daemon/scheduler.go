@@ -160,6 +160,9 @@ func (daemon *Daemon) RunScheduler(ctx context.Context, spec SupervisorSpec) err
 					}
 				}
 			}
+			if !stopping && resultErr == nil {
+				daemon.tickMergePipeline(ownedCtx)
+			}
 			if !stopping && resultErr == nil && probeID == 0 {
 				startProbe()
 			}

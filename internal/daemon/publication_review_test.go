@@ -10,7 +10,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dark-factory-build/dark-factory/internal/api"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 	"github.com/dark-factory-build/dark-factory/internal/review"
 )
@@ -26,37 +25,6 @@ func (s *failReviewUpdateStore) Update(ctx context.Context, operation review.Ope
 		return errors.New("simulated restart before durable review update")
 	}
 	return s.Store.Update(ctx, operation)
-}
-
-func TestPublishedFixtureTriggersExactHeadReview(t *testing.T) {
-	fixture := newDispatchFixture(t)
-	projectID := mustProjectID(t, testID(240))
-	if _, err := fixture.store.CreateProject(context.Background(), kernel.NewProject{ID: projectID, Name: "publication-review", Root: "/publication-review"}, mustKernelTime(t, 2)); err != nil {
-		t.Fatal(err)
-	}
-	incarnation, err := kernel.IncarnationIDFromBytes(mustIDBytes(t, testID(242)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	task, err := fixture.store.EnqueueTask(context.Background(), kernel.NewTask{ID: mustTaskID(t, testID(241)), IncarnationID: incarnation, ProjectID: projectID, Title: "publish"}, mustKernelTime(t, 3))
-	if err != nil {
-		t.Fatal(err)
-	}
-	head := strings.Repeat("a", 40)
-	base := strings.Repeat("b", 40)
-	var got api.ReviewRequest
-	fixture.daemon.reviewPublished = func(_ context.Context, _ kernel.ProjectID, request api.ReviewRequest) (string, error) {
-		got = request
-		return "review-op", nil
-	}
-	request := maintainerRequest{JSONRPC: "2.0", ID: json.RawMessage(`1`), Method: "tools/call", Params: json.RawMessage(`{"name":"create_pull_request","arguments":{"repository":"team/repo","title":"Ship it","head":"feature/ship","base":"main","body":"fixture body"}}`)}
-	response := json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"isError":false,"structuredContent":{"number":7,"url":"https://github.com/team/repo/pull/7","head_sha":"` + head + `","base_sha":"` + base + `","base_ref":"main"}}}`)
-	if err := fixture.daemon.recordMaintainerPublication(context.Background(), projectID, task.ID, request, response); err != nil {
-		t.Fatal(err)
-	}
-	if got.Repository != "team/repo" || got.PullNumber != 7 || got.Head != head || got.Base != base || got.BaseRef != "main" || got.Body != "fixture body" || got.Provider != "codex" {
-		t.Fatalf("review request=%+v", got)
-	}
 }
 
 func TestPublishedFixtureEnqueuesWithBaseRef(t *testing.T) {
@@ -78,7 +46,7 @@ func TestPublishedFixtureEnqueuesWithBaseRef(t *testing.T) {
 		t.Fatal(err)
 	}
 	op := waitForDurableReview(t, fixture.store, projectID, func(op review.Operation) bool { return op.State == "enqueued" })
-	if backend.reviews != 1 || backend.submits != 1 || backend.enqueues != 1 || backend.enqueuedBase != "main" || backend.enqueuedSHA != base || op.Request.Base != base || op.Request.BaseRef != "main" {
+	if backend.reviews != 1 || backend.submits != 1 || backend.enqueues != 1 || backend.enqueuedBase != "main" || backend.enqueuedSHA != base || op.Request != (review.Request{Repository: "team/repo", PullNumber: 7, Head: head, Base: base, BaseRef: "main", Body: "fixture body", Provider: "codex"}) {
 		t.Fatalf("publication review enqueue=%+v operation=%+v", backend, op)
 	}
 }
@@ -213,6 +181,11 @@ func TestRestartReconcilesUncertainExternalReviewWritesWithoutDuplicateWrites(t 
 				t.Fatal(err)
 			}
 			restarted.reviewBackend = func(string, uint64) review.Backend { return backend }
+			// A poll tick leaves a write younger than reviewStuckAfter to the
+			// review that may still be making it; startup owns every write.
+			if count, err := restarted.advanceReviewOperations(context.Background(), false); err != nil || count != 0 || lastDurableReview(t, fixture.store, projectID).State != wantState {
+				t.Fatalf("tick resumed a fresh write: count=%d err=%v", count, err)
+			}
 			if count, err := restarted.RecoverReviewOperations(context.Background()); err != nil || count != 1 {
 				t.Fatalf("reconciliation count=%d err=%v", count, err)
 			}

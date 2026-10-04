@@ -4,23 +4,29 @@ package daemon
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/dark-factory-build/dark-factory/internal/api"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
+	"github.com/dark-factory-build/dark-factory/internal/maintainer"
 	"github.com/dark-factory-build/dark-factory/internal/review"
 )
 
 type publicReviewBackend struct {
 	killed, submitAmbiguous, requestChanges bool
+	enqueueRefused                          bool
 	reviews, submits, enqueues              int
 	enqueuedBase, enqueuedSHA               string
 	journal                                 map[string]string
 	observations                            map[string]review.Receipt
+	merge                                   review.Merge
 }
 
 func (b *publicReviewBackend) CloneReadOnly(context.Context, review.Request) (string, func(), error) {
@@ -52,7 +58,14 @@ func (b *publicReviewBackend) Submit(_ context.Context, operation review.Operati
 func (b *publicReviewBackend) Enqueue(_ context.Context, operation review.Operation) error {
 	b.enqueues++
 	b.enqueuedBase, b.enqueuedSHA = operation.Request.BaseRef, operation.Request.Base
+	if b.enqueueRefused {
+		return errors.New("review: Maintainer rejected operation")
+	}
 	return b.record("enqueue_pull_request", operation.EnqueueID)
+}
+
+func (b *publicReviewBackend) ObserveMerge(context.Context, review.Operation) (review.Merge, error) {
+	return b.merge, nil
 }
 
 func (b *publicReviewBackend) Observe(_ context.Context, operationID string) (review.Receipt, error) {
@@ -136,8 +149,11 @@ func TestRestartDoesNotRouteRequestChangesBeforeSubmit(t *testing.T) {
 	}
 }
 
-func TestRestartRoutesCompletedRequestChangesWithoutResubmitting(t *testing.T) {
-	fixture, project := reviewPublicFixture(t)
+// publishedTask publishes pull 12 at head eeee… from a task that is running;
+// settle ends its run so a send-back can land.
+func publishedTask(t *testing.T) (fixture *dispatchFixture, project kernel.ProjectID, task kernel.Task, settle func()) {
+	t.Helper()
+	fixture, project = reviewPublicFixture(t)
 	ctx := context.Background()
 	factory, err := fixture.store.Factory(ctx)
 	if err != nil {
@@ -154,7 +170,7 @@ func TestRestartRoutesCompletedRequestChangesWithoutResubmitting(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	task, err := fixture.store.EnqueueTask(ctx, kernel.NewTask{ID: mustTaskID(t, testID(254)), IncarnationID: incarnation, ProjectID: project, AssignedAgentID: agent.ID, Title: "publish"}, mustKernelTime(t, 1002))
+	task, err = fixture.store.EnqueueTask(ctx, kernel.NewTask{ID: mustTaskID(t, testID(254)), IncarnationID: incarnation, ProjectID: project, AssignedAgentID: agent.ID, Title: "publish"}, mustKernelTime(t, 1002))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -195,42 +211,53 @@ func TestRestartRoutesCompletedRequestChangesWithoutResubmitting(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	run := *admission.Run
-	resourceRevision, err := kernel.NewRevision(1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	runtimeResource, err := fixture.store.ActivateResource(ctx, run.ID, keys.Resources.RuntimeRoot, resourceRevision, runtimeIdentity, mustKernelTime(t, 1004))
-	if err != nil {
-		t.Fatal(err)
-	}
-	startedRun, startingRunner, err := fixture.store.BeginRunnerStart(ctx, run.ID, keys.Resources.RunnerProcess, run.Revision, resourceRevision, mustKernelTime(t, 1005))
-	if err != nil {
-		t.Fatal(err)
-	}
-	activatedRun, runnerResource, err := fixture.store.ActivateRunner(ctx, startedRun.ID, startingRunner.ID, startedRun.Revision, startingRunner.Revision, processIdentity, mustKernelTime(t, 1006))
-	if err != nil {
-		t.Fatal(err)
-	}
-	finalizing, err := fixture.store.RecordRecoveredPreSessionRunnerAbsence(ctx, activatedRun.ID, runnerResource.ID, activatedRun.Revision, runnerResource.Revision, processIdentity, mustKernelTime(t, 1007))
-	if err != nil {
-		t.Fatal(err)
-	}
-	releasingRuntimeRevision, err := kernel.NewRevision(runtimeResource.Revision.Int64() + 1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := fixture.store.ReleaseResource(ctx, finalizing.ID, runtimeResource.ID, releasingRuntimeRevision, runtimeIdentity, mustKernelTime(t, 1008)); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := fixture.store.FinalizeRun(ctx, finalizing.ID, finalizing.Revision, mustKernelTime(t, 1009)); err != nil {
-		t.Fatal(err)
-	}
-	head, base := strings.Repeat("e", 40), strings.Repeat("f", 40)
+	head := strings.Repeat("e", 40)
 	pr := kernel.ProductionPullRequest{Number: 12, Title: "Ship it", URL: "https://github.com/team/repo/pull/12", Head: head, Branch: "feature/ship", Base: "main", State: "open", Review: kernel.ProductionReview{Head: head, State: "unknown"}}
 	if err := fixture.store.RecordPublication(ctx, project, task.ID, "team/repo", pr, mustKernelTime(t, 1010)); err != nil {
 		t.Fatal(err)
 	}
+	settle = func() {
+		run := *admission.Run
+		resourceRevision, err := kernel.NewRevision(1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		runtimeResource, err := fixture.store.ActivateResource(ctx, run.ID, keys.Resources.RuntimeRoot, resourceRevision, runtimeIdentity, mustKernelTime(t, 1004))
+		if err != nil {
+			t.Fatal(err)
+		}
+		startedRun, startingRunner, err := fixture.store.BeginRunnerStart(ctx, run.ID, keys.Resources.RunnerProcess, run.Revision, resourceRevision, mustKernelTime(t, 1005))
+		if err != nil {
+			t.Fatal(err)
+		}
+		activatedRun, runnerResource, err := fixture.store.ActivateRunner(ctx, startedRun.ID, startingRunner.ID, startedRun.Revision, startingRunner.Revision, processIdentity, mustKernelTime(t, 1006))
+		if err != nil {
+			t.Fatal(err)
+		}
+		finalizing, err := fixture.store.RecordRecoveredPreSessionRunnerAbsence(ctx, activatedRun.ID, runnerResource.ID, activatedRun.Revision, runnerResource.Revision, processIdentity, mustKernelTime(t, 1007))
+		if err != nil {
+			t.Fatal(err)
+		}
+		releasingRuntimeRevision, err := kernel.NewRevision(runtimeResource.Revision.Int64() + 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := fixture.store.ReleaseResource(ctx, finalizing.ID, runtimeResource.ID, releasingRuntimeRevision, runtimeIdentity, mustKernelTime(t, 1008)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := fixture.store.FinalizeRun(ctx, finalizing.ID, finalizing.Revision, mustKernelTime(t, 1009)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fixture.daemon.now = func() time.Time { return time.Unix(2000, 0) }
+	return fixture, project, task, settle
+}
+
+func TestRestartRoutesCompletedRequestChangesWithoutResubmitting(t *testing.T) {
+	fixture, project, task, settle := publishedTask(t)
+	ctx := context.Background()
+	settle()
+	head, base := strings.Repeat("e", 40), strings.Repeat("f", 40)
 	backend := &publicReviewBackend{requestChanges: true}
 	now := func() time.Time { return time.Unix(1011, 0) }
 	coordinator := review.Coordinator{Store: durableReviewStore{store: fixture.store, project: project, repository: "team/repo", now: now}, Backend: backend, Now: now}
@@ -314,4 +341,250 @@ func waitForDurableReview(t *testing.T, store *kernel.Store, project kernel.Proj
 		time.Sleep(5 * time.Millisecond)
 	}
 	return lastDurableReview(t, store, project)
+}
+
+func publishedReviewRequest() api.ReviewRequest {
+	return api.ReviewRequest{Repository: "team/repo", PullNumber: 12, Head: strings.Repeat("e", 40), Base: strings.Repeat("f", 40), BaseRef: "main", Body: "fixture body", Provider: "codex"}
+}
+
+func TestSendBackToARunningTaskLandsOnALaterTick(t *testing.T) {
+	fixture, project, task, settle := publishedTask(t)
+	ctx := context.Background()
+	fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return &publicReviewBackend{requestChanges: true} }
+	if _, err := fixture.daemon.reviewPR(ctx, project, publishedReviewRequest()); err == nil {
+		t.Fatal("a running task accepted the send-back")
+	}
+	for _, settled := range []bool{false, true} {
+		if settled {
+			settle()
+		}
+		if _, err := fixture.daemon.advanceReviewOperations(ctx, false); err != nil {
+			t.Fatal(err)
+		}
+		op := lastDurableReview(t, fixture.store, project)
+		current, _, err := fixture.store.Task(ctx, task.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		routed := strings.Contains(kernel.TaskFeedback(current), "review-operation: "+op.ID+"\n")
+		if op.RoutePending == settled || routed != settled || (current.WorkRevision.Int64() == 2) != settled {
+			t.Fatalf("settled=%v: operation=%+v task revision %d routed=%v", settled, op, current.WorkRevision.Int64(), routed)
+		}
+	}
+}
+
+// #1078: the task handed a head with a BLOCK and a later ALLOW that does not
+// correct it receives the BLOCK findings as its correction input. (The kernel
+// test TestPublishedReviewSendBackReachesTheWorkerNotThePublisher shows that
+// task is the worker's when the overseer published the worker's Change.)
+func TestSendBackCarriesTheBlockOfRecordDespiteALaterAllow(t *testing.T) {
+	fixture, project, task, settle := publishedTask(t)
+	settle()
+	ctx := context.Background()
+	fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return &publicReviewBackend{requestChanges: true} }
+	block, err := fixture.daemon.reviewPR(ctx, project, publishedReviewRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	head := strings.Repeat("e", 40)
+	if err := fixture.store.RecordProductionReview(ctx, project, "team/repo", 12, kernel.ProductionReview{Head: head, State: "allow", Findings: "looks fine", OperationID: "later-allow"}, mustKernelTime(t, 2000)); err != nil {
+		t.Fatal(err)
+	}
+	current, _, err := fixture.store.Task(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	feedback := kernel.TaskFeedback(current)
+	for _, want := range []string{"review-operation: " + block + "\n", "This is the review of record for exact head " + head, "No other verdict on this head supersedes its findings", "fixture findings"} {
+		if !strings.Contains(feedback, want) {
+			t.Fatalf("worker feedback lacks %q:\n%s", want, feedback)
+		}
+	}
+	if review := readProductionPull(t, fixture.store, project, 12).Review; review.State != "block" || review.OperationID != block {
+		t.Fatalf("production review of record = %+v, want the block %s", review, block)
+	}
+}
+
+func TestMergeQueueEjectionSendsBackOnceAndAMergeCloses(t *testing.T) {
+	for _, test := range []struct {
+		merge review.Merge
+		state string
+	}{
+		{merge: review.Merge{State: "NOT_QUEUED", Open: true, Failing: []string{"ci / go", "ci / ui"}}, state: "ejected"},
+		{merge: review.Merge{State: "MERGED_AFTER_ENQUEUE_ATTEMPT"}, state: "merged"},
+	} {
+		fixture, project, task, settle := publishedTask(t)
+		settle()
+		customerMode(t, fixture)
+		ctx := context.Background()
+		backend := &publicReviewBackend{merge: test.merge}
+		fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return backend }
+		if _, err := fixture.daemon.reviewPR(ctx, project, publishedReviewRequest()); err != nil || backend.enqueues != 1 {
+			t.Fatalf("enqueue err=%v backend=%+v", err, backend)
+		}
+		for range 2 {
+			if _, err := fixture.daemon.advanceReviewOperations(ctx, false); err != nil {
+				t.Fatal(err)
+			}
+		}
+		op := lastDurableReview(t, fixture.store, project)
+		current, _, err := fixture.store.Task(ctx, task.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sentBack := current.WorkRevision.Int64() == 2 && strings.Contains(kernel.TaskFeedback(current), "Failing checks: ci / go, ci / ui.")
+		if op.State != test.state || op.RoutePending || sentBack != (test.state == "ejected") || current.WorkRevision.Int64() > 2 {
+			t.Fatalf("%s: operation=%+v task revision %d feedback %q", test.state, op, current.WorkRevision.Int64(), kernel.TaskFeedback(current))
+		}
+	}
+}
+
+// An enqueue the App refused leaves its operation failed but pending, in the
+// same write, so the overseer escalation survives a failed or interrupted
+// attempt and lands exactly once on a later tick.
+func TestRefusedEnqueueEscalatesOnceEvenAfterAFailedTick(t *testing.T) {
+	fixture, project, _, settle := publishedTask(t)
+	settle()
+	customerMode(t, fixture)
+	ctx := context.Background()
+	backend := &publicReviewBackend{enqueueRefused: true}
+	now := fixture.daemon.now
+	// The coordinator alone stands in for a daemon that stopped before
+	// escalating.
+	coordinator := review.Coordinator{Store: durableReviewStore{store: fixture.store, project: project, repository: "team/repo", now: now}, Backend: backend, Now: now}
+	request := publishedReviewRequest()
+	if op, err := coordinator.Start(ctx, review.Request{Repository: request.Repository, PullNumber: request.PullNumber, Head: request.Head, Base: request.Base, BaseRef: request.BaseRef, Body: request.Body, Provider: request.Provider}); err == nil || op.State != "failed" || !op.RoutePending {
+		t.Fatalf("refused enqueue operation=%+v err=%v", op, err)
+	}
+	fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return backend }
+	digest := sha256.Sum256([]byte(fmt.Sprintf("escalation\x00%s\x00team/repo\x0012", project)))
+	escalation := mustTaskID(t, hex.EncodeToString(digest[:kernel.IDBytes]))
+	escalations := func() int {
+		if _, found, err := fixture.store.Task(ctx, escalation); err != nil || !found {
+			return 0
+		}
+		return 1
+	}
+	// The tick reads the clock to age the operation, to stamp routing, then
+	// to stamp the escalation: only that third read fails.
+	reads := 0
+	fixture.daemon.now = func() time.Time {
+		if reads++; reads == 3 {
+			return time.Unix(-1, 0)
+		}
+		return now()
+	}
+	if _, err := fixture.daemon.advanceReviewOperations(ctx, false); err != nil {
+		t.Fatal(err)
+	}
+	if reads < 3 || escalations() != 0 || !lastDurableReview(t, fixture.store, project).RoutePending {
+		t.Fatalf("after a failed escalation (clock reads %d) it was dropped or recorded", reads)
+	}
+	fixture.daemon.now = now
+	for range 2 {
+		if _, err := fixture.daemon.advanceReviewOperations(ctx, false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := escalations(); got != 1 || lastDurableReview(t, fixture.store, project).RoutePending {
+		t.Fatalf("escalations=%d pending=%v, want one delivered escalation", got, lastDurableReview(t, fixture.store, project).RoutePending)
+	}
+}
+
+// customerMode puts the daemon on the factoryd Maintainer path with an offline
+// customer connection, so no fixture can reach GitHub.
+func customerMode(t *testing.T, fixture *dispatchFixture) {
+	t.Helper()
+	if err := fixture.home.WriteMaintainerCredential([]byte(`{"disabled":true}`)); err != nil {
+		t.Fatal(err)
+	}
+	host, err := maintainer.OpenHost(fixture.home)
+	if err != nil || !host.CustomerMode() {
+		t.Fatalf("customer host: %v", err)
+	}
+	fixture.daemon.github = host
+}
+
+// The merge stage is dormant on a legacy home: the tick does not route a
+// review_pr result, and startup routes it as before but does not observe an
+// enqueued head. On the factoryd Maintainer path both advance.
+func TestMergeStageRunsOnlyOnTheCustomerPath(t *testing.T) {
+	for _, customer := range []bool{false, true} {
+		fixture, project, task, settle := publishedTask(t)
+		ctx := context.Background()
+		fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return &publicReviewBackend{requestChanges: true} }
+		if _, err := fixture.daemon.reviewPR(ctx, project, publishedReviewRequest()); err == nil {
+			t.Fatal("a running task accepted the send-back")
+		}
+		settle()
+		if customer {
+			customerMode(t, fixture)
+		}
+		fixture.daemon.advanceMergePipeline(ctx)
+		if current, _, err := fixture.store.Task(ctx, task.ID); err != nil || (current.WorkRevision.Int64() == 2) != customer {
+			t.Fatalf("customer=%v: tick left task revision %d (err %v)", customer, current.WorkRevision.Int64(), err)
+		}
+
+		fixture, project, _, settle = publishedTask(t)
+		settle()
+		fixture.daemon.reviewBackend = func(string, uint64) review.Backend {
+			return &publicReviewBackend{merge: review.Merge{State: "MERGED_AFTER_ENQUEUE_ATTEMPT"}}
+		}
+		if _, err := fixture.daemon.reviewPR(ctx, project, publishedReviewRequest()); err != nil {
+			t.Fatal(err)
+		}
+		if customer {
+			customerMode(t, fixture)
+		}
+		if _, err := fixture.daemon.RecoverReviewOperations(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if state := lastDurableReview(t, fixture.store, project).State; (state == "merged") != customer {
+			t.Fatalf("customer=%v: startup left operation %s", customer, state)
+		}
+	}
+}
+
+// An escalation that finds no overseer keeps the route pending and says why
+// on the operation; once an overseer has published the pull request, a later
+// tick delivers it and clears both.
+func TestEscalationWithNoOverseerStaysPendingUntilOneExists(t *testing.T) {
+	fixture, project := reviewPublicFixture(t)
+	customerMode(t, fixture)
+	ctx := context.Background()
+	fixture.daemon.now = func() time.Time { return time.Unix(2000, 0) }
+	publish := func(seed byte, role kernel.AgentRole) {
+		agent, err := fixture.store.CreateAgent(ctx, kernel.NewAgent{ID: mustAgentID(t, testID(seed)), ProjectID: project, Name: role.String(), Role: role, Provider: kernel.ProviderCodex, ToolBudgetLimit: 2}, mustKernelTime(t, 1001))
+		if err != nil {
+			t.Fatal(err)
+		}
+		incarnation, err := kernel.IncarnationIDFromBytes(mustIDBytes(t, testID(seed+1)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		task, err := fixture.store.EnqueueTask(ctx, kernel.NewTask{ID: mustTaskID(t, testID(seed+2)), IncarnationID: incarnation, ProjectID: project, AssignedAgentID: agent.ID, Title: "publish"}, mustKernelTime(t, 1002))
+		if err != nil {
+			t.Fatal(err)
+		}
+		head := strings.Repeat("e", 40)
+		if err := fixture.store.RecordPublication(ctx, project, task.ID, "team/repo", kernel.ProductionPullRequest{Number: 12, Title: "Ship it", URL: "https://github.com/team/repo/pull/12", Head: head, Branch: "feature/ship", Base: "main", State: "open", Review: kernel.ProductionReview{Head: head, State: "unknown"}}, mustKernelTime(t, 1003)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	publish(230, kernel.RoleWorker)
+	backend := &publicReviewBackend{enqueueRefused: true}
+	fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return backend }
+	if _, err := fixture.daemon.reviewPR(ctx, project, publishedReviewRequest()); err == nil {
+		t.Fatal("a refused enqueue reported success")
+	}
+	if op := lastDurableReview(t, fixture.store, project); !op.RoutePending || !strings.Contains(op.Escalation, "not found") {
+		t.Fatalf("escalation without an overseer: %+v", op)
+	}
+	publish(234, kernel.RoleOrchestrator)
+	if _, err := fixture.daemon.advanceReviewOperations(ctx, false); err != nil {
+		t.Fatal(err)
+	}
+	if op := lastDurableReview(t, fixture.store, project); op.RoutePending || op.Escalation != "" {
+		t.Fatalf("delivered escalation left the operation pending: %+v", op)
+	}
 }
