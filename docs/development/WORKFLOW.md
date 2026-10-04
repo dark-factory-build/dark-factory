@@ -136,6 +136,9 @@ Task preparation freezes a bounded selection of exact document revisions,
 prioritizing explicit attachments and the project brief. The normal knowledge
 addition is at most 3 KiB, plus at most 4 KiB for all explicitly attached
 revision identifiers; bodies are loaded in bounded prefixes or on demand.
+Context includes author, a bounded evidence reference and any explicit supersedes
+link. A correction claim does not silently rewrite or invalidate earlier evidence;
+mark obsolete guidance superseded through its ordinary revision action.
 Codex and Claude fetch the actual assignment through `attempt task` when knowledge
 is present. Access records distinguish selection, context bytes served, and body
 pages served; none claims understanding or application. A later assignment fetch

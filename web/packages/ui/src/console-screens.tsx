@@ -101,7 +101,7 @@ export function FactoryFloor({
   onOpenTasks?: (projectId?: string) => void;
   onOpenMissions?: (projectId?: string) => void;
   onOpenLibrary?: (projectId?: string) => void;
-  onOpenBoard?: (projectId?: string, entity?: string, id?: string) => void;
+  onOpenBoard?: (projectId?: string, entity?: string, id?: string, repository?: string) => void;
   requestedEntity?: { id: string };
   onSelectHumanRequest?: (request: HumanRequestItem) => void;
   connected?: boolean;
@@ -171,7 +171,7 @@ export function FactoryFloor({
     </div>
     {entity === undefined ? null : <section aria-label="Source contents">
       <p>Stable source reference <code>{entity.id}</code></p>
-      <SourceNotices key={entity.id} entity={entity} call={connected ? onProjectContent : undefined} open={onOpenBoard} />
+      <SourceNotices key={`${entity.id}:${topologies?.get(entity.project?.id ?? "")?.digest}`} entity={entity} topology={topologies?.get(entity.project?.id ?? "")} call={connected ? onProjectContent : undefined} open={onOpenBoard} />
       <SourceContents key={`${entity.id}:${topologies?.get(entity.project?.id ?? "")?.digest}`} node={entity} topology={topologies?.get(entity.project?.id ?? "")} call={connected ? onProjectContent : undefined} />
       {related.map((proposal) => <button key={proposal.id} type="button" onClick={() => onSelectChange?.(proposal.id)}>Inspect change: {proposal.title}</button>)}
     </section>}
@@ -179,18 +179,21 @@ export function FactoryFloor({
 }
 
 
-function SourceNotices({ entity, call, open }: { entity: SceneNode; call?: ProjectContentCall; open?: (project?: string, entity?: string, id?: string) => void }) {
+const sourceForNode = (node: SceneNode, topology?: TopologyView) => [...topology?.sources ?? []].filter((source) => source.prefix === "" || node.path === source.prefix || node.path.startsWith(`${source.prefix}/`)).sort((a, b) => b.prefix.length - a.prefix.length)[0];
+
+function SourceNotices({ entity, topology, call, open }: { entity: SceneNode; topology?: TopologyView; call?: ProjectContentCall; open?: (project?: string, entity?: string, id?: string, repository?: string) => void }) {
+  const repository = sourceForNode(entity, topology)?.repository_id;
   const [items, setItems] = useState<Readonly<Record<string, unknown>>[]>([]), [notice, setNotice] = useState(""), [next, setNext] = useState(0), [pending, setPending] = useState(false);
   const epoch = useRef(0);
   useEffect(() => () => { epoch.current++; }, []);
   const read = async (offset = 0) => {
     if (!call || !entity.project) return;
     const generation = epoch.current; setPending(true);
-    try { const result = await call("search", { project_id: entity.project.id, entity: entity.id, kind: "discussion", open_only: true, offset, limit: 4 }); if (generation !== epoch.current) return; setItems(Array.isArray(result.items) ? result.items as Readonly<Record<string, unknown>>[] : []); setNext(Number(result.next_offset ?? 0)); setNotice("Notices are retained project threads. Open a thread for its evidence."); }
+    try { const result = await call("search", { project_id: entity.project.id, repository_id: repository ?? "", entity: entity.id, kind: "discussion", open_only: true, offset, limit: 4 }); if (generation !== epoch.current) return; setItems(Array.isArray(result.items) ? result.items as Readonly<Record<string, unknown>>[] : []); setNext(Number(result.next_offset ?? 0)); setNotice("Notices are retained project threads. Open a thread for its evidence."); }
     catch { if (generation === epoch.current) setNotice("Notices unavailable."); }
     finally { if (generation === epoch.current) setPending(false); }
   };
-  return <section aria-label="Source notices"><button type="button" disabled={!call || pending} onClick={() => void read()}>Read notices for this source</button><button type="button" disabled={!open} onClick={() => open?.(entity.project?.id, entity.id)}>Discuss this source</button>{items.filter((item) => !knowledgeMetadata(item.source_references).resolved).map((item) => <button type="button" key={String(item.id)} onClick={() => open?.(entity.project?.id, entity.id, String(item.id))}>{String(item.title)} · unresolved · r{String(item.revision)}{item.projected_status === "needs_revalidation" ? " · needs revalidation" : ""}</button>)}{next ? <button type="button" disabled={pending} onClick={() => void read(next)}>More source notices</button> : null}{notice ? <p role="status">{notice}</p> : null}</section>;
+  return <section aria-label="Source notices"><button type="button" disabled={!call || pending} onClick={() => void read()}>Read notices for this source</button><button type="button" disabled={!open} onClick={() => open?.(entity.project?.id, entity.id, undefined, repository)}>Discuss this source</button>{items.filter((item) => !knowledgeMetadata(item.source_references).resolved).map((item) => <button type="button" key={String(item.id)} onClick={() => open?.(entity.project?.id, entity.id, String(item.id), repository)}>{String(item.title)} · unresolved · r{String(item.revision)}{item.projected_status === "needs_revalidation" ? " · needs revalidation" : ""}</button>)}{next ? <button type="button" disabled={pending} onClick={() => void read(next)}>More source notices</button> : null}{notice ? <p role="status">{notice}</p> : null}</section>;
 }
 
 function SourceContents({ node, topology, call }: { node: SceneNode; topology?: TopologyView; call?: ProjectContentCall }) {
@@ -203,7 +206,7 @@ function SourceContents({ node, topology, call }: { node: SceneNode; topology?: 
     const generation = ++epoch.current;
     setPending(true); setNotice("");
     try {
-      const result = await call("source_files", { project_id: node.project.id, id: node.id.slice(node.project.id.length + 1), tested_source: [...topology?.sources ?? []].filter((source) => source.prefix === "" || node.path === source.prefix || node.path.startsWith(`${source.prefix}/`)).sort((a, b) => b.prefix.length - a.prefix.length)[0]?.revision ?? topology?.sourceRevision ?? "", offset: loaded ? next : 0, limit: 32 });
+      const result = await call("source_files", { project_id: node.project.id, id: node.id.slice(node.project.id.length + 1), tested_source: sourceForNode(node, topology)?.revision ?? topology?.sourceRevision ?? "", offset: loaded ? next : 0, limit: 32 });
       if (generation !== epoch.current) return;
       if (result.unavailable) { setNotice(String(result.unavailable)); return; }
       setFiles((old) => [...old, ...(Array.isArray(result.files) ? result.files as Readonly<Record<string, unknown>>[] : [])]);

@@ -74,6 +74,13 @@ func ParseKnowledgeMetadata(raw string) (KnowledgeMetadata, error) {
 		if !ok || seen[name] {
 			return m, ErrInvalidValue
 		}
+		// SQL applicability filters and browser metadata use exact JSON keys.
+		// encoding/json otherwise accepts case-insensitive field aliases.
+		switch name {
+		case "scope", "status", "evidence", "entities", "source_revision", "branch", "environment", "thread_id", "task_id", "change_id", "record_type", "record_id", "mentions", "resolved", "pinned", "supersedes":
+		default:
+			return m, ErrInvalidValue
+		}
 		seen[name] = true
 		var value json.RawMessage
 		if err := keys.Decode(&value); err != nil {

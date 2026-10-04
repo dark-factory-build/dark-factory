@@ -22,6 +22,21 @@ func knowledgeSpec(t *testing.T, project ProjectID, seed byte, kind ContentKind,
 	return s
 }
 
+func TestKnowledgeMetadataRequiresCanonicalKeys(t *testing.T) {
+	for _, raw := range []string{
+		`{"status":"tentative","Branch":"other"}`,
+		`{"status":"tentative","Environment":"private"}`,
+		`{"status":"tentative","Resolved":true}`,
+		`{"status":"current","Status":"tentative"}`,
+		`{"status":"tentative","scope":"repository","Scope":"project"}`,
+		`{"status":"tentative","status":"current"}`,
+	} {
+		if _, err := ParseKnowledgeMetadata(raw); !errors.Is(err, ErrInvalidValue) {
+			t.Fatalf("noncanonical metadata accepted: %s: %v", raw, err)
+		}
+	}
+}
+
 func TestKnowledgeAuthorityScopeAndImmutableThreads(t *testing.T) {
 	store, run, _ := runningWorkerRun(t)
 	defer store.Close()

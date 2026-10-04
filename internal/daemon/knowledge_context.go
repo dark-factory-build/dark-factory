@@ -309,13 +309,19 @@ func renderKnowledgeContext(kind kernel.Provider, items []knowledgeContextItem, 
 			Revision       int64              `json:"revision"`
 			Kind           kernel.ContentKind `json:"kind"`
 			Title          string             `json:"title"`
+			Author         string             `json:"author"`
 			Status         string             `json:"status"`
+			Supersedes     string             `json:"supersedes,omitempty"`
+			Evidence       string             `json:"evidence_reference,omitempty"`
 			SourceRevision string             `json:"source_revision,omitempty"`
 			Entities       []string           `json:"entities,omitempty"`
 			Attached       bool               `json:"attached,omitempty"`
 			Summary        string             `json:"summary,omitempty"`
 			Body           string             `json:"body_prefix,omitempty"`
-		}{ID: item.content.ID.String(), Revision: item.content.Revision.Int64(), Kind: item.content.Kind, Title: knowledgeTextPrefix(item.content.Title, 96), Status: item.status, SourceRevision: metadata.SourceRevision, Entities: metadata.Entities[:min(len(metadata.Entities), 2)], Attached: item.attached, Summary: knowledgeTextPrefix(item.content.Description, 160), Body: item.body}
+		}{ID: item.content.ID.String(), Revision: item.content.Revision.Int64(), Kind: item.content.Kind, Title: knowledgeTextPrefix(item.content.Title, 96), Author: knowledgeTextPrefix(item.content.Author, 160), Status: item.status, Supersedes: metadata.Supersedes, SourceRevision: metadata.SourceRevision, Entities: metadata.Entities[:min(len(metadata.Entities), 2)], Attached: item.attached, Summary: knowledgeTextPrefix(item.content.Description, 160), Body: item.body}
+		if len(metadata.Evidence) > 0 {
+			entry.Evidence = knowledgeTextPrefix(metadata.Evidence[0], 160)
+		}
 		encoded, _ := json.Marshal(entry)
 		line := string(encoded) + "\n" + prefix
 		if len(text)+len(line) > budget {

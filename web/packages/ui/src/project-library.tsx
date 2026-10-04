@@ -15,9 +15,9 @@ export function knowledgeMetadata(value: unknown): RecordValue {
 const lines = (value: FormDataEntryValue | null): string[] => String(value ?? "").split("\n").map((item) => item.trim()).filter(Boolean);
 
 /** Bodies are read only by an explicit gesture. Floor and panel entry points share these records. */
-export function ProjectLibrary({ state, call, draft, board = false, entity = "", initialID = "", onSource, onRecord }: {
+export function ProjectLibrary({ state, call, draft, board = false, entity = "", repository = "", initialID = "", onSource, onRecord }: {
   state?: StateView; call?: ProjectContentCall; draft?: (agent: AgentItem, instruction: string) => void;
-  board?: boolean; entity?: string; initialID?: string; onSource?: (entity: string) => void; onRecord?: (kind: string, id: string, project: string) => void | Promise<void>;
+  board?: boolean; entity?: string; repository?: string; initialID?: string; onSource?: (entity: string) => void; onRecord?: (kind: string, id: string, project: string) => void | Promise<void>;
 }) {
   const [project, setProject] = useState("");
   const [items, setItems] = useState<RecordValue[]>([]), [next, setNext] = useState(0);
@@ -28,7 +28,7 @@ export function ProjectLibrary({ state, call, draft, board = false, entity = "",
   const [accesses, setAccesses] = useState<RecordValue[]>([]), [accessNext, setAccessNext] = useState(0);
   const [pending, setPending] = useState(false), [error, setError] = useState(""), [notice, setNotice] = useState("");
   const [editing, setEditing] = useState(false), [newKind, setNewKind] = useState(""), [seed, setSeed] = useState<RecordValue>({});
-  const [filters, setFilters] = useState({ query: "", repository_id: "", branch: "", environment: "", kind: board ? "discussion" : "", entity });
+  const [filters, setFilters] = useState({ query: "", repository_id: repository, branch: "", environment: "", kind: board ? "discussion" : "", entity });
   const epoch = useRef(0), newID = useRef(""), evidenceID = useRef(id()), searchMode = useRef(true);
   const [showResolved, setShowResolved] = useState(false);
   const projects = [...(state?.projects.values() ?? [])];
@@ -54,11 +54,14 @@ export function ProjectLibrary({ state, call, draft, board = false, entity = "",
     if (generation !== epoch.current) return;
     setItems(rows(result.items)); setNext(Number(result.next_offset ?? 0));
   };
+  const selectRevision = (value: RecordValue, loadedBody?: string) => {
+    setSelected(value); setBody(loadedBody ?? ""); setBodyNext(0); setComplete(loadedBody !== undefined); setEvidence([]); setEvidenceNext(0); setReplies([]); setReplyNext(0); setAccesses([]); setAccessNext(0); setEditing(false);
+  };
   const read = async (contentID: string, revision = 0) => {
     const generation = epoch.current;
     const result = await request("read", { id: contentID, revision });
     if (generation !== epoch.current) return;
-    setSelected(result); setBody(""); setBodyNext(0); setComplete(false); setEvidence([]); setEvidenceNext(0); setReplies([]); setReplyNext(0); setAccesses([]); setAccessNext(0); setEditing(false);
+    selectRevision(result);
   };
   useEffect(() => { if (initialID) void run(() => read(initialID)); }, [initialID]);
   const loadBody = async () => {
@@ -71,7 +74,7 @@ export function ProjectLibrary({ state, call, draft, board = false, entity = "",
   const loadRelated = async (type: "evidence_list" | "accesses" | "search", offset = 0) => {
     if (!selected) return;
     const generation = epoch.current;
-    const result = await request(type, type === "search" ? { thread_id: selected.id, kind: "discussion_reply", offset, limit: 4 } : type === "accesses" ? { id: selected.id, revision: selected.revision, offset, limit: 4 } : { content_id: selected.id, content_revision: selected.revision, offset, limit: 1 });
+    const result = await request(type, type === "search" ? { repository_id: text(selected.repository_id) || filters.repository_id, branch: text(metadata.branch), environment: text(metadata.environment), thread_id: selected.id, kind: "discussion_reply", offset, limit: 4 } : type === "accesses" ? { id: selected.id, revision: selected.revision, offset, limit: 4 } : { content_id: selected.id, content_revision: selected.revision, offset, limit: 1 });
     if (generation !== epoch.current) return;
     (type === "search" ? setReplies : type === "accesses" ? setAccesses : setEvidence)(rows(result.items));
     (type === "search" ? setReplyNext : type === "accesses" ? setAccessNext : setEvidenceNext)(Number(result.next_offset ?? 0));
@@ -80,7 +83,7 @@ export function ProjectLibrary({ state, call, draft, board = false, entity = "",
   const updateThread = async (changes: RecordValue) => {
     if (!selected || !complete) return;
     const value = await request("revise", { id: selected.id, expected_revision: selected.revision, kind: selected.kind, title: selected.title, description: selected.description, body, source_references: JSON.stringify({ ...metadata, ...changes }) });
-    setSelected(value); setNotice("Thread updated. No task state or delivery changed.");
+    selectRevision(value, body); setNotice("Thread updated. No task state or delivery changed.");
   };
   const entry = (item: RecordValue) => {
     const meta: RecordValue = { ...knowledgeMetadata(item.source_references), status: item.projected_status || knowledgeMetadata(item.source_references).status };
@@ -91,7 +94,7 @@ export function ProjectLibrary({ state, call, draft, board = false, entity = "",
   return <details className="dfConsoleSidebar__panel dfProjectLibrary" open={board || Boolean(initialID)}>
     <summary>{board ? "Project board" : "Instructions & outcomes"}</summary>
     <p>{board ? "Questions, findings and handovers. Replies retain their authors and evidence; board actions do not deliver task replies." : "Source-linked project knowledge. Tasks keep the exact versions supplied or attached. Notes do not grant permissions."}</p>
-    <label>Project <select value={projectID} disabled={pending} onChange={(event) => { epoch.current++; setProject(event.target.value); setItems([]); setSelected(undefined); setEditing(false); setNext(0); }}>
+    <label>Project <select value={projectID} disabled={pending} onChange={(event) => { epoch.current++; setProject(event.target.value); setFilters({ query: "", repository_id: "", branch: "", environment: "", kind: board ? "discussion" : "", entity: "" }); setItems([]); setSelected(undefined); setEditing(false); setNext(0); }}>
       {projects.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
     </select></label>
     <fieldset disabled={pending || call === undefined || projectID === ""}>
@@ -102,7 +105,7 @@ export function ProjectLibrary({ state, call, draft, board = false, entity = "",
         <button>Search</button>
       </form>
       <button type="button" onClick={() => void run(() => list(0, board))}>{board ? "Browse discussions" : "Browse library"}</button>
-      <button type="button" onClick={() => begin(board ? "discussion" : "observation", { status: "tentative", entities: entity ? [entity] : [] })}>{board ? "New discussion" : "New document"}</button>
+      <button type="button" onClick={() => begin(board ? "discussion" : "observation", { status: "tentative", entities: filters.entity ? [filters.entity] : [] })}>{board ? "New discussion" : "New document"}</button>
       <label><input type="checkbox" checked={showResolved} onChange={(event) => setShowResolved(event.target.checked)} /> Include resolved discussions</label>
       <div aria-label={board ? "Discussions" : "Library results"}>{items.filter((item) => !board || showResolved || !knowledgeMetadata(item.source_references).resolved).map(entry)}</div>
       {next === 0 ? null : <button type="button" onClick={() => void run(() => list(next, searchMode.current))}>Next documents</button>}
@@ -123,7 +126,7 @@ export function ProjectLibrary({ state, call, draft, board = false, entity = "",
         <pre>{body}</pre>
         {complete ? null : <button type="button" onClick={() => void run(loadBody)}>{bodyNext === 0 ? "Read body" : "Read next body page"}</button>}
         <button type="button" disabled={!complete || selected.kind === "discussion_reply" || selected.deprecated === true || selected.revision !== selected.latest_revision} onClick={() => { setNewKind(""); setEditing(true); }}>Revise document</button>
-        <button type="button" disabled={selected.deprecated === true || selected.revision !== selected.latest_revision} onClick={() => void run(async () => { setSelected(await request("deprecate", { id: selected.id, expected_revision: selected.revision })); setNotice("Deprecated. Existing task references remain."); })}>Deprecate</button>
+        <button type="button" disabled={selected.deprecated === true || selected.revision !== selected.latest_revision} onClick={() => void run(async () => { selectRevision(await request("deprecate", { id: selected.id, expected_revision: selected.revision }), complete ? body : undefined); setNotice("Deprecated. Existing task references remain."); })}>Deprecate</button>
         {!discussion ? null : <div aria-label="Thread actions">
           <button type="button" onClick={() => void run(() => loadRelated("search"))}>Read replies</button>
           <button type="button" onClick={() => begin("discussion_reply", { ...metadata, thread_id: selected.id, resolved: false, pinned: false, status: "tentative" })}>Reply</button>
@@ -154,10 +157,10 @@ export function ProjectLibrary({ state, call, draft, board = false, entity = "",
         event.preventDefault(); const data = new FormData(event.currentTarget);
         const details: Record<string, unknown> = { ...editorMeta, status: data.get("status"), scope: data.get("scope"), evidence: lines(data.get("evidence")), entities: lines(data.get("entities")), mentions: lines(data.get("mentions")) };
         for (const key of ["source_revision", "branch", "environment", "thread_id", "task_id", "change_id", "record_type", "record_id", "supersedes"]) { const value = text(data.get(key)); if (value) details[key] = value; else delete details[key]; }
-        void run(async () => { const value = await request(newKind ? "create" : "revise", { id: newKind ? newID.current : selected?.id, expected_revision: newKind ? 0 : selected?.revision, repository_id: data.get("repository_id"), kind: data.get("kind"), title: data.get("title"), description: data.get("description"), body: data.get("body"), source_references: (kinds.includes(String(data.get("kind"))) && (data.get("kind") !== "procedure" || Boolean(newKind) || Object.keys(metadata).length > 0)) ? JSON.stringify(details) : data.get("source_references") }); setSelected(value); setBody(String(data.get("body"))); setComplete(true); setEditing(false); setNotice("Saved as an immutable revision."); });
+        void run(async () => { const value = await request(newKind ? "create" : "revise", { id: newKind ? newID.current : selected?.id, expected_revision: newKind ? 0 : selected?.revision, repository_id: data.get("repository_id"), kind: data.get("kind"), title: data.get("title"), description: data.get("description"), body: data.get("body"), source_references: (kinds.includes(String(data.get("kind"))) && (data.get("kind") !== "procedure" || Boolean(newKind) || Object.keys(metadata).length > 0)) ? JSON.stringify(details) : data.get("source_references") }); selectRevision(value, String(data.get("body"))); setNotice("Saved as an immutable revision."); });
       }}>
         <label>Kind <input name="kind" defaultValue={editorKind} required maxLength={64} list="df-library-kinds" /></label><datalist id="df-library-kinds">{kinds.map((kind) => <option key={kind} value={kind} />)}<option value="acceptance_scenario" /></datalist>
-        <label>Repository ID (blank uses the project default) <input name="repository_id" defaultValue={text(selected?.repository_id) || filters.repository_id} /></label>
+        <label>Repository ID (blank uses the project default) <input name="repository_id" defaultValue={newKind && newKind !== "discussion_reply" && !text(seed.thread_id) ? filters.repository_id : text(selected?.repository_id) || filters.repository_id} /></label>
         <label>Title <input name="title" defaultValue={newKind ? "" : text(selected?.title)} required /></label>
         <label>Description <textarea name="description" defaultValue={newKind ? "" : text(selected?.description)} /></label>
         <label>Scope <select name="scope" defaultValue={text(editorMeta.scope) || (editorKind === "project_brief" ? "project" : "repository")}><option value="repository">This repository</option><option value="project">Whole project (operator guidance)</option></select></label>

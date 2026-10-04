@@ -30,7 +30,7 @@ test("library is lazy and reads immutable body pages only on demand", async () =
 
 test("board shares immutable threads, resolves by revision, and retains linked conclusions", async () => {
   const calls = [], source = `${[...fixtureState.projects.keys()][0]}:node-stable`;
-  const metadata = { id: "ab".repeat(16), revision: 2, latest_revision: 2, kind: "discussion", title: "Root cause", description: "finding", author: "reviewer", source_references: JSON.stringify({ status: "tentative", entities: [source], evidence: ["test:regression"], pinned: false, resolved: false }) };
+  const metadata = { id: "ab".repeat(16), revision: 2, latest_revision: 2, repository_id: "cd".repeat(16), kind: "discussion", title: "Root cause", description: "finding", author: "reviewer", source_references: JSON.stringify({ status: "tentative", entities: [source], evidence: ["test:regression"], branch: "topic", environment: "staging", pinned: false, resolved: false }) };
   let current = metadata;
   const call = async (operation, input) => {
     calls.push({ operation, input });
@@ -38,21 +38,30 @@ test("board shares immutable threads, resolves by revision, and retains linked c
     if (operation === "read") return current;
     if (operation === "body") return { body: "Concrete evidence, not a permission grant.", complete: true };
     if (operation === "revise") { current = { ...current, ...input, revision: current.revision + 1, latest_revision: current.revision + 1 }; return current; }
+    if (operation === "create") return { ...input, revision: 1, latest_revision: 1, author: "operator" };
     if (operation === "accesses") return { items: [{ content_revision: input.revision, kind: "read", run_id: "run", offset: 0, byte_length: 12 }] };
     throw new Error(`unexpected ${operation}`);
   };
   const opened = [];
   let renderer;
-  await act(async () => { renderer = create(createElement(ProjectLibrary, { state: fixtureState, call, board: true, entity: source, onSource: (ref) => opened.push(ref) })); });
+  await act(async () => { renderer = create(createElement(ProjectLibrary, { state: fixtureState, call, board: true, entity: source, repository: metadata.repository_id, onSource: (ref) => opened.push(ref) })); });
   const click = async (label) => { const button = renderer.root.findAllByType("button").find((button) => button.children.join("").includes(label)); assert.ok(button, label); await act(async () => { button.props.onClick(); }); };
   assert.equal(calls.length, 0);
+  await click("New discussion");
+  assert.equal(renderer.root.findAllByType("input").find((input) => input.props.name === "repository_id").props.defaultValue, metadata.repository_id, "entity entry point seeds the editor repository");
+  await click("Cancel");
   await click("Browse discussions");
   assert.equal(calls[0].input.entity, source);
   assert.equal(calls[0].input.limit, 4);
   await click("Root cause");
   assert.equal(renderer.root.findAllByType("button").find((button) => button.children.join("") === "Resolve discussion").props.disabled, true);
   await click("Read body");
+  await click("Read replies");
+  assert.deepEqual(calls.at(-1).input, { project_id: [...fixtureState.projects.keys()][0], repository_id: metadata.repository_id, branch: "topic", environment: "staging", thread_id: metadata.id, kind: "discussion_reply", offset: 0, limit: 4 });
+  await click("Retrieval records");
+  assert.ok(renderer.root.findAllByType("p").some((node) => node.children.join("").includes("· Run run")));
   await click("Resolve discussion");
+  assert.ok(!renderer.root.findAllByType("p").some((node) => node.children.join("").includes("· Run run")), "new root revision clears previous revision receipts");
   const revised = calls.find((value) => value.operation === "revise").input;
   assert.equal(revised.expected_revision, 2);
   assert.equal(revised.body, "Concrete evidence, not a permission grant.");
@@ -63,11 +72,19 @@ test("board shares immutable threads, resolves by revision, and retains linked c
   await click("Reply");
   assert.equal(renderer.root.findAllByType("input").find((input) => input.props.name === "kind").props.defaultValue, "discussion_reply");
   assert.equal(renderer.root.findAllByType("input").find((input) => input.props.name === "thread_id").props.defaultValue, metadata.id);
+  assert.equal(renderer.root.findAllByType("input").find((input) => input.props.name === "repository_id").props.defaultValue, metadata.repository_id);
   await click("Cancel");
   assert.deepEqual(renderer.root.findByType("pre").children, ["Concrete evidence, not a permission grant."], "cancelling a reply preserves the loaded root body");
   await click("Retain conclusion");
   assert.equal(renderer.root.findAllByType("input").find((input) => input.props.name === "kind").props.defaultValue, "lesson");
   assert.match(renderer.root.findAllByType("textarea").find((input) => input.props.name === "evidence").props.defaultValue, /content:abab.*@3/);
+  const originalFormData = globalThis.FormData;
+  const values = { kind: "lesson", repository_id: metadata.repository_id, title: "Retained conclusion", body: "Use exact authority", status: "tentative", evidence: `content:${metadata.id}@3`, entities: source, thread_id: metadata.id, branch: "topic", environment: "staging" };
+  globalThis.FormData = class { get(name) { return values[name] ?? null; } };
+  try { await act(async () => renderer.root.findByProps({ "aria-label": "Knowledge editor" }).props.onSubmit({ preventDefault() {}, currentTarget: {} })); } finally { globalThis.FormData = originalFormData; }
+  assert.ok(!renderer.root.findAllByType("p").some((node) => node.children.join("").includes("· Run run")), "new conclusion clears another document's receipts");
+  assert.equal(calls.at(-1).operation, "create");
+  assert.equal(calls.at(-1).input.repository_id, metadata.repository_id);
   assert.ok(!calls.some((value) => /task|reply|deliver/.test(value.operation)), "discussion actions never invoke task delivery");
   await act(async () => renderer.unmount());
 });

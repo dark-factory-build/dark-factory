@@ -133,6 +133,40 @@ func TestKnowledgeReachesFreshProviderTaskAndPinsExplicitRevision(t *testing.T) 
 	}
 }
 
+func TestKnowledgeSupersessionClaimsKeepAttributionAndEvidence(t *testing.T) {
+	f := newDispatchFixture(t)
+	var old, correction kernel.ContentRevision
+	active := prepareActiveAttemptInProjectWithProvider(t, f, 61, testID(61), "worker", "codex", func() {
+		project, _ := projectID(testID(61))
+		old = seedContextKnowledge(t, f, project, 180, kernel.ContentLesson, kernel.KnowledgeMetadata{Status: "current", Evidence: []string{"old test"}}, "Always enable the old policy.")
+		correction = seedContextKnowledge(t, f, project, 181, kernel.ContentLesson, kernel.KnowledgeMetadata{Status: "current", Evidence: []string{"corrected test"}, Supersedes: old.ID.String()}, "Never enable the old policy.")
+	})
+	done := f.serve(t)
+	assignment, err := active.client.Task(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitDispatch(t, done)
+	var found bool
+	for _, line := range strings.Split(assignment.Task, "\n") {
+		var entry struct {
+			ID, Author, Supersedes string
+			Evidence               string `json:"evidence_reference"`
+			Body                   string `json:"body_prefix"`
+		}
+		if json.Unmarshal([]byte(line), &entry) == nil && entry.ID == correction.ID.String() {
+			found = entry.Supersedes == old.ID.String() && entry.Author == correction.Author && entry.Evidence == "corrected test" && entry.Body == "Never enable the old policy."
+		}
+	}
+	if !found || !strings.Contains(assignment.Task, "Always enable the old policy.") {
+		t.Fatalf("contrary evidence or attributed correction lost: %s", assignment.Task)
+	}
+	retained, err := f.store.Content(context.Background(), old.ID, old.Revision.Int64())
+	if err != nil || retained.Revision != old.Revision || retained.SourceReferences != old.SourceReferences {
+		t.Fatalf("supersession silently rewrote prior claim: %+v %v", retained, err)
+	}
+}
+
 func TestKnowledgeContextBoundsQuotingAndEmpty(t *testing.T) {
 	if value, receipts := renderKnowledgeContext(kernel.ProviderCodex, nil, knowledgeContextBytes); len(value) != 0 || len(receipts) != 0 {
 		t.Fatal("empty knowledge changed task")
