@@ -1111,6 +1111,7 @@ func (runtime RuntimePaths) environmentForRole(kind kernel.Provider, role kernel
 			"GOCACHE="+filepath.Join(runtime.home, ".cache", "go-build"),
 			"GOPATH="+filepath.Join(runtime.home, "go"),
 			"GOPROXY=off",
+			"GOSUMDB=off",
 			"CARGO_HOME="+filepath.Join(runtime.home, ".cargo"),
 			"RUSTUP_HOME="+filepath.Join(runtime.accountHome, ".rustup"),
 			"COREPACK_HOME="+filepath.Join(runtime.home, ".cache", "corepack"),

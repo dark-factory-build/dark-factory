@@ -1445,7 +1445,7 @@ func TestCodexToolchainRootsAndCachesStaySeparateFromAccount(t *testing.T) {
 	if !slices.Contains(launch.Environment(), sharedModuleCache) || !slices.Contains(launch.Environment(), "GOMODCACHE="+goModuleCachePath(runtime.accountHome)) {
 		t.Fatalf("Go module cache was not projected to the trusted shared path: %q", launch.Environment())
 	}
-	if !slices.Contains(launch.Environment(), "GOPROXY=off") {
+	if !slices.Contains(launch.Environment(), "GOPROXY=off") || !slices.Contains(launch.Environment(), "GOSUMDB=off") {
 		t.Fatal("native Go launches must not depend on sandbox TLS or network")
 	}
 	if !strings.Contains(policy, tomlBasicString(goModuleCachePath(runtime.accountHome))+`="read"`) || strings.Contains(policy, tomlBasicString(goModuleCachePath(runtime.accountHome))+`="write"`) {

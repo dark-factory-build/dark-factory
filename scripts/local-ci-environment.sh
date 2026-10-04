@@ -289,9 +289,9 @@ export pnpm_config_store_dir="$ci_cache_root/pnpm-store"
 export NETRC=/dev/null
 export GOPATH="$ci_cache_root/go" GOCACHE="$ci_cache_root/go-build"
 if [ -n "$ci_go_module_cache" ]; then
-    export DF_CI_GO_MODULE_CACHE="$ci_go_module_cache" GOMODCACHE="$ci_go_module_cache" GOPROXY=off
+    export DF_CI_GO_MODULE_CACHE="$ci_go_module_cache" GOMODCACHE="$ci_go_module_cache" GOPROXY=off GOSUMDB=off
 else
-    export GOMODCACHE="$ci_cache_root/go-mod" GOPROXY=off
+    export GOMODCACHE="$ci_cache_root/go-mod" GOPROXY=off GOSUMDB=off
 fi
 # Keep module directories removable when retiring a cache root.
 export GOFLAGS=-modcacherw
