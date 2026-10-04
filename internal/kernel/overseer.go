@@ -23,8 +23,7 @@ type OverseerSnapshot struct {
 	Handoffs       []RetainedChangeHandoff
 }
 
-// RetainedChangeHandoff is the complete identity an overseer or delegated
-// reviewer must match before reading a daemon-retained worker tree. It is
+// RetainedChangeHandoff is the complete identity an overseer must match before reading a daemon-retained worker tree. It is
 // deliberately an identity, not a caller-supplied pathname.
 type RetainedChangeHandoff struct {
 	ChangeID   ChangeID
