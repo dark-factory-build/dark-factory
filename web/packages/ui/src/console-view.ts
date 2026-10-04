@@ -468,6 +468,8 @@ export function projectProposals(selected: ReturnType<typeof selectFloor>, items
     return { id: productionKey(item), title: item.pullRequest?.title || item.construction?.title || "Proposed change",
       state: source.kind === "unavailable" ? "unavailable" : source.stale ? "stale" : "active", base: source.base, head: source.head, operations,
       relationships: source.relationships.map((edge) => ({ status: edge.status, fromPath: edge.from_path, toPath: edge.to_path, weight: edge.weight,
+        fromEntityId: provisional.get(`${item.projectId}:proposed:${edge.from_path}`)?.id ?? roomForPath(item.projectId, edge.from_path)?.id,
+        toEntityId: provisional.get(`${item.projectId}:proposed:${edge.to_path}`)?.id ?? roomForPath(item.projectId, edge.to_path)?.id,
         fromId: provisional.get(`${item.projectId}:proposed:${edge.from_path}`)?.id ?? selected.visibleAncestor(roomForPath(item.projectId, edge.from_path)?.id),
         toId: provisional.get(`${item.projectId}:proposed:${edge.to_path}`)?.id ?? selected.visibleAncestor(roomForPath(item.projectId, edge.to_path)?.id),
       })),

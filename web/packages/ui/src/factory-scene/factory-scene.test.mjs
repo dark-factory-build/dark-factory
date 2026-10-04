@@ -1381,7 +1381,8 @@ test("flat assemblies have bounded resource shapes, file scale and unchanged roo
   assert.match(markup, /data-associated-equipment="documentation"/);
   assert.match(markup, /data-equipment-scale="0"/);
   assert.match(markup, /data-equipment-scale="3"/);
-  assert.match(markup, /\+1 assemblies/);
+  assert.match(markup, /2 more assemblies/);
+  assert.match(markup, /\+2 assemblies/);
   assert.doesNotMatch(markup, /Production area|Open contents/);
 });
 

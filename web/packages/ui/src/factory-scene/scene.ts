@@ -18,7 +18,8 @@ export type SceneAssembly = Readonly<{
 
 export type SceneProposal = Readonly<{
   id: string; title: string; state: "active" | "stale" | "unavailable"; base?: string; head?: string;
-  relationships?: readonly Readonly<{ status: "added" | "removed"; fromId?: string; toId?: string; fromPath: string; toPath: string; weight: number }>[];
+  /** Cable endpoints use displayed rooms; entity endpoints retain canonical source ownership. */
+  relationships?: readonly Readonly<{ status: "added" | "removed"; fromId?: string; toId?: string; fromEntityId?: string; toEntityId?: string; fromPath: string; toPath: string; weight: number }>[];
   operations: readonly Readonly<{ entityId?: string; roomId?: string; path: string; previousPath?: string; kind: "addition" | "modification" | "removal" | "move"; label?: string }>[];
 }>;
 
@@ -46,6 +47,18 @@ export type SceneNode = Readonly<{
   /** The project this room belongs to: rooms sharing an id are laid out together under its name. */
   project?: Readonly<{ id: string; name: string }>;
 }>;
+
+/** Inspect the displayed group's proposals without replacing its canonical identity. */
+export function proposalsForEntity(topology: SceneTopology, proposals: readonly SceneProposal[], id?: string): readonly SceneProposal[] {
+  if (id === undefined) return [];
+  const members = new Set([id]);
+  for (const room of topology.nodes) for (const assembly of room.assemblies ?? []) if (room.id === id || assembly.id === id) {
+    members.add(assembly.id);
+    for (const member of assembly.representedIds ?? []) members.add(member);
+  }
+  return proposals.filter((proposal) => proposal.operations.some((operation) => members.has(operation.entityId ?? "") || operation.roomId === id)
+    || proposal.relationships?.some((edge) => members.has(edge.fromEntityId ?? edge.fromId ?? "") || members.has(edge.toEntityId ?? edge.toId ?? "")));
+}
 
 export type SceneWorker = Readonly<{
   id: string;

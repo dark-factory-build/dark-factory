@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { createElement } from "react";
+import { act, create } from "react-test-renderer";
+import { FactoryFloor } from "../dist/src/console-screens.js";
 import { prepareFloor, selectFloor, projectProposals, projectFloor, MAX_FLOOR_ROOMS } from "../dist/src/console-view.js";
 import { deriveProductionView, productionKey } from "../dist/src/production-view.js";
 import { layoutScene } from "../dist/src/factory-scene/scene.js";
@@ -139,4 +142,30 @@ test("automatic areas keep wide namespaces and package resources together withou
   assert.deepEqual(assembly.inventory.direct, counts(5, 2), "aggregate scale never overwrites canonical direct contents");
   assert.deepEqual(assembly.representedIds, ["project:p1", "project:manuals", "project:tests"]);
   for (const id of assembly.representedIds) assert.ok(auto.detailByID.has(id) && fine.detailByID.has(id));
+});
+
+test("clicking grouped equipment exposes child edits and relationship changes in both inspectors", async () => {
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+  const packages = Array.from({ length: 5 }, (_, i) => node(`pkg${i}`, `internal/pkg${i}`, "internal", inv(5), "package"));
+  const manuals = { ...inv(0), direct: { ...counts(0), documentation: 2 }, total: { ...counts(0), documentation: 2 } };
+  const source = [root, node("internal", "internal", "root", inv(0)), ...packages, node("docs", "internal/pkg0/docs", "pkg0", manuals)];
+  const relationship = record("2", []);
+  relationship.document.source.relationships = [{ status: "added", from_path: "internal/pkg0/docs", to_path: "internal/pkg1", weight: 1 }];
+  const changes = items([record("1", [{ status: "modified", path: "internal/pkg0/docs/guide.md" }]), relationship, record("3", [{ status: "modified", path: "internal/pkg2/code.go" }])]);
+  const state = { projects, agents: new Map(), tasks: new Map(), humanRequests: new Map() };
+  const text = (value) => typeof value === "string" ? value : (value.children ?? []).map(text).join("");
+  const selected = [];
+  let tree;
+  try {
+    await act(async () => { tree = create(createElement(FactoryFloor, { state, topologies: new Map([[project.id, { ...topology, nodes: source }]]), changes, floorAppearance: { detail: "auto", social: "nearby" }, onSelectChange: (id) => selected.push(id) })); });
+    const equipment = tree.root.findAllByProps({ "data-entity-id": "project:pkg0" })[0];
+    assert.match(equipment.props["data-tooltip"], /Change 1/);
+    await act(async () => equipment.props.onClick());
+    for (const label of ["Source contents", "Changes affecting selected source"]) {
+      const buttons = tree.root.findByProps({ "aria-label": label }).findAllByType("button").filter((button) => /Change \d/.test(text(button)));
+      assert.deepEqual(buttons.map(text).map((label) => label.match(/Change \d/)[0]), ["Change 1", "Change 2"]);
+      await act(async () => buttons[0].props.onClick());
+    }
+    assert.deepEqual(selected, [productionKey(changes[0]), productionKey(changes[0])]);
+  } finally { if (tree) await act(async () => tree.unmount()); }
 });

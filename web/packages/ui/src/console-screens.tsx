@@ -13,7 +13,7 @@ import {
 import { FactoryScene, AgentSprite } from "./factory-scene/factory-scene.js";
 import { productionKey, type ProductionContraption } from "./production-view.js";
 import { knowledgeMetadata, type ProjectContentCall } from "./project-library.js";
-import type { SceneNode } from "./factory-scene/scene.js";
+import { proposalsForEntity, type SceneNode } from "./factory-scene/scene.js";
 import { DEFAULT_FLOOR_APPEARANCE, type FloorAppearance } from "./floor-appearance.js";
 
 function shortID(value: string): string {
@@ -120,7 +120,7 @@ export function FactoryFloor({
   const peerQuestions = useMemo(() => [...(state?.peerQuestions?.values() ?? [])], [state]);
   const inventoryOmitted = [...(state?.projects.keys() ?? [])].reduce((count, id) => count + (topologies?.get(id)?.inventoryOmitted ?? 0), 0);
   const entity = selected.detailByID.get(selectedEntity ?? "");
-  const related = proposed.proposals.filter((proposal) => proposal.operations.some((operation) => operation.entityId === selectedEntity || operation.roomId === selectedEntity) || proposal.relationships?.some((edge) => edge.fromId === selectedEntity || edge.toId === selectedEntity));
+  const related = proposalsForEntity(proposed.topology, proposed.proposals, selectedEntity);
   return <div className="dfFactoryFloor">
     <details className="dfFactoryFloor__source"><summary>Integrated source · {state?.projects.size ?? 0} projects</summary>
       {[...(state?.projects.values() ?? [])].map((project) => { const topology = topologies?.get(project.id); return <p key={project.id}>{project.name}: {topology?.sources?.length ? topology.sources.map((source) => <span key={source.repository_id}> · {source.repository_id} · {source.target_ref || "target unavailable"} · {source.kind} · {source.revision ? <code>{source.revision}</code> : "revision unavailable"}{source.reason ? `: ${source.reason}` : ""}</span>) : topology?.sourceRevision ? <code>{topology.sourceRevision}</code> : "integrated revision unavailable"}</p>; })}
