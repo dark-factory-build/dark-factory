@@ -1,6 +1,5 @@
 packages:
   - packages/*
-  - apps/dev
 
 # Keep CI and developer installs on one layout; installs are explicit.
 enableGlobalVirtualStore: false

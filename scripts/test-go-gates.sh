@@ -86,7 +86,7 @@ EOF
 /bin/cat >"$ordinary/bin/corepack" <<'EOF'
 #!/bin/sh
 case "${DF_GATE_FAULT-}:$*" in
-    'ts-type:pnpm --filter dark-factory-dev typecheck')
+    'ts-type:pnpm --filter @dark-factory/ui build')
         echo 'fixture TypeScript type error' >&2
         exit 1
         ;;
