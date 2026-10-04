@@ -136,7 +136,7 @@ export function layoutScene(topology: SceneTopology, selectedProposalId?: string
     for (let start = 0; start < members.length; start += columns) {
       const row = Math.floor(start / columns);
       const widths = row % 2 === 0 ? bays : [...bays.slice(1), bays[0]!];
-      const height = assembled ? Math.max(256, ...members.slice(start, start + columns).map((node) => 96 + Math.ceil(Math.min(6, node.assemblies?.length ?? 0) / 2) * 96)) : row % 2 === 0 ? 112 : 128;
+      const height = assembled ? Math.max(256, ...members.slice(start, start + columns).map((node) => 64 + Math.ceil(Math.min(6, node.assemblies?.length ?? 0) / 2) * 110)) : row % 2 === 0 ? 112 : 128;
       let x = ROOM_LEFT;
       for (const [index, node] of members.slice(start, start + columns).entries()) {
         const width = widths[index]!;
@@ -294,7 +294,7 @@ function composeRoom(node: SceneNode, room: SceneRect, selectedProposalId?: stri
       inventory: rest.some((assembly) => assembly.inventory === undefined) ? undefined : { direct: sum, total: sum, samples: [], samples_omitted: Object.values(sum).reduce((a, b) => a + b, 0) },
     }];
     const columns = Math.min(2, shown.length), rows = Math.ceil(shown.length / Math.max(1, columns));
-    const cellWidth = (room.width - 48) / Math.max(1, columns), cellHeight = rows > 1 ? 96 : 128;
+    const cellWidth = (room.width - 48) / Math.max(1, columns), cellHeight = rows > 1 ? 110 : 128;
     return shown.map((assembly, index) => {
       const counts = assembly.inventory?.[assembly.inventoryScope === "direct" ? "direct" : "total"];
       const kinds = (Object.keys(inventoryLabels) as InventoryKind[]).filter((kind) => (counts?.[kind] ?? 0) > 0);
@@ -302,7 +302,8 @@ function composeRoom(node: SceneNode, room: SceneRect, selectedProposalId?: stri
       const total = Object.values(counts ?? {}).reduce((sum, count) => sum + count, 0);
       const scale = equipmentScale(total);
       const width = Math.min(cellWidth - (columns > 1 ? 16 : 0), [76, 128, 260, 344][scale]!);
-      const height = Math.min(cellHeight - (rows > 1 ? 28 : 0), [62, 90, 150, 164][scale]!);
+      // Leave a standing lane for 24px actor targets before the next row's label.
+      const height = Math.min(cellHeight - (rows > 1 ? 42 : 0), [62, 90, 150, 164][scale]!);
       const sampleFamilies = (assembly.inventory?.samples ?? []).map((path) => path.split("/").at(-1)!.replace(/(?:[._-](?:test|tests|spec))?\.[^.]+$/, "").split(/[._-]/)[0]!).filter(Boolean);
       const families = [...new Set(sampleFamilies)];
       const parts = scale < 2 || kind !== "source" ? [] : families.sort((a, b) => Number(responsibility(b) !== "generic") - Number(responsibility(a) !== "generic") || sampleFamilies.filter((family) => family === b).length - sampleFamilies.filter((family) => family === a).length || compareText(a, b)).slice(0, width >= 240 && height >= 120 ? 4 : 2).map((label) => ({ label, motif: responsibility(label) }));

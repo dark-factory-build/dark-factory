@@ -124,7 +124,17 @@ try {
 
   await page.getByLabel('Population', { exact: true }).selectOption('crowded');
   await openEntity('web/packages/ui/src/factory-scene');
+  await page.getByRole('button', { name: 'Focus on floor', exact: true }).click();
   await shot('10-crowded');
+  const uiRoom = page.locator('[data-room-id]').filter({ has: page.getByRole('button', { name: 'Inspect assembly factory-scene', exact: true }) });
+  const remoteLabel = uiRoom.getByRole('button', { name: 'Inspect assembly remote', exact: true }).locator(':scope > text').first();
+  await remoteLabel.scrollIntoViewIfNeeded();
+  const labelBounds = await remoteLabel.boundingBox();
+  assert.ok(labelBounds);
+  await page.mouse.click(labelBounds.x + labelBounds.width / 2, labelBounds.y + labelBounds.height / 2);
+  await expect(page.getByRole('combobox', { name: 'Inspect room', exact: true }).locator('option:checked')).toContainText('web/packages/ui/src/remote');
+  await shot('18-crowded-source-label-click');
+  check('crowded source labels receive clicks without worker interception');
   await page.getByRole('button', { name: 'Disconnect fixture', exact: true }).click();
   await expect(page.getByLabel('Connection status: CLOSED', { exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Focus on floor', exact: true }).click();
