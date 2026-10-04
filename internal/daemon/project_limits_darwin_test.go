@@ -4,6 +4,8 @@ package daemon
 
 import (
 	"context"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -42,7 +44,7 @@ func TestRunLimitWatchdogTerminatesOwnedProvider(t *testing.T) {
 		t.Fatal(err)
 	}
 	time.Sleep(1100 * time.Millisecond)
-	if err := fixture.daemon.enforceRunLimits(context.Background()); err != nil {
+	if err := fixture.daemon.enforceRunLiveness(context.Background(), SupervisorSpec{}); err != nil {
 		t.Fatal(err)
 	}
 	var result struct {
@@ -58,11 +60,68 @@ func TestRunLimitWatchdogTerminatesOwnedProvider(t *testing.T) {
 		t.Fatalf("watchdog run = %+v, err=%v", result.run, result.err)
 	}
 	fixture.assertReleased(t, result.run)
-	if err := fixture.daemon.enforceRunLimits(context.Background()); err != nil {
+	if err := fixture.daemon.enforceRunLiveness(context.Background(), SupervisorSpec{}); err != nil {
 		t.Fatal(err)
 	}
 	project, found, err = fixture.store.Project(context.Background(), project.ID)
 	if err != nil || !found || project.RunsUsed != 1 {
 		t.Fatalf("run allowance after watchdog = %+v, found=%v, err=%v", project, found, err)
+	}
+}
+
+func TestRunLivenessStopsStalledProvider(t *testing.T) {
+	fixture := newSupervisorFixture(t, "set -eu\nprintf x >> __WITNESS__\nsleep 30\n")
+	var skew atomic.Int64
+	fixture.daemon.livenessClock = func() time.Time { return time.Now().Add(time.Duration(skew.Load())) }
+	done := make(chan struct {
+		run kernel.Run
+		err error
+	}, 1)
+	go func() {
+		run, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
+		done <- struct {
+			run kernel.Run
+			err error
+		}{run, err}
+	}()
+	if err := waitForWitness(fixture.witness, 10*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		started := false
+		fixture.daemon.attemptMu.Lock()
+		for _, attempt := range fixture.daemon.attempts {
+			attempt.livenessMu.Lock()
+			started = !attempt.startedAt.IsZero()
+			attempt.livenessMu.Unlock()
+		}
+		fixture.daemon.attemptMu.Unlock()
+		if started {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("live attempt never started")
+		}
+	}
+	skew.Store(int64(stalledRunLivenessThreshold))
+	if err := fixture.daemon.enforceRunLiveness(context.Background(), SupervisorSpec{}); err != nil {
+		t.Fatal(err)
+	}
+	var result struct {
+		run kernel.Run
+		err error
+	}
+	select {
+	case result = <-done:
+	case <-time.After(12 * time.Second):
+		t.Fatal("stall did not stop the provider")
+	}
+	if result.err != nil || result.run.Phase != kernel.RunTerminal || result.run.Proposal == nil || result.run.Proposal.Code() != kernel.FailureProtocol || !strings.HasPrefix(result.run.Proposal.Detail(), stalledRunDetail) {
+		t.Fatalf("stalled run = %+v, err=%v", result.run, result.err)
+	}
+	fixture.assertReleased(t, result.run)
+	task, found, err := fixture.store.Task(context.Background(), fixture.taskID)
+	if err != nil || !found || task.Status != kernel.TaskFailed {
+		t.Fatalf("stalled task = %+v, found=%v, err=%v", task, found, err)
 	}
 }

@@ -1206,3 +1206,50 @@ func TestContinueUnsettledRunOutlivesRuntimeWriter(t *testing.T) {
 		t.Fatalf("runtime persists: %v", err)
 	}
 }
+
+// The scheduler tick repeats recovery for an ownerless run once it has gone
+// ten minutes without an update (#1121), and leaves a younger run, such as
+// one still between admission and live-owner registration, to its owner.
+func TestLivenessTickRecoversOnlyOldOwnerlessRuns(t *testing.T) {
+	fixture := newRecoveryFixture(t, 0x70)
+	ctx := context.Background()
+	spec := SupervisorSpec{RuntimeParent: fixture.parent, ChangeParent: fixture.changeParent}
+	tick := func(at int64) kernel.Run {
+		t.Helper()
+		fixture.daemon.now = func() time.Time { return time.UnixMilli(at) }
+		if err := fixture.daemon.enforceRunLiveness(ctx, spec); err != nil {
+			t.Fatal(err)
+		}
+		return fixture.currentRun(t)
+	}
+	admitted := fixture.currentRun(t)
+	if run := tick(admitted.UpdatedAt.Int64() + ownerlessRunAge.Milliseconds() - 1); run.Phase != kernel.RunAdmitted || run.Revision != admitted.Revision {
+		t.Fatalf("young unregistered run was recovered: %+v", run)
+	}
+	runtimeIdentity := fixture.stageRuntime(t)
+	fixture.beginRunnerStart(t)
+	fixture.activateRunner(t)
+	fixture.writeMarker(t, runner.OuterActivationMarkerName)
+	// The #1121 cut: the result was consumed, so the run is finalizing, and
+	// its artifact is still on disk, but no owner carries it further.
+	result, err := kernel.NewInnerUnregisteredConvergedAttemptResult(fixture.run.ID, fixture.run.CredentialDigest, fixture.run.ResultProofDigest(), runtimeIdentity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	finalizing, err := fixture.daemon.consumeAttemptResult(ctx, result, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(forgedResultWire{Version: 1, AttemptID: fixture.run.ID.String(), Kind: "inner_unregistered_converged", Proof: hex.EncodeToString(fixture.proof[:])})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.writeArtifact(t, body)
+	updated := finalizing.UpdatedAt.Int64()
+	if run := tick(updated + ownerlessRunAge.Milliseconds() - 1); run.Phase != kernel.RunFinalizing || run.Revision != finalizing.Revision {
+		t.Fatalf("recovered before the age filter: %+v", run)
+	}
+	if run := tick(updated + ownerlessRunAge.Milliseconds()); run.Phase != kernel.RunTerminal {
+		t.Fatalf("ownerless finalizing run with a result did not settle: %+v", run)
+	}
+}

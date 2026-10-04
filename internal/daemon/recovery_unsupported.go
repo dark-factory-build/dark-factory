@@ -14,3 +14,7 @@ import (
 func (daemon *Daemon) ContinueUnsettledRun(context.Context, *RuntimeParent, string, kernel.RunID) error {
 	return errors.New("daemon: unsettled runtime continuation unsupported")
 }
+
+func (daemon *Daemon) recoverOwnerlessRuns(context.Context, *RuntimeParent, string, int64) error {
+	return nil
+}
