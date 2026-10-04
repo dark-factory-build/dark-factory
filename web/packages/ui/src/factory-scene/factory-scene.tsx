@@ -446,16 +446,17 @@ export function FactoryScene({ proposals, onSelectEntity, onOpenLibrary, topolog
   };
   const layout = useMemo(() => layoutScene(topology), [topology]);
   const placements = useMemo(() => placeWorkers(layout, workers, appearance.social), [layout, workers, appearance.social]);
-  const nodes = new Map(topology.nodes.map((node) => [node.id, node]));
+  const visibleProposals = proposals?.items.filter((proposal) => !proposals.selected || proposal.id === proposals.selected) ?? [];
+  const nodes = new Map(topology.nodes.filter((node) => !node.proposed || visibleProposals.some((proposal) => proposal.operations.some((operation) => operation.roomId === node.id))).map((node) => [node.id, node]));
   const availableNodes = new Map(detailNodes ?? nodes);
-  for (const node of topology.nodes) for (const assembly of node.assemblies ?? []) if (!availableNodes.has(assembly.id)) availableNodes.set(assembly.id, { ...assembly, kind: "directory", project: node.project });
+  for (const node of nodes.values()) if (node.proposed) availableNodes.set(node.id, { ...node, sourceIncomplete: true, components: (node.assemblies ?? []).filter((assembly) => !assembly.proposalId || visibleProposals.some((proposal) => proposal.id === assembly.proposalId)).map((assembly) => ({ id: assembly.id, label: assembly.label })) });
+  for (const node of nodes.values()) for (const assembly of node.assemblies ?? []) if ((!assembly.proposalId || visibleProposals.some((proposal) => proposal.id === assembly.proposalId)) && !availableNodes.has(assembly.id)) availableNodes.set(assembly.id, { ...assembly, kind: "directory", project: node.project });
   const roomFor = (id: string) => layout.rooms.find((room) => room.id === id || nodes.get(room.id)?.assemblies?.some((assembly) => assembly.id === id || assembly.representedIds?.includes(id)));
   const focusEntity = (id: string) => { selectEntity(id); const room = roomFor(id); if (room) Array.from(mapElement.current?.querySelectorAll("[data-room-id]") ?? []).find((element) => element.getAttribute("data-room-id") === room.id)?.scrollIntoView({ block: "center", inline: "center", behavior: "instant" }); };
-  const visibleProposals = proposals?.items.filter((proposal) => !proposals.selected || proposal.id === proposals.selected) ?? [];
   const operationMatches = (operation: SceneProposal["operations"][number], roomId: string, item?: RoomContent) => item === undefined
     ? operation.roomId === roomId || operation.entityId === roomId
     : operation.entityId === item.entityId || item.representedIds?.includes(operation.entityId ?? "") || operation.roomId === roomId && !operation.entityId;
-  const operationsFor = (roomId: string, item?: RoomContent) => visibleProposals.flatMap((proposal) => proposal.operations.filter((operation) => operationMatches(operation, roomId, item)).map((operation) => ({ proposal, operation })));
+  const operationsFor = (roomId: string, item?: RoomContent) => visibleProposals.filter((proposal) => !item?.proposalId || item.proposalId === proposal.id).flatMap((proposal) => proposal.operations.filter((operation) => operationMatches(operation, roomId, item)).map((operation) => ({ proposal, operation })));
   const selectedRoom = availableNodes.get(selectedRoomId ?? "");
   const links = selectedRoom?.dependencies?.links ?? [];
   const resting = placements.filter((placement) => placement.area === "resting");
@@ -476,6 +477,12 @@ export function FactoryScene({ proposals, onSelectEntity, onOpenLibrary, topolog
   const sceneHeight = boardTop + PADDING;
   const affected = new Map(layout.rooms.map((room) => [room.id, tasks.filter((order) => order.status === "running" && (order.displayRoomIds ?? order.roomIds).includes(room.id))]));
   const cabling = useMemo(() => wires(layout, topology), [layout, topology]);
+  const proposedCables = visibleProposals.flatMap((proposal) => (proposal.relationships ?? []).flatMap((edge) => {
+    const from = nodes.get(edge.fromId ?? ""), to = nodes.get(edge.toId ?? "");
+    if (!from || !to) return [];
+    const routes = wires(layout, { digest: topology.digest, nodes: [{ ...from, dependencies: { omitted: 0, links: [{ nodeId: to.id, label: to.label, path: to.path, direction: "to", weight: edge.weight }] } }] }).routes;
+    return routes.map((route) => ({ ...route, edge, proposal }));
+  }));
   const queued = tasks.filter((order) => order.status === "queued").length;
   // The hand-off origin is the visible task tray, below rather than beside the seats.
   const tray = station.tasks;
@@ -496,8 +503,8 @@ export function FactoryScene({ proposals, onSelectEntity, onOpenLibrary, topolog
     <>
     <div className="dfFactoryEntityTools">
       <label>Find source <input type="search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Package, assembly or path" /></label>
-      {search === "" ? null : <div className="dfFactoryEntityTools__results">{[...availableNodes.values()].filter((node) => `${node.label} ${node.path}`.toLowerCase().includes(search.toLowerCase())).slice(0, 30).map((node) => <button type="button" key={node.id} onClick={() => focusEntity(node.id)}>{node.path === "." ? node.label : node.path}</button>)}</div>}
-      <p className="dfFactoryLegend">⚙ Code · ⏚ Tests · ▤ Config · ▥ Docs · ▦ Assets <span>Size: eligible files, 1–4 / 5–20 / 21–80 / 81+. Name-based machine motifs.</span></p>
+      {search === "" ? null : <div className="dfFactoryEntityTools__results">{[...availableNodes.values()].filter((node) => !node.proposed && `${node.label} ${node.path}`.toLowerCase().includes(search.toLowerCase())).slice(0, 30).map((node) => <button type="button" key={node.id} onClick={() => focusEntity(node.id)}>{node.path === "." ? node.label : node.path}</button>)}</div>}
+      <p className="dfFactoryLegend">⚙ Code · ⏚ Tests · ▤ Config · ▥ Docs · ▦ Assets <span>Size: eligible files, 1–4 / 5–20 / 21–80 / 81+. Name-based machine motifs. ? = proposed or unavailable final scale. Dashed + / × cables = proposed dependency changes.</span></p>
       {proposals === undefined || proposals.items.length === 0 ? null : <div className="dfFactoryProposals" aria-label="Proposed changes"><button type="button" aria-pressed={!proposals.selected} onClick={() => proposals.onSelect("")}>All changes</button>{proposals.items.map((proposal) => <button key={proposal.id} type="button" aria-pressed={proposals.selected === proposal.id} onClick={() => proposals.onSelect(proposal.id)}>{proposal.title} · {proposal.operations.length} paths · {proposal.state}</button>)}</div>}
     </div>
     <div ref={mapElement} className="dfFactoryFloor__map" onClick={inspect} onPointerOver={inspect} onFocus={inspect} onPointerLeave={() => { retainFocusedTooltip(); setLinkedFrom(undefined); }} onBlur={() => { setTooltip(undefined); setLinkedFrom(undefined); }} onScroll={() => { retainFocusedTooltip(); updateViewport(); }} onKeyDown={(event) => { if (event.key === "Escape") { setTooltip(undefined); setLinkedFrom(undefined); } }} role="region" aria-label="Scrollable codebase floor" tabIndex={0}>
@@ -544,7 +551,7 @@ export function FactoryScene({ proposals, onSelectEntity, onOpenLibrary, topolog
         const node = nodes.get(room.id);
         if (node === undefined) return null;
         const footprint = affected.get(room.id) ?? [];
-        const contents = room.contents;
+        const contents = room.contents.filter((item) => !item.proposalId || visibleProposals.some((proposal) => proposal.id === item.proposalId));
         const task = footprint.find((order) => order.id === selectedTaskId) ?? footprint[0];
         const operating = connected && task !== undefined;
         const roomOperations = visibleProposals.flatMap((proposal) => proposal.operations.filter((operation) => operationMatches(operation, room.id) || node.assemblies?.some((assembly) => assembly.id === operation.entityId || assembly.representedIds?.includes(operation.entityId ?? ""))).map((operation) => ({ proposal, operation })));
@@ -566,7 +573,7 @@ export function FactoryScene({ proposals, onSelectEntity, onOpenLibrary, topolog
               const proposedPaths = [...new Set(edits.map(({ operation }) => operation.path))];
               const sourceHint = proposedPaths.find((path) => /\.(?:go|[cm]?[jt]sx?|py|rs|c|cpp|h|sh)$/.test(path));
               const pictured = node.proposed && item.resourceCounts === undefined && sourceHint ? { ...item, kind: "source" as const, responsibility: responsibility(sourceHint) } : item;
-              return <g key={item.key} data-room-content={item.kind} data-entity-id={item.entityId} data-tooltip={item.entityId === undefined ? roomInfo(node) : `${item.label}${item.parts?.length ? `\nFilename motifs: ${item.parts.map((part) => part.label).join(", ")}; not semantic analysis` : ""}\n${item.resourceCounts === undefined ? "Inventory unavailable" : Object.entries(item.resourceCounts).filter(([, count]) => count > 0).map(([kind, count]) => `${count} ${kind}`).join(" · ")}${edits.map(({ proposal, operation }) => `\n${proposal.title}: ${operation.kind} · ${operation.path}`).join("")}`} {...sceneAction(() => selectEntity(item.selectionId ?? item.entityId ?? room.id))} aria-label={`Inspect assembly ${item.label}`} className="dfFactoryScene__target">
+              return <g key={item.key} data-room-content={item.kind} data-entity-id={item.entityId} data-tooltip={item.entityId === undefined ? roomInfo(node) : `${item.label}${item.sourceIncomplete ? "\nObserved proposed paths only; final contents and scale are not established." : ""}${item.parts?.length ? `\nFilename motifs: ${item.parts.map((part) => part.label).join(", ")}; not semantic analysis` : ""}\n${item.resourceCounts === undefined ? "Inventory unavailable" : Object.entries(item.resourceCounts).filter(([, count]) => count > 0).map(([kind, count]) => `${count} ${kind}`).join(" · ")}${edits.map(({ proposal, operation }) => `\n${proposal.title}: ${operation.kind} · ${operation.path}`).join("")}`} {...sceneAction(() => selectEntity(item.selectionId ?? item.entityId ?? room.id))} aria-label={`Inspect assembly ${item.label}`} className="dfFactoryScene__target">
                 <rect className="dfFactoryScene__focus" x={item.x - 4} y={item.y - 17} width={item.width + 8} height={item.height + 24} fill="transparent" />
                 <Equipment item={pictured} operating={operating} scenery={appearance.scenery} />
                 {item.entityId === undefined ? null : <text x={item.x} y={item.y - 6} fill="#d7ddcf" fontFamily="ui-monospace, monospace" fontSize="9">{shortLabel(item.label, 19)}</text>}
@@ -601,9 +608,15 @@ export function FactoryScene({ proposals, onSelectEntity, onOpenLibrary, topolog
         {cabling.routes.filter((wire) => linkedFrom === wire.from || linkedFrom === wire.to).map((wire) =>
           <path key={`${wire.from} ${wire.to}`} data-wire={`${wire.from} ${wire.to}`} d={wire.d} stroke="#e5c58b" strokeWidth="1.5" opacity=".9" />)}
       </g>}
+      {proposedCables.map(({ d, edge, proposal }, index) => <g key={`${proposal.id}:${index}`} data-proposed-relationship={edge.status} data-proposal-id={proposal.id} {...sceneAction(() => proposals?.onSelect(proposal.id))} aria-label={`${proposal.title}: ${edge.status} dependency ${edge.fromPath} to ${edge.toPath}`}>
+        <title>{proposal.title}: {edge.status} {edge.fromPath} → {edge.toPath} · {edge.weight} static links</title>
+        <path d={d} fill="none" stroke="transparent" strokeWidth="12" />
+        <path d={d} fill="none" stroke={edge.status === "added" ? "#a4d6e8" : "#e7a893"} strokeWidth="2" strokeDasharray={edge.status === "added" ? "8 4" : "2 5"} pointerEvents="none" />
+        <text x={(layout.rooms.find((room) => room.id === edge.fromId)?.door.x ?? 0) + 8} y={(layout.rooms.find((room) => room.id === edge.fromId)?.door.y ?? 0) - 6} fill="#ead8a4" fontSize="12" pointerEvents="none">{edge.status === "added" ? "+ link" : "× link"}</text>
+      </g>)}
       <Area width={commonAreaWidth} top={upperRoom.y} bottom={upperRoom.y + upperRoom.height}  />
       {/* Somewhere to go other than the table: against the back wall, muted like the rest of the furniture. */}
-      {appearance.scenery === "off" ? null : nook?.furniture.map((piece) => <g key={piece.key} data-break-room={piece.errand} opacity=".8" transform={`translate(${piece.x} ${piece.y}) scale(${WORKER_SIZE / FRAME})`}>
+      {appearance.scenery === "off" ? null : nook?.furniture.filter((piece) => !piece.roomId || nodes.has(piece.roomId)).map((piece) => <g key={piece.key} data-break-room={piece.errand} opacity=".8" transform={`translate(${piece.x} ${piece.y}) scale(${WORKER_SIZE / FRAME})`}>
         {piece.errand !== "shelf" || onOpenLibrary === undefined ? null : <g {...sceneAction(() => onOpenLibrary(projectId))} aria-label="Open project library"><rect className="dfFactoryScene__focus" x="-9" y="-9" width="35" height="35" fill="transparent" /></g>}
         <g aria-hidden="true" pointerEvents="none"><Frame name={piece.errand === "shelf" ? "prop.bookshelf" : "prop.coffeestation"} x={0} y={0} />
         {piece.errand !== "coffee" ? null : <path d="M2 15v3 M14 15v3" stroke="#303b3b" strokeWidth="2" />}</g>
@@ -662,8 +675,10 @@ export function FactoryScene({ proposals, onSelectEntity, onOpenLibrary, topolog
         {selectedRoom.path === selectedRoom.label ? null : <p>{selectedRoom.path}</p>}
         <p>{selectedRoom.kind} · {selectedRoom.sizeBucket ?? "size unavailable"}{selectedRoom.language ? ` · ${selectedRoom.language}` : ""}{selectedRoom.childCount === undefined ? "" : ` · ${selectedRoom.childCount} subcomponents`}</p>
         <p>{roomInfo(selectedRoom)}</p>
+        {selectedRoom.sourceIncomplete ? <p>Observed proposed paths only. Final contents and scale remain unverified.</p> : null}
+        {selectedRoom.sourcePaths?.length ? <ul>{selectedRoom.sourcePaths.map((path) => <li key={path}><code>{path}</code></li>)}</ul> : null}
         {proposals === undefined ? null : <div aria-label="Changes affecting selected source">{proposals.items.filter((proposal) => proposal.operations.some((operation) => operation.entityId === selectedRoom.id || operation.roomId === selectedRoom.id || selectedRoom.assemblies?.some((assembly) => assembly.representedIds?.includes(operation.entityId ?? "")))).map((proposal) => <button type="button" key={proposal.id} onClick={() => proposals.onSelect(proposal.id)}>{proposal.title} · {proposal.state}</button>)}</div>}
-        {selectedRoom.inventory === undefined ? null : <table><caption>Scanned files</caption><thead><tr><th>Kind</th><th>Direct</th><th>Subtree</th></tr></thead><tbody>{Object.entries(inventoryLabels).map(([kind, label]) => <tr key={kind}><th>{label}</th><td>{selectedRoom.inventory!.direct[kind as keyof typeof inventoryLabels]}</td><td>{selectedRoom.inventory!.total[kind as keyof typeof inventoryLabels]}</td></tr>)}</tbody></table>}
+        {selectedRoom.inventory === undefined ? null : <table><caption>{selectedRoom.sourceIncomplete ? "Observed proposed files" : "Scanned files"}</caption><thead><tr><th>Kind</th><th>Direct</th><th>Subtree</th></tr></thead><tbody>{Object.entries(inventoryLabels).map(([kind, label]) => <tr key={kind}><th>{label}</th><td>{selectedRoom.inventory!.direct[kind as keyof typeof inventoryLabels]}</td><td>{selectedRoom.inventory!.total[kind as keyof typeof inventoryLabels]}</td></tr>)}</tbody></table>}
         <p>{selectedRoom.dependencies === undefined ? "Dependencies unavailable." : "Supplied static imports and manifest dependencies. Floor cables group their visible endpoints."}</p>
         {selectedRoom.dependencies === undefined ? null : <>
           {links.length === 0 ? <p>No relationships in this sample.</p> : <ul>{links.map((link) => <li key={`${link.direction}:${link.nodeId}`}>
@@ -798,14 +813,14 @@ function Equipment({ item, operating, scenery }: { item: RoomContent; operating:
     const scale = item.scale ?? 0, width = 36 + scale * 8, height = 24 + scale * 3;
     const color = operating ? "#a6c9bb" : "#849b91";
     const resources = Object.entries(item.resourceCounts ?? {}).filter(([, count]) => count > 0);
-    return <g transform={`translate(${item.x} ${item.y})`} data-equipment-scale={scale} data-responsibility={item.responsibility}>
+    return <g transform={`translate(${item.x} ${item.y})`} data-equipment-scale={item.resourceCounts === undefined || item.sourceIncomplete ? "unknown" : scale} data-responsibility={item.responsibility}>
       <rect x="0" y="32" width={width + 8} height="5" fill="#111c20" />
       {(item.parts?.length ?? 0) < 2 ? <ResourceMachine kind={item.kind} width={width} height={height} color={color} motif={item.responsibility} /> : <g data-assembly-parts="filename motifs">
         {item.parts!.map((part, index) => <g key={part.label} transform={`translate(${index * 33} 0)`}><ResourceMachine kind="source" width={28} height={20} color={color} motif={part.motif} /><text y="40" fill="#d1c7a5" fontFamily="ui-monospace, monospace" fontSize="8">{shortLabel(part.label, 7)}</text></g>)}
       </g>}
       {resources.filter(([kind]) => kind !== item.kind).slice(0, 3).map(([kind], index) => <g key={kind} data-associated-equipment={kind} transform={`translate(${64 + (index % 2) * 22} ${Math.floor(index / 2) * 22})`}><ResourceMachine kind={kind} width={18} height={14} color="#a4b8a4" /></g>)}
       <g transform="translate(0 42)">{resources.map(([kind, count], index) => <g key={kind} data-resource-kind={kind} transform={`translate(${index * 17} 0)`}><ResourceGlyph kind={kind} /><text x="8" y="7" fill="#b5c4ba" fontFamily="ui-monospace, monospace" fontSize="6">{count > 999 ? "1k+" : count}</text></g>)}</g>
-      <text x={width - 4} y="-3" fill="#aab7ad" fontFamily="ui-monospace, monospace" fontSize="7">{["S", "M", "L", "XL"][scale]}</text>
+      <text x={width - 4} y="-3" fill="#aab7ad" fontFamily="ui-monospace, monospace" fontSize="7">{item.resourceCounts === undefined || item.sourceIncomplete ? "?" : ["S", "M", "L", "XL"][scale]}</text>
     </g>;
   }
   return <g transform={`translate(${item.x} ${item.y})`} opacity={operating ? .9 : .55}>

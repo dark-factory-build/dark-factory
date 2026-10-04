@@ -162,6 +162,22 @@ export function selectFloor(prepared: ReturnType<typeof prepareFloor>, detail: F
     const parent = parentOf(node);
     if (parent !== undefined) children.set(parent.id, [...children.get(parent.id) ?? [], node]);
   }
+  const detailByID = new Map(canonical.map((node) => {
+    const links = new Map<string, NonNullable<SceneNode["dependencies"]>["links"][number]>();
+    for (const alias of roomByID.values()) {
+      if (canonicalOf(alias).id !== node.id) continue;
+      for (const link of alias.dependencies?.links ?? []) {
+        const target = roomByID.get(link.nodeId);
+        if (!target || canonicalOf(target).id === node.id) continue;
+        const owner = canonicalOf(target), key = `${link.direction}:${owner.id}`;
+        links.set(key, { ...link, nodeId: owner.id, label: owner.label, weight: (links.get(key)?.weight ?? 0) + link.weight });
+      }
+    }
+    const members = children.get(node.id) ?? [];
+    return [node.id, { ...node, childCount: members.length, components: members.map((member) => ({ id: member.id, label: member.label })),
+      ...(node.dependencies === undefined ? {} : { dependencies: { ...node.dependencies, links: [...links.values()] } }),
+    }] as const;
+  }));
   const rootIds = new Set(hierarchies.map((hierarchy) => canonicalOf(hierarchy.projectRoom).id));
   const wrapper = (node: SceneNode) => ["internal", "src", "lib", "packages", "apps", "cmd", "web"].includes(node.path.split("/").at(-1)!) && (children.get(node.id)?.length ?? 0) > 0;
   const candidates = canonical.filter((node) => {
@@ -218,7 +234,7 @@ export function selectFloor(prepared: ReturnType<typeof prepareFloor>, detail: F
       ...(node.dependencies === undefined ? {} : { dependencies: { ...node.dependencies, links: [...links.values()] } }),
     };
   });
-  return { blocksByProject, roomByID, kept, visibleAncestor, canonical,
+  return { blocksByProject, roomByID, detailByID, kept, visibleAncestor, canonical,
     topology: { digest: `${prepared.digest}:${detail}`, nodes: rooms },
     aggregatedLocations: Math.max(0, candidates.length - kept.size),
   };
@@ -407,14 +423,25 @@ export function projectProposals(selected: ReturnType<typeof selectFloor>, items
       let entityId = before?.id;
       if (["added", "renamed"].includes(path.status) && destination !== undefined && directory !== destination.path) {
         roomId = `${item.projectId}:proposed:${directory}`;
-        provisional.set(roomId, { id: roomId, path: directory, label: directory, kind: "directory", project: destination.project, inventoryScope: "direct", proposed: true, assemblies: [{ id: roomId, path: directory, label: directory.split("/").at(-1)!, inventoryScope: "direct", representedIds: [roomId, ...(before ? [before.id] : [])] }] });
+        const id = `${roomId}@${productionKey(item)}`, existing = provisional.get(roomId);
+        if (!existing?.assemblies?.some((assembly) => assembly.id === id)) {
+          const paths = source.paths.filter((entry) => ["added", "renamed"].includes(entry.status) && entry.path.slice(0, entry.path.lastIndexOf("/")) === directory);
+          const counts = emptyCounts();
+          for (const entry of paths) counts[entry.resource ?? "unclassified"]++;
+          provisional.set(roomId, { id: roomId, path: directory, label: directory, kind: "directory", project: destination.project, inventoryScope: "direct", proposed: true, assemblies: [...existing?.assemblies ?? [], { id, proposalId: productionKey(item), path: directory, label: directory.split("/").at(-1)!, inventoryScope: "direct", representedIds: [roomId], sourceIncomplete: true, sourcePaths: paths.map((entry) => entry.path), inventory: { direct: counts, total: counts, samples: paths.map((entry) => entry.path.split("/").at(-1)!), samples_omitted: source.omitted } }] });
+        }
         if (path.status === "added") entityId = roomId;
       }
       return { entityId, roomId, path: path.path, previousPath: path.old_path,
         kind: ({ added: "addition", modified: "modification", deleted: "removal", renamed: "move" } as const)[path.status] };
     });
     return { id: productionKey(item), title: item.pullRequest?.title || item.construction?.title || "Proposed change",
-      state: source.kind === "unavailable" ? "unavailable" : source.stale ? "stale" : "active", base: source.base, head: source.head, operations };
+      state: source.kind === "unavailable" ? "unavailable" : source.stale ? "stale" : "active", base: source.base, head: source.head, operations,
+      relationships: source.relationships.map((edge) => ({ status: edge.status, fromPath: edge.from_path, toPath: edge.to_path, weight: edge.weight,
+        fromId: provisional.get(`${item.projectId}:proposed:${edge.from_path}`)?.id ?? selected.visibleAncestor(roomForPath(item.projectId, edge.from_path)?.id),
+        toId: provisional.get(`${item.projectId}:proposed:${edge.to_path}`)?.id ?? selected.visibleAncestor(roomForPath(item.projectId, edge.to_path)?.id),
+      })),
+    };
   });
   const reviewers = new Map<string, SceneWorker>();
   for (const item of items.filter(proposedProduction)) {
@@ -434,6 +461,10 @@ export function projectProposals(selected: ReturnType<typeof selectFloor>, items
   const roomFallback = new Map([...provisional.values()].filter((room) => !addedIDs.has(room.id)).map((room) => [room.id, selected.visibleAncestor(roomForPath(room.project!.id, room.path)?.id)]));
   for (const proposal of proposals) for (const operation of proposal.operations) {
     if (operation.roomId !== undefined && roomFallback.has(operation.roomId)) Object.assign(operation, { roomId: roomFallback.get(operation.roomId) });
+  }
+  for (const proposal of proposals) for (const edge of proposal.relationships ?? []) {
+    if (edge.fromId && roomFallback.has(edge.fromId)) Object.assign(edge, { fromId: roomFallback.get(edge.fromId) });
+    if (edge.toId && roomFallback.has(edge.toId)) Object.assign(edge, { toId: roomFallback.get(edge.toId) });
   }
   const actors = [...reviewers.values()].map((actor) => actor.nodeId !== undefined && roomFallback.has(actor.nodeId) ? { ...actor, nodeId: roomFallback.get(actor.nodeId) } : actor);
   return { topology: { ...selected.topology, nodes: [...selected.topology.nodes, ...addedRooms] }, proposals, reviewers: actors, aggregatedProposals: provisional.size - addedRooms.length };

@@ -1,3 +1,4 @@
+import type { InventoryKind } from "./factory-scene/scene.js";
 /** Facts persisted by the operator production projection. */
 export type ProductionRecord = Readonly<{
   project_id?: string;
@@ -37,7 +38,9 @@ type Scoped = Readonly<{ projectId: string; repository: string }>;
 export type ProposedSource = Readonly<{
   kind: "committed" | "working-tree" | "unavailable";
   base: string; target: string; head: string; observation: string; observedAt: number;
-  paths: readonly Readonly<{ status: "added" | "modified" | "deleted" | "renamed"; path: string; old_path?: string }>[];
+  paths: readonly Readonly<{ status: "added" | "modified" | "deleted" | "renamed"; path: string; old_path?: string; resource?: InventoryKind }>[];
+  relationships: readonly Readonly<{ status: "added" | "removed"; from_path: string; to_path: string; weight: number }>[];
+  relationshipsOmitted: number; relationshipsUnavailable: string;
   omitted: number; reason: string; stale: boolean;
 }>;
 
@@ -81,11 +84,17 @@ function proposedSource(value: unknown, now: number, head?: string): ProposedSou
   for (const item of raw.slice(0, 512)) {
     const path = object(item);
     if (!["added", "modified", "deleted", "renamed"].includes(text(path.status)) || !validPath(path.path) || path.status === "renamed" && !validPath(path.old_path)) continue;
-    paths.push({ status: path.status as ProposedSource["paths"][number]["status"], path: path.path, ...(path.status === "renamed" ? { old_path: path.old_path as string } : {}) });
+    paths.push({ status: path.status as ProposedSource["paths"][number]["status"], path: path.path, ...(["source", "tests", "configuration", "documentation", "assets", "unclassified"].includes(text(path.resource)) ? { resource: path.resource as InventoryKind } : {}), ...(path.status === "renamed" ? { old_path: path.old_path as string } : {}) });
+  }
+  const rawRelationships = Array.isArray(source.relationships) ? source.relationships : [];
+  const relationships: ProposedSource["relationships"][number][] = [];
+  for (const value of rawRelationships.slice(0, 32)) {
+    const edge = object(value);
+    if ((edge.status === "added" || edge.status === "removed") && validPath(edge.from_path === "." ? "root" : edge.from_path) && validPath(edge.to_path === "." ? "root" : edge.to_path) && typeof edge.weight === "number" && Number.isSafeInteger(edge.weight) && edge.weight > 0) relationships.push({ status: edge.status, from_path: edge.from_path as string, to_path: edge.to_path as string, weight: edge.weight });
   }
   const observedAt = Number(source.observed_at) || 0;
   return { kind, base: text(source.base), target: text(source.target), head: text(source.head), observation: text(source.fingerprint), observedAt,
-    paths, omitted: Math.max(0, Number(source.omitted) || 0) + raw.length - paths.length,
+    paths, relationships, relationshipsOmitted: Math.max(0, Number(source.relationships_omitted) || 0) + rawRelationships.length - relationships.length, relationshipsUnavailable: text(source.relationships_unavailable) || (!Array.isArray(source.relationships) ? "Proposed relationships unavailable." : ""), omitted: Math.max(0, Number(source.omitted) || 0) + raw.length - paths.length,
     reason: text(source.reason) || (kind === "unavailable" ? "Source observation unavailable." : ""),
     stale: now > 0 && (observedAt <= 0 || now - observedAt > STALE_AFTER) || Boolean(head && source.head !== head),
   };

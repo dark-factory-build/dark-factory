@@ -149,60 +149,81 @@ func ObserveSource(ctx context.Context, git, root, worktree, base, head string, 
 		}
 	}
 	if result.Kind == "working-tree" {
-		// The fingerprint includes contents, including untracked ordinary files.
-		// It identifies this bounded observation; it is never a reviewed commit.
-		fingerprintArgs := []string{"-C", where, "diff", "--binary", "--no-ext-diff", "--no-textconv", "--ignore-submodules=all", base, "--"}
-		patch, err := a.succeed(ctx, 8<<20, fingerprintArgs...)
+		fingerprint, untracked, err := sourceFingerprint(ctx, a, where, base)
 		if err != nil {
 			return result, err
 		}
-		hash := sha256.New()
-		hash.Write(patch)
-		untracked, err := a.succeed(ctx, 1<<20, "-C", where, "ls-files", "--others", "--exclude-standard", "-z")
-		if err != nil {
-			return result, err
-		}
-		hash.Write(untracked)
-		fs, err := os.OpenRoot(where)
-		if err != nil {
-			return result, newGitError(gitFailurePrivateIO)
-		}
-		defer fs.Close()
-		for _, rawPath := range bytes.Split(untracked, []byte{0}) {
-			if len(rawPath) == 0 {
-				continue
-			}
-			file := string(rawPath)
-			if validateContentPath(file) != nil {
-				return result, newGitError(gitFailureProtocol)
-			}
-			info, err := fs.Lstat(filepath.FromSlash(file))
-			if err != nil || !info.Mode().IsRegular() || info.Size() > 1<<20 {
-				return result, &ValidationError{Reason: "untracked source cannot be observed completely"}
-			}
-			opened, err := fs.Open(filepath.FromSlash(file))
-			if err != nil {
-				return result, newGitError(gitFailurePrivateIO)
-			}
-			body, err := io.ReadAll(io.LimitReader(opened, (1<<20)+1))
-			opened.Close()
-			if err != nil || len(body) > 1<<20 {
-				return result, newGitError(gitFailurePrivateIO)
-			}
-			hash.Write(body)
+		for _, file := range untracked {
 			if len(result.Paths) < 32 {
 				result.Paths = append(result.Paths, SourcePath{Status: "added", Path: file})
 			} else {
 				result.Omitted++
 			}
 		}
-		result.Fingerprint = hex.EncodeToString(hash.Sum(nil))
-		again, err := a.succeed(ctx, 8<<20, fingerprintArgs...)
-		if err != nil || !bytes.Equal(patch, again) {
+		// Refuse edits spanning the path and content reads, including untracked
+		// names, executable modes and bytes. This is an observation, not a lock.
+		again, err := a.succeed(ctx, 4<<20, arguments...)
+		if err != nil || !bytes.Equal(raw, again) {
+			return result, &ValidationError{Reason: "source changed during observation"}
+		}
+		verified, _, err := sourceFingerprint(ctx, a, where, base)
+		if err != nil || fingerprint != verified {
+			return result, &ValidationError{Reason: "source changed during observation"}
+		}
+		result.Fingerprint = fingerprint
+	}
+	if worktree != "" {
+		facts, err := a.inspectWorktree(ctx, worktree)
+		if err != nil || facts.Head().Hex() != result.Head || facts.Dirty() != (result.Kind == "working-tree") {
 			return result, &ValidationError{Reason: "source changed during observation"}
 		}
 	}
 	return result, nil
+}
+
+// Fixed-size hashes and a NUL-terminated path keep file boundaries unambiguous.
+func sourceFingerprint(ctx context.Context, a *gitAuthority, where, base string) (string, []string, error) {
+	patch, err := a.succeed(ctx, 8<<20, "-C", where, "diff", "--binary", "--no-ext-diff", "--no-textconv", "--ignore-submodules=all", base, "--")
+	if err != nil {
+		return "", nil, err
+	}
+	untracked, err := a.succeed(ctx, 1<<20, "-C", where, "ls-files", "--others", "--exclude-standard", "-z")
+	if err != nil {
+		return "", nil, err
+	}
+	hash := sha256.New()
+	fmt.Fprintf(hash, "%x", sha256.Sum256(patch))
+	fs, err := os.OpenRoot(where)
+	if err != nil {
+		return "", nil, newGitError(gitFailurePrivateIO)
+	}
+	defer fs.Close()
+	files := []string{}
+	for _, rawPath := range bytes.Split(untracked, []byte{0}) {
+		if len(rawPath) == 0 {
+			continue
+		}
+		file := string(rawPath)
+		if validateContentPath(file) != nil {
+			return "", nil, newGitError(gitFailureProtocol)
+		}
+		info, err := fs.Lstat(filepath.FromSlash(file))
+		if err != nil || !info.Mode().IsRegular() || info.Size() > 1<<20 {
+			return "", nil, &ValidationError{Reason: "untracked source cannot be observed completely"}
+		}
+		opened, err := fs.Open(filepath.FromSlash(file))
+		if err != nil {
+			return "", nil, newGitError(gitFailurePrivateIO)
+		}
+		body, err := io.ReadAll(io.LimitReader(opened, (1<<20)+1))
+		opened.Close()
+		if err != nil || len(body) > 1<<20 {
+			return "", nil, newGitError(gitFailurePrivateIO)
+		}
+		fmt.Fprintf(hash, "%s%c%08x%x", file, 0, uint32(info.Mode()), sha256.Sum256(body))
+		files = append(files, file)
+	}
+	return hex.EncodeToString(hash.Sum(nil)), files, nil
 }
 
 // Git archive honors export-ignore/export-subst attributes. Refuse an altered

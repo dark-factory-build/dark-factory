@@ -134,3 +134,49 @@ func TestObserveSourceDoesNotInventRemovalsWhenIntegratedTargetAdvances(t *testi
 		t.Fatalf("invented target reversal: %+v", source)
 	}
 }
+
+func TestObserveSourceFramesUntrackedFiles(t *testing.T) {
+	fixture := newLocalGitFixture(t, "sha1")
+	ctx := context.Background()
+	identity, err := InspectRepositorySource(ctx, fixture.git, fixture.repository, "", fixture.identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	selected, err := SelectGit(ctx, fixture.git, fixture.repository, "HEAD", fixture.identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	worktree := filepath.Join(secureTempDir(t), "worktree")
+	if _, err := AddWorktree(ctx, selected, worktree, "factory/223344556677"); err != nil {
+		t.Fatal(err)
+	}
+	observe := func(a, b string) SourceObservation {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(worktree, "a.go"), []byte(a), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(worktree, "b.go"), []byte(b), 0600); err != nil {
+			t.Fatal(err)
+		}
+		source, err := ObserveSource(ctx, fixture.git, fixture.repository, worktree, fixture.base.Hex(), fixture.base.Hex(), identity)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return source
+	}
+	first, second := observe("package a\n", "package b\n"), observe("package a\npackage ", "b\n")
+	t.Logf("first=%+v second=%+v", first, second)
+	if first.Fingerprint == second.Fingerprint {
+		t.Fatalf("distinct two-file working trees share fingerprint %s", first.Fingerprint)
+	}
+	if err := os.Chmod(filepath.Join(worktree, "a.go"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	executable, err := ObserveSource(ctx, fixture.git, fixture.repository, worktree, fixture.base.Hex(), fixture.base.Hex(), identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if executable.Fingerprint == second.Fingerprint {
+		t.Fatal("executable mode inherited old observation")
+	}
+}

@@ -35,6 +35,9 @@ try {
   await expect(map).toBeVisible();
   await expect(page.getByRole('combobox', { name: 'Topology detail', exact: true })).toHaveValue('auto');
   await expect(page.locator('[data-proposed-room]')).toHaveCount(1);
+  for (const resource of ['tests', 'documentation', 'configuration']) await expect(page.locator(`[data-proposed-room] [data-associated-equipment="${resource}"]`)).toBeAttached();
+  await expect(page.locator('[data-proposed-room] [data-equipment-scale="unknown"]')).toBeAttached();
+  for (const status of ['added', 'removed']) await expect(page.locator(`[data-proposed-relationship="${status}"]`)).toBeAttached();
   for (const kind of ['modification', 'addition', 'removal', 'move']) await expect(page.locator(`[data-proposal-kind="${kind}"]`).first()).toBeAttached();
   await expect(page.getByRole('button', { name: /^Morgan · visual review, reviewer,/ })).toHaveCount(1);
   const ordinaryPositions = await positions();
@@ -62,6 +65,8 @@ try {
   await page.locator('.dfFactoryProposals').getByRole('button', { name: /^Alternative route clearance/ }).click();
   await expect(page.getByRole('region', { name: 'Production inspection', exact: true })).toContainText('Alternative route clearance');
   await expect(page.locator('[data-proposal-kind="removal"]')).toHaveCount(0);
+  await expect(page.locator('[data-proposed-room]')).toHaveCount(0);
+  await expect(page.locator('[data-proposed-relationship]')).toHaveCount(0);
   await expect(page.locator('[data-proposal-kind="modification"]')).toHaveCount(1);
   await shot('04-isolated-overlap');
   await page.locator('.dfFactoryProposals').getByRole('button', { name: 'All changes', exact: true }).click();
@@ -75,6 +80,8 @@ try {
   await phase('abandoned');
   await expect(page.locator('[data-proposed-room]')).toHaveCount(0);
   await expect(page.locator('[data-proposal-kind="removal"]')).toHaveCount(0);
+  await expect(page.locator('[data-proposed-room]')).toHaveCount(0);
+  await expect(page.locator('[data-proposed-relationship]')).toHaveCount(0);
   await shot('06-abandoned');
   assert.deepEqual(await positions(), ordinaryPositions, 'abandonment must preserve integrated spatial map');
   await phase('integrated');

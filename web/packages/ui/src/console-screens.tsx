@@ -117,8 +117,8 @@ export function FactoryFloor({
   const proposed = useMemo(() => projectProposals(selected, changes), [selected, changes]);
   const peerQuestions = useMemo(() => [...(state?.peerQuestions?.values() ?? [])], [state]);
   const inventoryOmitted = [...(state?.projects.keys() ?? [])].reduce((count, id) => count + (topologies?.get(id)?.inventoryOmitted ?? 0), 0);
-  const entity = prepared.roomByID.get(selectedEntity ?? "");
-  const related = proposed.proposals.filter((proposal) => proposal.operations.some((operation) => operation.entityId === selectedEntity || operation.roomId === selectedEntity));
+  const entity = selected.detailByID.get(selectedEntity ?? "");
+  const related = proposed.proposals.filter((proposal) => proposal.operations.some((operation) => operation.entityId === selectedEntity || operation.roomId === selectedEntity) || proposal.relationships?.some((edge) => edge.fromId === selectedEntity || edge.toId === selectedEntity));
   return <div className="dfFactoryFloor">
     <nav className="dfFactoryFloor__navigation" aria-label="Floor detail">
       <label>Topology detail <select value={floorAppearance.detail ?? "auto"} onChange={(event) => onAppearanceChange?.({ ...floorAppearance, detail: event.currentTarget.value as FloorAppearance["detail"] })} disabled={onAppearanceChange === undefined}>
@@ -128,7 +128,7 @@ export function FactoryFloor({
       <span>{scene.topology.nodes.length} rooms · one connected floor</span>
     </nav>
     <details className="dfFactoryFloor__source"><summary>Integrated source · {state?.projects.size ?? 0} projects</summary>
-      {[...(state?.projects.values() ?? [])].map((project) => { const topology = topologies?.get(project.id); return <p key={project.id}>{project.name}: {topology?.sourceRevision ? <code>{topology.sourceRevision}</code> : "integrated revision unavailable"}{topology?.sources?.map((source) => <span key={source.repository_id}> · {source.target_ref || "target unavailable"} · {source.kind}{source.reason ? `: ${source.reason}` : ""}</span>)}</p>; })}
+      {[...(state?.projects.values() ?? [])].map((project) => { const topology = topologies?.get(project.id); return <p key={project.id}>{project.name}: {topology?.sources?.length ? topology.sources.map((source) => <span key={source.repository_id}> · {source.repository_id} · {source.target_ref || "target unavailable"} · {source.kind} · {source.revision ? <code>{source.revision}</code> : "revision unavailable"}{source.reason ? `: ${source.reason}` : ""}</span>) : topology?.sourceRevision ? <code>{topology.sourceRevision}</code> : "integrated revision unavailable"}</p>; })}
     </details>
     {inventoryOmitted === 0 && scene.aggregatedLocations === 0 ? null : <p role="status">{inventoryOmitted > 0 ? `${inventoryOmitted} source inventories unavailable. ` : ""}{scene.aggregatedLocations > 0 ? `${scene.aggregatedLocations} areas aggregated into their visible ancestors; search still reaches every served entity.` : ""}</p>}
     {proposed.aggregatedProposals === 0 ? null : <p role="status">{proposed.aggregatedProposals} proposed new areas are marked in their owning rooms. All observed paths remain in the Change inspector.</p>}
@@ -143,8 +143,8 @@ export function FactoryFloor({
       selectedTaskId={selectedTaskId}
       topology={proposed.topology}
       projectId={projectId}
-      detailNodes={prepared.roomByID}
-      workers={[...scene.workers, ...proposed.reviewers]}
+      detailNodes={selected.detailByID}
+      workers={[...scene.workers, ...proposed.reviewers.filter((worker) => !selectedChange || worker.review?.proposalId === selectedChange)]}
       connected={connected}
       tasks={scene.tasks}
       peerQuestions={peerQuestions}

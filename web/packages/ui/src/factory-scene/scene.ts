@@ -10,6 +10,7 @@ export type SceneAssembly = Readonly<{
   inventoryScope: "direct" | "subtree";
   inventory?: TopologyView["nodes"][number]["inventory"];
   sizeBucket?: "empty" | "tiny" | "small" | "medium" | "large";
+  proposalId?: string;
   purpose?: string; sourcePaths?: readonly string[]; sourceIncomplete?: boolean;
   representedIds?: readonly string[];
   dependencies?: Readonly<{ omitted: number; links: readonly Readonly<{ nodeId: string; label: string; path: string; direction: "to" | "from"; weight: number }>[] }>;
@@ -17,12 +18,14 @@ export type SceneAssembly = Readonly<{
 
 export type SceneProposal = Readonly<{
   id: string; title: string; state: "active" | "stale" | "unavailable"; base?: string; head?: string;
+  relationships?: readonly Readonly<{ status: "added" | "removed"; fromId?: string; toId?: string; fromPath: string; toPath: string; weight: number }>[];
   operations: readonly Readonly<{ entityId?: string; roomId?: string; path: string; previousPath?: string; kind: "addition" | "modification" | "removal" | "move"; label?: string }>[];
 }>;
 
 export type SceneNode = Readonly<{
   assemblies?: readonly SceneAssembly[];
   proposed?: boolean;
+  sourceIncomplete?: boolean; sourcePaths?: readonly string[];
   id: string;
   /** Served parent identity; this is navigation data, never derived from text. */
   parentId?: string;
@@ -276,7 +279,7 @@ export function responsibility(path: string): Responsibility {
 }
 /** Eligible file counts, clamped to four visual buckets; generated/vendor files are excluded upstream. */
 export function equipmentScale(count: number): number { return count <= 4 ? 0 : count <= 20 ? 1 : count <= 80 ? 2 : 3; }
-export type RoomContent = SceneRect & Readonly<{ key: string; kind: ContentKind; label: string; count: number; entityId?: string; selectionId?: string; representedIds?: readonly string[]; resourceCounts?: Readonly<Record<InventoryKind, number>>; responsibility?: Responsibility; scale?: number; parts?: readonly Readonly<{ label: string; motif: Responsibility }>[]; workSurface?: boolean; furnishing?: "console" | "bench" | "drafting" }>;
+export type RoomContent = SceneRect & Readonly<{ key: string; kind: ContentKind; label: string; count: number; entityId?: string; selectionId?: string; representedIds?: readonly string[]; resourceCounts?: Readonly<Record<InventoryKind, number>>; proposalId?: string; sourceIncomplete?: boolean; responsibility?: Responsibility; scale?: number; parts?: readonly Readonly<{ label: string; motif: Responsibility }>[]; workSurface?: boolean; furnishing?: "console" | "bench" | "drafting" }>;
 
 /** Background fittings stay sparse; inventory detail belongs in the tooltip. */
 function composeRoom(node: SceneNode, room: SceneRect): readonly RoomContent[] {
@@ -299,7 +302,7 @@ function composeRoom(node: SceneNode, room: SceneRect): readonly RoomContent[] {
     const sampleFamilies = files.map((path) => path.split("/").at(-1)!.replace(/(?:[._-](?:test|tests|spec))?\.[^.]+$/, "").split(/[._-]/)[0]!).filter(Boolean);
     const families = [...new Set(sampleFamilies)];
     const parts = scale < 2 || kind !== "source" ? [] : families.sort((a, b) => Number(responsibility(b) !== "generic") - Number(responsibility(a) !== "generic") || sampleFamilies.filter((family) => family === b).length - sampleFamilies.filter((family) => family === a).length || compareText(a, b)).slice(0, 2).map((label) => ({ label, motif: responsibility(label) }));
-    return [{ key: assembly.id, entityId: assembly.id, selectionId: assembly.id === `${node.id}:aggregate` ? node.id : undefined, representedIds: assembly.representedIds, kind, label: assembly.label, count: counts?.[kind] ?? 0, resourceCounts: counts, parts, responsibility: responsibility(assembly.path), scale, workSurface: true,
+    return [{ key: assembly.id, entityId: assembly.id, selectionId: assembly.id === `${node.id}:aggregate` ? node.id : undefined, representedIds: assembly.representedIds, kind, label: assembly.label, count: counts?.[kind] ?? 0, resourceCounts: counts, proposalId: assembly.proposalId, sourceIncomplete: assembly.sourceIncomplete, parts, responsibility: responsibility(assembly.path), scale, workSurface: true,
       x: room.x + 24 + (index % 2) * 132, y: room.y + 56 + Math.floor(index / 2) * 96, width: 104, height: 52 }];
     });
   }

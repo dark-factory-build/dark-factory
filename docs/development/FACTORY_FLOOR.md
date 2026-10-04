@@ -215,7 +215,9 @@ Repository/module/package wrappers can share a physical path. The projection
 chooses one owner for that path (package, then module, directory, repository),
 retains wrapper IDs as aliases, and sums only canonical direct counts. A room's
 displayed total contains its assigned assemblies, excluding separately displayed
-child rooms. The inspector retains original direct and subtree source counts.
+child rooms. Inspectors, containment controls and dependency links resolve to the
+canonical owner, retaining that owner's direct and subtree counts rather than
+offering a second alias inspector with contradictory exact contents.
 Up to 32 immediate filename samples are sent, with `samples_omitted` and the
 existing frame budget's `inventory_omitted` disclosed. No source text is sent.
 
@@ -232,7 +234,7 @@ The browser's persisted detail setting selects coarse areas, automatic useful
 areas, or fine directories on the same floor. Automatic grouping collapses
 structural wrappers such as internal/src/packages/apps and retains useful package
 rooms. Up to 96 rooms aggregate the remaining canonical entities under visible
-ancestors; all served entities remain searchable. Each room pictures at most six
+ancestors; all canonical source entities remain searchable. Each room pictures at most six
 assemblies with an explicit overflow label. Search focuses an entity's owning
 room and retains its exact source identity. Viewport culling bounds rendered
 rooms. Changing live work or proposal selection does not choose the room order.
@@ -260,7 +262,19 @@ proposal names its real head. Dirty work is identified as a working-tree
 observation with a content fingerprint. Plans and terminal prose produce no
 source objects. Missing local commits/base information refuses the observation.
 Up to 32 exact path operations include additions, modifications, deletions and
-renames with old path; omitted paths are disclosed beside the Change and full diff.
+renames with old path and the existing scanner's filename-based resource class;
+omitted paths are disclosed beside the Change and full diff. Dirty fingerprints
+frame each untracked path, mode and content digest; repeat path/content reads and
+a final HEAD/dirty check refuse changes detected during observation.
+
+Committed observations reuse the same static analyzer on exact base/head archives.
+`relationships` contains at most 32 added/removed `{from_path, to_path, weight}`
+entries; `relationships_omitted` and `relationships_unavailable` disclose bounds or
+missing analysis. Dirty working-tree relationships are explicitly unavailable.
+Dashed +/× dependency cables and the existing Change inspector show these deltas
+without changing the integrated graph. Observed proposed resource counts use the
+same equipment vocabulary; their `?` marker does not assert final inventory or
+scale. Concurrent versions of a new area remain separate proposed assemblies.
 
 Each proposal is independently keyed by project, repository and visual Change ID.
 Frames, repairs, dismantling marks and move destinations use the same assemblies

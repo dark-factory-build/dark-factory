@@ -1415,3 +1415,32 @@ test("distributed rest and shelves keep deterministic destinations off equipment
     assertRouteGeometry(layout, resting[0], route, entity.id);
   }
 });
+
+
+test("selecting a proposal hides unrelated new rooms without moving integrated equipment", () => {
+  const provisional = { id: "new", path: "new/area", label: "Proposed area", kind: "directory", proposed: true };
+  const floor = { ...topology, nodes: [...topology.nodes, provisional] };
+  const items = [{ id: "addition", title: "New area", state: "active", operations: [{ roomId: "new", entityId: "new", path: "new/area/file.go", kind: "addition" }] },
+    { id: "edit", title: "Existing edit", state: "active", operations: [{ roomId: "repo", entityId: "repo", path: "main.go", kind: "modification" }] }];
+  const all = render({ topology: floor, workers: [], proposals: { items, onSelect() {} } });
+  const selected = render({ topology: floor, workers: [], proposals: { items, selected: "edit", onSelect() {} } });
+  assert.match(all, /data-proposed-room="true"/);
+  assert.doesNotMatch(selected, /data-proposed-room="true"|value="new"/);
+  assert.match(selected, /data-room-id="repo"/);
+  assert.equal(all.match(/viewBox="([^"]+)"/)[1], selected.match(/viewBox="([^"]+)"/)[1], "selection keeps the spatial map stable");
+});
+
+
+test("proposed resource versions and dependency cables remain distinct and inspectable", () => {
+  const inventory = { direct: { source: 1, tests: 1, documentation: 1, configuration: 1, assets: 0, unclassified: 0 }, total: fileCounts, samples: [], samples_omitted: 0 };
+  const room = { ...topology.nodes[1], proposed: true, assemblies: [{ id: "first-version", proposalId: "first", path: "new", label: "New", inventoryScope: "direct", inventory, sourceIncomplete: true, representedIds: ["lib"] }, { id: "second-version", proposalId: "second", path: "new", label: "Other future", inventoryScope: "direct", inventory, representedIds: ["lib"] }] };
+  const first = { id: "first", title: "First", operations: [{ roomId: "lib", entityId: "lib", path: "new/code.go", kind: "addition" }], relationships: [{ status: "added", fromId: "lib", toId: "repo", fromPath: "new", toPath: ".", weight: 1 }, { status: "removed", fromId: "repo", toId: "src", fromPath: ".", toPath: "src", weight: 1 }] };
+  const second = { id: "second", title: "Second", operations: [{ roomId: "lib", entityId: "lib", path: "new/other.go", kind: "addition" }] };
+  const markup = render({ topology: { ...topology, nodes: [topology.nodes[0], room, topology.nodes[2]] }, workers: [], proposals: { items: [first, second], selected: "first", onSelect() {} } });
+  for (const resource of ["tests", "configuration", "documentation"]) assert.match(markup, new RegExp(`data-associated-equipment="${resource}"`));
+  assert.match(markup, /data-equipment-scale="unknown"/);
+  assert.match(markup, /data-proposed-relationship="added"/);
+  assert.match(markup, /data-proposed-relationship="removed"/);
+  assert.match(markup, /First: added dependency new to ./);
+  assert.doesNotMatch(markup, /data-entity-id="second-version"|value="second-version"/);
+});

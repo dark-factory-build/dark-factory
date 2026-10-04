@@ -81,3 +81,28 @@ test("one reviewer run does not multiply per affected path", () => {
   assert.equal(actors.length, 1); assert.match(actors[0].review.scope, /Individual file inspection is not observed/);
   assert.equal(actors[0].review.proposalId, productionKey(changes[0]));
 });
+
+
+test("source inspectors normalize aliases, containment and relationship targets to their canonical owners", () => {
+  const prepared = prepare({ ...topology, dependencies: { omitted: 0, edges: [{ from: "root", to: "kernel", weight: 1 }] } });
+  const { detailByID } = selectFloor(prepared);
+  assert.equal(detailByID.has("project:root"), false, "same-path wrapper is not a duplicate source inspector");
+  assert.equal(detailByID.get("project:module").inventory.direct.source, 2);
+  assert.deepEqual(detailByID.get("project:module").components.map((node) => node.id), ["project:internal", "project:web"]);
+  assert.equal(detailByID.get("project:module").dependencies.links[0].nodeId, "project:kernel");
+  assert.equal(detailByID.get("project:kernel").dependencies.links[0].nodeId, "project:module");
+});
+
+
+test("new-area versions retain observed resource classes and source-backed dependency changes", () => {
+  const change = record("1", [{ status: "added", path: "new/area/code.go", resource: "source" }, { status: "added", path: "new/area/code_test.go", resource: "tests" }, { status: "added", path: "new/area/README.md", resource: "documentation" }, { status: "added", path: "new/area/rules.json", resource: "configuration" }]);
+  change.document.source.relationships = [{ status: "added", from_path: "new/area", to_path: "internal/kernel", weight: 2 }, { status: "removed", from_path: "web/ui", to_path: "internal/kernel", weight: 1 }, { status: "added", from_path: "../unsafe", to_path: "web/ui", weight: 1 }];
+  const changed = items([change]), projected = projectProposals(selectFloor(prepare()), changed);
+  const newArea = projected.topology.nodes.find((node) => node.proposed);
+  assert.deepEqual(newArea.assemblies[0].inventory.direct, { source: 1, tests: 1, documentation: 1, configuration: 1, assets: 0, unclassified: 0 });
+  assert.equal(newArea.assemblies[0].sourceIncomplete, true, "bounded observed paths do not assert final scale");
+  assert.deepEqual(projected.proposals[0].relationships.map((edge) => edge.status), ["added", "removed"]);
+  assert.equal(projected.proposals[0].relationships[0].fromId, newArea.id);
+  assert.equal(projected.proposals[0].relationships[0].toId, "project:kernel");
+  assert.equal(changed[0].source.relationshipsOmitted, 1);
+});
