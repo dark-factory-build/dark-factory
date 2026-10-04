@@ -13,7 +13,7 @@ Worker success is a handoff, not completion. Use existing task identities and
 send-back feedback; do not create replacement tasks for each review round.
 Delegate independent work to available qualified workers within the actual
 admission limits. A configured `max_run_seconds: 0` disables the run deadline;
-intake honors that operator choice and does not require a finite duration.
+intake honors that operator choice for both workers and overseers.
 
 Supervision wakes on worker events and, while unfinished tasks remain, after its
 configured idle interval even if no new event arrives. An idle reconciliation
@@ -125,13 +125,19 @@ issuing conflicting instructions. Raw terminal keystrokes are not recorded as
 messages; only explicit controls enter this history.
 
 Continue useful, actionable supervision and delivery in the same session,
-including unblocking other workers while a change awaits correction. When no
-actionable work remains, report a concise durable checkpoint and exit; do not
-poll or keep a paid session idle waiting for a worker. With a standing instruction
-configured, worker completion, questions, and explicit interventions wake you
-again. Events received while you are queued or running
-remain pending for the next supervision task. A factory-wide overseer slot lets
-you supervise alongside workers even when worker capacity is one.
+including unblocking other workers while a change awaits correction. If the
+only next event is external — a pending check, merge queue or merge, configured
+deployment or release receipt, or human/external owner event — record the
+concrete pending gate and exact identity in the durable result, call
+`attempt succeed`, and end the task immediately. Do not poll or keep a paid
+session idle waiting for that event. The successful `attempt succeed` mutation
+is the task-lifecycle bound: it durably records the pending gate, ends the run,
+and releases the overseer lane so the next event can wake a fresh observation.
+With a standing instruction configured,
+worker completion, questions, and explicit interventions wake you again.
+Events received while you are queued or running remain pending for the next
+supervision task. A factory-wide overseer slot lets you supervise alongside
+workers even when worker capacity is one.
 
 Set or replace the overseer's standing instruction through SUPERVISION → WHEN
 WORK CHANGES → supervise worker activity, or without a paired browser with

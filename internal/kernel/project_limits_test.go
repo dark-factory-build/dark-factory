@@ -67,6 +67,41 @@ func TestProjectLimitsUseAdditionalAllowanceAndDefaultToDisabled(t *testing.T) {
 	}
 }
 
+func TestOverseerRunUsesOnlyConfiguredProjectLimit(t *testing.T) {
+	for _, role := range []AgentRole{RoleOrchestrator, RoleWorker} {
+		t.Run(role.String(), func(t *testing.T) {
+			store, _, project, agent := newAdmissionStore(t, role, 1)
+			defer store.Close()
+			ctx := context.Background()
+			if _, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 220), ProjectID: project.ID, AssignedAgentID: agent.ID, IncarnationID: incarnationID(t, 221), Title: "external gate"}, mustTime(t, 4)); err != nil {
+				t.Fatal(err)
+			}
+			admitted, err := store.AdmitNext(ctx, admissionKeys(t, 222, nil), mustTime(t, 5))
+			if err != nil || !admitted.Admitted() {
+				t.Fatalf("admission = %+v, %v", admitted, err)
+			}
+			due, err := store.OverdueRuns(ctx, mustTime(t, 5+300_000))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(due) != 0 {
+				t.Fatalf("default-disabled limit canceled productive %s run = %+v", role, due)
+			}
+			current, found, err := store.Project(ctx, project.ID)
+			if err != nil || !found {
+				t.Fatalf("project = %+v, found=%v, err=%v", current, found, err)
+			}
+			if _, err := store.SetProjectLimits(ctx, current.ID, current.Revision, 0, 1, mustTime(t, 305_000)); err != nil {
+				t.Fatal(err)
+			}
+			due, err = store.OverdueRuns(ctx, mustTime(t, 306_000))
+			if err != nil || len(due) != 1 || due[0].ID != admitted.Run.ID {
+				t.Fatalf("configured shorter limit = %+v, %v", due, err)
+			}
+		})
+	}
+}
+
 func TestAdmissionSkipsExhaustedProjectBeforePriority(t *testing.T) {
 	for _, role := range []AgentRole{RoleWorker, RoleOrchestrator} {
 		t.Run(role.String(), func(t *testing.T) {
