@@ -290,6 +290,9 @@ export NETRC=/dev/null
 export GOPATH="$ci_cache_root/go" GOCACHE="$ci_cache_root/go-build"
 if [ -n "$ci_go_module_cache" ]; then
     export DF_CI_GO_MODULE_CACHE="$ci_go_module_cache" GOMODCACHE="$ci_go_module_cache" GOPROXY=off GOSUMDB=off
+elif [ -w "$HOME" ]; then
+    # A cold cache (CI) downloads modules; only a sandbox without HOME is offline.
+    export GOMODCACHE="$ci_cache_root/go-mod"
 else
     export GOMODCACHE="$ci_cache_root/go-mod" GOPROXY=off GOSUMDB=off
 fi
