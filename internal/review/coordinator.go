@@ -63,6 +63,14 @@ type Store interface {
 	Update(context.Context, Operation) error
 }
 
+// RetryStore reserves the one allowed retry and creates its operation in the
+// same durable transaction. Keeping the reservation beside the original
+// failure prevents two callers from replaying the same failed operation.
+type RetryStore interface {
+	Store
+	CreateRetry(context.Context, Operation, Operation) error
+}
+
 type Backend interface {
 	CloneReadOnly(context.Context, Request) (string, func(), error)
 	Review(context.Context, string, Request) (Verdict, error)
@@ -131,15 +139,15 @@ func (c Coordinator) Resume(ctx context.Context, op Operation) (Operation, error
 	}
 	checkout, cleanup, err := c.Backend.CloneReadOnly(ctx, op.Request)
 	if err != nil {
-		return c.fail(ctx, op, err, true)
+		return c.failPreSubmit(ctx, op, err)
 	}
 	defer cleanup()
 	verdict, err := c.Backend.Review(ctx, checkout, op.Request)
 	if err != nil {
-		return c.fail(ctx, op, err, true)
+		return c.failPreSubmit(ctx, op, err)
 	}
 	if verdict.Event != "ALLOW" && verdict.Event != "REQUEST_CHANGES" {
-		return c.fail(ctx, op, errors.New("review: provider returned no valid verdict"), true)
+		return c.failPreSubmit(ctx, op, errors.New("review: provider returned no valid verdict"))
 	}
 	op.Verdict, op.Detail, op.State, op.UpdatedAt = strings.ToLower(verdict.Event), verdict.Body, "submitting", c.Now()
 	if err := c.Store.Update(ctx, op); err != nil {
@@ -269,7 +277,19 @@ func (c Coordinator) Retry(ctx context.Context, failed Operation) (Operation, er
 	if failed.State != "failed" || !failed.Retryable || failed.ID == "" || failed.RetryOf != "" {
 		return Operation{}, errors.New("review: only pre-submit launch failures are retryable")
 	}
-	return c.start(ctx, failed.Request, failed.ID)
+	store, ok := c.Store.(RetryStore)
+	if !ok {
+		return Operation{}, errors.New("review: retry reservation unavailable")
+	}
+	op, err := Prepare(failed.Request, c.Now)
+	if err != nil {
+		return Operation{}, err
+	}
+	op.RetryOf = failed.ID
+	if err := store.CreateRetry(ctx, failed, op); err != nil {
+		return Operation{}, err
+	}
+	return c.Resume(ctx, op)
 }
 
 func (c Coordinator) fail(ctx context.Context, op Operation, cause error, retryable bool) (Operation, error) {
@@ -278,6 +298,14 @@ func (c Coordinator) fail(ctx context.Context, op Operation, cause error, retrya
 		return Operation{}, errors.Join(cause, err)
 	}
 	return op, cause
+}
+
+func (c Coordinator) failPreSubmit(ctx context.Context, op Operation, cause error) (Operation, error) {
+	if op.RetryOf != "" {
+		cause = fmt.Errorf("review retries exhausted: %w", cause)
+		return c.fail(ctx, op, cause, false)
+	}
+	return c.fail(ctx, op, cause, true)
 }
 
 func validate(r Request) error {

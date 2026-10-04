@@ -1168,6 +1168,12 @@ func TestAttemptClientPinsRetainedCredentialAcrossRotation(t *testing.T) {
 			if readErr == nil && (len(frame) < wireRequestPrelude || frame[0] != wireAttemptDomain || !bytes.Equal(frame[1:wireRequestPrelude], want[index][:])) {
 				readErr = fmt.Errorf("attempt frame %d carried the wrong credential", index)
 			}
+			if readErr == nil && index < 3 {
+				// Non-outcome clients half-close their request before reading;
+				// consume that EOF before replying so the fixture cannot close
+				// the accepted connection while the client is doing CloseWrite.
+				readErr = requireEOF(connection)
+			}
 			if readErr == nil {
 				readErr = writeTestResponse(connection, wireAttemptDomain, responses[index])
 			}

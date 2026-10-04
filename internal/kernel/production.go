@@ -18,6 +18,15 @@ import (
 
 const maxProductionReviewFindings = 16000
 
+// PublicationAttentionAfter is the quiet period before a successful Change
+// without a publication receipt needs another operator/overseer look.
+const PublicationAttentionAfter = 3 * time.Minute
+
+// PublicationRetryAfter re-arms publication attention whose carrying overseer
+// task blocked, failed or was cancelled without handling it, bounded so a
+// persistent blocker costs at most one wake per interval.
+const PublicationRetryAfter = 30 * time.Minute
+
 var productionRepository = regexp.MustCompile(`^[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}$`)
 
 type ProductionRecord struct {
@@ -524,6 +533,42 @@ func (store *Store) RecordReviewOperation(ctx context.Context, project ProjectID
 	return tx.Commit(ctx)
 }
 
+// RecordReviewRetry consumes the original pre-submit retry allowance and
+// creates the replacement operation atomically. A concurrent retry therefore
+// observes the consumed allowance instead of creating a duplicate reviewer.
+func (store *Store) RecordReviewRetry(ctx context.Context, project ProjectID, repo, originalID, retryID string, retry any, at UnixMillis) error {
+	if project.zero() || !productionRepository.MatchString(repo) || !validOutcomeText(originalID, 128) || !validOutcomeText(retryID, 128) || originalID == retryID {
+		return ErrInvalidValue
+	}
+	body, err := json.Marshal(retry)
+	if err != nil || len(body) < 2 || len(body) > 65536 {
+		return ErrInvalidValue
+	}
+	tx, err := store.beginValidatedWrite(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Close()
+	result, err := tx.connection.ExecContext(ctx, `UPDATE production_records
+		SET document = json_set(document, '$.retryable', json('false')), observed_at_ms = ?
+		WHERE project_id = ? AND repository = ? AND kind = 'reviewer' AND identity = ?
+		  AND observed_at_ms <= ? AND json_extract(document, '$.state') = 'failed'
+		  AND json_extract(document, '$.retryable') = 1
+		  AND COALESCE(json_extract(document, '$.retry_of'), '') = ''`, at.Int64(), project.Bytes(), strings.ToLower(repo), originalID, at.Int64())
+	if err != nil {
+		return tx.Rollback(err)
+	}
+	if affected, err := result.RowsAffected(); err != nil {
+		return tx.Rollback(err)
+	} else if affected != 1 {
+		return tx.Rollback(ErrConflict)
+	}
+	if err := productionRecordOnConnection(ctx, tx.connection, project, strings.ToLower(repo), "reviewer", retryID, "", json.RawMessage(body), at.Int64()); err != nil {
+		return tx.Rollback(err)
+	}
+	return tx.Commit(ctx)
+}
+
 // ReviewOperation returns the last durable state for a daemon-owned review.
 func (store *Store) ReviewOperation(ctx context.Context, project ProjectID, operationID string) ([]byte, bool, error) {
 	if project.zero() || !validOutcomeText(operationID, 128) {
@@ -669,12 +714,13 @@ func (store *Store) RecoverRunningReviewOperations(ctx context.Context, at UnixM
 		if err := json.Unmarshal(fields["id"], &operationID); err != nil || operationID == "" {
 			continue
 		}
-		var verdict, enqueueID string
+		var verdict, enqueueID, retryOf string
 		var submitted bool
 		_ = json.Unmarshal(fields["verdict"], &verdict)
 		_ = json.Unmarshal(fields["enqueue_id"], &enqueueID)
+		_ = json.Unmarshal(fields["retry_of"], &retryOf)
 		_ = json.Unmarshal(fields["submitted"], &submitted)
-		retryable, _ := json.Marshal(verdict == "" && enqueueID == "")
+		retryable, _ := json.Marshal(verdict == "" && enqueueID == "" && retryOf == "")
 		fields["retryable"] = retryable
 		candidates = append(candidates, candidate{project: project, repository: repository, identity: identity, document: fields})
 	}
@@ -694,10 +740,11 @@ func (store *Store) RecoverRunningReviewOperations(ctx context.Context, at UnixM
 		return 0, tx.Rollback(err)
 	}
 	for _, item := range candidates {
-		var verdict, enqueueID string
+		var verdict, enqueueID, retryOf string
 		var submitted bool
 		_ = json.Unmarshal(item.document["verdict"], &verdict)
 		_ = json.Unmarshal(item.document["enqueue_id"], &enqueueID)
+		_ = json.Unmarshal(item.document["retry_of"], &retryOf)
 		_ = json.Unmarshal(item.document["submitted"], &submitted)
 		if verdict == "request_changes" && submitted && enqueueID == "" {
 			// The provider write and completed state may already be durable,
@@ -710,7 +757,11 @@ func (store *Store) RecoverRunningReviewOperations(ctx context.Context, at UnixM
 		} else {
 			item.document["state"] = json.RawMessage(`"failed"`)
 			if verdict == "" && enqueueID == "" {
-				item.document["detail"] = detail
+				if retryOf == "" {
+					item.document["detail"] = detail
+				} else {
+					item.document["detail"] = json.RawMessage(`"review retries exhausted; review interrupted before completion"`)
+				}
 			} else {
 				item.document["detail"] = json.RawMessage(`"review interrupted after an external write may have occurred; observe the original operation"`)
 			}
@@ -731,7 +782,10 @@ func (store *Store) RecoverRunningReviewOperations(ctx context.Context, at UnixM
 const productionRows = `SELECT repository, kind, identity, visual_id, document, observed_at_ms FROM production_records WHERE project_id = ?
  UNION ALL SELECT COALESCE(r.name, ''), 'construction', lower(hex(c.id)), 'change:' || lower(hex(c.id)),
 		json_object('title', t.title, 'phase', c.phase, 'status', t.status, 'head', lower(hex(c.head_commit)), 'task_id', lower(hex(t.id)), 'blocked_reason', t.blocked_reason,
-			'has_changes', CASE WHEN c.head_commit IS NULL OR c.base_commit IS NULL THEN NULL WHEN c.head_commit = c.base_commit THEN json('false') ELSE json('true') END), c.updated_at_ms
+			'has_changes', CASE WHEN c.head_commit IS NULL OR c.base_commit IS NULL THEN NULL WHEN c.head_commit = c.base_commit THEN json('false') ELSE json('true') END,
+			'needs_you', CASE WHEN t.status = 'succeeded' AND c.head_commit IS NOT NULL AND c.base_commit IS NOT NULL AND c.head_commit <> c.base_commit
+				AND c.updated_at_ms + ? <= CAST(strftime('%s','now') AS INTEGER) * 1000
+				THEN json('true') ELSE json('false') END), c.updated_at_ms
  FROM changes c JOIN tasks t ON t.id = c.task_id
  LEFT JOIN task_repository_bindings b ON b.task_id = t.id
  LEFT JOIN project_repositories r ON r.id = b.repository_id
@@ -747,13 +801,14 @@ func (store *Store) Production(ctx context.Context, project ProjectID, offset, l
 	}
 	defer tx.Close()
 	page := ProductionPage{Records: []ProductionRecord{}}
-	if err := tx.connection.QueryRowContext(ctx, "SELECT count(*) FROM ("+productionRows+")", project.Bytes(), project.Bytes()).Scan(&page.Total); err != nil {
+	attentionAfter := PublicationAttentionAfter.Milliseconds()
+	if err := tx.connection.QueryRowContext(ctx, "SELECT count(*) FROM ("+productionRows+")", project.Bytes(), attentionAfter, project.Bytes()).Scan(&page.Total); err != nil {
 		return page, err
 	}
 	// Load delivery evidence before merged PRs so bounded reads can identify completed work.
 	rows, err := tx.connection.QueryContext(ctx, "SELECT * FROM ("+productionRows+") ORDER BY CASE\n"+
 		" WHEN kind = 'repository' THEN 0\n"+
-		" WHEN kind = 'pull_request' AND json_extract(document, '$.state') = 'open' THEN 1\n"+" WHEN kind = 'construction' AND json_extract(document, '$.status') IN ('queued', 'running', 'blocked') THEN 2\n"+" WHEN kind = 'delivery' THEN 3\n"+" WHEN kind IN ('pull_request', 'check', 'reviewer') THEN 4\n"+" WHEN kind = 'construction' THEN 5\n"+" ELSE 6 END, repository, identity LIMIT ? OFFSET ?", project.Bytes(), project.Bytes(), limit, offset)
+		" WHEN kind = 'pull_request' AND json_extract(document, '$.state') = 'open' THEN 1\n"+" WHEN kind = 'construction' AND json_extract(document, '$.status') IN ('queued', 'running', 'blocked') THEN 2\n"+" WHEN kind = 'delivery' THEN 3\n"+" WHEN kind IN ('pull_request', 'check', 'reviewer') THEN 4\n"+" WHEN kind = 'construction' THEN 5\n"+" ELSE 6 END, repository, identity LIMIT ? OFFSET ?", project.Bytes(), attentionAfter, project.Bytes(), limit, offset)
 	if err != nil {
 		return page, err
 	}

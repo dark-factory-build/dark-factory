@@ -624,6 +624,49 @@ def gate_failure_note(receipt, operation):
     return "pre-review full gate failed: tests=" + (", ".join(tests) if tests else "unavailable") + ". Exact head " + operation["head"] + "."
 
 
+GATE_FLAKE_RETRIES = 2
+GO_MODULE = "github.com/dark-factory-build/dark-factory/"
+
+
+def gate_failure_unrelated(path, operation, receipt):
+    """True only when no failing Go test package can reach a path this head changes (#1076).
+
+    ponytail: reachability is the in-module import closure at the head plus two
+    trees no Go code reads (control-plane/, docs/); any other failure shape,
+    or a package that builds binaries, stays the author's.
+    """
+    try:
+        log = receipt.with_suffix(".log").read_text(encoding="utf-8")
+        changed = [name for name in intake.command(["git", "-C", str(path), "diff", "--name-only", "-z", operation["base"] + "..." + operation["head"]], timeout=60).split("\0") if name]
+        mentions = intake.command(["git", "-C", str(path), "grep", "-o", "-e", '"' + GO_MODULE + '[^"]*"', "-e", '"go", "build"', operation["head"], "--", "*.go"], timeout=60)
+    except (OSError, intake.IntakeError):
+        return False
+    failed = re.findall(r"(?m)^FAIL\t" + re.escape(GO_MODULE) + r"(\S+)\t[0-9.]+s$", log)
+    # A unittest, build or setup failure, or a stage with no package verdict may be this head's.
+    if not failed or not changed or re.search(r"(?m)^(?:FAIL|ERROR): |^FAIL\t\S+ \[", log):
+        return False
+    imports = {}
+    for line in mentions.splitlines():
+        name, mention = line.split(":", 2)[1:]
+        imports.setdefault(os.path.dirname(name), set()).add(mention[len(GO_MODULE) + 1:-1] if mention.startswith('"' + GO_MODULE) else "go build")
+    for package in failed:
+        reached, pending = set(), [package]
+        while pending:
+            directory = pending.pop()
+            if directory not in reached:
+                reached.add(directory)
+                pending.extend(imports.get(directory, ()))
+        if "go build" in reached or package == "internal/e2e":
+            return False
+        for name in changed:
+            if name.endswith(".go"):
+                if os.path.dirname(name) in reached:
+                    return False
+            elif not name.startswith(("control-plane/", "docs/")) or any(name.startswith(directory + "/") for directory in reached):
+                return False
+    return True
+
+
 def review_failure_note(config, operation):
     """Return bounded, explicitly untrusted findings from the exact review."""
     prefix = ("independent review requested changes at " + str(operation.get("blocking_review_url", "the validated review"))
@@ -1137,6 +1180,27 @@ def run_locked(config, path, journal, journal_path, managed=None):
                         raise ReviewError("pre-review gate could not run: bounded gate wrapper exit " + str(receipt["exit_code"]) +
                                           ", nothing ran. Exact head " + operation["head"] + ".")
                     operation["gate_evidence"] = str(evidence)
+                    flakes = operation.get("gate_flakes", [])
+                    if not isinstance(flakes, list) or not all(isinstance(flake, dict) for flake in flakes):
+                        raise ReviewError("pre-review gate flake receipt is invalid. Exact head " + operation["head"] + ".")
+                    rerun = receipt.get("exit_code") != 0 and (not flakes or len(flakes) < GATE_FLAKE_RETRIES and gate_failure_unrelated(path, operation, evidence))
+                    if rerun:
+                        # Gate the same head once more before blaming the author, and
+                        # again (bounded) for a test this head cannot reach. A pass
+                        # leaves these failures as flake evidence; a repeat routes normally.
+                        # A rerun would overwrite the gate log, so one whose log cannot be
+                        # kept routes normally instead.
+                        note = gate_failure_note(evidence, operation)
+                        kept = evidence.with_suffix(".flake-" + str(len(flakes) + 1) + ".log")
+                        try:
+                            evidence.with_suffix(".log").replace(kept)
+                        except OSError:
+                            rerun = False
+                    if rerun:
+                        operation["gate_flakes"] = flakes + [{"note": note, "log": str(kept)}]
+                        intake.atomic_json(journal_path, receipts)
+                        messages.append("re-gating PR #" + str(pr["number"]) + " at the same head after a gate failure: " + note)
+                        continue
                     if receipt.get("exit_code") != 0:
                         operation["gate_state"] = "failed"
                         operation["gate_failure_note"] = gate_failure_note(evidence, operation)

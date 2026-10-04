@@ -159,6 +159,16 @@ func validCurrentExecCheckAck(frame attemptFrame) bool {
 		noLegacyFields(frame) && noTerminalFields(frame) && len(frame.Payload) == 0
 }
 
+func validProviderHandoffCheck(frame attemptFrame) bool {
+	return frame.Version == commandVersion && frame.Kind == "provider-handoff-check" &&
+		noLegacyFields(frame) && noTerminalFields(frame) && len(frame.Payload) == 0
+}
+
+func validProviderHandoffAck(frame attemptFrame) bool {
+	return frame.Version == commandVersion && frame.Kind == "provider-handoff-ack" &&
+		noLegacyFields(frame) && noTerminalFields(frame) && len(frame.Payload) == 0
+}
+
 func writeFrame(w io.Writer, value any, limit int) error {
 	if w == nil {
 		return ErrIdentity
