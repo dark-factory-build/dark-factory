@@ -221,6 +221,10 @@ func TestReviewCheckoutIsExactHeadAndLeavesRegisteredRepositoryUnchanged(t *test
 	if got := runExternalGit(t, root, git, checkout, "rev-parse", "HEAD"); got != head {
 		t.Fatalf("review HEAD = %s, want %s", got, head)
 	}
+	// A full branch ref names the same base as its short name.
+	if err := change.ReviewCheckout(context.Background(), git, repository, source, filepath.Join(root, "full-ref"), 7, head, base, "refs/heads/main"); err != nil {
+		t.Fatalf("full base ref: %v", err)
+	}
 	moved := filepath.Join(root, "moved")
 	if err := change.ReviewCheckout(context.Background(), git, repository, source, moved, 7, base, base, "main"); err == nil {
 		t.Fatal("review checkout accepted a head the pull request does not have")

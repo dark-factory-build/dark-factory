@@ -50,7 +50,7 @@ func ReviewCheckout(ctx context.Context, gitExecutable, root string, expected Re
 	}
 	// The origin is the registered, digest-bound remote, so a local-path
 	// origin (a mirror, or a test fixture) is as trusted as a GitHub one.
-	if _, err := authority.succeed(ctx, maxGitSelectionOutput, "-C", path, "-c", "core.hooksPath=/dev/null", "-c", "protocol.file.allow=always", "fetch", "--quiet", "--no-tags", "--no-recurse-submodules", "--no-write-fetch-head", "--no-auto-maintenance", "--end-of-options", strings.TrimSpace(string(origin)), fmt.Sprintf("+refs/pull/%d/head:refs/review/head", pull), "+refs/heads/"+baseRef+":refs/review/base"); err != nil {
+	if _, err := authority.succeed(ctx, maxGitSelectionOutput, "-C", path, "-c", "core.hooksPath=/dev/null", "-c", "protocol.file.allow=always", "fetch", "--quiet", "--no-tags", "--no-recurse-submodules", "--no-write-fetch-head", "--no-auto-maintenance", "--end-of-options", strings.TrimSpace(string(origin)), fmt.Sprintf("+refs/pull/%d/head:refs/review/head", pull), "+refs/heads/"+strings.TrimPrefix(baseRef, "refs/heads/")+":refs/review/base"); err != nil {
 		return err
 	}
 	if _, err := authority.succeed(ctx, maxGitSelectionOutput, "-C", path, "-c", "core.hooksPath=/dev/null", "checkout", "--quiet", "--detach", "refs/review/head"); err != nil {
