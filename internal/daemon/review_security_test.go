@@ -132,6 +132,11 @@ func (fixedReviewCheckout) CloneReadOnly(context.Context, review.Request) (strin
 	return os.TempDir(), func() {}, nil
 }
 
+// The gate stage is not under test here; a passing gate lets the review run.
+func (fixedReviewCheckout) Gate(_ context.Context, _ string, _ review.Operation, commit string) (review.GateRun, error) {
+	return review.GateRun{Commit: commit}, nil
+}
+
 func TestReviewMovesPastALimitedAccountAndFailsRetryablyWhenAllAreLimited(t *testing.T) {
 	backend, homes := reviewerFixture(t, "a-limited", "b-available")
 	if err := os.WriteFile(filepath.Join(homes["a-limited"], "limited"), nil, 0o600); err != nil {
