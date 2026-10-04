@@ -1002,13 +1002,6 @@ func (daemon *Daemon) attemptResultTail(
 		if proposalErr != nil {
 			return kernel.Run{}, proposalErr
 		}
-		// The clock hook is also the last synchronous boundary before the
-		// retained proposal acquires the SQLite writer. If shutdown cancelled
-		// this supervisor while that boundary ran, preserve the proposal as
-		// outcome-unknown without entering a writer wait that cannot complete.
-		if cancellation := ctx.Err(); cancellation != nil {
-			return kernel.Run{}, kernel.NewOutcomeUnknownError(fmt.Errorf("daemon: retained outcome proposal: %w", cancellation))
-		}
 		proposalRun, proposeErr := daemon.store.ProposeAttemptOutcome(ctx, live.attemptDigest, pending, at)
 		if proposeErr == nil {
 			run = proposalRun

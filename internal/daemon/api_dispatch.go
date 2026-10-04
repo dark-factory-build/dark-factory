@@ -173,7 +173,7 @@ func (daemon *Daemon) HandleConnection(ctx context.Context, connection *api.Conn
 	// request itself would make a snapshot unable to report the quiet interval
 	// it is observing; authenticated attempt work calls still re-arm liveness.
 	if call.Kind() != api.CallOverseerSnapshot {
-		daemon.markAttemptAPICall(call)
+		daemon.markAttemptAPICall(ctx, call)
 	}
 	dispatchContext, cancel := context.WithTimeout(ctx, defaultDispatchTimeout)
 	defer cancel()
@@ -234,7 +234,7 @@ func (daemon *Daemon) HandleConnection(ctx context.Context, connection *api.Conn
 // markAttemptAPICall is intentionally best-effort telemetry. Authentication
 // and request handling remain authoritative below; liveness must never turn a
 // healthy API request into a failed attempt or a new termination path.
-func (daemon *Daemon) markAttemptAPICall(call api.Call) {
+func (daemon *Daemon) markAttemptAPICall(ctx context.Context, call api.Call) {
 	raw, ok := call.AttemptDigest()
 	if !ok {
 		return
@@ -243,7 +243,13 @@ func (daemon *Daemon) markAttemptAPICall(call api.Call) {
 	if err != nil {
 		return
 	}
-	attempt := daemon.liveAttemptForDigest(digest)
+	authority, err := daemon.store.AuthenticateAttempt(ctx, digest)
+	if err != nil {
+		return
+	}
+	daemon.attemptMu.Lock()
+	attempt := daemon.attempts[authority.RunID]
+	daemon.attemptMu.Unlock()
 	if attempt != nil {
 		attempt.markAttemptAPICall(daemon.now())
 	}
