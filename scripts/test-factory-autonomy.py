@@ -1015,6 +1015,19 @@ class LegacyCutoverTest(unittest.TestCase):
         patch.object(autonomy,'managed_launchctl',side_effect=launchctl).start()
         patch.object(autonomy,'managed_api',side_effect=api).start()
 
+    def test_retired_review_mirror_key_is_accepted_and_inert(self):
+        self.fixture()
+        self.assertIn('review_mirror_root', self.config)
+        sent = []
+        def api(binary,home,args,value=None):
+            if args[0] == 'legacy_preview':
+                sent.append(value['legacy'])
+            return self.api(binary,home,args,value)
+        with patch.object(autonomy,'managed_api',side_effect=api):
+            self.assertEqual('migrated',autonomy.managed_migrate(self.home,self.factoryctl,self.config_path,self.plan)['state'])
+        self.assertTrue(sent)
+        self.assertFalse(any('review_companion' in legacy for legacy in sent))
+
     def test_release_companion_refuses_cutover_before_schedule_or_baseline_changes(self):
         self.fixture()
         self.config['release_configs'] = [str(self.root / 'release.json')]

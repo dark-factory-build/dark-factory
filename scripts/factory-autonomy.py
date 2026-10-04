@@ -392,7 +392,7 @@ def legacy_migration_input(home, config_path):
     configuration = {'priority_default': config.get('priority_default', 0), 'priority_by_label': config.get('priority_by_label', {}), 'repository': config['repository'], 'overseer_agent_id': config['overseer_agent_id'], 'label': config['label'], 'policy': 'trusted_authors' if humans else 'manual', 'trusted_authors': humans, 'poll_seconds': int(config.get('poll_seconds', 120)), 'admission_limit': int(config.get('max_issues', 25))}
     digest = lambda value: hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
     source_id = hashlib.sha256(('legacy-intake\0' + str(home) + '\0' + str(config_path)).encode()).hexdigest()[:32]
-    request = {'action': 'legacy_preview', 'source_id': source_id, 'project_id': config['project_id'], 'configuration': configuration, 'legacy': {'review_companion': 'review_mirror_root' in config, 'manual_app_authors': manual_apps, 'config_hash': digest(config), 'journal_hash': digest(history), 'history': history}}
+    request = {'action': 'legacy_preview', 'source_id': source_id, 'project_id': config['project_id'], 'configuration': configuration, 'legacy': {'manual_app_authors': manual_apps, 'config_hash': digest(config), 'journal_hash': digest(history), 'history': history}}
     return request, config, raw_config.decode(), raw_journal.decode()
 
 
