@@ -1,3 +1,4 @@
+import { productionKey } from "./production-view.js";
 import { useEffect, useRef, useState } from "react";
 import type { AgentItem, StateView, TaskItem } from "@dark-factory/client";
 import type { ProductionContraption } from "./production-view.js";
@@ -120,7 +121,7 @@ export function MissionsPanel({ production = [], onProduction, requestedMission,
           {(!Array.isArray(selected.missing_references) || selected.missing_references.length === 0) ? null : <p>Some evidence is unavailable.</p>}
         </details> : null}
         <h4>Related work</h4>
-        {production.filter((item) => item.projectId === projectId && item.missions.includes(text(selected.id))).map((item) => <p key={item.visualId}><button type="button" onClick={() => onProduction?.(item.projectId + ":" + item.visualId)} disabled={!onProduction}>Open {item.pullRequest?.title ?? item.construction?.title ?? "production work"} · {item.status}</button></p>)}
+        {production.filter((item) => item.projectId === projectId && item.missions.includes(text(selected.id))).map((item) => <p key={item.visualId}><button type="button" onClick={() => onProduction?.(productionKey(item))} disabled={!onProduction}>Open {item.pullRequest?.title ?? item.construction?.title ?? "production work"} · {item.status}</button></p>)}
         <ul className="dfMissions__list">{tasks.map((task) => <li key={task.id}><button type="button" disabled={call === undefined || !onOpenTask} onClick={() => onOpenTask?.(task)}>Open {task.title}<span>{task.status}{task.blocked_reason ? ` · ${task.blocked_reason}` : ""}</span></button></li>)}</ul>
         {taskNext === 0 ? null : <button type="button" disabled={Boolean(pending) || call === undefined} onClick={() => void run(() => loadTasks(text(selected.id), taskNext))}>{pending ? "Loading…" : "Show more"}</button>}
       </article>}

@@ -869,6 +869,26 @@ summary.dfConsoleItem__summary { cursor: pointer; }
 .dfMissions textarea { display: block; width: 100%; min-height: 6rem; padding: 0.65rem; resize: vertical; color: var(--df-console-text); background: var(--df-console-background); border: 1px solid var(--df-console-rule); font: inherit; }
 .dfMissions :is(button, select) { min-height: 2.75rem; }
 
+/* One floor: source search, projection controls and proposal selection stay reachable. */
+.dfFactoryEntityTools { padding: .65rem; background: #122027; border-bottom: 1px solid #3c5051; }
+.dfFactoryEntityTools label { display: flex; align-items: center; gap: .5rem; }
+.dfFactoryEntityTools input { min-width: 0; flex: 1; }
+.dfFactoryEntityTools__results, .dfFactoryProposals, .dfFactoryFloor__changes { display: flex; flex-wrap: wrap; gap: .4rem; max-height: 9rem; overflow: auto; }
+.dfFactoryEntityTools__results button, .dfFactoryProposals button { max-width: 100%; overflow-wrap: anywhere; font-size: .75rem; }
+.dfFactoryProposals button[aria-pressed="true"] { border-color: #a8d8ea; background: #274655; }
+.dfFactoryLegend { color: #b2c6be; font-size: .72rem; line-height: 1.7; margin: .4rem 0; }
+.dfFactoryLegend span { display: block; color: #819e9b; }
+.dfRoomDetails td, .dfRoomDetails th, .dfFactoryFloor__changes td { overflow-wrap: anywhere; }
+.dfRoomDetails button { max-width: 100%; overflow-wrap: anywhere; }
+
+/* Source identity is exact, including on phone-sized inspectors. */
+.dfFactoryFloor code, .dfProduction code { overflow-wrap: anywhere; word-break: break-word; }
+.dfFactoryFloor section, .dfRoomDetails, .dfProduction__detail { min-width: 0; }
+.dfFactoryFloor select, .dfRoomDetails select { max-width: 100%; min-width: 0; }
+.dfProduction table { table-layout: fixed; width: 100%; font-size: .8rem; }
+.dfProduction table th:first-child { width: 6rem; white-space: nowrap; }
+.dfProduction table td { overflow-wrap: anywhere; }
+
 /* remote ------------------------------------------------------------------
    The phone console. One column by default because the smallest screen is the
    real one; two columns only once there is room. Legibility over density: no
@@ -1195,3 +1215,4 @@ summary.dfConsoleItem__summary { cursor: pointer; }
 .dfMissions .dfStatus { text-transform: capitalize; }
 
 .dfConsoleBack { min-height: 2.75rem; }
+

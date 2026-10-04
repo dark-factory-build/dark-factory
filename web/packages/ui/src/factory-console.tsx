@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { DiscoveredAccount, AccountItem, AgentItem, GitHubConnectionBody, ProjectItem, RepositoryMutation, RepositoryView, SpriteAppearance, TaskHistoryView, TaskItem, TaskListView } from "@dark-factory/client";
 import { BROWSER_HOST, type FactoryAgentSelection, type FactoryAppSnapshot, type FactoryHumanRequestView } from "./factory-app-controller.js";
 import type { FactoryGitHubView } from "./factory-settings-coordinator.js";
@@ -211,16 +211,14 @@ export function FactoryConsole({
   const selectTask = onSelectTask === undefined ? undefined : (id: string) => { onSelectTask(id); onDetail?.("queue"); };
   const ready = status === "ready";
   const productionData = useProduction([...(scopedState?.projects.keys() ?? [])].sort(), ready ? onProjectContent : undefined);
-  const productionView = deriveProductionView(productionData.records, Date.now());
-  const productionItems = Object.values(productionView.contraptions).sort((a, b) => Number(a.completed) - Number(b.completed) || (a.completed ? a.completedAt - b.completedAt : 0) || a.visualId.localeCompare(b.visualId));
+  const productionView = useMemo(() => deriveProductionView(productionData.records, Date.now()), [productionData.records]);
+  const productionItems = useMemo(() => Object.values(productionView.contraptions).sort((a, b) => Number(a.completed) - Number(b.completed) || (a.completed ? a.completedAt - b.completedAt : 0) || a.visualId.localeCompare(b.visualId)), [productionView]);
   const inProgressItems = productionItems.filter(inProgressProduction).sort((a, b) => {
     const priority = (item: typeof a) => item.pullRequest?.state === "merged" ? 2 : item.construction?.status === "succeeded" ? 3 : 0;
     return priority(a) - priority(b) || b.completedAt - a.completedAt || a.visualId.localeCompare(b.visualId);
   });
-  const productionFloor = inProgressItems.slice(0, 12);
   const [selectedProduction, setSelectedProduction] = useState<string>();
-  const selectedFloorItem = inProgressItems.find((item) => `${item.projectId}:${item.visualId}` === selectedProduction);
-  if (selectedFloorItem && !productionFloor.includes(selectedFloorItem)) productionFloor.push(selectedFloorItem);
+  const [libraryOpen, setLibraryOpen] = useState(false);
   const [requestedMission, setRequestedMission] = useState<{ projectId: string; id: string }>();
   const selectProduction = (key: string) => { setSelectedProduction(key); onDetail?.("production"); };
   const counters = factoryCounters(state);
@@ -275,7 +273,7 @@ export function FactoryConsole({
           <button type="button" aria-pressed={detail === "floor" && view === "floor"} disabled={!ready} onClick={() => { onView?.("floor"); onDetail("floor"); }}>Floor</button>
           <button type="button" aria-pressed={detail === "floor" && view === "agents"} disabled={!ready || onView === undefined} onClick={() => { onView?.("agents"); onDetail("floor"); }}>Agents</button>
           <button type="button" aria-pressed={detail === "missions"} disabled={!ready} onClick={() => onDetail("missions")}>Missions</button>
-          <button type="button" aria-pressed={detail === "production"} onClick={() => onDetail("production")}>Production</button>
+          <button type="button" aria-pressed={detail === "production"} onClick={() => onDetail("production")}>Changes</button>
           <button type="button" aria-pressed={detail === "queue"} disabled={!ready} onClick={() => onDetail("queue")}>Tasks</button>
           <button type="button" aria-pressed={detail !== "floor" && selectedDetail === "needs-you"} disabled={!ready} onClick={() => onDetail("needs-you")}>Needs you {counters.needsYou || ""}</button>
         </nav>}
@@ -298,7 +296,7 @@ export function FactoryConsole({
               </div>
             </div>
             {view === "floor"
-              ? <FactoryFloor production={{ items: productionFloor, hiddenItems: inProgressItems.length - productionFloor.length, selected: selectedProduction, onSelect: selectProduction }} onOpenTasks={ready ? (id) => { selectProject(id); onDetail?.("queue"); } : undefined} onOpenMissions={ready ? (id) => { selectProject(id); onDetail?.("missions"); } : undefined} projectId={projectId} onProject={selectProject} floorAppearance={floorAppearance} selectedTaskId={selectedTask?.id} onSelectTask={ready ? selectTask : undefined} selectedAgentId={selectedDetail === "agent" ? selectedAgent?.id : undefined} state={scopedState} topologies={topologies} runPaths={runPaths} lastRunPaths={lastRunPaths} onSelectAgent={ready ? onSelectAgent : undefined} onSelectHumanRequest={ready ? onSelectHumanRequest : undefined} connected={ready} />
+              ? <FactoryFloor changes={productionItems} selectedChange={selectedProduction} onSelectChange={selectProduction} onProjectContent={onProjectContent} onAppearanceChange={changeFloorAppearance} onOpenLibrary={(id) => { if (id) selectProject(id); setLibraryOpen(true); }} onOpenTasks={ready ? (id) => { selectProject(id); onDetail?.("queue"); } : undefined} onOpenMissions={ready ? (id) => { selectProject(id); onDetail?.("missions"); } : undefined} projectId={projectId} onProject={selectProject} floorAppearance={floorAppearance} selectedTaskId={selectedTask?.id} onSelectTask={ready ? selectTask : undefined} selectedAgentId={selectedDetail === "agent" ? selectedAgent?.id : undefined} state={scopedState} topologies={topologies} runPaths={runPaths} lastRunPaths={lastRunPaths} onSelectAgent={ready ? onSelectAgent : undefined} onSelectHumanRequest={ready ? onSelectHumanRequest : undefined} connected={ready} />
               : <AgentList state={scopedState} selectedAgentId={selectedAgent?.id} ready={ready} onSelectAgent={ready ? onSelectAgent : undefined} />}
           </section>
 
@@ -307,7 +305,7 @@ export function FactoryConsole({
               <button type="button" aria-pressed={selectedDetail === "needs-you"} disabled={!ready || onDetail === undefined} onClick={() => onDetail?.("needs-you")}>Needs you <span>{counters.needsYou ?? "—"}</span></button>
               <button type="button" aria-pressed={selectedDetail === "missions"} disabled={!ready || onDetail === undefined} onClick={() => onDetail?.("missions")}>Missions</button>
               <button type="button" aria-pressed={selectedDetail === "queue"} disabled={!ready || onDetail === undefined} onClick={() => onDetail?.("queue")}>Tasks</button>
-              <button type="button" aria-pressed={selectedDetail === "production"} disabled={onDetail === undefined} onClick={() => onDetail?.("production")}>Production</button>
+              <button type="button" aria-pressed={selectedDetail === "production"} disabled={onDetail === undefined} onClick={() => onDetail?.("production")}>Changes</button>
               <button type="button" aria-pressed={selectedDetail === "agent"} disabled={!ready || onDetail === undefined} onClick={() => onDetail?.("agent")}>Agent</button>
             </div>
             {editError === undefined ? null : <p className="dfFactoryConsole__terminalError" role="alert">{editError}</p>}
@@ -367,6 +365,10 @@ export function FactoryConsole({
           </aside>
         </div>
       </main>
+      {!libraryOpen ? null : <ConsoleDialog label="Project library" title="LIBRARY" onClose={() => setLibraryOpen(false)}>
+        <p>Project documents. Ambient shelf visits are decoration; documents are read only when opened here.</p>
+        <ProjectLibrary state={scopedState} call={ready ? onProjectContent : undefined} draft={(agent, instruction) => { setLibraryOpen(false); onDraftLibraryTask?.(agent, instruction); }} />
+      </ConsoleDialog>}
       {settingsOpen !== true ? null : (
         <SettingsDialog
           onAttachmentRetention={ready ? onAttachmentRetention : undefined}
