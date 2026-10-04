@@ -2522,3 +2522,31 @@ test("opening a project shelf scopes Library without changing the floor filter",
   assert.ok(calls.some(({ operation, input }) => operation === "search" && input.project_id === ids.secondProject));
   await act(async () => tree.unmount());
 });
+
+
+test("Library source navigation synchronizes both inspectors and focus after another selection", async () => {
+  const selected = selectFloor(prepareFloor(fixtureState.projects, fixtureTopologies), "fine");
+  const [first, destination] = [...selected.detailByID.values()].filter((node) => node.project?.id === ids.project && node.path !== ".");
+  assert.ok(first && destination && first.id !== destination.id);
+  let tree;
+  await act(async () => { tree = create(createElement(FactoryConsole, { status: "ready", state: fixtureState, topologies: fixtureTopologies, onProjectContent: async () => ({ items: [] }) })); });
+  const room = () => tree.root.findByProps({ "aria-label": "Inspect room" });
+  const assertSelection = (id) => {
+    assert.equal(room().props.value, id);
+    const sources = tree.root.findAllByProps({ "aria-label": "Source contents" });
+    assert.equal(sources.length, id ? 1 : 0);
+    if (id) assert.equal(sources[0].findAllByType("code")[0].children.join(""), id);
+  };
+  for (let visit = 0; visit < 2; visit++) {
+    await act(async () => room().props.onChange({ target: { value: first.id } }));
+    assertSelection(first.id);
+    await act(async () => tree.root.findByType(FactoryFloor).props.onOpenLibrary(ids.project));
+    await act(async () => tree.root.findByType(ProjectLibrary).props.onSource(destination.id));
+    assertSelection(destination.id);
+    await act(async () => tree.root.findAllByType("button").find((button) => button.children.join("") === "Focus on floor").props.onClick());
+    assertSelection(destination.id);
+  }
+  await act(async () => room().props.onChange({ target: { value: "" } }));
+  assertSelection("");
+  await act(async () => tree.unmount());
+});

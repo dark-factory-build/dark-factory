@@ -31,7 +31,8 @@ import { spriteAtlas, spriteSheet, spriteSheetSize } from "./sprites/sprites.gen
 
 export type FactorySceneProps = Readonly<{
   proposals?: { items: readonly SceneProposal[]; selected?: string; onSelect: (id: string) => void };
-  onSelectEntity?: (entityId: string) => void;
+  requestedEntity?: { id: string };
+  onSelectEntity?: (entityId: string | undefined) => void;
   onOpenLibrary?: (projectId?: string) => void;
   onOpenBoard?: (projectId?: string) => void;
   appearance?: FloorAppearance;
@@ -406,7 +407,7 @@ function SceneWorkers({ nearby, errands, furniture, restingSeats, tray, peerQues
 }
 
 /** A disposable SVG projection of topology and current factory state. */
-export function FactoryScene({ proposals, onSelectEntity, onOpenLibrary, onOpenBoard, topology, detailNodes, workers, appearance = DEFAULT_FLOOR_APPEARANCE, omittedLocations = 0, selectedWorkerId, onSelectWorker, tasks = [], peerQuestions = NO_QUESTIONS, selectedTaskId, onSelectTask, onOpenTasks, onOpenMissions, onSelectHumanRequest, projectId, connected = true }: FactorySceneProps) {
+export function FactoryScene({ proposals, requestedEntity, onSelectEntity, onOpenLibrary, onOpenBoard, topology, detailNodes, workers, appearance = DEFAULT_FLOOR_APPEARANCE, omittedLocations = 0, selectedWorkerId, onSelectWorker, tasks = [], peerQuestions = NO_QUESTIONS, selectedTaskId, onSelectTask, onOpenTasks, onOpenMissions, onSelectHumanRequest, projectId, connected = true }: FactorySceneProps) {
   const [selectedRoomId, setSelectedRoomId] = useState<string>();
   const [search, setSearch] = useState("");
   const mapElement = useRef<HTMLDivElement>(null);
@@ -424,7 +425,7 @@ export function FactoryScene({ proposals, onSelectEntity, onOpenLibrary, onOpenB
     const observer = new ResizeObserver(updateViewport); observer.observe(map);
     return () => observer.disconnect();
   }, [topology.digest]);
-  const selectEntity = (id: string) => { setSelectedRoomId(id); onSelectEntity?.(id); };
+  const selectEntity = (id: string | undefined) => { setSelectedRoomId(id); onSelectEntity?.(id); };
   const [tooltip, setTooltip] = useState<{ text: string; x: number; y: number; top: number; bottom: number; room: number }>();
   const tooltipElement = useRef<HTMLDivElement>(null);
   const [linkedFrom, setLinkedFrom] = useState<string>();
@@ -455,6 +456,7 @@ export function FactoryScene({ proposals, onSelectEntity, onOpenLibrary, onOpenB
   for (const node of nodes.values()) for (const assembly of node.assemblies ?? []) if ((!assembly.proposalId || visibleProposals.some((proposal) => proposal.id === assembly.proposalId)) && !availableNodes.has(assembly.id)) availableNodes.set(assembly.id, { ...assembly, kind: "directory", project: node.project });
   const roomFor = (id: string) => layout.rooms.find((room) => room.id === id || nodes.get(room.id)?.assemblies?.some((assembly) => assembly.id === id || assembly.representedIds?.includes(id)));
   const focusEntity = (id: string) => { selectEntity(id); const room = roomFor(id); if (room) Array.from(mapElement.current?.querySelectorAll("[data-room-id]") ?? []).find((element) => element.getAttribute("data-room-id") === room.id)?.scrollIntoView({ block: "center", inline: "center", behavior: "instant" }); };
+  useEffect(() => { if (requestedEntity) { setSearch(""); focusEntity(requestedEntity.id); } }, [requestedEntity]);
   const operationMatches = (operation: SceneProposal["operations"][number], roomId: string, item?: RoomContent) => item === undefined
     ? operation.roomId === roomId || operation.entityId === roomId
     : operation.entityId === item.entityId || item.representedIds?.includes(operation.entityId ?? "") || operation.roomId === roomId && !operation.entityId;
@@ -665,7 +667,7 @@ export function FactoryScene({ proposals, onSelectEntity, onOpenLibrary, onOpenB
     {tooltip === undefined ? null : <div ref={tooltipElement} className="dfFactoryTooltip" role="tooltip" style={{ left: tooltip.x, top: tooltip.y, maxHeight: tooltip.room }}>{tooltip.text}</div>}
     </div>
     <section className="dfRoomDetails" aria-label="Room details">
-      <label>Room <select aria-label="Inspect room" value={selectedRoom?.id ?? ""} onChange={(event) => { if (event.target.value) selectEntity(event.target.value); else setSelectedRoomId(undefined); }}>
+      <label>Room <select aria-label="Inspect room" value={selectedRoom?.id ?? ""} onChange={(event) => selectEntity(event.target.value || undefined)}>
         <option value="">Select a room</option>
         {[...availableNodes.values()].sort((a, b) => compareText(a.project?.name ?? "", b.project?.name ?? "") || compareText(a.path, b.path) || compareText(a.label, b.label) || compareText(a.id, b.id)).map((node) => <option key={node.id} value={node.id}>{node.project?.name} · {node.label} · {node.path}</option>)}
       </select></label>
