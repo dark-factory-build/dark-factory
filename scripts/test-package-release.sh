@@ -64,6 +64,9 @@ run_packaged_smoke() {
         || fail "packaged factoryctl could not initialize a fresh home"
     "$smoke_bin/factoryctl" doctor --home "$smoke_home" >/dev/null \
         || fail "packaged factoryctl doctor rejected its fresh home"
+    smoke_go_module_cache="$smoke_home/Library/Caches/dark-factory/local-ci/trusted/go-mod"
+    [ ! -e "$smoke_go_module_cache" ] \
+        || fail "fresh packaged home unexpectedly created a trusted Go module cache"
 
     smoke_socket="$smoke_home/runtimes/factory.sock"
     "$smoke_bin/factoryd" --home "$smoke_home" \
@@ -92,6 +95,8 @@ run_packaged_smoke() {
         sleep 0.05
     done
     [ -e "$smoke_socket" ] || fail "packaged factoryd socket disappeared before shutdown"
+    [ ! -e "$smoke_go_module_cache" ] \
+        || fail "packaged daemon created a trusted Go module cache without a worker"
     kill -TERM "$smoke_pid" 2>/dev/null \
         || fail "could not terminate packaged factoryd"
     if wait "$smoke_pid"; then

@@ -6,6 +6,7 @@
 ci_original_path=${PATH-}
 ci_original_home=${HOME-}
 ci_requested_cache_root=${DF_CI_CACHE_ROOT-}
+ci_requested_go_module_cache=${DF_CI_GO_MODULE_CACHE-}
 ci_node=${DF_CI_NODE-}
 ci_corepack=${DF_CI_COREPACK-}
 ci_old_ifs=$IFS
@@ -110,13 +111,90 @@ IFS=$ci_old_ifs
 
 ci_script_dir=$(CDPATH= cd -- "$(/usr/bin/dirname "$0")" && pwd -P)
 ci_repository_root=$(CDPATH= cd -- "$ci_script_dir/.." && pwd -P)
+ci_skip_cache_setup=0
 if [ -n "$ci_requested_cache_root" ]; then
-    ci_cache_root=$ci_requested_cache_root
+    if [ "$ci_requested_cache_root" = /var/empty ] \
+        || [ "$ci_requested_cache_root" = /private/var/empty ]; then
+        # /var/empty is the deliberate no-cache sentinel exported by the
+        # unwritable-HOME fallback below. Preserve it across nested sources.
+        ci_cache_root=/var/empty
+        ci_skip_cache_setup=1
+    else
+        ci_cache_root=$ci_requested_cache_root
+    fi
 elif [ -n "$ci_original_home" ] && [ "$ci_original_home" != /dev/null ]; then
-    ci_cache_root="$ci_original_home/Library/Caches/dark-factory/local-ci/trusted"
+    ci_home_can_host_cache=0
+    if [ -d "$ci_original_home" ] && [ -w "$ci_original_home" ]; then
+        ci_home_can_host_cache=1
+    elif [ ! -e "$ci_original_home" ]; then
+        ci_home_parent=$(/usr/bin/dirname -- "$ci_original_home")
+        if [ -d "$ci_home_parent" ] && [ -w "$ci_home_parent" ]; then
+            ci_home_can_host_cache=1
+        fi
+    fi
+    if [ "$ci_home_can_host_cache" -eq 1 ]; then
+        ci_cache_root="$ci_original_home/Library/Caches/dark-factory/local-ci/trusted"
+    else
+        # Some repository-contract fixtures intentionally run after the
+        # boundary has installed HOME=/var/empty. Do not probe that HOME by
+        # creating Library/Caches there; run without a trusted cache instead.
+        ci_cache_root=/var/empty
+        ci_skip_cache_setup=1
+    fi
 else
     echo "local-ci: HOME is required when DF_CI_CACHE_ROOT is unset" >&2
     return 1
+fi
+
+ci_go_module_cache=
+if [ -n "$ci_requested_go_module_cache" ]; then
+    case "$ci_requested_go_module_cache" in
+        /*) ;;
+        *) echo "local-ci: shared Go module cache must be absolute" >&2; return 1 ;;
+    esac
+    case "$ci_requested_go_module_cache" in
+        ''|*/../*|*/..|*/./*|*/.)
+            echo "local-ci: shared Go module cache must be canonical" >&2
+            return 1
+            ;;
+    esac
+    ci_go_module_cache_probe=$ci_requested_go_module_cache
+    while [ "$ci_go_module_cache_probe" != / ]; do
+        if [ -L "$ci_go_module_cache_probe" ]; then
+            echo "local-ci: refusing symlink ancestor in shared Go module cache path" >&2
+            return 1
+        fi
+        ci_go_module_cache_probe=$(/usr/bin/dirname -- "$ci_go_module_cache_probe")
+    done
+    if [ -e "$ci_requested_go_module_cache" ] && [ ! -d "$ci_requested_go_module_cache" ]; then
+        echo "local-ci: refusing unsafe shared Go module cache path" >&2
+        return 1
+    fi
+    [ -d "$ci_requested_go_module_cache" ] || {
+        echo "local-ci: shared Go module cache is unavailable" >&2
+        return 1
+    }
+    ci_go_module_cache=$(CDPATH= cd -- "$ci_requested_go_module_cache" && pwd -P)
+    ci_go_module_cache_prefix=${ci_go_module_cache%/Library/Caches/dark-factory/local-ci/trusted/go-mod}
+    case "$ci_go_module_cache" in
+        */Library/Caches/dark-factory/local-ci/trusted/go-mod) ;;
+        *)
+            echo "local-ci: shared Go module cache must be the trusted go-mod directory" >&2
+            return 1
+            ;;
+    esac
+    case "$ci_go_module_cache_prefix" in
+        ''|/|/System|/System/*|/Library|/Library/*|/private/var|/private/var/*|/Volumes|/Volumes/*|/Network|/Network/*)
+            echo "local-ci: shared Go module cache has an unsafe account root" >&2
+            return 1
+            ;;
+    esac
+    case "$ci_go_module_cache" in
+        "$ci_repository_root"|"$ci_repository_root"/*)
+            echo "local-ci: shared Go module cache must be outside the checkout" >&2
+            return 1
+            ;;
+    esac
 fi
 case "$ci_cache_root" in
     /)
@@ -174,19 +252,21 @@ for ci_private_child in data state; do
 done
 /bin/mkdir -p "$ci_private_root/data" "$ci_private_root/state"
 /bin/chmod 700 "$ci_private_root"
-/bin/mkdir -p -m 700 "$ci_cache_root"
-ci_cache_children='corepack go-build go-mod go cache npm pnpm-store'
-for ci_cache_child in $ci_cache_children; do
-    ci_cache_path="$ci_cache_root/$ci_cache_child"
-    if [ -L "$ci_cache_path" ] || { [ -e "$ci_cache_path" ] && [ ! -d "$ci_cache_path" ]; }; then
-        echo "local-ci: refusing unsafe cache/$ci_cache_child path" >&2
-        return 1
-    fi
-done
-for ci_cache_child in $ci_cache_children; do
-    ci_cache_path="$ci_cache_root/$ci_cache_child"
-    [ -d "$ci_cache_path" ] || /bin/mkdir "$ci_cache_path"
-done
+if [ "$ci_skip_cache_setup" -eq 0 ]; then
+    /bin/mkdir -p -m 700 "$ci_cache_root"
+    ci_cache_children='corepack go-build go-mod go cache npm pnpm-store'
+    for ci_cache_child in $ci_cache_children; do
+        ci_cache_path="$ci_cache_root/$ci_cache_child"
+        if [ -L "$ci_cache_path" ] || { [ -e "$ci_cache_path" ] && [ ! -d "$ci_cache_path" ]; }; then
+            echo "local-ci: refusing unsafe cache/$ci_cache_child path" >&2
+            return 1
+        fi
+    done
+    for ci_cache_child in $ci_cache_children; do
+        ci_cache_path="$ci_cache_root/$ci_cache_child"
+        [ -d "$ci_cache_path" ] || /bin/mkdir "$ci_cache_path"
+    done
+fi
 
 if [ -n "$ci_saved_local_ci_directory" ]; then
     export DARK_FACTORY_LOCAL_CI_DIRECTORY="$ci_saved_local_ci_directory"
@@ -207,7 +287,12 @@ export npm_config_globalconfig=/var/empty/.npmrc-global NPM_CONFIG_GLOBALCONFIG=
 export npm_config_cache="$ci_cache_root/npm" NPM_CONFIG_CACHE="$ci_cache_root/npm"
 export pnpm_config_store_dir="$ci_cache_root/pnpm-store"
 export NETRC=/dev/null
-export GOPATH="$ci_cache_root/go" GOCACHE="$ci_cache_root/go-build" GOMODCACHE="$ci_cache_root/go-mod"
+export GOPATH="$ci_cache_root/go" GOCACHE="$ci_cache_root/go-build"
+if [ -n "$ci_go_module_cache" ]; then
+    export DF_CI_GO_MODULE_CACHE="$ci_go_module_cache" GOMODCACHE="$ci_go_module_cache" GOPROXY=off GOSUMDB=off
+else
+    export GOMODCACHE="$ci_cache_root/go-mod" GOPROXY=off GOSUMDB=off
+fi
 # Keep module directories removable when retiring a cache root.
 export GOFLAGS=-modcacherw
 export LC_ALL=C

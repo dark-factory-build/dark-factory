@@ -617,7 +617,7 @@ func Build(request Request) (Launch, error) {
 		return Launch{
 			executable:   request.installation.executable,
 			argv:         []string{shellPath, runner.ProviderTaskPath},
-			environment:  request.runtime.environment(request.provider),
+			environment:  request.runtime.environmentForRole(request.provider, request.role),
 			taskDelivery: TaskDeliveryFD11,
 		}, nil
 	case kernel.ProviderClaudeCode:
@@ -652,7 +652,7 @@ func Build(request Request) (Launch, error) {
 				"args":    []string{"attempt", "mcp"},
 			},
 		}
-		environment := request.runtime.environment(request.provider)
+		environment := request.runtime.environmentForRole(request.provider, request.role)
 		if browser != "" {
 			servers["factory_browser"] = map[string]any{"command": browser, "args": browserArgs}
 		}
@@ -728,7 +728,7 @@ func Build(request Request) (Launch, error) {
 		if request.reasoningEffort != "" {
 			argv = append(argv, "-c", fmt.Sprintf("model_reasoning_effort=%q", request.reasoningEffort))
 		}
-		environment := request.runtime.environment(request.provider)
+		environment := request.runtime.environmentForRole(request.provider, request.role)
 		if request.role == kernel.RoleOrchestrator && request.runtime.customerMaintainer {
 			argv = append(argv, "-c", "mcp_servers.dark_factory_maintainer={command="+tomlBasicString(request.runtime.factoryctl)+`,args=["attempt","maintainer-mcp"],env_vars=["DARK_FACTORY_SOCKET","DARK_FACTORY_ATTEMPT_TOKEN_FILE"],enabled=true,required=true,default_tools_approval_mode="approve"}`)
 		} else if request.role == kernel.RoleOrchestrator {
@@ -782,6 +782,12 @@ func sandboxGrants(request Request) []grant {
 	// Node/Corepack reads the system OpenSSL configuration before dispatch.
 	// Permit this file, not the surrounding directory or operator configuration.
 	grants = append(grants, grant{"/System/Library/OpenSSL/openssl.cnf", false})
+	// Go downloads are prepared by the trusted local-CI boundary. Workers may
+	// consume that cache, but never mutate the operator home or the cache that
+	// belongs to another trust context.
+	if request.role == kernel.RoleWorker && request.installation.provider != kernel.ProviderShell {
+		grants = append(grants, grant{goModuleCachePath(request.runtime.accountHome), false})
+	}
 	for _, root := range filepath.SplitList(request.runtime.toolchainReadRoots) {
 		grants = append(grants, grant{root, false})
 	}
@@ -1076,6 +1082,10 @@ func (runtime RuntimePaths) valid() bool {
 }
 
 func (runtime RuntimePaths) environment(kind kernel.Provider) []string {
+	return runtime.environmentForRole(kind, kernel.RoleWorker)
+}
+
+func (runtime RuntimePaths) environmentForRole(kind kernel.Provider, role kernel.AgentRole) []string {
 	home := runtime.home
 	if kind == kernel.ProviderClaudeCode {
 		home = runtime.accountHome
@@ -1096,14 +1106,25 @@ func (runtime RuntimePaths) environment(kind kernel.Provider) []string {
 	// build caches live in the private runtime home rather than the account's.
 	if kind != kernel.ProviderShell {
 		environment = append(environment,
+			"GOENV=off",
+			"GOTOOLCHAIN=local",
 			"GOCACHE="+filepath.Join(runtime.home, ".cache", "go-build"),
 			"GOPATH="+filepath.Join(runtime.home, "go"),
-			"GOMODCACHE="+filepath.Join(runtime.home, "go", "pkg", "mod"),
+			"GOPROXY=off",
+			"GOSUMDB=off",
 			"CARGO_HOME="+filepath.Join(runtime.home, ".cargo"),
 			"RUSTUP_HOME="+filepath.Join(runtime.accountHome, ".rustup"),
 			"COREPACK_HOME="+filepath.Join(runtime.home, ".cache", "corepack"),
 			"npm_config_cache="+filepath.Join(runtime.home, ".cache", "npm"),
 			"XDG_CACHE_HOME="+filepath.Join(runtime.home, ".cache"))
+		if role == kernel.RoleWorker {
+			environment = append(environment,
+				"GOMODCACHE="+goModuleCachePath(runtime.accountHome),
+				"DF_CI_GO_MODULE_CACHE="+goModuleCachePath(runtime.accountHome))
+		}
+		if kind == kernel.ProviderClaudeCode {
+			environment = append(environment, "DF_CI_CACHE_ROOT="+filepath.Join(runtime.home, ".cache", "dark-factory", "local-ci", "trusted"))
+		}
 	}
 	switch kind {
 	case kernel.ProviderCodex:
@@ -1146,6 +1167,63 @@ func (runtime RuntimePaths) environment(kind kernel.Provider) []string {
 		"GIT_SSH_COMMAND=/usr/bin/false",
 		"GH_CONFIG_DIR=/dev/null",
 	)
+}
+
+// goModuleCachePath is the one shared-cache path native workers may see. It
+// matches local-ci-environment.sh's trusted cache layout and deliberately
+// leaves the rest of the account home outside the provider grant.
+func goModuleCachePath(accountHome string) string {
+	return filepath.Join(accountHome, "Library", "Caches", "dark-factory", "local-ci", "trusted", "go-mod")
+}
+
+// PrepareGoModuleCache provisions the exact trusted directory that native
+// workers consume read-only. It runs before the provider sandbox is built;
+// the local-CI boundary still validates the complete path before use.
+func (runtime RuntimePaths) PrepareGoModuleCache() error {
+	if !validAbsolute(runtime.accountHome, maxPathBytes-len("/"+codexConfigDir)) {
+		return ErrInvalid
+	}
+	if err := validateGoModuleCacheDirectory(runtime.accountHome); err != nil {
+		return err
+	}
+	current := runtime.accountHome
+	for _, component := range []string{"Library", "Caches", "dark-factory", "local-ci", "trusted", "go-mod"} {
+		current = filepath.Join(current, component)
+		info, err := os.Lstat(current)
+		if errors.Is(err, os.ErrNotExist) {
+			mkdirErr := os.Mkdir(current, 0o700)
+			if mkdirErr != nil && !errors.Is(mkdirErr, os.ErrExist) {
+				return fmt.Errorf("provider: create trusted Go module cache directory: %w", mkdirErr)
+			}
+			info, err = os.Lstat(current)
+		}
+		if err != nil {
+			return fmt.Errorf("provider: inspect trusted Go module cache directory: %w", err)
+		}
+		if err := validateGoModuleCacheDirectoryInfo(info); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateGoModuleCacheDirectory(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return fmt.Errorf("provider: inspect trusted Go module cache directory: %w", err)
+	}
+	return validateGoModuleCacheDirectoryInfo(info)
+}
+
+func validateGoModuleCacheDirectoryInfo(info os.FileInfo) error {
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return fmt.Errorf("provider: trusted Go module cache path is not a directory")
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || uint64(stat.Uid) != uint64(os.Geteuid()) || info.Mode().Perm()&0o022 != 0 {
+		return fmt.Errorf("provider: trusted Go module cache directory has unsafe ownership or mode")
+	}
+	return nil
 }
 
 func validAbsolute(value string, limit int) bool {
