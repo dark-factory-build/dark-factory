@@ -15,9 +15,9 @@ import (
 var _ browser.AgentControlBackend = (*browserBackend)(nil)
 
 func (backend *browserBackend) ControlAgent(ctx context.Context, principal browser.Principal, request browserprotocol.AgentControl) (browserprotocol.AgentControlResult, error) {
-	operation, opErr := browserID(request.OperationID, kernel.TaskInterventionIDFromBytes)
-	task, taskErr := browserID(request.TaskID, kernel.TaskIDFromBytes)
-	run, runErr := browserID(request.RunID, kernel.RunIDFromBytes)
+	operation, opErr := decodeID(request.OperationID, kernel.TaskInterventionIDFromBytes)
+	task, taskErr := decodeID(request.TaskID, kernel.TaskIDFromBytes)
+	run, runErr := decodeID(request.RunID, kernel.RunIDFromBytes)
 	taskRevision, taskRevErr := browserDecimal(request.ExpectedTaskRevision)
 	runRevision, runRevErr := browserDecimal(request.ExpectedRunRevision)
 	if errors.Join(opErr, taskErr, runErr, taskRevErr, runRevErr) != nil {
@@ -49,8 +49,8 @@ func (backend *browserBackend) ControlAgent(ctx context.Context, principal brows
 		defer release()
 		var successor *kernel.NewTask
 		if spec.Kind == kernel.TaskInterventionReplace {
-			id, idErr := browserID(request.SuccessorTaskID, kernel.TaskIDFromBytes)
-			incarnation, incErr := browserID(request.SuccessorIncarnationID, kernel.IncarnationIDFromBytes)
+			id, idErr := decodeID(request.SuccessorTaskID, kernel.TaskIDFromBytes)
+			incarnation, incErr := decodeID(request.SuccessorIncarnationID, kernel.IncarnationIDFromBytes)
 			if errors.Join(idErr, incErr) != nil {
 				return browserprotocol.AgentControlResult{}, browser.ErrStale
 			}
@@ -103,7 +103,7 @@ func (backend *browserBackend) TaskHistory(ctx context.Context, rawClient [brows
 		return browserprotocol.TaskHistory{}, err
 	}
 	defer release()
-	taskID, err := browserID(request.TaskID, kernel.TaskIDFromBytes)
+	taskID, err := decodeID(request.TaskID, kernel.TaskIDFromBytes)
 	if err != nil {
 		return browserprotocol.TaskHistory{}, browser.ErrStale
 	}
@@ -152,7 +152,7 @@ func (backend *browserBackend) TaskDetail(ctx context.Context, rawClient [browse
 		return browserprotocol.TaskDetail{}, err
 	}
 	defer release()
-	taskID, err := browserID(request.TaskID, kernel.TaskIDFromBytes)
+	taskID, err := decodeID(request.TaskID, kernel.TaskIDFromBytes)
 	if err != nil {
 		return browserprotocol.TaskDetail{}, browser.ErrStale
 	}
@@ -264,7 +264,7 @@ func (backend *browserBackend) TaskList(ctx context.Context, rawClient [browserp
 		return browserprotocol.TaskList{}, err
 	}
 	defer release()
-	agentID, err := browserID(request.AgentID, kernel.AgentIDFromBytes)
+	agentID, err := decodeID(request.AgentID, kernel.AgentIDFromBytes)
 	if err != nil {
 		return browserprotocol.TaskList{}, browser.ErrStale
 	}
@@ -274,7 +274,7 @@ func (backend *browserBackend) TaskList(ctx context.Context, rawClient [browserp
 		if request.BeforeUpdatedAt == nil {
 			return browserprotocol.TaskList{}, browser.ErrStale
 		}
-		beforeID, err = browserID(request.BeforeTaskID, kernel.TaskIDFromBytes)
+		beforeID, err = decodeID(request.BeforeTaskID, kernel.TaskIDFromBytes)
 		if err != nil {
 			return browserprotocol.TaskList{}, browser.ErrStale
 		}

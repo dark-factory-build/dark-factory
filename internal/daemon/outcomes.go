@@ -2,20 +2,12 @@ package daemon
 
 import (
 	"context"
-	"encoding/hex"
 	"math"
 
 	"github.com/dark-factory-build/dark-factory/internal/api"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 )
 
-func outcomeID(s string) (kernel.OutcomeID, error) {
-	b, err := hex.DecodeString(s)
-	if err != nil || len(b) != 16 {
-		return kernel.OutcomeID{}, kernel.ErrInvalidValue
-	}
-	return kernel.OutcomeIDFromBytes(b)
-}
 func outcomeDTO(v kernel.OutcomeRevision) api.Outcome {
 	return api.Outcome{ID: v.ID.String(), ProjectID: v.ProjectID.String(), Revision: uint64(v.Revision.Int64()), Document: v.Document, Kind: v.Kind, Objective: v.Objective, Criteria: v.Criteria, State: v.State, Author: v.Author, Authority: v.Authority, ObjectiveWorkRevision: uint64(v.ObjectiveWorkRevision.Int64()), Stale: v.Stale, MissingReferences: v.MissingReferences}
 }
@@ -39,11 +31,11 @@ func (daemon *Daemon) outcomes(ctx context.Context, call api.Call) api.Reply {
 	}
 	if call.Kind() == api.CallOutcomeWrite {
 		in, _ := call.OutcomeWriteInput()
-		id, err := outcomeID(in.ID)
+		id, err := decodeID(in.ID, kernel.OutcomeIDFromBytes)
 		if err != nil {
 			return newErrorReply(api.RemoteInvalidRequest)
 		}
-		project, err := projectID(in.ProjectID)
+		project, err := decodeID(in.ProjectID, kernel.ProjectIDFromBytes)
 		if err != nil {
 			return newErrorReply(api.RemoteInvalidRequest)
 		}
@@ -69,10 +61,10 @@ func (daemon *Daemon) outcomes(ctx context.Context, call api.Call) api.Reply {
 		if call.Kind() == api.CallOutcomeList {
 			l, _ := call.OutcomeListInput()
 			if l.ProjectID != "" {
-				project, err = projectID(l.ProjectID)
+				project, err = decodeID(l.ProjectID, kernel.ProjectIDFromBytes)
 			}
 		} else if in.ProjectID != "" {
-			project, err = projectID(in.ProjectID)
+			project, err = decodeID(in.ProjectID, kernel.ProjectIDFromBytes)
 		}
 		if err != nil {
 			return newErrorReply(api.RemoteInvalidRequest)
@@ -80,10 +72,10 @@ func (daemon *Daemon) outcomes(ctx context.Context, call api.Call) api.Reply {
 	} else {
 		if call.Kind() == api.CallOutcomeList {
 			l, _ := call.OutcomeListInput()
-			project, err = projectID(l.ProjectID)
+			project, err = decodeID(l.ProjectID, kernel.ProjectIDFromBytes)
 		} else {
 			in, _ := call.OutcomeReadInput()
-			project, err = projectID(in.ProjectID)
+			project, err = decodeID(in.ProjectID, kernel.ProjectIDFromBytes)
 		}
 		if err != nil {
 			return newErrorReply(api.RemoteInvalidRequest)
@@ -105,7 +97,7 @@ func (daemon *Daemon) outcomes(ctx context.Context, call api.Call) api.Reply {
 		if in.Revision > uint64(math.MaxInt64) {
 			return newErrorReply(api.RemoteInvalidRequest)
 		}
-		id, e := outcomeID(in.ID)
+		id, e := decodeID(in.ID, kernel.OutcomeIDFromBytes)
 		if e != nil {
 			return newErrorReply(api.RemoteInvalidRequest)
 		}

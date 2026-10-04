@@ -131,22 +131,6 @@ func parseID(value string) ([]byte, error) {
 	return decoded, nil
 }
 
-func parseProjectID(value string) (kernel.ProjectID, error) {
-	decoded, err := parseID(value)
-	if err != nil {
-		return kernel.ProjectID{}, err
-	}
-	return kernel.ProjectIDFromBytes(decoded)
-}
-
-func parseAgentID(value string) (kernel.AgentID, error) {
-	decoded, err := parseID(value)
-	if err != nil {
-		return kernel.AgentID{}, err
-	}
-	return kernel.AgentIDFromBytes(decoded)
-}
-
 // optionalAgentText serves a task's assigned agent: the zero identity is an
 // empty string, an unclaimed task any eligible worker may take.
 func optionalAgentText(id kernel.AgentID) string {
@@ -162,63 +146,7 @@ func parseOptionalAgentID(value string) (kernel.AgentID, error) {
 	if value == "" {
 		return kernel.AgentID{}, nil
 	}
-	return parseAgentID(value)
-}
-
-func parseAccountID(value string) (kernel.AccountID, error) {
-	decoded, err := parseID(value)
-	if err != nil {
-		return kernel.AccountID{}, err
-	}
-	return kernel.AccountIDFromBytes(decoded)
-}
-
-func parseTaskID(value string) (kernel.TaskID, error) {
-	decoded, err := parseID(value)
-	if err != nil {
-		return kernel.TaskID{}, err
-	}
-	return kernel.TaskIDFromBytes(decoded)
-}
-
-func parseRunID(value string) (kernel.RunID, error) {
-	decoded, err := parseID(value)
-	if err != nil {
-		return kernel.RunID{}, err
-	}
-	return kernel.RunIDFromBytes(decoded)
-}
-
-func parseTaskInterventionID(value string) (kernel.TaskInterventionID, error) {
-	decoded, err := parseID(value)
-	if err != nil {
-		return kernel.TaskInterventionID{}, err
-	}
-	return kernel.TaskInterventionIDFromBytes(decoded)
-}
-
-func parseHumanRequestID(value string) (kernel.HumanRequestID, error) {
-	decoded, err := parseID(value)
-	if err != nil {
-		return kernel.HumanRequestID{}, err
-	}
-	return kernel.HumanRequestIDFromBytes(decoded)
-}
-
-func parseHumanDeliveryID(value string) (kernel.HumanRequestDeliveryID, error) {
-	decoded, err := parseID(value)
-	if err != nil {
-		return kernel.HumanRequestDeliveryID{}, err
-	}
-	return kernel.HumanRequestDeliveryIDFromBytes(decoded)
-}
-
-func parseIncarnationID(value string) (kernel.IncarnationID, error) {
-	decoded, err := parseID(value)
-	if err != nil {
-		return kernel.IncarnationID{}, err
-	}
-	return kernel.IncarnationIDFromBytes(decoded)
+	return decodeID(value, kernel.AgentIDFromBytes)
 }
 
 func parseAgentRole(value string) (kernel.AgentRole, error) {

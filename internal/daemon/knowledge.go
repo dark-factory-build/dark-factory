@@ -16,7 +16,7 @@ func (daemon *Daemon) knowledgeRepository(ctx context.Context, project kernel.Pr
 	if raw == "" {
 		repository, found, err = daemon.store.DefaultProjectRepository(ctx, project)
 	} else {
-		id, e := browserID(raw, kernel.RepositoryIDFromBytes)
+		id, e := decodeID(raw, kernel.RepositoryIDFromBytes)
 		if e != nil {
 			return kernel.RepositoryID{}, e
 		}

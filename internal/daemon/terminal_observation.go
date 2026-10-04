@@ -237,15 +237,15 @@ func (daemon *Daemon) terminalObserve(ctx context.Context, call api.Call) api.Re
 	if !ok {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
-	project, err := parseProjectID(input.ProjectID)
+	project, err := decodeID(input.ProjectID, kernel.ProjectIDFromBytes)
 	if err != nil {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
-	task, err := parseTaskID(input.TaskID)
+	task, err := decodeID(input.TaskID, kernel.TaskIDFromBytes)
 	if err != nil {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
-	runID, err := parseRunID(input.RunID)
+	runID, err := decodeID(input.RunID, kernel.RunIDFromBytes)
 	if err != nil {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
@@ -279,15 +279,15 @@ func (daemon *Daemon) operatorTerminalObserve(ctx context.Context, call api.Call
 	if !ok {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
-	project, err := parseProjectID(input.ProjectID)
+	project, err := decodeID(input.ProjectID, kernel.ProjectIDFromBytes)
 	if err != nil {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
-	task, err := parseTaskID(input.TaskID)
+	task, err := decodeID(input.TaskID, kernel.TaskIDFromBytes)
 	if err != nil {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
-	runID, err := parseRunID(input.RunID)
+	runID, err := decodeID(input.RunID, kernel.RunIDFromBytes)
 	if err != nil {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}

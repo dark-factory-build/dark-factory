@@ -238,7 +238,7 @@ func (backend *browserBackend) TerminalTarget(ctx context.Context, rawClient [br
 		return browserprotocol.TerminalTarget{}, err
 	}
 	defer release()
-	agentID, err := browserID(request.AgentID, kernel.AgentIDFromBytes)
+	agentID, err := decodeID(request.AgentID, kernel.AgentIDFromBytes)
 	if err != nil {
 		return browserprotocol.TerminalTarget{}, browser.ErrStale
 	}
@@ -291,15 +291,15 @@ func (backend *browserBackend) EnqueueTask(ctx context.Context, rawClient [brows
 		return browserprotocol.TaskEnqueueResult{}, err
 	}
 	defer release()
-	taskID, err := browserID(request.TaskID, kernel.TaskIDFromBytes)
+	taskID, err := decodeID(request.TaskID, kernel.TaskIDFromBytes)
 	if err != nil {
 		return browserprotocol.TaskEnqueueResult{}, browser.ErrStale
 	}
-	incarnationID, err := browserID(request.IncarnationID, kernel.IncarnationIDFromBytes)
+	incarnationID, err := decodeID(request.IncarnationID, kernel.IncarnationIDFromBytes)
 	if err != nil {
 		return browserprotocol.TaskEnqueueResult{}, browser.ErrStale
 	}
-	agentID, err := browserID(request.AgentID, kernel.AgentIDFromBytes)
+	agentID, err := decodeID(request.AgentID, kernel.AgentIDFromBytes)
 	if err != nil {
 		return browserprotocol.TaskEnqueueResult{}, browser.ErrStale
 	}
@@ -309,7 +309,7 @@ func (backend *browserBackend) EnqueueTask(ctx context.Context, rawClient [brows
 	}
 	var repositoryID kernel.RepositoryID
 	if request.RepositoryID != "" {
-		repositoryID, err = browserID(request.RepositoryID, kernel.RepositoryIDFromBytes)
+		repositoryID, err = decodeID(request.RepositoryID, kernel.RepositoryIDFromBytes)
 		if err != nil {
 			return browserprotocol.TaskEnqueueResult{}, browser.ErrStale
 		}
@@ -423,7 +423,7 @@ func (backend *browserBackend) UpdateAgent(ctx context.Context, rawClient [brows
 	if request.AccountID != nil && !client.CapabilityMask.Has(kernel.BrowserCapabilityAdministration) {
 		return browserprotocol.AgentUpdateResult{}, browser.ErrUnauthorized
 	}
-	agentID, err := browserID(request.AgentID, kernel.AgentIDFromBytes)
+	agentID, err := decodeID(request.AgentID, kernel.AgentIDFromBytes)
 	if err != nil {
 		return browserprotocol.AgentUpdateResult{}, browser.ErrStale
 	}
@@ -444,7 +444,7 @@ func (backend *browserBackend) UpdateAgent(ctx context.Context, rawClient [brows
 		// anything else must be one canonical account identity.
 		selected := kernel.AccountID{}
 		if *request.AccountID != "" {
-			if selected, err = browserID(*request.AccountID, kernel.AccountIDFromBytes); err != nil {
+			if selected, err = decodeID(*request.AccountID, kernel.AccountIDFromBytes); err != nil {
 				return browserprotocol.AgentUpdateResult{}, browser.ErrStale
 			}
 		}
@@ -479,7 +479,7 @@ func (backend *browserBackend) SetProjectLimits(ctx context.Context, rawClient [
 		return browserprotocol.ProjectLimitsResult{}, err
 	}
 	defer release()
-	projectID, err := browserID(request.ProjectID, kernel.ProjectIDFromBytes)
+	projectID, err := decodeID(request.ProjectID, kernel.ProjectIDFromBytes)
 	if err != nil {
 		return browserprotocol.ProjectLimitsResult{}, browser.ErrStale
 	}
@@ -531,7 +531,7 @@ func (backend *browserBackend) CreateProject(ctx context.Context, rawClient [bro
 		return browserprotocol.ProjectCreateResult{}, err
 	}
 	defer release()
-	projectID, err := browserID(request.ProjectID, kernel.ProjectIDFromBytes)
+	projectID, err := decodeID(request.ProjectID, kernel.ProjectIDFromBytes)
 	if err != nil {
 		return browserprotocol.ProjectCreateResult{}, browser.ErrStale
 	}
@@ -560,7 +560,7 @@ func (backend *browserBackend) Repositories(ctx context.Context, rawClient [brow
 		return browserprotocol.Repositories{}, err
 	}
 	defer release()
-	projectID, err := browserID(request.ProjectID, kernel.ProjectIDFromBytes)
+	projectID, err := decodeID(request.ProjectID, kernel.ProjectIDFromBytes)
 	if err != nil {
 		return browserprotocol.Repositories{}, browser.ErrStale
 	}
@@ -598,13 +598,13 @@ func (backend *browserBackend) MutateRepository(ctx context.Context, rawClient [
 	if err != nil {
 		return browserprotocol.RepositoryMutateResult{}, mapBrowserError(err)
 	}
-	parse := func() (kernel.RepositoryID, error) { return browserID(request.ID, kernel.RepositoryIDFromBytes) }
+	parse := func() (kernel.RepositoryID, error) { return decodeID(request.ID, kernel.RepositoryIDFromBytes) }
 	if request.Action == "add" {
 		id, err := parse()
 		if err != nil {
 			return browserprotocol.RepositoryMutateResult{}, browser.ErrStale
 		}
-		project, err := browserID(request.ProjectID, kernel.ProjectIDFromBytes)
+		project, err := decodeID(request.ProjectID, kernel.ProjectIDFromBytes)
 		if err != nil {
 			return browserprotocol.RepositoryMutateResult{}, browser.ErrStale
 		}
@@ -687,7 +687,7 @@ func (backend *browserBackend) UpdateTask(ctx context.Context, rawClient [browse
 		return browserprotocol.TaskUpdateResult{}, err
 	}
 	defer release()
-	taskID, err := browserID(request.TaskID, kernel.TaskIDFromBytes)
+	taskID, err := decodeID(request.TaskID, kernel.TaskIDFromBytes)
 	if err != nil {
 		return browserprotocol.TaskUpdateResult{}, browser.ErrStale
 	}
@@ -697,7 +697,7 @@ func (backend *browserBackend) UpdateTask(ctx context.Context, rawClient [browse
 	}
 	patch := kernel.TaskPatch{Title: request.Title, Body: request.Body, Priority: request.Priority, Cancel: request.Status != nil && *request.Status == "cancelled"}
 	if request.AssignedAgentID != nil {
-		assigned, err := browserID(*request.AssignedAgentID, kernel.AgentIDFromBytes)
+		assigned, err := decodeID(*request.AssignedAgentID, kernel.AgentIDFromBytes)
 		if err != nil {
 			return browserprotocol.TaskUpdateResult{}, browser.ErrStale
 		}
@@ -751,7 +751,7 @@ func (backend *browserBackend) Topology(ctx context.Context, rawClient [browserp
 	if backend.owner == nil {
 		return browserprotocol.Topology{}, browser.ErrNotFound
 	}
-	projectID, err := browserID(request.ProjectID, kernel.ProjectIDFromBytes)
+	projectID, err := decodeID(request.ProjectID, kernel.ProjectIDFromBytes)
 	if err != nil {
 		return browserprotocol.Topology{}, browser.ErrStale
 	}
@@ -996,7 +996,7 @@ func (backend *browserBackend) RunPaths(ctx context.Context, rawClient [browserp
 	if backend.owner == nil {
 		return browserprotocol.RunPaths{}, browser.ErrNotFound
 	}
-	agentID, err := browserID(request.AgentID, kernel.AgentIDFromBytes)
+	agentID, err := decodeID(request.AgentID, kernel.AgentIDFromBytes)
 	if err != nil {
 		return browserprotocol.RunPaths{}, browser.ErrStale
 	}
@@ -1158,7 +1158,7 @@ func (backend *browserBackend) RevokeBrowserClient(ctx context.Context, rawClien
 		return browserprotocol.BrowserClientRevokeResult{}, err
 	}
 	defer release()
-	id, err := browserID(request.ClientID, kernel.BrowserClientIDFromBytes)
+	id, err := decodeID(request.ClientID, kernel.BrowserClientIDFromBytes)
 	if err != nil || id == self {
 		return browserprotocol.BrowserClientRevokeResult{}, browser.ErrInvalidRequest
 	}
@@ -1182,7 +1182,7 @@ func (backend *browserBackend) UpdateAccount(ctx context.Context, rawClient [bro
 		return browserprotocol.AccountUpdateResult{}, err
 	}
 	defer release()
-	id, err := browserID(request.AccountID, kernel.AccountIDFromBytes)
+	id, err := decodeID(request.AccountID, kernel.AccountIDFromBytes)
 	if err != nil {
 		return browserprotocol.AccountUpdateResult{}, browser.ErrStale
 	}
@@ -1306,12 +1306,8 @@ func projectBrowserAuthentication(client kernel.BrowserClient) (browser.Authenti
 	return browser.Authentication{Principal: principal, Capabilities: capabilities}, nil
 }
 
-// projectPublicSnapshot is the one positive-allowlist conversion from the
-// kernel public snapshot to the wire. Nothing private is reachable from here.
-func projectPublicSnapshot(snapshot kernel.PublicSnapshot, providerDefaults func(string, string) (string, string, string)) (browserprotocol.StateSnapshot, error) {
-	return projectPublicSnapshotForClient(snapshot, providerDefaults, true)
-}
-
+// projectPublicSnapshotForClient is the one positive-allowlist conversion from
+// the kernel public snapshot to the wire. Nothing private is reachable from here.
 func projectPublicSnapshotForClient(snapshot kernel.PublicSnapshot, providerDefaults func(string, string) (string, string, string), administration bool) (browserprotocol.StateSnapshot, error) {
 	result := browserprotocol.StateSnapshot{
 		Head:          decimalSequence(snapshot.Head),
@@ -1369,17 +1365,13 @@ func projectProject(item kernel.ProjectSummary) browserprotocol.ProjectItem {
 	return browserprotocol.ProjectItem{ID: item.ID.String(), Name: item.Name, RunBudgetLimit: browserprotocol.Decimal(item.RunBudgetLimit), RunsUsed: browserprotocol.Decimal(item.RunsUsed), MaxRunSeconds: item.MaxRunSeconds, Revision: decimalRevision(item.Revision)}
 }
 
-// projectAgent resolves what the agent will actually run with. An agent that
+// projectAgentForClient resolves what the agent will actually run with. An agent that
 // names no model is launched without one and the provider CLI picks its own,
 // so the console is served that CLI's configured default and the file it came
 // from rather than a blank the operator cannot interpret. configHome is the
 // account's own directory when the agent selects one, so the default shown is
 // the one that account will actually launch with; empty means the operator's
 // own login, which is what the daemon falls back to.
-func projectAgent(item kernel.AgentSummary, configHome string, providerDefaults func(string, string) (string, string, string)) browserprotocol.AgentItem {
-	return projectAgentForClient(item, configHome, providerDefaults, true)
-}
-
 func projectAgentForClient(item kernel.AgentSummary, configHome string, providerDefaults func(string, string) (string, string, string), administration bool) browserprotocol.AgentItem {
 	defaultModel, defaultEffort, source := providerDefaults(item.Provider, configHome)
 	effectiveModel, effectiveEffort := item.Model, item.ReasoningEffort

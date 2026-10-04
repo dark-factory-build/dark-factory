@@ -94,7 +94,7 @@ func (backend *browserBackend) observeProductionSources(ctx context.Context, pro
 		var identity change.RepositorySourceIdentity
 		head = field("head")
 		if strings.HasPrefix(item.VisualID, "change:") {
-			id, e := browserID(strings.TrimPrefix(item.VisualID, "change:"), kernel.ChangeIDFromBytes)
+			id, e := decodeID(strings.TrimPrefix(item.VisualID, "change:"), kernel.ChangeIDFromBytes)
 			if e == nil {
 				value, found, e := backend.store.Change(ctx, id)
 				if e == nil && found && value.ProjectID == project && value.Selection != nil {

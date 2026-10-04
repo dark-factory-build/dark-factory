@@ -86,7 +86,6 @@ type Daemon struct {
 	successSourceRun        func(context.Context, kernel.RunID) (kernel.Run, bool, error)
 	successSourceChange     func(context.Context, kernel.ChangeID) (kernel.Change, bool, error)
 	successSourceRepository func(context.Context, kernel.TaskID) (kernel.ProjectRepository, bool, error)
-	beforeSuccessProposal   func()
 	successSourceInspect    func(context.Context, string, string, change.RepositoryIdentity, string) (change.WorktreeFacts, error)
 
 	browserMu          sync.Mutex
@@ -456,7 +455,7 @@ func (daemon *Daemon) agentPaths(ctx context.Context, call api.Call) api.Reply {
 	if !ok {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
-	agentID, err := parseAgentID(input.AgentID)
+	agentID, err := decodeID(input.AgentID, kernel.AgentIDFromBytes)
 	if err != nil {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
@@ -496,7 +495,7 @@ func (daemon *Daemon) taskRead(ctx context.Context, call api.Call) api.Reply {
 	if !ok || input.ExpectedRevision > uint64(^uint64(0)>>1) {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
-	id, err := parseTaskID(input.TaskID)
+	id, err := decodeID(input.TaskID, kernel.TaskIDFromBytes)
 	if err != nil {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
@@ -562,11 +561,11 @@ func (daemon *Daemon) taskRecovery(ctx context.Context, call api.Call) api.Reply
 	if !ok {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
-	id, err := parseTaskID(input.TaskID)
+	id, err := decodeID(input.TaskID, kernel.TaskIDFromBytes)
 	if err != nil {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
-	incarnation, err := parseIncarnationID(input.IncarnationID)
+	incarnation, err := decodeID(input.IncarnationID, kernel.IncarnationIDFromBytes)
 	if err != nil {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
@@ -650,7 +649,7 @@ func (daemon *Daemon) workerOperation(ctx context.Context, call api.Call) api.Re
 	if !ok {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
-	id, err := parseTaskInterventionID(input.OperationID)
+	id, err := decodeID(input.OperationID, kernel.TaskInterventionIDFromBytes)
 	if err != nil {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
@@ -689,11 +688,11 @@ func (daemon *Daemon) humanReplyOperator(ctx context.Context, call api.Call) api
 	if !ok {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
-	requestID, err := parseHumanRequestID(input.RequestID)
+	requestID, err := decodeID(input.RequestID, kernel.HumanRequestIDFromBytes)
 	if err != nil {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
-	deliveryID, err := parseHumanDeliveryID(input.OperationID)
+	deliveryID, err := decodeID(input.OperationID, kernel.HumanRequestDeliveryIDFromBytes)
 	if err != nil {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
@@ -832,7 +831,7 @@ func (daemon *Daemon) attemptSource(ctx context.Context, call api.Call) api.Repl
 	if !ok {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
-	targetTaskID, err := parseTaskID(taskIDText)
+	targetTaskID, err := decodeID(taskIDText, kernel.TaskIDFromBytes)
 	if err != nil {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
@@ -950,7 +949,7 @@ func (daemon *Daemon) peerAsk(ctx context.Context, call api.Call) api.Reply {
 	if !ok {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
-	target, err := parseTaskID(input.TargetTaskID)
+	target, err := decodeID(input.TargetTaskID, kernel.TaskIDFromBytes)
 	if err != nil {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
@@ -1164,11 +1163,11 @@ func (daemon *Daemon) selectAgentAccount(ctx context.Context, call api.Call) api
 	if !ok {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
-	agentID, err := parseAgentID(input.AgentID)
+	agentID, err := decodeID(input.AgentID, kernel.AgentIDFromBytes)
 	if err != nil {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
-	accountID, err := parseAccountID(input.AccountID)
+	accountID, err := decodeID(input.AccountID, kernel.AccountIDFromBytes)
 	if err != nil {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
@@ -1196,7 +1195,7 @@ func (daemon *Daemon) createProject(ctx context.Context, call api.Call) api.Repl
 	if !ok {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
-	id, err := parseProjectID(input.ID)
+	id, err := decodeID(input.ID, kernel.ProjectIDFromBytes)
 	if err != nil {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
@@ -1230,7 +1229,7 @@ func (daemon *Daemon) projectRepository(ctx context.Context, call api.Call) api.
 		return value, err == nil
 	}
 	parseProject := func() (kernel.ProjectID, bool) {
-		value, err := parseProjectID(input.ProjectID)
+		value, err := decodeID(input.ProjectID, kernel.ProjectIDFromBytes)
 		return value, err == nil
 	}
 	at, err := daemon.timestamp()
@@ -1330,7 +1329,7 @@ func (daemon *Daemon) setProjectLimits(ctx context.Context, call api.Call) api.R
 	if !ok {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
-	id, err := parseProjectID(input.ProjectID)
+	id, err := decodeID(input.ProjectID, kernel.ProjectIDFromBytes)
 	if err != nil {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
@@ -1354,11 +1353,11 @@ func (daemon *Daemon) createAgent(ctx context.Context, call api.Call) api.Reply 
 	if !ok {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
-	id, err := parseAgentID(input.ID)
+	id, err := decodeID(input.ID, kernel.AgentIDFromBytes)
 	if err != nil {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
-	projectID, err := parseProjectID(input.ProjectID)
+	projectID, err := decodeID(input.ProjectID, kernel.ProjectIDFromBytes)
 	if err != nil {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
@@ -1403,7 +1402,7 @@ func (daemon *Daemon) setAgentIdlePolicy(ctx context.Context, call api.Call) api
 	if !ok || input.ExpectedRevision > uint64(^uint64(0)>>1) {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
-	id, err := parseAgentID(input.AgentID)
+	id, err := decodeID(input.AgentID, kernel.AgentIDFromBytes)
 	if err != nil {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
@@ -1430,11 +1429,11 @@ func (daemon *Daemon) enqueueTask(ctx context.Context, call api.Call) api.Reply 
 	if !ok {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
-	id, err := parseTaskID(input.ID)
+	id, err := decodeID(input.ID, kernel.TaskIDFromBytes)
 	if err != nil {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
-	projectID, err := parseProjectID(input.ProjectID)
+	projectID, err := decodeID(input.ProjectID, kernel.ProjectIDFromBytes)
 	if err != nil {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
@@ -1453,7 +1452,7 @@ func (daemon *Daemon) enqueueTask(ctx context.Context, call api.Call) api.Reply 
 	if err != nil {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
-	incarnationID, err := parseIncarnationID(input.IncarnationID)
+	incarnationID, err := decodeID(input.IncarnationID, kernel.IncarnationIDFromBytes)
 	if err != nil {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
@@ -1480,7 +1479,7 @@ func newTaskSpec(id kernel.TaskID, projectID kernel.ProjectID, repositoryID kern
 	spec := kernel.NewTask{ID: id, ProjectID: projectID, RepositoryID: repositoryID, AssignedAgentID: agentID, IncarnationID: incarnationID, Title: title, Body: body, Priority: priority, ConflictPaths: append([]string(nil), paths...)}
 	spec.Prerequisites = make([]kernel.TaskPrerequisite, 0, len(prerequisites))
 	for _, input := range prerequisites {
-		taskID, err := parseTaskID(input.TaskID)
+		taskID, err := decodeID(input.TaskID, kernel.TaskIDFromBytes)
 		if err != nil {
 			return kernel.NewTask{}, err
 		}
@@ -1560,15 +1559,6 @@ func (daemon *Daemon) proposeOutcome(ctx context.Context, call api.Call) (api.Re
 	}
 	daemon.operationMu.Lock()
 	// Source validation and the durable proposal share one linearization gate.
-	// The second validation is a checked snapshot fence: a source mutation
-	// observed between the first inspection and proposal is refused.
-	if err := daemon.validateSuccessSource(ctx, live, proposal); err != nil {
-		daemon.operationMu.Unlock()
-		return newRefusalReply(err), nil
-	}
-	if daemon.beforeSuccessProposal != nil {
-		daemon.beforeSuccessProposal()
-	}
 	if err := daemon.validateSuccessSource(ctx, live, proposal); err != nil {
 		daemon.operationMu.Unlock()
 		return newRefusalReply(err), nil
@@ -1642,7 +1632,7 @@ func (daemon *Daemon) sendBack(ctx context.Context, call api.Call) api.Reply {
 	if !ok {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
-	taskID, err := parseTaskID(input.TaskID)
+	taskID, err := decodeID(input.TaskID, kernel.TaskIDFromBytes)
 	if err != nil {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
@@ -1803,7 +1793,7 @@ func (daemon *Daemon) overseerSnapshot(ctx context.Context, call api.Call) api.R
 	}
 	request.ExpectedHead = expectedHead
 	if input.TaskID != "" {
-		id, err := parseTaskID(input.TaskID)
+		id, err := decodeID(input.TaskID, kernel.TaskIDFromBytes)
 		if err != nil {
 			return newErrorReply(api.RemoteInvalidRequest)
 		}
@@ -1839,7 +1829,7 @@ func (daemon *Daemon) overseerEnqueueTask(ctx context.Context, call api.Call) ap
 	if !ok {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
-	id, err := parseTaskID(input.ID)
+	id, err := decodeID(input.ID, kernel.TaskIDFromBytes)
 	if err != nil {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
@@ -1847,7 +1837,7 @@ func (daemon *Daemon) overseerEnqueueTask(ctx context.Context, call api.Call) ap
 	if err != nil {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
-	incarnationID, err := parseIncarnationID(input.IncarnationID)
+	incarnationID, err := decodeID(input.IncarnationID, kernel.IncarnationIDFromBytes)
 	if err != nil {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
@@ -1879,7 +1869,7 @@ func (daemon *Daemon) overseerUpdateTask(ctx context.Context, call api.Call) api
 	if !ok || input.ExpectedRevision > uint64(^uint64(0)>>1) {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
-	id, err := parseTaskID(input.TaskID)
+	id, err := decodeID(input.TaskID, kernel.TaskIDFromBytes)
 	if err != nil {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
@@ -1889,7 +1879,7 @@ func (daemon *Daemon) overseerUpdateTask(ctx context.Context, call api.Call) api
 	}
 	var assignedAgentID *kernel.AgentID
 	if input.AssignedAgentID != nil {
-		agentID, err := parseAgentID(*input.AssignedAgentID)
+		agentID, err := decodeID(*input.AssignedAgentID, kernel.AgentIDFromBytes)
 		if err != nil {
 			return newErrorReply(api.RemoteInvalidRequest)
 		}
@@ -1943,7 +1933,7 @@ func (daemon *Daemon) overseerUpdateAgent(ctx context.Context, call api.Call) ap
 	if !ok || input.ExpectedRevision > uint64(^uint64(0)>>1) {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
-	id, err := parseAgentID(input.AgentID)
+	id, err := decodeID(input.AgentID, kernel.AgentIDFromBytes)
 	if err != nil {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
@@ -1971,7 +1961,7 @@ func (daemon *Daemon) operatorUpdateTask(ctx context.Context, call api.Call) api
 	if !ok || input.ExpectedRevision > uint64(^uint64(0)>>1) {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
-	id, err := parseTaskID(input.TaskID)
+	id, err := decodeID(input.TaskID, kernel.TaskIDFromBytes)
 	if err != nil {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
@@ -1988,7 +1978,7 @@ func (daemon *Daemon) operatorUpdateTask(ctx context.Context, call api.Call) api
 	}
 	var assigned *kernel.AgentID
 	if input.AssignedAgentID != nil {
-		value, err := parseAgentID(*input.AssignedAgentID)
+		value, err := decodeID(*input.AssignedAgentID, kernel.AgentIDFromBytes)
 		if err != nil {
 			return newErrorReply(api.RemoteInvalidRequest)
 		}
@@ -2034,7 +2024,7 @@ func (daemon *Daemon) operatorUpdateAgent(ctx context.Context, call api.Call) ap
 	if !ok || input.ExpectedRevision > uint64(^uint64(0)>>1) || input.Paused == nil && input.Archived == nil || input.Paused != nil && input.Archived != nil {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
-	id, err := parseAgentID(input.AgentID)
+	id, err := decodeID(input.AgentID, kernel.AgentIDFromBytes)
 	if err != nil {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
@@ -2113,11 +2103,11 @@ func (daemon *Daemon) overseerReplaceRun(ctx context.Context, call api.Call) api
 	if err != nil {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
-	successorID, err := parseTaskID(input.SuccessorTaskID)
+	successorID, err := decodeID(input.SuccessorTaskID, kernel.TaskIDFromBytes)
 	if err != nil {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
-	incarnationID, err := parseIncarnationID(input.SuccessorIncarnationID)
+	incarnationID, err := decodeID(input.SuccessorIncarnationID, kernel.IncarnationIDFromBytes)
 	if err != nil {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
@@ -2145,11 +2135,11 @@ func (daemon *Daemon) operatorReplaceRun(ctx context.Context, call api.Call) api
 	if err != nil {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
-	successorID, err := parseTaskID(input.SuccessorTaskID)
+	successorID, err := decodeID(input.SuccessorTaskID, kernel.TaskIDFromBytes)
 	if err != nil {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
-	incarnationID, err := parseIncarnationID(input.SuccessorIncarnationID)
+	incarnationID, err := decodeID(input.SuccessorIncarnationID, kernel.IncarnationIDFromBytes)
 	if err != nil {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
@@ -2249,11 +2239,11 @@ func (daemon *Daemon) overseerReplyHuman(ctx context.Context, call api.Call) api
 	if !ok || input.ExpectedRevision > uint64(^uint64(0)>>1) {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
-	requestID, err := parseHumanRequestID(input.RequestID)
+	requestID, err := decodeID(input.RequestID, kernel.HumanRequestIDFromBytes)
 	if err != nil {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
-	deliveryID, err := parseHumanDeliveryID(input.OperationID)
+	deliveryID, err := decodeID(input.OperationID, kernel.HumanRequestDeliveryIDFromBytes)
 	if err != nil {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
@@ -2320,15 +2310,15 @@ func (daemon *Daemon) overseerHumanReplyMutation(projection kernel.HumanRequestP
 }
 
 func overseerInterventionRequest(operationText, taskText string, taskRevision uint64, runText string, runRevision uint64, kind kernel.TaskInterventionKind, payload string) (kernel.TaskInterventionRequest, error) {
-	operation, err := parseTaskInterventionID(operationText)
+	operation, err := decodeID(operationText, kernel.TaskInterventionIDFromBytes)
 	if err != nil {
 		return kernel.TaskInterventionRequest{}, err
 	}
-	task, err := parseTaskID(taskText)
+	task, err := decodeID(taskText, kernel.TaskIDFromBytes)
 	if err != nil {
 		return kernel.TaskInterventionRequest{}, err
 	}
-	run, err := parseRunID(runText)
+	run, err := decodeID(runText, kernel.RunIDFromBytes)
 	if err != nil || taskRevision > uint64(^uint64(0)>>1) || runRevision > uint64(^uint64(0)>>1) {
 		return kernel.TaskInterventionRequest{}, kernel.ErrInvalidValue
 	}
@@ -2580,7 +2570,7 @@ func (daemon *Daemon) selectAgentModel(ctx context.Context, call api.Call) api.R
 	if !ok {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
-	agentID, err := parseAgentID(input.AgentID)
+	agentID, err := decodeID(input.AgentID, kernel.AgentIDFromBytes)
 	if err != nil {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}

@@ -261,7 +261,7 @@ func TestAcceptedAttemptContextAndRestrictionsSurviveSourceSettingsChanges(t *te
 		if err != nil {
 			t.Fatal(err)
 		}
-		agent, err := parseAgentID(testID(181))
+		agent, err := decodeID(testID(181), kernel.AgentIDFromBytes)
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -26,7 +26,6 @@ type IntakeConfiguration struct {
 type IntakeInput struct {
 	APIKey           string               `json:"api_key,omitempty"`
 	ReviewRequest    *ReviewRequest       `json:"review_request,omitempty"`
-	Legacy           *LegacyIntakeInput   `json:"legacy,omitempty"`
 	AcceptanceCursor string               `json:"acceptance_cursor,omitempty"`
 	Action           string               `json:"action"`
 	SourceID         string               `json:"source_id,omitempty"`
@@ -99,7 +98,6 @@ type IntakeResult struct {
 	SourceID           string            `json:"source_id,omitempty"`
 	LinearTeams        []IntakeTeam      `json:"linear_teams,omitempty"`
 	ReviewOperation    string            `json:"review_operation,omitempty"`
-	Legacy             *LegacyIntakePlan `json:"legacy,omitempty"`
 	AcceptanceProgress bool              `json:"acceptance_progress,omitempty"`
 	AcceptanceCursor   string            `json:"acceptance_cursor,omitempty"`
 	State              string            `json:"state"`
@@ -127,13 +125,6 @@ func ValidIntakeInput(input IntakeInput) bool {
 	case "review_pr":
 		allowed.ProjectID, allowed.ReviewRequest = input.ProjectID, input.ReviewRequest
 		valid = validID(input.ProjectID) && input.ReviewRequest != nil && validReviewRequest(*input.ReviewRequest)
-	case "legacy_preview", "legacy_commit", "legacy_lineage":
-		allowed.SourceID, allowed.ProjectID, allowed.Configuration, allowed.Legacy = input.SourceID, input.ProjectID, input.Configuration, input.Legacy
-		valid = validID(input.SourceID) && validID(input.ProjectID) && input.Configuration != nil && input.Legacy != nil && validLegacyIntakeInput(*input.Legacy, input.Action == "legacy_commit")
-		if input.Action == "legacy_lineage" {
-			allowed.IssueNumber = input.IssueNumber
-			valid = valid && input.IssueNumber > 0 && validLegacyDigest(input.Legacy.PlanHash) && validID(input.Configuration.TargetRepositoryID)
-		}
 	case "list":
 		allowed.ProjectID = input.ProjectID
 		valid = input.ProjectID == "" || validID(input.ProjectID)

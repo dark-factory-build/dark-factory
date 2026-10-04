@@ -90,7 +90,7 @@ func TestOperatorContentMetadataAndBodyUseExplicitReadPaths(t *testing.T) {
 
 	// Retained content remains in its original repository even when the new
 	// default checkout is unavailable.
-	project, _ := parseProjectID(projectID)
+	project, _ := decodeID(projectID, kernel.ProjectIDFromBytes)
 	otherID, _ := kernel.RepositoryIDFromBytes([]byte(strings.Repeat("r", 16)))
 	otherRoot := contentRepositoryFixture(t)
 	other, err := fixture.store.AddProjectRepository(ctx, kernel.NewProjectRepository{ID: otherID, ProjectID: project, Name: "other", Root: otherRoot, BaseRef: "HEAD"}, supervisorTime())
@@ -221,7 +221,7 @@ func TestOperatorContentMetadataAndBodyUseExplicitReadPaths(t *testing.T) {
 
 func TestPageContentBodyContinuesFromGitSizedOffsets(t *testing.T) {
 	body := strings.Repeat("a", 64*1024) + "£tail"
-	id, err := contentID(strings.Repeat("01", 16))
+	id, err := decodeID(strings.Repeat("01", 16), kernel.ContentIDFromBytes)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -272,11 +272,11 @@ func TestAttemptContentRejectsCrossProjectAndWrongTaskWithoutMutation(t *testing
 	create(ownerContent, ownerProject)
 	create(foreignContent, foreignProject)
 	active := prepareActiveAttemptInProject(t, fixture, 70, ownerProject, "worker")
-	ownerID, err := parseProjectID(ownerProject)
+	ownerID, err := decodeID(ownerProject, kernel.ProjectIDFromBytes)
 	if err != nil {
 		t.Fatal(err)
 	}
-	ownerContentID, err := contentID(ownerContent)
+	ownerContentID, err := decodeID(ownerContent, kernel.ContentIDFromBytes)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -288,11 +288,11 @@ func TestAttemptContentRejectsCrossProjectAndWrongTaskWithoutMutation(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	foreignID, err := parseProjectID(foreignProject)
+	foreignID, err := decodeID(foreignProject, kernel.ProjectIDFromBytes)
 	if err != nil {
 		t.Fatal(err)
 	}
-	foreignContentID, err := contentID(foreignContent)
+	foreignContentID, err := decodeID(foreignContent, kernel.ContentIDFromBytes)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -312,7 +312,7 @@ func TestAttemptContentRejectsCrossProjectAndWrongTaskWithoutMutation(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	wrongTaskID, err := taskID(testID(75))
+	wrongTaskID, err := decodeID(testID(75), kernel.TaskIDFromBytes)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -438,7 +438,7 @@ func TestAttemptCreatesContentInItsOriginalRepositoryAfterDefaultChanges(t *test
 			t.Fatal(err)
 		}
 		waitDispatch(t, done)
-		contentID, _ := contentID(id)
+		contentID, _ := decodeID(id, kernel.ContentIDFromBytes)
 		binding, found, err := fixture.store.ContentRepository(ctx, contentID, mustRevision(t, 1))
 		if err != nil || !found || binding.ID != first.ID {
 			t.Fatalf("content retargeted: %v %v %v", binding.ID, found, err)

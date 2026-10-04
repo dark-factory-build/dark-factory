@@ -188,7 +188,7 @@ func TestProjectAgentResolvesTheModelTheRunWillUse(t *testing.T) {
 		return "", "", ""
 	}
 	summary := kernel.AgentSummary{ID: mustAgentID(t, testID(52)), ProjectID: mustProjectID(t, testID(51)), Name: "codex-native-smoke", Role: "worker", Provider: "codex", Revision: mustRevision(t, 3)}
-	inherited := projectAgent(summary, "", defaults)
+	inherited := projectAgentForClient(summary, "", defaults, true)
 	if inherited.EffectiveModel != "gpt-6-astra" || inherited.EffectiveReasoningEffort != "high" || inherited.ModelSource != "/Users/operator/.codex/config.toml" || inherited.Model != "" {
 		t.Fatalf("inherited = %+v", inherited)
 	}
@@ -196,19 +196,19 @@ func TestProjectAgentResolvesTheModelTheRunWillUse(t *testing.T) {
 	// inherited model still points at the file the model came from.
 	effortOnly := summary
 	effortOnly.ReasoningEffort = "medium"
-	mixed := projectAgent(effortOnly, "", defaults)
+	mixed := projectAgentForClient(effortOnly, "", defaults, true)
 	if mixed.EffectiveModel != "gpt-6-astra" || mixed.EffectiveReasoningEffort != "medium" || mixed.ModelSource != "/Users/operator/.codex/config.toml" {
 		t.Fatalf("mixed = %+v", mixed)
 	}
 	owned := summary
 	owned.Model = "gpt-5-codex"
-	own := projectAgent(owned, "", defaults)
+	own := projectAgentForClient(owned, "", defaults, true)
 	if own.EffectiveModel != "gpt-5-codex" || own.EffectiveReasoningEffort != "high" || own.ModelSource != "agent" {
 		t.Fatalf("own = %+v", own)
 	}
 	shell := summary
 	shell.Provider = "shell"
-	unknown := projectAgent(shell, "", defaults)
+	unknown := projectAgentForClient(shell, "", defaults, true)
 	if unknown.EffectiveModel != "" || unknown.EffectiveReasoningEffort != "" || unknown.ModelSource != "" {
 		t.Fatalf("unknown = %+v", unknown)
 	}
@@ -228,7 +228,7 @@ func TestProjectAgentReadsTheSelectedAccountsDefaults(t *testing.T) {
 		t.Fatal(err)
 	}
 	summary.AccountID = accountID
-	item := projectAgent(summary, "/Users/operator/.codex-second", defaults)
+	item := projectAgentForClient(summary, "/Users/operator/.codex-second", defaults, true)
 	if asked != "/Users/operator/.codex-second" || item.EffectiveModel != "gpt-7-nova" || item.ModelSource != "/Users/operator/.codex-second/config.toml" {
 		t.Fatalf("asked %q, item %+v", asked, item)
 	}

@@ -44,7 +44,7 @@ func (daemon *Daemon) Intake(ctx context.Context, input api.IntakeInput) api.Int
 		return api.IntakeResult{State: "invalid"}
 	}
 	if input.Action == "review_pr" {
-		project, parseErr := browserID(input.ProjectID, kernel.ProjectIDFromBytes)
+		project, parseErr := decodeID(input.ProjectID, kernel.ProjectIDFromBytes)
 		if parseErr != nil || input.ReviewRequest == nil {
 			return api.IntakeResult{State: "invalid"}
 		}
@@ -84,18 +84,12 @@ func (daemon *Daemon) Intake(ctx context.Context, input api.IntakeInput) api.Int
 	if err != nil {
 		return intakeFailure(err)
 	}
-	if input.Action == "legacy_lineage" {
-		return daemon.legacyIntakeLineage(ctx, input)
-	}
-	if input.Action == "legacy_preview" || input.Action == "legacy_commit" {
-		return daemon.legacyIntake(ctx, input, at)
-	}
 	if input.Action == "list" {
 		var sources []kernel.IntakeSource
 		if input.ProjectID == "" {
 			sources, err = daemon.store.IntakeSources(ctx)
 		} else {
-			project, parseErr := browserID(input.ProjectID, kernel.ProjectIDFromBytes)
+			project, parseErr := decodeID(input.ProjectID, kernel.ProjectIDFromBytes)
 			if parseErr != nil {
 				return intakeFailure(kernel.ErrInvalidValue)
 			}
@@ -116,7 +110,7 @@ func (daemon *Daemon) Intake(ctx context.Context, input api.IntakeInput) api.Int
 		return result
 	}
 	if input.Action == "withdraw" || input.Action == "import" {
-		id, parseErr := browserID(input.AcceptanceID, kernel.IntakeAcceptanceIDFromBytes)
+		id, parseErr := decodeID(input.AcceptanceID, kernel.IntakeAcceptanceIDFromBytes)
 		if parseErr != nil {
 			return intakeFailure(kernel.ErrInvalidValue)
 		}
@@ -159,7 +153,7 @@ func (daemon *Daemon) Intake(ctx context.Context, input api.IntakeInput) api.Int
 		}
 		return api.IntakeResult{State: "imported", AcceptanceID: id.String(), TaskID: task.ID.String()}
 	}
-	sourceID, err := browserID(input.SourceID, kernel.IntakeSourceIDFromBytes)
+	sourceID, err := decodeID(input.SourceID, kernel.IntakeSourceIDFromBytes)
 	if err != nil {
 		return intakeFailure(kernel.ErrInvalidValue)
 	}
@@ -207,17 +201,17 @@ func (daemon *Daemon) Intake(ctx context.Context, input api.IntakeInput) api.Int
 				return intakeFailure(maintainer.ErrDenied)
 			}
 		}
-		project, parseErr := browserID(input.ProjectID, kernel.ProjectIDFromBytes)
+		project, parseErr := decodeID(input.ProjectID, kernel.ProjectIDFromBytes)
 		if parseErr != nil {
 			return intakeFailure(kernel.ErrInvalidValue)
 		}
-		target, parseErr := browserID(config.TargetRepositoryID, kernel.RepositoryIDFromBytes)
+		target, parseErr := decodeID(config.TargetRepositoryID, kernel.RepositoryIDFromBytes)
 		if parseErr != nil {
 			return intakeFailure(kernel.ErrInvalidValue)
 		}
 		var agent kernel.AgentID
 		if config.OverseerAgentID != "" {
-			agent, parseErr = browserID(config.OverseerAgentID, kernel.AgentIDFromBytes)
+			agent, parseErr = decodeID(config.OverseerAgentID, kernel.AgentIDFromBytes)
 		}
 		if parseErr != nil {
 			return intakeFailure(kernel.ErrInvalidValue)
@@ -452,7 +446,7 @@ func (daemon *Daemon) previewIntake(ctx context.Context, source kernel.IntakeSou
 	if tick {
 		after := kernel.IntakeAcceptanceID{}
 		if cursor != "" {
-			after, _ = browserID(cursor, kernel.IntakeAcceptanceIDFromBytes) // ValidIntakeInput checked it.
+			after, _ = decodeID(cursor, kernel.IntakeAcceptanceIDFromBytes) // ValidIntakeInput checked it.
 		}
 		const receiptPageSize = 25
 		pending, err := daemon.store.PendingIntakeAcceptancesAfter(ctx, source.ID, receiptPageSize, after)
@@ -593,4 +587,13 @@ func (daemon *Daemon) sourceIssues(ctx context.Context, source kernel.IntakeSour
 		return daemon.linear.Issues(ctx, source.LinearTeamID, page, label, number)
 	}
 	return daemon.readIntakeIssues(ctx, source.GitHubRepositoryName, source.GitHubRepositoryID, page, label, number)
+}
+
+// legacyExistingContent reports whether a migrated pre-cutover baseline
+// already covers this exact issue content.
+func legacyExistingContent(record kernel.LegacyIntakeRecord, hash [32]byte) bool {
+	if record.HistoricalContentHash != nil {
+		return *record.HistoricalContentHash == hash
+	}
+	return record.HasHistory && record.ContentHash == hash
 }
