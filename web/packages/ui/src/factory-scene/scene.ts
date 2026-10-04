@@ -101,7 +101,7 @@ export type BreakRoomErrand = "shelf" | "coffee";
 // Workshop bays share walls; dimensions never depend on live work.
 const CORRIDOR = 32;
 export const PADDING = 16;
-export const ROOM_LEFT = PADDING + CORRIDOR;
+export const ROOM_LEFT = PADDING + 192 + 16 + CORRIDOR;
 const FLOOR_TOP = 48;
 export const WORKER_GAP = 40;
 export const WORKER_SIZE = 20;
@@ -118,14 +118,13 @@ export function layoutScene(topology: SceneTopology, selectedProposalId?: string
     || compareText(left.path, right.path) || compareText(left.label, right.label) || compareText(left.id, right.id));
   const groups = new Map<string, SceneNode[]>();
   for (const node of nodes) groups.set(`${node.proposed ? "proposed:" : ""}${node.project?.id ?? ""}`, [...(groups.get(`${node.proposed ? "proposed:" : ""}${node.project?.id ?? ""}`) ?? []), node]);
-  const widestGroup = Math.max(1, ...[...groups.values()].filter((group) => !group[0]?.proposed).map((group) => group.length));
   const assembled = nodes.some((node) => node.assemblies !== undefined);
-  const columns = assembled ? Math.min(2, Math.max(1, widestGroup)) : widestGroup <= 4 ? Math.max(1, Math.min(2, widestGroup)) : Math.min(4, Math.ceil(Math.sqrt(widestGroup)));
-  const bays = assembled ? Array.from({ length: columns }, () => 392) : columns === 4 ? [160, 208, 144, 192] : columns === 3 ? [160, 224, 160] : columns === 2 ? [144, 208] : [224];
-  const width = ROOM_LEFT + bays.reduce((sum, bay) => sum + bay, 0) + PADDING;
-  const rooms: SceneRoomLayout[] = [];
-  const headings: SceneHeading[] = [];
-  const corridors: SceneRect[] = [];
+  const units = (node: SceneNode) => !assembled ? 1 : (node.assemblies?.length ?? 0) > 6 ? 4
+    : (node.assemblies?.length ?? 0) > 1 || node.sizeBucket === "large" ? 2 : 1;
+  const columns = Math.min(4, Math.max(1, ...[...groups.values()].filter((group) => !group[0]?.proposed).map((group) => group.reduce((sum, node) => sum + units(node), 0))));
+  const bay = 224;
+  const width = ROOM_LEFT + columns * bay + PADDING;
+  const rooms: SceneRoomLayout[] = [], headings: SceneHeading[] = [], corridors: SceneRect[] = [];
   let top = FLOOR_TOP;
   for (const members of groups.values()) {
     const project = members[0]!.project;
@@ -133,25 +132,34 @@ export function layoutScene(topology: SceneTopology, selectedProposalId?: string
       if (members.length !== 1 || members[0]!.label !== project.name) headings.push({ label: project.name, x: ROOM_LEFT, y: top });
       top += 16;
     }
-    for (let start = 0; start < members.length; start += columns) {
-      const row = Math.floor(start / columns);
-      const widths = row % 2 === 0 ? bays : [...bays.slice(1), bays[0]!];
-      const height = assembled ? Math.max(256, ...members.slice(start, start + columns).map((node) => 64 + Math.ceil(Math.min(6, node.assemblies?.length ?? 0) / 2) * 110)) : row % 2 === 0 ? 112 : 128;
-      let x = ROOM_LEFT;
-      for (const [index, node] of members.slice(start, start + columns).entries()) {
-        const width = widths[index]!;
-        const rectangle = { x, y: top, width, height };
-        rooms.push({ id: node.id, ...rectangle, contents: composeRoom(node, rectangle, selectedProposalId),
-          door: { x: x + width / 2, y: top + height } });
-        x += width;
+    for (let start = 0; start < members.length;) {
+      const row: { node: SceneNode; span: number }[] = [];
+      let used = 0;
+      while (start < members.length) {
+        const node = members[start]!, span = Math.min(columns, units(node));
+        if (used + span > columns) break;
+        row.push({ node, span }); used += span; start++;
       }
-      corridors.push({ x: PADDING, y: top + height, width: x - PADDING, height: CORRIDOR });
+      const height = assembled ? Math.max(...row.map(({ node, span }) => {
+        const count = Math.min(12, node.assemblies?.length ?? 0);
+        const across = Math.min(span, Math.max(1, count));
+        return count <= 1 ? (node.sizeBucket === "large" ? 274 : 208) : 146 + (Math.ceil(count / across) - 1) * 110 + (count > across ? 68 : 128);
+      })) : 144;
+      let x = ROOM_LEFT;
+      for (const { node, span } of row) {
+        const rectangle = { x, y: top, width: span * bay, height };
+        rooms.push({ id: node.id, ...rectangle, contents: composeRoom(node, rectangle, selectedProposalId),
+          door: { x: x + rectangle.width / 2, y: top + height } });
+        x += rectangle.width;
+      }
+      corridors.push({ x: ROOM_LEFT - CORRIDOR, y: top + height, width: x - ROOM_LEFT + CORRIDOR, height: CORRIDOR });
       top += height + CORRIDOR;
     }
   }
-  // A spine joins each project's corridor and the expandable common area below.
-  corridors.push({ x: PADDING, y: FLOOR_TOP, width: CORRIDOR, height: top - FLOOR_TOP + 32 });
-  return { width, height: top + 32, rooms, headings, corridors, restingTop: top + 32 };
+  // The entrance stays beside the source rooms, including on large repositories.
+  // Live actors can extend its seating downwards without moving any source area.
+  corridors.push({ x: ROOM_LEFT - CORRIDOR, y: FLOOR_TOP, width: CORRIDOR, height: Math.max(160, top - FLOOR_TOP) });
+  return { width, height: Math.max(224, top), rooms, headings, corridors, restingTop: 144 };
 }
 
 export function placeWorkers(layout: SceneLayout, workers: readonly SceneWorker[], social: "nearby" | "commons" = "commons"): readonly SceneWorkerPlacement[] {
@@ -285,16 +293,16 @@ function composeRoom(node: SceneNode, room: SceneRect, selectedProposalId?: stri
   if (node.assemblies !== undefined) {
     const assemblies = node.assemblies.filter((assembly) => !assembly.proposalId || !selectedProposalId || assembly.proposalId === selectedProposalId);
     // Proposed versions are alternatives, never inputs to an aggregate inventory.
-    const rest = assemblies.slice(5);
+    const rest = assemblies.slice(11);
     const sum = { source: 0, tests: 0, documentation: 0, configuration: 0, assets: 0, unclassified: 0 };
     for (const assembly of rest) for (const kind of Object.keys(sum) as InventoryKind[]) sum[kind] += assembly.inventory?.[assembly.inventoryScope === "direct" ? "direct" : "total"][kind] ?? 0;
-    const shown: readonly SceneAssembly[] = assemblies.some((assembly) => assembly.proposalId) ? assemblies.slice(0, 6) : assemblies.length <= 6 ? assemblies : [...assemblies.slice(0, 5), {
+    const shown: readonly SceneAssembly[] = assemblies.some((assembly) => assembly.proposalId) ? assemblies.slice(0, 12) : assemblies.length <= 12 ? assemblies : [...assemblies.slice(0, 11), {
       id: `${node.id}:aggregate`, path: node.path, label: `${rest.length} more assemblies`, inventoryScope: "direct",
       representedIds: rest.flatMap((assembly) => [assembly.id, ...assembly.representedIds ?? []]),
       inventory: rest.some((assembly) => assembly.inventory === undefined) ? undefined : { direct: sum, total: sum, samples: [], samples_omitted: Object.values(sum).reduce((a, b) => a + b, 0) },
     }];
-    const columns = Math.min(2, shown.length), rows = Math.ceil(shown.length / Math.max(1, columns));
-    const cellWidth = (room.width - 48) / Math.max(1, columns), cellHeight = rows > 1 ? 110 : 128;
+    const columns = Math.min(Math.max(1, Math.floor(room.width / 224)), shown.length), rows = Math.ceil(shown.length / Math.max(1, columns));
+    const cellWidth = (room.width - 48) / Math.max(1, columns), cellHeight = rows > 1 ? 110 : room.height - 146;
     return shown.map((assembly, index) => {
       const counts = assembly.inventory?.[assembly.inventoryScope === "direct" ? "direct" : "total"];
       const kinds = (Object.keys(inventoryLabels) as InventoryKind[]).filter((kind) => (counts?.[kind] ?? 0) > 0);

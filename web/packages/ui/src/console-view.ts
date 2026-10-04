@@ -179,13 +179,20 @@ export function selectFloor(prepared: ReturnType<typeof prepareFloor>, detail: F
     }] as const;
   }));
   const rootIds = new Set(hierarchies.map((hierarchy) => canonicalOf(hierarchy.projectRoom).id));
-  const wrapper = (node: SceneNode) => ["internal", "src", "lib", "packages", "apps", "web"].includes(node.path.split("/").at(-1)!) && (children.get(node.id)?.length ?? 0) > 0;
+  // Unwrap short namespace chains, not broad areas such as Go's internal/.
+  // A wide namespace remains a room containing its packages as assemblies.
+  const wrapper = (node: SceneNode) => ["internal", "src", "lib", "packages", "apps", "web"].includes(node.path.split("/").at(-1)!)
+    && (children.get(node.id)?.length ?? 0) > 0 && children.get(node.id)!.length <= 4;
   const candidates = canonical.filter((node) => {
     if (rootIds.has(node.id)) return true;
     if (detail === "fine") return true;
     const parent = parentOf(node);
     if (detail === "coarse") return parent !== undefined && rootIds.has(parent.id);
     if (wrapper(node)) return false;
+    if (Object.values(node.inventory?.total ?? {}).reduce((sum, count) => sum + count, 0) <= 4 && node.inventory !== undefined && !(children.get(node.id)?.length)) return false;
+    // Large direct packages warrant their own bay; this uses integrated source,
+    // never proposal counts or live worker activity.
+    if (node.kind === "package" && parent?.path.split("/").at(-1) === "internal" && countFiles(node) > 80) return true;
     let ancestor = parent;
     while (ancestor !== undefined && !rootIds.has(ancestor.id)) {
       if (!wrapper(ancestor)) return false;
@@ -224,10 +231,10 @@ export function selectFloor(prepared: ReturnType<typeof prepareFloor>, detail: F
       links.set(key, { ...link, nodeId: targetID, label: target.label, path: target.path, weight: (links.get(key)?.weight ?? 0) + link.weight });
     }
     return {
-      ...node, label: node.path === "." ? node.project?.name ?? node.label : node.label, inventoryScope: "subtree",
+      ...node, label: node.path === "." ? node.project?.name ?? node.label : node.path, inventoryScope: "subtree",
       inventory: owned.every((member) => member.inventory !== undefined) ? { ...node.inventory!, total } : undefined,
       assemblies: owned.filter((member) => countFiles(member) > 0 || member.inventory === undefined).map((member) => ({
-        id: member.id, path: member.path, label: member.path === "." ? "Repository files" : member.label,
+        id: member.id, path: member.path, label: member.path === "." ? "Repository files" : member.path === node.path ? member.path.split("/").at(-1)! : member.path.slice(node.path === "." ? 0 : node.path.length + 1),
         inventoryScope: "direct" as const, inventory: member.inventory, sizeBucket: member.sizeBucket,
         representedIds: [member.id], dependencies: member.dependencies,
       })),

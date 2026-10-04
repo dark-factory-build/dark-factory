@@ -160,7 +160,7 @@ function useSceneMotion(layout: ReturnType<typeof layoutScene>, seated: ReturnTy
   const placements = useMemo(() => {
     // With the scenery off there is no furniture to walk to.
     if (errandClock === undefined) return errandsBefore.current = seated;
-    const nook = breakRoomNook(layout, seated.filter((placement) => placement.area === "resting").length, seated.filter((placement) => placement.area !== "room" && placement.area !== "resting").length, nearby);
+    const nook = breakRoomNook(layout, seated.filter((placement) => placement.area === "resting" && placement.roomId === undefined).length, seated.filter((placement) => placement.area !== "room" && placement.area !== "resting").length, nearby);
     const byId = new Map(workers.map((worker) => [worker.id, worker]));
     return errandsBefore.current = placeErrands(seated, nook, (id) => { const worker = byId.get(id); return worker === undefined ? undefined : breakRoomHabit(worker); }, errandClock, errandsBefore.current);
   }, [seated, errandClock, layout, workers, nearby]);
@@ -309,7 +309,7 @@ function SceneWorkers({ nearby, errands, furniture, restingSeats, tray, peerQues
   });
   const rows = [...new Set(seats.map((seat) => seat.y))].map((y) => seats.filter((seat) => seat.y === y));
   // The cat has the first table; every table has its talk.
-  const cat = errands ? catAt(rows[0]!, at) : undefined;
+  const cat = errands ? catAt(rows[0] ?? [], at) : undefined;
   const news = useMemo(() => gossip(workers, tasks), [workers, tasks]);
   const talk = rows.flatMap((row) => chats(row, news, at));
   const catDoing = cat === undefined ? "" : cat.pettedBy !== undefined ? `being fussed over by ${workerById.get(cat.pettedBy)?.name}` : cat.frame.startsWith("sleep") ? "asleep" : cat.moving ? "on the prowl" : "supervising";
@@ -318,7 +318,7 @@ function SceneWorkers({ nearby, errands, furniture, restingSeats, tray, peerQues
         <rect x="4" y="2" width="12" height="10" fill="transparent" />
         <g aria-hidden="true" transform={cat.west ? "translate(22 0) scale(-1 1)" : undefined}><Frame name={`cat.${cat.frame}`} x={3} y={-4} /></g>
       </g>;
-  const bed = errands ? catBed(rows[0]!) : undefined;
+  const bed = errands ? catBed(rows[0] ?? []) : undefined;
   return <>
       {bed === undefined ? null : <g aria-hidden="true" pointerEvents="none" data-cat-bed="" transform={`translate(${bed.x} ${bed.y}) scale(${WORKER_SIZE / FRAME})`}><Frame name="cat.bed" x={3} y={-4} /></g>}
       {cat !== undefined && cat.y !== rows[0]![0]!.y ? puss : null}
@@ -462,18 +462,13 @@ export function FactoryScene({ proposals, onSelectEntity, onOpenLibrary, onOpenB
   const links = selectedRoom?.dependencies?.links ?? [];
   const resting = placements.filter((placement) => placement.area === "resting");
   const planning = placements.filter((placement) => placement.area !== "room" && placement.area !== "resting");
-  const seating = commonSeating(layout, resting.length, planning.length);
+  const commonResting = resting.filter((placement) => placement.roomId === undefined);
+  const seating = commonSeating(layout, commonResting.length, planning.length);
   const seats = [...seating.resting, ...seating.planning];
-  const commonBottom = Math.max(...seats.map(({ y }) => y)) + 24;
-  const commonWidth = Math.max(...seats.map(({ x }) => x)) + 24 - ROOM_LEFT;
-  const nook = breakRoomNook(layout, resting.length, planning.length, appearance.social === "nearby");
-  // The operator's desks sit below the seats. This keeps a stable, useful
-  // destination even when no overseer is pictured, without borrowing a worker's chair.
-  const stationTop = commonBottom + 32;
-  const station = { missions: { x: ROOM_LEFT + 32, y: stationTop }, tasks: { x: ROOM_LEFT + 112, y: stationTop } };
-  const commonAreaWidth = Math.max(commonWidth + (nook?.width ?? 0), station.tasks.x + 24 - ROOM_LEFT);
-  const upperRoom = { x: ROOM_LEFT, y: layout.restingTop - 40, width: commonAreaWidth, height: stationTop + 24 - (layout.restingTop - 40) };
-  const boardTop = Math.max(layout.height, commonBottom, stationTop + 24, ...placements.map((placement) => placement.y + 24)) + PADDING;
+  const commonBottom = Math.max(layout.restingTop, ...seats.map(({ y }) => y)) + 32;
+  const nook = breakRoomNook(layout, commonResting.length, planning.length, appearance.social === "nearby");
+  const station = { missions: { x: PADDING + 40, y: 48 }, tasks: { x: PADDING + 120, y: 48 } };
+  const boardTop = Math.max(layout.height, commonBottom, 112, ...placements.map((placement) => placement.y + 24)) + PADDING;
   const sceneWidth = layout.width;
   const sceneHeight = boardTop + PADDING;
   const affected = new Map(layout.rooms.map((room) => [room.id, tasks.filter((order) => order.status === "running" && (order.displayRoomIds ?? order.roomIds).includes(room.id))]));
@@ -505,7 +500,7 @@ export function FactoryScene({ proposals, onSelectEntity, onOpenLibrary, onOpenB
     <div className="dfFactoryEntityTools">
       <label>Find source <input type="search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Package, assembly or path" /></label>
       {search === "" ? null : <div className="dfFactoryEntityTools__results">{[...availableNodes.values()].filter((node) => !node.proposed && `${node.label} ${node.path}`.toLowerCase().includes(search.toLowerCase())).slice(0, 30).map((node) => <button type="button" key={node.id} onClick={() => focusEntity(node.id)}>{node.path === "." ? node.label : node.path}</button>)}</div>}
-      <p className="dfFactoryLegend">⚙ Code · ⏚ Tests · ▤ Config · ▥ Docs · ▦ Assets <span>Size: eligible files, 1–4 / 5–20 / 21–80 / 81+. Name-based machine motifs. ? = proposed or unavailable final scale. Dashed + / × cables = proposed dependency changes.</span></p>
+      <p className="dfFactoryLegend">⚙ Code · ⏚ Tests · ▤ Config · ▥ Docs · ▦ Assets</p>
       {proposals === undefined || proposals.items.length === 0 ? null : <div className="dfFactoryProposals" aria-label="Proposed changes"><button type="button" aria-pressed={!proposals.selected} onClick={() => proposals.onSelect("")}>All changes</button>{proposals.items.map((proposal) => <button key={proposal.id} type="button" aria-pressed={proposals.selected === proposal.id} onClick={() => proposals.onSelect(proposal.id)}>{proposal.title} · {proposal.operations.length} paths · {proposal.state}</button>)}</div>}
     </div>
     <div ref={mapElement} className="dfFactoryFloor__map" onClick={inspect} onPointerOver={inspect} onFocus={inspect} onPointerLeave={() => { retainFocusedTooltip(); setLinkedFrom(undefined); }} onBlur={() => { setTooltip(undefined); setLinkedFrom(undefined); }} onScroll={() => { retainFocusedTooltip(); updateViewport(); }} onKeyDown={(event) => { if (event.key === "Escape") { setTooltip(undefined); setLinkedFrom(undefined); } }} role="region" aria-label="Scrollable codebase floor" tabIndex={0}>
@@ -541,7 +536,7 @@ export function FactoryScene({ proposals, onSelectEntity, onOpenLibrary, onOpenB
       </defs>
       <rect width={layout.width} height={sceneHeight} fill="#08131d" />
       {layout.corridors.map((corridor, index) => <rect key={index} data-corridor="" {...corridor} fill="url(#df-floor)" />)}
-      <rect x={PADDING} y={layout.restingTop - 32} width={ROOM_LEFT - PADDING} height={boardTop - layout.restingTop + 32} fill="url(#df-floor)" />
+      <rect x={PADDING} y={16} width={ROOM_LEFT - PADDING} height={boardTop - 16} fill="url(#df-floor)" />
       {layout.headings.map((heading) => (
         <text key={heading.y} data-floor-heading={heading.label} x={heading.x} y={heading.y + 11} fill="#b9cad5" fontFamily="ui-monospace, monospace" fontSize="9" fontWeight="700">
           {shortLabel(heading.label)}
@@ -615,16 +610,15 @@ export function FactoryScene({ proposals, onSelectEntity, onOpenLibrary, onOpenB
         <path d={d} fill="none" stroke={edge.status === "added" ? "#a4d6e8" : "#e7a893"} strokeWidth="2" strokeDasharray={edge.status === "added" ? "8 4" : "2 5"} pointerEvents="none" />
         <text x={(layout.rooms.find((room) => room.id === edge.fromId)?.door.x ?? 0) + 8} y={(layout.rooms.find((room) => room.id === edge.fromId)?.door.y ?? 0) - 6} fill="#ead8a4" fontSize="12" pointerEvents="none">{edge.status === "added" ? "+ link" : "× link"}</text>
       </g>)}
-      <g aria-label="Open project board" {...sceneAction(onOpenBoard === undefined ? undefined : () => onOpenBoard(projectId))} transform={`translate(${PADDING + 25} 25)`}><rect className="dfFactoryScene__focus" x="-8" y="-8" width="48" height="48" fill="transparent" /><g aria-hidden="true"><Frame name="prop.board" x={0} y={0} /><text x="0" y="30" fill="#d4ddd2" fontSize="10">BOARD</text></g></g>
-      <Area width={commonAreaWidth} top={upperRoom.y} bottom={upperRoom.y + upperRoom.height}  />
+      <g aria-label="Open project board" {...sceneAction(onOpenBoard === undefined ? undefined : () => onOpenBoard(projectId))} transform={`translate(${PADDING + 24} 90)`}><rect className="dfFactoryScene__focus" x="-8" y="-8" width="48" height="48" fill="transparent" /><g aria-hidden="true"><Frame name="prop.board" x={0} y={0} /><text x="0" y="30" fill="#d4ddd2" fontSize="10">BOARD</text></g></g>
       {/* Somewhere to go other than the table: against the back wall, muted like the rest of the furniture. */}
       {appearance.scenery === "off" ? null : nook?.furniture.filter((piece) => !piece.roomId || nodes.has(piece.roomId)).map((piece) => <g key={piece.key} data-break-room={piece.errand} opacity=".8" transform={`translate(${piece.x} ${piece.y}) scale(${WORKER_SIZE / FRAME})`}>
-        {piece.errand !== "shelf" || onOpenLibrary === undefined ? null : <g {...sceneAction(() => onOpenLibrary(projectId))} aria-label="Open project library"><rect className="dfFactoryScene__focus" x="-9" y="-9" width="35" height="35" fill="transparent" /></g>}
+        {piece.errand !== "shelf" || onOpenLibrary === undefined ? null : <g {...sceneAction(() => onOpenLibrary(piece.roomId ? nodes.get(piece.roomId)?.project?.id : projectId))} aria-label="Open project library"><rect className="dfFactoryScene__focus" x="-9" y="-9" width="35" height="35" fill="transparent" /></g>}
         <g aria-hidden="true" pointerEvents="none"><Frame name={piece.errand === "shelf" ? "prop.bookshelf" : "prop.coffeestation"} x={0} y={0} />
         {piece.errand !== "coffee" ? null : <path d="M2 15v3 M14 15v3" stroke="#303b3b" strokeWidth="2" />}</g>
       </g>)}
       {[
-        { label: "Break room", seats: seating.resting, planning: false, occupied: resting.length },
+        { label: "Break room", seats: seating.resting, planning: false, occupied: commonResting.length },
         { label: "Work tables", seats: seating.planning, planning: true, occupied: planning.length },
       ].filter(({ seats }) => seats.length > 0).map(({ label, seats, planning, occupied }) => {
         const top = seats[0]!.y;
@@ -701,20 +695,6 @@ function sceneAction(select: (() => void) | undefined) {
     if (event.key === "Enter" || event.key === " ") { event.preventDefault(); select(); }
   } };
 }
-
-function Area({ width, top, bottom, connector }: { width: number; top: number; bottom: number; connector?: { x: number; width: number } }) {
-  const openingEnd = connector === undefined ? undefined : connector.x + connector.width;
-  return (
-    <g role="group" aria-label="Common room">
-      <rect x={ROOM_LEFT} y={top} width={width} height={bottom - top} fill="url(#df-floor)" />
-      <path d={connector === undefined
-        ? `M${ROOM_LEFT} ${top + 24}v-24h${width}v${bottom - top}H${ROOM_LEFT}v-8`
-        : `M${ROOM_LEFT} ${top + 24}v-24h${width}v${bottom - top}H${openingEnd} M${ROOM_LEFT} ${bottom - 8}V${top + 24}`}
-        fill="none" stroke="#465355" strokeWidth="1" />
-    </g>
-  );
-}
-
 
 /**
  * Static dependencies as floor cabling. Every link is routed once: out under

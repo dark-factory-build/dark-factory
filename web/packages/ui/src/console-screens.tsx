@@ -85,7 +85,7 @@ const NO_CHANGES: readonly ProductionContraption[] = [];
 /** Flat source projection; every action opens an existing inspector or control. */
 export function FactoryFloor({
   changes = NO_CHANGES, selectedChange, onSelectChange, state, topologies, runPaths, lastRunPaths, selectedAgentId, onSelectAgent,
-  onSelectHumanRequest, selectedTaskId, onSelectTask, onOpenTasks, onOpenMissions, onOpenLibrary, onOpenBoard, requestedEntity, connected = true, floorAppearance = DEFAULT_FLOOR_APPEARANCE, onAppearanceChange, projectId, onProjectContent,
+  onSelectHumanRequest, selectedTaskId, onSelectTask, onOpenTasks, onOpenMissions, onOpenLibrary, onOpenBoard, requestedEntity, connected = true, floorAppearance = DEFAULT_FLOOR_APPEARANCE, projectId, onProjectContent,
 }: {
   changes?: readonly ProductionContraption[];
   selectedChange?: string;
@@ -106,7 +106,6 @@ export function FactoryFloor({
   onSelectHumanRequest?: (request: HumanRequestItem) => void;
   connected?: boolean;
   floorAppearance: FloorAppearance;
-  onAppearanceChange?: (appearance: FloorAppearance) => void;
   projectId?: string;
   onProject?: (projectId: string | undefined) => void;
   onProjectContent?: ProjectContentCall;
@@ -123,13 +122,6 @@ export function FactoryFloor({
   const entity = selected.detailByID.get(selectedEntity ?? "");
   const related = proposed.proposals.filter((proposal) => proposal.operations.some((operation) => operation.entityId === selectedEntity || operation.roomId === selectedEntity) || proposal.relationships?.some((edge) => edge.fromId === selectedEntity || edge.toId === selectedEntity));
   return <div className="dfFactoryFloor">
-    <nav className="dfFactoryFloor__navigation" aria-label="Floor detail">
-      <label>Topology detail <select value={floorAppearance.detail ?? "auto"} onChange={(event) => onAppearanceChange?.({ ...floorAppearance, detail: event.currentTarget.value as FloorAppearance["detail"] })} disabled={onAppearanceChange === undefined}>
-        <option value="coarse">Coarse · areas</option><option value="auto">Automatic · useful areas</option><option value="fine">Fine · directories</option>
-      </select></label>
-      <label>Social furniture <select value={floorAppearance.social ?? "nearby"} onChange={(event) => onAppearanceChange?.({ ...floorAppearance, social: event.currentTarget.value as FloorAppearance["social"] })} disabled={onAppearanceChange === undefined}><option value="nearby">Within the base</option><option value="commons">Common tables</option></select></label>
-      <span>{scene.topology.nodes.length} rooms · one connected floor</span>
-    </nav>
     <details className="dfFactoryFloor__source"><summary>Integrated source · {state?.projects.size ?? 0} projects</summary>
       {[...(state?.projects.values() ?? [])].map((project) => { const topology = topologies?.get(project.id); return <p key={project.id}>{project.name}: {topology?.sources?.length ? topology.sources.map((source) => <span key={source.repository_id}> · {source.repository_id} · {source.target_ref || "target unavailable"} · {source.kind} · {source.revision ? <code>{source.revision}</code> : "revision unavailable"}{source.reason ? `: ${source.reason}` : ""}</span>) : topology?.sourceRevision ? <code>{topology.sourceRevision}</code> : "integrated revision unavailable"}</p>; })}
     </details>
