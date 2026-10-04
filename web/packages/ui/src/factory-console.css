@@ -1208,6 +1208,12 @@ summary.dfConsoleItem__summary { cursor: pointer; }
 .dfProjectLibrary textarea, .dfProjectLibrary input, .dfProjectLibrary select { max-width: 100%; box-sizing: border-box; }
 .dfProjectLibrary pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 24rem; overflow: auto; }
 .dfProjectLibrary button { margin: .2rem; }
+.dfProjectLibrary__browser { display: grid; grid-template-columns: minmax(9rem, 1fr) minmax(0, 2fr); gap: 1rem; align-items: start; }
+.dfProjectLibrary__documents { display: flex; flex-direction: column; min-width: 0; }
+.dfProjectLibrary__documents button { text-align: left; overflow-wrap: anywhere; }
+.dfProjectLibrary__documents button span { display: block; font-size: .85em; }
+.dfProjectLibrary__reader { min-width: 0; overflow-wrap: anywhere; }
+@media (max-width: 640px) { .dfProjectLibrary__browser { grid-template-columns: minmax(0, 1fr); } }
 
 .dfStatus[data-stage$="passed"], .dfStatus[data-stage="Delivered"], .dfStatus[data-stage="accepted"], .dfStatus[data-stage$="running"], .dfStatus[data-stage="Construction"], .dfStatus[data-stage="Deploying"], .dfStatus[data-stage="Merge"], .dfStatus[data-stage="Merge queued"] { color: var(--df-console-accent); }
 .dfStatus[data-stage="Blocked"], .dfStatus[data-stage="Delivery blocked"], .dfStatus[data-stage="Correction"], .dfStatus[data-stage="reopened"] { color: var(--df-console-warning); }

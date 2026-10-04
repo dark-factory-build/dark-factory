@@ -6,26 +6,120 @@ import { ProjectLibrary } from "../dist/src/project-library.js";
 import { fixtureState } from "../../../fixtures/state.mjs";
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
-test("library is lazy and reads immutable body pages only on demand", async () => {
+const metadata = { id: "ab".repeat(16), revision: 2, latest_revision: 3, kind: "procedure", title: "Optional guide", description: "Release instructions", author: "worker", source_references: "" };
+const words = (node) => typeof node === "string" ? node : (node.children ?? []).map(words).join("");
+const button = (renderer, label) => { const found = renderer.root.findAllByType("button").find((item) => words(item).includes(label)); assert.ok(found, label); return found; };
+const click = async (renderer, label) => { await act(async () => button(renderer, label).props.onClick()); };
+const mount = async (t, props) => { let renderer; await act(async () => { renderer = create(createElement(ProjectLibrary, { state: fixtureState, ...props })); }); t.after(async () => { await act(async () => renderer.unmount()); }); return renderer; };
+const documents = (renderer) => renderer.root.findByProps({ "aria-label": "Library documents" }).findAllByType("strong").map(words);
+const defer = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
+
+test("Settings remains lazy; opening loads bounded search pages and appends results", async (t) => {
   const calls = [];
-  const metadata = { id: "ab".repeat(16), revision: 2, latest_revision: 3, kind: "procedure", title: "Optional guide", description: "", author: "worker", source_references: "" };
-  const call = async (operation, input) => { calls.push({ operation, input }); if (operation === "list") return { items: [metadata] }; if (operation === "read") return metadata; if (operation === "body") return { body: "read me", complete: true }; throw new Error("unexpected operation"); };
-  let renderer;
-  await act(async () => { renderer = create(createElement(ProjectLibrary, { state: fixtureState, call })); });
+  const call = async (operation, input) => {
+    calls.push({ operation, input });
+    assert.equal(operation, "search"); assert.equal(input.limit, 4);
+    return { items: Array.from({ length: 4 }, (_, index) => ({ ...metadata, id: String(input.offset + index), title: `Guide ${input.offset + index}` })), next_offset: input.offset === 4 ? 0 : 4 };
+  };
+  const renderer = await mount(t, { call });
   assert.equal(calls.length, 0);
-  const click = async (label) => { const button = renderer.root.findAllByType("button").find((button) => button.children.join("").includes(label)); assert.ok(button, label); await act(async () => { await button.props.onClick(); }); };
-  await click("Browse library");
-  assert.deepEqual(calls.map((call) => call.operation), ["list"]);
-  await click("Optional guide");
-  assert.deepEqual(calls.map((call) => call.operation), ["list", "read"]);
-  assert.equal(renderer.root.findByType("pre").children.length, 0);
-  await click("Read body");
-  assert.equal(calls[2].input.revision, 2);
-  assert.equal(calls[2].input.limit, 8192);
+  await act(async () => renderer.root.findByType("details").props.onToggle({ currentTarget: { open: true } }));
+  assert.equal(calls.length, 1);
+  assert.deepEqual(documents(renderer), Array.from({ length: 4 }, (_, index) => `Guide ${index}`));
+  await act(async () => renderer.root.findByProps({ type: "search" }).props.onChange({ target: { value: "changed filter" } }));
+  await click(renderer, "Load more documents");
+  assert.equal(calls.at(-1).input.query, "", "paging retains the query that produced the existing results");
+  assert.equal(calls.length, 2);
+  assert.deepEqual(documents(renderer), Array.from({ length: 8 }, (_, index) => `Guide ${index}`));
+  await click(renderer, "Refresh documents");
+  assert.equal(documents(renderer).length, 4, "refresh replaces the old page");
+});
+
+test("intentional entry is flat and a document click reads its exact revision and first body page", async (t) => {
+  const calls = [];
+  const call = async (operation, input) => {
+    calls.push({ operation, input });
+    if (operation === "search") return { items: [metadata] };
+    if (operation === "read") return { ...metadata, revision: input.revision };
+    if (operation === "body") return input.offset === 0 ? { body: "read me", next_offset: 7, complete: false } : { body: " fully", complete: true };
+    throw new Error("unexpected operation");
+  };
+  const renderer = await mount(t, { call, open: true });
+  assert.equal(renderer.root.findByProps({ "aria-label": "Project library" }).type, "section");
+  assert.deepEqual(calls.map((call) => call.operation), ["search"], "no background body reads");
+  await click(renderer, "Optional guide");
+  assert.deepEqual(calls.map((call) => call.operation), ["search", "read", "body"]);
+  assert.equal(calls[2].input.revision, 2); assert.equal(calls[2].input.limit, 8192);
   assert.deepEqual(renderer.root.findByType("pre").children, ["read me"]);
-  const revise = renderer.root.findAllByType("button").find((button) => button.children.join("") === "Revise document");
-  assert.equal(revise.props.disabled, true, "superseded revision cannot be edited as current");
-  await act(async () => renderer.unmount());
+  await click(renderer, "Read more");
+  assert.equal(calls[3].input.revision, 2); assert.equal(calls[3].input.offset, 7);
+  assert.deepEqual(renderer.root.findByType("pre").children, ["read me fully"]);
+  assert.equal(button(renderer, "Revise document").props.disabled, true, "superseded revision cannot be edited as current");
+  const advanced = renderer.root.findAllByType("details").find((item) => words(item.findByType("summary")).includes("Versions"));
+  assert.ok(advanced.findAllByType("button").includes(button(renderer, "Deprecate")));
+  assert.ok(!advanced.findAllByType("button").includes(button(renderer, "Attach revision")), "attachment stays directly reachable");
+  assert.ok(!advanced.findAllByType("button").includes(button(renderer, "Open task draft")), "draft stays directly reachable");
+  await act(async () => advanced.findAllByType("input").find((item) => item.props.type === "number").props.onBlur({ target: { value: "1" } }));
+  assert.deepEqual(calls.slice(-2).map(({ operation, input }) => [operation, input.revision]), [["read", 1], ["body", 1]]);
+});
+
+test("a failed initial body page is retryable at the selected revision", async (t) => {
+  let attempts = 0;
+  const renderer = await mount(t, { open: true, call: async (operation, input) => {
+    if (operation === "search") return { items: [metadata] };
+    if (operation === "read") return metadata;
+    assert.equal(input.revision, 2); assert.equal(input.offset, 0);
+    if (++attempts === 1) throw new Error("Document temporarily unavailable");
+    return { body: "recovered", complete: true };
+  } });
+  await click(renderer, "Optional guide");
+  assert.match(words(renderer.root.findByProps({ role: "alert" })), /temporarily unavailable/);
+  await click(renderer, "Retry document text");
+  assert.deepEqual(renderer.root.findByType("pre").children, ["recovered"]);
+});
+
+test("changing projects discards late body results and resets the selected document", async (t) => {
+  const firstProject = [...fixtureState.projects.values()][0];
+  const secondProject = { ...firstProject, id: "ef".repeat(16), name: "Second project" };
+  const state = { ...fixtureState, projects: new Map([[firstProject.id, firstProject], [secondProject.id, secondProject]]) };
+  const oldBody = defer();
+  const calls = [];
+  const renderer = await mount(t, { state, open: true, call: async (operation, input) => {
+    calls.push({ operation, input });
+    if (operation === "search") return { items: input.project_id === firstProject.id ? [metadata] : [] };
+    if (operation === "read") return metadata;
+    return oldBody.promise;
+  } });
+  await click(renderer, "Optional guide");
+  await act(async () => renderer.root.findAllByType("select")[0].props.onChange({ target: { value: secondProject.id } }));
+  assert.equal(renderer.root.findAllByType("pre").length, 0);
+  assert.deepEqual(documents(renderer), []);
+  await act(async () => oldBody.resolve({ body: "OLD PROJECT BODY", complete: true }));
+  assert.equal(renderer.root.findAllByType("pre").length, 0);
+  assert.equal(renderer.root.findAllByProps({ role: "alert" }).length, 0);
+  assert.equal(calls.at(-1).input.project_id, secondProject.id);
+});
+
+test("late metadata after project scope replacement cannot request an old document body", async (t) => {
+  const oldRead = defer();
+  const calls = [];
+  const call = async (operation, input) => { calls.push({ operation, input }); if (operation === "search") return { items: [metadata] }; if (operation === "read") return oldRead.promise; throw new Error("unexpected body request"); };
+  const renderer = await mount(t, { open: true, call });
+  await click(renderer, "Optional guide");
+  const project = { ...[...fixtureState.projects.values()][0], id: "ef".repeat(16) };
+  await act(async () => renderer.update(createElement(ProjectLibrary, { open: true, call, state: { ...fixtureState, projects: new Map([[project.id, project]]) } })));
+  await act(async () => oldRead.resolve(metadata));
+  assert.deepEqual(calls.map(({ operation }) => operation), ["search", "read", "search"]);
+  assert.equal(renderer.root.findAllByType("pre").length, 0);
+});
+
+test("disconnected and empty libraries have an honest visible state", async (t) => {
+  const renderer = await mount(t, { open: true });
+  assert.match(words(renderer.root), /Connect to read project documents/);
+  let calls = 0;
+  await act(async () => renderer.update(createElement(ProjectLibrary, { open: true, state: fixtureState, call: async () => { calls++; return { items: [] }; } })));
+  assert.equal(calls, 1);
+  assert.match(words(renderer.root), /No documents yet/);
 });
 
 test("board shares immutable threads, resolves by revision, and retains linked conclusions", async () => {
@@ -45,17 +139,16 @@ test("board shares immutable threads, resolves by revision, and retains linked c
   const opened = [];
   let renderer;
   await act(async () => { renderer = create(createElement(ProjectLibrary, { state: fixtureState, call, board: true, entity: source, repository: metadata.repository_id, onSource: (ref) => opened.push(ref) })); });
-  const click = async (label) => { const button = renderer.root.findAllByType("button").find((button) => button.children.join("").includes(label)); assert.ok(button, label); await act(async () => { button.props.onClick(); }); };
-  assert.equal(calls.length, 0);
+  const click = async (label) => { const button = renderer.root.findAllByType("button").find((button) => words(button).includes(label)); assert.ok(button, label); await act(async () => { button.props.onClick(); }); };
+  assert.equal(calls.length, 1, "Board entry loads bounded discussion metadata");
   await click("New discussion");
   assert.equal(renderer.root.findAllByType("input").find((input) => input.props.name === "repository_id").props.defaultValue, metadata.repository_id, "entity entry point seeds the editor repository");
   await click("Cancel");
-  await click("Browse discussions");
+  await click("Refresh discussions");
   assert.equal(calls[0].input.entity, source);
   assert.equal(calls[0].input.limit, 4);
   await click("Root cause");
-  assert.equal(renderer.root.findAllByType("button").find((button) => button.children.join("") === "Resolve discussion").props.disabled, true);
-  await click("Read body");
+  assert.equal(renderer.root.findAllByType("button").find((button) => words(button) === "Resolve discussion").props.disabled, false, "selection reads the complete root body");
   await click("Read replies");
   assert.deepEqual(calls.at(-1).input, { project_id: [...fixtureState.projects.keys()][0], repository_id: metadata.repository_id, branch: "topic", environment: "staging", thread_id: metadata.id, kind: "discussion_reply", offset: 0, limit: 4 });
   await click("Task access");
@@ -95,19 +188,35 @@ test("ID-only links resolve latest through explicit metadata revisions; historic
   const call = async (operation, input) => {
     calls.push({ operation, input });
     if (operation === "read") { assert.ok(Number.isSafeInteger(input.revision) && input.revision > 0, "real store rejects revision zero"); const doc = documents.get(input.id); assert.ok(doc); return { ...doc, id: input.id, revision: input.revision }; }
-    if (operation === "list") return { items: [{ ...documents.get(lessonID), id: lessonID, revision: 1 }], next_offset: 0 };
+    if (operation === "search") return { items: [{ ...documents.get(lessonID), id: lessonID, revision: 1 }], next_offset: 0 };
+    if (operation === "body") return { body: `Revision ${input.revision}`, complete: true };
     throw new Error(`unexpected ${operation}`);
   };
   let renderer;
   await act(async () => { renderer = create(createElement(ProjectLibrary, { state: fixtureState, call, initialID: lessonID })); });
-  const click = async (label) => { await act(async () => renderer.root.findAllByType("button").find((button) => button.children.join("").includes(label)).props.onClick()); };
+  const click = async (label) => { await act(async () => renderer.root.findAllByType("button").find((button) => words(button).includes(label)).props.onClick()); };
   const reads = () => calls.filter((call) => call.operation === "read").map(({ input }) => [input.id, input.revision]);
   assert.deepEqual(reads(), [[lessonID, 1], [lessonID, 2]], "initial ID opens the current immutable revision");
   await click("Original discussion:");
   assert.deepEqual(reads().slice(-2), [[rootID, 1], [rootID, 3]]);
-  await click("Browse library"); await click("Lesson · lesson · r1");
+  await click("Refresh documents"); await click("Lesson");
   assert.deepEqual(reads().at(-1), [lessonID, 1], "explicit historical selection never advances to latest");
   await click("Supersedes:");
   assert.deepEqual(reads().slice(-2), [[priorID, 1], [priorID, 4]]);
   await act(async () => renderer.unmount());
+});
+
+
+test("scoped entry selects its project and clears source filters when switching projects", async (t) => {
+  const first = [...fixtureState.projects.values()][0], second = { ...first, id: "ef".repeat(16), name: "Second project" };
+  const calls = [], entity = `${second.id}:source`, repository = "cd".repeat(16);
+  const renderer = await mount(t, { open: true, initialProjectId: second.id, entity, repository,
+    state: { ...fixtureState, projects: new Map([[first.id, first], [second.id, second]]) },
+    call: async (operation, input) => { calls.push({ operation, input }); return { items: [] }; },
+  });
+  assert.equal(calls[0].input.project_id, second.id);
+  assert.equal(calls[0].input.entity, entity); assert.equal(calls[0].input.repository_id, repository);
+  await act(async () => renderer.root.findAllByType("select")[0].props.onChange({ target: { value: first.id } }));
+  assert.equal(calls.at(-1).input.project_id, first.id);
+  assert.equal(calls.at(-1).input.entity, ""); assert.equal(calls.at(-1).input.repository_id, "");
 });
