@@ -2,8 +2,33 @@ package kernel
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os"
 )
+
+// SchemaVersion is the user_version this build opens and writes.
+const SchemaVersion = userVersion
+
+// BackupTo replaces path with a consistent copy of the database (VACUUM
+// INTO), holding the writer gate so nothing commits during the copy.
+func (store *Store) BackupTo(ctx context.Context, path string) error {
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	tx, err := store.beginValidatedWrite(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Close()
+	if err := tx.Rollback(nil); err != nil {
+		return err
+	}
+	if _, err := tx.connection.ExecContext(ctx, `VACUUM INTO ?`, path); err != nil {
+		return err
+	}
+	return os.Chmod(path, 0o600)
+}
 
 // CompactStorage is explicit maintenance: retain the writer gate across VACUUM
 // (which cannot run inside a transaction), so dispatch cannot restart mid-copy.

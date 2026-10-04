@@ -4,13 +4,25 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"regexp"
+	"runtime"
+	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/dark-factory-build/dark-factory/internal/api"
+	"github.com/dark-factory-build/dark-factory/internal/buildinfo"
+	"github.com/dark-factory-build/dark-factory/internal/change"
+	"github.com/dark-factory-build/dark-factory/internal/install"
+	"github.com/dark-factory-build/dark-factory/internal/kernel"
+	"github.com/dark-factory-build/dark-factory/internal/runner"
 )
 
 // The console shows which published release exists; installing one stays a
@@ -94,4 +106,221 @@ func readPublishedRelease(ctx context.Context, client *http.Client, endpoint str
 		return api.PublishedRelease{}, errNoRelease
 	}
 	return api.PublishedRelease{Version: result.TagName, URL: releaseTagURL + result.TagName}, nil
+}
+
+// factoryd releases only itself: the registered checkout of its own
+// repository, at a commit merged into its base.
+// ponytail: one fixed repository and base; take them from the project when a
+// factory ships a fork of itself.
+const (
+	selfRepository = "dark-factory-build/dark-factory"
+	selfBase       = "main"
+)
+
+var (
+	// releaseDrainLimit bounds how long admission stays held (#1121).
+	releaseDrainLimit = 10 * time.Minute
+	releaseDrainPoll  = time.Second
+	// releaseBuild, releaseUpgrade and releaseExit are package-test seams.
+	releaseBuild   = buildRelease
+	releaseUpgrade = install.ServiceUpgrade
+	// SIGTERM shuts down cleanly; factoryd then exits 75 because a trial
+	// marker names another build, and launchd restarts the new binaries.
+	releaseExit = func() { _ = syscall.Kill(os.Getpid(), syscall.SIGTERM) }
+)
+
+// Release starts (start) or reads the release of merged commit sha into this
+// factory's own service. The record is the production delivery release:<sha>.
+func (daemon *Daemon) Release(ctx context.Context, sha string, start bool) (kernel.ProductionDelivery, error) {
+	_, existing, found, err := daemon.store.Delivery(ctx, "release:"+sha)
+	if err != nil || !start {
+		if err == nil && !found {
+			err = kernel.ErrNotFound
+		}
+		return existing, err
+	}
+	if daemon.gateHome == "" {
+		return existing, fmt.Errorf("%w: factoryd has no home to release into", kernel.ErrConflict)
+	}
+	_, upgrading, err := install.ReadUpgradeMarker(daemon.gateHome)
+	if err != nil {
+		return existing, err
+	}
+	if upgrading || !daemon.releaseBusy.CompareAndSwap(false, true) {
+		if found && existing.State == "running" {
+			return existing, nil
+		}
+		return existing, fmt.Errorf("%w: a release is already running", kernel.ErrConflict)
+	}
+	project, root, source, err := daemon.selfRepositorySource(ctx)
+	delivery := kernel.ProductionDelivery{ID: "release:" + sha, Kind: "runtime", Destination: "factoryd", Revision: sha, State: "running", Phase: "build", PullRequests: []uint64{}}
+	if buildinfo.Current().Source() == sha {
+		delivery.State, delivery.Phase = "verified", ""
+	}
+	if err == nil {
+		err = daemon.writeRelease(ctx, project, &delivery)
+	}
+	if err != nil || delivery.State == "verified" {
+		daemon.releaseBusy.Store(false)
+		return delivery, err
+	}
+	go daemon.release(project, root, source, delivery)
+	return delivery, nil
+}
+
+func (daemon *Daemon) writeRelease(ctx context.Context, project kernel.ProjectID, delivery *kernel.ProductionDelivery) error {
+	now := daemon.now().UnixMilli()
+	delivery.UpdatedAt = now
+	if delivery.State == "verified" {
+		delivery.VerifiedAt = now
+	}
+	if len(delivery.Reason) > 2048 {
+		delivery.Reason = delivery.Reason[:2048]
+	}
+	at, err := kernel.NewUnixMillis(now)
+	if err == nil {
+		err = daemon.store.RecordDelivery(ctx, project, selfRepository, *delivery, at)
+	}
+	return err
+}
+
+// FinishRelease records the outcome of release:<sha> after the restart.
+func (daemon *Daemon) FinishRelease(ctx context.Context, sha, state, reason string) error {
+	project, delivery, found, err := daemon.store.Delivery(ctx, "release:"+sha)
+	if err != nil || !found {
+		return err
+	}
+	delivery.State, delivery.Phase, delivery.Reason = state, "", reason
+	return daemon.writeRelease(ctx, project, &delivery)
+}
+
+func (daemon *Daemon) selfRepositorySource(ctx context.Context) (project kernel.ProjectID, root string, source change.RepositorySourceIdentity, err error) {
+	projects, err := daemon.store.PublishingProjects(ctx)
+	for _, project = range projects {
+		repositories, _ := daemon.store.ProjectRepositories(ctx, project)
+		for _, repository := range repositories {
+			identity, verified, _ := daemon.store.RepositorySourceIdentity(ctx, repository.ID)
+			if repository.Enabled && verified && strings.EqualFold(identity.PublicationRepository, selfRepository) {
+				rootIdentity, rootErr := change.NewRepositoryIdentity(identity.RootDevice, identity.RootInode)
+				gitIdentity, gitErr := change.NewRepositoryIdentity(identity.GitDevice, identity.GitInode)
+				return project, repository.Root, change.RepositorySourceIdentity{Root: rootIdentity, Git: gitIdentity, OriginDigest: identity.OriginDigest}, errors.Join(rootErr, gitErr)
+			}
+		}
+	}
+	return project, "", source, errors.Join(err, fmt.Errorf("%w: no registered checkout of %s", kernel.ErrNotFound, selfRepository))
+}
+
+// release builds, drains, backs up and swaps; the restarted build promotes or
+// rolls back. Every failure before the swap leaves the factory as it was.
+func (daemon *Daemon) release(project kernel.ProjectID, root string, source change.RepositorySourceIdentity, delivery kernel.ProductionDelivery) {
+	ctx := daemon.cleanupCtx
+	fail := func(reason string) {
+		daemon.releaseHold.Store(false)
+		daemon.releaseBusy.Store(false)
+		delivery.State, delivery.Reason = "failed", reason
+		_ = daemon.writeRelease(context.WithoutCancel(ctx), project, &delivery)
+	}
+	directory, err := os.MkdirTemp("", "dark-factory-release-")
+	if err != nil {
+		fail(err.Error())
+		return
+	}
+	defer os.RemoveAll(directory)
+	daemon.gateMu.Lock()
+	identity, err := releaseBuild(ctx, daemon, root, source, delivery.Revision, directory)
+	daemon.gateMu.Unlock()
+	if err != nil {
+		fail(err.Error())
+		return
+	}
+	delivery.Phase = "drain"
+	_ = daemon.writeRelease(ctx, project, &delivery)
+	daemon.releaseHold.Store(true)
+	blocking, err := daemon.drainForRelease(ctx)
+	if err == nil && blocking != "" {
+		err = errors.New("drain_timeout" + blocking)
+	}
+	if err != nil {
+		fail(err.Error())
+		return
+	}
+	delivery.Phase = "swap"
+	_ = daemon.writeRelease(ctx, project, &delivery)
+	if err := daemon.store.BackupTo(ctx, install.UpgradeBackupPath(daemon.gateHome)); err != nil {
+		fail("backup: " + err.Error())
+		return
+	}
+	if err := releaseUpgrade(ctx, daemon.gateHome, filepath.Join(directory, "bin"), identity, kernel.SchemaVersion); err != nil {
+		fail("upgrade: " + err.Error())
+		return
+	}
+	delivery.Phase = "trial"
+	_ = daemon.writeRelease(ctx, project, &delivery)
+	releaseExit()
+}
+
+// drainForRelease waits, admission held, until every live run either ended
+// or can be adopted across the restart. It returns the run still blocking
+// when the limit passes.
+func (daemon *Daemon) drainForRelease(ctx context.Context) (string, error) {
+	deadline := time.Now().Add(releaseDrainLimit)
+	for {
+		runs, err := daemon.store.RecoverableRuns(ctx)
+		if err != nil {
+			return "", err
+		}
+		blocking := ""
+		for _, recovered := range runs {
+			run := recovered.Run
+			// A running attempt behind its runner's takeover endpoint is
+			// adopted by the next daemon; every other live run must end.
+			if _, err := os.Stat(filepath.Join(install.RuntimesPath(daemon.gateHome), run.ID.String(), runner.TakeoverSocketName)); run.Phase == kernel.RunRunning && err == nil {
+				continue
+			}
+			blocking = ": run " + run.ID.String() + " is " + run.Phase.String()
+			break
+		}
+		if blocking == "" || time.Now().After(deadline) {
+			return blocking, nil
+		}
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-time.After(releaseDrainPoll):
+		}
+	}
+}
+
+// buildRelease builds the three binaries at sha, from a base-only clone of
+// the registered checkout, into directory/bin as an exact release identity.
+func buildRelease(ctx context.Context, daemon *Daemon, root string, source change.RepositorySourceIdentity, sha, directory string) (buildinfo.Identity, error) {
+	tree := filepath.Join(directory, "tree")
+	if err := change.ReviewCheckout(ctx, change.TrustedGitExecutable, root, source, tree, 0, sha, sha, selfBase); err != nil {
+		return buildinfo.Identity{}, fmt.Errorf("release checkout: %w", err)
+	}
+	version, versionErr := os.ReadFile(filepath.Join(tree, "VERSION"))
+	module, moduleErr := os.ReadFile(filepath.Join(tree, "go.mod"))
+	goVersion := regexp.MustCompile(`(?m)^go ([0-9]+\.[0-9]+\.[0-9]+)$`).FindSubmatch(module)
+	identity, ok := buildinfo.Expected(strings.TrimSpace(string(version)), sha, runtime.GOOS+"/"+runtime.GOARCH)
+	if versionErr != nil || moduleErr != nil || goVersion == nil || !ok {
+		return buildinfo.Identity{}, errors.New("release source has no exact VERSION or go.mod toolchain")
+	}
+	for _, name := range []string{"factoryd", "factoryctl", "factory-runner"} {
+		output := filepath.Join(directory, "bin", name)
+		// /usr/bin/env resolves go on the operator's tool path, not ours.
+		command := exec.CommandContext(ctx, "/usr/bin/env", "go", "build", "-trimpath", "-buildvcs=false", "-ldflags", "-s -w -X github.com/dark-factory-build/dark-factory/internal/buildinfo.receipt="+identity.Receipt(), "-o", output, "./cmd/"+name)
+		command.Dir = tree
+		command.Env = append(daemon.gateEnvironment(), "CGO_ENABLED=0", "GOENV=off", "GOAUTH=off", "GOTOOLCHAIN=go"+string(goVersion[1]))
+		command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		command.Cancel = func() error { return syscall.Kill(-command.Process.Pid, syscall.SIGKILL) }
+		command.WaitDelay = 5 * time.Second
+		if log, err := command.CombinedOutput(); err != nil {
+			return buildinfo.Identity{}, fmt.Errorf("go build %s: %v: %s", name, err, log[max(0, len(log)-1024):])
+		}
+		// The release artifact contract is exactly 0755; the linker honors umask.
+		if err := os.Chmod(output, 0o755); err != nil {
+			return buildinfo.Identity{}, err
+		}
+	}
+	return identity, nil
 }

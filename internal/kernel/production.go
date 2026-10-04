@@ -326,7 +326,7 @@ func (store *Store) recordProductionObservation(ctx context.Context, c *sql.Conn
 		}
 	}
 	for _, delivery := range observation.Deliveries {
-		if !productionSHA(delivery.Revision) || !validOutcomeText(delivery.Kind, 64) || !validOutcomeText(delivery.Destination, 256) || !validOutcomeText(delivery.State, 64) || !productionURL(delivery.URL) || !productionNumbers(delivery.PullRequests) || delivery.UpdatedAt < 0 || delivery.UpdatedAt > at.Int64()+5000 || !validOutcomeText(delivery.Phase, 64) || !validOutcomeText(delivery.Reason, 2048) || delivery.Overflow < 0 || delivery.VerifiedAt < 0 || delivery.VerifiedAt > at.Int64()+5000 {
+		if !validProductionDelivery(delivery, at) {
 			return ErrInvalidValue
 		}
 		if err := write("delivery", delivery.ID, "", delivery); err != nil {
@@ -337,6 +337,48 @@ func (store *Store) recordProductionObservation(ctx context.Context, c *sql.Conn
 		return err
 	}
 	return nil
+}
+
+func validProductionDelivery(delivery ProductionDelivery, at UnixMillis) bool {
+	return productionSHA(delivery.Revision) && validOutcomeText(delivery.Kind, 64) && validOutcomeText(delivery.Destination, 256) && validOutcomeText(delivery.State, 64) && productionURL(delivery.URL) && productionNumbers(delivery.PullRequests) && delivery.UpdatedAt >= 0 && delivery.UpdatedAt <= at.Int64()+5000 && validOutcomeText(delivery.Phase, 64) && validOutcomeText(delivery.Reason, 2048) && delivery.Overflow >= 0 && delivery.VerifiedAt >= 0 && delivery.VerifiedAt <= at.Int64()+5000
+}
+
+// RecordDelivery writes one delivery row, such as a runtime release.
+func (store *Store) RecordDelivery(ctx context.Context, project ProjectID, repository string, delivery ProductionDelivery, at UnixMillis) error {
+	repository = strings.ToLower(repository)
+	if project.zero() || !productionRepository.MatchString(repository) || !validProductionDelivery(delivery, at) {
+		return ErrInvalidValue
+	}
+	tx, err := store.beginValidatedWrite(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Close()
+	if err := productionRecordOnConnection(ctx, tx.connection, project, repository, "delivery", delivery.ID, "", delivery, at.Int64()); err != nil {
+		return tx.Rollback(err)
+	}
+	return tx.Commit(ctx)
+}
+
+// Delivery reads the delivery row id and the project that recorded it.
+func (store *Store) Delivery(ctx context.Context, id string) (ProjectID, ProductionDelivery, bool, error) {
+	var delivery ProductionDelivery
+	tx, err := store.beginRead(ctx)
+	if err != nil {
+		return ProjectID{}, delivery, false, err
+	}
+	defer tx.Close()
+	var projectBytes []byte
+	var document string
+	err = tx.connection.QueryRowContext(ctx, `SELECT project_id, document FROM production_records WHERE kind = 'delivery' AND identity = ? ORDER BY observed_at_ms DESC LIMIT 1`, id).Scan(&projectBytes, &document)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ProjectID{}, delivery, false, nil
+	}
+	project, idErr := ProjectIDFromBytes(projectBytes)
+	if err = errors.Join(err, idErr); err == nil && json.Unmarshal([]byte(document), &delivery) != nil {
+		err = fmt.Errorf("%w: delivery", ErrCorruptState)
+	}
+	return project, delivery, err == nil, err
 }
 
 // A recorded branch and exact settled commit identify a Change. A successful

@@ -120,6 +120,9 @@ const (
     Only succeeded/cancelled tasks; retained filenames are marked removed.
   factoryctl storage compact
     Requires dispatch off and no nonterminal runs.
+  factoryctl release SHA [--wait]
+    Installs merged commit SHA into this factory's service, with rollback.
+    --wait exits 0 verified, 1 failed or rolled back, 75 refused with no effect.
   factoryctl task recovery --task ID --incarnation ID
   factoryctl task read --task ID --revision REVISION [--offset N]
   factoryctl dispatch on|off [--revision REVISION]
@@ -356,6 +359,9 @@ func runWithDependencies(ctx context.Context, args []string, getenv func(string)
 			return exitFailure
 		}
 		return 0
+	}
+	if len(args) >= 1 && args[0] == "release" {
+		return runRelease(ctx, args[1:], getenv, stdout, stderr)
 	}
 	command, help, ok := parse(args)
 	if help {
@@ -1245,11 +1251,6 @@ func runService(ctx context.Context, command attemptCommand, stdout, stderr io.W
 			message = "factoryctl: service operations are unsupported on this platform\n"
 		case errors.Is(err, install.ErrInvalidHome):
 			message = "factoryctl: service operations require an exact Go home\n"
-		case errors.Is(err, install.ErrServiceRelayOrigin):
-			// The only service error printed verbatim: it names the installed
-			// origin and the way out, and the engine assembles it from its own
-			// words alone.
-			message = "factoryctl: " + err.Error() + "\n"
 		case errors.Is(err, install.ErrServiceForeign):
 			message = "factoryctl: a service artifact is not this installation's property; refusing\n"
 		case errors.Is(err, install.ErrServiceResidue):

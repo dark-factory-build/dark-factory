@@ -254,7 +254,8 @@ or the exact root-owned `/Library/Developer/CommandLineTools` installation,
 not writable by other users,
 and cannot overlap Factory private paths or include account/credential roots.
 The managed service install accepts and records the same option; status and
-uninstall recover it from the receipt. Changing it requires reinstalling.
+uninstall recover it from the receipt. Installing again with another value
+re-renders the job in place.
 Codex Go, Corepack, npm and XDG caches live inside the private runtime home;
 operator caches are not inherited. Tool versions and command-specific compiler
 or OpenSSL settings remain the task and installation owner's choices.

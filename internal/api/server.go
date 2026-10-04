@@ -89,6 +89,7 @@ const (
 	CallGitHubConnection
 	CallIntake
 	CallMaintainer
+	CallRelease
 )
 
 // AttemptDigest is the SHA-256 digest of one raw attempt bearer. The bearer is
@@ -152,6 +153,7 @@ type Call struct {
 	outcomeWrite        OutcomeWriteInput
 	outcomeRead         OutcomeReadInput
 	outcomeList         OutcomeListInput
+	release             ReleaseInput
 	webClient           WebClientRevocationInput
 	webAfter            string
 	expectedRevision    uint64
@@ -362,6 +364,8 @@ func (call Call) OutcomeReadInput() (OutcomeReadInput, bool) {
 func (call Call) OutcomeListInput() (OutcomeListInput, bool) {
 	return call.outcomeList, call.kind == CallOutcomeList
 }
+
+func (call Call) ReleaseInput() (ReleaseInput, bool) { return call.release, call.kind == CallRelease }
 
 type replyKind uint8
 
@@ -1060,6 +1064,10 @@ func decodeCall(domain byte, bearer credential, encoded []byte) (Call, RemoteErr
 		if err := decodeExact(request.Params, &call.outcomeList); err != nil || !validText(call.outcomeList.ProjectID, 1, 64) || call.outcomeList.Limit > MaxContentPageItems {
 			return Call{}, RemoteInvalidRequest
 		}
+	case CallRelease:
+		if err := decodeExact(request.Params, &call.release); err != nil || !validReleaseInput(call.release) {
+			return Call{}, RemoteInvalidRequest
+		}
 	case CallHumanReply:
 		if err := decodeExact(request.Params, &call.humanReply); err != nil || !validID(call.humanReply.OperationID) || !validID(call.humanReply.RequestID) || call.humanReply.ExpectedRevision == 0 || !validText(call.humanReply.Reply, 1, 8192) {
 			return Call{}, RemoteInvalidRequest
@@ -1233,6 +1241,8 @@ func methodKind(method string) (CallKind, byte) {
 		return CallOutcomeRead, operatorDomain
 	case "outcome_list":
 		return CallOutcomeList, operatorDomain
+	case "release":
+		return CallRelease, operatorDomain
 	case "attempt_outcome_write":
 		return CallOutcomeWrite, attemptDomain
 	case "attempt_outcome_read":
@@ -1351,7 +1361,7 @@ func replyMatches(kind CallKind, reply replyKind) bool {
 		return reply == replyWebClients
 	case CallWebRevokeClient:
 		return reply == replyWebRevoke
-	case CallMaintainer, CallGitHubConnection, CallIntake:
+	case CallMaintainer, CallGitHubConnection, CallIntake, CallRelease:
 		return reply == replyContent
 	case CallRemoteStatus:
 		return reply == replyRemoteStatus

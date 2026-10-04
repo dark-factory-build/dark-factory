@@ -398,7 +398,7 @@ EOF
 /bin/chmod 755 "$local_fixture/configured/node" "$local_fixture/configured/corepack"
 for local_child in \
     check-toolchain-pins.sh test-local-ci-environment.sh test-new-worktree.sh \
-    test-reinstall-service.sh test-deploy-site.sh test-cold-review.sh \
+    test-deploy-site.sh test-cold-review.sh \
     test-release.sh test-github-step-summary.sh test-verify-adversarial-review.sh \
     test-cloudflare-env.sh test-bootstrap-maintainer-v2.sh test-repository-settings.sh \
     test-go-gates.sh test-go-e2e-tools.sh go-ci-owned.sh \

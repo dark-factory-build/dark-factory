@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 	"unicode/utf8"
 
 	"github.com/dark-factory-build/dark-factory/internal/api"
@@ -39,6 +41,10 @@ const (
 	maxAPIHandlers        = 32
 	exitFailure           = 1
 	exitUsage             = 64
+	// exitRestart is unsuccessful, so launchd's KeepAlive starts the job
+	// again: on the swapped binaries after a release, or the old ones after
+	// a rollback.
+	exitRestart = 75
 
 	usage = `usage:
   factoryd --home ABSOLUTE [--git PATH] [--tool-path PATH] [--toolchain-read-roots PATH_LIST] [--base-revision REVISION]
@@ -52,6 +58,19 @@ const (
 )
 
 var (
+	errRestart = errors.New("restarting for a release")
+	// The self-upgrade trial limits (#1106): a trial build that is not up
+	// and verified within trialLimit exits and is rolled back; one that is
+	// promotes promoteAfter after it came up.
+	trialLimit   = 5 * time.Minute
+	promoteAfter = 60 * time.Second
+	// Package-test seams for the trial boot.
+	selfSource      = func() string { return buildinfo.Current().Source() }
+	trialExit       = os.Exit
+	rollbackService = install.ServiceRollback
+	verifyRelease   = install.VerifyInstalledRelease
+	removeUpgrade   = install.RemoveUpgrade
+
 	cleanStartupCancellation = errors.New("factoryd: clean startup cancellation")
 	startupPhaseHook         func(string)
 	closeDaemon              = func(value *daemon.Daemon) error { return value.Close() }
@@ -169,6 +188,9 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	}
 	if err := serve(ctx, configuration); err != nil {
 		_, _ = fmt.Fprintf(stderr, "factoryd: %v\n", err)
+		if errors.Is(err, errRestart) {
+			return exitRestart
+		}
 		return exitFailure
 	}
 	return 0
@@ -310,6 +332,31 @@ func serve(ctx context.Context, configuration config) error {
 			return errors.New("invalid factoryd configuration")
 		}
 	}
+	// The trial boot runs before the store opens, so a rollback can restore
+	// the database the old build expects.
+	marker, upgrading, err := install.ReadUpgradeMarker(configuration.home)
+	if err != nil {
+		return err
+	}
+	trial := upgrading && marker.Target == selfSource()
+	var limit *time.Timer
+	if trial {
+		marker.Boots++
+		// Any boot after the first means the trial build exited: it crashed,
+		// hung past trialLimit, or failed verification.
+		if marker.Boots >= 2 {
+			reason := cmp.Or(marker.Reason, "the new build exited before it was promoted")
+			if err := rollbackService(ctx, configuration.home, marker.UserVersion != kernel.SchemaVersion, reason); err != nil {
+				return fmt.Errorf("roll back release %s: %w", marker.Target, err)
+			}
+			return fmt.Errorf("%w: rolled back %s: %s", errRestart, marker.Target, reason)
+		}
+		if err := install.WriteUpgradeMarker(configuration.home, marker); err != nil {
+			return err
+		}
+		limit = time.AfterFunc(trialLimit, func() { trialExit(exitRestart) })
+		defer limit.Stop()
+	}
 	owner, err := openProcess(ctx, configuration)
 	if err != nil {
 		if errors.Is(err, cleanStartupCancellation) {
@@ -317,7 +364,54 @@ func serve(ctx context.Context, configuration config) error {
 		}
 		return err
 	}
-	return owner.wait(ctx)
+	if trial {
+		go owner.promote(ctx, configuration.home, marker, limit)
+	} else if upgrading {
+		// The old build is back: the release rolled back, or never swapped.
+		owner.settleRelease(ctx, configuration.home, marker.Target, "failed", cmp.Or(marker.Reason, "interrupted in state "+marker.State))
+	}
+	if err := owner.wait(ctx); err != nil {
+		return err
+	}
+	// A release swapped the binaries and shut this build down.
+	if next, ok, _ := install.ReadUpgradeMarker(configuration.home); ok && next.State == install.UpgradeTrial && next.Target != selfSource() {
+		return fmt.Errorf("%w: %s installed", errRestart, next.Target)
+	}
+	return nil
+}
+
+// promote verifies the trial build once it has stayed up, then records the
+// release verified and forgets the upgrade. A failed verification exits, so
+// the next boot rolls back.
+func (owner *process) promote(ctx context.Context, home string, marker install.UpgradeMarker, limit *time.Timer) {
+	select {
+	case <-ctx.Done():
+		return
+	case <-time.After(promoteAfter):
+	}
+	if err := verifyRelease(ctx, home, buildinfo.Current()); err != nil {
+		marker.Reason = "verification failed: " + err.Error()
+		_ = install.WriteUpgradeMarker(home, marker)
+		trialExit(exitRestart)
+		return
+	}
+	if owner.settleRelease(ctx, home, marker.Target, "verified", "") {
+		limit.Stop()
+	}
+}
+
+// settleRelease forgets the upgrade first: while its marker remains, the next
+// boot still decides the release, so nothing is recorded.
+func (owner *process) settleRelease(ctx context.Context, home, target, state, reason string) bool {
+	err := removeUpgrade(home)
+	if _, present, readErr := install.ReadUpgradeMarker(home); present || readErr != nil {
+		_, _ = fmt.Fprintf(recoveryLog, "factoryd: forgetting release %s failed: %v\n", target, errors.Join(err, readErr))
+		return false
+	}
+	if err = errors.Join(err, owner.daemon.FinishRelease(ctx, target, state, reason)); err != nil {
+		_, _ = fmt.Fprintf(recoveryLog, "factoryd: recording release %s %s failed: %v\n", target, state, err)
+	}
+	return true
 }
 
 func openProcess(ctx context.Context, configuration config) (_ *process, resultErr error) {

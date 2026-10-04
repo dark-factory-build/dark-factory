@@ -10,14 +10,16 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
-	"strconv"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/dark-factory-build/dark-factory/internal/buildinfo"
 	"golang.org/x/sys/unix"
 )
 
@@ -904,15 +906,27 @@ func TestServiceArgumentsSurviveInstallStatusAndUninstall(t *testing.T) {
 		t.Fatalf("receipt does not bind the relayed plist: %+v, %v", receipt, err)
 	}
 
+	// A changed setting re-renders the plist and receipt in place: one
+	// bootout and bootstrap, the installed binaries untouched.
 	changed := fixture.config
 	changed.ToolPath += ":/usr/local/bin"
-	unchanged := &recordedLaunchctl{results: []launchctlResult{fixture.printRunning(77)}}
-	status, err = serviceInstallAt(context.Background(), fixture.home, fixture.userHome, changed, fixture.sourceDir, unchanged.run)
-	if !errors.Is(err, ErrServiceForeign) || status.State != ServiceAmbiguous {
-		t.Fatalf("changed toolchain replaced installed authority: %+v, %v", status, err)
+	program, err := os.Stat(serviceProgramPath(fixture.home))
+	if err != nil {
+		t.Fatal(err)
+	}
+	reconfigured := &recordedLaunchctl{results: []launchctlResult{fixture.printRunning(77), {status: 0}, {status: launchctlNotFound}, {status: 0}, fixture.printRunning(78)}}
+	status, err = serviceInstallAt(context.Background(), fixture.home, fixture.userHome, changed, fixture.sourceDir, reconfigured.run)
+	if err != nil || status.State != ServiceRunning || status.PID != 78 {
+		t.Fatalf("changed toolchain install = %+v, %v (%q)", status, err, reconfigured.calls)
+	}
+	if expected, _, err = ServicePlist(fixture.home, fixture.config.Label, origin, address, changed.ToolPath, toolchain); err != nil {
+		t.Fatal(err)
 	}
 	if body, err := os.ReadFile(fixture.plistPath()); err != nil || !bytes.Equal(body, expected) {
-		t.Fatalf("refused toolchain change modified plist: %v", err)
+		t.Fatalf("reconfigured plist is not the new rendering: %v", err)
+	}
+	if after, err := os.Stat(serviceProgramPath(fixture.home)); err != nil || !os.SameFile(program, after) {
+		t.Fatalf("reconfiguration replaced the installed program: %v", err)
 	}
 
 	// Status re-renders from the receipt, so the relayed plist is recognized
@@ -942,49 +956,34 @@ func TestServiceArgumentsSurviveInstallStatusAndUninstall(t *testing.T) {
 	}
 }
 
-func TestServiceInstallRefusesAChangedRelayOriginInsteadOfNoOpping(t *testing.T) {
+func TestServiceInstallReconfiguresAChangedRelayOriginInPlace(t *testing.T) {
 	const originA = "wss://relay.darkfactory.build"
 	const originB = "wss://relay.example.test"
 	fixture := newManageFixture(t)
-
-	// A repeated install that would render a different plist must refuse
-	// rather than report the old installation as satisfying the request.
-	refuses := func(t *testing.T, from, to string) {
-		t.Helper()
-		fixture.config.RelayOrigin = from
-		first := &recordedLaunchctl{results: append(fixture.printAbsent(), launchctlResult{status: 0}, fixture.printRunning(88))}
-		fixture.install(t, first.run)
-		installed, err := os.ReadFile(fixture.plistPath())
+	fixture.config.RelayOrigin = originA
+	fixture.install(t, (&recordedLaunchctl{results: append(fixture.printAbsent(), launchctlResult{status: 0}, fixture.printRunning(88))}).run)
+	for _, to := range []string{originB, "", originA} {
+		changed := fixture.config
+		changed.RelayOrigin = to
+		reconfigured := &recordedLaunchctl{results: []launchctlResult{fixture.printRunning(88), {status: 0}, {status: launchctlNotFound}, {status: 0}, fixture.printRunning(88)}}
+		status, err := serviceInstallAt(context.Background(), fixture.home, fixture.userHome, changed, fixture.sourceDir, reconfigured.run)
+		if err != nil || status.State != ServiceRunning {
+			t.Fatalf("install %q = %+v, %v", to, status, err)
+		}
+		want, _, err := ServicePlist(fixture.home, fixture.config.Label, to, "", "", "")
 		if err != nil {
 			t.Fatal(err)
 		}
-		changed := fixture.config
-		changed.RelayOrigin = to
-		status, err := serviceInstallAt(context.Background(), fixture.home, fixture.userHome, changed, fixture.sourceDir, (&recordedLaunchctl{results: []launchctlResult{fixture.printRunning(88)}}).run)
-		if status.State != ServiceAmbiguous || !errors.Is(err, ErrServiceRelayOrigin) || !errors.Is(err, ErrServiceForeign) {
-			t.Fatalf("install %q over %q = %+v, %v", to, from, status, err)
+		if body, err := os.ReadFile(fixture.plistPath()); err != nil || !bytes.Equal(body, want) {
+			t.Fatalf("install %q left another plist: %v", to, err)
 		}
-		// The refusal must name what is installed, quoted, so an empty
-		// installed origin is still distinguishable from a relayed one.
-		if !strings.Contains(err.Error(), strconv.Quote(from)) || !strings.Contains(err.Error(), "service uninstall") {
-			t.Fatalf("refusal text = %v", err)
-		}
-		if body, readErr := os.ReadFile(fixture.plistPath()); readErr != nil || !bytes.Equal(body, installed) {
-			t.Fatalf("refused install rewrote the plist: %v", readErr)
-		}
-		removed := &recordedLaunchctl{results: []launchctlResult{fixture.printRunning(88), {status: 0}, {status: launchctlNotFound}}}
-		if status, err := serviceUninstallAt(context.Background(), fixture.home, fixture.userHome, fixture.config, removed.run); err != nil || status.State != ServiceAbsent {
-			t.Fatalf("uninstall after refusal = %+v, %v", status, err)
+		if receipt, _, err := readServiceReceipt(fixture.home); err != nil || receipt.RelayOrigin != to {
+			t.Fatalf("install %q receipt = %+v, %v", to, receipt, err)
 		}
 	}
-	refuses(t, "", originA)
-	refuses(t, originA, originB)
-	refuses(t, originA, "")
 
 	// The same origin twice stays idempotent: no plist rewrite, no launchctl
 	// bootstrap, just the recognized installation.
-	fixture.config.RelayOrigin = originA
-	fixture.install(t, (&recordedLaunchctl{results: append(fixture.printAbsent(), launchctlResult{status: 0}, fixture.printRunning(89))}).run)
 	repeat := &recordedLaunchctl{results: []launchctlResult{fixture.printRunning(89)}}
 	status, err := serviceInstallAt(context.Background(), fixture.home, fixture.userHome, fixture.config, fixture.sourceDir, repeat.run)
 	if err != nil || status.State != ServiceRunning || status.PID != 89 {
@@ -992,5 +991,192 @@ func TestServiceInstallRefusesAChangedRelayOriginInsteadOfNoOpping(t *testing.T)
 	}
 	if len(repeat.calls) != 1 || repeat.calls[0][0] != "print" {
 		t.Fatalf("repeated identical install verbs = %q", repeat.calls)
+	}
+}
+
+func upgradeFixture(t *testing.T) (*manageFixture, string, buildinfo.Identity) {
+	t.Helper()
+	fixture := newManageFixture(t)
+	fixture.install(t, (&recordedLaunchctl{results: append(fixture.printAbsent(), launchctlResult{status: 0}, fixture.printRunning(41))}).run)
+	identity, ok := buildinfo.Expected("1.2.3", strings.Repeat("ab", 20), runtime.GOOS+"/"+runtime.GOARCH)
+	if !ok {
+		t.Fatal("invalid identity")
+	}
+	next := filepath.Join(fixture.root, "next")
+	if err := os.Mkdir(next, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range serviceBinaryNames {
+		if err := os.WriteFile(filepath.Join(next, name), []byte("#!next "+name+"\n"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	restore := verifyServiceRelease
+	t.Cleanup(func() { verifyServiceRelease = restore })
+	verifyServiceRelease = func(_ context.Context, source, staged string, expected buildinfo.Identity) error {
+		if source != next || filepath.Base(staged) != "previous" || expected != identity {
+			return errors.New("unexpected verification")
+		}
+		return nil
+	}
+	return fixture, next, identity
+}
+
+func (fixture *manageFixture) requireProgram(t *testing.T, directory, want string) {
+	t.Helper()
+	for _, name := range serviceBinaryNames {
+		body, err := os.ReadFile(filepath.Join(ServiceDirectoryPath(fixture.home), "bin", directory, name))
+		if err != nil || string(body) != want+" "+name+"\n" {
+			t.Fatalf("bin/%s/%s = %q, %v", directory, name, body, err)
+		}
+	}
+	status, err := inspectServiceAtHome(context.Background(), fixture.home, fixture.userHome, fixture.config, (&recordedLaunchctl{results: []launchctlResult{fixture.printRunning(41)}}).run)
+	if err != nil || status.State != ServiceRunning {
+		t.Fatalf("status = %+v, %v", status, err)
+	}
+}
+
+func TestServiceUpgradeSwapsAtomicallyAndRollsBack(t *testing.T) {
+	fixture, next, identity := upgradeFixture(t)
+	if err := ServiceUpgrade(context.Background(), fixture.home, next, identity, 33); err != nil {
+		t.Fatal(err)
+	}
+	fixture.requireProgram(t, "current", "#!next")
+	fixture.requireProgram(t, "previous", "#!binary")
+	marker, present, err := ReadUpgradeMarker(fixture.home)
+	if err != nil || !present || marker != (UpgradeMarker{Target: identity.Source(), UserVersion: 33, State: UpgradeTrial}) {
+		t.Fatalf("marker = %+v, %t, %v", marker, present, err)
+	}
+
+	if err := ServiceRollback(context.Background(), fixture.home, false, "verification failed"); err != nil {
+		t.Fatal(err)
+	}
+	fixture.requireProgram(t, "current", "#!binary")
+	marker, _, err = ReadUpgradeMarker(fixture.home)
+	if err != nil || marker.State != UpgradeRolledBack || marker.Reason != "verification failed" {
+		t.Fatalf("rolled back marker = %+v, %v", marker, err)
+	}
+
+	// Uninstall resolves the kept package and the marker too.
+	removed := &recordedLaunchctl{results: []launchctlResult{fixture.printRunning(41), {status: 0}, {status: launchctlNotFound}}}
+	if status, err := serviceUninstallAt(context.Background(), fixture.home, fixture.userHome, fixture.config, removed.run); err != nil || status.State != ServiceAbsent {
+		t.Fatalf("uninstall = %+v, %v", status, err)
+	}
+	if _, err := os.Lstat(ServiceDirectoryPath(fixture.home)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("service directory survived uninstall: %v", err)
+	}
+}
+
+func TestServiceUpgradeFailureBeforeTheSwapLeavesCurrentUntouched(t *testing.T) {
+	plant := func(path string) func(*testing.T, *manageFixture, string) {
+		return func(t *testing.T, fixture *manageFixture, _ string) {
+			if err := os.Mkdir(filepath.Join(ServiceDirectoryPath(fixture.home), path), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.Remove(filepath.Join(ServiceDirectoryPath(fixture.home), path)) })
+		}
+	}
+	for name, fault := range map[string]func(*testing.T, *manageFixture, string){
+		"copy": func(t *testing.T, _ *manageFixture, next string) { _ = os.Remove(filepath.Join(next, "factoryd")) },
+		"verify": func(*testing.T, *manageFixture, string) {
+			verifyServiceRelease = func(context.Context, string, string, buildinfo.Identity) error { return ErrServiceForeign }
+		},
+		"marker":  plant("." + upgradeMarkerName + ".stage"),
+		"receipt": plant("." + serviceReceiptName + ".stage"),
+		"swap": func(t *testing.T, _ *manageFixture, _ string) {
+			restore := renameSwap
+			t.Cleanup(func() { renameSwap = restore })
+			renameSwap = func(string, string, uint32) error { return unix.EIO }
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			fixture, next, identity := upgradeFixture(t)
+			fault(t, fixture, next)
+			if err := ServiceUpgrade(context.Background(), fixture.home, next, identity, 33); err == nil {
+				t.Fatal("faulted upgrade succeeded")
+			}
+			if _, present, _ := ReadUpgradeMarker(fixture.home); present {
+				t.Fatal("faulted upgrade left a trial marker")
+			}
+			for _, cleanup := range []string{"." + upgradeMarkerName + ".stage", "." + serviceReceiptName + ".stage"} {
+				_ = os.Remove(filepath.Join(ServiceDirectoryPath(fixture.home), cleanup))
+			}
+			fixture.requireProgram(t, "current", "#!binary")
+		})
+	}
+}
+
+func TestServiceRollbackRestoresTheDatabaseOnlyWhenTheSchemaMoved(t *testing.T) {
+	fixture, next, identity := upgradeFixture(t)
+	database := filepath.Join(fixture.home, databaseName)
+	original, err := os.ReadFile(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The GitHub connection lives beside the database and must outlive both.
+	connection := filepath.Join(fixture.home, maintainerCredentialName)
+	if err := os.WriteFile(connection, []byte("connection"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	requireConnection := func(stage string) {
+		if body, err := os.ReadFile(connection); err != nil || string(body) != "connection" {
+			t.Fatalf("%s lost %s: %v", stage, maintainerCredentialName, err)
+		}
+	}
+	for _, restore := range []bool{false, true} {
+		if err := ServiceUpgrade(context.Background(), fixture.home, next, identity, 33); err != nil {
+			t.Fatal(err)
+		}
+		requireConnection("upgrade")
+		// The backup BackupTo takes, then the trial build's migration.
+		if err := os.WriteFile(UpgradeBackupPath(fixture.home), original, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		for _, sidecar := range []string{"-wal", "-shm"} {
+			if err := os.WriteFile(database+sidecar, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := ServiceRollback(context.Background(), fixture.home, restore, "schema"); err != nil {
+			t.Fatal(err)
+		}
+		_, backupErr := os.Lstat(UpgradeBackupPath(fixture.home))
+		_, walErr := os.Lstat(database + "-wal")
+		if restore != errors.Is(backupErr, os.ErrNotExist) || restore != errors.Is(walErr, os.ErrNotExist) {
+			t.Fatalf("restore=%t: backup %v, wal %v", restore, backupErr, walErr)
+		}
+		if body, err := os.ReadFile(database); err != nil || !bytes.Equal(body, original) {
+			t.Fatalf("database after rollback: %v", err)
+		}
+		requireConnection("rollback")
+		fixture.requireProgram(t, "current", "#!binary")
+		if err := RemoveUpgrade(fixture.home); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// TestServiceReleaseVerificationRunsTheRealBinaries builds the three binaries
+// the way a release does and proves the verifier accepts exactly them.
+func TestServiceReleaseVerificationRunsTheRealBinaries(t *testing.T) {
+	identity, _ := buildinfo.Expected("1.2.3", strings.Repeat("cd", 20), runtime.GOOS+"/"+runtime.GOARCH)
+	other, _ := buildinfo.Expected("1.2.3", strings.Repeat("ef", 20), runtime.GOOS+"/"+runtime.GOARCH)
+	directory := t.TempDir()
+	for _, name := range serviceBinaryNames {
+		output := filepath.Join(directory, name)
+		command := exec.Command("go", "build", "-trimpath", "-buildvcs=false", "-ldflags", "-s -w -X github.com/dark-factory-build/dark-factory/internal/buildinfo.receipt="+identity.Receipt(), "-o", output, "../../cmd/"+name)
+		command.Env = append(os.Environ(), "CGO_ENABLED=0", "GOENV=off", "GOAUTH=off", "GOTOOLCHAIN=local")
+		if log, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("build %s: %v\n%s", name, err, log)
+		}
+		if err := os.Chmod(output, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := verifyServiceRelease(context.Background(), directory, directory, identity); err != nil {
+		t.Fatalf("release rejected: %v", err)
+	}
+	if err := verifyServiceRelease(context.Background(), directory, directory, other); err == nil {
+		t.Fatal("another release identity was accepted")
 	}
 }

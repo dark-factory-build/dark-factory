@@ -594,12 +594,12 @@ before enqueue is not a signal to repeat review.
 
 If a merged PR touched `cmd/` or `internal/`, it may need a live-service
 reinstall, and if it touched `web/`, it may need a site re-vendor. Before a
-runtime reinstall request, inspect `go version -m "$DARK_FACTORY_FACTORYCTL"`.
-With its exact `vcs.revision` as `installed`, run `git -C repo fetch origin "$installed" "<merge-commit>"`, then verify each with `git -C repo rev-parse --verify "<revision>^{commit}"`. Run `git -C repo merge-base --is-ancestor
+runtime reinstall request, run `"$DARK_FACTORY_FACTORYCTL" --build-identity`.
+With its exact `source` as `installed`, run `git -C repo fetch origin "$installed" "<merge-commit>"`, then verify each with `git -C repo rev-parse --verify "<revision>^{commit}"`. Run `git -C repo merge-base --is-ancestor
 <merge-commit> "$installed"`: status 0 means that merge is already installed,
 so skip that request and never recommend an older merge; only status 1 says it
-is absent. Require `vcs.modified=false`; missing, malformed, or modified
-metadata, a fetch or verification failure, or any other ancestry error warrants
+is absent. Require `"release": true`; a missing, malformed, or development
+identity, a fetch or verification failure, or any other ancestry error warrants
 a human request to verify the installed source, not a claim that the merge is
 absent. If the runtime merge is absent, or the site needs a re-vendor, raise
 one human request naming the merge commit and applicable deployment, then wait

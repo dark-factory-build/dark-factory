@@ -83,13 +83,7 @@ func (daemon *Daemon) runGate(ctx context.Context, checkout, operationID, commit
 	defer cancel()
 	command := exec.CommandContext(runCtx, filepath.Join(tree, gateCommand))
 	command.Dir = tree
-	command.Env = []string{"PATH=" + daemon.gateToolPath}
-	for _, value := range os.Environ() {
-		// Allowlisted, so no GitHub or provider token reaches the gate.
-		if slices.Contains([]string{"HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE", "TERM"}, strings.SplitN(value, "=", 2)[0]) {
-			command.Env = append(command.Env, value)
-		}
-	}
+	command.Env = daemon.gateEnvironment()
 	output := &cappedWriter{file: log, left: gateLogLimit}
 	command.Stdout, command.Stderr = output, output
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -142,6 +136,18 @@ func (daemon *Daemon) runGate(ctx context.Context, checkout, operationID, commit
 		}
 	}
 	return run, nil
+}
+
+// gateEnvironment is the operator's tool path plus an allowlist, so no GitHub
+// or provider token reaches a gate or a release build.
+func (daemon *Daemon) gateEnvironment() []string {
+	environment := []string{"PATH=" + daemon.gateToolPath}
+	for _, value := range os.Environ() {
+		if slices.Contains([]string{"HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE", "TERM"}, strings.SplitN(value, "=", 2)[0]) {
+			environment = append(environment, value)
+		}
+	}
+	return environment
 }
 
 // cappedWriter keeps the first bytes of a gate log and drops the rest, so a
