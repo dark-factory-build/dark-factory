@@ -71,6 +71,31 @@ func TestRunLivenessFailsOnlyAQuietAttempt(t *testing.T) {
 	}
 }
 
+func TestRunLivenessFailsAttemptThatNeverBecomesReady(t *testing.T) {
+	fixture := newDispatchFixture(t)
+	active := prepareActiveAttempt(t, fixture, 141)
+	ctx := context.Background()
+	session, found, err := fixture.store.TerminalSessionForRun(ctx, active.run.ID)
+	if err != nil || !found {
+		t.Fatalf("terminal session: found=%v err=%v", found, err)
+	}
+	registered := time.UnixMilli(10_000)
+	fixture.daemon.livenessClock = func() time.Time { return registered }
+	attempt := newLiveAttempt(fixture.daemon, active.run.ID, session.ID, nil)
+	if err := fixture.daemon.registerLiveAttempt(attempt); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { fixture.daemon.unregisterLiveAttempt(active.run.ID, attempt) })
+	fixture.daemon.livenessClock = func() time.Time { return registered.Add(stalledRunLivenessThreshold) }
+	if err := fixture.daemon.enforceRunLiveness(ctx, SupervisorSpec{}); err != nil {
+		t.Fatal(err)
+	}
+	run, found, err := fixture.store.Run(ctx, active.run.ID)
+	if err != nil || !found || run.Phase != kernel.RunFinalizing || run.Proposal == nil || run.Proposal.Code() != kernel.FailureProtocol || run.Proposal.Detail() != stalledRunDetail {
+		t.Fatalf("never-ready run = %+v found=%v err=%v", run, found, err)
+	}
+}
+
 // Concurrent attempt API calls can record their timestamps out of order. An
 // older one must not move liveness backwards and report a false stall.
 func TestLivenessTimestampsNeverMoveBackwards(t *testing.T) {

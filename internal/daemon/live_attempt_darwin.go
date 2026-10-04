@@ -710,7 +710,6 @@ func (attempt *liveAttempt) handleRunnerEvent(event runner.AttemptEvent) (bool, 
 			return false, runner.ErrState
 		}
 		attempt.readySeen = true
-		attempt.markStarted(attempt.now())
 		correlation, err := attempt.nextCorrelation()
 		if err != nil {
 			return false, err
@@ -754,7 +753,6 @@ func (attempt *liveAttempt) routeFrame(frame runner.TerminalFrame) error {
 			return runner.ErrState
 		}
 		attempt.readySeen = true
-		attempt.markStarted(attempt.now())
 		return nil
 	case runner.TerminalAttached:
 		return attempt.routeAttached(frame)

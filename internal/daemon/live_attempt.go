@@ -547,6 +547,9 @@ func (daemon *Daemon) registerLiveAttempt(attempt *liveAttempt) error {
 		return kernel.ErrBusy
 	}
 	daemon.attempts[attempt.runID] = attempt
+	// The stall clock starts at registration, so silence before the
+	// provider's terminal is ready also counts.
+	attempt.markStarted(attempt.now())
 	return nil
 }
 
