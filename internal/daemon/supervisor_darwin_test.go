@@ -368,8 +368,9 @@ func TestSupervisorToleratesSlowProviderRelease(t *testing.T) {
 func TestSupervisorOptionalCILeaseRefusalDoesNotFailFreshWork(t *testing.T) {
 	program := "test -z \"${DARK_FACTORY_LOCAL_CI_DIRECTORY-}\" || exit 90\n" + supervisorProgram(t, false, false)
 	fixture := newSupervisorFixture(t, program)
-	legacyLock := filepath.Join(fixture.root, "repository", ".git", ".dark-factory-local-ci.lock")
-	if err := os.Mkdir(legacyLock, 0700); err != nil {
+	// A non-directory at the lease path makes the optional lease unsafe.
+	leasePath := filepath.Join(fixture.root, "repository", ".git", "dark-factory-local-ci")
+	if err := os.WriteFile(leasePath, nil, 0600); err != nil {
 		t.Fatal(err)
 	}
 	run, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
@@ -379,11 +380,8 @@ func TestSupervisorOptionalCILeaseRefusalDoesNotFailFreshWork(t *testing.T) {
 	fixture.assertTerminal(t, run, kernel.OutcomeSucceeded)
 	fixture.assertOneWitness(t)
 	fixture.assertReleased(t, run)
-	if info, err := os.Lstat(legacyLock); err != nil || !info.IsDir() {
-		t.Fatalf("legacy lease changed: %v, %v", info, err)
-	}
-	if _, err := os.Stat(filepath.Join(filepath.Dir(legacyLock), "dark-factory-local-ci")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("refusal created a capability: %v", err)
+	if info, err := os.Lstat(leasePath); err != nil || !info.Mode().IsRegular() {
+		t.Fatalf("refusal changed the lease path: %v, %v", info, err)
 	}
 	if body, err := os.ReadFile(filepath.Join(fixture.changeParent, fixture.changeName(t, run), "payload.txt")); err != nil || string(body) != "exact source\n" {
 		t.Fatalf("retained exact source = %q, %v", body, err)

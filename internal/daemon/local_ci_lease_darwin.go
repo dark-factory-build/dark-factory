@@ -34,18 +34,6 @@ func resolveGitCommonDir(ctx context.Context, gitExecutable, repository string) 
 // prepareLocalCILeaseDirectory installs the shared CI lease subtree below the
 // repository's Git directory.
 func prepareLocalCILeaseDirectory(common string) (string, error) {
-	if _, err := os.Lstat(filepath.Join(common, ".dark-factory-local-ci")); !errors.Is(err, os.ErrNotExist) {
-		return "", errors.New("drain and clean the legacy local CI lease before enabling the dedicated lease directory")
-	}
-	// The old helper rejects a symlink lock object. Install this barrier with
-	// no replacement, atomically excluding an old helper's competing mkdir.
-	legacyLock := filepath.Join(common, ".dark-factory-local-ci.lock")
-	const barrier = "dark-factory-local-ci/.dark-factory-local-ci.lock"
-	if target, err := os.Readlink(legacyLock); err != nil || target != barrier {
-		if err := os.Symlink(barrier, legacyLock); err != nil {
-			return "", fmt.Errorf("legacy local CI lease has not drained: %w", err)
-		}
-	}
 	directory := filepath.Join(common, "dark-factory-local-ci")
 	if err := os.Mkdir(directory, 0700); err != nil && !errors.Is(err, os.ErrExist) {
 		return "", err
