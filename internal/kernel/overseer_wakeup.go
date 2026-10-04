@@ -4,38 +4,66 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"strconv"
+	"slices"
 	"strings"
+	"time"
 
 	"github.com/dark-factory-build/dark-factory/internal/runner"
 )
 
-type publicationWakeTarget struct {
-	TaskID           TaskID
-	ChangeID         ChangeID
-	ChangeRevision   Revision
-	HeadCommitDigest string
-}
+// An overseer's wake carrier is its standing instruction at the head of its
+// queue; an item it left unhandled is re-woken OverseerRewakeAfter apart.
+const (
+	overseerWakeTitle    = "Standing instruction"
+	overseerWakePriority = 1000
+	OverseerRewakeAfter  = 30 * time.Minute
+)
 
-// EnqueueOverseerWakeups consumes worker activity from the durable
-// invalidation journal. A cursor is deliberately left behind a queued or
-// running overseer, so activity while it works causes one follow-up after it
-// exits. Unfinished work is reconsidered after the configured quiet interval
-// even without new events; a failed coordination run cannot strand the backlog.
+// overseerWakeItems is every work item of a project that needs its
+// overseer, at the version it last changed. An item persists until the
+// overseer acts on it (a blocked or failed worker task, an unanswered worker
+// question, finished work not yet published or corrected behind its open pull
+// request, a pull request factoryd escalated); a succeeded or cancelled worker
+// task needs one look. It is due when no carrier was enqueued since that
+// version, or, while it persists, when at most three were and the latest is
+// OverseerRewakeAfter old: one wake and three re-wakes per item version.
+const overseerWakeItems = `WITH carrier AS (SELECT created_at_ms AS at FROM tasks WHERE assigned_agent_id = ?4 AND title = ?5),
+item AS (
+	SELECT t.id, t.updated_at_ms AS version, t.status IN ('blocked', 'failed') AS persistent, '' AS detail
+	FROM tasks AS t JOIN agents AS a ON a.id = t.assigned_agent_id
+	WHERE t.project_id = ?1 AND a.role = 'worker' AND t.status IN ('succeeded', 'blocked', 'failed', 'cancelled')
+	UNION ALL SELECT r.task_id, h.created_at_ms, 1, '' FROM human_requests AS h JOIN runs AS r ON r.id = h.run_id
+	WHERE r.project_id = ?1 AND r.role = 'worker' AND h.status IN ('open', 'delivering', 'delivery_unknown')
+	UNION ALL SELECT c.task_id, c.updated_at_ms, 1, '' FROM changes AS c JOIN tasks AS t ON t.id = c.task_id
+	WHERE c.project_id = ?1 AND t.status = 'succeeded' AND c.head_commit IS NOT NULL AND c.base_commit IS NOT NULL
+	  AND c.head_commit <> c.base_commit AND c.updated_at_ms + ?2 <= ?3
+	  AND (NOT EXISTS (SELECT 1 FROM publication_tasks AS p WHERE p.change_id = c.id)
+	       OR EXISTS (SELECT 1 FROM publication_tasks AS p JOIN production_records AS r
+	           ON r.project_id = p.project_id AND r.repository = p.repository AND r.kind = 'pull_request' AND r.identity = CAST(p.pull_number AS TEXT)
+	           WHERE p.change_id = c.id AND json_extract(r.document, '$.state') = 'open' AND c.updated_at_ms > p.created_at_ms))
+	UNION ALL SELECT NULL, observed_at_ms, 1, json_extract(document, '$.escalation') FROM production_records
+	WHERE project_id = ?1 AND kind = 'reviewer' AND COALESCE(json_extract(document, '$.escalation'), '') <> ''
+	  AND COALESCE(json_extract(document, '$.route_pending'), 0) = 0)
+SELECT id, detail FROM item
+WHERE version > COALESCE((SELECT at FROM carrier ORDER BY at DESC LIMIT 1 OFFSET 3), -1)
+  AND (NOT EXISTS (SELECT 1 FROM carrier WHERE at > version) OR persistent AND (SELECT MAX(at) FROM carrier) + ?6 <= ?3)
+ORDER BY version LIMIT 33`
+
+// EnqueueOverseerWakeups applies one level-triggered rule to each standing
+// overseer: while it has no unfinished wake carrier and some item is due, it
+// gets one carrier naming the due items. An item is due when no carrier was
+// enqueued since it last changed, or, while it still needs the overseer, when
+// fewer than four were and the latest is OverseerRewakeAfter old.
 func (store *Store) EnqueueOverseerWakeups(ctx context.Context, at UnixMillis) ([]Task, error) {
 	tx, err := store.beginUncheckedWrite(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Close()
-	factory, err := factoryState(ctx, tx.connection)
-	if err != nil {
-		return nil, tx.Rollback(err)
-	}
-	rows, err := tx.connection.QueryContext(ctx, `SELECT `+agentColumns+` FROM agents
+	rows, err := tx.connection.QueryContext(ctx, `SELECT `+agentColumns+` FROM agents AS a
 		WHERE role = 'orchestrator' AND idle_policy = 'standing_instruction' AND paused = 0 AND archived = 0
-		  AND MAX(updated_at_ms, COALESCE((SELECT MAX(terminal_at_ms) FROM runs WHERE agent_id = agents.id), 0)) + idle_after_seconds * 1000 <= ?
-		ORDER BY id`, at.Int64())
+		  AND NOT EXISTS (SELECT 1 FROM tasks WHERE assigned_agent_id = a.id AND title = ? AND status IN ('queued', 'running'))
+		ORDER BY id`, overseerWakeTitle)
 	if err != nil {
 		return nil, tx.Rollback(err)
 	}
@@ -58,85 +86,80 @@ func (store *Store) EnqueueOverseerWakeups(ctx context.Context, at UnixMillis) (
 		return nil, tx.Rollback(err)
 	}
 	var tasks []Task
-	changed := false
 	for _, agent := range agents {
-		cursor, found, err := overseerWakeCursor(ctx, tx.connection, agent.ID)
+		body, due, err := overseerWake(ctx, tx.connection, agent, at.Int64())
 		if err != nil {
 			return nil, tx.Rollback(err)
 		}
-		if !found {
-			cursor = 0
-		}
-		var active int
-		if err := tx.connection.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM tasks WHERE assigned_agent_id = ? AND status IN ('queued', 'running'))`, agent.ID.Bytes()).Scan(&active); err != nil {
-			return nil, tx.Rollback(err)
-		}
-		if active != 0 {
+		if !due {
 			continue
 		}
-		// A missing cursor is the one initial inspection for a newly enabled
-		// rule. Worker events retain targeted context; an unchanged backlog is
-		// deliberately quiet so a standing overseer cannot become a paid poll.
-		fullReconciliation := !found || cursor < factory.Floor.Int64()-1
-		var targets []TaskID
-		if !fullReconciliation {
-			targets, err = workerInvalidationTargetsAfter(ctx, tx.connection, agent.ProjectID, cursor, factory.Head.Int64())
-			if err != nil {
-				return nil, tx.Rollback(err)
-			}
-		}
-		publicationTargets, err := unpublishedPublicationTargets(ctx, tx.connection, agent.ProjectID, agent.ID, at.Int64())
-		if err != nil {
-			return nil, tx.Rollback(err)
-		}
-		// Validate once, before the first task or cursor write; an unchanged
-		// poll rolls back without scanning unrelated retained history.
-		if !changed && (fullReconciliation || len(targets) != 0 || len(publicationTargets) != 0 || cursor != factory.Head.Int64()) {
+		// Validate once, before the first write; a quiet poll rolls back
+		// without scanning retained history.
+		if len(tasks) == 0 {
 			if err := validateDurableControls(ctx, tx.connection); err != nil {
 				return nil, tx.Rollback(err)
 			}
 		}
-		if fullReconciliation || len(targets) != 0 || len(publicationTargets) != 0 {
-			prior, err := latestOverseerTask(ctx, tx.connection, agent.ID)
-			if err != nil {
-				return nil, tx.Rollback(err)
-			}
-			if prior == nil {
-				fullReconciliation = true
-				targets = nil
-			}
-			body, fits := overseerWakeInstructionWithPublication(agent.Provider, agent.Idle.Instruction, targets, prior, fullReconciliation, publicationTargets)
-			if !fits {
-				// Retaining every causal identity would exceed the exact task-delivery
-				// bound. Say so explicitly and make the next run reconcile instead of
-				// silently dropping an event or failing a legal standing instruction.
-				fullReconciliation = true
-				body, fits = overseerWakeInstructionWithPublication(agent.Provider, agent.Idle.Instruction, nil, prior, true, publicationTargets)
-				if !fits {
-					return nil, tx.Rollback(fmt.Errorf("%w: overseer wake instruction exceeds task bound", ErrInvalidValue))
-				}
-			}
-			task, err := enqueueStandingTaskWithBody(ctx, tx.connection, agent, body, at)
-			if err != nil {
-				return nil, tx.Rollback(err)
-			}
-			tasks = append(tasks, task)
-			changed = true
+		task, err := enqueueStandingTaskWithBody(ctx, tx.connection, agent, body, at)
+		if err != nil {
+			return nil, tx.Rollback(err)
 		}
-		if cursor != factory.Head.Int64() || !found {
-			if err := setOverseerWakeCursor(ctx, tx.connection, agent, factory.Head.Int64()); err != nil {
-				return nil, tx.Rollback(err)
-			}
-			changed = true
-		}
+		tasks = append(tasks, task)
 	}
-	if !changed {
+	if len(tasks) == 0 {
 		return nil, tx.Rollback(nil)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
 	return tasks, nil
+}
+
+// overseerWake returns the carrier body for agent's due items, if any.
+func overseerWake(ctx context.Context, connection *sql.Conn, agent Agent, at int64) (string, bool, error) {
+	rows, err := connection.QueryContext(ctx, overseerWakeItems, agent.ProjectID.Bytes(), PublicationAttentionAfter.Milliseconds(), at,
+		agent.ID.Bytes(), overseerWakeTitle, OverseerRewakeAfter.Milliseconds())
+	if err != nil {
+		return "", false, err
+	}
+	defer rows.Close()
+	var targets []TaskID
+	var escalations []string
+	full := false
+	for rows.Next() {
+		var raw []byte
+		var detail string
+		if err := rows.Scan(&raw, &detail); err != nil {
+			return "", false, err
+		}
+		if len(targets)+len(escalations) == 32 {
+			full = true // more is due than one wake names
+			break
+		}
+		if raw == nil {
+			escalations = append(escalations, strings.ToValidUTF8(detail[:min(len(detail), 512)], ""))
+			continue
+		}
+		id, err := TaskIDFromBytes(raw)
+		if err != nil {
+			return "", false, fmt.Errorf("%w: invalid overseer wake task", ErrCorruptState)
+		}
+		if !slices.Contains(targets, id) {
+			targets = append(targets, id)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return "", false, err
+	}
+	if len(targets)+len(escalations) == 0 {
+		return "", false, nil
+	}
+	prior, err := latestOverseerTask(ctx, connection, agent.ID)
+	if err != nil {
+		return "", false, err
+	}
+	return overseerWakeInstruction(agent.Provider, agent.Idle.Instruction, targets, escalations, prior, full || prior == nil), true, nil
 }
 
 // latestOverseerTask is durable continuity, not a new conversation store. The
@@ -166,146 +189,42 @@ func latestOverseerTask(ctx context.Context, connection *sql.Conn, agentID Agent
 	return &id, nil
 }
 
-func overseerWakeCursor(ctx context.Context, connection *sql.Conn, agentID AgentID) (int64, bool, error) {
-	var sequence int64
-	err := connection.QueryRowContext(ctx, `SELECT invalidation_sequence FROM overseer_wake_cursors WHERE agent_id = ?`, agentID.Bytes()).Scan(&sequence)
-	if err == sql.ErrNoRows {
-		return 0, false, nil
+// overseerWakeInstruction appends the causal record to the standing
+// instruction. What does not fit the provider's delivery bound is dropped in
+// order (task identities, then escalations) and the wake becomes a full
+// reconciliation; the bare instruction was checked against it when set.
+func overseerWakeInstruction(provider Provider, instruction string, targets []TaskID, escalations []string, prior *TaskID, full bool) string {
+	identities := make([]string, 0, len(targets))
+	for _, target := range targets {
+		identities = append(identities, target.String())
 	}
-	if err != nil {
-		return 0, false, err
+	priorID := ""
+	if prior != nil {
+		priorID = prior.String()
 	}
-	if sequence < 0 {
-		return 0, false, fmt.Errorf("%w: invalid overseer wake cursor", ErrCorruptState)
-	}
-	return sequence, true, nil
-}
-
-func setOverseerWakeCursor(ctx context.Context, connection *sql.Conn, agent Agent, sequence int64) error {
-	if sequence < 0 {
-		return fmt.Errorf("%w: invalid overseer wake cursor", ErrInvalidValue)
-	}
-	_, err := connection.ExecContext(ctx, `INSERT INTO overseer_wake_cursors(agent_id, project_id, invalidation_sequence) VALUES(?, ?, ?)
-		ON CONFLICT(agent_id) DO UPDATE SET project_id = excluded.project_id, invalidation_sequence = excluded.invalidation_sequence`, agent.ID.Bytes(), agent.ProjectID.Bytes(), sequence)
-	return err
-}
-
-// workerInvalidationTargetsAfter keeps the actual affected task identities,
-// rather than merely answering whether one exists. That is the causal input
-// an ordinary overseer wake needs to avoid reconstructing every collection.
-func workerInvalidationTargetsAfter(ctx context.Context, connection *sql.Conn, projectID ProjectID, cursor, head int64) ([]TaskID, error) {
-	if cursor >= head {
-		return nil, nil
-	}
-	rows, err := connection.QueryContext(ctx, `SELECT task_id FROM (
-		SELECT i.sequence, t.id AS task_id FROM invalidations AS i
-		JOIN tasks AS t ON t.id = i.entity_id LEFT JOIN agents AS a ON a.id = t.assigned_agent_id AND a.project_id = t.project_id
-		WHERE i.sequence > ? AND i.sequence <= ? AND i.entity_kind = 'task' AND t.project_id = ? AND (t.assigned_agent_id IS NULL OR a.role = 'worker')
-		UNION ALL SELECT i.sequence, r.task_id FROM invalidations AS i JOIN runs AS r ON r.id = i.entity_id
-		WHERE i.sequence > ? AND i.sequence <= ? AND i.entity_kind = 'run' AND r.project_id = ? AND r.role = 'worker'
-		UNION ALL SELECT i.sequence, r.task_id FROM invalidations AS i JOIN human_requests AS h ON h.id = i.entity_id JOIN runs AS r ON r.id = h.run_id
-		WHERE i.sequence > ? AND i.sequence <= ? AND i.entity_kind = 'human_request' AND r.project_id = ? AND r.role = 'worker'
-		UNION ALL SELECT i.sequence, q.source_task_id FROM invalidations AS i JOIN peer_questions AS q ON q.id = i.entity_id
-		WHERE i.sequence > ? AND i.sequence <= ? AND i.entity_kind = 'peer_question' AND q.project_id = ?
-		UNION ALL SELECT i.sequence, q.target_task_id FROM invalidations AS i JOIN peer_questions AS q ON q.id = i.entity_id
-		WHERE i.sequence > ? AND i.sequence <= ? AND i.entity_kind = 'peer_question' AND q.project_id = ?
-	) ORDER BY sequence, task_id`, cursor, head, projectID.Bytes(), cursor, head, projectID.Bytes(), cursor, head, projectID.Bytes(), cursor, head, projectID.Bytes(), cursor, head, projectID.Bytes())
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	seen := make(map[TaskID]struct{})
-	var tasks []TaskID
-	for rows.Next() {
-		var raw []byte
-		if err := rows.Scan(&raw); err != nil {
-			return nil, err
+	for {
+		mode := "targeted"
+		if full {
+			mode = "full"
 		}
-		id, err := TaskIDFromBytes(raw)
-		if err != nil {
-			return nil, fmt.Errorf("%w: invalid worker wake task", ErrCorruptState)
+		body := instruction + "\n\nFactory causal wake: mode=" + mode + "; task_ids=" + strings.Join(identities, ",") + "; prior_task_id=" + priorID + ". Read prior_task_id first when present, then each named task, without --head; retain the first returned head for related paging/text reads. mode=full requires fixed-head reconciliation."
+		for _, escalation := range escalations {
+			body += "\nEscalated: " + escalation
 		}
-		if _, ok := seen[id]; !ok {
-			seen[id] = struct{}{}
-			tasks = append(tasks, id)
+		switch {
+		case wakeBodyFits(provider, body):
+			return body
+		case len(identities) != 0:
+			identities, full = nil, true
+		case len(escalations) != 0:
+			escalations = nil
+		default:
+			return instruction
 		}
 	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return tasks, nil
 }
 
-func unpublishedPublicationTargets(ctx context.Context, connection *sql.Conn, projectID ProjectID, agentID AgentID, at int64) ([]publicationWakeTarget, error) {
-	rows, err := connection.QueryContext(ctx, `SELECT c.task_id, c.id, c.revision, lower(hex(c.head_commit)) FROM changes AS c JOIN tasks AS t ON t.id = c.task_id
-		WHERE c.project_id = ? AND t.status = 'succeeded' AND c.head_commit IS NOT NULL AND c.base_commit IS NOT NULL
-		  AND c.head_commit <> c.base_commit AND c.updated_at_ms + ? <= ?
-		  AND (NOT EXISTS (SELECT 1 FROM publication_tasks AS p WHERE p.change_id = c.id)
-		       -- A correction committed after publication while the pull request is still open.
-		       OR EXISTS (SELECT 1 FROM publication_tasks AS p JOIN production_records AS r
-		           ON r.project_id = p.project_id AND r.repository = p.repository AND r.kind = 'pull_request' AND r.identity = CAST(p.pull_number AS TEXT)
-		           WHERE p.change_id = c.id AND json_extract(r.document, '$.state') = 'open' AND c.updated_at_ms > p.created_at_ms))
-		  AND NOT EXISTS (SELECT 1 FROM tasks AS prior WHERE prior.assigned_agent_id = ?
-		      AND (prior.status IN ('queued', 'running', 'succeeded') OR prior.updated_at_ms + ? > ?)
-		      AND (instr(prior.body, 'publication_change=' || lower(hex(c.id)) || ':' || c.revision || ':' || lower(hex(c.head_commit))) > 0
-		           OR (instr(prior.body, 'publication attention overflow: full reconciliation required') > 0
-	               AND c.updated_at_ms <= prior.updated_at_ms)))
-		ORDER BY c.updated_at_ms, c.id LIMIT 32`, projectID.Bytes(), PublicationAttentionAfter.Milliseconds(), at, agentID.Bytes(), PublicationRetryAfter.Milliseconds(), at)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var result []publicationWakeTarget
-	for rows.Next() {
-		var taskRaw, changeRaw []byte
-		var revision int64
-		var head string
-		if err := rows.Scan(&taskRaw, &changeRaw, &revision, &head); err != nil {
-			return nil, err
-		}
-		task, taskErr := TaskIDFromBytes(taskRaw)
-		change, changeErr := ChangeIDFromBytes(changeRaw)
-		changeRevision, revisionErr := NewRevision(revision)
-		if taskErr != nil || changeErr != nil || revisionErr != nil || head == "" {
-			return nil, fmt.Errorf("%w: invalid publication wake identity", ErrCorruptState)
-		}
-		result = append(result, publicationWakeTarget{TaskID: task, ChangeID: change, ChangeRevision: changeRevision, HeadCommitDigest: head})
-	}
-	return result, rows.Err()
-}
-
-func overseerWakeInstructionWithPublication(provider Provider, instruction string, targets []TaskID, prior *TaskID, full bool, publications []publicationWakeTarget) (string, bool) {
-	body, fits := overseerWakeInstruction(provider, instruction, targets, prior, full)
-	if len(publications) == 0 || !fits {
-		return body, fits
-	}
-	tasks, changes := make([]string, 0, len(publications)), make([]string, 0, len(publications))
-	for _, target := range publications {
-		tasks = append(tasks, target.TaskID.String())
-		changes = append(changes, target.ChangeID.String())
-	}
-	markers := make([]string, 0, len(publications))
-	for _, target := range publications {
-		markers = append(markers, "publication_change="+target.ChangeID.String()+":"+strconv.FormatInt(target.ChangeRevision.Int64(), 10)+":"+target.HeadCommitDigest)
-	}
-	body += " Publication attention: task_ids=" + strings.Join(tasks, ",") + "; change_ids=" + strings.Join(changes, ",") + "; " + strings.Join(markers, " ") + ". Reconcile publication for each exact task and Change."
-	if publicationBodyFits(provider, body) {
-		return body, true
-	}
-	// The durable candidates remain queryable, so an overfull causal envelope
-	// must become a bounded full reconciliation rather than a failed wake.
-	body, fits = overseerWakeInstruction(provider, instruction, nil, prior, true)
-	if !fits {
-		return body, false
-	}
-	attention := body + " publication attention overflow: full reconciliation required."
-	if publicationBodyFits(provider, attention) {
-		return attention, true
-	}
-	return body, true
-}
-
-func publicationBodyFits(provider Provider, body string) bool {
+func wakeBodyFits(provider Provider, body string) bool {
 	if provider == ProviderClaudeCode {
 		_, err := runner.PrepareClaudeTask([]byte(body))
 		return err == nil
@@ -315,38 +234,4 @@ func publicationBodyFits(provider Provider, body string) bool {
 		limit = runner.MaxCodexTaskBytes
 	}
 	return byteLen(body) <= limit
-}
-
-func overseerWakeInstruction(provider Provider, instruction string, targets []TaskID, prior *TaskID, full bool) (string, bool) {
-	mode := "targeted"
-	identities := make([]string, 0, len(targets))
-	for _, target := range targets {
-		identities = append(identities, target.String())
-	}
-	if full {
-		mode = "full"
-	}
-	priorID := ""
-	if prior != nil {
-		priorID = prior.String()
-	}
-	body := instruction + "\n\nFactory causal wake: mode=" + mode + "; task_ids=" + strings.Join(identities, ",") + "; prior_task_id=" + priorID + ". Read prior_task_id first when present, then each named task, without --head; retain the first returned head for related paging/text reads. mode=full requires fixed-head reconciliation."
-	if provider == ProviderClaudeCode {
-		_, err := runner.PrepareClaudeTask([]byte(body))
-		if err == nil || !full {
-			return body, err == nil
-		}
-		_, err = runner.PrepareClaudeTask([]byte(instruction))
-		return instruction, err == nil
-	}
-	limit := runner.MaxProviderTaskBytes
-	if provider == ProviderCodex {
-		limit = runner.MaxCodexTaskBytes
-	}
-	// Without room for optional context, retain the exact legal instruction.
-	// The bootstrap treats an absent causal envelope as full reconciliation.
-	if full && byteLen(body) > limit && byteLen(instruction) <= limit {
-		return instruction, true
-	}
-	return body, byteLen(body) <= limit
 }

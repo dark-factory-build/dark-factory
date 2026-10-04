@@ -4,11 +4,8 @@ package daemon
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -440,55 +437,32 @@ func TestMergeQueueEjectionSendsBackOnceAndAMergeCloses(t *testing.T) {
 	}
 }
 
-// An enqueue the App refused leaves its operation failed but pending, in the
-// same write, so the overseer escalation survives a failed or interrupted
-// attempt and lands exactly once on a later tick.
-func TestRefusedEnqueueEscalatesOnceEvenAfterAFailedTick(t *testing.T) {
+// An enqueue the App refused is escalated: the reason is recorded on the
+// operation, which is then an item due to the project's overseer.
+func TestRefusedEnqueueBecomesAnOverseerItem(t *testing.T) {
 	fixture, project, _, settle := publishedTask(t)
 	settle()
 	customerMode(t, fixture)
 	ctx := context.Background()
-	backend := &publicReviewBackend{enqueueRefused: true}
-	now := fixture.daemon.now
-	// The coordinator alone stands in for a daemon that stopped before
-	// escalating.
-	coordinator := review.Coordinator{Store: durableReviewStore{store: fixture.store, project: project, repository: "team/repo", now: now}, Backend: backend, Now: now}
-	request := publishedReviewRequest()
-	if op, err := coordinator.Start(ctx, review.Request{Repository: request.Repository, PullNumber: request.PullNumber, Head: request.Head, Base: request.Base, BaseRef: request.BaseRef, Body: request.Body, Provider: request.Provider}); err == nil || op.State != "failed" || !op.RoutePending {
-		t.Fatalf("refused enqueue operation=%+v err=%v", op, err)
+	fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return &publicReviewBackend{enqueueRefused: true} }
+	if _, err := fixture.daemon.reviewPR(ctx, project, publishedReviewRequest()); err == nil {
+		t.Fatal("a refused enqueue reported success")
 	}
-	fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return backend }
-	digest := sha256.Sum256([]byte(fmt.Sprintf("escalation\x00%s\x00team/repo\x0012", project)))
-	escalation := mustTaskID(t, hex.EncodeToString(digest[:kernel.IDBytes]))
-	escalations := func() int {
-		if _, found, err := fixture.store.Task(ctx, escalation); err != nil || !found {
-			return 0
-		}
-		return 1
+	op := lastDurableReview(t, fixture.store, project)
+	if op.RoutePending || !strings.Contains(op.Escalation, "did not enqueue") {
+		t.Fatalf("refused enqueue operation = %+v", op)
 	}
-	// The tick reads the clock to age the operation, to stamp routing, then
-	// to stamp the escalation: only that third read fails.
-	reads := 0
-	fixture.daemon.now = func() time.Time {
-		if reads++; reads == 3 {
-			return time.Unix(-1, 0)
-		}
-		return now()
-	}
-	if _, err := fixture.daemon.advanceReviewOperations(ctx, false); err != nil {
+	overseer, err := fixture.store.CreateAgent(ctx, kernel.NewAgent{ID: mustAgentID(t, testID(234)), ProjectID: project, Name: "overseer", Role: kernel.RoleOrchestrator, Provider: kernel.ProviderCodex, ToolBudgetLimit: 2}, mustKernelTime(t, 1001))
+	if err != nil {
 		t.Fatal(err)
 	}
-	if reads < 3 || escalations() != 0 || !lastDurableReview(t, fixture.store, project).RoutePending {
-		t.Fatalf("after a failed escalation (clock reads %d) it was dropped or recorded", reads)
+	policy, after, instruction := kernel.IdleStandingInstruction, uint32(1), "Supervise."
+	if _, err := fixture.store.UpdateAgent(ctx, overseer.ID, overseer.Revision, kernel.AgentPatch{IdlePolicy: &policy, IdleAfterSeconds: &after, IdleInstruction: &instruction}, mustKernelTime(t, 1002)); err != nil {
+		t.Fatal(err)
 	}
-	fixture.daemon.now = now
-	for range 2 {
-		if _, err := fixture.daemon.advanceReviewOperations(ctx, false); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if got := escalations(); got != 1 || lastDurableReview(t, fixture.store, project).RoutePending {
-		t.Fatalf("escalations=%d pending=%v, want one delivered escalation", got, lastDurableReview(t, fixture.store, project).RoutePending)
+	wakes, err := fixture.store.EnqueueOverseerWakeups(ctx, mustKernelTime(t, time.Now().UnixMilli()))
+	if err != nil || len(wakes) != 1 || !strings.Contains(wakes[0].Body, "Escalated: factoryd cannot advance team/repo#12") {
+		t.Fatalf("escalation wake = %+v, %v", wakes, err)
 	}
 }
 
@@ -546,50 +520,6 @@ func TestMergeStageRunsOnlyOnTheCustomerPath(t *testing.T) {
 	}
 }
 
-// An escalation that finds no overseer keeps the route pending and says why
-// on the operation; once an overseer has published the pull request, a later
-// tick delivers it and clears both.
-func TestEscalationWithNoOverseerStaysPendingUntilOneExists(t *testing.T) {
-	fixture, project := reviewPublicFixture(t)
-	customerMode(t, fixture)
-	ctx := context.Background()
-	fixture.daemon.now = func() time.Time { return time.Unix(2000, 0) }
-	publish := func(seed byte, role kernel.AgentRole) {
-		agent, err := fixture.store.CreateAgent(ctx, kernel.NewAgent{ID: mustAgentID(t, testID(seed)), ProjectID: project, Name: role.String(), Role: role, Provider: kernel.ProviderCodex, ToolBudgetLimit: 2}, mustKernelTime(t, 1001))
-		if err != nil {
-			t.Fatal(err)
-		}
-		incarnation, err := kernel.IncarnationIDFromBytes(mustIDBytes(t, testID(seed+1)))
-		if err != nil {
-			t.Fatal(err)
-		}
-		task, err := fixture.store.EnqueueTask(ctx, kernel.NewTask{ID: mustTaskID(t, testID(seed+2)), IncarnationID: incarnation, ProjectID: project, AssignedAgentID: agent.ID, Title: "publish"}, mustKernelTime(t, 1002))
-		if err != nil {
-			t.Fatal(err)
-		}
-		head := strings.Repeat("e", 40)
-		if err := fixture.store.RecordPublication(ctx, project, task.ID, "team/repo", kernel.ProductionPullRequest{Number: 12, Title: "Ship it", URL: "https://github.com/team/repo/pull/12", Head: head, Branch: "feature/ship", Base: "main", State: "open", Review: kernel.ProductionReview{Head: head, State: "unknown"}}, mustKernelTime(t, 1003)); err != nil {
-			t.Fatal(err)
-		}
-	}
-	publish(230, kernel.RoleWorker)
-	backend := &publicReviewBackend{enqueueRefused: true}
-	fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return backend }
-	if _, err := fixture.daemon.reviewPR(ctx, project, publishedReviewRequest()); err == nil {
-		t.Fatal("a refused enqueue reported success")
-	}
-	if op := lastDurableReview(t, fixture.store, project); !op.RoutePending || !strings.Contains(op.Escalation, "not found") {
-		t.Fatalf("escalation without an overseer: %+v", op)
-	}
-	publish(234, kernel.RoleOrchestrator)
-	if _, err := fixture.daemon.advanceReviewOperations(ctx, false); err != nil {
-		t.Fatal(err)
-	}
-	if op := lastDurableReview(t, fixture.store, project); op.RoutePending || op.Escalation != "" {
-		t.Fatalf("delivered escalation left the operation pending: %+v", op)
-	}
-}
-
 // A failed review never stalls its pull request silently: the tick retries a
 // retryable failure once, and escalates a failure nothing will retry once,
 // including one whose retry cannot start.
@@ -622,8 +552,6 @@ func TestFailedReviewRetriesOnceThenEscalatesOnce(t *testing.T) {
 		}
 		return failed, handled
 	}
-	digest := sha256.Sum256([]byte(fmt.Sprintf("escalation\x00%s\x00team/repo\x0012", project)))
-	escalation := mustTaskID(t, hex.EncodeToString(digest[:kernel.IDBytes]))
 	tick := func() {
 		offset.Add(int64(2 * reviewStuckAfter))
 		if _, err := fixture.daemon.advanceReviewOperations(ctx, false); err != nil {
@@ -641,8 +569,19 @@ func TestFailedReviewRetriesOnceThenEscalatesOnce(t *testing.T) {
 	for range 2 {
 		tick()
 	}
-	if _, found, err := fixture.store.Task(ctx, escalation); err != nil || !found {
-		t.Fatalf("exhausted retry was not escalated: %v", err)
+	page, err := fixture.store.Production(ctx, project, 0, 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	escalated := 0
+	for _, record := range page.Records {
+		var op review.Operation
+		if record.Kind == "reviewer" && json.Unmarshal(record.Document, &op) == nil && strings.Contains(op.Escalation, "its review failed") {
+			escalated++
+		}
+	}
+	if escalated != 1 {
+		t.Fatalf("exhausted retry escalated %d times, want once", escalated)
 	}
 	if failed, handled := ops(); failed != 2 || handled != 2 || backend.reviews != 2 {
 		t.Fatalf("after escalation: failed=%d handled=%d reviews=%d", failed, handled, backend.reviews)
@@ -661,14 +600,10 @@ func TestFailedReviewRetriesOnceThenEscalatesOnce(t *testing.T) {
 	if err := (durableReviewStore{store: fixture.store, project: project, repository: "team/unbound", now: fixture.daemon.now}).Create(ctx, unbound); err != nil {
 		t.Fatal(err)
 	}
-	digest = sha256.Sum256([]byte(fmt.Sprintf("escalation\x00%s\x00team/unbound\x0012", project)))
 	for range 2 {
 		tick()
 	}
-	if _, found, err := fixture.store.Task(ctx, mustTaskID(t, hex.EncodeToString(digest[:kernel.IDBytes]))); err != nil || !found {
-		t.Fatalf("a retry that could not start was not escalated: %v", err)
-	}
-	if document, _, err := fixture.store.ReviewOperation(ctx, project, unbound.ID); err != nil || !strings.Contains(string(document), `"handled":true`) || backend.reviews != 2 {
+	if document, _, err := fixture.store.ReviewOperation(ctx, project, unbound.ID); err != nil || !strings.Contains(string(document), `"handled":true`) || !strings.Contains(string(document), "its retry could not start") || backend.reviews != 2 {
 		t.Fatalf("unbound failure left unhandled: %s %v reviews=%d", document, err, backend.reviews)
 	}
 }

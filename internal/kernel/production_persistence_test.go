@@ -11,8 +11,6 @@ import (
 	"reflect"
 	"strings"
 	"testing"
-
-	"github.com/dark-factory-build/dark-factory/internal/runner"
 )
 
 func TestProductionPersistsFinalizedConstructionPublicationAndRebase(t *testing.T) {
@@ -170,8 +168,8 @@ func TestPublishedReviewChangesAreSentBackToOriginExactlyOnce(t *testing.T) {
 
 // The overseer publishes a worker's Change, so the pull request has two
 // publication rows. A review send-back must reach the worker, even when the
-// overseer's row is the newer one, and an escalation must reach the overseer
-// exactly once.
+// overseer's row is the newer one, and the sent-back branch is no longer
+// publishable.
 func TestPublishedReviewSendBackReachesTheWorkerNotThePublisher(t *testing.T) {
 	ctx := context.Background()
 	proposal, err := NewSuccessProposal("published")
@@ -208,6 +206,9 @@ func TestPublishedReviewSendBackReachesTheWorkerNotThePublisher(t *testing.T) {
 	if _, err := store.writer.ExecContext(ctx, `UPDATE publication_tasks SET created_at_ms = 90 WHERE task_id = ?`, publisher.ID.Bytes()); err != nil {
 		t.Fatal(err)
 	}
+	if inWork, err := store.ChangeBranchInWork(ctx, worker.ProjectID, pr.Branch); err != nil || inWork {
+		t.Fatalf("settled branch: inWork=%v err=%v", inWork, err)
+	}
 	routed, err := store.SendBackPublishedReview(ctx, worker.ProjectID, "example/factory", 7, "review-op", head, "fix the finding", mustTime(t, 91))
 	if err != nil || routed.ID != worker.TaskID || !strings.Contains(TaskFeedback(routed), "review-operation: review-op\n") || routed.WorkRevision.Int64() != 2 {
 		t.Fatalf("send-back reached %v (worker %v), err=%v", routed.ID, worker.TaskID, err)
@@ -215,28 +216,18 @@ func TestPublishedReviewSendBackReachesTheWorkerNotThePublisher(t *testing.T) {
 	if _, err := store.SendBackPublishedReview(ctx, worker.ProjectID, "example/factory", 7, "stale-op", strings.Repeat("c", 40), "an older head", mustTime(t, 92)); !errors.Is(err, ErrSuperseded) {
 		t.Fatalf("a superseded head err=%v, want ErrSuperseded", err)
 	}
-	// A conflict is "escalated already" only when the escalation task exists.
-	if _, err := store.writer.ExecContext(ctx, `UPDATE agents SET archived = 1 WHERE id = ?`, overseer.ID.Bytes()); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.EscalatePublishedPull(ctx, worker.ProjectID, "example/factory", 7, "past two repair rounds", mustTime(t, 93)); !errors.Is(err, ErrConflict) {
-		t.Fatalf("escalation to an archived overseer err=%v, want the conflict", err)
-	}
-	if _, err := store.writer.ExecContext(ctx, `UPDATE agents SET archived = 0 WHERE id = ?`, overseer.ID.Bytes()); err != nil {
-		t.Fatal(err)
-	}
-	for range 2 {
-		if err := store.EscalatePublishedPull(ctx, worker.ProjectID, "example/factory", 7, "past two repair rounds", mustTime(t, 93)); err != nil {
-			t.Fatal(err)
-		}
-	}
-	var escalations int
-	if err := store.writer.QueryRowContext(ctx, `SELECT COUNT(*) FROM tasks WHERE assigned_agent_id = ? AND body = 'past two repair rounds'`, overseer.ID.Bytes()).Scan(&escalations); err != nil || escalations != 1 {
-		t.Fatalf("overseer escalations = %d, err=%v; want exactly one", escalations, err)
+	// The sent-back Change is in work again: its branch is not publishable.
+	if inWork, err := store.ChangeBranchInWork(ctx, worker.ProjectID, pr.Branch); err != nil || !inWork {
+		t.Fatalf("sent-back branch: inWork=%v err=%v", inWork, err)
 	}
 }
 
-func TestOverseerWakeForStalePublicationIsEdgeTriggeredAndRearmsOnChange(t *testing.T) {
+// One level-triggered rule: finished, unpublished work is an item due to the
+// overseer. It gets one carrier at the head of the queue, never a second while
+// that one is unfinished, three re-wakes half an hour apart while it stays
+// unpublished, and none once it is published. A worker takes no standing
+// instruction at all.
+func TestOverseerWakeRule(t *testing.T) {
 	ctx := context.Background()
 	proposal, err := NewSuccessProposal("published")
 	if err != nil {
@@ -256,373 +247,73 @@ func TestOverseerWakeForStalePublicationIsEdgeTriggeredAndRearmsOnChange(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	change, found, err = store.Change(ctx, change.ID)
-	if err != nil || !found {
-		t.Fatalf("settled Change after finalization = %+v, found=%v, err=%v", change, found, err)
-	}
-	firstHead, err := NewCommitID(change.Selection.format, bytes.Repeat([]byte{0xd2}, change.Selection.format.oidLength()))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.writer.ExecContext(ctx, `UPDATE changes SET head_commit = ? WHERE id = ?`, firstHead.Bytes(), change.ID.Bytes()); err != nil {
-		t.Fatal(err)
-	}
-	overseer, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 191), ProjectID: terminal.ProjectID, Name: "publication overseer", Role: RoleOrchestrator, Provider: ProviderCodex, ToolBudgetLimit: 8}, mustTime(t, 80))
-	if err != nil {
-		t.Fatal(err)
-	}
-	policy, after, budget, instruction := IdleStandingInstruction, uint32(1), uint32(4), "Publish completed Changes."
-	overseer, err = store.UpdateAgent(ctx, overseer.ID, overseer.Revision, AgentPatch{IdlePolicy: &policy, IdleAfterSeconds: &after, IdleRunBudget: &budget, IdleInstruction: &instruction}, mustTime(t, 81))
-	if err != nil {
-		t.Fatal(err)
-	}
-	first, err := store.EnqueueOverseerWakeups(ctx, mustTime(t, 200_080))
-	firstMarker := "publication_change=" + change.ID.String() + ":" + fmt.Sprint(change.Revision.Int64()) + ":" + hex.EncodeToString(firstHead.Bytes())
-	if err != nil || len(first) != 1 || !strings.Contains(first[0].Body, firstMarker) {
-		t.Fatalf("stale publication wake marker=%q = %+v, %v", firstMarker, first, err)
-	}
-	keys := admissionKeys(t, 192, nil)
-	admission, err := store.AdmitNext(ctx, keys, mustTime(t, 200_081))
-	if err != nil || !admission.Admitted() || admission.Run == nil || admission.Run.TaskID != first[0].ID {
-		t.Fatalf("overseer admission = %+v, %v", admission, err)
-	}
-	runID := admission.Run.ID
-	activateAllResourcesUnique(t, store, *admission.Run, 200_082, 192)
-	running, found, err := store.Run(ctx, runID)
-	if err != nil || !found {
-		t.Fatalf("activated overseer run = %+v, found=%v, err=%v", running, found, err)
-	}
-	activated := running
-	session := terminalSessionForRunTest(t, store, running.ID)
-	running, err = store.ActivateRun(ctx, running.ID, session.ID, running.Revision, session.Revision, mustTime(t, 200_086))
-	if err != nil {
-		t.Fatalf("activate overseer run id=%s run_revision=%d session=%s session_run=%s session_revision=%d: %v", activated.ID, activated.Revision.Int64(), session.ID, session.RunID, session.Revision.Int64(), err)
-	}
-	if _, err := store.ProposeAttemptOutcome(ctx, keys.AttemptDigest, proposal, mustTime(t, 200_087)); err != nil {
-		t.Fatal(err)
-	}
-	running = observeMissingProcessExits(t, store, running.ID, 200_088)
-	releaseAllRunResources(t, store, running.ID, 200_089)
-	closed := closeTerminalSessionAtCurrent(t, store, running.ID, 200_092)
-	if _, err := store.FinalizeRun(ctx, closed.ID, closed.Revision, mustTime(t, 200_093)); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.writer.ExecContext(ctx, `UPDATE runs SET admitted_task_work_revision = admitted_task_work_revision + 1`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.EnqueueOverseerWakeups(ctx, mustTime(t, 300_000)); !errors.Is(err, ErrCorruptState) {
-		t.Fatalf("publication-only wake accepted corrupt authority: %v", err)
-	}
-	if _, err := store.writer.ExecContext(ctx, `UPDATE runs SET admitted_task_work_revision = admitted_task_work_revision - 1`); err != nil {
-		t.Fatal(err)
-	}
-	if repeated, err := store.EnqueueOverseerWakeups(ctx, mustTime(t, 400_000)); err != nil || len(repeated) != 0 {
-		t.Fatalf("duplicate stale publication wake = %+v, %v", repeated, err)
-	}
-	secondHead, err := NewCommitID(change.Selection.format, bytes.Repeat([]byte{0xd3}, change.Selection.format.oidLength()))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.writer.ExecContext(ctx, `UPDATE changes SET head_commit = ? WHERE id = ?`, secondHead.Bytes(), change.ID.Bytes()); err != nil {
-		t.Fatal(err)
-	}
-	rearmed, err := store.EnqueueOverseerWakeups(ctx, mustTime(t, 400_001))
-	secondMarker := "publication_change=" + change.ID.String() + ":" + fmt.Sprint(change.Revision.Int64()) + ":" + hex.EncodeToString(secondHead.Bytes())
-	if err != nil || len(rearmed) != 1 || !strings.Contains(rearmed[0].Body, secondMarker) {
-		t.Fatalf("changed publication wake = %+v, %v", rearmed, err)
-	}
-	pr := ProductionPullRequest{Number: 7, Title: "Ship the machine", URL: "https://github.com/example/factory/pull/7", Head: hex.EncodeToString(secondHead.Bytes()), Branch: "factory/" + change.ID.String()[:12], Base: "main", State: "open", Review: ProductionReview{Head: hex.EncodeToString(secondHead.Bytes()), State: "allow"}}
-	if err := store.RecordPublication(ctx, terminal.ProjectID, terminal.TaskID, "example/factory", pr, mustTime(t, 400_002)); err != nil {
-		t.Fatal(err)
-	}
-	read, err := store.beginRead(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer read.Close()
-	if candidates, err := unpublishedPublicationTargets(ctx, read.connection, terminal.ProjectID, overseer.ID, 400_003); err != nil || len(candidates) != 0 {
-		t.Fatalf("published Change remained a wake candidate = %+v, %v", candidates, err)
-	}
-	read.Close()
-	// A correction committed after publication, while the pull request is
-	// still open, needs republishing: on 30 Sep 2026 one sat unpublished for days.
-	correctedHead, err := NewCommitID(change.Selection.format, bytes.Repeat([]byte{0xd4}, change.Selection.format.oidLength()))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.writer.ExecContext(ctx, `UPDATE changes SET head_commit = ? WHERE id = ?`, correctedHead.Bytes(), change.ID.Bytes()); err != nil {
-		t.Fatal(err)
-	}
-	// The Change's last settlement now postdates its publication.
-	if _, err := store.writer.ExecContext(ctx, `UPDATE publication_tasks SET created_at_ms = (SELECT updated_at_ms - 1 FROM changes WHERE id = ?) WHERE change_id = ?`, change.ID.Bytes(), change.ID.Bytes()); err != nil {
-		t.Fatal(err)
-	}
-	candidates := func(at int64) []publicationWakeTarget {
-		t.Helper()
-		read, err := store.beginRead(ctx)
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer read.Close()
-		found, err := unpublishedPublicationTargets(ctx, read.connection, terminal.ProjectID, overseer.ID, at)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return found
-	}
-	if found := candidates(600_000); len(found) != 1 || found[0].HeadCommitDigest != hex.EncodeToString(correctedHead.Bytes()) {
-		t.Fatalf("corrected Change behind its open pull request = %+v", found)
-	}
-	// The daemon's production refresh records the merge.
-	if _, err := store.writer.ExecContext(ctx, `UPDATE production_records SET document = json_set(document, '$.state', 'merged') WHERE kind = 'pull_request' AND identity = '7'`); err != nil {
-		t.Fatal(err)
-	}
-	if found := candidates(600_001); len(found) != 0 {
-		t.Fatalf("corrected Change of a merged pull request = %+v", found)
-	}
-}
-
-func TestPublicationWakeRearmsAfterCarrierBlockedWithoutHandlingIt(t *testing.T) {
-	ctx := context.Background()
-	proposal, err := NewSuccessProposal("published")
-	if err != nil {
-		t.Fatal(err)
-	}
-	store, finalizing := finalizingReleasedRun(t, RoleWorker, VerificationNone, proposal)
-	defer store.Close()
-	change, found, err := store.Change(ctx, *finalizing.ChangeID)
-	if err != nil || !found || change.HeadCommit == nil {
-		t.Fatalf("settled change = %+v, found=%v, err=%v", change, found, err)
-	}
-	settlement, err := NewRetainedChangeSettlement(change.Revision, change.HeadCommit)
-	if err != nil {
-		t.Fatal(err)
-	}
-	terminal, err := store.FinalizeWorkerRun(ctx, finalizing.ID, finalizing.Revision, settlement, mustTime(t, 79))
-	if err != nil {
-		t.Fatal(err)
-	}
-	change, found, err = store.Change(ctx, change.ID)
-	if err != nil || !found {
-		t.Fatalf("settled Change after finalization = %+v, found=%v, err=%v", change, found, err)
-	}
-	firstHead, err := NewCommitID(change.Selection.format, bytes.Repeat([]byte{0xd2}, change.Selection.format.oidLength()))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.writer.ExecContext(ctx, `UPDATE changes SET head_commit = ? WHERE id = ?`, firstHead.Bytes(), change.ID.Bytes()); err != nil {
-		t.Fatal(err)
-	}
-	overseer, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 197), ProjectID: terminal.ProjectID, Name: "publication overseer", Role: RoleOrchestrator, Provider: ProviderCodex, ToolBudgetLimit: 8}, mustTime(t, 80))
-	if err != nil {
-		t.Fatal(err)
-	}
-	policy, after, budget, instruction := IdleStandingInstruction, uint32(1), uint32(4), "Publish completed Changes."
-	overseer, err = store.UpdateAgent(ctx, overseer.ID, overseer.Revision, AgentPatch{IdlePolicy: &policy, IdleAfterSeconds: &after, IdleRunBudget: &budget, IdleInstruction: &instruction}, mustTime(t, 81))
-	if err != nil {
-		t.Fatal(err)
-	}
-	first, err := store.EnqueueOverseerWakeups(ctx, mustTime(t, 200_080))
-	firstMarker := "publication_change=" + change.ID.String() + ":" + fmt.Sprint(change.Revision.Int64()) + ":" + hex.EncodeToString(firstHead.Bytes())
-	if err != nil || len(first) != 1 || !strings.Contains(first[0].Body, firstMarker) {
-		t.Fatalf("stale publication wake marker=%q = %+v, %v", firstMarker, first, err)
-	}
-	// The carrier blocked on something else (on 1 Oct 2026, a Maintainer
-	// transport failure); its marker must not retire the Change forever.
-	blocked, err := NewBlockedProposal("maintainer transport closed")
-	if err != nil {
-		t.Fatal(err)
-	}
-	keys := admissionKeys(t, 198, nil)
-	admission, err := store.AdmitNext(ctx, keys, mustTime(t, 200_081))
-	if err != nil || !admission.Admitted() || admission.Run == nil || admission.Run.TaskID != first[0].ID {
-		t.Fatalf("overseer admission = %+v, %v", admission, err)
-	}
-	runID := admission.Run.ID
-	activateAllResourcesUnique(t, store, *admission.Run, 200_082, 198)
-	running, found, err := store.Run(ctx, runID)
-	if err != nil || !found {
-		t.Fatalf("activated overseer run = %+v, found=%v, err=%v", running, found, err)
-	}
-	activated := running
-	session := terminalSessionForRunTest(t, store, running.ID)
-	running, err = store.ActivateRun(ctx, running.ID, session.ID, running.Revision, session.Revision, mustTime(t, 200_086))
-	if err != nil {
-		t.Fatalf("activate overseer run id=%s run_revision=%d session=%s session_run=%s session_revision=%d: %v", activated.ID, activated.Revision.Int64(), session.ID, session.RunID, session.Revision.Int64(), err)
-	}
-	if _, err := store.ProposeAttemptOutcome(ctx, keys.AttemptDigest, blocked, mustTime(t, 200_087)); err != nil {
-		t.Fatal(err)
-	}
-	running = observeMissingProcessExits(t, store, running.ID, 200_088)
-	releaseAllRunResources(t, store, running.ID, 200_089)
-	closed := closeTerminalSessionAtCurrent(t, store, running.ID, 200_092)
-	if _, err := store.FinalizeRun(ctx, closed.ID, closed.Revision, mustTime(t, 200_093)); err != nil {
-		t.Fatal(err)
-	}
-	carrier, found, err := store.Task(ctx, first[0].ID)
-	if err != nil || !found || carrier.Status != TaskBlocked {
-		t.Fatalf("carrier = %+v, found=%v, err=%v", carrier, found, err)
-	}
-	blockedAt := carrier.UpdatedAt.Int64()
-	if early, err := store.EnqueueOverseerWakeups(ctx, mustTime(t, blockedAt+PublicationRetryAfter.Milliseconds()-1)); err != nil || len(early) != 0 {
-		t.Fatalf("publication wake retried inside the back-off = %+v, %v", early, err)
-	}
-	retried, err := store.EnqueueOverseerWakeups(ctx, mustTime(t, blockedAt+PublicationRetryAfter.Milliseconds()))
-	if err != nil || len(retried) != 1 || !strings.Contains(retried[0].Body, firstMarker) {
-		t.Fatalf("publication wake after a blocked carrier = %+v, %v", retried, err)
-	}
-}
-
-func TestPublicationWakeOverflowFallsBackToBoundedFullReconciliation(t *testing.T) {
-	targets := make([]publicationWakeTarget, 32)
-	for index := range targets {
-		targets[index] = publicationWakeTarget{TaskID: taskID(t, byte(index+1)), ChangeID: changeID(t, byte(index+60)), ChangeRevision: mustRevision(t, 4), HeadCommitDigest: strings.Repeat("d", 40)}
-	}
-	instruction := strings.Repeat("x", runner.MaxCodexTaskBytes-512)
-	body, fits := overseerWakeInstructionWithPublication(ProviderCodex, instruction, nil, nil, false, targets)
-	if !fits || len(body) > runner.MaxCodexTaskBytes || !strings.Contains(body, "mode=full") || !strings.Contains(body, "publication attention overflow: full reconciliation required") || strings.Contains(body, "publication_change=") {
-		t.Fatalf("overflow wake body fits=%v bytes=%d mode=%v overflow=%v marker=%v body suffix=%q", fits, len(body), strings.Contains(body, "mode=full"), strings.Contains(body, "publication attention overflow: full reconciliation required"), strings.Contains(body, "publication_change="), body[max(0, len(body)-160):])
-	}
-}
-
-func TestPublicationWakeOverflowRearmsForChangedCandidateAndClearsOnPublication(t *testing.T) {
-	ctx := context.Background()
-	proposal, err := NewSuccessProposal("published")
-	if err != nil {
-		t.Fatal(err)
-	}
-	store, finalizing := finalizingReleasedRun(t, RoleWorker, VerificationNone, proposal)
-	defer store.Close()
-	change, found, err := store.Change(ctx, *finalizing.ChangeID)
-	if err != nil || !found || change.HeadCommit == nil {
-		t.Fatalf("settled change = %+v, found=%v, err=%v", change, found, err)
-	}
-	settlement, err := NewRetainedChangeSettlement(change.Revision, change.HeadCommit)
-	if err != nil {
-		t.Fatal(err)
-	}
-	terminal, err := store.FinalizeWorkerRun(ctx, finalizing.ID, finalizing.Revision, settlement, mustTime(t, 79))
-	if err != nil {
-		t.Fatal(err)
-	}
-	firstHead, err := NewCommitID(change.Selection.format, bytes.Repeat([]byte{0xd2}, change.Selection.format.oidLength()))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.writer.ExecContext(ctx, `UPDATE changes SET head_commit = ? WHERE id = ?`, firstHead.Bytes(), change.ID.Bytes()); err != nil {
-		t.Fatal(err)
-	}
-	overseer, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 193), ProjectID: terminal.ProjectID, Name: "overflow publication overseer", Role: RoleOrchestrator, Provider: ProviderCodex, ToolBudgetLimit: 8}, mustTime(t, 80))
-	if err != nil {
-		t.Fatal(err)
-	}
-	policy, after, budget, instruction := IdleStandingInstruction, uint32(1), uint32(4), strings.Repeat("x", runner.MaxCodexTaskBytes-128)
-	overseer, err = store.UpdateAgent(ctx, overseer.ID, overseer.Revision, AgentPatch{IdlePolicy: &policy, IdleAfterSeconds: &after, IdleRunBudget: &budget, IdleInstruction: &instruction}, mustTime(t, 81))
-	if err != nil {
-		t.Fatal(err)
-	}
-	first, err := store.EnqueueOverseerWakeups(ctx, mustTime(t, 200_080))
-	if err != nil || len(first) != 1 || !strings.Contains(first[0].Body, "publication attention overflow: full reconciliation required") || strings.Contains(first[0].Body, "publication_change=") {
-		t.Fatalf("overflow publication wake = %+v, %v", first, err)
-	}
-	keys := admissionKeys(t, 194, nil)
-	admission, err := store.AdmitNext(ctx, keys, mustTime(t, 200_081))
-	if err != nil || !admission.Admitted() || admission.Run == nil || admission.Run.TaskID != first[0].ID {
-		t.Fatalf("overflow overseer admission = %+v, %v", admission, err)
-	}
-	activateAllResourcesUnique(t, store, *admission.Run, 200_082, 194)
-	running, found, err := store.Run(ctx, admission.Run.ID)
-	if err != nil || !found {
-		t.Fatalf("activated overflow run = %+v, found=%v, err=%v", running, found, err)
-	}
-	session := terminalSessionForRunTest(t, store, running.ID)
-	running, err = store.ActivateRun(ctx, running.ID, session.ID, running.Revision, session.Revision, mustTime(t, 200_086))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.ProposeAttemptOutcome(ctx, keys.AttemptDigest, proposal, mustTime(t, 200_087)); err != nil {
-		t.Fatal(err)
-	}
-	running = observeMissingProcessExits(t, store, running.ID, 200_088)
-	releaseAllRunResources(t, store, running.ID, 200_089)
-	closed := closeTerminalSessionAtCurrent(t, store, running.ID, 200_092)
-	if _, err := store.FinalizeRun(ctx, closed.ID, closed.Revision, mustTime(t, 200_093)); err != nil {
-		t.Fatal(err)
-	}
-	if repeated, err := store.EnqueueOverseerWakeups(ctx, mustTime(t, 400_000)); err != nil || len(repeated) != 0 {
-		t.Fatalf("duplicate overflow publication wake = %+v, %v", repeated, err)
-	}
-	secondHead, err := NewCommitID(change.Selection.format, bytes.Repeat([]byte{0xd3}, change.Selection.format.oidLength()))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.writer.ExecContext(ctx, `UPDATE changes SET head_commit = ?, updated_at_ms = ? WHERE id = ?`, secondHead.Bytes(), 200_094, change.ID.Bytes()); err != nil {
-		t.Fatal(err)
-	}
-	read, err := store.beginRead(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	candidates, err := unpublishedPublicationTargets(ctx, read.connection, terminal.ProjectID, overseer.ID, 400_002)
-	read.Close()
-	if err != nil || len(candidates) != 1 {
-		t.Fatalf("changed overflow publication candidate = %+v, %v", candidates, err)
-	}
-}
-
-func TestMaximumInstructionDoesNotFenceFuturePublicationAttention(t *testing.T) {
-	ctx := context.Background()
-	proposal, err := NewSuccessProposal("published")
-	if err != nil {
-		t.Fatal(err)
-	}
-	store, finalizing := finalizingReleasedRun(t, RoleWorker, VerificationNone, proposal)
-	defer store.Close()
-	change, found, err := store.Change(ctx, *finalizing.ChangeID)
-	if err != nil || !found || change.HeadCommit == nil {
-		t.Fatalf("settled change = %+v, found=%v, err=%v", change, found, err)
-	}
-	settlement, err := NewRetainedChangeSettlement(change.Revision, change.HeadCommit)
-	if err != nil {
-		t.Fatal(err)
-	}
-	terminal, err := store.FinalizeWorkerRun(ctx, finalizing.ID, finalizing.Revision, settlement, mustTime(t, 79))
-	if err != nil {
-		t.Fatal(err)
-	}
-	head, err := NewCommitID(change.Selection.format, bytes.Repeat([]byte{0xd4}, change.Selection.format.oidLength()))
+	head, err := NewCommitID(change.Selection.format, bytes.Repeat([]byte{0xd2}, change.Selection.format.oidLength()))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.writer.ExecContext(ctx, `UPDATE changes SET head_commit = ? WHERE id = ?`, head.Bytes(), change.ID.Bytes()); err != nil {
 		t.Fatal(err)
 	}
-	overseer, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 195), ProjectID: terminal.ProjectID, Name: "maximum publication overseer", Role: RoleOrchestrator, Provider: ProviderCodex, ToolBudgetLimit: 8}, mustTime(t, 79))
+	policy, after, instruction := IdleStandingInstruction, uint32(1), "Publish completed Changes."
+	worker, _, err := store.Agent(ctx, terminal.AgentID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	policy, after, budget, instruction := IdleStandingInstruction, uint32(1), uint32(4), strings.Repeat("x", runner.MaxCodexTaskBytes)
-	if _, err := store.UpdateAgent(ctx, overseer.ID, overseer.Revision, AgentPatch{IdlePolicy: &policy, IdleAfterSeconds: &after, IdleRunBudget: &budget, IdleInstruction: &instruction}, mustTime(t, 79)); err != nil {
+	if _, err := store.UpdateAgent(ctx, worker.ID, worker.Revision, AgentPatch{IdlePolicy: &policy, IdleAfterSeconds: &after, IdleInstruction: &instruction}, mustTime(t, 80)); !errors.Is(err, ErrInvalidValue) {
+		t.Fatalf("worker standing instruction err=%v", err)
+	}
+	overseer, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 191), ProjectID: terminal.ProjectID, Name: "overseer", Role: RoleOrchestrator, Provider: ProviderCodex, ToolBudgetLimit: 8}, mustTime(t, 80))
+	if err != nil {
 		t.Fatal(err)
 	}
-	initial, err := store.EnqueueOverseerWakeups(ctx, mustTime(t, 1_080))
-	if err != nil || len(initial) != 1 || initial[0].Body != instruction {
-		t.Fatalf("maximum-instruction initial wake = %d, body=%d, err=%v", len(initial), len(initialBody(initial)), err)
-	}
-	if _, err := store.UpdateTask(ctx, initial[0].ID, initial[0].Revision, TaskPatch{Cancel: true}, mustTime(t, 1_081)); err != nil {
+	if _, err := store.UpdateAgent(ctx, overseer.ID, overseer.Revision, AgentPatch{IdlePolicy: &policy, IdleAfterSeconds: &after, IdleInstruction: &instruction}, mustTime(t, 81)); err != nil {
 		t.Fatal(err)
 	}
-	attention, err := store.EnqueueOverseerWakeups(ctx, mustTime(t, 200_080))
-	if err != nil || len(attention) != 1 {
-		t.Fatalf("maximum-instruction publication wake = %+v, %v", attention, err)
+	wake := func(at int64) []Task {
+		t.Helper()
+		tasks, err := store.EnqueueOverseerWakeups(ctx, mustTime(t, at))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return tasks
 	}
-}
-
-func initialBody(tasks []Task) string {
-	if len(tasks) == 0 {
-		return ""
+	rewake := OverseerRewakeAfter.Milliseconds()
+	at := int64(200_080)
+	first := wake(at)
+	if len(first) != 1 || first[0].Priority != 1000 || !strings.Contains(first[0].Body, "task_ids="+terminal.TaskID.String()+";") {
+		t.Fatalf("first wake = %+v", first)
 	}
-	return tasks[0].Body
+	if again := wake(at + 2*rewake); len(again) != 0 {
+		t.Fatalf("second carrier while one is queued = %+v", again)
+	}
+	carrier := first[0]
+	for round := range 4 {
+		if _, err := store.UpdateTask(ctx, carrier.ID, carrier.Revision, TaskPatch{Cancel: true}, mustTime(t, at+1)); err != nil {
+			t.Fatal(err)
+		}
+		if early := wake(at + rewake - 1); len(early) != 0 {
+			t.Fatalf("round %d re-woke early = %+v", round, early)
+		}
+		next := wake(at + rewake)
+		if round == 3 {
+			if len(next) != 0 {
+				t.Fatalf("fourth re-wake = %+v", next)
+			}
+			break
+		}
+		if len(next) != 1 {
+			t.Fatalf("re-wake %d = %+v", round+1, next)
+		}
+		carrier, at = next[0], at+rewake
+	}
+	// Publication clears it.
+	pr := ProductionPullRequest{Number: 7, Title: "Ship", URL: "https://github.com/example/factory/pull/7", Head: hex.EncodeToString(head.Bytes()), Branch: "factory/" + change.ID.String()[:12], Base: "main", State: "open", Review: ProductionReview{Head: hex.EncodeToString(head.Bytes()), State: "unknown"}}
+	if err := store.RecordPublication(ctx, terminal.ProjectID, terminal.TaskID, "example/factory", pr, mustTime(t, at+3*rewake)); err != nil {
+		t.Fatal(err)
+	}
+	if published := wake(at + 5*rewake); len(published) != 0 {
+		t.Fatalf("published Change still woke the overseer = %+v", published)
+	}
 }
 
 func TestProductionPublicationUsesOwnedChangeForTransformedHead(t *testing.T) {

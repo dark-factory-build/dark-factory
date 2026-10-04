@@ -2,7 +2,6 @@ package kernel
 
 import (
 	"context"
-	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -65,46 +64,20 @@ func (store *Store) SendBackPublishedReview(ctx context.Context, project Project
 	return updated, nil
 }
 
-// EscalatePublishedPull queues one task for the overseer that published the
-// pull request. Its identity derives from the pull request, so a later
-// escalation of the same pull request is a replay, never a second task.
-func (store *Store) EscalatePublishedPull(ctx context.Context, project ProjectID, repository string, pull uint64, body string, at UnixMillis) error {
-	repository = strings.ToLower(repository)
+// ChangeBranchInWork reports whether branch names a factory Change whose task
+// is queued or running, as after a send-back: the head it held is superseded,
+// so it is not publishable until the task settles again.
+func (store *Store) ChangeBranchInWork(ctx context.Context, project ProjectID, branch string) (bool, error) {
 	tx, err := store.beginRead(ctx)
 	if err != nil {
-		return err
+		return false, err
 	}
-	var overseer []byte
-	err = tx.connection.QueryRowContext(ctx, `SELECT t.assigned_agent_id FROM publication_tasks p JOIN tasks t ON t.id = p.task_id JOIN agents a ON a.id = t.assigned_agent_id WHERE p.project_id = ? AND p.repository = ? AND p.pull_number = ? AND a.role = 'orchestrator' ORDER BY p.created_at_ms DESC LIMIT 1`, project.Bytes(), repository, pull).Scan(&overseer)
-	tx.Close()
-	if errors.Is(err, sql.ErrNoRows) {
-		return ErrNotFound
-	}
-	if err != nil {
-		return err
-	}
-	agent, err := AgentIDFromBytes(overseer)
-	if err != nil {
-		return err
-	}
-	digest := sha256.Sum256([]byte(fmt.Sprintf("escalation\x00%s\x00%s\x00%d", project, repository, pull)))
-	id, err := TaskIDFromBytes(digest[:IDBytes])
-	if err != nil {
-		return err
-	}
-	incarnation, err := IncarnationIDFromBytes(digest[IDBytes : 2*IDBytes])
-	if err != nil {
-		return err
-	}
-	_, err = store.EnqueueTask(ctx, NewTask{ID: id, ProjectID: project, AssignedAgentID: agent, IncarnationID: incarnation, Title: fmt.Sprintf("Escalated: %s#%d", repository, pull), Body: body}, at)
-	if errors.Is(err, ErrConflict) {
-		// Escalated already only if that exact task exists; otherwise the
-		// conflict (an archived overseer, say) is the failure.
-		if _, found, readErr := store.Task(ctx, id); readErr == nil && found {
-			return nil
-		}
-	}
-	return err
+	defer tx.Close()
+	var inWork bool
+	err = tx.connection.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM changes AS c JOIN tasks AS t ON t.id = c.task_id
+		WHERE c.project_id = ? AND substr(lower(hex(c.id)), 1, 12) = ? AND t.status IN ('queued', 'running'))`,
+		project.Bytes(), strings.ToLower(strings.TrimPrefix(branch, "factory/"))).Scan(&inWork)
+	return inWork, err
 }
 
 // MaxSendBackNoteBytes bounds the note a send-back leaves at the end of a
