@@ -275,6 +275,43 @@ func TestOverseerWakeForStalePublicationIsEdgeTriggeredAndRearmsOnChange(t *test
 	if candidates, err := unpublishedPublicationTargets(ctx, read.connection, terminal.ProjectID, overseer.ID, 400_003); err != nil || len(candidates) != 0 {
 		t.Fatalf("published Change remained a wake candidate = %+v, %v", candidates, err)
 	}
+	read.Close()
+	// A correction committed after publication, while the pull request is
+	// still open, needs republishing: on 30 Sep 2026 one sat unpublished for days.
+	correctedHead, err := NewCommitID(change.Selection.format, bytes.Repeat([]byte{0xd4}, change.Selection.format.oidLength()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.writer.ExecContext(ctx, `UPDATE changes SET head_commit = ? WHERE id = ?`, correctedHead.Bytes(), change.ID.Bytes()); err != nil {
+		t.Fatal(err)
+	}
+	// The Change's last settlement now postdates its publication.
+	if _, err := store.writer.ExecContext(ctx, `UPDATE publication_tasks SET created_at_ms = (SELECT updated_at_ms - 1 FROM changes WHERE id = ?) WHERE change_id = ?`, change.ID.Bytes(), change.ID.Bytes()); err != nil {
+		t.Fatal(err)
+	}
+	candidates := func(at int64) []publicationWakeTarget {
+		t.Helper()
+		read, err := store.beginRead(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer read.Close()
+		found, err := unpublishedPublicationTargets(ctx, read.connection, terminal.ProjectID, overseer.ID, at)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return found
+	}
+	if found := candidates(600_000); len(found) != 1 || found[0].HeadCommitDigest != hex.EncodeToString(correctedHead.Bytes()) {
+		t.Fatalf("corrected Change behind its open pull request = %+v", found)
+	}
+	// The daemon's production refresh records the merge.
+	if _, err := store.writer.ExecContext(ctx, `UPDATE production_records SET document = json_set(document, '$.state', 'merged') WHERE kind = 'pull_request' AND identity = '7'`); err != nil {
+		t.Fatal(err)
+	}
+	if found := candidates(600_001); len(found) != 0 {
+		t.Fatalf("corrected Change of a merged pull request = %+v", found)
+	}
 }
 
 func TestPublicationWakeRearmsAfterCarrierBlockedWithoutHandlingIt(t *testing.T) {

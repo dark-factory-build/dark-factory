@@ -240,7 +240,11 @@ func unpublishedPublicationTargets(ctx context.Context, connection *sql.Conn, pr
 	rows, err := connection.QueryContext(ctx, `SELECT c.task_id, c.id, c.revision, lower(hex(c.head_commit)) FROM changes AS c JOIN tasks AS t ON t.id = c.task_id
 		WHERE c.project_id = ? AND t.status = 'succeeded' AND c.head_commit IS NOT NULL AND c.base_commit IS NOT NULL
 		  AND c.head_commit <> c.base_commit AND c.updated_at_ms + ? <= ?
-		  AND NOT EXISTS (SELECT 1 FROM publication_tasks AS p WHERE p.change_id = c.id)
+		  AND (NOT EXISTS (SELECT 1 FROM publication_tasks AS p WHERE p.change_id = c.id)
+		       -- A correction committed after publication while the pull request is still open.
+		       OR EXISTS (SELECT 1 FROM publication_tasks AS p JOIN production_records AS r
+		           ON r.project_id = p.project_id AND r.repository = p.repository AND r.kind = 'pull_request' AND r.identity = CAST(p.pull_number AS TEXT)
+		           WHERE p.change_id = c.id AND json_extract(r.document, '$.state') = 'open' AND c.updated_at_ms > p.created_at_ms))
 		  AND NOT EXISTS (SELECT 1 FROM tasks AS prior WHERE prior.assigned_agent_id = ?
 		      AND (prior.status IN ('queued', 'running', 'succeeded') OR prior.updated_at_ms + ? > ?)
 		      AND (instr(prior.body, 'publication_change=' || lower(hex(c.id)) || ':' || c.revision || ':' || lower(hex(c.head_commit))) > 0
