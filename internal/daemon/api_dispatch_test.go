@@ -1251,6 +1251,25 @@ func TestDaemonServesTaskOnlyToLiveAttempt(t *testing.T) {
 	waitDispatch(t, done)
 }
 
+func TestDaemonOverseerBackstopFreesLaneWhenProjectLimitIsDisabled(t *testing.T) {
+	fixture := newDispatchFixture(t)
+	active := prepareActiveAttemptInProjectWithProvider(t, fixture, 53, testID(53), "orchestrator", "codex")
+	ctx := context.Background()
+	// An overseer that keeps waiting on an external gate instead of
+	// checkpointing is cancelled at the backstop, releasing the lane (#1096).
+	bound := active.run.AdmittedAt.Int64() + kernel.MaxOverseerRunSeconds*1000
+	for _, at := range []int64{bound - 1, bound} {
+		fixture.daemon.now = func() time.Time { return time.UnixMilli(at) }
+		if err := fixture.daemon.enforceRunLimits(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	run, found, err := fixture.store.Run(ctx, active.run.ID)
+	if err != nil || !found || run.Phase != kernel.RunFinalizing || run.Proposal == nil || run.Proposal.Kind() != kernel.OutcomeCancelled || run.Proposal.Detail() != runLimitDetail || run.UpdatedAt.Int64() != bound {
+		t.Fatalf("overseer at backstop = %+v, found=%v, err=%v", run, found, err)
+	}
+}
+
 func TestDaemonRejectsForgedAttemptOutcome(t *testing.T) {
 	fixture := newDispatchFixture(t)
 	_ = prepareActiveAttempt(t, fixture, 61)

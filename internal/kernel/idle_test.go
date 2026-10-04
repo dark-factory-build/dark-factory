@@ -211,7 +211,10 @@ func TestOverseerWakeupConsumesWorkerEventsAndLeavesEventsDuringItsRunPending(t 
 	if tasks, err := store.EnqueueOverseerWakeups(ctx, mustTime(t, 124_011)); err != nil || len(tasks) != 0 {
 		t.Fatalf("wake stacked during running overseer: %+v, %v", tasks, err)
 	}
-	proposal, err := NewSuccessProposal("done")
+	// The overseer has no useful in-session action while the protected merge
+	// queue is pending. Its durable success result is the checkpoint; the
+	// causal wake below must resume observation without replaying the merge.
+	proposal, err := NewSuccessProposal("protected merge queue pending; entry=merge-1096; resume observation on the next wake")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -223,6 +226,10 @@ func TestOverseerWakeupConsumesWorkerEventsAndLeavesEventsDuringItsRunPending(t 
 	closed := closeTerminalSessionAtCurrent(t, store, running.ID, 124_020)
 	if _, err := store.FinalizeRun(ctx, closed.ID, closed.Revision, mustTime(t, 124_021)); err != nil {
 		t.Fatal(err)
+	}
+	checkpoint, found, err := store.Task(ctx, first[0].ID)
+	if err != nil || !found || checkpoint.Status != TaskSucceeded || checkpoint.Result != "protected merge queue pending; entry=merge-1096; resume observation on the next wake" {
+		t.Fatalf("durable external checkpoint = %+v, found=%v, err=%v", checkpoint, found, err)
 	}
 	followup, err := store.EnqueueOverseerWakeups(ctx, mustTime(t, 184_021))
 	if err != nil || len(followup) != 1 {

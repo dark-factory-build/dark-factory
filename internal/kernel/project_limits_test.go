@@ -67,6 +67,61 @@ func TestProjectLimitsUseAdditionalAllowanceAndDefaultToDisabled(t *testing.T) {
 	}
 }
 
+func TestOverseerRunHasBackstopBelowDisabledOrLongerProjectLimit(t *testing.T) {
+	for _, role := range []AgentRole{RoleOrchestrator, RoleWorker} {
+		t.Run(role.String(), func(t *testing.T) {
+			store, _, project, agent := newAdmissionStore(t, role, 1)
+			defer store.Close()
+			ctx := context.Background()
+			if _, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 220), ProjectID: project.ID, AssignedAgentID: agent.ID, IncarnationID: incarnationID(t, 221), Title: "external gate"}, mustTime(t, 4)); err != nil {
+				t.Fatal(err)
+			}
+			admitted, err := store.AdmitNext(ctx, admissionKeys(t, 222, nil), mustTime(t, 5))
+			if err != nil || !admitted.Admitted() {
+				t.Fatalf("admission = %+v, %v", admitted, err)
+			}
+			bound := int64(5 + MaxOverseerRunSeconds*1000)
+			overdue := func(at int64) bool {
+				t.Helper()
+				due, err := store.OverdueRuns(ctx, mustTime(t, at))
+				if err != nil || len(due) > 1 || len(due) == 1 && due[0].ID != admitted.Run.ID {
+					t.Fatalf("overdue at %d = %+v, %v", at, due, err)
+				}
+				return len(due) == 1
+			}
+			setCeiling := func(seconds uint32) {
+				t.Helper()
+				current, found, err := store.Project(ctx, project.ID)
+				if err != nil || !found {
+					t.Fatalf("project = %+v, found=%v, err=%v", current, found, err)
+				}
+				if _, err := store.SetProjectLimits(ctx, current.ID, current.Revision, 0, seconds, mustTime(t, 6)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			isOverseer := role == RoleOrchestrator
+			if overdue(bound-1) || overdue(bound) != isOverseer {
+				t.Fatalf("disabled ceiling: %s backstop wrong", role)
+			}
+			setCeiling(2700)
+			if overdue(bound-1) || overdue(bound) != isOverseer || !overdue(5+2_700_000) {
+				t.Fatalf("longer ceiling: %s backstop wrong", role)
+			}
+			setCeiling(1)
+			if !overdue(1005) {
+				t.Fatalf("shorter configured ceiling did not apply to %s", role)
+			}
+			setCeiling(0)
+			if _, err := store.writer.Exec(`UPDATE runs SET provider = 'shell' WHERE id = ?`, admitted.Run.ID.Bytes()); err != nil {
+				t.Fatal(err)
+			}
+			if overdue(bound) {
+				t.Fatalf("shell %s inherited the overseer backstop", role)
+			}
+		})
+	}
+}
+
 func TestAdmissionSkipsExhaustedProjectBeforePriority(t *testing.T) {
 	for _, role := range []AgentRole{RoleWorker, RoleOrchestrator} {
 		t.Run(role.String(), func(t *testing.T) {

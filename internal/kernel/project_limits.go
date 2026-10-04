@@ -7,6 +7,13 @@ import (
 
 const maxProjectRunSeconds = 86400
 
+// MaxOverseerRunSeconds bounds one non-shell overseer run even when the
+// project ceiling is disabled or longer. An overseer must checkpoint and exit
+// when only an external event remains (#1096); this backstop stops one that
+// waits instead from holding the project's single overseer lane. Events stay
+// pending, so the next wake resumes from durable state.
+const MaxOverseerRunSeconds = 1800
+
 // SetProjectLimits replaces a project's future run allowance and per-run
 // wall-clock ceiling. An allowance is additional to the lifetime count already
 // recorded; zero disables the count ceiling without erasing that history.
@@ -70,16 +77,18 @@ func (store *Store) SetProjectLimitsWithTokens(ctx context.Context, id ProjectID
 	return project, nil
 }
 
-// OverdueRuns returns admitted and running runs whose project ceiling has
-// elapsed. The caller cancels each at its returned revision; a concurrent
-// result or stop simply wins the CAS.
+// OverdueRuns returns admitted and running runs whose project ceiling, or the
+// overseer backstop, has elapsed. The caller cancels each at its returned
+// revision; a concurrent result or stop simply wins the CAS.
 func (store *Store) OverdueRuns(ctx context.Context, at UnixMillis) ([]Run, error) {
 	tx, err := store.beginRead(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Close()
-	rows, err := tx.connection.QueryContext(ctx, `SELECT `+runColumns+` FROM runs AS r WHERE r.phase IN ('admitted', 'running') AND r.admitted_at_ms + (SELECT p.max_run_seconds FROM projects AS p WHERE p.id = r.project_id) * 1000 <= ? AND (SELECT p.max_run_seconds FROM projects AS p WHERE p.id = r.project_id) > 0 ORDER BY r.admitted_at_ms, r.id`, at.Int64())
+	rows, err := tx.connection.QueryContext(ctx, `SELECT `+runColumns+` FROM runs AS r WHERE r.phase IN ('admitted', 'running') AND r.admitted_at_ms + 1000 * (SELECT CASE
+		WHEN r.role = 'orchestrator' AND r.provider <> 'shell' AND (p.max_run_seconds = 0 OR p.max_run_seconds > ?1) THEN ?1
+		ELSE NULLIF(p.max_run_seconds, 0) END FROM projects AS p WHERE p.id = r.project_id) <= ?2 ORDER BY r.admitted_at_ms, r.id`, MaxOverseerRunSeconds, at.Int64())
 	if err != nil {
 		return nil, err
 	}
