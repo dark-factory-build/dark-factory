@@ -29,14 +29,6 @@ deploy = module('deploy-runtime')
 
 
 class AutonomyTest(unittest.TestCase):
-    def test_production_uses_existing_release_lane(self):
-        config = {'repository': 'example/factory', 'project_id': 'a' * 32}
-        with patch.object(autonomy.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, '{}', '')) as run:
-            results = autonomy.tick(Path('/config.json'), config, release_only=True)
-        self.assertEqual([{'component': 'factory-production', 'ok': True}], results)
-        self.assertEqual('factory-production.py', Path(run.call_args.args[0][1]).name)
-        self.assertEqual('--record', run.call_args.args[0][-1])
-
     def test_installed_controller_does_not_refresh_an_archive_parent(self):
         with tempfile.TemporaryDirectory() as directory:
             installed = Path(directory) / 'libexec' / 'dark-factory'
@@ -230,7 +222,7 @@ class AutonomyTest(unittest.TestCase):
                     self.assertFalse(worker.is_alive())
                     self.assertTrue(refreshed.is_set())
 
-    def test_waiting_release_does_not_block_intake_review_or_allow_duplicate(self):
+    def test_waiting_release_does_not_block_intake_or_allow_duplicate(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             script = root / 'factory-autonomy.py'
@@ -240,8 +232,7 @@ class AutonomyTest(unittest.TestCase):
             config = root / 'config.json'
             config.write_text(json.dumps({'factory_home': str(root / 'home'), 'journal': str(root / 'journal'),
                                           'release_configs': [str(release_config)], 'review_mirror_root': str(root / 'mirror')}))
-            for name in ('factory-intake', 'factory-review-intake'):
-                (root / (name + '.py')).write_text('print("{}")')
+            (root / 'factory-intake.py').write_text('print("{}")')
             (root / 'factory-release.py').write_text(
                 'from pathlib import Path\nimport time\n'
                 'root = Path(__file__).parent\n(root / "started").touch()\n'
@@ -257,7 +248,7 @@ class AutonomyTest(unittest.TestCase):
                     time.sleep(.01)
                 normal = subprocess.run([sys.executable, str(script), str(config), '--once'], capture_output=True, text=True, timeout=5)
                 self.assertEqual(0, normal.returncode, normal.stderr)
-                self.assertEqual(['factory-intake', 'factory-review-intake'],
+                self.assertEqual(['factory-intake'],
                                  [item['component'] for item in json.loads(normal.stdout)['components']])
                 duplicate = subprocess.run([sys.executable, str(script), str(config), '--once', '--release-only'], capture_output=True, text=True, timeout=5)
                 self.assertNotEqual(0, duplicate.returncode)
@@ -268,14 +259,6 @@ class AutonomyTest(unittest.TestCase):
                 stdout, stderr = release.communicate(timeout=5)
             self.assertEqual(0, release.returncode, stderr)
             self.assertEqual(['factory-release'], [item['component'] for item in json.loads(stdout)['components']])
-
-    def test_private_review_wakeup_is_optional(self):
-        config = {'factory_home': '/private/tmp/factory', 'journal': '/private/tmp/journal', 'review_mirror_root': '/private/tmp/mirror'}
-        with patch.object(autonomy.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, '{}', '')) as run:
-            autonomy.tick(Path('/private/tmp/config'), config)
-        self.assertTrue(any('factory-review-intake.py' in call.args[0][1] for call in run.call_args_list))
-        self.assertIn('factory-review-intake.py', run.call_args_list[-1].args[0][1])
-        self.assertIsNone(run.call_args_list[-1].kwargs['timeout'])
 
     def test_mixed_installed_binaries_cannot_prove_health(self):
         identities = ['a' * 40, 'b' * 40, 'a' * 40]
@@ -982,7 +965,6 @@ class LegacyCutoverTest(unittest.TestCase):
         import hashlib
         import plistlib
         shutil.copyfile(Path(__file__).with_name('factory-intake.py'), self.script.with_name('factory-intake.py'))
-        self.script.with_name('factory-review-intake.py').write_text('# fixture')
         self.config_path, journal = self.root / 'legacy.json', self.root / 'legacy-journal.json'
         self.config = {'repository':'fixture/issues','project_id':'1'*32,'overseer_agent_id':'2'*32,'label':'ready','allowed_authors':['owner'],'factory_home':str(self.home),'journal':str(journal),'priority_by_label':{'urgent':5,'later':-2},'review_mirror_root':str(self.root / 'reviews')}
         autonomy.atomic_json(self.config_path, self.config)
@@ -1029,19 +1011,9 @@ class LegacyCutoverTest(unittest.TestCase):
         self.api = api
         self.addCleanup(patch.stopall)
         patch.object(autonomy,'__file__',str(self.script)).start()
-        self.review_ready = patch.object(autonomy,'legacy_review_ready').start()
         patch.object(autonomy,'managed_plist_root',return_value=self.plists).start()
         patch.object(autonomy,'managed_launchctl',side_effect=launchctl).start()
         patch.object(autonomy,'managed_api',side_effect=api).start()
-
-    def test_review_readiness_is_checked_before_stopping_legacy(self):
-        self.fixture()
-        self.review_ready.side_effect=ValueError('review mirror unavailable')
-        with self.assertRaisesRegex(ValueError,'review mirror unavailable'):
-            autonomy.managed_migrate(self.home,self.factoryctl,self.config_path,self.plan)
-        self.assertFalse(any(call[0]=='bootout' for call in self.calls))
-        self.assertEqual(0,self.commits)
-        self.review_ready.assert_called_once_with(self.config,'fixture/publication')
 
     def test_release_companion_refuses_cutover_before_schedule_or_baseline_changes(self):
         self.fixture()
@@ -1161,12 +1133,9 @@ class LegacyCutoverTest(unittest.TestCase):
                 self.assertEqual(1,sum(call[0]=='bootout' for call in self.calls))
                 self.assertEqual(before,Path(self.config['journal']).read_bytes())
                 self.assertEqual(before.decode(),receipt['journal'])
-                with patch.object(autonomy,'tick',return_value=[{'ok':True}]) as companion:
+                with patch.object(autonomy,'tick') as companion:
                     autonomy.managed_tick(self.home,self.factoryctl)
-                    self.assertTrue(companion.call_args.kwargs['skip_intake'])
-                    self.assertEqual('/legacy/bin:/usr/bin:/bin',companion.call_args.kwargs['environment']['PATH'])
-                    self.assertEqual(self.config,companion.call_args.args[1])
-                    self.assertEqual(['--managed-migration',str(Path(str(self.home)+'.intake/migration.json')),'--factoryctl',str(self.factoryctl)],companion.call_args.kwargs['review_arguments'])
+                    companion.assert_not_called()
                 patch.stopall()
 
     def test_lost_commit_response_never_restarts_legacy_or_duplicates_baseline(self):
