@@ -150,7 +150,7 @@ func (f WorktreeFacts) GitDirectory() string { return f.gitDirectory }
 // the group-writable /Applications directory and cannot provide this authority.
 const TrustedGitExecutable = "/Library/Developer/CommandLineTools/usr/bin/git"
 
-// TrustedDeveloperGitPath is the one Git-trust path predicate. SelectGit
+// TrustedDeveloperGitPath is the one Git-trust path predicate. SelectRegisteredGit
 // enforces it per attempt; boot-time callers reuse it so a configuration that
 // would fail every attempt refuses the process instead.
 func TrustedDeveloperGitPath(path string) bool {

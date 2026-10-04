@@ -6,9 +6,7 @@ import (
 	"context"
 	"errors"
 	"os"
-	"path/filepath"
 
-	"github.com/dark-factory-build/dark-factory/internal/kernel"
 	"github.com/dark-factory-build/dark-factory/internal/runner"
 	"golang.org/x/sys/unix"
 )
@@ -173,58 +171,6 @@ func openAdoptedRuntimeDirectory(parent *RuntimeParent, basename string, expecte
 	keepDir = true
 	child = transferred
 	return opened, transferred, nil
-}
-
-// AcknowledgeTerminal removes exactly the inspected spool only after the
-// caller supplies a durable Store postcondition for the same run and exact
-// released provider process/group. Exit time is deliberately not compared:
-// a restart may observe the same committed exit with a new proposed time.
-func (recovered *RecoveredRuntime) AcknowledgeTerminal(record *runner.TerminalRecord, run kernel.Run, runtimeRoot, providerProcess, providerGroup kernel.Resource) error {
-	if recovered == nil || recovered.runtime == nil || record == nil || !terminalCommitProven(recovered.runtime.locator, recovered.runtime.identity, record.Terminal, run, runtimeRoot, providerProcess, providerGroup) {
-		return invalidContract(nil)
-	}
-	recovered.runtime.mu.Lock()
-	defer recovered.runtime.mu.Unlock()
-	if err := recovered.verifyAuthority(); err != nil {
-		return err
-	}
-	expected, present := recovered.files[runner.TerminalSpoolName]
-	if !present || record.Identity != fileIdentity(expected) {
-		return invalidContract(nil)
-	}
-	if err := runner.AcknowledgeTerminal(recovered.runtime.dir, runner.TerminalSpoolName, record, true); err != nil {
-		return invalidContract(err)
-	}
-	delete(recovered.files, runner.TerminalSpoolName)
-	return recovered.verifyAuthority()
-}
-
-func terminalCommitProven(runtimePath string, runtimeIdentity runner.FileIdentity, terminal runner.Terminal, run kernel.Run, runtimeRoot, providerProcess, providerGroup kernel.Resource) bool {
-	basename := run.ID.String()
-	if filepath.Base(runtimePath) != basename || run.Phase != kernel.RunFinalizing || run.ProviderExit == nil || terminal.AttemptID != basename || run.CredentialRevokedAt == nil || run.FinalizingAt == nil {
-		return false
-	}
-	wantRuntimeIdentity, err := pathResourceIdentity(runtimeIdentity)
-	if err != nil || runtimeRoot.RunID != run.ID || runtimeRoot.Kind != kernel.ResourceRuntimeRoot || runtimeRoot.Path != runtimePath || runtimeRoot.Identity != wantRuntimeIdentity || runtimeRoot.Identity.Empty() || runtimeRoot.ActivatedAt == nil || (runtimeRoot.State != kernel.ResourceReleasing && runtimeRoot.State != kernel.ResourceUnresolved) {
-		return false
-	}
-	for _, resource := range []kernel.Resource{providerProcess, providerGroup} {
-		if resource.RunID != run.ID || resource.State != kernel.ResourceReleased || resource.ActivatedAt == nil || resource.ReleasedAt == nil || resource.Identity.Empty() {
-			return false
-		}
-	}
-	if providerProcess.Kind != kernel.ResourceProviderProcess || providerGroup.Kind != kernel.ResourceProviderGroup || providerProcess.Identity != providerGroup.Identity || *providerProcess.ActivatedAt != *providerGroup.ActivatedAt || run.ProviderExit.At().Int64() < providerProcess.ActivatedAt.Int64() || providerProcess.ReleasedAt.Int64() < run.ProviderExit.At().Int64() || providerGroup.ReleasedAt.Int64() < run.ProviderExit.At().Int64() {
-		return false
-	}
-	identity, err := runnerIdentity(providerProcess.Identity)
-	if err != nil || terminal.Process != identity || run.ProviderExit.Sequence() != 1 || run.ProviderExit.RecoveredAbsence() {
-		return false
-	}
-	if code, present := run.ProviderExit.Code(); present {
-		return terminal.Exit.Code >= 0 && terminal.Exit.Signal == 0 && code == int64(terminal.Exit.Code)
-	}
-	signal, present := run.ProviderExit.Signal()
-	return present && terminal.Exit.Code == -1 && terminal.Exit.Signal > 0 && signal == int64(terminal.Exit.Signal)
 }
 
 // OuterActivated, InnerActivated and HasAttemptResult expose the recovered

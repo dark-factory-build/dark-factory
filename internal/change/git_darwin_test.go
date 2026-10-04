@@ -16,6 +16,7 @@ import (
 	"runtime"
 	"runtime/debug"
 	"strings"
+	"syscall"
 	"testing"
 	"testing/iotest"
 	"time"
@@ -1044,4 +1045,115 @@ func TestFreshSelectionFetchesConfiguredUpstreamWithoutMovingCheckout(t *testing
 	if err != nil || selected.Base().Hex() != fixture.base.Hex() {
 		t.Fatalf("detached source: %v", err)
 	}
+}
+
+// The test-only Git entry points below drive native Git through the same
+// authority as production without the private-administration layout.
+
+// SelectGit resolves revision once to the exact commit a Change is made
+// from, refreshing a configured upstream first, without touching the
+// checkout.
+func SelectGit(ctx context.Context, gitExecutable, repositoryRoot, revision string, expected RepositoryIdentity) (Selection, error) {
+	return selectGitWithTrust(ctx, gitExecutable, repositoryRoot, revision, expected, nil, true)
+}
+
+// selectGit is the package-private native-process fixture seam. Public callers
+// can enter only through SelectGit's root-owned Developer-toolchain check.
+func selectGit(ctx context.Context, gitExecutable, repositoryRoot, revision string, expected RepositoryIdentity, hook gitProcessHook) (Selection, error) {
+	return selectGitWithTrust(ctx, gitExecutable, repositoryRoot, revision, expected, hook, false)
+}
+
+func repositoryIdentityOf(info os.FileInfo) (RepositoryIdentity, error) {
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return RepositoryIdentity{}, errors.New("repository stat identity is unavailable")
+	}
+	return NewRepositoryIdentity(uint64(stat.Dev), stat.Ino)
+}
+
+// AddWorktree makes the Change's worktree: one linked worktree of the
+// selected repository at path, on its own branch, checked out at the
+// selected base. A leftover of an earlier attempt that never reached a
+// provider (the same branch still at the base, at this path or registered
+// for it) is removed and remade; anything else at the path or on the branch
+// is refused, never replaced.
+func AddWorktree(ctx context.Context, selection Selection, path, branch string) (WorktreeFacts, error) {
+	return addWorktree(ctx, selection, path, branch, nil, true)
+}
+
+func addWorktree(ctx context.Context, selection Selection, path, branch string, hook gitProcessHook, trusted bool) (WorktreeFacts, error) {
+	if !selection.valid() || !validWorktreeBranch(branch) {
+		return WorktreeFacts{}, &ValidationError{Reason: "worktree selection or branch is invalid"}
+	}
+	if err := validateWorktreePath(path); err != nil {
+		return WorktreeFacts{}, err
+	}
+	authority, err := openGitAuthority(selection.gitExecutable, selection.repositoryRoot, selection.repository.root, hook, trusted)
+	if err != nil {
+		return WorktreeFacts{}, err
+	}
+	defer authority.close()
+	if err := authority.removeUnusedWorktree(ctx, path, branch, selection.base); err != nil {
+		return WorktreeFacts{}, err
+	}
+	if _, err := os.Lstat(path); err == nil {
+		return WorktreeFacts{}, &ValidationError{Reason: "Change path is taken by something that is not its worktree"}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return WorktreeFacts{}, newGitError(gitFailurePrivateIO)
+	}
+	if err := authority.addWorktree(ctx, path, branch, selection.base, false); err != nil {
+		return WorktreeFacts{}, err
+	}
+	return authority.verifyWorktree(ctx, path, branch, selection.base)
+}
+
+// removeUnusedWorktree removes a registration of path, or of the Change's
+// branch, that an earlier attempt left before any provider ran: it must
+// still be the Change's branch at the Change's base. Nothing else is touched.
+func (a *gitAuthority) removeUnusedWorktree(ctx context.Context, path, branch string, base ObjectID) error {
+	registrations, err := a.worktrees(ctx)
+	if err != nil {
+		return err
+	}
+	registered, ok := registrations[path]
+	if !ok {
+		for _, candidate := range registrations {
+			if candidate.branch == "refs/heads/"+branch {
+				registered, ok = candidate, true
+				break
+			}
+		}
+	}
+	if !ok {
+		return nil
+	}
+	if registered.branch != "refs/heads/"+branch || registered.head != base.Hex() {
+		return &ValidationError{Reason: "the Change path or branch is registered to a worktree that is not its unused one"}
+	}
+	if _, err := os.Lstat(registered.path); err == nil {
+		facts, err := a.inspectWorktree(ctx, registered.path)
+		if err != nil || !facts.head.equal(base) || facts.branch != branch || facts.dirty {
+			return errors.Join(&ValidationError{Reason: "the Change path holds a worktree with work in it"}, err)
+		}
+	}
+	if err := a.rewriteConfig(ctx, maxGitSelectionOutput, "-C", a.repositoryRoot, "worktree", "remove", "--force", registered.path); err != nil {
+		return err
+	}
+	tip, exists, err := a.branchTip(ctx, base.format, branch)
+	if err != nil {
+		return err
+	}
+	if exists && tip.equal(base) {
+		return a.rewriteConfig(ctx, maxGitSelectionOutput, "-C", a.repositoryRoot, "branch", "--quiet", "-D", branch)
+	}
+	return nil
+}
+
+// worktrees parses git worktree list --porcelain into one record per path.
+func (a *gitAuthority) worktrees(ctx context.Context) (map[string]worktreeRegistration, error) {
+	output, err := a.succeed(ctx, maxGitListOutput, "-C", a.repositoryRoot, "worktree", "list", "--porcelain")
+	if err != nil {
+		return nil, err
+	}
+	return parseWorktrees(output), nil
 }

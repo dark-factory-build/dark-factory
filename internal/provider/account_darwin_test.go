@@ -134,3 +134,7 @@ func TestDefaultClaudeAccountIsNeverNamedInTheEnvironment(t *testing.T) {
 		t.Fatal("codex default account changed the launch environment")
 	}
 }
+
+func (runtime RuntimePaths) environment(kind kernel.Provider) []string {
+	return runtime.environmentForRole(kind, kernel.RoleWorker)
+}

@@ -84,7 +84,7 @@ func (fixture *recoveryFixture) settlementWorktree(t *testing.T) (kernel.Change,
 	if err != nil {
 		t.Fatal(err)
 	}
-	selection, err := change.SelectGit(ctx, git, repository, "HEAD", identity)
+	base, err := change.NewObjectIDFromHex("sha1", strings.TrimSpace(settlementGit(t, git, repository, "rev-parse", "HEAD")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,14 +97,11 @@ func (fixture *recoveryFixture) settlementWorktree(t *testing.T) (kernel.Change,
 		t.Fatalf("change: found=%v err=%v", found, err)
 	}
 	path := filepath.Join(fixture.changeParent, changeState.ID.String())
-	facts, err := change.AddWorktree(ctx, selection, path, change.BranchName(changeState.ID.String()))
-	if err != nil {
-		t.Fatal(err)
-	}
+	settlementGit(t, git, repository, "worktree", "add", "-q", "-b", change.BranchName(changeState.ID.String()), path, base.Hex())
 	if err := os.Chmod(path, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	kernelSelection, err := kernelSelectionCheckpoint(changeworker.Result{Format: selection.ObjectFormat(), Base: selection.Base()}, identity)
+	kernelSelection, err := kernelSelectionCheckpoint(changeworker.Result{Format: base.Format(), Base: base}, identity)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -112,7 +109,7 @@ func (fixture *recoveryFixture) settlementWorktree(t *testing.T) (kernel.Change,
 	if err != nil {
 		t.Fatal(err)
 	}
-	head, err := kernelCommit(facts.Head())
+	head, err := kernelCommit(base)
 	if err != nil {
 		t.Fatal(err)
 	}
