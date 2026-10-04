@@ -12,7 +12,10 @@ import (
 )
 
 const productionRefreshPRLimit = 100
-const productionRefreshInterval = 30 * time.Second
+
+// Each refresh lists up to 100 pull requests on the owner's GitHub quota,
+// which host tools share; every 30s exhausted it (5,000/h).
+const productionRefreshInterval = 5 * time.Minute
 
 // refreshProduction reads the bounded pull-request projection through the
 // retained Maintainer connection. It is deliberately best-effort: an
