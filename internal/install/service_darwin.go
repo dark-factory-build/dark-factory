@@ -683,7 +683,7 @@ func parseLaunchctlPrint(output []byte, service, plistPath, programPath string) 
 			return 0, fmt.Errorf("%w: invalid launchd pid", ErrServiceLaunchctl)
 		}
 		return int(pid), nil
-	case "not running":
+	case "not running", "spawn scheduled": // KeepAlive waiting out its restart throttle
 		if _, present := fields["pid"]; present {
 			return 0, fmt.Errorf("%w: stopped service carries pid", ErrServiceLaunchctl)
 		}

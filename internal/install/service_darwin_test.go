@@ -225,8 +225,10 @@ func TestLaunchctlPrintRequiresExactOwnedFields(t *testing.T) {
 	if pid, err := parseLaunchctlPrint(valid("running", "731"), service, plist, program); err != nil || pid != 731 {
 		t.Fatalf("running parse = %d, %v", pid, err)
 	}
-	if pid, err := parseLaunchctlPrint(valid("not running", ""), service, plist, program); err != nil || pid != 0 {
-		t.Fatalf("stopped parse = %d, %v", pid, err)
+	for _, stopped := range []string{"not running", "spawn scheduled"} {
+		if pid, err := parseLaunchctlPrint(valid(stopped, ""), service, plist, program); err != nil || pid != 0 {
+			t.Fatalf("%s parse = %d, %v", stopped, pid, err)
+		}
 	}
 	documented := []byte(service + " = {\n" +
 		"\tactive count = 1\n" +
@@ -299,10 +301,11 @@ func TestServicePlistIsOneFiniteAllowlist(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if sha256.Sum256(body) != digest || bytes.Count(body, []byte("<key>AbandonProcessGroup</key>")) != 1 || bytes.Count(body, []byte("<true/>")) != 2 {
+	if sha256.Sum256(body) != digest || bytes.Count(body, []byte("<key>AbandonProcessGroup</key>")) != 1 || bytes.Count(body, []byte("<true/>")) != 2 ||
+		!bytes.Contains(body, []byte("<key>KeepAlive</key>\n    <dict>\n        <key>SuccessfulExit</key>\n        <false/>\n    </dict>")) {
 		t.Fatalf("plist identity or required keys invalid: %s", body)
 	}
-	for _, forbidden := range []string{"KeepAlive", "EnvironmentVariables", "Sockets", "NetworkState", "StandardOutPath", "ProcessType", "--development-browser-address", "*"} {
+	for _, forbidden := range []string{"EnvironmentVariables", "Sockets", "NetworkState", "StandardOutPath", "ProcessType", "--development-browser-address", "*"} {
 		if bytes.Contains(body, []byte(forbidden)) {
 			t.Fatalf("plist contains forbidden %q", forbidden)
 		}

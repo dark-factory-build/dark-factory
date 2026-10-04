@@ -356,8 +356,9 @@ func serviceStartLockedAt(ctx context.Context, home, userHome string, config Ser
 		return status, nil
 	case ServiceInstalled:
 		if inspection.observation.present {
-			// RunAtLoad without KeepAlive can leave an exited job loaded. Remove
-			// that definition before reusing the one bootstrap path below.
+			// A job that exited cleanly, or is waiting out launchd's restart
+			// throttle, stays loaded without a pid. Remove that definition
+			// before reusing the one bootstrap path below.
 			if err := bootoutService(ctx, config, launchctl); err != nil {
 				return ServiceStatus{State: ServiceAmbiguous}, err
 			}
