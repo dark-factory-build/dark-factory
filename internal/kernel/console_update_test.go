@@ -3,6 +3,7 @@ package kernel
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -523,5 +524,64 @@ func TestUpdateTaskRetiresABlockedTaskButNeverEditsIt(t *testing.T) {
 				t.Fatalf("%s public snapshot after retiring a blocked task: %v", role, err)
 			}
 		}()
+	}
+}
+
+func TestExpireBlockedTasksCancelsOnlyStaleUnaskedBlockedTasks(t *testing.T) {
+	ctx := context.Background()
+	blockedFixture := func(t *testing.T) (*Store, Task, Run) {
+		blocked, _ := NewBlockedProposal("external prerequisite")
+		store, finalizing := finalizingReleasedRun(t, RoleWorker, VerificationNone, blocked)
+		terminal, err := finalizeTestRun(t, store, finalizing, 70)
+		if err != nil {
+			t.Fatal(err)
+		}
+		task, found, err := store.Task(ctx, terminal.TaskID)
+		if err != nil || !found || task.Status != TaskBlocked {
+			t.Fatalf("blocked task = %+v, found=%v, err=%v", task, found, err)
+		}
+		return store, task, terminal
+	}
+	day := BlockedExpiry.Milliseconds()
+
+	store, task, terminal := blockedFixture(t)
+	defer store.Close()
+	queued, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 250), ProjectID: task.ProjectID, AssignedAgentID: task.AssignedAgentID, IncarnationID: incarnationID(t, 251), Title: "queued"}, mustTime(t, 71))
+	if err != nil {
+		t.Fatal(err)
+	}
+	change, _, err := store.Change(ctx, *terminal.ChangeID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if expired, err := store.ExpireBlockedTasks(ctx, mustTime(t, task.UpdatedAt.Int64()+day-1)); err != nil || len(expired) != 0 {
+		t.Fatalf("expiry before 24h = %v, %v", expired, err)
+	}
+	if expired, err := store.ExpireBlockedTasks(ctx, mustTime(t, task.UpdatedAt.Int64()+day)); err != nil || len(expired) != 1 || expired[0] != task.ID {
+		t.Fatalf("expiry at 24h = %v, %v", expired, err)
+	}
+	if expired, err := store.ExpireBlockedTasks(ctx, mustTime(t, task.UpdatedAt.Int64()+10*day)); err != nil || len(expired) != 0 {
+		t.Fatalf("expiry of non-blocked tasks = %v, %v", expired, err)
+	}
+	if retired, _, err := store.Task(ctx, task.ID); err != nil || retired.Status != TaskCancelled {
+		t.Fatalf("expired task = %+v, %v", retired, err)
+	}
+	if after, _, err := store.Task(ctx, queued.ID); err != nil || after.Status != TaskQueued || after.Revision != queued.Revision {
+		t.Fatalf("queued task = %+v, %v", after, err)
+	}
+	if after, _, err := store.Change(ctx, change.ID); err != nil || !reflect.DeepEqual(after, change) {
+		t.Fatalf("Change after expiry = %+v, %v; want %+v", after, err, change)
+	}
+
+	asked, askedTask, askedRun := blockedFixture(t)
+	defer asked.Close()
+	if _, err := asked.writer.Exec(`INSERT INTO human_requests(id, run_id, idempotency_key, kind, reason_code, question_text, status, revision, created_at_ms, updated_at_ms) VALUES(?, ?, ?, 'question', 'provider_question', 'which?', 'open', 1, 70, 70)`, taskID(t, 252).Bytes(), askedRun.ID.Bytes(), taskID(t, 253).Bytes()); err != nil {
+		t.Fatal(err)
+	}
+	if expired, err := asked.ExpireBlockedTasks(ctx, mustTime(t, askedTask.UpdatedAt.Int64()+10*day)); err != nil || len(expired) != 0 {
+		t.Fatalf("expiry with an open human request = %v, %v", expired, err)
+	}
+	if after, _, err := asked.Task(ctx, askedTask.ID); err != nil || after.Status != TaskBlocked {
+		t.Fatalf("asked task = %+v, %v", after, err)
 	}
 }

@@ -3,7 +3,9 @@ package kernel
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
+	"time"
 )
 
 // AgentPatch is the console's agent-configuration edit. A nil member is not
@@ -370,4 +372,59 @@ func (store *Store) updateTask(ctx context.Context, digest *AttemptDigest, id Ta
 		return Task{}, err
 	}
 	return updated, nil
+}
+
+// A blocked task nobody acted on for BlockedExpiry is cancelled as expired.
+const (
+	BlockedExpiry       = 24 * time.Hour
+	BlockedExpiryReason = "expired: blocked 24h with no action"
+)
+
+// ExpireBlockedTasks retires, through the operator cancel path, every task
+// blocked unchanged for BlockedExpiry that has no open human request. Its
+// Change is left retained. A task changed since the read loses the revision
+// race and is reconsidered on a later tick.
+func (store *Store) ExpireBlockedTasks(ctx context.Context, at UnixMillis) ([]TaskID, error) {
+	var ids [][]byte
+	var revisions []int64
+	read, err := store.beginRead(ctx)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := read.connection.QueryContext(ctx, `SELECT id, revision FROM tasks t WHERE status = 'blocked' AND updated_at_ms <= ?
+ AND NOT EXISTS (SELECT 1 FROM human_requests h JOIN runs r ON r.id = h.run_id WHERE r.task_id = t.id AND h.status IN ('open', 'delivering', 'delivery_unknown'))`, at.Int64()-BlockedExpiry.Milliseconds())
+	for err == nil && rows.Next() {
+		var id []byte
+		var revision int64
+		if err = rows.Scan(&id, &revision); err == nil {
+			ids, revisions = append(ids, id), append(revisions, revision)
+		}
+	}
+	if rows != nil {
+		err = errors.Join(err, rows.Err(), rows.Close())
+	}
+	read.Close()
+	if err != nil {
+		return nil, err
+	}
+	var expired []TaskID
+	for i := range ids {
+		id, err := TaskIDFromBytes(ids[i])
+		if err != nil {
+			return expired, err
+		}
+		revision, err := NewRevision(revisions[i])
+		if err != nil {
+			return expired, err
+		}
+		_, err = store.UpdateTaskForOperator(ctx, id, revision, TaskPatch{Cancel: true}, at)
+		if errors.Is(err, ErrConflict) || errors.Is(err, ErrRevisionConflict) {
+			continue
+		}
+		if err != nil {
+			return expired, err
+		}
+		expired = append(expired, id)
+	}
+	return expired, nil
 }
