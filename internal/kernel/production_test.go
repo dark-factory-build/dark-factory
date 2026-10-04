@@ -71,6 +71,87 @@ func TestProductionObservationKeepsAReviewRecordedDuringTheRefresh(t *testing.T)
 	t.Fatal("pull request record missing")
 }
 
+func TestProductionReviewBlockNeedsItsNamedCorrection(t *testing.T) {
+	store, _, project, _ := newAdmissionStore(t, RoleOrchestrator, 2)
+	defer store.Close()
+	ctx := context.Background()
+	head := strings.Repeat("a", 40)
+	block := ProductionReview{Head: head, State: "block", Findings: "fix the exact finding", OperationID: "block-operation"}
+	if err := store.RecordProductionReview(ctx, project.ID, "example/factory", 7, block, mustTime(t, 10)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecordProductionReview(ctx, project.ID, "example/factory", 7, ProductionReview{Head: head, State: "allow", OperationID: "plain-allow"}, mustTime(t, 11)); err != nil {
+		t.Fatal(err)
+	}
+	page, err := store.Production(ctx, project.ID, 0, 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var pull ProductionPullRequest
+	for _, record := range page.Records {
+		if record.Kind == "pull_request" {
+			if err := json.Unmarshal(record.Document, &pull); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if pull.Review.State != "block" || pull.Review.Findings != block.Findings || pull.Review.OperationID != block.OperationID {
+		t.Fatalf("plain allow replaced block: %+v", pull.Review)
+	}
+	correction := ProductionReview{Head: head, State: "allow", Findings: "the finding was explicitly refuted", OperationID: "correction-operation", CorrectsReviewOperationID: block.OperationID}
+	if err := store.RecordProductionReview(ctx, project.ID, "example/factory", 7, correction, mustTime(t, 12)); err != nil {
+		t.Fatal(err)
+	}
+	page, err = store.Production(ctx, project.ID, 0, 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, record := range page.Records {
+		if record.Kind == "pull_request" {
+			if err := json.Unmarshal(record.Document, &pull); err != nil {
+				t.Fatal(err)
+			}
+			if pull.Review.State != "allow" || pull.Review.CorrectsReviewOperationID != block.OperationID {
+				t.Fatalf("valid correction did not replace block: %+v", pull.Review)
+			}
+			return
+		}
+	}
+	t.Fatal("pull request record missing")
+}
+
+func TestProductionReviewIdentitylessBlockSurvivesPlainAllow(t *testing.T) {
+	store, _, project, _ := newAdmissionStore(t, RoleOrchestrator, 2)
+	defer store.Close()
+	ctx := context.Background()
+	head := strings.Repeat("b", 40)
+	block := ProductionReview{Head: head, State: "block", Findings: "native finding"}
+	if err := store.RecordProductionReview(ctx, project.ID, "example/factory", 8, block, mustTime(t, 20)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecordProductionReview(ctx, project.ID, "example/factory", 8, ProductionReview{Head: head, State: "allow", OperationID: "plain-allow"}, mustTime(t, 21)); err != nil {
+		t.Fatal(err)
+	}
+	page, err := store.Production(ctx, project.ID, 0, 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, record := range page.Records {
+		if record.Kind != "pull_request" || record.ID != "8" {
+			continue
+		}
+		var pull ProductionPullRequest
+		if err := json.Unmarshal(record.Document, &pull); err != nil {
+			t.Fatal(err)
+		}
+		if pull.Review.State != "block" || pull.Review.Findings != block.Findings || pull.Review.OperationID != "" {
+			t.Fatalf("plain allow replaced identity-less block: %+v", pull.Review)
+		}
+		return
+	}
+	t.Fatal("pull request record missing")
+}
+
 func TestCorrectedProductionHeadStoresRecoverableReviewClaimAtomically(t *testing.T) {
 	store, path, project, _ := newAdmissionStore(t, RoleOrchestrator, 2)
 	ctx := context.Background()

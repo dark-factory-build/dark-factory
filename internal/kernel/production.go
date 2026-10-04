@@ -161,7 +161,7 @@ func migrateProductionRuntimeRecords(ctx context.Context, c *sql.Conn, project P
 }
 
 func validProductionPull(pr ProductionPullRequest) bool {
-	return pr.Number > 0 && pr.Number <= 1<<53-1 && validOutcomeText(pr.Title, 1024) && pr.Title != "" && productionURL(pr.URL) && productionSHA(pr.Head) && productionSHA(pr.Merge) && productionSHA(pr.Review.Head) && (pr.HeadRepository == "" || productionRepository.MatchString(pr.HeadRepository)) && validOutcomeText(pr.Branch, 256) && validOutcomeText(pr.Base, 256) && validOutcomeText(pr.MergeQueue, 64) && validOutcomeText(pr.MergedAt, 64) && validOutcomeText(pr.NextAction, 2048) && validOutcomeText(pr.Review.State, 64) && validOutcomeText(pr.Review.Findings, maxProductionReviewFindings) && productionURL(pr.Review.URL) && (pr.State == "open" || pr.State == "closed" || pr.State == "merged")
+	return pr.Number > 0 && pr.Number <= 1<<53-1 && validOutcomeText(pr.Title, 1024) && pr.Title != "" && productionURL(pr.URL) && productionSHA(pr.Head) && productionSHA(pr.Merge) && productionSHA(pr.Review.Head) && (pr.HeadRepository == "" || productionRepository.MatchString(pr.HeadRepository)) && validOutcomeText(pr.Branch, 256) && validOutcomeText(pr.Base, 256) && validOutcomeText(pr.MergeQueue, 64) && validOutcomeText(pr.MergedAt, 64) && validOutcomeText(pr.NextAction, 2048) && validOutcomeText(pr.Review.State, 64) && validOutcomeText(pr.Review.Findings, maxProductionReviewFindings) && validOutcomeText(pr.Review.OperationID, 128) && validOutcomeText(pr.Review.CorrectsReviewOperationID, 128) && productionURL(pr.Review.URL) && (pr.State == "open" || pr.State == "closed" || pr.State == "merged")
 }
 
 func productionRecordOnConnection(ctx context.Context, c *sql.Conn, project ProjectID, repo, kind, id, visual string, value any, at int64) error {
@@ -475,7 +475,7 @@ func storedProductionReview(ctx context.Context, c *sql.Conn, project ProjectID,
 }
 
 func (store *Store) RecordProductionReview(ctx context.Context, project ProjectID, repo string, number uint64, review ProductionReview, at UnixMillis) error {
-	if project.zero() || !productionRepository.MatchString(repo) || number == 0 || number > 1<<53-1 || !productionSHA(review.Head) || !validOutcomeText(review.State, 64) || !validOutcomeText(review.Findings, maxProductionReviewFindings) || !productionURL(review.URL) {
+	if project.zero() || !productionRepository.MatchString(repo) || number == 0 || number > 1<<53-1 || !productionSHA(review.Head) || !validOutcomeText(review.State, 64) || !validOutcomeText(review.Findings, maxProductionReviewFindings) || !validOutcomeText(review.OperationID, 128) || !validOutcomeText(review.CorrectsReviewOperationID, 128) || (review.CorrectsReviewOperationID != "" && review.State != "allow") || !productionURL(review.URL) {
 		return ErrInvalidValue
 	}
 	repo = strings.ToLower(repo)
@@ -500,6 +500,12 @@ func (store *Store) RecordProductionReview(ctx context.Context, project ProjectI
 	var pr ProductionPullRequest
 	if json.Unmarshal([]byte(body), &pr) != nil || pr.Number != number || !validProductionPull(pr) {
 		return tx.Rollback(ErrCorruptState)
+	}
+	correction := pr.Review.OperationID != "" && review.CorrectsReviewOperationID == pr.Review.OperationID
+	if review.State == "allow" && pr.Review.Head == review.Head && pr.Review.State == "block" && !correction {
+		// A plain or unrelated ALLOW is not a correction. An identity-less
+		// block cannot be implicitly corrected by an empty identity.
+		return tx.Commit(ctx)
 	}
 	pr.Review = review
 	if err := productionRecordOnConnection(ctx, tx.connection, project, repo, "pull_request", identity, visual, pr, at.Int64()); err != nil {
