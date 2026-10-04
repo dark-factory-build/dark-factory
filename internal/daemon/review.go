@@ -46,15 +46,7 @@ func (daemon *Daemon) RecoverReviewOperations(ctx context.Context) (int, error) 
 	if daemon == nil || daemon.store == nil || daemon.now == nil {
 		return 0, fmt.Errorf("%w: invalid review recovery", kernel.ErrInvalidValue)
 	}
-	pendingBefore, err := daemon.store.PendingReviewOperations(ctx)
-	if err != nil {
-		return 0, err
-	}
 	at, err := kernel.NewUnixMillis(daemon.now().UnixMilli())
-	if err != nil {
-		return 0, err
-	}
-	inFlight, err := daemon.store.InFlightReviewOperations(ctx)
 	if err != nil {
 		return 0, err
 	}
@@ -62,138 +54,195 @@ func (daemon *Daemon) RecoverReviewOperations(ctx context.Context) (int, error) 
 	if err != nil {
 		return 0, err
 	}
-	for _, operation := range inFlight {
-		var op review.Operation
-		if err := json.Unmarshal(operation.Document, &op); err != nil || op.ID == "" || op.ID != operation.ID {
-			return 0, fmt.Errorf("%w: review operation", kernel.ErrCorruptState)
-		}
-		if op.State == "gating" {
-			// A gate takes up to half an hour; startup does not wait for it.
-			daemon.launchReview(operation.Project, op)
-			recovered++
-			continue
-		}
-		if _, err := daemon.resumeReview(ctx, operation.Project, op); err == nil {
-			recovered++
-		}
+	advanced, err := daemon.advanceReviewOperations(ctx, true)
+	return recovered + advanced, err
+}
+
+// reviewStuckAfter separates an interrupted verdict or enqueue write from one
+// a review goroutine is still making: a Maintainer call times out in 30s.
+const reviewStuckAfter = 2 * time.Minute
+
+// tickMergePipeline runs the merge stage beside the scheduler loop, one pass
+// at a time and at most once per productionRefreshInterval.
+func (daemon *Daemon) tickMergePipeline(ctx context.Context) {
+	now := daemon.now()
+	if now.Before(daemon.pipelineAt) || !daemon.pipelineBusy.CompareAndSwap(false, true) {
+		return
 	}
-	pending, err := daemon.store.PendingReviewOperations(ctx)
+	daemon.pipelineAt = now.Add(productionRefreshInterval)
+	go func() {
+		defer daemon.pipelineBusy.Store(false)
+		daemon.advanceMergePipeline(ctx)
+	}()
+}
+
+// advanceMergePipeline refreshes each publishing project's pull requests, so
+// a corrected head is gated and reviewed, then advances every unfinished
+// review operation.
+func (daemon *Daemon) advanceMergePipeline(ctx context.Context) {
+	projects, _ := daemon.store.PublishingProjects(ctx)
+	for _, project := range projects {
+		_ = daemon.refreshProduction(ctx, project)
+	}
+	_, _ = daemon.advanceReviewOperations(ctx, false)
+}
+
+// advanceReviewOperations moves each unfinished review operation one step. It
+// resumes verdict and enqueue writes whose receipts may be lost, observes
+// enqueued heads, and retries task routing until it lands. Startup and the
+// poll tick share it; only startup relaunches an interrupted gate, and the
+// tick leaves a write younger than reviewStuckAfter to the goroutine making it.
+func (daemon *Daemon) advanceReviewOperations(ctx context.Context, startup bool) (int, error) {
+	operations, err := daemon.store.InFlightReviewOperations(ctx)
 	if err != nil {
 		return 0, err
 	}
-	prior := make(map[string]struct{}, len(pendingBefore))
-	for _, operation := range pendingBefore {
-		prior[operation.Project.String()+"/"+operation.ID] = struct{}{}
-	}
-	for _, operation := range pending {
+	advanced := 0
+	for _, operation := range operations {
 		var op review.Operation
 		if err := json.Unmarshal(operation.Document, &op); err != nil || op.ID == "" || op.ID != operation.ID {
-			return 0, fmt.Errorf("%w: review operation", kernel.ErrCorruptState)
+			return advanced, fmt.Errorf("%w: review operation", kernel.ErrCorruptState)
 		}
-		if err := daemon.finishReviewRouting(ctx, operation.Project, operation.Repository, op); err != nil {
-			return 0, err
+		stuck := startup || daemon.now().Sub(op.UpdatedAt) > reviewStuckAfter
+		switch {
+		case op.RoutePending:
+			err = daemon.finishReviewRouting(ctx, operation.Project, operation.Repository, op)
+		case op.State == "gating" && startup:
+			// A gate takes up to half an hour; startup does not wait for it.
+			daemon.launchReview(operation.Project, op)
+		case op.State == "enqueued":
+			var coordinator review.Coordinator
+			if coordinator, err = daemon.reviewCoordinator(ctx, operation.Project, operation.Repository); err == nil {
+				if op, err = coordinator.ObserveMerge(ctx, op); err == nil && op.State == "enqueued" {
+					continue
+				}
+			}
+			if err == nil {
+				err = daemon.finishReviewRouting(ctx, operation.Project, operation.Repository, op)
+			}
+		case (op.State == "submitting" || op.State == "enqueuing") && stuck:
+			_, err = daemon.resumeReview(ctx, operation.Project, op)
+		default:
+			continue
 		}
-		if _, existed := prior[operation.Project.String()+"/"+operation.ID]; existed {
-			// RecoverRunningReviewOperations counted newly promoted claims.
-			// Existing completed claims are counted as startup work here.
-			recovered++
+		if err == nil {
+			advanced++
 		}
 	}
-	return recovered, nil
+	return advanced, nil
 }
 
-func (daemon *Daemon) startReview(ctx context.Context, project kernel.ProjectID, request api.ReviewRequest, failed review.Operation) (string, error) {
+func (daemon *Daemon) reviewCoordinator(ctx context.Context, project kernel.ProjectID, repository string) (review.Coordinator, error) {
 	targets, _, unbound, err := daemon.projectMaintainerRepositories(ctx, project)
 	if err != nil {
-		return "", err
+		return review.Coordinator{}, err
 	}
-	repository := strings.ToLower(request.Repository)
+	repository = strings.ToLower(repository)
 	repositoryID := targets[repository]
 	if repositoryID == 0 {
 		if unbound[repository] {
-			return "", kernel.ErrConflict
+			return review.Coordinator{}, kernel.ErrConflict
 		}
-		return "", kernel.ErrUnauthorized
+		return review.Coordinator{}, kernel.ErrUnauthorized
 	}
 	if daemon.github == nil && daemon.reviewBackend == nil {
-		return "", errors.New("review: Maintainer unavailable")
+		return review.Coordinator{}, errors.New("review: Maintainer unavailable")
 	}
 	var backend review.Backend = &daemonReviewBackend{daemon: daemon, project: project, repository: repository, repositoryID: repositoryID}
 	if daemon.reviewBackend != nil {
 		backend = daemon.reviewBackend(repository, repositoryID)
 	}
-	coordinator := review.Coordinator{Store: durableReviewStore{store: daemon.store, project: project, repository: repository, now: daemon.now}, Backend: backend, Now: daemon.now}
+	return review.Coordinator{Store: durableReviewStore{store: daemon.store, project: project, repository: repository, now: daemon.now}, Backend: backend, Now: daemon.now}, nil
+}
+
+func (daemon *Daemon) startReview(ctx context.Context, project kernel.ProjectID, request api.ReviewRequest, failed review.Operation) (string, error) {
+	repository := strings.ToLower(request.Repository)
+	coordinator, err := daemon.reviewCoordinator(ctx, project, repository)
+	if err != nil {
+		return "", err
+	}
 	var op review.Operation
 	if failed.ID != "" {
 		op, err = coordinator.Retry(ctx, failed)
 	} else {
 		op, err = coordinator.Start(ctx, review.Request{Repository: repository, PullNumber: request.PullNumber, Head: request.Head, Base: request.Base, BaseRef: request.BaseRef, Body: request.Body, Provider: request.Provider})
 	}
-	if err != nil {
-		return op.ID, err
-	}
-	if err := daemon.finishReviewRouting(ctx, project, repository, op); err != nil {
-		return op.ID, err
-	}
-	return op.ID, nil
+	return op.ID, errors.Join(err, daemon.finishReviewRouting(ctx, project, repository, op))
 }
 
 func (daemon *Daemon) resumeReview(ctx context.Context, project kernel.ProjectID, op review.Operation) (string, error) {
-	targets, _, unbound, err := daemon.projectMaintainerRepositories(ctx, project)
-	if err != nil {
-		return op.ID, err
-	}
 	repository := strings.ToLower(op.Request.Repository)
-	repositoryID := targets[repository]
-	if repositoryID == 0 {
-		if unbound[repository] {
-			return op.ID, kernel.ErrConflict
-		}
-		return op.ID, kernel.ErrUnauthorized
-	}
-	if daemon.github == nil && daemon.reviewBackend == nil {
-		return op.ID, errors.New("review: Maintainer unavailable")
-	}
-	var backend review.Backend = &daemonReviewBackend{daemon: daemon, project: project, repository: repository, repositoryID: repositoryID}
-	if daemon.reviewBackend != nil {
-		backend = daemon.reviewBackend(repository, repositoryID)
-	}
-	coordinator := review.Coordinator{Store: durableReviewStore{store: daemon.store, project: project, repository: repository, now: daemon.now}, Backend: backend, Now: daemon.now}
-	op, err = coordinator.Resume(ctx, op)
+	coordinator, err := daemon.reviewCoordinator(ctx, project, repository)
 	if err != nil {
 		return op.ID, err
 	}
-	if err := daemon.finishReviewRouting(ctx, project, repository, op); err != nil {
-		return op.ID, err
-	}
-	return op.ID, nil
+	op, err = coordinator.Resume(ctx, op)
+	return op.ID, errors.Join(err, daemon.finishReviewRouting(ctx, project, repository, op))
 }
 
-// finishReviewRouting completes the second half of a REQUEST_CHANGES result.
-// SendBackPublishedReview is idempotent by operation/head marker, so replaying
-// this helper after a daemon stop cannot resubmit the provider review or route
-// task feedback twice.
+// finishReviewRouting completes the second half of a REQUEST_CHANGES verdict,
+// a gate failure or a merge-queue ejection: the note goes to the task that
+// owns the published Change. It stays pending, retried each tick, until that
+// task's feedback carries the operation marker at a new work revision; the
+// marker makes a replay idempotent. A head that cannot be routed, more than
+// two repair rounds, or an enqueue the App refused go to the overseer.
 func (daemon *Daemon) finishReviewRouting(ctx context.Context, project kernel.ProjectID, repository string, op review.Operation) error {
-	if op.Verdict != "request_changes" {
+	at, err := daemon.timestamp()
+	if err != nil {
+		return err
+	}
+	if op.Submitted && (op.State == "enqueued" || op.State == "completed") {
+		// factoryd's submitted verdict is the production review of record,
+		// shown best-effort: routing never waits on the projection.
+		verdict := kernel.ProductionReview{Head: op.Request.Head, State: "allow", Findings: strings.ToValidUTF8(op.Detail[:min(len(op.Detail), 16000)], ""), OperationID: op.ID}
+		if op.Verdict == "request_changes" {
+			verdict.State = "block"
+		}
+		_ = daemon.store.RecordProductionReview(ctx, project, repository, op.Request.PullNumber, verdict, at)
+	}
+	if op.State == "failed" && op.EnqueueID != "" {
+		return daemon.escalatePull(ctx, project, repository, op, "the Maintainer App did not enqueue it: "+op.Detail)
+	}
+	if !op.RoutePending {
 		return nil
 	}
 	note := op.Detail
-	if len(note) > kernel.MaxSendBackNoteBytes-160 {
-		note = note[:kernel.MaxSendBackNoteBytes-160]
+	if op.Submitted && op.Verdict == "request_changes" {
+		note = "This is the review of record for exact head " + op.Request.Head + ". No other verdict on this head supersedes its findings: correct each one.\n\n" + note
 	}
-	at, err := kernel.NewUnixMillis(daemon.now().UnixMilli())
+	note = strings.ToValidUTF8(note[:min(len(note), kernel.MaxSendBackNoteBytes-160)], "")
+	task, err := daemon.store.SendBackPublishedReview(ctx, project, repository, op.Request.PullNumber, op.ID, op.Request.Head, note, at)
+	switch {
+	case errors.Is(err, kernel.ErrSuperseded):
+		err = nil
+	case errors.Is(err, kernel.ErrNotFound), errors.Is(err, kernel.ErrInvalidValue):
+		err = daemon.escalatePull(ctx, project, repository, op, "its send-back reached no task:\n\n"+note)
+	case err != nil:
+		return err // a running task refuses it until it settles
+	case !strings.Contains(kernel.TaskFeedback(task), "review-operation: "+op.ID+"\n") || task.WorkRevision.Int64() < 2:
+		return errors.New("review: send-back did not move the task")
+	case task.WorkRevision.Int64() > 3:
+		err = daemon.escalatePull(ctx, project, repository, op, "it is past two repair rounds; the latest went back to its task:\n\n"+note)
+	}
 	if err != nil {
 		return err
 	}
-	if _, err := daemon.store.SendBackPublishedReview(ctx, project, repository, op.Request.PullNumber, op.ID, op.Request.Head, note, at); err != nil && !errors.Is(err, kernel.ErrNotFound) {
+	op.RoutePending, op.UpdatedAt = false, daemon.now()
+	return durableReviewStore{store: daemon.store, project: project, repository: repository, now: daemon.now}.Update(ctx, op)
+}
+
+// escalatePull hands a pull request the pipeline cannot advance to the
+// overseer that published it, once per pull request.
+func (daemon *Daemon) escalatePull(ctx context.Context, project kernel.ProjectID, repository string, op review.Operation, why string) error {
+	at, err := daemon.timestamp()
+	if err != nil {
 		return err
 	}
-	if op.RoutePending {
-		op.RoutePending = false
-		op.UpdatedAt = daemon.now()
-		return (durableReviewStore{store: daemon.store, project: project, repository: repository, now: daemon.now}).Update(ctx, op)
+	body := fmt.Sprintf("factoryd cannot advance %s#%d at exact head %s: %s", repository, op.Request.PullNumber, op.Request.Head, why)
+	if err := daemon.store.EscalatePublishedPull(ctx, project, repository, op.Request.PullNumber, body, at); !errors.Is(err, kernel.ErrNotFound) {
+		return err
 	}
-	return nil
+	return nil // no overseer published it
 }
 
 // launchReview keeps publication acknowledgement independent from provider
@@ -205,34 +254,6 @@ func (daemon *Daemon) launchReview(project kernel.ProjectID, op review.Operation
 		ctx = context.Background()
 	}
 	go func() { _, _ = daemon.resumeReview(ctx, project, op) }()
-}
-
-func (daemon *Daemon) launchPublishedReview(project kernel.ProjectID, repository string, pull uint64, head string) {
-	ctx := daemon.cleanupCtx
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	go func() {
-		if daemon.reviewPublished != nil {
-			_, _ = daemon.reviewPublished(ctx, project, api.ReviewRequest{Repository: repository, PullNumber: pull, Head: head, Provider: "codex"})
-			return
-		}
-		_, _ = daemon.reviewPublishedPR(ctx, project, repository, pull, head)
-	}()
-}
-
-// reviewPublishedPR observes the PR after publication, rather than trusting
-// the branch/base names supplied to create_pull_request. This makes corrected
-// publications naturally create a new exact-head operation as well.
-func (daemon *Daemon) reviewPublishedPR(ctx context.Context, project kernel.ProjectID, repository string, pull uint64, publishedHead string) (string, error) {
-	reviewRequest, err := daemon.publishedReviewRequest(ctx, project, repository, pull, publishedHead)
-	if err != nil {
-		return "", err
-	}
-	if daemon.reviewPublished != nil {
-		return daemon.reviewPublished(ctx, project, reviewRequest)
-	}
-	return daemon.reviewPR(ctx, project, reviewRequest)
 }
 
 func (daemon *Daemon) preparePublishedReview(ctx context.Context, project kernel.ProjectID, repository string, pull uint64, publishedHead string) (review.Operation, error) {
@@ -403,14 +424,32 @@ func (b *daemonReviewBackend) Review(ctx context.Context, checkout string, reque
 		if err != nil {
 			return review.Verdict{}, err
 		}
-		text := string(output)
+		// A provider may echo its prompt, which quotes the author's body.
+		text := strings.Replace(string(output), prompt, "", 1)
 		event, err := terminalReviewVerdict(text)
 		if err != nil {
 			return review.Verdict{}, err
 		}
+		if event == "ALLOW" && !namesChangedPath(ctx, checkout, request.Base, text) {
+			// #369, minimal: an ALLOW that names nothing the change touches
+			// is a rubber stamp, so it counts as no verdict.
+			return review.Verdict{}, errors.New("review: the ALLOW names no changed path")
+		}
 		return review.Verdict{Event: event, Body: text}, nil
 	}
 	return review.Verdict{}, errProviderLimited
+}
+
+func namesChangedPath(ctx context.Context, checkout, base, text string) bool {
+	command := exec.CommandContext(ctx, change.TrustedGitExecutable, "-C", checkout, "diff", "--name-only", "-z", base+"...HEAD")
+	command.Env = reviewEnvironment(filepath.Dir(checkout))
+	output, err := command.Output()
+	for _, path := range strings.Split(string(output), "\x00") {
+		if err == nil && path != "" && strings.Contains(text, path) {
+			return true
+		}
+	}
+	return false
 }
 
 // claudeLogin is the launcher's rule for one Claude login directory: a login
@@ -543,8 +582,47 @@ func (b *daemonReviewBackend) Observe(ctx context.Context, operationID string) (
 }
 
 func (b *daemonReviewBackend) Enqueue(ctx context.Context, operation review.Operation) error {
+	return b.call(ctx, "enqueue_pull_request", map[string]any{"repository": b.repository, "pull_number": operation.Request.PullNumber, "head_sha": operation.Request.Head, "base": operation.Request.BaseRef, "operation_id": operation.EnqueueID, "reviewed_body_digest": reviewedBodyDigest(operation)})
+}
+
+func reviewedBodyDigest(operation review.Operation) string {
 	digest := sha256.Sum256([]byte(operation.Request.Body))
-	return b.call(ctx, "enqueue_pull_request", map[string]any{"repository": b.repository, "pull_number": operation.Request.PullNumber, "head_sha": operation.Request.Head, "base": operation.Request.BaseRef, "operation_id": operation.EnqueueID, "reviewed_body_digest": "sha256:" + hex.EncodeToString(digest[:])})
+	return "sha256:" + hex.EncodeToString(digest[:])
+}
+
+func (b *daemonReviewBackend) ObserveMerge(ctx context.Context, operation review.Operation) (review.Merge, error) {
+	response, err := b.callResponse(ctx, "observe_pull_request_merge", map[string]any{"repository": b.repository, "enqueue_operation_id": operation.EnqueueID, "pull_number": operation.Request.PullNumber, "head_sha": operation.Request.Head, "base": operation.Request.BaseRef, "reviewed_body_digest": reviewedBodyDigest(operation)})
+	if err != nil {
+		return review.Merge{}, err
+	}
+	var merge struct {
+		Head  string `json:"head_sha"`
+		State string `json:"state"`
+		Pull  string `json:"pull_state"`
+	}
+	if json.Unmarshal(response, &merge) != nil || merge.Head != operation.Request.Head {
+		return review.Merge{}, errors.New("review: Maintainer returned an invalid merge observation")
+	}
+	result := review.Merge{State: merge.State, Open: merge.Pull == "open"}
+	if merge.State != "NOT_QUEUED" || !result.Open {
+		return result, nil
+	}
+	response, err = b.callResponse(ctx, "observe_pull_request_checks", map[string]any{"repository": b.repository, "pull_number": operation.Request.PullNumber, "head_sha": operation.Request.Head})
+	var checks struct {
+		Checks []struct {
+			Name       string  `json:"name"`
+			Conclusion *string `json:"conclusion"`
+		} `json:"checks"`
+	}
+	if err != nil || json.Unmarshal(response, &checks) != nil {
+		return review.Merge{}, errors.Join(err, errors.New("review: Maintainer returned invalid checks"))
+	}
+	for _, check := range checks.Checks {
+		if check.Conclusion != nil && *check.Conclusion != "success" && *check.Conclusion != "neutral" && *check.Conclusion != "skipped" {
+			result.Failing = append(result.Failing, check.Name)
+		}
+	}
+	return result, nil
 }
 func (b *daemonReviewBackend) call(ctx context.Context, name string, arguments map[string]any) error {
 	_, err := b.callResponse(ctx, name, arguments)

@@ -91,6 +91,17 @@ type Backend interface {
 	Review(context.Context, string, Request) (Verdict, error)
 	Submit(context.Context, Operation, Verdict) error
 	Enqueue(context.Context, Operation) error
+	// ObserveMerge reads the merge queue's view of an enqueued exact head.
+	ObserveMerge(context.Context, Operation) (Merge, error)
+}
+
+// Merge is one merge-queue observation: State is the Maintainer's
+// ACTIVE_QUEUE, MERGED_AFTER_ENQUEUE_ATTEMPT or NOT_QUEUED, and Failing names
+// the head's failing checks when an open pull request is no longer queued.
+type Merge struct {
+	State   string
+	Open    bool
+	Failing []string
 }
 
 type Coordinator struct {
@@ -293,6 +304,35 @@ func (c Coordinator) finishSubmitted(ctx context.Context, op Operation) (Operati
 		return Operation{}, err
 	}
 	return op, nil
+}
+
+// ObserveMerge advances an enqueued operation from the merge queue: merged,
+// closed, or ejected while the pull request is still open, which goes back to
+// the author with the head's failing checks, routed like a REQUEST_CHANGES.
+func (c Coordinator) ObserveMerge(ctx context.Context, op Operation) (Operation, error) {
+	if op.State != "enqueued" {
+		return op, errors.New("review: operation is not enqueued")
+	}
+	merge, err := c.Backend.ObserveMerge(ctx, op)
+	switch {
+	case err != nil:
+		return op, err
+	case merge.State == "MERGED_AFTER_ENQUEUE_ATTEMPT":
+		op.State = "merged"
+	case merge.State != "NOT_QUEUED":
+		return op, nil
+	case !merge.Open:
+		op.State = "closed"
+	default:
+		failing := "none reported"
+		if len(merge.Failing) > 0 {
+			failing = strings.Join(merge.Failing, ", ")
+		}
+		op.State, op.RoutePending = "ejected", true
+		op.Detail = fmt.Sprintf("The merge queue removed exact head %s without merging it. Failing checks: %s.", op.Request.Head, failing)
+	}
+	op.UpdatedAt = c.Now()
+	return op, c.Store.Update(ctx, op)
 }
 
 func (c Coordinator) reconcileSubmitting(ctx context.Context, op Operation, cause error) (Operation, error) {

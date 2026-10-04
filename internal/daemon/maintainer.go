@@ -60,6 +60,11 @@ func (daemon *Daemon) attemptMaintainer(ctx context.Context, call api.Call) api.
 		if err != nil {
 			return failure("invalid")
 		}
+		// factoryd is the one verdict authority: it gates, reviews and
+		// enqueues every published head itself.
+		if params.Name == "submit_pull_request_review" || params.Name == "enqueue_pull_request" {
+			return failure("denied")
+		}
 		request.Params = encoded
 		var repository, source string
 		if json.Unmarshal(params.Arguments["repository"], &repository) != nil || repository == "" {
@@ -221,42 +226,6 @@ func (daemon *Daemon) recordMaintainerPublication(ctx context.Context, project k
 	if err != nil {
 		return err
 	}
-	if params.Name == "submit_pull_request_review" {
-		var repo, head, event, body, operationID, correctsOperationID string
-		var number uint64
-		for name, target := range map[string]any{"repository": &repo, "pull_number": &number, "head_sha": &head, "event": &event, "body": &body, "operation_id": &operationID, "corrects_review_operation_id": &correctsOperationID} {
-			if params.Arguments[name] == nil {
-				continue
-			}
-			if err := json.Unmarshal(params.Arguments[name], target); err != nil {
-				return err
-			}
-		}
-		var reply struct {
-			Result struct {
-				IsError bool `json:"isError"`
-				Review  struct {
-					Head    string `json:"head_sha"`
-					Verdict string `json:"verdict"`
-				} `json:"structuredContent"`
-			} `json:"result"`
-		}
-		if json.Unmarshal(response, &reply) != nil || reply.Result.IsError {
-			return nil
-		}
-		state := "block"
-		if event == "ALLOW" {
-			state = "allow"
-		}
-		if reply.Result.Review.Head != head || reply.Result.Review.Verdict != state {
-			return nil
-		}
-		at, err := daemon.timestamp()
-		if err != nil {
-			return err
-		}
-		return daemon.store.RecordProductionReview(ctx, project, repo, number, kernel.ProductionReview{Head: head, State: state, Findings: body, OperationID: operationID, CorrectsReviewOperationID: correctsOperationID}, at)
-	}
 	if params.Name != "create_pull_request" {
 		return nil
 	}
@@ -284,14 +253,8 @@ func (daemon *Daemon) recordMaintainerPublication(ctx context.Context, project k
 	if err != nil {
 		return err
 	}
-	reviewRequest := api.ReviewRequest{Repository: strings.ToLower(repo), PullNumber: reply.Result.Pull.Number, Head: strings.ToLower(reply.Result.Pull.Head), Base: strings.ToLower(reply.Result.Pull.Base), BaseRef: base, Body: body, Provider: "codex"}
-	if daemon.reviewPublished != nil {
-		if err := daemon.store.RecordPublication(ctx, project, task, repo, kernel.ProductionPullRequest{Number: reply.Result.Pull.Number, Title: title, URL: reply.Result.Pull.URL, Head: reply.Result.Pull.Head, Branch: branch, Base: base, State: "open", Review: kernel.ProductionReview{Head: reply.Result.Pull.Head, State: "unknown"}}, at); err != nil {
-			return err
-		}
-		_, err = daemon.reviewPublished(ctx, project, reviewRequest)
-	} else if daemon.github != nil || daemon.reviewBackend != nil {
-		prepared, prepareErr := review.Prepare(review.Request{Repository: reviewRequest.Repository, PullNumber: reviewRequest.PullNumber, Head: reviewRequest.Head, Base: reviewRequest.Base, BaseRef: reviewRequest.BaseRef, Body: reviewRequest.Body, Provider: reviewRequest.Provider}, daemon.now)
+	if daemon.github != nil || daemon.reviewBackend != nil {
+		prepared, prepareErr := review.Prepare(review.Request{Repository: strings.ToLower(repo), PullNumber: reply.Result.Pull.Number, Head: strings.ToLower(reply.Result.Pull.Head), Base: strings.ToLower(reply.Result.Pull.Base), BaseRef: base, Body: body, Provider: "codex"}, daemon.now)
 		if prepareErr != nil {
 			return prepareErr
 		}

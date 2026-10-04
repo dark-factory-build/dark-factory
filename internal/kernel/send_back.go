@@ -2,6 +2,7 @@ package kernel
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -10,8 +11,11 @@ import (
 )
 
 // SendBackPublishedReview routes one exact REQUEST_CHANGES result to the
-// worker that owns the published pull request. The operation/head marker in
-// the retained feedback makes response loss and daemon restart idempotent.
+// worker that owns the published pull request: the publication row that
+// carries the worker's Change wins over the overseer's that published it. The
+// operation/head marker in the retained feedback makes response loss and
+// daemon restart idempotent. A pull request that has moved past head reports
+// ErrSuperseded.
 func (store *Store) SendBackPublishedReview(ctx context.Context, project ProjectID, repository string, pull uint64, operationID, head, note string, at UnixMillis) (Task, error) {
 	if project.zero() || !productionRepository.MatchString(repository) || pull == 0 || !validOutcomeText(operationID, 128) || !productionSHA(head) || byteLen(note) < 1 || byteLen(note) > MaxSendBackNoteBytes-160 {
 		return Task{}, fmt.Errorf("%w: invalid published review send-back", ErrInvalidValue)
@@ -24,15 +28,18 @@ func (store *Store) SendBackPublishedReview(ctx context.Context, project Project
 	defer tx.Close()
 	repository = strings.ToLower(repository)
 	var taskBytes, document string
-	if err := tx.connection.QueryRowContext(ctx, `SELECT p.task_id, r.document FROM publication_tasks p JOIN production_records r ON r.project_id = p.project_id AND r.repository = p.repository AND r.kind = 'pull_request' AND r.identity = CAST(p.pull_number AS TEXT) WHERE p.project_id = ? AND p.repository = ? AND p.pull_number = ? ORDER BY p.created_at_ms DESC LIMIT 1`, project.Bytes(), repository, pull).Scan(&taskBytes, &document); err != nil {
+	if err := tx.connection.QueryRowContext(ctx, `SELECT p.task_id, r.document FROM publication_tasks p JOIN production_records r ON r.project_id = p.project_id AND r.repository = p.repository AND r.kind = 'pull_request' AND r.identity = CAST(p.pull_number AS TEXT) WHERE p.project_id = ? AND p.repository = ? AND p.pull_number = ? ORDER BY p.change_id IS NOT NULL DESC, p.created_at_ms DESC LIMIT 1`, project.Bytes(), repository, pull).Scan(&taskBytes, &document); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return Task{}, tx.Rollback(ErrNotFound)
 		}
 		return Task{}, tx.Rollback(err)
 	}
 	var published ProductionPullRequest
-	if json.Unmarshal([]byte(document), &published) != nil || !strings.EqualFold(published.Head, head) {
+	if json.Unmarshal([]byte(document), &published) != nil {
 		return Task{}, tx.Rollback(ErrConflict)
+	}
+	if !strings.EqualFold(published.Head, head) {
+		return Task{}, tx.Rollback(ErrSuperseded)
 	}
 	taskID, err := TaskIDFromBytes([]byte(taskBytes))
 	if err != nil {
@@ -56,6 +63,44 @@ func (store *Store) SendBackPublishedReview(ctx context.Context, project Project
 		return Task{}, err
 	}
 	return updated, nil
+}
+
+// EscalatePublishedPull queues one task for the overseer that published the
+// pull request. Its identity derives from the pull request, so a later
+// escalation of the same pull request is a replay, never a second task.
+func (store *Store) EscalatePublishedPull(ctx context.Context, project ProjectID, repository string, pull uint64, body string, at UnixMillis) error {
+	repository = strings.ToLower(repository)
+	tx, err := store.beginRead(ctx)
+	if err != nil {
+		return err
+	}
+	var overseer []byte
+	err = tx.connection.QueryRowContext(ctx, `SELECT t.assigned_agent_id FROM publication_tasks p JOIN tasks t ON t.id = p.task_id JOIN agents a ON a.id = t.assigned_agent_id WHERE p.project_id = ? AND p.repository = ? AND p.pull_number = ? AND a.role = 'orchestrator' ORDER BY p.created_at_ms DESC LIMIT 1`, project.Bytes(), repository, pull).Scan(&overseer)
+	tx.Close()
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+	agent, err := AgentIDFromBytes(overseer)
+	if err != nil {
+		return err
+	}
+	digest := sha256.Sum256([]byte(fmt.Sprintf("escalation\x00%s\x00%s\x00%d", project, repository, pull)))
+	id, err := TaskIDFromBytes(digest[:IDBytes])
+	if err != nil {
+		return err
+	}
+	incarnation, err := IncarnationIDFromBytes(digest[IDBytes : 2*IDBytes])
+	if err != nil {
+		return err
+	}
+	_, err = store.EnqueueTask(ctx, NewTask{ID: id, ProjectID: project, AssignedAgentID: agent, IncarnationID: incarnation, Title: fmt.Sprintf("Escalated: %s#%d", repository, pull), Body: body}, at)
+	if errors.Is(err, ErrConflict) {
+		return nil // escalated already; the overseer has taken it up
+	}
+	return err
 }
 
 // MaxSendBackNoteBytes bounds the note a send-back leaves at the end of a

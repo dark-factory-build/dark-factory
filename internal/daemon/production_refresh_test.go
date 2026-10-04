@@ -4,13 +4,11 @@ package daemon
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/dark-factory-build/dark-factory/internal/api"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 )
 
@@ -77,23 +75,6 @@ func TestCorrectionHeadSchedulesFreshReview(t *testing.T) {
 		t.Fatalf("corrections=%+v", corrections)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	requests := make(chan api.ReviewRequest, 1)
-	project := mustProjectID(t, testID(254))
-	daemon := &Daemon{cleanupCtx: ctx, reviewPublished: func(_ context.Context, _ kernel.ProjectID, request api.ReviewRequest) (string, error) {
-		requests <- request
-		return "review-op", nil
-	}}
-	daemon.launchPublishedReview(project, "team/repo", corrections[0].Number, corrections[0].Head)
-	select {
-	case request := <-requests:
-		if request.Repository != "team/repo" || request.PullNumber != 7 || request.Head != newHead {
-			t.Fatalf("correction review request=%+v", request)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("correction review was not scheduled")
-	}
 }
 
 func intPointer(value int) *int { return &value }

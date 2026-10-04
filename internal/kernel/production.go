@@ -188,13 +188,39 @@ type ProductionReviewOperation struct {
 	Document any
 }
 
-// PendingReviewOperation is a completed REQUEST_CHANGES operation whose task
-// feedback has not yet been durably acknowledged by the daemon.
+// PendingReviewOperation is one unfinished daemon-owned review operation.
 type PendingReviewOperation struct {
 	Project    ProjectID
 	Repository string
 	ID         string
 	Document   []byte
+}
+
+// PublishingProjects lists the projects that have published a pull request.
+func (store *Store) PublishingProjects(ctx context.Context) ([]ProjectID, error) {
+	tx, err := store.beginRead(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Close()
+	rows, err := tx.connection.QueryContext(ctx, `SELECT DISTINCT project_id FROM publication_tasks`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var projects []ProjectID
+	for rows.Next() {
+		var raw []byte
+		if err := rows.Scan(&raw); err != nil {
+			return nil, err
+		}
+		project, err := ProjectIDFromBytes(raw)
+		if err != nil {
+			return nil, err
+		}
+		projects = append(projects, project)
+	}
+	return projects, rows.Err()
 }
 
 func validProductionObservation(project ProjectID, observation ProductionObservation, at UnixMillis) bool {
@@ -596,49 +622,10 @@ func (store *Store) ReviewOperation(ctx context.Context, project ProjectID, oper
 	return []byte(document), true, nil
 }
 
-// PendingReviewOperations returns completed REQUEST_CHANGES operations that
-// still need their exactly-once task routing. The operation document remains
-// the source of the exact pull-request head and idempotency marker.
-func (store *Store) PendingReviewOperations(ctx context.Context) ([]PendingReviewOperation, error) {
-	tx, err := store.beginRead(ctx)
-	if err != nil {
-		return nil, err
-	}
-	defer tx.Close()
-	rows, err := tx.connection.QueryContext(ctx, `SELECT project_id, repository, identity, document FROM production_records
-        WHERE kind = 'reviewer' AND json_extract(document, '$.state') = 'completed'
-          AND json_extract(document, '$.verdict') = 'request_changes'
-          AND json_extract(document, '$.route_pending') = 1
-          AND json_type(document, '$.request') = 'object'`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var pending []PendingReviewOperation
-	for rows.Next() {
-		var projectBytes []byte
-		var repository, operationID, document string
-		if err := rows.Scan(&projectBytes, &repository, &operationID, &document); err != nil {
-			return nil, err
-		}
-		project, err := ProjectIDFromBytes(projectBytes)
-		if err != nil {
-			return nil, err
-		}
-		if !json.Valid([]byte(document)) {
-			return nil, fmt.Errorf("%w: review operation", ErrCorruptState)
-		}
-		pending = append(pending, PendingReviewOperation{Project: project, Repository: repository, ID: operationID, Document: []byte(document)})
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return pending, nil
-}
-
-// InFlightReviewOperations returns gates to rerun and review writes whose
-// external receipts may have been lost. The coordinator reconciles these
-// operation IDs before any new write is attempted.
+// InFlightReviewOperations returns every unfinished review operation: gates to
+// rerun, review writes whose external receipts may have been lost, enqueued
+// heads awaiting the merge queue, and results whose task routing has not
+// landed.
 func (store *Store) InFlightReviewOperations(ctx context.Context) ([]PendingReviewOperation, error) {
 	tx, err := store.beginRead(ctx)
 	if err != nil {
@@ -646,7 +633,7 @@ func (store *Store) InFlightReviewOperations(ctx context.Context) ([]PendingRevi
 	}
 	defer tx.Close()
 	rows, err := tx.connection.QueryContext(ctx, `SELECT project_id, repository, identity, document FROM production_records
-        WHERE kind = 'reviewer' AND json_extract(document, '$.state') IN ('gating', 'submitting', 'enqueuing')
+        WHERE kind = 'reviewer' AND (json_extract(document, '$.state') IN ('gating', 'submitting', 'enqueuing', 'enqueued') OR json_extract(document, '$.route_pending') = 1)
           AND json_type(document, '$.request') = 'object'`)
 	if err != nil {
 		return nil, err

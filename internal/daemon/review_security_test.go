@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -57,11 +58,11 @@ func reviewerFixture(t *testing.T, reviewers ...string) (*daemonReviewBackend, m
 	fixture, project := reviewPublicFixture(t)
 	ctx := context.Background()
 	bin := t.TempDir()
-	script := "#!/bin/sh\n[ -e \"$CODEX_HOME/limited\" ] && { echo \"■ You've hit your usage limit. Try again later.\"; exit 1; }\n[ -e \"$CODEX_HOME/quoted\" ] && { echo \"the task says: You've hit your usage limit\"; exit 1; }\n[ -e \"$CODEX_HOME/hang\" ] && { sleep 600 & echo $$ > \"$CODEX_HOME/pid\"; wait; }\necho \"VERDICT: ALLOW\"\n"
+	script := "#!/bin/sh\n[ -e \"$CODEX_HOME/limited\" ] && { echo \"■ You've hit your usage limit. Try again later.\"; exit 1; }\n[ -e \"$CODEX_HOME/quoted\" ] && { echo \"the task says: You've hit your usage limit\"; exit 1; }\n[ -e \"$CODEX_HOME/hang\" ] && { sleep 600 & echo $$ > \"$CODEX_HOME/pid\"; wait; }\n[ -e \"$CODEX_HOME/stamp\" ] && { for prompt; do :; done; echo \"$prompt\"; echo \"VERDICT: ALLOW\"; exit 0; }\necho \"read changed.go\"\necho \"VERDICT: ALLOW\"\n"
 	if err := os.WriteFile(filepath.Join(bin, "codex"), []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(bin, "claude"), []byte("#!/bin/sh\n[ -e \"$HOME/.claude/limited\" ] && { echo \"■ You've hit your usage limit\"; exit 1; }\necho \"home=$HOME config=${CLAUDE_CONFIG_DIR-unset}\"\necho \"VERDICT: ALLOW\"\n"), 0o700); err != nil {
+	if err := os.WriteFile(filepath.Join(bin, "claude"), []byte("#!/bin/sh\n[ -e \"$HOME/.claude/limited\" ] && { echo \"■ You've hit your usage limit\"; exit 1; }\necho \"home=$HOME config=${CLAUDE_CONFIG_DIR-unset} read changed.go\"\necho \"VERDICT: ALLOW\"\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", bin+":/usr/bin:/bin")
@@ -118,6 +119,49 @@ func reviewerRequest() review.Request {
 	return review.Request{Repository: "team/repo", PullNumber: 12, Head: strings.Repeat("e", 40), Base: strings.Repeat("f", 40), BaseRef: "main", Body: "fixture body", Provider: "codex"}
 }
 
+// reviewCheckout is a checkout whose change against its base adds changed.go,
+// with the request for it.
+func reviewCheckout(t *testing.T) (string, review.Request) {
+	t.Helper()
+	dir := t.TempDir()
+	git := func(args ...string) string {
+		output, err := exec.Command("git", append([]string{"-C", dir, "-c", "user.name=review", "-c", "user.email=review@example.invalid"}, args...)...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v %s", args, err, output)
+		}
+		return strings.TrimSpace(string(output))
+	}
+	git("init", "-q")
+	git("commit", "-q", "--allow-empty", "-m", "base")
+	request := reviewerRequest()
+	request.Base = git("rev-parse", "HEAD")
+	if err := os.WriteFile(filepath.Join(dir, "changed.go"), []byte("package changed\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	git("add", "changed.go")
+	git("commit", "-q", "-m", "head")
+	return dir, request
+}
+
+func TestAnAllowThatNamesNoChangedPathIsNoVerdict(t *testing.T) {
+	backend, homes := reviewerFixture(t, "stamp")
+	if err := os.WriteFile(filepath.Join(homes["stamp"], "stamp"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	checkout, request := reviewCheckout(t)
+	// The author's body names the changed path; the stamp only echoes it.
+	request.Body = "this touches changed.go"
+	if verdict, err := backend.Review(context.Background(), checkout, request); err == nil || !strings.Contains(err.Error(), "names no changed path") {
+		t.Fatalf("rubber stamp verdict=%+v err=%v, want no verdict", verdict, err)
+	}
+	if err := os.Remove(filepath.Join(homes["stamp"], "stamp")); err != nil {
+		t.Fatal(err)
+	}
+	if verdict, err := backend.Review(context.Background(), checkout, request); err != nil || verdict.Event != "ALLOW" {
+		t.Fatalf("verdict=%+v err=%v, want an ALLOW that names changed.go", verdict, err)
+	}
+}
+
 func TestReviewerAccountIsNeverThePullRequestAuthors(t *testing.T) {
 	backend, homes := reviewerFixture(t, "reviewer")
 	got, err := backend.daemon.store.ReviewerAccountHomes(context.Background(), backend.project, kernel.ProviderCodex, "team/repo", 12)
@@ -143,7 +187,8 @@ func TestReviewMovesPastALimitedAccountAndFailsRetryablyWhenAllAreLimited(t *tes
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	if verdict, err := backend.Review(ctx, t.TempDir(), reviewerRequest()); err != nil || verdict.Event != "ALLOW" {
+	checkout, request := reviewCheckout(t)
+	if verdict, err := backend.Review(ctx, checkout, request); err != nil || verdict.Event != "ALLOW" {
 		t.Fatalf("verdict=%+v err=%v, want ALLOW from the second account", verdict, err)
 	}
 	if err := os.WriteFile(filepath.Join(homes["b-available"], "limited"), nil, 0o600); err != nil {
@@ -187,9 +232,9 @@ func TestReviewDeadlineKillsTheReviewerProcessGroup(t *testing.T) {
 
 func TestDefaultDirectoryClaudeLoginReviewsThroughItsHome(t *testing.T) {
 	backend, homes := reviewerFixture(t)
-	request := reviewerRequest()
+	checkout, request := reviewCheckout(t)
 	request.Provider = "claude"
-	verdict, err := backend.Review(context.Background(), t.TempDir(), request)
+	verdict, err := backend.Review(context.Background(), checkout, request)
 	want := "home=" + filepath.Dir(homes["claude"]) + " config=unset"
 	if err != nil || !strings.Contains(verdict.Body, want) {
 		t.Fatalf("verdict=%+v err=%v, want %q", verdict, err, want)

@@ -17,6 +17,8 @@ var (
 	ErrSnapshotTooLarge = errors.New("dashboard snapshot exceeds the entity bound")
 	ErrRecoveryBounds   = errors.New("operator recovery exceeds its bounded read")
 	ErrStoreClosed      = errors.New("kernel store is closed")
+	// ErrSuperseded: a newer pull-request head replaced the one named.
+	ErrSuperseded = errors.New("superseded by a newer head")
 )
 
 // OutcomeRefusal is returned after an exact attempt bearer was found, but

@@ -83,6 +83,41 @@ func TestMaintainerProjectScopeRequiresPinnedTargetAndNeverCrossesProject(t *tes
 	}
 }
 
+// factoryd is the one verdict authority, so an attempt may observe through the
+// Maintainer but never submit a verdict or enqueue.
+func TestAttemptsCannotSubmitAVerdictOrEnqueue(t *testing.T) {
+	fixture := newDispatchFixture(t)
+	ctx := context.Background()
+	project := mustProjectID(t, testID(190))
+	if _, err := fixture.store.CreateProject(ctx, kernel.NewProject{ID: project, Name: "project", Root: "/project/190", SourceIdentity: &kernel.RepositorySourceIdentity{RootDevice: 1, RootInode: 190, GitDevice: 1, GitInode: 191, OriginDigest: [32]byte{190}, PublicationRepository: "team/repo"}}, mustKernelTime(t, 999)); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.store.BindRepositoryGitHubID(ctx, kernel.RepositoryID(project), 7); err != nil {
+		t.Fatal(err)
+	}
+	active := prepareActiveAttemptInProject(t, fixture, 190, project.String(), "orchestrator")
+	session, found, err := fixture.store.TerminalSessionForRun(ctx, active.run.ID)
+	if err != nil || !found {
+		t.Fatalf("session: %v %v", found, err)
+	}
+	owner := newLiveAttempt(fixture.daemon, active.run.ID, session.ID, nil)
+	owner.agentID = active.run.AgentID
+	owner.attemptDigest = active.run.CredentialDigest
+	if err := fixture.daemon.registerLiveAttempt(owner); err != nil {
+		t.Fatal(err)
+	}
+	defer fixture.daemon.unregisterLiveAttempt(active.run.ID, owner)
+	// No customer host is installed, so an allowed call stops there (unavailable).
+	for name, want := range map[string]string{"submit_pull_request_review": "denied", "enqueue_pull_request": "denied", "observe_operation": "unavailable"} {
+		done := fixture.serve(t)
+		result, err := active.client.Maintainer(ctx, api.MaintainerInput{Request: json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"` + name + `","arguments":{"repository":"team/repo"}}}`)})
+		waitDispatch(t, done)
+		if err != nil || result.State != want {
+			t.Fatalf("%s: %+v %v, want %s", name, result, err, want)
+		}
+	}
+}
+
 func TestConnectRefusesLegacyOverseerBeforeCredentialActivation(t *testing.T) {
 	fixture := newDispatchFixture(t)
 	prepareActiveAttemptInProject(t, fixture, 170, testID(170), "orchestrator")

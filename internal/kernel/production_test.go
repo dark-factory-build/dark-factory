@@ -243,7 +243,7 @@ func TestRequestChangesReviewRecoveryPreservesRoutePending(t *testing.T) {
 	if recovered["state"] != "completed" || recovered["route_pending"] != true {
 		t.Fatalf("recovered request-changes operation=%v", recovered)
 	}
-	pending, err := store.PendingReviewOperations(ctx)
+	pending, err := store.InFlightReviewOperations(ctx)
 	if err != nil || len(pending) != 1 || pending[0].ID != operationID {
 		t.Fatalf("pending request-changes operations=%+v err=%v", pending, err)
 	}
@@ -285,7 +285,7 @@ func TestRequestChangesBeforeSubmitDoesNotBecomeRoutePending(t *testing.T) {
 	if recovered["state"] != "failed" || recovered["route_pending"] == true {
 		t.Fatalf("pre-submit operation became routable=%v", recovered)
 	}
-	if pending, err := store.PendingReviewOperations(ctx); err != nil || len(pending) != 0 {
+	if pending, err := store.InFlightReviewOperations(ctx); err != nil || len(pending) != 0 {
 		t.Fatalf("pre-submit pending operations=%+v err=%v", pending, err)
 	}
 }

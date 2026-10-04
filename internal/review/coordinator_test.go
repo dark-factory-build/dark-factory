@@ -40,6 +40,7 @@ type fakeBackend struct {
 	submitErr           error
 	event               string
 	submitted, enqueued bool
+	merge               Merge
 }
 
 func (b *fakeBackend) CloneReadOnly(context.Context, Request) (string, func(), error) {
@@ -73,6 +74,9 @@ func (b *fakeBackend) Submit(context.Context, Operation, Verdict) error {
 	return b.submitErr
 }
 func (b *fakeBackend) Enqueue(context.Context, Operation) error { b.enqueued = true; return nil }
+func (b *fakeBackend) ObserveMerge(context.Context, Operation) (Merge, error) {
+	return b.merge, nil
+}
 
 type observedBackend struct {
 	fakeBackend
@@ -267,5 +271,34 @@ func TestGateReproducingFailureAlsoAtBaseProceeds(t *testing.T) {
 	op, err := Coordinator{Store: &memoryStore{}, Backend: backend, Now: time.Now}.Start(context.Background(), reviewRequest())
 	if err != nil || op.State != "enqueued" || backend.reviews != 1 || len(op.Gates) != 3 {
 		t.Fatalf("operation=%+v err=%v", op, err)
+	}
+}
+
+func TestObserveMergeMarksMergedAndEjectsOnceWithFailingChecks(t *testing.T) {
+	enqueued := Operation{ID: "op", EnqueueID: "enqueue", Request: reviewRequest(), State: "enqueued", Verdict: "allow", Submitted: true}
+	for _, test := range []struct {
+		merge Merge
+		state string
+	}{
+		{merge: Merge{State: "ACTIVE_QUEUE", Open: true}, state: "enqueued"},
+		{merge: Merge{State: "MERGED_AFTER_ENQUEUE_ATTEMPT"}, state: "merged"},
+		{merge: Merge{State: "NOT_QUEUED"}, state: "closed"},
+		{merge: Merge{State: "NOT_QUEUED", Open: true, Failing: []string{"ci / go", "ci / ui"}}, state: "ejected"},
+	} {
+		store := &memoryStore{}
+		c := Coordinator{Store: store, Backend: &fakeBackend{merge: test.merge}, Now: func() time.Time { return time.Unix(20, 0) }}
+		op, err := c.ObserveMerge(context.Background(), enqueued)
+		if err != nil || op.State != test.state || op.RoutePending != (test.state == "ejected") || len(store.values) != map[bool]int{true: 0, false: 1}[test.state == "enqueued"] {
+			t.Fatalf("%+v: operation=%+v err=%v records=%d", test.merge, op, err, len(store.values))
+		}
+		if test.state == "ejected" {
+			if !strings.Contains(op.Detail, "ci / go, ci / ui") || !strings.Contains(op.Detail, enqueued.Request.Head) {
+				t.Fatalf("ejection note = %q", op.Detail)
+			}
+			// The ejected head is no longer enqueued, so a later tick cannot eject it twice.
+			if _, err := c.ObserveMerge(context.Background(), op); err == nil {
+				t.Fatal("an ejected operation was observed again")
+			}
+		}
 	}
 }
