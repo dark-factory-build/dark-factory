@@ -14,3 +14,7 @@ func InspectRepositorySource(context.Context, string, string, string, Repository
 func SelectRegisteredGit(context.Context, string, string, string, RepositorySourceIdentity) (Selection, error) {
 	return Selection{}, &UnsupportedError{Platform: runtime.GOOS}
 }
+
+func ReviewCheckout(context.Context, string, string, RepositorySourceIdentity, string, uint64, string, string, string) error {
+	return &UnsupportedError{Platform: runtime.GOOS}
+}

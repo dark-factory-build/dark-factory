@@ -160,3 +160,12 @@ func (w *cappedWriter) Write(p []byte) (int, error) {
 	}
 	return len(p), nil
 }
+
+func runReviewGit(ctx context.Context, root string, args ...string) error {
+	command := exec.CommandContext(ctx, "/usr/bin/git", args...)
+	command.Env = reviewEnvironment(root)
+	if output, err := command.CombinedOutput(); err != nil {
+		return fmt.Errorf("%s: %s", err, strings.TrimSpace(string(output)))
+	}
+	return nil
+}

@@ -178,3 +178,61 @@ func externalFDCount(t testing.TB) int {
 	}
 	return len(entries)
 }
+
+func TestReviewCheckoutIsExactHeadAndLeavesRegisteredRepositoryUnchanged(t *testing.T) {
+	root := externalSecureTempDir(t)
+	git := externalGitExecutable(t)
+	origin, work, repository := filepath.Join(root, "origin.git"), filepath.Join(root, "work"), filepath.Join(root, "repository")
+	runExternalGit(t, root, git, root, "init", "--quiet", "--bare", origin)
+	runExternalGit(t, root, git, root, "init", "--quiet", "-b", "main", work)
+	commit := func(message string) string {
+		runExternalGit(t, root, git, work, "-c", "user.name=t", "-c", "user.email=t@invalid", "commit", "--quiet", "--allow-empty", "-m", message)
+		return runExternalGit(t, root, git, work, "rev-parse", "HEAD")
+	}
+	fork := commit("fork")
+	head := commit("head")
+	runExternalGit(t, root, git, work, "push", "--quiet", origin, "HEAD:refs/pull/7/head")
+	// The base branch moved on after the pull request forked from it.
+	runExternalGit(t, root, git, work, "reset", "--quiet", "--hard", fork)
+	base := commit("base")
+	runExternalGit(t, root, git, work, "push", "--quiet", origin, "main")
+	// The registered checkout has neither commit: both must be fetched.
+	runExternalGit(t, root, git, root, "init", "--quiet", repository)
+	runExternalGit(t, root, git, repository, "remote", "add", "origin", origin)
+	info, err := os.Lstat(repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stat := info.Sys().(*syscall.Stat_t)
+	identity, err := change.NewRepositoryIdentity(uint64(stat.Dev), stat.Ino)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, err := change.InspectRepositorySource(context.Background(), git, repository, "", identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	refsBefore := runExternalGit(t, root, git, repository, "for-each-ref")
+
+	checkout := filepath.Join(root, "review")
+	if err := change.ReviewCheckout(context.Background(), git, repository, source, checkout, 7, head, base, "main"); err != nil {
+		t.Fatal(err)
+	}
+	if got := runExternalGit(t, root, git, checkout, "rev-parse", "HEAD"); got != head {
+		t.Fatalf("review HEAD = %s, want %s", got, head)
+	}
+	// A full branch ref names the same base as its short name.
+	if err := change.ReviewCheckout(context.Background(), git, repository, source, filepath.Join(root, "full-ref"), 7, head, base, "refs/heads/main"); err != nil {
+		t.Fatalf("full base ref: %v", err)
+	}
+	moved := filepath.Join(root, "moved")
+	if err := change.ReviewCheckout(context.Background(), git, repository, source, moved, 7, base, base, "main"); err == nil {
+		t.Fatal("review checkout accepted a head the pull request does not have")
+	}
+	if after := runExternalGit(t, root, git, repository, "for-each-ref"); after != refsBefore {
+		t.Fatalf("registered refs changed:\n%s\n%s", refsBefore, after)
+	}
+	if _, err := os.Stat(filepath.Join(repository, ".git", "objects", "info", "alternates")); !os.IsNotExist(err) {
+		t.Fatalf("registered repository gained alternates: %v", err)
+	}
+}
