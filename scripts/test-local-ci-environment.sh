@@ -3,7 +3,9 @@ set -eu
 
 repository_root=$(CDPATH='' cd -- "$(dirname "$0")/.." && pwd)
 boundary=$repository_root/scripts/local-ci-environment.sh
-temporary=$(mktemp -d "${TMPDIR:-/tmp}/dark-factory-local-ci-environment.XXXXXX")
+# Under /private/tmp, not $TMPDIR: the default macOS TMPDIR resolves under
+# /private/var, which the shared Go module cache check refuses as an account root.
+temporary=$(mktemp -d /private/tmp/dark-factory-local-ci-environment.XXXXXX)
 temporary_root=$(CDPATH= cd -- "$temporary" && pwd -P)
 trap 'rm -rf "$temporary"' EXIT HUP INT TERM
 unset DF_CI_CACHE_ROOT
