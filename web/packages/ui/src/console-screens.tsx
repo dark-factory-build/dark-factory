@@ -111,7 +111,6 @@ export function FactoryFloor({
   onProjectContent?: ProjectContentCall;
 }) {
   const [selectedEntity, setSelectedEntity] = useState<string>();
-  useEffect(() => { if (requestedEntity) setSelectedEntity(requestedEntity.id); }, [requestedEntity]);
   const projectsKey = JSON.stringify([...state?.projects.values() ?? []].map(({ id, name }) => [id, name]).sort(([left], [right]) => left!.localeCompare(right!)));
   const prepared = useMemo(() => prepareFloor(state?.projects, topologies), [projectsKey, topologies]);
   const selected = useMemo(() => selectFloor(prepared, floorAppearance.detail ?? "auto"), [prepared, floorAppearance.detail]);
@@ -144,6 +143,7 @@ export function FactoryFloor({
       tasks={scene.tasks}
       peerQuestions={peerQuestions}
       omittedLocations={scene.omittedLocations}
+      requestedEntity={requestedEntity}
       onSelectEntity={setSelectedEntity}
       onSelectTask={onSelectTask}
       onOpenTasks={onOpenTasks}
