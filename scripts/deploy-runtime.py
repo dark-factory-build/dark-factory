@@ -16,6 +16,9 @@ import time
 # reinstall-service.sh refuses a run it cannot adopt with this status, and the
 # release controller reads the same number back as "no effect; retryable".
 REFUSED = 75
+INSTALL_OUTPUT_LIMIT = 64 << 10
+AUTHORIZATION = re.compile(r"(?i)(authorization\W{1,4})[^\r\n]+")
+SECRET = re.compile(r"(?i)(bearer|api[_-]?key|password|token|secret)(\W{1,4})\S+|\b(gh[pousr]_|github_pat_)\w+")
 
 
 def state(home):
@@ -50,15 +53,39 @@ def service_reachable(home):
     return True
 
 
-def failure_receipt(sha, reachable, dispatch_enabled):
+def bounded_install_output(error, private_paths=()):
+    stdout = getattr(error, 'stdout', '') or ''
+    stderr = getattr(error, 'stderr', '') or ''
+    if isinstance(stdout, bytes):
+        stdout = stdout.decode('utf-8', 'replace')
+    if isinstance(stderr, bytes):
+        stderr = stderr.decode('utf-8', 'replace')
+    if not stdout and not stderr:
+        return None
+    text = 'stdout:\n' + str(stdout) + '\nstderr:\n' + str(stderr)
+    for path in (Path.home(), *private_paths):
+        text = text.replace(str(path), '~')
+    text = SECRET.sub(lambda match: (match.group(1) or '') + (match.group(2) or '') + '***',
+                      AUTHORIZATION.sub(r'\1***', text))
+    text = ''.join(character if character in '\n\t' or ord(character) >= 0x20 else ' ' for character in text)
+    if len(text) <= INSTALL_OUTPUT_LIMIT:
+        return text
+    half = (INSTALL_OUTPUT_LIMIT - len('\n...[truncated bounded install output]...\n')) // 2
+    return text[:half] + '\n...[truncated bounded install output]...\n' + text[-half:]
+
+
+def failure_receipt(sha, reachable, dispatch_enabled, install_output=None):
     directory = Path.home() / '.dark-factory-backups'
     directory.mkdir(mode=0o700, exist_ok=True)
     target = directory / ('deploy-' + sha + '.json')
     fd, temporary = tempfile.mkstemp(prefix='.deploy-', dir=directory)
     try:
         with os.fdopen(fd, 'w', encoding='utf-8') as stream:
-            json.dump({'sha': sha, 'healthy': False, 'dispatch_enabled': dispatch_enabled,
-                       'service_reachable': reachable, 'error': 'deployment_failed'}, stream, sort_keys=True)
+            value = {'sha': sha, 'healthy': False, 'dispatch_enabled': dispatch_enabled,
+                     'service_reachable': reachable, 'error': 'deployment_failed'}
+            if install_output is not None:
+                value['install_output'] = install_output
+            json.dump(value, stream, sort_keys=True)
             stream.write('\n')
         os.replace(temporary, target)
         os.chmod(target, 0o600)
@@ -92,7 +119,7 @@ def deploy(sha, home=None):
         subprocess.run([str(control), 'dispatch', 'on', '--revision', str(revision)], env=env, check=True, timeout=15,
                        stdout=subprocess.DEVNULL)
 
-    def recover(exc, owned_revision):
+    def recover(exc, owned_revision, stage):
         """Report what the factory was left with, undoing only a proven pause.
 
         The daemon advances its control revision on every accepted command, so
@@ -123,7 +150,11 @@ def deploy(sha, home=None):
         except (OSError, sqlite3.Error):
             dispatching = None
         reachable = service_reachable(home)
-        failure_receipt(sha, reachable, dispatching)
+        output = bounded_install_output(exc, (home,)) if stage == 'install' else None
+        if output is None:
+            failure_receipt(sha, reachable, dispatching)
+        else:
+            failure_receipt(sha, reachable, dispatching, output)
         if dispatching is None:
             note = 'state is unreadable; run factoryctl status before deciding whether to resume'
         elif dispatching:
@@ -147,6 +178,7 @@ def deploy(sha, home=None):
     # the installation. Ownership is earned, not assumed -- only an accepted
     # `dispatch off` gives this deployment a revision of its own to undo.
     owned_revision = None
+    stage = None
     try:
         subprocess.run([str(control), 'dispatch', 'off', '--revision', str(original_revision)], env=env, check=True, timeout=15, stdout=subprocess.DEVNULL)
         owned_revision = original_revision + 1
@@ -156,13 +188,15 @@ def deploy(sha, home=None):
             if active == 0:
                 break
             time.sleep(1)
+        stage = 'install'
         subprocess.run(['/bin/sh', str(scripts / 'reinstall-service.sh'), '--home', str(home), '--install-prepared', sha], env=env, check=True, timeout=600,
                        capture_output=True, text=True)
+        stage = 'verify'
         observed = json.loads(subprocess.run([sys.executable, str(scripts / 'verify-live-runtime.py'), '--home', str(home), sha], env=env, capture_output=True, text=True, check=True, timeout=60).stdout)
         if observed.get('sha') != sha or observed.get('healthy') is not True:
             raise ValueError('runtime verification failed')
     except (OSError, ValueError, json.JSONDecodeError, sqlite3.Error, subprocess.SubprocessError) as exc:
-        raise recover(exc, owned_revision) from exc
+        raise recover(exc, owned_revision, stage) from exc
     current_enabled, revision, active = state(home)
     # A subsequent explicit operator dispatch change wins over our restoration.
     if enabled and not current_enabled and active == 0 and revision == owned_revision:

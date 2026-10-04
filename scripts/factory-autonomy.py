@@ -528,7 +528,15 @@ def managed_service(home, factoryctl, action, migration=False):
     target = domain + '/' + label
     plist_path = managed_plist_root() / (label + '.plist')
     receipt_path = state / 'service.json'
-    with managed_lock(state / 'service.lock'):
+    lock_path = state / 'service.lock'
+    # A killed controller can leave an empty directory where the lock file
+    # should be. With no receipt it owns no launchd service, so remove only
+    # that exact stale shape and let status/uninstall prove absence normally.
+    if not receipt_path.exists() and lock_path.is_dir():
+        if any(lock_path.iterdir()):
+            raise ValueError('managed intake lock directory is not empty')
+        lock_path.rmdir()
+    with managed_lock(lock_path):
         receipt = managed_read(receipt_path, maximum=16384)
         present = plist_path.exists() or plist_path.is_symlink()
         if receipt is not None:
