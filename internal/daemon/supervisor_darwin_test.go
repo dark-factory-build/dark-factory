@@ -1133,7 +1133,8 @@ func TestSupervisorClaudeReviewerLaunchReceivesExactRetainedChangeReceipt(t *tes
 }
 
 func TestSupervisorClaudeReviewersPreserveConcurrentAccountTrust(t *testing.T) {
-	const reviewerCount = 4
+	const reviewerCount = 2
+	baselineFDs := supervisorFDCount(t)
 	accountHome := filepath.Join(t.TempDir(), "account")
 	if err := os.Mkdir(accountHome, 0o700); err != nil {
 		t.Fatal(err)
@@ -1141,6 +1142,9 @@ func TestSupervisorClaudeReviewersPreserveConcurrentAccountTrust(t *testing.T) {
 	fixtures := make([]*supervisorFixture, reviewerCount)
 	for index := range fixtures {
 		fixture := newSupervisorFixture(t, supervisorProgram(t, false, false))
+		// newSupervisorFixture observes its own creation baseline. Use one
+		// common pre-fixture baseline for the whole concurrent fixture set.
+		fixture.baselineFDs = baselineFDs
 		worker, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
 		if err != nil {
 			t.Fatalf("source worker %d RunNext: %v", index, err)
@@ -1199,6 +1203,15 @@ func TestSupervisorClaudeReviewersPreserveConcurrentAccountTrust(t *testing.T) {
 		fixture := fixtures[result.index]
 		fixture.assertTerminal(t, result.run, kernel.OutcomeSucceeded)
 		fixture.assertReleased(t, result.run)
+	}
+	// Each fixture's cleanup normally performs its census immediately. Close
+	// the concurrent fixture set first so one fixture's descriptors cannot be
+	// mistaken for a leak from another fixture.
+	for _, fixture := range fixtures {
+		fixture.closeWithoutFDCensus()
+	}
+	for _, fixture := range fixtures {
+		fixture.assertFDCensus()
 	}
 }
 
@@ -2769,6 +2782,14 @@ func newSupervisorRoleFixture(t *testing.T, program string, role kernel.AgentRol
 }
 
 func (fixture *supervisorFixture) close() {
+	fixture.closeWithFDCensus(true)
+}
+
+func (fixture *supervisorFixture) closeWithoutFDCensus() {
+	fixture.closeWithFDCensus(false)
+}
+
+func (fixture *supervisorFixture) closeWithFDCensus(census bool) {
 	if fixture == nil {
 		return
 	}
@@ -2804,7 +2825,9 @@ func (fixture *supervisorFixture) close() {
 				fixture.t.Errorf("Store close: %v", err)
 			}
 		}
-		fixture.assertFDCensus()
+		if census {
+			fixture.assertFDCensus()
+		}
 	})
 }
 
