@@ -83,10 +83,10 @@ func ResolveInstallation(kind kernel.Provider, toolPath string) (Installation, e
 	return Installation{provider: kind, executable: executable}, nil
 }
 
-// walkToolPath resolves the first tool of that name on the fixed tool path:
+// WalkToolPath resolves the first tool of that name on the fixed tool path:
 // the search is ordered, and an existing candidate that cannot be resolved
 // fails closed rather than falling through to another.
-func walkToolPath(toolPath, tool string) (string, error) {
+func WalkToolPath(toolPath, tool string) (string, error) {
 	for _, directory := range filepath.SplitList(toolPath) {
 		candidate := filepath.Join(directory, tool)
 		if _, err := os.Lstat(candidate); os.IsNotExist(err) {
@@ -105,7 +105,7 @@ func walkToolPath(toolPath, tool string) (string, error) {
 
 // resolveTool commits the first tool of that name on the fixed tool path.
 func resolveTool(toolPath, tool string) (runner.ExecutableCommitment, error) {
-	resolved, err := walkToolPath(toolPath, tool)
+	resolved, err := WalkToolPath(toolPath, tool)
 	if err != nil {
 		return runner.ExecutableCommitment{}, err
 	}
@@ -124,7 +124,7 @@ var errBridgeUnfit = errors.New("provider: MCP bridge is not a regular owner-onl
 
 // resolveBridge finds an operator-installed MCP bridge on the fixed tool path.
 func resolveBridge(toolPath string, tool string) (string, error) {
-	resolved, err := walkToolPath(toolPath, tool)
+	resolved, err := WalkToolPath(toolPath, tool)
 	if err != nil {
 		return "", err
 	}

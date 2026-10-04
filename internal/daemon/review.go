@@ -410,6 +410,11 @@ func (b *daemonReviewBackend) Review(ctx context.Context, checkout string, reque
 	if len(homes) == 0 {
 		return review.Verdict{}, errors.New("review: no non-author worker account for the provider")
 	}
+	// The provider comes from the workers' tool path: launchd's PATH lacks it.
+	tool, err := provider.WalkToolPath(b.daemon.gateToolPath, request.Provider)
+	if err != nil {
+		return review.Verdict{}, fmt.Errorf("review: %s not on the tool path: %w", request.Provider, err)
+	}
 	ctx, cancel := context.WithTimeout(ctx, reviewDeadline)
 	defer cancel()
 	prompt := reviewPrompt(checkout, request.Base, request.Body)
@@ -417,10 +422,10 @@ func (b *daemonReviewBackend) Review(ctx context.Context, checkout string, reque
 		var command *exec.Cmd
 		environment := reviewEnvironment(filepath.Dir(checkout))
 		if kind == kernel.ProviderClaudeCode {
-			command = exec.CommandContext(ctx, "claude", "-p", prompt, "--permission-mode", "plan", "--safe-mode", "--restricted", "--setting-sources", "", "--strict-mcp-config", "--tools", "Read,Grep,Glob,Bash(git -C "+checkout+":*)", "--allowedTools", "Read,Grep,Glob,Bash(git -C "+checkout+":*)")
+			command = exec.CommandContext(ctx, tool, "-p", prompt, "--permission-mode", "plan", "--safe-mode", "--restricted", "--setting-sources", "", "--strict-mcp-config", "--tools", "Read,Grep,Glob,Bash(git -C "+checkout+":*)", "--allowedTools", "Read,Grep,Glob,Bash(git -C "+checkout+":*)")
 			environment = append(environment, claudeLogin(home))
 		} else {
-			command = exec.CommandContext(ctx, "codex", "exec", "--disable", "computer_use", "--disable", "browser_use", "--disable", "plugins", "--ephemeral", "--ignore-user-config", "--strict-config", "-c", "approval_policy={ granular={sandbox_approval=false,rules=false,mcp_elicitations=false,request_permissions=false,skill_approval=false}}", "--sandbox", "read-only", "--ignore-rules", "--skip-git-repo-check", prompt)
+			command = exec.CommandContext(ctx, tool, "exec", "--disable", "computer_use", "--disable", "browser_use", "--disable", "plugins", "--ephemeral", "--ignore-user-config", "--strict-config", "-c", "approval_policy={ granular={sandbox_approval=false,rules=false,mcp_elicitations=false,request_permissions=false,skill_approval=false}}", "--sandbox", "read-only", "--ignore-rules", "--skip-git-repo-check", prompt)
 			environment = append(environment, "CODEX_HOME="+home)
 		}
 		// The CLI finds its keychain login under $USER (#1107).

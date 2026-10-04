@@ -68,7 +68,9 @@ func reviewerFixture(t *testing.T, reviewers ...string) (*daemonReviewBackend, m
 	if err := os.WriteFile(filepath.Join(bin, "claude"), []byte("#!/bin/sh\n[ -e \"$HOME/.claude/limited\" ] && { echo \"■ You've hit your usage limit\"; exit 1; }\necho \"home=$HOME config=${CLAUDE_CONFIG_DIR-unset} read changed.go\"\necho \"VERDICT: ALLOW\"\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("PATH", bin+":/usr/bin:/bin")
+	// The fakes are only on the tool path, as under launchd.
+	t.Setenv("PATH", "/usr/bin:/bin")
+	fixture.daemon.gateToolPath = bin + ":/usr/bin:/bin"
 	homes, accounts := map[string]string{}, map[string]kernel.AccountID{}
 	next := byte(60)
 	agent := func(name string, role kernel.AgentRole, provider kernel.Provider, account string) kernel.AgentID {
