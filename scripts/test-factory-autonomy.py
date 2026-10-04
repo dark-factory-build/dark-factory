@@ -942,7 +942,8 @@ class ManagedIntakeTest(unittest.TestCase):
 
     def test_empty_stale_lock_directory_without_receipt_is_absent(self):
         state = Path(str(self.home) + '.intake')
-        (state / 'service.lock').mkdir(parents=True)
+        state.mkdir(mode=0o700)
+        (state / 'service.lock').mkdir()
         absent = subprocess.CompletedProcess([], 113, '', '')
         with patch.object(autonomy, '__file__', str(self.script)), patch.object(autonomy, 'managed_plist_root', return_value=self.plists), patch.object(autonomy, 'managed_launchctl', return_value=absent):
             self.assertEqual('absent', autonomy.managed_service(self.home, self.factoryctl, 'status')['state'])
