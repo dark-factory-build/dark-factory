@@ -225,8 +225,10 @@ func TestLaunchctlPrintRequiresExactOwnedFields(t *testing.T) {
 	if pid, err := parseLaunchctlPrint(valid("running", "731"), service, plist, program); err != nil || pid != 731 {
 		t.Fatalf("running parse = %d, %v", pid, err)
 	}
-	if pid, err := parseLaunchctlPrint(valid("not running", ""), service, plist, program); err != nil || pid != 0 {
-		t.Fatalf("stopped parse = %d, %v", pid, err)
+	for _, stopped := range []string{"not running", "spawn scheduled"} {
+		if pid, err := parseLaunchctlPrint(valid(stopped, ""), service, plist, program); err != nil || pid != 0 {
+			t.Fatalf("%s parse = %d, %v", stopped, pid, err)
+		}
 	}
 	documented := []byte(service + " = {\n" +
 		"\tactive count = 1\n" +

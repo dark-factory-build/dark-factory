@@ -98,10 +98,45 @@ func TestBlackBoxServiceLifecycle(t *testing.T) {
 		t.Fatalf("running status = %+v", state)
 	}
 
+	// KeepAlive SuccessfulExit=false: launchd restarts a daemon that dies
+	// unsuccessfully, after its default 10s throttle, with a new pid.
+	if err := syscall.Kill(state.PID, syscall.SIGKILL); err != nil {
+		t.Fatal(err)
+	}
+	killed := state.PID
+	awaitSocketGone(t, install.LocalAPISocketPath(fixture.home), 5*time.Second)
+	// While launchd waits out the throttle ("spawn scheduled") the service is
+	// installed with no pid, not ambiguous, so stop and uninstall still work.
+	for deadline := time.Now().Add(5 * time.Second); state.State != "installed" || state.PID != 0; time.Sleep(100 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("killed daemon status = %+v", state)
+		}
+		state = serviceState(t, fixture.runFactoryctl(t, 0, serviceArgs("status")...))
+	}
+	for deadline := time.Now().Add(30 * time.Second); ; time.Sleep(250 * time.Millisecond) {
+		if connection, err := net.DialTimeout("unix", install.LocalAPISocketPath(fixture.home), time.Second); err == nil {
+			_ = connection.Close()
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("launchd did not restart the killed daemon")
+		}
+	}
+	client = fixture.waitClient(t, serviceStartupOutput(filepath.Join(install.ServiceDirectoryPath(fixture.home), "factoryd.stderr.log")))
+	if state = serviceState(t, fixture.runFactoryctl(t, 0, serviceArgs("status")...)); state.State != "running" || state.PID <= 1 || state.PID == killed {
+		t.Fatalf("restarted status = %+v, killed pid %d", state, killed)
+	}
+
 	// Stop unloads the job, the daemon exits, and the socket dies.
 	state = serviceState(t, fixture.runFactoryctl(t, 0, serviceArgs("stop")...))
 	if state.State != "installed" || state.PID != 0 {
 		t.Fatalf("stop state = %+v", state)
+	}
+	// An intentional stop stays stopped beyond the restart throttle.
+	for deadline := time.Now().Add(15 * time.Second); time.Now().Before(deadline); time.Sleep(time.Second) {
+		if state = serviceState(t, fixture.runFactoryctl(t, 0, serviceArgs("status")...)); state.State != "installed" || state.PID != 0 {
+			t.Fatalf("stopped daemon came back: %+v", state)
+		}
 	}
 	awaitSocketGone(t, install.LocalAPISocketPath(fixture.home), 20*time.Second)
 	// launchd absence and a closed listener do not prove that factoryd has
