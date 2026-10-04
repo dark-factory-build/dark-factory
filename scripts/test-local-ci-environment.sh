@@ -30,11 +30,8 @@ child_environment=$temporary/child.env
     for name in $live_names; do
         export "$name=hostile live value; \$(must remain data)"
     done
-    export DARK_FACTORY_LOCAL_CI_TEST_SENTINEL=preserved-local-ci-test-seam
     export DARK_FACTORY_LOCAL_CI_DIRECTORY=/private/fixture/.git/dark-factory-local-ci
-    export DARK_FACTORY_FACTORYCTL=/private/fixture/factoryctl
     export DARK_FACTORY_LOCAL_CI_LEASE_HELD=1
-    export DARK_FACTORY_LOCAL_CI_TEST_PAUSE_AFTER_LOCKF=/hostile/pause
     export CARGO_TARGET_DIR=/intentional/build-target
     export RUSTUP_TOOLCHAIN=1.88.0
     export CODEX_HOME=/intentional/provider-home
@@ -58,11 +55,8 @@ for name in $live_names; do
 done
 
 for expected in \
-    'DARK_FACTORY_LOCAL_CI_TEST_SENTINEL=preserved-local-ci-test-seam' \
     'DARK_FACTORY_LOCAL_CI_LEASE_HELD=1' \
-    'DARK_FACTORY_LOCAL_CI_DIRECTORY=/private/fixture/.git/dark-factory-local-ci' \
-    'DARK_FACTORY_FACTORYCTL=/private/fixture/factoryctl' \
-    'DARK_FACTORY_LOCAL_CI_TEST_PAUSE_AFTER_LOCKF=/hostile/pause'
+    'DARK_FACTORY_LOCAL_CI_DIRECTORY=/private/fixture/.git/dark-factory-local-ci'
 do
     grep -F -x "$expected" "$child_environment" >/dev/null \
         || fail "intentional input was removed: ${expected%%=*}"

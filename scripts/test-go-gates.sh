@@ -281,8 +281,7 @@ grep -F 'export DF_CI_CACHE_ROOT=' "$repository_root/scripts/local-ci-environmen
     || fail "gate cache root is not shared"
 if grep -Eq 'rm -rf|cleanup_scratch|dark-factory-ci-home' \
     "$repository_root/scripts/local-ci-environment.sh" \
-    "$repository_root/scripts/local-ci.sh" \
-    "$repository_root/scripts/local-ci-lease.sh"; then
+    "$repository_root/scripts/local-ci.sh"; then
     fail "gate boundary retained scratch cleanup logic"
 fi
 non_git_fixture="$temporary/non-git"
@@ -290,7 +289,6 @@ non_git_fixture="$temporary/non-git"
 /bin/cp "$repository_root/scripts/local-ci.sh" \
     "$repository_root/scripts/local-ci-environment.sh" \
     "$repository_root/scripts/with-local-ci-lease.sh" \
-    "$repository_root/scripts/local-ci-lease.sh" \
     "$non_git_fixture/scripts/"
 /bin/chmod 755 "$non_git_fixture/scripts/local-ci.sh" \
     "$non_git_fixture/scripts/with-local-ci-lease.sh"
@@ -306,6 +304,18 @@ printf '%s\n' "$non_git_output" | /usr/bin/grep -F \
     || fail "non-Git local-ci refusal was unclear: $non_git_output"
 [ ! -e "$non_git_fixture/.tools" ] && [ ! -L "$non_git_fixture/.tools" ] \
     || fail "non-Git local-ci refusal created cache artifacts"
+# Two lease holders serialise: the second waits until the first exits.
+lease_fixture="$temporary/lease"
+/usr/bin/env -i PATH=/usr/bin:/bin HOME=/dev/null /usr/bin/git init -q "$lease_fixture"
+lease_run() {
+    (CDPATH= cd -- "$lease_fixture" && /usr/bin/env -i PATH=/usr/bin:/bin HOME=/dev/null \
+        "$repository_root/scripts/with-local-ci-lease.sh" /bin/sh -c "$1")
+}
+lease_run ': >first; /bin/sleep 1; : >first-done' &
+lease_first=$!
+while [ ! -e "$lease_fixture/first" ]; do /bin/sleep 0.05; done
+lease_run '[ -e first-done ]' || fail "second lease holder ran before the first released"
+wait "$lease_first" || fail "first lease holder failed"
 local_fixture="$temporary/local"
 /bin/mkdir -p "$local_fixture/scripts" "$local_fixture/poison" "$local_fixture/configured"
 /usr/bin/env -i PATH=/usr/bin:/bin HOME=/dev/null /usr/bin/git init -q "$local_fixture"
