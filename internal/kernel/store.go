@@ -604,6 +604,37 @@ func (store *Store) ListAccounts(ctx context.Context) ([]Account, error) {
 	return readAccounts(ctx, connection)
 }
 
+// ReviewerAccountHomes lists the linked logins of the project's live worker
+// agents for provider, leaving out every login an author of the pull request
+// uses: the agents assigned to its publication tasks, which include the task
+// that owns a published Change. Agents on the provider default have no
+// distinct login to offer.
+func (store *Store) ReviewerAccountHomes(ctx context.Context, project ProjectID, provider Provider, repository string, pull uint64) ([]string, error) {
+	connection, err := store.readerConnection(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer connection.Close()
+	rows, err := connection.QueryContext(ctx, `SELECT DISTINCT ac.home FROM agents a JOIN accounts ac ON ac.id = a.account_id
+		WHERE a.project_id = ? AND a.role = 'worker' AND a.provider = ? AND a.archived = 0
+		  AND ac.id NOT IN (SELECT au.account_id FROM agents au JOIN tasks t ON t.assigned_agent_id = au.id
+		    WHERE au.account_id IS NOT NULL AND t.id IN (SELECT task_id FROM publication_tasks WHERE project_id = ? AND repository = ? AND pull_number = ?))
+		ORDER BY ac.home`, project.Bytes(), provider.String(), project.Bytes(), repository, pull)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var homes []string
+	for rows.Next() {
+		var home string
+		if err := rows.Scan(&home); err != nil {
+			return nil, err
+		}
+		homes = append(homes, home)
+	}
+	return homes, rows.Err()
+}
+
 // UpdateAccount renames or removes one linked provider login at an exact
 // revision. Removal only removes the registry entry: it never detaches agents,
 // changes provider defaults, or touches the provider's home or auth data.

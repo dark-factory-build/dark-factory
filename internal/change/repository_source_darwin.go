@@ -5,8 +5,66 @@ package change
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 )
+
+// ReviewCheckout makes path a disposable clone checked out at exactly head,
+// the head of pull request pull, with base present. The clone borrows the
+// registered repository's objects through Git alternates and fetches the pull
+// ref from that repository's registered origin into its own refs, so the
+// repository's refs, config and index are only ever read.
+func ReviewCheckout(ctx context.Context, gitExecutable, root string, expected RepositorySourceIdentity, path string, pull uint64, head, base, baseRef string) error {
+	if err := validateRevision(baseRef); err != nil {
+		return err
+	}
+	for _, value := range []string{head, base} {
+		if raw, err := hex.DecodeString(value); err != nil || (len(raw) != 20 && len(raw) != 32) || value != strings.ToLower(value) {
+			return &ValidationError{Reason: "review commit must be a full lowercase object ID"}
+		}
+	}
+	authority, err := openGitAuthority(gitExecutable, root, expected.Root, nil, true)
+	if err != nil {
+		return err
+	}
+	defer authority.close()
+	actual, err := authority.sourceIdentity(ctx)
+	if err != nil {
+		return err
+	}
+	if actual.Root != expected.Root || actual.Git != expected.Git || actual.OriginDigest != expected.OriginDigest {
+		return &ValidationError{Reason: "registered checkout identity changed"}
+	}
+	origin, err := authority.succeed(ctx, maxGitSelectionOutput, "-C", root, "remote", "get-url", "--", "origin")
+	if err != nil {
+		return err
+	}
+	if _, err := authority.succeed(ctx, maxGitSelectionOutput, "init", "--quiet", "--", path); err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(path, ".git", "objects", "info", "alternates"), []byte(filepath.Join(root, ".git", "objects")+"\n"), 0o600); err != nil {
+		return newGitError(gitFailurePrivateIO)
+	}
+	// The origin is the registered, digest-bound remote, so a local-path
+	// origin (a mirror, or a test fixture) is as trusted as a GitHub one.
+	if _, err := authority.succeed(ctx, maxGitSelectionOutput, "-C", path, "-c", "core.hooksPath=/dev/null", "-c", "protocol.file.allow=always", "fetch", "--quiet", "--no-tags", "--no-recurse-submodules", "--no-write-fetch-head", "--no-auto-maintenance", "--end-of-options", strings.TrimSpace(string(origin)), fmt.Sprintf("+refs/pull/%d/head:refs/review/head", pull), "+refs/heads/"+baseRef+":refs/review/base"); err != nil {
+		return err
+	}
+	if _, err := authority.succeed(ctx, maxGitSelectionOutput, "-C", path, "-c", "core.hooksPath=/dev/null", "checkout", "--quiet", "--detach", "refs/review/head"); err != nil {
+		return err
+	}
+	checked, err := authority.run(ctx, maxGitSelectionOutput, "-C", path, "rev-parse", "HEAD^{commit}", base+"^{commit}")
+	if err != nil {
+		return err
+	}
+	if checked.exitCode != 0 || string(checked.output) != head+"\n"+base+"\n" {
+		return &ValidationError{Reason: "pull request head or base differs from the requested review"}
+	}
+	return nil
+}
 
 // InspectRepositorySource proves the configured root and base without fetching
 // or changing refs. An empty base only inspects identity; normal source selection
