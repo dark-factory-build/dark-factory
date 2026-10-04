@@ -10,7 +10,7 @@ unset CLOUDFLARE_API_TOKEN
 fail() { echo "release: control-plane $1" >&2; exit 1; }
 
 test "$#" = 1 && test "$(git rev-parse HEAD)" = "$(git rev-parse --verify "$1^{commit}")" \
-    && test -z "$(git status --porcelain -- control-plane)" || fail "needs a clean checkout at <commit>"
+    && test -z "$(git status --porcelain)" || fail "needs a clean checkout at <commit>"
 cd "$(git rev-parse --show-toplevel)/control-plane"
 PATH="$PWD/.tools/bin:$PWD/node_modules/.bin:$PATH"
 RUSTUP_TOOLCHAIN=1.88.0 ./scripts/local-ci.sh >&2 || fail build_failed
