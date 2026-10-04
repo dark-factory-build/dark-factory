@@ -1731,7 +1731,9 @@ func TestDaemonSourceAllowsClaudeOrchestratorRoute(t *testing.T) {
 	waitDispatch(t, done)
 }
 
-func TestDaemonSourceTitleOnlyWorkerUsesEffectiveHandoff(t *testing.T) {
+// A task text starting "review handoff" is ordinary: its worker gets no
+// source receipt.
+func TestDaemonSourceRefusesWorkerEvenWithReviewHandoffText(t *testing.T) {
 	fixture := newDispatchFixture(t)
 	const seed = 74
 	target := testID(73)
@@ -1751,8 +1753,8 @@ func TestDaemonSourceTitleOnlyWorkerUsesEffectiveHandoff(t *testing.T) {
 	done := fixture.serve(t)
 	_, err := active.client.Source(context.Background(), target)
 	var remote *api.RemoteError
-	if !errors.As(err, &remote) || remote.Code() != api.RemoteNotFound {
-		t.Fatalf("title-only worker source = %v", err)
+	if !errors.As(err, &remote) || remote.Code() != api.RemoteUnauthorized {
+		t.Fatalf("worker source = %v", err)
 	}
 	waitDispatch(t, done)
 }

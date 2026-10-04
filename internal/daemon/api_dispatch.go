@@ -807,18 +807,13 @@ func (daemon *Daemon) attemptSource(ctx context.Context, call api.Call) api.Repl
 	if err != nil {
 		return newErrorReply(remoteErrorCode(err))
 	}
-	// Only providers with the protected retained-source receipt route may
-	// receive this immutable snapshot. Unsupported providers fail before target
-	// parsing, so a reassignment cannot silently admit doomed work.
-	if !kernel.RetainedSourceReviewSupported(authority.Provider) {
-		return newErrorReply(api.RemoteUnavailable)
+	// Only the overseer reads settled source; factoryd reviews published heads.
+	if authority.Role != kernel.RoleOrchestrator {
+		return newErrorReply(api.RemoteUnauthorized)
 	}
-	if authority.Role == kernel.RoleWorker {
-		expected, review, parseErr := kernel.ParseRetainedSourceReviewTask(authority.Task())
-		targetText, present := call.AttemptSourceTaskID()
-		if parseErr != nil || !review || !present || expected.TaskID.String() != targetText {
-			return newErrorReply(api.RemoteUnauthorized)
-		}
+	// A shell provider has no read-only boundary for the receipt's paths.
+	if authority.Provider == kernel.ProviderShell {
+		return newErrorReply(api.RemoteUnavailable)
 	}
 	taskIDText, ok := call.AttemptSourceTaskID()
 	if !ok {
@@ -828,8 +823,7 @@ func (daemon *Daemon) attemptSource(ctx context.Context, call api.Call) api.Repl
 	if err != nil {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
-	// An overseer reads any settled Change in its project; a worker reads only
-	// the target its authenticated effective handoff line names.
+	// The overseer reads any settled Change in its project.
 	daemon.attemptMu.Lock()
 	live := daemon.attempts[authority.RunID]
 	daemon.attemptMu.Unlock()

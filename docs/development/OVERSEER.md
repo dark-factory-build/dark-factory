@@ -214,10 +214,9 @@ For unattended projects, also follow [UNATTENDED.md](UNATTENDED.md).
 ## 1. Find what a worker finished
 
 The implementing worker uses its assigned writable checkout directly, including
-a correction after send-back. Do not require that worker to obtain an
-`attempt source` receipt for its own reopened Change: the retained source
-operation is for settled review targets. A reviewer must still follow the exact
-receipt procedure below; this distinction grants no access to other Changes.
+a correction after send-back. Only the overseer may request an `attempt source`
+receipt; a worker's request is refused. factoryd reviews every published head
+itself, so there is no delegated pre-publication source review.
 
 An installed runtime upgrade does not update source in a retained Change.
 Before repeating a sandbox or toolchain blocker, compare its pinned source base
@@ -249,26 +248,6 @@ is adopted into one by the first source request, at its recorded base with
 the worker's edits uncommitted, so its `head_commit` equals its base and
 `dirty` is true: send such a task back to have its work committed before
 publication.
-
-An independently delegated Codex or Claude Code reviewer uses the same explicit source
-request and reads the same head from `git_directory`. It must match Change
-ID, base commit, head commit, target task ID, task work revision and Change
-revision first; the local branch is evidence of the worker Change, not the
-published pull request head, which the cold review reads on its own. A
-reviewer is not an overseer and cannot use `overseer status` to discover a
-Change. No receipt or a changed identity is a refusal, not a candidate for
-path reconstruction.
-
-Delegate that reviewer with this exact first line, using the values from the
-current authenticated `retained_change_handoffs` entry:
-
-```text
-review handoff TASK_ID CHANGE_ID BASE_COMMIT TASK_WORK_REVISION CHANGE_REVISION
-```
-
-Reviewer instructions, including a `FACTORY_SOURCE` marker, may follow on later
-lines. The daemon grants the retained source only when every first-line value
-still matches the current handoff; prose or an older identity grants nothing.
 
 A change is finished when its `enqueue-HEAD8`
 operation (step 5) for its current head is `completed` in the App journal
