@@ -134,11 +134,22 @@ func (daemon *Daemon) advanceReviewOperations(ctx context.Context, startup bool)
 		case (op.State == "submitting" || op.State == "enqueuing") && stuck:
 			_, err = daemon.resumeReview(ctx, operation.Project, op)
 		case op.State == "failed" && stuck && daemon.customerMaintainer():
-			// A failed review is retried once; one that cannot be goes to the
-			// overseer, once. Neither leaves the pull request silently stalled.
+			// A failed review is retried once, claimed here and run in the
+			// background; one that cannot be goes to the overseer, once.
+			// Neither leaves the pull request silently stalled.
+			why := "its review failed: " + op.Detail
 			if op.Retryable && op.RetryOf == "" {
-				daemon.launchReview(operation.Project, op)
-			} else if err = daemon.escalatePull(ctx, operation.Project, operation.Repository, op, "its review failed: "+op.Detail); err == nil {
+				var coordinator review.Coordinator
+				var retry review.Operation
+				if coordinator, err = daemon.reviewCoordinator(ctx, operation.Project, operation.Repository); err == nil {
+					if retry, err = coordinator.ReserveRetry(ctx, op); err == nil {
+						daemon.launchReview(operation.Project, retry)
+						break
+					}
+				}
+				why += "\n\nits retry could not start: " + err.Error()
+			}
+			if err = daemon.escalatePull(ctx, operation.Project, operation.Repository, op, why); err == nil {
 				op.Handled = true
 				err = durableReviewStore{store: daemon.store, project: operation.Project, repository: operation.Repository, now: daemon.now}.Update(ctx, op)
 			}
@@ -279,20 +290,13 @@ func (daemon *Daemon) escalatePull(ctx context.Context, project kernel.ProjectID
 
 // launchReview keeps publication acknowledgement independent from provider
 // work. The operation is already durable when this is called, so a shutdown
-// before the goroutine starts is recovered as an interrupted review. A failed
-// operation is retried instead.
+// before the goroutine starts is recovered as an interrupted review.
 func (daemon *Daemon) launchReview(project kernel.ProjectID, op review.Operation) {
 	ctx := daemon.cleanupCtx
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	go func() {
-		if op.State == "failed" {
-			_, _ = daemon.startReview(ctx, project, api.ReviewRequest{Repository: op.Request.Repository}, op)
-			return
-		}
-		_, _ = daemon.resumeReview(ctx, project, op)
-	}()
+	go func() { _, _ = daemon.resumeReview(ctx, project, op) }()
 }
 
 func (daemon *Daemon) preparePublishedReview(ctx context.Context, project kernel.ProjectID, repository string, pull uint64, publishedHead string) (review.Operation, error) {
