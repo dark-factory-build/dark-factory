@@ -127,7 +127,56 @@ var (
 	// SIGTERM shuts down cleanly; factoryd then exits 75 because a trial
 	// marker names another build, and launchd restarts the new binaries.
 	releaseExit = func() { _ = syscall.Kill(os.Getpid(), syscall.SIGTERM) }
+	// releasePoll spaces base observations; releaseHead is a package-test seam.
+	releasePoll = 2 * time.Minute
+	releaseHead = observeBaseHead
 )
+
+// tickRelease releases the base tip into this factory once per tip. Only a
+// home with a registered checkout of factoryd's own repository releases
+// itself. A tip with any release record (running, verified or failed) is never
+// started again: a failed release waits for a newer tip or `factoryctl
+// release`. The newest tip wins, so merges in between are released together.
+func (daemon *Daemon) tickRelease(ctx context.Context) {
+	// The wall clock, not daemon.now: this cadence is not factory time.
+	now := time.Now()
+	if daemon.gateHome == "" || daemon.releaseBusy.Load() || now.Before(daemon.releaseDue) {
+		return
+	}
+	daemon.releaseDue = now.Add(releasePoll)
+	go func() {
+		ctx, cancel := context.WithTimeout(ctx, time.Minute)
+		defer cancel()
+		_, root, _, err := daemon.selfRepositorySource(ctx)
+		if err != nil {
+			return
+		}
+		head, err := releaseHead(ctx, daemon, root)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "factoryd: release: observe %s: %v\n", selfBase, err)
+			return
+		}
+		if _, _, found, err := daemon.store.Delivery(ctx, "release:"+head); err == nil && !found {
+			_, _ = daemon.Release(ctx, head, true)
+		}
+	}()
+}
+
+// observeBaseHead reads the base tip from the checkout's origin over the git
+// protocol, which spends no GitHub REST quota.
+func observeBaseHead(ctx context.Context, daemon *Daemon, root string) (string, error) {
+	command := exec.CommandContext(ctx, change.TrustedGitExecutable, "-C", root, "ls-remote", "--exit-code", "--refs", "origin", "refs/heads/"+selfBase)
+	command.Env = daemon.gateEnvironment()
+	output, err := command.Output()
+	fields := strings.Fields(string(output))
+	if err == nil && (len(fields) != 2 || fields[1] != "refs/heads/"+selfBase || !regexp.MustCompile(`^[0-9a-f]{40}$`).MatchString(fields[0])) {
+		err = fmt.Errorf("unexpected ls-remote output %q", output)
+	}
+	if err != nil {
+		return "", err
+	}
+	return fields[0], nil
+}
 
 // Release starts (start) or reads the release of merged commit sha into this
 // factory's own service. The record is the production delivery release:<sha>.

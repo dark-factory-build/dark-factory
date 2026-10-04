@@ -121,10 +121,6 @@ package_target() {
     mkdir -p "$controller_payload"
     for controller_asset in \
         cold-review.sh \
-        factory-autonomy.py \
-        factory-delivery.py \
-        factory-publication.py \
-        factory-release.py \
         go-gate-environment.sh \
         verify-adversarial-review.sh
     do
@@ -176,10 +172,6 @@ package_target() {
         -czf "$staging/$package_archive" -C "$package_payload" \
         factoryd factory-runner factoryctl \
         libexec/dark-factory/cold-review.sh \
-        libexec/dark-factory/factory-autonomy.py \
-        libexec/dark-factory/factory-delivery.py \
-        libexec/dark-factory/factory-publication.py \
-        libexec/dark-factory/factory-release.py \
         libexec/dark-factory/go-gate-environment.sh \
         libexec/dark-factory/verify-adversarial-review.sh
     rm -r "$package_payload"

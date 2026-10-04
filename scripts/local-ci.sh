@@ -49,10 +49,6 @@ if [ "$local_ci_mode" = full ]; then
     ./scripts/test-cold-review.sh
     ./scripts/test-publication-parents.sh
     python3 ./scripts/test-factory-browser.py
-    python3 ./scripts/test-factory-release.py
-    python3 ./scripts/test-factory-autonomy.py
-    python3 ./scripts/test-factory-delivery.py
-    python3 ./scripts/test-verify-live-runtime.py
     ./scripts/test-github-step-summary.sh
     ./scripts/test-verify-adversarial-review.sh
     ./scripts/test-cloudflare-env.sh

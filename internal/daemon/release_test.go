@@ -257,6 +257,58 @@ func TestReleaseRecordsAFailedUpgradeAndNeverRestarts(t *testing.T) {
 	}
 }
 
+func TestTickReleasesEachNewBaseTipOnce(t *testing.T) {
+	fixture, settle, events := releaseFixture(t)
+	settle()
+	head, poll := releaseHead, releasePoll
+	t.Cleanup(func() { releaseHead, releasePoll = head, poll })
+	var tip atomic.Value
+	releaseHead = func(_ context.Context, _ *Daemon, root string) (string, error) {
+		if root != "/self-repository" {
+			t.Errorf("observed %q", root)
+		}
+		return tip.Load().(string), nil
+	}
+	releasePoll = 0
+	tick := func(sha string) {
+		t.Helper()
+		tip.Store(sha)
+		fixture.daemon.tickRelease(context.Background())
+		time.Sleep(50 * time.Millisecond)
+	}
+	moved, failed, newer := strings.Repeat("e", 40), strings.Repeat("f", 40), strings.Repeat("1", 40)
+	tick(moved)
+	if got := <-events; got != "build /self-repository" {
+		t.Fatalf("moved tip: %q", got)
+	}
+	<-events
+	<-events
+	awaitRelease(t, fixture.daemon, moved, func(value kernel.ProductionDelivery) bool { return value.Phase == "trial" })
+	if err := fixture.daemon.FinishRelease(context.Background(), moved, "verified", ""); err != nil {
+		t.Fatal(err)
+	}
+	fixture.daemon.releaseHold.Store(false)
+	fixture.daemon.releaseBusy.Store(false)
+	tick(moved)
+	if len(events) != 0 {
+		t.Fatal("a released tip was released again")
+	}
+
+	releaseUpgrade = func(context.Context, string, string, buildinfo.Identity, int) error { return errors.New("receipt") }
+	tick(failed)
+	awaitRelease(t, fixture.daemon, failed, func(value kernel.ProductionDelivery) bool { return value.State == "failed" })
+	<-events
+	tick(failed)
+	if len(events) != 0 {
+		t.Fatal("a failed tip was retried")
+	}
+	tick(newer)
+	if got := <-events; got != "build /self-repository" {
+		t.Fatalf("newer tip: %q", got)
+	}
+	awaitRelease(t, fixture.daemon, newer, func(value kernel.ProductionDelivery) bool { return value.State == "failed" })
+}
+
 func TestSchedulerAdmitsNothingWhileAReleaseHoldsAdmission(t *testing.T) {
 	daemon := newSchedulerTestDaemon(t)
 	daemon.releaseHold.Store(true)
