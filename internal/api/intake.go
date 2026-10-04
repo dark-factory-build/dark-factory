@@ -25,7 +25,6 @@ type IntakeConfiguration struct {
 }
 type IntakeInput struct {
 	APIKey           string               `json:"api_key,omitempty"`
-	Review           *IntakeReviewInput   `json:"review,omitempty"`
 	ReviewRequest    *ReviewRequest       `json:"review_request,omitempty"`
 	Legacy           *LegacyIntakeInput   `json:"legacy,omitempty"`
 	AcceptanceCursor string               `json:"acceptance_cursor,omitempty"`
@@ -97,21 +96,20 @@ type IntakeTeam struct {
 	Key  string `json:"key"`
 }
 type IntakeResult struct {
-	SourceID           string              `json:"source_id,omitempty"`
-	LinearTeams        []IntakeTeam        `json:"linear_teams,omitempty"`
-	Review             *IntakeReviewResult `json:"review,omitempty"`
-	ReviewOperation    string              `json:"review_operation,omitempty"`
-	Legacy             *LegacyIntakePlan   `json:"legacy,omitempty"`
-	AcceptanceProgress bool                `json:"acceptance_progress,omitempty"`
-	AcceptanceCursor   string              `json:"acceptance_cursor,omitempty"`
-	State              string              `json:"state"`
-	ImportedTasks      []string            `json:"imported_tasks,omitempty"`
-	Sources            []IntakeSource      `json:"sources,omitempty"`
-	Candidates         []IntakeCandidate   `json:"candidates,omitempty"`
-	NextPage           *uint32             `json:"next_page,omitempty"`
-	ReviewedRevision   uint64              `json:"reviewed_revision,omitempty"`
-	AcceptanceID       string              `json:"acceptance_id,omitempty"`
-	TaskID             string              `json:"task_id,omitempty"`
+	SourceID           string            `json:"source_id,omitempty"`
+	LinearTeams        []IntakeTeam      `json:"linear_teams,omitempty"`
+	ReviewOperation    string            `json:"review_operation,omitempty"`
+	Legacy             *LegacyIntakePlan `json:"legacy,omitempty"`
+	AcceptanceProgress bool              `json:"acceptance_progress,omitempty"`
+	AcceptanceCursor   string            `json:"acceptance_cursor,omitempty"`
+	State              string            `json:"state"`
+	ImportedTasks      []string          `json:"imported_tasks,omitempty"`
+	Sources            []IntakeSource    `json:"sources,omitempty"`
+	Candidates         []IntakeCandidate `json:"candidates,omitempty"`
+	NextPage           *uint32           `json:"next_page,omitempty"`
+	ReviewedRevision   uint64            `json:"reviewed_revision,omitempty"`
+	AcceptanceID       string            `json:"acceptance_id,omitempty"`
+	TaskID             string            `json:"task_id,omitempty"`
 }
 
 func ValidIntakeInput(input IntakeInput) bool {
@@ -129,17 +127,9 @@ func ValidIntakeInput(input IntakeInput) bool {
 	case "review_pr":
 		allowed.ProjectID, allowed.ReviewRequest = input.ProjectID, input.ReviewRequest
 		valid = validID(input.ProjectID) && input.ReviewRequest != nil && validReviewRequest(*input.ReviewRequest)
-	case "legacy_preview", "legacy_commit", "legacy_lineage", "review":
+	case "legacy_preview", "legacy_commit", "legacy_lineage":
 		allowed.SourceID, allowed.ProjectID, allowed.Configuration, allowed.Legacy = input.SourceID, input.ProjectID, input.Configuration, input.Legacy
 		valid = validID(input.SourceID) && validID(input.ProjectID) && input.Configuration != nil && input.Legacy != nil && validLegacyIntakeInput(*input.Legacy, input.Action == "legacy_commit")
-		if input.Action == "review" {
-			allowed.Review = input.Review
-			if input.Review != nil && (input.Review.Tool == "submit_pull_request_review" || input.Review.Tool == "enqueue_pull_request") {
-				allowed.IssueNumber = input.IssueNumber
-				valid = valid && input.IssueNumber > 0
-			}
-			valid = valid && input.Review != nil && validIntakeReview(*input.Review) && validLegacyDigest(input.Legacy.PlanHash) && validID(input.Configuration.TargetRepositoryID)
-		}
 		if input.Action == "legacy_lineage" {
 			allowed.IssueNumber = input.IssueNumber
 			valid = valid && input.IssueNumber > 0 && validLegacyDigest(input.Legacy.PlanHash) && validID(input.Configuration.TargetRepositoryID)
@@ -195,8 +185,18 @@ func (client *OperatorClient) Intake(ctx context.Context, input IntakeInput) (In
 	if err := client.client.call(ctx, "intake", input, &result); err != nil {
 		return IntakeResult{}, err
 	}
-	if result.Review != nil && result.Review.Response != "" && validateJSON([]byte(result.Review.Response), false) != nil {
-		return IntakeResult{}, ErrProtocol
-	}
 	return result, nil
+}
+
+func reviewUUID(value string) bool {
+	if len(value) != 36 || value[8] != '-' || value[13] != '-' || value[18] != '-' || value[23] != '-' {
+		return false
+	}
+	_, err := hex.DecodeString(strings.ReplaceAll(value, "-", ""))
+	return err == nil && value == strings.ToLower(value)
+}
+
+func validHex(value string, size int) bool {
+	decoded, err := hex.DecodeString(value)
+	return err == nil && len(decoded) == size && value == strings.ToLower(value)
 }

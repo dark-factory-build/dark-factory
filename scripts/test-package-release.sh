@@ -53,7 +53,7 @@ run_packaged_smoke() {
     done
     for controller_asset in \
         cold-review.sh factory-autonomy.py factory-delivery.py factory-intake.py \
-        factory-production-reviews.py factory-production.py factory-publication.py factory-release.py factory-review-intake.py \
+        factory-publication.py factory-release.py \
         go-gate-environment.sh verify-adversarial-review.sh supervision.md
     do
         [ -f "$smoke_bin/libexec/dark-factory/$controller_asset" ] \
@@ -281,11 +281,8 @@ libexec/dark-factory/cold-review.sh
 libexec/dark-factory/factory-autonomy.py
 libexec/dark-factory/factory-delivery.py
 libexec/dark-factory/factory-intake.py
-libexec/dark-factory/factory-production-reviews.py
-libexec/dark-factory/factory-production.py
 libexec/dark-factory/factory-publication.py
 libexec/dark-factory/factory-release.py
-libexec/dark-factory/factory-review-intake.py
 libexec/dark-factory/go-gate-environment.sh
 libexec/dark-factory/supervision.md
 libexec/dark-factory/verify-adversarial-review.sh" ] || fail "$target archive has unexpected contents: $listing"
@@ -295,7 +292,7 @@ libexec/dark-factory/verify-adversarial-review.sh" ] || fail "$target archive ha
       $2 != 0 || $3 != "root" || $4 != "wheel" || $6 != "Jan" || $7 != 1 || $8 != 2000 { exit 1 }
       ($9 == "libexec/dark-factory/supervision.md" && $1 != "-rw-r--r--") ||
         ($9 != "libexec/dark-factory/supervision.md" && $1 != "-rwxr-xr-x") { exit 1 }
-      END { exit NR == 15 ? 0 : 1 }
+      END { exit NR == 12 ? 0 : 1 }
     ' || fail "$target archive metadata is not normalized"
 done
 (cd "$output" && shasum -a 256 -c SHA256SUMS >/dev/null) || fail "release checksums failed"
@@ -307,8 +304,6 @@ mkdir -p "$controller_root"
 tar -xzf "$output/dark-factory-v1.2.3-$native_archive_target.tar.gz" -C "$controller_root"
 (cd /private/tmp && python3 "$controller_root/libexec/dark-factory/factory-release.py" --help >/dev/null) \
     || fail "installed release controller could not load relative helpers"
-(cd /private/tmp && python3 "$controller_root/libexec/dark-factory/factory-review-intake.py" --help >/dev/null) \
-    || fail "installed review controller could not load relative helpers"
 (cd /private/tmp && python3 - "$controller_root/libexec/dark-factory/factory-intake.py" <<'PY'
 import importlib.util
 import sys

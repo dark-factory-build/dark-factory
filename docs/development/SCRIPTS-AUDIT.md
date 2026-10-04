@@ -22,12 +22,9 @@ repository/domain.
 | `factory-delivery.py` | PRODUCT | operator-owned deployment receipts re-enter legacy intake/home; issue #973 |
 | `factory-intake.example.json` | DEV | documented example configuration |
 | `factory-intake.py` | PRODUCT | legacy GitHub-CLI intake and factory-home journal; issue #974 |
-| `factory-production-reviews.py` | PRODUCT | owner-host `gh` review collection feeding Production; issue #975 |
-| `factory-production.py` | PRODUCT | hard-coded `dark-factory-build/dark-factory` and local operator home; issue #976 |
 | `factory-publication.py` | DEV | pure publication-footer contract library |
 | `factory-release.example.json` | DEAD | no workflow, documentation, test, service-packaging path, or script references it |
 | `factory-release.py` | PRODUCT | release controller using operator `release_configs`, `gh`, and host hooks; issue #977 |
-| `factory-review-intake.py` | PRODUCT | legacy owner-only review controller and maintainer bridge; issue #978 |
 | `github-repo-settings.sh` | DEV | repository configuration script |
 | `github-step-summary.sh` | DEV | workflow summary helper |
 | `go-check.sh` | DEV | source and UI gate |
@@ -57,10 +54,7 @@ repository/domain.
 | `test-factory-browser.py` | DEV | browser helper fixture |
 | `test-factory-delivery.py` | DEV | delivery unit fixture |
 | `test-factory-intake.py` | DEV | intake unit fixture |
-| `test-factory-production-reviews.py` | DEV | review collector fixture |
-| `test-factory-production.py` | DEV | production observer fixture |
 | `test-factory-release.py` | DEV | release controller fixture |
-| `test-factory-review-intake.py` | DEV | review controller fixture |
 | `test-github-step-summary.sh` | DEV | workflow summary fixture |
 | `test-go-e2e-tools.sh` | DEV | E2E tool fixture |
 | `test-go-gates.sh` | DEV | CI gate fault-injection fixture |

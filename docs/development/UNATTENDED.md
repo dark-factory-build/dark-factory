@@ -130,7 +130,9 @@ from worker success, merge, a TCP socket, or an unchanged alias alone.
 
 ## Host scheduling and deployment
 
-`scripts/factory-autonomy.py CONFIG --once` runs intake and review.
+`scripts/factory-autonomy.py CONFIG --once` runs intake. factoryd reviews,
+enqueues and observes published pull requests itself; no host review or
+production controller remains.
 The separate `--release-only` pass uses `release_configs` paths for exact-default-head releases and enqueues
 one idempotent verified-delivery follow-up for the same project's overseer.
 After verification, the controller fast-forwards its own source checkout to the
@@ -143,7 +145,7 @@ runtime receipt; resolve the reported checkout condition before the next pass.
 Use `--plist` to generate a launchd StartInterval job. The generated job uses
 absolute script/config paths and the host's tool PATH. Install it only after
 the one-shot preflight succeeds. Each config gets a separate launchd label. Controllers for the same factory
-serialize each lane through its own host lock. Intake/review can continue while
+serialize each lane through its own host lock. Intake can continue while
 a release waits for productive runs to drain. Use the controller for scheduled work; direct maintenance
 hooks are operator tools.
 Each tick writes a mode-0600 `.autonomy.json` health receipt beside the intake
@@ -153,42 +155,9 @@ failing component also prints one line to the controller's own log (its launchd
 `StandardErrorPath`): the component name, that status code, and a bounded,
 single-line tail of the component's stderr with labelled credentials and GitHub
 tokens starred. The durable receipt itself still retains no child output.
-For private repositories, optionally set `review_mirror_root` to an existing
-bare mirror at `ROOT/OWNER/REPOSITORY` whose `origin` is the configured HTTPS
-GitHub repository. Create it with `git clone --bare https://github.com/OWNER/REPOSITORY ROOT/OWNER/REPOSITORY` so it retains base history. The host fetches only the base and `refs/pull/N/head` into
-that mirror after GitHub reports the exact head. For open PRs whose footer has
-`Refs #N` or `Closes #N` for a tracked source issue, the existing controller runs
-one independent cold review per pass after intake and release checks. A tracked
-source is an intake-managed issue, or an overseer tracking issue the App created
-(its completed `create_issue` receipt) on a PR the App published (its completed
-publication receipt); a footer the pass cannot prove is skipped with the reason
-in the pass output, never reviewed. The existing
-autonomy job and lock stay occupied during that review (up to its 20-minute
-owned-group deadline); the next scheduled intake/release tick waits. This change
-removes nested-sandbox failures, not that existing serialization limit. The host
-needs the selected Codex/Claude installation and the owner-installed Maintainer
-bridge on PATH (or `DARK_FACTORY_MAINTAINER_BRIDGE`). These remain host
-capabilities; no bridge credentials or provider SDK permissions are granted to
-worker local commands.
-
-The existing `.reviews.json` journal pins the head/base and deterministic App
-operation before launching. The reviewer runs inside the existing owned process
-group deadline and records its own exact-head verdict through the App. A timeout,
-crash, or lost reply remains unresolved: later passes observe the same App
-operation instead of starting another model call. Completed allow/block results
-wake the configured overseer to enqueue or return findings to the original task.
-A blocked review is a completed review, not an infrastructure failure. The host
-must reconcile an unresolved launch before explicitly authorizing another; do
-not erase the attempted marker to retry an ambiguous submission.
-Before that review the pass runs the repository's own full gate on the exact
-head and keeps its receipt. A nonzero gate status sends the source task back;
-the bounded wrapper's own statuses (64 refused arguments, 125..127 supervisor or
-exec failure) mean no gate ran, so they are reported as a host blocker on the
-controller's log, journal no gate verdict, and are gated again next pass.
-
 Bind the controller config to the actual `factory_home`, `project_id`,
-`overseer_agent_id`, external `journal`, and verified `review_mirror_root`; its
-PATH must select the matching installed factoryctl plus provider/bridge tools.
+`overseer_agent_id` and external `journal`; its PATH must select the matching
+installed factoryctl.
 Regenerate and replace the existing launchd job only after a one-shot preflight.
 An unloaded job or a config pointing at an older factory is not autonomous proof.
 No GitHub credential is stored in config or passed to a task.
@@ -202,8 +171,8 @@ Deployment has no elapsed-time ceiling; `command_timeout` bounds verification an
 review commands. Preparation, installation, and runtime probes retain their own
 command bounds. Install a second launchd job generated with
 `factory-autonomy.py CONFIG --plist --release-only`; the ordinary job handles
-intake and review, while this independent job handles release and delivery.
-Their separate locks keep a draining release from suppressing intake or review.
+intake, while this independent job handles release and delivery.
+Their separate locks keep a draining release from suppressing intake.
 The existing release journal lock prevents duplicate deployment. An explicit
 operator control change still cancels the owned pause; a stuck run must be
 resolved through its existing recovery path, never killed to meet a release clock.
