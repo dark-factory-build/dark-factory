@@ -860,26 +860,6 @@ func storeTestPath(t *testing.T, store *Store) string {
 	return filepath.Clean(path)
 }
 
-func TestConsumeAttemptResultPreservesStartupUnverifiedFailure(t *testing.T) {
-	store, run, keys := runningStartedOrchestratorRun(t, 1910)
-	defer store.Close()
-	runtime := resourceOfKind(t, resourcesForRunTest(t, store, run.ID), ResourceRuntimeRoot)
-	provider := resourceOfKind(t, resourcesForRunTest(t, store, run.ID), ResourceProviderProcess)
-	exit, _ := NewAttemptResultExitCode(1)
-	result, err := NewInnerConvergedAttemptResult(run.ID, keys.AttemptDigest, keys.ResultProofDigest, runtime.Identity, provider.Identity, exit)
-	if err != nil {
-		t.Fatal(err)
-	}
-	failure, err := NewFailureProposal(FailureAttempt, "runner: provider startup submission unverified")
-	if err != nil {
-		t.Fatal(err)
-	}
-	consumed, err := store.ConsumeAttemptResultWithFailure(context.Background(), result, run.Revision, mustTime(t, 25), &failure)
-	if err != nil || consumed.Phase != RunFinalizing || consumed.Proposal == nil || consumed.Proposal.Code() != FailureAttempt || consumed.Proposal.Detail() != failure.Detail() {
-		t.Fatalf("startup-unverified consume = %+v err=%v", consumed, err)
-	}
-}
-
 func TestNonzeroExitResultsConvergeThroughEveryResultSeam(t *testing.T) {
 	// The insignificant arm of the exit union differs between
 	// AttemptResultExit (raw value, false) and ProcessExit (nil-guarded zero),

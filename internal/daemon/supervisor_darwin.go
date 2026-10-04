@@ -1009,15 +1009,7 @@ func (daemon *Daemon) attemptResultTail(
 			return kernel.Run{}, kernel.NewOutcomeUnknownError(fmt.Errorf("daemon: retained outcome proposal: %w", proposeErr))
 		}
 	}
-	var convergenceFailure *kernel.Proposal
-	if errors.Is(resultOutcome.err, runner.ErrStartupUnverified) {
-		proposal, proposalErr := kernel.NewFailureProposal(kernel.FailureAttempt, runner.ErrStartupUnverified.Error())
-		if proposalErr != nil {
-			return run, proposalErr
-		}
-		convergenceFailure = &proposal
-	}
-	run, err = daemon.consumeAttemptResultWithFailure(daemon.cleanupCtx, result, false, convergenceFailure)
+	run, err = daemon.consumeAttemptResult(daemon.cleanupCtx, result, false)
 	if err != nil {
 		return kernel.Run{}, err
 	}
@@ -1612,10 +1604,6 @@ func terminalExitEvent(record *runner.AttemptResultRecord) (TerminalEvent, error
 
 // Recovery may replay an exact result consumed before a later cleanup edge failed.
 func (daemon *Daemon) consumeAttemptResult(ctx context.Context, result kernel.AttemptResult, recovered bool) (kernel.Run, error) {
-	return daemon.consumeAttemptResultWithFailure(ctx, result, recovered, nil)
-}
-
-func (daemon *Daemon) consumeAttemptResultWithFailure(ctx context.Context, result kernel.AttemptResult, recovered bool, failure *kernel.Proposal) (kernel.Run, error) {
 	var lastErr error
 	for attempt := 0; attempt < supervisorReconcileAttempts; attempt++ {
 		current, found, readErr := daemon.store.Run(ctx, result.RunID())
@@ -1631,11 +1619,11 @@ func (daemon *Daemon) consumeAttemptResultWithFailure(ctx context.Context, resul
 			lastErr = clockErr
 			continue
 		}
-		consumed, consumeErr := daemon.store.ConsumeAttemptResultWithFailure(ctx, result, current.Revision, at, failure)
+		consumed, consumeErr := daemon.store.ConsumeAttemptResult(ctx, result, current.Revision, at)
 		if errors.Is(consumeErr, kernel.ErrConflict) && recovered && current.Phase == kernel.RunFinalizing && current.Revision.Int64() > 1 {
 			previous, revisionErr := kernel.NewRevision(current.Revision.Int64() - 1)
 			if revisionErr == nil {
-				consumed, consumeErr = daemon.store.ConsumeAttemptResultWithFailure(ctx, result, previous, at, failure)
+				consumed, consumeErr = daemon.store.ConsumeAttemptResult(ctx, result, previous, at)
 			} else {
 				consumeErr = revisionErr
 			}
