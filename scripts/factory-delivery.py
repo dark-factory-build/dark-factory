@@ -22,7 +22,11 @@ def task_state(config, operation):
     value = factoryctl(config, 'task', 'recovery', '--task', operation['task_id'], '--incarnation', operation['incarnation_id'])
     if value.get('state') not in ('missing', 'found'):
         raise ValueError('factory task state response is invalid')
-    return None if value['state'] == 'missing' else value
+    if value['state'] == 'missing':
+        return None
+    if value.get('task_id') != operation['task_id'] or value.get('incarnation_id') != operation['incarnation_id'] or value.get('project_id') != config['project_id'] or value.get('assigned_agent_id') != config['overseer_agent_id']:
+        raise ValueError('deterministic delivery task identity conflicts with factory state')
+    return value
 
 
 def enqueue(config, operation):

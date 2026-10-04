@@ -13,6 +13,18 @@ SPEC.loader.exec_module(delivery)
 SHA = "a" * 40
 
 
+class TaskStateIdentity(unittest.TestCase):
+    def test_found_task_owned_by_another_project_or_overseer_is_a_conflict(self):
+        config = {"project_id": "1" * 32, "overseer_agent_id": "2" * 32}
+        operation = {"task_id": "3" * 32, "incarnation_id": "4" * 32}
+        owned = {"state": "found", "task_id": operation["task_id"], "incarnation_id": operation["incarnation_id"], "project_id": config["project_id"], "assigned_agent_id": config["overseer_agent_id"]}
+        with mock.patch.object(delivery, "factoryctl", return_value=owned):
+            self.assertEqual(owned, delivery.task_state(config, operation))
+        for key, value in (("project_id", "9" * 32), ("assigned_agent_id", "9" * 32), ("task_id", "9" * 32), ("incarnation_id", "9" * 32)):
+            with mock.patch.object(delivery, "factoryctl", return_value=dict(owned, **{key: value})), self.assertRaises(ValueError):
+                delivery.task_state(config, operation)
+
+
 class DeliveryFixtures(unittest.TestCase):
     def setUp(self):
         self.enqueued = []
