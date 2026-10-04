@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
 	"strings"
 	"time"
 
@@ -210,6 +211,9 @@ func (daemon *Daemon) attemptMaintainer(ctx context.Context, call api.Call) api.
 }
 
 func (daemon *Daemon) recordMaintainerPublication(ctx context.Context, project kernel.ProjectID, task kernel.TaskID, request maintainerRequest, response json.RawMessage) error {
+	if err := validateMaintainerResponse(request, response); err != nil {
+		return err
+	}
 	if request.Method != "tools/call" && request.Method != "factory/tools/call_private" {
 		return nil
 	}
@@ -297,6 +301,74 @@ func (daemon *Daemon) recordMaintainerPublication(ctx context.Context, project k
 		err = daemon.store.RecordPublication(ctx, project, task, repo, kernel.ProductionPullRequest{Number: reply.Result.Pull.Number, Title: title, URL: reply.Result.Pull.URL, Head: reply.Result.Pull.Head, Branch: branch, Base: base, State: "open", Review: kernel.ProductionReview{Head: reply.Result.Pull.Head, State: "unknown"}}, at)
 	}
 	return err
+}
+
+// validateMaintainerResponse keeps a protocol-level error from looking like a
+// successful MCP call. It runs immediately before any publication or review
+// receipt can be persisted; tool-level isError results remain valid replies.
+func validateMaintainerResponse(request maintainerRequest, response json.RawMessage) error {
+	if !api.ValidMaintainerJSON(response) {
+		return errors.New("invalid Maintainer response")
+	}
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(response, &envelope); err != nil {
+		return errors.New("invalid Maintainer response")
+	}
+	var jsonrpc string
+	if err := json.Unmarshal(envelope["jsonrpc"], &jsonrpc); err != nil || jsonrpc != "2.0" || len(envelope["id"]) == 0 || !maintainerIDsEqual(envelope["id"], request.ID) {
+		return errors.New("invalid Maintainer response envelope")
+	}
+	if _, found := envelope["error"]; found {
+		return errors.New("Maintainer returned a JSON-RPC error")
+	}
+	if result, found := envelope["result"]; !found || string(bytes.TrimSpace(result)) == "null" {
+		return errors.New("invalid Maintainer response envelope")
+	}
+	return nil
+}
+
+func maintainerIDsEqual(left, right json.RawMessage) bool {
+	decode := func(raw json.RawMessage) (any, bool) {
+		decoder := json.NewDecoder(bytes.NewReader(raw))
+		decoder.UseNumber()
+		var value any
+		if err := decoder.Decode(&value); err != nil {
+			return nil, false
+		}
+		switch value.(type) {
+		case nil, string, json.Number:
+			return value, true
+		default:
+			return nil, false
+		}
+	}
+	leftValue, leftOK := decode(left)
+	rightValue, rightOK := decode(right)
+	if !leftOK || !rightOK {
+		return false
+	}
+	switch leftValue := leftValue.(type) {
+	case nil:
+		return rightValue == nil
+	case string:
+		rightString, ok := rightValue.(string)
+		return ok && leftValue == rightString
+	case json.Number:
+		rightNumber, ok := rightValue.(json.Number)
+		if !ok {
+			return false
+		}
+		var leftRat, rightRat big.Rat
+		if _, ok := leftRat.SetString(leftValue.String()); !ok {
+			return false
+		}
+		if _, ok := rightRat.SetString(rightNumber.String()); !ok {
+			return false
+		}
+		return leftRat.Cmp(&rightRat) == 0
+	default:
+		return false
+	}
 }
 
 // decodeMaintainerToolCall re-encodes the exact repository fields that local
@@ -400,7 +472,7 @@ func currentAcceptedIssueMetadata(request maintainerRequest, accepted kernel.Int
 	}
 	decoder := json.NewDecoder(bytes.NewReader(response))
 	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&live); err != nil || decoder.Decode(&struct{}{}) != io.EOF || live.JSONRPC != "2.0" || !bytes.Equal(bytes.TrimSpace(live.ID), bytes.TrimSpace(request.ID)) || live.Result.IsError == nil || *live.Result.IsError || len(live.Result.Content) == 0 {
+	if err := decoder.Decode(&live); err != nil || decoder.Decode(&struct{}{}) != io.EOF || live.JSONRPC != "2.0" || !maintainerIDsEqual(live.ID, request.ID) || live.Result.IsError == nil || *live.Result.IsError || len(live.Result.Content) == 0 {
 		return frozenIssue{}, errors.New("invalid observed issue response")
 	}
 	for _, content := range live.Result.Content {

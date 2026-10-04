@@ -694,21 +694,24 @@ func (b *daemonReviewBackend) callResponse(ctx context.Context, name string, arg
 	if err != nil {
 		return nil, err
 	}
+	return reviewResponseStructuredContent(maintainerRequest{JSONRPC: "2.0", ID: json.RawMessage(`1`)}, response)
+}
+
+func reviewResponseStructuredContent(request maintainerRequest, response json.RawMessage) (json.RawMessage, error) {
+	if err := validateMaintainerResponse(request, response); err != nil {
+		return nil, errors.New("review: Maintainer returned an invalid response")
+	}
 	var value struct {
 		Result struct {
-			IsError bool `json:"isError"`
-		} `json:"result"`
-	}
-	if err := json.Unmarshal(response, &value); err != nil || value.Result.IsError {
-		return nil, errors.New("review: Maintainer rejected operation")
-	}
-	var envelope struct {
-		Result struct {
+			IsError           bool            `json:"isError"`
 			StructuredContent json.RawMessage `json:"structuredContent"`
 		} `json:"result"`
 	}
-	if err := json.Unmarshal(response, &envelope); err != nil {
-		return nil, err
+	if err := json.Unmarshal(response, &value); err != nil {
+		return nil, errors.New("review: Maintainer returned an invalid response")
 	}
-	return envelope.Result.StructuredContent, nil
+	if value.Result.IsError {
+		return nil, errors.New("review: Maintainer rejected operation")
+	}
+	return value.Result.StructuredContent, nil
 }

@@ -106,6 +106,9 @@ func TestAcceptedIssueObservationReturnsOnlyFrozenSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := currentAcceptedIssueMetadata(maintainerRequest{JSONRPC: "2.0", ID: json.RawMessage(`1.0`)}, accepted, upstream); err != nil {
+		t.Fatalf("equivalent observed response ID rejected: %v", err)
+	}
 	if bytes.Contains(response, []byte("revised untrusted instructions")) {
 		t.Fatalf("frozen response exposed broker content: %s", response)
 	}
