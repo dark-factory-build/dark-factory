@@ -484,3 +484,12 @@ test("topology inventory preserves unavailable versus zero and rejects malformed
  const future = { ...valid, future_detail: "additive" };
  assert.deepEqual(decode(future).body.nodes[0].inventory, valid);
 });
+
+test("integrated topology sources retain exact target identity and reject invented revisions", () => {
+ const body = JSON.parse(fixture("topology.json")).body;
+ const source = { repository_id: "11".repeat(16), prefix: "", kind: "integrated", target_ref: "refs/remotes/origin/main", revision: "a".repeat(40), observed_at: 1000 };
+ const decode = (sources) => decodeServerControl(JSON.stringify({ type: "TOPOLOGY", id: "sources", body: { ...body, sources } }));
+ assert.deepEqual(decode([source]).body.sources, [source]);
+ for (const invalid of [{ ...source, revision: "" }, { ...source, kind: "approved" }, { ...source, repository_id: "unknown" }, { ...source, observed_at: -1 }, { ...source, revision: "main" }]) expectMalformed(() => decode([invalid]));
+ assert.equal(decode([{ ...source, kind: "unavailable", revision: "", reason: "Target unavailable" }]).body.sources[0].kind, "unavailable");
+});

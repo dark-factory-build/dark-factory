@@ -425,7 +425,7 @@ func TestInventoryCountsPhysicalPathsAndChangesDigest(t *testing.T) {
 		if node.Inventory == nil || node.Inventory.Direct != wantDirect || node.Inventory.Total != wantTotal {
 			t.Fatalf("%s inventory = %+v", node.Kind, node.Inventory)
 		}
-		if strings.Join(node.Inventory.Samples, ",") != "README.md,go.mod,image.svg" || node.Inventory.SamplesOmitted != 3 {
+		if strings.Join(node.Inventory.Samples, ",") != "README.md,go.mod,image.svg,main.go,main_test.go,unknown.bin" || node.Inventory.SamplesOmitted != 0 {
 			t.Fatalf("samples = %+v", node.Inventory)
 		}
 	}
@@ -476,7 +476,7 @@ func TestInventoryEmptySamplesAndClassification(t *testing.T) {
 		t.Fatal(err)
 	}
 	inventory = sampled.Nodes[0].Inventory
-	if strings.Join(inventory.Samples, ",") != "b.md,c.md,d.md" || inventory.SamplesOmitted != 2 {
+	if strings.Join(inventory.Samples, ",") != "b.md,c.md,d.md,e.md" || inventory.SamplesOmitted != 1 {
 		t.Fatalf("omitted samples = %+v", inventory)
 	}
 }

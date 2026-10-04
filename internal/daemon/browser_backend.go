@@ -806,6 +806,9 @@ func projectTopology(projectID string, snapshot topology.Snapshot) browserprotoc
 			Label: node.Label, Language: node.Language, SizeBucket: node.SizeBucket,
 		})
 	}
+	for _, source := range snapshot.Sources {
+		result.Sources = append(result.Sources, browserprotocol.TopologySource(source))
+	}
 	dependencies := &browserprotocol.TopologyDependencies{Source: "go-imports-package-manifests", Edges: []browserprotocol.TopologyEdge{}}
 	for _, edge := range snapshot.Edges {
 		if edge.Kind == topology.EdgeImports {

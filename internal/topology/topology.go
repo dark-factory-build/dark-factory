@@ -46,10 +46,12 @@ type EdgeKind string
 const EdgeImports EdgeKind = "imports"
 
 type Snapshot struct {
-	Digest         string `json:"digest"`
-	SourceRevision string `json:"source_revision,omitempty"`
-	Nodes          []Node `json:"nodes"`
-	Edges          []Edge `json:"edges"`
+	Digest         string   `json:"digest"`
+	SourceRevision string   `json:"source_revision,omitempty"`
+	Sources        []Source `json:"sources,omitempty"`
+	Files          []File   `json:"-"`
+	Nodes          []Node   `json:"nodes"`
+	Edges          []Edge   `json:"edges"`
 }
 
 type Node struct {
@@ -91,6 +93,7 @@ type languageFile struct{ dir, language string }
 type discovery struct {
 	dirs      map[string]int64
 	inventory map[string]*Inventory
+	contents  []File
 	files     int
 	modules   map[string]string
 	goPkgs    map[string]*goPackage
@@ -151,7 +154,7 @@ func build(ctx context.Context, root, project string, bounds limits) (Snapshot, 
 	if err != nil {
 		return Snapshot{}, err
 	}
-	result := Snapshot{SourceRevision: revision, Nodes: nodes, Edges: edges}
+	result := Snapshot{SourceRevision: revision, Nodes: nodes, Edges: edges, Files: found.contents}
 	result.Digest = graphDigest(nodes, edges)
 	return result, nil
 }
@@ -245,8 +248,9 @@ func discover(ctx context.Context, root string, bounds limits) (*discovery, erro
 		result.dirs[dir] += fileInfo.Size()
 		inventory := result.inventory[dir]
 		inventory.Direct.add(classify(rel))
+		result.contents = append(result.contents, File{Path: rel, Kind: classify(rel), Bytes: fileInfo.Size()})
 		sampleName := path.Base(rel)
-		if len(inventory.Samples) < 3 && len(sampleName) <= 128 && utf8.ValidString(sampleName) {
+		if len(inventory.Samples) < 32 && len(sampleName) <= 128 && utf8.ValidString(sampleName) {
 			inventory.Samples = append(inventory.Samples, sampleName)
 		} else {
 			inventory.SamplesOmitted++
@@ -739,7 +743,7 @@ func keys[V any](values map[string]V) []string {
 
 // Inventory counts eligible scanned physical files. Total includes Direct and
 // descendants; nodes sharing a path describe the same inventory, never additive
-// child totals. Samples name at most three direct files in lexical order.
+// child totals. Samples name at most 32 direct files in lexical order.
 type Inventory struct {
 	Direct         InventoryCounts `json:"direct"`
 	Total          InventoryCounts `json:"total"`

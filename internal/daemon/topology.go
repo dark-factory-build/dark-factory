@@ -9,6 +9,7 @@ import (
 	"path"
 	"time"
 
+	"github.com/dark-factory-build/dark-factory/internal/change"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 	"github.com/dark-factory-build/dark-factory/internal/topology"
 )
@@ -54,7 +55,7 @@ func (daemon *Daemon) ProjectTopology(ctx context.Context, projectID kernel.Proj
 	// build gate if that ever costs more than the duplicated walk.
 	var snapshot topology.Snapshot
 	if len(repositories) == 1 {
-		snapshot, err = topology.Build(ctx, repositories[0].Root, repositories[0].ID.String())
+		snapshot, err = daemon.repositoryTopology(ctx, repositories[0])
 		if err != nil {
 			return topology.Snapshot{}, err
 		}
@@ -65,7 +66,7 @@ func (daemon *Daemon) ProjectTopology(ctx context.Context, projectID kernel.Proj
 		groupID := hex.EncodeToString(groupDigest[:])
 		snapshot.Nodes = []topology.Node{{ID: groupID, Kind: topology.NodeRepository, RelativePath: ".", Label: project.Name, SizeBucket: "small"}}
 		for _, repository := range repositories {
-			part, buildErr := topology.Build(ctx, repository.Root, repository.ID.String())
+			part, buildErr := daemon.repositoryTopology(ctx, repository)
 			if buildErr != nil {
 				return topology.Snapshot{}, buildErr
 			}
@@ -77,6 +78,14 @@ func (daemon *Daemon) ProjectTopology(ctx context.Context, projectID kernel.Proj
 					node.Label = repository.Name
 				}
 			}
+			for index := range part.Files {
+				part.Files[index].Path = path.Join(repository.ID.String(), part.Files[index].Path)
+			}
+			for index := range part.Sources {
+				part.Sources[index].Prefix = repository.ID.String()
+			}
+			snapshot.Files = append(snapshot.Files, part.Files...)
+			snapshot.Sources = append(snapshot.Sources, part.Sources...)
 			snapshot.Nodes = append(snapshot.Nodes, part.Nodes...)
 			snapshot.Edges = append(snapshot.Edges, part.Edges...)
 			if len(snapshot.Nodes) > 4096 || len(snapshot.Edges) > 16384 {
@@ -107,4 +116,37 @@ func (daemon *Daemon) freshTopology(projectID kernel.ProjectID, configuration st
 		return topology.Snapshot{}, false
 	}
 	return held.snapshot, true
+}
+
+func (daemon *Daemon) repositoryTopology(ctx context.Context, repository kernel.ProjectRepository) (topology.Snapshot, error) {
+	source := topology.Source{RepositoryID: repository.ID.String(), Kind: "unavailable", TargetRef: repository.BaseRef, ObservedAt: daemon.now().UnixMilli()}
+	registered, found, err := daemon.store.RepositorySourceIdentity(ctx, repository.ID)
+	if err != nil {
+		return topology.Snapshot{}, err
+	}
+	if !found {
+		// Legacy non-Git projects remain inspectable but never claim integration.
+		observed, err := topology.Build(ctx, repository.Root, repository.ID.String())
+		source.Reason = "Integrated target has no registered Git identity; checkout observation only."
+		observed.SourceRevision = ""
+		observed.Sources = []topology.Source{source}
+		return observed, err
+	}
+	identity, err := observationIdentity(registered)
+	if err != nil {
+		return topology.Snapshot{}, err
+	}
+	revision, archive, err := change.ArchiveSource(ctx, change.TrustedGitExecutable, repository.Root, repository.BaseRef, identity)
+	if err == nil {
+		observed, buildErr := topology.BuildArchive(ctx, archive, repository.ID.String(), revision)
+		if buildErr == nil {
+			source.Kind, source.Revision = "integrated", revision
+			observed.Sources = []topology.Source{source}
+			return observed, nil
+		}
+	}
+	source.Reason = "Integrated target is unavailable locally; refresh the registered repository target."
+	root := topology.Node{ID: fmt.Sprintf("%x", sha256.Sum256([]byte("unavailable:"+repository.ID.String()))), Kind: topology.NodeRepository, RelativePath: ".", Label: repository.Name, SizeBucket: "empty"}
+	encoded, _ := json.Marshal(source)
+	return topology.Snapshot{Digest: fmt.Sprintf("%x", sha256.Sum256(encoded)), Nodes: []topology.Node{root}, Edges: []topology.Edge{}, Sources: []topology.Source{source}}, nil
 }

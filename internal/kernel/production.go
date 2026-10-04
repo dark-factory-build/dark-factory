@@ -161,7 +161,7 @@ func migrateProductionRuntimeRecords(ctx context.Context, c *sql.Conn, project P
 }
 
 func validProductionPull(pr ProductionPullRequest) bool {
-	return pr.Number > 0 && pr.Number <= 1<<53-1 && validOutcomeText(pr.Title, 1024) && pr.Title != "" && productionURL(pr.URL) && productionSHA(pr.Head) && productionSHA(pr.Merge) && productionSHA(pr.Review.Head) && (pr.HeadRepository == "" || productionRepository.MatchString(pr.HeadRepository)) && validOutcomeText(pr.Branch, 256) && validOutcomeText(pr.Base, 256) && validOutcomeText(pr.MergeQueue, 64) && validOutcomeText(pr.MergedAt, 64) && validOutcomeText(pr.NextAction, 2048) && validOutcomeText(pr.Review.State, 64) && validOutcomeText(pr.Review.Findings, maxProductionReviewFindings) && validOutcomeText(pr.Review.OperationID, 128) && validOutcomeText(pr.Review.CorrectsReviewOperationID, 128) && productionURL(pr.Review.URL) && (pr.State == "open" || pr.State == "closed" || pr.State == "merged")
+	return pr.Number > 0 && pr.Number <= 1<<53-1 && validOutcomeText(pr.Title, 1024) && pr.Title != "" && productionURL(pr.URL) && productionSHA(pr.Head) && productionSHA(pr.BaseSHA) && productionSHA(pr.Merge) && productionSHA(pr.Review.Head) && (pr.HeadRepository == "" || productionRepository.MatchString(pr.HeadRepository)) && validOutcomeText(pr.Branch, 256) && validOutcomeText(pr.Base, 256) && validOutcomeText(pr.MergeQueue, 64) && validOutcomeText(pr.MergedAt, 64) && validOutcomeText(pr.NextAction, 2048) && validOutcomeText(pr.Review.State, 64) && validOutcomeText(pr.Review.Findings, maxProductionReviewFindings) && validOutcomeText(pr.Review.OperationID, 128) && validOutcomeText(pr.Review.CorrectsReviewOperationID, 128) && productionURL(pr.Review.URL) && (pr.State == "open" || pr.State == "closed" || pr.State == "merged")
 }
 
 func productionRecordOnConnection(ctx context.Context, c *sql.Conn, project ProjectID, repo, kind, id, visual string, value any, at int64) error {
@@ -787,7 +787,7 @@ func (store *Store) RecoverRunningReviewOperations(ctx context.Context, at UnixM
 // projection replaces it only when normal publication records the association.
 const productionRows = `SELECT repository, kind, identity, visual_id, document, observed_at_ms FROM production_records WHERE project_id = ?
  UNION ALL SELECT COALESCE(r.name, ''), 'construction', lower(hex(c.id)), 'change:' || lower(hex(c.id)),
-		json_object('title', t.title, 'phase', c.phase, 'status', t.status, 'head', lower(hex(c.head_commit)), 'task_id', lower(hex(t.id)), 'blocked_reason', t.blocked_reason,
+		json_object('title', t.title, 'phase', c.phase, 'status', t.status, 'base', lower(hex(c.base_commit)), 'head', lower(hex(c.head_commit)), 'task_id', lower(hex(t.id)), 'blocked_reason', t.blocked_reason,
 			'has_changes', CASE WHEN c.head_commit IS NULL OR c.base_commit IS NULL THEN NULL WHEN c.head_commit = c.base_commit THEN json('false') ELSE json('true') END,
 			'needs_you', CASE WHEN t.status = 'succeeded' AND c.head_commit IS NOT NULL AND c.base_commit IS NOT NULL AND c.head_commit <> c.base_commit
 				AND c.updated_at_ms + ? <= CAST(strftime('%s','now') AS INTEGER) * 1000

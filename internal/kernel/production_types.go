@@ -21,6 +21,7 @@ type ProductionPullRequest struct {
 	HeadRepository string           `json:"head_repository,omitempty"`
 	Branch         string           `json:"branch"`
 	Base           string           `json:"base"`
+	BaseSHA        string           `json:"base_sha,omitempty"`
 	State          string           `json:"state"`
 	Merge          string           `json:"merge,omitempty"`
 	MergeQueue     string           `json:"merge_queue,omitempty"`

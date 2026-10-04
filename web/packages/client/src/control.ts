@@ -136,7 +136,8 @@ export type TopologyInventoryCounts = { source: number; tests: number; documenta
 export type TopologyInventory = Readonly<{ direct: Readonly<TopologyInventoryCounts>; total: Readonly<TopologyInventoryCounts>; samples: readonly string[]; samples_omitted: number }>;
 export type TopologyNode = { id: string; parent_id: string; kind: "repository" | "module" | "package" | "directory"; path: string; label: string; language: string; size_bucket: "empty" | "tiny" | "small" | "medium" | "large"; inventory?: TopologyInventory };
 export type TopologyDependencies = { source: "go-imports-package-manifests"; edges: { from: string; to: string; weight: number }[]; omitted: number };
-export type TopologyBody = { project_id: string; digest: string; source_revision: string; nodes: TopologyNode[]; dependencies?: TopologyDependencies; inventory_omitted?: number };
+export type TopologySource = Readonly<{ repository_id: string; prefix: string; kind: "integrated" | "unavailable"; target_ref: string; revision: string; observed_at: number; reason?: string }>;
+export type TopologyBody = { project_id: string; digest: string; source_revision: string; sources?: readonly TopologySource[]; nodes: TopologyNode[]; dependencies?: TopologyDependencies; inventory_omitted?: number };
 export type RunPathsGetBody = { agent_id: string };
 export type RunPathsBody = { agent_id: string; run_id: string; paths: string[] };
 export type AccountsDiscoverBody = { offset?: number };
@@ -877,7 +878,7 @@ function intakeResult(body: Record<string, unknown>, wire: boolean): IntakeResul
 }
 
 function topologyBody(body: Record<string, unknown>, wire: boolean): TopologyBody {
-  requireKeys(body, ["project_id", "digest", "source_revision", "nodes"], wire, ["dependencies", "inventory_omitted"]);
+  requireKeys(body, ["project_id", "digest", "source_revision", "nodes"], wire, ["dependencies", "inventory_omitted", "sources"]);
   const nodes = itemArray(body.nodes, (item) => topologyNode(item, wire));
   uniqueIDs(nodes);
   let dependencies: TopologyDependencies | undefined;
@@ -899,7 +900,7 @@ function topologyBody(body: Record<string, unknown>, wire: boolean): TopologyBod
     });
     dependencies = { source: value.source, edges, omitted: integer(value.omitted, 0, 0xffffffff) };
   }
-  return { project_id: dynamicID(body.project_id), digest: fixedHex(body.digest, 32), source_revision: topologySource(body.source_revision), nodes, ...(dependencies === undefined ? {} : { dependencies }), ...(present(body, "inventory_omitted") ? { inventory_omitted: integer(body.inventory_omitted, 0, nodes.length) } : {}) };
+  return { project_id: dynamicID(body.project_id), digest: fixedHex(body.digest, 32), source_revision: topologySource(body.source_revision), ...(present(body,"sources") ? {sources: topologySources(body.sources,wire)} : {}), nodes, ...(dependencies === undefined ? {} : { dependencies }), ...(present(body, "inventory_omitted") ? { inventory_omitted: integer(body.inventory_omitted, 0, nodes.length) } : {}) };
 }
 function topologyNode(value: unknown, wire: boolean): TopologyNode {
   if (!isObject(value)) malformed(); requireKeys(value, ["id", "parent_id", "kind", "path", "label", "language", "size_bucket"], wire, ["inventory"]);
@@ -1053,10 +1054,22 @@ function topologyInventory(value: unknown, wire: boolean): TopologyInventory {
   if (!isObject(value)) malformed();
   requireKeys(value, ["direct", "total", "samples", "samples_omitted"], wire);
   const direct = topologyInventoryCounts(value.direct, wire), total = topologyInventoryCounts(value.total, wire);
-  if (INVENTORY_CATEGORIES.some((key) => direct[key] > total[key]) || !Array.isArray(value.samples) || value.samples.length > 3) malformed();
+  if (INVENTORY_CATEGORIES.some((key) => direct[key] > total[key]) || !Array.isArray(value.samples) || value.samples.length > 32) malformed();
   const samples = value.samples.map((name) => boundedText(name, 1, 128));
   if (new Set(samples).size !== samples.length || samples.some((name) => name.includes("/") || name.includes("\0") || name === "." || name === "..")) malformed();
   const samples_omitted = integer(value.samples_omitted, 0, 50_000);
   if (samples.length + samples_omitted !== Object.values(direct).reduce((sum, count) => sum + count, 0)) malformed();
   return { direct, total, samples, samples_omitted };
+}
+
+function topologySources(value: unknown, wire: boolean): TopologySource[] {
+ if (!Array.isArray(value) || value.length > 32) malformed();
+ return value.map((source) => {
+  if (!isObject(source)) malformed();
+  requireKeys(source,["repository_id","prefix","kind","target_ref","revision","observed_at"],wire,["reason"]);
+  if (source.kind !== "integrated" && source.kind !== "unavailable") malformed();
+  const revision = topologySource(source.revision);
+  if (source.kind === "integrated" && revision === "") malformed();
+  return {repository_id:dynamicID(source.repository_id),prefix:boundedText(source.prefix,0,MAX_TASK_TITLE_BYTES),kind:source.kind,target_ref:boundedText(source.target_ref,0,256),revision,observed_at:integer(source.observed_at,0,Number.MAX_SAFE_INTEGER),...(present(source,"reason") ? {reason:boundedText(source.reason,0,256)} : {})};
+ });
 }
