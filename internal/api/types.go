@@ -506,14 +506,6 @@ type OutcomeListInput struct {
 	Limit     uint64 `json:"limit,omitempty"`
 }
 
-type ProductionInput struct {
-	ProjectID   string                       `json:"project_id"`
-	Observation kernel.ProductionObservation `json:"observation"`
-}
-
-type ProductionResult struct {
-	State string `json:"state"`
-}
 type ContentInput struct {
 	RepositoryID     string `json:"repository_id,omitempty"`
 	ID               string `json:"id"`

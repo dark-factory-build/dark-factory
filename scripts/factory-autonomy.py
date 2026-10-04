@@ -83,30 +83,21 @@ def shared_intake():
     return module
 
 
-def tick(config_path, config, release_only=False, skip_intake=False, environment=None, review_arguments=(), controller_lock_fd=None):
+def tick(config_path, config, release_only=False):
     scripts = Path(__file__).resolve().parent
     calls = []
-    # Observe the published repository on every bounded controller pass. The
-    # production projection is the durable event stream for reviews, queue
-    # entries and checks; release-only passes retain the same single poller.
-    if config.get('repository') and config.get('project_id'):
-        calls.append([sys.executable, str(scripts / 'factory-production.py'), str(config_path), '--record'])
-    if not release_only and not skip_intake:
+    if not release_only:
         calls.append([sys.executable, str(scripts / 'factory-intake.py'), str(config_path), '--once'])
     releases = config.get('release_configs', []) if release_only else []
     for release_config in releases:
         calls.append([sys.executable, str(scripts / 'factory-release.py'), release_config, '--latest', '--once'])
-    if not release_only and 'review_mirror_root' in config:
-        if not isinstance(config['review_mirror_root'], str) or not Path(config['review_mirror_root']).is_absolute():
-            raise ValueError('review_mirror_root must be an absolute path')
-        calls.append([sys.executable, str(scripts / 'factory-review-intake.py'), str(config_path), '--once'] + list(review_arguments) + (['--controller-lock-fd', str(controller_lock_fd)] if controller_lock_fd is not None else []))
     results = []
     for argv in calls:
         try:
-            completed = subprocess.run(argv, capture_output=True, text=True, env=environment, pass_fds=() if controller_lock_fd is None else (controller_lock_fd,), timeout=1300 if Path(argv[1]).name == 'factory-intake.py' else None)
+            completed = subprocess.run(argv, capture_output=True, text=True, timeout=1300 if Path(argv[1]).name == 'factory-intake.py' else None)
             result = {'component': Path(argv[1]).stem, 'ok': completed.returncode == 0}
             if completed.returncode:
-                result['error'] = 'legacy_review_customer_unsupported: use the installed customer publication workflow' if Path(argv[1]).name == 'factory-review-intake.py' and 'Legacy review is owner-only' in completed.stderr else 'exit_' + str(completed.returncode)
+                result['error'] = 'exit_' + str(completed.returncode)
                 # A status alone names no cause: 'exit_1' left one broken tick
                 # indistinguishable from the next for hours. The receipt keeps
                 # its finite codes and no child output; this controller's own
@@ -226,7 +217,7 @@ def managed_api(factoryctl, home, arguments, value=None):
 
 def managed_tick(home, factoryctl):
     home, state, identity = managed_paths(home)
-    with managed_lock(Path(str(home) + '.autonomy.lock')) as controller_lock_fd, managed_lock(state / 'journal.lock'):
+    with managed_lock(Path(str(home) + '.autonomy.lock')), managed_lock(state / 'journal.lock'):
         migration = managed_read(state / 'migration.json', maximum=4 << 20)
         if migration and (migration.get('home_identity') != identity or migration.get('phase') != 'completed'):
             return {'state': 'migration_pending'}
@@ -324,17 +315,7 @@ def managed_tick(home, factoryctl):
             if result.get('state') != 'ok' or error == 'overflow':
                 summary.update(last_attempt_at=now, state='error', error=error)
             summaries[identifier] = summary
-        review = journal.get('review', [])
-        if migration and migration['job']['was_loaded'] and 'review_mirror_root' in json.loads(migration['config']) and now >= journal.get('review_next_due', 0):
-            environment = dict(os.environ, PATH=migration['job']['path_environment'])
-            review = tick(state / 'legacy-review.json', json.loads(migration['config']), skip_intake=True, environment=environment, review_arguments=['--managed-migration', str(state / 'migration.json'), '--factoryctl', str(factoryctl)], controller_lock_fd=controller_lock_fd)
-            journal.update(review=review, review_next_due=now + int(json.loads(migration['config']).get('poll_seconds',120)))
-            atomic_json(state / 'journal.json',journal)
-        if any(not item['ok'] for item in review):
-            error = 'review_unavailable'
         summary = {'version': 1, 'state': 'error' if error else 'ok', 'error': error, 'sources': summaries}
-        if review:
-            summary['review'] = review
         if len(json.dumps(summary).encode()) > 64 << 10:
             raise ValueError('managed intake status exceeds its bound')
         atomic_json(state / 'status.json', summary)
@@ -372,7 +353,7 @@ def legacy_migration_input(home, config_path):
         raise ValueError(str(error)) from error
     if Path(config['factory_home']).resolve() != home:
         raise ValueError('legacy configuration belongs to another factory')
-    known = {'repository', 'project_id', 'overseer_agent_id', 'label', 'allowed_authors', 'journal', 'factory_home', 'max_issues', 'poll_seconds', 'command_timeout', 'priority_default', 'priority_by_label', 'review_mirror_root', 'review_provider', 'base', 'release_configs'}
+    known = {'repository', 'project_id', 'overseer_agent_id', 'label', 'allowed_authors', 'journal', 'factory_home', 'max_issues', 'poll_seconds', 'command_timeout', 'priority_default', 'priority_by_label', 'review_mirror_root', 'review_provider', 'base', 'release_configs'}  # Retired review keys stay accepted and ignored.
     if set(config) - known:
         raise ValueError('unsupported legacy configuration fields: ' + ', '.join(sorted(set(config) - known)))
     raw_journal = managed_read(Path(config['journal']), maximum=1 << 20, decode=lambda data: data)
@@ -387,10 +368,6 @@ def legacy_migration_input(home, config_path):
         legacy.bind_journal(config, journal)
     except legacy.IntakeError as error:
         raise ValueError(str(error)) from error
-    if config.get('review_provider', 'codex') not in ('codex', 'claude'):
-        raise ValueError('review_provider must be codex or claude')
-    if 'review_mirror_root' in config and (not isinstance(config['review_mirror_root'], str) or not Path(config['review_mirror_root']).is_absolute()):
-        raise ValueError('review_mirror_root must be an absolute path')
     history = []
     for key, record in sorted(journal['issues'].items()):
         if not isinstance(record, dict) or type(record.get('number')) is not int or key != legacy.issue_key(config, record['number']) or record.get('managed') is not True or set(record) - {'number', 'managed', 'processed_fingerprint', 'desired', 'desired_fingerprint', 'operation', 'needs_operator_recovery'}:
@@ -415,22 +392,8 @@ def legacy_migration_input(home, config_path):
     configuration = {'priority_default': config.get('priority_default', 0), 'priority_by_label': config.get('priority_by_label', {}), 'repository': config['repository'], 'overseer_agent_id': config['overseer_agent_id'], 'label': config['label'], 'policy': 'trusted_authors' if humans else 'manual', 'trusted_authors': humans, 'poll_seconds': int(config.get('poll_seconds', 120)), 'admission_limit': int(config.get('max_issues', 25))}
     digest = lambda value: hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
     source_id = hashlib.sha256(('legacy-intake\0' + str(home) + '\0' + str(config_path)).encode()).hexdigest()[:32]
-    request = {'action': 'legacy_preview', 'source_id': source_id, 'project_id': config['project_id'], 'configuration': configuration, 'legacy': {'review_companion': 'review_mirror_root' in config, 'manual_app_authors': manual_apps, 'config_hash': digest(config), 'journal_hash': digest(history), 'history': history}}
+    request = {'action': 'legacy_preview', 'source_id': source_id, 'project_id': config['project_id'], 'configuration': configuration, 'legacy': {'manual_app_authors': manual_apps, 'config_hash': digest(config), 'journal_hash': digest(history), 'history': history}}
     return request, config, raw_config.decode(), raw_journal.decode()
-
-
-def legacy_review_ready(config, publication):
-    if 'review_mirror_root' not in config:
-        return
-    if not isinstance(publication, str) or not publication:
-        raise ValueError('review publication repository is unbound; legacy schedule remains untouched')
-    spec = importlib.util.spec_from_file_location('legacy_review_preflight', Path(__file__).with_name('factory-review-intake.py'))
-    reviewer = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(reviewer)
-    try:
-        reviewer.mirror(dict(config, repository=publication))
-    except (reviewer.ReviewError, reviewer.intake.IntakeError, OSError) as error:
-        raise ValueError('prepare the configured Git review mirror for the publication repository before cutover; legacy schedule remains untouched') from error
 
 
 def legacy_migration_job(config_path):
@@ -632,10 +595,8 @@ def managed_migrate(home, factoryctl, config_path, plan_hash=None, acknowledge_p
             job = legacy_migration_job(config_path)
             refuse_legacy_intake_service(home, Path(job['path']))
         reply = managed_api(factoryctl, home, ['legacy_preview'], request)
-        if reply.get('state') == 'legacy_preview':
-            legacy_review_ready(config, reply.get('legacy', {}).get('publication_repository'))
         reply['configuration'] = dict(request['configuration'], target_repository_id=reply.get('legacy', {}).get('target_repository_id', request['configuration'].get('target_repository_id', '')))
-        reply['companions'] = {key: config[key] for key in ('review_mirror_root','review_provider','base','release_configs','command_timeout') if key in config}
+        reply['companions'] = {key: config[key] for key in ('release_configs','command_timeout') if key in config}
         reply['source_id'] = request['source_id']
         if receipt:
             reply['cutover_phase'] = receipt['phase']
@@ -644,9 +605,7 @@ def managed_migrate(home, factoryctl, config_path, plan_hash=None, acknowledge_p
         raise ValueError('migration requires the exact reviewed plan hash')
     if not receipt and request['legacy']['manual_app_authors'] and not acknowledge_policy_narrowing:
         raise ValueError('review App/bot policy narrowing: imported work is preserved, future bot issues require manual acceptance; apply with --acknowledge-policy-narrowing')
-    script, _, _ = managed_install_assets(factoryctl)  # Fail before stopping anything.
-    if 'review_mirror_root' in config and managed_read(script.with_name('factory-review-intake.py'), private=False, maximum=1 << 20, decode=lambda data: data) is None:
-        raise ValueError('installed review companion is missing; legacy schedule remains untouched')
+    managed_install_assets(factoryctl)  # Fail before stopping anything.
     home, state, identity = managed_paths(home)
     with managed_lock(Path(str(home) + '.autonomy.lock')), managed_lock(Path(config['journal'] + '.lock'), private=False):
         receipt = managed_read(receipt_path, maximum=4 << 20)
@@ -665,7 +624,6 @@ def managed_migrate(home, factoryctl, config_path, plan_hash=None, acknowledge_p
                 if reply.get('state') != 'legacy_preview' or reply.get('legacy', {}).get('plan_hash') != plan_hash:
                     return reply
                 receipt['plan_hash'] = plan_hash
-                legacy_review_ready(config, reply['legacy'].get('publication_repository'))
                 request['legacy']['plan_hash'] = plan_hash
                 request['configuration']['target_repository_id'] = reply['legacy']['target_repository_id']
                 atomic_json(receipt_path, receipt)
@@ -677,7 +635,6 @@ def managed_migrate(home, factoryctl, config_path, plan_hash=None, acknowledge_p
             reply = managed_api(factoryctl, home, ['legacy_preview'], request)
             if reply.get('state') != 'legacy_preview' or reply.get('legacy', {}).get('plan_hash') != plan_hash:
                 return reply if reply.get('state') != 'legacy_preview' else dict(reply, state='stale')
-            legacy_review_ready(config, reply['legacy'].get('publication_repository'))
             request['legacy']['plan_hash'] = plan_hash
             request['legacy']['acknowledge_policy_narrowing'] = bool(request['legacy']['manual_app_authors']) and acknowledge_policy_narrowing
             request['configuration']['target_repository_id'] = reply['legacy']['target_repository_id']
@@ -716,7 +673,6 @@ def managed_migrate(home, factoryctl, config_path, plan_hash=None, acknowledge_p
             receipt['phase'] = 'baseline_committed'
             atomic_json(receipt_path, receipt)
         if receipt['phase'] == 'baseline_committed':
-            atomic_json(state / 'legacy-review.json', json.loads(receipt['config']))
             managed_service(home, factoryctl, 'install', migration=True)
             receipt['phase'] = 'managed_started'
             atomic_json(receipt_path, receipt)
@@ -788,7 +744,7 @@ def main():
                  'EnvironmentVariables': {'PATH': os.environ.get('PATH', '/usr/bin:/bin:/usr/sbin:/sbin')}}
         sys.stdout.buffer.write(plistlib.dumps(plist))
         return 0
-    # Release waits must not hold the intake/review scheduler's lock.
+    # Release waits must not hold the intake scheduler's lock.
     descriptor = os.open(Path(str(Path(config['factory_home']).resolve()) + suffix + '.autonomy.lock'), os.O_CREAT | os.O_RDWR, 0o600)
     with os.fdopen(descriptor, 'a+') as lock:
         try:
@@ -797,7 +753,7 @@ def main():
             raise ValueError('another controller owns this factory') from error
         if not args.release_only and Path(str(Path(config['factory_home']).resolve()) + '.intake/migration.json').exists():
             raise ValueError('legacy intake was explicitly cut over; resume or use the managed service')
-        results = tick(config_path, config, args.release_only, controller_lock_fd=lock.fileno())
+        results = tick(config_path, config, args.release_only)
         write_health(config, results, args.release_only)
     print(json.dumps({'at': int(time.time()), 'components': results}), flush=True)
     return 0 if all(result['ok'] for result in results) else 1

@@ -33,11 +33,8 @@ for controller_asset in \
     factory-autonomy.py \
     factory-delivery.py \
     factory-intake.py \
-    factory-production.py \
-    factory-production-reviews.py \
     factory-publication.py \
     factory-release.py \
-    factory-review-intake.py \
     go-gate-environment.sh \
     verify-adversarial-review.sh \
     supervision.md
@@ -358,11 +355,8 @@ for controller_asset in \
     factory-autonomy.py \
     factory-delivery.py \
     factory-intake.py \
-    factory-production.py \
-    factory-production-reviews.py \
     factory-publication.py \
     factory-release.py \
-    factory-review-intake.py \
     go-gate-environment.sh \
     verify-adversarial-review.sh \
     supervision.md

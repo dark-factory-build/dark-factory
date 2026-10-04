@@ -15,6 +15,5 @@
   "poll_seconds": 120,
   "factory_home": "/Users/you/.dark-factory",
   "journal": "/Users/you/.dark-factory-autonomy/github-intake.json",
-  "review_mirror_root": "/Users/you/.dark-factory-mirrors",
   "release_configs": []
 }
