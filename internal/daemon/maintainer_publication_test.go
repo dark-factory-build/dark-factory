@@ -181,13 +181,13 @@ func TestRecordMaintainerPublicationPreservesBlockUntilCorrection(t *testing.T) 
 	head := strings.Repeat("a", 40)
 	blockOperation := "11111111-1111-4111-8111-111111111111"
 	var taskID kernel.TaskID
-	blockRequest := maintainerRequest{Method: "tools/call", Params: json.RawMessage(`{"name":"submit_pull_request_review","arguments":{"repository":"team/repo","pull_number":7,"head_sha":"` + head + `","operation_id":"` + blockOperation + `","event":"REQUEST_CHANGES","body":"fix the exact finding"}}`)}
-	blockResponse := json.RawMessage(`{"result":{"isError":false,"structuredContent":{"head_sha":"` + head + `","verdict":"block"}}}`)
+	blockRequest := maintainerRequest{JSONRPC: "2.0", ID: json.RawMessage(`1`), Method: "tools/call", Params: json.RawMessage(`{"name":"submit_pull_request_review","arguments":{"repository":"team/repo","pull_number":7,"head_sha":"` + head + `","operation_id":"` + blockOperation + `","event":"REQUEST_CHANGES","body":"fix the exact finding"}}`)}
+	blockResponse := json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"isError":false,"structuredContent":{"head_sha":"` + head + `","verdict":"block"}}}`)
 	if err := fixture.daemon.recordMaintainerPublication(ctx, projectID, taskID, blockRequest, blockResponse); err != nil {
 		t.Fatal(err)
 	}
-	plainAllow := maintainerRequest{Method: "tools/call", Params: json.RawMessage(`{"name":"submit_pull_request_review","arguments":{"repository":"team/repo","pull_number":7,"head_sha":"` + head + `","operation_id":"22222222-2222-4222-8222-222222222222","event":"ALLOW","body":"looks good"}}`)}
-	plainAllowResponse := json.RawMessage(`{"result":{"isError":false,"structuredContent":{"head_sha":"` + head + `","verdict":"allow"}}}`)
+	plainAllow := maintainerRequest{JSONRPC: "2.0", ID: json.RawMessage(`1`), Method: "tools/call", Params: json.RawMessage(`{"name":"submit_pull_request_review","arguments":{"repository":"team/repo","pull_number":7,"head_sha":"` + head + `","operation_id":"22222222-2222-4222-8222-222222222222","event":"ALLOW","body":"looks good"}}`)}
+	plainAllowResponse := json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"isError":false,"structuredContent":{"head_sha":"` + head + `","verdict":"allow"}}}`)
 	if err := fixture.daemon.recordMaintainerPublication(ctx, projectID, taskID, plainAllow, plainAllowResponse); err != nil {
 		t.Fatal(err)
 	}
@@ -195,7 +195,7 @@ func TestRecordMaintainerPublicationPreservesBlockUntilCorrection(t *testing.T) 
 	if pull.Review.State != "block" || pull.Review.Findings != "fix the exact finding" {
 		t.Fatalf("plain allow suppressed block: %+v", pull.Review)
 	}
-	correction := maintainerRequest{Method: "tools/call", Params: json.RawMessage(`{"name":"submit_pull_request_review","arguments":{"repository":"team/repo","pull_number":7,"head_sha":"` + head + `","operation_id":"33333333-3333-4333-8333-333333333333","corrects_review_operation_id":"` + blockOperation + `","event":"ALLOW","body":"the exact finding is refuted"}}`)}
+	correction := maintainerRequest{JSONRPC: "2.0", ID: json.RawMessage(`1`), Method: "tools/call", Params: json.RawMessage(`{"name":"submit_pull_request_review","arguments":{"repository":"team/repo","pull_number":7,"head_sha":"` + head + `","operation_id":"33333333-3333-4333-8333-333333333333","corrects_review_operation_id":"` + blockOperation + `","event":"ALLOW","body":"the exact finding is refuted"}}`)}
 	if err := fixture.daemon.recordMaintainerPublication(ctx, projectID, taskID, correction, plainAllowResponse); err != nil {
 		t.Fatal(err)
 	}
