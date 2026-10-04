@@ -118,6 +118,46 @@ func TestAttemptsCannotSubmitAVerdictOrEnqueue(t *testing.T) {
 	}
 }
 
+// Codex 0.155.1 sends every tools/call with params._meta (captured verbatim
+// below, ids shortened). Canary 5's overseer got "invalid" for both reads.
+func TestMaintainerAcceptsAndDropsClientMeta(t *testing.T) {
+	fixture := newDispatchFixture(t)
+	ctx := context.Background()
+	project := mustProjectID(t, testID(195))
+	if _, err := fixture.store.CreateProject(ctx, kernel.NewProject{ID: project, Name: "project", Root: "/project/195", SourceIdentity: &kernel.RepositorySourceIdentity{RootDevice: 1, RootInode: 195, GitDevice: 1, GitInode: 196, OriginDigest: [32]byte{195}, PublicationRepository: "team/repo"}}, mustKernelTime(t, 999)); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.store.BindRepositoryGitHubID(ctx, kernel.RepositoryID(project), 7); err != nil {
+		t.Fatal(err)
+	}
+	active := prepareActiveAttemptInProject(t, fixture, 195, project.String(), "orchestrator")
+	session, found, err := fixture.store.TerminalSessionForRun(ctx, active.run.ID)
+	if err != nil || !found {
+		t.Fatalf("session: %v %v", found, err)
+	}
+	owner := newLiveAttempt(fixture.daemon, active.run.ID, session.ID, nil)
+	owner.agentID, owner.attemptDigest = active.run.AgentID, active.run.CredentialDigest
+	if err := fixture.daemon.registerLiveAttempt(owner); err != nil {
+		t.Fatal(err)
+	}
+	defer fixture.daemon.unregisterLiveAttempt(active.run.ID, owner)
+	customerMode(t, fixture)
+	meta := `"_meta":{"callId":"exec-1","x-codex-turn-metadata":{"session_id":"s","model":"m","codex_version":"0.155.1"},"threadId":"s","itemId":"i","progressToken":1}`
+	for _, call := range []string{`"name":"maintainer_status","arguments":{"repository":"team/repo"}`, `"name":"list_issues","arguments":{"repository":"team/repo","page":1}`} {
+		done := fixture.serve(t)
+		result, err := active.client.Maintainer(ctx, api.MaintainerInput{Request: json.RawMessage(`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{` + meta + `,` + call + `}}`)})
+		waitDispatch(t, done)
+		// The offline customer connection is the next gate: the call got past decoding.
+		if err != nil || result.State != "denied" {
+			t.Fatalf("%s: %+v %v, want denied at the connection", call, result, err)
+		}
+	}
+	_, canonical, err := decodeMaintainerToolCall(json.RawMessage(`{` + meta + `,"name":"list_issues","arguments":{"repository":"team/repo","page":1}}`))
+	if err != nil || string(canonical) != `{"name":"list_issues","arguments":{"page":1,"repository":"team/repo"}}` {
+		t.Fatalf("forwarded params = %s %v, want _meta dropped", canonical, err)
+	}
+}
+
 func TestConnectRefusesLegacyOverseerBeforeCredentialActivation(t *testing.T) {
 	fixture := newDispatchFixture(t)
 	prepareActiveAttemptInProject(t, fixture, 170, testID(170), "orchestrator")

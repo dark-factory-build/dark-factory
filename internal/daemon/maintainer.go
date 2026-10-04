@@ -341,7 +341,11 @@ func maintainerIDsEqual(left, right json.RawMessage) bool {
 // authorization checked. The API transport already rejects duplicate names.
 func decodeMaintainerToolCall(encoded json.RawMessage) (maintainerToolCall, json.RawMessage, error) {
 	var raw map[string]json.RawMessage
-	if json.Unmarshal(encoded, &raw) != nil || len(raw) != 2 || raw["name"] == nil || raw["arguments"] == nil {
+	err := json.Unmarshal(encoded, &raw)
+	// MCP clients attach per-call _meta (Codex sends session and model details);
+	// it is dropped here and never forwarded to the broker.
+	delete(raw, "_meta")
+	if err != nil || len(raw) != 2 || raw["name"] == nil || raw["arguments"] == nil {
 		return maintainerToolCall{}, nil, errors.New("invalid tool call params")
 	}
 	var value maintainerToolCall
