@@ -1251,6 +1251,41 @@ func TestDaemonServesTaskOnlyToLiveAttempt(t *testing.T) {
 	waitDispatch(t, done)
 }
 
+func TestDaemonExternalCheckpointEndsOverseerWithoutGenericWatchdog(t *testing.T) {
+	fixture := newDispatchFixture(t)
+	active := prepareActiveAttempt(t, fixture, 53)
+	ctx := context.Background()
+	// A disabled project ceiling must preserve a productive overseer run; the
+	// controller cannot infer that a live run is merely waiting on an external
+	// gate and must not cancel it by role.
+	fixture.daemon.now = func() time.Time { return time.UnixMilli(601_000) }
+	if err := fixture.daemon.enforceRunLimits(ctx); err != nil {
+		t.Fatal(err)
+	}
+	stillRunning, found, err := fixture.store.Run(ctx, active.run.ID)
+	if err != nil || !found || stillRunning.Phase != kernel.RunRunning {
+		t.Fatalf("default-disabled overseer run = %+v, found=%v, err=%v", stillRunning, found, err)
+	}
+
+	const checkpoint = "external pending; gate=merge-1096; resume observation on next wake"
+	done := fixture.serve(t)
+	if _, err := active.client.Succeed(ctx, checkpoint); err != nil {
+		t.Fatal(err)
+	}
+	waitDispatch(t, done)
+	finalizing, found, err := fixture.store.Run(ctx, active.run.ID)
+	if err != nil || !found || finalizing.Phase != kernel.RunFinalizing || finalizing.Proposal == nil || finalizing.Proposal.Result() != checkpoint {
+		t.Fatalf("external checkpoint = %+v, found=%v, err=%v", finalizing, found, err)
+	}
+	if err := fixture.daemon.enforceRunLimits(ctx); err != nil {
+		t.Fatal(err)
+	}
+	unchanged, found, err := fixture.store.Run(ctx, active.run.ID)
+	if err != nil || !found || unchanged.Phase != kernel.RunFinalizing || unchanged.Proposal == nil || unchanged.Proposal.Result() != checkpoint {
+		t.Fatalf("checkpoint was canceled instead of preserved = %+v, found=%v, err=%v", unchanged, found, err)
+	}
+}
+
 func TestDaemonRejectsForgedAttemptOutcome(t *testing.T) {
 	fixture := newDispatchFixture(t)
 	_ = prepareActiveAttempt(t, fixture, 61)
