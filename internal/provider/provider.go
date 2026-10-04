@@ -616,7 +616,7 @@ func Build(request Request) (Launch, error) {
 		return Launch{
 			executable:   request.installation.executable,
 			argv:         []string{shellPath, runner.ProviderTaskPath},
-			environment:  request.runtime.environment(request.provider),
+			environment:  request.runtime.environmentForRole(request.provider, request.role),
 			taskDelivery: TaskDeliveryFD11,
 		}, nil
 	case kernel.ProviderClaudeCode:
@@ -651,7 +651,7 @@ func Build(request Request) (Launch, error) {
 				"args":    []string{"attempt", "mcp"},
 			},
 		}
-		environment := request.runtime.environment(request.provider)
+		environment := request.runtime.environmentForRole(request.provider, request.role)
 		if browser != "" {
 			servers["factory_browser"] = map[string]any{"command": browser, "args": browserArgs}
 		}
@@ -727,7 +727,7 @@ func Build(request Request) (Launch, error) {
 		if request.reasoningEffort != "" {
 			argv = append(argv, "-c", fmt.Sprintf("model_reasoning_effort=%q", request.reasoningEffort))
 		}
-		environment := request.runtime.environment(request.provider)
+		environment := request.runtime.environmentForRole(request.provider, request.role)
 		if request.role == kernel.RoleOrchestrator && request.runtime.customerMaintainer {
 			argv = append(argv, "-c", "mcp_servers.dark_factory_maintainer={command="+tomlBasicString(request.runtime.factoryctl)+`,args=["attempt","maintainer-mcp"],env_vars=["DARK_FACTORY_SOCKET","DARK_FACTORY_ATTEMPT_TOKEN_FILE"],enabled=true,required=true,default_tools_approval_mode="approve"}`)
 		} else if request.role == kernel.RoleOrchestrator {
@@ -784,7 +784,7 @@ func sandboxGrants(request Request) []grant {
 	// Go downloads are prepared by the trusted local-CI boundary. Workers may
 	// consume that cache, but never mutate the operator home or the cache that
 	// belongs to another trust context.
-	if request.installation.provider != kernel.ProviderShell {
+	if request.role == kernel.RoleWorker && request.installation.provider != kernel.ProviderShell {
 		grants = append(grants, grant{goModuleCachePath(request.runtime.accountHome), false})
 	}
 	for _, root := range filepath.SplitList(request.runtime.toolchainReadRoots) {
@@ -1067,6 +1067,10 @@ func (runtime RuntimePaths) valid() bool {
 }
 
 func (runtime RuntimePaths) environment(kind kernel.Provider) []string {
+	return runtime.environmentForRole(kind, kernel.RoleWorker)
+}
+
+func (runtime RuntimePaths) environmentForRole(kind kernel.Provider, role kernel.AgentRole) []string {
 	home := runtime.home
 	if kind == kernel.ProviderClaudeCode {
 		home = runtime.accountHome
@@ -1091,14 +1095,17 @@ func (runtime RuntimePaths) environment(kind kernel.Provider) []string {
 			"GOTOOLCHAIN=local",
 			"GOCACHE="+filepath.Join(runtime.home, ".cache", "go-build"),
 			"GOPATH="+filepath.Join(runtime.home, "go"),
-			"GOMODCACHE="+goModuleCachePath(runtime.accountHome),
 			"GOPROXY=off",
-			"DF_CI_GO_MODULE_CACHE="+goModuleCachePath(runtime.accountHome),
 			"CARGO_HOME="+filepath.Join(runtime.home, ".cargo"),
 			"RUSTUP_HOME="+filepath.Join(runtime.accountHome, ".rustup"),
 			"COREPACK_HOME="+filepath.Join(runtime.home, ".cache", "corepack"),
 			"npm_config_cache="+filepath.Join(runtime.home, ".cache", "npm"),
 			"XDG_CACHE_HOME="+filepath.Join(runtime.home, ".cache"))
+		if role == kernel.RoleWorker {
+			environment = append(environment,
+				"GOMODCACHE="+goModuleCachePath(runtime.accountHome),
+				"DF_CI_GO_MODULE_CACHE="+goModuleCachePath(runtime.accountHome))
+		}
 		if kind == kernel.ProviderClaudeCode {
 			environment = append(environment, "DF_CI_CACHE_ROOT="+filepath.Join(runtime.home, ".cache", "dark-factory", "local-ci", "trusted"))
 		}

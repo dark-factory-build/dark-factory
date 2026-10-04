@@ -1465,6 +1465,34 @@ func TestClaudeLocalCICacheStaysInRuntimeHome(t *testing.T) {
 	}
 }
 
+func TestNativeOrchestratorDoesNotProjectSharedGoModuleCache(t *testing.T) {
+	for _, kind := range []kernel.Provider{kernel.ProviderCodex, kernel.ProviderClaudeCode} {
+		t.Run(kind.String(), func(t *testing.T) {
+			installation, runtime, _ := nativeFixture(t, kind)
+			runtime = runtime.WithCustomerMaintainer(true)
+			request := roleRequestFor(t, kind, installation, runtime, "", "", kernel.RoleOrchestrator)
+			launch, err := Build(request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, prefix := range []string{"GOMODCACHE=", "DF_CI_GO_MODULE_CACHE="} {
+				if slices.ContainsFunc(launch.Environment(), func(entry string) bool { return strings.HasPrefix(entry, prefix) }) {
+					t.Fatalf("orchestrator received worker-only %s projection: %q", prefix, launch.Environment())
+				}
+			}
+			if kind == kernel.ProviderCodex {
+				policy, err := codexPermissions(request)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if strings.Contains(policy, tomlBasicString(goModuleCachePath(runtime.accountHome))) {
+					t.Fatalf("orchestrator received worker-only Go module cache grant: %s", policy)
+				}
+			}
+		})
+	}
+}
+
 // Opt-in local proof with an installed Codex CLI; no model or account access.
 // Keep fixtures outside the system temp roots permitted by :minimal.
 func TestCodexToolchainSandbox(t *testing.T) {

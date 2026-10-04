@@ -101,7 +101,7 @@ func runProvider(ctx context.Context) (resultErr error) {
 		_ = cwd.Close()
 		return err
 	}
-	if config.Provider != kernel.ProviderShell {
+	if shouldPrepareGoModuleCache(config.Role, config.Provider) {
 		if err := runtimePaths.PrepareGoModuleCache(); err != nil {
 			_ = cwd.Close()
 			return err
@@ -225,6 +225,10 @@ func runProvider(ctx context.Context) (resultErr error) {
 	}
 	taskOpen = false
 	return control.ExecProvider(spec, cwd, task)
+}
+
+func shouldPrepareGoModuleCache(role kernel.AgentRole, provider kernel.Provider) bool {
+	return role == kernel.RoleWorker && provider != kernel.ProviderShell
 }
 
 // openChangeDirectory makes or reopens the run's Change worktree and returns
