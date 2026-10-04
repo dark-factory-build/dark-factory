@@ -100,6 +100,7 @@ export type BreakRoomErrand = "shelf" | "coffee";
 
 // Workshop bays share walls; dimensions never depend on live work.
 const CORRIDOR = 32;
+export const COMMON_WIDTH = 192;
 export const PADDING = 16;
 export const ROOM_LEFT = PADDING + 192 + 16 + CORRIDOR;
 const FLOOR_TOP = 48;
@@ -164,9 +165,10 @@ export function layoutScene(topology: SceneTopology, selectedProposalId?: string
 
 export function placeWorkers(layout: SceneLayout, workers: readonly SceneWorker[], social: "nearby" | "commons" = "commons"): readonly SceneWorkerPlacement[] {
   const rooms = new Map(layout.rooms.map((room) => [room.id, room]));
-  const roomCounts = new Map<string, number>();
   const sorted = [...workers].sort((left, right) => compareText(left.id, right.id));
   const placed: SceneWorkerPlacement[] = [];
+  // ponytail: a bounded actor list uses linear collision checks; use spatial buckets if thousands are displayed.
+  const occupied = (point: ScenePoint) => placed.some((other) => Math.abs(point.x - other.x) < 24 && Math.abs(point.y - other.y) < 24);
   const areas: Record<"resting" | "staging" | "outside" | "overflow", SceneWorker[]> = { resting: [], staging: [], outside: [], overflow: [] };
   for (const worker of sorted) {
     if (worker.location !== "working") {
@@ -175,68 +177,51 @@ export function placeWorkers(layout: SceneLayout, workers: readonly SceneWorker[
     }
     const room = worker.nodeId === undefined ? undefined : rooms.get(worker.nodeId);
     if (room === undefined) { areas.outside.push(worker); continue; }
-    const slot = roomCounts.get(room.id) ?? 0;
-    const positions = workPositions(room, worker.observedBayId);
-    if (slot >= positions.length) { areas.overflow.push(worker); continue; }
-    roomCounts.set(room.id, slot + 1);
-    placed.push({ id: worker.id, area: "room", roomId: room.id, ...positions[slot]! });
+    const position = workPositions(room, worker.observedBayId).find((point) => !occupied(point));
+    if (position === undefined) { areas.overflow.push(worker); continue; }
+    placed.push({ id: worker.id, area: "room", roomId: room.id, ...position });
+  }
+  const nearby = social === "nearby" ? layout.rooms.filter((room) => room.contents.some((item) => item.entityId !== undefined)) : [];
+  const localCounts = new Map<string, number>();
+  const commons: SceneWorker[] = [];
+  // Known locations keep their seats before unlocated idle workers join a nearby pair.
+  const resting = areas.resting.sort((left, right) => Number(nearby.some((room) => room.id === right.nodeId)) - Number(nearby.some((room) => room.id === left.nodeId)) || compareText(left.id, right.id));
+  for (const worker of resting) {
+    const known = nearby.find((room) => room.id === worker.nodeId);
+    const candidates = known ? [known] : [...nearby.filter((room) => localCounts.get(room.id) === 1), ...nearby.slice(0, 3)];
+    const seat = candidates.filter((room) => (localCounts.get(room.id) ?? 0) < 2).flatMap((room) => [-24, 24].map((offset) => ({ roomId: room.id, x: room.door.x + offset, y: room.door.y - 24 }))).find((point) => !occupied(point));
+    if (seat === undefined) { commons.push(worker); continue; }
+    placed.push({ id: worker.id, area: "resting", ...seat });
+    localCounts.set(seat.roomId, (localCounts.get(seat.roomId) ?? 0) + 1);
   }
   const planning = (["staging", "outside", "overflow"] as const).flatMap((area) => areas[area].map((worker) => ({ worker, area })));
-  const seats = commonSeating(layout, areas.resting.length, planning.length);
-  const nearby = social === "nearby" ? layout.rooms.filter((room) => room.contents.some((item) => item.entityId !== undefined)) : [];
-  areas.resting.forEach((worker, slot) => {
-    const room = nearby.find((room) => room.id === worker.nodeId) ?? nearby[slot % Math.max(1, nearby.length)];
-    const localSlot = Math.floor(slot / Math.max(1, nearby.length));
-    placed.push(room === undefined || localSlot > 1 ? { id: worker.id, area: "resting", ...seats.resting[slot]! }
-      : { id: worker.id, area: "resting", roomId: room.id, x: room.x + 28 + localSlot * WORKER_GAP, y: room.door.y - 24 });
-  });
+  const seats = commonSeating(layout, commons.length, planning.length);
+  commons.forEach((worker, slot) => placed.push({ id: worker.id, area: "resting", ...seats.resting[slot]! }));
   planning.forEach(({ worker, area }, slot) => placed.push({ id: worker.id, area, ...seats.planning[slot]! }));
   return placed.sort((left, right) => compareText(left.id, right.id));
 }
 
-/** Two compact seating sections share one bay, growing down only when crowded. */
+/** The side commons has four seats per row and no empty duplicate seats for local rest. */
 export function commonSeating(layout: SceneLayout, restingCount: number, planningCount: number) {
-  const available = layout.width - ROOM_LEFT - PADDING;
-  // The break-room furniture keeps whatever two seats a section can spare it.
-  const capacity = (available - 16 - nookWidth(layout)) / 2;
-  const columns = Math.max(2, Math.min(Math.floor((capacity - 48) / WORKER_GAP) + 1, Math.max(restingCount, planningCount)));
-  const width = (columns - 1) * WORKER_GAP + 48;
-  const seats = (count: number, left: number, top: number) => Array.from({ length: Math.max(2, count) }, (_, slot) => ({
-    x: left + 24 + (slot % columns) * WORKER_GAP,
-    y: top + Math.floor(slot / columns) * WORKER_GAP,
+  const seats = (count: number, top: number) => Array.from({ length: count }, (_, slot) => ({
+    x: PADDING + 24 + (slot % 4) * WORKER_GAP,
+    y: top + Math.floor(slot / 4) * WORKER_GAP,
   }));
-  const resting = seats(restingCount, ROOM_LEFT, layout.restingTop);
-  const planning = planningCount === 0 ? [] : seats(planningCount,
-    ROOM_LEFT + width + 16, layout.restingTop);
-  return { resting, planning };
+  return { resting: seats(restingCount, layout.restingTop), planning: seats(planningCount,
+    layout.restingTop + (restingCount === 0 ? 0 : (Math.ceil(restingCount / 4) - 1) * WORKER_GAP + 64)) };
 }
 
 
-// Each piece of break-room furniture wants this much of the back wall.
-const PIECE = 30;
-const nookWidth = (layout: SceneLayout) => Math.max(0, Math.min(2 * PIECE + 4, layout.width - ROOM_LEFT - PADDING - (2 * 88 + 16)));
-
-/**
- * Furniture along the break room's back wall, right of the last seats, with one
- * standing place in front of each piece: a bookshelf where there is room for
- * one thing, a coffee station beside it where there is room for two. On a floor
- * with room for neither, workers simply stay seated.
- */
-export function breakRoomNook(layout: SceneLayout, restingCount: number, planningCount: number, nearby = false) {
-  const width = nookWidth(layout), compact = width < 2 * PIECE + 4, pieces = compact ? 2 : Math.floor(width / PIECE);
-  if (pieces === 0) return undefined;
-  const seating = commonSeating(layout, restingCount, planningCount);
-  const left = Math.max(...[...seating.resting, ...seating.planning].map((seat) => seat.x)) + 24;
-  const compactX = layout.width - PADDING - WORKER_SIZE;
-  return { width, furniture: (["shelf", "coffee"] as const).slice(0, pieces).map((errand, index) => ({
+/** Stable furniture in the side commons and above each local resting pair. */
+export function breakRoomNook(layout: SceneLayout, _restingCount: number, _planningCount: number, nearby = false) {
+  return { width: COMMON_WIDTH, furniture: (["shelf", "coffee"] as const).map((errand, index) => ({
     errand, key: String(errand), roomId: undefined as string | undefined,
-    x: compact ? compactX : left + 5 + index * PIECE,
-    y: layout.restingTop - 38 + (compact ? index * 24 : 0),
-    stand: { x: compact ? compactX + 10 : left + 15 + index * PIECE, y: layout.restingTop - 8 + (compact ? index * 24 : 0) },
+    x: PADDING + 120 + index * 38, y: 74,
+    stand: { x: PADDING + 130 + index * 38, y: 104 },
   })).concat(!nearby ? [] : layout.rooms.filter((room) => room.contents.some((item) => item.entityId !== undefined)).map((room, index) => ({
     errand: index % 2 === 0 ? "shelf" as const : "coffee" as const, key: room.id, roomId: room.id,
-    x: room.x + room.width - 42, y: room.door.y - 55,
-    stand: { x: room.x + room.width - 30, y: room.door.y - 24 },
+    x: room.x + room.width - 42, y: room.door.y - 79,
+    stand: { x: room.x + room.width - 30, y: room.door.y - 48 },
   }))) };
 }
 
