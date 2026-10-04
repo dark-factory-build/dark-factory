@@ -37,6 +37,7 @@ type Operation struct {
 	Submitted    bool      `json:"submitted,omitempty"`
 	RoutePending bool      `json:"route_pending,omitempty"`
 	Escalation   string    `json:"escalation,omitempty"` // why the last overseer escalation failed; retried
+	Handled      bool      `json:"handled,omitempty"`    // a failure already retried or escalated
 	Gates        []GateRun `json:"gates,omitempty"`
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
@@ -416,6 +417,15 @@ func (c Coordinator) reconcileEnqueuing(ctx context.Context, op Operation, cause
 // failure remains immutable history; the request is reused so the retry cannot
 // silently move to a different pull-request head.
 func (c Coordinator) Retry(ctx context.Context, failed Operation) (Operation, error) {
+	op, err := c.ReserveRetry(ctx, failed)
+	if err != nil {
+		return Operation{}, err
+	}
+	return c.Resume(ctx, op)
+}
+
+// ReserveRetry durably claims a failed operation's one retry without running it.
+func (c Coordinator) ReserveRetry(ctx context.Context, failed Operation) (Operation, error) {
 	if failed.State != "failed" || !failed.Retryable || failed.ID == "" || failed.RetryOf != "" {
 		return Operation{}, errors.New("review: only pre-submit launch failures are retryable")
 	}
@@ -428,10 +438,7 @@ func (c Coordinator) Retry(ctx context.Context, failed Operation) (Operation, er
 		return Operation{}, err
 	}
 	op.RetryOf = failed.ID
-	if err := store.CreateRetry(ctx, failed, op); err != nil {
-		return Operation{}, err
-	}
-	return c.Resume(ctx, op)
+	return op, store.CreateRetry(ctx, failed, op)
 }
 
 func (c Coordinator) fail(ctx context.Context, op Operation, cause error, retryable bool) (Operation, error) {

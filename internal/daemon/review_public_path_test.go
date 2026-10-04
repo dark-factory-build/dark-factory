@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -586,5 +587,88 @@ func TestEscalationWithNoOverseerStaysPendingUntilOneExists(t *testing.T) {
 	}
 	if op := lastDurableReview(t, fixture.store, project); op.RoutePending || op.Escalation != "" {
 		t.Fatalf("delivered escalation left the operation pending: %+v", op)
+	}
+}
+
+// A failed review never stalls its pull request silently: the tick retries a
+// retryable failure once, and escalates a failure nothing will retry once,
+// including one whose retry cannot start.
+func TestFailedReviewRetriesOnceThenEscalatesOnce(t *testing.T) {
+	fixture, project, task, settle := publishedTask(t)
+	settle()
+	customerMode(t, fixture)
+	ctx := context.Background()
+	backend := &publicReviewBackend{killed: true}
+	fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return backend }
+	if _, err := fixture.daemon.reviewPR(ctx, project, publishedReviewRequest()); err == nil {
+		t.Fatal("a killed provider reported success")
+	}
+	var offset atomic.Int64
+	now := fixture.daemon.now
+	fixture.daemon.now = func() time.Time { return now().Add(time.Duration(offset.Load())) }
+	ops := func() (failed, handled int) {
+		page, err := fixture.store.Production(ctx, project, 0, 8)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, record := range page.Records {
+			var op review.Operation
+			if record.Kind == "reviewer" && json.Unmarshal(record.Document, &op) == nil && op.State == "failed" {
+				failed++
+				if op.Handled {
+					handled++
+				}
+			}
+		}
+		return failed, handled
+	}
+	digest := sha256.Sum256([]byte(fmt.Sprintf("escalation\x00%s\x00team/repo\x0012", project)))
+	escalation := mustTaskID(t, hex.EncodeToString(digest[:kernel.IDBytes]))
+	tick := func() {
+		offset.Add(int64(2 * reviewStuckAfter))
+		if _, err := fixture.daemon.advanceReviewOperations(ctx, false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tick()
+	deadline := time.Now().Add(2 * time.Second)
+	for failed, _ := ops(); failed != 2 && time.Now().Before(deadline); failed, _ = ops() {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if failed, handled := ops(); failed != 2 || handled != 1 || backend.reviews != 2 {
+		t.Fatalf("after one tick: failed=%d handled=%d reviews=%d, want the one retry failed", failed, handled, backend.reviews)
+	}
+	for range 2 {
+		tick()
+	}
+	if _, found, err := fixture.store.Task(ctx, escalation); err != nil || !found {
+		t.Fatalf("exhausted retry was not escalated: %v", err)
+	}
+	if failed, handled := ops(); failed != 2 || handled != 2 || backend.reviews != 2 {
+		t.Fatalf("after escalation: failed=%d handled=%d reviews=%d", failed, handled, backend.reviews)
+	}
+	if pending, err := fixture.store.InFlightReviewOperations(ctx); err != nil || len(pending) != 0 {
+		t.Fatalf("handled failures are still in flight: %d %v", len(pending), err)
+	}
+
+	// A repository the project does not bind cannot start the retry.
+	head := strings.Repeat("e", 40)
+	if err := fixture.store.RecordPublication(ctx, project, task.ID, "team/unbound", kernel.ProductionPullRequest{Number: 12, Title: "Ship it", URL: "https://github.com/team/unbound/pull/12", Head: head, Branch: "feature/ship", Base: "main", State: "open", Review: kernel.ProductionReview{Head: head, State: "unknown"}}, mustKernelTime(t, 1011)); err != nil {
+		t.Fatal(err)
+	}
+	request := publishedReviewRequest()
+	unbound := review.Operation{ID: "unbound-failure", Request: review.Request{Repository: "team/unbound", PullNumber: 12, Head: head, Base: request.Base, BaseRef: "main", Body: "fixture", Provider: "codex"}, State: "failed", Retryable: true, Detail: "provider killed at launch", CreatedAt: fixture.daemon.now(), UpdatedAt: fixture.daemon.now()}
+	if err := (durableReviewStore{store: fixture.store, project: project, repository: "team/unbound", now: fixture.daemon.now}).Create(ctx, unbound); err != nil {
+		t.Fatal(err)
+	}
+	digest = sha256.Sum256([]byte(fmt.Sprintf("escalation\x00%s\x00team/unbound\x0012", project)))
+	for range 2 {
+		tick()
+	}
+	if _, found, err := fixture.store.Task(ctx, mustTaskID(t, hex.EncodeToString(digest[:kernel.IDBytes]))); err != nil || !found {
+		t.Fatalf("a retry that could not start was not escalated: %v", err)
+	}
+	if document, _, err := fixture.store.ReviewOperation(ctx, project, unbound.ID); err != nil || !strings.Contains(string(document), `"handled":true`) || backend.reviews != 2 {
+		t.Fatalf("unbound failure left unhandled: %s %v reviews=%d", document, err, backend.reviews)
 	}
 }
