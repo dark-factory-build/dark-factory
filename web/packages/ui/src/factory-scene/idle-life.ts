@@ -128,7 +128,7 @@ export function chats(row: readonly Seat[], news: readonly Remark[], at: number 
   const epoch = Math.floor(at / CHAT_EPOCH), t = at % CHAT_EPOCH, found: Chat[] = [];
   for (let seat = 0; seat + 1 < row.length; seat += 1) {
     const left = row[seat]!, right = row[seat + 1]!;
-    if (!left.free || !right.free || left.id === undefined || right.id === undefined) continue;
+    if (Math.abs(left.x - right.x) > 64 || !left.free || !right.free || left.id === undefined || right.id === undefined) continue;
     const seed = hash(`${left.id} ${right.id} ${epoch}`);
     if (seed % 2 === 1) continue;
     const since = t - (seed >>> 1) % (CHAT_EPOCH - TURN * 3), turn = Math.floor(since / TURN);
