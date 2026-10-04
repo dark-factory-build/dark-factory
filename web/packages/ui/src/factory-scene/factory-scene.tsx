@@ -444,7 +444,7 @@ export function FactoryScene({ proposals, onSelectEntity, onOpenLibrary, topolog
     showTooltip(element.closest("[data-tooltip]"));
     setLinkedFrom(element.closest("[data-room-id]")?.getAttribute("data-room-id") ?? undefined);
   };
-  const layout = useMemo(() => layoutScene(topology), [topology]);
+  const layout = useMemo(() => layoutScene(topology, proposals?.selected), [topology, proposals?.selected]);
   const placements = useMemo(() => placeWorkers(layout, workers, appearance.social), [layout, workers, appearance.social]);
   const visibleProposals = proposals?.items.filter((proposal) => !proposals.selected || proposal.id === proposals.selected) ?? [];
   const nodes = new Map(topology.nodes.filter((node) => !node.proposed || visibleProposals.some((proposal) => proposal.operations.some((operation) => operation.roomId === node.id))).map((node) => [node.id, node]));
@@ -574,9 +574,9 @@ export function FactoryScene({ proposals, onSelectEntity, onOpenLibrary, topolog
               const sourceHint = proposedPaths.find((path) => /\.(?:go|[cm]?[jt]sx?|py|rs|c|cpp|h|sh)$/.test(path));
               const pictured = node.proposed && item.resourceCounts === undefined && sourceHint ? { ...item, kind: "source" as const, responsibility: responsibility(sourceHint) } : item;
               return <g key={item.key} data-room-content={item.kind} data-entity-id={item.entityId} data-tooltip={item.entityId === undefined ? roomInfo(node) : `${item.label}${item.sourceIncomplete ? "\nObserved proposed paths only; final contents and scale are not established." : ""}${item.parts?.length ? `\nFilename motifs: ${item.parts.map((part) => part.label).join(", ")}; not semantic analysis` : ""}\n${item.resourceCounts === undefined ? "Inventory unavailable" : Object.entries(item.resourceCounts).filter(([, count]) => count > 0).map(([kind, count]) => `${count} ${kind}`).join(" · ")}${edits.map(({ proposal, operation }) => `\n${proposal.title}: ${operation.kind} · ${operation.path}`).join("")}`} {...sceneAction(() => selectEntity(item.selectionId ?? item.entityId ?? room.id))} aria-label={`Inspect assembly ${item.label}`} className="dfFactoryScene__target">
-                <rect className="dfFactoryScene__focus" x={item.x - 4} y={item.y - 17} width={item.width + 8} height={item.height + 24} fill="transparent" />
+                <rect className="dfFactoryScene__focus" x={item.x - 4} y={item.y - 17} width={(item.labelWidth ?? item.width) + 8} height={item.height + 24} fill="transparent" />
                 <Equipment item={pictured} operating={operating} scenery={appearance.scenery} />
-                {item.entityId === undefined ? null : <text x={item.x} y={item.y - 6} fill="#d7ddcf" fontFamily="ui-monospace, monospace" fontSize="9">{shortLabel(item.label, 19)}</text>}
+                {item.entityId === undefined ? null : <text x={item.x} y={item.y - 6} fill="#d7ddcf" fontFamily="ui-monospace, monospace" fontSize="11">{shortLabel(item.label, Math.floor(((item.labelWidth ?? item.width) - 28) / 6.6))}</text>}
                 {[...new Map(edits.map((edit) => [`${edit.proposal.id}:${edit.operation.kind}`, edit])).values()].slice(0, 4).map(({ proposal, operation }, index) => <ProposalMark key={`${proposal.id}:${operation.path}`} proposalId={proposal.id} item={item} kind={operation.kind} index={index} stale={proposal.state !== "active"} />)}
               </g>;
             })}
@@ -593,9 +593,9 @@ export function FactoryScene({ proposals, onSelectEntity, onOpenLibrary, topolog
               <path d={`M${room.x + room.width - 26} ${room.y + 18}h14v10h-14Z`} fill="#303e40" stroke="#53605b" />
               <rect x={room.x + room.width - 24} y={room.y + 20} width="10" height="5" fill={operating ? "#e5c58b" : "#626c64"} />
             </g>
-            {(node.assemblies?.length ?? 0) <= 6 ? null : <text x={room.x + 112} y={room.door.y - 7} fill="#b8cabe" fontSize="8">+{node.assemblies!.length - 6} assemblies · search to inspect</text>}
+            {(node.assemblies?.length ?? 0) <= 6 || node.proposed && proposals?.selected ? null : <text x={room.x + 136} y={room.door.y - 7} fill="#b8cabe" fontSize="10">+{node.assemblies!.length - 6} {node.proposed ? "versions · select a Change" : "assemblies · search to inspect"}</text>}
             {node.proposed ? <rect x={room.x + 3} y={room.y + 3} width={room.width - 6} height={room.height - 6} fill="none" stroke="#84bfd3" strokeDasharray="6 4" pointerEvents="none" /> : null}
-            {roomOperations.length === 0 ? null : <g {...sceneAction(() => proposals?.onSelect(roomOperations[0]!.proposal.id))} aria-label={`Inspect changes in ${node.label}`}><rect x={room.x + 8} y={room.door.y - 17} width="94" height="14" fill="#384643" /><text x={room.x + 12} y={room.door.y - 7} fill="#eed59c" fontSize="8">{roomOperations.length} proposed edits</text></g>}
+            {roomOperations.length === 0 ? null : <g {...sceneAction(() => proposals?.onSelect(roomOperations[0]!.proposal.id))} aria-label={`Inspect changes in ${node.label}`}><rect x={room.x + 8} y={room.door.y - 17} width="120" height="16" fill="#384643" /><text x={room.x + 12} y={room.door.y - 6} fill="#eed59c" fontSize="10">{roomOperations.length} proposed edits</text></g>}
 
           </g>
         );
@@ -609,7 +609,7 @@ export function FactoryScene({ proposals, onSelectEntity, onOpenLibrary, topolog
           <path key={`${wire.from} ${wire.to}`} data-wire={`${wire.from} ${wire.to}`} d={wire.d} stroke="#e5c58b" strokeWidth="1.5" opacity=".9" />)}
       </g>}
       {proposedCables.map(({ d, edge, proposal }, index) => <g key={`${proposal.id}:${index}`} data-proposed-relationship={edge.status} data-proposal-id={proposal.id} {...sceneAction(() => proposals?.onSelect(proposal.id))} aria-label={`${proposal.title}: ${edge.status} dependency ${edge.fromPath} to ${edge.toPath}`}>
-        <title>{proposal.title}: {edge.status} {edge.fromPath} → {edge.toPath} · {edge.weight} static links</title>
+        <title>{`${proposal.title}: ${edge.status} ${edge.fromPath} → ${edge.toPath} · ${edge.weight} static links`}</title>
         <path d={d} fill="none" stroke="transparent" strokeWidth="12" />
         <path d={d} fill="none" stroke={edge.status === "added" ? "#a4d6e8" : "#e7a893"} strokeWidth="2" strokeDasharray={edge.status === "added" ? "8 4" : "2 5"} pointerEvents="none" />
         <text x={(layout.rooms.find((room) => room.id === edge.fromId)?.door.x ?? 0) + 8} y={(layout.rooms.find((room) => room.id === edge.fromId)?.door.y ?? 0) - 6} fill="#ead8a4" fontSize="12" pointerEvents="none">{edge.status === "added" ? "+ link" : "× link"}</text>
@@ -810,17 +810,30 @@ function wires(layout: ReturnType<typeof layoutScene>, topology: SceneTopology) 
 /** Furniture is subdued scenery, never a second set of file-category controls. */
 function Equipment({ item, operating, scenery }: { item: RoomContent; operating: boolean; scenery: FloorAppearance["scenery"] }) {
   if (item.entityId !== undefined) {
-    const scale = item.scale ?? 0, width = 36 + scale * 8, height = 24 + scale * 3;
-    const color = operating ? "#a6c9bb" : "#849b91";
+    const scale = item.scale ?? 0, rich = item.width >= 240 && item.height >= 120;
+    const color = operating ? "#b0d0c0" : "#91aca1";
     const resources = Object.entries(item.resourceCounts ?? {}).filter(([, count]) => count > 0);
+    const associated = resources.filter(([kind]) => kind !== item.kind).slice(0, 3);
+    const mainWidth = rich && associated.length ? item.width - 90 : item.width;
+    const partColumns = Math.min(2, item.parts?.length ?? 0), partWidth = mainWidth / Math.max(1, partColumns);
+    const machineWidth = Math.min(mainWidth - 8, [48, 80, 128, 180][scale]!);
+    const machineHeight = Math.min(item.height - 30, [30, 46, 64, 80][scale]!);
+    const total = resources.reduce((sum, [, count]) => sum + count, 0);
+    const associatedStep = Math.min(40, (item.height - 24) / Math.max(1, associated.length));
     return <g transform={`translate(${item.x} ${item.y})`} data-equipment-scale={item.resourceCounts === undefined || item.sourceIncomplete ? "unknown" : scale} data-responsibility={item.responsibility}>
-      <rect x="0" y="32" width={width + 8} height="5" fill="#111c20" />
-      {(item.parts?.length ?? 0) < 2 ? <ResourceMachine kind={item.kind} width={width} height={height} color={color} motif={item.responsibility} /> : <g data-assembly-parts="filename motifs">
-        {item.parts!.map((part, index) => <g key={part.label} transform={`translate(${index * 33} 0)`}><ResourceMachine kind="source" width={28} height={20} color={color} motif={part.motif} /><text y="40" fill="#d1c7a5" fontFamily="ui-monospace, monospace" fontSize="8">{shortLabel(part.label, 7)}</text></g>)}
+      {(item.parts?.length ?? 0) < 2 ? <ResourceMachine kind={item.kind} width={machineWidth} height={machineHeight} color={color} motif={item.responsibility} /> : <g data-assembly-parts="filename motifs">
+        {item.parts!.map((part, index) => {
+          const width = partWidth - 12, height = rich ? Math.min(44, (item.height - 24) / 2 - 20) : Math.min(34, item.height - 40), y = Math.floor(index / partColumns) * (item.height - 24) / 2;
+          return <g key={part.label} transform={`translate(${index % partColumns * partWidth} ${y})`}><ResourceMachine kind="source" width={width} height={height} color={color} motif={part.motif} /><text y={height + 16} fill="#ded3af" fontFamily="ui-monospace, monospace" fontSize="10">{shortLabel(part.label, Math.floor(width / 6))}</text></g>;
+        })}
       </g>}
-      {resources.filter(([kind]) => kind !== item.kind).slice(0, 3).map(([kind], index) => <g key={kind} data-associated-equipment={kind} transform={`translate(${64 + (index % 2) * 22} ${Math.floor(index / 2) * 22})`}><ResourceMachine kind={kind} width={18} height={14} color="#a4b8a4" /></g>)}
-      <g transform="translate(0 42)">{resources.map(([kind, count], index) => <g key={kind} data-resource-kind={kind} transform={`translate(${index * 17} 0)`}><ResourceGlyph kind={kind} /><text x="8" y="7" fill="#b5c4ba" fontFamily="ui-monospace, monospace" fontSize="6">{count > 999 ? "1k+" : count}</text></g>)}</g>
-      <text x={width - 4} y="-3" fill="#aab7ad" fontFamily="ui-monospace, monospace" fontSize="7">{item.resourceCounts === undefined || item.sourceIncomplete ? "?" : ["S", "M", "L", "XL"][scale]}</text>
+      {associated.map(([kind, count], index) => <g key={kind} data-associated-equipment={kind} transform={`translate(${rich ? item.width - 76 : index * Math.min(24, item.width / Math.max(1, associated.length))} ${rich ? index * associatedStep : item.height - 28})`}>
+        {rich ? <ResourceMachine kind={kind} width={62} height={associatedStep - 18} color="#aec2ab" /> : <ResourceGlyph kind={kind} />}
+        {!rich ? null : <text x="0" y={associatedStep - 4} fill="#c9d2bc" fontSize="10">{inventoryLabels[kind as keyof typeof inventoryLabels]} {count}</text>}
+      </g>)}
+      {rich ? <g transform={`translate(0 ${item.height - Math.ceil(resources.length / 3) * 13})`}>{resources.map(([kind, count], index) => <g key={kind} data-resource-kind={kind} transform={`translate(${index % 3 * item.width / 3} ${Math.floor(index / 3) * 13})`}><ResourceGlyph kind={kind} /><text x="11" y="8" fill="#c3d1c6" fontFamily="ui-monospace, monospace" fontSize="10">{count} {inventoryLabels[kind as keyof typeof inventoryLabels].toLowerCase()}</text></g>)}</g>
+        : <text y={item.height} fill="#c3d1c6" fontFamily="ui-monospace, monospace" fontSize="10">{item.resourceCounts === undefined ? "Unknown" : `${total} ${item.sourceIncomplete ? "observed" : "files"}`}</text>}
+      <text x={item.labelWidth ?? item.width} y="-6" textAnchor="end" fill="#c3d1c6" fontFamily="ui-monospace, monospace" fontSize="10">{item.resourceCounts === undefined || item.sourceIncomplete ? "?" : ["S", "M", "L", "XL"][scale]}</text>
     </g>;
   }
   return <g transform={`translate(${item.x} ${item.y})`} opacity={operating ? .9 : .55}>
@@ -870,8 +883,8 @@ function ProposalMark({ proposalId, item, kind, index, stale }: { proposalId: st
   return <g data-proposal-id={proposalId} data-proposal-kind={kind} pointerEvents="none" opacity={stale ? .65 : 1}>
     {index !== 0 ? null : <><rect x={item.x - 2} y={item.y - 3} width={item.width + 4} height={item.height + 8} fill={kind === "addition" ? "#396d8950" : "none"} stroke={color} strokeWidth="2" strokeDasharray={kind === "addition" ? "5 3" : kind === "removal" ? "2 3" : undefined} />
       {kind === "removal" ? <path d={`M${item.x + 5} ${item.y}l${item.width - 10} ${item.height}m-${item.width - 10} 0l${item.width - 10} -${item.height}`} stroke={color} strokeWidth="2" /> : kind === "move" ? <path d={`M${item.x + 8} ${item.y + 12}h${item.width - 16}l-8-6m8 6-8 6`} fill="none" stroke={color} strokeWidth="3" /> : kind === "modification" ? <path d={`M${item.x + item.width - 20} ${item.y + 2}l12 12m-16-13 4-4 5 1-1 5-4 4m11 7 3 3`} fill="none" stroke="#e7c27f" strokeWidth="3" /> : null}</>}
-    <rect x={item.x + index * 23} y={item.y + item.height + 14} width="21" height="12" fill="#203a46" stroke={color} />
-    <text x={item.x + index * 23 + 10} y={item.y + item.height + 23} fill={color} textAnchor="middle" fontSize="8">{kind === "addition" ? "+" : kind === "removal" ? "×" : kind === "move" ? "→" : "M"}</text>
+    <rect x={item.x - 15} y={item.y + index * 15} width="12" height="12" fill="#203a46" stroke={color} />
+    <text x={item.x - 9} y={item.y + index * 15 + 9} fill={color} textAnchor="middle" fontSize="8">{kind === "addition" ? "+" : kind === "removal" ? "×" : kind === "move" ? "→" : "M"}</text>
   </g>;
 }
 

@@ -1363,7 +1363,8 @@ test("flat assemblies have bounded resource shapes, file scale and unchanged roo
   const aggregate = layout.rooms[0].contents.at(-1);
   assert.ok(aggregate.representedIds.includes("hidden"));
   assert.equal(hiddenWorker.x, aggregate.x + aggregate.width / 2, "hidden active assembly is represented at aggregate equipment, never unrelated machinery");
-  assert.ok(layout.rooms[1].height < layout.rooms[0].height, "a small neighbor is not stretched into an empty hall");
+  assert.equal(layout.rooms[1].height, layout.rooms[0].height, "shared-wall rooms have no unexplained row holes");
+  assert.equal(layout.rooms[1].y, layout.rooms[0].y);
   const changed = layoutScene({ ...floor, nodes: floor.nodes.map((node) => ({ ...node, assemblies: node.assemblies.map((assembly) => ({ ...assembly, inventory: { ...assembly.inventory, direct: counts(200) } })) })) });
   const geometry = ({ contents, ...rectangle }) => rectangle;
   assert.deepEqual(changed.rooms.map(geometry), layout.rooms.map(geometry), "file counts change equipment, not room positions");
@@ -1443,4 +1444,49 @@ test("proposed resource versions and dependency cables remain distinct and inspe
   assert.match(markup, /data-proposed-relationship="removed"/);
   assert.match(markup, /First: added dependency new to ./);
   assert.doesNotMatch(markup, /data-entity-id="second-version"|value="second-version"/);
+});
+
+
+test("large real collections fill their work zone with readable sampled modules while small equipment stays small", () => {
+  const inventory = (source) => ({ direct: { source, tests: source > 4 ? 40 : 0, documentation: 0, configuration: 0, assets: 0, unclassified: 0 }, total: fileCounts, samples: ["browser.go", "intake.go", "provider.go", "recovery.go", "runtime.go", "supervisor.go"], samples_omitted: source - 6 });
+  const nodes = [3, 125, 141, 10].map((source, index) => ({ ...topology.nodes[0], id: `room${index}`, path: `room${index}`, assemblies: [{ id: `entity${index}`, path: `room${index}`, label: `Collection ${index}`, inventoryScope: "direct", inventory: inventory(source) }] }));
+  const layout = layoutScene({ digest: "actual-scale", nodes });
+  const small = layout.rooms[0].contents[0], large = layout.rooms[1].contents[0];
+  assert.ok(large.width * large.height >= small.width * small.height * 6, "large collections have substantial machinery, not only a larger badge");
+  assert.equal(large.parts.length, 4);
+  assert.ok(small.labelWidth > small.width * 3, "source names use the available cell, independently of machine size");
+  for (const [index, room] of layout.rooms.entries()) {
+    assert.equal(room.height, 256);
+    if (index % 2) assert.deepEqual([room.y, room.x], [layout.rooms[index - 1].y, layout.rooms[index - 1].x + layout.rooms[index - 1].width]);
+    const atWork = placeWorkers(layout, [{ ...workers[0], nodeId: room.id, observedBayId: room.contents[0].entityId }])[0];
+    const route = routeFromSpine(layout, { x: 32, y: layout.restingTop }, atWork);
+    assert.ok(route);
+    assertRouteGeometry(layout, { x: 32, y: layout.restingTop }, route, room.id);
+  }
+  const markup = render({ topology: { digest: "actual-scale", nodes }, workers: [] });
+  assert.match(markup, /font-size="10">browser<\/text>/);
+  assert.match(markup, /font-size="10">125 source<\/text>/);
+  assert.doesNotMatch(markup, /font-size="6"/);
+});
+
+test("seven competing proposed versions are never aggregated and selecting the seventh composes only that version", () => {
+  const assemblies = Array.from({ length: 7 }, (_, index) => ({ id: `version-${index + 1}`, proposalId: `change-${index + 1}`, path: "new", label: `Version ${index + 1}`, inventoryScope: "direct", inventory: inventoryTopology.nodes[0].inventory, sourceIncomplete: true, representedIds: ["new"] }));
+  const floor = { digest: "seven-futures", nodes: [{ ...topology.nodes[0], assemblies: [] }, { ...topology.nodes[1], id: "new", path: "new", proposed: true, assemblies }] };
+  const items = assemblies.map((assembly) => ({ id: assembly.proposalId, title: assembly.label, state: "active", operations: [{ roomId: "new", entityId: "new", path: `new/${assembly.id}.go`, kind: "addition" }] }));
+  const all = layoutScene(floor);
+  assert.deepEqual(all.rooms[1].contents.map((item) => item.proposalId), items.slice(0, 6).map((item) => item.id));
+  assert.ok(all.rooms[1].contents.every((item) => item.sourceIncomplete));
+  const markup = render({ topology: floor, workers: [], proposals: { items, onSelect() {} } });
+  assert.match(markup, /\+1 versions · select a Change/);
+  assert.doesNotMatch(markup, /data-entity-id="new:aggregate"/);
+  for (const selected of ["change-1", "change-7"]) {
+    const layout = layoutScene(floor, selected);
+    assert.equal(layout.rooms[1].contents.length, 1);
+    assert.equal(layout.rooms[1].contents[0].proposalId, selected);
+    assert.deepEqual(layout.rooms.map(({ contents, ...geometry }) => geometry), all.rooms.map(({ contents, ...geometry }) => geometry));
+    const selectedMarkup = render({ topology: floor, workers: [], proposals: { items, selected, onSelect() {} } });
+    assert.equal((selectedMarkup.match(/data-entity-id="version-/g) ?? []).length, 1);
+    assert.match(selectedMarkup, new RegExp(`data-entity-id="version-${selected.slice(-1)}"`));
+    assert.match(selectedMarkup, /data-equipment-scale="unknown"/);
+  }
 });
