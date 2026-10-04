@@ -905,7 +905,6 @@ func (result AttemptResult) RunID() RunID                      { return result.r
 func (result AttemptResult) AttemptDigest() AttemptDigest      { return result.attemptDigest }
 func (result AttemptResult) RuntimeIdentity() ResourceIdentity { return result.runtimeIdentity }
 func (result AttemptResult) Kind() AttemptResultKind           { return result.kind }
-func (result AttemptResult) ProcessIdentity() ResourceIdentity { return result.processIdentity }
 func (result AttemptResult) Exit() (AttemptResultExit, bool) {
 	return result.exit, result.kind == AttemptInnerConverged
 }

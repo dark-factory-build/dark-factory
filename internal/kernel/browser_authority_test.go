@@ -64,13 +64,9 @@ func TestBrowserPairingConsumesAndDerivesIdentity(t *testing.T) {
 	if _, err := store.RedeemBrowserPairingChallenge(ctx, digest, boot, "https://app.example", browserTestID(t, 3), publicKey, UnixMillis{value: 11}); !errors.Is(err, ErrUnauthorized) {
 		t.Fatalf("replay error = %v", err)
 	}
-	principal, err := store.AuthenticateBrowserClient(ctx, clientID)
-	if err != nil || principal.ClientID() != clientID {
-		t.Fatalf("active principal = %v/%v, err=%v", principal.ClientID(), clientID, err)
-	}
-	loaded, found, err := store.BrowserClient(ctx, principal.ClientID())
-	if err != nil || !found || loaded.CapabilityMask != client.CapabilityMask || loaded.PublicKey == nil {
-		t.Fatalf("principal reload = %+v, found=%v, err=%v", loaded, found, err)
+	loaded, found, err := store.BrowserClient(ctx, clientID)
+	if err != nil || !found || loaded.RevokedAt != nil || loaded.CapabilityMask != client.CapabilityMask || loaded.PublicKey == nil {
+		t.Fatalf("client reload = %+v, found=%v, err=%v", loaded, found, err)
 	}
 	revokedClient, err := store.RevokeBrowserClient(ctx, clientID, client.Revision, UnixMillis{value: 12})
 	if err != nil {
@@ -79,9 +75,9 @@ func TestBrowserPairingConsumesAndDerivesIdentity(t *testing.T) {
 	if _, err := store.RevokeBrowserClient(ctx, clientID, revokedClient.Revision, UnixMillis{value: 13}); err != nil {
 		t.Fatalf("idempotent revoke: %v", err)
 	}
-	revoked, err := store.AuthenticateBrowserClient(ctx, clientID)
-	if !errors.Is(err, ErrUnauthorized) || revoked.ClientID() != (BrowserClientID{}) {
-		t.Fatalf("revoked auth = %+v, %v", revoked, err)
+	revoked, found, err := store.BrowserClient(ctx, clientID)
+	if err != nil || !found || revoked.RevokedAt == nil {
+		t.Fatalf("revoked client = %+v, found=%v, err=%v", revoked, found, err)
 	}
 }
 

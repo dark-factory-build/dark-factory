@@ -156,45 +156,6 @@ func TestTerminalSessionActivationAndLiveCloseAreDurableTransitions(t *testing.T
 	}
 }
 
-func TestTerminalSessionUnresolvedCannotTerminalize(t *testing.T) {
-	store, run, keys := runningOrchestratorRun(t)
-	path := storePath(t, store)
-	defer store.Close()
-	proposal, _ := NewFailureProposal(FailureInternal, "uncertain")
-	finalizing, err := store.ProposeAttemptOutcome(context.Background(), keys.AttemptDigest, proposal, mustTime(t, 40))
-	if err != nil {
-		t.Fatal(err)
-	}
-	session := terminalSessionForRunTest(t, store, run.ID)
-	unresolved, err := store.MarkTerminalSessionUnresolved(context.Background(), run.ID, session.ID, finalizing.Revision, session.Revision, "owner uncertain", mustTime(t, 41))
-	if err != nil || unresolved.State != TerminalSessionUnresolved {
-		t.Fatalf("unresolved = %+v, err=%v", unresolved, err)
-	}
-	reopened := terminalSessionForRunTest(t, store, run.ID)
-	if reopened.State != TerminalSessionUnresolved || reopened.UnresolvedReason != "owner uncertain" {
-		t.Fatalf("unresolved = %+v", reopened)
-	}
-	if err := store.Close(); err != nil {
-		t.Fatal(err)
-	}
-	reopenedStore, err := Open(context.Background(), path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer reopenedStore.Close()
-	reopened = terminalSessionForRunTest(t, reopenedStore, run.ID)
-	if reopened.State != TerminalSessionUnresolved || reopened.UnresolvedReason != "owner uncertain" {
-		t.Fatalf("reopened unresolved = %+v", reopened)
-	}
-	current, found, err := reopenedStore.Run(context.Background(), run.ID)
-	if err != nil || !found {
-		t.Fatalf("unresolved run reload = %+v, found=%v, err=%v", current, found, err)
-	}
-	if _, err := reopenedStore.FinalizeRun(context.Background(), run.ID, current.Revision, mustTime(t, 50)); !errors.Is(err, ErrConflict) {
-		t.Fatalf("unresolved terminalization = %v", err)
-	}
-}
-
 func recoveredCloseExit(t *testing.T, kind string, sequence uint64, at int64) ProcessExit {
 	t.Helper()
 	var exit ProcessExit

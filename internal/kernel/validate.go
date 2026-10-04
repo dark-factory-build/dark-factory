@@ -1450,12 +1450,3 @@ func validNonzeroID(value []byte) bool {
 	_, err := identifierFromBytes(value)
 	return err == nil
 }
-
-func anyNullIntValid(values ...sql.NullInt64) bool {
-	for _, value := range values {
-		if value.Valid {
-			return true
-		}
-	}
-	return false
-}
