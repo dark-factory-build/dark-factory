@@ -18,7 +18,8 @@ export type SceneAssembly = Readonly<{
 
 export type SceneProposal = Readonly<{
   id: string; title: string; state: "active" | "stale" | "unavailable"; base?: string; head?: string;
-  relationships?: readonly Readonly<{ status: "added" | "removed"; fromId?: string; toId?: string; fromPath: string; toPath: string; weight: number }>[];
+  /** Cable endpoints use displayed rooms; entity endpoints retain canonical source ownership. */
+  relationships?: readonly Readonly<{ status: "added" | "removed"; fromId?: string; toId?: string; fromEntityId?: string; toEntityId?: string; fromPath: string; toPath: string; weight: number }>[];
   operations: readonly Readonly<{ entityId?: string; roomId?: string; path: string; previousPath?: string; kind: "addition" | "modification" | "removal" | "move"; label?: string }>[];
 }>;
 
@@ -46,6 +47,18 @@ export type SceneNode = Readonly<{
   /** The project this room belongs to: rooms sharing an id are laid out together under its name. */
   project?: Readonly<{ id: string; name: string }>;
 }>;
+
+/** Inspect the displayed group's proposals without replacing its canonical identity. */
+export function proposalsForEntity(topology: SceneTopology, proposals: readonly SceneProposal[], id?: string): readonly SceneProposal[] {
+  if (id === undefined) return [];
+  const members = new Set([id]);
+  for (const room of topology.nodes) for (const assembly of room.assemblies ?? []) if (room.id === id || assembly.id === id) {
+    members.add(assembly.id);
+    for (const member of assembly.representedIds ?? []) members.add(member);
+  }
+  return proposals.filter((proposal) => proposal.operations.some((operation) => members.has(operation.entityId ?? "") || operation.roomId === id)
+    || proposal.relationships?.some((edge) => members.has(edge.fromEntityId ?? edge.fromId ?? "") || members.has(edge.toEntityId ?? edge.toId ?? "")));
+}
 
 export type SceneWorker = Readonly<{
   id: string;
@@ -100,8 +113,9 @@ export type BreakRoomErrand = "shelf" | "coffee";
 
 // Workshop bays share walls; dimensions never depend on live work.
 const CORRIDOR = 32;
+export const COMMON_WIDTH = 192;
 export const PADDING = 16;
-export const ROOM_LEFT = PADDING + CORRIDOR;
+export const ROOM_LEFT = PADDING + COMMON_WIDTH + 16 + CORRIDOR;
 const FLOOR_TOP = 48;
 export const WORKER_GAP = 40;
 export const WORKER_SIZE = 20;
@@ -115,17 +129,16 @@ export function compareText(left: string, right: string) {
 export function layoutScene(topology: SceneTopology, selectedProposalId?: string): SceneLayout {
   const nodes = [...topology.nodes].sort((left, right) =>
     Number(Boolean(left.proposed)) - Number(Boolean(right.proposed)) || compareText(left.project?.name ?? "", right.project?.name ?? "") || compareText(left.project?.id ?? "", right.project?.id ?? "")
-    || compareText(left.path, right.path) || compareText(left.label, right.label) || compareText(left.id, right.id));
+    || Number(left.path === ".") - Number(right.path === ".") || compareText(left.path, right.path) || compareText(left.label, right.label) || compareText(left.id, right.id));
   const groups = new Map<string, SceneNode[]>();
   for (const node of nodes) groups.set(`${node.proposed ? "proposed:" : ""}${node.project?.id ?? ""}`, [...(groups.get(`${node.proposed ? "proposed:" : ""}${node.project?.id ?? ""}`) ?? []), node]);
-  const widestGroup = Math.max(1, ...[...groups.values()].filter((group) => !group[0]?.proposed).map((group) => group.length));
   const assembled = nodes.some((node) => node.assemblies !== undefined);
-  const columns = assembled ? Math.min(2, Math.max(1, widestGroup)) : widestGroup <= 4 ? Math.max(1, Math.min(2, widestGroup)) : Math.min(4, Math.ceil(Math.sqrt(widestGroup)));
-  const bays = assembled ? Array.from({ length: columns }, () => 392) : columns === 4 ? [160, 208, 144, 192] : columns === 3 ? [160, 224, 160] : columns === 2 ? [144, 208] : [224];
-  const width = ROOM_LEFT + bays.reduce((sum, bay) => sum + bay, 0) + PADDING;
-  const rooms: SceneRoomLayout[] = [];
-  const headings: SceneHeading[] = [];
-  const corridors: SceneRect[] = [];
+  const units = (node: SceneNode) => !assembled ? 1 : (node.assemblies?.length ?? 0) > 6 ? 4
+    : (node.assemblies?.length ?? 0) > 1 || node.sizeBucket === "large" ? 2 : 1;
+  const columns = Math.min(4, Math.max(1, ...[...groups.values()].filter((group) => !group[0]?.proposed).map((group) => group.reduce((sum, node) => sum + units(node), 0))));
+  const bay = 160;
+  const width = ROOM_LEFT + columns * bay + PADDING;
+  const rooms: SceneRoomLayout[] = [], headings: SceneHeading[] = [], corridors: SceneRect[] = [];
   let top = FLOOR_TOP;
   for (const members of groups.values()) {
     const project = members[0]!.project;
@@ -133,32 +146,42 @@ export function layoutScene(topology: SceneTopology, selectedProposalId?: string
       if (members.length !== 1 || members[0]!.label !== project.name) headings.push({ label: project.name, x: ROOM_LEFT, y: top });
       top += 16;
     }
-    for (let start = 0; start < members.length; start += columns) {
-      const row = Math.floor(start / columns);
-      const widths = row % 2 === 0 ? bays : [...bays.slice(1), bays[0]!];
-      const height = assembled ? Math.max(256, ...members.slice(start, start + columns).map((node) => 64 + Math.ceil(Math.min(6, node.assemblies?.length ?? 0) / 2) * 110)) : row % 2 === 0 ? 112 : 128;
-      let x = ROOM_LEFT;
-      for (const [index, node] of members.slice(start, start + columns).entries()) {
-        const width = widths[index]!;
-        const rectangle = { x, y: top, width, height };
-        rooms.push({ id: node.id, ...rectangle, contents: composeRoom(node, rectangle, selectedProposalId),
-          door: { x: x + width / 2, y: top + height } });
-        x += width;
+    for (let start = 0; start < members.length;) {
+      const row: { node: SceneNode; span: number }[] = [];
+      let used = 0;
+      while (start < members.length) {
+        const node = members[start]!, span = Math.min(columns, units(node));
+        if (used + span > columns) break;
+        row.push({ node, span }); used += span; start++;
       }
-      corridors.push({ x: PADDING, y: top + height, width: x - PADDING, height: CORRIDOR });
+      const height = assembled ? Math.max(...row.map(({ node, span }) => {
+        const count = Math.min(12, node.assemblies?.length ?? 0);
+        const across = Math.min(span, Math.max(1, count));
+        return count <= 1 ? (node.sizeBucket === "large" ? 274 : 208) : 146 + (Math.ceil(count / across) - 1) * 110 + (count > across ? 68 : 128);
+      })) : 144;
+      let x = ROOM_LEFT;
+      for (const { node, span } of row) {
+        const rectangle = { x, y: top, width: span * bay, height };
+        rooms.push({ id: node.id, ...rectangle, contents: composeRoom(node, rectangle, selectedProposalId),
+          door: { x: x + rectangle.width / 2, y: top + height } });
+        x += rectangle.width;
+      }
+      corridors.push({ x: ROOM_LEFT - CORRIDOR, y: top + height, width: x - ROOM_LEFT + CORRIDOR, height: CORRIDOR });
       top += height + CORRIDOR;
     }
   }
-  // A spine joins each project's corridor and the expandable common area below.
-  corridors.push({ x: PADDING, y: FLOOR_TOP, width: CORRIDOR, height: top - FLOOR_TOP + 32 });
-  return { width, height: top + 32, rooms, headings, corridors, restingTop: top + 32 };
+  // The entrance stays beside the source rooms, including on large repositories.
+  // Live actors can extend its seating downwards without moving any source area.
+  corridors.push({ x: ROOM_LEFT - CORRIDOR, y: FLOOR_TOP, width: CORRIDOR, height: Math.max(160, top - FLOOR_TOP) });
+  return { width, height: Math.max(224, top), rooms, headings, corridors, restingTop: 168 };
 }
 
 export function placeWorkers(layout: SceneLayout, workers: readonly SceneWorker[], social: "nearby" | "commons" = "commons"): readonly SceneWorkerPlacement[] {
   const rooms = new Map(layout.rooms.map((room) => [room.id, room]));
-  const roomCounts = new Map<string, number>();
   const sorted = [...workers].sort((left, right) => compareText(left.id, right.id));
   const placed: SceneWorkerPlacement[] = [];
+  // ponytail: a bounded actor list uses linear collision checks; use spatial buckets if thousands are displayed.
+  const occupied = (point: ScenePoint) => placed.some((other) => Math.abs(point.x - other.x) < 24 && Math.abs(point.y - other.y) < 24);
   const areas: Record<"resting" | "staging" | "outside" | "overflow", SceneWorker[]> = { resting: [], staging: [], outside: [], overflow: [] };
   for (const worker of sorted) {
     if (worker.location !== "working") {
@@ -167,68 +190,51 @@ export function placeWorkers(layout: SceneLayout, workers: readonly SceneWorker[
     }
     const room = worker.nodeId === undefined ? undefined : rooms.get(worker.nodeId);
     if (room === undefined) { areas.outside.push(worker); continue; }
-    const slot = roomCounts.get(room.id) ?? 0;
-    const positions = workPositions(room, worker.observedBayId);
-    if (slot >= positions.length) { areas.overflow.push(worker); continue; }
-    roomCounts.set(room.id, slot + 1);
-    placed.push({ id: worker.id, area: "room", roomId: room.id, ...positions[slot]! });
+    const position = workPositions(room, worker.observedBayId).find((point) => !occupied(point));
+    if (position === undefined) { areas.overflow.push(worker); continue; }
+    placed.push({ id: worker.id, area: "room", roomId: room.id, ...position });
+  }
+  const nearby = social === "nearby" ? layout.rooms.filter((room) => room.contents.some((item) => item.entityId !== undefined)) : [];
+  const localCounts = new Map<string, number>();
+  const commons: SceneWorker[] = [];
+  // Known locations keep their seats before unlocated idle workers join a nearby pair.
+  const resting = areas.resting.sort((left, right) => Number(nearby.some((room) => room.id === right.nodeId)) - Number(nearby.some((room) => room.id === left.nodeId)) || compareText(left.id, right.id));
+  for (const worker of resting) {
+    const known = nearby.find((room) => room.id === worker.nodeId);
+    const candidates = known ? [known] : [...nearby.filter((room) => localCounts.get(room.id) === 1), ...nearby.slice(0, 3)];
+    const seat = candidates.filter((room) => (localCounts.get(room.id) ?? 0) < 2).flatMap((room) => [-24, 24].map((offset) => ({ roomId: room.id, x: room.door.x + offset, y: room.door.y - 24 }))).find((point) => !occupied(point));
+    if (seat === undefined) { commons.push(worker); continue; }
+    placed.push({ id: worker.id, area: "resting", ...seat });
+    localCounts.set(seat.roomId, (localCounts.get(seat.roomId) ?? 0) + 1);
   }
   const planning = (["staging", "outside", "overflow"] as const).flatMap((area) => areas[area].map((worker) => ({ worker, area })));
-  const seats = commonSeating(layout, areas.resting.length, planning.length);
-  const nearby = social === "nearby" ? layout.rooms.filter((room) => room.contents.some((item) => item.entityId !== undefined)) : [];
-  areas.resting.forEach((worker, slot) => {
-    const room = nearby.find((room) => room.id === worker.nodeId) ?? nearby[slot % Math.max(1, nearby.length)];
-    const localSlot = Math.floor(slot / Math.max(1, nearby.length));
-    placed.push(room === undefined || localSlot > 1 ? { id: worker.id, area: "resting", ...seats.resting[slot]! }
-      : { id: worker.id, area: "resting", roomId: room.id, x: room.x + 28 + localSlot * WORKER_GAP, y: room.door.y - 24 });
-  });
+  const seats = commonSeating(layout, commons.length, planning.length);
+  commons.forEach((worker, slot) => placed.push({ id: worker.id, area: "resting", ...seats.resting[slot]! }));
   planning.forEach(({ worker, area }, slot) => placed.push({ id: worker.id, area, ...seats.planning[slot]! }));
   return placed.sort((left, right) => compareText(left.id, right.id));
 }
 
-/** Two compact seating sections share one bay, growing down only when crowded. */
+/** The side commons has four seats per row and no empty duplicate seats for local rest. */
 export function commonSeating(layout: SceneLayout, restingCount: number, planningCount: number) {
-  const available = layout.width - ROOM_LEFT - PADDING;
-  // The break-room furniture keeps whatever two seats a section can spare it.
-  const capacity = (available - 16 - nookWidth(layout)) / 2;
-  const columns = Math.max(2, Math.min(Math.floor((capacity - 48) / WORKER_GAP) + 1, Math.max(restingCount, planningCount)));
-  const width = (columns - 1) * WORKER_GAP + 48;
-  const seats = (count: number, left: number, top: number) => Array.from({ length: Math.max(2, count) }, (_, slot) => ({
-    x: left + 24 + (slot % columns) * WORKER_GAP,
-    y: top + Math.floor(slot / columns) * WORKER_GAP,
+  const seats = (count: number, top: number) => Array.from({ length: count }, (_, slot) => ({
+    x: PADDING + 24 + (slot % 4) * WORKER_GAP,
+    y: top + Math.floor(slot / 4) * WORKER_GAP,
   }));
-  const resting = seats(restingCount, ROOM_LEFT, layout.restingTop);
-  const planning = planningCount === 0 ? [] : seats(planningCount,
-    ROOM_LEFT + width + 16, layout.restingTop);
-  return { resting, planning };
+  return { resting: seats(restingCount, layout.restingTop), planning: seats(planningCount,
+    layout.restingTop + (restingCount === 0 ? 0 : (Math.ceil(restingCount / 4) - 1) * WORKER_GAP + 64)) };
 }
 
 
-// Each piece of break-room furniture wants this much of the back wall.
-const PIECE = 30;
-const nookWidth = (layout: SceneLayout) => Math.max(0, Math.min(2 * PIECE + 4, layout.width - ROOM_LEFT - PADDING - (2 * 88 + 16)));
-
-/**
- * Furniture along the break room's back wall, right of the last seats, with one
- * standing place in front of each piece: a bookshelf where there is room for
- * one thing, a coffee station beside it where there is room for two. On a floor
- * with room for neither, workers simply stay seated.
- */
-export function breakRoomNook(layout: SceneLayout, restingCount: number, planningCount: number, nearby = false) {
-  const width = nookWidth(layout), compact = width < 2 * PIECE + 4, pieces = compact ? 2 : Math.floor(width / PIECE);
-  if (pieces === 0) return undefined;
-  const seating = commonSeating(layout, restingCount, planningCount);
-  const left = Math.max(...[...seating.resting, ...seating.planning].map((seat) => seat.x)) + 24;
-  const compactX = layout.width - PADDING - WORKER_SIZE;
-  return { width, furniture: (["shelf", "coffee"] as const).slice(0, pieces).map((errand, index) => ({
+/** Stable furniture in the side commons and above each local resting pair. */
+export function breakRoomNook(layout: SceneLayout, _restingCount: number, _planningCount: number, nearby = false) {
+  return { width: COMMON_WIDTH, furniture: (["shelf", "coffee"] as const).map((errand, index) => ({
     errand, key: String(errand), roomId: undefined as string | undefined,
-    x: compact ? compactX : left + 5 + index * PIECE,
-    y: layout.restingTop - 38 + (compact ? index * 24 : 0),
-    stand: { x: compact ? compactX + 10 : left + 15 + index * PIECE, y: layout.restingTop - 8 + (compact ? index * 24 : 0) },
+    x: PADDING + 120 + index * 38, y: 90,
+    stand: { x: PADDING + 130 + index * 38, y: 136 },
   })).concat(!nearby ? [] : layout.rooms.filter((room) => room.contents.some((item) => item.entityId !== undefined)).map((room, index) => ({
     errand: index % 2 === 0 ? "shelf" as const : "coffee" as const, key: room.id, roomId: room.id,
-    x: room.x + room.width - 42, y: room.door.y - 55,
-    stand: { x: room.x + room.width - 30, y: room.door.y - 24 },
+    x: room.x + room.width - 42, y: room.door.y - 79,
+    stand: { x: room.x + room.width - 30, y: room.door.y - 48 },
   }))) };
 }
 
@@ -285,16 +291,16 @@ function composeRoom(node: SceneNode, room: SceneRect, selectedProposalId?: stri
   if (node.assemblies !== undefined) {
     const assemblies = node.assemblies.filter((assembly) => !assembly.proposalId || !selectedProposalId || assembly.proposalId === selectedProposalId);
     // Proposed versions are alternatives, never inputs to an aggregate inventory.
-    const rest = assemblies.slice(5);
+    const rest = assemblies.slice(11);
     const sum = { source: 0, tests: 0, documentation: 0, configuration: 0, assets: 0, unclassified: 0 };
     for (const assembly of rest) for (const kind of Object.keys(sum) as InventoryKind[]) sum[kind] += assembly.inventory?.[assembly.inventoryScope === "direct" ? "direct" : "total"][kind] ?? 0;
-    const shown: readonly SceneAssembly[] = assemblies.some((assembly) => assembly.proposalId) ? assemblies.slice(0, 6) : assemblies.length <= 6 ? assemblies : [...assemblies.slice(0, 5), {
+    const shown: readonly SceneAssembly[] = assemblies.some((assembly) => assembly.proposalId) ? assemblies.slice(0, 12) : assemblies.length <= 12 ? assemblies : [...assemblies.slice(0, 11), {
       id: `${node.id}:aggregate`, path: node.path, label: `${rest.length} more assemblies`, inventoryScope: "direct",
       representedIds: rest.flatMap((assembly) => [assembly.id, ...assembly.representedIds ?? []]),
       inventory: rest.some((assembly) => assembly.inventory === undefined) ? undefined : { direct: sum, total: sum, samples: [], samples_omitted: Object.values(sum).reduce((a, b) => a + b, 0) },
     }];
-    const columns = Math.min(2, shown.length), rows = Math.ceil(shown.length / Math.max(1, columns));
-    const cellWidth = (room.width - 48) / Math.max(1, columns), cellHeight = rows > 1 ? 110 : 128;
+    const columns = Math.min(Math.max(1, Math.floor(room.width / 160)), shown.length), rows = Math.ceil(shown.length / Math.max(1, columns));
+    const cellWidth = (room.width - 48) / Math.max(1, columns), cellHeight = rows > 1 ? 110 : room.height - 146;
     return shown.map((assembly, index) => {
       const counts = assembly.inventory?.[assembly.inventoryScope === "direct" ? "direct" : "total"];
       const kinds = (Object.keys(inventoryLabels) as InventoryKind[]).filter((kind) => (counts?.[kind] ?? 0) > 0);

@@ -166,7 +166,7 @@ export function routeFromSpine(layout: SceneLayout, from: ScenePoint, to: SceneW
   if (to.area === "room" && destination === undefined || mainSpine === undefined) return undefined;
   const center = mainSpine.x + mainSpine.width / 2;
   // The spine beside the common room is one of its lanes, so it counts as inside.
-  if (from.y >= layout.restingTop - 30) {
+  if (from.x < (mainSpine.x + mainSpine.width / 2)) {
     // Out of the common room by its lanes; to a room, the spine takes over from there.
     if (destination === undefined) return route([from, ...commonRoomLanes(layout, from, to, center), to]);
     const out = commonRoomLanes(layout, from, { x: center, y: layout.restingTop - AISLE }, center);

@@ -927,7 +927,8 @@ function FloorAppearanceSection({ appearance, onChange, onReset }: {
 }) {
   return <section className="dfConsoleSidebar__section" aria-label="FLOOR APPEARANCE">
     <h3>Floor appearance</h3>
-    <p>Saved in this browser.</p>
+    <p>Saved in this browser. Automatic groups broad areas; Fine exposes directories on the same floor.</p>
+    <p>Equipment size uses eligible files: S 1–4, M 5–20, L 21–80, XL 81+. Machine motifs are name hints. ? means scale is unavailable; dashed + / × cables mark proposed dependencies.</p>
     <label>Scenery<select value={appearance.scenery} onChange={(event) => onChange({ ...appearance, scenery: event.currentTarget.value as FloorAppearance["scenery"] })}><option value="off">Off</option><option value="subtle">Subtle</option><option value="rich">Rich</option></select></label>
     <label>Topology detail<select value={appearance.detail ?? "auto"} onChange={(event) => onChange({ ...appearance, detail: event.currentTarget.value as FloorAppearance["detail"] })}><option value="coarse">Coarse</option><option value="auto">Automatic</option><option value="fine">Fine</option></select></label>
     <label>Social furniture<select value={appearance.social ?? "nearby"} onChange={(event) => onChange({ ...appearance, social: event.currentTarget.value as FloorAppearance["social"] })}><option value="nearby">Within the base</option><option value="commons">Common tables</option></select></label>

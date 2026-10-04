@@ -179,13 +179,20 @@ export function selectFloor(prepared: ReturnType<typeof prepareFloor>, detail: F
     }] as const;
   }));
   const rootIds = new Set(hierarchies.map((hierarchy) => canonicalOf(hierarchy.projectRoom).id));
-  const wrapper = (node: SceneNode) => ["internal", "src", "lib", "packages", "apps", "web"].includes(node.path.split("/").at(-1)!) && (children.get(node.id)?.length ?? 0) > 0;
+  // Unwrap short namespace chains, not broad areas such as Go's internal/.
+  // A wide namespace remains a room containing its packages as assemblies.
+  const wrapper = (node: SceneNode) => ["internal", "src", "lib", "packages", "apps", "web"].includes(node.path.split("/").at(-1)!)
+    && (children.get(node.id)?.length ?? 0) > 0 && children.get(node.id)!.length <= 4;
   const candidates = canonical.filter((node) => {
     if (rootIds.has(node.id)) return true;
     if (detail === "fine") return true;
     const parent = parentOf(node);
     if (detail === "coarse") return parent !== undefined && rootIds.has(parent.id);
     if (wrapper(node)) return false;
+    if (Object.values(node.inventory?.total ?? {}).reduce((sum, count) => sum + count, 0) <= 4 && node.inventory !== undefined && !(children.get(node.id)?.length)) return false;
+    // Large direct packages warrant their own bay; this uses integrated source,
+    // never proposal counts or live worker activity.
+    if (node.kind === "package" && parent?.path.split("/").at(-1) === "internal" && countFiles(node) > 80) return true;
     let ancestor = parent;
     while (ancestor !== undefined && !rootIds.has(ancestor.id)) {
       if (!wrapper(ancestor)) return false;
@@ -223,14 +230,37 @@ export function selectFloor(prepared: ReturnType<typeof prepareFloor>, detail: F
       const key = `${link.direction}:${targetID}`, target = roomByID.get(targetID)!;
       links.set(key, { ...link, nodeId: targetID, label: target.label, path: target.path, weight: (links.get(key)?.weight ?? 0) + link.weight });
     }
+    // A package includes its tests, manifests and manuals. Keep nested functional
+    // packages and substantial source directories as named assemblies, instead of
+    // giving every resource folder a separate workstation.
+    const assemblyOwners = new Set(owned.filter((member) => member.id === node.id || member.kind === "package"
+      || !["src", "lib", "scripts"].includes(member.path.split("/").at(-1)!) && (member.inventory?.direct.source ?? 0) > 4).map((member) => member.id));
+    const ownedIds = new Set(owned.map((member) => member.id));
+    const assemblyGroups = new Map<string, SceneNode[]>();
+    for (const member of owned) {
+      let owner = member;
+      while (!assemblyOwners.has(owner.id)) {
+        const parent = parentOf(owner);
+        if (!parent || !ownedIds.has(parent.id)) { owner = node; break; }
+        owner = parent;
+      }
+      assemblyGroups.set(owner.id, [...assemblyGroups.get(owner.id) ?? [], member]);
+    }
     return {
-      ...node, label: node.path === "." ? node.project?.name ?? node.label : node.label, inventoryScope: "subtree",
+      ...node, label: node.path === "." ? node.project?.name ?? node.label : node.path, inventoryScope: "subtree",
       inventory: owned.every((member) => member.inventory !== undefined) ? { ...node.inventory!, total } : undefined,
-      assemblies: owned.filter((member) => countFiles(member) > 0 || member.inventory === undefined).map((member) => ({
-        id: member.id, path: member.path, label: member.path === "." ? "Repository files" : member.label,
-        inventoryScope: "direct" as const, inventory: member.inventory, sizeBucket: member.sizeBucket,
-        representedIds: [member.id], dependencies: member.dependencies,
-      })),
+      assemblies: [...assemblyGroups].flatMap(([id, group]) => {
+        const member = detailByID.get(id)!;
+        const total = emptyCounts();
+        for (const source of group) for (const kind of Object.keys(total) as InventoryKind[]) total[kind] += source.inventory?.direct[kind] ?? 0;
+        if (!Object.values(total).some(Boolean) && group.every((source) => source.inventory !== undefined)) return [];
+        const samples = group.flatMap((source) => (source.inventory?.samples ?? []).map((sample) => source.path === member.path ? sample : `${source.path.slice(member.path === "." ? 0 : member.path.length + 1)}/${sample}`)).slice(0, 32);
+        return [{ id, path: member.path, label: member.path === "." ? "Repository files" : member.path === node.path ? member.path.split("/").at(-1)! : member.path.slice(node.path === "." ? 0 : node.path.length + 1),
+          inventoryScope: "subtree" as const,
+          inventory: group.some((source) => source.inventory === undefined) ? undefined : { direct: member.inventory!.direct, total, samples, samples_omitted: Math.max(0, Object.values(total).reduce((sum, count) => sum + count, 0) - samples.length) },
+          sizeBucket: member.sizeBucket, representedIds: group.map((source) => source.id), dependencies: member.dependencies,
+        }];
+      }),
       ...(node.dependencies === undefined ? {} : { dependencies: { ...node.dependencies, links: [...links.values()] } }),
     };
   });
@@ -438,6 +468,8 @@ export function projectProposals(selected: ReturnType<typeof selectFloor>, items
     return { id: productionKey(item), title: item.pullRequest?.title || item.construction?.title || "Proposed change",
       state: source.kind === "unavailable" ? "unavailable" : source.stale ? "stale" : "active", base: source.base, head: source.head, operations,
       relationships: source.relationships.map((edge) => ({ status: edge.status, fromPath: edge.from_path, toPath: edge.to_path, weight: edge.weight,
+        fromEntityId: provisional.get(`${item.projectId}:proposed:${edge.from_path}`)?.id ?? roomForPath(item.projectId, edge.from_path)?.id,
+        toEntityId: provisional.get(`${item.projectId}:proposed:${edge.to_path}`)?.id ?? roomForPath(item.projectId, edge.to_path)?.id,
         fromId: provisional.get(`${item.projectId}:proposed:${edge.from_path}`)?.id ?? selected.visibleAncestor(roomForPath(item.projectId, edge.from_path)?.id),
         toId: provisional.get(`${item.projectId}:proposed:${edge.to_path}`)?.id ?? selected.visibleAncestor(roomForPath(item.projectId, edge.to_path)?.id),
       })),

@@ -215,9 +215,9 @@ export function FactoryConsole({
   });
   const [selectedProduction, setSelectedProduction] = useState<string>();
   const [libraryOpen, setLibraryOpen] = useState(false);
-  const [knowledgeView, setKnowledgeView] = useState<{ board?: boolean; entity?: string; id?: string; repository?: string }>({});
+  const [knowledgeView, setKnowledgeView] = useState<{ board?: boolean; project?: string; entity?: string; id?: string; repository?: string }>({});
   const [requestedEntity, setRequestedEntity] = useState<{ id: string }>();
-  const openKnowledge = (board: boolean, project?: string, entity?: string, id?: string, repository?: string) => { if (project) selectProject(project); setKnowledgeView({ board, ...(entity ? { entity } : {}), ...(id ? { id } : {}), ...(repository ? { repository } : {}) }); setLibraryOpen(true); };
+  const openKnowledge = (board: boolean, project?: string, entity?: string, id?: string, repository?: string) => { setKnowledgeView({ board, project: project ?? projectId, ...(entity ? { entity } : {}), ...(id ? { id } : {}), ...(repository ? { repository } : {}) }); setLibraryOpen(true); };
   const [requestedMission, setRequestedMission] = useState<{ projectId: string; id: string }>();
   const selectProduction = (key: string) => { setSelectedProduction(key); onDetail?.("production"); };
   const counters = factoryCounters(state);
@@ -312,7 +312,7 @@ export function FactoryConsole({
               </div>
             </div>
             {view === "floor"
-              ? <FactoryFloor requestedEntity={requestedEntity} onOpenBoard={(project, entity, id, repository) => openKnowledge(true, project, entity, id, repository)} changes={productionItems} selectedChange={selectedProduction} onSelectChange={selectProduction} onProjectContent={onProjectContent} onAppearanceChange={changeFloorAppearance} onOpenLibrary={(id) => openKnowledge(false, id)} onOpenTasks={ready ? (id) => { selectProject(id); onDetail?.("queue"); } : undefined} onOpenMissions={ready ? (id) => { selectProject(id); onDetail?.("missions"); } : undefined} projectId={projectId} onProject={selectProject} floorAppearance={floorAppearance} selectedTaskId={selectedTask?.id} onSelectTask={ready ? selectTask : undefined} selectedAgentId={selectedDetail === "agent" ? selectedAgent?.id : undefined} state={scopedState} topologies={topologies} runPaths={runPaths} lastRunPaths={lastRunPaths} onSelectAgent={ready ? onSelectAgent : undefined} onSelectHumanRequest={ready ? onSelectHumanRequest : undefined} connected={ready} />
+              ? <FactoryFloor requestedEntity={requestedEntity} onOpenBoard={(project, entity, id, repository) => openKnowledge(true, project, entity, id, repository)} changes={productionItems} selectedChange={selectedProduction} onSelectChange={selectProduction} onProjectContent={onProjectContent} onOpenLibrary={(id) => openKnowledge(false, id)} onOpenTasks={ready ? (id) => { selectProject(id); onDetail?.("queue"); } : undefined} onOpenMissions={ready ? (id) => { selectProject(id); onDetail?.("missions"); } : undefined} projectId={projectId} onProject={selectProject} floorAppearance={floorAppearance} selectedTaskId={selectedTask?.id} onSelectTask={ready ? selectTask : undefined} selectedAgentId={selectedDetail === "agent" ? selectedAgent?.id : undefined} state={scopedState} topologies={topologies} runPaths={runPaths} lastRunPaths={lastRunPaths} onSelectAgent={ready ? onSelectAgent : undefined} onSelectHumanRequest={ready ? onSelectHumanRequest : undefined} connected={ready} />
               : <AgentList state={scopedState} selectedAgentId={selectedAgent?.id} ready={ready} onSelectAgent={ready ? onSelectAgent : undefined} />}
           </section>
 
@@ -383,7 +383,7 @@ export function FactoryConsole({
         </div>
       </main>
       {!libraryOpen ? null : <ConsoleDialog label={knowledgeView.board ? "Project board" : "Project library"} title={knowledgeView.board ? "BOARD" : "LIBRARY"} onClose={() => setLibraryOpen(false)}>
-        <ProjectLibrary key={`${projectId}:${knowledgeView.board}:${knowledgeView.entity}:${knowledgeView.id}`} board={knowledgeView.board} repository={knowledgeView.repository} entity={knowledgeView.entity} initialID={knowledgeView.id} onSource={(entity) => { selectProject(entity.split(":")[0]); setRequestedEntity({ id: entity }); setLibraryOpen(false); onView?.("floor"); }} onRecord={openKnowledgeRecord} state={scopedState} call={ready ? onProjectContent : undefined} draft={(agent, instruction) => { setLibraryOpen(false); onDraftLibraryTask?.(agent, instruction); }} />
+        <ProjectLibrary open initialProjectId={knowledgeView.project} key={`${knowledgeView.project}:${knowledgeView.board}:${knowledgeView.entity}:${knowledgeView.id}`} board={knowledgeView.board} repository={knowledgeView.repository} entity={knowledgeView.entity} initialID={knowledgeView.id} onSource={(entity) => { selectProject(entity.split(":")[0]); setRequestedEntity({ id: entity }); setLibraryOpen(false); onView?.("floor"); }} onRecord={openKnowledgeRecord} state={state} call={ready ? onProjectContent : undefined} draft={(agent, instruction) => { setLibraryOpen(false); onDraftLibraryTask?.(agent, instruction); }} />
       </ConsoleDialog>}
       {settingsOpen !== true ? null : (
         <SettingsDialog

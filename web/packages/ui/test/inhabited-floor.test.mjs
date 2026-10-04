@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { createElement } from "react";
+import { act, create } from "react-test-renderer";
+import { FactoryFloor } from "../dist/src/console-screens.js";
 import { prepareFloor, selectFloor, projectProposals, projectFloor, MAX_FLOOR_ROOMS } from "../dist/src/console-view.js";
 import { deriveProductionView, productionKey } from "../dist/src/production-view.js";
 import { layoutScene } from "../dist/src/factory-scene/scene.js";
@@ -19,7 +22,10 @@ test("flat detail preserves every canonical source once across same-path wrapper
   for (const detail of ["coarse", "auto", "fine"]) {
     const floor = selectFloor(prepared, detail), assemblies = floor.topology.nodes.flatMap((room) => room.assemblies);
     assert.equal(new Set(assemblies.map((assembly) => assembly.id)).size, assemblies.length);
-    assert.equal(assemblies.reduce((sum, assembly) => sum + assembly.inventory.direct.source, 0), 24);
+    assert.equal(assemblies.reduce((sum, assembly) => sum + assembly.inventory.total.source, 0), 24);
+    const represented = assemblies.flatMap((assembly) => assembly.representedIds);
+    assert.equal(new Set(represented).size, represented.length, "each canonical area has one physical owner");
+    for (const source of floor.canonical.filter((source) => Object.values(source.inventory?.direct ?? {}).some(Boolean))) assert.ok(represented.includes(source.id));
     assert.equal(floor.topology.nodes.reduce((sum, room) => sum + room.inventory.total.source, 0), 24);
     assert.equal(floor.visibleAncestor("project:root"), floor.visibleAncestor("project:module"));
     assert.deepEqual([...prepared.roomByID.keys()], identity);
@@ -118,4 +124,48 @@ test("new-area versions retain observed resource classes and source-backed depen
   assert.equal(projected.proposals[0].relationships[0].fromId, newArea.id);
   assert.equal(projected.proposals[0].relationships[0].toId, "project:kernel");
   assert.equal(changed[0].source.relationshipsOmitted, 1);
+});
+
+
+test("automatic areas keep wide namespaces and package resources together without losing exact owners", () => {
+  const packages = Array.from({ length: 8 }, (_, index) => node(`p${index}`, `internal/p${index}`, "internal", inv(index === 0 ? 100 : 5, 2), "package"));
+  const inventory = { ...inv(0), direct: { ...counts(0), documentation: 4 }, total: { ...counts(0), documentation: 4 } };
+  const source = [root, node("internal", "internal", "root", inv(0)), ...packages,
+    node("tests", "internal/p1/test", "p1", inv(0, 8)), node("manuals", "internal/p1/docs", "p1", inventory)];
+  const prepared = prepare({ ...topology, nodes: source });
+  const auto = selectFloor(prepared), fine = selectFloor(prepared, "fine");
+  assert.ok(auto.topology.nodes.length < fine.topology.nodes.length / 2);
+  assert.ok(auto.topology.nodes.some((room) => room.path === "internal"));
+  assert.ok(auto.topology.nodes.some((room) => room.path === "internal/p0"));
+  const assembly = auto.topology.nodes.flatMap((room) => room.assemblies).find((assembly) => assembly.id === "project:p1");
+  assert.deepEqual(assembly.inventory.total, { ...counts(5, 10), documentation: 4 });
+  assert.deepEqual(assembly.inventory.direct, counts(5, 2), "aggregate scale never overwrites canonical direct contents");
+  assert.deepEqual(assembly.representedIds, ["project:p1", "project:manuals", "project:tests"]);
+  for (const id of assembly.representedIds) assert.ok(auto.detailByID.has(id) && fine.detailByID.has(id));
+});
+
+test("clicking grouped equipment exposes child edits and relationship changes in both inspectors", async () => {
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+  const packages = Array.from({ length: 5 }, (_, i) => node(`pkg${i}`, `internal/pkg${i}`, "internal", inv(5), "package"));
+  const manuals = { ...inv(0), direct: { ...counts(0), documentation: 2 }, total: { ...counts(0), documentation: 2 } };
+  const source = [root, node("internal", "internal", "root", inv(0)), ...packages, node("docs", "internal/pkg0/docs", "pkg0", manuals)];
+  const relationship = record("2", []);
+  relationship.document.source.relationships = [{ status: "added", from_path: "internal/pkg0/docs", to_path: "internal/pkg1", weight: 1 }];
+  const changes = items([record("1", [{ status: "modified", path: "internal/pkg0/docs/guide.md" }]), relationship, record("3", [{ status: "modified", path: "internal/pkg2/code.go" }])]);
+  const state = { projects, agents: new Map(), tasks: new Map(), humanRequests: new Map() };
+  const text = (value) => typeof value === "string" ? value : (value.children ?? []).map(text).join("");
+  const selected = [];
+  let tree;
+  try {
+    await act(async () => { tree = create(createElement(FactoryFloor, { state, topologies: new Map([[project.id, { ...topology, nodes: source }]]), changes, floorAppearance: { detail: "auto", social: "nearby" }, onSelectChange: (id) => selected.push(id) })); });
+    const equipment = tree.root.findAllByProps({ "data-entity-id": "project:pkg0" })[0];
+    assert.match(equipment.props["data-tooltip"], /Change 1/);
+    await act(async () => equipment.props.onClick());
+    for (const label of ["Source contents", "Changes affecting selected source"]) {
+      const buttons = tree.root.findByProps({ "aria-label": label }).findAllByType("button").filter((button) => /Change \d/.test(text(button)));
+      assert.deepEqual(buttons.map(text).map((label) => label.match(/Change \d/)[0]), ["Change 1", "Change 2"]);
+      await act(async () => buttons[0].props.onClick());
+    }
+    assert.deepEqual(selected, [productionKey(changes[0]), productionKey(changes[0])]);
+  } finally { if (tree) await act(async () => tree.unmount()); }
 });

@@ -9,6 +9,7 @@ import { FactoryApp, FactoryConsole } from "../dist/src/index.js";
 import { layoutScene } from "../dist/src/factory-scene/scene.js";
 import { prepareFloor, selectFloor, projectFloor } from "../dist/src/console-view.js";
 import { FactoryFloor, StageMeter } from "../dist/src/console-screens.js";
+import { ProjectLibrary } from "../dist/src/project-library.js";
 import { SettingsDialog } from "../dist/src/console-sidebar.js";
 import { FactoryScene } from "../dist/src/factory-scene/factory-scene.js";
 import { TerminalPanel } from "../dist/src/factory-app.js";
@@ -1945,8 +1946,8 @@ test("floor omits the global evidence essay", () => {
   const markup = renderToStaticMarkup(createElement(FactoryConsole, { status: "ready", state: fixtureState, topologies: fixtureTopologies, view: "floor" }));
   assert.doesNotMatch(markup, /Floor evidence|Rooms describe a repository snapshot/);
   assert.doesNotMatch(markup, /Scroll the floor to explore/);
-  assert.match(markup, /Floor detail/);
-  assert.match(markup, /one connected floor/);
+  assert.doesNotMatch(markup, /Floor detail|Topology detail|Social furniture|one connected floor/);
+  assert.match(markup, /Find source/);
 });
 
 
@@ -2481,7 +2482,9 @@ test("Missions and Production share the task dialog and preserve their origin on
   }
 });
 
-test("source notices and new discussions retain the deepest repository source scope", async () => {
+test("source switches replace notices and retain the deepest repository discussion scope", async (t) => {
+  const warnings = [];
+  t.mock.method(console, "error", (...args) => warnings.push(args.join(" ")));
   const selected = selectFloor(prepareFloor(fixtureState.projects, fixtureTopologies), "fine");
   const entity = [...selected.detailByID.values()].find((node) => node.project?.id === ids.project && node.path !== "." && node.path !== "");
   assert.ok(entity);
@@ -2489,11 +2492,33 @@ test("source notices and new discussions retain the deepest repository source sc
   const topology = { ...fixtureTopology, sources: [{ repository_id: "ab".repeat(16), prefix: "", revision: "base" }, { repository_id: repository, prefix: entity.path, revision: "scoped" }] };
   const calls = [], opens = [];
   let renderer;
-  await act(async () => { renderer = create(createElement(FactoryFloor, { state: fixtureState, topologies: new Map(fixtureTopologies).set(ids.project, topology), requestedEntity: { id: entity.id }, floorAppearance: { ...DEFAULT_FLOOR_APPEARANCE, detail: "fine" }, onProjectContent: async (operation, input) => { calls.push({ operation, input }); return { items: [] }; }, onOpenBoard: (...args) => opens.push(args) })); });
+  const props = { state: fixtureState, topologies: new Map(fixtureTopologies).set(ids.project, topology), requestedEntity: { id: entity.id }, floorAppearance: { ...DEFAULT_FLOOR_APPEARANCE, detail: "fine" }, onProjectContent: async (operation, input) => { calls.push({ operation, input }); return { items: [] }; }, onOpenBoard: (...args) => opens.push(args) };
+  await act(async () => { renderer = create(createElement(FactoryFloor, props)); });
   const click = async (label) => { await act(async () => renderer.root.findAllByType("button").find((button) => button.children.join("") === label).props.onClick()); };
   await click("Read notices for this source");
   assert.equal(calls.at(-1).input.repository_id, repository);
   await click("Discuss this source");
   assert.deepEqual(opens, [[ids.project, entity.id, undefined, repository]]);
+  for (const source of [...selected.detailByID.values()].filter((node) => node.project?.id === ids.project).slice(0, 5)) {
+    await act(async () => renderer.update(createElement(FactoryFloor, { ...props, requestedEntity: { id: source.id } })));
+    assert.equal(renderer.root.findAllByProps({ "aria-label": "Source notices" }).length, 1);
+    await click("Discuss this source");
+    assert.equal(opens.at(-1)[1], source.id);
+  }
+  assert.ok(!warnings.some((message) => message.includes("same key")), "source inspectors must have distinct reconciliation identities");
   await act(async () => renderer.unmount());
+});
+
+test("opening a project shelf scopes Library without changing the floor filter", async () => {
+  const calls = [];
+  let tree;
+  await act(async () => { tree = create(createElement(FactoryConsole, { status: "ready", state: fixtureState, topologies: fixtureTopologies,
+    onProjectContent: async (operation, input) => { calls.push({ operation, input }); return { items: [], next_offset: 0 }; },
+  })); });
+  await act(async () => tree.root.findByType(FactoryFloor).props.onOpenLibrary(ids.secondProject));
+  assert.equal(tree.root.findByType(ProjectLibrary).props.initialProjectId, ids.secondProject);
+  assert.equal(tree.root.findByType(FactoryFloor).props.projectId, undefined);
+  assert.equal(tree.root.findByType(FactoryFloor).props.state.projects.size, fixtureState.projects.size);
+  assert.ok(calls.some(({ operation, input }) => operation === "search" && input.project_id === ids.secondProject));
+  await act(async () => tree.unmount());
 });

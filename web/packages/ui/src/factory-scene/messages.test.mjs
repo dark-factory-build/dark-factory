@@ -151,7 +151,7 @@ test("the floor sends a question down the corridors, its answer back, and new wo
     await tick(16);
     const tray = all("data-floor-inbox")[0].props.transform.match(/translate\(([\d.]+) ([\d.]+)\)/).slice(1).map(Number);
     const paper = () => all("data-paper")[0]?.props.transform.match(/translate\(([-\d.]+) ([-\d.]+)\)/).slice(1).map(Number);
-    assert.ok(Math.hypot(paper()[0] - tray[0] - 10, paper()[1] - tray[1] + 4) < 12, `paper starts at the tray: ${paper()} vs ${tray}`);
+    assert.ok(Math.hypot(paper()[0] - tray[0], paper()[1] - tray[1]) < 12, `paper starts at the tray: ${paper()} vs ${tray}`);
     assert.equal(all("data-call").length, 0, "nobody throws it");
     for (let step = 0; step < 80 && paper() !== undefined; step += 1) await tick(16);
     assert.match(poseOf("linus"), /wave\.0$/, "whoever it is for takes it");

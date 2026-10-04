@@ -228,30 +228,41 @@ text is sent.
 
 A source entity reference is `<project ID>:<served topology node ID>`. The served
 ID is derived from normalized relative path and node kind, independent of display
-grouping, file counts, activity or labels. A future library or message-board link
-should store this reference plus the exact source revision; optional file links
+grouping, file counts, activity or labels. Library and message-board links
+store this reference plus the exact source revision; optional file links
 also store the repository-relative path. A rename relationship is established
 only by observed Git rename evidence; path identity alone never proves continuity.
 
 The browser's persisted detail setting selects coarse areas, automatic useful
 areas, or fine directories on the same floor. Automatic grouping collapses
-structural wrappers such as internal/src/packages/apps and retains useful package
-rooms; command entry points remain assemblies in their shared `cmd` area.
+short namespace chains such as src/packages/apps, while broad namespaces remain
+areas containing package assemblies. Large direct packages inside internal/ get
+their own rooms. Tiny leaf areas stay in their ancestor. Command entry points
+remain assemblies in their shared `cmd` area. These choices use integrated source,
+never live activity or proposed file counts.
 Up to 96 rooms aggregate the remaining canonical entities under visible
-ancestors; all canonical source entities remain searchable. Each room pictures at most six
+ancestors; all canonical source entities remain searchable. Each room pictures at most twelve
 assemblies with an explicit overflow label. Search focuses an entity's owning
 room and retains its exact source identity. Viewport culling bounds rendered
 rooms. Changing live work or proposal selection does not choose the room order.
 Explicit detail changes may regroup the floor while preserving selected identity.
 Assembled rooms share regular walls and corridor rows; equipment uses each room's
-work zone. File counts scale equipment within that zone without moving the walls.
+work zone. File counts scale equipment within that zone. Room footprints use bounded bays
+and assembly counts. The entrance, task tray and common seating sit beside the
+rooms; crowded seating extends downward without moving source areas. Detail and
+social controls live only in Settings.
 
 Assemblies combine source machinery, test rigs, control cabinets, document shelves
 and asset racks. Eligible file counts select clamped size buckets: 1–4, 5–20,
 21–80 and 81+. Size is scope, never quality or completion. Name-based movement,
 messaging, selection, admission and storage motifs are disclosed as filename
 hints, not verified semantic analysis. Parts and secondary resource silhouettes
-belong to the same canonical assembly and do not count files again.
+belong to the same display assembly and do not count files again. Package
+assemblies include their resource directories, while substantial nested source
+directories remain named equipment. `representedIds` lists the canonical source
+areas assigned exclusively to each display assembly. Its aggregate inventory
+sums their direct counts; source inspectors still expose each canonical area
+and its directly owned files. Display grouping never changes those identities.
 
 The explicit `source_files` project-content read takes project ID, served node ID,
 `tested_source` (the exact target SHA), offset and limit (maximum 32). It returns
