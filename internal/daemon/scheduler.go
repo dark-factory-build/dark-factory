@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
@@ -131,6 +132,10 @@ func (daemon *Daemon) RunScheduler(ctx context.Context, spec SupervisorSpec) err
 			if !stopping && resultErr == nil {
 				if now := daemon.now(); !now.Before(nextAttachmentCleanup) {
 					if at, err := kernel.NewUnixMillis(now.UnixMilli()); err == nil {
+						expired, _ := daemon.store.ExpireBlockedTasks(ownedCtx, at)
+						for _, id := range expired {
+							fmt.Fprintf(os.Stderr, "factoryd: task %s %s\n", id, kernel.BlockedExpiryReason)
+						}
 						if err := daemon.store.ExpireTaskAttachments(ownedCtx, at); err == nil {
 							nextAttachmentCleanup = now.Add(time.Hour)
 						}
