@@ -368,7 +368,9 @@ func (attempt *liveAttempt) markTerminalOutput(at time.Time, end uint64) {
 	attempt.livenessMu.Lock()
 	if end > attempt.terminalOutputBytes {
 		attempt.terminalOutputBytes = end
-		attempt.lastTerminalOutputAt = at
+		if at.After(attempt.lastTerminalOutputAt) {
+			attempt.lastTerminalOutputAt = at
+		}
 		attempt.livenessReported = false
 		attempt.livenessInFlight = false
 		attempt.livenessRevision++
@@ -381,7 +383,10 @@ func (attempt *liveAttempt) markAttemptAPICall(at time.Time) {
 		return
 	}
 	attempt.livenessMu.Lock()
-	attempt.lastAttemptAPICallAt = at
+	// Concurrent API calls may record out of order; never move backwards.
+	if at.After(attempt.lastAttemptAPICallAt) {
+		attempt.lastAttemptAPICallAt = at
+	}
 	attempt.livenessReported = false
 	attempt.livenessInFlight = false
 	attempt.livenessRevision++

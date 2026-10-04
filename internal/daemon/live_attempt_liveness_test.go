@@ -221,3 +221,17 @@ func TestAddOverseerLivenessReportsActionableContext(t *testing.T) {
 		t.Fatalf("re-armed snapshot reports=%d, want 1", len(projected.LivenessReports))
 	}
 }
+
+// Concurrent attempt API calls can record their timestamps out of order. An
+// older one must not move liveness backwards and report a false stall.
+func TestLivenessTimestampsNeverMoveBackwards(t *testing.T) {
+	attempt := &liveAttempt{wake: make(chan struct{}, 1)}
+	newer := time.Unix(2000, 0)
+	attempt.markAttemptAPICall(newer)
+	attempt.markAttemptAPICall(newer.Add(-time.Minute))
+	attempt.markTerminalOutput(newer, 10)
+	attempt.markTerminalOutput(newer.Add(-time.Minute), 20)
+	if !attempt.lastAttemptAPICallAt.Equal(newer) || !attempt.lastTerminalOutputAt.Equal(newer) {
+		t.Fatalf("liveness moved backwards: api=%v output=%v", attempt.lastAttemptAPICallAt, attempt.lastTerminalOutputAt)
+	}
+}
