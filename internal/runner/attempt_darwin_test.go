@@ -347,7 +347,7 @@ func runAttemptWorkerHelper(args []string) error {
 		interactiveWitness := shellWitness("\"$interactive\"", filepath.Join(root, "provider.stdin"))
 		script := fmt.Sprintf("test ! -e /dev/fd/11 || exit 97; %sIFS= read -r startup || exit 98; %s || exit 99; IFS= read -r interactive || exit 100; %s || exit 101; while test ! -f %q; do sleep 0.01; done", greeting, startupWitness, interactiveWitness, filepath.Join(root, "finish"))
 		provider = ExecSpec{Target: "/bin/sh", Args: []string{"-c", script}, Env: []string{"PATH=/usr/bin:/bin", "LANG=C"}, Cwd: providerCwd}
-	case "shell", "shell-input", "term", "leader", "tail", "reply", "reply-submit", "reply-submit-exit", "loud-adoption":
+	case "shell", "shell-input", "term", "leader", "tail", "reply", "reply-submit", "reply-submit-exit", "loud-adoption", "handoff-worker-eof":
 		providerWitness := shellWitness("$$", filepath.Join(root, "provider.pid"))
 		script := fmt.Sprintf("test -z \"${HOME+x}\" || exit 90; test -z \"${DARK_FACTORY_ATTEMPT_TOKEN+x}\" || exit 91; for n in 3 4 5 6 7 8 9; do test ! -e /dev/fd/$n || exit 92; done; test -f /dev/fd/10 || exit 93; test ! -s /dev/fd/10 || exit 94; test -f /dev/fd/11 || exit 97; IFS= read -r task < /dev/fd/11; test \"$task\" = one-startup || exit 98; cat /dev/fd/10/change-worker.config >/dev/null 2>&1 && exit 95; cd /dev/fd/10 >/dev/null 2>&1 && exit 96; %s; printf 'pre-output\\n'; while test ! -f %q; do sleep 0.01; done; printf 'post-output\\n'; printf x >> %q; while test ! -f %q; do sleep 0.01; done", providerWitness, filepath.Join(root, "continue"), filepath.Join(root, "provider.effect"), filepath.Join(root, "finish"))
 		if mode == "shell-input" {
@@ -406,6 +406,9 @@ func runAttemptWorkerHelper(args []string) error {
 	}
 	if mode == "seam" || mode == "lease-seam" || mode == "cwd-seam" {
 		prepared.testCurrentFinal = true
+	}
+	if mode == "handoff-worker-eof" {
+		prepared.testProviderHandoffClose = true
 	}
 	cwdPath := providerCwd
 	if mode == "cwd-unrelated" {
@@ -570,9 +573,23 @@ type attemptFixture struct {
 	diagnostic *os.File
 }
 
+// attemptFixtureRoot is longer than macOS's 104-byte sun_path, so the outer
+// runner can never bind takeover.sock and daemon EOF after provider exec
+// always takes protocol-1 close-and-drain. A bare t.TempDir() root made that
+// depend on its random suffix under the gate's TMPDIR=/tmp, where a bound
+// endpoint holds the runner for handoverDetachedGrace instead (#1100).
+func attemptFixtureRoot(t *testing.T) string {
+	t.Helper()
+	root := filepath.Join(t.TempDir(), strings.Repeat("r", 104))
+	if err := os.Mkdir(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
 func newAttemptFixture(t *testing.T, mode string, target string) *attemptFixture {
 	t.Helper()
-	root := t.TempDir()
+	root := attemptFixtureRoot(t)
 	if err := os.Chmod(root, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -1070,7 +1087,6 @@ func TestAttemptRunnerPTYTerminalOwnerCommandsAndReplay(t *testing.T) {
 	if err := f.controller.Release(StageProvider); err != nil {
 		t.Fatal(err)
 	}
-	waitFile(t, filepath.Join(f.root, "provider.pid"))
 	event, err := f.controller.Next(4 * time.Second)
 	if err != nil || event.Kind != AttemptTerminalFrame || event.Frame == nil || event.Frame.Kind != TerminalReady {
 		t.Fatalf("terminal ready=%+v err=%v", event, err)
@@ -1379,6 +1395,9 @@ func TestRuntimeLifetimeRemainsHeldAcrossOuterAndInnerOwnership(t *testing.T) {
 	if err := f.controller.Release(StageProvider); err != nil {
 		t.Fatal(err)
 	}
+	if event, err := f.controller.Next(4 * time.Second); err != nil || event.Kind != AttemptTerminalFrame || event.Frame == nil || event.Frame.Kind != TerminalReady {
+		t.Fatalf("terminal ready=%+v err=%v output=%q", event, err, f.output())
+	}
 	waitFile(t, filepath.Join(f.root, "provider.pid"))
 	if err := f.lease.Close(); err != nil {
 		t.Fatal(err)
@@ -1436,6 +1455,9 @@ func TestProviderRetainsLeastPrivilegeLifetimeAfterOuterSIGKILL(t *testing.T) {
 		t.Fatal(err)
 	}
 	readyPath := filepath.Join(f.root, "provider.ready")
+	if event, err := f.controller.Next(4 * time.Second); err != nil || event.Kind != AttemptTerminalFrame || event.Frame == nil || event.Frame.Kind != TerminalReady {
+		t.Fatalf("terminal ready=%+v err=%v output=%q", event, err, f.output())
+	}
 	readyDeadline := time.Now().Add(4 * time.Second)
 	for {
 		if _, err := os.Stat(readyPath); err == nil {
@@ -1536,12 +1558,22 @@ func TestAttemptRunnerDaemonEOFCuts(t *testing.T) {
 		}
 	})
 
-	t.Run("after-provider-release", func(t *testing.T) {
+	t.Run("after-provider-release-before-provider-handoff", func(t *testing.T) {
 		f := newAttemptFixture(t, "shell", "")
 		inner := f.activateOuter()
 		f.advanceToProvider()
+		// Hold the final worker->runner->daemon fence. Closing the daemon
+		// here is the exact causal ordering that used to race worker exec.
+		f.controller.manualProviderHandoff = true
 		if err := f.controller.Release(StageProvider); err != nil {
 			t.Fatal(err)
+		}
+		event, err := f.controller.Next(4 * time.Second)
+		if err != nil || event.Kind != AttemptProviderHandoff {
+			t.Fatalf("provider handoff=%+v err=%v output=%q", event, err, f.output())
+		}
+		if _, err := os.Stat(filepath.Join(f.root, "provider.pid")); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("provider reached handoff barrier: %v", err)
 		}
 		if err := f.controller.Close(); err != nil {
 			t.Fatal(err)
@@ -1561,7 +1593,75 @@ func TestAttemptRunnerDaemonEOFCuts(t *testing.T) {
 			t.Fatalf("replay result=%+v", record)
 		}
 		if _, err := os.Stat(filepath.Join(f.root, "provider.pid")); !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("provider ran after daemon EOF before input handoff: %v", err)
+			t.Fatalf("provider ran after daemon EOF before provider handoff: %v", err)
+		}
+	})
+
+	t.Run("worker-eof-before-provider-handoff-ack", func(t *testing.T) {
+		f := newAttemptFixture(t, "handoff-worker-eof", "")
+		inner := f.activateOuter()
+		f.advanceToProvider()
+		f.controller.manualProviderHandoff = true
+		if err := f.controller.Release(StageProvider); err != nil {
+			t.Fatal(err)
+		}
+		event, err := f.controller.Next(4 * time.Second)
+		if err != nil || event.Kind != AttemptProviderHandoff {
+			t.Fatalf("provider handoff=%+v err=%v output=%q", event, err, f.output())
+		}
+		// The worker closes after sending the check and before any daemon
+		// acknowledgement. The runner must not convert that EOF into exec.
+		if err := f.controller.Close(); err != nil {
+			t.Fatal(err)
+		}
+		exit, err := f.outer.FinishAfterExit(6 * time.Second)
+		if err != nil || exit.Code == 0 && exit.Signal == 0 {
+			t.Fatalf("outer exit=%+v err=%v output=%q", exit, err, f.output())
+		}
+		if _, err := os.Stat(filepath.Join(f.root, "provider.pid")); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("provider ran after worker EOF before handoff ack: %v", err)
+		}
+		result := loadAttemptResultForTest(t, f.dir, f.spec.AttemptID, nil)
+		if result.Terminal.Process != inner {
+			t.Fatalf("worker EOF result=%+v", result)
+		}
+	})
+
+	t.Run("after-provider-handoff-daemon-eof", func(t *testing.T) {
+		f := newAttemptFixture(t, "shell", "")
+		inner := f.activateOuter()
+		f.advanceToProvider()
+		f.controller.manualProviderHandoff = true
+		if err := f.controller.Release(StageProvider); err != nil {
+			t.Fatal(err)
+		}
+		event, err := f.controller.Next(4 * time.Second)
+		if err != nil || event.Kind != AttemptProviderHandoff {
+			t.Fatalf("provider handoff=%+v err=%v output=%q", event, err, f.output())
+		}
+		// The acknowledgement is the ownership boundary. EOF after it is
+		// allowed: the provider has passed the final daemon liveness fence.
+		if err := f.controller.acknowledgeProviderHandoff(); err != nil {
+			t.Fatal(err)
+		}
+		waitFile(t, filepath.Join(f.root, "provider.pid"))
+		// The runner tries its takeover endpoint before provider exec. With
+		// one bound, daemon EOF detaches rather than draining (see
+		// TestAttemptFixtureRootCannotBindTakeover).
+		if _, err := os.Stat(filepath.Join(f.root, TakeoverSocketName)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("outer runner bound %s: %v", TakeoverSocketName, err)
+		}
+		if err := f.controller.Close(); err != nil {
+			t.Fatal(err)
+		}
+		exit, err := f.outer.FinishAfterExit(6 * time.Second)
+		if err != nil || exit.Code == 0 && exit.Signal == 0 {
+			t.Fatalf("outer exit=%+v err=%v output=%q", exit, err, f.output())
+		}
+		waitExactAbsence(t, inner)
+		record := loadAttemptResultForTest(t, f.dir, f.spec.AttemptID, nil)
+		if record.Terminal.Process != inner {
+			t.Fatalf("post-handoff result=%+v", record)
 		}
 	})
 
@@ -1585,6 +1685,28 @@ func TestAttemptRunnerDaemonEOFCuts(t *testing.T) {
 			t.Fatalf("result=%+v", record)
 		}
 	})
+}
+
+// TestAttemptFixtureRootCannotBindTakeover pins the #1100 cause under the
+// gate's TMPDIR=/tmp: a short root binds the real takeover endpoint, while
+// the subprocess fixture root never can, whatever its random suffix.
+func TestAttemptFixtureRootCannotBindTakeover(t *testing.T) {
+	t.Setenv("TMPDIR", "/tmp")
+	for _, tc := range []struct {
+		root string
+		bind bool
+	}{{t.TempDir(), true}, {attemptFixtureRoot(t), false}} {
+		dir, err := os.Open(tc.root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		transport, closeEndpoint := startTakeoverEndpoint(dir, "attempt-1")
+		closeEndpoint()
+		_ = dir.Close()
+		if bound := transport != nil; bound != tc.bind {
+			t.Fatalf("root %q (%d bytes) bound takeover endpoint=%v, want %v", tc.root, len(tc.root), bound, tc.bind)
+		}
+	}
 }
 
 func TestAttemptRunnerReapsInertInnerExitBeforeSelection(t *testing.T) {
@@ -1804,6 +1926,9 @@ func TestAttemptRunnerTerminatesOwnedProviderGroup(t *testing.T) {
 			f.advanceToProvider()
 			if err := f.controller.Release(StageProvider); err != nil {
 				t.Fatal(err)
+			}
+			if event, err := f.controller.Next(4 * time.Second); err != nil || event.Kind != AttemptTerminalFrame || event.Frame == nil || event.Frame.Kind != TerminalReady {
+				t.Fatalf("terminal ready=%+v err=%v output=%q", event, err, f.output())
 			}
 			descendantPath := filepath.Join(f.root, "descendant.pid")
 			waitFile(t, descendantPath)
@@ -2779,6 +2904,60 @@ func TestAttemptControllerRejectsResultNoticeWithContentAuthority(t *testing.T) 
 	}
 }
 
+func TestAttemptControllerProviderHandoffPreservesNextDeadline(t *testing.T) {
+	controllerFile, peer, err := newControlPair("deadline-controller", "deadline-peer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller := &AttemptController{file: controllerFile, state: controllerProviderReleased}
+	defer controller.Close()
+	defer peer.Close()
+
+	const timeout = 500 * time.Millisecond
+	entered := make(chan struct{})
+	done := make(chan error, 1)
+	started := time.Now()
+	go func() {
+		close(entered)
+		_, err := controller.Next(timeout)
+		done <- err
+	}()
+	<-entered
+
+	timer := time.NewTimer(7 * timeout / 10)
+	defer timer.Stop()
+	select {
+	case err := <-done:
+		t.Fatalf("Next returned before the handoff fence: %v", err)
+	case <-timer.C:
+	}
+	if err := writeControlFrame(peer, attemptFrame{Version: commandVersion, Kind: "provider-handoff-check"}, maxFrameBytes); err != nil {
+		t.Fatal(err)
+	}
+	if err := peer.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	var ack attemptFrame
+	if err := readFrame(peer, &ack, maxFrameBytes); err != nil {
+		t.Fatal(err)
+	}
+	if !validProviderHandoffAck(ack) {
+		t.Fatalf("handoff acknowledgement=%+v", ack)
+	}
+
+	err = <-done
+	elapsed := time.Since(started)
+	if err == nil {
+		t.Fatal("Next accepted a handoff fence without a following frame")
+	}
+	if elapsed < timeout/2 {
+		t.Fatalf("Next returned before the near-deadline fence was exercised: %s", elapsed)
+	}
+	if elapsed >= 3*timeout/2 {
+		t.Fatalf("Next extended its original deadline after the handoff fence: %s", elapsed)
+	}
+}
+
 func TestDirectAttemptRunnerWithoutCapabilitiesFailsBeforeEffect(t *testing.T) {
 	executable, err := os.Executable()
 	if err != nil {
@@ -2857,11 +3036,11 @@ func TestWorkerOutputInTheAdoptionWindowStaysInTheTerminalStream(t *testing.T) {
 	if err := f.controller.Release(StageProvider); err != nil {
 		t.Fatal(err)
 	}
-	waitFile(t, filepath.Join(f.root, "provider.pid"))
 	event, err := f.controller.Next(8 * time.Second)
 	if err != nil || event.Kind != AttemptTerminalFrame || event.Frame == nil || event.Frame.Kind != TerminalReady {
 		t.Fatalf("terminal ready=%+v err=%v output=%q", event, err, f.output())
 	}
+	waitFile(t, filepath.Join(f.root, "provider.pid"))
 	if err := f.controller.SendTerminalCommand(TerminalCommand{Kind: TerminalAttach, Correlation: 1, Sequence: 0}); err != nil {
 		t.Fatal(err)
 	}

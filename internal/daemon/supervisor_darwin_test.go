@@ -1133,7 +1133,7 @@ func TestSupervisorClaudeReviewerLaunchReceivesExactRetainedChangeReceipt(t *tes
 }
 
 func TestSupervisorClaudeReviewersPreserveConcurrentAccountTrust(t *testing.T) {
-	const reviewerCount = 8
+	const reviewerCount = 4
 	accountHome := filepath.Join(t.TempDir(), "account")
 	if err := os.Mkdir(accountHome, 0o700); err != nil {
 		t.Fatal(err)

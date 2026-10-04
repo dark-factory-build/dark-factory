@@ -650,9 +650,10 @@ test("resting workers take fair, uninterrupted turns at the break-room furniture
   const nook = breakRoomNook(wide, 12, 1);
   assert.deepEqual(nook.furniture.map((piece) => piece.errand), ["shelf", "coffee"]);
   const narrow = layoutScene({ digest: "narrow", nodes: [topology.nodes[0]] }), narrowNook = breakRoomNook(narrow, 40, 40);
-  assert.deepEqual(narrowNook.furniture.map((piece) => piece.errand), ["shelf"]);
+  assert.deepEqual(narrowNook.furniture.map((piece) => piece.errand), ["shelf", "coffee"]);
   for (const [layout, pieces, counts] of [[wide, nook.furniture, [12, 1]], [narrow, narrowNook.furniture, [40, 40]]]) for (const piece of pieces) {
     assert.ok(piece.x + WORKER_SIZE <= layout.width - PADDING && piece.stand.x + WORKER_SIZE / 2 <= layout.width - PADDING);
+    assert.ok(piece.y >= layout.restingTop - 40 && piece.y + WORKER_SIZE <= layout.restingTop + 24, "break-room furniture stays inside the common-room area");
     const seating = commonSeating(layout, ...counts);
     for (const seat of [...seating.resting, ...seating.planning]) assert.ok(Math.abs(seat.x - piece.stand.x) >= WORKER_SIZE, "nobody stands on a seat");
   }

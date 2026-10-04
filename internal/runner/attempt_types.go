@@ -42,6 +42,10 @@ const (
 	AttemptHandoverQuiesced AttemptEventKind = "handover-quiesced"
 	AttemptHandoverAttached AttemptEventKind = "handover-attached"
 	AttemptHandoverRejected AttemptEventKind = "handover-rejected"
+	// AttemptProviderHandoff is the runner's final liveness fence: the worker
+	// asks the released daemon to confirm that it is still present immediately
+	// before provider exec.
+	AttemptProviderHandoff AttemptEventKind = "provider-handoff"
 )
 
 // TerminalCommandKind and TerminalEventKind are intentionally closed unions.
