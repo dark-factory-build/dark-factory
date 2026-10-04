@@ -29,10 +29,12 @@ cannot run as "verified by gate" instead of blocking on it.
 
 The full local gate runs before every review, at the exact head and outside
 any worker sandbox. A failure is rerun once at the head (a pass then counts,
-and the failure is kept as flake evidence) and then once at the base. It goes
-back to the author with the failing test names only when it reproduces at the
-head and not at the base. A wrapper failure where nothing ran is a host
-blocker, never author work. Run it yourself when broad local integration proof
+and the failure is kept as flake evidence). The reproducing failures are the
+tests that failed in both head runs. With none in common the failure is a flake
+and review proceeds; otherwise the gate runs once at the base, and the
+reproducing failures the base does not share go back to the author by name.
+Head failures with no parsed test names go back without a base run. A wrapper
+failure where nothing ran is a host blocker, never author work. Run it yourself when broad local integration proof
 is needed:
 
 ```sh

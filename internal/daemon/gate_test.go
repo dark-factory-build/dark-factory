@@ -61,10 +61,13 @@ func (b *fixtureGateBackend) Gate(ctx context.Context, checkout string, op revie
 	return b.daemon.runGate(ctx, checkout, op.ID, commit, len(op.Gates)+1)
 }
 
+var gateHome string
+
 func startGateFixture(t *testing.T, baseGate, headGate string) (review.Operation, *fixtureGateBackend, error) {
 	t.Helper()
+	gateHome = t.TempDir()
 	fixture, project := reviewPublicFixture(t)
-	fixture.daemon.ConfigureGate(t.TempDir(), "/usr/bin:/bin")
+	fixture.daemon.ConfigureGate(gateHome, "/usr/bin:/bin")
 	repo, base, head := gateFixtureRepo(t, baseGate, headGate)
 	backend := &fixtureGateBackend{daemon: fixture.daemon, checkout: repo}
 	now := func() time.Time { return time.Unix(20, 0) }
@@ -79,7 +82,10 @@ func TestGateSendsBackHeadFailureAbsentAtBase(t *testing.T) {
 	if err != nil || op.State != "completed" || op.Verdict != "request_changes" || !op.RoutePending || backend.reviews != 0 || len(op.Gates) != 3 || op.Gates[2].ExitCode != 0 {
 		t.Fatalf("operation=%+v err=%v", op, err)
 	}
-	if !strings.Contains(op.Detail, "tests=TestBroken, TestBroken/case") {
+	// The note reaches the worker and may be published, so it never names
+	// a host path: the absolute log path stays in the operation document.
+	userHome, _ := os.UserHomeDir()
+	if !strings.Contains(op.Detail, "tests=TestBroken, TestBroken/case") || strings.Contains(op.Detail, " /") || strings.Contains(op.Detail, gateHome) || (userHome != "" && strings.Contains(op.Detail, userHome)) || !filepath.IsAbs(op.Gates[0].Log) {
 		t.Fatalf("note=%q", op.Detail)
 	}
 	log, err := os.ReadFile(op.Gates[0].Log)

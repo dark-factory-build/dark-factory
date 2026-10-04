@@ -27,9 +27,12 @@ heavy process run on the Mac without making source checks wait. Use
 that component boundary.
 
 Before review, the full gate (`scripts/local-ci.sh`) runs at the exact head
-outside any worker sandbox. A failure is rerun once at the head and then once
-at the base, and comes back to the author, with the failing test names, only
-when it reproduces at the head and not at the base. A factory worker that
+outside any worker sandbox. A failure is rerun once at the head; a pass on
+either run passes. The reproducing failures are the tests that failed in both
+head runs: none in common is a flake and review proceeds; otherwise the gate
+runs once at the base, and the reproducing failures the base does not share
+come back to the author by name. Head failures with no parsed test names come
+back without a base run. A factory worker that
 cannot run a check inside its sandbox (a nested `sandbox-exec`, system Perl,
 the daemon supervisor fixtures, the full gate itself) does not block on it:
 it lists that check as "verified by gate" in its result and finishes.

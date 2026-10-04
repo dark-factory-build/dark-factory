@@ -260,7 +260,7 @@ func nextGate(op Operation) (string, string) {
 	if len(uncovered) > 0 {
 		tests = strings.Join(uncovered, ", ")
 	}
-	return "", fmt.Sprintf("pre-review full gate failed twice at the exact head (exit %d): tests=%s. Base gate %s. Factory-host gate logs: %s, %s. Exact head %s.", runs[1].ExitCode, tests, base, runs[0].Log, runs[1].Log, op.Request.Head)
+	return "", fmt.Sprintf("pre-review full gate failed twice at the exact head (exit %d): tests=%s. Base gate %s. Gate logs: runtimes/gates/%s/1.log and 2.log in the factory home. Exact head %s.", runs[1].ExitCode, tests, base, op.ID, op.Request.Head)
 }
 
 func (c Coordinator) finishSubmitted(ctx context.Context, op Operation) (Operation, error) {
