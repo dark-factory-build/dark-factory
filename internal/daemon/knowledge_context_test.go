@@ -135,12 +135,9 @@ func TestKnowledgeReachesFreshProviderTaskAndPinsExplicitRevision(t *testing.T) 
 
 func TestKnowledgeSupersessionClaimsKeepAttributionAndEvidence(t *testing.T) {
 	f := newDispatchFixture(t)
-	var old, correction kernel.ContentRevision
-	active := prepareActiveAttemptInProjectWithProvider(t, f, 61, testID(61), "worker", "codex", func() {
-		project, _ := projectID(testID(61))
-		old = seedContextKnowledge(t, f, project, 180, kernel.ContentLesson, kernel.KnowledgeMetadata{Status: "current", Evidence: []string{"old test"}}, "Always enable the old policy.")
-		correction = seedContextKnowledge(t, f, project, 181, kernel.ContentLesson, kernel.KnowledgeMetadata{Status: "current", Evidence: []string{"corrected test"}, Supersedes: old.ID.String()}, "Never enable the old policy.")
-	})
+	active := prepareActiveAttemptInProjectWithProvider(t, f, 61, testID(61), "worker", "codex")
+	old := seedContextKnowledge(t, f, active.run.ProjectID, 180, kernel.ContentLesson, kernel.KnowledgeMetadata{Status: "current", Evidence: []string{"old test"}}, "Always enable the old policy.")
+	correction := seedContextKnowledge(t, f, active.run.ProjectID, 181, kernel.ContentLesson, kernel.KnowledgeMetadata{Status: "current", Evidence: []string{"corrected test"}, Supersedes: old.ID.String()}, "Never enable the old policy.")
 	done := f.serve(t)
 	assignment, err := active.client.Task(context.Background())
 	if err != nil {
