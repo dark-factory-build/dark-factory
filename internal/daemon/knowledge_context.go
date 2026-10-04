@@ -440,9 +440,6 @@ func (daemon *Daemon) prepareKnowledgeTask(ctx context.Context, run kernel.Run, 
 		if e != nil {
 			return nil, nil, e
 		}
-		if len(knowledge) > 0 && !strings.Contains(string(framed), string(knowledge)) {
-			accesses = nil
-		}
 		combined = framed
 	} else {
 		if _, e := attemptTaskWithContinuationContext(run.Provider, combined, run.ContinuationContexts); e != nil {

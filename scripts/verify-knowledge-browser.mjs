@@ -52,7 +52,7 @@ try {
  await expect(selected()).toContainText('Revision 2');
  await selected().getByRole('combobox', { name: 'Attach to queued task' }).selectOption({ label: 'Tighten the queue ordering' });
  await click('Attach revision'); await expect(page.getByRole('status').filter({ hasText: 'Attached to the task.' })).toBeVisible();
- await click('Retrieval records');
+ await click('Task access');
  await page.screenshot({ path: join(output, '02-retained-revision.png') });
  check('retain, revise, attach and inspect retrieval records without inventing worker reads');
  await selected().getByRole('button', { name: `Source: ${entity}`, exact: true }).click();
@@ -65,7 +65,7 @@ try {
  await page.getByRole('button', { name: /^Exact-run delivery finding · discussion/ }).click();
  await expect(selected()).toContainText('resolved discussion');
  await click('CLOSE'); await click('Library');
- await page.getByText('Instructions & outcomes', { exact: true }).click();
+ await page.getByText('Documents', { exact: true }).click();
  await page.getByRole('searchbox', { name: 'Search knowledge' }).fill('Preserve exact-run'); await click('Search');
  await page.getByRole('button', { name: /^Preserve exact-run reply authority · lesson · r2/ }).click();
  await click('Read body'); await expect(selected()).toContainText('reconcile its receipt before any retry');

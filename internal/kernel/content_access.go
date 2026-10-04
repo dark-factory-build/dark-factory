@@ -32,17 +32,6 @@ func recordContentAccess(ctx context.Context, c *sql.Conn, a ContentAccess) erro
 	_, err = c.ExecContext(ctx, `INSERT OR IGNORE INTO content_accesses(run_id,content_id,content_revision,kind,byte_offset,byte_length,created_at_ms) VALUES(?,?,?,?,?,?,?)`, a.RunID.Bytes(), a.ContentID.Bytes(), a.ContentRevision.Int64(), a.Kind, a.Offset, a.ByteLength, a.CreatedAt.Int64())
 	return err
 }
-func (store *Store) RecordContentAccess(ctx context.Context, a ContentAccess) error {
-	tx, err := store.beginValidatedWrite(ctx)
-	if err != nil {
-		return err
-	}
-	defer tx.Close()
-	if err = recordContentAccess(ctx, tx.connection, a); err != nil {
-		return tx.Rollback(err)
-	}
-	return tx.Commit(ctx)
-}
 func (store *Store) RecordContentAccessForAttempt(ctx context.Context, digest AttemptDigest, access ContentAccess) error {
 	tx, err := store.beginValidatedWrite(ctx)
 	if err != nil {
@@ -65,10 +54,7 @@ func (store *Store) RecordContentAccessForAttempt(ctx context.Context, digest At
 func listContentAccesses(ctx context.Context, c *sql.Conn, run RunID, selected bool) ([]ContentAccess, error) {
 	query := `SELECT a.content_id,a.content_revision,a.kind,a.byte_offset,a.byte_length,a.created_at_ms,r.task_id,r.admitted_task_work_revision FROM content_accesses a JOIN runs r ON r.id=a.run_id WHERE a.run_id=? AND a.kind<>'snapshot'`
 	if selected {
-		query += ` AND kind='selected'`
-	}
-	if selected {
-		query += ` ORDER BY a.byte_offset,a.content_id`
+		query += ` AND kind='selected' ORDER BY a.byte_offset,a.content_id`
 	} else {
 		query += ` ORDER BY a.created_at_ms,a.content_id,a.content_revision,a.kind,a.byte_offset`
 	}

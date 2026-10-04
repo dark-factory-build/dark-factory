@@ -58,7 +58,7 @@ test("board shares immutable threads, resolves by revision, and retains linked c
   await click("Read body");
   await click("Read replies");
   assert.deepEqual(calls.at(-1).input, { project_id: [...fixtureState.projects.keys()][0], repository_id: metadata.repository_id, branch: "topic", environment: "staging", thread_id: metadata.id, kind: "discussion_reply", offset: 0, limit: 4 });
-  await click("Retrieval records");
+  await click("Task access");
   assert.ok(renderer.root.findAllByType("p").some((node) => node.children.join("").includes("· Run run")));
   await click("Resolve discussion");
   assert.ok(!renderer.root.findAllByType("p").some((node) => node.children.join("").includes("· Run run")), "new root revision clears previous revision receipts");
@@ -68,7 +68,7 @@ test("board shares immutable threads, resolves by revision, and retains linked c
   assert.equal(JSON.parse(revised.source_references).resolved, true);
   assert.equal(current.revision, 3);
   await click("Source:"); assert.deepEqual(opened, [source]);
-  await click("Retrieval records"); assert.equal(calls.at(-1).input.revision, 3);
+  await click("Task access"); assert.equal(calls.at(-1).input.revision, 3);
   await click("Reply");
   assert.equal(renderer.root.findAllByType("input").find((input) => input.props.name === "kind").props.defaultValue, "discussion_reply");
   assert.equal(renderer.root.findAllByType("input").find((input) => input.props.name === "thread_id").props.defaultValue, metadata.id);
