@@ -760,7 +760,7 @@ function wires(layout: ReturnType<typeof layoutScene>, topology: SceneTopology) 
   };
   // Axis-aligned stretches by channel, for counting what each one carries.
   const channels = new Map<string, [number, number][]>();
-  const routes = [...pairs].sort().map((pair, index) => {
+  const routes = [...pairs].sort().map((pair) => {
     const [from, to] = (pair.split("\n").map((id) => rooms.get(id)!) as [SceneRoomLayout, SceneRoomLayout]).sort((a, b) => rowOf(a) - rowOf(b));
     const points: Point[] = [{ x: from.door.x, y: from.door.y }, { x: from.door.x, y: from.door.y + 16 }];
     let tail: string;

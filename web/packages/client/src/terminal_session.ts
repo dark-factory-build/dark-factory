@@ -1,11 +1,5 @@
 import {
-  encodeTerminalAck,
-  encodeTerminalAttach,
-  encodeTerminalDetach,
-  encodeTerminalLeaseAcquire,
-  encodeTerminalLeaseRelease,
-  encodeTerminalLeaseRenew,
-  encodeTerminalResize,
+  encodeClientControl,
   type ServerControlFrame,
   type TerminalInputResultBody,
   type TerminalLeaseResultBody,
@@ -150,11 +144,11 @@ class TerminalHandleImpl implements InternalTerminalHandle {
     this.#requestedAfterSequence = afterSequence;
     const id = this.#nextID("terminal-attach");
     this.#attachmentID = id;
-    return this.#start<TerminalAttachOutcome>({ kind: "attach", id }, encodeTerminalAttach(id, {
+    return this.#start<TerminalAttachOutcome>({ kind: "attach", id }, encodeClientControl({ type: "TERMINAL_ATTACH", id, body: {
       run_id: this.#target.runId, session_id: this.#target.sessionId,
       expected_run_revision: this.#target.runRevision, expected_session_revision: this.#target.sessionRevision,
       after_sequence: afterSequence,
-    }));
+    } }));
   }
 
   acquireInput(): Promise<TerminalLease> {
@@ -164,10 +158,10 @@ class TerminalHandleImpl implements InternalTerminalHandle {
     if (this.#lease !== undefined || this.#operation !== undefined || this.#detaching) return Promise.reject(new SessionErrorLikeError("terminal operation pending"));
     if (this.#generationFloor >= MAX_SQLITE_INTEGER) return Promise.reject(new SessionErrorLikeError("generation exhausted"));
     const id = this.#nextID("terminal-lease-acquire");
-    return this.#start<TerminalLease>({ kind: "acquire", id }, encodeTerminalLeaseAcquire(id, {
+    return this.#start<TerminalLease>({ kind: "acquire", id }, encodeClientControl({ type: "TERMINAL_LEASE_ACQUIRE", id, body: {
       run_id: this.#target.runId, session_id: this.#target.sessionId,
       expected_run_revision: this.#target.runRevision, expected_session_revision: this.#target.sessionRevision,
-    }));
+    } }));
   }
 
   releaseInput(): Promise<TerminalLeaseResult> {
@@ -199,10 +193,10 @@ class TerminalHandleImpl implements InternalTerminalHandle {
     if (this.#operation !== undefined || this.#detaching) return Promise.reject(new SessionErrorLikeError("terminal operation pending"));
     if (!Number.isSafeInteger(rows) || rows < 1 || rows > MAX_TERMINAL_ROWS || !Number.isSafeInteger(cols) || cols < 1 || cols > MAX_TERMINAL_COLS) return Promise.reject(new ProtocolError("malformed"));
     const id = this.#nextID("terminal-resize");
-    return this.#start({ kind: "resize", id, generation: lease.generation, rows, cols }, encodeTerminalResize(id, {
+    return this.#start({ kind: "resize", id, generation: lease.generation, rows, cols }, encodeClientControl({ type: "TERMINAL_RESIZE", id, body: {
       run_id: this.#target.runId, session_id: this.#target.sessionId, generation: lease.generation,
       expected_run_revision: this.#target.runRevision, expected_session_revision: this.#target.sessionRevision, rows, cols,
-    }));
+    } }));
   }
 
   detach(): Promise<void> {
@@ -313,7 +307,7 @@ class TerminalHandleImpl implements InternalTerminalHandle {
       }
       if (this.#closed || !this.#attached) return true;
       const nextSequence = this.#nextOutputSequence + BigInt(frame.payload.length);
-      try { this.#send(undefined, encodeTerminalAck({ session_id: this.#target.sessionId, next_sequence: nextSequence })); } catch {
+      try { this.#send(undefined, encodeClientControl({ type: "TERMINAL_ACK", body: { session_id: this.#target.sessionId, next_sequence: nextSequence } })); } catch {
         this.#fatal(new SessionErrorLikeError("terminal ACK send failed")); return true;
       }
       if (this.#closed || !this.#attached) return true;
@@ -420,15 +414,15 @@ class TerminalHandleImpl implements InternalTerminalHandle {
     const id = this.#nextID("terminal-lease-release");
     this.#armExpiryWatchdog(expiry);
     if (this.#closed) return Promise.reject(new SessionErrorLikeError("terminal lease release failed"));
-    return this.#start({ kind: "release", id, generation: lease.generation, detachAfter }, encodeTerminalLeaseRelease(id, {
+    return this.#start({ kind: "release", id, generation: lease.generation, detachAfter }, encodeClientControl({ type: "TERMINAL_LEASE_RELEASE", id, body: {
       run_id: this.#target.runId, session_id: this.#target.sessionId, generation: lease.generation,
       expected_run_revision: this.#target.runRevision, expected_session_revision: this.#target.sessionRevision,
-    }));
+    } }));
   }
 
   #beginDetach(): Promise<void> {
     const id = this.#nextID("terminal-detach");
-    return this.#start<void>({ kind: "detach", id }, encodeTerminalDetach(id, { session_id: this.#target.sessionId }));
+    return this.#start<void>({ kind: "detach", id }, encodeClientControl({ type: "TERMINAL_DETACH", id, body: { session_id: this.#target.sessionId } }));
   }
 
   #beginRenew(): void {
@@ -443,7 +437,7 @@ class TerminalHandleImpl implements InternalTerminalHandle {
     this.#armExpiryWatchdog(expiry);
     if (this.#closed || this.#operation !== operation) { void pending.catch(() => undefined); return; }
     try {
-      this.#send(id, encodeTerminalLeaseRenew(id, { run_id: this.#target.runId, session_id: this.#target.sessionId, generation: lease.generation, expected_run_revision: this.#target.runRevision, expected_session_revision: this.#target.sessionRevision }));
+      this.#send(id, encodeClientControl({ type: "TERMINAL_LEASE_RENEW", id, body: { run_id: this.#target.runId, session_id: this.#target.sessionId, generation: lease.generation, expected_run_revision: this.#target.runRevision, expected_session_revision: this.#target.sessionRevision } }));
     } catch { this.#fatal(new SessionErrorLikeError("terminal renewal send failed")); }
     void pending.catch(() => undefined);
   }

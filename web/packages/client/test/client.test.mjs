@@ -14,10 +14,7 @@ import {
   decodeTerminalOutput,
   encodeClientControl,
   encodeServerControl,
-  encodeServerError,
-  encodeTerminalExit,
   encodeTerminalInput,
-  encodeTerminalInputResult,
   encodeTerminalOutput,
   MAX_TERMINAL_COLS,
   MAX_TERMINAL_ROWS,
@@ -26,6 +23,7 @@ import {
   MAX_TERMINAL_PAYLOAD,
   verifyP256Signature,
 } from "../dist/src/index.js";
+import { encodeServerError, encodeTerminalExit, encodeTerminalInputResult } from "./server-frames.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "../../../..");
 const fixture = (name) => readFileSync(join(root, "protocol/browser/fixtures", name), "utf8").trim();

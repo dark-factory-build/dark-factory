@@ -45,7 +45,6 @@ export function AgentPanel({
   ready,
   onSaveConfig,
   onEditAppearance,
-  onEditTask,
   onLoadTaskDetail,
   onLoadTaskHistory,
   onLoadTaskList,
@@ -59,7 +58,6 @@ export function AgentPanel({
   ready: boolean;
   onSaveConfig?: (config: AgentConfigEdit) => void;
   onEditAppearance?: (agent: AgentItem) => void;
-  onEditTask?: (task: TaskItem, change: TaskEdit) => Promise<boolean>;
   onLoadTaskDetail?: (task: TaskItem, peerOffset?: bigint, expectedHead?: bigint) => Promise<TaskBrief>;
   onLoadTaskHistory?: (task: TaskItem) => Promise<TaskHistoryView>;
   onLoadTaskList?: (agentId: string, cursor?: { beforeUpdatedAtMs?: bigint; beforeTaskId?: string }) => Promise<TaskListView>;
@@ -620,7 +618,6 @@ export function SettingsDialog({
   state,
   projectId,
   ready,
-  address,
   edit,
   onSaveProjectLimits,
   accounts,
@@ -656,7 +653,6 @@ export function SettingsDialog({
   state: StateView | undefined;
   projectId?: string;
   ready: boolean;
-  address: string;
   edit?: FactoryEditView;
   onSaveProjectLimits?: (project: Pick<ProjectItem, "id" | "revision">, limits: { runBudget: bigint; maxRunSeconds: number }) => void;
   /** The logins the daemon found, once it has been asked. */

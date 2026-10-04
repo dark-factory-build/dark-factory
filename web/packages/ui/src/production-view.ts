@@ -70,7 +70,6 @@ export function proposedProduction(item: ProductionContraption): boolean {
 
 const STALE_AFTER = 180_000;
 const text = (value: unknown) => typeof value === "string" ? value : "";
-const list = (value: unknown) => Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
 const numbers = (value: unknown) => Array.isArray(value) ? value.filter((item): item is number => typeof item === "number" && Number.isSafeInteger(item) && item > 0) : [];
 const object = (value: unknown): Record<string, unknown> => value !== null && typeof value === "object" ? value as Record<string, unknown> : {};
 const scoped = (record: Pick<ProductionRecord, "project_id" | "repository">): Scoped => ({ projectId: record.project_id ?? "", repository: record.repository });

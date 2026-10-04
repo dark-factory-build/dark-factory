@@ -5,12 +5,9 @@ import {
   CAPABILITIES,
   base64urlEncode,
   decodeClientControl,
-  encodeAuthResult,
-  encodeHello,
-  encodePairResult,
   encodeServerControl,
-  encodeStateSnapshot,
 } from "../dist/src/index.js";
+import { encodeAuthResult, encodeHello, encodePairResult, encodeStateSnapshot } from "./server-frames.mjs";
 
 export const ALL_CAPABILITIES = CAPABILITIES.observe | CAPABILITIES.private_human_request_detail | CAPABILITIES.human_actions | CAPABILITIES.terminal_input | CAPABILITIES.administration;
 export const RELAY_ORIGIN = "wss://relay.example";

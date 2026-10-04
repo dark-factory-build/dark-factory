@@ -5,13 +5,9 @@ import { SessionErrorLikeError, createTerminalHandle } from "../dist/src/termina
 import {
   decodeClientControl,
   decodeServerControl,
-  encodeTerminalAttached,
-  encodeTerminalDetached,
-  encodeTerminalInputResult,
-  encodeTerminalLeaseResult,
-  encodeTerminalResized,
 } from "../dist/src/control.js";
 import { decodeTerminalInput } from "../dist/src/terminal.js";
+import { encodeTerminalAttached, encodeTerminalDetached, encodeTerminalInputResult, encodeTerminalLeaseResult, encodeTerminalResized } from "./server-frames.mjs";
 
 const runId = "11".repeat(16);
 const sessionId = "22".repeat(16);

@@ -3,15 +3,11 @@ import test from "node:test";
 import {
   decodeClientControl,
   decodeServerControl,
-  encodeTerminalAttached,
-  encodeTerminalDetached,
-  encodeTerminalInputResult,
-  encodeTerminalLeaseResult,
-  encodeTerminalResized,
   SessionError,
 } from "@dark-factory/client";
 import { createTerminalHandle } from "../../client/dist/src/terminal_session.js";
 import { MAX_PENDING_INPUT_BYTES, TerminalController } from "../dist/src/terminal-controller.js";
+import { encodeTerminalAttached, encodeTerminalDetached, encodeTerminalInputResult, encodeTerminalLeaseResult, encodeTerminalResized } from "../../client/test/server-frames.mjs";
 
 const target = Object.freeze({});
 
