@@ -97,7 +97,7 @@ func TestIntakeAcceptedContentSurvivesLargeBacklogAndMetadataChanges(t *testing.
 			if got := fixture.daemon.Intake(ctx, accept); got.State != "content_changed" {
 				t.Fatalf("stale acceptance: %+v", got)
 			}
-			acceptedID, _ := browserID(receipt.AcceptanceID, kernel.IntakeAcceptanceIDFromBytes)
+			acceptedID, _ := decodeID(receipt.AcceptanceID, kernel.IntakeAcceptanceIDFromBytes)
 			accepted, found, err := fixture.store.IntakeAcceptance(ctx, acceptedID)
 			if err != nil || !found || accepted.Snapshot.Body != "Exact instructions" {
 				t.Fatal("approved snapshot replaced")

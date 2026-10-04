@@ -22,11 +22,11 @@ func (backend *browserBackend) AttachTerminal(ctx context.Context, request brows
 		return nil, err
 	}
 	defer release()
-	runID, err := browserID(request.Request.RunID, kernel.RunIDFromBytes)
+	runID, err := decodeID(request.Request.RunID, kernel.RunIDFromBytes)
 	if err != nil {
 		return nil, browser.ErrStale
 	}
-	sessionID, err := browserID(request.Request.SessionID, kernel.TerminalSessionIDFromBytes)
+	sessionID, err := decodeID(request.Request.SessionID, kernel.TerminalSessionIDFromBytes)
 	if err != nil {
 		return nil, browser.ErrStale
 	}
@@ -104,11 +104,11 @@ func (backend *browserBackend) ResizeTerminal(ctx context.Context, request brows
 }
 
 func (backend *browserBackend) InputTerminal(ctx context.Context, request browser.TerminalInputRequest) (uint32, error) {
-	runID, err := browserID(request.RunID, kernel.RunIDFromBytes)
+	runID, err := decodeID(request.RunID, kernel.RunIDFromBytes)
 	if err != nil {
 		return 0, browser.ErrStale
 	}
-	sessionID, err := browserID(request.SessionID, kernel.TerminalSessionIDFromBytes)
+	sessionID, err := decodeID(request.SessionID, kernel.TerminalSessionIDFromBytes)
 	if err != nil || request.Frame.SessionID != sessionIDBytes(sessionID) || request.Frame.LeaseGeneration == 0 || request.Frame.Sequence == 0 || request.Frame.Sequence > math.MaxInt64 {
 		return 0, browser.ErrStale
 	}
@@ -133,7 +133,7 @@ func (backend *browserBackend) InputTerminal(ctx context.Context, request browse
 }
 
 func (backend *browserBackend) ReplyHumanRequest(ctx context.Context, principal browser.Principal, request browserprotocol.HumanRequestReply) (browserprotocol.HumanRequestReplyResult, error) {
-	requestID, err := browserID(request.RequestID, kernel.HumanRequestIDFromBytes)
+	requestID, err := decodeID(request.RequestID, kernel.HumanRequestIDFromBytes)
 	if err != nil {
 		return browserprotocol.HumanRequestReplyResult{}, browser.ErrStale
 	}
@@ -154,7 +154,7 @@ func (backend *browserBackend) ReplyHumanRequest(ctx context.Context, principal 
 }
 
 func (backend *browserBackend) CancelHumanRequestRun(ctx context.Context, principal browser.Principal, request browserprotocol.HumanRequestCancelRun) (browserprotocol.HumanRequestCancelRunResult, error) {
-	requestID, err := browserID(request.RequestID, kernel.HumanRequestIDFromBytes)
+	requestID, err := decodeID(request.RequestID, kernel.HumanRequestIDFromBytes)
 	if err != nil {
 		return browserprotocol.HumanRequestCancelRunResult{}, browser.ErrStale
 	}
@@ -227,11 +227,11 @@ func (backend *browserBackend) authorizePrincipal(ctx context.Context, principal
 }
 
 func leaseRequest(run, session string, expectedRun, expectedSession browserprotocol.Decimal) (kernel.RunID, kernel.TerminalSessionID, kernel.Revision, kernel.Revision, error) {
-	runID, err := browserID(run, kernel.RunIDFromBytes)
+	runID, err := decodeID(run, kernel.RunIDFromBytes)
 	if err != nil {
 		return kernel.RunID{}, kernel.TerminalSessionID{}, kernel.Revision{}, kernel.Revision{}, browser.ErrStale
 	}
-	sessionID, err := browserID(session, kernel.TerminalSessionIDFromBytes)
+	sessionID, err := decodeID(session, kernel.TerminalSessionIDFromBytes)
 	if err != nil {
 		return kernel.RunID{}, kernel.TerminalSessionID{}, kernel.Revision{}, kernel.Revision{}, browser.ErrStale
 	}
@@ -269,11 +269,8 @@ func browserSequence(value browserprotocol.Decimal) (uint64, error) {
 	return uint64(value), nil
 }
 
-func browserID[T any](value string, decode func([]byte) (T, error)) (T, error) {
-	return decodeMust[T](value, decode)
-}
-
-func decodeMust[T any](value string, decode func([]byte) (T, error)) (T, error) {
+// decodeID parses a canonical lowercase 32-hex identifier into a kernel ID.
+func decodeID[T any](value string, decode func([]byte) (T, error)) (T, error) {
 	var zero T
 	raw, err := parseID(value)
 	if err != nil {

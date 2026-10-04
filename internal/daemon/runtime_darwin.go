@@ -1093,10 +1093,6 @@ func samePrivateFileAuthority(opened, named unix.Stat_t) bool {
 	return sameFileObject(opened, named) && opened.Uid == named.Uid && opened.Gid == named.Gid && opened.Mode == named.Mode && opened.Nlink == named.Nlink
 }
 
-func samePrivateFile(opened, named unix.Stat_t) bool {
-	return validPrivateFile(named, opened.Size) && samePrivateFileAuthority(opened, named) && opened.Size == named.Size
-}
-
 func validBasename(name string) bool {
 	return name != "" && name != "." && name != ".." && filepath.Base(name) == name && len(name) <= 255
 }

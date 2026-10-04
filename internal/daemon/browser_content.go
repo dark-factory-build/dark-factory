@@ -47,10 +47,10 @@ type browserContentInput struct {
 }
 
 func browserContentProject(s string) (kernel.ProjectID, error) {
-	return browserID(s, kernel.ProjectIDFromBytes)
+	return decodeID(s, kernel.ProjectIDFromBytes)
 }
 func browserContentIDValue(s string) (kernel.ContentID, error) {
-	return browserID(s, kernel.ContentIDFromBytes)
+	return decodeID(s, kernel.ContentIDFromBytes)
 }
 func browserContentRevision(n uint64) (kernel.Revision, error) { return kernel.NewRevision(int64(n)) }
 
@@ -111,7 +111,7 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 	}
 	switch request.Operation {
 	case "task_read":
-		id, e := browserID(input.TaskID, kernel.TaskIDFromBytes)
+		id, e := decodeID(input.TaskID, kernel.TaskIDFromBytes)
 		if e != nil {
 			return result, browser.ErrInvalidRequest
 		}
@@ -305,7 +305,7 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 		}
 		output = backend.owner.knowledgeDTO(ctx, item)
 	case "evidence":
-		eid, e := browserID(input.ID, kernel.ContentEvidenceIDFromBytes)
+		eid, e := decodeID(input.ID, kernel.ContentEvidenceIDFromBytes)
 		cid, ce := browserContentIDValue(input.ContentID)
 		rev, re := browserContentRevision(contentRevision)
 		if e != nil || ce != nil || re != nil {
@@ -347,7 +347,7 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 		output = out
 
 	case "attach":
-		task, e := browserID(input.TaskID, kernel.TaskIDFromBytes)
+		task, e := decodeID(input.TaskID, kernel.TaskIDFromBytes)
 		cid, ce := browserContentIDValue(input.ContentID)
 		rev, re := browserContentRevision(contentRevision)
 		if e != nil || ce != nil || re != nil {
@@ -375,7 +375,7 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 		}
 		output = map[string]any{"task_id": task.String(), "project_id": project.String(), "content_id": cid.String(), "content_revision": rev.Int64()}
 	case "attachments":
-		task, e := browserID(input.TaskID, kernel.TaskIDFromBytes)
+		task, e := decodeID(input.TaskID, kernel.TaskIDFromBytes)
 		work, re := browserContentRevision(input.TaskWorkRevision)
 		if e != nil || re != nil {
 			return result, browser.ErrStale
@@ -427,9 +427,9 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 		}
 		output = out
 	case "mission_create":
-		owner, e := browserID(input.OwnerAgentID, kernel.AgentIDFromBytes)
+		owner, e := decodeID(input.OwnerAgentID, kernel.AgentIDFromBytes)
 		revision, re := kernel.NewRevision(int64(input.ExpectedAgentRevision))
-		id, ie := outcomeID(input.ID)
+		id, ie := decodeID(input.ID, kernel.OutcomeIDFromBytes)
 		if e != nil || re != nil || ie != nil || input.ExpectedAgentRevision == 0 || input.Objective == "" || input.Criteria == "" {
 			return result, browser.ErrInvalidRequest
 		}
@@ -442,7 +442,7 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 		output = out
 		backend.owner.notifyScheduler()
 	case "mission_tasks":
-		id, e := outcomeID(input.ID)
+		id, e := decodeID(input.ID, kernel.OutcomeIDFromBytes)
 		if e != nil {
 			return result, browser.ErrInvalidRequest
 		}
@@ -456,7 +456,7 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 		}
 		output = map[string]any{"mission_id": id.String(), "tasks": tasks, "next_offset": next}
 	case "outcome_read", "outcome_write":
-		id, e := outcomeID(input.ID)
+		id, e := decodeID(input.ID, kernel.OutcomeIDFromBytes)
 		if e != nil {
 			return result, browser.ErrInvalidRequest
 		}

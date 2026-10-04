@@ -59,7 +59,7 @@ func TestBrowserTaskEnqueueAnyWorkerQueuesUnclaimedWork(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wire, err := projectPublicSnapshot(public, func(string, string) (string, string, string) { return "", "", "" })
+	wire, err := projectPublicSnapshotForClient(public, func(string, string) (string, string, string) { return "", "", "" }, true)
 	if err != nil {
 		t.Fatal(err)
 	}

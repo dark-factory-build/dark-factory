@@ -36,16 +36,16 @@ func (daemon *Daemon) legacyIntakeWithStatus(ctx context.Context, input api.Inta
 	if status.State != "connected" {
 		return intakeFailure(maintainer.ErrDenied)
 	}
-	id, err := browserID(input.SourceID, kernel.IntakeSourceIDFromBytes)
+	id, err := decodeID(input.SourceID, kernel.IntakeSourceIDFromBytes)
 	if err != nil {
 		return intakeFailure(err)
 	}
-	project, err := browserID(input.ProjectID, kernel.ProjectIDFromBytes)
+	project, err := decodeID(input.ProjectID, kernel.ProjectIDFromBytes)
 	if err != nil {
 		return intakeFailure(err)
 	}
 	config := *input.Configuration
-	agent, err := browserID(config.OverseerAgentID, kernel.AgentIDFromBytes)
+	agent, err := decodeID(config.OverseerAgentID, kernel.AgentIDFromBytes)
 	if err != nil {
 		return intakeFailure(err)
 	}
@@ -184,8 +184,8 @@ func (daemon *Daemon) legacyIntakeWithStatus(ctx context.Context, input api.Inta
 			if old.TaskID != expectedTask || old.IncarnationID != hex.EncodeToString(incarnationDigest[:16]) {
 				return intakeFailure(kernel.ErrConflict)
 			}
-			taskID, _ := browserID(old.TaskID, kernel.TaskIDFromBytes)
-			incarnation, _ := browserID(old.IncarnationID, kernel.IncarnationIDFromBytes)
+			taskID, _ := decodeID(old.TaskID, kernel.TaskIDFromBytes)
+			incarnation, _ := decodeID(old.IncarnationID, kernel.IncarnationIDFromBytes)
 			recovery, found, err := daemon.store.TaskRecovery(ctx, taskID, incarnation)
 			if err != nil {
 				return intakeFailure(err)
@@ -258,7 +258,7 @@ func (daemon *Daemon) legacyIntakeWithStatus(ctx context.Context, input api.Inta
 // legacyIntakeLineage reads managed work for the frozen review companion route.
 // The migration receipt supplies remote identity; a live read proves the node.
 func (daemon *Daemon) legacyIntakeLineage(ctx context.Context, input api.IntakeInput) api.IntakeResult {
-	sourceID, _ := browserID(input.SourceID, kernel.IntakeSourceIDFromBytes)
+	sourceID, _ := decodeID(input.SourceID, kernel.IntakeSourceIDFromBytes)
 	receipt, found, err := daemon.store.LegacyIntakeMigration(ctx, sourceID)
 	if err != nil {
 		return intakeFailure(err)
@@ -266,8 +266,8 @@ func (daemon *Daemon) legacyIntakeLineage(ctx context.Context, input api.IntakeI
 	if !found || hex.EncodeToString(receipt.PlanHash[:]) != input.Legacy.PlanHash || hex.EncodeToString(receipt.ConfigHash[:]) != input.Legacy.ConfigHash || hex.EncodeToString(receipt.JournalHash[:]) != input.Legacy.JournalHash {
 		return api.IntakeResult{State: "conflict"}
 	}
-	projectID, _ := browserID(input.ProjectID, kernel.ProjectIDFromBytes)
-	targetID, _ := browserID(input.Configuration.TargetRepositoryID, kernel.RepositoryIDFromBytes)
+	projectID, _ := decodeID(input.ProjectID, kernel.ProjectIDFromBytes)
+	targetID, _ := decodeID(input.Configuration.TargetRepositoryID, kernel.RepositoryIDFromBytes)
 	page, err := daemon.readIntakeIssues(ctx, input.Configuration.Repository, receipt.RepositoryID, 1, "", input.IssueNumber)
 	if err != nil {
 		return intakeFailure(err)

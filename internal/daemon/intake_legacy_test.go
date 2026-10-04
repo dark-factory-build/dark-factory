@@ -222,7 +222,7 @@ func TestLegacyCutoverLivePlanHistorySuppressionAndPriority(t *testing.T) {
 	if imported.State != "imported" {
 		t.Fatalf("import: %+v", imported)
 	}
-	newID, _ := browserID(imported.TaskID, kernel.TaskIDFromBytes)
+	newID, _ := decodeID(imported.TaskID, kernel.TaskIDFromBytes)
 	task, _, err := fixture.store.Task(ctx, newID)
 	if err != nil || task.Priority != 8 {
 		t.Fatalf("initial priority: %+v %v", task, err)
@@ -267,7 +267,7 @@ func TestLegacyCutoverLivePlanHistorySuppressionAndPriority(t *testing.T) {
 	if reply := fixture.daemon.Intake(ctx, lineage); reply.State != "imported" || reply.TaskID != imported.TaskID {
 		t.Fatalf("mutable source retargeted retained review: %+v", reply)
 	}
-	acceptedID, _ := browserID(accepted.AcceptanceID, kernel.IntakeAcceptanceIDFromBytes)
+	acceptedID, _ := decodeID(accepted.AcceptanceID, kernel.IntakeAcceptanceIDFromBytes)
 	if _, err := fixture.store.WithdrawIntakeAcceptance(ctx, acceptedID, mustKernelTime(t, 1001)); err != nil {
 		t.Fatal(err)
 	}

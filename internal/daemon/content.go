@@ -2,7 +2,6 @@ package daemon
 
 import (
 	"context"
-	"encoding/hex"
 	"fmt"
 	"unicode/utf8"
 
@@ -11,27 +10,6 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 )
 
-func contentID(s string) (kernel.ContentID, error) {
-	b, err := hex.DecodeString(s)
-	if err != nil || len(b) != 16 {
-		return kernel.ContentID{}, kernel.ErrInvalidValue
-	}
-	return kernel.ContentIDFromBytes(b)
-}
-func projectID(s string) (kernel.ProjectID, error) {
-	b, err := hex.DecodeString(s)
-	if err != nil || len(b) != 16 {
-		return kernel.ProjectID{}, kernel.ErrInvalidValue
-	}
-	return kernel.ProjectIDFromBytes(b)
-}
-func taskID(s string) (kernel.TaskID, error) {
-	b, err := hex.DecodeString(s)
-	if err != nil || len(b) != 16 {
-		return kernel.TaskID{}, kernel.ErrInvalidValue
-	}
-	return kernel.TaskIDFromBytes(b)
-}
 func revision(n uint64) (kernel.Revision, error) { return kernel.NewRevision(int64(n)) }
 func contentDTO(v kernel.ContentRevision) api.Content {
 	return api.Content{ID: v.ID.String(), ProjectID: v.ProjectID.String(), Kind: string(v.Kind), Title: v.Title, Description: v.Description, Author: v.Author, SourceReferences: v.SourceReferences, ObjectFormat: v.ObjectFormat, Commit: v.Commit, Path: v.Path, Revision: uint64(v.Revision.Int64()), LatestRevision: uint64(v.LatestRevision.Int64()), Deprecated: v.Deprecated}
@@ -224,7 +202,7 @@ func (daemon *Daemon) content(ctx context.Context, call api.Call) api.Reply {
 	operator := !attempt
 	// Provenance is authority-derived, never a caller-supplied identity.
 	const operatorProvenance = "operator:local"
-	pid, err := projectID(firstNonEmpty(input.ProjectID, list.ProjectID, ev.ProjectID, attach.ProjectID, evList.ProjectID, attachments.ProjectID))
+	pid, err := decodeID(firstNonEmpty(input.ProjectID, list.ProjectID, ev.ProjectID, attach.ProjectID, evList.ProjectID, attachments.ProjectID), kernel.ProjectIDFromBytes)
 	projectOptional := call.Kind() == api.CallContentRead || call.Kind() == api.CallContentBody || !operator && (call.Kind() == api.CallContentList || call.Kind() == api.CallContentEvidenceList || call.Kind() == api.CallContentAttachments)
 	if err != nil && !projectOptional {
 		return newErrorReply(api.RemoteInvalidRequest)
@@ -241,11 +219,11 @@ func (daemon *Daemon) content(ctx context.Context, call api.Call) api.Reply {
 		authorTask = authority.TaskID
 	}
 	makeSpec := func() (kernel.NewContent, error) {
-		id, e := contentID(input.ID)
+		id, e := decodeID(input.ID, kernel.ContentIDFromBytes)
 		if e != nil {
 			return kernel.NewContent{}, e
 		}
-		p, e := projectID(input.ProjectID)
+		p, e := decodeID(input.ProjectID, kernel.ProjectIDFromBytes)
 		if e != nil {
 			return kernel.NewContent{}, e
 		}
@@ -336,7 +314,7 @@ func (daemon *Daemon) content(ctx context.Context, call api.Call) api.Reply {
 				v, e = daemon.store.ReviseContentForAttempt(ctx, kd, r, spec, at)
 			}
 		} else {
-			id, e2 := contentID(input.ID)
+			id, e2 := decodeID(input.ID, kernel.ContentIDFromBytes)
 			if e2 != nil {
 				return newErrorReply(api.RemoteInvalidRequest)
 			}
@@ -399,7 +377,7 @@ func (daemon *Daemon) content(ctx context.Context, call api.Call) api.Reply {
 		}
 		return api.NewContentReply(out)
 	case api.CallContentRead:
-		id, e := contentID(read.ID)
+		id, e := decodeID(read.ID, kernel.ContentIDFromBytes)
 		if e != nil {
 			return newErrorReply(api.RemoteInvalidRequest)
 		}
@@ -414,7 +392,7 @@ func (daemon *Daemon) content(ctx context.Context, call api.Call) api.Reply {
 		}
 		return api.NewContentReply(daemon.knowledgeDTO(ctx, v))
 	case api.CallContentBody:
-		id, e := contentID(body.ID)
+		id, e := decodeID(body.ID, kernel.ContentIDFromBytes)
 		if e != nil {
 			return newErrorReply(api.RemoteInvalidRequest)
 		}
@@ -442,15 +420,11 @@ func (daemon *Daemon) content(ctx context.Context, call api.Call) api.Reply {
 		}
 		return api.NewContentReply(api.ContentBody{ID: v.ID.String(), Revision: uint64(v.Revision.Int64()), Offset: uint64(v.Offset), Body: v.Body, NextOffset: uint64(v.NextOffset), Complete: v.Complete})
 	case api.CallContentEvidence:
-		ib, e := hex.DecodeString(ev.ID)
-		if e != nil || len(ib) != 16 {
-			return newErrorReply(api.RemoteInvalidRequest)
-		}
-		i, e := kernel.ContentEvidenceIDFromBytes(ib)
+		i, e := decodeID(ev.ID, kernel.ContentEvidenceIDFromBytes)
 		if e != nil {
 			return newErrorReply(api.RemoteInvalidRequest)
 		}
-		c, e := contentID(ev.ContentID)
+		c, e := decodeID(ev.ContentID, kernel.ContentIDFromBytes)
 		if e != nil {
 			return newErrorReply(api.RemoteInvalidRequest)
 		}
@@ -471,7 +445,7 @@ func (daemon *Daemon) content(ctx context.Context, call api.Call) api.Reply {
 		}
 		return api.NewContentReply(evidenceDTO(v))
 	case api.CallContentEvidenceList:
-		c, e := contentID(evList.ContentID)
+		c, e := decodeID(evList.ContentID, kernel.ContentIDFromBytes)
 		if e != nil {
 			return newErrorReply(api.RemoteInvalidRequest)
 		}
@@ -498,11 +472,11 @@ func (daemon *Daemon) content(ctx context.Context, call api.Call) api.Reply {
 		}
 		return api.NewContentReply(out)
 	case api.CallContentAttach:
-		t, e := taskID(attach.TaskID)
+		t, e := decodeID(attach.TaskID, kernel.TaskIDFromBytes)
 		if e != nil {
 			return newErrorReply(api.RemoteInvalidRequest)
 		}
-		c, e := contentID(attach.ContentID)
+		c, e := decodeID(attach.ContentID, kernel.ContentIDFromBytes)
 		if e != nil {
 			return newErrorReply(api.RemoteInvalidRequest)
 		}
@@ -524,7 +498,7 @@ func (daemon *Daemon) content(ctx context.Context, call api.Call) api.Reply {
 	case api.CallContentAttachments:
 		var refs []kernel.TaskContentReference
 		if operator {
-			t, e := taskID(attachments.TaskID)
+			t, e := decodeID(attachments.TaskID, kernel.TaskIDFromBytes)
 			if e != nil {
 				return newErrorReply(api.RemoteInvalidRequest)
 			}
@@ -541,7 +515,7 @@ func (daemon *Daemon) content(ctx context.Context, call api.Call) api.Reply {
 			var target kernel.TaskID
 			if attachments.TaskID != "" {
 				var e error
-				target, e = taskID(attachments.TaskID)
+				target, e = decodeID(attachments.TaskID, kernel.TaskIDFromBytes)
 				if e != nil {
 					return newErrorReply(api.RemoteInvalidRequest)
 				}

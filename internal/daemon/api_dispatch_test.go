@@ -758,7 +758,7 @@ func prepareActiveAttemptInProjectWithProvider(t *testing.T, fixture *dispatchFi
 		}
 		waitDispatch(t, done)
 	}
-	id, err := parseProjectID(projectID)
+	id, err := decodeID(projectID, kernel.ProjectIDFromBytes)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1451,7 +1451,7 @@ func TestProjectionHasNoPrivateFieldsAndKeepsEmptySlices(t *testing.T) {
 	projectID := mustProjectID(t, testID(51))
 	agentID := mustAgentID(t, testID(52))
 	taskID := mustTaskID(t, testID(53))
-	incarnationID, err := parseIncarnationID(testID(54))
+	incarnationID, err := decodeID(testID(54), kernel.IncarnationIDFromBytes)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1605,7 +1605,7 @@ func TestTaskEnqueuePreflightPreservesReplayAndOverseerAuthority(t *testing.T) {
 	}
 	waitDispatch(t, done)
 	// Simulate a task accepted by the old operator route before this check.
-	incarnation, _ := parseIncarnationID(testID(212))
+	incarnation, _ := decodeID(testID(212), kernel.IncarnationIDFromBytes)
 	spec := kernel.NewTask{ID: mustTaskID(t, testID(211)), ProjectID: active.run.ProjectID, AssignedAgentID: mustAgentID(t, workerID), IncarnationID: incarnation, Title: "legacy", Body: strings.Repeat("x", 8193)}
 	at, _ := kernel.NewUnixMillis(1000)
 	legacy, err := fixture.store.EnqueueTask(ctx, spec, at)

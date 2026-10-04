@@ -107,28 +107,6 @@ func pathResourceIdentity(identity runner.FileIdentity) (kernel.ResourceIdentity
 	return result, nil
 }
 
-func kernelFileIdentity(identity runner.FileIdentity) (kernel.FileIdentity, error) {
-	if identity.Device == 0 {
-		return kernel.FileIdentity{}, errInvalidContract
-	}
-	device, inode, err := signedIdentity(identity.Device, identity.Inode)
-	if err != nil {
-		return kernel.FileIdentity{}, err
-	}
-	result, err := kernel.NewFileIdentity(device, inode)
-	if err != nil {
-		return kernel.FileIdentity{}, errInvalidContract
-	}
-	return result, nil
-}
-
-func runnerFileIdentity(identity kernel.FileIdentity) (runner.FileIdentity, error) {
-	if identity.Device() <= 0 || identity.Inode() <= 0 {
-		return runner.FileIdentity{}, errInvalidContract
-	}
-	return runner.FileIdentity{Device: uint64(identity.Device()), Inode: uint64(identity.Inode())}, nil
-}
-
 func signedIdentity(device, inode uint64) (int64, int64, error) {
 	if device > math.MaxInt64 || inode == 0 || inode > math.MaxInt64 {
 		return 0, 0, errInvalidContract

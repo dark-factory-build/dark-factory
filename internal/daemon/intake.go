@@ -44,7 +44,7 @@ func (daemon *Daemon) Intake(ctx context.Context, input api.IntakeInput) api.Int
 		return api.IntakeResult{State: "invalid"}
 	}
 	if input.Action == "review_pr" {
-		project, parseErr := browserID(input.ProjectID, kernel.ProjectIDFromBytes)
+		project, parseErr := decodeID(input.ProjectID, kernel.ProjectIDFromBytes)
 		if parseErr != nil || input.ReviewRequest == nil {
 			return api.IntakeResult{State: "invalid"}
 		}
@@ -95,7 +95,7 @@ func (daemon *Daemon) Intake(ctx context.Context, input api.IntakeInput) api.Int
 		if input.ProjectID == "" {
 			sources, err = daemon.store.IntakeSources(ctx)
 		} else {
-			project, parseErr := browserID(input.ProjectID, kernel.ProjectIDFromBytes)
+			project, parseErr := decodeID(input.ProjectID, kernel.ProjectIDFromBytes)
 			if parseErr != nil {
 				return intakeFailure(kernel.ErrInvalidValue)
 			}
@@ -116,7 +116,7 @@ func (daemon *Daemon) Intake(ctx context.Context, input api.IntakeInput) api.Int
 		return result
 	}
 	if input.Action == "withdraw" || input.Action == "import" {
-		id, parseErr := browserID(input.AcceptanceID, kernel.IntakeAcceptanceIDFromBytes)
+		id, parseErr := decodeID(input.AcceptanceID, kernel.IntakeAcceptanceIDFromBytes)
 		if parseErr != nil {
 			return intakeFailure(kernel.ErrInvalidValue)
 		}
@@ -159,7 +159,7 @@ func (daemon *Daemon) Intake(ctx context.Context, input api.IntakeInput) api.Int
 		}
 		return api.IntakeResult{State: "imported", AcceptanceID: id.String(), TaskID: task.ID.String()}
 	}
-	sourceID, err := browserID(input.SourceID, kernel.IntakeSourceIDFromBytes)
+	sourceID, err := decodeID(input.SourceID, kernel.IntakeSourceIDFromBytes)
 	if err != nil {
 		return intakeFailure(kernel.ErrInvalidValue)
 	}
@@ -207,17 +207,17 @@ func (daemon *Daemon) Intake(ctx context.Context, input api.IntakeInput) api.Int
 				return intakeFailure(maintainer.ErrDenied)
 			}
 		}
-		project, parseErr := browserID(input.ProjectID, kernel.ProjectIDFromBytes)
+		project, parseErr := decodeID(input.ProjectID, kernel.ProjectIDFromBytes)
 		if parseErr != nil {
 			return intakeFailure(kernel.ErrInvalidValue)
 		}
-		target, parseErr := browserID(config.TargetRepositoryID, kernel.RepositoryIDFromBytes)
+		target, parseErr := decodeID(config.TargetRepositoryID, kernel.RepositoryIDFromBytes)
 		if parseErr != nil {
 			return intakeFailure(kernel.ErrInvalidValue)
 		}
 		var agent kernel.AgentID
 		if config.OverseerAgentID != "" {
-			agent, parseErr = browserID(config.OverseerAgentID, kernel.AgentIDFromBytes)
+			agent, parseErr = decodeID(config.OverseerAgentID, kernel.AgentIDFromBytes)
 		}
 		if parseErr != nil {
 			return intakeFailure(kernel.ErrInvalidValue)
@@ -452,7 +452,7 @@ func (daemon *Daemon) previewIntake(ctx context.Context, source kernel.IntakeSou
 	if tick {
 		after := kernel.IntakeAcceptanceID{}
 		if cursor != "" {
-			after, _ = browserID(cursor, kernel.IntakeAcceptanceIDFromBytes) // ValidIntakeInput checked it.
+			after, _ = decodeID(cursor, kernel.IntakeAcceptanceIDFromBytes) // ValidIntakeInput checked it.
 		}
 		const receiptPageSize = 25
 		pending, err := daemon.store.PendingIntakeAcceptancesAfter(ctx, source.ID, receiptPageSize, after)
