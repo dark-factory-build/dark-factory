@@ -582,7 +582,7 @@ func (store *Store) RecordReviewRetry(ctx context.Context, project ProjectID, re
 	}
 	defer tx.Close()
 	result, err := tx.connection.ExecContext(ctx, `UPDATE production_records
-		SET document = json_set(document, '$.retryable', json('false')), observed_at_ms = ?
+		SET document = json_set(document, '$.retryable', json('false'), '$.handled', json('true')), observed_at_ms = ?
 		WHERE project_id = ? AND repository = ? AND kind = 'reviewer' AND identity = ?
 		  AND observed_at_ms <= ? AND json_extract(document, '$.state') = 'failed'
 		  AND json_extract(document, '$.retryable') = 1
@@ -624,16 +624,19 @@ func (store *Store) ReviewOperation(ctx context.Context, project ProjectID, oper
 
 // InFlightReviewOperations returns every unfinished review operation: gates to
 // rerun, review writes whose external receipts may have been lost, enqueued
-// heads awaiting the merge queue, and results whose task routing has not
-// landed.
+// heads awaiting the merge queue, results whose task routing has not landed,
+// and unhandled failures of a still-open pull request at the same head.
 func (store *Store) InFlightReviewOperations(ctx context.Context) ([]PendingReviewOperation, error) {
 	tx, err := store.beginRead(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Close()
-	rows, err := tx.connection.QueryContext(ctx, `SELECT project_id, repository, identity, document FROM production_records
-        WHERE kind = 'reviewer' AND (json_extract(document, '$.state') IN ('gating', 'submitting', 'enqueuing', 'enqueued') OR json_extract(document, '$.route_pending') = 1)
+	rows, err := tx.connection.QueryContext(ctx, `SELECT project_id, repository, identity, document FROM production_records r
+        WHERE kind = 'reviewer' AND (json_extract(document, '$.state') IN ('gating', 'submitting', 'enqueuing', 'enqueued') OR json_extract(document, '$.route_pending') = 1
+            OR (json_extract(document, '$.state') = 'failed' AND json_extract(document, '$.handled') IS NOT 1 AND EXISTS (SELECT 1 FROM production_records p
+                WHERE p.project_id = r.project_id AND p.repository = r.repository AND p.kind = 'pull_request' AND p.identity = CAST(json_extract(r.document, '$.request.PullNumber') AS TEXT)
+                  AND json_extract(p.document, '$.state') = 'open' AND lower(json_extract(p.document, '$.head')) = lower(json_extract(r.document, '$.request.Head')))))
           AND json_type(document, '$.request') = 'object'`)
 	if err != nil {
 		return nil, err
