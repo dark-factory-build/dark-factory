@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 )
@@ -35,8 +36,19 @@ type Operation struct {
 	Detail       string    `json:"detail,omitempty"`
 	Submitted    bool      `json:"submitted,omitempty"`
 	RoutePending bool      `json:"route_pending,omitempty"`
+	Gates        []GateRun `json:"gates,omitempty"`
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
+}
+
+// GateRun is one completed run of the operator's full gate at one commit.
+// Runs are recorded only once finished, so a restarted operation replays the
+// re-gate rule from what it already knows.
+type GateRun struct {
+	Commit   string   `json:"commit"`
+	ExitCode int      `json:"exit_code"`
+	Failed   []string `json:"failed,omitempty"`
+	Log      string   `json:"log"`
 }
 
 type Verdict struct {
@@ -73,6 +85,9 @@ type RetryStore interface {
 
 type Backend interface {
 	CloneReadOnly(context.Context, Request) (string, func(), error)
+	// Gate runs the full gate once at commit. An error means nothing ran (a
+	// host blocker), never that the commit failed.
+	Gate(ctx context.Context, checkout string, op Operation, commit string) (GateRun, error)
 	Review(context.Context, string, Request) (Verdict, error)
 	Submit(context.Context, Operation, Verdict) error
 	Enqueue(context.Context, Operation) error
@@ -120,12 +135,12 @@ func Prepare(request Request, now func() time.Time) (Operation, error) {
 		return Operation{}, err
 	}
 	stamp := now()
-	return Operation{ID: id, Request: request, State: "running", CreatedAt: stamp, UpdatedAt: stamp}, nil
+	return Operation{ID: id, Request: request, State: "gating", CreatedAt: stamp, UpdatedAt: stamp}, nil
 }
 
 // Resume continues an operation already durably claimed by the caller.
 func (c Coordinator) Resume(ctx context.Context, op Operation) (Operation, error) {
-	if err := validate(op.Request); err != nil || c.Store == nil || c.Backend == nil || c.Now == nil || op.ID == "" || (op.State != "running" && op.State != "submitting" && op.State != "enqueuing") {
+	if err := validate(op.Request); err != nil || c.Store == nil || c.Backend == nil || c.Now == nil || op.ID == "" || (op.State != "gating" && op.State != "running" && op.State != "submitting" && op.State != "enqueuing") {
 		if err == nil {
 			err = errors.New("review: incomplete coordinator")
 		}
@@ -142,6 +157,11 @@ func (c Coordinator) Resume(ctx context.Context, op Operation) (Operation, error
 		return c.failPreSubmit(ctx, op, err)
 	}
 	defer cleanup()
+	if op.State == "gating" {
+		if op, err = c.gate(ctx, checkout, op); err != nil || op.State != "running" {
+			return op, err
+		}
+	}
 	verdict, err := c.Backend.Review(ctx, checkout, op.Request)
 	if err != nil {
 		return c.failPreSubmit(ctx, op, err)
@@ -160,6 +180,78 @@ func (c Coordinator) Resume(ctx context.Context, op Operation) (Operation, error
 		return c.fail(ctx, op, err, false)
 	}
 	return c.finishSubmitted(ctx, op)
+}
+
+// gate runs the operator's full gate before any reviewer reads the head. A
+// head failure is rerun once, and a pass on either run passes, the failure
+// staying as flake evidence. Two head failures run once at the base: when
+// every failing head test also fails there, review proceeds with that
+// evidence; otherwise the head goes back to its author with the failing tests.
+func (c Coordinator) gate(ctx context.Context, checkout string, op Operation) (Operation, error) {
+	for {
+		commit, note := nextGate(op)
+		if commit == "" && note == "" {
+			op.State, op.UpdatedAt = "running", c.Now()
+			return op, c.Store.Update(ctx, op)
+		}
+		if note != "" {
+			// Routed like a REQUEST_CHANGES verdict, by the same marker, but
+			// nothing is submitted: the gate is not a review.
+			op.State, op.Verdict, op.Detail, op.RoutePending, op.UpdatedAt = "completed", "request_changes", note, true, c.Now()
+			return op, c.Store.Update(ctx, op)
+		}
+		run, err := c.Backend.Gate(ctx, checkout, op, commit)
+		if err != nil {
+			return c.failPreSubmit(ctx, op, fmt.Errorf("review: gate could not run: %w", err))
+		}
+		op.Gates, op.UpdatedAt = append(op.Gates, run), c.Now()
+		if err := c.Store.Update(ctx, op); err != nil {
+			return Operation{}, err
+		}
+	}
+}
+
+// nextGate returns the commit to gate next, a send-back note, or neither when
+// review may proceed.
+func nextGate(op Operation) (string, string) {
+	runs := op.Gates
+	for _, run := range runs {
+		if run.Commit == op.Request.Head && run.ExitCode == 0 {
+			return "", ""
+		}
+	}
+	if len(runs) < 2 {
+		return op.Request.Head, ""
+	}
+	if len(runs) == 2 {
+		return op.Request.Base, ""
+	}
+	atBase := map[string]bool{}
+	if runs[2].ExitCode != 0 {
+		for _, name := range runs[2].Failed {
+			atBase[name] = true
+		}
+	}
+	var failed []string
+	inherited := true
+	for _, name := range append(append([]string{}, runs[0].Failed...), runs[1].Failed...) {
+		if !slices.Contains(failed, name) {
+			failed = append(failed, name)
+			inherited = inherited && atBase[name]
+		}
+	}
+	if inherited && len(failed) > 0 {
+		return "", ""
+	}
+	tests := "unavailable"
+	if len(failed) > 0 {
+		tests = strings.Join(failed, ", ")
+	}
+	base := "passed"
+	if runs[2].ExitCode != 0 {
+		base = "failed, but not on all of these"
+	}
+	return "", fmt.Sprintf("pre-review full gate failed twice at the exact head (exit %d): tests=%s. At base %s the gate %s. Factory-host gate logs: %s, %s. Exact head %s.", runs[1].ExitCode, tests, op.Request.Base, base, runs[0].Log, runs[1].Log, op.Request.Head)
 }
 
 func (c Coordinator) finishSubmitted(ctx context.Context, op Operation) (Operation, error) {

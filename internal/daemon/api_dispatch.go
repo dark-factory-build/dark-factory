@@ -44,6 +44,10 @@ type Daemon struct {
 	// reviewBackend is a package-test seam; production always uses the
 	// Maintainer-backed daemonReviewBackend.
 	reviewBackend func(string, uint64) review.Backend
+	// The full gate's home and tool path (ConfigureGate); gateMu runs one
+	// gate at a time.
+	gateHome, gateToolPath string
+	gateMu                 sync.Mutex
 	// intakeIssues is a package-test-only remote failure/race seam.
 	intakeIssues func(context.Context, string, uint64, uint32, string, uint64) (maintainer.IssuePage, error)
 	// browserRemote is a package-test-only seam for operator calls that wait

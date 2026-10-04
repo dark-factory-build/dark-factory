@@ -26,6 +26,9 @@ type publicReviewBackend struct {
 func (b *publicReviewBackend) CloneReadOnly(context.Context, review.Request) (string, func(), error) {
 	return "/fixture-review", func() {}, nil
 }
+func (b *publicReviewBackend) Gate(_ context.Context, _ string, _ review.Operation, commit string) (review.GateRun, error) {
+	return review.GateRun{Commit: commit}, nil
+}
 func (b *publicReviewBackend) Review(context.Context, string, review.Request) (review.Verdict, error) {
 	b.reviews++
 	if b.killed {

@@ -65,6 +65,12 @@ func (daemon *Daemon) RecoverReviewOperations(ctx context.Context) (int, error) 
 		if err := json.Unmarshal(operation.Document, &op); err != nil || op.ID == "" || op.ID != operation.ID {
 			return 0, fmt.Errorf("%w: review operation", kernel.ErrCorruptState)
 		}
+		if op.State == "gating" {
+			// A gate takes up to half an hour; startup does not wait for it.
+			daemon.launchReview(operation.Project, op)
+			recovered++
+			continue
+		}
 		if _, err := daemon.resumeReview(ctx, operation.Project, op); err == nil {
 			recovered++
 		}
@@ -615,6 +621,10 @@ func reviewEnvironment(root string) []string {
 		"GIT_CONFIG_VALUE_0=",
 	)
 	return result
+}
+
+func (b *daemonReviewBackend) Gate(ctx context.Context, checkout string, operation review.Operation, commit string) (review.GateRun, error) {
+	return b.daemon.runGate(ctx, checkout, operation.ID, commit, len(operation.Gates)+1)
 }
 
 func (b *daemonReviewBackend) Submit(ctx context.Context, operation review.Operation, verdict review.Verdict) error {

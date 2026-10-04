@@ -630,9 +630,9 @@ func (store *Store) PendingReviewOperations(ctx context.Context) ([]PendingRevie
 	return pending, nil
 }
 
-// InFlightReviewOperations returns review writes whose external receipts may
-// have been lost. The coordinator reconciles these operation IDs before any
-// new write is attempted.
+// InFlightReviewOperations returns gates to rerun and review writes whose
+// external receipts may have been lost. The coordinator reconciles these
+// operation IDs before any new write is attempted.
 func (store *Store) InFlightReviewOperations(ctx context.Context) ([]PendingReviewOperation, error) {
 	tx, err := store.beginRead(ctx)
 	if err != nil {
@@ -640,7 +640,7 @@ func (store *Store) InFlightReviewOperations(ctx context.Context) ([]PendingRevi
 	}
 	defer tx.Close()
 	rows, err := tx.connection.QueryContext(ctx, `SELECT project_id, repository, identity, document FROM production_records
-        WHERE kind = 'reviewer' AND json_extract(document, '$.state') IN ('submitting', 'enqueuing')
+        WHERE kind = 'reviewer' AND json_extract(document, '$.state') IN ('gating', 'submitting', 'enqueuing')
           AND json_type(document, '$.request') = 'object'`)
 	if err != nil {
 		return nil, err
