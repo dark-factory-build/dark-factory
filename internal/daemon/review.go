@@ -458,7 +458,12 @@ func (b *daemonReviewBackend) Review(ctx context.Context, checkout string, reque
 		command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 		command.Cancel = func() error { return syscall.Kill(-command.Process.Pid, syscall.SIGKILL) }
 		command.WaitDelay = 5 * time.Second
-		output, err := command.CombinedOutput()
+		// The verdict is read from stdout, the final message only: codex
+		// streams its transcript and token count to stderr.
+		var stdout, stderr strings.Builder
+		command.Stdout, command.Stderr = &stdout, &stderr
+		err := command.Run()
+		output := []byte(stdout.String() + stderr.String())
 		if ctx.Err() != nil {
 			return review.Verdict{}, fmt.Errorf("review: provider deadline: %w", ctx.Err())
 		}
@@ -473,7 +478,7 @@ func (b *daemonReviewBackend) Review(ctx context.Context, checkout string, reque
 			return review.Verdict{}, err
 		}
 		// A provider may echo its prompt, which quotes the author's body.
-		text := strings.Replace(string(output), prompt, "", 1)
+		text := strings.Replace(stdout.String(), prompt, "", 1)
 		event, err := terminalReviewVerdict(text)
 		if err != nil {
 			return review.Verdict{}, err

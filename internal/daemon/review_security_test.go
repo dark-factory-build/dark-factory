@@ -61,7 +61,7 @@ func reviewerFixture(t *testing.T, reviewers ...string) (*daemonReviewBackend, m
 	fixture, project := reviewPublicFixture(t)
 	ctx := context.Background()
 	bin := t.TempDir()
-	script := "#!/bin/sh\n[ -e \"$CODEX_HOME/limited\" ] && { echo \"■ You've hit your usage limit. Try again later.\"; exit 1; }\n[ -e \"$CODEX_HOME/quoted\" ] && { echo \"the task says: You've hit your usage limit\"; exit 1; }\n[ -e \"$CODEX_HOME/hang\" ] && { sleep 600 & echo $$ > \"$CODEX_HOME/pid\"; wait; }\n[ -e \"$CODEX_HOME/say\" ] && { cat \"$CODEX_HOME/say\"; exit 0; }\n[ -e \"$CODEX_HOME/stamp\" ] && { for prompt; do :; done; echo \"$prompt\"; echo \"VERDICT: ALLOW\"; exit 0; }\necho \"read changed.go\"\necho \"VERDICT: ALLOW\"\n"
+	script := "#!/bin/sh\n[ -e \"$CODEX_HOME/limited\" ] && { echo \"■ You've hit your usage limit. Try again later.\"; exit 1; }\n[ -e \"$CODEX_HOME/quoted\" ] && { echo \"the task says: You've hit your usage limit\"; exit 1; }\n[ -e \"$CODEX_HOME/hang\" ] && { sleep 600 & echo $$ > \"$CODEX_HOME/pid\"; wait; }\n[ -e \"$CODEX_HOME/say\" ] && { cat \"$CODEX_HOME/say\" >&2; echo \"tokens used: 12\" >&2; cat \"$CODEX_HOME/say\"; exit 0; }\n[ -e \"$CODEX_HOME/stamp\" ] && { for prompt; do :; done; echo \"$prompt\"; echo \"VERDICT: ALLOW\"; exit 0; }\necho \"read changed.go\"\necho \"VERDICT: ALLOW\"\n"
 	if err := os.WriteFile(filepath.Join(bin, "codex"), []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -172,7 +172,8 @@ func TestAnAllowThatNamesNoChangedPathIsNoVerdict(t *testing.T) {
 }
 
 // A path is named only as a whole path: a changed file named go is not named
-// by "looks good", but is by "`go`" or by a sentence ending "go.".
+// by "looks good", but is by "`go`" or by a sentence ending "go.". The fake,
+// like codex, repeats its transcript and token count on stderr.
 func TestAnAllowNamesAChangedPathOnlyAsAWholePath(t *testing.T) {
 	backend, homes := reviewerFixture(t, "speaker")
 	checkout, request := reviewCheckoutChanging(t, "go")
