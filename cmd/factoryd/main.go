@@ -371,6 +371,7 @@ func openProcess(ctx context.Context, configuration config) (_ *process, resultE
 		return nil, err
 	}
 	startupPhase("review recovery")
+	owner.daemon.ConfigureGate(configuration.home, configuration.toolPath)
 	if _, err := owner.daemon.RecoverReviewOperations(ownedContext); err != nil {
 		return nil, err
 	}

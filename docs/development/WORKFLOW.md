@@ -23,9 +23,19 @@ The routine source check is:
 
 It runs Go formatting, vetting, ordinary short tests, the TypeScript build and
 tests, and `git diff --check`. It does not acquire the process lease. During
-implementation, run this check plus focused tests for the changed package.
+implementation, run this check plus the focused tests for the changed package
+that your environment can run. A factory worker reports a check its sandbox
+cannot run as "verified by gate" instead of blocking on it.
 
-The full local gate is available when broad local integration proof is needed:
+The full local gate runs before every review, at the exact head and outside
+any worker sandbox. A failure is rerun once at the head (a pass then counts,
+and the failure is kept as flake evidence). The reproducing failures are the
+tests that failed in both head runs. With none in common the failure is a flake
+and review proceeds; otherwise the gate runs once at the base, and the
+reproducing failures the base does not share go back to the author by name.
+Head failures with no parsed test names go back without a base run. A wrapper
+failure where nothing ran is a host blocker, never author work. Run it yourself when broad local integration proof
+is needed:
 
 ```sh
 ./scripts/local-ci.sh

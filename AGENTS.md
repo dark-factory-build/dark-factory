@@ -19,20 +19,31 @@ details live in [README.md](README.md), [ARCHITECTURE.md](ARCHITECTURE.md),
 
 ## Agent check loop
 
-During implementation, run `./scripts/go-check.sh` and focused tests for the
-changed risk. Process-sensitive Go tests use `-count=1` and must run through
-`./scripts/with-local-ci-lease.sh`; this keeps one heavy process run on the
-Mac without making source checks wait. Use `./scripts/local-ci.sh --ui`,
-`--runtime`, or `--release` when working across that component boundary.
-Agent-posted issue or pull-request comments must use
-`./scripts/gh-comment.sh`; pass the comment body through `--body-file` or
-stdin, never as a command-line argument.
-For CI changes, run the affected gate fixtures and source checks; use the
-explicit `./scripts/local-ci.sh` full gate when the risk needs broad local
-integration proof. Before review, record the exact head and checks run.
-An independent reviewer reproduces relevant risks. Do not repeat the full
-suite automatically for each edit, reviewer, or enqueue: the protected merge
-queue checks the actual combined tree, widening mixed or uncertain inputs.
+During implementation, run `./scripts/go-check.sh` and the focused tests for
+the changed risk that your environment can run. Process-sensitive Go tests use
+`-count=1` and run through `./scripts/with-local-ci-lease.sh`, which keeps one
+heavy process run on the Mac without making source checks wait. Use
+`./scripts/local-ci.sh --ui`, `--runtime`, or `--release` when working across
+that component boundary.
+
+Before review, the full gate (`scripts/local-ci.sh`) runs at the exact head
+outside any worker sandbox. A failure is rerun once at the head; a pass on
+either run passes. The reproducing failures are the tests that failed in both
+head runs: none in common is a flake and review proceeds; otherwise the gate
+runs once at the base, and the reproducing failures the base does not share
+come back to the author by name. Head failures with no parsed test names come
+back without a base run. A factory worker that
+cannot run a check inside its sandbox (a nested `sandbox-exec`, system Perl,
+the daemon supervisor fixtures, the full gate itself) does not block on it:
+it lists that check as "verified by gate" in its result and finishes.
+
+Record the exact head, the checks run, and the checks left to the gate. For CI
+changes, also run the affected gate fixtures. An independent reviewer
+reproduces relevant risks. Do not repeat the full suite for each edit,
+reviewer, or enqueue: the protected merge queue checks the actual combined
+tree, widening mixed or uncertain inputs. Agent-posted issue or pull-request
+comments must use `./scripts/gh-comment.sh`; pass the comment body through
+`--body-file` or stdin, never as a command-line argument.
 
 ## Writing code: the ponytail ladder
 
