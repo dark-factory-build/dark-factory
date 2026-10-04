@@ -15,7 +15,6 @@ var (
 	ErrNotFound         = errors.New("kernel entity not found")
 	ErrUnauthorized     = errors.New("attempt credential is not authorized")
 	ErrSnapshotTooLarge = errors.New("dashboard snapshot exceeds the entity bound")
-	ErrRecoveryBounds   = errors.New("operator recovery exceeds its bounded read")
 	ErrStoreClosed      = errors.New("kernel store is closed")
 	// ErrSuperseded: a newer pull-request head replaced the one named.
 	ErrSuperseded = errors.New("superseded by a newer head")

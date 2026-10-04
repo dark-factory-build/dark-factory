@@ -56,9 +56,8 @@ task update --retry`, which keeps its worker, or a send-back). Anything else
 is reconciled from its receipts, never replayed, and escalated when uncertain.
 A retry that fails the same way, or an uncertain effect, becomes a human
 request raised in that same pass naming the task, the run and its exit, then
-other work continues. Deferring it to a later wake records no disposition:
-`factoryctl task recovery` shows the task as notification scheduled,
-disposition none, and the operator has no Needs You to answer.
+other work continues. Deferring it to a later wake records no disposition,
+and the operator has no Needs You to answer.
 
 After a verified merge, include housekeeping in that same pass. Pause an obsolete
 worker only after checking that it has neither active nor queued work and is not
@@ -674,10 +673,3 @@ may read this settled window, and the same credential/path redaction and
 complete-line boundaries apply after restart. Saving the window occurs only
 after the authenticated runner result is durably consumed, so a diagnostic-write
 failure cannot turn an accepted outcome into an ambiguous settlement.
-
-Operator supervision can use `factoryctl task recovery --task TASK_ID --incarnation INCARNATION_ID` for current result and blocker text without
-opening runtime files. `result_truncated` explicitly marks a UTF-8-safe 65536-byte
-excerpt; existing overseer or browser task-detail paging retrieves the full
-stored result. `run_outcome` and `run_detail` describe only the returned run at
-`run_work_revision`, which may precede the current task work revision after
-send-back. They are not a result for the new correction.

@@ -486,31 +486,13 @@ func (store *Store) LatestTerminalRuntimeRoot(ctx context.Context, agentID Agent
 }
 
 func resourcesForRun(ctx context.Context, connection *sql.Conn, runID RunID) ([]Resource, error) {
-	return resourcesForRunWithLimit(ctx, connection, runID, 0)
-}
-
-func resourcesForRunBounded(ctx context.Context, connection *sql.Conn, runID RunID, limit int) ([]Resource, error) {
-	return resourcesForRunWithLimit(ctx, connection, runID, limit)
-}
-
-func resourcesForRunWithLimit(ctx context.Context, connection *sql.Conn, runID RunID, limit int) ([]Resource, error) {
-	query := `SELECT ` + resourceColumns + ` FROM resources WHERE run_id = ? ORDER BY kind, id`
-	args := []any{runID.Bytes()}
-	if limit > 0 {
-		query += ` LIMIT ?`
-		args = append(args, limit+1)
-	}
-	rows, err := connection.QueryContext(ctx, query, args...)
+	rows, err := connection.QueryContext(ctx, `SELECT `+resourceColumns+` FROM resources WHERE run_id = ? ORDER BY kind, id`, runID.Bytes())
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	var resources []Resource
 	for rows.Next() {
-		if limit > 0 && len(resources) == limit {
-			_ = rows.Close()
-			return nil, fmt.Errorf("%w: run has more than %d resources", ErrRecoveryBounds, limit)
-		}
 		resource, found, err := scanResource(rows)
 		if err != nil {
 			return nil, err
@@ -644,4 +626,25 @@ func authenticateAttempt(ctx context.Context, connection *sql.Conn, digest Attem
 		return AttemptAuthority{}, err
 	}
 	return AttemptAuthority{RunID: run.ID, ProjectID: run.ProjectID, AgentID: run.AgentID, TaskID: run.TaskID, TaskIncarnation: run.TaskIncarnationID, AdmittedTaskWorkRevision: run.AdmittedTaskWorkRevision, Role: run.Role, Provider: run.Provider, ChangeID: run.ChangeID, AdmittedChangeRevision: run.AdmittedChangeRevision, CurrentChangeRevision: currentChangeRevision, BaseCommit: baseCommit, ContinuationContexts: contexts, task: effectiveTask}, nil
+}
+
+// LatestTaskRun is the task's newest run for that incarnation.
+func (store *Store) LatestTaskRun(ctx context.Context, id TaskID, incarnation IncarnationID) (Run, bool, error) {
+	if id.zero() || incarnation.zero() {
+		return Run{}, false, ErrInvalidValue
+	}
+	read, err := store.beginRead(ctx)
+	if err != nil {
+		return Run{}, false, err
+	}
+	defer read.Close()
+	task, found, err := taskByID(ctx, read.connection, id)
+	if err != nil || !found || task.IncarnationID != incarnation {
+		return Run{}, false, err
+	}
+	return latestRunForTask(ctx, read.connection, task)
+}
+
+func latestRunForTask(ctx context.Context, connection *sql.Conn, task Task) (Run, bool, error) {
+	return scanRun(connection.QueryRowContext(ctx, `SELECT `+runColumns+` FROM runs WHERE project_id=? AND task_id=? AND task_incarnation_id=? ORDER BY admitted_task_work_revision DESC LIMIT 1`, task.ProjectID.Bytes(), task.ID.Bytes(), task.IncarnationID.Bytes()))
 }

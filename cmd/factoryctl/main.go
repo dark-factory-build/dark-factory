@@ -123,7 +123,6 @@ const (
   factoryctl release SHA [--wait]
     Installs merged commit SHA into this factory's service, with rollback.
     --wait exits 0 verified, 1 failed or rolled back, 75 refused with no effect.
-  factoryctl task recovery --task ID --incarnation ID
   factoryctl task read --task ID --revision REVISION [--offset N]
   factoryctl dispatch on|off [--revision REVISION]
   factoryctl capacity --workers N --revision REVISION
@@ -202,7 +201,6 @@ const (
 	commandAgentPaths
 	commandTaskAdd
 	commandTaskSendBack
-	commandTaskRecovery
 	commandTaskRead
 	commandDispatch
 	commandCapacity
@@ -384,7 +382,7 @@ func runWithDependencies(ctx context.Context, args []string, getenv func(string)
 	if command.kind == commandRemoteStatus {
 		return runRemote(ctx, getenv, stdout, stderr)
 	}
-	if command.kind == commandAgentPaths || command.kind == commandOperatorTerminalObserve || command.kind == commandWorkerOperation || command.kind == commandProjectCreate || command.kind == commandProjectRepository || command.kind == commandIntake || command.kind == commandProjectLimits || command.kind == commandAgentCreate || command.kind == commandAgentIdlePolicy || command.kind == commandAccountsDiscover || command.kind == commandAccountsList || command.kind == commandAccountLink || command.kind == commandAgentSelectAccount || command.kind == commandAgentSelectModel || command.kind == commandTaskAdd || command.kind == commandTaskSendBack || command.kind == commandTaskRecovery || command.kind == commandTaskRead || command.kind == commandDispatch || command.kind == commandCapacity || command.kind == commandStatus || command.kind == commandCompactStorage || command.kind == commandHumanList || command.kind == commandHumanReply {
+	if command.kind == commandAgentPaths || command.kind == commandOperatorTerminalObserve || command.kind == commandWorkerOperation || command.kind == commandProjectCreate || command.kind == commandProjectRepository || command.kind == commandIntake || command.kind == commandProjectLimits || command.kind == commandAgentCreate || command.kind == commandAgentIdlePolicy || command.kind == commandAccountsDiscover || command.kind == commandAccountsList || command.kind == commandAccountLink || command.kind == commandAgentSelectAccount || command.kind == commandAgentSelectModel || command.kind == commandTaskAdd || command.kind == commandTaskSendBack || command.kind == commandTaskRead || command.kind == commandDispatch || command.kind == commandCapacity || command.kind == commandStatus || command.kind == commandCompactStorage || command.kind == commandHumanList || command.kind == commandHumanReply {
 		return runOperator(ctx, command, getenv, stdout, stderr)
 	}
 	if command.kind >= commandContentCreate && command.kind <= commandContentAttachments && len(args) > 0 && args[0] == "content" {
@@ -1638,7 +1636,7 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 	}
 	if len(args) >= 3 && helpFlag(args[2]) {
 		switch args[0] + " " + args[1] {
-		case "project create", "project limits", "agent create", "agent idle-policy", "agent select-account", "agent select-model", "agent paths", "account link", "task add", "task send-back", "task recovery":
+		case "project create", "project limits", "agent create", "agent idle-policy", "agent select-account", "agent select-model", "agent paths", "account link", "task add", "task send-back":
 			return attemptCommand{}, true, true
 		}
 	}
@@ -1695,8 +1693,6 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 		command.kind = commandTaskAdd
 	case "task send-back":
 		command.kind = commandTaskSendBack
-	case "task recovery":
-		command.kind = commandTaskRecovery
 	case "task read":
 		command.kind = commandTaskRead
 	default:
@@ -1807,8 +1803,6 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 			command.run = value
 		case name == "--task" && command.kind == commandTaskSendBack && validHumanRequestKey(value):
 			command.id = value
-		case name == "--task" && command.kind == commandTaskRecovery && validHumanRequestKey(value):
-			command.id = value
 		case name == "--task" && command.kind == commandTaskRead && validHumanRequestKey(value):
 			command.id = value
 		case name == "--revision" && command.kind == commandTaskRead:
@@ -1823,8 +1817,6 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 				return attemptCommand{}, false, false
 			}
 			command.offset = offset
-		case name == "--incarnation" && command.kind == commandTaskRecovery && validHumanRequestKey(value):
-			command.run = value
 		case name == "--note" && command.kind == commandTaskSendBack && validQuestion(value):
 			command.text = value
 		case name == "--priority" && command.kind == commandTaskAdd:
@@ -1878,10 +1870,6 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 		}
 	case commandTaskSendBack:
 		if command.id == "" || command.text == "" {
-			return attemptCommand{}, false, false
-		}
-	case commandTaskRecovery:
-		if command.id == "" || command.run == "" {
 			return attemptCommand{}, false, false
 		}
 	case commandTaskRead:
@@ -2562,12 +2550,6 @@ func runOperator(ctx context.Context, command attemptCommand, getenv func(string
 			Head     uint64 `json:"head"`
 			Revision uint64 `json:"revision"`
 		}{ID: command.id, Head: result.Head, Revision: result.Revision})
-	case commandTaskRecovery:
-		recovery, callErr := client.TaskRecovery(callContext, api.TaskRecoveryInput{TaskID: command.id, IncarnationID: command.run})
-		if callErr != nil {
-			return writeWebFailure(stderr, "task recovery", callErr)
-		}
-		return writeJSON(stdout, recovery)
 	case commandTaskRead:
 		result, callErr := client.ReadTask(callContext, api.TaskReadInput{TaskID: command.id, ExpectedRevision: command.expectedRevision, Offset: command.offset})
 		if callErr != nil {

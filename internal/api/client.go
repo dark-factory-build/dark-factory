@@ -336,20 +336,6 @@ func (client *OperatorClient) SendBackTask(ctx context.Context, input SendBackIn
 	return client.client.mutate(ctx, "send_back_task", input)
 }
 
-func (client *OperatorClient) TaskRecovery(ctx context.Context, input TaskRecoveryInput) (TaskRecovery, error) {
-	if !validID(input.TaskID) || !validID(input.IncarnationID) {
-		return TaskRecovery{}, ErrInvalidInput
-	}
-	var result TaskRecovery
-	if err := client.client.call(ctx, "task_recovery", input, &result); err != nil {
-		return TaskRecovery{}, err
-	}
-	if !validTaskRecovery(result) || result.State == "found" && (result.TaskID != input.TaskID || result.IncarnationID != input.IncarnationID) {
-		return TaskRecovery{}, ErrProtocol
-	}
-	return result, nil
-}
-
 func (client *OperatorClient) WorkerOperation(ctx context.Context, operationID string) (WorkerOperation, error) {
 	if !validID(operationID) {
 		return WorkerOperation{}, ErrInvalidInput
