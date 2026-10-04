@@ -247,8 +247,8 @@ func discover(ctx context.Context, root string, bounds limits) (*discovery, erro
 		dir := path.Dir(rel)
 		result.dirs[dir] += fileInfo.Size()
 		inventory := result.inventory[dir]
-		inventory.Direct.add(classify(rel))
-		result.contents = append(result.contents, File{Path: rel, Kind: classify(rel), Bytes: fileInfo.Size()})
+		inventory.Direct.add(Classify(rel))
+		result.contents = append(result.contents, File{Path: rel, Kind: Classify(rel), Bytes: fileInfo.Size()})
 		sampleName := path.Base(rel)
 		if len(inventory.Samples) < 32 && len(sampleName) <= 128 && utf8.ValidString(sampleName) {
 			inventory.Samples = append(inventory.Samples, sampleName)
@@ -784,10 +784,10 @@ func (counts *InventoryCounts) add(category string) {
 	}
 }
 
-// Classification is filename-only, in precedence order: explicit test names
+// Classify is filename-only, in precedence order: explicit test names
 // and test-directory source files, documentation, configuration, assets, source,
 // then unclassified. Ambiguous files remain unclassified; tests imply no result.
-func classify(relative string) string {
+func Classify(relative string) string {
 	name := strings.ToLower(path.Base(relative))
 	extension := strings.ToLower(path.Ext(name))
 	source := strings.Contains("|.go|.js|.jsx|.mjs|.cjs|.ts|.tsx|.mts|.cts|.py|.rs|.c|.h|.cc|.cpp|.hpp|.java|.kt|.swift|.rb|.php|.sh|.sql|.css|.scss|.html|.vue|.svelte|", "|"+extension+"|") && extension != ""

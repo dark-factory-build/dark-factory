@@ -457,8 +457,8 @@ func TestInventoryEmptySamplesAndClassification(t *testing.T) {
 		"contest/unit.ts": "source", "test_main.py": "tests", "go.mod": "configuration", "icons/a.svg": "assets", "LICENSE": "documentation",
 		"opaque.data": "unclassified", "notes.txt": "unclassified", "Test/Example.go": "tests",
 	} {
-		if got := classify(name); got != want {
-			t.Errorf("classify(%q) = %s, want %s", name, got, want)
+		if got := Classify(name); got != want {
+			t.Errorf("Classify(%q) = %s, want %s", name, got, want)
 		}
 	}
 	root := t.TempDir()
