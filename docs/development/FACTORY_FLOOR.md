@@ -228,8 +228,8 @@ text is sent.
 
 A source entity reference is `<project ID>:<served topology node ID>`. The served
 ID is derived from normalized relative path and node kind, independent of display
-grouping, file counts, activity or labels. A future library or message-board link
-should store this reference plus the exact source revision; optional file links
+grouping, file counts, activity or labels. Library and message-board links
+store this reference plus the exact source revision; optional file links
 also store the repository-relative path. A rename relationship is established
 only by observed Git rename evidence; path identity alone never proves continuity.
 

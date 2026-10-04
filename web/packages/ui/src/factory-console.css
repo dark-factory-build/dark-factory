@@ -604,7 +604,8 @@
   gap: 0.5rem;
 }
 
-.dfConsoleViewToggle { display: flex; flex: 0 0 auto; }
+.dfConsoleViewToggle { display: flex; flex: 0 0 auto; flex-wrap: wrap; }
+.dfConsoleViewToggle button { white-space: nowrap; }
 .dfConsoleViewToggle button + button { margin-left: -1px; }
 .dfConsoleViewToggle button:hover:not(:disabled) { z-index: 2; }
 .dfConsoleViewToggle button:is([aria-pressed="true"], :focus-visible, :hover) { position: relative; z-index: 1; }

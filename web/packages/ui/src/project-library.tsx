@@ -162,7 +162,7 @@ function LibraryDocuments({ state, call, draft, projectID, board = false, entity
           <label>Draft ordinary work <select name="agent" required defaultValue=""><option value="" disabled>Select agent</option>{[...(state?.agents.values() ?? [])].filter((agent) => agent.project_id === projectID && !agent.archived).map((agent) => <option key={agent.id} value={agent.id}>{agent.name}</option>)}</select></label>
           <label>Instruction <textarea name="instruction" required /></label><button disabled={draft === undefined}>Open task draft</button>
         </form>
-        <details><summary>Versions, editing &amp; test results</summary>
+        <details><summary>Versions, task access &amp; evidence</summary>
         {text(selected.commit) === "" ? null : <p>Document source: <code>{text(selected.commit)}</code> · <code>{text(selected.path)}</code></p>}
         <label>Read revision <input type="number" min="1" max={Number(selected.latest_revision)} defaultValue={Number(selected.revision)} key={`${selected.id}:${selected.revision}`} onBlur={(event) => { const revision = Number(event.target.value); if (Number.isSafeInteger(revision) && revision > 0 && revision !== selected.revision) void run(() => read(text(selected.id), revision)); }} /></label>
         <button type="button" disabled={!complete || selected.kind === "discussion_reply" || selected.deprecated === true || selected.revision !== selected.latest_revision} onClick={() => { setNewKind(""); setEditing(true); }}>Revise document</button>
