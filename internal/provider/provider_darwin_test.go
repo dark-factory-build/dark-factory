@@ -1355,7 +1355,7 @@ func TestCodexOverseerDiscoversScopedControlsWithoutChangingWorkerTask(t *testin
 		t.Fatal("worker was given overseer authority instructions")
 	}
 	prompt := overseerArgs[len(overseerArgs)-1]
-	for _, command := range []string{`["attempt","task"]`, "overseer status", "next_offset", "next_text_offset", "worker interrupt", "worker replace", "Maintainer App", "structuredContent", "capability refusal", "causal wake", "Continue actionable supervision", "without idle polling", "only next event is external", "merge queue", "attempt succeed", "overseer task update --body", "preserve the original acceptance criteria", "Send-back replaces previous feedback", "accepted snapshot", "fully qualified source repository", "close_on_merge", "Closes #N", "Refs #N"} {
+	for _, command := range []string{`["attempt","task"]`, "overseer status", "next_offset", "next_text_offset", "worker interrupt", "worker replace", "Maintainer App", "structuredContent", "capability refusal", "causal wake", "Continue actionable supervision", "without idle polling", "only next event is external", "merge queue", "attempt succeed", "30 minutes after admission", "overseer task update --body", "preserve the original acceptance criteria", "Send-back replaces previous feedback", "accepted snapshot", "fully qualified source repository", "close_on_merge", "Closes #N", "Refs #N"} {
 		if !strings.Contains(prompt, command) {
 			t.Fatalf("overseer cannot discover %q", command)
 		}

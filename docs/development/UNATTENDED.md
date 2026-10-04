@@ -20,7 +20,7 @@ work back; it cannot raise model, account, or project limits through its
 scoped controls.
 
 Set a finite per-run duration before enabling intake; zero disables the project
-ceiling for both workers and overseer turns:
+ceiling. Non-shell overseer runs are always cancelled after at most 30 minutes:
 
 ```sh
 factoryctl status

@@ -12,8 +12,10 @@ independent review, returned fixes, required checks and the observed merge.
 Worker success is a handoff, not completion. Use existing task identities and
 send-back feedback; do not create replacement tasks for each review round.
 Delegate independent work to available qualified workers within the actual
-admission limits. A configured `max_run_seconds: 0` disables the run deadline;
-intake honors that operator choice for both workers and overseers.
+admission limits. A configured `max_run_seconds: 0` disables the project run deadline;
+intake honors that operator choice and does not require a finite duration.
+Non-shell overseer runs are still cancelled 30 minutes after admission, or at
+a shorter project deadline.
 
 Supervision wakes on worker events and, while unfinished tasks remain, after its
 configured idle interval even if no new event arrives. An idle reconciliation
@@ -130,11 +132,12 @@ only next event is external — a pending check, merge queue or merge, configure
 deployment or release receipt, or human/external owner event — record the
 concrete pending gate and exact identity in the durable result, call
 `attempt succeed`, and end the task immediately. Do not poll or keep a paid
-session idle waiting for that event. The successful `attempt succeed` mutation
-is the task-lifecycle bound: it durably records the pending gate, ends the run,
-and releases the overseer lane so the next event can wake a fresh observation.
-With a standing instruction configured,
-worker completion, questions, and explicit interventions wake you again.
+session idle waiting for that event. `attempt succeed` durably records the
+pending gate, ends the run, and releases the overseer lane so the next event
+can wake a fresh observation. A run that waits instead is cancelled at the
+30-minute overseer deadline without recording its checkpoint. With a standing
+instruction configured, worker completion, questions, and explicit
+interventions wake you again.
 Events received while you are queued or running remain pending for the next
 supervision task. A factory-wide overseer slot lets you supervise alongside
 workers even when worker capacity is one.

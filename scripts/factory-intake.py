@@ -15,7 +15,7 @@ import time
 from pathlib import Path
 from urllib.parse import urlparse
 
-MAX_BODY, MAX_ISSUE_BODY, MAX_TITLE = 16384, 5000, 900
+MAX_BODY, MAX_ISSUE_BODY, MAX_TITLE = 8192, 5000, 900
 ID_RE = re.compile(r"^[0-9a-f]{32}$")
 REPOSITORY_RE = re.compile(r"^[A-Za-z0-9_.-]{1,39}/[A-Za-z0-9_.-]{1,100}$")
 ACTIVE = {"queued", "running"}

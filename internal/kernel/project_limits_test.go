@@ -67,7 +67,7 @@ func TestProjectLimitsUseAdditionalAllowanceAndDefaultToDisabled(t *testing.T) {
 	}
 }
 
-func TestOverseerRunUsesOnlyConfiguredProjectLimit(t *testing.T) {
+func TestOverseerRunHasBackstopBelowDisabledOrLongerProjectLimit(t *testing.T) {
 	for _, role := range []AgentRole{RoleOrchestrator, RoleWorker} {
 		t.Run(role.String(), func(t *testing.T) {
 			store, _, project, agent := newAdmissionStore(t, role, 1)
@@ -80,23 +80,43 @@ func TestOverseerRunUsesOnlyConfiguredProjectLimit(t *testing.T) {
 			if err != nil || !admitted.Admitted() {
 				t.Fatalf("admission = %+v, %v", admitted, err)
 			}
-			due, err := store.OverdueRuns(ctx, mustTime(t, 5+300_000))
-			if err != nil {
+			bound := int64(5 + MaxOverseerRunSeconds*1000)
+			overdue := func(at int64) bool {
+				t.Helper()
+				due, err := store.OverdueRuns(ctx, mustTime(t, at))
+				if err != nil || len(due) > 1 || len(due) == 1 && due[0].ID != admitted.Run.ID {
+					t.Fatalf("overdue at %d = %+v, %v", at, due, err)
+				}
+				return len(due) == 1
+			}
+			setCeiling := func(seconds uint32) {
+				t.Helper()
+				current, found, err := store.Project(ctx, project.ID)
+				if err != nil || !found {
+					t.Fatalf("project = %+v, found=%v, err=%v", current, found, err)
+				}
+				if _, err := store.SetProjectLimits(ctx, current.ID, current.Revision, 0, seconds, mustTime(t, 6)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			isOverseer := role == RoleOrchestrator
+			if overdue(bound-1) || overdue(bound) != isOverseer {
+				t.Fatalf("disabled ceiling: %s backstop wrong", role)
+			}
+			setCeiling(2700)
+			if overdue(bound-1) || overdue(bound) != isOverseer || !overdue(5+2_700_000) {
+				t.Fatalf("longer ceiling: %s backstop wrong", role)
+			}
+			setCeiling(1)
+			if !overdue(1005) {
+				t.Fatalf("shorter configured ceiling did not apply to %s", role)
+			}
+			setCeiling(0)
+			if _, err := store.writer.Exec(`UPDATE runs SET provider = 'shell' WHERE id = ?`, admitted.Run.ID.Bytes()); err != nil {
 				t.Fatal(err)
 			}
-			if len(due) != 0 {
-				t.Fatalf("default-disabled limit canceled productive %s run = %+v", role, due)
-			}
-			current, found, err := store.Project(ctx, project.ID)
-			if err != nil || !found {
-				t.Fatalf("project = %+v, found=%v, err=%v", current, found, err)
-			}
-			if _, err := store.SetProjectLimits(ctx, current.ID, current.Revision, 0, 1, mustTime(t, 305_000)); err != nil {
-				t.Fatal(err)
-			}
-			due, err = store.OverdueRuns(ctx, mustTime(t, 306_000))
-			if err != nil || len(due) != 1 || due[0].ID != admitted.Run.ID {
-				t.Fatalf("configured shorter limit = %+v, %v", due, err)
+			if overdue(bound) {
+				t.Fatalf("shell %s inherited the overseer backstop", role)
 			}
 		})
 	}
