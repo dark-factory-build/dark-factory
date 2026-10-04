@@ -8,7 +8,8 @@ import (
 
 const MaxTerminalDiagnosticsBytes = 1 << 20
 
-// MaxRetainedTerminalDiagnostics keeps the table under 64 MiB (64 rows of at most 1 MiB).
+// MaxRetainedTerminalDiagnostics bounds stored payloads to 64 MiB (64 rows of at most
+// 1 MiB each), plus row and page overhead.
 const MaxRetainedTerminalDiagnostics = 64
 
 type TerminalDiagnostics struct {
