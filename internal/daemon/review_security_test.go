@@ -57,11 +57,11 @@ func reviewerFixture(t *testing.T, reviewers ...string) (*daemonReviewBackend, m
 	fixture, project := reviewPublicFixture(t)
 	ctx := context.Background()
 	bin := t.TempDir()
-	script := "#!/bin/sh\n[ -e \"$CODEX_HOME/limited\" ] && { echo \"ERROR: You've hit your usage limit. Try again later.\"; exit 1; }\n[ -e \"$CODEX_HOME/hang\" ] && { sleep 600 & echo $$ > \"$CODEX_HOME/pid\"; wait; }\necho \"VERDICT: ALLOW\"\n"
+	script := "#!/bin/sh\n[ -e \"$CODEX_HOME/limited\" ] && { echo \"■ You've hit your usage limit. Try again later.\"; exit 1; }\n[ -e \"$CODEX_HOME/quoted\" ] && { echo \"the task says: You've hit your usage limit\"; exit 1; }\n[ -e \"$CODEX_HOME/hang\" ] && { sleep 600 & echo $$ > \"$CODEX_HOME/pid\"; wait; }\necho \"VERDICT: ALLOW\"\n"
 	if err := os.WriteFile(filepath.Join(bin, "codex"), []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(bin, "claude"), []byte("#!/bin/sh\necho \"home=$HOME config=${CLAUDE_CONFIG_DIR-unset}\"\necho \"VERDICT: ALLOW\"\n"), 0o700); err != nil {
+	if err := os.WriteFile(filepath.Join(bin, "claude"), []byte("#!/bin/sh\n[ -e \"$HOME/.claude/limited\" ] && { echo \"■ You've hit your usage limit\"; exit 1; }\necho \"home=$HOME config=${CLAUDE_CONFIG_DIR-unset}\"\necho \"VERDICT: ALLOW\"\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", bin+":/usr/bin:/bin")
@@ -197,5 +197,22 @@ func TestClaudeLoginNamesOnlyANonDefaultDirectory(t *testing.T) {
 	}
 	if got := claudeLogin("/accounts/work/.claude-second"); got != "CLAUDE_CONFIG_DIR=/accounts/work/.claude-second" {
 		t.Fatalf("sibling login = %q", got)
+	}
+}
+
+func TestReviewLimitNeedsTheCodexMarkerAndACodexReviewer(t *testing.T) {
+	backend, homes := reviewerFixture(t, "quoting")
+	if err := os.WriteFile(filepath.Join(homes["quoting"], "quoted"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(homes["claude"], "limited"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	claude := reviewerRequest()
+	claude.Provider = "claude"
+	for _, request := range []review.Request{reviewerRequest(), claude} {
+		if _, err := backend.Review(context.Background(), t.TempDir(), request); err == nil || errors.Is(err, errProviderLimited) {
+			t.Fatalf("%s failure err=%v, want an ordinary failure", request.Provider, err)
+		}
 	}
 }

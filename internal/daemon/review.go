@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -394,7 +393,11 @@ func (b *daemonReviewBackend) Review(ctx context.Context, checkout string, reque
 		if ctx.Err() != nil {
 			return review.Verdict{}, fmt.Errorf("review: provider deadline: %w", ctx.Err())
 		}
-		if err != nil && bytes.Contains(output, codexUsageLimit[len("■ "):]) {
+		// The live-attempt detector, marker guard included, so quoted text or a
+		// Claude failure surfaces as an ordinary failure.
+		var limit liveAttempt
+		limit.scanUsageLimit(0, uint64(len(output)), output)
+		if err != nil && kind == kernel.ProviderCodex && limit.usageLimit != "" {
 			continue
 		}
 		if err != nil {
