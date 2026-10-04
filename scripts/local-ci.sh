@@ -51,7 +51,6 @@ if [ "$local_ci_mode" = full ]; then
     ./scripts/test-cloudflare-access-policy-shape.sh
     ./scripts/test-publication-parents.sh
     python3 ./scripts/test-factory-browser.py
-    python3 ./scripts/test-factory-intake.py
     python3 ./scripts/test-factory-release.py
     python3 ./scripts/test-factory-autonomy.py
     python3 ./scripts/test-factory-delivery.py

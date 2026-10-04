@@ -6,12 +6,14 @@ authorize importing every issue or unlimited agent use.
 
 ## Configuration
 
-Copy `scripts/factory-intake.example.json` to a private operator-owned file.
-Choose the repository, project and overseer IDs, a ready label, eligible issue
-authors, priorities, and a bounded queue size. Issue text is source material,
-not authority to change these settings. The host reads GitHub; agents still
-publish exclusively through their Maintainer App. No host credentials are
-passed in task instructions.
+Create a factoryd intake source with `factoryctl intake create`: the GitHub
+repository (read through the customer GitHub App connection) or Linear team,
+the target repository, overseer, a ready label, trusted issue authors,
+priorities, poll interval, and admission limit. factoryd polls each enabled
+source when its interval is due; no host job is involved. Issue text is source
+material, not authority to change these settings. Agents still publish
+exclusively through their Maintainer App. No host credentials are passed in
+task instructions.
 
 Use preconfigured Luna/Terra workers and a Sol overseer. Set worker capacity,
 a standing supervision instruction, and a finite supervision-run allowance.
@@ -99,14 +101,14 @@ terminal prose is not a human request.
 
 ## Recovery and completion
 
-Run intake once before scheduling it. Its `--status` exposes durable receipts.
-GitHub failure is not an empty backlog. Exact tracked issues are reread, and
-withdrawals become reconciliation events. Planned enqueues are recorded before
-the daemon call; deterministic IDs and read-only database observations recover
-lost responses. Only the daemon API writes factory state.
+Preview a source (`factoryctl intake preview`) before enabling it;
+`factoryctl intake list` shows each source's last poll. GitHub failure is not
+an empty backlog. Acceptances are durable and idempotent, so a factoryd
+restart rescans from the first page without duplicating work, and withdrawals
+cancel queued work and stop running work.
 
 Failed work is not recreated on every poll. Missing evidence and ambiguous
-outcomes remain visible. Stop intake to stop importing work; disable dispatch
+outcomes remain visible. Pause the source to stop importing work; disable dispatch
 to stop future admissions. Existing runs require Stop or their duration limit.
 Intake never fast-forwards the project root. Every delegated worker works in
 its own linked worktree of the project on its Change branch, made at the
@@ -119,10 +121,6 @@ exact branch, and integrating it with current main is a separate reviewed
 operation. Explicit local revision policies remain local. See the
 [installation guide](../install.md) for `--base-revision` and repository base
 settings.
-If a source supervisor reaches its duration limit while a human decision is
-unanswered, intake records `needs_operator_recovery`.
-It does not repeat that task. Edit the source issue materially to create a new
-supervision event after resolving the decision.
 
 An unattended release is complete only when the configured verification hook
 observes the exact merged SHA healthy on the actual target. Never infer this
@@ -130,10 +128,10 @@ from worker success, merge, a TCP socket, or an unchanged alias alone.
 
 ## Host scheduling and deployment
 
-`scripts/factory-autonomy.py CONFIG --once` runs intake. factoryd reviews,
-enqueues and observes published pull requests itself; no host review or
-production controller remains.
-The separate `--release-only` pass uses `release_configs` paths for exact-default-head releases and enqueues
+factoryd polls intake and reviews, enqueues and observes published pull
+requests itself; no host intake, review or production controller remains.
+`scripts/factory-autonomy.py CONFIG --once --release-only` is the one remaining
+host pass; it refuses to run without `--release-only`. It uses `release_configs` paths for exact-default-head releases and enqueues
 one idempotent verified-delivery follow-up for the same project's overseer.
 After verification, the controller fast-forwards its own source checkout to the
 exact released commit so the next tick loads the released scripts. The checkout
@@ -144,12 +142,11 @@ branch are reported without resetting the checkout or changing the verified
 runtime receipt; resolve the reported checkout condition before the next pass.
 Use `--plist` to generate a launchd StartInterval job. The generated job uses
 absolute script/config paths and the host's tool PATH. Install it only after
-the one-shot preflight succeeds. Each config gets a separate launchd label. Controllers for the same factory
-serialize each lane through its own host lock. Intake can continue while
-a release waits for productive runs to drain. Use the controller for scheduled work; direct maintenance
+the one-shot preflight succeeds. Each config gets a separate launchd label, and
+one host lock serializes the passes for a factory. Use the controller for scheduled work; direct maintenance
 hooks are operator tools.
-Each tick writes a mode-0600 `.autonomy.json` health receipt beside the intake
-journal, containing component names, finite status codes, and fixed source-refresh refusal details for bounded
+Each tick writes a mode-0600 `.release-autonomy.json` health receipt beside the
+controller journal, containing component names, finite status codes, and fixed source-refresh refusal details for bounded
 automation health diagnostics. A status code alone names no cause, so each
 failing component also prints one line to the controller's own log (its launchd
 `StandardErrorPath`): the component name, that status code, and a bounded,
@@ -169,10 +166,8 @@ paths, never source or agent output. The controller appends the full merge SHA.
 The runtime hook prepares before draining and waits for productive runs to finish.
 Deployment has no elapsed-time ceiling; `command_timeout` bounds verification and
 review commands. Preparation, installation, and runtime probes retain their own
-command bounds. Install a second launchd job generated with
-`factory-autonomy.py CONFIG --plist --release-only`; the ordinary job handles
-intake, while this independent job handles release and delivery.
-Their separate locks keep a draining release from suppressing intake.
+command bounds. Install the launchd job generated with
+`factory-autonomy.py CONFIG --plist --release-only`.
 The existing release journal lock prevents duplicate deployment. An explicit
 operator control change still cancels the owned pause; a stuck run must be
 resolved through its existing recovery path, never killed to meet a release clock.

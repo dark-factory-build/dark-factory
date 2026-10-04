@@ -32,10 +32,13 @@ const (
 // durable Store and live attempt owners. It does not own an accept loop; the
 // caller accepts and hands one connection to HandleConnection.
 type Daemon struct {
-	intakeMu             sync.Mutex
-	linear               *linear.Host
-	github               *maintainer.Host
-	intakeControllerHome string
+	intakeMu sync.Mutex
+	linear   *linear.Host
+	github   *maintainer.Host
+	// The scheduler's intake pass (tickIntake): per-source progress, guarded
+	// by intakeMu, and whether a pass is running.
+	intakePolls map[kernel.IntakeSourceID]*intakePoll
+	intakeBusy  atomic.Bool
 	// reviewOperation is a package-test seam; production uses reviewCoordinator.
 	reviewOperation func(context.Context, kernel.ProjectID, api.ReviewRequest) (string, error)
 	// reviewBackend is a package-test seam; production always uses the

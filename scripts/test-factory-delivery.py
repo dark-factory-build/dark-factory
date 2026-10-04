@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Offline tests for source-linked deployment follow-ups."""
 import importlib.util
-import types
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -17,21 +16,18 @@ SHA = "a" * 40
 class DeliveryFixtures(unittest.TestCase):
     def setUp(self):
         self.enqueued = []
-        self.intake = types.SimpleNamespace(
-            validate_config=lambda value: value,
-            sha_id=lambda *parts: ":".join(parts),
-            task_state=lambda config, operation: None,
-            enqueue=lambda config, operation: self.enqueued.append(operation),
-        )
-        self.config = {"repository": "example/factory", "project_id": "project", "priority_default": 0}
+        for name, value in (("task_state", lambda config, operation: None), ("enqueue", lambda config, operation: self.enqueued.append(operation))):
+            patcher = mock.patch.object(delivery, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.config = {"repository": "example/factory", "project_id": "1" * 32, "overseer_agent_id": "2" * 32, "priority_default": 0}
         self.receipt = {"state": "verified", "sha": SHA, "pr": 11,
                         "verification": {"sha": SHA, "healthy": True}, "delivery_mode": "range",
                         "delivery_sources": [{"pr": 10, "merge_sha": SHA, "issue": 602, "reference": "refs"},
                                              {"pr": 11, "merge_sha": SHA, "issue": 512, "reference": "closes"}]}
 
     def test_enqueues_one_idempotent_follow_up_per_source_mapping(self):
-        with mock.patch.object(delivery, "load_intake", return_value=self.intake):
-            task_ids = delivery.deliver(self.config, {"repository": "example/factory"}, self.receipt)
+        task_ids = delivery.deliver(self.config, {"repository": "example/factory"}, self.receipt)
         self.assertEqual(len(task_ids), 2)
         self.assertEqual(len(self.enqueued), 2)
         self.assertIn("issue #602", self.enqueued[0]["body"])
@@ -39,28 +35,25 @@ class DeliveryFixtures(unittest.TestCase):
 
     def test_shared_source_is_never_closed_by_destination_delivery(self):
         self.receipt['delivery_sources'][0]['repository'] = 'other/backlog'
-        with mock.patch.object(delivery, "load_intake", return_value=self.intake):
-            task_ids = delivery.deliver(self.config, {"repository": "example/factory"}, self.receipt)
+        task_ids = delivery.deliver(self.config, {"repository": "example/factory"}, self.receipt)
         self.assertEqual(len(task_ids), 1)
         self.assertNotIn('602', self.enqueued[0]['body'])
 
     def test_legacy_receipt_without_mapping_is_rejected(self):
         del self.receipt["delivery_sources"]
-        with mock.patch.object(delivery, "load_intake", return_value=self.intake), self.assertRaisesRegex(ValueError, "source mapping"):
+        with self.assertRaisesRegex(ValueError, "source mapping"):
             delivery.deliver(self.config, {"repository": "example/factory"}, self.receipt)
 
     def test_unchanged_reverification_keeps_membership_without_a_second_sweep(self):
         # The release journal retains delivery_sources across re-verification
         # of the same tip; that is not a baseline error and enqueues nothing.
         self.receipt.update({"delivery_mode": "unchanged"})
-        with mock.patch.object(delivery, "load_intake", return_value=self.intake):
-            self.assertEqual(delivery.deliver(self.config, {"repository": "example/factory"}, self.receipt), [])
+        self.assertEqual(delivery.deliver(self.config, {"repository": "example/factory"}, self.receipt), [])
         self.assertEqual(self.enqueued, [])
 
     def test_baseline_has_no_delivery_sweep(self):
         self.receipt.update({"delivery_mode": "baseline_current", "delivery_sources": []})
-        with mock.patch.object(delivery, "load_intake", return_value=self.intake):
-            self.assertEqual(delivery.deliver(self.config, {"repository": "example/factory"}, self.receipt), [])
+        self.assertEqual(delivery.deliver(self.config, {"repository": "example/factory"}, self.receipt), [])
         self.assertEqual(self.enqueued, [])
 
 

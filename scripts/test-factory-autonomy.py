@@ -11,7 +11,6 @@ import subprocess
 import sys
 import tempfile
 import time
-import threading
 import unittest
 from unittest.mock import Mock, patch
 
@@ -104,7 +103,7 @@ class AutonomyTest(unittest.TestCase):
                      patch.object(autonomy.importlib.util, 'spec_from_file_location'), \
                      patch.object(autonomy.importlib.util, 'module_from_spec', return_value=Mock()), \
                      patch.object(autonomy, 'refresh_controller', side_effect=autonomy.ControllerSourceError('controller source has tracked edits')) as refresh:
-                    result = autonomy.tick(Path(directory) / 'config', config, release_only=True)
+                    result = autonomy.tick(config)
                 self.assertEqual(1, run.call_count)
                 self.assertEqual(1, len(result))
                 if state == 'verified':
@@ -122,12 +121,28 @@ class AutonomyTest(unittest.TestCase):
             home.mkdir()
             other = root / 'other-config.json'
             other.write_text(json.dumps({'factory_home': str(home), 'journal': str(root / 'other-journal')}))
-            with Path(str(home.resolve()) + '.autonomy.lock').open('a+') as lock:
+            with Path(str(home.resolve()) + '.release.autonomy.lock').open('a+') as lock:
                 autonomy.fcntl.flock(lock, autonomy.fcntl.LOCK_EX | autonomy.fcntl.LOCK_NB)
-                with patch.object(autonomy.sys, 'argv', ['factory-autonomy', str(other), '--once']), patch.object(autonomy, 'tick') as tick:
+                with patch.object(autonomy.sys, 'argv', ['factory-autonomy', str(other), '--once', '--release-only']), patch.object(autonomy, 'tick') as tick:
                     with self.assertRaisesRegex(ValueError, 'another controller'):
                         autonomy.main()
                     tick.assert_not_called()
+
+    def test_intake_pass_is_refused_before_any_write(self):
+        # The live intake job still runs this script without --release-only
+        # until it is unloaded; it must neither run nor write anything.
+        with tempfile.TemporaryDirectory() as directory:
+            root, home = Path(directory), Path(directory) / 'home'
+            home.mkdir()
+            config = root / 'config.json'
+            config.write_text(json.dumps({'factory_home': str(home), 'journal': str(root / 'journal.json')}))
+            with patch.object(autonomy.sys, 'argv', ['factory-autonomy', str(config), '--once']), patch.object(autonomy, 'tick') as tick, \
+                 contextlib.redirect_stderr(io.StringIO()) as log, self.assertRaises(SystemExit) as raised:
+                autonomy.main()
+            self.assertEqual(2, raised.exception.code)
+            self.assertIn('factoryd polls intake itself', log.getvalue())
+            tick.assert_not_called()
+            self.assertEqual(['config.json', 'home'], sorted(path.name for path in root.iterdir()))
 
     def test_external_controller_state_leaves_runtime_home_unchanged(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -136,11 +151,11 @@ class AutonomyTest(unittest.TestCase):
             config = root / 'config.json'
             journal = root / 'state' / 'journal.json'
             config.write_text(json.dumps({'factory_home': str(home), 'journal': str(journal)}))
-            with patch.object(autonomy.sys, 'argv', ['factory-autonomy', str(config), '--once']), patch.object(autonomy, 'tick', return_value=[]):
+            with patch.object(autonomy.sys, 'argv', ['factory-autonomy', str(config), '--once', '--release-only']), patch.object(autonomy, 'tick', return_value=[]):
                 self.assertEqual(0, autonomy.main())
             self.assertEqual([], list(home.iterdir()))
-            self.assertTrue(Path(str(home.resolve()) + '.autonomy.lock').is_file())
-            self.assertTrue(Path(str(journal) + '.autonomy.json').is_file())
+            self.assertTrue(Path(str(home.resolve()) + '.release.autonomy.lock').is_file())
+            self.assertTrue(Path(str(journal) + '.release-autonomy.json').is_file())
 
     def test_runtime_home_journal_and_release_journal_are_refused_before_controller_writes(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -151,78 +166,50 @@ class AutonomyTest(unittest.TestCase):
             for config_value in ({'factory_home': str(home), 'journal': str(home / 'journal.json')}, {'factory_home': str(home), 'journal': str(root / 'journal.json'), 'release_configs': [str(release)]}):
                 config = root / ('config-' + str(len(list(root.glob('config-*')))) + '.json')
                 config.write_text(json.dumps(config_value))
-                with patch.object(autonomy.sys, 'argv', ['factory-autonomy', str(config), '--once']), patch.object(autonomy, 'tick') as tick:
+                with patch.object(autonomy.sys, 'argv', ['factory-autonomy', str(config), '--once', '--release-only']), patch.object(autonomy, 'tick') as tick:
                     with self.assertRaisesRegex(ValueError, 'outside factory_home'):
                         autonomy.main()
                     tick.assert_not_called()
             self.assertEqual([], list(home.iterdir()))
-            self.assertFalse(Path(str(home.resolve()) + '.autonomy.lock').exists())
+            self.assertFalse(Path(str(home.resolve()) + '.release.autonomy.lock').exists())
 
-    def test_intake_failure_is_retained_in_health(self):
-        config = {'factory_home': '/private/tmp/factory', 'journal': '/private/tmp/journal'}
-        with patch.object(autonomy.subprocess, 'run', return_value=subprocess.CompletedProcess([], 1, '', 'GitHub unavailable')) as run:
-            result = autonomy.tick(Path('/private/tmp/config'), config)
+    def test_component_failure_is_retained_in_health(self):
+        config = {'factory_home': '/private/tmp/factory', 'journal': '/private/tmp/journal', 'release_configs': ['/private/tmp/release.json']}
+        with patch.object(autonomy.subprocess, 'run', return_value=subprocess.CompletedProcess([], 1, '', 'GitHub unavailable')) as run, \
+             contextlib.redirect_stderr(io.StringIO()):
+            result = autonomy.tick(config)
         self.assertFalse(result[0]['ok'])
         self.assertEqual(1, len(result))
-        self.assertIn('factory-intake.py', run.call_args_list[0].args[0][1])
+        self.assertIn('factory-release.py', run.call_args_list[0].args[0][1])
 
     def test_launchd_results_do_not_retain_child_output(self):
-        config = {'factory_home': '/private/tmp/factory', 'journal': '/private/tmp/journal'}
+        config = {'factory_home': '/private/tmp/factory', 'journal': '/private/tmp/journal', 'release_configs': ['/private/tmp/release.json']}
         secret = 'token=should-not-appear'
         with patch.object(autonomy.subprocess, 'run', return_value=subprocess.CompletedProcess([], 1, secret, 'gate refused: ' + secret)), \
              contextlib.redirect_stderr(io.StringIO()) as log:
-            result = autonomy.tick(Path('/private/tmp/config'), config)
-        self.assertEqual([{'component': 'factory-intake', 'ok': False, 'error': 'exit_1'}], result)
+            result = autonomy.tick(config)
+        self.assertEqual([{'component': 'factory-release', 'ok': False, 'error': 'exit_1'}], result)
         # A bare status named no cause for four hours of identical ticks: the
         # controller's own log carries the redacted diagnostic the receipt must not.
-        self.assertEqual('factory-intake exit_1: gate refused: token=***', log.getvalue().strip())
+        self.assertEqual('factory-release exit_1: gate refused: token=***', log.getvalue().strip())
         self.assertNotIn('should-not-appear', log.getvalue())
 
     def test_silent_component_failure_still_names_itself_on_the_controller_log(self):
-        config = {'factory_home': '/private/tmp/factory', 'journal': '/private/tmp/journal'}
+        config = {'factory_home': '/private/tmp/factory', 'journal': '/private/tmp/journal', 'release_configs': ['/private/tmp/release.json']}
         with patch.object(autonomy.subprocess, 'run', return_value=subprocess.CompletedProcess([], 2, '', '')), \
              contextlib.redirect_stderr(io.StringIO()) as log:
-            autonomy.tick(Path('/private/tmp/config'), config)
-        self.assertEqual('factory-intake exit_2: no stderr diagnostic', log.getvalue().strip())
+            autonomy.tick(config)
+        self.assertEqual('factory-release exit_2: no stderr diagnostic', log.getvalue().strip())
 
     def test_health_receipt_is_private_and_finite(self):
         with tempfile.TemporaryDirectory() as directory:
             config = {'journal': str(Path(directory) / 'journal.json')}
-            autonomy.write_health(config, [{'component': 'factory-intake', 'ok': False, 'error': 'exit_1'}])
-            receipt = Path(config['journal'] + '.autonomy.json')
+            autonomy.write_health(config, [{'component': 'factory-release', 'ok': False, 'error': 'exit_1'}])
+            receipt = Path(config['journal'] + '.release-autonomy.json')
             self.assertEqual(oct(receipt.stat().st_mode & 0o777), '0o600')
             self.assertEqual(json.loads(receipt.read_text())['components'][0]['error'], 'exit_1')
 
-    def test_source_refresh_waits_for_normal_pass_lock(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            config = {'factory_home': str(root / 'home'), 'release_configs': [str(root / 'release.json')]}
-            (root / 'release.json').write_text('{}')
-            receipt = {'state': 'verified', 'sha': 'a' * 40}
-            requested, refreshed = threading.Event(), threading.Event()
-            flock = autonomy.fcntl.flock
-            def lock(fd, mode):
-                requested.set()
-                return flock(fd, mode)
-            with (root / 'home.autonomy.lock').open('a+') as held:
-                flock(held, autonomy.fcntl.LOCK_EX)
-                with patch.object(autonomy.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, json.dumps(receipt), '')), \
-                     patch.object(autonomy.importlib.util, 'spec_from_file_location'), \
-                     patch.object(autonomy.importlib.util, 'module_from_spec', return_value=Mock()), \
-                     patch.object(autonomy.fcntl, 'flock', side_effect=lock), \
-                     patch.object(autonomy, 'refresh_controller', side_effect=lambda *_args: refreshed.set()):
-                    worker = threading.Thread(target=autonomy.tick, args=(root / 'config', config, True))
-                    worker.start()
-                    try:
-                        self.assertTrue(requested.wait(5))
-                        self.assertFalse(refreshed.is_set())
-                    finally:
-                        flock(held, autonomy.fcntl.LOCK_UN)
-                        worker.join(5)
-                    self.assertFalse(worker.is_alive())
-                    self.assertTrue(refreshed.is_set())
-
-    def test_waiting_release_does_not_block_intake_or_allow_duplicate(self):
+    def test_waiting_release_refuses_a_duplicate(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             script = root / 'factory-autonomy.py'
@@ -231,8 +218,7 @@ class AutonomyTest(unittest.TestCase):
             release_config.write_text(json.dumps({'journal': str(root / 'release-journal')}))
             config = root / 'config.json'
             config.write_text(json.dumps({'factory_home': str(root / 'home'), 'journal': str(root / 'journal'),
-                                          'release_configs': [str(release_config)], 'review_mirror_root': str(root / 'mirror')}))
-            (root / 'factory-intake.py').write_text('print("{}")')
+                                          'release_configs': [str(release_config)]}))
             (root / 'factory-release.py').write_text(
                 'from pathlib import Path\nimport time\n'
                 'root = Path(__file__).parent\n(root / "started").touch()\n'
@@ -246,10 +232,6 @@ class AutonomyTest(unittest.TestCase):
                     self.assertIsNone(release.poll())
                     self.assertLess(time.monotonic(), deadline)
                     time.sleep(.01)
-                normal = subprocess.run([sys.executable, str(script), str(config), '--once'], capture_output=True, text=True, timeout=5)
-                self.assertEqual(0, normal.returncode, normal.stderr)
-                self.assertEqual(['factory-intake'],
-                                 [item['component'] for item in json.loads(normal.stdout)['components']])
                 duplicate = subprocess.run([sys.executable, str(script), str(config), '--once', '--release-only'], capture_output=True, text=True, timeout=5)
                 self.assertNotEqual(0, duplicate.returncode)
                 self.assertIn('another controller owns', duplicate.stderr)
@@ -740,460 +722,6 @@ class DeployStageEvidence(unittest.TestCase):
             self.assertEqual('stdout:\nstdout token=***\n\nstderr:\nstderr bearer ***\n', value['install_output'])
             self.assertNotIn('private', value['install_output'])
             self.assertNotIn('secret', value['install_output'])
-
-
-class ManagedIntakeTest(unittest.TestCase):
-    def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name).resolve()
-        self.home = self.root / 'factory'
-        self.home.mkdir(mode=0o700)
-        self.factoryctl = self.root / 'release/factoryctl'
-        self.factoryctl.parent.mkdir()
-        self.factoryctl.write_text('fixture')
-        self.factoryctl.chmod(0o755)
-        self.script = self.factoryctl.parent / 'libexec/dark-factory/factory-autonomy.py'
-        self.script.parent.mkdir(parents=True)
-        self.script.write_text('fixture')
-        self.script.chmod(0o755)
-        self.plists = self.root / 'plists'
-        self.sources = [{'id': '1'*32, 'enabled': True, 'revision': 1, 'poll_seconds': 60},
-                        {'id': '2'*32, 'enabled': True, 'revision': 1, 'poll_seconds': 60}]
-
-    def test_per_source_errors_persist_and_paused_sources_reconcile(self):
-        replies = [{'state':'ok', 'sources': self.sources}, {'state':'ok','imported_tasks':['a'*32]}, {'state':'unavailable'}]
-        with patch.object(autonomy, 'managed_api', side_effect=replies) as api, patch.object(autonomy.time, 'time', return_value=100):
-            result = autonomy.managed_tick(self.home, self.factoryctl)
-        self.assertEqual('ok', result['sources']['1'*32]['state'])
-        self.assertEqual(100, result['sources']['1'*32]['last_success_at'])
-        self.assertEqual('unavailable', result['sources']['2'*32]['error'])
-        with patch.object(autonomy, 'managed_api', return_value={'state':'ok','sources':self.sources}) as api, patch.object(autonomy.time, 'time', return_value=105):
-            result = autonomy.managed_tick(self.home, self.factoryctl)
-        self.assertEqual(1, api.call_count)
-        self.assertEqual('unavailable', result['sources']['2'*32]['error'])
-        self.assertEqual(100, result['sources']['1'*32]['last_success_at'])
-        self.sources[1].update(enabled=False, revision=2)
-        with patch.object(autonomy, 'managed_api', side_effect=[{'state':'ok','sources':self.sources},{'state':'paused'}]) as api, patch.object(autonomy.time, 'time', return_value=106):
-            result = autonomy.managed_tick(self.home, self.factoryctl)
-        self.assertEqual(['tick','--source','2'*32,'--page','1'],api.call_args.args[2])
-        self.assertEqual('paused', result['sources']['2'*32]['state'])
-        self.assertEqual(106, result['sources']['2'*32]['last_success_at'])
-
-    def test_cursor_survives_restart_and_ambiguous_import(self):
-        self.sources = self.sources[:1]
-        for at, next_page, expected in [(100,2,'1'),(105,'failure','2'),(165,None,'2')]:
-            reply = {'state':'unavailable'} if next_page == 'failure' else {'state':'ok','next_page':next_page,'imported_tasks':['a'*32]}
-            with patch.object(autonomy, 'managed_api', side_effect=[{'state':'ok','sources':self.sources},reply]) as api, patch.object(autonomy.time, 'time', return_value=at):
-                autonomy.managed_tick(self.home,self.factoryctl)
-                self.assertEqual(expected,api.call_args.args[2][-1])
-        journal = json.loads(Path(str(self.home)+'.intake/journal.json').read_text())
-        self.assertEqual(1,journal['sources']['1'*32]['next_page'])
-        self.assertNotIn('task_id',journal['sources']['1'*32])
-
-    def test_acceptance_cursor_survives_restart_and_lost_response_then_wraps(self):
-        self.sources = self.sources[:1]
-        for at, reply, cursor in [(100, {'state':'ok','acceptance_cursor':'b'*32}, ''),
-                                  (105, {'state':'unavailable'}, 'b'*32),
-                                  (165, {'state':'ok'}, 'b'*32),
-                                  (225, {'state':'ok'}, '')]:
-            with patch.object(autonomy, 'managed_api', side_effect=[{'state':'ok','sources':self.sources},reply]) as api, patch.object(autonomy.time, 'time', return_value=at):
-                autonomy.managed_tick(self.home,self.factoryctl)
-                expected = ['tick','--source','1'*32,'--page','1']
-                if cursor:
-                    expected += ['--acceptance-cursor',cursor]
-                self.assertEqual(expected,api.call_args.args[2])
-        journal = json.loads(Path(str(self.home)+'.intake/journal.json').read_text())
-        self.assertEqual('',journal['sources']['1'*32]['acceptance_cursor'])
-
-    def test_partial_receipt_progress_keeps_error_then_wraps_without_success(self):
-        self.sources = self.sources[:1]
-        for at, reply, expected, due in [(100, {'state':'unavailable','acceptance_progress':True,'acceptance_cursor':'b'*32}, '', 160),
-                                         (105, {'state':'unavailable'}, '', 160),
-                                         (160, {'state':'unavailable','acceptance_progress':True,'acceptance_cursor':'c'*32}, 'b'*32, 220),
-                                         (220, {'state':'ok'}, 'c'*32, 280)]:
-            with patch.object(autonomy, 'managed_api', side_effect=[{'state':'ok','sources':self.sources},reply]) as api, patch.object(autonomy.time, 'time', return_value=at):
-                autonomy.managed_tick(self.home,self.factoryctl)
-                arguments = api.call_args.args[2]
-                if at not in (105,):
-                    self.assertEqual(expected, arguments[-1] if '--acceptance-cursor' in arguments else '')
-            journal = json.loads(Path(str(self.home)+'.intake/journal.json').read_text())
-            record = journal['sources']['1'*32]
-            self.assertEqual(due, record['next_due'])
-            if reply['state'] != 'ok':
-                self.assertEqual('unavailable',record['error'])
-                self.assertEqual(0,record.get('last_success_at',0))
-        self.assertEqual(220,record['last_success_at'])
-        self.assertEqual('',record['error'])
-
-    def test_overflow_and_factory_replacement_fail_closed(self):
-        with patch.object(autonomy,'managed_api',return_value={'state':'ok','sources':self.sources*101}):
-            result = autonomy.managed_tick(self.home,self.factoryctl)
-        self.assertEqual('overflow',result['error'])
-        old = self.home.with_name('old')
-        self.home.rename(old)
-        self.home.mkdir(mode=0o700)
-        with patch.object(autonomy,'managed_api') as api, self.assertRaisesRegex(ValueError,'different factory'):
-            autonomy.managed_tick(self.home,self.factoryctl)
-        api.assert_not_called()
-
-    def test_api_child_receives_only_local_operator_environment(self):
-        response = subprocess.CompletedProcess([],0,'{"state":"ok"}','')
-        with patch.object(autonomy.subprocess,'run',return_value=response) as run:
-            autonomy.managed_api(self.factoryctl,self.home,['config'])
-        self.assertEqual({'PATH','DARK_FACTORY_SOCKET','DARK_FACTORY_OPERATOR_TOKEN_FILE'},set(run.call_args.kwargs['env']))
-        self.assertEqual([str(self.factoryctl),'intake','config'],run.call_args.args[0])
-
-    def test_service_install_upgrade_status_uninstall_retains_journal(self):
-        jobs, calls = {}, []
-        def launchctl(*args):
-            calls.append(args)
-            if args[0] == 'print':
-                path = jobs.get(args[1])
-                return subprocess.CompletedProcess(args,0 if path else 113,'path = '+str(path)+'\n' if path else '','')
-            if args[0] == 'bootstrap':
-                value = autonomy.plistlib.loads(Path(args[2]).read_bytes())
-                jobs[args[1]+'/'+value['Label']] = args[2]
-            elif args[0] == 'bootout':
-                del jobs[args[1]]
-            return subprocess.CompletedProcess(args,0,'','')
-        with patch.object(autonomy,'__file__',str(self.script)), patch.object(autonomy,'managed_plist_root',return_value=self.plists), patch.object(autonomy,'managed_launchctl',side_effect=launchctl):
-            self.assertEqual('scheduled',autonomy.managed_service(self.home,self.factoryctl,'install')['state'])
-            self.assertEqual('scheduled',autonomy.managed_service(self.home,self.factoryctl,'install')['state'])
-            self.assertEqual(1,sum(call[0]=='bootstrap' for call in calls))
-            self.assertEqual('scheduled',autonomy.managed_service(self.home,self.factoryctl,'status')['state'])
-            journal = Path(str(self.home)+'.intake/journal.json')
-            autonomy.atomic_json(journal,{'keep':'cutoff'})
-            self.script.write_text('upgraded fixture')
-            autonomy.managed_service(self.home,self.factoryctl,'install')
-            self.assertEqual(2,sum(call[0]=='bootstrap' for call in calls))
-            autonomy.managed_service(self.home,self.factoryctl,'uninstall')
-            self.assertEqual({'keep':'cutoff'},json.loads(journal.read_text()))
-            self.assertFalse(jobs)
-
-    def test_install_refuses_same_home_legacy_schedule_without_touching_it(self):
-        self.plists.mkdir()
-        config = self.root / 'legacy.json'
-        config.write_text(json.dumps({'factory_home': str(self.home), 'journal': str(self.root / 'legacy-journal.json')}))
-        config.chmod(0o600)
-        # The operator may save the generated plist under a custom filename.
-        plist = self.plists / 'custom-intake.plist'
-        job = {'Label': 'build.darkfactory.autonomy.fixture', 'ProgramArguments': ['/usr/bin/python3', '/old/release/factory-autonomy.py', str(config), '--once']}
-        plist.write_bytes(autonomy.plistlib.dumps(job))
-        plist.chmod(0o600)
-        original = plist.read_bytes()
-        with patch.object(autonomy, 'managed_plist_root', return_value=self.plists), patch.object(autonomy, 'managed_launchctl', return_value=subprocess.CompletedProcess([], 0, '', '')) as launchctl:
-            with self.assertRaisesRegex(ValueError, 'legacy intake already schedules'):
-                autonomy.managed_service(self.home, self.factoryctl, 'install')
-            self.assertEqual([('list',)], [call.args for call in launchctl.call_args_list])
-        self.assertEqual(original, plist.read_bytes())
-        self.assertFalse(Path(str(self.home)+'.intake/service.json').exists())
-        # Release-only work and another factory retain their existing jobs.
-        job['ProgramArguments'].append('--release-only')
-        plist.write_bytes(autonomy.plistlib.dumps(job))
-        with patch.object(autonomy, 'managed_plist_root', return_value=self.plists), patch.object(autonomy, 'managed_launchctl', return_value=subprocess.CompletedProcess([], 0, '', '')):
-            autonomy.refuse_legacy_intake_service(self.home)
-            job['ProgramArguments'].pop()
-            plist.write_bytes(autonomy.plistlib.dumps(job))
-            config.write_text(json.dumps({'factory_home': str(self.root / 'another-home')}))
-            autonomy.refuse_legacy_intake_service(self.home)
-
-    def test_install_refuses_uninspectable_loaded_legacy_job_and_overflow(self):
-        label = 'build.darkfactory.autonomy.fixture'
-        replies = [subprocess.CompletedProcess([], 0, '-\t0\t'+label+'\n', ''), subprocess.CompletedProcess([], 0, 'path = '+str(self.root/'missing.plist')+'\n', '')]
-        with patch.object(autonomy, 'managed_plist_root', return_value=self.plists), patch.object(autonomy, 'managed_launchctl', side_effect=replies), self.assertRaisesRegex(ValueError, 'arguments unavailable'):
-            autonomy.refuse_legacy_intake_service(self.home)
-        self.plists.mkdir()
-        for index in range(201):
-            (self.plists / (str(index)+'.plist')).touch()
-        with patch.object(autonomy, 'managed_plist_root', return_value=self.plists), patch.object(autonomy, 'managed_launchctl', return_value=subprocess.CompletedProcess([], 0, '', '')), self.assertRaisesRegex(ValueError, 'exceeds 200'):
-            autonomy.refuse_legacy_intake_service(self.home)
-
-    def test_foreign_plist_is_never_stopped_and_missing_owned_plist_can_uninstall(self):
-        absent = subprocess.CompletedProcess([],113,'','')
-        success = subprocess.CompletedProcess([],0,'','')
-        with patch.object(autonomy,'__file__',str(self.script)), patch.object(autonomy,'managed_plist_root',return_value=self.plists), patch.object(autonomy,'managed_launchctl',side_effect=[success,absent,success]):
-            autonomy.managed_service(self.home,self.factoryctl,'install')
-        plist = next(self.plists.iterdir())
-        plist.write_text('foreign')
-        with patch.object(autonomy,'managed_plist_root',return_value=self.plists), patch.object(autonomy,'managed_launchctl') as launchctl, self.assertRaisesRegex(ValueError,'foreign'):
-            autonomy.managed_service(self.home,self.factoryctl,'uninstall')
-        launchctl.assert_not_called()
-        plist.unlink()
-        with patch.object(autonomy,'managed_plist_root',return_value=self.plists), patch.object(autonomy,'managed_launchctl',return_value=absent):
-            self.assertEqual('absent',autonomy.managed_service(self.home,self.factoryctl,'uninstall')['state'])
-
-    def test_empty_stale_lock_directory_without_receipt_is_absent(self):
-        state = Path(str(self.home) + '.intake')
-        state.mkdir(mode=0o700)
-        (state / 'service.lock').mkdir()
-        absent = subprocess.CompletedProcess([], 113, '', '')
-        with patch.object(autonomy, '__file__', str(self.script)), patch.object(autonomy, 'managed_plist_root', return_value=self.plists), patch.object(autonomy, 'managed_launchctl', return_value=absent):
-            self.assertEqual('absent', autonomy.managed_service(self.home, self.factoryctl, 'status')['state'])
-        self.assertTrue((state / 'service.lock').is_file())
-        self.assertFalse((state / 'service.json').exists())
-
-    @unittest.skipUnless(autonomy.os.environ.get('DARK_FACTORY_INTAKE_SERVICE_E2E') == '1', 'disposable launchd gate only')
-    def test_real_disposable_service_lifecycle(self):
-        self.script.write_bytes(Path(autonomy.__file__).read_bytes())
-        self.factoryctl.write_text('#!/bin/sh\nprintf \'{"state":"ok","sources":[]}\\n\'\n')
-        label = 'com.dark-factory.intake.' + autonomy.hashlib.sha256(str(self.home).encode()).hexdigest()[:12]
-        target = 'gui/' + str(autonomy.os.geteuid()) + '/' + label
-        status = Path(str(self.home) + '.intake/status.json')
-        with patch.object(autonomy, '__file__', str(self.script)), patch.object(autonomy, 'managed_plist_root', return_value=self.plists):
-            try:
-                self.assertEqual('scheduled', autonomy.managed_service(self.home, self.factoryctl, 'install')['state'])
-                deadline = time.monotonic() + 20
-                while not status.exists() and time.monotonic() < deadline:
-                    time.sleep(0.1)
-                self.assertEqual('ok', autonomy.managed_read(status)['state'])
-                self.assertEqual('scheduled', autonomy.managed_service(self.home, self.factoryctl, 'status')['state'])
-                self.assertEqual('scheduled', autonomy.managed_service(self.home, self.factoryctl, 'install')['state'])
-                self.assertEqual('absent', autonomy.managed_service(self.home, self.factoryctl, 'uninstall')['state'])
-                self.assertEqual(113, autonomy.managed_launchctl('print', target).returncode)
-                self.assertTrue(status.exists())
-                self.assertFalse(list(self.plists.iterdir()))
-            finally:
-                autonomy.managed_launchctl('bootout', target)
-
-
-class LegacyCutoverTest(unittest.TestCase):
-    setUp = ManagedIntakeTest.setUp
-
-    def fixture(self):
-        import shutil
-        import hashlib
-        import plistlib
-        shutil.copyfile(Path(__file__).with_name('factory-intake.py'), self.script.with_name('factory-intake.py'))
-        self.config_path, journal = self.root / 'legacy.json', self.root / 'legacy-journal.json'
-        self.config = {'repository':'fixture/issues','project_id':'1'*32,'overseer_agent_id':'2'*32,'label':'ready','allowed_authors':['owner'],'factory_home':str(self.home),'journal':str(journal),'priority_by_label':{'urgent':5,'later':-2},'review_mirror_root':str(self.root / 'reviews')}
-        autonomy.atomic_json(self.config_path, self.config)
-        legacy = module('factory-intake')
-        autonomy.atomic_json(journal, {'version':2,'config_fingerprint':legacy.config_fingerprint(self.config),'issues':{}})
-        label = 'build.darkfactory.autonomy.' + hashlib.sha256(str(self.config_path).encode()).hexdigest()[:12]
-        self.plists.mkdir()
-        self.legacy_plist = self.plists / (label + '.plist')
-        self.legacy_plist.write_bytes(plistlib.dumps({'Label':label,'ProgramArguments':[sys.executable,str(self.script),str(self.config_path),'--once'],'EnvironmentVariables':{'PATH':'/legacy/bin:/usr/bin:/bin'}}))
-        self.loaded = {label:str(self.legacy_plist)}
-        self.calls, self.sources, self.commits = [], {}, 0
-        self.plan = 'a'*64
-        def launchctl(*args):
-            self.calls.append(args)
-            label = args[1].split('/')[-1] if len(args)>1 else ''
-            if args[0] == 'list':
-                return subprocess.CompletedProcess(args,0,'\n'.join(self.loaded),'')
-            if args[0] == 'print':
-                return subprocess.CompletedProcess(args,0,'path = '+self.loaded[label],'') if label in self.loaded else subprocess.CompletedProcess(args,113,'','')
-            if args[0] == 'bootout':
-                self.loaded.pop(label, None)
-            if args[0] == 'bootstrap':
-                value = plistlib.loads(Path(args[2]).read_bytes())
-                self.loaded[value['Label']] = args[2]
-            return subprocess.CompletedProcess(args,0,'','')
-        def api(_binary,_home,args,value=None):
-            if args[0] == 'legacy_preview':
-                return {'state':'legacy_committed' if self.sources else 'legacy_preview','legacy':{'plan_hash': self.plan, 'target_repository_id':'b'*32, 'publication_repository':'fixture/publication', 'requires_policy_acknowledgement': bool(value['legacy'].get('manual_app_authors'))}}
-            if args[0] == 'legacy_commit':
-                if value['legacy']['plan_hash'] != self.plan:
-                    return {'state':'stale','legacy':{'plan_hash':self.plan, 'target_repository_id':'b'*32}}
-                if not self.sources:
-                    self.commits += 1
-                    self.sources[value['source_id']] = dict(value['configuration'],id=value['source_id'],enabled=False,revision=1)
-                return {'state':'legacy_committed','legacy':{'plan_hash':self.plan, 'target_repository_id':'b'*32}}
-            if args[0] == 'config':
-                return {'state':'ok','sources':list(self.sources.values())}
-            if args[0] == 'enable':
-                self.sources[args[2]].update(enabled=True,revision=2)
-                return {'state':'ok'}
-            if args[0] == 'tick':
-                return {'state':'ok'}
-            raise AssertionError(args)
-        self.api = api
-        self.addCleanup(patch.stopall)
-        patch.object(autonomy,'__file__',str(self.script)).start()
-        patch.object(autonomy,'managed_plist_root',return_value=self.plists).start()
-        patch.object(autonomy,'managed_launchctl',side_effect=launchctl).start()
-        patch.object(autonomy,'managed_api',side_effect=api).start()
-
-    def test_retired_review_mirror_key_is_accepted_and_inert(self):
-        self.fixture()
-        self.assertIn('review_mirror_root', self.config)
-        sent = []
-        def api(binary,home,args,value=None):
-            if args[0] == 'legacy_preview':
-                sent.append(value['legacy'])
-            return self.api(binary,home,args,value)
-        with patch.object(autonomy,'managed_api',side_effect=api):
-            self.assertEqual('migrated',autonomy.managed_migrate(self.home,self.factoryctl,self.config_path,self.plan)['state'])
-        self.assertTrue(sent)
-        self.assertFalse(any('review_companion' in legacy for legacy in sent))
-
-    def test_release_companion_refuses_cutover_before_schedule_or_baseline_changes(self):
-        self.fixture()
-        self.config['release_configs'] = [str(self.root / 'release.json')]
-        autonomy.atomic_json(self.root / 'release.json', {'journal': str(self.root / 'release-journal.json')})
-        autonomy.atomic_json(self.config_path, self.config)
-        legacy = module('factory-intake')
-        autonomy.atomic_json(Path(self.config['journal']), {'version': 2, 'config_fingerprint': legacy.config_fingerprint(self.config), 'issues': {}})
-        original = self.legacy_plist.read_bytes()
-        for plan in (None, self.plan):
-            with self.assertRaisesRegex(ValueError, 'customer-scoped release path'):
-                autonomy.managed_migrate(self.home, self.factoryctl, self.config_path, plan)
-        self.assertEqual(original, self.legacy_plist.read_bytes())
-        self.assertFalse(any(call[0] == 'bootout' for call in self.calls))
-        self.assertEqual(0, self.commits)
-
-    def test_processed_history_hash_is_proven_only_by_the_retained_matching_snapshot(self):
-        self.fixture()
-        legacy = module('factory-intake')
-        desired = {'number':1,'title':'Original','body':'Bytes','author':'owner','labels':['ready'],'state':'OPEN','updated_at':'before','url':'https://github.com/fixture/issues/issues/1'}
-        fingerprint = legacy.fingerprint(desired)
-        record = {'number':1,'managed':True,'processed_fingerprint':fingerprint,'desired':desired,'desired_fingerprint':fingerprint}
-        journal = {'version':2,'config_fingerprint':legacy.config_fingerprint(self.config),'issues':{'fixture/issues#1':record}}
-        autonomy.atomic_json(Path(self.config['journal']),journal)
-        request,_,_,_=autonomy.legacy_migration_input(self.home,self.config_path)
-        self.assertIn('historical_content_hash',request['legacy']['history'][0])
-        task=request['legacy']['history'][0]['task_id']
-        desired['updated_at']='after'
-        record['desired_fingerprint']=legacy.fingerprint(desired)
-        autonomy.atomic_json(Path(self.config['journal']),journal)
-        request,_,_,_=autonomy.legacy_migration_input(self.home,self.config_path)
-        self.assertEqual(task,request['legacy']['history'][0]['task_id'])
-        self.assertNotIn('historical_content_hash',request['legacy']['history'][0])
-        journal['issues'].update({str(i):{} for i in range(201)})
-        autonomy.atomic_json(Path(self.config['journal']),journal)
-        with self.assertRaisesRegex(ValueError,'at most 200'):
-            autonomy.legacy_migration_input(self.home,self.config_path)
-
-    def test_preview_preserves_priority_and_makes_no_state_or_schedule_changes(self):
-        self.fixture()
-        before = self.legacy_plist.read_bytes()
-        result = autonomy.managed_migrate(self.home,self.factoryctl,self.config_path)
-        self.assertEqual('legacy_preview',result['state'])
-        self.assertEqual(self.config['priority_by_label'],result['configuration']['priority_by_label'])
-        self.assertEqual(['owner'],result['configuration']['trusted_authors'])
-        self.assertEqual('b'*32,result['configuration']['target_repository_id'])
-        self.assertFalse(Path(str(self.home)+'.intake').exists())
-        self.assertEqual(before,self.legacy_plist.read_bytes())
-        self.assertTrue(all(call[0] in ('print','list') for call in self.calls))
-
-    def test_app_authors_require_reviewed_narrowing_before_any_stop_and_resume_keeps_ack(self):
-        self.fixture()
-        self.config['allowed_authors'] = ['owner', 'app/factory', 'automation[bot]']
-        autonomy.atomic_json(self.config_path,self.config)
-        legacy = module('factory-intake')
-        journal_path = Path(self.config['journal'])
-        autonomy.atomic_json(journal_path, {'version':2,'config_fingerprint':legacy.config_fingerprint(self.config),'issues':{}})
-        before = journal_path.read_bytes()
-        preview = autonomy.managed_migrate(self.home,self.factoryctl,self.config_path)
-        self.assertTrue(preview['legacy']['requires_policy_acknowledgement'])
-        self.assertEqual(['owner'], preview['configuration']['trusted_authors'])
-        with self.assertRaisesRegex(ValueError, 'acknowledge-policy-narrowing'):
-            autonomy.managed_migrate(self.home,self.factoryctl,self.config_path,self.plan)
-        self.assertTrue(self.legacy_plist.exists())
-        self.assertFalse(any(call[0] == 'bootout' for call in self.calls))
-        write = autonomy.atomic_json
-        def crash(path,value):
-            write(path,value)
-            if Path(path).name == 'migration.json' and value['phase'] == 'prepared':
-                raise RuntimeError('phase crash')
-        with patch.object(autonomy,'atomic_json',side_effect=crash):
-            with self.assertRaisesRegex(RuntimeError,'phase crash'):
-                autonomy.managed_migrate(self.home,self.factoryctl,self.config_path,self.plan,True)
-        receipt = autonomy.managed_read(Path(str(self.home)+'.intake/migration.json'),maximum=4<<20)
-        self.assertTrue(receipt['request']['legacy']['acknowledge_policy_narrowing'])
-        self.assertEqual(['app/factory','automation[bot]'],receipt['request']['legacy']['manual_app_authors'])
-        self.assertEqual('b'*32,receipt['request']['configuration']['target_repository_id'])
-        result = autonomy.managed_migrate(self.home,self.factoryctl,self.config_path,self.plan)
-        self.assertEqual('migrated',result['state'])
-        self.assertEqual(before,journal_path.read_bytes())
-        self.assertEqual(1,self.commits)
-
-    def test_app_only_legacy_policy_becomes_manual(self):
-        self.fixture()
-        self.config['allowed_authors'] = ['app/factory']
-        autonomy.atomic_json(self.config_path,self.config)
-        legacy = module('factory-intake')
-        autonomy.atomic_json(Path(self.config['journal']), {'version':2,'config_fingerprint':legacy.config_fingerprint(self.config),'issues':{}})
-        request,_,_,_ = autonomy.legacy_migration_input(self.home,self.config_path)
-        self.assertEqual('manual',request['configuration']['policy'])
-        self.assertEqual([],request['configuration']['trusted_authors'])
-
-    def test_every_durable_phase_resumes_once_and_preserves_history_and_companion(self):
-        for phase in ('prepared','old_stopped','baseline_committed','managed_started','completed'):
-            with self.subTest(phase=phase):
-                self.setUp()
-                self.fixture()
-                before = Path(self.config['journal']).read_bytes()
-                write = autonomy.atomic_json
-                failed = False
-                def crash(path,value):
-                    nonlocal failed
-                    write(path,value)
-                    if path.name == 'migration.json' and value.get('phase') == phase and not failed:
-                        failed = True
-                        raise RuntimeError('simulated crash')
-                with patch.object(autonomy,'atomic_json',side_effect=crash):
-                    with self.assertRaisesRegex(RuntimeError,'simulated crash'):
-                        autonomy.managed_migrate(self.home,self.factoryctl,self.config_path,self.plan)
-                receipt = autonomy.managed_read(Path(str(self.home)+'.intake/migration.json'),maximum=4<<20)
-                self.assertEqual(phase,receipt['phase'])
-                self.assertEqual('migrated',autonomy.managed_migrate(self.home,self.factoryctl,self.config_path,self.plan)['state'])
-                self.assertEqual('migrated',autonomy.managed_migrate(self.home,self.factoryctl,self.config_path,self.plan)['state'])
-                self.assertEqual(1,self.commits)
-                self.assertEqual(1,len(self.loaded))
-                self.assertTrue(next(iter(self.loaded)).startswith('com.dark-factory.intake.'))
-                self.assertEqual(1,sum(call[0]=='bootout' for call in self.calls))
-                self.assertEqual(before,Path(self.config['journal']).read_bytes())
-                self.assertEqual(before.decode(),receipt['journal'])
-                with patch.object(autonomy,'tick') as companion:
-                    autonomy.managed_tick(self.home,self.factoryctl)
-                    companion.assert_not_called()
-                patch.stopall()
-
-    def test_lost_commit_response_never_restarts_legacy_or_duplicates_baseline(self):
-        self.fixture()
-        lost = False
-        def api(binary,home,args,value=None):
-            nonlocal lost
-            reply = self.api(binary,home,args,value)
-            if args[0] == 'legacy_commit' and not lost:
-                lost = True
-                return {'state':'unavailable'}
-            return reply
-        with patch.object(autonomy,'managed_api',side_effect=api):
-            result = autonomy.managed_migrate(self.home,self.factoryctl,self.config_path,self.plan)
-            self.assertEqual('old_stopped',result['cutover_phase'])
-            self.assertEqual({},self.loaded)
-            self.assertFalse(next(iter(self.sources.values()))['enabled'])
-            self.assertEqual('migrated',autonomy.managed_migrate(self.home,self.factoryctl,self.config_path,self.plan)['state'])
-        self.assertEqual(1,self.commits)
-
-    def test_stale_remote_plan_requires_review_and_can_resume_while_legacy_stays_stopped(self):
-        self.fixture()
-        def api(binary,home,args,value=None):
-            if args[0] == 'legacy_commit':
-                self.plan='b'*64
-            return self.api(binary,home,args,value)
-        with patch.object(autonomy,'managed_api',side_effect=api):
-            self.assertEqual('stale',autonomy.managed_migrate(self.home,self.factoryctl,self.config_path,'a'*64)['state'])
-        self.assertEqual({},self.loaded)
-        preview=autonomy.managed_migrate(self.home,self.factoryctl,self.config_path)
-        self.assertEqual('b'*64,preview['legacy']['plan_hash'])
-        self.assertEqual('migrated',autonomy.managed_migrate(self.home,self.factoryctl,self.config_path,'b'*64)['state'])
-        self.assertEqual(1,self.commits)
-
-    def test_unsettled_legacy_plan_and_second_same_home_job_refuse_before_stop(self):
-        self.fixture()
-        with patch.object(autonomy,'managed_api',return_value={'state':'legacy_blocked'}):
-            self.assertEqual('legacy_blocked',autonomy.managed_migrate(self.home,self.factoryctl,self.config_path,self.plan)['state'])
-        self.assertTrue(self.legacy_plist.exists())
-        self.assertFalse(any(call[0]=='bootout' for call in self.calls))
-        import shutil
-        shutil.copyfile(self.legacy_plist,self.plists/'second.plist')
-        with self.assertRaisesRegex(ValueError,'legacy intake already'):
-            autonomy.managed_migrate(self.home,self.factoryctl,self.config_path,self.plan)
-        self.assertFalse(any(call[0]=='bootout' for call in self.calls))
 
 
 if __name__ == '__main__':
