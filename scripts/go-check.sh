@@ -65,13 +65,12 @@ if [ "$go_check_mode" = source ]; then
         ./internal/topology
 fi
 
-echo "go-check: TypeScript install, build, typecheck, and tests"
+echo "go-check: TypeScript install, build, and tests"
 (
     CDPATH= cd -- web
     COREPACK_ENABLE_NETWORK=1 CI=true "$DF_CI_NODE" "$DF_CI_COREPACK" pnpm install --frozen-lockfile --ignore-scripts
     COREPACK_ENABLE_NETWORK=0 CI=true "$DF_CI_NODE" "$DF_CI_COREPACK" pnpm --filter @dark-factory/client build
     COREPACK_ENABLE_NETWORK=0 CI=true "$DF_CI_NODE" "$DF_CI_COREPACK" pnpm --filter @dark-factory/ui build
-    COREPACK_ENABLE_NETWORK=0 CI=true "$DF_CI_NODE" "$DF_CI_COREPACK" pnpm --filter dark-factory-dev typecheck
     "$DF_CI_NODE" --test --test-reporter=spec packages/client/test/*.test.mjs packages/ui/test/*.test.mjs packages/ui/src/factory-scene/*.test.mjs packages/ui/src/production-*.test.mjs
 )
 

@@ -10,14 +10,13 @@ use crate::{
     BrokerState,
     access::AccessAuthority,
     github_app::{
-        AppAuthority, ClosePullRequest, CreateIssue, CreatePullRequest, DispatchControlPlaneDeploy,
-        EnqueuePullRequest, ListIssues, ListPullRequests, MergePullRequestAtHead,
-        ObserveControlPlaneDeploy, ObserveFile, ObserveIssue, ObservePullRequestChecks,
-        ObservePullRequestMerge, ObservePullRequestReview, ObservePullRequestWorkflows, ObserveRef,
-        ObserveRelease, ObserveReleaseWorkflow, ObserveRepository, ObserveTree, OperationError,
-        PublishCommit, PublishReleaseTag, ReadPullRequestJobLog, RecoverRelease,
-        RerunFailedPullRequestJobs, ResolveIssue, SubmitPullRequestReview, UpdatePullRequestBody,
-        canonical_operation_id,
+        AppAuthority, ClosePullRequest, CreateIssue, CreatePullRequest, EnqueuePullRequest,
+        ListIssues, ListPullRequests, MergePullRequestAtHead, ObserveFile, ObserveIssue,
+        ObservePullRequestChecks, ObservePullRequestMerge, ObservePullRequestReview,
+        ObservePullRequestWorkflows, ObserveRef, ObserveRelease, ObserveReleaseWorkflow,
+        ObserveRepository, ObserveTree, OperationError, PublishCommit, PublishReleaseTag,
+        ReadPullRequestJobLog, RecoverRelease, RerunFailedPullRequestJobs, ResolveIssue,
+        SubmitPullRequestReview, UpdatePullRequestBody, canonical_operation_id,
     },
     journal::DeliveryJournal,
 };
@@ -144,11 +143,7 @@ pub(crate) async fn connection_dispatch(
         {
             for (key, value) in arguments {
                 let referenced = key.ends_with("_operation_id")
-                    || (key == "operation_id"
-                        && matches!(
-                            name,
-                            "observe_release_workflow" | "observe_control_plane_deploy"
-                        ));
+                    || (key == "operation_id" && name == "observe_release_workflow");
                 if referenced && !value.is_null() {
                     let Some(id) = value.as_str() else {
                         return error_response(StatusCode::UNAUTHORIZED, "unauthorized");
@@ -613,20 +608,6 @@ fn tools() -> Value {
         "description": "Read the one workflow run returned by recover_release and re-prove its fixed workflow, complete request digest, immutable tag, and dispatch commit.",
         "inputSchema": {"type": "object", "properties": {"repository": {"type": "string", "pattern": "^[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}$"}, "operation_id": {"type": "string", "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"}, "tag": {"type": "string", "pattern": "^v[0-9]+\\.[0-9]+\\.[0-9]+(?:-[A-Za-z0-9.-]+)?$"}, "tag_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"}, "workflow_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"}, "run_id": {"type": "integer", "minimum": 1}}, "required": ["repository", "operation_id", "tag", "tag_sha", "workflow_sha", "run_id"], "additionalProperties": false},
         "outputSchema": {"type": "object", "properties": {"operation_id": {"type": "string"}, "tag": {"type": "string"}, "tag_sha": {"type": "string"}, "workflow_sha": {"type": "string"}, "workflow_run": workflow_run_schema()}, "required": ["operation_id", "tag", "tag_sha", "workflow_sha", "workflow_run"], "additionalProperties": false},
-        "annotations": {"readOnlyHint": true, "destructiveHint": false, "openWorldHint": true}
-    }, {
-        "name": "dispatch_control_plane_deploy",
-        "title": "Dispatch the fixed control-plane deployment",
-        "description": "Dispatch only deploy-control-plane.yml from the live default branch, bound to the exact commit and reviewed source tree.",
-        "inputSchema": {"type": "object", "properties": {"repository": {"type": "string", "pattern": "^[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}$"}, "operation_id": {"type": "string", "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"}, "commit_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"}, "reviewed_tree": {"type": "string", "pattern": "^[0-9a-f]{40}$"}, "promote": {"type": "boolean"}}, "required": ["repository", "operation_id", "commit_sha", "reviewed_tree", "promote"], "additionalProperties": false},
-        "outputSchema": {"type": "object", "properties": {"operation_id": {"type": "string"}, "workflow": {"type": "string"}, "commit_sha": {"type": "string"}, "run_id": {"type": "integer"}, "run_attempt": {"type": "integer"}}, "required": ["operation_id", "workflow", "commit_sha", "run_id", "run_attempt"], "additionalProperties": false},
-        "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": true}
-    }, {
-        "name": "observe_control_plane_deploy",
-        "title": "Observe an exact control-plane deployment",
-        "description": "Read the one workflow run returned by dispatch_control_plane_deploy and re-prove its fixed workflow, complete request digest, exact commit, reviewed tree, and promotion mode.",
-        "inputSchema": {"type": "object", "properties": {"repository": {"type": "string", "pattern": "^[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}$"}, "operation_id": {"type": "string", "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"}, "commit_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"}, "reviewed_tree": {"type": "string", "pattern": "^[0-9a-f]{40}$"}, "promote": {"type": "boolean"}, "run_id": {"type": "integer", "minimum": 1}}, "required": ["repository", "operation_id", "commit_sha", "reviewed_tree", "promote", "run_id"], "additionalProperties": false},
-        "outputSchema": {"type": "object", "properties": {"operation_id": {"type": "string"}, "commit_sha": {"type": "string"}, "reviewed_tree": {"type": "string"}, "promote": {"type": "boolean"}, "workflow_run": workflow_run_schema()}, "required": ["operation_id", "commit_sha", "reviewed_tree", "promote", "workflow_run"], "additionalProperties": false},
         "annotations": {"readOnlyHint": true, "destructiveHint": false, "openWorldHint": true}
     }, {
         "name": "create_pull_request",
@@ -1230,38 +1211,6 @@ async fn call_tool(id: Value, request: &Map<String, Value>, mcp: &McpState) -> R
                     id,
                     &result,
                     "Exact release recovery workflow state was observed.",
-                ),
-                Err(error) => operation_error(id, error),
-            }
-        }
-        Some("dispatch_control_plane_deploy") => {
-            let Ok(arguments) = serde_json::from_value::<DispatchControlPlaneDeploy>(arguments)
-            else {
-                return json_rpc_error(id, -32602, "Invalid params");
-            };
-            match mcp
-                .app
-                .dispatch_control_plane_deploy(&mcp.journal, arguments)
-                .await
-            {
-                Ok(result) => serialized_tool_result(
-                    id,
-                    &result,
-                    "Control-plane deployment is durably dispatched.",
-                ),
-                Err(error) => operation_error(id, error),
-            }
-        }
-        Some("observe_control_plane_deploy") => {
-            let Ok(arguments) = serde_json::from_value::<ObserveControlPlaneDeploy>(arguments)
-            else {
-                return json_rpc_error(id, -32602, "Invalid params");
-            };
-            match mcp.app.observe_control_plane_deploy(arguments).await {
-                Ok(result) => serialized_tool_result(
-                    id,
-                    &result,
-                    "Exact control-plane deployment state was observed.",
                 ),
                 Err(error) => operation_error(id, error),
             }

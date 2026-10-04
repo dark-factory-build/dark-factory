@@ -163,9 +163,7 @@ The live maintainer broker exposes only these repository-scoped operations:
 - squash-merge one exact reviewed head when its queue-less base either has a
   strict active ruleset or satisfies the private-unprotected 403 contract;
 - publish and observe one immutable semver release tag, and recover only that
-  exact tag through the fixed release workflow; and
-- dispatch and observe the fixed control-plane deployment workflow at one exact
-  default-branch commit and reviewed tree.
+  exact tag through the fixed release workflow.
 
 Replacing the already-open canonical bodies for #126, #153, and #188 is a
 one-time Phase 0 bootstrap action, not a maintainer-broker operation. It must
@@ -363,9 +361,8 @@ The runtime operation set is deliberately finite: read the exact default
 revision, create, observe, and resolve one bounded issue with an evidence
 comment, publish one exact immutable Change tree to a generated branch, create
 one PR, observe checks and merge state for its exact head, post one bounded
-formal PR review, enqueue it, publish and observe one immutable release, and
-dispatch one fixed control-plane deployment. GitHub owns merged source-branch
-cleanup through delete-on-merge. There is no generic issue-comment or closure
+formal PR review, enqueue it, and publish and observe one immutable release.
+GitHub owns merged source-branch cleanup through delete-on-merge. There is no generic issue-comment or closure
 authority and no arbitrary REST, GraphQL, Git, shell, merge, ref update, or
 administration mutation escape hatch.
 

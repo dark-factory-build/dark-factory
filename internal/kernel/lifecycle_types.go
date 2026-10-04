@@ -968,7 +968,6 @@ const (
 	NoAdmissionQueueEmpty
 	NoAdmissionNoEligibleWork
 	NoAdmissionNotReconciled
-	NoAdmissionSourceRouteUnavailable
 )
 
 func (reason NoAdmissionReason) String() string {
@@ -983,8 +982,6 @@ func (reason NoAdmissionReason) String() string {
 		return "no_eligible_work"
 	case NoAdmissionNotReconciled:
 		return "not_reconciled"
-	case NoAdmissionSourceRouteUnavailable:
-		return "source_route_unavailable"
 	default:
 		return ""
 	}

@@ -311,14 +311,3 @@ invoke no models or knowledge reads, and cannot delay work or review. Paused,
 waiting, needs-you and disconnected state remains authoritative. Reduced motion
 and hidden/disconnected scenes stop ambient activity. Bookshelves open the existing
 project library; explicit document actions alone read its content.
-
-### Isolated acceptance fixture
-
-Build the web packages and serve the existing dev app at a loopback address.
-`?fixture=inhabited` uses an immutable scan of this repository with labelled
-synthetic proposal observations and explicit phase/population controls. It covers
-all operation kinds, overlaps, stale evidence, abandonment, an integrated snapshot
-refresh, empty/crowded/resting/disconnected states, keyboard, phone and reduced
-motion. `scripts/verify-inhabited-browser.mjs` exercises these routes and saves
-screenshots; screenshots require human/agent visual inspection as well as checks.
-No installed factory, queue, provider, Maintainer App or live service is involved.

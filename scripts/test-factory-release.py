@@ -104,13 +104,12 @@ class ReleaseFixtures(unittest.TestCase):
             self.assertEqual(raised.exception.code, 1)
             self.assertEqual(output.getvalue(), "")
 
-    def test_shared_atomic_writer_preserves_receipt_on_replace_failure(self):
-        self.assertIs(release.atomic_json, release.intake.atomic_json)
+    def test_atomic_writer_preserves_receipt_on_replace_failure(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "receipt.json"
             release.atomic_json(path, {"state": "verified"})
             before = path.read_bytes()
-            with mock.patch.object(release.intake.os, "replace", side_effect=OSError("injected")):
+            with mock.patch.object(release.os, "replace", side_effect=OSError("injected")):
                 with self.assertRaises(OSError):
                     release.atomic_json(path, {"state": "running"})
             self.assertEqual(before, path.read_bytes())

@@ -8,12 +8,8 @@ hostname=maintainer.darkfactory.build
 # A constant asserting "this is the reviewed runtime" is a declaration nothing
 # observes: it rotted three times in one pull request, and each time the first
 # thing to notice was a refused activation at the moment it was needed.
-# `deploy-control-plane.yml` takes `expected_tree` as a dispatch input and
-# proves the checkout matches it. This is the same shape of contract for the
-# same decision, but deliberately not the same value: the workflow proves
-# `HEAD^{tree}`, the whole repository, while this proves the `control-plane`
-# subtree that is all it ships. Crossing the two fails closed either way; do
-# not "unify" them.
+# It proves the `control-plane` subtree, the same tree `scripts/release.sh`
+# tags each deployed version with.
 #
 # A subtree reference needs no reachability check -- it resolves through HEAD,
 # so no merge strategy, branch deletion, or shallow clone can put it out of
@@ -22,11 +18,9 @@ hostname=maintainer.darkfactory.build
 # that path is a symlink and to an absent gitlink if it is a submodule, and in
 # both cases the bytes that would ship sit outside the object being proven.
 #
-# This path exists because `dispatch_control_plane_deploy` observes the
-# repository, so a defect there disables the App's ability to deploy its own
-# repair, and the workflow requires the App as `github.actor` so no human
-# dispatch can substitute. It is not one-time: it shipped that exact repair on
-# 30 Aug 2026. Routine deployments remain the App's.
+# Routine deployments are `scripts/release.sh`, which inherits secrets from
+# the live version. This path also uploads the permission revision, so it is
+# the one to use when that revision changes.
 test "$#" = 1 || {
     echo "usage: scripts/bootstrap-maintainer-v2.sh <reviewed-control-plane-tree>" >&2
     echo "the reviewed tree is git rev-parse <reviewed-head>:control-plane" >&2

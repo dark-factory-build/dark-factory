@@ -18,14 +18,8 @@ verify its entry in that release's `SHA256SUMS`, and put `factoryd`,
 release's Homebrew formula installs the same commands if it has been added to a
 tap.
 
-The archive includes the intake controller under `libexec/dark-factory/`.
-Keep that directory with the release binaries, or use Homebrew's installed
-commands. **Starting with v0.4.1**, `factoryctl service install` also schedules
-the packaged intake controller. On v0.4.0, run `factoryctl intake service install
---home "$HOME/.dark-factory"` separately. Python 3.9 or newer is required;
-Homebrew installs it. No operator JSON, handwritten launchd file, or source
-checkout is needed. See the managed intake and explicit legacy migration
-instructions below.
+factoryd polls issue intake itself; no operator JSON, handwritten launchd
+file, or source checkout is needed. See the intake instructions below.
 
 Create and install one managed home. Those two commands are the whole terminal
 side of setup: an install that starts a fresh service loads the launchd job,
@@ -338,30 +332,17 @@ source so you can preview the change before enabling it.
 Accept the exact displayed content using `factoryctl intake accept --source
 SOURCE_ID --revision REVISION --issue NUMBER --hash CONTENT_HASH`. The daemon
 checks the current GitHub content again before recording acceptance. The
-controller imports accepted work into the existing queue; comments and reactions
+daemon imports accepted work into the existing queue; comments and reactions
 do not create work. A later title/body edit needs fresh acceptance, including
 when the original issue author is trusted. Existing failed or completed work is
 not automatically retried.
 
-Starting with v0.4.1, installing the managed service from a release or Homebrew
-also schedules the packaged controller. `factoryctl service status --home
-"$HOME/.dark-factory"` reports intake readiness separately from the daemon.
-A source-built CLI without packaged assets reports intake as unavailable while
-the daemon remains usable; use a release archive or Homebrew for issue intake.
-
-If controller setup fails after the daemon starts, installation reports the
-failure and the repair command: `factoryctl intake service install --home
-"$HOME/.dark-factory"`. Use that same command for v0.4.0's separate setup step;
-`status` and `uninstall` use the same home argument. In v0.4.1, managed-service
-uninstall removes its scheduled controller first and refuses to remove the
-daemon if safe controller removal fails. Existing legacy schedules still need
-explicit migration; setup never silently replaces them.
-
-Python 3.9 or newer is required (Homebrew installs it). The controller owns its
-private journal and sync status beside the factory home; back up that directory
-with the home.
-`intake list` reports the last successful sync and current error. An unavailable
-GitHub connection is not an empty backlog.
+factoryd polls each enabled source when its `--poll-seconds` interval is due,
+while the GitHub connection (or Linear) is configured. Poll progress is kept in
+memory: a restart rescans from the first page, and acceptance and import are
+idempotent, so no work is duplicated. `intake list` reports each source's last
+poll, last success and current error. An unavailable GitHub connection is not
+an empty backlog.
 
 `factoryctl intake pause --source SOURCE_ID --revision REVISION` stops new
 imports, not existing work. `factoryctl intake withdraw --acceptance ID`
@@ -369,99 +350,4 @@ withdraws that approval, cancels linked queued work and requests the existing
 stop mechanism for running work. `withdrawal_pending` requires reconciliation;
 it does not promise that an offline host or running process has stopped.
 
-Existing legacy controllers remain supported until explicit cutover. Managed
-installation refuses another legacy intake schedule for the same factory home.
-It leaves that schedule, its configuration and journal untouched. Release-only
-schedules and other factory homes remain independent.
-
-To migrate a generated legacy intake schedule, use the installed release's
-`factoryctl` with its packaged controller and Python 3.9 or newer:
-
-```sh
-factoryctl intake service migrate --home "$HOME/.dark-factory" \
-  --legacy-config /absolute/path/to/existing-intake.json --preview
-factoryctl intake service migrate --home "$HOME/.dark-factory" \
-  --legacy-config /absolute/path/to/existing-intake.json --plan REVIEWED_PLAN_HASH
-```
-
-Preview reads the existing configuration and version-2 journal, verifies current
-GitHub identities through the connected Maintainer, and shows historical task
-links, unresolved history, configuration and policy changes. It changes no
-schedule or journal. Preview resolves and freezes the actual project default
-repository as the destination; a default change requires a new preview. Mixed
-historical destinations are refused explicitly. The source preserves the label
-filter and trusted human authors,
-poll interval, default priority and maximum matching label priority. Priority
-label changes update the same queued task, without new acceptance or recovery.
-Review companion settings and its operation journal are retained. After cutover,
-the companion uses the installed private operator adapter and the connected
-Maintainer for PR reads, independent review, enqueue and merge observation.
-It keeps the source issue repository separate from the frozen publication
-destination and uses each PR's actual base branch. Preview requires that
-publication destination to be bound and delegated and its configured Git review
-mirror to be ready before stopping the old schedule. Git fetch uses the
-operator's existing Git authentication; no broker credential is copied.
-
-The independent reviewer sees only status, observation of its own operation,
-and submission for its exact repository, PR, head and review UUID. Disconnect,
-expiry or withdrawal refuses new publication through live host checks; it never
-falls back to `gh` or the old owner bridge. A standalone old companion stops
-after customer opt-in. Existing legacy broker receipts require explicit
-administrative transfer with their original request proof before the customer
-connection can observe them; their UUIDs and stored outcomes remain unchanged.
-Initial customer connection waits until an existing controller/review pass
-releases its ownership lock; finish or stop that pass and retry Connect.
-A legacy configuration with `release_configs` cannot enter customer cutover yet:
-its release pass still uses the host's `gh` identity. Preview and apply refuse
-before stopping either schedule or changing the journal. Keep the existing
-release-only pass under its explicit operator configuration until a
-customer-scoped release path is available.
-
-Legacy `app/…` and `…[bot]` author entries are listed as a policy narrowing in
-preview. Already imported work and receipts are preserved. Future bot-authored
-issues require explicit manual acceptance; App authorship never establishes
-human approval. Apply a plan containing those entries with the additional
-`--acknowledge-policy-narrowing` flag. This acknowledgement is recorded in the
-reviewed cutover receipt, so an interrupted cutover can resume with the same
-plan. An app-only legacy author list becomes a manual source.
-
-All current matching backlog and journal-tracked issues become suppression
-receipts, **not** accepted content. The version-2 journal has no first-sync
-cutoff; migration does not invent one. Unprocessed baseline issues need explicit
-acceptance. An unchanged processed issue returns its existing task, or an
-unresolved-history explanation when the old bytes cannot be proved. Use the
-existing task controls to retry failed work. A reviewed title/body edit may be
-accepted as new work; comments, reactions and label edits cannot create it.
-The automatic trusted-author policy applies to new issues after cutover.
-
-Legacy workers predate durable intake lineage, so cutover requires the entire
-project to have no queued, running or blocked tasks or nonterminal runs. Use
-the existing task controls to finish or cancel work; migration does not stop
-that work on your behalf. Priority mappings support at most 25 labels and 2 KiB of JSON after escaping.
-Cutover also refuses uncertain legacy work, changed task
-incarnations, unsupported configuration and more than 200 baseline issues or
-journal entries. This bounded migration returns an explicit overflow instead
-of accepting a partial backlog. Settle the reported legacy work before retrying.
-The kernel commits the paused source, canonical suppression receipts and
-migration receipt atomically. The controller archives the exact old files,
-stops only the proven old launchd job, removes its restart plist, and starts one
-managed schedule. An originally running source is enabled only after that
-baseline exists; an originally stopped source remains paused.
-
-After an interruption, run the same command with the same plan hash. The private
-`HOME.intake/migration.json` receipt resumes the recorded phase without starting
-both controllers or repeating imported work. An ambiguous daemon reply leaves
-legacy stopped and the new source paused until the exact receipt is recovered.
-If GitHub content changed before commit, preview again and explicitly apply the
-new plan hash; the old controller stays stopped during that review. Operator
-source edits during cutover are preserved and require operator resolution.
-Back up `HOME.intake` and the existing journal alongside the factory home. Do not
-restore an older runtime that lacks these suppression and ownership boundaries
-once a migration has committed.
-
-The retained review companion reads new managed issue lineage through the private
-operator API using the migration's frozen repository and destination. It requires
-an imported, nonwithdrawn acceptance and the PR's completed publication receipt;
-human-authored source issues need no App-created issue marker. The old intake
-journal remains unchanged, and editing the source settings does not retarget
-reviews of retained work.
+Priority mappings support at most 25 labels and 2 KiB of JSON after escaping.

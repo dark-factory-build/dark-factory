@@ -418,42 +418,6 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 	}
 	var changeState kernel.Change
 	var retained *changeworker.Result
-	var retainedSourceReview *changeworker.SourceReview
-	if kernel.RetainedSourceReviewSupported(run.Provider) && run.Role == kernel.RoleWorker {
-		expected, review, parseErr := kernel.ParseRetainedSourceReviewTask(kernel.EffectiveTaskText(run.Provider, task.Title, task.Body))
-		if parseErr != nil {
-			return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSource, parseErr)
-		}
-		if review {
-			handoff, found, sourceErr := daemon.store.RetainedChangeHandoffForTask(ctx, run.ProjectID, expected.TaskID)
-			if sourceErr != nil || !found {
-				if sourceErr == nil {
-					sourceErr = kernel.ErrConflict
-				}
-				return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSource, sourceErr)
-			}
-			if mismatch := retainedReviewHandoffMismatch(expected, handoff); mismatch != nil {
-				return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSource, mismatch)
-			}
-			receipt, sourceErr := daemon.attemptSourceHandoff(ctx, handoff)
-			if sourceErr != nil {
-				return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSource, sourceErr)
-			}
-			if receipt.TaskID != expected.TaskID.String() || receipt.ChangeID != expected.ChangeID.String() || receipt.BaseCommit != expected.BaseCommit || receipt.TaskWorkRevision != uint64(expected.TaskWorkRevision.Int64()) || receipt.ChangeRevision != uint64(expected.ChangeRevision.Int64()) {
-				return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSource, kernel.ErrConflict)
-			}
-			reviewID := receipt.ChangeID
-			reviewTask := receipt.TaskID
-			reviewBase := receipt.BaseCommit
-			reviewHead := receipt.HeadCommit
-			reviewChange := receipt.ChangeRevision
-			reviewWork := receipt.TaskWorkRevision
-			reviewSource := receipt.SourcePath
-			reviewGit := receipt.GitDirectory
-			received := changeworker.SourceReview{TaskID: reviewTask, ChangeID: reviewID, TaskWorkRevision: reviewWork, ChangeRevision: reviewChange, BaseCommit: reviewBase, HeadCommit: reviewHead, SourcePath: reviewSource, GitDirectory: reviewGit}
-			retainedSourceReview = &received
-		}
-	}
 	if worker {
 		var found bool
 		changeState, found, err = daemon.store.Change(ctx, changeID)
@@ -550,7 +514,7 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 		RuntimePath: gotRuntimePath, RuntimeIdentity: runtimeFileIdentity,
 		GitExecutable: spec.GitExecutable, FactoryctlExecutable: factoryctl.Path(), ToolPath: spec.ToolPath, ToolchainReadRoots: spec.ToolchainReadRoots, LocalCILeaseDir: localCILeaseDir, AccountHome: spec.AccountHome, AccountConfigDir: accountConfigDir, RepositoryRoot: repository.Root, RepositoryIdentity: repositoryIdentity, RepositoryGitIdentity: repositoryGitIdentity, RepositoryOriginDigest: repositoryOriginDigest, GitCommonDir: gitCommonDir,
 		Revision: repository.BaseRef, ChangeParent: spec.ChangeParent, FinalName: finalName,
-		AttemptSocket: spec.AttemptSocket, Retained: retained, RetainedSourceReview: retainedSourceReview, ProviderTask: providerTask,
+		AttemptSocket: spec.AttemptSocket, Retained: retained, ProviderTask: providerTask,
 	}
 	workerConfig, err := changeworker.EncodeConfig(config)
 	if err != nil {

@@ -1376,7 +1376,7 @@ func TestCodexOverseerDiscoversScopedControlsWithoutChangingWorkerTask(t *testin
 	if !strings.Contains(customerPrompt, "factoryd gates, reviews and enqueues every published head") || !strings.Contains(customerPrompt, "never submit a verdict or enqueue yourself") || strings.Contains(customerPrompt, "resolve review findings before publishing") {
 		t.Fatal("factoryd-Maintainer overseer lacks factoryd's verdict guidance")
 	}
-	for _, command := range []string{`["attempt","task"]`, "overseer status", "next_offset", "next_text_offset", "worker interrupt", "worker replace", "Maintainer App", "structuredContent", "capability refusal", "causal wake", "Continue actionable supervision", "without idle polling", "only next event is external", "merge queue", "attempt succeed", "30 minutes after admission", "overseer task update --body", "preserve the original acceptance criteria", "Send-back replaces previous feedback", "accepted snapshot", "fully qualified source repository", "close_on_merge", "Closes #N", "Refs #N", "review handoff TASK_ID CHANGE_ID BASE_COMMIT TASK_WORK_REVISION CHANGE_REVISION"} {
+	for _, command := range []string{`["attempt","task"]`, "overseer status", "next_offset", "next_text_offset", "worker interrupt", "worker replace", "Maintainer App", "structuredContent", "capability refusal", "causal wake", "Continue actionable supervision", "without idle polling", "only next event is external", "merge queue", "attempt succeed", "30 minutes after admission", "overseer task update --body", "preserve the original acceptance criteria", "Send-back replaces previous feedback", "accepted snapshot", "fully qualified source repository", "close_on_merge", "Closes #N", "Refs #N"} {
 		if !strings.Contains(prompt, command) {
 			t.Fatalf("overseer cannot discover %q", command)
 		}
@@ -1707,30 +1707,6 @@ printf '#include <stdio.h>\nint main(void) { puts("sdk-ok"); return 0; }\n' > sd
 	if out, err := run("/bin/sh", "-c", readerScript, "proof", gitDirectory); err != nil {
 		t.Fatalf("orchestrator Git directory grant: %v\n%s", err, out)
 	}
-	producer := filepath.Join(root, "producer-change")
-	if err := os.Mkdir(producer, 0700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(producer, "review.txt"), []byte("producer\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	canonicalReview, err := runtime.WithGitCommonDirectory(gitDirectory, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	canonicalReview, err = canonicalReview.WithRetainedSourceReview(producer, gitDirectory)
-	if err != nil {
-		t.Fatal(err)
-	}
-	request.runtime = canonicalReview
-	canonicalReviewScript := `set -eu
-/bin/cat "$1/review.txt" >/dev/null
-/bin/cat "$2/refs/factory-branch" >/dev/null
-if printf forbidden > "$2/refs/injected" 2>/dev/null; then exit 41; fi
-`
-	if out, err := run("/bin/sh", "-c", canonicalReviewScript, "proof", producer, gitDirectory); err != nil {
-		t.Fatalf("generated canonical retained-source review profile: %v\n%s", err, out)
-	}
 	request.runtime.gitCommonDir, request.runtime.gitCommonDirWritable = "", false
 	if fixture := os.Getenv("DARK_FACTORY_TEST_FIXTURE_BINARY"); fixture != "" {
 		request.runtime.toolchainReadRoots = strings.TrimPrefix(request.runtime.toolchainReadRoots+string(filepath.ListSeparator)+filepath.Dir(fixture), string(filepath.ListSeparator))
@@ -1817,69 +1793,10 @@ func TestCodexLaunchGrantsTheRepositoryGitDirectoryByRole(t *testing.T) {
 	}
 }
 
-func TestCodexLaunchGrantsOnlyAuthenticatedRetainedReviewPathsReadOnly(t *testing.T) {
-	installation, runtime, _ := nativeFixture(t, kernel.ProviderCodex)
-	owned, err := runtime.WithGitCommonDirectory("/private/reviewer/.git", true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	granted, err := owned.WithRetainedSourceReview("/private/producer-change", "/private/producer-repo/.git")
-	if err != nil {
-		t.Fatal(err)
-	}
-	launch, err := Build(requestFor(t, kernel.ProviderCodex, installation, granted, "", ""))
-	if err != nil {
-		t.Fatal(err)
-	}
-	policy := ""
-	for _, argument := range launch.Argv() {
-		if strings.HasPrefix(argument, "permissions."+codexPermissionName(granted)+"=") {
-			policy = argument
-		}
-	}
-	for _, path := range []string{"/private/producer-change", "/private/producer-repo/.git"} {
-		if !strings.Contains(policy, tomlBasicString(path)+`="read"`) {
-			t.Fatalf("retained review path %q missing read grant: %q", path, policy)
-		}
-		if strings.Contains(policy, tomlBasicString(path)+`="write"`) {
-			t.Fatalf("retained review path %q writable: %q", path, policy)
-		}
-	}
-	if !strings.Contains(policy, tomlBasicString("/private/reviewer/.git")+`="write"`) {
-		t.Fatalf("reviewer's distinct Git directory lost its write grant: %q", policy)
-	}
-	for _, path := range []string{"/private/producer-repo", "/private/dark-factory/changes"} {
-		if strings.Contains(policy, tomlBasicString(path)+`="`) {
-			t.Fatalf("retained review grant widened to %q: %q", path, policy)
-		}
-	}
-	// The canonical layout shares the Git directory with the reviewer's own
-	// Change; the existing write grant remains the sole entry and is not
-	// duplicated as a second, conflicting TOML key.
-	shared, err := owned.WithRetainedSourceReview("/private/producer-change", "/private/reviewer/.git")
-	if err != nil {
-		t.Fatal(err)
-	}
-	sharedLaunch, err := Build(requestFor(t, kernel.ProviderCodex, installation, shared, "", ""))
-	if err != nil {
-		t.Fatalf("shared canonical Git directory rejected: %v", err)
-	}
-	sharedPolicy := ""
-	for _, argument := range sharedLaunch.Argv() {
-		if strings.HasPrefix(argument, "permissions."+codexPermissionName(shared)+"=") {
-			sharedPolicy = argument
-			break
-		}
-	}
-	if !strings.Contains(sharedPolicy, tomlBasicString("/private/reviewer/.git")+`="read"`) || strings.Contains(sharedPolicy, tomlBasicString("/private/reviewer/.git")+`="write"`) {
-		t.Fatalf("canonical shared Git grant is not read-only: %q", sharedPolicy)
-	}
-}
-
-func TestBothProviderAssignmentsDistinguishOwnedCheckoutFromRetainedReview(t *testing.T) {
+func TestBothProviderAssignmentsUseTheirOwnCheckout(t *testing.T) {
 	for name, prompt := range map[string]string{"codex": codexBootstrapPrompt, "claude": runner.ClaudeTaskLead} {
-		if !strings.Contains(prompt, "including corrections after send-back") || !strings.Contains(prompt, "attempt source is only for inspecting a settled retained Change") || !strings.Contains(prompt, "Never substitute another task or private Change path") || !strings.Contains(prompt, "screenshots are illustrative only and never blocking evidence") {
-			t.Fatalf("%s assignment loses checkout/reviewer authority distinction", name)
+		if !strings.Contains(prompt, "including corrections after send-back") || strings.Contains(prompt, "attempt source") || !strings.Contains(prompt, "Never substitute another task or private Change path") || !strings.Contains(prompt, "screenshots are illustrative only and never blocking evidence") {
+			t.Fatalf("%s assignment loses its own-checkout instruction", name)
 		}
 	}
 }

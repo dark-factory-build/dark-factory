@@ -1063,3 +1063,29 @@ func TestEmptyAdmissionDoesNotValidateUnrelatedHistoryOrWrite(t *testing.T) {
 		t.Fatal("empty probe mutated durable state")
 	}
 }
+
+// A task text starting "review handoff" is ordinary work: any provider may be
+// assigned it and admission treats it like any other task.
+func TestReviewHandoffTextIsAnOrdinaryTask(t *testing.T) {
+	ctx := context.Background()
+	store, err := createTestStore(ctx, filepath.Join(t.TempDir(), "kernel.db"), FactoryConfig{DispatchEnabled: true, Capacity: 2}, mustTime(t, 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	project, err := store.CreateProject(ctx, NewProject{ID: projectID(t, 1), Name: "project", Root: filepath.Join(t.TempDir(), "root")}, mustTime(t, 2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 2), ProjectID: project.ID, Name: "shell", Role: RoleWorker, Provider: ProviderShell, ToolBudgetLimit: 10}, mustTime(t, 3))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 3), ProjectID: project.ID, AssignedAgentID: agent.ID, IncarnationID: incarnationID(t, 3), Title: "task", Body: "review handoff not-an-identity\nlook at #1"}, mustTime(t, 4)); err != nil {
+		t.Fatalf("review handoff text refused at enqueue: %v", err)
+	}
+	result, err := store.AdmitNext(ctx, admissionKeys(t, 20, nil), mustTime(t, 5))
+	if err != nil || !result.Admitted() || result.Run.AgentID != agent.ID {
+		t.Fatalf("review handoff text not admitted: %+v, %v", result, err)
+	}
+}

@@ -32,12 +32,10 @@ for controller_asset in \
     cold-review.sh \
     factory-autonomy.py \
     factory-delivery.py \
-    factory-intake.py \
     factory-publication.py \
     factory-release.py \
     go-gate-environment.sh \
-    verify-adversarial-review.sh \
-    supervision.md
+    verify-adversarial-review.sh
 do
     cp "$repository_root/scripts/$controller_asset" "$test_repository/scripts/$controller_asset"
 done
@@ -354,12 +352,10 @@ for controller_asset in \
     cold-review.sh \
     factory-autonomy.py \
     factory-delivery.py \
-    factory-intake.py \
     factory-publication.py \
     factory-release.py \
     go-gate-environment.sh \
-    verify-adversarial-review.sh \
-    supervision.md
+    verify-adversarial-review.sh
 do
     installed="$test_repository/.worktrees/bin-$sha/libexec/dark-factory/$controller_asset"
     [ -x "$installed" ] && cmp -s "$installed" "$test_repository/.worktrees/build-$sha/scripts/$controller_asset" \

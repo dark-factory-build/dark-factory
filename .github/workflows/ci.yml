@@ -113,9 +113,6 @@ jobs:
               control-plane|control-plane/*)
                 control_plane=true
                 ;;
-              .github/workflows/deploy-control-plane.yml)
-                control_plane=true
-                ;;
               relay/fixtures/*|relay/src/*)
                 macos=true; select_macos_mode full; relay=true
                 ;;
@@ -131,7 +128,7 @@ jobs:
               scripts/package-release.sh|scripts/prepare-release-source.sh|scripts/publish-release.sh|scripts/render-homebrew-formula.sh|scripts/test-package-release.sh|scripts/test-prepare-release-source.sh|scripts/test-publish-release.sh)
                 macos=true; select_macos_mode release
                 ;;
-              .gitignore|scripts/bootstrap-maintainer-v2.sh)
+              .gitignore|scripts/bootstrap-maintainer-v2.sh|scripts/release.sh)
                 macos=true; select_macos_mode full; control_plane=true
                 ;;
               protocol/*|web/fixtures/*|spikes/browser-connectivity/*|internal/browser/*|internal/browserprotocol/*|internal/buildinfo/*|internal/install/*|cmd/factoryctl/*|scripts/reinstall-service.sh|launchd/*)

@@ -123,12 +123,10 @@ package_target() {
         cold-review.sh \
         factory-autonomy.py \
         factory-delivery.py \
-        factory-intake.py \
         factory-publication.py \
         factory-release.py \
         go-gate-environment.sh \
-        verify-adversarial-review.sh \
-        supervision.md
+        verify-adversarial-review.sh
     do
         controller_tree_entry=$(git -C "$repository_root" ls-tree "$source_sha" -- "scripts/$controller_asset")
         controller_mode=${controller_tree_entry%% *}
@@ -145,10 +143,7 @@ package_target() {
             exit 1
         }
         git -C "$repository_root" show "$source_sha:scripts/$controller_asset" >"$controller_payload/$controller_asset"
-        case "$controller_asset" in
-            supervision.md) chmod 0644 "$controller_payload/$controller_asset" ;;
-            *) chmod 0755 "$controller_payload/$controller_asset" ;;
-        esac
+        chmod 0755 "$controller_payload/$controller_asset"
         TZ=UTC0 touch -t 200001010000.00 "$controller_payload/$controller_asset"
         controller_size=$(/usr/bin/stat -f '%z' "$controller_payload/$controller_asset")
         package_unpacked_bytes=$((package_unpacked_bytes + controller_size))
@@ -183,11 +178,9 @@ package_target() {
         libexec/dark-factory/cold-review.sh \
         libexec/dark-factory/factory-autonomy.py \
         libexec/dark-factory/factory-delivery.py \
-        libexec/dark-factory/factory-intake.py \
         libexec/dark-factory/factory-publication.py \
         libexec/dark-factory/factory-release.py \
         libexec/dark-factory/go-gate-environment.sh \
-        libexec/dark-factory/supervision.md \
         libexec/dark-factory/verify-adversarial-review.sh
     rm -r "$package_payload"
     package_archive_bytes=$(/usr/bin/stat -f '%z' "$staging/$package_archive")

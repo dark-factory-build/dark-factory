@@ -25,9 +25,6 @@ func (store *Store) AdmitNext(ctx context.Context, keys AdmissionKeys, at UnixMi
 	if err != nil {
 		return AdmissionResult{}, tx.Rollback(err)
 	}
-	providerPlaceholders, providerArgs := retainedSourceReviewProviderSQL()
-	sourceReviewTask := retainedSourceReviewTaskSQL()
-	eligibleArgs := append(providerArgs, factory.Capacity)
 	if result, found, err := reconcileAdmissionOnConnection(ctx, tx.connection, keys); err != nil {
 		return AdmissionResult{}, tx.Rollback(err)
 	} else if found {
@@ -72,7 +69,6 @@ func (store *Store) AdmitNext(ctx context.Context, keys AdmissionKeys, at UnixMi
 			  AND NOT EXISTS (SELECT 1 FROM runs AS r WHERE r.agent_id = a.id AND r.phase <> 'terminal')
 			  AND NOT EXISTS (SELECT 1 FROM task_prerequisites AS prerequisite WHERE prerequisite.task_id = t.id AND prerequisite.consumed_run_id IS NULL AND NOT EXISTS (SELECT 1 FROM tasks AS upstream JOIN runs AS source_run ON source_run.task_id = upstream.id AND source_run.project_id = upstream.project_id AND source_run.task_incarnation_id = upstream.incarnation_id AND source_run.admitted_task_work_revision = prerequisite.upstream_work_revision AND source_run.phase = 'terminal' AND source_run.terminal_kind = 'succeeded' WHERE upstream.id = prerequisite.upstream_task_id AND upstream.status = 'succeeded' AND upstream.work_revision = prerequisite.upstream_work_revision))
 			  AND NOT EXISTS (SELECT 1 FROM task_conflict_paths AS candidate_path JOIN task_conflict_paths AS active_path ON active_path.path = candidate_path.path JOIN tasks AS active ON active.id = active_path.task_id JOIN task_repository_bindings AS candidate_repository ON candidate_repository.task_id = t.id JOIN task_repository_bindings AS active_repository ON active_repository.task_id = active.id AND active_repository.repository_id = candidate_repository.repository_id WHERE candidate_path.task_id = t.id AND active.project_id = t.project_id AND active.status = 'running')
-			  AND NOT (`+sourceReviewTask+` AND (a.provider NOT IN (`+providerPlaceholders+`) OR a.role <> 'worker'))
 			  AND ((a.role = 'worker' AND (SELECT COUNT(*) FROM runs WHERE role = 'worker' AND phase <> 'terminal') < ?)
 			    OR (a.role = 'orchestrator' AND (SELECT COUNT(*) FROM runs WHERE role = 'orchestrator' AND project_id = t.project_id AND phase <> 'terminal') < 1))
 		), next_for_worker AS (
@@ -86,7 +82,7 @@ func (store *Store) AdmitNext(ctx context.Context, keys AdmissionKeys, at UnixMi
 		FROM next_for_worker
 		WHERE rank = 1
 		ORDER BY `+taskQueueOrder+`, agent_id ASC
-		LIMIT 1`, eligibleArgs...).Scan(&rawTaskID, &rawAgentID)
+		LIMIT 1`, factory.Capacity).Scan(&rawTaskID, &rawAgentID)
 	found := err == nil
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return AdmissionResult{}, tx.Rollback(err)
@@ -98,16 +94,6 @@ func (store *Store) AdmitNext(ctx context.Context, keys AdmissionKeys, at UnixMi
 		}
 		if queued == 0 {
 			return rollbackNoAdmission(tx, NoAdmissionQueueEmpty)
-		}
-		var sourceRouteUnavailable int
-		if err := tx.connection.QueryRowContext(ctx, `SELECT EXISTS(
-			SELECT 1 FROM tasks AS t JOIN agents AS a ON a.id = t.assigned_agent_id AND a.project_id = t.project_id
-			WHERE t.status = 'queued' AND `+sourceReviewTask+` AND (a.provider NOT IN (`+providerPlaceholders+`) OR a.role <> 'worker')
-		)`, providerArgs...).Scan(&sourceRouteUnavailable); err != nil {
-			return AdmissionResult{}, tx.Rollback(err)
-		}
-		if sourceRouteUnavailable != 0 {
-			return rollbackNoAdmission(tx, NoAdmissionSourceRouteUnavailable)
 		}
 		var capacityBlocked int
 		if err := tx.connection.QueryRowContext(ctx, `SELECT EXISTS(

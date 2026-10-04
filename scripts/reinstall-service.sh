@@ -225,7 +225,7 @@ else
                 && join("|", @{$identity}{qw(version source target build_id)}) eq $expected;
         ' "$receipt" || { echo "$cmd build receipt mismatch" >&2; exit 1; }
     done
-    # Keep the managed intake controller beside the exact factoryctl that will
+    # Keep the release controller beside the exact factoryctl that will
     # run it. This is the same release asset set, so a reinstall never removes
     # an existing companion and then falls back to a source checkout.
     controller_dir="$bin/libexec/dark-factory"
@@ -234,12 +234,10 @@ else
         cold-review.sh \
         factory-autonomy.py \
         factory-delivery.py \
-        factory-intake.py \
         factory-publication.py \
         factory-release.py \
         go-gate-environment.sh \
-        verify-adversarial-review.sh \
-        supervision.md
+        verify-adversarial-review.sh
     do
         [ -f "$worktree/scripts/$controller_asset" ] \
             || { echo "release controller asset is missing: $controller_asset" >&2; exit 1; }

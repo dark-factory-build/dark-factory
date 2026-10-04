@@ -1,7 +1,7 @@
 # Repository setup, intake, and community feedback
 
 Implementation boundary, 18 September 2026. This programme extends the existing
-Maintainer, local operator API, and host intake controller. GitHub owns the
+Maintainer, local operator API, and factoryd intake. GitHub owns the
 shared backlog; `factoryd` owns execution. It adds neither a scheduler nor a
 general account platform.
 

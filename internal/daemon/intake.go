@@ -448,7 +448,7 @@ func (daemon *Daemon) previewIntake(ctx context.Context, source kernel.IntakeSou
 		return api.IntakeResult{State: "paused"}
 	}
 	// Keep bounded receipt scanning independent of discovery and admission limits.
-	// The existing controller journal owns progress; an empty cursor wraps.
+	// The caller (the scheduler's intake poll) owns progress; an empty cursor wraps.
 	if tick {
 		after := kernel.IntakeAcceptanceID{}
 		if cursor != "" {
