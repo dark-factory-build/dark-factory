@@ -250,7 +250,7 @@ func discover(ctx context.Context, root string, bounds limits) (*discovery, erro
 		inventory.Direct.add(Classify(rel))
 		result.contents = append(result.contents, File{Path: rel, Kind: Classify(rel), Bytes: fileInfo.Size()})
 		sampleName := path.Base(rel)
-		if len(inventory.Samples) < 32 && len(sampleName) <= 128 && utf8.ValidString(sampleName) {
+		if len(sampleName) <= 128 && utf8.ValidString(sampleName) {
 			inventory.Samples = append(inventory.Samples, sampleName)
 		} else {
 			inventory.SamplesOmitted++
@@ -315,6 +315,13 @@ func discover(ctx context.Context, root string, bounds limits) (*discovery, erro
 	sort.Slice(dirs, func(i, j int) bool { return depth(dirs[i]) > depth(dirs[j]) })
 	for _, dir := range dirs {
 		inventory := result.inventory[dir]
+		if names := inventory.Samples; len(names) > 32 {
+			inventory.Samples = make([]string, 32)
+			for i := range inventory.Samples {
+				inventory.Samples[i] = names[i*(len(names)-1)/31]
+			}
+			inventory.SamplesOmitted += uint32(len(names) - 32)
+		}
 		inventory.Total.plus(inventory.Direct)
 		if dir != "." {
 			result.inventory[path.Dir(dir)].Total.plus(inventory.Total)
@@ -743,7 +750,8 @@ func keys[V any](values map[string]V) []string {
 
 // Inventory counts eligible scanned physical files. Total includes Direct and
 // descendants; nodes sharing a path describe the same inventory, never additive
-// child totals. Samples name at most 32 direct files in lexical order.
+// child totals. Samples name at most 32 direct files in lexical order, evenly
+// spaced across that order for larger directories, including both endpoints.
 type Inventory struct {
 	Direct         InventoryCounts `json:"direct"`
 	Total          InventoryCounts `json:"total"`
