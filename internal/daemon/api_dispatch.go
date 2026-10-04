@@ -54,6 +54,10 @@ type Daemon struct {
 	productionRefreshAt map[kernel.ProjectID]time.Time
 	store               *kernel.Store
 	now                 func() time.Time
+	// livenessClock is deliberately separate from now. The latter is also
+	// used by supervisor ordering tests and may be an injected, blocking
+	// clock; liveness telemetry must never enter that ordering boundary.
+	livenessClock func() time.Time
 
 	// Cleanup survives caller cancellation but remains interruptible by daemon shutdown.
 	cleanupCtx    context.Context
@@ -153,7 +157,14 @@ func newDaemon(store *kernel.Store, now func() time.Time) (*Daemon, error) {
 		return nil, fmt.Errorf("%w: invalid daemon", kernel.ErrInvalidValue)
 	}
 	cleanupCtx, cleanupCancel := context.WithCancel(context.Background())
-	return &Daemon{store: store, now: now, cleanupCtx: cleanupCtx, cleanupCancel: cleanupCancel, browsers: make(map[*BrowserRuntime]struct{}), browserClientGates: &browserClientGates{}, attempts: make(map[kernel.RunID]*liveAttempt), supervisors: make(map[*supervisorRegistration]struct{}), schedulerWake: make(chan struct{}, 1), productionRefreshAt: make(map[kernel.ProjectID]time.Time)}, nil
+	return &Daemon{store: store, now: now, livenessClock: time.Now, cleanupCtx: cleanupCtx, cleanupCancel: cleanupCancel, browsers: make(map[*BrowserRuntime]struct{}), browserClientGates: &browserClientGates{}, attempts: make(map[kernel.RunID]*liveAttempt), supervisors: make(map[*supervisorRegistration]struct{}), schedulerWake: make(chan struct{}, 1), productionRefreshAt: make(map[kernel.ProjectID]time.Time)}, nil
+}
+
+func (daemon *Daemon) livenessTimestamp() time.Time {
+	if daemon != nil && daemon.livenessClock != nil {
+		return daemon.livenessClock()
+	}
+	return time.Now()
 }
 
 // HandleConnection synchronously consumes exactly one authenticated request,
@@ -168,6 +179,12 @@ func (daemon *Daemon) HandleConnection(ctx context.Context, connection *api.Conn
 	call, err := connection.Receive(ctx)
 	if err != nil {
 		return err
+	}
+	// The overseer snapshot is observation, not provider work. Counting the
+	// request itself would make a snapshot unable to report the quiet interval
+	// it is observing; authenticated attempt work calls still re-arm liveness.
+	if call.Kind() != api.CallOverseerSnapshot {
+		daemon.markAttemptAPICall(ctx, call)
 	}
 	dispatchContext, cancel := context.WithTimeout(ctx, defaultDispatchTimeout)
 	defer cancel()
@@ -186,6 +203,14 @@ func (daemon *Daemon) HandleConnection(ctx context.Context, connection *api.Conn
 		dispatchContext, cancel = context.WithTimeout(ctx, storageCompactionDispatchTimeout)
 		defer cancel()
 	}
+	deliveryState := &livenessDeliveryState{}
+	dispatchContext = context.WithValue(dispatchContext, livenessDeliveryContextKey{}, deliveryState)
+	responseDelivered := false
+	defer func() {
+		for _, delivery := range deliveryState.reports {
+			delivery.finish(responseDelivered)
+		}
+	}()
 	if err := connection.RefreshDeadline(dispatchContext); err != nil {
 		return err
 	}
@@ -201,6 +226,7 @@ func (daemon *Daemon) HandleConnection(ctx context.Context, connection *api.Conn
 			return dispatchErr
 		}
 		responseErr := connection.Respond(reply)
+		responseDelivered = responseErr == nil
 		if responseErr == nil {
 			responseErr = connection.AwaitOutcomeReceipt(dispatchContext)
 		}
@@ -211,7 +237,33 @@ func (daemon *Daemon) HandleConnection(ctx context.Context, connection *api.Conn
 	if err != nil {
 		return err
 	}
-	return connection.Respond(reply)
+	err = connection.Respond(reply)
+	responseDelivered = err == nil
+	return err
+}
+
+// markAttemptAPICall is intentionally best-effort telemetry. Authentication
+// and request handling remain authoritative below; liveness must never turn a
+// healthy API request into a failed attempt or a new termination path.
+func (daemon *Daemon) markAttemptAPICall(ctx context.Context, call api.Call) {
+	raw, ok := call.AttemptDigest()
+	if !ok {
+		return
+	}
+	digest, err := attemptDigest(raw)
+	if err != nil {
+		return
+	}
+	authority, err := daemon.store.AuthenticateAttempt(ctx, digest)
+	if err != nil {
+		return
+	}
+	daemon.attemptMu.Lock()
+	attempt := daemon.attempts[authority.RunID]
+	daemon.attemptMu.Unlock()
+	if attempt != nil {
+		attempt.markAttemptAPICall(daemon.livenessTimestamp())
+	}
 }
 
 // dispatch is intentionally one closed switch. API validation belongs to the
@@ -1773,11 +1825,55 @@ func (daemon *Daemon) overseerSnapshot(ctx context.Context, call api.Call) api.R
 	if err != nil {
 		return newErrorReply(api.RemoteUnavailable)
 	}
+	deliveries := daemon.addOverseerLiveness(&projected, snapshot.Runs, daemon.livenessTimestamp())
+	if deliveryState, ok := ctx.Value(livenessDeliveryContextKey{}).(*livenessDeliveryState); ok {
+		deliveryState.reports = append(deliveryState.reports, deliveries...)
+	}
 	reply, err := api.NewOverseerSnapshotReply(projected)
 	if err != nil {
 		return newErrorReply(api.RemoteInternal)
 	}
 	return reply
+}
+
+type livenessDeliveryContextKey struct{}
+
+type livenessDeliveryState struct {
+	reports []livenessReportDelivery
+}
+
+func (daemon *Daemon) addOverseerLiveness(projected *api.OverseerSnapshot, runs []kernel.OverseerRunSummary, now time.Time) []livenessReportDelivery {
+	if daemon == nil || projected == nil || now.IsZero() {
+		return nil
+	}
+	daemon.attemptMu.Lock()
+	defer daemon.attemptMu.Unlock()
+	var deliveries []livenessReportDelivery
+	for _, run := range runs {
+		attempt := daemon.attempts[run.ID]
+		if attempt == nil {
+			continue
+		}
+		activity, delivery, report := attempt.beginLivenessReport(now, stalledRunLivenessThreshold)
+		if !report {
+			continue
+		}
+		millis := func(value time.Time) uint64 {
+			if value.IsZero() || value.UnixMilli() < 0 {
+				return 0
+			}
+			return uint64(value.UnixMilli())
+		}
+		projected.LivenessReports = append(projected.LivenessReports, api.OverseerLivenessReport{
+			RunID: run.ID.String(), TaskID: run.TaskID.String(), Provider: run.Provider.String(), Stalled: true,
+			ThresholdMs: uint64(stalledRunLivenessThreshold.Milliseconds()), StartedAtMs: millis(activity.startedAt),
+			LastTerminalOutputAtMs: millis(activity.lastTerminalOutputAt), LastAttemptAPICallAtMs: millis(activity.lastAttemptAPICallAt),
+			TerminalOutputBytes: activity.terminalOutputBytes,
+			Detail:              fmt.Sprintf("run %s task %s provider %s has had no terminal-output growth and no attempt API calls for %s after startup", run.ID, run.TaskID, run.Provider, stalledRunLivenessThreshold),
+		})
+		deliveries = append(deliveries, delivery)
+	}
+	return deliveries
 }
 
 func (daemon *Daemon) overseerEnqueueTask(ctx context.Context, call api.Call) api.Reply {

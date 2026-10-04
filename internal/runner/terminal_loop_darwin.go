@@ -16,7 +16,7 @@ import (
 // It never returns with an unjoined goroutine: the outer attempt runner owns
 // the PTY, child group, two capability sockets and every terminal cursor.
 func runReleasedProvider(child *OwnedChild, daemon, worker *os.File, reads *attemptReadSet, stagePTY *ptyStageSink, retained *terminalByteRing, startup []byte) (bool, error) {
-	return runReleasedProviderWithHandover(child, daemon, worker, reads, stagePTY, retained, startup, nil)
+	return runReleasedProviderWithHandover(child, daemon, worker, reads, stagePTY, retained, startup, nil, 0)
 }
 
 // HandoverTransport belongs to the runner loop. The endpoint sends only
@@ -48,7 +48,7 @@ func handoverGrace() time.Duration {
 
 // The endpoint admits only a fenced replacement and passes its still-open
 // duplex connection here. A nil channel retains protocol-1 close-and-drain.
-func runReleasedProviderWithHandover(child *OwnedChild, daemon, worker *os.File, reads *attemptReadSet, stagePTY *ptyStageSink, retained *terminalByteRing, startup []byte, handover *HandoverTransport) (bool, error) {
+func runReleasedProviderWithHandover(child *OwnedChild, daemon, worker *os.File, reads *attemptReadSet, stagePTY *ptyStageSink, retained *terminalByteRing, startup []byte, handover *HandoverTransport, retryInterval time.Duration) (bool, error) {
 	if child == nil || daemon == nil || worker == nil || reads == nil || child.ptyMaster == nil || retained == nil {
 		return false, ErrState
 	}
@@ -56,7 +56,7 @@ func runReleasedProviderWithHandover(child *OwnedChild, daemon, worker *os.File,
 	// worker output is already retained in exact order. The stage sink and this
 	// loop share that one ring by pointer: any copy here would silently drop
 	// every byte the worker writes between adoption and provider exec.
-	loop := terminalOwner{child: child, daemon: daemon, worker: worker, reads: reads, daemonOpen: true, workerOpen: true, ring: retained, handover: handover}
+	loop := terminalOwner{child: child, daemon: daemon, worker: worker, reads: reads, daemonOpen: true, workerOpen: true, ring: retained, handover: handover, startupSubmitRetryInterval: retryInterval}
 	if handover != nil {
 		handover.Current = daemon
 	}
@@ -147,6 +147,11 @@ type terminalOwner struct {
 	// lastOutput is when the provider last wrote, so the CR follows a quiet
 	// prompt rather than a banner still being drawn.
 	enterAfter, enterBy, lastOutput time.Time
+	startupSubmitAttempts           uint8
+	startupSubmitLast               time.Time
+	startupSubmitPending            bool
+	startupSubmitVerified           bool
+	startupSubmitRetryInterval      time.Duration
 	humanReplyCorrelation           uint64
 	humanReplyCount                 uint32
 }
@@ -158,16 +163,29 @@ type terminalOwner struct {
 // startupEnterCeiling regardless. Recognise the provider's own prompt if
 // these ever prove wrong for a CLI.
 const (
-	startupRawCeiling         = 2 * time.Second
-	startupEnterFloor         = time.Second
-	startupEnterQuiet         = 500 * time.Millisecond
-	startupEnterCeiling       = 5 * time.Second
-	startupEnterTick          = 100 * time.Millisecond
+	startupRawCeiling          = 2 * time.Second
+	startupEnterFloor          = time.Second
+	startupEnterQuiet          = 500 * time.Millisecond
+	startupEnterCeiling        = 5 * time.Second
+	startupEnterTick           = 100 * time.Millisecond
+	startupSubmitRetryInterval = time.Second
+	startupSubmitMaxAttempts   = 3 // initial CR plus two bounded retries
+	// startupVerifyRetries bounds how long after its last CR a provider may
+	// take to show authenticated startup evidence: its first model turn,
+	// which ordinary latency can stretch well past the CR retries (2 min).
+	startupVerifyRetries      = 120
 	terminalPayloadWriteLimit = 250 * time.Millisecond
 	// DeferredSubmitBudget is the extra daemon effect budget for a deferred
 	// Codex submit: its paste, ceiling/tick, and standalone CR write.
 	DeferredSubmitBudget = startupEnterCeiling + 2*terminalPayloadWriteLimit + startupEnterTick
 )
+
+func (o *terminalOwner) startupSubmitRetryWait() time.Duration {
+	if o.startupSubmitRetryInterval > 0 {
+		return o.startupSubmitRetryInterval
+	}
+	return startupSubmitRetryInterval
+}
 
 // awaitRawMode waits, up to the ceiling, for the provider to clear canonical
 // input on its terminal, draining what it prints meanwhile so a provider that
@@ -222,11 +240,46 @@ func (o *terminalOwner) submitPending() error {
 		return o.send(TerminalFrame{Kind: TerminalHumanReplyResult, Correlation: correlation, Count: count, Status: status})
 	}
 	switch status {
-	case TerminalResultOK, TerminalResultRejected:
+	case TerminalResultOK:
+		if !o.startupSubmitVerified {
+			o.startupSubmitAttempts = 1
+			o.startupSubmitLast = time.Now()
+			o.startupSubmitPending = true
+		}
+		return nil
+	case TerminalResultRejected:
 		return nil
 	default:
 		return fmt.Errorf("runner: provider startup submit %s", status)
 	}
+}
+
+// verifyStartupSubmit gives the provider a bounded opportunity to show that
+// the startup line was consumed. A dropped CR is recoverable; a provider that
+// remains silent after the fixed retry budget is a failed run, not an
+// indefinitely running one.
+func (o *terminalOwner) verifyStartupSubmit() error {
+	if !o.startupSubmitPending {
+		return nil
+	}
+	if time.Since(o.startupSubmitLast) < o.startupSubmitRetryWait() {
+		return nil
+	}
+	if o.startupSubmitAttempts >= startupSubmitMaxAttempts {
+		if time.Since(o.startupSubmitLast) < startupVerifyRetries*o.startupSubmitRetryWait() {
+			return nil
+		}
+		stopErr := o.stop()
+		return errors.Join(fmt.Errorf("%w after %d carriage returns", ErrStartupUnverified, o.startupSubmitAttempts), stopErr)
+	}
+	_, status := o.writeTerminalPayload([]byte{'\r'})
+	if status != TerminalResultOK {
+		stopErr := o.stop()
+		return errors.Join(fmt.Errorf("%w: retry submit %s", ErrStartupUnverified, status), stopErr)
+	}
+	o.startupSubmitAttempts++
+	o.startupSubmitLast = time.Now()
+	return nil
 }
 
 func (o *terminalOwner) rejectHumanReply() error {
@@ -339,6 +392,9 @@ func (o *terminalOwner) serve() (bool, error) {
 			if err := o.submitPending(); err != nil {
 				return o.daemonOpen, err
 			}
+			if err := o.verifyStartupSubmit(); err != nil {
+				return o.daemonOpen, err
+			}
 		case sourceChild:
 			if err := o.rejectHumanReply(); err != nil {
 				return o.daemonOpen, err
@@ -368,6 +424,11 @@ func (o *terminalOwner) serve() (bool, error) {
 		case sourcePTY:
 			o.lastOutput = time.Now()
 			if err := o.consumePTY(ev.bytes, ev.err); err != nil {
+				return o.daemonOpen, err
+			}
+			// A continuously readable PTY must not starve the bounded startup
+			// watchdog. Check it after every read as well as on the idle tick.
+			if err := o.verifyStartupSubmit(); err != nil {
 				return o.daemonOpen, err
 			}
 			if stopped, err := o.handoverStep(); stopped || err != nil {
@@ -448,7 +509,7 @@ func (o *terminalOwner) nextEvent() (terminalReady, error) {
 		// While a startup CR is owed the wait is bounded, so the quiet prompt
 		// is noticed without any event arriving.
 		var timeout *unix.Timespec
-		if !o.enterBy.IsZero() || o.handover != nil {
+		if !o.enterBy.IsZero() || o.startupSubmitPending || o.handover != nil {
 			tick := unix.NsecToTimespec(int64(startupEnterTick))
 			timeout = &tick
 		}
@@ -538,6 +599,10 @@ func (o *terminalOwner) command(raw attemptFrame) error {
 		return o.resize(command)
 	case TerminalHumanReply:
 		return o.humanReply(command)
+	case TerminalStartupEvidence:
+		o.startupSubmitVerified = true
+		o.startupSubmitPending = false
+		return nil
 	default:
 		return ErrState
 	}

@@ -47,11 +47,12 @@ const (
 )
 
 var (
-	ErrUnsupported = errors.New("runner: unsupported platform")
-	ErrState       = errors.New("runner: invalid lifecycle state")
-	ErrIdentity    = errors.New("runner: identity mismatch")
-	ErrUnresolved  = errors.New("runner: process state unresolved")
-	ErrConflict    = errors.New("runner: durable record conflict")
+	ErrUnsupported       = errors.New("runner: unsupported platform")
+	ErrState             = errors.New("runner: invalid lifecycle state")
+	ErrIdentity          = errors.New("runner: identity mismatch")
+	ErrUnresolved        = errors.New("runner: process state unresolved")
+	ErrConflict          = errors.New("runner: durable record conflict")
+	ErrStartupUnverified = errors.New("runner: provider startup submission unverified")
 )
 
 type Birth struct {

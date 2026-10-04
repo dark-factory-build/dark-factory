@@ -208,6 +208,7 @@ func TestAttemptConfigureFreezesAndRejectsStartupInput(t *testing.T) {
 	})
 	spec := base
 	spec.StartupInput = startup
+	spec.startupSubmitRetryInterval = 37 * time.Millisecond
 	if err := controller.Configure(spec); err != nil {
 		t.Fatal(err)
 	}
@@ -218,6 +219,9 @@ func TestAttemptConfigureFreezesAndRejectsStartupInput(t *testing.T) {
 	}
 	if got, want := string(frozen.StartupInput), "exact startup\n"; got != want {
 		t.Fatalf("frozen startup input=%q want=%q", got, want)
+	}
+	if frozen.StartupSubmitRetryInterval != spec.startupSubmitRetryInterval {
+		t.Fatalf("frozen startup retry interval=%s want=%s", frozen.StartupSubmitRetryInterval, spec.startupSubmitRetryInterval)
 	}
 	maximum := frozen
 	maximum.StartupInput = bytes.Repeat([]byte{'x'}, MaxProviderTaskBytes)
@@ -328,7 +332,7 @@ func runAttemptWorkerHelper(args []string) error {
 	var provider ExecSpec
 	var providerTask []byte
 	switch mode {
-	case "native-input", "native-raw", "native-chatty", "native-exit":
+	case "native-input", "native-raw", "native-chatty", "native-drop-submit", "native-delayed-submit", "native-continuous-submit", "native-exit":
 		// native-raw greets with more than the terminal's output buffer and
 		// only then takes the terminal out of canonical mode, as an
 		// interactive CLI does while it starts; native-chatty then keeps
@@ -340,12 +344,27 @@ func runAttemptWorkerHelper(args []string) error {
 			greeting = "head -c 2048 /dev/zero | tr '\\0' x; sleep 0.3; stty -icanon || exit 96; "
 		case "native-chatty":
 			greeting = fmt.Sprintf("stty -icanon || exit 96; (i=0; while [ $i -lt 10 ]; do sleep 0.1; printf .; i=$((i+1)); done; : > %q) & ", filepath.Join(root, "chatter.done"))
+		case "native-drop-submit":
+			greeting = "stty -echo || exit 96; "
+		case "native-delayed-submit":
+			greeting = "stty -echo || exit 96; "
+		case "native-continuous-submit":
+			greeting = "stty -echo || exit 96; "
 		case "native-exit":
 			greeting = "exit 3; "
 		}
 		startupWitness := shellWitness("\"$startup\"", filepath.Join(root, "provider.startup"))
 		interactiveWitness := shellWitness("\"$interactive\"", filepath.Join(root, "provider.stdin"))
-		script := fmt.Sprintf("test ! -e /dev/fd/11 || exit 97; %sIFS= read -r startup || exit 98; %s || exit 99; IFS= read -r interactive || exit 100; %s || exit 101; while test ! -f %q; do sleep 0.01; done", greeting, startupWitness, interactiveWitness, filepath.Join(root, "finish"))
+		script := fmt.Sprintf("test ! -e /dev/fd/11 || exit 97; %sIFS= read -r startup || exit 98; %s || exit 99; ", greeting, startupWitness)
+		if mode == "native-drop-submit" {
+			script += fmt.Sprintf("IFS= read -r retry || exit 102; : > %q; printf 'work-started\\n'; IFS= read -r interactive || exit 100; %s || exit 101; while test ! -f %q; do sleep 0.01; done", filepath.Join(root, "provider.started"), interactiveWitness, filepath.Join(root, "finish"))
+		} else if mode == "native-delayed-submit" {
+			script += "sleep 0.8; printf 'delayed-banner\\n'; while :; do sleep 1; done"
+		} else if mode == "native-continuous-submit" {
+			script += fmt.Sprintf("while test ! -f %q; do printf 'stream'; sleep 0.02; done", filepath.Join(root, "finish"))
+		} else {
+			script += fmt.Sprintf("IFS= read -r interactive || exit 100; %s || exit 101; while test ! -f %q; do sleep 0.01; done", interactiveWitness, filepath.Join(root, "finish"))
+		}
 		provider = ExecSpec{Target: "/bin/sh", Args: []string{"-c", script}, Env: []string{"PATH=/usr/bin:/bin", "LANG=C"}, Cwd: providerCwd}
 	case "shell", "shell-input", "term", "leader", "tail", "reply", "reply-submit", "reply-submit-exit", "loud-adoption", "handoff-worker-eof":
 		providerWitness := shellWitness("$$", filepath.Join(root, "provider.pid"))
@@ -498,7 +517,7 @@ func runAttemptWorkerHelper(args []string) error {
 		}
 	}
 	var task *os.File
-	if mode != "native-input" && mode != "native-raw" && mode != "native-chatty" && mode != "native-exit" {
+	if mode != "native-input" && mode != "native-raw" && mode != "native-chatty" && mode != "native-drop-submit" && mode != "native-delayed-submit" && mode != "native-continuous-submit" && mode != "native-exit" {
 		if len(providerTask) == 0 {
 			providerTask = []byte("test-provider-task\n")
 		}
@@ -999,6 +1018,160 @@ func TestAttemptRunnerSubmitsTheStartupPromptOnlyOnceTheProviderIsQuiet(t *testi
 	record := f.finishAndAck()
 	if record.Terminal.Process != inner || record.Terminal.Exit.Code != 0 {
 		t.Fatalf("terminal=%+v", record.Terminal)
+	}
+}
+
+// The provider deliberately consumes the first submit without starting work.
+// The second CR is accepted by the same PTY submission path and its output is
+// the evidence that the bounded recovery reached the provider.
+func TestAttemptRunnerResendsDroppedStartupCarriageReturn(t *testing.T) {
+	f := newAttemptFixture(t, "native-drop-submit", "")
+	f.spec.startupSubmitRetryInterval = 10 * time.Millisecond
+	f.spec.StartupInput = []byte("native-startup\r")
+	inner := f.activateOuter()
+	f.advanceToProvider()
+	if err := f.controller.Release(StageProvider); err != nil {
+		t.Fatal(err)
+	}
+	if ready := f.nextTerminal(TerminalReady, 0); ready.Kind != TerminalReady {
+		t.Fatalf("terminal ready=%+v", ready)
+	}
+	waitFile(t, filepath.Join(f.root, "provider.started"))
+	if err := f.controller.SendTerminalCommand(TerminalCommand{Kind: TerminalStartupEvidence}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.controller.SendTerminalCommand(TerminalCommand{Kind: TerminalGenerationInstall, Correlation: 1, Generation: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if result := f.nextTerminal(TerminalGenerationResult, 1); result.Status != TerminalResultOK {
+		t.Fatalf("generation install=%+v", result)
+	}
+	if err := f.controller.SendTerminalCommand(TerminalCommand{Kind: TerminalInput, Correlation: 2, Generation: 1, Sequence: 1, Payload: []byte("interactive-after-ready\n")}); err != nil {
+		t.Fatal(err)
+	}
+	if result := f.nextTerminal(TerminalInputResult, 2); result.Status != TerminalResultOK {
+		t.Fatalf("terminal input=%+v", result)
+	}
+	waitFile(t, filepath.Join(f.root, "provider.stdin"))
+	if err := os.WriteFile(filepath.Join(f.root, "finish"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	record := f.finishAndAck()
+	if record.Terminal.Process != inner || record.Terminal.Exit.Code != 0 {
+		t.Fatalf("terminal=%+v", record.Terminal)
+	}
+}
+
+// A provider's first model turn can outlast the carriage-return retries.
+// Evidence that arrives after them, inside the verification ceiling, keeps
+// the run alive.
+func TestAttemptRunnerKeepsAProviderWhoseStartupEvidenceIsSlow(t *testing.T) {
+	f := newAttemptFixture(t, "native-drop-submit", "")
+	f.spec.startupSubmitRetryInterval = 10 * time.Millisecond
+	f.spec.StartupInput = []byte("native-startup\r")
+	inner := f.activateOuter()
+	f.advanceToProvider()
+	if err := f.controller.Release(StageProvider); err != nil {
+		t.Fatal(err)
+	}
+	if ready := f.nextTerminal(TerminalReady, 0); ready.Kind != TerminalReady {
+		t.Fatalf("terminal ready=%+v", ready)
+	}
+	waitFile(t, filepath.Join(f.root, "provider.started"))
+	time.Sleep(300 * time.Millisecond) // past the three retries, inside 120x10ms
+	if err := f.controller.SendTerminalCommand(TerminalCommand{Kind: TerminalStartupEvidence}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(f.root, "finish"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	record := f.finishAndAck()
+	if record.Terminal.Process != inner || record.Terminal.Exit.Code != 0 {
+		t.Fatalf("terminal=%+v", record.Terminal)
+	}
+}
+
+// A delayed banner is not evidence that the startup task was consumed. The
+// runner exhausts its bounded retries and surfaces the stable diagnostic
+// instead of leaving the provider running indefinitely.
+func TestAttemptRunnerRejectsDelayedUnrelatedStartupOutput(t *testing.T) {
+	f := newAttemptFixture(t, "native-delayed-submit", "")
+	f.spec.startupSubmitRetryInterval = 10 * time.Millisecond
+	f.spec.StartupInput = []byte("native-startup\r")
+	inner := f.activateOuter()
+	f.advanceToProvider()
+	if err := f.controller.Release(StageProvider); err != nil {
+		t.Fatal(err)
+	}
+	if ready := f.nextTerminal(TerminalReady, 0); ready.Kind != TerminalReady {
+		t.Fatalf("terminal ready=%+v", ready)
+	}
+	if record := f.finishAndAck(false); record.Terminal.Process != inner {
+		t.Fatalf("terminal=%+v", record.Terminal)
+	}
+	if output := f.output(); !strings.Contains(output, ErrStartupUnverified.Error()) {
+		t.Fatalf("runner output=%q, want %q", output, ErrStartupUnverified)
+	}
+}
+
+// Continuous terminal output is not itself the startup proof. Once the
+// authenticated startup-evidence command arrives, the same live provider may
+// stream without being killed by the bounded submit watchdog.
+func TestAttemptRunnerKeepsAHealthyContinuouslyStreamingProvider(t *testing.T) {
+	f := newAttemptFixture(t, "native-continuous-submit", "")
+	f.spec.StartupInput = []byte("native-startup\r")
+	inner := f.activateOuter()
+	f.advanceToProvider()
+	if err := f.controller.Release(StageProvider); err != nil {
+		t.Fatal(err)
+	}
+	if ready := f.nextTerminal(TerminalReady, 0); ready.Kind != TerminalReady {
+		t.Fatalf("terminal ready=%+v", ready)
+	}
+	if err := f.controller.SendTerminalCommand(TerminalCommand{Kind: TerminalStartupEvidence}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.controller.SendTerminalCommand(TerminalCommand{Kind: TerminalAttach, Correlation: 1, Sequence: 0}); err != nil {
+		t.Fatal(err)
+	}
+	if attached := f.nextTerminal(TerminalAttached, 1); attached.Status != TerminalResultOK {
+		t.Fatalf("terminal attach=%+v", attached)
+	}
+	if err := f.controller.SendTerminalCommand(TerminalCommand{Kind: TerminalCredit, Credit: 256}); err != nil {
+		t.Fatal(err)
+	}
+	if output := f.nextTerminal(TerminalOutput, 0); len(output.Payload) == 0 {
+		t.Fatalf("continuous output=%+v", output)
+	}
+	if err := os.WriteFile(filepath.Join(f.root, "finish"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	record := f.finishAndAck()
+	if record.Terminal.Process != inner || record.Terminal.Exit.Code != 0 {
+		t.Fatalf("terminal=%+v", record.Terminal)
+	}
+}
+
+// A continuously readable PTY cannot starve the startup watchdog. Without
+// authenticated evidence, output alone is unrelated to task submission and
+// the bounded retry budget must still terminate the provider.
+func TestAttemptRunnerExhaustsStartupRetriesDuringContinuousOutput(t *testing.T) {
+	f := newAttemptFixture(t, "native-continuous-submit", "")
+	f.spec.startupSubmitRetryInterval = 10 * time.Millisecond
+	f.spec.StartupInput = []byte("native-startup\r")
+	inner := f.activateOuter()
+	f.advanceToProvider()
+	if err := f.controller.Release(StageProvider); err != nil {
+		t.Fatal(err)
+	}
+	if ready := f.nextTerminal(TerminalReady, 0); ready.Kind != TerminalReady {
+		t.Fatalf("terminal ready=%+v", ready)
+	}
+	if record := f.finishAndAck(false); record.Terminal.Process != inner {
+		t.Fatalf("terminal=%+v", record.Terminal)
+	}
+	if output := f.output(); !strings.Contains(output, ErrStartupUnverified.Error()) {
+		t.Fatalf("runner output=%q, want %q", output, ErrStartupUnverified)
 	}
 }
 
