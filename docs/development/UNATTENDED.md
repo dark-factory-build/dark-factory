@@ -122,91 +122,13 @@ operation. Explicit local revision policies remain local. See the
 [installation guide](../install.md) for `--base-revision` and repository base
 settings.
 
-An unattended release is complete only when the configured verification hook
-observes the exact merged SHA healthy on the actual target. Never infer this
+An unattended release is complete only when factoryd records `release:<sha>`
+verified for the exact merged SHA. Never infer this
 from worker success, merge, a TCP socket, or an unchanged alias alone.
 
 ## Host scheduling and deployment
 
-factoryd polls intake and reviews, enqueues and observes published pull
-requests itself; no host intake, review or production controller remains.
-`scripts/factory-autonomy.py CONFIG --once --release-only` is the one remaining
-host pass; it refuses to run without `--release-only`. It uses `release_configs` paths for exact-default-head releases and enqueues
-one idempotent verified-delivery follow-up for the same project's overseer.
-After verification, the controller fast-forwards its own source checkout to the
-exact released commit so the next tick loads the released scripts. The checkout
-must be on the configured release branch, have no tracked edits, and use an
-`origin` matching the configured GitHub repository (HTTPS or SSH). Untracked
-files are preserved. Fetch or ancestry failures, operator edits, and a different
-branch are reported without resetting the checkout or changing the verified
-runtime receipt; resolve the reported checkout condition before the next pass.
-Use `--plist` to generate a launchd StartInterval job. The generated job uses
-absolute script/config paths and the host's tool PATH. Install it only after
-the one-shot preflight succeeds. Each config gets a separate launchd label, and
-one host lock serializes the passes for a factory. Use the controller for scheduled work; direct maintenance
-hooks are operator tools.
-Each tick writes a mode-0600 `.release-autonomy.json` health receipt beside the
-controller journal, containing component names, finite status codes, and fixed source-refresh refusal details for bounded
-automation health diagnostics. A status code alone names no cause, so each
-failing component also prints one line to the controller's own log (its launchd
-`StandardErrorPath`): the component name, that status code, and a bounded,
-single-line tail of the component's stderr with labelled credentials and GitHub
-tokens starred. The durable receipt itself still retains no child output.
-Bind the controller config to the actual `factory_home`, `project_id`,
-`overseer_agent_id` and external `journal`; its PATH must select the matching
-installed factoryctl.
-Regenerate and replace the existing launchd job only after a one-shot preflight.
-An unloaded job or a config pointing at an older factory is not autonomous proof.
-No GitHub credential is stored in config or passed to a task.
-
-A release configuration pins `repository`, `base`, `journal`, `deploy_argv`,
-`verify_argv`, `review_verifier`, and `command_timeout` (5–1200 seconds).
-All command arrays are trusted operator configuration with absolute executable
-paths, never source or agent output. The controller appends the full merge SHA.
-Deployment has no elapsed-time ceiling; `command_timeout` bounds verification and
-review commands. Install the launchd job generated with
-`factory-autonomy.py CONFIG --plist --release-only`.
-The existing release journal lock prevents duplicate deployment. A stuck run must be
-resolved through its existing recovery path, never killed to meet a release clock.
-For this repository use Python with `scripts/deploy-runtime.py` (a shim over
-`factoryctl release SHA --wait`; see [DEPLOY.md](DEPLOY.md)) and
-`scripts/verify-live-runtime.py`. For a non-default factory, include
-`"--home", "/absolute/factory-home"` in both arrays before the appended SHA.
-For the site use `/bin/sh` with
-`scripts/deploy-site.sh` and Python with `scripts/verify-live-site.py`.
-`review_verifier` runs `/bin/sh` with `scripts/verify-adversarial-review.sh`.
-A probe emits the actually installed `sha` and boolean `healthy`; unavailable
-or malformed observations block deployment. It must never echo the requested
-SHA without observing the target.
-
-`factory-release.py CONFIG --latest --once` requires a merged PR at the
-configured default branch, an independent Maintainer ALLOW at its exact head,
-and completed passing checks. It records the plan before executing the fixed
-hook, then independently probes the live target. A crash or ambiguous effect
-is observed before retrying; blocked receipts require explicit `--retry`.
-A hook that exits 75 declares that it failed before any effect on the target
-(`deploy-runtime.py` does so when factoryd refused the release or it failed
-before the swap, so the old build still runs): the receipt is blocked as pre-deployment and
-leaves no unresolved barrier, so the next tick re-plans it automatically, once.
-A blocker that survives that attempt, like any other failure, keeps the barrier
-and needs `--retry`.
-Each hook starts in an
-owned process group; a timeout terminates that group before the receipt is
-blocked.
-
-Before deployment the release journal records the actually observed live SHA
-and maps every merged factory PR in the bounded ancestor range to its one
-App-rendered `Refs #N` or `Closes #N` footer. The App operation marker follows
-that footer and is accepted, and it is what marks a body as factory-written: a
-marked body whose footer is malformed blocks deployment, while an unmarked PR
-without a valid footer is source-less and is skipped. Incomplete
-range results and unexpected live tips block deployment. On the first probe,
-an already-current live SHA becomes an explicit baseline with no historical
-issue sweep; an older observed SHA is mapped before deployment even when it is
-unhealthy. A non-ancestor baseline requires explicit
-`allow_nonancestor_baseline: true` and deliberately enqueues no delivery work.
-
-For deployment-required source issues, set `close_on_merge: false` when the
-App creates the PR. The host's verified-delivery follow-up lets the overseer
-close the issue with evidence after deployment. Without an enabled release
-configuration, merged work remains a deployment handoff, not automatic delivery.
+factoryd polls intake and reviews, enqueues, observes and releases published
+pull requests itself; no host controller remains. Releases are described in
+[DEPLOY.md](DEPLOY.md). The site deploys with `scripts/deploy-site.sh` and
+`scripts/verify-live-site.py`.

@@ -52,6 +52,8 @@ type Daemon struct {
 	// durable dispatch switch is never written. releaseBusy is the one
 	// release this process runs.
 	releaseHold, releaseBusy atomic.Bool
+	// releaseDue is when tickRelease next observes the base; scheduler-owned.
+	releaseDue time.Time
 	// intakeIssues is a package-test-only remote failure/race seam.
 	intakeIssues func(context.Context, string, uint64, uint32, string, uint64) (maintainer.IssuePage, error)
 	// browserRemote is a package-test-only seam for operator calls that wait

@@ -407,11 +407,10 @@ for local_child in \
     test-publication-parents.sh; do
     /bin/ln -s stub "$local_fixture/scripts/$local_child"
 done
-printf 'pass\n' >"$local_fixture/scripts/test-verify-live-runtime.py"
 printf '#!/bin/sh\nexit 0\n' >"$local_fixture/scripts/test-verification-profile.mjs"
 /bin/chmod 755 "$local_fixture/scripts/test-verification-profile.mjs"
 
-for local_python in browser intake release autonomy delivery; do
+for local_python in browser; do
     printf 'pass\n' >"$local_fixture/scripts/test-factory-$local_python.py"
 done
 

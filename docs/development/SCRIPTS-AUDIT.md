@@ -6,7 +6,7 @@ consumer of the kinds named in the task; no file met that definition. `DEV`
 is repository, CI, release, fixture, or verification tooling. `PRODUCT` is a
 host-owned controller or hosted-site path that an external installation needs
 but that currently depends on the owner machine, legacy factory home,
-owner-authenticated `gh`/Vercel, `release_configs`, or the hard-coded hosted
+owner-authenticated `gh`/Vercel or the hard-coded hosted
 repository/domain.
 
 | Script | Class | Evidence |
@@ -16,13 +16,7 @@ repository/domain.
 | `cloudflare-env-clean.sh` | DEV | Cloudflare admin boundary and test |
 | `cold-review.sh` | DEV | independent review gate |
 | `dark-factory-browser-mcp.py` | DEV | documented provider/browser helper and tests |
-| `deploy-runtime.py` | DEV | release-lane shim over `factoryctl release` |
 | `deploy-site.sh` | PRODUCT | owner Vercel project and `app.darkfactory.build` deployment; issue #971 |
-| `factory-autonomy.py` | PRODUCT | legacy launchd controller; `factory_home`, journals, and `release_configs`; issue #972 |
-| `factory-delivery.py` | PRODUCT | operator-owned deployment receipts enqueue an overseer follow-up through `factoryctl`; issue #973 |
-| `factory-publication.py` | DEV | pure publication-footer contract library |
-| `factory-release.example.json` | DEAD | no workflow, documentation, test, service-packaging path, or script references it |
-| `factory-release.py` | PRODUCT | release controller using operator `release_configs`, `gh`, and host hooks; issue #977 |
 | `github-repo-settings.sh` | DEV | repository configuration script |
 | `github-step-summary.sh` | DEV | workflow summary helper |
 | `go-check.sh` | DEV | source and UI gate |
@@ -44,11 +38,8 @@ repository/domain.
 | `test-cloudflare-env.sh` | DEV | Cloudflare boundary fixture |
 | `test-cold-review.sh` | DEV | cold-review fixture |
 | `test-deploy-site.sh` | DEV | deployment fixture |
-| `test-factory-autonomy.py` | DEV | controller unit/integration fixture |
 | `test-factory-browser-live.py` | DEV | documented browser configuration fixture |
 | `test-factory-browser.py` | DEV | browser helper fixture |
-| `test-factory-delivery.py` | DEV | delivery unit fixture |
-| `test-factory-release.py` | DEV | release controller fixture |
 | `test-github-step-summary.sh` | DEV | workflow summary fixture |
 | `test-go-e2e-tools.sh` | DEV | E2E tool fixture |
 | `test-go-gates.sh` | DEV | CI gate fault-injection fixture |
@@ -61,17 +52,16 @@ repository/domain.
 | `test-repository-settings.sh` | DEV | repository-settings fixture |
 | `test-verification-profile.mjs` | DEV | browser profile unit fixture |
 | `test-verify-adversarial-review.sh` | DEV | review-policy fixture |
-| `test-verify-live-runtime.py` | DEV | runtime verifier unit fixture |
 | `verification-profile.mjs` | DEV | browser verification support library |
 | `verify-adversarial-review.sh` | DEV | exact-head review gate |
 | `verify-live-browser.mjs` | DEV | documented hosted-console smoke verifier |
-| `verify-live-runtime.py` | DEV | parameterized installed-runtime verifier |
 | `verify-live-site.py` | PRODUCT | owner Vercel/browser environment and hosted-domain verifier; issue #979 |
 | `with-cloudflare-env.sh` | DEV | Cloudflare credential boundary |
 | `with-local-ci-lease.sh` | DEV | local gate lease wrapper |
 
-The DEAD set contains only `factory-release.example.json`; it had no
-repository consumer and is deleted by this change. PRODUCT follow-ups are
+The release lane (`factory-autonomy.py`, `factory-release.py`,
+`factory-delivery.py` and their helpers) is deleted: factoryd releases itself.
+PRODUCT follow-ups are
 tracked as one issue per script; each issue
 names the daemon or `factoryctl` home as the destination and the repository
 copy/legacy fixture set to delete after cutover.

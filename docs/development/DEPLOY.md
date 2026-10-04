@@ -42,8 +42,13 @@ release `failed` with the reason. The record is the production delivery
 verified, 1 when it failed after the swap or rolled back, and 75 when the call
 was refused or the release failed before the swap.
 
-The release lane's hook, `scripts/deploy-runtime.py [--home HOME] SHA`, runs the
-installed `factoryctl release SHA --wait` and passes its exit status through.
+factoryd also releases itself. Where the home has a registered checkout of
+dark-factory, every two minutes it reads `main`'s tip with `git ls-remote
+origin` (no GitHub REST call) and releases that tip when no `release:<sha>`
+record exists. A recorded tip, running, verified or failed, is never started
+again: a failed release waits for a newer tip or a manual `factoryctl release`.
+Merged work is not followed up after release; a `Closes #N` footer closes its
+issue on merge.
 The build that introduces `factoryctl release` cannot be released by the
 daemon before it; install that one by hand: build the three binaries with the
 release receipt, stop dispatch and let work drain, then `factoryctl service
