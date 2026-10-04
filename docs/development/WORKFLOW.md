@@ -304,13 +304,6 @@ that name at another commit refuses the adoption and is the operator's to
 resolve. A build from before the migration refuses the newer `user_version`;
 the rollback plan for an operator home is a backup taken before install.
 
-When installing this lease layout, drain old CI holders, let their existing
-helper clean its lease state, and update active host checkouts before enabling
-worker checks. The new helper refuses legacy lease state, then atomically installs a
-symlink barrier at the former lock pathname. Old helpers already refuse this
-object and cannot create an independent gate. Never grant workers the enclosing
-`.git`, and never delete a held lease to complete this cutover.
-
 To check an older exact host checkout after cutover without changing its source,
 run the current helper from that checkout:
 `/absolute/current/scripts/with-local-ci-lease.sh /bin/sh ./scripts/local-ci.sh`.
