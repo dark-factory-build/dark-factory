@@ -20,7 +20,7 @@ work back; it cannot raise model, account, or project limits through its
 scoped controls.
 
 Set a finite per-run duration before enabling intake; zero disables the project
-ceiling for workers, while overseer turns retain the controller backstop:
+ceiling for both workers and overseer turns:
 
 ```sh
 factoryctl status
