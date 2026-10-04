@@ -235,6 +235,11 @@ func ServicePlist(home, label, relayOrigin, developmentBrowserAddress, toolPath,
     <string>` + escapedStderr.String() + `</string>
     <key>RunAtLoad</key>
     <true/>
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
     <key>AbandonProcessGroup</key>
     <true/>
     <key>Umask</key>
