@@ -10,6 +10,7 @@ import (
 	"io"
 	"maps"
 	"os"
+	"os/user"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -1100,6 +1101,11 @@ func (runtime RuntimePaths) environment(kind kernel.Provider) []string {
 		// launch the run with no login at all.
 		if configDir := claudeConfigHome(runtime); configDir != ConfigHome(kernel.ProviderClaudeCode, runtime.accountHome) {
 			environment = append(environment, "CLAUDE_CONFIG_DIR="+configDir)
+		}
+		// The CLI finds its keychain login under $USER; without it a
+		// logged-in account launches as "Not logged in" (#1107).
+		if account, err := user.Current(); err == nil {
+			environment = append(environment, "USER="+account.Username)
 		}
 	}
 	if runtime.localCILeaseDir != "" {

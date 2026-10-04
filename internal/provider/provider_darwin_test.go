@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"reflect"
 	goruntime "runtime"
@@ -355,6 +356,9 @@ func TestBuildNativeReturnsExactArgvEnvironmentAndSafeStartupTask(t *testing.T) 
 			wantHome := runtime.home
 			if test.kind == kernel.ProviderClaudeCode {
 				wantHome = runtime.accountHome
+				if account, err := user.Current(); err != nil || !slices.Contains(launch.Environment(), "USER="+account.Username) {
+					t.Fatalf("claude environment lacks USER for its keychain login: %q", launch.Environment())
+				}
 			} else {
 				wantConfig := "CODEX_HOME=" + filepath.Join(runtime.accountHome, codexConfigDir)
 				if !slices.Contains(launch.Environment(), wantConfig) {
