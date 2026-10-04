@@ -603,6 +603,26 @@ func runSupervisorClaudeFixture() error {
 	if typed != task.Task {
 		return fmt.Errorf("typed task is %d bytes, the attempt's is %d", len(typed), len(task.Task))
 	}
+	workingDirectory, err := os.Getwd()
+	if err != nil {
+		return err
+	}
+	configPath := provider.ClaudeConfigFile(os.Getenv("HOME"), os.Getenv("CLAUDE_CONFIG_DIR"))
+	configBody, err := os.ReadFile(configPath)
+	if err != nil {
+		return fmt.Errorf("Claude trust config: %w", err)
+	}
+	var config struct {
+		Projects map[string]struct {
+			Trusted bool `json:"hasTrustDialogAccepted"`
+		} `json:"projects"`
+	}
+	if err := json.Unmarshal(configBody, &config); err != nil {
+		return fmt.Errorf("Claude trust config: %w", err)
+	}
+	if !config.Projects[workingDirectory].Trusted {
+		return errors.New("Claude working directory is not trusted")
+	}
 	// Stand in for the real CLI's own transcript write, so a later launch's
 	// on-disk check (provider.claudeSessionSelection) can observe this exact
 	// session the same way it would against the real tool. The escaping here
@@ -1109,6 +1129,89 @@ func TestSupervisorClaudeReviewerLaunchReceivesExactRetainedChangeReceipt(t *tes
 			}
 			fixture.assertReleased(t, reviewer)
 		})
+	}
+}
+
+func TestSupervisorClaudeReviewersPreserveConcurrentAccountTrust(t *testing.T) {
+	const reviewerCount = 2
+	baselineFDs := supervisorFDCount(t)
+	accountHome := filepath.Join(t.TempDir(), "account")
+	if err := os.Mkdir(accountHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	fixtures := make([]*supervisorFixture, reviewerCount)
+	for index := range fixtures {
+		fixture := newSupervisorFixture(t, supervisorProgram(t, false, false))
+		// newSupervisorFixture observes its own creation baseline. Use one
+		// common pre-fixture baseline for the whole concurrent fixture set.
+		fixture.baselineFDs = baselineFDs
+		worker, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
+		if err != nil {
+			t.Fatalf("source worker %d RunNext: %v", index, err)
+		}
+		fixture.assertTerminal(t, worker, kernel.OutcomeSucceeded)
+		changeState, found, err := fixture.store.Change(context.Background(), *worker.ChangeID)
+		if err != nil || !found || changeState.Selection == nil {
+			t.Fatalf("source Change %d = %+v, found=%v, err=%v", index, changeState, found, err)
+		}
+		reviewerID := supervisorAgentID(t, byte(32+index))
+		if _, err := fixture.store.CreateAgent(context.Background(), kernel.NewAgent{
+			ID: reviewerID, ProjectID: worker.ProjectID, Name: "claude-reviewer", Role: kernel.RoleWorker,
+			Provider: kernel.ProviderClaudeCode, ToolBudgetLimit: 20,
+		}, supervisorTime()); err != nil {
+			t.Fatal(err)
+		}
+		handoff := fmt.Sprintf("review handoff %s %s %x %d %d\nreview this exact source", worker.TaskID, changeState.ID, changeState.Selection.Commit().Bytes(), worker.AdmittedTaskWorkRevision.Int64(), changeState.Revision.Int64())
+		if _, err := fixture.store.EnqueueTask(context.Background(), kernel.NewTask{
+			ID: supervisorTaskID(t, byte(33+index)), ProjectID: worker.ProjectID, AssignedAgentID: reviewerID, IncarnationID: supervisorIncarnationID(t, byte(34+index)),
+			Title: "review retained Change", Body: handoff, Priority: 1,
+		}, supervisorTime()); err != nil {
+			t.Fatal(err)
+		}
+		tools := filepath.Join(fixture.root, "claude-reviewer-tools")
+		if err := os.Mkdir(tools, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		copySupervisorExecutable(t, supervisorTestExecutable(t), filepath.Join(tools, "claude"))
+		fixture.spec.ToolPath = tools + ":" + fixture.spec.ToolPath
+		fixture.spec.AccountHome = accountHome
+		fixtures[index] = fixture
+	}
+
+	type result struct {
+		index int
+		run   kernel.Run
+		err   error
+	}
+	results := make(chan result, reviewerCount)
+	var group sync.WaitGroup
+	for index, fixture := range fixtures {
+		group.Add(1)
+		go func(index int, fixture *supervisorFixture) {
+			defer group.Done()
+			run, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
+			results <- result{index: index, run: run, err: err}
+		}(index, fixture)
+	}
+	group.Wait()
+	close(results)
+	for result := range results {
+		if result.err != nil {
+			t.Errorf("Claude reviewer %d RunNext: %v", result.index, result.err)
+			continue
+		}
+		fixture := fixtures[result.index]
+		fixture.assertTerminal(t, result.run, kernel.OutcomeSucceeded)
+		fixture.assertReleased(t, result.run)
+	}
+	// Each fixture's cleanup normally performs its census immediately. Close
+	// the concurrent fixture set first so one fixture's descriptors cannot be
+	// mistaken for a leak from another fixture.
+	for _, fixture := range fixtures {
+		fixture.closeWithoutFDCensus()
+	}
+	for _, fixture := range fixtures {
+		fixture.assertFDCensus()
 	}
 }
 
@@ -2679,6 +2782,14 @@ func newSupervisorRoleFixture(t *testing.T, program string, role kernel.AgentRol
 }
 
 func (fixture *supervisorFixture) close() {
+	fixture.closeWithFDCensus(true)
+}
+
+func (fixture *supervisorFixture) closeWithoutFDCensus() {
+	fixture.closeWithFDCensus(false)
+}
+
+func (fixture *supervisorFixture) closeWithFDCensus(census bool) {
 	if fixture == nil {
 		return
 	}
@@ -2714,7 +2825,9 @@ func (fixture *supervisorFixture) close() {
 				fixture.t.Errorf("Store close: %v", err)
 			}
 		}
-		fixture.assertFDCensus()
+		if census {
+			fixture.assertFDCensus()
+		}
 	})
 }
 
@@ -2812,7 +2925,14 @@ func (fixture *supervisorFixture) assertTerminal(t *testing.T, run kernel.Run, k
 	t.Helper()
 	fixture.trackRun(run.ID)
 	if run.Phase != kernel.RunTerminal || run.Proposal == nil || run.Terminal == nil || run.Proposal.Kind() != kind || run.Terminal.Kind() != kind {
-		t.Fatalf("terminal run = %+v", run)
+		var proposal, terminal string
+		if run.Proposal != nil {
+			proposal = fmt.Sprintf("kind=%s code=%s detail=%q result=%q", run.Proposal.Kind(), run.Proposal.Code(), run.Proposal.Detail(), run.Proposal.Result())
+		}
+		if run.Terminal != nil {
+			terminal = fmt.Sprintf("kind=%s code=%s detail=%q result=%q", run.Terminal.Kind(), run.Terminal.Code(), run.Terminal.Detail(), run.Terminal.Result())
+		}
+		t.Fatalf("terminal run phase=%s proposal={%s} terminal={%s}", run.Phase, proposal, terminal)
 	}
 	task, found, err := fixture.store.Task(context.Background(), run.TaskID)
 	if err != nil || !found {

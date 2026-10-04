@@ -1148,8 +1148,25 @@ func TestTrustClaudeDirectoryRecordsOnlyTheWorkingDirectory(t *testing.T) {
 	if err != nil || !json.Valid(final) || !bytes.Contains(final, []byte("/private/concurrent-")) {
 		t.Fatalf("concurrent records left %s, %v", final, err)
 	}
+	var concurrentConfig struct {
+		Projects map[string]struct {
+			Trusted bool `json:"hasTrustDialogAccepted"`
+		} `json:"projects"`
+	}
+	if err := json.Unmarshal(final, &concurrentConfig); err != nil {
+		t.Fatal(err)
+	}
+	for index := range 8 {
+		if !concurrentConfig.Projects[fmt.Sprintf("/private/concurrent-%d", index)].Trusted {
+			t.Fatalf("concurrent trust record %d was lost: %s", index, final)
+		}
+	}
 	if leftovers, _ := filepath.Glob(filepath.Join(accountHome, ".claude.json.*")); len(leftovers) != 0 {
-		t.Fatalf("temporary files remain: %v", leftovers)
+		for _, leftover := range leftovers {
+			if filepath.Base(leftover) != ".claude.json.lock" {
+				t.Fatalf("temporary files remain: %v", leftovers)
+			}
+		}
 	}
 	if err := TrustClaudeDirectory(runtime, "relative/change"); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("relative working directory = %v, want ErrInvalid", err)
