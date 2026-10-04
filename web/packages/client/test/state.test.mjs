@@ -17,12 +17,9 @@ import {
   decodeServerControl,
   encodeClientControl,
   encodeServerControl,
-  encodeStateChanged,
-  encodeStateGet,
-  encodeStateSnapshot,
-  encodeStateWatch,
   snapshotView,
 } from "../dist/src/index.js";
+import { encodeStateChanged, encodeStateSnapshot } from "./server-frames.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "../../../..");
 const fixture = (name) => readFileSync(join(root, "protocol/browser/fixtures", name), "utf8").trim();
@@ -148,7 +145,7 @@ test("factory capacity counts workers while active runs include the overseer", (
 });
 
 test("STATE_GET carries no selector and STATE_CHANGED carries only a head", () => {
-  const request = encodeStateGet("state", {});
+  const request = encodeClientControl({ type: "STATE_GET", id: "state", body: {} });
   assert.equal(request, `{"type":"STATE_GET","id":"state","body":{}}`);
   assert.deepEqual(decodeClientControl(request).body, {});
   // STATE_GET has no selector member, so none of these reaches a field.
@@ -172,7 +169,7 @@ test("retired state frames are ignored and the deleted envelope generation is ig
   // an unknown member like any other, so it is ignored.
   assert.deepEqual(
     decodeClientControl('{"v":1,"type":"STATE_GET","id":"state","body":{"cursor":null}}'),
-    decodeClientControl(encodeStateGet("state", {})),
+    decodeClientControl(encodeClientControl({ type: "STATE_GET", id: "state", body: {} })),
   );
   for (const type of ["STATE_SUBSCRIBE", "STATE_ENTITY_GET"]) {
     expectMalformed(() => decodeClientControl(`{"type":"${type}","id":"x","body":{}}`));
@@ -184,7 +181,7 @@ test("retired state frames are ignored and the deleted envelope generation is ig
 
 test("decimal chronology uses canonical strings and bigint across unsafe boundaries", () => {
   for (const value of [0n, 1n, 9_007_199_254_740_991n, 9_007_199_254_740_992n, 9_007_199_254_740_993n, MAX_SQLITE_INTEGER]) {
-    const wire = encodeStateWatch("watch", { after_head: value });
+    const wire = encodeClientControl({ type: "STATE_WATCH", id: "watch", body: { after_head: value } });
     assert.match(wire, new RegExp(`"after_head":"${value}"`));
     assert.equal(decodeClientControl(wire).body.after_head, value);
   }
@@ -194,8 +191,8 @@ test("decimal chronology uses canonical strings and bigint across unsafe boundar
   for (const value of ["0", "1", "9007199254740991", "9007199254740992", "9223372036854775807", "-1"]) {
     expectMalformed(() => decodeClientControl(`{"type":"STATE_WATCH","id":"watch","body":{"after_head":${value}}}`));
   }
-  expectMalformed(() => encodeStateWatch("watch", { after_head: MAX_SQLITE_INTEGER + 1n }));
-  expectMalformed(() => encodeStateWatch("watch", { after_head: 1 }));
+  expectMalformed(() => encodeClientControl({ type: "STATE_WATCH", id: "watch", body: { after_head: MAX_SQLITE_INTEGER + 1n } }));
+  expectMalformed(() => encodeClientControl({ type: "STATE_WATCH", id: "watch", body: { after_head: 1 } }));
 });
 
 test("the snapshot entity bound is exact, fails closed, and never truncates", () => {
@@ -403,7 +400,7 @@ test("the client tolerates added members but nothing else", () => {
   // exceeds its bound, and a missing required member is still malformed.
   const oversized = snapshot.replace('"body":{', `"future":"${"x".repeat(MAX_SNAPSHOT_BYTES)}","body":{`);
   expectMalformed(() => decodeServerControl(oversized));
-  const watch = encodeStateWatch("watch", { after_head: 1n });
+  const watch = encodeClientControl({ type: "STATE_WATCH", id: "watch", body: { after_head: 1n } });
   const padded = watch.replace('"body":{', `"future":"${"x".repeat(MAX_CONTROL_BYTES)}","body":{`);
   expectMalformed(() => decodeClientControl(padded));
   expectMalformed(() => decodeServerControl(snapshot.replace('"head":"1"', '"future_head":"1"')));

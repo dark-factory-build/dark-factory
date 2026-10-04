@@ -291,68 +291,8 @@ const CLIENT_TYPES: readonly ControlType[] = CONTROL_MANIFEST.filter((entry) => 
 const SERVER_TYPES: readonly ControlType[] = CONTROL_MANIFEST.filter((entry) => entry.direction !== "client").map((entry) => entry.type);
 
 export function encodeClientControl(frame: ClientControlFrame): string { return normalizeBoundary(() => encode(frame, validateControl(frame, "client"))); }
-export function encodeFactoryDispatch(id: string, body: FactoryDispatchBody): string { return encodeClientControl({ type: "FACTORY_DISPATCH", id, body }); }
-export function encodePairProve(id: string, body: PairProveBody): string { return encodeClientControl({ type: "PAIR_PROVE", id, body }); }
-export function encodeAuthProve(id: string, body: AuthProveBody): string { return encodeClientControl({ type: "AUTH_PROVE", id, body }); }
-export function encodeStateGet(id: string, body: StateGetBody): string { return encodeClientControl({ type: "STATE_GET", id, body }); }
-export function encodeStateWatch(id: string, body: StateWatchBody): string { return encodeClientControl({ type: "STATE_WATCH", id, body }); }
-export function encodeHumanRequestDetailGet(id: string, body: HumanRequestDetailGetBody): string { return encodeClientControl({ type: "HUMAN_REQUEST_DETAIL_GET", id, body }); }
-export function encodeHumanRequestReply(id: string, body: HumanRequestReplyBody): string { return encodeClientControl({ type: "HUMAN_REQUEST_REPLY", id, body }); }
-export function encodeHumanRequestCancelRun(id: string, body: HumanRequestCancelRunBody): string { return encodeClientControl({ type: "HUMAN_REQUEST_CANCEL_RUN", id, body }); }
-export function encodeTaskAttachment(id: string, body: TaskAttachmentBody): string { return encodeClientControl({ type: "TASK_ATTACHMENT", id, body }); }
-export function encodeTaskAttachmentResult(id: string, body: TaskAttachmentResultBody): string { return encodeServerControl({ type: "TASK_ATTACHMENT_RESULT", id, body }); }
-export function encodeTaskEnqueue(id: string, body: TaskEnqueueBody): string { return encodeClientControl({ type: "TASK_ENQUEUE", id, body }); }
-export function encodeProjectCreate(id: string, body: ProjectCreateBody): string { return encodeClientControl({ type: "PROJECT_CREATE", id, body }); }
-export function encodeRepositoriesGet(id: string, body: RepositoriesGetBody): string { return encodeClientControl({ type: "REPOSITORIES_GET", id, body }); }
-export function encodeRepositoryMutate(id: string, body: RepositoryMutateBody): string { return encodeClientControl({ type: "REPOSITORY_MUTATE", id, body }); }
-export function encodeAgentControl(id: string, body: AgentControlBody): string { return encodeClientControl({ type: "AGENT_CONTROL", id, body }); }
-export function encodeTaskHistoryGet(id: string, body: TaskHistoryGetBody): string { return encodeClientControl({ type: "TASK_HISTORY_GET", id, body }); }
-export function encodeTaskDetailGet(id: string, body: TaskDetailGetBody): string { return encodeClientControl({ type: "TASK_DETAIL_GET", id, body }); }
-export function encodeTaskListGet(id: string, body: TaskListGetBody): string { return encodeClientControl({ type: "TASK_LIST_GET", id, body }); }
-export function encodeTerminalTargetGet(id: string, body: TerminalTargetGetBody): string { return encodeClientControl({ type: "TERMINAL_TARGET_GET", id, body }); }
-export function encodeTerminalAttach(id: string, body: TerminalAttachBody): string { return encodeClientControl({ type: "TERMINAL_ATTACH", id, body }); }
-export function encodeTerminalAck(body: TerminalAckBody): string { return encodeClientControl({ type: "TERMINAL_ACK", body }); }
-export function encodeTerminalLeaseAcquire(id: string, body: TerminalLeaseAcquireBody): string { return encodeClientControl({ type: "TERMINAL_LEASE_ACQUIRE", id, body }); }
-export function encodeTerminalLeaseRenew(id: string, body: TerminalLeaseRenewBody): string { return encodeClientControl({ type: "TERMINAL_LEASE_RENEW", id, body }); }
-export function encodeTerminalLeaseRelease(id: string, body: TerminalLeaseReleaseBody): string { return encodeClientControl({ type: "TERMINAL_LEASE_RELEASE", id, body }); }
-export function encodeTerminalResize(id: string, body: TerminalResizeBody): string { return encodeClientControl({ type: "TERMINAL_RESIZE", id, body }); }
-export function encodeTerminalDetach(id: string, body: TerminalDetachBody): string { return encodeClientControl({ type: "TERMINAL_DETACH", id, body }); }
-export function encodeRemoteInvite(id: string, body: RemoteInviteBody): string { return encodeClientControl({ type: "REMOTE_INVITE", id, body }); }
-export function encodePushSubscribe(id: string, body: PushSubscribeBody): string { return encodeClientControl({ type: "PUSH_SUBSCRIBE", id, body }); }
-export function encodeClientError(body: ErrorBody, id?: string): string { return encodeClientControl({ type: "ERROR", ...(id === undefined ? {} : { id }), body }); }
 
 export function encodeServerControl(frame: ServerControlFrame): string { return normalizeBoundary(() => encode(frame, validateControl(frame, "server"))); }
-export function encodeFactoryDispatchResult(id: string, body: FactoryDispatchResultBody): string { return encodeServerControl({ type: "FACTORY_DISPATCH_RESULT", id, body }); }
-export function encodeHello(body: HelloBody): string { return encodeServerControl({ type: "HELLO", body }); }
-export function encodePairResult(id: string, body: PairResultBody): string { return encodeServerControl({ type: "PAIR_RESULT", id, body }); }
-export function encodeAuthResult(id: string, body: AuthResultBody): string { return encodeServerControl({ type: "AUTH_RESULT", id, body }); }
-export function encodeStateSnapshot(id: string, body: StateSnapshotBody): string { return encodeServerControl({ type: "STATE_SNAPSHOT", id, body }); }
-export function encodeStateChanged(id: string, body: StateChangedBody): string { return encodeServerControl({ type: "STATE_CHANGED", id, body }); }
-export function encodeHumanRequestDetail(id: string, body: HumanRequestDetailBody): string { return encodeServerControl({ type: "HUMAN_REQUEST_DETAIL", id, body }); }
-export function encodeHumanRequestReplyResult(id: string, body: HumanRequestReplyResultBody): string { return encodeServerControl({ type: "HUMAN_REQUEST_REPLY_RESULT", id, body }); }
-export function encodeHumanRequestCancelRunResult(id: string, body: HumanRequestCancelRunResultBody): string { return encodeServerControl({ type: "HUMAN_REQUEST_CANCEL_RUN_RESULT", id, body }); }
-export function encodeTaskEnqueueResult(id: string, body: TaskEnqueueResultBody): string { return encodeServerControl({ type: "TASK_ENQUEUE_RESULT", id, body }); }
-export function encodeProjectCreateResult(id: string, body: ProjectCreateResultBody): string { return encodeServerControl({ type: "PROJECT_CREATE_RESULT", id, body }); }
-export function encodeRepositories(id: string, body: RepositoriesBody): string { return encodeServerControl({ type: "REPOSITORIES", id, body }); }
-export function encodeRepositoryMutateResult(id: string, body: RepositoryMutateResultBody): string { return encodeServerControl({ type: "REPOSITORY_MUTATE_RESULT", id, body }); }
-export function encodeIntake(id: string, body: IntakeBody): string { return encodeClientControl({ type: "INTAKE", id, body }); }
-export function encodeIntakeResult(id: string, body: IntakeResultBody): string { return encodeServerControl({ type: "INTAKE_RESULT", id, body }); }
-export function encodeAgentControlResult(id: string, body: AgentControlResultBody): string { return encodeServerControl({ type: "AGENT_CONTROL_RESULT", id, body }); }
-export function encodeTaskHistory(id: string, body: TaskHistoryBody): string { return encodeServerControl({ type: "TASK_HISTORY", id, body }); }
-export function encodeTaskDetail(id: string, body: TaskDetailBody): string { return encodeServerControl({ type: "TASK_DETAIL", id, body }); }
-export function encodeTaskList(id: string, body: TaskListBody): string { return encodeServerControl({ type: "TASK_LIST", id, body }); }
-export function encodeTerminalTarget(id: string, body: TerminalTargetBody): string { return encodeServerControl({ type: "TERMINAL_TARGET", id, body }); }
-export function encodeTerminalAttached(id: string, body: TerminalAttachedBody): string { return encodeServerControl({ type: "TERMINAL_ATTACHED", id, body }); }
-export function encodeTerminalLeaseResult(id: string, body: TerminalLeaseResultBody): string { return encodeServerControl({ type: "TERMINAL_LEASE_RESULT", id, body }); }
-export function encodeTerminalResized(id: string, body: TerminalResizedBody): string { return encodeServerControl({ type: "TERMINAL_RESIZED", id, body }); }
-export function encodeTerminalDetached(id: string, body: TerminalDetachedBody): string { return encodeServerControl({ type: "TERMINAL_DETACHED", id, body }); }
-export function encodeTerminalInputResult(id: string, body: TerminalInputResultBody): string { return encodeServerControl({ type: "TERMINAL_INPUT_RESULT", id, body }); }
-export function encodeTerminalEOF(id: string, body: TerminalEOFBody): string { return encodeServerControl({ type: "TERMINAL_EOF", id, body }); }
-export function encodeTerminalExit(id: string, body: TerminalExitBody): string { return encodeServerControl({ type: "TERMINAL_EXIT", id, body }); }
-export function encodeTerminalReset(id: string, body: TerminalResetBody): string { return encodeServerControl({ type: "TERMINAL_RESET", id, body }); }
-export function encodeRemoteInviteResult(id: string, body: RemoteInviteResultBody): string { return encodeServerControl({ type: "REMOTE_INVITE_RESULT", id, body }); }
-export function encodePushSubscribeResult(id: string, body: PushSubscribeResultBody): string { return encodeServerControl({ type: "PUSH_SUBSCRIBE_RESULT", id, body }); }
-export function encodeServerError(body: ErrorBody, id?: string): string { return encodeServerControl({ type: "ERROR", ...(id === undefined ? {} : { id }), body }); }
 export function decodeClientControl(data: string | Uint8Array): ClientControlFrame { return normalizeBoundary(() => decodeControl(data, "client") as ClientControlFrame); }
 export function decodeServerControl(data: string | Uint8Array): ServerControlFrame { return normalizeBoundary(() => decodeControl(data, "server") as ServerControlFrame); }
 

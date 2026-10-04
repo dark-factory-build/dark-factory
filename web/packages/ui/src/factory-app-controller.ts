@@ -48,8 +48,6 @@ export function browserEndpoint(port = 43123): BrowserEndpoint {
 }
 
 const DEFAULT_BROWSER_ENDPOINT = browserEndpoint();
-/** The default production loopback address; settings may show an isolated development listener. */
-export const BROWSER_HOST = DEFAULT_BROWSER_ENDPOINT.host;
 // The daemon caches run paths for five seconds, so one timer at ten never
 // outruns the cache and never lets a room go more than a cycle stale.
 const RUN_PATHS_POLL_MS = 10_000;

@@ -102,7 +102,6 @@ export function FactoryApp({ onStatusChange, browserPort }: FactoryAppProps = {}
       selectedTaskId={selectedTaskId}
       onSelectTask={setSelectedTaskId}
       {...snapshot}
-      address={browser.host}
       view={view}
       onView={setView}
       detail={detail}

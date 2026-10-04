@@ -5,11 +5,9 @@ import {
   base64urlDecode,
   base64urlEncode,
   createRelaySocketFactory,
-  encodeAuthResult,
-  encodePairResult,
-  encodeStateChanged,
   RELAY_SUBPROTOCOL,
 } from "../dist/src/index.js";
+import { encodeAuthResult, encodePairResult, encodeStateChanged } from "./server-frames.mjs";
 import { ALL_CAPABILITIES, FakeFactory, FakeRelay, RELAY_ORIGIN, bytes, mintTicket, nodeId, settle } from "./remote-fake.mjs";
 
 const node = nodeId("a");

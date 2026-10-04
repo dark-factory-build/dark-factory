@@ -2341,7 +2341,7 @@ test("floor project changes clear task selection without restoring an old dialog
 test("settings reports the running version and the update command without any production record", () => {
   const settings = (props) => renderToStaticMarkup(createElement(SettingsDialog, {
     floorAppearance: DEFAULT_FLOOR_APPEARANCE, onFloorAppearanceChange() {}, onResetFloorAppearance() {},
-    state: undefined, ready: false, address: "127.0.0.1:43123", ...props,
+    state: undefined, ready: false, ...props,
   }));
   const markup = settings({ runtime: { version: "v0.4.2", source: "a".repeat(40), target: "darwin/arm64", build_id: "build", release: true } });
   assert.match(markup, /Running version <code>v0\.4\.2<\/code>/);

@@ -2,27 +2,7 @@ import { MAX_TASK_ATTACHMENTS, MAX_TASK_ATTACHMENT_BYTES, TASK_ATTACHMENT_CHUNK_
 import { projectContentOperation, type ProjectContentOperation, type ProjectContentInput, type ProjectContentOutput } from "./project-content.js";
 import {
   decodeServerControl,
-  encodeAuthProve,
   encodeClientControl,
-  encodeHumanRequestCancelRun,
-  encodeHumanRequestDetailGet,
-  encodeHumanRequestReply,
-  encodeAgentControl,
-  encodePairProve,
-  encodePushSubscribe,
-  encodeRemoteInvite,
-  encodeStateGet,
-  encodeStateWatch,
-  encodeTaskEnqueue, encodeTaskAttachment,
-  encodeProjectCreate,
-  encodeRepositoriesGet,
-  encodeRepositoryMutate,
-  encodeIntake,
-  encodeTaskDetailGet,
-  encodeTaskHistoryGet,
-  encodeTerminalTargetGet,
-  type AccountLinkResultBody,
-  type AccountUpdateResultBody,
   type AccountsBody,
   type AgentUpdateBody,
   type ProjectLimitsBody,
@@ -331,7 +311,7 @@ export class BrowserSession {
     try { taskId = this.#randomID(); incarnationId = this.#randomID(); } catch (error) { return Promise.reject(error); }
     const id = this.#nextID("task-enqueue");
     let payload: string;
-    try { payload = encodeTaskEnqueue(id, { task_id: taskId, incarnation_id: incarnationId, agent_id: request.agentId, ...(request.attachmentCount ? { attachment_count: request.attachmentCount } : {}), ...(request.repositoryId === undefined ? {} : { repository_id: request.repositoryId }), expected_agent_revision: request.expectedAgentRevision, instruction: request.instruction, ...(request.mode === "queue" || request.mode === "any" ? { mode: request.mode } : {}) }); } catch (error) { return Promise.reject(error); }
+    try { payload = encodeClientControl({ type: "TASK_ENQUEUE", id, body: { task_id: taskId, incarnation_id: incarnationId, agent_id: request.agentId, ...(request.attachmentCount ? { attachment_count: request.attachmentCount } : {}), ...(request.repositoryId === undefined ? {} : { repository_id: request.repositoryId }), expected_agent_revision: request.expectedAgentRevision, instruction: request.instruction, ...(request.mode === "queue" || request.mode === "any" ? { mode: request.mode } : {}) } }); } catch (error) { return Promise.reject(error); }
     const result = new Promise<{ taskId: string; revision: bigint }>((resolve, reject) => this.#taskPending.set(id, { taskId, expectedAgentRevision: request.expectedAgentRevision, resolve, reject }));
     try { this.#send(payload); } catch { this.#fail(new SessionError("connection")); }
     return result;
@@ -351,7 +331,7 @@ export class BrowserSession {
           this.#ensureLive();
           if (!this.#authenticated) throw new SessionError("connection");
           const id = this.#nextID("task-attachment");
-          const payload = encodeTaskAttachment(id, { index, offset: BigInt(offset), size: BigInt(file.size), name: file.name, data: btoa(String.fromCharCode(...bytes)) });
+          const payload = encodeClientControl({ type: "TASK_ATTACHMENT", id, body: { index, offset: BigInt(offset), size: BigInt(file.size), name: file.name, data: btoa(String.fromCharCode(...bytes)) } });
           const ack = new Promise<void>((resolve, reject) => this.#attachmentPending.set(id, { offset: BigInt(offset + bytes.length), resolve, reject }));
           try { this.#send(payload); } catch { this.#fail(new SessionError("connection")); }
           await ack;
@@ -377,7 +357,7 @@ export class BrowserSession {
     const id = this.#nextID("agent-control");
     let payload: string;
     try {
-      payload = encodeAgentControl(id, {
+      payload = encodeClientControl({ type: "AGENT_CONTROL", id, body: {
         operation_id: request.operationId,
         task_id: request.taskId,
         run_id: target.descriptor.run_id,
@@ -387,7 +367,7 @@ export class BrowserSession {
         instruction,
         successor_task_id: successorTaskId,
         successor_incarnation_id: successorIncarnationId,
-      });
+      } });
     } catch (error) { return Promise.reject(error); }
     const result = new Promise<AgentControlResult>((resolve, reject) => this.#agentControlPending.set(id, { operationId: request.operationId, taskId: request.taskId, runId: target.descriptor.run_id, resolve, reject }));
     try { this.#send(payload); } catch { this.#fail(new SessionError("connection")); }
@@ -396,12 +376,12 @@ export class BrowserSession {
 
   /** Durable operator receipts are private to a task, never terminal bytes. */
   getTaskHistory(taskId: string): Promise<TaskHistoryView> {
-    return this.#consoleRequest("TASK_HISTORY", taskId, 1n, "task-history", (id) => encodeTaskHistoryGet(id, { task_id: taskId }));
+    return this.#consoleRequest("TASK_HISTORY", taskId, 1n, "task-history", (id) => encodeClientControl({ type: "TASK_HISTORY_GET", id, body: { task_id: taskId } }));
   }
 
   /** Private editable base instruction and retained review feedback. */
   getTaskDetail(taskId: string, expectedRevision: bigint, offsets: { textOffset?: bigint; peerOffset?: bigint; expectedHead?: bigint } = {}): Promise<TaskDetailView> {
-    return this.#consoleRequest("TASK_DETAIL", taskId, expectedRevision, "task-detail", (id) => encodeTaskDetailGet(id, { task_id: taskId, expected_revision: expectedRevision, ...(offsets.textOffset === undefined ? {} : { text_offset: offsets.textOffset }), ...(offsets.peerOffset === undefined ? {} : { peer_offset: offsets.peerOffset }), ...(offsets.expectedHead === undefined ? {} : { expected_head: offsets.expectedHead }) }));
+    return this.#consoleRequest("TASK_DETAIL", taskId, expectedRevision, "task-detail", (id) => encodeClientControl({ type: "TASK_DETAIL_GET", id, body: { task_id: taskId, expected_revision: expectedRevision, ...(offsets.textOffset === undefined ? {} : { text_offset: offsets.textOffset }), ...(offsets.peerOffset === undefined ? {} : { peer_offset: offsets.peerOffset }), ...(offsets.expectedHead === undefined ? {} : { expected_head: offsets.expectedHead }) } }));
   }
 
   /** Edit one agent's configuration. An omitted member is left alone. */
@@ -437,12 +417,12 @@ export class BrowserSession {
     if (bounded(request.name, MAX_AGENT_NAME_BYTES) || bounded(request.root, 4096) || !request.root.startsWith("/")) return Promise.reject(new SessionError("invalid_request"));
     let projectId: string;
     try { projectId = this.#randomID(); } catch (error) { return Promise.reject(error); }
-    return this.#accountRequest("PROJECT_CREATE_RESULT", CAPABILITIES.administration, "project-create", (id) => encodeProjectCreate(id, { project_id: projectId, name: request.name, root: request.root }), { entityId: projectId });
+    return this.#accountRequest("PROJECT_CREATE_RESULT", CAPABILITIES.administration, "project-create", (id) => encodeClientControl({ type: "PROJECT_CREATE", id, body: { project_id: projectId, name: request.name, root: request.root } }), { entityId: projectId });
   }
 
   getRepositories(projectId: string): Promise<readonly RepositoryView[]> {
     if (!validDynamicID(projectId)) return Promise.reject(new SessionError("invalid_request"));
-    return this.#accountRequest("REPOSITORIES", CAPABILITIES.administration, "repositories", (id) => encodeRepositoriesGet(id, { project_id: projectId }), { entityId: projectId });
+    return this.#accountRequest("REPOSITORIES", CAPABILITIES.administration, "repositories", (id) => encodeClientControl({ type: "REPOSITORIES_GET", id, body: { project_id: projectId } }), { entityId: projectId });
   }
 
   mutateRepository(request: RepositoryMutation): Promise<RepositoryView | undefined> {
@@ -466,7 +446,7 @@ export class BrowserSession {
       if (request.action === "enabled") body.enabled = request.enabled;
     }
     const expectedRevision = "expectedRevision" in request ? request.expectedRevision : undefined;
-    return this.#accountRequest("REPOSITORY_MUTATE_RESULT", CAPABILITIES.administration, "repository-mutate", (id) => encodeRepositoryMutate(id, body), { entityId: repositoryId, expectedRevision, action: request.action });
+    return this.#accountRequest("REPOSITORY_MUTATE_RESULT", CAPABILITIES.administration, "repository-mutate", (id) => encodeClientControl({ type: "REPOSITORY_MUTATE", id, body: body }), { entityId: repositoryId, expectedRevision, action: request.action });
   }
 
   /** Private operator intake controls; candidate content never enters STATE. */
@@ -475,7 +455,7 @@ export class BrowserSession {
     if ((this.#capabilities & CAPABILITIES.administration) === 0) return Promise.reject(new SessionError("unauthorized"));
     if (this.#intakePending.size >= MAX_ARRAY_ITEMS) return Promise.reject(new SessionError("rate_limited"));
     const id = this.#nextID("intake"); let payload: string; let body = request;
-    try { if (body.action === "create" && body.source_id === undefined) body = { ...body, source_id: this.#randomID() }; payload = encodeIntake(id, body); } catch (error) { return Promise.reject(error); }
+    try { if (body.action === "create" && body.source_id === undefined) body = { ...body, source_id: this.#randomID() }; payload = encodeClientControl({ type: "INTAKE", id, body: body }); } catch (error) { return Promise.reject(error); }
     const result = new Promise<IntakeView>((resolve, reject) => this.#intakePending.set(id, { resolve, reject }));
     try { this.#send(payload); } catch { this.#fail(new SessionError("connection")); }
     return result;
@@ -596,7 +576,7 @@ export class BrowserSession {
     if (this.#invitePending.size >= MAX_ARRAY_ITEMS) return Promise.reject(new SessionError("rate_limited"));
     const id = this.#nextID("remote-invite");
     let payload: string;
-    try { payload = encodeRemoteInvite(id, {}); } catch (error) { return Promise.reject(error); }
+    try { payload = encodeClientControl({ type: "REMOTE_INVITE", id, body: {} }); } catch (error) { return Promise.reject(error); }
     const result = new Promise<RemoteInvite>((resolve, reject) => this.#invitePending.set(id, { resolve, reject }));
     try { this.#send(payload); } catch { this.#fail(new SessionError("connection")); }
     return result;
@@ -611,7 +591,7 @@ export class BrowserSession {
     if (this.#pushPending.size >= MAX_ARRAY_ITEMS) return Promise.reject(new SessionError("rate_limited"));
     const id = this.#nextID("push-subscribe");
     let payload: string;
-    try { payload = encodePushSubscribe(id, subscription); } catch (error) { return Promise.reject(error); }
+    try { payload = encodeClientControl({ type: "PUSH_SUBSCRIBE", id, body: subscription }); } catch (error) { return Promise.reject(error); }
     const result = new Promise<void>((resolve, reject) => this.#pushPending.set(id, { resolve, reject }));
     try { this.#send(payload); } catch { this.#fail(new SessionError("connection")); }
     return result;
@@ -625,7 +605,7 @@ export class BrowserSession {
     if (this.#targetPending.size >= MAX_ARRAY_ITEMS) return Promise.reject(new SessionError("rate_limited"));
     const id = this.#nextID("terminal-target");
     let payload: string;
-    try { payload = encodeTerminalTargetGet(id, { agent_id: request.agentId, expected_agent_revision: request.expectedAgentRevision, expected_head: request.expectedHead }); } catch (error) { return Promise.reject(error); }
+    try { payload = encodeClientControl({ type: "TERMINAL_TARGET_GET", id, body: { agent_id: request.agentId, expected_agent_revision: request.expectedAgentRevision, expected_head: request.expectedHead } }); } catch (error) { return Promise.reject(error); }
     const result = new Promise<TerminalTarget | null>((resolve, reject) => this.#targetPending.set(id, { ...request, resolve, reject }));
     try { this.#send(payload); } catch { this.#fail(new SessionError("connection")); }
     return result;
@@ -659,7 +639,7 @@ export class BrowserSession {
     if (request.expectedRevision < 1n || request.expectedRevision > MAX_SQLITE_INTEGER) return Promise.reject(new SessionError("invalid_request"));
     const id = this.#nextID("human-detail");
     let payload: string;
-    try { payload = encodeHumanRequestDetailGet(id, { request_id: request.requestId, expected_revision: request.expectedRevision }); } catch (error) { return Promise.reject(error); }
+    try { payload = encodeClientControl({ type: "HUMAN_REQUEST_DETAIL_GET", id, body: { request_id: request.requestId, expected_revision: request.expectedRevision } }); } catch (error) { return Promise.reject(error); }
     return this.#humanRequest<HumanRequestDetail>(id, { kind: "detail", requestId: request.requestId, expectedRevision: request.expectedRevision, expectedRunRevision: 0n }, payload);
   }
 
@@ -672,7 +652,7 @@ export class BrowserSession {
     if (detail.revision > MAX_SQLITE_INTEGER - 2n) return Promise.reject(new SessionError("stale"));
     const id = this.#nextID("human-reply");
     let payload: string;
-    try { payload = encodeHumanRequestReply(id, { request_id: detail.requestId, expected_revision: detail.revision, reply }); } catch (error) { return Promise.reject(error); }
+    try { payload = encodeClientControl({ type: "HUMAN_REQUEST_REPLY", id, body: { request_id: detail.requestId, expected_revision: detail.revision, reply } }); } catch (error) { return Promise.reject(error); }
     this.#humanDetails.delete(detail);
     this.#humanCancelRuns.delete(detail.cancelRun);
     return this.#humanRequest<HumanReplyResult>(id, { kind: "reply", requestId: detail.requestId, expectedRevision: detail.revision, expectedRunRevision: 0n, yielded: detail.terminalTarget === null }, payload);
@@ -686,7 +666,7 @@ export class BrowserSession {
     if (cancelRun.expectedRequestRevision > MAX_SQLITE_INTEGER - 1n || cancelRun.expectedRunRevision > MAX_SQLITE_INTEGER - 1n) return Promise.reject(new SessionError("stale"));
     const id = this.#nextID("human-cancel");
     let payload: string;
-    try { payload = encodeHumanRequestCancelRun(id, { request_id: cancelRun.requestId, expected_request_revision: cancelRun.expectedRequestRevision, expected_run_revision: cancelRun.expectedRunRevision }); } catch (error) { return Promise.reject(error); }
+    try { payload = encodeClientControl({ type: "HUMAN_REQUEST_CANCEL_RUN", id, body: { request_id: cancelRun.requestId, expected_request_revision: cancelRun.expectedRequestRevision, expected_run_revision: cancelRun.expectedRunRevision } }); } catch (error) { return Promise.reject(error); }
     this.#humanCancelRuns.delete(cancelRun);
     this.#humanDetails.delete(detail);
     return this.#humanRequest<HumanCancelRunResult>(id, { kind: "cancel", requestId: cancelRun.requestId, expectedRevision: cancelRun.expectedRequestRevision, expectedRunRevision: cancelRun.expectedRunRevision, runId: cancelRun.runId, yielded: detail.terminalTarget === null }, payload);
@@ -803,7 +783,7 @@ export class BrowserSession {
         this.#ensureLive();
         const id = this.#nextID("auth");
         this.#authAttempted = true;
-        this.#sendAuth("auth", id, encodeAuthProve(id, { client_id: stored.clientId, signature }));
+        this.#sendAuth("auth", id, encodeClientControl({ type: "AUTH_PROVE", id, body: { client_id: stored.clientId, signature } }));
       }
     })();
     return this.#authPromise;
@@ -830,7 +810,7 @@ export class BrowserSession {
     const signature = await this.#sign(buildPairTranscript({ ...this.#transcriptBase(), challenge, public_key_sec1: toHex(this.#publicKey) }));
     this.#ensureLive();
     const id = this.#nextID("pair");
-    this.#sendAuth("pair", id, encodePairProve(id, { challenge, public_key_sec1: toHex(this.#publicKey), signature }));
+    this.#sendAuth("pair", id, encodeClientControl({ type: "PAIR_PROVE", id, body: { challenge, public_key_sec1: toHex(this.#publicKey), signature } }));
   }
 
   async #authenticationFrame(frame: ServerControlFrame): Promise<void> {
@@ -967,7 +947,7 @@ export class BrowserSession {
       this.#setStatus("ready");
       const id = this.#nextID("watch");
       this.#subscriptionID = id;
-      this.#send(encodeStateWatch(id, { after_head: frame.body.head }));
+      this.#send(encodeClientControl({ type: "STATE_WATCH", id, body: { after_head: frame.body.head } }));
     }
     this.#maybeRefresh();
   }
@@ -992,7 +972,7 @@ export class BrowserSession {
     const id = this.#nextID("state");
     this.#refreshID = id;
     this.#pending.set(id, "snapshot");
-    this.#send(encodeStateGet(id, {}));
+    this.#send(encodeClientControl({ type: "STATE_GET", id, body: {} }));
   }
 
   #discardState(): void {
