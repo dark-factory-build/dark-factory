@@ -170,7 +170,11 @@ const (
 	startupEnterTick           = 100 * time.Millisecond
 	startupSubmitRetryInterval = time.Second
 	startupSubmitMaxAttempts   = 3 // initial CR plus two bounded retries
-	terminalPayloadWriteLimit  = 250 * time.Millisecond
+	// startupVerifyRetries bounds how long after its last CR a provider may
+	// take to show authenticated startup evidence: its first model turn,
+	// which ordinary latency can stretch well past the CR retries (2 min).
+	startupVerifyRetries      = 120
+	terminalPayloadWriteLimit = 250 * time.Millisecond
 	// DeferredSubmitBudget is the extra daemon effect budget for a deferred
 	// Codex submit: its paste, ceiling/tick, and standalone CR write.
 	DeferredSubmitBudget = startupEnterCeiling + 2*terminalPayloadWriteLimit + startupEnterTick
@@ -262,6 +266,9 @@ func (o *terminalOwner) verifyStartupSubmit() error {
 		return nil
 	}
 	if o.startupSubmitAttempts >= startupSubmitMaxAttempts {
+		if time.Since(o.startupSubmitLast) < startupVerifyRetries*o.startupSubmitRetryWait() {
+			return nil
+		}
 		stopErr := o.stop()
 		return errors.Join(fmt.Errorf("%w after %d carriage returns", ErrStartupUnverified, o.startupSubmitAttempts), stopErr)
 	}

@@ -1062,12 +1062,41 @@ func TestAttemptRunnerResendsDroppedStartupCarriageReturn(t *testing.T) {
 	}
 }
 
+// A provider's first model turn can outlast the carriage-return retries.
+// Evidence that arrives after them, inside the verification ceiling, keeps
+// the run alive.
+func TestAttemptRunnerKeepsAProviderWhoseStartupEvidenceIsSlow(t *testing.T) {
+	f := newAttemptFixture(t, "native-drop-submit", "")
+	f.spec.startupSubmitRetryInterval = 10 * time.Millisecond
+	f.spec.StartupInput = []byte("native-startup\r")
+	inner := f.activateOuter()
+	f.advanceToProvider()
+	if err := f.controller.Release(StageProvider); err != nil {
+		t.Fatal(err)
+	}
+	if ready := f.nextTerminal(TerminalReady, 0); ready.Kind != TerminalReady {
+		t.Fatalf("terminal ready=%+v", ready)
+	}
+	waitFile(t, filepath.Join(f.root, "provider.started"))
+	time.Sleep(300 * time.Millisecond) // past the three retries, inside 120x10ms
+	if err := f.controller.SendTerminalCommand(TerminalCommand{Kind: TerminalStartupEvidence}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(f.root, "finish"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	record := f.finishAndAck()
+	if record.Terminal.Process != inner || record.Terminal.Exit.Code != 0 {
+		t.Fatalf("terminal=%+v", record.Terminal)
+	}
+}
+
 // A delayed banner is not evidence that the startup task was consumed. The
 // runner exhausts its bounded retries and surfaces the stable diagnostic
 // instead of leaving the provider running indefinitely.
 func TestAttemptRunnerRejectsDelayedUnrelatedStartupOutput(t *testing.T) {
 	f := newAttemptFixture(t, "native-delayed-submit", "")
-	f.spec.startupSubmitRetryInterval = 500 * time.Millisecond
+	f.spec.startupSubmitRetryInterval = 10 * time.Millisecond
 	f.spec.StartupInput = []byte("native-startup\r")
 	inner := f.activateOuter()
 	f.advanceToProvider()
