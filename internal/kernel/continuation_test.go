@@ -7,20 +7,15 @@ import (
 	"fmt"
 	"strings"
 	"testing"
-	"unicode/utf8"
 )
 
-func TestContinuationTaskTextCapsCodexAtProviderLimit(t *testing.T) {
+func TestContinuationTaskFitsCodexProviderLimit(t *testing.T) {
 	context := ContinuationContext{ConditionKind: ConditionHumanRequest, ConditionRevision: mustRevision(t, 1), ResolutionDetail: strings.Repeat("答", 4096)}
-	text := ContinuationTaskText(ProviderCodex, strings.Repeat("x", 7168), []ContinuationContext{context})
 	if ContinuationTaskFits(ProviderCodex, strings.Repeat("x", 8192), []ContinuationContext{context}) {
 		t.Fatal("exact-limit Codex task was admitted without room for causal context")
 	}
 	if !ContinuationTaskCanUseFetchFallback(ProviderCodex, []ContinuationContext{context}) {
 		t.Fatal("oversized Codex continuation lost its bounded fetch fallback")
-	}
-	if len(text) > 8192 || !utf8.ValidString(text) {
-		t.Fatalf("bounded continuation task length=%d valid=%v", len(text), utf8.ValidString(text))
 	}
 }
 
@@ -157,53 +152,6 @@ func TestContinuationConditionIDRoundTripsBytes(t *testing.T) {
 	}
 }
 
-func TestYieldedContinuationResolvesExactlyOnceAndSurvivesRestart(t *testing.T) {
-	ctx := context.Background()
-	store, run, keys, path := runningWorkerRunWithPath(t)
-	condition := ContinuationConditionID{}
-	conditionBytes := humanKey(220)
-	copy(condition[:], conditionBytes[:])
-
-	yielded, err := store.YieldContinuationForAttempt(ctx, keys.AttemptDigest, ConditionHumanRequest, condition, mustRevision(t, 1), mustTime(t, 40))
-	if err != nil {
-		t.Fatalf("yield continuation: %v", err)
-	}
-	if yielded.State != ContinuationWaiting || yielded.WorkRevision != run.AdmittedTaskWorkRevision {
-		t.Fatalf("yielded continuation = %+v", yielded)
-	}
-	if yielded.ConditionID != condition || yielded.ConditionRevision != mustRevision(t, 1) || yielded.ContextDigest == ([DigestBytes]byte{}) {
-		t.Fatalf("yielded causal context = %+v", yielded)
-	}
-	if _, err := store.AuthenticateAttempt(ctx, keys.AttemptDigest); !errors.Is(err, ErrUnauthorized) {
-		t.Fatalf("old attempt credential after yield = %v", err)
-	}
-
-	// This is the event edge immediately following yield: the old bearer is
-	// already revoked, but the durable causal context still accepts exactly one
-	// wake. The atomic question test above covers the event-before-yield window.
-	woken, err := store.ResolveContinuationForEvent(ctx, yielded.ID, yielded.Revision, ConditionHumanRequest, condition, yielded.ConditionRevision, "human answered", mustTime(t, 41))
-	if err != nil || woken.State != ContinuationQueued || woken.ResolutionDetail != "human answered" || woken.ResolvedAt == nil {
-		t.Fatalf("resolved continuation = %+v, %v", woken, err)
-	}
-	replay, err := store.ResolveContinuationForEvent(ctx, yielded.ID, yielded.Revision, ConditionHumanRequest, condition, yielded.ConditionRevision, "human answered", mustTime(t, 42))
-	if err != nil || replay.ID != woken.ID || replay.Revision != woken.Revision {
-		t.Fatalf("duplicate wake = %+v, %v", replay, err)
-	}
-	if _, err := store.ResolveContinuationForEvent(ctx, yielded.ID, yielded.Revision, ConditionHumanRequest, condition, yielded.ConditionRevision, "different answer", mustTime(t, 42)); !errors.Is(err, ErrRevisionConflict) {
-		t.Fatalf("conflicting wake = %v", err)
-	}
-	store.Close()
-	reopened, err := Open(ctx, path)
-	if err != nil {
-		t.Fatalf("reopen store: %v", err)
-	}
-	defer reopened.Close()
-	read, found, err := reopened.Continuation(ctx, yielded.ID)
-	if err != nil || !found || read.State != ContinuationQueued || read.ResolutionDetail != "human answered" {
-		t.Fatalf("restarted continuation = %+v found=%v err=%v", read, found, err)
-	}
-}
-
 func TestCreateHumanQuestionAndYieldIsAtomic(t *testing.T) {
 	ctx := context.Background()
 	store, run, keys := runningWorkerRun(t)
@@ -248,14 +196,23 @@ func TestResolvedContinuationPromotesThenReentersProviderAdmission(t *testing.T)
 		ContextDigest: sha256.Sum256([]byte("admission-continuation")), ConditionKind: ConditionHumanRequest,
 		ConditionID: condition, ConditionRevision: mustRevision(t, 1),
 	}
-	waiting, err := store.CreateContinuation(ctx, spec, mustTime(t, 82))
+	// Production queues continuations only through a human reply; insert the
+	// resolved row directly to exercise promotion and admission alone.
+	at := mustTime(t, 83)
+	tx, err := store.beginValidatedWrite(ctx)
 	if err != nil {
-		t.Fatalf("create continuation: %v", err)
+		t.Fatal(err)
 	}
-	queued, err := store.ResolveContinuationForEvent(ctx, waiting.ID, waiting.Revision, ConditionHumanRequest, condition, waiting.ConditionRevision, "continue", mustTime(t, 83))
-	if err != nil || queued.State != ContinuationQueued {
-		t.Fatalf("queue continuation: %+v, %v", queued, err)
+	if _, err := tx.connection.ExecContext(ctx, `INSERT INTO continuations(id, project_id, task_id, task_incarnation_id, work_revision, context_digest, condition_kind, condition_id, condition_revision, state, resolution_detail, resolved_at_ms, revision, created_at_ms, updated_at_ms) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 1, 'queued', 'continue', ?, 1, ?, ?)`, spec.ID.Bytes(), spec.ProjectID.Bytes(), spec.TaskID.Bytes(), spec.TaskIncarnationID.Bytes(), spec.WorkRevision.Int64(), spec.ContextDigest[:], string(spec.ConditionKind), spec.ConditionID.Bytes(), at.Int64(), at.Int64(), at.Int64()); err != nil {
+		t.Fatal(tx.Rollback(err))
 	}
+	if err := appendInvalidations(ctx, tx.connection, at, []pendingInvalidation{{kind: EntityContinuation, id: spec.ID.Bytes(), revision: 1}}); err != nil {
+		t.Fatal(tx.Rollback(err))
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	tx.Close()
 	terminal, err := finalizeTestRun(t, store, run, 90)
 	if err != nil || terminal.Phase != RunTerminal {
 		t.Fatalf("terminal origin run: %+v, %v", terminal, err)
@@ -277,34 +234,13 @@ func TestResolvedContinuationPromotesThenReentersProviderAdmission(t *testing.T)
 	}
 	context := admission.Run.ContinuationContexts[0]
 	if context.ContextDigest != spec.ContextDigest || context.ConditionKind != ConditionHumanRequest ||
-		context.ConditionID != condition || context.ConditionRevision != waiting.ConditionRevision ||
+		context.ConditionID != condition || context.ConditionRevision != spec.ConditionRevision ||
 		context.ResolutionDetail != "continue" {
 		t.Fatalf("fresh admission continuation context = %+v", context)
 	}
-	resolved, found, err := store.Continuation(ctx, waiting.ID)
+	resolved, found, err := store.Continuation(ctx, spec.ID)
 	if err != nil || !found || resolved.State != ContinuationResolved {
 		t.Fatalf("resolved continuation after admission: %+v found=%v err=%v", resolved, found, err)
-	}
-}
-
-func TestContinuationCancellationWinsAndStaleEventCannotWake(t *testing.T) {
-	ctx := context.Background()
-	store, run, _ := runningWorkerRun(t)
-	defer store.Close()
-	condition := ContinuationConditionID{}
-	conditionBytes := humanKey(221)
-	copy(condition[:], conditionBytes[:])
-	spec := NewContinuation{ID: continuationIDForTest(t, 222), ProjectID: run.ProjectID, TaskID: run.TaskID, TaskIncarnationID: run.TaskIncarnationID, WorkRevision: run.AdmittedTaskWorkRevision, ContextDigest: sha256.Sum256([]byte("cancel-context")), ConditionKind: ConditionHumanRequest, ConditionID: condition, ConditionRevision: mustRevision(t, 1)}
-	created, err := store.CreateContinuation(ctx, spec, mustTime(t, 40))
-	if err != nil {
-		t.Fatalf("create continuation: %v", err)
-	}
-	cancelled, err := store.CancelContinuation(ctx, created.ID, created.Revision, "scope changed", mustTime(t, 41))
-	if err != nil || cancelled.State != ContinuationCancelled || cancelled.ResolutionDetail != "scope changed" {
-		t.Fatalf("cancelled continuation = %+v, %v", cancelled, err)
-	}
-	if _, err := store.ResolveContinuationForEvent(ctx, created.ID, created.Revision, ConditionHumanRequest, condition, created.ConditionRevision, "late answer", mustTime(t, 42)); !errors.Is(err, ErrRevisionConflict) {
-		t.Fatalf("late event after cancellation = %v", err)
 	}
 }
 

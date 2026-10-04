@@ -43,13 +43,8 @@ func TestOperatorHumanReplyResolvesYieldedContinuation(t *testing.T) {
 	}
 	var key [kernel.IDBytes]byte
 	copy(key[:], adapterID(t, 60))
-	request, err := adapter.store.CreateHumanQuestionForAttempt(context.Background(), run.CredentialDigest, kernel.NewHumanQuestion{IdempotencyKey: key, QuestionText: "continue?"}, adapterTime(t, 500))
+	request, err := adapter.store.CreateHumanQuestionAndYieldForAttempt(context.Background(), run.CredentialDigest, kernel.NewHumanQuestion{IdempotencyKey: key, QuestionText: "continue?"}, adapterTime(t, 500))
 	if err != nil {
-		t.Fatal(err)
-	}
-	var condition kernel.ContinuationConditionID
-	copy(condition[:], request.ID.Bytes())
-	if _, err := adapter.store.YieldContinuationForAttempt(context.Background(), run.CredentialDigest, kernel.ConditionHumanRequest, condition, request.Revision, adapterTime(t, 500)); err != nil {
 		t.Fatal(err)
 	}
 	completeYieldedOperatorRun(t, adapter.store, run)

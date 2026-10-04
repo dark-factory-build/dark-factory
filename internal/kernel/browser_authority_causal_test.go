@@ -1274,30 +1274,6 @@ func TestTerminalLeaseSequenceReleasePartialResetAndFreshGeneration(t *testing.T
 	if _, err := store.ReserveTerminalInputSequence(ctx, run.ID, session.ID, client.ID, newLease.Generation, 1, run.Revision, session.Revision, mustTime(t, 40)); err != nil {
 		t.Fatal(err)
 	}
-	beforeResetFactory, err := store.Factory(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := store.ResetTerminalLeases(ctx); err != nil {
-		t.Fatal(err)
-	}
-	afterReset := terminalSessionForRunTest(t, store, run.ID)
-	if afterReset.LeaseClientID != nil || afterReset.LeaseExpiresAt != nil || afterReset.LastInputSequence != 0 || afterReset.LeaseGeneration != newLease.Generation+1 || afterReset.Revision != session.Revision || afterReset.UpdatedAt != session.UpdatedAt {
-		t.Fatalf("reset lease state = %+v", afterReset)
-	}
-	afterResetFactory, err := store.Factory(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if afterResetFactory.Head != beforeResetFactory.Head || afterResetFactory.Revision != beforeResetFactory.Revision {
-		t.Fatalf("reset emitted lifecycle invalidation: before=%+v after=%+v", beforeResetFactory, afterResetFactory)
-	}
-	if _, err := store.ReleaseTerminalLease(ctx, run.ID, session.ID, client.ID, newLease.Generation, run.Revision, session.Revision, mustTime(t, 41)); !errors.Is(err, ErrRevisionConflict) {
-		t.Fatalf("stale release error = %v", err)
-	}
-	if _, err := store.ReleaseTerminalLease(ctx, run.ID, session.ID, client.ID, afterReset.LeaseGeneration, run.Revision, session.Revision, mustTime(t, 41)); !errors.Is(err, ErrRevisionConflict) {
-		t.Fatalf("cleared-holder release error = %v", err)
-	}
 	secondRun := addRunningRunOnStore(t, store, 180)
 	secondSession := terminalSessionForRunTest(t, store, secondRun.ID)
 	secondClientID := browserTestID(t, 131)

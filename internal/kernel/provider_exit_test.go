@@ -3,6 +3,7 @@ package kernel
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 )
 
@@ -221,4 +222,132 @@ func TestProcessExitTimeIsBoundedByRunLifetime(t *testing.T) {
 			t.Fatalf("runner exit after updated_at = %v", err)
 		}
 	})
+}
+
+// ObserveProviderExit is a test-only provider exit edge; production records
+// provider exits only through the atomic attempt result and absence edges.
+func (store *Store) ObserveProviderExit(ctx context.Context, runID RunID, expected Revision, identity ResourceIdentity, exit ProcessExit, at UnixMillis) (Run, error) {
+	if runID.zero() || !identity.validFor(ResourceProviderProcess) || !exit.valid() || at.Int64() < exit.at.Int64() {
+		return Run{}, fmt.Errorf("%w: invalid process exit observation", ErrInvalidValue)
+	}
+	tx, err := store.beginValidatedWrite(ctx)
+	if err != nil {
+		return Run{}, err
+	}
+	defer tx.Close()
+	run, found, err := runByID(ctx, tx.connection, runID)
+	if err != nil {
+		return Run{}, tx.Rollback(err)
+	}
+	if !found {
+		return Run{}, tx.Rollback(ErrNotFound)
+	}
+	if exit.at.Int64() < run.AdmittedAt.Int64() {
+		return Run{}, tx.Rollback(ErrInvalidValue)
+	}
+	resources, err := resourcesForRun(ctx, tx.connection, runID)
+	if err != nil {
+		return Run{}, tx.Rollback(err)
+	}
+	activatedAt, matched := exitIdentityMatches(resources, identity)
+	if !matched {
+		return Run{}, tx.Rollback(ErrConflict)
+	}
+	if exit.at.Int64() < activatedAt.Int64() {
+		return Run{}, tx.Rollback(ErrConflict)
+	}
+	existing := run.ProviderExit
+	if existing != nil {
+		if !existing.equal(exit) {
+			return Run{}, tx.Rollback(ErrConflict)
+		}
+		if err := tx.Rollback(nil); err != nil {
+			return Run{}, err
+		}
+		return run, nil
+	}
+	if run.Phase == RunTerminal || run.Revision != expected || at.Int64() < run.UpdatedAt.Int64() {
+		return Run{}, tx.Rollback(ErrRevisionConflict)
+	}
+	exitKind, code, signal := exitSQL(exit)
+	newRevision := expected.Int64() + 1
+	pending := []pendingInvalidation{{kind: EntityRun, id: run.ID.Bytes(), revision: newRevision}}
+	if run.Phase == RunAdmitted || run.Phase == RunRunning {
+		if err := requireFinalizingTime(ctx, tx.connection, run, at); err != nil {
+			return Run{}, tx.Rollback(err)
+		}
+		proposal, _ := NewFailureProposal(FailureProviderExit, "provider exited before an attempt outcome")
+		kind, proposalCode, proposalDetail, result := proposalSQL(proposal)
+		updated, err := tx.connection.ExecContext(ctx, `UPDATE runs SET phase = 'finalizing', proposal_kind = ?, proposal_code = ?, proposal_detail = ?, proposal_result = ?, credential_revoked_at_ms = ?, finalizing_at_ms = ?, provider_exit_kind = ?, provider_exit_sequence = ?, provider_exit_code = ?, provider_exit_signal = ?, provider_exit_at_ms = ?, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND phase IN ('admitted', 'running') AND proposal_kind IS NULL AND provider_exit_kind IS NULL AND revision = ?`,
+			kind, proposalCode, proposalDetail, result, at.Int64(), at.Int64(), exitKind, exit.sequence, code, signal, exit.at.Int64(), at.Int64(), run.ID.Bytes(), expected.Int64())
+		if err := requireOneRow(updated, err); err != nil {
+			return Run{}, tx.Rollback(err)
+		}
+		releasing, err := tx.connection.ExecContext(ctx, `UPDATE resources SET state = 'releasing', revision = revision + 1, updated_at_ms = ? WHERE run_id = ? AND state IN ('declared', 'active')`, at.Int64(), run.ID.Bytes())
+		if err := requireRows(releasing, err, 4); err != nil {
+			return Run{}, tx.Rollback(err)
+		}
+		session, found, sessionErr := terminalSessionByRunID(ctx, tx.connection, run.ID)
+		if sessionErr != nil || !found {
+			if sessionErr == nil {
+				sessionErr = ErrCorruptState
+			}
+			return Run{}, tx.Rollback(sessionErr)
+		}
+		if err := moveTerminalToReleasing(ctx, tx.connection, session, at); err != nil {
+			return Run{}, tx.Rollback(err)
+		}
+		requestInvalidations, transitionErr := transitionHumanRequestsForRun(ctx, tx.connection, run.ID, at, false, nil, nil)
+		if transitionErr != nil {
+			return Run{}, tx.Rollback(transitionErr)
+		}
+		pending = append(pending, requestInvalidations...)
+	} else if run.Phase == RunFinalizing {
+		updated, err := tx.connection.ExecContext(ctx, `UPDATE runs SET provider_exit_kind = ?, provider_exit_sequence = ?, provider_exit_code = ?, provider_exit_signal = ?, provider_exit_at_ms = ?, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND phase = 'finalizing' AND provider_exit_kind IS NULL AND revision = ?`, exitKind, exit.sequence, code, signal, exit.at.Int64(), at.Int64(), run.ID.Bytes(), expected.Int64())
+		if err := requireOneRow(updated, err); err != nil {
+			return Run{}, tx.Rollback(err)
+		}
+	} else {
+		return Run{}, tx.Rollback(ErrConflict)
+	}
+	if err := appendInvalidations(ctx, tx.connection, at, pending); err != nil {
+		return Run{}, tx.Rollback(err)
+	}
+	run, found, err = runByID(ctx, tx.connection, run.ID)
+	if err != nil || !found {
+		if err == nil {
+			err = ErrCorruptState
+		}
+		return Run{}, tx.Rollback(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Run{}, err
+	}
+	return run, nil
+}
+
+func exitIdentityMatches(resources []Resource, identity ResourceIdentity) (UnixMillis, bool) {
+	providerProcessMatched := false
+	providerGroupMatched := false
+	var activatedAt UnixMillis
+	var activationFound bool
+	for _, resource := range resources {
+		if resource.State == ResourceDeclared || !resourceIdentityEqual(resource.Identity, identity) {
+			continue
+		}
+		switch resource.Kind {
+		case ResourceProviderProcess:
+			providerProcessMatched = true
+		case ResourceProviderGroup:
+			providerGroupMatched = true
+		default:
+			continue
+		}
+		if resource.ActivatedAt == nil || activationFound && *resource.ActivatedAt != activatedAt {
+			return UnixMillis{}, false
+		}
+		activatedAt = *resource.ActivatedAt
+		activationFound = true
+	}
+	return activatedAt, providerProcessMatched && providerGroupMatched && activationFound
 }

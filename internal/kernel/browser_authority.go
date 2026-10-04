@@ -86,15 +86,6 @@ type BrowserClientCounts struct {
 	ActiveChallenges uint64
 }
 
-// BrowserClientPrincipal is deliberately only a durable client identity. The
-// daemon reloads BrowserClient before every effect instead of caching authority
-// in a connection principal.
-type BrowserClientPrincipal struct {
-	id BrowserClientID
-}
-
-func (principal BrowserClientPrincipal) ClientID() BrowserClientID { return principal.id }
-
 type BrowserSecurityEventKind string
 
 const (
@@ -464,17 +455,6 @@ func (store *Store) BrowserClientCounts(ctx context.Context, bootID BootID, at U
 	}
 	result.Active -= result.Revoked
 	return result, nil
-}
-
-func (store *Store) AuthenticateBrowserClient(ctx context.Context, id BrowserClientID) (BrowserClientPrincipal, error) {
-	client, found, err := store.BrowserClient(ctx, id)
-	if err != nil {
-		return BrowserClientPrincipal{}, err
-	}
-	if !found || client.RevokedAt != nil {
-		return BrowserClientPrincipal{}, ErrUnauthorized
-	}
-	return BrowserClientPrincipal{id: client.ID}, nil
 }
 
 func insertBrowserSecurityEvent(ctx context.Context, c *sql.Conn, kind BrowserSecurityEventKind, clientID *BrowserClientID, at UnixMillis) error {
@@ -879,42 +859,4 @@ func (store *Store) RevokeBrowserClient(ctx context.Context, id BrowserClientID,
 		return BrowserClient{}, err
 	}
 	return client, nil
-}
-
-func (store *Store) ResetTerminalLeases(ctx context.Context) error {
-	tx, err := store.beginValidatedWrite(ctx)
-	if err != nil {
-		return err
-	}
-	defer tx.Close()
-	rows, err := tx.connection.QueryContext(ctx, `SELECT id, lease_generation FROM terminal_sessions WHERE lease_client_id IS NOT NULL`)
-	if err != nil {
-		return tx.Rollback(err)
-	}
-	type held struct {
-		sid []byte
-		gen int64
-	}
-	var sessions []held
-	for rows.Next() {
-		var h held
-		if err := rows.Scan(&h.sid, &h.gen); err != nil {
-			_ = closeValidatedBrowserRows(rows)
-			return tx.Rollback(err)
-		}
-		sessions = append(sessions, h)
-	}
-	if err := closeValidatedBrowserRows(rows); err != nil {
-		return tx.Rollback(err)
-	}
-	for _, h := range sessions {
-		if _, err := leaseGenerationNext(h.gen); err != nil {
-			return tx.Rollback(err)
-		}
-		updated, err := tx.connection.ExecContext(ctx, `UPDATE terminal_sessions SET lease_client_id = NULL, lease_expires_at_ms = NULL, lease_generation = lease_generation + 1, last_input_sequence = 0 WHERE id = ? AND lease_client_id IS NOT NULL AND lease_generation = ?`, h.sid, h.gen)
-		if err := requireOneRow(updated, err); err != nil {
-			return tx.Rollback(err)
-		}
-	}
-	return tx.Commit(ctx)
 }

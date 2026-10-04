@@ -165,15 +165,6 @@ func TestRecoveredRunnerAbsenceFromRunningRunRevokesAuthorityAndRoundTrips(t *te
 	if err != nil || !found {
 		t.Fatalf("recovered running reload = %+v, found=%v, err=%v", fresh, found, err)
 	}
-	session := terminalSessionForRunTest(t, reopened, run.ID)
-	unresolved, err := reopened.MarkTerminalSessionUnresolved(context.Background(), run.ID, session.ID, fresh.Revision, session.Revision, "runner recovered", mustTime(t, 60))
-	if err != nil || unresolved.State != TerminalSessionUnresolved {
-		t.Fatalf("mark recovered unresolved = %+v, err=%v", unresolved, err)
-	}
-	fresh, found, err = reopened.Run(context.Background(), run.ID)
-	if err != nil || !found {
-		t.Fatalf("unresolved recovered reload = %+v, found=%v, err=%v", fresh, found, err)
-	}
 	// A no-result history deliberately cannot terminalize: the recovered
 	// close authority is gone, the exact result edge cannot authenticate a
 	// recovered-absence provider exit, and the finalizer refuses the open

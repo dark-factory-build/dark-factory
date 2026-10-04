@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-	"unicode/utf8"
 )
 
 type ContinuationCondition string
@@ -79,23 +78,6 @@ type ContinuationContext struct {
 // provider-limit task can still be returned together with its causal context.
 const MaxContinuationTaskBytes = (128 << 10) + MaxHumanRequestReplyBytes + 2048
 
-// ContinuationTaskText frames resolved causal context for a fresh provider
-// authority while preserving the provider's task-size contract.
-func ContinuationTaskText(provider Provider, task string, contexts []ContinuationContext) string {
-	if len(contexts) == 0 {
-		return task
-	}
-	limit := 131072
-	if provider == ProviderCodex {
-		limit = 8192
-	}
-	if len(task) >= limit {
-		return task
-	}
-	full := continuationTaskTextFull(task, contexts)
-	return truncateContinuationUTF8(full, limit)
-}
-
 func continuationTaskTextFull(task string, contexts []ContinuationContext) string {
 	var builder strings.Builder
 	builder.WriteString(task)
@@ -144,17 +126,6 @@ func ContinuationTaskCanUseFetchFallback(provider Provider, contexts []Continuat
 	return provider == ProviderClaudeCode || provider == ProviderCodex
 }
 
-func truncateContinuationUTF8(value string, limit int) string {
-	if len(value) <= limit {
-		return value
-	}
-	value = value[:limit]
-	for len(value) > 0 && !utf8.ValidString(value) {
-		value = value[:len(value)-1]
-	}
-	return value
-}
-
 func validateContinuationSpec(spec NewContinuation) error {
 	if spec.ID.zero() || spec.ProjectID.zero() || spec.TaskID.zero() || spec.TaskIncarnationID.zero() || spec.ConditionID.zero() ||
 		spec.WorkRevision.Int64() < 1 || spec.ConditionRevision.Int64() < 1 || spec.ConditionKind == "" ||
@@ -183,126 +154,6 @@ func isZeroDigest(value [DigestBytes]byte) bool {
 		}
 	}
 	return true
-}
-
-func (store *Store) CreateContinuation(ctx context.Context, spec NewContinuation, at UnixMillis) (Continuation, error) {
-	if err := validateContinuationSpec(spec); err != nil {
-		return Continuation{}, err
-	}
-	tx, err := store.beginValidatedWrite(ctx)
-	if err != nil {
-		return Continuation{}, err
-	}
-	defer tx.Close()
-	task, found, err := taskByID(ctx, tx.connection, spec.TaskID)
-	if err != nil || !found {
-		if err == nil {
-			err = ErrNotFound
-		}
-		return Continuation{}, tx.Rollback(err)
-	}
-	if task.ProjectID != spec.ProjectID || task.IncarnationID != spec.TaskIncarnationID || task.WorkRevision != spec.WorkRevision || task.Status != TaskRunning {
-		return Continuation{}, tx.Rollback(ErrRevisionConflict)
-	}
-	_, err = tx.connection.ExecContext(ctx, `INSERT INTO continuations(id, project_id, task_id, task_incarnation_id, work_revision, context_digest, condition_kind, condition_id, condition_revision, state, revision, created_at_ms, updated_at_ms) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, 'waiting', 1, ?, ?)`, spec.ID.Bytes(), spec.ProjectID.Bytes(), spec.TaskID.Bytes(), spec.TaskIncarnationID.Bytes(), spec.WorkRevision.Int64(), spec.ContextDigest[:], string(spec.ConditionKind), spec.ConditionID.Bytes(), spec.ConditionRevision.Int64(), at.Int64(), at.Int64())
-	if err != nil {
-		return Continuation{}, tx.Rollback(err)
-	}
-	if err := appendInvalidations(ctx, tx.connection, at, []pendingInvalidation{{kind: EntityContinuation, id: spec.ID.Bytes(), revision: 1}}); err != nil {
-		return Continuation{}, tx.Rollback(err)
-	}
-	value, found, err := continuationByID(ctx, tx.connection, spec.ID)
-	if err != nil || !found {
-		if err == nil {
-			err = ErrCorruptState
-		}
-		return Continuation{}, tx.Rollback(err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return Continuation{}, err
-	}
-	return value, nil
-}
-
-// YieldContinuationForAttempt is the daemon boundary for a provider request
-// that can outlive its bearer.  The continuation and credential revocation
-// are committed together; the caller may then terminate the old provider and
-// release its slot.  No provider input is retained or replayed here.
-func (store *Store) YieldContinuationForAttempt(ctx context.Context, digest AttemptDigest, kind ContinuationCondition, conditionID ContinuationConditionID, conditionRevision Revision, at UnixMillis) (Continuation, error) {
-	if kind == "" || !validContinuationCondition(kind) || conditionID.zero() || conditionRevision.Int64() < 1 {
-		return Continuation{}, fmt.Errorf("%w: invalid continuation event", ErrInvalidValue)
-	}
-	tx, err := store.beginValidatedWrite(ctx)
-	if err != nil {
-		return Continuation{}, err
-	}
-	defer tx.Close()
-	run, found, err := runByDigest(ctx, tx.connection, digest)
-	if err != nil || !found {
-		if err == nil {
-			err = ErrUnauthorized
-		}
-		return Continuation{}, tx.Rollback(err)
-	}
-	if run.Phase != RunRunning || run.CredentialRevokedAt != nil {
-		return Continuation{}, tx.Rollback(ErrUnauthorized)
-	}
-	task, found, err := taskByID(ctx, tx.connection, run.TaskID)
-	if err != nil || !found {
-		if err == nil {
-			err = ErrCorruptState
-		}
-		return Continuation{}, tx.Rollback(err)
-	}
-	if task.ProjectID != run.ProjectID || task.IncarnationID != run.TaskIncarnationID || task.WorkRevision != run.AdmittedTaskWorkRevision || task.Status != TaskRunning {
-		return Continuation{}, tx.Rollback(ErrRevisionConflict)
-	}
-	var existing Continuation
-	var existingFound bool
-	existing, existingFound, err = continuationByCondition(ctx, tx.connection, task.ID, task.IncarnationID, task.WorkRevision, kind, conditionID)
-	if err != nil {
-		return Continuation{}, tx.Rollback(err)
-	}
-	if existingFound {
-		return existing, tx.Rollback(nil)
-	}
-	var raw [IDBytes]byte
-	if _, err := rand.Read(raw[:]); err != nil || raw == ([IDBytes]byte{}) {
-		if err == nil {
-			err = fmt.Errorf("%w: generated zero continuation identifier", ErrCorruptState)
-		}
-		return Continuation{}, tx.Rollback(err)
-	}
-	id, err := ContinuationIDFromBytes(raw[:])
-	if err != nil {
-		return Continuation{}, tx.Rollback(err)
-	}
-	contextDigest := sha256.Sum256([]byte(fmt.Sprintf("%s:%d", task.ID.String(), task.WorkRevision.Int64())))
-	spec := NewContinuation{ID: id, ProjectID: task.ProjectID, TaskID: task.ID, TaskIncarnationID: task.IncarnationID, WorkRevision: task.WorkRevision, ContextDigest: contextDigest, ConditionKind: kind, ConditionID: conditionID, ConditionRevision: conditionRevision}
-	if err := validateContinuationSpec(spec); err != nil {
-		return Continuation{}, tx.Rollback(err)
-	}
-	if _, err := tx.connection.ExecContext(ctx, `INSERT INTO continuations(id, project_id, task_id, task_incarnation_id, work_revision, context_digest, condition_kind, condition_id, condition_revision, state, revision, created_at_ms, updated_at_ms) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, 'waiting', 1, ?, ?)`, id.Bytes(), task.ProjectID.Bytes(), task.ID.Bytes(), task.IncarnationID.Bytes(), task.WorkRevision.Int64(), contextDigest[:], string(kind), conditionID.Bytes(), conditionRevision.Int64(), at.Int64(), at.Int64()); err != nil {
-		return Continuation{}, tx.Rollback(err)
-	}
-	if err := appendInvalidations(ctx, tx.connection, at, []pendingInvalidation{{kind: EntityContinuation, id: id.Bytes(), revision: 1}}); err != nil {
-		return Continuation{}, tx.Rollback(err)
-	}
-	proposal, err := NewCancelledProposal("yielded awaiting " + string(kind))
-	if err != nil {
-		return Continuation{}, tx.Rollback(err)
-	}
-	if _, err := store.enterFinalizing(ctx, tx, run, run.Revision, proposal, at, nil, &conditionID); err != nil {
-		return Continuation{}, err
-	}
-	value, found, err := continuationByID(ctx, tx.connection, id)
-	if err != nil || !found {
-		if err == nil {
-			err = ErrCorruptState
-		}
-		return Continuation{}, tx.Rollback(err)
-	}
-	return value, nil
 }
 
 // yieldContinuationOnConnection is the shared atomic portion of yielding. The
@@ -385,95 +236,6 @@ func continuationByCondition(ctx context.Context, connection *sql.Conn, taskID T
 	return continuationByID(ctx, connection, id)
 }
 
-func (store *Store) ResolveContinuation(ctx context.Context, id ContinuationID, expected Revision, detail string, at UnixMillis) (Continuation, error) {
-	if id.zero() || len(detail) == 0 || byteLen(detail) > 4096 {
-		return Continuation{}, fmt.Errorf("%w: invalid continuation resolution", ErrInvalidValue)
-	}
-	tx, err := store.beginValidatedWrite(ctx)
-	if err != nil {
-		return Continuation{}, err
-	}
-	defer tx.Close()
-	current, found, err := continuationByID(ctx, tx.connection, id)
-	if err != nil || !found {
-		if err == nil {
-			err = ErrNotFound
-		}
-		return Continuation{}, tx.Rollback(err)
-	}
-	return resolveContinuationOnConnection(ctx, tx, current, expected, detail, at)
-}
-
-// ResolveContinuationForEvent is the event-delivery seam for continuations.
-// Callers must identify the exact durable condition that caused the wake.  The
-// condition revision is checked before the compare-and-swap in
-// ResolveContinuation, so an old answer, question, or handoff cannot wake a
-// newer continuation after a task revision changed.
-func (store *Store) ResolveContinuationForEvent(ctx context.Context, id ContinuationID, expected Revision, kind ContinuationCondition, conditionID ContinuationConditionID, conditionRevision Revision, detail string, at UnixMillis) (Continuation, error) {
-	if id.zero() || !validContinuationCondition(kind) || conditionID.zero() || conditionRevision.Int64() < 1 {
-		return Continuation{}, fmt.Errorf("%w: invalid continuation event", ErrInvalidValue)
-	}
-	if len(detail) == 0 || byteLen(detail) > 4096 {
-		return Continuation{}, fmt.Errorf("%w: invalid continuation resolution", ErrInvalidValue)
-	}
-	tx, err := store.beginValidatedWrite(ctx)
-	if err != nil {
-		return Continuation{}, err
-	}
-	defer tx.Close()
-	current, found, err := continuationByID(ctx, tx.connection, id)
-	if err != nil {
-		return Continuation{}, tx.Rollback(err)
-	}
-	if !found {
-		return Continuation{}, tx.Rollback(ErrNotFound)
-	}
-	if current.ConditionKind != kind || current.ConditionID != conditionID || current.ConditionRevision != conditionRevision {
-		return Continuation{}, tx.Rollback(ErrRevisionConflict)
-	}
-	return resolveContinuationOnConnection(ctx, tx, current, expected, detail, at)
-}
-
-// resolveContinuationOnConnection validates the current durable condition and
-// performs the wake CAS while the caller's write transaction is still open.
-// In particular, ResolveContinuationForEvent must not validate an event in a
-// read transaction and then wake a different continuation revision.
-func resolveContinuationOnConnection(ctx context.Context, tx *writeTx, current Continuation, expected Revision, detail string, at UnixMillis) (Continuation, error) {
-	if current.State == ContinuationQueued && current.Revision.Int64() == expected.Int64()+1 && current.ResolutionDetail == detail {
-		if err := tx.Rollback(nil); err != nil {
-			return Continuation{}, err
-		}
-		return current, nil
-	}
-	if current.State != ContinuationWaiting || current.Revision != expected || at.Int64() < current.UpdatedAt.Int64() {
-		return Continuation{}, tx.Rollback(ErrRevisionConflict)
-	}
-	// A queued continuation is resolved but not yet admitted. Keep the
-	// resolution in the durable row so fresh admission can receive causal
-	// event metadata.
-	updated, err := tx.connection.ExecContext(ctx, `UPDATE continuations SET state='queued', resolution_detail=?, resolved_at_ms=?, revision=revision+1, updated_at_ms=? WHERE id=? AND state='waiting' AND revision=?`, detail, at.Int64(), at.Int64(), current.ID.Bytes(), expected.Int64())
-	if err := requireOneRow(updated, err); err != nil {
-		return Continuation{}, tx.Rollback(err)
-	}
-	if err := appendInvalidations(ctx, tx.connection, at, []pendingInvalidation{{kind: EntityContinuation, id: current.ID.Bytes(), revision: expected.Int64() + 1}}); err != nil {
-		return Continuation{}, tx.Rollback(err)
-	}
-	if _, err := promoteContinuationOnConnection(ctx, tx.connection, current.ID, at); err != nil {
-		return Continuation{}, tx.Rollback(err)
-	}
-	value, found, err := continuationByID(ctx, tx.connection, current.ID)
-	if err != nil || !found {
-		if err == nil {
-			err = ErrCorruptState
-		}
-		return Continuation{}, tx.Rollback(err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return Continuation{}, err
-	}
-	return value, nil
-}
-
 // PromoteQueuedContinuations is the restart-safe admission edge. Resolution
 // may race the old run's final cleanup; promotion therefore checks the
 // terminal task/run topology in the same write transaction and can be retried
@@ -547,45 +309,7 @@ func (store *Store) ResolveHumanContinuationForAttempt(ctx context.Context, dige
 	if actor.Role != RoleOrchestrator || actor.Phase != RunRunning || actor.CredentialRevokedAt != nil {
 		return false, tx.Rollback(ErrUnauthorized)
 	}
-	request, found, err := humanRequestByID(ctx, tx.connection, requestID)
-	if err != nil || !found {
-		if err == nil {
-			err = ErrNotFound
-		}
-		return false, tx.Rollback(err)
-	}
-	if request.Revision != expected || request.Status != HumanRequestOpen {
-		return false, tx.Rollback(ErrRevisionConflict)
-	}
-	target, found, err := runByID(ctx, tx.connection, request.RunID)
-	if err != nil || !found {
-		if err == nil {
-			err = ErrCorruptState
-		}
-		return false, tx.Rollback(err)
-	}
-	if target.ProjectID != actor.ProjectID || target.Phase != RunTerminal {
-		return false, tx.Rollback(ErrConflict)
-	}
-	var conditionID ContinuationConditionID
-	copy(conditionID[:], request.ID.Bytes())
-	continuation, found, err := continuationByCondition(ctx, tx.connection, target.TaskID, target.TaskIncarnationID, target.AdmittedTaskWorkRevision, ConditionHumanRequest, conditionID)
-	if err != nil || !found {
-		if err == nil {
-			err = ErrNotFound
-		}
-		return false, tx.Rollback(err)
-	}
-	if continuation.State != ContinuationWaiting && continuation.State != ContinuationQueued {
-		return false, tx.Rollback(ErrRevisionConflict)
-	}
-	if err := resolveHumanContinuationOnConnection(ctx, tx, request, continuation, HumanRequestDeliveryID{}, reply, at); err != nil {
-		return false, tx.Rollback(err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return false, err
-	}
-	return true, nil
+	return resolveHumanContinuation(ctx, tx, requestID, expected, actor.ProjectID, HumanRequestDeliveryID{}, reply, at)
 }
 
 // ResolveHumanContinuationForBrowser is the public human-action equivalent of
@@ -607,45 +331,7 @@ func (store *Store) ResolveHumanContinuationForBrowser(ctx context.Context, clie
 		}
 		return false, tx.Rollback(err)
 	}
-	request, found, err := humanRequestByID(ctx, tx.connection, requestID)
-	if err != nil || !found {
-		if err == nil {
-			err = ErrNotFound
-		}
-		return false, tx.Rollback(err)
-	}
-	if request.Revision != expected || request.Status != HumanRequestOpen {
-		return false, tx.Rollback(ErrRevisionConflict)
-	}
-	target, found, err := runByID(ctx, tx.connection, request.RunID)
-	if err != nil || !found {
-		if err == nil {
-			err = ErrCorruptState
-		}
-		return false, tx.Rollback(err)
-	}
-	if target.Phase != RunTerminal {
-		return false, tx.Rollback(ErrConflict)
-	}
-	var conditionID ContinuationConditionID
-	copy(conditionID[:], request.ID.Bytes())
-	continuation, found, err := continuationByCondition(ctx, tx.connection, target.TaskID, target.TaskIncarnationID, target.AdmittedTaskWorkRevision, ConditionHumanRequest, conditionID)
-	if err != nil || !found {
-		if err == nil {
-			err = ErrNotFound
-		}
-		return false, tx.Rollback(err)
-	}
-	if continuation.State != ContinuationWaiting && continuation.State != ContinuationQueued {
-		return false, tx.Rollback(ErrRevisionConflict)
-	}
-	if err := resolveHumanContinuationOnConnection(ctx, tx, request, continuation, HumanRequestDeliveryID{}, reply, at); err != nil {
-		return false, tx.Rollback(err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return false, err
-	}
-	return true, nil
+	return resolveHumanContinuation(ctx, tx, requestID, expected, ProjectID{}, HumanRequestDeliveryID{}, reply, at)
 }
 
 // ResolveHumanContinuationForOperator consumes an operator-authorized reply
@@ -659,6 +345,12 @@ func (store *Store) ResolveHumanContinuationForOperator(ctx context.Context, req
 		return false, err
 	}
 	defer tx.Close()
+	return resolveHumanContinuation(ctx, tx, requestID, expected, ProjectID{}, deliveryID, reply, at)
+}
+
+// resolveHumanContinuation resolves an open request's yielded continuation
+// and commits tx. A nonzero project confines the request's run to it.
+func resolveHumanContinuation(ctx context.Context, tx *writeTx, requestID HumanRequestID, expected Revision, project ProjectID, deliveryID HumanRequestDeliveryID, reply string, at UnixMillis) (bool, error) {
 	request, found, err := humanRequestByID(ctx, tx.connection, requestID)
 	if err != nil || !found {
 		if err == nil {
@@ -676,7 +368,7 @@ func (store *Store) ResolveHumanContinuationForOperator(ctx context.Context, req
 		}
 		return false, tx.Rollback(err)
 	}
-	if target.Phase != RunTerminal {
+	if !project.zero() && target.ProjectID != project || target.Phase != RunTerminal {
 		return false, tx.Rollback(ErrConflict)
 	}
 	var conditionID ContinuationConditionID
@@ -782,48 +474,6 @@ func promoteContinuationOnConnection(ctx context.Context, connection *sql.Conn, 
 		return nil, err
 	}
 	return &task, nil
-}
-
-func (store *Store) CancelContinuation(ctx context.Context, id ContinuationID, expected Revision, detail string, at UnixMillis) (Continuation, error) {
-	if id.zero() || len(detail) == 0 || byteLen(detail) > 4096 {
-		return Continuation{}, fmt.Errorf("%w: invalid continuation cancellation", ErrInvalidValue)
-	}
-	tx, err := store.beginValidatedWrite(ctx)
-	if err != nil {
-		return Continuation{}, err
-	}
-	defer tx.Close()
-	current, found, err := continuationByID(ctx, tx.connection, id)
-	if err != nil || !found {
-		if err == nil {
-			err = ErrNotFound
-		}
-		return Continuation{}, tx.Rollback(err)
-	}
-	if current.State == ContinuationCancelled && current.Revision.Int64() == expected.Int64()+1 && current.ResolutionDetail == detail {
-		return current, tx.Rollback(nil)
-	}
-	if current.State != ContinuationWaiting && current.State != ContinuationQueued || current.Revision != expected {
-		return Continuation{}, tx.Rollback(ErrRevisionConflict)
-	}
-	if at.Int64() < current.UpdatedAt.Int64() {
-		return Continuation{}, tx.Rollback(ErrRevisionConflict)
-	}
-	updated, err := tx.connection.ExecContext(ctx, `UPDATE continuations SET state='cancelled', resolution_detail=?, resolved_at_ms=?, revision=revision+1, updated_at_ms=? WHERE id=? AND state IN ('waiting', 'queued') AND revision=?`, detail, at.Int64(), at.Int64(), id.Bytes(), expected.Int64())
-	if err := requireOneRow(updated, err); err != nil {
-		return Continuation{}, tx.Rollback(err)
-	}
-	if err := appendInvalidations(ctx, tx.connection, at, []pendingInvalidation{{kind: EntityContinuation, id: id.Bytes(), revision: expected.Int64() + 1}}); err != nil {
-		return Continuation{}, tx.Rollback(err)
-	}
-	value, _, err := continuationByID(ctx, tx.connection, id)
-	if err != nil {
-		return Continuation{}, tx.Rollback(err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return Continuation{}, err
-	}
-	return value, nil
 }
 
 func continuationByID(ctx context.Context, connection *sql.Conn, id ContinuationID) (Continuation, bool, error) {
