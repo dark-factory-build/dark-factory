@@ -66,7 +66,8 @@ git -C "$test_repository" config core.hooksPath "$temporary/configured-hooks"
 printf 'live store\n' >"$fake_home/.dark-factory/factory.sqlite3"
 printf '\n' >"$fake_home/.dark-factory/home.lock"
 mkdir -p "$fake_home/.dark-factory.service"
-printf '{"label":"com.dark-factory.fixture","plist_path":"/private/tmp/fixture-plists/com.dark-factory.fixture.plist","relay_origin":"wss://relay.example"}\n' >"$fake_home/.dark-factory.service/receipt"
+fixture_program_digest=306c6ca7407560340797866e077e053627ad409277d1b9da58106fce4cf717cb
+printf '{"label":"com.dark-factory.fixture","plist_path":"/private/tmp/fixture-plists/com.dark-factory.fixture.plist","relay_origin":"wss://relay.example","program_digest":"%s"}\n' "$fixture_program_digest" >"$fake_home/.dark-factory.service/receipt"
 printf '0\n' >"$temporary/dispatch-enabled"
 : >"$temporary/active-runs"
 : >"$temporary/pids"
@@ -338,6 +339,18 @@ no_service_change "symlinked runtime home"
 
 "$script" "$sha" >"$temporary/stdout" || fail "clean reinstall exited non-zero"
 
+# An unchanged receipt cannot bless a replaced installed program. Refuse
+# before uninstalling it, so the next attempt still has a service to inspect.
+printf 'tampered\n' >"$fake_home/.dark-factory.service/bin/current/factoryd"
+chmod 755 "$fake_home/.dark-factory.service/bin/current/factoryd"
+"$script" "$sha" >/dev/null 2>"$temporary/stderr" && fail "tampered previous factoryd accepted"
+grep -q 'previous service package does not match its receipt' "$temporary/stderr" \
+    || fail "tampered previous factoryd: wrong refusal"
+[ ! -e "$DARK_FACTORY_TEST_FACTORYCTL_LOG" ] || fail "tampered previous factoryd: service changed"
+printf '#!/bin/sh\nexit 0\n' >"$fake_home/.dark-factory.service/bin/current/factoryd"
+chmod 755 "$fake_home/.dark-factory.service/bin/current/factoryd"
+rm -rf "$fake_home/.dark-factory-backups"
+
 # A failed prepared install must restore the copied old package after the
 # destructive uninstall and verify that the old service is healthy.
 before_rollback_receipt=$(cat "$fake_home/.dark-factory.service/receipt")
@@ -387,6 +400,7 @@ builds=$(wc -l <"$DARK_FACTORY_TEST_GO_LOG" | tr -d ' ')
 [ "$builds" -gt 0 ] && [ "$(grep -F -c -- '-buildvcs=true' "$DARK_FACTORY_TEST_GO_LOG")" = "$builds" ] \
     || fail "builds did not require VCS metadata: $(tr '\n' ';' <"$DARK_FACTORY_TEST_GO_LOG")"
 printf '%s\n' \
+	"service status --home $fake_home/.dark-factory --label com.dark-factory.fixture --plist-dir /private/tmp/fixture-plists" \
     "service uninstall --home $fake_home/.dark-factory --label com.dark-factory.fixture --plist-dir /private/tmp/fixture-plists" \
     "service install --home $fake_home/.dark-factory --label com.dark-factory.fixture --plist-dir /private/tmp/fixture-plists --relay-origin wss://relay.example" \
     "service status --home $fake_home/.dark-factory --label com.dark-factory.fixture --plist-dir /private/tmp/fixture-plists" \
@@ -399,9 +413,10 @@ rm "$DARK_FACTORY_TEST_FACTORYCTL_LOG"
 
 # An absent receipt member is a local-only install: factoryctl rejects an
 # empty relay argument, so reinstall must omit the flag rather than pass "".
-printf '{"label":"com.dark-factory.fixture","plist_path":"/private/tmp/fixture-plists/com.dark-factory.fixture.plist"}\n' >"$fake_home/.dark-factory.service/receipt"
+printf '{"label":"com.dark-factory.fixture","plist_path":"/private/tmp/fixture-plists/com.dark-factory.fixture.plist","program_digest":"%s"}\n' "$fixture_program_digest" >"$fake_home/.dark-factory.service/receipt"
 "$script" "$sha" >"$temporary/stdout" || fail "local-only reinstall exited non-zero"
 printf '%s\n' \
+	"service status --home $fake_home/.dark-factory --label com.dark-factory.fixture --plist-dir /private/tmp/fixture-plists" \
     "service uninstall --home $fake_home/.dark-factory --label com.dark-factory.fixture --plist-dir /private/tmp/fixture-plists" \
     "service install --home $fake_home/.dark-factory --label com.dark-factory.fixture --plist-dir /private/tmp/fixture-plists" \
     "service status --home $fake_home/.dark-factory --label com.dark-factory.fixture --plist-dir /private/tmp/fixture-plists" \
@@ -412,9 +427,10 @@ cmp -s "$temporary/expected-local.log" "$DARK_FACTORY_TEST_FACTORYCTL_LOG" \
 rm "$DARK_FACTORY_TEST_FACTORYCTL_LOG"
 # The receipt comes from Go's JSON encoder, which escapes HTML-significant
 # bytes. Reinstall must restore the decoded, valid custom origin.
-printf '%s\n' '{"label":"com.dark-factory.fixture","plist_path":"/private/tmp/fixture-plists/com.dark-factory.fixture.plist","relay_origin":"wss://relay\u0026.example"}' >"$fake_home/.dark-factory.service/receipt"
+printf '%s\n' '{"label":"com.dark-factory.fixture","plist_path":"/private/tmp/fixture-plists/com.dark-factory.fixture.plist","relay_origin":"wss://relay\u0026.example","program_digest":"306c6ca7407560340797866e077e053627ad409277d1b9da58106fce4cf717cb"}' >"$fake_home/.dark-factory.service/receipt"
 "$script" "$sha" >"$temporary/stdout" || fail "escaped relay origin reinstall exited non-zero"
 printf '%s\n' \
+	"service status --home $fake_home/.dark-factory --label com.dark-factory.fixture --plist-dir /private/tmp/fixture-plists" \
     "service uninstall --home $fake_home/.dark-factory --label com.dark-factory.fixture --plist-dir /private/tmp/fixture-plists" \
     "service install --home $fake_home/.dark-factory --label com.dark-factory.fixture --plist-dir /private/tmp/fixture-plists --relay-origin wss://relay&.example" \
     "service status --home $fake_home/.dark-factory --label com.dark-factory.fixture --plist-dir /private/tmp/fixture-plists" \
@@ -423,7 +439,7 @@ printf '%s\n' \
 cmp -s "$temporary/expected-escaped.log" "$DARK_FACTORY_TEST_FACTORYCTL_LOG" \
     || fail "escaped relay origin: factoryctl calls: $(tr '\n' ';' <"$DARK_FACTORY_TEST_FACTORYCTL_LOG")"
 rm "$DARK_FACTORY_TEST_FACTORYCTL_LOG"
-printf '{"label":"com.dark-factory.fixture","plist_path":"/private/tmp/fixture-plists/com.dark-factory.fixture.plist","relay_origin":"wss://relay.example"}\n' >"$fake_home/.dark-factory.service/receipt"
+printf '{"label":"com.dark-factory.fixture","plist_path":"/private/tmp/fixture-plists/com.dark-factory.fixture.plist","relay_origin":"wss://relay.example","program_digest":"%s"}\n' "$fixture_program_digest" >"$fake_home/.dark-factory.service/receipt"
 
 # VCS metadata is provenance, not just a build option: both refusal paths must
 # stop before the backup or service change.
@@ -492,7 +508,13 @@ custom_home="$fake_home/other-factory"
 mkdir -p "$custom_home" "$custom_home.service"
 printf 'other store\n' >"$custom_home/factory.sqlite3"
 printf '\n' >"$custom_home/home.lock"
-printf '%s\n' '{"label":"com.dark-factory.other","plist_path":"/private/tmp/custom plists/com.dark-factory.other.plist","relay_origin":"wss://other.example","tool_path":"/tools with spaces:/bin","toolchain_read_roots":"/tool roots:/sdk","development_browser_address":"127.0.0.1:4173"}' >"$custom_home.service/receipt"
+mkdir -p "$custom_home.service/bin/current"
+cp "$fake_home/.dark-factory.service/bin/current/factoryctl" "$custom_home.service/bin/current/factoryctl"
+for name in factoryd factory-runner; do
+    printf '#!/bin/sh\nexit 0\n' >"$custom_home.service/bin/current/$name"
+    chmod 755 "$custom_home.service/bin/current/$name"
+done
+printf '%s\n' '{"label":"com.dark-factory.other","plist_path":"/private/tmp/custom plists/com.dark-factory.other.plist","relay_origin":"wss://other.example","tool_path":"/tools with spaces:/bin","toolchain_read_roots":"/tool roots:/sdk","development_browser_address":"127.0.0.1:4173","program_digest":"306c6ca7407560340797866e077e053627ad409277d1b9da58106fce4cf717cb"}' >"$custom_home.service/receipt"
 before_builds=$(wc -l <"$DARK_FACTORY_TEST_GO_LOG")
 "$script" --home "$custom_home" --install-prepared "$sha" >/dev/null 2>"$temporary/stderr" \
     || fail "configured prepared installation: $(cat "$temporary/stderr")"
