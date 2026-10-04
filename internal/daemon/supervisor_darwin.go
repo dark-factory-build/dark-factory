@@ -393,7 +393,7 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 		return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureInternal, err)
 	}
 	rawProviderTask = []byte(instruction)
-	rawProviderTask, err = providerTaskForContinuationLaunch(run.Provider, rawProviderTask, run.ContinuationContexts)
+	rawProviderTask, _, err = daemon.prepareKnowledgeTask(ctx, run, rawProviderTask, true)
 	if err != nil {
 		return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSpawn, err)
 	}

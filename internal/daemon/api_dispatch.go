@@ -753,7 +753,8 @@ func (daemon *Daemon) attemptTask(ctx context.Context, call api.Call) api.Reply 
 	if err != nil {
 		return newErrorReply(api.RemoteInternal)
 	}
-	task, err := attemptTaskWithContinuationContext(authority.Provider, []byte(instruction), authority.ContinuationContexts)
+	contextRun := kernel.Run{ID: authority.RunID, CredentialDigest: kDigest, ProjectID: authority.ProjectID, AgentID: authority.AgentID, TaskID: authority.TaskID, ChangeID: authority.ChangeID, Provider: authority.Provider, AdmittedTaskWorkRevision: authority.AdmittedTaskWorkRevision, ContinuationContexts: authority.ContinuationContexts}
+	task, suppliedKnowledge, err := daemon.prepareKnowledgeTask(ctx, contextRun, []byte(instruction), false)
 	if err != nil {
 		return newErrorReply(api.RemoteInternal)
 	}
@@ -782,6 +783,15 @@ func (daemon *Daemon) attemptTask(ctx context.Context, call api.Call) api.Reply 
 	reply, err := api.NewAttemptTaskReply(assignment)
 	if err != nil {
 		return newErrorReply(api.RemoteInternal)
+	}
+	// Receipts mean this exact task response was served, not that the model
+	// understood it. Reauthenticate and record the complete set atomically.
+	at, err := daemon.timestamp()
+	if err != nil {
+		return newErrorReply(api.RemoteInternal)
+	}
+	if err = daemon.store.RecordSuppliedContentForAttempt(ctx, kDigest, suppliedKnowledge, at); err != nil {
+		return newErrorReply(remoteErrorCode(err))
 	}
 	return reply
 }

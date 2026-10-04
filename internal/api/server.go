@@ -1018,7 +1018,7 @@ func decodeCall(domain byte, bearer credential, encoded []byte) (Call, RemoteErr
 			return Call{}, RemoteInvalidRequest
 		}
 	case CallContentList:
-		if err := decodeExact(request.Params, &call.contentList); err != nil || !validText(call.contentList.ProjectID, 1, 64) || call.contentList.Limit > MaxContentPageItems {
+		if err := decodeExact(request.Params, &call.contentList); err != nil || !validText(call.contentList.ProjectID, 1, 64) || call.contentList.Limit > MaxContentPageItems || call.contentList.Offset > (1<<53)-1 || !validText(call.contentList.Query, 0, 1024) || !validText(call.contentList.Branch, 0, 256) || !validText(call.contentList.Environment, 0, 256) || !validText(call.contentList.Entity, 0, 256) || !validText(call.contentList.Thread, 0, 32) || call.contentList.RepositoryID != "" && !validID(call.contentList.RepositoryID) {
 			return Call{}, RemoteInvalidRequest
 		}
 	case CallContentRead:

@@ -77,3 +77,11 @@ func TestContentCallerBoundsAndDerivedProvenance(t *testing.T) {
 		}
 	}
 }
+
+func TestKnowledgeSearchUsesExistingContentAuthority(t *testing.T) {
+	id := "0123456789abcdef0123456789abcdef"
+	command, help, ok := parse([]string{"attempt", "content", "search", "--project", id, "--query", "exact run", "--repository", id, "--branch", "main", "--environment", "test", "--limit", "4"})
+	if !ok || help || command.kind != commandContentList || !command.knowledgeSearch || command.knowledgeQuery != "exact run" || command.knowledgeRepository != id || command.knowledgeBranch != "main" || command.environment != "test" {
+		t.Fatalf("search parse: %+v %t %t", command, help, ok)
+	}
+}

@@ -32,6 +32,7 @@ export type FactorySceneProps = Readonly<{
   proposals?: { items: readonly SceneProposal[]; selected?: string; onSelect: (id: string) => void };
   onSelectEntity?: (entityId: string) => void;
   onOpenLibrary?: (projectId?: string) => void;
+  onOpenBoard?: (projectId?: string) => void;
   appearance?: FloorAppearance;
   topology: SceneTopology;
   /** Current project scope, when the floor has one. */
@@ -404,7 +405,7 @@ function SceneWorkers({ nearby, errands, furniture, restingSeats, tray, peerQues
 }
 
 /** A disposable SVG projection of topology and current factory state. */
-export function FactoryScene({ proposals, onSelectEntity, onOpenLibrary, topology, detailNodes, workers, appearance = DEFAULT_FLOOR_APPEARANCE, omittedLocations = 0, selectedWorkerId, onSelectWorker, tasks = [], peerQuestions = NO_QUESTIONS, selectedTaskId, onSelectTask, onOpenTasks, onOpenMissions, onSelectHumanRequest, projectId, connected = true }: FactorySceneProps) {
+export function FactoryScene({ proposals, onSelectEntity, onOpenLibrary, onOpenBoard, topology, detailNodes, workers, appearance = DEFAULT_FLOOR_APPEARANCE, omittedLocations = 0, selectedWorkerId, onSelectWorker, tasks = [], peerQuestions = NO_QUESTIONS, selectedTaskId, onSelectTask, onOpenTasks, onOpenMissions, onSelectHumanRequest, projectId, connected = true }: FactorySceneProps) {
   const [selectedRoomId, setSelectedRoomId] = useState<string>();
   const [search, setSearch] = useState("");
   const mapElement = useRef<HTMLDivElement>(null);
@@ -614,6 +615,7 @@ export function FactoryScene({ proposals, onSelectEntity, onOpenLibrary, topolog
         <path d={d} fill="none" stroke={edge.status === "added" ? "#a4d6e8" : "#e7a893"} strokeWidth="2" strokeDasharray={edge.status === "added" ? "8 4" : "2 5"} pointerEvents="none" />
         <text x={(layout.rooms.find((room) => room.id === edge.fromId)?.door.x ?? 0) + 8} y={(layout.rooms.find((room) => room.id === edge.fromId)?.door.y ?? 0) - 6} fill="#ead8a4" fontSize="12" pointerEvents="none">{edge.status === "added" ? "+ link" : "× link"}</text>
       </g>)}
+      <g aria-label="Open project board" {...sceneAction(onOpenBoard === undefined ? undefined : () => onOpenBoard(projectId))} transform={`translate(${PADDING + 25} 25)`}><rect className="dfFactoryScene__focus" x="-8" y="-8" width="48" height="48" fill="transparent" /><g aria-hidden="true"><Frame name="prop.board" x={0} y={0} /><text x="0" y="30" fill="#d4ddd2" fontSize="10">BOARD</text></g></g>
       <Area width={commonAreaWidth} top={upperRoom.y} bottom={upperRoom.y + upperRoom.height}  />
       {/* Somewhere to go other than the table: against the back wall, muted like the rest of the furniture. */}
       {appearance.scenery === "off" ? null : nook?.furniture.filter((piece) => !piece.roomId || nodes.has(piece.roomId)).map((piece) => <g key={piece.key} data-break-room={piece.errand} opacity=".8" transform={`translate(${piece.x} ${piece.y}) scale(${WORKER_SIZE / FRAME})`}>

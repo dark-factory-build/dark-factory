@@ -235,13 +235,17 @@ func TestTaskContentAttachmentBoundIsEnforced(t *testing.T) {
 	store, run, _ := runningWorkerRun(t)
 	defer store.Close()
 	ctx := context.Background()
+	target, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 130), ProjectID: run.ProjectID, IncarnationID: incarnationID(t, 131), Title: "queued attachments"}, mustTime(t, 39))
+	if err != nil {
+		t.Fatal(err)
+	}
 	for index := 0; index < contentPageSize+1; index++ {
 		seed := byte(60 + index)
 		content, err := store.CreateContent(ctx, contentSpec(t, run.ProjectID, seed, "attachment"), mustTime(t, int64(40+index)))
 		if err != nil {
 			t.Fatal(err)
 		}
-		err = store.AttachContentToTask(ctx, run.TaskID, run.ProjectID, content.ID, content.Revision, mustTime(t, int64(100+index)))
+		err = store.AttachContentToTask(ctx, target.ID, run.ProjectID, content.ID, content.Revision, mustTime(t, int64(100+index)))
 		if index < contentPageSize && err != nil {
 			t.Fatalf("attachment %d = %v", index, err)
 		}

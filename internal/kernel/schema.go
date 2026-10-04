@@ -9,7 +9,7 @@ import (
 
 const (
 	applicationID = 0x4446474f
-	userVersion   = 33
+	userVersion   = 34
 
 	// SQLite reserves the exact lower-case "sqlite_" prefix. Use a literal,
 	// binary prefix test: LIKE would treat '_' as a wildcard and hide names
@@ -18,6 +18,20 @@ const (
 )
 
 var schemaStatements = []string{
+	`CREATE TABLE content_accesses (
+    run_id BLOB NOT NULL REFERENCES runs(id),
+    content_id BLOB,
+    content_revision INTEGER,
+    kind TEXT NOT NULL CHECK (kind IN ('snapshot','selected','supplied','read')),
+    byte_offset INTEGER NOT NULL CHECK (byte_offset >= 0),
+    byte_length INTEGER NOT NULL CHECK (byte_length BETWEEN 0 AND 65536),
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    FOREIGN KEY(content_id, content_revision) REFERENCES project_content_revisions(id, revision),
+    CHECK ((kind = 'snapshot' AND content_id IS NULL AND content_revision IS NULL AND byte_offset = 0 AND byte_length = 0) OR (kind <> 'snapshot' AND content_id IS NOT NULL AND length(content_id) = 16 AND content_revision IS NOT NULL AND content_revision >= 1)),
+    UNIQUE(run_id,content_id,content_revision,kind,byte_offset,byte_length)
+) STRICT`,
+	`CREATE UNIQUE INDEX content_accesses_snapshot ON content_accesses(run_id) WHERE kind = 'snapshot'`,
+	`CREATE INDEX content_accesses_content ON content_accesses(content_id,content_revision,created_at_ms DESC)`,
 	`CREATE TABLE production_records (
     project_id BLOB NOT NULL REFERENCES projects(id),
     repository TEXT NOT NULL CHECK (length(CAST(repository AS BLOB)) BETWEEN 3 AND 140),

@@ -22,6 +22,11 @@ import (
 // version it runs.
 type browserContentInput struct {
 	api.ContentInput
+	OpenOnly              bool                   `json:"open_only"`
+	Query                 string                 `json:"query"`
+	Branch                string                 `json:"branch"`
+	Entity                string                 `json:"entity"`
+	Thread                string                 `json:"thread_id"`
 	Document              kernel.OutcomeDocument `json:"document"`
 	Objective             string                 `json:"objective"`
 	Criteria              string                 `json:"criteria"`
@@ -59,7 +64,7 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 	if err != nil && !factoryOnly {
 		return browserprotocol.ProjectContentResult{}, browser.ErrInvalidRequest
 	}
-	read := request.Operation == "list" || request.Operation == "read" || request.Operation == "body" || request.Operation == "evidence_list" || request.Operation == "attachments" || request.Operation == "outcome_list" || request.Operation == "outcome_read" || request.Operation == "mission_tasks" || request.Operation == "production" || request.Operation == "task_read" || request.Operation == "source_files"
+	read := request.Operation == "search" || request.Operation == "accesses" || request.Operation == "list" || request.Operation == "read" || request.Operation == "body" || request.Operation == "evidence_list" || request.Operation == "attachments" || request.Operation == "outcome_list" || request.Operation == "outcome_read" || request.Operation == "mission_tasks" || request.Operation == "production" || request.Operation == "task_read" || request.Operation == "source_files"
 	_, release, client, err := backend.authorize(ctx, raw, kernel.BrowserCapabilityPrivateHumanRequestDetail)
 	if err != nil {
 		return browserprotocol.ProjectContentResult{}, err
@@ -85,8 +90,11 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 	if err != nil {
 		return result, err
 	}
-	if request.Operation == "list" || request.Operation == "evidence_list" || request.Operation == "outcome_list" {
+	if request.Operation == "search" || request.Operation == "accesses" || request.Operation == "list" || request.Operation == "evidence_list" || request.Operation == "outcome_list" {
 		maximum := uint64(1)
+		if request.Operation == "search" || request.Operation == "accesses" {
+			maximum = 4
+		}
 		if request.Operation == "outcome_list" && input.Kind == "mission" {
 			maximum = 8 // Mission lists return summaries; full documents are read on selection.
 		}
@@ -136,6 +144,35 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 			Runtime api.BuildIdentity    `json:"runtime"`
 			Release api.PublishedRelease `json:"release,omitzero"`
 		}{page, currentDaemonBuild(), latestPublishedRelease()}
+	case "accesses":
+		id, e := browserContentIDValue(input.ID)
+		rev, re := browserContentRevision(input.Revision)
+		if e != nil || re != nil {
+			return result, browser.ErrInvalidRequest
+		}
+		page, e := backend.store.ListContentRevisionAccesses(ctx, project, id, rev, int(input.Offset), int(input.Limit))
+		if e != nil {
+			return result, mapBrowserError(e)
+		}
+		items := make([]map[string]any, 0, len(page.Items))
+		for _, item := range page.Items {
+			items = append(items, map[string]any{"task_id": item.TaskID.String(), "task_work_revision": item.TaskWorkRevision.Int64(), "run_id": item.RunID.String(), "content_id": item.ContentID.String(), "content_revision": item.ContentRevision.Int64(), "kind": item.Kind, "offset": item.Offset, "byte_length": item.ByteLength, "created_at_ms": item.CreatedAt.Int64()})
+		}
+		output = map[string]any{"items": items, "next_offset": page.NextOffset}
+	case "search":
+		repository, e := backend.owner.knowledgeRepository(ctx, project, input.RepositoryID)
+		if e != nil {
+			return result, mapBrowserError(e)
+		}
+		page, e := backend.store.SearchKnowledge(ctx, project, repository, kernel.KnowledgeQuery{OpenOnly: input.OpenOnly, Kind: kernel.ContentKind(input.Kind), Query: input.Query, Branch: input.Branch, Environment: input.Environment, Entity: input.Entity, Thread: input.Thread, Offset: int(input.Offset), Limit: int(input.Limit)})
+		if e != nil {
+			return result, mapBrowserError(e)
+		}
+		out := api.ContentList{Items: []api.Content{}, NextOffset: uint64(page.NextOffset)}
+		for _, item := range page.Items {
+			out.Items = append(out.Items, backend.owner.knowledgeDTO(ctx, item))
+		}
+		output = out
 	case "list":
 		page, e := backend.store.ListContent(ctx, project, kernel.ContentKind(input.Kind), int(input.Offset), int(input.Limit))
 		if e != nil {
@@ -143,7 +180,7 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 		}
 		out := api.ContentList{Items: []api.Content{}, NextOffset: uint64(page.NextOffset)}
 		for _, item := range page.Items {
-			out.Items = append(out.Items, contentDTO(item))
+			out.Items = append(out.Items, backend.owner.knowledgeDTO(ctx, item))
 		}
 		output = out
 	case "read":
@@ -158,7 +195,7 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 		if item.ProjectID != project {
 			return result, browser.ErrUnauthorized
 		}
-		output = contentDTO(item)
+		output = backend.owner.knowledgeDTO(ctx, item)
 	case "body":
 		id, e := browserContentIDValue(input.ID)
 		rev, re := browserContentRevision(input.Revision)
@@ -187,6 +224,22 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 			return result, browser.ErrStale
 		}
 		spec := kernel.NewContent{ID: id, ProjectID: project, Kind: kernel.ContentKind(input.Kind), Title: input.Title, Description: input.Description, Body: input.Body, Author: fmt.Sprintf("browser:%s", client.ID.String()), SourceReferences: input.SourceReferences, Commit: input.Commit, Path: input.Path}
+		if input.RepositoryID != "" {
+			spec.RepositoryID, e = browserID(input.RepositoryID, kernel.RepositoryIDFromBytes)
+			if e != nil {
+				return result, browser.ErrInvalidRequest
+			}
+		}
+		expected := kernel.Revision{}
+		if request.Operation == "revise" {
+			expected, e = browserContentRevision(input.ExpectedRevision)
+			if e != nil {
+				return result, browser.ErrInvalidRequest
+			}
+		}
+		if e = backend.owner.validateKnowledgeWrite(ctx, true, kernel.AttemptDigest{}, spec, expected); e != nil {
+			return result, mapBrowserError(e)
+		}
 		var item kernel.ContentRevision
 		if request.Operation == "create" {
 			if existing, existingErr := backend.store.Content(ctx, id, 1); existingErr == nil {
@@ -226,7 +279,7 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 		if e != nil {
 			return result, mapBrowserError(e)
 		}
-		output = contentDTO(item)
+		output = backend.owner.knowledgeDTO(ctx, item)
 	case "deprecate":
 		id, e := browserContentIDValue(input.ID)
 		rev, re := browserContentRevision(input.ExpectedRevision)
@@ -250,7 +303,7 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 		if e != nil {
 			return result, mapBrowserError(e)
 		}
-		output = contentDTO(item)
+		output = backend.owner.knowledgeDTO(ctx, item)
 	case "evidence":
 		eid, e := browserID(input.ID, kernel.ContentEvidenceIDFromBytes)
 		cid, ce := browserContentIDValue(input.ContentID)

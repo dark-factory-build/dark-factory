@@ -2480,3 +2480,20 @@ test("Missions and Production share the task dialog and preserve their origin on
     await act(async () => tree.unmount());
   }
 });
+
+test("source notices and new discussions retain the deepest repository source scope", async () => {
+  const selected = selectFloor(prepareFloor(fixtureState.projects, fixtureTopologies), "fine");
+  const entity = [...selected.detailByID.values()].find((node) => node.project?.id === ids.project && node.path !== "." && node.path !== "");
+  assert.ok(entity);
+  const repository = "cd".repeat(16);
+  const topology = { ...fixtureTopology, sources: [{ repository_id: "ab".repeat(16), prefix: "", revision: "base" }, { repository_id: repository, prefix: entity.path, revision: "scoped" }] };
+  const calls = [], opens = [];
+  let renderer;
+  await act(async () => { renderer = create(createElement(FactoryFloor, { state: fixtureState, topologies: new Map(fixtureTopologies).set(ids.project, topology), requestedEntity: { id: entity.id }, floorAppearance: { ...DEFAULT_FLOOR_APPEARANCE, detail: "fine" }, onProjectContent: async (operation, input) => { calls.push({ operation, input }); return { items: [] }; }, onOpenBoard: (...args) => opens.push(args) })); });
+  const click = async (label) => { await act(async () => renderer.root.findAllByType("button").find((button) => button.children.join("") === label).props.onClick()); };
+  await click("Read notices for this source");
+  assert.equal(calls.at(-1).input.repository_id, repository);
+  await click("Discuss this source");
+  assert.deepEqual(opens, [[ids.project, entity.id, undefined, repository]]);
+  await act(async () => renderer.unmount());
+});

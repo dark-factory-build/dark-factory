@@ -104,6 +104,9 @@ func (store *Store) CreateContent(ctx context.Context, spec NewContent, at UnixM
 }
 
 func createContentTx(ctx context.Context, tx *writeTx, spec NewContent, at UnixMillis, authorTask *TaskID) (ContentRevision, error) {
+	if err := validateKnowledge(ctx, tx.connection, spec, Revision{}, nil); err != nil {
+		return ContentRevision{}, tx.Rollback(err)
+	}
 	if err := validateContent(spec); err != nil {
 		return ContentRevision{}, tx.Rollback(err)
 	}
@@ -177,6 +180,9 @@ func (store *Store) reviseContent(ctx context.Context, expected Revision, spec N
 }
 
 func reviseContentTx(ctx context.Context, tx *writeTx, expected Revision, spec NewContent, deprecated bool, at UnixMillis) (ContentRevision, error) {
+	if err := validateKnowledge(ctx, tx.connection, spec, expected, nil); err != nil {
+		return ContentRevision{}, tx.Rollback(err)
+	}
 	if err := validateContent(spec); err != nil {
 		return ContentRevision{}, tx.Rollback(err)
 	}
@@ -527,15 +533,17 @@ func (store *Store) AttachContentForOrchestrator(ctx context.Context, digest Att
 	}
 	var taskProject []byte
 	var taskWorkRevision int64
-	var taskStatus string
-	if err := tx.connection.QueryRowContext(ctx, `SELECT project_id, work_revision, status FROM tasks WHERE id = ?`, task.Bytes()).Scan(&taskProject, &taskWorkRevision, &taskStatus); err != nil {
+	if err := tx.connection.QueryRowContext(ctx, `SELECT project_id, work_revision FROM tasks WHERE id = ?`, task.Bytes()).Scan(&taskProject, &taskWorkRevision); err != nil {
 		if err == sql.ErrNoRows {
 			err = ErrNotFound
 		}
 		return tx.Rollback(err)
 	}
-	if string(taskProject) != string(authority.ProjectID.Bytes()) || taskStatus != TaskQueued.String() {
+	if string(taskProject) != string(authority.ProjectID.Bytes()) {
 		return tx.Rollback(ErrUnauthorized)
+	}
+	if err := contentScope(ctx, tx.connection, authority, content, revision.Int64()); err != nil {
+		return tx.Rollback(err)
 	}
 	if err := attachContentTx(ctx, tx, task, authority.ProjectID, taskWorkRevision, content, revision, at); err != nil {
 		return tx.Rollback(err)
@@ -565,6 +573,16 @@ func attachContentTx(ctx context.Context, tx *writeTx, task TaskID, project Proj
 	if err != sql.ErrNoRows {
 		return err
 	}
+	var status string
+	if err := tx.connection.QueryRowContext(ctx, `SELECT t.status FROM tasks t JOIN task_repository_bindings tb ON tb.task_id=t.id JOIN content_repository_bindings cb JOIN project_content_revisions c ON c.id=cb.content_id AND c.revision=cb.content_revision WHERE t.id=? AND t.project_id=? AND cb.content_id=? AND cb.content_revision=? AND c.project_id=t.project_id AND (cb.repository_id=tb.repository_id OR `+projectKnowledgeScopeSQL("c")+`)`, task.Bytes(), project.Bytes(), content.Bytes(), revision.Int64()).Scan(&status); err != nil {
+		if err == sql.ErrNoRows {
+			return ErrConflict
+		}
+		return err
+	}
+	if status != TaskQueued.String() {
+		return ErrConflict
+	}
 	var references int
 	if err := tx.connection.QueryRowContext(ctx, `SELECT COUNT(*) FROM task_content_references WHERE task_id = ? AND task_work_revision = ?`, task.Bytes(), taskWorkRevision).Scan(&references); err != nil {
 		return err
@@ -592,8 +610,8 @@ func (store *Store) ContentForAttempt(ctx context.Context, digest AttemptDigest,
 	if err != nil {
 		return ContentRevision{}, err
 	}
-	if content.ProjectID != authority.ProjectID {
-		return ContentRevision{}, ErrUnauthorized
+	if err := contentScope(ctx, tx.connection, authority, id, revision); err != nil {
+		return ContentRevision{}, err
 	}
 	return content, nil
 }
@@ -609,6 +627,9 @@ func (store *Store) CreateContentForAttempt(ctx context.Context, digest AttemptD
 	if spec.ProjectID != authority.ProjectID {
 		return ContentRevision{}, tx.Rollback(ErrUnauthorized)
 	}
+	if err := validateKnowledge(ctx, tx.connection, spec, Revision{}, &authority); err != nil {
+		return ContentRevision{}, tx.Rollback(err)
+	}
 	spec.Author = contentProvenance(authority)
 	return createContentTx(ctx, tx, spec, at, &authority.TaskID)
 }
@@ -623,7 +644,11 @@ func (store *Store) ListContentForAttempt(ctx context.Context, digest AttemptDig
 	if err != nil {
 		return ContentPage{}, err
 	}
-	return listContentOnConnection(ctx, tx.connection, authority.ProjectID, kind, offset, limit)
+	repo, err := knowledgeRepository(ctx, tx.connection, authority)
+	if err != nil {
+		return ContentPage{}, err
+	}
+	return searchKnowledge(ctx, tx.connection, authority.ProjectID, repo, KnowledgeQuery{Kind: kind, Offset: offset, Limit: limit})
 }
 
 func (store *Store) ReviseContentForAttempt(ctx context.Context, digest AttemptDigest, expected Revision, spec NewContent, at UnixMillis) (ContentRevision, error) {
@@ -635,6 +660,9 @@ func (store *Store) ReviseContentForAttempt(ctx context.Context, digest AttemptD
 	if spec.ProjectID != authority.ProjectID {
 		return ContentRevision{}, tx.Rollback(ErrUnauthorized)
 	}
+	if err := validateKnowledge(ctx, tx.connection, spec, expected, &authority); err != nil {
+		return ContentRevision{}, tx.Rollback(err)
+	}
 	spec.Author = contentProvenance(authority)
 	return reviseContentTx(ctx, tx, expected, spec, false, at)
 }
@@ -645,6 +673,14 @@ func (store *Store) DeprecateContentForAttempt(ctx context.Context, digest Attem
 		return ContentRevision{}, err
 	}
 	defer tx.Close()
+	current, err := contentByRevision(ctx, tx.connection, id, expected.Int64())
+	if err != nil {
+		return ContentRevision{}, tx.Rollback(err)
+	}
+	spec := NewContent{ID: id, ProjectID: current.ProjectID, Kind: current.Kind, SourceReferences: current.SourceReferences}
+	if err := validateKnowledge(ctx, tx.connection, spec, expected, &authority); err != nil {
+		return ContentRevision{}, tx.Rollback(err)
+	}
 	return deprecateContentTx(ctx, tx, id, authority.ProjectID, expected, contentProvenance(authority), at)
 }
 
@@ -656,6 +692,9 @@ func (store *Store) CreateContentEvidenceForAttempt(ctx context.Context, digest 
 	defer tx.Close()
 	if spec.ProjectID != authority.ProjectID {
 		return ContentEvidence{}, tx.Rollback(ErrUnauthorized)
+	}
+	if err := contentScope(ctx, tx.connection, authority, spec.ContentID, spec.ContentRevision.Int64()); err != nil {
+		return ContentEvidence{}, tx.Rollback(err)
 	}
 	spec.Evaluator = evidenceProvenance(authority)
 	return createContentEvidenceTx(ctx, tx, spec, at)
@@ -843,6 +882,9 @@ func (store *Store) ListContentEvidenceForAttempt(ctx context.Context, digest At
 	if err != nil {
 		return ContentEvidencePage{}, err
 	}
+	if err := contentScope(ctx, tx.connection, authority, content, revision.Int64()); err != nil {
+		return ContentEvidencePage{}, err
+	}
 	return listContentEvidenceOnConnection(ctx, tx.connection, authority.ProjectID, content, revision, offset, limit)
 }
 
@@ -870,6 +912,17 @@ func (store *Store) TaskContentReferencesForAttempt(ctx context.Context, digest 
 		return nil, ErrNotFound
 	}
 	if selected.ProjectID != authority.ProjectID {
+		return nil, ErrUnauthorized
+	}
+	repository, found, err := taskRepository(ctx, tx.connection, task)
+	if err != nil {
+		return nil, err
+	}
+	own, err := knowledgeRepository(ctx, tx.connection, authority)
+	if err != nil {
+		return nil, err
+	}
+	if !found || repository.ID != own {
 		return nil, ErrUnauthorized
 	}
 	if workRevision.Int64() > selected.WorkRevision.Int64() {

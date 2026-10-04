@@ -133,6 +133,7 @@ const (
 	factoryctl content revise --project ID --id ID --revision REVISION --kind KIND --title TEXT [--description TEXT] [--body TEXT|--body-file PATH|--commit OID --path PATH]
   factoryctl content deprecate --project ID --id ID --revision REVISION
   factoryctl content list --project ID [--kind KIND] [--offset N] [--limit N]
+  factoryctl content search --project ID [--query TEXT] [--repository ID] [--entity REF] [--branch REF] [--environment NAME] [--thread ID]
   factoryctl content read --id ID --revision REVISION
   factoryctl content body --id ID --revision REVISION --offset N --limit N
   factoryctl content evidence [--evidence-id ID] --project ID --id ID --revision REVISION --tested-source TEXT --result passed|failed|incomplete|not_run  [--environment TEXT] [--location TEXT] [--judgment TEXT]
@@ -247,63 +248,69 @@ type attemptCommand struct {
 	after             string
 	expectedRevision  uint64
 
-	label            string
-	plistDir         string
-	relayOrigin      string
-	browserAddress   string
-	name             string
-	root             string
-	project          string
-	repository       string
-	agent            string
-	role             string
-	provider         string
-	model            string
-	reasoningEffort  string
-	account          string
-	title            string
-	body             string
-	bodySet          bool
-	toolBudget       uint64
-	capacity         uint16
-	maxBytes         uint32
-	maxRunSeconds    uint32
-	tokenBudget      *uint64
-	priority         int64
-	prioritySet      bool
-	offset           uint64
-	head             uint64
-	textOffset       uint64
-	terminalText     bool
-	includeTargets   bool
-	enabled          bool
-	operationID      string
-	taskRevision     uint64
-	runRevision      uint64
-	run              string
-	paused           bool
-	archived         bool
-	archiveSet       bool
-	cancel           bool
-	retry            bool
-	bodyFile         string
-	contentKind      string
-	intake           api.IntakeInput
-	contentID        string
-	contentRevision  uint64
-	description      string
-	sourceReferences string
-	sourceCommit     string
-	sourcePath       string
-	testedSource     string
-	environment      string
-	contentResult    string
-	location         string
-	judgment         string
-	document         string
-	documentFile     string
-	prerequisites    []api.TaskPrerequisiteInput
-	conflictPaths    []string
+	label               string
+	plistDir            string
+	relayOrigin         string
+	browserAddress      string
+	name                string
+	root                string
+	project             string
+	repository          string
+	agent               string
+	role                string
+	provider            string
+	model               string
+	reasoningEffort     string
+	account             string
+	title               string
+	body                string
+	bodySet             bool
+	toolBudget          uint64
+	capacity            uint16
+	maxBytes            uint32
+	maxRunSeconds       uint32
+	tokenBudget         *uint64
+	priority            int64
+	prioritySet         bool
+	offset              uint64
+	head                uint64
+	textOffset          uint64
+	terminalText        bool
+	includeTargets      bool
+	enabled             bool
+	operationID         string
+	taskRevision        uint64
+	runRevision         uint64
+	run                 string
+	paused              bool
+	archived            bool
+	archiveSet          bool
+	cancel              bool
+	retry               bool
+	bodyFile            string
+	knowledgeSearch     bool
+	knowledgeQuery      string
+	knowledgeRepository string
+	knowledgeEntity     string
+	knowledgeBranch     string
+	knowledgeThread     string
+	contentKind         string
+	intake              api.IntakeInput
+	contentID           string
+	contentRevision     uint64
+	description         string
+	sourceReferences    string
+	sourceCommit        string
+	sourcePath          string
+	testedSource        string
+	environment         string
+	contentResult       string
+	location            string
+	judgment            string
+	document            string
+	documentFile        string
+	prerequisites       []api.TaskPrerequisiteInput
+	conflictPaths       []string
 }
 
 func main() {
@@ -548,7 +555,7 @@ func contentBody(command attemptCommand) (string, error) {
 }
 
 func contentInput(command attemptCommand, body string) api.ContentInput {
-	return api.ContentInput{ID: command.contentID, ProjectID: command.project, Kind: command.contentKind, Title: command.title, Description: command.description, Body: body, SourceReferences: command.sourceReferences, Commit: command.sourceCommit, Path: command.sourcePath, ExpectedRevision: command.contentRevision}
+	return api.ContentInput{RepositoryID: command.knowledgeRepository, ID: command.contentID, ProjectID: command.project, Kind: command.contentKind, Title: command.title, Description: command.description, Body: body, SourceReferences: command.sourceReferences, Commit: command.sourceCommit, Path: command.sourcePath, ExpectedRevision: command.contentRevision}
 }
 
 type contentClient interface {
@@ -587,7 +594,7 @@ func runContent(ctx context.Context, client contentClient, command attemptComman
 	case commandContentDeprecate:
 		value, err = client.ContentDeprecate(ctx, contentInput(command, ""))
 	case commandContentList:
-		value, err = client.ContentList(ctx, api.ContentListInput{ProjectID: command.project, Kind: command.contentKind, Offset: command.offset, Limit: command.head})
+		value, err = client.ContentList(ctx, api.ContentListInput{ProjectID: command.project, Kind: command.contentKind, Offset: command.offset, Limit: command.head, Knowledge: command.knowledgeSearch, Query: command.knowledgeQuery, RepositoryID: command.knowledgeRepository, Entity: command.knowledgeEntity, Branch: command.knowledgeBranch, Environment: command.environment, Thread: command.knowledgeThread})
 	case commandContentRead:
 		value, err = client.ContentRead(ctx, api.ContentReadInput{ID: command.contentID, Revision: command.contentRevision})
 	case commandContentBody:
@@ -879,6 +886,8 @@ func parseContent(args []string) (attemptCommand, bool, bool) {
 		command.kind = commandContentRevise
 	case "deprecate":
 		command.kind = commandContentDeprecate
+	case "search":
+		command.kind, command.knowledgeSearch = commandContentList, true
 	case "list":
 		command.kind = commandContentList
 	case "read":
@@ -912,6 +921,25 @@ func parseContent(args []string) (attemptCommand, bool, bool) {
 				command.project = value
 			} else {
 				return attemptCommand{}, false, false
+			}
+		case "--query", "--branch", "--entity", "--thread", "--repository":
+			if !validOperatorText(value, 1, 1024) {
+				return attemptCommand{}, false, false
+			}
+			switch name {
+			case "--query":
+				command.knowledgeQuery = value
+			case "--branch":
+				command.knowledgeBranch = value
+			case "--entity":
+				command.knowledgeEntity = value
+			case "--thread":
+				command.knowledgeThread = value
+			case "--repository":
+				if !validHumanRequestKey(value) {
+					return attemptCommand{}, false, false
+				}
+				command.knowledgeRepository = value
 			}
 		case "--kind":
 			if validOperatorText(value, 1, 64) {
