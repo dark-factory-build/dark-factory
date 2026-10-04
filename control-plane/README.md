@@ -260,10 +260,10 @@ activation sequence uses the versions API or another no-traffic staging
 mechanism, proves the exact draft, and adds a route after the deployment gate.
 Routine production deployment is `../scripts/release.sh <commit>`, run from a
 clean checkout at that commit with the operator's own Wrangler OAuth login. It
-does nothing when the live version is tagged `cp-<control-plane tree>`;
-otherwise it runs the local gate, uploads and promotes a version with that tag,
-and redeploys the previous version if `/healthz` or the headless `/readyz`
-label does not come up.
+runs the local gate, deploys a version tagged `cp-<control-plane tree>`, and
+runs `wrangler rollback` if `/healthz` or the headless `/readyz` label does not
+come up. factoryd's release lane is meant to be its only caller, one release at
+a time.
 
 ## Local proof
 
