@@ -98,7 +98,11 @@ func (store *Store) EscalatePublishedPull(ctx context.Context, project ProjectID
 	}
 	_, err = store.EnqueueTask(ctx, NewTask{ID: id, ProjectID: project, AssignedAgentID: agent, IncarnationID: incarnation, Title: fmt.Sprintf("Escalated: %s#%d", repository, pull), Body: body}, at)
 	if errors.Is(err, ErrConflict) {
-		return nil // escalated already; the overseer has taken it up
+		// Escalated already only if that exact task exists; otherwise the
+		// conflict (an archived overseer, say) is the failure.
+		if _, found, readErr := store.Task(ctx, id); readErr == nil && found {
+			return nil
+		}
 	}
 	return err
 }

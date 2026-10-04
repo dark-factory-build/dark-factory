@@ -215,6 +215,16 @@ func TestPublishedReviewSendBackReachesTheWorkerNotThePublisher(t *testing.T) {
 	if _, err := store.SendBackPublishedReview(ctx, worker.ProjectID, "example/factory", 7, "stale-op", strings.Repeat("c", 40), "an older head", mustTime(t, 92)); !errors.Is(err, ErrSuperseded) {
 		t.Fatalf("a superseded head err=%v, want ErrSuperseded", err)
 	}
+	// A conflict is "escalated already" only when the escalation task exists.
+	if _, err := store.writer.ExecContext(ctx, `UPDATE agents SET archived = 1 WHERE id = ?`, overseer.ID.Bytes()); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.EscalatePublishedPull(ctx, worker.ProjectID, "example/factory", 7, "past two repair rounds", mustTime(t, 93)); !errors.Is(err, ErrConflict) {
+		t.Fatalf("escalation to an archived overseer err=%v, want the conflict", err)
+	}
+	if _, err := store.writer.ExecContext(ctx, `UPDATE agents SET archived = 0 WHERE id = ?`, overseer.ID.Bytes()); err != nil {
+		t.Fatal(err)
+	}
 	for range 2 {
 		if err := store.EscalatePublishedPull(ctx, worker.ProjectID, "example/factory", 7, "past two repair rounds", mustTime(t, 93)); err != nil {
 			t.Fatal(err)

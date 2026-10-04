@@ -63,6 +63,13 @@ func (daemon *Daemon) RecoverReviewOperations(ctx context.Context) (int, error) 
 // a review goroutine is still making: a Maintainer call times out in 30s.
 const reviewStuckAfter = 2 * time.Minute
 
+// customerMaintainer is the launch predicate that puts overseers on
+// factoryd's own Maintainer path (attempt maintainer-mcp). Only then does
+// factoryd run the merge stage: a legacy home keeps its host review flow.
+func (daemon *Daemon) customerMaintainer() bool {
+	return daemon.github != nil && daemon.github.CustomerMode()
+}
+
 // tickMergePipeline runs the merge stage beside the scheduler loop, one pass
 // at a time and at most once per productionRefreshInterval.
 func (daemon *Daemon) tickMergePipeline(ctx context.Context) {
@@ -79,8 +86,11 @@ func (daemon *Daemon) tickMergePipeline(ctx context.Context) {
 
 // advanceMergePipeline refreshes each publishing project's pull requests, so
 // a corrected head is gated and reviewed, then advances every unfinished
-// review operation.
+// review operation. It does nothing on a legacy home.
 func (daemon *Daemon) advanceMergePipeline(ctx context.Context) {
+	if !daemon.customerMaintainer() {
+		return
+	}
 	projects, _ := daemon.store.PublishingProjects(ctx)
 	for _, project := range projects {
 		_ = daemon.refreshProduction(ctx, project)
@@ -111,7 +121,7 @@ func (daemon *Daemon) advanceReviewOperations(ctx context.Context, startup bool)
 		case op.State == "gating" && startup:
 			// A gate takes up to half an hour; startup does not wait for it.
 			daemon.launchReview(operation.Project, op)
-		case op.State == "enqueued":
+		case op.State == "enqueued" && daemon.customerMaintainer():
 			var coordinator review.Coordinator
 			if coordinator, err = daemon.reviewCoordinator(ctx, operation.Project, operation.Repository); err == nil {
 				if op, err = coordinator.ObserveMerge(ctx, op); err == nil && op.State == "enqueued" {
@@ -212,7 +222,7 @@ func (daemon *Daemon) finishReviewRouting(ctx context.Context, project kernel.Pr
 	if err != nil {
 		return err
 	}
-	op.RoutePending, op.UpdatedAt = false, daemon.now()
+	op.RoutePending, op.Escalation, op.UpdatedAt = false, "", daemon.now()
 	return durableReviewStore{store: daemon.store, project: project, repository: repository, now: daemon.now}.Update(ctx, op)
 }
 
@@ -239,17 +249,23 @@ func (daemon *Daemon) routeSendBack(ctx context.Context, project kernel.ProjectI
 }
 
 // escalatePull hands a pull request the pipeline cannot advance to the
-// overseer that published it, once per pull request.
+// overseer that published it, once per pull request. A failure, such as no
+// overseer having published it, keeps the route pending for a later tick and
+// is recorded on the operation; a legacy home never escalates.
 func (daemon *Daemon) escalatePull(ctx context.Context, project kernel.ProjectID, repository string, op review.Operation, why string) error {
-	at, err := daemon.timestamp()
-	if err != nil {
-		return err
+	err := errors.New("escalation waits for the factoryd Maintainer connection")
+	at, clockErr := daemon.timestamp()
+	if daemon.customerMaintainer() {
+		err = clockErr
 	}
-	body := fmt.Sprintf("factoryd cannot advance %s#%d at exact head %s: %s", repository, op.Request.PullNumber, op.Request.Head, why)
-	if err := daemon.store.EscalatePublishedPull(ctx, project, repository, op.Request.PullNumber, body, at); !errors.Is(err, kernel.ErrNotFound) {
-		return err
+	if err == nil {
+		err = daemon.store.EscalatePublishedPull(ctx, project, repository, op.Request.PullNumber, fmt.Sprintf("factoryd cannot advance %s#%d at exact head %s: %s", repository, op.Request.PullNumber, op.Request.Head, why), at)
 	}
-	return nil // no overseer published it
+	if err != nil && op.Escalation != err.Error() {
+		op.Escalation = err.Error()
+		_ = durableReviewStore{store: daemon.store, project: project, repository: repository, now: daemon.now}.Update(ctx, op)
+	}
+	return err
 }
 
 // launchReview keeps publication acknowledgement independent from provider

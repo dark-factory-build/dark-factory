@@ -15,6 +15,7 @@ import (
 
 	"github.com/dark-factory-build/dark-factory/internal/api"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
+	"github.com/dark-factory-build/dark-factory/internal/maintainer"
 	"github.com/dark-factory-build/dark-factory/internal/review"
 )
 
@@ -414,6 +415,7 @@ func TestMergeQueueEjectionSendsBackOnceAndAMergeCloses(t *testing.T) {
 	} {
 		fixture, project, task, settle := publishedTask(t)
 		settle()
+		customerMode(t, fixture)
 		ctx := context.Background()
 		backend := &publicReviewBackend{merge: test.merge}
 		fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return backend }
@@ -443,6 +445,7 @@ func TestMergeQueueEjectionSendsBackOnceAndAMergeCloses(t *testing.T) {
 func TestRefusedEnqueueEscalatesOnceEvenAfterAFailedTick(t *testing.T) {
 	fixture, project, _, settle := publishedTask(t)
 	settle()
+	customerMode(t, fixture)
 	ctx := context.Background()
 	backend := &publicReviewBackend{enqueueRefused: true}
 	now := fixture.daemon.now
@@ -485,5 +488,103 @@ func TestRefusedEnqueueEscalatesOnceEvenAfterAFailedTick(t *testing.T) {
 	}
 	if got := escalations(); got != 1 || lastDurableReview(t, fixture.store, project).RoutePending {
 		t.Fatalf("escalations=%d pending=%v, want one delivered escalation", got, lastDurableReview(t, fixture.store, project).RoutePending)
+	}
+}
+
+// customerMode puts the daemon on the factoryd Maintainer path with an offline
+// customer connection, so no fixture can reach GitHub.
+func customerMode(t *testing.T, fixture *dispatchFixture) {
+	t.Helper()
+	if err := fixture.home.WriteMaintainerCredential([]byte(`{"disabled":true}`)); err != nil {
+		t.Fatal(err)
+	}
+	host, err := maintainer.OpenHost(fixture.home)
+	if err != nil || !host.CustomerMode() {
+		t.Fatalf("customer host: %v", err)
+	}
+	fixture.daemon.github = host
+}
+
+// The merge stage is dormant on a legacy home: the tick does not route a
+// review_pr result, and startup routes it as before but does not observe an
+// enqueued head. On the factoryd Maintainer path both advance.
+func TestMergeStageRunsOnlyOnTheCustomerPath(t *testing.T) {
+	for _, customer := range []bool{false, true} {
+		fixture, project, task, settle := publishedTask(t)
+		ctx := context.Background()
+		fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return &publicReviewBackend{requestChanges: true} }
+		if _, err := fixture.daemon.reviewPR(ctx, project, publishedReviewRequest()); err == nil {
+			t.Fatal("a running task accepted the send-back")
+		}
+		settle()
+		if customer {
+			customerMode(t, fixture)
+		}
+		fixture.daemon.advanceMergePipeline(ctx)
+		if current, _, err := fixture.store.Task(ctx, task.ID); err != nil || (current.WorkRevision.Int64() == 2) != customer {
+			t.Fatalf("customer=%v: tick left task revision %d (err %v)", customer, current.WorkRevision.Int64(), err)
+		}
+
+		fixture, project, _, settle = publishedTask(t)
+		settle()
+		fixture.daemon.reviewBackend = func(string, uint64) review.Backend {
+			return &publicReviewBackend{merge: review.Merge{State: "MERGED_AFTER_ENQUEUE_ATTEMPT"}}
+		}
+		if _, err := fixture.daemon.reviewPR(ctx, project, publishedReviewRequest()); err != nil {
+			t.Fatal(err)
+		}
+		if customer {
+			customerMode(t, fixture)
+		}
+		if _, err := fixture.daemon.RecoverReviewOperations(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if state := lastDurableReview(t, fixture.store, project).State; (state == "merged") != customer {
+			t.Fatalf("customer=%v: startup left operation %s", customer, state)
+		}
+	}
+}
+
+// An escalation that finds no overseer keeps the route pending and says why
+// on the operation; once an overseer has published the pull request, a later
+// tick delivers it and clears both.
+func TestEscalationWithNoOverseerStaysPendingUntilOneExists(t *testing.T) {
+	fixture, project := reviewPublicFixture(t)
+	customerMode(t, fixture)
+	ctx := context.Background()
+	fixture.daemon.now = func() time.Time { return time.Unix(2000, 0) }
+	publish := func(seed byte, role kernel.AgentRole) {
+		agent, err := fixture.store.CreateAgent(ctx, kernel.NewAgent{ID: mustAgentID(t, testID(seed)), ProjectID: project, Name: role.String(), Role: role, Provider: kernel.ProviderCodex, ToolBudgetLimit: 2}, mustKernelTime(t, 1001))
+		if err != nil {
+			t.Fatal(err)
+		}
+		incarnation, err := kernel.IncarnationIDFromBytes(mustIDBytes(t, testID(seed+1)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		task, err := fixture.store.EnqueueTask(ctx, kernel.NewTask{ID: mustTaskID(t, testID(seed+2)), IncarnationID: incarnation, ProjectID: project, AssignedAgentID: agent.ID, Title: "publish"}, mustKernelTime(t, 1002))
+		if err != nil {
+			t.Fatal(err)
+		}
+		head := strings.Repeat("e", 40)
+		if err := fixture.store.RecordPublication(ctx, project, task.ID, "team/repo", kernel.ProductionPullRequest{Number: 12, Title: "Ship it", URL: "https://github.com/team/repo/pull/12", Head: head, Branch: "feature/ship", Base: "main", State: "open", Review: kernel.ProductionReview{Head: head, State: "unknown"}}, mustKernelTime(t, 1003)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	publish(230, kernel.RoleWorker)
+	backend := &publicReviewBackend{enqueueRefused: true}
+	fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return backend }
+	if _, err := fixture.daemon.reviewPR(ctx, project, publishedReviewRequest()); err == nil {
+		t.Fatal("a refused enqueue reported success")
+	}
+	if op := lastDurableReview(t, fixture.store, project); !op.RoutePending || !strings.Contains(op.Escalation, "not found") {
+		t.Fatalf("escalation without an overseer: %+v", op)
+	}
+	publish(234, kernel.RoleOrchestrator)
+	if _, err := fixture.daemon.advanceReviewOperations(ctx, false); err != nil {
+		t.Fatal(err)
+	}
+	if op := lastDurableReview(t, fixture.store, project); op.RoutePending || op.Escalation != "" {
+		t.Fatalf("delivered escalation left the operation pending: %+v", op)
 	}
 }

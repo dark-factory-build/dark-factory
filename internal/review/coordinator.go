@@ -36,6 +36,7 @@ type Operation struct {
 	Detail       string    `json:"detail,omitempty"`
 	Submitted    bool      `json:"submitted,omitempty"`
 	RoutePending bool      `json:"route_pending,omitempty"`
+	Escalation   string    `json:"escalation,omitempty"` // why the last overseer escalation failed; retried
 	Gates        []GateRun `json:"gates,omitempty"`
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
