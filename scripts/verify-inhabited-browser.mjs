@@ -93,7 +93,7 @@ try {
   await page.getByLabel('Population', { exact: true }).selectOption('resting');
   await page.getByRole('combobox', { name: 'Social furniture', exact: true }).selectOption('nearby');
   await expect(page.getByRole('button', { name: /^Builder One, worker, waiting/ })).toHaveCount(1);
-  await page.getByRole('button', { name: /^Builder One, worker, waiting/ }).scrollIntoViewIfNeeded();
+  await page.getByRole('button', { name: /^Builder One, worker, waiting/ }).locator(':scope > rect').scrollIntoViewIfNeeded();
   await shot('08-resting-within-base');
   const shelf = page.getByRole('button', { name: 'Open project library', exact: true }).first();
   await shelf.focus(); await page.keyboard.press('Enter');
