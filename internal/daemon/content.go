@@ -229,7 +229,7 @@ func (daemon *Daemon) content(ctx context.Context, call api.Call) api.Reply {
 		}
 		var repository kernel.RepositoryID
 		if input.RepositoryID != "" {
-			repository, e = browserID(input.RepositoryID, kernel.RepositoryIDFromBytes)
+			repository, e = decodeID(input.RepositoryID, kernel.RepositoryIDFromBytes)
 			if e != nil {
 				return kernel.NewContent{}, e
 			}

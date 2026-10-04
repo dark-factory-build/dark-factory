@@ -225,7 +225,7 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 		}
 		spec := kernel.NewContent{ID: id, ProjectID: project, Kind: kernel.ContentKind(input.Kind), Title: input.Title, Description: input.Description, Body: input.Body, Author: fmt.Sprintf("browser:%s", client.ID.String()), SourceReferences: input.SourceReferences, Commit: input.Commit, Path: input.Path}
 		if input.RepositoryID != "" {
-			spec.RepositoryID, e = browserID(input.RepositoryID, kernel.RepositoryIDFromBytes)
+			spec.RepositoryID, e = decodeID(input.RepositoryID, kernel.RepositoryIDFromBytes)
 			if e != nil {
 				return result, browser.ErrInvalidRequest
 			}
