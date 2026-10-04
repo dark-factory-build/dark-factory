@@ -220,15 +220,10 @@ cache for subsequent merge-queue refs. The default manual runner remains
 `dark-factory-mac`; its Go patch version may differ. Queue caches alone do not
 establish reuse across different queue refs.
 
-Process-sensitive checks acquire one kernel-backed lease from the common Git
-directory, so linked worktrees cannot stack process-heavy Go runs. The routine
-`go-check.sh` remains outside that lease. Set `DARK_FACTORY_LOCAL_CI_WAIT=0`
-to fail instead of waiting.
-
-The full lease stress suites are focused checks for changes to the lease
-helpers, their entry/owner semantics, or the macOS process primitives they
-depend on: `scripts/test-local-ci-lease.sh` and
-`scripts/test-local-ci-lease-mutations.sh`.
+Process-sensitive checks take one blocking `lockf` lock from the common Git
+directory, so linked worktrees cannot stack process-heavy Go runs. A contender
+waits; the kernel releases the lock when its holder exits. The routine
+`go-check.sh` remains outside that lease.
 
 The supervisor currently runs worker attempts with `VerificationNone`. The
 schema recognizes other roles and verification values, but unsupported

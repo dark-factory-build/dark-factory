@@ -79,25 +79,8 @@ esac
 ci_saved_df_gate_fault=${DF_GATE_FAULT-}
 ci_have_df_gate_fault=${DF_GATE_FAULT+yes}
 ci_saved_local_ci_directory=${DARK_FACTORY_LOCAL_CI_DIRECTORY-}
-ci_saved_local_ci_factoryctl=${DARK_FACTORY_FACTORYCTL-}
 ci_saved_local_ci_lease_held=${DARK_FACTORY_LOCAL_CI_LEASE_HELD-}
 ci_have_local_ci_lease_held=${DARK_FACTORY_LOCAL_CI_LEASE_HELD+yes}
-ci_saved_local_ci_wait=${DARK_FACTORY_LOCAL_CI_WAIT-}
-ci_have_local_ci_wait=${DARK_FACTORY_LOCAL_CI_WAIT+yes}
-ci_saved_local_ci_test_sentinel=${DARK_FACTORY_LOCAL_CI_TEST_SENTINEL-}
-ci_have_local_ci_test_sentinel=${DARK_FACTORY_LOCAL_CI_TEST_SENTINEL+yes}
-ci_saved_pause_before=${DARK_FACTORY_LOCAL_CI_TEST_PAUSE_BEFORE_GROUP_TRAPS-}
-ci_have_pause_before=${DARK_FACTORY_LOCAL_CI_TEST_PAUSE_BEFORE_GROUP_TRAPS+yes}
-ci_saved_pause_after=${DARK_FACTORY_LOCAL_CI_TEST_PAUSE_AFTER_LOCKF-}
-ci_have_pause_after=${DARK_FACTORY_LOCAL_CI_TEST_PAUSE_AFTER_LOCKF+yes}
-ci_saved_owner_marker=${DARK_FACTORY_LOCAL_CI_TEST_OWNER_MARKER-}
-ci_have_owner_marker=${DARK_FACTORY_LOCAL_CI_TEST_OWNER_MARKER+yes}
-ci_saved_holder_pid=${DARK_FACTORY_LOCAL_CI_TEST_HOLDER_PID_FILE-}
-ci_have_holder_pid=${DARK_FACTORY_LOCAL_CI_TEST_HOLDER_PID_FILE+yes}
-ci_saved_wrapper_pid=${DARK_FACTORY_LOCAL_CI_TEST_WRAPPER_PID_FILE-}
-ci_have_wrapper_pid=${DARK_FACTORY_LOCAL_CI_TEST_WRAPPER_PID_FILE+yes}
-ci_saved_fail_after=${DARK_FACTORY_LOCAL_CI_TEST_FAIL_AFTER_MARKER-}
-ci_have_fail_after=${DARK_FACTORY_LOCAL_CI_TEST_FAIL_AFTER_MARKER+yes}
 
 # A sourced file cannot use env -i for its caller. Enumerate and clear the
 # inherited environment, then restore only the explicit test controls above.
@@ -270,7 +253,6 @@ fi
 
 if [ -n "$ci_saved_local_ci_directory" ]; then
     export DARK_FACTORY_LOCAL_CI_DIRECTORY="$ci_saved_local_ci_directory"
-    if [ -n "$ci_saved_local_ci_factoryctl" ]; then export DARK_FACTORY_FACTORYCTL="$ci_saved_local_ci_factoryctl"; fi
 fi
 export DF_CI_NODE="$ci_node" DF_CI_COREPACK="$ci_corepack" DF_CI_GO="$ci_go"
 export DARK_FACTORY_E2E_GO="$ci_go" DARK_FACTORY_E2E_NODE="$ci_node" DARK_FACTORY_E2E_COREPACK="$ci_corepack"
@@ -303,11 +285,3 @@ export LC_ALL=C
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_COUNT=0
 if [ -n "$ci_have_df_gate_fault" ]; then export DF_GATE_FAULT="$ci_saved_df_gate_fault"; fi
 if [ -n "$ci_have_local_ci_lease_held" ]; then export DARK_FACTORY_LOCAL_CI_LEASE_HELD="$ci_saved_local_ci_lease_held"; fi
-if [ -n "$ci_have_local_ci_wait" ]; then export DARK_FACTORY_LOCAL_CI_WAIT="$ci_saved_local_ci_wait"; fi
-if [ -n "$ci_have_local_ci_test_sentinel" ]; then export DARK_FACTORY_LOCAL_CI_TEST_SENTINEL="$ci_saved_local_ci_test_sentinel"; fi
-if [ -n "$ci_have_pause_before" ]; then export DARK_FACTORY_LOCAL_CI_TEST_PAUSE_BEFORE_GROUP_TRAPS="$ci_saved_pause_before"; fi
-if [ -n "$ci_have_pause_after" ]; then export DARK_FACTORY_LOCAL_CI_TEST_PAUSE_AFTER_LOCKF="$ci_saved_pause_after"; fi
-if [ -n "$ci_have_owner_marker" ]; then export DARK_FACTORY_LOCAL_CI_TEST_OWNER_MARKER="$ci_saved_owner_marker"; fi
-if [ -n "$ci_have_holder_pid" ]; then export DARK_FACTORY_LOCAL_CI_TEST_HOLDER_PID_FILE="$ci_saved_holder_pid"; fi
-if [ -n "$ci_have_wrapper_pid" ]; then export DARK_FACTORY_LOCAL_CI_TEST_WRAPPER_PID_FILE="$ci_saved_wrapper_pid"; fi
-if [ -n "$ci_have_fail_after" ]; then export DARK_FACTORY_LOCAL_CI_TEST_FAIL_AFTER_MARKER="$ci_saved_fail_after"; fi

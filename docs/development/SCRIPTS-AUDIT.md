@@ -33,7 +33,6 @@ repository/domain.
 | `go-service-e2e.sh` | DEV | disposable launchd E2E gate |
 | `import-issues.sh` | DEV | repository issue import utility and test |
 | `local-ci-environment.sh` | DEV | local CI environment boundary |
-| `local-ci-lease.sh` | DEV | local heavy-gate lease |
 | `local-ci.sh` | DEV | repository gate orchestrator |
 | `new-worktree.sh` | DEV | contributor worktree helper |
 | `package-release.sh` | DEV | release artifact packaging |
@@ -55,8 +54,6 @@ repository/domain.
 | `test-go-e2e-tools.sh` | DEV | E2E tool fixture |
 | `test-go-gates.sh` | DEV | CI gate fault-injection fixture |
 | `test-local-ci-environment.sh` | DEV | environment-boundary fixture |
-| `test-local-ci-lease-mutations.sh` | DEV | lease mutation fixture |
-| `test-local-ci-lease.sh` | DEV | lease fixture |
 | `test-new-worktree.sh` | DEV | worktree fixture |
 | `test-package-release.sh` | DEV | package fixture |
 | `test-prepare-release-source.sh` | DEV | release-source fixture |

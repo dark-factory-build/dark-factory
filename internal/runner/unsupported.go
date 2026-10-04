@@ -74,5 +74,3 @@ func (w *WorkerControl) ExecProvider(_ *LaunchSpec, cwd, task *os.File) error {
 	return ErrUnsupported
 }
 func (w *WorkerControl) Close() error { return nil }
-
-func ReadOwnedProcessIdentity(int) (Identity, error) { return Identity{}, ErrUnsupported }

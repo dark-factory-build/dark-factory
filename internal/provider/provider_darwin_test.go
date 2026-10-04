@@ -1630,23 +1630,12 @@ func TestCodexToolchainSandbox(t *testing.T) {
 	if err := os.Mkdir(leaseScripts, 0700); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"local-ci-lease.sh", "with-local-ci-lease.sh"} {
-		body, err := os.ReadFile(filepath.Join(filepath.Dir(testSource), "..", "..", "scripts", name))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(leaseScripts, name), body, 0700); err != nil {
-			t.Fatal(err)
-		}
+	body, err := os.ReadFile(filepath.Join(filepath.Dir(testSource), "..", "..", "scripts", "with-local-ci-lease.sh"))
+	if err != nil {
+		t.Fatal(err)
 	}
-	request.runtime.factoryctl = filepath.Join(root, "factoryctl")
-	build := exec.Command("go", "build", "-o", request.runtime.factoryctl, "./cmd/factoryctl")
-	build.Dir = filepath.Join(filepath.Dir(testSource), "..", "..")
-	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build lease observer fixture: %v\n%s", err, out)
-	}
-	if out, err := run("/bin/sh", "-c", "\"$DARK_FACTORY_FACTORYCTL\" --local-ci-process-identity $$"); err != nil {
-		t.Fatalf("lease process observation: %v\n%s", err, out)
+	if err := os.WriteFile(filepath.Join(leaseScripts, "with-local-ci-lease.sh"), body, 0700); err != nil {
+		t.Fatal(err)
 	}
 	if out, err := run("/bin/sh", "-c", "./scripts/with-local-ci-lease.sh /usr/bin/true"); err != nil {
 		t.Fatalf("generated-profile Git-free lease: %v\n%s", err, out)
