@@ -64,6 +64,12 @@ export function inhabitedTopology(phase: InhabitedPhase): TopologyView {
   return { ...actualTopology, dependencies, sourceRevision: mergedHead, digest: "fixture-integrated-conflict-resolution", nodes, sources: actualTopology.sources?.map((source) => ({ ...source, revision: mergedHead })) };
 }
 
+// Deliberately simulated interface data. Durable/provider proof lives in daemon tests.
+type FixtureDocument = Record<string, unknown>;
+const knowledgeDocuments = new Map<string, FixtureDocument[]>([[libraryDocument.id, [{ ...libraryDocument, project_id: projectId, body: "Source links identify integrated code entities. Shelf visits are ambient activity, not knowledge retrieval. This deterministic document proves that the visible bookshelf uses the existing library interface." }]]]);
+const knowledgeMeta = (item: FixtureDocument) => { try { return JSON.parse(String(item.source_references || "{}")) as Record<string, unknown>; } catch { return {}; } };
+const withoutBody = (item: FixtureDocument): FixtureDocument => { const { body: _body, ...metadata } = item; return metadata; };
+
 export function inhabitedContent(phase: InhabitedPhase): NonNullable<FactoryConsoleProps["onProjectContent"]> {
   return async (operation, input) => {
     const now = Date.now();
@@ -90,9 +96,33 @@ export function inhabitedContent(phase: InhabitedPhase): NonNullable<FactoryCons
       const offset = Number(input.offset) || 0, limit = Math.min(32, Number(input.limit) || 32);
       return { revision: topology.sourceRevision, files: files.slice(offset, offset + limit), total: files.length, next_offset: offset + limit < files.length ? offset + limit : 0 };
     }
-    if (operation === "list") return { items: [libraryDocument], next_offset: 0 };
-    if (operation === "read") return libraryDocument;
-    if (operation === "body") return { body: "Source links identify integrated code entities. Shelf visits are ambient activity, not knowledge retrieval. This deterministic document proves that the visible bookshelf uses the existing library interface.", complete: true, next_offset: 0 };
+    if (input.project_id !== projectId) throw new Error("Fixture project mismatch");
+    if (operation === "list" || operation === "search") {
+      const found = [...knowledgeDocuments.values()].map((revisions) => revisions[revisions.length - 1]!).filter((item) => {
+        const metadata = knowledgeMeta(item);
+        return (!input.open_only || !metadata.resolved) && (!input.kind || item.kind === input.kind) && (!input.thread_id || metadata.thread_id === input.thread_id) && (!input.entity || (metadata.entities as string[] || []).includes(String(input.entity))) && (!input.query || `${item.title} ${item.description}`.toLowerCase().includes(String(input.query).toLowerCase())) && (!metadata.branch || metadata.branch === input.branch) && (!metadata.environment || metadata.environment === input.environment);
+      });
+      const offset = Number(input.offset) || 0, limit = Number(input.limit) || 4;
+      return { items: found.slice(offset, offset + limit).map(withoutBody), next_offset: offset + limit < found.length ? offset + limit : 0 };
+    }
+    if (operation === "create" || operation === "revise" || operation === "deprecate") {
+      const key = String(input.id), revisions = knowledgeDocuments.get(key) || [], prior = revisions[revisions.length - 1];
+      if (operation === "create" ? revisions.length !== 0 : Number(input.expected_revision) !== revisions.length) throw new Error("Revision conflict");
+      const revision = revisions.length + 1;
+      const item = { ...(operation === "deprecate" ? prior : input), id: key, project_id: projectId, revision, latest_revision: revision, author: "human: isolated browser fixture", deprecated: operation === "deprecate" };
+      revisions.push(item); knowledgeDocuments.set(key, revisions);
+      return withoutBody(item);
+    }
+    if (operation === "read" || operation === "body") {
+      const revisions = knowledgeDocuments.get(String(input.id));
+      const item = revisions?.[Number(input.revision || revisions.length) - 1];
+      if (!item) throw new Error("Document revision not found");
+      if (operation === "read") return { ...withoutBody(item), latest_revision: revisions!.length };
+      const offset = Number(input.offset) || 0, limit = Number(input.limit) || 8192, body = String(item.body || "");
+      return { body: body.slice(offset, offset + limit), complete: offset + limit >= body.length, next_offset: offset + limit < body.length ? offset + limit : 0 };
+    }
+    if (operation === "attach") return { task_id: input.task_id, content_id: input.content_id, content_revision: input.content_revision };
+    if (operation === "accesses") return { items: [], next_offset: 0 };
     if (operation === "outcome_list" || operation === "evidence_list") return { items: [], next_offset: 0 };
     if (operation === "task_read") return { ...fixtureFloorState.tasks.get(taskId), id: taskId, task_id: taskId, project_id: projectId, revision: "12" };
     throw new Error("Fixture has no response for this operation; no daemon action was performed.");

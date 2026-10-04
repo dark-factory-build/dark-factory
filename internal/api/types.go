@@ -413,6 +413,8 @@ func validTerminalObservation(value TerminalObservation) bool {
 // Project content is deliberately a small wire DTO. Bodies are never placed
 // in list responses; callers use the explicit bounded body reader.
 type Content struct {
+	RepositoryID     string `json:"repository_id,omitempty"`
+	ProjectedStatus  string `json:"projected_status,omitempty"`
 	ID               string `json:"id"`
 	ProjectID        string `json:"project_id"`
 	Kind             string `json:"kind"`
@@ -513,6 +515,7 @@ type ProductionResult struct {
 	State string `json:"state"`
 }
 type ContentInput struct {
+	RepositoryID     string `json:"repository_id,omitempty"`
 	ID               string `json:"id"`
 	ProjectID        string `json:"project_id"`
 	Kind             string `json:"kind"`
@@ -525,10 +528,18 @@ type ContentInput struct {
 	ExpectedRevision uint64 `json:"expected_revision,omitempty"`
 }
 type ContentListInput struct {
-	ProjectID string `json:"project_id,omitempty"`
-	Kind      string `json:"kind,omitempty"`
-	Offset    uint64 `json:"offset,omitempty"`
-	Limit     uint64 `json:"limit,omitempty"`
+	OpenOnly     bool   `json:"open_only,omitempty"`
+	Knowledge    bool   `json:"knowledge,omitempty"`
+	RepositoryID string `json:"repository_id,omitempty"`
+	Query        string `json:"query,omitempty"`
+	Branch       string `json:"branch,omitempty"`
+	Environment  string `json:"environment,omitempty"`
+	Entity       string `json:"entity,omitempty"`
+	Thread       string `json:"thread_id,omitempty"`
+	ProjectID    string `json:"project_id,omitempty"`
+	Kind         string `json:"kind,omitempty"`
+	Offset       uint64 `json:"offset,omitempty"`
+	Limit        uint64 `json:"limit,omitempty"`
 }
 type ContentReadInput struct {
 	ID       string `json:"id"`

@@ -102,6 +102,53 @@ correction or an ordinary second opinion cannot clear a same-head block.
 The Maintainer App is another publisher of the same record. Its automated
 intake retains its own operation journal and uncertainty handling.
 
+## Shared project knowledge
+
+Board threads and library entries use the existing Git-backed content revisions.
+The board's replies are retained discussion data, never peer-question or human
+reply delivery. Link those existing records and use their existing reply actions.
+Document revision is independent of `source_revision`, which identifies the code
+a claim discusses. Bodies and historical pages remain outside active state.
+
+The provider-independent CLI (also available through the existing attempt MCP) is:
+
+```sh
+factoryctl attempt content search --project ID --query "delivery" --limit 4
+factoryctl attempt content body --id DOCUMENT_ID --revision 1 --limit 8192
+factoryctl attempt content create --project ID --kind observation --title "Delivery finding" \
+  --body-file finding.md --source-references '{"status":"tentative","evidence":["path/to/check"],"source_revision":"FULL_SOURCE_SHA"}'
+```
+
+Knowledge kinds are `project_brief`, `decision`, `lesson`, `observation`,
+`discussion`, `discussion_reply`, and procedures with structured metadata.
+Legacy free-form procedure references remain readable. Metadata accepts `status`
+(`tentative`, `current`, `needs_revalidation`, `superseded`), `evidence`, `entities`
+(stable project-ID:topology-node-ID references), `source_revision`, `branch`,
+`environment`, `thread_id`, `task_id`, `change_id`, `record_type`/`record_id`,
+`mentions`, `resolved`, `pinned`, `supersedes`, and `scope` (repository by default,
+or project-wide for operator-authored material). Unknown/duplicate fields are
+rejected. Decisions and lessons require evidence. Authors come from authenticated
+identity; agent notes cannot create project briefs, promote current guidance, or
+revise another author's protected knowledge. Operator capability is required for
+promotion. Text cannot grant capabilities.
+
+Task preparation freezes a bounded selection of exact document revisions,
+prioritizing explicit attachments and the project brief. The normal knowledge
+addition is at most 3 KiB, plus at most 4 KiB for all explicitly attached
+revision identifiers; bodies are loaded in bounded prefixes or on demand.
+Codex and Claude fetch the actual assignment through `attempt task` when knowledge
+is present. Access records distinguish selection, context bytes served, and body
+pages served; none claims understanding or application. A later assignment fetch
+shows a checkpoint when a selected document has changed. Unknown branch or
+environment applicability fails closed for automatic selection; explicit historical
+references remain inspectable. Source revalidation compares only linked entity
+paths and preserves the author's immutable claim.
+
+The Board/Library buttons, floor board/shelves, and source notices open the same
+records. Browser fixture demonstrations are simulated UI operations; isolated
+kernel/daemon/provider-boundary tests establish persistence and delivery. No model
+learning is inferred from either test.
+
 ## Operator human requests
 
 With the existing operator socket and token-file environment configured,

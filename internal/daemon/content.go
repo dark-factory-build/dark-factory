@@ -65,6 +65,9 @@ func (daemon *Daemon) writeContentSource(ctx context.Context, spec kernel.NewCon
 		}
 		return kernel.NewContent{}, err
 	}
+	if repository.ProjectID != spec.ProjectID {
+		return kernel.NewContent{}, kernel.ErrUnauthorized
+	}
 	git := change.TrustedGitExecutable
 	if configured := daemon.gitExecutable.Load(); configured != nil && *configured != "" {
 		git = *configured
@@ -246,8 +249,15 @@ func (daemon *Daemon) content(ctx context.Context, call api.Call) api.Reply {
 		if e != nil {
 			return kernel.NewContent{}, e
 		}
+		var repository kernel.RepositoryID
+		if input.RepositoryID != "" {
+			repository, e = browserID(input.RepositoryID, kernel.RepositoryIDFromBytes)
+			if e != nil {
+				return kernel.NewContent{}, e
+			}
+		}
 		author := operatorProvenance
-		return kernel.NewContent{ID: id, ProjectID: p, Kind: kernel.ContentKind(input.Kind), Title: input.Title, Description: input.Description, Body: input.Body, Author: author, SourceReferences: input.SourceReferences, Commit: input.Commit, Path: input.Path}, nil
+		return kernel.NewContent{ID: id, ProjectID: p, RepositoryID: repository, Kind: kernel.ContentKind(input.Kind), Title: input.Title, Description: input.Description, Body: input.Body, Author: author, SourceReferences: input.SourceReferences, Commit: input.Commit, Path: input.Path}, nil
 	}
 	switch call.Kind() {
 	case api.CallContentCreate, api.CallContentRevise, api.CallContentDeprecate:
@@ -276,8 +286,14 @@ func (daemon *Daemon) content(ctx context.Context, call api.Call) api.Reply {
 					return newErrorReply(remoteErrorCode(readErr))
 				}
 				if found {
+					if spec.RepositoryID != (kernel.RepositoryID{}) && spec.RepositoryID != repository.ID {
+						return newErrorReply(api.RemoteUnauthorized)
+					}
 					spec.RepositoryID = repository.ID
 				}
+			}
+			if specErr = daemon.validateKnowledgeWrite(ctx, operator, kd, spec, kernel.Revision{}); specErr != nil {
+				return newErrorReply(remoteErrorCode(specErr))
 			}
 			spec, specErr = daemon.writeContentSource(ctx, spec, 1)
 			if specErr != nil {
@@ -306,6 +322,9 @@ func (daemon *Daemon) content(ctx context.Context, call api.Call) api.Reply {
 			}
 			if latest := current.LatestRevision.Int64(); latest != int64(input.ExpectedRevision) && latest != int64(input.ExpectedRevision)+1 {
 				return newErrorReply(api.RemoteRevisionConflict)
+			}
+			if specErr = daemon.validateKnowledgeWrite(ctx, operator, kd, spec, r); specErr != nil {
+				return newErrorReply(remoteErrorCode(specErr))
 			}
 			spec, specErr = daemon.writeContentSource(ctx, spec, input.ExpectedRevision+1)
 			if specErr != nil {
@@ -347,7 +366,7 @@ func (daemon *Daemon) content(ctx context.Context, call api.Call) api.Reply {
 		if e != nil {
 			return newErrorReply(remoteErrorCode(e))
 		}
-		return api.NewContentReply(contentDTO(v))
+		return api.NewContentReply(daemon.knowledgeDTO(ctx, v))
 	case api.CallContentList:
 		kind := kernel.ContentKind(list.Kind)
 		limit := int(list.Limit)
@@ -355,7 +374,18 @@ func (daemon *Daemon) content(ctx context.Context, call api.Call) api.Reply {
 			limit = api.MaxContentPageItems
 		}
 		var v kernel.ContentPage
-		if operator {
+		if list.Knowledge {
+			query := kernel.KnowledgeQuery{OpenOnly: list.OpenOnly, Kind: kind, Query: list.Query, Branch: list.Branch, Environment: list.Environment, Entity: list.Entity, Thread: list.Thread, Offset: int(list.Offset), Limit: limit}
+			if operator {
+				repository, e := daemon.knowledgeRepository(ctx, pid, list.RepositoryID)
+				if e != nil {
+					return newErrorReply(remoteErrorCode(e))
+				}
+				v, err = daemon.store.SearchKnowledge(ctx, pid, repository, query)
+			} else {
+				v, err = daemon.store.SearchKnowledgeForAttempt(ctx, kd, query)
+			}
+		} else if operator {
 			v, err = daemon.store.ListContent(ctx, pid, kind, int(list.Offset), limit)
 		} else {
 			v, err = daemon.store.ListContentForAttempt(ctx, kd, kind, int(list.Offset), limit)
@@ -365,7 +395,7 @@ func (daemon *Daemon) content(ctx context.Context, call api.Call) api.Reply {
 		}
 		out := api.ContentList{NextOffset: uint64(v.NextOffset)}
 		for _, x := range v.Items {
-			out.Items = append(out.Items, contentDTO(x))
+			out.Items = append(out.Items, daemon.knowledgeDTO(ctx, x))
 		}
 		return api.NewContentReply(out)
 	case api.CallContentRead:
@@ -382,7 +412,7 @@ func (daemon *Daemon) content(ctx context.Context, call api.Call) api.Reply {
 		if err != nil {
 			return newErrorReply(remoteErrorCode(err))
 		}
-		return api.NewContentReply(contentDTO(v))
+		return api.NewContentReply(daemon.knowledgeDTO(ctx, v))
 	case api.CallContentBody:
 		id, e := contentID(body.ID)
 		if e != nil {
@@ -404,6 +434,11 @@ func (daemon *Daemon) content(ctx context.Context, call api.Call) api.Reply {
 		v, err := pageContentBody(content, sourceBody, int(body.Offset), int(body.Limit))
 		if err != nil {
 			return newErrorReply(remoteErrorCode(err))
+		}
+		if attempt {
+			if err := daemon.store.RecordContentAccessForAttempt(ctx, kd, kernel.ContentAccess{ContentID: v.ID, ContentRevision: v.Revision, Kind: "read", Offset: v.Offset, ByteLength: len(v.Body), CreatedAt: at}); err != nil {
+				return newErrorReply(remoteErrorCode(err))
+			}
 		}
 		return api.NewContentReply(api.ContentBody{ID: v.ID.String(), Revision: uint64(v.Revision.Int64()), Offset: uint64(v.Offset), Body: v.Body, NextOffset: uint64(v.NextOffset), Complete: v.Complete})
 	case api.CallContentEvidence:

@@ -1215,3 +1215,8 @@ summary.dfConsoleItem__summary { cursor: pointer; }
 .dfMissions .dfStatus { text-transform: capitalize; }
 
 .dfConsoleBack { min-height: 2.75rem; }
+.dfProjectLibrary [data-knowledge-status="needs_revalidation"] { border-color: #dca85b; }
+.dfProjectLibrary [data-knowledge-status="superseded"] { opacity: .7; }
+.dfProjectLibrary [data-knowledge-status="tentative"] { border-style: dashed; }
+
+.dfProjectLibrary button { overflow-wrap: anywhere; white-space: normal; text-align: left; }

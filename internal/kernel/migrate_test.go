@@ -466,7 +466,7 @@ func newLegacyDatabase(t *testing.T, persistWAL bool, version int, extra ...stri
 			t.Fatal(err)
 		}
 	}
-	downgrade := []string{"DROP TABLE publication_tasks", "DROP TABLE production_records", "DROP TABLE mission_task_bindings", "DROP TABLE run_tokens", "DROP TABLE project_tokens", "DROP TABLE attachment_retention", "DROP TABLE task_attachments", "DROP TABLE intake_acceptance_reviews", "DROP TABLE intake_source_priorities", "DROP TABLE intake_legacy_suppressions", "DROP TABLE intake_legacy_migrations", "DROP TABLE intake_task_bindings", "DROP TABLE intake_source_trusted_logins", "DROP TABLE intake_acceptances", "DROP TABLE intake_sources", "DROP TABLE repository_source_identities", "DROP TABLE content_repository_bindings", "DROP TABLE task_repository_bindings", "DROP TABLE project_repositories", "DROP TABLE continuations", fmt.Sprintf("PRAGMA user_version = %d", version), "COMMIT"}
+	downgrade := []string{"DROP TABLE content_accesses", "DROP TABLE publication_tasks", "DROP TABLE production_records", "DROP TABLE mission_task_bindings", "DROP TABLE run_tokens", "DROP TABLE project_tokens", "DROP TABLE attachment_retention", "DROP TABLE task_attachments", "DROP TABLE intake_acceptance_reviews", "DROP TABLE intake_source_priorities", "DROP TABLE intake_legacy_suppressions", "DROP TABLE intake_legacy_migrations", "DROP TABLE intake_task_bindings", "DROP TABLE intake_source_trusted_logins", "DROP TABLE intake_acceptances", "DROP TABLE intake_sources", "DROP TABLE repository_source_identities", "DROP TABLE content_repository_bindings", "DROP TABLE task_repository_bindings", "DROP TABLE project_repositories", "DROP TABLE continuations", fmt.Sprintf("PRAGMA user_version = %d", version), "COMMIT"}
 	if version < v19UserVersion {
 		downgrade = append([]string{"DROP TABLE terminal_diagnostics"}, downgrade...)
 	}
@@ -848,7 +848,7 @@ func downgradeIntakeToV30(t *testing.T, store *Store) {
 	defer connection.Close()
 	err = migrateWithoutForeignKeys(ctx, connection, func(ctx context.Context, connection *sql.Conn) error {
 		target := expectedSchemaOf(v30SchemaStatements())
-		if _, err := connection.ExecContext(ctx, "DROP TABLE publication_tasks; DROP TABLE production_records; DROP TABLE mission_task_bindings"); err != nil {
+		if _, err := connection.ExecContext(ctx, "DROP TABLE content_accesses; DROP TABLE publication_tasks; DROP TABLE production_records; DROP TABLE mission_task_bindings"); err != nil {
 			return err
 		}
 		if err := rebuildTable(ctx, connection, target, "intake_sources", strings.TrimSuffix(intakeSourceColumns, ", linear_team_id"), "intake_sources_repository_destination", "", ""); err != nil {

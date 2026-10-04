@@ -881,7 +881,7 @@ func TestV32MigrationPreservesMissionBindingsAndStandaloneTasks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.writer.ExecContext(ctx, "DROP TABLE production_records; DROP TABLE publication_tasks; PRAGMA user_version = 32"); err != nil {
+	if _, err := store.writer.ExecContext(ctx, "DROP TABLE content_accesses; DROP TABLE production_records; DROP TABLE publication_tasks; PRAGMA user_version = 32"); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.Close(); err != nil {
