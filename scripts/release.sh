@@ -52,6 +52,7 @@ test -n "$version" || fail upload_failed
 # promote over it or roll it back.
 rollback() {
     now=$(live)
+    test "$now" != "$previous" || fail "$1 (previous $previous still live)"
     test "$now" = "$version" || fail "$1 rollback_skipped: live changed to ${now:-unknown}"
     if wrangler versions deploy "$previous@100%" --name "$worker" --yes \
         --message "roll back failed release of $commit" >&2; then
@@ -71,6 +72,8 @@ for attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do
     if test "$health" = 200 \
         && printf '%s' "$body" | grep -Fq '"status":"ready"' \
         && printf '%s' "$body" | grep -Fq '"maintainer_operations":"mcp_installation_bound_operator_and_headless"'; then
+        now=$(live)
+        test "$now" = "$version" || fail "concurrent_deploy after promote (live is ${now:-unknown})"
         echo "release: control-plane $tag live as $version (previous $previous)"
         exit 0
     fi

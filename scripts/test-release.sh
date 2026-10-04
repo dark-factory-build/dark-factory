@@ -31,7 +31,7 @@ case "$1 $2" in
         printf '{"versions":[{"version_id":"%s","percentage":100}]}\n' "$(cat "$FAKE_LIVE")" ;;
     "versions view") printf '{"annotations":{"workers/tag":"%s"}}\n' "$FAKE_LIVE_TAG" ;;
     "versions upload") echo "Worker Version ID: new-id" ;;
-    "versions deploy") echo "${3%@100%}" >"$FAKE_LIVE" ;;
+    "versions deploy") [ -z "${FAKE_DEPLOY_FAIL:-}" ] || exit 1; echo "${3%@100%}" >"$FAKE_LIVE" ;;
     *) exit 9 ;;
 esac
 EOF
@@ -88,5 +88,15 @@ grep -Fxq 'release: control-plane health_failed rollback_skipped: live changed t
     "$temporary/out" || fail "untyped skipped rollback: $(cat "$temporary/out")"
 [ "$(deploys)" = 1 ] || fail "rolled back over a concurrent deploy"
 [ "$(cat "$temporary/live")" = other-id ] || fail "concurrent deploy was overwritten"
+
+if run FAKE_LIVE_TAG=cp-old FAKE_RACE_AFTER=1; then fail "replaced version reported live"; fi
+grep -Fxq 'release: control-plane concurrent_deploy after promote (live is other-id)' \
+    "$temporary/out" || fail "untyped replacement during polling: $(cat "$temporary/out")"
+[ "$(deploys)" = 1 ] || fail "rolled back over a replacement during polling"
+
+if run FAKE_LIVE_TAG=cp-old FAKE_DEPLOY_FAIL=1; then fail "failed deploy succeeded"; fi
+grep -Fxq 'release: control-plane deploy_failed (previous old-id still live)' \
+    "$temporary/out" || fail "untyped failed deploy: $(cat "$temporary/out")"
+[ "$(deploys)" = 1 ] || fail "failed deploy was rolled back"
 
 echo "release step fixtures passed"
