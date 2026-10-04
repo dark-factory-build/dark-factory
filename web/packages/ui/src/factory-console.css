@@ -841,10 +841,6 @@ summary.dfConsoleItem__summary { cursor: pointer; }
 @media (max-width: 640px) { .dfSpriteEditor__groups { grid-template-columns: minmax(0, 1fr); } }
 
 
-.dfFactoryFloor__navigation { display: flex; flex-wrap: wrap; align-items: center; gap: 0.35rem; margin: 0 0 0.5rem; font: 0.75rem/1.4 system-ui, sans-serif; }
-.dfFactoryFloor__navigation button { min-height: 2rem; padding: 0.25rem 0.5rem; font: inherit; letter-spacing: normal; text-transform: none; }
-.dfFactoryFloor__spaceCount { color: var(--df-console-muted); margin-left: auto; white-space: nowrap; }
-.dfFactoryFloor__scopeSummary { margin: 0 0 0.75rem; color: var(--df-console-muted); font: 0.8rem/1.5 system-ui, sans-serif; }
 .dfFactoryFloor [role="button"]:focus-visible { outline: none; }
 .dfFactoryFloor [role="button"]:focus-visible > rect,
 .dfFactoryScene__target:focus-visible > .dfFactoryScene__focus { stroke: var(--df-console-accent); stroke-width: 2; }
@@ -877,7 +873,6 @@ summary.dfConsoleItem__summary { cursor: pointer; }
 .dfFactoryEntityTools__results button, .dfFactoryProposals button { max-width: 100%; overflow-wrap: anywhere; font-size: .75rem; }
 .dfFactoryProposals button[aria-pressed="true"] { border-color: #a8d8ea; background: #274655; }
 .dfFactoryLegend { color: #b2c6be; font-size: .72rem; line-height: 1.7; margin: .4rem 0; }
-.dfFactoryLegend span { display: block; color: #819e9b; }
 .dfRoomDetails td, .dfRoomDetails th, .dfFactoryFloor__changes td { overflow-wrap: anywhere; }
 .dfRoomDetails button { max-width: 100%; overflow-wrap: anywhere; }
 
@@ -1226,3 +1221,5 @@ summary.dfConsoleItem__summary { cursor: pointer; }
 .dfProjectLibrary [data-knowledge-status="tentative"] { border-style: dashed; }
 
 .dfProjectLibrary button { overflow-wrap: anywhere; white-space: normal; text-align: left; }
+
+.dfConsoleDialog:is([aria-label="Project library"], [aria-label="Project board"]) { width: min(64rem, calc(100% - 2rem)); }

@@ -9,6 +9,7 @@ import { FactoryApp, FactoryConsole } from "../dist/src/index.js";
 import { layoutScene } from "../dist/src/factory-scene/scene.js";
 import { prepareFloor, selectFloor, projectFloor } from "../dist/src/console-view.js";
 import { FactoryFloor, StageMeter } from "../dist/src/console-screens.js";
+import { ProjectLibrary } from "../dist/src/project-library.js";
 import { SettingsDialog } from "../dist/src/console-sidebar.js";
 import { FactoryScene } from "../dist/src/factory-scene/factory-scene.js";
 import { TerminalPanel } from "../dist/src/factory-app.js";
@@ -1945,8 +1946,8 @@ test("floor omits the global evidence essay", () => {
   const markup = renderToStaticMarkup(createElement(FactoryConsole, { status: "ready", state: fixtureState, topologies: fixtureTopologies, view: "floor" }));
   assert.doesNotMatch(markup, /Floor evidence|Rooms describe a repository snapshot/);
   assert.doesNotMatch(markup, /Scroll the floor to explore/);
-  assert.match(markup, /Floor detail/);
-  assert.match(markup, /one connected floor/);
+  assert.doesNotMatch(markup, /Floor detail|Topology detail|Social furniture|one connected floor/);
+  assert.match(markup, /Find source/);
 });
 
 
@@ -2496,4 +2497,18 @@ test("source notices and new discussions retain the deepest repository source sc
   await click("Discuss this source");
   assert.deepEqual(opens, [[ids.project, entity.id, undefined, repository]]);
   await act(async () => renderer.unmount());
+});
+
+test("opening a project shelf scopes Library without changing the floor filter", async () => {
+  const calls = [];
+  let tree;
+  await act(async () => { tree = create(createElement(FactoryConsole, { status: "ready", state: fixtureState, topologies: fixtureTopologies,
+    onProjectContent: async (operation, input) => { calls.push({ operation, input }); return { items: [], next_offset: 0 }; },
+  })); });
+  await act(async () => tree.root.findByType(FactoryFloor).props.onOpenLibrary(ids.secondProject));
+  assert.equal(tree.root.findByType(ProjectLibrary).props.initialProjectId, ids.secondProject);
+  assert.equal(tree.root.findByType(FactoryFloor).props.projectId, undefined);
+  assert.equal(tree.root.findByType(FactoryFloor).props.state.projects.size, fixtureState.projects.size);
+  assert.ok(calls.some(({ operation, input }) => operation === "search" && input.project_id === ids.secondProject));
+  await act(async () => tree.unmount());
 });

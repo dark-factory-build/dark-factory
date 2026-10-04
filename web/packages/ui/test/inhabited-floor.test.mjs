@@ -19,7 +19,10 @@ test("flat detail preserves every canonical source once across same-path wrapper
   for (const detail of ["coarse", "auto", "fine"]) {
     const floor = selectFloor(prepared, detail), assemblies = floor.topology.nodes.flatMap((room) => room.assemblies);
     assert.equal(new Set(assemblies.map((assembly) => assembly.id)).size, assemblies.length);
-    assert.equal(assemblies.reduce((sum, assembly) => sum + assembly.inventory.direct.source, 0), 24);
+    assert.equal(assemblies.reduce((sum, assembly) => sum + assembly.inventory.total.source, 0), 24);
+    const represented = assemblies.flatMap((assembly) => assembly.representedIds);
+    assert.equal(new Set(represented).size, represented.length, "each canonical area has one physical owner");
+    for (const source of floor.canonical.filter((source) => Object.values(source.inventory?.direct ?? {}).some(Boolean))) assert.ok(represented.includes(source.id));
     assert.equal(floor.topology.nodes.reduce((sum, room) => sum + room.inventory.total.source, 0), 24);
     assert.equal(floor.visibleAncestor("project:root"), floor.visibleAncestor("project:module"));
     assert.deepEqual([...prepared.roomByID.keys()], identity);
@@ -118,4 +121,22 @@ test("new-area versions retain observed resource classes and source-backed depen
   assert.equal(projected.proposals[0].relationships[0].fromId, newArea.id);
   assert.equal(projected.proposals[0].relationships[0].toId, "project:kernel");
   assert.equal(changed[0].source.relationshipsOmitted, 1);
+});
+
+
+test("automatic areas keep wide namespaces and package resources together without losing exact owners", () => {
+  const packages = Array.from({ length: 8 }, (_, index) => node(`p${index}`, `internal/p${index}`, "internal", inv(index === 0 ? 100 : 5, 2), "package"));
+  const inventory = { ...inv(0), direct: { ...counts(0), documentation: 4 }, total: { ...counts(0), documentation: 4 } };
+  const source = [root, node("internal", "internal", "root", inv(0)), ...packages,
+    node("tests", "internal/p1/test", "p1", inv(0, 8)), node("manuals", "internal/p1/docs", "p1", inventory)];
+  const prepared = prepare({ ...topology, nodes: source });
+  const auto = selectFloor(prepared), fine = selectFloor(prepared, "fine");
+  assert.ok(auto.topology.nodes.length < fine.topology.nodes.length / 2);
+  assert.ok(auto.topology.nodes.some((room) => room.path === "internal"));
+  assert.ok(auto.topology.nodes.some((room) => room.path === "internal/p0"));
+  const assembly = auto.topology.nodes.flatMap((room) => room.assemblies).find((assembly) => assembly.id === "project:p1");
+  assert.deepEqual(assembly.inventory.total, { ...counts(5, 10), documentation: 4 });
+  assert.deepEqual(assembly.inventory.direct, counts(5, 2), "aggregate scale never overwrites canonical direct contents");
+  assert.deepEqual(assembly.representedIds, ["project:p1", "project:manuals", "project:tests"]);
+  for (const id of assembly.representedIds) assert.ok(auto.detailByID.has(id) && fine.detailByID.has(id));
 });

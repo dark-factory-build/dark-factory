@@ -72,7 +72,7 @@ test("social furniture stays put and its standing destinations clear rest and wo
   assert.deepEqual(nook, breakRoomNook(layout, 100, 100, true));
   assert.equal(nook.furniture.length, 5);
   assert.deepEqual(nook.furniture.slice(0, 2).map(({ x, y, stand }) => ({ x, y, stand })), [
-    { x: 136, y: 74, stand: { x: 146, y: 104 } }, { x: 174, y: 74, stand: { x: 184, y: 104 } },
+    { x: 136, y: 90, stand: { x: 146, y: 136 } }, { x: 174, y: 90, stand: { x: 184, y: 136 } },
   ]);
   for (const piece of nook.furniture.filter((item) => item.roomId)) {
     const destination = layout.rooms.find((candidate) => candidate.id === piece.roomId);

@@ -230,14 +230,37 @@ export function selectFloor(prepared: ReturnType<typeof prepareFloor>, detail: F
       const key = `${link.direction}:${targetID}`, target = roomByID.get(targetID)!;
       links.set(key, { ...link, nodeId: targetID, label: target.label, path: target.path, weight: (links.get(key)?.weight ?? 0) + link.weight });
     }
+    // A package includes its tests, manifests and manuals. Keep nested functional
+    // packages and substantial source directories as named assemblies, instead of
+    // giving every resource folder a separate workstation.
+    const assemblyOwners = new Set(owned.filter((member) => member.id === node.id || member.kind === "package"
+      || !["src", "lib", "scripts"].includes(member.path.split("/").at(-1)!) && (member.inventory?.direct.source ?? 0) > 4).map((member) => member.id));
+    const ownedIds = new Set(owned.map((member) => member.id));
+    const assemblyGroups = new Map<string, SceneNode[]>();
+    for (const member of owned) {
+      let owner = member;
+      while (!assemblyOwners.has(owner.id)) {
+        const parent = parentOf(owner);
+        if (!parent || !ownedIds.has(parent.id)) { owner = node; break; }
+        owner = parent;
+      }
+      assemblyGroups.set(owner.id, [...assemblyGroups.get(owner.id) ?? [], member]);
+    }
     return {
       ...node, label: node.path === "." ? node.project?.name ?? node.label : node.path, inventoryScope: "subtree",
       inventory: owned.every((member) => member.inventory !== undefined) ? { ...node.inventory!, total } : undefined,
-      assemblies: owned.filter((member) => countFiles(member) > 0 || member.inventory === undefined).map((member) => ({
-        id: member.id, path: member.path, label: member.path === "." ? "Repository files" : member.path === node.path ? member.path.split("/").at(-1)! : member.path.slice(node.path === "." ? 0 : node.path.length + 1),
-        inventoryScope: "direct" as const, inventory: member.inventory, sizeBucket: member.sizeBucket,
-        representedIds: [member.id], dependencies: member.dependencies,
-      })),
+      assemblies: [...assemblyGroups].flatMap(([id, group]) => {
+        const member = detailByID.get(id)!;
+        const total = emptyCounts();
+        for (const source of group) for (const kind of Object.keys(total) as InventoryKind[]) total[kind] += source.inventory?.direct[kind] ?? 0;
+        if (!Object.values(total).some(Boolean) && group.every((source) => source.inventory !== undefined)) return [];
+        const samples = group.flatMap((source) => (source.inventory?.samples ?? []).map((sample) => source.path === member.path ? sample : `${source.path.slice(member.path === "." ? 0 : member.path.length + 1)}/${sample}`)).slice(0, 32);
+        return [{ id, path: member.path, label: member.path === "." ? "Repository files" : member.path === node.path ? member.path.split("/").at(-1)! : member.path.slice(node.path === "." ? 0 : node.path.length + 1),
+          inventoryScope: "subtree" as const,
+          inventory: group.some((source) => source.inventory === undefined) ? undefined : { direct: member.inventory!.direct, total, samples, samples_omitted: Math.max(0, Object.values(total).reduce((sum, count) => sum + count, 0) - samples.length) },
+          sizeBucket: member.sizeBucket, representedIds: group.map((source) => source.id), dependencies: member.dependencies,
+        }];
+      }),
       ...(node.dependencies === undefined ? {} : { dependencies: { ...node.dependencies, links: [...links.values()] } }),
     };
   });
