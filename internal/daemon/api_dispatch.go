@@ -1825,7 +1825,7 @@ func (daemon *Daemon) overseerSnapshot(ctx context.Context, call api.Call) api.R
 	if err != nil {
 		return newErrorReply(api.RemoteUnavailable)
 	}
-	deliveries := daemon.addOverseerLiveness(&projected, snapshot.Runs, daemon.now())
+	deliveries := daemon.addOverseerLiveness(&projected, snapshot.Runs, daemon.livenessTimestamp())
 	if deliveryState, ok := ctx.Value(livenessDeliveryContextKey{}).(*livenessDeliveryState); ok {
 		deliveryState.reports = append(deliveryState.reports, deliveries...)
 	}

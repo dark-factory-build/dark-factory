@@ -35,9 +35,8 @@ func TestStalledRunLivenessRequiresBothQuietSignals(t *testing.T) {
 
 func TestOverseerSnapshotLivenessUsesRealConnectionDeliveryAndRearm(t *testing.T) {
 	fixture := newDispatchFixture(t)
-	// Keep this fixture's synthetic liveness timeline coherent while the
-	// production liveness clock remains independent of supervisor.now.
-	fixture.daemon.livenessClock = func() time.Time { return fixture.daemon.now() }
+	// Drive only the liveness clock; the supervisor clock stays real time,
+	// far from this synthetic timeline, so reading it would change the report.
 	projectID, err := parseProjectID(testID(241))
 	if err != nil {
 		t.Fatal(err)
@@ -61,7 +60,7 @@ func TestOverseerSnapshotLivenessUsesRealConnectionDeliveryAndRearm(t *testing.T
 	}
 	t.Cleanup(func() { fixture.daemon.unregisterLiveAttempt(active.run.ID, attempt) })
 
-	fixture.daemon.now = func() time.Time { return quiet }
+	fixture.daemon.livenessClock = func() time.Time { return quiet }
 	done := fixture.serve(t)
 	first, err := active.client.OverseerSnapshot(ctx)
 	waitDispatch(t, done)
@@ -76,13 +75,13 @@ func TestOverseerSnapshotLivenessUsesRealConnectionDeliveryAndRearm(t *testing.T
 	}
 
 	activity := quiet.Add(time.Millisecond)
-	fixture.daemon.now = func() time.Time { return activity }
+	fixture.daemon.livenessClock = func() time.Time { return activity }
 	done = fixture.serve(t)
 	if _, err := active.client.Task(ctx); err != nil {
 		t.Fatal(err)
 	}
 	waitDispatch(t, done)
-	fixture.daemon.now = func() time.Time { return activity.Add(stalledRunLivenessThreshold) }
+	fixture.daemon.livenessClock = func() time.Time { return activity.Add(stalledRunLivenessThreshold) }
 	done = fixture.serve(t)
 	rearmed, err := active.client.OverseerSnapshot(ctx)
 	waitDispatch(t, done)
@@ -91,7 +90,7 @@ func TestOverseerSnapshotLivenessUsesRealConnectionDeliveryAndRearm(t *testing.T
 	}
 
 	failedActivity := activity.Add(stalledRunLivenessThreshold + time.Millisecond)
-	fixture.daemon.now = func() time.Time { return failedActivity }
+	fixture.daemon.livenessClock = func() time.Time { return failedActivity }
 	done = fixture.serve(t)
 	if _, err := active.client.Task(ctx); err != nil {
 		t.Fatal(err)
@@ -101,7 +100,7 @@ func TestOverseerSnapshotLivenessUsesRealConnectionDeliveryAndRearm(t *testing.T
 	entered := make(chan struct{})
 	release := make(chan struct{})
 	var once sync.Once
-	fixture.daemon.now = func() time.Time {
+	fixture.daemon.livenessClock = func() time.Time {
 		once.Do(func() { close(entered); <-release })
 		return failedAt
 	}
@@ -159,7 +158,7 @@ func TestOverseerSnapshotLivenessUsesRealConnectionDeliveryAndRearm(t *testing.T
 		t.Fatal("failed snapshot handler did not finish")
 	}
 
-	fixture.daemon.now = func() time.Time { return failedAt }
+	fixture.daemon.livenessClock = func() time.Time { return failedAt }
 	done = fixture.serve(t)
 	retried, err := active.client.OverseerSnapshot(ctx)
 	waitDispatch(t, done)
