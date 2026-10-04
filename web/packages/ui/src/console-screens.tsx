@@ -161,10 +161,10 @@ export function FactoryFloor({
       }}
     />
     </div>
-    {entity === undefined ? null : <section aria-label="Source contents">
+    {entity === undefined ? null : <section key={`${entity.id}:${topologies?.get(entity.project?.id ?? "")?.digest}`} aria-label="Source contents">
       <p>Stable source reference <code>{entity.id}</code></p>
-      <SourceNotices key={`${entity.id}:${topologies?.get(entity.project?.id ?? "")?.digest}`} entity={entity} topology={topologies?.get(entity.project?.id ?? "")} call={connected ? onProjectContent : undefined} open={onOpenBoard} />
-      <SourceContents key={`${entity.id}:${topologies?.get(entity.project?.id ?? "")?.digest}`} node={entity} topology={topologies?.get(entity.project?.id ?? "")} call={connected ? onProjectContent : undefined} />
+      <SourceNotices entity={entity} topology={topologies?.get(entity.project?.id ?? "")} call={connected ? onProjectContent : undefined} open={onOpenBoard} />
+      <SourceContents node={entity} topology={topologies?.get(entity.project?.id ?? "")} call={connected ? onProjectContent : undefined} />
       {related.map((proposal) => <button key={proposal.id} type="button" onClick={() => onSelectChange?.(proposal.id)}>Inspect change: {proposal.title}</button>)}
     </section>}
   </div>;

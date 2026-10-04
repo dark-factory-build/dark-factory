@@ -2482,7 +2482,9 @@ test("Missions and Production share the task dialog and preserve their origin on
   }
 });
 
-test("source notices and new discussions retain the deepest repository source scope", async () => {
+test("source switches replace notices and retain the deepest repository discussion scope", async (t) => {
+  const warnings = [];
+  t.mock.method(console, "error", (...args) => warnings.push(args.join(" ")));
   const selected = selectFloor(prepareFloor(fixtureState.projects, fixtureTopologies), "fine");
   const entity = [...selected.detailByID.values()].find((node) => node.project?.id === ids.project && node.path !== "." && node.path !== "");
   assert.ok(entity);
@@ -2490,12 +2492,20 @@ test("source notices and new discussions retain the deepest repository source sc
   const topology = { ...fixtureTopology, sources: [{ repository_id: "ab".repeat(16), prefix: "", revision: "base" }, { repository_id: repository, prefix: entity.path, revision: "scoped" }] };
   const calls = [], opens = [];
   let renderer;
-  await act(async () => { renderer = create(createElement(FactoryFloor, { state: fixtureState, topologies: new Map(fixtureTopologies).set(ids.project, topology), requestedEntity: { id: entity.id }, floorAppearance: { ...DEFAULT_FLOOR_APPEARANCE, detail: "fine" }, onProjectContent: async (operation, input) => { calls.push({ operation, input }); return { items: [] }; }, onOpenBoard: (...args) => opens.push(args) })); });
+  const props = { state: fixtureState, topologies: new Map(fixtureTopologies).set(ids.project, topology), requestedEntity: { id: entity.id }, floorAppearance: { ...DEFAULT_FLOOR_APPEARANCE, detail: "fine" }, onProjectContent: async (operation, input) => { calls.push({ operation, input }); return { items: [] }; }, onOpenBoard: (...args) => opens.push(args) };
+  await act(async () => { renderer = create(createElement(FactoryFloor, props)); });
   const click = async (label) => { await act(async () => renderer.root.findAllByType("button").find((button) => button.children.join("") === label).props.onClick()); };
   await click("Read notices for this source");
   assert.equal(calls.at(-1).input.repository_id, repository);
   await click("Discuss this source");
   assert.deepEqual(opens, [[ids.project, entity.id, undefined, repository]]);
+  for (const source of [...selected.detailByID.values()].filter((node) => node.project?.id === ids.project).slice(0, 5)) {
+    await act(async () => renderer.update(createElement(FactoryFloor, { ...props, requestedEntity: { id: source.id } })));
+    assert.equal(renderer.root.findAllByProps({ "aria-label": "Source notices" }).length, 1);
+    await click("Discuss this source");
+    assert.equal(opens.at(-1)[1], source.id);
+  }
+  assert.ok(!warnings.some((message) => message.includes("same key")), "source inspectors must have distinct reconciliation identities");
   await act(async () => renderer.unmount());
 });
 
