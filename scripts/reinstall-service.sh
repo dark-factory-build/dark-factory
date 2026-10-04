@@ -49,7 +49,10 @@ receipt_field() {
         print $value;
     ' "$1" "$runtime_home.service/receipt"
 }
-service_receipt_hash=$(shasum -a 256 "$runtime_home.service/receipt")
+receipt_digest() {
+    shasum -a 256 "$1" | cut -d' ' -f1
+}
+service_receipt_hash=$(receipt_digest "$runtime_home.service/receipt")
 label=$(receipt_field label)
 [ -n "$label" ] || { echo "service receipt has no label" >&2; exit 1; }
 plist_path=$(receipt_field plist_path)
@@ -58,6 +61,8 @@ case "$plist_path" in
     *) echo "service receipt has no matching absolute plist path" >&2; exit 1 ;;
 esac
 relay_origin=$(receipt_field relay_origin)
+program_digest=$(receipt_field program_digest)
+[ -n "$program_digest" ] || { echo "previous service receipt has no program digest; refusing uninstall" >&2; exit 1; }
 # The receipt otherwise carries its toolchain grant forward forever; the
 # operator replaces it here, e.g. to add ~/.cargo/bin and ~/.rustup.
 tool_path=${DARK_FACTORY_TOOL_PATH:-$(receipt_field tool_path)}
@@ -296,11 +301,19 @@ for name in factoryd factoryctl factory-runner; do
 	cp -p "$old" "$rollback_bin/$name"
 done
 cp -p "$runtime_home.service/receipt" "$rollback_receipt"
-[ "$(shasum -a 256 "$rollback_receipt")" = "$service_receipt_hash" ] \
+[ "$(receipt_digest "$rollback_receipt")" = "$service_receipt_hash" ] \
 	|| { echo "previous service receipt changed while preparing rollback; refusing uninstall" >&2; exit 1; }
+[ "$(receipt_digest "$rollback_bin/factoryd")" = "$program_digest" ] \
+	|| { echo "previous service package does not match its receipt; refusing uninstall" >&2; exit 1; }
+if ! "$runtime_home.service/bin/current/factoryctl" service status --home "$runtime_home" --label "$label" --plist-dir "$plist_dir" >/dev/null; then
+	echo "previous service does not match its receipt; refusing uninstall" >&2
+	exit 1
+fi
 
 rollback_needed=0
 rollback_in_progress=0
+export DARK_FACTORY_SOCKET="$socket"
+export DARK_FACTORY_OPERATOR_TOKEN_FILE="$runtime_home/operator.token"
 rollback_previous() {
 	set +e
 	echo "rollback: removing failed installation" >&2
@@ -363,7 +376,7 @@ trap 'exit 143' TERM
 
 refuse_dispatch_enabled
 refuse_active_runs
-[ "$(shasum -a 256 "$runtime_home.service/receipt")" = "$service_receipt_hash" ] \
+[ "$(receipt_digest "$runtime_home.service/receipt")" = "$service_receipt_hash" ] \
 	|| { echo "service settings changed during preparation; retry from the current receipt" >&2; exit 1; }
 rollback_needed=1
 "$bin/factoryctl" service uninstall --home "$runtime_home" --label "$label" --plist-dir "$plist_dir"
@@ -383,8 +396,6 @@ set -- service install --home "$runtime_home" --label "$label" --plist-dir "$pli
 # never listens.
 await listening install_stalled
 "$bin/factoryctl" service status --home "$runtime_home" --label "$label" --plist-dir "$plist_dir"
-export DARK_FACTORY_SOCKET="$socket"
-export DARK_FACTORY_OPERATOR_TOKEN_FILE="$runtime_home/operator.token"
 "$bin/factoryctl" web status
 "$bin/factoryctl" remote status
 echo "user_version now: $(sqlite3 "$db" 'PRAGMA user_version')"
