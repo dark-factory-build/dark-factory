@@ -84,12 +84,6 @@ func (daemon *Daemon) Intake(ctx context.Context, input api.IntakeInput) api.Int
 	if err != nil {
 		return intakeFailure(err)
 	}
-	if input.Action == "legacy_lineage" {
-		return daemon.legacyIntakeLineage(ctx, input)
-	}
-	if input.Action == "legacy_preview" || input.Action == "legacy_commit" {
-		return daemon.legacyIntake(ctx, input, at)
-	}
 	if input.Action == "list" {
 		var sources []kernel.IntakeSource
 		if input.ProjectID == "" {
@@ -593,4 +587,13 @@ func (daemon *Daemon) sourceIssues(ctx context.Context, source kernel.IntakeSour
 		return daemon.linear.Issues(ctx, source.LinearTeamID, page, label, number)
 	}
 	return daemon.readIntakeIssues(ctx, source.GitHubRepositoryName, source.GitHubRepositoryID, page, label, number)
+}
+
+// legacyExistingContent reports whether a migrated pre-cutover baseline
+// already covers this exact issue content.
+func legacyExistingContent(record kernel.LegacyIntakeRecord, hash [32]byte) bool {
+	if record.HistoricalContentHash != nil {
+		return *record.HistoricalContentHash == hash
+	}
+	return record.HasHistory && record.ContentHash == hash
 }
