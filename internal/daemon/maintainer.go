@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
 	"strings"
 	"time"
 
@@ -314,16 +315,60 @@ func validateMaintainerResponse(request maintainerRequest, response json.RawMess
 		return errors.New("invalid Maintainer response")
 	}
 	var jsonrpc string
-	if err := json.Unmarshal(envelope["jsonrpc"], &jsonrpc); err != nil || jsonrpc != "2.0" || len(envelope["id"]) == 0 || !bytes.Equal(bytes.TrimSpace(envelope["id"]), bytes.TrimSpace(request.ID)) {
+	if err := json.Unmarshal(envelope["jsonrpc"], &jsonrpc); err != nil || jsonrpc != "2.0" || len(envelope["id"]) == 0 || !maintainerIDsEqual(envelope["id"], request.ID) {
 		return errors.New("invalid Maintainer response envelope")
 	}
-	if errorValue, found := envelope["error"]; found && string(bytes.TrimSpace(errorValue)) != "null" {
+	if _, found := envelope["error"]; found {
 		return errors.New("Maintainer returned a JSON-RPC error")
 	}
 	if result, found := envelope["result"]; !found || string(bytes.TrimSpace(result)) == "null" {
 		return errors.New("invalid Maintainer response envelope")
 	}
 	return nil
+}
+
+func maintainerIDsEqual(left, right json.RawMessage) bool {
+	decode := func(raw json.RawMessage) (any, bool) {
+		decoder := json.NewDecoder(bytes.NewReader(raw))
+		decoder.UseNumber()
+		var value any
+		if err := decoder.Decode(&value); err != nil {
+			return nil, false
+		}
+		switch value.(type) {
+		case nil, string, json.Number:
+			return value, true
+		default:
+			return nil, false
+		}
+	}
+	leftValue, leftOK := decode(left)
+	rightValue, rightOK := decode(right)
+	if !leftOK || !rightOK {
+		return false
+	}
+	switch leftValue := leftValue.(type) {
+	case nil:
+		return rightValue == nil
+	case string:
+		rightString, ok := rightValue.(string)
+		return ok && leftValue == rightString
+	case json.Number:
+		rightNumber, ok := rightValue.(json.Number)
+		if !ok {
+			return false
+		}
+		var leftRat, rightRat big.Rat
+		if _, ok := leftRat.SetString(leftValue.String()); !ok {
+			return false
+		}
+		if _, ok := rightRat.SetString(rightNumber.String()); !ok {
+			return false
+		}
+		return leftRat.Cmp(&rightRat) == 0
+	default:
+		return false
+	}
 }
 
 // decodeMaintainerToolCall re-encodes the exact repository fields that local
@@ -427,7 +472,7 @@ func currentAcceptedIssueMetadata(request maintainerRequest, accepted kernel.Int
 	}
 	decoder := json.NewDecoder(bytes.NewReader(response))
 	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&live); err != nil || decoder.Decode(&struct{}{}) != io.EOF || live.JSONRPC != "2.0" || !bytes.Equal(bytes.TrimSpace(live.ID), bytes.TrimSpace(request.ID)) || live.Result.IsError == nil || *live.Result.IsError || len(live.Result.Content) == 0 {
+	if err := decoder.Decode(&live); err != nil || decoder.Decode(&struct{}{}) != io.EOF || live.JSONRPC != "2.0" || !maintainerIDsEqual(live.ID, request.ID) || live.Result.IsError == nil || *live.Result.IsError || len(live.Result.Content) == 0 {
 		return frozenIssue{}, errors.New("invalid observed issue response")
 	}
 	for _, content := range live.Result.Content {

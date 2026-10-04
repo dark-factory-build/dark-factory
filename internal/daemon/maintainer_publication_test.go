@@ -68,8 +68,9 @@ func TestValidateMaintainerResponseRequiresMatchingResultEnvelope(t *testing.T) 
 		response string
 		valid    bool
 	}{
-		{name: "matching result", response: `{"jsonrpc":"2.0","id":1,"result":{"isError":true}}`, valid: true},
+		{name: "matching numeric result", response: `{"jsonrpc":"2.0","id":1,"result":{"isError":true}}`, valid: true},
 		{name: "top-level error", response: `{"jsonrpc":"2.0","id":1,"error":{"code":-32602,"message":"invalid params"}}`},
+		{name: "result and null error", response: `{"jsonrpc":"2.0","id":1,"result":{"isError":false},"error":null}`},
 		{name: "wrong id", response: `{"jsonrpc":"2.0","id":2,"result":{}}`},
 		{name: "missing result", response: `{"jsonrpc":"2.0","id":1}`, valid: false},
 	} {
@@ -77,6 +78,26 @@ func TestValidateMaintainerResponseRequiresMatchingResultEnvelope(t *testing.T) 
 			err := validateMaintainerResponse(request, json.RawMessage(test.response))
 			if (err == nil) != test.valid {
 				t.Fatalf("validation error=%v, want valid=%v", err, test.valid)
+			}
+		})
+	}
+}
+
+func TestMaintainerIDsEqualAcceptsEquivalentJSONValues(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		requestID  string
+		responseID string
+		wantEqual  bool
+	}{
+		{name: "numeric spelling", requestID: `1.0`, responseID: `1`, wantEqual: true},
+		{name: "escaped string", requestID: `"a\u0062"`, responseID: `"ab"`, wantEqual: true},
+		{name: "different number", requestID: `1`, responseID: `2`, wantEqual: false},
+		{name: "different type", requestID: `1`, responseID: `"1"`, wantEqual: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := maintainerIDsEqual(json.RawMessage(test.requestID), json.RawMessage(test.responseID)); got != test.wantEqual {
+				t.Fatalf("IDs equal=%v, want %v", got, test.wantEqual)
 			}
 		})
 	}
