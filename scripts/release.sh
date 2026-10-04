@@ -28,8 +28,11 @@ PATH="$PWD/.tools/bin:$PWD/node_modules/.bin:$PATH"
 test -x node_modules/.bin/wrangler || npm ci --ignore-scripts >&2 || fail build_failed
 
 json() { node -e 'let s="";process.stdin.on("data",c=>s+=c).on("end",()=>{try{const v=('"$1"')(JSON.parse(s));if(v)process.stdout.write(String(v))}catch{}})'; }
-previous=$(wrangler deployments status --name "$worker" --json 2>/dev/null \
-    | json 'd=>d.versions.length===1&&d.versions[0].percentage===100&&d.versions[0].version_id') || true
+live() {
+    wrangler deployments status --name "$worker" --json 2>/dev/null \
+        | json 'd=>d.versions.length===1&&d.versions[0].percentage===100&&d.versions[0].version_id' || true
+}
+previous=$(live)
 test -n "$previous" || fail "auth_failed (no single live version at 100%)"
 live_tag=$(wrangler versions view "$previous" --name "$worker" --json 2>/dev/null \
     | json 'v=>v.annotations["workers/tag"]') || true
@@ -45,13 +48,19 @@ upload=$(DARK_FACTORY_WRANGLER_PREBUILT=1 wrangler versions upload --name "$work
 version=$(printf '%s\n' "$upload" | sed -n 's/^Worker Version ID: *//p' | tail -1)
 test -n "$version" || fail upload_failed
 
+# Another deployment may land while this one builds or verifies; never
+# promote over it or roll it back.
 rollback() {
+    now=$(live)
+    test "$now" = "$version" || fail "$1 rollback_skipped: live changed to ${now:-unknown}"
     if wrangler versions deploy "$previous@100%" --name "$worker" --yes \
         --message "roll back failed release of $commit" >&2; then
         fail "$1 rolled back to $previous"
     fi
     fail "$1 rollback_failed to $previous"
 }
+now=$(live)
+test "$now" = "$previous" || fail "concurrent_deploy (live is ${now:-unknown}, not $previous)"
 wrangler versions deploy "$version@100%" --name "$worker" --yes \
     --message "commit $commit" >&2 || rollback deploy_failed
 
