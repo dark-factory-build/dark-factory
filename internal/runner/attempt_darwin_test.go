@@ -757,6 +757,20 @@ func (f *attemptFixture) finishAndAck(expectOuterSuccess ...bool) *TerminalRecor
 	return record
 }
 
+// TerminalRecord is the authenticated attempt result in the shape these
+// tests assert on.
+type TerminalRecord struct {
+	Terminal Terminal
+	Identity FileIdentity
+	Digest   string
+}
+
+type Terminal struct {
+	AttemptID string
+	Process   Identity
+	Exit      Exit
+}
+
 func loadAttemptResultForTest(t *testing.T, dir *os.File, attemptID string, notice *AttemptResultNotice) *TerminalRecord {
 	t.Helper()
 	record, err := AuthenticateAttemptResult(dir, attemptID, notice)
@@ -2953,7 +2967,7 @@ func TestAttemptCleanupUncertaintyRetainsOwnerBeforeTerminal(t *testing.T) {
 	case <-time.After(4 * time.Second):
 		t.Fatal("cleanup did not reach injected uncertainty")
 	}
-	if _, err := os.Stat(filepath.Join(f.root, cfg.ResultName)); !errors.Is(err, os.ErrNotExist) {
+	if err := unix.Fstatat(int(f.dir.Fd()), cfg.ResultName, new(unix.Stat_t), unix.AT_SYMLINK_NOFOLLOW); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("uncertain cleanup published terminal: %v", err)
 	}
 	if got := ObserveProcess(identity); got.Presence != Present {
@@ -2980,7 +2994,7 @@ func TestAttemptCleanupUncertaintyRetainsOwnerBeforeTerminal(t *testing.T) {
 	if child.state != stateWaited {
 		t.Fatalf("terminal returned without sole Wait: state=%d", child.state)
 	}
-	if _, err := LoadTerminal(f.dir, cfg.ResultName); !errors.Is(err, os.ErrNotExist) {
+	if err := unix.Fstatat(int(f.dir.Fd()), cfg.ResultName, new(unix.Stat_t), unix.AT_SYMLINK_NOFOLLOW); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("uncertain cleanup published terminal: %v", err)
 	}
 	waitExactAbsence(t, identity)
@@ -3029,7 +3043,7 @@ func TestAttemptPermanentCleanupUncertaintyPublishesNothing(t *testing.T) {
 			t.Fatal("cleanup stopped retrying permanent uncertainty")
 		}
 	}
-	if _, err := os.Stat(filepath.Join(f.root, cfg.ResultName)); !errors.Is(err, os.ErrNotExist) {
+	if err := unix.Fstatat(int(f.dir.Fd()), cfg.ResultName, new(unix.Stat_t), unix.AT_SYMLINK_NOFOLLOW); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("permanent uncertainty published terminal: %v", err)
 	}
 	if got := ObserveProcess(identity); got.Presence != Present {
@@ -3053,7 +3067,7 @@ func TestAttemptPermanentCleanupUncertaintyPublishesNothing(t *testing.T) {
 	if child.state != stateWaited {
 		t.Fatalf("restored cleanup returned before Wait: state=%d", child.state)
 	}
-	if _, err := LoadTerminal(f.dir, cfg.ResultName); !errors.Is(err, os.ErrNotExist) {
+	if err := unix.Fstatat(int(f.dir.Fd()), cfg.ResultName, new(unix.Stat_t), unix.AT_SYMLINK_NOFOLLOW); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("restored cleanup published terminal after uncertainty: %v", err)
 	}
 	waitExactAbsence(t, identity)

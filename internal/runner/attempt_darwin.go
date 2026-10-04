@@ -1152,13 +1152,6 @@ func validateAttemptName(value string, limit int) error {
 	return nil
 }
 
-func validateBasename(value string) error {
-	if value == "" || len(value) > 255 || filepath.Base(value) != value || value == "." || value == ".." {
-		return ErrIdentity
-	}
-	return nil
-}
-
 func runAttempt(daemon, dir, lifetime *os.File, cfg attemptConfig, workerConfig []byte) (result error) {
 	proof, err := decodeResultProof(cfg.ResultProof)
 	if err != nil {

@@ -12,13 +12,6 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// runReleasedProvider is the single owner loop for a released PTY provider.
-// It never returns with an unjoined goroutine: the outer attempt runner owns
-// the PTY, child group, two capability sockets and every terminal cursor.
-func runReleasedProvider(child *OwnedChild, daemon, worker *os.File, reads *attemptReadSet, stagePTY *ptyStageSink, retained *terminalByteRing, startup []byte) (bool, error) {
-	return runReleasedProviderWithHandover(child, daemon, worker, reads, stagePTY, retained, startup, nil, 0)
-}
-
 // HandoverTransport belongs to the runner loop. The endpoint sends only
 // already-authenticated, fenced duplex connections through Replacements.
 // After the loop returns, Current receives the final result notice and is
@@ -46,8 +39,12 @@ func handoverGrace() time.Duration {
 	return handoverDetachedGrace
 }
 
-// The endpoint admits only a fenced replacement and passes its still-open
-// duplex connection here. A nil channel retains protocol-1 close-and-drain.
+// runReleasedProviderWithHandover is the single owner loop for a released PTY
+// provider. It never returns with an unjoined goroutine: the outer attempt
+// runner owns the PTY, child group, two capability sockets and every terminal
+// cursor. The endpoint admits only a fenced replacement and passes its
+// still-open duplex connection here. A nil handover retains protocol-1
+// close-and-drain.
 func runReleasedProviderWithHandover(child *OwnedChild, daemon, worker *os.File, reads *attemptReadSet, stagePTY *ptyStageSink, retained *terminalByteRing, startup []byte, handover *HandoverTransport, retryInterval time.Duration) (bool, error) {
 	if child == nil || daemon == nil || worker == nil || reads == nil || child.ptyMaster == nil || retained == nil {
 		return false, ErrState

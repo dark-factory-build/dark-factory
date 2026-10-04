@@ -1089,10 +1089,6 @@ func (runtime RuntimePaths) valid() bool {
 		(runtime.accountConfig == "" || validAbsolute(runtime.accountConfig, maxPathBytes))
 }
 
-func (runtime RuntimePaths) environment(kind kernel.Provider) []string {
-	return runtime.environmentForRole(kind, kernel.RoleWorker)
-}
-
 func (runtime RuntimePaths) environmentForRole(kind kernel.Provider, role kernel.AgentRole) []string {
 	home := runtime.home
 	if kind == kernel.ProviderClaudeCode {

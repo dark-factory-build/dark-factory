@@ -10,14 +10,13 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/dark-factory-build/dark-factory/internal/kernel"
 	"github.com/dark-factory-build/dark-factory/internal/runner"
 	"golang.org/x/sys/unix"
 )
 
 func TestOpenRecoveredRuntimeValidatesPopulatedEvidenceWithoutMutation(t *testing.T) {
 	before := openFDCensus(t)
-	parent, path, identity, _ := populatedRecoveredRuntime(t, runtimeTestName)
+	parent, path, identity := populatedRecoveredRuntime(t, runtimeTestName)
 	t.Cleanup(func() { _ = parent.Close() })
 	if _, err := os.Lstat(filepath.Join(path, runner.InnerActivationMarkerName)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("fixture unexpectedly retained inner marker: %v", err)
@@ -99,8 +98,8 @@ func TestOpenRecoveredRuntimeAcceptsExactCrashCutsWithoutConfigurationPath(t *te
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			beforeFDs := openFDCensus(t)
-			parent, path, identity, terminal := populatedRecoveredRuntime(t, runtimeTestName)
-			configureRecoveredResidue(t, path, test.residue, terminal)
+			parent, path, identity := populatedRecoveredRuntime(t, runtimeTestName)
+			configureRecoveredResidue(t, path, test.residue)
 			before := snapshotRuntimeGraph(t, path)
 			recovered, err := OpenRecoveredRuntime(context.Background(), parent, runtimeTestName, identity)
 			if err != nil {
@@ -199,7 +198,7 @@ func TestOpenRecoveredRuntimeRejectsMalformedCensusAndReplacement(t *testing.T) 
 	}
 	for name, mutate := range mutations {
 		t.Run(name, func(t *testing.T) {
-			parent, path, identity, _ := populatedRecoveredRuntime(t, runtimeTestName)
+			parent, path, identity := populatedRecoveredRuntime(t, runtimeTestName)
 			defer parent.Close()
 			mutate(t, path)
 			before := snapshotRuntimeGraph(t, path)
@@ -214,7 +213,7 @@ func TestOpenRecoveredRuntimeRejectsMalformedCensusAndReplacement(t *testing.T) 
 	}
 
 	t.Run("wrong root identity", func(t *testing.T) {
-		parent, path, identity, _ := populatedRecoveredRuntime(t, runtimeTestName)
+		parent, path, identity := populatedRecoveredRuntime(t, runtimeTestName)
 		defer parent.Close()
 		identity.Inode++
 		before := snapshotRuntimeGraph(t, path)
@@ -228,7 +227,7 @@ func TestOpenRecoveredRuntimeRejectsMalformedCensusAndReplacement(t *testing.T) 
 	})
 
 	t.Run("root replacement after descriptor open", func(t *testing.T) {
-		parent, path, identity, _ := populatedRecoveredRuntime(t, runtimeTestName)
+		parent, path, identity := populatedRecoveredRuntime(t, runtimeTestName)
 		defer parent.Close()
 		moved := path + ".old"
 		recovered, err := openRecoveredRuntime(context.Background(), parent, runtimeTestName, identity, func() {
@@ -299,9 +298,9 @@ func TestRecoveredRuntimeCensusGrammar(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			parent, path, identity, terminal := populatedRecoveredRuntime(t, runtimeTestName)
+			parent, path, identity := populatedRecoveredRuntime(t, runtimeTestName)
 			defer parent.Close()
-			configureRecoveredResidue(t, path, test.residue, terminal)
+			configureRecoveredResidue(t, path, test.residue)
 			before := snapshotRuntimeGraph(t, path)
 			recovered, err := OpenRecoveredRuntime(context.Background(), parent, runtimeTestName, identity)
 			if test.open {
@@ -325,7 +324,7 @@ func TestRecoveredRuntimeCensusGrammar(t *testing.T) {
 	}
 }
 
-func configureRecoveredResidue(t *testing.T, path string, residue []string, terminal runner.Terminal) {
+func configureRecoveredResidue(t *testing.T, path string, residue []string) {
 	t.Helper()
 	all := []string{
 		runner.OuterActivationMarkerName, runner.InnerActivationMarkerName,
@@ -339,23 +338,11 @@ func configureRecoveredResidue(t *testing.T, path string, residue []string, term
 		}
 	}
 	for _, name := range residue {
+		var body []byte
 		if name == runner.TerminalSpoolName {
-			dir, err := os.Open(path)
-			if err != nil {
-				t.Fatal(err)
-			}
-			_, publishErr := runner.PublishTerminal(dir, name, terminal)
-			closeErr := dir.Close()
-			if publishErr != nil || closeErr != nil {
-				t.Fatalf("publish terminal residue: %v; close: %v", publishErr, closeErr)
-			}
+			body = []byte("{}\n")
 		}
-	}
-	for _, name := range residue {
-		if name == runner.TerminalSpoolName {
-			continue
-		}
-		if err := os.WriteFile(filepath.Join(path, name), nil, 0o600); err != nil {
+		if err := os.WriteFile(filepath.Join(path, name), body, 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -376,9 +363,9 @@ func TestRecoveredResultArtifactSizeBound(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			parent, path, identity, terminal := populatedRecoveredRuntime(t, runtimeTestName)
+			parent, path, identity := populatedRecoveredRuntime(t, runtimeTestName)
 			defer parent.Close()
-			configureRecoveredResidue(t, path, []string{runner.OuterActivationMarkerName}, terminal)
+			configureRecoveredResidue(t, path, []string{runner.OuterActivationMarkerName})
 			artifact := filepath.Join(path, runner.AttemptResultSpoolName)
 			if err := os.WriteFile(artifact, bytes.Repeat([]byte{'r'}, test.size), 0o600); err != nil {
 				t.Fatal(err)
@@ -431,157 +418,7 @@ func TestRecoveredRuntimeFilePolicyRejectsEveryAuthorityMutation(t *testing.T) {
 	}
 }
 
-func TestRecoveredRuntimeAcknowledgesOnlyExactDurableTerminalPostcondition(t *testing.T) {
-	runID, err := kernel.RunIDFromBytes(bytes.Repeat([]byte{0x42}, kernel.IDBytes))
-	if err != nil {
-		t.Fatal(err)
-	}
-	newFixture := func(t *testing.T) (*RuntimeParent, string, *RecoveredRuntime, *runner.TerminalRecord, kernel.Run, kernel.Resource, kernel.Resource, kernel.Resource) {
-		parent, path, identity, _ := populatedRecoveredRuntime(t, runID.String())
-		recovered, err := OpenRecoveredRuntime(context.Background(), parent, runID.String(), identity)
-		if err != nil {
-			t.Fatal(err)
-		}
-		record, err := runner.LoadTerminal(recovered.runtime.dir, runner.TerminalSpoolName)
-		if err != nil {
-			t.Fatal(err)
-		}
-		when, _ := kernel.NewUnixMillis(90)
-		exit, _ := kernel.NewProcessExitCode(1, 0, when)
-		run := kernel.Run{ID: runID, Phase: kernel.RunFinalizing, ProviderExit: &exit, CredentialRevokedAt: &when, FinalizingAt: &when}
-		processIdentity, err := processResourceIdentity(record.Terminal.Process)
-		if err != nil {
-			t.Fatal(err)
-		}
-		activated, released := when, when
-		runtimeIdentity, err := pathResourceIdentity(identity)
-		if err != nil {
-			t.Fatal(err)
-		}
-		runtimeRoot := kernel.Resource{RunID: runID, Kind: kernel.ResourceRuntimeRoot, State: kernel.ResourceReleasing, Path: path, Identity: runtimeIdentity, ActivatedAt: &activated}
-		process := kernel.Resource{RunID: runID, Kind: kernel.ResourceProviderProcess, State: kernel.ResourceReleased, Identity: processIdentity, ActivatedAt: &activated, ReleasedAt: &released}
-		group := process
-		group.Kind = kernel.ResourceProviderGroup
-		return parent, path, recovered, record, run, runtimeRoot, process, group
-	}
-
-	t.Run("same semantic exit ignores observation time", func(t *testing.T) {
-		parent, path, recovered, record, run, runtimeRoot, process, group := newFixture(t)
-		defer parent.Close()
-		if !terminalCommitProven(path, recovered.runtime.identity, record.Terminal, run, runtimeRoot, process, group) {
-			t.Fatal("durable semantic postcondition rejected")
-		}
-		if _, err := os.Stat(filepath.Join(path, runner.TerminalSpoolName)); err != nil {
-			t.Fatal(err)
-		}
-		rootIdentity := recovered.runtime.identity
-		if err := recovered.Close(); err != nil {
-			t.Fatal(err)
-		}
-		recovered, err = OpenRecoveredRuntime(context.Background(), parent, runID.String(), rootIdentity)
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer recovered.Close()
-		if err := recovered.AcknowledgeTerminal(record, run, runtimeRoot, process, group); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := os.Lstat(filepath.Join(path, runner.TerminalSpoolName)); !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("ack retained terminal: %v", err)
-		}
-	})
-
-	mutations := map[string]func(*kernel.Run, *kernel.Resource, *kernel.Resource, *kernel.Resource){
-		"sequence": func(run *kernel.Run, _, _, _ *kernel.Resource) {
-			exit, _ := kernel.NewProcessExitCode(2, 0, run.ProviderExit.At())
-			run.ProviderExit = &exit
-		},
-		"code": func(run *kernel.Run, _, _, _ *kernel.Resource) {
-			exit, _ := kernel.NewProcessExitCode(1, 7, run.ProviderExit.At())
-			run.ProviderExit = &exit
-		},
-		"kind": func(run *kernel.Run, _, _, _ *kernel.Resource) {
-			exit, _ := kernel.NewProcessExitSignal(1, 15, run.ProviderExit.At())
-			run.ProviderExit = &exit
-		},
-		"recovered absence": func(run *kernel.Run, _, _, _ *kernel.Resource) {
-			exit, _ := kernel.NewProcessExitRecoveredAbsence(1, run.ProviderExit.At())
-			run.ProviderExit = &exit
-		},
-		"wrong runtime binding": func(_ *kernel.Run, runtimeRoot, _, _ *kernel.Resource) { runtimeRoot.Path += ".other" },
-		"released runtime root": func(_ *kernel.Run, runtimeRoot, _, _ *kernel.Resource) {
-			runtimeRoot.State = kernel.ResourceReleased
-		},
-		"unreleased process": func(_ *kernel.Run, _, process, _ *kernel.Resource) { process.State = kernel.ResourceReleasing },
-		"wrong group identity": func(_ *kernel.Run, _, _, group *kernel.Resource) {
-			group.Identity = kernel.EmptyResourceIdentity()
-		},
-	}
-	for name, mutate := range mutations {
-		t.Run(name, func(t *testing.T) {
-			parent, path, recovered, record, run, runtimeRoot, process, group := newFixture(t)
-			defer parent.Close()
-			defer recovered.Close()
-			mutate(&run, &runtimeRoot, &process, &group)
-			if err := recovered.AcknowledgeTerminal(record, run, runtimeRoot, process, group); !errors.Is(err, errInvalidContract) {
-				t.Fatalf("contradictory proof = %v", err)
-			}
-			loaded, err := runner.LoadTerminal(recovered.runtime.dir, runner.TerminalSpoolName)
-			if err != nil || loaded.Digest != record.Digest {
-				t.Fatalf("contradictory proof changed spool at %s: %+v, %v", path, loaded, err)
-			}
-		})
-	}
-
-	t.Run("forged terminal binding", func(t *testing.T) {
-		for name, forge := range map[string]func(*runner.TerminalRecord){
-			"attempt": func(record *runner.TerminalRecord) { record.Terminal.AttemptID = "other" },
-			"process": func(record *runner.TerminalRecord) { record.Terminal.Process.PID++ },
-		} {
-			t.Run(name, func(t *testing.T) {
-				parent, _, recovered, record, run, runtimeRoot, process, group := newFixture(t)
-				defer parent.Close()
-				defer recovered.Close()
-				forged := *record
-				forge(&forged)
-				if err := recovered.AcknowledgeTerminal(&forged, run, runtimeRoot, process, group); !errors.Is(err, errInvalidContract) {
-					t.Fatalf("forged terminal proof = %v", err)
-				}
-				loaded, err := runner.LoadTerminal(recovered.runtime.dir, runner.TerminalSpoolName)
-				if err != nil || loaded.Digest != record.Digest {
-					t.Fatalf("forged terminal changed spool: %+v, %v", loaded, err)
-				}
-			})
-		}
-	})
-
-	t.Run("spool replacement", func(t *testing.T) {
-		parent, path, recovered, record, run, runtimeRoot, process, group := newFixture(t)
-		defer parent.Close()
-		defer recovered.Close()
-		moved := filepath.Join(filepath.Dir(path), "old-terminal")
-		if err := os.Rename(filepath.Join(path, runner.TerminalSpoolName), moved); err != nil {
-			t.Fatal(err)
-		}
-		dir := openDirectory(t, path)
-		replacementTerminal := record.Terminal
-		replacementTerminal.Message = "replacement"
-		replacement, err := runner.PublishTerminal(dir, runner.TerminalSpoolName, replacementTerminal)
-		closeErr := dir.Close()
-		if err != nil || closeErr != nil {
-			t.Fatalf("replacement publish = %v, close = %v", err, closeErr)
-		}
-		if err := recovered.AcknowledgeTerminal(record, run, runtimeRoot, process, group); !errors.Is(err, errInvalidContract) {
-			t.Fatalf("replacement spool ack = %v", err)
-		}
-		loaded, err := runner.LoadTerminal(recovered.runtime.dir, runner.TerminalSpoolName)
-		if err != nil || loaded.Identity != replacement.Identity || loaded.Digest != replacement.Digest {
-			t.Fatalf("replacement spool changed: %+v, %v", loaded, err)
-		}
-	})
-}
-
-func populatedRecoveredRuntime(t *testing.T, basename string) (*RuntimeParent, string, runner.FileIdentity, runner.Terminal) {
+func populatedRecoveredRuntime(t *testing.T, basename string) (*RuntimeParent, string, runner.FileIdentity) {
 	t.Helper()
 	parentPath := filepath.Join(runtimeTempDir(t), "private")
 	if err := os.Mkdir(parentPath, 0o700); err != nil {
@@ -602,8 +439,7 @@ func populatedRecoveredRuntime(t *testing.T, basename string) (*RuntimeParent, s
 	if err != nil {
 		t.Fatal(err)
 	}
-	terminal := runner.Terminal{AttemptID: basename, Process: runner.Identity{PID: 22, PGID: 22, Birth: runner.Birth{Seconds: 3, Microseconds: 4}}, Exit: runner.Exit{Code: 0}, Message: "private"}
-	if _, err := runner.PublishTerminal(dir, runner.TerminalSpoolName, terminal); err != nil {
+	if err := os.WriteFile(filepath.Join(path, runner.TerminalSpoolName), []byte("{}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(path, runner.OuterActivationMarkerName), nil, 0o600); err != nil {
@@ -618,5 +454,5 @@ func populatedRecoveredRuntime(t *testing.T, basename string) (*RuntimeParent, s
 	if err := runtime.Close(); err != nil {
 		t.Fatal(err)
 	}
-	return parent, path, identity, terminal
+	return parent, path, identity
 }

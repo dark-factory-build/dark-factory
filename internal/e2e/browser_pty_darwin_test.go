@@ -27,7 +27,6 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/install"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 	"github.com/dark-factory-build/dark-factory/internal/runner"
-	"golang.org/x/sys/unix"
 )
 
 const (
@@ -443,7 +442,7 @@ func (fixture *fixture) durableDiagnostic() string {
 			}
 			resources = append(resources, detail)
 		}
-		parts = append(parts, item.Run.ID.String()+":"+item.Run.Phase.String()+":"+item.TerminalSession.State.String()+":"+runControlDiagnostic(item.Run)+":"+strings.Join(resources, ",")+":"+fixture.terminalSpoolDiagnostic(item))
+		parts = append(parts, item.Run.ID.String()+":"+item.Run.Phase.String()+":"+item.TerminalSession.State.String()+":"+runControlDiagnostic(item.Run)+":"+strings.Join(resources, ","))
 	}
 	return census + ":" + strings.Join(parts, ";")
 }
@@ -470,39 +469,6 @@ func processExitDiagnostic(exit *kernel.ProcessExit) string {
 		return fmt.Sprintf("recovered-absence@%d", exit.Sequence())
 	}
 	return fmt.Sprintf("invalid@%d", exit.Sequence())
-}
-
-func (fixture *fixture) terminalSpoolDiagnostic(item kernel.RecoverableRun) string {
-	var expected kernel.FileIdentity
-	var found bool
-	for _, resource := range item.Resources {
-		if resource.Kind == kernel.ResourceRuntimeRoot {
-			expected, found = resource.Identity.Path()
-			break
-		}
-	}
-	if !found {
-		return "spool=no-runtime-identity"
-	}
-	path := filepath.Join(fixture.root, "runtimes", item.Run.ID.String())
-	var status unix.Stat_t
-	if err := unix.Lstat(path, &status); err != nil {
-		return "spool=lstat:" + err.Error()
-	}
-	if status.Mode&unix.S_IFMT != unix.S_IFDIR || int64(status.Dev) != expected.Device() || int64(status.Ino) != expected.Inode() {
-		return "spool=runtime-identity-mismatch"
-	}
-	directory, err := os.Open(path)
-	if err != nil {
-		return "spool=open:" + err.Error()
-	}
-	record, loadErr := runner.LoadTerminal(directory, runner.TerminalSpoolName)
-	closeErr := directory.Close()
-	if loadErr != nil || closeErr != nil {
-		return fmt.Sprintf("spool=load:%v:close:%v", loadErr, closeErr)
-	}
-	exit := record.Terminal.Exit
-	return fmt.Sprintf("spool=present:exit=%d/%d:aborted=%t", exit.Code, exit.Signal, exit.Aborted)
 }
 
 func (fixture *fixture) assertNodeResult(result nodeResult, test scenario) {

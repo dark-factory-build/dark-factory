@@ -44,9 +44,6 @@ func AdoptRuntime(*RuntimeParent, string) (*Runtime, error) { return nil, errUns
 func OpenRecoveredRuntime(context.Context, *RuntimeParent, string, runner.FileIdentity) (*RecoveredRuntime, error) {
 	return nil, errUnsupported
 }
-func (*RecoveredRuntime) AcknowledgeTerminal(*runner.TerminalRecord, kernel.Run, kernel.Resource, kernel.Resource, kernel.Resource) error {
-	return errUnsupported
-}
 func (*RecoveredRuntime) Close() error             { return nil }
 func (*Runtime) Binding() (*RuntimeBinding, error) { return nil, errUnsupported }
 func (*RuntimeBinding) Values() (string, runner.FileIdentity, error) {

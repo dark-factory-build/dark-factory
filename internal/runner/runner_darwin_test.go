@@ -2636,3 +2636,24 @@ func copyNative(t *testing.T, from, to string) {
 		t.Fatal(err)
 	}
 }
+
+// StartBlockedPTY is the Darwin-only concrete PTY launch seam. It retains the
+// same activation gate and identity checks as StartBlocked, but gives the
+// gate, and ultimately the target, one controlling terminal on fd 0/1/2.
+// The returned child owns the master; callers must use the child methods for
+// synchronous I/O and must not close the master independently.
+func StartBlockedPTY(lease *GateLease, gateExecutable string, spec *LaunchSpec, keepDirectoryAcrossExec bool) (child *OwnedChild, err error) {
+	prepared, err := PrepareBlockedPTY(lease, gateExecutable, spec, keepDirectoryAcrossExec)
+	if err != nil {
+		return nil, err
+	}
+	started, err := prepared.Start()
+	if err != nil {
+		return nil, err
+	}
+	child, err = started.Bind()
+	if err != nil {
+		return nil, errors.Join(err, convergeStartedChild(started))
+	}
+	return child, nil
+}

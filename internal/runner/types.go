@@ -97,13 +97,6 @@ type Exit struct {
 	LaunchErr string `json:"launch_error,omitempty"`
 }
 
-type Terminal struct {
-	AttemptID string   `json:"attempt_id"`
-	Process   Identity `json:"process"`
-	Exit      Exit     `json:"exit"`
-	Message   string   `json:"message,omitempty"`
-}
-
 type ExecSpec struct {
 	Target string
 	Args   []string
