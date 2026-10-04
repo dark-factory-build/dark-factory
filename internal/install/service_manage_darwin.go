@@ -160,7 +160,11 @@ func receiptMatchesInstallation(receipt serviceReceipt, home string, config Serv
 }
 
 func digestServiceProgram(home string) (string, error) {
-	fd, err := unix.Open(serviceProgramPath(home), unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	return digestServiceFile(serviceProgramPath(home))
+}
+
+func digestServiceFile(path string) (string, error) {
+	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 	if err != nil {
 		return "", fmt.Errorf("%w: open installed program", ErrServiceReceipt)
 	}
@@ -412,17 +416,13 @@ func ServiceUpgrade(ctx context.Context, home, sourceDir string, expected buildi
 			return ServiceStatus{}, fmt.Errorf("%w: write upgrade marker: %v", ErrServiceAmbiguous, err)
 		}
 		if err := swapServicePackage(home, receipt); err != nil {
-			if errors.Is(err, errNotSwapped) {
-				_ = RemoveUpgrade(home)
-			}
+			_ = RemoveUpgrade(home)
 			return ServiceStatus{}, err
 		}
 		return ServiceStatus{}, nil
 	})
 	return err
 }
-
-var errNotSwapped = errors.New("package not swapped")
 
 // ServiceRollback swaps bin/previous back into bin/current, restores the
 // pre-upgrade database when restoreDatabase is set, and marks the marker
@@ -467,23 +467,32 @@ func ServiceRollback(ctx context.Context, home string, restoreDatabase bool, rea
 // rebinds the receipt to the program now current.
 func swapServicePackage(home string, receipt serviceReceipt) error {
 	bin := filepath.Join(ServiceDirectoryPath(home), "bin")
-	if err := unix.RenamexNp(filepath.Join(bin, "previous"), filepath.Join(bin, "current"), unix.RENAME_SWAP); err != nil {
-		return errors.Join(ErrServiceAmbiguous, errNotSwapped, err)
-	}
-	if err := syncServiceDirectory(bin); err != nil {
+	digest, err := digestServiceFile(filepath.Join(bin, "previous", "factoryd"))
+	if err != nil {
 		return err
 	}
-	digest, err := digestServiceProgram(home)
+	before, err := encodeServiceReceipt(receipt)
 	if err != nil {
 		return err
 	}
 	receipt.ProgramDigest = digest
-	body, err := encodeServiceReceipt(receipt)
+	after, err := encodeServiceReceipt(receipt)
 	if err != nil {
 		return err
 	}
-	return replaceFile(ServiceDirectoryPath(home), serviceReceiptName, body, 0o600)
+	if err := replaceFile(ServiceDirectoryPath(home), serviceReceiptName, after, 0o600); err != nil {
+		return err
+	}
+	// The swap is the commit point and the last step that can fail.
+	if err := renameSwap(filepath.Join(bin, "previous"), filepath.Join(bin, "current"), unix.RENAME_SWAP); err != nil {
+		_ = replaceFile(ServiceDirectoryPath(home), serviceReceiptName, before, 0o600)
+		return errors.Join(ErrServiceAmbiguous, err)
+	}
+	_ = syncServiceDirectory(bin)
+	return nil
 }
+
+var renameSwap = unix.RenamexNp
 
 func serviceStart(ctx context.Context, home string, config ServiceConfig) (ServiceStatus, error) {
 	userHome, err := AccountHome()

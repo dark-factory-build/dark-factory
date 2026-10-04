@@ -237,6 +237,26 @@ func TestReleaseDrainTimeoutReleasesTheHoldAndNeverWritesDispatch(t *testing.T) 
 	}
 }
 
+func TestReleaseRecordsAFailedUpgradeAndNeverRestarts(t *testing.T) {
+	fixture, settle, events := releaseFixture(t)
+	settle()
+	releaseUpgrade = func(context.Context, string, string, buildinfo.Identity, int) error {
+		events <- "upgrade"
+		return errors.New("receipt")
+	}
+	sha := strings.Repeat("d", 40)
+	if _, err := fixture.daemon.Release(context.Background(), sha, true); err != nil {
+		t.Fatal(err)
+	}
+	delivery := awaitRelease(t, fixture.daemon, sha, func(value kernel.ProductionDelivery) bool { return value.State == "failed" })
+	if delivery.Phase != "swap" || delivery.Reason != "upgrade: receipt" || fixture.daemon.releaseHold.Load() {
+		t.Fatalf("failed upgrade = %+v, hold %t", delivery, fixture.daemon.releaseHold.Load())
+	}
+	if <-events != "build /self-repository" || <-events != "upgrade" || len(events) != 0 {
+		t.Fatal("a failed upgrade went on to restart")
+	}
+}
+
 func TestSchedulerAdmitsNothingWhileAReleaseHoldsAdmission(t *testing.T) {
 	daemon := newSchedulerTestDaemon(t)
 	daemon.releaseHold.Store(true)

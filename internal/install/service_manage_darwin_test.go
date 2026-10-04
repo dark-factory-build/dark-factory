@@ -1067,15 +1067,42 @@ func TestServiceUpgradeSwapsAtomicallyAndRollsBack(t *testing.T) {
 	}
 }
 
-func TestServiceUpgradeRefusesAnUnverifiedReleaseWithoutSwapping(t *testing.T) {
-	fixture, next, identity := upgradeFixture(t)
-	verifyServiceRelease = func(context.Context, string, string, buildinfo.Identity) error { return ErrServiceForeign }
-	if err := ServiceUpgrade(context.Background(), fixture.home, next, identity, 33); !errors.Is(err, ErrServiceForeign) {
-		t.Fatalf("unverified upgrade = %v", err)
+func TestServiceUpgradeFailureBeforeTheSwapLeavesCurrentUntouched(t *testing.T) {
+	plant := func(path string) func(*testing.T, *manageFixture, string) {
+		return func(t *testing.T, fixture *manageFixture, _ string) {
+			if err := os.Mkdir(filepath.Join(ServiceDirectoryPath(fixture.home), path), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.Remove(filepath.Join(ServiceDirectoryPath(fixture.home), path)) })
+		}
 	}
-	fixture.requireProgram(t, "current", "#!binary")
-	if _, present, err := ReadUpgradeMarker(fixture.home); present || err != nil {
-		t.Fatalf("refused upgrade left a marker: %v", err)
+	for name, fault := range map[string]func(*testing.T, *manageFixture, string){
+		"copy": func(t *testing.T, _ *manageFixture, next string) { _ = os.Remove(filepath.Join(next, "factoryd")) },
+		"verify": func(*testing.T, *manageFixture, string) {
+			verifyServiceRelease = func(context.Context, string, string, buildinfo.Identity) error { return ErrServiceForeign }
+		},
+		"marker":  plant("." + upgradeMarkerName + ".stage"),
+		"receipt": plant("." + serviceReceiptName + ".stage"),
+		"swap": func(t *testing.T, _ *manageFixture, _ string) {
+			restore := renameSwap
+			t.Cleanup(func() { renameSwap = restore })
+			renameSwap = func(string, string, uint32) error { return unix.EIO }
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			fixture, next, identity := upgradeFixture(t)
+			fault(t, fixture, next)
+			if err := ServiceUpgrade(context.Background(), fixture.home, next, identity, 33); err == nil {
+				t.Fatal("faulted upgrade succeeded")
+			}
+			if _, present, _ := ReadUpgradeMarker(fixture.home); present {
+				t.Fatal("faulted upgrade left a trial marker")
+			}
+			for _, cleanup := range []string{"." + upgradeMarkerName + ".stage", "." + serviceReceiptName + ".stage"} {
+				_ = os.Remove(filepath.Join(ServiceDirectoryPath(fixture.home), cleanup))
+			}
+			fixture.requireProgram(t, "current", "#!binary")
+		})
 	}
 }
 
