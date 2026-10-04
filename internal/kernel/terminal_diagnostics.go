@@ -8,6 +8,9 @@ import (
 
 const MaxTerminalDiagnosticsBytes = 1 << 20
 
+// MaxRetainedTerminalDiagnostics keeps the table under 64 MiB (64 rows of at most 1 MiB).
+const MaxRetainedTerminalDiagnostics = 64
+
 type TerminalDiagnostics struct {
 	RunID      RunID
 	Floor      uint64
@@ -36,6 +39,9 @@ func (store *Store) SaveTerminalDiagnostics(ctx context.Context, value TerminalD
 		return tx.Rollback(ErrConflict)
 	}
 	if _, err := tx.connection.ExecContext(ctx, `INSERT INTO terminal_diagnostics(run_id, floor, head, payload, captured_at_ms) VALUES(?, ?, ?, ?, ?) ON CONFLICT(run_id) DO UPDATE SET floor = excluded.floor, head = excluded.head, payload = excluded.payload, captured_at_ms = excluded.captured_at_ms`, value.RunID.Bytes(), int64(value.Floor), int64(value.Head), value.Payload, value.CapturedAt.Int64()); err != nil {
+		return tx.Rollback(err)
+	}
+	if _, err := tx.connection.ExecContext(ctx, `DELETE FROM terminal_diagnostics WHERE run_id NOT IN (SELECT run_id FROM terminal_diagnostics ORDER BY captured_at_ms DESC, run_id DESC LIMIT ?)`, MaxRetainedTerminalDiagnostics); err != nil {
 		return tx.Rollback(err)
 	}
 	return tx.Commit(ctx)
