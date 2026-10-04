@@ -61,6 +61,9 @@ func reviewerFixture(t *testing.T, reviewers ...string) (*daemonReviewBackend, m
 	if err := os.WriteFile(filepath.Join(bin, "codex"), []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(bin, "claude"), []byte("#!/bin/sh\necho \"home=$HOME config=${CLAUDE_CONFIG_DIR-unset}\"\necho \"VERDICT: ALLOW\"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("PATH", bin+":/usr/bin:/bin")
 	homes, accounts := map[string]string{}, map[string]kernel.AccountID{}
 	next := byte(60)
@@ -72,6 +75,12 @@ func reviewerFixture(t *testing.T, reviewers ...string) (*daemonReviewBackend, m
 				t.Fatal(err)
 			}
 			accounts[account], homes[account] = id, t.TempDir()
+			if account == "claude" { // a login in its home's default directory
+				homes[account] = filepath.Join(homes[account], ".claude")
+				if err := os.Mkdir(homes[account], 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
 			if _, err := fixture.store.LinkAccount(ctx, kernel.NewAccount{ID: id, Provider: provider, Home: homes[account], Label: account}, mustKernelTime(t, 1000)); err != nil {
 				t.Fatal(err)
 			}
@@ -168,5 +177,25 @@ func TestReviewDeadlineKillsTheReviewerProcessGroup(t *testing.T) {
 	}
 	if err := syscall.Kill(-pid, 0); !errors.Is(err, syscall.ESRCH) {
 		t.Fatalf("reviewer process group %d survived: %v", pid, err)
+	}
+}
+
+func TestDefaultDirectoryClaudeLoginReviewsThroughItsHome(t *testing.T) {
+	backend, homes := reviewerFixture(t)
+	request := reviewerRequest()
+	request.Provider = "claude"
+	verdict, err := backend.Review(context.Background(), t.TempDir(), request)
+	want := "home=" + filepath.Dir(homes["claude"]) + " config=unset"
+	if err != nil || !strings.Contains(verdict.Body, want) {
+		t.Fatalf("verdict=%+v err=%v, want %q", verdict, err, want)
+	}
+}
+
+func TestClaudeLoginNamesOnlyANonDefaultDirectory(t *testing.T) {
+	if got := claudeLogin("/accounts/work/.claude"); got != "HOME=/accounts/work" {
+		t.Fatalf("default login = %q", got)
+	}
+	if got := claudeLogin("/accounts/work/.claude-second"); got != "CLAUDE_CONFIG_DIR=/accounts/work/.claude-second" {
+		t.Fatalf("sibling login = %q", got)
 	}
 }

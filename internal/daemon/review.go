@@ -19,6 +19,7 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/api"
 	"github.com/dark-factory-build/dark-factory/internal/change"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
+	"github.com/dark-factory-build/dark-factory/internal/provider"
 	"github.com/dark-factory-build/dark-factory/internal/review"
 )
 
@@ -374,7 +375,7 @@ func (b *daemonReviewBackend) Review(ctx context.Context, checkout string, reque
 		environment := reviewEnvironment(filepath.Dir(checkout))
 		if kind == kernel.ProviderClaudeCode {
 			command = exec.CommandContext(ctx, "claude", "-p", prompt, "--permission-mode", "plan", "--safe-mode", "--restricted", "--setting-sources", "", "--strict-mcp-config", "--tools", "Read,Grep,Glob,Bash(git -C "+checkout+":*)", "--allowedTools", "Read,Grep,Glob,Bash(git -C "+checkout+":*)")
-			environment = append(environment, "CLAUDE_CONFIG_DIR="+home)
+			environment = append(environment, claudeLogin(home))
 		} else {
 			command = exec.CommandContext(ctx, "codex", "exec", "--disable", "computer_use", "--disable", "browser_use", "--disable", "plugins", "--ephemeral", "--ignore-user-config", "--strict-config", "-c", "approval_policy={ granular={sandbox_approval=false,rules=false,mcp_elicitations=false,request_permissions=false,skill_approval=false}}", "--sandbox", "read-only", "--ignore-rules", "--skip-git-repo-check", prompt)
 			environment = append(environment, "CODEX_HOME="+home)
@@ -407,6 +408,16 @@ func (b *daemonReviewBackend) Review(ctx context.Context, checkout string, reque
 		return review.Verdict{Event: event, Body: text}, nil
 	}
 	return review.Verdict{}, errProviderLimited
+}
+
+// claudeLogin is the launcher's rule for one Claude login directory: a login
+// in its home's default directory keeps its OAuth account in that home's
+// .claude.json, reached through HOME; any other directory is named directly.
+func claudeLogin(directory string) string {
+	if home := filepath.Dir(directory); filepath.Dir(provider.ClaudeConfigFile(home, directory)) == home {
+		return "HOME=" + home
+	}
+	return "CLAUDE_CONFIG_DIR=" + directory
 }
 
 func reviewPrompt(checkout, base, body string) string {
