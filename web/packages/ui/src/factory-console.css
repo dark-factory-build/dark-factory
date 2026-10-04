@@ -878,7 +878,7 @@ summary.dfConsoleItem__summary { cursor: pointer; }
 .dfRoomDetails button { max-width: 100%; overflow-wrap: anywhere; }
 
 /* Source identity is exact, including on phone-sized inspectors. */
-.dfFactoryFloor code, .dfProduction code { overflow-wrap: anywhere; word-break: break-word; }
+.dfFactoryFloor [role="status"], .dfFactoryFloor code, .dfProduction code { overflow-wrap: anywhere; word-break: break-word; }
 .dfFactoryFloor section, .dfRoomDetails, .dfProduction__detail { min-width: 0; }
 .dfFactoryFloor select, .dfRoomDetails select { max-width: 100%; min-width: 0; }
 .dfProduction table { table-layout: fixed; width: 100%; font-size: .8rem; }
