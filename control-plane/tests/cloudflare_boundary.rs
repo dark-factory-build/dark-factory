@@ -472,8 +472,6 @@ fn every_repository_tool_requires_the_repository_it_acts_on() {
         "recover_release",
         "observe_release",
         "observe_release_workflow",
-        "dispatch_control_plane_deploy",
-        "observe_control_plane_deploy",
         "create_pull_request",
         "update_pull_request_body",
         "close_pull_request",
@@ -601,8 +599,6 @@ fn mcp_surface_is_installation_bound_and_typed() {
         "recover_release",
         "observe_release",
         "observe_release_workflow",
-        "dispatch_control_plane_deploy",
-        "observe_control_plane_deploy",
         "create_pull_request",
         "update_pull_request_body",
         "close_pull_request",
@@ -640,54 +636,24 @@ fn mcp_surface_is_installation_bound_and_typed() {
     assert!(access.contains("claims.issuer"));
 }
 
-/// The deployment gate rolls back unless the live `/readyz` body carries the
+/// The release step rolls back unless the live `/readyz` body carries the
 /// exact label the Worker emits. They live in two files, so a rename that
-/// touches only one strands production on a rollback loop — or, worse, passes
-/// against a label that no longer means what the gate thinks it does.
+/// touches only one strands production on a rollback loop.
 #[test]
 fn the_deployment_gate_asserts_the_readiness_label_the_worker_emits() {
     let lib = project_file("src/lib.rs");
     let bootstrap = project_file("../scripts/bootstrap-maintainer-v2.sh");
-    let workflow = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../.github/workflows/deploy-control-plane.yml"),
-    )
-    .unwrap();
+    let release = project_file("../scripts/release.sh");
 
     let headless = r#""maintainer_operations":"mcp_installation_bound_operator_and_headless""#;
     assert!(lib.contains(headless));
     assert!(lib.contains(r#""maintainer_operations":"mcp_installation_bound_operator_only""#));
-    // The gate must require the headless variant specifically: the binding
-    // behind it is optional and inherited across versions, so this is the only
-    // check that catches a deployment which silently lost it.
-    assert!(workflow.contains(headless));
-    // The break-glass activation path performs the same live check. Keep it
-    // bound to the emitted label too, or a failed activation can roll back
-    // forever even while the regular deployment workflow is correct.
+    // The headless binding is optional and inherited across versions, so this
+    // is the only check that catches a deployment which silently lost it.
+    assert!(release.contains(headless));
     assert!(bootstrap.contains(headless));
     assert!(!bootstrap.contains("mcp_repository_bound_operator_and_headless"));
-    assert!(!workflow.contains("mcp_installation_bound_operator_only"));
     assert!(!lib.contains("mcp_six_tools"));
-    assert!(!workflow.contains("mcp_six_tools"));
-}
-
-/// The production environment has no per-run reviewer so the Maintainer App
-/// can deploy unattended. The workflow must therefore authenticate the event
-/// origin from GitHub's event context before the job names that environment;
-/// caller-supplied dispatch inputs are not authority.
-#[test]
-fn deployment_workflow_accepts_only_the_maintainer_app_dispatch() {
-    let workflow = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../.github/workflows/deploy-control-plane.yml"),
-    )
-    .unwrap();
-
-    let guard = "    if: ${{ github.actor == 'dark-factory-maintainer[bot]' && github.triggering_actor == 'dark-factory-maintainer[bot]' && github.ref == 'refs/heads/main' }}";
-    assert_eq!(workflow.lines().filter(|line| *line == guard).count(), 1);
-    assert!(workflow.contains("    environment: production"));
-    assert!(!workflow.contains("inputs.actor"));
-    assert!(!workflow.contains("inputs.triggering_actor"));
 }
 
 /// The enqueue and publish paths are `wasm32`-only, so a host test cannot
@@ -765,7 +731,6 @@ fn github_refusals_stay_determinate() {
     // copied marker and parent cannot cause a different tree to be adopted.
     assert!(github_app.contains("head.tree.sha != self.materialize_tree(token, request).await?"));
     // These fixed REST contracts are exact rather than generic 2xx guesses.
-    assert!(github_app.contains("request.promote.to_string()"));
     assert!(github_app.contains("token.as_str(),\n            201,"));
     assert!(journal.contains(r#"Ok(("planned", None, "'executing','indeterminate'"))"#));
     // And the caller is told which of the two it got.

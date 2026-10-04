@@ -48,7 +48,6 @@ if [ "$local_ci_mode" = full ]; then
     ./scripts/test-deploy-site.sh
     node ./scripts/test-verification-profile.mjs
     ./scripts/test-cold-review.sh
-    ./scripts/test-cloudflare-access-policy-shape.sh
     ./scripts/test-publication-parents.sh
     python3 ./scripts/test-factory-browser.py
     python3 ./scripts/test-factory-release.py
@@ -59,6 +58,7 @@ if [ "$local_ci_mode" = full ]; then
     ./scripts/test-verify-adversarial-review.sh
     ./scripts/test-cloudflare-env.sh
     ./scripts/test-bootstrap-maintainer-v2.sh
+    ./scripts/test-release.sh
     ./scripts/test-repository-settings.sh
     /bin/sh ./scripts/test-go-gates.sh
 fi
