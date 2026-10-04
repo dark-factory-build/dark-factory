@@ -122,6 +122,17 @@ grep -F -x "GOCACHE=$empty_home_cache_root/go-build" "$empty_home_environment" >
 grep -F -x 'GOPROXY=off' "$empty_home_environment" >/dev/null \
     || fail "unwritable HOME did not disable Go network fallback"
 
+cold_ci_environment=$temporary/cold-ci.env
+(
+    unset DF_CI_GO_MODULE_CACHE
+    export DF_CI_CACHE_ROOT="$temporary/cold-ci-cache"
+    # shellcheck source=scripts/local-ci-environment.sh
+    . "$boundary"
+    env
+) >"$cold_ci_environment"
+! grep -F -x 'GOPROXY=off' "$cold_ci_environment" >/dev/null \
+    || fail "a cold CI module cache was made offline"
+
 no_network_module=$temporary/no-network-module
 /bin/mkdir -p "$no_network_module"
 printf '%s\n' \
