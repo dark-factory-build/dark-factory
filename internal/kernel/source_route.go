@@ -39,23 +39,13 @@ func EffectiveTaskText(provider Provider, title, body string) string {
 }
 
 // retainedSourceReviewTaskSQL mirrors ParseRetainedSourceReviewTask's first
-// line shape for the admission query.
+// line tokenization for the admission query.
 func retainedSourceReviewTaskSQL() string {
 	taskText := `CASE WHEN a.provider <> 'shell' AND t.body = '' THEN t.title ELSE t.body END`
 	firstLine := `substr(` + taskText + `, 1, instr(` + taskText + ` || char(10), char(10)) - 1)`
 	normalized := `ltrim(replace(replace(` + firstLine + `, char(9), ' '), char(13), ' '), ' ')`
 	first := `ltrim(substr(` + normalized + `, 8), ' ')`
-	handoff := `(substr(` + normalized + `, 1, 6) = 'review' AND substr(` + normalized + `, 7, 1) = ' ' AND substr(` + first + `, 1, 7) = 'handoff' AND (substr(` + first + `, 8, 1) = ' ' OR substr(` + first + `, 8, 1) = ''))`
-	return handoff
-}
-
-// retainedSourceReviewIntentSQL also catches malformed source-review tasks
-// whose authority line is missing entirely. FACTORY_SOURCE alone is ordinary
-// provenance and is intentionally not enough to identify a review.
-func retainedSourceReviewIntentSQL() string {
-	taskText := `CASE WHEN a.provider <> 'shell' AND t.body = '' THEN t.title ELSE t.body END`
-	text := `lower(replace(` + taskText + `, '-', ' '))`
-	return `(` + retainedSourceReviewTaskSQL() + ` OR instr(` + text + `, 'attempt source') > 0 OR instr(` + text + `, 'retained change') > 0 OR instr(` + text + `, 'exact retained source') > 0 OR (instr(` + text + `, 'exact source') > 0 AND instr(` + text + `, 'review') > 0) OR (instr(` + taskText + `, 'FACTORY_SOURCE ') > 0 AND instr(` + text + `, 'review') > 0))`
+	return `(substr(` + normalized + `, 1, 6) = 'review' AND substr(` + normalized + `, 7, 1) = ' ' AND substr(` + first + `, 1, 7) = 'handoff' AND (substr(` + first + `, 8, 1) = ' ' OR substr(` + first + `, 8, 1) = ''))`
 }
 
 func retainedSourceReviewFields(line string) []string {
@@ -68,7 +58,7 @@ func retainedSourceReviewFields(line string) []string {
 // exact retained-source reads.
 func validateRetainedSourceReviewRoute(taskBody string, agent Agent) error {
 	_, review, err := ParseRetainedSourceReviewTask(taskBody)
-	if err != nil || (!review && retainedSourceReviewIntent(taskBody)) {
+	if err != nil {
 		return fmt.Errorf("%w: invalid retained-source review handoff", ErrConflict)
 	}
 	if !review {
@@ -81,21 +71,6 @@ func validateRetainedSourceReviewRoute(taskBody string, agent Agent) error {
 		return fmt.Errorf("%w: retained-source review unavailable for %s; supported routes: codex, claude_code", ErrConflict, agent.Provider)
 	}
 	return nil
-}
-
-// retainedSourceReviewIntent catches source-review tasks whose authority line
-// is missing or malformed. A source marker remains ordinary provenance unless
-// the task also contains explicit review intent.
-func retainedSourceReviewIntent(taskBody string) bool {
-	if _, review, _ := ParseRetainedSourceReviewTask(taskBody); review {
-		return true
-	}
-	lower := strings.NewReplacer("-", " ").Replace(strings.ToLower(taskBody))
-	return strings.Contains(lower, "attempt source") ||
-		strings.Contains(lower, "retained change") ||
-		strings.Contains(lower, "exact retained source") ||
-		strings.Contains(lower, "exact source") && strings.Contains(lower, "review") ||
-		strings.Contains(taskBody, "FACTORY_SOURCE ") && strings.Contains(lower, "review")
 }
 
 // ParseRetainedSourceReviewTask reads the exact retained identity from the
