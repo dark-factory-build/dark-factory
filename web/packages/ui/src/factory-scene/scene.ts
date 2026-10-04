@@ -5,7 +5,27 @@ export type SceneTopology = Readonly<{
   nodes: readonly SceneNode[];
 }>;
 
+export type SceneAssembly = Readonly<{
+  id: string; path: string; label: string;
+  inventoryScope: "direct" | "subtree";
+  inventory?: TopologyView["nodes"][number]["inventory"];
+  sizeBucket?: "empty" | "tiny" | "small" | "medium" | "large";
+  proposalId?: string;
+  purpose?: string; sourcePaths?: readonly string[]; sourceIncomplete?: boolean;
+  representedIds?: readonly string[];
+  dependencies?: Readonly<{ omitted: number; links: readonly Readonly<{ nodeId: string; label: string; path: string; direction: "to" | "from"; weight: number }>[] }>;
+}>;
+
+export type SceneProposal = Readonly<{
+  id: string; title: string; state: "active" | "stale" | "unavailable"; base?: string; head?: string;
+  relationships?: readonly Readonly<{ status: "added" | "removed"; fromId?: string; toId?: string; fromPath: string; toPath: string; weight: number }>[];
+  operations: readonly Readonly<{ entityId?: string; roomId?: string; path: string; previousPath?: string; kind: "addition" | "modification" | "removal" | "move"; label?: string }>[];
+}>;
+
 export type SceneNode = Readonly<{
+  assemblies?: readonly SceneAssembly[];
+  proposed?: boolean;
+  sourceIncomplete?: boolean; sourcePaths?: readonly string[];
   id: string;
   /** Served parent identity; this is navigation data, never derived from text. */
   parentId?: string;
@@ -42,6 +62,7 @@ export type SceneWorker = Readonly<{
   locationWithin?: boolean;
   nodeId?: string;
   observedBayId?: string;
+  review?: Readonly<{ proposalId: string; scope: string }>;
 }>;
 
 export type ScenePoint = Readonly<{ x: number; y: number }>;
@@ -70,13 +91,14 @@ export type SceneWorkerPlacement = Readonly<{
   roomId?: string;
   /** A resting worker who has got up for a while stands here instead of sitting. */
   errand?: BreakRoomErrand;
+  errandKey?: string;
   x: number;
   y: number;
 }>;
 
 export type BreakRoomErrand = "shelf" | "coffee";
 
-// Staggered workshop bays share walls; dimensions never depend on live work.
+// Workshop bays share walls; dimensions never depend on live work.
 const CORRIDOR = 32;
 export const PADDING = 16;
 export const ROOM_LEFT = PADDING + CORRIDOR;
@@ -90,15 +112,16 @@ export function compareText(left: string, right: string) {
 }
 
 /** Topology alone fixes buildings. Corridors express access, never imports. */
-export function layoutScene(topology: SceneTopology): SceneLayout {
+export function layoutScene(topology: SceneTopology, selectedProposalId?: string): SceneLayout {
   const nodes = [...topology.nodes].sort((left, right) =>
-    compareText(left.project?.name ?? "", right.project?.name ?? "") || compareText(left.project?.id ?? "", right.project?.id ?? "")
+    Number(Boolean(left.proposed)) - Number(Boolean(right.proposed)) || compareText(left.project?.name ?? "", right.project?.name ?? "") || compareText(left.project?.id ?? "", right.project?.id ?? "")
     || compareText(left.path, right.path) || compareText(left.label, right.label) || compareText(left.id, right.id));
   const groups = new Map<string, SceneNode[]>();
-  for (const node of nodes) groups.set(node.project?.id ?? "", [...(groups.get(node.project?.id ?? "") ?? []), node]);
-  const widestGroup = Math.max(1, ...[...groups.values()].map((group) => group.length));
-  const columns = widestGroup <= 4 ? Math.max(1, Math.min(2, widestGroup)) : Math.min(4, Math.ceil(Math.sqrt(widestGroup)));
-  const bays = columns === 4 ? [160, 208, 144, 192] : columns === 3 ? [160, 224, 160] : columns === 2 ? [144, 208] : [224];
+  for (const node of nodes) groups.set(`${node.proposed ? "proposed:" : ""}${node.project?.id ?? ""}`, [...(groups.get(`${node.proposed ? "proposed:" : ""}${node.project?.id ?? ""}`) ?? []), node]);
+  const widestGroup = Math.max(1, ...[...groups.values()].filter((group) => !group[0]?.proposed).map((group) => group.length));
+  const assembled = nodes.some((node) => node.assemblies !== undefined);
+  const columns = assembled ? Math.min(2, Math.max(1, widestGroup)) : widestGroup <= 4 ? Math.max(1, Math.min(2, widestGroup)) : Math.min(4, Math.ceil(Math.sqrt(widestGroup)));
+  const bays = assembled ? Array.from({ length: columns }, () => 392) : columns === 4 ? [160, 208, 144, 192] : columns === 3 ? [160, 224, 160] : columns === 2 ? [144, 208] : [224];
   const width = ROOM_LEFT + bays.reduce((sum, bay) => sum + bay, 0) + PADDING;
   const rooms: SceneRoomLayout[] = [];
   const headings: SceneHeading[] = [];
@@ -113,12 +136,12 @@ export function layoutScene(topology: SceneTopology): SceneLayout {
     for (let start = 0; start < members.length; start += columns) {
       const row = Math.floor(start / columns);
       const widths = row % 2 === 0 ? bays : [...bays.slice(1), bays[0]!];
-      const height = row % 2 === 0 ? 112 : 128;
+      const height = assembled ? Math.max(256, ...members.slice(start, start + columns).map((node) => 64 + Math.ceil(Math.min(6, node.assemblies?.length ?? 0) / 2) * 110)) : row % 2 === 0 ? 112 : 128;
       let x = ROOM_LEFT;
       for (const [index, node] of members.slice(start, start + columns).entries()) {
         const width = widths[index]!;
         const rectangle = { x, y: top, width, height };
-        rooms.push({ id: node.id, ...rectangle, contents: composeRoom(node, rectangle),
+        rooms.push({ id: node.id, ...rectangle, contents: composeRoom(node, rectangle, selectedProposalId),
           door: { x: x + width / 2, y: top + height } });
         x += width;
       }
@@ -131,7 +154,7 @@ export function layoutScene(topology: SceneTopology): SceneLayout {
   return { width, height: top + 32, rooms, headings, corridors, restingTop: top + 32 };
 }
 
-export function placeWorkers(layout: SceneLayout, workers: readonly SceneWorker[]): readonly SceneWorkerPlacement[] {
+export function placeWorkers(layout: SceneLayout, workers: readonly SceneWorker[], social: "nearby" | "commons" = "commons"): readonly SceneWorkerPlacement[] {
   const rooms = new Map(layout.rooms.map((room) => [room.id, room]));
   const roomCounts = new Map<string, number>();
   const sorted = [...workers].sort((left, right) => compareText(left.id, right.id));
@@ -145,14 +168,20 @@ export function placeWorkers(layout: SceneLayout, workers: readonly SceneWorker[
     const room = worker.nodeId === undefined ? undefined : rooms.get(worker.nodeId);
     if (room === undefined) { areas.outside.push(worker); continue; }
     const slot = roomCounts.get(room.id) ?? 0;
-    const positions = workPositions(room);
+    const positions = workPositions(room, worker.observedBayId);
     if (slot >= positions.length) { areas.overflow.push(worker); continue; }
     roomCounts.set(room.id, slot + 1);
     placed.push({ id: worker.id, area: "room", roomId: room.id, ...positions[slot]! });
   }
   const planning = (["staging", "outside", "overflow"] as const).flatMap((area) => areas[area].map((worker) => ({ worker, area })));
   const seats = commonSeating(layout, areas.resting.length, planning.length);
-  areas.resting.forEach((worker, slot) => placed.push({ id: worker.id, area: "resting", ...seats.resting[slot]! }));
+  const nearby = social === "nearby" ? layout.rooms.filter((room) => room.contents.some((item) => item.entityId !== undefined)) : [];
+  areas.resting.forEach((worker, slot) => {
+    const room = nearby.find((room) => room.id === worker.nodeId) ?? nearby[slot % Math.max(1, nearby.length)];
+    const localSlot = Math.floor(slot / Math.max(1, nearby.length));
+    placed.push(room === undefined || localSlot > 1 ? { id: worker.id, area: "resting", ...seats.resting[slot]! }
+      : { id: worker.id, area: "resting", roomId: room.id, x: room.x + 28 + localSlot * WORKER_GAP, y: room.door.y - 24 });
+  });
   planning.forEach(({ worker, area }, slot) => placed.push({ id: worker.id, area, ...seats.planning[slot]! }));
   return placed.sort((left, right) => compareText(left.id, right.id));
 }
@@ -185,18 +214,22 @@ const nookWidth = (layout: SceneLayout) => Math.max(0, Math.min(2 * PIECE + 4, l
  * one thing, a coffee station beside it where there is room for two. On a floor
  * with room for neither, workers simply stay seated.
  */
-export function breakRoomNook(layout: SceneLayout, restingCount: number, planningCount: number) {
+export function breakRoomNook(layout: SceneLayout, restingCount: number, planningCount: number, nearby = false) {
   const width = nookWidth(layout), compact = width < 2 * PIECE + 4, pieces = compact ? 2 : Math.floor(width / PIECE);
   if (pieces === 0) return undefined;
   const seating = commonSeating(layout, restingCount, planningCount);
   const left = Math.max(...[...seating.resting, ...seating.planning].map((seat) => seat.x)) + 24;
   const compactX = layout.width - PADDING - WORKER_SIZE;
   return { width, furniture: (["shelf", "coffee"] as const).slice(0, pieces).map((errand, index) => ({
-    errand,
+    errand, key: String(errand), roomId: undefined as string | undefined,
     x: compact ? compactX : left + 5 + index * PIECE,
     y: layout.restingTop - 38 + (compact ? index * 24 : 0),
     stand: { x: compact ? compactX + 10 : left + 15 + index * PIECE, y: layout.restingTop - 8 + (compact ? index * 24 : 0) },
-  })) };
+  })).concat(!nearby ? [] : layout.rooms.filter((room) => room.contents.some((item) => item.entityId !== undefined)).map((room, index) => ({
+    errand: index % 2 === 0 ? "shelf" as const : "coffee" as const, key: room.id, roomId: room.id,
+    x: room.x + room.width - 42, y: room.door.y - 55,
+    stand: { x: room.x + room.width - 30, y: room.door.y - 24 },
+  }))) };
 }
 
 // Each piece of furniture is visited in turns: free for the first part of a turn, then one visitor.
@@ -216,19 +249,19 @@ export function placeErrands(placements: readonly SceneWorkerPlacement[], nook: 
   for (const [index, piece] of nook.furniture.entries()) {
     // Later pieces run behind the first, so every piece's first turn begins free.
     const clock = at - index * TURN / 2, turn = Math.floor(clock / TURN);
-    const suited = placements.filter((placement) => placement.area === "resting" && habitOf(placement.id) === piece.errand);
+    const suited = placements.filter((placement) => placement.area === "resting" && placement.roomId === piece.roomId && habitOf(placement.id) === piece.errand);
     // Whoever has the piece keeps it for as long as they rest and the turn runs, whoever else
     // sits down or leaves meanwhile. (Every turn starts free, so nobody is carried into the next.)
-    const holder = before.find((placement) => placement.errand === piece.errand)?.id;
+    const holder = before.find((placement) => placement.errandKey === piece.key || placement.errandKey === undefined && placement.errand === piece.errand)?.id;
     const visitor = clock < 0 || clock - turn * TURN < FREE ? undefined : suited.find((placement) => placement.id === holder) ?? suited[(Math.imul(turn + 1, 2654435761) >>> 0) % Math.max(suited.length, 4)];
     if (visitor !== undefined) visiting.set(visitor.id, piece);
   }
-  return placements.map((placement) => { const piece = visiting.get(placement.id); return piece === undefined ? placement : { ...placement, errand: piece.errand, ...piece.stand }; });
+  return placements.map((placement) => { const piece = visiting.get(placement.id); return piece === undefined ? placement : { ...placement, errand: piece.errand, errandKey: piece.key, ...piece.stand }; });
 }
 
 /** Pictured surface slots also determine standing destinations; no parallel workstation map. */
-export function workPositions(room: SceneRoomLayout): readonly ScenePoint[] {
-  const surface = room.contents.find((item) => item.workSurface);
+export function workPositions(room: SceneRoomLayout, entityId?: string): readonly ScenePoint[] {
+  const surface = room.contents.find((item) => item.workSurface && (item.entityId === entityId || item.representedIds?.includes(entityId ?? ""))) ?? room.contents.find((item) => item.workSurface);
   if (surface === undefined) return [{ x: room.door.x, y: room.door.y - 32 }];
   const offsets = surface.width >= 120 ? [0, -24, 24, -48, 48] : surface.width >= 88 ? [0, -24, 24] : [0, -24];
   return offsets.map((offset) => ({ x: surface.x + surface.width / 2 + offset, y: surface.y + surface.height + WORKER_SIZE / 2 }));
@@ -237,10 +270,47 @@ export function workPositions(room: SceneRoomLayout): readonly ScenePoint[] {
 export type InventoryKind = keyof typeof inventoryLabels;
 export const inventoryLabels = { source: "Source", tests: "Tests", documentation: "Docs", configuration: "Config", assets: "Assets", unclassified: "Unclassified" } as const;
 type ContentKind = keyof typeof inventoryLabels;
-export type RoomContent = SceneRect & Readonly<{ key: string; kind: ContentKind; label: string; count: number; workSurface?: boolean; furnishing?: "console" | "bench" | "drafting" }>;
+export type Responsibility = "movement" | "messaging" | "selection" | "admission" | "storage" | "interface" | "generic";
+/** Name-based visual hints, never claims of analysis. */
+export function responsibility(path: string): Responsibility {
+  const name = path.toLowerCase();
+  return /movement|routing|transport/.test(name) ? "movement" : /message|event|protocol|relay/.test(name) ? "messaging" : /topology|source|selection/.test(name) ? "selection" : /admission|queue|dispatch|task/.test(name) ? "admission" : /store|persist|database|sqlite/.test(name) ? "storage" : /browser|console|interface/.test(name) ? "interface" : "generic";
+}
+/** Eligible file counts, clamped to four visual buckets; generated/vendor files are excluded upstream. */
+export function equipmentScale(count: number): number { return count <= 4 ? 0 : count <= 20 ? 1 : count <= 80 ? 2 : 3; }
+export type RoomContent = SceneRect & Readonly<{ key: string; kind: ContentKind; label: string; labelWidth?: number; count: number; entityId?: string; selectionId?: string; representedIds?: readonly string[]; resourceCounts?: Readonly<Record<InventoryKind, number>>; proposalId?: string; sourceIncomplete?: boolean; responsibility?: Responsibility; scale?: number; parts?: readonly Readonly<{ label: string; motif: Responsibility }>[]; workSurface?: boolean; furnishing?: "console" | "bench" | "drafting" }>;
 
-/** Background fittings stay sparse; inventory detail belongs in the tooltip. */
-function composeRoom(node: SceneNode, room: SceneRect): readonly RoomContent[] {
+/** File-backed equipment fills a bounded work zone; the access lanes stay clear. */
+function composeRoom(node: SceneNode, room: SceneRect, selectedProposalId?: string): readonly RoomContent[] {
+  if (node.assemblies !== undefined) {
+    const assemblies = node.assemblies.filter((assembly) => !assembly.proposalId || !selectedProposalId || assembly.proposalId === selectedProposalId);
+    // Proposed versions are alternatives, never inputs to an aggregate inventory.
+    const rest = assemblies.slice(5);
+    const sum = { source: 0, tests: 0, documentation: 0, configuration: 0, assets: 0, unclassified: 0 };
+    for (const assembly of rest) for (const kind of Object.keys(sum) as InventoryKind[]) sum[kind] += assembly.inventory?.[assembly.inventoryScope === "direct" ? "direct" : "total"][kind] ?? 0;
+    const shown: readonly SceneAssembly[] = assemblies.some((assembly) => assembly.proposalId) ? assemblies.slice(0, 6) : assemblies.length <= 6 ? assemblies : [...assemblies.slice(0, 5), {
+      id: `${node.id}:aggregate`, path: node.path, label: `${rest.length} more assemblies`, inventoryScope: "direct",
+      representedIds: rest.flatMap((assembly) => [assembly.id, ...assembly.representedIds ?? []]),
+      inventory: rest.some((assembly) => assembly.inventory === undefined) ? undefined : { direct: sum, total: sum, samples: [], samples_omitted: Object.values(sum).reduce((a, b) => a + b, 0) },
+    }];
+    const columns = Math.min(2, shown.length), rows = Math.ceil(shown.length / Math.max(1, columns));
+    const cellWidth = (room.width - 48) / Math.max(1, columns), cellHeight = rows > 1 ? 110 : 128;
+    return shown.map((assembly, index) => {
+      const counts = assembly.inventory?.[assembly.inventoryScope === "direct" ? "direct" : "total"];
+      const kinds = (Object.keys(inventoryLabels) as InventoryKind[]).filter((kind) => (counts?.[kind] ?? 0) > 0);
+      const kind = kinds.includes("source") ? "source" : kinds.sort((a, b) => counts![b] - counts![a] || compareText(a, b))[0] ?? "unclassified";
+      const total = Object.values(counts ?? {}).reduce((sum, count) => sum + count, 0);
+      const scale = equipmentScale(total);
+      const width = Math.min(cellWidth - (columns > 1 ? 16 : 0), [76, 128, 260, 344][scale]!);
+      // Leave a standing lane for 24px actor targets before the next row's label.
+      const height = Math.min(cellHeight - (rows > 1 ? 42 : 0), [62, 90, 150, 164][scale]!);
+      const sampleFamilies = (assembly.inventory?.samples ?? []).map((path) => path.split("/").at(-1)!.replace(/(?:[._-](?:test|tests|spec))?\.[^.]+$/, "").split(/[._-]/)[0]!).filter(Boolean);
+      const families = [...new Set(sampleFamilies)];
+      const parts = scale < 2 || kind !== "source" ? [] : families.sort((a, b) => Number(responsibility(b) !== "generic") - Number(responsibility(a) !== "generic") || sampleFamilies.filter((family) => family === b).length - sampleFamilies.filter((family) => family === a).length || compareText(a, b)).slice(0, width >= 240 && height >= 120 ? 4 : 2).map((label) => ({ label, motif: responsibility(label) }));
+      return { key: assembly.id, entityId: assembly.id, selectionId: assembly.id === `${node.id}:aggregate` ? node.id : undefined, representedIds: assembly.representedIds, kind, label: assembly.label, count: counts?.[kind] ?? 0, resourceCounts: counts, proposalId: assembly.proposalId, sourceIncomplete: assembly.sourceIncomplete, parts, responsibility: responsibility(assembly.path), scale, workSurface: true,
+        x: room.x + 24 + (index % Math.max(1, columns)) * cellWidth, y: room.y + 62 + Math.floor(index / Math.max(1, columns)) * cellHeight, width, height, labelWidth: cellWidth - (columns > 1 ? 16 : 0) };
+    });
+  }
   const counts = node.inventory?.[node.inventoryScope === "direct" ? "direct" : "total"];
   if (counts === undefined) return [];
   const primary = (Object.keys(inventoryLabels) as Array<keyof typeof inventoryLabels>)

@@ -255,9 +255,20 @@ type Topology struct {
 	ProjectID        string                `json:"project_id"`
 	Digest           string                `json:"digest"`
 	SourceRevision   string                `json:"source_revision"`
+	Sources          []TopologySource      `json:"sources,omitempty"`
 	Nodes            []TopologyNode        `json:"nodes"`
 	Dependencies     *TopologyDependencies `json:"dependencies,omitempty"`
 	InventoryOmitted *uint32               `json:"inventory_omitted,omitempty"`
+}
+
+type TopologySource struct {
+	RepositoryID string `json:"repository_id"`
+	Prefix       string `json:"prefix"`
+	Kind         string `json:"kind"`
+	TargetRef    string `json:"target_ref"`
+	Revision     string `json:"revision"`
+	ObservedAt   int64  `json:"observed_at"`
+	Reason       string `json:"reason,omitempty"`
 }
 
 const MaxTopologyEdges = 256
@@ -645,6 +656,14 @@ func validConsoleControl(kind MessageType, body any) error {
 			!validTopologySource(value.SourceRevision) || len(value.Nodes) > MaxSnapshotEntities {
 			return bad()
 		}
+		if len(value.Sources) > 32 {
+			return bad()
+		}
+		for _, source := range value.Sources {
+			if validateDynamicID(source.RepositoryID) != nil || validateBoundedText(source.Prefix, 0, MaxTaskTitleBytes) != nil || (source.Kind != "integrated" && source.Kind != "unavailable") || validateBoundedText(source.TargetRef, 0, 256) != nil || !validTopologySource(source.Revision) || source.Kind == "integrated" && source.Revision == "" || source.ObservedAt < 0 || source.ObservedAt > 1<<53-1 || validateBoundedText(source.Reason, 0, 256) != nil {
+				return bad()
+			}
+		}
 		if value.InventoryOmitted != nil && *value.InventoryOmitted > uint32(len(value.Nodes)) {
 			return bad()
 		}
@@ -849,7 +868,7 @@ func validTopologyInventory(value TopologyInventory) bool {
 		directCount += uint64(count)
 		totalCount += uint64(total[i])
 	}
-	if totalCount > 50000 || value.Samples == nil || len(value.Samples) > 3 || uint64(len(value.Samples))+uint64(value.SamplesOmitted) != directCount {
+	if totalCount > 50000 || value.Samples == nil || len(value.Samples) > 32 || uint64(len(value.Samples))+uint64(value.SamplesOmitted) != directCount {
 		return false
 	}
 	seen := make(map[string]bool, len(value.Samples))

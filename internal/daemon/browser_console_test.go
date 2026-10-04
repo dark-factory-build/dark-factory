@@ -167,10 +167,9 @@ func TestBrowserConsoleGatesUpdatesOnHumanActionsButNotTopology(t *testing.T) {
 		t.Fatalf("agent after refused update = %+v, found=%v, err=%v", stored, found, err)
 	}
 	result, err := fixture.backend.Topology(ctx, client, browserprotocol.TopologyGet{ProjectID: fixture.project.ID.String()})
-	// consoleRoot is a Go module with one package below it, so the served tree
-	// is exactly the module and the repository at ".", plus the package. An
-	// exact count is what catches a projection that silently drops a subtree.
-	if err != nil || result.ProjectID != fixture.project.ID.String() || len(result.Digest) != 64 || len(result.Nodes) != 3 {
+	// This checkout has no registered target. Observation remains authorized,
+	// but mutable checkout files must not become the finished factory.
+	if err != nil || result.ProjectID != fixture.project.ID.String() || len(result.Digest) != 64 || len(result.Nodes) != 1 || len(result.Sources) != 1 || result.Sources[0].Kind != "unavailable" || result.Nodes[0].Inventory != nil {
 		t.Fatalf("observe-only topology = %+v, %v", result, err)
 	}
 	for _, node := range result.Nodes {
@@ -295,8 +294,11 @@ func TestProjectTopologyDropsNodesTheWireCannotCarry(t *testing.T) {
 func TestBrowserConsoleServesAProjectWithAnOverLongDirectoryName(t *testing.T) {
 	root := consoleRoot(t)
 	writeTopologyFixture(t, root, strings.Repeat("d", browserprotocol.MaxAgentNameBytes+1)+"/inner/inner.go", "package inner\n")
-	fixture := newConsoleFixture(t, kernel.BrowserCapabilityObserve, root)
-	result, err := fixture.backend.Topology(context.Background(), rawBrowserClient(fixture.client.ID), browserprotocol.TopologyGet{ProjectID: fixture.project.ID.String()})
+	snapshot, err := topology.Build(context.Background(), root, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := projectTopology("01010101010101010101010101010101", snapshot)
 	if err != nil {
 		t.Fatalf("topology with an over-long directory = %v", err)
 	}

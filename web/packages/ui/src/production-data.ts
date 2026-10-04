@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { ProjectContentCall } from "./project-library.js";
 
 export type RuntimeBuild = { version: string; source: string; target: string; build_id: string; release: boolean };
@@ -64,9 +64,9 @@ export function useProduction(projects: readonly string[], call: ProjectContentC
     document.addEventListener("visibilitychange", visible);
     return () => { stopped = true; clearInterval(timer); document.removeEventListener("visibilitychange", visible); };
   }, [key, connected, pages]);
-  const scoped = records.filter((record) => projects.includes(record.project_id));
+  const scoped = useMemo(() => records.filter((record) => projects.includes(record.project_id)), [records, key]);
   const notices = scoped.filter((record) => record.kind === "repository" && (record.document.unavailable || record.document.overflow)).map((record) => `${record.repository}: ${record.document.unavailable ? "some external evidence is unavailable" : "observation is bounded"}${record.document.overflow ? "; additional external records exist" : ""}.`);
   // The runtime identity belongs to this connection and is dropped when it goes;
   // the published release is a repository fact that no reconnect invalidates.
-  return { runtime: connected && runtimeGeneration.current === generation.current ? runtime : undefined, release, notices, records: records.filter((record) => projects.includes(record.project_id)), error, overflow, loading: connected && loading, loadMore: () => setPages((value) => value + 32) };
+  return { runtime: connected && runtimeGeneration.current === generation.current ? runtime : undefined, release, notices, records: scoped, error, overflow, loading: connected && loading, loadMore: () => setPages((value) => value + 32) };
 }

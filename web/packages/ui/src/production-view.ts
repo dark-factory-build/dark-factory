@@ -1,3 +1,4 @@
+import type { InventoryKind } from "./factory-scene/scene.js";
 /** Facts persisted by the operator production projection. */
 export type ProductionRecord = Readonly<{
   project_id?: string;
@@ -34,7 +35,17 @@ type PullRequest = Readonly<{
 type Construction = Readonly<{ title?: string; phase?: string; status?: string; head?: string; task_id?: string; blocked_reason?: string; has_changes?: boolean; needs_you?: boolean }>;
 type Scoped = Readonly<{ projectId: string; repository: string }>;
 
+export type ProposedSource = Readonly<{
+  kind: "committed" | "working-tree" | "unavailable";
+  base: string; target: string; head: string; observation: string; observedAt: number;
+  paths: readonly Readonly<{ status: "added" | "modified" | "deleted" | "renamed"; path: string; old_path?: string; resource?: InventoryKind }>[];
+  relationships: readonly Readonly<{ status: "added" | "removed"; from_path: string; to_path: string; weight: number }>[];
+  relationshipsOmitted: number; relationshipsUnavailable: string;
+  omitted: number; reason: string; stale: boolean;
+}>;
+
 export type ProductionContraption = Readonly<{
+  source: ProposedSource;
   visualId: string; projectId: string; repository: string; pullRequest?: PullRequest; construction?: Construction;
   tasks: readonly string[]; missions: readonly string[]; linksOverflow: boolean;
   review: Readonly<{ head: string; state: string; current: boolean; allowed: boolean; sourceFresh: boolean; findings: string; url: string }>;
@@ -50,6 +61,13 @@ export type ProductionView = Readonly<{
   reviewers: Readonly<Record<string, ProductionReviewer>>;
 }>;
 
+export const productionKey = (item: Pick<ProductionContraption, "projectId" | "repository" | "visualId">) => JSON.stringify([item.projectId, item.repository, item.visualId]);
+
+/** Terminal proposals are history, even when deployment is still outstanding. */
+export function proposedProduction(item: ProductionContraption): boolean {
+  return item.pullRequest !== undefined ? !["closed", "merged"].includes(item.pullRequest.state) : item.construction?.status !== "cancelled" && !(item.construction?.status === "succeeded" && item.construction.has_changes === false);
+}
+
 const STALE_AFTER = 180_000;
 const text = (value: unknown) => typeof value === "string" ? value : "";
 const list = (value: unknown) => Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
@@ -57,6 +75,30 @@ const numbers = (value: unknown) => Array.isArray(value) ? value.filter((item): 
 const object = (value: unknown): Record<string, unknown> => value !== null && typeof value === "object" ? value as Record<string, unknown> : {};
 const scoped = (record: Pick<ProductionRecord, "project_id" | "repository">): Scoped => ({ projectId: record.project_id ?? "", repository: record.repository });
 const scopeKey = (value: Scoped, id: string) => `${value.projectId}\0${value.repository}\0${id}`;
+
+const validPath = (value: unknown): value is string => typeof value === "string" && value.length > 0 && !value.startsWith("/") && !/[\\\x00-\x1f]/.test(value) && value.split("/").every((part) => part !== ".." && part !== "." && part !== "");
+function proposedSource(value: unknown, now: number, head?: string): ProposedSource {
+  const source = object(value), kind = source.kind === "committed" || source.kind === "working-tree" ? source.kind : "unavailable";
+  const raw = Array.isArray(source.paths) ? source.paths : [];
+  const paths: ProposedSource["paths"][number][] = [];
+  for (const item of raw.slice(0, 512)) {
+    const path = object(item);
+    if (!["added", "modified", "deleted", "renamed"].includes(text(path.status)) || !validPath(path.path) || path.status === "renamed" && !validPath(path.old_path)) continue;
+    paths.push({ status: path.status as ProposedSource["paths"][number]["status"], path: path.path, ...(["source", "tests", "configuration", "documentation", "assets", "unclassified"].includes(text(path.resource)) ? { resource: path.resource as InventoryKind } : {}), ...(path.status === "renamed" ? { old_path: path.old_path as string } : {}) });
+  }
+  const rawRelationships = Array.isArray(source.relationships) ? source.relationships : [];
+  const relationships: ProposedSource["relationships"][number][] = [];
+  for (const value of rawRelationships.slice(0, 32)) {
+    const edge = object(value);
+    if ((edge.status === "added" || edge.status === "removed") && validPath(edge.from_path === "." ? "root" : edge.from_path) && validPath(edge.to_path === "." ? "root" : edge.to_path) && typeof edge.weight === "number" && Number.isSafeInteger(edge.weight) && edge.weight > 0) relationships.push({ status: edge.status, from_path: edge.from_path as string, to_path: edge.to_path as string, weight: edge.weight });
+  }
+  const observedAt = Number(source.observed_at) || 0;
+  return { kind, base: text(source.base), target: text(source.target), head: text(source.head), observation: text(source.fingerprint), observedAt,
+    paths, relationships, relationshipsOmitted: Math.max(0, Number(source.relationships_omitted) || 0) + rawRelationships.length - relationships.length, relationshipsUnavailable: text(source.relationships_unavailable) || (!Array.isArray(source.relationships) ? "Proposed relationships unavailable." : ""), omitted: Math.max(0, Number(source.omitted) || 0) + raw.length - paths.length,
+    reason: text(source.reason) || (kind === "unavailable" ? "Source observation unavailable." : ""),
+    stale: now > 0 && (observedAt <= 0 || now - observedAt > STALE_AFTER) || Boolean(head && source.head !== head),
+  };
+}
 
 function latestRecords(records: readonly ProductionRecord[]) {
   const latest = new Map<string, ProductionRecord>();
@@ -177,16 +219,18 @@ export function deriveProductionView(records: readonly ProductionRecord[], now =
   for (const [key, item] of allVisuals) {
     const construction = item.construction, pull = item.pull, pr = pull ? object(pull.document) as PullRequest : undefined;
     const repositoryRecord = health.get(scopeKey(item.scope, "repository"));
+    const source = proposedSource(object((pull ?? construction)?.document).source, now, pr?.head);
     const sourceFresh = fresh(repositoryRecord, now) && (pull === undefined || fresh(pull, now));
-    const pullChecks = pr ? Object.values(checks).filter((check) => (check.project_id ?? "") === item.scope.projectId && check.repository === item.scope.repository && check.pull_requests.includes(pr.number)).map((check) => ({ ...check, applicable: check.scope === "head" && check.revision === pr.head })) : [];
+    const reviewedSource = source.kind !== "working-tree" && (source.kind === "unavailable" || source.head === pr?.head);
+    const pullChecks = pr ? Object.values(checks).filter((check) => (check.project_id ?? "") === item.scope.projectId && check.repository === item.scope.repository && check.pull_requests.includes(pr.number)).map((check) => ({ ...check, applicable: reviewedSource && check.scope === "head" && check.revision === pr.head })) : [];
     const pullDeliveries = pr ? Object.values(deliveries).filter((delivery) => (delivery.project_id ?? "") === item.scope.projectId && delivery.repository === item.scope.repository && delivery.pull_requests.includes(pr.number)).map((delivery) => ({ ...delivery, verified: verifiedDelivery(delivery) })) : [];
     const assigned = pr ? Object.values(reviewers).filter((reviewer) => (reviewer.project_id ?? "") === item.scope.projectId && reviewer.repository === item.scope.repository && reviewer.number === pr.number && reviewer.head === pr.head) : [];
     const review = pr?.review ?? {};
-    const reviewView = { head: text(review.head), state: text(review.state) || "unknown", current: text(review.head) !== "" && text(review.head) === pr?.head, allowed: sourceFresh && text(review.head) !== "" && text(review.head) === pr?.head && text(review.state) === "allow", sourceFresh, findings: text(review.findings), url: text(review.url) };
+    const reviewView = { head: text(review.head), state: text(review.state) || "unknown", current: reviewedSource && text(review.head) !== "" && text(review.head) === pr?.head, allowed: reviewedSource && sourceFresh && text(review.head) !== "" && text(review.head) === pr?.head && text(review.state) === "allow", sourceFresh, findings: text(review.findings), url: text(review.url) };
     const closedUnmerged = pr?.state === "closed" && !pr.merge;
     const completed = closedUnmerged || pr?.state === "merged" && pullDeliveries.length > 0 && latestDestinations(pullDeliveries).every((delivery) => delivery.verified);
     const doc = construction ? object(construction.document) : {};
-    contraptions[key] = { visualId: item.visualId, projectId: item.scope.projectId, repository: item.scope.repository, construction: construction ? { title: text(doc.title), phase: text(doc.phase), status: text(doc.status), head: text(doc.head), task_id: text(doc.task_id), blocked_reason: text(doc.blocked_reason), has_changes: typeof doc.has_changes === "boolean" ? doc.has_changes : undefined, needs_you: doc.needs_you === true } : undefined, pullRequest: pr, tasks: [...new Set([...(construction?.tasks ?? []), ...(pull?.tasks ?? [])])], missions: [...new Set([...(construction?.missions ?? []), ...(pull?.missions ?? [])])], linksOverflow: Boolean(construction?.links_overflow || pull?.links_overflow), review: reviewView, checks: pullChecks, deliveries: pullDeliveries, reviewers: assigned, completed: Boolean(completed), completedAt: Date.parse(pr?.merged_at ?? "") || pull?.observed_at || 0, status: completed ? (closedUnmerged ? "closed-unmerged" : "delivered") : text(pr?.state) || text(doc.status) || text(doc.phase) || "construction", nextAction: pr ? nextAction(pr, reviewView, pullChecks, pullDeliveries) : constructionNextAction(doc) };
+    contraptions[key] = { source, visualId: item.visualId, projectId: item.scope.projectId, repository: item.scope.repository, construction: construction ? { title: text(doc.title), phase: text(doc.phase), status: text(doc.status), head: text(doc.head), task_id: text(doc.task_id), blocked_reason: text(doc.blocked_reason), has_changes: typeof doc.has_changes === "boolean" ? doc.has_changes : undefined, needs_you: doc.needs_you === true } : undefined, pullRequest: pr, tasks: [...new Set([...(construction?.tasks ?? []), ...(pull?.tasks ?? [])])], missions: [...new Set([...(construction?.missions ?? []), ...(pull?.missions ?? [])])], linksOverflow: Boolean(construction?.links_overflow || pull?.links_overflow), review: reviewView, checks: pullChecks, deliveries: pullDeliveries, reviewers: assigned, completed: Boolean(completed), completedAt: Date.parse(pr?.merged_at ?? "") || pull?.observed_at || 0, status: completed ? (closedUnmerged ? "closed-unmerged" : "delivered") : text(pr?.state) || text(doc.status) || text(doc.phase) || "construction", nextAction: pr ? nextAction(pr, reviewView, pullChecks, pullDeliveries) : constructionNextAction(doc) };
   }
   return { contraptions, checks, deliveries, reviewers };
 }

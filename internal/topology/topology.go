@@ -46,10 +46,12 @@ type EdgeKind string
 const EdgeImports EdgeKind = "imports"
 
 type Snapshot struct {
-	Digest         string `json:"digest"`
-	SourceRevision string `json:"source_revision,omitempty"`
-	Nodes          []Node `json:"nodes"`
-	Edges          []Edge `json:"edges"`
+	Digest         string   `json:"digest"`
+	SourceRevision string   `json:"source_revision,omitempty"`
+	Sources        []Source `json:"sources,omitempty"`
+	Files          []File   `json:"-"`
+	Nodes          []Node   `json:"nodes"`
+	Edges          []Edge   `json:"edges"`
 }
 
 type Node struct {
@@ -91,6 +93,7 @@ type languageFile struct{ dir, language string }
 type discovery struct {
 	dirs      map[string]int64
 	inventory map[string]*Inventory
+	contents  []File
 	files     int
 	modules   map[string]string
 	goPkgs    map[string]*goPackage
@@ -151,7 +154,7 @@ func build(ctx context.Context, root, project string, bounds limits) (Snapshot, 
 	if err != nil {
 		return Snapshot{}, err
 	}
-	result := Snapshot{SourceRevision: revision, Nodes: nodes, Edges: edges}
+	result := Snapshot{SourceRevision: revision, Nodes: nodes, Edges: edges, Files: found.contents}
 	result.Digest = graphDigest(nodes, edges)
 	return result, nil
 }
@@ -244,9 +247,10 @@ func discover(ctx context.Context, root string, bounds limits) (*discovery, erro
 		dir := path.Dir(rel)
 		result.dirs[dir] += fileInfo.Size()
 		inventory := result.inventory[dir]
-		inventory.Direct.add(classify(rel))
+		inventory.Direct.add(Classify(rel))
+		result.contents = append(result.contents, File{Path: rel, Kind: Classify(rel), Bytes: fileInfo.Size()})
 		sampleName := path.Base(rel)
-		if len(inventory.Samples) < 3 && len(sampleName) <= 128 && utf8.ValidString(sampleName) {
+		if len(sampleName) <= 128 && utf8.ValidString(sampleName) {
 			inventory.Samples = append(inventory.Samples, sampleName)
 		} else {
 			inventory.SamplesOmitted++
@@ -311,6 +315,13 @@ func discover(ctx context.Context, root string, bounds limits) (*discovery, erro
 	sort.Slice(dirs, func(i, j int) bool { return depth(dirs[i]) > depth(dirs[j]) })
 	for _, dir := range dirs {
 		inventory := result.inventory[dir]
+		if names := inventory.Samples; len(names) > 32 {
+			inventory.Samples = make([]string, 32)
+			for i := range inventory.Samples {
+				inventory.Samples[i] = names[i*(len(names)-1)/31]
+			}
+			inventory.SamplesOmitted += uint32(len(names) - 32)
+		}
 		inventory.Total.plus(inventory.Direct)
 		if dir != "." {
 			result.inventory[path.Dir(dir)].Total.plus(inventory.Total)
@@ -739,7 +750,8 @@ func keys[V any](values map[string]V) []string {
 
 // Inventory counts eligible scanned physical files. Total includes Direct and
 // descendants; nodes sharing a path describe the same inventory, never additive
-// child totals. Samples name at most three direct files in lexical order.
+// child totals. Samples name at most 32 direct files in lexical order, evenly
+// spaced across that order for larger directories, including both endpoints.
 type Inventory struct {
 	Direct         InventoryCounts `json:"direct"`
 	Total          InventoryCounts `json:"total"`
@@ -780,10 +792,10 @@ func (counts *InventoryCounts) add(category string) {
 	}
 }
 
-// Classification is filename-only, in precedence order: explicit test names
+// Classify is filename-only, in precedence order: explicit test names
 // and test-directory source files, documentation, configuration, assets, source,
 // then unclassified. Ambiguous files remain unclassified; tests imply no result.
-func classify(relative string) string {
+func Classify(relative string) string {
 	name := strings.ToLower(path.Base(relative))
 	extension := strings.ToLower(path.Ext(name))
 	source := strings.Contains("|.go|.js|.jsx|.mjs|.cjs|.ts|.tsx|.mts|.cts|.py|.rs|.c|.h|.cc|.cpp|.hpp|.java|.kt|.swift|.rb|.php|.sh|.sql|.css|.scss|.html|.vue|.svelte|", "|"+extension+"|") && extension != ""

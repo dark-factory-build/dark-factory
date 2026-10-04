@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { AgentItem, HumanRequestItem, StateView, TaskItem, TopologyView } from "@dark-factory/client";
 import {
   agentStatus,
@@ -7,10 +7,14 @@ import {
   prepareFloor,
   selectFloor,
   projectFloor,
+  projectProposals,
   type RunPathSample,
 } from "./console-view.js";
-import { FactoryScene, AgentSprite, type FactorySceneProps } from "./factory-scene/factory-scene.js";
-import type { FloorAppearance } from "./floor-appearance.js";
+import { FactoryScene, AgentSprite } from "./factory-scene/factory-scene.js";
+import { productionKey, type ProductionContraption } from "./production-view.js";
+import type { ProjectContentCall } from "./project-library.js";
+import type { SceneNode } from "./factory-scene/scene.js";
+import { DEFAULT_FLOOR_APPEARANCE, type FloorAppearance } from "./floor-appearance.js";
 
 function shortID(value: string): string {
   return value.slice(0, 8);
@@ -76,12 +80,16 @@ export function StageMeter({ stage }: { stage: TaskItem["status"] }) {
   );
 }
 
-/** The floor shares the normal task detail and HumanRequest routes. */
+const NO_CHANGES: readonly ProductionContraption[] = [];
+
+/** Flat source projection; every action opens an existing inspector or control. */
 export function FactoryFloor({
-  production, state, topologies, runPaths, lastRunPaths, selectedAgentId, onSelectAgent,
-  onSelectHumanRequest, selectedTaskId, onSelectTask, onOpenTasks, onOpenMissions, connected = true, floorAppearance, projectId, onProject,
+  changes = NO_CHANGES, selectedChange, onSelectChange, state, topologies, runPaths, lastRunPaths, selectedAgentId, onSelectAgent,
+  onSelectHumanRequest, selectedTaskId, onSelectTask, onOpenTasks, onOpenMissions, onOpenLibrary, connected = true, floorAppearance = DEFAULT_FLOOR_APPEARANCE, onAppearanceChange, projectId, onProjectContent,
 }: {
-  production?: FactorySceneProps["production"];
+  changes?: readonly ProductionContraption[];
+  selectedChange?: string;
+  onSelectChange?: (key: string) => void;
   state: StateView | undefined;
   topologies: ReadonlyMap<string, TopologyView> | undefined;
   runPaths?: ReadonlyMap<string, RunPathSample>;
@@ -92,67 +100,60 @@ export function FactoryFloor({
   onSelectTask?: (taskId: string) => void;
   onOpenTasks?: (projectId?: string) => void;
   onOpenMissions?: (projectId?: string) => void;
+  onOpenLibrary?: (projectId?: string) => void;
   onSelectHumanRequest?: (request: HumanRequestItem) => void;
   connected?: boolean;
   floorAppearance: FloorAppearance;
+  onAppearanceChange?: (appearance: FloorAppearance) => void;
   projectId?: string;
   onProject?: (projectId: string | undefined) => void;
+  onProjectContent?: ProjectContentCall;
 }) {
-  const [{ scopeId, page }, setView] = useState<{ scopeId?: string; page: number }>({ page: 0 });
-  // Snapshot decoding replaces the projects Map even when only live work changed.
+  const [selectedEntity, setSelectedEntity] = useState<string>();
   const projectsKey = JSON.stringify([...state?.projects.values() ?? []].map(({ id, name }) => [id, name]).sort(([left], [right]) => left!.localeCompare(right!)));
   const prepared = useMemo(() => prepareFloor(state?.projects, topologies), [projectsKey, topologies]);
-  const rootId = prepared.hierarchies.find((hierarchy) => hierarchy.project.id === projectId)?.projectRoom.id;
-  const setScopeId = (scopeId: string | undefined) => {
-    setView({ scopeId, page: 0 });
-    onProject?.(scopeId === undefined ? undefined : prepared.roomByID.get(scopeId)?.project?.id);
-  };
-  const effectiveScope = onProject !== undefined && prepared.roomByID.get(scopeId ?? "")?.project?.id !== projectId ? rootId : scopeId ?? rootId;
-  const selected = useMemo(() => selectFloor(prepared, effectiveScope, effectiveScope === scopeId ? page : 0), [prepared, effectiveScope, scopeId, page]);
+  const selected = useMemo(() => selectFloor(prepared, floorAppearance.detail ?? "auto"), [prepared, floorAppearance.detail]);
   const scene = useMemo(() => projectFloor(state, selected, runPaths, lastRunPaths), [state, selected, runPaths, lastRunPaths]);
+  const proposed = useMemo(() => projectProposals(selected, changes), [selected, changes]);
   const peerQuestions = useMemo(() => [...(state?.peerQuestions?.values() ?? [])], [state]);
-  useEffect(() => {
-    if (scopeId !== scene.navigation.scopeId || page !== scene.navigation.page) setView({ scopeId: scene.navigation.scopeId, page: scene.navigation.page });
-  }, [scopeId, page, scene.navigation.scopeId, scene.navigation.page]);
   const inventoryOmitted = [...(state?.projects.keys() ?? [])].reduce((count, id) => count + (topologies?.get(id)?.inventoryOmitted ?? 0), 0);
+  const entity = selected.detailByID.get(selectedEntity ?? "");
+  const related = proposed.proposals.filter((proposal) => proposal.operations.some((operation) => operation.entityId === selectedEntity || operation.roomId === selectedEntity) || proposal.relationships?.some((edge) => edge.fromId === selectedEntity || edge.toId === selectedEntity));
   return <div className="dfFactoryFloor">
-    <nav className="dfFactoryFloor__navigation" aria-label="Floor hierarchy">
-      {scene.navigation.breadcrumbs.map((crumb, index) => <span key={crumb.id ?? "root"}>
-        {index === 0 ? null : <span aria-hidden="true"> / </span>}
-        <button type="button" aria-current={index === scene.navigation.breadcrumbs.length - 1 ? "page" : undefined} disabled={index === scene.navigation.breadcrumbs.length - 1} onClick={() => setScopeId(crumb.id)}>{crumb.label}</button>
-      </span>)}
-      {scene.navigation.scopeId === undefined ? null : <button type="button" onClick={() => setScopeId(scene.navigation.backScopeId)}>Back</button>}
-      <span className="dfFactoryFloor__spaceCount" aria-live="polite">{scene.topology.nodes.length} {scene.topology.nodes.length === 1 ? "space" : "spaces"}</span>
+    <nav className="dfFactoryFloor__navigation" aria-label="Floor detail">
+      <label>Topology detail <select value={floorAppearance.detail ?? "auto"} onChange={(event) => onAppearanceChange?.({ ...floorAppearance, detail: event.currentTarget.value as FloorAppearance["detail"] })} disabled={onAppearanceChange === undefined}>
+        <option value="coarse">Coarse · areas</option><option value="auto">Automatic · useful areas</option><option value="fine">Fine · directories</option>
+      </select></label>
+      <label>Social furniture <select value={floorAppearance.social ?? "nearby"} onChange={(event) => onAppearanceChange?.({ ...floorAppearance, social: event.currentTarget.value as FloorAppearance["social"] })} disabled={onAppearanceChange === undefined}><option value="nearby">Within the base</option><option value="commons">Common tables</option></select></label>
+      <span>{scene.topology.nodes.length} rooms · one connected floor</span>
     </nav>
-    {inventoryOmitted === 0 ? null : <p role="status">{inventoryOmitted} room inventories omitted from the served projects; those rooms show inventory unavailable.</p>}
-    {scene.navigation.pageCount <= 1 ? null : <nav aria-label="Floor pages">
-      <button type="button" disabled={scene.navigation.page === 0} onClick={() => setView({ scopeId, page: scene.navigation.page - 1 })}>Previous spaces</button>
-      <span> Page {scene.navigation.page + 1} of {scene.navigation.pageCount} · {scene.navigation.omittedChildren} spaces on other pages </span>
-      <button type="button" disabled={scene.navigation.page + 1 === scene.navigation.pageCount} onClick={() => setView({ scopeId, page: scene.navigation.page + 1 })}>Next spaces</button>
-    </nav>}
-    {scene.navigation.outsideScopeActivity === 0 && scene.navigation.hiddenScopeActivity === 0 ? null : <p className="dfFactoryFloor__scopeSummary" role="status">
-      {scene.navigation.outsideScopeActivity === 0 ? null : `${scene.navigation.outsideScopeActivity} active tasks outside this scope. `}
-      {scene.navigation.hiddenScopeActivity === 0 ? null : `${scene.navigation.hiddenScopeActivity} active tasks within this scope, outside displayed rooms.`}
-    </p>}
+    <details className="dfFactoryFloor__source"><summary>Integrated source · {state?.projects.size ?? 0} projects</summary>
+      {[...(state?.projects.values() ?? [])].map((project) => { const topology = topologies?.get(project.id); return <p key={project.id}>{project.name}: {topology?.sources?.length ? topology.sources.map((source) => <span key={source.repository_id}> · {source.repository_id} · {source.target_ref || "target unavailable"} · {source.kind} · {source.revision ? <code>{source.revision}</code> : "revision unavailable"}{source.reason ? `: ${source.reason}` : ""}</span>) : topology?.sourceRevision ? <code>{topology.sourceRevision}</code> : "integrated revision unavailable"}</p>; })}
+    </details>
+    {inventoryOmitted === 0 && scene.aggregatedLocations === 0 ? null : <p role="status">{inventoryOmitted > 0 ? `${inventoryOmitted} source inventories unavailable. ` : ""}{scene.aggregatedLocations > 0 ? `${scene.aggregatedLocations} areas aggregated into their visible ancestors; search still reaches every served entity.` : ""}</p>}
+    {proposed.aggregatedProposals === 0 ? null : <p role="status">{proposed.aggregatedProposals} proposed new areas are marked in their owning rooms. All observed paths remain in the Change inspector.</p>}
+    <div className="dfFactoryFloor__changes" aria-label="Source observation notices">
+      {changes.filter((item) => proposed.proposals.some((proposal) => proposal.id === productionKey(item)) && (item.source.omitted > 0 || item.source.kind === "unavailable")).map((item) => <p key={productionKey(item)} role="status">{item.pullRequest?.title || item.construction?.title}: {item.source.omitted > 0 ? `${item.source.omitted} paths outside this bounded observation. ` : ""}{item.source.reason} Inspect the Change for full evidence.</p>)}
+    </div>
     <div className="dfFactoryFloor__scene">
     <FactoryScene
-      production={production}
+      proposals={{ items: proposed.proposals, selected: selectedChange, onSelect: (id) => onSelectChange?.(id) }}
       appearance={floorAppearance}
       selectedWorkerId={selectedAgentId}
       selectedTaskId={selectedTaskId}
-      topology={scene.topology}
+      topology={proposed.topology}
       projectId={projectId}
-      detailNodes={prepared.roomByID}
-      workers={scene.workers}
+      detailNodes={selected.detailByID}
+      workers={[...scene.workers, ...proposed.reviewers.filter((worker) => !selectedChange || worker.review?.proposalId === selectedChange)]}
       connected={connected}
       tasks={scene.tasks}
       peerQuestions={peerQuestions}
       omittedLocations={scene.omittedLocations}
-      enterableRoomIds={scene.navigation.enterableIds}
-      onEnterRoom={setScopeId}
+      onSelectEntity={setSelectedEntity}
       onSelectTask={onSelectTask}
       onOpenTasks={onOpenTasks}
       onOpenMissions={onOpenMissions}
+      onOpenLibrary={onOpenLibrary}
       onSelectHumanRequest={onSelectHumanRequest === undefined || state === undefined ? undefined : (id) => {
         const request = state.humanRequests.get(id);
         if (request !== undefined) onSelectHumanRequest(request);
@@ -160,10 +161,42 @@ export function FactoryFloor({
       onSelectWorker={onSelectAgent === undefined || state === undefined ? undefined : (workerID) => {
         const agent = state.agents.get(workerID);
         if (agent !== undefined) onSelectAgent(agent);
+        else { const reviewer = proposed.reviewers.find((actor) => actor.id === workerID); if (reviewer?.review) onSelectChange?.(reviewer.review.proposalId); }
       }}
     />
     </div>
+    {entity === undefined ? null : <section aria-label="Source contents">
+      <p>Stable source reference <code>{entity.id}</code></p>
+      <SourceContents key={`${entity.id}:${topologies?.get(entity.project?.id ?? "")?.digest}`} node={entity} topology={topologies?.get(entity.project?.id ?? "")} call={connected ? onProjectContent : undefined} />
+      {related.map((proposal) => <button key={proposal.id} type="button" onClick={() => onSelectChange?.(proposal.id)}>Inspect change: {proposal.title}</button>)}
+    </section>}
   </div>;
+}
+
+function SourceContents({ node, topology, call }: { node: SceneNode; topology?: TopologyView; call?: ProjectContentCall }) {
+  const [files, setFiles] = useState<Readonly<Record<string, unknown>>[]>([]), [next, setNext] = useState(0), [loaded, setLoaded] = useState(false), [pending, setPending] = useState(false), [notice, setNotice] = useState("");
+  const epoch = useRef(0);
+  useEffect(() => () => { epoch.current++; }, []);
+  useEffect(() => { epoch.current++; setPending(false); }, [call]);
+  const read = async () => {
+    if (!call || !node.project || pending) return;
+    const generation = ++epoch.current;
+    setPending(true); setNotice("");
+    try {
+      const result = await call("source_files", { project_id: node.project.id, id: node.id.slice(node.project.id.length + 1), tested_source: [...topology?.sources ?? []].filter((source) => source.prefix === "" || node.path === source.prefix || node.path.startsWith(`${source.prefix}/`)).sort((a, b) => b.prefix.length - a.prefix.length)[0]?.revision ?? topology?.sourceRevision ?? "", offset: loaded ? next : 0, limit: 32 });
+      if (generation !== epoch.current) return;
+      if (result.unavailable) { setNotice(String(result.unavailable)); return; }
+      setFiles((old) => [...old, ...(Array.isArray(result.files) ? result.files as Readonly<Record<string, unknown>>[] : [])]);
+      setNext(Number(result.next_offset) || 0); setLoaded(true);
+      setNotice(`${Number(result.total) || 0} directly owned files at ${String(result.revision || "unknown revision")}. Descendant files belong to their own entities.`);
+    } catch { if (generation === epoch.current) setNotice("Source contents unavailable. Refresh the topology before retrying."); }
+    finally { if (generation === epoch.current) setPending(false); }
+  };
+  return <>
+    {loaded && next === 0 ? null : <button type="button" disabled={!call || pending} onClick={() => void read()}>{pending ? "Reading source…" : loaded ? "More source files" : "Read exact source contents"}</button>}
+    {notice ? <p role="status">{notice}</p> : null}
+    {files.length === 0 ? null : <ul>{files.map((file) => <li key={String(file.path)}><code>{String(file.path)}</code> · {String(file.kind)} · {String(file.bytes)} bytes</li>)}</ul>}
+  </>;
 }
 
 /** Rank is the served role: an orchestrator oversees, a worker builds. */

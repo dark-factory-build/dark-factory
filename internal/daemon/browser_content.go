@@ -59,7 +59,7 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 	if err != nil && !factoryOnly {
 		return browserprotocol.ProjectContentResult{}, browser.ErrInvalidRequest
 	}
-	read := request.Operation == "list" || request.Operation == "read" || request.Operation == "body" || request.Operation == "evidence_list" || request.Operation == "attachments" || request.Operation == "outcome_list" || request.Operation == "outcome_read" || request.Operation == "mission_tasks" || request.Operation == "production" || request.Operation == "task_read"
+	read := request.Operation == "list" || request.Operation == "read" || request.Operation == "body" || request.Operation == "evidence_list" || request.Operation == "attachments" || request.Operation == "outcome_list" || request.Operation == "outcome_read" || request.Operation == "mission_tasks" || request.Operation == "production" || request.Operation == "task_read" || request.Operation == "source_files"
 	_, release, client, err := backend.authorize(ctx, raw, kernel.BrowserCapabilityPrivateHumanRequestDetail)
 	if err != nil {
 		return browserprotocol.ProjectContentResult{}, err
@@ -115,6 +115,11 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 			return result, browser.ErrInvalidRequest
 		}
 		output = browserTaskSummary(task)
+	case "source_files":
+		output, err = backend.sourceFiles(ctx, project, input)
+		if err != nil {
+			return result, err
+		}
 	case "production":
 		_ = backend.owner.refreshProduction(ctx, project)
 		page := kernel.ProductionPage{Records: []kernel.ProductionRecord{}}
@@ -124,6 +129,7 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 				return result, mapBrowserError(e)
 			}
 			page = observed
+			backend.observeProductionSources(ctx, project, page.Records)
 		}
 		output = struct {
 			kernel.ProductionPage

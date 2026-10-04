@@ -183,90 +183,142 @@ its old CI-refusal checkout are retained until merge; unrelated operator edits
 in the primary runtime/site checkouts remain untouched.
 
 
-## Scanned inventory
+## One inhabited factory: source and display contract
 
-Optional topology-node `inventory` counts eligible regular files from the existing
-bounded scan. Missing inventory means unavailable; present zero counts mean an
-empty scanned inventory. Dot directories, dependency/build/cache exclusions,
-symlinks and special files remain excluded. This is not a count of every file on
-disk. `direct` counts files immediately in the node's physical path; `total`
-includes those files and descendants. Repository/module/package nodes may share
-a path and therefore share counts: never sum overlapping child totals.
+The preceding ledger records historical checkpoints. The current interface has
+one flat floor, one SVG renderer and one movement system. The former nested
+replacement floors, separate production machines and expanding production area
+are removed. Changes open the existing evidence inspector; tasks, missions,
+workers and the project library retain their existing controls and authority.
 
-Classification uses case-insensitive filenames, with this precedence: recognized
-source files with explicit test names (`_test.go`, `.test.`, `.spec.`, `test_`,
-`_test`) or inside `test`, `tests`, `__tests__` directories are tests; Markdown,
-reStructuredText, AsciiDoc and bare README/LICENSE are documentation; JSON,
-YAML, TOML, INI, CFG, lock files and recognized build/configuration filenames are
-configuration; recognized image/font/audio/video/PDF extensions are assets;
-recognized programming/web source extensions are source; everything else stays
-unclassified. A JSON fixture in tests is configuration; unknown `.txt` or binary
-content is explicitly unclassified. Test presence means neither success nor
-coverage. Import and manifest observations retain their existing partial scope.
+### Integrated source
 
-`samples` contains up to three lexically ordered immediate filenames, each at
-most 128 UTF-8 bytes. `samples_omitted` counts remaining direct files, including
-names too long to transmit. No source text is sent. Optional summaries consume
-only remaining capacity under the existing response limit; `inventory_omitted`
-reports how many served nodes lost their summary to that bound. Missing counts
-must never be displayed as zero. The topology digest includes inventory while
-node identities remain tied to project, kind and path.
+Topology reads an immutable archive of each registered repository's configured
+local target ref. The archive is checked against Git blob identities; dirty
+checkout files and export-attribute rewrites cannot become finished equipment.
+`sources[]` records repository ID, displayed prefix, target ref, resolved revision,
+observation time and integrated/unavailable state. An unregistered checkout may
+provide an explicitly unavailable legacy observation, never integrated proof.
+No topology read fetches, changes a ref or advances the checkout. A remote merge
+will appear only after the configured local target ref has actually advanced and
+the topology refresh reads it. The revision remains inspectable throughout.
 
+Eligible regular files use the existing bounded scanner. Dot directories,
+vendor/dependency/build/cache directories, symlinks, submodules and special files
+are excluded. Missing inventories are unavailable, not zero. Classification is
+by filename/extension: explicitly named source tests first, then documentation,
+configuration, assets, source and unclassified. A JSON test fixture remains
+configuration; a test rig establishes file presence, not test success or coverage.
 
-## Inventory equipment and activity
+`inventory.direct` counts immediate files; `inventory.total` counts descendants.
+Repository/module/package wrappers can share a physical path. The projection
+chooses one owner for that path (package, then module, directory, repository),
+retains wrapper IDs as aliases, and sums only canonical direct counts. A room's
+displayed total contains its assigned assemblies, excluding separately displayed
+child rooms. Inspectors, containment controls and dependency links resolve to the
+canonical owner, retaining that owner's direct and subtree counts rather than
+offering a second alias inspector with contradictory exact contents.
+Up to 32 exact immediate filenames are sampled evenly across the sorted list,
+including its endpoints; small lists remain complete. This gives large packages
+broader filename coverage without guessing responsibilities. `samples_omitted`
+and the existing frame budget's `inventory_omitted` disclose omissions. No source
+text is sent.
 
-Rooms project the optional scanned subtree inventory into at most six equipment groups: source racks, test benches, document drawers, configuration panels, asset displays and unclassified crates. Counts are partitioned between repeated groups, never one object per file. Direct and subtree counts remain separately inspectable; shared-path totals overlap. Equipment capacity omissions, direct filename sample omissions and missing summaries are explicit. Test benches indicate test-file presence, not success or coverage. Named child cabinets use the existing hierarchy navigation; remaining served siblings are reached by pages.
+### Stable references and grouping
 
-Room geometry and the five worker standing slots remain independent of inventory contents. Only a busy worker with current observed work in a visible room runs the restrained interaction loop. Reduced motion, hidden tabs, disconnection and idle floors stop the animation clock; reconnection reconciles the current snapshot instead of replaying events. This is an activity projection, not command execution evidence.
+A source entity reference is `<project ID>:<served topology node ID>`. The served
+ID is derived from normalized relative path and node kind, independent of display
+grouping, file counts, activity or labels. A future library or message-board link
+should store this reference plus the exact source revision; optional file links
+also store the repository-relative path. A rename relationship is established
+only by observed Git rename evidence; path identity alone never proves continuity.
 
-## Interactive production sources
+The browser's persisted detail setting selects coarse areas, automatic useful
+areas, or fine directories on the same floor. Automatic grouping collapses
+structural wrappers such as internal/src/packages/apps and retains useful package
+rooms; command entry points remain assemblies in their shared `cmd` area.
+Up to 96 rooms aggregate the remaining canonical entities under visible
+ancestors; all canonical source entities remain searchable. Each room pictures at most six
+assemblies with an explicit overflow label. Search focuses an entity's owning
+room and retains its exact source identity. Viewport culling bounds rendered
+rooms. Changing live work or proposal selection does not choose the room order.
+Explicit detail changes may regroup the floor while preserving selected identity.
+Assembled rooms share regular walls and corridor rows; equipment uses each room's
+work zone. File counts scale equipment within that zone without moving the walls.
 
-The production floor and inspector share one derived view. They do not advance
-work: animation is presentation only. The private project-content read reconciles
-durable records on connection and a bounded visible-tab refresh; it never calls
-GitHub from a sprite or panel.
+Assemblies combine source machinery, test rigs, control cabinets, document shelves
+and asset racks. Eligible file counts select clamped size buckets: 1–4, 5–20,
+21–80 and 81+. Size is scope, never quality or completion. Name-based movement,
+messaging, selection, admission and storage motifs are disclosed as filename
+hints, not verified semantic analysis. Parts and secondary resource silhouettes
+belong to the same canonical assembly and do not count files again.
 
-| Fact | Authority and identity |
-| --- | --- |
-| Mission | Existing outcome objective/criteria/state, with durable task bindings; task success does not complete the objective |
-| Construction | Stored Change and task phase; identity is the Change ID, including after worker completion |
-| Publication | Maintainer publication receipt, or an observed exact factory branch and settled head; subsequent heads retain the recorded binding |
-| Review | Existing exact-head adversarial verifier over formal reviews; host reviewer journal and matching process-start receipt expose actual activity |
-| CI | Repository-level Actions observation; one run ID, revision and PR membership, with head and merge-group scopes kept separate |
-| Merge | GitHub merged timestamp and actual merge commit; merge-queue admission is separate |
-| Delivery | Existing release journal, verified destination receipt and included-PR membership; merge alone proves no delivery |
+The explicit `source_files` project-content read takes project ID, served node ID,
+`tested_source` (the exact target SHA), offset and limit (maximum 32). It returns
+canonical directly owned paths, kinds and bytes with total/next offset. A changed
+revision is refused instead of returning newer files under an older inspection.
+Missing or omitted contents remain visible as unavailable or incomplete.
 
-The host controller's existing release-observation cadence records bounded facts
-through the operator-only `factoryctl production observe --json-stdin` path.
-Customer runtimes without this host controller show unavailable external evidence;
-there is no fallback to host credentials from an agent or browser. Related task
-and conversation content retains its existing private read authority.
+### Proposed versions and evidence
 
-Missing or stale review/check evidence cannot approve a new head. Unavailable
-reads retain the last durable item and disclose the observation gap. Active,
-blocked and undelivered items remain inspectable; completed work has a bounded
-visible rack and explicit expansion. External record and relationship limits are
-shown, not presented as successful or empty work.
+The existing production observation supplies source `{kind, base, target, head,
+fingerprint, observed_at, paths, omitted, reason}`. `base` is the actual merge-base
+used for the comparison; `target` is the observed target endpoint. A committed
+proposal names its real head. Dirty work is identified as a working-tree
+observation with a content fingerprint. Plans and terminal prose produce no
+source objects. Missing local commits/base information refuses the observation.
+Up to 32 exact path operations include additions, modifications, deletions and
+renames with old path and the existing scanner's filename-based resource class;
+omitted paths are disclosed beside the Change and full diff. Dirty fingerprints
+frame each untracked path, mode and content digest; repeat path/content reads and
+a final HEAD/dirty check refuse changes detected during observation.
 
-The factory service dock keeps release availability, installed binary receipts,
-the daemon serving the current private connection, and the loaded hosted-console
-bundle separate. A reconnect discards runtime confirmation until that connection
-returns its build identity. The runtime deployment verifier compares the serving
-daemon with the installed source; its preflight still reports the actual old
-revision so the existing release controller can decide whether deployment is
-needed. Disconnection and stale observations never confirm an update.
+Committed observations reuse the same static analyzer on exact base/head archives.
+`relationships` contains at most 32 added/removed `{from_path, to_path, weight}`
+entries; `relationships_omitted` and `relationships_unavailable` disclose bounds or
+missing analysis. Dirty working-tree relationships are explicitly unavailable.
+Dashed +/× dependency cables and the existing Change inspector show these deltas
+without changing the integrated graph. Observed proposed resource counts use the
+same equipment vocabulary; their `?` marker does not assert final inventory or
+scale. Concurrent versions of a new area remain separate proposed assemblies. Selection
+filters versions before composition; overview caps pictures without ever summing
+competing versions into a fictitious aggregate. Selecting any Change reaches its
+own proposed version even when it is beyond the overview picture limit.
 
-Both docks use the same bounded receipt inspector. A shared deployment retains
-its PR membership across re-verification; later attempts replace earlier status
-metadata for that destination/revision. Receipt timestamps describe verification
-at that time, not a perpetual claim about the current destination. Host installation
-continues through the existing safe deployment script; there is no browser updater
-or new automatic-update policy. Older merged items compact into an explicit
-inspectable dispatch rack without shrinking phone targets.
+Each proposal is independently keyed by project, repository and visual Change ID.
+Frames, repairs, dismantling marks and move destinations use the same assemblies
+as finished code. Overview marks every observed footprint; selecting a Change
+isolates its operations without combining overlapping futures. New areas append
+provisional rooms without shifting finished rooms. Closed/cancelled/merged
+proposals leave the overlay and remain in inspectable Change history. Merge
+metadata does not edit topology: the actual integrated target, including conflict
+resolution, is the only source of the next finished factory.
 
-Runtime destinations use stable opaque host identities, never home paths.
-Legacy destination records are normalized before private browser reads and
-transactionally migrated in bounded batches on the next observation. Tied
-receipt timestamps do not prove a newer success: unresolved evidence wins a tie
-until a later verification establishes ordering. Re-reading an old running
-receipt does not refresh its activity timestamp.
+Reviews and checks remain attached to their examined head. Dirty work and
+mismatched heads cannot inherit current approval or applicable checks. Stale,
+incomplete and unavailable observations remain labelled. The inspector keeps
+before/proposed paths, findings, checks, task/mission links and separate delivery
+receipts accessible from affected equipment. No elapsed-time or edit-volume
+completion percentage is produced. Deployment receipts never stand for merge,
+and disconnected views never establish current runtime confirmation.
+
+Review sprites represent scoped observed reviewer runs, one identity per run,
+using worker movement. Their inspectable scope is the assignment and changed
+areas, not a claim that each pictured file was inspected. Resting workers have
+deterministic local seats and shelf/coffee visits; the persisted social setting
+chooses valid nearby furniture or common tables. These visits are decoration,
+invoke no models or knowledge reads, and cannot delay work or review. Paused,
+waiting, needs-you and disconnected state remains authoritative. Reduced motion
+and hidden/disconnected scenes stop ambient activity. Bookshelves open the existing
+project library; explicit document actions alone read its content.
+
+### Isolated acceptance fixture
+
+Build the web packages and serve the existing dev app at a loopback address.
+`?fixture=inhabited` uses an immutable scan of this repository with labelled
+synthetic proposal observations and explicit phase/population controls. It covers
+all operation kinds, overlaps, stale evidence, abandonment, an integrated snapshot
+refresh, empty/crowded/resting/disconnected states, keyboard, phone and reduced
+motion. `scripts/verify-inhabited-browser.mjs` exercises these routes and saves
+screenshots; screenshots require human/agent visual inspection as well as checks.
+No installed factory, queue, provider, Maintainer App or live service is involved.

@@ -1,5 +1,6 @@
+import { productionKey, proposedProduction, type ProductionContraption } from "./production-view.js";
 import { MAX_SNAPSHOT_ENTITIES, type AgentItem, type StateView, type TaskItem, type TopologyView } from "@dark-factory/client";
-import { compareText, inventoryLabels, type InventoryKind, type SceneNode, type SceneTopology, type SceneWorker } from "./factory-scene/scene.js";
+import { compareText, inventoryLabels, type InventoryKind, type SceneNode, type SceneTopology, type SceneWorker, type SceneProposal } from "./factory-scene/scene.js";
 
 export type AgentActivity = "busy" | "waiting" | "needs-you" | "idle";
 /** The operator-facing state has one name for each actionable condition. */
@@ -79,29 +80,15 @@ export function orderTasksForHome(state: StateView): readonly TaskItem[] {
   });
 }
 
-/** One viewed hierarchy scope holds this many rooms. */
-export const MAX_SCOPE_ROOMS = 24;
-
+/** Flat grouping is presentation only; canonical source IDs never depend on detail. */
+export type FloorDetail = "coarse" | "auto" | "fine";
+export const MAX_FLOOR_ROOMS = 96;
 export type FloorScene = Readonly<{
   topology: SceneTopology;
   workers: readonly SceneWorker[];
   tasks: readonly SceneTask[];
   omittedLocations: number;
-  navigation: FloorNavigation;
-}>;
-
-export type FloorNavigation = Readonly<{
-  /** Undefined is the all-projects landing scope. */
-  scopeId?: string;
-  /** The immediate ancestor for Back; breadcrumbs may jump further. */
-  backScopeId?: string;
-  breadcrumbs: readonly Readonly<{ id?: string; label: string }>[];
-  enterableIds: readonly string[];
-  omittedChildren: number;
-  outsideScopeActivity: number;
-  hiddenScopeActivity: number;
-  page: number;
-  pageCount: number;
+  aggregatedLocations: number;
 }>;
 
 /** A served task and its observed footprint, without inferring any execution detail. */
@@ -150,90 +137,112 @@ export function prepareFloor(projectMap: StateView["projects"] | undefined, topo
   return { hierarchies, blocksByProject, roomByID, children, digest };
 }
 
-/** Scope and page select a stable room map independently of live activity. */
-export function selectFloor(prepared: ReturnType<typeof prepareFloor>, scopeId?: string, requestedPage = 0) {
-  const { hierarchies, blocksByProject, roomByID, children } = prepared;
-  const validScope = scopeId !== undefined && roomByID.has(scopeId) ? scopeId : undefined;
-  let scope = validScope === undefined ? undefined : roomByID.get(validScope)!;
-  // Skip sole same-path wrappers for navigation, retaining every node for details.
-  while (scope !== undefined) {
-    const members = children.get(scope.id) ?? [];
-    if (members.length !== 1 || members[0]!.path !== scope.path) break;
-    scope = roomByID.get(members[0]!.id)!;
+const kindOrder = { repository: 0, directory: 1, module: 2, package: 3 };
+const countFiles = (node: SceneNode) => Object.values(node.inventory?.direct ?? {}).reduce((sum, count) => sum + count, 0);
+const emptyCounts = () => ({ source: 0, tests: 0, documentation: 0, configuration: 0, assets: 0, unclassified: 0 });
+
+/** Every physical path has exactly one owner; same-path wrappers remain aliases. */
+export function selectFloor(prepared: ReturnType<typeof prepareFloor>, detail: FloorDetail = "auto") {
+  const { hierarchies, blocksByProject, roomByID } = prepared;
+  const owners = new Map<string, SceneNode>();
+  for (const node of roomByID.values()) {
+    const key = `${node.project?.id}:${node.path}`, old = owners.get(key);
+    if (old === undefined || kindOrder[node.kind] > kindOrder[old.kind]
+      || kindOrder[node.kind] === kindOrder[old.kind] && node.id < old.id) owners.set(key, node);
   }
-  const scopeChildren = scope === undefined ? hierarchies.map((hierarchy) => hierarchy.projectRoom) : children.get(scope.id) ?? [];
-  const showScope = scope !== undefined && !scopeChildren.some((child) => child.path === scope.path);
-  const roomLimit = MAX_SCOPE_ROOMS - (showScope ? 1 : 0);
-  const pageCount = Math.max(1, Math.ceil(scopeChildren.length / roomLimit));
-  const page = scopeId !== validScope || !Number.isFinite(requestedPage) ? 0 : Math.max(0, Math.min(pageCount - 1, Math.floor(requestedPage)));
-  const pageChildren = scopeChildren.slice(page * roomLimit, (page + 1) * roomLimit);
-  // Counts belong to physical paths. A same-path child represents a hidden
-  // wrapper's direct files when its sibling subtrees are displayed separately.
-  const splitContents = scope !== undefined && scopeChildren.some((child) => child.path !== scope.path);
-  const shown = showScope ? [scope!, ...pageChildren] : pageChildren;
-  const kept = new Set(shown.map((room) => room.id));
-  const visibleAncestor = (id: string | undefined): string | undefined => {
-    let room = id === undefined ? undefined : roomByID.get(id);
-    while (room !== undefined && !kept.has(room.id)) room = room.parentId === undefined ? undefined : roomByID.get(room.parentId);
-    return room?.id;
+  const canonical = [...owners.values()].sort((a, b) => compareText(a.project?.id ?? "", b.project?.id ?? "") || compareText(a.path, b.path) || compareText(a.id, b.id));
+  const canonicalOf = (node: SceneNode) => owners.get(`${node.project?.id}:${node.path}`)!;
+  const parentOf = (node: SceneNode): SceneNode | undefined => {
+    let parent = node.parentId === undefined ? undefined : roomByID.get(node.parentId);
+    while (parent !== undefined && parent.path === node.path) parent = parent.parentId === undefined ? undefined : roomByID.get(parent.parentId);
+    return parent === undefined ? undefined : canonicalOf(parent);
   };
-  // Imports are observed between packages; a room stands for everything beneath
-  // it, so each link is drawn between the rooms that show its two ends.
-  // The scope's own room holds only its direct files: a descendant that climbs
-  // to it sits under a child on another page, which this floor does not show.
-  const roomOf = (id: string) => { const shownAs = visibleAncestor(id); return shownAs === scope?.id && id !== scope?.id ? undefined : shownAs; };
-  const rolled = new Map<string, Map<string, NonNullable<SceneNode["dependencies"]>["links"][number]>>();
-  for (const room of roomByID.values()) for (const link of room.dependencies?.links ?? []) {
-    const from = roomOf(room.id), to = roomOf(link.nodeId);
-    if (from === undefined || to === undefined || from === to) continue;
-    const links = rolled.get(from) ?? new Map(), key = `${link.direction} ${to}`, target = roomByID.get(to)!;
-    links.set(key, { nodeId: to, label: target.label, path: target.path, direction: link.direction, weight: (links.get(key)?.weight ?? 0) + link.weight });
-    rolled.set(from, links);
+  const children = new Map<string, SceneNode[]>();
+  for (const node of canonical) {
+    const parent = parentOf(node);
+    if (parent !== undefined) children.set(parent.id, [...children.get(parent.id) ?? [], node]);
   }
-  const rooms: SceneNode[] = shown.map((room) => ({
-    ...roomByID.get(room.id)!,
-    inventoryScope: splitContents && room.path === scope?.path ? "direct" : "subtree",
-    ...(room.dependencies === undefined ? {} : { dependencies: { ...room.dependencies, links: [...(rolled.get(room.id)?.values() ?? [])] } }),
-  }));
-  const inScope = (id: string): boolean => {
-    if (validScope === undefined) return true;
-    let room = roomByID.get(id);
-    while (room !== undefined && room.id !== validScope) room = room.parentId === undefined ? undefined : roomByID.get(room.parentId);
-    return room !== undefined;
-  };
-  const crumbs: Array<{ id?: string; label: string }> = [{ label: "All projects" }];
-  if (scope !== undefined) {
-    const chain: SceneNode[] = [];
-    const seen = new Set<string>();
-    let current: SceneNode | undefined = scope;
-    // Topology frames validate node fields but containment still arrives from
-    // outside this projection. A malformed parent cycle degrades to the
-    // project fallback below; keep this bound as the final UI-side guard.
-    while (current !== undefined && !seen.has(current.id)) {
-      seen.add(current.id);
-      chain.unshift(current);
-      current = current.parentId === undefined ? undefined : roomByID.get(current.parentId);
+  const detailByID = new Map(canonical.map((node) => {
+    const links = new Map<string, NonNullable<SceneNode["dependencies"]>["links"][number]>();
+    for (const alias of roomByID.values()) {
+      if (canonicalOf(alias).id !== node.id) continue;
+      for (const link of alias.dependencies?.links ?? []) {
+        const target = roomByID.get(link.nodeId);
+        if (!target || canonicalOf(target).id === node.id) continue;
+        const owner = canonicalOf(target), key = `${link.direction}:${owner.id}`;
+        links.set(key, { ...link, nodeId: owner.id, label: owner.label, weight: (links.get(key)?.weight ?? 0) + link.weight });
+      }
     }
-    crumbs.push(...chain.filter((node, index) => index === 0 || node.path !== chain[index - 1]!.path || children.get(chain[index - 1]!.id)?.length !== 1).map((node) => ({ id: node.id, label: node.label })));
+    const members = children.get(node.id) ?? [];
+    return [node.id, { ...node, childCount: members.length, components: members.map((member) => ({ id: member.id, label: member.label })),
+      ...(node.dependencies === undefined ? {} : { dependencies: { ...node.dependencies, links: [...links.values()] } }),
+    }] as const;
+  }));
+  const rootIds = new Set(hierarchies.map((hierarchy) => canonicalOf(hierarchy.projectRoom).id));
+  const wrapper = (node: SceneNode) => ["internal", "src", "lib", "packages", "apps", "web"].includes(node.path.split("/").at(-1)!) && (children.get(node.id)?.length ?? 0) > 0;
+  const candidates = canonical.filter((node) => {
+    if (rootIds.has(node.id)) return true;
+    if (detail === "fine") return true;
+    const parent = parentOf(node);
+    if (detail === "coarse") return parent !== undefined && rootIds.has(parent.id);
+    if (wrapper(node)) return false;
+    let ancestor = parent;
+    while (ancestor !== undefined && !rootIds.has(ancestor.id)) {
+      if (!wrapper(ancestor)) return false;
+      ancestor = parentOf(ancestor);
+    }
+    return true;
+  });
+  // Keep project roots, then stable path order. Overflow still belongs to a
+  // visible ancestor and stays searchable; activity never chooses room order.
+  const kept = new Set([...new Set([...rootIds, ...candidates.map((node) => node.id)])].slice(0, Math.max(MAX_FLOOR_ROOMS, rootIds.size)));
+  const visibleAncestor = (id: string | undefined): string | undefined => {
+    const source = id === undefined ? undefined : roomByID.get(id);
+    let node = source === undefined ? undefined : canonicalOf(source);
+    while (node !== undefined && !kept.has(node.id)) node = parentOf(node);
+    return node?.id;
+  };
+  const members = new Map<string, SceneNode[]>();
+  for (const node of canonical) {
+    const room = visibleAncestor(node.id);
+    if (room !== undefined) members.set(room, [...members.get(room) ?? [], node]);
   }
-  const digest = `${prepared.digest}:${validScope ?? "root"}:${page}`;
-  return {
-    blocksByProject, roomByID, kept, visibleAncestor, inScope,
-    topology: { digest, nodes: rooms },
-    navigation: {
-      ...(validScope === undefined ? {} : { scopeId: validScope }),
-      ...(scope === undefined ? {} : { backScopeId: crumbs.at(-2)?.id }),
-      breadcrumbs: crumbs,
-      enterableIds: rooms.filter((room) => room.id !== scope?.id && (children.get(room.id)?.length ?? 0) > 0).map((room) => room.id),
-      omittedChildren: Math.max(0, scopeChildren.length - pageChildren.length),
-      page, pageCount,
-    },
+  const references = new Map<string, SceneNode[]>();
+  for (const node of roomByID.values()) {
+    const room = visibleAncestor(node.id);
+    if (room !== undefined) references.set(room, [...references.get(room) ?? [], node]);
+  }
+  const rooms: SceneNode[] = canonical.filter((node) => kept.has(node.id)).map((node) => {
+    const owned = members.get(node.id) ?? [];
+    const total = emptyCounts();
+    for (const member of owned) for (const kind of Object.keys(total) as InventoryKind[]) total[kind] += member.inventory?.direct[kind] ?? 0;
+    const links = new Map<string, NonNullable<SceneNode["dependencies"]>["links"][number]>();
+    for (const member of references.get(node.id) ?? []) for (const link of member.dependencies?.links ?? []) {
+      const targetID = visibleAncestor(link.nodeId);
+      if (targetID === undefined || targetID === node.id) continue;
+      const key = `${link.direction}:${targetID}`, target = roomByID.get(targetID)!;
+      links.set(key, { ...link, nodeId: targetID, label: target.label, path: target.path, weight: (links.get(key)?.weight ?? 0) + link.weight });
+    }
+    return {
+      ...node, label: node.path === "." ? node.project?.name ?? node.label : node.label, inventoryScope: "subtree",
+      inventory: owned.every((member) => member.inventory !== undefined) ? { ...node.inventory!, total } : undefined,
+      assemblies: owned.filter((member) => countFiles(member) > 0 || member.inventory === undefined).map((member) => ({
+        id: member.id, path: member.path, label: member.path === "." ? "Repository files" : member.label,
+        inventoryScope: "direct" as const, inventory: member.inventory, sizeBucket: member.sizeBucket,
+        representedIds: [member.id], dependencies: member.dependencies,
+      })),
+      ...(node.dependencies === undefined ? {} : { dependencies: { ...node.dependencies, links: [...links.values()] } }),
+    };
+  });
+  return { blocksByProject, roomByID, detailByID, kept, visibleAncestor, canonical,
+    topology: { digest: `${prepared.digest}:${detail}`, nodes: rooms },
+    aggregatedLocations: Math.max(0, candidates.length - kept.size),
   };
 }
 
 /** Live task and observed-path projection reuses the selected static hierarchy. */
 export function projectFloor(state: StateView | undefined, selected: ReturnType<typeof selectFloor>, runPaths?: ReadonlyMap<string, RunPathSample>, lastRunPaths?: ReadonlyMap<string, RunPathSample>): FloorScene {
-  const { blocksByProject, roomByID, kept, visibleAncestor, inScope } = selected;
+  const { blocksByProject, roomByID, kept, visibleAncestor } = selected;
   const liveRooms = new Set<string>();
   const tasks = state === undefined ? [] : [...state.tasks.values()]
 		.filter((task) => !state.agents.get(task.assigned_agent_id)?.archived)
@@ -274,10 +283,7 @@ export function projectFloor(state: StateView | undefined, selected: ReturnType<
     const displayedObservation = display === undefined || visibleAncestor(live) === display ? live
       : work?.roomIds.find((id) => visibleAncestor(id) === display);
     let observedBayId: string | undefined;
-    if (selected.navigation.scopeId !== undefined && display !== undefined && displayedObservation !== undefined) {
-      const pictured = roomByID.get(displayedObservation);
-      if (pictured?.parentId === display) observedBayId = pictured.id;
-    }
+    if (display !== undefined && displayedObservation !== undefined) observedBayId = displayedObservation;
     if (live !== undefined) liveRooms.add(display ?? live);
     const location: SceneWorker["location"] = task === undefined ? last === undefined ? "resting" : "last-observed" : live !== undefined ? "working" : "unobserved";
     const room = location === "working" ? roomByID.get(displayedObservation!) : location === "last-observed" ? roomByID.get(last!) : undefined;
@@ -291,24 +297,18 @@ export function projectFloor(state: StateView | undefined, selected: ReturnType<
       paused: agent.paused,
       location,
       ...(room === undefined ? {} : { locationLabel: room.label }),
+      ...(location === "last-observed" && last !== undefined ? { nodeId: visibleAncestor(last) } : {}),
       ...(location === "working" && live !== undefined ? {
         nodeId: display ?? live,
         locationWithin: display !== undefined && display !== displayedObservation,
-        // An ancestor summary is not evidence that an arbitrary descendant is
-        // pictured. Only its exact direct child may receive a named bay.
-        // The all-projects overview is a subtree preview, not a second child
-        // hierarchy. Named bays begin only after entering a served scope.
         ...(observedBayId === undefined ? {} : { observedBayId }),
       } : {}),
     };
   });
-  const observedTasks = tasks.filter((task) => task.status === "running" && task.roomIds.length > 0);
-  const outsideScopeActivity = observedTasks.filter((task) => !task.roomIds.some(inScope)).length;
-  const hiddenScopeActivity = observedTasks.filter((task) => task.roomIds.some(inScope) && task.displayRoomIds?.length === 0).length;
   return {
     topology: selected.topology, workers, tasks,
     omittedLocations: [...liveRooms].filter((id) => !kept.has(id)).length,
-    navigation: { ...selected.navigation, outsideScopeActivity, hiddenScopeActivity },
+    aggregatedLocations: selected.aggregatedLocations,
   };
 }
 
@@ -336,7 +336,6 @@ function matchingRunSample(
  * the room holding the most paths is the representative; ties use room order.
  */
 function runFootprint(rooms: readonly SceneNode[], sample: RunPathSample | undefined): Readonly<{ roomIds: readonly string[]; representativeRoomId?: string }> {
-  const kindOrder = { repository: 0, directory: 1, module: 2, package: 3 };
   const counts = new Map<SceneNode, number>();
   for (const path of sample?.paths ?? []) {
     const room = rooms
@@ -373,7 +372,7 @@ function projectHierarchy(project: { id: string; name: string }, topology: Topol
       }
       return true;
     });
-  const fallback: SceneNode = { id: project.id, path: project.name, label: project.name, kind: "repository", inventoryScope: "subtree", project: { id: project.id, name: project.name } };
+  const fallback: SceneNode = { id: project.id, path: ".", label: project.name, kind: "repository", inventoryScope: "subtree", project: { id: project.id, name: project.name } };
   if (!valid) return { project, projectRoom: fallback, nodes: [fallback] };
   const roots = served.filter((node) => node.parent_id === "");
   // The daemon serves one repository root. If that root is unavailable or a
@@ -406,4 +405,67 @@ function projectHierarchy(project: { id: string; name: string }, topology: Topol
     project: { id: project.id, name: project.name },
   }));
   return { project, projectRoom: nodes.find((node) => node.id === `${project.id}:${root.id}`)!, nodes };
+}
+
+/** Project each proposal independently; never manufacture a combined future tree. */
+export function projectProposals(selected: ReturnType<typeof selectFloor>, items: readonly ProductionContraption[]) {
+  const provisional = new Map<string, SceneNode>();
+  const roomForPath = (project: string, path: string) => selected.canonical
+    .filter((node) => node.project?.id === project && (node.path === "." || path === node.path || path.startsWith(`${node.path}/`)))
+    .sort((a, b) => b.path.length - a.path.length || compareText(a.id, b.id))[0];
+  const proposals: SceneProposal[] = items.filter(proposedProduction).map((item) => {
+    const source = item.source;
+    const operations = source.paths.map((path) => {
+      const before = roomForPath(item.projectId, path.old_path ?? path.path);
+      const destination = roomForPath(item.projectId, path.path);
+      const directory = path.path.includes("/") ? path.path.slice(0, path.path.lastIndexOf("/")) : ".";
+      let roomId = selected.visibleAncestor(destination?.id);
+      let entityId = before?.id;
+      if (["added", "renamed"].includes(path.status) && destination !== undefined && directory !== destination.path) {
+        roomId = `${item.projectId}:proposed:${directory}`;
+        const id = `${roomId}@${productionKey(item)}`, existing = provisional.get(roomId);
+        if (!existing?.assemblies?.some((assembly) => assembly.id === id)) {
+          const paths = source.paths.filter((entry) => ["added", "renamed"].includes(entry.status) && entry.path.slice(0, entry.path.lastIndexOf("/")) === directory);
+          const counts = emptyCounts();
+          for (const entry of paths) counts[entry.resource ?? "unclassified"]++;
+          provisional.set(roomId, { id: roomId, path: directory, label: directory, kind: "directory", project: destination.project, inventoryScope: "direct", proposed: true, assemblies: [...existing?.assemblies ?? [], { id, proposalId: productionKey(item), path: directory, label: directory.split("/").at(-1)!, inventoryScope: "direct", representedIds: [roomId], sourceIncomplete: true, sourcePaths: paths.map((entry) => entry.path), inventory: { direct: counts, total: counts, samples: paths.map((entry) => entry.path.split("/").at(-1)!), samples_omitted: source.omitted } }] });
+        }
+        if (path.status === "added") entityId = roomId;
+      }
+      return { entityId, roomId, path: path.path, previousPath: path.old_path,
+        kind: ({ added: "addition", modified: "modification", deleted: "removal", renamed: "move" } as const)[path.status] };
+    });
+    return { id: productionKey(item), title: item.pullRequest?.title || item.construction?.title || "Proposed change",
+      state: source.kind === "unavailable" ? "unavailable" : source.stale ? "stale" : "active", base: source.base, head: source.head, operations,
+      relationships: source.relationships.map((edge) => ({ status: edge.status, fromPath: edge.from_path, toPath: edge.to_path, weight: edge.weight,
+        fromId: provisional.get(`${item.projectId}:proposed:${edge.from_path}`)?.id ?? selected.visibleAncestor(roomForPath(item.projectId, edge.from_path)?.id),
+        toId: provisional.get(`${item.projectId}:proposed:${edge.to_path}`)?.id ?? selected.visibleAncestor(roomForPath(item.projectId, edge.to_path)?.id),
+      })),
+    };
+  });
+  const reviewers = new Map<string, SceneWorker>();
+  for (const item of items.filter(proposedProduction)) {
+    const proposal = proposals.find((candidate) => candidate.id === productionKey(item))!;
+    const operation = proposal.operations.find((candidate) => candidate.roomId !== undefined);
+    for (const actor of item.reviewers) {
+      const id = `review:${item.projectId}:${item.repository}:${actor.id}`;
+      if (reviewers.has(id)) continue;
+      const working = actor.state === "running" && proposal.state === "active" && actor.head === proposal.head && operation !== undefined;
+      reviewers.set(id, { id, name: actor.name || actor.id, role: "worker", activity: working ? "busy" : actor.state === "waiting" ? "waiting" : "idle",
+        location: working ? "working" : "resting", nodeId: working ? operation.roomId : undefined, observedBayId: working ? operation.entityId : undefined,
+        review: { proposalId: proposal.id, scope: `Review assignment at ${actor.head || "unknown head"}; ${proposal.operations.length} observed paths. Individual file inspection is not observed.` } });
+    }
+  }
+  const addedRooms = [...provisional.values()].sort((a, b) => compareText(a.id, b.id)).slice(0, 16);
+  const addedIDs = new Set(addedRooms.map((room) => room.id));
+  const roomFallback = new Map([...provisional.values()].filter((room) => !addedIDs.has(room.id)).map((room) => [room.id, selected.visibleAncestor(roomForPath(room.project!.id, room.path)?.id)]));
+  for (const proposal of proposals) for (const operation of proposal.operations) {
+    if (operation.roomId !== undefined && roomFallback.has(operation.roomId)) Object.assign(operation, { roomId: roomFallback.get(operation.roomId) });
+  }
+  for (const proposal of proposals) for (const edge of proposal.relationships ?? []) {
+    if (edge.fromId && roomFallback.has(edge.fromId)) Object.assign(edge, { fromId: roomFallback.get(edge.fromId) });
+    if (edge.toId && roomFallback.has(edge.toId)) Object.assign(edge, { toId: roomFallback.get(edge.toId) });
+  }
+  const actors = [...reviewers.values()].map((actor) => actor.nodeId !== undefined && roomFallback.has(actor.nodeId) ? { ...actor, nodeId: roomFallback.get(actor.nodeId) } : actor);
+  return { topology: { ...selected.topology, nodes: [...selected.topology.nodes, ...addedRooms] }, proposals, reviewers: actors, aggregatedProposals: provisional.size - addedRooms.length };
 }

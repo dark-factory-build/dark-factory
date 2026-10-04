@@ -1,5 +1,6 @@
 import actualTopology from "./actual-topology.js";
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { inhabitedContent, inhabitedState, inhabitedTopology, type InhabitedPhase, type InhabitedPopulation } from "./inhabited-fixture.js";
 import { SessionError, type GitHubConnectionBody } from "@dark-factory/client";
 import { TerminalPanel } from "../../../packages/ui/dist/src/factory-app.js";
 import { createRoot } from "react-dom/client";
@@ -127,8 +128,13 @@ function githubFixture(mode: GitHubFixtureMode): NonNullable<FactoryConsoleProps
 // toggles expose production components; no action reports a daemon result.
 function FixtureTour() {
   const fixture = new URLSearchParams(window.location.search).get("fixture");
+  const inhabited = fixture === "inhabited";
+  const [phase, setPhase] = useState<InhabitedPhase>("observed");
+  const [population, setPopulation] = useState<InhabitedPopulation>("working");
+  const projectContent = useMemo(() => inhabitedContent(phase), [phase]);
+  useEffect(() => { if (inhabited) document.dispatchEvent(new Event("visibilitychange")); }, [phase, inhabited]);
   const crowded = fixture === "crowded" || fixture === "inventory-crowded";
-  const actual = fixture === "actual" || fixture === "actual-idle" || fixture === "actual-crowded";
+  const actual = inhabited || fixture === "actual" || fixture === "actual-idle" || fixture === "actual-crowded";
   const inventoryFixture = actual || fixture === "inventory" || fixture === "inventory-idle" || fixture === "inventory-crowded";
   const terminalFixture = fixture === "terminal";
   const repositoryFixture = fixture === "repositories";
@@ -169,6 +175,12 @@ function FixtureTour() {
       <p className="devFixtureBanner" role="note">
         {actual ? `ACTUAL CODEBASE SCAN · ${actualTopology.sourceRevision.slice(0, 8)} · sample workers, no daemon.` : "FIXTURE TOUR — sample data, no daemon. Actions that need the factory are inert here."}
       </p>
+      {!inhabited ? null : <div className="devFixtureBanner" role="group" aria-label="Deterministic factory scenarios">
+        <label>Proposal observation <select aria-label="Proposal observation" value={phase} onChange={(event) => setPhase(event.target.value as InhabitedPhase)}><option value="observed">Observed edits + overlap</option><option value="stale">Stale review and checks</option><option value="abandoned">Main proposal abandoned</option><option value="integrated">Confirmed integration snapshot</option></select></label>{" "}
+        <label>Population <select aria-label="Population" value={population} onChange={(event) => setPopulation(event.target.value as InhabitedPopulation)}><option value="working">Workers and reviewer</option><option value="resting">Resting workers</option><option value="crowded">Crowded base</option><option value="empty">Empty factory</option></select></label>{" "}
+        <button type="button" onClick={() => setConnected((value) => !value)}>{connected ? "Disconnect fixture" : "Reconnect fixture"}</button>
+        <span> Synthetic proposals; integrated revisions change only with the explicit snapshot control.</span>
+      </div>}
       {!hierarchy ? null : <p className="devFixtureBanner" role="note">
         HIERARCHY FIXTURE — North and South use different served nesting; labels and paths are deliberately misleading.
       </p>}
@@ -187,9 +199,10 @@ function FixtureTour() {
         selectedTaskId={selectedTaskId}
         onSelectTask={setSelectedTaskId}
         status={connected ? "ready" : "closed"}
-        state={actual ? { ...fixtureInventoryState, projects: new Map([[actualTopology.projectId, { ...fixtureInventoryState.projects.get(actualTopology.projectId)!, name: "dark-factory" }]]), ...(fixture === "actual-idle" ? { tasks: new Map(), agents: new Map() } : fixture === "actual-crowded" ? { tasks: fixtureCrowdedState.tasks, agents: fixtureCrowdedState.agents } : {}) } : inventoryFixture ? fixture === "inventory-idle" ? { ...fixtureInventoryState, tasks: new Map(), agents: new Map() } : crowded ? { ...fixtureCrowdedState, humanRequests: new Map() } : fixtureInventoryState : intakeFixture ? fixtureIntakeState : archiveFixture ? archiveFixtureState(archivedWorker) : returned ? fixtureReturnedState : crowded ? fixtureCrowdedState : fixtureFloorState}
-        topologies={actual ? new Map([[actualTopology.projectId, actualTopology]]) : inventoryFixture ? fixtureInventoryTopologies : fixture === "paging" ? fixturePagedTopologies : changedTopology ? fixtureChangedTopologies : hierarchy ? fixtureHierarchyTopologies : fixtureTopologies}
-        runPaths={returned ? fixtureRunPaths : crowded ? routeStep === 0 ? fixtureTourCrowdedRunPaths : fixtureMovementCrowdedRunPaths : fixtureRapidRunPaths[routeStep]!}
+        state={inhabited ? inhabitedState(population) : actual ? { ...fixtureInventoryState, projects: new Map([[actualTopology.projectId, { ...fixtureInventoryState.projects.get(actualTopology.projectId)!, name: "dark-factory" }]]), ...(fixture === "actual-idle" ? { tasks: new Map(), agents: new Map() } : fixture === "actual-crowded" ? { tasks: fixtureCrowdedState.tasks, agents: fixtureCrowdedState.agents } : {}) } : inventoryFixture ? fixture === "inventory-idle" ? { ...fixtureInventoryState, tasks: new Map(), agents: new Map() } : crowded ? { ...fixtureCrowdedState, humanRequests: new Map() } : fixtureInventoryState : intakeFixture ? fixtureIntakeState : archiveFixture ? archiveFixtureState(archivedWorker) : returned ? fixtureReturnedState : crowded ? fixtureCrowdedState : fixtureFloorState}
+        topologies={inhabited ? new Map([[actualTopology.projectId, inhabitedTopology(phase)]]) : actual ? new Map([[actualTopology.projectId, actualTopology]]) : inventoryFixture ? fixtureInventoryTopologies : fixture === "paging" ? fixturePagedTopologies : changedTopology ? fixtureChangedTopologies : hierarchy ? fixtureHierarchyTopologies : fixtureTopologies}
+        onProjectContent={inhabited && connected ? projectContent : undefined}
+        runPaths={inhabited ? new Map([...fixtureMovementCrowdedRunPaths].filter(([id]) => inhabitedState(population).agents.has(id)).map(([id, run]) => [id, { ...run, projectId: actualTopology.projectId, paths: ["web/packages/ui/src/factory-scene/movement.ts"] }])) : returned ? fixtureRunPaths : crowded ? routeStep === 0 ? fixtureTourCrowdedRunPaths : fixtureMovementCrowdedRunPaths : fixtureRapidRunPaths[routeStep]!}
         view={view}
         onView={setView}
         detail={detail}

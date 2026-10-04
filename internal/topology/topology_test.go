@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -425,7 +426,7 @@ func TestInventoryCountsPhysicalPathsAndChangesDigest(t *testing.T) {
 		if node.Inventory == nil || node.Inventory.Direct != wantDirect || node.Inventory.Total != wantTotal {
 			t.Fatalf("%s inventory = %+v", node.Kind, node.Inventory)
 		}
-		if strings.Join(node.Inventory.Samples, ",") != "README.md,go.mod,image.svg" || node.Inventory.SamplesOmitted != 3 {
+		if strings.Join(node.Inventory.Samples, ",") != "README.md,go.mod,image.svg,main.go,main_test.go,unknown.bin" || node.Inventory.SamplesOmitted != 0 {
 			t.Fatalf("samples = %+v", node.Inventory)
 		}
 	}
@@ -457,8 +458,8 @@ func TestInventoryEmptySamplesAndClassification(t *testing.T) {
 		"contest/unit.ts": "source", "test_main.py": "tests", "go.mod": "configuration", "icons/a.svg": "assets", "LICENSE": "documentation",
 		"opaque.data": "unclassified", "notes.txt": "unclassified", "Test/Example.go": "tests",
 	} {
-		if got := classify(name); got != want {
-			t.Errorf("classify(%q) = %s, want %s", name, got, want)
+		if got := Classify(name); got != want {
+			t.Errorf("Classify(%q) = %s, want %s", name, got, want)
 		}
 	}
 	root := t.TempDir()
@@ -476,8 +477,49 @@ func TestInventoryEmptySamplesAndClassification(t *testing.T) {
 		t.Fatal(err)
 	}
 	inventory = sampled.Nodes[0].Inventory
-	if strings.Join(inventory.Samples, ",") != "b.md,c.md,d.md" || inventory.SamplesOmitted != 2 {
+	if strings.Join(inventory.Samples, ",") != "b.md,c.md,d.md,e.md" || inventory.SamplesOmitted != 1 {
 		t.Fatalf("omitted samples = %+v", inventory)
+	}
+}
+
+func TestInventorySamplesSpanLargeDirectoryWithoutChangingCounts(t *testing.T) {
+	root := t.TempDir()
+	files := map[string]string{"child/source.ts": "", strings.Repeat("z", 129): ""}
+	for i := range 24 {
+		for _, pattern := range []string{"admission_%02d.go", "browser_%02d_test.go", "movement_%02d.ts", "worker_%02d.md"} {
+			files[fmt.Sprintf(pattern, i)] = ""
+		}
+	}
+	writeFixture(t, root, files)
+	first, err := Build(context.Background(), root, "samples")
+	if err != nil {
+		t.Fatal(err)
+	}
+	inventory := first.Nodes[0].Inventory
+	wantDirect := InventoryCounts{Source: 48, Tests: 24, Documentation: 24, Unclassified: 1}
+	wantTotal := wantDirect
+	wantTotal.Source++
+	if inventory.Direct != wantDirect || inventory.Total != wantTotal || len(inventory.Samples) != 32 || inventory.SamplesOmitted != 65 {
+		t.Fatalf("large directory inventory = %+v", inventory)
+	}
+	if inventory.Samples[0] != "admission_00.go" || inventory.Samples[31] != "worker_23.md" {
+		t.Fatalf("samples do not span the directory: %v", inventory.Samples)
+	}
+	groups := map[string]int{}
+	for i, name := range inventory.Samples {
+		if _, exists := files[name]; !exists || i > 0 && inventory.Samples[i-1] >= name {
+			t.Fatalf("sample is absent, repeated, or unordered: %v", inventory.Samples)
+		}
+		groups[strings.Split(name, "_")[0]]++
+	}
+	for _, group := range []string{"admission", "browser", "movement", "worker"} {
+		if groups[group] != 8 {
+			t.Errorf("sampled %s files = %d, want 8", group, groups[group])
+		}
+	}
+	second, err := Build(context.Background(), root, "samples")
+	if err != nil || first.Digest != second.Digest {
+		t.Fatalf("sampling is not deterministic: %v", err)
 	}
 }
 

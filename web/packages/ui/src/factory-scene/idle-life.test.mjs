@@ -158,8 +158,8 @@ test("the floor shows the cat, what is said and the heart, and none of it withou
         assert.match(cat["aria-label"], /^The cat, being fussed over by (Ada|Grace)$/, "a name keeps its capital");
         const fussing = renderer.root.findAll((node) => node.props["data-tooltip"]?.includes("fussing the cat"));
         assert.equal(fussing.length, 1);
-        assert.ok(fussing[0].findAllByType("use").some((use) => /pet\.[01]$/.test(use.props.href)), "the one with the heart is the one reaching for the cat");
-        assert.ok(!fussing[0].findAllByType("use").some((use) => use.props.href.includes("person.held.")));
+        assert.ok(fussing[0].parent.findAllByType("use").some((use) => /pet\.[01]$/.test(use.props.href)), "the one with the heart is the one reaching for the cat");
+        assert.ok(!fussing[0].parent.findAllByType("use").some((use) => use.props.href.includes("person.held.")));
         assert.ok(renderer.root.findAll((node) => node.props["data-table-item"] !== undefined).some((item) => item.props.transform.startsWith(fussing[0].parent.props.transform)), "what they had stays on the table");
       }
     }

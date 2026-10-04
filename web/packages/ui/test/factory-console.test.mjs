@@ -92,7 +92,7 @@ test("error banner keeps its centered layout after the paragraph reset", () => {
 
 test("floor appearance is local, field-validated, and available before a connection", () => {
   assert.deepEqual(readFloorAppearance('{"scenery":"off","dependencyLinks":"bad","labels":"names-and-counts","taskProps":false,"animation":"off"}'), {
-    scenery: "off", animation: "off",
+    ...DEFAULT_FLOOR_APPEARANCE, scenery: "off", animation: "off",
   });
   assert.deepEqual(readFloorAppearance('{"scenery":"subtle"}'), { ...DEFAULT_FLOOR_APPEARANCE, scenery: "subtle" });
   assert.deepEqual(readFloorAppearance("not json"), DEFAULT_FLOOR_APPEARANCE);
@@ -134,7 +134,7 @@ test("floor appearance waits for storage, changes while disconnected, and resets
     let tree;
     act(() => { tree = create(createElement(FactoryConsole, { status: "closed", state: baseState(), settingsOpen: true })); });
     assert.deepEqual(writes, [], "loading never writes defaults");
-    const selects = tree.root.findAllByType("select").slice(-2);
+    const selects = tree.root.findAllByType("select").filter((node) => ["subtle", "off"].includes(node.props.value));
     assert.equal(selects[0].props.value, "subtle");
     assert.equal(selects[1].props.value, "off");
     act(() => { selects[0].props.onChange({ currentTarget: { value: "off" } }); });
@@ -242,7 +242,7 @@ test("viewed geometry is independent of worker activity and population", () => {
   const observed = floorScene(fixtureState, fixtureTopologies, undefined,
     new Map([[ids.idleAgent, runSample(ids.idleAgent, ["web"], "72".repeat(16))]]))
     .workers.find((worker) => worker.id === ids.idleAgent);
-  assert.deepEqual([observed.location, observed.nodeId, observed.locationLabel], ["last-observed", undefined, "web"]);
+  assert.deepEqual([observed.location, observed.nodeId, observed.locationLabel], ["last-observed", web, "web"]);
   const fallback = floorScene(fixtureState, undefined);
   assert.equal(fallback.topology.nodes.length, fixtureState.projects.size);
   assert.ok(fallback.topology.nodes.every((node) => node.sizeBucket === undefined));
@@ -303,45 +303,7 @@ test("floor tasks retain every served task and its exact observed footprint", ()
   assert.deepEqual(scene.workers.find((worker) => worker.id === ids.agent).nodeId, room("internal/kernel"));
 });
 
-test("hierarchy navigation is bounded, identity-led, and leaves outside work discoverable", () => {
-  const landing = floorScene(fixtureState, fixtureTopologies);
-  assert.deepEqual(landing.topology.nodes.map((node) => node.label), ["North Workshop", "South Workshop"]);
-  assert.deepEqual(landing.topology.nodes.map((node) => node.sizeBucket), ["large", undefined], "a served root is the project landing; only unavailable structure uses the fallback");
-  assert.deepEqual(landing.navigation.breadcrumbs, [{ label: "All projects" }]);
-  const project = landing.topology.nodes.find((node) => node.id === ids.project);
-  assert.equal(project, undefined, "a valid served root does not gain a synthetic project room");
-  const repository = landing.topology.nodes.find((node) => node.project?.id === ids.project);
-  const repositoryView = floorScene(fixtureState, fixtureTopologies, undefined, undefined, repository.id);
-  const kernel = repositoryView.topology.nodes.find((node) => node.label === "kernel");
-  assert.deepEqual(repositoryView.topology.nodes.map((node) => node.label), ["North Workshop", "kernel", "web"]);
-  assert.ok(repositoryView.navigation.enterableIds.includes(kernel.id));
-  assert.ok(!repositoryView.navigation.enterableIds.includes(repository.id), "the current scope has no no-op Enter action");
-  const nested = floorScene(fixtureState, fixtureTopologies, undefined, undefined, kernel.id);
-  assert.deepEqual(nested.topology.nodes.map((node) => node.label), ["kernel", "store"]);
-  assert.ok(!nested.navigation.enterableIds.includes(kernel.id), "nested scopes also exclude their current room");
-  assert.deepEqual(nested.navigation.breadcrumbs.map((crumb) => crumb.label), ["All projects", "North Workshop", "kernel"]);
-  assert.equal(nested.navigation.backScopeId, repository.id, "Back is one level; breadcrumbs remain direct ancestor links");
 
-  const misleading = served({ ...fixtureTopology, nodes: fixtureTopology.nodes.map((node) => ({ ...node, path: "unrelated", label: "same" })) });
-  const misleadingRepository = floorScene(fixtureState, misleading, undefined, undefined,
-    floorScene(fixtureState, misleading).topology.nodes.find((node) => node.project?.id === ids.project).id);
-  assert.equal(misleadingRepository.navigation.enterableIds.length, 1, "served parent ids, not labels or paths, make the room navigable");
-
-  const root = fixtureTopology.nodes[0];
-  const topology = served({ ...fixtureTopology, nodes: [root, ...Array.from({ length: 30 }, (_, index) => ({ id: `${index}`.padStart(64, "0"), parent_id: root.id, kind: "directory", path: `path-${index}`, label: `Child ${index}`, language: "", size_bucket: "tiny" }))] });
-  const scope = floorScene(fixtureState, topology).topology.nodes.find((node) => node.project?.id === ids.project);
-  const task = { ...fixtureState.tasks.get(ids.task), revision: 99n };
-  const scene = floorScene({ ...fixtureState, tasks: new Map([[task.id, task]]) }, topology,
-    new Map([[ids.agent, runSample(ids.agent, ["path-29"], task.id, task.revision)]]), undefined, scope.id);
-  assert.equal(scene.topology.nodes.length, 24);
-  assert.deepEqual([scene.navigation.omittedChildren, scene.navigation.outsideScopeActivity, scene.omittedLocations], [7, 0, 0]);
-  assert.equal(scene.workers.find((worker) => worker.id === ids.agent).location, "working");
-
-  const before = layoutScene(repositoryView.topology);
-  const after = layoutScene({ ...repositoryView.topology, nodes: [...repositoryView.topology.nodes, { id: "z", parentId: repository.id, path: "z", label: "Z", kind: "directory", project: repository.project }] });
-  for (const room of before.rooms) assert.deepEqual(after.rooms.find((candidate) => candidate.id === room.id), room);
-
-});
 
 test("malformed served containment degrades without cycles or invented parent links", () => {
   const root = fixtureTopology.nodes[0];
@@ -352,7 +314,7 @@ test("malformed served containment degrades without cycles or invented parent li
   const second = floorScene(fixtureState, malformed);
   assert.deepEqual(first, second, "invalid topology has a bounded deterministic projection");
   assert.deepEqual(first.topology.nodes.filter((node) => node.project?.id === ids.project).map((node) => [node.id, node.parentId, node.sizeBucket]), [[ids.project, undefined, undefined]]);
-  assert.equal(first.navigation.enterableIds.length, 0);
+  assert.equal(first.aggregatedLocations, 0);
 });
 
 test("task footprints reject stale, retry, cancelled, terminal, and cross-project samples", () => {
@@ -454,93 +416,9 @@ test("an active overseer without a path remains unknown", () => {
   assert.equal(observed.location, "working", "an observed overseer keeps the observed room");
 });
 
-test("served hierarchy remains navigable across different repository shapes", () => {
-  for (const shape of [
-    [["repository", ".", "large"], ["module", ".", "large", 0], ["package", "gamma", "medium", 1], ["directory", "delta", "small", 1]],
-    [["repository", ".", "large"], ["package", ".", "large", 0], ["directory", "one", "medium", 1], ["directory", "two", "small", 1]],
-    [["repository", ".", "large"], ["directory", "docs", "small", 0], ["directory", "src", "medium", 0]],
-  ]) {
-    const topology = topologyFor(ids.project, shape);
-    const topologies = served(topology);
-    const state = soloState(ids.project);
-    const landing = floorScene(state, topologies);
-    assert.deepEqual(landing.topology.nodes.map((node) => node.label), [PROJECT_NAME]);
-    for (const parent of topology.nodes) {
-      let contents = parent;
-      let children = topology.nodes.filter((node) => node.parent_id === contents.id);
-      while (children.length === 1 && children[0].path === contents.path) {
-        contents = children[0];
-        children = topology.nodes.filter((node) => node.parent_id === contents.id);
-      }
-      const view = floorScene(state, topologies, undefined, undefined, `${ids.project}:${parent.id}`);
-      assert.deepEqual(new Set(view.topology.nodes.map((node) => node.id)),
-        new Set((children.some((child) => child.path === contents.path) ? children : [contents, ...children]).map((node) => `${ids.project}:${node.id}`)));
-      assert.equal(view.navigation.omittedChildren, 0);
-    }
-  }
-});
 
-test("project scopes preserve worker identity and explicit project overflow", () => {
-  // Two projects holding the same path are served the same node id; two rooms
-  // on one floor may not share one, and a worker may not walk into the other
-  // project's code. A paused worker stays in resting rather than occupying its
-  // project's latest room.
-  const shape = [["repository", ".", "large"], ["directory", "src", "medium", 0]];
-  const topologies = served(topologyFor(ids.project, shape), topologyFor(ids.secondProject, shape));
-  const scene = floorScene(fixtureState, topologies, new Map([[ids.agent, runSample(ids.agent, ["src"])], [ids.orchestrator, runSample(ids.orchestrator, ["src"])]]));
-  assert.equal(scene.topology.nodes.length, 2);
-  const scopes = scene.topology.nodes.map((root) => floorScene(fixtureState, topologies, undefined, undefined, root.id));
-  const scopedRooms = scopes.flatMap((scope) => scope.topology.nodes);
-  assert.equal(new Set(scopedRooms.map((node) => node.id)).size, 4);
-  assert.deepEqual(new Set(scene.workers.map((worker) => worker.id)), new Set(fixtureState.agents.keys()));
-  const nodeOf = (agentId) => scene.workers.find((worker) => worker.id === agentId).nodeId;
-  assert.notEqual(nodeOf(ids.agent), undefined);
-  assert.equal(nodeOf(ids.orchestrator), undefined);
-  assert.ok(nodeOf(ids.agent).startsWith(`${ids.project}:`));
-  assert.equal(scopes.find((scope) => scope.topology.nodes[0].project.id === ids.secondProject).topology.nodes.some((node) => node.id === nodeOf(ids.agent)), false);
-  // Two structures have arrived and neither root room reads as the served
-  // label: on a floor of many projects only the project name tells them apart.
-  assert.deepEqual(scene.topology.nodes.filter((node) => node.path === ".").map((node) => node.label),
-    [fixtureState.projects.get(ids.project).name, fixtureState.projects.get(ids.secondProject).name]);
 
-  // More projects than the floor can detail: every one keeps its own room
-  // before any one keeps a second, and none of them is served first.
-  const projects = Array.from({ length: 8 }, (_, index) => ({ id: `${index}`.padStart(32, "b"), name: `Project ${index}`, revision: 1n }));
-  const crowd = floorScene(
-    { ...fixtureState, projects: new Map(projects.map((project) => [project.id, project])), agents: new Map(), tasks: new Map() },
-    served(...projects.map((project) => topologyFor(project.id, [
-      ["repository", ".", "large"],
-      ...Array.from({ length: 10 }, (_, index) => ["directory", `dir-${index}`, "medium", 0]),
-    ]))),
-  );
-  assert.equal(crowd.topology.nodes.length, projects.length);
-  assert.equal(crowd.topology.nodes.filter((node) => node.path === ".").length, projects.length);
 
-  // Past one room per project the floor cannot detail them all. The projects
-  // the cap reaches keep their own room; an agent whose project it never
-  // reached stands off the floor rather than in another project's room.
-  const overflow = Array.from({ length: 30 }, (_, index) => ({ id: `${index}`.padStart(32, "d"), name: `Project ${index}`, revision: 1n }));
-  const posted = [overflow[0], overflow.at(-1)].map((project, index) => ({
-    id: `${index}`.padStart(32, "e"), project_id: project.id, name: project.name,
-    role: "worker", provider: "shell", paused: false, model: "", reasoning_effort: "", revision: 1n,
-  }));
-  const stranded = floorScene(
-    {
-      ...fixtureState,
-      projects: new Map(overflow.map((project) => [project.id, project])),
-      agents: new Map(posted.map((agent) => [agent.id, agent])),
-      tasks: new Map(),
-      humanRequests: new Map(),
-    },
-    served(...overflow.map((project) => topologyFor(project.id, [["repository", ".", "large"], ["directory", "src", "medium", 0]]))),
-  );
-  assert.deepEqual(stranded.topology.nodes.map((node) => node.path), Array.from({ length: 24 }, () => "."));
-  assert.equal(stranded.navigation.omittedChildren, overflow.length - 24);
-  assert.deepEqual(new Set(stranded.workers.map((worker) => worker.id)), new Set(posted.map((worker) => worker.id)));
-  assert.equal(stranded.workers[0].location, "resting");
-  assert.equal(stranded.workers[0].nodeId, undefined);
-  assert.equal(stranded.workers.at(-1).nodeId, undefined);
-});
 
 test("hostile names and titles are escaped as text and private detail is absent", () => {
   const hostile = "<img src=x onerror=alert(1)>";
@@ -586,7 +464,7 @@ test("the console never shows a kernel-grammar or retired vocabulary word", () =
   // ban is anchored at a word start so it still catches lease/leased/leases
   // without catching the floor's "release-ready".
   for (const [name, markup] of surfaces) {
-    for (const forbidden of [/attempt/i, /converge/i, /finalize/i, /unresolved/i, /proposal/i, /verdict/i, /\bALLOW\b/, /\bBLOCK\b/, /\blease/i, /quarantine/i, /work item/i, /cancel run/i]) {
+    for (const forbidden of [/attempt/i, /converge/i, /finalize/i, /unresolved/i, /verdict/i, /\bALLOW\b/, /\bBLOCK\b/, /\blease/i, /quarantine/i, /work item/i, /cancel run/i]) {
       assert.equal(forbidden.test(markup), false, `${name}: ${forbidden}`);
     }
   }
@@ -866,7 +744,7 @@ test("selecting an agent exposes terminal and configuration controls", () => {
 
   // Without handlers the sidebar is a readout, never a dead form.
   const readOnly = render({ selectedAgent: agentSelection() });
-  assert.equal(readOnly.includes("<input"), false);
+  assert.equal(readOnly.includes('name="instruction"'), false);
   assert.equal(readOnly.includes("Open terminal"), false);
 });
 
@@ -1998,17 +1876,12 @@ test("floor objects select the exact existing task detail and question route", a
   await act(async () => { tree = create(createElement(Harness)); });
   const task = fixtureState.tasks.get(ids.task);
   const rootID = `${ids.project}:${fixtureTopology.nodes[0].id}`;
-  await act(async () => { tree.root.findByProps({ "data-enter-room-id": rootID }).props.onClick(); });
   const kernelID = `${ids.project}:${fixtureTopology.nodes[1].id}`;
-  await act(async () => { tree.root.findByProps({ "data-enter-room-id": kernelID }).props.onClick(); });
   await act(async () => { tree.root.findByProps({ "data-workbench-task-id": task.id }).props.onKeyDown({ key: "Enter", preventDefault() {} }); });
   assert.equal(loaded.length, 1);
   assert.equal(loaded[0], task);
   assert.deepEqual(queueSelections, [task.id]);
   assert.equal(tree.root.findByProps({ "aria-label": "Task details" }).findByType("h3").children.join(""), task.title);
-  await act(async () => { tree.root.findAllByType("button").find((button) => button.children.join("") === "Back").props.onClick(); });
-  assert.equal(tree.root.findByProps({ "aria-label": "Task details" }).findByType("h3").children.join(""), task.title, "navigation retains the existing detail selection");
-  await act(async () => { tree.root.findByProps({ "data-enter-room-id": kernelID }).props.onClick(); });
   await act(async () => { tree.root.findByProps({ "aria-label": "Task details" }).props.onClose(); });
   const running = tree.root.findByProps({ "aria-label": "Running tasks" }).findByType("button");
   await act(async () => { running.props.onClick(); });
@@ -2057,9 +1930,8 @@ test("dependency projection keeps served identity, hidden endpoints and project 
   const shownIDs = new Set(view.topology.nodes.map((node) => node.id));
   assert.deepEqual(kernel.dependencies.links.map((link) => [link.direction, link.label, link.weight]), [["from", "web", 1]]);
   assert.ok(view.topology.nodes.every((node) => node.dependencies.links.every((link) => shownIDs.has(link.nodeId) && link.nodeId !== node.id)), "every link joins two different rooms on this floor");
-  // Entering kernel shows store as its own room: the link reappears, and web is off this floor.
-  const inside = floorScene(fixtureState, mirrored, undefined, undefined, kernel.id).topology.nodes;
-  assert.deepEqual(inside.find((node) => node.path === "internal/kernel" && node.inventoryScope === "direct").dependencies.links.map((link) => [link.direction, link.label, link.weight]), [["to", "store", 2]]);
+  const fine = selectFloor(prepareFloor(fixtureState.projects, mirrored), "fine").topology.nodes;
+  assert.ok(fine.find((node) => node.id === kernel.id).dependencies.links.some((link) => link.label === "store" && link.direction === "to"));
   assert.ok(kernel.dependencies.links.every((link) => link.nodeId.startsWith(`${ids.project}:`)), "matching node hashes in another project never cross-link");
   const legacy = new Map([[ids.project, { ...fixtureTopology, dependencies: undefined }]]);
   assert.equal(floorScene(fixtureState, legacy, undefined, undefined, rootID).topology.nodes[0].dependencies, undefined);
@@ -2073,31 +1945,12 @@ test("floor omits the global evidence essay", () => {
   const markup = renderToStaticMarkup(createElement(FactoryConsole, { status: "ready", state: fixtureState, topologies: fixtureTopologies, view: "floor" }));
   assert.doesNotMatch(markup, /Floor evidence|Rooms describe a repository snapshot/);
   assert.doesNotMatch(markup, /Scroll the floor to explore/);
-  assert.match(markup, /Floor hierarchy/);
-  assert.match(markup, /dfFactoryFloor__spaceCount/);
+  assert.match(markup, /Floor detail/);
+  assert.match(markup, /one connected floor/);
 });
 
 
-test("a viewed module shows direct contents beside distinct child subtrees", () => {
-  const module = { ...fixtureTopology.nodes[1], kind: "module", label: "example.org/workshop/core" };
-  const topology = served({ ...fixtureTopology, nodes: fixtureTopology.nodes.map((node) => node.id === module.id ? module : node) });
-  const scope = `${ids.project}:${module.id}`;
-  const scene = floorScene(fixtureState, topology, undefined, undefined, scope);
-  assert.deepEqual(scene.topology.nodes.map((node) => node.label), [module.label, "store"]);
-  assert.deepEqual(scene.topology.nodes.map((node) => node.inventoryScope), ["direct", "subtree"]);
-  assert.equal(scene.navigation.breadcrumbs.at(-1).label, module.label);
-  assert.equal(scene.navigation.backScopeId, `${ids.project}:${module.parent_id}`);
-  const task = fixtureState.tasks.get(ids.task);
-  const working = floorScene(fixtureState, topology,
-    new Map([[ids.agent, runSample(ids.agent, [module.path + "/go.mod"], task.id, task.revision)]]), undefined, scope);
-  assert.deepEqual(working.topology, scene.topology);
-  assert.equal(working.workers.find((worker) => worker.id === ids.agent).nodeId, scope);
-  assert.equal(working.navigation.outsideScopeActivity, 0);
-  assert.equal(working.navigation.hiddenScopeActivity, 0);
-  assert.equal(working.workers.length, scene.workers.length);
-  const leaf = `${ids.project}:${fixtureTopology.nodes[2].id}`;
-  assert.deepEqual(floorScene(fixtureState, topology, undefined, undefined, leaf).topology.nodes.map((node) => node.id), [leaf]);
-});
+
 
 
 test("mobile navigation switches presentation without mutating work", () => {
@@ -2141,133 +1994,19 @@ test("mobile Floor and Agents tabs track both directions and restore after Tasks
 });
 
 
-test("same-path breadcrumb modules and direct-content modules account for page capacity", () => {
-  const root = fixtureTopology.nodes[0];
-  const module = { ...fixtureTopology.nodes[1], kind: "module" };
-  for (const samePath of [false, true]) for (const count of [24, 25]) {
-    const children = Array.from({ length: count }, (_, index) => ({
-      id: String(index).padStart(64, "0"), parent_id: module.id, kind: index === 0 && samePath ? "package" : "directory", path: index === 0 && samePath ? module.path : `${module.path}/child-${index}`, label: `Child ${index}`, language: "", size_bucket: "tiny",
-    }));
-    const topologies = served({ ...fixtureTopology, nodes: [root, module, ...children] });
-    const scope = `${ids.project}:${module.id}`;
-    const scene = floorScene(fixtureState, topologies, undefined, undefined, scope);
-    const capacity = samePath ? 24 : 23;
-    assert.equal(scene.topology.nodes.length, 24);
-    assert.equal(scene.navigation.omittedChildren, count - capacity);
-    assert.equal(scene.topology.nodes.some((room) => room.id === scope), !samePath);
-    assert.equal(scene.navigation.breadcrumbs.at(-1).id, scope);
-    const pages = Array.from({ length: scene.navigation.pageCount }, (_, page) => floorScene(fixtureState, topologies, undefined, undefined, scope, page));
-    const visible = new Set(pages.flatMap((page) => page.topology.nodes.map((node) => node.id)));
-    for (const child of children) assert.ok(visible.has(`${ids.project}:${child.id}`), "every child remains accessible across pages");
-  }
-});
 
 
-test("nested observed areas follow visible served ancestors without duplicating tasks or workers", () => {
-  const samples = new Map([[ids.agent, runSample(ids.agent, ["internal/kernel/store/a.go", "web/app.ts"])]]);
-  const root = `${ids.project}:${fixtureTopology.nodes[0].id}`;
-  const kernel = `${ids.project}:${fixtureTopology.nodes.find((node) => node.path === "internal/kernel").id}`;
-  const store = `${ids.project}:${fixtureTopology.nodes.find((node) => node.path === "internal/kernel/store").id}`;
-  const landing = floorScene(fixtureState, fixtureTopologies, samples);
-  const project = floorScene(fixtureState, fixtureTopologies, samples, undefined, root);
-  const nested = floorScene(fixtureState, fixtureTopologies, samples, undefined, kernel);
-  for (const [scene, target, within] of [[landing, root, true], [project, kernel, true], [nested, store, false]]) {
-    assert.equal(scene.tasks.filter((task) => task.id === ids.task).length, 1);
-    assert.equal(scene.workers.filter((worker) => worker.id === ids.agent).length, 1);
-    assert.deepEqual(scene.tasks[0].roomIds, landing.tasks[0].roomIds);
-    assert.deepEqual(scene.tasks[0].observation, landing.tasks[0].observation);
-    assert.equal(scene.workers.find((worker) => worker.id === ids.agent).nodeId, target);
-    assert.equal(scene.workers.find((worker) => worker.id === ids.agent).locationWithin, within);
-    assert.equal(scene.navigation.outsideScopeActivity, 0);
-  }
-  assert.deepEqual(landing.tasks[0].displayRoomIds, [root]);
-  const web = `${ids.project}:${fixtureTopology.nodes.find((node) => node.path === "web").id}`;
-  const otherObservedBranch = floorScene(fixtureState, fixtureTopologies, samples, undefined, web);
-  const webWorker = otherObservedBranch.workers.find((worker) => worker.id === ids.agent);
-  assert.deepEqual([webWorker.nodeId, webWorker.locationLabel, webWorker.locationWithin], [web, "web", false]);
-  assert.equal(otherObservedBranch.tasks[0].representativeRoomId, store, "global exact representative remains unchanged");
-  const other = floorScene(fixtureState, fixtureTopologies, samples, undefined, ids.secondProject);
-  assert.equal(other.navigation.outsideScopeActivity, 1);
-  assert.equal(other.navigation.hiddenScopeActivity, 0);
-  assert.equal(other.workers.find((worker) => worker.id === ids.agent).location, "working");
-  const stale = new Map([[ids.agent, { ...samples.get(ids.agent), taskRevision: 0n }]]);
-  const unknown = floorScene(fixtureState, fixtureTopologies, stale, samples);
-  assert.equal(unknown.tasks[0].observation, undefined);
-  assert.equal(unknown.workers.find((worker) => worker.id === ids.agent).location, "unobserved");
-  const archived = { ...fixtureState, agents: new Map(fixtureState.agents).set(ids.agent, { ...fixtureState.agents.get(ids.agent), archived: true }) };
-  assert.equal(floorScene(archived, fixtureTopologies, samples).workers.some((worker) => worker.id === ids.agent), false);
-  assert.equal(floorScene(archived, fixtureTopologies, samples).tasks.some((task) => task.id === ids.task), false);
-});
-
-test("a deep observation stays on its displayed parent's shared workbench", () => {
-  const root = fixtureTopology.nodes[0];
-  const store = fixtureTopology.nodes.find((node) => node.path === "internal/kernel/store");
-  const deep = { id: "e5".repeat(32), parent_id: store.id, kind: "directory", path: "internal/kernel/store/deep", label: "deep", language: "go", size_bucket: "tiny" };
-  const topology = served({ ...fixtureTopology, nodes: [...fixtureTopology.nodes, deep] });
-  const samples = new Map([[ids.agent, runSample(ids.agent, ["internal/kernel/store/deep/file.go"])]]);
-  const scene = floorScene(fixtureState, topology, samples, undefined, `${ids.project}:${root.id}`);
-  const worker = scene.workers.find((entry) => entry.id === ids.agent);
-  assert.equal(worker.nodeId, `${ids.project}:${fixtureTopology.nodes[1].id}`);
-  assert.equal(worker.locationWithin, true);
-  assert.equal(worker.observedBayId, undefined, "an ancestor's pictured child is not the exact observed component");
-});
-
-test("paging reaches all served siblings and leaf inspection; stale scopes and pages reconcile", () => {
-  const root = fixtureTopology.nodes[0];
-  const children = Array.from({ length: 30 }, (_, index) => ({ ...root, id: index.toString(16).padStart(64, "0"), parent_id: root.id, kind: "directory", path: `child-${index}`, label: `Child ${index}` }));
-  const topology = served({ ...fixtureTopology, nodes: [root, ...children] });
-  const scope = `${ids.project}:${root.id}`;
-  const first = floorScene(fixtureState, topology, undefined, undefined, scope, 0);
-  const second = floorScene(fixtureState, topology, undefined, undefined, scope, 1);
-  assert.equal(first.navigation.pageCount, 2);
-  assert.equal(first.topology.nodes.length, 24);
-  assert.equal(second.topology.nodes.length, 8);
-  assert.equal(new Set([...first.topology.nodes, ...second.topology.nodes].map((node) => node.id)).size, 31);
-  assert.deepEqual(floorScene(fixtureState, served({ ...fixtureTopology, nodes: [root, ...children.reverse()] }), undefined, undefined, scope, 1).topology, second.topology);
-  const leaf = second.topology.nodes.at(-1).id;
-  assert.deepEqual(floorScene(fixtureState, topology, undefined, undefined, leaf).topology.nodes.map((node) => node.id), [leaf]);
-  assert.equal(floorScene(fixtureState, topology, undefined, undefined, scope, 999).navigation.page, 1);
-  assert.equal(floorScene(fixtureState, topology, undefined, undefined, scope, NaN).navigation.page, 0);
-  assert.equal(floorScene(fixtureState, topology, undefined, undefined, "deleted", 1).navigation.page, 0);
-  assert.equal(floorScene(fixtureState, topology, undefined, undefined, "deleted").navigation.scopeId, undefined);
-  const shrunk = served({ ...fixtureTopology, nodes: [root] });
-  assert.equal(floorScene(fixtureState, shrunk, undefined, undefined, scope, 1).navigation.page, 0);
-});
 
 
-test("a link to a room on another page is not drawn from the scope's direct-files room", () => {
-  const root = fixtureTopology.nodes[0];
-  const children = Array.from({ length: 30 }, (_, index) => ({ ...root, id: index.toString(16).padStart(64, "0"), parent_id: root.id, kind: "directory", path: `child-${index}`, label: `Child ${index}` }));
-  const topology = served({ ...fixtureTopology, nodes: [root, ...children], dependencies: { omitted: 0, edges: [
-    { from: root.id, to: children[0].id, weight: 1 }, { from: children[9].id, to: children[0].id, weight: 5 }] } });
-  const links = (page) => Object.fromEntries(floorScene(fixtureState, topology, undefined, undefined, `${ids.project}:${root.id}`, page).topology.nodes
-    .filter((node) => node.dependencies.links.length > 0).map((node) => [node.path, node.dependencies.links.map((link) => `${link.direction} ${link.path} ${link.weight}`)]));
-  assert.deepEqual(links(0), { ".": ["to child-0 1"], "child-0": ["from . 1"] }, "the off-page importer neither appears nor adds weight");
-  assert.deepEqual(links(1), {}, "child-9 is shown, the room it imports is not");
-});
 
-test("dependency inspection keeps the current page and exposes off-screen details", async () => {
-  const root = fixtureTopology.nodes[0];
-  const children = Array.from({ length: 30 }, (_, index) => ({ ...root, id: index.toString(16).padStart(64, "0"), parent_id: root.id, kind: "directory", path: `child-${index}`, label: `Child ${index}` }));
-  const topology = served({ ...fixtureTopology, nodes: [root, ...children], dependencies: { edges: [{ from: root.id, to: children[9].id, weight: 1 }], omitted: 0 } });
-  let tree;
-  await act(async () => { tree = create(createElement(FactoryConsole, { status: "ready", state: fixtureState, topologies: topology, view: "floor" })); });
-  const rootID = `${ids.project}:${root.id}`;
-  await act(async () => { tree.root.findByProps({ "data-enter-room-id": rootID }).props.onKeyDown({ key: "Enter", preventDefault() {} }); });
-  const next = () => tree.root.findAllByType("button").find((button) => button.children.join("") === "Next spaces");
-  await act(async () => { next().props.onClick(); });
-  assert.equal(next().props.disabled, true);
-  assert.ok(tree.root.findAllByType("option").some((option) => option.props.value === `${ids.project}:${children[9].id}`));
-  await act(async () => { tree.root.findAllByType("button").find((button) => button.children.join("") === "Previous spaces").props.onClick(); });
-  await act(async () => { tree.root.findByProps({ "aria-label": "Inspect room" }).props.onChange({ target: { value: rootID } }); });
-  await act(async () => { tree.root.findAllByType("li").find((item) => item.children.includes("Depends on ")).findByType("button").props.onClick(); });
-  assert.equal(tree.root.findByProps({ "aria-label": "Inspect room" }).props.value, `${ids.project}:${children[9].id}`);
-  assert.equal(tree.root.findAllByProps({ "data-room-id": `${ids.project}:${children[9].id}` }).length, 0);
-  assert.equal(tree.root.findAllByProps({ "aria-label": "Floor pages" }).length, 1);
-  await act(async () => { tree.update(createElement(FactoryConsole, { status: "ready", state: fixtureState, topologies: served({ ...fixtureTopology, nodes: [root] }), view: "floor" })); });
-  assert.equal(tree.root.findAllByProps({ "data-room-id": rootID }).length, 1);
-  await act(async () => tree.unmount());
-});
+
+
+
+
+
+
+
+
 
 
 test("floor preparation survives draft and live snapshot updates but invalidates source facts", async () => {
@@ -2288,7 +2027,7 @@ test("floor preparation survives draft and live snapshot updates but invalidates
   const originalTopology = scene().props.topology;
   const originalLayout = layout();
   assert.ok(preparedReads > 0);
-  await act(async () => { renderer.root.findByType("input").props.onChange({ target: { value: "draft typing" } }); });
+  await act(async () => { renderer.root.findAllByType("input").find((input) => input.props.type !== "search").props.onChange({ target: { value: "draft typing" } }); });
   assert.equal(reads, preparedReads);
   assert.equal(scene().props.topology, originalTopology);
   assert.equal(layout(), originalLayout);
@@ -2303,9 +2042,9 @@ test("floor preparation survives draft and live snapshot updates but invalidates
   assert.equal(reads, preparedReads);
   assert.equal(layout(), originalLayout);
   const roomId = originalTopology.nodes[0].id;
-  await act(async () => { scene().props.onEnterRoom(roomId); });
-  assert.equal(reads, preparedReads, "scope selection reuses prepared hierarchy");
-  assert.notEqual(layout(), originalLayout);
+  await act(async () => { scene().props.onSelectEntity(roomId); });
+  assert.equal(reads, preparedReads, "entity selection reuses prepared hierarchy");
+  assert.equal(layout(), originalLayout);
   const renamed = { ...fresh, projects: new Map(fresh.projects).set(ids.project, { ...fresh.projects.get(ids.project), name: "Renamed workshop" }) };
   await act(async () => { renderer.update(createElement(DraftFloor, { state: renamed })); });
   assert.ok(reads > preparedReads);
@@ -2340,58 +2079,9 @@ test("task meter displays every canonical status without conflating cancellation
 });
 
 
-test("same-path observed roots choose package then module independent of served order", () => {
-  const node = (id, kind, parent_id) => ({ id, kind, parent_id, path: ".", label: kind, language: "go", size_bucket: "tiny" });
-  const root = node("a".repeat(64), "repository", "");
-  const module = node("b".repeat(64), "module", root.id);
-  const pkg = node("c".repeat(64), "package", module.id);
-  const samples = new Map([[ids.agent, runSample(ids.agent, ["main.go"])]]);
-  for (const nodes of [[root, module, pkg], [pkg, root, module], [module, pkg, root], [root, module], [module, root]]) {
-    const topologies = served({ ...fixtureTopology, nodes });
-    const exact = `${ids.project}:${nodes.includes(pkg) ? pkg.id : module.id}`;
-    for (const [scope, display] of [[undefined, root.id], [`${ids.project}:${root.id}`, nodes.includes(pkg) ? pkg.id : module.id], [`${ids.project}:${module.id}`, nodes.includes(pkg) ? pkg.id : module.id]]) {
-      const scene = floorScene(fixtureState, topologies, samples, undefined, scope);
-      const task = scene.tasks.find((task) => task.id === ids.task);
-      assert.deepEqual(task.roomIds, [exact]);
-      assert.equal(task.representativeRoomId, exact);
-      assert.equal(task.displayRoomId, `${ids.project}:${display}`);
-      const worker = scene.workers.find((worker) => worker.id === ids.agent);
-      assert.equal(worker.nodeId, task.displayRoomId);
-      assert.equal(worker.observedBayId, undefined, "the same-path component is now the displayed room, not a bay inside a wrapper");
-    }
-  }
-});
 
-test("same-path wrappers retain navigation without overlapping displayed physical inventory", () => {
-  const counts = (source) => ({ source, tests: 0, documentation: 0, configuration: 0, assets: 0, unclassified: 0 });
-  const inventory = { direct: counts(1), total: counts(7), samples: [], samples_omitted: 1 };
-  const root = { ...fixtureTopology.nodes[0], inventory };
-  const module = { ...root, id: "e1".repeat(32), parent_id: root.id, kind: "module", label: "root module" };
-  const pkg = { ...root, id: "e2".repeat(32), parent_id: module.id, kind: "package", label: "root package" };
-  const child = { ...root, id: "e3".repeat(32), parent_id: module.id, kind: "directory", path: "src", label: "source subtree", inventory: { direct: counts(6), total: counts(6), samples: [], samples_omitted: 6 } };
-  const topologies = served({ ...fixtureTopology, nodes: [root, module, pkg, child] });
-  const id = (node) => `${ids.project}:${node.id}`;
-  const overview = floorScene(fixtureState, topologies);
-  assert.equal(overview.topology.nodes.find((node) => node.id === id(root)).inventoryScope, "subtree");
-  const repository = floorScene(fixtureState, topologies, undefined, undefined, id(root));
-  assert.deepEqual(repository.topology.nodes.map((node) => [node.id, node.inventoryScope]), [[id(pkg), "direct"], [id(child), "subtree"]]);
-  assert.ok(!repository.navigation.enterableIds.includes(id(module)));
-  const selected = floorScene(fixtureState, topologies, undefined, undefined, id(module));
-  assert.deepEqual(selected.topology.nodes.map((node) => [node.id, node.inventoryScope]), [[id(pkg), "direct"], [id(child), "subtree"]]);
-  assert.equal(selected.topology.nodes.reduce((sum, node) => sum + node.inventory[node.inventoryScope === "direct" ? "direct" : "total"].source, 0), 7);
-  assert.deepEqual(selected.navigation.breadcrumbs.map((crumb) => crumb.id), [undefined, id(root)]);
-  assert.equal(selected.navigation.backScopeId, undefined);
-  for (const node of [root, module, pkg, child]) {
-    const entered = floorScene(fixtureState, topologies, undefined, undefined, id(node));
-    assert.equal(entered.navigation.scopeId, id(node));
-    assert.equal(entered.navigation.breadcrumbs.at(-1).id, id(node === module ? root : node));
-  }
-  const prepared = prepareFloor(fixtureState.projects, topologies);
-  assert.equal(prepared.roomByID.get(id(module)).parentId, id(root));
-  assert.equal(prepared.roomByID.get(id(pkg)).parentId, id(module));
-  assert.equal(prepared.roomByID.get(id(child)).parentId, id(module));
-  assert.equal(prepared.roomByID.get(id(root)).inventoryScope, "subtree", "selection does not mutate prepared source facts");
-});
+
+
 
 for (const [label, loader] of [["Repositories", "onLoadRepositories"], ["Issue intake", "onLoadIntake"]]) {
   test(`${label} reads only the selected project when opened`, async () => {
@@ -2607,7 +2297,7 @@ test("one project selector scopes floor, agents, tasks and project limits across
   assert.ok([...floor().props.state.tasks.values()].every((task) => task.project_id === ids.project));
   assert.ok([...floor().findByType(FactoryScene).props.detailNodes.values()].every((node) => node.project.id === ids.project));
   const rootID = `${ids.project}:${fixtureTopology.nodes[0].id}`;
-  assert.equal(tree.root.findByProps({ "aria-label": "Floor hierarchy" }).findAllByType("button").at(-2).props.children, fixtureState.projects.get(ids.project).name);
+  assert.equal(tree.root.findAllByProps({ "data-enter-room-id": rootID }).length, 0);
   await act(async () => { tree.update(createElement(FactoryConsole, { ...props, view: "agents", settingsOpen: true })); });
   const rows = tree.root.findAllByProps({ className: "dfConsoleRow dfAgentList__row" });
   assert.equal(rows.length, [...fixtureState.agents.values()].filter((agent) => agent.project_id === ids.project && !agent.archived).length);
@@ -2619,30 +2309,17 @@ test("one project selector scopes floor, agents, tasks and project limits across
   assert.equal(floor().props.projectId, ids.project, "switching views retains project scope");
   await choose("");
   assert.equal(floor().props.state.agents.size, fixtureState.agents.size);
-  await act(async () => tree.root.findByProps({ "data-enter-room-id": rootID }).props.onClick());
-  assert.equal(tree.root.findByProps({ "aria-label": "Project" }).props.value, ids.project, "entering a project updates the shared selector");
+  await choose(ids.project);
   await choose(ids.secondProject);
   assert.equal(floor().props.projectId, ids.secondProject);
-  assert.ok(tree.root.findAllByProps({ role: "status" }).some((status) => status.children.join("").startsWith("12 room inventories omitted")));
+  assert.ok(tree.root.findAllByProps({ role: "status" }).some((status) => status.children.join("").startsWith("12 source inventories unavailable")));
   assert.equal(tree.root.findAllByProps({ "aria-label": `Agent ${fixtureState.agents.get(ids.agent).name}` }).length, 0, "a foreign selected agent cannot retain controls");
   assert.ok([...floor().findByType(FactoryScene).props.detailNodes.values()].every((node) => node.project.id === ids.secondProject));
   assert.ok([...floor().props.state.tasks.values()].every((task) => task.project_id === ids.secondProject));
   await act(async () => tree.unmount());
 });
 
-test("floor pages follow path and name order before opaque identity", () => {
-  const root = fixtureTopology.nodes[0];
-  const children = Array.from({ length: 50 }, (_, index) => ({ ...root,
-    id: (100 - index).toString(16).padStart(64, "0"), parent_id: root.id,
-    path: `area-${String(index).padStart(2, "0")}`, label: `Area ${index}`, kind: "directory",
-  }));
-  const prepared = prepareFloor(fixtureState.projects, served({ ...fixtureTopology, nodes: [root, ...children].reverse() }));
-  const scope = `${ids.project}:${root.id}`;
-  const pages = Array.from({ length: selectFloor(prepared, scope).navigation.pageCount }, (_, page) => selectFloor(prepared, scope, page));
-  const paths = pages.flatMap((page) => page.topology.nodes.filter((node) => node.id !== scope).map((node) => node.path));
-  assert.deepEqual(paths, children.map((node) => node.path));
-  assert.deepEqual(prepared.roomByID.get(scope).components.map((component) => component.id), children.map((node) => `${ids.project}:${node.id}`));
-});
+
 
 
 test("floor project changes clear task selection without restoring an old dialog", async () => {
@@ -2654,9 +2331,9 @@ test("floor project changes clear task selection without restoring an old dialog
   let tree;
   await act(async () => { tree = create(createElement(Harness)); });
   assert.equal(tree.root.findAllByProps({ "aria-label": "Task details" }).length, 1);
-  await act(async () => tree.root.findByProps({ "data-enter-room-id": `${ids.project}:${fixtureTopology.nodes[0].id}` }).props.onClick());
+  await act(async () => tree.root.findByProps({ "aria-label": "Project" }).props.onChange({ currentTarget: { value: ids.project } }));
   assert.equal(tree.root.findAllByProps({ "aria-label": "Task details" }).length, 0);
-  await act(async () => tree.root.findByProps({ "aria-label": "Floor hierarchy" }).findAllByType("button").find((button) => button.children.join("") === "All projects").props.onClick());
+  await act(async () => tree.root.findByProps({ "aria-label": "Project" }).props.onChange({ currentTarget: { value: "" } }));
   assert.equal(tree.root.findAllByProps({ "aria-label": "Task details" }).length, 0);
   await act(async () => tree.unmount());
 });

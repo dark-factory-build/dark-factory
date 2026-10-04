@@ -118,6 +118,7 @@ type maintainerPullRequest struct {
 	HeadRepository string                  `json:"head_repository"`
 	Branch         string                  `json:"head_ref"`
 	Base           string                  `json:"base_ref"`
+	BaseSHA        string                  `json:"base_sha"`
 	State          string                  `json:"state"`
 	Merged         bool                    `json:"merged"`
 	Review         kernel.ProductionReview `json:"review"`
@@ -183,7 +184,7 @@ func productionPullRequest(value maintainerPullRequest) kernel.ProductionPullReq
 	if review.State == "" {
 		review.State = "unknown"
 	}
-	return kernel.ProductionPullRequest{Number: value.Number, Title: value.Title, URL: value.URL, Head: value.Head, HeadRepository: value.HeadRepository, Branch: value.Branch, Base: value.Base, State: state, Review: review}
+	return kernel.ProductionPullRequest{Number: value.Number, Title: value.Title, URL: value.URL, Head: value.Head, HeadRepository: value.HeadRepository, Branch: value.Branch, Base: value.Base, BaseSHA: value.BaseSHA, State: state, Review: review}
 }
 
 type maintainerPullRequestPage struct {
