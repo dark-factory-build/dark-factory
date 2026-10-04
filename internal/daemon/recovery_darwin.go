@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"time"
 
@@ -71,6 +72,18 @@ type RecoveredRunDisposition struct {
 // The sweep is idempotent: every durable edge it uses recognizes its own
 // exact replay.
 func (daemon *Daemon) RecoverAbandonedRuns(ctx context.Context, parent *RuntimeParent, changeParent string) ([]RecoveredRunDisposition, error) {
+	return daemon.recoverRuns(ctx, parent, changeParent, math.MaxInt64)
+}
+
+// recoverOwnerlessRuns is the scheduler tick's sweep. It skips runs updated
+// after updatedBefore, so an admitted run not yet registered is left alone.
+// Per-run results are durable state; only a sweep failure is returned.
+func (daemon *Daemon) recoverOwnerlessRuns(ctx context.Context, parent *RuntimeParent, changeParent string, updatedBefore int64) error {
+	_, err := daemon.recoverRuns(ctx, parent, changeParent, updatedBefore)
+	return err
+}
+
+func (daemon *Daemon) recoverRuns(ctx context.Context, parent *RuntimeParent, changeParent string, updatedBefore int64) ([]RecoveredRunDisposition, error) {
 	if daemon == nil || daemon.store == nil || ctx == nil || parent == nil || changeParent == "" {
 		return nil, fmt.Errorf("%w: invalid recovery sweep", kernel.ErrInvalidValue)
 	}
@@ -83,7 +96,7 @@ func (daemon *Daemon) RecoverAbandonedRuns(ctx context.Context, parent *RuntimeP
 		daemon.attemptMu.Lock()
 		_, live := daemon.attempts[recoverable.Run.ID]
 		daemon.attemptMu.Unlock()
-		if live {
+		if live || recoverable.Run.UpdatedAt.Int64() > updatedBefore {
 			// A registered live owner is not abandoned; recovery never races it.
 			continue
 		}

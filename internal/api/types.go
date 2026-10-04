@@ -872,18 +872,17 @@ type DashboardSnapshot struct {
 // orchestrator. Its project identity is derived from the attempt credential;
 // callers cannot select a different project.
 type OverseerSnapshot struct {
-	ProjectID       string                   `json:"project_id"`
-	Head            uint64                   `json:"head"`
-	NextOffset      *uint64                  `json:"next_offset"`
-	NextTextOffset  *uint64                  `json:"next_text_offset"`
-	Agents          []AgentSummary           `json:"agents"`
-	Tasks           []OverseerTask           `json:"tasks"`
-	Runs            []OverseerRun            `json:"runs"`
-	Questions       []OverseerQuestion       `json:"questions"`
-	PeerQuestions   []PeerQuestion           `json:"peer_questions"`
-	History         []OverseerIntervention   `json:"history"`
-	Handoffs        []RetainedChangeHandoff  `json:"retained_change_handoffs"`
-	LivenessReports []OverseerLivenessReport `json:"liveness_reports,omitempty"`
+	ProjectID      string                  `json:"project_id"`
+	Head           uint64                  `json:"head"`
+	NextOffset     *uint64                 `json:"next_offset"`
+	NextTextOffset *uint64                 `json:"next_text_offset"`
+	Agents         []AgentSummary          `json:"agents"`
+	Tasks          []OverseerTask          `json:"tasks"`
+	Runs           []OverseerRun           `json:"runs"`
+	Questions      []OverseerQuestion      `json:"questions"`
+	PeerQuestions  []PeerQuestion          `json:"peer_questions"`
+	History        []OverseerIntervention  `json:"history"`
+	Handoffs       []RetainedChangeHandoff `json:"retained_change_handoffs"`
 }
 
 // RetainedChangeHandoff identifies one settled worker Change by its Git
@@ -991,22 +990,6 @@ type OverseerRun struct {
 	TaskID   string `json:"task_id"`
 	Phase    string `json:"phase"`
 	Revision uint64 `json:"revision"`
-}
-
-// OverseerLivenessReport is observation only. It gives the orchestrator
-// exact identity and timing context to route a stalled provider; it never
-// stops or otherwise mutates the run.
-type OverseerLivenessReport struct {
-	RunID                  string `json:"run_id"`
-	TaskID                 string `json:"task_id"`
-	Provider               string `json:"provider"`
-	Stalled                bool   `json:"stalled"`
-	ThresholdMs            uint64 `json:"threshold_ms"`
-	StartedAtMs            uint64 `json:"started_at_ms"`
-	LastTerminalOutputAtMs uint64 `json:"last_terminal_output_at_ms,omitempty"`
-	LastAttemptAPICallAtMs uint64 `json:"last_attempt_api_call_at_ms,omitempty"`
-	TerminalOutputBytes    uint64 `json:"terminal_output_bytes"`
-	Detail                 string `json:"detail"`
 }
 
 // OverseerQuestion carries the exact question only to the project's running

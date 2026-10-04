@@ -140,7 +140,7 @@ func (daemon *Daemon) RunScheduler(ctx context.Context, spec SupervisorSpec) err
 				// on enabled ticks ahead of the probe that admits them. Pausing
 				// defers automatic tasks without consuming their causal events. A round that
 				// fails is retried next tick; the admission probe stays exact.
-				if err := daemon.enforceRunLimits(ownedCtx); err != nil {
+				if err := daemon.enforceRunLiveness(ownedCtx, spec); err != nil {
 					// Cancellation can interrupt the read before the Done arm runs.
 					// Preserve unrelated failures even when shutdown races with them.
 					if cancellation := ownedCtx.Err(); cancellation == nil || !schedulerOnlyCancellation(err, cancellation) {

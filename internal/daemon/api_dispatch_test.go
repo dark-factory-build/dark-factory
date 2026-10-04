@@ -1260,7 +1260,7 @@ func TestDaemonOverseerBackstopFreesLaneWhenProjectLimitIsDisabled(t *testing.T)
 	bound := active.run.AdmittedAt.Int64() + kernel.MaxOverseerRunSeconds*1000
 	for _, at := range []int64{bound - 1, bound} {
 		fixture.daemon.now = func() time.Time { return time.UnixMilli(at) }
-		if err := fixture.daemon.enforceRunLimits(ctx); err != nil {
+		if err := fixture.daemon.enforceRunLiveness(ctx, SupervisorSpec{}); err != nil {
 			t.Fatal(err)
 		}
 	}

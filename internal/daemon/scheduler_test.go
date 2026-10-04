@@ -602,7 +602,7 @@ func TestSchedulerCancellationDuringLimitPollJoinsOwners(t *testing.T) {
 	daemon := newSchedulerTestDaemon(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	// The clock is read inside enforceRunLimits, after the poll has been selected.
+	// The clock is read inside enforceRunLiveness, after the poll has been selected.
 	daemon.now = func() time.Time { cancel(); return time.UnixMilli(1000) }
 	polls := make(chan time.Time, 1)
 	polls <- time.Now()

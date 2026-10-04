@@ -30,7 +30,7 @@ const (
 	liveAttemptCredit           = 1 << 20
 	liveAttemptStoreTimeout     = 2 * time.Second
 	liveAttemptEffectLimit      = 4 * time.Second
-	stalledRunLivenessThreshold = 2 * time.Minute
+	stalledRunLivenessThreshold = 10 * time.Minute
 )
 
 var (
@@ -300,15 +300,11 @@ type liveAttempt struct {
 	usageScan    []byte
 	usageScanned uint64
 
-	livenessMu               sync.Mutex
-	startedAt                time.Time
-	lastTerminalOutputAt     time.Time
-	lastAttemptAPICallAt     time.Time
-	terminalOutputBytes      uint64
-	livenessReported         bool
-	livenessInFlight         bool
-	livenessInFlightRevision uint64
-	livenessRevision         uint64
+	livenessMu           sync.Mutex
+	startedAt            time.Time
+	lastTerminalOutputAt time.Time
+	lastAttemptAPICallAt time.Time
+	terminalOutputBytes  uint64
 
 	subs            map[*TerminalAttachment]struct{}
 	correlations    map[uint64]*TerminalAttachment
@@ -338,9 +334,12 @@ type liveAttempt struct {
 	beforeProviderStateCheck func() error
 }
 
-type liveAttemptLiveness struct {
-	startedAt, lastTerminalOutputAt, lastAttemptAPICallAt time.Time
-	terminalOutputBytes                                   uint64
+// stalled reports whether this attempt has had no terminal-output growth and
+// no authenticated attempt API call for the stall budget since startup.
+func (attempt *liveAttempt) stalled(now time.Time) bool {
+	attempt.livenessMu.Lock()
+	defer attempt.livenessMu.Unlock()
+	return stalledRunLiveness(now, attempt.startedAt, attempt.lastTerminalOutputAt, attempt.lastAttemptAPICallAt, stalledRunLivenessThreshold)
 }
 
 func (attempt *liveAttempt) markStarted(at time.Time) {
@@ -371,9 +370,6 @@ func (attempt *liveAttempt) markTerminalOutput(at time.Time, end uint64) {
 		if at.After(attempt.lastTerminalOutputAt) {
 			attempt.lastTerminalOutputAt = at
 		}
-		attempt.livenessReported = false
-		attempt.livenessInFlight = false
-		attempt.livenessRevision++
 	}
 	attempt.livenessMu.Unlock()
 }
@@ -387,9 +383,6 @@ func (attempt *liveAttempt) markAttemptAPICall(at time.Time) {
 	if at.After(attempt.lastAttemptAPICallAt) {
 		attempt.lastAttemptAPICallAt = at
 	}
-	attempt.livenessReported = false
-	attempt.livenessInFlight = false
-	attempt.livenessRevision++
 	attempt.livenessMu.Unlock()
 	attempt.startupEvidence.Store(true)
 	select {
@@ -411,43 +404,6 @@ func (attempt *liveAttempt) deliverStartupEvidence() error {
 	}
 	attempt.startupEvidence.Store(false)
 	return nil
-}
-
-type livenessReportDelivery struct {
-	attempt  *liveAttempt
-	revision uint64
-}
-
-func (attempt *liveAttempt) beginLivenessReport(now time.Time, threshold time.Duration) (liveAttemptLiveness, livenessReportDelivery, bool) {
-	if attempt == nil {
-		return liveAttemptLiveness{}, livenessReportDelivery{}, false
-	}
-	attempt.livenessMu.Lock()
-	defer attempt.livenessMu.Unlock()
-	activity := liveAttemptLiveness{startedAt: attempt.startedAt, lastTerminalOutputAt: attempt.lastTerminalOutputAt, lastAttemptAPICallAt: attempt.lastAttemptAPICallAt, terminalOutputBytes: attempt.terminalOutputBytes}
-	if attempt.livenessReported || attempt.livenessInFlight || !stalledRunLiveness(now, activity.startedAt, activity.lastTerminalOutputAt, activity.lastAttemptAPICallAt, threshold) {
-		return activity, livenessReportDelivery{}, false
-	}
-	attempt.livenessInFlight = true
-	attempt.livenessInFlightRevision = attempt.livenessRevision
-	return activity, livenessReportDelivery{attempt: attempt, revision: attempt.livenessRevision}, true
-}
-
-func (delivery livenessReportDelivery) finish(delivered bool) {
-	if delivery.attempt == nil {
-		return
-	}
-	delivery.attempt.livenessMu.Lock()
-	defer delivery.attempt.livenessMu.Unlock()
-	if !delivery.attempt.livenessInFlight || delivery.attempt.livenessInFlightRevision != delivery.revision {
-		return
-	}
-	delivery.attempt.livenessInFlight = false
-	if delivered && delivery.attempt.livenessRevision == delivery.revision {
-		// Emit one edge per quiet interval. Terminal output growth or an attempt
-		// API call clears this bit and re-arms the next genuinely new stall.
-		delivery.attempt.livenessReported = true
-	}
 }
 
 func stalledRunLiveness(now, started, lastOutput, lastAPICall time.Time, threshold time.Duration) bool {
