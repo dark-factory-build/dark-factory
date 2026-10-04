@@ -44,6 +44,13 @@ try {
   await shot('01-automatic');
   check('real repository, four operation kinds, new area, one reviewer');
 
+  for (const [path, name] of [['internal/kernel', '14-dark-factory-kernel'], ['internal/daemon', '15-dark-factory-daemon'], ['internal/linear', '16-dark-factory-small-package'], ['web/packages/ui/src', '17-dark-factory-web-ui']]) {
+    await openEntity(path);
+    await page.getByRole('button', { name: 'Focus on floor', exact: true }).click();
+    await shot(name);
+  }
+  check('actual Dark Factory kernel, daemon, small package and web UI equipment');
+
   await openEntity('web/packages/ui/src/factory-scene');
   await page.getByRole('button', { name: 'Read exact source contents', exact: true }).click();
   const contents = page.getByRole('region', { name: 'Source contents', exact: true });
@@ -80,7 +87,6 @@ try {
   await phase('abandoned');
   await expect(page.locator('[data-proposed-room]')).toHaveCount(0);
   await expect(page.locator('[data-proposal-kind="removal"]')).toHaveCount(0);
-  await expect(page.locator('[data-proposed-room]')).toHaveCount(0);
   await expect(page.locator('[data-proposed-relationship]')).toHaveCount(0);
   await shot('06-abandoned');
   assert.deepEqual(await positions(), ordinaryPositions, 'abandonment must preserve integrated spatial map');

@@ -49,11 +49,13 @@ func TestArchiveHasImmutableRevisionExactInventoryAndRejectsEscapes(t *testing.T
 	if count != 3 {
 		t.Fatal("double-counted files")
 	}
-	var escaped bytes.Buffer
-	writer = tar.NewWriter(&escaped)
-	writer.WriteHeader(&tar.Header{Name: "../escape", Mode: 0600, Size: 0})
-	writer.Close()
-	if _, err := BuildArchive(context.Background(), escaped.Bytes(), "project", ""); err == nil {
-		t.Fatal("archive escaped root")
+	for _, name := range []string{"../escape", "..", "/absolute", "a/../../escape", "a/../alias", "./alias"} {
+		var escaped bytes.Buffer
+		writer = tar.NewWriter(&escaped)
+		writer.WriteHeader(&tar.Header{Name: name, Mode: 0600, Size: 0})
+		writer.Close()
+		if _, err := BuildArchive(context.Background(), escaped.Bytes(), "project", ""); err == nil || !strings.Contains(err.Error(), "invalid archived source path") {
+			t.Fatalf("archive path %q was not rejected before extraction: %v", name, err)
+		}
 	}
 }

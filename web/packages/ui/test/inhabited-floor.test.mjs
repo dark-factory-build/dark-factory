@@ -43,6 +43,19 @@ test("bounded aggregation retains ownership and active observations beyond room 
   assert.equal(scene.omittedLocations, 0);
 });
 
+test("automatic detail assembles command entry points in one stable source area", () => {
+  const commandNodes = [node("cmd", "cmd", "module", inv(0)), node("ctl", "cmd/factoryctl", "cmd", inv(8, 4), "package"), node("daemon", "cmd/factoryd", "cmd", inv(2), "package")];
+  const prepared = prepare({ ...topology, nodes: [...nodes, ...commandNodes] });
+  const floor = selectFloor(prepared), commandRoom = floor.topology.nodes.find((room) => room.path === "cmd");
+  assert.deepEqual(commandRoom.assemblies.map((assembly) => assembly.id), ["project:ctl", "project:daemon"]);
+  assert.equal(commandRoom.inventory.total.source, 10);
+  assert.equal(floor.visibleAncestor("project:ctl"), "project:cmd");
+  assert.equal(selectFloor(prepared, "fine").visibleAncestor("project:ctl"), "project:ctl");
+  const changed = selectFloor(prepare({ ...topology, nodes: [...nodes, ...commandNodes.map((item) => item.id === "ctl" ? { ...item, inventory: inv(90, 40) } : item)] }));
+  const geometry = (value) => layoutScene(value.topology).rooms.map(({ id, x, y, width, height }) => ({ id, x, y, width, height }));
+  assert.deepEqual(geometry(changed), geometry(floor), "ordinary file count changes do not rearrange rooms");
+});
+
 test("overlap stays separate; additions, abandonment and merge labels never move finished rooms", () => {
   const floor = selectFloor(prepare()), changes = items([record("1", [{ status: "modified", path: "internal/kernel/movement.go" }, { status: "added", path: "new/area/dispatcher.go" }, { status: "deleted", path: "web/ui/old.ts" }, { status: "renamed", old_path: "web/ui/scene/movement.ts", path: "new/area/routes.ts" }]), record("2", [{ status: "modified", path: "internal/kernel/movement.go" }])]);
   const projected = projectProposals(floor, changes);

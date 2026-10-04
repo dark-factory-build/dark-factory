@@ -179,7 +179,7 @@ export function selectFloor(prepared: ReturnType<typeof prepareFloor>, detail: F
     }] as const;
   }));
   const rootIds = new Set(hierarchies.map((hierarchy) => canonicalOf(hierarchy.projectRoom).id));
-  const wrapper = (node: SceneNode) => ["internal", "src", "lib", "packages", "apps", "cmd", "web"].includes(node.path.split("/").at(-1)!) && (children.get(node.id)?.length ?? 0) > 0;
+  const wrapper = (node: SceneNode) => ["internal", "src", "lib", "packages", "apps", "web"].includes(node.path.split("/").at(-1)!) && (children.get(node.id)?.length ?? 0) > 0;
   const candidates = canonical.filter((node) => {
     if (rootIds.has(node.id)) return true;
     if (detail === "fine") return true;

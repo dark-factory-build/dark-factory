@@ -55,7 +55,7 @@ func BuildArchive(ctx context.Context, archive []byte, project, revision string)
 			continue
 		}
 		name := item.Name
-		if name == "." || path.Clean(name) != name || path.IsAbs(name) || strings.HasPrefix(name, "../") {
+		if name == "." || path.Clean(name) != name || !filepath.IsLocal(name) {
 			return Snapshot{}, fmt.Errorf("invalid archived source path")
 		}
 		skip := false

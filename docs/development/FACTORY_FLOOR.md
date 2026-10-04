@@ -218,8 +218,11 @@ displayed total contains its assigned assemblies, excluding separately displayed
 child rooms. Inspectors, containment controls and dependency links resolve to the
 canonical owner, retaining that owner's direct and subtree counts rather than
 offering a second alias inspector with contradictory exact contents.
-Up to 32 immediate filename samples are sent, with `samples_omitted` and the
-existing frame budget's `inventory_omitted` disclosed. No source text is sent.
+Up to 32 exact immediate filenames are sampled evenly across the sorted list,
+including its endpoints; small lists remain complete. This gives large packages
+broader filename coverage without guessing responsibilities. `samples_omitted`
+and the existing frame budget's `inventory_omitted` disclose omissions. No source
+text is sent.
 
 ### Stable references and grouping
 
@@ -233,12 +236,15 @@ only by observed Git rename evidence; path identity alone never proves continuit
 The browser's persisted detail setting selects coarse areas, automatic useful
 areas, or fine directories on the same floor. Automatic grouping collapses
 structural wrappers such as internal/src/packages/apps and retains useful package
-rooms. Up to 96 rooms aggregate the remaining canonical entities under visible
+rooms; command entry points remain assemblies in their shared `cmd` area.
+Up to 96 rooms aggregate the remaining canonical entities under visible
 ancestors; all canonical source entities remain searchable. Each room pictures at most six
 assemblies with an explicit overflow label. Search focuses an entity's owning
 room and retains its exact source identity. Viewport culling bounds rendered
 rooms. Changing live work or proposal selection does not choose the room order.
 Explicit detail changes may regroup the floor while preserving selected identity.
+Assembled rooms share regular walls and corridor rows; equipment uses each room's
+work zone. File counts scale equipment within that zone without moving the walls.
 
 Assemblies combine source machinery, test rigs, control cabinets, document shelves
 and asset racks. Eligible file counts select clamped size buckets: 1–4, 5–20,
@@ -274,7 +280,10 @@ missing analysis. Dirty working-tree relationships are explicitly unavailable.
 Dashed +/× dependency cables and the existing Change inspector show these deltas
 without changing the integrated graph. Observed proposed resource counts use the
 same equipment vocabulary; their `?` marker does not assert final inventory or
-scale. Concurrent versions of a new area remain separate proposed assemblies.
+scale. Concurrent versions of a new area remain separate proposed assemblies. Selection
+filters versions before composition; overview caps pictures without ever summing
+competing versions into a fictitious aggregate. Selecting any Change reaches its
+own proposed version even when it is beyond the overview picture limit.
 
 Each proposal is independently keyed by project, repository and visual Change ID.
 Frames, repairs, dismantling marks and move destinations use the same assemblies
