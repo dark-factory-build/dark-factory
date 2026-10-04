@@ -76,7 +76,7 @@ func (daemon *Daemon) RunScheduler(ctx context.Context, spec SupervisorSpec) err
 			cancel()
 			return false
 		}
-		return factory.DispatchEnabled
+		return factory.DispatchEnabled && !daemon.releaseHold.Load()
 	}
 
 	startProbe := func() {

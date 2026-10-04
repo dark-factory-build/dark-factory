@@ -131,7 +131,7 @@ jobs:
               .gitignore|scripts/bootstrap-maintainer-v2.sh|scripts/release.sh)
                 macos=true; select_macos_mode full; control_plane=true
                 ;;
-              protocol/*|web/fixtures/*|spikes/browser-connectivity/*|internal/browser/*|internal/browserprotocol/*|internal/buildinfo/*|internal/install/*|cmd/factoryctl/*|scripts/reinstall-service.sh|launchd/*)
+              protocol/*|web/fixtures/*|spikes/browser-connectivity/*|internal/browser/*|internal/browserprotocol/*|internal/buildinfo/*|internal/install/*|cmd/factoryctl/*|launchd/*)
                 macos=true; select_macos_mode full
                 ;;
               cmd/*|internal/*|launchd/*|spikes/*)

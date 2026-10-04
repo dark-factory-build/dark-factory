@@ -16,7 +16,7 @@ repository/domain.
 | `cloudflare-env-clean.sh` | DEV | Cloudflare admin boundary and test |
 | `cold-review.sh` | DEV | independent review gate |
 | `dark-factory-browser-mcp.py` | DEV | documented provider/browser helper and tests |
-| `deploy-runtime.py` | DEV | parameterized runtime deployment path and deployment docs |
+| `deploy-runtime.py` | DEV | release-lane shim over `factoryctl release` |
 | `deploy-site.sh` | PRODUCT | owner Vercel project and `app.darkfactory.build` deployment; issue #971 |
 | `factory-autonomy.py` | PRODUCT | legacy launchd controller; `factory_home`, journals, and `release_configs`; issue #972 |
 | `factory-delivery.py` | PRODUCT | operator-owned deployment receipts enqueue an overseer follow-up through `factoryctl`; issue #973 |
@@ -40,7 +40,6 @@ repository/domain.
 | `prepare-release-source.sh` | DEV | release source selection and workflow |
 | `publication-parents.sh` | DEV | publication ancestry gate |
 | `publish-release.sh` | DEV | GitHub release publisher used by workflow |
-| `reinstall-service.sh` | DEV | service installation path and fixtures |
 | `render-homebrew-formula.sh` | DEV | release formula generation |
 | `test-bootstrap-maintainer-v2.sh` | DEV | bootstrap fixture |
 | `test-cloudflare-env.sh` | DEV | Cloudflare boundary fixture |
@@ -62,7 +61,6 @@ repository/domain.
 | `test-prepare-release-source.sh` | DEV | release-source fixture |
 | `test-publication-parents.sh` | DEV | ancestry fixture |
 | `test-publish-release.sh` | DEV | release-publisher fixture |
-| `test-reinstall-service.sh` | DEV | service installer fixture |
 | `test-repository-settings.sh` | DEV | repository-settings fixture |
 | `test-verification-profile.mjs` | DEV | browser profile unit fixture |
 | `test-verify-adversarial-review.sh` | DEV | review-policy fixture |

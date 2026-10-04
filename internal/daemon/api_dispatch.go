@@ -48,6 +48,10 @@ type Daemon struct {
 	// gate at a time.
 	gateHome, gateToolPath string
 	gateMu                 sync.Mutex
+	// releaseHold pauses admission in memory while a release drains; the
+	// durable dispatch switch is never written. releaseBusy is the one
+	// release this process runs.
+	releaseHold, releaseBusy atomic.Bool
 	// intakeIssues is a package-test-only remote failure/race seam.
 	intakeIssues func(context.Context, string, uint64, uint32, string, uint64) (maintainer.IssuePage, error)
 	// browserRemote is a package-test-only seam for operator calls that wait
@@ -419,6 +423,13 @@ func (daemon *Daemon) dispatch(ctx context.Context, call api.Call) api.Reply {
 			return newErrorReply(api.RemoteInvalidRequest)
 		}
 		return api.NewContentReply(daemon.GitHubConnection(ctx, input))
+	case api.CallRelease:
+		input, _ := call.ReleaseInput()
+		delivery, err := daemon.Release(ctx, input.SHA, input.Start)
+		if err != nil {
+			return newErrorReply(remoteErrorCode(err))
+		}
+		return api.NewContentReply(delivery)
 	case api.CallRemoteStatus:
 		status, err := daemon.RemoteStatus()
 		if err != nil {

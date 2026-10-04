@@ -229,6 +229,17 @@ func TestReviewCheckoutIsExactHeadAndLeavesRegisteredRepositoryUnchanged(t *test
 	if err := change.ReviewCheckout(context.Background(), git, repository, source, moved, 7, base, base, "main"); err == nil {
 		t.Fatal("review checkout accepted a head the pull request does not have")
 	}
+	// Pull 0 releases a merged commit: the base alone, at that commit.
+	merged := filepath.Join(root, "merged")
+	if err := change.ReviewCheckout(context.Background(), git, repository, source, merged, 0, fork, fork, "main"); err != nil {
+		t.Fatalf("merged commit: %v", err)
+	}
+	if got := runExternalGit(t, root, git, merged, "rev-parse", "HEAD"); got != fork {
+		t.Fatalf("merged HEAD = %s, want %s", got, fork)
+	}
+	if err := change.ReviewCheckout(context.Background(), git, repository, source, filepath.Join(root, "unmerged"), 0, head, head, "main"); err == nil {
+		t.Fatal("a commit the base does not contain was checked out")
+	}
 	if after := runExternalGit(t, root, git, repository, "for-each-ref"); after != refsBefore {
 		t.Fatalf("registered refs changed:\n%s\n%s", refsBefore, after)
 	}

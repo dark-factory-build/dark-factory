@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/dark-factory-build/dark-factory/internal/buildinfo"
 	"golang.org/x/sys/unix"
 )
 
@@ -22,8 +23,6 @@ const (
 	serviceBinaryMaxBytes  = int64(1) << 30
 	serviceBootoutPatience = 5 * time.Second
 )
-
-var serviceBinaryNames = [3]string{"factoryd", "factoryctl", "factory-runner"}
 
 // withServiceMutation serializes every lifecycle mutation on the exact home
 // directory. factoryd's lifetime flock is on the separate factory.lock inode,
@@ -206,23 +205,19 @@ func serviceInstallLockedAt(ctx context.Context, home, userHome string, config S
 	inspection, err := inspectServiceWithCapabilityAt(ctx, home, userHome, config, launchctl, capability)
 	status := inspection.status
 	if err == nil && (status.State == ServiceInstalled || status.State == ServiceRunning) {
-		if inspection.relayOrigin != config.RelayOrigin {
-			// Repeating an install is recognized only when it would render the
-			// same plist. A changed relay origin needs the old job removed.
-			return ServiceStatus{State: ServiceAmbiguous}, fmt.Errorf("%w %q; run factoryctl service uninstall first", ErrServiceRelayOrigin, inspection.relayOrigin)
+		if inspection.relayOrigin == config.RelayOrigin && inspection.toolPath == config.ToolPath && inspection.toolchainReadRoots == config.ToolchainReadRoots && inspection.developmentBrowserAddress == config.DevelopmentBrowserAddress {
+			return status, nil
 		}
-		if inspection.toolPath != config.ToolPath || inspection.toolchainReadRoots != config.ToolchainReadRoots {
-			return ServiceStatus{State: ServiceAmbiguous}, fmt.Errorf("%w: installed toolchain differs; run factoryctl service uninstall first", ErrServiceForeign)
+		// Changed settings re-render the plist and receipt in place around
+		// the installed binaries; only a release replaces those.
+		if inspection.observation.present {
+			if err := bootoutService(ctx, config, launchctl); err != nil {
+				return ServiceStatus{State: ServiceAmbiguous}, err
+			}
 		}
-		if inspection.developmentBrowserAddress != config.DevelopmentBrowserAddress {
-			return ServiceStatus{State: ServiceAmbiguous}, fmt.Errorf("%w: installed development browser address differs; run factoryctl service uninstall first", ErrServiceForeign)
-		}
-		return status, nil
+		return publishServiceJob(ctx, home, userHome, config, launchctl)
 	}
 	if err != nil && !errors.Is(err, ErrServiceResidue) {
-		if status.State == ServiceAmbiguous {
-			return status, err
-		}
 		return status, err
 	}
 	if errors.Is(err, ErrServiceResidue) {
@@ -273,16 +268,7 @@ func serviceInstallLockedAt(ctx context.Context, home, userHome string, config S
 			programDigest = digest
 		}
 	}
-	plistBytes, plistDigest, err := ServicePlist(home, config.Label, config.RelayOrigin, config.DevelopmentBrowserAddress, config.ToolPath, config.ToolchainReadRoots)
-	if err != nil {
-		return ServiceStatus{}, err
-	}
-	receipt := serviceReceipt{
-		Version: serviceReceiptVersion, Label: config.Label, PlistPath: plistPath,
-		PlistDigest: hex.EncodeToString(plistDigest[:]), ProgramDigest: programDigest,
-		RelayOrigin: config.RelayOrigin, DevelopmentBrowserAddress: config.DevelopmentBrowserAddress, ToolPath: config.ToolPath, ToolchainReadRoots: config.ToolchainReadRoots,
-	}
-	body, err := encodeServiceReceipt(receipt)
+	plistBytes, body, err := renderServiceJob(home, plistPath, config, programDigest)
 	if err != nil {
 		cleanupStage()
 		return ServiceStatus{}, err
@@ -326,6 +312,177 @@ func serviceInstallLockedAt(ctx context.Context, home, userHome string, config S
 		return ServiceStatus{State: ServiceInstalled}, fmt.Errorf("%w: bootstrap status %d: %v", ErrServiceLaunchctl, result.status, result.err)
 	}
 	return confirmServiceLoaded(ctx, home, config, plistPath, launchctl)
+}
+
+// renderServiceJob renders the plist and the receipt binding it to the
+// installed program digest.
+func renderServiceJob(home, plistPath string, config ServiceConfig, programDigest string) ([]byte, []byte, error) {
+	plistBytes, plistDigest, err := ServicePlist(home, config.Label, config.RelayOrigin, config.DevelopmentBrowserAddress, config.ToolPath, config.ToolchainReadRoots)
+	if err != nil {
+		return nil, nil, err
+	}
+	body, err := encodeServiceReceipt(serviceReceipt{
+		Version: serviceReceiptVersion, Label: config.Label, PlistPath: plistPath,
+		PlistDigest: hex.EncodeToString(plistDigest[:]), ProgramDigest: programDigest,
+		RelayOrigin: config.RelayOrigin, DevelopmentBrowserAddress: config.DevelopmentBrowserAddress, ToolPath: config.ToolPath, ToolchainReadRoots: config.ToolchainReadRoots,
+	})
+	return plistBytes, body, err
+}
+
+// publishServiceJob replaces the receipt and plist of an unloaded
+// installation with config's and bootstraps it.
+func publishServiceJob(ctx context.Context, home, userHome string, config ServiceConfig, launchctl launchctlRun) (ServiceStatus, error) {
+	programDigest, err := digestServiceProgram(home)
+	if err != nil {
+		return ServiceStatus{State: ServiceAmbiguous}, err
+	}
+	plistDirectory, plistPath := servicePlistLocation(userHome, config)
+	plistBytes, body, err := renderServiceJob(home, plistPath, config, programDigest)
+	if err != nil {
+		return ServiceStatus{State: ServiceAmbiguous}, err
+	}
+	// ponytail: a crash between these two writes leaves a receipt naming a
+	// plist that is not on disk, and status reports ambiguous until the
+	// install is repeated. Bind both in one write if that window matters.
+	if err := replaceFile(ServiceDirectoryPath(home), serviceReceiptName, body, 0o600); err != nil {
+		return ServiceStatus{State: ServiceAmbiguous}, err
+	}
+	if err := replaceFile(plistDirectory, config.plistName(), plistBytes, 0o600); err != nil {
+		return ServiceStatus{State: ServiceAmbiguous}, err
+	}
+	if result := launchctl(ctx, "bootstrap", "gui/"+strconv.Itoa(os.Geteuid()), plistPath); result.err != nil || result.status != 0 {
+		return ServiceStatus{State: ServiceInstalled}, fmt.Errorf("%w: bootstrap status %d: %v", ErrServiceLaunchctl, result.status, result.err)
+	}
+	return confirmServiceLoaded(ctx, home, config, plistPath, launchctl)
+}
+
+// verifyServiceRelease proves each binary is the expected release: the built
+// bytes carry exactly its linked receipt, and the staged copy, run, reports
+// that identity. It is a package-test seam.
+var verifyServiceRelease = func(ctx context.Context, sourceDir, stagedDir string, expected buildinfo.Identity) error {
+	for _, name := range serviceBinaryNames {
+		fd, err := unix.Open(filepath.Join(sourceDir, name), unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+		if err != nil {
+			return fmt.Errorf("%w: open release %s", ErrServiceAmbiguous, name)
+		}
+		file := os.NewFile(uintptr(fd), name)
+		_, inspectErr := buildinfo.InspectReleaseArtifact(file, name, expected)
+		_ = file.Close()
+		if inspectErr != nil {
+			return fmt.Errorf("%w: release %s: %v", ErrServiceForeign, name, inspectErr)
+		}
+	}
+	return runReleaseIdentities(ctx, stagedDir, expected)
+}
+
+// ServiceUpgrade installs the verified release binaries in sourceDir over
+// bin/current with one atomic swap, keeping the replaced set as bin/previous,
+// and leaves a trial marker for the next boot. userVersion is the running
+// build's schema version, so a rollback knows whether the database moved.
+func ServiceUpgrade(ctx context.Context, home, sourceDir string, expected buildinfo.Identity, userVersion int) error {
+	if ctx == nil || !validServicePath(sourceDir) || !expected.Release() {
+		return fmt.Errorf("%w: invalid upgrade request", ErrServiceAmbiguous)
+	}
+	_, err := withServiceMutation(ctx, home, func(*serviceHomeCapability) (ServiceStatus, error) {
+		receipt, present, err := readServiceReceipt(home)
+		if err != nil || !present {
+			return ServiceStatus{}, errors.Join(ErrServiceAmbiguous, errors.New("no installed service to upgrade"), err)
+		}
+		if err := receiptMatchesInstallation(receipt, home, ServiceConfig{Label: receipt.Label}, receipt.PlistPath); err != nil {
+			return ServiceStatus{}, err
+		}
+		// The new set is staged as bin/previous, so the one swap below both
+		// installs it and keeps the replaced set for a rollback.
+		previous := filepath.Join(ServiceDirectoryPath(home), "bin", "previous")
+		if err := removeOwnedTree(previous); err != nil {
+			return ServiceStatus{}, err
+		}
+		if err := os.Mkdir(previous, 0o700); err != nil {
+			return ServiceStatus{}, fmt.Errorf("%w: create package stage: %v", ErrServiceAmbiguous, err)
+		}
+		for _, name := range serviceBinaryNames {
+			if _, err := copyServiceBinary(filepath.Join(sourceDir, name), previous, name); err != nil {
+				return ServiceStatus{}, err
+			}
+		}
+		if err := verifyServiceRelease(ctx, sourceDir, previous, expected); err != nil {
+			return ServiceStatus{}, err
+		}
+		if err := WriteUpgradeMarker(home, UpgradeMarker{Target: expected.Source(), UserVersion: userVersion, State: UpgradeTrial}); err != nil {
+			return ServiceStatus{}, fmt.Errorf("%w: write upgrade marker: %v", ErrServiceAmbiguous, err)
+		}
+		if err := swapServicePackage(home, receipt); err != nil {
+			if errors.Is(err, errNotSwapped) {
+				_ = RemoveUpgrade(home)
+			}
+			return ServiceStatus{}, err
+		}
+		return ServiceStatus{}, nil
+	})
+	return err
+}
+
+var errNotSwapped = errors.New("package not swapped")
+
+// ServiceRollback swaps bin/previous back into bin/current, restores the
+// pre-upgrade database when restoreDatabase is set, and marks the marker
+// rolled back with reason for the old build to record.
+func ServiceRollback(ctx context.Context, home string, restoreDatabase bool, reason string) error {
+	marker, present, err := ReadUpgradeMarker(home)
+	if err != nil || !present {
+		return errors.Join(errors.New("no upgrade to roll back"), err)
+	}
+	// The database goes first: it is repeatable (a consumed backup means it
+	// already happened), and the old build cannot open a newer schema.
+	if restoreDatabase {
+		if _, err := os.Lstat(UpgradeBackupPath(home)); err == nil {
+			for _, sidecar := range []string{"-wal", "-shm"} {
+				if err := os.Remove(filepath.Join(home, databaseName+sidecar)); err != nil && !errors.Is(err, os.ErrNotExist) {
+					return err
+				}
+			}
+			if err := os.Rename(UpgradeBackupPath(home), filepath.Join(home, databaseName)); err != nil {
+				return err
+			}
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	if _, err := withServiceMutation(ctx, home, func(*serviceHomeCapability) (ServiceStatus, error) {
+		receipt, present, err := readServiceReceipt(home)
+		if err != nil || !present {
+			return ServiceStatus{}, errors.Join(ErrServiceAmbiguous, errors.New("no installed service to roll back"), err)
+		}
+		return ServiceStatus{}, swapServicePackage(home, receipt)
+	}); err != nil {
+		return err
+	}
+	// ponytail: a crash between the swap and this write leaves the old build
+	// a non-final marker; it records the release failed all the same.
+	marker.State, marker.Reason = UpgradeRolledBack, reason
+	return WriteUpgradeMarker(home, marker)
+}
+
+// swapServicePackage exchanges bin/previous and bin/current in one rename and
+// rebinds the receipt to the program now current.
+func swapServicePackage(home string, receipt serviceReceipt) error {
+	bin := filepath.Join(ServiceDirectoryPath(home), "bin")
+	if err := unix.RenamexNp(filepath.Join(bin, "previous"), filepath.Join(bin, "current"), unix.RENAME_SWAP); err != nil {
+		return errors.Join(ErrServiceAmbiguous, errNotSwapped, err)
+	}
+	if err := syncServiceDirectory(bin); err != nil {
+		return err
+	}
+	digest, err := digestServiceProgram(home)
+	if err != nil {
+		return err
+	}
+	receipt.ProgramDigest = digest
+	body, err := encodeServiceReceipt(receipt)
+	if err != nil {
+		return err
+	}
+	return replaceFile(ServiceDirectoryPath(home), serviceReceiptName, body, 0o600)
 }
 
 func serviceStart(ctx context.Context, home string, config ServiceConfig) (ServiceStatus, error) {
@@ -494,17 +651,20 @@ func serviceUninstallLockedAt(ctx context.Context, home, userHome string, config
 	if present {
 		defer func() { _ = directory.Close() }()
 		current := filepath.Join(ServiceDirectoryPath(home), "bin", "current")
-		for _, name := range serviceBinaryNames {
-			if err := removeOwnedFile(current, name); err != nil {
-				return ServiceStatus{State: ServiceAmbiguous}, err
-			}
-			// Exactly this engine's own stage names are crash residue it must
-			// resolve; nothing else in the tree is deletable without proof.
-			if err := removeOwnedFile(current, "."+name+".stage"); err != nil {
-				return ServiceStatus{State: ServiceAmbiguous}, err
+		previous := filepath.Join(ServiceDirectoryPath(home), "bin", "previous")
+		for _, directory := range []string{current, previous} {
+			for _, name := range serviceBinaryNames {
+				if err := removeOwnedFile(directory, name); err != nil {
+					return ServiceStatus{State: ServiceAmbiguous}, err
+				}
+				// Exactly this engine's own stage names are crash residue it must
+				// resolve; nothing else in the tree is deletable without proof.
+				if err := removeOwnedFile(directory, "."+name+".stage"); err != nil {
+					return ServiceStatus{State: ServiceAmbiguous}, err
+				}
 			}
 		}
-		for _, path := range []string{current, filepath.Join(ServiceDirectoryPath(home), "bin")} {
+		for _, path := range []string{current, previous, filepath.Join(ServiceDirectoryPath(home), "bin")} {
 			if path == filepath.Join(ServiceDirectoryPath(home), "bin") {
 				if err := removeOwnedTree(filepath.Join(path, ".current.stage")); err != nil {
 					return ServiceStatus{State: ServiceAmbiguous}, err
@@ -514,7 +674,7 @@ func serviceUninstallLockedAt(ctx context.Context, home, userHome string, config
 				return ServiceStatus{State: ServiceAmbiguous}, err
 			}
 		}
-		for _, name := range []string{serviceReceiptName, "." + serviceReceiptName + ".stage", serviceStderrLogName} {
+		for _, name := range []string{serviceReceiptName, "." + serviceReceiptName + ".stage", serviceStderrLogName, upgradeMarkerName, "." + upgradeMarkerName + ".stage", filepath.Base(UpgradeBackupPath(home))} {
 			if err := removeOwnedFile(ServiceDirectoryPath(home), name); err != nil {
 				return ServiceStatus{State: ServiceAmbiguous}, err
 			}
@@ -681,6 +841,12 @@ func writeExactFile(directory, name string, contents []byte, mode os.FileMode) e
 	if !errors.Is(err, unix.ENOENT) {
 		return fmt.Errorf("%w: probe %s", ErrServiceAmbiguous, name)
 	}
+	return replaceFile(directory, name, contents, mode)
+}
+
+// replaceFile publishes contents at name through a fresh stage and one rename.
+func replaceFile(directory, name string, contents []byte, mode os.FileMode) error {
+	path := filepath.Join(directory, name)
 	stagePath := filepath.Join(directory, "."+name+".stage")
 	file, err := os.OpenFile(stagePath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
 	if errors.Is(err, os.ErrExist) {

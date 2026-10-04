@@ -11,12 +11,16 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
 
+	"github.com/dark-factory-build/dark-factory/internal/api"
+	"github.com/dark-factory-build/dark-factory/internal/buildinfo"
 	"github.com/dark-factory-build/dark-factory/internal/install"
+	"github.com/dark-factory-build/dark-factory/internal/kernel"
 )
 
 // TestBlackBoxServiceLifecycle proves the managed launchd installation with
@@ -157,6 +161,30 @@ func TestBlackBoxServiceLifecycle(t *testing.T) {
 	second := fixture.operatorID(t, fixture.runFactoryctl(t, 0, "task", "add", "--project", project, "--agent", agent, "--title", "Managed restart run", "--body", happyPathBody))
 	fixture.awaitTaskStatus(t, client, second, "succeeded", 60*time.Second)
 
+	// A release swaps in release binaries; the SIGTERMed daemon exits 75 and
+	// launchd starts them on trial, and they promote once up and verified.
+	released := buildReleaseBinaries(t, strings.Repeat("1", 40))
+	if err := install.ServiceUpgrade(context.Background(), fixture.home, released.directory, released.identity, kernel.SchemaVersion); err != nil {
+		t.Fatal(err)
+	}
+	restartService(t, fixture, serviceArgs, syscall.SIGTERM)
+	awaitServiceBuild(t, fixture, released.identity.Source())
+	awaitUpgradeSettled(t, fixture.home)
+	// A trial build that dies before promotion is rolled back on its next
+	// boot, and the previous build serves again.
+	trial := buildReleaseBinaries(t, strings.Repeat("2", 40))
+	if err := install.ServiceUpgrade(context.Background(), fixture.home, trial.directory, trial.identity, kernel.SchemaVersion); err != nil {
+		t.Fatal(err)
+	}
+	restartService(t, fixture, serviceArgs, syscall.SIGTERM)
+	awaitServiceBuild(t, fixture, trial.identity.Source())
+	restartService(t, fixture, serviceArgs, syscall.SIGKILL)
+	awaitServiceBuild(t, fixture, released.identity.Source())
+	awaitUpgradeSettled(t, fixture.home)
+	if state = serviceState(t, fixture.runFactoryctl(t, 0, serviceArgs("status")...)); state.State != "running" {
+		t.Fatalf("rolled back status = %+v", state)
+	}
+
 	// Uninstall removes the job and every artifact; absence is provable.
 	state = serviceState(t, fixture.runFactoryctl(t, 0, serviceArgs("uninstall")...))
 	if state.State != "absent" {
@@ -183,6 +211,89 @@ func TestBlackBoxServiceLifecycle(t *testing.T) {
 		t.Fatalf("final status = %+v", state)
 	}
 	awaitNoHomeProcesses(t, fixture.home, 20*time.Second)
+}
+
+type releaseBinaries struct {
+	directory string
+	identity  buildinfo.Identity
+}
+
+// buildReleaseBinaries builds this tree's three binaries as a release of
+// source, the way factoryd builds one.
+func buildReleaseBinaries(t *testing.T, source string) releaseBinaries {
+	t.Helper()
+	identity, ok := buildinfo.Expected("0.0.0", source, runtime.GOOS+"/"+runtime.GOARCH)
+	if !ok {
+		t.Fatal("invalid release identity")
+	}
+	directory := t.TempDir()
+	for _, name := range []string{"factoryd", "factoryctl", "factory-runner"} {
+		output := filepath.Join(directory, name)
+		command := exec.Command("go", "build", "-trimpath", "-buildvcs=false", "-ldflags", "-s -w -X github.com/dark-factory-build/dark-factory/internal/buildinfo.receipt="+identity.Receipt(), "-o", output, "../../cmd/"+name)
+		command.Env = append(os.Environ(), "CGO_ENABLED=0")
+		if log, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("build %s: %v\n%s", name, err, log)
+		}
+		if err := os.Chmod(output, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return releaseBinaries{directory: directory, identity: identity}
+}
+
+// restartService signals the running daemon and waits for launchd to start
+// another one.
+func restartService(t *testing.T, fixture *blackBoxFixture, serviceArgs func(string) []string, signal syscall.Signal) {
+	t.Helper()
+	before := serviceState(t, fixture.runFactoryctl(t, 0, serviceArgs("status")...))
+	if before.State != "running" {
+		t.Fatalf("status before restart = %+v", before)
+	}
+	if err := syscall.Kill(before.PID, signal); err != nil {
+		t.Fatal(err)
+	}
+	for deadline := time.Now().Add(60 * time.Second); ; time.Sleep(250 * time.Millisecond) {
+		// Status may be refused while launchd is between processes.
+		var state serviceStateOutput
+		output, _ := exec.Command(fixture.factoryctl, serviceArgs("status")...).Output()
+		if json.Unmarshal(output, &state) == nil && state.State == "running" && state.PID != before.PID {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("launchd did not restart pid %d: %+v", before.PID, state)
+		}
+	}
+}
+
+func awaitServiceBuild(t *testing.T, fixture *blackBoxFixture, source string) {
+	t.Helper()
+	for deadline := time.Now().Add(60 * time.Second); ; time.Sleep(250 * time.Millisecond) {
+		if client, err := api.NewOperatorClient(install.LocalAPISocketPath(fixture.home), filepath.Join(fixture.home, "operator.token")); err == nil {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			web, err := client.WebStatus(ctx)
+			cancel()
+			if err == nil && web.Build.Source == source {
+				return
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the service never served build %s", source)
+		}
+	}
+}
+
+// awaitUpgradeSettled waits for promotion (60s after the trial build is up)
+// or for the old build to record a rollback: either removes the marker.
+func awaitUpgradeSettled(t *testing.T, home string) {
+	t.Helper()
+	for deadline := time.Now().Add(120 * time.Second); ; time.Sleep(time.Second) {
+		if _, present, err := install.ReadUpgradeMarker(home); err == nil && !present {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the upgrade never settled")
+		}
+	}
 }
 
 func serviceStartupOutput(path string) func() string {

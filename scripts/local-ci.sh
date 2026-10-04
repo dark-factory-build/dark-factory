@@ -44,7 +44,6 @@ if [ "$local_ci_mode" = full ]; then
     ./scripts/check-toolchain-pins.sh
     ./scripts/test-local-ci-environment.sh
     ./scripts/test-new-worktree.sh
-    ./scripts/test-reinstall-service.sh
     ./scripts/test-deploy-site.sh
     node ./scripts/test-verification-profile.mjs
     ./scripts/test-cold-review.sh

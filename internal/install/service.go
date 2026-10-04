@@ -9,10 +9,15 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
+
+	"github.com/dark-factory-build/dark-factory/internal/buildinfo"
 )
 
 // DefaultServiceLabel is the production launchd label. Every test and E2E
@@ -41,12 +46,87 @@ var (
 	ErrServiceReceipt   = errors.New("service receipt is invalid")
 	ErrServiceForeign   = errors.New("service artifact is not this installation's property")
 	ErrServiceResidue   = errors.New("service installation residue requires uninstall")
-
-	// ErrServiceRelayOrigin is the one refusal factoryctl prints verbatim, so
-	// it is assembled only from this engine's own words and the origin its own
-	// receipt recorded; no platform diagnostic is ever joined onto it.
-	ErrServiceRelayOrigin = fmt.Errorf("%w: the installed service uses a different relay origin", ErrServiceForeign)
 )
+
+var serviceBinaryNames = [3]string{"factoryd", "factoryctl", "factory-runner"}
+
+// UpgradeMarker is the one in-flight self-upgrade, kept at
+// <home>.service/upgrade from the swap until the trial build is promoted or
+// the old build has recorded the rollback.
+type UpgradeMarker struct {
+	Target      string `json:"target"`
+	UserVersion int    `json:"user_version"`
+	Boots       int    `json:"boots"`
+	State       string `json:"state"`
+	Reason      string `json:"reason,omitempty"`
+}
+
+const (
+	UpgradeTrial      = "trial"
+	UpgradeRolledBack = "rolled_back"
+	upgradeMarkerName = "upgrade"
+)
+
+// UpgradeBackupPath is the database copy taken just before the swap.
+func UpgradeBackupPath(home string) string {
+	return filepath.Join(ServiceDirectoryPath(home), "upgrade.sqlite3")
+}
+
+func ReadUpgradeMarker(home string) (marker UpgradeMarker, present bool, err error) {
+	body, err := os.ReadFile(filepath.Join(ServiceDirectoryPath(home), upgradeMarkerName))
+	if errors.Is(err, os.ErrNotExist) {
+		return marker, false, nil
+	}
+	if err == nil && (json.Unmarshal(body, &marker) != nil || marker.Target == "") {
+		err = fmt.Errorf("%w: upgrade marker", ErrServiceReceipt)
+	}
+	return marker, err == nil, err
+}
+
+func WriteUpgradeMarker(home string, marker UpgradeMarker) error {
+	body, err := json.Marshal(marker)
+	if err != nil {
+		return err
+	}
+	stage := filepath.Join(ServiceDirectoryPath(home), "."+upgradeMarkerName+".stage")
+	if err := os.WriteFile(stage, body, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(stage, filepath.Join(ServiceDirectoryPath(home), upgradeMarkerName))
+}
+
+// VerifyInstalledRelease runs each installed binary and requires it to
+// report exactly the expected release identity.
+func VerifyInstalledRelease(ctx context.Context, home string, expected buildinfo.Identity) error {
+	return runReleaseIdentities(ctx, filepath.Join(ServiceDirectoryPath(home), "bin", "current"), expected)
+}
+
+func runReleaseIdentities(ctx context.Context, directory string, expected buildinfo.Identity) error {
+	want := new(bytes.Buffer)
+	if !expected.Release() || expected.WriteJSON(want) != nil {
+		return errors.New("invalid release identity")
+	}
+	for _, name := range serviceBinaryNames {
+		runCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		got, err := exec.CommandContext(runCtx, filepath.Join(directory, name), "--build-identity").Output()
+		cancel()
+		if err != nil || !bytes.Equal(got, want.Bytes()) {
+			return fmt.Errorf("%w: %s does not report release %s", ErrServiceForeign, name, expected.Source())
+		}
+	}
+	return nil
+}
+
+// RemoveUpgrade forgets a settled upgrade: the marker and the backup.
+func RemoveUpgrade(home string) error {
+	var result error
+	for _, path := range []string{filepath.Join(ServiceDirectoryPath(home), upgradeMarkerName), UpgradeBackupPath(home)} {
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			result = errors.Join(result, err)
+		}
+	}
+	return result
+}
 
 // ServiceState is the bounded read-only projection returned by factoryctl.
 // Absence is provable directly; present states are provable only through the

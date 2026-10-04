@@ -2,13 +2,23 @@ package daemon
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/dark-factory-build/dark-factory/internal/api"
+	"github.com/dark-factory-build/dark-factory/internal/buildinfo"
+	"github.com/dark-factory-build/dark-factory/internal/change"
+	"github.com/dark-factory-build/dark-factory/internal/install"
+	"github.com/dark-factory-build/dark-factory/internal/kernel"
 )
 
 // No other test in this package reaches GitHub: the shared window starts closed
@@ -113,4 +123,143 @@ func TestPublishedReleaseIsValidatedCachedAndNeverBlocksTheConsole(t *testing.T)
 	releaseMu.Lock()
 	releaseNext = time.Now().Add(24 * time.Hour)
 	releaseMu.Unlock()
+}
+
+// releaseFixture is a publishing project with a registered checkout of
+// factoryd's own repository, a home with its service directory, a live run
+// (settle ends it), and every release side effect replaced by a recorder.
+func releaseFixture(t *testing.T) (*dispatchFixture, func(), chan string) {
+	t.Helper()
+	fixture, project, _, settle := publishedTask(t)
+	ctx := context.Background()
+	repository, err := kernel.RepositoryIDFromBytes(mustIDBytes(t, testID(240)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity := kernel.RepositorySourceIdentity{RootDevice: 1, RootInode: 4, GitDevice: 1, GitInode: 5, OriginDigest: [32]byte{2}, PublicationRepository: selfRepository}
+	if _, err := fixture.store.AddProjectRepository(ctx, kernel.NewProjectRepository{ID: repository, ProjectID: project, Name: "self", Root: "/self-repository", BaseRef: "main", SourceIdentity: &identity}, mustKernelTime(t, 4)); err != nil {
+		t.Fatal(err)
+	}
+	home := filepath.Join(t.TempDir(), "factory")
+	if err := os.MkdirAll(install.ServiceDirectoryPath(home), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	fixture.daemon.ConfigureGate(home, "/usr/bin:/bin")
+	events := make(chan string, 8)
+	build, upgrade, exit, limit, poll := releaseBuild, releaseUpgrade, releaseExit, releaseDrainLimit, releaseDrainPoll
+	t.Cleanup(func() {
+		releaseBuild, releaseUpgrade, releaseExit, releaseDrainLimit, releaseDrainPoll = build, upgrade, exit, limit, poll
+	})
+	releaseBuild = func(_ context.Context, _ *Daemon, root string, _ change.RepositorySourceIdentity, sha, _ string) (buildinfo.Identity, error) {
+		events <- "build " + root
+		value, _ := buildinfo.Expected("1.2.3", sha, "darwin/arm64")
+		return value, nil
+	}
+	releaseUpgrade = func(_ context.Context, upgradeHome, _ string, identity buildinfo.Identity, userVersion int) error {
+		if _, err := os.Stat(install.UpgradeBackupPath(upgradeHome)); err != nil || userVersion != kernel.SchemaVersion {
+			t.Errorf("upgrade without a backup: %v, user_version %d", err, userVersion)
+		}
+		events <- "upgrade " + identity.Source()
+		return nil
+	}
+	releaseExit = func() { events <- "exit" }
+	releaseDrainLimit, releaseDrainPoll = 200*time.Millisecond, 5*time.Millisecond
+	return fixture, settle, events
+}
+
+func awaitRelease(t *testing.T, daemon *Daemon, sha string, settled func(kernel.ProductionDelivery) bool) kernel.ProductionDelivery {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		delivery, err := daemon.Release(context.Background(), sha, false)
+		if err == nil && settled(delivery) {
+			return delivery
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("release = %+v, %v", delivery, err)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func TestReleaseBuildsDrainsBacksUpAndSwapsThenRestarts(t *testing.T) {
+	fixture, settle, events := releaseFixture(t)
+	settle()
+	sha := strings.Repeat("a", 40)
+	delivery, err := fixture.daemon.Release(context.Background(), sha, true)
+	if err != nil || delivery.State != "running" || delivery.Phase != "build" || delivery.ID != "release:"+sha {
+		t.Fatalf("start = %+v, %v", delivery, err)
+	}
+	for _, want := range []string{"build /self-repository", "upgrade " + sha, "exit"} {
+		if got := <-events; got != want {
+			t.Fatalf("event %q, want %q", got, want)
+		}
+	}
+	delivery = awaitRelease(t, fixture.daemon, sha, func(value kernel.ProductionDelivery) bool { return value.Phase == "trial" })
+	if delivery.State != "running" || !fixture.daemon.releaseHold.Load() {
+		t.Fatalf("restarting release = %+v, hold %t", delivery, fixture.daemon.releaseHold.Load())
+	}
+	// The restarted build records the outcome.
+	if err := fixture.daemon.FinishRelease(context.Background(), sha, "verified", ""); err != nil {
+		t.Fatal(err)
+	}
+	if delivery, err = fixture.daemon.Release(context.Background(), sha, false); err != nil || delivery.State != "verified" || delivery.VerifiedAt == 0 || delivery.Phase != "" {
+		t.Fatalf("verified release = %+v, %v", delivery, err)
+	}
+}
+
+func TestReleaseDrainTimeoutReleasesTheHoldAndNeverWritesDispatch(t *testing.T) {
+	fixture, _, events := releaseFixture(t)
+	before, err := fixture.store.Factory(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sha := strings.Repeat("b", 40)
+	if _, err := fixture.daemon.Release(context.Background(), sha, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.daemon.Release(context.Background(), strings.Repeat("c", 40), true); !errors.Is(err, kernel.ErrConflict) {
+		t.Fatalf("second concurrent release = %v", err)
+	}
+	delivery := awaitRelease(t, fixture.daemon, sha, func(value kernel.ProductionDelivery) bool { return value.State == "failed" })
+	if delivery.Phase != "drain" || !strings.HasPrefix(delivery.Reason, "drain_timeout: run ") || !strings.HasSuffix(delivery.Reason, "is admitted") {
+		t.Fatalf("timed out release = %+v", delivery)
+	}
+	if fixture.daemon.releaseHold.Load() || fixture.daemon.releaseBusy.Load() {
+		t.Fatal("a timed out drain kept admission held")
+	}
+	if got := <-events; got != "build /self-repository" || len(events) != 0 {
+		t.Fatalf("timed out release went on to %q", got)
+	}
+	after, err := fixture.store.Factory(context.Background())
+	if err != nil || after.Revision != before.Revision || after.DispatchEnabled != before.DispatchEnabled {
+		t.Fatalf("dispatch moved: %+v -> %+v, %v", before, after, err)
+	}
+}
+
+func TestSchedulerAdmitsNothingWhileAReleaseHoldsAdmission(t *testing.T) {
+	daemon := newSchedulerTestDaemon(t)
+	daemon.releaseHold.Store(true)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	var calls atomic.Int64
+	go func() {
+		done <- daemon.RunScheduler(ctx, SupervisorSpec{scheduledAttempt: func(_ context.Context, spec SupervisorSpec) (kernel.Run, error) {
+			calls.Add(1)
+			spec.admissionObserved(false)
+			return kernel.Run{}, fmt.Errorf("%w: empty", kernel.ErrConflict)
+		}})
+	}()
+	time.Sleep(50 * time.Millisecond)
+	if calls.Load() != 0 {
+		t.Fatal("the scheduler admitted work during a release hold")
+	}
+	daemon.releaseHold.Store(false)
+	daemon.notifyScheduler()
+	waitSchedulerCalls(t, &calls, 1)
+	cancel()
+	if err := waitSchedulerDone(t, done); err != nil {
+		t.Fatal(err)
+	}
 }

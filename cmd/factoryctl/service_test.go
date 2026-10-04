@@ -6,7 +6,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"fmt"
 	"net"
 	"reflect"
 	"strings"
@@ -258,24 +257,6 @@ func TestServiceStatusCLIMapsFailuresWithoutPrivateDiagnostics(t *testing.T) {
 				t.Fatalf("failure = exit %d stdout %q stderr %q", exit, stdout.String(), stderr.String())
 			}
 		})
-	}
-}
-
-func TestServiceCLIPrintsTheChangedRelayOriginRefusal(t *testing.T) {
-	const origin = "wss://relay.darkfactory.build"
-	var stdout, stderr bytes.Buffer
-	exit := runWithDependencies(context.Background(), []string{"service", "status", "--home", "/private/tmp/factory"}, func(string) string {
-		return "/private/tmp/user"
-	}, &stdout, &stderr, nil, func(context.Context, string) (install.ServiceStatus, error) {
-		return install.ServiceStatus{}, fmt.Errorf("%w %q; run factoryctl service uninstall first", install.ErrServiceRelayOrigin, origin)
-	})
-	if exit != exitFailure || stdout.Len() != 0 {
-		t.Fatalf("refusal = exit %d, stdout %q", exit, stdout.String())
-	}
-	// Without both halves the operator cannot tell what is installed or how to
-	// replace it, which is the whole point of refusing instead of no-opping.
-	if !strings.Contains(stderr.String(), origin) || !strings.Contains(stderr.String(), "service uninstall") {
-		t.Fatalf("refusal stderr = %q", stderr.String())
 	}
 }
 
