@@ -22,11 +22,42 @@ PUBLICATION_SPEC = importlib.util.spec_from_file_location("factory_publication",
 publication = importlib.util.module_from_spec(PUBLICATION_SPEC)
 PUBLICATION_SPEC.loader.exec_module(publication)
 
-INTAKE_SPEC = importlib.util.spec_from_file_location("factory_intake", Path(__file__).with_name("factory-intake.py"))
-intake = importlib.util.module_from_spec(INTAKE_SPEC)
-INTAKE_SPEC.loader.exec_module(intake)
-atomic_json = intake.atomic_json
-failure_tail = intake.failure_tail
+
+def atomic_json(path: Path, value: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            json.dump(value, stream, indent=2, sort_keys=True)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        directory = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    except BaseException:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+AUTHORIZATION = re.compile(r"(?i)(authorization\W{1,4})[^\r\n]+")
+SECRET = re.compile(r"(?i)(bearer|api[_-]?key|password|token|secret)(\W{1,4})\S+|\b(gh[pousr]_|github_pat_)\w+")
+
+
+def failure_tail(stderr: str) -> str:
+    # Children may write credentials or private task text to stderr, and both
+    # receipts and the controller log are durable: keep only a bounded,
+    # single-line tail with labelled values and GitHub tokens starred and the
+    # operator's home shortened.
+    text = SECRET.sub(lambda match: (match.group(1) or "") + (match.group(2) or "") + "***", AUTHORIZATION.sub(r"\1***", stderr.replace(str(Path.home()), "~")))
+    return " ".join(re.sub(r"[\x00-\x1f\x7f-\x9f]", " ", text).split())[-2000:]
+
 
 SHA = re.compile(r"^[0-9a-f]{40}$")
 MAX_RANGE_COMMITS = 100
