@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"syscall"
 	"time"
@@ -200,12 +201,22 @@ func (daemon *Daemon) finishReviewRouting(ctx context.Context, project kernel.Pr
 		}
 		_ = daemon.store.RecordProductionReview(ctx, project, repository, op.Request.PullNumber, verdict, at)
 	}
-	if op.State == "failed" && op.EnqueueID != "" {
-		return daemon.escalatePull(ctx, project, repository, op, "the Maintainer App did not enqueue it: "+op.Detail)
-	}
 	if !op.RoutePending {
 		return nil
 	}
+	if op.State == "failed" {
+		err = daemon.escalatePull(ctx, project, repository, op, "the Maintainer App did not enqueue it: "+op.Detail)
+	} else {
+		err = daemon.routeSendBack(ctx, project, repository, op, at)
+	}
+	if err != nil {
+		return err
+	}
+	op.RoutePending, op.UpdatedAt = false, daemon.now()
+	return durableReviewStore{store: daemon.store, project: project, repository: repository, now: daemon.now}.Update(ctx, op)
+}
+
+func (daemon *Daemon) routeSendBack(ctx context.Context, project kernel.ProjectID, repository string, op review.Operation, at kernel.UnixMillis) error {
 	note := op.Detail
 	if op.Submitted && op.Verdict == "request_changes" {
 		note = "This is the review of record for exact head " + op.Request.Head + ". No other verdict on this head supersedes its findings: correct each one.\n\n" + note
@@ -224,11 +235,7 @@ func (daemon *Daemon) finishReviewRouting(ctx context.Context, project kernel.Pr
 	case task.WorkRevision.Int64() > 3:
 		err = daemon.escalatePull(ctx, project, repository, op, "it is past two repair rounds; the latest went back to its task:\n\n"+note)
 	}
-	if err != nil {
-		return err
-	}
-	op.RoutePending, op.UpdatedAt = false, daemon.now()
-	return durableReviewStore{store: daemon.store, project: project, repository: repository, now: daemon.now}.Update(ctx, op)
+	return err
 }
 
 // escalatePull hands a pull request the pipeline cannot advance to the
@@ -445,7 +452,10 @@ func namesChangedPath(ctx context.Context, checkout, base, text string) bool {
 	command.Env = reviewEnvironment(filepath.Dir(checkout))
 	output, err := command.Output()
 	for _, path := range strings.Split(string(output), "\x00") {
-		if err == nil && path != "" && strings.Contains(text, path) {
+		// The whole relative path, not preceded by a path character and not
+		// followed by a word character, '/' or '-' (a sentence's full stop
+		// may follow it): a file named go is not named by "looks good".
+		if err == nil && path != "" && regexp.MustCompile(`(^|[^\w./-])`+regexp.QuoteMeta(path)+`([^\w/-]|$)`).MatchString(text) {
 			return true
 		}
 	}

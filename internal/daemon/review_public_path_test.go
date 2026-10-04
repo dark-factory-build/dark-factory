@@ -4,8 +4,11 @@ package daemon
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -17,6 +20,7 @@ import (
 
 type publicReviewBackend struct {
 	killed, submitAmbiguous, requestChanges bool
+	enqueueRefused                          bool
 	reviews, submits, enqueues              int
 	enqueuedBase, enqueuedSHA               string
 	journal                                 map[string]string
@@ -53,6 +57,9 @@ func (b *publicReviewBackend) Submit(_ context.Context, operation review.Operati
 func (b *publicReviewBackend) Enqueue(_ context.Context, operation review.Operation) error {
 	b.enqueues++
 	b.enqueuedBase, b.enqueuedSHA = operation.Request.BaseRef, operation.Request.Base
+	if b.enqueueRefused {
+		return errors.New("review: Maintainer rejected operation")
+	}
 	return b.record("enqueue_pull_request", operation.EnqueueID)
 }
 
@@ -427,5 +434,56 @@ func TestMergeQueueEjectionSendsBackOnceAndAMergeCloses(t *testing.T) {
 		if op.State != test.state || op.RoutePending || sentBack != (test.state == "ejected") || current.WorkRevision.Int64() > 2 {
 			t.Fatalf("%s: operation=%+v task revision %d feedback %q", test.state, op, current.WorkRevision.Int64(), kernel.TaskFeedback(current))
 		}
+	}
+}
+
+// An enqueue the App refused leaves its operation failed but pending, in the
+// same write, so the overseer escalation survives a failed or interrupted
+// attempt and lands exactly once on a later tick.
+func TestRefusedEnqueueEscalatesOnceEvenAfterAFailedTick(t *testing.T) {
+	fixture, project, _, settle := publishedTask(t)
+	settle()
+	ctx := context.Background()
+	backend := &publicReviewBackend{enqueueRefused: true}
+	now := fixture.daemon.now
+	// The coordinator alone stands in for a daemon that stopped before
+	// escalating.
+	coordinator := review.Coordinator{Store: durableReviewStore{store: fixture.store, project: project, repository: "team/repo", now: now}, Backend: backend, Now: now}
+	request := publishedReviewRequest()
+	if op, err := coordinator.Start(ctx, review.Request{Repository: request.Repository, PullNumber: request.PullNumber, Head: request.Head, Base: request.Base, BaseRef: request.BaseRef, Body: request.Body, Provider: request.Provider}); err == nil || op.State != "failed" || !op.RoutePending {
+		t.Fatalf("refused enqueue operation=%+v err=%v", op, err)
+	}
+	fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return backend }
+	digest := sha256.Sum256([]byte(fmt.Sprintf("escalation\x00%s\x00team/repo\x0012", project)))
+	escalation := mustTaskID(t, hex.EncodeToString(digest[:kernel.IDBytes]))
+	escalations := func() int {
+		if _, found, err := fixture.store.Task(ctx, escalation); err != nil || !found {
+			return 0
+		}
+		return 1
+	}
+	// The tick reads the clock to age the operation, to stamp routing, then
+	// to stamp the escalation: only that third read fails.
+	reads := 0
+	fixture.daemon.now = func() time.Time {
+		if reads++; reads == 3 {
+			return time.Unix(-1, 0)
+		}
+		return now()
+	}
+	if _, err := fixture.daemon.advanceReviewOperations(ctx, false); err != nil {
+		t.Fatal(err)
+	}
+	if reads < 3 || escalations() != 0 || !lastDurableReview(t, fixture.store, project).RoutePending {
+		t.Fatalf("after a failed escalation (clock reads %d) it was dropped or recorded", reads)
+	}
+	fixture.daemon.now = now
+	for range 2 {
+		if _, err := fixture.daemon.advanceReviewOperations(ctx, false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := escalations(); got != 1 || lastDurableReview(t, fixture.store, project).RoutePending {
+		t.Fatalf("escalations=%d pending=%v, want one delivered escalation", got, lastDurableReview(t, fixture.store, project).RoutePending)
 	}
 }

@@ -435,6 +435,9 @@ func (c Coordinator) Retry(ctx context.Context, failed Operation) (Operation, er
 
 func (c Coordinator) fail(ctx context.Context, op Operation, cause error, retryable bool) (Operation, error) {
 	op.State, op.Detail, op.Retryable, op.UpdatedAt = "failed", cause.Error(), retryable, c.Now()
+	// An ALLOW whose enqueue did not happen stays pending, in the same write,
+	// until the overseer has been told.
+	op.RoutePending = op.EnqueueID != ""
 	if err := c.Store.Update(ctx, op); err != nil {
 		return Operation{}, errors.Join(cause, err)
 	}

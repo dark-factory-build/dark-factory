@@ -58,7 +58,7 @@ func reviewerFixture(t *testing.T, reviewers ...string) (*daemonReviewBackend, m
 	fixture, project := reviewPublicFixture(t)
 	ctx := context.Background()
 	bin := t.TempDir()
-	script := "#!/bin/sh\n[ -e \"$CODEX_HOME/limited\" ] && { echo \"■ You've hit your usage limit. Try again later.\"; exit 1; }\n[ -e \"$CODEX_HOME/quoted\" ] && { echo \"the task says: You've hit your usage limit\"; exit 1; }\n[ -e \"$CODEX_HOME/hang\" ] && { sleep 600 & echo $$ > \"$CODEX_HOME/pid\"; wait; }\n[ -e \"$CODEX_HOME/stamp\" ] && { for prompt; do :; done; echo \"$prompt\"; echo \"VERDICT: ALLOW\"; exit 0; }\necho \"read changed.go\"\necho \"VERDICT: ALLOW\"\n"
+	script := "#!/bin/sh\n[ -e \"$CODEX_HOME/limited\" ] && { echo \"■ You've hit your usage limit. Try again later.\"; exit 1; }\n[ -e \"$CODEX_HOME/quoted\" ] && { echo \"the task says: You've hit your usage limit\"; exit 1; }\n[ -e \"$CODEX_HOME/hang\" ] && { sleep 600 & echo $$ > \"$CODEX_HOME/pid\"; wait; }\n[ -e \"$CODEX_HOME/say\" ] && { cat \"$CODEX_HOME/say\"; exit 0; }\n[ -e \"$CODEX_HOME/stamp\" ] && { for prompt; do :; done; echo \"$prompt\"; echo \"VERDICT: ALLOW\"; exit 0; }\necho \"read changed.go\"\necho \"VERDICT: ALLOW\"\n"
 	if err := os.WriteFile(filepath.Join(bin, "codex"), []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -122,6 +122,10 @@ func reviewerRequest() review.Request {
 // reviewCheckout is a checkout whose change against its base adds changed.go,
 // with the request for it.
 func reviewCheckout(t *testing.T) (string, review.Request) {
+	return reviewCheckoutChanging(t, "changed.go")
+}
+
+func reviewCheckoutChanging(t *testing.T, file string) (string, review.Request) {
 	t.Helper()
 	dir := t.TempDir()
 	git := func(args ...string) string {
@@ -135,10 +139,10 @@ func reviewCheckout(t *testing.T) (string, review.Request) {
 	git("commit", "-q", "--allow-empty", "-m", "base")
 	request := reviewerRequest()
 	request.Base = git("rev-parse", "HEAD")
-	if err := os.WriteFile(filepath.Join(dir, "changed.go"), []byte("package changed\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, file), []byte("changed\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	git("add", "changed.go")
+	git("add", file)
 	git("commit", "-q", "-m", "head")
 	return dir, request
 }
@@ -159,6 +163,22 @@ func TestAnAllowThatNamesNoChangedPathIsNoVerdict(t *testing.T) {
 	}
 	if verdict, err := backend.Review(context.Background(), checkout, request); err != nil || verdict.Event != "ALLOW" {
 		t.Fatalf("verdict=%+v err=%v, want an ALLOW that names changed.go", verdict, err)
+	}
+}
+
+// A path is named only as a whole path: a changed file named go is not named
+// by "looks good", but is by "`go`" or by a sentence ending "go.".
+func TestAnAllowNamesAChangedPathOnlyAsAWholePath(t *testing.T) {
+	backend, homes := reviewerFixture(t, "speaker")
+	checkout, request := reviewCheckoutChanging(t, "go")
+	for say, named := range map[string]bool{"looks good": false, "gone over": false, "see cmd/go": false, "checked `go`": true, "edited go.": true} {
+		if err := os.WriteFile(filepath.Join(homes["speaker"], "say"), []byte(say+"\nVERDICT: ALLOW\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		verdict, err := backend.Review(context.Background(), checkout, request)
+		if (err == nil && verdict.Event == "ALLOW") != named {
+			t.Fatalf("%q: verdict=%+v err=%v, named=%v", say, verdict, err, named)
+		}
 	}
 }
 
