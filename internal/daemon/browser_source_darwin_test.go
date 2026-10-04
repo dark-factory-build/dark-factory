@@ -65,6 +65,41 @@ func TestIntegratedTopologyAndInventoryIgnoreProposedCheckout(t *testing.T) {
 	if decoded.Total != 1 || decoded.Files[0].Path != "README.md" {
 		t.Fatalf("source inventory=%s", encoded)
 	}
+	secondRoot := contentRepositoryFixture(t)
+	if err := os.WriteFile(filepath.Join(secondRoot, "second.go"), []byte("package second\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	supervisorGit(t, change.TrustedGitExecutable, "-C", secondRoot, "add", "second.go")
+	supervisorGit(t, change.TrustedGitExecutable, "-C", secondRoot, "commit", "-qm", "second repository")
+	secondSource, err := inspectRegisteredRepository(ctx, secondRoot, "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondID := kernel.RepositoryID(mustProjectID(t, testID(232)))
+	if _, err := fixture.store.AddProjectRepository(ctx, kernel.NewProjectRepository{ID: secondID, ProjectID: project, Name: "second", Root: secondRoot, BaseRef: "HEAD", SourceIdentity: &secondSource}, at); err != nil {
+		t.Fatal(err)
+	}
+	multi, err := fixture.daemon.ProjectTopology(ctx, project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, source := range multi.Sources {
+		owner, ok := topology.NodeForPath(multi, source.Prefix+"/README.md")
+		if !ok {
+			t.Fatal("missing prefixed owner")
+		}
+		query := browserContentInput{ContentInput: api.ContentInput{ID: owner.ID}, TestedSource: source.Revision, Limit: 32}
+		page, err := backend.sourceFiles(ctx, project, query)
+		if err != nil {
+			t.Fatal(err)
+		}
+		encoded, _ := json.Marshal(page)
+		decoded.Files = nil
+		json.Unmarshal(encoded, &decoded)
+		if len(decoded.Files) == 0 || decoded.Files[0].Path != source.Prefix+"/README.md" {
+			t.Fatalf("mixed source namespaces: %s", encoded)
+		}
+	}
 	input.TestedSource = "outdated"
 	if _, err := backend.sourceFiles(ctx, project, input); !errors.Is(err, browser.ErrStale) {
 		t.Fatalf("stale query=%v", err)

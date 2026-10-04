@@ -204,7 +204,11 @@ func TestTopologyInventoryOptionalAndBounded(t *testing.T) {
 		t.Fatal("legacy absent inventory is not unavailable")
 	}
 	valid := TopologyInventory{Direct: TopologyInventoryCounts{Source: 2}, Total: TopologyInventoryCounts{Source: 3}, Samples: []string{"a.go"}, SamplesOmitted: 1}
-	for _, inventory := range []TopologyInventory{valid, {Samples: []string{}}} {
+	full := TopologyInventory{Direct: TopologyInventoryCounts{Source: 32}, Total: TopologyInventoryCounts{Source: 32}, Samples: []string{}}
+	for index := range 32 {
+		full.Samples = append(full.Samples, fmt.Sprintf("file-%d.go", index))
+	}
+	for _, inventory := range []TopologyInventory{valid, full, {Samples: []string{}}} {
 		body.Nodes[0].Inventory = &inventory
 		encoded, err := EncodeTopology("inventory", body)
 		if err != nil {
@@ -218,9 +222,12 @@ func TestTopologyInventoryOptionalAndBounded(t *testing.T) {
 		func(v *TopologyInventory) { v.Total.Source = 1 }, func(v *TopologyInventory) { v.Total.Source = 50001 },
 		func(v *TopologyInventory) { v.Samples = nil },
 		func(v *TopologyInventory) {
-			v.Direct.Source = 4
-			v.Total.Source = 4
-			v.Samples = []string{"a", "b", "c", "d"}
+			v.Direct.Source = 33
+			v.Total.Source = 33
+			v.Samples = []string{}
+			for index := range 33 {
+				v.Samples = append(v.Samples, fmt.Sprintf("file-%d.go", index))
+			}
 			v.SamplesOmitted = 0
 		}, func(v *TopologyInventory) { v.SamplesOmitted = 0 },
 		func(v *TopologyInventory) { v.Samples = []string{"a.go", "a.go"}; v.SamplesOmitted = 0 },

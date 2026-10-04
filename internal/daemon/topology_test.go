@@ -15,7 +15,7 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 )
 
-func TestProjectTopologyUsesMemoryFreshnessWithoutDiskCache(t *testing.T) {
+func TestProjectTopologyKeepsUnregisteredCheckoutUnavailable(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	writeTopologyFixture(t, root, "go.mod", "module example.com/project\n")
@@ -40,7 +40,7 @@ func TestProjectTopologyUsesMemoryFreshnessWithoutDiskCache(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// A cache directory cannot be resolved, but topology remains available.
+	// A cache directory cannot be resolved; unavailable source remains explicit.
 	t.Setenv("HOME", "")
 	t.Setenv("XDG_CACHE_HOME", "")
 	if _, err := os.UserCacheDir(); err == nil {
@@ -51,8 +51,7 @@ func TestProjectTopologyUsesMemoryFreshnessWithoutDiskCache(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeTopologyFixture(t, root, "two/two.go", "package two\n")
-	// Inside the freshness window the walk is not repeated, so the answer is
-	// the one already computed even though the tree moved underneath it.
+	// The unavailable source observation is cached without scanning working files.
 	held, err := daemon.ProjectTopology(ctx, projectID)
 	if err != nil {
 		t.Fatal(err)
@@ -65,8 +64,8 @@ func TestProjectTopologyUsesMemoryFreshnessWithoutDiskCache(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if second.Digest == first.Digest {
-		t.Fatal("topology request did not regenerate after the project changed")
+	if len(first.Nodes) != 1 || len(second.Nodes) != 1 || first.Nodes[0].Inventory != nil || second.Nodes[0].Inventory != nil || len(second.Files) != 0 || second.SourceRevision != "" || second.Sources[0].Kind != "unavailable" {
+		t.Fatal("unregistered checkout was presented as integrated source")
 	}
 	after, err := store.Factory(ctx)
 	if err != nil {
@@ -120,7 +119,7 @@ func TestProjectTopologyKeepsRepositoryPathsDistinctAndInvalidatesConfiguration(
 	for _, node := range after.Nodes {
 		paths[node.RelativePath] = true
 	}
-	if !paths[id.String()+"/src"] || !paths[other.String()+"/src"] {
+	if !paths[id.String()] || !paths[other.String()] || len(paths) != 3 || len(after.Files) != 0 {
 		t.Fatalf("repository paths conflated: %#v", paths)
 	}
 	wire := projectTopology(id.String(), after)

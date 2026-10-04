@@ -125,27 +125,23 @@ func (daemon *Daemon) repositoryTopology(ctx context.Context, repository kernel.
 		return topology.Snapshot{}, err
 	}
 	if !found {
-		// Legacy non-Git projects remain inspectable but never claim integration.
-		observed, err := topology.Build(ctx, repository.Root, repository.ID.String())
-		source.Reason = "Integrated target has no registered Git identity; checkout observation only."
-		observed.SourceRevision = ""
-		observed.Sources = []topology.Source{source}
-		return observed, err
-	}
-	identity, err := observationIdentity(registered)
-	if err != nil {
-		return topology.Snapshot{}, err
-	}
-	revision, archive, err := change.ArchiveSource(ctx, change.TrustedGitExecutable, repository.Root, repository.BaseRef, identity)
-	if err == nil {
-		observed, buildErr := topology.BuildArchive(ctx, archive, repository.ID.String(), revision)
-		if buildErr == nil {
-			source.Kind, source.Revision = "integrated", revision
-			observed.Sources = []topology.Source{source}
-			return observed, nil
+		source.Reason = "Integrated target has no registered Git identity; repository source is unavailable."
+	} else {
+		identity, err := observationIdentity(registered)
+		if err != nil {
+			return topology.Snapshot{}, err
 		}
+		revision, archive, err := change.ArchiveSource(ctx, change.TrustedGitExecutable, repository.Root, repository.BaseRef, identity)
+		if err == nil {
+			observed, buildErr := topology.BuildArchive(ctx, archive, repository.ID.String(), revision)
+			if buildErr == nil {
+				source.Kind, source.Revision = "integrated", revision
+				observed.Sources = []topology.Source{source}
+				return observed, nil
+			}
+		}
+		source.Reason = "Integrated target is unavailable locally; refresh the registered repository target."
 	}
-	source.Reason = "Integrated target is unavailable locally; refresh the registered repository target."
 	root := topology.Node{ID: fmt.Sprintf("%x", sha256.Sum256([]byte("unavailable:"+repository.ID.String()))), Kind: topology.NodeRepository, RelativePath: ".", Label: repository.Name, SizeBucket: "empty"}
 	encoded, _ := json.Marshal(source)
 	return topology.Snapshot{Digest: fmt.Sprintf("%x", sha256.Sum256(encoded)), Nodes: []topology.Node{root}, Edges: []topology.Edge{}, Sources: []topology.Source{source}}, nil
