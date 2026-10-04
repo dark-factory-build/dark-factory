@@ -240,7 +240,6 @@ scope_case() {
 scope_case false false false none docs/install.md README.md
 scope_case false true false none control-plane
 scope_case false true false none control-plane/src/lib.rs
-scope_case false true false none .github/workflows/deploy-control-plane.yml
 scope_case true false false ui web/packages/ui/src/console-view.tsx
 scope_case true false false ui web/packages/ui/src/factory-console.tsx
 scope_case true false false ui web/packages/ui/test/console-view.test.mjs
@@ -260,6 +259,7 @@ scope_case true true false runtime control-plane/src/lib.rs internal/kernel/stor
 scope_case true true true full .github/workflows/ci.yml
 scope_case true true false full .gitignore
 scope_case true true false full scripts/bootstrap-maintainer-v2.sh
+scope_case true true false full scripts/release.sh
 scope_case true false true full relay/src/index.ts
 scope_case true false true full relay/src/tokens.ts
 scope_case true false true full relay/src/envelope.ts

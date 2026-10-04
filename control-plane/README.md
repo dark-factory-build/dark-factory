@@ -53,8 +53,8 @@ Access policy, or App configuration is live.
   `ALLOW`, `COMMENT`, or `REQUEST_CHANGES` verdict, diagnose and rerun exact CI,
   observe eventual merge state, enqueue through a merge queue, perform a
   strict exact-head squash merge where a base has no queue, publish and observe
-  immutable releases, and dispatch only the two fixed reviewed recovery and
-  deployment workflows. GitHub's `delete_branch_on_merge` repository setting
+  immutable releases, and dispatch only the fixed reviewed release recovery
+  workflow. GitHub's `delete_branch_on_merge` repository setting
   performs atomic source-branch cleanup; the broker never deletes a ref itself. All three verdicts are the repository's own words,
   not GitHub review states -- the App opens the pull requests it
   reviews, and GitHub refuses a self-review that takes a side, `APPROVE` and
@@ -219,24 +219,6 @@ before the route receives traffic. A service token needs a `non_identity`
 not match a service token and silently falls through to interactive IdP login,
 which a headless caller cannot complete.
 
-The deployment gate reads the live application and its policies before
-promotion and requires this policy shape for the `/mcp` application:
-
-- exactly one application whose domain is `maintainer.darkfactory.build/mcp` (the
-  Cloudflare API's hostname-and-path form, without the scheme);
-- every policy is either an `allow` policy whose includes are all exact emails
-  or exact `service_token`s, with at least one email, or a `non_identity` policy
-  whose includes are all exact `service_token`s; and
-- at least one of each.
-
-`require` and `exclude` entries only narrow a policy and are accepted. Anything
-that widens access (a `bypass` policy, or an `everyone`, email-domain, IP,
-group or any-valid-service-token include) fails the deployment, as does either
-missing principal. A refusal prints the live shape as decisions and rule kinds
-only, never emails or token IDs. The gate never reads or changes the token
-value; the Worker still binds the JWT's `common_name` to its injected
-`DARK_FACTORY_CLOUDFLARE_ACCESS_SERVICE_TOKEN_ID` secret.
-
 The Worker also validates the injected JWT independently: it fetches the
 bounded key set from the configured team domain, matches one RS256 signing key
 by `kid`, verifies the signature with WebCrypto, and binds issuer, single
@@ -276,10 +258,12 @@ documentation.
 `wrangler secret put` immediately creates and deploys a Worker version. The
 activation sequence uses the versions API or another no-traffic staging
 mechanism, proves the exact draft, and adds a route after the deployment gate.
-Routine production deployment is the deliberate non-local exception: the fixed
-Maintainer-App workflow receives its Cloudflare API token only from the
-environment-scoped GitHub Actions secret. It does not use the local `.env.txt`,
-Wrangler OAuth, keychain, or ambient credentials.
+Routine production deployment is `../scripts/release.sh <commit>`, run from a
+clean checkout at that commit with the operator's own Wrangler OAuth login. It
+does nothing when the live version is tagged `cp-<control-plane tree>`;
+otherwise it runs the local gate, uploads and promotes a version with that tag,
+and redeploys the previous version if `/healthz` or the headless `/readyz`
+label does not come up.
 
 ## Local proof
 

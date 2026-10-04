@@ -161,7 +161,6 @@ fn tool_write(name: &str) -> Option<bool> {
         | "observe_pull_request_review"
         | "observe_release"
         | "observe_release_workflow"
-        | "observe_control_plane_deploy"
         | "observe_pull_request_checks"
         | "observe_pull_request_workflows"
         | "read_pull_request_job_log"
@@ -175,7 +174,6 @@ fn tool_write(name: &str) -> Option<bool> {
         | "publish_commit"
         | "publish_release_tag"
         | "recover_release"
-        | "dispatch_control_plane_deploy"
         | "enqueue_pull_request"
         | "merge_pull_request_at_head"
         | "rerun_failed_pull_request_jobs" => Some(true),

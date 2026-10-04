@@ -60,10 +60,6 @@ const RELEASE_WORKFLOW: WorkflowRef<'static> = WorkflowRef {
     api_id: "release.yml",
     response_path: ".github/workflows/release.yml",
 };
-const DEPLOY_WORKFLOW: WorkflowRef<'static> = WorkflowRef {
-    api_id: "deploy-control-plane.yml",
-    response_path: ".github/workflows/deploy-control-plane.yml",
-};
 
 #[derive(Clone)]
 pub(crate) struct AppAuthority(Arc<Authority>);
@@ -987,16 +983,6 @@ pub(crate) struct RecoverRelease {
     pub(crate) workflow_sha: String,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct DispatchControlPlaneDeploy {
-    pub(crate) repository: String,
-    pub(crate) operation_id: String,
-    pub(crate) commit_sha: String,
-    pub(crate) reviewed_tree: String,
-    pub(crate) promote: bool,
-}
-
 #[derive(Debug, Deserialize, Serialize)]
 pub(crate) struct WorkflowDispatchResult {
     pub(crate) operation_id: String,
@@ -1057,26 +1043,6 @@ pub(crate) struct ReleaseAssetResult {
     pub(crate) size: i64,
     pub(crate) digest: String,
     pub(crate) url: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct ObserveControlPlaneDeploy {
-    pub(crate) repository: String,
-    pub(crate) operation_id: String,
-    pub(crate) commit_sha: String,
-    pub(crate) reviewed_tree: String,
-    pub(crate) promote: bool,
-    pub(crate) run_id: i64,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-pub(crate) struct ControlPlaneDeployObservationResult {
-    pub(crate) operation_id: String,
-    pub(crate) commit_sha: String,
-    pub(crate) reviewed_tree: String,
-    pub(crate) promote: bool,
-    pub(crate) workflow_run: WorkflowRunResult,
 }
 
 impl AppAuthority {
@@ -2328,174 +2294,6 @@ impl AppAuthority {
     }
 
     #[cfg(target_arch = "wasm32")]
-    pub(crate) async fn dispatch_control_plane_deploy(
-        &self,
-        journal: &DeliveryJournal,
-        mut request: DispatchControlPlaneDeploy,
-    ) -> Result<WorkflowDispatchResult, OperationError> {
-        request.validate()?;
-        let repository = RepositoryName::requested(&mut request.repository)?;
-        let operation = request.operation("dispatch_control_plane_deploy")?;
-        let state = journal
-            .begin_operation(&operation)
-            .await
-            .map_err(|_| OperationError::Unavailable)?;
-        if let Some(result) = completed_or_conflict::<WorkflowDispatchResult>(&state)? {
-            return Ok(result);
-        }
-        let token = self
-            .0
-            .installation_token(
-                repository,
-                BTreeMap::from([
-                    ("actions", "write"),
-                    ("contents", "read"),
-                    ("metadata", "read"),
-                ]),
-            )
-            .await?;
-        let repository = self.0.repository_metadata(&token).await?;
-        let default = self.0.read_ref(&token, &repository.default_branch).await?;
-        if default.object.sha != request.commit_sha {
-            return Err(OperationError::Conflict);
-        }
-        let default_commit: GitCommit = github_json(
-            &format!(
-                "https://api.github.com/repos/{}/{}/git/commits/{}",
-                token.repository.owner, token.repository.name, request.commit_sha
-            ),
-            token.as_str(),
-        )
-        .await?;
-        if default_commit.tree.sha != request.reviewed_tree {
-            return Err(OperationError::Conflict);
-        }
-        let marker = format!(
-            "Deploy control-plane {} {}",
-            operation.operation_id, operation.request_digest
-        );
-        if let Some(run) = self
-            .0
-            .workflow_run_by_title(&token, DEPLOY_WORKFLOW, &marker, &request.commit_sha)
-            .await?
-        {
-            return complete(
-                journal,
-                &operation,
-                WorkflowDispatchResult {
-                    operation_id: request.operation_id,
-                    workflow: DEPLOY_WORKFLOW.response_path.into(),
-                    commit_sha: request.commit_sha,
-                    run_id: run.id,
-                    run_attempt: run.run_attempt,
-                },
-            )
-            .await;
-        }
-        if matches!(
-            state,
-            OperationRecord::Executing | OperationRecord::Indeterminate
-        ) {
-            journal
-                .mark_operation(&operation, OperationTransition::Indeterminate)
-                .await
-                .map_err(|_| OperationError::Unavailable)?;
-            return Err(OperationError::Indeterminate);
-        }
-        match journal
-            .mark_operation(&operation, OperationTransition::Executing)
-            .await
-            .map_err(|_| OperationError::Unavailable)?
-        {
-            OperationRecord::Claimed => {}
-            OperationRecord::Completed(result) => {
-                return serde_json::from_str(&result).map_err(|_| OperationError::Unavailable);
-            }
-            OperationRecord::Conflict => return Err(OperationError::Conflict),
-            OperationRecord::Executing | OperationRecord::Indeterminate => {
-                return Err(OperationError::Indeterminate);
-            }
-            OperationRecord::New | OperationRecord::Planned => {
-                return Err(OperationError::Unavailable);
-            }
-        }
-        match self
-            .0
-            .dispatch_workflow(
-                &token,
-                DEPLOY_WORKFLOW,
-                &repository.default_branch,
-                serde_json::json!({
-                    "operation_id": request.operation_id,
-                    "request_digest": operation.request_digest,
-                    "expected_commit": request.commit_sha,
-                    "expected_tree": request.reviewed_tree,
-                    "promote": request.promote.to_string(),
-                }),
-            )
-            .await
-        {
-            Ok(dispatch) => match self
-                .0
-                .read_dispatched_workflow(
-                    &token,
-                    dispatch.workflow_run_id,
-                    DEPLOY_WORKFLOW,
-                    &request.commit_sha,
-                    &marker,
-                )
-                .await
-            {
-                Ok(run) => {
-                    complete(
-                        journal,
-                        &operation,
-                        WorkflowDispatchResult {
-                            operation_id: operation.operation_id.clone(),
-                            workflow: DEPLOY_WORKFLOW.response_path.into(),
-                            commit_sha: request.commit_sha.clone(),
-                            run_id: run.id,
-                            run_attempt: run.run_attempt,
-                        },
-                    )
-                    .await
-                }
-                Err(_) => {
-                    let _ = journal
-                        .mark_operation(&operation, OperationTransition::Indeterminate)
-                        .await;
-                    Err(OperationError::Indeterminate)
-                }
-            },
-            Err(OperationError::Refused(reason)) => refuse(journal, &operation, reason).await,
-            Err(_) => {
-                if let Some(run) = self
-                    .0
-                    .workflow_run_by_title(&token, DEPLOY_WORKFLOW, &marker, &request.commit_sha)
-                    .await?
-                {
-                    return complete(
-                        journal,
-                        &operation,
-                        WorkflowDispatchResult {
-                            operation_id: operation.operation_id.clone(),
-                            workflow: DEPLOY_WORKFLOW.response_path.into(),
-                            commit_sha: request.commit_sha.clone(),
-                            run_id: run.id,
-                            run_attempt: run.run_attempt,
-                        },
-                    )
-                    .await;
-                }
-                let _ = journal
-                    .mark_operation(&operation, OperationTransition::Indeterminate)
-                    .await;
-                Err(OperationError::Indeterminate)
-            }
-        }
-    }
-
-    #[cfg(target_arch = "wasm32")]
     pub(crate) async fn observe_release(
         &self,
         mut request: ObserveRelease,
@@ -2580,51 +2378,6 @@ impl AppAuthority {
             tag: request.tag,
             tag_sha: request.tag_sha,
             workflow_sha: request.workflow_sha,
-            workflow_run: workflow_run.into_result(Vec::new())?,
-        })
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    pub(crate) async fn observe_control_plane_deploy(
-        &self,
-        mut request: ObserveControlPlaneDeploy,
-    ) -> Result<ControlPlaneDeployObservationResult, OperationError> {
-        request.validate()?;
-        let repository = RepositoryName::requested(&mut request.repository)?;
-        let token = self
-            .0
-            .installation_token(
-                repository,
-                BTreeMap::from([
-                    ("actions", "read"),
-                    ("contents", "read"),
-                    ("metadata", "read"),
-                ]),
-            )
-            .await?;
-        let mut dispatch = DispatchControlPlaneDeploy {
-            repository: request.repository.clone(),
-            operation_id: request.operation_id.clone(),
-            commit_sha: request.commit_sha.clone(),
-            reviewed_tree: request.reviewed_tree.clone(),
-            promote: request.promote,
-        };
-        dispatch.validate()?;
-        let operation = dispatch.operation("dispatch_control_plane_deploy")?;
-        let workflow_run = self.0.workflow_run(&token, request.run_id).await?;
-        workflow_run.verify_dispatch(
-            DEPLOY_WORKFLOW,
-            &request.commit_sha,
-            &format!(
-                "Deploy control-plane {} {}",
-                operation.operation_id, operation.request_digest
-            ),
-        )?;
-        Ok(ControlPlaneDeployObservationResult {
-            operation_id: request.operation_id,
-            commit_sha: request.commit_sha,
-            reviewed_tree: request.reviewed_tree,
-            promote: request.promote,
             workflow_run: workflow_run.into_result(Vec::new())?,
         })
     }
@@ -3742,19 +3495,6 @@ impl RecoverRelease {
     }
 }
 
-impl DispatchControlPlaneDeploy {
-    fn validate(&mut self) -> Result<(), OperationError> {
-        canonical_operation_id(&mut self.operation_id)?;
-        valid_sha(&self.commit_sha)?;
-        valid_sha(&self.reviewed_tree)
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    fn operation(&self, kind: &str) -> Result<Operation, OperationError> {
-        operation(kind, &self.operation_id, self)
-    }
-}
-
 impl ObserveRelease {
     fn validate(&self) -> Result<(), OperationError> {
         valid_release_tag(&self.tag)?;
@@ -3768,15 +3508,6 @@ impl ObserveReleaseWorkflow {
         valid_release_tag(&self.tag)?;
         valid_sha(&self.tag_sha)?;
         valid_sha(&self.workflow_sha)?;
-        valid_exact_integer(self.run_id)
-    }
-}
-
-impl ObserveControlPlaneDeploy {
-    fn validate(&mut self) -> Result<(), OperationError> {
-        canonical_operation_id(&mut self.operation_id)?;
-        valid_sha(&self.commit_sha)?;
-        valid_sha(&self.reviewed_tree)?;
         valid_exact_integer(self.run_id)
     }
 }
@@ -4277,7 +4008,6 @@ pub(crate) fn legacy_receipt_request(
         "publish_commit" => proof!(PublishCommit),
         "publish_release_tag" => proof!(PublishReleaseTag),
         "recover_release" => proof!(RecoverRelease),
-        "dispatch_control_plane_deploy" => proof!(DispatchControlPlaneDeploy),
         "enqueue_pull_request" => proof!(EnqueuePullRequest),
         "merge_pull_request_at_head" => proof!(MergePullRequestAtHead),
         "rerun_failed_pull_request_jobs" => proof!(RerunFailedPullRequestJobs),
@@ -9303,7 +9033,7 @@ mod tests {
     fn a_workflow_path_names_a_workflow_file() {
         for accepted in [
             ".github/workflows/ci.yml",
-            ".github/workflows/deploy-control-plane.yml",
+            ".github/workflows/deploy.yml",
             ".github/workflows/release.yaml",
         ] {
             assert!(valid_workflow_path(accepted).is_ok(), "{accepted}");
@@ -10558,15 +10288,6 @@ mod tests {
             workflow_api_url(owner, repository, RELEASE_WORKFLOW, "dispatches"),
             "https://api.github.com/repos/dark-factory-build/dark-factory/actions/workflows/release.yml/dispatches"
         );
-        assert_eq!(
-            workflow_api_url(owner, repository, DEPLOY_WORKFLOW, "runs"),
-            "https://api.github.com/repos/dark-factory-build/dark-factory/actions/workflows/deploy-control-plane.yml/runs"
-        );
-        assert_eq!(
-            workflow_api_url(owner, repository, DEPLOY_WORKFLOW, "dispatches"),
-            "https://api.github.com/repos/dark-factory-build/dark-factory/actions/workflows/deploy-control-plane.yml/dispatches"
-        );
-
         let sha = "a".repeat(40);
         let mut run = release_run(1, "push", &sha, "v1.2.3");
         assert!(run.verify_identity(RELEASE_WORKFLOW, &sha).is_ok());
@@ -10582,15 +10303,17 @@ mod tests {
             Err(OperationError::Indeterminate)
         ));
 
-        let title = "Deploy control-plane operation digest";
-        let mut deploy = release_run(2, "workflow_dispatch", &sha, "main");
-        deploy.name = "Deploy control-plane".into();
-        deploy.path = DEPLOY_WORKFLOW.response_path.into();
-        deploy.display_title = Some(title.into());
-        assert!(deploy.verify_dispatch(DEPLOY_WORKFLOW, &sha, title).is_ok());
-        deploy.path = DEPLOY_WORKFLOW.api_id.into();
+        let title = "Release recovery operation digest";
+        let mut recovery = release_run(2, "workflow_dispatch", &sha, "main");
+        recovery.display_title = Some(title.into());
+        assert!(
+            recovery
+                .verify_dispatch(RELEASE_WORKFLOW, &sha, title)
+                .is_ok()
+        );
+        recovery.path = RELEASE_WORKFLOW.api_id.into();
         assert!(matches!(
-            deploy.verify_dispatch(DEPLOY_WORKFLOW, &sha, title),
+            recovery.verify_dispatch(RELEASE_WORKFLOW, &sha, title),
             Err(OperationError::Conflict)
         ));
     }
