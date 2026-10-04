@@ -406,3 +406,14 @@ func TestKnowledgeAllExplicitRevisionPinsAreBounded(t *testing.T) {
 		}
 	}
 }
+
+func TestKnowledgeAndMaximumContinuationFitPrivateEnvelope(t *testing.T) {
+	task := []byte(strings.Repeat("t", 128<<10) + strings.Repeat("k", knowledgeContextBytes+knowledgeAttachmentBytes))
+	framed, err := attemptTaskWithContinuationContext(kernel.ProviderCodex, task, []kernel.ContinuationContext{{ResolutionDetail: strings.Repeat("r", kernel.MaxHumanRequestReplyBytes)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := api.NewAttemptTaskReply(api.AttemptTask{Task: string(framed)}); err != nil {
+		t.Fatal(err)
+	}
+}

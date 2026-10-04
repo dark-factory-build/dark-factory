@@ -77,7 +77,9 @@ type ContinuationContext struct {
 // MaxContinuationTaskBytes bounds the private attempt-task envelope. It is
 // deliberately larger than either provider's inline task limit so an exact
 // provider-limit task can still be returned together with its causal context.
-const MaxContinuationTaskBytes = (128 << 10) + MaxHumanRequestReplyBytes + 2048
+// Reserve 3 KiB of selected knowledge and 4 KiB of explicit revision pins.
+// Provider launch bounds stay unchanged; coding providers fetch this envelope.
+const MaxContinuationTaskBytes = (128 << 10) + MaxHumanRequestReplyBytes + 2048 + (7 << 10)
 
 // ContinuationTaskText frames resolved causal context for a fresh provider
 // authority while preserving the provider's task-size contract.
