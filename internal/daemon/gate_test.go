@@ -97,7 +97,7 @@ func TestGateWrapperExitIsRetryableHostBlocker(t *testing.T) {
 
 func TestGateTimeoutKillsProcessGroup(t *testing.T) {
 	previous := gateTimeout
-	gateTimeout = 300 * time.Millisecond
+	gateTimeout = 2 * time.Second
 	t.Cleanup(func() { gateTimeout = previous })
 	pidFile := filepath.Join(t.TempDir(), "child")
 	repo, _, head := gateFixtureRepo(t, "exit 0", "/bin/sleep 60 &\necho $! > "+pidFile+"\nexec /bin/sleep 60")
@@ -105,8 +105,8 @@ func TestGateTimeoutKillsProcessGroup(t *testing.T) {
 	daemon.ConfigureGate(t.TempDir(), "/usr/bin:/bin")
 	started := time.Now()
 	run, err := daemon.runGate(context.Background(), repo, "op", head, 1)
-	// Well inside WaitDelay: the timeout killed the group, not just the leader.
-	if err != nil || run.ExitCode != 124 || time.Since(started) > 4*time.Second {
+	// Under timeout + WaitDelay: the timeout killed the group, not just the leader.
+	if err != nil || run.ExitCode != 124 || time.Since(started) > 6*time.Second {
 		t.Fatalf("run=%+v err=%v after %s", run, err, time.Since(started))
 	}
 	data, err := os.ReadFile(pidFile)

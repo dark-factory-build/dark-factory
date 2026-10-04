@@ -207,7 +207,7 @@ func TestGateFailureAbsentAtBaseIsSentBackWithTestNames(t *testing.T) {
 	if err != nil || op.State != "completed" || op.Verdict != "request_changes" || !op.RoutePending || op.Submitted || backend.reviews != 0 || backend.submitted {
 		t.Fatalf("operation=%+v err=%v", op, err)
 	}
-	if len(op.Gates) != 3 || op.Gates[2].Commit != op.Request.Base || !strings.Contains(op.Detail, "tests=TestBroken, TestOther") || !strings.Contains(op.Detail, op.Request.Head) {
+	if len(op.Gates) != 3 || op.Gates[2].Commit != op.Request.Base || !strings.Contains(op.Detail, "tests=TestOther.") || !strings.Contains(op.Detail, op.Request.Head) {
 		t.Fatalf("gates=%+v note=%q", op.Gates, op.Detail)
 	}
 }
@@ -233,14 +233,39 @@ func TestGateHostBlockerStaysRetryableWithoutSendBack(t *testing.T) {
 
 func TestGateSendsBackUnlessEveryNamedHeadFailureFailsAtBase(t *testing.T) {
 	for name, runs := range map[string][]GateRun{
-		"base passed":            {{ExitCode: 1, Failed: []string{"TestA"}}, {ExitCode: 1, Failed: []string{"TestA"}}, {ExitCode: 0, Failed: []string{"TestA"}}},
-		"first head run unknown": {{ExitCode: 1, Failed: []string{"TestA"}}, {ExitCode: 1, Failed: []string{"TestB"}}, {ExitCode: 1, Failed: []string{"TestB"}}},
-		"no test names":          {{ExitCode: 2}, {ExitCode: 2}, {ExitCode: 2}},
+		"base passed":     {{ExitCode: 1, Failed: []string{"TestA"}}, {ExitCode: 1, Failed: []string{"TestA"}}, {ExitCode: 0, Failed: []string{"TestA"}}},
+		"no test names":   {{ExitCode: 2}, {ExitCode: 2}},
+		"one run unnamed": {{ExitCode: 1, Failed: []string{"TestA"}}, {ExitCode: 2}},
 	} {
 		backend := &fakeBackend{gates: runs}
 		op, err := Coordinator{Store: &memoryStore{}, Backend: backend, Now: time.Now}.Start(context.Background(), reviewRequest())
 		if err != nil || op.State != "completed" || op.Verdict != "request_changes" || backend.reviews != 0 {
 			t.Fatalf("%s: operation=%+v err=%v", name, op, err)
 		}
+	}
+}
+
+func TestGateDisjointHeadFailuresAreAFlakeWithoutBaseRun(t *testing.T) {
+	backend := &fakeBackend{gates: []GateRun{{ExitCode: 1, Failed: []string{"TestA"}}, {ExitCode: 1, Failed: []string{"TestB"}}}}
+	op, err := Coordinator{Store: &memoryStore{}, Backend: backend, Now: time.Now}.Start(context.Background(), reviewRequest())
+	if err != nil || op.State != "enqueued" || backend.reviews != 1 || len(op.Gates) != 2 {
+		t.Fatalf("operation=%+v err=%v", op, err)
+	}
+}
+
+func TestGateSendsBackReproducingFailureTheBaseDoesNotShare(t *testing.T) {
+	backend := &fakeBackend{gates: []GateRun{{ExitCode: 1, Failed: []string{"TestA", "TestB"}}, {ExitCode: 1, Failed: []string{"TestA"}}, {ExitCode: 1, Failed: []string{"TestB"}}}}
+	op, err := Coordinator{Store: &memoryStore{}, Backend: backend, Now: time.Now}.Start(context.Background(), reviewRequest())
+	if err != nil || op.State != "completed" || op.Verdict != "request_changes" || backend.reviews != 0 || len(op.Gates) != 3 || !strings.Contains(op.Detail, "tests=TestA.") {
+		t.Fatalf("operation=%+v err=%v", op, err)
+	}
+}
+
+func TestGateReproducingFailureAlsoAtBaseProceeds(t *testing.T) {
+	failed := GateRun{ExitCode: 1, Failed: []string{"TestA"}}
+	backend := &fakeBackend{gates: []GateRun{failed, failed, failed}}
+	op, err := Coordinator{Store: &memoryStore{}, Backend: backend, Now: time.Now}.Start(context.Background(), reviewRequest())
+	if err != nil || op.State != "enqueued" || backend.reviews != 1 || len(op.Gates) != 3 {
+		t.Fatalf("operation=%+v err=%v", op, err)
 	}
 }

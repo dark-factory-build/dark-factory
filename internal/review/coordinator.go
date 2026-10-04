@@ -183,10 +183,13 @@ func (c Coordinator) Resume(ctx context.Context, op Operation) (Operation, error
 }
 
 // gate runs the operator's full gate before any reviewer reads the head. A
-// head failure is rerun once, and a pass on either run passes, the failure
-// staying as flake evidence. Two head failures run once at the base: when
-// every failing head test also fails there, review proceeds with that
-// evidence; otherwise the head goes back to its author with the failing tests.
+// head failure is rerun once, and a pass on either run passes. The tests that
+// failed in both head runs reproduce; when the runs share none, the failure is
+// a flake and review proceeds. Otherwise the gate runs once at the base:
+// review proceeds when every reproducing test also fails there, and the head
+// goes back to its author with the reproducing tests the base does not share.
+// A head run with no parsed test names cannot be compared, so the head goes
+// back without a base run.
 func (c Coordinator) gate(ctx context.Context, checkout string, op Operation) (Operation, error) {
 	for {
 		commit, note := nextGate(op)
@@ -223,35 +226,41 @@ func nextGate(op Operation) (string, string) {
 	if len(runs) < 2 {
 		return op.Request.Head, ""
 	}
-	if len(runs) == 2 {
-		return op.Request.Base, ""
-	}
-	atBase := map[string]bool{}
-	if runs[2].ExitCode != 0 {
-		for _, name := range runs[2].Failed {
-			atBase[name] = true
+	var reproduced []string
+	for _, name := range runs[0].Failed {
+		if slices.Contains(runs[1].Failed, name) && !slices.Contains(reproduced, name) {
+			reproduced = append(reproduced, name)
 		}
 	}
-	var failed []string
-	inherited := true
-	for _, name := range append(append([]string{}, runs[0].Failed...), runs[1].Failed...) {
-		if !slices.Contains(failed, name) {
-			failed = append(failed, name)
-			inherited = inherited && atBase[name]
-		}
-	}
-	if inherited && len(failed) > 0 {
+	unnamed := len(runs[0].Failed) == 0 || len(runs[1].Failed) == 0
+	if !unnamed && len(reproduced) == 0 {
 		return "", ""
 	}
+	base := "was not run: the head failures name no tests"
+	var uncovered []string
+	if !unnamed {
+		if len(runs) == 2 {
+			return op.Request.Base, ""
+		}
+		for _, name := range reproduced {
+			if runs[2].ExitCode == 0 || !slices.Contains(runs[2].Failed, name) {
+				uncovered = append(uncovered, name)
+			}
+		}
+		if len(uncovered) == 0 {
+			return "", ""
+		}
+		base = "passed"
+		if runs[2].ExitCode != 0 {
+			base = "failed, but not on these"
+		}
+		base = op.Request.Base + " " + base
+	}
 	tests := "unavailable"
-	if len(failed) > 0 {
-		tests = strings.Join(failed, ", ")
+	if len(uncovered) > 0 {
+		tests = strings.Join(uncovered, ", ")
 	}
-	base := "passed"
-	if runs[2].ExitCode != 0 {
-		base = "failed, but not on all of these"
-	}
-	return "", fmt.Sprintf("pre-review full gate failed twice at the exact head (exit %d): tests=%s. At base %s the gate %s. Factory-host gate logs: %s, %s. Exact head %s.", runs[1].ExitCode, tests, op.Request.Base, base, runs[0].Log, runs[1].Log, op.Request.Head)
+	return "", fmt.Sprintf("pre-review full gate failed twice at the exact head (exit %d): tests=%s. Base gate %s. Factory-host gate logs: %s, %s. Exact head %s.", runs[1].ExitCode, tests, base, runs[0].Log, runs[1].Log, op.Request.Head)
 }
 
 func (c Coordinator) finishSubmitted(ctx context.Context, op Operation) (Operation, error) {
