@@ -69,6 +69,7 @@ var (
 	trialExit       = os.Exit
 	rollbackService = install.ServiceRollback
 	verifyRelease   = install.VerifyInstalledRelease
+	removeUpgrade   = install.RemoveUpgrade
 
 	cleanStartupCancellation = errors.New("factoryd: clean startup cancellation")
 	startupPhaseHook         func(string)
@@ -394,14 +395,23 @@ func (owner *process) promote(ctx context.Context, home string, marker install.U
 		trialExit(exitRestart)
 		return
 	}
-	limit.Stop()
-	owner.settleRelease(ctx, home, marker.Target, "verified", "")
+	if owner.settleRelease(ctx, home, marker.Target, "verified", "") {
+		limit.Stop()
+	}
 }
 
-func (owner *process) settleRelease(ctx context.Context, home, target, state, reason string) {
-	if err := errors.Join(owner.daemon.FinishRelease(ctx, target, state, reason), install.RemoveUpgrade(home)); err != nil {
+// settleRelease forgets the upgrade first: while its marker remains, the next
+// boot still decides the release, so nothing is recorded.
+func (owner *process) settleRelease(ctx context.Context, home, target, state, reason string) bool {
+	err := removeUpgrade(home)
+	if _, present, readErr := install.ReadUpgradeMarker(home); present || readErr != nil {
+		_, _ = fmt.Fprintf(recoveryLog, "factoryd: forgetting release %s failed: %v\n", target, errors.Join(err, readErr))
+		return false
+	}
+	if err = errors.Join(err, owner.daemon.FinishRelease(ctx, target, state, reason)); err != nil {
 		_, _ = fmt.Fprintf(recoveryLog, "factoryd: recording release %s %s failed: %v\n", target, state, err)
 	}
+	return true
 }
 
 func openProcess(ctx context.Context, configuration config) (_ *process, resultErr error) {

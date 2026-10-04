@@ -85,6 +85,31 @@ func TestTrialBuildPromotesOnceItStaysUpAndVerifies(t *testing.T) {
 	}
 }
 
+func TestTrialBuildThatCannotForgetItsMarkerRecordsNothingAndRollsBack(t *testing.T) {
+	home, seams := trialHome(t, install.UpgradeMarker{Target: trialTarget, UserVersion: kernel.SchemaVersion, State: install.UpgradeTrial})
+	restore := removeUpgrade
+	t.Cleanup(func() { removeUpgrade = restore })
+	removals := make(chan struct{}, 4)
+	removeUpgrade = func(string) error { removals <- struct{}{}; return errors.New("read-only") }
+	trialLimit = 300 * time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- serve(ctx, testConfig(home)) }()
+	<-removals
+	// Not promoted: the trial limit still ends the build.
+	if code := <-seams.exits; code != exitRestart {
+		t.Fatalf("exit = %d", code)
+	}
+	cancel()
+	<-done
+	if marker, present := readMarker(t, home); !present || marker.Boots != 1 {
+		t.Fatalf("marker = %+v, %t", marker, present)
+	}
+	if exit := boot(t, home); exit != exitRestart || <-seams.rollbacks != "restore=false the new build exited before it was promoted" {
+		t.Fatalf("next boot exit = %d", exit)
+	}
+}
+
 func TestTrialBuildThatCrashesAtBootRollsBackOnItsSecondBoot(t *testing.T) {
 	home, seams := trialHome(t, install.UpgradeMarker{Target: trialTarget, UserVersion: kernel.SchemaVersion, State: install.UpgradeTrial})
 	startupPhaseHook = func(phase string) {
