@@ -297,13 +297,13 @@ untouched "stalled finalizing run"
 DARK_FACTORY_TEST_ENABLE_DISPATCH_DURING_BUILD=1 "$script" "$sha" >/dev/null 2>"$temporary/stderr" \
     && fail "dispatch enabled during build accepted"
 grep -q 'dispatch is enabled' "$temporary/stderr" || fail "dispatch enabled during build: wrong refusal"
-[ ! -e "$DARK_FACTORY_TEST_FACTORYCTL_LOG" ] || fail "dispatch enabled during build: service uninstalled"
+! grep -q "^service uninstall" "$DARK_FACTORY_TEST_FACTORYCTL_LOG" 2>/dev/null || fail "dispatch enabled during build: service uninstalled"
 printf '0\n' >"$temporary/dispatch-enabled"
 
 DARK_FACTORY_TEST_ADMIT_DURING_BUILD=1 "$script" "$sha" >/dev/null 2>"$temporary/stderr" \
     && fail "run admitted during the build accepted"
 grep -q 'non-terminal run' "$temporary/stderr" || fail "run admitted during the build: wrong refusal"
-[ ! -e "$DARK_FACTORY_TEST_FACTORYCTL_LOG" ] || fail "run admitted during the build: service uninstalled"
+! grep -q "^service uninstall" "$DARK_FACTORY_TEST_FACTORYCTL_LOG" 2>/dev/null || fail "run admitted during the build: service uninstalled"
 : >"$temporary/active-runs"
 rm -rf "$fake_home/.dark-factory-backups"
 
@@ -338,31 +338,6 @@ grep -qx 'current session' "$unsafe_home/.dark-factory-verification-browser/sess
 no_service_change "symlinked runtime home"
 
 "$script" "$sha" >"$temporary/stdout" || fail "clean reinstall exited non-zero"
-
-# An unchanged receipt cannot bless a replaced installed program. Refuse
-# before uninstalling it, so the next attempt still has a service to inspect.
-printf 'tampered\n' >"$fake_home/.dark-factory.service/bin/current/factoryd"
-chmod 755 "$fake_home/.dark-factory.service/bin/current/factoryd"
-"$script" "$sha" >/dev/null 2>"$temporary/stderr" && fail "tampered previous factoryd accepted"
-grep -q 'previous service package does not match its receipt' "$temporary/stderr" \
-    || fail "tampered previous factoryd: wrong refusal"
-[ ! -e "$DARK_FACTORY_TEST_FACTORYCTL_LOG" ] || fail "tampered previous factoryd: service changed"
-printf '#!/bin/sh\nexit 0\n' >"$fake_home/.dark-factory.service/bin/current/factoryd"
-chmod 755 "$fake_home/.dark-factory.service/bin/current/factoryd"
-rm -rf "$fake_home/.dark-factory-backups"
-
-# A failed prepared install must restore the copied old package after the
-# destructive uninstall and verify that the old service is healthy.
-before_rollback_receipt=$(cat "$fake_home/.dark-factory.service/receipt")
-DARK_FACTORY_TEST_INSTALL_FAIL=1 "$script" "$sha" >"$temporary/stdout" 2>"$temporary/stderr" \
-    && fail "failed prepared install accepted"
-grep -q 'fixture: prepared service install failed' "$temporary/stderr" \
-    || fail "failed prepared install: fixture failure was not reached"
-grep -q 'rollback: previous service restored and verified' "$temporary/stderr" \
-    || fail "failed prepared install: rollback was not verified"
-[ "$(cat "$fake_home/.dark-factory.service/receipt")" = "$before_rollback_receipt" ] \
-    || fail "failed prepared install: service receipt changed"
-rm "$DARK_FACTORY_TEST_FACTORYCTL_LOG"
 
 backup=$(find "$fake_home/.dark-factory-backups" -name factory.sqlite3)
 case "$backup" in
@@ -410,6 +385,32 @@ cmp -s "$temporary/expected.log" "$DARK_FACTORY_TEST_FACTORYCTL_LOG" \
     || fail "factoryctl calls: $(tr '\n' ';' <"$DARK_FACTORY_TEST_FACTORYCTL_LOG")"
 grep -q '^user_version now: 7$' "$temporary/stdout" || fail "user_version not printed"
 rm "$DARK_FACTORY_TEST_FACTORYCTL_LOG"
+
+# An unchanged receipt cannot bless a replaced installed program. Refuse
+# before uninstalling it, so the next attempt still has a service to inspect.
+printf 'tampered\n' >"$fake_home/.dark-factory.service/bin/current/factoryd"
+chmod 755 "$fake_home/.dark-factory.service/bin/current/factoryd"
+"$script" "$sha" >/dev/null 2>"$temporary/stderr" && fail "tampered previous factoryd accepted"
+grep -q 'previous service package does not match its receipt' "$temporary/stderr" \
+    || fail "tampered previous factoryd: wrong refusal"
+[ ! -e "$DARK_FACTORY_TEST_FACTORYCTL_LOG" ] || fail "tampered previous factoryd: service changed"
+printf '#!/bin/sh\nexit 0\n' >"$fake_home/.dark-factory.service/bin/current/factoryd"
+chmod 755 "$fake_home/.dark-factory.service/bin/current/factoryd"
+rm -rf "$fake_home/.dark-factory-backups"
+
+# A failed prepared install must restore the copied old package after the
+# destructive uninstall and verify that the old service is healthy.
+before_rollback_receipt=$(cat "$fake_home/.dark-factory.service/receipt")
+DARK_FACTORY_TEST_INSTALL_FAIL=1 "$script" "$sha" >"$temporary/stdout" 2>"$temporary/stderr" \
+    && fail "failed prepared install accepted"
+grep -q 'fixture: prepared service install failed' "$temporary/stderr" \
+    || fail "failed prepared install: fixture failure was not reached"
+grep -q 'rollback: previous service restored and verified' "$temporary/stderr" \
+    || fail "failed prepared install: rollback was not verified"
+[ "$(cat "$fake_home/.dark-factory.service/receipt")" = "$before_rollback_receipt" ] \
+    || fail "failed prepared install: service receipt changed"
+rm "$DARK_FACTORY_TEST_FACTORYCTL_LOG"
+rm -rf "$fake_home/.dark-factory-backups"
 
 # An absent receipt member is a local-only install: factoryctl rejects an
 # empty relay argument, so reinstall must omit the flag rather than pass "".
