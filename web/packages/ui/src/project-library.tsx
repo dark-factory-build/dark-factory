@@ -57,9 +57,11 @@ export function ProjectLibrary({ state, call, draft, board = false, entity = "",
   const selectRevision = (value: RecordValue, loadedBody?: string) => {
     setSelected(value); setBody(loadedBody ?? ""); setBodyNext(0); setComplete(loadedBody !== undefined); setEvidence([]); setEvidenceNext(0); setReplies([]); setReplyNext(0); setAccesses([]); setAccessNext(0); setEditing(false);
   };
-  const read = async (contentID: string, revision = 0) => {
+  const read = async (contentID: string, revision?: number) => {
     const generation = epoch.current;
-    const result = await request("read", { id: contentID, revision });
+    let result = await request("read", { id: contentID, revision: revision ?? 1 });
+    if (generation !== epoch.current) return;
+    if (revision === undefined && Number(result.latest_revision) > 1) result = await request("read", { id: contentID, revision: Number(result.latest_revision) });
     if (generation !== epoch.current) return;
     selectRevision(result);
   };

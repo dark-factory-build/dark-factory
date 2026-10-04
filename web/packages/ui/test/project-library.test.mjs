@@ -88,3 +88,26 @@ test("board shares immutable threads, resolves by revision, and retains linked c
   assert.ok(!calls.some((value) => /task|reply|deliver/.test(value.operation)), "discussion actions never invoke task delivery");
   await act(async () => renderer.unmount());
 });
+
+test("ID-only links resolve latest through explicit metadata revisions; historical selections stay pinned", async () => {
+  const rootID = "ab".repeat(16), lessonID = "cd".repeat(16), priorID = "ef".repeat(16), calls = [];
+  const documents = new Map([[rootID, { title: "Discussion", kind: "discussion", latest_revision: 3, source_references: JSON.stringify({ status: "current" }) }], [lessonID, { title: "Lesson", kind: "lesson", latest_revision: 2, source_references: JSON.stringify({ status: "current", thread_id: rootID, supersedes: priorID }) }], [priorID, { title: "Earlier lesson", kind: "lesson", latest_revision: 4, source_references: JSON.stringify({ status: "superseded" }) }]]);
+  const call = async (operation, input) => {
+    calls.push({ operation, input });
+    if (operation === "read") { assert.ok(Number.isSafeInteger(input.revision) && input.revision > 0, "real store rejects revision zero"); const doc = documents.get(input.id); assert.ok(doc); return { ...doc, id: input.id, revision: input.revision }; }
+    if (operation === "list") return { items: [{ ...documents.get(lessonID), id: lessonID, revision: 1 }], next_offset: 0 };
+    throw new Error(`unexpected ${operation}`);
+  };
+  let renderer;
+  await act(async () => { renderer = create(createElement(ProjectLibrary, { state: fixtureState, call, initialID: lessonID })); });
+  const click = async (label) => { await act(async () => renderer.root.findAllByType("button").find((button) => button.children.join("").includes(label)).props.onClick()); };
+  const reads = () => calls.filter((call) => call.operation === "read").map(({ input }) => [input.id, input.revision]);
+  assert.deepEqual(reads(), [[lessonID, 1], [lessonID, 2]], "initial ID opens the current immutable revision");
+  await click("Original discussion:");
+  assert.deepEqual(reads().slice(-2), [[rootID, 1], [rootID, 3]]);
+  await click("Browse library"); await click("Lesson · lesson · r1");
+  assert.deepEqual(reads().at(-1), [lessonID, 1], "explicit historical selection never advances to latest");
+  await click("Supersedes:");
+  assert.deepEqual(reads().slice(-2), [[priorID, 1], [priorID, 4]]);
+  await act(async () => renderer.unmount());
+});

@@ -115,7 +115,8 @@ export function inhabitedContent(phase: InhabitedPhase): NonNullable<FactoryCons
     }
     if (operation === "read" || operation === "body") {
       const revisions = knowledgeDocuments.get(String(input.id));
-      const item = revisions?.[Number(input.revision || revisions.length) - 1];
+      if (!Number.isSafeInteger(input.revision) || Number(input.revision) < 1) throw new Error("An explicit positive document revision is required");
+      const item = revisions?.[Number(input.revision) - 1];
       if (!item) throw new Error("Document revision not found");
       if (operation === "read") return { ...withoutBody(item), latest_revision: revisions!.length };
       const offset = Number(input.offset) || 0, limit = Number(input.limit) || 8192, body = String(item.body || "");
