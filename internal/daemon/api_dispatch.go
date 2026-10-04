@@ -54,6 +54,10 @@ type Daemon struct {
 	productionRefreshAt map[kernel.ProjectID]time.Time
 	store               *kernel.Store
 	now                 func() time.Time
+	// livenessClock is deliberately separate from now. The latter is also
+	// used by supervisor ordering tests and may be an injected, blocking
+	// clock; liveness telemetry must never enter that ordering boundary.
+	livenessClock func() time.Time
 
 	// Cleanup survives caller cancellation but remains interruptible by daemon shutdown.
 	cleanupCtx    context.Context
@@ -153,7 +157,14 @@ func newDaemon(store *kernel.Store, now func() time.Time) (*Daemon, error) {
 		return nil, fmt.Errorf("%w: invalid daemon", kernel.ErrInvalidValue)
 	}
 	cleanupCtx, cleanupCancel := context.WithCancel(context.Background())
-	return &Daemon{store: store, now: now, cleanupCtx: cleanupCtx, cleanupCancel: cleanupCancel, browsers: make(map[*BrowserRuntime]struct{}), browserClientGates: &browserClientGates{}, attempts: make(map[kernel.RunID]*liveAttempt), supervisors: make(map[*supervisorRegistration]struct{}), schedulerWake: make(chan struct{}, 1), productionRefreshAt: make(map[kernel.ProjectID]time.Time)}, nil
+	return &Daemon{store: store, now: now, livenessClock: time.Now, cleanupCtx: cleanupCtx, cleanupCancel: cleanupCancel, browsers: make(map[*BrowserRuntime]struct{}), browserClientGates: &browserClientGates{}, attempts: make(map[kernel.RunID]*liveAttempt), supervisors: make(map[*supervisorRegistration]struct{}), schedulerWake: make(chan struct{}, 1), productionRefreshAt: make(map[kernel.ProjectID]time.Time)}, nil
+}
+
+func (daemon *Daemon) livenessTimestamp() time.Time {
+	if daemon != nil && daemon.livenessClock != nil {
+		return daemon.livenessClock()
+	}
+	return time.Now()
 }
 
 // HandleConnection synchronously consumes exactly one authenticated request,
@@ -251,7 +262,7 @@ func (daemon *Daemon) markAttemptAPICall(ctx context.Context, call api.Call) {
 	attempt := daemon.attempts[authority.RunID]
 	daemon.attemptMu.Unlock()
 	if attempt != nil {
-		attempt.markAttemptAPICall(daemon.now())
+		attempt.markAttemptAPICall(daemon.livenessTimestamp())
 	}
 }
 

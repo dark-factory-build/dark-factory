@@ -355,8 +355,8 @@ func (attempt *liveAttempt) markStarted(at time.Time) {
 }
 
 func (attempt *liveAttempt) now() time.Time {
-	if attempt != nil && attempt.daemon != nil && attempt.daemon.now != nil {
-		return attempt.daemon.now()
+	if attempt != nil && attempt.daemon != nil {
+		return attempt.daemon.livenessTimestamp()
 	}
 	return time.Now()
 }

@@ -35,6 +35,9 @@ func TestStalledRunLivenessRequiresBothQuietSignals(t *testing.T) {
 
 func TestOverseerSnapshotLivenessUsesRealConnectionDeliveryAndRearm(t *testing.T) {
 	fixture := newDispatchFixture(t)
+	// Keep this fixture's synthetic liveness timeline coherent while the
+	// production liveness clock remains independent of supervisor.now.
+	fixture.daemon.livenessClock = func() time.Time { return fixture.daemon.now() }
 	projectID, err := parseProjectID(testID(241))
 	if err != nil {
 		t.Fatal(err)
