@@ -1250,6 +1250,9 @@ func TestAttemptClientRejectsResponseAfterTokenRotation(t *testing.T) {
 		if readErr == nil && (len(frame) < wireRequestPrelude || !bytes.Equal(frame[1:wireRequestPrelude], first[:])) {
 			readErr = fmt.Errorf("in-flight request did not carry run A credential")
 		}
+		if readErr == nil {
+			readErr = requireEOF(connection)
+		}
 		received <- readErr
 		if readErr != nil {
 			done <- readErr
@@ -1363,7 +1366,13 @@ func TestClientSurvivesDaemonSocketRebind(t *testing.T) {
 				return
 			}
 			defer connection.Close()
-			if _, readErr := readTestFrame(connection); readErr != nil {
+			_, readErr := readTestFrame(connection)
+			if readErr == nil {
+				// Like the daemon, wait for the client's half-close before
+				// replying; closing first makes Darwin fail its CloseWrite.
+				readErr = requireEOF(connection)
+			}
+			if readErr != nil {
 				done <- readErr
 				return
 			}
