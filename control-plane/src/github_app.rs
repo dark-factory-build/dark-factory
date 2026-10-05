@@ -16,7 +16,7 @@ use crate::maintainer::MAX_EXACT_INTEGER;
 
 pub(crate) const PRIVATE_KEY_BINDING: &str = "DARK_FACTORY_MAINTAINER_PRIVATE_KEY_PKCS8";
 pub(crate) const PERMISSION_REVISION_BINDING: &str = "DARK_FACTORY_MAINTAINER_PERMISSION_REVISION";
-pub(crate) const PERMISSION_REVISION: &str = "maintainer-operations-v7";
+pub(crate) const PERMISSION_REVISION: &str = "maintainer-operations-v6";
 const GITHUB_API_VERSION: &str = "2026-03-10";
 // GitHub list endpoints below request at most 100 records. Issue comments and
 // review bodies can each be 65,536 characters, so a webhook-sized 64 KiB cap

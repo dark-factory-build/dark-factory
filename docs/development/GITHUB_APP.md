@@ -79,7 +79,7 @@ and can never satisfy readiness. The production adapter accepts exactly
 `DARK_FACTORY_CLOUDFLARE_ACCESS_AUD`. The private key is standard
 base64 of unencrypted PKCS#8 DER, no repository is configured, and the
 implemented permission revision is exactly
-`maintainer-operations-v7`. Missing webhook authority or a partial or
+`maintainer-operations-v6`. Missing webhook authority or a partial or
 syntactically invalid App-authority group leaves the fixed inactive router with
 no webhook route. An unusable key or configured but unavailable or drifted
 Durable Object journal or GitHub authority makes readiness and ping
@@ -349,8 +349,8 @@ execution boundary.
 
 ## Permission revisions
 
-Permission authority is durable and revisioned. Expansion requires a new
-recorded revision and explicit operator approval; a prompt cannot widen it.
+A permission is requested only once the installation has accepted it
+(`mintable_permissions`), so adding one needs no revision change.
 
 The initial intake-only revision requests only Metadata read and Issues read.
 Its effective allowlist includes the automatic `installation` lifecycle event
@@ -368,16 +368,13 @@ lifecycle action fails closed. The revision requests no Contents, Pull
 requests, Checks, Actions, Workflows, Releases, Administration, or Secrets
 authority.
 
-`maintainer-operations-v7` adds Workflows write to
-`maintainer-operations-v6` so the factory can deliver changes to its own
-workflow files (#1251). `publish_commit` and `enqueue_pull_request` mint it;
+Workflows write was added under `maintainer-operations-v6` so the factory can
+deliver changes to its own workflow files (#1251). `publish_commit` and `enqueue_pull_request` mint it;
 publication no longer refuses `.github/workflows/**`, which still passes the
 same exact-head review and merge queue as any other change. The token carries
 Workflows write only where the installation has accepted it; elsewhere GitHub
 refuses just the workflow-changing push and every other operation is
-unaffected, so installations may accept before or after promotion. Rotate the
-`DARK_FACTORY_MAINTAINER_PERMISSION_REVISION` secret before promoting a v7
-build.
+unaffected, so installations may accept before or after promotion.
 
 `maintainer-operations-v6` grants exactly what
 `maintainer-operations-v5` granted. It adds one bounded
