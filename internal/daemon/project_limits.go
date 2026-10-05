@@ -40,7 +40,8 @@ func (daemon *Daemon) enforceRunLiveness(ctx context.Context, spec SupervisorSpe
 		return err
 	}
 	for _, run := range runs {
-		if run.Role == kernel.RoleOrchestrator {
+		// Only the overseer backstop requeues; a project limit still cancels.
+		if run.Role == kernel.RoleOrchestrator && run.Provider != kernel.ProviderShell && at.Int64()-run.AdmittedAt.Int64() >= kernel.MaxOverseerRunSeconds*1000 {
 			_, err = daemon.store.FailRun(ctx, run.ID, run.Revision, overseerLimit, at)
 		} else {
 			_, err = daemon.store.CancelRun(ctx, run.ID, run.Revision, runLimitDetail, at)

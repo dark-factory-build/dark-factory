@@ -1270,6 +1270,27 @@ func TestDaemonOverseerBackstopFreesLaneWhenProjectLimitIsDisabled(t *testing.T)
 	}
 }
 
+// A shorter project limit still cancels an overseer: only the backstop requeues.
+func TestOverseerPastAProjectLimitIsCancelled(t *testing.T) {
+	fixture := newDispatchFixture(t)
+	active := prepareActiveAttemptInProjectWithProvider(t, fixture, 57, testID(57), "orchestrator", "codex")
+	ctx := context.Background()
+	project, _, err := fixture.store.Project(ctx, active.run.ProjectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.store.SetProjectLimits(ctx, project.ID, project.Revision, project.RunBudgetLimit, 60, active.run.AdmittedAt); err != nil {
+		t.Fatal(err)
+	}
+	fixture.daemon.now = func() time.Time { return time.UnixMilli(active.run.AdmittedAt.Int64() + 60_000) }
+	if err := fixture.daemon.enforceRunLiveness(ctx, SupervisorSpec{}); err != nil {
+		t.Fatal(err)
+	}
+	if run, _, err := fixture.store.Run(ctx, active.run.ID); err != nil || run.Proposal == nil || run.Proposal.Kind() != kernel.OutcomeCancelled || run.Proposal.Detail() != runLimitDetail {
+		t.Fatalf("overseer past project limit = %+v, err=%v", run, err)
+	}
+}
+
 func TestDaemonRejectsForgedAttemptOutcome(t *testing.T) {
 	fixture := newDispatchFixture(t)
 	_ = prepareActiveAttempt(t, fixture, 61)
