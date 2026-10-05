@@ -7,7 +7,6 @@ import (
 	"crypto/sha256"
 	_ "embed"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -64,11 +63,8 @@ func BuildRelease(ctx context.Context, dir, source, target, out string, environm
 }
 
 type releaseAsset struct {
-	URL           string `json:"url"`
-	SHA256        string `json:"sha256"`
-	Bytes         int64  `json:"bytes"`
-	UnpackedBytes int64  `json:"unpacked_bytes"`
-	BuildID       string `json:"build_id"`
+	SHA256, BuildID string
+	Bytes           int64
 }
 
 // PackageRelease packages both macOS targets in one all-or-nothing step:
@@ -76,7 +72,7 @@ type releaseAsset struct {
 //	TAG SOURCE_SHA OUT_DIR OWNER/REPO TARGET BIN_DIR TARGET BIN_DIR
 //
 // OUT_DIR must not exist. Everything is built in a sibling staging directory
-// and renamed into place only after both archives, SHA256SUMS, latest.json,
+// and renamed into place only after both archives, SHA256SUMS,
 // and the Homebrew formula exist. Archive members have one fixed order, mode,
 // owner, and timestamp, so byte-identical binaries give byte-identical assets.
 func PackageRelease(arguments []string) (result error) {
@@ -124,42 +120,28 @@ func PackageRelease(arguments []string) (result error) {
 			return errors.New("invalid release identity")
 		}
 		archive := "dark-factory-" + tag + "-" + target[0] + ".tar.gz"
-		unpacked, size, sum, err := packageTarget(binDirs[target[0]], filepath.Join(staging, archive), identity)
+		_, size, sum, err := packageTarget(binDirs[target[0]], filepath.Join(staging, archive), identity)
 		if err != nil {
 			return fmt.Errorf("%s: %w", target[0], err)
 		}
 		sums += sum + "  " + archive + "\n"
 		assets[target[0]] = releaseAsset{
-			URL:    "https://github.com/" + repository + "/releases/download/" + tag + "/" + archive,
-			SHA256: sum, Bytes: size, UnpackedBytes: unpacked, BuildID: identity.BuildID(),
+			SHA256: sum, Bytes: size, BuildID: identity.BuildID(),
 		}
 	}
 	arm, intel := assets[releaseTargets[0][0]], assets[releaseTargets[1][0]]
 	if err := ValidateReleaseArchiveBounds(arm.Bytes, intel.Bytes); err != nil {
 		return err
 	}
-	manifest, err := json.MarshalIndent(struct {
-		Version string                  `json:"version"`
-		Tag     string                  `json:"tag"`
-		Source  string                  `json:"source"`
-		Assets  map[string]releaseAsset `json:"assets"`
-	}{version, tag, source, assets}, "", "  ")
-	if err != nil {
-		return err
-	}
-	manifest = append(manifest, '\n')
-	manifestSum := sha256.Sum256(manifest)
-	sums += hex.EncodeToString(manifestSum[:]) + "  latest.json\n"
-
 	formula := new(strings.Builder)
 	if err := formulaTemplate.Execute(formula, map[string]any{
-		"Tag": tag, "Version": version, "Prerelease": strings.Contains(tag, "-"),
-		"Source": source, "Repository": repository, "ManifestSHA": hex.EncodeToString(manifestSum[:]),
+		"Tag": tag, "Version": version,
+		"Source": source, "Repository": repository,
 		"ArmBuildID": arm.BuildID, "IntelBuildID": intel.BuildID, "ArmSHA": arm.SHA256, "IntelSHA": intel.SHA256,
 	}); err != nil {
 		return err
 	}
-	for name, content := range map[string]string{"latest.json": string(manifest), "SHA256SUMS": sums, "dark-factory.rb": formula.String()} {
+	for name, content := range map[string]string{"SHA256SUMS": sums, "dark-factory.rb": formula.String()} {
 		if err := os.WriteFile(filepath.Join(staging, name), []byte(content), 0o644); err != nil {
 			return err
 		}

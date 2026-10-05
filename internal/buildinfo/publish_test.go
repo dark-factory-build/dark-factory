@@ -70,7 +70,7 @@ func publishFixture(t *testing.T) (*fakeGitHub, []string) {
 	publishRetryDelay = 0
 	directory := t.TempDir()
 	var paths []string
-	for _, name := range []string{"archive.tar.gz", "SHA256SUMS", "latest.json"} {
+	for _, name := range []string{"archive.tar.gz", "SHA256SUMS", "dark-factory.rb"} {
 		path := filepath.Join(directory, name)
 		if err := os.WriteFile(path, []byte("fixture "+name+"\n"), 0o644); err != nil {
 			t.Fatal(err)

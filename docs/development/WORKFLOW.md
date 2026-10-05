@@ -338,8 +338,8 @@ Neither path exposes process arguments, credentials, or a new daemon operation.
 Publishing an immutable semver tag whose name matches `VERSION` triggers
 `.github/workflows/release.yml`, which builds the three Go commands for Apple
 silicon and Intel macOS and
-publishes two archives, `SHA256SUMS`, a Homebrew formula candidate, and
-`latest.json`. The manifest is release metadata; the runtime has no updater.
+publishes two archives, `SHA256SUMS`, and a Homebrew formula candidate. The
+runtime has no updater.
 
 A half-published release is fixed by re-running that tag's Release workflow or
 publishing manually with the `release-artifact` tool.

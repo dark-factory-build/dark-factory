@@ -6,7 +6,6 @@ import (
 	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -18,7 +17,7 @@ import (
 
 var releaseAssetNames = []string{
 	"dark-factory-v1.2.3-aarch64-apple-darwin.tar.gz", "dark-factory-v1.2.3-x86_64-apple-darwin.tar.gz",
-	"SHA256SUMS", "latest.json", "dark-factory.rb",
+	"SHA256SUMS", "dark-factory.rb",
 }
 
 func TestPackageReleaseIsDeterministicAndConsistent(t *testing.T) {
@@ -47,7 +46,7 @@ func TestPackageReleaseIsDeterministicAndConsistent(t *testing.T) {
 	mustPackage(t, second, "aarch64-apple-darwin", arm, "x86_64-apple-darwin", intel)
 	entries, err := os.ReadDir(second)
 	if err != nil || len(entries) != len(releaseAssetNames) {
-		t.Fatalf("output has %d entries (%v); want exactly the five assets", len(entries), err)
+		t.Fatalf("output has %d entries (%v); want exactly the four assets", len(entries), err)
 	}
 	for _, name := range releaseAssetNames {
 		if !bytes.Equal(readFile(t, filepath.Join(first, name)), readFile(t, filepath.Join(second, name))) {
@@ -60,39 +59,23 @@ func TestPackageReleaseIsDeterministicAndConsistent(t *testing.T) {
 		sum, name, _ := strings.Cut(line, "  ")
 		sums[name] = sum
 	}
-	if len(sums) != 3 {
-		t.Fatalf("SHA256SUMS names %d files; want 3", len(sums))
+	if len(sums) != 2 {
+		t.Fatalf("SHA256SUMS names %d files; want 2", len(sums))
 	}
 	for name, sum := range sums {
 		if digest := sha256.Sum256(readFile(t, filepath.Join(first, name))); hex.EncodeToString(digest[:]) != sum {
 			t.Fatalf("SHA256SUMS does not match %s", name)
 		}
 	}
-	var manifest struct {
-		Version, Tag, Source string
-		Assets               map[string]releaseAsset
-	}
-	if err := json.Unmarshal(readFile(t, filepath.Join(first, "latest.json")), &manifest); err != nil {
-		t.Fatal(err)
-	}
-	if manifest.Version != "1.2.3" || manifest.Tag != "v1.2.3" || manifest.Source != fixtureSource || len(manifest.Assets) != 2 {
-		t.Fatalf("manifest = %+v", manifest)
-	}
-	for _, target := range releaseTargets {
-		identity, _ := Expected("1.2.3", fixtureSource, target[1])
-		archive := "dark-factory-v1.2.3-" + target[0] + ".tar.gz"
-		asset := manifest.Assets[target[0]]
-		content := readFile(t, filepath.Join(first, archive))
-		if asset.URL != "https://github.com/example/project/releases/download/v1.2.3/"+archive || asset.SHA256 != sums[archive] ||
-			asset.Bytes != int64(len(content)) || asset.UnpackedBytes <= asset.Bytes || asset.BuildID != identity.BuildID() {
-			t.Fatalf("%s manifest entry = %+v", target[0], asset)
-		}
-		inputs := map[string]string{"darwin/arm64": arm, "darwin/amd64": intel}
-		assertArchive(t, content, inputs[target[1]], asset.UnpackedBytes)
-	}
 	formula := string(readFile(t, filepath.Join(first, "dark-factory.rb")))
-	if !strings.Contains(formula, `sha256 "`+sums["latest.json"]+`"`) || !strings.Contains(formula, `sha256 "`+sums[releaseAssetNames[0]]+`"`) {
-		t.Fatal("formula does not pin the packaged checksums")
+	for _, target := range releaseTargets {
+		archive := "dark-factory-v1.2.3-" + target[0] + ".tar.gz"
+		content := readFile(t, filepath.Join(first, archive))
+		inputs := map[string]string{"darwin/arm64": arm, "darwin/amd64": intel}
+		assertArchive(t, content, inputs[target[1]])
+		if !strings.Contains(formula, "releases/download/v1.2.3/"+archive+"\"\n    sha256 \""+sums[archive]+"\"") {
+			t.Fatalf("formula does not pin %s at its checksum", archive)
+		}
 	}
 }
 
@@ -137,9 +120,9 @@ func TestPackageReleaseRefusesBadInputWithoutPartialOutput(t *testing.T) {
 
 func TestFormulaRendersExactCandidate(t *testing.T) {
 	data := map[string]any{
-		"Tag": "v1.2.3", "Version": "1.2.3", "Prerelease": false, "Source": fixtureSource, "Repository": "example/project",
+		"Tag": "v1.2.3", "Version": "1.2.3", "Source": fixtureSource, "Repository": "example/project",
 		"ArmBuildID": strings.Repeat("a", 64), "IntelBuildID": strings.Repeat("b", 64),
-		"ArmSHA": strings.Repeat("c", 64), "IntelSHA": strings.Repeat("d", 64), "ManifestSHA": strings.Repeat("e", 64),
+		"ArmSHA": strings.Repeat("c", 64), "IntelSHA": strings.Repeat("d", 64),
 	}
 	got := new(strings.Builder)
 	if err := formulaTemplate.Execute(got, data); err != nil {
@@ -148,17 +131,17 @@ func TestFormulaRendersExactCandidate(t *testing.T) {
 	if want := string(readFile(t, "testdata/dark-factory.rb")); got.String() != want {
 		t.Fatalf("formula differs from testdata/dark-factory.rb:\n%s", got)
 	}
-	data["Tag"], data["Version"], data["Prerelease"] = "v1.2.3-rc.1", "1.2.3-rc.1", true
+	data["Tag"], data["Version"] = "v1.2.3-rc.1", "1.2.3-rc.1"
 	got.Reset()
 	if err := formulaTemplate.Execute(got, data); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Count(got.String(), "  version ") != 1 || !strings.Contains(got.String(), "latest.json\"\n  version \"1.2.3-rc.1\"\n  sha256") {
+	if strings.Count(got.String(), "  version ") != 1 || !strings.Contains(got.String(), "  version \"1.2.3-rc.1\"") {
 		t.Fatalf("prerelease formula does not declare its version once:\n%s", got)
 	}
 }
 
-func assertArchive(t *testing.T, content []byte, inputs string, unpacked int64) {
+func assertArchive(t *testing.T, content []byte, inputs string) {
 	t.Helper()
 	if !bytes.Equal(content[4:8], []byte{0, 0, 0, 0}) {
 		t.Fatal("archive embeds its packaging time")
@@ -169,7 +152,6 @@ func assertArchive(t *testing.T, content []byte, inputs string, unpacked int64) 
 	}
 	archive := tar.NewReader(compressed)
 	var names []string
-	var total int64
 	for {
 		header, err := archive.Next()
 		if err == io.EOF {
@@ -190,10 +172,9 @@ func assertArchive(t *testing.T, content []byte, inputs string, unpacked int64) 
 			t.Fatalf("%s is not the verified input binary", header.Name)
 		}
 		names = append(names, header.Name)
-		total += int64(len(member))
 	}
-	if fmt.Sprint(names) != "[factoryd factory-runner factoryctl]" || total != unpacked {
-		t.Fatalf("archive members = %v (%d bytes, manifest %d)", names, total, unpacked)
+	if fmt.Sprint(names) != "[factoryd factory-runner factoryctl]" {
+		t.Fatalf("archive members = %v", names)
 	}
 }
 

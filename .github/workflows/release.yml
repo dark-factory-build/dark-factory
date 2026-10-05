@@ -3,9 +3,7 @@ run-name: Release ${{ github.ref_name }}
 
 # A semver tag (`vX.Y.Z`) pushed by a maintainer builds the macOS arm64
 # and Intel binaries serially and publishes them, a SHA256SUMS file, a tap
-# formula candidate, and the `latest.json` manifest as a GitHub Release.
-# `latest.json` is inert release metadata; no local command consumes it as an
-# updater manifest.
+# formula candidate as a GitHub Release.
 on:
   push:
     tags: ["v*"]
@@ -63,7 +61,7 @@ jobs:
 
       # One Go implementation (internal/buildinfo, shared with factoryd's
       # self-release) checks the tag against VERSION, cross-compiles both
-      # targets with go.mod's toolchain, packages the five assets, and
+      # targets with go.mod's toolchain, packages the four assets, and
       # publishes them. RELEASE_ARTIFACT is built from this workflow's commit.
       - name: Build release binaries
         run: |
