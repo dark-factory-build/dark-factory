@@ -86,38 +86,17 @@ jobs:
           echo "/opt/homebrew/bin" >> "$GITHUB_PATH"
           /opt/homebrew/bin/go version
 
-      - name: Check that the tag matches the runtime version
-        run: |
-          version=$(cat VERSION)
-          if [ "v$version" != "$TAG" ]; then
-            echo "tag $TAG does not match VERSION $version" >&2
-            exit 1
-          fi
-
+      # One Go implementation (internal/buildinfo, shared with factoryd's
+      # self-release) checks the tag against VERSION, cross-compiles both
+      # targets with go.mod's toolchain, packages the five assets, and
+      # publishes them. RELEASE_ARTIFACT is built from this workflow's commit.
       - name: Build release binaries
         run: |
-          set -eu
-          version=$(cat VERSION)
-          GOTOOLCHAIN=go1.27.0 GOENV=off GOAUTH=off go build -trimpath -buildvcs=false \
-            -o release-artifact ./internal/buildinfo/cmd/release-artifact
-          arm_receipt=$(./release-artifact receipt "$version" "$SOURCE_SHA" darwin/arm64)
-          intel_receipt=$(./release-artifact receipt "$version" "$SOURCE_SHA" darwin/amd64)
-          mkdir -p release/aarch64-apple-darwin release/x86_64-apple-darwin
-          for binary in factoryd factory-runner factoryctl; do
-            CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 GOENV=off GOTOOLCHAIN=go1.27.0 GOAUTH=off \
-              go build -trimpath -buildvcs=false \
-              -ldflags "-s -w -X github.com/dark-factory-build/dark-factory/internal/buildinfo.receipt=$arm_receipt" \
-              -o "release/aarch64-apple-darwin/$binary" "./cmd/$binary"
-            CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 GOENV=off GOTOOLCHAIN=go1.27.0 GOAUTH=off \
-              go build -trimpath -buildvcs=false \
-              -ldflags "-s -w -X github.com/dark-factory-build/dark-factory/internal/buildinfo.receipt=$intel_receipt" \
-              -o "release/x86_64-apple-darwin/$binary" "./cmd/$binary"
-          done
-          rm release-artifact
+          "$RELEASE_ARTIFACT" build "$TAG" "$SOURCE_SHA" release
 
       - name: Package
         run: |
-          GOTOOLCHAIN=go1.27.0 ./scripts/package-release.sh "$TAG" "$SOURCE_SHA" dist "$GITHUB_REPOSITORY" \
+          "$RELEASE_ARTIFACT" package "$TAG" "$SOURCE_SHA" dist "$GITHUB_REPOSITORY" \
             aarch64-apple-darwin release/aarch64-apple-darwin \
             x86_64-apple-darwin release/x86_64-apple-darwin
 
@@ -125,7 +104,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          "$PUBLISHER" "$TAG" "$SOURCE_SHA" "$GITHUB_REPOSITORY" dist/*
+          "$RELEASE_ARTIFACT" publish "$TAG" "$SOURCE_SHA" "$GITHUB_REPOSITORY" dist/*
 
       - name: Publish bounded workflow summary
         if: always()

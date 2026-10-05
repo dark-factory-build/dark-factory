@@ -346,31 +346,12 @@ func buildRelease(ctx context.Context, daemon *Daemon, root string, source chang
 	if err := change.ReviewCheckout(ctx, change.TrustedGitExecutable, root, source, tree, 0, sha, sha, selfBase); err != nil {
 		return buildinfo.Identity{}, fmt.Errorf("release checkout: %w", err)
 	}
-	version, versionErr := os.ReadFile(filepath.Join(tree, "VERSION"))
-	module, moduleErr := os.ReadFile(filepath.Join(tree, "go.mod"))
-	goVersion := regexp.MustCompile(`(?m)^go ([0-9]+\.[0-9]+\.[0-9]+)$`).FindSubmatch(module)
-	identity, ok := buildinfo.Expected(strings.TrimSpace(string(version)), sha, runtime.GOOS+"/"+runtime.GOARCH)
-	if versionErr != nil || moduleErr != nil || goVersion == nil || !ok {
-		return buildinfo.Identity{}, errors.New("release source has no exact VERSION or go.mod toolchain")
-	}
-	for _, name := range []string{"factoryd", "factoryctl", "factory-runner"} {
-		output := filepath.Join(directory, "bin", name)
-		// /usr/bin/env resolves go on the operator's tool path, not ours.
-		command := exec.CommandContext(ctx, "/usr/bin/env", "go", "build", "-trimpath", "-buildvcs=false", "-ldflags", "-s -w -X github.com/dark-factory-build/dark-factory/internal/buildinfo.receipt="+identity.Receipt(), "-o", output, "./cmd/"+name)
-		command.Dir = tree
-		command.Env = append(daemon.toolEnvironment(), "CGO_ENABLED=0", "GOENV=off", "GOAUTH=off", "GOTOOLCHAIN=go"+string(goVersion[1]))
+	// /usr/bin/env resolves go on the operator's tool path, not ours.
+	return buildinfo.BuildRelease(ctx, tree, sha, runtime.GOOS+"/"+runtime.GOARCH, filepath.Join(directory, "bin"), daemon.toolEnvironment(), func(command *exec.Cmd) {
 		command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 		command.Cancel = func() error { return syscall.Kill(-command.Process.Pid, syscall.SIGKILL) }
 		command.WaitDelay = 5 * time.Second
-		if log, err := command.CombinedOutput(); err != nil {
-			return buildinfo.Identity{}, fmt.Errorf("go build %s: %v: %s", name, err, log[max(0, len(log)-1024):])
-		}
-		// The release artifact contract is exactly 0755; the linker honors umask.
-		if err := os.Chmod(output, 0o755); err != nil {
-			return buildinfo.Identity{}, err
-		}
-	}
-	return identity, nil
+	})
 }
 
 // ConfigureHost sets the factory home and the operator's tool path.

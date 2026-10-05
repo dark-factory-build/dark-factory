@@ -3,6 +3,7 @@ package buildinfo
 import (
 	"archive/tar"
 	"compress/gzip"
+	"context"
 	"crypto/sha256"
 	_ "embed"
 	"encoding/hex"
@@ -11,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -28,6 +30,38 @@ var (
 	// releaseTargets is the one fixed packaging order; input order never matters.
 	releaseTargets = [2][2]string{{"aarch64-apple-darwin", "darwin/arm64"}, {"x86_64-apple-darwin", "darwin/amd64"}}
 )
+
+// BuildRelease builds the three release binaries of the source tree at dir,
+// commit source, for target ("darwin/arm64") into out as an exact release
+// identity, with the Go toolchain dir's go.mod names. go resolves on the PATH
+// in environment; prepare, when set, adjusts each command before it runs.
+func BuildRelease(ctx context.Context, dir, source, target, out string, environment []string, prepare func(*exec.Cmd)) (Identity, error) {
+	version, versionErr := os.ReadFile(filepath.Join(dir, "VERSION"))
+	module, moduleErr := os.ReadFile(filepath.Join(dir, "go.mod"))
+	goVersion := regexp.MustCompile(`(?m)^go ([0-9]+\.[0-9]+\.[0-9]+)$`).FindSubmatch(module)
+	identity, ok := Expected(strings.TrimSpace(string(version)), source, target)
+	if versionErr != nil || moduleErr != nil || goVersion == nil || !ok {
+		return Identity{}, errors.New("release source has no exact VERSION or go.mod toolchain")
+	}
+	goos, goarch, _ := strings.Cut(target, "/")
+	for _, name := range []string{"factoryd", "factoryctl", "factory-runner"} {
+		output := filepath.Join(out, name)
+		command := exec.CommandContext(ctx, "/usr/bin/env", "go", "build", "-trimpath", "-buildvcs=false", "-ldflags", "-s -w -X github.com/dark-factory-build/dark-factory/internal/buildinfo.receipt="+identity.Receipt(), "-o", output, "./cmd/"+name)
+		command.Dir = dir
+		command.Env = append(environment, "CGO_ENABLED=0", "GOOS="+goos, "GOARCH="+goarch, "GOENV=off", "GOAUTH=off", "GOTOOLCHAIN=go"+string(goVersion[1]))
+		if prepare != nil {
+			prepare(command)
+		}
+		if log, err := command.CombinedOutput(); err != nil {
+			return Identity{}, fmt.Errorf("go build %s: %v: %s", name, err, log[max(0, len(log)-1024):])
+		}
+		// The release artifact contract is exactly 0755; the linker honors umask.
+		if err := os.Chmod(output, 0o755); err != nil {
+			return Identity{}, err
+		}
+	}
+	return identity, nil
+}
 
 type releaseAsset struct {
 	URL           string `json:"url"`

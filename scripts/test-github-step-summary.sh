@@ -42,7 +42,8 @@ assert_contains 'href="https://github.com/dark-factory-build/dark-factory/milest
 GITHUB_STEP_SUMMARY=$summary \
 DF_SUMMARY_KIND='CI
 <script>' \
-DF_SUMMARY_REF='refs/pull/208/merge|[attack](javascript:alert(1))' \
+DF_SUMMARY_REF='refs/pull/208/merge
+|[attack](javascript:alert(1))' \
 DF_SUMMARY_SHA='not-a-sha
 ' \
 DF_SUMMARY_RESULT='success
@@ -102,13 +103,11 @@ grep -F 'if [ -x ./scripts/github-step-summary.sh ]; then' .github/workflows/rel
 grep -F 'unavailable before checkout' .github/workflows/ci.yml >/dev/null
 grep -F 'unavailable before checkout' .github/workflows/release.yml >/dev/null
 grep -F 'runs-on: macos-15' .github/workflows/release.yml >/dev/null
-grep -F 'CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 GOENV=off GOTOOLCHAIN=go1.27.0 GOAUTH=off' .github/workflows/release.yml >/dev/null
-grep -F 'CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 GOENV=off GOTOOLCHAIN=go1.27.0 GOAUTH=off' .github/workflows/release.yml >/dev/null
 if grep -Fq 'runs-on: dark-factory-mac' .github/workflows/release.yml; then
     echo 'release workflow retained the persistent credential-bearing runner' >&2
     exit 1
 fi
-grep -F '"$PUBLISHER" "$TAG" "$SOURCE_SHA" "$GITHUB_REPOSITORY" dist/*' .github/workflows/release.yml >/dev/null
+grep -F '"$RELEASE_ARTIFACT" publish "$TAG" "$SOURCE_SHA" "$GITHUB_REPOSITORY" dist/*' .github/workflows/release.yml >/dev/null
 grep -F 'if: always()' .github/workflows/ci.yml >/dev/null
 grep -F 'if: always()' .github/workflows/release.yml >/dev/null
 for state in queued in-progress blocked review release-ready; do

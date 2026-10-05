@@ -251,7 +251,7 @@ scope_case true false false full internal/install/install_darwin.go
 scope_case true false false full cmd/factoryctl/main.go
 scope_case true false false full web/package.json
 scope_case true false false full VERSION
-scope_case true false false release scripts/package-release.sh
+scope_case true false false release scripts/prepare-release-source.sh
 scope_case true false false runtime internal/kernel/store.go
 scope_case true true false runtime control-plane/src/lib.rs internal/kernel/store.go
 scope_case true true true full .github/workflows/ci.yml
