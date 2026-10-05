@@ -225,52 +225,47 @@ func TestPublicationRedactsEmailsAndUUID5MatchesTheRunbook(t *testing.T) {
 	}
 }
 
-// Accepted work keeps its destination: a repository disabled for new work
-// after acceptance is still checked out for its publication.
-func TestPublicationChecksOutADisabledAcceptedRepository(t *testing.T) {
+// A repository disabled for new work after acceptance is neither published
+// to nor reviewed: the Change is escalated once, before any Maintainer call
+// (the fixture has no connection, so a call would fail the test).
+func TestDisabledAcceptedRepositoryEscalatesOnce(t *testing.T) {
+	fixture, c, _, _, _ := publishFixture(t, 1, false)
 	ctx := context.Background()
-	git := change.TrustedGitExecutable
-	seed := contentRepositoryFixture(t)
-	supervisorGit(t, git, "-C", seed, "branch", "-M", "main")
-	base := strings.TrimSpace(supervisorGitOutput(t, git, "-C", seed, "rev-parse", "HEAD"))
-	parent, err := os.MkdirTemp("/private/tmp", "dark-factory-publish-")
+	id, err := kernel.RepositoryIDFromBytes(mustIDBytes(t, testID(251)))
 	if err != nil {
 		t.Fatal(err)
-	}
-	t.Cleanup(func() { os.RemoveAll(parent) })
-	bare := filepath.Join(parent, "remote.git")
-	supervisorGit(t, git, "clone", "-q", "--bare", seed, bare)
-	var roots []string
-	for _, name := range []string{"default", "accepted"} {
-		root := filepath.Join(parent, name)
-		supervisorGit(t, git, "clone", "-q", bare, root)
-		supervisorGit(t, git, "-C", root, "config", "protocol.file.allow", "always")
-		roots = append(roots, root)
-	}
-	fixture, project := readinessProject(t, roots[0], "refs/remotes/origin/main")
-	id, err := kernel.RepositoryIDFromBytes(mustIDBytes(t, testID(230)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := fixture.store.AddProjectRepository(ctx, kernel.NewProjectRepository{ID: id, ProjectID: kernel.ProjectID(project), Name: "accepted", Root: roots[1], BaseRef: "refs/remotes/origin/main"}, mustKernelTime(t, 300)); err != nil {
-		t.Fatal(err)
-	}
-	if view, err := fixture.daemon.RepositoryReadiness(ctx, id, true); err != nil || view.FetchState != "ready" {
-		t.Fatalf("readiness: %+v %v", view, err)
 	}
 	repository, _, err := fixture.store.ProjectRepository(ctx, id)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := fixture.store.SetProjectRepositoryEnabled(ctx, id, repository.Revision, false, mustKernelTime(t, 301)); err != nil {
+	if _, err := fixture.store.SetProjectRepositoryEnabled(ctx, id, repository.Revision, false, mustKernelTime(t, 1003)); err != nil {
 		t.Fatal(err)
 	}
-	gitDir, cleanup, err := fixture.daemon.publicationCheckout(id, base)(ctx, base)
-	if err != nil {
-		t.Fatalf("checkout of the disabled accepted repository: %v", err)
+	c.Accepted.RepositoryID = id
+	for range 2 {
+		if err := fixture.daemon.publishSettledChange(ctx, c); err != nil {
+			t.Fatal(err)
+		}
 	}
-	defer cleanup()
-	if got := strings.TrimSpace(supervisorGitOutput(t, git, "--git-dir", gitDir, "rev-parse", "HEAD")); got != base {
-		t.Fatalf("checkout at %s, want %s", got, base)
+	page, err := fixture.store.Production(ctx, c.Task.ProjectID, 0, 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	escalations := 0
+	for _, record := range page.Records {
+		var op review.Operation
+		if record.Kind == "reviewer" && json.Unmarshal(record.Document, &op) == nil && op.Escalation != "" {
+			escalations++
+			if op.ID != kernel.PublishFailureID(c.Change, c.Revision) || op.Escalation != "factoryd cannot publish change "+c.Change.String()+" for task "+c.Task.ID.String()+": repository disabled for new work" {
+				t.Fatalf("escalation = %+v", op)
+			}
+		}
+		if record.Kind == "pull_request" {
+			t.Fatalf("published into a disabled repository: %s", record.Document)
+		}
+	}
+	if escalations != 1 {
+		t.Fatalf("escalations = %d, want 1", escalations)
 	}
 }

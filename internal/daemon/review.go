@@ -394,7 +394,7 @@ type daemonReviewBackend struct {
 }
 
 // CloneReadOnly checks the pull request out at its exact head into a
-// disposable clone of the enabled registered repository publishing it.
+// disposable clone that borrows the registered repository's objects.
 func (b *daemonReviewBackend) CloneReadOnly(ctx context.Context, request review.Request) (string, func(), error) {
 	repositories, err := b.daemon.store.ProjectRepositories(ctx, b.project)
 	if err != nil {
@@ -405,33 +405,28 @@ func (b *daemonReviewBackend) CloneReadOnly(ctx context.Context, request review.
 		if err != nil {
 			return "", nil, err
 		}
-		if repository.Enabled && verified && strings.EqualFold(source.PublicationRepository, request.Repository) {
-			return cloneRepository(ctx, repository, source, request)
+		if !repository.Enabled || !verified || !strings.EqualFold(source.PublicationRepository, request.Repository) {
+			continue
 		}
+		rootIdentity, rootErr := change.NewRepositoryIdentity(source.RootDevice, source.RootInode)
+		gitIdentity, gitErr := change.NewRepositoryIdentity(source.GitDevice, source.GitInode)
+		if rootErr != nil || gitErr != nil {
+			return "", nil, kernel.ErrCorruptState
+		}
+		root, err := os.MkdirTemp("", "dark-factory-review-")
+		if err != nil {
+			return "", nil, err
+		}
+		cleanup := func() { _ = os.RemoveAll(root) }
+		checkout := filepath.Join(root, "repo")
+		expected := change.RepositorySourceIdentity{Root: rootIdentity, Git: gitIdentity, OriginDigest: source.OriginDigest}
+		if err := change.ReviewCheckout(ctx, change.TrustedGitExecutable, repository.Root, expected, checkout, request.PullNumber, request.Head, request.Base, request.BaseRef); err != nil {
+			cleanup()
+			return "", nil, fmt.Errorf("review checkout: %w", err)
+		}
+		return checkout, cleanup, nil
 	}
 	return "", nil, errors.New("review: no registered checkout for repository")
-}
-
-// cloneRepository checks request's head out into a disposable clone that
-// borrows the verified registered repository's objects.
-func cloneRepository(ctx context.Context, repository kernel.ProjectRepository, source kernel.RepositorySourceIdentity, request review.Request) (string, func(), error) {
-	rootIdentity, rootErr := change.NewRepositoryIdentity(source.RootDevice, source.RootInode)
-	gitIdentity, gitErr := change.NewRepositoryIdentity(source.GitDevice, source.GitInode)
-	if rootErr != nil || gitErr != nil {
-		return "", nil, kernel.ErrCorruptState
-	}
-	root, err := os.MkdirTemp("", "dark-factory-review-")
-	if err != nil {
-		return "", nil, err
-	}
-	cleanup := func() { _ = os.RemoveAll(root) }
-	checkout := filepath.Join(root, "repo")
-	expected := change.RepositorySourceIdentity{Root: rootIdentity, Git: gitIdentity, OriginDigest: source.OriginDigest}
-	if err := change.ReviewCheckout(ctx, change.TrustedGitExecutable, repository.Root, expected, checkout, request.PullNumber, request.Head, request.Base, request.BaseRef); err != nil {
-		cleanup()
-		return "", nil, fmt.Errorf("review checkout: %w", err)
-	}
-	return checkout, cleanup, nil
 }
 
 // reviewDeadline bounds one review, every account it tries included.
