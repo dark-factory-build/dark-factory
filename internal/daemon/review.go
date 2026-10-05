@@ -97,7 +97,9 @@ func (daemon *Daemon) advanceMergePipeline(ctx context.Context) {
 	}
 	projects, _ := daemon.store.PublishingProjects(ctx)
 	for _, project := range projects {
-		_ = daemon.refreshProduction(ctx, project)
+		if err := daemon.refreshProduction(ctx, project); err != nil {
+			fmt.Fprintf(os.Stderr, "factoryd: refresh %s: %v\n", project, err)
+		}
 	}
 	_, _ = daemon.advanceReviewOperations(ctx, false)
 }
@@ -168,6 +170,8 @@ func (daemon *Daemon) advanceReviewOperations(ctx context.Context, startup bool)
 		}
 		if err == nil {
 			advanced++
+		} else {
+			fmt.Fprintf(os.Stderr, "factoryd: review %s %s: %v\n", operation.ID, op.State, err)
 		}
 	}
 	return advanced, nil
