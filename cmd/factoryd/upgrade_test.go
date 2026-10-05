@@ -192,10 +192,16 @@ func TestRollbackRestoresTheDatabaseOnlyWhenTheSchemaMoved(t *testing.T) {
 func TestOldBuildRecordsTheRollbackThenRestartsOnlyForANewRelease(t *testing.T) {
 	home, _ := trialHome(t, install.UpgradeMarker{Target: trialTarget, UserVersion: kernel.SchemaVersion, State: install.UpgradeRolledBack, Reason: "crashed"})
 	selfSource = func() string { return strings.Repeat("6", 40) }
+	// The local API is up before the old build settles the release, so wait
+	// for the removal itself rather than for the socket.
+	realRemove := removeUpgrade
+	t.Cleanup(func() { removeUpgrade = realRemove })
+	removed := make(chan struct{})
+	removeUpgrade = func(home string) error { defer close(removed); return realRemove(home) }
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- serve(ctx, testConfig(home)) }()
-	waitOperatorClient(t, home)
+	<-removed
 	if _, present := readMarker(t, home); present {
 		t.Fatal("the old build kept the rolled back marker")
 	}
