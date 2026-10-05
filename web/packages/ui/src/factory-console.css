@@ -1202,16 +1202,22 @@ summary.dfConsoleItem__summary { cursor: pointer; }
   .dfFactoryConsole[data-mobile-view="floor"] .dfConsoleSidebar,
   .dfFactoryConsole[data-mobile-view] .dfConsoleSidebar > .dfConsoleViewToggle { display: none; }
 }
-.dfProjectLibrary { border-top: 1px solid var(--df-border, #555); margin-top: 1rem; padding-top: 1rem; }
+.dfProjectLibrary { margin-top: 1rem; }
 .dfProjectLibrary fieldset { border: 0; padding: 0; min-width: 0; }
 .dfProjectLibrary label { display: grid; gap: .3rem; margin: .7rem 0; }
 .dfProjectLibrary textarea, .dfProjectLibrary input, .dfProjectLibrary select { max-width: 100%; box-sizing: border-box; }
+.dfProjectLibrary :is(input:not([type="checkbox"]), textarea, select) { width: 100%; padding: .6rem; color: var(--df-console-text); background: var(--df-console-background); border: 1px solid var(--df-console-rule); font: inherit; }
+.dfProjectLibrary label:has(> input[type="checkbox"]) { display: flex; align-items: center; }
 .dfProjectLibrary pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 24rem; overflow: auto; }
 .dfProjectLibrary button { margin: .2rem; }
 .dfProjectLibrary__browser { display: grid; grid-template-columns: minmax(9rem, 1fr) minmax(0, 2fr); gap: 1rem; align-items: start; }
 .dfProjectLibrary__documents { display: flex; flex-direction: column; min-width: 0; }
 .dfProjectLibrary__documents button { text-align: left; overflow-wrap: anywhere; }
 .dfProjectLibrary__documents button span { display: block; font-size: .85em; }
+.dfProjectLibrary__actions { display: flex; flex-wrap: wrap; gap: .25rem; align-items: center; }
+.dfProjectLibrary__actions [aria-pressed="true"] { border-color: var(--df-console-accent, #64d8b1); }
+.dfProjectLibrary__workspace { border-top: 1px solid var(--df-border, #555); margin-top: .75rem; padding-top: .75rem; }
+.dfProjectLibrary__fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 16rem), 1fr)); gap: 0 1rem; }
 .dfProjectLibrary__reader { min-width: 0; overflow-wrap: anywhere; }
 @media (max-width: 640px) { .dfProjectLibrary__browser { grid-template-columns: minmax(0, 1fr); } }
 
@@ -1228,3 +1234,24 @@ summary.dfConsoleItem__summary { cursor: pointer; }
 .dfProjectLibrary button { overflow-wrap: anywhere; white-space: normal; text-align: left; }
 
 .dfConsoleDialog:is([aria-label="Project library"], [aria-label="Project board"]) { width: min(64rem, calc(100% - 2rem)); }
+
+/* Reading space: the floor remains visible behind a single Library workspace. */
+.dfConsoleDialog.dfLibraryDialog { width: min(78rem, calc(100% - 2rem)); }
+.dfLibraryDialog .dfConsoleSidebar__heading { position: sticky; top: -1rem; z-index: 1; background: var(--df-console-background); padding-block: .75rem; }
+.dfProjectLibrary__views { border-bottom: 1px solid var(--df-console-rule); margin-bottom: 1rem; padding-bottom: .5rem; }
+.dfProjectLibrary__reader :is(p, pre) { line-height: 1.55; margin-block: .75rem; }
+.dfProjectLibrary__reader pre { font-family: inherit; font-size: .9rem; }
+.dfOutcomes { min-width: 0; }
+.dfOutcomes__list { list-style: none; padding: 0; margin: 1rem 0; display: grid; gap: .5rem; }
+.dfOutcomes__list button { display: flex; justify-content: space-between; align-items: baseline; gap: 1rem; width: 100%; margin: 0; padding: 1rem; }
+.dfOutcomes__list strong { font-weight: 500; line-height: 1.4; }
+.dfOutcomes__list .dfStatus { flex-shrink: 0; font-size: .85rem; }
+.dfOutcomes__detail { max-width: 78ch; margin-inline: auto; overflow-wrap: anywhere; }
+.dfOutcomes__detail h3 { margin-block: 1.25rem .5rem; font-size: 1.2rem; line-height: 1.4; }
+.dfOutcomes__detail section { margin-block: 1.5rem; }
+.dfOutcomes__detail h4 { margin: 0 0 .5rem; color: var(--df-console-muted); font-size: .85rem; }
+.dfOutcomes__detail p { margin-block: .5rem; line-height: 1.6; font-size: .9rem; }
+.dfOutcomes__prose { white-space: pre-wrap; }
+.dfOutcomes__meta { color: var(--df-console-muted); }
+.dfOutcomes__reference { border-top: 1px solid var(--df-console-rule); padding-block: .5rem; }
+@media (max-width: 640px) { .dfOutcomes__list button { flex-direction: column; gap: .5rem; } }

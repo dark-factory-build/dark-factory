@@ -1522,11 +1522,15 @@ test("room shelves open their own project library while the commons keeps the fl
     const nodes = ["project-a", "project-b"].map((id) => ({ ...inventoryTopology.nodes[0], id: `${id}:source`, path: "src", label: "Source", project: { id, name: id === firstProject ? "Alpha" : "Beta" }, assemblies: [{ id: `${id}:equipment`, path: "src", label: "Equipment", inventoryScope: "direct", inventory: inventoryTopology.nodes[0].inventory }] }));
     const floor = { digest: `shelf-scope-${firstProject}`, nodes }, before = structuredClone(floor), opened = [];
     let tree;
-    await act(async () => { tree = create(createElement(FactoryScene, { topology: floor, workers: [], projectId, appearance: { social: "nearby", scenery: "on", animation: "off" }, onOpenLibrary: (id) => opened.push(id) })); });
+    await act(async () => { tree = create(createElement(FactoryScene, { topology: floor, workers: [], projectId, appearance: { social: "nearby", scenery: "off", animation: "off" }, onOpenLibrary: (id) => opened.push(id) })); });
     assert.deepEqual(opened, [], "rendering ambient furniture does not retrieve library content");
     const shelves = tree.root.findAllByProps({ "aria-label": "Open project library" });
     assert.equal(shelves.length, 2, "the commons and the first room have shelves; the other room has coffee");
-    for (const shelf of shelves) await act(async () => shelf.props.onClick());
+    for (const shelf of shelves) {
+      assert.equal(shelf.props["data-tooltip"], "Library · documents");
+      assert.equal(shelf.props.className, "dfFactoryScene__target");
+      await act(async () => shelf.props.onKeyDown({ key: "Enter", preventDefault() {} }));
+    }
     assert.deepEqual(opened, [projectId, firstProject], "each bookshelf invokes the existing library with its actual project scope");
     assert.deepEqual(floor, before, "opening a library does not alter source topology");
     await act(async () => tree.unmount());

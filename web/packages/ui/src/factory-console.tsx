@@ -292,6 +292,7 @@ export function FactoryConsole({
           <button type="button" aria-pressed={detail === "production"} onClick={openChanges}>Changes</button>
           <button type="button" aria-pressed={detail === "queue"} disabled={!ready} onClick={() => onDetail("queue")}>Tasks</button>
           <button type="button" aria-pressed={detail !== "floor" && selectedDetail === "needs-you"} disabled={!ready} onClick={() => onDetail("needs-you")}>Needs you {counters.needsYou || ""}</button>
+          <button type="button" disabled={!ready} onClick={() => openKnowledge(false)}>Library</button>
         </nav>}
         <div className="dfConsoleLayout">
           <section className="dfConsoleLayout__left dfFactoryConsole__section" aria-label={view === "floor" ? "Factory floor" : "Agents"}>
@@ -318,7 +319,6 @@ export function FactoryConsole({
 
           <aside className="dfConsoleSidebar" aria-label="Selected detail">
             <div className="dfConsoleViewToggle" role="group" aria-label="Right panel">
-              <button type="button" disabled={!ready} onClick={() => openKnowledge(true)}>Board</button>
               <button type="button" disabled={!ready} onClick={() => openKnowledge(false)}>Library</button>
               <button type="button" aria-pressed={selectedDetail === "needs-you"} disabled={!ready || onDetail === undefined} onClick={() => onDetail?.("needs-you")}>Needs you <span>{counters.needsYou ?? "—"}</span></button>
               <button type="button" aria-pressed={selectedDetail === "missions"} disabled={!ready || onDetail === undefined} onClick={() => onDetail?.("missions")}>Missions</button>
@@ -382,7 +382,7 @@ export function FactoryConsole({
           </aside>
         </div>
       </main>
-      {!libraryOpen ? null : <ConsoleDialog label={knowledgeView.board ? "Project board" : "Project library"} title={knowledgeView.board ? "BOARD" : "LIBRARY"} onClose={() => setLibraryOpen(false)}>
+      {!libraryOpen ? null : <ConsoleDialog label="Project library" title="LIBRARY" className="dfLibraryDialog" onClose={() => setLibraryOpen(false)}>
         <ProjectLibrary open initialProjectId={knowledgeView.project} key={`${knowledgeView.project}:${knowledgeView.board}:${knowledgeView.entity}:${knowledgeView.id}`} board={knowledgeView.board} repository={knowledgeView.repository} entity={knowledgeView.entity} initialID={knowledgeView.id} onSource={(entity) => { selectProject(entity.split(":")[0]); setRequestedEntity({ id: entity }); setLibraryOpen(false); onView?.("floor"); }} onRecord={openKnowledgeRecord} state={state} call={ready ? onProjectContent : undefined} draft={(agent, instruction) => { setLibraryOpen(false); onDraftLibraryTask?.(agent, instruction); }} />
       </ConsoleDialog>}
       {settingsOpen !== true ? null : (
@@ -419,7 +419,7 @@ export function FactoryConsole({
           pairing={pairing ?? (!remoteInviteAllowed ? undefined : (
             <RemoteInvitePanel invite={remoteInvite} error={remoteInviteError} onInvite={onInviteRemote} onDismiss={onDismissRemoteInvite} devices={devices} devicesError={devicesError} ownClientId={ownClientId} onLoadDevices={onLoadDevices} onRevokeDevice={onRevokeDevice} />
           ))}
-          library={ready && onProjectContent !== undefined ? <ProjectLibrary state={state} call={onProjectContent} draft={(agent, instruction) => { onToggleSettings?.(); onDraftLibraryTask?.(agent, instruction); }} /> : undefined}
+          library={ready && onProjectContent !== undefined ? <button type="button" onClick={() => { onToggleSettings?.(); openKnowledge(false); }}>Open Library</button> : undefined}
           runtime={productionData.runtime}
           release={productionData.release}
           onClose={onToggleSettings}
