@@ -26,10 +26,6 @@ import (
 const (
 	shellPath  = "/bin/sh"
 	claudeTool = "claude"
-	// maintainerBridge is the Maintainer App's MCP bridge. An orchestrator
-	// launch names it to Claude, which is how an overseer publishes: the
-	// daemon itself exposes no repository or publication operation.
-	maintainerBridge = "dark-factory-maintainer-mcp-bridge"
 	// GitIdentityName and GitIdentityEmail author a worker's local commits.
 	GitIdentityName      = gitauthor.AutomationName
 	GitIdentityEmail     = gitauthor.AutomationEmail
@@ -244,7 +240,8 @@ func (runtime RuntimePaths) WithGitAuthor(author gitauthor.Identity) (RuntimePat
 	return runtime, nil
 }
 
-// WithCustomerMaintainer uses the installed attempt bridge for opted-in homes.
+// WithCustomerMaintainer gives an orchestrator factoryd's Maintainer MCP
+// (attempt maintainer-mcp); only a GitHub-connected home enables it.
 func (runtime RuntimePaths) WithCustomerMaintainer(enabled bool) RuntimePaths {
 	runtime.customerMaintainer = enabled
 	return runtime
@@ -646,13 +643,6 @@ func Build(request Request) (Launch, error) {
 		}
 		if request.role == kernel.RoleOrchestrator && request.runtime.customerMaintainer {
 			servers["maintainer"] = map[string]any{"command": request.runtime.factoryctl, "args": []string{"attempt", "maintainer-mcp"}}
-		} else if request.role == kernel.RoleOrchestrator {
-			bridge, err := resolveBridge(request.runtime.toolPath, maintainerBridge)
-			if err != nil {
-				return Launch{}, errors.Join(err, fmt.Errorf("%s on %s", maintainerBridge, request.runtime.toolPath))
-			}
-			servers["maintainer"] = map[string]string{"command": bridge}
-			environment = append(environment, "DARK_FACTORY_MAINTAINER_BRIDGE="+bridge)
 		}
 		settings, err := claudeSettings(request, slices.Sorted(maps.Keys(servers)))
 		if err != nil {
@@ -719,23 +709,10 @@ func Build(request Request) (Launch, error) {
 		environment := request.runtime.environmentForRole(request.provider, request.role)
 		if request.role == kernel.RoleOrchestrator && request.runtime.customerMaintainer {
 			argv = append(argv, "-c", "mcp_servers.dark_factory_maintainer={command="+tomlBasicString(request.runtime.factoryctl)+`,args=["attempt","maintainer-mcp"],env_vars=["DARK_FACTORY_SOCKET","DARK_FACTORY_ATTEMPT_TOKEN_FILE"],enabled=true,required=true,default_tools_approval_mode="approve"}`)
-		} else if request.role == kernel.RoleOrchestrator {
-			bridge, err := resolveBridge(request.runtime.toolPath, maintainerBridge)
-			if err != nil {
-				return Launch{}, err
-			}
-			argv = append(argv, "-c", "mcp_servers.dark_factory_maintainer={command="+tomlBasicString(bridge)+`,enabled=true,required=true,default_tools_approval_mode="approve"}`)
-			environment = append(environment, "DARK_FACTORY_MAINTAINER_BRIDGE="+bridge)
 		}
 		prompt := codexBootstrapPromptFor(request.runtime)
 		if request.role == kernel.RoleOrchestrator {
-			// Only an overseer on factoryd's own Maintainer path (attempt
-			// maintainer-mcp) has factoryd as its verdict authority; a legacy
-			// bridge-backed overseer keeps the host review flow until cutover.
-			publication := "inspect the exact retained Change and resolve review findings before publishing through your Maintainer App."
-			if request.runtime.customerMaintainer {
-				publication = "inspect the exact retained Change and publish it through your Maintainer App. factoryd reviews and enqueues every published head, merges and releases it, and sends findings back to the worker; never submit a verdict or enqueue yourself, never create review tasks for workers; act on a published pull request only when an Escalated: wake names it."
-			}
+			publication := "inspect the exact retained Change and publish it through your Maintainer App. factoryd reviews and enqueues every published head, merges and releases it, and sends findings back to the worker; never submit a verdict or enqueue yourself, never create review tasks for workers; act on a published pull request only when an Escalated: wake names it."
 			prompt += " You are the project overseer. If no causal context is supplied, perform full reconciliation. On a causal wake, first read its prior overseer task result and affected tasks using overseer status --task without a head fence, then use the returned current head for subsequent pages; reconcile every fixed-head page only at startup, recovery, omissions, or an event that cannot be resolved narrowly. For a settled worker Change, request attempt source --task TASK_ID and verify its exact task/work/Change receipt; its branch and head_commit are the work, read from git_directory with git, and source_path is that branch's worktree; never reconstruct private paths. Follow next_offset with --offset and --head; use --task and next_text_offset for complete text. Delegate with overseer task add; supervise with task update, agent pause/resume, worker message, worker interrupt, worker stop, worker replace and human reply. Keep enduring acceptance criteria, prerequisites and owner authority in the complete base instruction using overseer task update --body while the task is queued; preserve the original acceptance criteria. Send-back replaces previous feedback, so use it only for current findings or pointers, not durable requirements. Use the factory tool description for exact flags. Routine supported task routing needs no checkout. Use the registered repository and its configured base for edits and checks; " + publication + " For accepted intake, the attempt task body is the accepted snapshot: preserve its acceptance criteria and destination when delegating, and never replace it with newer GitHub title or body text. Revised issue content requires operator acceptance. For Linear intake, carry its source_url into GitHub publication as external_source_url with issue_number 0 and close_on_merge false; do not look up or create a corresponding GitHub issue. For GitHub intake, carry the fully qualified source repository and issue number into publication; reference cross-repository sources without closing them, and never publish private source details into a public result. A successful Maintainer response's structuredContent is its result: do not repeat the identical read or write after its content acknowledgement; observe an ambiguous write instead. Respect direct operator interventions. A capability refusal is not actionable work: do not retry it until role, capability, or runtime state changes. If the only next event is external — including a pending check, merge queue or merge, configured deployment or release receipt, or human/external owner event — record the concrete pending gate and its exact identity in the durable result, call attempt succeed, and end this task immediately; do not wait or keep the overseer lane occupied, without idle polling; the factory cancels any overseer run " + fmt.Sprint(kernel.MaxOverseerRunSeconds/60) + " minutes after admission. Events remain pending for the next supervision task and existing wake tasks resume observation from that checkpoint. Continue actionable supervision and delivery in this session only while useful in-session work remains. Use attempt request-human only for operator decisions; non-shell overseers yield and release their lane, while shell overseers remain live for the answer."
 		}
 		if request.role == kernel.RoleOrchestrator {

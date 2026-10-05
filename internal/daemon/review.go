@@ -92,9 +92,9 @@ const reviewStuckAfter = 2 * time.Minute
 // write that has not advanced for this long is escalated to the overseer once.
 const reviewEscalateAfter = 30 * time.Minute
 
-// customerMaintainer is the launch predicate that puts overseers on
-// factoryd's own Maintainer path (attempt maintainer-mcp). Only then does
-// factoryd run the merge stage: a legacy home keeps its host review flow.
+// customerMaintainer is true on a GitHub-connected home. Invariant: there is
+// one Maintainer path, factoryd's (attempt maintainer-mcp); an unconnected
+// home's overseers get no Maintainer server and factoryd runs no merge stage.
 func (daemon *Daemon) customerMaintainer() bool {
 	return daemon.github != nil && daemon.github.CustomerMode()
 }
@@ -115,7 +115,7 @@ func (daemon *Daemon) tickMergePipeline(ctx context.Context) {
 
 // advanceMergePipeline refreshes each publishing project's pull requests, so
 // a corrected head is reviewed, then advances every unfinished
-// review operation. It does nothing on a legacy home.
+// review operation. It does nothing on an unconnected home.
 func (daemon *Daemon) advanceMergePipeline(ctx context.Context) {
 	if !daemon.customerMaintainer() {
 		return
@@ -296,8 +296,8 @@ func (daemon *Daemon) routeSendBack(ctx context.Context, project kernel.ProjectI
 }
 
 // escalatePull records why the pipeline cannot advance a pull request on its
-// operation, which makes it an item due to the project's overseer; a legacy
-// home never escalates, so its route stays pending.
+// operation, which makes it an item due to the project's overseer; an
+// unconnected home never escalates, so its route stays pending.
 func (daemon *Daemon) escalatePull(op *review.Operation, why string) error {
 	if !daemon.customerMaintainer() {
 		return errors.New("escalation waits for the factoryd Maintainer connection")

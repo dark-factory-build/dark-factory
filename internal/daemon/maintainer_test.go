@@ -158,17 +158,6 @@ func TestMaintainerAcceptsAndDropsClientMeta(t *testing.T) {
 	}
 }
 
-func TestConnectRefusesLegacyOverseerBeforeCredentialActivation(t *testing.T) {
-	fixture := newDispatchFixture(t)
-	prepareActiveAttemptInProject(t, fixture, 170, testID(170), "orchestrator")
-	// This durable attempt is deliberately absent from the live registry.
-	fixture.daemon.github = &maintainer.Host{}
-	result := fixture.daemon.GitHubConnection(context.Background(), api.GitHubConnectionInput{Action: "connect"})
-	if result.State != "legacy_overseers_running" || fixture.daemon.github.CustomerMode() {
-		t.Fatalf("legacy transition = %+v", result)
-	}
-}
-
 func TestAcceptedIssueObservationReturnsOnlyFrozenSnapshot(t *testing.T) {
 	accepted := kernel.IntakeAcceptance{SourceRepository: "feed/original", Snapshot: kernel.IntakeIssueSnapshot{IssueNumber: 9, Title: "reviewed", Body: "safe snapshot"}}
 	// A broker response can carry revised instructions in content even when

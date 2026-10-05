@@ -276,12 +276,8 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 			resultRun = kernel.Run{ID: admittedRunID}
 		}
 	}()
-	// Serialize the one-way customer transition with admission. Connect refuses
-	// every nonterminal legacy overseer, including one not yet in the live map.
-	daemon.maintainerMu.Lock()
 	customerMaintainer := daemon.customerMaintainer()
 	admission, err := daemon.store.AdmitNext(ctx, admissionKeys, at)
-	daemon.maintainerMu.Unlock()
 	if err == nil && admission.Admitted() {
 		admittedRunID = admission.Run.ID
 	}

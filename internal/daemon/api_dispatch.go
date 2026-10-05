@@ -57,7 +57,6 @@ type Daemon struct {
 	// browserRemote is a package-test-only seam for operator calls that wait
 	// outside a paired client's gate.
 	browserRemote       func(context.Context, string)
-	maintainerMu        sync.Mutex
 	productionRefreshMu sync.Mutex
 	productionRefreshAt map[kernel.ProjectID]time.Time
 	// The scheduler's merge-pipeline pass (tickMergePipeline): the next pass

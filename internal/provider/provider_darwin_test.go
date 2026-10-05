@@ -221,10 +221,10 @@ func wantClaudeWorkerSessionFlag(t *testing.T, request Request) []string {
 	return []string{"--session-id", id}
 }
 
-// Claude receives only the installed attempt server, plus the Maintainer
-// bridge for orchestrators; account and Change-local MCP configuration is not
-// trusted.
-func TestBuildOrchestratorClaudeIsGivenTheMaintainerBridge(t *testing.T) {
+// Claude receives only the installed attempt server, plus factoryd's
+// Maintainer server for a connected home's orchestrators; account and
+// Change-local MCP configuration is not trusted.
+func TestBuildOrchestratorClaudeIsGivenTheMaintainer(t *testing.T) {
 	installation, runtime, locator := nativeFixture(t, kernel.ProviderClaudeCode)
 	workerRequest := roleRequestFor(t, kernel.ProviderClaudeCode, installation, runtime, "", "", kernel.RoleWorker)
 	worker, err := Build(workerRequest)
@@ -245,52 +245,42 @@ func TestBuildOrchestratorClaudeIsGivenTheMaintainerBridge(t *testing.T) {
 			t.Fatalf("Claude worker attempt transport lacks %q: %q", required, worker.Environment())
 		}
 	}
-	if _, err := Build(roleRequestFor(t, kernel.ProviderClaudeCode, installation, runtime, "", "", kernel.RoleOrchestrator)); !errors.Is(err, ErrUnavailable) {
-		t.Fatalf("orchestrator without the bridge = %v, want ErrUnavailable", err)
-	}
-	// The installed bridge is a script, which the CLI commitment would refuse;
-	// it needs only to be a regular executable nobody but its owner can write.
-	bridge := filepath.Join(filepath.Dir(locator), maintainerBridge)
-	if err := os.WriteFile(bridge, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	resolvedBridge, err := filepath.EvalSymlinks(bridge)
+	// An unconnected home's orchestrator has no Maintainer server at all.
+	unconnected := roleRequestFor(t, kernel.ProviderClaudeCode, installation, runtime, "", "", kernel.RoleOrchestrator)
+	launch, err := Build(unconnected)
 	if err != nil {
 		t.Fatal(err)
 	}
-	overseerRequest := roleRequestFor(t, kernel.ProviderClaudeCode, installation, runtime, "", "", kernel.RoleOrchestrator)
-	launch, err := Build(overseerRequest)
+	want := []string{"/usr/bin/true", "--permission-mode", "dontAsk", "--setting-sources", "", "--strict-mcp-config", "--settings", wantClaudeSettings(t, unconnected, "factory_attempt"), "--mcp-config", wantClaudeServers(t, unconnected, nil)}
+	if !reflect.DeepEqual(launch.Argv(), want) {
+		t.Fatalf("unconnected orchestrator argv = %q, want %q", launch.Argv(), want)
+	}
+	overseerRequest := roleRequestFor(t, kernel.ProviderClaudeCode, installation, runtime.WithCustomerMaintainer(true), "", "", kernel.RoleOrchestrator)
+	launch, err = Build(overseerRequest)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"/usr/bin/true", "--permission-mode", "dontAsk", "--setting-sources", "", "--strict-mcp-config", "--settings", wantClaudeSettings(t, overseerRequest, "factory_attempt", "maintainer"), "--mcp-config", wantClaudeServers(t, overseerRequest, map[string]any{"maintainer": map[string]string{"command": resolvedBridge}})}
+	want = []string{"/usr/bin/true", "--permission-mode", "dontAsk", "--setting-sources", "", "--strict-mcp-config", "--settings", wantClaudeSettings(t, overseerRequest, "factory_attempt", "maintainer"), "--mcp-config", wantClaudeServers(t, overseerRequest, map[string]any{"maintainer": map[string]any{"command": runtime.factoryctl, "args": []string{"attempt", "maintainer-mcp"}}})}
 	if !reflect.DeepEqual(launch.Argv(), want) {
 		t.Fatalf("orchestrator argv = %q, want %q", launch.Argv(), want)
 	}
 	if _, err := runner.PrepareCommittedExecSpec(launch.Executable(), launch.Argv(), launch.Environment(), t.TempDir()); err != nil {
 		t.Fatalf("runner rejected Claude overseer environment: %v", err)
 	}
-	if !slices.Contains(launch.Environment(), "DARK_FACTORY_MAINTAINER_BRIDGE="+resolvedBridge) {
-		t.Fatal("Claude overseer lost its exact bridge environment")
-	}
-	if slices.Contains(worker.Environment(), "DARK_FACTORY_MAINTAINER_BRIDGE="+resolvedBridge) {
-		t.Fatal("Claude worker inherited publication authority")
-	}
-	// A bridge that is present but unfit is refused by name, unlike a
-	// missing one, so the operator learns which of the two it is.
+	// An installed bridge is a script, which the CLI commitment would refuse;
+	// it needs only to be a regular executable nobody but its owner can write.
+	// One that is present but unfit is refused by name.
+	bridge := filepath.Join(filepath.Dir(locator), "dark-factory-browser-mcp")
 	for name, mode := range map[string]os.FileMode{"not executable": 0o644, "group writable": 0o775} {
+		if err := os.WriteFile(bridge, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+			t.Fatal(err)
+		}
 		if err := os.Chmod(bridge, mode); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := Build(roleRequestFor(t, kernel.ProviderClaudeCode, installation, runtime, "", "", kernel.RoleOrchestrator)); !errors.Is(err, ErrUnavailable) || !errors.Is(err, errBridgeUnfit) {
+		if _, err := Build(workerRequest); !errors.Is(err, ErrUnavailable) || !errors.Is(err, errBridgeUnfit) {
 			t.Fatalf("%s bridge = %v, want ErrUnavailable and errBridgeUnfit", name, err)
 		}
-	}
-	if err := os.Remove(bridge); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := Build(roleRequestFor(t, kernel.ProviderClaudeCode, installation, runtime, "", "", kernel.RoleOrchestrator)); !errors.Is(err, ErrUnavailable) || errors.Is(err, errBridgeUnfit) {
-		t.Fatalf("missing bridge = %v, want ErrUnavailable alone", err)
 	}
 	if _, err := NewRequest(kernel.ProviderClaudeCode, installation, "", "", runtime, "/private/change", kernel.AgentRole(0), testAgentID, testIncarnationID); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("request without a role = %v, want ErrInvalid", err)
@@ -604,7 +594,7 @@ func TestClaudeWorkerSessionStartsFreshWhenNoTranscriptExists(t *testing.T) {
 	if i := slices.Index(launch.Argv(), "--session-id"); i < 0 || launch.Argv()[i+1] != id {
 		t.Fatalf("worker argv = %q, want --session-id %q", launch.Argv(), id)
 	}
-	// TestBuildOrchestratorClaudeIsGivenTheMaintainerBridge covers the
+	// TestBuildOrchestratorClaudeIsGivenTheMaintainer covers the
 	// orchestrator side: its exact worker/orchestrator argv comparison shows
 	// no --session-id/--resume reaches an orchestrator launch. Its cwd is a
 	// fresh directory on every run (internal/daemon: the runtime root behind
@@ -924,11 +914,7 @@ func TestCodexWorkerRotatesWhenNewestMatchingRolloutExceedsLimit(t *testing.T) {
 // agent's last terminal run's cwd, durable through kernel.Store) is what lets
 // its standing tasks share one continuing Codex session.
 func TestCodexOrchestratorResumesFromPreviousWorkingDirectory(t *testing.T) {
-	installation, runtime, locator := nativeFixture(t, kernel.ProviderCodex)
-	bridge := filepath.Join(filepath.Dir(locator), maintainerBridge)
-	if err := os.WriteFile(bridge, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	installation, runtime, _ := nativeFixture(t, kernel.ProviderCodex)
 	previous := filepath.Join(t.TempDir(), "previous-runtime-home")
 	sessionsRoot := filepath.Join(codexConfigHome(runtime), "sessions")
 	const previousSession = "01a00000-0000-7000-8000-0000000000ff"
@@ -962,11 +948,10 @@ func TestInstalledBrowserBridgeUsesOnlyRunPathsForBothProviders(t *testing.T) {
 	for _, kind := range []kernel.Provider{kernel.ProviderCodex, kernel.ProviderClaudeCode} {
 		t.Run(kind.String(), func(t *testing.T) {
 			installation, runtime, locator := nativeFixture(t, kind)
+			runtime = runtime.WithCustomerMaintainer(true)
 			bridge := filepath.Join(filepath.Dir(locator), "dark-factory-browser-mcp")
-			for _, name := range []string{bridge, filepath.Join(filepath.Dir(locator), maintainerBridge)} {
-				if err := os.WriteFile(name, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
-					t.Fatal(err)
-				}
+			if err := os.WriteFile(bridge, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+				t.Fatal(err)
 			}
 			for _, role := range []kernel.AgentRole{kernel.RoleWorker, kernel.RoleOrchestrator} {
 				request := roleRequestFor(t, kind, installation, runtime, "", "", role)
@@ -993,7 +978,7 @@ func TestInstalledBrowserBridgeUsesOnlyRunPathsForBothProviders(t *testing.T) {
 						server := config.Servers["factory_browser"]
 						found = server.Command != "" && slices.Equal(server.Args, []string{"--runtime-dir", runtime.temp})
 						if role == kernel.RoleOrchestrator && config.Servers["maintainer"].Command == "" {
-							t.Fatal("lost Maintainer bridge")
+							t.Fatal("lost Maintainer server")
 						}
 					}
 				}
@@ -1325,18 +1310,14 @@ func TestCodexOverseerDiscoversScopedControlsWithoutChangingWorkerTask(t *testin
 		t.Fatal(err)
 	}
 	request.role = kernel.RoleOrchestrator
-	if _, err := Build(request); !errors.Is(err, ErrUnavailable) {
-		t.Fatal("overseer launched without its explicit Maintainer bridge")
-	}
-	bridge := filepath.Join(filepath.SplitList(runtime.toolPath)[0], maintainerBridge)
-	if err := os.WriteFile(bridge, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	resolvedBridge, err := filepath.EvalSymlinks(bridge)
+	unconnected, err := Build(request)
 	if err != nil {
 		t.Fatal(err)
 	}
-
+	if strings.Contains(strings.Join(unconnected.Argv(), " "), "mcp_servers.dark_factory_maintainer=") {
+		t.Fatal("unconnected overseer was given Maintainer tools")
+	}
+	request.runtime = request.runtime.WithCustomerMaintainer(true)
 	overseer, err := Build(request)
 	if err != nil {
 		t.Fatal(err)
@@ -1348,12 +1329,6 @@ func TestCodexOverseerDiscoversScopedControlsWithoutChangingWorkerTask(t *testin
 	if _, err := runner.PrepareCommittedExecSpec(overseer.Executable(), overseer.Argv(), overseer.Environment(), t.TempDir()); err != nil {
 		t.Fatalf("runner rejected Codex overseer environment: %v", err)
 	}
-	if !slices.Contains(overseer.Environment(), "DARK_FACTORY_MAINTAINER_BRIDGE="+resolvedBridge) {
-		t.Fatalf("overseer did not export its exact Maintainer bridge: %q", overseer.Environment())
-	}
-	if slices.Contains(worker.Environment(), "DARK_FACTORY_MAINTAINER_BRIDGE="+resolvedBridge) {
-		t.Fatal("worker inherited the overseer's Maintainer bridge")
-	}
 	if strings.Contains(strings.Join(workerArgs, " "), "mcp_servers.dark_factory_maintainer=") {
 		t.Fatal("worker was granted publication tool approvals")
 	}
@@ -1361,20 +1336,8 @@ func TestCodexOverseerDiscoversScopedControlsWithoutChangingWorkerTask(t *testin
 		t.Fatal("worker was given overseer authority instructions")
 	}
 	prompt := overseerArgs[len(overseerArgs)-1]
-	// The bridge-backed (legacy) overseer keeps the host review flow; only the
-	// factoryd Maintainer path hands verdicts and enqueues to factoryd.
-	if !strings.Contains(prompt, "resolve review findings before publishing") || strings.Contains(prompt, "never submit a verdict") {
-		t.Fatal("bridge-backed overseer was given factoryd's verdict guidance")
-	}
-	customerRequest := request
-	customerRequest.runtime = request.runtime.WithCustomerMaintainer(true)
-	customer, err := Build(customerRequest)
-	if err != nil {
-		t.Fatal(err)
-	}
-	customerPrompt := customer.Argv()[len(customer.Argv())-1]
-	if !strings.Contains(customerPrompt, "factoryd reviews and enqueues every published head") || !strings.Contains(customerPrompt, "never create review tasks for workers") || !strings.Contains(customerPrompt, "never submit a verdict or enqueue yourself") || strings.Contains(customerPrompt, "resolve review findings before publishing") {
-		t.Fatal("factoryd-Maintainer overseer lacks factoryd's verdict guidance")
+	if !strings.Contains(prompt, "factoryd reviews and enqueues every published head") || !strings.Contains(prompt, "never create review tasks for workers") || !strings.Contains(prompt, "never submit a verdict or enqueue yourself") {
+		t.Fatal("overseer lacks factoryd's verdict guidance")
 	}
 	for _, command := range []string{`["attempt","task"]`, "overseer status", "next_offset", "next_text_offset", "worker interrupt", "worker replace", "Maintainer App", "structuredContent", "capability refusal", "causal wake", "Continue actionable supervision", "without idle polling", "only next event is external", "merge queue", "attempt succeed", "30 minutes after admission", "overseer task update --body", "preserve the original acceptance criteria", "Send-back replaces previous feedback", "accepted snapshot", "fully qualified source repository", "close_on_merge", "Closes #N", "Refs #N"} {
 		if !strings.Contains(prompt, command) {
@@ -1790,7 +1753,7 @@ func TestBothProviderAssignmentsUseTheirOwnCheckout(t *testing.T) {
 	}
 }
 
-func TestCustomerMaintainerUsesInstalledBridgeWithoutExternalExecutable(t *testing.T) {
+func TestCustomerMaintainerIsOrchestratorOnly(t *testing.T) {
 	for _, kind := range []kernel.Provider{kernel.ProviderCodex, kernel.ProviderClaudeCode} {
 		t.Run(kind.String(), func(t *testing.T) {
 			installation, runtime, _ := nativeFixture(t, kind)
@@ -1804,9 +1767,6 @@ func TestCustomerMaintainerUsesInstalledBridgeWithoutExternalExecutable(t *testi
 				argv := strings.Join(launch.Argv(), " ")
 				if strings.Contains(argv, "maintainer-mcp") != (role == kernel.RoleOrchestrator) {
 					t.Fatalf("wrong bridge role: %s", argv)
-				}
-				if strings.Contains(argv, maintainerBridge) || strings.Contains(strings.Join(launch.Environment(), " "), "DARK_FACTORY_MAINTAINER_BRIDGE=") {
-					t.Fatal("customer retained external legacy bridge")
 				}
 			}
 		})
