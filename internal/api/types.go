@@ -440,22 +440,6 @@ type ContentBody struct {
 	NextOffset uint64 `json:"next_offset,omitempty"`
 	Complete   bool   `json:"complete"`
 }
-type ContentEvidence struct {
-	ID              string `json:"id"`
-	ProjectID       string `json:"project_id"`
-	ContentID       string `json:"content_id"`
-	ContentRevision uint64 `json:"content_revision"`
-	TestedSource    string `json:"tested_source"`
-	Environment     string `json:"environment"`
-	Result          string `json:"result"`
-	Location        string `json:"location"`
-	Evaluator       string `json:"evaluator"`
-	Judgment        string `json:"judgment"`
-}
-type ContentEvidenceList struct {
-	Items      []ContentEvidence `json:"items"`
-	NextOffset uint64            `json:"next_offset,omitempty"`
-}
 type ContentAttachment struct {
 	TaskID           string `json:"task_id"`
 	ProjectID        string `json:"project_id"`
@@ -541,29 +525,11 @@ type ContentBodyInput struct {
 	Offset   uint64 `json:"offset"`
 	Limit    uint64 `json:"limit"`
 }
-type ContentEvidenceInput struct {
-	ID              string `json:"id"`
-	ProjectID       string `json:"project_id"`
-	ContentID       string `json:"content_id"`
-	ContentRevision uint64 `json:"content_revision"`
-	TestedSource    string `json:"tested_source"`
-	Environment     string `json:"environment"`
-	Result          string `json:"result"`
-	Location        string `json:"location"`
-	Judgment        string `json:"judgment"`
-}
 type ContentAttachInput struct {
 	TaskID          string `json:"task_id"`
 	ProjectID       string `json:"project_id"`
 	ContentID       string `json:"content_id"`
 	ContentRevision uint64 `json:"content_revision"`
-}
-type ContentEvidenceListInput struct {
-	ProjectID       string `json:"project_id,omitempty"`
-	ContentID       string `json:"content_id"`
-	ContentRevision uint64 `json:"content_revision"`
-	Offset          uint64 `json:"offset,omitempty"`
-	Limit           uint64 `json:"limit,omitempty"`
 }
 type ContentAttachmentsInput struct {
 	ProjectID        string `json:"project_id,omitempty"`

@@ -9,7 +9,7 @@ scenario does not execute it or make it a global gate.
 List and read return metadata. `latest_revision` makes an old selection's
 supersession visible. Body pages use UTF-8 byte offsets; follow `next_offset`
 until `complete`, and retain the requested revision throughout. Small limits
-that cannot fit the next complete code point are rejected. List/evidence pages
+that cannot fit the next complete code point are rejected. List pages
 contain at most four records, including under worst-case JSON escaping. Bodies
 are limited to 1 MiB in storage; the API also rejects requests whose encoded
 JSON exceeds its 1 MiB frame. No input is silently truncated.
@@ -21,11 +21,9 @@ factoryctl content read --id CONTENT_ID --revision 1
 factoryctl content body --id CONTENT_ID --revision 1 --offset 0 --limit 65536
 factoryctl content attach --project PROJECT_ID --task TASK_ID --id CONTENT_ID --revision 1
 factoryctl content attachments --project PROJECT_ID --task TASK_ID --revision TASK_WORK_REVISION
-factoryctl content evidence --evidence-id EVIDENCE_ID --project PROJECT_ID --id SCENARIO_ID --revision 1 --tested-source COMMIT --environment "local macOS" --result passed --location EXISTING_REPORT_REFERENCE
-factoryctl content evidence-list --project PROJECT_ID --id SCENARIO_ID --revision 1
 ```
 
-The IDs above are nonzero 32-hex values. A supplied create/evidence ID permits
+The IDs above are nonzero 32-hex values. A supplied create ID permits
 an exact retry; omitting it generates one. Revision/deprecation retries resolve
 to the immutable revision originally inserted, even after later edits. A changed
 payload at the same expected revision conflicts. Deprecation preserves history.
@@ -48,7 +46,7 @@ The added schema objects are three optional tables and two indexes at schema
 16. Prior schema fingerprints and migration steps remain unchanged. The v15
 migration check preserves task prerequisites/conflict paths and starts the new
 tables empty. Repeated command dispatch and write SQL are shared; the replaced
-caller-supplied provenance inputs and unused evidence-by-ID entry point were
+caller-supplied provenance inputs were
 removed.
 
 Focused behavioral coverage lives in `internal/kernel/content_test.go`,

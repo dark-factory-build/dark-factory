@@ -78,9 +78,7 @@ const (
 	CallContentList
 	CallContentRead
 	CallContentBody
-	CallContentEvidence
 	CallContentAttach
-	CallContentEvidenceList
 	CallContentAttachments
 	CallOutcomeWrite
 	CallOutcomeRead
@@ -106,63 +104,61 @@ func digestAttemptCredential(bearer credential) AttemptDigest {
 // Call is an immutable decoded request. Only the accessor matching Kind
 // returns true.
 type Call struct {
-	maintainer          MaintainerInput
-	githubConnection    GitHubConnectionInput
-	intake              IntakeInput
-	attempt             bool
-	terminalObserve     TerminalObserveInput
-	peerIncludeTargets  bool
-	kind                CallKind
-	digest              AttemptDigest
-	project             CreateProjectInput
-	repository          ProjectRepositoryInput
-	projectLimits       ProjectLimitsInput
-	agent               CreateAgentInput
-	agentIdlePolicy     AgentIdlePolicyInput
-	agentPaths          AgentPathsInput
-	task                EnqueueTaskInput
-	humanQuestion       HumanQuestionInput
-	peerQuestion        PeerQuestionInput
-	peerAnswer          PeerAnswerInput
-	peerStatusOffset    uint64
-	peerTargetOffset    uint64
-	peerExpectedHead    uint64
-	sendBack            SendBackInput
-	taskRead            TaskReadInput
-	overseerTask        OverseerTaskCreateInput
-	overseerSnapshot    OverseerSnapshotInput
-	overseerTaskEdit    OverseerTaskUpdateInput
-	overseerAgent       OverseerAgentUpdateInput
-	overseerRun         OverseerRunStopInput
-	overseerReplace     OverseerRunReplaceInput
-	overseerMessage     OverseerWorkerMessageInput
-	overseerInterrupt   OverseerWorkerInterruptInput
-	workerOperation     WorkerOperationInput
-	overseerReply       OverseerHumanReplyInput
-	humanReply          OverseerHumanReplyInput
-	content             ContentInput
-	contentList         ContentListInput
-	contentRead         ContentReadInput
-	contentBody         ContentBodyInput
-	contentEvidence     ContentEvidenceInput
-	contentAttach       ContentAttachInput
-	contentEvidenceList ContentEvidenceListInput
-	contentAttachments  ContentAttachmentsInput
-	outcomeWrite        OutcomeWriteInput
-	outcomeRead         OutcomeReadInput
-	outcomeList         OutcomeListInput
-	release             ReleaseInput
-	webClient           WebClientRevocationInput
-	webAfter            string
-	expectedRevision    uint64
-	enabled             bool
-	capacity            uint16
-	account             AccountLinkInput
-	selection           AgentAccountSelectInput
-	accountsOffset      uint32
-	modelSelection      AgentModelSelectInput
-	text                string
-	sourceTaskID        string
+	maintainer         MaintainerInput
+	githubConnection   GitHubConnectionInput
+	intake             IntakeInput
+	attempt            bool
+	terminalObserve    TerminalObserveInput
+	peerIncludeTargets bool
+	kind               CallKind
+	digest             AttemptDigest
+	project            CreateProjectInput
+	repository         ProjectRepositoryInput
+	projectLimits      ProjectLimitsInput
+	agent              CreateAgentInput
+	agentIdlePolicy    AgentIdlePolicyInput
+	agentPaths         AgentPathsInput
+	task               EnqueueTaskInput
+	humanQuestion      HumanQuestionInput
+	peerQuestion       PeerQuestionInput
+	peerAnswer         PeerAnswerInput
+	peerStatusOffset   uint64
+	peerTargetOffset   uint64
+	peerExpectedHead   uint64
+	sendBack           SendBackInput
+	taskRead           TaskReadInput
+	overseerTask       OverseerTaskCreateInput
+	overseerSnapshot   OverseerSnapshotInput
+	overseerTaskEdit   OverseerTaskUpdateInput
+	overseerAgent      OverseerAgentUpdateInput
+	overseerRun        OverseerRunStopInput
+	overseerReplace    OverseerRunReplaceInput
+	overseerMessage    OverseerWorkerMessageInput
+	overseerInterrupt  OverseerWorkerInterruptInput
+	workerOperation    WorkerOperationInput
+	overseerReply      OverseerHumanReplyInput
+	humanReply         OverseerHumanReplyInput
+	content            ContentInput
+	contentList        ContentListInput
+	contentRead        ContentReadInput
+	contentBody        ContentBodyInput
+	contentAttach      ContentAttachInput
+	contentAttachments ContentAttachmentsInput
+	outcomeWrite       OutcomeWriteInput
+	outcomeRead        OutcomeReadInput
+	outcomeList        OutcomeListInput
+	release            ReleaseInput
+	webClient          WebClientRevocationInput
+	webAfter           string
+	expectedRevision   uint64
+	enabled            bool
+	capacity           uint16
+	account            AccountLinkInput
+	selection          AgentAccountSelectInput
+	accountsOffset     uint32
+	modelSelection     AgentModelSelectInput
+	text               string
+	sourceTaskID       string
 }
 
 func (call Call) IntakeInput() (IntakeInput, bool) { return call.intake, call.kind == CallIntake }
@@ -186,7 +182,7 @@ func (call Call) AttemptDigest() (AttemptDigest, bool) {
 		return AttemptDigest{}, false
 	}
 	switch call.kind {
-	case CallMaintainer, CallAttemptTask, CallAttemptSource, CallSucceed, CallBlock, CallFail, CallRequestHuman, CallPeerStatus, CallPeerAsk, CallPeerAnswer, CallTerminalObserve, CallSendBack, CallOverseerSnapshot, CallOverseerEnqueueTask, CallOverseerUpdateTask, CallOverseerUpdateAgent, CallOverseerStopRun, CallOverseerReplaceRun, CallOverseerMessageWorker, CallOverseerInterruptWorker, CallOverseerReplyHuman, CallContentCreate, CallContentRevise, CallContentDeprecate, CallContentList, CallContentRead, CallContentBody, CallContentEvidence, CallContentAttach, CallContentEvidenceList, CallContentAttachments, CallOutcomeWrite, CallOutcomeRead, CallOutcomeList:
+	case CallMaintainer, CallAttemptTask, CallAttemptSource, CallSucceed, CallBlock, CallFail, CallRequestHuman, CallPeerStatus, CallPeerAsk, CallPeerAnswer, CallTerminalObserve, CallSendBack, CallOverseerSnapshot, CallOverseerEnqueueTask, CallOverseerUpdateTask, CallOverseerUpdateAgent, CallOverseerStopRun, CallOverseerReplaceRun, CallOverseerMessageWorker, CallOverseerInterruptWorker, CallOverseerReplyHuman, CallContentCreate, CallContentRevise, CallContentDeprecate, CallContentList, CallContentRead, CallContentBody, CallContentAttach, CallContentAttachments, CallOutcomeWrite, CallOutcomeRead, CallOutcomeList:
 		return call.digest, true
 	default:
 		return AttemptDigest{}, false
@@ -337,14 +333,8 @@ func (call Call) ContentReadInput() (ContentReadInput, bool) {
 func (call Call) ContentBodyInput() (ContentBodyInput, bool) {
 	return call.contentBody, call.kind == CallContentBody
 }
-func (call Call) ContentEvidenceInput() (ContentEvidenceInput, bool) {
-	return call.contentEvidence, call.kind == CallContentEvidence
-}
 func (call Call) ContentAttachInput() (ContentAttachInput, bool) {
 	return call.contentAttach, call.kind == CallContentAttach
-}
-func (call Call) ContentEvidenceListInput() (ContentEvidenceListInput, bool) {
-	return call.contentEvidenceList, call.kind == CallContentEvidenceList
 }
 func (call Call) ContentAttachmentsInput() (ContentAttachmentsInput, bool) {
 	return call.contentAttachments, call.kind == CallContentAttachments
@@ -1013,16 +1003,8 @@ func decodeCall(domain byte, bearer credential, encoded []byte) (Call, RemoteErr
 		if err := decodeExact(request.Params, &call.contentBody); err != nil || !validText(call.contentBody.ID, 1, 64) || call.contentBody.Revision == 0 || call.contentBody.Limit == 0 || call.contentBody.Limit > 64*1024 {
 			return Call{}, RemoteInvalidRequest
 		}
-	case CallContentEvidence:
-		if err := decodeExact(request.Params, &call.contentEvidence); err != nil || !validText(call.contentEvidence.ID, 1, 64) || !validText(call.contentEvidence.ProjectID, 1, 64) || !validText(call.contentEvidence.ContentID, 1, 64) || call.contentEvidence.ContentRevision == 0 || !validText(call.contentEvidence.TestedSource, 1, 4096) || !validText(call.contentEvidence.Environment, 0, 4096) || !validText(call.contentEvidence.Result, 1, 32) || !validText(call.contentEvidence.Location, 0, 4096) || !validText(call.contentEvidence.Judgment, 0, 8192) || (call.contentEvidence.Result != "passed" && call.contentEvidence.Result != "failed" && call.contentEvidence.Result != "incomplete" && call.contentEvidence.Result != "not_run") {
-			return Call{}, RemoteInvalidRequest
-		}
 	case CallContentAttach:
 		if err := decodeExact(request.Params, &call.contentAttach); err != nil || !validText(call.contentAttach.TaskID, 1, 64) || !validText(call.contentAttach.ProjectID, 1, 64) || !validText(call.contentAttach.ContentID, 1, 64) || call.contentAttach.ContentRevision == 0 {
-			return Call{}, RemoteInvalidRequest
-		}
-	case CallContentEvidenceList:
-		if err := decodeExact(request.Params, &call.contentEvidenceList); err != nil || !validText(call.contentEvidenceList.ProjectID, 0, 64) || !validText(call.contentEvidenceList.ContentID, 1, 64) || call.contentEvidenceList.ContentRevision == 0 || call.contentEvidenceList.Limit > MaxContentPageItems {
 			return Call{}, RemoteInvalidRequest
 		}
 	case CallContentAttachments:
@@ -1185,12 +1167,8 @@ func methodKind(method string) (CallKind, byte) {
 		return CallContentRead, operatorDomain
 	case "content_body":
 		return CallContentBody, operatorDomain
-	case "content_evidence":
-		return CallContentEvidence, operatorDomain
 	case "content_attach":
 		return CallContentAttach, operatorDomain
-	case "content_evidence_list":
-		return CallContentEvidenceList, operatorDomain
 	case "content_attachments":
 		return CallContentAttachments, operatorDomain
 	case "attempt_content_create":
@@ -1205,12 +1183,8 @@ func methodKind(method string) (CallKind, byte) {
 		return CallContentRead, attemptDomain
 	case "attempt_content_body":
 		return CallContentBody, attemptDomain
-	case "attempt_content_evidence":
-		return CallContentEvidence, attemptDomain
 	case "attempt_content_attach":
 		return CallContentAttach, attemptDomain
-	case "attempt_content_evidence_list":
-		return CallContentEvidenceList, attemptDomain
 	case "attempt_content_attachments":
 		return CallContentAttachments, attemptDomain
 	case "outcome_write":
@@ -1341,7 +1315,7 @@ func replyMatches(kind CallKind, reply replyKind) bool {
 		return reply == replyContent
 	case CallRemoteStatus:
 		return reply == replyRemoteStatus
-	case CallContentCreate, CallContentRevise, CallContentDeprecate, CallContentList, CallContentRead, CallContentBody, CallContentEvidence, CallContentAttach, CallContentEvidenceList, CallContentAttachments, CallOutcomeWrite, CallOutcomeRead, CallOutcomeList:
+	case CallContentCreate, CallContentRevise, CallContentDeprecate, CallContentList, CallContentRead, CallContentBody, CallContentAttach, CallContentAttachments, CallOutcomeWrite, CallOutcomeRead, CallOutcomeList:
 		return reply == replyContent || reply == replyMutation
 	default:
 		return false

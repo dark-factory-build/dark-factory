@@ -14,9 +14,6 @@ func revision(n uint64) (kernel.Revision, error) { return kernel.NewRevision(int
 func contentDTO(v kernel.ContentRevision) api.Content {
 	return api.Content{ID: v.ID.String(), ProjectID: v.ProjectID.String(), Kind: string(v.Kind), Title: v.Title, Description: v.Description, Author: v.Author, SourceReferences: v.SourceReferences, ObjectFormat: v.ObjectFormat, Commit: v.Commit, Path: v.Path, Revision: uint64(v.Revision.Int64()), LatestRevision: uint64(v.LatestRevision.Int64()), Deprecated: v.Deprecated}
 }
-func evidenceDTO(v kernel.ContentEvidence) api.ContentEvidence {
-	return api.ContentEvidence{ID: v.ID.String(), ProjectID: v.ProjectID.String(), ContentID: v.ContentID.String(), ContentRevision: uint64(v.ContentRevision.Int64()), TestedSource: v.TestedSource, Environment: v.Environment, Result: v.Result, Location: v.Location, Evaluator: v.Evaluator, Judgment: v.Judgment}
-}
 func attachmentDTO(v kernel.TaskContentReference) api.ContentAttachment {
 	return api.ContentAttachment{TaskID: v.TaskID.String(), ProjectID: v.ProjectID.String(), TaskWorkRevision: uint64(v.TaskWorkRevision.Int64()), ContentID: v.ContentID.String(), ContentRevision: uint64(v.ContentRevision.Int64()), AttachedAtMs: uint64(v.AttachedAt.Int64())}
 }
@@ -186,9 +183,7 @@ func (daemon *Daemon) content(ctx context.Context, call api.Call) api.Reply {
 	list, _ := call.ContentListInput()
 	read, _ := call.ContentReadInput()
 	body, _ := call.ContentBodyInput()
-	ev, _ := call.ContentEvidenceInput()
 	attach, _ := call.ContentAttachInput()
-	evList, _ := call.ContentEvidenceListInput()
 	attachments, _ := call.ContentAttachmentsInput()
 	digest, attempt := call.AttemptDigest()
 	var kd kernel.AttemptDigest
@@ -202,8 +197,8 @@ func (daemon *Daemon) content(ctx context.Context, call api.Call) api.Reply {
 	operator := !attempt
 	// Provenance is authority-derived, never a caller-supplied identity.
 	const operatorProvenance = "operator:local"
-	pid, err := decodeID(firstNonEmpty(input.ProjectID, list.ProjectID, ev.ProjectID, attach.ProjectID, evList.ProjectID, attachments.ProjectID), kernel.ProjectIDFromBytes)
-	projectOptional := call.Kind() == api.CallContentRead || call.Kind() == api.CallContentBody || !operator && (call.Kind() == api.CallContentList || call.Kind() == api.CallContentEvidenceList || call.Kind() == api.CallContentAttachments)
+	pid, err := decodeID(firstNonEmpty(input.ProjectID, list.ProjectID, attach.ProjectID, attachments.ProjectID), kernel.ProjectIDFromBytes)
+	projectOptional := call.Kind() == api.CallContentRead || call.Kind() == api.CallContentBody || !operator && (call.Kind() == api.CallContentList || call.Kind() == api.CallContentAttachments)
 	if err != nil && !projectOptional {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
@@ -419,58 +414,6 @@ func (daemon *Daemon) content(ctx context.Context, call api.Call) api.Reply {
 			}
 		}
 		return api.NewContentReply(api.ContentBody{ID: v.ID.String(), Revision: uint64(v.Revision.Int64()), Offset: uint64(v.Offset), Body: v.Body, NextOffset: uint64(v.NextOffset), Complete: v.Complete})
-	case api.CallContentEvidence:
-		i, e := decodeID(ev.ID, kernel.ContentEvidenceIDFromBytes)
-		if e != nil {
-			return newErrorReply(api.RemoteInvalidRequest)
-		}
-		c, e := decodeID(ev.ContentID, kernel.ContentIDFromBytes)
-		if e != nil {
-			return newErrorReply(api.RemoteInvalidRequest)
-		}
-		r, e := revision(ev.ContentRevision)
-		if e != nil {
-			return newErrorReply(api.RemoteInvalidRequest)
-		}
-		evaluator := operatorProvenance
-		spec := kernel.NewContentEvidence{ID: i, ProjectID: pid, ContentID: c, ContentRevision: r, TestedSource: ev.TestedSource, Environment: ev.Environment, Result: ev.Result, Location: ev.Location, Evaluator: evaluator, Judgment: ev.Judgment}
-		var v kernel.ContentEvidence
-		if operator {
-			v, err = daemon.store.CreateContentEvidence(ctx, spec, at)
-		} else {
-			v, err = daemon.store.CreateContentEvidenceForAttempt(ctx, kd, spec, at)
-		}
-		if err != nil {
-			return newErrorReply(remoteErrorCode(err))
-		}
-		return api.NewContentReply(evidenceDTO(v))
-	case api.CallContentEvidenceList:
-		c, e := decodeID(evList.ContentID, kernel.ContentIDFromBytes)
-		if e != nil {
-			return newErrorReply(api.RemoteInvalidRequest)
-		}
-		r, e := revision(evList.ContentRevision)
-		if e != nil {
-			return newErrorReply(api.RemoteInvalidRequest)
-		}
-		limit := int(evList.Limit)
-		if limit == 0 {
-			limit = api.MaxContentPageItems
-		}
-		var page kernel.ContentEvidencePage
-		if operator {
-			page, err = daemon.store.ListContentEvidence(ctx, pid, c, r, int(evList.Offset), limit)
-		} else {
-			page, err = daemon.store.ListContentEvidenceForAttempt(ctx, kd, c, r, int(evList.Offset), limit)
-		}
-		if err != nil {
-			return newErrorReply(remoteErrorCode(err))
-		}
-		out := api.ContentEvidenceList{NextOffset: uint64(page.NextOffset)}
-		for _, item := range page.Items {
-			out.Items = append(out.Items, evidenceDTO(item))
-		}
-		return api.NewContentReply(out)
 	case api.CallContentAttach:
 		t, e := decodeID(attach.TaskID, kernel.TaskIDFromBytes)
 		if e != nil {

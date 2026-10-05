@@ -19,18 +19,8 @@ func sourceOutcome() OutcomeDocument {
 	return OutcomeDocument{Kind: "outcome", Objective: "reduce failed builds", Criteria: "a reproducible passing check", SourceIssue: "https://example.test/issues/1", State: "open"}
 }
 
-func TestOutcomeDocumentBoundsAndComparisonRequirements(t *testing.T) {
+func TestOutcomeDocumentBounds(t *testing.T) {
 	d := sourceOutcome()
-	d.Kind = "comparison"
-	if _, err := d.MarshalBounded(); err == nil {
-		t.Fatal("comparison without question accepted")
-	}
-	d.Question = "which candidate?"
-	d.Baseline = &ComparisonCandidate{TaskID: taskID(t, 1).String(), TaskWorkRevision: 1, RunID: taskID(t, 3).String(), Source: "baseline", Environment: "local", ScenarioEvidenceID: taskID(t, 4).String(), EvidenceKind: "measurement"}
-	d.Candidates = []ComparisonCandidate{{TaskID: taskID(t, 2).String(), TaskWorkRevision: 1, RunID: taskID(t, 5).String(), Source: "candidate", Environment: "local", ScenarioEvidenceID: taskID(t, 6).String(), EvidenceKind: "measurement"}}
-	if _, err := d.MarshalBounded(); err != nil {
-		t.Fatal(err)
-	}
 	d.Links = make([]OutcomeLink, OutcomeLinkLimit+1)
 	if _, err := d.MarshalBounded(); err == nil {
 		t.Fatal("oversized link set accepted")
@@ -229,56 +219,6 @@ func TestUnusedOutcomesDoNotAddAdmissionQueries(t *testing.T) {
 	}
 	if !reflect.DeepEqual(observations[0].result, observations[1].result) || observations[0].statements != observations[1].statements {
 		t.Fatalf("unused outcome changed admission: empty=%+v populated=%+v", observations[0], observations[1])
-	}
-}
-
-func TestComparisonPinsScenarioEvidenceWithoutStartingWork(t *testing.T) {
-	store, run, _ := runningWorkerRun(t)
-	defer store.Close()
-	ctx := context.Background()
-	scenario := contentSpec(t, run.ProjectID, 118, "scenario")
-	scenario.Kind = ContentAcceptanceScenario
-	content, err := store.CreateContent(ctx, scenario, mustTime(t, 40))
-	if err != nil {
-		t.Fatal(err)
-	}
-	evidenceID, err := ContentEvidenceIDFromBytes(repeatBytes(119, IDBytes))
-	if err != nil {
-		t.Fatal(err)
-	}
-	evidence, err := store.CreateContentEvidence(ctx, NewContentEvidence{ID: evidenceID, ProjectID: run.ProjectID, ContentID: content.ID, ContentRevision: content.Revision, TestedSource: "commit:a", Environment: "darwin", Result: "passed", Location: "report", Evaluator: "operator", Judgment: "measured"}, mustTime(t, 41))
-	if err != nil {
-		t.Fatal(err)
-	}
-	candidate := ComparisonCandidate{TaskID: run.TaskID.String(), TaskWorkRevision: uint64(run.AdmittedTaskWorkRevision.Int64()), RunID: run.ID.String(), Source: "commit:a", Environment: "darwin", ScenarioEvidenceID: evidence.ID.String(), EvidenceKind: "measurement"}
-	doc := OutcomeDocument{Kind: "comparison", Objective: "choose result", Criteria: "same scenario", AnchorTaskID: run.TaskID.String(), AnchorWorkRevision: uint64(run.AdmittedTaskWorkRevision.Int64()), State: "open", Question: "which result?", Baseline: &candidate, Candidates: []ComparisonCandidate{candidate}}
-	var tasksBefore, runsBefore int
-	if err := store.writer.QueryRowContext(ctx, "SELECT COUNT(*) FROM tasks").Scan(&tasksBefore); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.writer.QueryRowContext(ctx, "SELECT COUNT(*) FROM runs").Scan(&runsBefore); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.WriteOutcome(ctx, NewOutcome{ID: outcomeID(t, 120), ProjectID: run.ProjectID, Document: doc}, 0, mustTime(t, 42)); err != nil {
-		t.Fatal(err)
-	}
-	var tasksAfter, runsAfter int
-	if err := store.writer.QueryRowContext(ctx, "SELECT COUNT(*) FROM tasks").Scan(&tasksAfter); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.writer.QueryRowContext(ctx, "SELECT COUNT(*) FROM runs").Scan(&runsAfter); err != nil {
-		t.Fatal(err)
-	}
-	if tasksAfter != tasksBefore || runsAfter != runsBefore {
-		t.Fatalf("comparison started work: tasks %d -> %d, runs %d -> %d", tasksBefore, tasksAfter, runsBefore, runsAfter)
-	}
-	mismatched := candidate
-	mismatched.Environment = "other"
-	bad := doc
-	bad.Baseline = &mismatched
-	bad.Candidates = []ComparisonCandidate{mismatched}
-	if _, err := store.WriteOutcome(ctx, NewOutcome{ID: outcomeID(t, 131), ProjectID: run.ProjectID, Document: bad}, 0, mustTime(t, 43)); !errors.Is(err, ErrConflict) {
-		t.Fatalf("mismatched scenario environment = %v", err)
 	}
 }
 

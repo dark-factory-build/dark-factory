@@ -126,8 +126,6 @@ func TestAttemptMCPCommandCatalogueParity(t *testing.T) {
 		{"attempt content list", []string{"attempt", "content", "list", "--project", id}},
 		{"attempt content read", []string{"attempt", "content", "read", "--id", id, "--revision", "1"}},
 		{"attempt content body", []string{"attempt", "content", "body", "--id", id, "--revision", "1", "--offset", "0", "--limit", "1"}},
-		{"attempt content evidence", []string{"attempt", "content", "evidence", "--project", id, "--id", id, "--revision", "1", "--tested-source", "check", "--result", "passed"}},
-		{"attempt content evidence list", []string{"attempt", "content", "evidence-list", "--id", id, "--revision", "1"}},
 		{"attempt content attach", []string{"attempt", "content", "attach", "--project", id, "--task", id, "--id", id, "--revision", "1"}},
 		{"attempt content attachments", []string{"attempt", "content", "attachments", "--task", id, "--revision", "1"}},
 		{"overseer status", []string{"overseer", "status"}},

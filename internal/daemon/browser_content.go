@@ -64,7 +64,7 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 	if err != nil && !factoryOnly {
 		return browserprotocol.ProjectContentResult{}, browser.ErrInvalidRequest
 	}
-	read := request.Operation == "search" || request.Operation == "accesses" || request.Operation == "list" || request.Operation == "read" || request.Operation == "body" || request.Operation == "evidence_list" || request.Operation == "attachments" || request.Operation == "outcome_list" || request.Operation == "outcome_read" || request.Operation == "mission_tasks" || request.Operation == "production" || request.Operation == "task_read" || request.Operation == "source_files"
+	read := request.Operation == "search" || request.Operation == "accesses" || request.Operation == "list" || request.Operation == "read" || request.Operation == "body" || request.Operation == "attachments" || request.Operation == "outcome_list" || request.Operation == "outcome_read" || request.Operation == "mission_tasks" || request.Operation == "production" || request.Operation == "task_read" || request.Operation == "source_files"
 	_, release, client, err := backend.authorize(ctx, raw, kernel.BrowserCapabilityPrivateHumanRequestDetail)
 	if err != nil {
 		return browserprotocol.ProjectContentResult{}, err
@@ -90,7 +90,7 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 	if err != nil {
 		return result, err
 	}
-	if request.Operation == "search" || request.Operation == "accesses" || request.Operation == "list" || request.Operation == "evidence_list" || request.Operation == "outcome_list" {
+	if request.Operation == "search" || request.Operation == "accesses" || request.Operation == "list" || request.Operation == "outcome_list" {
 		maximum := uint64(1)
 		if request.Operation == "search" || request.Operation == "accesses" {
 			maximum = 4
@@ -304,48 +304,6 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 			return result, mapBrowserError(e)
 		}
 		output = backend.owner.knowledgeDTO(ctx, item)
-	case "evidence":
-		eid, e := decodeID(input.ID, kernel.ContentEvidenceIDFromBytes)
-		cid, ce := browserContentIDValue(input.ContentID)
-		rev, re := browserContentRevision(contentRevision)
-		if e != nil || ce != nil || re != nil {
-			return result, browser.ErrStale
-		}
-		content, e := backend.store.Content(ctx, cid, rev.Int64())
-		if e != nil {
-			return result, mapBrowserError(e)
-		}
-		if content.ProjectID != project {
-			return result, browser.ErrUnauthorized
-		}
-		item, e := backend.store.CreateContentEvidence(ctx, kernel.NewContentEvidence{ID: eid, ProjectID: project, ContentID: cid, ContentRevision: rev, TestedSource: input.TestedSource, Environment: input.Environment, Result: input.Result, Location: input.Location, Evaluator: fmt.Sprintf("browser:%s", client.ID.String()), Judgment: input.Judgment}, at)
-		if e != nil {
-			return result, mapBrowserError(e)
-		}
-		output = evidenceDTO(item)
-	case "evidence_list":
-		cid, e := browserContentIDValue(input.ContentID)
-		rev, re := browserContentRevision(contentRevision)
-		if e != nil || re != nil {
-			return result, browser.ErrStale
-		}
-		content, e := backend.store.Content(ctx, cid, rev.Int64())
-		if e != nil {
-			return result, mapBrowserError(e)
-		}
-		if content.ProjectID != project {
-			return result, browser.ErrUnauthorized
-		}
-		page, e := backend.store.ListContentEvidence(ctx, project, cid, rev, int(input.Offset), int(input.Limit))
-		if e != nil {
-			return result, mapBrowserError(e)
-		}
-		out := api.ContentEvidenceList{Items: []api.ContentEvidence{}, NextOffset: uint64(page.NextOffset)}
-		for _, item := range page.Items {
-			out.Items = append(out.Items, evidenceDTO(item))
-		}
-		output = out
-
 	case "attach":
 		task, e := decodeID(input.TaskID, kernel.TaskIDFromBytes)
 		cid, ce := browserContentIDValue(input.ContentID)
