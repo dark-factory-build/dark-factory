@@ -363,7 +363,7 @@ func TestLiveAttemptConsumesRefusalAfterReturnedResult(t *testing.T) {
 func TestLiveAttemptProviderUsageLimitFailsTheRun(t *testing.T) {
 	quoted := "issue: The terminal shows `You've hit your usage limit ... try again at Sep 25th`\r\n"
 	// Codex's own error cell, styled and split across output frames.
-	report := []string{"\x1b[31m■ You've hit your us", "age limit. Upgrade to Pro or try again at Sep 25th, 3:00 PM.\x1b[39m\r\n\x1b[1mApproaching rate limits\x1b[0m"}
+	report := []string{"\x1b[31m■\x1b[39m \x1b[1mYou've hit your us", "age limit. Upgrade to Pro or try again at Sep 25th, 3:00 PM.\x1b[39m\r\n\x1b[1mApproaching rate limits\x1b[0m"}
 	for _, adopted := range []bool{false, true} {
 		t.Run(map[bool]string{false: "live", true: "adopted replay"}[adopted], func(t *testing.T) {
 			fixture := newDispatchFixture(t)

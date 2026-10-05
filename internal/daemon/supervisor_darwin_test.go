@@ -204,8 +204,9 @@ func runSupervisorCodexFixture() error {
 		return err
 	}
 	if task.Task == "capacity" {
-		// Codex's capacity warning, after which the real CLI idles at its prompt.
-		fmt.Print("\x1b[33m⚠ Selected model is at capacity. Please try a different model.\x1b[39m\r\n")
+		// Codex's capacity warning, glyph and message styled apart; the real
+		// CLI then idles at its prompt.
+		fmt.Print("\x1b[33m⚠\x1b[39m \x1b[1mSelected model is at capacity. Please try a different model.\x1b[22m\r\n")
 		time.Sleep(30 * time.Second)
 		return nil
 	}
