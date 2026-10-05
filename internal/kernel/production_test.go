@@ -622,4 +622,13 @@ func TestCorrectedHeadSupersedesOlderInFlightReview(t *testing.T) {
 	if err != nil || !strings.Contains(string(document), `"state":"superseded"`) {
 		t.Fatalf("stale=%s err=%v", document, err)
 	}
+	// A pull with no factory task (factoryctl review) records its corrected
+	// head through the plain observation path.
+	plain := ProductionObservation{Repository: "example/factory", ObservedAt: 30, PullRequests: []ProductionPullRequest{{Number: 8, Title: "By hand", Head: newHead, State: "open"}}}
+	if err := store.RecordProductionObservation(ctx, project.ID, plain, mustTime(t, 30)); err != nil {
+		t.Fatal(err)
+	}
+	if document, _, err = store.ReviewOperation(ctx, project.ID, "other"); err != nil || !strings.Contains(string(document), `"state":"superseded"`) {
+		t.Fatalf("plain-path other=%s err=%v", document, err)
+	}
 }

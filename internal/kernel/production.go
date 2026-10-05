@@ -269,20 +269,6 @@ func (store *Store) RecordProductionObservationWithReviewOperations(ctx context.
 			return tx.Rollback(err)
 		}
 	}
-	// One live review operation per pull request head: an in-flight operation
-	// for an older head of an open pull is terminal, never resumed, retried or
-	// escalated, since the Maintainer refuses its writes forever.
-	for _, pr := range observation.PullRequests {
-		if pr.State != "open" {
-			continue
-		}
-		if _, err := tx.connection.ExecContext(ctx, `UPDATE production_records SET document = json_set(document, '$.state', 'superseded'), observed_at_ms = ?
-			WHERE project_id = ? AND repository = ? AND kind = 'reviewer' AND json_extract(document, '$.request.PullNumber') = ?
-			  AND lower(json_extract(document, '$.request.Head')) <> lower(?) AND json_extract(document, '$.state') IN ('gating', 'running', 'submitting', 'enqueuing')`,
-			at.Int64(), project.Bytes(), repo, int64(pr.Number), pr.Head); err != nil {
-			return tx.Rollback(err)
-		}
-	}
 	return tx.Commit(ctx)
 }
 
@@ -310,6 +296,20 @@ func (store *Store) recordProductionObservation(ctx context.Context, c *sql.Conn
 			pr.Review = ProductionReview{Head: pr.Head, State: "unknown"}
 		}
 		if err := write("pull_request", strconv.FormatUint(pr.Number, 10), visual, pr); err != nil {
+			return err
+		}
+	}
+	// One live review operation per pull request head: an in-flight operation
+	// for an older head of an open pull is terminal, never resumed, retried or
+	// escalated, since the Maintainer refuses its writes forever.
+	for _, pr := range observation.PullRequests {
+		if pr.State != "open" {
+			continue
+		}
+		if _, err := c.ExecContext(ctx, `UPDATE production_records SET document = json_set(document, '$.state', 'superseded'), observed_at_ms = ?
+			WHERE project_id = ? AND repository = ? AND kind = 'reviewer' AND json_extract(document, '$.request.PullNumber') = ?
+			  AND lower(json_extract(document, '$.request.Head')) <> lower(?) AND json_extract(document, '$.state') IN ('gating', 'running', 'submitting', 'enqueuing')`,
+			at.Int64(), project.Bytes(), observation.Repository, int64(pr.Number), pr.Head); err != nil {
 			return err
 		}
 	}
