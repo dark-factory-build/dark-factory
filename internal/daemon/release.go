@@ -161,7 +161,7 @@ func (daemon *Daemon) tickRelease(ctx context.Context) {
 		}
 		head, err := releaseHead(ctx, daemon, root)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "factoryd: release: observe %s: %v\n", selfBase, err)
+			LogFactoryd(daemon.log, "factoryd: release: observe %s: %v\n", selfBase, err)
 			return
 		}
 		_, _, found, err := daemon.store.Delivery(ctx, "release:"+head)
@@ -372,6 +372,13 @@ func buildRelease(ctx context.Context, daemon *Daemon, root string, source chang
 // ConfigureHost sets the factory home and the operator's tool path.
 func (daemon *Daemon) ConfigureHost(home, toolPath string) {
 	daemon.home, daemon.toolPath = home, toolPath
+}
+
+// ConfigureLog sets the process stderr boundary used by daemon-owned logs.
+func (daemon *Daemon) ConfigureLog(writer io.Writer) {
+	if writer != nil {
+		daemon.log = writer
+	}
 }
 
 // toolEnvironment is the operator's tool path plus an allowlist, so no GitHub

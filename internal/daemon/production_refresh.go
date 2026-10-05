@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"strings"
 	"time"
 
@@ -47,7 +46,7 @@ func (daemon *Daemon) refreshProduction(ctx context.Context, project kernel.Proj
 		known, published, _ := daemon.knownProductionPulls(ctx, project, identity.PublicationRepository)
 		observation, err := daemon.pullRequestObservation(ctx, identity.PublicationRepository, githubID, known)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "factoryd: refresh %s: %v\n", identity.PublicationRepository, err)
+			LogFactoryd(daemon.log, "factoryd: refresh %s: %v\n", identity.PublicationRepository, err)
 			continue
 		}
 		corrections := changedProductionHeads(known, observation.PullRequests)
