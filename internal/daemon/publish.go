@@ -131,10 +131,11 @@ func (daemon *Daemon) publishFailed(ctx context.Context, c kernel.PublishableCha
 // publishPull is the overseer runbook's publication, made deterministic:
 // every App write has the operation id uuid5(URL, "dark-factory:<change>:<step>")
 // and is observed first, so a replay after a lost response reuses the
-// completed write. A correction (c.Pull set) goes on its pull request's
-// branch head under publish-<HEAD8 of the worker's head>-N (on replay the
-// first one's parent is that branch head) and replaces the body under
-// body-<HEAD8 of the new head>.
+// completed write. Commits go under publish-<HEAD8 of the worker's head>-N
+// and the pull request under pr-<HEAD8>, so a changed head never reuses a
+// stale write. A correction (c.Pull set) goes on its pull request's branch
+// head (on replay the first one's parent is that branch head) and replaces
+// the body under body-<HEAD8 of the new head>.
 func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChange, repo, source string, call publishCall, checkout publishCheckout) error {
 	operation := func(step string) string { return uuid5("dark-factory:" + c.Change.String() + ":" + step) }
 	completed := func(step string, result any) (bool, error) {
@@ -169,10 +170,9 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 	if err != nil {
 		return err
 	}
-	prefix, checked := "publish-", main
+	prefix, checked := "publish-"+c.Head[:8]+"-", main
 	var tip string // a correction's branch head before it
 	if c.Pull != 0 {
-		prefix = "publish-" + c.Head[:8] + "-"
 		var first struct {
 			Parent string `json:"parent_sha"`
 		}
@@ -284,11 +284,11 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 		Head   string `json:"head_sha"`
 		Base   string `json:"base_sha"`
 	}
-	done, err := completed("pr", &pull)
+	done, err := completed("pr-"+c.Head[:8], &pull)
 	if err == nil && !done {
 		var base string
 		if base, err = refHead("main"); err == nil {
-			arguments := map[string]any{"repository": repo, "operation_id": operation("pr"), "head": branch, "head_sha": head, "base": "main", "base_sha": base, "title": message, "body": body, "draft": false,
+			arguments := map[string]any{"repository": repo, "operation_id": operation("pr-" + c.Head[:8]), "head": branch, "head_sha": head, "base": "main", "base_sha": base, "title": message, "body": body, "draft": false,
 				"issue_number": c.Accepted.Snapshot.IssueNumber, "close_on_merge": true} // the source issue is in repo itself
 			var response json.RawMessage
 			if response, err = call(ctx, "create_pull_request", arguments); err == nil {

@@ -524,9 +524,9 @@ func PublishFailureID(change ChangeID, revision Revision) string {
 // PublishableChanges lists, oldest first, the current settled Changes of
 // succeeded tasks bound to a live intake acceptance factoryd publishes, whose
 // head differs from their base, with no recorded publish failure at that
-// Change revision: at work revision 1 with no publication of that Change or
-// task, or above it settled since factoryd last published that Change on its
-// still-open pull request (publication_tasks.created_at_ms).
+// Change revision: with no publication of that Change or task, at any work
+// revision, or above work revision 1 settled since factoryd last published
+// that Change on its still-open pull request (publication_tasks.created_at_ms).
 func (store *Store) PublishableChanges(ctx context.Context) ([]PublishableChange, error) {
 	tx, err := store.beginRead(ctx)
 	if err != nil {
@@ -541,7 +541,7 @@ func (store *Store) PublishableChanges(ctx context.Context) ([]PublishableChange
 		      AND r.identity = CAST(p.pull_number AS TEXT) AND json_extract(r.document, '$.state') = 'open')
 		WHERE c.phase = 'retained' AND t.status = 'succeeded' AND a.withdrawn_at_ms IS NULL AND c.head_commit <> c.base_commit
 		  AND `+factorydPublishesAcceptance+`
-		  AND (p.pull_number IS NOT NULL OR t.work_revision = 1 AND NOT EXISTS (SELECT 1 FROM publication_tasks q WHERE q.change_id = c.id OR q.task_id = c.task_id))
+		  AND (p.pull_number IS NOT NULL OR NOT EXISTS (SELECT 1 FROM publication_tasks q WHERE q.change_id = c.id OR q.task_id = c.task_id))
 		  AND NOT EXISTS (SELECT 1 FROM production_records r WHERE r.project_id = c.project_id AND r.kind = 'reviewer'
 		      AND r.identity = 'publish-' || lower(hex(c.id)) || '-' || c.revision)
 		ORDER BY c.updated_at_ms`)

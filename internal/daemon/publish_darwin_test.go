@@ -165,7 +165,7 @@ func TestFactorydPublishesASettledIntakeChange(t *testing.T) {
 		t.Fatal(err)
 	}
 	first, second, pull := app.writes[0]["arguments"].(map[string]any), app.writes[1]["arguments"].(map[string]any), app.writes[2]["arguments"].(map[string]any)
-	if len(app.writes) != 3 || first["operation_id"] != uuid5("dark-factory:"+c.Change.String()+":publish-1") || second["operation_id"] != uuid5("dark-factory:"+c.Change.String()+":publish-2") || pull["operation_id"] != uuid5("dark-factory:"+c.Change.String()+":pr") {
+	if len(app.writes) != 3 || first["operation_id"] != uuid5("dark-factory:"+c.Change.String()+":publish-"+c.Head[:8]+"-1") || second["operation_id"] != uuid5("dark-factory:"+c.Change.String()+":publish-"+c.Head[:8]+"-2") || pull["operation_id"] != uuid5("dark-factory:"+c.Change.String()+":pr-"+c.Head[:8]) {
 		t.Fatalf("writes = %+v", app.writes)
 	}
 	firstCommit := fmt.Sprintf("%x", sha1.Sum([]byte(first["operation_id"].(string))))
@@ -192,6 +192,36 @@ func TestFactorydPublishesASettledIntakeChange(t *testing.T) {
 	}
 	if op := waitForDurableReview(t, fixture.store, c.Task.ProjectID, func(op review.Operation) bool { return op.State == "enqueued" }); op.State != "enqueued" || op.Request.PullNumber != 31 || op.Request.Head != secondCommit {
 		t.Fatalf("review = %+v", op)
+	}
+}
+
+// A head that changes after its commits were published but before the pull
+// request (a retried task) publishes under new operation ids: its pull
+// request carries the new head's commit, never the stale one.
+func TestFirstPublicationOfAChangedHeadReusesNoStaleWrite(t *testing.T) {
+	fixture, c, source, app, checkout := publishFixture(t, 1, false)
+	ctx := context.Background()
+	if err := fixture.daemon.publishChange(ctx, c, "team/repo", source, app.call, checkout); err != nil {
+		t.Fatal(err)
+	}
+	delete(app.journal, uuid5("dark-factory:"+c.Change.String()+":pr-"+c.Head[:8])) // the pull request was never opened
+	root := filepath.Dir(source)
+	if err := os.WriteFile(filepath.Join(root, "f00.txt"), []byte("retried\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	supervisorGit(t, change.TrustedGitExecutable, "-C", root, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "commit", "-q", "-am", "retry")
+	c.Head = strings.TrimSpace(supervisorGitOutput(t, change.TrustedGitExecutable, "-C", root, "rev-parse", "HEAD"))
+	app.writes = nil
+	if err := fixture.daemon.publishChange(ctx, c, "team/repo", source, app.call, checkout); err != nil {
+		t.Fatal(err)
+	}
+	if len(app.writes) != 2 {
+		t.Fatalf("writes = %+v", app.writes)
+	}
+	commit, pull := app.writes[0]["arguments"].(map[string]any), app.writes[1]["arguments"].(map[string]any)
+	if commit["operation_id"] != uuid5("dark-factory:"+c.Change.String()+":publish-"+c.Head[:8]+"-1") || pull["operation_id"] != uuid5("dark-factory:"+c.Change.String()+":pr-"+c.Head[:8]) ||
+		pull["head_sha"] != fmt.Sprintf("%x", sha1.Sum([]byte(commit["operation_id"].(string)))) {
+		t.Fatalf("commit = %+v pull = %+v", commit, pull)
 	}
 }
 

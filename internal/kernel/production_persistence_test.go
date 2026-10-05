@@ -757,12 +757,16 @@ func TestPublishableIntakeChangeIsFactorydsUntilPublishedOrFailed(t *testing.T) 
 	if found := candidates(); len(found) != 0 || !closed() {
 		t.Fatalf("a published correction: candidates=%+v closed=%v", found, closed())
 	}
-	// Had its first pull request never been published, a correction is the
-	// overseer's, never factoryd's under the old operation ids.
+	// A retried task whose first pull request was never published is still
+	// factoryd's first publication, at its later work revision.
 	if _, err := store.writer.ExecContext(ctx, `DELETE FROM publication_tasks; UPDATE changes SET updated_at_ms = 75`); err != nil {
 		t.Fatal(err)
 	}
-	if found := candidates(); len(found) != 0 || closed() {
-		t.Fatalf("an unpublished correction is factoryd's: candidates=%+v closed=%v", found, closed())
+	var workRevision int64
+	if err := store.writer.QueryRowContext(ctx, `SELECT work_revision FROM tasks WHERE id = ?`, worker.TaskID.Bytes()).Scan(&workRevision); err != nil || workRevision < 2 {
+		t.Fatalf("work revision %d %v", workRevision, err)
+	}
+	if found := candidates(); len(found) != 1 || found[0].Pull != 0 || !closed() {
+		t.Fatalf("an unpublished retried Change: candidates=%+v closed=%v", found, closed())
 	}
 }
