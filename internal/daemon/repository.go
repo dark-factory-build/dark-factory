@@ -7,11 +7,7 @@ import (
 )
 
 func (daemon *Daemon) repositoryForChange(ctx context.Context, value kernel.Change) (kernel.ProjectRepository, error) {
-	readRepository := daemon.store.TaskRepository
-	if daemon.successSourceRepository != nil {
-		readRepository = daemon.successSourceRepository
-	}
-	repository, found, err := readRepository(ctx, value.TaskID)
+	repository, found, err := daemon.store.TaskRepository(ctx, value.TaskID)
 	if err != nil || !found {
 		if err == nil {
 			err = kernel.ErrCorruptState

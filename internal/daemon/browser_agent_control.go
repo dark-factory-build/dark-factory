@@ -187,9 +187,6 @@ func (backend *browserBackend) TaskDetail(ctx context.Context, rawClient [browse
 	if task.Revision != expected {
 		return browserprotocol.TaskDetail{}, browser.ErrStale
 	}
-	if backend.afterTaskDetailTaskRead != nil {
-		backend.afterTaskDetailTaskRead()
-	}
 	instruction, instructionMore := taskDetailTextChunk(kernel.TaskInstruction(task), uint64(request.TextOffset))
 	feedback, feedbackMore := taskDetailTextChunk(kernel.TaskFeedback(task), uint64(request.TextOffset))
 	outcomeText := task.Result

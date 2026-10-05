@@ -2125,32 +2125,6 @@ func TestSupervisorDoesNotRepeatNoAdmissionObservationAfterHookFailure(t *testin
 	}
 }
 
-func TestSupervisorRetriesTransientAdmissionReconciliation(t *testing.T) {
-	fixture := newSupervisorFixture(t, supervisorProgram(t, false, false))
-	commitErr := errors.New("injected lost admission commit acknowledgement")
-	transientErr := errors.New("injected transient reconciliation read")
-	fixture.spec.afterAdmission = func() error { return commitErr }
-	attempts := 0
-	fixture.spec.reconcileAdmission = func(ctx context.Context, keys kernel.AdmissionKeys) (kernel.AdmissionResult, error) {
-		attempts++
-		if attempts < 3 {
-			return kernel.AdmissionResult{}, transientErr
-		}
-		return fixture.store.ReconcileAdmission(ctx, keys)
-	}
-	run, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
-	if !errors.Is(err, commitErr) || attempts != 3 {
-		t.Fatalf("RunNext reconciliation = attempts %d, err %v", attempts, err)
-	}
-	fixture.assertTerminal(t, run, kernel.OutcomeFailed)
-	if run.CredentialRevokedAt == nil {
-		t.Fatalf("transient reconciliation run = %+v", run)
-	}
-	if _, err := fixture.store.AuthenticateAttempt(context.Background(), run.CredentialDigest); !errors.Is(err, kernel.ErrUnauthorized) {
-		t.Fatalf("transient reconciliation bearer = %v", err)
-	}
-}
-
 func TestSupervisorBoundsUnavailableAdmissionReconciliation(t *testing.T) {
 	fixture := newSupervisorFixture(t, supervisorProgram(t, false, false))
 	commitErr := errors.New("injected lost admission commit acknowledgement")

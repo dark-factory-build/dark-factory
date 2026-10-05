@@ -13,7 +13,6 @@ import (
 
 	"github.com/dark-factory-build/dark-factory/internal/api"
 	"github.com/dark-factory-build/dark-factory/internal/browserprotocol"
-	"github.com/dark-factory-build/dark-factory/internal/change"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 	"github.com/dark-factory-build/dark-factory/internal/linear"
 	"github.com/dark-factory-build/dark-factory/internal/maintainer"
@@ -38,8 +37,6 @@ type Daemon struct {
 	// by intakeMu, and whether a pass is running.
 	intakePolls map[kernel.IntakeSourceID]*intakePoll
 	intakeBusy  atomic.Bool
-	// reviewOperation is a package-test seam; production uses reviewCoordinator.
-	reviewOperation func(context.Context, kernel.ProjectID, api.ReviewRequest) (string, error)
 	// reviewBackend is a package-test seam; production always uses the
 	// Maintainer-backed daemonReviewBackend.
 	reviewBackend func(string, uint64) review.Backend
@@ -80,12 +77,6 @@ type Daemon struct {
 	// scheduledRun is a package-test-only seam for the scheduler's terminal
 	// completion reread. Production reads from the concrete Store.
 	scheduledRun func(context.Context, kernel.RunID) (kernel.Run, bool, error)
-	// successSource* are package-test-only seams for failure-injection coverage;
-	// production source validation always reads the concrete Store.
-	successSourceRun        func(context.Context, kernel.RunID) (kernel.Run, bool, error)
-	successSourceChange     func(context.Context, kernel.ChangeID) (kernel.Change, bool, error)
-	successSourceRepository func(context.Context, kernel.TaskID) (kernel.ProjectRepository, bool, error)
-	successSourceInspect    func(context.Context, string, string, change.RepositoryIdentity, string) (change.WorktreeFacts, error)
 
 	browserMu          sync.Mutex
 	browserLifecycleMu sync.Mutex

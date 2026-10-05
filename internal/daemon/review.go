@@ -26,9 +26,6 @@ import (
 // reviewPR answers once the review operation is durable and runs it in the
 // background: a review outlasts the operator call that requested it.
 func (daemon *Daemon) reviewPR(ctx context.Context, project kernel.ProjectID, request api.ReviewRequest) (string, error) {
-	if daemon.reviewOperation != nil {
-		return daemon.reviewOperation(ctx, project, request)
-	}
 	op, err := daemon.claimReview(ctx, project, request)
 	if err != nil {
 		return "", err
