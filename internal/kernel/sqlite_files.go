@@ -44,7 +44,7 @@ var sqlitePostPoolHook func(string) error
 // uncertain and its authority must remain retained. install.OperationalHome
 // is the sole production caller and keeps that Store as its child lease.
 func OpenOperational(ctx context.Context, absolutePath string, home, database *os.File) (*Store, error) {
-	files, err := openBoundDatabaseFiles(absolutePath, home, database, true)
+	files, err := openBoundDatabaseFiles(absolutePath, home, database)
 	if err != nil {
 		return nil, err
 	}
@@ -56,7 +56,7 @@ func OpenOperational(ctx context.Context, absolutePath string, home, database *o
 // or WAL. It takes ownership of home and database and keeps their path
 // authority pinned until validation and the final binding checks complete.
 func InspectOperational(ctx context.Context, absolutePath string, home, database *os.File) (resultErr error) {
-	files, err := openBoundDatabaseFiles(absolutePath, home, database, true)
+	files, err := openBoundDatabaseFiles(absolutePath, home, database)
 	if err != nil {
 		return err
 	}
@@ -261,12 +261,11 @@ type databaseFile struct {
 }
 
 type databaseFiles struct {
-	authority     *databasePathAuthority
-	directory     *os.File
-	allowShortSHM bool
-	main          *databaseFile
-	wal           *databaseFile
-	shm           *databaseFile
+	authority *databasePathAuthority
+	directory *os.File
+	main      *databaseFile
+	wal       *databaseFile
+	shm       *databaseFile
 }
 
 type databasePathComponent struct {
@@ -419,7 +418,7 @@ func (authority *databasePathAuthority) Close() error {
 	return result
 }
 
-func openBoundDatabaseFiles(path string, retainedHome, retainedMain *os.File, allowShortSHM bool) (_ *databaseFiles, resultErr error) {
+func openBoundDatabaseFiles(path string, retainedHome, retainedMain *os.File) (_ *databaseFiles, resultErr error) {
 	if retainedHome == nil || retainedMain == nil {
 		var closeErr error
 		if retainedHome != nil {
@@ -435,9 +434,8 @@ func openBoundDatabaseFiles(path string, retainedHome, retainedMain *os.File, al
 		return nil, errors.Join(err, retainedMain.Close(), retainedHome.Close())
 	}
 	files := &databaseFiles{
-		authority:     authority,
-		directory:     authority.directory(),
-		allowShortSHM: allowShortSHM,
+		authority: authority,
+		directory: authority.directory(),
 	}
 	defer func() {
 		if resultErr != nil {
@@ -520,16 +518,9 @@ func populateDatabaseFiles(files *databaseFiles, path string, retainedMain *os.F
 	if err != nil {
 		return err
 	}
-	shmMinimum := int64(walIndexRegionSize)
-	if files.allowShortSHM {
-		shmMinimum = 0
-	}
-	files.shm, err = files.openDatabaseFile(base+"-shm", "SHM", shmMinimum, maxSQLiteSHMSize)
+	files.shm, err = files.openDatabaseFile(base+"-shm", "SHM", 0, maxSQLiteSHMSize)
 	if err != nil {
 		return err
-	}
-	if !files.allowShortSHM && files.shm.info.Size()%walIndexRegionSize != 0 {
-		return fmt.Errorf("%w: SHM size %d is not a positive multiple of %d", ErrCorruptState, files.shm.info.Size(), walIndexRegionSize)
 	}
 	pageSize, err := databasePageSize(files.main.file)
 	if err != nil {
@@ -632,9 +623,6 @@ func (files *databaseFiles) refreshPinnedInfo() error {
 	if files.wal == nil {
 		return nil
 	}
-	if !files.allowShortSHM && files.shm.info.Size()%walIndexRegionSize != 0 {
-		return fmt.Errorf("%w: SHM size %d is not a positive multiple of %d", ErrCorruptState, files.shm.info.Size(), walIndexRegionSize)
-	}
 	pageSize, err := databasePageSize(files.main.file)
 	if err != nil {
 		return err
@@ -643,9 +631,6 @@ func (files *databaseFiles) refreshPinnedInfo() error {
 }
 
 func (files *databaseFiles) validateWAL(pageSize uint32) error {
-	if !files.allowShortSHM {
-		return validateWAL(files.wal.file, files.wal.info.Size(), pageSize)
-	}
 	// A checkpoint may truncate the WAL after fstat. Validate the header we
 	// actually read, including the valid empty-WAL case, rather than a stale
 	// size. Partial headers still fail; all format/checksum checks remain.
