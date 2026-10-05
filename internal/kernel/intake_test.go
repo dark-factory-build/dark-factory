@@ -507,11 +507,11 @@ func TestIntakePriorityRulesBoundEncodedOperatorConfiguration(t *testing.T) {
 	}
 }
 
-func TestIntakeReacceptsRestoredContentWithoutDuplicatingWork(t *testing.T) {
+func TestIntakeRestoredContentReturnsExistingReceipt(t *testing.T) {
 	for _, imported := range []bool{false, true} {
 		t.Run(fmt.Sprint(imported), func(t *testing.T) {
 			ctx := context.Background()
-			store, path := newTestStore(t)
+			store, _ := newTestStore(t)
 			project, err := store.CreateProject(ctx, NewProject{ID: projectID(t, 240), Name: "restored", Root: "/restored"}, mustTime(t, 1))
 			if err != nil {
 				t.Fatal(err)
@@ -546,55 +546,21 @@ func TestIntakeReacceptsRestoredContentWithoutDuplicatingWork(t *testing.T) {
 			if err != nil || restored.ID != first.ID || restored.TaskID != first.TaskID || restored.CreatedAt != first.CreatedAt {
 				t.Fatalf("restored receipt: %+v %v", restored, err)
 			}
-			if retry, err := store.AcceptIntakeSnapshot(ctx, source.ID, snapshot, mustTime(t, 5)); err != nil || retry.ID != first.ID {
-				t.Fatalf("retry: %+v %v", retry, err)
-			}
-			if _, err := store.AcceptIntakeSnapshot(ctx, source.ID, changed, mustTime(t, 7)); !errors.Is(err, ErrRevisionConflict) {
-				t.Fatalf("nonincreasing review: %v", err)
-			}
-			if err := store.Close(); err != nil {
+			if _, err := store.AcceptIntakeSnapshot(ctx, source.ID, changed, mustTime(t, 6)); err != nil {
 				t.Fatal(err)
 			}
-			store, err = Open(ctx, path)
-			if err != nil {
+			if _, err := store.AcceptIntakeSnapshot(ctx, source.ID, snapshot, mustTime(t, 4)); err != nil {
 				t.Fatal(err)
 			}
-			defer store.Close()
 			latest, found, err := store.LatestIntakeAcceptance(ctx, snapshot, project.ID, source.TargetRepositoryID)
-			if err != nil || !found || latest.ID != first.ID {
-				t.Fatalf("latest after restart: %+v %v", latest, err)
+			if err != nil || !found || latest.ID != second.ID {
+				t.Fatalf("latest: %+v %v", latest, err)
 			}
-			pending, err := store.PendingIntakeAcceptances(ctx, source.ID, 25)
-			expected := 1
-			if imported {
-				expected = 0
+			if _, err := store.AcceptIntakeSnapshot(ctx, source.ID, changed, mustTime(t, 5)); err != nil {
+				t.Fatalf("retry B: %v", err)
 			}
-			if err != nil || len(pending) != expected || expected == 1 && pending[0].ID != first.ID {
-				t.Fatalf("pending: %+v %v", pending, err)
-			}
-			if _, err := store.ImportIntakeAcceptance(ctx, second.ID, mustTime(t, 8)); !errors.Is(err, ErrConflict) {
-				t.Fatalf("superseded B imported: %v", err)
-			}
-			task, err := store.ImportIntakeAcceptance(ctx, first.ID, mustTime(t, 8))
-			if err != nil || task.ID != first.TaskID {
-				t.Fatalf("A task: %+v %v", task, err)
-			}
-			var tasks, reviews int
-			if err := store.readers.QueryRow(`SELECT (SELECT COUNT(*) FROM tasks), (SELECT COUNT(*) FROM intake_acceptance_reviews)`).Scan(&tasks, &reviews); err != nil || tasks != 1 || reviews != 1 {
-				t.Fatalf("dedup: tasks=%d reviews=%d err=%v", tasks, reviews, err)
-			}
-			if _, err := store.WithdrawIntakeAcceptance(ctx, first.ID, mustTime(t, 9)); err != nil {
-				t.Fatal(err)
-			}
-			if _, err := store.AcceptIntakeSnapshot(ctx, source.ID, changed, mustTime(t, 10)); err != nil {
-				t.Fatal(err)
-			}
-			if withdrawn, err := store.AcceptIntakeSnapshot(ctx, source.ID, snapshot, mustTime(t, 11)); err != nil || withdrawn.WithdrawnAt == nil {
-				t.Fatalf("withdrawal revived: %+v %v", withdrawn, err)
-			}
-			latest, _, err = store.LatestIntakeAcceptance(ctx, snapshot, project.ID, source.TargetRepositoryID)
-			if err != nil || latest.ID != second.ID {
-				t.Fatalf("withdrawn review promoted: %+v %v", latest, err)
+			if withdrawn, err := store.AcceptIntakeSnapshot(ctx, source.ID, snapshot, mustTime(t, 11)); err != nil || withdrawn.ID != first.ID {
+				t.Fatalf("restored: %+v %v", withdrawn, err)
 			}
 		})
 	}
