@@ -735,6 +735,9 @@ func reviewResponseStructuredContent(request maintainerRequest, response json.Ra
 		if len(value.Result.Content) > 0 {
 			reason = ": " + strings.ToValidUTF8(value.Result.Content[0].Text[:min(len(value.Result.Content[0].Text), 300)], "")
 		}
+		if rest, ok := strings.CutPrefix(reason, ": conflict"); ok {
+			return nil, fmt.Errorf("%w%s", review.ErrConflict, rest)
+		}
 		return nil, errors.New("review: Maintainer rejected operation" + reason)
 	}
 	return value.Result.StructuredContent, nil

@@ -60,6 +60,9 @@ func (b *fakeBackend) Submit(context.Context, Operation, Verdict) error {
 	return b.submitErr
 }
 func (b *fakeBackend) Enqueue(context.Context, Operation) error { b.enqueued = true; return nil }
+func (b *fakeBackend) Observe(context.Context, string) (Receipt, error) {
+	return Receipt{State: "missing"}, nil
+}
 func (b *fakeBackend) ObserveMerge(context.Context, Operation) (Merge, error) {
 	return b.merge, nil
 }
@@ -223,5 +226,26 @@ func TestResumeResendsAPlannedEnqueue(t *testing.T) {
 	got, err := c.Resume(context.Background(), op)
 	if err != nil || got.State != "enqueued" || !backend.enqueued {
 		t.Fatalf("operation=%+v err=%v enqueued=%v", got, err, backend.enqueued)
+	}
+}
+
+type conflictBackend struct{ observedBackend }
+
+func (b *conflictBackend) Enqueue(context.Context, Operation) error {
+	return ErrConflict
+}
+
+// A planned enqueue the Maintainer refuses as a conflict ends; it is not
+// resent forever (the pull request was merged under it, #1167 and #1179).
+func TestResumeFailsAPlannedEnqueueTheMaintainerRefuses(t *testing.T) {
+	c := Coordinator{Store: &memoryStore{}, Backend: &conflictBackend{observedBackend{receipt: Receipt{State: "planned"}}}, Now: func() time.Time { return time.Unix(10, 0) }}
+	op, err := Prepare(reviewRequest(), c.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	op.State, op.Verdict, op.Submitted, op.EnqueueID = "enqueuing", "allow", true, "enqueue-1"
+	got, err := c.Resume(context.Background(), op)
+	if !errors.Is(err, ErrConflict) || got.State != "failed" || got.Retryable || !got.RoutePending {
+		t.Fatalf("operation=%+v err=%v", got, err)
 	}
 }
