@@ -169,7 +169,7 @@ func inspectOperationalSnapshot(ctx context.Context, path string, files *databas
 	if err := tx.connection.QueryRowContext(inspectionCtx, "PRAGMA user_version").Scan(&schemaVersion); err != nil {
 		return errors.Join(fmt.Errorf("pin operational SQLite snapshot: %w", err), tx.Close())
 	}
-	if err := validateDatabaseSnapshot(inspectionCtx, tx.connection); err != nil {
+	if err := validateOpenableSnapshot(inspectionCtx, tx.connection); err != nil {
 		return errors.Join(fmt.Errorf("validate operational SQLite snapshot: %w", err), tx.Close())
 	}
 	if err := tx.Close(); err != nil {
