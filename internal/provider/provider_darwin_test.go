@@ -1825,6 +1825,11 @@ func TestClaudeSettingsConfineTheRunToItsGrants(t *testing.T) {
 	installation, runtime, _ := nativeFixture(t, kernel.ProviderClaudeCode)
 	request := requestFor(t, kernel.ProviderClaudeCode, installation, runtime, "", "")
 	var settings struct {
+		Hooks struct {
+			Stop []struct {
+				Hooks []struct{ Type, Command string }
+			}
+		}
 		Permissions struct{ Allow []string }
 		Sandbox     struct {
 			Enabled, FailIfUnavailable, AllowUnsandboxedCommands bool
@@ -1834,6 +1839,10 @@ func TestClaudeSettingsConfineTheRunToItsGrants(t *testing.T) {
 	}
 	if err := json.Unmarshal([]byte(wantClaudeSettings(t, request, "factory_browser")), &settings); err != nil {
 		t.Fatal(err)
+	}
+	// A turn that ends without an outcome reaches factoryd at once.
+	if stop := settings.Hooks.Stop; len(stop) != 1 || len(stop[0].Hooks) != 1 || stop[0].Hooks[0].Type != "command" || stop[0].Hooks[0].Command != "'"+runtime.factoryctl+"' attempt turn-complete" {
+		t.Fatalf("Stop hook = %+v", stop)
 	}
 	sandbox, change := settings.Sandbox, "/"+request.workingDirectory
 	if !sandbox.Enabled || !sandbox.FailIfUnavailable || sandbox.AllowUnsandboxedCommands {

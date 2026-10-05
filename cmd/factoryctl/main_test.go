@@ -900,3 +900,67 @@ func TestAttemptSourceUnauthorizedTellsWorkerToUseCheckout(t *testing.T) {
 		t.Fatalf("stderr = %q", got)
 	}
 }
+
+// Claude's Stop hook: a live run that ends a turn without an outcome is
+// reminded once, failed on the next stop, and left alone once an outcome or
+// yield has revoked its credential.
+func TestClaudeTurnCompleteRemindsThenFails(t *testing.T) {
+	if command, help, ok := parse([]string{"attempt", "turn-complete"}); !ok || help || command.kind != commandTurnComplete || command.text != "" {
+		t.Fatalf("parse = %+v, %t, %t", command, help, ok)
+	}
+	task := func(api.Call) api.Reply {
+		reply, _ := api.NewAttemptTaskReply(api.AttemptTask{Task: "task"})
+		return reply
+	}
+	failed := func(api.Call) api.Reply {
+		reply, _ := api.NewMutationReply(api.MutationResult{Head: 1, Revision: 1})
+		return reply
+	}
+	revoked := func(api.Call) api.Reply {
+		reply, _ := api.NewErrorReply(api.RemoteUnauthorized)
+		return reply
+	}
+	for _, test := range []struct {
+		name    string
+		stdin   string
+		replies []func(api.Call) api.Reply
+		exit    int
+		calls   []api.CallKind
+	}{
+		{name: "first stop reminds", stdin: `{"stop_hook_active":false}`, replies: []func(api.Call) api.Reply{task}, exit: 2, calls: []api.CallKind{api.CallAttemptTask}},
+		{name: "stop after reminder fails", stdin: `{"stop_hook_active":true}`, replies: []func(api.Call) api.Reply{task, failed}, exit: 0, calls: []api.CallKind{api.CallAttemptTask, api.CallFail}},
+		{name: "stop after outcome is allowed", stdin: `{"stop_hook_active":true}`, replies: []func(api.Call) api.Reply{revoked}, exit: 0, calls: []api.CallKind{api.CallAttemptTask}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newAPIFixture(t)
+			defer fixture.close(t)
+			t.Setenv("DARK_FACTORY_ATTEMPT_TOKEN_FILE", fixture.attemptPath)
+			client, err := api.NewAttemptClientFromEnvironment(fixture.socket)
+			if err != nil {
+				t.Fatal(err)
+			}
+			done := make(chan []serverResult, 1)
+			go func() {
+				var results []serverResult
+				for _, reply := range test.replies {
+					results = append(results, <-serveOne(fixture.listener, reply))
+				}
+				done <- results
+			}()
+			var stderr bytes.Buffer
+			exit := claudeTurnComplete(context.Background(), client, strings.NewReader(test.stdin), &stderr)
+			results := awaitMany(t, done, len(test.calls))
+			for index, result := range results {
+				if result.err != nil || result.call.Kind() != test.calls[index] {
+					t.Fatalf("call %d = %v, %v", index, result.call.Kind(), result.err)
+				}
+			}
+			if detail, ok := results[len(results)-1].call.Detail(); test.calls[len(test.calls)-1] == api.CallFail && (!ok || !strings.Contains(detail, "after a reminder")) {
+				t.Fatalf("fail detail = %q", detail)
+			}
+			if exit != test.exit || (exit == 2) != strings.Contains(stderr.String(), "attempt succeed") {
+				t.Fatalf("exit %d, stderr %q", exit, stderr.String())
+			}
+		})
+	}
+}

@@ -828,7 +828,12 @@ func claudeSettings(request Request, servers []string) (string, error) {
 			allow = append(allow, "Edit("+rule+"/**)")
 		}
 	}
+	// The Stop hook runs outside the sandbox with the attempt environment, so
+	// a turn that ends without an outcome is answered at once, not by the
+	// stall rule ten minutes later.
+	stop := "'" + strings.ReplaceAll(request.runtime.factoryctl, "'", `'\''`) + "' attempt turn-complete"
 	settings, err := json.Marshal(map[string]any{
+		"hooks":       map[string]any{"Stop": []any{map[string]any{"hooks": []any{map[string]any{"type": "command", "command": stop}}}}},
 		"permissions": map[string]any{"allow": allow},
 		"sandbox": map[string]any{
 			"enabled": true, "failIfUnavailable": true, "allowUnsandboxedCommands": false, "autoAllowBashIfSandboxed": true,
