@@ -725,13 +725,21 @@ func reviewResponseStructuredContent(request maintainerRequest, response json.Ra
 		Result struct {
 			IsError           bool            `json:"isError"`
 			StructuredContent json.RawMessage `json:"structuredContent"`
+			Content           []struct {
+				Text string `json:"text"`
+			} `json:"content"`
 		} `json:"result"`
 	}
 	if err := json.Unmarshal(response, &value); err != nil {
 		return nil, errors.New("review: Maintainer returned an invalid response")
 	}
 	if value.Result.IsError {
-		return nil, errors.New("review: Maintainer rejected operation")
+		// The broker's reason is what an operator needs to act on.
+		reason := ""
+		if len(value.Result.Content) > 0 {
+			reason = ": " + strings.ToValidUTF8(value.Result.Content[0].Text[:min(len(value.Result.Content[0].Text), 300)], "")
+		}
+		return nil, errors.New("review: Maintainer rejected operation" + reason)
 	}
 	return value.Result.StructuredContent, nil
 }
