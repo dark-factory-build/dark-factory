@@ -232,7 +232,7 @@ func TestResumeResendsAPlannedEnqueue(t *testing.T) {
 type conflictBackend struct{ observedBackend }
 
 func (b *conflictBackend) Enqueue(context.Context, Operation) error {
-	return ErrConflict
+	return ErrRejected
 }
 
 // A planned enqueue the Maintainer refuses as a conflict ends; it is not
@@ -245,7 +245,7 @@ func TestResumeFailsAPlannedEnqueueTheMaintainerRefuses(t *testing.T) {
 	}
 	op.State, op.Verdict, op.Submitted, op.EnqueueID = "enqueuing", "allow", true, "enqueue-1"
 	got, err := c.Resume(context.Background(), op)
-	if !errors.Is(err, ErrConflict) || got.State != "failed" || got.Retryable || !got.RoutePending {
+	if !errors.Is(err, ErrRejected) || got.State != "failed" || got.Retryable || !got.RoutePending {
 		t.Fatalf("operation=%+v err=%v", got, err)
 	}
 }
