@@ -349,8 +349,7 @@ Limits: Playwright's origin/file guards catch unintended access, but are not a
 security boundary; origin lists do not cover redirects or deliberate bypass.
 Explicit MCP servers and native providers still run as the operator. This is
 session separation, not hostile-code confinement or permission to operate the
-live factory. The existing operator-owned `verify-live-browser.mjs` remains the
-separate authorized connected-console route. No native desktop-control tool is
+live factory. No native desktop-control tool is
 provided here.
 
 Run `python3 scripts/test-factory-browser.py` for the configuration checks. With

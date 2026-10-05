@@ -3,11 +3,7 @@
 Audited against origin/main `6915d8328b0a8b8c32d359a9fcd3a7da08ac1349`.
 Every root file in `scripts/` is listed below. `DEAD` means no repository
 consumer of the kinds named in the task; no file met that definition. `DEV`
-is repository, CI, release, fixture, or verification tooling. `PRODUCT` is a
-host-owned controller or hosted-site path that an external installation needs
-but that currently depends on the owner machine, legacy factory home,
-owner-authenticated `gh`/Vercel or the hard-coded hosted
-repository/domain.
+is repository, CI, release, fixture, or verification tooling.
 
 | Script | Class | Evidence |
 | --- | --- | --- |
@@ -16,7 +12,6 @@ repository/domain.
 | `cloudflare-env-clean.sh` | DEV | Cloudflare admin boundary and test |
 | `cold-review.sh` | DEV | independent review gate |
 | `dark-factory-browser-mcp.py` | DEV | documented provider/browser helper and tests |
-| `deploy-site.sh` | PRODUCT | owner Vercel project and `app.darkfactory.build` deployment; issue #971 |
 | `github-repo-settings.sh` | DEV | repository configuration script |
 | `github-step-summary.sh` | DEV | workflow summary helper |
 | `go-check.sh` | DEV | source and UI gate |
@@ -37,7 +32,6 @@ repository/domain.
 | `test-bootstrap-maintainer-v2.sh` | DEV | bootstrap fixture |
 | `test-cloudflare-env.sh` | DEV | Cloudflare boundary fixture |
 | `test-cold-review.sh` | DEV | cold-review fixture |
-| `test-deploy-site.sh` | DEV | deployment fixture |
 | `test-factory-browser-live.py` | DEV | documented browser configuration fixture |
 | `test-factory-browser.py` | DEV | browser helper fixture |
 | `test-github-step-summary.sh` | DEV | workflow summary fixture |
@@ -50,18 +44,12 @@ repository/domain.
 | `test-publication-parents.sh` | DEV | ancestry fixture |
 | `test-publish-release.sh` | DEV | release-publisher fixture |
 | `test-repository-settings.sh` | DEV | repository-settings fixture |
-| `test-verification-profile.mjs` | DEV | browser profile unit fixture |
 | `test-verify-adversarial-review.sh` | DEV | review-policy fixture |
-| `verification-profile.mjs` | DEV | browser verification support library |
 | `verify-adversarial-review.sh` | DEV | exact-head review gate |
-| `verify-live-browser.mjs` | DEV | documented hosted-console smoke verifier |
-| `verify-live-site.py` | PRODUCT | owner Vercel/browser environment and hosted-domain verifier; issue #979 |
 | `with-cloudflare-env.sh` | DEV | Cloudflare credential boundary |
 | `with-local-ci-lease.sh` | DEV | local gate lease wrapper |
 
 The release lane (`factory-autonomy.py`, `factory-release.py`,
 `factory-delivery.py` and their helpers) is deleted: factoryd releases itself.
-PRODUCT follow-ups are
-tracked as one issue per script; each issue
-names the daemon or `factoryctl` home as the destination and the repository
-copy/legacy fixture set to delete after cutover.
+The site deploy scripts are deleted: the public site deploys from
+dark-factory-site `main` via Vercel's Git integration.

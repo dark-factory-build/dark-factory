@@ -1,15 +1,13 @@
 # Deploying the site and the live service
 
+The public site (`https://app.darkfactory.build`) deploys to Vercel
+production from `main` of the dark-factory-site repository via Vercel's Git
+integration; its `vercel.json` build runs the site's own artifact
+verification. Nothing here deploys it.
+
 ```sh
-./scripts/deploy-site.sh <site-commit-sha>
 factoryctl release <commit-sha> [--wait]
 ```
-
-`deploy-site.sh` takes one exact 40-hex commit, refuses a dirty or
-mis-positioned worktree, deploys the public site to Vercel production from a
-detached worktree of the site repository (`$DARK_FACTORY_SITE`, default
-`$HOME/dark-factory-site`) at that commit, then prints `vercel inspect`
-for `https://app.darkfactory.build`.
 
 `factoryctl release` asks the running factoryd to install a commit merged into
 `main` of its registered dark-factory checkout. factoryd:
