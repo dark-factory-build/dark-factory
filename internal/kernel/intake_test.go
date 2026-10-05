@@ -562,3 +562,11 @@ func TestIntakeRestoredContentIsRefusedAfterNewerReceipt(t *testing.T) {
 		})
 	}
 }
+
+func TestIntakeTaskBodyKeepsATitleOnlyIssuesInstruction(t *testing.T) {
+	accepted := IntakeAcceptance{SourceRepository: "owner/repository"}
+	accepted.Snapshot.Title, accepted.Snapshot.IssueNumber = "Fix the flake", 7
+	if got := intakeTaskBody(accepted); got != "Fix the flake\n\nSource: https://github.com/owner/repository/issues/7\nFACTORY_SOURCE owner/repository#7" {
+		t.Fatalf("title-only body = %q", got)
+	}
+}

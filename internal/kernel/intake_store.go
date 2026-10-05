@@ -594,11 +594,7 @@ func (store *Store) importIntakeAcceptance(ctx context.Context, id IntakeAccepta
 	}
 	// Accepted work goes straight to any idle worker; the overseer wakes only
 	// for its outcome (overseer_wakeup.go).
-	body := accepted.Snapshot.Body + "\n\nSource: " + accepted.Snapshot.URL
-	if accepted.Snapshot.LinearTeamID == "" {
-		body = fmt.Sprintf("%s\n\nSource: https://github.com/%[2]s/issues/%[3]d\nFACTORY_SOURCE %[2]s#%[3]d", accepted.Snapshot.Body, accepted.SourceRepository, accepted.Snapshot.IssueNumber)
-	}
-	spec := NewTask{Priority: priority, ID: accepted.TaskID, IncarnationID: accepted.IncarnationID, ProjectID: accepted.ProjectID, RepositoryID: accepted.RepositoryID, Title: accepted.Snapshot.Title, Body: body}
+	spec := NewTask{Priority: priority, ID: accepted.TaskID, IncarnationID: accepted.IncarnationID, ProjectID: accepted.ProjectID, RepositoryID: accepted.RepositoryID, Title: accepted.Snapshot.Title, Body: intakeTaskBody(accepted)}
 	if err := validateNewTask(spec); err != nil {
 		return Task{}, tx.Rollback(err)
 	}
@@ -739,4 +735,17 @@ func (store *Store) IntakeTasksForAcceptance(ctx context.Context, id IntakeAccep
 		tasks = append(tasks, task)
 	}
 	return tasks, rows.Err()
+}
+
+// intakeTaskBody is the worker's instruction for accepted intake: the issue
+// body (or, for a title-only issue, its title) followed by its source.
+func intakeTaskBody(accepted IntakeAcceptance) string {
+	request := accepted.Snapshot.Body
+	if strings.TrimSpace(request) == "" {
+		request = accepted.Snapshot.Title
+	}
+	if accepted.Snapshot.LinearTeamID != "" {
+		return request + "\n\nSource: " + accepted.Snapshot.URL
+	}
+	return fmt.Sprintf("%s\n\nSource: https://github.com/%[2]s/issues/%[3]d\nFACTORY_SOURCE %[2]s#%[3]d", request, accepted.SourceRepository, accepted.Snapshot.IssueNumber)
 }
