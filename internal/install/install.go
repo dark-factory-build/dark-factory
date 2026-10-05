@@ -10,7 +10,6 @@ import (
 )
 
 var (
-	ErrUnsupported = errors.New("home initialization is unsupported on this platform")
 	ErrInvalidHome = errors.New("home path is invalid")
 	ErrUncertain   = errors.New("home publication outcome is uncertain")
 	ErrBusy        = errors.New("home is already leased")

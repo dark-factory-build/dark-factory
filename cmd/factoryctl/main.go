@@ -1214,8 +1214,6 @@ func runService(ctx context.Context, command attemptCommand, stdout, stderr io.W
 			message = "factoryctl: service operation canceled\n"
 		case errors.Is(err, context.DeadlineExceeded):
 			message = "factoryctl: service operation timed out\n"
-		case errors.Is(err, install.ErrUnsupported):
-			message = "factoryctl: service operations are unsupported on this platform\n"
 		case errors.Is(err, install.ErrInvalidHome):
 			message = "factoryctl: service operations require an exact Go home\n"
 		case errors.Is(err, install.ErrServiceForeign):
@@ -1325,8 +1323,6 @@ func runHome(ctx context.Context, command attemptCommand, stdout, stderr io.Writ
 				message = "factoryctl: home inspection outcome is uncertain; inspect the explicit home path again\n"
 			}
 			_, _ = io.WriteString(stderr, message)
-		case errors.Is(err, install.ErrUnsupported):
-			_, _ = io.WriteString(stderr, "factoryctl: Go home operations are unsupported on this platform\n")
 		case errors.Is(err, install.ErrInvalidHome):
 			_, _ = io.WriteString(stderr, "factoryctl: home is invalid or not an exact stopped Go home\n")
 		default:

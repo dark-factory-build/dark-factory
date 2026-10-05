@@ -239,7 +239,6 @@ func TestServiceStatusCLIMapsFailuresWithoutPrivateDiagnostics(t *testing.T) {
 		{name: "home", err: errors.Join(install.ErrInvalidHome, errors.New(private)), want: "factoryctl: service operations require an exact Go home\n"},
 		{name: "foreign", err: errors.Join(install.ErrServiceForeign, errors.New(private)), want: "factoryctl: a service artifact is not this installation's property; refusing\n"},
 		{name: "residue", err: errors.Join(install.ErrServiceResidue, errors.New(private)), want: "factoryctl: service residue found; run factoryctl service uninstall first\n"},
-		{name: "unsupported", err: install.ErrUnsupported, want: "factoryctl: service operations are unsupported on this platform\n"},
 		{name: "canceled", err: context.Canceled, want: "factoryctl: service operation canceled\n"},
 		{name: "deadline", err: context.DeadlineExceeded, want: "factoryctl: service operation timed out\n"},
 	}

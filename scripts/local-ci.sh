@@ -48,7 +48,6 @@ if [ "$local_ci_mode" = full ]; then
     python3 ./scripts/test-factory-browser.py
     ./scripts/test-github-step-summary.sh
     ./scripts/test-verify-adversarial-review.sh
-    ./scripts/test-bootstrap-maintainer-v2.sh
     ./scripts/test-release.sh
     ./scripts/test-repository-settings.sh
     /bin/sh ./scripts/test-go-gates.sh

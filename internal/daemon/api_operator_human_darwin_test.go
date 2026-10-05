@@ -133,9 +133,6 @@ func newOperatorAPITestFixture(t *testing.T, daemon *Daemon) *operatorAPITestFix
 	authRoot := runtimeTempDir(t)
 	authHome := filepath.Join(authRoot, "auth")
 	if _, err := install.Init(context.Background(), authHome); err != nil {
-		if errors.Is(err, install.ErrUnsupported) {
-			t.Skip("operational local API is unsupported on this platform")
-		}
 		t.Fatal(err)
 	}
 	token := filepath.Join(authHome, "operator.token")

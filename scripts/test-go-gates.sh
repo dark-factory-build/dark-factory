@@ -401,7 +401,7 @@ EOF
 for local_child in \
     check-toolchain-pins.sh test-local-ci-environment.sh test-new-worktree.sh \
     test-release.sh test-github-step-summary.sh test-verify-adversarial-review.sh \
-    test-bootstrap-maintainer-v2.sh test-repository-settings.sh \
+    test-repository-settings.sh \
     test-go-gates.sh test-go-e2e-tools.sh go-ci-owned.sh \
     go-e2e.sh \
     test-prepare-release-source.sh test-publish-release.sh \

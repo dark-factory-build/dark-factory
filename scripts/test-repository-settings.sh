@@ -256,7 +256,6 @@ scope_case true false false runtime internal/kernel/store.go
 scope_case true true false runtime control-plane/src/lib.rs internal/kernel/store.go
 scope_case true true true full .github/workflows/ci.yml
 scope_case true true false full .gitignore
-scope_case true true false full scripts/bootstrap-maintainer-v2.sh
 scope_case true true false full scripts/release.sh
 scope_case true false true full relay/src/index.ts
 scope_case true false true full relay/src/tokens.ts
