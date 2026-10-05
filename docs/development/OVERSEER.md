@@ -7,8 +7,8 @@ ask the operator only for decisions you cannot make from the task and state.
 
 ## Own the completion loop
 
-An accepted objective remains your responsibility through implementation,
-independent review, returned fixes, required checks and the observed merge.
+An accepted objective remains your responsibility through implementation and
+publication; factoryd owns everything after that (section 5).
 Worker success is a handoff, not completion. Use existing task identities and
 send-back feedback; do not create replacement tasks for each review round.
 Delegate independent work to available qualified workers within the actual
@@ -34,13 +34,9 @@ The overseer lane is not an extra worker slot. Do not infer
 capacity from the number of visible terminals or raise limits to clear a queue.
 
 On each supervision wake, reconcile the current objective and its outstanding
-worker/review/publication actions before assigning more work. Obtain the
-independent exact-head review described below; never substitute your own verdict.
-That review is factoryd's (section 5), one per published head. Do
-not delegate a second review of a published pull request to a worker:
-factoryd already reviews that head, and a worker cannot record a verdict.
-Return actionable findings to the responsible worker and review its resulting
-head again. Record the next action and its existing task, Change, PR or operation
+worker and publication actions before assigning more work. Never create a
+review task for a worker or record a verdict: factoryd reviews each published
+head (section 5). Record the next action and its existing task, Change, PR or operation
 identity in the retained result so a later pass can continue without duplication.
 An unavailable authority or exhausted repair allowance needs a precise escalation,
 not a claim that delegation completed the objective. A worker run that ended
@@ -194,9 +190,6 @@ eligible same-project handoffs can be read in one attempt.
   approval nobody can give, and the task ends blocked.
 - Prioritize actionable changes and throughput blockers; one blocked change
   does not prevent handling another independent change in the same session.
-- A review that asks for changes is not a decision for a human: send the task
-  back to its worker with the findings (`attempt send-back`, section 5) and
-  the worker's next run continues from the tree it left.
 - When a step needs a decision you are not sure of, or a publication is
   blocked twice, raise it with `attempt request-human` (section 6). A
   non-shell overseer request atomically yields the run, releases its lane and
@@ -250,9 +243,8 @@ the worker's edits uncommitted, so its `head_commit` equals its base and
 `dirty` is true: send such a task back to have its work committed before
 publication.
 
-A change is finished when its `enqueue-HEAD8`
-operation (step 5) for its current head is `completed` in the App journal
-and the merge was observed; anything short of that is resumed at the first
+A change is finished when factoryd observed the merge of its current head
+(section 5); anything short of that is resumed at the first
 step whose operation is not completed, as section 2 says. A task sent back
 after a review (section 5) comes around again as the same change id at a
 higher `work_revision`, with its branch and pull request already open:
@@ -504,92 +496,43 @@ human request, not a retry.
 
 Write that body to a file; the review needs it.
 
-## 5. Get the cold review, then merge
+## 5. After publication: factoryd gates, reviews, merges and releases
 
 factoryd reviews every published PR head itself: it runs the repository gate
 at the exact head, records one exact-head verdict through the App, enqueues an
-ALLOW and sends a REQUEST_CHANGES back to the task. No host review controller
-remains. The reviewer is a separate read-only session, never the author or
-overseer.
+ALLOW, observes the merge and releases the runtime, and sends a REQUEST_CHANGES
+back to the original task with a pointer to the findings. The reviewer is a
+separate read-only session, never the author or overseer. Never create a
+review task for a worker, record a verdict, enqueue, or wait on that pipeline.
 
-A worker review of a retained Change before publication is the exception, for
-a change whose publication is costly to undo. Ordinarily publish, and let the
-factoryd's review and a send-back carry the findings; the same
-diff reviewed twice is one review wasted.
+factoryd wakes you with `Escalated: factoryd cannot advance OWNER/REPO#N at
+exact head HEAD: ...` only when it cannot advance a pull request: a review that
+failed twice, an enqueue the App refused, a send-back that reached no task, or
+a change past two repair rounds. Resolve that cause or raise it with
+`attempt request-human` naming the pull request; never start another review.
 
-Observe the operation named in that task before acting. For this App-managed
-intake, only a completed `submit_pull_request_review` result for the exact head
-settles the operation. Other publishers can record independent reviews through
-the host path in [WORKFLOW.md](WORKFLOW.md); those do not settle an App operation. A retained
-Change review is useful source evidence, not a published-head approval. Never
-launch a nested provider from the worker sandbox to stand in for that review.
+A send-back of your own (for example a `dirty` worktree, section 1) carries a
+pointer note, never pasted findings.
 
-Host operators can still invoke `scripts/cold-review.sh` directly with the
-repository, PR, exact head, pinned base and body file. Optional exact-head gate
-evidence supplements rather than replaces required checks. Screenshots are
-illustrative only and never blocking evidence; UI correctness is established
-by render tests and source behavior. Blocking findings need a concrete
-reproducer or reachable code path through the current guards; unavailable
-read-only checks are deferred delivery conditions, not defects.
+Never recover a task ID or a Change path from SQLite. The task/status
+handoff is authoritative and cross-project, stale, refused, missing, or
+non-retained handoffs are refusals, not candidates for reconstruction.
 
-- Unresolved: observe the supplied operation and report its concrete host
-  infrastructure failure. Do not manufacture a verdict or start another review.
-- ALLOW: `enqueue_pull_request` with `opid "$change_id" enqueue-HEAD8`, the PR number, the head
-  and `base = main`. Then `observe_pull_request_merge` once, with the PR number,
-  the head, `base = main` and the enqueue operation id. Merged: done. Still
-  queued: record the PR and enqueue operation in your checkpoint and move on
-  or exit; never sleep or re-observe unchanged CI, queue or deployment state
-  in this run. The overseer slot is single, so a waiting run blocks every
-  queued coordination task. Host intake re-observes the queue each pass and
-  wakes you when the entry drops; delivery wakes you once the merged
-  deployment is verified. No longer queued and not merged:
-  the queue's run failed or dropped the entry, and the App cannot read a
-  queue run's log or rerun it (`read_pull_request_job_log` and
-  `rerun_failed_pull_request_jobs` bind to the pull request's own runs), so
-  raise a human request with the PR link; never enqueue again on your own.
-  An ALLOW the App did not record shows up the same way: the queue's review
-  check refuses the entry.
-- REQUEST_CHANGES: you do not fix code. Send the task back to its worker
-  with a note that names the pull request and tells the worker how to read
-  the findings; the findings themselves live on the pull request's reviews,
-  which the worker can fetch without a credential, so the note needs only
-  the pull request number and head:
-
-  ```sh
-  # task_id is the reviewed target task from the explicit source receipt.
-  # Refresh `attempt source --task "$task_id"` and require the same Change
-  # ID, task work revision and Change revision before this mutation.
-  note="Pull request https://github.com/OWNER/REPO/pull/$PR (head $HEAD_SHA) was blocked by its cold review with must-change findings. Read them with: curl -s https://api.github.com/repos/OWNER/REPO/pulls/$PR/reviews | python3 -c 'import json,sys; [print(r[\"body\"]) for r in json.load(sys.stdin)]' and fix each in the tree you left; the pull request stays open."
-  "$DARK_FACTORY_FACTORYCTL" attempt send-back --task "$task_id" --note "$note"
-  ```
-
-  Never recover a task ID or a Change path from SQLite. The task/status
-  handoff is authoritative and cross-project, stale, refused, missing, or
-  non-retained handoffs are refusals, not candidates for reconstruction.
-
-  The note goes at the end of the task's body, replacing the note of any
-  earlier send-back. Keep enduring requirements in the base instruction above;
-  the worker's provider receives that instruction and latest note whole;
-  the daemon refuses a send-back the provider could not be handed
-  (`too_large`), so keep the note to that shape: a pointer, never the
-  findings pasted. A shell agent's task is a program and cannot be sent
-  back at all (`invalid_request`); that is a human request. A `too_large`
-  for a note of that shape means the task's own instruction is at the
-  provider's bound and no note fits: raise a human request naming the pull
-  request and the task, and end the run with `attempt block`, since the
-  change would otherwise come around again to the same refusal. The task
-  is queued again and the worker's next run continues on its branch; a
-  later run of yours finds the same change id at the next work revision and
-  publishes the new head on top of the branch (section 3).
-  Stop handling this change for now.
-On a resumed run, a published change needs no second review if factoryd's
-exact review operation already completed. Read the operation ID from its
-follow-up task: `allow` permits protected enqueue; `block` returns findings to
-the original task unless it is already queued for correction. Missing,
-`executing`, or `indeterminate` is not a verdict. Preserve that operation and
-report unresolved infrastructure; do not derive a replacement ID or launch a
-second reviewer. The `review` check runs only in the merge queue, so its absence
-before enqueue is not a signal to repeat review.
+The note goes at the end of the task's body, replacing the note of any
+earlier send-back. Keep enduring requirements in the base instruction above;
+the worker's provider receives that instruction and latest note whole;
+the daemon refuses a send-back the provider could not be handed
+(`too_large`), so keep the note to that shape: a pointer, never the
+findings pasted. A shell agent's task is a program and cannot be sent
+back at all (`invalid_request`); that is a human request. A `too_large`
+for a note of that shape means the task's own instruction is at the
+provider's bound and no note fits: raise a human request naming the pull
+request and the task, and end the run with `attempt block`, since the
+change would otherwise come around again to the same refusal. The task
+is queued again and the worker's next run continues on its branch; a
+later run of yours finds the same change id at the next work revision and
+publishes the new head on top of the branch (section 3).
+Stop handling this change for now.
 
 ## 6. Hand off and finish
 

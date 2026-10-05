@@ -64,13 +64,12 @@ instructions. Supply product priorities and explicit closure criteria.
 - On changed or withdrawn sources, cancel queued work and stop running work
   that no longer applies. Observe those outcomes before delegating a successor.
   Intake is a supervisory event, not an instantaneous GitHub-to-process kill.
-- A worker's success is input to review, not issue completion. Inspect its
-  tree and receipts, run repository gates and independent exact-head review,
-  and send findings back. Never author an ALLOW for your own work.
-- Allow at most two repair rounds for the same unresolved failure. A review
-  finding returns to the original task/Change and must be independently
-  re-reviewed at its corrected head; do not create a retry duplicate.
-  Repeated publication failures, missing authority, or unclear requirements
+- A worker's success is not issue completion. Inspect its tree and receipts,
+  then publish it. factoryd gates, reviews, enqueues, merges and releases every
+  published head and returns findings to the original worker; never run gates,
+  create review tasks or record a verdict. Act on a published pull request only
+  when an `Escalated:` wake names it.
+- Repeated publication failures, missing authority, or unclear requirements
   become one human decision. Do not spawn fresh tasks to evade admission
   limits.
 - Reuse the source issue when publishing. Observe stable operation IDs before

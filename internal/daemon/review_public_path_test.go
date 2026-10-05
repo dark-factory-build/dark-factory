@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -25,6 +26,7 @@ type publicReviewBackend struct {
 	journal                                 map[string]string
 	observations                            map[string]review.Receipt
 	merge                                   review.Merge
+	observeFailures                         int
 }
 
 func (b *publicReviewBackend) CloneReadOnly(context.Context, review.Request) (string, func(), error) {
@@ -67,6 +69,10 @@ func (b *publicReviewBackend) ObserveMerge(context.Context, review.Operation) (r
 }
 
 func (b *publicReviewBackend) Observe(_ context.Context, operationID string) (review.Receipt, error) {
+	if b.observeFailures > 0 {
+		b.observeFailures++
+		return review.Receipt{}, fmt.Errorf("observe_operation 401 #%d", b.observeFailures-1)
+	}
 	if receipt, ok := b.observations[operationID]; ok {
 		return receipt, nil
 	}
@@ -116,7 +122,8 @@ func reviewNow(ctx context.Context, daemon *Daemon, project kernel.ProjectID, re
 	if err != nil {
 		return "", err
 	}
-	return daemon.resumeReview(ctx, project, op)
+	op, err = daemon.resumeReview(ctx, project, op)
+	return op.ID, err
 }
 
 type gatedReviewBackend struct {
@@ -644,5 +651,40 @@ func TestFailedReviewRetriesOnceThenEscalatesOnce(t *testing.T) {
 	}
 	if document, _, err := fixture.store.ReviewOperation(ctx, project, unbound.ID); err != nil || !strings.Contains(string(document), `"handled":true`) || !strings.Contains(string(document), "its retry could not start") || backend.reviews != 2 {
 		t.Fatalf("unbound failure left unhandled: %s %v reviews=%d", document, err, backend.reviews)
+	}
+}
+
+// An in-flight write whose resume keeps failing is escalated to the overseer
+// once it has not advanced for 30 minutes, and is still resumed afterwards.
+func TestStuckEnqueueEscalatesOnceAndKeepsResuming(t *testing.T) {
+	fixture, project, _, settle := publishedTask(t)
+	settle()
+	customerMode(t, fixture)
+	ctx := context.Background()
+	backend := &publicReviewBackend{observeFailures: 1}
+	fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return backend }
+	var offset atomic.Int64
+	now := fixture.daemon.now
+	fixture.daemon.now = func() time.Time { return now().Add(time.Duration(offset.Load())) }
+	request := publishedReviewRequest()
+	stuck := review.Operation{ID: "stuck-enqueue", EnqueueID: "stuck-enqueue-write", Submitted: true, Verdict: "allow", Request: review.Request{Repository: request.Repository, PullNumber: request.PullNumber, Head: request.Head, Base: request.Base, BaseRef: request.BaseRef, Body: request.Body, Provider: request.Provider}, State: "enqueuing", CreatedAt: fixture.daemon.now(), UpdatedAt: fixture.daemon.now()}
+	if err := (durableReviewStore{store: fixture.store, project: project, repository: "team/repo", now: fixture.daemon.now}).Create(ctx, stuck); err != nil {
+		t.Fatal(err)
+	}
+	tick := func(after time.Duration) review.Operation {
+		offset.Add(int64(after))
+		if _, err := fixture.daemon.advanceReviewOperations(ctx, false); err != nil {
+			t.Fatal(err)
+		}
+		return lastDurableReview(t, fixture.store, project)
+	}
+	if op := tick(3 * time.Minute); op.Escalation != "" || backend.observeFailures != 2 {
+		t.Fatalf("a young stuck write escalated: %+v (observes %d)", op, backend.observeFailures-1)
+	}
+	if op := tick(30 * time.Minute); op.State != "enqueuing" || !strings.Contains(op.Escalation, "enqueuing write has not advanced for 30 minutes: observe_operation 401 #2") {
+		t.Fatalf("stuck write was not escalated: %+v", op)
+	}
+	if op := tick(3 * time.Minute); op.State != "enqueuing" || !strings.Contains(op.Escalation, "401 #2") || backend.observeFailures != 4 {
+		t.Fatalf("stuck write re-escalated or stopped resuming: %+v (observes %d)", op, backend.observeFailures-1)
 	}
 }

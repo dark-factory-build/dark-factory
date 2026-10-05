@@ -88,6 +88,10 @@ func (daemon *Daemon) RecoverReviewOperations(ctx context.Context) (int, error) 
 // a review goroutine is still making: a Maintainer call times out in 30s.
 const reviewStuckAfter = 2 * time.Minute
 
+// reviewEscalateAfter bounds a silent in-flight write: a verdict or enqueue
+// write that has not advanced for this long is escalated to the overseer once.
+const reviewEscalateAfter = 30 * time.Minute
+
 // customerMaintainer is the launch predicate that puts overseers on
 // factoryd's own Maintainer path (attempt maintainer-mcp). Only then does
 // factoryd run the merge stage: a legacy home keeps its host review flow.
@@ -157,7 +161,13 @@ func (daemon *Daemon) advanceReviewOperations(ctx context.Context, startup bool)
 				err = daemon.finishReviewRouting(ctx, operation.Project, operation.Repository, op)
 			}
 		case (op.State == "submitting" || op.State == "enqueuing") && stuck:
-			_, err = daemon.resumeReview(ctx, operation.Project, op)
+			// It keeps resuming, since it may still complete; one whose resume
+			// keeps failing is escalated once, with the last error, not left silent.
+			var resumed review.Operation
+			if resumed, err = daemon.resumeReview(ctx, operation.Project, op); err != nil && resumed.State == op.State && op.Escalation == "" && daemon.now().Sub(op.UpdatedAt) > reviewEscalateAfter &&
+				daemon.escalatePull(&resumed, "its "+op.State+" write has not advanced for 30 minutes: "+err.Error()) == nil {
+				err = durableReviewStore{store: daemon.store, project: operation.Project, repository: operation.Repository, now: daemon.now}.Update(ctx, resumed)
+			}
 		case op.State == "failed" && stuck && daemon.customerMaintainer():
 			// A failed review is retried once, claimed here and run in the
 			// background; one that cannot be is escalated to the overseer, once.
@@ -211,14 +221,14 @@ func (daemon *Daemon) reviewCoordinator(ctx context.Context, project kernel.Proj
 	return review.Coordinator{Store: durableReviewStore{store: daemon.store, project: project, repository: repository, now: daemon.now}, Backend: backend, Now: daemon.now}, nil
 }
 
-func (daemon *Daemon) resumeReview(ctx context.Context, project kernel.ProjectID, op review.Operation) (string, error) {
+func (daemon *Daemon) resumeReview(ctx context.Context, project kernel.ProjectID, op review.Operation) (review.Operation, error) {
 	repository := strings.ToLower(op.Request.Repository)
 	coordinator, err := daemon.reviewCoordinator(ctx, project, repository)
 	if err != nil {
-		return op.ID, err
+		return op, err
 	}
 	op, err = coordinator.Resume(ctx, op)
-	return op.ID, errors.Join(err, daemon.finishReviewRouting(ctx, project, repository, op))
+	return op, errors.Join(err, daemon.finishReviewRouting(ctx, project, repository, op))
 }
 
 // finishReviewRouting completes the second half of a REQUEST_CHANGES verdict,
@@ -586,7 +596,7 @@ func (b *daemonReviewBackend) Submit(ctx context.Context, operation review.Opera
 }
 
 func (b *daemonReviewBackend) Observe(ctx context.Context, operationID string) (review.Receipt, error) {
-	response, err := b.callResponse(ctx, "observe_operation", map[string]any{"operation_id": operationID})
+	response, err := b.callResponse(ctx, "observe_operation", map[string]any{"repository": b.repository, "operation_id": operationID})
 	if err != nil {
 		return review.Receipt{}, err
 	}
