@@ -130,3 +130,19 @@ test("disconnected source and revision evidence remains readable without enabled
     assert.equal(tree.root.findAllByType("button").find((button) => button.children.join("") === "← Back to Changes").props.disabled, undefined);
   } finally { if (tree) await act(async () => tree.unmount()); }
 });
+
+
+test("missing or omitted relationship evidence never asserts no dependency changes", () => {
+  for (const [kind, omitted, unavailable, expected] of [
+    ["unavailable", 0, "", "Static dependency changes unavailable."],
+    ["committed", 3, "", "Dependency changes are outside this observation."],
+    ["committed", 0, "Analysis refused", "Analysis refused"],
+    ["committed", 0, "", "No static dependency changes in this observation."],
+  ]) {
+    const item = { ...active, source: { ...active.source, kind, relationships: [], relationshipsOmitted: omitted, relationshipsUnavailable: unavailable } };
+    const markup = renderToStaticMarkup(createElement(ProductionPanel, { items: [item], selected: productionKey(item), onSelect() {} }));
+    assert.ok(markup.includes(expected));
+    if (kind === "unavailable" || omitted || unavailable) assert.doesNotMatch(markup, /No static dependency changes/);
+    if (omitted) assert.match(markup, /3 relationship changes omitted/);
+  }
+});
