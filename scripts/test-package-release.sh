@@ -52,7 +52,7 @@ run_packaged_smoke() {
         [ -x "$smoke_bin/$binary" ] || fail "packaged smoke is missing $binary"
     done
     for controller_asset in \
-        cold-review.sh go-gate-environment.sh verify-adversarial-review.sh
+        go-gate-environment.sh verify-adversarial-review.sh
     do
         [ -f "$smoke_bin/libexec/dark-factory/$controller_asset" ] \
             || fail "packaged smoke is missing controller asset $controller_asset"
@@ -275,14 +275,13 @@ for target in aarch64-apple-darwin x86_64-apple-darwin; do
     [ "$listing" = "factory-runner
 factoryctl
 factoryd
-libexec/dark-factory/cold-review.sh
 libexec/dark-factory/go-gate-environment.sh
 libexec/dark-factory/verify-adversarial-review.sh" ] || fail "$target archive has unexpected contents: $listing"
     gzip_mtime=$(od -An -tu1 -j4 -N4 "$archive" | tr -d '[:space:]')
     [ "$gzip_mtime" = "0000" ] || fail "$target archive embeds its packaging time"
     LC_ALL=C tar -tvzf "$archive" | awk '
       $2 != 0 || $3 != "root" || $4 != "wheel" || $6 != "Jan" || $7 != 1 || $8 != 2000 || $1 != "-rwxr-xr-x" { exit 1 }
-      END { exit NR == 6 ? 0 : 1 }
+      END { exit NR == 5 ? 0 : 1 }
     ' || fail "$target archive metadata is not normalized"
 done
 (cd "$output" && shasum -a 256 -c SHA256SUMS >/dev/null) || fail "release checksums failed"
