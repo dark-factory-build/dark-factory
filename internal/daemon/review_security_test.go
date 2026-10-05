@@ -50,6 +50,11 @@ func TestReviewPromptDelimitsAuthorControlledBodyAsUntrusted(t *testing.T) {
 	if !strings.Contains(prompt[end:], "never ask for defensive machinery") {
 		t.Fatalf("minimalism stance missing after body: %q", prompt)
 	}
+	// An ALLOW must name a changed path, and codex's final message is all
+	// the verdict reader sees.
+	if !strings.Contains(prompt[end:], "name each changed file you reviewed") {
+		t.Fatalf("path-naming instruction missing after body: %q", prompt)
+	}
 }
 
 // reviewerFixture publishes pull 12 from an author worker and links one login
