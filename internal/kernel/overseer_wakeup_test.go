@@ -103,6 +103,20 @@ func TestOverseerEscalationWake(t *testing.T) {
 	}
 }
 
+// A Change factoryd could not publish has no pull request; its escalation
+// wakes the overseer once all the same.
+func TestOverseerPublishFailureWake(t *testing.T) {
+	store, worker, _ := wakeFixture(t)
+	insert := `INSERT INTO production_records (project_id, repository, kind, identity, visual_id, document, observed_at_ms) VALUES (?, 'example/factory', 'reviewer', 'publish-x-1', '', ?, 1000)`
+	if _, err := store.writer.ExecContext(context.Background(), insert, worker.ProjectID.Bytes(), `{"id":"publish-x-1","state":"publish_failed","handled":true,"request":{"PullNumber":0,"Head":""},"escalation":"factoryd cannot publish change x for task t: refused"}`); err != nil {
+		t.Fatal(err)
+	}
+	bodies := wakeBodies(t, store, 1000+overseerWakeSettle.Milliseconds())
+	if len(bodies) != 1 || strings.Count(bodies[0], "Escalated: ") != 1 || !strings.Contains(bodies[0], "\nEscalated: factoryd cannot publish change x for task t: refused") {
+		t.Fatalf("wake = %q", bodies)
+	}
+}
+
 // A cancelled worker task is informational; a blocked one wakes the overseer
 // with one summary line and project counts.
 func TestOverseerWakeSummarisesTasks(t *testing.T) {

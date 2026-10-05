@@ -26,7 +26,8 @@ const (
 // overseer acts on it (a blocked or failed worker task, an unanswered worker
 // question, finished work not yet published or corrected behind its open pull
 // request, a pull request factoryd escalated while it stays open at the
-// escalated head); a succeeded worker task needs one look. It is due when no
+// escalated head); a succeeded worker task, and a Change factoryd could not
+// publish (it has no pull request), need one look. It is due when no
 // carrier was enqueued since that version, or, while it persists, when at most
 // three were and the latest is OverseerRewakeAfter old: one wake and three
 // re-wakes per item version, once the newest due item is overseerWakeSettle
@@ -50,7 +51,10 @@ item AS (
 	  AND p.identity = CAST(json_extract(e.document, '$.request.PullNumber') AS TEXT)
 	WHERE e.project_id = ?1 AND e.kind = 'reviewer' AND COALESCE(json_extract(e.document, '$.escalation'), '') <> ''
 	  AND COALESCE(json_extract(e.document, '$.route_pending'), 0) = 0 AND json_extract(p.document, '$.state') = 'open'
-	  AND lower(json_extract(p.document, '$.head')) = lower(json_extract(e.document, '$.request.Head')))
+	  AND lower(json_extract(p.document, '$.head')) = lower(json_extract(e.document, '$.request.Head'))
+	UNION ALL SELECT NULL, observed_at_ms, 0, json_extract(document, '$.escalation') FROM production_records
+	WHERE project_id = ?1 AND kind = 'reviewer' AND json_extract(document, '$.state') = 'publish_failed'
+	  AND COALESCE(json_extract(document, '$.escalation'), '') <> '')
 SELECT id IS NULL, CASE WHEN id IS NULL THEN detail ELSE (` + overseerWakeLine + `) END, (` + overseerWakeCounts + `)
 FROM (SELECT *, MIN(version) OVER () AS oldest, MAX(version) OVER () AS newest FROM item
 	WHERE version > COALESCE((SELECT at FROM carrier ORDER BY at DESC LIMIT 1 OFFSET 3), -1)
