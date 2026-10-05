@@ -42,9 +42,9 @@ not mean managing another set of disconnected sessions.
 
 ## Quick start
 
-Start with macOS, Git, Python 3.9 or newer, an existing committed checkout, and
+Start with macOS, Git, an existing committed checkout, and
 a signed-in Codex CLI. [Install the latest release](docs/install.md#install-a-release),
-putting its commands on `PATH`. Homebrew supplies Python. Then run:
+putting its commands on `PATH`. Then run:
 
 ```sh
 factoryctl init --home "$HOME/.dark-factory"

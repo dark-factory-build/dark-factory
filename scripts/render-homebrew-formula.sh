@@ -101,7 +101,6 @@ ${version_stanza}  sha256 "$manifest_sha"
   license "MIT"
 
   depends_on :macos
-  depends_on "python"
 
   resource "binaries" do
     on_arm do
@@ -131,8 +130,7 @@ ${version_stanza}  sha256 "$manifest_sha"
       There is no in-runtime updater or rollback-version store.
 
       \`brew uninstall dark-factory\` removes commands. Stop or unload any daemon
-      first; retained factory
-      data is untouched.
+      first; retained factory data is untouched.
     EOS
   end
 
