@@ -11,6 +11,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/dark-factory-build/dark-factory/internal/browser"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
@@ -862,7 +863,11 @@ func (attempt *liveAttempt) scanUsageLimit(start, end uint64, payload []byte) {
 		attempt.usageLimit, attempt.usageScan = kernel.ProviderCapacityRunDetail, nil
 		return
 	}
-	attempt.usageScan = append(attempt.usageScan[:0], attempt.usageScan[max(0, len(attempt.usageScan)-usageScanCarry):]...)
+	cut := max(0, len(attempt.usageScan)-usageScanCarry)
+	for cut < len(attempt.usageScan) && !utf8.RuneStart(attempt.usageScan[cut]) {
+		cut++ // a stray continuation byte reads as a C1 control that can swallow text
+	}
+	attempt.usageScan = append(attempt.usageScan[:0], attempt.usageScan[cut:]...)
 }
 
 func (attempt *liveAttempt) routeAttached(frame runner.TerminalFrame) error {
