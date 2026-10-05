@@ -685,3 +685,21 @@ func TestStuckEnqueueEscalatesOnceAndKeepsResuming(t *testing.T) {
 		t.Fatalf("stuck write re-escalated or stopped resuming: %+v (observes %d)", op, backend.observeFailures-1)
 	}
 }
+
+// A pull request no factory task published (a host or human author's) keeps
+// its REQUEST_CHANGES on GitHub: it is neither sent back nor escalated.
+func TestRequestChangesOnAPullNoTaskPublishedIsNotEscalated(t *testing.T) {
+	fixture, project, _, settle := publishedTask(t)
+	settle()
+	customerMode(t, fixture)
+	ctx := context.Background()
+	fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return &publicReviewBackend{requestChanges: true} }
+	request := publishedReviewRequest()
+	request.PullNumber = 99
+	if _, err := reviewNow(ctx, fixture.daemon, project, request); err != nil {
+		t.Fatal(err)
+	}
+	if op := lastDurableReview(t, fixture.store, project); op.State != "completed" || op.RoutePending || op.Escalation != "" {
+		t.Fatalf("host pull operation = %+v", op)
+	}
+}
