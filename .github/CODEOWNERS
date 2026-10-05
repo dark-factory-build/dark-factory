@@ -3,5 +3,5 @@
 /.github/workflows/                  @baziyer
 /.github/CODEOWNERS                  @baziyer
 /scripts/github-repo-settings.sh     @baziyer
-/scripts/verify-adversarial-review.sh @baziyer
+/internal/review/gate/               @baziyer
 /docs/development/WORKFLOW.md        @baziyer

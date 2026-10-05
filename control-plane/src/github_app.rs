@@ -7303,7 +7303,7 @@ mod tests {
         assert_eq!(blocked.verdict, "block");
 
         // A metadata-only correction names the exact prior App BLOCK
-        // operation; `verify-adversarial-review.sh` reads that wire format.
+        // operation; `internal/review/gate` reads that wire format.
         let correction = SubmitPullRequestReview {
             repository: block.repository.clone(),
             operation_id: "4c8a5c44-7f1f-11f0-952e-acde48001122".into(),

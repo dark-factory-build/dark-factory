@@ -12,7 +12,8 @@ import (
 	"time"
 )
 
-var shaRE = regexp.MustCompile(`^[0-9a-f]{40}$`)
+// HeadRE matches one exact commit sha; the merge-queue gate reuses it.
+var HeadRE = regexp.MustCompile(`^[0-9a-f]{40}$`)
 
 // ErrRejected is the Maintainer answering conflict or refused: resending the
 // same operation cannot succeed.
@@ -358,7 +359,7 @@ func (c Coordinator) failPreSubmit(ctx context.Context, op Operation, cause erro
 }
 
 func validate(r Request) error {
-	if !strings.Contains(r.Repository, "/") || r.PullNumber == 0 || !shaRE.MatchString(r.Head) || !shaRE.MatchString(r.Base) || r.BaseRef == "" || len(r.BaseRef) > 240 || strings.ContainsAny(r.BaseRef, "\x00\r\n") || r.Body == "" || (r.Provider != "codex" && r.Provider != "claude") {
+	if !strings.Contains(r.Repository, "/") || r.PullNumber == 0 || !HeadRE.MatchString(r.Head) || !HeadRE.MatchString(r.Base) || r.BaseRef == "" || len(r.BaseRef) > 240 || strings.ContainsAny(r.BaseRef, "\x00\r\n") || r.Body == "" || (r.Provider != "codex" && r.Provider != "claude") {
 		return errors.New("review: invalid exact-head request")
 	}
 	return nil
