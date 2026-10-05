@@ -109,7 +109,7 @@ func TestSchedulerPollsDueIntakeSourceWithoutAController(t *testing.T) {
 		t.Fatal(err)
 	}
 	tasks := fixture.tasks(t)
-	if len(tasks) != 1 || tasks[0].Status != kernel.TaskQueued || tasks[0].Body != "Do the polled work" {
+	if len(tasks) != 1 || tasks[0].Status != kernel.TaskQueued || tasks[0].Body != "Do the polled work\n\nSource: https://github.com/team/issues/issues/7\nFACTORY_SOURCE team/issues#7" {
 		t.Fatalf("imported tasks = %+v", tasks)
 	}
 	result := fixture.daemon.Intake(context.Background(), api.IntakeInput{Action: "list"})

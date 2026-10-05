@@ -507,7 +507,10 @@ type PublishableChange struct {
 // task, and a GitHub source issue in the destination repository itself. A
 // Linear or cross-repository source (whose private title must never reach a
 // public commit) and work split over several tasks are the overseer's.
-const factorydPublishesAcceptance = `(SELECT count(*) FROM intake_task_bindings s WHERE s.acceptance_id = a.id AND s.task_id <> a.task_id) = 1
+// An imported task its overseer owned (before intake went straight to
+// workers) is not a worker task.
+const factorydPublishesAcceptance = `(SELECT count(*) FROM intake_task_bindings s JOIN tasks st ON st.id = s.task_id LEFT JOIN agents sa ON sa.id = st.assigned_agent_id
+	WHERE s.acceptance_id = a.id AND sa.role IS NOT 'orchestrator') = 1
 	AND EXISTS (SELECT 1 FROM repository_source_identities i WHERE i.repository_id = a.repository_id AND i.github_repository_id = a.github_repository_id)`
 
 // PublishFailureID names the one reviewer record of factoryd failing to

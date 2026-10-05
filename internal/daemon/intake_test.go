@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -104,7 +105,7 @@ func TestIntakeAcceptedContentSurvivesLargeBacklogAndMetadataChanges(t *testing.
 				t.Fatalf("withdraw: %+v", got)
 			}
 			task, found, err := fixture.store.Task(ctx, accepted.TaskID)
-			if err != nil || !found || task.Status != kernel.TaskCancelled || task.Body != "Exact instructions" {
+			if err != nil || !found || task.Status != kernel.TaskCancelled || !strings.HasPrefix(task.Body, "Exact instructions\n\nSource: ") {
 				t.Fatal("withdraw did not preserve and cancel queued work")
 			}
 			issue.Body = "Exact instructions"

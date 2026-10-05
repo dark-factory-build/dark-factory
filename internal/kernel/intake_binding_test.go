@@ -28,9 +28,13 @@ func runningIntakeOverseer(t *testing.T) (*Store, Run, IntakeSource, IntakeAccep
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.ImportIntakeAcceptance(ctx, accepted.ID, mustTime(t, 7)); err != nil {
-		t.Fatal(err)
+	task, err := store.ImportIntakeAcceptance(ctx, accepted.ID, mustTime(t, 7))
+	if err != nil || !task.AssignedAgentID.zero() {
+		t.Fatalf("import left for a worker: %+v %v", task, err)
 	}
+	// Overseer-owned intake tasks imported before workers took them directly
+	// still delegate until they drain.
+	corruptSQL(t, store, `UPDATE tasks SET assigned_agent_id = ? WHERE id = ?`, agent.ID.Bytes(), task.ID.Bytes())
 	keys := admissionKeys(t, 152, nil)
 	result, err := store.AdmitNext(ctx, keys, mustTime(t, 10))
 	if err != nil || !result.Admitted() {
@@ -43,6 +47,40 @@ func runningIntakeOverseer(t *testing.T) (*Store, Run, IntakeSource, IntakeAccep
 		t.Fatal(err)
 	}
 	return store, run, source, accepted
+}
+
+func TestIntakeImportNeitherWakesNorAssignsTheOverseer(t *testing.T) {
+	ctx := context.Background()
+	store, _, project, overseer := newAdmissionStore(t, RoleOrchestrator, 4)
+	defer store.Close()
+	policy, after, instruction := IdleStandingInstruction, uint32(1), "Handle exceptions."
+	if _, err := store.UpdateAgent(ctx, overseer.ID, overseer.Revision, AgentPatch{IdlePolicy: &policy, IdleAfterSeconds: &after, IdleInstruction: &instruction}, mustTime(t, 3)); err != nil {
+		t.Fatal(err)
+	}
+	sourceID, err := IntakeSourceIDFromBytes(bytes.Repeat([]byte{224}, IDBytes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, err := store.CreateIntakeSource(ctx, NewIntakeSource{ID: sourceID, GitHubRepositoryID: 42, GitHubRepositoryName: "owner/source", ProjectID: project.ID, TargetRepositoryID: RepositoryID(project.ID), OverseerAgentID: overseer.ID, Policy: IntakePolicyManual, PollSeconds: 60, AdmissionLimit: 25}, mustTime(t, 4))
+	if err == nil {
+		source, err = store.SetIntakeSourceEnabled(ctx, source.ID, source.Revision, true, mustTime(t, 5))
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	accepted, err := store.AcceptIntakeSnapshot(ctx, source.ID, intakeSnapshotForTest(), mustTime(t, 6))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ImportIntakeAcceptance(ctx, accepted.ID, mustTime(t, 7)); err != nil {
+		t.Fatal(err)
+	}
+	if woken, err := store.EnqueueOverseerWakeups(ctx, mustTime(t, 1_000_000)); err != nil || len(woken) != 0 {
+		t.Fatalf("fresh import woke the overseer: %+v %v", woken, err)
+	}
+	if result, err := store.AdmitNext(ctx, admissionKeys(t, 225, nil), mustTime(t, 8)); err != nil || result.Admitted() {
+		t.Fatalf("overseer admitted to intake work: %+v %v", result, err)
+	}
 }
 
 func TestIntakeDescendantsRetainSourceAndDestinationAndCannotAdoptForeignReplay(t *testing.T) {

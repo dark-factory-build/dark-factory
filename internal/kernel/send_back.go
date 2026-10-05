@@ -64,25 +64,33 @@ func (store *Store) SendBackPublishedReview(ctx context.Context, project Project
 	return updated, nil
 }
 
-// ChangeBranchClosedToOverseer reports whether branch names a factory Change
-// an overseer may not publish: one whose task is queued or running, as after
-// a send-back (the head it held is superseded until the task settles again),
-// or intake work at work revision 1 that factoryd publishes
-// (factorydPublishesAcceptance) and no pull request carries yet.
-func (store *Store) ChangeBranchClosedToOverseer(ctx context.Context, project ProjectID, branch string) (bool, error) {
+// ChangeBranchClosedToOverseer reports the task of the factory Change branch
+// names, if any, and whether an overseer may not publish it: its task is
+// queued or running, as after a send-back (the head it held is superseded
+// until the task settles again), or it is intake work at work revision 1 that
+// factoryd publishes (factorydPublishesAcceptance) and no pull request carries
+// yet. A branch prefix naming more than one Change is closed.
+func (store *Store) ChangeBranchClosedToOverseer(ctx context.Context, project ProjectID, branch string) (TaskID, bool, error) {
 	tx, err := store.beginRead(ctx)
 	if err != nil {
-		return false, err
+		return TaskID{}, false, err
 	}
 	defer tx.Close()
-	var closed bool
-	err = tx.connection.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM changes AS c JOIN tasks AS t ON t.id = c.task_id
-		WHERE c.project_id = ? AND substr(lower(hex(c.id)), 1, 12) = ? AND (t.status IN ('queued', 'running')
+	var count int
+	var closed sql.NullBool
+	var task []byte
+	err = tx.connection.QueryRowContext(ctx, `SELECT COUNT(*), MAX(t.status IN ('queued', 'running')
 		  OR t.work_revision = 1 AND EXISTS (SELECT 1 FROM intake_task_bindings b JOIN intake_acceptances a ON a.id = b.acceptance_id
 		     WHERE b.task_id = c.task_id AND `+factorydPublishesAcceptance+`)
-		     AND NOT EXISTS (SELECT 1 FROM publication_tasks p WHERE p.change_id = c.id OR p.task_id = c.task_id)))`,
-		project.Bytes(), strings.ToLower(strings.TrimPrefix(branch, "factory/"))).Scan(&closed)
-	return closed, err
+		     AND NOT EXISTS (SELECT 1 FROM publication_tasks p WHERE p.change_id = c.id OR p.task_id = c.task_id)), MIN(c.task_id)
+		FROM changes AS c JOIN tasks AS t ON t.id = c.task_id
+		WHERE c.project_id = ? AND substr(lower(hex(c.id)), 1, 12) = ?`,
+		project.Bytes(), strings.ToLower(strings.TrimPrefix(branch, "factory/"))).Scan(&count, &closed, &task)
+	if err != nil || count != 1 {
+		return TaskID{}, count > 1, err
+	}
+	id, err := TaskIDFromBytes(task)
+	return id, closed.Bool, err
 }
 
 // MaxSendBackNoteBytes bounds the note a send-back leaves at the end of a
