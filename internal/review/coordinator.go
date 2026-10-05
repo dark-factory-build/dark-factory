@@ -73,6 +73,8 @@ type Store interface {
 }
 
 type Backend interface {
+	// StoredPull reads the pull request as GitHub stores it, for the exact head.
+	StoredPull(context.Context, uint64, string) (Request, error)
 	CloneReadOnly(context.Context, Request) (string, func(), error)
 	Review(context.Context, string, Request) (Verdict, error)
 	Submit(context.Context, Operation, Verdict) error

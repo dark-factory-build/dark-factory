@@ -45,7 +45,7 @@ const (
 	pairListenPatience = 10 * time.Second
 
 	usage = `usage:
-	factoryctl review --project ID --repository OWNER/REPO --pull N --head SHA --base SHA --base-ref REF --body TEXT [--provider codex|claude] | --retry-operation UUID
+	factoryctl review --project ID --repository OWNER/REPO --pull N --head SHA --base SHA --base-ref REF [--provider codex|claude] | --retry-operation UUID
   factoryctl github connect [--open] | confirm CODE | status | refresh | disconnect
   factoryctl github installations [--page N]
   factoryctl github repositories --installation ID [--page N]

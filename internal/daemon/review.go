@@ -46,7 +46,7 @@ func (daemon *Daemon) claimReview(ctx context.Context, project kernel.ProjectID,
 		if err := json.Unmarshal(document, &failed); err != nil || failed.State != "failed" || !failed.Retryable {
 			return review.Operation{}, errors.New("review: operation is not failed")
 		}
-		request = api.ReviewRequest{Repository: failed.Request.Repository, PullNumber: failed.Request.PullNumber, Head: failed.Request.Head, Base: failed.Request.Base, BaseRef: failed.Request.BaseRef, Body: failed.Request.Body, Provider: failed.Request.Provider}
+		request = api.ReviewRequest{Repository: failed.Request.Repository, PullNumber: failed.Request.PullNumber, Head: failed.Request.Head, Base: failed.Request.Base, BaseRef: failed.Request.BaseRef, Provider: failed.Request.Provider}
 	}
 	repository := strings.ToLower(request.Repository)
 	coordinator, err := daemon.reviewCoordinator(ctx, project, repository)
@@ -56,7 +56,11 @@ func (daemon *Daemon) claimReview(ctx context.Context, project kernel.ProjectID,
 	if failed.ID != "" {
 		return coordinator.ReserveRetry(ctx, failed)
 	}
-	op, err := review.Prepare(review.Request{Repository: repository, PullNumber: request.PullNumber, Head: request.Head, Base: request.Base, BaseRef: request.BaseRef, Body: request.Body, Provider: request.Provider}, daemon.now)
+	stored, err := coordinator.Backend.StoredPull(ctx, request.PullNumber, request.Head)
+	if err != nil {
+		return review.Operation{}, err
+	}
+	op, err := review.Prepare(review.Request{Repository: repository, PullNumber: request.PullNumber, Head: request.Head, Base: request.Base, BaseRef: request.BaseRef, Body: stored.Body, Provider: request.Provider}, daemon.now)
 	if err != nil {
 		return review.Operation{}, err
 	}
@@ -322,22 +326,28 @@ func (daemon *Daemon) preparePublishedReview(ctx context.Context, project kernel
 	if err != nil {
 		return review.Operation{}, err
 	}
-	return review.Prepare(review.Request{Repository: request.Repository, PullNumber: request.PullNumber, Head: request.Head, Base: request.Base, BaseRef: request.BaseRef, Body: request.Body, Provider: request.Provider}, daemon.now)
+	return review.Prepare(request, daemon.now)
 }
 
-func (daemon *Daemon) publishedReviewRequest(ctx context.Context, project kernel.ProjectID, repository string, pull uint64, publishedHead string) (api.ReviewRequest, error) {
+func (daemon *Daemon) publishedReviewRequest(ctx context.Context, project kernel.ProjectID, repository string, pull uint64, publishedHead string) (review.Request, error) {
 	targets, _, _, err := daemon.projectMaintainerRepositories(ctx, project)
 	if err != nil {
-		return api.ReviewRequest{}, err
+		return review.Request{}, err
 	}
 	repository = strings.ToLower(repository)
 	repositoryID := targets[repository]
 	if repositoryID == 0 || daemon.github == nil {
-		return api.ReviewRequest{}, errors.New("review: published repository unavailable")
+		return review.Request{}, errors.New("review: published repository unavailable")
 	}
-	response, err := (&daemonReviewBackend{daemon: daemon, repository: repository, repositoryID: repositoryID}).callResponse(ctx, "list_pull_requests", map[string]any{"repository": repository, "page": 1, "per_page": 1, "pull_number": pull})
+	return (&daemonReviewBackend{daemon: daemon, repository: repository, repositoryID: repositoryID}).StoredPull(ctx, pull, publishedHead)
+}
+
+// StoredPull reads the pull request as GitHub stores it; enqueue binds the
+// reviewed body's digest to that stored body.
+func (b *daemonReviewBackend) StoredPull(ctx context.Context, pull uint64, head string) (review.Request, error) {
+	response, err := b.callResponse(ctx, "list_pull_requests", map[string]any{"repository": b.repository, "page": 1, "per_page": 1, "pull_number": pull})
 	if err != nil {
-		return api.ReviewRequest{}, err
+		return review.Request{}, err
 	}
 	var value struct {
 		PullRequests []struct {
@@ -349,13 +359,13 @@ func (daemon *Daemon) publishedReviewRequest(ctx context.Context, project kernel
 		} `json:"pull_requests"`
 	}
 	if err := json.Unmarshal(response, &value); err != nil || len(value.PullRequests) != 1 {
-		return api.ReviewRequest{}, errors.New("review: published pull not found")
+		return review.Request{}, errors.New("review: published pull not found")
 	}
 	pullValue := value.PullRequests[0]
-	if pullValue.Number != pull || !strings.EqualFold(pullValue.HeadSHA, publishedHead) {
-		return api.ReviewRequest{}, errors.New("review: publication head changed before review")
+	if pullValue.Number != pull || !strings.EqualFold(pullValue.HeadSHA, head) {
+		return review.Request{}, errors.New("review: pull head changed before review")
 	}
-	return api.ReviewRequest{Repository: repository, PullNumber: pull, Head: strings.ToLower(pullValue.HeadSHA), Base: strings.ToLower(pullValue.BaseSHA), BaseRef: pullValue.BaseRef, Body: pullValue.Body, Provider: "codex"}, nil
+	return review.Request{Repository: b.repository, PullNumber: pull, Head: strings.ToLower(pullValue.HeadSHA), Base: strings.ToLower(pullValue.BaseSHA), BaseRef: pullValue.BaseRef, Body: pullValue.Body, Provider: "codex"}, nil
 }
 
 type durableReviewStore struct {
