@@ -374,6 +374,11 @@ func (store *Store) ProposeAttemptOutcome(ctx context.Context, digest AttemptDig
 // the next work revision, unless the previous run ended the same way.
 const NeverStartedRunDetail = "stalled: no terminal output or attempt call in 10m since launch"
 
+// ProviderCapacityRunDetail is the provider-exit failure of a run whose
+// provider reported its model at capacity: transient, so it is retried as a
+// never-started run is.
+const ProviderCapacityRunDetail = "provider reported its selected model at capacity"
+
 // FailRun records a daemon-owned infrastructure failure before or during a
 // running attempt. It never acts as attempt authority and never overwrites an
 // outcome that reached finalizing first.
@@ -724,12 +729,12 @@ func (store *Store) finalizeRun(ctx context.Context, runID RunID, expected Revis
 		taskStatus, blocked = TaskBlocked.String(), terminal.detail
 	case OutcomeFailed:
 		taskStatus, completed = TaskFailed.String(), at.Int64()
-		if terminal.code == FailureProtocol && terminal.detail == NeverStartedRunDetail {
-			// A run that never produced output never started: queue its task
-			// again once, unless the previous run never started either.
+		if terminal.code == FailureProtocol && terminal.detail == NeverStartedRunDetail || terminal.code == FailureProviderExit && terminal.detail == ProviderCapacityRunDetail {
+			// A run that never started, or met a transient provider condition:
+			// queue its task again once, unless the previous run ended the same way.
 			var again bool
-			if err := tx.connection.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM runs WHERE task_id = ? AND task_incarnation_id = ? AND admitted_task_work_revision = ? AND terminal_code = 'protocol' AND terminal_detail = ?)`,
-				task.ID.Bytes(), run.TaskIncarnationID.Bytes(), run.AdmittedTaskWorkRevision.Int64()-1, NeverStartedRunDetail).Scan(&again); err != nil {
+			if err := tx.connection.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM runs WHERE task_id = ? AND task_incarnation_id = ? AND admitted_task_work_revision = ? AND terminal_code = ? AND terminal_detail = ?)`,
+				task.ID.Bytes(), run.TaskIncarnationID.Bytes(), run.AdmittedTaskWorkRevision.Int64()-1, terminal.code.String(), terminal.detail).Scan(&again); err != nil {
 				return Run{}, tx.Rollback(err)
 			}
 			if !again {

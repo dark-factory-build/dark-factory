@@ -753,7 +753,9 @@ func (attempt *liveAttempt) routeFrame(frame runner.TerminalFrame) error {
 			return runner.ErrState
 		}
 		attempt.readySeen = true
-		return nil
+		// Credit from the start, viewer or not: the provider-report scan and
+		// output liveness read this stream.
+		return attempt.addCredit(liveAttemptCredit)
 	case runner.TerminalAttached:
 		return attempt.routeAttached(frame)
 	case runner.TerminalOutput:
@@ -820,6 +822,11 @@ func (attempt *liveAttempt) routeFrame(frame runner.TerminalFrame) error {
 // provider event instead if Codex ever reports this outside its screen.
 var codexUsageLimit = []byte("■ You've hit your usage limit")
 
+// codexModelCapacity is Codex's warning cell for a model at capacity, after
+// which it idles the same way. It is transient, so its task is queued again
+// (kernel.ProviderCapacityRunDetail).
+var codexModelCapacity = []byte("⚠ Selected model is at capacity")
+
 // scanUsageLimit reads each output byte once by its stream offset, whether it
 // arrives live or in an adopted owner's retained replay: the report may exist
 // only in that replay when Codex hit the limit before a handover.
@@ -844,7 +851,11 @@ func (attempt *liveAttempt) scanUsageLimit(start, end uint64, payload []byte) {
 		attempt.usageScan = nil
 		return
 	}
-	attempt.usageScan = append(attempt.usageScan[:0], attempt.usageScan[max(0, len(attempt.usageScan)-len(codexUsageLimit)+1):]...)
+	if bytes.Contains(attempt.usageScan, codexModelCapacity) {
+		attempt.usageLimit, attempt.usageScan = kernel.ProviderCapacityRunDetail, nil
+		return
+	}
+	attempt.usageScan = append(attempt.usageScan[:0], attempt.usageScan[max(0, len(attempt.usageScan)-len(codexModelCapacity)+1):]...) // the longer marker
 }
 
 func (attempt *liveAttempt) routeAttached(frame runner.TerminalFrame) error {

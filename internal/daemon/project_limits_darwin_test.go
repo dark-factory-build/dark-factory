@@ -5,6 +5,7 @@ package daemon
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -160,4 +161,36 @@ func stallNextRun(t *testing.T, fixture *supervisorFixture, output bool) kernel.
 		t.Fatalf("stalled run = %+v, err=%v", result.run, result.err)
 	}
 	return result.run
+}
+
+// Codex at model capacity idles at its prompt: the report ends the attempt at
+// once, and the task is queued again once, failing on a second in a row.
+// Quoted text without Codex's warning marker is not the report.
+func TestCodexModelCapacityRequeuesOnce(t *testing.T) {
+	var quoted liveAttempt
+	quoted.scanUsageLimit(0, 40, []byte("Selected model is at capacity. Please try"))
+	if quoted.usageLimit != "" {
+		t.Fatalf("quoted capacity matched: %q", quoted.usageLimit)
+	}
+	fixture := newSupervisorFixture(t, "unused shell task")
+	if err := replaceSupervisorAgentLaunchControls(fixture.storePath, fixture.agentID, kernel.ProviderCodex, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	execSupervisorSQL(t, fixture.storePath, `UPDATE tasks SET body = ? WHERE id = ?`, "capacity", fixture.taskID.Bytes())
+	tools := filepath.Join(fixture.root, "tools")
+	if err := os.Mkdir(tools, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	copySupervisorExecutable(t, supervisorTestExecutable(t), filepath.Join(tools, "codex"))
+	fixture.spec.ToolPath = tools + ":" + fixture.spec.ToolPath
+	for _, want := range []kernel.TaskStatus{kernel.TaskQueued, kernel.TaskFailed} {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		run, err := fixture.daemon.RunNext(ctx, fixture.spec)
+		cancel()
+		if err != nil || run.Proposal == nil || run.Proposal.Code() != kernel.FailureProviderExit || run.Proposal.Detail() != kernel.ProviderCapacityRunDetail {
+			t.Fatalf("capacity run = %v, err=%v", run.Proposal, err)
+		}
+		fixture.assertReleased(t, run)
+		assertTaskStatus(t, fixture, want)
+	}
 }
