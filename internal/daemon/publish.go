@@ -72,15 +72,29 @@ func (daemon *Daemon) publishSettledChange(ctx context.Context, c kernel.Publish
 		}
 		return backend.callAs(ctx, method, repositories, name, arguments)
 	}
-	checkout := func(ctx context.Context, main string) (string, func(), error) {
-		path, cleanup, err := backend.CloneReadOnly(ctx, review.Request{Repository: repo, Head: main, Base: c.Base, BaseRef: "main"})
-		return filepath.Join(path, ".git"), cleanup, err
-	}
+	checkout := daemon.publicationCheckout(c.Accepted.RepositoryID, c.Base)
 	source, err := daemon.settledChangeGitDirectory(ctx, c)
 	if err != nil {
 		return daemon.publishFailed(ctx, c, repo, err)
 	}
 	return daemon.publishChange(ctx, c, repo, source, call, checkout)
+}
+
+// publicationCheckout clones the acceptance's repository even after it is
+// disabled for new work: accepted work keeps its destination.
+func (daemon *Daemon) publicationCheckout(id kernel.RepositoryID, base string) publishCheckout {
+	return func(ctx context.Context, main string) (string, func(), error) {
+		repository, found, err := daemon.store.ProjectRepository(ctx, id)
+		source, verified, sourceErr := daemon.store.RepositorySourceIdentity(ctx, id)
+		if err = errors.Join(err, sourceErr); err == nil && (!found || !verified) {
+			err = errors.New("its repository has no verified checkout")
+		}
+		if err != nil {
+			return "", nil, err
+		}
+		path, cleanup, err := cloneRepository(ctx, repository, source, review.Request{Head: main, Base: base, BaseRef: "main"})
+		return filepath.Join(path, ".git"), cleanup, err
+	}
 }
 
 // settledChangeGitDirectory is the verified private Git directory holding the

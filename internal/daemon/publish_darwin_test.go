@@ -224,3 +224,53 @@ func TestPublicationRedactsEmailsAndUUID5MatchesTheRunbook(t *testing.T) {
 		t.Fatalf("uuid5 = %s", got)
 	}
 }
+
+// Accepted work keeps its destination: a repository disabled for new work
+// after acceptance is still checked out for its publication.
+func TestPublicationChecksOutADisabledAcceptedRepository(t *testing.T) {
+	ctx := context.Background()
+	git := change.TrustedGitExecutable
+	seed := contentRepositoryFixture(t)
+	supervisorGit(t, git, "-C", seed, "branch", "-M", "main")
+	base := strings.TrimSpace(supervisorGitOutput(t, git, "-C", seed, "rev-parse", "HEAD"))
+	parent, err := os.MkdirTemp("/private/tmp", "dark-factory-publish-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(parent) })
+	bare := filepath.Join(parent, "remote.git")
+	supervisorGit(t, git, "clone", "-q", "--bare", seed, bare)
+	var roots []string
+	for _, name := range []string{"default", "accepted"} {
+		root := filepath.Join(parent, name)
+		supervisorGit(t, git, "clone", "-q", bare, root)
+		supervisorGit(t, git, "-C", root, "config", "protocol.file.allow", "always")
+		roots = append(roots, root)
+	}
+	fixture, project := readinessProject(t, roots[0], "refs/remotes/origin/main")
+	id, err := kernel.RepositoryIDFromBytes(mustIDBytes(t, testID(230)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.store.AddProjectRepository(ctx, kernel.NewProjectRepository{ID: id, ProjectID: kernel.ProjectID(project), Name: "accepted", Root: roots[1], BaseRef: "refs/remotes/origin/main"}, mustKernelTime(t, 300)); err != nil {
+		t.Fatal(err)
+	}
+	if view, err := fixture.daemon.RepositoryReadiness(ctx, id, true); err != nil || view.FetchState != "ready" {
+		t.Fatalf("readiness: %+v %v", view, err)
+	}
+	repository, _, err := fixture.store.ProjectRepository(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.store.SetProjectRepositoryEnabled(ctx, id, repository.Revision, false, mustKernelTime(t, 301)); err != nil {
+		t.Fatal(err)
+	}
+	gitDir, cleanup, err := fixture.daemon.publicationCheckout(id, base)(ctx, base)
+	if err != nil {
+		t.Fatalf("checkout of the disabled accepted repository: %v", err)
+	}
+	defer cleanup()
+	if got := strings.TrimSpace(supervisorGitOutput(t, git, "--git-dir", gitDir, "rev-parse", "HEAD")); got != base {
+		t.Fatalf("checkout at %s, want %s", got, base)
+	}
+}

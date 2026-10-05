@@ -461,15 +461,21 @@ with the replacement; this metadata write has no atomic expected-head
 condition. If that head differs from `HEAD_SHA`, rebuild the cumulative body
 from the returned head under its own `body-HEAD8` operation.
 
-A first publication of accepted intake work is factoryd's (section 3), so
-only work without a source issue reaches the steps below.
-`create_pull_request` needs an issue. `create_issue` with `opid "$change_id" issue`, the
+Intake work split over several worker tasks is yours to publish (section 3):
+reuse its accepted source, never create an issue. For a GitHub source pass
+`issue_number` and `source_repository` (fully qualified) from the accepted
+snapshot, with `close_on_merge = true` only on the pull request that completes
+the issue (`Closes #N`; `false` renders `Refs #N`). For a Linear source pass
+`external_source_url` with `issue_number = 0` and `close_on_merge = false`.
+Skip `create_issue` for both.
+
+Work without a source issue needs one: `create_pull_request` needs an issue. `create_issue` with `opid "$change_id" issue`, the
 task title (cut to 256 characters, the App's bound), and a body of the task
 text plus the change id; it returns the issue number. Then read
 `observe_ref` for `main` again, immediately before the call, and use that
 answer: `create_pull_request` with `opid "$change_id" pr`, `issue_number` from that
 result, `head = branch`, `head_sha` = the last published commit, `base =
-main`, `close_on_merge = true`, `base_sha` = main's head as just read (the App verifies the base
+main`, `close_on_merge` as above (`true` for a new issue), `base_sha` = main's head as just read (the App verifies the base
 branch is at that commit at that moment; `base_commit` is wrong whenever
 main moved, and a stale read is wrong whenever main moves between the read
 and the call), `draft = false`, the same title, and a body in this
