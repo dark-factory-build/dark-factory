@@ -3,7 +3,6 @@ package api
 import (
 	"encoding/json"
 	"errors"
-	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -11,8 +10,7 @@ import (
 )
 
 const (
-	maxFrameBytes          = 1 << 20
-	MaxRecoveryResultBytes = 65536
+	maxFrameBytes = 1 << 20
 	// Four metadata rows fit the frame even when every text byte is JSON-escaped.
 	MaxContentPageItems = 4
 	maxSnapshotEntries  = 4096
@@ -677,11 +675,6 @@ type TaskSummary struct {
 	Revision        uint64 `json:"revision"`
 }
 
-type TaskRecoveryInput struct {
-	TaskID        string `json:"task_id"`
-	IncarnationID string `json:"incarnation_id"`
-}
-
 type TaskReadInput struct {
 	TaskID           string `json:"task_id"`
 	ExpectedRevision uint64 `json:"expected_revision"`
@@ -696,176 +689,6 @@ type TaskText struct {
 	Feedback    string                  `json:"feedback"`
 	Outcome     *string                 `json:"outcome,omitempty"`
 	NextOffset  *uint64                 `json:"next_offset,omitempty"`
-}
-
-type TaskRecovery struct {
-	Result                string   `json:"result"`
-	ResultTruncated       bool     `json:"result_truncated"`
-	BlockedReason         string   `json:"blocked_reason"`
-	RunWorkRevision       uint64   `json:"run_work_revision,omitempty"`
-	RunOutcome            string   `json:"run_outcome,omitempty"`
-	RunDetail             string   `json:"run_detail,omitempty"`
-	State                 string   `json:"state"`
-	TaskID                string   `json:"task_id"`
-	IncarnationID         string   `json:"incarnation_id"`
-	ProjectID             string   `json:"project_id"`
-	AssignedAgentID       string   `json:"assigned_agent_id"`
-	WorkRevision          uint64   `json:"work_revision"`
-	Revision              uint64   `json:"revision"`
-	Status                string   `json:"status"`
-	NeedsOperatorRecovery bool     `json:"needs_operator_recovery"`
-	ChangeID              string   `json:"change_id,omitempty"`
-	ChangeRevision        uint64   `json:"change_revision,omitempty"`
-	ChangePhase           string   `json:"change_phase,omitempty"`
-	SourceFormat          string   `json:"source_format,omitempty"`
-	SourceBaseCommit      string   `json:"source_base_commit,omitempty"`
-	SourceRepositoryDev   int64    `json:"source_repository_dev,omitempty"`
-	SourceRepositoryInode int64    `json:"source_repository_inode,omitempty"`
-	RunID                 string   `json:"run_id,omitempty"`
-	RunRevision           uint64   `json:"run_revision,omitempty"`
-	ArtifactPaths         []string `json:"artifact_paths"`
-	// Disposition is the decision durable state records after the latest
-	// run; OverseerNotification (none, pending, scheduled) says whether the
-	// standing overseer's wake cursor has consumed this task's newest event,
-	// which is neither seen nor handled; OverseerTask* name what that
-	// overseer is running or next queued on; LastProgressAtMs is the newest
-	// transition among the task, its runs, their human requests, its peer
-	// questions and interventions against it.
-	Disposition          string `json:"disposition,omitempty"`
-	HumanRequestID       string `json:"human_request_id,omitempty"`
-	OverseerAgentID      string `json:"overseer_agent_id,omitempty"`
-	OverseerNotification string `json:"overseer_notification,omitempty"`
-	OverseerTaskID       string `json:"overseer_task_id,omitempty"`
-	OverseerTaskStatus   string `json:"overseer_task_status,omitempty"`
-	OverseerTaskTitle    string `json:"overseer_task_title,omitempty"`
-	LastProgressAtMs     int64  `json:"last_progress_at_ms,omitempty"`
-	// Evidence for deciding whether the returned run refused before acting:
-	// its provider exit ("code N", "signal N", "absent"), how long it ran,
-	// and the retained Change head it left.
-	RunProviderExit  string `json:"run_provider_exit,omitempty"`
-	RunRunningMs     int64  `json:"run_running_ms,omitempty"`
-	ChangeHeadCommit string `json:"change_head_commit,omitempty"`
-}
-
-func validTaskRecovery(value TaskRecovery) bool {
-	if !utf8.ValidString(value.Result) || len(value.Result) > MaxRecoveryResultBytes || !utf8.ValidString(value.BlockedReason) || len(value.BlockedReason) > 4096 || !utf8.ValidString(value.RunDetail) || len(value.RunDetail) > 4096 {
-		return false
-	}
-	if (value.Result != "" || value.ResultTruncated) && value.Status != "succeeded" || value.BlockedReason != "" && value.Status != "blocked" {
-		return false
-	}
-	if value.ResultTruncated && len(value.Result) < MaxRecoveryResultBytes-3 {
-		return false
-	}
-	if value.RunID == "" && (value.RunWorkRevision != 0 || value.RunOutcome != "" || value.RunDetail != "") || value.RunID != "" && (value.RunWorkRevision == 0 || value.RunWorkRevision > value.WorkRevision) {
-		return false
-	}
-	switch value.RunOutcome {
-	case "":
-		if value.RunDetail != "" {
-			return false
-		}
-	case "succeeded":
-		if value.RunDetail != "" {
-			return false
-		}
-	case "blocked", "cancelled":
-		if value.RunDetail == "" {
-			return false
-		}
-	case "failed":
-	default:
-		return false
-	}
-
-	if value.State == "missing" {
-		return value.TaskID == "" && value.IncarnationID == "" && value.ProjectID == "" && value.AssignedAgentID == "" && value.WorkRevision == 0 && value.Revision == 0 && value.Status == "" && !value.NeedsOperatorRecovery && value.ChangeID == "" && value.ChangeRevision == 0 && value.ChangePhase == "" && value.SourceFormat == "" && value.SourceBaseCommit == "" && value.SourceRepositoryDev == 0 && value.SourceRepositoryInode == 0 && value.RunID == "" && value.RunRevision == 0 && value.ArtifactPaths != nil && len(value.ArtifactPaths) == 0 &&
-			value.Disposition == "" && value.HumanRequestID == "" && value.OverseerAgentID == "" && value.OverseerNotification == "" && value.OverseerTaskID == "" && value.OverseerTaskStatus == "" && value.OverseerTaskTitle == "" && value.LastProgressAtMs == 0 &&
-			value.RunProviderExit == "" && value.RunRunningMs == 0 && value.ChangeHeadCommit == ""
-	}
-	if value.State != "found" || !validID(value.TaskID) || !validID(value.IncarnationID) || !validID(value.ProjectID) || !validOptionalID(value.AssignedAgentID) || value.WorkRevision == 0 || value.Revision == 0 || !validTaskStatus(value.Status) || value.ArtifactPaths == nil || len(value.ArtifactPaths) > kernel.MaxRecoveryResources {
-		return false
-	}
-	// Empty additive fields are an older daemon's answer, tolerated.
-	switch value.Disposition {
-	case "", "queued", "retry_queued", "running", "succeeded", "cancelled", "needs_operator_recovery", "needs_you", "none":
-	default:
-		return false
-	}
-	switch value.OverseerNotification {
-	case "", "none":
-		if value.OverseerAgentID != "" {
-			return false
-		}
-	case "pending", "scheduled":
-		if !validID(value.OverseerAgentID) {
-			return false
-		}
-	default:
-		return false
-	}
-	if !validOptionalID(value.HumanRequestID) || value.Disposition == "needs_you" != (value.HumanRequestID != "") {
-		return false
-	}
-	if value.OverseerTaskID == "" {
-		if value.OverseerTaskStatus != "" || value.OverseerTaskTitle != "" {
-			return false
-		}
-	} else if value.OverseerAgentID == "" || !validID(value.OverseerTaskID) || value.OverseerTaskStatus != "running" && value.OverseerTaskStatus != "queued" || !validText(value.OverseerTaskTitle, 1, 1024) {
-		return false
-	}
-	if value.LastProgressAtMs < 0 || value.RunRunningMs < 0 || value.RunID == "" && (value.RunProviderExit != "" || value.RunRunningMs != 0) {
-		return false
-	}
-	switch {
-	case value.RunProviderExit == "", value.RunProviderExit == "absent":
-	case strings.HasPrefix(value.RunProviderExit, "code "), strings.HasPrefix(value.RunProviderExit, "signal "):
-		if _, err := strconv.ParseInt(value.RunProviderExit[strings.IndexByte(value.RunProviderExit, ' ')+1:], 10, 64); err != nil {
-			return false
-		}
-	default:
-		return false
-	}
-	if value.ChangeHeadCommit != "" && (value.ChangeID == "" || !(value.SourceFormat == "sha1" && len(value.ChangeHeadCommit) == 40 || value.SourceFormat == "sha256" && len(value.ChangeHeadCommit) == 64)) {
-		return false
-	}
-	if value.RunID == "" && value.RunRevision != 0 || value.RunID != "" && (!validID(value.RunID) || value.RunRevision == 0) {
-		return false
-	}
-	if value.ChangeID == "" {
-		if value.ChangeRevision != 0 || value.ChangePhase != "" || value.SourceFormat != "" {
-			return false
-		}
-	} else {
-		if !validID(value.ChangeID) || value.ChangeRevision == 0 {
-			return false
-		}
-		switch value.ChangePhase {
-		case "reserved", "prepared", "available", "retained", "abandoned":
-		default:
-			return false
-		}
-	}
-	if value.SourceFormat == "" {
-		if value.SourceBaseCommit != "" || value.SourceRepositoryDev != 0 || value.SourceRepositoryInode != 0 {
-			return false
-		}
-	} else {
-		if !(value.SourceFormat == "sha1" && len(value.SourceBaseCommit) == 40 || value.SourceFormat == "sha256" && len(value.SourceBaseCommit) == 64) || value.SourceRepositoryDev < 0 || value.SourceRepositoryInode <= 0 {
-			return false
-		}
-		for _, ch := range value.SourceBaseCommit {
-			if !(ch >= '0' && ch <= '9' || ch >= 'a' && ch <= 'f') {
-				return false
-			}
-		}
-	}
-	for _, path := range value.ArtifactPaths {
-		if value.RunID == "" || !validCanonicalPath(path, 4096) {
-			return false
-		}
-	}
-	return true
 }
 
 // DashboardSnapshot deliberately contains only the bounded public Store

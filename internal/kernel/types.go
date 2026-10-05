@@ -7,13 +7,11 @@ import (
 )
 
 const (
-	IDBytes              = 16
-	DigestBytes          = 32
-	EventRetentionLimit  = 4096
-	SnapshotEntityLimit  = 4096
-	MaxFactoryCapacity   = 1024
-	MaxRecoveryRuns      = 64
-	MaxRecoveryResources = 16
+	IDBytes             = 16
+	DigestBytes         = 32
+	EventRetentionLimit = 4096
+	SnapshotEntityLimit = 4096
+	MaxFactoryCapacity  = 1024
 )
 
 type identifier struct {

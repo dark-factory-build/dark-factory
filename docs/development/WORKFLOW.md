@@ -172,8 +172,7 @@ standing-instruction policy and counters, and tool-budget counters. Read a
 revision-bound task with `factoryctl task read --task ID --revision REVISION
 [--offset N]`; follow `next_offset` to page instruction, feedback and outcome.
 `factoryctl agent paths --agent ID` returns sampled modified paths relative to
-the current Change, not a process working directory. Task recovery below names
-the exact Change and retained run artifacts.
+the current Change, not a process working directory.
 
 `factoryctl terminal observe --project ID --task ID --run ID` reads a bounded,
 redacted terminal window for a worker or overseer through operator authority,
@@ -183,25 +182,6 @@ or retry; retry may include reassignment but cannot be combined with text edits.
 `factoryctl agent pause|resume|archive|restore --agent ID --revision REVISION`
 uses the existing lifecycle guards; restoring an archived worker leaves it paused.
 These operator commands require the socket and token-file environment above.
-
-For one unresolved worker failure, `factoryctl task recovery --task ID
---incarnation ID` answers from durable state alone: `overseer_notification`
-is `pending` while the task's newest event is still ahead of the standing
-overseer's wake cursor and `scheduled` once that cursor has consumed it
-(scheduled into a wake, neither seen nor handled), `none` without a standing
-overseer or for an orchestrator's own task; `disposition` is what was
-actually recorded afterwards (`needs_you` with `human_request_id` when the
-task's own run has an unresolved question, `retry_queued`, `queued`,
-`running`, `succeeded`, `cancelled`, `needs_operator_recovery`, or `none`);
-`overseer_task_id`/`overseer_task_status`/`overseer_task_title` name what
-that overseer is running or next queued on, the dependency a pending wake
-waits behind; `last_progress_at_ms` is the newest transition among the task,
-its runs, their human requests, its peer questions and interventions against
-it; `run_provider_exit`, `run_running_ms` and `change_head_commit` are the
-returned run's refusal-or-effects evidence. A failed task showing `scheduled`
-and `none` with an empty `human list` has been dropped by supervision,
-whatever any transcript says. An overseer's own Needs You about a worker task
-is not tied to that task by any record and appears only in `human list`.
 
 ## Finish and clean up
 

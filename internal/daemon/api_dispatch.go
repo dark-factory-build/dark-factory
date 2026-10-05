@@ -10,7 +10,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-	"unicode/utf8"
 
 	"github.com/dark-factory-build/dark-factory/internal/api"
 	"github.com/dark-factory-build/dark-factory/internal/browserprotocol"
@@ -293,8 +292,6 @@ func (daemon *Daemon) dispatch(ctx context.Context, call api.Call) api.Reply {
 		return daemon.setAgentIdlePolicy(ctx, call)
 	case api.CallEnqueueTask:
 		return daemon.enqueueTask(ctx, call)
-	case api.CallTaskRecovery:
-		return daemon.taskRecovery(ctx, call)
 	case api.CallTaskRead:
 		return daemon.taskRead(ctx, call)
 	case api.CallOperatorWorkerOperation:
@@ -552,94 +549,6 @@ func (daemon *Daemon) taskRead(ctx context.Context, call api.Call) api.Reply {
 		result.NextOffset = &next
 	}
 	reply, err := api.NewTaskTextReply(result)
-	if err != nil {
-		return newErrorReply(api.RemoteInternal)
-	}
-	return reply
-}
-
-func (daemon *Daemon) taskRecovery(ctx context.Context, call api.Call) api.Reply {
-	input, ok := call.TaskRecoveryInput()
-	if !ok {
-		return newErrorReply(api.RemoteInvalidRequest)
-	}
-	id, err := decodeID(input.TaskID, kernel.TaskIDFromBytes)
-	if err != nil {
-		return newErrorReply(api.RemoteInvalidRequest)
-	}
-	incarnation, err := decodeID(input.IncarnationID, kernel.IncarnationIDFromBytes)
-	if err != nil {
-		return newErrorReply(api.RemoteInvalidRequest)
-	}
-	recovery, found, err := daemon.store.TaskRecovery(ctx, id, incarnation)
-	if err != nil {
-		return newErrorReply(remoteErrorCode(err))
-	}
-	value := api.TaskRecovery{ArtifactPaths: []string{}}
-	if !found {
-		value.State = "missing"
-	} else {
-		value.State, value.TaskID, value.IncarnationID = "found", recovery.Task.ID.String(), recovery.Incarnation.String()
-		value.ProjectID, value.AssignedAgentID = recovery.Task.ProjectID.String(), optionalAgentText(recovery.Task.AssignedAgentID)
-		value.WorkRevision, value.Revision, value.Status = uint64(recovery.Task.WorkRevision.Int64()), uint64(recovery.Task.Revision.Int64()), recovery.Task.Status.String()
-		value.NeedsOperatorRecovery = recovery.NeedsOperatorRecovery
-		value.Result, value.BlockedReason = recovery.Task.Result, recovery.Task.BlockedReason
-		if len(value.Result) > api.MaxRecoveryResultBytes {
-			end := api.MaxRecoveryResultBytes
-			for !utf8.RuneStart(value.Result[end]) {
-				end--
-			}
-			value.Result, value.ResultTruncated = value.Result[:end], true
-		}
-		if recovery.Change != nil {
-			value.ChangeID, value.ChangeRevision, value.ChangePhase = recovery.Change.ID.String(), uint64(recovery.Change.Revision.Int64()), recovery.Change.Phase.String()
-			if recovery.Change.Selection != nil {
-				value.SourceFormat = recovery.Change.Selection.ObjectFormat().String()
-				value.SourceBaseCommit = hex.EncodeToString(recovery.Change.Selection.Commit().Bytes())
-				value.SourceRepositoryDev = recovery.Change.Selection.RepositoryIdentity().Device()
-				value.SourceRepositoryInode = recovery.Change.Selection.RepositoryIdentity().Inode()
-			}
-		}
-		if recovery.Run != nil {
-			value.RunID, value.RunRevision = recovery.Run.ID.String(), uint64(recovery.Run.Revision.Int64())
-			value.RunWorkRevision = uint64(recovery.Run.AdmittedTaskWorkRevision.Int64())
-			if recovery.Run.Terminal != nil {
-				value.RunOutcome, value.RunDetail = recovery.Run.Terminal.Kind().String(), recovery.Run.Terminal.Detail()
-			}
-		}
-		for _, resource := range recovery.Artifacts {
-			if resource.Path != "" {
-				value.ArtifactPaths = append(value.ArtifactPaths, resource.Path)
-			}
-		}
-		value.Disposition, value.OverseerNotification, value.LastProgressAtMs = recovery.Disposition(), string(recovery.OverseerNotification), recovery.LastProgressAt.Int64()
-		if recovery.HumanRequest != nil {
-			value.HumanRequestID = recovery.HumanRequest.String()
-		}
-		if recovery.Overseer != nil {
-			value.OverseerAgentID = recovery.Overseer.String()
-		}
-		if recovery.OverseerTask != nil {
-			value.OverseerTaskID, value.OverseerTaskStatus, value.OverseerTaskTitle = recovery.OverseerTask.ID.String(), recovery.OverseerTask.Status.String(), recovery.OverseerTask.Title
-		}
-		if recovery.Change != nil && recovery.Change.HeadCommit != nil {
-			value.ChangeHeadCommit = hex.EncodeToString(recovery.Change.HeadCommit.Bytes())
-		}
-		if run := recovery.Run; run != nil {
-			if run.RunningAt != nil && run.TerminalAt != nil {
-				value.RunRunningMs = run.TerminalAt.Int64() - run.RunningAt.Int64()
-			}
-			if exit := run.ProviderExit; exit != nil {
-				value.RunProviderExit = "absent"
-				if code, ok := exit.Code(); ok {
-					value.RunProviderExit = fmt.Sprintf("code %d", code)
-				} else if signal, ok := exit.Signal(); ok {
-					value.RunProviderExit = fmt.Sprintf("signal %d", signal)
-				}
-			}
-		}
-	}
-	reply, err := api.NewTaskRecoveryReply(value)
 	if err != nil {
 		return newErrorReply(api.RemoteInternal)
 	}

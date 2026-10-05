@@ -49,7 +49,6 @@ const (
 	CallOperatorTerminalObserve
 	CallSendBack
 	CallSendBackTask
-	CallTaskRecovery
 	CallTaskRead
 	CallWebStatus
 	CallWebListClients
@@ -129,7 +128,6 @@ type Call struct {
 	peerTargetOffset    uint64
 	peerExpectedHead    uint64
 	sendBack            SendBackInput
-	taskRecovery        TaskRecoveryInput
 	taskRead            TaskReadInput
 	overseerTask        OverseerTaskCreateInput
 	overseerSnapshot    OverseerSnapshotInput
@@ -316,10 +314,6 @@ func (call Call) SendBackInput() (SendBackInput, bool) {
 	return call.sendBack, call.kind == CallSendBack || call.kind == CallSendBackTask
 }
 
-func (call Call) TaskRecoveryInput() (TaskRecoveryInput, bool) {
-	return call.taskRecovery, call.kind == CallTaskRecovery
-}
-
 func (call Call) TaskReadInput() (TaskReadInput, bool) {
 	return call.taskRead, call.kind == CallTaskRead
 }
@@ -385,7 +379,6 @@ const (
 	replyPeerStatus
 	replyTerminalObservation
 	replyAccounts
-	replyTaskRecovery
 	replyTaskText
 	replyWorkerOperation
 	replyHumanRequests
@@ -410,7 +403,6 @@ type Reply struct {
 	peerStatus          PeerStatus
 	content             any
 	accounts            Accounts
-	taskRecovery        TaskRecovery
 	taskText            TaskText
 	workerOperation     WorkerOperation
 	humanRequests       HumanRequestList
@@ -488,14 +480,6 @@ func NewAttemptSourceReply(source RetainedChangeHandoff) (Reply, error) {
 		return Reply{}, ErrInvalidInput
 	}
 	return Reply{kind: replyAttemptSource, attemptSource: source}, nil
-}
-
-func NewTaskRecoveryReply(value TaskRecovery) (Reply, error) {
-	if !validTaskRecovery(value) {
-		return Reply{}, ErrInvalidInput
-	}
-	value.ArtifactPaths = append([]string{}, value.ArtifactPaths...)
-	return Reply{kind: replyTaskRecovery, taskRecovery: value}, nil
 }
 
 func NewTaskTextReply(value TaskText) (Reply, error) {
@@ -881,10 +865,6 @@ func decodeCall(domain byte, bearer credential, encoded []byte) (Call, RemoteErr
 		if err := decodeExact(request.Params, &call.task); err != nil || !validID(call.task.ID) || !validID(call.task.ProjectID) || !validOptionalID(call.task.RepositoryID) || !validOptionalID(call.task.AssignedAgentID) || !validID(call.task.IncarnationID) || !validText(call.task.Title, 1, 1024) || !validText(call.task.Body, 0, 131072) || call.task.Priority < -1_000_000 || call.task.Priority > 1_000_000 {
 			return Call{}, RemoteInvalidRequest
 		}
-	case CallTaskRecovery:
-		if err := decodeExact(request.Params, &call.taskRecovery); err != nil || !validID(call.taskRecovery.TaskID) || !validID(call.taskRecovery.IncarnationID) {
-			return Call{}, RemoteInvalidRequest
-		}
 	case CallTaskRead:
 		if err := decodeExact(request.Params, &call.taskRead); err != nil || !validID(call.taskRead.TaskID) || call.taskRead.ExpectedRevision == 0 || call.taskRead.Offset > uint64(^uint64(0)>>1) {
 			return Call{}, RemoteInvalidRequest
@@ -1155,8 +1135,6 @@ func methodKind(method string) (CallKind, byte) {
 		return CallSendBack, attemptDomain
 	case "send_back_task":
 		return CallSendBackTask, operatorDomain
-	case "task_recovery":
-		return CallTaskRecovery, operatorDomain
 	case "task_read":
 		return CallTaskRead, operatorDomain
 	case "web_status":
@@ -1337,8 +1315,6 @@ func replyMatches(kind CallKind, reply replyKind) bool {
 		return reply == replyAttemptTask
 	case CallAttemptSource:
 		return reply == replyAttemptSource
-	case CallTaskRecovery:
-		return reply == replyTaskRecovery
 	case CallOperatorWorkerOperation:
 		return reply == replyWorkerOperation
 	case CallTaskRead:
@@ -1401,8 +1377,6 @@ func (connection *Connection) writeReply(reply Reply) error {
 		data, err = json.Marshal(reply.attemptTask)
 	case replyAttemptSource:
 		data, err = json.Marshal(reply.attemptSource)
-	case replyTaskRecovery:
-		data, err = json.Marshal(reply.taskRecovery)
 	case replyTaskText:
 		data, err = json.Marshal(reply.taskText)
 	case replyWorkerOperation:
