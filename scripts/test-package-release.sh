@@ -51,12 +51,6 @@ run_packaged_smoke() {
     for binary in factoryd factory-runner factoryctl; do
         [ -x "$smoke_bin/$binary" ] || fail "packaged smoke is missing $binary"
     done
-    for controller_asset in \
-        go-gate-environment.sh verify-adversarial-review.sh
-    do
-        [ -f "$smoke_bin/libexec/dark-factory/$controller_asset" ] \
-            || fail "packaged smoke is missing controller asset $controller_asset"
-    done
 
     "$smoke_bin/factoryctl" init --home "$smoke_home" >/dev/null \
         || fail "packaged factoryctl could not initialize a fresh home"
@@ -274,14 +268,12 @@ for target in aarch64-apple-darwin x86_64-apple-darwin; do
     listing=$(tar -tzf "$archive" | LC_ALL=C sort)
     [ "$listing" = "factory-runner
 factoryctl
-factoryd
-libexec/dark-factory/go-gate-environment.sh
-libexec/dark-factory/verify-adversarial-review.sh" ] || fail "$target archive has unexpected contents: $listing"
+factoryd" ] || fail "$target archive has unexpected contents: $listing"
     gzip_mtime=$(od -An -tu1 -j4 -N4 "$archive" | tr -d '[:space:]')
     [ "$gzip_mtime" = "0000" ] || fail "$target archive embeds its packaging time"
     LC_ALL=C tar -tvzf "$archive" | awk '
       $2 != 0 || $3 != "root" || $4 != "wheel" || $6 != "Jan" || $7 != 1 || $8 != 2000 || $1 != "-rwxr-xr-x" { exit 1 }
-      END { exit NR == 5 ? 0 : 1 }
+      END { exit NR == 3 ? 0 : 1 }
     ' || fail "$target archive metadata is not normalized"
 done
 (cd "$output" && shasum -a 256 -c SHA256SUMS >/dev/null) || fail "release checksums failed"
@@ -338,10 +330,6 @@ if grep -Eq '^[[:space:]]+version ' "$formula"; then
 fi
 grep -Fq 'resource("binaries").stage' "$formula" \
     || fail "formula does not install its selected resource"
-grep -Fq 'libexec.install "libexec/dark-factory"' "$formula" \
-    || fail "formula does not install controller assets"
-grep -Fq 'depends_on "python"' "$formula" \
-    || fail "formula does not declare its Python 3 controller prerequisite"
 grep -Fq 'assert_equal "#{name} #{version}", shell_output("#{bin}/#{name} --version").strip' \
     "$formula" || fail "formula does not test the exact binary version"
 grep -Fq "SOURCE_SHA = \"$source_sha\"" "$formula" || fail "formula omitted the exact source"
@@ -355,10 +343,8 @@ if grep -Eq 'factory-tui|factoryctl update|rollback binaries' "$formula"; then
     fail "formula retained deleted TUI/updater behavior"
 fi
 grep -Fq '`brew services` for Dark Factory.' "$formula" || fail "formula permits competing service ownership"
-grep -Fq '`brew uninstall dark-factory` removes commands and optional controller' "$formula" \
-    || fail "formula hides controller uninstall behavior"
-grep -Fq 'Stop or unload any daemon or controller job first' "$formula" \
-    || fail "formula does not warn before controller uninstall"
+grep -Fq '`brew uninstall dark-factory` removes commands. Stop or unload any daemon' "$formula" \
+    || fail "formula hides uninstall behavior"
 if grep -Eq 'factoryctl service|service uninstall operation' "$formula"; then
     fail "formula advertises a nonexistent service command"
 fi

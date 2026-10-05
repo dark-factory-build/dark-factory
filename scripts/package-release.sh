@@ -117,32 +117,6 @@ package_target() {
     package_payload="$staging/.payload-$package_target_name"
     mkdir "$package_payload"
     package_unpacked_bytes=0
-    controller_payload="$package_payload/libexec/dark-factory"
-    mkdir -p "$controller_payload"
-    for controller_asset in \
-        go-gate-environment.sh \
-        verify-adversarial-review.sh
-    do
-        controller_tree_entry=$(git -C "$repository_root" ls-tree "$source_sha" -- "scripts/$controller_asset")
-        controller_mode=${controller_tree_entry%% *}
-        case "$controller_mode" in
-            100644 | 100755) ;;
-            *)
-                echo "release controller asset is missing or unsupported in source: $controller_asset" >&2
-                exit 1
-                ;;
-        esac
-        controller_tree_path=$(printf '%s\n' "$controller_tree_entry" | cut -f2-)
-        [ "$controller_tree_path" = "scripts/$controller_asset" ] || {
-            echo "release controller asset path is ambiguous in source: $controller_asset" >&2
-            exit 1
-        }
-        git -C "$repository_root" show "$source_sha:scripts/$controller_asset" >"$controller_payload/$controller_asset"
-        chmod 0755 "$controller_payload/$controller_asset"
-        TZ=UTC0 touch -t 200001010000.00 "$controller_payload/$controller_asset"
-        controller_size=$(/usr/bin/stat -f '%z' "$controller_payload/$controller_asset")
-        package_unpacked_bytes=$((package_unpacked_bytes + controller_size))
-    done
     package_build_id=
     # The verifier opens each source once without following a final symlink,
     # snapshots from that retained descriptor, and validates the private copy.
@@ -169,9 +143,7 @@ package_target() {
     COPYFILE_DISABLE=1 tar --format ustar --uid 0 --gid 0 --uname root --gname wheel \
         --no-acls --no-xattrs --no-fflags --options gzip:!timestamp \
         -czf "$staging/$package_archive" -C "$package_payload" \
-        factoryd factory-runner factoryctl \
-        libexec/dark-factory/go-gate-environment.sh \
-        libexec/dark-factory/verify-adversarial-review.sh
+        factoryd factory-runner factoryctl
     rm -r "$package_payload"
     package_archive_bytes=$(/usr/bin/stat -f '%z' "$staging/$package_archive")
     "$release_tool" bounds "$package_unpacked_bytes" "$package_archive_bytes"
