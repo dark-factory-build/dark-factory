@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/dark-factory-build/dark-factory/internal/change"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
@@ -213,6 +214,10 @@ func TestRefusedPublicationEscalatesOnce(t *testing.T) {
 func TestPublicationRedactsEmailsAndUUID5MatchesTheRunbook(t *testing.T) {
 	if got := string(redactTerminalText([]byte("mail a.b+c@mail.example.org now"))); strings.Contains(got, "@") || !strings.HasSuffix(got, " now") {
 		t.Fatalf("redacted = %q", got)
+	}
+	cjk := strings.Repeat("修正", 50) // 300 bytes of three-byte runes
+	if got := publicationTitle(cjk + "\nmore"); len(got) != 255 || !utf8.ValidString(got) || !strings.HasPrefix(cjk, got) {
+		t.Fatalf("title = %d bytes %q", len(got), got)
 	}
 	// python3 -c "import uuid; print(uuid.uuid5(uuid.NAMESPACE_URL, 'dark-factory:00112233445566778899aabbccddeeff:publish-1'))"
 	if got := uuid5("dark-factory:00112233445566778899aabbccddeeff:publish-1"); got != "b766e0bb-085c-51fb-8f53-11c3cdd7c979" {

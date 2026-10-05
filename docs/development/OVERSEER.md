@@ -305,9 +305,10 @@ id and resume from that observation.
 
 ## 3. Publish the change as a branch
 
-factoryd publishes the first pull request of accepted intake work itself:
-when a worker task bound to a live intake acceptance succeeds with a settled
-head, it runs sections 3 and 4 with the same operation ids, opens the pull
+factoryd publishes the first pull request of accepted intake work itself
+when you delegated it to exactly one worker task (one issue, one worker; work
+split over several tasks is yours to publish): when that task succeeds at
+work revision 1 with a settled head, it runs sections 3 and 4 with the same operation ids, opens the pull
 request from the accepted source (`Closes #N`, or the Linear URL), records it
 against the worker task and reviews it. Until then the App refuses your
 `publish_commit` and `create_pull_request` on that branch. When it cannot

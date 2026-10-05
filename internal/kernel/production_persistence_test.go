@@ -689,6 +689,21 @@ func TestPublishableIntakeChangeIsFactorydsUntilPublishedOrFailed(t *testing.T) 
 	if _, err := store.writer.ExecContext(ctx, `UPDATE changes SET head_commit = ? WHERE id = ?`, head, change.ID.Bytes()); err != nil {
 		t.Fatal(err)
 	}
+	// A second worker task on the same issue makes the work the overseer's:
+	// each would close the issue.
+	sibling, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 248), IncarnationID: incarnationID(t, 248), ProjectID: worker.ProjectID, Title: "sibling"}, mustTime(t, 65))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.writer.ExecContext(ctx, `INSERT INTO intake_task_bindings (task_id, acceptance_id) VALUES (?, ?)`, sibling.ID.Bytes(), accepted.ID.Bytes()); err != nil {
+		t.Fatal(err)
+	}
+	if len(candidates()) != 0 || closed() {
+		t.Fatal("work split over two worker tasks is factoryd's to publish")
+	}
+	if _, err := store.writer.ExecContext(ctx, `DELETE FROM intake_task_bindings WHERE task_id = ?`, sibling.ID.Bytes()); err != nil {
+		t.Fatal(err)
+	}
 	found := candidates()
 	if len(found) != 1 || found[0].Change != change.ID || found[0].Task.ID != worker.TaskID || found[0].Accepted.ID != accepted.ID || found[0].Head != hex.EncodeToString(head) || found[0].Base != strings.Repeat("01", 20) || !closed() {
 		t.Fatalf("candidates = %+v, closed=%v", found, closed())

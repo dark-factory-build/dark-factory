@@ -190,8 +190,7 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 	if len(changes) == 0 {
 		return errors.New("nothing to publish: its head " + c.Head + " changes no file from " + from)
 	}
-	title := []rune(strings.Join(strings.Fields(c.Accepted.Snapshot.Title), " "))
-	message := string(title[:min(len(title), 256)])
+	message := publicationTitle(c.Accepted.Snapshot.Title)
 	branch := "factory/" + c.Change.String()[:12]
 	head := from
 	for i := 0; i*50 < len(changes); i++ {
@@ -260,6 +259,13 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 		return err
 	}
 	return daemon.recordPublishedPull(ctx, c.Task.ProjectID, c.Task.ID, repo, kernel.ProductionPullRequest{Number: pull.Number, Title: message, URL: pull.URL, Head: pull.Head, HeadRepository: repo, Branch: branch, Base: "main", State: "open", Review: kernel.ProductionReview{Head: pull.Head, State: "unknown"}}, body, pull.Base)
+}
+
+// publicationTitle is the accepted title on one line, within the App's
+// 256-byte bound and cut on a UTF-8 boundary.
+func publicationTitle(title string) string {
+	title = strings.Join(strings.Fields(title), " ")
+	return strings.ToValidUTF8(title[:min(len(title), 256)], "")
 }
 
 // publicationFrom is where a first publication's commits go: the Change's
