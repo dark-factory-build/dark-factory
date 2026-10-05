@@ -306,10 +306,11 @@ id and resume from that observation.
 ## 3. Publish the change as a branch
 
 factoryd publishes the first pull request of accepted intake work itself
-when you delegated it to exactly one worker task (one issue, one worker; work
-split over several tasks is yours to publish): when that task succeeds at
+when its GitHub source issue is in the destination repository and you
+delegated it to exactly one worker task (one issue, one worker; a Linear or
+cross-repository source, or work split over several tasks, is yours): when that task succeeds at
 work revision 1 with a settled head, it runs sections 3 and 4 with the same operation ids, opens the pull
-request from the accepted source (`Closes #N`, or the Linear URL), records it
+request from the accepted source (`Closes #N`), records it
 against the worker task and reviews it. Until then the App refuses your
 `publish_commit` and `create_pull_request` on that branch. When it cannot
 (a refused path, a symlink, a file over the bound, an indeterminate write), it
@@ -461,7 +462,7 @@ with the replacement; this metadata write has no atomic expected-head
 condition. If that head differs from `HEAD_SHA`, rebuild the cumulative body
 from the returned head under its own `body-HEAD8` operation.
 
-Intake work split over several worker tasks is yours to publish (section 3):
+Intake work factoryd does not publish is yours (section 3):
 reuse its accepted source, never create an issue. For a GitHub source pass
 `issue_number` and `source_repository` (fully qualified) from the accepted
 snapshot, with `close_on_merge = true` only on the pull request that completes

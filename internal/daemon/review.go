@@ -709,19 +709,13 @@ func (b *daemonReviewBackend) call(ctx context.Context, name string, arguments m
 }
 
 func (b *daemonReviewBackend) callResponse(ctx context.Context, name string, arguments map[string]any) (json.RawMessage, error) {
-	return b.callAs(ctx, "tools/call", map[string]uint64{b.repository: b.repositoryID}, name, arguments)
-}
-
-// callAs sends one tool call under method (the private broker method for a
-// Linear source) for exactly repositories, and returns its structured result.
-func (b *daemonReviewBackend) callAs(ctx context.Context, method string, repositories map[string]uint64, name string, arguments map[string]any) (json.RawMessage, error) {
 	params := map[string]any{"name": name, "arguments": arguments}
-	request := map[string]any{"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
+	request := map[string]any{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": params}
 	encoded, err := json.Marshal(request)
 	if err != nil {
 		return nil, err
 	}
-	response, err := b.daemon.github.MCP(ctx, encoded, repositories)
+	response, err := b.daemon.github.MCP(ctx, encoded, map[string]uint64{b.repository: b.repositoryID})
 	if err != nil {
 		return nil, err
 	}

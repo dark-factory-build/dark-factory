@@ -67,9 +67,8 @@ func (store *Store) SendBackPublishedReview(ctx context.Context, project Project
 // ChangeBranchClosedToOverseer reports whether branch names a factory Change
 // an overseer may not publish: one whose task is queued or running, as after
 // a send-back (the head it held is superseded until the task settles again),
-// or the one worker task of an intake acceptance at work revision 1 that no
-// pull request carries yet, which factoryd publishes; a correction, or work
-// split over several worker tasks, is the overseer's.
+// or intake work at work revision 1 that factoryd publishes
+// (factorydPublishesAcceptance) and no pull request carries yet.
 func (store *Store) ChangeBranchClosedToOverseer(ctx context.Context, project ProjectID, branch string) (bool, error) {
 	tx, err := store.beginRead(ctx)
 	if err != nil {
@@ -80,7 +79,7 @@ func (store *Store) ChangeBranchClosedToOverseer(ctx context.Context, project Pr
 	err = tx.connection.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM changes AS c JOIN tasks AS t ON t.id = c.task_id
 		WHERE c.project_id = ? AND substr(lower(hex(c.id)), 1, 12) = ? AND (t.status IN ('queued', 'running')
 		  OR t.work_revision = 1 AND EXISTS (SELECT 1 FROM intake_task_bindings b JOIN intake_acceptances a ON a.id = b.acceptance_id
-		     WHERE b.task_id = c.task_id AND (SELECT count(*) FROM intake_task_bindings s WHERE s.acceptance_id = a.id AND s.task_id <> a.task_id) = 1)
+		     WHERE b.task_id = c.task_id AND `+factorydPublishesAcceptance+`)
 		     AND NOT EXISTS (SELECT 1 FROM publication_tasks p WHERE p.change_id = c.id OR p.task_id = c.task_id)))`,
 		project.Bytes(), strings.ToLower(strings.TrimPrefix(branch, "factory/"))).Scan(&closed)
 	return closed, err

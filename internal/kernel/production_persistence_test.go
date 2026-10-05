@@ -659,6 +659,13 @@ func TestPublishableIntakeChangeIsFactorydsUntilPublishedOrFailed(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The destination repository is the source issue's own (GitHub id 42).
+	if err := store.BindRepositorySource(ctx, RepositoryID(worker.ProjectID), RepositorySourceIdentity{RootDevice: 61, RootInode: 62, GitDevice: 61, GitInode: 63, OriginDigest: [32]byte{1}, PublicationRepository: "example/factory"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.BindRepositoryGitHubID(ctx, RepositoryID(worker.ProjectID), 42); err != nil {
+		t.Fatal(err)
+	}
 	branch := "factory/" + change.ID.String()[:12]
 	candidates := func() []PublishableChange {
 		t.Helper()
@@ -704,6 +711,22 @@ func TestPublishableIntakeChangeIsFactorydsUntilPublishedOrFailed(t *testing.T) 
 	if _, err := store.writer.ExecContext(ctx, `DELETE FROM intake_task_bindings WHERE task_id = ?`, sibling.ID.Bytes()); err != nil {
 		t.Fatal(err)
 	}
+	// A cross-repository or Linear source is the overseer's: its private
+	// title must never reach a public commit.
+	for _, source := range []string{
+		`UPDATE intake_acceptances SET github_repository_id = 43 WHERE id = ?`,
+		`UPDATE intake_acceptances SET linear_team_id = '` + strings.Repeat("a", 36) + `', github_repository_id = 0 WHERE id = ?`,
+	} {
+		if _, err := store.writer.ExecContext(ctx, source, accepted.ID.Bytes()); err != nil {
+			t.Fatal(err)
+		}
+		if len(candidates()) != 0 || closed() {
+			t.Fatalf("%s: factoryd's to publish", source)
+		}
+		if _, err := store.writer.ExecContext(ctx, `UPDATE intake_acceptances SET linear_team_id = '', github_repository_id = 42 WHERE id = ?`, accepted.ID.Bytes()); err != nil {
+			t.Fatal(err)
+		}
+	}
 	found := candidates()
 	if len(found) != 1 || found[0].Change != change.ID || found[0].Task.ID != worker.TaskID || found[0].Accepted.ID != accepted.ID || found[0].Head != hex.EncodeToString(head) || found[0].Base != strings.Repeat("01", 20) || !closed() {
 		t.Fatalf("candidates = %+v, closed=%v", found, closed())
@@ -720,9 +743,6 @@ func TestPublishableIntakeChangeIsFactorydsUntilPublishedOrFailed(t *testing.T) 
 	}
 	// Published under the worker task, it is linked to its Change and is the
 	// overseer's again (a correction publishes on its branch).
-	if err := store.BindRepositorySource(ctx, RepositoryID(worker.ProjectID), RepositorySourceIdentity{RootDevice: 61, RootInode: 62, GitDevice: 61, GitInode: 63, OriginDigest: [32]byte{1}, PublicationRepository: "example/factory"}); err != nil {
-		t.Fatal(err)
-	}
 	published := strings.Repeat("c", 40)
 	pr := ProductionPullRequest{Number: 5, Title: "Improve intake", URL: "https://github.com/example/factory/pull/5", Head: published, HeadRepository: "example/factory", Branch: branch, Base: "main", State: "open", Review: ProductionReview{Head: published, State: "unknown"}}
 	if err := store.RecordPublication(ctx, worker.ProjectID, worker.TaskID, "example/factory", pr, mustTime(t, 71)); err != nil {

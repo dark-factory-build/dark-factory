@@ -130,7 +130,7 @@ func publishFixture(t *testing.T, files int, workflow bool) (*dispatchFixture, k
 		t.Fatal(err)
 	}
 	candidate := kernel.PublishableChange{Task: task, Change: changeID, Revision: revision, Base: base, Head: head,
-		Accepted: kernel.IntakeAcceptance{SourceRepository: "team/source", Snapshot: kernel.IntakeIssueSnapshot{GitHubRepositoryID: 7, IssueNumber: 9, Title: "Fix  the\nthing"}}}
+		Accepted: kernel.IntakeAcceptance{SourceRepository: "team/repo", Snapshot: kernel.IntakeIssueSnapshot{GitHubRepositoryID: 42, IssueNumber: 9, Title: "Fix  the\nthing"}}}
 	fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return &publicReviewBackend{} }
 	checkout := func(context.Context, string) (string, func(), error) {
 		clone := filepath.Join(t.TempDir(), "clone")
@@ -167,7 +167,7 @@ func TestFactorydPublishesASettledIntakeChange(t *testing.T) {
 		t.Fatalf("commit chain: first=%v second=%v", first["expected_head_sha"], second["expected_head_sha"])
 	}
 	body := pull["body"].(string)
-	if pull["head_sha"] != secondCommit || pull["issue_number"] != uint64(9) || pull["source_repository"] != "team/source" || pull["close_on_merge"] != true || pull["base_sha"] != c.Base ||
+	if pull["head_sha"] != secondCommit || pull["issue_number"] != uint64(9) || pull["source_repository"] != nil || pull["close_on_merge"] != true || pull["base_sha"] != c.Base ||
 		strings.Contains(body, "example.com") || strings.Contains(body, "/Users/") || !strings.Contains(body, "Implemented it") || !strings.Contains(body, secondCommit) || !strings.Contains(body, "+51 -1 across 52 files") || !strings.HasSuffix(body, "The merge queue runs the gate.") {
 		t.Fatalf("pull request = %+v", pull)
 	}

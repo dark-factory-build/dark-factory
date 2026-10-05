@@ -66,17 +66,6 @@ func (daemon *Daemon) publishSettledChange(ctx context.Context, c kernel.Publish
 		return daemon.publishFailed(ctx, c, repo, errors.Join(err, errors.New("repository disabled for new work")))
 	}
 	backend := &daemonReviewBackend{daemon: daemon, project: c.Task.ProjectID, repository: repo, repositoryID: id}
-	method := "tools/call"
-	if c.Accepted.Snapshot.LinearTeamID != "" {
-		method = "factory/tools/call_private" // as attemptMaintainer sends a Linear source's calls
-	}
-	call := func(ctx context.Context, name string, arguments map[string]any) (json.RawMessage, error) {
-		repositories := map[string]uint64{repo: id}
-		if source, ok := arguments["source_repository"].(string); ok {
-			repositories[strings.ToLower(source)] = c.Accepted.Snapshot.GitHubRepositoryID
-		}
-		return backend.callAs(ctx, method, repositories, name, arguments)
-	}
 	checkout := func(ctx context.Context, main string) (string, func(), error) {
 		path, cleanup, err := backend.CloneReadOnly(ctx, review.Request{Repository: repo, Head: main, Base: c.Base, BaseRef: "main"})
 		return filepath.Join(path, ".git"), cleanup, err
@@ -85,7 +74,7 @@ func (daemon *Daemon) publishSettledChange(ctx context.Context, c kernel.Publish
 	if err != nil {
 		return daemon.publishFailed(ctx, c, repo, err)
 	}
-	return daemon.publishChange(ctx, c, repo, source, call, checkout)
+	return daemon.publishChange(ctx, c, repo, source, backend.callResponse, checkout)
 }
 
 // settledChangeGitDirectory is the verified private Git directory holding the
@@ -245,12 +234,7 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 		var base string
 		if base, err = mainHead(); err == nil {
 			arguments := map[string]any{"repository": repo, "operation_id": operation("pr"), "head": branch, "head_sha": head, "base": "main", "base_sha": base, "title": message, "body": body, "draft": false,
-				"issue_number": c.Accepted.Snapshot.IssueNumber, "source_repository": c.Accepted.SourceRepository, "close_on_merge": true}
-			if c.Accepted.Snapshot.LinearTeamID != "" {
-				// Source provenance comes from the accepted receipt.
-				delete(arguments, "source_repository")
-				arguments["external_source_url"], arguments["issue_number"], arguments["close_on_merge"] = c.Accepted.Snapshot.URL, 0, false
-			}
+				"issue_number": c.Accepted.Snapshot.IssueNumber, "close_on_merge": true} // the source issue is in repo itself
 			var response json.RawMessage
 			if response, err = call(ctx, "create_pull_request", arguments); err == nil {
 				err = json.Unmarshal(response, &pull)

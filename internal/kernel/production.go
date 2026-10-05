@@ -502,6 +502,14 @@ type PublishableChange struct {
 	Accepted   IntakeAcceptance
 }
 
+// factorydPublishesAcceptance is the invariant for intake work factoryd
+// publishes itself (a is its intake_acceptances row): one issue, one worker
+// task, and a GitHub source issue in the destination repository itself. A
+// Linear or cross-repository source (whose private title must never reach a
+// public commit) and work split over several tasks are the overseer's.
+const factorydPublishesAcceptance = `(SELECT count(*) FROM intake_task_bindings s WHERE s.acceptance_id = a.id AND s.task_id <> a.task_id) = 1
+	AND EXISTS (SELECT 1 FROM repository_source_identities i WHERE i.repository_id = a.repository_id AND i.github_repository_id = a.github_repository_id)`
+
 // PublishFailureID names the one reviewer record of factoryd failing to
 // publish a Change revision; while it exists that revision is not retried.
 func PublishFailureID(change ChangeID, revision Revision) string {
@@ -509,10 +517,9 @@ func PublishFailureID(change ChangeID, revision Revision) string {
 }
 
 // PublishableChanges lists, oldest first, the current settled Changes of
-// succeeded tasks at work revision 1 (a correction is the overseer's) that
-// are the one worker task bound to a live intake acceptance (one issue, one
-// worker: with several, each closing the issue, the overseer publishes),
-// whose head differs from their base, with no publication of that Change or task and no recorded
+// succeeded tasks at work revision 1 (a correction is the overseer's) bound
+// to a live intake acceptance factoryd publishes, whose head differs from
+// their base, with no publication of that Change or task and no recorded
 // publish failure at that Change revision.
 func (store *Store) PublishableChanges(ctx context.Context) ([]PublishableChange, error) {
 	tx, err := store.beginRead(ctx)
@@ -524,7 +531,7 @@ func (store *Store) PublishableChanges(ctx context.Context) ([]PublishableChange
 		JOIN tasks t ON t.id = c.task_id AND t.incarnation_id = c.task_incarnation_id
 		JOIN intake_task_bindings b ON b.task_id = c.task_id JOIN intake_acceptances a ON a.id = b.acceptance_id
 		WHERE c.phase = 'retained' AND t.status = 'succeeded' AND t.work_revision = 1 AND a.withdrawn_at_ms IS NULL AND c.head_commit <> c.base_commit
-		  AND (SELECT count(*) FROM intake_task_bindings s WHERE s.acceptance_id = a.id AND s.task_id <> a.task_id) = 1
+		  AND `+factorydPublishesAcceptance+`
 		  AND NOT EXISTS (SELECT 1 FROM publication_tasks p WHERE p.change_id = c.id OR p.task_id = c.task_id)
 		  AND NOT EXISTS (SELECT 1 FROM production_records r WHERE r.project_id = c.project_id AND r.kind = 'reviewer'
 		      AND r.identity = 'publish-' || lower(hex(c.id)) || '-' || c.revision)
