@@ -576,7 +576,7 @@ func (b *daemonReviewBackend) Submit(ctx context.Context, operation review.Opera
 }
 
 func (b *daemonReviewBackend) Observe(ctx context.Context, operationID string) (review.Receipt, error) {
-	response, err := b.callResponse(ctx, "observe_operation", map[string]any{"operation_id": operationID})
+	response, err := b.callResponse(ctx, "observe_operation", map[string]any{"repository": b.repository, "operation_id": operationID})
 	if err != nil {
 		return review.Receipt{}, err
 	}
