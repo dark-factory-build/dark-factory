@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -210,14 +211,14 @@ func (client *Client) requestBounded(ctx context.Context, credential Credential,
 	}
 	response, err := client.http.Do(request)
 	if err != nil {
-		return ErrUnavailable
+		return fmt.Errorf("%w: %v", ErrUnavailable, errors.Unwrap(err))
 	}
 	defer response.Body.Close()
 	if response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden {
 		return ErrDenied
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return ErrUnavailable
+		return fmt.Errorf("%w: the Maintainer answered %d", ErrUnavailable, response.StatusCode)
 	}
 	data, err := io.ReadAll(io.LimitReader(response.Body, maximum+1))
 	if err != nil || int64(len(data)) > maximum {
