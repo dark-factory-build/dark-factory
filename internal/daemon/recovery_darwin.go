@@ -230,6 +230,20 @@ func (daemon *Daemon) recoverRunOnce(ctx context.Context, parent *RuntimeParent,
 		return RecoveredConverged, settleErr
 	}
 	recovered, err := OpenRecoveredRuntime(ctx, parent, run.ID.String(), fileIdentity)
+	if errors.Is(err, errRuntimeBusy) {
+		// OpenRecoveredRuntime can also observe the short-lived runtime-parent
+		// operation lock, which is not evidence that a runner owns the runtime.
+		// Probe the exact lifetime lease before classifying this as a live holder;
+		// otherwise a transient parent operation can defer result consumption for
+		// the whole ownerless recovery interval.
+		presence, observeErr := ObserveRuntimeLifetime(parent, run.ID.String(), fileIdentity)
+		if observeErr != nil {
+			return RecoveredUncertain, observeErr
+		}
+		if presence == RuntimeLeaseAvailable {
+			recovered, err = OpenRecoveredRuntime(ctx, parent, run.ID.String(), fileIdentity)
+		}
+	}
 	if err != nil {
 		if errors.Is(err, errRuntimeBusy) {
 			if run.Phase == kernel.RunRunning && runnerProcess.State == kernel.ResourceActive {
