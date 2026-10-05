@@ -879,3 +879,24 @@ func countFDs(t testing.TB) int {
 	}
 	return len(entries)
 }
+
+func TestAttemptSourceUnauthorizedTellsWorkerToUseCheckout(t *testing.T) {
+	fixture := newAPIFixture(t)
+	defer fixture.close(t)
+	t.Setenv("DARK_FACTORY_ATTEMPT_TOKEN_FILE", fixture.attemptPath)
+	done := serveOne(fixture.listener, func(api.Call) api.Reply {
+		reply, err := api.NewErrorReply(api.RemoteUnauthorized)
+		if err != nil {
+			t.Errorf("new error reply: %v", err)
+		}
+		return reply
+	})
+	var stdout, stderr bytes.Buffer
+	run(context.Background(), []string{"attempt", "source", "--task", "0123456789abcdef0123456789abcdef"}, func(string) string { return fixture.socket }, &stdout, &stderr)
+	if result := awaitServer(t, done); result.err != nil {
+		t.Fatal(result.err)
+	}
+	if got := stderr.String(); !strings.Contains(got, "unauthorized") || !strings.Contains(got, "current checkout") {
+		t.Fatalf("stderr = %q", got)
+	}
+}
