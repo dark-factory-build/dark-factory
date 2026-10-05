@@ -538,6 +538,9 @@ func outcomeOnConnection(ctx context.Context, c *sql.Conn, project ProjectID, id
 		}
 		return OutcomeRevision{}, err
 	}
+	if strings.Contains(raw, `"kind":"comparison"`) { // retired kind from older releases
+		return OutcomeRevision{}, ErrNotFound
+	}
 	doc, err := DecodeOutcomeDocument(raw)
 	if err != nil {
 		return OutcomeRevision{}, err
@@ -608,7 +611,7 @@ func listOutcomesOnConnection(ctx context.Context, c *sql.Conn, project ProjectI
 	if limit == 0 {
 		limit = 16
 	}
-	query := "SELECT id, revision FROM project_outcome_revisions current WHERE project_id = ? AND revision = (SELECT MAX(revision) FROM project_outcome_revisions latest WHERE latest.id = current.id)"
+	query := "SELECT id, revision FROM project_outcome_revisions current WHERE project_id = ? AND json_extract(document, '$.kind') IN ('outcome', 'mission') AND revision = (SELECT MAX(revision) FROM project_outcome_revisions latest WHERE latest.id = current.id)"
 	args := []any{project.Bytes()}
 	if kind != "" {
 		query += " AND json_extract(document, '$.kind') = ?"

@@ -277,3 +277,26 @@ func TestOutcomeAnchorBecomesStaleAndProjectIdentityIsStable(t *testing.T) {
 		t.Fatalf("cross-project identity = %v", err)
 	}
 }
+
+func TestStoredComparisonRowDoesNotBreakOutcomeList(t *testing.T) {
+	store, _ := newTestStore(t)
+	defer store.Close()
+	ctx := context.Background()
+	project, err := store.CreateProject(ctx, NewProject{ID: projectID(t, 150), Name: "legacy-comparison", Root: "/legacy-comparison"}, mustTime(t, 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	kept, err := store.WriteOutcome(ctx, NewOutcome{ID: outcomeID(t, 151), ProjectID: project.ID, Document: sourceOutcome()}, 0, mustTime(t, 2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := outcomeID(t, 152)
+	corruptSQL(t, store, `INSERT INTO project_outcome_revisions(id, project_id, revision, document, author, authority, objective_hash, objective_work_revision, created_at_ms) VALUES(?, ?, 1, ?, 'operator:local', 'operator', ?, 1, 3)`, legacy.Bytes(), project.ID.Bytes(), `{"kind":"comparison","objective":"x","criteria":"y","state":"open","question":"q"}`, make([]byte, 32))
+	page, err := store.ListOutcomes(ctx, project.ID, 0, 16)
+	if err != nil || len(page.Items) != 1 || page.Items[0].ID != kept.ID {
+		t.Fatalf("list = %+v, %v", page, err)
+	}
+	if _, err := store.Outcome(ctx, project.ID, legacy, 0); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("legacy comparison read = %v", err)
+	}
+}
