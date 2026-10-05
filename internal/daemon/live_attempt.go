@@ -306,7 +306,7 @@ type liveAttempt struct {
 	usageScanned uint64
 
 	livenessMu           sync.Mutex
-	callFirst            bool // the provider's first act is an attempt API call
+	callFirst            bool // a freshly launched provider's first act is an attempt API call; never set on adoption
 	startedAt            time.Time
 	lastTerminalOutputAt time.Time
 	lastAttemptAPICallAt time.Time
