@@ -400,7 +400,7 @@ EOF
 /bin/chmod 755 "$local_fixture/configured/node" "$local_fixture/configured/corepack"
 for local_child in \
     check-toolchain-pins.sh test-local-ci-environment.sh test-new-worktree.sh \
-    test-release.sh test-github-step-summary.sh test-verify-adversarial-review.sh \
+    test-release.sh test-github-step-summary.sh \
     test-repository-settings.sh \
     test-go-gates.sh test-go-e2e-tools.sh go-ci-owned.sh \
     go-e2e.sh \
