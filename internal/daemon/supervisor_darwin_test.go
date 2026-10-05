@@ -203,6 +203,12 @@ func runSupervisorCodexFixture() error {
 	if err != nil {
 		return err
 	}
+	if task.Task == "capacity" {
+		// Codex's capacity warning, after which the real CLI idles at its prompt.
+		fmt.Print("\x1b[33m⚠ Selected model is at capacity. Please try a different model.\x1b[39m\r\n")
+		time.Sleep(30 * time.Second)
+		return nil
+	}
 	if strings.Contains(task.Task, "# Task attachments:") {
 		contents, err := os.ReadFile(filepath.Join(os.Getenv("DARK_FACTORY_TASK_ATTACHMENTS"), "attachment-1.png"))
 		if err != nil || !bytes.Equal(contents, []byte{0, 1, 255}) {
