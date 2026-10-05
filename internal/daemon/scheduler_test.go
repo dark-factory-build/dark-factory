@@ -635,8 +635,19 @@ func TestSchedulerPausedDispatchDefersAutomaticWorkUntilResume(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	clockCalls := make(chan struct{}, 16)
-	daemon.now = func() time.Time { clockCalls <- struct{}{}; return time.UnixMilli(100_000) }
+	var clockCalls atomic.Int64
+	daemon.now = func() time.Time { clockCalls.Add(1); return time.UnixMilli(100_000) }
+	waitClockCalls := func(want int64) {
+		t.Helper()
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			if clockCalls.Load() >= want {
+				return
+			}
+			time.Sleep(time.Millisecond)
+		}
+		t.Fatalf("scheduler clock calls=%d, want at least %d", clockCalls.Load(), want)
+	}
 	polls := make(chan time.Time)
 	tick := func() {
 		t.Helper()
@@ -656,17 +667,10 @@ func TestSchedulerPausedDispatchDefersAutomaticWorkUntilResume(t *testing.T) {
 		return kernel.Run{}, fmt.Errorf("%w: fixture admission", kernel.ErrConflict)
 	}}
 	go func() { done <- daemon.RunScheduler(runCtx, spec) }()
-	// Receiving the next unbuffered tick proves the preceding paused pass
-	// completed, including run-limit enforcement, without a sleep.
+	// The fourth clock read is after the synchronous write paths in each poll.
 	tick()
 	tick()
-	for index := 0; index < 3; index++ {
-		select {
-		case <-clockCalls:
-		case <-time.After(5 * time.Second):
-			t.Fatal("paused scheduler stopped enforcing limits")
-		}
-	}
+	waitClockCalls(8)
 	after, err := store.Factory(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -681,6 +685,7 @@ func TestSchedulerPausedDispatchDefersAutomaticWorkUntilResume(t *testing.T) {
 	waitSchedulerCalls(t, &attempts, 1)
 	tick()
 	tick() // prior enabled tick completed both original enqueue paths
+	waitClockCalls(16)
 	snapshot, err := store.Snapshot(ctx)
 	if err != nil {
 		t.Fatal(err)
