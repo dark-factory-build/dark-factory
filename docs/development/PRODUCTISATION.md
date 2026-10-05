@@ -38,11 +38,6 @@ settings reads, not public snapshots. A connection is an access ceiling; a
 project repository is a codebase and checkout; an issue source is a backlog,
 filter, acceptance policy and destination. These are distinct boundaries.
 
-The existing host controller remains the sole writer of its reconciliation
-journals. It reads source settings and accepted snapshots through the daemon,
-then uses the existing task queue and stop/recovery controls. Package its scripts
-and generic supervision instructions with the product and manage its existing
-launchd job through installation. Browsers never edit controller files.
 Operator-owned Git transport authentication remains separate from Maintainer
 publication readiness; no worker receives a fetch credential workaround.
 

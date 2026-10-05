@@ -5,7 +5,6 @@ set -eu
 repository_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 workflow="$repository_root/.github/workflows/ci.yml"
 publisher="$repository_root/scripts/github-repo-settings.sh"
-issue_importer="$repository_root/scripts/import-issues.sh"
 
 require() {
     grep -Fq "$1" "$2" || {
@@ -143,8 +142,7 @@ if grep -Eq '^/(ARCHITECTURE|SECURITY|CLAUDE)\.md|^/\.github/[[:space:]]' "$repo
 fi
 
 require 'area:console|1D76DB|loopback web console, browser protocol, client, and UI' "$publisher"
-require '"TUI") echo "area:console"' "$issue_importer"
-if grep -Eq 'area:tui|factory-tui' "$publisher" "$issue_importer"; then
+if grep -Eq 'area:tui|factory-tui' "$publisher"; then
     echo "repository label surfaces still name the retired TUI" >&2
     exit 1
 fi

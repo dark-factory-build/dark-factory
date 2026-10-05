@@ -212,9 +212,9 @@ bounded findings plus one App-written verdict line, which is what the required
 `review` check reads; the GitHub review state never carries the verdict. The
 review is not an independent GitHub approval and cannot satisfy a
 distinct-reviewer requirement. The status check consumes an attestation of a
-cold review from a separate agent or person. Any GitHub review publisher may
+review from a separate agent or person. Any GitHub review publisher may
 record that attestation; the App identity has no special status in the
-repository gate. Host publication uses the same exact-head verdict format
+repository gate. factoryd's reviewer records the exact-head verdict format
 described in [WORKFLOW.md](WORKFLOW.md). The App's operation journal still
 governs its own submission and recovery path.
 
