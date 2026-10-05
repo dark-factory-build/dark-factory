@@ -1149,6 +1149,10 @@ func TestUnsucceededProducerCarriesPrerequisitePins(t *testing.T) {
 			if pinned != 2 {
 				t.Fatalf("consumer pinned to producer revision %d, want 2", pinned)
 			}
+			connection.Close()
+			if _, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 229), ProjectID: finalizing.ProjectID, AssignedAgentID: consumerAgent.ID, IncarnationID: incarnationID(t, 230), Title: "consumer", Prerequisites: []TaskPrerequisite{{TaskID: finalizing.TaskID, WorkRevision: mustRevision(t, 1)}}}, mustTime(t, 80)); err != nil {
+				t.Fatalf("replayed creation after carry: %v", err)
+			}
 		})
 	}
 }
