@@ -105,3 +105,11 @@ func TestIntakeControllerWaitsBeyondAttemptDeadline(t *testing.T) {
 		t.Fatalf("slow intake: exit=%d err=%v stderr=%s", exit, err, stderr.String())
 	}
 }
+
+func TestIntakeEnableWithoutReviewedRevisionNamesMissingFlag(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	exit := run(context.Background(), []string{"intake", "enable", "--source", strings.Repeat("ab", 16), "--revision", "1"}, func(string) string { t.Fatal("environment read"); return "" }, &stdout, &stderr)
+	if exit != 2 || stdout.Len() != 0 || stderr.String() != "factoryctl: intake enable: missing required flag --reviewed-revision\n" {
+		t.Fatalf("exit=%d stdout=%q stderr=%q", exit, stdout.String(), stderr.String())
+	}
+}

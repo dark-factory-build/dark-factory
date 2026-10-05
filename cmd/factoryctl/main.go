@@ -12,6 +12,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -367,6 +368,10 @@ func runWithDependencies(ctx context.Context, args []string, getenv func(string)
 		return 0
 	}
 	if !ok {
+		if len(args) >= 2 && args[0] == "intake" && args[1] == "enable" && !slices.Contains(args, "--reviewed-revision") {
+			_, _ = io.WriteString(stderr, "factoryctl: intake enable: missing required flag --reviewed-revision\n")
+			return 2
+		}
 		_, _ = io.WriteString(stderr, usage)
 		return exitUsage
 	}
