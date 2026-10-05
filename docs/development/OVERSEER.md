@@ -305,6 +305,21 @@ id and resume from that observation.
 
 ## 3. Publish the change as a branch
 
+factoryd publishes the first pull request of accepted intake work itself
+when its GitHub source issue is in the destination repository and you
+delegated it to exactly one worker task (one issue, one worker; a Linear or
+cross-repository source, or work split over several tasks, is yours): when that task succeeds at
+work revision 1 with a settled head, it runs sections 3 and 4 with the same operation ids, opens the pull
+request from the accepted source (`Closes #N`), records it
+against the worker task and reviews it. Until then the App refuses your
+`publish_commit` and `create_pull_request` on that branch. When it cannot
+(a refused path, a symlink, a file over the bound, an indeterminate write), it
+wakes you once with `Escalated: factoryd cannot publish change CHANGE for task
+TASK: ...` and never retries that Change revision: send the task back to fix
+the cause, or raise it with `attempt request-human`. What follows is for a
+correction on an open pull request (`work_revision` above 1) and for work
+outside intake.
+
 The branch is `factory/<first 12 hex of change_id>`. The task's
 `work_revision` from section 1 says which publication this is:
 
@@ -447,21 +462,21 @@ with the replacement; this metadata write has no atomic expected-head
 condition. If that head differs from `HEAD_SHA`, rebuild the cumulative body
 from the returned head under its own `body-HEAD8` operation.
 
-For GitHub-imported work, preserve its `FACTORY_SOURCE OWNER/REPO#NUMBER` marker in
-worker tasks and reuse that issue here. Observe its current state before
-publication; withdrawn or changed sources require reconciliation. Create a new
-tracking issue only when the task has no source issue.
+Intake work factoryd does not publish is yours (section 3):
+reuse its accepted source, never create an issue. For a GitHub source pass
+`issue_number` and `source_repository` (fully qualified) from the accepted
+snapshot, with `close_on_merge = true` only on the pull request that completes
+the issue (`Closes #N`; `false` renders `Refs #N`). For a Linear source pass
+`external_source_url` with `issue_number = 0` and `close_on_merge = false`.
+Skip `create_issue` for both.
 
-`create_pull_request` needs an issue. `create_issue` with `opid "$change_id" issue`, the
+Work without a source issue needs one: `create_pull_request` needs an issue. `create_issue` with `opid "$change_id" issue`, the
 task title (cut to 256 characters, the App's bound), and a body of the task
 text plus the change id; it returns the issue number. Then read
 `observe_ref` for `main` again, immediately before the call, and use that
 answer: `create_pull_request` with `opid "$change_id" pr`, `issue_number` from that
 result, `head = branch`, `head_sha` = the last published commit, `base =
-main`, `close_on_merge = true` when the Change completes its source issue; use
-`close_on_merge = false` when the PR only advances an umbrella issue, so the
-App renders `Closes #N` or `Refs #N` respectively. For a non-GitHub source,
-use its qualified reference and never a closing footer. `base_sha` = main's head as just read (the App verifies the base
+main`, `close_on_merge` as above (`true` for a new issue), `base_sha` = main's head as just read (the App verifies the base
 branch is at that commit at that moment; `base_commit` is wrong whenever
 main moved, and a stale read is wrong whenever main moves between the read
 and the call), `draft = false`, the same title, and a body in this

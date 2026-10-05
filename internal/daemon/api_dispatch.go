@@ -63,7 +63,7 @@ type Daemon struct {
 	productionRefreshAt map[kernel.ProjectID]time.Time
 	// The scheduler's merge-pipeline pass (tickMergePipeline): the next pass
 	// time, read only by the scheduler loop, and whether a pass is running.
-	pipelineAt   time.Time
+	pipelineAt   atomic.Int64 // unix nanoseconds of the next merge-stage pass
 	pipelineBusy atomic.Bool
 	store        *kernel.Store
 	now          func() time.Time

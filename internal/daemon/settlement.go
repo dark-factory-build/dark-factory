@@ -90,6 +90,9 @@ func (daemon *Daemon) settleRun(ctx context.Context, changeParent string, runID 
 		}
 
 		final, err := daemon.store.FinalizeWorkerRun(ctx, run.ID, run.Revision, settlement, at)
+		if err == nil {
+			daemon.pipelineAt.Store(0) // publish a settled Change on the next tick
+		}
 		return final, err
 	default:
 		return run, fmt.Errorf("%w: change %s is not settleable for a finalizing run", kernel.ErrCorruptState, changeState.Phase.String())

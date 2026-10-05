@@ -100,23 +100,25 @@ func (daemon *Daemon) customerMaintainer() bool {
 // at a time and at most once per productionRefreshInterval.
 func (daemon *Daemon) tickMergePipeline(ctx context.Context) {
 	now := daemon.now()
-	if now.Before(daemon.pipelineAt) || !daemon.pipelineBusy.CompareAndSwap(false, true) {
+	if now.UnixNano() < daemon.pipelineAt.Load() || !daemon.pipelineBusy.CompareAndSwap(false, true) {
 		return
 	}
-	daemon.pipelineAt = now.Add(productionRefreshInterval)
+	daemon.pipelineAt.Store(now.Add(productionRefreshInterval).UnixNano())
 	go func() {
 		defer daemon.pipelineBusy.Store(false)
 		daemon.advanceMergePipeline(ctx)
 	}()
 }
 
-// advanceMergePipeline refreshes each publishing project's pull requests, so
-// a corrected head is reviewed, then advances every unfinished
-// review operation. It does nothing on an unconnected home.
+// advanceMergePipeline publishes settled intake work, refreshes each
+// publishing project's pull requests, so a corrected head is reviewed, then
+// advances every unfinished review operation. It does nothing on an
+// unconnected home.
 func (daemon *Daemon) advanceMergePipeline(ctx context.Context) {
 	if !daemon.customerMaintainer() {
 		return
 	}
+	daemon.publishSettledChanges(ctx)
 	projects, _ := daemon.store.PublishingProjects(ctx)
 	for _, project := range projects {
 		if err := daemon.refreshProduction(ctx, project); err != nil {

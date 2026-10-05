@@ -206,7 +206,7 @@ func TestPublishedReviewSendBackReachesTheWorkerNotThePublisher(t *testing.T) {
 	if _, err := store.writer.ExecContext(ctx, `UPDATE publication_tasks SET created_at_ms = 90 WHERE task_id = ?`, publisher.ID.Bytes()); err != nil {
 		t.Fatal(err)
 	}
-	if inWork, err := store.ChangeBranchInWork(ctx, worker.ProjectID, pr.Branch); err != nil || inWork {
+	if inWork, err := store.ChangeBranchClosedToOverseer(ctx, worker.ProjectID, pr.Branch); err != nil || inWork {
 		t.Fatalf("settled branch: inWork=%v err=%v", inWork, err)
 	}
 	routed, err := store.SendBackPublishedReview(ctx, worker.ProjectID, "example/factory", 7, "review-op", head, "fix the finding", mustTime(t, 91))
@@ -217,7 +217,7 @@ func TestPublishedReviewSendBackReachesTheWorkerNotThePublisher(t *testing.T) {
 		t.Fatalf("a superseded head err=%v, want ErrSuperseded", err)
 	}
 	// The sent-back Change is in work again: its branch is not publishable.
-	if inWork, err := store.ChangeBranchInWork(ctx, worker.ProjectID, pr.Branch); err != nil || !inWork {
+	if inWork, err := store.ChangeBranchClosedToOverseer(ctx, worker.ProjectID, pr.Branch); err != nil || !inWork {
 		t.Fatalf("sent-back branch: inWork=%v err=%v", inWork, err)
 	}
 }
@@ -614,4 +614,168 @@ func containsString(values []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// factoryd publishes a succeeded intake worker's settled Change: it is a
+// candidate, closed to the overseer, until a pull request carries it or a
+// publish failure is recorded at its revision; that failure is never in
+// flight, so nothing retries it.
+func TestPublishableIntakeChangeIsFactorydsUntilPublishedOrFailed(t *testing.T) {
+	ctx := context.Background()
+	proposal, err := NewSuccessProposal("done")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, finalizing := finalizingReleasedRun(t, RoleWorker, VerificationNone, proposal)
+	defer store.Close()
+	change, _, err := store.Change(ctx, *finalizing.ChangeID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settlement, err := NewRetainedChangeSettlement(change.Revision, change.HeadCommit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker, err := store.FinalizeWorkerRun(ctx, finalizing.ID, finalizing.Revision, settlement, mustTime(t, 60))
+	if err != nil {
+		t.Fatal(err)
+	}
+	overseer, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 246), ProjectID: worker.ProjectID, Name: "overseer", Role: RoleOrchestrator, Provider: ProviderCodex, ToolBudgetLimit: 2}, mustTime(t, 61))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourceID, err := IntakeSourceIDFromBytes(bytes.Repeat([]byte{247}, IDBytes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, err := store.CreateIntakeSource(ctx, NewIntakeSource{ID: sourceID, GitHubRepositoryID: 42, GitHubRepositoryName: "owner/source", ProjectID: worker.ProjectID, TargetRepositoryID: RepositoryID(worker.ProjectID), OverseerAgentID: overseer.ID, Policy: IntakePolicyManual, PollSeconds: 60, AdmissionLimit: 25}, mustTime(t, 62))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if source, err = store.SetIntakeSourceEnabled(ctx, source.ID, source.Revision, true, mustTime(t, 63)); err != nil {
+		t.Fatal(err)
+	}
+	accepted, err := store.AcceptIntakeSnapshot(ctx, source.ID, intakeSnapshotForTest(), mustTime(t, 64))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The destination repository is the source issue's own (GitHub id 42).
+	if err := store.BindRepositorySource(ctx, RepositoryID(worker.ProjectID), RepositorySourceIdentity{RootDevice: 61, RootInode: 62, GitDevice: 61, GitInode: 63, OriginDigest: [32]byte{1}, PublicationRepository: "example/factory"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.BindRepositoryGitHubID(ctx, RepositoryID(worker.ProjectID), 42); err != nil {
+		t.Fatal(err)
+	}
+	branch := "factory/" + change.ID.String()[:12]
+	candidates := func() []PublishableChange {
+		t.Helper()
+		found, err := store.PublishableChanges(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return found
+	}
+	closed := func() bool {
+		t.Helper()
+		value, err := store.ChangeBranchClosedToOverseer(ctx, worker.ProjectID, branch)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return value
+	}
+	if len(candidates()) != 0 || closed() {
+		t.Fatal("work outside intake is factoryd's to publish")
+	}
+	if _, err := store.writer.ExecContext(ctx, `INSERT INTO intake_task_bindings (task_id, acceptance_id) VALUES (?, ?)`, worker.TaskID.Bytes(), accepted.ID.Bytes()); err != nil {
+		t.Fatal(err)
+	}
+	if len(candidates()) != 0 {
+		t.Fatal("a head equal to its base is publishable")
+	}
+	head := bytes.Repeat([]byte{2}, 20)
+	if _, err := store.writer.ExecContext(ctx, `UPDATE changes SET head_commit = ? WHERE id = ?`, head, change.ID.Bytes()); err != nil {
+		t.Fatal(err)
+	}
+	// A second worker task on the same issue makes the work the overseer's:
+	// each would close the issue.
+	sibling, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 248), IncarnationID: incarnationID(t, 248), ProjectID: worker.ProjectID, Title: "sibling"}, mustTime(t, 65))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.writer.ExecContext(ctx, `INSERT INTO intake_task_bindings (task_id, acceptance_id) VALUES (?, ?)`, sibling.ID.Bytes(), accepted.ID.Bytes()); err != nil {
+		t.Fatal(err)
+	}
+	if len(candidates()) != 0 || closed() {
+		t.Fatal("work split over two worker tasks is factoryd's to publish")
+	}
+	if _, err := store.writer.ExecContext(ctx, `DELETE FROM intake_task_bindings WHERE task_id = ?`, sibling.ID.Bytes()); err != nil {
+		t.Fatal(err)
+	}
+	// A cross-repository or Linear source is the overseer's: its private
+	// title must never reach a public commit.
+	for _, source := range []string{
+		`UPDATE intake_acceptances SET github_repository_id = 43 WHERE id = ?`,
+		`UPDATE intake_acceptances SET linear_team_id = '` + strings.Repeat("a", 36) + `', github_repository_id = 0 WHERE id = ?`,
+	} {
+		if _, err := store.writer.ExecContext(ctx, source, accepted.ID.Bytes()); err != nil {
+			t.Fatal(err)
+		}
+		if len(candidates()) != 0 || closed() {
+			t.Fatalf("%s: factoryd's to publish", source)
+		}
+		if _, err := store.writer.ExecContext(ctx, `UPDATE intake_acceptances SET linear_team_id = '', github_repository_id = 42 WHERE id = ?`, accepted.ID.Bytes()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	found := candidates()
+	if len(found) != 1 || found[0].Change != change.ID || found[0].Task.ID != worker.TaskID || found[0].Accepted.ID != accepted.ID || found[0].Head != hex.EncodeToString(head) || found[0].Base != strings.Repeat("01", 20) || !closed() {
+		t.Fatalf("candidates = %+v, closed=%v", found, closed())
+	}
+	failure := map[string]any{"id": PublishFailureID(change.ID, found[0].Revision), "state": "publish_failed", "handled": true, "escalation": "factoryd cannot publish", "request": map[string]any{}}
+	if err := store.RecordReviewOperation(ctx, worker.ProjectID, "example/factory", PublishFailureID(change.ID, found[0].Revision), failure, mustTime(t, 70)); err != nil {
+		t.Fatal(err)
+	}
+	if len(candidates()) != 0 {
+		t.Fatal("a recorded publish failure is retried")
+	}
+	if pending, err := store.InFlightReviewOperations(ctx); err != nil || len(pending) != 0 {
+		t.Fatalf("publish failure in flight: %+v %v", pending, err)
+	}
+	// Published under the worker task, it is linked to its Change and is the
+	// overseer's again (a correction publishes on its branch).
+	published := strings.Repeat("c", 40)
+	pr := ProductionPullRequest{Number: 5, Title: "Improve intake", URL: "https://github.com/example/factory/pull/5", Head: published, HeadRepository: "example/factory", Branch: branch, Base: "main", State: "open", Review: ProductionReview{Head: published, State: "unknown"}}
+	if err := store.RecordPublication(ctx, worker.ProjectID, worker.TaskID, "example/factory", pr, mustTime(t, 71)); err != nil {
+		t.Fatal(err)
+	}
+	var linked int
+	if err := store.writer.QueryRowContext(ctx, `SELECT count(*) FROM publication_tasks WHERE task_id = ? AND change_id = ?`, worker.TaskID.Bytes(), change.ID.Bytes()).Scan(&linked); err != nil || linked != 1 {
+		t.Fatalf("publication linked to its Change: %d %v", linked, err)
+	}
+	if closed() {
+		t.Fatal("a published intake branch is closed to the overseer's correction")
+	}
+	// Had its pull request failed after its commits published, the overseer
+	// sends it back and the worker settles a correction at a new Change
+	// revision: that is the overseer's to publish, never factoryd's under the
+	// old operation ids.
+	if _, err := store.writer.ExecContext(ctx, `DELETE FROM publication_tasks`); err != nil {
+		t.Fatal(err)
+	}
+	task, _, err := store.Task(ctx, worker.TaskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.SendBackTask(ctx, task.ID, task.Revision, "fix the refused path", mustTime(t, 72)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.writer.ExecContext(ctx, `UPDATE changes SET revision = revision + 1, head_commit = ? WHERE id = ?`, bytes.Repeat([]byte{3}, 20), change.ID.Bytes()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.writer.ExecContext(ctx, `UPDATE tasks SET status = 'succeeded', result = 'corrected', completed_at_ms = updated_at_ms WHERE id = ?`, task.ID.Bytes()); err != nil {
+		t.Fatal(err)
+	}
+	if found := candidates(); len(found) != 0 || closed() {
+		t.Fatalf("a corrected Change is factoryd's: candidates=%+v closed=%v", found, closed())
+	}
 }

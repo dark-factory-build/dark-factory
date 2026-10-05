@@ -14,7 +14,7 @@ import (
 // Only complete lines are exposed. Starting inside a retained page discards
 // its first line, and a partial final line is omitted, so a caller cannot
 // bypass credential labels by requesting a cursor inside their value.
-var terminalPrivateText = regexp.MustCompile(`(?i)(?:authorization[[:blank:]]*[:=][[:blank:]]*(?:bearer[[:blank:]]+)?|bearer[[:blank:]]+|(?:api[_-]?key|password|token|secret)["']?[[:blank:]]*[:=][[:blank:]]*["']?)[^\r\n]+|(?:/Users/|/home/|/private/|/var/|/tmp/|/Volumes/|/opt/|/usr/local/|~/)[^[:space:]]+`)
+var terminalPrivateText = regexp.MustCompile(`(?i)(?:authorization[[:blank:]]*[:=][[:blank:]]*(?:bearer[[:blank:]]+)?|bearer[[:blank:]]+|(?:api[_-]?key|password|token|secret)["']?[[:blank:]]*[:=][[:blank:]]*["']?)[^\r\n]+|(?:/Users/|/home/|/private/|/var/|/tmp/|/Volumes/|/opt/|/usr/local/|~/)[^[:space:]]+|[[:alnum:]._%+-]+@[[:alnum:]-]+(?:\.[[:alnum:]-]+)+`)
 
 const terminalJSONStringAtom = `(?:\\.|[^"\\])`
 
