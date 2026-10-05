@@ -12,7 +12,8 @@ import (
 )
 
 // validateSuccessSource keeps a successful worker outcome live until its
-// implementation is committed. A clean no-change success remains valid.
+// implementation is committed. A clean no-change success remains valid
+// unless the task is an accepted intake issue.
 func (daemon *Daemon) validateSuccessSource(ctx context.Context, live *liveAttempt, proposal kernel.Proposal) error {
 	if live == nil || proposal.Kind() != kernel.OutcomeSucceeded {
 		return nil
@@ -65,6 +66,14 @@ func (daemon *Daemon) validateSuccessSource(ctx context.Context, live *liveAttem
 	}
 	if facts.Dirty() {
 		return kernel.NewOutcomeRefusal(fmt.Errorf("%w: %s (%w)", errDirtyWorkerChange, changeState.ID.String(), kernel.ErrConflict))
+	}
+	// An accepted issue promises a published Change; an empty one cannot be.
+	if head, err := kernelCommit(facts.Head()); err == nil && kernelCommitEqual(head, changeState.Selection.Commit()) {
+		if _, intake, err := daemon.store.IntakeAcceptanceForTask(ctx, run.TaskID); err != nil {
+			return unverifiableSuccessSource(fmt.Sprintf("intake facts unavailable: %v", err))
+		} else if intake {
+			return kernel.NewOutcomeRefusal(fmt.Errorf("%w: %s (%w)", errEmptyIntakeChange, changeState.ID.String(), kernel.ErrConflict))
+		}
 	}
 	return nil
 }

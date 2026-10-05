@@ -13,6 +13,7 @@ import (
 )
 
 var errDirtyWorkerChange = errors.New("uncommitted implementation in Change worktree; commit it or clean it up before reporting success")
+var errEmptyIntakeChange = errors.New("nothing committed; commit the change, or report `attempt block` with why no change is needed")
 
 type successSettlementContextKey struct{}
 
