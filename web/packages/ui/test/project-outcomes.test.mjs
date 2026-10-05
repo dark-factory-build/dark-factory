@@ -61,3 +61,26 @@ test("editing replaces the reader, preserves comparison fields and expected revi
   assert.deepEqual(write.document.baseline, document.baseline); assert.deepEqual(write.document.links, document.links);
   assert.equal(calls.at(-1).operation, "outcome_list"); assert.equal(tree.root.findAllByType("article").length, 1);
 });
+
+
+test("equivalent callback replacement preserves an open editor without restarting pagination", async t => {
+  const calls = [];
+  const call = async (operation) => { calls.push(operation); return { items: [] }; };
+  const tree = await mount(t, call);
+  await click(tree, "New outcome");
+  await act(async () => tree.update(createElement(ProjectOutcomes, { project: "project", call: (...args) => call(...args) })));
+  assert.equal(tree.root.findAllByType("form").length, 1);
+  assert.deepEqual(calls, ["outcome_list"]);
+});
+
+test("leaving during a write preserves the write but never restarts the closed list", async () => {
+  const write = deferred(), calls = [];
+  let tree;
+  await act(async () => { tree = create(createElement(ProjectOutcomes, { project: "project", call: async (operation) => { calls.push(operation); return operation === "outcome_write" ? write.promise : { items: [] }; } })); });
+  await click(tree, "New outcome");
+  const original = globalThis.FormData; globalThis.FormData = class { get() { return ""; } };
+  try { await act(async () => tree.root.findByType("form").props.onSubmit({ preventDefault() {}, currentTarget: {} })); } finally { globalThis.FormData = original; }
+  await act(async () => tree.unmount());
+  await act(async () => write.resolve({ id: "new", revision: 1, document: {} }));
+  assert.deepEqual(calls, ["outcome_list", "outcome_write"]);
+});

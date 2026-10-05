@@ -16,7 +16,7 @@ function candidate(data: FormData, prefix: string): Value {
 export function ProjectOutcomes({ project, call }: { project: string; call?: ProjectContentCall }) {
   const newID = useRef<string | undefined>(undefined);
   const [items, setItems] = useState<Value[]>([]);
-  const listing = useRef(0), reading = useRef(0);
+  const listing = useRef(0), reading = useRef(0), scope = useRef(0);
   const [loading, setLoading] = useState(false), [listError, setListError] = useState("");
   const [selected, setSelected] = useState<Value>();
   const [editing, setEditing] = useState(false);
@@ -25,8 +25,20 @@ export function ProjectOutcomes({ project, call }: { project: string; call?: Pro
   const [error, setError] = useState("");
   const document = (selected?.document ?? {}) as Value;
   const [candidateCount, setCandidateCount] = useState(2);
-  const run = async (work: () => Promise<void>) => { setPending(true); setError(""); try { await work(); } catch (error) { setError(error instanceof Error ? error.message : "Request failed"); } finally { setPending(false); } };
-  const request = (operation: "outcome_list" | "outcome_read" | "outcome_write", input: Value) => call === undefined ? Promise.reject(new Error("Connect to read outcomes")) : call(operation, { ...input, project_id: project });
+  const available = call !== undefined && project !== "";
+  const run = async (work: () => Promise<void>) => {
+    const generation = scope.current;
+    setPending(true); setError("");
+    try { await work(); } catch (error) { if (generation === scope.current) setError(error instanceof Error ? error.message : "Request failed"); }
+    finally { if (generation === scope.current) setPending(false); }
+  };
+  const request = async (operation: "outcome_list" | "outcome_read" | "outcome_write", input: Value) => {
+    if (!call || !project) throw new Error("Connect to read outcomes");
+    const generation = scope.current;
+    const value = await call(operation, { ...input, project_id: project });
+    if (generation !== scope.current) throw new Error("Library view changed");
+    return value;
+  };
   const list = async () => {
     const generation = ++listing.current;
     setLoading(true); setListError("");
@@ -48,10 +60,10 @@ export function ProjectOutcomes({ project, call }: { project: string; call?: Pro
     finally { if (generation === listing.current) setLoading(false); }
   };
   useEffect(() => {
-    setItems([]); setSelected(undefined); setEditing(false);
-    if (call && project) void list();
-    return () => { listing.current++; reading.current++; };
-  }, [call, project]);
+    setItems([]); setSelected(undefined); setEditing(false); setPending(false); setError("");
+    if (available) void list();
+    return () => { scope.current++; listing.current++; reading.current++; };
+  }, [available, project]);
   const read = async (id: string, revision = 0) => { const generation = ++reading.current; const value = await request("outcome_read", { id, revision }); if (generation !== reading.current) return; setSelected(value); setEditing(false); setKind(string((value.document as Value)?.kind)); setCandidateCount(Math.max(2, records((value.document as Value)?.candidates).length)); };
   return <section className="dfOutcomes" aria-label="Project outcomes">
     <fieldset disabled={pending || call === undefined || project === ""} aria-busy={pending}>

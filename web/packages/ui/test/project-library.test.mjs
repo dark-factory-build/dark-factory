@@ -154,6 +154,7 @@ test("board shares immutable threads, resolves by revision, and retains linked c
   await click("Task access");
   assert.ok(renderer.root.findAllByType("p").some((node) => node.children.join("").includes("· Run run")));
   await click("Resolve discussion");
+  assert.equal(calls.filter(({ operation, input }) => operation === "search" && input.kind === "discussion_reply").length, 2, "updated discussion reloads replies automatically");
   assert.ok(!renderer.root.findAllByType("p").some((node) => node.children.join("").includes("· Run run")), "new root revision clears previous revision receipts");
   const revised = calls.find((value) => value.operation === "revise").input;
   assert.equal(revised.expected_revision, 2);
@@ -288,4 +289,14 @@ test("editor preserves scope fields in one form, and Outcomes is a separate proj
   assert.equal(renderer.root.findAllByType("details").length, 0);
   assert.deepEqual(calls.at(-1), { operation: "outcome_list", input: { project_id: [...fixtureState.projects.keys()][0], offset: 0, limit: 1 } });
   await click(renderer, "All documents"); assert.ok(renderer.root.findByProps({ type: "search" }));
+});
+
+
+test("leaving a deep link during its list request never starts the document read", async () => {
+  const page = defer(), calls = [];
+  let renderer;
+  await act(async () => { renderer = create(createElement(ProjectLibrary, { state: fixtureState, open: true, initialID: metadata.id, call: async (operation) => { calls.push(operation); return page.promise; } })); });
+  await act(async () => renderer.unmount());
+  await act(async () => page.resolve({ items: [metadata] }));
+  assert.deepEqual(calls, ["search"]);
 });

@@ -65,9 +65,12 @@ function LibraryDocuments({ state, call, draft, projectID, board = false, entity
     try { await work(); } catch (error) { if (generation === epoch.current) setError(error instanceof Error ? error.message : "Request failed"); }
     finally { if (generation === epoch.current) setPending(false); }
   };
-  const request = (operation: ProjectContentOperation, input: ProjectContentInput = {}) => {
+  const request = async (operation: ProjectContentOperation, input: ProjectContentInput = {}) => {
     if (call === undefined || projectID === "") return Promise.reject(new Error("Connect and select a project"));
-    return call(operation, { ...input, project_id: projectID });
+    const generation = epoch.current;
+    const value = await call(operation, { ...input, project_id: projectID });
+    if (generation !== epoch.current) throw new Error("Library view changed");
+    return value;
   };
   const list = async (offset = 0) => {
     const generation = epoch.current;
@@ -93,7 +96,7 @@ function LibraryDocuments({ state, call, draft, projectID, board = false, entity
   };
   const available = call !== undefined && projectID !== "";
   useEffect(() => {
-    if (available) void run(async () => { await list(); if (initialID) await read(initialID); });
+    if (available) void run(async () => { const generation = epoch.current; await list(); if (generation === epoch.current && initialID) await read(initialID); });
     return () => { epoch.current++; };
   }, [available, initialID]);
   const loadBody = async (content = selected, offset = bodyNext) => {
@@ -116,7 +119,7 @@ function LibraryDocuments({ state, call, draft, projectID, board = false, entity
   const updateThread = async (changes: RecordValue) => {
     if (!selected || !complete) return;
     const value = await request("revise", { id: selected.id, expected_revision: selected.revision, kind: selected.kind, title: selected.title, description: selected.description, body, source_references: JSON.stringify({ ...metadata, ...changes }) });
-    selectRevision(value, body); setNotice("Discussion updated."); await list();
+    selectRevision(value, body); setNotice("Discussion updated."); await loadRelated("search", 0, value); await list();
   };
   const entry = (item: RecordValue) => {
     const meta: RecordValue = { ...knowledgeMetadata(item.source_references), status: item.projected_status || knowledgeMetadata(item.source_references).status };
