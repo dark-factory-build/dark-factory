@@ -396,6 +396,74 @@ func TestConcurrentWorktreesOfOneRepositoryAllSucceed(t *testing.T) {
 	}
 }
 
+// The package-private authority keeps this concurrency proof runnable in
+// restricted test environments whose trusted Developer-toolchain path is not
+// visible, while exercising the same production worktree operation.
+func TestConcurrentWorktreesOfOneRepositoryAllSucceedThroughTestAuthority(t *testing.T) {
+	fixture := newLocalGitFixture(t, "sha1")
+	selected, err := selectGit(context.Background(), fixture.git, fixture.repository, "HEAD", fixture.identity, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent := secureTempDir(t)
+	results := make(chan error, 8)
+	for index := range cap(results) {
+		go func() {
+			changeID := strings.Repeat(fmt.Sprintf("%x", index+1), 32)
+			_, err := addWorktree(context.Background(), selected, filepath.Join(parent, changeID), BranchName(changeID), nil, false)
+			results <- err
+		}()
+	}
+	for range cap(results) {
+		if err := <-results; err != nil {
+			t.Fatalf("concurrent worktree: %v", err)
+		}
+	}
+}
+
+func TestWorktreeAddRetriesOnlyBoundedGitLockFailures(t *testing.T) {
+	t.Run("transient lock", func(t *testing.T) {
+		path := filepath.Join(secureTempDir(t), "worktree")
+		calls := 0
+		err := retryWorktreeAdd(context.Background(), path, func() (gitCapture, error) {
+			calls++
+			if calls <= 3 {
+				return gitCapture{exitCode: 128, stderr: []byte("fatal: cannot lock ref 'refs/heads/private': File exists\n")}, nil
+			}
+			return gitCapture{}, nil
+		})
+		if err != nil || calls != 4 {
+			t.Fatalf("lock retry calls=%d err=%v", calls, err)
+		}
+	})
+
+	t.Run("real failure is fail-closed", func(t *testing.T) {
+		path := filepath.Join(secureTempDir(t), "worktree")
+		const private = "private repository path and stderr"
+		calls := 0
+		err := retryWorktreeAdd(context.Background(), path, func() (gitCapture, error) {
+			calls++
+			return gitCapture{exitCode: 128, stderr: []byte("fatal: invalid object name: " + private + "\n")}, nil
+		})
+		if err == nil || calls != 1 || strings.Contains(err.Error(), private) {
+			t.Fatalf("non-lock failure calls=%d err=%v", calls, err)
+		}
+	})
+
+	t.Run("permission failure is not contention", func(t *testing.T) {
+		path := filepath.Join(secureTempDir(t), "worktree")
+		const private = "private permission path"
+		calls := 0
+		err := retryWorktreeAdd(context.Background(), path, func() (gitCapture, error) {
+			calls++
+			return gitCapture{exitCode: 128, stderr: []byte("fatal: cannot lock ref 'refs/heads/private': Unable to create '" + private + ".lock': Permission denied\n")}, nil
+		})
+		if err == nil || calls != 1 || strings.Contains(err.Error(), private) {
+			t.Fatalf("permission failure calls=%d err=%v", calls, err)
+		}
+	})
+}
+
 // A Change from before managed worktrees is a plain copy of the base with
 // the worker's edits in it. Adoption keeps every byte and makes the edits
 // the uncommitted work of the Change's branch at the base, at any step of
