@@ -49,6 +49,8 @@ type Daemon struct {
 	releaseHold, releaseBusy atomic.Bool
 	// releaseDue is when tickRelease next observes the base; scheduler-owned.
 	releaseDue time.Time
+	// releaseSince is when the open releaseBatch window began (Unix ns), or 0.
+	releaseSince atomic.Int64
 	// intakeIssues is a package-test-only remote failure/race seam.
 	intakeIssues func(context.Context, string, uint64, uint32, string, uint64) (maintainer.IssuePage, error)
 	// browserRemote is a package-test-only seam for operator calls that wait

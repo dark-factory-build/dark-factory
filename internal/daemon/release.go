@@ -130,14 +130,21 @@ var (
 	releaseExit = func() { _ = syscall.Kill(os.Getpid(), syscall.SIGTERM) }
 	// releasePoll spaces base observations; releaseHead is a package-test seam.
 	releasePoll = 2 * time.Minute
-	releaseHead = observeBaseHead
+	// releaseBatch is the one restart window: the first unreleased tip seen
+	// starts it, and when it closes the tip then current is released, so
+	// merges inside it share one restart. Restarts stay at most one per
+	// window and lag at most a window plus a poll; drainForRelease already
+	// waits for live runs.
+	releaseBatch = 15 * time.Minute
+	releaseHead  = observeBaseHead
 )
 
 // tickRelease releases the base tip into this factory once per tip. Only a
 // home with a registered checkout of factoryd's own repository releases
 // itself. A tip with any release record (running, verified or failed) is never
 // started again: a failed release waits for a newer tip or `factoryctl
-// release`. The newest tip wins, so merges in between are released together.
+// release`. The newest tip wins when the releaseBatch window closes, so
+// merges in between are released together.
 func (daemon *Daemon) tickRelease(ctx context.Context) {
 	// The wall clock, not daemon.now: this cadence is not factory time.
 	now := time.Now()
@@ -157,7 +164,15 @@ func (daemon *Daemon) tickRelease(ctx context.Context) {
 			fmt.Fprintf(os.Stderr, "factoryd: release: observe %s: %v\n", selfBase, err)
 			return
 		}
-		if _, _, found, err := daemon.store.Delivery(ctx, "release:"+head); err == nil && !found {
+		_, _, found, err := daemon.store.Delivery(ctx, "release:"+head)
+		if err != nil || found {
+			if err == nil {
+				daemon.releaseSince.Store(0)
+			}
+			return
+		}
+		daemon.releaseSince.CompareAndSwap(0, now.UnixNano())
+		if now.Sub(time.Unix(0, daemon.releaseSince.Load())) >= releaseBatch {
 			_, _ = daemon.Release(ctx, head, true)
 		}
 	}()

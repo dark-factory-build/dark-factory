@@ -260,8 +260,9 @@ func TestReleaseRecordsAFailedUpgradeAndNeverRestarts(t *testing.T) {
 func TestTickReleasesEachNewBaseTipOnce(t *testing.T) {
 	fixture, settle, events := releaseFixture(t)
 	settle()
-	head, poll := releaseHead, releasePoll
-	t.Cleanup(func() { releaseHead, releasePoll = head, poll })
+	head, poll, batch := releaseHead, releasePoll, releaseBatch
+	t.Cleanup(func() { releaseHead, releasePoll, releaseBatch = head, poll, batch })
+	releaseBatch = 0
 	var tip atomic.Value
 	releaseHead = func(_ context.Context, _ *Daemon, root string) (string, error) {
 		if root != "/self-repository" {
@@ -307,6 +308,44 @@ func TestTickReleasesEachNewBaseTipOnce(t *testing.T) {
 		t.Fatalf("newer tip: %q", got)
 	}
 	awaitRelease(t, fixture.daemon, newer, func(value kernel.ProductionDelivery) bool { return value.State == "failed" })
+}
+
+func TestTickBatchesBaseTipsIntoOneRelease(t *testing.T) {
+	fixture, settle, events := releaseFixture(t)
+	settle()
+	head, poll, batch := releaseHead, releasePoll, releaseBatch
+	t.Cleanup(func() { releaseHead, releasePoll, releaseBatch = head, poll, batch })
+	var tip atomic.Value
+	releaseHead = func(context.Context, *Daemon, string) (string, error) { return tip.Load().(string), nil }
+	releasePoll, releaseBatch = 0, time.Hour
+	tick := func(sha string) {
+		t.Helper()
+		tip.Store(sha)
+		fixture.daemon.tickRelease(context.Background())
+		time.Sleep(50 * time.Millisecond)
+	}
+	first, second := strings.Repeat("a", 40), strings.Repeat("b", 40)
+	tick(first)
+	opened := fixture.daemon.releaseSince.Load()
+	if len(events) != 0 || opened == 0 {
+		t.Fatalf("a new tip did not wait: %d events, window %d", len(events), opened)
+	}
+	tick(second)
+	if len(events) != 0 || fixture.daemon.releaseSince.Load() != opened {
+		t.Fatal("a newer tip released early or reopened the window")
+	}
+	// The window closes: the current tip is released once, the passed one never.
+	fixture.daemon.releaseSince.Store(opened - int64(releaseBatch))
+	tick(second)
+	if got := <-events; got != "build /self-repository" {
+		t.Fatalf("closed window: %q", got)
+	}
+	<-events
+	<-events
+	awaitRelease(t, fixture.daemon, second, func(value kernel.ProductionDelivery) bool { return value.Phase == "trial" })
+	if _, _, found, err := fixture.store.Delivery(context.Background(), "release:"+first); err != nil || found {
+		t.Fatalf("passed tip released: %t, %v", found, err)
+	}
 }
 
 func TestSchedulerAdmitsNothingWhileAReleaseHoldsAdmission(t *testing.T) {
