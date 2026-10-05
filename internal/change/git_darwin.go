@@ -147,8 +147,9 @@ func selectGitWithTrust(ctx context.Context, gitExecutable, repositoryRoot, revi
 	}, nil
 }
 
-// refreshTrackingRevision runs only for a fresh Change, before its commit is
-// pinned. Retained Changes and explicit local revisions never refresh source.
+// refreshTrackingRevision runs for a fresh Change before its commit is pinned,
+// and best effort before a retained Change's run so a correction can see the
+// current base (FetchBase). Explicit local revisions never refresh source.
 func refreshTrackingRevision(ctx context.Context, spec gitCommandSpec, revision string, verify func() error) (string, error) {
 	run := func(arguments ...string) ([]byte, error) {
 		spec.arguments = append([]string{"-C", spec.repository}, arguments...)
