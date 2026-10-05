@@ -307,20 +307,21 @@ id and resume from that observation.
 
 ## 3. Publish the change as a branch
 
-factoryd publishes the first pull request of accepted intake work itself
-when its GitHub source issue is in the destination repository and you
-delegated it to exactly one worker task (one issue, one worker; a Linear or
-cross-repository source, or work split over several tasks, is yours): when that task succeeds at
-work revision 1 with a settled head, it runs sections 3 and 4 with the same operation ids, opens the pull
-request from the accepted source (`Closes #N`), records it
-against the worker task and reviews it. Until then the App refuses your
-`publish_commit` and `create_pull_request` on that branch. When it cannot
+factoryd publishes accepted intake work itself when its GitHub source issue
+is in the destination repository and you delegated it to exactly one worker
+task (one issue, one worker; a Linear or cross-repository source, or work
+split over several tasks, is yours): when that task succeeds at work
+revision 1 with a settled head, it runs sections 3 and 4 with the same
+operation ids, opens the pull request from the accepted source (`Closes #N`),
+records it against the worker task and reviews it; when it succeeds again
+after a send-back, it publishes the correction on that pull request's branch
+and replaces its body. The App refuses your `publish_commit` and
+`create_pull_request` on that branch. When it cannot
 (a refused path, a symlink, a file over the bound, an indeterminate write), it
 wakes you once with `Escalated: factoryd cannot publish change CHANGE for task
 TASK: ...` and never retries that Change revision: send the task back to fix
-the cause, or raise it with `attempt request-human`. What follows is for a
-correction on an open pull request (`work_revision` above 1) and for work
-outside intake.
+the cause, or raise it with `attempt request-human`. What follows is for
+the work factoryd does not publish.
 
 The branch is `factory/<first 12 hex of change_id>`. The task's
 `work_revision` from section 1 says which publication this is:

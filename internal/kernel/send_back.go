@@ -67,9 +67,10 @@ func (store *Store) SendBackPublishedReview(ctx context.Context, project Project
 // ChangeBranchClosedToOverseer reports the task of the factory Change branch
 // names, if any, and whether an overseer may not publish it: its task is
 // queued or running, as after a send-back (the head it held is superseded
-// until the task settles again), or it is intake work at work revision 1 that
-// factoryd publishes (factorydPublishesAcceptance) and no pull request carries
-// yet. A branch prefix naming more than one Change is closed.
+// until the task settles again), or it is intake work factoryd publishes
+// (factorydPublishesAcceptance) at work revision 1 or with a pull request:
+// factoryd publishes its corrections too. A branch prefix naming more than
+// one Change is closed.
 func (store *Store) ChangeBranchClosedToOverseer(ctx context.Context, project ProjectID, branch string) (TaskID, bool, error) {
 	tx, err := store.beginRead(ctx)
 	if err != nil {
@@ -80,9 +81,9 @@ func (store *Store) ChangeBranchClosedToOverseer(ctx context.Context, project Pr
 	var closed sql.NullBool
 	var task []byte
 	err = tx.connection.QueryRowContext(ctx, `SELECT COUNT(*), MAX(t.status IN ('queued', 'running')
-		  OR t.work_revision = 1 AND EXISTS (SELECT 1 FROM intake_task_bindings b JOIN intake_acceptances a ON a.id = b.acceptance_id
+		  OR EXISTS (SELECT 1 FROM intake_task_bindings b JOIN intake_acceptances a ON a.id = b.acceptance_id
 		     WHERE b.task_id = c.task_id AND `+factorydPublishesAcceptance+`)
-		     AND NOT EXISTS (SELECT 1 FROM publication_tasks p WHERE p.change_id = c.id OR p.task_id = c.task_id)), MIN(c.task_id)
+		     AND (t.work_revision = 1 OR EXISTS (SELECT 1 FROM publication_tasks p WHERE p.change_id = c.id))), MIN(c.task_id)
 		FROM changes AS c JOIN tasks AS t ON t.id = c.task_id
 		WHERE c.project_id = ? AND substr(lower(hex(c.id)), 1, 12) = ?`,
 		project.Bytes(), strings.ToLower(strings.TrimPrefix(branch, "factory/"))).Scan(&count, &closed, &task)

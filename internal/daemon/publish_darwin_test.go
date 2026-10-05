@@ -21,8 +21,9 @@ import (
 // a replay of a completed id answered from it.
 type fakePublishMaintainer struct {
 	main     string
+	tip      string // the pull request branch's head
 	journal  map[string]json.RawMessage
-	writes   []map[string]any // every publish_commit and create_pull_request sent
+	writes   []map[string]any // every write sent
 	refuse   string           // a path publish_commit refuses
 	loseNext bool             // the next write lands but its response is lost
 }
@@ -31,6 +32,9 @@ func (f *fakePublishMaintainer) call(_ context.Context, name string, arguments m
 	id, _ := arguments["operation_id"].(string)
 	switch name {
 	case "observe_ref":
+		if arguments["branch"] != "main" {
+			return json.Marshal(map[string]any{"branch": arguments["branch"], "head_sha": f.tip})
+		}
 		return json.Marshal(map[string]any{"branch": "main", "head_sha": f.main})
 	case "observe_operation":
 		if result, ok := f.journal[id]; ok {
@@ -50,9 +54,12 @@ func (f *fakePublishMaintainer) call(_ context.Context, name string, arguments m
 				return nil, fmt.Errorf("%w: refused: %s cannot be written", review.ErrRejected, f.refuse)
 			}
 		}
-		result, _ = json.Marshal(map[string]any{"branch": arguments["branch"], "commit_sha": fmt.Sprintf("%x", sha1.Sum([]byte(id))), "parent_sha": arguments["expected_head_sha"]})
+		f.tip = fmt.Sprintf("%x", sha1.Sum([]byte(id)))
+		result, _ = json.Marshal(map[string]any{"branch": arguments["branch"], "commit_sha": f.tip, "parent_sha": arguments["expected_head_sha"]})
 	case "create_pull_request":
 		result, _ = json.Marshal(map[string]any{"number": 31, "url": "https://github.com/team/repo/pull/31", "head_sha": arguments["head_sha"], "base_sha": arguments["base_sha"]})
+	case "update_pull_request_body":
+		result, _ = json.Marshal(map[string]any{"number": arguments["pull_number"], "head_sha": f.tip})
 	default:
 		return nil, fmt.Errorf("unexpected tool %s", name)
 	}
@@ -132,7 +139,7 @@ func publishFixture(t *testing.T, files int, workflow bool) (*dispatchFixture, k
 	candidate := kernel.PublishableChange{Task: task, Change: changeID, Revision: revision, Base: base, Head: head,
 		Accepted: kernel.IntakeAcceptance{SourceRepository: "team/repo", Snapshot: kernel.IntakeIssueSnapshot{GitHubRepositoryID: 42, IssueNumber: 9, Title: "Fix  the\nthing"}}}
 	fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return &publicReviewBackend{} }
-	checkout := func(context.Context, string) (string, func(), error) {
+	checkout := func(context.Context, uint64, string) (string, func(), error) {
 		clone := filepath.Join(t.TempDir(), "clone")
 		supervisorGit(t, git, "clone", "-q", "--shared", registered, clone)
 		return filepath.Join(clone, ".git"), func() {}, nil
@@ -185,6 +192,54 @@ func TestFactorydPublishesASettledIntakeChange(t *testing.T) {
 	}
 	if op := waitForDurableReview(t, fixture.store, c.Task.ProjectID, func(op review.Operation) bool { return op.State == "enqueued" }); op.State != "enqueued" || op.Request.PullNumber != 31 || op.Request.Head != secondCommit {
 		t.Fatalf("review = %+v", op)
+	}
+}
+
+// A correction after a send-back goes on the open pull request's branch head
+// as one commit carrying only what the worker changed since, with its first
+// commit's response lost: the retry publishes nothing twice, replaces the
+// body naming the new head under its closing line, and a further pass writes
+// nothing.
+func TestFactorydPublishesACorrectionOnItsPullRequest(t *testing.T) {
+	fixture, c, source, app, checkout := publishFixture(t, 2, false)
+	ctx := context.Background()
+	root, git := filepath.Dir(source), change.TrustedGitExecutable
+	app.tip = c.Head // the first publication's tree, as the branch carries it
+	if err := os.WriteFile(filepath.Join(root, "f00.txt"), []byte("corrected\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	supervisorGit(t, git, "-C", root, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "commit", "-q", "-am", "correct")
+	c.Head, c.Pull = strings.TrimSpace(supervisorGitOutput(t, git, "-C", root, "rev-parse", "HEAD")), 31
+	tip := app.tip
+	withTip := func(ctx context.Context, pull uint64, head string) (string, func(), error) {
+		gitDir, cleanup, err := checkout(ctx, pull, head)
+		if err == nil {
+			_, err = gitOutput(ctx, gitDir, "-c", "protocol.file.allow=always", "fetch", "--quiet", source, tip)
+		}
+		return gitDir, cleanup, err
+	}
+	app.loseNext = true
+	if err := fixture.daemon.publishChange(ctx, c, "team/repo", source, app.call, withTip); err == nil {
+		t.Fatal("a lost response reported publication")
+	}
+	for range 2 {
+		if err := fixture.daemon.publishChange(ctx, c, "team/repo", source, app.call, withTip); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(app.writes) != 2 || app.writes[0]["name"] != "publish_commit" || app.writes[1]["name"] != "update_pull_request_body" {
+		t.Fatalf("writes = %+v", app.writes)
+	}
+	commit, body := app.writes[0]["arguments"].(map[string]any), app.writes[1]["arguments"].(map[string]any)
+	changes := commit["changes"].([]map[string]any)
+	if commit["operation_id"] != uuid5("dark-factory:"+c.Change.String()+":publish-"+c.Head[:8]+"-1") || commit["expected_head_sha"] != tip || commit["merge_parent_sha"] != nil ||
+		commit["branch"] != "factory/"+c.Change.String()[:12] || len(changes) != 1 || changes[0]["path"] != "f00.txt" {
+		t.Fatalf("correction commit = %+v", commit)
+	}
+	text := body["body"].(string)
+	if body["operation_id"] != uuid5("dark-factory:"+c.Change.String()+":body-"+app.tip[:8]) || body["pull_number"] != uint64(31) ||
+		!strings.Contains(text, "at "+app.tip+": +2 -1 across 3 files from "+c.Base) || !strings.HasSuffix(text, "\n\nCloses #9") {
+		t.Fatalf("corrected body = %+v", body)
 	}
 }
 

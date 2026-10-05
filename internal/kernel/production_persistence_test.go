@@ -758,8 +758,8 @@ func TestPublishableIntakeChangeIsFactorydsUntilPublishedOrFailed(t *testing.T) 
 	if pending, err := store.InFlightReviewOperations(ctx); err != nil || len(pending) != 0 {
 		t.Fatalf("publish failure in flight: %+v %v", pending, err)
 	}
-	// Published under the worker task, it is linked to its Change and is the
-	// overseer's again (a correction publishes on its branch).
+	// Published under the worker task, it is linked to its Change and stays
+	// factoryd's: it publishes the corrections too.
 	published := strings.Repeat("c", 40)
 	pr := ProductionPullRequest{Number: 5, Title: "Improve intake", URL: "https://github.com/example/factory/pull/5", Head: published, HeadRepository: "example/factory", Branch: branch, Base: "main", State: "open", Review: ProductionReview{Head: published, State: "unknown"}}
 	if err := store.RecordPublication(ctx, worker.ProjectID, worker.TaskID, "example/factory", pr, mustTime(t, 71)); err != nil {
@@ -769,30 +769,45 @@ func TestPublishableIntakeChangeIsFactorydsUntilPublishedOrFailed(t *testing.T) 
 	if err := store.writer.QueryRowContext(ctx, `SELECT count(*) FROM publication_tasks WHERE task_id = ? AND change_id = ?`, worker.TaskID.Bytes(), change.ID.Bytes()).Scan(&linked); err != nil || linked != 1 {
 		t.Fatalf("publication linked to its Change: %d %v", linked, err)
 	}
-	if closed() {
-		t.Fatal("a published intake branch is closed to the overseer's correction")
+	if len(candidates()) != 0 || !closed() {
+		t.Fatal("a published intake branch is open to the overseer, or published again")
 	}
-	// Had its pull request failed after its commits published, the overseer
-	// sends it back and the worker settles a correction at a new Change
-	// revision: that is the overseer's to publish, never factoryd's under the
-	// old operation ids.
-	if _, err := store.writer.ExecContext(ctx, `DELETE FROM publication_tasks`); err != nil {
-		t.Fatal(err)
-	}
+	// A send-back settles a correction at a new Change revision behind the
+	// open pull request: factoryd's to publish there, once.
 	task, _, err := store.Task(ctx, worker.TaskID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.SendBackTask(ctx, task.ID, task.Revision, "fix the refused path", mustTime(t, 72)); err != nil {
+	if _, err := store.SendBackTask(ctx, task.ID, task.Revision, "fix the finding", mustTime(t, 72)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.writer.ExecContext(ctx, `UPDATE changes SET revision = revision + 1, head_commit = ? WHERE id = ?`, bytes.Repeat([]byte{3}, 20), change.ID.Bytes()); err != nil {
+	// The settlement keeps the Change revision here, so drop that revision's
+	// publish failure.
+	if _, err := store.writer.ExecContext(ctx, `DELETE FROM production_records WHERE identity = ?`, PublishFailureID(change.ID, found[0].Revision)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.writer.ExecContext(ctx, `UPDATE changes SET updated_at_ms = 73 WHERE id = ?`, change.ID.Bytes()); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.writer.ExecContext(ctx, `UPDATE tasks SET status = 'succeeded', result = 'corrected', completed_at_ms = updated_at_ms WHERE id = ?`, task.ID.Bytes()); err != nil {
 		t.Fatal(err)
 	}
+	found = candidates()
+	if len(found) != 1 || found[0].Pull != 5 || found[0].Head != hex.EncodeToString(head) || !closed() {
+		t.Fatalf("correction candidates = %+v closed=%v", found, closed())
+	}
+	if err := store.RecordCorrectionPublished(ctx, found[0], mustTime(t, 74)); err != nil {
+		t.Fatal(err)
+	}
+	if found := candidates(); len(found) != 0 || !closed() {
+		t.Fatalf("a published correction: candidates=%+v closed=%v", found, closed())
+	}
+	// Had its first pull request never been published, a correction is the
+	// overseer's, never factoryd's under the old operation ids.
+	if _, err := store.writer.ExecContext(ctx, `DELETE FROM publication_tasks; UPDATE changes SET updated_at_ms = 75`); err != nil {
+		t.Fatal(err)
+	}
 	if found := candidates(); len(found) != 0 || closed() {
-		t.Fatalf("a corrected Change is factoryd's: candidates=%+v closed=%v", found, closed())
+		t.Fatalf("an unpublished correction is factoryd's: candidates=%+v closed=%v", found, closed())
 	}
 }
