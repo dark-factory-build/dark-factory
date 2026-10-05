@@ -105,6 +105,35 @@ func TestRunLivenessFailsAttemptThatNeverBecomesReady(t *testing.T) {
 	}
 }
 
+// A Codex run must call the attempt API first, so a TUI that paints without
+// one is stuck and is requeued as never started at the short budget.
+func TestRunLivenessFailsCallFirstAttemptThatPaintsWithoutACall(t *testing.T) {
+	fixture := newDispatchFixture(t)
+	active := prepareActiveAttempt(t, fixture, 211)
+	ctx := context.Background()
+	session, found, err := fixture.store.TerminalSessionForRun(ctx, active.run.ID)
+	if err != nil || !found {
+		t.Fatalf("terminal session: found=%v err=%v", found, err)
+	}
+	started := time.UnixMilli(10_000)
+	attempt := newLiveAttempt(fixture.daemon, active.run.ID, session.ID, nil)
+	attempt.callFirst = true
+	attempt.markStarted(started)
+	attempt.markTerminalOutput(started.Add(firstOutputBudget-time.Second), 900_000)
+	if err := fixture.daemon.registerLiveAttempt(attempt); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { fixture.daemon.unregisterLiveAttempt(active.run.ID, attempt) })
+	fixture.daemon.livenessClock = func() time.Time { return started.Add(firstOutputBudget) }
+	if err := fixture.daemon.enforceRunLiveness(ctx, SupervisorSpec{}); err != nil {
+		t.Fatal(err)
+	}
+	run, _, _ := fixture.store.Run(ctx, active.run.ID)
+	if run.Phase != kernel.RunFinalizing || run.Proposal == nil || run.Proposal.Detail() != kernel.NeverStartedRunDetail {
+		t.Fatalf("painting run without an attempt call = %+v", run)
+	}
+}
+
 // Concurrent attempt API calls can record their timestamps out of order. An
 // older one must not move liveness backwards and report a false stall.
 func TestLivenessTimestampsNeverMoveBackwards(t *testing.T) {

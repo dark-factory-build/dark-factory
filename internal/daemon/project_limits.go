@@ -70,7 +70,7 @@ func (daemon *Daemon) enforceRunLiveness(ctx context.Context, spec SupervisorSpe
 		}
 		_, _, output := attempt.diagnosticSnapshot()
 		detail := kernel.NeverStartedRunDetail
-		if len(output) > 0 || !attempt.neverStarted() {
+		if !attempt.neverStarted() {
 			dropped := len(output) > 512
 			if dropped {
 				output = output[len(output)-512:]
