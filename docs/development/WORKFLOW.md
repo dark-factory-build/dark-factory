@@ -83,17 +83,8 @@ findings and checks in the review body. The publisher attests to that work.
 GitHub authenticates the publisher, but neither the account identity nor the
 verdict marker proves reviewer independence.
 
-To publish through host credentials, put the independent findings in
-`review.md`, set `repository`, `pr` and the full reviewed `head`, then submit a
-formal review bound to that commit:
-
-```sh
-jq -n --arg head "$head" --rawfile report review.md \
-  '{commit_id: $head, event: "COMMENT", body: ($report + "\n\nDark-Factory-Review: allow " + $head)}' > review.json
-gh api "repos/$repository/pulls/$pr/reviews" --input review.json
-```
-
-Use `block` for an unresolved finding or `note` for evidence without approval.
+A review carries `Dark-Factory-Review: allow HEAD`, `block` or `note`
+(`factoryctl review` writes it). Use `block` for an unresolved finding or `note` for evidence without approval.
 A plain GitHub approval without the explicit verdict does not satisfy this
 gate. Pending and dismissed reviews do not count. A block or GitHub
 `CHANGES_REQUESTED` at the same head wins over an allow, regardless of publisher.

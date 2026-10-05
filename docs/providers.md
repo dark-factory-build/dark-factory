@@ -269,7 +269,7 @@ refuses unrecognized configuration rather than silently ignoring it. Account
 configuration and explicit model/effort choices remain intact. Network access
 is retained; this is a local-command filesystem boundary, not a network policy
 or a sandbox for the provider process or MCP servers. Factory Codex launches
-and cold reviews disable Codex computer use, browser use and inherited plugins:
+and factoryd's reviewer disable Codex computer use, browser use and inherited plugins:
 plugins can start desktop helpers even when the two built-in tools are disabled.
 This does not modify the operator's personal Codex configuration. Explicit MCP
 servers, including the Maintainer bridge, remain separate capabilities.
@@ -297,7 +297,7 @@ xcrun cache and Go telemetry warn that they cannot write outside the grants. A C
 Interactive Codex workers override `notify=[]` so a personal notification command
 cannot launch desktop helpers. They retain account configuration and authentication
 through the selected `CODEX_HOME`; this is not blanket configuration isolation.
-The exec-only `--ignore-user-config` flag remains confined to cold reviews.
+The exec-only `--ignore-user-config` flag remains confined to factoryd's reviewer.
 Factory-owned MCP servers and command permissions are supplied explicitly at launch.
 
 ## Run-scoped browser tools

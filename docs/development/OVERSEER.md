@@ -262,12 +262,10 @@ opid() { python3 -c "import sys,uuid; print(uuid.uuid5(uuid.NAMESPACE_URL, 'dark
 #   publish-1, publish-2, ...                  the first publication, one per commit
 #   publish-HEAD8-1, publish-HEAD8-2, ...      a follow-up on top of branch head HEAD8
 #   body-HEAD8                                  replacement body for pull request head HEAD8
-#   review-HEAD8, review-HEAD8-2               the review of pull request head HEAD8
-#   enqueue-HEAD8                              the enqueue of pull request head HEAD8
 ```
 
 `HEAD8` is the first eight hex digits of the commit named, so a follow-up
-commit, its review and its enqueue each get ids of their own.
+commit gets ids of its own.
 
 One id per App write: a change that needs several commits (step 3) uses
 `publish-1`, `publish-2` and so on, one per commit, and the same request under
@@ -450,15 +448,7 @@ completed call `update_pull_request_body` with the PR number and the contents
 of `body.md`. The App adds its own marker and returns the head it observed
 with the replacement; this metadata write has no atomic expected-head
 condition. If that head differs from `HEAD_SHA`, rebuild the cumulative body
-from the returned head under its own `body-HEAD8` operation before review.
-Then fetch the rendered body for the cold review:
-
-```sh
-curl -s "https://api.github.com/repos/OWNER/REPO/pulls/$PR" | python3 -c 'import json,sys; print(json.load(sys.stdin)["body"])' > body.md
-```
-
-A resumed first publication whose `pr` is completed but whose `body.md` is
-not in this run's directory takes its body the same way. Then go to the review.
+from the returned head under its own `body-HEAD8` operation.
 
 For GitHub-imported work, preserve its `FACTORY_SOURCE OWNER/REPO#NUMBER` marker in
 worker tasks and reuse that issue here. Observe its current state before
