@@ -61,8 +61,8 @@ run_resolver() {
     )
 }
 
-# Recovery resolves the immutable tag but saves the publisher from the exact
-# checked-out default-branch commit before switching source trees.
+# Recovery resolves the immutable tag but saves the publisher source from the
+# exact checked-out default-branch commit before switching source trees.
 fresh_workspace recovery
 run_resolver workflow_dispatch refs/heads/main "$main_sha" v1.2.3
 [ "$(git -C "$workspace" rev-parse HEAD)" = "$tagged_sha" ] \
@@ -72,8 +72,10 @@ run_resolver workflow_dispatch refs/heads/main "$main_sha" v1.2.3
     || fail "recovery source SHA"
 publisher=$(value PUBLISHER "$environment_file")
 [ -x "$publisher" ] || fail "trusted publisher is not executable"
-[ "$(sed -n '1p' "$publisher")" = "trusted main publisher" ] \
+[ "$(cat "$(dirname "$publisher")/scripts/publish-release.sh")" = "trusted main publisher" ] \
     || fail "recovery used the tagged publisher"
+grep -Fq "exec $(dirname "$publisher")/release-artifact publish" "$publisher" \
+    || fail "recovery publisher does not run the default-branch build"
 
 # The ordinary tag path keeps using the publisher committed with that tag.
 fresh_workspace push

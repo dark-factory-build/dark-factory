@@ -75,9 +75,14 @@ if [ -n "$expected_source" ] && [ "$source_sha" != "$expected_source" ]; then
     exit 1
 fi
 
+# Recovery publishes with the default branch's Go publisher, not the tag's
+# (an older tag may predate it), so keep that tree before switching sources.
 if [ "$event_name" = workflow_dispatch ]; then
-    publisher=$(mktemp "$runner_temp/dark-factory-publisher.XXXXXX")
-    git show "$event_sha:scripts/publish-release.sh" >"$publisher"
+    publisher_source=$(mktemp -d "$runner_temp/dark-factory-publisher.XXXXXX")
+    git archive "$event_sha" | tar -x -C "$publisher_source"
+    publisher="$publisher_source/publish"
+    printf '#!/bin/sh\nset -e\ngo build -C %s -o %s/release-artifact ./internal/buildinfo/cmd/release-artifact\nexec %s/release-artifact publish "$@"\n' \
+        "$publisher_source" "$publisher_source" "$publisher_source" >"$publisher"
     chmod 0700 "$publisher"
 fi
 

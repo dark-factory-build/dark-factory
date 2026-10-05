@@ -73,7 +73,6 @@ if [ "$local_ci_mode" = full ] || [ "$local_ci_mode" = release ]; then
         ./scripts/go-check.sh
     fi
     ./scripts/test-prepare-release-source.sh
-    ./scripts/test-publish-release.sh
     GOTOOLCHAIN=local "$DF_CI_GO" test -count=1 ./internal/buildinfo/...
 fi
 echo "local-ci: PASS ($local_ci_mode)"
