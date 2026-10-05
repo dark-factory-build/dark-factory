@@ -159,6 +159,10 @@ func (store *Store) updateAgent(ctx context.Context, digest *AttemptDigest, id A
 	}
 	idleChanged := patch.IdlePolicy != nil || patch.IdleAfterSeconds != nil || patch.IdleInstruction != nil || patch.IdleRunBudget != nil
 	if idleChanged {
+		// Only an overseer is woken; a worker's work comes from tasks.
+		if agent.Role == RoleWorker && agent.Idle.Policy == IdleStandingInstruction {
+			return Agent{}, tx.Rollback(fmt.Errorf("%w: only an overseer takes a standing instruction", ErrInvalidValue))
+		}
 		if err := validateIdleRuleForProvider(agent.Provider, agent.Idle); err != nil {
 			return Agent{}, tx.Rollback(err)
 		}

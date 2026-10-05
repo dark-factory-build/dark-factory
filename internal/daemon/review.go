@@ -135,7 +135,7 @@ func (daemon *Daemon) advanceReviewOperations(ctx context.Context, startup bool)
 			_, err = daemon.resumeReview(ctx, operation.Project, op)
 		case op.State == "failed" && stuck && daemon.customerMaintainer():
 			// A failed review is retried once, claimed here and run in the
-			// background; one that cannot be goes to the overseer, once.
+			// background; one that cannot be is escalated to the overseer, once.
 			// Neither leaves the pull request silently stalled.
 			why := "its review failed: " + op.Detail
 			if op.Retryable && op.RetryOf == "" {
@@ -149,7 +149,7 @@ func (daemon *Daemon) advanceReviewOperations(ctx context.Context, startup bool)
 				}
 				why += "\n\nits retry could not start: " + err.Error()
 			}
-			if err = daemon.escalatePull(ctx, operation.Project, operation.Repository, op, why); err == nil {
+			if err = daemon.escalatePull(&op, why); err == nil {
 				op.Handled = true
 				err = durableReviewStore{store: daemon.store, project: operation.Project, repository: operation.Repository, now: daemon.now}.Update(ctx, op)
 			}
@@ -216,7 +216,7 @@ func (daemon *Daemon) resumeReview(ctx context.Context, project kernel.ProjectID
 // owns the published Change. It stays pending, retried each tick, until that
 // task's feedback carries the operation marker at a new work revision; the
 // marker makes a replay idempotent. A head that cannot be routed, more than
-// two repair rounds, or an enqueue the App refused go to the overseer.
+// two repair rounds, or an enqueue the App refused are escalated.
 func (daemon *Daemon) finishReviewRouting(ctx context.Context, project kernel.ProjectID, repository string, op review.Operation) error {
 	at, err := daemon.timestamp()
 	if err != nil {
@@ -235,18 +235,18 @@ func (daemon *Daemon) finishReviewRouting(ctx context.Context, project kernel.Pr
 		return nil
 	}
 	if op.State == "failed" {
-		err = daemon.escalatePull(ctx, project, repository, op, "the Maintainer App did not enqueue it: "+op.Detail)
+		err = daemon.escalatePull(&op, "the Maintainer App did not enqueue it: "+op.Detail)
 	} else {
-		err = daemon.routeSendBack(ctx, project, repository, op, at)
+		err = daemon.routeSendBack(ctx, project, repository, &op, at)
 	}
 	if err != nil {
 		return err
 	}
-	op.RoutePending, op.Escalation, op.UpdatedAt = false, "", daemon.now()
+	op.RoutePending, op.UpdatedAt = false, daemon.now()
 	return durableReviewStore{store: daemon.store, project: project, repository: repository, now: daemon.now}.Update(ctx, op)
 }
 
-func (daemon *Daemon) routeSendBack(ctx context.Context, project kernel.ProjectID, repository string, op review.Operation, at kernel.UnixMillis) error {
+func (daemon *Daemon) routeSendBack(ctx context.Context, project kernel.ProjectID, repository string, op *review.Operation, at kernel.UnixMillis) error {
 	note := op.Detail
 	if op.Submitted && op.Verdict == "request_changes" {
 		note = "This is the review of record for exact head " + op.Request.Head + ". No other verdict on this head supersedes its findings: correct each one.\n\n" + note
@@ -257,35 +257,26 @@ func (daemon *Daemon) routeSendBack(ctx context.Context, project kernel.ProjectI
 	case errors.Is(err, kernel.ErrSuperseded):
 		err = nil
 	case errors.Is(err, kernel.ErrNotFound), errors.Is(err, kernel.ErrInvalidValue):
-		err = daemon.escalatePull(ctx, project, repository, op, "its send-back reached no task:\n\n"+note)
+		err = daemon.escalatePull(op, "its send-back reached no task:\n\n"+note)
 	case err != nil:
 		return err // a running task refuses it until it settles
 	case !strings.Contains(kernel.TaskFeedback(task), "review-operation: "+op.ID+"\n") || task.WorkRevision.Int64() < 2:
 		return errors.New("review: send-back did not move the task")
 	case task.WorkRevision.Int64() > 3:
-		err = daemon.escalatePull(ctx, project, repository, op, "it is past two repair rounds; the latest went back to its task:\n\n"+note)
+		err = daemon.escalatePull(op, "it is past two repair rounds; the latest went back to its task:\n\n"+note)
 	}
 	return err
 }
 
-// escalatePull hands a pull request the pipeline cannot advance to the
-// overseer that published it, once per pull request. A failure, such as no
-// overseer having published it, keeps the route pending for a later tick and
-// is recorded on the operation; a legacy home never escalates.
-func (daemon *Daemon) escalatePull(ctx context.Context, project kernel.ProjectID, repository string, op review.Operation, why string) error {
-	err := errors.New("escalation waits for the factoryd Maintainer connection")
-	at, clockErr := daemon.timestamp()
-	if daemon.customerMaintainer() {
-		err = clockErr
+// escalatePull records why the pipeline cannot advance a pull request on its
+// operation, which makes it an item due to the project's overseer; a legacy
+// home never escalates, so its route stays pending.
+func (daemon *Daemon) escalatePull(op *review.Operation, why string) error {
+	if !daemon.customerMaintainer() {
+		return errors.New("escalation waits for the factoryd Maintainer connection")
 	}
-	if err == nil {
-		err = daemon.store.EscalatePublishedPull(ctx, project, repository, op.Request.PullNumber, fmt.Sprintf("factoryd cannot advance %s#%d at exact head %s: %s", repository, op.Request.PullNumber, op.Request.Head, why), at)
-	}
-	if err != nil && op.Escalation != err.Error() {
-		op.Escalation = err.Error()
-		_ = durableReviewStore{store: daemon.store, project: project, repository: repository, now: daemon.now}.Update(ctx, op)
-	}
-	return err
+	op.Escalation = fmt.Sprintf("factoryd cannot advance %s#%d at exact head %s: %s", op.Request.Repository, op.Request.PullNumber, op.Request.Head, why)
+	return nil
 }
 
 // launchReview keeps publication acknowledgement independent from provider

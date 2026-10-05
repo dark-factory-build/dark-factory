@@ -340,11 +340,7 @@ func TestUpdateAgentForOverseerOnlyControlsWorkerLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	policy, after, instruction, budget := IdleStandingInstruction, uint32(1), "inspect worker work", uint32(2)
-	configured, err := store.UpdateAgent(ctx, worker.ID, worker.Revision, AgentPatch{IdlePolicy: &policy, IdleAfterSeconds: &after, IdleInstruction: &instruction, IdleRunBudget: &budget}, mustTime(t, 42))
-	if err != nil {
-		t.Fatal(err)
-	}
+	configured := worker
 	pause := true
 	paused, err := store.UpdateAgentForOverseer(ctx, keys.AttemptDigest, configured.ID, configured.Revision, AgentPatch{Paused: &pause}, mustTime(t, 43))
 	if err != nil || !paused.Paused || paused.Archived {
@@ -374,7 +370,7 @@ func TestUpdateAgentForOverseerOnlyControlsWorkerLifecycle(t *testing.T) {
 }
 
 func TestOperatorIdlePolicyReplacesRuleAndRejectsStaleOrInvalid(t *testing.T) {
-	store, _, _, worker := newAdmissionStore(t, RoleWorker, 2)
+	store, _, _, worker := newAdmissionStore(t, RoleOrchestrator, 2)
 	defer store.Close()
 	ctx := context.Background()
 	policy, after, instruction, budget := IdleStandingInstruction, uint32(60), "review retained changes", uint32(3)
@@ -392,7 +388,7 @@ func TestOperatorIdlePolicyReplacesRuleAndRejectsStaleOrInvalid(t *testing.T) {
 }
 
 func TestIdlePolicyWriteUsesProviderDeliveryBound(t *testing.T) {
-	store, _, project, worker := newAdmissionStore(t, RoleWorker, 2)
+	store, _, project, worker := newAdmissionStore(t, RoleOrchestrator, 2)
 	defer store.Close()
 	ctx := context.Background()
 	policy, after, budget := IdleStandingInstruction, uint32(60), uint32(3)
@@ -409,7 +405,7 @@ func TestIdlePolicyWriteUsesProviderDeliveryBound(t *testing.T) {
 	if err != nil || updated.Idle.Instruction != boundary {
 		t.Fatalf("Codex boundary instruction = %+v, %v", updated.Idle, err)
 	}
-	shell, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 8), ProjectID: project.ID, Name: "shell", Role: RoleWorker, Provider: ProviderShell, ToolBudgetLimit: 5}, mustTime(t, 8))
+	shell, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 8), ProjectID: project.ID, Name: "shell", Role: RoleOrchestrator, Provider: ProviderShell, ToolBudgetLimit: 5}, mustTime(t, 8))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -420,10 +416,10 @@ func TestIdlePolicyWriteUsesProviderDeliveryBound(t *testing.T) {
 }
 
 func TestClaudeIdlePolicyWriteUsesEncodedDeliveryBound(t *testing.T) {
-	store, _, project, _ := newAdmissionStore(t, RoleWorker, 2)
+	store, _, project, _ := newAdmissionStore(t, RoleOrchestrator, 2)
 	defer store.Close()
 	ctx := context.Background()
-	claude, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 10), ProjectID: project.ID, Name: "claude", Role: RoleWorker, Provider: ProviderClaudeCode, ToolBudgetLimit: 5}, mustTime(t, 10))
+	claude, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 10), ProjectID: project.ID, Name: "claude", Role: RoleOrchestrator, Provider: ProviderClaudeCode, ToolBudgetLimit: 5}, mustTime(t, 10))
 	if err != nil {
 		t.Fatal(err)
 	}

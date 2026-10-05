@@ -60,75 +60,6 @@ func idleRuleFromRow(policy string, after int64, instruction string, budget, use
 	return rule, validateIdleRule(rule)
 }
 
-// EnqueueIdleInstructions enqueues each idle agent's standing instruction to
-// itself once its quiet spell has passed, and spends one of its idle runs
-// for it, in one transaction. Idle means the agent itself could take work
-// (not paused, tool budget left; the factory's dispatch switch and capacity
-// stay admission's to apply once the task is queued; the daemon defers
-// automatic enqueue calls while dispatch is paused) and has no queued or
-// running task, so the rule never stacks on work; a run in flight is a
-// running task, which the durable checks enforce. The quiet spell starts at
-// the later of the agent's last edit and its
-// last run's end, so editing the rule restarts the clock. An agent with any
-// queued or running task is left alone, and so is a paused one; a budget
-// is retained only as legacy configuration, never as an admission ceiling.
-// The agent revision is the same CAS the console's enqueue uses, so a human
-// instruction landing in the same window wins or loses cleanly.
-func (store *Store) EnqueueIdleInstructions(ctx context.Context, at UnixMillis) ([]Task, error) {
-	tx, err := store.beginUncheckedWrite(ctx)
-	if err != nil {
-		return nil, err
-	}
-	defer tx.Close()
-	rows, err := tx.connection.QueryContext(ctx, `SELECT `+agentColumns+` FROM agents
-	WHERE role = 'worker' AND idle_policy = 'standing_instruction' AND paused = 0 AND archived = 0 AND tool_calls_used < tool_budget_limit
-		  AND NOT EXISTS (SELECT 1 FROM tasks WHERE assigned_agent_id = agents.id AND status IN ('queued', 'running'))
-		  AND MAX(updated_at_ms, COALESCE((SELECT MAX(terminal_at_ms) FROM runs WHERE agent_id = agents.id), 0)) + idle_after_seconds * 1000 <= ?
-		ORDER BY id`, at.Int64())
-	if err != nil {
-		return nil, tx.Rollback(err)
-	}
-	var due []Agent
-	for rows.Next() {
-		agent, found, err := scanAgent(rows)
-		if err != nil || !found {
-			rows.Close()
-			if err == nil {
-				err = ErrCorruptState
-			}
-			return nil, tx.Rollback(err)
-		}
-		due = append(due, agent)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, tx.Rollback(err)
-	}
-	if len(due) == 0 {
-		return nil, tx.Rollback(nil)
-	}
-	// A no-op poll needs no full history scan. The reserved transaction keeps
-	// these candidates unchanged until validation precedes the first write.
-	if err := validateDurableControls(ctx, tx.connection); err != nil {
-		return nil, tx.Rollback(err)
-	}
-	var tasks []Task
-	for _, agent := range due {
-		task, err := enqueueStandingTask(ctx, tx.connection, agent, at)
-		if err != nil {
-			return nil, tx.Rollback(err)
-		}
-		tasks = append(tasks, task)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return nil, err
-	}
-	return tasks, nil
-}
-
-func enqueueStandingTask(ctx context.Context, connection *sql.Conn, agent Agent, at UnixMillis) (Task, error) {
-	return enqueueStandingTaskWithBody(ctx, connection, agent, agent.Idle.Instruction, at)
-}
-
 func enqueueStandingTaskWithBody(ctx context.Context, connection *sql.Conn, agent Agent, body string, at UnixMillis) (Task, error) {
 	var ids [2][IDBytes]byte
 	for index := range ids {
@@ -141,7 +72,7 @@ func enqueueStandingTaskWithBody(ctx context.Context, connection *sql.Conn, agen
 	}
 	taskID, _ := TaskIDFromBytes(ids[0][:])
 	incarnationID, _ := IncarnationIDFromBytes(ids[1][:])
-	spec := NewTask{ID: taskID, ProjectID: agent.ProjectID, AssignedAgentID: agent.ID, IncarnationID: incarnationID, Title: "Standing instruction", Body: body, Priority: 0}
+	spec := NewTask{ID: taskID, ProjectID: agent.ProjectID, AssignedAgentID: agent.ID, IncarnationID: incarnationID, Title: overseerWakeTitle, Body: body, Priority: overseerWakePriority}
 	if err := validateNewTask(spec); err != nil {
 		return Task{}, err
 	}

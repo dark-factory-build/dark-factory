@@ -79,7 +79,7 @@ identity. Read that prior task first, then each named worker task, with
 `overseer status --task ID` and no `--head`: admission itself appends journal
 events, so an enqueue-time head is not a valid read fence. Retain the first
 returned current head for related text/history reads. `mode=full` is the
-explicit initial/pruned-cursor recovery signal. Do not reconstruct an unchanged
+explicit initial/overflow recovery signal. Do not reconstruct an unchanged
 project merely because the overseer woke. Status returns four entries from each collection. When
 `next_offset` is set, continue with `overseer status --offset N --head HEAD`; reuse
 the returned head exactly. A stale head restarts at page one. Use `overseer status
@@ -135,10 +135,12 @@ session idle waiting for that event. `attempt succeed` durably records the
 pending gate, ends the run, and releases the overseer lane so the next event
 can wake a fresh observation. A run that waits instead is cancelled at the
 30-minute overseer deadline without recording its checkpoint. With a standing
-instruction configured, worker completion, questions, and explicit
-interventions wake you again.
-Events received while you are queued or running remain pending for the next
-supervision task. A factory-wide overseer slot lets you supervise alongside
+instruction configured, factoryd keeps one wake task at the head of your
+queue while any item needs you: a finished, blocked or failed worker task, an
+unanswered worker question, unpublished or corrected work, or a pull request
+factoryd escalated. An item you leave unhandled is woken again at most three
+times, 30 minutes apart, until it changes. A Change whose task is queued or
+running (sent back) cannot be published. A factory-wide overseer slot lets you supervise alongside
 workers even when worker capacity is one.
 
 Set or replace the overseer's standing instruction through SUPERVISION → WHEN

@@ -66,6 +66,16 @@ func (daemon *Daemon) attemptMaintainer(ctx context.Context, call api.Call) api.
 			return failure("denied")
 		}
 		request.Params = encoded
+		if params.Name == "publish_commit" || params.Name == "create_pull_request" {
+			var branch string
+			_ = json.Unmarshal(params.Arguments["branch"], &branch)
+			_ = json.Unmarshal(params.Arguments["head"], &branch)
+			if inWork, err := daemon.store.ChangeBranchInWork(ctx, authority.ProjectID, branch); err != nil {
+				return failure("unavailable")
+			} else if inWork {
+				return failure("denied") // a sent-back Change is not publishable
+			}
+		}
 		var repository, source string
 		if json.Unmarshal(params.Arguments["repository"], &repository) != nil || repository == "" {
 			return failure("invalid")

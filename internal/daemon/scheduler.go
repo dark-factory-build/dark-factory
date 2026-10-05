@@ -141,10 +141,9 @@ func (daemon *Daemon) RunScheduler(ctx context.Context, spec SupervisorSpec) err
 						}
 					}
 				}
-				// Worker idle rules and event-driven overseer wakeups are enqueued
-				// on enabled ticks ahead of the probe that admits them. Pausing
-				// defers automatic tasks without consuming their causal events. A round that
-				// fails is retried next tick; the admission probe stays exact.
+				// Overseer wakes are derived on enabled ticks ahead of the probe
+				// that admits them; pausing defers them and loses nothing, since the
+				// rule is level-triggered. A failed round is retried next tick.
 				if err := daemon.enforceRunLiveness(ownedCtx, spec); err != nil {
 					// Cancellation can interrupt the read before the Done arm runs.
 					// Preserve unrelated failures even when shutdown races with them.
@@ -154,7 +153,6 @@ func (daemon *Daemon) RunScheduler(ctx context.Context, spec SupervisorSpec) err
 					stopping = true
 					cancel()
 				} else if at, err := daemon.timestamp(); err == nil && dispatchEnabled() {
-					_, _ = daemon.store.EnqueueIdleInstructions(ownedCtx, at)
 					_, _ = daemon.store.EnqueueOverseerWakeups(ownedCtx, at)
 					if _, promoteErr := daemon.store.PromoteQueuedContinuations(ownedCtx, at); promoteErr != nil {
 						if cancellation := ownedCtx.Err(); cancellation == nil || !schedulerOnlyCancellation(promoteErr, cancellation) {

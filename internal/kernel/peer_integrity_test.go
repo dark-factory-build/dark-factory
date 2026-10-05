@@ -66,9 +66,6 @@ func TestV6MigrationPreservesSendBackAndSupervision(t *testing.T) {
 	if _, err := store.UpdateAgent(ctx, agent.ID, agent.Revision, AgentPatch{IdlePolicy: &policy, IdleAfterSeconds: &after, IdleRunBudget: &budget, IdleInstruction: &instruction}, mustTime(t, 92)); err != nil {
 		t.Fatal(err)
 	}
-	if tasks, err := store.EnqueueOverseerWakeups(ctx, mustTime(t, 2000)); err != nil || len(tasks) != 1 {
-		t.Fatalf("wake = %v, %v", tasks, err)
-	}
 	path := storePath(t, store)
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
