@@ -6,9 +6,27 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"testing"
 
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 )
+
+func TestCreateTestStoreCanonicalRebuildDoesNotContendWithRetainedWriter(t *testing.T) {
+	for iteration := 0; iteration < 20; iteration++ {
+		path := filepath.Join(t.TempDir(), "kernel.sqlite")
+		at, err := kernel.NewUnixMillis(int64(iteration + 1))
+		if err != nil {
+			t.Fatal(err)
+		}
+		store, err := createTestStore(context.Background(), path, kernel.FactoryConfig{Capacity: 2}, at)
+		if err != nil {
+			t.Fatalf("iteration %d: create test store: %v", iteration, err)
+		}
+		if err := store.Close(); err != nil {
+			t.Fatalf("iteration %d: close test store: %v", iteration, err)
+		}
+	}
+}
 
 func createTestStore(ctx context.Context, path string, config kernel.FactoryConfig, at kernel.UnixMillis) (*kernel.Store, error) {
 	parent, err := filepath.EvalSymlinks(filepath.Dir(path))
