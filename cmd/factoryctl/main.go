@@ -2242,6 +2242,9 @@ func writeFailure(stderr io.Writer, kind commandKind, err error) {
 		message = "factoryctl: " + subject + " timed out\n"
 	case errors.As(err, &remote):
 		message = "factoryctl: " + subject + ": " + remote.Error() + "\n"
+		if kind == commandAttemptSource && remote.Code() == api.RemoteUnauthorized {
+			message += "factoryctl: attempt source is for the overseer; you are a worker: your task's source is your current checkout, so do not call attempt source and continue the task\n"
+		}
 	}
 	_, _ = io.WriteString(stderr, message)
 }
