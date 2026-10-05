@@ -309,7 +309,7 @@ func TestVerifiedConnectionCancellationRetainsSealedWriter(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			path, _ := walSnapshotFixture(t, "")
-			store, err := openOperationalTestStore(path)
+			store, err := Open(context.Background(), path)
 			if err != nil {
 				t.Fatalf("open operational store: %v", err)
 			}
@@ -357,7 +357,7 @@ func TestVerifiedConnectionNonCancellationFailuresDiscardSealedWriter(t *testing
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			path, _ := walSnapshotFixture(t, "")
-			store, err := openOperationalTestStore(path)
+			store, err := Open(context.Background(), path)
 			if err != nil {
 				t.Fatalf("open operational store: %v", err)
 			}
@@ -380,7 +380,7 @@ func TestVerifiedConnectionNonCancellationFailuresDiscardSealedWriter(t *testing
 
 func TestVerifiedConnectionConfigurationMismatchDiscardsSealedWriter(t *testing.T) {
 	path, _ := walSnapshotFixture(t, "")
-	store, err := openOperationalTestStore(path)
+	store, err := Open(context.Background(), path)
 	if err != nil {
 		t.Fatalf("open operational store: %v", err)
 	}

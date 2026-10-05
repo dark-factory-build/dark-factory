@@ -20,7 +20,7 @@ import (
 // admission. A second store holds that lock to make the window deterministic.
 func TestCallerCancellationDuringBeginKeepsTheRetainedWriterSet(t *testing.T) {
 	path, _ := walSnapshotFixture(t, "")
-	store, err := openOperationalTestStore(path)
+	store, err := Open(context.Background(), path)
 	if err != nil {
 		t.Fatalf("open operational store: %v", err)
 	}

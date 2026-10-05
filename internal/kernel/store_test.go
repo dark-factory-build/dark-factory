@@ -752,7 +752,7 @@ func TestConcurrentOpenAndValidWriterReturnsBoundedSnapshotFailure(t *testing.T)
 	close(start)
 	changed := 0
 	for index := 0; index < 300; index++ {
-		opened, err := Open(ctx, path)
+		opened, err := openStrict(ctx, path)
 		if errors.Is(err, errDatabaseSnapshotChanged) {
 			changed++
 			continue
@@ -889,7 +889,10 @@ func corruptSQL(t *testing.T, store *Store, statement string, args ...any) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer discardConnection(connection)
+	defer connection.Close()
+	// The fixed connection set cannot replace a poisoned connection, so
+	// restore the pragmas instead of discarding it.
+	defer connection.ExecContext(context.Background(), `PRAGMA ignore_check_constraints = OFF; PRAGMA foreign_keys = ON`)
 	if _, err := connection.ExecContext(context.Background(), `PRAGMA foreign_keys = OFF`); err != nil {
 		t.Fatal(err)
 	}

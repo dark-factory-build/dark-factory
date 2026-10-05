@@ -260,7 +260,7 @@ func TestOpenValidatesWALOnDisposableCopy(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			path, _ := walSnapshotFixture(t, mutation)
 			before := captureSQLiteSet(t, path)
-			if _, err := Open(context.Background(), path); err == nil {
+			if _, err := openStrict(context.Background(), path); err == nil {
 				t.Fatal("Open accepted invalid WAL state")
 			}
 			assertSQLiteSetUnchanged(t, path, before)

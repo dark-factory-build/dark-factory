@@ -153,7 +153,7 @@ func TestOpenRejectsForeignPathsWithoutModification(t *testing.T) {
 		if err := os.Symlink(target, link); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := Open(ctx, link); !errors.Is(err, ErrForeignDatabase) {
+		if _, err := openStrict(ctx, link); !errors.Is(err, ErrForeignDatabase) {
 			t.Fatalf("Open error = %v", err)
 		}
 	})
@@ -298,9 +298,17 @@ func TestLiteralSQLiteInternalPrefixCoversEveryInspectionPath(t *testing.T) {
 }
 
 func TestConnectionsVerifyExactPolicyAndDiscardPoison(t *testing.T) {
-	store, path := newTestStore(t)
-	defer store.Close()
+	created, path := newTestStore(t)
+	if err := created.Close(); err != nil {
+		t.Fatal(err)
+	}
 	ctx := context.Background()
+	// Replacing a poisoned connection needs the unfixed pools of openStrict.
+	store, err := openStrict(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
 	for _, pool := range []*sql.DB{store.writer, store.readers} {
 		for name, poison := range map[string]string{
 			"foreign_keys": `PRAGMA foreign_keys = OFF`,

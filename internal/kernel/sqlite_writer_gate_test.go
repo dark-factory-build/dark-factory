@@ -150,7 +150,7 @@ func TestStoreCloseRetainsAuthorityForCheckedOutConnection(t *testing.T) {
 	}
 	path := mustCanonicalTestDatabasePath(t, filepath.Join(t.TempDir(), "kernel.db"))
 	writeSidecar(t, path, image, 0o600)
-	store, err := openOperationalTestStore(path)
+	store, err := Open(context.Background(), path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -217,7 +217,7 @@ func testStoreCloseUncertaintyRetainsExactAuthority(t *testing.T, failureKind st
 	}
 	path := filepath.Join(home, "kernel.db")
 	writeSidecar(t, path, image, 0o600)
-	store, err := openOperationalTestStore(path)
+	store, err := Open(context.Background(), path)
 	if err != nil {
 		t.Fatal(err)
 	}

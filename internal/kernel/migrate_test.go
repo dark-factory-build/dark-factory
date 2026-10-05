@@ -737,7 +737,7 @@ func testLegacyHomeWithBrokenDurableStateRollsBackAndRefuses(t *testing.T, versi
 	// runs, and fails only the durable-control pass inside the transaction.
 	path, before := newLegacyDatabase(t, false, version, `UPDATE factory SET next_invalidation_sequence = next_invalidation_sequence + 5 WHERE singleton = 1`)
 	evidence := captureDatabaseEvidence(t, path)
-	store, err := Open(ctx, path)
+	store, err := openStrict(ctx, path)
 	if store != nil {
 		store.Close()
 	}

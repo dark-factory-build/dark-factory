@@ -6,24 +6,13 @@ import (
 	"database/sql"
 	sqldriver "database/sql/driver"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 )
-
-func openOperationalTestStore(path string) (*Store, error) {
-	home, err := os.Open(filepath.Dir(path))
-	if err != nil {
-		return nil, err
-	}
-	database, err := os.Open(path)
-	if err != nil {
-		return nil, errors.Join(err, home.Close())
-	}
-	return OpenOperational(context.Background(), path, home, database)
-}
 
 func TestOperationalOpenCancellationOwnsPhysicalConnectContext(t *testing.T) {
 	path, _ := walSnapshotFixture(t, "")
@@ -172,7 +161,7 @@ func TestOpenRequiresCanonicalOwnerOnlyDatabaseParent(t *testing.T) {
 		root := filepath.Dir(mustCanonicalTestDatabasePath(t, filepath.Join(t.TempDir(), "placeholder")))
 		component := filepath.Join(root, "not-a-directory")
 		writeSidecar(t, component, []byte("sentinel"), 0o600)
-		if _, err := Open(context.Background(), filepath.Join(component, "kernel.db")); !errors.Is(err, ErrForeignDatabase) {
+		if _, err := openStrict(context.Background(), filepath.Join(component, "kernel.db")); !errors.Is(err, ErrForeignDatabase) {
 			t.Fatalf("non-directory parent error = %v", err)
 		}
 	})
@@ -284,7 +273,7 @@ func TestOpenRefusesDatabaseAndSidecarReplacementDuringPhysicalConnect(t *testin
 				sqliteConnectHook = nil
 				sqliteActivationHook = nil
 			}()
-			store, err := openOperationalTestStore(path)
+			store, err := Open(context.Background(), path)
 			if store != nil {
 				_ = store.Close()
 				t.Fatal("Open returned a Store after a retained sqlite file was replaced")
@@ -312,7 +301,7 @@ func TestStorePinsFiniteConnectionsAndRefusesReplacementUnderPressure(t *testing
 		t.Fatal(err)
 	}
 	writeSidecar(t, path, image, 0o600)
-	store, err := openOperationalTestStore(path)
+	store, err := Open(context.Background(), path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -382,7 +371,7 @@ func TestStoreRefusesPhysicalReconnectAfterDiscard(t *testing.T) {
 	}
 	path := filepath.Join(home, "kernel.db")
 	writeSidecar(t, path, image, 0o600)
-	store, err := openOperationalTestStore(path)
+	store, err := Open(context.Background(), path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -450,7 +439,7 @@ func TestFailedConfiguredActivationLeavesPairedSidecarEvidence(t *testing.T) {
 		return injected
 	}
 	defer func() { sqliteActivationHook = nil }()
-	store, err := openOperationalTestStore(path)
+	store, err := Open(context.Background(), path)
 	if store != nil || !errors.Is(err, injected) {
 		t.Fatalf("faulted activation = %v, %v", store, err)
 	}
@@ -460,4 +449,167 @@ func TestFailedConfiguredActivationLeavesPairedSidecarEvidence(t *testing.T) {
 			t.Fatalf("faulted activation sidecar %s = %v, %v", suffix, info, statErr)
 		}
 	}
+}
+
+// Open activates a test database through the production operational path.
+func Open(ctx context.Context, path string) (*Store, error) {
+	home, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return nil, err
+	}
+	database, err := os.Open(path)
+	if err != nil {
+		return nil, errors.Join(err, home.Close())
+	}
+	return OpenOperational(ctx, path, home, database)
+}
+
+func closeFailedActivation(files *databaseFiles, cause error) error {
+	return errors.Join(cause, files.Close())
+}
+
+func openDatabaseFiles(path string) (_ *databaseFiles, resultErr error) {
+	authority, err := openDatabasePathAuthority(path)
+	if err != nil {
+		return nil, err
+	}
+	files := &databaseFiles{authority: authority, directory: authority.directory()}
+	defer func() {
+		if resultErr != nil {
+			resultErr = errors.Join(resultErr, files.Close())
+		}
+	}()
+	if err := populateDatabaseFiles(files, path, nil); err != nil {
+		return nil, err
+	}
+	return files, nil
+}
+func openPools(path string) (*Store, error) {
+	writer, err := openPool(path, 1)
+	if err != nil {
+		return nil, err
+	}
+	readers, err := openPool(path, maxReaders)
+	if err != nil {
+		return nil, errors.Join(err, writer.Close())
+	}
+	writerGate := make(chan struct{}, 1)
+	writerGate <- struct{}{}
+	store := &Store{writer: writer, readers: readers, writerGate: writerGate}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Duration(busyMilliseconds)*time.Millisecond)
+	defer cancel()
+	writerConnection, err := store.writerConnection(ctx)
+	if err != nil {
+		return nil, errors.Join(err, store.Close())
+	}
+	if err := writerConnection.Close(); err != nil {
+		return nil, errors.Join(fmt.Errorf("return initial writer connection: %w", err), store.Close())
+	}
+	readerConnection, err := store.readerConnection(ctx)
+	if err != nil {
+		return nil, errors.Join(err, store.Close())
+	}
+	if err := readerConnection.Close(); err != nil {
+		return nil, errors.Join(fmt.Errorf("return initial reader connection: %w", err), store.Close())
+	}
+	return store, nil
+}
+
+// openStrict is the non-retaining open: it validates with the strict snapshot
+// preflight and releases its file descriptors, so tests can assert that a
+// refusal leaves every byte untouched and replace poisoned connections.
+func openStrict(ctx context.Context, path string) (*Store, error) {
+	files, err := openDatabaseFiles(path)
+	if err != nil {
+		return nil, err
+	}
+	return openStrictFiles(ctx, path, files)
+}
+
+const retainBinding = false
+
+func openStrictFiles(ctx context.Context, absolutePath string, files *databaseFiles) (*Store, error) {
+	if err := files.refreshPinnedInfo(); err != nil {
+		return nil, errors.Join(err, files.Close())
+	}
+	if files.allowShortSHM {
+		if err := inspectOperationalSnapshot(ctx, absolutePath, files); err != nil {
+			return nil, errors.Join(err, files.Close())
+		}
+	} else {
+		snapshot, err := preflightExisting(ctx, files)
+		if err != nil {
+			return nil, errors.Join(err, files.Close())
+		}
+		if err := files.verifySnapshot(ctx, snapshot); err != nil {
+			return nil, errors.Join(err, files.Close())
+		}
+	}
+	if err := files.recheckPaths(); err != nil {
+		return nil, errors.Join(err, files.Close())
+	}
+	hadWAL := files.wal != nil
+	if !hadWAL {
+		if err := files.reservePrivateSHM(); err != nil {
+			return nil, errors.Join(err, files.Close())
+		}
+	}
+	var store *Store
+	var err error
+	if retainBinding {
+		store = newStore()
+		store.pathBinding = files
+		err = openFixedPools(ctx, store, absolutePath, files.recheckActivationBindings)
+	} else {
+		store, err = openPools(absolutePath)
+	}
+	if err != nil {
+		// SQLite activation may have created or changed sidecars. Without an
+		// exact live creation descriptor they remain visible evidence; cleanup
+		// must never guess ownership from a pathname.
+		if retainBinding {
+			if store.pathBinding != nil {
+				return store, err
+			}
+			return nil, err
+		}
+		return nil, closeFailedActivation(files, err)
+	}
+	if sqlitePostPoolHook != nil {
+		if err := sqlitePostPoolHook("before sidecar refresh"); err != nil {
+			return closeRejectedOpen(store, files, err)
+		}
+	}
+	if !hadWAL {
+		if files.wal == nil {
+			files.wal, err = files.openDatabaseFile(files.main.name+"-wal", "WAL", 0, maxSQLiteWALSize)
+			if err != nil {
+				return closeRejectedOpen(store, files, err)
+			}
+		}
+		files.shm.minimum = walIndexRegionSize
+	}
+	if err := store.migrateLegacy(ctx); err != nil {
+		return closeRejectedOpen(store, files, err)
+	}
+	if err := files.refreshPinnedInfo(); err != nil {
+		return closeRejectedOpen(store, files, err)
+	}
+	if err := store.validateOpen(ctx); err != nil {
+		return closeRejectedOpen(store, files, err)
+	}
+	if sqliteActivationHook != nil {
+		if err := sqliteActivationHook("after validation"); err != nil {
+			return closeRejectedOpen(store, files, err)
+		}
+	}
+	if err := files.recheckPaths(); err != nil {
+		return closeRejectedOpen(store, files, err)
+	}
+	if !retainBinding {
+		if err := files.Close(); err != nil {
+			return nil, errors.Join(err, store.Close())
+		}
+	}
+	return store, nil
 }

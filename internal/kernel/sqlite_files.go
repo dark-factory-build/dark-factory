@@ -36,12 +36,6 @@ var sqliteActivationHook func(string) error
 // Production activation has no hook.
 var sqlitePostPoolHook func(string) error
 
-// Open validates and activates one canonical absolute database path for fresh
-// construction, tests, and other callers that do not retain a home lease.
-func Open(ctx context.Context, absolutePath string) (*Store, error) {
-	return openExisting(ctx, absolutePath, false)
-}
-
 // OpenOperational validates and activates one canonical absolute database
 // path bound to the supplied retained home and main-database descriptors. It
 // takes ownership of both descriptors and retains the exact path/file
@@ -54,7 +48,7 @@ func OpenOperational(ctx context.Context, absolutePath string, home, database *o
 	if err != nil {
 		return nil, err
 	}
-	return openExistingFiles(ctx, absolutePath, files, true)
+	return openExistingFiles(ctx, absolutePath, files)
 }
 
 // InspectOperational validates one SQLite-consistent snapshot of an
@@ -70,15 +64,7 @@ func InspectOperational(ctx context.Context, absolutePath string, home, database
 	return inspectOperationalSnapshot(ctx, absolutePath, files)
 }
 
-func openExisting(ctx context.Context, absolutePath string, retainBinding bool) (*Store, error) {
-	files, err := openDatabaseFiles(absolutePath)
-	if err != nil {
-		return nil, err
-	}
-	return openExistingFiles(ctx, absolutePath, files, retainBinding)
-}
-
-func openExistingFiles(ctx context.Context, absolutePath string, files *databaseFiles, retainBinding bool) (*Store, error) {
+func openExistingFiles(ctx context.Context, absolutePath string, files *databaseFiles) (*Store, error) {
 	if err := files.refreshPinnedInfo(); err != nil {
 		return nil, errors.Join(err, files.Close())
 	}
@@ -104,26 +90,16 @@ func openExistingFiles(ctx context.Context, absolutePath string, files *database
 			return nil, errors.Join(err, files.Close())
 		}
 	}
-	var store *Store
-	var err error
-	if retainBinding {
-		store = newStore()
-		store.pathBinding = files
-		err = openFixedPools(ctx, store, absolutePath, files.recheckActivationBindings)
-	} else {
-		store, err = openPools(absolutePath)
-	}
-	if err != nil {
+	store := newStore()
+	store.pathBinding = files
+	if err := openFixedPools(ctx, store, absolutePath, files.recheckActivationBindings); err != nil {
 		// SQLite activation may have created or changed sidecars. Without an
 		// exact live creation descriptor they remain visible evidence; cleanup
 		// must never guess ownership from a pathname.
-		if retainBinding {
-			if store.pathBinding != nil {
-				return store, err
-			}
-			return nil, err
+		if store.pathBinding != nil {
+			return store, err
 		}
-		return nil, closeFailedActivation(files, err)
+		return nil, err
 	}
 	if sqlitePostPoolHook != nil {
 		if err := sqlitePostPoolHook("before sidecar refresh"); err != nil {
@@ -132,6 +108,7 @@ func openExistingFiles(ctx context.Context, absolutePath string, files *database
 	}
 	if !hadWAL {
 		if files.wal == nil {
+			var err error
 			files.wal, err = files.openDatabaseFile(files.main.name+"-wal", "WAL", 0, maxSQLiteWALSize)
 			if err != nil {
 				return closeRejectedOpen(store, files, err)
@@ -155,11 +132,6 @@ func openExistingFiles(ctx context.Context, absolutePath string, files *database
 	}
 	if err := files.recheckPaths(); err != nil {
 		return closeRejectedOpen(store, files, err)
-	}
-	if !retainBinding {
-		if err := files.Close(); err != nil {
-			return nil, errors.Join(err, store.Close())
-		}
 	}
 	return store, nil
 }
@@ -217,10 +189,6 @@ func inspectOperationalSnapshot(ctx context.Context, path string, files *databas
 		return err
 	}
 	return nil
-}
-
-func closeFailedActivation(files *databaseFiles, cause error) error {
-	return errors.Join(cause, files.Close())
 }
 
 func closeRejectedOpen(store *Store, files *databaseFiles, cause error) (*Store, error) {
@@ -459,23 +427,6 @@ func (authority *databasePathAuthority) Close() error {
 		}
 	}
 	return result
-}
-
-func openDatabaseFiles(path string) (_ *databaseFiles, resultErr error) {
-	authority, err := openDatabasePathAuthority(path)
-	if err != nil {
-		return nil, err
-	}
-	files := &databaseFiles{authority: authority, directory: authority.directory()}
-	defer func() {
-		if resultErr != nil {
-			resultErr = errors.Join(resultErr, files.Close())
-		}
-	}()
-	if err := populateDatabaseFiles(files, path, nil); err != nil {
-		return nil, err
-	}
-	return files, nil
 }
 
 func openBoundDatabaseFiles(path string, retainedHome, retainedMain *os.File, allowShortSHM bool) (_ *databaseFiles, resultErr error) {
