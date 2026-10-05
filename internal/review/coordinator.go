@@ -18,6 +18,10 @@ var shaRE = regexp.MustCompile(`^[0-9a-f]{40}$`)
 // same operation cannot succeed.
 var ErrRejected = errors.New("review: Maintainer rejected operation")
 
+// enqueueRefusedFor bounds resending an enqueue GitHub refused before
+// executing; it matches the daemon's reviewEscalateAfter.
+const enqueueRefusedFor = 30 * time.Minute
+
 type Request struct {
 	Repository string
 	PullNumber uint64
@@ -282,8 +286,16 @@ func (c Coordinator) reconcileEnqueuing(ctx context.Context, op Operation, cause
 	case "planned":
 		// The broker claimed the enqueue but never ran it; resending the same
 		// operation id resumes that claim (canary 6, #1167).
-		if err := c.Backend.Enqueue(ctx, op); errors.Is(err, ErrRejected) {
-			// The pull request moved on (merged, closed, queued or a new head).
+		err := c.Backend.Enqueue(ctx, op)
+		if errors.Is(err, ErrRejected) && strings.Contains(err.Error(), "rejected before execution") && c.Now().Sub(op.UpdatedAt) < enqueueRefusedFor {
+			// GitHub refused before executing and the broker released the
+			// claim: the pull request is not enqueueable yet (checks still
+			// running, #1236). It stays enqueuing for a later tick to resend.
+			return op, err
+		} else if errors.Is(err, ErrRejected) {
+			// The pull request moved on (merged, closed, queued or a new
+			// head), or stayed unenqueueable past the bound: end it and
+			// route the last refusal to the overseer once.
 			return c.fail(ctx, op, err, false)
 		} else if err != nil {
 			return op, err
