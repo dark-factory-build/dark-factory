@@ -26,17 +26,18 @@ const (
 // overseer acts on it (a blocked or failed worker task, an unanswered worker
 // question, finished work not yet published or corrected behind its open pull
 // request, a pull request factoryd escalated while it stays open at the
-// escalated head); a succeeded worker task, and a Change factoryd could not
-// publish (it has no pull request), need one look. It is due when no
+// escalated head); a Change factoryd could not publish (it has no pull
+// request) needs one look. A succeeded worker task needs none: factoryd
+// publishes it, and the items above catch it if that fails. It is due when no
 // carrier was enqueued since that version, or, while it persists, when at most
 // three were and the latest is OverseerRewakeAfter old: one wake and three
 // re-wakes per item version, once the newest due item is overseerWakeSettle
 // old or the oldest overseerWakeMaxDelay old.
 const overseerWakeItems = `WITH carrier AS (SELECT created_at_ms AS at FROM tasks WHERE assigned_agent_id = ?4 AND title = ?5),
 item AS (
-	SELECT t.id, t.updated_at_ms AS version, t.status IN ('blocked', 'failed') AS persistent, '' AS detail
+	SELECT t.id, t.updated_at_ms AS version, 1 AS persistent, '' AS detail
 	FROM tasks AS t JOIN agents AS a ON a.id = t.assigned_agent_id
-	WHERE t.project_id = ?1 AND a.role = 'worker' AND t.status IN ('succeeded', 'blocked', 'failed')
+	WHERE t.project_id = ?1 AND a.role = 'worker' AND t.status IN ('blocked', 'failed')
 	UNION ALL SELECT r.task_id, h.created_at_ms, 1, '' FROM human_requests AS h JOIN runs AS r ON r.id = h.run_id
 	WHERE r.project_id = ?1 AND r.role = 'worker' AND h.status IN ('open', 'delivering', 'delivery_unknown')
 	UNION ALL SELECT c.task_id, c.updated_at_ms, 1, '' FROM changes AS c JOIN tasks AS t ON t.id = c.task_id
