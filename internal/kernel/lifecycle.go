@@ -769,6 +769,11 @@ func (store *Store) finalizeRun(ctx context.Context, runID RunID, expected Revis
 	if err := requireOneRow(updated, err); err != nil {
 		return Run{}, tx.Rollback(err)
 	}
+	if requeue == 1 {
+		if err := carryPrerequisites(ctx, tx.connection, task, task.WorkRevision.Int64()+1); err != nil {
+			return Run{}, tx.Rollback(err)
+		}
+	}
 	terminalKind, terminalCode, terminalDetail, terminalResult := proposalSQL(terminal)
 	updated, err = tx.connection.ExecContext(ctx, `UPDATE runs SET phase = 'terminal', proposal_kind = ?, proposal_code = ?, proposal_detail = ?, proposal_result = ?, terminal_kind = ?, terminal_code = ?, terminal_detail = ?, terminal_result = ?, terminal_at_ms = ?, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND phase = 'finalizing' AND proposal_kind IS NOT NULL AND credential_revoked_at_ms IS NOT NULL AND revision = ?`, terminalKind, terminalCode, terminalDetail, terminalResult, terminalKind, terminalCode, terminalDetail, terminalResult, at.Int64(), at.Int64(), run.ID.Bytes(), expected.Int64())
 	if err := requireOneRow(updated, err); err != nil {
