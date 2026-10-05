@@ -173,7 +173,7 @@ func TestPublicReviewPathRefusesRetryAfterAmbiguousSubmit(t *testing.T) {
 
 func TestRestartDoesNotRouteRequestChangesBeforeSubmit(t *testing.T) {
 	fixture, project := reviewPublicFixture(t)
-	request := review.Request{Repository: "team/repo", PullNumber: 13, Head: strings.Repeat("a", 40), Base: strings.Repeat("b", 40), BaseRef: "main", Provider: "codex"}
+	request := review.Request{Repository: "team/repo", PullNumber: 13, Head: strings.Repeat("a", 40), Base: strings.Repeat("b", 40), BaseRef: "main", Body: "fixture body", Provider: "codex"}
 	operation := review.Operation{ID: "request-changes-before-submit", Request: request, State: "running", Verdict: "request_changes", Detail: "not submitted", CreatedAt: time.Unix(1, 0), UpdatedAt: time.Unix(1, 0)}
 	if err := fixture.store.RecordReviewOperation(context.Background(), project, request.Repository, operation.ID, operation, mustKernelTime(t, 1001)); err != nil {
 		t.Fatal(err)
@@ -303,7 +303,7 @@ func TestRestartRoutesCompletedRequestChangesWithoutResubmitting(t *testing.T) {
 	backend := &publicReviewBackend{requestChanges: true}
 	now := func() time.Time { return time.Unix(1011, 0) }
 	coordinator := review.Coordinator{Store: durableReviewStore{store: fixture.store, project: project, repository: "team/repo", now: now}, Backend: backend, Now: now}
-	op, err := coordinator.Start(ctx, review.Request{Repository: "team/repo", PullNumber: 12, Head: head, Base: base, BaseRef: "main", Provider: "codex"})
+	op, err := coordinator.Start(ctx, review.Request{Repository: "team/repo", PullNumber: 12, Head: head, Base: base, BaseRef: "main", Body: "fixture body", Provider: "codex"})
 	if err != nil || op.State != "completed" || !op.Submitted || !op.RoutePending || backend.submits != 1 {
 		t.Fatalf("completed request-changes operation=%+v err=%v backend=%+v", op, err, backend)
 	}
@@ -640,7 +640,7 @@ func TestFailedReviewRetriesOnceThenEscalatesOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	request := publishedReviewRequest()
-	unbound := review.Operation{ID: "unbound-failure", Request: review.Request{Repository: "team/unbound", PullNumber: 12, Head: head, Base: request.Base, BaseRef: "main", Provider: "codex"}, State: "failed", Retryable: true, Detail: "provider killed at launch", CreatedAt: fixture.daemon.now(), UpdatedAt: fixture.daemon.now()}
+	unbound := review.Operation{ID: "unbound-failure", Request: review.Request{Repository: "team/unbound", PullNumber: 12, Head: head, Base: request.Base, BaseRef: "main", Body: "fixture body", Provider: "codex"}, State: "failed", Retryable: true, Detail: "provider killed at launch", CreatedAt: fixture.daemon.now(), UpdatedAt: fixture.daemon.now()}
 	if err := (durableReviewStore{store: fixture.store, project: project, repository: "team/unbound", now: fixture.daemon.now}).Create(ctx, unbound); err != nil {
 		t.Fatal(err)
 	}
