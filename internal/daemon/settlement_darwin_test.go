@@ -3,6 +3,7 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/hex"
@@ -232,6 +233,74 @@ func TestSuccessfulWorkerOutcomeRefusesDirtySourceUntilCorrection(t *testing.T) 
 	settlementGit(t, change.TrustedGitExecutable, path, "commit", "-q", "-m", "corrected")
 	if err := fixture.daemon.validateSuccessSource(ctx, live, success); err != nil {
 		t.Fatalf("corrected success refused: %v", err)
+	}
+}
+
+// Issue #1278: an accepted intake issue promises a published Change, so a
+// worker success that committed nothing is refused while the provider is live.
+func TestIntakeWorkerSuccessRefusesEmptyChangeUntilCommitted(t *testing.T) {
+	fixture := newRecoveryFixtureWithRole(t, 0x7e, kernel.RoleWorker)
+	ctx := context.Background()
+	worktreeChange, path := fixture.settlementWorktree(t)
+	success, err := kernel.NewSuccessProposal("complete in the assigned checkout")
+	if err != nil {
+		t.Fatal(err)
+	}
+	live := &liveAttempt{daemon: fixture.daemon, runID: fixture.run.ID}
+	if err := fixture.daemon.validateSuccessSource(ctx, live, success); err != nil {
+		t.Fatalf("non-intake no-change success refused: %v", err)
+	}
+	run := fixture.currentRun(t)
+	sourceID, err := kernel.IntakeSourceIDFromBytes(bytes.Repeat([]byte{0x7e}, kernel.IDBytes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, err := fixture.store.CreateIntakeSource(ctx, kernel.NewIntakeSource{ID: sourceID, ProjectID: run.ProjectID, TargetRepositoryID: kernel.RepositoryID(run.ProjectID), GitHubRepositoryID: 42, GitHubRepositoryName: "feed/original", Policy: kernel.IntakePolicyManual, PollSeconds: 60, AdmissionLimit: 25}, mustKernelTime(t, 400))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if source, err = fixture.store.SetIntakeSourceEnabled(ctx, source.ID, source.Revision, true, mustKernelTime(t, 400)); err != nil {
+		t.Fatal(err)
+	}
+	accepted, err := fixture.store.AcceptIntakeSnapshot(ctx, source.ID, kernel.IntakeIssueSnapshot{GitHubRepositoryID: 42, IssueNumber: 1121, NodeID: "I_empty", Title: "accepted", Body: "change something", AuthorLogin: "reporter", AuthorType: kernel.GitHubAuthorUser}, mustKernelTime(t, 400))
+	if err != nil {
+		t.Fatal(err)
+	}
+	database, err := sql.Open("sqlite3", "file:"+fixture.storePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if _, err := database.Exec(`INSERT INTO intake_task_bindings(task_id, acceptance_id) VALUES(?, ?)`, run.TaskID.Bytes(), accepted.ID.Bytes()); err != nil {
+		t.Fatal(err)
+	}
+
+	refused := fixture.daemon.validateSuccessSource(ctx, live, success)
+	var refusal *kernel.OutcomeRefusal
+	if !errors.Is(refused, errEmptyIntakeChange) || !errors.Is(refused, kernel.ErrConflict) || !errors.As(refused, &refusal) {
+		t.Fatalf("empty intake success refusal = %v", refused)
+	}
+	if detail := boundedDetail(refusal.Unwrap()); !strings.Contains(detail, "attempt block") || !strings.Contains(detail, worktreeChange.ID.String()) {
+		t.Fatalf("empty refusal detail does not say what to do: %q", detail)
+	}
+	controller, peer := readyTerminalEffectController(t)
+	t.Cleanup(func() {
+		_ = controller.Close()
+		_ = peer.Close()
+	})
+	attempt := newLiveAttempt(fixture.daemon, fixture.run.ID, kernel.TerminalSessionID{}, controller)
+	attempt.outcomeRefusal = refused
+	if stop, err := attempt.processLifecycle(ctx); err != nil || stop || attempt.terminationSent || attempt.outcomeRefusal != nil {
+		t.Fatalf("empty refusal lifecycle = stop=%v err=%v terminated=%v", stop, err, attempt.terminationSent)
+	}
+
+	if err := os.WriteFile(filepath.Join(path, "fix.txt"), []byte("work\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	settlementGit(t, change.TrustedGitExecutable, path, "add", "fix.txt")
+	settlementGit(t, change.TrustedGitExecutable, path, "commit", "-q", "-m", "fix")
+	if err := fixture.daemon.validateSuccessSource(ctx, live, success); err != nil {
+		t.Fatalf("committed intake success refused: %v", err)
 	}
 }
 

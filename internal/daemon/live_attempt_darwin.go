@@ -270,16 +270,17 @@ func (attempt *liveAttempt) processLifecycle(ctx context.Context) (bool, error) 
 	}
 	if attempt.outcomeRefusal != nil {
 		// The refusal was authenticated to this exact owner. Consume the
-		// bounded cause without making a durable state claim. Dirty-source
-		// refusals leave the controller live for correction; other refusals
-		// converge it, and no other live attempt can be affected.
+		// bounded cause without making a durable state claim. Dirty or empty
+		// intake source refusals leave the controller live for correction;
+		// other refusals converge it, and no other live attempt is affected.
 		refusal := attempt.outcomeRefusal
 		attempt.outcomeRefusal = nil
-		if errors.Is(refusal, errDirtyWorkerChange) {
+		correctable := errors.Is(refusal, errDirtyWorkerChange) || errors.Is(refusal, errEmptyIntakeChange)
+		if correctable {
 			attempt.pendingOutcome = nil
 		}
 		attempt.daemon.operationMu.Unlock()
-		if errors.Is(refusal, errDirtyWorkerChange) {
+		if correctable {
 			return false, nil
 		}
 		return false, attempt.terminateController()
