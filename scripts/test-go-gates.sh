@@ -398,7 +398,7 @@ EOF
 /bin/chmod 755 "$local_fixture/configured/node" "$local_fixture/configured/corepack"
 for local_child in \
     check-toolchain-pins.sh test-local-ci-environment.sh test-new-worktree.sh \
-    test-deploy-site.sh test-cold-review.sh \
+    test-cold-review.sh \
     test-release.sh test-github-step-summary.sh test-verify-adversarial-review.sh \
     test-cloudflare-env.sh test-bootstrap-maintainer-v2.sh test-repository-settings.sh \
     test-go-gates.sh test-go-e2e-tools.sh go-ci-owned.sh \
@@ -407,8 +407,6 @@ for local_child in \
     test-publication-parents.sh; do
     /bin/ln -s stub "$local_fixture/scripts/$local_child"
 done
-printf '#!/bin/sh\nexit 0\n' >"$local_fixture/scripts/test-verification-profile.mjs"
-/bin/chmod 755 "$local_fixture/scripts/test-verification-profile.mjs"
 
 for local_python in browser; do
     printf 'pass\n' >"$local_fixture/scripts/test-factory-$local_python.py"

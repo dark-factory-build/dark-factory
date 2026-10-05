@@ -130,5 +130,5 @@ from worker success, merge, a TCP socket, or an unchanged alias alone.
 
 factoryd polls intake and reviews, enqueues, observes and releases published
 pull requests itself; no host controller remains. Releases are described in
-[DEPLOY.md](DEPLOY.md). The site deploys with `scripts/deploy-site.sh` and
-`scripts/verify-live-site.py`.
+[DEPLOY.md](DEPLOY.md). The site deploys from dark-factory-site `main` via Vercel's Git
+integration.
