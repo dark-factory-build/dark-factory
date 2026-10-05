@@ -458,7 +458,9 @@ func (b *daemonReviewBackend) Review(ctx context.Context, checkout string, reque
 	// The Claude reviewer has no shell (Bash would read the whole home), so
 	// factoryd writes the complete diff beside the checkout.
 	diff := filepath.Join(filepath.Dir(checkout), "change.diff")
-	if out, err := exec.CommandContext(ctx, change.TrustedGitExecutable, "-C", checkout, "diff", request.Base+"...HEAD").Output(); err != nil || os.WriteFile(diff, out, 0o600) != nil {
+	command := exec.CommandContext(ctx, change.TrustedGitExecutable, "-C", checkout, "diff", "--no-ext-diff", "--no-textconv", request.Base+"...HEAD")
+	command.Env = reviewEnvironment(filepath.Dir(checkout))
+	if out, err := command.Output(); err != nil || os.WriteFile(diff, out, 0o600) != nil {
 		return review.Verdict{}, fmt.Errorf("review: diff: %v", err)
 	}
 	prompt := reviewPrompt(checkout, request.Base, request.Body, diff)
