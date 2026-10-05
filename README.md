@@ -97,6 +97,10 @@ connection for new customers still awaits service activation**; installing
 v0.4.0 alone does not enable it. Manual local work and the public
 [reporting page](https://www.darkfactory.build/feedback) remain available.
 
+v0.5.1 lets factoryd run accepted issues end to end itself: it hands each one
+straight to a worker, publishes and corrects the pull request, reviews it and
+enqueues it; the overseer handles only exceptions. Releases are built in Go.
+
 Sandboxed Claude Code workers and provider token budgets ship in v0.5.0. Codex
 workers and overseers are proven with real work. Claude Code workers are proven
 by a live run; a Claude Code overseer has fixture proof only, so use a Codex
