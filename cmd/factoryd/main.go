@@ -155,7 +155,7 @@ func (owner *process) startCleanupContinuation(ctx context.Context, id kernel.Ru
 			owner.cleanupMu.Unlock()
 		}()
 		if continuationErr := continueUnsettledRun(owner.daemon, ctx, owner.runtimeParent, owner.supervisorSpec.ChangeParent, id); continuationErr != nil {
-			_, _ = fmt.Fprintf(recoveryLog, "factoryd: unsettled run %s stopped: %v\n", id.String(), continuationErr)
+			daemon.LogFactoryd(recoveryLog, "factoryd: unsettled run %s stopped: %v\n", id.String(), continuationErr)
 		}
 	}()
 }
@@ -167,6 +167,10 @@ func main() {
 }
 
 func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	previousRecoveryLog := recoveryLog
+	recoveryLog = stderr
+	defer func() { recoveryLog = previousRecoveryLog }()
+
 	if len(args) == 1 && args[0] == "--version" {
 		_, _ = fmt.Fprintf(stdout, "factoryd %s\n", buildinfo.Current().Version())
 		return 0
@@ -187,7 +191,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return exitUsage
 	}
 	if err := serve(ctx, configuration); err != nil {
-		_, _ = fmt.Fprintf(stderr, "factoryd: %v\n", err)
+		daemon.LogFactoryd(recoveryLog, "factoryd: %v\n", err)
 		if errors.Is(err, errRestart) {
 			return exitRestart
 		}
@@ -405,11 +409,11 @@ func (owner *process) promote(ctx context.Context, home string, marker install.U
 func (owner *process) settleRelease(ctx context.Context, home, target, state, reason string) bool {
 	err := removeUpgrade(home)
 	if _, present, readErr := install.ReadUpgradeMarker(home); present || readErr != nil {
-		_, _ = fmt.Fprintf(recoveryLog, "factoryd: forgetting release %s failed: %v\n", target, errors.Join(err, readErr))
+		daemon.LogFactoryd(recoveryLog, "factoryd: forgetting release %s failed: %v\n", target, errors.Join(err, readErr))
 		return false
 	}
 	if err = errors.Join(err, owner.daemon.FinishRelease(ctx, target, state, reason)); err != nil {
-		_, _ = fmt.Fprintf(recoveryLog, "factoryd: recording release %s %s failed: %v\n", target, state, err)
+		daemon.LogFactoryd(recoveryLog, "factoryd: recording release %s %s failed: %v\n", target, state, err)
 	}
 	return true
 }
@@ -460,6 +464,7 @@ func openProcess(ctx context.Context, configuration config) (_ *process, resultE
 	if err != nil {
 		return nil, err
 	}
+	owner.daemon.ConfigureLog(recoveryLog)
 	startupPhase("maintainer")
 	if err := owner.daemon.ConfigureMaintainer(owner.home); err != nil {
 		return nil, err
@@ -484,20 +489,20 @@ func openProcess(ctx context.Context, configuration config) (_ *process, resultE
 	var recoveryContinuations []kernel.RunID
 	for _, disposition := range dispositions {
 		if disposition.Err != nil {
-			_, _ = fmt.Fprintf(recoveryLog, "factoryd: recovered run %s: %s: %v\n", disposition.RunID.String(), disposition.Action, disposition.Err)
+			daemon.LogFactoryd(recoveryLog, "factoryd: recovered run %s: %s: %v\n", disposition.RunID.String(), disposition.Action, disposition.Err)
 			if disposition.Action == daemon.RecoveredResultConsumed || disposition.Action == daemon.RecoveredResultConsumedUnsettled {
 				recoveryContinuations = append(recoveryContinuations, disposition.RunID)
 			}
 			continue
 		}
-		_, _ = fmt.Fprintf(recoveryLog, "factoryd: recovered run %s: %s\n", disposition.RunID.String(), disposition.Action)
+		daemon.LogFactoryd(recoveryLog, "factoryd: recovered run %s: %s\n", disposition.RunID.String(), disposition.Action)
 	}
 	// Like an unresolved run above, a refused mark (a clock that moved
 	// backwards) is reported residue, never a boot refusal.
 	if unknown, err := owner.daemon.RecoverHumanDeliveries(ownedContext); err != nil {
-		_, _ = fmt.Fprintf(recoveryLog, "factoryd: human reply deliveries left by the previous daemon were not marked uncertain: %v\n", err)
+		daemon.LogFactoryd(recoveryLog, "factoryd: human reply deliveries left by the previous daemon were not marked uncertain: %v\n", err)
 	} else if unknown != 0 {
-		_, _ = fmt.Fprintf(recoveryLog, "factoryd: %d human reply deliveries left uncertain by the previous daemon\n", unknown)
+		daemon.LogFactoryd(recoveryLog, "factoryd: %d human reply deliveries left uncertain by the previous daemon\n", unknown)
 	}
 	startupPhase("recovery sweep")
 	owner.apiAuthority, err = owner.home.OpenLocalAPI(ownedContext)
@@ -529,7 +534,7 @@ func openProcess(ctx context.Context, configuration config) (_ *process, resultE
 	go owner.accept(ownedContext, owner.listener)
 	owner.cleanupRuns = make(map[kernel.RunID]struct{})
 	owner.supervisorSpec.UnsettledCompletion = func(id kernel.RunID, err error) {
-		_, _ = fmt.Fprintf(recoveryLog, "factoryd: unsettled run %s: %v\n", id.String(), err)
+		daemon.LogFactoryd(recoveryLog, "factoryd: unsettled run %s: %v\n", id.String(), err)
 		owner.startCleanupContinuation(ownedContext, id)
 	}
 	for _, id := range recoveryContinuations {

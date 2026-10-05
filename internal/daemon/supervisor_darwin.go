@@ -894,7 +894,7 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 			time.Sleep(time.Duration(attempt+1) * 100 * time.Millisecond)
 		}
 		if tokenErr != nil {
-			fmt.Fprintf(os.Stderr, "factoryd: run %s spent %d tokens that could not be recorded: %v\n", run.ID, tokens, tokenErr)
+			LogFactoryd(daemon.log, "factoryd: run %s spent %d tokens that could not be recorded: %v\n", run.ID, tokens, tokenErr)
 			err = errors.Join(err, tokenErr)
 		}
 	}
