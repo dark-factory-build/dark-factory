@@ -369,10 +369,11 @@ func (store *Store) ProposeAttemptOutcome(ctx context.Context, digest AttemptDig
 	return finalizing, err
 }
 
-// NeverStartedRunDetail is the stall failure of a run that never produced
-// terminal output or an attempt call. Finalizing it queues the task again at
-// the next work revision, unless the previous run ended the same way.
-const NeverStartedRunDetail = "stalled: no terminal output or attempt call in 10m since launch"
+// NeverStartedRunDetail is the failure of a run that never produced terminal
+// output or an attempt call: stalled 10m after launch, or found admitted at
+// recovery. Finalizing it queues the task again at the next work revision,
+// unless the previous run ended the same way.
+const NeverStartedRunDetail = "never started: no terminal output or attempt call after launch"
 
 // ProviderCapacityRunDetail is the provider-exit failure of a run whose
 // provider reported its model at capacity: transient, so it is retried as a
