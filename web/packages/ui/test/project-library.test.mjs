@@ -55,10 +55,10 @@ test("intentional entry is flat and a document click reads its exact revision an
   assert.equal(calls[3].input.revision, 2); assert.equal(calls[3].input.offset, 7);
   assert.deepEqual(renderer.root.findByType("pre").children, ["read me fully"]);
   assert.equal(button(renderer, "Revise document").props.disabled, true, "superseded revision cannot be edited as current");
-  const advanced = renderer.root.findAllByType("details").find((item) => words(item.findByType("summary")).includes("Versions"));
+  const advanced = renderer.root.findAllByType("details").find((item) => words(item.findByType("summary")).includes("Manage"));
   assert.ok(advanced.findAllByType("button").includes(button(renderer, "Deprecate")));
-  assert.ok(!advanced.findAllByType("button").includes(button(renderer, "Attach revision")), "attachment stays directly reachable");
-  assert.ok(!advanced.findAllByType("button").includes(button(renderer, "Open task draft")), "draft stays directly reachable");
+  assert.ok(!advanced.findAllByType("button").includes(button(renderer, "Attach revision")), "attachment remains outside management");
+  assert.ok(!advanced.findAllByType("button").includes(button(renderer, "Open task draft")), "draft remains outside management");
   await act(async () => advanced.findAllByType("input").find((item) => item.props.type === "number").props.onBlur({ target: { value: "1" } }));
   assert.deepEqual(calls.slice(-2).map(({ operation, input }) => [operation, input.revision]), [["read", 1], ["body", 1]]);
 });
@@ -160,7 +160,7 @@ test("board shares immutable threads, resolves by revision, and retains linked c
   assert.equal(revised.body, "Concrete evidence, not a permission grant.");
   assert.equal(JSON.parse(revised.source_references).resolved, true);
   assert.equal(current.revision, 3);
-  await click("Source:"); assert.deepEqual(opened, [source]);
+  await click("View source"); assert.deepEqual(opened, [source]);
   await click("Task access"); assert.equal(calls.at(-1).input.revision, 3);
   await click("Reply");
   assert.equal(renderer.root.findAllByType("input").find((input) => input.props.name === "kind").props.defaultValue, "discussion_reply");
@@ -197,11 +197,11 @@ test("ID-only links resolve latest through explicit metadata revisions; historic
   const click = async (label) => { await act(async () => renderer.root.findAllByType("button").find((button) => words(button).includes(label)).props.onClick()); };
   const reads = () => calls.filter((call) => call.operation === "read").map(({ input }) => [input.id, input.revision]);
   assert.deepEqual(reads(), [[lessonID, 1], [lessonID, 2]], "initial ID opens the current immutable revision");
-  await click("Original discussion:");
+  await click("View discussion");
   assert.deepEqual(reads().slice(-2), [[rootID, 1], [rootID, 3]]);
   await click("Refresh documents"); await click("Lesson");
   assert.deepEqual(reads().at(-1), [lessonID, 1], "explicit historical selection never advances to latest");
-  await click("Supersedes:");
+  await click("Earlier document");
   assert.deepEqual(reads().slice(-2), [[priorID, 1], [priorID, 4]]);
   await act(async () => renderer.unmount());
 });
@@ -219,4 +219,44 @@ test("scoped entry selects its project and clears source filters when switching 
   await act(async () => renderer.root.findAllByType("select")[0].props.onChange({ target: { value: first.id } }));
   assert.equal(calls.at(-1).input.project_id, first.id);
   assert.equal(calls.at(-1).input.entity, ""); assert.equal(calls.at(-1).input.repository_id, "");
+});
+
+
+const visibleWords = (node) => typeof node === "string" ? node : node.type === "details" && !node.props.open ? words(node.findByType("summary")) : (node.children ?? []).map(visibleWords).join(" ");
+
+test("reader foregrounds text while exact provenance and task controls remain in flat disclosures", async (t) => {
+  const source = "project:opaque-one", other = "project:opaque-two", task = "aa".repeat(16), opened = [];
+  const doc = { ...metadata, revision: 3, title: "Deployment guide", description: "Deployment guide", author: "run:opaque-author", repository_id: "bb".repeat(16), commit: "d".repeat(40), path: ".dark-factory/content/doc.md", source_references: JSON.stringify({ status: "current", source_revision: "c".repeat(40), branch: "private-branch", environment: "test-environment", entities: [source, other], record_type: "task", record_id: task, task_id: task }) };
+  const renderer = await mount(t, { open: true, onSource: (ref) => opened.push(ref), onRecord: (...args) => opened.push(args), call: async (operation) => operation === "search" ? { items: [doc] } : operation === "read" ? doc : { body: "Useful deployment steps.", complete: true } });
+  await click(renderer, "Deployment guide");
+  const reader = renderer.root.findByProps({ "aria-label": "Selected library revision" });
+  assert.match(visibleWords(reader), /Deployment guide current Useful deployment steps/);
+  assert.doesNotMatch(visibleWords(reader), /opaque|Revision|Repository|private-branch|test-environment|Attach revision|Deprecate|unspecified/);
+  assert.doesNotMatch(visibleWords(renderer.root), /Project guidance, available|Discuss questions, findings/);
+  const details = reader.findAllByType("details");
+  assert.deepEqual(details.map((item) => words(item.findByType("summary"))), ["Use in a task", "Sources & access", "Manage"]);
+  const sources = details[1];
+  assert.match(words(sources), /Revision 3.*opaque-author/);
+  assert.match(words(sources), /private-branch/); assert.match(words(sources), /test-environment/);
+  assert.match(words(sources), new RegExp(doc.commit));
+  assert.equal(reader.findAllByType("p").filter((item) => words(item) === doc.title).length, 0, "description does not repeat the title");
+  await act(async () => sources.findByProps({ "aria-label": "View source 2" }).props.onClick());
+  assert.equal(opened[0], other);
+  const recordButtons = sources.findAllByType("button").filter((item) => /View (linked )?task/.test(words(item)));
+  assert.equal(recordButtons.length, 1, "one link for the same task in both metadata fields");
+  await act(async () => recordButtons[0].props.onClick());
+  assert.deepEqual(opened[1], ["task", task, [...fixtureState.projects.keys()][0]]);
+});
+
+test("consequential knowledge and historical states remain visible outside disclosures", async (t) => {
+  for (const [status, warning] of [["current", "current"], ["needs_revalidation", "needs revalidation"], ["superseded", "superseded"]]) {
+    const doc = { ...metadata, revision: 3, projected_status: status, source_references: JSON.stringify({ status: "current" }) };
+    const renderer = await mount(t, { open: true, call: async (operation) => operation === "search" ? { items: [doc] } : operation === "read" ? doc : { body: "Guidance", complete: true } });
+    await click(renderer, "Optional guide");
+    assert.match(visibleWords(renderer.root.findByProps({ "aria-label": "Selected library revision" })), new RegExp(warning));
+  }
+  const renderer = await mount(t, { open: true, call: async (operation) => operation === "search" ? { items: [metadata] } : operation === "read" ? { ...metadata, source_references: JSON.stringify({ status: "current" }) } : { body: "Old guidance", complete: true } });
+  await click(renderer, "Optional guide");
+  const visible = visibleWords(renderer.root.findByProps({ "aria-label": "Selected library revision" }));
+  assert.match(visible, /Older revision/); assert.doesNotMatch(visible, /current/);
 });
