@@ -2729,7 +2729,7 @@ func (fixture *supervisorFixture) trackRun(runID kernel.RunID) {
 
 func (fixture *supervisorFixture) reopenStore(t *testing.T) {
 	t.Helper()
-	store, err := kernel.Open(context.Background(), fixture.storePath)
+	store, err := openTestStore(context.Background(), fixture.storePath)
 	if err != nil {
 		t.Fatal(err)
 	}

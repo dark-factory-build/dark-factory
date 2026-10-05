@@ -141,22 +141,6 @@ func TestOpenRejectsForeignPathsWithoutModification(t *testing.T) {
 		assertDatabaseEvidenceUnchanged(t, path, before)
 	})
 
-	t.Run("symlink", func(t *testing.T) {
-		directory := filepath.Dir(mustCanonicalTestDatabasePath(t, filepath.Join(t.TempDir(), "placeholder")))
-		target := filepath.Join(directory, "target.db")
-		store, err := createTestStore(ctx, target, FactoryConfig{}, at)
-		if err != nil {
-			t.Fatal(err)
-		}
-		store.Close()
-		link := filepath.Join(directory, "link.db")
-		if err := os.Symlink(target, link); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := Open(ctx, link); !errors.Is(err, ErrForeignDatabase) {
-			t.Fatalf("Open error = %v", err)
-		}
-	})
 }
 
 func TestOpenRejectsUnknownVersionAndPartialIdentity(t *testing.T) {
@@ -294,48 +278,6 @@ func TestLiteralSQLiteInternalPrefixCoversEveryInspectionPath(t *testing.T) {
 	walPath, _ := walSnapshotFixture(t, `CREATE TABLE sqliteXwal(value INTEGER)`)
 	if _, err := Open(context.Background(), walPath); !errors.Is(err, ErrForeignDatabase) {
 		t.Fatalf("WAL near-prefix Open error = %v", err)
-	}
-}
-
-func TestConnectionsVerifyExactPolicyAndDiscardPoison(t *testing.T) {
-	store, path := newTestStore(t)
-	defer store.Close()
-	ctx := context.Background()
-	for _, pool := range []*sql.DB{store.writer, store.readers} {
-		for name, poison := range map[string]string{
-			"foreign_keys": `PRAGMA foreign_keys = OFF`,
-			"busy_timeout": `PRAGMA busy_timeout = 7`,
-			"synchronous":  `PRAGMA synchronous = OFF`,
-		} {
-			t.Run(name, func(t *testing.T) {
-				connection, err := pool.Conn(ctx)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if _, err := connection.ExecContext(ctx, poison); err != nil {
-					t.Fatal(err)
-				}
-				connection.Close()
-				var checkout func(context.Context) (*sql.Conn, error)
-				if pool == store.writer {
-					checkout = store.writerConnection
-				} else {
-					checkout = store.readerConnection
-				}
-				if connection, err := checkout(ctx); err == nil {
-					connection.Close()
-					t.Fatal("poisoned connection passed verification")
-				}
-				replacement, err := checkout(ctx)
-				if err != nil {
-					t.Fatalf("verified replacement: %v", err)
-				}
-				replacement.Close()
-			})
-		}
-	}
-	if _, err := os.Stat(path); err != nil {
-		t.Fatal(err)
 	}
 }
 

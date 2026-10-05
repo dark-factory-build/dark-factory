@@ -36,12 +36,6 @@ var sqliteActivationHook func(string) error
 // Production activation has no hook.
 var sqlitePostPoolHook func(string) error
 
-// Open validates and activates one canonical absolute database path for fresh
-// construction, tests, and other callers that do not retain a home lease.
-func Open(ctx context.Context, absolutePath string) (*Store, error) {
-	return openExisting(ctx, absolutePath, false)
-}
-
 // OpenOperational validates and activates one canonical absolute database
 // path bound to the supplied retained home and main-database descriptors. It
 // takes ownership of both descriptors and retains the exact path/file
@@ -50,11 +44,11 @@ func Open(ctx context.Context, absolutePath string) (*Store, error) {
 // uncertain and its authority must remain retained. install.OperationalHome
 // is the sole production caller and keeps that Store as its child lease.
 func OpenOperational(ctx context.Context, absolutePath string, home, database *os.File) (*Store, error) {
-	files, err := openBoundDatabaseFiles(absolutePath, home, database, true)
+	files, err := openBoundDatabaseFiles(absolutePath, home, database)
 	if err != nil {
 		return nil, err
 	}
-	return openExistingFiles(ctx, absolutePath, files, true)
+	return openExistingFiles(ctx, absolutePath, files)
 }
 
 // InspectOperational validates one SQLite-consistent snapshot of an
@@ -62,7 +56,7 @@ func OpenOperational(ctx context.Context, absolutePath string, home, database *o
 // or WAL. It takes ownership of home and database and keeps their path
 // authority pinned until validation and the final binding checks complete.
 func InspectOperational(ctx context.Context, absolutePath string, home, database *os.File) (resultErr error) {
-	files, err := openBoundDatabaseFiles(absolutePath, home, database, true)
+	files, err := openBoundDatabaseFiles(absolutePath, home, database)
 	if err != nil {
 		return err
 	}
@@ -70,30 +64,12 @@ func InspectOperational(ctx context.Context, absolutePath string, home, database
 	return inspectOperationalSnapshot(ctx, absolutePath, files)
 }
 
-func openExisting(ctx context.Context, absolutePath string, retainBinding bool) (*Store, error) {
-	files, err := openDatabaseFiles(absolutePath)
-	if err != nil {
-		return nil, err
-	}
-	return openExistingFiles(ctx, absolutePath, files, retainBinding)
-}
-
-func openExistingFiles(ctx context.Context, absolutePath string, files *databaseFiles, retainBinding bool) (*Store, error) {
+func openExistingFiles(ctx context.Context, absolutePath string, files *databaseFiles) (*Store, error) {
 	if err := files.refreshPinnedInfo(); err != nil {
 		return nil, errors.Join(err, files.Close())
 	}
-	if files.allowShortSHM {
-		if err := inspectOperationalSnapshot(ctx, absolutePath, files); err != nil {
-			return nil, errors.Join(err, files.Close())
-		}
-	} else {
-		snapshot, err := preflightExisting(ctx, files)
-		if err != nil {
-			return nil, errors.Join(err, files.Close())
-		}
-		if err := files.verifySnapshot(ctx, snapshot); err != nil {
-			return nil, errors.Join(err, files.Close())
-		}
+	if err := inspectOperationalSnapshot(ctx, absolutePath, files); err != nil {
+		return nil, errors.Join(err, files.Close())
 	}
 	if err := files.recheckPaths(); err != nil {
 		return nil, errors.Join(err, files.Close())
@@ -104,26 +80,16 @@ func openExistingFiles(ctx context.Context, absolutePath string, files *database
 			return nil, errors.Join(err, files.Close())
 		}
 	}
-	var store *Store
-	var err error
-	if retainBinding {
-		store = newStore()
-		store.pathBinding = files
-		err = openFixedPools(ctx, store, absolutePath, files.recheckActivationBindings)
-	} else {
-		store, err = openPools(absolutePath)
-	}
-	if err != nil {
+	store := newStore()
+	store.pathBinding = files
+	if err := openFixedPools(ctx, store, absolutePath, files.recheckActivationBindings); err != nil {
 		// SQLite activation may have created or changed sidecars. Without an
 		// exact live creation descriptor they remain visible evidence; cleanup
 		// must never guess ownership from a pathname.
-		if retainBinding {
-			if store.pathBinding != nil {
-				return store, err
-			}
-			return nil, err
+		if store.pathBinding != nil {
+			return store, err
 		}
-		return nil, closeFailedActivation(files, err)
+		return nil, err
 	}
 	if sqlitePostPoolHook != nil {
 		if err := sqlitePostPoolHook("before sidecar refresh"); err != nil {
@@ -132,6 +98,7 @@ func openExistingFiles(ctx context.Context, absolutePath string, files *database
 	}
 	if !hadWAL {
 		if files.wal == nil {
+			var err error
 			files.wal, err = files.openDatabaseFile(files.main.name+"-wal", "WAL", 0, maxSQLiteWALSize)
 			if err != nil {
 				return closeRejectedOpen(store, files, err)
@@ -155,11 +122,6 @@ func openExistingFiles(ctx context.Context, absolutePath string, files *database
 	}
 	if err := files.recheckPaths(); err != nil {
 		return closeRejectedOpen(store, files, err)
-	}
-	if !retainBinding {
-		if err := files.Close(); err != nil {
-			return nil, errors.Join(err, store.Close())
-		}
 	}
 	return store, nil
 }
@@ -219,10 +181,6 @@ func inspectOperationalSnapshot(ctx context.Context, path string, files *databas
 	return nil
 }
 
-func closeFailedActivation(files *databaseFiles, cause error) error {
-	return errors.Join(cause, files.Close())
-}
-
 func closeRejectedOpen(store *Store, files *databaseFiles, cause error) (*Store, error) {
 	storeOwnsFiles := files != nil && store.pathBinding == files
 	closeErr := store.Close()
@@ -247,37 +205,27 @@ func validateDatabasePath(path string) error {
 }
 
 func preflightExisting(ctx context.Context, files *databaseFiles) (databaseSnapshot, error) {
-	// Activation validates the initial descriptors, but preflight is the last
-	// acceptance boundary before the isolated WAL image is trusted. Recheck the
-	// exact 0600 contract here so a sidecar whose mode changed after admission
-	// can never be copied into an otherwise-valid snapshot.
-	for _, source := range []*databaseFile{files.main, files.wal, files.shm} {
-		if source == nil {
-			continue
-		}
-		var stat unix.Stat_t
-		if err := unix.Fstat(int(source.file.Fd()), &stat); err != nil {
-			return databaseSnapshot{}, fmt.Errorf("inspect sqlite preflight identity: %w", err)
-		}
-		if err := validateDatabaseFileStat(uint32(stat.Mode), uint32(stat.Uid), uint64(stat.Nlink), int64(stat.Size), source.name, source.minimum, source.maximum); err != nil {
-			return databaseSnapshot{}, err
-		}
+	// Only a main file with no WAL reaches preflight; recheck its exact 0600
+	// contract before trusting it.
+	var stat unix.Stat_t
+	if err := unix.Fstat(int(files.main.file.Fd()), &stat); err != nil {
+		return databaseSnapshot{}, fmt.Errorf("inspect sqlite preflight identity: %w", err)
 	}
-	if files.wal == nil {
-		header := make([]byte, 20)
-		if _, err := files.main.file.ReadAt(header, 0); err != nil {
-			return databaseSnapshot{}, fmt.Errorf("%w: read sqlite header: %w", ErrForeignDatabase, err)
-		}
-		if err := validateJournalHeaderBytes(header, false); err != nil {
-			return databaseSnapshot{}, err
-		}
-		digest, err := digestDatabaseFile(ctx, files.main)
-		if err != nil {
-			return databaseSnapshot{}, err
-		}
-		return databaseSnapshot{main: digest}, inspectImmutable(ctx, files.main.file, files.main.info.Size(), header[18] == 1)
+	if err := validateDatabaseFileStat(uint32(stat.Mode), uint32(stat.Uid), uint64(stat.Nlink), int64(stat.Size), files.main.name, files.main.minimum, files.main.maximum); err != nil {
+		return databaseSnapshot{}, err
 	}
-	return validateWALSnapshotCopy(ctx, files)
+	header := make([]byte, 20)
+	if _, err := files.main.file.ReadAt(header, 0); err != nil {
+		return databaseSnapshot{}, fmt.Errorf("%w: read sqlite header: %w", ErrForeignDatabase, err)
+	}
+	if err := validateJournalHeaderBytes(header, false); err != nil {
+		return databaseSnapshot{}, err
+	}
+	digest, err := digestDatabaseFile(ctx, files.main)
+	if err != nil {
+		return databaseSnapshot{}, err
+	}
+	return databaseSnapshot{main: digest}, inspectImmutable(ctx, files.main.file, files.main.info.Size(), header[18] == 1)
 }
 
 var errDatabaseSnapshotChanged = fmt.Errorf("%w: sqlite database changed during preflight", ErrCorruptState)
@@ -289,8 +237,6 @@ type databaseDigest struct {
 
 type databaseSnapshot struct {
 	main databaseDigest
-	wal  databaseDigest
-	shm  databaseDigest
 }
 
 type databaseFile struct {
@@ -303,12 +249,11 @@ type databaseFile struct {
 }
 
 type databaseFiles struct {
-	authority     *databasePathAuthority
-	directory     *os.File
-	allowShortSHM bool
-	main          *databaseFile
-	wal           *databaseFile
-	shm           *databaseFile
+	authority *databasePathAuthority
+	directory *os.File
+	main      *databaseFile
+	wal       *databaseFile
+	shm       *databaseFile
 }
 
 type databasePathComponent struct {
@@ -461,24 +406,7 @@ func (authority *databasePathAuthority) Close() error {
 	return result
 }
 
-func openDatabaseFiles(path string) (_ *databaseFiles, resultErr error) {
-	authority, err := openDatabasePathAuthority(path)
-	if err != nil {
-		return nil, err
-	}
-	files := &databaseFiles{authority: authority, directory: authority.directory()}
-	defer func() {
-		if resultErr != nil {
-			resultErr = errors.Join(resultErr, files.Close())
-		}
-	}()
-	if err := populateDatabaseFiles(files, path, nil); err != nil {
-		return nil, err
-	}
-	return files, nil
-}
-
-func openBoundDatabaseFiles(path string, retainedHome, retainedMain *os.File, allowShortSHM bool) (_ *databaseFiles, resultErr error) {
+func openBoundDatabaseFiles(path string, retainedHome, retainedMain *os.File) (_ *databaseFiles, resultErr error) {
 	if retainedHome == nil || retainedMain == nil {
 		var closeErr error
 		if retainedHome != nil {
@@ -494,9 +422,8 @@ func openBoundDatabaseFiles(path string, retainedHome, retainedMain *os.File, al
 		return nil, errors.Join(err, retainedMain.Close(), retainedHome.Close())
 	}
 	files := &databaseFiles{
-		authority:     authority,
-		directory:     authority.directory(),
-		allowShortSHM: allowShortSHM,
+		authority: authority,
+		directory: authority.directory(),
 	}
 	defer func() {
 		if resultErr != nil {
@@ -579,16 +506,9 @@ func populateDatabaseFiles(files *databaseFiles, path string, retainedMain *os.F
 	if err != nil {
 		return err
 	}
-	shmMinimum := int64(walIndexRegionSize)
-	if files.allowShortSHM {
-		shmMinimum = 0
-	}
-	files.shm, err = files.openDatabaseFile(base+"-shm", "SHM", shmMinimum, maxSQLiteSHMSize)
+	files.shm, err = files.openDatabaseFile(base+"-shm", "SHM", 0, maxSQLiteSHMSize)
 	if err != nil {
 		return err
-	}
-	if !files.allowShortSHM && files.shm.info.Size()%walIndexRegionSize != 0 {
-		return fmt.Errorf("%w: SHM size %d is not a positive multiple of %d", ErrCorruptState, files.shm.info.Size(), walIndexRegionSize)
 	}
 	pageSize, err := databasePageSize(files.main.file)
 	if err != nil {
@@ -691,9 +611,6 @@ func (files *databaseFiles) refreshPinnedInfo() error {
 	if files.wal == nil {
 		return nil
 	}
-	if !files.allowShortSHM && files.shm.info.Size()%walIndexRegionSize != 0 {
-		return fmt.Errorf("%w: SHM size %d is not a positive multiple of %d", ErrCorruptState, files.shm.info.Size(), walIndexRegionSize)
-	}
 	pageSize, err := databasePageSize(files.main.file)
 	if err != nil {
 		return err
@@ -702,9 +619,6 @@ func (files *databaseFiles) refreshPinnedInfo() error {
 }
 
 func (files *databaseFiles) validateWAL(pageSize uint32) error {
-	if !files.allowShortSHM {
-		return validateWAL(files.wal.file, files.wal.info.Size(), pageSize)
-	}
 	// A checkpoint may truncate the WAL after fstat. Validate the header we
 	// actually read, including the valid empty-WAL case, rather than a stale
 	// size. Partial headers still fail; all format/checksum checks remain.
@@ -746,28 +660,20 @@ func digestDatabaseFile(ctx context.Context, source *databaseFile) (databaseDige
 }
 
 func (files *databaseFiles) verifySnapshot(ctx context.Context, expected databaseSnapshot) error {
-	for _, item := range []struct {
-		source *databaseFile
-		digest databaseDigest
-	}{{files.main, expected.main}, {files.wal, expected.wal}, {files.shm, expected.shm}} {
-		if item.source == nil {
-			continue
-		}
-		current, err := item.source.file.Stat()
-		if err != nil {
-			return fmt.Errorf("recheck sqlite snapshot size: %w", err)
-		}
-		if current.Size() != item.digest.size {
-			return fmt.Errorf("%w: sqlite %s length changed", errDatabaseSnapshotChanged, item.source.name)
-		}
-		item.source.info = current
-		actual, err := digestDatabaseFile(ctx, item.source)
-		if err != nil {
-			return err
-		}
-		if actual != item.digest {
-			return fmt.Errorf("%w: sqlite %s content changed", errDatabaseSnapshotChanged, item.source.name)
-		}
+	current, err := files.main.file.Stat()
+	if err != nil {
+		return fmt.Errorf("recheck sqlite snapshot size: %w", err)
+	}
+	if current.Size() != expected.main.size {
+		return fmt.Errorf("%w: sqlite %s length changed", errDatabaseSnapshotChanged, files.main.name)
+	}
+	files.main.info = current
+	actual, err := digestDatabaseFile(ctx, files.main)
+	if err != nil {
+		return err
+	}
+	if actual != expected.main {
+		return fmt.Errorf("%w: sqlite %s content changed", errDatabaseSnapshotChanged, files.main.name)
 	}
 	return nil
 }
@@ -1015,65 +921,6 @@ func walChecksum(bigEndian bool, data []byte, first, second uint32) [2]uint32 {
 	return [2]uint32{first, second}
 }
 
-func validateWALSnapshotCopy(ctx context.Context, sources *databaseFiles) (snapshot databaseSnapshot, resultErr error) {
-	directory, err := os.MkdirTemp("", "dark-factory-wal-preflight-")
-	if err != nil {
-		return databaseSnapshot{}, fmt.Errorf("create private WAL preflight directory: %w", err)
-	}
-	defer func() {
-		resultErr = errors.Join(resultErr, os.RemoveAll(directory))
-	}()
-	if err := os.Chmod(directory, 0o700); err != nil {
-		return databaseSnapshot{}, fmt.Errorf("secure WAL preflight directory: %w", err)
-	}
-	if err := validatePrivateDirectory(directory); err != nil {
-		return databaseSnapshot{}, err
-	}
-	temporaryMain := filepath.Join(directory, "factory.sqlite3")
-	snapshot.main, err = copyDatabaseFile(ctx, sources.main, temporaryMain)
-	if err != nil {
-		return databaseSnapshot{}, err
-	}
-	snapshot.wal, err = copyDatabaseFile(ctx, sources.wal, temporaryMain+"-wal")
-	if err != nil {
-		return databaseSnapshot{}, err
-	}
-	snapshot.shm, err = digestDatabaseFile(ctx, sources.shm)
-	if err != nil {
-		return databaseSnapshot{}, err
-	}
-
-	pool, err := sql.Open(driverName, walPreflightDataSource(temporaryMain))
-	if err != nil {
-		return databaseSnapshot{}, fmt.Errorf("open isolated WAL snapshot: %w", err)
-	}
-	pool.SetMaxOpenConns(1)
-	pool.SetMaxIdleConns(1)
-	defer func() {
-		if err := pool.Close(); err != nil {
-			resultErr = errors.Join(resultErr, fmt.Errorf("close isolated WAL snapshot: %w", err))
-		}
-	}()
-	connection, err := pool.Conn(ctx)
-	if err != nil {
-		return databaseSnapshot{}, fmt.Errorf("checkout isolated WAL snapshot: %w", err)
-	}
-	tx, err := beginPinnedRead(ctx, connection)
-	if err != nil {
-		return databaseSnapshot{}, errors.Join(fmt.Errorf("begin isolated WAL snapshot: %w", err), connection.Close())
-	}
-	var journalMode string
-	err = tx.connection.QueryRowContext(ctx, `PRAGMA journal_mode`).Scan(&journalMode)
-	if err == nil && strings.ToLower(journalMode) != "wal" {
-		err = fmt.Errorf("%w: isolated database did not recover in WAL mode", ErrCorruptState)
-	}
-	if err == nil {
-		err = validateOpenableSnapshot(ctx, tx.connection)
-	}
-	validationErr := errors.Join(err, tx.Close())
-	return snapshot, validationErr
-}
-
 func validatePrivateDirectory(path string) error {
 	info, err := os.Lstat(path)
 	if err != nil {
@@ -1093,58 +940,4 @@ func operationalInspectDataSource(path string) string {
 		"foreign_keys(ON)", "query_only(ON)", "temp_store(MEMORY)",
 	}
 	return (&url.URL{Scheme: "file", Path: path, RawQuery: query.Encode()}).String()
-}
-
-func walPreflightDataSource(path string) string {
-	query := url.Values{"mode": {"rw"}}
-	query["_pragma"] = []string{
-		fmt.Sprintf("busy_timeout(%d)", busyMilliseconds),
-		"foreign_keys(ON)",
-		"query_only(ON)",
-		"temp_store(MEMORY)",
-	}
-	return (&url.URL{Scheme: "file", Path: path, RawQuery: query.Encode()}).String()
-}
-
-func copyDatabaseFile(ctx context.Context, source *databaseFile, targetPath string) (digest databaseDigest, resultErr error) {
-	target, err := os.OpenFile(targetPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if err != nil {
-		return databaseDigest{}, fmt.Errorf("create isolated sqlite copy: %w", err)
-	}
-	defer func() {
-		if err := target.Close(); err != nil {
-			resultErr = errors.Join(resultErr, fmt.Errorf("close isolated sqlite copy: %w", err))
-		}
-	}()
-	digest.size = source.info.Size()
-	hash := sha256.New()
-	const bufferSize = 128 << 10
-	buffer := make([]byte, bufferSize)
-	section := io.NewSectionReader(source.file, 0, source.info.Size())
-	for {
-		if err := ctx.Err(); err != nil {
-			return databaseDigest{}, err
-		}
-		read, readErr := section.Read(buffer)
-		if read > 0 {
-			written, writeErr := target.Write(buffer[:read])
-			if writeErr != nil {
-				return databaseDigest{}, fmt.Errorf("write isolated sqlite copy: %w", writeErr)
-			}
-			if written != read {
-				return databaseDigest{}, fmt.Errorf("write isolated sqlite copy: %w", io.ErrShortWrite)
-			}
-			if _, err := hash.Write(buffer[:read]); err != nil {
-				return databaseDigest{}, fmt.Errorf("digest isolated sqlite copy: %w", err)
-			}
-		}
-		if errors.Is(readErr, io.EOF) {
-			break
-		}
-		if readErr != nil {
-			return databaseDigest{}, fmt.Errorf("read sqlite source for isolated copy: %w", readErr)
-		}
-	}
-	copy(digest.sum[:], hash.Sum(nil))
-	return digest, nil
 }

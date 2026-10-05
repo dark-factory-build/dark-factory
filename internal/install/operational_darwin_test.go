@@ -26,13 +26,6 @@ func TestOperationalHomeLeasesPopulatedGoHome(t *testing.T) {
 	if _, err := Init(context.Background(), homePath); err != nil {
 		t.Fatal(err)
 	}
-	store, err := kernel.Open(context.Background(), filepath.Join(homePath, databaseName))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Close(); err != nil {
-		t.Fatal(err)
-	}
 	runtimeSentinel := []byte("runtime descendant must not be read")
 	changeSentinel := []byte("change descendant must not be read")
 	if err := os.WriteFile(filepath.Join(homePath, runtimesName, "sentinel"), runtimeSentinel, 0o600); err != nil {
