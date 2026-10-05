@@ -2295,7 +2295,7 @@ func writeFailure(stderr io.Writer, kind commandKind, err error) {
 	} else if kind == commandSendBack {
 		subject, input = "send-back", "send-back input"
 	}
-	message := "factoryctl: " + subject + " failed\n"
+	message := "factoryctl: " + subject + " failed: " + err.Error() + "\n"
 	var remote *api.RemoteError
 	switch {
 	case errors.Is(err, api.ErrInvalidClient):
@@ -2843,7 +2843,7 @@ func writeJSON(stdout io.Writer, value any) int {
 }
 
 func writeWebFailure(stderr io.Writer, subject string, err error) int {
-	message := "factoryctl: " + subject + " failed\n"
+	message := "factoryctl: " + subject + " failed: " + err.Error() + "\n"
 	var remote *api.RemoteError
 	switch {
 	case errors.Is(err, context.Canceled):
