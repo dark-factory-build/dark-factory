@@ -42,44 +42,21 @@ func parseOutcome(args []string) (attemptCommand, bool, bool) {
 		}
 		seen[args[i]] = true
 		n, v := args[i], args[i+1]
-		switch n {
-		case "--id":
-			if !validHumanRequestKey(v) {
-				return attemptCommand{}, false, false
-			}
+		count, isCount := parseCount(v, true)
+		switch {
+		case n == "--id" && validHumanRequestKey(v):
 			c.contentID = v
-		case "--project":
-			if !validHumanRequestKey(v) {
-				return attemptCommand{}, false, false
-			}
+		case n == "--project" && validHumanRequestKey(v):
 			c.project = v
-		case "--revision":
-			x, ok := parseRevision(v)
-			if !ok {
-				return attemptCommand{}, false, false
-			}
-			c.contentRevision = x
-		case "--offset":
-			x, ok := parseCount(v, true)
-			if !ok {
-				return attemptCommand{}, false, false
-			}
-			c.offset = x
-		case "--limit":
-			x, ok := parseRevision(v)
-			if !ok || x > api.MaxContentPageItems {
-				return attemptCommand{}, false, false
-			}
-			c.head = x
-		case "--document":
-			if len(v) == 0 || len(v) > kernel.OutcomeDocumentLimit {
-				return attemptCommand{}, false, false
-			}
+		case n == "--revision" && isCount && count > 0:
+			c.contentRevision = count
+		case n == "--offset" && isCount:
+			c.offset = count
+		case n == "--limit" && isCount && count > 0 && count <= api.MaxContentPageItems:
+			c.head = count
+		case n == "--document" && len(v) > 0 && len(v) <= kernel.OutcomeDocumentLimit:
 			c.document, c.bodySet = v, true
-		case "--document-file":
-			if len(v) == 0 || len(v) > 4096 {
-				return attemptCommand{}, false, false
-			}
+		case n == "--document-file" && len(v) > 0 && len(v) <= 4096:
 			c.documentFile = v
 		default:
 			return attemptCommand{}, false, false

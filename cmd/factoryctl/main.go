@@ -1565,6 +1565,7 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 			return attemptCommand{}, false, false
 		}
 		seen[name] = true
+		count, isCount := parseCount(value, true)
 		switch {
 		case name == "--name" && (command.kind == commandProjectCreate || command.kind == commandAgentCreate) && validOperatorText(value, 1, 128):
 			command.name = value
@@ -1574,38 +1575,16 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 			command.project = value
 		case name == "--repository" && command.kind == commandTaskAdd && validHumanRequestKey(value):
 			command.repository = value
-		case name == "--revision" && (command.kind == commandProjectLimits || command.kind == commandAgentIdlePolicy):
-			revision, ok := parseRevision(value)
-			if !ok {
-				return attemptCommand{}, false, false
-			}
-			command.expectedRevision = revision
-		case name == "--run-budget" && command.kind == commandProjectLimits:
-			budget, err := strconv.ParseUint(value, 10, 64)
-			if err != nil || value != strconv.FormatUint(budget, 10) || budget > uint64(^uint64(0)>>1) {
-				return attemptCommand{}, false, false
-			}
-			command.toolBudget = budget
-		case name == "--token-budget" && command.kind == commandProjectLimits:
-			budget, err := strconv.ParseUint(value, 10, 64)
-			if err != nil || value != strconv.FormatUint(budget, 10) || budget > uint64(^uint64(0)>>1) {
-				return attemptCommand{}, false, false
-			}
-			command.tokenBudget = &budget
-		case name == "--max-run-seconds" && command.kind == commandProjectLimits:
-			seconds, err := strconv.ParseUint(value, 10, 32)
-			if err != nil || value != strconv.FormatUint(seconds, 10) || seconds > 86400 {
-				return attemptCommand{}, false, false
-			}
-			command.maxRunSeconds = uint32(seconds)
+		case name == "--revision" && (command.kind == commandProjectLimits || command.kind == commandAgentIdlePolicy || command.kind == commandAgentSelectAccount || command.kind == commandAgentSelectModel || command.kind == commandTaskRead) && isCount && count > 0:
+			command.expectedRevision = count
+		case name == "--run-budget" && command.kind == commandProjectLimits && isCount:
+			command.toolBudget = count
+		case name == "--token-budget" && command.kind == commandProjectLimits && isCount:
+			command.tokenBudget = &count
+		case name == "--max-run-seconds" && command.kind == commandProjectLimits && isCount && count <= 86400:
+			command.maxRunSeconds = uint32(count)
 		case name == "--agent" && (command.kind == commandTaskAdd || command.kind == commandAgentIdlePolicy || command.kind == commandAgentSelectAccount || command.kind == commandAgentSelectModel || command.kind == commandAgentPaths) && (validHumanRequestKey(value) || command.kind == commandTaskAdd && value == "any"):
 			command.agent = value
-		case name == "--revision" && (command.kind == commandAgentSelectAccount || command.kind == commandAgentSelectModel):
-			revision, ok := parseRevision(value)
-			if !ok {
-				return attemptCommand{}, false, false
-			}
-			command.expectedRevision = revision
 		case name == "--account" && command.kind == commandAgentSelectAccount && validHumanRequestKey(value):
 			command.account = value
 		case name == "--model" && command.kind == commandAgentSelectModel && validOperatorText(value, 1, 128):
@@ -1628,28 +1607,16 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 			command.reasoningEffort = value
 		case name == "--account" && command.kind == commandAgentCreate && validHumanRequestKey(value):
 			command.account = value
-		case name == "--tool-budget" && command.kind == commandAgentCreate:
-			budget, err := strconv.ParseUint(value, 10, 64)
-			if err != nil || value != strconv.FormatUint(budget, 10) || budget < 1 || budget > 1_000_000_000 {
-				return attemptCommand{}, false, false
-			}
-			command.toolBudget = budget
+		case name == "--tool-budget" && command.kind == commandAgentCreate && isCount && count >= 1 && count <= 1_000_000_000:
+			command.toolBudget = count
 		case name == "--policy" && command.kind == commandAgentIdlePolicy && (value == "wait" || value == "standing_instruction"):
 			command.provider = value
-		case name == "--after-seconds" && command.kind == commandAgentIdlePolicy:
-			seconds, err := strconv.ParseUint(value, 10, 32)
-			if err != nil || value != strconv.FormatUint(seconds, 10) || seconds > uint64(kernel.MaxIdleAfterSeconds) {
-				return attemptCommand{}, false, false
-			}
-			command.maxRunSeconds = uint32(seconds)
+		case name == "--after-seconds" && command.kind == commandAgentIdlePolicy && isCount && count <= uint64(kernel.MaxIdleAfterSeconds):
+			command.maxRunSeconds = uint32(count)
 		case name == "--instruction" && command.kind == commandAgentIdlePolicy && validOperatorText(value, 1, 32768):
 			command.text = value
-		case name == "--run-budget" && command.kind == commandAgentIdlePolicy:
-			budget, err := strconv.ParseUint(value, 10, 32)
-			if err != nil || value != strconv.FormatUint(budget, 10) || budget > uint64(kernel.MaxIdleRunBudget) {
-				return attemptCommand{}, false, false
-			}
-			command.toolBudget = budget
+		case name == "--run-budget" && command.kind == commandAgentIdlePolicy && isCount && count <= uint64(kernel.MaxIdleRunBudget):
+			command.toolBudget = count
 		case name == "--title" && command.kind == commandTaskAdd && validOperatorText(value, 1, 1024):
 			command.title = value
 		case name == "--body" && command.kind == commandTaskAdd && validOperatorText(value, 0, 131072):
@@ -1658,22 +1625,10 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 			command.id = value
 		case name == "--incarnation-id" && command.kind == commandTaskAdd && validHumanRequestKey(value):
 			command.run = value
-		case name == "--task" && command.kind == commandTaskSendBack && validHumanRequestKey(value):
+		case name == "--task" && (command.kind == commandTaskSendBack || command.kind == commandTaskRead) && validHumanRequestKey(value):
 			command.id = value
-		case name == "--task" && command.kind == commandTaskRead && validHumanRequestKey(value):
-			command.id = value
-		case name == "--revision" && command.kind == commandTaskRead:
-			revision, ok := parseRevision(value)
-			if !ok {
-				return attemptCommand{}, false, false
-			}
-			command.expectedRevision = revision
-		case name == "--offset" && command.kind == commandTaskRead:
-			offset, err := strconv.ParseUint(value, 10, 64)
-			if err != nil || value != strconv.FormatUint(offset, 10) || offset > uint64(^uint64(0)>>1) {
-				return attemptCommand{}, false, false
-			}
-			command.offset = offset
+		case name == "--offset" && command.kind == commandTaskRead && isCount:
+			command.offset = count
 		case name == "--note" && command.kind == commandTaskSendBack && validOperatorText(value, 1, 8192):
 			command.text = value
 		case name == "--priority" && command.kind == commandTaskAdd:
@@ -2094,14 +2049,27 @@ func usageProblem(spec, args []string, start int, accepts func([]string) bool) (
 		seen[s] = true
 	}
 	// A flag in several brackets, like --head, requires nothing itself; a
-	// flag bracketed only in group g requires g's other flags.
+	// flag bracketed only in group g requires g's other flags. These are only
+	// candidates: the usage line cannot express every rule parse applies.
 	exclusive := func(group int) bool {
 		return group != 0 && slices.ContainsFunc(slots, func(other *slot) bool { return seen[other] && slices.Equal(other.groups, []int{group}) })
 	}
+	var missing, insert []string
+	extended := map[int]*slot{}
 	for _, s := range slots {
 		if !seen[s] && (s.required || slices.ContainsFunc(s.groups, exclusive)) {
-			return 1, "missing " + s.name
+			missing = append(missing, "missing "+s.name)
+			if strings.HasPrefix(s.name, "--") {
+				insert = append(insert, s.name)
+			}
+			if s.value {
+				insert = append(insert, "")
+				extended[start+len(insert)-1] = s
+			}
 		}
+	}
+	for index, s := range values {
+		extended[index+len(insert)] = s
 	}
 	samples := func(placeholder string) []string {
 		var candidates []string
@@ -2126,39 +2094,57 @@ func usageProblem(spec, args []string, start int, accepts func([]string) bool) (
 		changed[index] = value
 		return changed
 	}
-	// The fewest values that must change to make the line valid are the
-	// invalid ones; the rest keep what was typed. ponytail: subset search caps
-	// at 12 values (then the generic message); search greedily past that.
-	indexes := slices.Sorted(maps.Keys(values))
-	var valid []string
-	var invalid []int
-	for size := 1; valid == nil && size <= len(indexes) && len(indexes) <= 12; size++ {
-		for mask := 1; valid == nil && mask < 1<<len(indexes); mask++ {
-			if bits.OnesCount(uint(mask)) != size {
-				continue
+	// The cheapest fix parse accepts names the problems: each changed value
+	// and each added flag costs one, and the rest keep what was typed. Added
+	// flags take samples for free. ponytail: subset search caps at 12 values
+	// (then the generic message); search greedily past that.
+	search := func(line []string, of map[int]*slot, inserted int) ([]string, []int) {
+		var open, free []int
+		for _, index := range slices.Sorted(maps.Keys(of)) {
+			if index < start+inserted {
+				free = append(free, index)
+			} else {
+				open = append(open, index)
 			}
-			changed, chosen := slices.Clone(args), []int{}
-			for bit, index := range indexes {
-				if mask&(1<<bit) != 0 {
-					changed[index], chosen = samples(values[index].placeholder)[0], append(chosen, index)
+		}
+		for size := 0; size <= len(open) && len(open) <= 12; size++ {
+			for mask := 0; mask < 1<<len(open); mask++ {
+				if bits.OnesCount(uint(mask)) != size {
+					continue
 				}
-			}
-			for _, index := range chosen {
-				for _, sample := range samples(values[index].placeholder) {
-					if !accepts(changed) && accepts(with(changed, index, sample)) {
-						changed[index] = sample
+				changed, chosen := slices.Clone(line), slices.Clone(free)
+				for bit, index := range open {
+					if mask&(1<<bit) != 0 {
+						chosen = append(chosen, index)
 					}
 				}
+				for _, index := range chosen {
+					changed[index] = samples(of[index].placeholder)[0]
+				}
+				for _, index := range chosen {
+					for _, sample := range samples(of[index].placeholder) {
+						if !accepts(changed) && accepts(with(changed, index, sample)) {
+							changed[index] = sample
+						}
+					}
+				}
+				if accepts(changed) {
+					return changed, chosen[len(free):]
+				}
 			}
-			if accepts(changed) {
-				valid, invalid = changed, chosen
-			}
+		}
+		return nil, nil
+	}
+	rank, problems := 0, []string(nil)
+	valid, invalid := search(args, values, 0)
+	if missing != nil {
+		if line, changed := search(slices.Concat(args[:start], insert, args[start:]), extended, len(insert)); line != nil && (valid == nil || len(missing)+len(changed) <= len(invalid)) {
+			valid, invalid, values, rank, problems = line, changed, extended, 1, missing
 		}
 	}
 	if valid == nil {
 		return 0, "invalid flag values or combination"
 	}
-	var problems []string
 	for _, index := range invalid {
 		name, problem := values[index].name, "invalid "+values[index].name
 		if value, err := strconv.ParseInt(valid[index], 10, 64); err == nil {
@@ -2190,7 +2176,7 @@ func usageProblem(spec, args []string, start int, accepts func([]string) bool) (
 		}
 		problems = append(problems, problem)
 	}
-	return 0, strings.Join(problems, "; ")
+	return rank, strings.Join(problems, "; ")
 }
 
 func validHumanRequestKey(value string) bool {
