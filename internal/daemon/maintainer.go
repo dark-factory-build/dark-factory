@@ -264,7 +264,13 @@ func (daemon *Daemon) recordMaintainerPublication(ctx context.Context, project k
 		return err
 	}
 	if daemon.github != nil || daemon.reviewBackend != nil {
-		prepared, prepareErr := review.Prepare(review.Request{Repository: strings.ToLower(repo), PullNumber: reply.Result.Pull.Number, Head: strings.ToLower(reply.Result.Pull.Head), Base: strings.ToLower(reply.Result.Pull.Base), BaseRef: base, Body: body, Provider: "codex"}, daemon.now)
+		request := review.Request{Repository: strings.ToLower(repo), PullNumber: reply.Result.Pull.Number, Head: strings.ToLower(reply.Result.Pull.Head), Base: strings.ToLower(reply.Result.Pull.Base), BaseRef: base, Body: body, Provider: "codex"}
+		// The App appends its footer, and enqueue binds the reviewed body's
+		// digest, so review the body GitHub stores (canary 9, #1179).
+		if published, readErr := daemon.publishedReviewRequest(ctx, project, repo, reply.Result.Pull.Number, reply.Result.Pull.Head); readErr == nil {
+			request.Body = published.Body
+		}
+		prepared, prepareErr := review.Prepare(request, daemon.now)
 		if prepareErr != nil {
 			return prepareErr
 		}
