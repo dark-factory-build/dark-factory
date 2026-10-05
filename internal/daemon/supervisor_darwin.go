@@ -1004,10 +1004,12 @@ func (daemon *Daemon) attemptResultTail(
 	if err != nil {
 		return run, err
 	}
-	presence, err := ObserveRuntimeLifetime(runtimeParent, run.ID.String(), runtimeFileID)
-	if err != nil || presence != RuntimeLeaseAvailable {
-		return daemon.unresolvedRuntime(run, runtimeRootID, errors.Join(err, errRetainedRuntime))
-	}
+	// Do not sample the lifetime lease as a one-shot gate here. The provider
+	// owns the inherited lease through its final exec, and a provider helper
+	// can still be closing it after the result has been consumed and the outer
+	// runner has exited. RemoveRecordedRuntime performs the same exact-identity
+	// checks and treats a held lease as bounded progress, allowing this normal
+	// check-then-exit race to converge within the cleanup window.
 	for {
 		done, removeErr := RemoveRecordedRuntime(daemon.cleanupCtx, runtimeParent, run.ID.String(), runtimeFileID)
 		if removeErr != nil {
