@@ -233,6 +233,27 @@ func TestFirstPublicationOfAChangedHeadBuildsOnItsBranch(t *testing.T) {
 	}
 }
 
+// A branch an earlier attempt already brought to the head's tree, with no
+// pull request, gets its pull request at that branch head and no commit.
+func TestFirstPublicationOfAnAlreadyPublishedTreeOpensItsPullRequest(t *testing.T) {
+	fixture, c, source, app, checkout := publishFixture(t, 1, false)
+	ctx := context.Background()
+	app.tip = c.Head // the earlier attempt's commit carries the same tree
+	withTip := func(ctx context.Context, ref, head string) (string, func(), error) {
+		gitDir, cleanup, err := checkout(ctx, ref, head)
+		if err == nil {
+			_, err = gitOutput(ctx, gitDir, "-c", "protocol.file.allow=always", "fetch", "--quiet", source, head)
+		}
+		return gitDir, cleanup, err
+	}
+	if err := fixture.daemon.publishChange(ctx, c, "team/repo", source, app.call, withTip); err != nil {
+		t.Fatal(err)
+	}
+	if len(app.writes) != 1 || app.writes[0]["name"] != "create_pull_request" || app.writes[0]["arguments"].(map[string]any)["head_sha"] != c.Head {
+		t.Fatalf("writes = %+v", app.writes)
+	}
+}
+
 // A correction after a send-back goes on the open pull request's branch head
 // as one commit carrying only what the worker changed since, with its first
 // commit's response lost: the retry publishes nothing twice, replaces the
