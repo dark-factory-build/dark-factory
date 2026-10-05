@@ -17,7 +17,7 @@ git -C "$seed" add marker
 git -C "$seed" commit -m tagged >/dev/null
 tagged_sha=$(git -C "$seed" rev-parse HEAD)
 git -C "$seed" tag v1.2.3
-printf 'trusted main tool\n' >"$seed/marker"
+printf 'main tool\n' >"$seed/marker"
 git -C "$seed" commit -am main >/dev/null
 main_sha=$(git -C "$seed" rev-parse HEAD)
 git -C "$seed" remote add origin "$remote"
@@ -47,65 +47,43 @@ run_resolver() {
     run_event=$1
     run_ref=$2
     run_sha=$3
-    run_tag=${4:-}
     (
         cd "$workspace"
         GITHUB_EVENT_NAME="$run_event" \
             GITHUB_REF="$run_ref" \
             GITHUB_SHA="$run_sha" \
-            RELEASE_DEFAULT_BRANCH=main \
             GITHUB_ENV="$environment_file" \
             RUNNER_TEMP="$runner_temp" \
-            "$resolver" "$run_tag"
+            "$resolver"
     )
 }
-
-# Recovery resolves the immutable tag but saves the release tool source from
-# the exact checked-out default-branch commit before switching source trees.
-fresh_workspace recovery
-run_resolver workflow_dispatch refs/heads/main "$main_sha" v1.2.3
-[ "$(git -C "$workspace" rev-parse HEAD)" = "$tagged_sha" ] \
-    || fail "recovery did not check out the tagged commit"
-[ "$(value TAG "$environment_file")" = v1.2.3 ] || fail "recovery tag"
-[ "$(value SOURCE_SHA "$environment_file")" = "$tagged_sha" ] \
-    || fail "recovery source SHA"
-tool=$(value RELEASE_ARTIFACT "$environment_file")
-[ -x "$tool" ] || fail "trusted release tool is not executable"
-[ "$(cat "$(dirname "$tool")/marker")" = "trusted main tool" ] \
-    || fail "recovery used the tagged release tool"
-grep -Fq "exec $(dirname "$tool")/release-artifact \"\$@\"" "$tool" \
-    || fail "recovery tool does not run the default-branch build"
 
 # A tag push builds the release tool committed with that tag.
 fresh_workspace push
 git -C "$workspace" checkout --quiet --detach "$tagged_sha"
 run_resolver push refs/tags/v1.2.3 "$tagged_sha"
+[ "$(value TAG "$environment_file")" = v1.2.3 ] || fail "tag"
+[ "$(value SOURCE_SHA "$environment_file")" = "$tagged_sha" ] || fail "source SHA"
+[ "$(git -C "$workspace" rev-parse HEAD)" = "$tagged_sha" ] || fail "checkout moved"
 [ "$(cat "$(dirname "$(value RELEASE_ARTIFACT "$environment_file")")/marker")" = "tagged tool" ] \
     || fail "tag push did not use its tagged release tool"
 
-# A dispatch from any ref except the default branch is rejected before the
-# persistent runner can switch to or execute the requested tag.
-fresh_workspace branch
-if run_resolver workflow_dispatch refs/heads/unreviewed "$main_sha" v1.2.3; then
-    fail "non-default-branch dispatch was accepted"
+# Only a tag push can release; a dispatch or branch push is refused before
+# anything is built.
+fresh_workspace dispatch
+if run_resolver workflow_dispatch refs/heads/main "$main_sha"; then
+    fail "dispatch was accepted"
 fi
-[ "$(git -C "$workspace" rev-parse HEAD)" = "$main_sha" ] \
-    || fail "rejected dispatch changed the checkout"
+fresh_workspace branch
+if run_resolver push refs/heads/main "$main_sha"; then
+    fail "branch push was accepted"
+fi
 
 # The tag is one validated ref component; it cannot inject a refspec.
 fresh_workspace injection
-if run_resolver workflow_dispatch refs/heads/main "$main_sha" \
-    'v1.2.3:refs/heads/main'; then
+if run_resolver push 'refs/tags/v1.2.3:refs/heads/main' "$main_sha"; then
     fail "tag refspec injection was accepted"
 fi
-
-# Recovery cannot invent a new tag or fall back to a branch or commit.
-fresh_workspace missing
-if run_resolver workflow_dispatch refs/heads/main "$main_sha" v9.9.9; then
-    fail "missing recovery tag was accepted"
-fi
-[ "$(git -C "$workspace" rev-parse HEAD)" = "$main_sha" ] \
-    || fail "missing tag changed the checkout"
 
 # A tag push must still resolve to the immutable event commit.
 fresh_workspace moved

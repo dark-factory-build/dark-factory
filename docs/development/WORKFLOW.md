@@ -341,8 +341,8 @@ silicon and Intel macOS and
 publishes two archives, `SHA256SUMS`, a Homebrew formula candidate, and
 `latest.json`. The manifest is release metadata; the runtime has no updater.
 
-The fixed recovery workflow can resume a failed release while remaining bound
-to its tag and exact default-branch workflow commit.
+A half-published release is fixed by re-running that tag's Release workflow or
+publishing manually with the `release-artifact` tool.
 
 factoryd releases merged commits into itself; see [DEPLOY.md](DEPLOY.md).
 

@@ -419,7 +419,7 @@ test('two principals: callback, pagination, refresh, replay, grants and revocati
     unavailable = '/user'; unavailableStatus = 403;
     assert.equal((await call(alice, 'observe_operation', observe)).status, 503, 'ambiguous 403 rate limit must not revoke the connection');
     unavailableStatus = 503; unavailable = '';
-    assert.equal((await call(bob, 'observe_release_workflow', observe)).status, 401, 'remote receipt markers require their owner');
+    assert.equal((await call(bob, 'observe_pull_request_merge', { repository: 'team/shared', enqueue_operation_id: id })).status, 401, 'referenced operations require their owner');
     assert.equal((await (await call(alice, 'create_issue', args)).json()).result.structuredContent.number, 123);
     push = false;
     assert.equal((await call(alice, 'create_issue', args)).status, 401, 'write loss blocks completed replay');

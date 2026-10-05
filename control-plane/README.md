@@ -51,9 +51,7 @@ Access policy, or App configuration is live.
   publish an exact commit, as the merge a worker made when it integrated the
   default branch, and pull request, submit an exact-head
   `ALLOW`, `COMMENT`, or `REQUEST_CHANGES` verdict, observe exact-head checks
-  and eventual merge state, enqueue through a merge queue, publish and observe
-  immutable releases, and dispatch only the fixed reviewed release recovery
-  workflow. GitHub's `delete_branch_on_merge` repository setting
+  and eventual merge state, and enqueue through a merge queue. GitHub's `delete_branch_on_merge` repository setting
   performs atomic source-branch cleanup; the broker never deletes a ref itself. All three verdicts are the repository's own words,
   not GitHub review states -- the App opens the pull requests it
   reviews, and GitHub refuses a self-review that takes a side, `APPROVE` and
@@ -131,10 +129,10 @@ in zeroizing memory and are never returned or journalled. The permanent App may
 have additional installed capabilities; unused App-level authority is never
 copied into an operation token.
 
-Each operation's requested Actions, checks, contents, issues,
+Each operation's requested checks, contents, issues,
 merge-queues, metadata, and pull-requests permission is checked when its
 repository token is minted, not at readiness. No operation mints
-Administration. Readiness names no
+Administration or Actions. Readiness names no
 repository, so it has no installation to audit; an installation that is
 suspended, is not selected-repository, or lacks the operation's requested grant
 is refused with the field that failed. A repository that cannot merge or deploy
