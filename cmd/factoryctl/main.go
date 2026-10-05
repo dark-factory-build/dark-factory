@@ -2136,10 +2136,11 @@ func usageProblem(spec, args []string, start int, accepts func([]string) bool) (
 		return nil, nil
 	}
 	rank, problems := 0, []string(nil)
-	valid, invalid := search(args, values, 0)
+	typed, withMissing := args, slices.Concat(args[:start], insert, args[start:])
+	valid, invalid := search(typed, values, 0)
 	if missing != nil {
-		if line, changed := search(slices.Concat(args[:start], insert, args[start:]), extended, len(insert)); line != nil && (valid == nil || len(missing)+len(changed) <= len(invalid)) {
-			valid, invalid, values, rank, problems = line, changed, extended, 1, missing
+		if line, changed := search(withMissing, extended, len(insert)); line != nil && (valid == nil || len(missing)+len(changed) <= len(invalid)) {
+			typed, valid, invalid, values, rank, problems = withMissing, line, changed, extended, 1, missing
 		}
 	}
 	if valid == nil {
@@ -2162,8 +2163,11 @@ func usageProblem(spec, args []string, start int, accepts func([]string) bool) (
 				}
 				return ok
 			}
+			given, notInteger := strconv.ParseInt(typed[index], 10, 64)
 			switch low, high := edge(value, -far), edge(value, far); {
-			case low == -far && high == far:
+			case notInteger != nil && !errors.Is(notInteger, strconv.ErrRange) || (low == -far || given >= low) && (high == far || given <= high):
+				// The probed bounds do not explain the typed value (ParseInt clamps an
+				// overflow to the int64 edge): say only invalid.
 			case high == far:
 				problem = fmt.Sprintf("%s must be at least %d", name, low)
 			case low == -far:
