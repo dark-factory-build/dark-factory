@@ -523,7 +523,7 @@ func customerMode(t *testing.T, fixture *dispatchFixture) {
 	fixture.daemon.github = host
 }
 
-// The merge stage is dormant on a legacy home: the tick does not route a
+// The merge stage is dormant on an unconnected home: the tick does not route a
 // review_pr result, and startup routes it as before but does not observe an
 // enqueued head. On the factoryd Maintainer path both advance.
 func TestMergeStageRunsOnlyOnTheCustomerPath(t *testing.T) {

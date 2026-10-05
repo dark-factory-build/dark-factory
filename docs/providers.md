@@ -90,10 +90,11 @@ granted the repository's Git directory read-only; they do not receive the
 daemon database, the Changes parent, or the daemon home. A later work
 revision or Change revision, or a branch that moved since settlement, is
 refused.
-overseer publishes through the Maintainer App. A Claude Code orchestrator is launched
-with that App's MCP bridge, `dark-factory-maintainer-mcp-bridge` resolved on
-the fixed tool path, beside the same `factory_attempt` server (`factoryctl
-attempt mcp`) a Codex orchestrator already has. A Claude Code worker is launched
+overseer publishes through the Maintainer App. On a GitHub-connected home an
+orchestrator of either provider is launched with factoryd's Maintainer server
+(`factoryctl attempt maintainer-mcp`) beside its `factory_attempt` server
+(`factoryctl attempt mcp`); an unconnected home's orchestrator has no
+Maintainer server. A Claude Code worker is launched
 with `--strict-mcp-config` and exactly one factory-control MCP server,
 `factory_attempt` (`factoryctl attempt mcp`). If the optional installed
 browser bridge is present, the worker also receives `factory_browser`; it is a

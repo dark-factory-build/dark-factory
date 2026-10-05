@@ -325,9 +325,9 @@ forwarding. The opaque connection credential remains in the private host store;
 the broker retains all GitHub tokens and repeats authorization on every call.
 An operator explicitly binds each publication checkout's configured origin to
 a live delegated numeric ID. Provider calls cannot learn or replace that binding.
-First connection refuses while any legacy overseer is nonterminal, including
-admissions not yet in the live registry. Disconnect permanently preserves customer
-mode, so later launches cannot fall back to the owner's external legacy bridge.
+This is the only Maintainer path: an unconnected home's overseers get no
+Maintainer server and factoryd runs no merge stage. Disconnect keeps customer
+mode, so later launches keep the adapter and fail closed at the broker.
 
 Repository registration checks the actual Git root and local base, then pins
 the root and Git administration file identities plus a digest of origin
