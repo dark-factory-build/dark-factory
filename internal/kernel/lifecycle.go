@@ -380,9 +380,9 @@ const NeverStartedRunDetail = "never started: no terminal output or attempt call
 // never-started run is.
 const ProviderCapacityRunDetail = "provider reported its selected model at capacity"
 
-// OverseerRunLimitDetail is the failure of an overseer run stopped at its
-// backstop (MaxOverseerRunSeconds): its task is retried as a never-started
-// run is, so the next run resumes from durable state.
+// OverseerRunLimitDetail is the failure of an overseer run stopped at its run
+// limit (the project's, or the MaxOverseerRunSeconds backstop): its task is
+// retried as a never-started run is, so the next run resumes from durable state.
 const OverseerRunLimitDetail = "overseer run limit reached"
 
 // FailRun records a daemon-owned infrastructure failure before or during a

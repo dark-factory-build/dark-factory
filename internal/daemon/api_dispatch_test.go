@@ -1270,24 +1270,38 @@ func TestDaemonOverseerBackstopFreesLaneWhenProjectLimitIsDisabled(t *testing.T)
 	}
 }
 
-// A shorter project limit still cancels an overseer: only the backstop requeues.
-func TestOverseerPastAProjectLimitIsCancelled(t *testing.T) {
-	fixture := newDispatchFixture(t)
-	active := prepareActiveAttemptInProjectWithProvider(t, fixture, 57, testID(57), "orchestrator", "codex")
+// An overseer past its project limit is requeued like one at the backstop,
+// and a project limit equal to the backstop is no different; a worker past
+// its limit is cancelled.
+func TestOverseerPastAProjectLimitIsRequeuedAndAWorkerCancelled(t *testing.T) {
 	ctx := context.Background()
-	project, _, err := fixture.store.Project(ctx, active.run.ProjectID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := fixture.store.SetProjectLimits(ctx, project.ID, project.Revision, project.RunBudgetLimit, 60, active.run.AdmittedAt); err != nil {
-		t.Fatal(err)
-	}
-	fixture.daemon.now = func() time.Time { return time.UnixMilli(active.run.AdmittedAt.Int64() + 60_000) }
-	if err := fixture.daemon.enforceRunLiveness(ctx, SupervisorSpec{}); err != nil {
-		t.Fatal(err)
-	}
-	if run, _, err := fixture.store.Run(ctx, active.run.ID); err != nil || run.Proposal == nil || run.Proposal.Kind() != kernel.OutcomeCancelled || run.Proposal.Detail() != runLimitDetail {
-		t.Fatalf("overseer past project limit = %+v, err=%v", run, err)
+	for _, test := range []struct {
+		seed   byte
+		role   string
+		limit  uint32
+		kind   kernel.OutcomeKind
+		detail string
+	}{
+		{57, "orchestrator", 60, kernel.OutcomeFailed, kernel.OverseerRunLimitDetail},
+		{67, "orchestrator", kernel.MaxOverseerRunSeconds, kernel.OutcomeFailed, kernel.OverseerRunLimitDetail},
+		{77, "worker", 60, kernel.OutcomeCancelled, runLimitDetail},
+	} {
+		fixture := newDispatchFixture(t)
+		active := prepareActiveAttemptInProjectWithProvider(t, fixture, test.seed, testID(test.seed), test.role, "codex")
+		project, _, err := fixture.store.Project(ctx, active.run.ProjectID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := fixture.store.SetProjectLimits(ctx, project.ID, project.Revision, project.RunBudgetLimit, test.limit, active.run.AdmittedAt); err != nil {
+			t.Fatal(err)
+		}
+		fixture.daemon.now = func() time.Time { return time.UnixMilli(active.run.AdmittedAt.Int64() + int64(test.limit)*1000) }
+		if err := fixture.daemon.enforceRunLiveness(ctx, SupervisorSpec{}); err != nil {
+			t.Fatal(err)
+		}
+		if run, _, err := fixture.store.Run(ctx, active.run.ID); err != nil || run.Proposal == nil || run.Proposal.Kind() != test.kind || run.Proposal.Detail() != test.detail {
+			t.Fatalf("%s past a %ds limit = %+v, err=%v", test.role, test.limit, run, err)
+		}
 	}
 }
 

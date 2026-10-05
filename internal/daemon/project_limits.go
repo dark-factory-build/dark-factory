@@ -18,13 +18,13 @@ const (
 
 // enforceRunLiveness runs on every scheduler poll. It cancels worker runs past
 // their limit (measured from admission, so a run stuck before provider startup
-// cannot evade it), fails an overseer run at its backstop, fails a live attempt that has been quiet for the stall
+// cannot evade it), fails an overseer run past its limit, fails a live attempt that has been quiet for the stall
 // budget, and repeats startup recovery for runs that have had no live owner
 // and no update for ownerlessRunAge. A failed or cancelled run reaches
 // finalizing, which its live owner answers by stopping the provider, as for
 // an operator stop. Every edge is CAS-protected: a result or stop that won
-// first is left untouched. A run that never started and an overseer at its
-// backstop are retried once, by their finalization (kernel.NeverStartedRunDetail,
+// first is left untouched. A run that never started and an overseer past its
+// limit are retried once, by their finalization (kernel.NeverStartedRunDetail,
 // kernel.OverseerRunLimitDetail).
 func (daemon *Daemon) enforceRunLiveness(ctx context.Context, spec SupervisorSpec) error {
 	at, err := daemon.timestamp()
@@ -40,8 +40,9 @@ func (daemon *Daemon) enforceRunLiveness(ctx context.Context, spec SupervisorSpe
 		return err
 	}
 	for _, run := range runs {
-		// Only the overseer backstop requeues; a project limit still cancels.
-		if run.Role == kernel.RoleOrchestrator && run.Provider != kernel.ProviderShell && at.Int64()-run.AdmittedAt.Int64() >= kernel.MaxOverseerRunSeconds*1000 {
+		// Cancelling an overseer's task would drop its work (an intake task):
+		// at any run limit it fails and is requeued once instead.
+		if run.Role == kernel.RoleOrchestrator {
 			_, err = daemon.store.FailRun(ctx, run.ID, run.Revision, overseerLimit, at)
 		} else {
 			_, err = daemon.store.CancelRun(ctx, run.ID, run.Revision, runLimitDetail, at)
