@@ -14,7 +14,7 @@ import (
 // Only complete lines are exposed. Starting inside a retained page discards
 // its first line, and a partial final line is omitted, so a caller cannot
 // bypass credential labels by requesting a cursor inside their value.
-var terminalPrivateText = regexp.MustCompile(`(?i)(?:authorization[[:blank:]]*[:=][[:blank:]]*(?:bearer[[:blank:]]+)?|bearer[[:blank:]]+|(?:api[_-]?key|password|token|secret)["']?[[:blank:]]*[:=][[:blank:]]*["']?)[^\r\n]+|(?:/Users/|/home/|/private/|/var/|/tmp/|/Volumes/|/opt/|/usr/local/|~/)[^[:space:]]+|[[:alnum:]._%+-]+@[[:alnum:]-]+(?:\.[[:alnum:]-]+)+`)
+var terminalPrivateText = regexp.MustCompile(`(?i)(?:authorization[[:blank:]]*[:=][[:space:]]*(?:bearer[[:blank:]]+)?|bearer[[:blank:]]+|(?:api[_-]?key|password|token|secret)["']?[[:blank:]]*[:=][[:space:]]*["']?)[^\r\n]+|(?:/Users/|/home/|/private/|/var/|/tmp/|/Volumes/|/opt/|/usr/local/|~/)[^[:space:]]+|[[:alnum:]._%+-]+@[[:alnum:]-]+(?:\.[[:alnum:]-]+)+`)
 
 const terminalJSONStringAtom = `(?:\\.|[^"\\])`
 
@@ -51,9 +51,13 @@ func terminalTextProjection(payload []byte, droppedPrefix bool, limit int) strin
 		payload, _ = redactTerminalWindow(payload, 1)
 	}
 	text := make([]byte, 0, len(payload))
-	space := func() {
-		if len(text) != 0 && text[len(text)-1] != ' ' {
-			text = append(text, ' ')
+	// Lines are joined only after redaction: a redaction runs to the end of
+	// its line, so joining first would hide everything after the first match.
+	boundary := func(mark byte) {
+		if n := len(text); n != 0 && text[n-1] == ' ' && mark == '\n' {
+			text[n-1] = '\n'
+		} else if n != 0 && text[n-1] != ' ' && text[n-1] != '\n' {
+			text = append(text, mark)
 		}
 	}
 	for index := 0; index < len(payload); {
@@ -81,15 +85,17 @@ func terminalTextProjection(payload []byte, droppedPrefix bool, limit int) strin
 		}
 		if value < 0x20 || value >= 0x7f && value <= 0x9f {
 			index += width
-			if value == '\r' || value == '\n' || value == '\t' {
-				space()
+			if value == '\r' || value == '\n' {
+				boundary('\n')
+			} else if value == '\t' {
+				boundary(' ')
 			}
 			continue
 		}
 		text = append(text, payload[index:index+width]...)
 		index += width
 	}
-	text = bytes.TrimSpace(redactTerminalText(text))
+	text = bytes.ReplaceAll(bytes.TrimSpace(redactTerminalText(text)), []byte{'\n'}, []byte{' '})
 	if len(text) > limit {
 		text = text[len(text)-limit:]
 		for len(text) != 0 && !utf8.Valid(text) {

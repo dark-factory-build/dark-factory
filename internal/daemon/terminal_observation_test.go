@@ -134,6 +134,9 @@ func TestTerminalTextProjectionNormalizesControlsBeforeRedaction(t *testing.T) {
 			t.Fatalf("encoded control leaked hidden text: %q", got)
 		}
 	}
+	if got := terminalTextProjection([]byte("token: abc\nvisible line\n"), false, 65536); got != "********** visible line" {
+		t.Fatalf("redaction crossed a line break: %q", got)
+	}
 	bounded := terminalTextProjection([]byte("old state\x1b[Hcurrent state"), false, 7)
 	if bounded != "t state" || !utf8.ValidString(bounded) {
 		t.Fatalf("bounded projection = %q", bounded)
