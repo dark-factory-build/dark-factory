@@ -177,7 +177,7 @@ test("board shares immutable threads, resolves by revision, and retains linked c
   assert.deepEqual(renderer.root.findByType("pre").children, ["Concrete evidence, not a permission grant."], "posting keeps the thread in view");
   await click("Save conclusion");
   assert.equal(renderer.root.findByProps({ name: "kind" }).props.defaultValue, "lesson");
-  assert.equal(renderer.root.findByProps({ name: "evidence" }).props.defaultValue, `content:${metadata.id}@3`, "conclusion starts with evidence from the thread");
+  assert.deepEqual(renderer.root.findByProps({ name: "evidence" }).props.defaultValue.split("\n"), ["test:regression", `content:${metadata.id}@3`], "conclusion retains existing and thread evidence");
   const originalFormData = globalThis.FormData;
   const values = { kind: "lesson", repository_id: metadata.repository_id, title: "Retained conclusion", body: "Use exact authority", status: "tentative", evidence: `content:${metadata.id}@3`, entities: source, thread_id: metadata.id, branch: "topic", environment: "staging" };
   globalThis.FormData = class { get(name) { return values[name] ?? null; } };
