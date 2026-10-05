@@ -358,7 +358,7 @@ func (daemon *Daemon) drainForRelease(ctx context.Context) (string, error) {
 // the registered checkout, into directory/bin as an exact release identity.
 func buildRelease(ctx context.Context, daemon *Daemon, root string, source change.RepositorySourceIdentity, sha, directory string) (buildinfo.Identity, error) {
 	tree := filepath.Join(directory, "tree")
-	if err := change.ReviewCheckout(ctx, change.TrustedGitExecutable, root, source, tree, 0, sha, sha, selfBase); err != nil {
+	if err := change.ReviewCheckout(ctx, change.TrustedGitExecutable, root, source, tree, "", sha, sha, selfBase); err != nil {
 		return buildinfo.Identity{}, fmt.Errorf("release checkout: %w", err)
 	}
 	// /usr/bin/env resolves go on the operator's tool path, not ours.
