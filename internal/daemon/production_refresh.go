@@ -137,10 +137,7 @@ func (daemon *Daemon) pullRequestObservation(ctx context.Context, repository str
 	for _, pull := range open {
 		seen[pull.Number] = true
 	}
-	for _, prior := range known {
-		if seen[prior.Number] {
-			continue
-		}
+	for _, prior := range rereadPulls(known, seen) {
 		exact, err := daemon.readMaintainerPullRequests(ctx, repository, githubID, map[string]any{"repository": repository, "page": 1, "per_page": 1, "pull_number": prior.Number})
 		if err == nil {
 			open = append(open, exact.PullRequests...)
@@ -163,6 +160,19 @@ func (daemon *Daemon) pullRequestObservation(ctx context.Context, repository str
 		result.PullRequests = append(result.PullRequests, pr)
 	}
 	return result, nil
+}
+
+// rereadPulls are the pulls last seen open that the open page no longer
+// lists. Merged and closed are final, so they are never read again: reading
+// every pull ever published cost one call each per refresh.
+func rereadPulls(known []kernel.ProductionPullRequest, seen map[uint64]bool) []kernel.ProductionPullRequest {
+	reread := []kernel.ProductionPullRequest{}
+	for _, pull := range known {
+		if pull.State == "open" && !seen[pull.Number] {
+			reread = append(reread, pull)
+		}
+	}
+	return reread
 }
 
 func productionPullRequestOverflow(page maintainerPullRequestPage) int {
