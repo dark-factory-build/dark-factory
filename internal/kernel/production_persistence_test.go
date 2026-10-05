@@ -280,7 +280,7 @@ func TestOverseerWakeRule(t *testing.T) {
 	rewake := OverseerRewakeAfter.Milliseconds()
 	at := int64(200_080)
 	first := wake(at)
-	if len(first) != 1 || first[0].Priority != 1000 || !strings.Contains(first[0].Body, "task_ids="+terminal.TaskID.String()+";") {
+	if len(first) != 1 || first[0].Priority != 1000 || !strings.Contains(first[0].Body, "\n- "+terminal.TaskID.String()+" ") {
 		t.Fatalf("first wake = %+v", first)
 	}
 	if again := wake(at + 2*rewake); len(again) != 0 {
