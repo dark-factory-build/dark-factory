@@ -140,9 +140,6 @@ func (record *AttemptResultRecord) Notice() AttemptResultNotice {
 	}
 	return record.notice
 }
-func (record *AttemptResultRecord) InnerActivated() bool {
-	return record != nil && record.innerActivated
-}
 func (record *AttemptResultRecord) ProofDigest() [sha256.Size]byte {
 	if record == nil {
 		return [sha256.Size]byte{}

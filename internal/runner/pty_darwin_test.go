@@ -50,7 +50,7 @@ func TestBlockedPTYIsInertUntilActivationAndProviderGetsExactTTY(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.child = child
-	if _, err := child.WritePTY([]byte("before\n")); !errors.Is(err, ErrState) {
+	if _, err := child.writePTYOwned([]byte("before\n"), 250*time.Millisecond); !errors.Is(err, ErrState) {
 		t.Fatalf("pre-activation PTY write error=%v, want ErrState", err)
 	}
 	if _, err := os.Stat(effect); !errors.Is(err, os.ErrNotExist) {
@@ -77,13 +77,13 @@ func TestBlockedPTYIsInertUntilActivationAndProviderGetsExactTTY(t *testing.T) {
 	if got := child.Identity(); got != want {
 		t.Fatalf("identity changed across activation: before=%+v after=%+v", want, got)
 	}
-	if _, err := child.WritePTY([]byte("hello\n")); err != nil {
+	if _, err := child.writePTYOwned([]byte("hello\n"), 250*time.Millisecond); err != nil {
 		t.Fatalf("PTY input after activation: %v", err)
 	}
 	var output strings.Builder
 	buf := make([]byte, 128)
 	for !strings.Contains(output.String(), "RESPONSE:hello") {
-		n, err := child.ReadPTY(buf)
+		n, err := readPTYForTest(child, buf)
 		if err != nil {
 			t.Fatalf("PTY output: %v (partial=%q)", err, output.String())
 		}
@@ -95,10 +95,10 @@ func TestBlockedPTYIsInertUntilActivationAndProviderGetsExactTTY(t *testing.T) {
 	if _, err := child.FinishAfterExit(4 * time.Second); err != nil {
 		t.Fatalf("finish provider: %v", err)
 	}
-	if n, err := child.ReadPTY(make([]byte, 16)); !errors.Is(err, io.EOF) || n != 0 {
+	if n, err := readPTYForTest(child, make([]byte, 16)); !errors.Is(err, io.EOF) || n != 0 {
 		t.Fatalf("post-exit PTY did not reach EOF: n=%d err=%v", n, err)
 	}
-	if _, err := child.WritePTY([]byte("after\n")); !errors.Is(err, ErrState) {
+	if _, err := child.writePTYOwned([]byte("after\n"), 250*time.Millisecond); !errors.Is(err, ErrState) {
 		t.Fatalf("post-exit PTY write error=%v, want ErrState", err)
 	}
 }
@@ -121,7 +121,7 @@ func TestPTYReadDeadlineDoesNotAffectOwnedProvider(t *testing.T) {
 	if _, err := child.Activate(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := child.ReadPTY(make([]byte, 32)); !errors.Is(err, os.ErrDeadlineExceeded) {
+	if _, err := readPTYForTest(child, make([]byte, 32)); !errors.Is(err, os.ErrDeadlineExceeded) {
 		t.Fatalf("quiet PTY read error=%v, want deadline", err)
 	}
 	if got := ObserveProcess(child.Identity()); got.Presence != Present {
@@ -148,23 +148,23 @@ func TestPTYResizeUsesOnlyLiveOwnedMasterAndExactBounds(t *testing.T) {
 	}
 	f.child = child
 	for _, invalid := range [][2]int{{0, 24}, {-1, 24}, {80, 0}, {80, -1}, {maxPTYDimension + 1, 24}, {80, maxPTYDimension + 1}, {1 << 20, 24}, {80, 1 << 20}, {int(^uint(0) >> 1), 24}} {
-		if err := child.ResizePTY(invalid[0], invalid[1]); !errors.Is(err, ErrState) {
-			t.Fatalf("ResizePTY(%d,%d) error=%v, want ErrState", invalid[0], invalid[1], err)
+		if err := child.resizePTYOwned(invalid[0], invalid[1]); !errors.Is(err, ErrState) {
+			t.Fatalf("resizePTYOwned(%d,%d) error=%v, want ErrState", invalid[0], invalid[1], err)
 		}
 	}
-	if err := child.ResizePTY(80, 24); !errors.Is(err, ErrState) {
+	if err := child.resizePTYOwned(80, 24); !errors.Is(err, ErrState) {
 		t.Fatalf("pre-activation resize error=%v, want ErrState", err)
 	}
 	if _, err := child.Activate(); err != nil {
 		t.Fatal(err)
 	}
 	for _, size := range [][2]int{{80, 24}, {132, 43}, {132, 43}} {
-		if err := child.ResizePTY(size[0], size[1]); err != nil {
-			t.Fatalf("ResizePTY(%d,%d): %v", size[0], size[1], err)
+		if err := child.resizePTYOwned(size[0], size[1]); err != nil {
+			t.Fatalf("resizePTYOwned(%d,%d): %v", size[0], size[1], err)
 		}
 		got, err := unix.IoctlGetWinsize(int(child.ptyMaster.Fd()), unix.TIOCGWINSZ)
 		if err != nil {
-			t.Fatalf("read PTY size after ResizePTY(%d,%d): %v", size[0], size[1], err)
+			t.Fatalf("read PTY size after resizePTYOwned(%d,%d): %v", size[0], size[1], err)
 		}
 		if got.Col != uint16(size[0]) || got.Row != uint16(size[1]) {
 			t.Fatalf("PTY size=%dx%d, want %dx%d", got.Col, got.Row, size[0], size[1])
@@ -173,7 +173,7 @@ func TestPTYResizeUsesOnlyLiveOwnedMasterAndExactBounds(t *testing.T) {
 	if _, err := child.Terminate(2 * time.Second); err != nil {
 		t.Fatal(err)
 	}
-	if err := child.ResizePTY(80, 24); !errors.Is(err, ErrState) {
+	if err := child.resizePTYOwned(80, 24); !errors.Is(err, ErrState) {
 		t.Fatalf("post-reap resize error=%v, want ErrState", err)
 	}
 }
@@ -184,7 +184,7 @@ func TestPTYResizeRejectsNonPTYAndClosedMaster(t *testing.T) {
 	if _, err := child.Activate(); err != nil {
 		t.Fatal(err)
 	}
-	if err := child.ResizePTY(80, 24); !errors.Is(err, ErrState) {
+	if err := child.resizePTYOwned(80, 24); !errors.Is(err, ErrState) {
 		t.Fatalf("non-PTY resize error=%v, want ErrState", err)
 	}
 	if _, err := child.Terminate(2 * time.Second); err != nil {
@@ -215,7 +215,7 @@ func TestPTYResizeRejectsNonPTYAndClosedMaster(t *testing.T) {
 	if ptyChild.state != stateActivated || ptyChild.exitObserved {
 		t.Fatalf("closed-master fixture stopped before resize: state=%v exitObserved=%v", ptyChild.state, ptyChild.exitObserved)
 	}
-	if err := ptyChild.ResizePTY(80, 24); !errors.Is(err, unix.EBADF) {
+	if err := ptyChild.resizePTYOwned(80, 24); !errors.Is(err, unix.EBADF) {
 		t.Fatalf("active closed-master resize error=%v, want EBADF", err)
 	}
 	if err := os.WriteFile(release, nil, 0o600); err != nil {
@@ -653,5 +653,36 @@ func TestLaunchAttemptReachesUnresolvedUnderPermanentCleanupFailure(t *testing.T
 	}
 	if _, err := os.Stat(filepath.Join(f.root, AttemptResultSpoolName)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("permanent uncertainty fabricated convergence evidence: %v", err)
+	}
+}
+
+// readPTYForTest reads the owned master with a fixed one-second bound; the
+// production owner loop polls the descriptor itself.
+func readPTYForTest(c *OwnedChild, output []byte) (int, error) {
+	deadline := time.Now().Add(time.Second)
+	for {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return 0, os.ErrDeadlineExceeded
+		}
+		fds := []unix.PollFd{{Fd: int32(c.ptyMaster.Fd()), Events: unix.POLLIN}}
+		ready, err := unix.Poll(fds, max(1, int(remaining/time.Millisecond)))
+		if errors.Is(err, unix.EINTR) {
+			continue
+		}
+		if err != nil {
+			return 0, err
+		}
+		if ready == 0 {
+			return 0, os.ErrDeadlineExceeded
+		}
+		n, err := unix.Read(int(c.ptyMaster.Fd()), output)
+		if errors.Is(err, unix.EAGAIN) {
+			continue
+		}
+		if errors.Is(err, unix.EIO) || (n == 0 && err == nil && fds[0].Revents&(unix.POLLHUP|unix.POLLERR) != 0) {
+			return n, io.EOF
+		}
+		return n, err
 	}
 }
