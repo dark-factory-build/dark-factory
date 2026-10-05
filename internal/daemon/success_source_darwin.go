@@ -20,11 +20,7 @@ func (daemon *Daemon) validateSuccessSource(ctx context.Context, live *liveAttem
 	if daemon == nil || daemon.store == nil {
 		return unverifiableSuccessSource("daemon store is unavailable")
 	}
-	readRun := daemon.store.Run
-	if daemon.successSourceRun != nil {
-		readRun = daemon.successSourceRun
-	}
-	run, found, err := readRun(ctx, live.runID)
+	run, found, err := daemon.store.Run(ctx, live.runID)
 	if err != nil {
 		return unverifiableSuccessSource(fmt.Sprintf("run facts unavailable: %v", err))
 	}
@@ -37,11 +33,7 @@ func (daemon *Daemon) validateSuccessSource(ctx context.Context, live *liveAttem
 	if run.ChangeID == nil {
 		return unverifiableSuccessSource("worker has no Change identity")
 	}
-	readChange := daemon.store.Change
-	if daemon.successSourceChange != nil {
-		readChange = daemon.successSourceChange
-	}
-	changeState, found, err := readChange(ctx, *run.ChangeID)
+	changeState, found, err := daemon.store.Change(ctx, *run.ChangeID)
 	if err != nil {
 		return unverifiableSuccessSource(fmt.Sprintf("Change facts unavailable: %v", err))
 	}
@@ -67,13 +59,7 @@ func (daemon *Daemon) validateSuccessSource(ctx context.Context, live *liveAttem
 	if err != nil {
 		return unverifiableSuccessSource(fmt.Sprintf("repository identity unavailable: %v", err))
 	}
-	inspect := func(ctx context.Context, git, root string, repository change.RepositoryIdentity, path string) (change.WorktreeFacts, error) {
-		return change.InspectWorktree(ctx, git, root, repository, path)
-	}
-	if daemon.successSourceInspect != nil {
-		inspect = daemon.successSourceInspect
-	}
-	facts, err := inspect(ctx, *git, route.Root, repository, filepath.Join(*parent, changeState.ID.String()))
+	facts, err := change.InspectWorktree(ctx, *git, route.Root, repository, filepath.Join(*parent, changeState.ID.String()))
 	if err != nil {
 		return unverifiableSuccessSource(fmt.Sprintf("Change worktree facts unavailable: %v", err))
 	}

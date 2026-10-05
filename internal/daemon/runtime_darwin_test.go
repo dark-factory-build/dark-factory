@@ -1836,10 +1836,17 @@ func TestRemoveRecordedRuntimeBoundsDepthAndReestablishesDurableAbsence(t *testi
 		if err := runtime.Close(); err != nil {
 			t.Fatal(err)
 		}
-		done, err := removeRecordedRuntimeWithHook(context.Background(), parent, runtimeTestName, identity, runtimeRemovalEffectLimit, nil, func() {
-			if err := os.Mkdir(path, 0o700); err != nil {
-				t.Fatal(err)
+		// The first directory sync after the runtime is gone replaces it.
+		replaced := false
+		done, err := removeRecordedRuntime(context.Background(), parent, runtimeTestName, identity, runtimeRemovalEffectLimit, func(fd int) error {
+			err := unix.Fsync(fd)
+			if _, statErr := os.Lstat(path); !replaced && errors.Is(statErr, os.ErrNotExist) {
+				replaced = true
+				if err := os.Mkdir(path, 0o700); err != nil {
+					t.Fatal(err)
+				}
 			}
+			return err
 		})
 		if !errors.Is(err, errInvalidContract) || done {
 			t.Fatalf("replacement after parent fsync = %v, %v", done, err)

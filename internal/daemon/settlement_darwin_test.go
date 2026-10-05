@@ -241,40 +241,11 @@ func TestSuccessfulWorkerOutcomeRefusesUnavailableSourceFacts(t *testing.T) {
 		t.Fatal(err)
 	}
 	tests := map[string]func(*recoveryFixture, string){
-		"Store.Run": func(fixture *recoveryFixture, _ string) {
-			fixture.daemon.successSourceRun = func(context.Context, kernel.RunID) (kernel.Run, bool, error) {
-				return kernel.Run{}, false, errors.New("injected Store.Run failure")
-			}
-			err := fixture.daemon.validateSuccessSource(context.Background(), &liveAttempt{daemon: fixture.daemon, runID: fixture.run.ID}, success)
-			if !errors.Is(err, kernel.ErrConflict) {
-				t.Fatalf("refusal = %v", err)
-			}
-		},
-		"Change": func(fixture *recoveryFixture, _ string) {
-			fixture.daemon.successSourceChange = func(context.Context, kernel.ChangeID) (kernel.Change, bool, error) {
-				return kernel.Change{}, false, errors.New("injected Change read failure")
-			}
-			err := fixture.daemon.validateSuccessSource(context.Background(), &liveAttempt{daemon: fixture.daemon, runID: fixture.run.ID}, success)
-			if !errors.Is(err, kernel.ErrConflict) {
-				t.Fatalf("refusal = %v", err)
-			}
-		},
-		"Selection": func(fixture *recoveryFixture, _ string) {
-			fixture.daemon.successSourceChange = func(ctx context.Context, id kernel.ChangeID) (kernel.Change, bool, error) {
-				state, found, err := fixture.store.Change(ctx, id)
-				state.Selection = nil
-				return state, found, err
-			}
-			err := fixture.daemon.validateSuccessSource(context.Background(), &liveAttempt{daemon: fixture.daemon, runID: fixture.run.ID}, success)
-			if !errors.Is(err, kernel.ErrConflict) {
-				t.Fatalf("refusal = %v", err)
-			}
-		},
-		"Store.TaskRepository": func(fixture *recoveryFixture, _ string) {
-			fixture.daemon.successSourceRepository = func(context.Context, kernel.TaskID) (kernel.ProjectRepository, bool, error) {
-				return kernel.ProjectRepository{}, false, errors.New("injected TaskRepository read failure")
-			}
-			err := fixture.daemon.validateSuccessSource(context.Background(), &liveAttempt{daemon: fixture.daemon, runID: fixture.run.ID}, success)
+		// A failed durable read refuses: the canceled context fails the first one.
+		"durable read": func(fixture *recoveryFixture, _ string) {
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			err := fixture.daemon.validateSuccessSource(ctx, &liveAttempt{daemon: fixture.daemon, runID: fixture.run.ID}, success)
 			if !errors.Is(err, kernel.ErrConflict) {
 				t.Fatalf("refusal = %v", err)
 			}

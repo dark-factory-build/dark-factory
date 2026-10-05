@@ -50,7 +50,6 @@ type SupervisorSpec struct {
 	afterAdmission           func() error
 	beforeProviderStateCheck func() error
 	afterProviderRelease     func() error
-	reconcileAdmission       func(context.Context, kernel.AdmissionKeys) (kernel.AdmissionResult, error)
 	beforeProviderRelease    func()
 
 	// admissionObserved is a package-private scheduling hint. The Darwin

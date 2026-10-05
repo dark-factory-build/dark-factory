@@ -240,13 +240,19 @@ func TestBrowserTaskDetailRejectsEditBetweenBriefAndPeerReads(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	fixture.backend.afterTaskDetailTaskRead = func() {
-		body := "new brief"
-		if _, err := fixture.store.UpdateTask(ctx, task.ID, task.Revision, kernel.TaskPatch{Body: &body}, adapterTime(t, 203)); err != nil {
-			t.Fatal(err)
-		}
+	// The brief is read at the edited revision, but the peer read is bound to
+	// the head the client saw before the edit: the mixed detail is stale.
+	before, err := fixture.store.Factory(ctx)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if _, err := fixture.backend.TaskDetail(ctx, rawBrowserClient(fixture.client.ID), browserprotocol.TaskDetailGet{TaskID: task.ID.String(), ExpectedRevision: decimalRevision(task.Revision)}); !errors.Is(err, browser.ErrStale) {
+	body := "new brief"
+	edited, err := fixture.store.UpdateTask(ctx, task.ID, task.Revision, kernel.TaskPatch{Body: &body}, adapterTime(t, 203))
+	if err != nil {
+		t.Fatal(err)
+	}
+	head := decimalSequence(before.Head)
+	if _, err := fixture.backend.TaskDetail(ctx, rawBrowserClient(fixture.client.ID), browserprotocol.TaskDetailGet{TaskID: task.ID.String(), ExpectedRevision: decimalRevision(edited.Revision), ExpectedHead: &head}); !errors.Is(err, browser.ErrStale) {
 		t.Fatalf("mixed task detail = %v", err)
 	}
 }

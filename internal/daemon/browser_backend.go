@@ -57,9 +57,6 @@ type browserBackend struct {
 	observerCancel context.CancelFunc
 	observerDone   chan struct{}
 	observerWake   chan struct{}
-
-	// package-test-only seam for a task-detail read that races a durable edit.
-	afterTaskDetailTaskRead func()
 }
 
 type browserClientGate struct {

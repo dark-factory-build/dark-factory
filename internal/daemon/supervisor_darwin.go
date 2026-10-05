@@ -293,14 +293,10 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 		// Admission commit acknowledgement is ambiguous. Retain the freshly
 		// generated bearer and exact keys until SQLite proves either that no
 		// admission committed or that its authority has been revoked.
-		reconcileAdmission := daemon.store.ReconcileAdmission
-		if spec.reconcileAdmission != nil {
-			reconcileAdmission = spec.reconcileAdmission
-		}
 		var reconcileErr error
 		for attempt := 0; attempt < supervisorReconcileAttempts; attempt++ {
 			reconcileCtx := daemon.cleanupCtx
-			reconciled, readErr := reconcileAdmission(reconcileCtx, admissionKeys)
+			reconciled, readErr := daemon.store.ReconcileAdmission(reconcileCtx, admissionKeys)
 			reconcileErr = readErr
 			if reconcileErr != nil {
 				continue
