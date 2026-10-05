@@ -47,7 +47,7 @@ func runReview(ctx context.Context, args []string, getenv func(string) string, s
 		_, _ = fmt.Fprintf(stderr, "factoryctl: review %s\n", result.State)
 		return exitFailure
 	}
-	_, err = fmt.Fprintln(stdout, result.ReviewOperation)
+	_, err = fmt.Fprintln(stdout, result.ReviewOperation, "in progress")
 	if err != nil {
 		return exitFailure
 	}
