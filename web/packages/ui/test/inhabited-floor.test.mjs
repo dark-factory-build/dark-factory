@@ -144,7 +144,7 @@ test("automatic areas keep wide namespaces and package resources together withou
   for (const id of assembly.representedIds) assert.ok(auto.detailByID.has(id) && fine.detailByID.has(id));
 });
 
-test("clicking grouped equipment exposes child edits and relationship changes in both inspectors", async () => {
+test("clicking grouped equipment exposes child edits and relationship changes in one source inspector", async () => {
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   const packages = Array.from({ length: 5 }, (_, i) => node(`pkg${i}`, `internal/pkg${i}`, "internal", inv(5), "package"));
   const manuals = { ...inv(0), direct: { ...counts(0), documentation: 2 }, total: { ...counts(0), documentation: 2 } };
@@ -161,11 +161,40 @@ test("clicking grouped equipment exposes child edits and relationship changes in
     const equipment = tree.root.findAllByProps({ "data-entity-id": "project:pkg0" })[0];
     assert.match(equipment.props["data-tooltip"], /Change 1/);
     await act(async () => equipment.props.onClick());
-    for (const label of ["Source contents", "Changes affecting selected source"]) {
-      const buttons = tree.root.findByProps({ "aria-label": label }).findAllByType("button").filter((button) => /Change \d/.test(text(button)));
-      assert.deepEqual(buttons.map(text).map((label) => label.match(/Change \d/)[0]), ["Change 1", "Change 2"]);
-      await act(async () => buttons[0].props.onClick());
-    }
-    assert.deepEqual(selected, [productionKey(changes[0]), productionKey(changes[0])]);
+    const inspectors = tree.root.findAllByProps({ "aria-label": "Source inspector" });
+    assert.equal(inspectors.length, 1);
+    assert.equal(tree.root.findAllByProps({ "aria-label": "Source contents" }).length, 0);
+    assert.equal(inspectors[0].findAllByType("code")[0].children.join(""), "project:pkg0");
+    const buttons = inspectors[0].findByProps({ "aria-label": "Changes affecting selected source" }).findAllByType("button");
+    assert.deepEqual(buttons.map(text), ["Change 1", "Change 2"]);
+    for (const button of buttons) await act(async () => button.props.onClick());
+    assert.deepEqual(selected, [productionKey(changes[0]), productionKey(changes[1])]);
+  } finally { if (tree) await act(async () => tree.unmount()); }
+});
+
+
+test("thirty proposals retain one floor Changes action and collapsed Help", async () => {
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+  const records = Array.from({ length: 30 }, (_, i) => record(String(i + 1), [{ status: "modified", path: "internal/kernel/movement.go" }]));
+  for (const entry of records) entry.document.source.relationships = [];
+  const changes = items(records), selected = [], opened = [];
+  const props = { state: { projects, agents: new Map(), tasks: new Map(), humanRequests: new Map() }, topologies: new Map([[project.id, topology]]), changes, floorAppearance: { detail: "auto", social: "nearby" }, onSelectChange: (id) => selected.push(id), onOpenChanges: () => opened.push("changes") };
+  const text = (value) => typeof value === "string" ? value : (value.children ?? []).map(text).join("");
+  let tree;
+  try {
+    await act(async () => { tree = create(createElement(FactoryFloor, props)); });
+    const header = () => tree.root.findByProps({ className: "dfFactoryEntityTools" });
+    assert.equal(header().findAllByProps({ type: "search" }).length, 1);
+    assert.deepEqual(header().findAllByType("button").map(text), ["Changes · 30"]);
+    const help = header().findByType("details");
+    assert.equal(text(help.findByType("summary")), "Help");
+    assert.equal(help.props.open, undefined);
+    await act(async () => header().findByType("button").props.onClick());
+    assert.deepEqual(opened, ["changes"]);
+    await act(async () => tree.update(createElement(FactoryFloor, { ...props, selectedChange: productionKey(changes[29]) })));
+    assert.match(text(header()), /Viewing: Change 30/);
+    assert.deepEqual(header().findAllByType("button").map(text), ["Changes · 30", "Clear selection"]);
+    await act(async () => header().findAllByType("button").find((button) => text(button) === "Clear selection").props.onClick());
+    assert.deepEqual(selected, [""]);
   } finally { if (tree) await act(async () => tree.unmount()); }
 });

@@ -3,7 +3,6 @@ import type { PeerQuestionItem } from "@dark-factory/client";
 import type { SceneTask } from "../console-view.js";
 import {
   PADDING,
-  compareText,
   ROOM_LEFT,
   layoutScene,
   commonSeating,
@@ -31,6 +30,9 @@ import { spriteAtlas, spriteSheet, spriteSheetSize } from "./sprites/sprites.gen
 
 export type FactorySceneProps = Readonly<{
   proposals?: { items: readonly SceneProposal[]; selected?: string; onSelect: (id: string) => void };
+  tools?: ReactNode;
+  sourceDetails?: ReactNode;
+  onDiscussSource?: () => void;
   requestedEntity?: { id: string };
   onSelectEntity?: (entityId: string | undefined) => void;
   onOpenLibrary?: (projectId?: string) => void;
@@ -407,7 +409,7 @@ function SceneWorkers({ nearby, errands, furniture, restingSeats, tray, peerQues
 }
 
 /** A disposable SVG projection of topology and current factory state. */
-export function FactoryScene({ proposals, requestedEntity, onSelectEntity, onOpenLibrary, onOpenBoard, topology, detailNodes, workers, appearance = DEFAULT_FLOOR_APPEARANCE, omittedLocations = 0, selectedWorkerId, onSelectWorker, tasks = [], peerQuestions = NO_QUESTIONS, selectedTaskId, onSelectTask, onOpenTasks, onOpenMissions, onSelectHumanRequest, projectId, connected = true }: FactorySceneProps) {
+export function FactoryScene({ proposals, tools, sourceDetails, onDiscussSource, requestedEntity, onSelectEntity, onOpenLibrary, onOpenBoard, topology, detailNodes, workers, appearance = DEFAULT_FLOOR_APPEARANCE, omittedLocations = 0, selectedWorkerId, onSelectWorker, tasks = [], peerQuestions = NO_QUESTIONS, selectedTaskId, onSelectTask, onOpenTasks, onOpenMissions, onSelectHumanRequest, projectId, connected = true }: FactorySceneProps) {
   const [selectedRoomId, setSelectedRoomId] = useState<string>();
   const [search, setSearch] = useState("");
   const mapElement = useRef<HTMLDivElement>(null);
@@ -507,8 +509,8 @@ export function FactoryScene({ proposals, requestedEntity, onSelectEntity, onOpe
     <div className="dfFactoryEntityTools">
       <label>Find source <input type="search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Package, assembly or path" /></label>
       {search === "" ? null : <div className="dfFactoryEntityTools__results">{[...availableNodes.values()].filter((node) => !node.proposed && `${node.label} ${node.path}`.toLowerCase().includes(search.toLowerCase())).slice(0, 30).map((node) => <button type="button" key={node.id} onClick={() => focusEntity(node.id)}>{node.path === "." ? node.label : node.path}</button>)}</div>}
-      <p className="dfFactoryLegend">⚙ Code · ⏚ Tests · ▤ Config · ▥ Docs · ▦ Assets</p>
-      {proposals === undefined || proposals.items.length === 0 ? null : <div className="dfFactoryProposals" aria-label="Proposed changes"><button type="button" aria-pressed={!proposals.selected} onClick={() => proposals.onSelect("")}>All changes</button>{proposals.items.map((proposal) => <button key={proposal.id} type="button" aria-pressed={proposals.selected === proposal.id} onClick={() => proposals.onSelect(proposal.id)}>{proposal.title} · {proposal.operations.length} paths · {proposal.state}</button>)}</div>}
+      {tools}
+      {proposals?.selected && proposals.items.some((item) => item.id === proposals.selected) ? <p className="dfFactoryEntityTools__notice"><span className="dfFactoryEntityTools__selection">Viewing: {proposals.items.find((item) => item.id === proposals.selected)?.title}</span><button type="button" onClick={() => proposals.onSelect("")}>Clear selection</button></p> : null}
     </div>
     <div ref={mapElement} className="dfFactoryFloor__map" onClick={inspect} onPointerOver={inspect} onFocus={inspect} onPointerLeave={() => { retainFocusedTooltip(); setLinkedFrom(undefined); }} onBlur={() => { setTooltip(undefined); setLinkedFrom(undefined); }} onScroll={() => { retainFocusedTooltip(); updateViewport(); }} onKeyDown={(event) => { if (event.key === "Escape") { setTooltip(undefined); setLinkedFrom(undefined); } }} role="region" aria-label="Scrollable codebase floor" tabIndex={0}>
     <svg
@@ -666,33 +668,29 @@ export function FactoryScene({ proposals, requestedEntity, onSelectEntity, onOpe
     </svg>
     {tooltip === undefined ? null : <div ref={tooltipElement} className="dfFactoryTooltip" role="tooltip" style={{ left: tooltip.x, top: tooltip.y, maxHeight: tooltip.room }}>{tooltip.text}</div>}
     </div>
-    <section className="dfRoomDetails" aria-label="Room details">
-      <label>Room <select aria-label="Inspect room" value={selectedRoom?.id ?? ""} onChange={(event) => selectEntity(event.target.value || undefined)}>
-        <option value="">Select a room</option>
-        {[...availableNodes.values()].sort((a, b) => compareText(a.project?.name ?? "", b.project?.name ?? "") || compareText(a.path, b.path) || compareText(a.label, b.label) || compareText(a.id, b.id)).map((node) => <option key={node.id} value={node.id}>{node.project?.name} · {node.label} · {node.path}</option>)}
-      </select></label>
-      {selectedRoom === undefined ? null : <details key={selectedRoom.id} open>
-        <summary>{selectedRoom.label} · Room info</summary>
-        <button type="button" onClick={() => focusEntity(selectedRoom.id)}>Focus on floor</button>
-        {contents.length === 0 ? null : <ul>{contents.map((component) => <li key={component.id}><button type="button" disabled={!availableNodes.has(component.id)} onClick={() => selectEntity(component.id)}>{component.label}</button></li>)}</ul>}
-        {selectedRoom.path === selectedRoom.label ? null : <p>{selectedRoom.path}</p>}
-        <p>{selectedRoom.kind} · {selectedRoom.sizeBucket ?? "size unavailable"}{selectedRoom.language ? ` · ${selectedRoom.language}` : ""}{selectedRoom.childCount === undefined ? "" : ` · ${selectedRoom.childCount} subcomponents`}</p>
-        <p>{roomInfo(selectedRoom)}</p>
-        {selectedRoom.sourceIncomplete ? <p>Observed proposed paths only. Final contents and scale remain unverified.</p> : null}
+    {selectedRoom === undefined ? null : <section className="dfRoomDetails" aria-label="Source inspector" key={selectedRoom.id}>
+      <h3>{selectedRoom.label}</h3>
+      {selectedRoom.path === selectedRoom.label ? null : <p>{selectedRoom.path}</p>}
+      <button type="button" onClick={() => focusEntity(selectedRoom.id)}>Focus on floor</button>
+      {onDiscussSource ? <button type="button" onClick={onDiscussSource}>Discuss this source</button> : null}
+      <button type="button" onClick={() => selectEntity(undefined)}>Close source</button>
+      {selectedRoom.sourceIncomplete ? <p>Proposed contents and size are incomplete.</p> : null}
+      {proposals === undefined ? null : <div aria-label="Changes affecting selected source">{proposalsForEntity(topology, proposals.items, selectedRoom.id).map((proposal) => <button type="button" key={proposal.id} onClick={() => proposals.onSelect(proposal.id)}>{proposal.title}</button>)}</div>}
+      <details><summary>Source details</summary>
+        <p>Source reference <code>{selectedRoom.id}</code>{selectedRoom.language ? ` · ${selectedRoom.language}` : ""}</p>
+        {contents.length === 0 ? null : <ul aria-label="Contained source areas">{contents.map((component) => <li key={component.id}><button type="button" disabled={!availableNodes.has(component.id)} onClick={() => selectEntity(component.id)}>{component.label}</button></li>)}</ul>}
         {selectedRoom.sourcePaths?.length ? <ul>{selectedRoom.sourcePaths.map((path) => <li key={path}><code>{path}</code></li>)}</ul> : null}
-        {proposals === undefined ? null : <div aria-label="Changes affecting selected source">{proposalsForEntity(topology, proposals.items, selectedRoom.id).map((proposal) => <button type="button" key={proposal.id} onClick={() => proposals.onSelect(proposal.id)}>{proposal.title} · {proposal.state}</button>)}</div>}
-        {selectedRoom.inventory === undefined ? null : <table><caption>{selectedRoom.sourceIncomplete ? "Observed proposed files" : "Scanned files"}</caption><thead><tr><th>Kind</th><th>Direct</th><th>Subtree</th></tr></thead><tbody>{Object.entries(inventoryLabels).map(([kind, label]) => <tr key={kind}><th>{label}</th><td>{selectedRoom.inventory!.direct[kind as keyof typeof inventoryLabels]}</td><td>{selectedRoom.inventory!.total[kind as keyof typeof inventoryLabels]}</td></tr>)}</tbody></table>}
-        <p>{selectedRoom.dependencies === undefined ? "Dependencies unavailable." : "Supplied static imports and manifest dependencies. Floor cables group their visible endpoints."}</p>
-        {selectedRoom.dependencies === undefined ? null : <>
-          {links.length === 0 ? <p>No relationships in this sample.</p> : <ul>{links.map((link) => <li key={`${link.direction}:${link.nodeId}`}>
+        {selectedRoom.inventory === undefined ? <p>Inventory unavailable.</p> : <table><caption>{selectedRoom.sourceIncomplete ? "Observed proposed files" : "Scanned files"}</caption><thead><tr><th>Kind</th><th>Direct</th><th>Including children</th></tr></thead><tbody>{Object.entries(inventoryLabels).filter(([kind]) => selectedRoom.inventory!.direct[kind as keyof typeof inventoryLabels] > 0 || selectedRoom.inventory!.total[kind as keyof typeof inventoryLabels] > 0).map(([kind, label]) => <tr key={kind}><th>{label}</th><td>{selectedRoom.inventory!.direct[kind as keyof typeof inventoryLabels]}</td><td>{selectedRoom.inventory!.total[kind as keyof typeof inventoryLabels]}</td></tr>)}</tbody></table>}
+        {sourceDetails}
+        {selectedRoom.dependencies === undefined ? <p>Dependencies unavailable.</p> : <>
+          {links.length === 0 ? null : <ul aria-label="Static dependencies">{links.map((link) => <li key={`${link.direction}:${link.nodeId}`}>
             {link.direction === "to" ? "Depends on " : "Used by "}
-            <button type="button" disabled={!availableNodes.has(link.nodeId)} onClick={() => selectEntity(link.nodeId)}>{link.label}</button>
-            {nodes.has(link.nodeId) ? "" : " · outside view"} · {link.path}
+            <button type="button" disabled={!availableNodes.has(link.nodeId)} onClick={() => selectEntity(link.nodeId)}>{link.path || link.label}</button>
           </li>)}</ul>}
-          {selectedRoom.dependencies.omitted === 0 ? null : <p>{selectedRoom.dependencies.omitted} project relationships omitted from the supplied topology.</p>}
+          {selectedRoom.dependencies.omitted === 0 ? null : <p>{selectedRoom.dependencies.omitted} relationships omitted from this topology.</p>}
         </>}
-      </details>}
-    </section>
+      </details>
+    </section>}
     </>
   );
 }

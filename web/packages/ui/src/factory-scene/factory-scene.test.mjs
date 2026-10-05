@@ -206,7 +206,8 @@ test("the pure scene model feeds a deterministic SVG renderer", () => {
   assert.equal(first.includes(">STAGED</text>"), false);
   assert.match(first, /data-room-id="src"/);
   assert.match(first, /package · subtree/);
-  assert.match(first, /Inspect room/);
+  assert.match(first, /Find source/);
+  assert.doesNotMatch(first, /Inspect room|<select/);
   const compact = renderToStaticMarkup(createElement(FactoryScene, {
     topology: { digest: "compact", nodes: [{ id: "p", path: ".", label: "Project", kind: "repository", sizeBucket: "large" }] },
     workers: [], omittedLocations: 1,
@@ -1192,7 +1193,8 @@ test("compact tooltips open on hover, focus and tap without opening component de
     await act(async () => map.props.onPointerOver({ target: { closest: () => ({ querySelector: () => null, getBoundingClientRect: () => ({ left: 10, top: 145, bottom: 169 }), getAttribute: () => target.props["data-tooltip"] }) } }));
     const tight = renderer.root.findByProps({ role: "tooltip" }).props.style;
     assert.ok(tight.top >= 169 && tight.top + tight.maxHeight <= 312, `crammed tooltip must clear its target: ${JSON.stringify(tight)}`);
-    assert.equal(renderer.root.findAllByType("select").length, 1);
+    assert.equal(renderer.root.findAllByType("select").length, 0);
+    assert.equal(renderer.root.findAllByProps({ "aria-label": "Source inspector" }).length, 0, "hover and focus do not open the inspector");
     assert.equal(renderer.root.findAllByType("table").length, 0);
   } finally {
     await act(async () => renderer?.unmount());
@@ -1335,17 +1337,18 @@ test("component and dependency selection inspect every supplied link without nav
   const entered = [];
   let tree;
   await act(async () => { tree = create(createElement(FactoryScene, { topology: { ...topology, nodes: [root] }, detailNodes, workers: [], onSelectEntity: (id) => entered.push(id) })); });
-  const select = () => tree.root.findByProps({ "aria-label": "Inspect room" });
-  const details = () => tree.root.findByProps({ "aria-label": "Room details" });
+  const details = () => tree.root.findByProps({ "aria-label": "Source inspector" });
+  const selectedReference = () => details().findAllByType("code")[0].children.join("");
   await act(async () => tree.root.findByProps({ "aria-label": `Inspect ${root.label}` }).props.onKeyDown({ key: "Enter", preventDefault() {} }));
+  assert.equal(details().findByType("details").props.open, undefined, "source details start collapsed");
   const dependencies = details().findAllByType("li").filter((item) => item.children.includes("Depends on "));
   assert.equal(dependencies.length, 10);
   await act(async () => dependencies[9].findByType("button").props.onClick());
-  assert.equal(select().props.value, "hidden-9");
+  assert.equal(selectedReference(), "hidden-9");
   assert.deepEqual(entered, [root.id, "hidden-9"]);
   assert.equal(tree.root.findAllByProps({ "data-room-id": root.id }).length, 1);
   await act(async () => details().findAllByType("button").find((button) => button.children.join("") === "Hidden 0").props.onClick());
-  assert.equal(select().props.value, "hidden-0");
+  assert.equal(selectedReference(), "hidden-0");
   assert.deepEqual(entered, [root.id, "hidden-9", "hidden-0"]);
   assert.equal(details().findAllByType("button").some((button) => button.children.join("") === "Open contents"), false);
   await act(async () => tree.unmount());

@@ -2313,7 +2313,7 @@ test("one project selector scopes floor, agents, tasks and project limits across
   await choose(ids.project);
   await choose(ids.secondProject);
   assert.equal(floor().props.projectId, ids.secondProject);
-  assert.ok(tree.root.findAllByProps({ role: "status" }).some((status) => status.children.join("").startsWith("12 source inventories unavailable")));
+  assert.ok(tree.root.findAllByProps({ role: "status" }).some((status) => status.children.join("") === "Source inventory incomplete: 12 areas unavailable."));
   assert.equal(tree.root.findAllByProps({ "aria-label": `Agent ${fixtureState.agents.get(ids.agent).name}` }).length, 0, "a foreign selected agent cannot retain controls");
   assert.ok([...floor().findByType(FactoryScene).props.detailNodes.values()].every((node) => node.project.id === ids.secondProject));
   assert.ok([...floor().props.state.tasks.values()].every((task) => task.project_id === ids.secondProject));
@@ -2482,7 +2482,7 @@ test("Missions and Production share the task dialog and preserve their origin on
   }
 });
 
-test("source switches replace notices and retain the deepest repository discussion scope", async (t) => {
+test("one source inspector resets exact contents and retains the deepest repository discussion scope", async (t) => {
   const warnings = [];
   t.mock.method(console, "error", (...args) => warnings.push(args.join(" ")));
   const selected = selectFloor(prepareFloor(fixtureState.projects, fixtureTopologies), "fine");
@@ -2495,15 +2495,23 @@ test("source switches replace notices and retain the deepest repository discussi
   const props = { state: fixtureState, topologies: new Map(fixtureTopologies).set(ids.project, topology), requestedEntity: { id: entity.id }, floorAppearance: { ...DEFAULT_FLOOR_APPEARANCE, detail: "fine" }, onProjectContent: async (operation, input) => { calls.push({ operation, input }); return { items: [] }; }, onOpenBoard: (...args) => opens.push(args) };
   await act(async () => { renderer = create(createElement(FactoryFloor, props)); });
   const click = async (label) => { await act(async () => renderer.root.findAllByType("button").find((button) => button.children.join("") === label).props.onClick()); };
-  await click("Read notices for this source");
-  assert.equal(calls.at(-1).input.repository_id, repository);
+  assert.equal(calls.length, 0, "selecting source never fetches notices or contents implicitly");
+  assert.equal(renderer.root.findAllByProps({ "aria-label": "Source inspector" }).length, 1);
+  assert.equal(renderer.root.findAllByProps({ "aria-label": "Source notices" }).length, 0);
+  await click("Read exact source contents");
+  assert.deepEqual(calls, [{ operation: "source_files", input: { project_id: ids.project, id: entity.id.slice(ids.project.length + 1), tested_source: "scoped", offset: 0, limit: 32 } }]);
   await click("Discuss this source");
   assert.deepEqual(opens, [[ids.project, entity.id, undefined, repository]]);
   for (const source of [...selected.detailByID.values()].filter((node) => node.project?.id === ids.project).slice(0, 5)) {
     await act(async () => renderer.update(createElement(FactoryFloor, { ...props, requestedEntity: { id: source.id } })));
-    assert.equal(renderer.root.findAllByProps({ "aria-label": "Source notices" }).length, 1);
+    const inspector = renderer.root.findAllByProps({ "aria-label": "Source inspector" });
+    assert.equal(inspector.length, 1);
+    assert.equal(inspector[0].findAllByType("code")[0].children.join(""), source.id);
+    assert.equal(inspector[0].findByType("details").props.open, undefined);
+    assert.ok(inspector[0].findAllByType("button").some((button) => button.children.join("") === "Read exact source contents"), "old exact contents do not follow the new source");
+    assert.equal(calls.length, 1, "source changes never start a second content or notice fetch");
     await click("Discuss this source");
-    assert.equal(opens.at(-1)[1], source.id);
+    assert.deepEqual(opens.at(-1), [ids.project, source.id, undefined, source.path === entity.path || source.path.startsWith(`${entity.path}/`) ? repository : "ab".repeat(16)]);
   }
   assert.ok(!warnings.some((message) => message.includes("same key")), "source inspectors must have distinct reconciliation identities");
   await act(async () => renderer.unmount());
@@ -2524,21 +2532,30 @@ test("opening a project shelf scopes Library without changing the floor filter",
 });
 
 
-test("Library source navigation synchronizes both inspectors and focus after another selection", async () => {
+test("Library source navigation synchronizes the single inspector and canonical focus after manual selection", async () => {
   const selected = selectFloor(prepareFloor(fixtureState.projects, fixtureTopologies), "fine");
   const [first, destination] = [...selected.detailByID.values()].filter((node) => node.project?.id === ids.project && node.path !== ".");
   assert.ok(first && destination && first.id !== destination.id);
   let tree;
   await act(async () => { tree = create(createElement(FactoryConsole, { status: "ready", state: fixtureState, topologies: fixtureTopologies, onProjectContent: async () => ({ items: [] }) })); });
-  const room = () => tree.root.findByProps({ "aria-label": "Inspect room" });
   const assertSelection = (id) => {
-    assert.equal(room().props.value, id);
-    const sources = tree.root.findAllByProps({ "aria-label": "Source contents" });
+    const sources = tree.root.findAllByProps({ "aria-label": "Source inspector" });
     assert.equal(sources.length, id ? 1 : 0);
-    if (id) assert.equal(sources[0].findAllByType("code")[0].children.join(""), id);
+    const scene = tree.root.findByType(FactoryScene);
+    if (id) {
+      assert.equal(sources[0].findAllByType("code")[0].children.join(""), id);
+      assert.equal(sources[0].findByType("details").props.open, undefined);
+      assert.equal(scene.props.sourceDetails.props.node.id, id, "floor context follows the canonical selected source");
+    } else {
+      assert.equal(scene.props.sourceDetails, undefined, "closing clears the parent source context too");
+      assert.equal(scene.props.onDiscussSource, undefined);
+    }
+    assert.equal(tree.root.findAllByProps({ "aria-label": "Inspect room" }).length, 0);
+    assert.equal(tree.root.findAllByProps({ "aria-label": "Source contents" }).length, 0);
   };
   for (let visit = 0; visit < 2; visit++) {
-    await act(async () => room().props.onChange({ target: { value: first.id } }));
+    await act(async () => tree.root.findByProps({ type: "search" }).props.onChange({ target: { value: first.path } }));
+    await act(async () => tree.root.findByProps({ className: "dfFactoryEntityTools__results" }).findAllByType("button").find((button) => button.children.join("") === first.path).props.onClick());
     assertSelection(first.id);
     await act(async () => tree.root.findByType(FactoryFloor).props.onOpenLibrary(ids.project));
     await act(async () => tree.root.findByType(ProjectLibrary).props.onSource(destination.id));
@@ -2546,7 +2563,7 @@ test("Library source navigation synchronizes both inspectors and focus after ano
     await act(async () => tree.root.findAllByType("button").find((button) => button.children.join("") === "Focus on floor").props.onClick());
     assertSelection(destination.id);
   }
-  await act(async () => room().props.onChange({ target: { value: "" } }));
+  await act(async () => tree.root.findAllByType("button").find((button) => button.children.join("") === "Close source").props.onClick());
   assertSelection("");
   await act(async () => tree.unmount());
 });
