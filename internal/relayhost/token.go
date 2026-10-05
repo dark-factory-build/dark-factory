@@ -3,12 +3,10 @@ package relayhost
 import (
 	"crypto/ed25519"
 	"crypto/rand"
-	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 )
 
@@ -107,62 +105,6 @@ func ControlTicket(identity Identity, clientID [ControllerIDSize]byte, deviceSEC
 	})
 }
 
-// VerifyHostToken mirrors the relay's host admission: the signature must be
-// the node key's, the embedded key must be that key, and the node id must be
-// the one the key derives.
-func VerifyHostToken(key ed25519.PublicKey, token string) (HostTokenPayload, error) {
-	var payload HostTokenPayload
-	if err := verify(key, hostDomain, token, &payload); err != nil {
-		return HostTokenPayload{}, err
-	}
-	embedded, err := base64.RawURLEncoding.DecodeString(payload.Key)
-	if err != nil || len(embedded) != ed25519.PublicKeySize || subtle.ConstantTimeCompare(embedded, key) != 1 {
-		return HostTokenPayload{}, fmt.Errorf("%w: key does not match the signer", ErrToken)
-	}
-	if payload.Node == "" || payload.Node != NodeIDFromPublicKey(key) {
-		return HostTokenPayload{}, fmt.Errorf("%w: node does not match the key", ErrToken)
-	}
-	if payload.Generation == 0 || payload.Sequence == 0 {
-		return HostTokenPayload{}, fmt.Errorf("%w: generation and sequence start at one", ErrToken)
-	}
-	return payload, nil
-}
-
-// VerifyTicket mirrors the relay's controller admission for the parts the
-// node key authorizes. Expiry, single use and the deny list stay with the
-// relay because only it observes redemption.
-func VerifyTicket(key ed25519.PublicKey, token string) (TicketPayload, error) {
-	var payload TicketPayload
-	if err := verify(key, ticketDomain, token, &payload); err != nil {
-		return TicketPayload{}, err
-	}
-	if payload.Node == "" || payload.Node != NodeIDFromPublicKey(key) {
-		return TicketPayload{}, fmt.Errorf("%w: node does not match the key", ErrToken)
-	}
-	if _, err := decodeFixed(payload.Controller, ControllerIDSize); err != nil {
-		return TicketPayload{}, err
-	}
-	if _, err := decodeFixed(payload.Ticket, TicketIDSize); err != nil {
-		return TicketPayload{}, err
-	}
-	switch payload.Purpose {
-	case PurposePair:
-		if payload.Device != "" {
-			return TicketPayload{}, fmt.Errorf("%w: a pair ticket carries no device", ErrToken)
-		}
-	case PurposeControl:
-		if _, err := decodeFixed(payload.Device, DeviceKeySize); err != nil {
-			return TicketPayload{}, err
-		}
-	default:
-		return TicketPayload{}, fmt.Errorf("%w: unknown purpose %q", ErrToken, payload.Purpose)
-	}
-	if payload.Expires <= 0 {
-		return TicketPayload{}, fmt.Errorf("%w: missing expiry", ErrToken)
-	}
-	return payload, nil
-}
-
 func sign[Payload any](identity Identity, domain string, payload Payload) string {
 	encoded, err := json.Marshal(payload)
 	if err != nil {
@@ -171,35 +113,6 @@ func sign[Payload any](identity Identity, domain string, payload Payload) string
 	text := base64.RawURLEncoding.EncodeToString(encoded)
 	signature := ed25519.Sign(identity.private, append([]byte(domain), text...))
 	return text + "." + base64.RawURLEncoding.EncodeToString(signature)
-}
-
-func verify(key ed25519.PublicKey, domain, token string, out any) error {
-	if len(key) != ed25519.PublicKeySize {
-		return fmt.Errorf("%w: verifier key is not an Ed25519 public key", ErrToken)
-	}
-	if token == "" || len(token) > maxTokenBytes {
-		return fmt.Errorf("%w: token length", ErrToken)
-	}
-	separator := strings.IndexByte(token, '.')
-	if separator <= 0 || separator == len(token)-1 || strings.IndexByte(token[separator+1:], '.') >= 0 {
-		return fmt.Errorf("%w: token is not payload.signature", ErrToken)
-	}
-	text, encodedSignature := token[:separator], token[separator+1:]
-	signature, err := base64.RawURLEncoding.DecodeString(encodedSignature)
-	if err != nil || len(signature) != ed25519.SignatureSize {
-		return fmt.Errorf("%w: signature encoding", ErrToken)
-	}
-	if !ed25519.Verify(key, append([]byte(domain), text...), signature) {
-		return fmt.Errorf("%w: signature does not verify", ErrToken)
-	}
-	payload, err := base64.RawURLEncoding.DecodeString(text)
-	if err != nil {
-		return fmt.Errorf("%w: payload encoding", ErrToken)
-	}
-	if err := json.Unmarshal(payload, out); err != nil {
-		return fmt.Errorf("%w: payload is not the expected JSON object", ErrToken)
-	}
-	return nil
 }
 
 func decodeFixed(value string, size int) ([]byte, error) {

@@ -28,9 +28,6 @@ type TaskAttachmentResult struct {
 	Offset Decimal `json:"offset"`
 }
 
-func EncodeTaskAttachment(id string, value TaskAttachmentChunk) ([]byte, error) {
-	return encodeControl(TypeTaskAttachment, id, value)
-}
 func EncodeTaskAttachmentResult(id string, value TaskAttachmentResult) ([]byte, error) {
 	return encodeControl(TypeTaskAttachmentResult, id, value)
 }
@@ -56,10 +53,6 @@ type TaskEnqueueResult struct {
 	TaskID        string  `json:"task_id"`
 	Revision      Decimal `json:"revision"`
 	AgentRevision Decimal `json:"agent_revision"`
-}
-
-func EncodeTaskEnqueue(id string, value TaskEnqueue) ([]byte, error) {
-	return encodeControl(TypeTaskEnqueue, id, value)
 }
 
 func EncodeTaskEnqueueResult(id string, value TaskEnqueueResult) ([]byte, error) {

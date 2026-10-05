@@ -18,12 +18,12 @@ func TestBrowserRuntimeCloseJoinsDisconnectedActiveStateSubscription(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	subscribe, err := browserprotocol.EncodeStateWatch("shutdown-watch", browserprotocol.StateWatch{AfterHead: decimalSequence(state.Head)})
+	subscribe, err := testEncodeStateWatch("shutdown-watch", browserprotocol.StateWatch{AfterHead: decimalSequence(state.Head)})
 	if err != nil {
 		t.Fatal(err)
 	}
 	adapterWrite(t, connection, subscribe)
-	barrier, err := browserprotocol.EncodeStateGet("subscription-installed", browserprotocol.StateGet{})
+	barrier, err := testEncodeStateGet("subscription-installed", browserprotocol.StateGet{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,12 +67,12 @@ func TestConnectedStateWatchMapsStoreCloseToRetryableLifecycleError(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	subscribe, err := browserprotocol.EncodeStateWatch("store-close-watch", browserprotocol.StateWatch{AfterHead: decimalSequence(state.Head)})
+	subscribe, err := testEncodeStateWatch("store-close-watch", browserprotocol.StateWatch{AfterHead: decimalSequence(state.Head)})
 	if err != nil {
 		t.Fatal(err)
 	}
 	adapterWrite(t, connection, subscribe)
-	barrier, err := browserprotocol.EncodeStateGet("store-close-barrier", browserprotocol.StateGet{})
+	barrier, err := testEncodeStateGet("store-close-barrier", browserprotocol.StateGet{})
 	if err != nil {
 		t.Fatal(err)
 	}

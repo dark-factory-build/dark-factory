@@ -17,9 +17,6 @@ type ProjectContentResult struct {
 	Output    json.RawMessage `json:"output"`
 }
 
-func EncodeProjectContent(id string, value ProjectContent) ([]byte, error) {
-	return encodeControl(TypeProjectContent, id, value)
-}
 func EncodeProjectContentResult(id string, value ProjectContentResult) ([]byte, error) {
 	return encodeControl(TypeProjectContentResult, id, value)
 }

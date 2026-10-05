@@ -1364,7 +1364,7 @@ func TestBrowserCancelOwnerFenceErrorIsNonRetryable(t *testing.T) {
 		t.Fatalf("current run = %+v, found=%v, err=%v", currentRun, found, err)
 	}
 	connection := fixture.adapter.authenticate(t)
-	payload, err := browserprotocol.EncodeHumanRequestCancelRun("cancel-browser", browserprotocol.HumanRequestCancelRun{
+	payload, err := testEncodeHumanRequestCancelRun("cancel-browser", browserprotocol.HumanRequestCancelRun{
 		RequestID: request.ID.String(), ExpectedRequestRevision: browserprotocol.Decimal(request.Revision.Int64()), ExpectedRunRevision: browserprotocol.Decimal(currentRun.Revision.Int64()),
 	})
 	if err != nil {

@@ -34,7 +34,7 @@ func TestAgentControlTransportCorrelatesDurableOperation(t *testing.T) {
 			server := startTaskServer(t, backend)
 			connection, _ := dialServer(t, server, testOrigin)
 			authenticate(t, connection)
-			payload, err := browserprotocol.EncodeAgentControl("control", request)
+			payload, err := testEncodeAgentControl("control", request)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -47,7 +47,7 @@ func TestAgentControlTransportCorrelatesDurableOperation(t *testing.T) {
 			if frame.Type != browserprotocol.TypeAgentControlResult || frame.ID != "control" || frame.Body.(browserprotocol.AgentControlResult).OperationID != request.OperationID {
 				t.Fatalf("result: %+v", frame)
 			}
-			payload, err = browserprotocol.EncodeTaskHistoryGet("history", browserprotocol.TaskHistoryGet{TaskID: request.TaskID})
+			payload, err = testEncodeTaskHistoryGet("history", browserprotocol.TaskHistoryGet{TaskID: request.TaskID})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -56,7 +56,7 @@ func TestAgentControlTransportCorrelatesDurableOperation(t *testing.T) {
 			if frame.Type != browserprotocol.TypeTaskHistory || frame.ID != "history" || frame.Body.(browserprotocol.TaskHistory).TaskID != request.TaskID {
 				t.Fatalf("history: %+v", frame)
 			}
-			payload, err = browserprotocol.EncodeTaskDetailGet("detail", browserprotocol.TaskDetailGet{TaskID: request.TaskID, ExpectedRevision: request.ExpectedTaskRevision})
+			payload, err = testEncodeTaskDetailGet("detail", browserprotocol.TaskDetailGet{TaskID: request.TaskID, ExpectedRevision: request.ExpectedTaskRevision})
 			if err != nil {
 				t.Fatal(err)
 			}

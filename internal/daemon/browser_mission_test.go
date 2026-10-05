@@ -46,7 +46,7 @@ func TestBrowserMissionRoundTripAndProjectAuthority(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		wire, err := browserprotocol.EncodeProjectContent("mission-"+string(rune('a'+seq)), browserprotocol.ProjectContent{Operation: operation, Input: raw})
+		wire, err := testEncodeProjectContent("mission-"+string(rune('a'+seq)), browserprotocol.ProjectContent{Operation: operation, Input: raw})
 		if err != nil {
 			t.Fatal(err)
 		}

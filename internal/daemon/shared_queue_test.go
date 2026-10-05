@@ -30,7 +30,7 @@ func TestBrowserTaskEnqueueAnyWorkerQueuesUnclaimedWork(t *testing.T) {
 	}
 	connection := fixture.pair(t)
 	request := browserprotocol.TaskEnqueue{TaskID: taskID.String(), IncarnationID: incarnationID.String(), AgentID: agent.ID.String(), ExpectedAgentRevision: browserprotocol.Decimal(agent.Revision.Int64()), Instruction: "Whoever is free: fix the flaky test", Mode: "any"}
-	payload, err := browserprotocol.EncodeTaskEnqueue("enqueue-any", request)
+	payload, err := testEncodeTaskEnqueue("enqueue-any", request)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -181,7 +181,7 @@ func (backend *terminalTestBackend) CancelHumanRequestRun(ctx context.Context, _
 func authenticateTerminalTest(t *testing.T, connection *websocket.Conn) browserprotocol.AuthResult {
 	t.Helper()
 	_ = readServerFrame(t, connection)
-	proof, err := browserprotocol.EncodeAuthProve("auth", browserprotocol.AuthProve{
+	proof, err := testEncodeAuthProve("auth", browserprotocol.AuthProve{
 		ClientID: testID, Signature: strings.Repeat("01", browserprotocol.SignatureSize),
 	})
 	if err != nil {
@@ -243,7 +243,7 @@ func expectTerminalReadError(t *testing.T, connection *websocket.Conn) {
 
 func terminalAttachRequest(t *testing.T, id string, after uint64) []byte {
 	t.Helper()
-	payload, err := browserprotocol.EncodeTerminalAttach(id, browserprotocol.TerminalAttach{
+	payload, err := testEncodeTerminalAttach(id, browserprotocol.TerminalAttach{
 		RunID: testID, SessionID: projectID, ExpectedRunRevision: 1, ExpectedSessionRevision: 1,
 		AfterSequence: browserprotocol.Decimal(after),
 	})
@@ -272,7 +272,7 @@ func TestTerminalTransportKeepsTinyOutputFlowingDuringSlowControl(t *testing.T) 
 		{
 			name: "agent control",
 			request: func(*terminalTestBackend) ([]byte, error) {
-				return browserprotocol.EncodeAgentControl("control", browserprotocol.AgentControl{
+				return testEncodeAgentControl("control", browserprotocol.AgentControl{
 					OperationID: strings.Repeat("11", 16), TaskID: strings.Repeat("12", 16), RunID: strings.Repeat("13", 16),
 					ExpectedTaskRevision: 1, ExpectedRunRevision: 1, Action: "message", Instruction: "continue",
 				})
@@ -283,7 +283,7 @@ func TestTerminalTransportKeepsTinyOutputFlowingDuringSlowControl(t *testing.T) 
 			name: "human reply",
 			request: func(backend *terminalTestBackend) ([]byte, error) {
 				backend.replyResult = browserprotocol.HumanRequestReplyResult{RequestID: requestID, Revision: 3, Status: "resolved"}
-				return browserprotocol.EncodeHumanRequestReply("reply", browserprotocol.HumanRequestReply{RequestID: requestID, ExpectedRevision: 1, Reply: "continue"})
+				return testEncodeHumanRequestReply("reply", browserprotocol.HumanRequestReply{RequestID: requestID, ExpectedRevision: 1, Reply: "continue"})
 			},
 			result: browserprotocol.TypeHumanRequestReplyResult,
 		},
@@ -291,7 +291,7 @@ func TestTerminalTransportKeepsTinyOutputFlowingDuringSlowControl(t *testing.T) 
 			name: "human cancellation",
 			request: func(backend *terminalTestBackend) ([]byte, error) {
 				backend.cancelResult = browserprotocol.HumanRequestCancelRunResult{RunID: testID, RunRevision: 2, RequestID: requestID, RequestRevision: 2, RunRevisionChanged: true}
-				return browserprotocol.EncodeHumanRequestCancelRun("cancel", browserprotocol.HumanRequestCancelRun{RequestID: requestID, ExpectedRequestRevision: 1, ExpectedRunRevision: 1})
+				return testEncodeHumanRequestCancelRun("cancel", browserprotocol.HumanRequestCancelRun{RequestID: requestID, ExpectedRequestRevision: 1, ExpectedRunRevision: 1})
 			},
 			result: browserprotocol.TypeHumanRequestCancelRunResult,
 		},
@@ -337,7 +337,7 @@ func TestTerminalTransportKeepsTinyOutputFlowingDuringSlowControl(t *testing.T) 
 				if frame.Sequence != sequence || len(frame.Payload) != 1 || frame.Payload[0] != byte(sequence) {
 					t.Fatalf("tiny output[%d] = %+v", sequence, frame)
 				}
-				ack, err := browserprotocol.EncodeTerminalAck(browserprotocol.TerminalAck{SessionID: projectID, NextSequence: browserprotocol.Decimal(sequence + 1)})
+				ack, err := testEncodeTerminalAck(browserprotocol.TerminalAck{SessionID: projectID, NextSequence: browserprotocol.Decimal(sequence + 1)})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -414,7 +414,7 @@ func TestTerminalTransportDeliversCanonicalExitAndRetainsConnection(t *testing.T
 				t.Fatalf("exit attachment close = %d calls %d", attachment.closed.Load(), attachment.closeCalls.Load())
 			}
 
-			target, err := browserprotocol.EncodeTerminalTargetGet("still-open", browserprotocol.TerminalTargetGet{AgentID: strings.Repeat("01", 16), ExpectedAgentRevision: 1, ExpectedHead: 7})
+			target, err := testEncodeTerminalTargetGet("still-open", browserprotocol.TerminalTargetGet{AgentID: strings.Repeat("01", 16), ExpectedAgentRevision: 1, ExpectedHead: 7})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -459,7 +459,7 @@ func TestTerminalTransportAcknowledgesOutputBeforeClosingTerminal(t *testing.T) 
 				t.Fatal("attachment closed before output ACK")
 			}
 
-			ack, err := browserprotocol.EncodeTerminalAck(browserprotocol.TerminalAck{SessionID: projectID, NextSequence: 1})
+			ack, err := testEncodeTerminalAck(browserprotocol.TerminalAck{SessionID: projectID, NextSequence: 1})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -473,7 +473,7 @@ func TestTerminalTransportAcknowledgesOutputBeforeClosingTerminal(t *testing.T) 
 			if result.err != nil || result.kind != websocket.MessageText {
 				t.Fatalf("closing frame kind=%v err=%v", result.kind, result.err)
 			}
-			frame, err := browserprotocol.DecodeServerControl(result.payload)
+			frame, err := testDecodeServerControl(result.payload)
 			if err != nil || frame.Type != test.wantType || frame.ID != "attach" {
 				t.Fatalf("closing frame=%+v err=%v", frame, err)
 			}
@@ -486,7 +486,7 @@ func TestTerminalTransportAcknowledgesOutputBeforeClosingTerminal(t *testing.T) 
 				t.Fatalf("closing event attachment close = %d calls %d", attachment.closed.Load(), attachment.closeCalls.Load())
 			}
 
-			target, err := browserprotocol.EncodeTerminalTargetGet("still-open", browserprotocol.TerminalTargetGet{AgentID: strings.Repeat("01", 16), ExpectedAgentRevision: 1, ExpectedHead: 7})
+			target, err := testEncodeTerminalTargetGet("still-open", browserprotocol.TerminalTargetGet{AgentID: strings.Repeat("01", 16), ExpectedAgentRevision: 1, ExpectedHead: 7})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -527,7 +527,7 @@ func TestTerminalTransportConvertsSlowAttachmentCloseToReset(t *testing.T) {
 	case <-time.After(100 * time.Millisecond):
 	}
 
-	ack, err := browserprotocol.EncodeTerminalAck(browserprotocol.TerminalAck{SessionID: projectID, NextSequence: 1})
+	ack, err := testEncodeTerminalAck(browserprotocol.TerminalAck{SessionID: projectID, NextSequence: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -541,7 +541,7 @@ func TestTerminalTransportConvertsSlowAttachmentCloseToReset(t *testing.T) {
 	if result.err != nil || result.kind != websocket.MessageText {
 		t.Fatalf("slow close result kind=%v err=%v", result.kind, result.err)
 	}
-	reset, err := browserprotocol.DecodeServerControl(result.payload)
+	reset, err := testDecodeServerControl(result.payload)
 	if err != nil || reset.Type != browserprotocol.TypeTerminalReset || reset.ID != "attach" {
 		t.Fatalf("slow close reset=%+v err=%v", reset, err)
 	}
@@ -555,7 +555,7 @@ func TestTerminalTransportConvertsSlowAttachmentCloseToReset(t *testing.T) {
 		t.Fatalf("slow close attachment close=%d calls=%d", attachment.closed.Load(), attachment.closeCalls.Load())
 	}
 
-	target, err := browserprotocol.EncodeTerminalTargetGet("still-open", browserprotocol.TerminalTargetGet{AgentID: strings.Repeat("01", 16), ExpectedAgentRevision: 1, ExpectedHead: 7})
+	target, err := testEncodeTerminalTargetGet("still-open", browserprotocol.TerminalTargetGet{AgentID: strings.Repeat("01", 16), ExpectedAgentRevision: 1, ExpectedHead: 7})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -613,7 +613,7 @@ func TestTerminalTransportAttachCreditReplayAndInput(t *testing.T) {
 		t.Fatalf("output frame=%+v", output)
 	}
 
-	input, err := browserprotocol.EncodeTerminalInput(fixedID(projectID), 1, 7, []byte("in"))
+	input, err := testEncodeTerminalInput(fixedID(projectID), 1, 7, []byte("in"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -627,7 +627,7 @@ func TestTerminalTransportAttachCreditReplayAndInput(t *testing.T) {
 		t.Fatalf("input result body=%+v", inputResult)
 	}
 
-	ack, err := browserprotocol.EncodeTerminalAck(browserprotocol.TerminalAck{SessionID: projectID, NextSequence: 94})
+	ack, err := testEncodeTerminalAck(browserprotocol.TerminalAck{SessionID: projectID, NextSequence: 94})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -678,7 +678,7 @@ func TestTerminalTransportCreditWindowHoldsOnePendingOutput(t *testing.T) {
 		t.Fatalf("connection closed before credit ACK: %v", result.err)
 	case <-time.After(100 * time.Millisecond):
 	}
-	ack, err := browserprotocol.EncodeTerminalAck(browserprotocol.TerminalAck{SessionID: projectID, NextSequence: browserprotocol.MaxTerminalUnackedBytes})
+	ack, err := testEncodeTerminalAck(browserprotocol.TerminalAck{SessionID: projectID, NextSequence: browserprotocol.MaxTerminalUnackedBytes})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -726,7 +726,7 @@ func TestTerminalTransportRejectsAheadAndBackwardACKs(t *testing.T) {
 			sendTerminalEvent(t, backend, TerminalEvent{Kind: TerminalEventOutput, Start: 0, End: 2, Payload: []byte("xy")})
 			_ = readTerminalBinary(t, connection)
 			if test.firstACK != 0 {
-				ack, err := browserprotocol.EncodeTerminalAck(browserprotocol.TerminalAck{SessionID: projectID, NextSequence: browserprotocol.Decimal(test.firstACK)})
+				ack, err := testEncodeTerminalAck(browserprotocol.TerminalAck{SessionID: projectID, NextSequence: browserprotocol.Decimal(test.firstACK)})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -736,7 +736,7 @@ func TestTerminalTransportRejectsAheadAndBackwardACKs(t *testing.T) {
 			if ackSession == "" {
 				ackSession = projectID
 			}
-			ack, err := browserprotocol.EncodeTerminalAck(browserprotocol.TerminalAck{SessionID: ackSession, NextSequence: browserprotocol.Decimal(test.invalidACK)})
+			ack, err := testEncodeTerminalAck(browserprotocol.TerminalAck{SessionID: ackSession, NextSequence: browserprotocol.Decimal(test.invalidACK)})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -784,7 +784,7 @@ func TestTerminalTransportACKProgressExtendsTimeoutWhileOutputRemains(t *testing
 	payload := bytes.Repeat([]byte{'y'}, browserprotocol.MaxTerminalPayload)
 	sendTerminalEvent(t, backend, TerminalEvent{Kind: TerminalEventOutput, Start: browserprotocol.MaxTerminalUnackedBytes, End: browserprotocol.MaxTerminalUnackedBytes + uint64(len(payload)), Payload: payload})
 	time.Sleep(ackTimeout / 2)
-	ack, err := browserprotocol.EncodeTerminalAck(browserprotocol.TerminalAck{SessionID: projectID, NextSequence: browserprotocol.MaxTerminalPayload})
+	ack, err := testEncodeTerminalAck(browserprotocol.TerminalAck{SessionID: projectID, NextSequence: browserprotocol.MaxTerminalPayload})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -881,7 +881,7 @@ func TestTerminalTransportResetAndDetachJoinAttachment(t *testing.T) {
 	if frame := readServerFrame(t, connection2); frame.Type != browserprotocol.TypeTerminalAttached {
 		t.Fatalf("attached frame=%+v", frame)
 	}
-	detach, err := browserprotocol.EncodeTerminalDetach("detach", browserprotocol.TerminalDetach{SessionID: projectID})
+	detach, err := testEncodeTerminalDetach("detach", browserprotocol.TerminalDetach{SessionID: projectID})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -908,7 +908,7 @@ func TestTerminalTransportRetainsAttachmentAfterCloseFailure(t *testing.T) {
 	attachment := backend.currentAttachment(t)
 	closeErr := errors.New("attachment close failed once")
 	attachment.closeFirstErr = closeErr
-	detach, err := browserprotocol.EncodeTerminalDetach("detach-fail", browserprotocol.TerminalDetach{SessionID: projectID})
+	detach, err := testEncodeTerminalDetach("detach-fail", browserprotocol.TerminalDetach{SessionID: projectID})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -945,7 +945,7 @@ func TestTerminalTransportRetriesFailedDetachAndClearsOnlyAfterSuccess(t *testin
 		{id: "detach-fail", wantType: browserprotocol.TypeError},
 		{id: "detach-success", wantType: browserprotocol.TypeTerminalDetached},
 	} {
-		detach, err := browserprotocol.EncodeTerminalDetach(test.id, browserprotocol.TerminalDetach{SessionID: projectID})
+		detach, err := testEncodeTerminalDetach(test.id, browserprotocol.TerminalDetach{SessionID: projectID})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1004,7 +1004,7 @@ func TestTerminalTransportHumanRequestEffectDispatch(t *testing.T) {
 	server := startTerminalServer(t, backend)
 	connection, _ := dialServer(t, server, testOrigin)
 	authenticateTerminalTest(t, connection)
-	reply, err := browserprotocol.EncodeHumanRequestReply("reply", browserprotocol.HumanRequestReply{RequestID: requestID, ExpectedRevision: 1, Reply: "yes"})
+	reply, err := testEncodeHumanRequestReply("reply", browserprotocol.HumanRequestReply{RequestID: requestID, ExpectedRevision: 1, Reply: "yes"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1012,7 +1012,7 @@ func TestTerminalTransportHumanRequestEffectDispatch(t *testing.T) {
 	if frame := readServerFrame(t, connection); frame.Type != browserprotocol.TypeHumanRequestReplyResult || frame.ID != "reply" || frame.Body.(browserprotocol.HumanRequestReplyResult).Status != "resolved" {
 		t.Fatalf("reply result=%+v", frame)
 	}
-	cancel, err := browserprotocol.EncodeHumanRequestCancelRun("cancel", browserprotocol.HumanRequestCancelRun{RequestID: requestID, ExpectedRequestRevision: 1, ExpectedRunRevision: 2})
+	cancel, err := testEncodeHumanRequestCancelRun("cancel", browserprotocol.HumanRequestCancelRun{RequestID: requestID, ExpectedRequestRevision: 1, ExpectedRunRevision: 2})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1035,7 +1035,7 @@ func TestTerminalTransportRejectsMismatchedHumanEffectResults(t *testing.T) {
 				backend.replyResult = browserprotocol.HumanRequestReplyResult{RequestID: testID, Revision: 3, Status: "resolved"}
 			},
 			write: func(t *testing.T, connection *websocket.Conn) {
-				payload, err := browserprotocol.EncodeHumanRequestReply("reply-request", browserprotocol.HumanRequestReply{RequestID: requestID, ExpectedRevision: 1, Reply: "yes"})
+				payload, err := testEncodeHumanRequestReply("reply-request", browserprotocol.HumanRequestReply{RequestID: requestID, ExpectedRevision: 1, Reply: "yes"})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -1048,7 +1048,7 @@ func TestTerminalTransportRejectsMismatchedHumanEffectResults(t *testing.T) {
 				backend.replyResult = browserprotocol.HumanRequestReplyResult{RequestID: requestID, Revision: 1, Status: "resolved"}
 			},
 			write: func(t *testing.T, connection *websocket.Conn) {
-				payload, err := browserprotocol.EncodeHumanRequestReply("reply-revision", browserprotocol.HumanRequestReply{RequestID: requestID, ExpectedRevision: 1, Reply: "yes"})
+				payload, err := testEncodeHumanRequestReply("reply-revision", browserprotocol.HumanRequestReply{RequestID: requestID, ExpectedRevision: 1, Reply: "yes"})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -1061,7 +1061,7 @@ func TestTerminalTransportRejectsMismatchedHumanEffectResults(t *testing.T) {
 				backend.replyResult = browserprotocol.HumanRequestReplyResult{RequestID: requestID, Revision: 3, Status: "pending"}
 			},
 			write: func(t *testing.T, connection *websocket.Conn) {
-				payload, err := browserprotocol.EncodeHumanRequestReply("reply-status", browserprotocol.HumanRequestReply{RequestID: requestID, ExpectedRevision: 1, Reply: "yes"})
+				payload, err := testEncodeHumanRequestReply("reply-status", browserprotocol.HumanRequestReply{RequestID: requestID, ExpectedRevision: 1, Reply: "yes"})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -1074,7 +1074,7 @@ func TestTerminalTransportRejectsMismatchedHumanEffectResults(t *testing.T) {
 				backend.cancelResult = browserprotocol.HumanRequestCancelRunResult{RunID: testID, RunRevision: 3, RequestID: testID, RequestRevision: 2}
 			},
 			write: func(t *testing.T, connection *websocket.Conn) {
-				payload, err := browserprotocol.EncodeHumanRequestCancelRun("cancel-request", browserprotocol.HumanRequestCancelRun{RequestID: requestID, ExpectedRequestRevision: 1, ExpectedRunRevision: 2})
+				payload, err := testEncodeHumanRequestCancelRun("cancel-request", browserprotocol.HumanRequestCancelRun{RequestID: requestID, ExpectedRequestRevision: 1, ExpectedRunRevision: 2})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -1087,7 +1087,7 @@ func TestTerminalTransportRejectsMismatchedHumanEffectResults(t *testing.T) {
 				backend.cancelResult = browserprotocol.HumanRequestCancelRunResult{RunID: testID, RunRevision: 2, RequestID: requestID, RequestRevision: 1}
 			},
 			write: func(t *testing.T, connection *websocket.Conn) {
-				payload, err := browserprotocol.EncodeHumanRequestCancelRun("cancel-revisions", browserprotocol.HumanRequestCancelRun{RequestID: requestID, ExpectedRequestRevision: 1, ExpectedRunRevision: 2})
+				payload, err := testEncodeHumanRequestCancelRun("cancel-revisions", browserprotocol.HumanRequestCancelRun{RequestID: requestID, ExpectedRequestRevision: 1, ExpectedRunRevision: 2})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -1123,7 +1123,7 @@ func TestTerminalTransportValidatesLeaseResultRelations(t *testing.T) {
 				backend.leaseResult = TerminalLeaseResult{Operation: "renewed", RunID: testID, SessionID: projectID, Generation: 3, ExpiresAtMS: &expires, RunRevision: 1, SessionRevision: 1}
 			},
 			write: func(t *testing.T, connection *websocket.Conn) {
-				payload, err := browserprotocol.EncodeTerminalLeaseAcquire("lease-operation", browserprotocol.TerminalLeaseAcquire{RunID: testID, SessionID: projectID, ExpectedRunRevision: 1, ExpectedSessionRevision: 1})
+				payload, err := testEncodeTerminalLeaseAcquire("lease-operation", browserprotocol.TerminalLeaseAcquire{RunID: testID, SessionID: projectID, ExpectedRunRevision: 1, ExpectedSessionRevision: 1})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -1137,7 +1137,7 @@ func TestTerminalTransportValidatesLeaseResultRelations(t *testing.T) {
 				backend.leaseResult = TerminalLeaseResult{Operation: "acquired", RunID: testID, SessionID: testID, Generation: 3, ExpiresAtMS: &expires, RunRevision: 1, SessionRevision: 1}
 			},
 			write: func(t *testing.T, connection *websocket.Conn) {
-				payload, err := browserprotocol.EncodeTerminalLeaseAcquire("lease-identity", browserprotocol.TerminalLeaseAcquire{RunID: testID, SessionID: projectID, ExpectedRunRevision: 1, ExpectedSessionRevision: 1})
+				payload, err := testEncodeTerminalLeaseAcquire("lease-identity", browserprotocol.TerminalLeaseAcquire{RunID: testID, SessionID: projectID, ExpectedRunRevision: 1, ExpectedSessionRevision: 1})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -1151,7 +1151,7 @@ func TestTerminalTransportValidatesLeaseResultRelations(t *testing.T) {
 				backend.leaseResult = TerminalLeaseResult{Operation: "renewed", RunID: testID, SessionID: projectID, Generation: 4, ExpiresAtMS: &expires, RunRevision: 1, SessionRevision: 1}
 			},
 			write: func(t *testing.T, connection *websocket.Conn) {
-				payload, err := browserprotocol.EncodeTerminalLeaseRenew("lease-generation", browserprotocol.TerminalLeaseRenew{RunID: testID, SessionID: projectID, Generation: 3, ExpectedRunRevision: 1, ExpectedSessionRevision: 1})
+				payload, err := testEncodeTerminalLeaseRenew("lease-generation", browserprotocol.TerminalLeaseRenew{RunID: testID, SessionID: projectID, Generation: 3, ExpectedRunRevision: 1, ExpectedSessionRevision: 1})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -1165,7 +1165,7 @@ func TestTerminalTransportValidatesLeaseResultRelations(t *testing.T) {
 				backend.leaseResult = TerminalLeaseResult{Operation: "renewed", RunID: testID, SessionID: projectID, Generation: 3, ExpiresAtMS: &expires, RunRevision: 2, SessionRevision: 1}
 			},
 			write: func(t *testing.T, connection *websocket.Conn) {
-				payload, err := browserprotocol.EncodeTerminalLeaseRenew("lease-revisions", browserprotocol.TerminalLeaseRenew{RunID: testID, SessionID: projectID, Generation: 3, ExpectedRunRevision: 1, ExpectedSessionRevision: 1})
+				payload, err := testEncodeTerminalLeaseRenew("lease-revisions", browserprotocol.TerminalLeaseRenew{RunID: testID, SessionID: projectID, Generation: 3, ExpectedRunRevision: 1, ExpectedSessionRevision: 1})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -1290,7 +1290,7 @@ func TestTerminalTransportAcceptsExactLeaseResults(t *testing.T) {
 
 	expires := browserprotocol.Decimal(20)
 	backend.leaseResult = TerminalLeaseResult{Operation: "acquired", RunID: testID, SessionID: projectID, Generation: 3, ExpiresAtMS: &expires, RunRevision: 1, SessionRevision: 1}
-	acquire, err := browserprotocol.EncodeTerminalLeaseAcquire("lease-acquire", browserprotocol.TerminalLeaseAcquire{RunID: testID, SessionID: projectID, ExpectedRunRevision: 1, ExpectedSessionRevision: 1})
+	acquire, err := testEncodeTerminalLeaseAcquire("lease-acquire", browserprotocol.TerminalLeaseAcquire{RunID: testID, SessionID: projectID, ExpectedRunRevision: 1, ExpectedSessionRevision: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1300,7 +1300,7 @@ func TestTerminalTransportAcceptsExactLeaseResults(t *testing.T) {
 	}
 
 	backend.leaseResult = TerminalLeaseResult{Operation: "renewed", RunID: testID, SessionID: projectID, Generation: 3, ExpiresAtMS: &expires, LastInputSequence: 4, RunRevision: 1, SessionRevision: 1}
-	renew, err := browserprotocol.EncodeTerminalLeaseRenew("lease-renew", browserprotocol.TerminalLeaseRenew{RunID: testID, SessionID: projectID, Generation: 3, ExpectedRunRevision: 1, ExpectedSessionRevision: 1})
+	renew, err := testEncodeTerminalLeaseRenew("lease-renew", browserprotocol.TerminalLeaseRenew{RunID: testID, SessionID: projectID, Generation: 3, ExpectedRunRevision: 1, ExpectedSessionRevision: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1326,7 +1326,7 @@ func TestTerminalTransportBinaryDirectionAndSessionGuards(t *testing.T) {
 	server := startTerminalServer(t, backend)
 	connection, _ := dialServer(t, server, testOrigin)
 	authenticateTerminalTest(t, connection)
-	input, err := browserprotocol.EncodeTerminalInput(fixedID(projectID), 1, 1, []byte("x"))
+	input, err := testEncodeTerminalInput(fixedID(projectID), 1, 1, []byte("x"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1343,7 +1343,7 @@ func TestTerminalTransportBinaryDirectionAndSessionGuards(t *testing.T) {
 	writeClientFrame(t, connection2, terminalAttachRequest(t, "attach", 0))
 	sendTerminalEvent(t, backend2, TerminalEvent{Kind: TerminalEventAttached, Accepted: true, Sequence: 0, Floor: 0, Head: 1})
 	_ = readServerFrame(t, connection2)
-	wrong, err := browserprotocol.EncodeTerminalInput(fixedID(testID), 1, 1, []byte("x"))
+	wrong, err := testEncodeTerminalInput(fixedID(testID), 1, 1, []byte("x"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1379,7 +1379,7 @@ func TestTerminalTransportInputResultKeepsExactBackendCount(t *testing.T) {
 	writeClientFrame(t, connection, terminalAttachRequest(t, "attach", 0))
 	sendTerminalEvent(t, backend, TerminalEvent{Kind: TerminalEventAttached, Accepted: true, Sequence: 0, Floor: 0, Head: 1})
 	_ = readServerFrame(t, connection)
-	input, err := browserprotocol.EncodeTerminalInput(fixedID(projectID), 1, 3, []byte("exact"))
+	input, err := testEncodeTerminalInput(fixedID(projectID), 1, 3, []byte("exact"))
 	if err != nil {
 		t.Fatal(err)
 	}

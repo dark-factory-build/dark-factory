@@ -104,7 +104,7 @@ func TestBrowserTaskDetailPagesMaximumResultPastTheFormerCursorLimit(t *testing.
 	var rebuilt string
 	passedFormerLimit := false
 	for offset := 0; ; offset += 2048 {
-		encoded, err := browserprotocol.EncodeTaskDetailGet("detail", browserprotocol.TaskDetailGet{TaskID: task.ID.String(), ExpectedRevision: decimalRevision(task.Revision), TextOffset: browserprotocol.Decimal(offset)})
+		encoded, err := testEncodeTaskDetailGet("detail", browserprotocol.TaskDetailGet{TaskID: task.ID.String(), ExpectedRevision: decimalRevision(task.Revision), TextOffset: browserprotocol.Decimal(offset)})
 		if err != nil {
 			t.Fatalf("page %d request = %v", offset, err)
 		}
@@ -289,7 +289,7 @@ func TestBrowserActivityRefreshDoesNotConsumeFactoryControlRevision(t *testing.T
 		t.Fatalf("admission snapshot: before=%+v active=%+v", before, active)
 	}
 	completeAdapterRun(t, fixture.store, run, "finished")
-	watch, err := browserprotocol.EncodeStateWatch("activity-watch", browserprotocol.StateWatch{AfterHead: active.Head})
+	watch, err := testEncodeStateWatch("activity-watch", browserprotocol.StateWatch{AfterHead: active.Head})
 	if err != nil {
 		t.Fatal(err)
 	}

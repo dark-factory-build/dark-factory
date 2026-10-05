@@ -74,7 +74,7 @@ func (relay *relayServer) handle(writer http.ResponseWriter, request *http.Reque
 		http.Error(writer, "forbidden", http.StatusForbidden)
 		return
 	}
-	payload, err := relayhost.VerifyHostToken(relay.key.PublicKey(), offered[1])
+	payload, err := testVerifyHostToken(relay.key.PublicKey(), offered[1])
 	relay.mu.Lock()
 	relay.dials++
 	stale := payload.Generation < relay.lastAccepted.Generation ||
@@ -213,7 +213,7 @@ func (controller *relayController) frame(t *testing.T) browserprotocol.ControlFr
 	if record.Type != relayhost.RecordText {
 		t.Fatalf("relayed record type = 0x%02x, want TEXT", byte(record.Type))
 	}
-	frame, err := browserprotocol.DecodeServerControl(record.Payload)
+	frame, err := testDecodeServerControl(record.Payload)
 	if err != nil {
 		t.Fatalf("decode relayed frame %q: %v", record.Payload, err)
 	}
@@ -269,7 +269,7 @@ func (controller *relayController) proveePair(t *testing.T, fixture *adapterFixt
 	if err != nil {
 		t.Fatal(err)
 	}
-	payload, err := browserprotocol.EncodePairProve("pair", browserprotocol.PairProve{
+	payload, err := testEncodePairProve("pair", browserprotocol.PairProve{
 		Challenge: hex.EncodeToString(challenge), PublicKeySEC1: hex.EncodeToString(publicKey), Signature: hex.EncodeToString(adapterSign(t, controller.key, transcript)),
 	})
 	if err != nil {
@@ -288,7 +288,7 @@ func (controller *relayController) proveAuth(t *testing.T, fixture *adapterFixtu
 	if err != nil {
 		t.Fatal(err)
 	}
-	payload, err := browserprotocol.EncodeAuthProve("auth", browserprotocol.AuthProve{ClientID: controller.client.ID.String(), Signature: hex.EncodeToString(adapterSign(t, controller.key, transcript))})
+	payload, err := testEncodeAuthProve("auth", browserprotocol.AuthProve{ClientID: controller.client.ID.String(), Signature: hex.EncodeToString(adapterSign(t, controller.key, transcript))})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -297,7 +297,7 @@ func (controller *relayController) proveAuth(t *testing.T, fixture *adapterFixtu
 
 func (controller *relayController) snapshot(t *testing.T, id string) browserprotocol.StateSnapshot {
 	t.Helper()
-	payload, err := browserprotocol.EncodeStateGet(id, browserprotocol.StateGet{})
+	payload, err := testEncodeStateGet(id, browserprotocol.StateGet{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -379,7 +379,7 @@ func (controller *relayController) resolveClient(t *testing.T, fixture *adapterF
 		t.Fatalf("durable client = %+v found=%v err=%v", client, found, err)
 	}
 	controller.client = client
-	payload, err := relayhost.VerifyTicket(identity.PublicKey(), ticket)
+	payload, err := testVerifyTicket(identity.PublicKey(), ticket)
 	if err != nil {
 		t.Fatalf("relay ticket does not verify against the node key: %v", err)
 	}

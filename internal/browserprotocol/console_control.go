@@ -519,16 +519,8 @@ func EncodeAccountUpdateResult(id string, value AccountUpdateResult) ([]byte, er
 	return encodeControl(TypeAccountUpdateResult, id, value)
 }
 
-func EncodeBrowserClientsGet(id string, value BrowserClientsGet) ([]byte, error) {
-	return encodeControl(TypeBrowserClientsGet, id, value)
-}
-
 func EncodeBrowserClients(id string, value BrowserClients) ([]byte, error) {
 	return encodeControl(TypeBrowserClients, id, value)
-}
-
-func EncodeBrowserClientRevoke(id string, value BrowserClientRevoke) ([]byte, error) {
-	return encodeControl(TypeBrowserClientRevoke, id, value)
 }
 
 func EncodeBrowserClientRevokeResult(id string, value BrowserClientRevokeResult) ([]byte, error) {

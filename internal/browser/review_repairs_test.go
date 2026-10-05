@@ -16,7 +16,7 @@ import (
 
 func authProof(t *testing.T, connection *websocket.Conn) {
 	t.Helper()
-	proof, err := browserprotocol.EncodeAuthProve("auth", browserprotocol.AuthProve{
+	proof, err := testEncodeAuthProve("auth", browserprotocol.AuthProve{
 		ClientID: testID, Signature: strings.Repeat("01", browserprotocol.SignatureSize),
 	})
 	if err != nil {
@@ -107,7 +107,7 @@ func TestPairResultCannotRegisterAfterExactClientRevocation(t *testing.T) {
 	connection, _ := dialServer(t, server, testOrigin)
 	_ = readServerFrame(t, connection)
 	publicKey := append([]byte{4}, make([]byte, browserprotocol.PublicKeySize-1)...)
-	pair, err := browserprotocol.EncodePairProve("pair", browserprotocol.PairProve{
+	pair, err := testEncodePairProve("pair", browserprotocol.PairProve{
 		Challenge:     strings.Repeat("04", browserprotocol.ChallengeSize),
 		PublicKeySEC1: hex.EncodeToString(publicKey),
 		Signature:     strings.Repeat("05", browserprotocol.SignatureSize),
@@ -170,7 +170,7 @@ func TestOperationAuthorizationIsReloadedByBackend(t *testing.T) {
 	backend.mu.Lock()
 	backend.detailErr = ErrUnauthorized
 	backend.mu.Unlock()
-	request, _ := browserprotocol.EncodeHumanRequestDetailGet("detail-revoked", browserprotocol.HumanRequestDetailGet{RequestID: requestID, ExpectedRevision: 1})
+	request, _ := testEncodeHumanRequestDetailGet("detail-revoked", browserprotocol.HumanRequestDetailGet{RequestID: requestID, ExpectedRevision: 1})
 	writeClientFrame(t, connection, request)
 	assertError(t, readServerFrame(t, connection), browserprotocol.ErrorUnauthorized)
 	backend.mu.Lock()
@@ -192,7 +192,7 @@ func TestBackendResponseCorrelationFailsClosed(t *testing.T) {
 			server := startServer(t, backend)
 			connection, _ := dialServer(t, server, testOrigin)
 			authenticate(t, connection)
-			request, _ := browserprotocol.EncodeHumanRequestDetailGet("detail-mismatch", browserprotocol.HumanRequestDetailGet{RequestID: requestID, ExpectedRevision: 1})
+			request, _ := testEncodeHumanRequestDetailGet("detail-mismatch", browserprotocol.HumanRequestDetailGet{RequestID: requestID, ExpectedRevision: 1})
 			writeClientFrame(t, connection, request)
 			assertError(t, readServerFrame(t, connection), browserprotocol.ErrorInternal)
 		}
@@ -211,7 +211,7 @@ func TestBackendResponseCorrelationFailsClosed(t *testing.T) {
 			server := startServer(t, backend)
 			connection, _ := dialServer(t, server, testOrigin)
 			authenticate(t, connection)
-			request, _ := browserprotocol.EncodeTerminalTargetGet("target-mismatch", browserprotocol.TerminalTargetGet{AgentID: strings.Repeat("01", 16), ExpectedAgentRevision: 1, ExpectedHead: 7})
+			request, _ := testEncodeTerminalTargetGet("target-mismatch", browserprotocol.TerminalTargetGet{AgentID: strings.Repeat("01", 16), ExpectedAgentRevision: 1, ExpectedHead: 7})
 			writeClientFrame(t, connection, request)
 			assertError(t, readServerFrame(t, connection), browserprotocol.ErrorInternal)
 			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -232,7 +232,7 @@ func TestTerminalTargetRoutesThroughCodecAndPreservesNull(t *testing.T) {
 	connection, _ := dialServer(t, server, testOrigin)
 	authenticate(t, connection)
 	requestBody := browserprotocol.TerminalTargetGet{AgentID: strings.Repeat("01", 16), ExpectedAgentRevision: 1, ExpectedHead: 7}
-	request, _ := browserprotocol.EncodeTerminalTargetGet("target-active", requestBody)
+	request, _ := testEncodeTerminalTargetGet("target-active", requestBody)
 	writeClientFrame(t, connection, request)
 	frame := readServerFrame(t, connection)
 	if frame.Type != browserprotocol.TypeTerminalTarget || frame.ID != "target-active" {
@@ -245,7 +245,7 @@ func TestTerminalTargetRoutesThroughCodecAndPreservesNull(t *testing.T) {
 	backend.mu.Lock()
 	backend.target.Target = nil
 	backend.mu.Unlock()
-	request, _ = browserprotocol.EncodeTerminalTargetGet("target-null", requestBody)
+	request, _ = testEncodeTerminalTargetGet("target-null", requestBody)
 	writeClientFrame(t, connection, request)
 	frame = readServerFrame(t, connection)
 	if got := frame.Body.(browserprotocol.TerminalTarget); got.Target != nil || got.AgentID != requestBody.AgentID || got.AgentRevision != requestBody.ExpectedAgentRevision || got.Head != requestBody.ExpectedHead {
@@ -261,7 +261,7 @@ func TestTerminalTargetBackendCancellationDoesNotPublishLateResult(t *testing.T)
 	server := startServer(t, backend)
 	connection, _ := dialServer(t, server, testOrigin)
 	authenticate(t, connection)
-	request, _ := browserprotocol.EncodeTerminalTargetGet("target-cancel", browserprotocol.TerminalTargetGet{AgentID: strings.Repeat("01", 16), ExpectedAgentRevision: 1, ExpectedHead: 7})
+	request, _ := testEncodeTerminalTargetGet("target-cancel", browserprotocol.TerminalTargetGet{AgentID: strings.Repeat("01", 16), ExpectedAgentRevision: 1, ExpectedHead: 7})
 	writeClientFrame(t, connection, request)
 	select {
 	case <-backend.targetStarted:
@@ -300,7 +300,7 @@ func TestBackendSuccessAfterOperationDeadlineIsDiscarded(t *testing.T) {
 	server := startServer(t, backend)
 	connection, _ := dialServer(t, server, testOrigin)
 	authenticate(t, connection)
-	request, _ := browserprotocol.EncodeStateGet("late-state", browserprotocol.StateGet{})
+	request, _ := testEncodeStateGet("late-state", browserprotocol.StateGet{})
 	writeClientFrame(t, connection, request)
 	// The late result is still discarded, but a budget the store outran is
 	// busyness the client reconnects on, never an internal fault that strands
@@ -314,7 +314,7 @@ func TestLateSubscriptionIsCancelledAndNeverInstalled(t *testing.T) {
 	server := startServer(t, backend)
 	connection, _ := dialServer(t, server, testOrigin)
 	authenticate(t, connection)
-	request, _ := browserprotocol.EncodeStateWatch("late-sub", browserprotocol.StateWatch{})
+	request, _ := testEncodeStateWatch("late-sub", browserprotocol.StateWatch{})
 	writeClientFrame(t, connection, request)
 	assertRetryableError(t, readServerFrame(t, connection), "late-sub")
 	if backend.sub.closed.Load() != 1 {
@@ -350,7 +350,7 @@ func TestRejectedSubscriptionsAreCancelledAndJoined(t *testing.T) {
 			server := startServer(t, backend)
 			connection, _ := dialServer(t, server, testOrigin)
 			authenticate(t, connection)
-			request, _ := browserprotocol.EncodeStateWatch("rejected", browserprotocol.StateWatch{})
+			request, _ := testEncodeStateWatch("rejected", browserprotocol.StateWatch{})
 			writeClientFrame(t, connection, request)
 			assertError(t, readServerFrame(t, connection), test.code)
 			if got := backend.sub.closed.Load(); got != 1 {
@@ -370,7 +370,7 @@ func TestRejectedSubscriptionCleanupUncertaintyIsObservable(t *testing.T) {
 	}
 	connection, _ := dialServer(t, server, testOrigin)
 	authenticate(t, connection)
-	request, _ := browserprotocol.EncodeStateWatch("unresolved-rejected", browserprotocol.StateWatch{})
+	request, _ := testEncodeStateWatch("unresolved-rejected", browserprotocol.StateWatch{})
 	writeClientFrame(t, connection, request)
 	assertError(t, readServerFrame(t, connection), browserprotocol.ErrorInternal)
 	_ = connection.CloseNow()
@@ -404,8 +404,8 @@ func TestUnresolvedSubscriptionPoisonsEveryBoundedConnection(t *testing.T) {
 		authenticate(t, connection)
 		connections = append(connections, connection)
 	}
-	first, _ := browserprotocol.EncodeStateWatch("poison", browserprotocol.StateWatch{})
-	second, _ := browserprotocol.EncodeStateWatch("must-not-run", browserprotocol.StateWatch{})
+	first, _ := testEncodeStateWatch("poison", browserprotocol.StateWatch{})
+	second, _ := testEncodeStateWatch("must-not-run", browserprotocol.StateWatch{})
 	for _, connection := range connections {
 		writeClientFrame(t, connection, first)
 		writeClientFrame(t, connection, second)
@@ -458,7 +458,7 @@ func TestUncooperativeSubscriptionCleanupIsBoundedAndObservable(t *testing.T) {
 	}
 	connection, _ := dialServer(t, server, testOrigin)
 	authenticate(t, connection)
-	subscribe, _ := browserprotocol.EncodeStateWatch("unresolved", browserprotocol.StateWatch{})
+	subscribe, _ := testEncodeStateWatch("unresolved", browserprotocol.StateWatch{})
 	writeClientFrame(t, connection, subscribe)
 	waitFor(t, func() bool {
 		backend.mu.Lock()

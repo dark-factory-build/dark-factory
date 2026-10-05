@@ -196,14 +196,14 @@ func TestBrowserRevocationReportsCleanupFailureAfterDurableCommit(t *testing.T) 
 
 	connection := adapterDial(t, server)
 	_ = adapterRead(t, connection)
-	auth, _ := browserprotocol.EncodeAuthProve("cleanup-auth", browserprotocol.AuthProve{
+	auth, _ := testEncodeAuthProve("cleanup-auth", browserprotocol.AuthProve{
 		ClientID: fixture.client.ID.String(), Signature: strings.Repeat("01", browserprotocol.SignatureSize),
 	})
 	adapterWrite(t, connection, auth)
 	if frame := adapterRead(t, connection); frame.Type != browserprotocol.TypeAuthResult {
 		t.Fatalf("cleanup fixture auth = %+v", frame)
 	}
-	subscribe, _ := browserprotocol.EncodeStateWatch("unresolved", browserprotocol.StateWatch{})
+	subscribe, _ := testEncodeStateWatch("unresolved", browserprotocol.StateWatch{})
 	adapterWrite(t, connection, subscribe)
 	<-backend.started
 
@@ -228,7 +228,7 @@ func adapterAuthProof(t *testing.T, fixture *adapterFixture, hello browserprotoc
 	if err != nil {
 		t.Fatal(err)
 	}
-	proof, err := browserprotocol.EncodeAuthProve(id, browserprotocol.AuthProve{ClientID: fixture.client.ID.String(), Signature: hex.EncodeToString(adapterSign(t, fixture.key, transcript))})
+	proof, err := testEncodeAuthProve(id, browserprotocol.AuthProve{ClientID: fixture.client.ID.String(), Signature: hex.EncodeToString(adapterSign(t, fixture.key, transcript))})
 	if err != nil {
 		t.Fatal(err)
 	}

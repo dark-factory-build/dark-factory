@@ -19,7 +19,7 @@ func TestTransportMintsPrivateIdentityPerConnection(t *testing.T) {
 
 	pairSocket, _ := dialServer(t, server, testOrigin)
 	_ = readServerFrame(t, pairSocket)
-	pairProof, err := browserprotocol.EncodePairProve("pair", browserprotocol.PairProve{
+	pairProof, err := testEncodePairProve("pair", browserprotocol.PairProve{
 		Challenge:     strings.Repeat("04", browserprotocol.ChallengeSize),
 		PublicKeySEC1: "04" + strings.Repeat("00", browserprotocol.PublicKeySize-1),
 		Signature:     strings.Repeat("05", browserprotocol.SignatureSize),
@@ -56,7 +56,7 @@ func TestTransportMintsPrivateIdentityPerConnection(t *testing.T) {
 	assertPrivateConnectionID(t, pairID, pairPayload)
 	assertPrivateConnectionID(t, authID, authPayload)
 
-	state, err := browserprotocol.EncodeStateGet("state", browserprotocol.StateGet{})
+	state, err := testEncodeStateGet("state", browserprotocol.StateGet{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,7 +97,7 @@ func TestBackendCannotChooseConnectionIdentity(t *testing.T) {
 			socket, _ := dialServer(t, server, testOrigin)
 			_ = readServerFrame(t, socket)
 			if pair {
-				proof, err := browserprotocol.EncodePairProve("pair", browserprotocol.PairProve{
+				proof, err := testEncodePairProve("pair", browserprotocol.PairProve{
 					Challenge:     strings.Repeat("04", browserprotocol.ChallengeSize),
 					PublicKeySEC1: "04" + strings.Repeat("00", browserprotocol.PublicKeySize-1),
 					Signature:     strings.Repeat("05", browserprotocol.SignatureSize),
@@ -159,7 +159,7 @@ func readServerPayload(t *testing.T, connection *websocket.Conn) ([]byte, browse
 	if kind != websocket.MessageText {
 		t.Fatalf("message type = %v", kind)
 	}
-	frame, err := browserprotocol.DecodeServerControl(payload)
+	frame, err := testDecodeServerControl(payload)
 	if err != nil {
 		t.Fatal(err)
 	}
