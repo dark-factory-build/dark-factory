@@ -101,7 +101,9 @@ func (daemon *Daemon) advanceMergePipeline(ctx context.Context) {
 			fmt.Fprintf(os.Stderr, "factoryd: refresh %s: %v\n", project, err)
 		}
 	}
-	_, _ = daemon.advanceReviewOperations(ctx, false)
+	if _, err := daemon.advanceReviewOperations(ctx, false); err != nil {
+		fmt.Fprintf(os.Stderr, "factoryd: review operations: %v\n", err)
+	}
 }
 
 // advanceReviewOperations moves each unfinished review operation one step. It
