@@ -60,7 +60,7 @@ func TestInvalidWebSyntaxStopsBeforeEnvironmentAndOpener(t *testing.T) {
 				opens++
 				return nil
 			})
-			if exit != exitUsage || lookups != 0 || opens != 0 || stdout.Len() != 0 || stderr.String() != usage {
+			if exit != exitUsage || lookups != 0 || opens != 0 || stdout.Len() != 0 || !usageRejection(stderr.String()) {
 				t.Fatalf("run = exit %d lookups %d opens %d stdout %q stderr %q", exit, lookups, opens, stdout.String(), stderr.String())
 			}
 		})

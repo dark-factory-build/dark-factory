@@ -162,7 +162,7 @@ func TestWorkerMessageRejectsMalformedOperationIDWithoutClientEffect(t *testing.
 		lookups++
 		return "/private/should-not-be-read"
 	}, &stdout, &stderr)
-	if exit != 2 || lookups != 0 || stdout.Len() != 0 || stderr.String() != "factoryctl: worker message: operation id must be 32 lowercase hex characters\n" {
+	if exit != exitUsage || lookups != 0 || stdout.Len() != 0 || stderr.String() != "factoryctl worker message: invalid --operation-id\nusage: factoryctl worker message --operation-id ID --task ID --task-revision REVISION --run ID --run-revision REVISION --message TEXT\n" {
 		t.Fatalf("worker message validation = exit %d lookups %d stdout %q stderr %q", exit, lookups, stdout.String(), stderr.String())
 	}
 }

@@ -9,6 +9,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
+	"math/bits"
 	"net"
 	"os"
 	"path/filepath"
@@ -54,11 +56,12 @@ const (
 	factoryctl intake config [--project ID]
 	factoryctl intake linear-connect --key-file PATH
 	factoryctl intake linear-teams|linear-disconnect
-	factoryctl intake create --project ID --repository OWNER/REPO|--linear-team TEAM_ID --target-repository ID [--overseer ID] [--label LABEL] [--policy manual|trusted-authors] [--trusted-author LOGIN ...] [--poll-seconds N] [--admission-limit N] [--priority N] [--source ID]
-	factoryctl intake update --source ID --project ID --repository OWNER/REPO --target-repository ID [--overseer ID] [--label LABEL] [--policy manual|trusted-authors] [--trusted-author LOGIN ...] [--poll-seconds N] [--admission-limit N] [--priority N] --revision N
+	factoryctl intake create --project ID --repository OWNER/REPO|--linear-team TEAM_ID --target-repository ID [--overseer ID] [--label LABEL] [--policy manual|trusted-authors] [--trusted-author LOGIN ...] [--poll-seconds N] [--admission-limit N] [--priority N] [--source ID] [--configuration JSON]
+	factoryctl intake update --source ID --project ID --repository OWNER/REPO --target-repository ID [--overseer ID] [--label LABEL] [--policy manual|trusted-authors] [--trusted-author LOGIN ...] [--poll-seconds N] [--admission-limit N] [--priority N] [--configuration JSON] --revision N
 	  New sources use manual approval, poll every 60 seconds, and admit up to 25 accepted issues. --configuration JSON remains available for automation.
 	factoryctl intake preview|refresh --source ID --page N
-	factoryctl intake enable|pause --source ID --revision N [--reviewed-revision N]
+	factoryctl intake enable --source ID --revision N --reviewed-revision N
+	factoryctl intake pause --source ID --revision N
 	factoryctl intake accept --source ID --revision N --issue N --hash HEX64
 	factoryctl intake withdraw|import --acceptance ID
 	factoryctl intake tick --source ID --page N [--acceptance-cursor ID]
@@ -302,7 +305,6 @@ type attemptCommand struct {
 	environment         string
 	document            string
 	documentFile        string
-	parseError          string
 	prerequisites       []api.TaskPrerequisiteInput
 	conflictPaths       []string
 }
@@ -382,16 +384,7 @@ func runWithDependencies(ctx context.Context, args []string, getenv func(string)
 		return 0
 	}
 	if !ok {
-		if command.parseError != "" {
-			_, _ = io.WriteString(stderr, command.parseError+"\n")
-			return 2
-		}
-		if len(args) >= 2 && args[0] == "intake" && args[1] == "enable" && !slices.Contains(args, "--reviewed-revision") {
-			_, _ = io.WriteString(stderr, "factoryctl: intake enable: missing required flag --reviewed-revision\n")
-			return 2
-		}
-		_, _ = io.WriteString(stderr, usage)
-		return exitUsage
+		return usageFailure(stderr, args, func(args []string) bool { _, _, ok := parse(args); return ok })
 	}
 	if command.kind == commandInit || command.kind == commandDoctor {
 		return runHome(ctx, command, stdout, stderr)
@@ -686,7 +679,7 @@ func parse(args []string) (attemptCommand, bool, bool) {
 		if len(args) == 2 && args[1] == "list" {
 			return attemptCommand{kind: commandHumanList}, false, true
 		}
-		if len(args) == 10 && args[1] == "reply" && args[2] == "--operation-id" && validHumanRequestKey(args[3]) && args[4] == "--request" && validHumanRequestKey(args[5]) && args[6] == "--revision" && validRevision(args[7]) && args[8] == "--reply" && validQuestion(args[9]) {
+		if len(args) == 10 && args[1] == "reply" && args[2] == "--operation-id" && validHumanRequestKey(args[3]) && args[4] == "--request" && validHumanRequestKey(args[5]) && args[6] == "--revision" && validRevision(args[7]) && args[8] == "--reply" && validOperatorText(args[9], 1, 8192) {
 			revision, _ := strconv.ParseUint(args[7], 10, 64)
 			return attemptCommand{kind: commandHumanReply, operationID: args[3], id: args[5], expectedRevision: revision, text: args[9]}, false, true
 		}
@@ -773,7 +766,7 @@ func parse(args []string) (attemptCommand, bool, bool) {
 			return attemptCommand{kind: commandFail, text: args[3]}, false, true
 		}
 	case "request-human":
-		if len(args) >= 6 && len(args)%2 == 0 && args[2] == "--idempotency-key" && validHumanRequestKey(args[3]) && args[4] == "--question" && validQuestion(args[5]) {
+		if len(args) >= 6 && len(args)%2 == 0 && args[2] == "--idempotency-key" && validHumanRequestKey(args[3]) && args[4] == "--question" && validOperatorText(args[5], 1, 8192) {
 			var options []string
 			for i := 6; i < len(args); i += 2 {
 				if args[i] != "--option" {
@@ -838,10 +831,10 @@ func parse(args []string) (attemptCommand, bool, bool) {
 			}
 			return command, false, true
 		}
-		if len(args) == 9 && args[2] == "ask" && args[3] == "--task" && validHumanRequestKey(args[4]) && args[5] == "--idempotency-key" && validHumanRequestKey(args[6]) && args[7] == "--question" && validPeerText(args[8]) {
+		if len(args) == 9 && args[2] == "ask" && args[3] == "--task" && validHumanRequestKey(args[4]) && args[5] == "--idempotency-key" && validHumanRequestKey(args[6]) && args[7] == "--question" && validOperatorText(args[8], 1, 2048) {
 			return attemptCommand{kind: commandPeerAsk, id: args[4], idempotencyKey: args[6], text: args[8]}, false, true
 		}
-		if len(args) == 11 && args[2] == "answer" && args[3] == "--question" && validHumanRequestKey(args[4]) && args[5] == "--revision" && validRevision(args[6]) && args[7] == "--idempotency-key" && validHumanRequestKey(args[8]) && args[9] == "--answer" && validPeerText(args[10]) {
+		if len(args) == 11 && args[2] == "answer" && args[3] == "--question" && validHumanRequestKey(args[4]) && args[5] == "--revision" && validRevision(args[6]) && args[7] == "--idempotency-key" && validHumanRequestKey(args[8]) && args[9] == "--answer" && validOperatorText(args[10], 1, 2048) {
 			revision, _ := strconv.ParseUint(args[6], 10, 64)
 			return attemptCommand{kind: commandPeerAnswer, id: args[4], expectedRevision: revision, idempotencyKey: args[8], text: args[10]}, false, true
 		}
@@ -888,7 +881,7 @@ func parse(args []string) (attemptCommand, bool, bool) {
 			}
 		}
 	case "send-back":
-		if len(args) == 6 && args[2] == "--task" && validHumanRequestKey(args[3]) && args[4] == "--note" && validQuestion(args[5]) {
+		if len(args) == 6 && args[2] == "--task" && validHumanRequestKey(args[3]) && args[4] == "--note" && validOperatorText(args[5], 1, 8192) {
 			return attemptCommand{kind: commandSendBack, id: args[3], text: args[5]}, false, true
 		}
 	}
@@ -933,69 +926,36 @@ func parseContent(args []string) (attemptCommand, bool, bool) {
 		return attemptCommand{}, true, true
 	}
 	seen := map[string]bool{}
+	ids := map[string]*string{"--project": &command.project, "--id": &command.contentID, "--task": &command.id, "--repository": &command.knowledgeRepository}
+	texts := map[string]struct {
+		minimum, maximum int
+		target           *string
+	}{"--query": {1, 1024, &command.knowledgeQuery}, "--branch": {1, 1024, &command.knowledgeBranch}, "--entity": {1, 1024, &command.knowledgeEntity}, "--thread": {1, 1024, &command.knowledgeThread}, "--kind": {1, 64, &command.contentKind}, "--title": {1, 1024, &command.title}, "--description": {0, 4096, &command.description}, "--body": {0, 1 << 20, &command.body}, "--body-file": {1, 4096, &command.bodyFile}, "--source-references": {0, 32768, &command.sourceReferences}, "--path": {1, 4096, &command.sourcePath}, "--environment": {0, 4096, &command.environment}}
 	for i := start + 2; i < len(args); i += 2 {
 		if i+1 >= len(args) || seen[args[i]] {
 			return attemptCommand{}, false, false
 		}
 		seen[args[i]] = true
 		name, value := args[i], args[i+1]
-		switch name {
-		case "--project":
-			if validHumanRequestKey(value) {
-				command.project = value
-			} else {
-				return attemptCommand{}, false, false
-			}
-		case "--query", "--branch", "--entity", "--thread", "--repository":
-			if !validOperatorText(value, 1, 1024) {
-				return attemptCommand{}, false, false
-			}
-			switch name {
-			case "--query":
-				command.knowledgeQuery = value
-			case "--branch":
-				command.knowledgeBranch = value
-			case "--entity":
-				command.knowledgeEntity = value
-			case "--thread":
-				command.knowledgeThread = value
-			case "--repository":
-				if !validHumanRequestKey(value) {
-					return attemptCommand{}, false, false
-				}
-				command.knowledgeRepository = value
-			}
-		case "--kind":
-			if validOperatorText(value, 1, 64) {
-				command.contentKind = value
-			} else {
-				return attemptCommand{}, false, false
-			}
-		case "--id":
-			if validHumanRequestKey(value) {
-				command.contentID = value
-			} else {
-				return attemptCommand{}, false, false
-			}
-		case "--task":
-			if validHumanRequestKey(value) {
-				command.id = value
-			} else {
-				return attemptCommand{}, false, false
-			}
-		case "--revision":
+		text, isText := texts[name]
+		switch {
+		case ids[name] != nil && validHumanRequestKey(value):
+			*ids[name] = value
+		case isText && validOperatorText(value, text.minimum, text.maximum):
+			*text.target, command.bodySet = value, command.bodySet || name == "--body"
+		case name == "--revision":
 			n, ok := parseRevision(value)
 			if !ok {
 				return attemptCommand{}, false, false
 			}
 			command.contentRevision = n
-		case "--offset":
-			n, ok := parseOffset(value)
+		case name == "--offset":
+			n, ok := parseCount(value, true)
 			if !ok {
 				return attemptCommand{}, false, false
 			}
 			command.offset = n
-		case "--limit":
+		case name == "--limit":
 			n, ok := parseRevision(value)
 			max := uint64(64 * 1024)
 			if command.kind == commandContentList {
@@ -1005,56 +965,8 @@ func parseContent(args []string) (attemptCommand, bool, bool) {
 				return attemptCommand{}, false, false
 			}
 			command.head = n
-		case "--title":
-			if validOperatorText(value, 1, 1024) {
-				command.title = value
-			} else {
-				return attemptCommand{}, false, false
-			}
-		case "--description":
-			if validOperatorText(value, 0, 4096) {
-				command.description = value
-			} else {
-				return attemptCommand{}, false, false
-			}
-
-		case "--body":
-			if validOperatorText(value, 0, 1<<20) {
-				command.body, command.bodySet = value, true
-			} else {
-				return attemptCommand{}, false, false
-			}
-		case "--body-file":
-			if validOperatorText(value, 1, 4096) {
-				command.bodyFile = value
-			} else {
-				return attemptCommand{}, false, false
-			}
-		case "--source-references":
-			if validOperatorText(value, 0, 32768) {
-				command.sourceReferences = value
-			} else {
-				return attemptCommand{}, false, false
-			}
-		case "--commit":
-			if len(value) >= 40 && len(value) <= 64 {
-				command.sourceCommit = value
-			} else {
-				return attemptCommand{}, false, false
-			}
-		case "--path":
-			if validOperatorText(value, 1, 4096) {
-				command.sourcePath = value
-			} else {
-				return attemptCommand{}, false, false
-			}
-		case "--environment":
-			if validOperatorText(value, 0, 4096) {
-				command.environment = value
-			} else {
-				return attemptCommand{}, false, false
-			}
-
+		case name == "--commit" && len(value) >= 40 && len(value) <= 64:
+			command.sourceCommit = value
 		default:
 			return attemptCommand{}, false, false
 		}
@@ -1381,11 +1293,11 @@ func parseWeb(args []string) (attemptCommand, bool, bool) {
 		if len(args) == 2 {
 			return attemptCommand{kind: commandWebListClients}, false, true
 		}
-		if len(args) == 4 && args[2] == "--after" && validBrowserClientID(args[3]) {
+		if len(args) == 4 && args[2] == "--after" && validHumanRequestKey(args[3]) {
 			return attemptCommand{kind: commandWebListClients, after: args[3]}, false, true
 		}
 	case "revoke":
-		if len(args) == 5 && validBrowserClientID(args[2]) && args[3] == "--revision" {
+		if len(args) == 5 && validHumanRequestKey(args[2]) && args[3] == "--revision" {
 			revision, ok := parseRevision(args[4])
 			if ok {
 				return attemptCommand{kind: commandWebRevoke, id: args[2], expectedRevision: revision}, false, true
@@ -1557,38 +1469,18 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 		}
 		for i := 3; i < len(args); i += 2 {
 			key, value := args[i], args[i+1]
-			switch key {
-			case "--project":
-				if validHumanRequestKey(value) {
-					command.project = value
-				} else {
-					return attemptCommand{}, false, false
-				}
-			case "--id":
-				if validHumanRequestKey(value) {
-					command.repository = value
-				} else {
-					return attemptCommand{}, false, false
-				}
-			case "--name":
-				if validOperatorText(value, 1, 128) {
-					command.name = value
-				} else {
-					return attemptCommand{}, false, false
-				}
-			case "--root":
-				if validHomeArg(value) {
-					command.root = value
-				} else {
-					return attemptCommand{}, false, false
-				}
-			case "--base":
-				if validOperatorText(value, 1, 256) {
-					command.body = value
-				} else {
-					return attemptCommand{}, false, false
-				}
-			case "--revision":
+			switch {
+			case key == "--project" && validHumanRequestKey(value):
+				command.project = value
+			case key == "--id" && validHumanRequestKey(value):
+				command.repository = value
+			case key == "--name" && validOperatorText(value, 1, 128):
+				command.name = value
+			case key == "--root" && validHomeArg(value):
+				command.root = value
+			case key == "--base" && validOperatorText(value, 1, 256):
+				command.body = value
+			case key == "--revision":
 				n, ok := parseRevision(value)
 				if !ok {
 					return attemptCommand{}, false, false
@@ -1706,6 +1598,7 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 			return attemptCommand{}, false, false
 		}
 		seen[name] = true
+		count, isCount := parseCount(value, true)
 		switch {
 		case name == "--name" && (command.kind == commandProjectCreate || command.kind == commandAgentCreate) && validOperatorText(value, 1, 128):
 			command.name = value
@@ -1715,38 +1608,16 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 			command.project = value
 		case name == "--repository" && command.kind == commandTaskAdd && validHumanRequestKey(value):
 			command.repository = value
-		case name == "--revision" && (command.kind == commandProjectLimits || command.kind == commandAgentIdlePolicy):
-			revision, ok := parseRevision(value)
-			if !ok {
-				return attemptCommand{}, false, false
-			}
-			command.expectedRevision = revision
-		case name == "--run-budget" && command.kind == commandProjectLimits:
-			budget, err := strconv.ParseUint(value, 10, 64)
-			if err != nil || value != strconv.FormatUint(budget, 10) || budget > uint64(^uint64(0)>>1) {
-				return attemptCommand{}, false, false
-			}
-			command.toolBudget = budget
-		case name == "--token-budget" && command.kind == commandProjectLimits:
-			budget, err := strconv.ParseUint(value, 10, 64)
-			if err != nil || value != strconv.FormatUint(budget, 10) || budget > uint64(^uint64(0)>>1) {
-				return attemptCommand{}, false, false
-			}
-			command.tokenBudget = &budget
-		case name == "--max-run-seconds" && command.kind == commandProjectLimits:
-			seconds, err := strconv.ParseUint(value, 10, 32)
-			if err != nil || value != strconv.FormatUint(seconds, 10) || seconds > 86400 {
-				return attemptCommand{}, false, false
-			}
-			command.maxRunSeconds = uint32(seconds)
+		case name == "--revision" && (command.kind == commandProjectLimits || command.kind == commandAgentIdlePolicy || command.kind == commandAgentSelectAccount || command.kind == commandAgentSelectModel || command.kind == commandTaskRead) && isCount && count > 0:
+			command.expectedRevision = count
+		case name == "--run-budget" && command.kind == commandProjectLimits && isCount:
+			command.toolBudget = count
+		case name == "--token-budget" && command.kind == commandProjectLimits && isCount:
+			command.tokenBudget = &count
+		case name == "--max-run-seconds" && command.kind == commandProjectLimits && isCount && count <= 86400:
+			command.maxRunSeconds = uint32(count)
 		case name == "--agent" && (command.kind == commandTaskAdd || command.kind == commandAgentIdlePolicy || command.kind == commandAgentSelectAccount || command.kind == commandAgentSelectModel || command.kind == commandAgentPaths) && (validHumanRequestKey(value) || command.kind == commandTaskAdd && value == "any"):
 			command.agent = value
-		case name == "--revision" && (command.kind == commandAgentSelectAccount || command.kind == commandAgentSelectModel):
-			revision, ok := parseRevision(value)
-			if !ok {
-				return attemptCommand{}, false, false
-			}
-			command.expectedRevision = revision
 		case name == "--account" && command.kind == commandAgentSelectAccount && validHumanRequestKey(value):
 			command.account = value
 		case name == "--model" && command.kind == commandAgentSelectModel && validOperatorText(value, 1, 128):
@@ -1769,28 +1640,16 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 			command.reasoningEffort = value
 		case name == "--account" && command.kind == commandAgentCreate && validHumanRequestKey(value):
 			command.account = value
-		case name == "--tool-budget" && command.kind == commandAgentCreate:
-			budget, err := strconv.ParseUint(value, 10, 64)
-			if err != nil || value != strconv.FormatUint(budget, 10) || budget < 1 || budget > 1_000_000_000 {
-				return attemptCommand{}, false, false
-			}
-			command.toolBudget = budget
+		case name == "--tool-budget" && command.kind == commandAgentCreate && isCount && count >= 1 && count <= 1_000_000_000:
+			command.toolBudget = count
 		case name == "--policy" && command.kind == commandAgentIdlePolicy && (value == "wait" || value == "standing_instruction"):
 			command.provider = value
-		case name == "--after-seconds" && command.kind == commandAgentIdlePolicy:
-			seconds, err := strconv.ParseUint(value, 10, 32)
-			if err != nil || value != strconv.FormatUint(seconds, 10) || seconds > uint64(kernel.MaxIdleAfterSeconds) {
-				return attemptCommand{}, false, false
-			}
-			command.maxRunSeconds = uint32(seconds)
+		case name == "--after-seconds" && command.kind == commandAgentIdlePolicy && isCount && count <= uint64(kernel.MaxIdleAfterSeconds):
+			command.maxRunSeconds = uint32(count)
 		case name == "--instruction" && command.kind == commandAgentIdlePolicy && validOperatorText(value, 1, 32768):
 			command.text = value
-		case name == "--run-budget" && command.kind == commandAgentIdlePolicy:
-			budget, err := strconv.ParseUint(value, 10, 32)
-			if err != nil || value != strconv.FormatUint(budget, 10) || budget > uint64(kernel.MaxIdleRunBudget) {
-				return attemptCommand{}, false, false
-			}
-			command.toolBudget = budget
+		case name == "--run-budget" && command.kind == commandAgentIdlePolicy && isCount && count <= uint64(kernel.MaxIdleRunBudget):
+			command.toolBudget = count
 		case name == "--title" && command.kind == commandTaskAdd && validOperatorText(value, 1, 1024):
 			command.title = value
 		case name == "--body" && command.kind == commandTaskAdd && validOperatorText(value, 0, 131072):
@@ -1799,23 +1658,11 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 			command.id = value
 		case name == "--incarnation-id" && command.kind == commandTaskAdd && validHumanRequestKey(value):
 			command.run = value
-		case name == "--task" && command.kind == commandTaskSendBack && validHumanRequestKey(value):
+		case name == "--task" && (command.kind == commandTaskSendBack || command.kind == commandTaskRead) && validHumanRequestKey(value):
 			command.id = value
-		case name == "--task" && command.kind == commandTaskRead && validHumanRequestKey(value):
-			command.id = value
-		case name == "--revision" && command.kind == commandTaskRead:
-			revision, ok := parseRevision(value)
-			if !ok {
-				return attemptCommand{}, false, false
-			}
-			command.expectedRevision = revision
-		case name == "--offset" && command.kind == commandTaskRead:
-			offset, err := strconv.ParseUint(value, 10, 64)
-			if err != nil || value != strconv.FormatUint(offset, 10) || offset > uint64(^uint64(0)>>1) {
-				return attemptCommand{}, false, false
-			}
-			command.offset = offset
-		case name == "--note" && command.kind == commandTaskSendBack && validQuestion(value):
+		case name == "--offset" && command.kind == commandTaskRead && isCount:
+			command.offset = count
+		case name == "--note" && command.kind == commandTaskSendBack && validOperatorText(value, 1, 8192):
 			command.text = value
 		case name == "--priority" && command.kind == commandTaskAdd:
 			priority, err := strconv.ParseInt(value, 10, 64)
@@ -1931,7 +1778,7 @@ func parseOverseer(args []string) (attemptCommand, bool, bool) {
 				}
 				command.id = value
 			case "--offset":
-				offset, ok := parseOverseerOffset(value, true)
+				offset, ok := parseCount(value, true)
 				if !ok {
 					return attemptCommand{}, false, false
 				}
@@ -1943,7 +1790,7 @@ func parseOverseer(args []string) (attemptCommand, bool, bool) {
 				}
 				command.head = head
 			case "--text-offset":
-				offset, ok := parseOverseerOffset(value, false)
+				offset, ok := parseCount(value, false)
 				if !ok {
 					return attemptCommand{}, false, false
 				}
@@ -1990,29 +1837,16 @@ func parseOverseer(args []string) (attemptCommand, bool, bool) {
 		return attemptCommand{}, false, false
 	}
 	seen := map[string]bool{}
+	switches := map[string]*bool{"--cancel": &command.cancel, "--remove-attachments": &command.removeAttachments, "--retry": &command.retry}
+	ids := map[string]*string{"--task": &command.id, "--request": &command.id, "--run": &command.run, "--successor-task": &command.project, "--successor-incarnation": &command.account, "--operation-id": &command.operationID, "--task-id": &command.id, "--incarnation-id": &command.project}
+	revisions := map[string]*uint64{"--revision": &command.expectedRevision, "--task-revision": &command.taskRevision, "--run-revision": &command.runRevision}
 	for index := 3; index < len(args); {
 		name := args[index]
-		if name == "--cancel" && command.kind == commandOverseerTaskUpdate {
+		if switches[name] != nil && command.kind == commandOverseerTaskUpdate {
 			if seen[name] {
 				return attemptCommand{}, false, false
 			}
-			seen[name], command.cancel = true, true
-			index++
-			continue
-		}
-		if name == "--remove-attachments" && command.kind == commandOverseerTaskUpdate {
-			if seen[name] {
-				return attemptCommand{}, false, false
-			}
-			seen[name], command.removeAttachments = true, true
-			index++
-			continue
-		}
-		if name == "--retry" && command.kind == commandOverseerTaskUpdate {
-			if seen[name] {
-				return attemptCommand{}, false, false
-			}
-			seen[name], command.retry = true, true
+			seen[name], *switches[name] = true, true
 			index++
 			continue
 		}
@@ -2028,41 +1862,17 @@ func parseOverseer(args []string) (attemptCommand, bool, bool) {
 				return attemptCommand{}, false, false
 			}
 			command.agent = value
-		case "--task":
-			if !validHumanRequestKey(value) {
+		case "--task", "--request", "--run", "--successor-task", "--successor-incarnation", "--operation-id", "--task-id", "--incarnation-id":
+			if !validHumanRequestKey(value) || (name == "--task-id" || name == "--incarnation-id") && command.kind != commandOverseerTaskAdd {
 				return attemptCommand{}, false, false
 			}
-			command.id = value
-		case "--task-id":
-			if command.kind != commandOverseerTaskAdd || !validHumanRequestKey(value) {
+			*ids[name] = value
+		case "--revision", "--task-revision", "--run-revision":
+			revision, ok := parseRevision(value)
+			if !ok {
 				return attemptCommand{}, false, false
 			}
-			command.id = value
-		case "--incarnation-id":
-			if command.kind != commandOverseerTaskAdd || !validHumanRequestKey(value) {
-				return attemptCommand{}, false, false
-			}
-			command.project = value
-		case "--run":
-			if !validHumanRequestKey(value) {
-				return attemptCommand{}, false, false
-			}
-			command.run = value
-		case "--request":
-			if !validHumanRequestKey(value) {
-				return attemptCommand{}, false, false
-			}
-			command.id = value
-		case "--successor-task":
-			if !validHumanRequestKey(value) {
-				return attemptCommand{}, false, false
-			}
-			command.project = value
-		case "--successor-incarnation":
-			if !validHumanRequestKey(value) {
-				return attemptCommand{}, false, false
-			}
-			command.account = value
+			*revisions[name] = revision
 		case "--title":
 			if command.kind != commandOverseerTaskAdd && command.kind != commandOverseerTaskUpdate || !validOperatorText(value, 1, 1024) {
 				return attemptCommand{}, false, false
@@ -2098,38 +1908,11 @@ func parseOverseer(args []string) (attemptCommand, bool, bool) {
 				return attemptCommand{}, false, false
 			}
 			command.conflictPaths = append(command.conflictPaths, value)
-		case "--revision":
-			revision, ok := parseRevision(value)
-			if !ok {
-				return attemptCommand{}, false, false
-			}
-			command.expectedRevision = revision
-		case "--task-revision":
-			revision, ok := parseRevision(value)
-			if !ok {
-				return attemptCommand{}, false, false
-			}
-			command.taskRevision = revision
-		case "--run-revision":
-			revision, ok := parseRevision(value)
-			if !ok {
-				return attemptCommand{}, false, false
-			}
-			command.runRevision = revision
 		case "--note", "--detail", "--message", "--reply", "--instruction":
-			if !validQuestion(value) {
+			if !validOperatorText(value, 1, 8192) {
 				return attemptCommand{}, false, false
 			}
 			command.text = value
-		case "--operation-id":
-			if !validHumanRequestKey(value) {
-				if command.kind == commandOverseerMessageWorker {
-					command.parseError = "factoryctl: worker message: operation id must be 32 lowercase hex characters"
-					return command, false, false
-				}
-				return attemptCommand{}, false, false
-			}
-			command.operationID = value
 		default:
 			return attemptCommand{}, false, false
 		}
@@ -2181,29 +1964,10 @@ func validOperatorText(value string, minimum, maximum int) bool {
 	return len(value) >= minimum && len(value) <= maximum && utf8.ValidString(value) && !strings.ContainsRune(value, 0)
 }
 
-func validBrowserClientID(value string) bool { return validHumanRequestKey(value) }
+func parseRevision(value string) (uint64, bool) { return parseCount(value, false) }
 
-func parseRevision(value string) (uint64, bool) {
-	if value == "" || value[0] == '0' || len(value) > 19 {
-		return 0, false
-	}
-	for _, character := range value {
-		if character < '0' || character > '9' {
-			return 0, false
-		}
-	}
-	parsed, err := strconv.ParseUint(value, 10, 64)
-	return parsed, err == nil && parsed > 0 && parsed <= uint64(^uint64(0)>>1)
-}
-
-func parseOffset(value string) (uint64, bool) {
-	if value == "0" {
-		return 0, true
-	}
-	return parseRevision(value)
-}
-
-func parseOverseerOffset(value string, allowZero bool) (uint64, bool) {
+// parseCount reads a canonical decimal no larger than the largest int64.
+func parseCount(value string, allowZero bool) (uint64, bool) {
 	if value == "" || len(value) > 19 || value[0] == '0' && (len(value) > 1 || !allowZero) {
 		return 0, false
 	}
@@ -2217,6 +1981,240 @@ func parseOverseerOffset(value string, allowZero bool) (uint64, bool) {
 }
 
 func helpFlag(value string) bool { return value == "-h" || value == "--help" }
+
+// usageFailure answers a rejected command line with one line naming what is
+// wrong, then the usage line of the subcommand it names; a line naming no
+// subcommand still gets the full usage. accepts stays the only validator:
+// each value is judged by restoring it into a command line made valid with
+// sample values, and probing that line also recovers numeric ranges.
+func usageFailure(stderr io.Writer, args []string, accepts func([]string) bool) int {
+	var line []string
+	consumed, rank, problem := 0, 3, ""
+	for _, text := range strings.Split(usage, "\n") {
+		fields := strings.Fields(text)
+		words := 1
+		for words < len(fields) && fields[words][0] >= 'a' && fields[words][0] <= 'z' {
+			words++
+		}
+		// attempt content and outcome reuse the operator lines.
+		for skip := 0; skip < 2 && words > 1 && fields[0] == "factoryctl" && (words == len(fields) || fields[words] != "..."); skip++ {
+			matched := len(args) >= words-1+skip && (skip == 0 || args[0] == "attempt")
+			for i := 1; matched && i < words; i++ {
+				matched = slices.Contains(strings.Split(fields[i], "|"), args[i-1+skip])
+			}
+			if matched && words-1+skip >= consumed {
+				if r, p := usageProblem(fields[words:], args, words-1+skip, accepts); words-1+skip > consumed || r < rank {
+					line, consumed, rank, problem = fields, words-1+skip, r, p
+				}
+			}
+		}
+	}
+	if line == nil {
+		_, _ = io.WriteString(stderr, usage)
+	} else {
+		_, _ = fmt.Fprintf(stderr, "factoryctl %s: %s\nusage: %s\n", strings.Join(args[:consumed], " "), problem, strings.Join(line, " "))
+	}
+	return exitUsage
+}
+
+// usageProblem ranks its finding: 0 a value, 1 a missing argument, 2 an
+// argument the usage line does not have. It names flags, never values. Flags
+// bracketed together, like [--offset N --head HEAD], come together.
+func usageProblem(spec, args []string, start int, accepts func([]string) bool) (int, string) {
+	type slot struct {
+		name, placeholder       string
+		groups                  []int
+		required, repeat, value bool
+	}
+	flags, slots := map[string]*slot{}, []*slot{}
+	var positionals []*slot
+	var last *slot
+	groups, next, alternative, pending := []int{0}, 0, false, false
+	for _, field := range strings.Fields(strings.NewReplacer("[", " [ ", "]", " ] ", "|--", " | --").Replace(strings.Join(spec, " "))) {
+		switch {
+		case field == "[":
+			next++
+			groups = append(groups, next)
+		case field == "]":
+			groups = groups[:len(groups)-1]
+		case field == "|" && last != nil:
+			last.required, alternative = false, true
+			if next++; len(groups) > 1 {
+				groups[len(groups)-1] = next
+			}
+		case field == "..." && last != nil:
+			last.repeat = true
+		case strings.HasPrefix(field, "--"):
+			if flags[field] == nil {
+				flags[field] = &slot{name: field, required: len(groups) == 1 && !alternative}
+				slots = append(slots, flags[field])
+			}
+			flags[field].groups = append(flags[field].groups, groups[len(groups)-1])
+			last, alternative, pending = flags[field], false, true
+			continue
+		case pending:
+			last.value, last.placeholder = true, field
+		case len(groups) == 1:
+			positionals = append(positionals, &slot{name: field, placeholder: field, required: true, value: true})
+		}
+		pending = false
+	}
+	slots = append(slots, positionals...)
+	seen, values := map[*slot]bool{}, map[int]*slot{}
+	for i := start; i < len(args); i++ {
+		s := flags[args[i]]
+		switch {
+		case !strings.HasPrefix(args[i], "--") && len(positionals) == 0:
+			return 2, "unexpected argument"
+		case !strings.HasPrefix(args[i], "--"):
+			s, positionals = positionals[0], positionals[1:]
+			values[i] = s
+		case s == nil:
+			return 2, "unknown flag " + strings.SplitN(args[i], "=", 2)[0]
+		case seen[s] && !s.repeat:
+			return 2, "duplicate flag " + s.name
+		case s.value && i+1 == len(args):
+			return 1, "missing value for " + s.name
+		case s.value:
+			i++
+			values[i] = s
+		}
+		seen[s] = true
+	}
+	// A flag in several brackets, like --head, requires nothing itself; a
+	// flag bracketed only in group g requires g's other flags. These are only
+	// candidates: the usage line cannot express every rule parse applies.
+	exclusive := func(group int) bool {
+		return group != 0 && slices.ContainsFunc(slots, func(other *slot) bool { return seen[other] && slices.Equal(other.groups, []int{group}) })
+	}
+	var missing, insert []string
+	extended := map[int]*slot{}
+	for _, s := range slots {
+		if !seen[s] && (s.required || slices.ContainsFunc(s.groups, exclusive)) {
+			missing = append(missing, "missing "+s.name)
+			if strings.HasPrefix(s.name, "--") {
+				insert = append(insert, s.name)
+			}
+			if s.value {
+				insert = append(insert, "")
+				extended[start+len(insert)-1] = s
+			}
+		}
+	}
+	for index, s := range values {
+		extended[index+len(insert)] = s
+	}
+	samples := func(placeholder string) []string {
+		var candidates []string
+		for _, value := range strings.Split(placeholder, "|") {
+			if value == strings.ToLower(value) {
+				candidates = append(candidates, value)
+			}
+		}
+		if strings.Contains(placeholder, "ID") || strings.HasPrefix(placeholder, "HEX") {
+			candidates = append(candidates, strings.Repeat("ab", 16+16*strings.Count(placeholder, "64")))
+		}
+		if placeholder == "ABSOLUTE" || placeholder == "PATH" {
+			candidates = append(candidates, "/tmp")
+		}
+		if strings.Contains(placeholder, "/") {
+			candidates = append(candidates, "o/r")
+		}
+		return append(candidates, "1", "64", "0", "x")
+	}
+	with := func(base []string, index int, value string) []string {
+		changed := slices.Clone(base)
+		changed[index] = value
+		return changed
+	}
+	// The cheapest fix parse accepts names the problems: each changed value
+	// and each added flag costs one, and the rest keep what was typed. Added
+	// flags take samples for free. ponytail: subset search caps at 12 values
+	// (then the generic message); search greedily past that.
+	search := func(line []string, of map[int]*slot, inserted int) ([]string, []int) {
+		var open, free []int
+		for _, index := range slices.Sorted(maps.Keys(of)) {
+			if index < start+inserted {
+				free = append(free, index)
+			} else {
+				open = append(open, index)
+			}
+		}
+		for size := 0; size <= len(open) && len(open) <= 12; size++ {
+			for mask := 0; mask < 1<<len(open); mask++ {
+				if bits.OnesCount(uint(mask)) != size {
+					continue
+				}
+				changed, chosen := slices.Clone(line), slices.Clone(free)
+				for bit, index := range open {
+					if mask&(1<<bit) != 0 {
+						chosen = append(chosen, index)
+					}
+				}
+				for _, index := range chosen {
+					changed[index] = samples(of[index].placeholder)[0]
+				}
+				for _, index := range chosen {
+					for _, sample := range samples(of[index].placeholder) {
+						if !accepts(changed) && accepts(with(changed, index, sample)) {
+							changed[index] = sample
+						}
+					}
+				}
+				if accepts(changed) {
+					return changed, chosen[len(free):]
+				}
+			}
+		}
+		return nil, nil
+	}
+	rank, problems := 0, []string(nil)
+	typed, withMissing := args, slices.Concat(args[:start], insert, args[start:])
+	valid, invalid := search(typed, values, 0)
+	if missing != nil {
+		if line, changed := search(withMissing, extended, len(insert)); line != nil && (valid == nil || len(missing)+len(changed) <= len(invalid)) {
+			typed, valid, invalid, values, rank, problems = withMissing, line, changed, extended, 1, missing
+		}
+	}
+	if valid == nil {
+		return 0, "invalid flag values or combination"
+	}
+	for _, index := range invalid {
+		name, problem := values[index].name, "invalid "+values[index].name
+		if value, err := strconv.ParseInt(valid[index], 10, 64); err == nil {
+			const far = 1 << 61
+			edge := func(ok, bad int64) int64 {
+				if accepts(with(valid, index, strconv.FormatInt(bad, 10))) {
+					return bad
+				}
+				for ok-bad > 1 || bad-ok > 1 {
+					if middle := ok + (bad-ok)/2; accepts(with(valid, index, strconv.FormatInt(middle, 10))) {
+						ok = middle
+					} else {
+						bad = middle
+					}
+				}
+				return ok
+			}
+			given, notInteger := strconv.ParseInt(typed[index], 10, 64)
+			switch low, high := edge(value, -far), edge(value, far); {
+			case notInteger != nil && !errors.Is(notInteger, strconv.ErrRange) || (low == -far || given >= low) && (high == far || given <= high):
+				// The probed bounds do not explain the typed value (ParseInt clamps an
+				// overflow to the int64 edge): say only invalid.
+			case high == far:
+				problem = fmt.Sprintf("%s must be at least %d", name, low)
+			case low == -far:
+				problem = fmt.Sprintf("%s must be at most %d", name, high)
+			case low == high:
+				problem = fmt.Sprintf("%s must be %d", name, low)
+			default:
+				problem = fmt.Sprintf("%s must be %d-%d", name, low, high)
+			}
+		}
+		problems = append(problems, problem)
+	}
+	return rank, strings.Join(problems, "; ")
+}
 
 func validHumanRequestKey(value string) bool {
 	if len(value) != 32 {
@@ -2232,14 +2230,6 @@ func validHumanRequestKey(value string) bool {
 		nonzero = nonzero || value != '0'
 	}
 	return nonzero
-}
-
-func validQuestion(value string) bool {
-	return len(value) >= 1 && len(value) <= 8192 && utf8.ValidString(value) && !strings.ContainsRune(value, 0)
-}
-
-func validPeerText(value string) bool {
-	return len(value) >= 1 && len(value) <= 2048 && utf8.ValidString(value) && !strings.ContainsRune(value, 0)
 }
 
 func validRevision(value string) bool {

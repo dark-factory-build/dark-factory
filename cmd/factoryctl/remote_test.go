@@ -46,7 +46,7 @@ func TestInvalidRemoteSyntaxStopsBeforeEnvironment(t *testing.T) {
 				lookups++
 				return "/private/should-not-be-read"
 			}, &stdout, &stderr, nil)
-			if exit != exitUsage || lookups != 0 || stdout.Len() != 0 || stderr.String() != usage {
+			if exit != exitUsage || lookups != 0 || stdout.Len() != 0 || !usageRejection(stderr.String()) {
 				t.Fatalf("run = exit %d lookups %d stdout %q stderr %q", exit, lookups, stdout.String(), stderr.String())
 			}
 		})
