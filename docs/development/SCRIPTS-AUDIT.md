@@ -10,7 +10,6 @@ is repository, CI, release, fixture, or verification tooling.
 | `bootstrap-maintainer-v2.sh` | DEV | control-plane bootstrap and CI fixtures |
 | `check-toolchain-pins.sh` | DEV | CI toolchain gate |
 | `cloudflare-env-clean.sh` | DEV | Cloudflare admin boundary and test |
-| `cold-review.sh` | DEV | independent review gate |
 | `dark-factory-browser-mcp.py` | DEV | documented provider/browser helper and tests |
 | `github-repo-settings.sh` | DEV | repository configuration script |
 | `github-step-summary.sh` | DEV | workflow summary helper |
@@ -31,7 +30,6 @@ is repository, CI, release, fixture, or verification tooling.
 | `render-homebrew-formula.sh` | DEV | release formula generation |
 | `test-bootstrap-maintainer-v2.sh` | DEV | bootstrap fixture |
 | `test-cloudflare-env.sh` | DEV | Cloudflare boundary fixture |
-| `test-cold-review.sh` | DEV | cold-review fixture |
 | `test-factory-browser-live.py` | DEV | documented browser configuration fixture |
 | `test-factory-browser.py` | DEV | browser helper fixture |
 | `test-github-step-summary.sh` | DEV | workflow summary fixture |

@@ -120,7 +120,6 @@ package_target() {
     controller_payload="$package_payload/libexec/dark-factory"
     mkdir -p "$controller_payload"
     for controller_asset in \
-        cold-review.sh \
         go-gate-environment.sh \
         verify-adversarial-review.sh
     do
@@ -171,7 +170,6 @@ package_target() {
         --no-acls --no-xattrs --no-fflags --options gzip:!timestamp \
         -czf "$staging/$package_archive" -C "$package_payload" \
         factoryd factory-runner factoryctl \
-        libexec/dark-factory/cold-review.sh \
         libexec/dark-factory/go-gate-environment.sh \
         libexec/dark-factory/verify-adversarial-review.sh
     rm -r "$package_payload"
