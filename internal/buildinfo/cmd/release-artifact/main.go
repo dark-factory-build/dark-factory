@@ -1,10 +1,13 @@
 // Command release-artifact is a repository-owned build tool, not a shipped
-// runtime binary. It prints release receipts and packages the release assets.
+// runtime binary. It prints release receipts, packages the release assets, and
+// publishes them as a GitHub release through `gh`.
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"os"
+	"os/exec"
 
 	"github.com/dark-factory-build/dark-factory/internal/buildinfo"
 )
@@ -32,5 +35,16 @@ func run(arguments []string) error {
 		fmt.Println("packaged", arguments[3], "for aarch64-apple-darwin and x86_64-apple-darwin")
 		return nil
 	}
-	return fmt.Errorf("usage: release-artifact receipt VERSION SOURCE TARGET | package TAG SOURCE_SHA OUT_DIR OWNER/REPO TARGET BIN_DIR TARGET BIN_DIR")
+	if len(arguments) > 0 && arguments[0] == "publish" {
+		return buildinfo.PublishRelease(arguments[1:], gh)
+	}
+	return fmt.Errorf("usage: release-artifact receipt VERSION SOURCE TARGET | package TAG SOURCE_SHA OUT_DIR OWNER/REPO TARGET BIN_DIR TARGET BIN_DIR | publish TAG EXPECTED_COMMIT OWNER/REPO ASSET...")
+}
+
+func gh(arguments ...string) ([]byte, string, error) {
+	var stderr bytes.Buffer
+	command := exec.Command("gh", arguments...)
+	command.Stderr = &stderr
+	stdout, err := command.Output()
+	return stdout, stderr.String(), err
 }

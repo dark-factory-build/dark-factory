@@ -347,7 +347,7 @@ if [ "${DF_GATE_FAULT-}" = env ]; then
         || { echo 'fixture Git environment was not scrubbed' >&2; exit 1; }
 fi
 case "${DF_GATE_FAULT-}:$name" in
-    release:test-publish-release.sh) echo 'fixture release proof failure' >&2; exit 1 ;;
+    release:test-prepare-release-source.sh) echo 'fixture release proof failure' >&2; exit 1 ;;
     ui:go-check.sh) echo 'fixture UI source proof failure' >&2; exit 1 ;;
 esac
 EOF
@@ -405,7 +405,7 @@ for local_child in \
     test-cloudflare-env.sh test-bootstrap-maintainer-v2.sh test-repository-settings.sh \
     test-go-gates.sh test-go-e2e-tools.sh go-ci-owned.sh \
     go-e2e.sh \
-    test-prepare-release-source.sh test-publish-release.sh \
+    test-prepare-release-source.sh \
     test-publication-parents.sh; do
     /bin/ln -s stub "$local_fixture/scripts/$local_child"
 done
