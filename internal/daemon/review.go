@@ -281,9 +281,10 @@ func (daemon *Daemon) routeSendBack(ctx context.Context, project kernel.ProjectI
 	note = strings.ToValidUTF8(note[:min(len(note), kernel.MaxSendBackNoteBytes-160)], "")
 	task, err := daemon.store.SendBackPublishedReview(ctx, project, repository, op.Request.PullNumber, op.ID, op.Request.Head, note, at)
 	switch {
-	case errors.Is(err, kernel.ErrSuperseded):
+	case errors.Is(err, kernel.ErrSuperseded), errors.Is(err, kernel.ErrNotFound):
+		// No factory task published it: its author reads the verdict on GitHub.
 		err = nil
-	case errors.Is(err, kernel.ErrNotFound), errors.Is(err, kernel.ErrInvalidValue):
+	case errors.Is(err, kernel.ErrInvalidValue):
 		err = daemon.escalatePull(op, "its send-back reached no task:\n\n"+note)
 	case err != nil:
 		return err // a running task refuses it until it settles

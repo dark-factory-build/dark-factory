@@ -14,7 +14,7 @@ import (
 // carries the worker's Change wins over the overseer's that published it. The
 // operation/head marker in the retained feedback makes response loss and
 // daemon restart idempotent. A pull request that has moved past head reports
-// ErrSuperseded.
+// ErrSuperseded; one no factory task published reports ErrNotFound.
 func (store *Store) SendBackPublishedReview(ctx context.Context, project ProjectID, repository string, pull uint64, operationID, head, note string, at UnixMillis) (Task, error) {
 	if project.zero() || !productionRepository.MatchString(repository) || pull == 0 || !validOutcomeText(operationID, 128) || !productionSHA(head) || byteLen(note) < 1 || byteLen(note) > MaxSendBackNoteBytes-160 {
 		return Task{}, fmt.Errorf("%w: invalid published review send-back", ErrInvalidValue)
@@ -47,7 +47,7 @@ func (store *Store) SendBackPublishedReview(ctx context.Context, project Project
 	task, found, err := taskByID(ctx, tx.connection, taskID)
 	if err != nil || !found {
 		if err == nil {
-			err = ErrNotFound
+			err = ErrCorruptState
 		}
 		return Task{}, tx.Rollback(err)
 	}
