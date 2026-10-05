@@ -60,6 +60,9 @@ func (b *fakeBackend) Submit(context.Context, Operation, Verdict) error {
 	return b.submitErr
 }
 func (b *fakeBackend) Enqueue(context.Context, Operation) error { b.enqueued = true; return nil }
+func (b *fakeBackend) Observe(context.Context, string) (Receipt, error) {
+	return Receipt{State: "missing"}, nil
+}
 func (b *fakeBackend) ObserveMerge(context.Context, Operation) (Merge, error) {
 	return b.merge, nil
 }

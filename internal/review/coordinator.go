@@ -60,20 +60,11 @@ type Receipt struct {
 	Event string
 }
 
-type Observer interface {
-	Observe(context.Context, string) (Receipt, error)
-}
-
 type Store interface {
 	Create(context.Context, Operation) error
 	Update(context.Context, Operation) error
-}
-
-// RetryStore reserves the one allowed retry and creates its operation in the
-// same durable transaction. Keeping the reservation beside the original
-// failure prevents two callers from replaying the same failed operation.
-type RetryStore interface {
-	Store
+	// CreateRetry reserves the one allowed retry and creates its operation in
+	// the same durable transaction, so two callers cannot replay one failure.
 	CreateRetry(context.Context, Operation, Operation) error
 }
 
@@ -82,6 +73,8 @@ type Backend interface {
 	Review(context.Context, string, Request) (Verdict, error)
 	Submit(context.Context, Operation, Verdict) error
 	Enqueue(context.Context, Operation) error
+	// Observe reads the Maintainer's receipt for one operation id.
+	Observe(context.Context, string) (Receipt, error)
 	// ObserveMerge reads the merge queue's view of an enqueued exact head.
 	ObserveMerge(context.Context, Operation) (Merge, error)
 }
@@ -171,10 +164,7 @@ func (c Coordinator) Resume(ctx context.Context, op Operation) (Operation, error
 		return Operation{}, err
 	}
 	if err := c.Backend.Submit(ctx, op, verdict); err != nil {
-		if _, ok := c.Backend.(Observer); ok {
-			return c.reconcileSubmitting(ctx, op, err)
-		}
-		return c.fail(ctx, op, err, false)
+		return c.reconcileSubmitting(ctx, op, err)
 	}
 	return c.finishSubmitted(ctx, op)
 }
@@ -192,10 +182,7 @@ func (c Coordinator) finishSubmitted(ctx context.Context, op Operation) (Operati
 			return Operation{}, err
 		}
 		if err := c.Backend.Enqueue(ctx, op); err != nil {
-			if _, ok := c.Backend.(Observer); ok {
-				return c.reconcileEnqueuing(ctx, op, err)
-			}
-			return c.fail(ctx, op, err, false)
+			return c.reconcileEnqueuing(ctx, op, err)
 		}
 		op.State = "enqueued"
 	} else {
@@ -241,14 +228,7 @@ func (c Coordinator) ObserveMerge(ctx context.Context, op Operation) (Operation,
 }
 
 func (c Coordinator) reconcileSubmitting(ctx context.Context, op Operation, cause error) (Operation, error) {
-	observer, ok := c.Backend.(Observer)
-	if !ok {
-		if cause == nil {
-			cause = errors.New("review: submit receipt observer unavailable")
-		}
-		return c.fail(ctx, op, cause, false)
-	}
-	receipt, err := observer.Observe(ctx, op.ID)
+	receipt, err := c.Backend.Observe(ctx, op.ID)
 	if err != nil {
 		if cause != nil {
 			return op, errors.Join(cause, err)
@@ -277,14 +257,7 @@ func (c Coordinator) reconcileSubmitting(ctx context.Context, op Operation, caus
 }
 
 func (c Coordinator) reconcileEnqueuing(ctx context.Context, op Operation, cause error) (Operation, error) {
-	observer, ok := c.Backend.(Observer)
-	if !ok {
-		if cause == nil {
-			cause = errors.New("review: enqueue receipt observer unavailable")
-		}
-		return c.fail(ctx, op, cause, false)
-	}
-	receipt, err := observer.Observe(ctx, op.EnqueueID)
+	receipt, err := c.Backend.Observe(ctx, op.EnqueueID)
 	if err != nil {
 		if cause != nil {
 			return op, errors.Join(cause, err)
@@ -343,16 +316,12 @@ func (c Coordinator) ReserveRetry(ctx context.Context, failed Operation) (Operat
 	if failed.State != "failed" || !failed.Retryable || failed.ID == "" || failed.RetryOf != "" {
 		return Operation{}, errors.New("review: only pre-submit launch failures are retryable")
 	}
-	store, ok := c.Store.(RetryStore)
-	if !ok {
-		return Operation{}, errors.New("review: retry reservation unavailable")
-	}
 	op, err := Prepare(failed.Request, c.Now)
 	if err != nil {
 		return Operation{}, err
 	}
 	op.RetryOf = failed.ID
-	return op, store.CreateRetry(ctx, failed, op)
+	return op, c.Store.CreateRetry(ctx, failed, op)
 }
 
 func (c Coordinator) fail(ctx context.Context, op Operation, cause error, retryable bool) (Operation, error) {
