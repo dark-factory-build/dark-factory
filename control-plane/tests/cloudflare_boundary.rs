@@ -300,14 +300,6 @@ fn declared_output_schemas_name_the_fields_the_results_carry() {
             ][..],
         ),
         (
-            // Written with its closing brace on the value's own line, which is
-            // how six other tools in `mcp.rs` are written. Including one here
-            // keeps the key reader honest about where a value ends.
-            "publish_release_tag",
-            "ReleaseTagResult",
-            &["tag", "commit_sha"][..],
-        ),
-        (
             "observe_file",
             "FileObservationResult",
             &["path", "commit_sha", "content_base64"][..],
@@ -457,10 +449,6 @@ fn every_repository_tool_requires_the_repository_it_acts_on() {
         "observe_tree",
         "create_issue",
         "observe_issue",
-        "publish_release_tag",
-        "recover_release",
-        "observe_release",
-        "observe_release_workflow",
         "create_pull_request",
         "update_pull_request_body",
         "submit_pull_request_review",
@@ -529,9 +517,8 @@ fn every_repository_tool_requires_the_repository_it_acts_on() {
         );
     }
 
-    // The release and deploy workflows are this control plane's own and stay
-    // constants. A CI constant would be the hard-coding this removes: it is the
-    // one workflow whose name belongs to whichever repository is being watched.
+    // A CI constant would be hard-coding: the CI workflow's name belongs to
+    // whichever repository is being watched.
     assert!(
         !project_file("src/github_app.rs").contains("CI_WORKFLOW"),
         "the CI workflow is named by a constant again, so it works on one repository"
@@ -551,10 +538,6 @@ fn mcp_surface_is_installation_bound_and_typed() {
         "observe_operation",
         "create_issue",
         "observe_issue",
-        "publish_release_tag",
-        "recover_release",
-        "observe_release",
-        "observe_release_workflow",
         "create_pull_request",
         "update_pull_request_body",
         "submit_pull_request_review",

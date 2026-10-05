@@ -156,9 +156,7 @@ The live maintainer broker exposes only these repository-scoped operations:
   operation;
 - observe Check Runs and eventual merge state for one exact PR head;
 - enqueue one exact reviewed head for merge after its bound checks and
-  approvals;
-- publish and observe one immutable semver release tag, and recover only that
-  exact tag through the fixed release workflow.
+  approvals.
 
 Replacing the already-open canonical bodies for #126, #153, and #188 is a
 one-time Phase 0 bootstrap action, not a maintainer-broker operation. It must
@@ -168,8 +166,7 @@ replacement digest, and exact reviewed body, and exposes no comment, label,
 state, or close authority. Until that bootstrap authority exists, the reviewed
 replacement bodies remain local and Phase 0 is incomplete.
 
-The live tools mint only their operation-specific subsets of Actions write,
-Metadata read, Contents write, Issues write, Pull requests write, Checks read,
+The live tools mint only their operation-specific subsets of Metadata read, Contents write, Issues write, Pull requests write, Checks read,
 and Merge queues write. No operation mints Administration. Issues write exists
 only for bounded issue creation. Pull requests
 write authorizes PR creation, the bounded body replacement, formal review, and
@@ -178,8 +175,8 @@ review is not an Issues API comment. Merge queues write authorizes only the
 typed exact-head enqueue and
 reconciliation operation; the enqueue token also mints Contents write, because
 a queued entry ends with GitHub pushing the squash commit to the default branch
-(#371 tracks the live proof of the scope set). Actions write is narrowed by code
-to exact workflow/run identities. No generic workflow,
+(#371 tracks the live proof of the scope set). No operation mints Actions. No
+generic workflow,
 administration mutation, Secrets, arbitrary status, caller-selected merge,
 dequeue, queue-jump, or generic API authority is exposed. Exact-tree publication still
 rejects any tree that changes
@@ -326,7 +323,7 @@ turning an idempotency conflict into a guess.
 The runtime operation set is deliberately finite: read the exact default
 revision, create and observe one bounded issue, publish one exact immutable Change tree to a generated branch, create
 one PR, observe checks and merge state for its exact head, post one bounded
-formal PR review, enqueue it, and publish and observe one immutable release.
+formal PR review, and enqueue it.
 GitHub owns merged source-branch cleanup through delete-on-merge. There is no generic issue-comment or closure
 authority and no arbitrary REST, GraphQL, Git, shell, merge, ref update, or
 administration mutation escape hatch.
@@ -398,9 +395,12 @@ response is therefore indeterminate rather than reported as success. Rotate
 the `DARK_FACTORY_MAINTAINER_PERMISSION_REVISION` secret before promoting a v5
 build.
 
-Direct merge, PR close, issue resolution, PR review observation, and the
-workflow diagnosis and rerun tools were later removed without a revision change:
-nothing called them, and removal narrows what each token can request.
+Direct merge, PR close, issue resolution, PR review observation, the
+workflow diagnosis and rerun tools, and the release tag, observation, and
+recovery tools were later removed without a revision change: nothing called
+them, and removal narrows what each token can request. Releases publish from a
+tag push; a half-published release is fixed by re-running that tag's Release
+workflow or publishing manually with the `release-artifact` tool.
 
 `maintainer-operations-v4` adds Administration write to
 `maintainer-operations-v3` solely because GitHub withholds ruleset bypass actors

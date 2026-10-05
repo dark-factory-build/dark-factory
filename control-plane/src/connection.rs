@@ -158,8 +158,6 @@ fn tool_write(name: &str) -> Option<bool> {
         | "observe_issue"
         | "list_issues"
         | "list_pull_requests"
-        | "observe_release"
-        | "observe_release_workflow"
         | "observe_pull_request_checks"
         | "observe_pull_request_merge" => Some(false),
         "create_issue"
@@ -167,8 +165,6 @@ fn tool_write(name: &str) -> Option<bool> {
         | "update_pull_request_body"
         | "submit_pull_request_review"
         | "publish_commit"
-        | "publish_release_tag"
-        | "recover_release"
         | "enqueue_pull_request" => Some(true),
         _ => None,
     }

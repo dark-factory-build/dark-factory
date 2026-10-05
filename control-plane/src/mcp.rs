@@ -12,9 +12,8 @@ use crate::{
     github_app::{
         AppAuthority, CreateIssue, CreatePullRequest, EnqueuePullRequest, ListIssues,
         ListPullRequests, ObserveFile, ObserveIssue, ObservePullRequestChecks,
-        ObservePullRequestMerge, ObserveRef, ObserveRelease, ObserveReleaseWorkflow,
-        ObserveRepository, ObserveTree, OperationError, PublishCommit, PublishReleaseTag,
-        RecoverRelease, SubmitPullRequestReview, UpdatePullRequestBody, canonical_operation_id,
+        ObservePullRequestMerge, ObserveRef, ObserveRepository, ObserveTree, OperationError,
+        PublishCommit, SubmitPullRequestReview, UpdatePullRequestBody, canonical_operation_id,
     },
     journal::DeliveryJournal,
 };
@@ -128,21 +127,14 @@ pub(crate) async fn connection_dispatch(
             Ok(journal) => journal,
             Err(_) => return error_response(StatusCode::UNAUTHORIZED, "unauthorized"),
         };
-        // Workflow observations reconstruct a remote marker without otherwise
-        // reading the journal. Bind those and every referenced UUID before any
-        // GitHub read, exactly as the mutation/reconciliation paths already do.
-        let name = request
-            .pointer("/params/name")
-            .and_then(Value::as_str)
-            .unwrap_or("");
+        // Bind every referenced operation UUID before any GitHub read, exactly
+        // as the mutation/reconciliation paths already do.
         if let Some(arguments) = request
             .pointer("/params/arguments")
             .and_then(Value::as_object)
         {
             for (key, value) in arguments {
-                let referenced = key.ends_with("_operation_id")
-                    || (key == "operation_id" && name == "observe_release_workflow");
-                if referenced && !value.is_null() {
+                if key.ends_with("_operation_id") && !value.is_null() {
                     let Some(id) = value.as_str() else {
                         return error_response(StatusCode::UNAUTHORIZED, "unauthorized");
                     };
@@ -201,82 +193,6 @@ async fn dispatch(request: Value, mcp: &McpState, connection: bool) -> Response 
         "tools/call" => call_tool(id, request, mcp).await,
         _ => json_rpc_error(id, -32601, "Method not found"),
     }
-}
-
-fn workflow_run_schema() -> Value {
-    json!({
-        "type": "object",
-        "properties": {
-            "run_id": {"type": "integer"},
-            "run_attempt": {"type": "integer"},
-            "name": {"type": "string"},
-            "path": {"type": "string"},
-            "event": {"type": "string"},
-            "status": {"type": "string"},
-            "conclusion": {"type": ["string", "null"]},
-            "url": {"type": "string"},
-            "jobs": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "job_id": {"type": "integer"},
-                        "name": {"type": "string"},
-                        "status": {"type": "string"},
-                        "conclusion": {"type": ["string", "null"]},
-                        "url": {"type": "string"},
-                        "steps": {
-                            "type": "array",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "name": {"type": "string"},
-                                    "status": {"type": "string"},
-                                    "conclusion": {"type": ["string", "null"]}
-                                },
-                                "required": ["name", "status", "conclusion"],
-                                "additionalProperties": false
-                            }
-                        }
-                    },
-                    "required": ["job_id", "name", "status", "conclusion", "url", "steps"],
-                    "additionalProperties": false
-                }
-            }
-        },
-        "required": ["run_id", "run_attempt", "name", "path", "event", "status", "conclusion", "url", "jobs"],
-        "additionalProperties": false
-    })
-}
-
-fn release_schema() -> Value {
-    json!({
-        "type": ["object", "null"],
-        "properties": {
-            "tag": {"type": "string"},
-            "url": {"type": "string"},
-            "draft": {"type": "boolean", "const": false},
-            "prerelease": {"type": "boolean"},
-            "assets": {
-                "type": "array",
-                "minItems": 5,
-                "maxItems": 5,
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "name": {"type": "string"},
-                        "size": {"type": "integer", "minimum": 1},
-                        "digest": {"type": "string", "pattern": "^sha256:[0-9a-fA-F]{64}$"},
-                        "url": {"type": "string"}
-                    },
-                    "required": ["name", "size", "digest", "url"],
-                    "additionalProperties": false
-                }
-            }
-        },
-        "required": ["tag", "url", "draft", "prerelease", "assets"],
-        "additionalProperties": false
-    })
 }
 
 fn tools() -> Value {
@@ -514,55 +430,6 @@ fn tools() -> Value {
             "required": ["number", "url", "title", "body", "labels", "updated_at", "state", "state_reason"],
             "additionalProperties": false
         },
-        "annotations": {"readOnlyHint": true, "destructiveHint": false, "openWorldHint": true}
-    }, {
-        "name": "publish_release_tag",
-        "title": "Publish an immutable release tag",
-        "description": "Create one semver release tag only at the live default-branch commit. Existing exact tags reconcile; moved tags conflict.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "repository": {"type": "string", "pattern": "^[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}$"},
-                "operation_id": {"type": "string", "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"},
-                "tag": {"type": "string", "pattern": "^v[0-9]+\\.[0-9]+\\.[0-9]+(?:-[A-Za-z0-9.-]+)?$"},
-                "commit_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"}
-            },
-            "required": ["repository", "operation_id", "tag", "commit_sha"],
-            "additionalProperties": false
-        },
-        "outputSchema": {"type": "object", "properties": {"tag": {"type": "string"}, "commit_sha": {"type": "string"}}, "required": ["tag", "commit_sha"], "additionalProperties": false},
-        "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": true}
-    }, {
-        "name": "recover_release",
-        "title": "Recover an exact release workflow",
-        "description": "Dispatch only the fixed release.yml recovery workflow from the exact live default-branch commit for an existing exact tag, then verify GitHub's returned run ID before completion.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "repository": {"type": "string", "pattern": "^[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}$"},
-                "operation_id": {"type": "string", "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"},
-                "tag": {"type": "string", "pattern": "^v[0-9]+\\.[0-9]+\\.[0-9]+(?:-[A-Za-z0-9.-]+)?$"},
-                "commit_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
-                "workflow_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"}
-            },
-            "required": ["repository", "operation_id", "tag", "commit_sha", "workflow_sha"],
-            "additionalProperties": false
-        },
-        "outputSchema": {"type": "object", "properties": {"operation_id": {"type": "string"}, "workflow": {"type": "string"}, "commit_sha": {"type": "string"}, "run_id": {"type": "integer"}, "run_attempt": {"type": "integer"}}, "required": ["operation_id", "workflow", "commit_sha", "run_id", "run_attempt"], "additionalProperties": false},
-        "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": true}
-    }, {
-        "name": "observe_release",
-        "title": "Observe an exact release",
-        "description": "Verify an immutable tag and return its release assets plus the one fixed tag-push release workflow run for that exact commit.",
-        "inputSchema": {"type": "object", "properties": {"repository": {"type": "string", "pattern": "^[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}$"}, "tag": {"type": "string", "pattern": "^v[0-9]+\\.[0-9]+\\.[0-9]+(?:-[A-Za-z0-9.-]+)?$"}, "commit_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"}}, "required": ["repository", "tag", "commit_sha"], "additionalProperties": false},
-        "outputSchema": {"type": "object", "properties": {"tag": {"type": "string"}, "commit_sha": {"type": "string"}, "release": release_schema(), "workflow_run": workflow_run_schema()}, "required": ["tag", "commit_sha", "release", "workflow_run"], "additionalProperties": false},
-        "annotations": {"readOnlyHint": true, "destructiveHint": false, "openWorldHint": true}
-    }, {
-        "name": "observe_release_workflow",
-        "title": "Observe an exact release recovery workflow",
-        "description": "Read the one workflow run returned by recover_release and re-prove its fixed workflow, complete request digest, immutable tag, and dispatch commit.",
-        "inputSchema": {"type": "object", "properties": {"repository": {"type": "string", "pattern": "^[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}$"}, "operation_id": {"type": "string", "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"}, "tag": {"type": "string", "pattern": "^v[0-9]+\\.[0-9]+\\.[0-9]+(?:-[A-Za-z0-9.-]+)?$"}, "tag_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"}, "workflow_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"}, "run_id": {"type": "integer", "minimum": 1}}, "required": ["repository", "operation_id", "tag", "tag_sha", "workflow_sha", "run_id"], "additionalProperties": false},
-        "outputSchema": {"type": "object", "properties": {"operation_id": {"type": "string"}, "tag": {"type": "string"}, "tag_sha": {"type": "string"}, "workflow_sha": {"type": "string"}, "workflow_run": workflow_run_schema()}, "required": ["operation_id", "tag", "tag_sha", "workflow_sha", "workflow_run"], "additionalProperties": false},
         "annotations": {"readOnlyHint": true, "destructiveHint": false, "openWorldHint": true}
     }, {
         "name": "create_pull_request",
@@ -947,52 +814,6 @@ async fn call_tool(id: Value, request: &Map<String, Value>, mcp: &McpState) -> R
             };
             match mcp.app.observe_issue(arguments).await {
                 Ok(result) => serialized_tool_result(id, &result, "Issue state was observed."),
-                Err(error) => operation_error(id, error),
-            }
-        }
-        Some("publish_release_tag") => {
-            let Ok(arguments) = serde_json::from_value::<PublishReleaseTag>(arguments) else {
-                return json_rpc_error(id, -32602, "Invalid params");
-            };
-            match mcp.app.publish_release_tag(&mcp.journal, arguments).await {
-                Ok(result) => {
-                    serialized_tool_result(id, &result, "Release tag is durably published.")
-                }
-                Err(error) => operation_error(id, error),
-            }
-        }
-        Some("recover_release") => {
-            let Ok(arguments) = serde_json::from_value::<RecoverRelease>(arguments) else {
-                return json_rpc_error(id, -32602, "Invalid params");
-            };
-            match mcp.app.recover_release(&mcp.journal, arguments).await {
-                Ok(result) => {
-                    serialized_tool_result(id, &result, "Release recovery is durably dispatched.")
-                }
-                Err(error) => operation_error(id, error),
-            }
-        }
-        Some("observe_release") => {
-            let Ok(arguments) = serde_json::from_value::<ObserveRelease>(arguments) else {
-                return json_rpc_error(id, -32602, "Invalid params");
-            };
-            match mcp.app.observe_release(arguments).await {
-                Ok(result) => {
-                    serialized_tool_result(id, &result, "Exact release state was observed.")
-                }
-                Err(error) => operation_error(id, error),
-            }
-        }
-        Some("observe_release_workflow") => {
-            let Ok(arguments) = serde_json::from_value::<ObserveReleaseWorkflow>(arguments) else {
-                return json_rpc_error(id, -32602, "Invalid params");
-            };
-            match mcp.app.observe_release_workflow(arguments).await {
-                Ok(result) => serialized_tool_result(
-                    id,
-                    &result,
-                    "Exact release recovery workflow state was observed.",
-                ),
                 Err(error) => operation_error(id, error),
             }
         }
