@@ -155,6 +155,18 @@ func TestWorkerStopUsesOperatorClient(t *testing.T) {
 	}
 }
 
+func TestWorkerMessageRejectsMalformedOperationIDWithoutClientEffect(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	lookups := 0
+	exit := run(context.Background(), []string{"worker", "message", "--operation-id", "bad", "--task", strings.Repeat("ab", 16), "--task-revision", "2", "--run", strings.Repeat("cd", 16), "--run-revision", "3", "--message", "continue"}, func(string) string {
+		lookups++
+		return "/private/should-not-be-read"
+	}, &stdout, &stderr)
+	if exit != 2 || lookups != 0 || stdout.Len() != 0 || stderr.String() != "factoryctl: worker message: operation id must be 32 lowercase hex characters\n" {
+		t.Fatalf("worker message validation = exit %d lookups %d stdout %q stderr %q", exit, lookups, stdout.String(), stderr.String())
+	}
+}
+
 func TestWorkerOperationUsesReadOnlyOperatorCall(t *testing.T) {
 	fixture := newAPIFixture(t)
 	defer fixture.close(t)

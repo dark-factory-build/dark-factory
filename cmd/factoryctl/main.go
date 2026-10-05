@@ -310,6 +310,7 @@ type attemptCommand struct {
 	judgment            string
 	document            string
 	documentFile        string
+	parseError          string
 	prerequisites       []api.TaskPrerequisiteInput
 	conflictPaths       []string
 }
@@ -368,6 +369,10 @@ func runWithDependencies(ctx context.Context, args []string, getenv func(string)
 		return 0
 	}
 	if !ok {
+		if command.parseError != "" {
+			_, _ = io.WriteString(stderr, command.parseError+"\n")
+			return 2
+		}
 		if len(args) >= 2 && args[0] == "intake" && args[1] == "enable" && !slices.Contains(args, "--reviewed-revision") {
 			_, _ = io.WriteString(stderr, "factoryctl: intake enable: missing required flag --reviewed-revision\n")
 			return 2
@@ -2130,6 +2135,10 @@ func parseOverseer(args []string) (attemptCommand, bool, bool) {
 			command.text = value
 		case "--operation-id":
 			if !validHumanRequestKey(value) {
+				if command.kind == commandOverseerMessageWorker {
+					command.parseError = "factoryctl: worker message: operation id must be 32 lowercase hex characters"
+					return command, false, false
+				}
 				return attemptCommand{}, false, false
 			}
 			command.operationID = value
