@@ -125,7 +125,7 @@ jobs:
               VERSION)
                 macos=true; select_macos_mode full
                 ;;
-              scripts/package-release.sh|scripts/prepare-release-source.sh|scripts/publish-release.sh|scripts/test-prepare-release-source.sh|scripts/test-publish-release.sh)
+              scripts/package-release.sh|scripts/prepare-release-source.sh|scripts/publish-release.sh|scripts/test-prepare-release-source.sh)
                 macos=true; select_macos_mode release
                 ;;
               .gitignore|scripts/bootstrap-maintainer-v2.sh|scripts/release.sh)
