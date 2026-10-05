@@ -308,7 +308,7 @@ func (store *Store) recordProductionObservation(ctx context.Context, c *sql.Conn
 		}
 		if _, err := c.ExecContext(ctx, `UPDATE production_records SET document = json_set(document, '$.state', 'superseded'), observed_at_ms = ?
 			WHERE project_id = ? AND repository = ? AND kind = 'reviewer' AND json_extract(document, '$.request.PullNumber') = ?
-			  AND lower(json_extract(document, '$.request.Head')) <> lower(?) AND json_extract(document, '$.state') IN ('gating', 'running', 'submitting', 'enqueuing')`,
+			  AND lower(json_extract(document, '$.request.Head')) <> lower(?) AND json_extract(document, '$.state') IN ('running', 'submitting', 'enqueuing')`,
 			at.Int64(), project.Bytes(), observation.Repository, int64(pr.Number), pr.Head); err != nil {
 			return err
 		}
@@ -683,8 +683,8 @@ func (store *Store) ReviewOperation(ctx context.Context, project ProjectID, oper
 	return []byte(document), true, nil
 }
 
-// InFlightReviewOperations returns every unfinished review operation: gates to
-// rerun, review writes whose external receipts may have been lost, enqueued
+// InFlightReviewOperations returns every unfinished review operation: reviews
+// to relaunch, review writes whose external receipts may have been lost, enqueued
 // heads awaiting the merge queue, results whose task routing has not landed,
 // and unhandled failures of a still-open pull request at the same head.
 func (store *Store) InFlightReviewOperations(ctx context.Context) ([]PendingReviewOperation, error) {
@@ -694,7 +694,7 @@ func (store *Store) InFlightReviewOperations(ctx context.Context) ([]PendingRevi
 	}
 	defer tx.Close()
 	rows, err := tx.connection.QueryContext(ctx, `SELECT project_id, repository, identity, document FROM production_records r
-        WHERE kind = 'reviewer' AND (json_extract(document, '$.state') IN ('gating', 'submitting', 'enqueuing', 'enqueued') OR json_extract(document, '$.route_pending') = 1
+        WHERE kind = 'reviewer' AND (json_extract(document, '$.state') IN ('running', 'submitting', 'enqueuing', 'enqueued') OR json_extract(document, '$.route_pending') = 1
             OR (json_extract(document, '$.state') = 'failed' AND json_extract(document, '$.handled') IS NOT 1 AND EXISTS (SELECT 1 FROM production_records p
                 WHERE p.project_id = r.project_id AND p.repository = r.repository AND p.kind = 'pull_request' AND p.identity = CAST(json_extract(r.document, '$.request.PullNumber') AS TEXT)
                   AND json_extract(p.document, '$.state') = 'open' AND lower(json_extract(p.document, '$.head')) = lower(json_extract(r.document, '$.request.Head')))))
@@ -728,7 +728,8 @@ func (store *Store) InFlightReviewOperations(ctx context.Context) ([]PendingRevi
 // RecoverRunningReviewOperations reconciles review claims left by a stopped
 // daemon. A REQUEST_CHANGES verdict with a durable submit receipt and without
 // an enqueue receipt remains a completed, route-pending operation; a claim with
-// no verdict or enqueue returns to gating for startup to relaunch; others fail.
+// no verdict or enqueue stays running for startup to relaunch; others fail.
+// A 'gating' claim from before the pre-review gate was removed is the same.
 // An external reviewer observation uses the same projection kind but does not
 // have the durable operation request object.
 func (store *Store) RecoverRunningReviewOperations(ctx context.Context, at UnixMillis) (int, error) {
@@ -738,7 +739,7 @@ func (store *Store) RecoverRunningReviewOperations(ctx context.Context, at UnixM
 	}
 	defer tx.Close()
 	rows, err := tx.connection.QueryContext(ctx, `SELECT project_id, repository, identity, document FROM production_records
-        WHERE kind = 'reviewer' AND json_extract(document, '$.state') = 'running'
+        WHERE kind = 'reviewer' AND json_extract(document, '$.state') IN ('running', 'gating')
           AND json_type(document, '$.request') = 'object'`)
 	if err != nil {
 		return 0, err
@@ -771,10 +772,13 @@ func (store *Store) RecoverRunningReviewOperations(ctx context.Context, at UnixM
 		if err := json.Unmarshal(fields["id"], &operationID); err != nil || operationID == "" {
 			continue
 		}
-		var verdict, enqueueID, retryOf string
+		var verdict, enqueueID, retryOf, state string
 		var submitted bool
 		_ = json.Unmarshal(fields["verdict"], &verdict)
 		_ = json.Unmarshal(fields["enqueue_id"], &enqueueID)
+		if _ = json.Unmarshal(fields["state"], &state); state == "running" && verdict == "" && enqueueID == "" {
+			continue // startup relaunches it as it stands
+		}
 		_ = json.Unmarshal(fields["retry_of"], &retryOf)
 		_ = json.Unmarshal(fields["submitted"], &submitted)
 		retryable, _ := json.Marshal(verdict == "" && enqueueID == "" && retryOf == "")
@@ -807,9 +811,9 @@ func (store *Store) RecoverRunningReviewOperations(ctx context.Context, at UnixM
 			item.document["route_pending"] = json.RawMessage(`true`)
 			delete(item.document, "detail")
 		} else if verdict == "" && enqueueID == "" {
-			// Nothing external was written: startup relaunches it from the
-			// gate, so a daemon restart (every release) never fails a review.
-			item.document["state"] = json.RawMessage(`"gating"`)
+			// Nothing external was written: startup relaunches it, so a
+			// daemon restart (every release) never fails a review.
+			item.document["state"] = json.RawMessage(`"running"`)
 			delete(item.document, "detail")
 		} else {
 			item.document["state"] = json.RawMessage(`"failed"`)

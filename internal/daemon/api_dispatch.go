@@ -43,10 +43,9 @@ type Daemon struct {
 	// reviewBackend is a package-test seam; production always uses the
 	// Maintainer-backed daemonReviewBackend.
 	reviewBackend func(string, uint64) review.Backend
-	// The full gate's home and tool path (ConfigureGate); gateMu runs one
-	// gate at a time.
-	gateHome, gateToolPath string
-	gateMu                 sync.Mutex
+	// The factory home and operator tool path (ConfigureHost) that releases
+	// and the reviewer run with.
+	home, toolPath string
 	// releaseHold pauses admission in memory while a release drains; the
 	// durable dispatch switch is never written. releaseBusy is the one
 	// release this process runs.

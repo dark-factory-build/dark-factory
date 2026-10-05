@@ -60,7 +60,7 @@ func (daemon *Daemon) attemptMaintainer(ctx context.Context, call api.Call) api.
 		if err != nil {
 			return failure("invalid")
 		}
-		// factoryd is the one verdict authority: it gates, reviews and
+		// factoryd is the one verdict authority: it reviews and
 		// enqueues every published head itself.
 		if params.Name == "submit_pull_request_review" || params.Name == "enqueue_pull_request" {
 			return failure("denied")

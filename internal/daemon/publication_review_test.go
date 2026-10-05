@@ -95,7 +95,7 @@ func TestPublicationReviewClaimSurvivesInterruptionBeforeCoordinatorResume(t *te
 		t.Fatal(err)
 	}
 	op := lastDurableReview(t, fixture.store, projectID)
-	if op.ID != prepared.ID || op.State != "gating" || op.Request.Head != head {
+	if op.ID != prepared.ID || op.State != "running" || op.Request.Head != head {
 		t.Fatalf("interrupted publication claim = %+v", op)
 	}
 }
@@ -129,7 +129,7 @@ func TestRestartResumesPublicationReviewWithoutDuplicateSubmit(t *testing.T) {
 	if count, err := restarted.RecoverReviewOperations(context.Background()); err != nil || count != 1 {
 		t.Fatalf("startup reconciliation count=%d err=%v", count, err)
 	}
-	// An interrupted claim is still gating, so startup resumes it once.
+	// An interrupted claim is still running, so startup resumes it once.
 	recovered := waitForDurableReview(t, fixture.store, projectID, func(op review.Operation) bool { return op.State == "enqueued" })
 	if recovered.ID != prepared.ID || recovered.State != "enqueued" || backend.reviews != 1 || backend.submits != 1 || backend.enqueues != 1 || len(backend.journal) != 2 {
 		t.Fatalf("recovered operation=%+v backend=%+v", recovered, backend)
@@ -146,8 +146,8 @@ func TestRestartReconcilesUncertainExternalReviewWritesWithoutDuplicateWrites(t 
 		wantSubmits  int
 		wantEnqueues int
 	}{
-		{name: "submit", failAt: 4, wantSubmits: 1},
-		{name: "enqueue", failAt: 5, wantSubmits: 1, wantEnqueues: 1},
+		{name: "submit", failAt: 2, wantSubmits: 1},
+		{name: "enqueue", failAt: 3, wantSubmits: 1, wantEnqueues: 1},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			fixture, projectID := reviewPublicFixture(t)

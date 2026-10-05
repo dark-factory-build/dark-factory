@@ -33,8 +33,6 @@ func (s *memoryStore) CreateRetry(_ context.Context, failed, retry Operation) er
 }
 
 type fakeBackend struct {
-	gates               []GateRun // scripted gate results, in order; none = pass
-	gateErr             error
 	reviews             int
 	killed              bool
 	submitErr           error
@@ -45,18 +43,6 @@ type fakeBackend struct {
 
 func (b *fakeBackend) CloneReadOnly(context.Context, Request) (string, func(), error) {
 	return "/review", func() {}, nil
-}
-func (b *fakeBackend) Gate(_ context.Context, _ string, _ Operation, commit string) (GateRun, error) {
-	if b.gateErr != nil {
-		return GateRun{}, b.gateErr
-	}
-	if len(b.gates) == 0 {
-		return GateRun{Commit: commit}, nil
-	}
-	run := b.gates[0]
-	b.gates = b.gates[1:]
-	run.Commit = commit
-	return run, nil
 }
 func (b *fakeBackend) Review(context.Context, string, Request) (Verdict, error) {
 	b.reviews++
@@ -98,7 +84,7 @@ func TestStartPersistsBeforeProviderAndEnqueuesExactHead(t *testing.T) {
 	if err != nil || op.State != "enqueued" || op.EnqueueID == "" || op.EnqueueID == op.ID || !backend.submitted || !backend.enqueued {
 		t.Fatalf("operation=%+v err=%v backend=%+v", op, err, backend)
 	}
-	if len(store.values) < 1 || store.values[0].State != "gating" {
+	if len(store.values) < 1 || store.values[0].State != "running" {
 		t.Fatalf("prelaunch record=%+v", store.values)
 	}
 }
@@ -191,86 +177,6 @@ func TestRequestChangesResponseLossIsReconciledForRouting(t *testing.T) {
 	op, err := c.Start(context.Background(), request)
 	if err != nil || op.State != "completed" || !op.Submitted || !op.RoutePending {
 		t.Fatalf("reconciled request changes=%+v err=%v backend=%+v", op, err, backend)
-	}
-}
-
-func TestGateFlakeAtHeadIsRerunAndReviewProceeds(t *testing.T) {
-	backend := &fakeBackend{gates: []GateRun{{ExitCode: 1, Failed: []string{"TestFlaky"}}}}
-	c := Coordinator{Store: &memoryStore{}, Backend: backend, Now: time.Now}
-	op, err := c.Start(context.Background(), reviewRequest())
-	if err != nil || op.State != "enqueued" || backend.reviews != 1 || len(op.Gates) != 2 || op.Gates[0].ExitCode == 0 || op.Gates[1].ExitCode != 0 || op.Gates[1].Commit != op.Request.Head {
-		t.Fatalf("operation=%+v err=%v", op, err)
-	}
-}
-
-func TestGateFailureAbsentAtBaseIsSentBackWithTestNames(t *testing.T) {
-	failed := GateRun{ExitCode: 1, Failed: []string{"TestBroken", "TestOther"}}
-	backend := &fakeBackend{gates: []GateRun{failed, failed, {ExitCode: 1, Failed: []string{"TestBroken"}}}}
-	c := Coordinator{Store: &memoryStore{}, Backend: backend, Now: time.Now}
-	op, err := c.Start(context.Background(), reviewRequest())
-	if err != nil || op.State != "completed" || op.Verdict != "request_changes" || !op.RoutePending || op.Submitted || backend.reviews != 0 || backend.submitted {
-		t.Fatalf("operation=%+v err=%v", op, err)
-	}
-	if len(op.Gates) != 3 || op.Gates[2].Commit != op.Request.Base || !strings.Contains(op.Detail, "tests=TestOther.") || !strings.Contains(op.Detail, op.Request.Head) {
-		t.Fatalf("gates=%+v note=%q", op.Gates, op.Detail)
-	}
-}
-
-func TestGateFailureAlsoAtBaseProceedsToReview(t *testing.T) {
-	failed := GateRun{ExitCode: 1, Failed: []string{"TestInherited"}}
-	backend := &fakeBackend{gates: []GateRun{failed, failed, {ExitCode: 1, Failed: []string{"TestInherited", "TestElse"}}}}
-	c := Coordinator{Store: &memoryStore{}, Backend: backend, Now: time.Now}
-	op, err := c.Start(context.Background(), reviewRequest())
-	if err != nil || op.State != "enqueued" || backend.reviews != 1 || len(op.Gates) != 3 {
-		t.Fatalf("operation=%+v err=%v", op, err)
-	}
-}
-
-func TestGateHostBlockerStaysRetryableWithoutSendBack(t *testing.T) {
-	backend := &fakeBackend{gateErr: errors.New("gate exit 125, nothing ran")}
-	c := Coordinator{Store: &memoryStore{}, Backend: backend, Now: time.Now}
-	op, err := c.Start(context.Background(), reviewRequest())
-	if err == nil || op.State != "failed" || !op.Retryable || op.Verdict != "" || op.RoutePending || backend.reviews != 0 {
-		t.Fatalf("operation=%+v err=%v", op, err)
-	}
-}
-
-func TestGateSendsBackUnlessEveryNamedHeadFailureFailsAtBase(t *testing.T) {
-	for name, runs := range map[string][]GateRun{
-		"base passed":     {{ExitCode: 1, Failed: []string{"TestA"}}, {ExitCode: 1, Failed: []string{"TestA"}}, {ExitCode: 0, Failed: []string{"TestA"}}},
-		"no test names":   {{ExitCode: 2}, {ExitCode: 2}},
-		"one run unnamed": {{ExitCode: 1, Failed: []string{"TestA"}}, {ExitCode: 2}},
-	} {
-		backend := &fakeBackend{gates: runs}
-		op, err := Coordinator{Store: &memoryStore{}, Backend: backend, Now: time.Now}.Start(context.Background(), reviewRequest())
-		if err != nil || op.State != "completed" || op.Verdict != "request_changes" || backend.reviews != 0 {
-			t.Fatalf("%s: operation=%+v err=%v", name, op, err)
-		}
-	}
-}
-
-func TestGateDisjointHeadFailuresAreAFlakeWithoutBaseRun(t *testing.T) {
-	backend := &fakeBackend{gates: []GateRun{{ExitCode: 1, Failed: []string{"TestA"}}, {ExitCode: 1, Failed: []string{"TestB"}}}}
-	op, err := Coordinator{Store: &memoryStore{}, Backend: backend, Now: time.Now}.Start(context.Background(), reviewRequest())
-	if err != nil || op.State != "enqueued" || backend.reviews != 1 || len(op.Gates) != 2 {
-		t.Fatalf("operation=%+v err=%v", op, err)
-	}
-}
-
-func TestGateSendsBackReproducingFailureTheBaseDoesNotShare(t *testing.T) {
-	backend := &fakeBackend{gates: []GateRun{{ExitCode: 1, Failed: []string{"TestA", "TestB"}}, {ExitCode: 1, Failed: []string{"TestA"}}, {ExitCode: 1, Failed: []string{"TestB"}}}}
-	op, err := Coordinator{Store: &memoryStore{}, Backend: backend, Now: time.Now}.Start(context.Background(), reviewRequest())
-	if err != nil || op.State != "completed" || op.Verdict != "request_changes" || backend.reviews != 0 || len(op.Gates) != 3 || !strings.Contains(op.Detail, "tests=TestA.") {
-		t.Fatalf("operation=%+v err=%v", op, err)
-	}
-}
-
-func TestGateReproducingFailureAlsoAtBaseProceeds(t *testing.T) {
-	failed := GateRun{ExitCode: 1, Failed: []string{"TestA"}}
-	backend := &fakeBackend{gates: []GateRun{failed, failed, failed}}
-	op, err := Coordinator{Store: &memoryStore{}, Backend: backend, Now: time.Now}.Start(context.Background(), reviewRequest())
-	if err != nil || op.State != "enqueued" || backend.reviews != 1 || len(op.Gates) != 3 {
-		t.Fatalf("operation=%+v err=%v", op, err)
 	}
 }
 

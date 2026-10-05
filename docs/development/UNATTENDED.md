@@ -65,7 +65,7 @@ instructions. Supply product priorities and explicit closure criteria.
   that no longer applies. Observe those outcomes before delegating a successor.
   Intake is a supervisory event, not an instantaneous GitHub-to-process kill.
 - A worker's success is not issue completion. Inspect its tree and receipts,
-  then publish it. factoryd gates, reviews, enqueues, merges and releases every
+  then publish it. factoryd reviews, enqueues, merges and releases every
   published head and returns findings to the original worker; never run gates,
   create review tasks or record a verdict. Act on a published pull request only
   when an `Escalated:` wake names it.

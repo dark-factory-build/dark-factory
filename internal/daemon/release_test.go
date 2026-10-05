@@ -144,7 +144,7 @@ func releaseFixture(t *testing.T) (*dispatchFixture, func(), chan string) {
 	if err := os.MkdirAll(install.ServiceDirectoryPath(home), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	fixture.daemon.ConfigureGate(home, "/usr/bin:/bin")
+	fixture.daemon.ConfigureHost(home, "/usr/bin:/bin")
 	events := make(chan string, 8)
 	build, upgrade, exit, limit, poll := releaseBuild, releaseUpgrade, releaseExit, releaseDrainLimit, releaseDrainPoll
 	t.Cleanup(func() {

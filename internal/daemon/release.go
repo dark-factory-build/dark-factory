@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -140,7 +141,7 @@ var (
 func (daemon *Daemon) tickRelease(ctx context.Context) {
 	// The wall clock, not daemon.now: this cadence is not factory time.
 	now := time.Now()
-	if daemon.gateHome == "" || daemon.releaseBusy.Load() || now.Before(daemon.releaseDue) {
+	if daemon.home == "" || daemon.releaseBusy.Load() || now.Before(daemon.releaseDue) {
 		return
 	}
 	daemon.releaseDue = now.Add(releasePoll)
@@ -166,7 +167,7 @@ func (daemon *Daemon) tickRelease(ctx context.Context) {
 // protocol, which spends no GitHub REST quota.
 func observeBaseHead(ctx context.Context, daemon *Daemon, root string) (string, error) {
 	command := exec.CommandContext(ctx, change.TrustedGitExecutable, "-C", root, "ls-remote", "--exit-code", "--refs", "origin", "refs/heads/"+selfBase)
-	command.Env = daemon.gateEnvironment()
+	command.Env = daemon.toolEnvironment()
 	output, err := command.Output()
 	fields := strings.Fields(string(output))
 	if err == nil && (len(fields) != 2 || fields[1] != "refs/heads/"+selfBase || !regexp.MustCompile(`^[0-9a-f]{40}$`).MatchString(fields[0])) {
@@ -188,10 +189,10 @@ func (daemon *Daemon) Release(ctx context.Context, sha string, start bool) (kern
 		}
 		return existing, err
 	}
-	if daemon.gateHome == "" {
+	if daemon.home == "" {
 		return existing, fmt.Errorf("%w: factoryd has no home to release into", kernel.ErrConflict)
 	}
-	_, upgrading, err := install.ReadUpgradeMarker(daemon.gateHome)
+	_, upgrading, err := install.ReadUpgradeMarker(daemon.home)
 	if err != nil {
 		return existing, err
 	}
@@ -275,9 +276,7 @@ func (daemon *Daemon) release(project kernel.ProjectID, root string, source chan
 		return
 	}
 	defer os.RemoveAll(directory)
-	daemon.gateMu.Lock()
 	identity, err := releaseBuild(ctx, daemon, root, source, delivery.Revision, directory)
-	daemon.gateMu.Unlock()
 	if err != nil {
 		fail(err.Error())
 		return
@@ -295,11 +294,11 @@ func (daemon *Daemon) release(project kernel.ProjectID, root string, source chan
 	}
 	delivery.Phase = "swap"
 	_ = daemon.writeRelease(ctx, project, &delivery)
-	if err := daemon.store.BackupTo(ctx, install.UpgradeBackupPath(daemon.gateHome)); err != nil {
+	if err := daemon.store.BackupTo(ctx, install.UpgradeBackupPath(daemon.home)); err != nil {
 		fail("backup: " + err.Error())
 		return
 	}
-	if err := releaseUpgrade(ctx, daemon.gateHome, filepath.Join(directory, "bin"), identity, kernel.SchemaVersion); err != nil {
+	if err := releaseUpgrade(ctx, daemon.home, filepath.Join(directory, "bin"), identity, kernel.SchemaVersion); err != nil {
 		fail("upgrade: " + err.Error())
 		return
 	}
@@ -323,7 +322,7 @@ func (daemon *Daemon) drainForRelease(ctx context.Context) (string, error) {
 			run := recovered.Run
 			// A running attempt behind its runner's takeover endpoint is
 			// adopted by the next daemon; every other live run must end.
-			if _, err := os.Stat(filepath.Join(install.RuntimesPath(daemon.gateHome), run.ID.String(), runner.TakeoverSocketName)); run.Phase == kernel.RunRunning && err == nil {
+			if _, err := os.Stat(filepath.Join(install.RuntimesPath(daemon.home), run.ID.String(), runner.TakeoverSocketName)); run.Phase == kernel.RunRunning && err == nil {
 				continue
 			}
 			blocking = ": run " + run.ID.String() + " is " + run.Phase.String()
@@ -359,7 +358,7 @@ func buildRelease(ctx context.Context, daemon *Daemon, root string, source chang
 		// /usr/bin/env resolves go on the operator's tool path, not ours.
 		command := exec.CommandContext(ctx, "/usr/bin/env", "go", "build", "-trimpath", "-buildvcs=false", "-ldflags", "-s -w -X github.com/dark-factory-build/dark-factory/internal/buildinfo.receipt="+identity.Receipt(), "-o", output, "./cmd/"+name)
 		command.Dir = tree
-		command.Env = append(daemon.gateEnvironment(), "CGO_ENABLED=0", "GOENV=off", "GOAUTH=off", "GOTOOLCHAIN=go"+string(goVersion[1]))
+		command.Env = append(daemon.toolEnvironment(), "CGO_ENABLED=0", "GOENV=off", "GOAUTH=off", "GOTOOLCHAIN=go"+string(goVersion[1]))
 		command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 		command.Cancel = func() error { return syscall.Kill(-command.Process.Pid, syscall.SIGKILL) }
 		command.WaitDelay = 5 * time.Second
@@ -372,4 +371,21 @@ func buildRelease(ctx context.Context, daemon *Daemon, root string, source chang
 		}
 	}
 	return identity, nil
+}
+
+// ConfigureHost sets the factory home and the operator's tool path.
+func (daemon *Daemon) ConfigureHost(home, toolPath string) {
+	daemon.home, daemon.toolPath = home, toolPath
+}
+
+// toolEnvironment is the operator's tool path plus an allowlist, so no GitHub
+// or provider token reaches a release build.
+func (daemon *Daemon) toolEnvironment() []string {
+	environment := []string{"PATH=" + daemon.toolPath}
+	for _, value := range os.Environ() {
+		if slices.Contains([]string{"HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE", "TERM"}, strings.SplitN(value, "=", 2)[0]) {
+			environment = append(environment, value)
+		}
+	}
+	return environment
 }

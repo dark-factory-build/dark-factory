@@ -75,7 +75,7 @@ func reviewerFixture(t *testing.T, reviewers ...string) (*daemonReviewBackend, m
 	}
 	// The fakes are only on the tool path, as under launchd.
 	t.Setenv("PATH", "/usr/bin:/bin")
-	fixture.daemon.gateToolPath = bin + ":/usr/bin:/bin"
+	fixture.daemon.toolPath = bin + ":/usr/bin:/bin"
 	homes, accounts := map[string]string{}, map[string]kernel.AccountID{}
 	next := byte(60)
 	agent := func(name string, role kernel.AgentRole, provider kernel.Provider, account string) kernel.AgentID {
@@ -205,11 +205,6 @@ type fixedReviewCheckout struct{ *daemonReviewBackend }
 
 func (fixedReviewCheckout) CloneReadOnly(context.Context, review.Request) (string, func(), error) {
 	return os.TempDir(), func() {}, nil
-}
-
-// The gate stage is not under test here; a passing gate lets the review run.
-func (fixedReviewCheckout) Gate(_ context.Context, _ string, _ review.Operation, commit string) (review.GateRun, error) {
-	return review.GateRun{Commit: commit}, nil
 }
 
 func TestReviewMovesPastALimitedAccountAndFailsRetryablyWhenAllAreLimited(t *testing.T) {

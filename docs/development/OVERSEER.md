@@ -496,13 +496,14 @@ human request, not a retry.
 
 Write that body to a file; the review needs it.
 
-## 5. After publication: factoryd gates, reviews, merges and releases
+## 5. After publication: factoryd reviews, merges and releases
 
-factoryd reviews every published PR head itself: it runs the repository gate
-at the exact head, records one exact-head verdict through the App, enqueues an
-ALLOW, observes the merge and releases the runtime, and sends a REQUEST_CHANGES
-back to the original task with a pointer to the findings. The reviewer is a
-separate read-only session, never the author or overseer. Never create a
+factoryd reviews every published PR head itself: it records one exact-head
+verdict through the App, enqueues an ALLOW, observes the merge and releases the
+runtime, and sends a REQUEST_CHANGES or a merge-queue ejection back to the
+original task with a pointer to the findings. The merge queue's required CI is
+the full gate. The reviewer is a separate read-only session, never the author
+or overseer. Never create a
 review task for a worker, record a verdict, enqueue, or wait on that pipeline.
 
 factoryd wakes you with `Escalated: factoryd cannot advance OWNER/REPO#N at

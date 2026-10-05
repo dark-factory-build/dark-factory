@@ -32,9 +32,6 @@ type publicReviewBackend struct {
 func (b *publicReviewBackend) CloneReadOnly(context.Context, review.Request) (string, func(), error) {
 	return "/fixture-review", func() {}, nil
 }
-func (b *publicReviewBackend) Gate(_ context.Context, _ string, _ review.Operation, commit string) (review.GateRun, error) {
-	return review.GateRun{Commit: commit}, nil
-}
 func (b *publicReviewBackend) Review(context.Context, string, review.Request) (review.Verdict, error) {
 	b.reviews++
 	if b.killed {
@@ -126,27 +123,27 @@ func reviewNow(ctx context.Context, daemon *Daemon, project kernel.ProjectID, re
 	return op.ID, err
 }
 
-type gatedReviewBackend struct {
+type blockedReviewBackend struct {
 	*publicReviewBackend
 	release chan struct{}
 }
 
-func (b gatedReviewBackend) Gate(ctx context.Context, checkout string, op review.Operation, commit string) (review.GateRun, error) {
+func (b blockedReviewBackend) Review(ctx context.Context, checkout string, request review.Request) (review.Verdict, error) {
 	<-b.release
-	return b.publicReviewBackend.Gate(ctx, checkout, op, commit)
+	return b.publicReviewBackend.Review(ctx, checkout, request)
 }
 
 // #1166: a created review answers with its operation while it is still
-// gating, rather than outliving the operator call and reporting failure.
-func TestReviewIntakeAnswersWithTheCreatedOperationWhileItGates(t *testing.T) {
+// running, rather than outliving the operator call and reporting failure.
+func TestReviewIntakeAnswersWithTheCreatedOperationWhileItRuns(t *testing.T) {
 	fixture, project := reviewPublicFixture(t)
-	backend := gatedReviewBackend{publicReviewBackend: &publicReviewBackend{}, release: make(chan struct{})}
+	backend := blockedReviewBackend{publicReviewBackend: &publicReviewBackend{}, release: make(chan struct{})}
 	fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return backend }
 	input := api.IntakeInput{Action: "review_pr", ProjectID: project.String(), ReviewRequest: &api.ReviewRequest{Repository: "team/repo", PullNumber: 9, Head: strings.Repeat("a", 40), Base: strings.Repeat("b", 40), BaseRef: "main", Body: "fixture", Provider: "codex"}}
 	result := fixture.daemon.Intake(context.Background(), input)
 	op := lastDurableReview(t, fixture.store, project)
 	close(backend.release)
-	if result.State != "ok" || result.ReviewOperation != op.ID || op.State != "gating" {
+	if result.State != "ok" || result.ReviewOperation != op.ID || op.State != "running" {
 		t.Fatalf("intake answered %+v for operation %+v", result, op)
 	}
 	if op = waitForDurableReview(t, fixture.store, project, func(op review.Operation) bool { return op.State == "enqueued" }); op.State != "enqueued" {
