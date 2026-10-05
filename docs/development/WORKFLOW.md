@@ -68,7 +68,7 @@ macOS resource exhaustion.
 
 ## Review and merge ordering
 
-factoryd gates and independently reviews every published head, then enqueues,
+factoryd independently reviews every published head, then enqueues,
 merges and releases it; overseers and workers never review or enqueue a
 published head themselves. The protected merge queue
 runs required CI on the combined tree before merging. A pending future queue

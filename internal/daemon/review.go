@@ -24,7 +24,7 @@ import (
 )
 
 // reviewPR answers once the review operation is durable and runs it in the
-// background: a gate outlasts the operator call that requested it.
+// background: a review outlasts the operator call that requested it.
 func (daemon *Daemon) reviewPR(ctx context.Context, project kernel.ProjectID, request api.ReviewRequest) (string, error) {
 	if daemon.reviewOperation != nil {
 		return daemon.reviewOperation(ctx, project, request)
@@ -114,7 +114,7 @@ func (daemon *Daemon) tickMergePipeline(ctx context.Context) {
 }
 
 // advanceMergePipeline refreshes each publishing project's pull requests, so
-// a corrected head is gated and reviewed, then advances every unfinished
+// a corrected head is reviewed, then advances every unfinished
 // review operation. It does nothing on a legacy home.
 func (daemon *Daemon) advanceMergePipeline(ctx context.Context) {
 	if !daemon.customerMaintainer() {
@@ -134,7 +134,7 @@ func (daemon *Daemon) advanceMergePipeline(ctx context.Context) {
 // advanceReviewOperations moves each unfinished review operation one step. It
 // resumes verdict and enqueue writes whose receipts may be lost, observes
 // enqueued heads, and retries task routing until it lands. Startup and the
-// poll tick share it; only startup relaunches an interrupted gate, and the
+// poll tick share it; only startup relaunches an interrupted review, and the
 // tick leaves a write younger than reviewStuckAfter to the goroutine making it.
 func (daemon *Daemon) advanceReviewOperations(ctx context.Context, startup bool) (int, error) {
 	operations, err := daemon.store.InFlightReviewOperations(ctx)
@@ -152,8 +152,8 @@ func (daemon *Daemon) advanceReviewOperations(ctx context.Context, startup bool)
 		switch {
 		case op.RoutePending:
 			err = daemon.finishReviewRouting(ctx, operation.Project, operation.Repository, op)
-		case op.State == "gating" && startup:
-			// A gate takes up to half an hour; startup does not wait for it.
+		case op.State == "running" && startup:
+			// A review takes minutes; startup does not wait for it.
 			daemon.launchReview(operation.Project, op)
 		case op.State == "enqueued" && daemon.customerMaintainer():
 			var coordinator review.Coordinator
@@ -238,8 +238,8 @@ func (daemon *Daemon) resumeReview(ctx context.Context, project kernel.ProjectID
 	return op, errors.Join(err, daemon.finishReviewRouting(ctx, project, repository, op))
 }
 
-// finishReviewRouting completes the second half of a REQUEST_CHANGES verdict,
-// a gate failure or a merge-queue ejection: the note goes to the task that
+// finishReviewRouting completes the second half of a REQUEST_CHANGES verdict
+// or a merge-queue ejection: the note goes to the task that
 // owns the published Change. It stays pending, retried each tick, until that
 // task's feedback carries the operation marker at a new work revision; the
 // marker makes a replay idempotent. A head that cannot be routed, more than
@@ -449,7 +449,7 @@ func (b *daemonReviewBackend) Review(ctx context.Context, checkout string, reque
 		return review.Verdict{}, errors.New("review: no non-author worker account for the provider")
 	}
 	// The provider comes from the workers' tool path: launchd's PATH lacks it.
-	tool, err := provider.WalkToolPath(b.daemon.gateToolPath, request.Provider)
+	tool, err := provider.WalkToolPath(b.daemon.toolPath, request.Provider)
 	if err != nil {
 		return review.Verdict{}, fmt.Errorf("review: %s not on the tool path: %w", request.Provider, err)
 	}
@@ -592,10 +592,6 @@ func reviewEnvironment(root string) []string {
 		"GIT_CONFIG_VALUE_0=",
 	)
 	return result
-}
-
-func (b *daemonReviewBackend) Gate(ctx context.Context, checkout string, operation review.Operation, commit string) (review.GateRun, error) {
-	return b.daemon.runGate(ctx, checkout, operation.ID, commit, len(operation.Gates)+1)
 }
 
 func (b *daemonReviewBackend) Submit(ctx context.Context, operation review.Operation, verdict review.Verdict) error {

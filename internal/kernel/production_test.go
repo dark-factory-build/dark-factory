@@ -163,7 +163,8 @@ func TestCorrectedProductionHeadStoresRecoverableReviewClaimAtomically(t *testin
 		t.Fatal(err)
 	}
 	operationID := "corrected-review"
-	operation := map[string]any{"id": operationID, "state": "running", "request": map[string]any{"repository": "example/factory", "head": newHead}}
+	// A claim persisted as gating, before the pre-review gate was removed, recovers like a running one.
+	operation := map[string]any{"id": operationID, "state": "gating", "request": map[string]any{"repository": "example/factory", "head": newHead}}
 	corrected := ProductionObservation{Repository: "example/factory", ObservedAt: 20, PullRequests: []ProductionPullRequest{{Number: 7, Title: "A machine", Head: newHead, State: "open"}}}
 	if err := store.RecordProductionObservationWithReviewOperations(ctx, project.ID, corrected, []ProductionReviewOperation{{ID: operationID, Document: operation}}, mustTime(t, 20)); err != nil {
 		store.Close()
@@ -201,7 +202,7 @@ func TestCorrectedProductionHeadStoresRecoverableReviewClaimAtomically(t *testin
 			foundState, _ = claim["state"].(string)
 		}
 	}
-	if foundHead != newHead || foundState != "gating" { // no verdict yet: relaunched at startup
+	if foundHead != newHead || foundState != "running" { // no verdict yet: relaunched at startup
 		t.Fatalf("corrected head/review after restart = %q/%q", foundHead, foundState)
 	}
 }
@@ -599,7 +600,7 @@ func TestCorrectedHeadSupersedesOlderInFlightReview(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	fresh := map[string]any{"id": "fresh", "state": "gating", "request": map[string]any{"Repository": "example/factory", "PullNumber": 7, "Head": newHead}}
+	fresh := map[string]any{"id": "fresh", "state": "running", "request": map[string]any{"Repository": "example/factory", "PullNumber": 7, "Head": newHead}}
 	corrected := ProductionObservation{Repository: "example/factory", ObservedAt: 20, PullRequests: []ProductionPullRequest{{Number: 7, Title: "A machine", Head: newHead, State: "open"}}}
 	if err := store.RecordProductionObservationWithReviewOperations(ctx, project.ID, corrected, []ProductionReviewOperation{{ID: "fresh", Document: fresh}}, mustTime(t, 20)); err != nil {
 		t.Fatal(err)
