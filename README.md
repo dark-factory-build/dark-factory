@@ -44,8 +44,7 @@ not mean managing another set of disconnected sessions.
 
 Start with macOS, Git, Python 3.9 or newer, an existing committed checkout, and
 a signed-in Codex CLI. [Install the latest release](docs/install.md#install-a-release),
-keeping the complete release directory together, including `libexec`, and its
-commands on `PATH`. Homebrew supplies Python. Then run:
+putting its commands on `PATH`. Homebrew supplies Python. Then run:
 
 ```sh
 factoryctl init --home "$HOME/.dark-factory"
