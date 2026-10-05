@@ -97,9 +97,13 @@ func (daemon *Daemon) advanceMergePipeline(ctx context.Context) {
 	}
 	projects, _ := daemon.store.PublishingProjects(ctx)
 	for _, project := range projects {
-		_ = daemon.refreshProduction(ctx, project)
+		if err := daemon.refreshProduction(ctx, project); err != nil {
+			fmt.Fprintf(os.Stderr, "factoryd: refresh %s: %v\n", project, err)
+		}
 	}
-	_, _ = daemon.advanceReviewOperations(ctx, false)
+	if _, err := daemon.advanceReviewOperations(ctx, false); err != nil {
+		fmt.Fprintf(os.Stderr, "factoryd: review operations: %v\n", err)
+	}
 }
 
 // advanceReviewOperations moves each unfinished review operation one step. It
@@ -118,6 +122,7 @@ func (daemon *Daemon) advanceReviewOperations(ctx context.Context, startup bool)
 		if err := json.Unmarshal(operation.Document, &op); err != nil || op.ID == "" || op.ID != operation.ID {
 			return advanced, fmt.Errorf("%w: review operation", kernel.ErrCorruptState)
 		}
+		err = nil
 		stuck := startup || daemon.now().Sub(op.UpdatedAt) > reviewStuckAfter
 		switch {
 		case op.RoutePending:
@@ -168,6 +173,8 @@ func (daemon *Daemon) advanceReviewOperations(ctx context.Context, startup bool)
 		}
 		if err == nil {
 			advanced++
+		} else {
+			fmt.Fprintf(os.Stderr, "factoryd: review %s %s: %v\n", operation.ID, op.State, err)
 		}
 	}
 	return advanced, nil
