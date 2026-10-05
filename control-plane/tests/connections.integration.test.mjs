@@ -101,7 +101,6 @@ test('two principals: callback, pagination, refresh, replay, grants and revocati
           return json([]);
         }
         if (url.pathname === '/repos/team/shared/pulls/12') return json({...pull, state: 'closed'});
-        if (url.pathname === '/repos/team/shared/pulls/12/reviews/55') return json({id: 55, html_url: 'https://github.com/team/shared/pull/12#pullrequestreview-55', commit_id: pull.head.sha, body: 'BLOCK: exact reviewed body', state: 'COMMENTED'});
         if (url.pathname === '/repos/team/shared/issues' || url.pathname === '/repos/team/shared/issues/9' || url.pathname === '/repos/team/shared/issues/10') {
           if (url.pathname.endsWith('/issues')) {
             assert.equal(url.searchParams.get('per_page'), '25');
@@ -256,19 +255,13 @@ test('two principals: callback, pagination, refresh, replay, grants and revocati
     const exactPull = (await (await call(bob, 'list_pull_requests', {...pullArgs, pull_number: 12})).json()).result.structuredContent;
     assert.equal(exactPull.next_page, null, 'an exact lookup never advertises another page');
     assert.equal(exactPull.pull_requests[0].number, 12, 'exact lookups retain closed PRs for recovery');
-    const reviewArgs = {repository: 'team/shared', pull_number: 12, review_id: 55};
-    const review = (await (await call(bob, 'observe_pull_request_review', reviewArgs)).json()).result.structuredContent;
-    assert.deepEqual(review, {id: 55, commit_id: pull.head.sha, body: 'BLOCK: exact reviewed body'});
-    assert.deepEqual(requestedPermissions.at(-1), {metadata: 'read', pull_requests: 'read'});
-    for (const [name, args] of [['list_pull_requests', pullArgs], ['observe_pull_request_review', reviewArgs]]) {
-      assert.equal((await call(bob, name, {...args, repository: 'team/guessed'})).status, 401);
-      unavailable = name === 'list_pull_requests' ? '/repos/team/shared/pulls' : '/repos/team/shared/pulls/12/reviews/55';
-      for (const status of [403, 404, 429, 503]) {
-        unavailableStatus = status;
-        const failed = await (await call(bob, name, args)).json();
-        assert.equal(failed.result.isError, true);
-        assert.match(failed.result.content[0].text, /unavailable/);
-      }
+    assert.equal((await call(bob, 'list_pull_requests', {...pullArgs, repository: 'team/guessed'})).status, 401);
+    unavailable = '/repos/team/shared/pulls';
+    for (const status of [403, 404, 429, 503]) {
+      unavailableStatus = status;
+      const failed = await (await call(bob, 'list_pull_requests', pullArgs)).json();
+      assert.equal(failed.result.isError, true);
+      assert.match(failed.result.content[0].text, /unavailable/);
     }
     unavailable = ''; unavailableStatus = 503;
     const issuePage = (await (await call(bob, 'list_issues', { repository: 'team/shared', page: 1, label: 'needs triage' })).json()).result.structuredContent;

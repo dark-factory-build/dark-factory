@@ -10,13 +10,11 @@ use crate::{
     BrokerState,
     access::AccessAuthority,
     github_app::{
-        AppAuthority, ClosePullRequest, CreateIssue, CreatePullRequest, EnqueuePullRequest,
-        ListIssues, ListPullRequests, MergePullRequestAtHead, ObserveFile, ObserveIssue,
-        ObservePullRequestChecks, ObservePullRequestMerge, ObservePullRequestReview,
-        ObservePullRequestWorkflows, ObserveRef, ObserveRelease, ObserveReleaseWorkflow,
+        AppAuthority, CreateIssue, CreatePullRequest, EnqueuePullRequest, ListIssues,
+        ListPullRequests, ObserveFile, ObserveIssue, ObservePullRequestChecks,
+        ObservePullRequestMerge, ObserveRef, ObserveRelease, ObserveReleaseWorkflow,
         ObserveRepository, ObserveTree, OperationError, PublishCommit, PublishReleaseTag,
-        ReadPullRequestJobLog, RecoverRelease, RerunFailedPullRequestJobs, ResolveIssue,
-        SubmitPullRequestReview, UpdatePullRequestBody, canonical_operation_id,
+        RecoverRelease, SubmitPullRequestReview, UpdatePullRequestBody, canonical_operation_id,
     },
     journal::DeliveryJournal,
 };
@@ -492,20 +490,6 @@ fn tools() -> Value {
         },
         "annotations": {"readOnlyHint": true, "destructiveHint": false, "openWorldHint": true}
     }, {
-        "name": "observe_pull_request_review",
-        "title": "Read an exact pull request review",
-        "description": "Read one recorded review by its PR and review ID, including its commit and complete body.",
-        "inputSchema": {
-            "type": "object", "additionalProperties": false,
-            "properties": {"repository": {"type": "string"}, "pull_number": {"type": "integer", "minimum": 1}, "review_id": {"type": "integer", "minimum": 1}},
-            "required": ["repository", "pull_number", "review_id"]
-        },
-        "outputSchema": {
-            "type": "object", "additionalProperties": false, "required": ["id", "commit_id", "body"],
-            "properties": {"id": {"type": "integer", "minimum": 1}, "commit_id": {"type": "string", "pattern": "^[0-9a-f]{40}$"}, "body": {"type": "string", "maxLength": 262144}}
-        },
-        "annotations": {"readOnlyHint": true, "destructiveHint": false, "openWorldHint": true}
-    }, {
         "name": "observe_issue",
         "title": "Observe one issue",
         "description": "Return the live state of one repository issue. Pull requests are refused.",
@@ -531,35 +515,6 @@ fn tools() -> Value {
             "additionalProperties": false
         },
         "annotations": {"readOnlyHint": true, "destructiveHint": false, "openWorldHint": true}
-    }, {
-        "name": "resolve_issue",
-        "title": "Resolve an issue with evidence",
-        "description": "Post one bounded evidence comment and close the same real issue as completed or not planned. A durable marker reconciles partial completion without duplicate comments.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "repository": {"type": "string", "pattern": "^[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}$"},
-                "operation_id": {"type": "string", "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"},
-                "issue_number": {"type": "integer", "minimum": 1},
-                "body": {"type": "string", "minLength": 1, "maxLength": 16000},
-                "state_reason": {"type": "string", "enum": ["completed", "not_planned"]}
-            },
-            "required": ["repository", "operation_id", "issue_number", "body", "state_reason"],
-            "additionalProperties": false
-        },
-        "outputSchema": {
-            "type": "object",
-            "properties": {
-                "number": {"type": "integer"},
-                "url": {"type": "string"},
-                "comment_url": {"type": "string"},
-                "state": {"type": "string", "const": "closed"},
-                "state_reason": {"type": "string", "enum": ["completed", "not_planned"]}
-            },
-            "required": ["number", "url", "comment_url", "state", "state_reason"],
-            "additionalProperties": false
-        },
-        "annotations": {"readOnlyHint": false, "destructiveHint": true, "idempotentHint": true, "openWorldHint": true}
     }, {
         "name": "publish_release_tag",
         "title": "Publish an immutable release tag",
@@ -673,33 +628,6 @@ fn tools() -> Value {
         },
         "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": true}
     }, {
-        "name": "close_pull_request",
-        "title": "Close an exact-head pull request",
-        "description": "Close one pull request only while it still names the stated head commit. Replays require the same operation UUID and request.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "repository": {"type": "string", "pattern": "^[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}$"},
-                "operation_id": {"type": "string", "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"},
-                "pull_number": {"type": "integer", "minimum": 1},
-                "head_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"}
-            },
-            "required": ["repository", "operation_id", "pull_number", "head_sha"],
-            "additionalProperties": false
-        },
-        "outputSchema": {
-            "type": "object",
-            "properties": {
-                "pull_number": {"type": "integer"},
-                "head_sha": {"type": "string"},
-                "url": {"type": "string"},
-                "state": {"type": "string", "const": "closed"}
-            },
-            "required": ["pull_number", "head_sha", "url", "state"],
-            "additionalProperties": false
-        },
-        "annotations": {"readOnlyHint": false, "destructiveHint": true, "idempotentHint": true, "openWorldHint": true}
-    }, {
         "name": "submit_pull_request_review",
         "title": "Submit an exact-head pull request review",
         "description": "Record an adversarial-review verdict against one pull request head commit. ALLOW satisfies the required `review` check; REQUEST_CHANGES blocks it, and a block at a head remains until a new head or an independent exact-head ALLOW explicitly corrects that prior App review operation; COMMENT decides nothing. All three are this App's own words and none is a GitHub review state: the App authors the pull requests it reviews and GitHub refuses a self-review either way, so every verdict is submitted as a GitHub COMMENT and the verdict itself rides in a line the App writes. That is the line the `review` check reads, which is why `body` carries the reviewer's findings and must not contain one. Replays require the same operation UUID and request.",
@@ -768,103 +696,6 @@ fn tools() -> Value {
             "additionalProperties": false
         },
         "annotations": {"readOnlyHint": true, "destructiveHint": false, "openWorldHint": true}
-    }, {
-        "name": "observe_pull_request_workflows",
-        "title": "Observe exact-head pull request workflows",
-        "description": "Return the bounded CI workflow runs, jobs, and steps for one exact pull request head and live default base.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "repository": {"type": "string", "pattern": "^[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}$"},
-                "workflow_path": {"type": "string", "pattern": "^\\.github/workflows/[A-Za-z0-9._-]{1,100}\\.ya?ml$"},
-                "pull_number": {"type": "integer", "minimum": 1},
-                "head_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
-                "base": {"type": "string", "minLength": 1, "maxLength": 240}
-            },
-            "required": ["repository", "workflow_path", "pull_number", "head_sha", "base"],
-            "additionalProperties": false
-        },
-        "outputSchema": {
-            "type": "object",
-            "properties": {
-                "pull_number": {"type": "integer"},
-                "head_sha": {"type": "string"},
-                "base": {"type": "string"},
-                "runs": {
-                    "type": "array",
-                    "items": workflow_run_schema()
-                }
-            },
-            "required": ["pull_number", "head_sha", "base", "runs"],
-            "additionalProperties": false
-        },
-        "annotations": {"readOnlyHint": true, "destructiveHint": false, "openWorldHint": true}
-    }, {
-        "name": "read_pull_request_job_log",
-        "title": "Read one failed pull request job log",
-        "description": "Return at most the last 64 KiB of one completed failed job log after re-proving its exact pull request head, base, run, and attempt.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "repository": {"type": "string", "pattern": "^[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}$"},
-                "workflow_path": {"type": "string", "pattern": "^\\.github/workflows/[A-Za-z0-9._-]{1,100}\\.ya?ml$"},
-                "pull_number": {"type": "integer", "minimum": 1},
-                "head_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
-                "base": {"type": "string", "minLength": 1, "maxLength": 240},
-                "run_id": {"type": "integer", "minimum": 1},
-                "run_attempt": {"type": "integer", "minimum": 1},
-                "job_id": {"type": "integer", "minimum": 1}
-            },
-            "required": ["repository", "workflow_path", "pull_number", "head_sha", "base", "run_id", "run_attempt", "job_id"],
-            "additionalProperties": false
-        },
-        "outputSchema": {
-            "type": "object",
-            "properties": {
-                "pull_number": {"type": "integer"},
-                "head_sha": {"type": "string"},
-                "base": {"type": "string"},
-                "run_id": {"type": "integer"},
-                "run_attempt": {"type": "integer"},
-                "job_id": {"type": "integer"},
-                "text": {"type": "string"}
-            },
-            "required": ["pull_number", "head_sha", "base", "run_id", "run_attempt", "job_id", "text"],
-            "additionalProperties": false
-        },
-        "annotations": {"readOnlyHint": true, "destructiveHint": false, "openWorldHint": true}
-    }, {
-        "name": "rerun_failed_pull_request_jobs",
-        "title": "Rerun failed jobs for an exact pull request workflow",
-        "description": "Rerun only failed jobs from one completed failed CI run after re-proving its exact pull request head, base, run, and attempt. Replays require the same operation UUID and request.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "repository": {"type": "string", "pattern": "^[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}$"},
-                "workflow_path": {"type": "string", "pattern": "^\\.github/workflows/[A-Za-z0-9._-]{1,100}\\.ya?ml$"},
-                "operation_id": {"type": "string", "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"},
-                "pull_number": {"type": "integer", "minimum": 1},
-                "head_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
-                "base": {"type": "string", "minLength": 1, "maxLength": 240},
-                "run_id": {"type": "integer", "minimum": 1},
-                "run_attempt": {"type": "integer", "minimum": 1}
-            },
-            "required": ["repository", "workflow_path", "operation_id", "pull_number", "head_sha", "base", "run_id", "run_attempt"],
-            "additionalProperties": false
-        },
-        "outputSchema": {
-            "type": "object",
-            "properties": {
-                "pull_number": {"type": "integer"},
-                "head_sha": {"type": "string"},
-                "base": {"type": "string"},
-                "run_id": {"type": "integer"},
-                "run_attempt": {"type": "integer"}
-            },
-            "required": ["pull_number", "head_sha", "base", "run_id", "run_attempt"],
-            "additionalProperties": false
-        },
-        "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": true}
     }, {
         "name": "observe_pull_request_merge",
         "title": "Observe an exact-head merge outcome",
@@ -970,35 +801,6 @@ fn tools() -> Value {
             "additionalProperties": false
         },
         "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": true}
-    }, {
-        "name": "merge_pull_request_at_head",
-        "title": "Merge an exact pull request head",
-        "description": "Squash-merge one pull request at its exact head into the current default base only after exact-head ALLOW, no BLOCK, and all checks pass. A protected base requires a strict squash ruleset with no App bypass; exact rules-read 403 on a private repo instead requires protected:false, squash enabled, explicit no-queue reads, and an unchanged base re-read. Classic protection alone is unsupported. Replays require the same operation UUID and request.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "repository": {"type": "string", "pattern": "^[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}$"},
-                "operation_id": {"type": "string", "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"},
-                "review_operation_id": {"type": "string", "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"},
-                "pull_number": {"type": "integer", "minimum": 1},
-                "head_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
-                "base": {"type": "string", "minLength": 1, "maxLength": 240}
-            },
-            "required": ["repository", "operation_id", "review_operation_id", "pull_number", "head_sha", "base"],
-            "additionalProperties": false
-        },
-        "outputSchema": {
-            "type": "object",
-            "properties": {
-                "pull_number": {"type": "integer"},
-                "head_sha": {"type": "string"},
-                "base": {"type": "string"},
-                "merge_commit_sha": {"type": "string"}
-            },
-            "required": ["pull_number", "head_sha", "base", "merge_commit_sha"],
-            "additionalProperties": false
-        },
-        "annotations": {"readOnlyHint": false, "destructiveHint": true, "idempotentHint": true, "openWorldHint": true}
     }]})
 }
 
@@ -1139,33 +941,12 @@ async fn call_tool(id: Value, request: &Map<String, Value>, mcp: &McpState) -> R
                 Err(error) => operation_error(id, error),
             }
         }
-        Some("observe_pull_request_review") => {
-            let Ok(arguments) = serde_json::from_value::<ObservePullRequestReview>(arguments)
-            else {
-                return json_rpc_error(id, -32602, "Invalid params");
-            };
-            match mcp.app.observe_pull_request_review(arguments).await {
-                Ok(result) => {
-                    serialized_tool_result(id, &result, "Pull request review was observed.")
-                }
-                Err(error) => operation_error(id, error),
-            }
-        }
         Some("observe_issue") => {
             let Ok(arguments) = serde_json::from_value::<ObserveIssue>(arguments) else {
                 return json_rpc_error(id, -32602, "Invalid params");
             };
             match mcp.app.observe_issue(arguments).await {
                 Ok(result) => serialized_tool_result(id, &result, "Issue state was observed."),
-                Err(error) => operation_error(id, error),
-            }
-        }
-        Some("resolve_issue") => {
-            let Ok(arguments) = serde_json::from_value::<ResolveIssue>(arguments) else {
-                return json_rpc_error(id, -32602, "Invalid params");
-            };
-            match mcp.app.resolve_issue(&mcp.journal, arguments).await {
-                Ok(result) => serialized_tool_result(id, &result, "Issue is durably resolved."),
                 Err(error) => operation_error(id, error),
             }
         }
@@ -1241,17 +1022,6 @@ async fn call_tool(id: Value, request: &Map<String, Value>, mcp: &McpState) -> R
                 Err(error) => operation_error(id, error),
             }
         }
-        Some("close_pull_request") => {
-            let Ok(arguments) = serde_json::from_value::<ClosePullRequest>(arguments) else {
-                return json_rpc_error(id, -32602, "Invalid params");
-            };
-            match mcp.app.close_pull_request(&mcp.journal, arguments).await {
-                Ok(result) => {
-                    serialized_tool_result(id, &result, "Pull request is durably closed.")
-                }
-                Err(error) => operation_error(id, error),
-            }
-        }
         Some("submit_pull_request_review") => {
             let Ok(arguments) = serde_json::from_value::<SubmitPullRequestReview>(arguments) else {
                 return json_rpc_error(id, -32602, "Invalid params");
@@ -1287,21 +1057,6 @@ async fn call_tool(id: Value, request: &Map<String, Value>, mcp: &McpState) -> R
                 Err(error) => operation_error(id, error),
             }
         }
-        Some("merge_pull_request_at_head") => {
-            let Ok(arguments) = serde_json::from_value::<MergePullRequestAtHead>(arguments) else {
-                return json_rpc_error(id, -32602, "Invalid params");
-            };
-            match mcp
-                .app
-                .merge_pull_request_at_head(&mcp.journal, arguments)
-                .await
-            {
-                Ok(result) => {
-                    serialized_tool_result(id, &result, "Pull request is durably merged.")
-                }
-                Err(error) => operation_error(id, error),
-            }
-        }
         Some("observe_pull_request_checks") => {
             let Ok(arguments) = serde_json::from_value::<ObservePullRequestChecks>(arguments)
             else {
@@ -1310,43 +1065,6 @@ async fn call_tool(id: Value, request: &Map<String, Value>, mcp: &McpState) -> R
             match mcp.app.observe_pull_request_checks(arguments).await {
                 Ok(result) => {
                     serialized_tool_result(id, &result, "Exact-head check runs were observed.")
-                }
-                Err(error) => operation_error(id, error),
-            }
-        }
-        Some("observe_pull_request_workflows") => {
-            let Ok(arguments) = serde_json::from_value::<ObservePullRequestWorkflows>(arguments)
-            else {
-                return json_rpc_error(id, -32602, "Invalid params");
-            };
-            match mcp.app.observe_pull_request_workflows(arguments).await {
-                Ok(result) => {
-                    serialized_tool_result(id, &result, "Exact-head workflow runs were observed.")
-                }
-                Err(error) => operation_error(id, error),
-            }
-        }
-        Some("read_pull_request_job_log") => {
-            let Ok(arguments) = serde_json::from_value::<ReadPullRequestJobLog>(arguments) else {
-                return json_rpc_error(id, -32602, "Invalid params");
-            };
-            match mcp.app.read_pull_request_job_log(arguments).await {
-                Ok(result) => serialized_tool_result(id, &result, "Failed job log tail was read."),
-                Err(error) => operation_error(id, error),
-            }
-        }
-        Some("rerun_failed_pull_request_jobs") => {
-            let Ok(arguments) = serde_json::from_value::<RerunFailedPullRequestJobs>(arguments)
-            else {
-                return json_rpc_error(id, -32602, "Invalid params");
-            };
-            match mcp
-                .app
-                .rerun_failed_pull_request_jobs(&mcp.journal, arguments)
-                .await
-            {
-                Ok(result) => {
-                    serialized_tool_result(id, &result, "Failed jobs were durably rerun.")
                 }
                 Err(error) => operation_error(id, error),
             }

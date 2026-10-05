@@ -26,34 +26,14 @@ const MAX_GITHUB_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 /// bulk upload channel, and the Worker must hold every blob in memory.
 const MAX_COMMIT_FILES: usize = 50;
 const MAX_COMMIT_FILE_BYTES: usize = 1_000_000;
-const MAX_ISSUE_COMMENT_PAGES: usize = 10;
-const MAX_ISSUE_COMMENTS_PER_PAGE: usize = 100;
 const MAX_ISSUE_LABELS: usize = 100;
 const MAX_ISSUE_LABEL_BYTES: usize = 50;
 const MAX_WORKFLOW_RUNS: usize = 20;
-const MAX_WORKFLOW_JOBS: usize = 100;
 const MAX_WORKFLOW_STEPS: usize = 100;
-const MAX_JOB_LOG_BYTES: usize = 64 * 1024;
-const MAX_LOG_REDIRECT_BYTES: usize = 4_096;
 #[derive(Clone, Copy)]
 struct WorkflowRef<'a> {
     api_id: &'a str,
     response_path: &'a str,
-}
-
-impl<'a> WorkflowRef<'a> {
-    /// A caller-named workflow. `valid_workflow_path` has already proven the
-    /// shape, so the API id is exactly the file name the path ends with, and
-    /// the two halves cannot disagree because both are read from one string.
-    fn requested(path: &'a str) -> Result<Self, OperationError> {
-        let api_id = path
-            .strip_prefix(".github/workflows/")
-            .ok_or(OperationError::InvalidInput)?;
-        Ok(Self {
-            api_id,
-            response_path: path,
-        })
-    }
 }
 
 const RELEASE_WORKFLOW: WorkflowRef<'static> = WorkflowRef {
@@ -172,10 +152,6 @@ pub(crate) enum RefusalReason {
     /// falling back to a merge.
     #[error("the queue read found no merge queue on the base branch")]
     NoMergeQueue,
-    #[error("the workflow run is not a completed failure")]
-    RunNotFailed,
-    #[error("the workflow job is not a completed failure")]
-    JobNotFailed,
     #[error("the pull request was already queued before this operation claimed it")]
     AlreadyQueued,
     /// The App is not installed on the named repository, or the installation
@@ -195,16 +171,6 @@ pub(crate) enum RefusalReason {
     /// Determinate: the same commit truncates every time.
     #[error("the commit's tree is too large for GitHub to return whole")]
     TreeTruncated,
-    #[error("the direct merge preconditions are not satisfied")]
-    MergePreconditions,
-    #[error("the pull request checks are not complete and successful")]
-    MergeChecks,
-    #[error("the required review did not allow this pull request head")]
-    MergeReview,
-    #[error("the pull request head conflicted with the merge request")]
-    MergeHeadConflict,
-    #[error("github refused the merge with status {0}")]
-    MergeRejected(u16),
 }
 
 /// Which pre-execution rejection classes appeared. More than one can:
@@ -324,18 +290,6 @@ pub(crate) struct UpdatePullRequestBody {
     pub(crate) operation_id: String,
     pub(crate) pull_number: i64,
     pub(crate) body: String,
-}
-
-/// Close one pull request only while it still names the head the caller
-/// reviewed. GitHub's close endpoint has no caller-selected state or generic
-/// update fields; this surface exposes only the one terminal transition.
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct ClosePullRequest {
-    pub(crate) repository: String,
-    pub(crate) operation_id: String,
-    pub(crate) pull_number: i64,
-    pub(crate) head_sha: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -558,14 +512,6 @@ pub(crate) struct ListPullRequests {
     pub(crate) pull_number: Option<i64>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct ObservePullRequestReview {
-    pub(crate) repository: String,
-    pub(crate) pull_number: i64,
-    pub(crate) review_id: i64,
-}
-
 #[derive(Debug, Serialize)]
 pub(crate) struct PullRequestPage {
     pub(crate) repository_id: i64,
@@ -588,13 +534,6 @@ pub(crate) struct PullRequestCandidate {
     pub(crate) mergeable: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) merge_state_status: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-pub(crate) struct PullRequestReviewObservation {
-    pub(crate) id: i64,
-    pub(crate) commit_id: String,
-    pub(crate) body: String,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -635,41 +574,6 @@ pub(crate) struct IssueObservationResult {
     pub(crate) updated_at: String,
     pub(crate) state: String,
     pub(crate) state_reason: Option<String>,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum IssueResolutionReason {
-    Completed,
-    NotPlanned,
-}
-
-impl IssueResolutionReason {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::Completed => "completed",
-            Self::NotPlanned => "not_planned",
-        }
-    }
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct ResolveIssue {
-    pub(crate) repository: String,
-    pub(crate) operation_id: String,
-    pub(crate) issue_number: i64,
-    pub(crate) body: String,
-    pub(crate) state_reason: IssueResolutionReason,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-pub(crate) struct ResolveIssueResult {
-    pub(crate) number: i64,
-    pub(crate) url: String,
-    pub(crate) comment_url: String,
-    pub(crate) state: String,
-    pub(crate) state_reason: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -741,10 +645,8 @@ pub(crate) struct PublishCommit {
 
 /// Add one pull request to the merge queue for its base branch.
 ///
-/// This is the queue path for repositories whose active repository ruleset
-/// requires a merge queue. Repositories with an active strict ruleset and no
-/// queue use the separate exact-head `merge_pull_request_at_head` operation
-/// instead.
+/// This is the only merge path: the base branch's active repository ruleset
+/// must require a merge queue.
 ///
 /// There is no merge method here. The queue's ruleset decides it, and a
 /// caller-supplied method would either be ignored or contradict the ruleset.
@@ -768,29 +670,6 @@ pub(crate) struct EnqueuePullRequest {
     /// atomically binds only the head; a body edit can race with that write.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) reviewed_body_digest: Option<String>,
-}
-
-/// Merge one pull request directly, but only after proving every repository,
-/// branch-rule, check, and review condition at the exact head. The operation
-/// deliberately has no caller-selected URL, method, or merge mode: this is
-/// one fixed `PUT /pulls/{n}/merge` squash path.
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct MergePullRequestAtHead {
-    pub(crate) repository: String,
-    pub(crate) operation_id: String,
-    pub(crate) review_operation_id: String,
-    pub(crate) pull_number: i64,
-    pub(crate) head_sha: String,
-    pub(crate) base: String,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-pub(crate) struct MergePullRequestAtHeadResult {
-    pub(crate) pull_number: i64,
-    pub(crate) head_sha: String,
-    pub(crate) base: String,
-    pub(crate) merge_commit_sha: String,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -827,14 +706,6 @@ pub(crate) struct PullRequestResult {
     pub(crate) base_sha: String,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
-pub(crate) struct ClosePullRequestResult {
-    pub(crate) pull_number: i64,
-    pub(crate) head_sha: String,
-    pub(crate) url: String,
-    pub(crate) state: String,
-}
-
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct ReviewResult {
     pub(crate) review_id: i64,
@@ -860,26 +731,6 @@ pub(crate) struct CheckResult {
     pub(crate) status: String,
     pub(crate) conclusion: Option<String>,
     pub(crate) url: String,
-    #[serde(skip)]
-    app_id: Option<i64>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct ObservePullRequestWorkflows {
-    pub(crate) repository: String,
-    pub(crate) workflow_path: String,
-    pub(crate) pull_number: i64,
-    pub(crate) head_sha: String,
-    pub(crate) base: String,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-pub(crate) struct PullRequestWorkflowsResult {
-    pub(crate) pull_number: i64,
-    pub(crate) head_sha: String,
-    pub(crate) base: String,
-    pub(crate) runs: Vec<WorkflowRunResult>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -910,52 +761,6 @@ pub(crate) struct WorkflowStepResult {
     pub(crate) name: String,
     pub(crate) status: String,
     pub(crate) conclusion: Option<String>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct ReadPullRequestJobLog {
-    pub(crate) repository: String,
-    pub(crate) workflow_path: String,
-    pub(crate) pull_number: i64,
-    pub(crate) head_sha: String,
-    pub(crate) base: String,
-    pub(crate) run_id: i64,
-    pub(crate) run_attempt: i64,
-    pub(crate) job_id: i64,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-pub(crate) struct JobLogResult {
-    pub(crate) pull_number: i64,
-    pub(crate) head_sha: String,
-    pub(crate) base: String,
-    pub(crate) run_id: i64,
-    pub(crate) run_attempt: i64,
-    pub(crate) job_id: i64,
-    pub(crate) text: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct RerunFailedPullRequestJobs {
-    pub(crate) repository: String,
-    pub(crate) workflow_path: String,
-    pub(crate) operation_id: String,
-    pub(crate) pull_number: i64,
-    pub(crate) head_sha: String,
-    pub(crate) base: String,
-    pub(crate) run_id: i64,
-    pub(crate) run_attempt: i64,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-pub(crate) struct RerunFailedPullRequestJobsResult {
-    pub(crate) pull_number: i64,
-    pub(crate) head_sha: String,
-    pub(crate) base: String,
-    pub(crate) run_id: i64,
-    pub(crate) run_attempt: i64,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1342,36 +1147,6 @@ impl AppAuthority {
     }
 
     #[cfg(target_arch = "wasm32")]
-    pub(crate) async fn observe_pull_request_review(
-        &self,
-        mut request: ObservePullRequestReview,
-    ) -> Result<PullRequestReviewObservation, OperationError> {
-        request.validate()?;
-        let repository = RepositoryName::requested(&mut request.repository)?;
-        let token = self
-            .0
-            .installation_token(
-                repository,
-                BTreeMap::from([("pull_requests", "read"), ("metadata", "read")]),
-            )
-            .await
-            .map_err(issue_read_error)?;
-        let review: PullRequestReview = github_json(
-            &format!(
-                "https://api.github.com/repos/{}/{}/pulls/{}/reviews/{}",
-                token.repository.owner,
-                token.repository.name,
-                request.pull_number,
-                request.review_id
-            ),
-            token.as_str(),
-        )
-        .await
-        .map_err(|error: Error| issue_read_error(error.into()))?;
-        review_observation(request.review_id, review)
-    }
-
-    #[cfg(target_arch = "wasm32")]
     pub(crate) async fn observe_issue(
         &self,
         mut request: ObserveIssue,
@@ -1389,134 +1164,6 @@ impl AppAuthority {
             .read_issue(&token, request.issue_number)
             .await?
             .into_observation()
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    pub(crate) async fn resolve_issue(
-        &self,
-        journal: &DeliveryJournal,
-        mut request: ResolveIssue,
-    ) -> Result<ResolveIssueResult, OperationError> {
-        request.validate()?;
-        let repository = RepositoryName::requested(&mut request.repository)?;
-        let operation = request.operation("resolve_issue")?;
-        let state = journal
-            .begin_operation(&operation)
-            .await
-            .map_err(|_| OperationError::Unavailable)?;
-        if let Some(result) = completed_or_conflict::<ResolveIssueResult>(&state)? {
-            return Ok(result);
-        }
-        let token = self
-            .0
-            .installation_token(
-                repository,
-                BTreeMap::from([("issues", "write"), ("metadata", "read")]),
-            )
-            .await?;
-        let progress = self.0.reconcile_issue_resolution(&token, &request).await?;
-        if let Some(result) = progress.completed(&request) {
-            return complete(journal, &operation, result).await;
-        }
-        if matches!(state, OperationRecord::Executing) {
-            journal
-                .mark_operation(&operation, OperationTransition::Indeterminate)
-                .await
-                .map_err(|_| OperationError::Unavailable)?;
-            return Err(OperationError::Indeterminate);
-        }
-        // A prior attempt may have posted the comment and lost the response.
-        // It is safe to retry only the close, never the comment, when the
-        // marker is already present.
-        if matches!(state, OperationRecord::Indeterminate) && progress.comment.is_none() {
-            return Err(OperationError::Indeterminate);
-        }
-        if matches!(state, OperationRecord::New | OperationRecord::Planned) {
-            match journal
-                .mark_operation(&operation, OperationTransition::Executing)
-                .await
-                .map_err(|_| OperationError::Unavailable)?
-            {
-                OperationRecord::Claimed => {}
-                OperationRecord::Completed(result) => {
-                    return serde_json::from_str(&result).map_err(|_| OperationError::Unavailable);
-                }
-                OperationRecord::Conflict => return Err(OperationError::Conflict),
-                OperationRecord::Executing | OperationRecord::Indeterminate => {
-                    return Err(OperationError::Indeterminate);
-                }
-                OperationRecord::New | OperationRecord::Planned => {
-                    return Err(OperationError::Unavailable);
-                }
-            }
-        }
-
-        let comment = match progress.comment {
-            Some(comment) => comment,
-            None => match self.0.post_issue_comment(&token, &request).await {
-                Ok(comment) => comment,
-                Err(OperationError::Refused(reason)) => {
-                    return refuse(journal, &operation, reason).await;
-                }
-                Err(_) => {
-                    if let Some(result) = self
-                        .0
-                        .reconcile_issue_resolution(&token, &request)
-                        .await?
-                        .completed(&request)
-                    {
-                        return complete(journal, &operation, result).await;
-                    }
-                    let _ = journal
-                        .mark_operation(&operation, OperationTransition::Indeterminate)
-                        .await;
-                    return Err(OperationError::Indeterminate);
-                }
-            },
-        };
-        match self.0.close_issue(&token, &request).await {
-            Ok(issue) => {
-                let result = ResolveIssueResult {
-                    number: issue.number,
-                    url: issue.html_url,
-                    comment_url: comment.html_url,
-                    state: issue.state,
-                    state_reason: issue.state_reason.unwrap_or_default(),
-                };
-                if result.state != "closed" || result.state_reason != request.state_reason.as_str()
-                {
-                    let _ = journal
-                        .mark_operation(&operation, OperationTransition::Indeterminate)
-                        .await;
-                    return Err(OperationError::Indeterminate);
-                }
-                complete(journal, &operation, result).await
-            }
-            Err(OperationError::Refused(reason)) => {
-                // The evidence comment is already durable, so the whole
-                // operation is partially applied even though GitHub proved
-                // the close itself did not run. Keep the journal
-                // reconcilable, but preserve the typed reason for this call.
-                let _ = journal
-                    .mark_operation(&operation, OperationTransition::Indeterminate)
-                    .await;
-                Err(OperationError::Refused(reason))
-            }
-            Err(_) => {
-                if let Some(result) = self
-                    .0
-                    .reconcile_issue_resolution(&token, &request)
-                    .await?
-                    .completed(&request)
-                {
-                    return complete(journal, &operation, result).await;
-                }
-                let _ = journal
-                    .mark_operation(&operation, OperationTransition::Indeterminate)
-                    .await;
-                Err(OperationError::Indeterminate)
-            }
-        }
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -1741,98 +1388,6 @@ impl AppAuthority {
             Err(OperationError::Refused(reason)) => refuse(journal, &operation, reason).await,
             Err(_) => {
                 if let Ok(Some(result)) = self.0.reconcile_pull_request_body(&token, &request).await
-                {
-                    return complete(journal, &operation, result).await;
-                }
-                let _ = journal
-                    .mark_operation(&operation, OperationTransition::Indeterminate)
-                    .await;
-                Err(OperationError::Indeterminate)
-            }
-        }
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    pub(crate) async fn close_pull_request(
-        &self,
-        journal: &DeliveryJournal,
-        mut request: ClosePullRequest,
-    ) -> Result<ClosePullRequestResult, OperationError> {
-        request.validate()?;
-        let repository = RepositoryName::requested(&mut request.repository)?;
-        let operation = request.operation("close_pull_request")?;
-        let state = journal
-            .begin_operation(&operation)
-            .await
-            .map_err(|_| OperationError::Unavailable)?;
-        if let Some(result) = completed_or_conflict::<ClosePullRequestResult>(&state)? {
-            return Ok(result);
-        }
-        let token = self
-            .0
-            .installation_token(
-                repository,
-                BTreeMap::from([("metadata", "read"), ("pull_requests", "write")]),
-            )
-            .await?;
-        if matches!(
-            state,
-            OperationRecord::Executing | OperationRecord::Indeterminate
-        ) {
-            if let Some(result) = self
-                .0
-                .reconcile_closed_pull_request(&token, &request)
-                .await?
-            {
-                return complete(journal, &operation, result).await;
-            }
-            journal
-                .mark_operation(&operation, OperationTransition::Indeterminate)
-                .await
-                .map_err(|_| OperationError::Unavailable)?;
-            return Err(OperationError::Indeterminate);
-        }
-        match journal
-            .mark_operation(&operation, OperationTransition::Executing)
-            .await
-            .map_err(|_| OperationError::Unavailable)?
-        {
-            OperationRecord::Claimed => {}
-            OperationRecord::Completed(result) => {
-                return serde_json::from_str(&result).map_err(|_| OperationError::Unavailable);
-            }
-            OperationRecord::Conflict => return Err(OperationError::Conflict),
-            OperationRecord::Executing | OperationRecord::Indeterminate => {
-                if let Some(result) = self
-                    .0
-                    .reconcile_closed_pull_request(&token, &request)
-                    .await?
-                {
-                    return complete(journal, &operation, result).await;
-                }
-                return Err(OperationError::Indeterminate);
-            }
-            OperationRecord::New | OperationRecord::Planned => {
-                return Err(OperationError::Unavailable);
-            }
-        }
-        match self.0.reconcile_closed_pull_request(&token, &request).await {
-            Ok(Some(result)) => return complete(journal, &operation, result).await,
-            Ok(None) => {}
-            Err(error) => {
-                journal
-                    .mark_operation(&operation, OperationTransition::Refused)
-                    .await
-                    .map_err(|_| OperationError::Unavailable)?;
-                return Err(error);
-            }
-        }
-        match self.0.close_pull_request(&token, &request).await {
-            Ok(result) => complete(journal, &operation, result).await,
-            Err(OperationError::Refused(reason)) => refuse(journal, &operation, reason).await,
-            Err(_) => {
-                if let Ok(Some(result)) =
-                    self.0.reconcile_closed_pull_request(&token, &request).await
                 {
                     return complete(journal, &operation, result).await;
                 }
@@ -2551,108 +2106,6 @@ impl AppAuthority {
     }
 
     #[cfg(target_arch = "wasm32")]
-    pub(crate) async fn merge_pull_request_at_head(
-        &self,
-        journal: &DeliveryJournal,
-        mut request: MergePullRequestAtHead,
-    ) -> Result<MergePullRequestAtHeadResult, OperationError> {
-        request.validate()?;
-        let repository = RepositoryName::requested(&mut request.repository)?;
-        let operation = request.operation("merge_pull_request_at_head")?;
-        let state = journal
-            .begin_operation(&operation)
-            .await
-            .map_err(|_| OperationError::Unavailable)?;
-        if let Some(result) = completed_or_conflict::<MergePullRequestAtHeadResult>(&state)? {
-            return Ok(result);
-        }
-        let token = self
-            .0
-            .installation_token(
-                repository,
-                BTreeMap::from([
-                    ("checks", "read"),
-                    // GitHub's Merge a pull request endpoint requires
-                    // Contents: write; pull-request reads only need read.
-                    ("contents", "write"),
-                    // Detailed rulesets are Administration-gated; this is the
-                    // only operation that reads them, and it performs no admin
-                    // mutation.
-                    ("administration", "write"),
-                    ("merge_queues", "read"),
-                    ("metadata", "read"),
-                    ("pull_requests", "read"),
-                ]),
-            )
-            .await?;
-
-        if matches!(
-            state,
-            OperationRecord::Executing | OperationRecord::Indeterminate
-        ) {
-            if let Ok(Some(result)) = self.0.reconcile_merge(&token, &request).await {
-                return complete(journal, &operation, result).await;
-            }
-            let _ = journal
-                .mark_operation(&operation, OperationTransition::Indeterminate)
-                .await;
-            return Err(OperationError::Indeterminate);
-        }
-        match journal
-            .mark_operation(&operation, OperationTransition::Executing)
-            .await
-            .map_err(|_| OperationError::Unavailable)?
-        {
-            OperationRecord::Claimed => {}
-            OperationRecord::Completed(result) => {
-                return serde_json::from_str(&result).map_err(|_| OperationError::Unavailable);
-            }
-            OperationRecord::Conflict => return Err(OperationError::Conflict),
-            OperationRecord::Executing | OperationRecord::Indeterminate => {
-                if let Ok(Some(result)) = self.0.reconcile_merge(&token, &request).await {
-                    return complete(journal, &operation, result).await;
-                }
-                let _ = journal
-                    .mark_operation(&operation, OperationTransition::Indeterminate)
-                    .await;
-                return Err(OperationError::Indeterminate);
-            }
-            OperationRecord::New | OperationRecord::Planned => {
-                return Err(OperationError::Unavailable);
-            }
-        }
-
-        // The unique durable claimant proves every mutable precondition once,
-        // immediately before the irreversible PUT. A determinate or read-only
-        // failure has made no GitHub mutation, so release the claim and keep
-        // this exact operation retryable.
-        if let Err(error) = self
-            .0
-            .verify_merge_preconditions(&token, journal, &request)
-            .await
-        {
-            journal
-                .mark_operation(&operation, OperationTransition::Refused)
-                .await
-                .map_err(|_| OperationError::Unavailable)?;
-            return Err(error);
-        }
-        match self.0.merge_pull_request(&token, &request).await {
-            Ok(result) => complete(journal, &operation, result).await,
-            Err(OperationError::Refused(reason)) => refuse(journal, &operation, reason).await,
-            Err(_) => {
-                if let Ok(Some(result)) = self.0.reconcile_merge(&token, &request).await {
-                    return complete(journal, &operation, result).await;
-                }
-                let _ = journal
-                    .mark_operation(&operation, OperationTransition::Indeterminate)
-                    .await;
-                Err(OperationError::Indeterminate)
-            }
-        }
-    }
-
-    #[cfg(target_arch = "wasm32")]
     pub(crate) async fn observe_pull_request_checks(
         &self,
         mut request: ObservePullRequestChecks,
@@ -2675,230 +2128,6 @@ impl AppAuthority {
             .verify_pull_request_head(&token, request.pull_number, &request.head_sha)
             .await?;
         self.0.checks(&token, request).await
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    pub(crate) async fn observe_pull_request_workflows(
-        &self,
-        mut request: ObservePullRequestWorkflows,
-    ) -> Result<PullRequestWorkflowsResult, OperationError> {
-        request.validate()?;
-        let repository = RepositoryName::requested(&mut request.repository)?;
-        let token = self
-            .0
-            .installation_token(
-                repository,
-                BTreeMap::from([
-                    ("actions", "read"),
-                    ("metadata", "read"),
-                    ("pull_requests", "read"),
-                ]),
-            )
-            .await?;
-        self.0
-            .verify_workflow_pr(
-                &token,
-                request.pull_number,
-                &request.head_sha,
-                &request.base,
-            )
-            .await?;
-        self.0.workflow_runs(&token, &request).await
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    pub(crate) async fn read_pull_request_job_log(
-        &self,
-        mut request: ReadPullRequestJobLog,
-    ) -> Result<JobLogResult, OperationError> {
-        request.validate()?;
-        let repository = RepositoryName::requested(&mut request.repository)?;
-        let token = self
-            .0
-            .installation_token(
-                repository,
-                BTreeMap::from([
-                    ("actions", "read"),
-                    ("metadata", "read"),
-                    ("pull_requests", "read"),
-                ]),
-            )
-            .await?;
-        self.0
-            .verify_workflow_pr(
-                &token,
-                request.pull_number,
-                &request.head_sha,
-                &request.base,
-            )
-            .await?;
-        let run = self.0.read_workflow_run(&token, request.run_id).await?;
-        run.verify(
-            WorkflowRef::requested(&request.workflow_path)?,
-            request.pull_number,
-            &request.head_sha,
-        )?;
-        if run.run_attempt != request.run_attempt
-            || run.status != "completed"
-            || !run.conclusion.as_deref().is_some_and(failed_conclusion)
-        {
-            return Err(OperationError::Conflict);
-        }
-        let jobs = self.0.workflow_jobs(&token, request.run_id).await?;
-        let job = jobs
-            .into_iter()
-            .find(|job| job.id == request.job_id)
-            .ok_or(OperationError::Conflict)?;
-        if job.status != "completed" || !job.conclusion.as_deref().is_some_and(failed_conclusion) {
-            return Err(OperationError::Refused(RefusalReason::JobNotFailed));
-        }
-        let location = self.0.job_log_redirect(&token, request.job_id).await?;
-        let text = github_public_log(&location).await?;
-        Ok(JobLogResult {
-            pull_number: request.pull_number,
-            head_sha: request.head_sha,
-            base: request.base,
-            run_id: request.run_id,
-            run_attempt: request.run_attempt,
-            job_id: request.job_id,
-            text,
-        })
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    pub(crate) async fn rerun_failed_pull_request_jobs(
-        &self,
-        journal: &DeliveryJournal,
-        mut request: RerunFailedPullRequestJobs,
-    ) -> Result<RerunFailedPullRequestJobsResult, OperationError> {
-        request.validate()?;
-        let repository = RepositoryName::requested(&mut request.repository)?;
-        let operation = request.operation("rerun_failed_pull_request_jobs")?;
-        let state = journal
-            .begin_operation(&operation)
-            .await
-            .map_err(|_| OperationError::Unavailable)?;
-        if let Some(result) = completed_or_conflict::<RerunFailedPullRequestJobsResult>(&state)? {
-            return Ok(result);
-        }
-        let token = self
-            .0
-            .installation_token(
-                repository,
-                BTreeMap::from([
-                    ("actions", "write"),
-                    ("metadata", "read"),
-                    ("pull_requests", "read"),
-                ]),
-            )
-            .await?;
-        self.0
-            .verify_workflow_pr(
-                &token,
-                request.pull_number,
-                &request.head_sha,
-                &request.base,
-            )
-            .await?;
-        let run = self.0.read_workflow_run(&token, request.run_id).await?;
-        run.verify(
-            WorkflowRef::requested(&request.workflow_path)?,
-            request.pull_number,
-            &request.head_sha,
-        )?;
-        if run.run_attempt < request.run_attempt {
-            return Err(OperationError::Conflict);
-        }
-        if run.run_attempt > request.run_attempt {
-            if matches!(
-                state,
-                OperationRecord::Executing | OperationRecord::Indeterminate
-            ) {
-                return complete(
-                    journal,
-                    &operation,
-                    RerunFailedPullRequestJobsResult {
-                        pull_number: request.pull_number,
-                        head_sha: request.head_sha,
-                        base: request.base,
-                        run_id: request.run_id,
-                        run_attempt: run.run_attempt,
-                    },
-                )
-                .await;
-            }
-            return Err(OperationError::Conflict);
-        }
-        if run.status != "completed" || !run.conclusion.as_deref().is_some_and(failed_conclusion) {
-            return Err(OperationError::Refused(RefusalReason::RunNotFailed));
-        }
-        if matches!(
-            state,
-            OperationRecord::Executing | OperationRecord::Indeterminate
-        ) {
-            journal
-                .mark_operation(&operation, OperationTransition::Indeterminate)
-                .await
-                .map_err(|_| OperationError::Unavailable)?;
-            return Err(OperationError::Indeterminate);
-        }
-        match journal
-            .mark_operation(&operation, OperationTransition::Executing)
-            .await
-            .map_err(|_| OperationError::Unavailable)?
-        {
-            OperationRecord::Claimed => {}
-            OperationRecord::Completed(result) => {
-                return serde_json::from_str(&result).map_err(|_| OperationError::Unavailable);
-            }
-            OperationRecord::Conflict => return Err(OperationError::Conflict),
-            OperationRecord::Executing | OperationRecord::Indeterminate => {
-                return Err(OperationError::Indeterminate);
-            }
-            OperationRecord::New | OperationRecord::Planned => {
-                return Err(OperationError::Unavailable);
-            }
-        }
-        if let Err(OperationError::Refused(reason)) =
-            self.0.rerun_failed_jobs(&token, request.run_id).await
-        {
-            return refuse(journal, &operation, reason).await;
-        }
-        for attempt in 0..4 {
-            if let Ok(after) = self.0.read_workflow_run(&token, request.run_id).await
-                && after
-                    .verify(
-                        WorkflowRef::requested(&request.workflow_path)?,
-                        request.pull_number,
-                        &request.head_sha,
-                    )
-                    .is_ok()
-                && after.run_attempt > request.run_attempt
-            {
-                return complete(
-                    journal,
-                    &operation,
-                    RerunFailedPullRequestJobsResult {
-                        pull_number: request.pull_number,
-                        head_sha: request.head_sha,
-                        base: request.base,
-                        run_id: request.run_id,
-                        run_attempt: after.run_attempt,
-                    },
-                )
-                .await;
-            }
-            if attempt < 3 {
-                worker::Delay::from(std::time::Duration::from_millis(250)).await;
-            }
-        }
-        // A 201 means GitHub accepted the rerun request, not that the run
-        // already exposes its new attempt. A lost response is equally
-        // ambiguous. Keep the UUID reconcilable until the exact run advances.
-        let _ = journal
-            .mark_operation(&operation, OperationTransition::Indeterminate)
-            .await;
-        Err(OperationError::Indeterminate)
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -3200,19 +2429,6 @@ impl UpdatePullRequestBody {
     }
 }
 
-impl ClosePullRequest {
-    fn validate(&mut self) -> Result<(), OperationError> {
-        canonical_operation_id(&mut self.operation_id)?;
-        valid_exact_integer(self.pull_number)?;
-        valid_sha(&self.head_sha)
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    fn operation(&self, kind: &str) -> Result<Operation, OperationError> {
-        operation(kind, &self.operation_id, self)
-    }
-}
-
 impl SubmitPullRequestReview {
     fn validate(&mut self) -> Result<(), OperationError> {
         canonical_operation_id(&mut self.operation_id)?;
@@ -3379,92 +2595,10 @@ impl EnqueuePullRequest {
     }
 }
 
-impl MergePullRequestAtHead {
-    fn validate(&mut self) -> Result<(), OperationError> {
-        canonical_operation_id(&mut self.operation_id)?;
-        canonical_operation_id(&mut self.review_operation_id)?;
-        if self.operation_id == self.review_operation_id {
-            return Err(OperationError::InvalidInput);
-        }
-        valid_exact_integer(self.pull_number)?;
-        valid_sha(&self.head_sha)?;
-        valid_ref(&self.base)
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    fn operation(&self, kind: &str) -> Result<Operation, OperationError> {
-        operation(kind, &self.operation_id, self)
-    }
-
-    fn trailer(&self) -> Result<String, OperationError> {
-        Ok(format!(
-            "{OPERATION_TRAILER_PREFIX} {} {}",
-            self.operation_id,
-            request_digest(self)?
-        ))
-    }
-}
-
 impl ObservePullRequestChecks {
     fn validate(&self) -> Result<(), OperationError> {
         valid_exact_integer(self.pull_number)?;
         valid_sha(&self.head_sha)
-    }
-}
-
-fn validate_pull_workflow(
-    pull_number: i64,
-    head_sha: &str,
-    base: &str,
-    workflow_path: &str,
-) -> Result<(), OperationError> {
-    valid_workflow_path(workflow_path)?;
-    valid_exact_integer(pull_number)?;
-    valid_sha(head_sha)?;
-    valid_ref(base)
-}
-
-impl ObservePullRequestWorkflows {
-    fn validate(&self) -> Result<(), OperationError> {
-        validate_pull_workflow(
-            self.pull_number,
-            &self.head_sha,
-            &self.base,
-            &self.workflow_path,
-        )
-    }
-}
-
-impl ReadPullRequestJobLog {
-    fn validate(&self) -> Result<(), OperationError> {
-        validate_pull_workflow(
-            self.pull_number,
-            &self.head_sha,
-            &self.base,
-            &self.workflow_path,
-        )?;
-        valid_exact_integer(self.run_id)?;
-        valid_exact_integer(self.run_attempt)?;
-        valid_exact_integer(self.job_id)
-    }
-}
-
-impl RerunFailedPullRequestJobs {
-    fn validate(&mut self) -> Result<(), OperationError> {
-        canonical_operation_id(&mut self.operation_id)?;
-        validate_pull_workflow(
-            self.pull_number,
-            &self.head_sha,
-            &self.base,
-            &self.workflow_path,
-        )?;
-        valid_exact_integer(self.run_id)?;
-        valid_exact_integer(self.run_attempt)
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    fn operation(&self, kind: &str) -> Result<Operation, OperationError> {
-        operation(kind, &self.operation_id, self)
     }
 }
 
@@ -3598,42 +2732,9 @@ impl ListPullRequests {
     }
 }
 
-impl ObservePullRequestReview {
-    fn validate(&self) -> Result<(), OperationError> {
-        valid_exact_integer(self.pull_number)?;
-        valid_exact_integer(self.review_id)
-    }
-}
-
 impl ObserveIssue {
     fn validate(&self) -> Result<(), OperationError> {
         valid_exact_integer(self.issue_number)
-    }
-}
-
-impl ResolveIssue {
-    fn validate(&mut self) -> Result<(), OperationError> {
-        canonical_operation_id(&mut self.operation_id)?;
-        valid_exact_integer(self.issue_number)?;
-        valid_text(&self.body, 1, 16_000, true)?;
-        free_of_operation_marker(&self.body)
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    fn operation(&self, kind: &str) -> Result<Operation, OperationError> {
-        operation(kind, &self.operation_id, self)
-    }
-
-    fn marker(&self) -> Result<String, OperationError> {
-        Ok(format!(
-            "{OPERATION_MARKER_PREFIX}{}:{} -->",
-            self.operation_id,
-            request_digest(self)?
-        ))
-    }
-
-    fn marked_body(&self) -> Result<String, OperationError> {
-        Ok(format!("{}\n\n{}", self.body, self.marker()?))
     }
 }
 
@@ -4000,17 +3101,13 @@ pub(crate) fn legacy_receipt_request(
     }
     match kind {
         "create_issue" => proof!(CreateIssue),
-        "resolve_issue" => proof!(ResolveIssue),
         "create_pull_request" => proof!(CreatePullRequest),
         "update_pull_request_body" => proof!(UpdatePullRequestBody),
-        "close_pull_request" => proof!(ClosePullRequest),
         "submit_pull_request_review" => proof!(SubmitPullRequestReview),
         "publish_commit" => proof!(PublishCommit),
         "publish_release_tag" => proof!(PublishReleaseTag),
         "recover_release" => proof!(RecoverRelease),
         "enqueue_pull_request" => proof!(EnqueuePullRequest),
-        "merge_pull_request_at_head" => proof!(MergePullRequestAtHead),
-        "rerun_failed_pull_request_jobs" => proof!(RerunFailedPullRequestJobs),
         _ => Err(OperationError::InvalidInput),
     }
 }
@@ -4641,114 +3738,6 @@ impl Authority {
         Ok(issue)
     }
 
-    async fn read_issue_resolution_comment(
-        &self,
-        token: &RepositoryToken,
-        request: &ResolveIssue,
-    ) -> Result<Option<IssueComment>, OperationError> {
-        let mut found = None;
-        for page in 1..=MAX_ISSUE_COMMENT_PAGES {
-            let comments: Vec<IssueComment> = github_json(
-                &format!(
-                    "https://api.github.com/repos/{}/{}/issues/{}/comments?per_page={MAX_ISSUE_COMMENTS_PER_PAGE}&page={page}",
-                    token.repository.owner, token.repository.name, request.issue_number
-                ),
-                token.as_str(),
-            )
-            .await?;
-            if comments.len() > MAX_ISSUE_COMMENTS_PER_PAGE {
-                return Err(OperationError::Indeterminate);
-            }
-            let page_is_full = comments.len() == MAX_ISSUE_COMMENTS_PER_PAGE;
-            for comment in comments {
-                let comment = comment.validate()?;
-                if comment.matches(request) {
-                    if found.is_some() {
-                        return Err(OperationError::Indeterminate);
-                    }
-                    found = Some(comment);
-                }
-            }
-            if !page_is_full {
-                return Ok(found);
-            }
-        }
-        // A full final page may hide another matching marker. Do not post a
-        // second comment when the bounded search cannot prove absence.
-        Err(OperationError::Indeterminate)
-    }
-
-    async fn reconcile_issue_resolution(
-        &self,
-        token: &RepositoryToken,
-        request: &ResolveIssue,
-    ) -> Result<IssueResolutionProgress, OperationError> {
-        let issue = self.read_issue(token, request.issue_number).await?;
-        if !issue.is_real_issue() {
-            return Err(OperationError::Conflict);
-        }
-        let comment = self.read_issue_resolution_comment(token, request).await?;
-        Ok(IssueResolutionProgress { issue, comment })
-    }
-
-    async fn post_issue_comment(
-        &self,
-        token: &RepositoryToken,
-        request: &ResolveIssue,
-    ) -> Result<IssueComment, OperationError> {
-        #[derive(Serialize)]
-        struct Body {
-            body: String,
-        }
-        let comment: IssueComment = github_json_request(
-            worker::Method::Post,
-            &format!(
-                "https://api.github.com/repos/{}/{}/issues/{}/comments",
-                token.repository.owner, token.repository.name, request.issue_number
-            ),
-            token.as_str(),
-            Some(&Body {
-                body: request.marked_body()?,
-            }),
-        )
-        .await?;
-        let comment = comment.validate()?;
-        comment
-            .matches(request)
-            .then_some(comment)
-            .ok_or(OperationError::Indeterminate)
-    }
-
-    async fn close_issue(
-        &self,
-        token: &RepositoryToken,
-        request: &ResolveIssue,
-    ) -> Result<Issue, OperationError> {
-        #[derive(Serialize)]
-        struct Body {
-            state: &'static str,
-            state_reason: &'static str,
-        }
-        let issue: Issue = github_json_request(
-            worker::Method::Patch,
-            &format!(
-                "https://api.github.com/repos/{}/{}/issues/{}",
-                token.repository.owner, token.repository.name, request.issue_number
-            ),
-            token.as_str(),
-            Some(&Body {
-                state: "closed",
-                state_reason: request.state_reason.as_str(),
-            }),
-        )
-        .await?;
-        if issue.number != request.issue_number || !issue.is_real_issue() {
-            return Err(OperationError::Conflict);
-        }
-        valid_github_url(&issue.html_url)?;
-        Ok(issue)
-    }
-
     /// Either the branch is at exactly `expected_head_sha`, or it does not exist
     /// yet and `expected_head_sha` is the commit it will start from. A missing
     /// branch is created only after the operation is claimed, so a lost create
@@ -5053,362 +4042,6 @@ impl Authority {
             .transpose()
     }
 
-    async fn verify_merge_preconditions(
-        &self,
-        token: &RepositoryToken,
-        journal: &DeliveryJournal,
-        request: &MergePullRequestAtHead,
-    ) -> Result<(), OperationError> {
-        let metadata = self.repository_metadata(token).await?;
-        if request.base != metadata.default_branch {
-            return Err(OperationError::Refused(RefusalReason::MergePreconditions));
-        }
-        let pull = self
-            .verify_pull_request_head(token, request.pull_number, &request.head_sha)
-            .await?;
-        if pull.state != "open" || pull.draft || pull.base.name != request.base {
-            return Err(OperationError::Refused(RefusalReason::MergePreconditions));
-        }
-
-        // Keep the ruleset path unchanged. Exact 403 is the one alternate
-        // GitHub response accepted for a private plan that cannot expose
-        // rules: the App then proves the smaller policy itself.
-        let (required, private_base_sha) = match self.branch_rules(token, &request.base).await {
-            Ok(rules) => {
-                if rules.len() >= 100 {
-                    return Err(OperationError::Refused(RefusalReason::MergePreconditions));
-                }
-                let ruleset_ids = active_ruleset_ids(&rules)
-                    .ok_or(OperationError::Refused(RefusalReason::MergePreconditions))?;
-                self.verify_rulesets_without_app_bypass(token, &ruleset_ids)
-                    .await?;
-                let required = branch_rules_allow_merge(&rules)
-                    .ok_or(OperationError::Refused(RefusalReason::MergePreconditions))?;
-                (Some(required), None)
-            }
-            Err(error @ Error::Rejected(403)) => {
-                let branch = self.branch(token, &request.base).await?;
-                if !private_unprotected_merge_allowed(&metadata, &branch)
-                    || pull.base.sha != branch.commit.sha
-                {
-                    return Err(error.into());
-                }
-                self.verify_no_merge_queue(token, &request.base).await?;
-                (None, Some(branch.commit.sha))
-            }
-            Err(error) => return Err(error.into()),
-        };
-        let checks = self
-            .checks(
-                token,
-                ObservePullRequestChecks {
-                    repository: token.repository.full_name.clone(),
-                    pull_number: request.pull_number,
-                    head_sha: request.head_sha.clone(),
-                },
-            )
-            .await?;
-        if !required.as_ref().map_or_else(
-            || checks_are_terminal_and_non_failing(&checks.checks),
-            |required| checks_allow_merge(&checks.checks, required),
-        ) {
-            return Err(OperationError::Refused(RefusalReason::MergeChecks));
-        }
-        let allowed_review = self
-            .verify_review_operation(journal, token, request)
-            .await?;
-        let reviews = self
-            .pull_request_reviews(token, request.pull_number)
-            .await?;
-        if reviews.len() >= 100 {
-            return Err(OperationError::Refused(RefusalReason::MergeReview));
-        }
-        if !reviews.iter().any(|review| {
-            review.matches_allow_result(
-                &allowed_review,
-                &token.repository.full_name,
-                request.pull_number,
-                &request.head_sha,
-                &request.review_operation_id,
-            )
-        }) || self
-            .review_blocks_head(journal, token, request, &reviews)
-            .await?
-        {
-            return Err(OperationError::Refused(RefusalReason::MergeReview));
-        }
-
-        if let Some(private_base_sha) = private_base_sha {
-            self.verify_no_merge_queue(token, &request.base).await?;
-            let current_branch = self.branch(token, &request.base).await?;
-            if current_branch.protected || current_branch.commit.sha != private_base_sha {
-                return Err(OperationError::Refused(RefusalReason::MergePreconditions));
-            }
-            let current_pull = self
-                .verify_pull_request_head(token, request.pull_number, &request.head_sha)
-                .await?;
-            if current_pull.state != "open"
-                || current_pull.draft
-                || current_pull.base.name != request.base
-                || current_pull.base.sha != private_base_sha
-            {
-                return Err(OperationError::Refused(RefusalReason::MergePreconditions));
-            }
-        }
-        Ok(())
-    }
-
-    async fn review_blocks_head(
-        &self,
-        journal: &DeliveryJournal,
-        token: &RepositoryToken,
-        request: &MergePullRequestAtHead,
-        reviews: &[PullRequestReview],
-    ) -> Result<bool, OperationError> {
-        for review in reviews {
-            if !review.is_block_for_head(&request.head_sha) {
-                continue;
-            }
-            let Some((block_operation_id, block_digest)) =
-                review.body.as_deref().and_then(review_operation_marker)
-            else {
-                return Ok(true);
-            };
-            let Some(block_operation) =
-                completed_review_operation(journal, block_operation_id).await?
-            else {
-                return Ok(true);
-            };
-            if block_operation.request_digest != block_digest
-                || !block_operation.matches_review(
-                    review,
-                    token.repository.full_name.as_str(),
-                    request.pull_number,
-                    &request.head_sha,
-                    "block",
-                )
-            {
-                return Ok(true);
-            }
-            let mut corrected = false;
-            for candidate in reviews {
-                if candidate
-                    .corrects_block_operation(
-                        journal,
-                        block_operation_id,
-                        token.repository.full_name.as_str(),
-                        request.pull_number,
-                        &request.head_sha,
-                    )
-                    .await?
-                {
-                    corrected = true;
-                    break;
-                }
-            }
-            if !corrected {
-                return Ok(true);
-            }
-        }
-        Ok(false)
-    }
-
-    async fn verify_no_merge_queue(
-        &self,
-        token: &RepositoryToken,
-        base: &str,
-    ) -> Result<(), OperationError> {
-        #[derive(Serialize)]
-        struct Variables<'a> {
-            owner: &'a str,
-            name: &'a str,
-            base: &'a str,
-        }
-        let (data, failure): (Option<serde_json::Value>, Option<GraphQlFailure>) = github_graphql(
-            &token.token,
-            "query($owner:String!,$name:String!,$base:String!){\
-             repository(owner:$owner,name:$name){\
-             mergeQueue(branch:$base){entries(first:1){totalCount}}}}",
-            &Variables {
-                owner: &token.repository.owner,
-                name: &token.repository.name,
-                base,
-            },
-        )
-        .await?;
-        no_merge_queue(data, failure)
-    }
-
-    async fn verify_review_operation(
-        &self,
-        journal: &DeliveryJournal,
-        token: &RepositoryToken,
-        request: &MergePullRequestAtHead,
-    ) -> Result<ReviewResult, OperationError> {
-        let observation = journal
-            .observe_operation(&request.review_operation_id)
-            .await
-            .map_err(|_| OperationError::Unavailable)?
-            .ok_or(OperationError::Refused(RefusalReason::MergeReview))?;
-        if observation.kind != "submit_pull_request_review" || observation.state != "completed" {
-            return Err(OperationError::Refused(RefusalReason::MergeReview));
-        }
-        let result: ReviewResult = serde_json::from_str(
-            observation
-                .result_json
-                .as_deref()
-                .ok_or(OperationError::Unavailable)?,
-        )
-        .map_err(|_| OperationError::Unavailable)?;
-        if !review_result_allows_merge(
-            &result,
-            &token.repository.full_name,
-            request.pull_number,
-            &request.head_sha,
-        ) {
-            return Err(OperationError::Refused(RefusalReason::MergeReview));
-        }
-        Ok(result)
-    }
-
-    async fn branch_rules(
-        &self,
-        token: &RepositoryToken,
-        base: &str,
-    ) -> Result<Vec<BranchRule>, Error> {
-        github_json(
-            &format!(
-                "https://api.github.com/repos/{}/{}/rules/branches/{}?per_page=100",
-                token.repository.owner,
-                token.repository.name,
-                percent_encode(base)
-            ),
-            token.as_str(),
-        )
-        .await
-    }
-
-    async fn branch(
-        &self,
-        token: &RepositoryToken,
-        base: &str,
-    ) -> Result<BranchSnapshot, OperationError> {
-        let branch: BranchSnapshot = github_json(
-            &format!(
-                "https://api.github.com/repos/{}/{}/branches/{}",
-                token.repository.owner,
-                token.repository.name,
-                percent_encode(base)
-            ),
-            token.as_str(),
-        )
-        .await?;
-        if branch.name != base || valid_sha(&branch.commit.sha).is_err() {
-            return Err(OperationError::Refused(RefusalReason::MergePreconditions));
-        }
-        Ok(branch)
-    }
-
-    async fn verify_rulesets_without_app_bypass(
-        &self,
-        token: &RepositoryToken,
-        ruleset_ids: &[i64],
-    ) -> Result<(), OperationError> {
-        for ruleset_id in ruleset_ids {
-            let body: serde_json::Value = github_json(
-                &format!(
-                    "https://api.github.com/repos/{}/{}/rulesets/{ruleset_id}?includes_parents=true",
-                    token.repository.owner, token.repository.name
-                ),
-                token.as_str(),
-            )
-            .await
-            .map_err(OperationError::from)?;
-            let ruleset: RepositoryRuleset = serde_json::from_value(body)
-                .map_err(|_| OperationError::Refused(RefusalReason::MergePreconditions))?;
-            if !ruleset_allows_merge(&ruleset, *ruleset_id, self.app_id) {
-                return Err(OperationError::Refused(RefusalReason::MergePreconditions));
-            }
-        }
-        Ok(())
-    }
-
-    async fn pull_request_reviews(
-        &self,
-        token: &RepositoryToken,
-        pull_number: i64,
-    ) -> Result<Vec<PullRequestReview>, OperationError> {
-        github_json(
-            &format!(
-                "https://api.github.com/repos/{}/{}/pulls/{pull_number}/reviews?per_page=100",
-                token.repository.owner, token.repository.name
-            ),
-            token.as_str(),
-        )
-        .await
-        .map_err(OperationError::from)
-    }
-
-    async fn merge_pull_request(
-        &self,
-        token: &RepositoryToken,
-        request: &MergePullRequestAtHead,
-    ) -> Result<MergePullRequestAtHeadResult, OperationError> {
-        #[derive(Serialize)]
-        struct Body<'a> {
-            sha: &'a str,
-            merge_method: &'static str,
-            commit_message: String,
-        }
-        let response: PullRequestMergeResponse = match github_json_request(
-            worker::Method::Put,
-            &format!(
-                "https://api.github.com/repos/{}/{}/pulls/{}/merge",
-                token.repository.owner, token.repository.name, request.pull_number
-            ),
-            token.as_str(),
-            Some(&Body {
-                sha: &request.head_sha,
-                merge_method: "squash",
-                commit_message: request.trailer()?,
-            }),
-        )
-        .await
-        {
-            Ok(response) => response,
-            Err(Error::Rejected(status)) => match classify_merge_status(status) {
-                MergeHttpStatus::HeadConflict => {
-                    return Err(OperationError::Refused(RefusalReason::MergeHeadConflict));
-                }
-                MergeHttpStatus::Refused => {
-                    return Err(OperationError::Refused(RefusalReason::MergeRejected(
-                        status,
-                    )));
-                }
-                MergeHttpStatus::Reconcile => return Err(OperationError::Unavailable),
-            },
-            Err(error) => return Err(error.into()),
-        };
-        let result = merge_response_result(response, request)?;
-        self.verify_merge_commit_trailer(token, request, &result.merge_commit_sha)
-            .await?;
-        Ok(result)
-    }
-
-    async fn verify_merge_commit_trailer(
-        &self,
-        token: &RepositoryToken,
-        request: &MergePullRequestAtHead,
-        merge_commit_sha: &str,
-    ) -> Result<(), OperationError> {
-        let merged = self.read_commit(token, merge_commit_sha).await?;
-        if merge_commit_has_trailer(request, &merged.message)? {
-            Ok(())
-        } else {
-            Err(OperationError::Indeterminate)
-        }
-    }
-
     async fn merged_pull_commit(
         &self,
         token: &RepositoryToken,
@@ -5429,39 +4062,6 @@ impl Authority {
         )
         .await?;
         merged_pull_commit_response(data, failure, expected_head)
-    }
-
-    async fn reconcile_merge(
-        &self,
-        token: &RepositoryToken,
-        request: &MergePullRequestAtHead,
-    ) -> Result<Option<MergePullRequestAtHeadResult>, OperationError> {
-        let pull: PullRequest = github_json(
-            &format!(
-                "https://api.github.com/repos/{}/{}/pulls/{}",
-                token.repository.owner, token.repository.name, request.pull_number
-            ),
-            token.as_str(),
-        )
-        .await?;
-        if pull.number != request.pull_number
-            || pull.head.sha != request.head_sha
-            || pull.base.name != request.base
-            || !pull.merged
-        {
-            return Ok(None);
-        }
-        let merge_commit_sha = self
-            .merged_pull_commit(token, request.pull_number, &request.head_sha)
-            .await?;
-        self.verify_merge_commit_trailer(token, request, &merge_commit_sha)
-            .await?;
-        Ok(Some(MergePullRequestAtHeadResult {
-            pull_number: request.pull_number,
-            head_sha: request.head_sha.clone(),
-            base: request.base.clone(),
-            merge_commit_sha,
-        }))
     }
 
     async fn read_queue_entry(
@@ -5693,39 +4293,6 @@ impl Authority {
             .ok_or(OperationError::Indeterminate)
     }
 
-    async fn reconcile_closed_pull_request(
-        &self,
-        token: &RepositoryToken,
-        request: &ClosePullRequest,
-    ) -> Result<Option<ClosePullRequestResult>, OperationError> {
-        self.verify_pull_request_head(token, request.pull_number, &request.head_sha)
-            .await?
-            .close_result(request)
-    }
-
-    async fn close_pull_request(
-        &self,
-        token: &RepositoryToken,
-        request: &ClosePullRequest,
-    ) -> Result<ClosePullRequestResult, OperationError> {
-        #[derive(Serialize)]
-        struct Body {
-            state: &'static str,
-        }
-        let pull: PullRequest = github_json_request(
-            worker::Method::Patch,
-            &format!(
-                "https://api.github.com/repos/{}/{}/pulls/{}",
-                token.repository.owner, token.repository.name, request.pull_number
-            ),
-            token.as_str(),
-            Some(&Body { state: "closed" }),
-        )
-        .await?;
-        pull.close_result(request)?
-            .ok_or(OperationError::Indeterminate)
-    }
-
     async fn reconcile_review(
         &self,
         token: &RepositoryToken,
@@ -5814,138 +4381,6 @@ impl Authority {
             head_sha: request.head_sha,
             checks,
         })
-    }
-
-    async fn verify_workflow_pr(
-        &self,
-        token: &RepositoryToken,
-        pull_number: i64,
-        head_sha: &str,
-        base: &str,
-    ) -> Result<(), OperationError> {
-        let repository = self.repository_metadata(token).await?;
-        if base != repository.default_branch {
-            return Err(OperationError::Conflict);
-        }
-        let pull = self
-            .verify_pull_request_head(token, pull_number, head_sha)
-            .await?;
-        (pull.base.name == base)
-            .then_some(())
-            .ok_or(OperationError::Conflict)
-    }
-
-    async fn workflow_runs(
-        &self,
-        token: &RepositoryToken,
-        request: &ObservePullRequestWorkflows,
-    ) -> Result<PullRequestWorkflowsResult, OperationError> {
-        let workflow = WorkflowRef::requested(&request.workflow_path)?;
-        let response: WorkflowRuns = github_json(
-            &format!(
-                "{}?event=pull_request&head_sha={}&per_page={MAX_WORKFLOW_RUNS}",
-                workflow_api_url(
-                    &token.repository.owner,
-                    &token.repository.name,
-                    workflow,
-                    "runs",
-                ),
-                request.head_sha
-            ),
-            token.as_str(),
-        )
-        .await?;
-        if !(0..=MAX_WORKFLOW_RUNS as i64).contains(&response.total_count)
-            || response.total_count as usize != response.workflow_runs.len()
-        {
-            return Err(OperationError::Indeterminate);
-        }
-        let mut runs = Vec::with_capacity(response.workflow_runs.len());
-        for run in response.workflow_runs {
-            run.verify(workflow, request.pull_number, &request.head_sha)?;
-            let jobs = self.workflow_jobs(token, run.id).await?;
-            runs.push(run.into_result(jobs)?);
-        }
-        runs.sort_by_key(|run| run.run_id);
-        Ok(PullRequestWorkflowsResult {
-            pull_number: request.pull_number,
-            head_sha: request.head_sha.clone(),
-            base: request.base.clone(),
-            runs,
-        })
-    }
-
-    async fn read_workflow_run(
-        &self,
-        token: &RepositoryToken,
-        run_id: i64,
-    ) -> Result<WorkflowRun, OperationError> {
-        let run: WorkflowRun = github_json(
-            &format!(
-                "https://api.github.com/repos/{}/{}/actions/runs/{run_id}",
-                token.repository.owner, token.repository.name
-            ),
-            token.as_str(),
-        )
-        .await?;
-        (run.id == run_id)
-            .then_some(run)
-            .ok_or(OperationError::Conflict)
-    }
-
-    async fn workflow_jobs(
-        &self,
-        token: &RepositoryToken,
-        run_id: i64,
-    ) -> Result<Vec<WorkflowJob>, OperationError> {
-        let response: WorkflowJobs = github_json(
-            &format!(
-                "https://api.github.com/repos/{}/{}/actions/runs/{run_id}/jobs?filter=latest&per_page={MAX_WORKFLOW_JOBS}",
-                token.repository.owner, token.repository.name
-            ),
-            token.as_str(),
-        )
-        .await?;
-        if !(0..=MAX_WORKFLOW_JOBS as i64).contains(&response.total_count)
-            || response.total_count as usize != response.jobs.len()
-            || response.jobs.iter().any(|job| job.run_id != run_id)
-        {
-            return Err(OperationError::Indeterminate);
-        }
-        Ok(response.jobs)
-    }
-
-    async fn job_log_redirect(
-        &self,
-        token: &RepositoryToken,
-        job_id: i64,
-    ) -> Result<String, OperationError> {
-        github_redirect_location(
-            &format!(
-                "https://api.github.com/repos/{}/{}/actions/jobs/{job_id}/logs",
-                token.repository.owner, token.repository.name
-            ),
-            token.as_str(),
-        )
-        .await
-    }
-
-    async fn rerun_failed_jobs(
-        &self,
-        token: &RepositoryToken,
-        run_id: i64,
-    ) -> Result<(), OperationError> {
-        github_empty_request(
-            worker::Method::Post,
-            &format!(
-                "https://api.github.com/repos/{}/{}/actions/runs/{run_id}/rerun-failed-jobs",
-                token.repository.owner, token.repository.name
-            ),
-            token.as_str(),
-            201,
-        )
-        .await
-        .map_err(Into::into)
     }
 
     async fn read_tag_commit_optional(
@@ -6238,11 +4673,8 @@ struct InstallationToken {
 /// returns it only with Administration access, while repository metadata does
 /// not need that field. A required field GitHub omits makes the whole 200 fail
 /// to deserialize, which reached the caller as an opaque "authority is
-/// unavailable" and disabled all eleven operations that observe the
-/// repository -- `maintainer_status` and the entire publication, merge, and
-/// CI-diagnosis path included. Three of the eleven reach this function
-/// indirectly through `verify_workflow_pr`, which is why the first count of
-/// the blast radius was too low.
+/// unavailable" and disabled every operation that observes the repository --
+/// `maintainer_status` and the entire publication and merge path included.
 ///
 /// Host-testable, unlike the `wasm32`-only transport around it, so the shape
 /// contract can be proven against a real GitHub body instead of asserted.
@@ -6254,8 +4686,6 @@ struct RepositoryMetadata {
     default_branch: String,
     #[serde(default)]
     private: Option<bool>,
-    #[serde(default)]
-    allow_squash_merge: Option<bool>,
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
@@ -6342,24 +4772,6 @@ fn pull_request_page(
         repository_id,
         pull_requests,
         next_page,
-    })
-}
-
-#[cfg(any(target_arch = "wasm32", test))]
-fn review_observation(
-    expected: i64,
-    review: PullRequestReview,
-) -> Result<PullRequestReviewObservation, OperationError> {
-    if review.id != expected {
-        return Err(OperationError::Conflict);
-    }
-    valid_sha(&review.commit_id).map_err(|_| OperationError::Unavailable)?;
-    let body = review.body.unwrap_or_default();
-    valid_text(&body, 0, 262_144, true).map_err(|_| OperationError::Unavailable)?;
-    Ok(PullRequestReviewObservation {
-        id: review.id,
-        commit_id: review.commit_id,
-        body,
     })
 }
 
@@ -6496,53 +4908,6 @@ impl Issue {
             updated_at: self.updated_at,
             state: self.state,
             state_reason: self.state_reason,
-        })
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-#[derive(Deserialize)]
-struct IssueComment {
-    id: i64,
-    html_url: String,
-    body: Option<String>,
-}
-
-#[cfg(target_arch = "wasm32")]
-impl IssueComment {
-    fn validate(self) -> Result<Self, OperationError> {
-        valid_exact_integer(self.id)?;
-        valid_github_url(&self.html_url)?;
-        Ok(self)
-    }
-
-    fn matches(&self, request: &ResolveIssue) -> bool {
-        request
-            .marked_body()
-            .is_ok_and(|body| self.body.as_deref() == Some(body.as_str()))
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-struct IssueResolutionProgress {
-    issue: Issue,
-    comment: Option<IssueComment>,
-}
-
-#[cfg(target_arch = "wasm32")]
-impl IssueResolutionProgress {
-    fn completed(&self, request: &ResolveIssue) -> Option<ResolveIssueResult> {
-        let comment = self.comment.as_ref()?;
-        let state_reason = self.issue.state_reason.as_deref()?;
-        if self.issue.state != "closed" || state_reason != request.state_reason.as_str() {
-            return None;
-        }
-        Some(ResolveIssueResult {
-            number: self.issue.number,
-            url: self.issue.html_url.clone(),
-            comment_url: comment.html_url.clone(),
-            state: self.issue.state.clone(),
-            state_reason: state_reason.to_owned(),
         })
     }
 }
@@ -6880,210 +5245,6 @@ fn revalidate_enqueue_pull(
     Ok(())
 }
 
-#[cfg(any(target_arch = "wasm32", test))]
-#[derive(Clone, Debug, Deserialize)]
-struct BranchSnapshot {
-    name: String,
-    protected: bool,
-    commit: BranchCommit,
-}
-
-#[cfg(any(target_arch = "wasm32", test))]
-#[derive(Clone, Debug, Deserialize)]
-struct BranchCommit {
-    sha: String,
-}
-
-#[cfg(any(target_arch = "wasm32", test))]
-#[derive(Clone, Debug, Deserialize)]
-struct BranchRule {
-    r#type: String,
-    #[serde(default)]
-    parameters: serde_json::Value,
-    #[serde(default)]
-    ruleset_id: Option<i64>,
-    #[serde(default)]
-    ruleset_source: Option<String>,
-}
-
-#[cfg(any(target_arch = "wasm32", test))]
-#[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RulesetBypassActor {
-    actor_id: Option<i64>,
-    actor_type: String,
-    bypass_mode: String,
-}
-
-#[cfg(any(target_arch = "wasm32", test))]
-#[derive(Clone, Debug, Deserialize)]
-struct RepositoryRuleset {
-    id: i64,
-    target: String,
-    enforcement: String,
-    #[serde(default)]
-    bypass_actors: Option<Vec<RulesetBypassActor>>,
-}
-
-#[cfg(any(target_arch = "wasm32", test))]
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct RequiredCheckIdentity {
-    context: String,
-    integration_id: Option<i64>,
-}
-
-#[cfg(any(target_arch = "wasm32", test))]
-fn active_ruleset_ids(rules: &[BranchRule]) -> Option<Vec<i64>> {
-    let mut ids = Vec::new();
-    for rule in rules {
-        let id = rule.ruleset_id?;
-        valid_exact_integer(id).ok()?;
-        if let Some(source) = rule.ruleset_source.as_deref() {
-            valid_text(source, 1, 256, false).ok()?;
-        }
-        if !ids.contains(&id) {
-            ids.push(id);
-        }
-    }
-    Some(ids)
-}
-
-#[cfg(any(target_arch = "wasm32", test))]
-fn ruleset_allows_merge(ruleset: &RepositoryRuleset, expected_id: i64, app_id: i64) -> bool {
-    if ruleset.id != expected_id || ruleset.target != "branch" || ruleset.enforcement != "active" {
-        return false;
-    }
-    let Some(actors) = ruleset.bypass_actors.as_ref() else {
-        return false;
-    };
-    actors.iter().all(|actor| {
-        let known_type = matches!(
-            actor.actor_type.as_str(),
-            "Integration" | "OrganizationAdmin" | "RepositoryRole" | "Team" | "User" | "DeployKey"
-        );
-        let valid_id = match actor.actor_type.as_str() {
-            "Integration" | "RepositoryRole" | "Team" | "User" => actor
-                .actor_id
-                .is_some_and(|id| valid_exact_integer(id).is_ok()),
-            "OrganizationAdmin" => actor
-                .actor_id
-                .is_none_or(|id| valid_exact_integer(id).is_ok()),
-            "DeployKey" => actor.actor_id.is_none(),
-            _ => false,
-        };
-        known_type
-            && valid_id
-            && matches!(
-                actor.bypass_mode.as_str(),
-                "always" | "pull_request" | "exempt"
-            )
-            && !(actor.actor_type == "DeployKey" && actor.bypass_mode != "always")
-            && !(actor.actor_type == "Integration" && actor.actor_id == Some(app_id))
-    })
-}
-
-#[cfg(any(target_arch = "wasm32", test))]
-fn branch_rules_allow_merge(rules: &[BranchRule]) -> Option<Vec<RequiredCheckIdentity>> {
-    if rules.iter().any(|rule| rule.r#type == "merge_queue") {
-        return None;
-    }
-    let pull_requests = rules
-        .iter()
-        .filter(|rule| rule.r#type == "pull_request")
-        .collect::<Vec<_>>();
-    if pull_requests.is_empty()
-        || pull_requests.iter().any(|rule| {
-            rule.parameters
-                .get("allowed_merge_methods")
-                .and_then(serde_json::Value::as_array)
-                .is_none_or(|methods| !methods.iter().any(|method| method == "squash"))
-        })
-    {
-        return None;
-    }
-    let status_rules = rules
-        .iter()
-        .filter(|rule| rule.r#type == "required_status_checks")
-        .collect::<Vec<_>>();
-    if status_rules.is_empty() {
-        return None;
-    }
-    let mut names = Vec::new();
-    for rule in status_rules {
-        if rule
-            .parameters
-            .get("strict_required_status_checks_policy")
-            .and_then(serde_json::Value::as_bool)
-            != Some(true)
-        {
-            return None;
-        }
-        let checks = rule
-            .parameters
-            .get("required_status_checks")
-            .and_then(serde_json::Value::as_array)?;
-        for check in checks {
-            let context = check.get("context").and_then(serde_json::Value::as_str)?;
-            if valid_text(context, 1, 256, false).is_err() {
-                return None;
-            }
-            let integration_id = match check.get("integration_id") {
-                None | Some(serde_json::Value::Null) => None,
-                Some(value) => {
-                    let id = value.as_i64()?;
-                    valid_exact_integer(id).ok()?;
-                    Some(id)
-                }
-            };
-            let required = RequiredCheckIdentity {
-                context: context.to_owned(),
-                integration_id,
-            };
-            if !names.contains(&required) {
-                names.push(required);
-            }
-        }
-    }
-    (!names.is_empty()).then_some(names)
-}
-
-#[cfg(any(target_arch = "wasm32", test))]
-fn private_unprotected_merge_allowed(
-    repository: &RepositoryMetadata,
-    branch: &BranchSnapshot,
-) -> bool {
-    repository.private == Some(true)
-        && repository.allow_squash_merge == Some(true)
-        && !branch.protected
-}
-
-#[cfg(any(target_arch = "wasm32", test))]
-fn no_merge_queue(
-    data: Option<serde_json::Value>,
-    failure: Option<GraphQlFailure>,
-) -> Result<(), OperationError> {
-    if failure.is_some() {
-        return Err(OperationError::Indeterminate);
-    }
-    match data
-        .as_ref()
-        .and_then(|data| data.get("repository"))
-        .filter(|repository| !repository.is_null())
-        .and_then(|repository| repository.get("mergeQueue"))
-    {
-        Some(serde_json::Value::Null) => Ok(()),
-        Some(_) => Err(OperationError::Refused(RefusalReason::MergePreconditions)),
-        None => Err(OperationError::Indeterminate),
-    }
-}
-
-#[cfg(any(target_arch = "wasm32", test))]
-#[derive(Clone, Debug, Deserialize)]
-struct PullRequestMergeResponse {
-    sha: Option<String>,
-    merged: bool,
-}
-
 #[cfg(target_arch = "wasm32")]
 impl PullRequest {
     fn matches_create(&self, request: &CreatePullRequest) -> bool {
@@ -7128,31 +5289,6 @@ impl PullRequest {
             base_sha: self.base.sha.clone(),
         }))
     }
-
-    fn close_result(
-        &self,
-        request: &ClosePullRequest,
-    ) -> Result<Option<ClosePullRequestResult>, OperationError> {
-        valid_exact_integer(self.number)?;
-        valid_github_url(&self.html_url)?;
-        valid_sha(&self.head.sha)?;
-        if self.number != request.pull_number || self.head.sha != request.head_sha {
-            return Err(OperationError::Conflict);
-        }
-        if self.merged {
-            return Err(OperationError::Conflict);
-        }
-        match self.state.as_str() {
-            "open" => Ok(None),
-            "closed" => Ok(Some(ClosePullRequestResult {
-                pull_number: self.number,
-                head_sha: self.head.sha.clone(),
-                url: self.html_url.clone(),
-                state: self.state.clone(),
-            })),
-            _ => Err(OperationError::Indeterminate),
-        }
-    }
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -7193,263 +5329,6 @@ impl PullRequestReview {
             && self.state == REVIEW_STATE
     }
 
-    // GitHub cannot delete a submitted review, and dismissal preserves its
-    // body. This App exposes no review-update operation, so its rendered
-    // BLOCK line remains the durable decision even if the review state is
-    // later changed to DISMISSED.
-    //
-    // Clearing a block requires the async merge path
-    // (`Authority::review_blocks_head`) to authenticate a correcting review
-    // through the durable operation journal. This pure predicate is
-    // deliberately conservative and never clears a block by itself, which
-    // also makes it safe for callers that do not have journal access.
-    fn is_block_for_head(&self, head_sha: &str) -> bool {
-        self.commit_id == head_sha
-            && (self.state == "CHANGES_REQUESTED"
-                || self.body.as_deref().is_some_and(|body| {
-                    body.lines().any(|line| {
-                        line.trim() == format!("{REVIEW_VERDICT_PREFIX} block {head_sha}")
-                    })
-                }))
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    async fn corrects_block_operation(
-        &self,
-        journal: &DeliveryJournal,
-        block_operation_id: &str,
-        repository: &str,
-        pull_number: i64,
-        head_sha: &str,
-    ) -> Result<bool, OperationError> {
-        let Some(body) = self.body.as_deref() else {
-            return Ok(false);
-        };
-        if self.commit_id != head_sha
-            || self.state != REVIEW_STATE
-            || !body.lines().any(|line| {
-                line.trim() == format!("{REVIEW_CORRECTION_PREFIX} {block_operation_id}")
-            })
-        {
-            return Ok(false);
-        }
-        let Some((operation_id, digest)) = review_operation_marker(body) else {
-            return Ok(false);
-        };
-        let Some(operation) = completed_review_operation(journal, operation_id).await? else {
-            return Ok(false);
-        };
-        if operation.request_digest != digest {
-            return Ok(false);
-        }
-        Ok(operation.matches_review(self, repository, pull_number, head_sha, "allow"))
-    }
-
-    fn matches_allow_result(
-        &self,
-        result: &ReviewResult,
-        repository: &str,
-        pull_number: i64,
-        head_sha: &str,
-        review_operation_id: &str,
-    ) -> bool {
-        let expected_url = format!("https://github.com/{repository}/pull/{pull_number}");
-        self.id == result.review_id
-            && self.commit_id == head_sha
-            && self.state == REVIEW_STATE
-            && self.html_url == result.url
-            && self.body.as_deref().is_some_and(|body| {
-                body.lines()
-                    .any(|line| line.trim() == format!("{REVIEW_VERDICT_PREFIX} allow {head_sha}"))
-                    && body.lines().any(|line| {
-                        line.trim().starts_with(&format!(
-                            "{OPERATION_MARKER_PREFIX}{review_operation_id}:"
-                        ))
-                    })
-            })
-            && (result.url == expected_url
-                || result
-                    .url
-                    .strip_prefix(&expected_url)
-                    .is_some_and(|suffix| suffix.starts_with('#')))
-    }
-}
-
-#[cfg(any(target_arch = "wasm32", test))]
-fn review_operation_marker(body: &str) -> Option<(&str, &str)> {
-    body.lines().find_map(|line| {
-        let rest = line.trim().strip_prefix(OPERATION_MARKER_PREFIX)?;
-        let (id, digest) = rest.strip_suffix(" -->")?.split_once(':')?;
-        (id.len() == 36
-            && id
-                .bytes()
-                .all(|byte| byte.is_ascii_hexdigit() || byte == b'-')
-            && digest.len() == 64
-            && digest.bytes().all(|byte| byte.is_ascii_hexdigit()))
-        .then_some((id, digest))
-    })
-}
-
-#[cfg(target_arch = "wasm32")]
-async fn completed_review_operation(
-    journal: &DeliveryJournal,
-    operation_id: &str,
-) -> Result<Option<OperationObservation>, OperationError> {
-    let Some(observation) = journal
-        .observe_operation(operation_id)
-        .await
-        .map_err(|_| OperationError::Unavailable)?
-    else {
-        return Ok(None);
-    };
-    if observation.kind != "submit_pull_request_review" || observation.state != "completed" {
-        return Ok(None);
-    }
-    Ok(Some(observation))
-}
-
-#[cfg(target_arch = "wasm32")]
-impl OperationObservation {
-    fn matches_review(
-        &self,
-        review: &PullRequestReview,
-        repository: &str,
-        pull_number: i64,
-        head_sha: &str,
-        verdict: &str,
-    ) -> bool {
-        let Ok(result) = self
-            .result_json
-            .as_deref()
-            .ok_or(())
-            .and_then(|json| serde_json::from_str::<ReviewResult>(json).map_err(|_| ()))
-        else {
-            return false;
-        };
-        let expected_url = format!("https://github.com/{repository}/pull/{pull_number}");
-        result.review_id == review.id
-            && result.url == review.html_url
-            && result.head_sha == head_sha
-            && result.state == REVIEW_STATE
-            && result.verdict == verdict
-            && (result.url == expected_url
-                || result
-                    .url
-                    .strip_prefix(&expected_url)
-                    .is_some_and(|suffix| suffix.starts_with('#')))
-            && review.body.as_deref().is_some_and(|body| {
-                body.lines().any(|line| {
-                    line.trim() == format!("{REVIEW_VERDICT_PREFIX} {verdict} {head_sha}")
-                })
-            })
-    }
-}
-
-#[cfg(any(target_arch = "wasm32", test))]
-fn checks_allow_merge(checks: &[CheckResult], required: &[RequiredCheckIdentity]) -> bool {
-    if required.is_empty() {
-        return false;
-    }
-    let required_present = required.iter().all(|required| {
-        checks.iter().any(|check| {
-            check.name == required.context
-                && required
-                    .integration_id
-                    .is_none_or(|app_id| check.app_id == Some(app_id))
-                && check.status == "completed"
-                && matches!(
-                    check.conclusion.as_deref(),
-                    Some("success" | "skipped" | "neutral")
-                )
-        })
-    });
-    required_present
-        && checks.iter().all(|check| {
-            check.status == "completed"
-                && matches!(
-                    check.conclusion.as_deref(),
-                    Some("success" | "skipped" | "neutral")
-                )
-        })
-}
-
-#[cfg(any(target_arch = "wasm32", test))]
-fn checks_are_terminal_and_non_failing(checks: &[CheckResult]) -> bool {
-    !checks.is_empty()
-        && checks.iter().all(|check| {
-            check.status == "completed"
-                && matches!(
-                    check.conclusion.as_deref(),
-                    Some("success" | "skipped" | "neutral")
-                )
-        })
-}
-
-#[cfg(any(target_arch = "wasm32", test))]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum MergeHttpStatus {
-    HeadConflict,
-    Refused,
-    Reconcile,
-}
-
-#[cfg(any(target_arch = "wasm32", test))]
-fn classify_merge_status(status: u16) -> MergeHttpStatus {
-    match status {
-        409 => MergeHttpStatus::HeadConflict,
-        403 | 404 | 405 | 422 => MergeHttpStatus::Refused,
-        _ => MergeHttpStatus::Reconcile,
-    }
-}
-
-#[cfg(any(target_arch = "wasm32", test))]
-fn review_result_allows_merge(
-    result: &ReviewResult,
-    repository: &str,
-    pull_number: i64,
-    head_sha: &str,
-) -> bool {
-    let expected = format!("https://github.com/{repository}/pull/{pull_number}");
-    valid_github_url(&result.url).is_ok()
-        && (result.url == expected
-            || result
-                .url
-                .strip_prefix(&expected)
-                .is_some_and(|suffix| suffix.starts_with('#')))
-        && result.head_sha == head_sha
-        && result.state == REVIEW_STATE
-        && result.verdict == "allow"
-}
-
-#[cfg(any(target_arch = "wasm32", test))]
-fn merge_commit_has_trailer(
-    request: &MergePullRequestAtHead,
-    message: &str,
-) -> Result<bool, OperationError> {
-    let trailer = request.trailer()?;
-    Ok(message.lines().any(|line| line.trim() == trailer))
-}
-
-#[cfg(any(target_arch = "wasm32", test))]
-fn merge_response_result(
-    response: PullRequestMergeResponse,
-    request: &MergePullRequestAtHead,
-) -> Result<MergePullRequestAtHeadResult, OperationError> {
-    if !response.merged {
-        return Err(OperationError::Refused(RefusalReason::MergePreconditions));
-    }
-    let merge_commit_sha = response.sha.ok_or(OperationError::Indeterminate)?;
-    valid_sha(&merge_commit_sha)?;
-    Ok(MergePullRequestAtHeadResult {
-        pull_number: request.pull_number,
-        head_sha: request.head_sha.clone(),
-        base: request.base.clone(),
-        merge_commit_sha,
-    })
-}
-
-#[cfg(any(target_arch = "wasm32", test))]
-impl PullRequestReview {
     /// The verdict comes from the request, not from GitHub: all three verdicts
     /// are indistinguishable in the review's `state`, and the App is the only
     /// thing that knows which one it rendered.
@@ -7493,13 +5372,6 @@ struct CheckRun {
     status: String,
     conclusion: Option<String>,
     html_url: String,
-    app: Option<CheckRunApp>,
-}
-
-#[cfg(target_arch = "wasm32")]
-#[derive(Deserialize)]
-struct CheckRunApp {
-    id: i64,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -7528,19 +5400,11 @@ impl TryFrom<CheckRun> for CheckResult {
             return Err(OperationError::Unavailable);
         }
         valid_github_url(&check.html_url)?;
-        let app_id = match check.app {
-            Some(app) => {
-                valid_exact_integer(app.id)?;
-                Some(app.id)
-            }
-            None => None,
-        };
         Ok(Self {
             name: check.name,
             status: check.status,
             conclusion: check.conclusion,
             url: check.html_url,
-            app_id,
         })
     }
 }
@@ -7682,14 +5546,6 @@ struct WorkflowRun {
     #[serde(default)]
     display_title: Option<String>,
     html_url: String,
-    #[serde(default)]
-    pull_requests: Vec<WorkflowPullRequest>,
-}
-
-#[cfg(any(target_arch = "wasm32", test))]
-#[derive(Deserialize)]
-struct WorkflowPullRequest {
-    number: i64,
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
@@ -7717,26 +5573,6 @@ fn select_release_workflow_run(
 
 #[cfg(any(target_arch = "wasm32", test))]
 impl WorkflowRun {
-    #[cfg(target_arch = "wasm32")]
-    fn verify(
-        &self,
-        workflow: WorkflowRef<'_>,
-        pull_number: i64,
-        head_sha: &str,
-    ) -> Result<(), OperationError> {
-        valid_exact_integer(self.id)?;
-        valid_exact_integer(self.run_attempt)?;
-        valid_text(&self.name, 1, 256, false)?;
-        self.verify_identity(workflow, head_sha)?;
-        if self.event != "pull_request"
-            || self.pull_requests.len() != 1
-            || self.pull_requests[0].number != pull_number
-        {
-            return Err(OperationError::Conflict);
-        }
-        Ok(())
-    }
-
     fn verify_identity(
         &self,
         workflow: WorkflowRef<'_>,
@@ -7790,13 +5626,6 @@ impl WorkflowRun {
             jobs,
         })
     }
-}
-
-#[cfg(target_arch = "wasm32")]
-#[derive(Deserialize)]
-struct WorkflowJobs {
-    total_count: i64,
-    jobs: Vec<WorkflowJob>,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -7874,18 +5703,6 @@ impl WorkflowStep {
     }
 }
 
-#[cfg(any(target_arch = "wasm32", test))]
-/// `.github/workflows/<file>.yml`, and nothing else. GitHub reports a run's
-/// `path` in exactly this shape, so anything else can never match a real run
-/// and is the caller's error rather than an empty result.
-fn valid_workflow_path(value: &str) -> Result<(), OperationError> {
-    let file = value
-        .strip_prefix(".github/workflows/")
-        .filter(|file| file.ends_with(".yml") || file.ends_with(".yaml"))
-        .filter(|file| valid_path_segment(file, 100, true));
-    file.map(|_| ()).ok_or(OperationError::InvalidInput)
-}
-
 fn valid_workflow_status(value: &str) -> bool {
     matches!(
         value,
@@ -7906,14 +5723,6 @@ fn valid_workflow_conclusion(value: &str) -> bool {
             | "startup_failure"
             | "success"
             | "timed_out"
-    )
-}
-
-#[cfg(any(target_arch = "wasm32", test))]
-fn failed_conclusion(value: &str) -> bool {
-    matches!(
-        value,
-        "action_required" | "cancelled" | "failure" | "startup_failure" | "timed_out"
     )
 }
 
@@ -8255,26 +6064,6 @@ async fn github_json_request<T: serde::de::DeserializeOwned, B: Serialize>(
 }
 
 #[cfg(target_arch = "wasm32")]
-async fn github_empty_request(
-    method: worker::Method,
-    url: &str,
-    credential: &str,
-    expected_status: u16,
-) -> Result<(), Error> {
-    let response = github_request(method, url, credential, None).await?;
-    if response.status_code() != expected_status {
-        worker::console_error!(
-            "github answered {url} with status {}, expected {expected_status}",
-            response.status_code()
-        );
-        return Err(Error::Rejected(response.status_code()));
-    }
-    read_github_response(response, url, MAX_GITHUB_RESPONSE_BYTES)
-        .await
-        .map(|_| ())
-}
-
-#[cfg(target_arch = "wasm32")]
 async fn github_response(
     method: worker::Method,
     url: &str,
@@ -8369,126 +6158,6 @@ pub(crate) async fn read_github_response(
         bytes.append(&mut chunk);
     }
     Ok(bytes)
-}
-
-#[cfg(target_arch = "wasm32")]
-async fn github_redirect_location(url: &str, credential: &str) -> Result<String, OperationError> {
-    let response = github_request(worker::Method::Get, url, credential, None).await?;
-    if response.status_code() != 302 {
-        return Err(Error::Rejected(response.status_code()).into());
-    }
-    let location = response
-        .headers()
-        .get("location")
-        .map_err(|_| OperationError::Unavailable)?
-        .ok_or(OperationError::Unavailable)?;
-    valid_log_redirect(&location)?;
-    Ok(location)
-}
-
-#[cfg(target_arch = "wasm32")]
-async fn github_public_log(location: &str) -> Result<String, OperationError> {
-    use worker::{Fetch, Headers, Request, RequestInit, RequestRedirect};
-
-    valid_log_redirect(location)?;
-    let headers = Headers::new();
-    for (name, value) in [
-        ("accept", "text/plain"),
-        ("range", "bytes=-65536"),
-        ("user-agent", "dark-factory-control-plane/0.1"),
-    ] {
-        headers
-            .set(name, value)
-            .map_err(|_| OperationError::Unavailable)?;
-    }
-    let mut init = RequestInit::new();
-    init.with_method(worker::Method::Get)
-        .with_redirect(RequestRedirect::Manual)
-        .with_headers(headers);
-    let request =
-        Request::new_with_init(location, &init).map_err(|_| OperationError::Unavailable)?;
-    // This request is deliberately credentialless. The short-lived signed URL
-    // is the complete authorization and is never logged or returned.
-    let mut response = Fetch::Request(request)
-        .send()
-        .await
-        .map_err(|_| OperationError::Unavailable)?;
-    if !matches!(response.status_code(), 200 | 206) {
-        return Err(OperationError::Unavailable);
-    }
-    let bytes = read_response_tail(&mut response, MAX_JOB_LOG_BYTES).await?;
-    Ok(String::from_utf8_lossy(&bytes)
-        .chars()
-        .map(|character| {
-            if character == '\n' || character == '\t' || !character.is_control() {
-                character
-            } else {
-                '\u{fffd}'
-            }
-        })
-        .collect())
-}
-
-#[cfg(target_arch = "wasm32")]
-async fn read_response_tail(
-    response: &mut worker::Response,
-    limit: usize,
-) -> Result<Vec<u8>, OperationError> {
-    use futures_util::TryStreamExt as _;
-
-    let mut stream = response.stream().map_err(|_| OperationError::Unavailable)?;
-    let mut bytes = Vec::new();
-    while let Some(mut chunk) = stream
-        .try_next()
-        .await
-        .map_err(|_| OperationError::Unavailable)?
-    {
-        retain_tail(&mut bytes, &mut chunk, limit);
-    }
-    Ok(bytes)
-}
-
-#[cfg(any(target_arch = "wasm32", test))]
-fn retain_tail(bytes: &mut Vec<u8>, chunk: &mut Vec<u8>, limit: usize) {
-    if chunk.len() >= limit {
-        bytes.clear();
-        bytes.extend_from_slice(&chunk[chunk.len() - limit..]);
-        return;
-    }
-    let overflow = bytes
-        .len()
-        .saturating_add(chunk.len())
-        .saturating_sub(limit);
-    if overflow > 0 {
-        bytes.drain(..overflow);
-    }
-    bytes.append(chunk);
-}
-
-#[cfg(any(target_arch = "wasm32", test))]
-fn valid_log_redirect(location: &str) -> Result<(), OperationError> {
-    if location.len() > MAX_LOG_REDIRECT_BYTES
-        || !location.is_ascii()
-        || location.bytes().any(|byte| byte.is_ascii_control())
-        || location.contains('#')
-    {
-        return Err(OperationError::Unavailable);
-    }
-    let rest = location
-        .strip_prefix("https://")
-        .ok_or(OperationError::Unavailable)?;
-    let authority_end = rest.find(['/', '?']).unwrap_or(rest.len());
-    let authority = &rest[..authority_end];
-    if authority.is_empty() || authority.contains(['@', ':']) {
-        return Err(OperationError::Unavailable);
-    }
-    let host = authority.to_ascii_lowercase();
-    if !(host.ends_with(".actions.githubusercontent.com")
-        || host.ends_with(".blob.core.windows.net"))
-    {
-        return Err(OperationError::Unavailable);
-    }
-    Ok(())
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -8691,28 +6360,6 @@ mod tests {
             request.page = page;
             request.per_page = per_page;
             assert!(request.validate().is_err());
-        }
-        let review = || {
-            serde_json::from_value::<PullRequestReview>(serde_json::json!({"id":55,"html_url":"https://github.com/team/code/pull/12#pullrequestreview-55","commit_id":"b".repeat(40),"body":"BLOCK: reviewed content","state":"COMMENTED"})).unwrap()
-        };
-        assert_eq!(
-            review_observation(55, review()).unwrap().body,
-            "BLOCK: reviewed content"
-        );
-        assert!(matches!(
-            review_observation(56, review()),
-            Err(OperationError::Conflict)
-        ));
-        for (pull_number, review_id) in [(0, 55), (12, 0), (12, MAX_EXACT_INTEGER + 1)] {
-            assert!(
-                ObservePullRequestReview {
-                    repository: "team/code".into(),
-                    pull_number,
-                    review_id
-                }
-                .validate()
-                .is_err()
-            );
         }
     }
 
@@ -9030,31 +6677,6 @@ mod tests {
     }
 
     #[test]
-    fn a_workflow_path_names_a_workflow_file() {
-        for accepted in [
-            ".github/workflows/ci.yml",
-            ".github/workflows/deploy.yml",
-            ".github/workflows/release.yaml",
-        ] {
-            assert!(valid_workflow_path(accepted).is_ok(), "{accepted}");
-        }
-        for rejected in [
-            "ci.yml",
-            ".github/workflows/",
-            ".github/workflows/ci.txt",
-            ".github/workflows/nested/ci.yml",
-            ".github/workflows/../../etc/passwd.yml",
-            "/.github/workflows/ci.yml",
-        ] {
-            assert_eq!(
-                valid_workflow_path(rejected).err(),
-                Some(OperationError::InvalidInput),
-                "{rejected} was accepted"
-            );
-        }
-    }
-
-    #[test]
     fn exact_repository_path_and_operation_installation_are_required() {
         let repository = RepositoryName::new("dark-factory-build/dark-factory".into()).unwrap();
         assert_eq!(
@@ -9189,8 +6811,8 @@ mod tests {
         )
         .unwrap();
 
-        // Issue reads and reviewed PR publication do not need merge queues,
-        // Actions, or direct-merge ruleset access.
+        // Issue reads and reviewed PR publication do not need merge queues
+        // or Actions.
         assert!(
             validate_installation(
                 &installation,
@@ -9223,13 +6845,12 @@ mod tests {
     }
 
     #[test]
-    fn operation_tokens_request_administration_only_for_direct_merge() {
+    fn operation_tokens_never_request_administration() {
         let source = include_str!("github_app.rs")
             .split("#[cfg(test)]\nmod tests {")
             .next()
             .unwrap();
-        let needle = ["(", "\"administration\"", ", ", "\"write\"", ")"].concat();
-        assert_eq!(source.matches(&needle).count(), 1);
+        assert!(!source.contains(&["\"administration", "\""].concat()));
     }
 
     #[test]
@@ -10145,7 +7766,7 @@ mod tests {
     }
 
     #[test]
-    fn rest_refusals_and_streaming_log_tails_are_bounded() {
+    fn rest_refusals_are_typed() {
         assert_eq!(
             rejection_for_status(403),
             Some(RejectionKinds {
@@ -10161,14 +7782,6 @@ mod tests {
             })
         );
         assert_eq!(rejection_for_status(500), None);
-
-        let mut tail = b"first".to_vec();
-        let mut middle = b"-middle".to_vec();
-        retain_tail(&mut tail, &mut middle, 8);
-        assert_eq!(tail, b"t-middle");
-        let mut oversized = b"0123456789".to_vec();
-        retain_tail(&mut tail, &mut oversized, 8);
-        assert_eq!(tail, b"23456789");
     }
 
     fn complete_release(tag: &str) -> Release {
@@ -10259,7 +7872,6 @@ mod tests {
             html_url: format!(
                 "https://github.com/dark-factory-build/dark-factory/actions/runs/{id}"
             ),
-            pull_requests: Vec::new(),
         }
     }
 
@@ -10520,89 +8132,6 @@ mod tests {
             .validate()
             .is_err()
         );
-        let mut resolve_issue = ResolveIssue {
-            repository: "dark-factory-build/dark-factory".into(),
-            operation_id: "3c8a5c44-7f1f-11f0-952e-acde48001122".into(),
-            issue_number: 349,
-            body: "The exact storage proof is now merged.".into(),
-            state_reason: IssueResolutionReason::Completed,
-        };
-        assert!(resolve_issue.validate().is_ok());
-        assert!(
-            resolve_issue
-                .marked_body()
-                .unwrap()
-                .contains(&resolve_issue.marker().unwrap())
-        );
-        assert_eq!(IssueResolutionReason::NotPlanned.as_str(), "not_planned");
-        assert!(
-            ResolveIssue {
-                repository: "dark-factory-build/dark-factory".into(),
-                body: "<!-- dark-factory-operation:forged -->".into(),
-                ..resolve_issue.clone()
-            }
-            .validate()
-            .is_err()
-        );
-        resolve_issue.issue_number = 0;
-        assert!(resolve_issue.validate().is_err());
-
-        let mut close = ClosePullRequest {
-            repository: "dark-factory-build/dark-factory".into(),
-            operation_id: "9c8a5c44-7f1f-11f0-952e-acde48001122".into(),
-            pull_number: 407,
-            head_sha: "e".repeat(40),
-        };
-        assert!(close.validate().is_ok());
-
-        let pull = |state: &str, merged: bool, head_sha: String| PullRequest {
-            number: 407,
-            node_id: "PR_node".into(),
-            html_url: "https://github.com/dark-factory-build/dark-factory/pull/407".into(),
-            title: "Superseded gate".into(),
-            body: None,
-            draft: false,
-            head: PullReference {
-                name: "simplify-ci".into(),
-                sha: head_sha,
-            },
-            base: PullReference {
-                name: "main".into(),
-                sha: "f".repeat(40),
-            },
-            state: state.into(),
-            merged,
-            mergeable: None,
-            merge_state_status: None,
-        };
-        assert!(
-            pull("open", false, close.head_sha.clone())
-                .close_result(&close)
-                .unwrap()
-                .is_none()
-        );
-        let closed = pull("closed", false, close.head_sha.clone())
-            .close_result(&close)
-            .unwrap()
-            .unwrap();
-        assert_eq!(closed.pull_number, close.pull_number);
-        assert_eq!(closed.head_sha, close.head_sha);
-        assert_eq!(closed.state, "closed");
-        assert!(matches!(
-            pull("closed", false, "d".repeat(40)).close_result(&close),
-            Err(OperationError::Conflict)
-        ));
-        assert!(matches!(
-            pull("closed", true, close.head_sha.clone()).close_result(&close),
-            Err(OperationError::Conflict)
-        ));
-        assert!(matches!(
-            pull("unknown", false, close.head_sha.clone()).close_result(&close),
-            Err(OperationError::Indeterminate)
-        ));
-        close.pull_number = 0;
-        assert!(close.validate().is_err());
-
         let mut merge = ObservePullRequestMerge {
             repository: "dark-factory-build/dark-factory".into(),
             enqueue_operation_id: "4c8a5c44-7f1f-11f0-952e-acde48001122".into(),
@@ -11113,14 +8642,8 @@ mod tests {
         assert_eq!(blocked.state, "COMMENTED");
         assert_eq!(blocked.verdict, "block");
 
-        // A metadata-only correction may clear an erroneous block at the same
-        // head, but only when the fresh independent review names that exact
-        // prior App operation. A plain ALLOW remains insufficient. Actually
-        // clearing the block is journal-authenticated on the wasm32-only
-        // merge path (`Authority::review_blocks_head`), which native `cargo
-        // test` cannot reach; what is provable here is the wire format that
-        // path and `verify-adversarial-review.sh` both read, and that the
-        // pure predicate never clears a block by itself.
+        // A metadata-only correction names the exact prior App BLOCK
+        // operation; `verify-adversarial-review.sh` reads that wire format.
         let correction = SubmitPullRequestReview {
             repository: block.repository.clone(),
             operation_id: "4c8a5c44-7f1f-11f0-952e-acde48001122".into(),
@@ -11135,16 +8658,6 @@ mod tests {
             "{REVIEW_CORRECTION_PREFIX} {}",
             block.operation_id
         )));
-        let blocking_review = PullRequestReview {
-            id: 6,
-            html_url:
-                "https://github.com/dark-factory-build/dark-factory/pull/331#pullrequestreview-6"
-                    .into(),
-            body: Some(block.marked_body().unwrap()),
-            commit_id: block.head_sha.clone(),
-            state: REVIEW_STATE.into(),
-        };
-        assert!(blocking_review.is_block_for_head(&block.head_sha));
         assert!(
             PullRequestReview {
                 id: 5,
@@ -11308,344 +8821,6 @@ mod tests {
     }
 
     #[test]
-    fn direct_merge_input_is_exactly_bound_and_has_no_merge_controls() {
-        let mut request: MergePullRequestAtHead = serde_json::from_value(serde_json::json!({
-            "repository": "dark-factory-build/dark-factory",
-            "operation_id": "6c8a5c44-7f1f-11f0-952e-acde48001122",
-            "review_operation_id": "7c8a5c44-7f1f-11f0-952e-acde48001122",
-            "pull_number": 403,
-            "head_sha": "a".repeat(40),
-            "base": "main"
-        }))
-        .unwrap();
-        assert!(request.validate().is_ok());
-        for value in [
-            serde_json::json!({"method":"merge"}),
-            serde_json::json!({"merge_method":"merge"}),
-            serde_json::json!({"url":"https://api.github.com"}),
-            serde_json::json!({"base_sha":"b".repeat(40)}),
-        ] {
-            let mut extra = serde_json::to_value(&request).unwrap();
-            extra.as_object_mut().unwrap().extend(
-                value
-                    .as_object()
-                    .unwrap()
-                    .iter()
-                    .map(|(key, value)| (key.clone(), value.clone())),
-            );
-            assert!(serde_json::from_value::<MergePullRequestAtHead>(extra).is_err());
-        }
-        let mut same = request.clone();
-        same.operation_id = same.review_operation_id.clone();
-        assert_eq!(same.validate().err(), Some(OperationError::InvalidInput));
-        same.operation_id = "8c8a5c44-7f1f-11f0-952e-acde48001122".into();
-        assert_eq!(same.validate().err(), None);
-    }
-
-    #[test]
-    fn direct_merge_private_unprotected_fallback_fails_closed() {
-        let repository = |private, squash| RepositoryMetadata {
-            id: 1_335_380_107,
-            full_name: "dark-factory-build/dark-factory-site".into(),
-            default_branch: "main".into(),
-            private,
-            allow_squash_merge: squash,
-        };
-        let branch = BranchSnapshot {
-            name: "main".into(),
-            protected: false,
-            commit: BranchCommit {
-                sha: "a".repeat(40),
-            },
-        };
-        assert!(private_unprotected_merge_allowed(
-            &repository(Some(true), Some(true)),
-            &branch
-        ));
-        for metadata in [
-            repository(None, Some(true)),
-            repository(Some(false), Some(true)),
-            repository(Some(true), None),
-            repository(Some(true), Some(false)),
-        ] {
-            assert!(!private_unprotected_merge_allowed(&metadata, &branch));
-        }
-        assert!(!private_unprotected_merge_allowed(
-            &repository(Some(true), Some(true)),
-            &BranchSnapshot {
-                protected: true,
-                ..branch
-            }
-        ));
-
-        let absent = serde_json::json!({"repository": {"mergeQueue": null}});
-        assert!(no_merge_queue(Some(absent.clone()), None).is_ok());
-        for unknown in [
-            None,
-            Some(serde_json::json!({})),
-            Some(serde_json::json!({"repository": null})),
-            Some(serde_json::json!({"repository": {}})),
-        ] {
-            assert_eq!(
-                no_merge_queue(unknown, None).err(),
-                Some(OperationError::Indeterminate)
-            );
-        }
-        assert_eq!(
-            no_merge_queue(
-                Some(serde_json::json!({"repository": {"mergeQueue": {}}})),
-                None
-            )
-            .err(),
-            Some(OperationError::Refused(RefusalReason::MergePreconditions))
-        );
-        assert_eq!(
-            no_merge_queue(Some(absent), Some(GraphQlFailure::Unknown)).err(),
-            Some(OperationError::Indeterminate)
-        );
-    }
-
-    #[test]
-    fn direct_merge_rules_checks_reviews_and_statuses_fail_closed() {
-        let required = |context: &str, integration_id| RequiredCheckIdentity {
-            context: context.into(),
-            integration_id,
-        };
-        let pull_parameters = || {
-            serde_json::json!({
-                "allowed_merge_methods": ["squash"],
-                "dismiss_stale_reviews_on_push": false,
-                "require_code_owner_review": false,
-                "require_last_push_approval": false,
-                "required_approving_review_count": 0,
-                "required_review_thread_resolution": false
-            })
-        };
-        let protected: Vec<BranchRule> = serde_json::from_value(serde_json::json!([
-            {"type": "pull_request", "parameters": pull_parameters()},
-            {"type": "required_status_checks", "parameters": {
-                "strict_required_status_checks_policy": true,
-                "required_status_checks": [{"context": "checks", "integration_id": 42}]
-            }}
-        ]))
-        .unwrap();
-        assert_eq!(
-            branch_rules_allow_merge(&protected).unwrap(),
-            [required("checks", Some(42))]
-        );
-        let multiple: Vec<BranchRule> = serde_json::from_value(serde_json::json!([
-            {"type": "pull_request", "parameters": pull_parameters()},
-            {"type": "pull_request", "parameters": pull_parameters()},
-            {"type": "required_status_checks", "parameters": {
-                "strict_required_status_checks_policy": true,
-                "required_status_checks": [{"context": "lint"}]
-            }},
-            {"type": "required_status_checks", "parameters": {
-                "strict_required_status_checks_policy": true,
-                "required_status_checks": [{"context": "tests"}]
-            }}
-        ]))
-        .unwrap();
-        assert_eq!(
-            branch_rules_allow_merge(&multiple).unwrap(),
-            [required("lint", None), required("tests", None)]
-        );
-        let mut queue = multiple.clone();
-        queue.push(BranchRule {
-            r#type: "merge_queue".into(),
-            parameters: serde_json::Value::Null,
-            ruleset_id: Some(1),
-            ruleset_source: Some("dark-factory-build/dark-factory".into()),
-        });
-        assert!(branch_rules_allow_merge(&queue).is_none());
-        let mut non_squash = multiple.clone();
-        non_squash[1].parameters = serde_json::json!({
-            "allowed_merge_methods": ["merge"],
-            "dismiss_stale_reviews_on_push": false,
-            "require_code_owner_review": false,
-            "require_last_push_approval": false,
-            "required_approving_review_count": 0,
-            "required_review_thread_resolution": false
-        });
-        assert!(branch_rules_allow_merge(&non_squash).is_none());
-        let mut loose = multiple.clone();
-        loose[3].parameters["strict_required_status_checks_policy"] =
-            serde_json::Value::Bool(false);
-        assert!(branch_rules_allow_merge(&loose).is_none());
-        let passing = vec![CheckResult {
-            name: "checks".into(),
-            status: "completed".into(),
-            conclusion: Some("success".into()),
-            url: "https://github.com/checks".into(),
-            app_id: Some(42),
-        }];
-        let any_checks = [required("checks", None)];
-        assert!(checks_allow_merge(&passing, &any_checks));
-        assert!(
-            serde_json::to_value(&passing[0])
-                .unwrap()
-                .get("app_id")
-                .is_none()
-        );
-        assert!(checks_allow_merge(
-            &passing,
-            &[required("checks", Some(42))]
-        ));
-        assert!(!checks_allow_merge(
-            &passing,
-            &[required("checks", Some(43))]
-        ));
-        for conclusion in ["failure", "cancelled", "timed_out", "action_required"] {
-            let mut blocked = passing.clone();
-            blocked[0].conclusion = Some(conclusion.into());
-            assert!(!checks_allow_merge(&blocked, &any_checks));
-        }
-        let mut incomplete = passing.clone();
-        incomplete[0].status = "in_progress".into();
-        assert!(!checks_allow_merge(&incomplete, &any_checks));
-        assert!(!checks_allow_merge(&passing, &[]));
-        assert!(checks_are_terminal_and_non_failing(&passing));
-        assert!(!checks_are_terminal_and_non_failing(&[]));
-
-        let allow = ReviewResult {
-            review_id: 1,
-            url: "https://github.com/dark-factory-build/dark-factory/pull/403#pullrequestreview-1"
-                .into(),
-            head_sha: "a".repeat(40),
-            state: "COMMENTED".into(),
-            verdict: "allow".into(),
-        };
-        assert!(review_result_allows_merge(
-            &allow,
-            "dark-factory-build/dark-factory",
-            403,
-            &"a".repeat(40)
-        ));
-        for (state, verdict) in [("COMMENTED", "block"), ("CHANGES_REQUESTED", "allow")] {
-            let mut blocked = allow.clone();
-            blocked.state = state.into();
-            blocked.verdict = verdict.into();
-            assert!(!review_result_allows_merge(
-                &blocked,
-                "dark-factory-build/dark-factory",
-                403,
-                &"a".repeat(40)
-            ));
-        }
-
-        let head = "a".repeat(40);
-        let app_block = PullRequestReview {
-            id: 2,
-            html_url: "https://github.com/dark-factory-build/dark-factory/pull/403".into(),
-            body: Some(format!("{REVIEW_VERDICT_PREFIX} block {head}")),
-            commit_id: head.clone(),
-            state: "COMMENTED".into(),
-        };
-        assert!(app_block.is_block_for_head(&head));
-        assert!(!app_block.is_block_for_head(&"b".repeat(40)));
-        assert!(
-            PullRequestReview {
-                id: 3,
-                html_url: app_block.html_url.clone(),
-                body: app_block.body.clone(),
-                commit_id: head.clone(),
-                state: "DISMISSED".into(),
-            }
-            .is_block_for_head(&head)
-        );
-    }
-
-    #[test]
-    fn direct_merge_ruleset_ids_and_bypass_shape_fail_closed() {
-        let rules: Vec<BranchRule> = serde_json::from_value(serde_json::json!([
-            {"type": "pull_request", "parameters": {}, "ruleset_id": 7, "ruleset_source": "dark-factory-build/dark-factory"},
-            {"type": "required_status_checks", "parameters": {}, "ruleset_id": 7, "ruleset_source": "dark-factory-build/dark-factory"},
-            {"type": "creation", "parameters": null, "ruleset_id": 11, "ruleset_source": "dark-factory-build"}
-        ]))
-        .unwrap();
-        assert_eq!(active_ruleset_ids(&rules), Some(vec![7, 11]));
-
-        let mut missing = rules.clone();
-        missing[0].ruleset_id = None;
-        assert!(active_ruleset_ids(&missing).is_none());
-        for invalid in [0, -1] {
-            let mut invalid_id = rules.clone();
-            invalid_id[0].ruleset_id = Some(invalid);
-            assert!(active_ruleset_ids(&invalid_id).is_none());
-        }
-
-        let safe: RepositoryRuleset = serde_json::from_value(serde_json::json!({
-            "id": 7,
-            "target": "branch",
-            "enforcement": "active",
-            "bypass_actors": [
-                {"actor_id": 9, "actor_type": "User", "bypass_mode": "always"},
-                {"actor_id": 10, "actor_type": "Integration", "bypass_mode": "pull_request"},
-                {"actor_id": 11, "actor_type": "Team", "bypass_mode": "exempt"},
-                {"actor_id": null, "actor_type": "DeployKey", "bypass_mode": "always"},
-                {"actor_id": null, "actor_type": "OrganizationAdmin", "bypass_mode": "always"}
-            ]
-        }))
-        .unwrap();
-        assert!(ruleset_allows_merge(&safe, 7, 42));
-        for drifted in [
-            RepositoryRuleset {
-                id: 8,
-                ..safe.clone()
-            },
-            RepositoryRuleset {
-                target: "tag".into(),
-                ..safe.clone()
-            },
-            RepositoryRuleset {
-                enforcement: "disabled".into(),
-                ..safe.clone()
-            },
-        ] {
-            assert!(!ruleset_allows_merge(&drifted, 7, 42));
-        }
-
-        let matching_app: RepositoryRuleset = serde_json::from_value(serde_json::json!({
-            "id": 7,
-            "target": "branch",
-            "enforcement": "active",
-            "bypass_actors": [
-                {"actor_id": 42, "actor_type": "Integration", "bypass_mode": "always"}
-            ]
-        }))
-        .unwrap();
-        assert!(!ruleset_allows_merge(&matching_app, 7, 42));
-        let missing_bypass: RepositoryRuleset = serde_json::from_value(serde_json::json!({
-            "id": 7,
-            "target": "branch",
-            "enforcement": "active"
-        }))
-        .unwrap();
-        assert!(!ruleset_allows_merge(&missing_bypass, 7, 42));
-        for actor in [
-            serde_json::json!({"actor_id": 9, "actor_type": "FutureActor", "bypass_mode": "always"}),
-            serde_json::json!({"actor_id": 9, "actor_type": "User", "bypass_mode": "future"}),
-            serde_json::json!({"actor_id": 0, "actor_type": "User", "bypass_mode": "always"}),
-        ] {
-            let ruleset: RepositoryRuleset = serde_json::from_value(serde_json::json!({
-                "id": 7,
-                "target": "branch",
-                "enforcement": "active",
-                "bypass_actors": [actor]
-            }))
-            .unwrap();
-            assert!(!ruleset_allows_merge(&ruleset, 7, 42));
-        }
-        assert!(serde_json::from_value::<RepositoryRuleset>(serde_json::json!({
-            "id": 7,
-            "target": "branch",
-            "enforcement": "active",
-            "bypass_actors": [{"actor_id": 9, "actor_type": "User", "bypass_mode": "always", "new": true}]
-        }))
-        .is_err());
-    }
-
-    #[test]
     fn merged_pull_graphql_recovers_the_api_versioned_rest_field() {
         assert_eq!(GITHUB_API_VERSION, "2026-03-10");
         let rest = serde_json::json!({
@@ -11697,43 +8872,6 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn direct_merge_statuses_and_response_reconciliation_are_typed() {
-        assert_eq!(classify_merge_status(409), MergeHttpStatus::HeadConflict);
-        assert_eq!(classify_merge_status(422), MergeHttpStatus::Refused);
-        assert_eq!(classify_merge_status(400), MergeHttpStatus::Reconcile);
-        assert_eq!(classify_merge_status(429), MergeHttpStatus::Reconcile);
-        assert_eq!(classify_merge_status(500), MergeHttpStatus::Reconcile);
-        assert_eq!(classify_merge_status(0), MergeHttpStatus::Reconcile);
-
-        let request = MergePullRequestAtHead {
-            repository: "dark-factory-build/dark-factory".into(),
-            operation_id: "6c8a5c44-7f1f-11f0-952e-acde48001122".into(),
-            review_operation_id: "7c8a5c44-7f1f-11f0-952e-acde48001122".into(),
-            pull_number: 403,
-            head_sha: "a".repeat(40),
-            base: "main".into(),
-        };
-        let response: PullRequestMergeResponse = serde_json::from_value(serde_json::json!({
-            "sha": "c".repeat(40), "merged": true
-        }))
-        .unwrap();
-        let result = merge_response_result(response, &request).unwrap();
-        assert_eq!(result.pull_number, 403);
-        assert_eq!(result.head_sha, request.head_sha);
-        assert_eq!(result.merge_commit_sha, "c".repeat(40));
-        let marked_message = format!("Squash change\n\n{}", request.trailer().unwrap());
-        assert!(merge_commit_has_trailer(&request, &marked_message).unwrap());
-        assert!(!merge_commit_has_trailer(&request, "Squash change").unwrap());
-        let no_effect: PullRequestMergeResponse = serde_json::from_value(serde_json::json!({
-            "sha": null, "merged": false
-        }))
-        .unwrap();
-        assert!(matches!(
-            merge_response_result(no_effect, &request),
-            Err(OperationError::Refused(RefusalReason::MergePreconditions))
-        ));
-    }
     #[test]
     fn issue_read_filter_accepts_the_configured_source_byte_bound() {
         for label in ["x".repeat(51), "é".repeat(50), "x".repeat(100)] {
