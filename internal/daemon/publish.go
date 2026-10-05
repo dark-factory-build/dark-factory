@@ -23,9 +23,9 @@ import (
 type publishCall func(ctx context.Context, name string, arguments map[string]any) (json.RawMessage, error)
 
 // publishCheckout returns the Git directory of a disposable clone holding the
-// Change's base, main and the given head (main, or pull's head), and its
-// cleanup.
-type publishCheckout func(ctx context.Context, pull uint64, head string) (string, func(), error)
+// Change's base, main and the given head (main, or the head of ref, the
+// Change's branch), and its cleanup.
+type publishCheckout func(ctx context.Context, ref, head string) (string, func(), error)
 
 // errPublishLater is a failure of the connection or the checkout, not of the
 // Change: the next pass retries it.
@@ -68,8 +68,8 @@ func (daemon *Daemon) publishSettledChange(ctx context.Context, c kernel.Publish
 		return daemon.publishFailed(ctx, c, repo, errors.Join(err, errors.New("repository disabled for new work")))
 	}
 	backend := &daemonReviewBackend{daemon: daemon, project: c.Task.ProjectID, repository: repo, repositoryID: id}
-	checkout := func(ctx context.Context, pull uint64, head string) (string, func(), error) {
-		path, cleanup, err := backend.CloneReadOnly(ctx, review.Request{Repository: repo, PullNumber: pull, Head: head, Base: c.Base, BaseRef: "main"})
+	checkout := func(ctx context.Context, ref, head string) (string, func(), error) {
+		path, cleanup, err := backend.clone(ctx, repo, ref, head, c.Base, "main")
 		return filepath.Join(path, ".git"), cleanup, err
 	}
 	source, err := daemon.settledChangeGitDirectory(ctx, c)
@@ -133,9 +133,10 @@ func (daemon *Daemon) publishFailed(ctx context.Context, c kernel.PublishableCha
 // and is observed first, so a replay after a lost response reuses the
 // completed write. Commits go under publish-<HEAD8 of the worker's head>-N
 // and the pull request under pr-<HEAD8>, so a changed head never reuses a
-// stale write. A correction (c.Pull set) goes on its pull request's branch
-// head (on replay the first one's parent is that branch head) and replaces
-// the body under body-<HEAD8 of the new head>.
+// stale write. They go on the Change's branch head when the branch exists (on
+// replay the first one's parent), carrying only what differs from it, or
+// start a new branch; a correction (c.Pull set) then replaces the body under
+// body-<HEAD8 of the new head>.
 func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChange, repo, source string, call publishCall, checkout publishCheckout) error {
 	operation := func(step string) string { return uuid5("dark-factory:" + c.Change.String() + ":" + step) }
 	completed := func(step string, result any) (bool, error) {
@@ -161,34 +162,34 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 		if err == nil {
 			err = json.Unmarshal(response, &ref)
 		}
-		if err == nil && ref.Head == "" {
-			err = errors.New(branch + " has no head")
-		}
-		return ref.Head, err
+		return ref.Head, err // "" when the branch does not exist
+	}
+	prefix := "publish-" + c.Head[:8] + "-"
+	var first struct {
+		Parent string `json:"parent_sha"`
 	}
 	main, err := refHead("main")
+	if err == nil && main == "" {
+		err = errors.New("main has no head")
+	}
+	done, ref := false, ""
+	if err == nil {
+		done, err = completed(prefix+"1", &first)
+	}
+	checked, tip := main, "" // the branch head before these commits, if any
+	if err == nil {
+		tip, err = refHead(branch)
+	}
 	if err != nil {
 		return err
 	}
-	prefix, checked := "publish-"+c.Head[:8]+"-", main
-	var tip string // a correction's branch head before it
-	if c.Pull != 0 {
-		var first struct {
-			Parent string `json:"parent_sha"`
-		}
-		done, err := completed(prefix+"1", &first)
-		if err == nil {
-			checked, err = refHead(branch)
-		}
-		if err != nil {
-			return err
-		}
-		tip = checked
-		if done {
-			tip = first.Parent
-		}
+	if tip != "" {
+		checked, ref = tip, "refs/heads/"+branch
 	}
-	gitDir, cleanup, err := checkout(ctx, c.Pull, checked)
+	if done {
+		tip = first.Parent
+	}
+	gitDir, cleanup, err := checkout(ctx, ref, checked)
 	if err != nil {
 		return errors.Join(errPublishLater, err)
 	}
@@ -284,7 +285,7 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 		Head   string `json:"head_sha"`
 		Base   string `json:"base_sha"`
 	}
-	done, err := completed("pr-"+c.Head[:8], &pull)
+	done, err = completed("pr-"+c.Head[:8], &pull)
 	if err == nil && !done {
 		var base string
 		if base, err = refHead("main"); err == nil {

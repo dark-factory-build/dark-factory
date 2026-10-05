@@ -49,6 +49,9 @@ func (f *fakePublishMaintainer) call(_ context.Context, name string, arguments m
 	var result json.RawMessage
 	switch name {
 	case "publish_commit":
+		if f.tip != "" && arguments["expected_head_sha"] != f.tip {
+			return nil, fmt.Errorf("%w: conflict: branch is at %s, not %v", review.ErrRejected, f.tip, arguments["expected_head_sha"])
+		}
 		for _, entry := range arguments["changes"].([]map[string]any) {
 			if f.refuse != "" && strings.HasPrefix(entry["path"].(string), f.refuse) {
 				return nil, fmt.Errorf("%w: refused: %s cannot be written", review.ErrRejected, f.refuse)
@@ -139,7 +142,7 @@ func publishFixture(t *testing.T, files int, workflow bool) (*dispatchFixture, k
 	candidate := kernel.PublishableChange{Task: task, Change: changeID, Revision: revision, Base: base, Head: head,
 		Accepted: kernel.IntakeAcceptance{SourceRepository: "team/repo", Snapshot: kernel.IntakeIssueSnapshot{GitHubRepositoryID: 42, IssueNumber: 9, Title: "Fix  the\nthing"}}}
 	fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return &publicReviewBackend{} }
-	checkout := func(context.Context, uint64, string) (string, func(), error) {
+	checkout := func(context.Context, string, string) (string, func(), error) {
 		clone := filepath.Join(t.TempDir(), "clone")
 		supervisorGit(t, git, "clone", "-q", "--shared", registered, clone)
 		return filepath.Join(clone, ".git"), func() {}, nil
@@ -195,32 +198,37 @@ func TestFactorydPublishesASettledIntakeChange(t *testing.T) {
 	}
 }
 
-// A head that changes after its commits were published but before the pull
-// request (a retried task) publishes under new operation ids: its pull
-// request carries the new head's commit, never the stale one.
-func TestFirstPublicationOfAChangedHeadReusesNoStaleWrite(t *testing.T) {
-	fixture, c, source, app, checkout := publishFixture(t, 1, false)
+// A head that changes after commits reached the Change's branch but before
+// its pull request (a retried task) goes on that branch head under new
+// operation ids, carrying only what differs from it.
+func TestFirstPublicationOfAChangedHeadBuildsOnItsBranch(t *testing.T) {
+	fixture, c, source, app, checkout := publishFixture(t, 2, false)
 	ctx := context.Background()
-	if err := fixture.daemon.publishChange(ctx, c, "team/repo", source, app.call, checkout); err != nil {
-		t.Fatal(err)
-	}
-	delete(app.journal, uuid5("dark-factory:"+c.Change.String()+":pr-"+c.Head[:8])) // the pull request was never opened
-	root := filepath.Dir(source)
+	root, git := filepath.Dir(source), change.TrustedGitExecutable
+	stale := c.Head
+	app.tip = stale // the branch carries the earlier head's tree; no pull request
 	if err := os.WriteFile(filepath.Join(root, "f00.txt"), []byte("retried\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	supervisorGit(t, change.TrustedGitExecutable, "-C", root, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "commit", "-q", "-am", "retry")
-	c.Head = strings.TrimSpace(supervisorGitOutput(t, change.TrustedGitExecutable, "-C", root, "rev-parse", "HEAD"))
-	app.writes = nil
-	if err := fixture.daemon.publishChange(ctx, c, "team/repo", source, app.call, checkout); err != nil {
+	supervisorGit(t, git, "-C", root, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "commit", "-q", "-am", "retry")
+	c.Head = strings.TrimSpace(supervisorGitOutput(t, git, "-C", root, "rev-parse", "HEAD"))
+	withTip := func(ctx context.Context, ref, head string) (string, func(), error) {
+		gitDir, cleanup, err := checkout(ctx, ref, head)
+		if err == nil && ref == "refs/heads/factory/"+c.Change.String()[:12] && head == stale {
+			_, err = gitOutput(ctx, gitDir, "-c", "protocol.file.allow=always", "fetch", "--quiet", source, stale)
+		}
+		return gitDir, cleanup, err
+	}
+	if err := fixture.daemon.publishChange(ctx, c, "team/repo", source, app.call, withTip); err != nil {
 		t.Fatal(err)
 	}
 	if len(app.writes) != 2 {
 		t.Fatalf("writes = %+v", app.writes)
 	}
 	commit, pull := app.writes[0]["arguments"].(map[string]any), app.writes[1]["arguments"].(map[string]any)
-	if commit["operation_id"] != uuid5("dark-factory:"+c.Change.String()+":publish-"+c.Head[:8]+"-1") || pull["operation_id"] != uuid5("dark-factory:"+c.Change.String()+":pr-"+c.Head[:8]) ||
-		pull["head_sha"] != fmt.Sprintf("%x", sha1.Sum([]byte(commit["operation_id"].(string)))) {
+	changes := commit["changes"].([]map[string]any)
+	if commit["operation_id"] != uuid5("dark-factory:"+c.Change.String()+":publish-"+c.Head[:8]+"-1") || commit["expected_head_sha"] != stale || len(changes) != 1 || changes[0]["path"] != "f00.txt" ||
+		pull["operation_id"] != uuid5("dark-factory:"+c.Change.String()+":pr-"+c.Head[:8]) || pull["head_sha"] != app.tip {
 		t.Fatalf("commit = %+v pull = %+v", commit, pull)
 	}
 }
@@ -241,8 +249,8 @@ func TestFactorydPublishesACorrectionOnItsPullRequest(t *testing.T) {
 	supervisorGit(t, git, "-C", root, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "commit", "-q", "-am", "correct")
 	c.Head, c.Pull = strings.TrimSpace(supervisorGitOutput(t, git, "-C", root, "rev-parse", "HEAD")), 31
 	tip := app.tip
-	withTip := func(ctx context.Context, pull uint64, head string) (string, func(), error) {
-		gitDir, cleanup, err := checkout(ctx, pull, head)
+	withTip := func(ctx context.Context, ref, head string) (string, func(), error) {
+		gitDir, cleanup, err := checkout(ctx, ref, head)
 		if err == nil {
 			_, err = gitOutput(ctx, gitDir, "-c", "protocol.file.allow=always", "fetch", "--quiet", source, tip)
 		}

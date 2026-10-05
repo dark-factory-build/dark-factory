@@ -7,19 +7,18 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 )
 
 // ReviewCheckout makes path a disposable clone checked out at exactly head,
-// the head of pull request pull, with base present. The clone borrows the
-// registered repository's objects through Git alternates and fetches the pull
-// ref from that repository's registered origin into its own refs, so the
-// repository's refs, config and index are only ever read. Pull 0 fetches the
-// base alone and checks out head, which must be merged into it.
-func ReviewCheckout(ctx context.Context, gitExecutable, root string, expected RepositorySourceIdentity, path string, pull uint64, head, base, baseRef string) error {
+// the head of ref (a pull request's or a branch's), with base present. The
+// clone borrows the registered repository's objects through Git alternates
+// and fetches ref from that repository's registered origin into its own refs,
+// so the repository's refs, config and index are only ever read. An empty ref
+// fetches the base alone and checks out head, which must be merged into it.
+func ReviewCheckout(ctx context.Context, gitExecutable, root string, expected RepositorySourceIdentity, path string, ref, head, base, baseRef string) error {
 	if err := validateRevision(baseRef); err != nil {
 		return err
 	}
@@ -54,13 +53,13 @@ func ReviewCheckout(ctx context.Context, gitExecutable, root string, expected Re
 	// origin (a mirror, or a test fixture) is as trusted as a GitHub one.
 	fetch := []string{"-C", path, "-c", "core.hooksPath=/dev/null", "-c", "protocol.file.allow=always", "fetch", "--quiet", "--no-tags", "--no-recurse-submodules", "--no-write-fetch-head", "--no-auto-maintenance", "--end-of-options", strings.TrimSpace(string(origin)), "+refs/heads/" + strings.TrimPrefix(baseRef, "refs/heads/") + ":refs/review/base"}
 	checkout := head
-	if pull != 0 {
-		fetch, checkout = append(fetch, fmt.Sprintf("+refs/pull/%d/head:refs/review/head", pull)), "refs/review/head"
+	if ref != "" {
+		fetch, checkout = append(fetch, "+"+ref+":refs/review/head"), "refs/review/head"
 	}
 	if _, err := authority.succeed(ctx, maxGitSelectionOutput, fetch...); err != nil {
 		return err
 	}
-	if pull == 0 {
+	if ref == "" {
 		if merged, err := authority.run(ctx, maxGitSelectionOutput, "-C", path, "merge-base", "--is-ancestor", head, "refs/review/base"); err != nil || merged.exitCode != 0 {
 			return errors.Join(&ValidationError{Reason: "commit is not merged into the base"}, err)
 		}

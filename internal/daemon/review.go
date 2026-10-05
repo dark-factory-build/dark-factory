@@ -406,6 +406,15 @@ type daemonReviewBackend struct {
 // CloneReadOnly checks the pull request out at its exact head into a
 // disposable clone that borrows the registered repository's objects.
 func (b *daemonReviewBackend) CloneReadOnly(ctx context.Context, request review.Request) (string, func(), error) {
+	ref := ""
+	if request.PullNumber != 0 {
+		ref = fmt.Sprintf("refs/pull/%d/head", request.PullNumber)
+	}
+	return b.clone(ctx, request.Repository, ref, request.Head, request.Base, request.BaseRef)
+}
+
+// clone is CloneReadOnly at ref's exact head (change.ReviewCheckout).
+func (b *daemonReviewBackend) clone(ctx context.Context, repo, ref, head, base, baseRef string) (string, func(), error) {
 	repositories, err := b.daemon.store.ProjectRepositories(ctx, b.project)
 	if err != nil {
 		return "", nil, err
@@ -415,7 +424,7 @@ func (b *daemonReviewBackend) CloneReadOnly(ctx context.Context, request review.
 		if err != nil {
 			return "", nil, err
 		}
-		if !repository.Enabled || !verified || !strings.EqualFold(source.PublicationRepository, request.Repository) {
+		if !repository.Enabled || !verified || !strings.EqualFold(source.PublicationRepository, repo) {
 			continue
 		}
 		rootIdentity, rootErr := change.NewRepositoryIdentity(source.RootDevice, source.RootInode)
@@ -430,7 +439,7 @@ func (b *daemonReviewBackend) CloneReadOnly(ctx context.Context, request review.
 		cleanup := func() { _ = os.RemoveAll(root) }
 		checkout := filepath.Join(root, "repo")
 		expected := change.RepositorySourceIdentity{Root: rootIdentity, Git: gitIdentity, OriginDigest: source.OriginDigest}
-		if err := change.ReviewCheckout(ctx, change.TrustedGitExecutable, repository.Root, expected, checkout, request.PullNumber, request.Head, request.Base, request.BaseRef); err != nil {
+		if err := change.ReviewCheckout(ctx, change.TrustedGitExecutable, repository.Root, expected, checkout, ref, head, base, baseRef); err != nil {
 			cleanup()
 			return "", nil, fmt.Errorf("review checkout: %w", err)
 		}

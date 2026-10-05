@@ -215,29 +215,29 @@ func TestReviewCheckoutIsExactHeadAndLeavesRegisteredRepositoryUnchanged(t *test
 	refsBefore := runExternalGit(t, root, git, repository, "for-each-ref")
 
 	checkout := filepath.Join(root, "review")
-	if err := change.ReviewCheckout(context.Background(), git, repository, source, checkout, 7, head, base, "main"); err != nil {
+	if err := change.ReviewCheckout(context.Background(), git, repository, source, checkout, "refs/pull/7/head", head, base, "main"); err != nil {
 		t.Fatal(err)
 	}
 	if got := runExternalGit(t, root, git, checkout, "rev-parse", "HEAD"); got != head {
 		t.Fatalf("review HEAD = %s, want %s", got, head)
 	}
 	// A full branch ref names the same base as its short name.
-	if err := change.ReviewCheckout(context.Background(), git, repository, source, filepath.Join(root, "full-ref"), 7, head, base, "refs/heads/main"); err != nil {
+	if err := change.ReviewCheckout(context.Background(), git, repository, source, filepath.Join(root, "full-ref"), "refs/pull/7/head", head, base, "refs/heads/main"); err != nil {
 		t.Fatalf("full base ref: %v", err)
 	}
 	moved := filepath.Join(root, "moved")
-	if err := change.ReviewCheckout(context.Background(), git, repository, source, moved, 7, base, base, "main"); err == nil {
+	if err := change.ReviewCheckout(context.Background(), git, repository, source, moved, "refs/pull/7/head", base, base, "main"); err == nil {
 		t.Fatal("review checkout accepted a head the pull request does not have")
 	}
 	// Pull 0 releases a merged commit: the base alone, at that commit.
 	merged := filepath.Join(root, "merged")
-	if err := change.ReviewCheckout(context.Background(), git, repository, source, merged, 0, fork, fork, "main"); err != nil {
+	if err := change.ReviewCheckout(context.Background(), git, repository, source, merged, "", fork, fork, "main"); err != nil {
 		t.Fatalf("merged commit: %v", err)
 	}
 	if got := runExternalGit(t, root, git, merged, "rev-parse", "HEAD"); got != fork {
 		t.Fatalf("merged HEAD = %s, want %s", got, fork)
 	}
-	if err := change.ReviewCheckout(context.Background(), git, repository, source, filepath.Join(root, "unmerged"), 0, head, head, "main"); err == nil {
+	if err := change.ReviewCheckout(context.Background(), git, repository, source, filepath.Join(root, "unmerged"), "", head, head, "main"); err == nil {
 		t.Fatal("a commit the base does not contain was checked out")
 	}
 	if after := runExternalGit(t, root, git, repository, "for-each-ref"); after != refsBefore {
