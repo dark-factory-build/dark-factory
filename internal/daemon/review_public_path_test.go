@@ -703,7 +703,7 @@ func (b *notYetEnqueueBackend) Enqueue(ctx context.Context, operation review.Ope
 // An enqueue GitHub refuses before executing (hosted checks queued, #1276)
 // is resent once per tick for as long as its pull request is open at head:
 // escalated once when stalled, never failed. It enqueues when GitHub accepts
-// it, and ends once its pull request closes or moves.
+// it, and ends once its pull request closes.
 func TestRefusedEnqueueResendsWhileThePullIsOpenAtHead(t *testing.T) {
 	fixture, project, _, settle := publishedTask(t)
 	settle()
@@ -746,17 +746,18 @@ func TestRefusedEnqueueResendsWhileThePullIsOpenAtHead(t *testing.T) {
 		t.Fatalf("accepted: %+v (enqueues %d)", op, backend.enqueues)
 	}
 
-	// A refused enqueue whose pull request moved to a new head ends.
+	// A refused enqueue whose pull request closed at its head ends (a moved
+	// head already supersedes it).
 	backend.refuse = true
-	moved := refused
-	moved.ID, moved.EnqueueID = "moved-enqueue", "moved-write"
-	backend.observations["moved-write"] = review.Receipt{State: "planned"}
-	if err := store.Create(ctx, moved); err != nil {
+	closed := refused
+	closed.ID, closed.EnqueueID = "closed-enqueue", "closed-write"
+	backend.observations["closed-write"] = review.Receipt{State: "planned"}
+	if err := store.Create(ctx, closed); err != nil {
 		t.Fatal(err)
 	}
-	head := strings.Repeat("d", 40)
+	head := request.Head
 	at := fixture.daemon.now().UnixMilli()
-	if err := fixture.store.RecordProductionObservation(ctx, project, kernel.ProductionObservation{Repository: "team/repo", ObservedAt: at, PullRequests: []kernel.ProductionPullRequest{{Number: 12, Title: "Ship it", URL: "https://github.com/team/repo/pull/12", Head: head, Branch: "feature/ship", Base: "main", State: "open", Review: kernel.ProductionReview{Head: head, State: "unknown"}}}}, mustKernelTime(t, at)); err != nil {
+	if err := fixture.store.RecordProductionObservation(ctx, project, kernel.ProductionObservation{Repository: "team/repo", ObservedAt: at, PullRequests: []kernel.ProductionPullRequest{{Number: 12, Title: "Ship it", URL: "https://github.com/team/repo/pull/12", Head: head, Branch: "feature/ship", Base: "main", State: "closed", Review: kernel.ProductionReview{Head: head, State: "unknown"}}}}, mustKernelTime(t, at)); err != nil {
 		t.Fatal(err)
 	}
 	enqueues := backend.enqueues
@@ -764,8 +765,8 @@ func TestRefusedEnqueueResendsWhileThePullIsOpenAtHead(t *testing.T) {
 	if _, err := fixture.daemon.advanceReviewOperations(ctx, false); err != nil {
 		t.Fatal(err)
 	}
-	if document, _, err := fixture.store.ReviewOperation(ctx, project, moved.ID); err != nil || !strings.Contains(string(document), `"state":"closed"`) || backend.enqueues != enqueues {
-		t.Fatalf("moved pull: %s %v (enqueues %d)", document, err, backend.enqueues-enqueues)
+	if document, _, err := fixture.store.ReviewOperation(ctx, project, closed.ID); err != nil || !strings.Contains(string(document), `"state":"closed"`) || backend.enqueues != enqueues {
+		t.Fatalf("closed pull: %s %v (enqueues %d)", document, err, backend.enqueues-enqueues)
 	}
 }
 
