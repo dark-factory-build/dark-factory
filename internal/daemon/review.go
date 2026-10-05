@@ -196,7 +196,7 @@ func (daemon *Daemon) reviewCoordinator(ctx context.Context, project kernel.Proj
 	if daemon.github == nil && daemon.reviewBackend == nil {
 		return review.Coordinator{}, errors.New("review: Maintainer unavailable")
 	}
-	var backend review.Backend = &daemonReviewBackend{daemon: daemon, project: project, repository: repository, repositoryID: repositoryID}
+	var backend review.Backend = &daemonReviewBackend{daemon: daemon, project: project, repository: repository}
 	if daemon.reviewBackend != nil {
 		backend = daemon.reviewBackend(repository, repositoryID)
 	}
@@ -325,7 +325,7 @@ func (daemon *Daemon) publishedReviewRequest(ctx context.Context, project kernel
 	if repositoryID == 0 || daemon.github == nil {
 		return api.ReviewRequest{}, errors.New("review: published repository unavailable")
 	}
-	response, err := (&daemonReviewBackend{daemon: daemon, repository: repository, repositoryID: repositoryID}).callResponse(ctx, "list_pull_requests", map[string]any{"repository": repository, "page": 1, "per_page": 1, "pull_number": pull})
+	response, err := (&daemonReviewBackend{daemon: daemon, repository: repository}).callResponse(ctx, "list_pull_requests", map[string]any{"repository": repository, "page": 1, "per_page": 1, "pull_number": pull})
 	if err != nil {
 		return api.ReviewRequest{}, err
 	}
@@ -377,10 +377,9 @@ func (s durableReviewStore) CreateRetry(ctx context.Context, failed, retry revie
 }
 
 type daemonReviewBackend struct {
-	daemon       *Daemon
-	project      kernel.ProjectID
-	repository   string
-	repositoryID uint64
+	daemon     *Daemon
+	project    kernel.ProjectID
+	repository string
 }
 
 // CloneReadOnly checks the pull request out at its exact head into a
@@ -700,7 +699,7 @@ func (b *daemonReviewBackend) callResponse(ctx context.Context, name string, arg
 	if err != nil {
 		return nil, err
 	}
-	response, err := b.daemon.github.MCP(ctx, encoded, map[string]uint64{b.repository: b.repositoryID})
+	response, err := b.daemon.github.MCP(ctx, encoded)
 	if err != nil {
 		return nil, err
 	}

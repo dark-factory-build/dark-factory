@@ -42,7 +42,7 @@ func (host *Host) Issues(ctx context.Context, repository string, repositoryID ui
 	if err != nil {
 		return IssuePage{}, ErrInvalid
 	}
-	data, err := host.MCP(ctx, request, map[string]uint64{repository: repositoryID})
+	data, err := host.MCP(ctx, request)
 	if err != nil {
 		return IssuePage{}, err
 	}

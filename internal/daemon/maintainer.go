@@ -51,7 +51,6 @@ func (daemon *Daemon) attemptMaintainer(ctx context.Context, call api.Call) api.
 	if !ok || json.Unmarshal(input.Request, &request) != nil || request.JSONRPC != "2.0" || len(request.ID) == 0 {
 		return failure("invalid")
 	}
-	repositories := map[string]uint64{}
 	var observedAcceptance *kernel.IntakeAcceptance
 	switch request.Method {
 	case "initialize", "ping", "tools/list":
@@ -177,7 +176,6 @@ func (daemon *Daemon) attemptMaintainer(ctx context.Context, call api.Call) api.
 			}
 			return failure("denied")
 		}
-		repositories[name] = id
 		if source != "" {
 			name = strings.ToLower(source)
 			id = sources[name]
@@ -190,7 +188,6 @@ func (daemon *Daemon) attemptMaintainer(ctx context.Context, call api.Call) api.
 				}
 				return failure("denied")
 			}
-			repositories[name] = id
 		}
 	default:
 		return failure("invalid")
@@ -203,7 +200,7 @@ func (daemon *Daemon) attemptMaintainer(ctx context.Context, call api.Call) api.
 	if err != nil {
 		return failure("invalid")
 	}
-	response, err := daemon.github.MCP(ctx, encoded, repositories)
+	response, err := daemon.github.MCP(ctx, encoded)
 	if err != nil {
 		if errors.Is(err, maintainer.ErrDenied) {
 			return failure("denied")

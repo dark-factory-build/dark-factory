@@ -122,7 +122,7 @@ func reviewerFixture(t *testing.T, reviewers ...string) (*daemonReviewBackend, m
 	if err := fixture.store.RecordPublication(ctx, project, task.ID, "team/repo", pr, mustKernelTime(t, 1003)); err != nil {
 		t.Fatal(err)
 	}
-	return &daemonReviewBackend{daemon: fixture.daemon, project: project, repository: "team/repo", repositoryID: 42}, homes
+	return &daemonReviewBackend{daemon: fixture.daemon, project: project, repository: "team/repo"}, homes
 }
 
 func reviewerRequest() review.Request {

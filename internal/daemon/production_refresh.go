@@ -37,7 +37,7 @@ func (daemon *Daemon) refreshProduction(ctx context.Context, project kernel.Proj
 		if err != nil {
 			return err
 		}
-		githubID, pinned, err := daemon.store.RepositoryGitHubID(ctx, repository.ID)
+		_, pinned, err := daemon.store.RepositoryGitHubID(ctx, repository.ID)
 		if err != nil {
 			return err
 		}
@@ -45,7 +45,7 @@ func (daemon *Daemon) refreshProduction(ctx context.Context, project kernel.Proj
 			continue
 		}
 		known, published, _ := daemon.knownProductionPulls(ctx, project, identity.PublicationRepository)
-		observation, err := daemon.pullRequestObservation(ctx, identity.PublicationRepository, githubID, known)
+		observation, err := daemon.pullRequestObservation(ctx, identity.PublicationRepository, known)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "factoryd: refresh %s: %v\n", identity.PublicationRepository, err)
 			continue
@@ -129,8 +129,8 @@ type maintainerPullRequest struct {
 	Review         kernel.ProductionReview `json:"review"`
 }
 
-func (daemon *Daemon) pullRequestObservation(ctx context.Context, repository string, githubID uint64, known []kernel.ProductionPullRequest) (kernel.ProductionObservation, error) {
-	page, err := daemon.readMaintainerPullRequests(ctx, repository, githubID, map[string]any{"repository": repository, "page": 1, "per_page": productionRefreshPRLimit})
+func (daemon *Daemon) pullRequestObservation(ctx context.Context, repository string, known []kernel.ProductionPullRequest) (kernel.ProductionObservation, error) {
+	page, err := daemon.readMaintainerPullRequests(ctx, map[string]any{"repository": repository, "page": 1, "per_page": productionRefreshPRLimit})
 	if err != nil {
 		return kernel.ProductionObservation{}, err
 	}
@@ -140,7 +140,7 @@ func (daemon *Daemon) pullRequestObservation(ctx context.Context, repository str
 		seen[pull.Number] = true
 	}
 	for _, prior := range rereadPulls(known, seen) {
-		exact, err := daemon.readMaintainerPullRequests(ctx, repository, githubID, map[string]any{"repository": repository, "page": 1, "per_page": 1, "pull_number": prior.Number})
+		exact, err := daemon.readMaintainerPullRequests(ctx, map[string]any{"repository": repository, "page": 1, "per_page": 1, "pull_number": prior.Number})
 		if err == nil {
 			open = append(open, exact.PullRequests...)
 		}
@@ -207,7 +207,7 @@ type maintainerPullRequestPage struct {
 	NextPage     *int                    `json:"next_page"`
 }
 
-func (daemon *Daemon) readMaintainerPullRequests(ctx context.Context, repository string, githubID uint64, arguments map[string]any) (maintainerPullRequestPage, error) {
+func (daemon *Daemon) readMaintainerPullRequests(ctx context.Context, arguments map[string]any) (maintainerPullRequestPage, error) {
 	request, err := json.Marshal(map[string]any{
 		"jsonrpc": "2.0", "id": 1, "method": "tools/call",
 		"params": map[string]any{"name": "list_pull_requests", "arguments": arguments},
@@ -215,7 +215,7 @@ func (daemon *Daemon) readMaintainerPullRequests(ctx context.Context, repository
 	if err != nil {
 		return maintainerPullRequestPage{}, err
 	}
-	response, err := daemon.github.MCP(ctx, request, map[string]uint64{repository: githubID})
+	response, err := daemon.github.MCP(ctx, request)
 	if err != nil {
 		return maintainerPullRequestPage{}, err
 	}
