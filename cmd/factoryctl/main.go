@@ -325,8 +325,29 @@ func main() {
 	os.Exit(run(context.Background(), os.Args[1:], os.Getenv, os.Stdout, os.Stderr))
 }
 
+// run guarantees a non-zero exit never happens silently: many failure paths
+// return exitFailure without writing, so say which subcommand failed.
 func run(ctx context.Context, args []string, getenv func(string) string, stdout, stderr io.Writer) int {
-	return runWithOpener(ctx, args, getenv, stdout, stderr, openBrowser)
+	watched := &writeWatcher{Writer: stderr}
+	code := runWithOpener(ctx, args, getenv, stdout, watched, openBrowser)
+	if code != 0 && !watched.wrote {
+		name := "command"
+		if len(args) > 0 {
+			name = args[0]
+		}
+		_, _ = fmt.Fprintf(stderr, "factoryctl: %s failed\n", name)
+	}
+	return code
+}
+
+type writeWatcher struct {
+	io.Writer
+	wrote bool
+}
+
+func (w *writeWatcher) Write(p []byte) (int, error) {
+	w.wrote = w.wrote || len(p) > 0
+	return w.Writer.Write(p)
 }
 
 type browserOpener func(context.Context, string) error
