@@ -1064,6 +1064,12 @@ func (runtime RuntimePaths) environmentForRole(kind kernel.Provider, role kernel
 		"TMPDIR=" + runtime.temp,
 		"PATH=" + runtime.toolPath,
 	}
+	if role == kernel.RoleWorker {
+		// A bare /usr/bin/git is Apple's xcrun shim. Pin its developer
+		// directory so it does not try to write xcrun_db under the host temp
+		// directory when the worker runs in a sandbox.
+		environment = append(environment, "DEVELOPER_DIR="+install.TrustedSystemToolchainRoot())
+	}
 	// A run whose agent selects an account points that CLI at the account's
 	// own configuration directory. No account leaves the environment exactly
 	// as it was.

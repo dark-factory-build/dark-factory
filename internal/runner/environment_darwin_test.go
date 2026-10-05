@@ -25,6 +25,7 @@ var providerEnvironmentNames = []string{
 	"HOME",
 	"TMPDIR",
 	"PATH",
+	"DEVELOPER_DIR",
 	"LANG",
 	"LC_ALL",
 	"TERM",
