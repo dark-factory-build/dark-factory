@@ -16,7 +16,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dark-factory-build/dark-factory/internal/changeworker"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
+	"github.com/dark-factory-build/dark-factory/internal/provider"
 	"github.com/dark-factory-build/dark-factory/internal/runner"
 	"golang.org/x/sys/unix"
 )
@@ -333,6 +335,45 @@ func TestRecoverySweepAdoptsRunningHandoverAndSettlesInBackground(t *testing.T) 
 	fixture.daemon.attemptMu.Unlock()
 	if stillRegistered {
 		t.Fatal("settled adopted run is still a registered live attempt")
+	}
+}
+
+// A run adopted after a daemon restart records its spend exactly like one this
+// daemon launched: the shared tail reads the provider's session log for the
+// orchestrator's runtime home.
+func TestAdoptedRunRecordsTokenSpend(t *testing.T) {
+	fixture := newRecoveryFixtureFor(t, 0xc0, kernel.RoleOrchestrator, kernel.ProviderClaudeCode)
+	accountHome := t.TempDir()
+	fixture.daemon.RememberSupervisorAccount(fixture.changeParent, accountHome, "/usr/bin/git")
+	cwd := []byte(filepath.Join(fixture.keys.RuntimeRoot, changeworker.HomeName))
+	for i, r := range cwd {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9') {
+			cwd[i] = '-'
+		}
+	}
+	transcript := filepath.Join(provider.ConfigHome(kernel.ProviderClaudeCode, accountHome), "projects", string(cwd), "session.jsonl")
+	if err := os.MkdirAll(filepath.Dir(transcript), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(transcript, []byte(`{"timestamp":"2026-09-20T12:01:00Z","message":{"id":"m1","usage":{"input_tokens":30,"output_tokens":12}}}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fixture.adoptRunningHandover(t, 99989).converge()
+	fixture.awaitSettled(t, 6*time.Second)
+	// The run settles before the deferred spend write lands.
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		spent, err := fixture.store.ProjectTokens(context.Background(), fixture.run.ProjectID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if spent.TokensUsed == 42 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("adopted run recorded %d tokens, want 42", spent.TokensUsed)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
 
