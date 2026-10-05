@@ -220,7 +220,7 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 	}
 	// A branch an earlier attempt already brought to this tree only lacks
 	// its pull request.
-	if len(changes) == 0 && (c.Pull != 0 || tip == "") {
+	if len(changes) == 0 && (c.Pull != 0 || diffFrom != tip) {
 		return errors.New("nothing to publish: its head " + c.Head + " changes no file from " + diffFrom)
 	}
 	message := publicationTitle(c.Accepted.Snapshot.Title)
