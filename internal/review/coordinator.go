@@ -14,9 +14,9 @@ import (
 
 var shaRE = regexp.MustCompile(`^[0-9a-f]{40}$`)
 
-// ErrConflict is the Maintainer refusing an operation whose exact-head binding
-// no longer matches GitHub: resending the same operation cannot succeed.
-var ErrConflict = errors.New("review: Maintainer rejected operation: conflict")
+// ErrRejected is the Maintainer answering conflict or refused: resending the
+// same operation cannot succeed.
+var ErrRejected = errors.New("review: Maintainer rejected operation")
 
 type Request struct {
 	Repository string
@@ -282,8 +282,8 @@ func (c Coordinator) reconcileEnqueuing(ctx context.Context, op Operation, cause
 	case "planned":
 		// The broker claimed the enqueue but never ran it; resending the same
 		// operation id resumes that claim (canary 6, #1167).
-		if err := c.Backend.Enqueue(ctx, op); errors.Is(err, ErrConflict) {
-			// The pull request moved on (merged, closed or a new head).
+		if err := c.Backend.Enqueue(ctx, op); errors.Is(err, ErrRejected) {
+			// The pull request moved on (merged, closed, queued or a new head).
 			return c.fail(ctx, op, err, false)
 		} else if err != nil {
 			return op, err
