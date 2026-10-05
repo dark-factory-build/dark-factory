@@ -84,3 +84,14 @@ test("leaving during a write preserves the write but never restarts the closed l
   await act(async () => write.resolve({ id: "new", revision: 1, document: {} }));
   assert.deepEqual(calls, ["outcome_list", "outcome_write"]);
 });
+
+
+test("outcome creation cannot masquerade as queued mission creation", async t => {
+  const calls = [];
+  const tree = await mount(t, async (operation, input) => { calls.push({ operation, input }); return operation === "outcome_list" ? { items: [] } : { id: "outcome", revision: 1, document: input.document }; });
+  await click(tree, "New outcome");
+  assert.ok(!tree.root.findAllByType("option").some(node => node.props.value === "mission"));
+  const original = globalThis.FormData; globalThis.FormData = class { get() { return ""; } };
+  try { await act(async () => tree.root.findByType("form").props.onSubmit({ preventDefault() {}, currentTarget: {} })); } finally { globalThis.FormData = original; }
+  assert.equal(calls.find(call => call.operation === "outcome_write").input.document.kind, "outcome");
+});
