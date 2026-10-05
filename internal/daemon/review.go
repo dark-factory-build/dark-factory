@@ -325,7 +325,7 @@ func (daemon *Daemon) publishedReviewRequest(ctx context.Context, project kernel
 	if repositoryID == 0 || daemon.github == nil {
 		return api.ReviewRequest{}, errors.New("review: published repository unavailable")
 	}
-	response, err := (&daemonReviewBackend{daemon: daemon, repository: repository, repositoryID: repositoryID}).callResponse(ctx, "list_pull_requests", map[string]any{"repository": repository, "page": 1, "pull_number": pull})
+	response, err := (&daemonReviewBackend{daemon: daemon, repository: repository, repositoryID: repositoryID}).callResponse(ctx, "list_pull_requests", map[string]any{"repository": repository, "page": 1, "per_page": 1, "pull_number": pull})
 	if err != nil {
 		return api.ReviewRequest{}, err
 	}
