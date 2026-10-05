@@ -23,7 +23,7 @@ import (
 type publishCall func(ctx context.Context, name string, arguments map[string]any) (json.RawMessage, error)
 
 // publishCheckout returns the Git directory of a disposable clone holding the
-// Change's commits and the given main head, and its cleanup.
+// Change's base and the given main head, and its cleanup.
 type publishCheckout func(ctx context.Context, main string) (string, func(), error)
 
 // errPublishLater is a failure of the connection or the checkout, not of the
@@ -76,13 +76,51 @@ func (daemon *Daemon) publishSettledChange(ctx context.Context, c kernel.Publish
 		path, cleanup, err := backend.CloneReadOnly(ctx, review.Request{Repository: repo, Head: main, Base: c.Base, BaseRef: "main"})
 		return filepath.Join(path, ".git"), cleanup, err
 	}
-	return daemon.publishChange(ctx, c, repo, call, checkout)
+	source, err := daemon.settledChangeGitDirectory(ctx, c)
+	if err != nil {
+		return daemon.publishFailed(ctx, c, repo, err)
+	}
+	return daemon.publishChange(ctx, c, repo, source, call, checkout)
 }
 
-// publishChange publishes c, or records why it cannot: the reviewer record
+// settledChangeGitDirectory is the verified private Git directory holding the
+// Change's commits, its worktree still at the settled head.
+func (daemon *Daemon) settledChangeGitDirectory(ctx context.Context, c kernel.PublishableChange) (string, error) {
+	parent, git := daemon.changeParent.Load(), daemon.gitExecutable.Load()
+	if parent == nil || *parent == "" || git == nil || *git == "" {
+		return "", errors.Join(errPublishLater, errors.New("no Change parent or Git executable"))
+	}
+	changeState, found, err := daemon.store.Change(ctx, c.Change)
+	if err != nil || !found || changeState.Revision != c.Revision || changeState.Selection == nil {
+		return "", errors.Join(errPublishLater, err, errors.New("the Change moved since it was selected"))
+	}
+	route, err := daemon.repositoryForChange(ctx, changeState)
+	if err != nil {
+		return "", errors.Join(errPublishLater, err)
+	}
+	repository, err := changeRepositoryIdentity(changeState.Selection.RepositoryIdentity())
+	if err != nil {
+		return "", err
+	}
+	facts, err := change.InspectWorktree(ctx, *git, route.Root, repository, filepath.Join(*parent, c.Change.String()))
+	if err != nil {
+		return "", fmt.Errorf("its worktree did not verify: %w", err)
+	}
+	if facts.Head().Hex() != c.Head || facts.Branch() != change.BranchName(c.Change.String()) {
+		return "", errors.New("its worktree is not at its settled head " + c.Head)
+	}
+	return facts.GitDirectory(), nil
+}
+
+// publishChange publishes c from the commits in its Git directory source.
+func (daemon *Daemon) publishChange(ctx context.Context, c kernel.PublishableChange, repo, source string, call publishCall, checkout publishCheckout) error {
+	return daemon.publishFailed(ctx, c, repo, daemon.publishPull(ctx, c, repo, source, call, checkout))
+}
+
+// publishFailed records why c cannot be published: the reviewer record
 // kernel.PublishFailureID, handled, whose escalation is due to the overseer.
-func (daemon *Daemon) publishChange(ctx context.Context, c kernel.PublishableChange, repo string, call publishCall, checkout publishCheckout) error {
-	err := daemon.publishPull(ctx, c, repo, call, checkout)
+// A failure the next pass may not repeat is only returned.
+func (daemon *Daemon) publishFailed(ctx context.Context, c kernel.PublishableChange, repo string, err error) error {
 	if err == nil || ctx.Err() != nil || errors.Is(err, errPublishLater) || errors.Is(err, maintainer.ErrUnavailable) || errors.Is(err, maintainer.ErrDenied) {
 		return err
 	}
@@ -98,7 +136,7 @@ func (daemon *Daemon) publishChange(ctx context.Context, c kernel.PublishableCha
 // deterministic: every App write has the operation id
 // uuid5(URL, "dark-factory:<change>:<step>") and is observed first, so a
 // replay after a lost response reuses the completed write.
-func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChange, repo string, call publishCall, checkout publishCheckout) error {
+func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChange, repo, source string, call publishCall, checkout publishCheckout) error {
 	operation := func(step string) string { return uuid5("dark-factory:" + c.Change.String() + ":" + step) }
 	completed := func(step string, result any) (bool, error) {
 		response, err := call(ctx, "observe_operation", map[string]any{"repository": repo, "operation_id": operation(step)})
@@ -136,6 +174,11 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 		return errors.Join(errPublishLater, err)
 	}
 	defer cleanup()
+	// The clone borrows only the registered repository's objects; the
+	// worker's commits are in the Change's own Git directory.
+	if _, err := gitOutput(ctx, gitDir, "-c", "protocol.file.allow=always", "fetch", "--quiet", "--no-tags", "--no-write-fetch-head", "--no-auto-maintenance", source, c.Head); err != nil {
+		return fmt.Errorf("fetch its head from the Change: %w", err)
+	}
 	from, err := publicationFrom(ctx, gitDir, c.Base, c.Head, main)
 	if err != nil {
 		return err

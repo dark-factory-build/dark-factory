@@ -720,4 +720,27 @@ func TestPublishableIntakeChangeIsFactorydsUntilPublishedOrFailed(t *testing.T) 
 	if closed() {
 		t.Fatal("a published intake branch is closed to the overseer's correction")
 	}
+	// Had its pull request failed after its commits published, the overseer
+	// sends it back and the worker settles a correction at a new Change
+	// revision: that is the overseer's to publish, never factoryd's under the
+	// old operation ids.
+	if _, err := store.writer.ExecContext(ctx, `DELETE FROM publication_tasks`); err != nil {
+		t.Fatal(err)
+	}
+	task, _, err := store.Task(ctx, worker.TaskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.SendBackTask(ctx, task.ID, task.Revision, "fix the refused path", mustTime(t, 72)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.writer.ExecContext(ctx, `UPDATE changes SET revision = revision + 1, head_commit = ? WHERE id = ?`, bytes.Repeat([]byte{3}, 20), change.ID.Bytes()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.writer.ExecContext(ctx, `UPDATE tasks SET status = 'succeeded', result = 'corrected', completed_at_ms = updated_at_ms WHERE id = ?`, task.ID.Bytes()); err != nil {
+		t.Fatal(err)
+	}
+	if found := candidates(); len(found) != 0 || closed() {
+		t.Fatalf("a corrected Change is factoryd's: candidates=%+v closed=%v", found, closed())
+	}
 }

@@ -509,8 +509,8 @@ func PublishFailureID(change ChangeID, revision Revision) string {
 }
 
 // PublishableChanges lists, oldest first, the current settled Changes of
-// succeeded tasks bound to a live intake acceptance whose head differs from
-// their base, with no publication of that Change or task and no recorded
+// succeeded tasks at work revision 1 (a correction is the overseer's) bound
+// to a live intake acceptance whose head differs from their base, with no publication of that Change or task and no recorded
 // publish failure at that Change revision.
 func (store *Store) PublishableChanges(ctx context.Context) ([]PublishableChange, error) {
 	tx, err := store.beginRead(ctx)
@@ -521,7 +521,7 @@ func (store *Store) PublishableChanges(ctx context.Context) ([]PublishableChange
 	rows, err := tx.connection.QueryContext(ctx, `SELECT c.id, c.task_id, c.revision, lower(hex(c.base_commit)), lower(hex(c.head_commit)) FROM changes c
 		JOIN tasks t ON t.id = c.task_id AND t.incarnation_id = c.task_incarnation_id
 		JOIN intake_task_bindings b ON b.task_id = c.task_id JOIN intake_acceptances a ON a.id = b.acceptance_id
-		WHERE c.phase = 'retained' AND t.status = 'succeeded' AND a.withdrawn_at_ms IS NULL AND c.head_commit <> c.base_commit
+		WHERE c.phase = 'retained' AND t.status = 'succeeded' AND t.work_revision = 1 AND a.withdrawn_at_ms IS NULL AND c.head_commit <> c.base_commit
 		  AND NOT EXISTS (SELECT 1 FROM publication_tasks p WHERE p.change_id = c.id OR p.task_id = c.task_id)
 		  AND NOT EXISTS (SELECT 1 FROM production_records r WHERE r.project_id = c.project_id AND r.kind = 'reviewer'
 		      AND r.identity = 'publish-' || lower(hex(c.id)) || '-' || c.revision)

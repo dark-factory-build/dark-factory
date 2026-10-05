@@ -66,10 +66,11 @@ func (f *fakePublishMaintainer) call(_ context.Context, name string, arguments m
 // publishFixture is a repository whose main is the Change's base and whose
 // worker head adds files, deletes one, and adds a workflow when asked; a
 // worker task in the review fixture's project, and that Change as a candidate.
-func publishFixture(t *testing.T, files int, workflow bool) (*dispatchFixture, kernel.PublishableChange, *fakePublishMaintainer, publishCheckout) {
+func publishFixture(t *testing.T, files int, workflow bool) (*dispatchFixture, kernel.PublishableChange, string, *fakePublishMaintainer, publishCheckout) {
 	t.Helper()
 	git := change.TrustedGitExecutable
-	root := t.TempDir()
+	registered := t.TempDir()
+	root := registered
 	run := func(args ...string) string {
 		return strings.TrimSpace(supervisorGitOutput(t, git, append([]string{"-C", root, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid"}, args...)...))
 	}
@@ -82,6 +83,10 @@ func publishFixture(t *testing.T, files int, workflow bool) (*dispatchFixture, k
 	run("add", ".")
 	run("commit", "-q", "-m", "base")
 	base := run("rev-parse", "HEAD")
+	// As in production, the worker's commits exist only in the Change's own
+	// Git directory, never in the registered repository the clone borrows.
+	root = filepath.Join(t.TempDir(), "change")
+	supervisorGit(t, git, "clone", "-q", registered, root)
 	run("rm", "-q", "gone.txt")
 	for i := range files {
 		if err := os.WriteFile(filepath.Join(root, fmt.Sprintf("f%02d.txt", i)), []byte(fmt.Sprintf("line %d\n", i)), 0o644); err != nil {
@@ -127,9 +132,11 @@ func publishFixture(t *testing.T, files int, workflow bool) (*dispatchFixture, k
 		Accepted: kernel.IntakeAcceptance{SourceRepository: "team/source", Snapshot: kernel.IntakeIssueSnapshot{GitHubRepositoryID: 7, IssueNumber: 9, Title: "Fix  the\nthing"}}}
 	fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return &publicReviewBackend{} }
 	checkout := func(context.Context, string) (string, func(), error) {
-		return filepath.Join(root, ".git"), func() {}, nil
+		clone := filepath.Join(t.TempDir(), "clone")
+		supervisorGit(t, git, "clone", "-q", "--shared", registered, clone)
+		return filepath.Join(clone, ".git"), func() {}, nil
 	}
-	return fixture, candidate, &fakePublishMaintainer{main: base, journal: map[string]json.RawMessage{}}, checkout
+	return fixture, candidate, filepath.Join(root, ".git"), &fakePublishMaintainer{main: base, journal: map[string]json.RawMessage{}}, checkout
 }
 
 // First publication end to end, with the first commit's response lost: the
@@ -137,16 +144,16 @@ func publishFixture(t *testing.T, files int, workflow bool) (*dispatchFixture, k
 // commits, opens the pull request from the accepted issue with a redacted
 // body, records it under the worker task and starts factoryd's review.
 func TestFactorydPublishesASettledIntakeChange(t *testing.T) {
-	fixture, c, app, checkout := publishFixture(t, 51, false)
+	fixture, c, source, app, checkout := publishFixture(t, 51, false)
 	ctx := context.Background()
 	app.loseNext = true
-	if err := fixture.daemon.publishChange(ctx, c, "team/repo", app.call, checkout); err == nil {
+	if err := fixture.daemon.publishChange(ctx, c, "team/repo", source, app.call, checkout); err == nil {
 		t.Fatal("a lost response reported publication")
 	}
 	if len(app.writes) != 1 {
 		t.Fatalf("writes before the retry = %d", len(app.writes))
 	}
-	if err := fixture.daemon.publishChange(ctx, c, "team/repo", app.call, checkout); err != nil {
+	if err := fixture.daemon.publishChange(ctx, c, "team/repo", source, app.call, checkout); err != nil {
 		t.Fatal(err)
 	}
 	first, second, pull := app.writes[0]["arguments"].(map[string]any), app.writes[1]["arguments"].(map[string]any), app.writes[2]["arguments"].(map[string]any)
@@ -183,10 +190,10 @@ func TestFactorydPublishesASettledIntakeChange(t *testing.T) {
 // A path the App refuses is escalated once, as a handled record the overseer
 // is woken for, and nothing about it stays in flight to be retried.
 func TestRefusedPublicationEscalatesOnce(t *testing.T) {
-	fixture, c, app, checkout := publishFixture(t, 1, true)
+	fixture, c, source, app, checkout := publishFixture(t, 1, true)
 	app.refuse = ".github/workflows"
 	ctx := context.Background()
-	if err := fixture.daemon.publishChange(ctx, c, "team/repo", app.call, checkout); err != nil {
+	if err := fixture.daemon.publishChange(ctx, c, "team/repo", source, app.call, checkout); err != nil {
 		t.Fatal(err)
 	}
 	document, found, err := fixture.store.ReviewOperation(ctx, c.Task.ProjectID, kernel.PublishFailureID(c.Change, c.Revision))
