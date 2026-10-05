@@ -302,3 +302,20 @@ func TestObserveMergeMarksMergedAndEjectsOnceWithFailingChecks(t *testing.T) {
 		}
 	}
 }
+
+// A planned enqueue was claimed by the broker but never run: resuming
+// resends the same operation id and the operation becomes enqueued.
+func TestResumeResendsAPlannedEnqueue(t *testing.T) {
+	store := &memoryStore{}
+	backend := &observedBackend{receipt: Receipt{State: "planned"}}
+	c := Coordinator{Store: store, Backend: backend, Now: func() time.Time { return time.Unix(10, 0) }}
+	op, err := Prepare(reviewRequest(), c.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	op.State, op.Verdict, op.Submitted, op.EnqueueID = "enqueuing", "allow", true, "enqueue-1"
+	got, err := c.Resume(context.Background(), op)
+	if err != nil || got.State != "enqueued" || !backend.enqueued {
+		t.Fatalf("operation=%+v err=%v enqueued=%v", got, err, backend.enqueued)
+	}
+}
