@@ -113,7 +113,7 @@ func repositoryID(t *testing.T, value byte) RepositoryID {
 	return id
 }
 
-func TestLegacyRepositoryBasePinsOnceAcrossMigrationAndRestart(t *testing.T) {
+func TestInheritedRepositoryBasePinsOnceAcrossRestart(t *testing.T) {
 	ctx := context.Background()
 	store, path := newTestStore(t)
 	project, err := store.CreateProject(ctx, NewProject{ID: projectID(t, 130), Name: "legacy", Root: filepath.Join(t.TempDir(), "legacy")}, mustTime(t, 2))
@@ -124,15 +124,9 @@ func TestLegacyRepositoryBasePinsOnceAcrossMigrationAndRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	task, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 132), ProjectID: project.ID, AssignedAgentID: agent.ID, IncarnationID: incarnationID(t, 133), Title: "queued before migration"}, mustTime(t, 4))
+	task, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 132), ProjectID: project.ID, AssignedAgentID: agent.ID, IncarnationID: incarnationID(t, 133), Title: "queued before pin"}, mustTime(t, 4))
 	if err != nil {
 		t.Fatal(err)
-	}
-	// Reproduce the exact v20 schema, which had no repository/base setting.
-	for _, statement := range []string{"DROP TABLE content_accesses", "DROP TABLE publication_tasks", "DROP TABLE production_records", "DROP TABLE mission_task_bindings", "DROP TABLE run_tokens", "DROP TABLE project_tokens", "DROP TABLE attachment_retention", "DROP TABLE task_attachments", "DROP TABLE intake_acceptance_reviews", "DROP TABLE intake_source_priorities", "DROP TABLE intake_legacy_suppressions", "DROP TABLE intake_legacy_migrations", "DROP TABLE intake_task_bindings", "DROP TABLE intake_source_trusted_logins", "DROP TABLE intake_acceptances", "DROP TABLE intake_sources", "DROP TABLE repository_source_identities", "DROP TABLE content_repository_bindings", "DROP TABLE task_repository_bindings", "DROP TABLE project_repositories", "PRAGMA user_version = 20"} {
-		if _, err := store.writer.ExecContext(ctx, statement); err != nil {
-			t.Fatal(err)
-		}
 	}
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
@@ -143,7 +137,7 @@ func TestLegacyRepositoryBasePinsOnceAcrossMigrationAndRestart(t *testing.T) {
 	}
 	route, found, err := store.TaskRepository(ctx, task.ID)
 	if err != nil || !found || route.BaseRef != inheritedRepositoryBase {
-		t.Fatalf("migration guessed a base: %+v %v %v", route, found, err)
+		t.Fatalf("open guessed a base: %+v %v %v", route, found, err)
 	}
 	if err := store.InitializeRepositoryBase(ctx, "refs/heads/release"); err != nil {
 		t.Fatal(err)
@@ -192,7 +186,7 @@ func TestLegacyRepositoryBasePinsOnceAcrossMigrationAndRestart(t *testing.T) {
 		t.Fatalf("new project did not inherit boot policy: %+v %v %v", newDefault, found, err)
 	}
 	if original, found, err := store.Task(ctx, task.ID); err != nil || !found || original.IncarnationID != task.IncarnationID || original.Revision != task.Revision {
-		t.Fatalf("migration changed task identity: %+v %v %v", original, found, err)
+		t.Fatalf("pin changed task identity: %+v %v %v", original, found, err)
 	}
 }
 

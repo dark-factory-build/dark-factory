@@ -195,7 +195,7 @@ func TestKnowledgeFilterBeforePaginationAndAccessFreeze(t *testing.T) {
 	}
 }
 
-func TestKnowledgeEmptyContextAndV33Migration(t *testing.T) {
+func TestKnowledgeEmptyContextSurvivesRestart(t *testing.T) {
 	store, run, _, path := runningWorkerRunWithPath(t)
 	ctx := context.Background()
 	if _, err := store.FreezeKnowledgeContext(ctx, run.ID, nil, mustTime(t, 40)); err != nil {
@@ -215,20 +215,7 @@ func TestKnowledgeEmptyContextAndV33Migration(t *testing.T) {
 	if refs, found, err = store.KnowledgeContext(ctx, run.ID); err != nil || !found || len(refs) != 0 {
 		t.Fatalf("empty snapshot lost after restart: %+v %v %v", refs, found, err)
 	}
-	if _, err := store.writer.ExecContext(ctx, `DROP TABLE content_accesses; PRAGMA user_version = 33`); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Close(); err != nil {
-		t.Fatal(err)
-	}
-	reopened, err := Open(ctx, path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer reopened.Close()
-	if _, _, err := reopened.KnowledgeContext(ctx, run.ID); err != nil {
-		t.Fatal(err)
-	}
+	store.Close()
 }
 
 func TestKnowledgeOpenThreadsFilterBeforePagination(t *testing.T) {

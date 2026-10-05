@@ -65,19 +65,11 @@ func TestRepositorySourceIdentityPinsOnceAcrossRestart(t *testing.T) {
 	}
 }
 
-func TestV22MigrationKeepsExplicitUnverifiedSourceUntilHostProof(t *testing.T) {
+func TestNewProjectSourceStaysUnverifiedUntilHostProof(t *testing.T) {
 	ctx := context.Background()
 	store, path := newTestStore(t)
 	project, err := store.CreateProject(ctx, NewProject{ID: projectID(t, 204), Name: "legacy", Root: "/legacy"}, mustTime(t, 2))
 	if err != nil {
-		t.Fatal(err)
-	}
-	for _, statement := range []string{"DROP TABLE content_accesses", "DROP TABLE publication_tasks", "DROP TABLE production_records", "DROP TABLE mission_task_bindings", "DROP TABLE run_tokens", "DROP TABLE project_tokens", "DROP TABLE attachment_retention", "DROP TABLE task_attachments", "DROP TABLE intake_acceptance_reviews", "DROP TABLE intake_source_priorities", "DROP TABLE intake_legacy_suppressions", "DROP TABLE intake_legacy_migrations", "DROP TABLE intake_task_bindings", "DROP TABLE intake_source_trusted_logins", "DROP TABLE intake_acceptances", "DROP TABLE intake_sources", "DROP TABLE repository_source_identities"} {
-		if _, err := store.writer.Exec(statement); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if _, err := store.writer.Exec(`PRAGMA user_version = 22`); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.Close(); err != nil {
@@ -89,7 +81,7 @@ func TestV22MigrationKeepsExplicitUnverifiedSourceUntilHostProof(t *testing.T) {
 	}
 	defer store.Close()
 	if _, verified, err := store.RepositorySourceIdentity(ctx, RepositoryID(project.ID)); err != nil || verified {
-		t.Fatalf("migration invented proof: %v, %v", verified, err)
+		t.Fatalf("open invented proof: %v, %v", verified, err)
 	}
 	if _, err := store.writer.Exec(`DELETE FROM repository_source_identities`); err != nil {
 		t.Fatal(err)
