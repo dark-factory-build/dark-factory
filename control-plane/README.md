@@ -62,7 +62,7 @@ Access policy, or App configuration is live.
   in either case and canonicalized to lowercase, so one UUID is one replay
   identity however the caller's `uuidgen` spelled it. Merge queue enqueue is
   the only merge path; it never falls back to a direct merge.
-  Publication refuses `.github` itself, `.github/workflows/**`, the three
+  Publication refuses `.github` itself, the three
   CODEOWNERS locations and the dependabot config, and every
   write is bound to a stated head commit and to a durable operation ID.
   There is no generic GitHub proxy, arbitrary URL, shell, caller-selected merge,

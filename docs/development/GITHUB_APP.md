@@ -167,7 +167,7 @@ state, or close authority. Until that bootstrap authority exists, the reviewed
 replacement bodies remain local and Phase 0 is incomplete.
 
 The live tools mint only their operation-specific subsets of Metadata read, Contents write, Issues write, Pull requests write, Checks read,
-and Merge queues write. No operation mints Administration. Issues write exists
+Merge queues write, and Workflows write. No operation mints Administration. Issues write exists
 only for bounded issue creation. Pull requests
 write authorizes PR creation, the bounded body replacement, formal review, and
 the exact-head enqueue, which mutates the pull request's queue state; a PR
@@ -175,15 +175,14 @@ review is not an Issues API comment. Merge queues write authorizes only the
 typed exact-head enqueue and
 reconciliation operation; the enqueue token also mints Contents write, because
 a queued entry ends with GitHub pushing the squash commit to the default branch
-(#371 tracks the live proof of the scope set). No operation mints Actions. No
+(#371 tracks the live proof of the scope set). No operation mints Actions. Workflows write is minted with Contents write by
+`publish_commit` and the enqueue, where the installation has accepted it, because GitHub refuses any push that changes
+`.github/workflows/**` without it. No
 generic workflow,
 administration mutation, Secrets, arbitrary status, caller-selected merge,
-dequeue, queue-jump, or generic API authority is exposed. Exact-tree publication still
-rejects any tree that changes
-`.github/workflows/**` rather than silently publishing an incomplete or
-unauthorized workflow update.
+dequeue, queue-jump, or generic API authority is exposed.
 
-Workflow and CODEOWNERS publication is outside the maintainer broker's typed
+CODEOWNERS and dependabot publication is outside the maintainer broker's typed
 surface. It can proceed through another repository authority without widening
 the broker.
 
@@ -350,8 +349,8 @@ execution boundary.
 
 ## Permission revisions
 
-Permission authority is durable and revisioned. Expansion requires a new
-recorded revision and explicit operator approval; a prompt cannot widen it.
+A permission is requested only once the installation has accepted it
+(`mintable_permissions`), so adding one needs no revision change.
 
 The initial intake-only revision requests only Metadata read and Issues read.
 Its effective allowlist includes the automatic `installation` lifecycle event
@@ -368,6 +367,14 @@ transfer or deletion revokes the mapping pending fresh approval. Every other
 lifecycle action fails closed. The revision requests no Contents, Pull
 requests, Checks, Actions, Workflows, Releases, Administration, or Secrets
 authority.
+
+Workflows write was added under `maintainer-operations-v6` so the factory can
+deliver changes to its own workflow files (#1251). `publish_commit` and `enqueue_pull_request` mint it;
+publication no longer refuses `.github/workflows/**`, which still passes the
+same exact-head review and merge queue as any other change. The token carries
+Workflows write only where the installation has accepted it; elsewhere GitHub
+refuses just the workflow-changing push and every other operation is
+unaffected, so installations may accept before or after promotion.
 
 `maintainer-operations-v6` grants exactly what
 `maintainer-operations-v5` granted. It adds one bounded

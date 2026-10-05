@@ -1368,7 +1368,11 @@ impl AppAuthority {
             .0
             .installation_token(
                 repository,
-                BTreeMap::from([("contents", "write"), ("metadata", "read")]),
+                BTreeMap::from([
+                    ("contents", "write"),
+                    ("metadata", "read"),
+                    ("workflows", "write"),
+                ]),
             )
             .await?;
         let repository = self.0.repository_metadata(&token).await?;
@@ -1490,6 +1494,7 @@ impl AppAuthority {
                     // pull request mints `write`, and the reviewed permission
                     // revision already grants it.
                     ("pull_requests", "write"),
+                    ("workflows", "write"),
                 ]),
             )
             .await?;
@@ -2282,17 +2287,13 @@ fn free_of_review_correction(value: &str) -> Result<(), OperationError> {
 
 /// A path inside the repository, as a commit may address it.
 ///
-/// The `.github` authority tree is refused explicitly. GitHub already blocks
-/// `.github/workflows/` without the `workflows` permission, which this App
-/// deliberately does not hold, but a policy-checked surface should state the
-/// boundary rather than depend on a permission staying un-granted: an agent
-/// that could rewrite the CI gating its own work would be escalating its
-/// authority.
+/// Workflow files are publishable: the owner granted this App `workflows:
+/// write` so the factory can deliver its own CI changes, which still pass the
+/// same exact-head review and merge queue as any other change.
 ///
-/// The refusal is by path segment, not by prefix. A tree entry may name a
-/// directory as a blob, which replaces the whole subtree, so `.github` and
-/// `.github/workflows` must be refused as paths in their own right and not
-/// only as prefixes of a file inside them.
+/// `.github` itself is refused. A tree entry may name a directory as a blob,
+/// which replaces the whole subtree, and that would delete the CODEOWNERS and
+/// dependabot files refused below.
 ///
 /// The review and dependency policy files are refused by name for the same
 /// reason. Refusing the `.github` tree stops an agent destroying them
@@ -2311,13 +2312,10 @@ fn free_of_review_correction(value: &str) -> Result<(), OperationError> {
 /// somewhere GitHub reads no authority from, such as `src/CODEOWNERS`.
 ///
 /// The `.github` tree needs no such rule. It is already refused as a path in
-/// its own right, so no blob can replace it, and `.github/workflows` is
-/// refused at any depth by the segment test, which is that directory's
-/// prefix rule. The rest of `.github` is a tree this surface deliberately
-/// publishes into -- `.github/ISSUE_TEMPLATE/**` and
-/// `.github/PULL_REQUEST_TEMPLATE.md` stay allowed -- which is why the three
-/// `.github/*` entries above are refused by name one at a time. A blanket
-/// prefix rule there would refuse intended writes rather than close a hole.
+/// its own right, so no blob can replace it, and the rest of it is a tree
+/// this surface deliberately publishes into -- workflows, issue and pull
+/// request templates -- which is why the three `.github/*` entries above are
+/// refused by name one at a time.
 fn valid_repository_path(value: &str) -> Result<(), OperationError> {
     const REVIEW_AUTHORITY_PATHS: &[&str] = &[
         "CODEOWNERS",
@@ -2327,13 +2325,7 @@ fn valid_repository_path(value: &str) -> Result<(), OperationError> {
         ".github/dependabot.yaml",
     ];
 
-    let mut segments = value.split('/');
-    let github_authority = segments
-        .next()
-        .is_some_and(|segment| segment.eq_ignore_ascii_case(".github"))
-        && segments
-            .next()
-            .is_none_or(|segment| segment.eq_ignore_ascii_case("workflows"));
+    let github_authority = value.eq_ignore_ascii_case(".github");
     let review_authority = REVIEW_AUTHORITY_PATHS.iter().any(|&protected| {
         value
             .strip_prefix(protected)
@@ -2794,6 +2786,7 @@ impl Authority {
                 }
                 Err(error) => return Err(error.into()),
             };
+        let permissions = mintable_permissions(&installation, permissions);
         validate_installation(&installation, self.app_id, &permissions).map_err(|defect| {
             OperationError::Refused(RefusalReason::InstallationRejected(defect))
         })?;
@@ -4674,6 +4667,20 @@ fn validate_installation(
     Ok(())
 }
 
+/// `workflows: write` is minted only where the installation has accepted it.
+/// Elsewhere the token omits it and GitHub refuses just the push that changes
+/// `.github/workflows/**`, so an installation that has not accepted the
+/// permission keeps every other operation.
+fn mintable_permissions(
+    installation: &Installation,
+    mut permissions: BTreeMap<&'static str, &'static str>,
+) -> BTreeMap<&'static str, &'static str> {
+    if !permission_at_least(&installation.permissions, "workflows", "write") {
+        permissions.remove("workflows");
+    }
+    permissions
+}
+
 fn permission_at_least(permissions: &BTreeMap<String, String>, name: &str, required: &str) -> bool {
     matches!(
         (permissions.get(name).map(String::as_str), required),
@@ -5418,8 +5425,11 @@ mod tests {
         ] {
             assert!(observe(readable).is_ok(), "{readable} is unreadable");
             assert!(valid_path(readable).is_ok(), "{readable} was refused");
-            // The same paths stay unwritable.
-            if readable != "control-plane/src/github_app.rs" {
+            // The authority files stay unwritable; workflows are writable.
+            if !matches!(
+                readable,
+                "control-plane/src/github_app.rs" | ".github/workflows/ci.yml"
+            ) {
                 assert_eq!(
                     valid_repository_path(readable).err(),
                     Some(OperationError::InvalidInput),
@@ -5689,6 +5699,37 @@ mod tests {
     }
 
     #[test]
+    fn workflows_write_is_minted_only_where_accepted() {
+        let installation = |permissions: &str| -> Installation {
+            serde_json::from_str(&format!(
+                r#"{{"id":17,"app_id":4673420,"account":{{"id":109233175}},"repository_selection":"selected","permissions":{{{permissions}}},"events":[],"suspended_at":null}}"#
+            ))
+            .unwrap()
+        };
+        let requested = BTreeMap::from([
+            ("contents", "write"),
+            ("metadata", "read"),
+            ("workflows", "write"),
+        ]);
+        assert_eq!(
+            mintable_permissions(
+                &installation(r#""contents":"write","metadata":"read","workflows":"write""#),
+                requested.clone(),
+            ),
+            requested
+        );
+        for without in [
+            r#""contents":"write","metadata":"read""#,
+            r#""contents":"write","metadata":"read","workflows":"read""#,
+        ] {
+            assert_eq!(
+                mintable_permissions(&installation(without), requested.clone()),
+                BTreeMap::from([("contents", "write"), ("metadata", "read")])
+            );
+        }
+    }
+
+    #[test]
     fn operation_tokens_never_request_administration() {
         let source = include_str!("github_app.rs")
             .split("#[cfg(test)]\nmod tests {")
@@ -5724,25 +5765,25 @@ mod tests {
             "src/CODEOWNERS",
             "a/CODEOWNERS/b",
             ".github/sub/dependabot.yml",
+            // The App holds `workflows: write`, so workflow changes are
+            // delivered like any other change (#1251).
+            ".github/workflows/ci.yml",
+            ".github/workflows",
+            ".GitHub/Workflows/ci.yml",
+            ".github/workflows/nested/deep.yml",
         ] {
             assert!(
                 valid_repository_path(allowed).is_ok(),
                 "rejected: {allowed}"
             );
         }
-        // Workflow files are refused explicitly. GitHub also blocks them without
-        // the `workflows` permission this App does not hold, but an agent able
-        // to rewrite the CI gating its own work would be escalating authority,
-        // so the surface states the boundary rather than inheriting it.
         for refused in [
-            ".github/workflows/ci.yml",
             // A tree entry may name a directory as a blob, which replaces the
-            // whole subtree. A prefix test needing the trailing slash let
-            // `.github/workflows` delete every workflow, and `.github` delete
-            // CODEOWNERS and the issue templates, which no permission on this
-            // installation protects.
-            ".github/workflows",
+            // whole subtree, so `.github` would delete CODEOWNERS and the
+            // dependabot config, which no permission on this installation
+            // protects.
             ".github",
+            ".GitHub",
             // An agent that can rewrite CODEOWNERS can remove itself from
             // required review. Refusing only the tree left that reachable one
             // file at a time.
@@ -5761,8 +5802,6 @@ mod tests {
             "CODEOWNERS/nested/deep.md",
             ".github/dependabot.yml/x",
             ".github/dependabot.yaml/x",
-            ".GitHub/Workflows/ci.yml",
-            ".github/workflows/nested/deep.yml",
             "",
             "/etc/passwd",
             "src/",
@@ -6273,8 +6312,12 @@ mod tests {
         // CODEOWNERS and `dependabot.yml` have no GitHub permission backstopping
         // them, so that slip is the escalation this whole boundary exists to
         // stop.
+        assert!(
+            base(vec![file(".github/workflows/ci.yml")])
+                .validate()
+                .is_ok()
+        );
         for protected in [
-            ".github/workflows/ci.yml",
             ".github",
             "CODEOWNERS",
             ".github/CODEOWNERS",
