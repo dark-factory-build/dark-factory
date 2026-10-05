@@ -1095,6 +1095,7 @@ func TestReviewHandoffTextIsAnOrdinaryTask(t *testing.T) {
 // success can be superseded, so nothing else may strand a consumer.
 func TestUnsucceededProducerCarriesPrerequisitePins(t *testing.T) {
 	neverStarted, _ := NewFailureProposal(FailureProtocol, NeverStartedRunDetail)
+	overseerLimit, _ := NewFailureProposal(FailureProtocol, OverseerRunLimitDetail)
 	failed, _ := NewFailureProposal(FailureInternal, "retry")
 	for _, test := range []struct {
 		name     string
@@ -1103,6 +1104,7 @@ func TestUnsucceededProducerCarriesPrerequisitePins(t *testing.T) {
 		requeue  func(*Store, Task) error
 	}{
 		{name: "requeue", role: RoleOrchestrator, proposal: neverStarted, requeue: func(*Store, Task) error { return nil }},
+		{name: "overseer-limit", role: RoleOrchestrator, proposal: overseerLimit, requeue: func(*Store, Task) error { return nil }},
 		{name: "retry", role: RoleWorker, proposal: failed, requeue: func(store *Store, task Task) error {
 			_, err := store.RetryTaskForOperator(context.Background(), task.ID, task.Revision, AgentID{}, mustTime(t, 70))
 			return err

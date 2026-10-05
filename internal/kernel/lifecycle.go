@@ -380,6 +380,11 @@ const NeverStartedRunDetail = "never started: no terminal output or attempt call
 // never-started run is.
 const ProviderCapacityRunDetail = "provider reported its selected model at capacity"
 
+// OverseerRunLimitDetail is the failure of an overseer run stopped at its
+// backstop (MaxOverseerRunSeconds): its task is retried as a never-started
+// run is, so the next run resumes from durable state.
+const OverseerRunLimitDetail = "overseer run limit reached"
+
 // FailRun records a daemon-owned infrastructure failure before or during a
 // running attempt. It never acts as attempt authority and never overwrites an
 // outcome that reached finalizing first.
@@ -730,7 +735,7 @@ func (store *Store) finalizeRun(ctx context.Context, runID RunID, expected Revis
 		taskStatus, blocked = TaskBlocked.String(), terminal.detail
 	case OutcomeFailed:
 		taskStatus, completed = TaskFailed.String(), at.Int64()
-		if terminal.code == FailureProtocol && terminal.detail == NeverStartedRunDetail || terminal.code == FailureProviderExit && terminal.detail == ProviderCapacityRunDetail {
+		if terminal.code == FailureProtocol && (terminal.detail == NeverStartedRunDetail || terminal.detail == OverseerRunLimitDetail) || terminal.code == FailureProviderExit && terminal.detail == ProviderCapacityRunDetail {
 			// A run that never started, or met a transient provider condition:
 			// queue its task again once, unless the previous run ended the same way.
 			var again bool

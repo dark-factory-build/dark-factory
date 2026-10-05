@@ -16,15 +16,16 @@ const (
 	ownerlessRunAge = 10 * time.Minute
 )
 
-// enforceRunLiveness runs on every scheduler poll. It cancels runs past their
-// limit (measured from admission, so a run stuck before provider startup
-// cannot evade it), fails a live attempt that has been quiet for the stall
+// enforceRunLiveness runs on every scheduler poll. It cancels worker runs past
+// their limit (measured from admission, so a run stuck before provider startup
+// cannot evade it), fails an overseer run at its backstop, fails a live attempt that has been quiet for the stall
 // budget, and repeats startup recovery for runs that have had no live owner
 // and no update for ownerlessRunAge. A failed or cancelled run reaches
 // finalizing, which its live owner answers by stopping the provider, as for
 // an operator stop. Every edge is CAS-protected: a result or stop that won
-// first is left untouched. Only a run that never started is retried, by
-// its finalization (kernel.NeverStartedRunDetail).
+// first is left untouched. A run that never started and an overseer at its
+// backstop are retried once, by their finalization (kernel.NeverStartedRunDetail,
+// kernel.OverseerRunLimitDetail).
 func (daemon *Daemon) enforceRunLiveness(ctx context.Context, spec SupervisorSpec) error {
 	at, err := daemon.timestamp()
 	if err != nil {
@@ -34,8 +35,17 @@ func (daemon *Daemon) enforceRunLiveness(ctx context.Context, spec SupervisorSpe
 	if err != nil {
 		return err
 	}
+	overseerLimit, err := kernel.NewFailureProposal(kernel.FailureProtocol, kernel.OverseerRunLimitDetail)
+	if err != nil {
+		return err
+	}
 	for _, run := range runs {
-		if _, err := daemon.store.CancelRun(ctx, run.ID, run.Revision, runLimitDetail, at); err != nil && !casLost(err) {
+		if run.Role == kernel.RoleOrchestrator {
+			_, err = daemon.store.FailRun(ctx, run.ID, run.Revision, overseerLimit, at)
+		} else {
+			_, err = daemon.store.CancelRun(ctx, run.ID, run.Revision, runLimitDetail, at)
+		}
+		if err != nil && !casLost(err) {
 			return err
 		}
 	}

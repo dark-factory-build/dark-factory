@@ -1265,7 +1265,7 @@ func TestDaemonOverseerBackstopFreesLaneWhenProjectLimitIsDisabled(t *testing.T)
 		}
 	}
 	run, found, err := fixture.store.Run(ctx, active.run.ID)
-	if err != nil || !found || run.Phase != kernel.RunFinalizing || run.Proposal == nil || run.Proposal.Kind() != kernel.OutcomeCancelled || run.Proposal.Detail() != runLimitDetail || run.UpdatedAt.Int64() != bound {
+	if err != nil || !found || run.Phase != kernel.RunFinalizing || run.Proposal == nil || run.Proposal.Kind() != kernel.OutcomeFailed || run.Proposal.Detail() != kernel.OverseerRunLimitDetail || run.UpdatedAt.Int64() != bound {
 		t.Fatalf("overseer at backstop = %+v, found=%v, err=%v", run, found, err)
 	}
 }
