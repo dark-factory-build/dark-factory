@@ -20,10 +20,6 @@ func inspectServiceForAccount(context.Context, string, ServiceConfig, launchctlR
 	return ServiceStatus{}, ErrUnsupported
 }
 
-func inspectService(context.Context, string, string, launchctlRun) (ServiceStatus, error) {
-	return ServiceStatus{}, ErrUnsupported
-}
-
 func serviceInstall(context.Context, string, ServiceConfig, string) (ServiceStatus, error) {
 	return ServiceStatus{}, ErrUnsupported
 }

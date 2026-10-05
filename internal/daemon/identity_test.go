@@ -144,12 +144,3 @@ func workerResultFixture(t testing.TB) (changeworker.Result, change.RepositoryId
 	}
 	return changeworker.Result{Format: format, Base: base}, repository
 }
-
-func mustKernelFileIdentity(t testing.TB, device, inode int64) kernel.FileIdentity {
-	t.Helper()
-	identity, err := kernel.NewFileIdentity(device, inode)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return identity
-}

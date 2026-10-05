@@ -522,15 +522,6 @@ func writeFakeGit(t testing.TB, contents string) string {
 	return path
 }
 
-func mustGitFileIdentity(t testing.TB, path string) gitFileIdentity {
-	t.Helper()
-	identity, err := checkpointGitExecutable(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return identity
-}
-
 func mustReadFile(t testing.TB, path string) []byte {
 	t.Helper()
 	data, err := os.ReadFile(path)

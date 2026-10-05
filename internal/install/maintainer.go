@@ -1,7 +1,5 @@
 package install
 
-import "io"
-
 const maintainerCredentialName = "maintainer.json"
 const maintainerCredentialStage = "maintainer.staging"
 const maxMaintainerCredentialBytes = 4096
@@ -26,15 +24,6 @@ func (home *OperationalHome) WriteMaintainerCredential(data []byte) error {
 		return ErrInvalidHome
 	}
 	return home.state.writeCredential(maintainerCredentialName, data)
-}
-
-// LockLegacyController fences the existing host controller while the first
-// customer credential becomes durable. The caller closes it after saving.
-func (home *OperationalHome) LockLegacyController() (io.Closer, error) {
-	if home == nil || home.state == nil {
-		return nil, ErrClosed
-	}
-	return home.state.lockLegacyController()
 }
 
 // Linear credentials use the same descriptor-bound, private storage as GitHub.

@@ -59,14 +59,6 @@ func NewDatabaseImage(ctx context.Context, config FactoryConfig, at UnixMillis) 
 	return buildDatabaseImage(ctx, bootstrapIdentity{config: config, at: at, daemonID: daemonID})
 }
 
-// InspectImmutable validates an already-open, sidecar-free SQLite main file
-// without taking ownership of reader. The caller must hold the database
-// lifetime lock, prove that no sidecar exists, and keep the declared bytes
-// stable until this call returns.
-func InspectImmutable(ctx context.Context, reader io.ReaderAt, size int64) error {
-	return inspectImmutable(ctx, reader, size, false)
-}
-
 // InspectPristine validates the exact sidecar-free rollback image produced by
 // NewDatabaseImage. It rebuilds the canonical image from the validated dynamic
 // factory identity and requires byte-for-byte equality, so deleted or vacuumed

@@ -382,10 +382,6 @@ func sameRecoveredFileStat(left, right unix.Stat_t) bool {
 	return left.Dev == right.Dev && left.Ino == right.Ino && left.Uid == right.Uid && left.Gid == right.Gid && left.Mode == right.Mode && left.Nlink == right.Nlink && left.Size == right.Size && left.Mtim == right.Mtim && left.Ctim == right.Ctim
 }
 
-func fileIdentity(stat unix.Stat_t) runner.FileIdentity {
-	return runner.FileIdentity{Device: uint64(stat.Dev), Inode: stat.Ino}
-}
-
 func (recovered *RecoveredRuntime) Close() error {
 	if recovered == nil || recovered.runtime == nil {
 		return nil

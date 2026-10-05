@@ -156,26 +156,6 @@ func TestTerminalSessionActivationAndLiveCloseAreDurableTransitions(t *testing.T
 	}
 }
 
-func recoveredCloseExit(t *testing.T, kind string, sequence uint64, at int64) ProcessExit {
-	t.Helper()
-	var exit ProcessExit
-	var err error
-	switch kind {
-	case "code":
-		exit, err = NewProcessExitCode(sequence, 0, mustTime(t, at))
-	case "signal":
-		exit, err = NewProcessExitSignal(sequence, 15, mustTime(t, at))
-	case "absence":
-		exit, err = NewProcessExitRecoveredAbsence(sequence, mustTime(t, at))
-	default:
-		t.Fatalf("unknown exit kind %q", kind)
-	}
-	if err != nil {
-		t.Fatal(err)
-	}
-	return exit
-}
-
 func TestTerminalSessionChronologyCorruptionFailsClosed(t *testing.T) {
 	tests := []struct {
 		name   string
