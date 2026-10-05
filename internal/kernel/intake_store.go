@@ -483,11 +483,12 @@ func (store *Store) AcceptIntakeSnapshot(ctx context.Context, sourceID IntakeSou
 	if err != nil {
 		return IntakeAcceptance{}, tx.Rollback(err)
 	}
-	// Exact retries remain stable, including withdrawn receipts: explicit
-	// acceptance never revives work withdrawn from this receipt.
-	// Exact retries and restored content return the existing receipt unchanged;
-	// explicit acceptance never revives work withdrawn from this receipt.
+	// An exact retry of the latest receipt is idempotent. Older content cannot
+	// become latest again, so it is refused rather than reported as accepted.
 	if exists {
+		if latestFound && latest.ID != existing.ID {
+			return IntakeAcceptance{}, tx.Rollback(ErrRevisionConflict)
+		}
 		if err := tx.Rollback(nil); err != nil {
 			return IntakeAcceptance{}, err
 		}

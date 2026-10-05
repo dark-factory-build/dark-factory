@@ -507,7 +507,7 @@ func TestIntakePriorityRulesBoundEncodedOperatorConfiguration(t *testing.T) {
 	}
 }
 
-func TestIntakeRestoredContentReturnsExistingReceipt(t *testing.T) {
+func TestIntakeRestoredContentIsRefusedAfterNewerReceipt(t *testing.T) {
 	for _, imported := range []bool{false, true} {
 		t.Run(fmt.Sprint(imported), func(t *testing.T) {
 			ctx := context.Background()
@@ -541,26 +541,15 @@ func TestIntakeRestoredContentReturnsExistingReceipt(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			// Restoring A is a new explicit review, not a rewrite of its receipt.
-			restored, err := store.AcceptIntakeSnapshot(ctx, source.ID, snapshot, mustTime(t, 7))
-			if err != nil || restored.ID != first.ID || restored.TaskID != first.TaskID || restored.CreatedAt != first.CreatedAt {
-				t.Fatalf("restored receipt: %+v %v", restored, err)
+			if _, err := store.AcceptIntakeSnapshot(ctx, source.ID, snapshot, mustTime(t, 7)); !errors.Is(err, ErrRevisionConflict) {
+				t.Fatalf("A after B: %v", err)
 			}
-			if _, err := store.AcceptIntakeSnapshot(ctx, source.ID, changed, mustTime(t, 6)); err != nil {
-				t.Fatal(err)
-			}
-			if _, err := store.AcceptIntakeSnapshot(ctx, source.ID, snapshot, mustTime(t, 4)); err != nil {
-				t.Fatal(err)
+			if retry, err := store.AcceptIntakeSnapshot(ctx, source.ID, changed, mustTime(t, 5)); err != nil || retry.ID != second.ID {
+				t.Fatalf("retry B: %+v %v", retry, err)
 			}
 			latest, found, err := store.LatestIntakeAcceptance(ctx, snapshot, project.ID, source.TargetRepositoryID)
 			if err != nil || !found || latest.ID != second.ID {
 				t.Fatalf("latest: %+v %v", latest, err)
-			}
-			if _, err := store.AcceptIntakeSnapshot(ctx, source.ID, changed, mustTime(t, 5)); err != nil {
-				t.Fatalf("retry B: %v", err)
-			}
-			if withdrawn, err := store.AcceptIntakeSnapshot(ctx, source.ID, snapshot, mustTime(t, 11)); err != nil || withdrawn.ID != first.ID {
-				t.Fatalf("restored: %+v %v", withdrawn, err)
 			}
 		})
 	}
