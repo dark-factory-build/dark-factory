@@ -354,16 +354,6 @@ fn declared_output_schemas_name_the_fields_the_results_carry() {
                 "merge_commit_sha",
             ][..],
         ),
-        (
-            "close_pull_request",
-            "ClosePullRequestResult",
-            &["pull_number", "head_sha", "url", "state"][..],
-        ),
-        (
-            "merge_pull_request_at_head",
-            "MergePullRequestAtHeadResult",
-            &["pull_number", "head_sha", "base", "merge_commit_sha"][..],
-        ),
     ] {
         let start = github_app
             .find(&format!("struct {struct_name} {{"))
@@ -467,23 +457,17 @@ fn every_repository_tool_requires_the_repository_it_acts_on() {
         "observe_tree",
         "create_issue",
         "observe_issue",
-        "resolve_issue",
         "publish_release_tag",
         "recover_release",
         "observe_release",
         "observe_release_workflow",
         "create_pull_request",
         "update_pull_request_body",
-        "close_pull_request",
         "submit_pull_request_review",
         "observe_pull_request_checks",
-        "observe_pull_request_workflows",
-        "read_pull_request_job_log",
-        "rerun_failed_pull_request_jobs",
         "observe_pull_request_merge",
         "publish_commit",
         "enqueue_pull_request",
-        "merge_pull_request_at_head",
     ] {
         let input = tool_input(tool);
         assert!(
@@ -524,23 +508,8 @@ fn every_repository_tool_requires_the_repository_it_acts_on() {
         ("observe_file", &["repository", "commit_sha", "path"][..]),
         ("observe_tree", &["repository", "commit_sha"][..]),
         (
-            "close_pull_request",
-            &["repository", "operation_id", "pull_number", "head_sha"][..],
-        ),
-        (
             "update_pull_request_body",
             &["repository", "operation_id", "pull_number", "body"][..],
-        ),
-        (
-            "merge_pull_request_at_head",
-            &[
-                "repository",
-                "operation_id",
-                "review_operation_id",
-                "pull_number",
-                "head_sha",
-                "base",
-            ][..],
         ),
     ] {
         let declared = own_required(tool);
@@ -560,18 +529,6 @@ fn every_repository_tool_requires_the_repository_it_acts_on() {
         );
     }
 
-    // The workflow the run-observing tools watch is the caller's to name; a
-    // hard-coded path silently means "this tool works on one repository".
-    for tool in [
-        "observe_pull_request_workflows",
-        "read_pull_request_job_log",
-        "rerun_failed_pull_request_jobs",
-    ] {
-        assert!(
-            tool_input(tool).contains(r#""workflow_path""#),
-            "{tool} does not take a workflow path"
-        );
-    }
     // The release and deploy workflows are this control plane's own and stay
     // constants. A CI constant would be the hard-coding this removes: it is the
     // one workflow whose name belongs to whichever repository is being watched.
@@ -594,23 +551,17 @@ fn mcp_surface_is_installation_bound_and_typed() {
         "observe_operation",
         "create_issue",
         "observe_issue",
-        "resolve_issue",
         "publish_release_tag",
         "recover_release",
         "observe_release",
         "observe_release_workflow",
         "create_pull_request",
         "update_pull_request_body",
-        "close_pull_request",
         "submit_pull_request_review",
         "observe_pull_request_checks",
-        "observe_pull_request_workflows",
-        "read_pull_request_job_log",
-        "rerun_failed_pull_request_jobs",
         "observe_pull_request_merge",
         "publish_commit",
         "enqueue_pull_request",
-        "merge_pull_request_at_head",
     ] {
         assert!(mcp.contains(tool), "missing typed MCP tool: {tool}");
         // Advertised is not dispatched. A renamed match arm leaves the tool in
@@ -705,10 +656,6 @@ fn github_refusals_stay_determinate() {
     // privileged operation gets the specific missing-grant refusal.
     assert!(github_app.contains("validate_installation(&installation, self.app_id, &permissions)"));
     assert!(github_app.contains("installation_requires_only_the_permission_each_operation_mints"));
-    // Direct merge is now an exact-head, exact-review operation; the schema
-    // and dispatch checks above ensure it cannot become an untyped shortcut.
-    assert!(github_app.contains("MergePullRequestAtHead"));
-    assert!(mcp.contains("merge_pull_request_at_head"));
     // GitHub owns atomic post-merge cleanup, through a repository setting this
     // App never acts on. The absence of a ref mutation is a real property of
     // this surface and is asserted here. That the metadata reader does not
@@ -730,8 +677,6 @@ fn github_refusals_stay_determinate() {
     // Reconciliation rematerializes the content-addressed request tree; a
     // copied marker and parent cannot cause a different tree to be adopted.
     assert!(github_app.contains("head.tree.sha != self.materialize_tree(token, request).await?"));
-    // These fixed REST contracts are exact rather than generic 2xx guesses.
-    assert!(github_app.contains("token.as_str(),\n            201,"));
     assert!(journal.contains(r#"Ok(("planned", None, "'executing','indeterminate'"))"#));
     // And the caller is told which of the two it got.
     assert!(mcp.contains(r#""refused""#));

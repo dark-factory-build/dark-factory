@@ -49,10 +49,9 @@ Access policy, or App configuration is live.
   commit's parents and complete tree, or a determinate refusal when GitHub
   truncates it, and durable operation state, manage a bounded issue lifecycle,
   publish an exact commit, as the merge a worker made when it integrated the
-  default branch, and pull request, close a pull request at an exact head, submit an exact-head
-  `ALLOW`, `COMMENT`, or `REQUEST_CHANGES` verdict, diagnose and rerun exact CI,
-  observe eventual merge state, enqueue through a merge queue, perform a
-  strict exact-head squash merge where a base has no queue, publish and observe
+  default branch, and pull request, submit an exact-head
+  `ALLOW`, `COMMENT`, or `REQUEST_CHANGES` verdict, observe exact-head checks
+  and eventual merge state, enqueue through a merge queue, publish and observe
   immutable releases, and dispatch only the fixed reviewed release recovery
   workflow. GitHub's `delete_branch_on_merge` repository setting
   performs atomic source-branch cleanup; the broker never deletes a ref itself. All three verdicts are the repository's own words,
@@ -63,23 +62,8 @@ Access policy, or App configuration is live.
   text. The `review` status check reads that line to enforce its exact-head
   verdict contract. Each write's operation UUID is accepted
   in either case and canonicalized to lowercase, so one UUID is one replay
-  identity however the caller's `uuidgen` spelled it. Merge queue enqueue and
-  direct merge are separate typed operations, never fallback attempts. Direct
-  merge refuses a configured queue and requires the default base, exact PR
-  head, journal-bound exact-head `ALLOW`, and completed non-failing checks. A
-  protected base requires an active strict squash ruleset. Exact rules-read 403
-  on a private repo instead requires `protected:false`, squash enabled,
-  nonempty all-green checks, explicit no-queue reads, and an unchanged base
-  re-read immediately before merge. On the protected path the operation proves
-  the Maintainer App is absent from every active ruleset's disclosed bypass
-  list; a missing or hidden list refuses that path. Legacy classic branch
-  protection alone is unsupported. GitHub exposes bypass actors only with
-  ruleset-write access, so direct merge alone mints Administration write for
-  fixed detailed-ruleset `GET` requests; the broker exposes no administration
-  mutation. The
-  resulting squash commit carries the operation digest before success or
-  reconciliation. GitHub's merge request atomically binds the stated head and
-  applies the ruleset to the then-current default base.
+  identity however the caller's `uuidgen` spelled it. Merge queue enqueue is
+  the only merge path; it never falls back to a direct merge.
   Publication refuses `.github` itself, `.github/workflows/**`, the three
   CODEOWNERS locations and the dependabot config, and every
   write is bound to a stated head commit and to a durable operation ID.
@@ -91,8 +75,7 @@ Access policy, or App configuration is live.
   live default branch: generated refs move only forward from a stated head or
   disappear after their exact pull request is proven merged.
 - Customer review controllers can use `list_pull_requests` (1–100 entries per
-  page, up to page 1000) or an exact `pull_number` at page 1, and
-  `observe_pull_request_review` for one known review ID. Both require only
+  page, up to page 1000) or an exact `pull_number` at page 1. It requires only
   Pull requests read and Metadata read. Results retain the actual base branch,
   complete bounded body, and exact head/base commits. A full last page or an
   upstream refusal is unavailable, never an empty backlog. These reads do not
@@ -148,10 +131,10 @@ in zeroizing memory and are never returned or journalled. The permanent App may
 have additional installed capabilities; unused App-level authority is never
 copied into an operation token.
 
-Each operation's requested Actions, Administration, checks, contents, issues,
+Each operation's requested Actions, checks, contents, issues,
 merge-queues, metadata, and pull-requests permission is checked when its
-repository token is minted, not at readiness. Administration write is
-downscoped only into direct merge's fixed ruleset reads. Readiness names no
+repository token is minted, not at readiness. No operation mints
+Administration. Readiness names no
 repository, so it has no installation to audit; an installation that is
 suspended, is not selected-repository, or lacks the operation's requested grant
 is refused with the field that failed. A repository that cannot merge or deploy

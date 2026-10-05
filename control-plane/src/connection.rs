@@ -158,25 +158,18 @@ fn tool_write(name: &str) -> Option<bool> {
         | "observe_issue"
         | "list_issues"
         | "list_pull_requests"
-        | "observe_pull_request_review"
         | "observe_release"
         | "observe_release_workflow"
         | "observe_pull_request_checks"
-        | "observe_pull_request_workflows"
-        | "read_pull_request_job_log"
         | "observe_pull_request_merge" => Some(false),
         "create_issue"
-        | "resolve_issue"
         | "create_pull_request"
         | "update_pull_request_body"
-        | "close_pull_request"
         | "submit_pull_request_review"
         | "publish_commit"
         | "publish_release_tag"
         | "recover_release"
-        | "enqueue_pull_request"
-        | "merge_pull_request_at_head"
-        | "rerun_failed_pull_request_jobs" => Some(true),
+        | "enqueue_pull_request" => Some(true),
         _ => None,
     }
 }
