@@ -48,17 +48,17 @@ test("stalled pagination keeps rows and exposes a recovery action", async t => {
   assert.equal(calls, 3); assert.equal(tree.root.findAllByProps({ role: "alert" }).length, 0);
 });
 
-test("editing replaces the reader, preserves comparison fields and expected revision, then reloads the list", async t => {
-  const calls = [], document = { kind: "comparison", objective: "Compare", criteria: "Same source", state: "proposed", baseline: { task_id: "base", task_work_revision: 2 }, candidates: [{ task_id: "candidate", task_work_revision: 3 }], links: [{ task_id: "linked", task_work_revision: 1 }], question: "Which?" };
+test("editing replaces the reader, preserves links and expected revision, then reloads the list", async t => {
+  const calls = [], document = { kind: "outcome", objective: "Compare", criteria: "Same source", state: "proposed", links: [{ task_id: "linked", task_work_revision: 1 }] };
   const tree = await mount(t, async (operation, input) => { calls.push({ operation, input }); return operation === "outcome_list" ? { items: [{ id: "a", objective: "Compare" }] } : { id: "a", revision: operation === "outcome_write" ? 6 : 5, document: operation === "outcome_write" ? input.document : document }; });
   await click(tree, "Compare"); await click(tree, "Edit outcome");
   assert.equal(tree.root.findAllByType("article").length, 0);
-  const values = { objective: "Compare", criteria: "Same source", state: "accepted", question: "Which?", "baseline.task_id": "base", "baseline.task_work_revision": "2", "candidate0.task_id": "candidate", "candidate0.task_work_revision": "3", "candidate1.task_id": "other", "candidate1.task_work_revision": "1" };
+  const values = { objective: "Compare", criteria: "Same source", state: "accepted", };
   const original = globalThis.FormData; globalThis.FormData = class { get(key) { return values[key] ?? ""; } };
   try { await act(async () => tree.root.findByType("form").props.onSubmit({ preventDefault() {}, currentTarget: {} })); } finally { globalThis.FormData = original; }
   const write = calls.find(({ operation }) => operation === "outcome_write").input;
   assert.equal(write.expected_revision, 5); assert.equal(write.project_id, "project");
-  assert.deepEqual(write.document.baseline, document.baseline); assert.deepEqual(write.document.links, document.links);
+  assert.deepEqual(write.document.links, document.links);
   assert.equal(calls.at(-1).operation, "outcome_list"); assert.equal(tree.root.findAllByType("article").length, 1);
 });
 

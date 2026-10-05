@@ -51,28 +51,6 @@ type ContentBodyPage struct {
 	Complete   bool
 }
 
-type ContentEvidence struct {
-	ID                                                               ContentEvidenceID
-	ProjectID                                                        ProjectID
-	ContentID                                                        ContentID
-	ContentRevision                                                  Revision
-	TestedSource, Environment, Result, Location, Evaluator, Judgment string
-	CreatedAt                                                        UnixMillis
-}
-
-type NewContentEvidence struct {
-	ID                                                               ContentEvidenceID
-	ProjectID                                                        ProjectID
-	ContentID                                                        ContentID
-	ContentRevision                                                  Revision
-	TestedSource, Environment, Result, Location, Evaluator, Judgment string
-}
-
-type ContentEvidencePage struct {
-	Items      []ContentEvidence
-	NextOffset int
-}
-
 type TaskContentReference struct {
 	TaskID           TaskID
 	ProjectID        ProjectID
@@ -684,149 +662,6 @@ func (store *Store) DeprecateContentForAttempt(ctx context.Context, digest Attem
 	return deprecateContentTx(ctx, tx, id, authority.ProjectID, expected, contentProvenance(authority), at)
 }
 
-func (store *Store) CreateContentEvidenceForAttempt(ctx context.Context, digest AttemptDigest, spec NewContentEvidence, at UnixMillis) (ContentEvidence, error) {
-	tx, authority, err := store.beginContentAttemptWrite(ctx, digest, at)
-	if err != nil {
-		return ContentEvidence{}, err
-	}
-	defer tx.Close()
-	if spec.ProjectID != authority.ProjectID {
-		return ContentEvidence{}, tx.Rollback(ErrUnauthorized)
-	}
-	if err := contentScope(ctx, tx.connection, authority, spec.ContentID, spec.ContentRevision.Int64()); err != nil {
-		return ContentEvidence{}, tx.Rollback(err)
-	}
-	spec.Evaluator = evidenceProvenance(authority)
-	return createContentEvidenceTx(ctx, tx, spec, at)
-}
-
-func validateContentEvidence(spec NewContentEvidence) error {
-	if spec.ID.zero() || spec.ProjectID.zero() || spec.ContentID.zero() || spec.ContentRevision.Int64() < 1 || byteLen(spec.TestedSource) < 1 || byteLen(spec.TestedSource) > 4096 || byteLen(spec.Environment) > 4096 || (spec.Result != "passed" && spec.Result != "failed" && spec.Result != "incomplete" && spec.Result != "not_run") || byteLen(spec.Location) > 4096 || byteLen(spec.Evaluator) < 1 || byteLen(spec.Evaluator) > 256 || byteLen(spec.Judgment) > 8192 {
-		return fmt.Errorf("%w: invalid content evidence", ErrInvalidValue)
-	}
-	if !utf8.ValidString(spec.TestedSource) || !utf8.ValidString(spec.Environment) || !utf8.ValidString(spec.Location) || !utf8.ValidString(spec.Evaluator) || !utf8.ValidString(spec.Judgment) {
-		return fmt.Errorf("%w: invalid content evidence", ErrInvalidValue)
-	}
-	return nil
-}
-
-func (store *Store) CreateContentEvidence(ctx context.Context, spec NewContentEvidence, at UnixMillis) (ContentEvidence, error) {
-	if err := validateContentEvidence(spec); err != nil {
-		return ContentEvidence{}, err
-	}
-	tx, err := store.beginValidatedWrite(ctx)
-	if err != nil {
-		return ContentEvidence{}, err
-	}
-	defer tx.Close()
-	return createContentEvidenceTx(ctx, tx, spec, at)
-}
-
-func createContentEvidenceTx(ctx context.Context, tx *writeTx, spec NewContentEvidence, at UnixMillis) (ContentEvidence, error) {
-	if err := validateContentEvidence(spec); err != nil {
-		return ContentEvidence{}, tx.Rollback(err)
-	}
-
-	var project []byte
-	if err := tx.connection.QueryRowContext(ctx, "SELECT project_id FROM project_content_revisions WHERE id = ? AND revision = ?", spec.ContentID.Bytes(), spec.ContentRevision.Int64()).Scan(&project); err != nil {
-		if err == sql.ErrNoRows {
-			err = ErrNotFound
-		}
-		return ContentEvidence{}, tx.Rollback(err)
-	}
-	if string(project) != string(spec.ProjectID.Bytes()) {
-		return ContentEvidence{}, tx.Rollback(ErrConflict)
-	}
-	var existing ContentEvidence
-	var existingContentID, existingProjectID []byte
-	var existingRevision, created int64
-	err := tx.connection.QueryRowContext(ctx, `SELECT project_id, content_id, content_revision, tested_source, environment, result, location, evaluator, judgment, created_at_ms FROM project_content_evidence WHERE id = ?`, spec.ID.Bytes()).Scan(&existingProjectID, &existingContentID, &existingRevision, &existing.TestedSource, &existing.Environment, &existing.Result, &existing.Location, &existing.Evaluator, &existing.Judgment, &created)
-	if err == nil {
-		existingID, idErr := ContentIDFromBytes(existingContentID)
-		existingRevisionValue, revisionErr := NewRevision(existingRevision)
-		if idErr != nil || revisionErr != nil {
-			return ContentEvidence{}, tx.Rollback(ErrCorruptState)
-		}
-		existing.ContentID, existing.ContentRevision = existingID, existingRevisionValue
-		if string(existingProjectID) == string(spec.ProjectID.Bytes()) && existing.ContentID == spec.ContentID && existing.ContentRevision.Int64() == spec.ContentRevision.Int64() && existing.TestedSource == spec.TestedSource && existing.Environment == spec.Environment && existing.Result == spec.Result && existing.Location == spec.Location && existing.Evaluator == spec.Evaluator && existing.Judgment == spec.Judgment {
-			if err := tx.Rollback(nil); err != nil {
-				return ContentEvidence{}, err
-			}
-			existing.ID, existing.ProjectID = spec.ID, spec.ProjectID
-			existing.CreatedAt, _ = NewUnixMillis(created)
-			return existing, nil
-		}
-		return ContentEvidence{}, tx.Rollback(ErrConflict)
-	}
-	if err != sql.ErrNoRows {
-		return ContentEvidence{}, tx.Rollback(err)
-	}
-	if _, err := tx.connection.ExecContext(ctx, `INSERT INTO project_content_evidence(id, project_id, content_id, content_revision, tested_source, environment, result, location, evaluator, judgment, created_at_ms) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, spec.ID.Bytes(), spec.ProjectID.Bytes(), spec.ContentID.Bytes(), spec.ContentRevision.Int64(), spec.TestedSource, spec.Environment, spec.Result, spec.Location, spec.Evaluator, spec.Judgment, at.Int64()); err != nil {
-		return ContentEvidence{}, tx.Rollback(err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return ContentEvidence{}, err
-	}
-	return ContentEvidence{ID: spec.ID, ProjectID: spec.ProjectID, ContentID: spec.ContentID, ContentRevision: spec.ContentRevision, TestedSource: spec.TestedSource, Environment: spec.Environment, Result: spec.Result, Location: spec.Location, Evaluator: spec.Evaluator, Judgment: spec.Judgment, CreatedAt: at}, nil
-}
-
-func (store *Store) ListContentEvidence(ctx context.Context, project ProjectID, content ContentID, revision Revision, offset, limit int) (ContentEvidencePage, error) {
-	tx, err := store.beginRead(ctx)
-	if err != nil {
-		return ContentEvidencePage{}, err
-	}
-	defer tx.Close()
-	return listContentEvidenceOnConnection(ctx, tx.connection, project, content, revision, offset, limit)
-}
-
-func listContentEvidenceOnConnection(ctx context.Context, connection *sql.Conn, project ProjectID, content ContentID, revision Revision, offset, limit int) (ContentEvidencePage, error) {
-	if project.zero() || content.zero() || offset < 0 || limit < 0 || limit > contentPageSize {
-		return ContentEvidencePage{}, fmt.Errorf("%w: invalid evidence page", ErrInvalidValue)
-	}
-	if limit == 0 {
-		limit = contentPageSize
-	}
-	rows, err := connection.QueryContext(ctx, `SELECT id, project_id, content_id, content_revision, tested_source, environment, result, location, evaluator, judgment, created_at_ms FROM project_content_evidence WHERE project_id = ? AND content_id = ? AND content_revision = ? ORDER BY id LIMIT ? OFFSET ?`, project.Bytes(), content.Bytes(), revision.Int64(), limit+1, offset)
-	if err != nil {
-		return ContentEvidencePage{}, err
-	}
-	defer rows.Close()
-	result := ContentEvidencePage{}
-	for rows.Next() {
-		item, err := scanContentEvidence(rows)
-		if err != nil {
-			return ContentEvidencePage{}, err
-		}
-		if len(result.Items) == limit {
-			result.NextOffset = offset + limit
-		} else {
-			result.Items = append(result.Items, item)
-		}
-	}
-	return result, rows.Err()
-}
-
-func scanContentEvidence(scanner rowScanner) (ContentEvidence, error) {
-	var rawID, rawProject, rawContent []byte
-	var revision, created int64
-	var tested, environment, result, location, evaluator, judgment string
-	if err := scanner.Scan(&rawID, &rawProject, &rawContent, &revision, &tested, &environment, &result, &location, &evaluator, &judgment, &created); err != nil {
-		if err == sql.ErrNoRows {
-			return ContentEvidence{}, ErrNotFound
-		}
-		return ContentEvidence{}, err
-	}
-	id, e1 := ContentEvidenceIDFromBytes(rawID)
-	project, e2 := ProjectIDFromBytes(rawProject)
-	content, e3 := ContentIDFromBytes(rawContent)
-	rev, e4 := NewRevision(revision)
-	at, e5 := NewUnixMillis(created)
-	if e1 != nil || e2 != nil || e3 != nil || e4 != nil || e5 != nil {
-		return ContentEvidence{}, fmt.Errorf("%w: invalid content evidence row", ErrCorruptState)
-	}
-	return ContentEvidence{ID: id, ProjectID: project, ContentID: content, ContentRevision: rev, TestedSource: tested, Environment: environment, Result: result, Location: location, Evaluator: evaluator, Judgment: judgment, CreatedAt: at}, nil
-}
-
 func (store *Store) TaskContentReferences(ctx context.Context, project ProjectID, task TaskID, workRevision Revision) ([]TaskContentReference, error) {
 	if project.zero() || task.zero() || workRevision.Int64() < 1 {
 		return nil, fmt.Errorf("%w: invalid task content reference", ErrInvalidValue)
@@ -870,22 +705,6 @@ func taskContentReferencesOnConnection(ctx context.Context, connection *sql.Conn
 		result = append(result, TaskContentReference{TaskID: tid, ProjectID: pid, TaskWorkRevision: tr, ContentID: cid, ContentRevision: cr, AttachedAt: at})
 	}
 	return result, rows.Err()
-}
-
-func (store *Store) ListContentEvidenceForAttempt(ctx context.Context, digest AttemptDigest, content ContentID, revision Revision, offset, limit int) (ContentEvidencePage, error) {
-	tx, err := store.beginRead(ctx)
-	if err != nil {
-		return ContentEvidencePage{}, err
-	}
-	defer tx.Close()
-	authority, err := authenticateAttempt(ctx, tx.connection, digest)
-	if err != nil {
-		return ContentEvidencePage{}, err
-	}
-	if err := contentScope(ctx, tx.connection, authority, content, revision.Int64()); err != nil {
-		return ContentEvidencePage{}, err
-	}
-	return listContentEvidenceOnConnection(ctx, tx.connection, authority.ProjectID, content, revision, offset, limit)
 }
 
 func (store *Store) TaskContentReferencesForAttempt(ctx context.Context, digest AttemptDigest, task TaskID, workRevision Revision) ([]TaskContentReference, error) {

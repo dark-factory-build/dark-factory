@@ -1,5 +1,3 @@
-//go:build darwin || linux
-
 package main
 
 import (
@@ -22,10 +20,6 @@ func TestContentCommandParsing(t *testing.T) {
 	command, help, ok = parse([]string{"content", "read", "--id", id, "--revision", "2"})
 	if !ok || help || command.kind != commandContentRead || command.project != "" {
 		t.Fatalf("operator metadata read parse = %+v, help=%t, ok=%t", command, help, ok)
-	}
-	command, help, ok = parse([]string{"attempt", "content", "evidence-list", "--id", id, "--revision", "2", "--limit", "4"})
-	if !ok || help || command.kind != commandContentEvidenceList {
-		t.Fatalf("attempt evidence list parse = %+v, help=%t, ok=%t", command, help, ok)
 	}
 	command, help, ok = parse([]string{"content", "attachments", "--project", id, "--task", id, "--revision", "3"})
 	if !ok || help || command.kind != commandContentAttachments {
@@ -69,7 +63,6 @@ func TestContentCallerBoundsAndDerivedProvenance(t *testing.T) {
 	id := "0123456789abcdef0123456789abcdef"
 	for _, argv := range [][]string{
 		{"attempt", "content", "body", "--id", id, "--revision", "1", "--limit", "65537"},
-		{"attempt", "content", "evidence", "--project", id, "--id", id, "--revision", "1", "--tested-source", "source", "--result", "passed", "--evaluator", "operator"},
 		{"attempt", "content", "create", "--project", id, "--kind", "procedure", "--title", "safe", "--body", strings.Repeat("x", 1<<20+1)},
 	} {
 		if _, _, ok := parse(argv); ok {

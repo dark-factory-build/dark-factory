@@ -369,15 +369,21 @@ func (store *Store) ProposeAttemptOutcome(ctx context.Context, digest AttemptDig
 	return finalizing, err
 }
 
-// NeverStartedRunDetail is the stall failure of a run that never produced
-// terminal output or an attempt call. Finalizing it queues the task again at
-// the next work revision, unless the previous run ended the same way.
-const NeverStartedRunDetail = "stalled: no terminal output or attempt call in 10m since launch"
+// NeverStartedRunDetail is the failure of a run that never produced terminal
+// output or an attempt call: stalled 10m after launch, or found admitted at
+// recovery. Finalizing it queues the task again at the next work revision,
+// unless the previous run ended the same way.
+const NeverStartedRunDetail = "never started: no terminal output or attempt call after launch"
 
 // ProviderCapacityRunDetail is the provider-exit failure of a run whose
 // provider reported its model at capacity: transient, so it is retried as a
 // never-started run is.
 const ProviderCapacityRunDetail = "provider reported its selected model at capacity"
+
+// OverseerRunLimitDetail is the failure of an overseer run stopped at its run
+// limit (the project's, or the MaxOverseerRunSeconds backstop): its task is
+// retried as a never-started run is, so the next run resumes from durable state.
+const OverseerRunLimitDetail = "overseer run limit reached"
 
 // FailRun records a daemon-owned infrastructure failure before or during a
 // running attempt. It never acts as attempt authority and never overwrites an
@@ -729,7 +735,7 @@ func (store *Store) finalizeRun(ctx context.Context, runID RunID, expected Revis
 		taskStatus, blocked = TaskBlocked.String(), terminal.detail
 	case OutcomeFailed:
 		taskStatus, completed = TaskFailed.String(), at.Int64()
-		if terminal.code == FailureProtocol && terminal.detail == NeverStartedRunDetail || terminal.code == FailureProviderExit && terminal.detail == ProviderCapacityRunDetail {
+		if terminal.code == FailureProtocol && (terminal.detail == NeverStartedRunDetail || terminal.detail == OverseerRunLimitDetail) || terminal.code == FailureProviderExit && terminal.detail == ProviderCapacityRunDetail {
 			// A run that never started, or met a transient provider condition:
 			// queue its task again once, unless the previous run ended the same way.
 			var again bool
@@ -768,6 +774,11 @@ func (store *Store) finalizeRun(ctx context.Context, runID RunID, expected Revis
 		taskStatus, blocked, result, completed, requeue, at.Int64(), task.ID.Bytes(), run.ProjectID.Bytes(), run.TaskIncarnationID.Bytes(), run.AdmittedTaskWorkRevision.Int64(), task.Revision.Int64())
 	if err := requireOneRow(updated, err); err != nil {
 		return Run{}, tx.Rollback(err)
+	}
+	if requeue == 1 {
+		if err := carryPrerequisites(ctx, tx.connection, task, task.WorkRevision.Int64()+1); err != nil {
+			return Run{}, tx.Rollback(err)
+		}
 	}
 	terminalKind, terminalCode, terminalDetail, terminalResult := proposalSQL(terminal)
 	updated, err = tx.connection.ExecContext(ctx, `UPDATE runs SET phase = 'terminal', proposal_kind = ?, proposal_code = ?, proposal_detail = ?, proposal_result = ?, terminal_kind = ?, terminal_code = ?, terminal_detail = ?, terminal_result = ?, terminal_at_ms = ?, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND phase = 'finalizing' AND proposal_kind IS NOT NULL AND credential_revoked_at_ms IS NOT NULL AND revision = ?`, terminalKind, terminalCode, terminalDetail, terminalResult, terminalKind, terminalCode, terminalDetail, terminalResult, at.Int64(), at.Int64(), run.ID.Bytes(), expected.Int64())

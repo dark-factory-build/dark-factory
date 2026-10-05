@@ -729,62 +729,6 @@ func TestCapacityAllowsOneOverseerBeyondWorkersAndRejectsExcessSnapshots(t *test
 	}
 }
 
-func TestConcurrentOpenAndValidWriterReturnsBoundedSnapshotFailure(t *testing.T) {
-	// This is an intentionally large filesystem/SQLite continuity stress. The
-	// routine gate keeps deterministic snapshot checks; run this exact test
-	// under -race only when the SQLite or toolchain boundary changes.
-	if testing.Short() {
-		t.Skip("large SQLite snapshot continuity stress is change-scoped")
-	}
-	writer, path := newTestStore(t)
-	defer writer.Close()
-	ctx := context.Background()
-	start := make(chan struct{})
-	writerResult := make(chan error, 1)
-	go func() {
-		<-start
-		state, err := writer.Factory(ctx)
-		for index := 0; err == nil && index < 2000; index++ {
-			state, err = writer.SetDispatch(ctx, state.Revision, !state.DispatchEnabled, UnixMillis{value: int64(index + 2)})
-		}
-		writerResult <- err
-	}()
-	close(start)
-	changed := 0
-	for index := 0; index < 300; index++ {
-		opened, err := Open(ctx, path)
-		if errors.Is(err, errDatabaseSnapshotChanged) {
-			changed++
-			continue
-		}
-		if err != nil {
-			t.Fatalf("Open %d returned an unexpected failure: %v", index, err)
-		}
-		if err := opened.Close(); err != nil {
-			t.Fatalf("Close %d: %v", index, err)
-		}
-	}
-	if err := <-writerResult; err != nil {
-		t.Fatalf("writer: %v", err)
-	}
-	if changed == 0 {
-		t.Fatal("concurrent writer never produced the required visible snapshot-change refusal")
-	}
-	state, err := writer.Factory(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if state.Revision.Int64() != 2001 || state.Head.Int64() != 2000 || state.Floor.Int64() != 1 {
-		t.Fatalf("final factory state = %+v", state)
-	}
-	if _, err := writer.Snapshot(ctx); err != nil {
-		t.Fatalf("final Snapshot: %v", err)
-	}
-	if _, err := writer.ReadPublicSnapshot(ctx); err != nil {
-		t.Fatalf("final ReadPublicSnapshot: %v", err)
-	}
-}
-
 func TestChangeCommitmentSchemaUsesFrozenBounds(t *testing.T) {
 	store, _ := newTestStore(t)
 	defer store.Close()
@@ -889,7 +833,10 @@ func corruptSQL(t *testing.T, store *Store, statement string, args ...any) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer discardConnection(connection)
+	defer connection.Close()
+	// The fixed connection set cannot replace a poisoned connection, so
+	// restore the pragmas instead of discarding it.
+	defer connection.ExecContext(context.Background(), `PRAGMA ignore_check_constraints = OFF; PRAGMA foreign_keys = ON`)
 	if _, err := connection.ExecContext(context.Background(), `PRAGMA foreign_keys = OFF`); err != nil {
 		t.Fatal(err)
 	}

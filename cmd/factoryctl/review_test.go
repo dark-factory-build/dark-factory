@@ -1,10 +1,9 @@
-//go:build darwin || linux
-
 package main
 
 import (
 	"bytes"
 	"context"
+	"io"
 	"strings"
 	"testing"
 
@@ -28,5 +27,18 @@ func TestReviewRetryCLILeavesDefaultProviderOutOfRequest(t *testing.T) {
 	result := awaitServer(t, done)
 	if exit != 0 || result.err != nil || stderr.Len() != 0 || stdout.String() != operation+" in progress\n" {
 		t.Fatalf("retry review CLI = exit %d server %v stdout=%q stderr=%q", exit, result.err, stdout.String(), stderr.String())
+	}
+}
+
+func TestSilentFailureNamesSubcommand(t *testing.T) {
+	var stderr bytes.Buffer
+	getenv := func(key string) string {
+		if key == "DARK_FACTORY_ATTEMPT_TOKEN_FILE" {
+			return "/x"
+		}
+		return ""
+	}
+	if code := run(context.Background(), []string{"review", "--project", "p"}, getenv, io.Discard, &stderr); code == 0 || stderr.String() != "factoryctl: review failed\n" {
+		t.Fatalf("code=%d stderr=%q", code, stderr.String())
 	}
 }

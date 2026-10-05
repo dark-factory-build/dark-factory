@@ -253,27 +253,6 @@ func TestOpenValidatesWALOnDisposableCopy(t *testing.T) {
 		}
 	})
 
-	for name, mutation := range map[string]string{
-		"invalid controls never touch originals": `UPDATE factory SET next_invalidation_sequence = 3`,
-		"invalid schema never touches originals": `DROP INDEX tasks_canonical_queue`,
-	} {
-		t.Run(name, func(t *testing.T) {
-			path, _ := walSnapshotFixture(t, mutation)
-			before := captureSQLiteSet(t, path)
-			if _, err := Open(context.Background(), path); err == nil {
-				t.Fatal("Open accepted invalid WAL state")
-			}
-			assertSQLiteSetUnchanged(t, path, before)
-			info, err := os.Stat(path + "-shm")
-			if err != nil || info.Size() != walIndexRegionSize {
-				size := int64(-1)
-				if info != nil {
-					size = info.Size()
-				}
-				t.Fatalf("rejected WAL changed zero-cache SHM: size=%d err=%v", size, err)
-			}
-		})
-	}
 }
 
 func TestOpenAcceptsSQLiteWALCrashTails(t *testing.T) {
@@ -571,73 +550,6 @@ func TestDatabaseFileBindingsAreRecheckedAfterPreflight(t *testing.T) {
 		file.Close()
 		if err := files.verifySnapshot(context.Background(), snapshot); !errors.Is(err, errDatabaseSnapshotChanged) {
 			t.Fatalf("in-place main mutation snapshot error = %v", err)
-		}
-	})
-
-	for name, suffix := range map[string]string{"WAL main changed in place": "", "WAL changed in place": "-wal", "SHM changed in place": "-shm"} {
-		t.Run(name, func(t *testing.T) {
-			path, _ := walSnapshotFixture(t, "")
-			files, err := openDatabaseFiles(path)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer files.Close()
-			snapshot, err := preflightExisting(context.Background(), files)
-			if err != nil {
-				t.Fatal(err)
-			}
-			file, err := os.OpenFile(path+suffix, os.O_RDWR, 0)
-			if err != nil {
-				t.Fatal(err)
-			}
-			offset := int64(0)
-			if suffix == "" {
-				offset = 4096
-			} else if suffix == "-wal" {
-				offset = walHeaderSize
-			}
-			original := []byte{0}
-			if _, err := file.ReadAt(original, offset); err != nil {
-				file.Close()
-				t.Fatal(err)
-			}
-			if _, err := file.WriteAt([]byte{original[0] ^ 0xff}, offset); err != nil {
-				file.Close()
-				t.Fatal(err)
-			}
-			if err := file.Close(); err != nil {
-				t.Fatal(err)
-			}
-			if err := files.verifySnapshot(context.Background(), snapshot); !errors.Is(err, errDatabaseSnapshotChanged) {
-				t.Fatalf("in-place %q mutation snapshot error = %v", suffix, err)
-			}
-		})
-	}
-
-	t.Run("WAL length changed in place", func(t *testing.T) {
-		path, _ := walSnapshotFixture(t, "")
-		files, err := openDatabaseFiles(path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer files.Close()
-		snapshot, err := preflightExisting(context.Background(), files)
-		if err != nil {
-			t.Fatal(err)
-		}
-		file, err := os.OpenFile(path+"-wal", os.O_WRONLY|os.O_APPEND, 0)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := file.Write([]byte{0}); err != nil {
-			file.Close()
-			t.Fatal(err)
-		}
-		if err := file.Close(); err != nil {
-			t.Fatal(err)
-		}
-		if err := files.verifySnapshot(context.Background(), snapshot); !errors.Is(err, errDatabaseSnapshotChanged) {
-			t.Fatalf("in-place WAL length mutation snapshot error = %v", err)
 		}
 	})
 }

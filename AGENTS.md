@@ -34,7 +34,8 @@ the daemon supervisor fixtures, the full gate itself) does not block on it:
 it lists that check as "verified by gate" in its result and finishes.
 
 Record the exact head, the checks run, and the checks left to the gate. For CI
-changes, also run the affected gate fixtures. An independent reviewer
+changes, also run the affected gate fixtures. Get the independent review with
+`factoryctl review` (factoryd records the exact-head verdict). An independent reviewer
 reproduces relevant risks. Do not repeat the full suite for each edit,
 reviewer, or enqueue: the protected merge queue checks the actual combined
 tree, widening mixed or uncertain inputs. Agent-posted issue or pull-request

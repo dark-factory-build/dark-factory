@@ -816,9 +816,6 @@ func TestSupervisorCodexOrchestratorResumesFromPreviousRunsWorkingDirectory(t *t
 		t.Fatal(err)
 	}
 	copySupervisorExecutable(t, supervisorTestExecutable(t), filepath.Join(tools, "codex"))
-	if err := os.WriteFile(filepath.Join(tools, "dark-factory-maintainer-mcp-bridge"), []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
-		t.Fatal(err)
-	}
 	fixture.spec.ToolPath = tools + ":" + fixture.spec.ToolPath
 	sessionsRoot := filepath.Join(provider.ConfigHome(kernel.ProviderCodex, fixture.spec.AccountHome), "sessions")
 
@@ -955,9 +952,6 @@ func TestSupervisorCodexOverseerReadsMultipleExactRetainedChanges(t *testing.T) 
 		t.Fatal(err)
 	}
 	copySupervisorExecutable(t, executable, filepath.Join(tools, "codex"))
-	if err := os.WriteFile(filepath.Join(tools, "dark-factory-maintainer-mcp-bridge"), []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
-		t.Fatal(err)
-	}
 	fixture.spec.ToolPath = tools + ":" + fixture.spec.ToolPath
 
 	overseer, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
@@ -2735,7 +2729,7 @@ func (fixture *supervisorFixture) trackRun(runID kernel.RunID) {
 
 func (fixture *supervisorFixture) reopenStore(t *testing.T) {
 	t.Helper()
-	store, err := kernel.Open(context.Background(), fixture.storePath)
+	store, err := openTestStore(context.Background(), fixture.storePath)
 	if err != nil {
 		t.Fatal(err)
 	}

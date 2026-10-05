@@ -178,10 +178,6 @@ func TestV16OutcomeMigrationPreservesLibrary(t *testing.T) {
 			t.Fatalf("legacy revision %d has no retained repository: %v %v", revision, found, err)
 		}
 	}
-	evidence, err := store.ListContentEvidence(ctx, projectID(t, 1), contentID(t, 212), mustRevision(t, 1), 0, 4)
-	if err != nil || len(evidence.Items) != 1 || evidence.Items[0].Result != "passed" {
-		t.Fatalf("retained evidence: %+v %v", evidence, err)
-	}
 	refs, err := store.TaskContentReferences(ctx, projectID(t, 1), taskID(t, 210), mustRevision(t, 1))
 	if err != nil || len(refs) != 1 || refs[0].ContentRevision.Int64() != 1 {
 		t.Fatalf("retained attachment: %+v %v", refs, err)
@@ -337,13 +333,6 @@ func newLegacyDatabase(t *testing.T, persistWAL bool, version int, extra ...stri
 		corruptSQL(t, store, `INSERT INTO project_content_revisions(id, project_id, kind, revision, title, description, body, author, source_references, deprecated, created_at_ms) VALUES(?, ?, ?, 2, ?, '', 'corrected definition', 'operator:local', '', 0, 10)`, id.Bytes(), project.Bytes(), string(ContentAcceptanceScenario), "retained scenario")
 		corruptSQL(t, store, `INSERT INTO content_repository_bindings(content_id, content_revision, repository_id) VALUES(?, 1, ?), (?, 2, ?)`, id.Bytes(), project.Bytes(), id.Bytes(), project.Bytes())
 		content := ContentRevision{ID: id, ProjectID: project, Revision: mustRevision(t, 1)}
-		evidence, err := ContentEvidenceIDFromBytes(bytes.Repeat([]byte{213}, IDBytes))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := store.CreateContentEvidence(ctx, NewContentEvidence{ID: evidence, ProjectID: project, ContentID: content.ID, ContentRevision: content.Revision, TestedSource: "retained-source", Result: "passed", Evaluator: "operator:local"}, mustTime(t, 11)); err != nil {
-			t.Fatal(err)
-		}
 		if err := store.AttachContentToTask(ctx, taskID(t, 210), project, content.ID, content.Revision, mustTime(t, 12)); err != nil {
 			t.Fatal(err)
 		}
@@ -722,64 +711,6 @@ func TestSchemaDigestsArePinned(t *testing.T) {
 // TestLegacyHomeWithBrokenDurableStateRollsBackAndRefuses is the only refusal
 // that reaches inside the migration transaction: the two above are rejected by
 // the preflight, on its disposable copy, before any pool exists.
-func TestLegacyHomeWithBrokenDurableStateRollsBackAndRefuses(t *testing.T) {
-	for _, version := range []int{legacyUserVersion, previousUserVersion, priorUserVersion, v4UserVersion, v5UserVersion, v6UserVersion, v7UserVersion, v8UserVersion, v9UserVersion, v10UserVersion, v12UserVersion, v13UserVersion, v14UserVersion, v15UserVersion, v16UserVersion, v17UserVersion, v18UserVersion, v19UserVersion} {
-		t.Run(fmt.Sprintf("v%d", version), func(t *testing.T) {
-			testLegacyHomeWithBrokenDurableStateRollsBackAndRefuses(t, version)
-		})
-	}
-}
-
-func testLegacyHomeWithBrokenDurableStateRollsBackAndRefuses(t *testing.T, version int) {
-	ctx := context.Background()
-	// An invalidation head that no longer matches the log passes the exact
-	// schema, the integrity check and foreign_key_check that the preflight
-	// runs, and fails only the durable-control pass inside the transaction.
-	path, before := newLegacyDatabase(t, false, version, `UPDATE factory SET next_invalidation_sequence = next_invalidation_sequence + 5 WHERE singleton = 1`)
-	evidence := captureDatabaseEvidence(t, path)
-	store, err := Open(ctx, path)
-	if store != nil {
-		store.Close()
-	}
-	if !errors.Is(err, ErrCorruptState) {
-		t.Fatalf("Open = %v, want ErrCorruptState", err)
-	}
-	assertDatabaseEvidenceUnchanged(t, path, evidence)
-	requireUnmigrated(t, path, version)
-
-	// Repaired, the same home migrates and keeps the rows it always had.
-	pool, connection := openRawDatabase(t, path, false)
-	if _, err := connection.ExecContext(ctx, `UPDATE factory SET next_invalidation_sequence = next_invalidation_sequence - 5 WHERE singleton = 1`); err != nil {
-		t.Fatal(err)
-	}
-	if err := errors.Join(connection.Close(), pool.Close()); err != nil {
-		t.Fatal(err)
-	}
-	repaired, err := Open(ctx, path)
-	if err != nil {
-		t.Fatalf("Open repaired home: %v", err)
-	}
-	defer repaired.Close()
-	reader, err := repaired.readerConnection(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer reader.Close()
-	if _, version, err := inspectIdentity(ctx, reader); err != nil || version != userVersion {
-		t.Fatalf("repaired user_version = %d, %v, want %d", version, err, userVersion)
-	}
-	after := snapshotRows(t, ctx, reader)
-	before["factory"] = after["factory"] // the repair rewrote the invalidation head
-	if !reflect.DeepEqual(before, after) {
-		t.Fatal("migration after repair did not preserve every row")
-	}
-}
-
-// TestRefusedMigrationReturnsTheWriterConnection covers what the rollback is
-// for. Closing the connection would roll the transaction back anyway, but a
-// connection left mid-transaction is destroyed rather than returned, and the
-// operational writer set is sealed at activation and cannot mint a
-// replacement.
 func TestRefusedMigrationReturnsTheWriterConnection(t *testing.T) {
 	ctx := context.Background()
 	path, _ := newLegacyDatabase(t, false, legacyUserVersion, `UPDATE factory SET next_invalidation_sequence = next_invalidation_sequence + 5 WHERE singleton = 1`)

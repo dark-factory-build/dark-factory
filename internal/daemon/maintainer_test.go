@@ -1,5 +1,3 @@
-//go:build darwin || linux
-
 package daemon
 
 import (
@@ -155,17 +153,6 @@ func TestMaintainerAcceptsAndDropsClientMeta(t *testing.T) {
 	_, canonical, err := decodeMaintainerToolCall(json.RawMessage(`{` + meta + `,"name":"list_issues","arguments":{"repository":"team/repo","page":1}}`))
 	if err != nil || string(canonical) != `{"name":"list_issues","arguments":{"page":1,"repository":"team/repo"}}` {
 		t.Fatalf("forwarded params = %s %v, want _meta dropped", canonical, err)
-	}
-}
-
-func TestConnectRefusesLegacyOverseerBeforeCredentialActivation(t *testing.T) {
-	fixture := newDispatchFixture(t)
-	prepareActiveAttemptInProject(t, fixture, 170, testID(170), "orchestrator")
-	// This durable attempt is deliberately absent from the live registry.
-	fixture.daemon.github = &maintainer.Host{}
-	result := fixture.daemon.GitHubConnection(context.Background(), api.GitHubConnectionInput{Action: "connect"})
-	if result.State != "legacy_overseers_running" || fixture.daemon.github.CustomerMode() {
-		t.Fatalf("legacy transition = %+v", result)
 	}
 }
 

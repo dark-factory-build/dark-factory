@@ -1,5 +1,3 @@
-//go:build darwin || linux
-
 package daemon
 
 import (
@@ -523,7 +521,7 @@ func customerMode(t *testing.T, fixture *dispatchFixture) {
 	fixture.daemon.github = host
 }
 
-// The merge stage is dormant on a legacy home: the tick does not route a
+// The merge stage is dormant on an unconnected home: the tick does not route a
 // review_pr result, and startup routes it as before but does not observe an
 // enqueued head. On the factoryd Maintainer path both advance.
 func TestMergeStageRunsOnlyOnTheCustomerPath(t *testing.T) {
@@ -683,5 +681,23 @@ func TestStuckEnqueueEscalatesOnceAndKeepsResuming(t *testing.T) {
 	}
 	if op := tick(3 * time.Minute); op.State != "enqueuing" || !strings.Contains(op.Escalation, "401 #2") || backend.observeFailures != 4 {
 		t.Fatalf("stuck write re-escalated or stopped resuming: %+v (observes %d)", op, backend.observeFailures-1)
+	}
+}
+
+// A pull request no factory task published (a host or human author's) keeps
+// its REQUEST_CHANGES on GitHub: it is neither sent back nor escalated.
+func TestRequestChangesOnAPullNoTaskPublishedIsNotEscalated(t *testing.T) {
+	fixture, project, _, settle := publishedTask(t)
+	settle()
+	customerMode(t, fixture)
+	ctx := context.Background()
+	fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return &publicReviewBackend{requestChanges: true} }
+	request := publishedReviewRequest()
+	request.PullNumber = 99
+	if _, err := reviewNow(ctx, fixture.daemon, project, request); err != nil {
+		t.Fatal(err)
+	}
+	if op := lastDurableReview(t, fixture.store, project); op.State != "completed" || op.RoutePending || op.Escalation != "" {
+		t.Fatalf("host pull operation = %+v", op)
 	}
 }

@@ -1,5 +1,3 @@
-//go:build darwin || linux
-
 package daemon
 
 import (
@@ -42,5 +40,17 @@ func createTestStore(ctx context.Context, path string, config kernel.FactoryConf
 	} else if info.Size() != int64(len(image)) {
 		return nil, io.ErrShortWrite
 	}
-	return kernel.Open(ctx, path)
+	return openTestStore(ctx, path)
+}
+
+func openTestStore(ctx context.Context, path string) (*kernel.Store, error) {
+	home, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return nil, err
+	}
+	database, err := os.Open(path)
+	if err != nil {
+		return nil, errors.Join(err, home.Close())
+	}
+	return kernel.OpenOperational(ctx, path, home, database)
 }

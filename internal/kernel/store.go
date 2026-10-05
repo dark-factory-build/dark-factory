@@ -204,9 +204,10 @@ func taskCreationReplay(ctx context.Context, connection *sql.Conn, spec NewTask)
 	if prerequisiteCount != len(spec.Prerequisites) || conflictPathCount != len(spec.ConflictPaths) {
 		return Task{}, false, ErrConflict
 	}
+	// A pin only moves forward along its producer (carryPrerequisites).
 	for _, prerequisite := range spec.Prerequisites {
 		var found int
-		if err := connection.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM task_prerequisites WHERE task_id = ? AND upstream_task_id = ? AND upstream_work_revision = ?)`, spec.ID.Bytes(), prerequisite.TaskID.Bytes(), prerequisite.WorkRevision.Int64()).Scan(&found); err != nil || found == 0 {
+		if err := connection.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM task_prerequisites WHERE task_id = ? AND upstream_task_id = ? AND upstream_work_revision >= ?)`, spec.ID.Bytes(), prerequisite.TaskID.Bytes(), prerequisite.WorkRevision.Int64()).Scan(&found); err != nil || found == 0 {
 			if err == nil {
 				err = ErrConflict
 			}

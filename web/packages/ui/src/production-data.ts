@@ -10,8 +10,8 @@ export type ProductionRecord = {
   observed_at: number; links_overflow?: boolean; document: Record<string, unknown>; tasks: string[]; missions: string[];
 };
 
-/** One bounded local read for scene and inspector. External observation belongs
- * to the existing host controller; neither sprites nor panels poll GitHub. */
+/** One bounded local read for scene and inspector. Neither sprites nor panels
+ * poll GitHub. */
 export function useProduction(projects: readonly string[], call: ProjectContentCall | undefined) {
   const [runtime, setRuntime] = useState<RuntimeBuild>();
   const [release, setRelease] = useState<PublishedRelease>();

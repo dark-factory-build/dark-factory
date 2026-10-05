@@ -46,13 +46,12 @@ function LibraryDocuments({ state, call, draft, projectID, board = false, entity
   const [selected, setSelected] = useState<RecordValue>();
   const [loaded, setLoaded] = useState(false);
   const [body, setBody] = useState(""), [bodyNext, setBodyNext] = useState<number>(0), [complete, setComplete] = useState(false);
-  const [evidence, setEvidence] = useState<RecordValue[]>([]), [evidenceNext, setEvidenceNext] = useState(0);
   const [replies, setReplies] = useState<RecordValue[]>([]), [replyNext, setReplyNext] = useState(0);
   const [accesses, setAccesses] = useState<RecordValue[]>([]), [accessNext, setAccessNext] = useState(0);
   const [pending, setPending] = useState(false), [error, setError] = useState(""), [notice, setNotice] = useState("");
   const [editing, setEditing] = useState(false), [newKind, setNewKind] = useState(""), [seed, setSeed] = useState<RecordValue>({});
   const [filters, setFilters] = useState({ query: "", repository_id: repository, branch: "", environment: "", kind: board ? "discussion" : "", entity });
-  const epoch = useRef(0), newID = useRef(""), evidenceID = useRef(id()), listQuery = useRef<ProjectContentInput>({});
+  const epoch = useRef(0), newID = useRef(""), listQuery = useRef<ProjectContentInput>({});
   const [showResolved, setShowResolved] = useState(false);
   const [sourceFilters, setSourceFilters] = useState(false);
   const [panel, setPanel] = useState("read");
@@ -81,8 +80,8 @@ function LibraryDocuments({ state, call, draft, projectID, board = false, entity
     setNext(Number(result.next_offset ?? 0)); setLoaded(true);
   };
   const selectRevision = (value: RecordValue, loadedBody?: string) => {
-    evidenceID.current = id(); setPanel("read");
-    setSelected(value); setBody(loadedBody ?? ""); setBodyNext(0); setComplete(loadedBody !== undefined); setEvidence([]); setEvidenceNext(0); setReplies([]); setReplyNext(0); setAccesses([]); setAccessNext(0); setEditing(false);
+    setPanel("read");
+    setSelected(value); setBody(loadedBody ?? ""); setBodyNext(0); setComplete(loadedBody !== undefined); setReplies([]); setReplyNext(0); setAccesses([]); setAccessNext(0); setEditing(false);
   };
   const read = async (contentID: string, revision?: number) => {
     const generation = epoch.current;
@@ -106,14 +105,14 @@ function LibraryDocuments({ state, call, draft, projectID, board = false, entity
     if (generation !== epoch.current) return;
     setBody((value) => offset === 0 ? text(result.body) : value + text(result.body)); setComplete(result.complete === true); setBodyNext(Number(result.next_offset ?? 0));
   };
-  const loadRelated = async (type: "evidence_list" | "accesses" | "search", offset = 0, content = selected) => {
+  const loadRelated = async (type: "accesses" | "search", offset = 0, content = selected) => {
     if (!content) return;
     const source = knowledgeMetadata(content.source_references);
     const generation = epoch.current;
-    const result = await request(type, type === "search" ? { repository_id: text(content.repository_id) || filters.repository_id, branch: text(source.branch), environment: text(source.environment), thread_id: content.id, kind: "discussion_reply", offset, limit: 4 } : type === "accesses" ? { id: content.id, revision: content.revision, offset, limit: 4 } : { content_id: content.id, content_revision: content.revision, offset, limit: 1 });
+    const result = await request(type, type === "search" ? { repository_id: text(content.repository_id) || filters.repository_id, branch: text(source.branch), environment: text(source.environment), thread_id: content.id, kind: "discussion_reply", offset, limit: 4 } : { id: content.id, revision: content.revision, offset, limit: 4 });
     if (generation !== epoch.current) return;
-    (type === "search" ? setReplies : type === "accesses" ? setAccesses : setEvidence)(rows(result.items));
-    (type === "search" ? setReplyNext : type === "accesses" ? setAccessNext : setEvidenceNext)(Number(result.next_offset ?? 0));
+    (type === "search" ? setReplies : setAccesses)(rows(result.items));
+    (type === "search" ? setReplyNext : setAccessNext)(Number(result.next_offset ?? 0));
   };
   const begin = (kind: string, details: RecordValue = {}) => { newID.current = id(); setNewKind(kind); setSeed({ ...details, ...(kind === "discussion" ? {} : { resolved: false, pinned: false }) }); setPanel("read"); setEditing(true); };
   const updateThread = async (changes: RecordValue) => {
@@ -163,7 +162,6 @@ function LibraryDocuments({ state, call, draft, projectID, board = false, entity
           <button type="button" aria-pressed={panel === "read"} onClick={() => setPanel("read")}>Read</button>
           <button type="button" aria-pressed={panel === "sources"} onClick={() => setPanel("sources")}>Sources &amp; revisions</button>
           <button type="button" aria-pressed={panel === "accesses"} onClick={() => { setPanel("accesses"); void run(() => loadRelated("accesses")); }}>Task access</button>
-          <button type="button" aria-pressed={panel === "tests" || panel === "evidence"} onClick={() => { setPanel("tests"); void run(() => loadRelated("evidence_list")); }}>Test results</button>
         </nav>
         {!complete && selected.revision === selected.latest_revision && selected.kind !== "discussion_reply" ? <p>Read the remaining text before editing this revision.</p> : null}
         <div className="dfProjectLibrary__workspace">
@@ -207,16 +205,7 @@ function LibraryDocuments({ state, call, draft, projectID, board = false, entity
         {accesses.map((item, index) => <p key={index}>Revision {String(item.content_revision ?? item.revision)} · {text(item.kind) || text(item.access_kind)} · Task {text(item.task_id)} · Run {text(item.run_id)} · Bytes {String(item.offset ?? 0)}–{Number(item.offset ?? 0) + Number(item.byte_length ?? 0)} · {String(item.created_at_ms ?? item.at_ms ?? "")}</p>)}
         {accessNext === 0 ? null : <button type="button" onClick={() => void run(() => loadRelated("accesses", accessNext))}>More task access</button>}
         {!pending && !error && accesses.length === 0 ? <p>No task access recorded.</p> : null}</>}
-        {panel !== "tests" ? null : <><h4>Test results</h4><button type="button" onClick={() => setPanel("evidence")}>Record a test result</button>
-        {evidence.map((item) => <article key={text(item.id)}><p>{text(item.result)} · {text(item.judgment)}</p><p>Source: {text(item.tested_source)} · Environment: {text(item.environment)}</p><p>Evidence: {text(item.location)} · Evaluator: {text(item.evaluator)}</p></article>)}
-        {evidenceNext === 0 ? null : <button type="button" onClick={() => void run(() => loadRelated("evidence_list", evidenceNext))}>Next evidence</button>}
-        {!pending && !error && evidence.length === 0 ? <p>No test results recorded.</p> : null}</>}
-        {panel !== "evidence" ? null : <>
-        <h4>Record a test result</h4><form aria-label="Record a test result" onSubmit={(event) => { event.preventDefault(); const data = new FormData(event.currentTarget); void run(async () => { await request("evidence", { id: evidenceID.current, content_id: selected.id, content_revision: selected.revision, tested_source: data.get("tested_source"), environment: data.get("environment"), result: data.get("result"), location: data.get("location"), judgment: data.get("judgment") }); evidenceID.current = id(); setPanel("tests"); await loadRelated("evidence_list"); setNotice("Test result saved."); }); }}>
-          <label>Tested source <input name="tested_source" autoFocus required /></label><label>Environment <input name="environment" required /></label><label>Observed result <select name="result"><option>passed</option><option>failed</option><option>incomplete</option><option>not_run</option></select></label><label>Existing report or result reference <input name="location" required /></label><label>Judgment <textarea name="judgment" /></label><button>Record observation</button>
-        </form>
-        </>}
-        {["attach", "draft", "evidence"].includes(panel) ? <button type="button" onClick={() => setPanel("read")}>Cancel</button> : null}
+        {["attach", "draft"].includes(panel) ? <button type="button" onClick={() => setPanel("read")}>Cancel</button> : null}
         </div>
       </section>}
       {!editing ? null : <form aria-label="Knowledge editor" key={newKind ? newID.current : `${selected?.id}:${selected?.revision}`} onSubmit={(event) => {

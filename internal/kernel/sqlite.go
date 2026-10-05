@@ -61,52 +61,6 @@ func openFixedPools(ctx context.Context, store *Store, path string, recheck func
 	return nil
 }
 
-func openPools(path string) (*Store, error) {
-	writer, err := openPool(path, 1)
-	if err != nil {
-		return nil, err
-	}
-	readers, err := openPool(path, maxReaders)
-	if err != nil {
-		return nil, errors.Join(err, writer.Close())
-	}
-	writerGate := make(chan struct{}, 1)
-	writerGate <- struct{}{}
-	store := &Store{writer: writer, readers: readers, writerGate: writerGate}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Duration(busyMilliseconds)*time.Millisecond)
-	defer cancel()
-	writerConnection, err := store.writerConnection(ctx)
-	if err != nil {
-		return nil, errors.Join(err, store.Close())
-	}
-	if err := writerConnection.Close(); err != nil {
-		return nil, errors.Join(fmt.Errorf("return initial writer connection: %w", err), store.Close())
-	}
-	readerConnection, err := store.readerConnection(ctx)
-	if err != nil {
-		return nil, errors.Join(err, store.Close())
-	}
-	if err := readerConnection.Close(); err != nil {
-		return nil, errors.Join(fmt.Errorf("return initial reader connection: %w", err), store.Close())
-	}
-	return store, nil
-}
-
-func openPool(path string, limit int) (*sql.DB, error) {
-	pool, err := sql.Open(driverName, configuredDataSource(path))
-	if err != nil {
-		return nil, fmt.Errorf("open sqlite pool: %w", err)
-	}
-	pool.SetMaxOpenConns(limit)
-	pool.SetMaxIdleConns(limit)
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Duration(busyMilliseconds)*time.Millisecond)
-	defer cancel()
-	if err := pool.PingContext(ctx); err != nil {
-		return nil, errors.Join(fmt.Errorf("initialize sqlite pool: %w", err), pool.Close())
-	}
-	return pool, nil
-}
-
 var errConnectionSetExhausted = fmt.Errorf("%w: retained sqlite connection set is exhausted", ErrCorruptState)
 
 // sqliteConnectHook is package-local deterministic fault instrumentation. It

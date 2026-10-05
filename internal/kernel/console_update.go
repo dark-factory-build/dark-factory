@@ -343,6 +343,11 @@ func (store *Store) updateTask(ctx context.Context, digest *AttemptDigest, id Ta
 	if err := requireOneRow(result, err); err != nil {
 		return Task{}, tx.Rollback(err)
 	}
+	if retire {
+		if err := carryPrerequisites(ctx, tx.connection, task, task.WorkRevision.Int64()+1); err != nil {
+			return Task{}, tx.Rollback(err)
+		}
+	}
 	if err := appendInvalidations(ctx, tx.connection, at, []pendingInvalidation{{kind: EntityTask, id: id.Bytes(), revision: expected.Int64() + 1}}); err != nil {
 		return Task{}, tx.Rollback(err)
 	}

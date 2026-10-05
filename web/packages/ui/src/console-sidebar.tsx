@@ -873,8 +873,8 @@ function GitHubSection({ github, onGitHub }: { github?: FactoryGitHubView; onGit
   const visibleRepositories = loadedRepositories !== undefined && loadedRepositories.installationID === installationID ? loadedRepositories.value : undefined;
   const load = (request: GitHubConnectionBody) => { if (!busy) onGitHub?.(request); };
   const connected = status === "connected";
-  const canConnect = status === "disconnected" || status === "pending" || status === "awaiting_confirmation" || status === "disconnect_pending" || status === "denied" || status === "unavailable" || status === "invalid" || status === "already_connected" || status === "legacy_overseers_running" || github?.error !== undefined;
-  const recoveryAction = status === "disconnected" ? connectionID === "" ? "connect" : "disconnect" : status === "pending" || status === "awaiting_confirmation" || status === "disconnect_pending" || status === "denied" || status === "legacy_overseers_running" && connectionID !== "" ? "disconnect" : status === "legacy_overseers_running" ? "connect" : "refresh";
+  const canConnect = status === "disconnected" || status === "pending" || status === "awaiting_confirmation" || status === "disconnect_pending" || status === "denied" || status === "unavailable" || status === "invalid" || status === "already_connected" || github?.error !== undefined;
+  const recoveryAction = status === "disconnected" ? connectionID === "" ? "connect" : "disconnect" : status === "pending" || status === "awaiting_confirmation" || status === "disconnect_pending" || status === "denied" ? "disconnect" : "refresh";
   useEffect(() => {
     if (connectionID !== previousConnectionID.current) {
       previousConnectionID.current = connectionID;
@@ -903,7 +903,6 @@ function GitHubSection({ github, onGitHub }: { github?: FactoryGitHubView; onGit
   return <section className="dfConsoleSidebar__section" aria-label="GITHUB SETTINGS">
     <h3>GITHUB</h3>
     <p className="dfConsoleSidebar__inherit">{status.toUpperCase().replaceAll("_", " ")}</p>
-    {status === "legacy_overseers_running" ? <p className="dfFactoryConsole__terminalError" role="alert">Stop the legacy controller and review runs before connecting.</p> : null}
     {status === "denied" ? <p className="dfFactoryConsole__terminalError" role="alert">Access expired or was denied. Reconnect GitHub.</p> : null}
     {status === "unavailable" ? <p className="dfFactoryConsole__terminalError" role="alert">GitHub is unavailable. Try again.</p> : null}
     {github?.error === undefined ? null : <p className="dfFactoryConsole__terminalError" role="alert">GITHUB SETTINGS UNAVAILABLE · {github.error.toUpperCase()}</p>}

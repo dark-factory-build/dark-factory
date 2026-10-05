@@ -232,7 +232,7 @@ test("reader keeps named actions visible and opens one workspace at a time", asy
   await click(renderer, "Deployment guide");
   const reader = renderer.root.findByProps({ "aria-label": "Selected library revision" });
   assert.match(visibleWords(reader), /Deployment guide.*Revision.*current.*Useful deployment steps/);
-  assert.match(visibleWords(reader), /Edit document.*Retire document.*Attach to a task.*Sources & revisions.*Task access.*Test results/);
+  assert.match(visibleWords(reader), /Edit document.*Retire document.*Attach to a task.*Sources & revisions.*Task access/);
   assert.doesNotMatch(visibleWords(reader), /opaque|Repository|Attach revision|unspecified|Manage/);
   assert.equal(renderer.root.findAllByType("details").length, 0);
   assert.equal(renderer.root.findByProps({ type: "search" }).parent.type, "label", "search is visible at entry");
@@ -241,10 +241,8 @@ test("reader keeps named actions visible and opens one workspace at a time", asy
   assert.equal(reader.findAllByType("pre").length, 0, "form replaces the body rather than stacking below it");
   await click(renderer, "Cancel");
   assert.deepEqual(reader.findByType("pre").children, ["Useful deployment steps."]);
-  await click(renderer, "Test results"); await click(renderer, "Record a test result");
-  assert.equal(reader.findAllByType("pre").length, 0);
-  assert.ok(renderer.root.findByProps({ "aria-label": "Record a test result" }));
   await click(renderer, "Sources & revisions");
+  assert.equal(reader.findAllByType("pre").length, 0);
   assert.equal(renderer.root.findAllByProps({ "aria-label": "Record a test result" }).length, 0);
   const sources = reader;
   assert.match(words(sources), /Revision 3.*opaque-author/);

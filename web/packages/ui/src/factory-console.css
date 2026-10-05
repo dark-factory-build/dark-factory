@@ -1254,7 +1254,4 @@ summary.dfConsoleItem__summary { cursor: pointer; }
 .dfOutcomes__prose { white-space: pre-wrap; }
 .dfOutcomes__meta { color: var(--df-console-muted); }
 .dfOutcomes__reference { border-top: 1px solid var(--df-console-rule); padding-block: .5rem; }
-.dfOutcomes__table { overflow-x: auto; }
-.dfOutcomes__table table { width: 100%; border-collapse: collapse; font-size: .85rem; }
-.dfOutcomes__table :is(th, td) { text-align: left; vertical-align: top; border-bottom: 1px solid var(--df-console-rule); padding: .6rem; }
 @media (max-width: 640px) { .dfOutcomes__list button { flex-direction: column; gap: .5rem; } }

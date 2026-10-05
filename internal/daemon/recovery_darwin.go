@@ -444,7 +444,12 @@ func (daemon *Daemon) recoverAuthenticatedResult(ctx context.Context, parent *Ru
 func (daemon *Daemon) recoverWithoutResult(ctx context.Context, run kernel.Run, runnerProcess, providerProcess, providerGroup kernel.Resource) (RecoveredRunAction, error) {
 	acted := false
 	if run.Phase == kernel.RunAdmitted || run.Phase == kernel.RunRunning {
-		failure, err := kernel.NewFailureProposal(kernel.FailureInternal, "recovered active attempt without an attempt result")
+		code, detail := kernel.FailureInternal, "recovered active attempt without an attempt result"
+		if run.Phase == kernel.RunAdmitted {
+			// It never started (a release restart can land here): requeue it.
+			code, detail = kernel.FailureProtocol, kernel.NeverStartedRunDetail
+		}
+		failure, err := kernel.NewFailureProposal(code, detail)
 		if err != nil {
 			return RecoveredUncertain, err
 		}

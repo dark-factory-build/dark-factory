@@ -166,7 +166,7 @@ func TestAttachmentCleanupAndCompactionPreserveHistory(t *testing.T) {
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
-	store, err = openOperationalTestStore(path)
+	store, err = Open(context.Background(), path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -182,7 +182,7 @@ func TestAttachmentCleanupAndCompactionPreserveHistory(t *testing.T) {
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
-	store, err = openOperationalTestStore(path)
+	store, err = Open(context.Background(), path)
 	if err != nil {
 		t.Fatal(err)
 	}

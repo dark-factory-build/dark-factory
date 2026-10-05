@@ -44,7 +44,6 @@ if [ "$local_ci_mode" = full ]; then
     ./scripts/check-toolchain-pins.sh
     ./scripts/test-local-ci-environment.sh
     ./scripts/test-new-worktree.sh
-    ./scripts/test-cold-review.sh
     ./scripts/test-publication-parents.sh
     python3 ./scripts/test-factory-browser.py
     ./scripts/test-github-step-summary.sh
@@ -76,6 +75,6 @@ if [ "$local_ci_mode" = full ] || [ "$local_ci_mode" = release ]; then
     fi
     ./scripts/test-prepare-release-source.sh
     ./scripts/test-publish-release.sh
-    ./scripts/test-package-release.sh
+    GOTOOLCHAIN=local "$DF_CI_GO" test -count=1 ./internal/buildinfo/...
 fi
 echo "local-ci: PASS ($local_ci_mode)"

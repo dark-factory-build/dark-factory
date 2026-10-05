@@ -95,12 +95,6 @@ func TestKnowledgeAuthorityScopeAndImmutableThreads(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.ListContentEvidenceForAttempt(ctx, run.CredentialDigest, foreign.ID, foreignRevision.Revision, 0, 4); !errors.Is(err, ErrUnauthorized) {
-		t.Fatalf("foreign evidence read: %v", err)
-	}
-	if _, err := store.CreateContentEvidenceForAttempt(ctx, run.CredentialDigest, NewContentEvidence{ProjectID: run.ProjectID, ContentID: foreign.ID, ContentRevision: foreignRevision.Revision}, mustTime(t, 46)); !errors.Is(err, ErrUnauthorized) {
-		t.Fatalf("foreign evidence write: %v", err)
-	}
 	if _, err := store.ContentForAttempt(ctx, run.CredentialDigest, foreign.ID, 1); !errors.Is(err, ErrUnauthorized) {
 		t.Fatalf("repository read: %v", err)
 	}

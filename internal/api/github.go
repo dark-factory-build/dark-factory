@@ -1,5 +1,3 @@
-//go:build darwin || linux
-
 package api
 
 import (
@@ -72,7 +70,7 @@ func (client *OperatorClient) GitHubConnection(ctx context.Context, input GitHub
 		return GitHubConnectionResult{}, err
 	}
 	switch result.State {
-	case "ok", "denied", "unavailable", "invalid", "already_connected", "legacy_overseers_running":
+	case "ok", "denied", "unavailable", "invalid", "already_connected":
 		return result, nil
 	default:
 		return GitHubConnectionResult{}, ErrProtocol

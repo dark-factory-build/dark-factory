@@ -90,10 +90,11 @@ granted the repository's Git directory read-only; they do not receive the
 daemon database, the Changes parent, or the daemon home. A later work
 revision or Change revision, or a branch that moved since settlement, is
 refused.
-overseer publishes through the Maintainer App. A Claude Code orchestrator is launched
-with that App's MCP bridge, `dark-factory-maintainer-mcp-bridge` resolved on
-the fixed tool path, beside the same `factory_attempt` server (`factoryctl
-attempt mcp`) a Codex orchestrator already has. A Claude Code worker is launched
+overseer publishes through the Maintainer App. On a GitHub-connected home an
+orchestrator of either provider is launched with factoryd's Maintainer server
+(`factoryctl attempt maintainer-mcp`) beside its `factory_attempt` server
+(`factoryctl attempt mcp`); an unconnected home's orchestrator has no
+Maintainer server. A Claude Code worker is launched
 with `--strict-mcp-config` and exactly one factory-control MCP server,
 `factory_attempt` (`factoryctl attempt mcp`). If the optional installed
 browser bridge is present, the worker also receives `factory_browser`; it is a
@@ -268,7 +269,7 @@ refuses unrecognized configuration rather than silently ignoring it. Account
 configuration and explicit model/effort choices remain intact. Network access
 is retained; this is a local-command filesystem boundary, not a network policy
 or a sandbox for the provider process or MCP servers. Factory Codex launches
-and cold reviews disable Codex computer use, browser use and inherited plugins:
+and factoryd's reviewer disable Codex computer use, browser use and inherited plugins:
 plugins can start desktop helpers even when the two built-in tools are disabled.
 This does not modify the operator's personal Codex configuration. Explicit MCP
 servers, including the Maintainer bridge, remain separate capabilities.
@@ -296,7 +297,7 @@ xcrun cache and Go telemetry warn that they cannot write outside the grants. A C
 Interactive Codex workers override `notify=[]` so a personal notification command
 cannot launch desktop helpers. They retain account configuration and authentication
 through the selected `CODEX_HOME`; this is not blanket configuration isolation.
-The exec-only `--ignore-user-config` flag remains confined to cold reviews.
+The exec-only `--ignore-user-config` flag remains confined to factoryd's reviewer.
 Factory-owned MCP servers and command permissions are supplied explicitly at launch.
 
 ## Run-scoped browser tools

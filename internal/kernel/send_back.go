@@ -14,7 +14,7 @@ import (
 // carries the worker's Change wins over the overseer's that published it. The
 // operation/head marker in the retained feedback makes response loss and
 // daemon restart idempotent. A pull request that has moved past head reports
-// ErrSuperseded.
+// ErrSuperseded; one no factory task published reports ErrNotFound.
 func (store *Store) SendBackPublishedReview(ctx context.Context, project ProjectID, repository string, pull uint64, operationID, head, note string, at UnixMillis) (Task, error) {
 	if project.zero() || !productionRepository.MatchString(repository) || pull == 0 || !validOutcomeText(operationID, 128) || !productionSHA(head) || byteLen(note) < 1 || byteLen(note) > MaxSendBackNoteBytes-160 {
 		return Task{}, fmt.Errorf("%w: invalid published review send-back", ErrInvalidValue)
@@ -47,7 +47,7 @@ func (store *Store) SendBackPublishedReview(ctx context.Context, project Project
 	task, found, err := taskByID(ctx, tx.connection, taskID)
 	if err != nil || !found {
 		if err == nil {
-			err = ErrNotFound
+			err = ErrCorruptState
 		}
 		return Task{}, tx.Rollback(err)
 	}
@@ -329,6 +329,9 @@ func (store *Store) retryTask(ctx context.Context, digest *AttemptDigest, id Tas
 	if err := requireOneRow(result, err); err != nil {
 		return Task{}, tx.Rollback(err)
 	}
+	if err := carryPrerequisites(ctx, tx.connection, task, next); err != nil {
+		return Task{}, tx.Rollback(err)
+	}
 	if err := appendInvalidations(ctx, tx.connection, at, []pendingInvalidation{{kind: EntityTask, id: id.Bytes(), revision: expected.Int64() + 1}}); err != nil {
 		return Task{}, tx.Rollback(err)
 	}
@@ -396,6 +399,11 @@ func sendBackTask(ctx context.Context, connection *sql.Conn, task Task, note str
 	if err := requireOneRow(result, err); err != nil {
 		return Task{}, err
 	}
+	if task.Status != TaskSucceeded {
+		if err := carryPrerequisites(ctx, connection, task, next); err != nil {
+			return Task{}, err
+		}
+	}
 	if err := appendInvalidations(ctx, connection, at, []pendingInvalidation{{kind: EntityTask, id: task.ID.Bytes(), revision: task.Revision.Int64() + 1}}); err != nil {
 		return Task{}, err
 	}
@@ -407,4 +415,12 @@ func sendBackTask(ctx context.Context, connection *sql.Conn, task Task, note str
 		return Task{}, err
 	}
 	return updated, nil
+}
+
+// carryPrerequisites moves consumers still waiting on a producer revision that
+// ended without success to the producer's next revision. Only a success can be
+// superseded, so a requeue, retry or send-back never strands a consumer.
+func carryPrerequisites(ctx context.Context, connection *sql.Conn, producer Task, next int64) error {
+	_, err := connection.ExecContext(ctx, `UPDATE task_prerequisites SET upstream_work_revision = ? WHERE upstream_task_id = ? AND upstream_work_revision = ? AND consumed_run_id IS NULL`, next, producer.ID.Bytes(), producer.WorkRevision.Int64())
+	return err
 }
