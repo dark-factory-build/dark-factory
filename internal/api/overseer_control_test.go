@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/dark-factory-build/dark-factory/internal/kernel"
 )
 
 func TestOverseerControlMethodsRemainAttemptScoped(t *testing.T) {
@@ -104,7 +106,7 @@ func TestOverseerSnapshotPagesFitTheResponseFrameAfterEscaping(t *testing.T) {
 	project := strings.Repeat("1", 32)
 	for _, selected := range []bool{false, true} {
 		snapshot := OverseerSnapshot{ProjectID: project, Head: 1, Agents: []AgentSummary{}, Tasks: []OverseerTask{}, Runs: []OverseerRun{}, Questions: []OverseerQuestion{}, History: []OverseerIntervention{}, Handoffs: []RetainedChangeHandoff{}}
-		for index := 0; index < 4; index++ {
+		for index := 0; index < kernel.OverseerSnapshotPageSize; index++ {
 			id := fmt.Sprintf("%032x", index+2)
 			snapshot.Agents = append(snapshot.Agents, AgentSummary{ID: id, ProjectID: project, Name: strings.Repeat("<", 128), Role: "worker", Provider: "codex", Revision: 1})
 			snapshot.Runs = append(snapshot.Runs, OverseerRun{ID: id, AgentID: id, TaskID: id, Phase: "running", Revision: 1})
