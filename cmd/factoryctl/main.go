@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"math/bits"
 	"net"
 	"os"
 	"path/filepath"
@@ -2034,7 +2035,7 @@ func usageFailure(stderr io.Writer, args []string, accepts func([]string) bool) 
 func usageProblem(spec, args []string, start int, accepts func([]string) bool) (int, string) {
 	type slot struct {
 		name, placeholder       string
-		group                   int
+		groups                  []int
 		required, repeat, value bool
 	}
 	flags, slots := map[string]*slot{}, []*slot{}
@@ -2057,9 +2058,10 @@ func usageProblem(spec, args []string, start int, accepts func([]string) bool) (
 			last.repeat = true
 		case strings.HasPrefix(field, "--"):
 			if flags[field] == nil {
-				flags[field] = &slot{name: field, group: groups[len(groups)-1], required: len(groups) == 1 && !alternative}
+				flags[field] = &slot{name: field, required: len(groups) == 1 && !alternative}
 				slots = append(slots, flags[field])
 			}
+			flags[field].groups = append(flags[field].groups, groups[len(groups)-1])
 			last, alternative, pending = flags[field], false, true
 			continue
 		case pending:
@@ -2091,8 +2093,13 @@ func usageProblem(spec, args []string, start int, accepts func([]string) bool) (
 		}
 		seen[s] = true
 	}
+	// A flag in several brackets, like --head, requires nothing itself; a
+	// flag bracketed only in group g requires g's other flags.
+	exclusive := func(group int) bool {
+		return group != 0 && slices.ContainsFunc(slots, func(other *slot) bool { return seen[other] && slices.Equal(other.groups, []int{group}) })
+	}
 	for _, s := range slots {
-		if !seen[s] && (s.required || s.group != 0 && slices.ContainsFunc(slots, func(other *slot) bool { return other.group == s.group && seen[other] })) {
+		if !seen[s] && (s.required || slices.ContainsFunc(s.groups, exclusive)) {
 			return 1, "missing " + s.name
 		}
 	}
@@ -2119,28 +2126,40 @@ func usageProblem(spec, args []string, start int, accepts func([]string) bool) (
 		changed[index] = value
 		return changed
 	}
-	// Make every value a plausible sample; if one sample is wrong, try the
-	// others for one value at a time.
-	valid := slices.Clone(args)
+	// The fewest values that must change to make the line valid are the
+	// invalid ones; the rest keep what was typed. ponytail: subset search caps
+	// at 12 values (then the generic message); search greedily past that.
 	indexes := slices.Sorted(maps.Keys(values))
-	for _, index := range indexes {
-		valid[index] = samples(values[index].placeholder)[0]
-	}
-	for _, index := range indexes {
-		for _, sample := range samples(values[index].placeholder) {
-			if !accepts(valid) && accepts(with(valid, index, sample)) {
-				valid[index] = sample
+	var valid []string
+	var invalid []int
+	for size := 1; valid == nil && size <= len(indexes) && len(indexes) <= 12; size++ {
+		for mask := 1; valid == nil && mask < 1<<len(indexes); mask++ {
+			if bits.OnesCount(uint(mask)) != size {
+				continue
+			}
+			changed, chosen := slices.Clone(args), []int{}
+			for bit, index := range indexes {
+				if mask&(1<<bit) != 0 {
+					changed[index], chosen = samples(values[index].placeholder)[0], append(chosen, index)
+				}
+			}
+			for _, index := range chosen {
+				for _, sample := range samples(values[index].placeholder) {
+					if !accepts(changed) && accepts(with(changed, index, sample)) {
+						changed[index] = sample
+					}
+				}
+			}
+			if accepts(changed) {
+				valid, invalid = changed, chosen
 			}
 		}
 	}
-	if !accepts(valid) {
+	if valid == nil {
 		return 0, "invalid flag values or combination"
 	}
 	var problems []string
-	for _, index := range indexes {
-		if accepts(with(valid, index, args[index])) {
-			continue
-		}
+	for _, index := range invalid {
 		name, problem := values[index].name, "invalid "+values[index].name
 		if value, err := strconv.ParseInt(valid[index], 10, 64); err == nil {
 			const far = 1 << 61
@@ -2170,9 +2189,6 @@ func usageProblem(spec, args []string, start int, accepts func([]string) bool) (
 			}
 		}
 		problems = append(problems, problem)
-	}
-	if problems == nil {
-		return 0, "invalid flag combination"
 	}
 	return 0, strings.Join(problems, "; ")
 }
