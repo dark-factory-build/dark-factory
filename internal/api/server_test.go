@@ -934,7 +934,9 @@ func TestServerRechecksOperatorTokenAndKeepsPublicValuesPrivate(t *testing.T) {
 	if _, err := client.Write(request); err != nil {
 		t.Fatal(err)
 	}
-	if err := client.CloseWrite(); err != nil {
+	// The rejected request may close the peer before shutdown reaches the
+	// socket. Darwin reports that race as ENOTCONN.
+	if err := client.CloseWrite(); err != nil && !errors.Is(err, syscall.ENOTCONN) {
 		t.Fatal(err)
 	}
 	response, err := readTestFrame(client)
@@ -960,7 +962,7 @@ func TestServerRechecksOperatorTokenAndKeepsPublicValuesPrivate(t *testing.T) {
 	if _, err := attemptClient.Write(attemptRequest); err != nil {
 		t.Fatal(err)
 	}
-	if err := attemptClient.CloseWrite(); err != nil {
+	if err := attemptClient.CloseWrite(); err != nil && !errors.Is(err, syscall.ENOTCONN) {
 		t.Fatal(err)
 	}
 	attemptResponse, err := readTestFrame(attemptClient)
