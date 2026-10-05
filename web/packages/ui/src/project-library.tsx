@@ -184,7 +184,7 @@ function LibraryDocuments({ state, call, draft, projectID, board = false, entity
             <button type="button" disabled={!editable} onClick={() => void run(() => updateThread({ pinned: !metadata.pinned }))}>{metadata.pinned ? "Unpin discussion" : "Pin discussion"}</button>
           </div>
           {replies.map((reply) => <article className="dfProjectLibrary__reply" key={text(reply.id)}><p className="dfProjectLibrary__meta">{text(reply.author) || "Reply"} · Revision {String(reply.revision)}</p><pre>{text(reply.body)}</pre>{reply.complete ? null : <button type="button" onClick={() => void run(() => read(text(reply.id), Number(reply.revision)))}>Read full reply</button>}</article>)}{replyNext === 0 ? null : <button type="button" onClick={() => void run(() => loadRelated("search", replyNext))}>More replies</button>}
-          <form aria-label="Reply to discussion" onSubmit={(event) => {
+          <form key={text(selected.id)} aria-label="Reply to discussion" onSubmit={(event) => {
             event.preventDefault(); const form = event.currentTarget, reply = String(new FormData(form).get("reply") ?? "").trim();
             if (!reply) return;
             newID.current ||= id();

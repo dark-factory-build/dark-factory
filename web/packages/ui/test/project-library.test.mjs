@@ -391,3 +391,12 @@ test("a scheduled search cannot interrupt a document save", async t => {
   assert.equal(renderer.root.findAllByProps({ "aria-label": "Knowledge editor" }).length, 0);
   assert.match(words(renderer.root), /Saved\./);
 });
+
+test("reply drafts belong to the selected discussion", async t => {
+  const threads = ["First", "Second"].map((title, index) => ({ ...metadata, id: String(index), kind: "discussion", title }));
+  const renderer = await mount(t, { board: true, call: async (operation, input) => operation === "search" ? { items: input.thread_id ? [] : threads } : operation === "read" ? threads.find(thread => thread.id === input.id) : { body: "Thread", complete: true } });
+  await click(renderer, "First");
+  const draft = renderer.root.findByProps({ name: "reply" });
+  await click(renderer, "Second");
+  assert.notEqual(renderer.root.findByProps({ name: "reply" }), draft, "switching threads clears the previous uncontrolled draft");
+});
