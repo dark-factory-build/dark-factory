@@ -492,14 +492,16 @@ func (store *Store) RecordPublication(ctx context.Context, project ProjectID, ta
 	return tx.Commit(ctx)
 }
 
-// PublishableChange is a succeeded intake worker task's settled Change that no
-// pull request carries yet: factoryd publishes it itself.
+// PublishableChange is a succeeded intake worker task's settled Change that
+// factoryd publishes itself: as a new pull request, or, when Pull is set, as
+// the correction of the open pull request it published for that task.
 type PublishableChange struct {
 	Task       Task
 	Change     ChangeID
 	Revision   Revision
 	Base, Head string
 	Accepted   IntakeAcceptance
+	Pull       uint64
 }
 
 // factorydPublishesAcceptance is the invariant for intake work factoryd
@@ -520,22 +522,26 @@ func PublishFailureID(change ChangeID, revision Revision) string {
 }
 
 // PublishableChanges lists, oldest first, the current settled Changes of
-// succeeded tasks at work revision 1 (a correction is the overseer's) bound
-// to a live intake acceptance factoryd publishes, whose head differs from
-// their base, with no publication of that Change or task and no recorded
-// publish failure at that Change revision.
+// succeeded tasks bound to a live intake acceptance factoryd publishes, whose
+// head differs from their base, with no recorded publish failure at that
+// Change revision: at work revision 1 with no publication of that Change or
+// task, or above it settled since factoryd last published that Change on its
+// still-open pull request (publication_tasks.created_at_ms).
 func (store *Store) PublishableChanges(ctx context.Context) ([]PublishableChange, error) {
 	tx, err := store.beginRead(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Close()
-	rows, err := tx.connection.QueryContext(ctx, `SELECT c.id, c.task_id, c.revision, lower(hex(c.base_commit)), lower(hex(c.head_commit)) FROM changes c
+	rows, err := tx.connection.QueryContext(ctx, `SELECT c.id, c.task_id, c.revision, lower(hex(c.base_commit)), lower(hex(c.head_commit)), COALESCE(p.pull_number, 0) FROM changes c
 		JOIN tasks t ON t.id = c.task_id AND t.incarnation_id = c.task_incarnation_id
 		JOIN intake_task_bindings b ON b.task_id = c.task_id JOIN intake_acceptances a ON a.id = b.acceptance_id
-		WHERE c.phase = 'retained' AND t.status = 'succeeded' AND t.work_revision = 1 AND a.withdrawn_at_ms IS NULL AND c.head_commit <> c.base_commit
+		LEFT JOIN publication_tasks p ON p.change_id = c.id AND p.task_id = c.task_id AND t.work_revision > 1 AND c.updated_at_ms > p.created_at_ms
+		  AND EXISTS (SELECT 1 FROM production_records r WHERE r.project_id = p.project_id AND r.repository = p.repository AND r.kind = 'pull_request'
+		      AND r.identity = CAST(p.pull_number AS TEXT) AND json_extract(r.document, '$.state') = 'open')
+		WHERE c.phase = 'retained' AND t.status = 'succeeded' AND a.withdrawn_at_ms IS NULL AND c.head_commit <> c.base_commit
 		  AND `+factorydPublishesAcceptance+`
-		  AND NOT EXISTS (SELECT 1 FROM publication_tasks p WHERE p.change_id = c.id OR p.task_id = c.task_id)
+		  AND (p.pull_number IS NOT NULL OR t.work_revision = 1 AND NOT EXISTS (SELECT 1 FROM publication_tasks q WHERE q.change_id = c.id OR q.task_id = c.task_id))
 		  AND NOT EXISTS (SELECT 1 FROM production_records r WHERE r.project_id = c.project_id AND r.kind = 'reviewer'
 		      AND r.identity = 'publish-' || lower(hex(c.id)) || '-' || c.revision)
 		ORDER BY c.updated_at_ms`)
@@ -547,7 +553,7 @@ func (store *Store) PublishableChanges(ctx context.Context) ([]PublishableChange
 		var change, task []byte
 		var revision int64
 		var value PublishableChange
-		if err := rows.Scan(&change, &task, &revision, &value.Base, &value.Head); err != nil {
+		if err := rows.Scan(&change, &task, &revision, &value.Base, &value.Head, &value.Pull); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -578,6 +584,22 @@ func (store *Store) PublishableChanges(ctx context.Context) ([]PublishableChange
 		}
 	}
 	return found, nil
+}
+
+// RecordCorrectionPublished marks the Change's correction as published on
+// the pull request factoryd opened for its worker task: neither factoryd nor
+// the overseer's wake treats that settlement as unpublished again.
+// It moves one timestamp no retained-history rule reads, so it is unchecked.
+func (store *Store) RecordCorrectionPublished(ctx context.Context, c PublishableChange, at UnixMillis) error {
+	tx, err := store.beginUncheckedWrite(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Close()
+	if _, err := tx.connection.ExecContext(ctx, `UPDATE publication_tasks SET created_at_ms = ? WHERE pull_number = ? AND task_id = ? AND change_id = ?`, at.Int64(), c.Pull, c.Task.ID.Bytes(), c.Change.Bytes()); err != nil {
+		return tx.Rollback(err)
+	}
+	return tx.Commit(ctx)
 }
 
 // RecordPublicationWithReviewOperation claims the independent review in the

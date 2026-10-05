@@ -23,8 +23,9 @@ import (
 type publishCall func(ctx context.Context, name string, arguments map[string]any) (json.RawMessage, error)
 
 // publishCheckout returns the Git directory of a disposable clone holding the
-// Change's base and the given main head, and its cleanup.
-type publishCheckout func(ctx context.Context, main string) (string, func(), error)
+// Change's base, main and the given head (main, or pull's head), and its
+// cleanup.
+type publishCheckout func(ctx context.Context, pull uint64, head string) (string, func(), error)
 
 // errPublishLater is a failure of the connection or the checkout, not of the
 // Change: the next pass retries it.
@@ -32,7 +33,8 @@ var errPublishLater = errors.New("publication waits for the next pass")
 
 // publishSettledChanges publishes each succeeded intake worker's settled
 // Change as one pull request through the project's Maintainer connection,
-// records it against the worker task and launches factoryd's review. A
+// records it against the worker task and launches factoryd's review; a
+// corrected Change goes onto that pull request, whose refresh reviews it. A
 // Change it cannot publish is escalated to the overseer once and not retried
 // at that revision; only an unreachable connection waits for the next pass.
 func (daemon *Daemon) publishSettledChanges(ctx context.Context) {
@@ -66,8 +68,8 @@ func (daemon *Daemon) publishSettledChange(ctx context.Context, c kernel.Publish
 		return daemon.publishFailed(ctx, c, repo, errors.Join(err, errors.New("repository disabled for new work")))
 	}
 	backend := &daemonReviewBackend{daemon: daemon, project: c.Task.ProjectID, repository: repo, repositoryID: id}
-	checkout := func(ctx context.Context, main string) (string, func(), error) {
-		path, cleanup, err := backend.CloneReadOnly(ctx, review.Request{Repository: repo, Head: main, Base: c.Base, BaseRef: "main"})
+	checkout := func(ctx context.Context, pull uint64, head string) (string, func(), error) {
+		path, cleanup, err := backend.CloneReadOnly(ctx, review.Request{Repository: repo, PullNumber: pull, Head: head, Base: c.Base, BaseRef: "main"})
 		return filepath.Join(path, ".git"), cleanup, err
 	}
 	source, err := daemon.settledChangeGitDirectory(ctx, c)
@@ -126,10 +128,13 @@ func (daemon *Daemon) publishFailed(ctx context.Context, c kernel.PublishableCha
 	return durableReviewStore{store: daemon.store, project: c.Task.ProjectID, repository: repo, now: daemon.now}.Create(ctx, failed)
 }
 
-// publishPull is the overseer runbook's first publication, made
-// deterministic: every App write has the operation id
-// uuid5(URL, "dark-factory:<change>:<step>") and is observed first, so a
-// replay after a lost response reuses the completed write.
+// publishPull is the overseer runbook's publication, made deterministic:
+// every App write has the operation id uuid5(URL, "dark-factory:<change>:<step>")
+// and is observed first, so a replay after a lost response reuses the
+// completed write. A correction (c.Pull set) goes on its pull request's
+// branch head under publish-<HEAD8 of the worker's head>-N (on replay the
+// first one's parent is that branch head) and replaces the body under
+// body-<HEAD8 of the new head>.
 func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChange, repo, source string, call publishCall, checkout publishCheckout) error {
 	operation := func(step string) string { return uuid5("dark-factory:" + c.Change.String() + ":" + step) }
 	completed := func(step string, result any) (bool, error) {
@@ -146,8 +151,9 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 		}
 		return true, json.Unmarshal(observed.Result, result)
 	}
-	mainHead := func() (string, error) {
-		response, err := call(ctx, "observe_ref", map[string]any{"repository": repo, "branch": "main"})
+	branch := "factory/" + c.Change.String()[:12]
+	refHead := func(branch string) (string, error) {
+		response, err := call(ctx, "observe_ref", map[string]any{"repository": repo, "branch": branch})
 		var ref struct {
 			Head string `json:"head_sha"`
 		}
@@ -155,15 +161,34 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 			err = json.Unmarshal(response, &ref)
 		}
 		if err == nil && ref.Head == "" {
-			err = errors.New("main has no head")
+			err = errors.New(branch + " has no head")
 		}
 		return ref.Head, err
 	}
-	main, err := mainHead()
+	main, err := refHead("main")
 	if err != nil {
 		return err
 	}
-	gitDir, cleanup, err := checkout(ctx, main)
+	prefix, checked := "publish-", main
+	var tip string // a correction's branch head before it
+	if c.Pull != 0 {
+		prefix = "publish-" + c.Head[:8] + "-"
+		var first struct {
+			Parent string `json:"parent_sha"`
+		}
+		done, err := completed(prefix+"1", &first)
+		if err == nil {
+			checked, err = refHead(branch)
+		}
+		if err != nil {
+			return err
+		}
+		tip = checked
+		if done {
+			tip = first.Parent
+		}
+	}
+	gitDir, cleanup, err := checkout(ctx, c.Pull, checked)
 	if err != nil {
 		return errors.Join(errPublishLater, err)
 	}
@@ -177,25 +202,38 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 	if err != nil {
 		return err
 	}
-	changes, err := publicationEntries(ctx, gitDir, from, c.Head)
+	head, diffFrom, mergeParent := from, from, ""
+	if tip != "" {
+		// The runbook's parent rule: a worker that integrated main newer
+		// than the branch publishes the merge it made.
+		if diffFrom, err = publicationFrom(ctx, gitDir, tip, c.Head, main); err != nil {
+			return err
+		}
+		if head = tip; diffFrom != tip {
+			mergeParent = diffFrom
+		}
+	}
+	changes, err := publicationEntries(ctx, gitDir, diffFrom, c.Head)
 	if err != nil {
 		return err
 	}
 	if len(changes) == 0 {
-		return errors.New("nothing to publish: its head " + c.Head + " changes no file from " + from)
+		return errors.New("nothing to publish: its head " + c.Head + " changes no file from " + diffFrom)
 	}
 	message := publicationTitle(c.Accepted.Snapshot.Title)
-	branch := "factory/" + c.Change.String()[:12]
-	head := from
 	for i := 0; i*50 < len(changes); i++ {
-		step := "publish-" + strconv.Itoa(i+1)
+		step := prefix + strconv.Itoa(i+1)
 		var commit struct {
 			SHA string `json:"commit_sha"`
 		}
 		done, err := completed(step, &commit)
 		if err == nil && !done {
 			var response json.RawMessage
-			response, err = call(ctx, "publish_commit", map[string]any{"repository": repo, "operation_id": operation(step), "branch": branch, "expected_head_sha": head, "message": message, "changes": changes[i*50 : min(len(changes), i*50+50)]})
+			arguments := map[string]any{"repository": repo, "operation_id": operation(step), "branch": branch, "expected_head_sha": head, "message": message, "changes": changes[i*50 : min(len(changes), i*50+50)]}
+			if i == 0 && mergeParent != "" {
+				arguments["merge_parent_sha"] = mergeParent
+			}
+			response, err = call(ctx, "publish_commit", arguments)
 			if err == nil {
 				err = json.Unmarshal(response, &commit)
 			}
@@ -212,17 +250,34 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 	if err != nil {
 		return err
 	}
-	added, deleted := 0, 0
+	added, deleted, files := 0, 0, 0
 	for _, line := range strings.Split(strings.TrimSpace(string(numstat)), "\n") {
 		if fields := strings.Fields(line); len(fields) > 2 {
 			plus, _ := strconv.Atoi(fields[0])
 			minus, _ := strconv.Atoi(fields[1])
-			added, deleted = added+plus, deleted+minus
+			added, deleted, files = added+plus, deleted+minus, files+1
 		}
 	}
 	result := string(redactTerminalText([]byte(c.Task.Result)))
 	result = strings.ToValidUTF8(result[:min(len(result), 24000)], "")
-	body := fmt.Sprintf("%s\n\nPublished by factoryd from Change %s at %s: +%d -%d across %d files from %s.\n\nThe merge queue runs the gate.", result, c.Change, head, added, deleted, len(changes), from)
+	body := fmt.Sprintf("%s\n\nPublished by factoryd from Change %s at %s: +%d -%d across %d files from %s.\n\nThe merge queue runs the gate.", result, c.Change, head, added, deleted, files, from)
+	if c.Pull != 0 {
+		// The corrected body keeps its closing line; factoryd's refresh
+		// reviews the new head.
+		step := "body-" + head[:8]
+		done, err := completed(step, new(json.RawMessage))
+		if err == nil && !done {
+			_, err = call(ctx, "update_pull_request_body", map[string]any{"repository": repo, "operation_id": operation(step), "pull_number": c.Pull, "body": fmt.Sprintf("%s\n\nCloses #%d", body, c.Accepted.Snapshot.IssueNumber)})
+		}
+		if err != nil {
+			return err
+		}
+		at, err := daemon.timestamp()
+		if err != nil {
+			return err
+		}
+		return daemon.store.RecordCorrectionPublished(ctx, c, at)
+	}
 	var pull struct {
 		Number uint64 `json:"number"`
 		URL    string `json:"url"`
@@ -232,7 +287,7 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 	done, err := completed("pr", &pull)
 	if err == nil && !done {
 		var base string
-		if base, err = mainHead(); err == nil {
+		if base, err = refHead("main"); err == nil {
 			arguments := map[string]any{"repository": repo, "operation_id": operation("pr"), "head": branch, "head_sha": head, "base": "main", "base_sha": base, "title": message, "body": body, "draft": false,
 				"issue_number": c.Accepted.Snapshot.IssueNumber, "close_on_merge": true} // the source issue is in repo itself
 			var response json.RawMessage
