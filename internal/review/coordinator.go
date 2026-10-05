@@ -403,7 +403,15 @@ func (c Coordinator) reconcileEnqueuing(ctx context.Context, op Operation, cause
 			cause = errors.New("review: enqueue operation is missing")
 		}
 		return c.fail(ctx, op, cause, false)
-	case "planned", "executing", "indeterminate":
+	case "planned":
+		// The broker claimed the enqueue but never ran it; resending the same
+		// operation id resumes that claim (canary 6, #1167).
+		if err := c.Backend.Enqueue(ctx, op); err != nil {
+			return op, err
+		}
+		op.State, op.UpdatedAt = "enqueued", c.Now()
+		return op, c.Store.Update(ctx, op)
+	case "executing", "indeterminate":
 		if cause == nil {
 			cause = fmt.Errorf("review: enqueue operation is %s", receipt.State)
 		}
