@@ -280,16 +280,6 @@ func (daemon *Daemon) Intake(ctx context.Context, input api.IntakeInput) api.Int
 		if !intakeMatches(source, issue) {
 			return api.IntakeResult{State: "ineligible"}
 		}
-		legacy, exists, legacyErr := daemon.store.LegacyIntakeSuppression(ctx, source, snapshot)
-		if legacyErr != nil {
-			return intakeFailure(legacyErr)
-		}
-		if exists && legacyExistingContent(legacy, digest) {
-			if legacy.TaskID == (kernel.TaskID{}) {
-				return api.IntakeResult{State: "legacy_history_unresolved"}
-			}
-			return api.IntakeResult{State: "legacy_existing_work", TaskID: legacy.TaskID.String()}
-		}
 		accepted, acceptErr := daemon.store.AcceptIntakeSnapshot(ctx, source.ID, snapshot, at, source.Revision)
 		if acceptErr != nil {
 			return intakeFailure(acceptErr)
@@ -504,25 +494,6 @@ func (daemon *Daemon) previewIntake(ctx context.Context, source kernel.IntakeSou
 			candidate.AcceptanceID = accepted.ID.String()
 			candidate.TaskID = accepted.TaskID.String()
 		}
-		if !found {
-			legacy, suppressed, err := daemon.store.LegacyIntakeSuppression(ctx, source, snapshot)
-			if err != nil {
-				return intakeFailure(err)
-			}
-			if suppressed {
-				reason = "legacy_suppressed"
-				if legacy.HasHistory && legacy.HistoricalContentHash == nil {
-					reason = "legacy_history_unresolved"
-				}
-				if legacy.TaskID != (kernel.TaskID{}) {
-					candidate.TaskID = legacy.TaskID.String()
-					if legacyExistingContent(legacy, hash) {
-						reason = "legacy_existing_work"
-					}
-				}
-				candidate.Reason = reason
-			}
-		}
 		if tick && reason == string(kernel.IntakeEligibleTrusted) && len(result.ImportedTasks) < int(source.AdmissionLimit) {
 			at, err := daemon.timestamp()
 			if err != nil {
@@ -587,13 +558,4 @@ func (daemon *Daemon) sourceIssues(ctx context.Context, source kernel.IntakeSour
 		return daemon.linear.Issues(ctx, source.LinearTeamID, page, label, number)
 	}
 	return daemon.readIntakeIssues(ctx, source.GitHubRepositoryName, source.GitHubRepositoryID, page, label, number)
-}
-
-// legacyExistingContent reports whether a migrated pre-cutover baseline
-// already covers this exact issue content.
-func legacyExistingContent(record kernel.LegacyIntakeRecord, hash [32]byte) bool {
-	if record.HistoricalContentHash != nil {
-		return *record.HistoricalContentHash == hash
-	}
-	return record.HasHistory && record.ContentHash == hash
 }
