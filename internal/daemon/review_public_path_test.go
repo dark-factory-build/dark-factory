@@ -90,16 +90,17 @@ func TestPublicReviewPathPersistsKilledProviderFailureAndRetries(t *testing.T) {
 	backend := &publicReviewBackend{killed: true}
 	fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return backend }
 	input := api.IntakeInput{Action: "review_pr", ProjectID: project.String(), ReviewRequest: &api.ReviewRequest{Repository: "team/repo", PullNumber: 7, Head: strings.Repeat("a", 40), Base: strings.Repeat("b", 40), BaseRef: "main", Body: "fixture", Provider: "codex"}}
-	if result := fixture.daemon.Intake(context.Background(), input); result.State == "ok" {
-		t.Fatal("killed provider unexpectedly succeeded")
+	if result := fixture.daemon.Intake(context.Background(), input); result.State != "ok" || result.ReviewOperation == "" {
+		t.Fatalf("created review answered %+v", result)
 	}
-	op := lastDurableReview(t, fixture.store, project)
+	op := waitForDurableReview(t, fixture.store, project, func(op review.Operation) bool { return op.State == "failed" })
 	if op.State != "failed" || !op.Retryable || backend.reviews != 1 {
 		t.Fatalf("failed operation=%+v backend=%+v", op, backend)
 	}
 	backend.killed = false
 	retry := api.IntakeInput{Action: "review_pr", ProjectID: project.String(), ReviewRequest: &api.ReviewRequest{RetryOperation: op.ID}}
 	result := fixture.daemon.Intake(context.Background(), retry)
+	waitForDurableReview(t, fixture.store, project, func(op review.Operation) bool { return op.ID == result.ReviewOperation && op.State == "enqueued" })
 	if result.State != "ok" || backend.reviews != 2 || backend.submits != 1 || backend.enqueues != 1 || len(backend.journal) != 2 {
 		t.Fatalf("retry result=%+v operation=%+v backend=%+v", result, lastDurableReview(t, fixture.store, project), backend)
 	}
@@ -108,15 +109,53 @@ func TestPublicReviewPathPersistsKilledProviderFailureAndRetries(t *testing.T) {
 	}
 }
 
+// reviewNow claims and runs a review in the foreground, as reviewPR's
+// background launch does.
+func reviewNow(ctx context.Context, daemon *Daemon, project kernel.ProjectID, request api.ReviewRequest) (string, error) {
+	op, err := daemon.claimReview(ctx, project, request)
+	if err != nil {
+		return "", err
+	}
+	return daemon.resumeReview(ctx, project, op)
+}
+
+type gatedReviewBackend struct {
+	*publicReviewBackend
+	release chan struct{}
+}
+
+func (b gatedReviewBackend) Gate(ctx context.Context, checkout string, op review.Operation, commit string) (review.GateRun, error) {
+	<-b.release
+	return b.publicReviewBackend.Gate(ctx, checkout, op, commit)
+}
+
+// #1166: a created review answers with its operation while it is still
+// gating, rather than outliving the operator call and reporting failure.
+func TestReviewIntakeAnswersWithTheCreatedOperationWhileItGates(t *testing.T) {
+	fixture, project := reviewPublicFixture(t)
+	backend := gatedReviewBackend{publicReviewBackend: &publicReviewBackend{}, release: make(chan struct{})}
+	fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return backend }
+	input := api.IntakeInput{Action: "review_pr", ProjectID: project.String(), ReviewRequest: &api.ReviewRequest{Repository: "team/repo", PullNumber: 9, Head: strings.Repeat("a", 40), Base: strings.Repeat("b", 40), BaseRef: "main", Body: "fixture", Provider: "codex"}}
+	result := fixture.daemon.Intake(context.Background(), input)
+	op := lastDurableReview(t, fixture.store, project)
+	close(backend.release)
+	if result.State != "ok" || result.ReviewOperation != op.ID || op.State != "gating" {
+		t.Fatalf("intake answered %+v for operation %+v", result, op)
+	}
+	if op = waitForDurableReview(t, fixture.store, project, func(op review.Operation) bool { return op.State == "enqueued" }); op.State != "enqueued" {
+		t.Fatalf("background review left operation %+v", op)
+	}
+}
+
 func TestPublicReviewPathRefusesRetryAfterAmbiguousSubmit(t *testing.T) {
 	fixture, project := reviewPublicFixture(t)
 	backend := &publicReviewBackend{submitAmbiguous: true}
 	fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return backend }
 	input := api.IntakeInput{Action: "review_pr", ProjectID: project.String(), ReviewRequest: &api.ReviewRequest{Repository: "team/repo", PullNumber: 8, Head: strings.Repeat("c", 40), Base: strings.Repeat("d", 40), BaseRef: "main", Body: "fixture", Provider: "claude"}}
-	if result := fixture.daemon.Intake(context.Background(), input); result.State == "ok" {
-		t.Fatal("ambiguous submit unexpectedly succeeded")
+	if result := fixture.daemon.Intake(context.Background(), input); result.State != "ok" || result.ReviewOperation == "" {
+		t.Fatalf("created review answered %+v", result)
 	}
-	op := lastDurableReview(t, fixture.store, project)
+	op := waitForDurableReview(t, fixture.store, project, func(op review.Operation) bool { return op.State == "failed" })
 	if op.State != "failed" || op.Retryable {
 		t.Fatalf("ambiguous operation=%+v", op)
 	}
@@ -349,7 +388,7 @@ func TestSendBackToARunningTaskLandsOnALaterTick(t *testing.T) {
 	fixture, project, task, settle := publishedTask(t)
 	ctx := context.Background()
 	fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return &publicReviewBackend{requestChanges: true} }
-	if _, err := fixture.daemon.reviewPR(ctx, project, publishedReviewRequest()); err == nil {
+	if _, err := reviewNow(ctx, fixture.daemon, project, publishedReviewRequest()); err == nil {
 		t.Fatal("a running task accepted the send-back")
 	}
 	for _, settled := range []bool{false, true} {
@@ -380,7 +419,7 @@ func TestSendBackCarriesTheBlockOfRecordDespiteALaterAllow(t *testing.T) {
 	settle()
 	ctx := context.Background()
 	fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return &publicReviewBackend{requestChanges: true} }
-	block, err := fixture.daemon.reviewPR(ctx, project, publishedReviewRequest())
+	block, err := reviewNow(ctx, fixture.daemon, project, publishedReviewRequest())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -417,7 +456,7 @@ func TestMergeQueueEjectionSendsBackOnceAndAMergeCloses(t *testing.T) {
 		ctx := context.Background()
 		backend := &publicReviewBackend{merge: test.merge}
 		fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return backend }
-		if _, err := fixture.daemon.reviewPR(ctx, project, publishedReviewRequest()); err != nil || backend.enqueues != 1 {
+		if _, err := reviewNow(ctx, fixture.daemon, project, publishedReviewRequest()); err != nil || backend.enqueues != 1 {
 			t.Fatalf("enqueue err=%v backend=%+v", err, backend)
 		}
 		for range 2 {
@@ -445,7 +484,7 @@ func TestRefusedEnqueueBecomesAnOverseerItem(t *testing.T) {
 	customerMode(t, fixture)
 	ctx := context.Background()
 	fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return &publicReviewBackend{enqueueRefused: true} }
-	if _, err := fixture.daemon.reviewPR(ctx, project, publishedReviewRequest()); err == nil {
+	if _, err := reviewNow(ctx, fixture.daemon, project, publishedReviewRequest()); err == nil {
 		t.Fatal("a refused enqueue reported success")
 	}
 	op := lastDurableReview(t, fixture.store, project)
@@ -488,7 +527,7 @@ func TestMergeStageRunsOnlyOnTheCustomerPath(t *testing.T) {
 		fixture, project, task, settle := publishedTask(t)
 		ctx := context.Background()
 		fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return &publicReviewBackend{requestChanges: true} }
-		if _, err := fixture.daemon.reviewPR(ctx, project, publishedReviewRequest()); err == nil {
+		if _, err := reviewNow(ctx, fixture.daemon, project, publishedReviewRequest()); err == nil {
 			t.Fatal("a running task accepted the send-back")
 		}
 		settle()
@@ -505,7 +544,7 @@ func TestMergeStageRunsOnlyOnTheCustomerPath(t *testing.T) {
 		fixture.daemon.reviewBackend = func(string, uint64) review.Backend {
 			return &publicReviewBackend{merge: review.Merge{State: "MERGED_AFTER_ENQUEUE_ATTEMPT"}}
 		}
-		if _, err := fixture.daemon.reviewPR(ctx, project, publishedReviewRequest()); err != nil {
+		if _, err := reviewNow(ctx, fixture.daemon, project, publishedReviewRequest()); err != nil {
 			t.Fatal(err)
 		}
 		if customer {
@@ -530,7 +569,7 @@ func TestFailedReviewRetriesOnceThenEscalatesOnce(t *testing.T) {
 	ctx := context.Background()
 	backend := &publicReviewBackend{killed: true}
 	fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return backend }
-	if _, err := fixture.daemon.reviewPR(ctx, project, publishedReviewRequest()); err == nil {
+	if _, err := reviewNow(ctx, fixture.daemon, project, publishedReviewRequest()); err == nil {
 		t.Fatal("a killed provider reported success")
 	}
 	var offset atomic.Int64

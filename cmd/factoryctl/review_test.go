@@ -26,7 +26,7 @@ func TestReviewRetryCLILeavesDefaultProviderOutOfRequest(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	exit := run(context.Background(), []string{"review", "--project", project, "--retry-operation", operation}, webEnvironment(fixture), &stdout, &stderr)
 	result := awaitServer(t, done)
-	if exit != 0 || result.err != nil || stderr.Len() != 0 || strings.TrimSpace(stdout.String()) != operation {
+	if exit != 0 || result.err != nil || stderr.Len() != 0 || stdout.String() != operation+" in progress\n" {
 		t.Fatalf("retry review CLI = exit %d server %v stdout=%q stderr=%q", exit, result.err, stdout.String(), stderr.String())
 	}
 }

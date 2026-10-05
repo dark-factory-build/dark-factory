@@ -23,22 +23,47 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/review"
 )
 
+// reviewPR answers once the review operation is durable and runs it in the
+// background: a gate outlasts the operator call that requested it.
 func (daemon *Daemon) reviewPR(ctx context.Context, project kernel.ProjectID, request api.ReviewRequest) (string, error) {
 	if daemon.reviewOperation != nil {
 		return daemon.reviewOperation(ctx, project, request)
 	}
+	op, err := daemon.claimReview(ctx, project, request)
+	if err != nil {
+		return "", err
+	}
+	daemon.launchReview(project, op)
+	return op.ID, nil
+}
+
+// claimReview durably creates a review operation, or a failed one's retry,
+// without running it.
+func (daemon *Daemon) claimReview(ctx context.Context, project kernel.ProjectID, request api.ReviewRequest) (review.Operation, error) {
 	var failed review.Operation
 	if request.RetryOperation != "" {
 		document, found, err := daemon.store.ReviewOperation(ctx, project, request.RetryOperation)
 		if err != nil || !found {
-			return "", errors.New("review: retry operation not found")
+			return review.Operation{}, errors.New("review: retry operation not found")
 		}
 		if err := json.Unmarshal(document, &failed); err != nil || failed.State != "failed" || !failed.Retryable {
-			return "", errors.New("review: operation is not failed")
+			return review.Operation{}, errors.New("review: operation is not failed")
 		}
 		request = api.ReviewRequest{Repository: failed.Request.Repository, PullNumber: failed.Request.PullNumber, Head: failed.Request.Head, Base: failed.Request.Base, BaseRef: failed.Request.BaseRef, Body: failed.Request.Body, Provider: failed.Request.Provider}
 	}
-	return daemon.startReview(ctx, project, request, failed)
+	repository := strings.ToLower(request.Repository)
+	coordinator, err := daemon.reviewCoordinator(ctx, project, repository)
+	if err != nil {
+		return review.Operation{}, err
+	}
+	if failed.ID != "" {
+		return coordinator.ReserveRetry(ctx, failed)
+	}
+	op, err := review.Prepare(review.Request{Repository: repository, PullNumber: request.PullNumber, Head: request.Head, Base: request.Base, BaseRef: request.BaseRef, Body: request.Body, Provider: request.Provider}, daemon.now)
+	if err != nil {
+		return review.Operation{}, err
+	}
+	return op, coordinator.Store.Create(ctx, op)
 }
 
 // RecoverReviewOperations closes the startup window left by a daemon that
@@ -184,21 +209,6 @@ func (daemon *Daemon) reviewCoordinator(ctx context.Context, project kernel.Proj
 		backend = daemon.reviewBackend(repository, repositoryID)
 	}
 	return review.Coordinator{Store: durableReviewStore{store: daemon.store, project: project, repository: repository, now: daemon.now}, Backend: backend, Now: daemon.now}, nil
-}
-
-func (daemon *Daemon) startReview(ctx context.Context, project kernel.ProjectID, request api.ReviewRequest, failed review.Operation) (string, error) {
-	repository := strings.ToLower(request.Repository)
-	coordinator, err := daemon.reviewCoordinator(ctx, project, repository)
-	if err != nil {
-		return "", err
-	}
-	var op review.Operation
-	if failed.ID != "" {
-		op, err = coordinator.Retry(ctx, failed)
-	} else {
-		op, err = coordinator.Start(ctx, review.Request{Repository: repository, PullNumber: request.PullNumber, Head: request.Head, Base: request.Base, BaseRef: request.BaseRef, Body: request.Body, Provider: request.Provider})
-	}
-	return op.ID, errors.Join(err, daemon.finishReviewRouting(ctx, project, repository, op))
 }
 
 func (daemon *Daemon) resumeReview(ctx context.Context, project kernel.ProjectID, op review.Operation) (string, error) {
