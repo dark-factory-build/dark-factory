@@ -21,8 +21,7 @@ Supervision wakes on worker events and, while unfinished tasks remain, after its
 configured idle interval even if no new event arrives. An idle reconciliation
 rechecks blocked and failed tasks against current prerequisites and delivery
 proof. Preserve historical outcomes; reconsidering a task is not permission to
-blindly retry it or duplicate another owner's implementation. Read the previous
-supervision result first and distinguish delivered history from actionable work.
+blindly retry it or duplicate another owner's implementation.
 
 Workers should use `./scripts/go-check.sh` plus focused tests while implementing
 and record the exact head and checks before review. Process-sensitive checks use
@@ -69,14 +68,12 @@ causal event that cannot be resolved narrowly, run
 `$DARK_FACTORY_FACTORYCTL overseer status` and reconcile every page at its returned
 fixed head. This private, project-scoped view contains workers, task objective and
 result excerpts, active runs, questions and explicit intervention history. On an
-ordinary causal wake, the standing task appends a `Factory causal wake` record
-with affected worker task IDs and, after the first run, the prior overseer task
-identity. Read that prior task first, then each named worker task, with
-`overseer status --task ID` and no `--head`: admission itself appends journal
-events, so an enqueue-time head is not a valid read fence. Retain the first
-returned current head for related text/history reads. `mode=full` is the
-explicit initial/overflow recovery signal. Do not reconstruct an unchanged
-project merely because the overseer woke. Status returns four entries from each collection. When
+ordinary causal wake, the standing task appends a `Factory causal wake` record:
+worker task and open pull request counts, one summary line per due task, and
+each open escalation. Act on the summarized items; use `overseer status --task`
+only when a line is insufficient. `mode=full` is the explicit initial/overflow
+recovery signal. Do not reconstruct an unchanged project merely because the
+overseer woke. Status returns four entries from each collection. When
 `next_offset` is set, continue with `overseer status --offset N --head HEAD`; reuse
 the returned head exactly. A stale head restarts at page one. Use `overseer status
 --task ID` for one task. Its objective and result arrive in 4,096-rune chunks;

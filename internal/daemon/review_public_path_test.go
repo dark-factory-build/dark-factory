@@ -501,7 +501,7 @@ func TestRefusedEnqueueBecomesAnOverseerItem(t *testing.T) {
 	if _, err := fixture.store.UpdateAgent(ctx, overseer.ID, overseer.Revision, kernel.AgentPatch{IdlePolicy: &policy, IdleAfterSeconds: &after, IdleInstruction: &instruction}, mustKernelTime(t, 1002)); err != nil {
 		t.Fatal(err)
 	}
-	wakes, err := fixture.store.EnqueueOverseerWakeups(ctx, mustKernelTime(t, time.Now().UnixMilli()))
+	wakes, err := fixture.store.EnqueueOverseerWakeups(ctx, mustKernelTime(t, time.Now().Add(time.Minute).UnixMilli()))
 	if err != nil || len(wakes) != 1 || !strings.Contains(wakes[0].Body, "Escalated: factoryd cannot advance team/repo#12") {
 		t.Fatalf("escalation wake = %+v, %v", wakes, err)
 	}

@@ -617,12 +617,11 @@ func TestSchedulerPausedDispatchDefersAutomaticWorkUntilResume(t *testing.T) {
 			t.Fatal(err)
 		}
 		if role == kernel.RoleWorker {
-			// A cancelled worker task is an item due to the overseer.
-			task, err := store.EnqueueTask(ctx, kernel.NewTask{ID: schedulerTaskID(t, 0x7a), ProjectID: project.ID, AssignedAgentID: agent.ID, IncarnationID: schedulerIncarnationID(t, 0x7b), Title: "cancelled"}, schedulerTime(t, 5))
-			if err != nil {
-				t.Fatal(err)
-			}
-			if _, err := store.UpdateTask(ctx, task.ID, task.Revision, kernel.TaskPatch{Cancel: true}, schedulerTime(t, 5)); err != nil {
+			// An escalation on an open pull request is an item due to the overseer.
+			head := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+			pr := kernel.ProductionPullRequest{Number: 7, Title: "Ship", URL: "https://github.com/team/repo/pull/7", Head: head, Branch: "factory/x", Base: "main", State: "open", Review: kernel.ProductionReview{Head: head, State: "unknown"}}
+			escalated := kernel.ProductionReviewOperation{ID: "op", Document: map[string]any{"request": map[string]any{"PullNumber": 7, "Head": head}, "escalation": "stuck"}}
+			if err := store.RecordProductionObservationWithReviewOperations(ctx, project.ID, kernel.ProductionObservation{Repository: "team/repo", ObservedAt: 5, PullRequests: []kernel.ProductionPullRequest{pr}}, []kernel.ProductionReviewOperation{escalated}, schedulerTime(t, 5)); err != nil {
 				t.Fatal(err)
 			}
 			continue
@@ -686,7 +685,7 @@ func TestSchedulerPausedDispatchDefersAutomaticWorkUntilResume(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(snapshot.Tasks) != 2 {
+	if len(snapshot.Tasks) != 1 {
 		t.Fatalf("resume lost the overseer wake: %+v", snapshot.Tasks)
 	}
 	cancel()

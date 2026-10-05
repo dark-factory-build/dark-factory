@@ -17,21 +17,25 @@ const (
 	overseerWakeTitle    = "Standing instruction"
 	overseerWakePriority = 1000
 	OverseerRewakeAfter  = 30 * time.Minute
+	overseerWakeSettle   = time.Minute
+	overseerWakeMaxDelay = 5 * time.Minute
 )
 
 // overseerWakeItems is every work item of a project that needs its
 // overseer, at the version it last changed. An item persists until the
 // overseer acts on it (a blocked or failed worker task, an unanswered worker
 // question, finished work not yet published or corrected behind its open pull
-// request, a pull request factoryd escalated); a succeeded or cancelled worker
-// task needs one look. It is due when no carrier was enqueued since that
-// version, or, while it persists, when at most three were and the latest is
-// OverseerRewakeAfter old: one wake and three re-wakes per item version.
+// request, a pull request factoryd escalated while it stays open at the
+// escalated head); a succeeded worker task needs one look. It is due when no
+// carrier was enqueued since that version, or, while it persists, when at most
+// three were and the latest is OverseerRewakeAfter old: one wake and three
+// re-wakes per item version, once the newest due item is overseerWakeSettle
+// old or the oldest overseerWakeMaxDelay old.
 const overseerWakeItems = `WITH carrier AS (SELECT created_at_ms AS at FROM tasks WHERE assigned_agent_id = ?4 AND title = ?5),
 item AS (
 	SELECT t.id, t.updated_at_ms AS version, t.status IN ('blocked', 'failed') AS persistent, '' AS detail
 	FROM tasks AS t JOIN agents AS a ON a.id = t.assigned_agent_id
-	WHERE t.project_id = ?1 AND a.role = 'worker' AND t.status IN ('succeeded', 'blocked', 'failed', 'cancelled')
+	WHERE t.project_id = ?1 AND a.role = 'worker' AND t.status IN ('succeeded', 'blocked', 'failed')
 	UNION ALL SELECT r.task_id, h.created_at_ms, 1, '' FROM human_requests AS h JOIN runs AS r ON r.id = h.run_id
 	WHERE r.project_id = ?1 AND r.role = 'worker' AND h.status IN ('open', 'delivering', 'delivery_unknown')
 	UNION ALL SELECT c.task_id, c.updated_at_ms, 1, '' FROM changes AS c JOIN tasks AS t ON t.id = c.task_id
@@ -41,12 +45,17 @@ item AS (
 	       OR EXISTS (SELECT 1 FROM publication_tasks AS p JOIN production_records AS r
 	           ON r.project_id = p.project_id AND r.repository = p.repository AND r.kind = 'pull_request' AND r.identity = CAST(p.pull_number AS TEXT)
 	           WHERE p.change_id = c.id AND json_extract(r.document, '$.state') = 'open' AND c.updated_at_ms > p.created_at_ms))
-	UNION ALL SELECT NULL, observed_at_ms, 1, json_extract(document, '$.escalation') FROM production_records
-	WHERE project_id = ?1 AND kind = 'reviewer' AND COALESCE(json_extract(document, '$.escalation'), '') <> ''
-	  AND COALESCE(json_extract(document, '$.route_pending'), 0) = 0)
-SELECT id, detail FROM item
-WHERE version > COALESCE((SELECT at FROM carrier ORDER BY at DESC LIMIT 1 OFFSET 3), -1)
-  AND (NOT EXISTS (SELECT 1 FROM carrier WHERE at > version) OR persistent AND (SELECT MAX(at) FROM carrier) + ?6 <= ?3)
+	UNION ALL SELECT NULL, e.observed_at_ms, 1, json_extract(e.document, '$.escalation') FROM production_records AS e
+	JOIN production_records AS p ON p.project_id = e.project_id AND p.repository = e.repository AND p.kind = 'pull_request'
+	  AND p.identity = CAST(json_extract(e.document, '$.request.PullNumber') AS TEXT)
+	WHERE e.project_id = ?1 AND e.kind = 'reviewer' AND COALESCE(json_extract(e.document, '$.escalation'), '') <> ''
+	  AND COALESCE(json_extract(e.document, '$.route_pending'), 0) = 0 AND json_extract(p.document, '$.state') = 'open'
+	  AND lower(json_extract(p.document, '$.head')) = lower(json_extract(e.document, '$.request.Head')))
+SELECT id IS NULL, CASE WHEN id IS NULL THEN detail ELSE (` + overseerWakeLine + `) END, (` + overseerWakeCounts + `)
+FROM (SELECT *, MIN(version) OVER () AS oldest, MAX(version) OVER () AS newest FROM item
+	WHERE version > COALESCE((SELECT at FROM carrier ORDER BY at DESC LIMIT 1 OFFSET 3), -1)
+	  AND (NOT EXISTS (SELECT 1 FROM carrier WHERE at > version) OR persistent AND (SELECT MAX(at) FROM carrier) + ?6 <= ?3)) AS due
+WHERE ?3 - newest >= ?7 OR ?3 - oldest >= ?8
 ORDER BY version LIMIT 33`
 
 // EnqueueOverseerWakeups applies one level-triggered rule to each standing
@@ -119,53 +128,62 @@ func (store *Store) EnqueueOverseerWakeups(ctx context.Context, at UnixMillis) (
 // overseerWake returns the carrier body for agent's due items, if any.
 func overseerWake(ctx context.Context, connection *sql.Conn, agent Agent, at int64) (string, bool, error) {
 	rows, err := connection.QueryContext(ctx, overseerWakeItems, agent.ProjectID.Bytes(), PublicationAttentionAfter.Milliseconds(), at,
-		agent.ID.Bytes(), overseerWakeTitle, OverseerRewakeAfter.Milliseconds())
+		agent.ID.Bytes(), overseerWakeTitle, OverseerRewakeAfter.Milliseconds(), overseerWakeSettle.Milliseconds(), overseerWakeMaxDelay.Milliseconds())
 	if err != nil {
 		return "", false, err
 	}
 	defer rows.Close()
-	var targets []TaskID
-	var escalations []string
+	var lines, escalations []string
+	var counts string
 	full := false
 	for rows.Next() {
-		var raw []byte
+		var escalation bool
 		var detail string
-		if err := rows.Scan(&raw, &detail); err != nil {
+		if err := rows.Scan(&escalation, &detail, &counts); err != nil {
 			return "", false, err
 		}
-		if len(targets)+len(escalations) == 32 {
+		if len(lines)+len(escalations) == 32 {
 			full = true // more is due than one wake names
 			break
 		}
-		if raw == nil {
-			escalations = append(escalations, strings.ToValidUTF8(detail[:min(len(detail), 512)], ""))
-			continue
-		}
-		id, err := TaskIDFromBytes(raw)
-		if err != nil {
-			return "", false, fmt.Errorf("%w: invalid overseer wake task", ErrCorruptState)
-		}
-		if !slices.Contains(targets, id) {
-			targets = append(targets, id)
+		if escalation {
+			escalations = append(escalations, "Escalated: "+strings.ToValidUTF8(detail[:min(len(detail), 256)], ""))
+		} else if !slices.Contains(lines, detail) {
+			lines = append(lines, detail)
 		}
 	}
 	if err := rows.Err(); err != nil {
 		return "", false, err
 	}
-	if len(targets)+len(escalations) == 0 {
+	if len(lines)+len(escalations) == 0 {
 		return "", false, nil
 	}
 	prior, err := latestOverseerTask(ctx, connection, agent.ID)
 	if err != nil {
 		return "", false, err
 	}
-	return overseerWakeInstruction(agent.Provider, agent.Idle.Instruction, targets, escalations, prior, full || prior == nil), true, nil
+	return overseerWakeInstruction(agent.Provider, agent.Idle.Instruction, counts, lines, escalations, prior, full || prior == nil), true, nil
 }
 
-// latestOverseerTask is durable continuity, not a new conversation store. The
-// next wake names this task so its result, decisions and operation IDs are one
-// targeted status read away. Failure and cancellation detail comes from the
-// exact settled run, rather than the task row, through that same status read.
+// overseerWakeLine summarises one due task in a line: identity, title, status,
+// work revision, its latest Change head, its pull request and why it waits.
+const overseerWakeLine = `SELECT printf('- %s "%s" %s rev=%d', lower(hex(t.id)), replace(substr(t.title, 1, 60), char(10), ' '), t.status, t.work_revision)
+	|| COALESCE((SELECT printf(' change=%s@%s', substr(lower(hex(c.id)), 1, 12), substr(lower(hex(c.head_commit)), 1, 8)) FROM changes AS c
+		WHERE c.task_id = t.id AND c.head_commit IS NOT NULL ORDER BY c.updated_at_ms DESC LIMIT 1), '')
+	|| COALESCE((SELECT printf(' PR #%d %s/%s', p.pull_number, json_extract(r.document, '$.state'), json_extract(r.document, '$.review.state'))
+		FROM publication_tasks AS p JOIN production_records AS r ON r.project_id = p.project_id AND r.repository = p.repository AND r.kind = 'pull_request' AND r.identity = CAST(p.pull_number AS TEXT)
+		WHERE p.task_id = t.id OR p.change_id IN (SELECT id FROM changes WHERE task_id = t.id) ORDER BY p.created_at_ms DESC LIMIT 1), '')
+	|| COALESCE(': ' || replace(substr(COALESCE(t.blocked_reason, (SELECT h.question_text FROM human_requests AS h JOIN runs AS u ON u.id = h.run_id
+		WHERE u.task_id = t.id AND h.status IN ('open', 'delivering', 'delivery_unknown') LIMIT 1)), 1, 120), char(10), ' '), '')
+FROM tasks AS t WHERE t.id = due.id`
+
+const overseerWakeCounts = `SELECT printf('worker tasks queued=%d running=%d; open PRs=%d', COALESCE(SUM(t.status = 'queued'), 0), COALESCE(SUM(t.status = 'running'), 0),
+	(SELECT count(*) FROM production_records WHERE project_id = ?1 AND kind = 'pull_request' AND json_extract(document, '$.state') = 'open'))
+FROM tasks AS t LEFT JOIN agents AS a ON a.id = t.assigned_agent_id
+WHERE t.project_id = ?1 AND t.status IN ('queued', 'running') AND COALESCE(a.role, 'worker') = 'worker'`
+
+// latestOverseerTask is the prior overseer task a wake names for reference:
+// its result, decisions and operation IDs are one status read away.
 func latestOverseerTask(ctx context.Context, connection *sql.Conn, agentID AgentID) (*TaskID, error) {
 	var raw []byte
 	err := connection.QueryRowContext(ctx, `SELECT t.id FROM runs AS r JOIN tasks AS t ON t.id = r.task_id
@@ -191,13 +209,9 @@ func latestOverseerTask(ctx context.Context, connection *sql.Conn, agentID Agent
 
 // overseerWakeInstruction appends the causal record to the standing
 // instruction. What does not fit the provider's delivery bound is dropped in
-// order (task identities, then escalations) and the wake becomes a full
+// order (task lines, then escalations) and the wake becomes a full
 // reconciliation; the bare instruction was checked against it when set.
-func overseerWakeInstruction(provider Provider, instruction string, targets []TaskID, escalations []string, prior *TaskID, full bool) string {
-	identities := make([]string, 0, len(targets))
-	for _, target := range targets {
-		identities = append(identities, target.String())
-	}
+func overseerWakeInstruction(provider Provider, instruction, counts string, lines, escalations []string, prior *TaskID, full bool) string {
 	priorID := ""
 	if prior != nil {
 		priorID = prior.String()
@@ -207,15 +221,15 @@ func overseerWakeInstruction(provider Provider, instruction string, targets []Ta
 		if full {
 			mode = "full"
 		}
-		body := instruction + "\n\nFactory causal wake: mode=" + mode + "; task_ids=" + strings.Join(identities, ",") + "; prior_task_id=" + priorID + ". Read prior_task_id first when present, then each named task, without --head; retain the first returned head for related paging/text reads. mode=full requires fixed-head reconciliation."
-		for _, escalation := range escalations {
-			body += "\nEscalated: " + escalation
+		body := instruction + "\n\nFactory causal wake: mode=" + mode + "; prior_task_id=" + priorID + "; " + counts + ". mode=full requires fixed-head reconciliation."
+		for _, line := range slices.Concat(lines, escalations) {
+			body += "\n" + line
 		}
 		switch {
 		case wakeBodyFits(provider, body):
 			return body
-		case len(identities) != 0:
-			identities, full = nil, true
+		case len(lines) != 0:
+			lines, full = nil, true
 		case len(escalations) != 0:
 			escalations = nil
 		default:
