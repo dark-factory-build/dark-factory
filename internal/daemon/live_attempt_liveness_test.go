@@ -38,6 +38,7 @@ func TestRunLivenessFailsOnlyAQuietAttempt(t *testing.T) {
 	started := time.UnixMilli(10_000)
 	attempt.markStarted(started)
 	attempt.retainDiagnosticOutput(0, 18, []byte("Login expired\r\n> "))
+	attempt.markTerminalOutput(started, 18)
 	if err := fixture.daemon.registerLiveAttempt(attempt); err != nil {
 		t.Fatal(err)
 	}
@@ -86,10 +87,18 @@ func TestRunLivenessFailsAttemptThatNeverBecomesReady(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { fixture.daemon.unregisterLiveAttempt(active.run.ID, attempt) })
-	fixture.daemon.livenessClock = func() time.Time { return registered.Add(stalledRunLivenessThreshold) }
-	if err := fixture.daemon.enforceRunLiveness(ctx, SupervisorSpec{}); err != nil {
-		t.Fatal(err)
+	tick := func(after time.Duration) {
+		t.Helper()
+		fixture.daemon.livenessClock = func() time.Time { return registered.Add(after) }
+		if err := fixture.daemon.enforceRunLiveness(ctx, SupervisorSpec{}); err != nil {
+			t.Fatal(err)
+		}
 	}
+	tick(firstOutputBudget - time.Millisecond)
+	if run, _, _ := fixture.store.Run(ctx, active.run.ID); run.Phase != kernel.RunRunning {
+		t.Fatalf("failed before the first-output budget: %+v", run)
+	}
+	tick(firstOutputBudget)
 	run, found, err := fixture.store.Run(ctx, active.run.ID)
 	if err != nil || !found || run.Phase != kernel.RunFinalizing || run.Proposal == nil || run.Proposal.Code() != kernel.FailureProtocol || run.Proposal.Detail() != kernel.NeverStartedRunDetail {
 		t.Fatalf("never-ready run = %+v found=%v err=%v", run, found, err)

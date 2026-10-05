@@ -31,6 +31,11 @@ const (
 	liveAttemptStoreTimeout     = 2 * time.Second
 	liveAttemptEffectLimit      = 4 * time.Second
 	stalledRunLivenessThreshold = 10 * time.Minute
+	// firstOutputBudget bounds a run that has produced no terminal byte and made
+	// no attempt call. Admission-to-running was 23 s at p99 over 3708 live
+	// runs, and a TUI paints within seconds of launch, so 3 minutes only fires
+	// on a run that will not start; it is then requeued once as never started.
+	firstOutputBudget = 3 * time.Minute
 )
 
 var (
@@ -339,7 +344,11 @@ type liveAttempt struct {
 func (attempt *liveAttempt) stalled(now time.Time) bool {
 	attempt.livenessMu.Lock()
 	defer attempt.livenessMu.Unlock()
-	return stalledRunLiveness(now, attempt.startedAt, attempt.lastTerminalOutputAt, attempt.lastAttemptAPICallAt, stalledRunLivenessThreshold)
+	threshold := stalledRunLivenessThreshold
+	if attempt.terminalOutputBytes == 0 && attempt.lastAttemptAPICallAt.IsZero() {
+		threshold = firstOutputBudget
+	}
+	return stalledRunLiveness(now, attempt.startedAt, attempt.lastTerminalOutputAt, attempt.lastAttemptAPICallAt, threshold)
 }
 
 // neverStarted reports whether this attempt has produced no terminal output

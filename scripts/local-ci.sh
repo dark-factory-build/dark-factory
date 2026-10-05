@@ -21,6 +21,7 @@ esac
     exit 1
 }
 . "$script_dir/local-ci-environment.sh"
+export DARK_FACTORY_LOCAL_CI=1
 
 if { [ "$local_ci_mode" = full ] || [ "$local_ci_mode" = release ]; } \
     && [ "${DARK_FACTORY_LOCAL_CI_LEASE_HELD-}" != 1 ]; then
