@@ -64,20 +64,23 @@ func (store *Store) SendBackPublishedReview(ctx context.Context, project Project
 	return updated, nil
 }
 
-// ChangeBranchInWork reports whether branch names a factory Change whose task
-// is queued or running, as after a send-back: the head it held is superseded,
-// so it is not publishable until the task settles again.
-func (store *Store) ChangeBranchInWork(ctx context.Context, project ProjectID, branch string) (bool, error) {
+// ChangeBranchClosedToOverseer reports whether branch names a factory Change
+// an overseer may not publish: one whose task is queued or running, as after
+// a send-back (the head it held is superseded until the task settles again),
+// or intake work that no pull request carries yet, which factoryd publishes.
+func (store *Store) ChangeBranchClosedToOverseer(ctx context.Context, project ProjectID, branch string) (bool, error) {
 	tx, err := store.beginRead(ctx)
 	if err != nil {
 		return false, err
 	}
 	defer tx.Close()
-	var inWork bool
+	var closed bool
 	err = tx.connection.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM changes AS c JOIN tasks AS t ON t.id = c.task_id
-		WHERE c.project_id = ? AND substr(lower(hex(c.id)), 1, 12) = ? AND t.status IN ('queued', 'running'))`,
-		project.Bytes(), strings.ToLower(strings.TrimPrefix(branch, "factory/"))).Scan(&inWork)
-	return inWork, err
+		WHERE c.project_id = ? AND substr(lower(hex(c.id)), 1, 12) = ? AND (t.status IN ('queued', 'running')
+		  OR EXISTS (SELECT 1 FROM intake_task_bindings b WHERE b.task_id = c.task_id)
+		     AND NOT EXISTS (SELECT 1 FROM publication_tasks p WHERE p.change_id = c.id OR p.task_id = c.task_id)))`,
+		project.Bytes(), strings.ToLower(strings.TrimPrefix(branch, "factory/"))).Scan(&closed)
+	return closed, err
 }
 
 // MaxSendBackNoteBytes bounds the note a send-back leaves at the end of a

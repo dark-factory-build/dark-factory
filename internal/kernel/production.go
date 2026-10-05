@@ -492,6 +492,81 @@ func (store *Store) RecordPublication(ctx context.Context, project ProjectID, ta
 	return tx.Commit(ctx)
 }
 
+// PublishableChange is a succeeded intake worker task's settled Change that no
+// pull request carries yet: factoryd publishes it itself.
+type PublishableChange struct {
+	Task       Task
+	Change     ChangeID
+	Revision   Revision
+	Base, Head string
+	Accepted   IntakeAcceptance
+}
+
+// PublishFailureID names the one reviewer record of factoryd failing to
+// publish a Change revision; while it exists that revision is not retried.
+func PublishFailureID(change ChangeID, revision Revision) string {
+	return fmt.Sprintf("publish-%s-%d", change, revision.Int64())
+}
+
+// PublishableChanges lists, oldest first, the current settled Changes of
+// succeeded tasks bound to a live intake acceptance whose head differs from
+// their base, with no publication of that Change or task and no recorded
+// publish failure at that Change revision.
+func (store *Store) PublishableChanges(ctx context.Context) ([]PublishableChange, error) {
+	tx, err := store.beginRead(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Close()
+	rows, err := tx.connection.QueryContext(ctx, `SELECT c.id, c.task_id, c.revision, lower(hex(c.base_commit)), lower(hex(c.head_commit)) FROM changes c
+		JOIN tasks t ON t.id = c.task_id AND t.incarnation_id = c.task_incarnation_id
+		JOIN intake_task_bindings b ON b.task_id = c.task_id JOIN intake_acceptances a ON a.id = b.acceptance_id
+		WHERE c.phase = 'retained' AND t.status = 'succeeded' AND a.withdrawn_at_ms IS NULL AND c.head_commit <> c.base_commit
+		  AND NOT EXISTS (SELECT 1 FROM publication_tasks p WHERE p.change_id = c.id OR p.task_id = c.task_id)
+		  AND NOT EXISTS (SELECT 1 FROM production_records r WHERE r.project_id = c.project_id AND r.kind = 'reviewer'
+		      AND r.identity = 'publish-' || lower(hex(c.id)) || '-' || c.revision)
+		ORDER BY c.updated_at_ms LIMIT 8`)
+	if err != nil {
+		return nil, err
+	}
+	var found []PublishableChange
+	for rows.Next() {
+		var change, task []byte
+		var revision int64
+		var value PublishableChange
+		if err := rows.Scan(&change, &task, &revision, &value.Base, &value.Head); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		if value.Change, err = ChangeIDFromBytes(change); err == nil {
+			if value.Task.ID, err = TaskIDFromBytes(task); err == nil {
+				value.Revision, err = NewRevision(revision)
+			}
+		}
+		if err != nil {
+			rows.Close()
+			return nil, err
+		}
+		found = append(found, value)
+	}
+	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
+		return nil, err
+	}
+	for i := range found {
+		var ok, bound bool
+		if found[i].Task, ok, err = taskByID(ctx, tx.connection, found[i].Task.ID); err == nil {
+			found[i].Accepted, bound, err = intakeAcceptanceForTask(ctx, tx.connection, found[i].Task.ID)
+		}
+		if err == nil && (!ok || !bound) {
+			err = ErrCorruptState
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
+	return found, nil
+}
+
 // RecordPublicationWithReviewOperation claims the independent review in the
 // same transaction as publication. This closes the shutdown window between
 // the publication record and review operation creation.

@@ -70,10 +70,10 @@ func (daemon *Daemon) attemptMaintainer(ctx context.Context, call api.Call) api.
 			var branch string
 			_ = json.Unmarshal(params.Arguments["branch"], &branch)
 			_ = json.Unmarshal(params.Arguments["head"], &branch)
-			if inWork, err := daemon.store.ChangeBranchInWork(ctx, authority.ProjectID, branch); err != nil {
+			if closed, err := daemon.store.ChangeBranchClosedToOverseer(ctx, authority.ProjectID, branch); err != nil {
 				return failure("unavailable")
-			} else if inWork {
-				return failure("denied") // a sent-back Change is not publishable
+			} else if closed {
+				return failure("denied") // a sent-back Change, or intake work factoryd publishes
 			}
 		}
 		var repository, source string
@@ -259,30 +259,35 @@ func (daemon *Daemon) recordMaintainerPublication(ctx context.Context, project k
 			return err
 		}
 	}
+	return daemon.recordPublishedPull(ctx, project, task, repo, kernel.ProductionPullRequest{Number: reply.Result.Pull.Number, Title: title, URL: reply.Result.Pull.URL, Head: reply.Result.Pull.Head, Branch: branch, Base: base, State: "open", Review: kernel.ProductionReview{Head: reply.Result.Pull.Head, State: "unknown"}}, body, reply.Result.Pull.Base)
+}
+
+// recordPublishedPull records a created pull request against the task that
+// published it and, on the Maintainer path, claims and launches its review in
+// the same write.
+func (daemon *Daemon) recordPublishedPull(ctx context.Context, project kernel.ProjectID, task kernel.TaskID, repo string, pr kernel.ProductionPullRequest, body, baseSHA string) error {
 	at, err := daemon.timestamp()
 	if err != nil {
 		return err
 	}
-	if daemon.github != nil || daemon.reviewBackend != nil {
-		request := review.Request{Repository: strings.ToLower(repo), PullNumber: reply.Result.Pull.Number, Head: strings.ToLower(reply.Result.Pull.Head), Base: strings.ToLower(reply.Result.Pull.Base), BaseRef: base, Body: body, Provider: "codex"}
-		// The App appends its footer, and enqueue binds the reviewed body's
-		// digest, so review the body GitHub stores (canary 9, #1179).
-		if published, readErr := daemon.publishedReviewRequest(ctx, project, repo, reply.Result.Pull.Number, reply.Result.Pull.Head); readErr == nil {
-			request.Body = published.Body
-		}
-		prepared, prepareErr := review.Prepare(request, daemon.now)
-		if prepareErr != nil {
-			return prepareErr
-		}
-		if err := daemon.store.RecordPublicationWithReviewOperation(ctx, project, task, repo, kernel.ProductionPullRequest{Number: reply.Result.Pull.Number, Title: title, URL: reply.Result.Pull.URL, Head: reply.Result.Pull.Head, Branch: branch, Base: base, State: "open", Review: kernel.ProductionReview{Head: reply.Result.Pull.Head, State: "unknown"}}, prepared.ID, prepared, at); err != nil {
-			return err
-		}
-		daemon.launchReview(project, prepared)
-		err = nil
-	} else {
-		err = daemon.store.RecordPublication(ctx, project, task, repo, kernel.ProductionPullRequest{Number: reply.Result.Pull.Number, Title: title, URL: reply.Result.Pull.URL, Head: reply.Result.Pull.Head, Branch: branch, Base: base, State: "open", Review: kernel.ProductionReview{Head: reply.Result.Pull.Head, State: "unknown"}}, at)
+	if daemon.github == nil && daemon.reviewBackend == nil {
+		return daemon.store.RecordPublication(ctx, project, task, repo, pr, at)
 	}
-	return err
+	request := review.Request{Repository: strings.ToLower(repo), PullNumber: pr.Number, Head: strings.ToLower(pr.Head), Base: strings.ToLower(baseSHA), BaseRef: pr.Base, Body: body, Provider: "codex"}
+	// The App appends its footer, and enqueue binds the reviewed body's
+	// digest, so review the body GitHub stores (canary 9, #1179).
+	if published, readErr := daemon.publishedReviewRequest(ctx, project, repo, pr.Number, pr.Head); readErr == nil {
+		request.Body = published.Body
+	}
+	prepared, err := review.Prepare(request, daemon.now)
+	if err != nil {
+		return err
+	}
+	if err := daemon.store.RecordPublicationWithReviewOperation(ctx, project, task, repo, pr, prepared.ID, prepared, at); err != nil {
+		return err
+	}
+	daemon.launchReview(project, prepared)
+	return nil
 }
 
 // validateMaintainerResponse keeps a protocol-level error from looking like a

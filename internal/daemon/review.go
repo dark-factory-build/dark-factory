@@ -100,23 +100,25 @@ func (daemon *Daemon) customerMaintainer() bool {
 // at a time and at most once per productionRefreshInterval.
 func (daemon *Daemon) tickMergePipeline(ctx context.Context) {
 	now := daemon.now()
-	if now.Before(daemon.pipelineAt) || !daemon.pipelineBusy.CompareAndSwap(false, true) {
+	if now.UnixNano() < daemon.pipelineAt.Load() || !daemon.pipelineBusy.CompareAndSwap(false, true) {
 		return
 	}
-	daemon.pipelineAt = now.Add(productionRefreshInterval)
+	daemon.pipelineAt.Store(now.Add(productionRefreshInterval).UnixNano())
 	go func() {
 		defer daemon.pipelineBusy.Store(false)
 		daemon.advanceMergePipeline(ctx)
 	}()
 }
 
-// advanceMergePipeline refreshes each publishing project's pull requests, so
-// a corrected head is reviewed, then advances every unfinished
-// review operation. It does nothing on an unconnected home.
+// advanceMergePipeline publishes settled intake work, refreshes each
+// publishing project's pull requests, so a corrected head is reviewed, then
+// advances every unfinished review operation. It does nothing on an
+// unconnected home.
 func (daemon *Daemon) advanceMergePipeline(ctx context.Context) {
 	if !daemon.customerMaintainer() {
 		return
 	}
+	daemon.publishSettledChanges(ctx)
 	projects, _ := daemon.store.PublishingProjects(ctx)
 	for _, project := range projects {
 		if err := daemon.refreshProduction(ctx, project); err != nil {
@@ -707,13 +709,19 @@ func (b *daemonReviewBackend) call(ctx context.Context, name string, arguments m
 }
 
 func (b *daemonReviewBackend) callResponse(ctx context.Context, name string, arguments map[string]any) (json.RawMessage, error) {
+	return b.callAs(ctx, "tools/call", map[string]uint64{b.repository: b.repositoryID}, name, arguments)
+}
+
+// callAs sends one tool call under method (the private broker method for a
+// Linear source) for exactly repositories, and returns its structured result.
+func (b *daemonReviewBackend) callAs(ctx context.Context, method string, repositories map[string]uint64, name string, arguments map[string]any) (json.RawMessage, error) {
 	params := map[string]any{"name": name, "arguments": arguments}
-	request := map[string]any{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": params}
+	request := map[string]any{"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
 	encoded, err := json.Marshal(request)
 	if err != nil {
 		return nil, err
 	}
-	response, err := b.daemon.github.MCP(ctx, encoded, map[string]uint64{b.repository: b.repositoryID})
+	response, err := b.daemon.github.MCP(ctx, encoded, repositories)
 	if err != nil {
 		return nil, err
 	}
