@@ -234,20 +234,7 @@ of those claims.
 Never put Worker binding values in a checked-in file, `control-plane/.env*`,
 `control-plane/.dev.vars*`, a provider process, Dark Factory state, shell
 history, or the macOS Keychain. Cloudflare secret values belong only in the
-platform secret binding. The sole local CLI exception is the account/zone-
-scoped `CLOUDFLARE_API_TOKEN` plus `CLOUDFLARE_ACCOUNT_ID` in the ignored,
-mode-`0600` root `.env.txt`, used only through
-`../scripts/with-cloudflare-env.sh dns status`, or
-`../scripts/with-cloudflare-env.sh dns publish-app` for an explicitly
-authorized command. The public launcher replaces itself with an explicit empty
-environment before any setup child. The compiled helper ignores every other
-assignment, rejects symlinks and broad file modes, and never passes the token to
-Wrangler or another child process. It captures and re-verifies one exact
-commit, refuses mutable helper source or a moving `HEAD`, and compiles only an
-offline Git export of that commit. Its link-time direct-invocation check is an
-accidental-misuse guardrail, not authentication: a process already running as
-the operator can read the operator's mode-`0600` files. Run untrusted same-UID
-code under a separate OS identity or keep the credential behind a broker.
+platform secret binding. The `app.darkfactory.build` A record (zone `darkfactory.build`, unproxied, TTL auto, `76.76.21.21`) is static and is managed in the Cloudflare dashboard; there is no repo-held Cloudflare token exception.
 The Durable Object binding embeds resource authority without exposing a
 resource credential to the Worker. See Cloudflare's [binding] and [secret]
 documentation.

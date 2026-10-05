@@ -48,7 +48,6 @@ case "$1:${2-}" in
     list:./...)
         [ "${DF_GATE_FAULT-}" != go-list ] || { echo 'fixture package discovery failure' >&2; exit 1; }
         printf '%s\n' \
-            github.com/dark-factory-build/dark-factory/cmd/cloudflare-admin \
             github.com/dark-factory-build/dark-factory/internal/change \
             github.com/dark-factory-build/dark-factory/internal/changeworker \
             github.com/dark-factory-build/dark-factory/internal/daemon \
@@ -402,7 +401,7 @@ EOF
 for local_child in \
     check-toolchain-pins.sh test-local-ci-environment.sh test-new-worktree.sh \
     test-release.sh test-github-step-summary.sh test-verify-adversarial-review.sh \
-    test-cloudflare-env.sh test-bootstrap-maintainer-v2.sh test-repository-settings.sh \
+    test-bootstrap-maintainer-v2.sh test-repository-settings.sh \
     test-go-gates.sh test-go-e2e-tools.sh go-ci-owned.sh \
     go-e2e.sh \
     test-prepare-release-source.sh test-publish-release.sh \
