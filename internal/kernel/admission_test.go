@@ -1089,3 +1089,66 @@ func TestReviewHandoffTextIsAnOrdinaryTask(t *testing.T) {
 		t.Fatalf("review handoff text not admitted: %+v, %v", result, err)
 	}
 }
+
+// A producer that ends without success and is queued again (an automatic
+// requeue, a retry, a send-back) carries its consumers' pins forward: only a
+// success can be superseded, so nothing else may strand a consumer.
+func TestUnsucceededProducerCarriesPrerequisitePins(t *testing.T) {
+	neverStarted, _ := NewFailureProposal(FailureProtocol, NeverStartedRunDetail)
+	failed, _ := NewFailureProposal(FailureInternal, "retry")
+	for _, test := range []struct {
+		name     string
+		role     AgentRole
+		proposal Proposal
+		requeue  func(*Store, Task) error
+	}{
+		{name: "requeue", role: RoleOrchestrator, proposal: neverStarted, requeue: func(*Store, Task) error { return nil }},
+		{name: "retry", role: RoleWorker, proposal: failed, requeue: func(store *Store, task Task) error {
+			_, err := store.RetryTaskForOperator(context.Background(), task.ID, task.Revision, AgentID{}, mustTime(t, 70))
+			return err
+		}},
+		{name: "send-back", role: RoleWorker, proposal: failed, requeue: func(store *Store, task Task) error {
+			_, err := store.SendBackTask(context.Background(), task.ID, task.Revision, "again", mustTime(t, 70))
+			return err
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			store, finalizing := finalizingReleasedRun(t, test.role, VerificationNone, test.proposal)
+			defer store.Close()
+			consumerAgent, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 225), ProjectID: finalizing.ProjectID, Name: "consumer", Role: RoleOrchestrator, Provider: ProviderCodex, ToolBudgetLimit: 5}, mustTime(t, 50))
+			if err != nil {
+				t.Fatal(err)
+			}
+			consumer, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 229), ProjectID: finalizing.ProjectID, AssignedAgentID: consumerAgent.ID, IncarnationID: incarnationID(t, 230), Title: "consumer", Prerequisites: []TaskPrerequisite{{TaskID: finalizing.TaskID, WorkRevision: mustRevision(t, 1)}}}, mustTime(t, 51))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := finalizeTestRun(t, store, finalizing, 60); err != nil {
+				t.Fatal(err)
+			}
+			producer, _, err := store.Task(ctx, finalizing.TaskID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := test.requeue(store, producer); err != nil {
+				t.Fatal(err)
+			}
+			if producer, _, err = store.Task(ctx, finalizing.TaskID); err != nil || producer.Status != TaskQueued || producer.WorkRevision.Int64() != 2 {
+				t.Fatalf("producer = %+v, %v", producer, err)
+			}
+			connection, err := store.readerConnection(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer connection.Close()
+			var pinned int64
+			if err := connection.QueryRowContext(ctx, `SELECT upstream_work_revision FROM task_prerequisites WHERE task_id = ?`, consumer.ID.Bytes()).Scan(&pinned); err != nil {
+				t.Fatal(err)
+			}
+			if pinned != 2 {
+				t.Fatalf("consumer pinned to producer revision %d, want 2", pinned)
+			}
+		})
+	}
+}
