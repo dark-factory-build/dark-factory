@@ -122,6 +122,7 @@ func (daemon *Daemon) advanceReviewOperations(ctx context.Context, startup bool)
 		if err := json.Unmarshal(operation.Document, &op); err != nil || op.ID == "" || op.ID != operation.ID {
 			return advanced, fmt.Errorf("%w: review operation", kernel.ErrCorruptState)
 		}
+		err = nil
 		stuck := startup || daemon.now().Sub(op.UpdatedAt) > reviewStuckAfter
 		switch {
 		case op.RoutePending:
