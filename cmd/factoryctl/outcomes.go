@@ -60,7 +60,7 @@ func parseOutcome(args []string) (attemptCommand, bool, bool) {
 			}
 			c.contentRevision = x
 		case "--offset":
-			x, ok := parseOffset(v)
+			x, ok := parseCount(v, true)
 			if !ok {
 				return attemptCommand{}, false, false
 			}
