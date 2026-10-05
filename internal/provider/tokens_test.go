@@ -32,15 +32,15 @@ not json
 `)
 		write(filepath.Join(codexConfigHome(runtime), "sessions", "2026", "09", "20", "rollout-x.jsonl"),
 			`{"timestamp":"2026-09-20T11:00:00Z","type":"session_meta","payload":{"id":"s","cwd":"/work/earlier"}}
-{"timestamp":"2026-09-20T11:30:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"total_tokens":1000}}}}
+{"timestamp":"2026-09-20T11:30:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"total_tokens":1000,"input_tokens":900,"cached_input_tokens":700,"output_tokens":100}}}}
 {"timestamp":"2026-09-20T12:01:00Z","type":"turn_context","payload":{"cwd":"/work/change"}}
-{"timestamp":"2026-09-20T12:02:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"total_tokens":1040}}}}
-{"timestamp":"2026-09-20T12:02:01Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"total_tokens":1040}}}}
+{"timestamp":"2026-09-20T12:02:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"total_tokens":1040,"input_tokens":940,"cached_input_tokens":700,"output_tokens":100}}}}
+{"timestamp":"2026-09-20T12:02:01Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"total_tokens":1040,"input_tokens":940,"cached_input_tokens":700,"output_tokens":100}}}}
 {"timestamp":"2026-09-20T12:03:00Z","type":"event_msg","payload":{"type":"token_count","info":null}}
 {"timestamp":"2026-09-20T12:04:00Z","type":"turn_context","payload":{"cwd":"/work/other"}}
-{"timestamp":"2026-09-20T12:05:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"total_tokens":9000}}}}
+{"timestamp":"2026-09-20T12:05:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"total_tokens":9000,"input_tokens":8900,"cached_input_tokens":700,"output_tokens":100}}}}
 `)
-		want := map[kernel.Provider]uint64{kernel.ProviderClaudeCode: 50, kernel.ProviderCodex: 40}[kind]
+		want := map[kernel.Provider]uint64{kernel.ProviderClaudeCode: 46, kernel.ProviderCodex: 40}[kind]
 		if got := RunTokens(kind, runtime.accountHome, runtime.accountConfig, cwd, since); got != want {
 			t.Fatalf("%s tokens = %d, want %d", kind, got, want)
 		}

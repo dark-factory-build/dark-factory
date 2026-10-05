@@ -10,8 +10,16 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 )
 
-// RunTokens is what one run spent, read from the provider's own session log:
-// every token the provider processed for work in cwd since the run began.
+type codexTokenUsage struct {
+	Tokens      uint64 `json:"total_tokens"`
+	Input       uint64 `json:"input_tokens"`
+	CachedInput uint64 `json:"cached_input_tokens"`
+	Output      uint64 `json:"output_tokens"`
+}
+
+// RunTokens is the billable token usage of one run, read from the provider's
+// own session log: uncached input plus output (and Claude cache creation)
+// for work in cwd since the run began. Cached input reads are excluded.
 // A log that is absent or unreadable counts nothing; it never fails a run.
 func RunTokens(kind kernel.Provider, accountHome, accountConfig, cwd string, since time.Time) uint64 {
 	runtime := RuntimePaths{accountHome: accountHome, accountConfig: accountConfig}
@@ -70,13 +78,12 @@ func claudeTranscriptTokens(path string, since time.Time) uint64 {
 					Input         uint64 `json:"input_tokens"`
 					Output        uint64 `json:"output_tokens"`
 					CacheCreation uint64 `json:"cache_creation_input_tokens"`
-					CacheRead     uint64 `json:"cache_read_input_tokens"`
 				}
 			}
 		}
 		if json.Unmarshal(line, &entry) == nil && entry.Message.Usage != nil && !entry.Timestamp.Before(since) {
 			usage := entry.Message.Usage
-			messages[entry.Message.ID] = addTokens(addTokens(usage.Input, usage.Output), addTokens(usage.CacheCreation, usage.CacheRead))
+			messages[entry.Message.ID] = addTokens(addTokens(usage.Input, usage.Output), usage.CacheCreation)
 		}
 	})
 	var total uint64
@@ -99,9 +106,7 @@ func codexRolloutTokens(path, cwd string, since time.Time) uint64 {
 				Type string
 				Cwd  string
 				Info *struct {
-					Total struct {
-						Tokens uint64 `json:"total_tokens"`
-					} `json:"total_token_usage"`
+					Total codexTokenUsage `json:"total_token_usage"`
 				}
 			}
 		}
@@ -114,11 +119,26 @@ func codexRolloutTokens(path, cwd string, since time.Time) uint64 {
 		if entry.Payload.Type != "token_count" || entry.Payload.Info == nil {
 			return
 		}
-		now := entry.Payload.Info.Total.Tokens
+		now := entry.Payload.Info.Total.billable()
 		if now > last && current == cwd && !entry.Timestamp.Before(since) {
 			total = addTokens(total, now-last)
 		}
 		last = now
 	})
 	return total
+}
+
+func (usage codexTokenUsage) billable() uint64 {
+	// Older rollouts only contain total_tokens; retain their accounting while
+	// newer rollouts use Codex's uncached-input-plus-output definition.
+	if usage.Input == 0 && usage.CachedInput == 0 && usage.Output == 0 {
+		return usage.Tokens
+	}
+	input := usage.Input
+	if usage.CachedInput < input {
+		input -= usage.CachedInput
+	} else {
+		input = 0
+	}
+	return addTokens(input, usage.Output)
 }
