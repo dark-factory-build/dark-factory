@@ -307,6 +307,7 @@ type liveAttempt struct {
 
 	livenessMu           sync.Mutex
 	callFirst            bool // a freshly launched provider's first act is an attempt API call; never set on adoption
+	adopted              bool // taken over after a restart: it has already started
 	startedAt            time.Time
 	lastTerminalOutputAt time.Time
 	lastAttemptAPICallAt time.Time
@@ -360,7 +361,7 @@ func (attempt *liveAttempt) neverStarted() bool {
 }
 
 func (attempt *liveAttempt) neverStartedLocked() bool {
-	return attempt.lastAttemptAPICallAt.IsZero() && (attempt.callFirst || attempt.terminalOutputBytes == 0)
+	return !attempt.adopted && attempt.lastAttemptAPICallAt.IsZero() && (attempt.callFirst || attempt.terminalOutputBytes == 0)
 }
 
 func (attempt *liveAttempt) markStarted(at time.Time) {

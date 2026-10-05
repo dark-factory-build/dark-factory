@@ -38,7 +38,7 @@ func TestRunLivenessFailsOnlyAQuietAttempt(t *testing.T) {
 	started := time.UnixMilli(10_000)
 	attempt.markStarted(started)
 	attempt.retainDiagnosticOutput(0, 18, []byte("Login expired\r\n> "))
-	attempt.markTerminalOutput(started, 18)
+	attempt.adopted = true // replayed output only: a run taken over after a restart
 	if err := fixture.daemon.registerLiveAttempt(attempt); err != nil {
 		t.Fatal(err)
 	}
