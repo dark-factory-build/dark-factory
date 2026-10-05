@@ -95,3 +95,38 @@ test("one Show more control expands loaded work before requesting another page",
   assert.equal(requested, 1);
   await act(async () => tree.unmount());
 });
+
+
+test("source disclosure distinguishes observed empty files from unavailable and omitted edits", () => {
+  const complete = { ...active.source, kind: "committed", base: "b".repeat(40), head: active.pullRequest.head, target: "refs/heads/main", stale: false, reason: "", relationshipsUnavailable: "" };
+  for (const [source, expected, status] of [
+    [complete, "No observed file edits.", ""],
+    [{ ...complete, kind: "unavailable", reason: "Snapshot missing" }, "File edits unavailable.", "Source details unavailable"],
+    [{ ...complete, omitted: 3 }, "File edits are outside this observation.", "Source details incomplete"],
+  ]) {
+    const item = { ...active, source };
+    const markup = renderToStaticMarkup(createElement(ProductionPanel, { items: [item], selected: productionKey(item), onSelect() {} }));
+    assert.match(markup, /<details aria-label="Before and proposed source"><summary>Source changes<\/summary>/);
+    assert.ok(markup.includes(expected));
+    assert.match(markup, /Target <code>refs\/heads\/main<\/code>/);
+    if (status) {
+      assert.ok(markup.includes(status));
+      assert.doesNotMatch(markup, /No observed file edits|0 observed/);
+    } else assert.doesNotMatch(markup, /Source details unavailable|Source details incomplete/);
+  }
+});
+
+test("disconnected source and revision evidence remains readable without enabled work actions", async () => {
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+  const item = { ...active, source: { ...active.source, kind: "working-tree", base: "b".repeat(40), head: active.pullRequest.head, observation: "observed-dirty-tree", paths: [{ status: "renamed", old_path: "before.go", path: "after.go" }], reason: "", relationshipsUnavailable: "" } };
+  let tree;
+  try {
+    await act(async () => { tree = create(createElement(ProductionPanel, { items: [item], selected: productionKey(item), onSelect() {}, connected: false, onOpenTask() {}, onMission() {} })); });
+    const source = tree.root.findByProps({ "aria-label": "Before and proposed source" });
+    assert.equal(source.props.open, undefined);
+    const markup = renderToStaticMarkup(createElement(ProductionPanel, { items: [item], selected: productionKey(item), onSelect() {}, connected: false }));
+    for (const evidence of ["Last observed state", "Disconnected. This is the last observed state.", "Source details out of date", "before.go", "after.go", "observed-dirty-tree", "Commit checks and approval do not cover these edits.", active.pullRequest.head]) assert.ok(markup.includes(evidence));
+    assert.ok(tree.root.findAllByType("button").filter((button) => button.children.join("").startsWith("Open ")).every((button) => button.props.disabled));
+    assert.equal(tree.root.findAllByType("button").find((button) => button.children.join("") === "← Back to Changes").props.disabled, undefined);
+  } finally { if (tree) await act(async () => tree.unmount()); }
+});

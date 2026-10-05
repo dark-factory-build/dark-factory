@@ -191,6 +191,20 @@ replacement floors, separate production machines and expanding production area
 are removed. Changes open the existing evidence inspector; tasks, missions,
 workers and the project library retain their existing controls and authority.
 
+### Reading the factory
+
+The default floor shows source search, a Changes entry point and Help. Help
+contains the legend and integrated-source provenance. One concise notice links
+to Changes when observations cannot be fully mapped; a verified empty diff is
+not missing evidence. Changes owns proposal selection, before/proposed paths,
+review and checks. The floor retains a clearable selected-proposal indicator.
+
+Selecting equipment opens one source inspector. Its closed Source details
+contains canonical identity, counts, exact files and relationships. Discuss this
+source opens the existing scoped Board directly. Library reading leads with
+content and consequential state; task use, sources/access and management are
+separate disclosures. Detail and social preferences remain only in Settings.
+
 ### Integrated source
 
 Topology reads an immutable archive of each registered repository's configured

@@ -681,7 +681,6 @@
 }
 
 .dfFactoryConsole__header select,
-.dfRoomDetails select,
 .dfConsoleSidebar :where(input[type="text"], input:not([type]), select),
 .dfConsoleDialog :where(input[type="text"], input:not([type]), select) {
   width: 100%;
@@ -867,20 +866,22 @@ summary.dfConsoleItem__summary { cursor: pointer; }
 .dfMissions :is(button, select) { min-height: 2.75rem; }
 
 /* One floor: source search, projection controls and proposal selection stay reachable. */
-.dfFactoryEntityTools { padding: .65rem; background: #122027; border-bottom: 1px solid #3c5051; }
-.dfFactoryEntityTools label { display: flex; align-items: center; gap: .5rem; }
-.dfFactoryEntityTools input { min-width: 0; flex: 1; }
-.dfFactoryEntityTools__results, .dfFactoryProposals, .dfFactoryFloor__changes { display: flex; flex-wrap: wrap; gap: .4rem; max-height: 9rem; overflow: auto; }
-.dfFactoryEntityTools__results button, .dfFactoryProposals button { max-width: 100%; overflow-wrap: anywhere; font-size: .75rem; }
-.dfFactoryProposals button[aria-pressed="true"] { border-color: #a8d8ea; background: #274655; }
+.dfFactoryEntityTools { display: flex; align-items: baseline; flex-wrap: wrap; gap: .5rem; padding: .5rem; background: #122027; border-bottom: 1px solid #3c5051; }
+.dfFactoryEntityTools label { display: flex; align-items: center; gap: .5rem; flex: 1 1 15rem; }
+.dfFactoryEntityTools input { width: 100%; min-width: 0; flex: 1; color: inherit; background: var(--df-console-background); border: 1px solid var(--df-console-rule); padding: .5rem; font: inherit; }
+.dfFactoryEntityTools__results { order: 1; flex-basis: 100%; display: flex; flex-wrap: wrap; gap: .4rem; max-height: 9rem; overflow: auto; }
+.dfFactoryEntityTools__results button { max-width: 100%; overflow-wrap: anywhere; font-size: .75rem; }
+.dfFactoryEntityTools__notice { flex-basis: 100%; display: flex; align-items: baseline; flex-wrap: wrap; gap: .4rem; margin: 0; font-size: .8rem; }
+.dfFactoryEntityTools__selection { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: min(100%, 32rem); }
+.dfFactoryHelp[open] { flex-basis: 100%; overflow-wrap: anywhere; }
 .dfFactoryLegend { color: #b2c6be; font-size: .72rem; line-height: 1.7; margin: .4rem 0; }
-.dfRoomDetails td, .dfRoomDetails th, .dfFactoryFloor__changes td { overflow-wrap: anywhere; }
+.dfRoomDetails td, .dfRoomDetails th { overflow-wrap: anywhere; }
 .dfRoomDetails button { max-width: 100%; overflow-wrap: anywhere; }
 
 /* Source identity is exact, including on phone-sized inspectors. */
 .dfFactoryFloor [role="status"], .dfFactoryFloor code, .dfProduction code { overflow-wrap: anywhere; word-break: break-word; }
 .dfFactoryFloor section, .dfRoomDetails, .dfProduction__detail { min-width: 0; }
-.dfFactoryFloor select, .dfRoomDetails select { max-width: 100%; min-width: 0; }
+
 .dfProduction table { table-layout: fixed; width: 100%; font-size: .8rem; }
 .dfProduction table th:first-child { width: 6rem; white-space: nowrap; }
 .dfProduction table td { overflow-wrap: anywhere; }

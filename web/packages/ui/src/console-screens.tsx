@@ -11,9 +11,9 @@ import {
   type RunPathSample,
 } from "./console-view.js";
 import { FactoryScene, AgentSprite } from "./factory-scene/factory-scene.js";
-import { productionKey, type ProductionContraption } from "./production-view.js";
-import { knowledgeMetadata, type ProjectContentCall } from "./project-library.js";
-import { proposalsForEntity, type SceneNode } from "./factory-scene/scene.js";
+import { inProgressProduction, productionKey, type ProductionContraption } from "./production-view.js";
+import { type ProjectContentCall } from "./project-library.js";
+import { type SceneNode } from "./factory-scene/scene.js";
 import { DEFAULT_FLOOR_APPEARANCE, type FloorAppearance } from "./floor-appearance.js";
 
 function shortID(value: string): string {
@@ -85,11 +85,12 @@ const NO_CHANGES: readonly ProductionContraption[] = [];
 /** Flat source projection; every action opens an existing inspector or control. */
 export function FactoryFloor({
   changes = NO_CHANGES, selectedChange, onSelectChange, state, topologies, runPaths, lastRunPaths, selectedAgentId, onSelectAgent,
-  onSelectHumanRequest, selectedTaskId, onSelectTask, onOpenTasks, onOpenMissions, onOpenLibrary, onOpenBoard, requestedEntity, connected = true, floorAppearance = DEFAULT_FLOOR_APPEARANCE, projectId, onProjectContent,
+  onSelectHumanRequest, selectedTaskId, onSelectTask, onOpenTasks, onOpenMissions, onOpenLibrary, onOpenBoard, onOpenChanges, requestedEntity, connected = true, floorAppearance = DEFAULT_FLOOR_APPEARANCE, projectId, onProjectContent,
 }: {
   changes?: readonly ProductionContraption[];
   selectedChange?: string;
   onSelectChange?: (key: string) => void;
+  onOpenChanges?: () => void;
   state: StateView | undefined;
   topologies: ReadonlyMap<string, TopologyView> | undefined;
   runPaths?: ReadonlyMap<string, RunPathSample>;
@@ -119,18 +120,30 @@ export function FactoryFloor({
   const peerQuestions = useMemo(() => [...(state?.peerQuestions?.values() ?? [])], [state]);
   const inventoryOmitted = [...(state?.projects.keys() ?? [])].reduce((count, id) => count + (topologies?.get(id)?.inventoryOmitted ?? 0), 0);
   const entity = selected.detailByID.get(selectedEntity ?? "");
-  const related = proposalsForEntity(proposed.topology, proposed.proposals, selectedEntity);
+  const incompleteChanges = proposed.proposals.filter((proposal) => {
+    const source = changes.find((item) => productionKey(item) === proposal.id)?.source;
+    return proposal.state === "unavailable" || (source?.omitted ?? 0) > 0 || (source?.relationshipsOmitted ?? 0) > 0 || Boolean(source?.relationshipsUnavailable) || proposal.operations.some((operation) => !operation.roomId) || proposal.relationships?.some((edge) => !edge.fromId || !edge.toId);
+  }).length;
+  const topology = topologies?.get(entity?.project?.id ?? "");
   return <div className="dfFactoryFloor">
-    <details className="dfFactoryFloor__source"><summary>Integrated source · {state?.projects.size ?? 0} projects</summary>
-      {[...(state?.projects.values() ?? [])].map((project) => { const topology = topologies?.get(project.id); return <p key={project.id}>{project.name}: {topology?.sources?.length ? topology.sources.map((source) => <span key={source.repository_id}> · {source.repository_id} · {source.target_ref || "target unavailable"} · {source.kind} · {source.revision ? <code>{source.revision}</code> : "revision unavailable"}{source.reason ? `: ${source.reason}` : ""}</span>) : topology?.sourceRevision ? <code>{topology.sourceRevision}</code> : "integrated revision unavailable"}</p>; })}
-    </details>
-    {inventoryOmitted === 0 && scene.aggregatedLocations === 0 ? null : <p role="status">{inventoryOmitted > 0 ? `${inventoryOmitted} source inventories unavailable. ` : ""}{scene.aggregatedLocations > 0 ? `${scene.aggregatedLocations} areas aggregated into their visible ancestors; search still reaches every served entity.` : ""}</p>}
-    {proposed.aggregatedProposals === 0 ? null : <p role="status">{proposed.aggregatedProposals} proposed new areas are marked in their owning rooms. All observed paths remain in the Change inspector.</p>}
-    <div className="dfFactoryFloor__changes" aria-label="Source observation notices">
-      {changes.filter((item) => proposed.proposals.some((proposal) => proposal.id === productionKey(item)) && (item.source.omitted > 0 || item.source.kind === "unavailable")).map((item) => <p key={productionKey(item)} role="status">{item.pullRequest?.title || item.construction?.title}: {item.source.omitted > 0 ? `${item.source.omitted} paths outside this bounded observation. ` : ""}{item.source.reason} Inspect the Change for full evidence.</p>)}
-    </div>
     <div className="dfFactoryFloor__scene">
     <FactoryScene
+      tools={<>
+        <button type="button" disabled={!onOpenChanges} onClick={onOpenChanges}>Changes · {changes.filter(inProgressProduction).length}</button>
+        <details className="dfFactoryHelp"><summary>Help</summary>
+          <p>Select equipment to inspect it. Search finds source areas beyond the visible rooms.</p>
+          <p className="dfFactoryLegend">⚙ Code · ⏚ Tests · ▤ Config · ▥ Docs · ▦ Assets</p>
+          <p>Frames are additions, repair marks are edits, and crossed equipment is proposed removal. Select a Change to view its proposal.</p>
+          <h4>Integrated source</h4>
+          {[...(state?.projects.values() ?? [])].map((project) => { const source = topologies?.get(project.id); return <p key={project.id}>{project.name}: {source?.sources?.length ? source.sources.map((item) => <span key={item.repository_id}> · {item.repository_id} · {item.target_ref || "target unavailable"} · {item.kind} · <code>{item.revision || "revision unavailable"}</code>{item.reason ? `: ${item.reason}` : ""}</span>) : <code>{source?.sourceRevision || "integrated revision unavailable"}</code>}</p>; })}
+          {scene.aggregatedLocations > 0 ? <p>{scene.aggregatedLocations} source areas grouped into larger assemblies; search reaches every served entity.</p> : null}
+          {proposed.aggregatedProposals > 0 ? <p>{proposed.aggregatedProposals} proposed areas grouped into their owning rooms. Full paths are in Changes.</p> : null}
+        </details>
+        {incompleteChanges > 0 ? <p className="dfFactoryEntityTools__notice" role="status">{incompleteChanges} {incompleteChanges === 1 ? "change is" : "changes are"} not fully shown on the floor. <button type="button" disabled={!onOpenChanges} onClick={onOpenChanges}>View changes</button></p> : null}
+        {inventoryOmitted > 0 ? <p className="dfFactoryEntityTools__notice" role="status">Source inventory incomplete: {inventoryOmitted} areas unavailable.</p> : null}
+      </>}
+      sourceDetails={entity === undefined ? undefined : <SourceContents key={`${entity.id}:${topology?.digest}`} node={entity} topology={topology} call={connected ? onProjectContent : undefined} />}
+      onDiscussSource={entity === undefined || onOpenBoard === undefined ? undefined : () => onOpenBoard(entity.project?.id, entity.id, undefined, sourceForNode(entity, topology)?.repository_id)}
       proposals={{ items: proposed.proposals, selected: selectedChange, onSelect: (id) => onSelectChange?.(id) }}
       appearance={floorAppearance}
       selectedWorkerId={selectedAgentId}
@@ -161,32 +174,11 @@ export function FactoryFloor({
       }}
     />
     </div>
-    {entity === undefined ? null : <section key={`${entity.id}:${topologies?.get(entity.project?.id ?? "")?.digest}`} aria-label="Source contents">
-      <p>Stable source reference <code>{entity.id}</code></p>
-      <SourceNotices entity={entity} topology={topologies?.get(entity.project?.id ?? "")} call={connected ? onProjectContent : undefined} open={onOpenBoard} />
-      <SourceContents node={entity} topology={topologies?.get(entity.project?.id ?? "")} call={connected ? onProjectContent : undefined} />
-      {related.map((proposal) => <button key={proposal.id} type="button" onClick={() => onSelectChange?.(proposal.id)}>Inspect change: {proposal.title}</button>)}
-    </section>}
   </div>;
 }
 
 
 const sourceForNode = (node: SceneNode, topology?: TopologyView) => [...topology?.sources ?? []].filter((source) => source.prefix === "" || node.path === source.prefix || node.path.startsWith(`${source.prefix}/`)).sort((a, b) => b.prefix.length - a.prefix.length)[0];
-
-function SourceNotices({ entity, topology, call, open }: { entity: SceneNode; topology?: TopologyView; call?: ProjectContentCall; open?: (project?: string, entity?: string, id?: string, repository?: string) => void }) {
-  const repository = sourceForNode(entity, topology)?.repository_id;
-  const [items, setItems] = useState<Readonly<Record<string, unknown>>[]>([]), [notice, setNotice] = useState(""), [next, setNext] = useState(0), [pending, setPending] = useState(false);
-  const epoch = useRef(0);
-  useEffect(() => () => { epoch.current++; }, []);
-  const read = async (offset = 0) => {
-    if (!call || !entity.project) return;
-    const generation = epoch.current; setPending(true);
-    try { const result = await call("search", { project_id: entity.project.id, repository_id: repository ?? "", entity: entity.id, kind: "discussion", open_only: true, offset, limit: 4 }); if (generation !== epoch.current) return; setItems(Array.isArray(result.items) ? result.items as Readonly<Record<string, unknown>>[] : []); setNext(Number(result.next_offset ?? 0)); setNotice("Notices are retained project threads. Open a thread for its evidence."); }
-    catch { if (generation === epoch.current) setNotice("Notices unavailable."); }
-    finally { if (generation === epoch.current) setPending(false); }
-  };
-  return <section aria-label="Source notices"><button type="button" disabled={!call || pending} onClick={() => void read()}>Read notices for this source</button><button type="button" disabled={!open} onClick={() => open?.(entity.project?.id, entity.id, undefined, repository)}>Discuss this source</button>{items.filter((item) => !knowledgeMetadata(item.source_references).resolved).map((item) => <button type="button" key={String(item.id)} onClick={() => open?.(entity.project?.id, entity.id, String(item.id), repository)}>{String(item.title)} · unresolved · r{String(item.revision)}{item.projected_status === "needs_revalidation" ? " · needs revalidation" : ""}</button>)}{next ? <button type="button" disabled={pending} onClick={() => void read(next)}>More source notices</button> : null}{notice ? <p role="status">{notice}</p> : null}</section>;
-}
 
 function SourceContents({ node, topology, call }: { node: SceneNode; topology?: TopologyView; call?: ProjectContentCall }) {
   const [files, setFiles] = useState<Readonly<Record<string, unknown>>[]>([]), [next, setNext] = useState(0), [loaded, setLoaded] = useState(false), [pending, setPending] = useState(false), [notice, setNotice] = useState("");
@@ -203,7 +195,7 @@ function SourceContents({ node, topology, call }: { node: SceneNode; topology?: 
       if (result.unavailable) { setNotice(String(result.unavailable)); return; }
       setFiles((old) => [...old, ...(Array.isArray(result.files) ? result.files as Readonly<Record<string, unknown>>[] : [])]);
       setNext(Number(result.next_offset) || 0); setLoaded(true);
-      setNotice(`${Number(result.total) || 0} directly owned files at ${String(result.revision || "unknown revision")}. Descendant files belong to their own entities.`);
+      setNotice(`${typeof result.total === "number" ? result.total : "Unknown number of"} directly owned files · ${String(result.revision || "revision unavailable")}`);
     } catch { if (generation === epoch.current) setNotice("Source contents unavailable. Refresh the topology before retrying."); }
     finally { if (generation === epoch.current) setPending(false); }
   };

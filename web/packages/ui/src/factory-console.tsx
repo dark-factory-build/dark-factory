@@ -219,7 +219,8 @@ export function FactoryConsole({
   const [requestedEntity, setRequestedEntity] = useState<{ id: string }>();
   const openKnowledge = (board: boolean, project?: string, entity?: string, id?: string, repository?: string) => { setKnowledgeView({ board, project: project ?? projectId, ...(entity ? { entity } : {}), ...(id ? { id } : {}), ...(repository ? { repository } : {}) }); setLibraryOpen(true); };
   const [requestedMission, setRequestedMission] = useState<{ projectId: string; id: string }>();
-  const selectProduction = (key: string) => { setSelectedProduction(key); onDetail?.("production"); };
+  const selectProduction = (key: string) => { setSelectedProduction(key); if (key) onDetail?.("production"); };
+  const openChanges = () => { setSelectedProduction(undefined); onDetail?.("production"); };
   const counters = factoryCounters(state);
   const agent = selectedAgent === undefined ? undefined : scopedState?.agents.get(selectedAgent.id);
   const selectedDetail = (detail === "floor" ? "needs-you" : detail) ?? (selectedAgent === undefined ? "needs-you" : "agent");
@@ -276,7 +277,6 @@ export function FactoryConsole({
           </div>
         </header>
 
-        {ready && onSetDispatch === undefined ? <p className="dfConsoleSidebar__inherit">Administrator access is required to pause or resume new work.</p> : null}
         {dispatchNotice === "" ? null : <p className="dfConsoleSidebar__status" role="status">{dispatchNotice}</p>}
         {dispatchError === "" ? null : <p role="alert">{dispatchError}</p>}
         {error === undefined ? null : (
@@ -289,7 +289,7 @@ export function FactoryConsole({
           <button type="button" aria-pressed={detail === "floor" && view === "floor"} disabled={!ready} onClick={() => { onView?.("floor"); onDetail("floor"); }}>Floor</button>
           <button type="button" aria-pressed={detail === "floor" && view === "agents"} disabled={!ready || onView === undefined} onClick={() => { onView?.("agents"); onDetail("floor"); }}>Agents</button>
           <button type="button" aria-pressed={detail === "missions"} disabled={!ready} onClick={() => onDetail("missions")}>Missions</button>
-          <button type="button" aria-pressed={detail === "production"} onClick={() => onDetail("production")}>Changes</button>
+          <button type="button" aria-pressed={detail === "production"} onClick={openChanges}>Changes</button>
           <button type="button" aria-pressed={detail === "queue"} disabled={!ready} onClick={() => onDetail("queue")}>Tasks</button>
           <button type="button" aria-pressed={detail !== "floor" && selectedDetail === "needs-you"} disabled={!ready} onClick={() => onDetail("needs-you")}>Needs you {counters.needsYou || ""}</button>
         </nav>}
@@ -312,7 +312,7 @@ export function FactoryConsole({
               </div>
             </div>
             {view === "floor"
-              ? <FactoryFloor requestedEntity={requestedEntity} onOpenBoard={(project, entity, id, repository) => openKnowledge(true, project, entity, id, repository)} changes={productionItems} selectedChange={selectedProduction} onSelectChange={selectProduction} onProjectContent={onProjectContent} onOpenLibrary={(id) => openKnowledge(false, id)} onOpenTasks={ready ? (id) => { selectProject(id); onDetail?.("queue"); } : undefined} onOpenMissions={ready ? (id) => { selectProject(id); onDetail?.("missions"); } : undefined} projectId={projectId} onProject={selectProject} floorAppearance={floorAppearance} selectedTaskId={selectedTask?.id} onSelectTask={ready ? selectTask : undefined} selectedAgentId={selectedDetail === "agent" ? selectedAgent?.id : undefined} state={scopedState} topologies={topologies} runPaths={runPaths} lastRunPaths={lastRunPaths} onSelectAgent={ready ? onSelectAgent : undefined} onSelectHumanRequest={ready ? onSelectHumanRequest : undefined} connected={ready} />
+              ? <FactoryFloor onOpenChanges={onDetail === undefined ? undefined : openChanges} requestedEntity={requestedEntity} onOpenBoard={(project, entity, id, repository) => openKnowledge(true, project, entity, id, repository)} changes={productionItems} selectedChange={selectedProduction} onSelectChange={selectProduction} onProjectContent={onProjectContent} onOpenLibrary={(id) => openKnowledge(false, id)} onOpenTasks={ready ? (id) => { selectProject(id); onDetail?.("queue"); } : undefined} onOpenMissions={ready ? (id) => { selectProject(id); onDetail?.("missions"); } : undefined} projectId={projectId} onProject={selectProject} floorAppearance={floorAppearance} selectedTaskId={selectedTask?.id} onSelectTask={ready ? selectTask : undefined} selectedAgentId={selectedDetail === "agent" ? selectedAgent?.id : undefined} state={scopedState} topologies={topologies} runPaths={runPaths} lastRunPaths={lastRunPaths} onSelectAgent={ready ? onSelectAgent : undefined} onSelectHumanRequest={ready ? onSelectHumanRequest : undefined} connected={ready} />
               : <AgentList state={scopedState} selectedAgentId={selectedAgent?.id} ready={ready} onSelectAgent={ready ? onSelectAgent : undefined} />}
           </section>
 
@@ -323,7 +323,7 @@ export function FactoryConsole({
               <button type="button" aria-pressed={selectedDetail === "needs-you"} disabled={!ready || onDetail === undefined} onClick={() => onDetail?.("needs-you")}>Needs you <span>{counters.needsYou ?? "—"}</span></button>
               <button type="button" aria-pressed={selectedDetail === "missions"} disabled={!ready || onDetail === undefined} onClick={() => onDetail?.("missions")}>Missions</button>
               <button type="button" aria-pressed={selectedDetail === "queue"} disabled={!ready || onDetail === undefined} onClick={() => onDetail?.("queue")}>Tasks</button>
-              <button type="button" aria-pressed={selectedDetail === "production"} disabled={onDetail === undefined} onClick={() => onDetail?.("production")}>Changes</button>
+              <button type="button" aria-pressed={selectedDetail === "production"} disabled={onDetail === undefined} onClick={openChanges}>Changes</button>
               <button type="button" aria-pressed={selectedDetail === "agent"} disabled={!ready || onDetail === undefined} onClick={() => onDetail?.("agent")}>Agent</button>
             </div>
             {editError === undefined ? null : <p className="dfFactoryConsole__terminalError" role="alert">{editError}</p>}
