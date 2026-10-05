@@ -31,7 +31,6 @@ case "$event_name" in
             *) echo "release pushes must run from a tag" >&2; exit 1 ;;
         esac
         expected_source=$event_sha
-        publisher=./scripts/publish-release.sh
         ;;
     workflow_dispatch)
         if [ -z "$default_branch" ] || [ "$event_ref" != "refs/heads/$default_branch" ]; then
@@ -75,20 +74,19 @@ if [ -n "$expected_source" ] && [ "$source_sha" != "$expected_source" ]; then
     exit 1
 fi
 
-# Recovery publishes with the default branch's Go publisher, not the tag's
-# (an older tag may predate it), so keep that tree before switching sources.
-if [ "$event_name" = workflow_dispatch ]; then
-    publisher_source=$(mktemp -d "$runner_temp/dark-factory-publisher.XXXXXX")
-    git archive "$event_sha" | tar -x -C "$publisher_source"
-    publisher="$publisher_source/publish"
-    printf '#!/bin/sh\nset -e\ngo build -C %s -o %s/release-artifact ./internal/buildinfo/cmd/release-artifact\nexec %s/release-artifact publish "$@"\n' \
-        "$publisher_source" "$publisher_source" "$publisher_source" >"$publisher"
-    chmod 0700 "$publisher"
-fi
+# The release tool comes from the workflow's own commit, not the tag's: a
+# recovery dispatch runs the default branch's tool over an older tag that may
+# predate it. For a tag push the two are the same commit.
+tool_source=$(mktemp -d "$runner_temp/dark-factory-release-tool.XXXXXX")
+git archive "$event_sha" | tar -x -C "$tool_source"
+release_artifact="$tool_source/release"
+printf '#!/bin/sh\nset -e\ngo build -C %s -o %s/release-artifact ./internal/buildinfo/cmd/release-artifact\nexec %s/release-artifact "$@"\n' \
+    "$tool_source" "$tool_source" "$tool_source" >"$release_artifact"
+chmod 0700 "$release_artifact"
 
 git checkout --force --detach "$source_sha"
 git clean -ffdx
 
 printf 'TAG=%s\n' "$tag" >>"$environment_file"
 printf 'SOURCE_SHA=%s\n' "$source_sha" >>"$environment_file"
-printf 'PUBLISHER=%s\n' "$publisher" >>"$environment_file"
+printf 'RELEASE_ARTIFACT=%s\n' "$release_artifact" >>"$environment_file"

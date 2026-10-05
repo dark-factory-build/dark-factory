@@ -12,13 +12,12 @@ git init --bare "$remote" >/dev/null
 git init -b main "$seed" >/dev/null
 git -C "$seed" config user.name fixture
 git -C "$seed" config user.email fixture@example.com
-mkdir -p "$seed/scripts"
-printf 'tagged publisher\n' >"$seed/scripts/publish-release.sh"
-git -C "$seed" add scripts/publish-release.sh
+printf 'tagged tool\n' >"$seed/marker"
+git -C "$seed" add marker
 git -C "$seed" commit -m tagged >/dev/null
 tagged_sha=$(git -C "$seed" rev-parse HEAD)
 git -C "$seed" tag v1.2.3
-printf 'trusted main publisher\n' >"$seed/scripts/publish-release.sh"
+printf 'trusted main tool\n' >"$seed/marker"
 git -C "$seed" commit -am main >/dev/null
 main_sha=$(git -C "$seed" rev-parse HEAD)
 git -C "$seed" remote add origin "$remote"
@@ -61,8 +60,8 @@ run_resolver() {
     )
 }
 
-# Recovery resolves the immutable tag but saves the publisher source from the
-# exact checked-out default-branch commit before switching source trees.
+# Recovery resolves the immutable tag but saves the release tool source from
+# the exact checked-out default-branch commit before switching source trees.
 fresh_workspace recovery
 run_resolver workflow_dispatch refs/heads/main "$main_sha" v1.2.3
 [ "$(git -C "$workspace" rev-parse HEAD)" = "$tagged_sha" ] \
@@ -70,19 +69,19 @@ run_resolver workflow_dispatch refs/heads/main "$main_sha" v1.2.3
 [ "$(value TAG "$environment_file")" = v1.2.3 ] || fail "recovery tag"
 [ "$(value SOURCE_SHA "$environment_file")" = "$tagged_sha" ] \
     || fail "recovery source SHA"
-publisher=$(value PUBLISHER "$environment_file")
-[ -x "$publisher" ] || fail "trusted publisher is not executable"
-[ "$(cat "$(dirname "$publisher")/scripts/publish-release.sh")" = "trusted main publisher" ] \
-    || fail "recovery used the tagged publisher"
-grep -Fq "exec $(dirname "$publisher")/release-artifact publish" "$publisher" \
-    || fail "recovery publisher does not run the default-branch build"
+tool=$(value RELEASE_ARTIFACT "$environment_file")
+[ -x "$tool" ] || fail "trusted release tool is not executable"
+[ "$(cat "$(dirname "$tool")/marker")" = "trusted main tool" ] \
+    || fail "recovery used the tagged release tool"
+grep -Fq "exec $(dirname "$tool")/release-artifact \"\$@\"" "$tool" \
+    || fail "recovery tool does not run the default-branch build"
 
-# The ordinary tag path keeps using the publisher committed with that tag.
+# A tag push builds the release tool committed with that tag.
 fresh_workspace push
 git -C "$workspace" checkout --quiet --detach "$tagged_sha"
 run_resolver push refs/tags/v1.2.3 "$tagged_sha"
-[ "$(value PUBLISHER "$environment_file")" = ./scripts/publish-release.sh ] \
-    || fail "tag push did not keep its tagged publisher"
+[ "$(cat "$(dirname "$(value RELEASE_ARTIFACT "$environment_file")")/marker")" = "tagged tool" ] \
+    || fail "tag push did not use its tagged release tool"
 
 # A dispatch from any ref except the default branch is rejected before the
 # persistent runner can switch to or execute the requested tag.
