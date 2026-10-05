@@ -4,6 +4,7 @@ package daemon
 
 import (
 	"context"
+	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -69,8 +70,41 @@ func TestRunLimitWatchdogTerminatesOwnedProvider(t *testing.T) {
 	}
 }
 
+// A stall after output fails the task. A stall with no output at all means the
+// run never started: its task is queued again once, and a second such stall
+// fails it.
 func TestRunLivenessStopsStalledProvider(t *testing.T) {
 	fixture := newSupervisorFixture(t, "set -eu\nprintf x >> __WITNESS__\nsleep 30\n")
+	run := stallNextRun(t, fixture, true)
+	if !strings.HasPrefix(run.Proposal.Detail(), stalledRunDetail) {
+		t.Fatalf("stalled run = %+v", run)
+	}
+	fixture.assertReleased(t, run)
+	assertTaskStatus(t, fixture, kernel.TaskFailed)
+}
+
+func TestRunLivenessRequeuesRunThatNeverStarted(t *testing.T) {
+	fixture := newSupervisorFixture(t, "set -eu\nprintf x >> __WITNESS__\nsleep 30\n")
+	for _, want := range []kernel.TaskStatus{kernel.TaskQueued, kernel.TaskFailed} {
+		if run := stallNextRun(t, fixture, false); run.Proposal.Detail() != kernel.NeverStartedRunDetail {
+			t.Fatalf("silent stalled run = %+v", run)
+		}
+		assertTaskStatus(t, fixture, want)
+	}
+}
+
+func assertTaskStatus(t *testing.T, fixture *supervisorFixture, want kernel.TaskStatus) {
+	t.Helper()
+	task, found, err := fixture.store.Task(context.Background(), fixture.taskID)
+	if err != nil || !found || task.Status != want {
+		t.Fatalf("stalled task = %+v, want %v, found=%v, err=%v", task, want, found, err)
+	}
+}
+
+// stallNextRun admits the next run, waits for its provider to start (and, if output is
+// set, records terminal output for it), then fails it as stalled.
+func stallNextRun(t *testing.T, fixture *supervisorFixture, output bool) kernel.Run {
+	t.Helper()
 	var skew atomic.Int64
 	fixture.daemon.livenessClock = func() time.Time { return time.Now().Add(time.Duration(skew.Load())) }
 	done := make(chan struct {
@@ -87,6 +121,9 @@ func TestRunLivenessStopsStalledProvider(t *testing.T) {
 	if err := waitForWitness(fixture.witness, 10*time.Second); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Remove(fixture.witness); err != nil {
+		t.Fatal(err)
+	}
 	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(10 * time.Millisecond) {
 		started := false
 		fixture.daemon.attemptMu.Lock()
@@ -94,6 +131,9 @@ func TestRunLivenessStopsStalledProvider(t *testing.T) {
 			attempt.livenessMu.Lock()
 			started = !attempt.startedAt.IsZero()
 			attempt.livenessMu.Unlock()
+			if started && output {
+				attempt.markTerminalOutput(time.Now(), 1)
+			}
 		}
 		fixture.daemon.attemptMu.Unlock()
 		if started {
@@ -116,12 +156,8 @@ func TestRunLivenessStopsStalledProvider(t *testing.T) {
 	case <-time.After(12 * time.Second):
 		t.Fatal("stall did not stop the provider")
 	}
-	if result.err != nil || result.run.Phase != kernel.RunTerminal || result.run.Proposal == nil || result.run.Proposal.Code() != kernel.FailureProtocol || !strings.HasPrefix(result.run.Proposal.Detail(), stalledRunDetail) {
+	if result.err != nil || result.run.Phase != kernel.RunTerminal || result.run.Proposal == nil || result.run.Proposal.Code() != kernel.FailureProtocol {
 		t.Fatalf("stalled run = %+v, err=%v", result.run, result.err)
 	}
-	fixture.assertReleased(t, result.run)
-	task, found, err := fixture.store.Task(context.Background(), fixture.taskID)
-	if err != nil || !found || task.Status != kernel.TaskFailed {
-		t.Fatalf("stalled task = %+v, found=%v, err=%v", task, found, err)
-	}
+	return result.run
 }

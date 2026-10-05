@@ -23,7 +23,8 @@ const (
 // and no update for ownerlessRunAge. A failed or cancelled run reaches
 // finalizing, which its live owner answers by stopping the provider, as for
 // an operator stop. Every edge is CAS-protected: a result or stop that won
-// first is left untouched. Nothing is retried.
+// first is left untouched. Only a run that never started is retried, by
+// its finalization (kernel.NeverStartedRunDetail).
 func (daemon *Daemon) enforceRunLiveness(ctx context.Context, spec SupervisorSpec) error {
 	at, err := daemon.timestamp()
 	if err != nil {
@@ -56,11 +57,15 @@ func (daemon *Daemon) enforceRunLiveness(ctx context.Context, spec SupervisorSpe
 			continue
 		}
 		_, _, output := attempt.diagnosticSnapshot()
-		dropped := len(output) > 512
-		if dropped {
-			output = output[len(output)-512:]
+		detail := kernel.NeverStartedRunDetail
+		if len(output) > 0 || !attempt.neverStarted() {
+			dropped := len(output) > 512
+			if dropped {
+				output = output[len(output)-512:]
+			}
+			detail = stalledRunDetail + terminalTextProjection(output, dropped, 512)
 		}
-		proposal, err := kernel.NewFailureProposal(kernel.FailureProtocol, stalledRunDetail+terminalTextProjection(output, dropped, 512))
+		proposal, err := kernel.NewFailureProposal(kernel.FailureProtocol, detail)
 		if err != nil {
 			return err
 		}

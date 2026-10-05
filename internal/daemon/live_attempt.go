@@ -342,6 +342,14 @@ func (attempt *liveAttempt) stalled(now time.Time) bool {
 	return stalledRunLiveness(now, attempt.startedAt, attempt.lastTerminalOutputAt, attempt.lastAttemptAPICallAt, stalledRunLivenessThreshold)
 }
 
+// neverStarted reports whether this attempt has produced no terminal output
+// and made no attempt call since it was registered.
+func (attempt *liveAttempt) neverStarted() bool {
+	attempt.livenessMu.Lock()
+	defer attempt.livenessMu.Unlock()
+	return attempt.terminalOutputBytes == 0 && attempt.lastAttemptAPICallAt.IsZero()
+}
+
 func (attempt *liveAttempt) markStarted(at time.Time) {
 	if attempt == nil || at.IsZero() {
 		return
