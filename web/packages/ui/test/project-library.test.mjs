@@ -177,7 +177,7 @@ test("board shares immutable threads, resolves by revision, and retains linked c
   assert.deepEqual(renderer.root.findByType("pre").children, ["Concrete evidence, not a permission grant."], "posting keeps the thread in view");
   await click("Save conclusion");
   assert.equal(renderer.root.findByProps({ name: "kind" }).props.defaultValue, "lesson");
-  assert.equal(renderer.root.findAllByProps({ name: "evidence" }).length, 0, "the short editor retains source links without presenting storage fields");
+  assert.equal(renderer.root.findByProps({ name: "evidence" }).props.defaultValue, `content:${metadata.id}@3`, "conclusion starts with evidence from the thread");
   const originalFormData = globalThis.FormData;
   const values = { kind: "lesson", repository_id: metadata.repository_id, title: "Retained conclusion", body: "Use exact authority", status: "tentative", evidence: `content:${metadata.id}@3`, entities: source, thread_id: metadata.id, branch: "topic", environment: "staging" };
   globalThis.FormData = class { get(name) { return values[name] ?? null; } };
@@ -356,4 +356,38 @@ test("discussion renders exact reply bodies and appends the next page", async t 
   assert.match(words(renderer.root), /Reply text reply1/);
   assert.match(words(renderer.root), /Reply text reply2/);
   assert.equal(renderer.root.findAllByType("article").length, 2);
+});
+
+test("new decisions, lessons and briefs retain required references and scope", async t => {
+  for (const kind of ["decision", "lesson", "project_brief"]) {
+    let write;
+    const renderer = await mount(t, { open: true, call: async (operation, input) => {
+      if (operation === "search") return { items: [] };
+      write = input; return { ...input, revision: 1, latest_revision: 1 };
+    } });
+    await click(renderer, "New document");
+    await act(async () => renderer.root.findByProps({ name: "kind" }).props.onChange({ target: { value: kind } }));
+    assert.ok(renderer.root.findByProps({ name: "evidence" }));
+    const original = globalThis.FormData;
+    globalThis.FormData = class { get(name) { return { kind, title: "Guidance", body: "Supported", status: "current", evidence: "content:source@1" }[name] ?? null; } };
+    try { await act(async () => renderer.root.findByProps({ "aria-label": "Knowledge editor" }).props.onSubmit({ preventDefault() {}, currentTarget: {} })); } finally { globalThis.FormData = original; }
+    const meta = JSON.parse(write.source_references);
+    assert.deepEqual(meta.evidence, ["content:source@1"]);
+    assert.equal(meta.scope, kind === "project_brief" ? "project" : "repository");
+  }
+});
+
+test("a scheduled search cannot interrupt a document save", async t => {
+  const saved = defer(), doc = { ...metadata, revision: 3 };
+  const renderer = await mount(t, { open: true, call: async operation => operation === "search" ? { items: [doc] } : operation === "read" ? doc : operation === "body" ? { body: "Original", complete: true } : saved.promise });
+  await click(renderer, "Optional guide"); await click(renderer, "Edit document");
+  await act(async () => renderer.root.findByProps({ type: "search" }).props.onChange({ target: { value: "guide" } }));
+  const original = globalThis.FormData;
+  globalThis.FormData = class { get(name) { return { title: "Saved title", body: "Saved text" }[name] ?? null; } };
+  try { await act(async () => renderer.root.findByProps({ "aria-label": "Knowledge editor" }).props.onSubmit({ preventDefault() {}, currentTarget: {} })); } finally { globalThis.FormData = original; }
+  await act(async () => new Promise(done => setTimeout(done, 300)));
+  assert.equal(renderer.root.findByProps({ "aria-busy": true }).props.disabled, true);
+  await act(async () => saved.resolve({ ...doc, title: "Saved title", revision: 4, latest_revision: 4 }));
+  assert.equal(renderer.root.findAllByProps({ "aria-label": "Knowledge editor" }).length, 0);
+  assert.match(words(renderer.root), /Saved\./);
 });

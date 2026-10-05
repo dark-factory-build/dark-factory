@@ -53,6 +53,7 @@ function LibraryDocuments({ state, call, draft, projectID, board = false, entity
   const [editing, setEditing] = useState(false), [newKind, setNewKind] = useState(""), [seed, setSeed] = useState<RecordValue>({});
   const [filters, setFilters] = useState({ query: "", repository_id: repository, branch: "", environment: "", kind: board ? "discussion" : "", entity });
   const initialRead = useRef("");
+  const searchTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const epoch = useRef(0), newID = useRef(""), listQuery = useRef<ProjectContentInput>({});
   const [showResolved, setShowResolved] = useState(false);
   const [sourceFilters, setSourceFilters] = useState(false);
@@ -61,6 +62,7 @@ function LibraryDocuments({ state, call, draft, projectID, board = false, entity
   const discussion = selected?.kind === "discussion";
   const threadID = discussion ? text(selected?.id) : text(metadata.thread_id);
   const run = async (work: () => Promise<void>) => {
+    clearTimeout(searchTimer.current);
     const generation = ++epoch.current;
     setPending(true); setError(""); setNotice("");
     try { await work(); } catch (error) { if (generation === epoch.current) setError(error instanceof Error ? error.message : "Request failed"); }
@@ -98,7 +100,7 @@ function LibraryDocuments({ state, call, draft, projectID, board = false, entity
   const available = call !== undefined && projectID !== "";
   useEffect(() => {
     const load = () => { if (available) void run(async () => { const generation = epoch.current; await list(); if (generation === epoch.current && initialID && initialRead.current !== initialID) { initialRead.current = initialID; await read(initialID); } }); };
-    const timer = filters.query ? setTimeout(load, 250) : undefined;
+    const timer = searchTimer.current = filters.query ? setTimeout(load, 250) : undefined;
     if (!timer) load();
     return () => { clearTimeout(timer); epoch.current++; };
   }, [available, initialID, filters, showResolved]);
@@ -133,6 +135,7 @@ function LibraryDocuments({ state, call, draft, projectID, board = false, entity
     const value = await request("revise", { id: selected.id, expected_revision: selected.revision, kind: selected.kind, title: selected.title, description: selected.description, body, source_references: JSON.stringify({ ...metadata, ...changes }) });
     selectRevision(value, body); setNotice("Discussion updated."); await loadRelated("search", 0, value); await list();
   };
+  const retire = async () => { if (!selected) return; selectRevision(await request("deprecate", { id: selected.id, expected_revision: selected.revision }), body); setNotice("Document retired."); await list(); };
   const entry = (item: RecordValue) => {
     const meta: RecordValue = { ...knowledgeMetadata(item.source_references), status: item.projected_status || knowledgeMetadata(item.source_references).status };
     return <button type="button" data-knowledge-status={text(meta.status)} key={text(item.id)} aria-pressed={selected?.id === item.id && selected?.revision === item.revision} onClick={() => void run(() => read(text(item.id), Number(item.revision)))}><strong>{text(item.title)}</strong><span>{kindLabel(text(item.kind))}{documentState(item, meta) ? ` · ${documentState(item, meta)}` : ""}</span></button>;
@@ -220,6 +223,7 @@ function LibraryDocuments({ state, call, draft, projectID, board = false, entity
           {text(metadata.supersedes) ? <p><button type="button" onClick={() => void run(() => read(text(metadata.supersedes)))}>Earlier document</button> <code>{text(metadata.supersedes)}</code></p> : null}
           {threadID && !discussion ? <p><button type="button" onClick={() => void run(() => read(threadID))}>View discussion</button> <code>{threadID}</code></p> : null}
         </>}
+        {selected.kind === "discussion_reply" && complete && !selected.deprecated && selected.revision === selected.latest_revision ? <button type="button" onClick={() => void run(retire)}>Retire reply</button> : null}
         <form className="dfProjectLibrary__revision" aria-label="Read a revision" onSubmit={(event) => { event.preventDefault(); const revision = Number(new FormData(event.currentTarget).get("revision")); if (Number.isSafeInteger(revision) && revision > 0 && revision <= Number(selected.latest_revision)) void run(() => read(text(selected.id), revision)); }}><label>Revision <input name="revision" type="number" min="1" max={Number(selected.latest_revision)} defaultValue={Number(selected.revision)} key={`${selected.id}:${selected.revision}`} required /></label><button>Read revision</button></form>
         </>}
         {panel !== "accesses" ? null : <><h4>Task access</h4><p>Recorded deliveries and reads of this revision.</p>
@@ -237,14 +241,16 @@ function LibraryDocuments({ state, call, draft, projectID, board = false, entity
           Object.assign(details, { scope: data.get("scope"), evidence: lines(data.get("evidence")), entities: lines(data.get("entities")), mentions: lines(data.get("mentions")) });
           for (const key of ["source_revision", "branch", "environment", "thread_id", "task_id", "change_id", "record_type", "record_id", "supersedes"]) { const value = text(data.get(key)); if (value) details[key] = value; else delete details[key]; }
         } else if (kinds.includes(kind)) details.status = data.get("status") || editorMeta.status || "tentative";
+        if (newKind) { details.scope ??= kind === "project_brief" ? "project" : "repository"; if (["decision", "lesson", "project_brief"].includes(kind)) details.evidence = lines(data.get("evidence")); }
         const updatedBody = editingSources ? body : String(data.get("body"));
         void run(async () => { const value = await request(newKind ? "create" : "revise", { id: newKind ? newID.current : selected?.id, expected_revision: newKind ? 0 : selected?.revision, repository_id: editingSources ? data.get("repository_id") : newKind && !seed.thread_id ? filters.repository_id : selected?.repository_id, kind, title: editingSources ? selected?.title : data.get("title"), description: editingSources ? data.get("description") : newKind ? "" : selected?.description, body: updatedBody, source_references: (kinds.includes(kind) && (kind !== "procedure" || Boolean(newKind) || Object.keys(metadata).length > 0)) ? JSON.stringify(details) : editingSources ? data.get("source_references") : selected?.source_references }); selectRevision(value, updatedBody); setNotice("Saved."); await list(); });
       }}>
         <h3>{editingSources ? "Edit sources" : newKind === "lesson" && seed.thread_id ? "Save conclusion" : newKind ? "New document" : "Edit document"}</h3>
         {editingSources ? null : <>
-          {!newKind ? <p>{kindLabel(editorKind)}</p> : <label>Category <select name="kind" defaultValue={editorKind}>{kinds.filter(kind => !kind.startsWith("discussion")).map(kind => <option key={kind} value={kind}>{kindLabel(kind)}</option>)}</select></label>}
+          {!newKind ? <p>{kindLabel(editorKind)}</p> : <label>Category <select name="kind" defaultValue={editorKind} onChange={(event) => setNewKind(event.target.value)}>{kinds.filter(kind => !kind.startsWith("discussion")).map(kind => <option key={kind} value={kind}>{kindLabel(kind)}</option>)}</select></label>}
           <label>Title <input name="title" autoFocus defaultValue={newKind ? newKind === "lesson" && seed.thread_id ? `Conclusion: ${text(selected?.title)}` : "" : text(selected?.title)} required /></label>
           <label>Text <textarea name="body" rows={12} defaultValue={newKind ? "" : body} required /></label>
+          {!newKind || !["decision", "lesson", "project_brief"].includes(editorKind) ? null : <label>Supporting references <textarea name="evidence" defaultValue={strings(editorMeta.evidence).join("\n")} required={editorKind !== "project_brief"} /></label>}
           {!structured ? null : <label>Status <select name="status" defaultValue={text(editorMeta.status) || "tentative"}>{["tentative", "current", "needs_revalidation", "superseded"].map((status) => <option key={status} value={status}>{status.replaceAll("_", " ")}</option>)}</select></label>}
         </>}
         {!editingSources ? null : <>
@@ -257,7 +263,7 @@ function LibraryDocuments({ state, call, draft, projectID, board = false, entity
         <label>Mentions (one agent ID per line) <textarea name="mentions" defaultValue={strings(editorMeta.mentions).join("\n")} /></label>
         {["source_revision", "branch", "environment", "thread_id", "task_id", "change_id", "record_type", "record_id", "supersedes"].map((key) => <label key={key}>{key.replaceAll("_", " ")} <input name={key} defaultValue={text(editorMeta[key])} /></label>)}<label>Source references for legacy documents <textarea name="source_references" defaultValue={newKind ? "" : text(selected?.source_references)} /></label></fieldset></>}
         <div className="dfProjectLibrary__actions"><button>Save</button><button type="button" onClick={() => setEditing(false)}>Cancel</button>
-        {newKind || !selected ? null : <button type="button" disabled={!editable} onClick={() => void run(async () => { selectRevision(await request("deprecate", { id: selected.id, expected_revision: selected.revision }), body); setNotice("Document retired."); await list(); })}>Retire document</button>}</div>
+        {newKind || !selected ? null : <button type="button" disabled={!editable} onClick={() => void run(retire)}>Retire document</button>}</div>
       </form>}
       </div>
       </div>

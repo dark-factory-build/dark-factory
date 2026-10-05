@@ -1242,9 +1242,9 @@ summary.dfConsoleItem__summary { cursor: pointer; }
 .dfMissions .dfStatus { text-transform: capitalize; }
 
 .dfConsoleBack { min-height: 2.75rem; }
-.dfProjectLibrary [data-knowledge-status="needs_revalidation"] { border-color: #dca85b; }
-.dfProjectLibrary [data-knowledge-status="superseded"] { opacity: .7; }
-.dfProjectLibrary [data-knowledge-status="tentative"] { border-style: dashed; }
+.dfProjectLibrary button[data-knowledge-status="needs_revalidation"] { border-color: #dca85b; }
+.dfProjectLibrary button[data-knowledge-status="superseded"] { opacity: .7; }
+.dfProjectLibrary button[data-knowledge-status="tentative"] { border-style: dashed; }
 
 .dfProjectLibrary button { overflow-wrap: anywhere; white-space: normal; text-align: left; }
 
@@ -1270,3 +1270,5 @@ summary.dfConsoleItem__summary { cursor: pointer; }
 .dfOutcomes__meta { color: var(--df-console-muted); }
 .dfOutcomes__reference { border-top: 1px solid var(--df-console-rule); padding-block: .5rem; }
 @media (max-width: 640px) { .dfOutcomes__list button { flex-direction: column; gap: .5rem; } }
+
+.dfProjectLibrary__workspace > section[aria-label="Replies"] > button { margin-top: .75rem; }
