@@ -371,6 +371,9 @@ export async function readPersistedObjects(persistence) {
 	return objects;
 }
 
+/** What Miniflare logs when workerd dies under `wrangler dev`. */
+const RUNTIME_CRASHED = 'The Workers runtime crashed unexpectedly';
+
 export async function startWorker(persistence) {
 	const root = process.cwd();
 	const wrangler = join(root, 'node_modules', 'wrangler', 'bin', 'wrangler.js');
@@ -412,7 +415,15 @@ export async function startWorker(persistence) {
 			try {
 				const response = await fetch(`${ready[1]}/healthz`);
 				if (response.status === 200) {
-					return { origin: ready[1], transcript: () => transcript, stop: () => stop(child) };
+					return {
+						origin: ready[1],
+						transcript: () => transcript,
+						alive: () => child.exitCode === null && child.signalCode === null,
+						// Miniflare restarts a crashed workerd on the same ports, but nothing
+						// tells the dev proxy, so a child that has crashed once is not trusted.
+						crashed: () => transcript.includes(RUNTIME_CRASHED),
+						stop: () => stop(child),
+					};
 				}
 			} catch {
 				// The local socket is not listening yet.
@@ -425,7 +436,7 @@ export async function startWorker(persistence) {
 }
 
 async function stop(child) {
-	if (child.exitCode !== null) return;
+	if (child.exitCode !== null || child.signalCode !== null) return;
 	const exited = once(child, 'exit');
 	child.kill('SIGTERM');
 	const timeout = new Promise((resolve) => setTimeout(resolve, 5_000, 'timeout'));

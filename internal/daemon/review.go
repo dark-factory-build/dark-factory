@@ -670,7 +670,13 @@ func reviewedBodyDigest(operation review.Operation) string {
 func (b *daemonReviewBackend) ObserveMerge(ctx context.Context, operation review.Operation) (review.Merge, error) {
 	response, err := b.callResponse(ctx, "observe_pull_request_merge", map[string]any{"repository": b.repository, "enqueue_operation_id": operation.EnqueueID, "pull_number": operation.Request.PullNumber, "head_sha": operation.Request.Head, "base": operation.Request.BaseRef, "reviewed_body_digest": reviewedBodyDigest(operation)})
 	if err != nil {
-		return review.Merge{}, err
+		// The receipt only exists for our own enqueue; a pull queued or merged
+		// by anyone else still settles from the pull request itself.
+		pull, pullErr := b.callResponse(ctx, "list_pull_requests", map[string]any{"repository": b.repository, "page": 1, "per_page": 1, "pull_number": operation.Request.PullNumber})
+		if pullErr != nil {
+			return review.Merge{}, errors.Join(err, pullErr)
+		}
+		return mergeFromPull(pull, operation, err)
 	}
 	var merge struct {
 		Head  string `json:"head_sha"`
@@ -701,6 +707,30 @@ func (b *daemonReviewBackend) ObserveMerge(ctx context.Context, operation review
 	}
 	return result, nil
 }
+
+// mergeFromPull settles an enqueued operation from a pull request read when
+// the merge receipt cannot: merged or closed ends it, open stays enqueued.
+func mergeFromPull(response json.RawMessage, operation review.Operation, cause error) (review.Merge, error) {
+	var value struct {
+		PullRequests []struct {
+			HeadSHA string `json:"head_sha"`
+			State   string `json:"state"`
+		} `json:"pull_requests"`
+	}
+	if json.Unmarshal(response, &value) != nil || len(value.PullRequests) != 1 || !strings.EqualFold(value.PullRequests[0].HeadSHA, operation.Request.Head) {
+		return review.Merge{}, cause
+	}
+	switch value.PullRequests[0].State {
+	case "merged":
+		return review.Merge{State: "MERGED_AFTER_ENQUEUE_ATTEMPT"}, nil
+	case "closed":
+		return review.Merge{State: "NOT_QUEUED"}, nil
+	case "open":
+		return review.Merge{State: "ACTIVE_QUEUE", Open: true}, nil
+	}
+	return review.Merge{}, cause
+}
+
 func (b *daemonReviewBackend) call(ctx context.Context, name string, arguments map[string]any) error {
 	_, err := b.callResponse(ctx, name, arguments)
 	return err

@@ -149,8 +149,9 @@ func selectGitWithTrust(ctx context.Context, gitExecutable, repositoryRoot, revi
 	}, nil
 }
 
-// refreshTrackingRevision runs only for a fresh Change, before its commit is
-// pinned. Retained Changes and explicit local revisions never refresh source.
+// refreshTrackingRevision runs for a fresh Change before its commit is pinned,
+// and best effort before a retained Change's run so a correction can see the
+// current base (FetchBase). Explicit local revisions never refresh source.
 func refreshTrackingRevision(ctx context.Context, spec gitCommandSpec, revision string, verify func() error) (string, error) {
 	run := func(arguments ...string) ([]byte, error) {
 		spec.arguments = append([]string{"-C", spec.repository}, arguments...)
@@ -1260,6 +1261,29 @@ func AddPrivateWorktree(ctx context.Context, selection Selection, path, branch s
 	return inspectWorktree(ctx, selection.gitExecutable, selection.repositoryRoot, selection.repository.root, path, nil, true)
 }
 
+// FetchBase makes the selected base tip available in the private Git
+// administration of the Change at path as refs/remotes/origin/main, so a
+// retained Change can rebase onto a newer main than the one it started from.
+func FetchBase(ctx context.Context, selection Selection, path string) error {
+	if !selection.valid() {
+		return &ValidationError{Reason: "worktree selection is invalid"}
+	}
+	authority, err := openGitAuthority(selection.gitExecutable, selection.repositoryRoot, selection.repository.root, nil, true)
+	if err != nil {
+		return err
+	}
+	defer authority.close()
+	admin := GitDirectoryForChange(selection.repositoryRoot, path)
+	if err := validatePrivateGitAdmin(admin); err != nil {
+		return err
+	}
+	_, err = authority.succeed(ctx, maxGitSelectionOutput, "-c", "core.hooksPath=/dev/null", "-c", "protocol.file.allow=always", "--git-dir", admin, "fetch", "--quiet", "--no-tags", "--no-write-fetch-head", "--no-auto-maintenance", "--no-recurse-submodules", selection.repositoryRoot, selection.base.Hex()+":refs/remotes/origin/main")
+	if err != nil {
+		return newGitError(gitFailureProcess)
+	}
+	return validatePrivateGitAdmin(admin)
+}
+
 // InspectWorktree verifies that path is a linked worktree of the repository
 // and reports its head, branch and cleanliness.
 func InspectWorktree(ctx context.Context, gitExecutable, repositoryRoot string, expected RepositoryIdentity, path string) (WorktreeFacts, error) {
@@ -1435,13 +1459,13 @@ func retryWorktreeAdd(ctx context.Context, path string, run func() (gitCapture, 
 func isGitLockFailure(stderr []byte) bool {
 	for _, rawLine := range bytes.Split(stderr, []byte{'\n'}) {
 		line := strings.ToLower(strings.TrimSpace(string(rawLine)))
-		if strings.Contains(line, "cannot lock") {
-			return true
+		if !strings.Contains(line, "lock") {
+			continue
 		}
-		if strings.Contains(line, "lock") && strings.Contains(line, "unable to create") {
-			return true
-		}
-		if strings.Contains(line, "lock") && (strings.Contains(line, "file exists") || strings.Contains(line, "already exists")) {
+		if strings.Contains(line, "file exists") ||
+			strings.Contains(line, "already exists") ||
+			strings.Contains(line, "resource busy") ||
+			(strings.Contains(line, " is at ") && strings.Contains(line, " expected ")) {
 			return true
 		}
 	}

@@ -8,7 +8,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdtemp, readFile, readdir, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import test, { after, before } from 'node:test';
+import test, { after, before, beforeEach } from 'node:test';
 
 import {
 	AMBIENT_DECOYS,
@@ -37,16 +37,57 @@ import {
 
 let persistence;
 let worker;
+/** Output of children replaced mid-run, still subject to the secrecy sweep. */
+const retiredTranscripts = [];
 
 before(async () => {
 	persistence = await mkdtemp(join(tmpdir(), 'df-relay-state-'));
 	worker = await startWorker(persistence);
 }, { timeout: 120_000 });
 
+// The shared child is a local runtime, not the relay: if workerd dies between
+// tests, every later test would otherwise fail against a dead port. Each test
+// starts against a child that has just completed a real host handshake.
+beforeEach((t) => ensureLiveRelay(t), { timeout: 120_000 });
+
 after(async () => {
 	await worker?.stop();
 	if (persistence) await rm(persistence, { recursive: true, force: true });
 });
+
+/** Why the shared child cannot serve a host handshake, or null when it can. */
+async function relayUnavailable() {
+	if (!worker.alive()) return 'the wrangler child exited';
+	if (worker.crashed()) return 'the Workers runtime crashed';
+	const node = createNode();
+	try {
+		const probe = await openHost(worker.origin, node.id, mintHostToken(node));
+		if (probe.status !== 101) return `a probe host handshake returned HTTP ${probe.status}`;
+		probe.tap.close(1000, 'probe');
+		return null;
+	} catch (error) {
+		return `a probe host handshake failed: ${error.message}`;
+	}
+}
+
+/** Replaces the shared child, with its output as a diagnostic, when it is not serving. */
+async function ensureLiveRelay(t) {
+	const reason = await relayUnavailable();
+	if (reason === null) return;
+	// Request lines say nothing about why the runtime went away; the rest might.
+	const output = worker
+		.transcript()
+		.split('\n')
+		.filter((line) => !line.startsWith('[wrangler:info] GET '))
+		.slice(-40)
+		.join('\n');
+	t.diagnostic(`replacing the wrangler child: ${reason}\n${output}`);
+	retiredTranscripts.push(worker.transcript());
+	await worker.stop();
+	worker = await startWorker(persistence);
+	const replaced = await relayUnavailable();
+	if (replaced !== null) throw new Error(`the replacement wrangler child is not serving: ${replaced}`);
+}
 
 /** A node with a live host socket. */
 async function withHost({ generation = 1, sequence = 1 } = {}) {
@@ -672,6 +713,23 @@ test('a truncated record ends the host', async () => {
 	assert.equal((await controller.tap.waitClosed()).code, 4001);
 });
 
+// -- harness ----------------------------------------------------------------
+
+test('a wrangler child that dies between tests is replaced before the next one', async (t) => {
+	// Merge-queue run 37314516560 lost the shared child before a host handshake:
+	// HTTP 500, then ECONNREFUSED on the same port for the tests after it.
+	const dead = worker.origin;
+	await worker.stop();
+	const node = createNode();
+	await assert.rejects(openHost(dead, node.id, mintHostToken(node)), { code: 'ECONNREFUSED' });
+
+	await ensureLiveRelay(t);
+	assert.ok(worker.alive());
+	const { host } = await withHost();
+	assert.equal(host.protocol, SUBPROTOCOL);
+	host.tap.close(1000, 'done');
+});
+
 // -- secrecy ----------------------------------------------------------------
 
 test('no frame, token, or payload reaches disk or the log', async () => {
@@ -711,7 +769,7 @@ test('no frame, token, or payload reaches disk or the log', async () => {
 	const disk = await readTree(persistence);
 	assert.ok(disk.length > 0, 'the persistence directory has files to inspect');
 	const blob = disk.map(({ text }) => text).join('\0');
-	const transcript = worker.transcript();
+	const transcript = [...retiredTranscripts, worker.transcript()].join('\n');
 
 	for (const [label, haystack] of [
 		['persisted state', blob],

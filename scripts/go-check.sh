@@ -63,6 +63,23 @@ if [ "$go_check_mode" = source ]; then
         ./internal/topology
 fi
 
+# A direct run (a worker's check loop) skips the TypeScript block when nothing
+# under web/ or protocol/ differs from the merge base. local-ci and CI always
+# run it: the process gate needs the built client. No base means run it.
+web_changed=1
+if [ "$go_check_mode" = source ] && [ -z "${DARK_FACTORY_LOCAL_CI-}" ] && [ -z "${CI-}" ] \
+    && base=$(git merge-base HEAD origin/main 2>/dev/null || git merge-base HEAD '@{upstream}' 2>/dev/null) \
+    && changed=$({ git diff --name-only "$base" --; git ls-files --others --exclude-standard; } 2>/dev/null); then
+    case "$changed" in
+        web/*|protocol/*|*"
+web/"*|*"
+protocol/"*) ;;
+        *) web_changed=0 ;;
+    esac
+fi
+if [ "$web_changed" = 0 ]; then
+    echo "go-check: no web/ or protocol/ changes since the merge base; skipping TypeScript"
+else
 echo "go-check: TypeScript install, build, and tests"
 (
     CDPATH= cd -- web
@@ -71,6 +88,7 @@ echo "go-check: TypeScript install, build, and tests"
     COREPACK_ENABLE_NETWORK=0 CI=true "$DF_CI_NODE" "$DF_CI_COREPACK" pnpm --filter @dark-factory/ui build
     "$DF_CI_NODE" --test --test-reporter=spec packages/client/test/*.test.mjs packages/ui/test/*.test.mjs packages/ui/src/factory-scene/*.test.mjs packages/ui/src/production-*.test.mjs
 )
+fi
 
 echo "go-check: git diff --check"
 git diff --check

@@ -3,6 +3,7 @@ package review
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -247,5 +248,49 @@ func TestResumeFailsAPlannedEnqueueTheMaintainerRefuses(t *testing.T) {
 	got, err := c.Resume(context.Background(), op)
 	if !errors.Is(err, ErrRejected) || got.State != "failed" || got.Retryable || !got.RoutePending {
 		t.Fatalf("operation=%+v err=%v", got, err)
+	}
+}
+
+type refusingBackend struct {
+	observedBackend
+	refuse error
+}
+
+func (b *refusingBackend) Enqueue(context.Context, Operation) error {
+	if b.refuse != nil {
+		return b.refuse
+	}
+	b.enqueued = true
+	return nil
+}
+
+// An enqueue GitHub refused before executing (checks still running, #1236)
+// stays enqueuing and a later tick's resend enqueues it; past the bound it
+// fails once with the refusal. A conflict still ends at once.
+func TestResumeResendsAnEnqueueRefusedBeforeExecutionUntilTheBound(t *testing.T) {
+	notYet := fmt.Errorf("%w: refused: The request was refused: rejected before execution as UNPROCESSABLE.", ErrRejected)
+	now := time.Unix(10, 0)
+	store := &memoryStore{}
+	backend := &refusingBackend{observedBackend{receipt: Receipt{State: "planned"}}, notYet}
+	c := Coordinator{Store: store, Backend: backend, Now: func() time.Time { return now }}
+	op, err := Prepare(reviewRequest(), c.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	op.State, op.Verdict, op.Submitted, op.EnqueueID = "enqueuing", "allow", true, "enqueue-1"
+	if got, err := c.Resume(context.Background(), op); !errors.Is(err, ErrRejected) || got.State != "enqueuing" || len(store.values) != 0 {
+		t.Fatalf("refused: operation=%+v err=%v writes=%d", got, err, len(store.values))
+	}
+	now, backend.refuse = now.Add(5*time.Minute), nil
+	if got, err := c.Resume(context.Background(), op); err != nil || got.State != "enqueued" || !backend.enqueued {
+		t.Fatalf("resend: operation=%+v err=%v", got, err)
+	}
+	now, backend.refuse = now.Add(enqueueRefusedFor), notYet
+	if got, err := c.Resume(context.Background(), op); !errors.Is(err, ErrRejected) || got.State != "failed" || got.Retryable || !got.RoutePending || !strings.Contains(got.Detail, "UNPROCESSABLE") {
+		t.Fatalf("bound: operation=%+v err=%v", got, err)
+	}
+	now, backend.refuse = time.Unix(10, 0), fmt.Errorf("%w: conflict: The request conflicts with the pull request.", ErrRejected)
+	if got, err := c.Resume(context.Background(), op); !errors.Is(err, ErrRejected) || got.State != "failed" {
+		t.Fatalf("conflict: operation=%+v err=%v", got, err)
 	}
 }

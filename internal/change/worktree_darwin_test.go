@@ -449,6 +449,19 @@ func TestWorktreeAddRetriesOnlyBoundedGitLockFailures(t *testing.T) {
 			t.Fatalf("non-lock failure calls=%d err=%v", calls, err)
 		}
 	})
+
+	t.Run("permission failure is not contention", func(t *testing.T) {
+		path := filepath.Join(secureTempDir(t), "worktree")
+		const private = "private permission path"
+		calls := 0
+		err := retryWorktreeAdd(context.Background(), path, func() (gitCapture, error) {
+			calls++
+			return gitCapture{exitCode: 128, stderr: []byte("fatal: cannot lock ref 'refs/heads/private': Unable to create '" + private + ".lock': Permission denied\n")}, nil
+		})
+		if err == nil || calls != 1 || strings.Contains(err.Error(), private) {
+			t.Fatalf("permission failure calls=%d err=%v", calls, err)
+		}
+	})
 }
 
 // A Change from before managed worktrees is a plain copy of the base with
@@ -540,5 +553,34 @@ func TestWorktreeInputsAreValidated(t *testing.T) {
 	}
 	if got := BranchName(testChangeID); got != "factory/0123456789ab" {
 		t.Fatalf("branch name = %s", got)
+	}
+}
+
+func TestFetchBaseGivesAPrivateChangeTheCurrentMainTip(t *testing.T) {
+	fixture := newLocalGitFixture(t, "sha1")
+	old, err := SelectGit(context.Background(), fixture.git, fixture.repository, "HEAD", fixture.identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(secureTempDir(t), testChangeID)
+	if _, err := AddPrivateWorktree(context.Background(), old, path, BranchName(testChangeID)); err != nil {
+		t.Fatal(err)
+	}
+	admin := GitDirectoryForChange(fixture.repository, path)
+	if err := os.WriteFile(filepath.Join(fixture.repository, "README.md"), []byte("newer main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runFixtureGit(t, fixture.git, fixture.repository, "add", "README.md")
+	runFixtureGit(t, fixture.git, fixture.repository, "commit", "-m", "advance main")
+	tip := strings.TrimSpace(runFixtureGitOutput(t, fixture.git, fixture.repository, "rev-parse", "HEAD"))
+	newer, err := SelectGit(context.Background(), fixture.git, fixture.repository, "HEAD", fixture.identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := FetchBase(context.Background(), newer, path); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(runFixtureGitOutput(t, fixture.git, admin, "rev-parse", "refs/remotes/origin/main")); got != tip {
+		t.Fatalf("origin/main = %s, want %s", got, tip)
 	}
 }
