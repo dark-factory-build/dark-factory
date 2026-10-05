@@ -81,7 +81,7 @@ func TestOverseerSnapshotPagesWithHeadFenceAndTaskTextChunks(t *testing.T) {
 	store, run, _ := runningOrchestratorRun(t)
 	defer store.Close()
 	for index := 0; index < OverseerSnapshotPageSize; index++ {
-		if _, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, byte(250+index)), ProjectID: run.ProjectID, AssignedAgentID: run.AgentID, IncarnationID: incarnationID(t, byte(250+index)), Title: "queued"}, mustTime(t, int64(40+index))); err != nil {
+		if _, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, byte(200+index)), ProjectID: run.ProjectID, AssignedAgentID: run.AgentID, IncarnationID: incarnationID(t, byte(200+index)), Title: "queued"}, mustTime(t, int64(40+index))); err != nil {
 			t.Fatal(err)
 		}
 	}

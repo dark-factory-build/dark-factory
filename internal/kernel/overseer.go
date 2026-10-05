@@ -36,7 +36,7 @@ type RetainedChangeHandoff struct {
 	ChangeRevision   Revision
 }
 
-const OverseerSnapshotPageSize = 4
+const OverseerSnapshotPageSize = 8 // worst-case JSON-escaped page stays under the 1 MiB API frame
 
 // OverseerTerminalTaskLimit keeps old terminal history out of the standing
 // reconciliation set. A targeted task read remains available for explicit

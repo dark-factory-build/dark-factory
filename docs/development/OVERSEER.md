@@ -76,7 +76,7 @@ identity. Read that prior task first, then each named worker task, with
 events, so an enqueue-time head is not a valid read fence. Retain the first
 returned current head for related text/history reads. `mode=full` is the
 explicit initial/overflow recovery signal. Do not reconstruct an unchanged
-project merely because the overseer woke. Status returns four entries from each collection. When
+project merely because the overseer woke. Status returns eight entries from each collection. When
 `next_offset` is set, continue with `overseer status --offset N --head HEAD`; reuse
 the returned head exactly. A stale head restarts at page one. Use `overseer status
 --task ID` for one task. Its objective and result arrive in 4,096-rune chunks;
