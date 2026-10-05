@@ -875,7 +875,9 @@ summary.dfConsoleItem__summary { cursor: pointer; }
 .dfFactoryEntityTools__selection { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: min(100%, 32rem); }
 .dfFactoryHelp[open] { flex-basis: 100%; overflow-wrap: anywhere; }
 .dfFactoryLegend { color: #b2c6be; font-size: .72rem; line-height: 1.7; margin: .4rem 0; }
-.dfRoomDetails td, .dfRoomDetails th { overflow-wrap: anywhere; }
+.dfRoomDetails { padding-top: .75rem; }
+.dfRoomDetails td, .dfRoomDetails th { overflow-wrap: anywhere; text-align: left; padding: .25rem .65rem .25rem 0; vertical-align: top; }
+.dfRoomDetails > button { margin: .25rem .35rem .5rem 0; }
 .dfRoomDetails button { max-width: 100%; overflow-wrap: anywhere; }
 
 /* Source identity is exact, including on phone-sized inspectors. */
