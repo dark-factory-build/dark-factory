@@ -642,7 +642,6 @@ fn mcp_surface_is_installation_bound_and_typed() {
 #[test]
 fn the_deployment_gate_asserts_the_readiness_label_the_worker_emits() {
     let lib = project_file("src/lib.rs");
-    let bootstrap = project_file("../scripts/bootstrap-maintainer-v2.sh");
     let release = project_file("../scripts/release.sh");
 
     let headless = r#""maintainer_operations":"mcp_installation_bound_operator_and_headless""#;
@@ -651,8 +650,6 @@ fn the_deployment_gate_asserts_the_readiness_label_the_worker_emits() {
     // The headless binding is optional and inherited across versions, so this
     // is the only check that catches a deployment which silently lost it.
     assert!(release.contains(headless));
-    assert!(bootstrap.contains(headless));
-    assert!(!bootstrap.contains("mcp_repository_bound_operator_and_headless"));
     assert!(!lib.contains("mcp_six_tools"));
 }
 

@@ -77,9 +77,6 @@ func newDispatchFixtureAt(t *testing.T, parent string) *dispatchFixture {
 		t.Fatalf("api socket path is %d bytes, over the %d-byte budget: %q", len(socket), install.MaxSocketPathBytes, socket)
 	}
 	if _, err := install.Init(context.Background(), authHomePath); err != nil {
-		if errors.Is(err, install.ErrUnsupported) {
-			t.Skip("operational local API is unsupported on this platform")
-		}
 		t.Fatal(err)
 	}
 	operatorToken := filepath.Join(authHomePath, "operator.token")

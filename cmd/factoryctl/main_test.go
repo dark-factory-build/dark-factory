@@ -101,9 +101,6 @@ func newAPIFixture(t testing.TB) *apiFixture {
 		t.Fatalf("api socket path is %d bytes, over the %d-byte budget: %q", len(socket), install.MaxSocketPathBytes, socket)
 	}
 	if _, err := install.Init(context.Background(), homePath); err != nil {
-		if errors.Is(err, install.ErrUnsupported) {
-			t.Skip("operational local API is unsupported on this platform")
-		}
 		t.Fatal(err)
 	}
 	operatorPath := filepath.Join(homePath, "operator.token")
@@ -389,12 +386,8 @@ func TestHomeCLIOutputIsBoundedAndRedacted(t *testing.T) {
 	home := filepath.Join(parent, secret)
 	var stdout, stderr bytes.Buffer
 	exit := run(context.Background(), []string{"init", "--home", home}, func(string) string { return "" }, &stdout, &stderr)
-	if runtime.GOOS == "darwin" {
-		if exit != 0 || stdout.String() != "home initialized\n" || stderr.Len() != 0 {
-			t.Fatalf("darwin init output: exit=%d stdout=%q stderr=%q", exit, stdout.String(), stderr.String())
-		}
-	} else if exit != exitFailure || stdout.Len() != 0 || stderr.String() != "factoryctl: Go home operations are unsupported on this platform\n" {
-		t.Fatalf("unsupported init output: exit=%d stdout=%q stderr=%q", exit, stdout.String(), stderr.String())
+	if exit != 0 || stdout.String() != "home initialized\n" || stderr.Len() != 0 {
+		t.Fatalf("init output: exit=%d stdout=%q stderr=%q", exit, stdout.String(), stderr.String())
 	}
 	if len(stdout.Bytes())+len(stderr.Bytes()) > 256 || strings.Contains(stdout.String()+stderr.String(), secret) {
 		t.Fatalf("home output leaked or exceeded bound: stdout=%q stderr=%q", stdout.String(), stderr.String())

@@ -128,7 +128,7 @@ jobs:
               scripts/prepare-release-source.sh|scripts/test-prepare-release-source.sh)
                 macos=true; select_macos_mode release
                 ;;
-              .gitignore|scripts/bootstrap-maintainer-v2.sh|scripts/release.sh)
+              .gitignore|scripts/release.sh)
                 macos=true; select_macos_mode full; control_plane=true
                 ;;
               protocol/*|web/fixtures/*|internal/browser/*|internal/browserprotocol/*|internal/buildinfo/*|internal/install/*|cmd/factoryctl/*|launchd/*)

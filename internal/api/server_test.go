@@ -40,9 +40,6 @@ func newAPITestListener(t testing.TB, bearer credential) (*Listener, string) {
 		t.Fatalf("api socket path is %d bytes, over the %d-byte budget: %q", len(socket), install.MaxSocketPathBytes, socket)
 	}
 	if _, err := install.Init(context.Background(), homePath); err != nil {
-		if errors.Is(err, install.ErrUnsupported) {
-			t.Skip("operational local API is unsupported on this platform")
-		}
 		t.Fatal(err)
 	}
 	tokenPath := filepath.Join(homePath, "operator.token")
