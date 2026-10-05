@@ -1,0 +1,210 @@
+package buildinfo
+
+import (
+	"archive/tar"
+	"compress/gzip"
+	"crypto/sha256"
+	_ "embed"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strings"
+	"text/template"
+	"time"
+)
+
+//go:embed dark-factory.rb.tmpl
+var formulaSource string
+
+var (
+	formulaTemplate = template.Must(template.New("dark-factory.rb").Parse(formulaSource))
+	releaseTag      = regexp.MustCompile(`^v[0-9][A-Za-z0-9._-]*$`)
+	repositoryName  = regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`)
+	// releaseTargets is the one fixed packaging order; input order never matters.
+	releaseTargets = [2][2]string{{"aarch64-apple-darwin", "darwin/arm64"}, {"x86_64-apple-darwin", "darwin/amd64"}}
+)
+
+type releaseAsset struct {
+	URL           string `json:"url"`
+	SHA256        string `json:"sha256"`
+	Bytes         int64  `json:"bytes"`
+	UnpackedBytes int64  `json:"unpacked_bytes"`
+	BuildID       string `json:"build_id"`
+}
+
+// PackageRelease packages both macOS targets in one all-or-nothing step:
+//
+//	TAG SOURCE_SHA OUT_DIR OWNER/REPO TARGET BIN_DIR TARGET BIN_DIR
+//
+// OUT_DIR must not exist. Everything is built in a sibling staging directory
+// and renamed into place only after both archives, SHA256SUMS, latest.json,
+// and the Homebrew formula exist. Archive members have one fixed order, mode,
+// owner, and timestamp, so byte-identical binaries give byte-identical assets.
+func PackageRelease(arguments []string) (result error) {
+	if len(arguments) != 8 {
+		return errors.New("usage: package TAG SOURCE_SHA OUT_DIR OWNER/REPO TARGET BIN_DIR TARGET BIN_DIR")
+	}
+	tag, source, outDir, repository := arguments[0], arguments[1], arguments[2], arguments[3]
+	if !releaseTag.MatchString(tag) || !validSource(source) || !repositoryName.MatchString(repository) || outDir == "" {
+		return errors.New("invalid release tag, source, output, or repository")
+	}
+	binDirs := map[string]string{}
+	for index := 4; index < 8; index += 2 {
+		target := arguments[index]
+		if target != releaseTargets[0][0] && target != releaseTargets[1][0] {
+			return fmt.Errorf("unsupported release target: %s", target)
+		}
+		if _, duplicate := binDirs[target]; duplicate {
+			return fmt.Errorf("duplicate release target: %s", target)
+		}
+		binDirs[target] = arguments[index+1]
+	}
+	if _, err := os.Lstat(outDir); !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("release output already exists: %s", outDir)
+	}
+	parent := filepath.Dir(outDir)
+	if err := os.MkdirAll(parent, 0o755); err != nil {
+		return err
+	}
+	staging, err := os.MkdirTemp(parent, ".dark-factory-package.")
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if result != nil {
+			_ = os.RemoveAll(staging)
+		}
+	}()
+
+	version := strings.TrimPrefix(tag, "v")
+	sums := ""
+	assets := map[string]releaseAsset{}
+	for _, target := range releaseTargets {
+		identity, ok := Expected(version, source, target[1])
+		if !ok {
+			return errors.New("invalid release identity")
+		}
+		archive := "dark-factory-" + tag + "-" + target[0] + ".tar.gz"
+		unpacked, size, sum, err := packageTarget(binDirs[target[0]], filepath.Join(staging, archive), identity)
+		if err != nil {
+			return fmt.Errorf("%s: %w", target[0], err)
+		}
+		sums += sum + "  " + archive + "\n"
+		assets[target[0]] = releaseAsset{
+			URL:    "https://github.com/" + repository + "/releases/download/" + tag + "/" + archive,
+			SHA256: sum, Bytes: size, UnpackedBytes: unpacked, BuildID: identity.BuildID(),
+		}
+	}
+	arm, intel := assets[releaseTargets[0][0]], assets[releaseTargets[1][0]]
+	if err := ValidateReleaseArchiveBounds(arm.Bytes, intel.Bytes); err != nil {
+		return err
+	}
+	manifest, err := json.MarshalIndent(struct {
+		Version string                  `json:"version"`
+		Tag     string                  `json:"tag"`
+		Source  string                  `json:"source"`
+		Assets  map[string]releaseAsset `json:"assets"`
+	}{version, tag, source, assets}, "", "  ")
+	if err != nil {
+		return err
+	}
+	manifest = append(manifest, '\n')
+	manifestSum := sha256.Sum256(manifest)
+	sums += hex.EncodeToString(manifestSum[:]) + "  latest.json\n"
+
+	formula := new(strings.Builder)
+	if err := formulaTemplate.Execute(formula, map[string]any{
+		"Tag": tag, "Version": version, "Prerelease": strings.Contains(tag, "-"),
+		"Source": source, "Repository": repository, "ManifestSHA": hex.EncodeToString(manifestSum[:]),
+		"ArmBuildID": arm.BuildID, "IntelBuildID": intel.BuildID, "ArmSHA": arm.SHA256, "IntelSHA": intel.SHA256,
+	}); err != nil {
+		return err
+	}
+	for name, content := range map[string]string{"latest.json": string(manifest), "SHA256SUMS": sums, "dark-factory.rb": formula.String()} {
+		if err := os.WriteFile(filepath.Join(staging, name), []byte(content), 0o644); err != nil {
+			return err
+		}
+	}
+	// ponytail: Lstat-then-rename has the same small race the shell mv had;
+	// rename would also succeed onto an empty directory created in between.
+	if _, err := os.Lstat(outDir); !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("release output appeared while packaging: %s", outDir)
+	}
+	return os.Rename(staging, outDir)
+}
+
+// packageTarget snapshots the three verified binaries into a private payload
+// and writes one canonical tar.gz from those snapshots, never the inputs.
+func packageTarget(binDir, archivePath string, identity Identity) (unpacked, size int64, sum string, result error) {
+	payload := archivePath + ".payload"
+	if err := os.Mkdir(payload, 0o700); err != nil {
+		return 0, 0, "", err
+	}
+	defer os.RemoveAll(payload)
+	components := []string{"factoryd", "factory-runner", "factoryctl"}
+	sizes := map[string]int64{}
+	for _, component := range components {
+		snapshot := filepath.Join(payload, component)
+		if _, err := SnapshotReleaseArtifact(filepath.Join(binDir, component), snapshot, component, identity); err != nil {
+			return 0, 0, "", fmt.Errorf("%s: %w", component, err)
+		}
+		information, err := os.Stat(snapshot)
+		if err != nil {
+			return 0, 0, "", err
+		}
+		sizes[component] = information.Size()
+		unpacked += information.Size()
+	}
+	if err := ValidateTargetBounds(unpacked); err != nil {
+		return 0, 0, "", err
+	}
+
+	output, err := os.OpenFile(archivePath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if err != nil {
+		return 0, 0, "", err
+	}
+	defer func() {
+		if closeErr := output.Close(); result == nil {
+			result = closeErr
+		}
+	}()
+	hash := sha256.New()
+	compressed := gzip.NewWriter(io.MultiWriter(output, hash)) // zero header mtime
+	archive := tar.NewWriter(compressed)
+	for _, component := range components {
+		if err := archive.WriteHeader(&tar.Header{
+			Typeflag: tar.TypeReg, Name: component, Size: sizes[component], Mode: 0o755,
+			Uname: "root", Gname: "wheel", ModTime: time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC), Format: tar.FormatUSTAR,
+		}); err != nil {
+			return 0, 0, "", err
+		}
+		input, err := os.Open(filepath.Join(payload, component))
+		if err != nil {
+			return 0, 0, "", err
+		}
+		_, err = io.CopyN(archive, input, sizes[component])
+		input.Close()
+		if err != nil {
+			return 0, 0, "", err
+		}
+	}
+	if err := archive.Close(); err != nil {
+		return 0, 0, "", err
+	}
+	if err := compressed.Close(); err != nil {
+		return 0, 0, "", err
+	}
+	information, err := output.Stat()
+	if err != nil {
+		return 0, 0, "", err
+	}
+	if err := ValidateArchiveBounds(unpacked, information.Size()); err != nil {
+		return 0, 0, "", err
+	}
+	return unpacked, information.Size(), hex.EncodeToString(hash.Sum(nil)), nil
+}
