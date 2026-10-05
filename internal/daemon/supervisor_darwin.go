@@ -904,6 +904,9 @@ func (daemon *Daemon) attemptResultTail(
 	// however this daemon came to own it. The run's row is the receipt, so the
 	// write is retried without counting twice; a store that still refuses is
 	// logged with the figure it lost, never failing a run that settled.
+	// The account is read while the run is live: once it is terminal an
+	// overseer may move the agent to another account and its logs.
+	accountConfigDir, tokenErr := daemon.agentAccountConfigDir(daemon.cleanupCtx, run.AgentID)
 	defer func() {
 		run, accountHome, cwd := settledRun, daemon.accountHome.Load(), ""
 		if run.Role == kernel.RoleWorker && run.ChangeID != nil {
@@ -911,8 +914,7 @@ func (daemon *Daemon) attemptResultTail(
 		} else if runtimeRoot, rootErr := runtimeChildPath(runtimeParent, run.ID.String()); rootErr == nil {
 			cwd = filepath.Join(runtimeRoot, changeworker.HomeName)
 		}
-		accountConfigDir, tokenErr := daemon.agentAccountConfigDir(daemon.cleanupCtx, run.AgentID)
-		if accountHome == nil || tokenErr != nil {
+		if run.ID == (kernel.RunID{}) || accountHome == nil || tokenErr != nil {
 			return
 		}
 		if tokens := provider.RunTokens(run.Provider, *accountHome, accountConfigDir, cwd, time.UnixMilli(run.AdmittedAt.Int64())); tokens > 0 {
