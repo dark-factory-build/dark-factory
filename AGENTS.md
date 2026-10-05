@@ -17,6 +17,10 @@ details live in [README.md](README.md), [ARCHITECTURE.md](ARCHITECTURE.md),
 [CONTRIBUTING.md](CONTRIBUTING.md), and
 [docs/development/WORKFLOW.md](docs/development/WORKFLOW.md).
 
+When fixing a defect or a flaky test, look first for the shared root cause
+across related issues and fix the whole class once, with the least code and
+product surface; never weaken a test to make it pass.
+
 ## Agent check loop
 
 During implementation, run `./scripts/go-check.sh` and the focused tests for
