@@ -31,8 +31,9 @@ const (
 	maxGitConfigBytes     = 1 << 20
 	maxGitExecutableBytes = 64 << 20
 	maxRevisionBytes      = 4096
-	gitLockRetries        = 5
-	gitLockRetryDelay     = 200 * time.Millisecond
+	gitLockRetries        = 12
+	gitLockRetryDelay     = 100 * time.Millisecond
+	gitLockRetryMaxDelay  = 500 * time.Millisecond
 	gitTerminateGrace     = 250 * time.Millisecond
 	gitPipeDrainGrace     = time.Second
 )
@@ -48,6 +49,7 @@ type gitCommandSpec struct {
 
 type gitCapture struct {
 	output   []byte
+	stderr   []byte
 	exitCode int
 }
 
@@ -923,7 +925,7 @@ func runGitCapture(ctx context.Context, spec gitCommandSpec, maximum int) (gitCa
 		stdoutChannel <- result
 	}()
 	go func() {
-		result := readGitDiscard(child.stderr, maxGitStderrBytes)
+		result := readGitCapture(child.stderr, maxGitStderrBytes)
 		if result.err != nil || result.overflow {
 			cancelRead(errors.New("bounded Git stderr failed"))
 		}
@@ -949,7 +951,7 @@ func runGitCapture(ctx context.Context, spec gitCommandSpec, maximum int) (gitCa
 	if reaped.waitErr != nil {
 		exitCode = reaped.waitErr.(*exec.ExitError).ExitCode()
 	}
-	return gitCapture{output: stdoutResult.data, exitCode: exitCode}, nil
+	return gitCapture{output: stdoutResult.data, stderr: stderrResult.data, exitCode: exitCode}, nil
 }
 
 func collectGitStream(channel <-chan gitStreamResult, file *os.File) (gitStreamResult, bool) {
@@ -962,11 +964,6 @@ func collectGitStream(channel <-chan gitStreamResult, file *os.File) (gitStreamR
 		_ = file.Close()
 		return <-channel, false
 	}
-}
-
-func readGitDiscard(reader io.Reader, maximum int64) gitStreamResult {
-	written, err := io.Copy(io.Discard, io.LimitReader(reader, maximum+1))
-	return gitStreamResult{overflow: written > maximum, err: err}
 }
 
 func readGitCapture(reader io.Reader, maximum int) gitStreamResult {
@@ -1377,8 +1374,8 @@ func adoptWorktree(ctx context.Context, gitExecutable, repositoryRoot string, ex
 // addWorktree runs git worktree add, creating the branch at base or checking
 // out an existing branch that already sits at base; a branch at any other
 // commit belongs to work this Change may not replace. Concurrent attempts
-// in one repository contend for Git's own locks, so a refused add is
-// retried a few times before it is a failure.
+// in one repository contend for Git's own locks, so a refused add is retried
+// only when Git privately identifies a transient lock failure.
 func (a *gitAuthority) addWorktree(ctx context.Context, path, branch string, base ObjectID, staging bool) error {
 	arguments := []string{"-C", a.repositoryRoot, "-c", "core.hooksPath=/dev/null", "worktree", "add", "--quiet"}
 	if staging {
@@ -1396,17 +1393,26 @@ func (a *gitAuthority) addWorktree(ctx context.Context, path, branch string, bas
 	} else {
 		arguments = append(arguments, "-b", branch, path, base.Hex())
 	}
-	// ponytail: fixed retry on any nonzero exit; a per-cause classification
-	// would need Git's stderr, which stays private.
+	return retryWorktreeAdd(ctx, path, func() (gitCapture, error) {
+		return a.run(ctx, maxGitSelectionOutput, arguments...)
+	})
+}
+
+// retryWorktreeAdd bounds recovery from Git's repository-wide lock
+// contention. Git's diagnostic is retained only inside the private process
+// boundary: callers still receive the same path-safe GitError for every
+// failure class.
+func retryWorktreeAdd(ctx context.Context, path string, run func() (gitCapture, error)) error {
+	delay := gitLockRetryDelay
 	for attempt := 0; ; attempt++ {
-		result, err := a.run(ctx, maxGitSelectionOutput, arguments...)
+		result, err := run()
 		if err != nil {
 			return err
 		}
 		if result.exitCode == 0 {
 			return nil
 		}
-		if attempt == gitLockRetries {
+		if !isGitLockFailure(result.stderr) || attempt == gitLockRetries {
 			return newGitError(gitFailureProcess)
 		}
 		if _, err := os.Lstat(path); err == nil {
@@ -1415,9 +1421,31 @@ func (a *gitAuthority) addWorktree(ctx context.Context, path, branch string, bas
 		select {
 		case <-ctx.Done():
 			return newGitContextError(ctx.Err(), false)
-		case <-time.After(gitLockRetryDelay):
+		case <-time.After(delay):
+		}
+		if delay < gitLockRetryMaxDelay {
+			delay *= 2
+			if delay > gitLockRetryMaxDelay {
+				delay = gitLockRetryMaxDelay
+			}
 		}
 	}
+}
+
+func isGitLockFailure(stderr []byte) bool {
+	for _, rawLine := range bytes.Split(stderr, []byte{'\n'}) {
+		line := strings.ToLower(strings.TrimSpace(string(rawLine)))
+		if strings.Contains(line, "cannot lock") {
+			return true
+		}
+		if strings.Contains(line, "lock") && strings.Contains(line, "unable to create") {
+			return true
+		}
+		if strings.Contains(line, "lock") && (strings.Contains(line, "file exists") || strings.Contains(line, "already exists")) {
+			return true
+		}
+	}
+	return false
 }
 
 // removeUnusedPrivateWorktree removes only the private registration left by a
