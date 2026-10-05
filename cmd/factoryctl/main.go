@@ -138,8 +138,6 @@ const (
   factoryctl content search --project ID [--query TEXT] [--repository ID] [--entity REF] [--branch REF] [--environment NAME] [--thread ID]
   factoryctl content read --id ID --revision REVISION
   factoryctl content body --id ID --revision REVISION --offset N --limit N
-  factoryctl content evidence [--evidence-id ID] --project ID --id ID --revision REVISION --tested-source TEXT --result passed|failed|incomplete|not_run  [--environment TEXT] [--location TEXT] [--judgment TEXT]
-  factoryctl content evidence-list --project ID --id ID --revision REVISION [--offset N] [--limit N]
   factoryctl content attach --project ID --task TASK_ID --id ID --revision REVISION
   factoryctl content attachments --project ID --task TASK_ID --revision TASK_WORK_REVISION
   factoryctl attempt content ... (same content commands, authenticated to the live attempt)
@@ -226,9 +224,7 @@ const (
 	commandContentList
 	commandContentRead
 	commandContentBody
-	commandContentEvidence
 	commandContentAttach
-	commandContentEvidenceList
 	commandContentAttachments
 	commandOutcomeWrite
 	commandOutcomeRead
@@ -303,11 +299,7 @@ type attemptCommand struct {
 	sourceReferences    string
 	sourceCommit        string
 	sourcePath          string
-	testedSource        string
 	environment         string
-	contentResult       string
-	location            string
-	judgment            string
 	document            string
 	documentFile        string
 	parseError          string
@@ -581,8 +573,6 @@ type contentClient interface {
 	ContentList(context.Context, api.ContentListInput) (api.ContentList, error)
 	ContentRead(context.Context, api.ContentReadInput) (api.Content, error)
 	ContentBody(context.Context, api.ContentBodyInput) (api.ContentBody, error)
-	ContentEvidence(context.Context, api.ContentEvidenceInput) (api.ContentEvidence, error)
-	ContentEvidenceList(context.Context, api.ContentEvidenceListInput) (api.ContentEvidenceList, error)
 	ContentAttachments(context.Context, api.ContentAttachmentsInput) (api.ContentAttachments, error)
 	ContentAttach(context.Context, api.ContentAttachInput) error
 }
@@ -615,19 +605,8 @@ func runContent(ctx context.Context, client contentClient, command attemptComman
 		value, err = client.ContentRead(ctx, api.ContentReadInput{ID: command.contentID, Revision: command.contentRevision})
 	case commandContentBody:
 		value, err = client.ContentBody(ctx, api.ContentBodyInput{ID: command.contentID, Revision: command.contentRevision, Offset: command.offset, Limit: command.head})
-	case commandContentEvidence:
-		id := command.operationID
-		if id == "" {
-			id, err = newOperatorID()
-			if err != nil {
-				return writeWebFailure(stderr, "content evidence", err)
-			}
-		}
-		value, err = client.ContentEvidence(ctx, api.ContentEvidenceInput{ID: id, ProjectID: command.project, ContentID: command.contentID, ContentRevision: command.contentRevision, TestedSource: command.testedSource, Environment: command.environment, Result: command.contentResult, Location: command.location, Judgment: command.judgment})
 	case commandContentAttach:
 		err = client.ContentAttach(ctx, api.ContentAttachInput{TaskID: command.id, ProjectID: command.project, ContentID: command.contentID, ContentRevision: command.contentRevision})
-	case commandContentEvidenceList:
-		value, err = client.ContentEvidenceList(ctx, api.ContentEvidenceListInput{ProjectID: command.project, ContentID: command.contentID, ContentRevision: command.contentRevision, Offset: command.offset, Limit: command.head})
 	case commandContentAttachments:
 		value, err = client.ContentAttachments(ctx, api.ContentAttachmentsInput{ProjectID: command.project, TaskID: command.id, TaskWorkRevision: command.contentRevision})
 	}
@@ -910,12 +889,8 @@ func parseContent(args []string) (attemptCommand, bool, bool) {
 		command.kind = commandContentRead
 	case "body":
 		command.kind = commandContentBody
-	case "evidence":
-		command.kind = commandContentEvidence
 	case "attach":
 		command.kind = commandContentAttach
-	case "evidence-list":
-		command.kind = commandContentEvidenceList
 	case "attachments":
 		command.kind = commandContentAttachments
 	default:
@@ -969,11 +944,6 @@ func parseContent(args []string) (attemptCommand, bool, bool) {
 			} else {
 				return attemptCommand{}, false, false
 			}
-		case "--evidence-id":
-			if !validHumanRequestKey(value) || command.kind != commandContentEvidence {
-				return attemptCommand{}, false, false
-			}
-			command.operationID = value
 		case "--task":
 			if validHumanRequestKey(value) {
 				command.id = value
@@ -995,7 +965,7 @@ func parseContent(args []string) (attemptCommand, bool, bool) {
 		case "--limit":
 			n, ok := parseRevision(value)
 			max := uint64(64 * 1024)
-			if command.kind == commandContentList || command.kind == commandContentEvidenceList {
+			if command.kind == commandContentList {
 				max = api.MaxContentPageItems
 			}
 			if !ok || n > max {
@@ -1045,37 +1015,13 @@ func parseContent(args []string) (attemptCommand, bool, bool) {
 			} else {
 				return attemptCommand{}, false, false
 			}
-		case "--tested-source":
-			if validOperatorText(value, 1, 4096) {
-				command.testedSource = value
-			} else {
-				return attemptCommand{}, false, false
-			}
 		case "--environment":
 			if validOperatorText(value, 0, 4096) {
 				command.environment = value
 			} else {
 				return attemptCommand{}, false, false
 			}
-		case "--result":
-			if value == "passed" || value == "failed" || value == "incomplete" || value == "not_run" {
-				command.contentResult = value
-			} else {
-				return attemptCommand{}, false, false
-			}
-		case "--location":
-			if validOperatorText(value, 0, 4096) {
-				command.location = value
-			} else {
-				return attemptCommand{}, false, false
-			}
 
-		case "--judgment":
-			if validOperatorText(value, 0, 8192) {
-				command.judgment = value
-			} else {
-				return attemptCommand{}, false, false
-			}
 		default:
 			return attemptCommand{}, false, false
 		}
@@ -1111,16 +1057,8 @@ func parseContent(args []string) (attemptCommand, bool, bool) {
 		if command.contentID == "" || command.contentRevision == 0 || command.head == 0 || command.head > 64*1024 {
 			return attemptCommand{}, false, false
 		}
-	case commandContentEvidence:
-		if command.project == "" || command.contentID == "" || command.contentRevision == 0 || command.testedSource == "" || command.contentResult == "" {
-			return attemptCommand{}, false, false
-		}
 	case commandContentAttach:
 		if command.project == "" || command.id == "" || command.contentID == "" || command.contentRevision == 0 {
-			return attemptCommand{}, false, false
-		}
-	case commandContentEvidenceList:
-		if (start == 0 && command.project == "") || command.contentID == "" || command.contentRevision == 0 {
 			return attemptCommand{}, false, false
 		}
 	case commandContentAttachments:

@@ -99,8 +99,7 @@ func allowedAttemptMCPCommand(kind commandKind) bool {
 		return true
 	case commandContentCreate, commandContentRevise, commandContentDeprecate,
 		commandContentList, commandContentRead, commandContentBody,
-		commandContentEvidence, commandContentAttach,
-		commandContentEvidenceList, commandContentAttachments:
+		commandContentAttach, commandContentAttachments:
 		return true
 	case commandOutcomeWrite, commandOutcomeRead, commandOutcomeList:
 		return true

@@ -505,7 +505,7 @@ export class BrowserSession {
 
   projectContent(operation: ProjectContentOperation, input: ProjectContentInput): Promise<ProjectContentOutput> {
     try { projectContentOperation(operation); } catch (error) { return Promise.reject(error); }
-    const write = operation === "create" || operation === "revise" || operation === "deprecate" || operation === "evidence" || operation === "attach" || operation === "outcome_write" || (operation as string) === "mission_create";
+    const write = operation === "create" || operation === "revise" || operation === "deprecate" || operation === "attach" || operation === "outcome_write" || (operation as string) === "mission_create";
     const capability = CAPABILITIES.private_human_request_detail | (write ? CAPABILITIES.human_actions : 0);
     if ((this.#capabilities & capability) !== capability) return Promise.reject(new SessionError("unauthorized"));
     return this.#accountRequest("PROJECT_CONTENT_RESULT", capability, "project-content", (id) => encodeClientControl({ type: "PROJECT_CONTENT", id, body: { operation, input } }), { operation });

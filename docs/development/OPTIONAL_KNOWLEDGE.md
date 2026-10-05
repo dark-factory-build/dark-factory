@@ -57,29 +57,16 @@ A minimal document is:
 
 Alternatively anchor to an existing `anchor_task_id` and exact
 `anchor_work_revision`. Link existing implementation, investigation, review and
-delivery tasks in `links`; a stage of `implemented`, `reviewed`, `merged` or
-`deployed` requires cited evidence. Task success alone never means accepted.
+delivery tasks in `links`. Task success alone never means accepted.
 
 A worker can propose an outcome for its admitted task/work revision. It cannot
 change the objective of an existing outcome or record independent acceptance.
 An overseer or human can accept explicit criteria with a `conclusion`, `reason` and
-existing evidence IDs, or a visibly labelled `authorized judgment:`. Record
+a visibly labelled `authorized judgment:`. Record
 `remaining_work` separately. Reopen when the objective or criteria change.
 Edits to a task's actual objective make older acceptance stale; history remains
 readable and missing references are explicit. Source issue text is not polled
 or synchronized. An outcome write never edits or schedules its linked tasks.
-
-## Compare existing candidates
-
-Use `kind: comparison`, a question and criteria, one baseline and existing
-candidate task/run references. Each candidate records exact source/environment,
-scenario evidence and whether the evidence is `measurement` or `subjective`.
-Record `select` with a selected candidate task ID, `keep_baseline`, or
-`inconclusive`, with the reason and evaluator. Preserve rejected candidates and
-their results. Rejection of a design does not turn successful investigation into
-a failed worker task. Comparing does not rerun work, create branches or bypass
-review, merge or deployment. Capacity one supports sequential candidate tasks;
-parallel work uses ordinary capacity controls.
 
 `kind: mission` records an objective with explicit acceptance criteria. A bounded milestone
 may name `milestone_of`; accepting it does not complete the parent mission.
@@ -92,7 +79,7 @@ atomically saves the existing outcome record and queues a normal task for its
 selected overseer. Delegated tasks retain their mission association; standalone
 tasks remain valid. Mission details show durable related work and link to the
 owner's existing controls. Task success does not accept the mission: acceptance
-still requires the outcome's reason, evidence or authorized judgment, and conclusion.
+still requires the outcome's reason, authorized judgment, and conclusion.
 The tray opens the existing **Tasks** panel. **Pause new work** changes admission
 only; active processes continue. Mission creation and admission changes wait for
 daemon acknowledgement.
@@ -100,7 +87,7 @@ daemon acknowledgement.
 
 The existing console sidebar has a collapsed **Project library & outcomes**
 panel. Opening it or leaving it unused causes no fetch. Browse metadata, select
-an exact revision, then explicitly read body or evidence pages. Authoring saves
+an exact revision, then explicitly read body pages. Authoring saves
 new revisions; superseded definitions and existing attachments remain unchanged.
 Attach a selected revision to queued work or open an ordinary agent instruction
 draft for review and explicit submission. An outcome links existing work; saving

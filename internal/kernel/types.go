@@ -65,7 +65,6 @@ type PeerQuestionID struct{ identifier }
 type PeerDeliveryID struct{ identifier }
 type ContinuationID struct{ identifier }
 type ContentID struct{ identifier }
-type ContentEvidenceID struct{ identifier }
 type IntakeSourceID struct{ identifier }
 type IntakeAcceptanceID struct{ identifier }
 
@@ -168,10 +167,6 @@ func ContentIDFromBytes(value []byte) (ContentID, error) {
 	id, err := identifierFromBytes(value)
 	return ContentID{id}, err
 }
-func ContentEvidenceIDFromBytes(value []byte) (ContentEvidenceID, error) {
-	id, err := identifierFromBytes(value)
-	return ContentEvidenceID{id}, err
-}
 
 func (id ProjectID) MarshalText() ([]byte, error)              { return []byte(id.String()), nil }
 func (id AgentID) MarshalText() ([]byte, error)                { return []byte(id.String()), nil }
@@ -190,7 +185,6 @@ func (id TaskInterventionID) MarshalText() ([]byte, error)     { return []byte(i
 func (id PeerQuestionID) MarshalText() ([]byte, error)         { return []byte(id.String()), nil }
 func (id PeerDeliveryID) MarshalText() ([]byte, error)         { return []byte(id.String()), nil }
 func (id ContentID) MarshalText() ([]byte, error)              { return []byte(id.String()), nil }
-func (id ContentEvidenceID) MarshalText() ([]byte, error)      { return []byte(id.String()), nil }
 
 type digest struct {
 	b [DigestBytes]byte

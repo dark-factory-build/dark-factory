@@ -136,24 +136,13 @@ func TestAttemptContentUsesLiveProjectAndProvenance(t *testing.T) {
 	}
 }
 
-func TestContentEvidenceAndAttachmentsEnforceAttemptRoleAndPinWork(t *testing.T) {
+func TestContentAttachmentsEnforceAttemptRoleAndPinWork(t *testing.T) {
 	store, worker, _ := runningWorkerRun(t)
 	defer store.Close()
 	ctx := context.Background()
 	content, err := store.CreateContent(ctx, contentSpec(t, worker.ProjectID, 45, "evidence"), mustTime(t, 40))
 	if err != nil {
 		t.Fatal(err)
-	}
-	evidenceID, err := ContentEvidenceIDFromBytes(repeatBytes(46, IDBytes))
-	if err != nil {
-		t.Fatal(err)
-	}
-	evidence, err := store.CreateContentEvidenceForAttempt(ctx, worker.CredentialDigest, NewContentEvidence{ID: evidenceID, ProjectID: worker.ProjectID, ContentID: content.ID, ContentRevision: content.Revision, TestedSource: "test", Result: "passed", Evaluator: "forged", Judgment: "observed"}, mustTime(t, 41))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if evidence.Evaluator == "forged" || !strings.Contains(evidence.Evaluator, worker.ID.String()) {
-		t.Fatalf("evidence provenance = %q", evidence.Evaluator)
 	}
 	if err := store.AttachContentForOrchestrator(ctx, worker.CredentialDigest, worker.TaskID, content.ID, content.Revision, mustTime(t, 42)); !errors.Is(err, ErrUnauthorized) {
 		t.Fatalf("worker attachment = %v", err)

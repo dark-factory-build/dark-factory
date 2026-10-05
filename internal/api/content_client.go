@@ -32,16 +32,6 @@ func (client *OperatorClient) ContentBody(ctx context.Context, input ContentBody
 	err := client.client.call(ctx, "content_body", input, &v)
 	return v, err
 }
-func (client *OperatorClient) ContentEvidence(ctx context.Context, input ContentEvidenceInput) (ContentEvidence, error) {
-	var v ContentEvidence
-	err := client.client.call(ctx, "content_evidence", input, &v)
-	return v, err
-}
-func (client *OperatorClient) ContentEvidenceList(ctx context.Context, input ContentEvidenceListInput) (ContentEvidenceList, error) {
-	var v ContentEvidenceList
-	err := client.client.call(ctx, "content_evidence_list", input, &v)
-	return v, err
-}
 func (client *OperatorClient) ContentAttachments(ctx context.Context, input ContentAttachmentsInput) (ContentAttachments, error) {
 	var v ContentAttachments
 	err := client.client.call(ctx, "content_attachments", input, &v)
@@ -79,16 +69,6 @@ func (client *AttemptClient) ContentRead(ctx context.Context, input ContentReadI
 func (client *AttemptClient) ContentBody(ctx context.Context, input ContentBodyInput) (ContentBody, error) {
 	var v ContentBody
 	err := client.client.call(ctx, "attempt_content_body", input, &v)
-	return v, err
-}
-func (client *AttemptClient) ContentEvidence(ctx context.Context, input ContentEvidenceInput) (ContentEvidence, error) {
-	var v ContentEvidence
-	err := client.client.call(ctx, "attempt_content_evidence", input, &v)
-	return v, err
-}
-func (client *AttemptClient) ContentEvidenceList(ctx context.Context, input ContentEvidenceListInput) (ContentEvidenceList, error) {
-	var v ContentEvidenceList
-	err := client.client.call(ctx, "attempt_content_evidence_list", input, &v)
 	return v, err
 }
 func (client *AttemptClient) ContentAttachments(ctx context.Context, input ContentAttachmentsInput) (ContentAttachments, error) {

@@ -44,13 +44,12 @@ function LibraryDocuments({ state, call, draft, projectID, board = false, entity
   const [selected, setSelected] = useState<RecordValue>();
   const [loaded, setLoaded] = useState(false);
   const [body, setBody] = useState(""), [bodyNext, setBodyNext] = useState<number>(0), [complete, setComplete] = useState(false);
-  const [evidence, setEvidence] = useState<RecordValue[]>([]), [evidenceNext, setEvidenceNext] = useState(0);
   const [replies, setReplies] = useState<RecordValue[]>([]), [replyNext, setReplyNext] = useState(0);
   const [accesses, setAccesses] = useState<RecordValue[]>([]), [accessNext, setAccessNext] = useState(0);
   const [pending, setPending] = useState(false), [error, setError] = useState(""), [notice, setNotice] = useState("");
   const [editing, setEditing] = useState(false), [newKind, setNewKind] = useState(""), [seed, setSeed] = useState<RecordValue>({});
   const [filters, setFilters] = useState({ query: "", repository_id: repository, branch: "", environment: "", kind: board ? "discussion" : "", entity });
-  const epoch = useRef(0), newID = useRef(""), evidenceID = useRef(id()), listQuery = useRef<ProjectContentInput>({});
+  const epoch = useRef(0), newID = useRef(""), listQuery = useRef<ProjectContentInput>({});
   const [showResolved, setShowResolved] = useState(false);
   const metadata = knowledgeMetadata(selected?.source_references);
   const discussion = selected?.kind === "discussion";
@@ -74,8 +73,7 @@ function LibraryDocuments({ state, call, draft, projectID, board = false, entity
     setNext(Number(result.next_offset ?? 0)); setLoaded(true);
   };
   const selectRevision = (value: RecordValue, loadedBody?: string) => {
-    evidenceID.current = id();
-    setSelected(value); setBody(loadedBody ?? ""); setBodyNext(0); setComplete(loadedBody !== undefined); setEvidence([]); setEvidenceNext(0); setReplies([]); setReplyNext(0); setAccesses([]); setAccessNext(0); setEditing(false);
+    setSelected(value); setBody(loadedBody ?? ""); setBodyNext(0); setComplete(loadedBody !== undefined); setReplies([]); setReplyNext(0); setAccesses([]); setAccessNext(0); setEditing(false);
   };
   const read = async (contentID: string, revision?: number) => {
     const generation = epoch.current;
@@ -98,13 +96,13 @@ function LibraryDocuments({ state, call, draft, projectID, board = false, entity
     if (generation !== epoch.current) return;
     setBody((value) => offset === 0 ? text(result.body) : value + text(result.body)); setComplete(result.complete === true); setBodyNext(Number(result.next_offset ?? 0));
   };
-  const loadRelated = async (type: "evidence_list" | "accesses" | "search", offset = 0) => {
+  const loadRelated = async (type: "accesses" | "search", offset = 0) => {
     if (!selected) return;
     const generation = epoch.current;
-    const result = await request(type, type === "search" ? { repository_id: text(selected.repository_id) || filters.repository_id, branch: text(metadata.branch), environment: text(metadata.environment), thread_id: selected.id, kind: "discussion_reply", offset, limit: 4 } : type === "accesses" ? { id: selected.id, revision: selected.revision, offset, limit: 4 } : { content_id: selected.id, content_revision: selected.revision, offset, limit: 1 });
+    const result = await request(type, type === "search" ? { repository_id: text(selected.repository_id) || filters.repository_id, branch: text(metadata.branch), environment: text(metadata.environment), thread_id: selected.id, kind: "discussion_reply", offset, limit: 4 } : { id: selected.id, revision: selected.revision, offset, limit: 4 });
     if (generation !== epoch.current) return;
-    (type === "search" ? setReplies : type === "accesses" ? setAccesses : setEvidence)(rows(result.items));
-    (type === "search" ? setReplyNext : type === "accesses" ? setAccessNext : setEvidenceNext)(Number(result.next_offset ?? 0));
+    (type === "search" ? setReplies : setAccesses)(rows(result.items));
+    (type === "search" ? setReplyNext : setAccessNext)(Number(result.next_offset ?? 0));
   };
   const begin = (kind: string, details: RecordValue = {}) => { newID.current = id(); setNewKind(kind); setSeed({ ...details, ...(kind === "discussion" ? {} : { resolved: false, pinned: false }) }); setEditing(true); };
   const updateThread = async (changes: RecordValue) => {
@@ -173,9 +171,6 @@ function LibraryDocuments({ state, call, draft, projectID, board = false, entity
         <button type="button" onClick={() => void run(() => loadRelated("accesses"))}>Task access</button>
         {accesses.map((item, index) => <p key={index}>Revision {String(item.content_revision ?? item.revision)} · {text(item.kind) || text(item.access_kind)} · Task {text(item.task_id)} · Run {text(item.run_id)} · Bytes {String(item.offset ?? 0)}–{Number(item.offset ?? 0) + Number(item.byte_length ?? 0)} · {String(item.created_at_ms ?? item.at_ms ?? "")}</p>)}
         {accessNext === 0 ? null : <button type="button" onClick={() => void run(() => loadRelated("accesses", accessNext))}>More task access</button>}
-        <button type="button" onClick={() => void run(() => loadRelated("evidence_list"))}>Test results</button>
-        {evidence.map((item) => <article key={text(item.id)}><p>{text(item.result)} · {text(item.judgment)}</p><p>Source: {text(item.tested_source)} · Environment: {text(item.environment)}</p><p>Evidence: {text(item.location)} · Evaluator: {text(item.evaluator)}</p></article>)}
-        {evidenceNext === 0 ? null : <button type="button" onClick={() => void run(() => loadRelated("evidence_list", evidenceNext))}>Next evidence</button>}
         </details>
         <details><summary>Manage</summary>
         <label>Read revision <input type="number" min="1" max={Number(selected.latest_revision)} defaultValue={Number(selected.revision)} key={`${selected.id}:${selected.revision}`} onBlur={(event) => { const revision = Number(event.target.value); if (Number.isSafeInteger(revision) && revision > 0 && revision !== selected.revision) void run(() => read(text(selected.id), revision)); }} /></label>
@@ -186,9 +181,6 @@ function LibraryDocuments({ state, call, draft, projectID, board = false, entity
           <button type="button" disabled={!complete || selected.revision !== selected.latest_revision} onClick={() => void run(() => updateThread({ pinned: !metadata.pinned }))}>{metadata.pinned ? "Unpin discussion" : "Pin discussion"}</button>
           <button type="button" onClick={() => begin("lesson", { ...metadata, resolved: false, pinned: false, thread_id: selected.id, evidence: [...strings(metadata.evidence), `content:${selected.id}@${selected.revision}`], status: "tentative" })}>Retain conclusion</button>
         </div>}
-        <h4>Record a test result</h4><form onSubmit={(event) => { event.preventDefault(); const data = new FormData(event.currentTarget); void run(async () => { await request("evidence", { id: evidenceID.current, content_id: selected.id, content_revision: selected.revision, tested_source: data.get("tested_source"), environment: data.get("environment"), result: data.get("result"), location: data.get("location"), judgment: data.get("judgment") }); evidenceID.current = id(); setNotice("Test result saved."); }); }}>
-          <label>Tested source <input name="tested_source" required /></label><label>Environment <input name="environment" required /></label><label>Observed result <select name="result"><option>passed</option><option>failed</option><option>incomplete</option><option>not_run</option></select></label><label>Existing report or result reference <input name="location" required /></label><label>Judgment <textarea name="judgment" /></label><button>Record observation</button>
-        </form>
         </details>
       </section>}
       {!editing ? null : <form aria-label="Knowledge editor" key={newKind ? newID.current : `${selected?.id}:${selected?.revision}`} onSubmit={(event) => {

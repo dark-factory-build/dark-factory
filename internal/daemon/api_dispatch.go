@@ -366,7 +366,7 @@ func (daemon *Daemon) dispatch(ctx context.Context, call api.Call) api.Reply {
 		return daemon.operatorUpdateAgent(ctx, call)
 	case api.CallOverseerReplyHuman:
 		return daemon.overseerReplyHuman(ctx, call)
-	case api.CallContentCreate, api.CallContentRevise, api.CallContentDeprecate, api.CallContentList, api.CallContentRead, api.CallContentBody, api.CallContentEvidence, api.CallContentAttach, api.CallContentEvidenceList, api.CallContentAttachments:
+	case api.CallContentCreate, api.CallContentRevise, api.CallContentDeprecate, api.CallContentList, api.CallContentRead, api.CallContentBody, api.CallContentAttach, api.CallContentAttachments:
 		return daemon.content(ctx, call)
 	case api.CallOutcomeWrite, api.CallOutcomeRead, api.CallOutcomeList:
 		return daemon.outcomes(ctx, call)
