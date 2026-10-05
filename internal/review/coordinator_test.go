@@ -64,6 +64,9 @@ func (b *fakeBackend) Enqueue(context.Context, Operation) error { b.enqueued = t
 func (b *fakeBackend) Observe(context.Context, string) (Receipt, error) {
 	return Receipt{State: "missing"}, nil
 }
+func (b *fakeBackend) StoredPull(context.Context, uint64, string) (Request, error) {
+	return Request{}, nil
+}
 func (b *fakeBackend) ObserveMerge(context.Context, Operation) (Merge, error) {
 	return b.merge, nil
 }

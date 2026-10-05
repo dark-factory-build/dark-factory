@@ -20,13 +20,16 @@ type publicReviewBackend struct {
 	killed, submitAmbiguous, requestChanges bool
 	enqueueRefused                          bool
 	reviews, submits, enqueues              int
-	enqueuedBase, enqueuedSHA               string
+	enqueuedBase, enqueuedSHA, enqueuedBody string
 	journal                                 map[string]string
 	observations                            map[string]review.Receipt
 	merge                                   review.Merge
 	observeFailures                         int
 }
 
+func (b *publicReviewBackend) StoredPull(context.Context, uint64, string) (review.Request, error) {
+	return review.Request{Body: "fixture body\n"}, nil
+}
 func (b *publicReviewBackend) CloneReadOnly(context.Context, review.Request) (string, func(), error) {
 	return "/fixture-review", func() {}, nil
 }
@@ -52,7 +55,7 @@ func (b *publicReviewBackend) Submit(_ context.Context, operation review.Operati
 }
 func (b *publicReviewBackend) Enqueue(_ context.Context, operation review.Operation) error {
 	b.enqueues++
-	b.enqueuedBase, b.enqueuedSHA = operation.Request.BaseRef, operation.Request.Base
+	b.enqueuedBase, b.enqueuedSHA, b.enqueuedBody = operation.Request.BaseRef, operation.Request.Base, operation.Request.Body
 	if b.enqueueRefused {
 		return errors.New("review: Maintainer rejected operation")
 	}
@@ -90,7 +93,7 @@ func TestPublicReviewPathPersistsKilledProviderFailureAndRetries(t *testing.T) {
 	fixture, project := reviewPublicFixture(t)
 	backend := &publicReviewBackend{killed: true}
 	fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return backend }
-	input := api.IntakeInput{Action: "review_pr", ProjectID: project.String(), ReviewRequest: &api.ReviewRequest{Repository: "team/repo", PullNumber: 7, Head: strings.Repeat("a", 40), Base: strings.Repeat("b", 40), BaseRef: "main", Body: "fixture", Provider: "codex"}}
+	input := api.IntakeInput{Action: "review_pr", ProjectID: project.String(), ReviewRequest: &api.ReviewRequest{Repository: "team/repo", PullNumber: 7, Head: strings.Repeat("a", 40), Base: strings.Repeat("b", 40), BaseRef: "main", Provider: "codex"}}
 	if result := fixture.daemon.Intake(context.Background(), input); result.State != "ok" || result.ReviewOperation == "" {
 		t.Fatalf("created review answered %+v", result)
 	}
@@ -137,7 +140,7 @@ func TestReviewIntakeAnswersWithTheCreatedOperationWhileItRuns(t *testing.T) {
 	fixture, project := reviewPublicFixture(t)
 	backend := blockedReviewBackend{publicReviewBackend: &publicReviewBackend{}, release: make(chan struct{})}
 	fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return backend }
-	input := api.IntakeInput{Action: "review_pr", ProjectID: project.String(), ReviewRequest: &api.ReviewRequest{Repository: "team/repo", PullNumber: 9, Head: strings.Repeat("a", 40), Base: strings.Repeat("b", 40), BaseRef: "main", Body: "fixture", Provider: "codex"}}
+	input := api.IntakeInput{Action: "review_pr", ProjectID: project.String(), ReviewRequest: &api.ReviewRequest{Repository: "team/repo", PullNumber: 9, Head: strings.Repeat("a", 40), Base: strings.Repeat("b", 40), BaseRef: "main", Provider: "codex"}}
 	result := fixture.daemon.Intake(context.Background(), input)
 	op := lastDurableReview(t, fixture.store, project)
 	close(backend.release)
@@ -153,7 +156,7 @@ func TestPublicReviewPathRefusesRetryAfterAmbiguousSubmit(t *testing.T) {
 	fixture, project := reviewPublicFixture(t)
 	backend := &publicReviewBackend{submitAmbiguous: true}
 	fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return backend }
-	input := api.IntakeInput{Action: "review_pr", ProjectID: project.String(), ReviewRequest: &api.ReviewRequest{Repository: "team/repo", PullNumber: 8, Head: strings.Repeat("c", 40), Base: strings.Repeat("d", 40), BaseRef: "main", Body: "fixture", Provider: "claude"}}
+	input := api.IntakeInput{Action: "review_pr", ProjectID: project.String(), ReviewRequest: &api.ReviewRequest{Repository: "team/repo", PullNumber: 8, Head: strings.Repeat("c", 40), Base: strings.Repeat("d", 40), BaseRef: "main", Provider: "claude"}}
 	if result := fixture.daemon.Intake(context.Background(), input); result.State != "ok" || result.ReviewOperation == "" {
 		t.Fatalf("created review answered %+v", result)
 	}
@@ -170,7 +173,7 @@ func TestPublicReviewPathRefusesRetryAfterAmbiguousSubmit(t *testing.T) {
 
 func TestRestartDoesNotRouteRequestChangesBeforeSubmit(t *testing.T) {
 	fixture, project := reviewPublicFixture(t)
-	request := review.Request{Repository: "team/repo", PullNumber: 13, Head: strings.Repeat("a", 40), Base: strings.Repeat("b", 40), BaseRef: "main", Body: "fixture body", Provider: "codex"}
+	request := review.Request{Repository: "team/repo", PullNumber: 13, Head: strings.Repeat("a", 40), Base: strings.Repeat("b", 40), BaseRef: "main", Provider: "codex"}
 	operation := review.Operation{ID: "request-changes-before-submit", Request: request, State: "running", Verdict: "request_changes", Detail: "not submitted", CreatedAt: time.Unix(1, 0), UpdatedAt: time.Unix(1, 0)}
 	if err := fixture.store.RecordReviewOperation(context.Background(), project, request.Repository, operation.ID, operation, mustKernelTime(t, 1001)); err != nil {
 		t.Fatal(err)
@@ -300,7 +303,7 @@ func TestRestartRoutesCompletedRequestChangesWithoutResubmitting(t *testing.T) {
 	backend := &publicReviewBackend{requestChanges: true}
 	now := func() time.Time { return time.Unix(1011, 0) }
 	coordinator := review.Coordinator{Store: durableReviewStore{store: fixture.store, project: project, repository: "team/repo", now: now}, Backend: backend, Now: now}
-	op, err := coordinator.Start(ctx, review.Request{Repository: "team/repo", PullNumber: 12, Head: head, Base: base, BaseRef: "main", Body: "fixture body", Provider: "codex"})
+	op, err := coordinator.Start(ctx, review.Request{Repository: "team/repo", PullNumber: 12, Head: head, Base: base, BaseRef: "main", Provider: "codex"})
 	if err != nil || op.State != "completed" || !op.Submitted || !op.RoutePending || backend.submits != 1 {
 		t.Fatalf("completed request-changes operation=%+v err=%v backend=%+v", op, err, backend)
 	}
@@ -383,7 +386,7 @@ func waitForDurableReview(t *testing.T, store *kernel.Store, project kernel.Proj
 }
 
 func publishedReviewRequest() api.ReviewRequest {
-	return api.ReviewRequest{Repository: "team/repo", PullNumber: 12, Head: strings.Repeat("e", 40), Base: strings.Repeat("f", 40), BaseRef: "main", Body: "fixture body", Provider: "codex"}
+	return api.ReviewRequest{Repository: "team/repo", PullNumber: 12, Head: strings.Repeat("e", 40), Base: strings.Repeat("f", 40), BaseRef: "main", Provider: "codex"}
 }
 
 func TestSendBackToARunningTaskLandsOnALaterTick(t *testing.T) {
@@ -637,7 +640,7 @@ func TestFailedReviewRetriesOnceThenEscalatesOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	request := publishedReviewRequest()
-	unbound := review.Operation{ID: "unbound-failure", Request: review.Request{Repository: "team/unbound", PullNumber: 12, Head: head, Base: request.Base, BaseRef: "main", Body: "fixture", Provider: "codex"}, State: "failed", Retryable: true, Detail: "provider killed at launch", CreatedAt: fixture.daemon.now(), UpdatedAt: fixture.daemon.now()}
+	unbound := review.Operation{ID: "unbound-failure", Request: review.Request{Repository: "team/unbound", PullNumber: 12, Head: head, Base: request.Base, BaseRef: "main", Provider: "codex"}, State: "failed", Retryable: true, Detail: "provider killed at launch", CreatedAt: fixture.daemon.now(), UpdatedAt: fixture.daemon.now()}
 	if err := (durableReviewStore{store: fixture.store, project: project, repository: "team/unbound", now: fixture.daemon.now}).Create(ctx, unbound); err != nil {
 		t.Fatal(err)
 	}
@@ -662,7 +665,7 @@ func TestStuckEnqueueEscalatesOnceAndKeepsResuming(t *testing.T) {
 	now := fixture.daemon.now
 	fixture.daemon.now = func() time.Time { return now().Add(time.Duration(offset.Load())) }
 	request := publishedReviewRequest()
-	stuck := review.Operation{ID: "stuck-enqueue", EnqueueID: "stuck-enqueue-write", Submitted: true, Verdict: "allow", Request: review.Request{Repository: request.Repository, PullNumber: request.PullNumber, Head: request.Head, Base: request.Base, BaseRef: request.BaseRef, Body: request.Body, Provider: request.Provider}, State: "enqueuing", CreatedAt: fixture.daemon.now(), UpdatedAt: fixture.daemon.now()}
+	stuck := review.Operation{ID: "stuck-enqueue", EnqueueID: "stuck-enqueue-write", Submitted: true, Verdict: "allow", Request: review.Request{Repository: request.Repository, PullNumber: request.PullNumber, Head: request.Head, Base: request.Base, BaseRef: request.BaseRef, Body: "fixture body", Provider: request.Provider}, State: "enqueuing", CreatedAt: fixture.daemon.now(), UpdatedAt: fixture.daemon.now()}
 	if err := (durableReviewStore{store: fixture.store, project: project, repository: "team/repo", now: fixture.daemon.now}).Create(ctx, stuck); err != nil {
 		t.Fatal(err)
 	}
@@ -699,5 +702,16 @@ func TestRequestChangesOnAPullNoTaskPublishedIsNotEscalated(t *testing.T) {
 	}
 	if op := lastDurableReview(t, fixture.store, project); op.State != "completed" || op.RoutePending || op.Escalation != "" {
 		t.Fatalf("host pull operation = %+v", op)
+	}
+}
+
+// The caller supplies no body: the review binds the body GitHub stores,
+// trailing newline included.
+func TestReviewBindsTheStoredBody(t *testing.T) {
+	fixture, project := reviewPublicFixture(t)
+	backend := &publicReviewBackend{}
+	fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return backend }
+	if _, err := reviewNow(context.Background(), fixture.daemon, project, publishedReviewRequest()); err != nil || backend.enqueuedBody != "fixture body\n" {
+		t.Fatalf("err=%v enqueued body %q", err, backend.enqueuedBody)
 	}
 }
