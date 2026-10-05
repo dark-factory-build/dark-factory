@@ -128,10 +128,6 @@ func inspectServiceForAccount(ctx context.Context, home string, config ServiceCo
 	return inspectServiceAtHome(ctx, home, userHome, config, launchctl)
 }
 
-func inspectService(ctx context.Context, home, userHome string, launchctl launchctlRun) (ServiceStatus, error) {
-	return inspectServiceAtHome(ctx, home, userHome, DefaultServiceConfig(), launchctl)
-}
-
 // inspectServiceAtHome is a package-private test seam. Production status uses
 // accountHome, never a caller-provided HOME value.
 func inspectServiceAtHome(ctx context.Context, home, userHome string, config ServiceConfig, launchctl launchctlRun) (status ServiceStatus, resultErr error) {

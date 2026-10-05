@@ -278,7 +278,7 @@ func TestLiteralSQLiteInternalPrefixCoversEveryInspectionPath(t *testing.T) {
 		t.Fatal(err)
 	}
 	for name, inspect := range map[string]func(context.Context, io.ReaderAt, int64) error{
-		"immutable": InspectImmutable,
+		"immutable": func(ctx context.Context, r io.ReaderAt, n int64) error { return inspectImmutable(ctx, r, n, false) },
 		"pristine":  InspectPristine,
 	} {
 		t.Run(name, func(t *testing.T) {

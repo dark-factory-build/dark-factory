@@ -2,7 +2,6 @@ package browserprotocol
 
 import (
 	"bytes"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -62,23 +61,6 @@ func hexIdentity(prefix byte, index int) string {
 	raw[15] = byte(index % 251)
 	raw[14] = byte(index / 251)
 	return fmt.Sprintf("%x", raw)
-}
-
-func rawControl(t *testing.T, kind MessageType, id string, body any) []byte {
-	t.Helper()
-	bodyJSON, err := json.Marshal(body)
-	if err != nil {
-		t.Fatal(err)
-	}
-	idJSON, err := json.Marshal(id)
-	if err != nil {
-		t.Fatal(err)
-	}
-	result, err := json.Marshal(controlEnvelope{Type: kind, ID: idJSON, Body: bodyJSON})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return result
 }
 
 func TestStateFixturesRoundTrip(t *testing.T) {

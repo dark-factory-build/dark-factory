@@ -75,13 +75,6 @@ func (host *Host) Connect(ctx context.Context) (Authorization, error) {
 	// per connection if the product supports them in a future release.
 	host.mu.Lock()
 	defer host.mu.Unlock()
-	if host.connection.ID == "" && !host.connection.Disabled {
-		lease, err := host.home.LockLegacyController()
-		if err != nil {
-			return Authorization{}, err
-		}
-		defer lease.Close()
-	}
 	if host.connection.ID != "" {
 		if !host.connection.Disabled {
 			return Authorization{}, ErrAlreadyConnected

@@ -51,7 +51,7 @@ func TestServiceStatusExactAbsenceIsReadOnly(t *testing.T) {
 		{status: launchctlNotFound},
 		{status: 0, stdout: []byte(launchctlNotFoundText + "\n")},
 	}}
-	status, err := inspectService(context.Background(), home, userHome, fake.run)
+	status, err := inspectServiceAtHome(context.Background(), home, userHome, DefaultServiceConfig(), fake.run)
 	if err != nil || status != (ServiceStatus{State: ServiceAbsent}) {
 		t.Fatalf("status = %+v, %v", status, err)
 	}
@@ -103,7 +103,7 @@ func TestServiceStatusRefusesNonGoHomesBeforeLaunchctl(t *testing.T) {
 			}
 			before := snapshotServiceTrees(t, root)
 			calls := 0
-			_, err := inspectService(context.Background(), home, userHome, func(context.Context, ...string) launchctlResult {
+			_, err := inspectServiceAtHome(context.Background(), home, userHome, DefaultServiceConfig(), func(context.Context, ...string) launchctlResult {
 				calls++
 				return launchctlResult{}
 			})
@@ -404,7 +404,7 @@ func TestServiceStatusRejectsDetachedLaunchAgentsDuringRead(t *testing.T) {
 	fake := &recordedLaunchctl{}
 	fake.results = []launchctlResult{{status: launchctlNotFound}, {status: 0, stdout: []byte(launchctlNotFoundText + "\n")}}
 	mutated := false
-	status, err := inspectService(context.Background(), home, userHome, func(ctx context.Context, args ...string) launchctlResult {
+	status, err := inspectServiceAtHome(context.Background(), home, userHome, DefaultServiceConfig(), func(ctx context.Context, args ...string) launchctlResult {
 		if !mutated {
 			mutated = true
 			if err := os.Rename(launchAgents, detached); err != nil {
@@ -432,7 +432,7 @@ func TestServiceStatusLaunchctlFailureIsReadOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	before := snapshotServiceTrees(t, home, userHome)
-	status, err := inspectService(context.Background(), home, userHome, func(context.Context, ...string) launchctlResult {
+	status, err := inspectServiceAtHome(context.Background(), home, userHome, DefaultServiceConfig(), func(context.Context, ...string) launchctlResult {
 		return launchctlResult{status: 1, stderr: []byte("permission denied")}
 	})
 	if status.State != ServiceAmbiguous || !errors.Is(err, ErrServiceLaunchctl) {
@@ -501,7 +501,7 @@ func TestServiceStatusRejectsStageCreatedAfterHomeCensus(t *testing.T) {
 	parent := filepath.Dir(home)
 	stage := filepath.Join(parent, "."+filepath.Base(home)+stageSuffix)
 	results := &recordedLaunchctl{results: []launchctlResult{{status: launchctlNotFound}, {status: 0, stdout: []byte(launchctlNotFoundText + "\n")}}}
-	status, err := inspectService(context.Background(), home, userHome, func(ctx context.Context, args ...string) launchctlResult {
+	status, err := inspectServiceAtHome(context.Background(), home, userHome, DefaultServiceConfig(), func(ctx context.Context, args ...string) launchctlResult {
 		if len(results.calls) == 0 {
 			if err := os.Mkdir(stage, 0o700); err != nil {
 				t.Fatalf("create stage: %v", err)
@@ -526,7 +526,7 @@ func TestServiceStatusRejectsHomeRemovalDuringLaunchctl(t *testing.T) {
 	}
 	moved := home + ".removed"
 	results := &recordedLaunchctl{results: []launchctlResult{{status: launchctlNotFound}, {status: 0, stdout: []byte(launchctlNotFoundText + "\n")}}}
-	status, err := inspectService(context.Background(), home, userHome, func(ctx context.Context, args ...string) launchctlResult {
+	status, err := inspectServiceAtHome(context.Background(), home, userHome, DefaultServiceConfig(), func(ctx context.Context, args ...string) launchctlResult {
 		if len(results.calls) == 0 {
 			if err := os.Rename(home, moved); err != nil {
 				t.Fatalf("remove home binding: %v", err)
@@ -559,7 +559,7 @@ func TestServiceStatusRefusesPlistMutationsAndPresentJobs(t *testing.T) {
 		t.Fatal(err)
 	}
 	absent := &recordedLaunchctl{results: []launchctlResult{{status: 113}, {status: 0, stdout: []byte(launchctlNotFoundText + "\n")}}}
-	if status, err := inspectService(context.Background(), home, userHome, absent.run); status.State != ServiceAmbiguous || !errors.Is(err, ErrServiceAmbiguous) {
+	if status, err := inspectServiceAtHome(context.Background(), home, userHome, DefaultServiceConfig(), absent.run); status.State != ServiceAmbiguous || !errors.Is(err, ErrServiceAmbiguous) {
 		t.Fatalf("plist without receipt = %+v, %v", status, err)
 	}
 
@@ -567,7 +567,7 @@ func TestServiceStatusRefusesPlistMutationsAndPresentJobs(t *testing.T) {
 		t.Fatal(err)
 	}
 	calls := 0
-	if status, err := inspectService(context.Background(), home, userHome, func(context.Context, ...string) launchctlResult {
+	if status, err := inspectServiceAtHome(context.Background(), home, userHome, DefaultServiceConfig(), func(context.Context, ...string) launchctlResult {
 		calls++
 		return launchctlResult{}
 	}); status.State != ServiceAmbiguous || !errors.Is(err, ErrServicePlist) || calls != 0 {
@@ -581,7 +581,7 @@ func TestServiceStatusRefusesPlistMutationsAndPresentJobs(t *testing.T) {
 	program := serviceProgramPath(home)
 	presentOutput := []byte(service + " = {\n\tpath = " + plistPath + "\n\tstate = running\n\tprogram = " + program + "\n\tpid = 731\n}\n")
 	present := &recordedLaunchctl{results: []launchctlResult{{status: 0, stdout: presentOutput}}}
-	if status, err := inspectService(context.Background(), home, userHome, present.run); status != (ServiceStatus{State: ServiceAmbiguous, PID: 731}) || !errors.Is(err, ErrServiceAmbiguous) {
+	if status, err := inspectServiceAtHome(context.Background(), home, userHome, DefaultServiceConfig(), present.run); status != (ServiceStatus{State: ServiceAmbiguous, PID: 731}) || !errors.Is(err, ErrServiceAmbiguous) {
 		t.Fatalf("present job without receipt = %+v, %v", status, err)
 	}
 }
@@ -632,7 +632,7 @@ func TestServiceStatusRejectsPlistMetadataWithoutLaunchctl(t *testing.T) {
 			}
 			test.mutate(t, path, directory)
 			calls := 0
-			status, err := inspectService(context.Background(), home, userHome, func(context.Context, ...string) launchctlResult {
+			status, err := inspectServiceAtHome(context.Background(), home, userHome, DefaultServiceConfig(), func(context.Context, ...string) launchctlResult {
 				calls++
 				return launchctlResult{}
 			})
@@ -679,7 +679,7 @@ func TestServiceStatusCancellationAndRepeatedCallsLeakNothing(t *testing.T) {
 		}
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	_, err := inspectService(ctx, home, userHome, func(ctx context.Context, _ ...string) launchctlResult {
+	_, err := inspectServiceAtHome(ctx, home, userHome, DefaultServiceConfig(), func(ctx context.Context, _ ...string) launchctlResult {
 		cancel()
 		return launchctlResult{status: -1, err: ctx.Err()}
 	})
@@ -688,7 +688,7 @@ func TestServiceStatusCancellationAndRepeatedCallsLeakNothing(t *testing.T) {
 	}
 	for index := 0; index < 20; index++ {
 		fake := &recordedLaunchctl{results: []launchctlResult{{status: 113}, {status: 0, stdout: []byte(launchctlNotFoundText + "\n")}}}
-		if _, err := inspectService(context.Background(), home, userHome, fake.run); err != nil {
+		if _, err := inspectServiceAtHome(context.Background(), home, userHome, DefaultServiceConfig(), fake.run); err != nil {
 			t.Fatal(err)
 		}
 	}

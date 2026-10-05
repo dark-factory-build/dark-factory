@@ -26,10 +26,6 @@ type fileIdentity struct {
 
 func (left fileIdentity) same(right fileIdentity) bool { return left == right }
 
-func (left fileIdentity) sameObject(right fileIdentity) bool {
-	return left.device == right.device && left.inode == right.inode && left.uid == right.uid && left.links == right.links && left.size == right.size
-}
-
 func (left fileIdentity) sameDirectory(right fileIdentity) bool {
 	return left.device == right.device && left.inode == right.inode && left.uid == right.uid && left.mode == right.mode
 }

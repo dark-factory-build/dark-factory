@@ -55,7 +55,7 @@ func TestNewDatabaseImageIsExactAndOpens(t *testing.T) {
 		if got := binary.BigEndian.Uint32(image[68:72]); got != uint32(applicationID) {
 			t.Fatalf("image %d application id = %#x, want %#x", index, got, applicationID)
 		}
-		if err := InspectImmutable(ctx, bytes.NewReader(image), int64(len(image))); err != nil {
+		if err := inspectImmutable(ctx, bytes.NewReader(image), int64(len(image)), false); err != nil {
 			t.Fatalf("InspectImmutable image %d: %v", index, err)
 		}
 	}
@@ -684,7 +684,7 @@ func TestInspectImmutableValidStateIsReadOnlyAndKeepsReaderOpen(t *testing.T) {
 	}
 	before := append([]byte(nil), image...)
 	reader := bytes.NewReader(image)
-	if err := InspectImmutable(ctx, reader, int64(len(image))); err != nil {
+	if err := inspectImmutable(ctx, reader, int64(len(image)), false); err != nil {
 		t.Fatal(err)
 	}
 	if !bytes.Equal(image, before) {
@@ -713,7 +713,7 @@ func TestInspectImmutableValidStateIsReadOnlyAndKeepsReaderOpen(t *testing.T) {
 		t.Fatal(err)
 	}
 	evidence := captureDatabaseEvidence(t, path)
-	if err := InspectImmutable(ctx, file, info.Size()); err != nil {
+	if err := inspectImmutable(ctx, file, info.Size(), false); err != nil {
 		t.Fatalf("InspectImmutable mutated database: %v", err)
 	}
 	assertDatabaseEvidenceUnchanged(t, path, evidence)
@@ -807,7 +807,7 @@ func TestInspectPristineRejectsReversibleHistory(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := InspectImmutable(context.Background(), bytes.NewReader(changed), int64(len(changed))); err != nil {
+			if err := inspectImmutable(context.Background(), bytes.NewReader(changed), int64(len(changed)), false); err != nil {
 				t.Fatalf("historically used but currently valid image: %v", err)
 			}
 			if err := InspectPristine(context.Background(), bytes.NewReader(changed), int64(len(changed))); !errors.Is(err, ErrForeignDatabase) {
@@ -832,13 +832,13 @@ func TestDatabaseImageScratchAlwaysCleansControlledTMPDIR(t *testing.T) {
 	assertDirectoryEmpty(t, temporaryRoot)
 	corrupt := append([]byte(nil), image...)
 	clear(corrupt[68:72])
-	if err := InspectImmutable(context.Background(), bytes.NewReader(corrupt), int64(len(corrupt))); !errors.Is(err, ErrForeignDatabase) {
+	if err := inspectImmutable(context.Background(), bytes.NewReader(corrupt), int64(len(corrupt)), false); !errors.Is(err, ErrForeignDatabase) {
 		t.Fatalf("corrupt inspection error = %v", err)
 	}
 	assertDirectoryEmpty(t, temporaryRoot)
 	cancelled, cancel := context.WithCancel(context.Background())
 	cancel()
-	if err := InspectImmutable(cancelled, bytes.NewReader(image), int64(len(image))); !errors.Is(err, context.Canceled) {
+	if err := inspectImmutable(cancelled, bytes.NewReader(image), int64(len(image)), false); !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancelled inspection error = %v", err)
 	}
 	assertDirectoryEmpty(t, temporaryRoot)
@@ -854,7 +854,7 @@ func TestDatabaseImageInspectionRequiresPrivateScratch(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("TMPDIR", blocked)
-	if err := InspectImmutable(context.Background(), bytes.NewReader(image), int64(len(image))); err == nil {
+	if err := inspectImmutable(context.Background(), bytes.NewReader(image), int64(len(image)), false); err == nil {
 		t.Fatal("immutable inspection bypassed its required private scratch")
 	}
 }
@@ -884,25 +884,25 @@ func TestInspectImmutableRejectsForeignTruncatedAndCorruptState(t *testing.T) {
 
 	foreign := append([]byte(nil), image...)
 	clear(foreign[68:72])
-	if err := InspectImmutable(ctx, bytes.NewReader(foreign), int64(len(foreign))); !errors.Is(err, ErrForeignDatabase) {
+	if err := inspectImmutable(ctx, bytes.NewReader(foreign), int64(len(foreign)), false); !errors.Is(err, ErrForeignDatabase) {
 		t.Fatalf("foreign application error = %v", err)
 	}
 	truncated := image[:len(image)/2]
-	if err := InspectImmutable(ctx, bytes.NewReader(truncated), int64(len(truncated))); err == nil {
+	if err := inspectImmutable(ctx, bytes.NewReader(truncated), int64(len(truncated)), false); err == nil {
 		t.Fatal("truncated image passed immutable inspection")
 	}
-	if err := InspectImmutable(ctx, bytes.NewReader(image), int64(len(image))+4096); err == nil {
+	if err := inspectImmutable(ctx, bytes.NewReader(image), int64(len(image))+4096, false); err == nil {
 		t.Fatal("larger declared size passed immutable inspection")
 	}
 	withTrailingBytes := append(append([]byte(nil), image...), make([]byte, 512)...)
-	if err := InspectImmutable(ctx, bytes.NewReader(withTrailingBytes), int64(len(withTrailingBytes))); err == nil {
+	if err := inspectImmutable(ctx, bytes.NewReader(withTrailingBytes), int64(len(withTrailingBytes)), false); err == nil {
 		t.Fatal("trailing bytes passed immutable inspection")
 	}
 	for name, pair := range map[string][2]byte{"mismatch": {1, 2}, "unknown": {3, 3}} {
 		t.Run("header_"+name, func(t *testing.T) {
 			changed := append([]byte(nil), image...)
 			changed[18], changed[19] = pair[0], pair[1]
-			if err := InspectImmutable(ctx, bytes.NewReader(changed), int64(len(changed))); !errors.Is(err, ErrCorruptState) {
+			if err := inspectImmutable(ctx, bytes.NewReader(changed), int64(len(changed)), false); !errors.Is(err, ErrCorruptState) {
 				t.Fatalf("header %d/%d error = %v", pair[0], pair[1], err)
 			}
 		})
@@ -910,26 +910,26 @@ func TestInspectImmutableRejectsForeignTruncatedAndCorruptState(t *testing.T) {
 	if err := validateDatabaseHeader(bytes.NewReader(image), int64(len(image)), true); !errors.Is(err, ErrCorruptState) {
 		t.Fatalf("rollback header with WAL sidecars error = %v", err)
 	}
-	if err := InspectImmutable(ctx, nil, int64(len(image))); !errors.Is(err, ErrInvalidValue) {
+	if err := inspectImmutable(ctx, nil, int64(len(image)), false); !errors.Is(err, ErrInvalidValue) {
 		t.Fatalf("nil reader error = %v", err)
 	}
-	if err := InspectImmutable(ctx, bytes.NewReader(image), 0); !errors.Is(err, ErrInvalidValue) {
+	if err := inspectImmutable(ctx, bytes.NewReader(image), 0, false); !errors.Is(err, ErrInvalidValue) {
 		t.Fatalf("zero size error = %v", err)
 	}
-	if err := InspectImmutable(ctx, bytes.NewReader(image), -1); !errors.Is(err, ErrInvalidValue) {
+	if err := inspectImmutable(ctx, bytes.NewReader(image), -1, false); !errors.Is(err, ErrInvalidValue) {
 		t.Fatalf("negative size error = %v", err)
 	}
 	readerFailure := errors.New("injected ReaderAt failure")
-	if err := InspectImmutable(ctx, failingReaderAt{err: readerFailure}, int64(len(image))); !errors.Is(err, readerFailure) {
+	if err := inspectImmutable(ctx, failingReaderAt{err: readerFailure}, int64(len(image)), false); !errors.Is(err, readerFailure) {
 		t.Fatalf("ReaderAt failure error = %v", err)
 	}
 	shortReader := &shortNilReaderAt{reader: bytes.NewReader(image), after: 0}
-	if err := InspectImmutable(ctx, shortReader, int64(len(image))); !errors.Is(err, io.ErrUnexpectedEOF) {
+	if err := inspectImmutable(ctx, shortReader, int64(len(image)), false); !errors.Is(err, io.ErrUnexpectedEOF) {
 		t.Fatalf("short nil ReaderAt error = %v", err)
 	}
 	laterFailure := errors.New("injected later ReaderAt failure")
 	laterReader := &failAfterReaderAt{reader: bytes.NewReader(image), after: 100, err: laterFailure}
-	if err := InspectImmutable(ctx, laterReader, int64(len(image))); !errors.Is(err, laterFailure) {
+	if err := inspectImmutable(ctx, laterReader, int64(len(image)), false); !errors.Is(err, laterFailure) {
 		t.Fatalf("later ReaderAt failure error = %v", err)
 	}
 	for name, reader := range map[string]io.ReaderAt{
@@ -938,7 +938,7 @@ func TestInspectImmutableRejectsForeignTruncatedAndCorruptState(t *testing.T) {
 		"short joined read": &shortErrorReaderAt{reader: bytes.NewReader(image), err: errors.Join(io.EOF, laterFailure)},
 	} {
 		t.Run(name, func(t *testing.T) {
-			err := InspectImmutable(ctx, reader, int64(len(image)))
+			err := inspectImmutable(ctx, reader, int64(len(image)), false)
 			if !errors.Is(err, io.EOF) {
 				t.Fatalf("joined ReaderAt error lost EOF: %v", err)
 			}
@@ -958,7 +958,7 @@ func TestInspectImmutableRejectsForeignTruncatedAndCorruptState(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			contents := mutatedDatabaseBytes(t, mutation)
-			if err := InspectImmutable(ctx, bytes.NewReader(contents), int64(len(contents))); err == nil {
+			if err := inspectImmutable(ctx, bytes.NewReader(contents), int64(len(contents)), false); err == nil {
 				t.Fatalf("%s corruption passed immutable inspection", name)
 			}
 		})
@@ -967,7 +967,7 @@ func TestInspectImmutableRejectsForeignTruncatedAndCorruptState(t *testing.T) {
 
 func TestInspectImmutableRejectsOversizeBeforeReading(t *testing.T) {
 	reader := &readExtentRecorder{reader: bytes.NewReader(nil)}
-	if err := InspectImmutable(context.Background(), reader, maxImmutableDatabaseImageSize+1); !errors.Is(err, ErrInvalidValue) {
+	if err := inspectImmutable(context.Background(), reader, maxImmutableDatabaseImageSize+1, false); !errors.Is(err, ErrInvalidValue) {
 		t.Fatalf("oversized immutable image error = %v", err)
 	}
 	if reader.MaxEnd() != 0 {
@@ -981,7 +981,7 @@ func TestInspectImmutableExactSizeBoundReachesReader(t *testing.T) {
 		t.Fatal(err)
 	}
 	reader := &readExtentRecorder{reader: bytes.NewReader(image)}
-	if err := InspectImmutable(context.Background(), reader, maxImmutableDatabaseImageSize); err == nil {
+	if err := inspectImmutable(context.Background(), reader, maxImmutableDatabaseImageSize, false); err == nil {
 		t.Fatal("declared exact immutable bound unexpectedly passed short image")
 	}
 	if reader.MaxEnd() == 0 || reader.MaxEnd() > maxImmutableDatabaseImageSize {
@@ -1050,7 +1050,7 @@ func TestInspectImmutableEnforcesDeclaredSizeBeforeReader(t *testing.T) {
 	}
 	declared := int64(len(image) / 2)
 	reader := &readExtentRecorder{reader: bytes.NewReader(image)}
-	if err := InspectImmutable(context.Background(), reader, declared); err == nil {
+	if err := inspectImmutable(context.Background(), reader, declared, false); err == nil {
 		t.Fatal("smaller declared size passed immutable inspection")
 	}
 	if got := reader.MaxEnd(); got > declared {
@@ -1083,7 +1083,7 @@ func TestInspectImmutableConcurrentImagesDoNotCrossWire(t *testing.T) {
 			if isForeign {
 				contents = foreign
 			}
-			results <- result{foreign: isForeign, err: InspectImmutable(ctx, bytes.NewReader(contents), int64(len(contents)))}
+			results <- result{foreign: isForeign, err: inspectImmutable(ctx, bytes.NewReader(contents), int64(len(contents)), false)}
 		}()
 	}
 	wait.Wait()
@@ -1100,7 +1100,7 @@ func TestInspectImmutableConcurrentImagesDoNotCrossWire(t *testing.T) {
 	preCancelled, cancel := context.WithCancel(ctx)
 	cancel()
 	preCancelledReader := &readExtentRecorder{reader: bytes.NewReader(image)}
-	if err := InspectImmutable(preCancelled, preCancelledReader, int64(len(image))); !errors.Is(err, context.Canceled) {
+	if err := inspectImmutable(preCancelled, preCancelledReader, int64(len(image)), false); !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancelled inspection error = %v", err)
 	}
 	if preCancelledReader.MaxEnd() != 0 {
@@ -1109,13 +1109,13 @@ func TestInspectImmutableConcurrentImagesDoNotCrossWire(t *testing.T) {
 
 	midCancelled, cancelMid := context.WithCancel(ctx)
 	midCancelledReader := cancelAfterRead{reader: bytes.NewReader(image), cancel: cancelMid}
-	if err := InspectImmutable(midCancelled, midCancelledReader, int64(len(image))); !errors.Is(err, context.Canceled) {
+	if err := inspectImmutable(midCancelled, midCancelledReader, int64(len(image)), false); !errors.Is(err, context.Canceled) {
 		t.Fatalf("mid-inspection cancellation error = %v", err)
 	}
 
 	corrupt := append([]byte(nil), image...)
 	clear(corrupt[68:72])
-	if err := InspectImmutable(ctx, bytes.NewReader(corrupt), int64(len(corrupt))); !errors.Is(err, ErrForeignDatabase) {
+	if err := inspectImmutable(ctx, bytes.NewReader(corrupt), int64(len(corrupt)), false); !errors.Is(err, ErrForeignDatabase) {
 		t.Fatalf("corrupt inspection error = %v", err)
 	}
 }

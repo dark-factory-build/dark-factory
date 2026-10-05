@@ -1263,15 +1263,6 @@ func validNodeID(value string) bool {
 	return true
 }
 
-func validDigest(value string) bool {
-	if len(value) != 64 || value == strings.Repeat("0", 64) {
-		return false
-	}
-	decoded := make([]byte, 32)
-	_, err := hex.Decode(decoded, []byte(value))
-	return err == nil && value == strings.ToLower(value)
-}
-
 func validWebClient(client WebClient) bool {
 	if !validID(client.ID) || client.CapabilityMask == 0 || client.CapabilityMask&1 == 0 || client.CapabilityMask&^31 != 0 || client.Revision == 0 || client.UpdatedAtMs < client.CreatedAtMs {
 		return false

@@ -423,13 +423,6 @@ func (fixture *blackBoxFixture) awaitOrphanArtifact(t *testing.T, patience time.
 	}
 }
 
-func (fixture *blackBoxFixture) awaitRuntimeFile(t *testing.T, name string, patience time.Duration) {
-	t.Helper()
-	if !fixture.awaitRuntimeFilePresence(t, name, patience) {
-		t.Fatalf("runtime file %q never appeared", name)
-	}
-}
-
 func (fixture *blackBoxFixture) awaitRuntimeFilePresence(t *testing.T, name string, patience time.Duration) bool {
 	t.Helper()
 	deadline := time.Now().Add(patience)
