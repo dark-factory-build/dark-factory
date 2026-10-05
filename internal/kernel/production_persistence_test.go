@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"reflect"
 	"strings"
 	"testing"
 )
@@ -550,50 +549,6 @@ func TestProductionSurvivesReopen(t *testing.T) {
 	item := productionRecord(t, page, "pull_request", "11")
 	if item == nil || !containsString(item.Tasks, task.ID.String()) {
 		t.Fatalf("reopened production = %+v", item)
-	}
-}
-
-func TestV32MigrationPreservesMissionBindingsAndStandaloneTasks(t *testing.T) {
-	ctx := context.Background()
-	store, path := newTestStore(t)
-	project, err := store.CreateProject(ctx, NewProject{ID: projectID(t, 253), Name: "migration", Root: "/migration"}, mustTime(t, 2))
-	if err != nil {
-		t.Fatal(err)
-	}
-	anchor, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 254), IncarnationID: incarnationID(t, 255), ProjectID: project.ID, Title: "mission anchor"}, mustTime(t, 3))
-	if err != nil {
-		t.Fatal(err)
-	}
-	mission, err := store.WriteOutcome(ctx, NewOutcome{ID: outcomeID(t, 240), ProjectID: project.ID, Document: OutcomeDocument{Kind: "mission", Objective: "keep work", Criteria: "all rows survive", AnchorTaskID: anchor.ID.String(), AnchorWorkRevision: 1, State: "open"}}, 0, mustTime(t, 4))
-	if err != nil {
-		t.Fatal(err)
-	}
-	standalone, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 241), IncarnationID: incarnationID(t, 242), ProjectID: project.ID, Title: "standalone"}, mustTime(t, 5))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.writer.ExecContext(ctx, "DROP TABLE content_accesses; DROP TABLE production_records; DROP TABLE publication_tasks; PRAGMA user_version = 32"); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Close(); err != nil {
-		t.Fatal(err)
-	}
-	store, err = Open(ctx, path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-	retained, err := store.Outcome(ctx, project.ID, mission.ID, 0)
-	if err != nil || !reflect.DeepEqual(retained, mission) {
-		t.Fatalf("migrated mission = %+v, err=%v", retained, err)
-	}
-	items, next, err := store.ListMissionTasks(ctx, project.ID, mission.ID, 0, 8)
-	if err != nil || next != 0 || len(items) != 1 || items[0].ID != anchor.ID {
-		t.Fatalf("migrated mission tasks = %+v next=%d err=%v", items, next, err)
-	}
-	got, found, err := store.Task(ctx, standalone.ID)
-	if err != nil || !found || got.ID != standalone.ID {
-		t.Fatalf("migrated standalone = %+v found=%v err=%v", got, found, err)
 	}
 }
 

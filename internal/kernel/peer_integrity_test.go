@@ -3,7 +3,6 @@ package kernel
 import (
 	"context"
 	"errors"
-	"reflect"
 	"testing"
 )
 
@@ -39,94 +38,5 @@ func TestPeerQuestionCorruptProjectFailsClosed(t *testing.T) {
 	}
 	if !errors.Is(err, ErrCorruptState) {
 		t.Fatalf("corrupt project reopen = %v", err)
-	}
-}
-
-func TestV6MigrationPreservesSendBackAndSupervision(t *testing.T) {
-	ctx := context.Background()
-	success, _ := NewSuccessProposal("finished")
-	store, finalizing := finalizingReleasedRun(t, RoleWorker, VerificationNone, success)
-	defer store.Close()
-	terminal, err := finalizeTestRun(t, store, finalizing, 80)
-	if err != nil {
-		t.Fatal(err)
-	}
-	task, found, err := store.Task(ctx, terminal.TaskID)
-	if err != nil || !found {
-		t.Fatalf("task = %v, %v", found, err)
-	}
-	if _, err := store.SendBackTask(ctx, task.ID, task.Revision, "retained review feedback", mustTime(t, 90)); err != nil {
-		t.Fatal(err)
-	}
-	agent, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 247), ProjectID: terminal.ProjectID, Name: "supervisor", Role: RoleOrchestrator, Provider: ProviderCodex, ToolBudgetLimit: 10}, mustTime(t, 91))
-	if err != nil {
-		t.Fatal(err)
-	}
-	policy, after, budget, instruction := IdleStandingInstruction, uint32(1), uint32(3), "inspect worker activity"
-	if _, err := store.UpdateAgent(ctx, agent.ID, agent.Revision, AgentPatch{IdlePolicy: &policy, IdleAfterSeconds: &after, IdleRunBudget: &budget, IdleInstruction: &instruction}, mustTime(t, 92)); err != nil {
-		t.Fatal(err)
-	}
-	path := storePath(t, store)
-	if err := store.Close(); err != nil {
-		t.Fatal(err)
-	}
-	pool, connection := openRawDatabase(t, path, false)
-	if err := setForeignKeys(ctx, connection, false); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := connection.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
-		t.Fatal(err)
-	}
-	for _, statement := range []string{"DROP INDEX continuations_admission_queue", "DROP INDEX continuations_one_waiting_per_condition", "DROP TABLE continuations"} {
-		if _, err := connection.ExecContext(ctx, statement); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := rebuildTable(ctx, connection, expectedSchemaOf(v6SchemaStatements()), "agents", v7AgentColumns, "agents_id_project_unique", "", ""); err != nil {
-		t.Fatal(err)
-	}
-	if err := rebuildTable(ctx, connection, expectedSchemaOf(v6SchemaStatements()), "invalidations", testInvalidationColumns, "invalidations_entity_revision_unique", "", ""); err != nil {
-		t.Fatal(err)
-	}
-	if err := rebuildTable(ctx, connection, expectedSchemaOf(v6SchemaStatements()), "changes", testChangeColumns, "changes_id_project_task_incarnation_unique", "changes_task_incarnation_unique", "tree_digest, entry_count, total_bytes, tree_dev, tree_inode",
-		"CASE WHEN prepared_at_ms IS NULL THEN NULL ELSE zeroblob(32) END, CASE WHEN prepared_at_ms IS NULL THEN NULL ELSE 1 END, CASE WHEN prepared_at_ms IS NULL THEN NULL ELSE 1 END, CASE WHEN prepared_at_ms IS NULL THEN NULL ELSE 0 END, CASE WHEN prepared_at_ms IS NULL THEN NULL ELSE 2 END"); err != nil {
-		t.Fatal(err)
-	}
-	target := expectedSchemaOf(v6SchemaStatements())
-	if err := rebuildTable(ctx, connection, target, "projects", "id, name, root, verification_policy, revision, created_at_ms, updated_at_ms", "projects_root_unique", "", ""); err != nil {
-		t.Fatal(err)
-	}
-	if err := rebuildTable(ctx, connection, target, "human_requests", "id, run_id, idempotency_key, kind, reason_code, question_text, status, delivery_id, delivery_started_at_ms, resolution_kind, closed_at_ms, revision, created_at_ms, updated_at_ms", "human_requests_one_unresolved_per_run", "", ""); err != nil {
-		t.Fatal(err)
-	}
-	if err := rebuildTable(ctx, connection, target, "tasks", testTaskColumnsV5, "tasks_id_project_incarnation_unique", "tasks_incarnation_unique", "tasks_canonical_queue", "", ""); err != nil {
-		t.Fatal(err)
-	}
-	for _, statement := range []string{"DROP TABLE content_accesses", "DROP TABLE publication_tasks", "DROP TABLE production_records", "DROP TABLE mission_task_bindings", "DROP TABLE run_tokens", "DROP TABLE project_tokens", "DROP TABLE attachment_retention", "DROP TABLE task_attachments", "DROP TABLE intake_acceptance_reviews", "DROP TABLE intake_source_priorities", "DROP TABLE intake_legacy_suppressions", "DROP TABLE intake_legacy_migrations", "DROP TABLE intake_task_bindings", "DROP TABLE intake_source_trusted_logins", "DROP TABLE intake_acceptances", "DROP TABLE intake_sources", "DROP TABLE repository_source_identities", "DROP TABLE content_repository_bindings", "DROP TABLE task_repository_bindings", "DROP TABLE project_repositories", "DROP TABLE terminal_diagnostics", "DROP TABLE project_outcome_revisions", "DROP TABLE task_content_references", "DROP TABLE project_content_evidence", "DROP TABLE project_content_revisions", "DROP INDEX task_prerequisites_upstream", "DROP TABLE task_prerequisites", "DROP TABLE task_conflict_paths"} {
-		if _, err := connection.ExecContext(ctx, statement); err != nil {
-			t.Fatal(err)
-		}
-	}
-	for _, statement := range []string{"DROP TABLE peer_questions", "PRAGMA user_version = 6", "COMMIT"} {
-		if _, err := connection.ExecContext(ctx, statement); err != nil {
-			t.Fatal(err)
-		}
-	}
-	before := snapshotSchemaRows(t, ctx, connection, v6SchemaStatements(), false)
-	if err := errors.Join(connection.Close(), pool.Close()); err != nil {
-		t.Fatal(err)
-	}
-	migrated, err := Open(ctx, path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer migrated.Close()
-	reader, err := migrated.readerConnection(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer reader.Close()
-	if after := snapshotSchemaRows(t, ctx, reader, v6SchemaStatements(), false); !reflect.DeepEqual(before, after) {
-		t.Fatal("v6 migration changed existing rows")
 	}
 }

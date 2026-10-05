@@ -43,9 +43,9 @@ The gate checks:
 
 - `gofmt` and `go vet` are clean. Any affected focused `-race` check treats a
   race report as a failure, not a warning.
-- The SQLite schema is defined in `internal/kernel/schema.go`. Changes also
-  extend the versioned transactions in `internal/kernel/migrate.go`, with a
-  preservation test for existing homes as well as fresh-schema checks.
+- The SQLite schema is defined in `internal/kernel/schema.go`. A change bumps
+  `userVersion` and adds one migration step from the version before it,
+  proven on a copy of a live home; Open refuses every other version.
 
 ## Where to start
 

@@ -214,7 +214,7 @@ func validateScratchImage(ctx context.Context, image []byte, pristine bool) (ide
 			}
 		}
 	}()
-	if err := validateOpenableSnapshot(ctx, connection); err != nil {
+	if err := validateDatabaseSnapshot(ctx, connection); err != nil {
 		return bootstrapIdentity{}, err
 	}
 	if pristine {

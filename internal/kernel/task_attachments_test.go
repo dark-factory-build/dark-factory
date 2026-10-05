@@ -57,42 +57,6 @@ func TestTaskAttachmentsAtomicReplayAndReopen(t *testing.T) {
 	}
 }
 
-func TestV27MigrationPreservesTaskAndAddsEmptyAttachments(t *testing.T) {
-	ctx := context.Background()
-	store, path, _, _ := newAdmissionStore(t, RoleWorker, 2)
-	connection, err := store.writer.Conn(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	before := snapshotSchemaRows(t, ctx, connection, v27SchemaStatements(), false)
-	connection.Close()
-	downgradeIntakeToV29(t, store)
-	if _, err := store.writer.ExecContext(ctx, `DROP TABLE attachment_retention; DROP TABLE task_attachments; PRAGMA user_version = 27`); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Close(); err != nil {
-		t.Fatal(err)
-	}
-	store, err = Open(ctx, path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-	connection, err = store.writer.Conn(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	after := snapshotSchemaRows(t, ctx, connection, v27SchemaStatements(), false)
-	connection.Close()
-	if !reflect.DeepEqual(before, after) {
-		t.Fatal("migration changed existing data")
-	}
-	var count int
-	if err := store.writer.QueryRowContext(ctx, `SELECT COUNT(*) FROM task_attachments`).Scan(&count); err != nil || count != 0 {
-		t.Fatalf("new attachments: %d %v", count, err)
-	}
-}
-
 func TestTaskAttachmentBoundsAndSafeNames(t *testing.T) {
 	for _, item := range []TaskAttachment{{Name: "a\n.png", Data: []byte("x")}, {Name: "x", Data: make([]byte, MaxTaskAttachmentBytes+1)}} {
 		if _, err := TaskAttachmentInstruction("text", []TaskAttachment{item}); !errors.Is(err, ErrInvalidValue) {
@@ -206,11 +170,6 @@ func TestAutomaticAttachmentRetention(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Simulate the exact released v28 database and preserve its attachment bytes.
-	downgradeIntakeToV29(t, store)
-	if _, err := store.writer.ExecContext(ctx, `DROP TABLE attachment_retention; PRAGMA user_version = 28`); err != nil {
-		t.Fatal(err)
-	}
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -220,7 +179,7 @@ func TestAutomaticAttachmentRetention(t *testing.T) {
 	}
 	defer store.Close()
 	if enabled, err := store.AttachmentRetention(ctx, nil); err != nil || enabled {
-		t.Fatalf("migration default: %v %v", enabled, err)
+		t.Fatalf("retention default: %v %v", enabled, err)
 	}
 	const age = int64(30 * 24 * 60 * 60 * 1000)
 	check := func(removed bool) {

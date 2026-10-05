@@ -150,6 +150,11 @@ func TestOpenRejectsUnknownVersionAndPartialIdentity(t *testing.T) {
 				t.Fatal(err)
 			}
 		},
+		"earlier version": func(t *testing.T, raw *sql.DB) {
+			if _, err := raw.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, userVersion-1)); err != nil {
+				t.Fatal(err)
+			}
+		},
 		"partial schema": func(t *testing.T, raw *sql.DB) {
 			if _, err := raw.Exec(`DROP TABLE resources`); err != nil {
 				t.Fatal(err)

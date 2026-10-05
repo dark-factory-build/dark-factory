@@ -377,27 +377,3 @@ func TestSharedQueueSurvivesReopen(t *testing.T) {
 		t.Fatalf("claim after reopen = %+v, %v", result, err)
 	}
 }
-
-func TestMigratedHomeKeepsAssignmentsAndAcceptsSharedTasks(t *testing.T) {
-	ctx := context.Background()
-	path, _ := newLegacyDatabase(t, false, v12UserVersion)
-	store, err := Open(ctx, path)
-	if err != nil {
-		t.Fatalf("open v12 home: %v", err)
-	}
-	defer store.Close()
-	var unclaimed int
-	if err := store.readers.QueryRow(`SELECT COUNT(*) FROM tasks WHERE assigned_agent_id IS NULL`).Scan(&unclaimed); err != nil {
-		t.Fatal(err)
-	}
-	if unclaimed != 0 {
-		t.Fatalf("migration unassigned %d existing tasks", unclaimed)
-	}
-	task, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 200), ProjectID: projectID(t, 1), IncarnationID: incarnationID(t, 201), Title: "shared after upgrade"}, mustTime(t, 100))
-	if err != nil || !task.AssignedAgentID.zero() {
-		t.Fatalf("shared task on migrated home = %+v, %v", task, err)
-	}
-	if _, err := store.ReadPublicSnapshot(ctx); err != nil {
-		t.Fatal(err)
-	}
-}

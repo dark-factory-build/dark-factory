@@ -2,7 +2,6 @@ package kernel
 
 import (
 	"context"
-	"reflect"
 	"testing"
 )
 
@@ -81,38 +80,5 @@ func TestProjectAtItsTokenCeilingAdmitsNothing(t *testing.T) {
 	}
 	if spent, err := store.AdmitNext(ctx, admissionKeys(t, 203, nil), mustTime(t, 5)); err != nil || spent.Admitted() {
 		t.Fatalf("admission at the ceiling = %+v, %v", spent, err)
-	}
-}
-
-func TestV29MigrationPreservesHomeAndAddsEmptyTokenLedger(t *testing.T) {
-	ctx := context.Background()
-	store, path, project, _ := newAdmissionStore(t, RoleWorker, 2)
-	connection, err := store.writer.Conn(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	before := snapshotSchemaRows(t, ctx, connection, v29SchemaStatements(), false)
-	connection.Close()
-	downgradeIntakeToV30(t, store)
-	if _, err := store.writer.ExecContext(ctx, `DROP TABLE run_tokens; DROP TABLE project_tokens; PRAGMA user_version = 29`); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if store, err = Open(ctx, path); err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-	if connection, err = store.writer.Conn(ctx); err != nil {
-		t.Fatal(err)
-	}
-	after := snapshotSchemaRows(t, ctx, connection, v29SchemaStatements(), false)
-	connection.Close()
-	if !reflect.DeepEqual(before, after) {
-		t.Fatal("migration changed existing data")
-	}
-	if got, err := store.ProjectTokens(ctx, project.ID); err != nil || got != (ProjectTokens{}) {
-		t.Fatalf("migrated ledger = %+v, %v", got, err)
 	}
 }

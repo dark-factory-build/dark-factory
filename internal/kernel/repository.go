@@ -8,7 +8,7 @@ import (
 	"unicode/utf8"
 )
 
-// A migration cannot know factoryd's --base-revision. This is an internal
+// A project created without factoryd's --base-revision records this. This is an internal
 // placeholder, never a caller-selectable Git revision or a runtime fallback.
 const inheritedRepositoryBase = ":factoryd-base-revision"
 
