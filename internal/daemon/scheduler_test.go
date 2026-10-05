@@ -667,10 +667,10 @@ func TestSchedulerPausedDispatchDefersAutomaticWorkUntilResume(t *testing.T) {
 		return kernel.Run{}, fmt.Errorf("%w: fixture admission", kernel.ErrConflict)
 	}}
 	go func() { done <- daemon.RunScheduler(runCtx, spec) }()
-	// The third clock read is after the synchronous write paths in each poll.
+	// The fourth clock read is after the synchronous write paths in each poll.
 	tick()
 	tick()
-	waitClockCalls(6)
+	waitClockCalls(8)
 	after, err := store.Factory(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -685,7 +685,7 @@ func TestSchedulerPausedDispatchDefersAutomaticWorkUntilResume(t *testing.T) {
 	waitSchedulerCalls(t, &attempts, 1)
 	tick()
 	tick() // prior enabled tick completed both original enqueue paths
-	waitClockCalls(12)
+	waitClockCalls(16)
 	snapshot, err := store.Snapshot(ctx)
 	if err != nil {
 		t.Fatal(err)
