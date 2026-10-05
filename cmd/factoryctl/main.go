@@ -69,7 +69,7 @@ const (
   factoryctl attempt block --detail TEXT
   factoryctl attempt fail [--detail TEXT]
   factoryctl attempt request-human --idempotency-key HEX32 --question TEXT [--option TEXT ...]
-  factoryctl attempt turn-complete NOTIFICATION_JSON
+  factoryctl attempt turn-complete [NOTIFICATION_JSON]
   factoryctl attempt peer status [--targets [--target-offset N]] [--offset N] [--head HEAD]
   factoryctl attempt peer ask --task ID --idempotency-key HEX32 --question TEXT
   factoryctl attempt peer answer --question ID --revision REVISION --idempotency-key HEX32 --answer TEXT
@@ -499,6 +499,9 @@ func runWithDependencies(ctx context.Context, args []string, getenv func(string)
 	if command.kind >= commandOutcomeWrite && command.kind <= commandOutcomeList {
 		return runOutcome(callContext, client, command, stdout, stderr)
 	}
+	if command.kind == commandTurnComplete && command.text == "" {
+		return claudeTurnComplete(callContext, client, os.Stdin, stderr)
+	}
 	var result api.MutationResult
 	switch command.kind {
 	case commandSucceed:
@@ -540,6 +543,33 @@ func runWithDependencies(ctx context.Context, args []string, getenv func(string)
 		_, _ = fmt.Fprintf(stdout, "attempt outcome request accepted: head=%d revision=%d\n", result.Head, result.Revision)
 	}
 	return 0
+}
+
+// claudeTurnComplete is Claude's Stop hook. A run whose credential is still
+// live when a turn ends has recorded no outcome: the first stop is refused
+// with a reminder (exit 2 hands stderr back to Claude), and a stop that
+// follows the reminder fails the run instead of leaving it idle until the
+// stall rule. An outcome or yield has revoked the credential, so the probe
+// fails and the stop is allowed.
+func claudeTurnComplete(ctx context.Context, client *api.AttemptClient, stdin io.Reader, stderr io.Writer) int {
+	var hook struct {
+		StopHookActive bool `json:"stop_hook_active"`
+	}
+	if json.NewDecoder(io.LimitReader(stdin, 1<<20)).Decode(&hook) != nil {
+		return exitFailure
+	}
+	if _, err := client.Task(ctx); err != nil {
+		return 0
+	}
+	if hook.StopHookActive {
+		if _, err := client.Fail(ctx, "turn ended again after a reminder without attempt succeed, block, or fail"); err != nil {
+			writeFailure(stderr, commandFail, err)
+			return exitFailure
+		}
+		return 0
+	}
+	_, _ = io.WriteString(stderr, "Your turn ended without an attempt outcome. Finish now with the factory tool: attempt succeed --result TEXT, attempt block --detail TEXT, or attempt fail --detail TEXT. Ending another turn without one fails this run.\n")
+	return 2
 }
 
 func contentBody(command attemptCommand) (string, error) {
@@ -757,6 +787,9 @@ func parse(args []string) (attemptCommand, bool, bool) {
 			return attemptCommand{kind: commandRequestHuman, idempotencyKey: args[3], text: args[5], options: options}, false, true
 		}
 	case "turn-complete":
+		if len(args) == 2 {
+			return attemptCommand{kind: commandTurnComplete}, false, true
+		}
 		if len(args) == 3 {
 			var notification struct {
 				Type     string `json:"type"`
