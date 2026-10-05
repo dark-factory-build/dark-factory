@@ -13,27 +13,21 @@ class DarkFactory < Formula
 
   desc "Web-first local runtime for persistent coding-agent teams"
   homepage "https://github.com/example/project"
-  url "https://github.com/example/project/releases/download/v1.2.3/latest.json"
-  sha256 "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+  version "1.2.3"
   license "MIT"
 
   depends_on :macos
 
-  resource "binaries" do
-    on_arm do
-      url "https://github.com/example/project/releases/download/v1.2.3/dark-factory-v1.2.3-aarch64-apple-darwin.tar.gz"
-      sha256 "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
-    end
-    on_intel do
-      url "https://github.com/example/project/releases/download/v1.2.3/dark-factory-v1.2.3-x86_64-apple-darwin.tar.gz"
-      sha256 "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
-    end
+  if Hardware::CPU.arm?
+    url "https://github.com/example/project/releases/download/v1.2.3/dark-factory-v1.2.3-aarch64-apple-darwin.tar.gz"
+    sha256 "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+  else
+    url "https://github.com/example/project/releases/download/v1.2.3/dark-factory-v1.2.3-x86_64-apple-darwin.tar.gz"
+    sha256 "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
   end
 
   def install
-    resource("binaries").stage do
-      bin.install "factoryd", "factory-runner", "factoryctl"
-    end
+    bin.install "factoryd", "factory-runner", "factoryctl"
   end
 
   def caveats
