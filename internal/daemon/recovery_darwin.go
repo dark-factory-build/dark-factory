@@ -855,6 +855,7 @@ func (daemon *Daemon) adoptHandoverRun(ctx context.Context, parent *RuntimeParen
 		return false, fmt.Errorf("%w: adopted run has no active terminal session", errInvalidContract)
 	}
 	live := newLiveAttempt(daemon, run.ID, session.ID, controller)
+	live.adopted = true
 	if run.Role == kernel.RoleWorker && recoverable.Change != nil && recoverable.Change.AvailableAt != nil && run.RunningAt != nil {
 		live.agentID, live.changeID = run.AgentID, recoverable.Change.ID
 		live.pathsSince = *recoverable.Change.AvailableAt
