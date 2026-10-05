@@ -75,20 +75,6 @@ func ptyIoctl(fd int, request uintptr, arg unsafe.Pointer) error {
 	return nil
 }
 
-// ResizePTY changes the window size of this live owner's PTY. The PTY master
-// is an authority-bearing capability: recovered process identities and
-// callers holding only a numeric descriptor cannot reach this operation.
-// Callers serialize it with other terminal operations at the daemon boundary.
-func (c *OwnedChild) ResizePTY(columns, rows int) error {
-	if !c.validPTYResize(columns, rows) {
-		return ErrState
-	}
-	if err := c.refreshExit(); err != nil {
-		return err
-	}
-	return c.resizePTYOwned(columns, rows)
-}
-
 // resizePTYOwned is for the synchronous terminal owner, which already owns
 // the child kqueue and must not poll it while readable filters are installed.
 func (c *OwnedChild) resizePTYOwned(columns, rows int) error {

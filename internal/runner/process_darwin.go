@@ -172,25 +172,6 @@ func (c *OwnedChild) Identity() Identity {
 	return c.identity
 }
 
-// WritePTY writes terminal input only while this live owner has an activated
-// process. It is intentionally synchronous and bounded; the browser/runtime
-// transport is responsible for serialization and backpressure later.
-func (c *OwnedChild) WritePTY(input []byte) (int, error) {
-	if c == nil || c.ptyMaster == nil || c.state != stateActivated || c.exitObserved {
-		return 0, ErrState
-	}
-	if len(input) == 0 || len(input) > maxInputBytes {
-		return 0, ErrState
-	}
-	if err := c.refreshExit(); err != nil {
-		return 0, err
-	}
-	if c.exitObserved {
-		return 0, ErrState
-	}
-	return c.writePTYOwned(input, 250*time.Millisecond)
-}
-
 // writePTYOwned is for the synchronous owner loop, which already consumes
 // the child's EVFILT_PROC event. Calling refreshExit from that loop could
 // consume a readiness event belonging to the loop and lose the only exit
@@ -240,54 +221,6 @@ func (c *OwnedChild) writePTYOwned(input []byte, timeout time.Duration) (int, er
 		written += n
 	}
 	return written, nil
-}
-
-// ReadPTY reads terminal output from the runner-owned master with a fixed
-// bounded wait. It never starts a goroutine and never changes process
-// lifecycle state.
-func (c *OwnedChild) ReadPTY(output []byte) (int, error) {
-	if c == nil || c.ptyMaster == nil || len(output) == 0 || len(output) > maxInputBytes {
-		return 0, ErrState
-	}
-	if c.state != stateActivated && c.state != stateExited && c.state != stateWaited {
-		return 0, ErrState
-	}
-	deadline := time.Now().Add(time.Second)
-	for {
-		remaining := time.Until(deadline)
-		if remaining <= 0 {
-			return 0, os.ErrDeadlineExceeded
-		}
-		milliseconds := int(remaining / time.Millisecond)
-		if milliseconds < 1 {
-			milliseconds = 1
-		}
-		fds := []unix.PollFd{{Fd: int32(c.ptyMaster.Fd()), Events: unix.POLLIN}}
-		ready, err := unix.Poll(fds, milliseconds)
-		if errors.Is(err, unix.EINTR) {
-			continue
-		}
-		if err != nil {
-			return 0, err
-		}
-		if ready == 0 {
-			return 0, os.ErrDeadlineExceeded
-		}
-		if fds[0].Revents&unix.POLLNVAL != 0 {
-			return 0, ErrState
-		}
-		n, err := unix.Read(int(c.ptyMaster.Fd()), output)
-		if errors.Is(err, unix.EAGAIN) || errors.Is(err, unix.EWOULDBLOCK) {
-			continue
-		}
-		if errors.Is(err, unix.EIO) {
-			return n, io.EOF
-		}
-		if n == 0 && err == nil && fds[0].Revents&(unix.POLLHUP|unix.POLLERR) != 0 {
-			return 0, io.EOF
-		}
-		return n, err
-	}
 }
 
 func (c *OwnedChild) refreshExit() error {

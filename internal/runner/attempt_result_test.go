@@ -84,7 +84,7 @@ func TestAttemptResultNoReplaceCanonicalRoundTrip(t *testing.T) {
 		t.Fatalf("replacement publication = %v", err)
 	}
 	loaded, err := AuthenticateAttemptResult(dir, "attempt-1", nil)
-	if err != nil || loaded.Result() != publicAttemptResult(result) || loaded.Notice() != record.Notice() || loaded.InnerActivated() {
+	if err != nil || loaded.Result() != publicAttemptResult(result) || loaded.Notice() != record.Notice() || loaded.innerActivated {
 		t.Fatalf("authenticated result = %+v, %v", loaded, err)
 	}
 	if loaded, err = AuthenticateAttemptResult(dir, "attempt-1", ptrNotice(record.Notice())); err != nil || loaded.Result() != publicAttemptResult(result) {
@@ -138,7 +138,7 @@ func TestAttemptResultConvergedCodeAndSignalAreClosed(t *testing.T) {
 				t.Fatal(err)
 			}
 			loaded, err := AuthenticateAttemptResult(dir, "attempt-converged", ptrNotice(record.Notice()))
-			if err != nil || loaded.Result() != publicAttemptResult(result) || !loaded.InnerActivated() {
+			if err != nil || loaded.Result() != publicAttemptResult(result) || !loaded.innerActivated {
 				t.Fatalf("converged result = %+v, %v", loaded, err)
 			}
 		})
@@ -449,7 +449,7 @@ func TestAttemptResultMarkerMatrixIsClosed(t *testing.T) {
 					setMarker(t, root, InnerActivationMarkerName, inner)
 					record, err := publishAttemptResult(dir, build(t, "matrix"))
 					if accept {
-						if err != nil || record.InnerActivated() != inner {
+						if err != nil || record.innerActivated != inner {
 							t.Fatalf("legal census publication = %+v, %v", record, err)
 						}
 						return
@@ -474,7 +474,7 @@ func TestAttemptResultMarkerMatrixIsClosed(t *testing.T) {
 					setMarker(t, root, InnerActivationMarkerName, inner)
 					loaded, err := AuthenticateAttemptResult(dir, "matrix", ptrNotice(record.Notice()))
 					if accept {
-						if err != nil || loaded.InnerActivated() != inner {
+						if err != nil || loaded.innerActivated != inner {
 							t.Fatalf("legal census authentication = %+v, %v", loaded, err)
 						}
 						return

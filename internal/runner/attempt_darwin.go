@@ -55,8 +55,7 @@ type AttemptController struct {
 	// controllers acknowledge the final provider liveness fence inline; the
 	// deterministic race test holds it so it can close the daemon before or
 	// after that exact causal boundary.
-	manualProviderHandoff  bool
-	providerHandoffPending bool
+	manualProviderHandoff bool
 }
 
 // writeFrame is the controller's only authoritative write path. A failed
@@ -218,7 +217,6 @@ func (c *AttemptController) Next(timeout time.Duration) (AttemptEvent, error) {
 		}
 		if frame.Kind == "provider-handoff-check" && c.state == controllerProviderReleased && validProviderHandoffCheck(frame) {
 			if c.manualProviderHandoff {
-				c.providerHandoffPending = true
 				return AttemptEvent{Kind: AttemptProviderHandoff}, nil
 			}
 			if err := c.writeFrame(attemptFrame{Version: commandVersion, Kind: "provider-handoff-ack"}, maxFrameBytes); err != nil {
@@ -298,17 +296,6 @@ func (c *AttemptController) Next(timeout time.Duration) (AttemptEvent, error) {
 			return AttemptEvent{}, ErrState
 		}
 	}
-}
-
-// acknowledgeProviderHandoff completes the package-test-only manual fence.
-// Production Next acknowledges this frame inline, keeping the causal point
-// immediately before the worker's final exec invisible to lifecycle callers.
-func (c *AttemptController) acknowledgeProviderHandoff() error {
-	if c == nil || c.file == nil || c.state != controllerProviderReleased || !c.providerHandoffPending {
-		return ErrState
-	}
-	c.providerHandoffPending = false
-	return c.writeFrame(attemptFrame{Version: commandVersion, Kind: "provider-handoff-ack"}, maxFrameBytes)
 }
 
 func (c *AttemptController) acceptAttemptResult(frame attemptFrame) (AttemptEvent, error) {
@@ -445,16 +432,6 @@ func (c *AttemptController) Terminate() error {
 		return ErrState
 	}
 	return c.writeFrame(attemptFrame{Version: 1, Kind: "terminate"}, maxFrameBytes)
-}
-
-// acknowledgeCurrentExecCheck exists only for the deterministic package test
-// of the documented same-UID pathname race. Production controllers never see
-// this frame because production LaunchSpecs cannot enable the seam.
-func (c *AttemptController) acknowledgeCurrentExecCheck() error {
-	if c == nil || c.file == nil || c.state != controllerProviderReleased {
-		return ErrState
-	}
-	return c.writeFrame(attemptFrame{Version: 1, Kind: "current-exec-check-ack"}, maxFrameBytes)
 }
 
 // Spent reports that the capability ended by failing, rather than because a

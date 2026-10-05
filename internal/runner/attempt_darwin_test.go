@@ -586,7 +586,6 @@ type attemptFixture struct {
 	lease      *GateLease
 	controller *AttemptController
 	spec       AttemptSpec
-	childCap   *os.File
 	outer      *OwnedChild
 	inner      Identity
 	diagnostic *os.File
@@ -1828,7 +1827,7 @@ func TestAttemptRunnerDaemonEOFCuts(t *testing.T) {
 		}
 		// The acknowledgement is the ownership boundary. EOF after it is
 		// allowed: the provider has passed the final daemon liveness fence.
-		if err := f.controller.acknowledgeProviderHandoff(); err != nil {
+		if err := f.controller.writeFrame(attemptFrame{Version: commandVersion, Kind: "provider-handoff-ack"}, maxFrameBytes); err != nil {
 			t.Fatal(err)
 		}
 		waitFile(t, filepath.Join(f.root, "provider.pid"))
@@ -2369,7 +2368,7 @@ func TestCurrentExecRechecksTransferredCwdAtFinalSeam(t *testing.T) {
 	if err := os.Chmod(filepath.Join(f.root, "change", "work"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.controller.acknowledgeCurrentExecCheck(); err != nil {
+	if err := f.controller.writeFrame(attemptFrame{Version: 1, Kind: "current-exec-check-ack"}, maxFrameBytes); err != nil {
 		t.Fatal(err)
 	}
 	record := f.finishAndAck(false)
@@ -2799,7 +2798,7 @@ func TestCurrentExecDocumentsCooperativeSameUIDRace(t *testing.T) {
 	if err := os.Rename(replacement, target); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.controller.acknowledgeCurrentExecCheck(); err != nil {
+	if err := f.controller.writeFrame(attemptFrame{Version: 1, Kind: "current-exec-check-ack"}, maxFrameBytes); err != nil {
 		t.Fatal(err)
 	}
 	record := f.finishAndAck()
@@ -2833,7 +2832,7 @@ func TestCurrentExecRejectsReplacedRuntimeLifetime(t *testing.T) {
 	if err := os.WriteFile(lifetimePath, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.controller.acknowledgeCurrentExecCheck(); err != nil {
+	if err := f.controller.writeFrame(attemptFrame{Version: 1, Kind: "current-exec-check-ack"}, maxFrameBytes); err != nil {
 		t.Fatal(err)
 	}
 	record := f.finishAndAck(false)
