@@ -132,7 +132,7 @@ test('two principals: callback, pagination, refresh, replay, grants and revocati
       DARK_FACTORY_MAINTAINER_WEBHOOK_SECRET: '0123456789abcdef0123456789abcdef',
       DARK_FACTORY_MAINTAINER_WEBHOOK_SECRET_REVISION: 'fixture-v1', DARK_FACTORY_MAINTAINER_APP_ID: '5678',
       DARK_FACTORY_MAINTAINER_PRIVATE_KEY_PKCS8: privateKey.export({ type: 'pkcs8', format: 'der' }).toString('base64'),
-      DARK_FACTORY_MAINTAINER_PERMISSION_REVISION: 'maintainer-operations-v6',
+      DARK_FACTORY_MAINTAINER_PERMISSION_REVISION: 'maintainer-operations-v7',
       DARK_FACTORY_MAINTAINER_OPERATOR_EMAIL_SHA256: hash(operatorEmail),
       DARK_FACTORY_CLOUDFLARE_ACCESS_TEAM_DOMAIN: 'https://fixture.cloudflareaccess.com',
       DARK_FACTORY_CLOUDFLARE_ACCESS_AUD: 'b'.repeat(64), DARK_FACTORY_MAINTAINER_CLIENT_ID: 'Iv1.fixture',

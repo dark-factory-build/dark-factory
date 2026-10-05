@@ -407,7 +407,7 @@ Build the `changes` array for `publish_commit`: added and modified paths carry
 `content_base64` and the `mode` the tree entry shows (`100644` or
 `100755`); deleted paths carry only `path`. The App takes at most 50 entries
 per commit and 1,000,000 base64 characters per file (about 732 KiB of
-content), and refuses the `.github` directory itself, `.github/workflows`,
+content), and refuses the `.github` directory itself,
 the CODEOWNERS locations and the dependabot config (other `.github` paths
 are publishable). More than 50 files means several commits on the same
 branch, each bound to the head the previous one returned. A file over that
