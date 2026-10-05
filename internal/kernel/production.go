@@ -535,7 +535,7 @@ func (store *Store) PublishableChanges(ctx context.Context) ([]PublishableChange
 		  AND NOT EXISTS (SELECT 1 FROM publication_tasks p WHERE p.change_id = c.id OR p.task_id = c.task_id)
 		  AND NOT EXISTS (SELECT 1 FROM production_records r WHERE r.project_id = c.project_id AND r.kind = 'reviewer'
 		      AND r.identity = 'publish-' || lower(hex(c.id)) || '-' || c.revision)
-		ORDER BY c.updated_at_ms LIMIT 8`)
+		ORDER BY c.updated_at_ms`)
 	if err != nil {
 		return nil, err
 	}
