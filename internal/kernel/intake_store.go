@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"fmt"
 	"maps"
 	"math"
 	"strings"
@@ -591,7 +592,13 @@ func (store *Store) importIntakeAcceptance(ctx context.Context, id IntakeAccepta
 		}
 		return Task{}, tx.Rollback(err)
 	}
-	spec := NewTask{Priority: priority, ID: accepted.TaskID, IncarnationID: accepted.IncarnationID, ProjectID: accepted.ProjectID, RepositoryID: accepted.RepositoryID, AssignedAgentID: accepted.OverseerAgentID, Title: accepted.Snapshot.Title, Body: accepted.Snapshot.Body}
+	// Accepted work goes straight to any idle worker; the overseer wakes only
+	// for its outcome (overseer_wakeup.go).
+	body := accepted.Snapshot.Body + "\n\nSource: " + accepted.Snapshot.URL
+	if accepted.Snapshot.LinearTeamID == "" {
+		body = fmt.Sprintf("%s\n\nSource: https://github.com/%[2]s/issues/%[3]d\nFACTORY_SOURCE %[2]s#%[3]d", accepted.Snapshot.Body, accepted.SourceRepository, accepted.Snapshot.IssueNumber)
+	}
+	spec := NewTask{Priority: priority, ID: accepted.TaskID, IncarnationID: accepted.IncarnationID, ProjectID: accepted.ProjectID, RepositoryID: accepted.RepositoryID, Title: accepted.Snapshot.Title, Body: body}
 	if err := validateNewTask(spec); err != nil {
 		return Task{}, tx.Rollback(err)
 	}

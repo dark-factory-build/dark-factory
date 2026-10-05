@@ -206,7 +206,7 @@ func TestPublishedReviewSendBackReachesTheWorkerNotThePublisher(t *testing.T) {
 	if _, err := store.writer.ExecContext(ctx, `UPDATE publication_tasks SET created_at_ms = 90 WHERE task_id = ?`, publisher.ID.Bytes()); err != nil {
 		t.Fatal(err)
 	}
-	if inWork, err := store.ChangeBranchClosedToOverseer(ctx, worker.ProjectID, pr.Branch); err != nil || inWork {
+	if _, inWork, err := store.ChangeBranchClosedToOverseer(ctx, worker.ProjectID, pr.Branch); err != nil || inWork {
 		t.Fatalf("settled branch: inWork=%v err=%v", inWork, err)
 	}
 	routed, err := store.SendBackPublishedReview(ctx, worker.ProjectID, "example/factory", 7, "review-op", head, "fix the finding", mustTime(t, 91))
@@ -217,7 +217,7 @@ func TestPublishedReviewSendBackReachesTheWorkerNotThePublisher(t *testing.T) {
 		t.Fatalf("a superseded head err=%v, want ErrSuperseded", err)
 	}
 	// The sent-back Change is in work again: its branch is not publishable.
-	if inWork, err := store.ChangeBranchClosedToOverseer(ctx, worker.ProjectID, pr.Branch); err != nil || !inWork {
+	if _, inWork, err := store.ChangeBranchClosedToOverseer(ctx, worker.ProjectID, pr.Branch); err != nil || !inWork {
 		t.Fatalf("sent-back branch: inWork=%v err=%v", inWork, err)
 	}
 }
@@ -677,7 +677,7 @@ func TestPublishableIntakeChangeIsFactorydsUntilPublishedOrFailed(t *testing.T) 
 	}
 	closed := func() bool {
 		t.Helper()
-		value, err := store.ChangeBranchClosedToOverseer(ctx, worker.ProjectID, branch)
+		_, value, err := store.ChangeBranchClosedToOverseer(ctx, worker.ProjectID, branch)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -723,6 +723,11 @@ func TestPublishableIntakeChangeIsFactorydsUntilPublishedOrFailed(t *testing.T) 
 		if len(candidates()) != 0 || closed() {
 			t.Fatalf("%s: factoryd's to publish", source)
 		}
+		// The overseer publishes it from a wake task; the branch names the
+		// worker task whose acceptance gates that publication.
+		if task, _, err := store.ChangeBranchClosedToOverseer(ctx, worker.ProjectID, branch); err != nil || task != worker.TaskID {
+			t.Fatalf("%s: branch task %v %v", source, task, err)
+		}
 		if _, err := store.writer.ExecContext(ctx, `UPDATE intake_acceptances SET linear_team_id = '', github_repository_id = 42 WHERE id = ?`, accepted.ID.Bytes()); err != nil {
 			t.Fatal(err)
 		}
@@ -730,6 +735,18 @@ func TestPublishableIntakeChangeIsFactorydsUntilPublishedOrFailed(t *testing.T) 
 	found := candidates()
 	if len(found) != 1 || found[0].Change != change.ID || found[0].Task.ID != worker.TaskID || found[0].Accepted.ID != accepted.ID || found[0].Head != hex.EncodeToString(head) || found[0].Base != strings.Repeat("01", 20) || !closed() {
 		t.Fatalf("candidates = %+v, closed=%v", found, closed())
+	}
+	// The rule counts worker tasks, not task identities: an intake task its
+	// overseer owned (imported before workers took intake directly) is not one.
+	legacy, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 249), IncarnationID: incarnationID(t, 249), ProjectID: worker.ProjectID, AssignedAgentID: overseer.ID, Title: "legacy intake"}, mustTime(t, 69))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.writer.ExecContext(ctx, `INSERT INTO intake_task_bindings (task_id, acceptance_id) VALUES (?, ?)`, legacy.ID.Bytes(), accepted.ID.Bytes()); err != nil {
+		t.Fatal(err)
+	}
+	if len(candidates()) != 1 || !closed() {
+		t.Fatal("an overseer-owned intake task counted as a second worker task")
 	}
 	failure := map[string]any{"id": PublishFailureID(change.ID, found[0].Revision), "state": "publish_failed", "handled": true, "escalation": "factoryd cannot publish", "request": map[string]any{}}
 	if err := store.RecordReviewOperation(ctx, worker.ProjectID, "example/factory", PublishFailureID(change.ID, found[0].Revision), failure, mustTime(t, 70)); err != nil {

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/dark-factory-build/dark-factory/internal/api"
@@ -264,7 +265,12 @@ func TestAcceptedAttemptContextAndRestrictionsSurviveSourceSettingsChanges(t *te
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := fixture.store.ImportIntakeAcceptance(ctx, accepted.ID, mustKernelTime(t, 1000)); err != nil {
+		task, err := fixture.store.ImportIntakeAcceptance(ctx, accepted.ID, mustKernelTime(t, 1000))
+		if err != nil {
+			t.Fatal(err)
+		}
+		// An overseer-owned intake task imported before workers took them directly.
+		if _, err := fixture.store.UpdateTaskForOperator(ctx, task.ID, task.Revision, kernel.TaskPatch{AssignedAgentID: &agent}, mustKernelTime(t, 1000)); err != nil {
 			t.Fatal(err)
 		}
 	})
@@ -277,7 +283,7 @@ func TestAcceptedAttemptContextAndRestrictionsSurviveSourceSettingsChanges(t *te
 	done := fixture.serve(t)
 	assignment, err := active.client.Task(ctx)
 	waitDispatch(t, done)
-	if err != nil || assignment.Task != accepted.Snapshot.Body || assignment.Intake == nil || assignment.Intake.AcceptanceID != accepted.ID.String() || assignment.Intake.Repository != "feed/original" || assignment.Intake.RepositoryID != 42 || assignment.Intake.IssueNumber != 9 || assignment.Intake.TargetRepositoryID != accepted.RepositoryID.String() {
+	if err != nil || !strings.HasPrefix(assignment.Task, accepted.Snapshot.Body+"\n\nSource: ") || assignment.Intake == nil || assignment.Intake.AcceptanceID != accepted.ID.String() || assignment.Intake.Repository != "feed/original" || assignment.Intake.RepositoryID != 42 || assignment.Intake.IssueNumber != 9 || assignment.Intake.TargetRepositoryID != accepted.RepositoryID.String() {
 		t.Fatalf("frozen accepted assignment: %+v %v", assignment, err)
 	}
 	session, found, err := fixture.store.TerminalSessionForRun(ctx, active.run.ID)

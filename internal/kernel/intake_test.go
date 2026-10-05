@@ -289,6 +289,14 @@ func TestAcceptedIntakeImportsOnceAcrossOverlappingSourcesAndWithdrawal(t *testi
 			if err != nil {
 				t.Fatal(err)
 			}
+			source := "\n\nSource: https://github.com/owner/repository/issues/7\nFACTORY_SOURCE owner/repository#7"
+			if linear {
+				source = "\n\nSource: " + snapshot.URL
+			}
+			if bound, found, err := store.IntakeAcceptanceForTask(ctx, firstTask.ID); err != nil || !found || bound.ID != accepted.ID || bound.WithdrawnAt != nil ||
+				firstTask.Status != TaskQueued || !firstTask.AssignedAgentID.zero() || firstTask.Title != edited.Title || firstTask.Body != edited.Body+source {
+				t.Fatalf("imported worker task = %+v bound to %+v, %v", firstTask, bound, err)
+			}
 			retry, err := store.ImportIntakeAcceptance(ctx, accepted.ID, mustTime(t, 13))
 			if err != nil {
 				t.Fatal(err)

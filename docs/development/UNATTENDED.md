@@ -51,19 +51,12 @@ tool-budget fields are not provider usage accounting.
 Combine these rules with the project's acceptance criteria and repository
 instructions. Supply product priorities and explicit closure criteria.
 
+- factoryd queues each accepted issue directly as a worker task for any idle
+  worker: the issue title, its body, and a `Source:` link with the
+  `FACTORY_SOURCE OWNER/REPO#NUMBER` line. It cancels or stops that work when
+  the source is withdrawn. The overseer does not triage or delegate intake; it
+  acts on the worker's outcome when woken.
 - Read all pages of `overseer status`. Preserve direct operator interventions.
-  Carry the exact `FACTORY_SOURCE OWNER/REPO#NUMBER` marker into every delegated task,
-  so later edits and withdrawals can find all linked work.
-- Triage first: verify the problem, reject duplicate or already-fixed work
-  with evidence, and prefer deletion or no change when sufficient. Close as
-  `not_planned` only within the operator's explicit closure policy. Ambiguous
-  product decisions go to Needs You.
-- Give workers bounded objectives, acceptance checks, source revisions, and
-  allowed files. Prioritise impact and dependencies before arrival order.
-  Avoid concurrent edits to the same files. Use the cheapest suitable worker.
-- On changed or withdrawn sources, cancel queued work and stop running work
-  that no longer applies. Observe those outcomes before delegating a successor.
-  Intake is a supervisory event, not an instantaneous GitHub-to-process kill.
 - A worker's success is not issue completion. Inspect its tree and receipts,
   then publish it. factoryd reviews, enqueues, merges and releases every
   published head and returns findings to the original worker; never run gates,

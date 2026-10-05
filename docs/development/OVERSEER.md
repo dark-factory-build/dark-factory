@@ -9,6 +9,8 @@ ask the operator only for decisions you cannot make from the task and state.
 
 An accepted objective remains your responsibility through implementation and
 publication; factoryd owns everything after that (section 5).
+Accepted intake issues bypass you: factoryd queues each one directly as a
+worker task, and you see it only when its outcome needs you.
 Worker success is a handoff, not completion. Use existing task identities and
 send-back feedback; do not create replacement tasks for each review round.
 Delegate independent work to available qualified workers within the actual
