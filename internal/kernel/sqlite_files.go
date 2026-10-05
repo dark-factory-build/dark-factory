@@ -205,37 +205,27 @@ func validateDatabasePath(path string) error {
 }
 
 func preflightExisting(ctx context.Context, files *databaseFiles) (databaseSnapshot, error) {
-	// Activation validates the initial descriptors, but preflight is the last
-	// acceptance boundary before the isolated WAL image is trusted. Recheck the
-	// exact 0600 contract here so a sidecar whose mode changed after admission
-	// can never be copied into an otherwise-valid snapshot.
-	for _, source := range []*databaseFile{files.main, files.wal, files.shm} {
-		if source == nil {
-			continue
-		}
-		var stat unix.Stat_t
-		if err := unix.Fstat(int(source.file.Fd()), &stat); err != nil {
-			return databaseSnapshot{}, fmt.Errorf("inspect sqlite preflight identity: %w", err)
-		}
-		if err := validateDatabaseFileStat(uint32(stat.Mode), uint32(stat.Uid), uint64(stat.Nlink), int64(stat.Size), source.name, source.minimum, source.maximum); err != nil {
-			return databaseSnapshot{}, err
-		}
+	// Only a main file with no WAL reaches preflight; recheck its exact 0600
+	// contract before trusting it.
+	var stat unix.Stat_t
+	if err := unix.Fstat(int(files.main.file.Fd()), &stat); err != nil {
+		return databaseSnapshot{}, fmt.Errorf("inspect sqlite preflight identity: %w", err)
 	}
-	if files.wal == nil {
-		header := make([]byte, 20)
-		if _, err := files.main.file.ReadAt(header, 0); err != nil {
-			return databaseSnapshot{}, fmt.Errorf("%w: read sqlite header: %w", ErrForeignDatabase, err)
-		}
-		if err := validateJournalHeaderBytes(header, false); err != nil {
-			return databaseSnapshot{}, err
-		}
-		digest, err := digestDatabaseFile(ctx, files.main)
-		if err != nil {
-			return databaseSnapshot{}, err
-		}
-		return databaseSnapshot{main: digest}, inspectImmutable(ctx, files.main.file, files.main.info.Size(), header[18] == 1)
+	if err := validateDatabaseFileStat(uint32(stat.Mode), uint32(stat.Uid), uint64(stat.Nlink), int64(stat.Size), files.main.name, files.main.minimum, files.main.maximum); err != nil {
+		return databaseSnapshot{}, err
 	}
-	return validateWALSnapshotCopy(ctx, files)
+	header := make([]byte, 20)
+	if _, err := files.main.file.ReadAt(header, 0); err != nil {
+		return databaseSnapshot{}, fmt.Errorf("%w: read sqlite header: %w", ErrForeignDatabase, err)
+	}
+	if err := validateJournalHeaderBytes(header, false); err != nil {
+		return databaseSnapshot{}, err
+	}
+	digest, err := digestDatabaseFile(ctx, files.main)
+	if err != nil {
+		return databaseSnapshot{}, err
+	}
+	return databaseSnapshot{main: digest}, inspectImmutable(ctx, files.main.file, files.main.info.Size(), header[18] == 1)
 }
 
 var errDatabaseSnapshotChanged = fmt.Errorf("%w: sqlite database changed during preflight", ErrCorruptState)
@@ -247,8 +237,6 @@ type databaseDigest struct {
 
 type databaseSnapshot struct {
 	main databaseDigest
-	wal  databaseDigest
-	shm  databaseDigest
 }
 
 type databaseFile struct {
@@ -672,28 +660,20 @@ func digestDatabaseFile(ctx context.Context, source *databaseFile) (databaseDige
 }
 
 func (files *databaseFiles) verifySnapshot(ctx context.Context, expected databaseSnapshot) error {
-	for _, item := range []struct {
-		source *databaseFile
-		digest databaseDigest
-	}{{files.main, expected.main}, {files.wal, expected.wal}, {files.shm, expected.shm}} {
-		if item.source == nil {
-			continue
-		}
-		current, err := item.source.file.Stat()
-		if err != nil {
-			return fmt.Errorf("recheck sqlite snapshot size: %w", err)
-		}
-		if current.Size() != item.digest.size {
-			return fmt.Errorf("%w: sqlite %s length changed", errDatabaseSnapshotChanged, item.source.name)
-		}
-		item.source.info = current
-		actual, err := digestDatabaseFile(ctx, item.source)
-		if err != nil {
-			return err
-		}
-		if actual != item.digest {
-			return fmt.Errorf("%w: sqlite %s content changed", errDatabaseSnapshotChanged, item.source.name)
-		}
+	current, err := files.main.file.Stat()
+	if err != nil {
+		return fmt.Errorf("recheck sqlite snapshot size: %w", err)
+	}
+	if current.Size() != expected.main.size {
+		return fmt.Errorf("%w: sqlite %s length changed", errDatabaseSnapshotChanged, files.main.name)
+	}
+	files.main.info = current
+	actual, err := digestDatabaseFile(ctx, files.main)
+	if err != nil {
+		return err
+	}
+	if actual != expected.main {
+		return fmt.Errorf("%w: sqlite %s content changed", errDatabaseSnapshotChanged, files.main.name)
 	}
 	return nil
 }
@@ -941,65 +921,6 @@ func walChecksum(bigEndian bool, data []byte, first, second uint32) [2]uint32 {
 	return [2]uint32{first, second}
 }
 
-func validateWALSnapshotCopy(ctx context.Context, sources *databaseFiles) (snapshot databaseSnapshot, resultErr error) {
-	directory, err := os.MkdirTemp("", "dark-factory-wal-preflight-")
-	if err != nil {
-		return databaseSnapshot{}, fmt.Errorf("create private WAL preflight directory: %w", err)
-	}
-	defer func() {
-		resultErr = errors.Join(resultErr, os.RemoveAll(directory))
-	}()
-	if err := os.Chmod(directory, 0o700); err != nil {
-		return databaseSnapshot{}, fmt.Errorf("secure WAL preflight directory: %w", err)
-	}
-	if err := validatePrivateDirectory(directory); err != nil {
-		return databaseSnapshot{}, err
-	}
-	temporaryMain := filepath.Join(directory, "factory.sqlite3")
-	snapshot.main, err = copyDatabaseFile(ctx, sources.main, temporaryMain)
-	if err != nil {
-		return databaseSnapshot{}, err
-	}
-	snapshot.wal, err = copyDatabaseFile(ctx, sources.wal, temporaryMain+"-wal")
-	if err != nil {
-		return databaseSnapshot{}, err
-	}
-	snapshot.shm, err = digestDatabaseFile(ctx, sources.shm)
-	if err != nil {
-		return databaseSnapshot{}, err
-	}
-
-	pool, err := sql.Open(driverName, walPreflightDataSource(temporaryMain))
-	if err != nil {
-		return databaseSnapshot{}, fmt.Errorf("open isolated WAL snapshot: %w", err)
-	}
-	pool.SetMaxOpenConns(1)
-	pool.SetMaxIdleConns(1)
-	defer func() {
-		if err := pool.Close(); err != nil {
-			resultErr = errors.Join(resultErr, fmt.Errorf("close isolated WAL snapshot: %w", err))
-		}
-	}()
-	connection, err := pool.Conn(ctx)
-	if err != nil {
-		return databaseSnapshot{}, fmt.Errorf("checkout isolated WAL snapshot: %w", err)
-	}
-	tx, err := beginPinnedRead(ctx, connection)
-	if err != nil {
-		return databaseSnapshot{}, errors.Join(fmt.Errorf("begin isolated WAL snapshot: %w", err), connection.Close())
-	}
-	var journalMode string
-	err = tx.connection.QueryRowContext(ctx, `PRAGMA journal_mode`).Scan(&journalMode)
-	if err == nil && strings.ToLower(journalMode) != "wal" {
-		err = fmt.Errorf("%w: isolated database did not recover in WAL mode", ErrCorruptState)
-	}
-	if err == nil {
-		err = validateOpenableSnapshot(ctx, tx.connection)
-	}
-	validationErr := errors.Join(err, tx.Close())
-	return snapshot, validationErr
-}
-
 func validatePrivateDirectory(path string) error {
 	info, err := os.Lstat(path)
 	if err != nil {
@@ -1019,58 +940,4 @@ func operationalInspectDataSource(path string) string {
 		"foreign_keys(ON)", "query_only(ON)", "temp_store(MEMORY)",
 	}
 	return (&url.URL{Scheme: "file", Path: path, RawQuery: query.Encode()}).String()
-}
-
-func walPreflightDataSource(path string) string {
-	query := url.Values{"mode": {"rw"}}
-	query["_pragma"] = []string{
-		fmt.Sprintf("busy_timeout(%d)", busyMilliseconds),
-		"foreign_keys(ON)",
-		"query_only(ON)",
-		"temp_store(MEMORY)",
-	}
-	return (&url.URL{Scheme: "file", Path: path, RawQuery: query.Encode()}).String()
-}
-
-func copyDatabaseFile(ctx context.Context, source *databaseFile, targetPath string) (digest databaseDigest, resultErr error) {
-	target, err := os.OpenFile(targetPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if err != nil {
-		return databaseDigest{}, fmt.Errorf("create isolated sqlite copy: %w", err)
-	}
-	defer func() {
-		if err := target.Close(); err != nil {
-			resultErr = errors.Join(resultErr, fmt.Errorf("close isolated sqlite copy: %w", err))
-		}
-	}()
-	digest.size = source.info.Size()
-	hash := sha256.New()
-	const bufferSize = 128 << 10
-	buffer := make([]byte, bufferSize)
-	section := io.NewSectionReader(source.file, 0, source.info.Size())
-	for {
-		if err := ctx.Err(); err != nil {
-			return databaseDigest{}, err
-		}
-		read, readErr := section.Read(buffer)
-		if read > 0 {
-			written, writeErr := target.Write(buffer[:read])
-			if writeErr != nil {
-				return databaseDigest{}, fmt.Errorf("write isolated sqlite copy: %w", writeErr)
-			}
-			if written != read {
-				return databaseDigest{}, fmt.Errorf("write isolated sqlite copy: %w", io.ErrShortWrite)
-			}
-			if _, err := hash.Write(buffer[:read]); err != nil {
-				return databaseDigest{}, fmt.Errorf("digest isolated sqlite copy: %w", err)
-			}
-		}
-		if errors.Is(readErr, io.EOF) {
-			break
-		}
-		if readErr != nil {
-			return databaseDigest{}, fmt.Errorf("read sqlite source for isolated copy: %w", readErr)
-		}
-	}
-	copy(digest.sum[:], hash.Sum(nil))
-	return digest, nil
 }

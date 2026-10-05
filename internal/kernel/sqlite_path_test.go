@@ -506,3 +506,18 @@ func openPools(path string) (*Store, error) {
 	}
 	return store, nil
 }
+
+func openPool(path string, limit int) (*sql.DB, error) {
+	pool, err := sql.Open(driverName, configuredDataSource(path))
+	if err != nil {
+		return nil, fmt.Errorf("open sqlite pool: %w", err)
+	}
+	pool.SetMaxOpenConns(limit)
+	pool.SetMaxIdleConns(limit)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Duration(busyMilliseconds)*time.Millisecond)
+	defer cancel()
+	if err := pool.PingContext(ctx); err != nil {
+		return nil, errors.Join(fmt.Errorf("initialize sqlite pool: %w", err), pool.Close())
+	}
+	return pool, nil
+}
