@@ -703,8 +703,8 @@ func (store *Store) InFlightReviewOperations(ctx context.Context) ([]PendingRevi
 
 // RecoverRunningReviewOperations reconciles review claims left by a stopped
 // daemon. A REQUEST_CHANGES verdict with a durable submit receipt and without
-// an enqueue receipt remains a completed, route-pending operation; other
-// interrupted claims become failures.
+// an enqueue receipt remains a completed, route-pending operation; a claim with
+// no verdict or enqueue returns to gating for startup to relaunch; others fail.
 // An external reviewer observation uses the same projection kind but does not
 // have the durable operation request object.
 func (store *Store) RecoverRunningReviewOperations(ctx context.Context, at UnixMillis) (int, error) {
@@ -768,16 +768,11 @@ func (store *Store) RecoverRunningReviewOperations(ctx context.Context, at UnixM
 	if err != nil {
 		return 0, tx.Rollback(err)
 	}
-	detail, err := json.Marshal("review interrupted before resume; retry the recorded operation")
-	if err != nil {
-		return 0, tx.Rollback(err)
-	}
 	for _, item := range candidates {
-		var verdict, enqueueID, retryOf string
+		var verdict, enqueueID string
 		var submitted bool
 		_ = json.Unmarshal(item.document["verdict"], &verdict)
 		_ = json.Unmarshal(item.document["enqueue_id"], &enqueueID)
-		_ = json.Unmarshal(item.document["retry_of"], &retryOf)
 		_ = json.Unmarshal(item.document["submitted"], &submitted)
 		if verdict == "request_changes" && submitted && enqueueID == "" {
 			// The provider write and completed state may already be durable,
@@ -787,17 +782,14 @@ func (store *Store) RecoverRunningReviewOperations(ctx context.Context, at UnixM
 			item.document["state"] = json.RawMessage(`"completed"`)
 			item.document["route_pending"] = json.RawMessage(`true`)
 			delete(item.document, "detail")
+		} else if verdict == "" && enqueueID == "" {
+			// Nothing external was written: startup relaunches it from the
+			// gate, so a daemon restart (every release) never fails a review.
+			item.document["state"] = json.RawMessage(`"gating"`)
+			delete(item.document, "detail")
 		} else {
 			item.document["state"] = json.RawMessage(`"failed"`)
-			if verdict == "" && enqueueID == "" {
-				if retryOf == "" {
-					item.document["detail"] = detail
-				} else {
-					item.document["detail"] = json.RawMessage(`"review retries exhausted; review interrupted before completion"`)
-				}
-			} else {
-				item.document["detail"] = json.RawMessage(`"review interrupted after an external write may have occurred; observe the original operation"`)
-			}
+			item.document["detail"] = json.RawMessage(`"review interrupted after an external write may have occurred; observe the original operation"`)
 		}
 		item.document["updated_at"] = updatedAt
 		if err := productionRecordOnConnection(ctx, tx.connection, item.project, item.repository, "reviewer", item.identity, "", item.document, at.Int64()); err != nil {

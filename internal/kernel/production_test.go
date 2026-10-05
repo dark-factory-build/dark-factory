@@ -201,7 +201,7 @@ func TestCorrectedProductionHeadStoresRecoverableReviewClaimAtomically(t *testin
 			foundState, _ = claim["state"].(string)
 		}
 	}
-	if foundHead != newHead || foundState != "failed" {
+	if foundHead != newHead || foundState != "gating" { // no verdict yet: relaunched at startup
 		t.Fatalf("corrected head/review after restart = %q/%q", foundHead, foundState)
 	}
 }
