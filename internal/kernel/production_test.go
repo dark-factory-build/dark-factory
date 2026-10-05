@@ -582,3 +582,53 @@ func TestProductionCanonicalizesLegacyRuntimeDestinationsAndDeduplicates(t *test
 		t.Fatalf("canonical delivery lost membership: %s", stored)
 	}
 }
+
+func TestCorrectedHeadSupersedesOlderInFlightReview(t *testing.T) {
+	store, _, project, _ := newAdmissionStore(t, RoleOrchestrator, 2)
+	defer store.Close()
+	ctx := context.Background()
+	oldHead, newHead := strings.Repeat("a", 40), strings.Repeat("b", 40)
+	old := ProductionObservation{Repository: "example/factory", ObservedAt: 10, PullRequests: []ProductionPullRequest{{Number: 7, Title: "A machine", Head: oldHead, State: "open"}}}
+	if err := store.RecordProductionObservation(ctx, project.ID, old, mustTime(t, 10)); err != nil {
+		t.Fatal(err)
+	}
+	stale := map[string]any{"id": "stale", "state": "enqueuing", "request": map[string]any{"Repository": "example/factory", "PullNumber": 7, "Head": oldHead}}
+	other := map[string]any{"id": "other", "state": "enqueuing", "request": map[string]any{"Repository": "example/factory", "PullNumber": 8, "Head": oldHead}}
+	for id, op := range map[string]any{"stale": stale, "other": other} {
+		if err := store.RecordReviewOperation(ctx, project.ID, "example/factory", id, op, mustTime(t, 11)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fresh := map[string]any{"id": "fresh", "state": "gating", "request": map[string]any{"Repository": "example/factory", "PullNumber": 7, "Head": newHead}}
+	corrected := ProductionObservation{Repository: "example/factory", ObservedAt: 20, PullRequests: []ProductionPullRequest{{Number: 7, Title: "A machine", Head: newHead, State: "open"}}}
+	if err := store.RecordProductionObservationWithReviewOperations(ctx, project.ID, corrected, []ProductionReviewOperation{{ID: "fresh", Document: fresh}}, mustTime(t, 20)); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := store.InFlightReviewOperations(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var live []string
+	for _, op := range pending {
+		live = append(live, op.ID)
+	}
+	if strings.Join(live, ",") != "fresh,other" && strings.Join(live, ",") != "other,fresh" {
+		t.Fatalf("in-flight=%v, want the corrected head's claim and the untouched pull", live)
+	}
+	if err := store.RecordReviewOperation(ctx, project.ID, "example/factory", "stale", stale, mustTime(t, 21)); !errors.Is(err, ErrSuperseded) {
+		t.Fatalf("revive superseded err=%v, want ErrSuperseded", err)
+	}
+	document, _, err := store.ReviewOperation(ctx, project.ID, "stale")
+	if err != nil || !strings.Contains(string(document), `"state":"superseded"`) {
+		t.Fatalf("stale=%s err=%v", document, err)
+	}
+	// A pull with no factory task (factoryctl review) records its corrected
+	// head through the plain observation path.
+	plain := ProductionObservation{Repository: "example/factory", ObservedAt: 30, PullRequests: []ProductionPullRequest{{Number: 8, Title: "By hand", Head: newHead, State: "open"}}}
+	if err := store.RecordProductionObservation(ctx, project.ID, plain, mustTime(t, 30)); err != nil {
+		t.Fatal(err)
+	}
+	if document, _, err = store.ReviewOperation(ctx, project.ID, "other"); err != nil || !strings.Contains(string(document), `"state":"superseded"`) {
+		t.Fatalf("plain-path other=%s err=%v", document, err)
+	}
+}

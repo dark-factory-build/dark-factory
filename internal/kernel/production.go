@@ -299,6 +299,20 @@ func (store *Store) recordProductionObservation(ctx context.Context, c *sql.Conn
 			return err
 		}
 	}
+	// One live review operation per pull request head: an in-flight operation
+	// for an older head of an open pull is terminal, never resumed, retried or
+	// escalated, since the Maintainer refuses its writes forever.
+	for _, pr := range observation.PullRequests {
+		if pr.State != "open" {
+			continue
+		}
+		if _, err := c.ExecContext(ctx, `UPDATE production_records SET document = json_set(document, '$.state', 'superseded'), observed_at_ms = ?
+			WHERE project_id = ? AND repository = ? AND kind = 'reviewer' AND json_extract(document, '$.request.PullNumber') = ?
+			  AND lower(json_extract(document, '$.request.Head')) <> lower(?) AND json_extract(document, '$.state') IN ('gating', 'running', 'submitting', 'enqueuing')`,
+			at.Int64(), project.Bytes(), observation.Repository, int64(pr.Number), pr.Head); err != nil {
+			return err
+		}
+	}
 	for _, check := range observation.Checks {
 		if !productionSHA(check.Revision) || !productionURL(check.URL) || !validOutcomeText(check.Name, 256) || !validOutcomeText(check.State, 64) || !validOutcomeText(check.Conclusion, 64) || (check.Scope != "head" && check.Scope != "merge_group") || !productionNumbers(check.PullRequests) || len(check.Jobs) > 32 || check.Overflow < 0 {
 			return ErrInvalidValue
@@ -595,6 +609,16 @@ func (store *Store) RecordReviewOperation(ctx context.Context, project ProjectID
 	}
 	if len(body) < 2 || len(body) > 65536 {
 		return tx.Rollback(ErrInvalidValue)
+	}
+	// A superseded operation is terminal: its still-running goroutine cannot
+	// revive it.
+	var state sql.NullString
+	if err := tx.connection.QueryRowContext(ctx, `SELECT json_extract(document, '$.state') FROM production_records WHERE project_id = ? AND repository = ? AND kind = 'reviewer' AND identity = ?`,
+		project.Bytes(), strings.ToLower(repo), operationID).Scan(&state); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return tx.Rollback(err)
+	}
+	if state.String == "superseded" {
+		return tx.Rollback(ErrSuperseded)
 	}
 	if err := productionRecordOnConnection(ctx, tx.connection, project, strings.ToLower(repo), "reviewer", operationID, "", document, at.Int64()); err != nil {
 		return tx.Rollback(err)
