@@ -3,14 +3,15 @@
 package daemon
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/dark-factory-build/dark-factory/internal/browser"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
@@ -820,12 +821,16 @@ func (attempt *liveAttempt) routeFrame(frame runner.TerminalFrame) error {
 // quotes the message from matching.
 // ponytail: a fixed string of one provider's TUI; recognise a structured
 // provider event instead if Codex ever reports this outside its screen.
-var codexUsageLimit = []byte("■ You've hit your usage limit")
+const codexUsageLimit = "■ You've hit your usage limit"
 
 // codexModelCapacity is Codex's warning cell for a model at capacity, after
 // which it idles the same way. It is transient, so its task is queued again
 // (kernel.ProviderCapacityRunDetail).
-var codexModelCapacity = []byte("⚠ Selected model is at capacity")
+const codexModelCapacity = "⚠ Selected model is at capacity"
+
+// usageScanCarry bounds the raw tail carried across frames: room for a marker
+// and the escapes a TUI styles it with, glyph and text apart.
+const usageScanCarry = 256
 
 // scanUsageLimit reads each output byte once by its stream offset, whether it
 // arrives live or in an adopted owner's retained replay: the report may exist
@@ -845,17 +850,24 @@ func (attempt *liveAttempt) scanUsageLimit(start, end uint64, payload []byte) {
 		return
 	}
 	attempt.usageScan = append(attempt.usageScan, payload...)
-	if index := bytes.Index(attempt.usageScan, codexUsageLimit); index >= 0 {
-		report := attempt.usageScan[index+len("■ "):]
-		attempt.usageLimit = "provider usage limit (retry after its reset or select another account): " + terminalTextProjection(report[:min(len(report), 1024)], false, 1024)
+	// Match the escape-stripped text: Codex may colour the glyph apart from
+	// its message.
+	text := terminalTextProjection(attempt.usageScan, false, len(attempt.usageScan))
+	if index := strings.Index(text, codexUsageLimit); index >= 0 {
+		report := text[index+len("■ "):]
+		attempt.usageLimit = "provider usage limit (retry after its reset or select another account): " + terminalTextProjection([]byte(report[:min(len(report), 1024)]), false, 1024)
 		attempt.usageScan = nil
 		return
 	}
-	if bytes.Contains(attempt.usageScan, codexModelCapacity) {
+	if strings.Contains(text, codexModelCapacity) {
 		attempt.usageLimit, attempt.usageScan = kernel.ProviderCapacityRunDetail, nil
 		return
 	}
-	attempt.usageScan = append(attempt.usageScan[:0], attempt.usageScan[max(0, len(attempt.usageScan)-len(codexModelCapacity)+1):]...) // the longer marker
+	cut := max(0, len(attempt.usageScan)-usageScanCarry)
+	for cut < len(attempt.usageScan) && !utf8.RuneStart(attempt.usageScan[cut]) {
+		cut++ // a stray continuation byte reads as a C1 control that can swallow text
+	}
+	attempt.usageScan = append(attempt.usageScan[:0], attempt.usageScan[cut:]...)
 }
 
 func (attempt *liveAttempt) routeAttached(frame runner.TerminalFrame) error {

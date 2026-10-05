@@ -172,6 +172,16 @@ func TestCodexModelCapacityRequeuesOnce(t *testing.T) {
 	if quoted.usageLimit != "" {
 		t.Fatalf("quoted capacity matched: %q", quoted.usageLimit)
 	}
+	// The carry edge splits "❝" (E2 9D 9D) after its lead byte; a stray 0x9D
+	// would open an OSC string that swallows the marker in the next frame.
+	var split liveAttempt
+	first := strings.Repeat("x", 10) + "❝" + strings.Repeat("y", usageScanCarry-2)
+	split.scanUsageLimit(0, uint64(len(first)), []byte(first))
+	marker := "\x1b[33m⚠\x1b[39m Selected model is at capacity"
+	split.scanUsageLimit(uint64(len(first)), uint64(len(first)+len(marker)), []byte(marker))
+	if split.usageLimit != kernel.ProviderCapacityRunDetail {
+		t.Fatalf("marker after a split rune = %q", split.usageLimit)
+	}
 	fixture := newSupervisorFixture(t, "unused shell task")
 	if err := replaceSupervisorAgentLaunchControls(fixture.storePath, fixture.agentID, kernel.ProviderCodex, "", ""); err != nil {
 		t.Fatal(err)
