@@ -58,9 +58,7 @@ if [ "$go_check_mode" = source ]; then
     # that create sockets, PTYs, subprocesses, or services run in the process gate.
     echo "go-check: ordinary Go tests"
     "$go" test -short -timeout=20m \
-        ./cmd/cloudflare-admin \
         ./internal/browserprotocol \
-        ./internal/cloudflareadmin \
         ./internal/provider \
         ./internal/topology
 fi

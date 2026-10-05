@@ -46,9 +46,7 @@ set --
 packages=$("$go" list ./...)
 for package in $packages; do
     case "$package" in
-        github.com/dark-factory-build/dark-factory/cmd/cloudflare-admin|\
         github.com/dark-factory-build/dark-factory/internal/browserprotocol|\
-        github.com/dark-factory-build/dark-factory/internal/cloudflareadmin|\
         github.com/dark-factory-build/dark-factory/internal/provider|\
         github.com/dark-factory-build/dark-factory/internal/topology|\
         github.com/dark-factory-build/dark-factory/internal/change|\
