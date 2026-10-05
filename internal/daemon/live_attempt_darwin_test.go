@@ -777,3 +777,31 @@ func TestLiveAttemptPreReleaseEffectCompletesThroughOwnerMailbox(t *testing.T) {
 		t.Fatal("pre-release owner effect remained blocked in the mailbox")
 	}
 }
+
+func TestLiveAttemptShutdownConvergenceDefersToBusyOperationGate(t *testing.T) {
+	daemon := &Daemon{}
+	runID, sessionID := liveTestIDs(t, 11201)
+	// The outcome API clears the receipt fence under operationMu while the
+	// cancelled owner converges. A busy gate must leave the fence unread (the
+	// race detector reports an unlocked read) and the controller alone until
+	// the next lifecycle pass.
+	attempt := newLiveAttempt(daemon, runID, sessionID, nil)
+	attempt.outcomeReceiptPending = true
+	daemon.operationMu.Lock()
+	converged := make(chan error, 1)
+	go func() { converged <- attempt.convergeForShutdown() }()
+	attempt.outcomeReceiptPending = false
+	select {
+	case err := <-converged:
+		daemon.operationMu.Unlock()
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		daemon.operationMu.Unlock()
+		t.Fatal("shutdown convergence blocked on the operation gate")
+	}
+	if attempt.terminationSent || attempt.handedOver {
+		t.Fatalf("busy gate converged the controller: terminated=%v handedOver=%v", attempt.terminationSent, attempt.handedOver)
+	}
+}

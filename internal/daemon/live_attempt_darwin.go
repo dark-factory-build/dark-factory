@@ -353,8 +353,17 @@ func (attempt *liveAttempt) convergeForShutdown() error {
 	// Only a still-running attempt with nothing of its own owed may be handed
 	// on. A committed outcome awaiting its receipt fence, or a retained
 	// refused proposal, is this daemon's to finish, not the next daemon's to
-	// adopt.
-	if attempt.outcomeReceiptPending || attempt.pendingOutcome != nil {
+	// adopt. Both belong to operationMu, which the outcome API sets and clears
+	// concurrently. Never block on it (see processLifecycle): a busy gate leaves
+	// convergence to the next lifecycle pass.
+	if attempt.daemon != nil && !attempt.daemon.operationMu.TryLock() {
+		return nil
+	}
+	owed := attempt.outcomeReceiptPending || attempt.pendingOutcome != nil
+	if attempt.daemon != nil {
+		attempt.daemon.operationMu.Unlock()
+	}
+	if owed {
 		return attempt.terminateController()
 	}
 	if err := attempt.controller.SendHandoverQuiesce(); err != nil {
