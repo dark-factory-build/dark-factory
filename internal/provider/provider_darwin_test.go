@@ -1373,7 +1373,7 @@ func TestCodexOverseerDiscoversScopedControlsWithoutChangingWorkerTask(t *testin
 		t.Fatal(err)
 	}
 	customerPrompt := customer.Argv()[len(customer.Argv())-1]
-	if !strings.Contains(customerPrompt, "factoryd gates, reviews and enqueues every published head") || !strings.Contains(customerPrompt, "never submit a verdict or enqueue yourself") || strings.Contains(customerPrompt, "resolve review findings before publishing") {
+	if !strings.Contains(customerPrompt, "factoryd gates, reviews and enqueues every published head") || !strings.Contains(customerPrompt, "never create review tasks for workers") || !strings.Contains(customerPrompt, "never submit a verdict or enqueue yourself") || strings.Contains(customerPrompt, "resolve review findings before publishing") {
 		t.Fatal("factoryd-Maintainer overseer lacks factoryd's verdict guidance")
 	}
 	for _, command := range []string{`["attempt","task"]`, "overseer status", "next_offset", "next_text_offset", "worker interrupt", "worker replace", "Maintainer App", "structuredContent", "capability refusal", "causal wake", "Continue actionable supervision", "without idle polling", "only next event is external", "merge queue", "attempt succeed", "30 minutes after admission", "overseer task update --body", "preserve the original acceptance criteria", "Send-back replaces previous feedback", "accepted snapshot", "fully qualified source repository", "close_on_merge", "Closes #N", "Refs #N"} {
