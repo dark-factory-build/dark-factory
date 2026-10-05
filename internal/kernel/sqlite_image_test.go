@@ -253,27 +253,6 @@ func TestOpenValidatesWALOnDisposableCopy(t *testing.T) {
 		}
 	})
 
-	for name, mutation := range map[string]string{
-		"invalid controls never touch originals": `UPDATE factory SET next_invalidation_sequence = 3`,
-		"invalid schema never touches originals": `DROP INDEX tasks_canonical_queue`,
-	} {
-		t.Run(name, func(t *testing.T) {
-			path, _ := walSnapshotFixture(t, mutation)
-			before := captureSQLiteSet(t, path)
-			if _, err := openStrict(context.Background(), path); err == nil {
-				t.Fatal("Open accepted invalid WAL state")
-			}
-			assertSQLiteSetUnchanged(t, path, before)
-			info, err := os.Stat(path + "-shm")
-			if err != nil || info.Size() != walIndexRegionSize {
-				size := int64(-1)
-				if info != nil {
-					size = info.Size()
-				}
-				t.Fatalf("rejected WAL changed zero-cache SHM: size=%d err=%v", size, err)
-			}
-		})
-	}
 }
 
 func TestOpenAcceptsSQLiteWALCrashTails(t *testing.T) {

@@ -68,18 +68,8 @@ func openExistingFiles(ctx context.Context, absolutePath string, files *database
 	if err := files.refreshPinnedInfo(); err != nil {
 		return nil, errors.Join(err, files.Close())
 	}
-	if files.allowShortSHM {
-		if err := inspectOperationalSnapshot(ctx, absolutePath, files); err != nil {
-			return nil, errors.Join(err, files.Close())
-		}
-	} else {
-		snapshot, err := preflightExisting(ctx, files)
-		if err != nil {
-			return nil, errors.Join(err, files.Close())
-		}
-		if err := files.verifySnapshot(ctx, snapshot); err != nil {
-			return nil, errors.Join(err, files.Close())
-		}
+	if err := inspectOperationalSnapshot(ctx, absolutePath, files); err != nil {
+		return nil, errors.Join(err, files.Close())
 	}
 	if err := files.recheckPaths(); err != nil {
 		return nil, errors.Join(err, files.Close())

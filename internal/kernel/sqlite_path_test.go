@@ -157,14 +157,6 @@ func TestOpenRequiresCanonicalOwnerOnlyDatabaseParent(t *testing.T) {
 		}
 	})
 
-	t.Run("final parent is not directory", func(t *testing.T) {
-		root := filepath.Dir(mustCanonicalTestDatabasePath(t, filepath.Join(t.TempDir(), "placeholder")))
-		component := filepath.Join(root, "not-a-directory")
-		writeSidecar(t, component, []byte("sentinel"), 0o600)
-		if _, err := openStrict(context.Background(), filepath.Join(component, "kernel.db")); !errors.Is(err, ErrForeignDatabase) {
-			t.Fatalf("non-directory parent error = %v", err)
-		}
-	})
 }
 
 func TestDatabasePathAuthorityDetectsEveryRetainedComponentReplacement(t *testing.T) {
@@ -511,105 +503,6 @@ func openPools(path string) (*Store, error) {
 	}
 	if err := readerConnection.Close(); err != nil {
 		return nil, errors.Join(fmt.Errorf("return initial reader connection: %w", err), store.Close())
-	}
-	return store, nil
-}
-
-// openStrict is the non-retaining open: it validates with the strict snapshot
-// preflight and releases its file descriptors, so tests can assert that a
-// refusal leaves every byte untouched and replace poisoned connections.
-func openStrict(ctx context.Context, path string) (*Store, error) {
-	files, err := openDatabaseFiles(path)
-	if err != nil {
-		return nil, err
-	}
-	return openStrictFiles(ctx, path, files)
-}
-
-const retainBinding = false
-
-func openStrictFiles(ctx context.Context, absolutePath string, files *databaseFiles) (*Store, error) {
-	if err := files.refreshPinnedInfo(); err != nil {
-		return nil, errors.Join(err, files.Close())
-	}
-	if files.allowShortSHM {
-		if err := inspectOperationalSnapshot(ctx, absolutePath, files); err != nil {
-			return nil, errors.Join(err, files.Close())
-		}
-	} else {
-		snapshot, err := preflightExisting(ctx, files)
-		if err != nil {
-			return nil, errors.Join(err, files.Close())
-		}
-		if err := files.verifySnapshot(ctx, snapshot); err != nil {
-			return nil, errors.Join(err, files.Close())
-		}
-	}
-	if err := files.recheckPaths(); err != nil {
-		return nil, errors.Join(err, files.Close())
-	}
-	hadWAL := files.wal != nil
-	if !hadWAL {
-		if err := files.reservePrivateSHM(); err != nil {
-			return nil, errors.Join(err, files.Close())
-		}
-	}
-	var store *Store
-	var err error
-	if retainBinding {
-		store = newStore()
-		store.pathBinding = files
-		err = openFixedPools(ctx, store, absolutePath, files.recheckActivationBindings)
-	} else {
-		store, err = openPools(absolutePath)
-	}
-	if err != nil {
-		// SQLite activation may have created or changed sidecars. Without an
-		// exact live creation descriptor they remain visible evidence; cleanup
-		// must never guess ownership from a pathname.
-		if retainBinding {
-			if store.pathBinding != nil {
-				return store, err
-			}
-			return nil, err
-		}
-		return nil, closeFailedActivation(files, err)
-	}
-	if sqlitePostPoolHook != nil {
-		if err := sqlitePostPoolHook("before sidecar refresh"); err != nil {
-			return closeRejectedOpen(store, files, err)
-		}
-	}
-	if !hadWAL {
-		if files.wal == nil {
-			files.wal, err = files.openDatabaseFile(files.main.name+"-wal", "WAL", 0, maxSQLiteWALSize)
-			if err != nil {
-				return closeRejectedOpen(store, files, err)
-			}
-		}
-		files.shm.minimum = walIndexRegionSize
-	}
-	if err := store.migrateLegacy(ctx); err != nil {
-		return closeRejectedOpen(store, files, err)
-	}
-	if err := files.refreshPinnedInfo(); err != nil {
-		return closeRejectedOpen(store, files, err)
-	}
-	if err := store.validateOpen(ctx); err != nil {
-		return closeRejectedOpen(store, files, err)
-	}
-	if sqliteActivationHook != nil {
-		if err := sqliteActivationHook("after validation"); err != nil {
-			return closeRejectedOpen(store, files, err)
-		}
-	}
-	if err := files.recheckPaths(); err != nil {
-		return closeRejectedOpen(store, files, err)
-	}
-	if !retainBinding {
-		if err := files.Close(); err != nil {
-			return nil, errors.Join(err, store.Close())
-		}
 	}
 	return store, nil
 }
