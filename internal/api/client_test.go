@@ -1396,6 +1396,10 @@ func TestClientSurvivesDaemonSocketRebind(t *testing.T) {
 	if err := listener.Close(); err != nil {
 		t.Fatal(err)
 	}
+	// Between generations the path is absent: retryable, not a broken client.
+	if _, err := client.Health(context.Background()); !errors.Is(err, ErrTransport) {
+		t.Fatalf("absent socket = %v, want ErrTransport", err)
+	}
 	replacement, err := net.ListenUnix("unix", &net.UnixAddr{Name: socket, Net: "unix"})
 	if err != nil {
 		t.Fatal(err)
