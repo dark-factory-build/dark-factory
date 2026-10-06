@@ -1047,6 +1047,80 @@ func TestFreshSelectionFetchesConfiguredUpstreamWithoutMovingCheckout(t *testing
 	}
 }
 
+// The registered checkout is the owner's: its local branch may lag the origin
+// and its HEAD may be on unrelated work. A new Change still starts from the
+// origin's default branch tip, fetched into a factory-owned ref.
+func TestFreshSelectionStartsFromOriginDefaultBranchNotCheckout(t *testing.T) {
+	ctx := context.Background()
+	fixture := newLocalGitFixture(t, "sha1")
+	remote := newLocalGitFixture(t, "sha1")
+	branch := strings.TrimSpace(runFixtureGitOutput(t, remote.git, remote.repository, "symbolic-ref", "HEAD"))
+	runFixtureGit(t, fixture.git, fixture.repository, "remote", "add", "origin", remote.repository)
+	// Fixture-only local transport; production keeps Git's protocol policy.
+	runFixtureGit(t, fixture.git, fixture.repository, "config", "protocol.file.allow", "always")
+	runFixtureGit(t, fixture.git, fixture.repository, "fetch", "--quiet", "origin")
+	localMain := strings.TrimPrefix(branch, "refs/heads/")
+	runFixtureGit(t, fixture.git, fixture.repository, "update-ref", "refs/heads/"+localMain, "refs/remotes/origin/"+localMain)
+	runFixtureGit(t, fixture.git, fixture.repository, "config", "branch."+localMain+".remote", "origin")
+	runFixtureGit(t, fixture.git, fixture.repository, "config", "branch."+localMain+".merge", branch)
+	runFixtureGit(t, fixture.git, fixture.repository, "checkout", "--quiet", "-B", "operator-work", fixture.base.Hex())
+	for _, name := range []string{"one.txt", "two.txt"} {
+		if err := os.WriteFile(filepath.Join(remote.repository, name), []byte(name+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		runFixtureGit(t, remote.git, remote.repository, "add", name)
+		runFixtureGit(t, remote.git, remote.repository, "commit", "-m", "origin advances")
+	}
+	want := strings.TrimSpace(runFixtureGitOutput(t, remote.git, remote.repository, "rev-parse", "HEAD"))
+	refs := func() string {
+		return runFixtureGitOutput(t, fixture.git, fixture.repository, "for-each-ref", "--format=%(refname) %(objectname)", "refs/heads/", "refs/remotes/")
+	}
+	before, head := refs(), runFixtureGitOutput(t, fixture.git, fixture.repository, "rev-parse", "HEAD")
+	if local := strings.TrimSpace(runFixtureGitOutput(t, fixture.git, fixture.repository, "rev-parse", "refs/heads/"+localMain)); local == want {
+		t.Fatal("fixture local branch is not behind its origin")
+	}
+	source, err := InspectRepositorySource(ctx, fixture.git, fixture.repository, "HEAD", fixture.identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	selected, err := SelectRegisteredGit(ctx, fixture.git, fixture.repository, "HEAD", source)
+	if err != nil || selected.Base().Hex() != want {
+		t.Fatalf("base=%s want origin tip %s: %v", selected.Base().Hex(), want, err)
+	}
+	if got := strings.TrimSpace(runFixtureGitOutput(t, fixture.git, fixture.repository, "rev-parse", factoryBaseRef("origin", branch))); got != want {
+		t.Fatalf("factory base ref=%s want %s", got, want)
+	}
+	if got := refs(); got != before {
+		t.Fatalf("owner branches or tracking refs moved: %q -> %q", before, got)
+	}
+	if got := runFixtureGitOutput(t, fixture.git, fixture.repository, "rev-parse", "HEAD"); got != head {
+		t.Fatalf("owner checkout moved: %s -> %s", head, got)
+	}
+	// The origin's default branch moves beneath its old name and back. The
+	// retained ref of one base must never block the ref of the next.
+	nested := branch + "/next"
+	for _, rename := range [][2]string{{branch, nested}, {nested, branch}} {
+		runFixtureGit(t, remote.git, remote.repository, "update-ref", "refs/factory-fixture/tip", rename[0])
+		runFixtureGit(t, remote.git, remote.repository, "update-ref", "-d", rename[0])
+		runFixtureGit(t, remote.git, remote.repository, "update-ref", rename[1], "refs/factory-fixture/tip")
+		runFixtureGit(t, remote.git, remote.repository, "symbolic-ref", "HEAD", rename[1])
+		runFixtureGit(t, remote.git, remote.repository, "update-ref", "-d", "refs/factory-fixture/tip")
+		selected, err := SelectRegisteredGit(ctx, fixture.git, fixture.repository, "HEAD", source)
+		if err != nil || selected.Base().Hex() != want {
+			t.Fatalf("default branch %s: base=%s want %s: %v", rename[1], selected.Base().Hex(), want, err)
+		}
+		if got := strings.TrimSpace(runFixtureGitOutput(t, fixture.git, fixture.repository, "rev-parse", factoryBaseRef("origin", rename[1]))); got != want {
+			t.Fatalf("factory base ref for %s=%s want %s", rename[1], got, want)
+		}
+	}
+	// An unreachable origin stops selection rather than falling back to the
+	// checkout's HEAD or the previously fetched factory ref.
+	runFixtureGit(t, fixture.git, fixture.repository, "remote", "set-url", "origin", filepath.Join(t.TempDir(), "missing"))
+	if _, err := SelectGit(ctx, fixture.git, fixture.repository, "HEAD", fixture.identity); err == nil || !strings.Contains(err.Error(), "source refresh failed") {
+		t.Fatalf("failed origin fetch selected old source: %v", err)
+	}
+}
+
 // The test-only Git entry points below drive native Git through the same
 // authority as production without the private-administration layout.
 

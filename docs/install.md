@@ -287,13 +287,18 @@ Maintainer connection.
 
 For a newly created project's first repository, `factoryd` defaults to
 `--base-revision HEAD`; this boot setting initializes the binding and does not
-retarget existing work. With `HEAD` on a branch that has a configured remote
-upstream, a fresh Change fetches and pins that upstream's exact commit. A
-`refs/remotes/upstream/main` base selects a different remote branch. Detached
-HEAD, branches without an upstream, and explicit local refs or commit IDs stay
-local. A configured fetch failure stops source preparation rather than using
-a stale tracking ref. Fetching does not move the registered checkout or update
-tracking refs or `FETCH_HEAD`. Retained Changes keep their original source and
+retarget existing work. With `HEAD`, a fresh Change starts from the origin's
+default branch as the origin reports it now, whatever the registered checkout
+has checked out and however far its local branches lag. A
+`refs/remotes/upstream/main` base selects a different remote branch. Each
+remote base is fetched into the factory-owned
+`refs/factory/base/DIGEST` (a SHA-256 of the remote and branch, so a renamed
+default branch never collides with an old one) and the Change is pinned to that commit.
+Only a checkout without an `origin` follows its own HEAD: its branch's
+upstream, or the local branch or detached HEAD itself. Explicit local refs or
+commit IDs stay local. A fetch failure stops source preparation rather than
+using a stale ref. Fetching does not move the registered checkout, its
+branches, tracking refs or `FETCH_HEAD`. Retained Changes keep their original source and
 edits; use the repository `base` setting for future work in that binding. Git
 runs noninteractively with a private home and global/system configuration
 disabled. Private remotes use repository-local authentication; missing
