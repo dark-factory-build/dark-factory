@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"net"
@@ -923,51 +924,88 @@ func parseContent(args []string) (attemptCommand, bool, bool) {
 	if len(args) == start+3 && helpFlag(args[start+2]) {
 		return attemptCommand{}, true, true
 	}
+	flags := flag.NewFlagSet(args[start+1], flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
 	seen := map[string]bool{}
-	ids := map[string]*string{"--project": &command.project, "--id": &command.contentID, "--task": &command.id, "--repository": &command.knowledgeRepository}
+	stringFlag := func(name string, target *string) {
+		flags.Func(name[2:], "", func(value string) error {
+			if seen[name] {
+				return errors.New("flag specified more than once")
+			}
+			seen[name] = true
+			*target = value
+			return nil
+		})
+	}
+	stringFlag("--project", &command.project)
+	stringFlag("--id", &command.contentID)
+	stringFlag("--task", &command.id)
+	stringFlag("--repository", &command.knowledgeRepository)
+	stringFlag("--query", &command.knowledgeQuery)
+	stringFlag("--branch", &command.knowledgeBranch)
+	stringFlag("--entity", &command.knowledgeEntity)
+	stringFlag("--thread", &command.knowledgeThread)
+	stringFlag("--kind", &command.contentKind)
+	stringFlag("--title", &command.title)
+	stringFlag("--description", &command.description)
+	stringFlag("--body", &command.body)
+	stringFlag("--body-file", &command.bodyFile)
+	stringFlag("--source-references", &command.sourceReferences)
+	stringFlag("--path", &command.sourcePath)
+	stringFlag("--environment", &command.environment)
+	var revision, offset, limit, commit string
+	stringFlag("--revision", &revision)
+	stringFlag("--offset", &offset)
+	stringFlag("--limit", &limit)
+	stringFlag("--commit", &commit)
+	if flags.Parse(args[start+2:]) != nil || flags.NArg() != 0 {
+		return attemptCommand{}, false, false
+	}
+	if seen["--project"] && !validHumanRequestKey(command.project) || seen["--id"] && !validHumanRequestKey(command.contentID) || seen["--task"] && !validHumanRequestKey(command.id) || seen["--repository"] && !validHumanRequestKey(command.knowledgeRepository) {
+		return attemptCommand{}, false, false
+	}
 	texts := map[string]struct {
 		minimum, maximum int
-		target           *string
-	}{"--query": {1, 1024, &command.knowledgeQuery}, "--branch": {1, 1024, &command.knowledgeBranch}, "--entity": {1, 1024, &command.knowledgeEntity}, "--thread": {1, 1024, &command.knowledgeThread}, "--kind": {1, 64, &command.contentKind}, "--title": {1, 1024, &command.title}, "--description": {0, 4096, &command.description}, "--body": {0, 1 << 20, &command.body}, "--body-file": {1, 4096, &command.bodyFile}, "--source-references": {0, 32768, &command.sourceReferences}, "--path": {1, 4096, &command.sourcePath}, "--environment": {0, 4096, &command.environment}}
-	for i := start + 2; i < len(args); i += 2 {
-		if i+1 >= len(args) || seen[args[i]] {
+		value            string
+	}{"--query": {1, 1024, command.knowledgeQuery}, "--branch": {1, 1024, command.knowledgeBranch}, "--entity": {1, 1024, command.knowledgeEntity}, "--thread": {1, 1024, command.knowledgeThread}, "--kind": {1, 64, command.contentKind}, "--title": {1, 1024, command.title}, "--description": {0, 4096, command.description}, "--body": {0, 1 << 20, command.body}, "--body-file": {1, 4096, command.bodyFile}, "--source-references": {0, 32768, command.sourceReferences}, "--path": {1, 4096, command.sourcePath}, "--environment": {0, 4096, command.environment}}
+	for name, text := range texts {
+		if seen[name] && !validOperatorText(text.value, text.minimum, text.maximum) {
 			return attemptCommand{}, false, false
 		}
-		seen[args[i]] = true
-		name, value := args[i], args[i+1]
-		text, isText := texts[name]
-		switch {
-		case ids[name] != nil && validHumanRequestKey(value):
-			*ids[name] = value
-		case isText && validOperatorText(value, text.minimum, text.maximum):
-			*text.target, command.bodySet = value, command.bodySet || name == "--body"
-		case name == "--revision":
-			n, ok := parseRevision(value)
-			if !ok {
-				return attemptCommand{}, false, false
-			}
-			command.contentRevision = n
-		case name == "--offset":
-			n, ok := parseCount(value, true)
-			if !ok {
-				return attemptCommand{}, false, false
-			}
-			command.offset = n
-		case name == "--limit":
-			n, ok := parseRevision(value)
-			max := uint64(64 * 1024)
-			if command.kind == commandContentList {
-				max = api.MaxContentPageItems
-			}
-			if !ok || n > max {
-				return attemptCommand{}, false, false
-			}
-			command.head = n
-		case name == "--commit" && len(value) >= 40 && len(value) <= 64:
-			command.sourceCommit = value
-		default:
+	}
+	if seen["--body"] {
+		command.bodySet = true
+	}
+	if seen["--revision"] {
+		n, ok := parseRevision(revision)
+		if !ok {
 			return attemptCommand{}, false, false
 		}
+		command.contentRevision = n
+	}
+	if seen["--offset"] {
+		n, ok := parseCount(offset, true)
+		if !ok {
+			return attemptCommand{}, false, false
+		}
+		command.offset = n
+	}
+	if seen["--limit"] {
+		n, ok := parseRevision(limit)
+		max := uint64(64 * 1024)
+		if command.kind == commandContentList {
+			max = api.MaxContentPageItems
+		}
+		if !ok || n > max {
+			return attemptCommand{}, false, false
+		}
+		command.head = n
+	}
+	if seen["--commit"] {
+		if len(commit) < 40 || len(commit) > 64 {
+			return attemptCommand{}, false, false
+		}
+		command.sourceCommit = commit
 	}
 	if command.bodySet && command.bodyFile != "" {
 		return attemptCommand{}, false, false
