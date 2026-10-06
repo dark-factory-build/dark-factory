@@ -95,6 +95,7 @@ func listContentAccesses(ctx context.Context, c *sql.Conn, run RunID, selected b
 	}
 	return result, rows.Err()
 }
+
 // FreezeKnowledgeContext retains even an empty first selection. Concurrent callers
 // receive the first committed selection, preserving exact revisions across restarts.
 func (store *Store) FreezeKnowledgeContext(ctx context.Context, run RunID, refs []ContentAccess, at UnixMillis) ([]ContentAccess, error) {
