@@ -189,6 +189,7 @@ type PendingReviewOperation struct {
 	Repository string
 	ID         string
 	Document   []byte
+	Ended      bool // its pull request is recorded merged, closed or at a new head
 }
 
 // PublishingProjects lists the projects that have published a pull request.
@@ -803,11 +804,10 @@ func (store *Store) InFlightReviewOperations(ctx context.Context) ([]PendingRevi
 		return nil, err
 	}
 	defer tx.Close()
-	rows, err := tx.connection.QueryContext(ctx, `SELECT project_id, repository, identity, document FROM production_records r
-        WHERE kind = 'reviewer' AND (json_extract(document, '$.state') IN ('running', 'submitting', 'enqueuing', 'enqueued') OR json_extract(document, '$.route_pending') = 1
-            OR (json_extract(document, '$.state') = 'failed' AND json_extract(document, '$.handled') IS NOT 1 AND EXISTS (SELECT 1 FROM production_records p
-                WHERE p.project_id = r.project_id AND p.repository = r.repository AND p.kind = 'pull_request' AND p.identity = CAST(json_extract(r.document, '$.request.PullNumber') AS TEXT)
-                  AND json_extract(p.document, '$.state') = 'open' AND lower(json_extract(p.document, '$.head')) = lower(json_extract(r.document, '$.request.Head')))))
+	rows, err := tx.connection.QueryContext(ctx, `SELECT project_id, repository, identity, document, (SELECT json_extract(p.document, '$.state') = 'open' AND lower(json_extract(p.document, '$.head')) = lower(json_extract(r.document, '$.request.Head'))
+                FROM production_records p WHERE p.project_id = r.project_id AND p.repository = r.repository AND p.kind = 'pull_request' AND p.identity = CAST(json_extract(r.document, '$.request.PullNumber') AS TEXT)) AS live
+        FROM production_records r WHERE kind = 'reviewer' AND (json_extract(document, '$.state') IN ('running', 'submitting', 'enqueuing', 'enqueued') OR json_extract(document, '$.route_pending') = 1
+            OR (json_extract(document, '$.state') = 'failed' AND json_extract(document, '$.handled') IS NOT 1 AND live))
           AND json_type(document, '$.request') = 'object'`)
 	if err != nil {
 		return nil, err
@@ -817,7 +817,8 @@ func (store *Store) InFlightReviewOperations(ctx context.Context) ([]PendingRevi
 	for rows.Next() {
 		var projectBytes []byte
 		var repository, operationID, document string
-		if err := rows.Scan(&projectBytes, &repository, &operationID, &document); err != nil {
+		var live sql.NullBool
+		if err := rows.Scan(&projectBytes, &repository, &operationID, &document, &live); err != nil {
 			return nil, err
 		}
 		project, err := ProjectIDFromBytes(projectBytes)
@@ -827,7 +828,7 @@ func (store *Store) InFlightReviewOperations(ctx context.Context) ([]PendingRevi
 		if !json.Valid([]byte(document)) {
 			return nil, fmt.Errorf("%w: review operation", ErrCorruptState)
 		}
-		pending = append(pending, PendingReviewOperation{Project: project, Repository: repository, ID: operationID, Document: []byte(document)})
+		pending = append(pending, PendingReviewOperation{Project: project, Repository: repository, ID: operationID, Document: []byte(document), Ended: live.Valid && !live.Bool})
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err

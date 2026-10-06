@@ -687,6 +687,89 @@ func TestStuckEnqueueEscalatesOnceAndKeepsResuming(t *testing.T) {
 	}
 }
 
+type notYetEnqueueBackend struct {
+	*publicReviewBackend
+	refuse bool
+}
+
+func (b *notYetEnqueueBackend) Enqueue(ctx context.Context, operation review.Operation) error {
+	if b.refuse {
+		b.enqueues++
+		return fmt.Errorf("%w: refused: The request was refused: rejected before execution as UNPROCESSABLE.", review.ErrRejected)
+	}
+	return b.publicReviewBackend.Enqueue(ctx, operation)
+}
+
+// An enqueue GitHub refuses before executing (hosted checks queued, #1276)
+// is resent once per tick for as long as its pull request is open at head:
+// escalated once when stalled, never failed. It enqueues when GitHub accepts
+// it, and ends once its pull request closes.
+func TestRefusedEnqueueResendsWhileThePullIsOpenAtHead(t *testing.T) {
+	fixture, project, _, settle := publishedTask(t)
+	settle()
+	customerMode(t, fixture)
+	ctx := context.Background()
+	backend := &notYetEnqueueBackend{&publicReviewBackend{observations: map[string]review.Receipt{"refused-write": {State: "planned"}}}, true}
+	fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return backend }
+	var offset atomic.Int64
+	now := fixture.daemon.now
+	fixture.daemon.now = func() time.Time { return now().Add(time.Duration(offset.Load())) }
+	request := publishedReviewRequest()
+	refused := review.Operation{ID: "refused-enqueue", EnqueueID: "refused-write", Submitted: true, Verdict: "allow", Request: review.Request{Repository: request.Repository, PullNumber: request.PullNumber, Head: request.Head, Base: request.Base, BaseRef: request.BaseRef, Body: "fixture body", Provider: request.Provider}, State: "enqueuing", CreatedAt: fixture.daemon.now(), UpdatedAt: fixture.daemon.now()}
+	store := durableReviewStore{store: fixture.store, project: project, repository: "team/repo", now: fixture.daemon.now}
+	if err := store.Create(ctx, refused); err != nil {
+		t.Fatal(err)
+	}
+	tick := func(after time.Duration) review.Operation {
+		offset.Add(int64(after))
+		if _, err := fixture.daemon.advanceReviewOperations(ctx, false); err != nil {
+			t.Fatal(err)
+		}
+		document, _, err := fixture.store.ReviewOperation(ctx, project, refused.ID)
+		var op review.Operation
+		if err != nil || json.Unmarshal(document, &op) != nil {
+			t.Fatalf("operation: %s %v", document, err)
+		}
+		return op
+	}
+	if op := tick(3 * time.Minute); op.State != "enqueuing" || op.Escalation != "" || backend.enqueues != 1 {
+		t.Fatalf("young refusal: %+v (enqueues %d)", op, backend.enqueues)
+	}
+	if op := tick(28 * time.Minute); op.State != "enqueuing" || !strings.Contains(op.Escalation, "UNPROCESSABLE") || backend.enqueues != 2 {
+		t.Fatalf("31 minutes: %+v (enqueues %d)", op, backend.enqueues)
+	}
+	if op := tick(3 * time.Minute); op.State != "enqueuing" || !strings.Contains(op.Escalation, "has not advanced for 30 minutes") || backend.enqueues != 3 {
+		t.Fatalf("stopped resending or re-escalated: %+v (enqueues %d)", op, backend.enqueues)
+	}
+	backend.refuse = false
+	if op := tick(3 * time.Minute); op.State != "enqueued" || op.Escalation != "" || backend.enqueues != 4 {
+		t.Fatalf("accepted: %+v (enqueues %d)", op, backend.enqueues)
+	}
+
+	// A refused enqueue whose pull request closed at its head ends (a moved
+	// head already supersedes it).
+	backend.refuse = true
+	closed := refused
+	closed.ID, closed.EnqueueID = "closed-enqueue", "closed-write"
+	backend.observations["closed-write"] = review.Receipt{State: "planned"}
+	if err := store.Create(ctx, closed); err != nil {
+		t.Fatal(err)
+	}
+	head := request.Head
+	at := fixture.daemon.now().UnixMilli()
+	if err := fixture.store.RecordProductionObservation(ctx, project, kernel.ProductionObservation{Repository: "team/repo", ObservedAt: at, PullRequests: []kernel.ProductionPullRequest{{Number: 12, Title: "Ship it", URL: "https://github.com/team/repo/pull/12", Head: head, Branch: "feature/ship", Base: "main", State: "closed", Review: kernel.ProductionReview{Head: head, State: "unknown"}}}}, mustKernelTime(t, at)); err != nil {
+		t.Fatal(err)
+	}
+	enqueues := backend.enqueues
+	offset.Add(int64(3 * time.Minute))
+	if _, err := fixture.daemon.advanceReviewOperations(ctx, false); err != nil {
+		t.Fatal(err)
+	}
+	if document, _, err := fixture.store.ReviewOperation(ctx, project, closed.ID); err != nil || !strings.Contains(string(document), `"state":"closed"`) || backend.enqueues != enqueues {
+		t.Fatalf("closed pull: %s %v (enqueues %d)", document, err, backend.enqueues-enqueues)
+	}
+}
+
 // A pull request no factory task published (a host or human author's) keeps
 // its REQUEST_CHANGES on GitHub: it is neither sent back nor escalated.
 func TestRequestChangesOnAPullNoTaskPublishedIsNotEscalated(t *testing.T) {

@@ -168,6 +168,10 @@ func (daemon *Daemon) advanceReviewOperations(ctx context.Context, startup bool)
 			if err == nil {
 				err = daemon.finishReviewRouting(ctx, operation.Project, operation.Repository, op)
 			}
+		case op.State == "enqueuing" && operation.Ended:
+			// An enqueue is resent only while its pull request is open at head.
+			op.State, op.UpdatedAt = "closed", daemon.now()
+			err = durableReviewStore{store: daemon.store, project: operation.Project, repository: operation.Repository, now: daemon.now}.Update(ctx, op)
 		case (op.State == "submitting" || op.State == "enqueuing") && stuck:
 			// It keeps resuming, since it may still complete; one whose resume
 			// keeps failing is escalated once, with the last error, not left silent.
