@@ -41,8 +41,9 @@ transcripts and Codex rollouts, for work in that run's directory since its
 admission). Once `tokens_used` reaches a nonzero `token_limit`, the project
 admits nothing more; running work finishes. Like the run allowance, the budget
 is additional to what is already recorded, and zero removes the ceiling.
-`factoryctl status` reports both figures per project. This counts tokens, not
-money, and input tokens include cached ones. The shell provider spends none,
+`factoryctl status` reports both figures per project. This counts billable
+tokens, not money: Codex counts uncached input plus output, while Claude counts
+input plus cache creation plus output, excluding cache reads. The shell provider spends none,
 and a run adopted by recovery after a daemon restart records none. Legacy
 tool-budget fields are not provider usage accounting.
 

@@ -107,8 +107,9 @@ by a live run; a Claude Code overseer has fixture proof only, so use a Codex
 overseer for now. Agents run on your Mac as your user. The sandbox confines the
 commands and file tools an agent uses; the provider process and its MCP servers
 sit outside it, and configured providers receive task and repository material.
-Token budgets count the tokens recorded from each provider's session log,
-including cached input, not money. A run the daemon recovers after a restart,
+Token budgets count billable tokens recorded from each provider's session log:
+uncached input plus output (and Claude cache creation), excluding cached input
+reads; they measure tokens, not money. A run the daemon recovers after a restart,
 or one whose provider log is missing, records none, so real usage can exceed
 the ceiling. Remote access and GitHub publication need additional setup. See
 [installation and recovery](docs/install.md) and [provider
