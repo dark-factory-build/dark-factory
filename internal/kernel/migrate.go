@@ -73,9 +73,23 @@ func validateOpenableSnapshot(ctx context.Context, connection *sql.Conn) error {
 		if err := validateSchemaVersion(ctx, connection, version, v34SchemaStatements()); err != nil {
 			return err
 		}
-		return validateIntegrity(ctx, connection)
+		if err := validateIntegrity(ctx, connection); err != nil {
+			return err
+		}
+		return validateContentGitPins(ctx, connection)
 	}
 	return validateDatabaseSnapshot(ctx, connection)
+}
+
+func validateContentGitPins(ctx context.Context, connection *sql.Conn) error {
+	var invalid bool
+	if err := connection.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM project_content_revisions WHERE commit_oid IS NULL OR body <> '')`).Scan(&invalid); err != nil {
+		return err
+	}
+	if invalid {
+		return fmt.Errorf("%w: project content contains a non-Git revision", ErrCorruptState)
+	}
+	return nil
 }
 
 // migrateLegacy takes an exact v34 home to the current schema in one

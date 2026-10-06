@@ -65,24 +65,22 @@ func (daemon *Daemon) writeContentSource(ctx context.Context, spec kernel.NewCon
 		if readErr != nil {
 			return kernel.NewContent{}, readErr
 		}
-		if previous.Commit != "" {
-			repository, found, readErr = daemon.store.ContentRepository(ctx, previous.ID, previous.Revision)
-			if readErr != nil || !found {
-				if readErr == nil {
-					readErr = kernel.ErrCorruptState
-				}
-				return kernel.NewContent{}, readErr
+		repository, found, readErr = daemon.store.ContentRepository(ctx, previous.ID, previous.Revision)
+		if readErr != nil || !found {
+			if readErr == nil {
+				readErr = kernel.ErrCorruptState
 			}
-			identity, readErr = change.NewRepositoryIdentity(uint64(previous.RepositoryDevice), uint64(previous.RepositoryInode))
-			if readErr != nil {
-				return kernel.NewContent{}, readErr
-			}
-			id, idErr := change.NewObjectIDFromHex(previous.ObjectFormat, previous.Commit)
-			if idErr != nil {
-				return kernel.NewContent{}, idErr
-			}
-			parent = &change.ContentSource{Commit: id, Path: previous.Path}
+			return kernel.NewContent{}, readErr
 		}
+		identity, readErr = change.NewRepositoryIdentity(uint64(previous.RepositoryDevice), uint64(previous.RepositoryInode))
+		if readErr != nil {
+			return kernel.NewContent{}, readErr
+		}
+		id, idErr := change.NewObjectIDFromHex(previous.ObjectFormat, previous.Commit)
+		if idErr != nil {
+			return kernel.NewContent{}, idErr
+		}
+		parent = &change.ContentSource{Commit: id, Path: previous.Path}
 	}
 	var source change.ContentSource
 	if spec.Commit != "" {
@@ -100,9 +98,6 @@ func (daemon *Daemon) writeContentSource(ctx context.Context, spec kernel.NewCon
 }
 
 func (daemon *Daemon) readContentSource(ctx context.Context, content kernel.ContentRevision) (string, error) {
-	if content.Commit == "" {
-		return "", kernel.ErrConflict
-	}
 	repository, found, err := daemon.store.ContentRepository(ctx, content.ID, content.Revision)
 	if err != nil || !found {
 		if err == nil {
@@ -126,11 +121,8 @@ func (daemon *Daemon) readContentSource(ctx context.Context, content kernel.Cont
 }
 
 func (daemon *Daemon) contentBodySource(ctx context.Context, content kernel.ContentRevision) (kernel.ContentRevision, string, error) {
-	if content.Commit != "" {
-		body, err := daemon.readContentSource(ctx, content)
-		return content, body, err
-	}
-	return content, "", kernel.ErrConflict
+	body, err := daemon.readContentSource(ctx, content)
+	return content, body, err
 }
 
 func (daemon *Daemon) content(ctx context.Context, call api.Call) api.Reply {
