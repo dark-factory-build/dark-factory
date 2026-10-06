@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"io/fs"
 	"net"
 	"os"
 	"path/filepath"
@@ -660,8 +661,13 @@ func (client client) call(ctx context.Context, method string, params, output any
 	// The daemon deliberately rebinds this canonical socket during a clean
 	// handover. The path and its private parent remain the authority; the
 	// socket inode is generation-scoped and must not be pinned in a client
-	// that can outlive one daemon generation.
+	// that can outlive one daemon generation. Between the old daemon's unlink
+	// and the new one's bind the path is absent: that is a transport outage
+	// to retry, not an invalid client.
 	if err != nil {
+		if _, statErr := os.Lstat(client.socketPath); errors.Is(statErr, fs.ErrNotExist) {
+			return classifyTransport(ctx)
+		}
 		return ErrInvalidClient
 	}
 	connection, err := (&net.Dialer{}).DialContext(ctx, "unix", client.socketPath)
