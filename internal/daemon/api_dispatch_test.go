@@ -1313,7 +1313,7 @@ func TestDaemonServesTaskOnlyToLiveAttempt(t *testing.T) {
 	active := prepareActiveAttempt(t, fixture, 51)
 	done := fixture.serve(t)
 	task, err := active.client.Task(context.Background())
-	if err != nil || task.Task != "private" {
+	if err != nil || !strings.HasPrefix(task.Task, "private\n\nProject knowledge") {
 		t.Fatalf("attempt task = %+v, %v", task, err)
 	}
 	waitDispatch(t, done)

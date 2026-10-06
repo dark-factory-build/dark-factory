@@ -209,6 +209,7 @@ func runSupervisorCodexFixture() error {
 	if err != nil {
 		return err
 	}
+	task.Task, _, _ = strings.Cut(task.Task, "\n\nProject knowledge")
 	if task.Task == "capacity" {
 		// Codex's capacity warning, glyph and message styled apart; the real
 		// CLI then idles at its prompt.
