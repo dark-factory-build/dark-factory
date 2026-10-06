@@ -309,7 +309,9 @@ func (daemon *Daemon) release(project kernel.ProjectID, root string, source chan
 	}
 	delivery.Phase = "swap"
 	_ = daemon.writeRelease(ctx, project, &delivery)
-	if err := daemon.store.BackupTo(ctx, install.UpgradeBackupPath(daemon.home)); err != nil {
+	backup := install.UpgradeBackupPath(daemon.home)
+	_ = os.Remove(backup) // BackupTo refuses whatever this could not remove.
+	if err := daemon.store.BackupTo(ctx, backup); err != nil {
 		fail("backup: " + err.Error())
 		return
 	}
