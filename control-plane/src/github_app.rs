@@ -159,6 +159,10 @@ pub(crate) enum RefusalReason {
     /// Determinate: the same commit truncates every time.
     #[error("the commit's tree is too large for GitHub to return whole")]
     TreeTruncated,
+    /// GitHub created the commit, but did not verify it as authored by this
+    /// App. Its SHA alone is not sufficient evidence for publication.
+    #[error("the created commit is not verified by GitHub")]
+    UnverifiedCommit,
 }
 
 /// Which pre-execution rejection classes appeared. More than one can:
@@ -3228,7 +3232,7 @@ impl Authority {
         branch_exists: bool,
     ) -> Result<CommitResult, OperationError> {
         let tree = self.materialize_tree(token, request).await?;
-        let commit: GitObjectId = github_json_request(
+        let commit: GitCommitResponse = github_json_request(
             worker::Method::Post,
             &format!(
                 "https://api.github.com/repos/{}/{}/git/commits",
@@ -3243,7 +3247,7 @@ impl Authority {
             }),
         )
         .await?;
-        valid_sha(&commit.sha)?;
+        let commit = commit.verify()?;
         // Git objects are immutable. The only persistent publication is this
         // final non-forced ref write, so a failure cannot strand an empty
         // branch and a moved branch cannot be overwritten.
@@ -4243,6 +4247,30 @@ struct RefCreate<'a> {
 #[derive(Deserialize)]
 struct GitObjectId {
     sha: String,
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+#[derive(Debug, Deserialize)]
+struct GitCommitResponse {
+    sha: String,
+    verification: GitCommitVerification,
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+#[derive(Debug, Deserialize)]
+struct GitCommitVerification {
+    verified: bool,
+    reason: String,
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+impl GitCommitResponse {
+    fn verify(self) -> Result<Self, OperationError> {
+        valid_sha(&self.sha)?;
+        (self.verification.verified && self.verification.reason == "valid")
+            .then_some(self)
+            .ok_or(OperationError::Refused(RefusalReason::UnverifiedCommit))
+    }
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
@@ -6290,6 +6318,24 @@ mod tests {
         let mut spoofed = serde_json::to_value(&request).unwrap();
         spoofed["author"] = serde_json::json!({"name":"other", "email":"other@example.com"});
         assert!(serde_json::from_value::<PublishCommit>(spoofed).is_err());
+    }
+
+    #[test]
+    fn an_unverified_created_commit_is_refused_even_when_its_sha_is_valid() {
+        for verification in [
+            r#"{"verified":false,"reason":"valid"}"#,
+            r#"{"verified":true,"reason":"unsigned"}"#,
+        ] {
+            let response: GitCommitResponse = serde_json::from_str(&format!(
+                r#"{{"sha":"{}","verification":{verification}}}"#,
+                "a".repeat(40)
+            ))
+            .unwrap();
+            assert_eq!(
+                response.verify().unwrap_err(),
+                OperationError::Refused(RefusalReason::UnverifiedCommit)
+            );
+        }
     }
 
     #[test]

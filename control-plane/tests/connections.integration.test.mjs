@@ -66,7 +66,7 @@ test('two principals: callback, pagination, refresh, replay, grants and revocati
         if (replacedPath) { assert.equal(request.headers.get('authorization'), 'Bearer app-2-fixture-installation-token'); return json({}, 404); }
         if (url.pathname === '/repos/team/shared/git/commits' && request.method === 'POST') {
           publishedCommits.push(await request.json());
-          return json({ sha: 'c'.repeat(40) }, 201);
+          return json({ sha: 'c'.repeat(40), verification: { verified: true, reason: 'valid' } }, 201);
         }
         if (url.pathname.startsWith('/repos/team/shared/git/commits/')) return json({ message: 'base', tree: { sha: 'd'.repeat(40) }, parents: [] });
         if (url.pathname === '/repos/team/shared/git/trees' && request.method === 'POST') return json({ sha: 'e'.repeat(40) }, 201);
