@@ -185,3 +185,48 @@ func TestOverseerWakeInstructionFallsBackToFull(t *testing.T) {
 		t.Fatalf("targeted body = %q", body)
 	}
 }
+
+// A succeeded intake task with a diff is factoryd's to publish; any other
+// success still gets the overseer's one look.
+func TestOverseerWakeSkipsPublishedIntakeSuccess(t *testing.T) {
+	for _, intake := range []bool{false, true} {
+		ctx := context.Background()
+		succeeded, _ := NewSuccessProposal("done")
+		store, finalizing := finalizingReleasedRun(t, RoleWorker, VerificationNone, succeeded)
+		defer store.Close()
+		change, _, err := store.Change(ctx, *finalizing.ChangeID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		moved, _ := NewCommitID(change.Selection.format, bytes.Repeat([]byte{0xd2}, change.Selection.format.oidLength()))
+		settlement, _ := NewRetainedChangeSettlement(change.Revision, &moved)
+		if _, err := store.FinalizeWorkerRun(ctx, finalizing.ID, finalizing.Revision, settlement, mustTime(t, 80)); err != nil {
+			t.Fatal(err)
+		}
+		if intake {
+			// The binding is all the rule reads; its acceptance row is not.
+			for _, statement := range []string{`PRAGMA foreign_keys = OFF`, `INSERT INTO intake_task_bindings(task_id, acceptance_id) VALUES (?, zeroblob(16))`, `PRAGMA foreign_keys = ON`} {
+				args := []any{finalizing.TaskID.Bytes()}[:strings.Count(statement, "?")]
+				if _, err := store.writer.ExecContext(ctx, statement, args...); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+		overseer, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 3), ProjectID: finalizing.ProjectID, Name: "overseer", Role: RoleOrchestrator, Provider: ProviderCodex, ToolBudgetLimit: 2}, mustTime(t, 82))
+		if err != nil {
+			t.Fatal(err)
+		}
+		policy, after, instruction := IdleStandingInstruction, uint32(1), "Supervise."
+		if _, err := store.UpdateAgent(ctx, overseer.ID, overseer.Revision, AgentPatch{IdlePolicy: &policy, IdleAfterSeconds: &after, IdleInstruction: &instruction}, mustTime(t, 83)); err != nil {
+			t.Fatal(err)
+		}
+		head := hex.EncodeToString(moved.Bytes())
+		pr := ProductionPullRequest{Number: 7, Title: "Ship", URL: "https://github.com/example/factory/pull/7", Head: head, Branch: "factory/" + change.ID.String()[:12], Base: "main", State: "open", Review: ProductionReview{Head: head, State: "unknown"}}
+		if err := store.RecordPublication(ctx, finalizing.ProjectID, finalizing.TaskID, "example/factory", pr, mustTime(t, 84)); err != nil {
+			t.Fatal(err)
+		}
+		if bodies := wakeBodies(t, store, 1_000_000); len(bodies) != map[bool]int{false: 1, true: 0}[intake] {
+			t.Fatalf("intake=%v wake = %q", intake, bodies)
+		}
+	}
+}

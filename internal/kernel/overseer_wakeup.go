@@ -27,7 +27,9 @@ const (
 // question, finished work not yet published or corrected behind its open pull
 // request, a pull request factoryd escalated while it stays open at the
 // escalated head); a succeeded worker task, and a Change factoryd could not
-// publish (it has no pull request), need one look. It is due when no
+// publish (it has no pull request), need one look. An accepted intake task
+// that succeeded with a diff needs none: factoryd publishes it, and the
+// Change item covers a publication that never happens. It is due when no
 // carrier was enqueued since that version, or, while it persists, when at most
 // three were and the latest is OverseerRewakeAfter old: one wake and three
 // re-wakes per item version, once the newest due item is overseerWakeSettle
@@ -37,6 +39,8 @@ item AS (
 	SELECT t.id, t.updated_at_ms AS version, t.status IN ('blocked', 'failed') AS persistent, '' AS detail
 	FROM tasks AS t JOIN agents AS a ON a.id = t.assigned_agent_id
 	WHERE t.project_id = ?1 AND a.role = 'worker' AND t.status IN ('succeeded', 'blocked', 'failed')
+	  AND NOT (t.status = 'succeeded' AND EXISTS (SELECT 1 FROM intake_task_bindings AS b WHERE b.task_id = t.id)
+	      AND EXISTS (SELECT 1 FROM changes AS c WHERE c.task_id = t.id AND c.head_commit <> c.base_commit))
 	UNION ALL SELECT r.task_id, h.created_at_ms, 1, '' FROM human_requests AS h JOIN runs AS r ON r.id = h.run_id
 	WHERE r.project_id = ?1 AND r.role = 'worker' AND h.status IN ('open', 'delivering', 'delivery_unknown')
 	UNION ALL SELECT c.task_id, c.updated_at_ms, 1, '' FROM changes AS c JOIN tasks AS t ON t.id = c.task_id
