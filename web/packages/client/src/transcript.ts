@@ -1,4 +1,4 @@
-import { malformed, normalizeBoundary } from "./errors.js";
+import { malformed, normalizeBoundary, ProtocolError } from "./errors.js";
 
 // The transcript domain has no generation. A durable pairing must survive a
 // site deploy: the stored non-exportable key is what persists, and it signs
@@ -59,4 +59,14 @@ export function buildAuthTranscript(input: AuthTranscriptInput): Uint8Array {
       { value: fixed(input.client_id, 16), fixed: 16 }, { value: text(input.host) }, { value: text(input.origin) },
     ]);
   });
+}
+
+/** Verify the raw IEEE-P1363 P-256 signature used by the browser boundary. */
+export async function verifyP256Signature(publicKeySEC1: Uint8Array, signature: Uint8Array, signed: Uint8Array): Promise<boolean> {
+  if (!(publicKeySEC1 instanceof Uint8Array) || !(signature instanceof Uint8Array) || !(signed instanceof Uint8Array)) throw new ProtocolError("malformed");
+  if (publicKeySEC1.length !== 65 || publicKeySEC1[0] !== 4 || signature.length !== 64) return false;
+  try {
+    const key = await globalThis.crypto.subtle.importKey("raw", publicKeySEC1 as unknown as BufferSource, { name: "ECDSA", namedCurve: "P-256" }, false, ["verify"]);
+    return await globalThis.crypto.subtle.verify({ name: "ECDSA", hash: "SHA-256" }, key, signature as unknown as BufferSource, signed as unknown as BufferSource);
+  } catch { return false; }
 }

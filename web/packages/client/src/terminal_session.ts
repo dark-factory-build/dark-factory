@@ -8,7 +8,6 @@ import {
 import { ProtocolError } from "./errors.js";
 import { MAX_SQLITE_INTEGER, MAX_TERMINAL_COLS, MAX_TERMINAL_PAYLOAD, MAX_TERMINAL_ROWS, TERMINAL_LEASE_RENEW_INTERVAL_MS } from "./manifest.js";
 import { decodeTerminalOutput, encodeTerminalInput, type TerminalFrame } from "./terminal.js";
-import { hexBytes } from "./transcript.js";
 import type { BrowserTimer } from "./session.js";
 
 export type TerminalOutput = Readonly<{ sequence: bigint; payload: Uint8Array }>;
@@ -39,6 +38,7 @@ export type TerminalOptions = Readonly<{
 export interface TerminalHandle {
   attach(): Promise<TerminalAttachOutcome>;
   acquireInput(): Promise<TerminalLease>;
+  releaseInput(): Promise<TerminalLeaseResult>;
   sendInput(bytes: Uint8Array): Promise<TerminalInputResult>;
   resize(rows: number, cols: number): Promise<{ sessionId: string; generation: bigint; rows: number; cols: number }>;
   detach(): Promise<void>;
@@ -612,9 +612,8 @@ export class SessionErrorLikeError extends Error {
 export function terminalControlFrame(frame: ServerControlFrame): frame is TerminalServerControlFrame { return frame.type.startsWith("TERMINAL_") && frame.type !== "TERMINAL_TARGET"; }
 export function decodeTerminalServer(data: Uint8Array): TerminalFrame { return decodeTerminalOutput(data); }
 export function hexSessionID(value: string): Uint8Array {
-  const result = hexBytes(value, 16);
-  if (result.every((byte) => byte === 0)) throw new ProtocolError("malformed");
-  return result;
+  if (!/^[0-9a-f]{32}$/.test(value) || /^0+$/.test(value)) throw new ProtocolError("malformed");
+  const result = new Uint8Array(16); for (let index = 0; index < 16; index++) result[index] = Number.parseInt(value.slice(index * 2, index * 2 + 2), 16); return result;
 }
 function sameBytes(a: Uint8Array, b: Uint8Array): boolean { return a.length === b.length && a.every((value, index) => value === b[index]); }
 function frozenAttached(value: TerminalAttached): TerminalAttached { return Object.freeze({ ...value }); }

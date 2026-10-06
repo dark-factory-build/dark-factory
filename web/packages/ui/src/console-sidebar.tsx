@@ -4,7 +4,7 @@ import type { FactoryEditView, FactoryHumanRequestView } from "./factory-app-con
 import type { FactoryGitHubView } from "./factory-settings-coordinator.js";
 import { rankLabel } from "./console-screens.js";
 import { AgentSprite } from "./factory-scene/factory-scene.js";
-import { agentStatus, agentCurrentTask, agentActivity, dateLabel } from "./console-view.js";
+import { agentStatus, agentCurrentTask, agentActivity } from "./console-view.js";
 import { AnswerControls } from "./console-interactions.js";
 import type { FloorAppearance } from "./floor-appearance.js";
 import type { PublishedRelease, RuntimeBuild } from "./production-data.js";
@@ -126,6 +126,13 @@ export function AgentPanel({
     </section>
   );
 }
+
+function dateLabel(value: bigint | undefined): string {
+  if (value === undefined || value > BigInt(Number.MAX_SAFE_INTEGER)) return "DATE UNAVAILABLE";
+  const date = new Date(Number(value));
+  return Number.isNaN(date.valueOf()) ? "DATE UNAVAILABLE" : date.toISOString().replace("T", " ").replace(".000Z", " UTC");
+}
+
 
 function pullRequests(value: string): readonly Readonly<{ href: string; label: string }>[] {
   const found = new Map<string, string>();

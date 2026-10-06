@@ -13,6 +13,10 @@ export type TerminalFrame = {
 export function encodeTerminalInput(sessionId: Uint8Array, sequence: bigint, leaseGeneration: bigint, payload: Uint8Array): Uint8Array {
   return normalizeBoundary(() => encode({ direction: "input", sessionId, sequence, leaseGeneration, payload }));
 }
+export function encodeTerminalOutput(sessionId: Uint8Array, sequence: bigint, payload: Uint8Array): Uint8Array {
+  return normalizeBoundary(() => encode({ direction: "output", sessionId, sequence, leaseGeneration: 0n, payload }));
+}
+export function decodeTerminalInput(data: Uint8Array): TerminalFrame { return normalizeBoundary(() => decode(data, "input")); }
 export function decodeTerminalOutput(data: Uint8Array): TerminalFrame { return normalizeBoundary(() => decode(data, "output")); }
 
 function encode(frame: TerminalFrame): Uint8Array {

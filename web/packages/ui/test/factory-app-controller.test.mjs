@@ -125,9 +125,9 @@ test("private issue source updates retain other sources and invalidate the revie
   context.controller.start();
   context.emitStatus("ready");
   context.emitState(fixtureState);
-  await context.controller.settings.loadIntake(sourceA.project_id);
-  await context.controller.settings.intakeAction(sourceA.project_id, { action: "preview", source_id: sourceA.id, page: 1 });
-  await context.controller.settings.intakeAction(sourceA.project_id, { action: "update", source_id: sourceA.id, expected_revision: sourceA.revision, configuration: { repository: revisedA.repository, target_repository_id: revisedA.target_repository_id, overseer_agent_id: revisedA.overseer_agent_id, label: revisedA.label, policy: revisedA.policy, trusted_authors: [], poll_seconds: 60, admission_limit: 25 } });
+  await context.controller.loadIntake(sourceA.project_id);
+  await context.controller.intakeAction(sourceA.project_id, { action: "preview", source_id: sourceA.id, page: 1 });
+  await context.controller.intakeAction(sourceA.project_id, { action: "update", source_id: sourceA.id, expected_revision: sourceA.revision, configuration: { repository: revisedA.repository, target_repository_id: revisedA.target_repository_id, overseer_agent_id: revisedA.overseer_agent_id, label: revisedA.label, policy: revisedA.policy, trusted_authors: [], poll_seconds: 60, admission_limit: 25 } });
   const result = context.latest().intake.get(sourceA.project_id);
   assert.deepEqual(result.sources.map((source) => source.id), [sourceA.id, sourceB.id]);
   assert.equal(result.sources[0].revision, revisedA.revision);
@@ -176,7 +176,7 @@ test("a browser reconnect clears private GitHub observations", async () => {
   const context = harness({ githubConnection: async (request) => request.action === "connect" ? { state: "ok", authorization } : { state: "ok", status: { connection_id: "github", state: "connected", repositories: [] } } });
   context.controller.start();
   context.emitStatus("ready");
-  await context.controller.settings.githubConnection({ action: "connect" });
+  await context.controller.githubConnection({ action: "connect" });
   assert.equal(context.latest().github.result.authorization.connection_id, "github");
   context.emitStatus("connecting");
   assert.equal(context.latest().github.result, undefined);
@@ -902,7 +902,7 @@ test("account discovery links once then refreshes its provider view", async () =
   });
   context.controller.start();
   context.emitStatus("ready");
-  await context.controller.settings.loadAccounts();
+  await context.controller.loadAccounts();
   assert.deepEqual(context.latest().accounts, [account]);
   await context.controller.linkAccount({ provider: "codex", home: account.home, label: account.label });
   assert.deepEqual(linked, [{ provider: "codex", home: account.home, label: account.label }]);
@@ -919,7 +919,7 @@ test("a remote invitation is offered, stored, dismissed, and its failure reporte
   context.controller.start();
   context.emitStatus("ready");
   assert.equal(context.latest().remoteInviteAllowed, true);
-  await context.controller.settings.inviteRemote();
+  await context.controller.inviteRemote();
   assert.deepEqual(context.latest().remoteInvite, { link: remoteInvite.link, svg: remoteInvite.svg, expiresAtMs: remoteInvite.expiresAtMs });
   assert.equal(context.latest().remoteInviteError, undefined);
   context.controller.dismissRemoteInvite();
@@ -938,7 +938,7 @@ test("a remote invitation is offered, stored, dismissed, and its failure reporte
   const failing = harness({ inviteRemote: async () => { throw new SessionError("not_found"); } });
   failing.controller.start();
   failing.emitStatus("ready");
-  await failing.controller.settings.inviteRemote();
+  await failing.controller.inviteRemote();
   assert.equal(failing.latest().remoteInvite, undefined);
   assert.equal(failing.latest().remoteInviteError, "not_found");
 });
@@ -949,8 +949,8 @@ test("one invitation is minted at a time and a dropped connection leaves no stal
   const context = harness({ inviteRemote: async () => { mints += 1; await release.promise; return remoteInvite; } });
   context.controller.start();
   context.emitStatus("ready");
-  const first = context.controller.settings.inviteRemote();
-  await context.controller.settings.inviteRemote();
+  const first = context.controller.inviteRemote();
+  await context.controller.inviteRemote();
   assert.equal(mints, 1, "a second press while one mint is in flight is ignored");
   release.resolve();
   await first;
@@ -1064,9 +1064,9 @@ test("paired devices are listed on request, revoked once, then reread", async ()
   context.controller.start();
   context.emitStatus("ready");
   assert.equal(context.latest().ownClientId, "60".repeat(16));
-  await context.controller.settings.loadDevices();
+  await context.controller.loadDevices();
   assert.deepEqual(context.latest().devices, { clients: [phone], more: false });
-  await context.controller.settings.revokeDevice({ clientId: phone.clientId, expectedRevision: 1n });
+  await context.controller.revokeDevice({ clientId: phone.clientId, expectedRevision: 1n });
   assert.deepEqual(revoked, [{ clientId: phone.clientId, expectedRevision: 1n }]);
   assert.equal(listed.length, 2, "a revocation rereads the list");
   assert.deepEqual(context.latest().devices, { clients: [], more: false });
@@ -1074,7 +1074,7 @@ test("paired devices are listed on request, revoked once, then reread", async ()
   const failing = harness({ revokeBrowserClient: async () => { throw new SessionError("stale"); } });
   failing.controller.start();
   failing.emitStatus("ready");
-  await failing.controller.settings.revokeDevice({ clientId: phone.clientId, expectedRevision: 1n });
+  await failing.controller.revokeDevice({ clientId: phone.clientId, expectedRevision: 1n });
   assert.equal(failing.latest().devicesError, "stale");
 });
 
@@ -1089,14 +1089,14 @@ test("repository mutation refusal survives its successful readback", async () =>
   const request = { action: "enabled", id: "61".repeat(16), projectId, expectedRevision: 1n, enabled: false };
   context.controller.start();
   context.emitStatus("ready");
-  await context.controller.settings.mutateRepository(request);
+  await context.controller.mutateRepository(request);
   assert.equal(context.latest().repositoryErrors.get(projectId), "stale");
 
-  await context.controller.settings.loadRepositories(projectId);
+  await context.controller.loadRepositories(projectId);
   assert.equal(context.latest().repositoryErrors.get(projectId), "stale");
 
   refuse = false;
-  await context.controller.settings.mutateRepository(request);
+  await context.controller.mutateRepository(request);
   assert.equal(context.latest().repositoryErrors.has(projectId), false);
 });
 
@@ -1107,10 +1107,10 @@ test("a successful repository retry clears only its own read error", async () =>
   const context = harness({ getRepositories: async () => { if (refuseRead) throw new SessionError("not_found"); return []; } });
   context.controller.start();
   context.emitStatus("ready");
-  await context.controller.settings.loadRepositories(projectId);
+  await context.controller.loadRepositories(projectId);
   assert.equal(context.latest().repositoryErrors.get(projectId), "not_found");
   refuseRead = false;
-  await context.controller.settings.loadRepositories(projectId);
+  await context.controller.loadRepositories(projectId);
   assert.equal(context.latest().repositoryErrors.has(projectId), false);
 });
 
@@ -1124,11 +1124,11 @@ test("explicit repository readiness survives without an unchecked readback", asy
     mutateRepository: async (request) => ({ ...repository, fetch_state: request.action === "fetch" ? "ready" : "unchecked", publication_state: request.action === "github" ? "ready" : "unchecked" }),
   });
   context.controller.start(); context.emitStatus("ready");
-  await context.controller.settings.loadRepositories(projectId);
-  await context.controller.settings.mutateRepository({ action: "fetch", projectId, repositoryId: repository.id });
+  await context.controller.loadRepositories(projectId);
+  await context.controller.mutateRepository({ action: "fetch", projectId, repositoryId: repository.id });
   assert.equal(reads, 1);
   assert.equal(context.latest().repositories.get(projectId)[0].fetch_state, "ready");
-  await context.controller.settings.mutateRepository({ action: "github", projectId, repositoryId: repository.id });
+  await context.controller.mutateRepository({ action: "github", projectId, repositoryId: repository.id });
   assert.equal(reads, 1);
   assert.equal(context.latest().repositories.get(projectId)[0].fetch_state, "ready");
   assert.equal(context.latest().repositories.get(projectId)[0].publication_state, "ready");
@@ -1143,9 +1143,9 @@ test("failed source preview cannot reuse another source's reviewed candidates or
     return new Promise((_, reject) => { rejectPreview = reject; });
   } });
   context.controller.start(); context.emitStatus("ready"); context.emitState(fixtureState);
-  await context.controller.settings.intakeAction(projectId, { action: "preview", source_id: "a1".repeat(16), page: 1 });
+  await context.controller.intakeAction(projectId, { action: "preview", source_id: "a1".repeat(16), page: 1 });
   assert.equal(context.latest().intake.get(projectId).candidates.length, 1);
-  const pending = context.controller.settings.intakeAction(projectId, { action: "preview", source_id: "a2".repeat(16), page: 1 });
+  const pending = context.controller.intakeAction(projectId, { action: "preview", source_id: "a2".repeat(16), page: 1 });
   assert.equal(context.latest().intake.get(projectId).candidates, undefined);
   rejectPreview(new Error("unavailable")); await pending;
   const result = context.latest().intake.get(projectId);
@@ -1157,8 +1157,8 @@ test("failed source preview cannot reuse another source's reviewed candidates or
  test("disconnect removes private repository and intake settings from the snapshot", async () => {
   const context = harness({ getRepositories: async () => [{ root: "/private/checkout" }], intake: async () => ({ sources: [{ repository: "private/source" }] }) });
   context.controller.start(); context.emitStatus("ready");
-  await context.controller.settings.loadRepositories("project");
-  await context.controller.settings.loadIntake("project");
+  await context.controller.loadRepositories("project");
+  await context.controller.loadIntake("project");
   assert.equal(context.latest().repositories.size, 1);
   assert.equal(context.latest().intake.size, 1);
   context.emitStatus("closed");
@@ -1179,7 +1179,7 @@ test("registering a checkout checks fetch and publication separately without los
     },
   });
   context.controller.start(); context.emitStatus("ready");
-  await context.controller.settings.mutateRepository({ action: "add", projectId, name: repository.name, root: repository.root, baseRef: repository.base_ref });
+  await context.controller.mutateRepository({ action: "add", projectId, name: repository.name, root: repository.root, baseRef: repository.base_ref });
   assert.deepEqual(calls, ["add", "fetch", "github"]);
   assert.equal(context.latest().repositories.get(projectId)[0].fetch_state, "setup_required");
   assert.equal(context.latest().repositories.get(projectId)[0].publication_state, "ready");
@@ -1194,7 +1194,7 @@ test("registration finishing after disconnect cannot check remote access in a ne
     return new Promise((resolve) => { finish = resolve; });
   } });
   context.controller.start(); context.emitStatus("ready");
-  const pending = context.controller.settings.mutateRepository({ action: "add", projectId, name: "Code", root: "/fixture/code", baseRef: "release" });
+  const pending = context.controller.mutateRepository({ action: "add", projectId, name: "Code", root: "/fixture/code", baseRef: "release" });
   context.emitStatus("disconnected");
   finish({ id: "61".repeat(16), revision: 1n });
   await pending;

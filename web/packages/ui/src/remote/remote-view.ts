@@ -4,7 +4,7 @@ import type {
   StateView,
   TaskItem,
 } from "@dark-factory/client";
-import { orderTasksForHome, shortRemoteID } from "../console-view.js";
+import { orderTasksForHome } from "../console-view.js";
 
 /**
  * The remote console shows one factory's connection state as a glyph, in the
@@ -142,4 +142,6 @@ export function remoteProjectGroups(state: StateView): readonly RemoteProjectGro
   }));
 }
 
-export { shortRemoteID };
+export function shortRemoteID(value: string): string {
+  return value.slice(0, 8);
+}

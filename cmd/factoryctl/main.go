@@ -364,11 +364,11 @@ func runWithDependencies(ctx context.Context, args []string, getenv func(string)
 	if len(args) > 0 && args[0] == "feedback" {
 		return runFeedback(ctx, args[1:], stdout, stderr, opener)
 	}
-	if len(args) == 1 && args[0] == "--version" {
+	if slices.Equal(args, []string{"--version"}) {
 		_, _ = fmt.Fprintf(stdout, "factoryctl %s\n", buildinfo.Current().Version())
 		return 0
 	}
-	if len(args) == 1 && args[0] == "--build-identity" {
+	if slices.Equal(args, []string{"--build-identity"}) {
 		if err := buildinfo.Current().WriteJSON(stdout); err != nil {
 			return exitFailure
 		}
@@ -645,17 +645,16 @@ func parse(args []string) (attemptCommand, bool, bool) {
 	if len(args) == 1 && helpFlag(args[0]) {
 		return attemptCommand{}, true, true
 	}
-	if len(args) == 3 && (args[0] == "init" || args[0] == "doctor") && args[1] == "--home" {
-		if validHomeArg(args[2]) {
-			kind := commandInit
-			if args[0] == "doctor" {
-				kind = commandDoctor
-			}
-			return attemptCommand{kind: kind, home: args[2]}, false, true
-		}
-	}
 	if len(args) == 2 && (args[0] == "init" || args[0] == "doctor") && helpFlag(args[1]) {
 		return attemptCommand{}, true, true
+	}
+	if len(args) >= 1 && (args[0] == "init" || args[0] == "doctor") {
+		values, ok := pairedFlagValues(args[1:], false, "--home")
+		kind := commandInit
+		if args[0] == "doctor" {
+			kind = commandDoctor
+		}
+		return attemptCommand{kind: kind, home: values["--home"]}, false, ok && validHomeArg(values["--home"])
 	}
 	if len(args) >= 1 && args[0] == "service" {
 		return parseServiceCommand(args)
@@ -678,11 +677,13 @@ func parse(args []string) (attemptCommand, bool, bool) {
 		if len(args) == 2 && args[1] == "list" {
 			return attemptCommand{kind: commandHumanList}, false, true
 		}
-		if len(args) == 10 && args[1] == "reply" && args[2] == "--operation-id" && validHumanRequestKey(args[3]) && args[4] == "--request" && validHumanRequestKey(args[5]) && args[6] == "--revision" && validRevision(args[7]) && args[8] == "--reply" && validOperatorText(args[9], 1, 8192) {
-			revision, _ := strconv.ParseUint(args[7], 10, 64)
-			return attemptCommand{kind: commandHumanReply, operationID: args[3], id: args[5], expectedRevision: revision, text: args[9]}, false, true
+		if len(args) < 2 || args[1] != "reply" {
+			return attemptCommand{}, false, false
 		}
-		return attemptCommand{}, false, false
+		values, ok := pairedFlagValues(args[2:], false, "--operation-id", "--request", "--revision", "--reply")
+		revision, _ := strconv.ParseUint(values["--revision"], 10, 64)
+		ok = ok && validHumanRequestKey(values["--operation-id"]) && validHumanRequestKey(values["--request"]) && validRevision(values["--revision"]) && validOperatorText(values["--reply"], 1, 8192)
+		return attemptCommand{kind: commandHumanReply, operationID: values["--operation-id"], id: values["--request"], expectedRevision: revision, text: values["--reply"]}, false, ok
 	}
 	if len(args) >= 1 && args[0] == "remote" {
 		return parseRemote(args)
@@ -743,41 +744,29 @@ func parse(args []string) (attemptCommand, bool, bool) {
 			return attemptCommand{kind: commandAttemptTask}, false, true
 		}
 	case "source":
-		if len(args) == 4 && args[2] == "--task" && validHumanRequestKey(args[3]) {
-			return attemptCommand{kind: commandAttemptSource, id: args[3]}, false, true
-		}
+		values, ok := pairedFlagValues(args[2:], true, "--task")
+		return attemptCommand{kind: commandAttemptSource, id: values["--task"]}, false, ok && validHumanRequestKey(values["--task"])
 	case "succeed":
-		if len(args) == 2 {
-			return attemptCommand{kind: commandSucceed}, false, true
-		}
-		if len(args) == 4 && args[2] == "--result" && strings.TrimSpace(args[3]) != "" && utf8.ValidString(args[3]) {
-			return attemptCommand{kind: commandSucceed, text: args[3]}, false, true
-		}
+		values, ok := pairedFlagValues(args[2:], true, "--result")
+		return attemptCommand{kind: commandSucceed, text: values["--result"]}, false, ok && (len(args) == 2 || strings.TrimSpace(values["--result"]) != "")
 	case "block":
-		if len(args) == 4 && args[2] == "--detail" && args[3] != "" && utf8.ValidString(args[3]) {
-			return attemptCommand{kind: commandBlock, text: args[3]}, false, true
-		}
+		values, ok := pairedFlagValues(args[2:], true, "--detail")
+		return attemptCommand{kind: commandBlock, text: values["--detail"]}, false, ok && values["--detail"] != ""
 	case "fail":
-		if len(args) == 2 {
-			return attemptCommand{kind: commandFail}, false, true
-		}
-		if len(args) == 4 && args[2] == "--detail" && utf8.ValidString(args[3]) {
-			return attemptCommand{kind: commandFail, text: args[3]}, false, true
-		}
+		values, ok := pairedFlagValues(args[2:], true, "--detail")
+		return attemptCommand{kind: commandFail, text: values["--detail"]}, false, ok
 	case "request-human":
-		if len(args) >= 6 && len(args)%2 == 0 && args[2] == "--idempotency-key" && validHumanRequestKey(args[3]) && args[4] == "--question" && validOperatorText(args[5], 1, 8192) {
-			var options []string
-			for i := 6; i < len(args); i += 2 {
-				if args[i] != "--option" {
-					return attemptCommand{}, false, false
-				}
-				options = append(options, args[i+1])
-			}
-			if kernel.ValidateHumanOptions(options) != nil {
-				return attemptCommand{}, false, false
-			}
-			return attemptCommand{kind: commandRequestHuman, idempotencyKey: args[3], text: args[5], options: options}, false, true
-		}
+		// The repeatable options follow the fixed key and question.
+		head := min(len(args), 6)
+		values, ok := pairedFlagValues(args[2:head], true, "--idempotency-key", "--question")
+		command := attemptCommand{kind: commandRequestHuman, idempotencyKey: values["--idempotency-key"], text: values["--question"]}
+		flags, _, _ := newOnceFlagSet("request-human")
+		flags.Func("option", "", func(value string) error {
+			command.options = append(command.options, value)
+			return nil
+		})
+		ok = ok && parsePairedFlags(flags, args[head:]) && validHumanRequestKey(command.idempotencyKey) && validOperatorText(command.text, 1, 8192) && kernel.ValidateHumanOptions(command.options) == nil
+		return command, false, ok
 	case "turn-complete":
 		if len(args) == 2 {
 			return attemptCommand{kind: commandTurnComplete}, false, true
@@ -830,12 +819,16 @@ func parse(args []string) (attemptCommand, bool, bool) {
 			}
 			return command, false, true
 		}
-		if len(args) == 9 && args[2] == "ask" && args[3] == "--task" && validHumanRequestKey(args[4]) && args[5] == "--idempotency-key" && validHumanRequestKey(args[6]) && args[7] == "--question" && validOperatorText(args[8], 1, 2048) {
-			return attemptCommand{kind: commandPeerAsk, id: args[4], idempotencyKey: args[6], text: args[8]}, false, true
+		if len(args) >= 3 && args[2] == "ask" {
+			values, ok := pairedFlagValues(args[3:], true, "--task", "--idempotency-key", "--question")
+			ok = ok && validHumanRequestKey(values["--task"]) && validHumanRequestKey(values["--idempotency-key"]) && validOperatorText(values["--question"], 1, 2048)
+			return attemptCommand{kind: commandPeerAsk, id: values["--task"], idempotencyKey: values["--idempotency-key"], text: values["--question"]}, false, ok
 		}
-		if len(args) == 11 && args[2] == "answer" && args[3] == "--question" && validHumanRequestKey(args[4]) && args[5] == "--revision" && validRevision(args[6]) && args[7] == "--idempotency-key" && validHumanRequestKey(args[8]) && args[9] == "--answer" && validOperatorText(args[10], 1, 2048) {
-			revision, _ := strconv.ParseUint(args[6], 10, 64)
-			return attemptCommand{kind: commandPeerAnswer, id: args[4], expectedRevision: revision, idempotencyKey: args[8], text: args[10]}, false, true
+		if len(args) >= 3 && args[2] == "answer" {
+			values, ok := pairedFlagValues(args[3:], true, "--question", "--revision", "--idempotency-key", "--answer")
+			revision, _ := strconv.ParseUint(values["--revision"], 10, 64)
+			ok = ok && validHumanRequestKey(values["--question"]) && validRevision(values["--revision"]) && validHumanRequestKey(values["--idempotency-key"]) && validOperatorText(values["--answer"], 1, 2048)
+			return attemptCommand{kind: commandPeerAnswer, id: values["--question"], expectedRevision: revision, idempotencyKey: values["--idempotency-key"], text: values["--answer"]}, false, ok
 		}
 	case "terminal":
 		if len(args) >= 3 && args[2] == "observe" && (len(args)-3)%2 == 0 {
@@ -880,9 +873,8 @@ func parse(args []string) (attemptCommand, bool, bool) {
 			}
 		}
 	case "send-back":
-		if len(args) == 6 && args[2] == "--task" && validHumanRequestKey(args[3]) && args[4] == "--note" && validOperatorText(args[5], 1, 8192) {
-			return attemptCommand{kind: commandSendBack, id: args[3], text: args[5]}, false, true
-		}
+		values, ok := pairedFlagValues(args[2:], true, "--task", "--note")
+		return attemptCommand{kind: commandSendBack, id: values["--task"], text: values["--note"]}, false, ok && validHumanRequestKey(values["--task"]) && validOperatorText(values["--note"], 1, 8192)
 	}
 	return attemptCommand{}, false, false
 }
@@ -1117,6 +1109,24 @@ func parsePairedFlags(flags *flag.FlagSet, args []string) bool {
 		}
 	}
 	return flags.Parse(args) == nil && flags.NArg() == 0
+}
+
+// pairedFlagValues parses args with parsePairedFlags into the values of the
+// named flags, each of which may be given at most once and, when ordered, only
+// in the order of names: the attempt protocol keeps its fixed argument order.
+func pairedFlagValues(args []string, ordered bool, names ...string) (map[string]string, bool) {
+	flags, _, _ := newOnceFlagSet("")
+	values, next := map[string]string{}, 0
+	for index, name := range names {
+		flags.Func(name[2:], "", func(value string) error {
+			if _, given := values[name]; given || ordered && index < next {
+				return errors.New("flag out of order or specified more than once")
+			}
+			values[name], next = value, index+1
+			return nil
+		})
+	}
+	return values, parsePairedFlags(flags, args)
 }
 
 func serviceConfigFor(command attemptCommand) install.ServiceConfig {
@@ -1470,7 +1480,7 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 			return attemptCommand{}, false, false
 		}
 		if action == "fetch" || action == "github" {
-			return command, false, len(args) == 5 && args[3] == "--id" && command.repository != ""
+			return command, false, len(args) == 5 && command.repository != ""
 		}
 		if action == "list" {
 			return command, false, command.project != ""
@@ -1481,8 +1491,9 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 		return command, false, command.repository != "" && command.expectedRevision != 0
 	}
 	if len(args) >= 1 && args[0] == "worker" {
-		if len(args) == 4 && args[1] == "operation" && args[2] == "--operation-id" && validHumanRequestKey(args[3]) {
-			return attemptCommand{kind: commandWorkerOperation, operationID: args[3]}, false, true
+		if len(args) >= 2 && args[1] == "operation" {
+			values, ok := pairedFlagValues(args[2:], false, "--operation-id")
+			return attemptCommand{kind: commandWorkerOperation, operationID: values["--operation-id"]}, false, ok && validHumanRequestKey(values["--operation-id"])
 		}
 		command, help, ok := parseOverseer(append([]string{"overseer"}, args...))
 		command.operatorControl = true
@@ -1509,27 +1520,20 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 			return attemptCommand{}, true, true
 		}
 	}
-	if args[0] == "dispatch" {
-		if len(args) == 2 && (args[1] == "on" || args[1] == "off") {
-			return attemptCommand{kind: commandDispatch, enabled: args[1] == "on"}, false, true
-		}
-		if len(args) == 4 && (args[1] == "on" || args[1] == "off") && args[2] == "--revision" {
-			revision, ok := parseRevision(args[3])
-			if ok {
-				return attemptCommand{kind: commandDispatch, enabled: args[1] == "on", expectedRevision: revision}, false, true
-			}
-		}
-		return attemptCommand{}, false, false
+	if len(args) >= 2 && args[0] == "dispatch" {
+		values, ok := pairedFlagValues(args[2:], false, "--revision")
+		revision, revisionOK := parseRevision(values["--revision"])
+		_, given := values["--revision"]
+		return attemptCommand{kind: commandDispatch, enabled: args[1] == "on", expectedRevision: revision}, false, ok && (args[1] == "on" || args[1] == "off") && (revisionOK || !given)
 	}
 	if args[0] == "capacity" {
-		if len(args) == 5 && args[1] == "--workers" && args[3] == "--revision" {
-			workers, workersOK := parseRevision(args[2])
-			revision, revisionOK := parseRevision(args[4])
-			if workersOK && workers >= 1 && workers <= uint64(kernel.MaxFactoryCapacity) && revisionOK {
-				return attemptCommand{kind: commandCapacity, capacity: uint16(workers), expectedRevision: revision}, false, true
-			}
+		values, ok := pairedFlagValues(args[1:], false, "--workers", "--revision")
+		workers, workersOK := parseRevision(values["--workers"])
+		revision, revisionOK := parseRevision(values["--revision"])
+		if !ok || !workersOK || workers > uint64(kernel.MaxFactoryCapacity) || !revisionOK {
+			return attemptCommand{}, false, false
 		}
-		return attemptCommand{}, false, false
+		return attemptCommand{kind: commandCapacity, capacity: uint16(workers), expectedRevision: revision}, false, true
 	}
 	if len(args) == 2 && args[0] == "account" && args[1] == "discover" {
 		return attemptCommand{kind: commandAccountsDiscover}, false, true
@@ -1541,42 +1545,38 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 		return attemptCommand{}, false, false
 	}
 	command := attemptCommand{role: "worker"}
+	var names []string
 	switch args[0] + " " + args[1] {
 	case "project create":
-		command.kind = commandProjectCreate
+		command.kind, names = commandProjectCreate, []string{"--name", "--root"}
 	case "project limits":
-		command.kind = commandProjectLimits
+		command.kind, names = commandProjectLimits, []string{"--project", "--revision", "--run-budget", "--token-budget", "--max-run-seconds"}
 	case "agent create":
-		command.kind = commandAgentCreate
+		command.kind, names = commandAgentCreate, []string{"--project", "--name", "--role", "--provider", "--model", "--reasoning-effort", "--account", "--tool-budget"}
 	case "agent idle-policy":
-		command.kind = commandAgentIdlePolicy
+		command.kind, names = commandAgentIdlePolicy, []string{"--agent", "--revision", "--policy", "--after-seconds", "--instruction", "--run-budget"}
 	case "agent select-account":
-		command.kind = commandAgentSelectAccount
+		command.kind, names = commandAgentSelectAccount, []string{"--agent", "--account", "--revision"}
 	case "agent select-model":
-		command.kind = commandAgentSelectModel
+		command.kind, names = commandAgentSelectModel, []string{"--agent", "--model", "--reasoning-effort", "--revision"}
 	case "agent paths":
-		command.kind = commandAgentPaths
+		command.kind, names = commandAgentPaths, []string{"--agent"}
 	case "account link":
-		command.kind = commandAccountLink
+		command.kind, names = commandAccountLink, []string{"--provider", "--home", "--label"}
 	case "task add":
-		command.kind = commandTaskAdd
+		command.kind, names = commandTaskAdd, []string{"--project", "--repository", "--agent", "--title", "--body", "--priority", "--task-id", "--incarnation-id"}
 	case "task send-back":
-		command.kind = commandTaskSendBack
+		command.kind, names = commandTaskSendBack, []string{"--task", "--note"}
 	case "task read":
-		command.kind = commandTaskRead
+		command.kind, names = commandTaskRead, []string{"--task", "--revision", "--offset"}
 	default:
 		return attemptCommand{}, false, false
 	}
-	seen := map[string]bool{}
-	for index := 2; index < len(args); index += 2 {
-		if index+1 >= len(args) {
-			return attemptCommand{}, false, false
-		}
-		name, value := args[index], args[index+1]
-		if seen[name] {
-			return attemptCommand{}, false, false
-		}
-		seen[name] = true
+	values, ok := pairedFlagValues(args[2:], false, names...)
+	if !ok {
+		return attemptCommand{}, false, false
+	}
+	for name, value := range values {
 		count, isCount := parseCount(value, true)
 		switch {
 		case name == "--name" && (command.kind == commandProjectCreate || command.kind == commandAgentCreate) && validOperatorText(value, 1, 128):
@@ -1597,11 +1597,11 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 			command.maxRunSeconds = uint32(count)
 		case name == "--agent" && (command.kind == commandTaskAdd || command.kind == commandAgentIdlePolicy || command.kind == commandAgentSelectAccount || command.kind == commandAgentSelectModel || command.kind == commandAgentPaths) && (validHumanRequestKey(value) || command.kind == commandTaskAdd && value == "any"):
 			command.agent = value
-		case name == "--account" && command.kind == commandAgentSelectAccount && validHumanRequestKey(value):
+		case name == "--account" && validHumanRequestKey(value):
 			command.account = value
 		case name == "--model" && command.kind == commandAgentSelectModel && validOperatorText(value, 1, 128):
 			command.model = value
-		case name == "--reasoning-effort" && command.kind == commandAgentSelectModel:
+		case name == "--reasoning-effort":
 			command.reasoningEffort = value
 		case name == "--provider" && command.kind == commandAccountLink && (value == "claude_code" || value == "codex"):
 			command.provider = value
@@ -1615,10 +1615,6 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 			command.provider = value
 		case name == "--model" && command.kind == commandAgentCreate && validOperatorText(value, 0, 128):
 			command.model = value
-		case name == "--reasoning-effort" && command.kind == commandAgentCreate:
-			command.reasoningEffort = value
-		case name == "--account" && command.kind == commandAgentCreate && validHumanRequestKey(value):
-			command.account = value
 		case name == "--tool-budget" && command.kind == commandAgentCreate && isCount && count >= 1 && count <= 1_000_000_000:
 			command.toolBudget = count
 		case name == "--policy" && command.kind == commandAgentIdlePolicy && (value == "wait" || value == "standing_instruction"):

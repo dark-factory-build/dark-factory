@@ -2,10 +2,13 @@ import { useEffect, useId, useRef, useState } from "react";
 import type { AgentItem, StateView, TaskItem } from "@dark-factory/client";
 import type { ProjectContentCall } from "./project-library.js";
 import { inProgressProduction, productionStages, productionKey, type ProductionContraption, type ProductionDelivery } from "./production-view.js";
-import { observedAt } from "./console-view.js";
 
 const text = (v: unknown) => typeof v === "string" ? v : "";
 const href = (v: unknown) => { try { const u = new URL(text(v)); return u.protocol === "https:" && !u.username && !u.password ? u.href : undefined; } catch { return undefined; } };
+const observedAt = (value: number | undefined) => {
+  if (value === undefined || !Number.isFinite(value) || value <= 0) return "";
+  try { return new Date(value).toISOString(); } catch { return ""; }
+};
 
 /** The receipts recorded for one pull request's own deliveries. */
 function DeliveryEvidence({ deliveries, current = true }: { deliveries: readonly ProductionDelivery[]; current?: boolean }) {

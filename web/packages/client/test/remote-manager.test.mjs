@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  MemoryRemoteStore,
   base64urlDecode,
   base64urlEncode,
   MAX_CONNECTED_FACTORIES,
@@ -10,7 +11,6 @@ import {
   parseInvitation,
   parseTicket,
 } from "../dist/src/index.js";
-import { MemoryRemoteStore } from "./helpers.mjs";
 import {
   ALL_CAPABILITIES,
   FakeFactory,
