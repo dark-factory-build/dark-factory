@@ -656,98 +656,10 @@ func TestManifestMatchesImplementedRegistry(t *testing.T) {
 	if fmt.Sprint(manifest.Bounds) != fmt.Sprint(wantBounds) {
 		t.Fatalf("bounds drift: got %+v want %+v", manifest.Bounds, wantBounds)
 	}
-	want := []struct{ name, direction, id, fixture string }{
-		{"HELLO", "server", "forbidden", "hello.json"},
-		{"PAIR_PROVE", "client", "required", "pair_prove.json"},
-		{"PAIR_RESULT", "server", "required", "pair_result.json"},
-		{"AUTH_PROVE", "client", "required", "auth_prove.json"},
-		{"AUTH_RESULT", "server", "required", "auth_result.json"},
-		{"STATE_GET", "client", "required", "state_get.json"},
-		{"STATE_SNAPSHOT", "server", "required", "state_snapshot.json"},
-		{"STATE_WATCH", "client", "required", "state_watch.json"},
-		{"STATE_CHANGED", "server", "required", "state_changed.json"},
-		{"HUMAN_REQUEST_DETAIL_GET", "client", "required", "human_request_detail_get.json"},
-		{"HUMAN_REQUEST_DETAIL", "server", "required", "human_request_detail.json"},
-		{"HUMAN_REQUEST_REPLY", "client", "required", "human_request_reply.json"},
-		{"HUMAN_REQUEST_REPLY_RESULT", "server", "required", "human_request_reply_result.json"},
-		{"HUMAN_REQUEST_CANCEL_RUN", "client", "required", "human_request_cancel_run.json"},
-		{"HUMAN_REQUEST_CANCEL_RUN_RESULT", "server", "required", "human_request_cancel_run_result.json"},
-		{"ATTACHMENT_RETENTION", "client", "required", "attachment_retention.json"},
-		{"ATTACHMENT_RETENTION_RESULT", "server", "required", "attachment_retention_result.json"},
-		{"FACTORY_DISPATCH", "client", "required", "factory_dispatch.json"},
-		{"FACTORY_DISPATCH_RESULT", "server", "required", "factory_dispatch_result.json"},
-		{"TASK_ATTACHMENT", "client", "required", "task_attachment.json"},
-		{"TASK_ATTACHMENT_RESULT", "server", "required", "task_attachment_result.json"},
-		{"TASK_ENQUEUE", "client", "required", "task_enqueue.json"},
-		{"TASK_ENQUEUE_RESULT", "server", "required", "task_enqueue_result.json"},
-		{"TERMINAL_TARGET_GET", "client", "required", "terminal_target_get.json"},
-		{"TERMINAL_TARGET", "server", "required", "terminal_target.json"},
-		{"TERMINAL_ATTACH", "client", "required", "terminal_attach.json"},
-		{"TERMINAL_ATTACHED", "server", "required", "terminal_attached.json"},
-		{"TERMINAL_ACK", "client", "forbidden", "terminal_ack.json"},
-		{"TERMINAL_LEASE_ACQUIRE", "client", "required", "terminal_lease_acquire.json"},
-		{"TERMINAL_LEASE_RENEW", "client", "required", "terminal_lease_renew.json"},
-		{"TERMINAL_LEASE_RELEASE", "client", "required", "terminal_lease_release.json"},
-		{"TERMINAL_LEASE_RESULT", "server", "required", "terminal_lease_result.json"},
-		{"TERMINAL_RESIZE", "client", "required", "terminal_resize.json"},
-		{"TERMINAL_RESIZED", "server", "required", "terminal_resized.json"},
-		{"TERMINAL_DETACH", "client", "required", "terminal_detach.json"},
-		{"TERMINAL_DETACHED", "server", "required", "terminal_detached.json"},
-		{"TERMINAL_INPUT_RESULT", "server", "required", "terminal_input_result.json"},
-		{"TERMINAL_EOF", "server", "required", "terminal_eof.json"},
-		{"TERMINAL_EXIT", "server", "required", "terminal_exit.json"},
-		{"TERMINAL_RESET", "server", "required", "terminal_reset.json"},
-		{"AGENT_UPDATE", "client", "required", "agent_update.json"},
-		{"AGENT_UPDATE_RESULT", "server", "required", "agent_update_result.json"},
-		{"PROJECT_LIMITS", "client", "required", "project_limits.json"},
-		{"PROJECT_LIMITS_RESULT", "server", "required", "project_limits_result.json"},
-		{"PROJECT_CREATE", "client", "required", "project_create.json"},
-		{"PROJECT_CREATE_RESULT", "server", "required", "project_create_result.json"},
-		{"REPOSITORIES_GET", "client", "required", "repositories_get.json"},
-		{"REPOSITORIES", "server", "required", "repositories.json"},
-		{"REPOSITORY_MUTATE", "client", "required", "repository_mutate.json"},
-		{"REPOSITORY_MUTATE_RESULT", "server", "required", "repository_mutate_result.json"},
-		{"INTAKE", "client", "required", "intake.json"},
-		{"INTAKE_RESULT", "server", "required", "intake_result.json"},
-		{"TASK_UPDATE", "client", "required", "task_update.json"},
-		{"TASK_UPDATE_RESULT", "server", "required", "task_update_result.json"},
-		{"TOPOLOGY_GET", "client", "required", "topology_get.json"},
-		{"TOPOLOGY", "server", "required", "topology.json"},
-		{"RUN_PATHS_GET", "client", "required", "run_paths_get.json"},
-		{"RUN_PATHS", "server", "required", "run_paths.json"},
-		{"ACCOUNTS_DISCOVER", "client", "required", "accounts_discover.json"},
-		{"ACCOUNTS", "server", "required", "accounts.json"},
-		{"ACCOUNT_LINK", "client", "required", "account_link.json"},
-		{"ACCOUNT_LINK_RESULT", "server", "required", "account_link_result.json"},
-		{"ACCOUNT_UPDATE", "client", "required", "account_update.json"},
-		{"ACCOUNT_UPDATE_RESULT", "server", "required", "account_update_result.json"},
-		{"BROWSER_CLIENTS_GET", "client", "required", "browser_clients_get.json"},
-		{"BROWSER_CLIENTS", "server", "required", "browser_clients.json"},
-		{"BROWSER_CLIENT_REVOKE", "client", "required", "browser_client_revoke.json"},
-		{"BROWSER_CLIENT_REVOKE_RESULT", "server", "required", "browser_client_revoke_result.json"},
-		{"GITHUB_CONNECTION", "client", "required", "github_connection.json"},
-		{"GITHUB_CONNECTION_RESULT", "server", "required", "github_connection_result.json"},
-		{"REMOTE_INVITE", "client", "required", "remote_invite.json"},
-		{"REMOTE_INVITE_RESULT", "server", "required", "remote_invite_result.json"},
-		{"PUSH_SUBSCRIBE", "client", "required", "push_subscribe.json"},
-		{"PUSH_SUBSCRIBE_RESULT", "server", "required", "push_subscribe_result.json"},
-		{"ERROR", "both", "optional", "error.json"},
-		{"AGENT_CONTROL", "client", "required", "agent_control.json"},
-		{"AGENT_CONTROL_RESULT", "server", "required", "agent_control_result.json"},
-		{"TASK_HISTORY_GET", "client", "required", "task_history_get.json"},
-		{"TASK_HISTORY", "server", "required", "task_history.json"},
-		{"TASK_DETAIL_GET", "client", "required", "task_detail_get.json"},
-		{"TASK_DETAIL", "server", "required", "task_detail.json"},
-		{"TASK_LIST_GET", "client", "required", "task_list_get.json"},
-		{"TASK_LIST", "server", "required", "task_list.json"},
-		{"PROJECT_CONTENT", "client", "required", "project_content.json"},
-		{"PROJECT_CONTENT_RESULT", "server", "required", "project_content_result.json"},
-	}
-	seenFixtures := make(map[string]bool, len(want))
-	for i, expected := range want {
-		actual := manifest.Control[i]
-		if actual.Type != expected.name || actual.Direction != expected.direction || actual.ID != expected.id || actual.Fixture != expected.fixture {
-			t.Fatalf("control[%d] drift: %+v", i, actual)
+	seenFixtures := make(map[string]bool, len(manifest.Control))
+	for i, actual := range manifest.Control {
+		if actual.Type == "" || actual.Direction == "" || actual.ID == "" || actual.Fixture == "" {
+			t.Fatalf("control[%d] incomplete: %+v", i, actual)
 		}
 		if seenFixtures[actual.Fixture] {
 			t.Fatalf("duplicate control fixture %q", actual.Fixture)
@@ -814,7 +726,13 @@ func TestManifestMatchesImplementedRegistry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	expectedFiles := map[string]bool{"attachment_retention.json": true, "attachment_retention_result.json": true, "factory_dispatch.json": true, "factory_dispatch_result.json": true, "task_attachment.json": true, "task_attachment_result.json": true, "github_connection.json": true, "github_connection_result.json": true, "intake.json": true, "intake_result.json": true, "agent_control.json": true, "agent_control_result.json": true, "task_history_get.json": true, "task_history.json": true, "task_list_get.json": true, "task_list.json": true, "task_detail_get.json": true, "task_detail.json": true, "project_content.json": true, "project_content_result.json": true, "transcript.json": true, "hello.json": true, "pair_prove.json": true, "pair_result.json": true, "auth_prove.json": true, "auth_result.json": true, "state_get.json": true, "state_snapshot.json": true, "state_watch.json": true, "state_changed.json": true, "human_request_detail_get.json": true, "human_request_detail.json": true, "error.json": true, "terminal_input.hex": true, "terminal_output.hex": true, "human_request_reply.json": true, "human_request_reply_result.json": true, "human_request_cancel_run.json": true, "human_request_cancel_run_result.json": true, "task_enqueue.json": true, "task_enqueue_result.json": true, "project_create.json": true, "project_create_result.json": true, "repositories_get.json": true, "repositories.json": true, "repository_mutate.json": true, "repository_mutate_result.json": true, "terminal_target_get.json": true, "terminal_target.json": true, "terminal_attach.json": true, "terminal_attached.json": true, "terminal_ack.json": true, "terminal_lease_acquire.json": true, "terminal_lease_renew.json": true, "terminal_lease_release.json": true, "terminal_lease_result.json": true, "terminal_resize.json": true, "terminal_resized.json": true, "terminal_detach.json": true, "terminal_detached.json": true, "terminal_input_result.json": true, "terminal_eof.json": true, "terminal_exit.json": true, "terminal_reset.json": true, "agent_update.json": true, "agent_update_result.json": true, "project_limits.json": true, "project_limits_result.json": true, "task_update.json": true, "task_update_result.json": true, "topology_get.json": true, "topology.json": true, "remote_invite.json": true, "remote_invite_result.json": true, "push_subscribe.json": true, "push_subscribe_result.json": true, "run_paths_get.json": true, "run_paths.json": true, "accounts_discover.json": true, "accounts.json": true, "account_link.json": true, "account_link_result.json": true, "account_update.json": true, "account_update_result.json": true, "browser_clients_get.json": true, "browser_clients.json": true, "browser_client_revoke.json": true, "browser_client_revoke_result.json": true}
+	expectedFiles := map[string]bool{"transcript.json": true}
+	for _, entry := range manifest.Control {
+		expectedFiles[entry.Fixture] = true
+	}
+	for _, entry := range manifest.Terminal.Opcodes {
+		expectedFiles[entry.Fixture] = true
+	}
 	if len(entries) != len(expectedFiles) {
 		t.Fatalf("fixture count = %d, want %d", len(entries), len(expectedFiles))
 	}

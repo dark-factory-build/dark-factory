@@ -4,7 +4,36 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import {
-  BROWSER_MANIFEST,
+  BROWSER_PROTOCOL_NAME,
+  CAPABILITIES,
+  CONTROL_MANIFEST,
+  TERMINAL_FRAME_VERSION,
+  TERMINAL_HEADER_BYTES,
+  TERMINAL_OPCODES,
+  MAX_CONTROL_BYTES,
+  MAX_JSON_DEPTH,
+  MAX_ARRAY_ITEMS,
+  MAX_OBJECT_MEMBERS,
+  MAX_SNAPSHOT_BYTES,
+  MAX_SNAPSHOT_ENTITIES,
+  MAX_PROJECT_NAME_BYTES,
+  MAX_AGENT_NAME_BYTES,
+  MAX_TASK_TITLE_BYTES,
+  MAX_HUMAN_QUESTION_BYTES,
+  MAX_HUMAN_REPLY_BYTES,
+  MAX_TASK_INSTRUCTION_BYTES,
+  MAX_FACTORY_CAPACITY,
+  MAX_TASK_PRIORITY,
+  MAX_SQLITE_INTEGER,
+  MAX_TERMINAL_UNACKED_BYTES,
+  TERMINAL_ACK_TIMEOUT_MS,
+  TERMINAL_LEASE_RENEW_INTERVAL_MS,
+  MAX_AGENT_MODEL_BYTES,
+  MAX_MODEL_SOURCE_BYTES,
+  MAX_REMOTE_INVITE_LINK_BYTES,
+  MAX_REMOTE_INVITE_SVG_BYTES,
+  MAX_IDLE_AFTER_SECONDS,
+  MAX_IDLE_RUN_BUDGET,
   ProtocolError,
   buildAuthTranscript,
   buildPairTranscript,
@@ -18,7 +47,6 @@ import {
   encodeTerminalOutput,
   MAX_TERMINAL_COLS,
   MAX_TERMINAL_ROWS,
-  MAX_TERMINAL_UNACKED_BYTES,
   hexBytes,
   MAX_TERMINAL_PAYLOAD,
   verifyP256Signature,
@@ -29,6 +57,17 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "../../../..");
 const fixture = (name) => readFileSync(join(root, "protocol/browser/fixtures", name), "utf8").trim();
 const json = (name) => JSON.parse(fixture(name));
 const bytes = (hex) => hexBytes(hex);
+const clientBounds = {
+  maxControlBytes: MAX_CONTROL_BYTES, maxJSONDepth: MAX_JSON_DEPTH, maxArrayItems: MAX_ARRAY_ITEMS, maxObjectMembers: MAX_OBJECT_MEMBERS,
+  maxSnapshotBytes: MAX_SNAPSHOT_BYTES, maxSnapshotEntities: MAX_SNAPSHOT_ENTITIES, maxProjectNameBytes: MAX_PROJECT_NAME_BYTES,
+  maxAgentNameBytes: MAX_AGENT_NAME_BYTES, maxTaskTitleBytes: MAX_TASK_TITLE_BYTES, maxHumanQuestionBytes: MAX_HUMAN_QUESTION_BYTES,
+  maxHumanReplyBytes: MAX_HUMAN_REPLY_BYTES, maxTaskInstructionBytes: MAX_TASK_INSTRUCTION_BYTES, maxFactoryCapacity: MAX_FACTORY_CAPACITY,
+  maxTaskPriority: MAX_TASK_PRIORITY, maxSQLiteInteger: MAX_SQLITE_INTEGER, maxTerminalUnackedBytes: MAX_TERMINAL_UNACKED_BYTES,
+  terminalAckTimeoutMs: TERMINAL_ACK_TIMEOUT_MS, terminalLeaseRenewIntervalMs: TERMINAL_LEASE_RENEW_INTERVAL_MS,
+  maxTerminalRows: MAX_TERMINAL_ROWS, maxTerminalCols: MAX_TERMINAL_COLS, maxAgentModelBytes: MAX_AGENT_MODEL_BYTES,
+  maxModelSourceBytes: MAX_MODEL_SOURCE_BYTES, maxRemoteInviteLinkBytes: MAX_REMOTE_INVITE_LINK_BYTES,
+  maxRemoteInviteSvgBytes: MAX_REMOTE_INVITE_SVG_BYTES, maxIdleAfterSeconds: MAX_IDLE_AFTER_SECONDS, maxIdleRunBudget: MAX_IDLE_RUN_BUDGET,
+};
 const expectMalformed = (fn) => assert.throws(fn, (e) => e instanceof ProtocolError && ["malformed", "wrong_direction"].includes(e.code));
 // The contract tolerates additive change: a member this build does not know is
 // ignored on the wire. The proof that it is only additive is that the mutated
@@ -379,29 +418,29 @@ test("a case variant of a known member is refused, an unknown name is ignored", 
 
 test("manifest has exactly one public mapping for every stable entry", () => {
   const source = json("../manifest.json");
-  assert.deepEqual(Object.keys(BROWSER_MANIFEST.capabilities), source.capabilities.map((x) => x.name));
-  assert.deepEqual(Object.values(BROWSER_MANIFEST.capabilities), source.capabilities.map((x) => x.value));
+  assert.deepEqual(Object.keys(CAPABILITIES), source.capabilities.map((x) => x.name));
+  assert.deepEqual(Object.values(CAPABILITIES), source.capabilities.map((x) => x.value));
   const camel = (key) => key.split("_").map((word, index) => index === 0 ? word : ({ json: "JSON", sqlite: "SQLite" }[word] ?? `${word[0].toUpperCase()}${word.slice(1)}`)).join("");
   const bounds = Object.fromEntries(Object.entries(source.bounds).map(([key, value]) => [camel(key), key === "max_sqlite_integer" ? BigInt(value) : value]));
-  assert.deepEqual(BROWSER_MANIFEST.bounds, bounds);
+  assert.deepEqual(clientBounds, bounds);
   for (const key of Object.keys(bounds)) {
     const mutated = { ...bounds };
     delete mutated[key];
-    assert.notDeepEqual(mutated, BROWSER_MANIFEST.bounds);
+    assert.notDeepEqual(mutated, clientBounds);
     const changed = { ...bounds, [key]: typeof bounds[key] === "bigint" ? bounds[key] + 1n : bounds[key] + 1 };
-    assert.notDeepEqual(changed, BROWSER_MANIFEST.bounds);
+    assert.notDeepEqual(changed, clientBounds);
   }
-  assert.deepEqual(BROWSER_MANIFEST.control, source.control);
+  assert.deepEqual(CONTROL_MANIFEST, source.control);
   // The contract's stable name and the fixed binary frame version are mirrored
   // too. terminal.version silently held the wrong number while it was aliased
   // to the deleted protocol generation; nothing compared it to the source.
-  assert.equal(BROWSER_MANIFEST.name, source.name);
-  assert.equal(BROWSER_MANIFEST.terminal.magic, source.terminal.magic);
-  assert.equal(BROWSER_MANIFEST.terminal.version, source.terminal.version);
-  assert.equal(BROWSER_MANIFEST.terminal.headerBytes, source.terminal.header_bytes);
-  assert.equal(BROWSER_MANIFEST.terminal.maxPayloadBytes, source.terminal.max_payload_bytes);
-  assert.deepEqual(Object.keys(BROWSER_MANIFEST.terminal.opcodes), source.terminal.opcodes.map((x) => x.name));
-  assert.deepEqual(Object.values(BROWSER_MANIFEST.terminal.opcodes), source.terminal.opcodes.map((x) => x.value));
+  assert.equal(BROWSER_PROTOCOL_NAME, source.name);
+  assert.equal("DF", source.terminal.magic);
+  assert.equal(TERMINAL_FRAME_VERSION, source.terminal.version);
+  assert.equal(TERMINAL_HEADER_BYTES, source.terminal.header_bytes);
+  assert.equal(MAX_TERMINAL_PAYLOAD, source.terminal.max_payload_bytes);
+  assert.deepEqual(Object.keys(TERMINAL_OPCODES), source.terminal.opcodes.map((x) => x.name));
+  assert.deepEqual(Object.values(TERMINAL_OPCODES), source.terminal.opcodes.map((x) => x.value));
 });
 
 

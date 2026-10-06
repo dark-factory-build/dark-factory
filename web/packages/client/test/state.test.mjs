@@ -4,14 +4,34 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import {
-  BROWSER_MANIFEST,
+  BROWSER_PROTOCOL_NAME,
+  CONTROL_MANIFEST,
   MAX_AGENT_MODEL_BYTES,
   MAX_CONTROL_BYTES,
   MAX_HUMAN_QUESTION_BYTES,
-  MAX_MODEL_SOURCE_BYTES,
+  MAX_HUMAN_REPLY_BYTES,
+  MAX_JSON_DEPTH,
   MAX_SNAPSHOT_BYTES,
   MAX_SNAPSHOT_ENTITIES,
   MAX_SQLITE_INTEGER,
+  MAX_ARRAY_ITEMS,
+  MAX_OBJECT_MEMBERS,
+  MAX_PROJECT_NAME_BYTES,
+  MAX_AGENT_NAME_BYTES,
+  MAX_TASK_TITLE_BYTES,
+  MAX_TASK_INSTRUCTION_BYTES,
+  MAX_FACTORY_CAPACITY,
+  MAX_TASK_PRIORITY,
+  MAX_TERMINAL_UNACKED_BYTES,
+  TERMINAL_ACK_TIMEOUT_MS,
+  TERMINAL_LEASE_RENEW_INTERVAL_MS,
+  MAX_TERMINAL_ROWS,
+  MAX_TERMINAL_COLS,
+  MAX_MODEL_SOURCE_BYTES,
+  MAX_REMOTE_INVITE_LINK_BYTES,
+  MAX_REMOTE_INVITE_SVG_BYTES,
+  MAX_IDLE_AFTER_SECONDS,
+  MAX_IDLE_RUN_BUDGET,
   ProtocolError,
   decodeClientControl,
   decodeServerControl,
@@ -352,9 +372,36 @@ test("state parsing rejects case-folded/duplicate/unknown/trailing/depth/member/
 });
 
 test("manifest bounds and registry are an exact readable mirror", () => {
-  assert.equal(BROWSER_MANIFEST.name, manifest.name);
-  assert.deepEqual(BROWSER_MANIFEST.control, manifest.control);
-  assert.deepEqual(BROWSER_MANIFEST.bounds, {
+  assert.equal(BROWSER_PROTOCOL_NAME, manifest.name);
+  assert.deepEqual(CONTROL_MANIFEST, manifest.control);
+  assert.deepEqual({
+    maxControlBytes: MAX_CONTROL_BYTES,
+    maxJSONDepth: MAX_JSON_DEPTH,
+    maxArrayItems: MAX_ARRAY_ITEMS,
+    maxObjectMembers: MAX_OBJECT_MEMBERS,
+    maxSnapshotBytes: MAX_SNAPSHOT_BYTES,
+    maxSnapshotEntities: MAX_SNAPSHOT_ENTITIES,
+    maxProjectNameBytes: MAX_PROJECT_NAME_BYTES,
+    maxAgentNameBytes: MAX_AGENT_NAME_BYTES,
+    maxTaskTitleBytes: MAX_TASK_TITLE_BYTES,
+    maxHumanQuestionBytes: MAX_HUMAN_QUESTION_BYTES,
+    maxHumanReplyBytes: MAX_HUMAN_REPLY_BYTES,
+    maxTaskInstructionBytes: MAX_TASK_INSTRUCTION_BYTES,
+    maxFactoryCapacity: MAX_FACTORY_CAPACITY,
+    maxTaskPriority: MAX_TASK_PRIORITY,
+    maxSQLiteInteger: MAX_SQLITE_INTEGER,
+    maxTerminalUnackedBytes: MAX_TERMINAL_UNACKED_BYTES,
+    terminalAckTimeoutMs: TERMINAL_ACK_TIMEOUT_MS,
+    terminalLeaseRenewIntervalMs: TERMINAL_LEASE_RENEW_INTERVAL_MS,
+    maxTerminalRows: MAX_TERMINAL_ROWS,
+    maxTerminalCols: MAX_TERMINAL_COLS,
+    maxAgentModelBytes: MAX_AGENT_MODEL_BYTES,
+    maxModelSourceBytes: MAX_MODEL_SOURCE_BYTES,
+    maxRemoteInviteLinkBytes: MAX_REMOTE_INVITE_LINK_BYTES,
+    maxRemoteInviteSvgBytes: MAX_REMOTE_INVITE_SVG_BYTES,
+    maxIdleAfterSeconds: MAX_IDLE_AFTER_SECONDS,
+    maxIdleRunBudget: MAX_IDLE_RUN_BUDGET,
+  }, {
     maxControlBytes: manifest.bounds.max_control_bytes,
     maxJSONDepth: manifest.bounds.max_json_depth,
     maxArrayItems: manifest.bounds.max_array_items,
