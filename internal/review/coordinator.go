@@ -42,6 +42,7 @@ type Operation struct {
 	RoutePending bool      `json:"route_pending,omitempty"`
 	Escalation   string    `json:"escalation,omitempty"` // why factoryd cannot advance it: due to the overseer
 	Handled      bool      `json:"handled,omitempty"`    // a failure already retried or escalated
+	Requeued     bool      `json:"requeued,omitempty"`   // re-enqueued once after an ejection
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
 }
@@ -202,8 +203,11 @@ func (c Coordinator) finishSubmitted(ctx context.Context, op Operation) (Operati
 }
 
 // ObserveMerge advances an enqueued operation from the merge queue: merged,
-// closed, or ejected while the pull request is still open, which goes back to
-// the author with the head's failing checks, routed like a REQUEST_CHANGES.
+// closed, or ejected while the pull request is still open. Only a failing
+// check on the head itself goes back to the author, routed like a
+// REQUEST_CHANGES. Merge-group checks run on the queue's merge commit, which
+// the author cannot see or rebase, so an ejection with none on the head is
+// re-enqueued once and escalated if the same head is ejected again.
 func (c Coordinator) ObserveMerge(ctx context.Context, op Operation) (Operation, error) {
 	if op.State != "enqueued" {
 		return op, errors.New("review: operation is not enqueued")
@@ -218,13 +222,14 @@ func (c Coordinator) ObserveMerge(ctx context.Context, op Operation) (Operation,
 		return op, nil
 	case !merge.Open:
 		op.State = "closed"
+	case len(merge.Failing) == 0 && !op.Requeued:
+		op.Requeued = true
+		return c.finishSubmitted(ctx, op)
+	case len(merge.Failing) == 0:
+		return c.fail(ctx, op, fmt.Errorf("the merge queue removed exact head %s again after factoryd re-enqueued it, with no failing check on that head: its merge-group run failed", op.Request.Head), false)
 	default:
-		failing := "none reported"
-		if len(merge.Failing) > 0 {
-			failing = strings.Join(merge.Failing, ", ")
-		}
 		op.State, op.RoutePending = "ejected", true
-		op.Detail = fmt.Sprintf("The merge queue removed exact head %s without merging it. Failing checks: %s.", op.Request.Head, failing)
+		op.Detail = fmt.Sprintf("The merge queue removed exact head %s without merging it. Failing checks: %s.", op.Request.Head, strings.Join(merge.Failing, ", "))
 	}
 	op.UpdatedAt = c.Now()
 	return op, c.Store.Update(ctx, op)

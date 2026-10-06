@@ -216,6 +216,28 @@ func TestObserveMergeMarksMergedAndEjectsOnceWithFailingChecks(t *testing.T) {
 	}
 }
 
+// Merge-group checks run on the queue's merge commit, so an ejection with no
+// failing check on the head goes back to enqueuing once, never to the author,
+// and a second ejection of the same head fails for the overseer.
+func TestEjectionWithNoHeadFailureReenqueuesOnceThenEscalates(t *testing.T) {
+	enqueued := Operation{ID: "op", EnqueueID: "enqueue", Request: reviewRequest(), State: "enqueued", Verdict: "allow", Submitted: true}
+	store, backend := &memoryStore{}, &fakeBackend{merge: Merge{State: "NOT_QUEUED", Open: true}}
+	c := Coordinator{Store: store, Backend: backend, Now: func() time.Time { return time.Unix(20, 0) }}
+	op, err := c.ObserveMerge(context.Background(), enqueued)
+	if err != nil || op.State != "enqueued" || !op.Requeued || op.RoutePending || !backend.enqueued || op.EnqueueID == enqueued.EnqueueID || len(store.values) != 2 || store.values[0].State != "enqueuing" {
+		t.Fatalf("re-enqueue operation=%+v err=%v records=%+v", op, err, store.values)
+	}
+	again, err := c.ObserveMerge(context.Background(), op)
+	if err == nil || again.State != "failed" || again.Retryable || !again.RoutePending || !strings.Contains(again.Detail, "again") || !strings.Contains(again.Detail, op.Request.Head) {
+		t.Fatalf("second ejection=%+v err=%v", again, err)
+	}
+	// A failing check on the head itself still goes back to its author.
+	backend.merge.Failing = []string{"ci / go"}
+	if ejected, err := c.ObserveMerge(context.Background(), op); err != nil || ejected.State != "ejected" || !ejected.RoutePending || !strings.Contains(ejected.Detail, "Failing checks: ci / go.") {
+		t.Fatalf("head failure after re-enqueue=%+v err=%v", ejected, err)
+	}
+}
+
 // A planned enqueue was claimed by the broker but never run: resuming
 // resends the same operation id and the operation becomes enqueued.
 func TestResumeResendsAPlannedEnqueue(t *testing.T) {

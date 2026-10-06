@@ -481,6 +481,39 @@ func TestMergeQueueEjectionSendsBackOnceAndAMergeCloses(t *testing.T) {
 	}
 }
 
+// An ejection with no failing check on the head is re-enqueued once by
+// factoryd; a second ejection is escalated, never sent back to the worker.
+func TestMergeQueueEjectionWithNoHeadFailureReenqueuesOnceThenEscalates(t *testing.T) {
+	fixture, project, task, settle := publishedTask(t)
+	settle()
+	customerMode(t, fixture)
+	ctx := context.Background()
+	backend := &publicReviewBackend{merge: review.Merge{State: "NOT_QUEUED", Open: true}}
+	fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return backend }
+	if _, err := reviewNow(ctx, fixture.daemon, project, publishedReviewRequest()); err != nil || backend.enqueues != 1 {
+		t.Fatalf("enqueue err=%v backend=%+v", err, backend)
+	}
+	if _, err := fixture.daemon.advanceReviewOperations(ctx, false); err != nil {
+		t.Fatal(err)
+	}
+	if op := lastDurableReview(t, fixture.store, project); op.State != "enqueued" || !op.Requeued || backend.enqueues != 2 {
+		t.Fatalf("re-enqueue operation=%+v enqueues=%d", op, backend.enqueues)
+	}
+	for range 3 {
+		if _, err := fixture.daemon.advanceReviewOperations(ctx, false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	op := lastDurableReview(t, fixture.store, project)
+	current, _, err := fixture.store.Task(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if op.State != "failed" || op.RoutePending || !op.Handled || backend.enqueues != 2 || !strings.Contains(op.Escalation, "again after factoryd re-enqueued it") || current.WorkRevision.Int64() != 1 {
+		t.Fatalf("second ejection operation=%+v enqueues=%d task revision %d", op, backend.enqueues, current.WorkRevision.Int64())
+	}
+}
+
 // An enqueue the App refused is escalated: the reason is recorded on the
 // operation, which is then an item due to the project's overseer.
 func TestRefusedEnqueueBecomesAnOverseerItem(t *testing.T) {
@@ -493,7 +526,7 @@ func TestRefusedEnqueueBecomesAnOverseerItem(t *testing.T) {
 		t.Fatal("a refused enqueue reported success")
 	}
 	op := lastDurableReview(t, fixture.store, project)
-	if op.RoutePending || !strings.Contains(op.Escalation, "did not enqueue") {
+	if op.RoutePending || !strings.Contains(op.Escalation, "did not take it") {
 		t.Fatalf("refused enqueue operation = %+v", op)
 	}
 	overseer, err := fixture.store.CreateAgent(ctx, kernel.NewAgent{ID: mustAgentID(t, testID(234)), ProjectID: project, Name: "overseer", Role: kernel.RoleOrchestrator, Provider: kernel.ProviderCodex, ToolBudgetLimit: 2}, mustKernelTime(t, 1001))
