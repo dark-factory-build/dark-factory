@@ -123,6 +123,7 @@ const (
     Only succeeded/cancelled tasks; retained filenames are marked removed.
   factoryctl storage compact
     Requires dispatch off and no nonterminal runs.
+  factoryctl backup create PATH | verify PATH
   factoryctl release SHA [--wait]
     Installs merged commit SHA into this factory's service, with rollback.
     --wait exits 0 verified, 1 failed or rolled back, 75 refused with no effect.
@@ -207,6 +208,8 @@ const (
 	commandCapacity
 	commandStatus
 	commandCompactStorage
+	commandBackupCreate
+	commandBackupVerify
 	commandOverseerStatus
 	commandOverseerTaskAdd
 	commandOverseerTaskUpdate
@@ -397,7 +400,7 @@ func runWithDependencies(ctx context.Context, args []string, getenv func(string)
 	if command.kind == commandRemoteStatus {
 		return runRemote(ctx, getenv, stdout, stderr)
 	}
-	if command.kind == commandAgentPaths || command.kind == commandOperatorTerminalObserve || command.kind == commandWorkerOperation || command.kind == commandProjectCreate || command.kind == commandProjectRepository || command.kind == commandIntake || command.kind == commandProjectLimits || command.kind == commandAgentCreate || command.kind == commandAgentIdlePolicy || command.kind == commandAccountsDiscover || command.kind == commandAccountsList || command.kind == commandAccountLink || command.kind == commandAgentSelectAccount || command.kind == commandAgentSelectModel || command.kind == commandTaskAdd || command.kind == commandTaskSendBack || command.kind == commandTaskRead || command.kind == commandDispatch || command.kind == commandCapacity || command.kind == commandStatus || command.kind == commandCompactStorage || command.kind == commandHumanList || command.kind == commandHumanReply {
+	if command.kind == commandAgentPaths || command.kind == commandOperatorTerminalObserve || command.kind == commandWorkerOperation || command.kind == commandProjectCreate || command.kind == commandProjectRepository || command.kind == commandIntake || command.kind == commandProjectLimits || command.kind == commandAgentCreate || command.kind == commandAgentIdlePolicy || command.kind == commandAccountsDiscover || command.kind == commandAccountsList || command.kind == commandAccountLink || command.kind == commandAgentSelectAccount || command.kind == commandAgentSelectModel || command.kind == commandTaskAdd || command.kind == commandTaskSendBack || command.kind == commandTaskRead || command.kind == commandDispatch || command.kind == commandCapacity || command.kind == commandStatus || command.kind == commandCompactStorage || command.kind == commandBackupCreate || command.kind == commandBackupVerify || command.kind == commandHumanList || command.kind == commandHumanReply {
 		return runOperator(ctx, command, getenv, stdout, stderr)
 	}
 	if command.kind >= commandContentCreate && command.kind <= commandContentAttachments && len(args) > 0 && args[0] == "content" {
@@ -664,7 +667,7 @@ func parse(args []string) (attemptCommand, bool, bool) {
 		command.operatorControl = ok
 		return command, help, ok
 	}
-	if len(args) >= 1 && (args[0] == "status" || args[0] == "storage" || args[0] == "content" || args[0] == "outcome" || args[0] == "project" || args[0] == "agent" || args[0] == "account" || args[0] == "task" || args[0] == "worker" || args[0] == "dispatch" || args[0] == "capacity" || args[0] == "intake") {
+	if len(args) >= 1 && (args[0] == "status" || args[0] == "storage" || args[0] == "backup" || args[0] == "content" || args[0] == "outcome" || args[0] == "project" || args[0] == "agent" || args[0] == "account" || args[0] == "task" || args[0] == "worker" || args[0] == "dispatch" || args[0] == "capacity" || args[0] == "intake") {
 		return parseOperator(args)
 	}
 	if len(args) >= 1 && args[0] == "overseer" {
@@ -1508,6 +1511,13 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 	if len(args) == 2 && args[0] == "storage" && args[1] == "compact" {
 		return attemptCommand{kind: commandCompactStorage}, false, true
 	}
+	if len(args) == 3 && args[0] == "backup" && (args[1] == "create" || args[1] == "verify") && filepath.IsAbs(args[2]) {
+		kind := commandBackupCreate
+		if args[1] == "verify" {
+			kind = commandBackupVerify
+		}
+		return attemptCommand{kind: kind, text: args[2]}, false, true
+	}
 	if len(args) == 1 && args[0] == "status" {
 		return attemptCommand{kind: commandStatus}, false, true
 	}
@@ -2126,7 +2136,7 @@ func runOperator(ctx context.Context, command attemptCommand, getenv func(string
 	if command.kind == commandIntake {
 		timeout = 120 * time.Second
 	}
-	if command.kind == commandCompactStorage {
+	if command.kind == commandCompactStorage || command.kind == commandBackupCreate || command.kind == commandBackupVerify {
 		timeout = storageCompactionRequestTimeout
 	}
 	callContext, cancel := context.WithTimeout(ctx, timeout)
@@ -2148,6 +2158,18 @@ func runOperator(ctx context.Context, command attemptCommand, getenv func(string
 		result, callErr := client.CompactStorage(callContext)
 		if callErr != nil {
 			return writeWebFailure(stderr, "storage compact", callErr)
+		}
+		return writeJSON(stdout, result)
+	case commandBackupCreate:
+		result, callErr := client.BackupCreate(callContext, command.text)
+		if callErr != nil {
+			return writeWebFailure(stderr, "backup create", callErr)
+		}
+		return writeJSON(stdout, result)
+	case commandBackupVerify:
+		result, callErr := client.BackupVerify(callContext, command.text)
+		if callErr != nil {
+			return writeWebFailure(stderr, "backup verify", callErr)
 		}
 		return writeJSON(stdout, result)
 	case commandStatus:

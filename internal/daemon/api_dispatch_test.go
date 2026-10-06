@@ -39,6 +39,97 @@ func newDispatchFixture(t *testing.T) *dispatchFixture {
 	return newDispatchFixtureAt(t, "/private/tmp")
 }
 
+func TestBackupCreateOperatorAPI(t *testing.T) {
+	fixture := newDispatchFixture(t)
+	backup := filepath.Join(t.TempDir(), "factory.sqlite3")
+	operator, err := api.NewOperatorClient(fixture.socket, fixture.operator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := fixture.serve(t)
+	result, err := operator.BackupCreate(context.Background(), backup)
+	waitDispatch(t, done)
+	if err != nil {
+		t.Fatalf("backup create: %v", err)
+	}
+	if result.Revision == 0 {
+		t.Fatalf("backup create returned zero revision: %+v", result)
+	}
+	if _, err := os.Stat(kernel.BackupManifestPath(backup)); err != nil {
+		t.Fatalf("backup manifest: %v", err)
+	}
+}
+
+func TestBackupCreateRejectsLiveDatabaseDestination(t *testing.T) {
+	fixture := newDispatchFixture(t)
+	operator, err := api.NewOperatorClient(fixture.socket, fixture.operator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := fixture.serve(t)
+	_, err = operator.BackupCreate(context.Background(), fixture.databasePath)
+	waitDispatch(t, done)
+	var remote *api.RemoteError
+	if !errors.As(err, &remote) || remote.Code() != api.RemoteConflict {
+		t.Fatalf("live database destination error: %v", err)
+	}
+	if _, statErr := os.Stat(fixture.databasePath); statErr != nil {
+		t.Fatalf("live database removed: %v", statErr)
+	}
+}
+
+func TestBackupCreateRejectsAliasedLiveDatabaseDestination(t *testing.T) {
+	fixture := newDispatchFixture(t)
+	aliased := strings.TrimPrefix(fixture.databasePath, "/private")
+	if filepath.Clean(aliased) == filepath.Clean(fixture.databasePath) {
+		t.Skip("test environment has no distinct /tmp alias")
+	}
+	operator, err := api.NewOperatorClient(fixture.socket, fixture.operator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := fixture.serve(t)
+	_, err = operator.BackupCreate(context.Background(), aliased)
+	waitDispatch(t, done)
+	var remote *api.RemoteError
+	if !errors.As(err, &remote) || remote.Code() != api.RemoteConflict {
+		t.Fatalf("aliased live database destination error: %v", err)
+	}
+	if _, statErr := os.Stat(fixture.databasePath); statErr != nil {
+		t.Fatalf("live database removed through alias: %v", statErr)
+	}
+}
+
+func TestBackupManifestTempFileDoesNotTruncateLiveDatabase(t *testing.T) {
+	fixture := newDispatchFixture(t)
+	backup := filepath.Join(t.TempDir(), "factory.sqlite3")
+	tmp := kernel.BackupManifestPath(backup) + ".tmp"
+	if err := os.Link(fixture.databasePath, tmp); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(fixture.databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	operator, err := api.NewOperatorClient(fixture.socket, fixture.operator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := fixture.serve(t)
+	_, err = operator.BackupCreate(context.Background(), backup)
+	waitDispatch(t, done)
+	if err == nil {
+		t.Fatal("backup unexpectedly succeeded with an existing manifest temp file")
+	}
+	after, err := os.ReadFile(fixture.databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatal("existing manifest temp alias changed the live database")
+	}
+}
+
 func newDispatchFixtureAt(t *testing.T, parent string) *dispatchFixture {
 	t.Helper()
 	directory, err := os.MkdirTemp(parent, "dark-factory-dispatch-")
