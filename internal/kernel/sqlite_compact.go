@@ -21,6 +21,17 @@ const SchemaVersion = userVersion
 // BackupTo replaces path with a consistent copy of the database (VACUUM
 // INTO), holding the writer gate so nothing commits during the copy.
 func (store *Store) BackupTo(ctx context.Context, path string) error {
+	path = filepath.Clean(path)
+	store.bindingMu.RLock()
+	if store.pathBinding != nil && store.pathBinding.main != nil {
+		live := filepath.Join(store.pathBinding.authority.path, store.pathBinding.main.name)
+		store.bindingMu.RUnlock()
+		if path == live || path == live+"-wal" || path == live+"-shm" {
+			return fmt.Errorf("%w: backup destination is a live sqlite file", ErrConflict)
+		}
+	} else {
+		store.bindingMu.RUnlock()
+	}
 	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}

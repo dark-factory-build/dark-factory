@@ -2136,7 +2136,7 @@ func runOperator(ctx context.Context, command attemptCommand, getenv func(string
 	if command.kind == commandIntake {
 		timeout = 120 * time.Second
 	}
-	if command.kind == commandCompactStorage {
+	if command.kind == commandCompactStorage || command.kind == commandBackupCreate || command.kind == commandBackupVerify {
 		timeout = storageCompactionRequestTimeout
 	}
 	callContext, cancel := context.WithTimeout(ctx, timeout)

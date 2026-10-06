@@ -60,6 +60,24 @@ func TestBackupCreateOperatorAPI(t *testing.T) {
 	}
 }
 
+func TestBackupCreateRejectsLiveDatabaseDestination(t *testing.T) {
+	fixture := newDispatchFixture(t)
+	operator, err := api.NewOperatorClient(fixture.socket, fixture.operator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := fixture.serve(t)
+	_, err = operator.BackupCreate(context.Background(), fixture.databasePath)
+	waitDispatch(t, done)
+	var remote *api.RemoteError
+	if !errors.As(err, &remote) || remote.Code() != api.RemoteConflict {
+		t.Fatalf("live database destination error: %v", err)
+	}
+	if _, statErr := os.Stat(fixture.databasePath); statErr != nil {
+		t.Fatalf("live database removed: %v", statErr)
+	}
+}
+
 func newDispatchFixtureAt(t *testing.T, parent string) *dispatchFixture {
 	t.Helper()
 	directory, err := os.MkdirTemp(parent, "dark-factory-dispatch-")
