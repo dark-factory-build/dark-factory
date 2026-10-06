@@ -40,6 +40,7 @@ type fakeBackend struct {
 	event               string
 	submitted, enqueued bool
 	merge               Merge
+	storedPull          Request
 }
 
 func (b *fakeBackend) CloneReadOnly(context.Context, Request) (string, func(), error) {
@@ -65,7 +66,7 @@ func (b *fakeBackend) Observe(context.Context, string) (Receipt, error) {
 	return Receipt{State: "missing"}, nil
 }
 func (b *fakeBackend) StoredPull(context.Context, uint64, string) (Request, error) {
-	return Request{}, nil
+	return b.storedPull, nil
 }
 func (b *fakeBackend) ObserveMerge(context.Context, Operation) (Merge, error) {
 	return b.merge, nil
@@ -287,6 +288,23 @@ func (b *refusingBackend) Enqueue(context.Context, Operation) error {
 	}
 	b.enqueued = true
 	return nil
+}
+
+func TestResumeSendsBackAConflictingPlannedEnqueue(t *testing.T) {
+	request := reviewRequest()
+	request.Mergeable = "CONFLICTING"
+	store := &memoryStore{}
+	backend := &refusingBackend{observedBackend: observedBackend{fakeBackend: fakeBackend{storedPull: request}, receipt: Receipt{State: "planned"}}, refuse: fmt.Errorf("%w: refused: rejected before execution", ErrRejected)}
+	c := Coordinator{Store: store, Backend: backend, Now: func() time.Time { return time.Unix(10, 0) }}
+	op, err := Prepare(request, c.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	op.State, op.Verdict, op.Submitted, op.EnqueueID = "enqueuing", "allow", true, "enqueue-1"
+	got, err := c.Resume(context.Background(), op)
+	if err != nil || got.State != "ejected" || !got.RoutePending || len(store.values) != 1 || !strings.Contains(got.Detail, "Rebase this Change onto origin/main") {
+		t.Fatalf("operation=%+v err=%v records=%+v", got, err, store.values)
+	}
 }
 
 // An enqueue GitHub refused before executing (checks still running, #1236)
