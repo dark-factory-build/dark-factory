@@ -6,7 +6,7 @@ import {
   decodeClientControl,
   decodeServerControl,
 } from "../dist/src/control.js";
-import { decodeTerminalInput } from "../dist/src/terminal.js";
+import { decodeTerminalInput } from "./helpers.mjs";
 import { encodeTerminalAttached, encodeTerminalDetached, encodeTerminalInputResult, encodeTerminalLeaseResult, encodeTerminalResized } from "./server-frames.mjs";
 
 const runId = "11".repeat(16);
