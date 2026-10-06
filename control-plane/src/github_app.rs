@@ -5521,10 +5521,14 @@ mod tests {
                 .map(|entry| (
                     entry.path.as_str(),
                     entry.kind.as_str(),
-                    entry.mode.as_str()
+                    entry.mode.as_str(),
+                    entry.sha.clone()
                 ))
                 .collect::<Vec<_>>(),
-            vec![("a.txt", "blob", "100644"), ("bin/x", "blob", "100755")]
+            vec![
+                ("a.txt", "blob", "100644", "d".repeat(40)),
+                ("bin/x", "blob", "100755", "e".repeat(40)),
+            ]
         );
         // A root commit has none, which is an answer rather than a failure.
         assert!(
