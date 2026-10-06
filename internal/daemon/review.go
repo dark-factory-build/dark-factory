@@ -356,11 +356,12 @@ func (b *daemonReviewBackend) StoredPull(ctx context.Context, pull uint64, head 
 	}
 	var value struct {
 		PullRequests []struct {
-			Number  uint64 `json:"number"`
-			HeadSHA string `json:"head_sha"`
-			BaseSHA string `json:"base_sha"`
-			BaseRef string `json:"base_ref"`
-			Body    string `json:"body"`
+			Number    uint64 `json:"number"`
+			HeadSHA   string `json:"head_sha"`
+			BaseSHA   string `json:"base_sha"`
+			BaseRef   string `json:"base_ref"`
+			Body      string `json:"body"`
+			Mergeable *bool  `json:"mergeable"`
 		} `json:"pull_requests"`
 	}
 	if err := json.Unmarshal(response, &value); err != nil || len(value.PullRequests) != 1 {
@@ -370,7 +371,7 @@ func (b *daemonReviewBackend) StoredPull(ctx context.Context, pull uint64, head 
 	if pullValue.Number != pull || !strings.EqualFold(pullValue.HeadSHA, head) {
 		return review.Request{}, errors.New("review: pull head changed before review")
 	}
-	return review.Request{Repository: b.repository, PullNumber: pull, Head: strings.ToLower(pullValue.HeadSHA), Base: strings.ToLower(pullValue.BaseSHA), BaseRef: pullValue.BaseRef, Body: pullValue.Body, Provider: "codex"}, nil
+	return review.Request{Repository: b.repository, PullNumber: pull, Head: strings.ToLower(pullValue.HeadSHA), Base: strings.ToLower(pullValue.BaseSHA), BaseRef: pullValue.BaseRef, Body: pullValue.Body, Provider: "codex", Mergeable: pullValue.Mergeable}, nil
 }
 
 type durableReviewStore struct {
