@@ -25,6 +25,17 @@ func (store *Store) BackupTo(ctx context.Context, path string) error {
 	store.bindingMu.RLock()
 	if store.pathBinding != nil && store.pathBinding.main != nil {
 		live := filepath.Join(store.pathBinding.authority.path, store.pathBinding.main.name)
+		if info, err := os.Stat(path); err == nil {
+			for _, source := range []*databaseFile{store.pathBinding.main, store.pathBinding.wal, store.pathBinding.shm} {
+				if source != nil && os.SameFile(info, source.info) {
+					store.bindingMu.RUnlock()
+					return fmt.Errorf("%w: backup destination is a live sqlite file", ErrConflict)
+				}
+			}
+		} else if !errors.Is(err, os.ErrNotExist) {
+			store.bindingMu.RUnlock()
+			return fmt.Errorf("inspect backup destination: %w", err)
+		}
 		store.bindingMu.RUnlock()
 		if path == live || path == live+"-wal" || path == live+"-shm" {
 			return fmt.Errorf("%w: backup destination is a live sqlite file", ErrConflict)

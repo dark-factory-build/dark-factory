@@ -78,6 +78,28 @@ func TestBackupCreateRejectsLiveDatabaseDestination(t *testing.T) {
 	}
 }
 
+func TestBackupCreateRejectsAliasedLiveDatabaseDestination(t *testing.T) {
+	fixture := newDispatchFixture(t)
+	aliased := strings.TrimPrefix(fixture.databasePath, "/private")
+	if filepath.Clean(aliased) == filepath.Clean(fixture.databasePath) {
+		t.Skip("test environment has no distinct /tmp alias")
+	}
+	operator, err := api.NewOperatorClient(fixture.socket, fixture.operator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := fixture.serve(t)
+	_, err = operator.BackupCreate(context.Background(), aliased)
+	waitDispatch(t, done)
+	var remote *api.RemoteError
+	if !errors.As(err, &remote) || remote.Code() != api.RemoteConflict {
+		t.Fatalf("aliased live database destination error: %v", err)
+	}
+	if _, statErr := os.Stat(fixture.databasePath); statErr != nil {
+		t.Fatalf("live database removed through alias: %v", statErr)
+	}
+}
+
 func newDispatchFixtureAt(t *testing.T, parent string) *dispatchFixture {
 	t.Helper()
 	directory, err := os.MkdirTemp(parent, "dark-factory-dispatch-")
