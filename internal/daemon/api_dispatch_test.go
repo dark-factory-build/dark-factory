@@ -39,6 +39,27 @@ func newDispatchFixture(t *testing.T) *dispatchFixture {
 	return newDispatchFixtureAt(t, "/private/tmp")
 }
 
+func TestBackupCreateOperatorAPI(t *testing.T) {
+	fixture := newDispatchFixture(t)
+	backup := filepath.Join(t.TempDir(), "factory.sqlite3")
+	operator, err := api.NewOperatorClient(fixture.socket, fixture.operator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := fixture.serve(t)
+	result, err := operator.BackupCreate(context.Background(), backup)
+	waitDispatch(t, done)
+	if err != nil {
+		t.Fatalf("backup create: %v", err)
+	}
+	if result.Revision == 0 {
+		t.Fatalf("backup create returned zero revision: %+v", result)
+	}
+	if _, err := os.Stat(kernel.BackupManifestPath(backup)); err != nil {
+		t.Fatalf("backup manifest: %v", err)
+	}
+}
+
 func newDispatchFixtureAt(t *testing.T, parent string) *dispatchFixture {
 	t.Helper()
 	directory, err := os.MkdirTemp(parent, "dark-factory-dispatch-")

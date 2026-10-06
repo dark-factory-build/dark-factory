@@ -306,11 +306,11 @@ func (daemon *Daemon) dispatch(ctx context.Context, call api.Call) api.Reply {
 		if err := kernel.WriteBackupManifest(path, time.Now()); err != nil {
 			return newErrorReply(remoteErrorCode(err))
 		}
-		reply, err := api.NewMutationReply(api.MutationResult{})
+		state, err := daemon.store.Factory(ctx)
 		if err != nil {
-			return newErrorReply(api.RemoteInternal)
+			return newErrorReply(remoteErrorCode(err))
 		}
-		return reply
+		return mutationReply(state.Head, state.Revision)
 	case api.CallBackupVerify:
 		path, _ := call.BackupPath()
 		manifest, err := kernel.VerifyBackup(ctx, path)
