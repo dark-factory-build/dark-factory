@@ -1954,6 +1954,10 @@ func (daemon *Daemon) overseerStopRun(ctx context.Context, call api.Call) api.Re
 	if failure != nil {
 		return *failure
 	}
+	return daemon.stopRun(ctx, call, kernel.TaskInterventionOrchestrator, digest)
+}
+
+func (daemon *Daemon) stopRun(ctx context.Context, call api.Call, actor kernel.TaskInterventionActor, digest kernel.AttemptDigest) api.Reply {
 	input, ok := call.OverseerRunStopInput()
 	if !ok {
 		return newErrorReply(api.RemoteInvalidRequest)
@@ -1966,7 +1970,7 @@ func (daemon *Daemon) overseerStopRun(ctx context.Context, call api.Call) api.Re
 	if err != nil {
 		return newErrorReply(api.RemoteInternal)
 	}
-	receipt, err := daemon.store.StopRunForAttempt(ctx, digest, request, nil, at)
+	receipt, err := daemon.store.StopRunForActor(ctx, actor, digest, request, nil, at)
 	if err != nil {
 		return newErrorReply(remoteErrorCode(err))
 	}
@@ -1975,24 +1979,7 @@ func (daemon *Daemon) overseerStopRun(ctx context.Context, call api.Call) api.Re
 }
 
 func (daemon *Daemon) operatorStopRun(ctx context.Context, call api.Call) api.Reply {
-	input, ok := call.OverseerRunStopInput()
-	if !ok {
-		return newErrorReply(api.RemoteInvalidRequest)
-	}
-	request, err := overseerInterventionRequest(input.OperationID, input.TaskID, input.ExpectedTaskRevision, input.RunID, input.ExpectedRunRevision, kernel.TaskInterventionStop, "")
-	if err != nil {
-		return newErrorReply(api.RemoteInvalidRequest)
-	}
-	at, err := daemon.timestamp()
-	if err != nil {
-		return newErrorReply(api.RemoteInternal)
-	}
-	receipt, err := daemon.store.StopRunForOperator(ctx, request, nil, at)
-	if err != nil {
-		return newErrorReply(remoteErrorCode(err))
-	}
-	daemon.notifyScheduler()
-	return daemon.interventionMutation(ctx, receipt)
+	return daemon.stopRun(ctx, call, kernel.TaskInterventionOperator, kernel.AttemptDigest{})
 }
 
 func (daemon *Daemon) overseerReplaceRun(ctx context.Context, call api.Call) api.Reply {
@@ -2000,6 +1987,10 @@ func (daemon *Daemon) overseerReplaceRun(ctx context.Context, call api.Call) api
 	if failure != nil {
 		return *failure
 	}
+	return daemon.replaceRun(ctx, call, kernel.TaskInterventionOrchestrator, digest)
+}
+
+func (daemon *Daemon) replaceRun(ctx context.Context, call api.Call, actor kernel.TaskInterventionActor, digest kernel.AttemptDigest) api.Reply {
 	input, ok := call.OverseerRunReplaceInput()
 	if !ok {
 		return newErrorReply(api.RemoteInvalidRequest)
@@ -2023,7 +2014,7 @@ func (daemon *Daemon) overseerReplaceRun(ctx context.Context, call api.Call) api
 	if err != nil {
 		return newErrorReply(api.RemoteInternal)
 	}
-	receipt, err := daemon.store.StopRunForAttempt(ctx, digest, request, &kernel.NewTask{ID: successorID, IncarnationID: incarnationID, Body: input.Instruction}, at)
+	receipt, err := daemon.store.StopRunForActor(ctx, actor, digest, request, &kernel.NewTask{ID: successorID, IncarnationID: incarnationID, Body: input.Instruction}, at)
 	if err != nil {
 		return newErrorReply(remoteErrorCode(err))
 	}
@@ -2032,35 +2023,7 @@ func (daemon *Daemon) overseerReplaceRun(ctx context.Context, call api.Call) api
 }
 
 func (daemon *Daemon) operatorReplaceRun(ctx context.Context, call api.Call) api.Reply {
-	input, ok := call.OverseerRunReplaceInput()
-	if !ok {
-		return newErrorReply(api.RemoteInvalidRequest)
-	}
-	request, err := overseerInterventionRequest(input.OperationID, input.TaskID, input.ExpectedTaskRevision, input.RunID, input.ExpectedRunRevision, kernel.TaskInterventionReplace, "")
-	if err != nil {
-		return newErrorReply(api.RemoteInvalidRequest)
-	}
-	successorID, err := decodeID(input.SuccessorTaskID, kernel.TaskIDFromBytes)
-	if err != nil {
-		return newErrorReply(api.RemoteInvalidRequest)
-	}
-	incarnationID, err := decodeID(input.SuccessorIncarnationID, kernel.IncarnationIDFromBytes)
-	if err != nil {
-		return newErrorReply(api.RemoteInvalidRequest)
-	}
-	if err := daemon.prepareOverseerReplacement(ctx, request.TaskID, input.Instruction); err != nil {
-		return newErrorReply(remoteErrorCode(err))
-	}
-	at, err := daemon.timestamp()
-	if err != nil {
-		return newErrorReply(api.RemoteInternal)
-	}
-	receipt, err := daemon.store.StopRunForOperator(ctx, request, &kernel.NewTask{ID: successorID, IncarnationID: incarnationID, Body: input.Instruction}, at)
-	if err != nil {
-		return newErrorReply(remoteErrorCode(err))
-	}
-	daemon.notifyScheduler()
-	return daemon.interventionMutation(ctx, receipt)
+	return daemon.replaceRun(ctx, call, kernel.TaskInterventionOperator, kernel.AttemptDigest{})
 }
 
 func (daemon *Daemon) overseerMessageWorker(ctx context.Context, call api.Call) api.Reply {
@@ -2068,6 +2031,10 @@ func (daemon *Daemon) overseerMessageWorker(ctx context.Context, call api.Call) 
 	if failure != nil {
 		return *failure
 	}
+	return daemon.messageWorker(ctx, call, kernel.TaskInterventionOrchestrator, digest)
+}
+
+func (daemon *Daemon) messageWorker(ctx context.Context, call api.Call, actor kernel.TaskInterventionActor, digest kernel.AttemptDigest) api.Reply {
 	input, ok := call.OverseerWorkerMessageInput()
 	if !ok {
 		return newErrorReply(api.RemoteInvalidRequest)
@@ -2076,7 +2043,7 @@ func (daemon *Daemon) overseerMessageWorker(ctx context.Context, call api.Call) 
 	if err != nil {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
-	receipt, err := daemon.overseerIntervention(ctx, digest, request)
+	receipt, err := daemon.intervention(ctx, actor, digest, request)
 	if err != nil {
 		return newErrorReply(remoteErrorCode(err))
 	}
@@ -2088,6 +2055,10 @@ func (daemon *Daemon) overseerInterruptWorker(ctx context.Context, call api.Call
 	if failure != nil {
 		return *failure
 	}
+	return daemon.interruptWorker(ctx, call, kernel.TaskInterventionOrchestrator, digest)
+}
+
+func (daemon *Daemon) interruptWorker(ctx context.Context, call api.Call, actor kernel.TaskInterventionActor, digest kernel.AttemptDigest) api.Reply {
 	input, ok := call.OverseerWorkerInterruptInput()
 	if !ok {
 		return newErrorReply(api.RemoteInvalidRequest)
@@ -2096,7 +2067,7 @@ func (daemon *Daemon) overseerInterruptWorker(ctx context.Context, call api.Call
 	if err != nil {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
-	receipt, err := daemon.overseerIntervention(ctx, digest, request)
+	receipt, err := daemon.intervention(ctx, actor, digest, request)
 	if err != nil {
 		return newErrorReply(remoteErrorCode(err))
 	}
@@ -2104,35 +2075,11 @@ func (daemon *Daemon) overseerInterruptWorker(ctx context.Context, call api.Call
 }
 
 func (daemon *Daemon) operatorMessageWorker(ctx context.Context, call api.Call) api.Reply {
-	input, ok := call.OverseerWorkerMessageInput()
-	if !ok {
-		return newErrorReply(api.RemoteInvalidRequest)
-	}
-	request, err := overseerInterventionRequest(input.OperationID, input.TaskID, input.ExpectedTaskRevision, input.RunID, input.ExpectedRunRevision, kernel.TaskInterventionMessage, input.Message)
-	if err != nil {
-		return newErrorReply(api.RemoteInvalidRequest)
-	}
-	receipt, err := daemon.operatorIntervention(ctx, request)
-	if err != nil {
-		return newErrorReply(remoteErrorCode(err))
-	}
-	return daemon.interventionMutation(ctx, receipt)
+	return daemon.messageWorker(ctx, call, kernel.TaskInterventionOperator, kernel.AttemptDigest{})
 }
 
 func (daemon *Daemon) operatorInterruptWorker(ctx context.Context, call api.Call) api.Reply {
-	input, ok := call.OverseerWorkerInterruptInput()
-	if !ok {
-		return newErrorReply(api.RemoteInvalidRequest)
-	}
-	request, err := overseerInterventionRequest(input.OperationID, input.TaskID, input.ExpectedTaskRevision, input.RunID, input.ExpectedRunRevision, kernel.TaskInterventionInterrupt, "")
-	if err != nil {
-		return newErrorReply(api.RemoteInvalidRequest)
-	}
-	receipt, err := daemon.operatorIntervention(ctx, request)
-	if err != nil {
-		return newErrorReply(remoteErrorCode(err))
-	}
-	return daemon.interventionMutation(ctx, receipt)
+	return daemon.interruptWorker(ctx, call, kernel.TaskInterventionOperator, kernel.AttemptDigest{})
 }
 
 func (daemon *Daemon) overseerReplyHuman(ctx context.Context, call api.Call) api.Reply {

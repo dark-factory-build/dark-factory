@@ -465,7 +465,7 @@ func (daemon *Daemon) browserIntervention(ctx context.Context, principal browser
 	return daemon.deliverIntervention(ctx, receipt, newlyReserved)
 }
 
-func (daemon *Daemon) overseerIntervention(ctx context.Context, digest kernel.AttemptDigest, request kernel.TaskInterventionRequest) (kernel.TaskIntervention, error) {
+func (daemon *Daemon) intervention(ctx context.Context, actor kernel.TaskInterventionActor, digest kernel.AttemptDigest, request kernel.TaskInterventionRequest) (kernel.TaskIntervention, error) {
 	if !terminalEffectsSupported {
 		return kernel.TaskIntervention{}, ErrTerminalEffectsUnsupported
 	}
@@ -475,28 +475,19 @@ func (daemon *Daemon) overseerIntervention(ctx context.Context, digest kernel.At
 	if err != nil {
 		return kernel.TaskIntervention{}, err
 	}
-	receipt, newlyReserved, err := daemon.store.ReserveTaskInterventionForAttempt(ctx, digest, request, at)
+	receipt, newlyReserved, err := daemon.store.ReserveTaskInterventionForActor(ctx, actor, digest, request, at)
 	if err != nil {
 		return kernel.TaskIntervention{}, err
 	}
 	return daemon.deliverIntervention(ctx, receipt, newlyReserved)
 }
 
+func (daemon *Daemon) overseerIntervention(ctx context.Context, digest kernel.AttemptDigest, request kernel.TaskInterventionRequest) (kernel.TaskIntervention, error) {
+	return daemon.intervention(ctx, kernel.TaskInterventionOrchestrator, digest, request)
+}
+
 func (daemon *Daemon) operatorIntervention(ctx context.Context, request kernel.TaskInterventionRequest) (kernel.TaskIntervention, error) {
-	if !terminalEffectsSupported {
-		return kernel.TaskIntervention{}, ErrTerminalEffectsUnsupported
-	}
-	daemon.operationMu.Lock()
-	defer daemon.operationMu.Unlock()
-	at, err := daemon.timestamp()
-	if err != nil {
-		return kernel.TaskIntervention{}, err
-	}
-	receipt, newlyReserved, err := daemon.store.ReserveTaskInterventionForOperator(ctx, request, at)
-	if err != nil {
-		return kernel.TaskIntervention{}, err
-	}
-	return daemon.deliverIntervention(ctx, receipt, newlyReserved)
+	return daemon.intervention(ctx, kernel.TaskInterventionOperator, kernel.AttemptDigest{}, request)
 }
 
 // deliverIntervention performs the one PTY action owned by a freshly reserved
