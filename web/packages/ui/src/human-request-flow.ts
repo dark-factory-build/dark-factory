@@ -39,11 +39,11 @@ export class HumanRequestFlow<Scope> {
   constructor(options: HumanRequestFlowOptions<Scope>) { this.#options = options; }
 
   get selection(): HumanRequestFlowSelection<Scope> | undefined { return this.#selection; }
-  get busy(): boolean { return this.#selection !== undefined && busy(this.#selection); }
+  get busy(): boolean { return this.#selection !== undefined && busy(this.#selection.phase); }
 
   open(scope: Scope, request: HumanRequestItem): Promise<void> {
     const current = this.#selection;
-    if (!this.#options.active(scope) || (current !== undefined && (busy(current) || !this.#options.replaceReady))) return Promise.resolve();
+    if (!this.#options.active(scope) || (current !== undefined && (busy(current.phase) || !this.#options.replaceReady))) return Promise.resolve();
     const latest = this.#options.currentRequest(scope, request.id);
     if (latest === undefined || latest.revision !== request.revision) { this.#fail(new SessionError("stale")); return Promise.resolve(); }
     return this.#load({ scope, request: latest, phase: "loading", reply: "", token: ++this.#token });
@@ -58,7 +58,7 @@ export class HumanRequestFlow<Scope> {
   }
 
   clear(force = false): void {
-    if (this.#selection === undefined || (!force && busy(this.#selection))) return;
+    if (this.#selection === undefined || (!force && busy(this.#selection.phase))) return;
     ++this.#token;
     this.#selection = undefined;
     this.#options.onChange();
@@ -150,10 +150,10 @@ export class HumanRequestFlow<Scope> {
   #put(selection: HumanRequestFlowSelection<Scope>): void { this.#selection = selection; this.#options.onChange(); }
 }
 
-function busy(selection: HumanRequestFlowSelection<unknown>): boolean {
-  return selection.phase === "loading" || selection.phase === "replying" || selection.phase === "cancelling";
+export function busy(phase: HumanRequestPhase): boolean {
+  return phase === "loading" || phase === "replying" || phase === "cancelling";
 }
 
-function finiteError(error: unknown): SessionError | ProtocolError {
+export function finiteError(error: unknown): SessionError | ProtocolError {
   return error instanceof SessionError || error instanceof ProtocolError ? error : new SessionError("connection");
 }
