@@ -48,7 +48,7 @@ func TestSupervisorKnowledgeDeliveredToFreshProviderProcess(t *testing.T) {
 	if !strings.Contains(result, lesson.ID.String()) || !strings.Contains(result, `"revision":1`) || !strings.Contains(result, "Preserve the exact source receipt") || !strings.Contains(result, "PTY=120x40") {
 		t.Fatalf("real provider fixture did not receive frozen lesson: %s", result)
 	}
-	accesses, err := fixture.store.ListContentAccesses(ctx, run.ID)
+	accesses, err := contentAccesses(ctx, fixture.store, run.ProjectID, kernel.ContentAccess{ContentID: lesson.ID, ContentRevision: lesson.Revision})
 	if err != nil {
 		t.Fatal(err)
 	}

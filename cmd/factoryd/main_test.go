@@ -100,10 +100,10 @@ func TestProcessServesAPIAndBrowserThenReleasesExactHome(t *testing.T) {
 
 	client := waitOperatorClient(t, home)
 	callContext, callCancel := context.WithTimeout(context.Background(), 3*time.Second)
-	health, err := client.Health(callContext)
+	snapshot, err := client.Snapshot(callContext)
 	callCancel()
-	if err != nil || !health.Ready {
-		t.Fatalf("health = %+v, %v", health, err)
+	if err != nil || snapshot.Head == 0 {
+		t.Fatalf("health check snapshot = %+v, %v", snapshot, err)
 	}
 	callContext, callCancel = context.WithTimeout(context.Background(), 3*time.Second)
 	status, err := client.WebStatus(callContext)
@@ -174,10 +174,10 @@ func TestSecondProcessCannotSplitHomeOwnershipOrDisruptFirst(t *testing.T) {
 		t.Fatalf("second process = %v, %v", second, err)
 	}
 	callContext, callCancel := context.WithTimeout(context.Background(), 3*time.Second)
-	health, err := client.Health(callContext)
+	snapshot, err := client.Snapshot(callContext)
 	callCancel()
-	if err != nil || !health.Ready {
-		t.Fatalf("first process after rejected split = %+v, %v", health, err)
+	if err != nil || snapshot.Head == 0 {
+		t.Fatalf("first process after rejected split = %+v, %v", snapshot, err)
 	}
 	address := owner.browser.Addr()
 	cancel()

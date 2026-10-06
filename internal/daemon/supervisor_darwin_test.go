@@ -232,7 +232,7 @@ func runSupervisorCodexFixture() error {
 		if len(expected) != 5 {
 			return fmt.Errorf("source target = %q", target)
 		}
-		before, err := client.OverseerTaskSnapshot(ctx, expected[0])
+		before, err := client.OverseerSnapshotPage(ctx, api.OverseerSnapshotInput{TaskID: expected[0]})
 		if err != nil || len(before.Handoffs) != 1 || before.Handoffs[0].TaskID != expected[0] || before.Handoffs[0].SourcePath != "" || before.Handoffs[0].GitDirectory != "" || before.Handoffs[0].HeadCommit == "" {
 			return fmt.Errorf("status before explicit request = %+v, %v", before.Handoffs, err)
 		}
@@ -249,7 +249,7 @@ func runSupervisorCodexFixture() error {
 		if _, err := os.Stat(filepath.Join(handoff.GitDirectory, "worktrees", handoff.ChangeID)); err != nil {
 			return fmt.Errorf("source receipt Git directory does not register the worktree: %w", err)
 		}
-		snapshot, err := client.OverseerTaskSnapshot(ctx, expected[0])
+		snapshot, err := client.OverseerSnapshotPage(ctx, api.OverseerSnapshotInput{TaskID: expected[0]})
 		if err != nil {
 			return err
 		}

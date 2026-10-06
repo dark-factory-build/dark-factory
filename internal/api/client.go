@@ -91,12 +91,6 @@ func newClient(socketPath, tokenPath string, domain byte) (client, error) {
 	return client{socketPath: socketPath, tokenPath: tokenPath, token: token, domain: domain}, nil
 }
 
-func (client *OperatorClient) Health(ctx context.Context) (HealthStatus, error) {
-	var result HealthStatus
-	err := client.client.call(ctx, "health", struct{}{}, &result)
-	return result, err
-}
-
 func (client *OperatorClient) WebStatus(ctx context.Context) (WebStatus, error) {
 	var result WebStatus
 	if err := client.client.call(ctx, "web_status", struct{}{}, &result); err != nil {
@@ -539,13 +533,6 @@ func (client *AttemptClient) SendBack(ctx context.Context, input SendBackInput) 
 
 func (client *AttemptClient) OverseerSnapshot(ctx context.Context) (OverseerSnapshot, error) {
 	return client.overseerSnapshot(ctx, OverseerSnapshotInput{})
-}
-
-func (client *AttemptClient) OverseerTaskSnapshot(ctx context.Context, taskID string) (OverseerSnapshot, error) {
-	if !validID(taskID) {
-		return OverseerSnapshot{}, ErrInvalidInput
-	}
-	return client.overseerSnapshot(ctx, OverseerSnapshotInput{TaskID: taskID})
 }
 
 func (client *AttemptClient) OverseerSnapshotPage(ctx context.Context, input OverseerSnapshotInput) (OverseerSnapshot, error) {

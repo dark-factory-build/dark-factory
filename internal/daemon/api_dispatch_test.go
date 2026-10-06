@@ -163,9 +163,8 @@ func TestDaemonDispatchesOperatorCallsAndBoundsProjection(t *testing.T) {
 	assertNoSchedulerWake(t, fixture.daemon)
 
 	done = fixture.serve(t)
-	health, err := client.Health(ctx)
-	if err != nil || !health.Ready {
-		t.Fatalf("health = %+v, %v", health, err)
+	if snapshot, err := client.Snapshot(ctx); err != nil || snapshot.Head < 1 {
+		t.Fatalf("health check snapshot = %+v, %v", snapshot, err)
 	}
 	waitDispatch(t, done)
 	assertNoSchedulerWake(t, fixture.daemon)

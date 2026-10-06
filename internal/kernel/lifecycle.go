@@ -84,10 +84,6 @@ func (store *Store) ActivateProviderResources(ctx context.Context, runID RunID, 
 	return process, group, nil
 }
 
-func (store *Store) BeginResourceRelease(ctx context.Context, runID RunID, resourceID ResourceID, expected Revision, identity ResourceIdentity, at UnixMillis) (Resource, error) {
-	return store.transitionResource(ctx, runID, resourceID, expected, identity, "", ResourceReleasing, at)
-}
-
 func (store *Store) MarkResourceUnresolved(ctx context.Context, runID RunID, resourceID ResourceID, expected Revision, identity ResourceIdentity, reason string, at UnixMillis) (Resource, error) {
 	if byteLen(reason) < 1 || byteLen(reason) > 4096 {
 		return Resource{}, fmt.Errorf("%w: invalid unresolved reason", ErrInvalidValue)

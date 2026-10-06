@@ -206,6 +206,13 @@ type ControlFrame struct {
 	Body any
 }
 
+// EncodeControl encodes a protocol control message selected by its wire type.
+// Tests and protocol extensions can use this without requiring one wrapper per
+// message variant.
+func EncodeControl(kind MessageType, id string, value any) ([]byte, error) {
+	return encodeControl(kind, id, value)
+}
+
 var (
 	ErrMalformed   = errors.New("browser protocol: malformed control frame")
 	ErrOversized   = errors.New("browser protocol: control frame too large")

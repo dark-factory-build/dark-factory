@@ -38,6 +38,12 @@ type wireFixture struct {
 	once      sync.Once
 }
 
+func (client *OperatorClient) Health(ctx context.Context) (HealthStatus, error) {
+	var result HealthStatus
+	err := client.client.call(ctx, "health", struct{}{}, &result)
+	return result, err
+}
+
 func newWireFixture(t testing.TB, bearer credential, response func(net.Conn, []byte) error) *wireFixture {
 	t.Helper()
 	directory := privateTestDirectory(t)

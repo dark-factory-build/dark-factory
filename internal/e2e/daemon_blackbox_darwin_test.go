@@ -152,16 +152,16 @@ func TestBlackBoxDaemonLifecycle(t *testing.T) {
 	fixture.killRunnerProcesses(t)
 	fixture.awaitOutput(t, outputC, "unsettled run", 60*time.Second)
 	callContext, callCancel := context.WithTimeout(context.Background(), 3*time.Second)
-	health, err := client.Health(callContext)
+	snapshot, err := client.Snapshot(callContext)
 	callCancel()
-	if err != nil || !health.Ready {
-		t.Fatalf("daemon after runner death = %+v, %v", health, err)
+	if err != nil || snapshot.Head == 0 {
+		t.Fatalf("daemon after runner death = %+v, %v", snapshot, err)
 	}
 	if status := fixture.taskStatus(t, client, runnerVictim); status != "running" {
 		t.Fatalf("wedged task after runner death = %q (must stay honestly nonterminal)", status)
 	}
 	callContext, callCancel = context.WithTimeout(context.Background(), 3*time.Second)
-	snapshot, err := client.Snapshot(callContext)
+	snapshot, err = client.Snapshot(callContext)
 	callCancel()
 	if err != nil || snapshot.Factory.ActiveRuns != 1 || snapshot.Factory.Capacity != 1 {
 		t.Fatalf("wedged capacity accounting = %+v, %v", snapshot.Factory, err)
@@ -315,9 +315,9 @@ func (fixture *blackBoxFixture) waitClient(t *testing.T, output func() string) *
 		client, err := api.NewOperatorClient(socket, token)
 		if err == nil {
 			callContext, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-			health, healthErr := client.Health(callContext)
+			snapshot, healthErr := client.Snapshot(callContext)
 			cancel()
-			if healthErr == nil && health.Ready {
+			if healthErr == nil && snapshot.Head >= 0 {
 				return client
 			}
 		}
