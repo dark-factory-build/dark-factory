@@ -66,37 +66,23 @@ func TestBackupCreateRejectsLiveDatabaseDestination(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	done := fixture.serve(t)
-	_, err = operator.BackupCreate(context.Background(), fixture.databasePath)
-	waitDispatch(t, done)
-	var remote *api.RemoteError
-	if !errors.As(err, &remote) || remote.Code() != api.RemoteConflict {
-		t.Fatalf("live database destination error: %v", err)
-	}
-	if _, statErr := os.Stat(fixture.databasePath); statErr != nil {
-		t.Fatalf("live database removed: %v", statErr)
-	}
-}
-
-func TestBackupCreateRejectsAliasedLiveDatabaseDestination(t *testing.T) {
-	fixture := newDispatchFixture(t)
-	aliased := strings.TrimPrefix(fixture.databasePath, "/private")
-	if filepath.Clean(aliased) == filepath.Clean(fixture.databasePath) {
-		t.Skip("test environment has no distinct /tmp alias")
-	}
-	operator, err := api.NewOperatorClient(fixture.socket, fixture.operator)
-	if err != nil {
+	// The live file itself, and the same file through a symlinked directory
+	// (as /tmp aliases /private/tmp on macOS), are both refused intact.
+	alias := filepath.Join(t.TempDir(), "alias")
+	if err := os.Symlink(filepath.Dir(fixture.databasePath), alias); err != nil {
 		t.Fatal(err)
 	}
-	done := fixture.serve(t)
-	_, err = operator.BackupCreate(context.Background(), aliased)
-	waitDispatch(t, done)
-	var remote *api.RemoteError
-	if !errors.As(err, &remote) || remote.Code() != api.RemoteConflict {
-		t.Fatalf("aliased live database destination error: %v", err)
-	}
-	if _, statErr := os.Stat(fixture.databasePath); statErr != nil {
-		t.Fatalf("live database removed through alias: %v", statErr)
+	for _, destination := range []string{fixture.databasePath, filepath.Join(alias, filepath.Base(fixture.databasePath))} {
+		done := fixture.serve(t)
+		_, err = operator.BackupCreate(context.Background(), destination)
+		waitDispatch(t, done)
+		var remote *api.RemoteError
+		if !errors.As(err, &remote) || remote.Code() != api.RemoteConflict {
+			t.Fatalf("live database destination %s error: %v", destination, err)
+		}
+		if _, statErr := os.Stat(fixture.databasePath); statErr != nil {
+			t.Fatalf("live database removed via %s: %v", destination, statErr)
+		}
 	}
 }
 
