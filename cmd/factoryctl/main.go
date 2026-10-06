@@ -1339,130 +1339,94 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 		if input.Action == "config" {
 			input.Action = "list"
 		}
-		if (len(args)-2)%2 != 0 {
-			return attemptCommand{}, false, false
-		}
 		configuration := api.IntakeConfiguration{Policy: "manual", PollSeconds: 60, AdmissionLimit: 25}
-		configurationFlags := false
-		configurationJSON := false
-		seen := map[string]bool{}
-		for i := 2; i < len(args); i += 2 {
-			key, value := args[i], args[i+1]
-			if key != "--trusted-author" && seen[key] {
-				return attemptCommand{}, false, false
+		configurationFlags, configurationJSON := false, false
+		flags, _, seen := newOnceFlagSet("intake")
+		// valueFlag registers a flag whose set function stores and validates
+		// its value; a configuring flag names the configuration field by field.
+		valueFlag := func(name string, configures bool, set func(string) bool) {
+			flags.Func(name[2:], "", func(value string) error {
+				if seen[name] && name != "--trusted-author" || !set(value) {
+					return errors.New("invalid flag value")
+				}
+				seen[name], configurationFlags = true, configurationFlags || configures
+				return nil
+			})
+		}
+		text := func(target *string) func(string) bool {
+			return func(value string) bool { *target = value; return true }
+		}
+		count := func(minimum, maximum uint64, set func(uint64)) func(string) bool {
+			return func(value string) bool {
+				n, ok := parseRevision(value)
+				set(n)
+				return ok && n >= minimum && n <= maximum
 			}
-			seen[key] = true
-			switch key {
-			case "--source":
-				input.SourceID = value
-			case "--project":
-				input.ProjectID = value
-			case "--revision":
-				n, ok := parseRevision(value)
-				if !ok {
-					return attemptCommand{}, false, false
-				}
-				input.ExpectedRevision = n
-			case "--reviewed-revision":
-				n, ok := parseRevision(value)
-				if !ok {
-					return attemptCommand{}, false, false
-				}
-				input.ReviewedRevision = n
-			case "--page":
-				n, ok := parseRevision(value)
-				if !ok || n > 1000 {
-					return attemptCommand{}, false, false
-				}
-				input.Page = uint32(n)
-			case "--issue":
-				n, ok := parseRevision(value)
-				if !ok {
-					return attemptCommand{}, false, false
-				}
-				input.IssueNumber = n
-			case "--hash":
-				input.ContentHash = value
-			case "--acceptance-cursor":
-				input.AcceptanceCursor = value
-			case "--acceptance":
-				input.AcceptanceID = value
-			case "--configuration":
-				if configurationFlags || json.Unmarshal([]byte(value), &configuration) != nil {
-					return attemptCommand{}, false, false
-				}
-				configurationJSON = true
-			case "--linear-team":
-				if configurationJSON || !kernel.ValidLinearID(value) {
-					return attemptCommand{}, false, false
-				}
-				configuration.LinearTeamID, configurationFlags = value, true
-				configuration.Repository = "Linear"
-			case "--key-file":
-				if input.Action != "linear_connect" {
-					return attemptCommand{}, false, false
-				}
-				file, err := os.Open(value)
-				if err != nil {
-					return attemptCommand{}, false, false
-				}
-				key, err := io.ReadAll(io.LimitReader(file, 513))
-				_ = file.Close()
-				if err != nil {
-					return attemptCommand{}, false, false
-				}
-				input.APIKey = strings.TrimSpace(string(key))
-			case "--repository":
-				if configurationJSON || !validIntakeRepository(value) {
-					return attemptCommand{}, false, false
-				}
-				configuration.Repository, configurationFlags = value, true
-			case "--target-repository":
-				if configurationJSON || !validHumanRequestKey(value) {
-					return attemptCommand{}, false, false
-				}
-				configuration.TargetRepositoryID, configurationFlags = value, true
-			case "--overseer":
-				if configurationJSON || !validHumanRequestKey(value) {
-					return attemptCommand{}, false, false
-				}
-				configuration.OverseerAgentID, configurationFlags = value, true
-			case "--label":
-				if configurationJSON || !validOperatorText(value, 1, 100) {
-					return attemptCommand{}, false, false
-				}
-				configuration.Label, configurationFlags = value, true
-			case "--policy":
-				if configurationJSON || value != "manual" && value != "trusted-authors" {
-					return attemptCommand{}, false, false
-				}
-				configuration.Policy, configurationFlags = strings.ReplaceAll(value, "-", "_"), true
-			case "--trusted-author":
-				if configurationJSON || !validOperatorText(value, 1, 100) {
-					return attemptCommand{}, false, false
-				}
-				configuration.TrustedAuthors, configurationFlags = append(configuration.TrustedAuthors, value), true
-			case "--poll-seconds":
-				n, ok := parseRevision(value)
-				if configurationJSON || !ok || n < 5 || n > 86400 {
-					return attemptCommand{}, false, false
-				}
-				configuration.PollSeconds, configurationFlags = uint32(n), true
-			case "--admission-limit":
-				n, ok := parseRevision(value)
-				if configurationJSON || !ok || n < 1 || n > 200 {
-					return attemptCommand{}, false, false
-				}
-				configuration.AdmissionLimit, configurationFlags = uint16(n), true
-			case "--priority":
-				n, err := strconv.ParseInt(value, 10, 64)
-				if configurationJSON || err != nil || value != strconv.FormatInt(n, 10) || n < -1_000_000 || n > 1_000_000 {
-					return attemptCommand{}, false, false
-				}
-				configuration.PriorityDefault, configurationFlags = n, true
-			default:
-				return attemptCommand{}, false, false
+		}
+		valueFlag("--source", false, text(&input.SourceID))
+		valueFlag("--project", false, text(&input.ProjectID))
+		valueFlag("--hash", false, text(&input.ContentHash))
+		valueFlag("--acceptance-cursor", false, text(&input.AcceptanceCursor))
+		valueFlag("--acceptance", false, text(&input.AcceptanceID))
+		valueFlag("--revision", false, count(1, ^uint64(0), func(n uint64) { input.ExpectedRevision = n }))
+		valueFlag("--reviewed-revision", false, count(1, ^uint64(0), func(n uint64) { input.ReviewedRevision = n }))
+		valueFlag("--page", false, count(1, 1000, func(n uint64) { input.Page = uint32(n) }))
+		valueFlag("--issue", false, count(1, ^uint64(0), func(n uint64) { input.IssueNumber = n }))
+		valueFlag("--configuration", false, func(value string) bool {
+			configurationJSON = true
+			return json.Unmarshal([]byte(value), &configuration) == nil
+		})
+		valueFlag("--key-file", false, func(value string) bool {
+			if input.Action != "linear_connect" {
+				return false
 			}
+			file, err := os.Open(value)
+			if err != nil {
+				return false
+			}
+			key, err := io.ReadAll(io.LimitReader(file, 513))
+			_ = file.Close()
+			input.APIKey = strings.TrimSpace(string(key))
+			return err == nil
+		})
+		valueFlag("--linear-team", true, func(value string) bool {
+			configuration.LinearTeamID, configuration.Repository = value, "Linear"
+			return kernel.ValidLinearID(value)
+		})
+		valueFlag("--repository", true, func(value string) bool {
+			configuration.Repository = value
+			return validIntakeRepository(value)
+		})
+		valueFlag("--target-repository", true, func(value string) bool {
+			configuration.TargetRepositoryID = value
+			return validHumanRequestKey(value)
+		})
+		valueFlag("--overseer", true, func(value string) bool {
+			configuration.OverseerAgentID = value
+			return validHumanRequestKey(value)
+		})
+		valueFlag("--label", true, func(value string) bool {
+			configuration.Label = value
+			return validOperatorText(value, 1, 100)
+		})
+		valueFlag("--policy", true, func(value string) bool {
+			configuration.Policy = strings.ReplaceAll(value, "-", "_")
+			return value == "manual" || value == "trusted-authors"
+		})
+		valueFlag("--trusted-author", true, func(value string) bool {
+			configuration.TrustedAuthors = append(configuration.TrustedAuthors, value)
+			return validOperatorText(value, 1, 100)
+		})
+		valueFlag("--poll-seconds", true, count(5, 86400, func(n uint64) { configuration.PollSeconds = uint32(n) }))
+		valueFlag("--admission-limit", true, count(1, 200, func(n uint64) { configuration.AdmissionLimit = uint16(n) }))
+		valueFlag("--priority", true, func(value string) bool {
+			n, err := strconv.ParseInt(value, 10, 64)
+			configuration.PriorityDefault = n
+			return err == nil && value == strconv.FormatInt(n, 10) && n >= -1_000_000 && n <= 1_000_000
+		})
+		// The configuration is named whole or field by field, never both.
+		if !parsePairedFlags(flags, args[2:]) || configurationFlags && configurationJSON {
+			return attemptCommand{}, false, false
 		}
 		if configurationFlags || configurationJSON {
 			input.Configuration = &configuration
@@ -1490,31 +1454,20 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 			return attemptCommand{}, false, false
 		}
 		command := attemptCommand{kind: commandProjectRepository, provider: action}
-		if (len(args)-3)%2 != 0 {
+		var revision string
+		flags, stringFlag, seen := newOnceFlagSet("repository")
+		stringFlag("--project", &command.project)
+		stringFlag("--id", &command.repository)
+		stringFlag("--name", &command.name)
+		stringFlag("--root", &command.root)
+		stringFlag("--base", &command.body)
+		stringFlag("--revision", &revision)
+		if !parsePairedFlags(flags, args[3:]) || seen["--project"] && !validHumanRequestKey(command.project) || seen["--id"] && !validHumanRequestKey(command.repository) || seen["--name"] && !validOperatorText(command.name, 1, 128) || seen["--root"] && !validHomeArg(command.root) || seen["--base"] && !validOperatorText(command.body, 1, 256) {
 			return attemptCommand{}, false, false
 		}
-		for i := 3; i < len(args); i += 2 {
-			key, value := args[i], args[i+1]
-			switch {
-			case key == "--project" && validHumanRequestKey(value):
-				command.project = value
-			case key == "--id" && validHumanRequestKey(value):
-				command.repository = value
-			case key == "--name" && validOperatorText(value, 1, 128):
-				command.name = value
-			case key == "--root" && validHomeArg(value):
-				command.root = value
-			case key == "--base" && validOperatorText(value, 1, 256):
-				command.body = value
-			case key == "--revision":
-				n, ok := parseRevision(value)
-				if !ok {
-					return attemptCommand{}, false, false
-				}
-				command.expectedRevision = n
-			default:
-				return attemptCommand{}, false, false
-			}
+		var ok bool
+		if command.expectedRevision, ok = parseRevision(revision); seen["--revision"] && !ok {
+			return attemptCommand{}, false, false
 		}
 		if action == "fetch" || action == "github" {
 			return command, false, len(args) == 5 && args[3] == "--id" && command.repository != ""
