@@ -18,7 +18,7 @@ import {
 } from "@dark-factory/client";
 import { AgentStrip, StageMeter } from "../console-screens.js";
 import { AnswerControls } from "../console-interactions.js";
-import { HumanRequestFlow, type HumanRequestFlowSelection } from "../human-request-flow.js";
+import { HumanRequestFlow, busy, type HumanRequestFlowSelection } from "../human-request-flow.js";
 import {
   FACTORY_UNREACHABLE,
   INVITATION_SPENT,
@@ -220,7 +220,7 @@ export function RemoteApp(props: RemoteAppProps = {}) {
   const needsYou = owner?.needsYou() ?? [];
   const selectedId = owner?.selected();
   const selected = factories.find((factory) => factory.nodeId === selectedId) ?? factories[0];
-  const working = detail !== undefined && busy(detail);
+  const working = detail !== undefined && busy(detail.phase);
   // A stored subscription is only alerts if the browser still lets this site
   // notify; a permission revoked in settings puts the button back.
   const alertsOn = owner?.push() !== undefined && ((globalThis as { Notification?: { permission?: string } }).Notification?.permission ?? "granted") === "granted";
@@ -579,12 +579,12 @@ export function RemoteApp(props: RemoteAppProps = {}) {
         </div>
 
         {detail === undefined ? null : (
-          <dialog ref={question} className="dfFactoryConsole__section dfRemote__detail" aria-label="Selected question" aria-live="polite" onCancel={(event) => { if (busy(detail)) event.preventDefault(); }} onClose={() => { setCancelPhrase(undefined); human.current?.clear(true); }}>
+          <dialog ref={question} className="dfFactoryConsole__section dfRemote__detail" aria-label="Selected question" aria-live="polite" onCancel={(event) => { if (busy(detail.phase)) event.preventDefault(); }} onClose={() => { setCancelPhrase(undefined); human.current?.clear(true); }}>
             <button
               type="button"
               className="dfRemote__close"
               autoFocus
-              disabled={busy(detail)}
+              disabled={busy(detail.phase)}
               onClick={() => question.current?.close()}
             >
               CLOSE
@@ -599,13 +599,13 @@ export function RemoteApp(props: RemoteAppProps = {}) {
             {detail.detail === undefined ? null : (
               <>
                 <p className="dfRemote__questionText">{detail.detail.question}</p>
-                <AnswerControls surface="remote" options={detail.detail.options} canReply={detail.detail.canReply} reply={detail.reply} replyMaxBytes={detail.detail.replyMaxBytes} busy={busy(detail)} disabled={!actionable(detail.scope.nodeId)} onReplyChange={changeReply} onReply={reply} submitLabel="REPLY" submittingLabel="REPLYING…" />
+                    <AnswerControls surface="remote" options={detail.detail.options} canReply={detail.detail.canReply} reply={detail.reply} replyMaxBytes={detail.detail.replyMaxBytes} busy={busy(detail.phase)} disabled={!actionable(detail.scope.nodeId)} onReplyChange={changeReply} onReply={reply} submitLabel="REPLY" submittingLabel="REPLYING…" />
                 {detail.detail.canReply ? null : <p className="dfFactoryConsole__empty">{detail.request.status === "open" ? "THIS CANNOT BE ANSWERED RIGHT NOW." : `THIS DECISION IS ${detail.request.status.replaceAll("_", " ").toUpperCase()}.`}</p>}
                 {detail.detail.cancelRun === null ? null : cancelPhrase === undefined ? (
                   <button
                     type="button"
                     className="dfRemote__cancelOpen"
-                    disabled={busy(detail) || !actionable(detail.scope.nodeId)}
+                    disabled={busy(detail.phase) || !actionable(detail.scope.nodeId)}
                     onClick={() => setCancelPhrase("")}
                   >
                     CANCEL RUN
@@ -617,14 +617,14 @@ export function RemoteApp(props: RemoteAppProps = {}) {
                       id="dfRemoteCancel"
                       className="dfRemote__cancelText"
                       value={cancelPhrase}
-                      disabled={busy(detail) || !actionable(detail.scope.nodeId)}
+                    disabled={busy(detail.phase) || !actionable(detail.scope.nodeId)}
                       onChange={(event) => setCancelPhrase(event.currentTarget.value)}
                     />
                     <div className="dfRemote__actions">
                       <button
                         type="button"
                         className="dfRemote__cancelAction"
-                        disabled={busy(detail) || !actionable(detail.scope.nodeId) || cancelPhrase.trim().toUpperCase() !== CANCEL_PHRASE}
+                    disabled={busy(detail.phase) || !actionable(detail.scope.nodeId) || cancelPhrase.trim().toUpperCase() !== CANCEL_PHRASE}
                         onClick={cancelRun}
                       >
                         {detail.phase === "cancelling" ? "CANCELLING…" : CANCEL_PHRASE}
@@ -632,7 +632,7 @@ export function RemoteApp(props: RemoteAppProps = {}) {
                       <button
                         type="button"
                         className="dfRemote__cancelKeep"
-                        disabled={busy(detail)}
+                    disabled={busy(detail.phase)}
                         onClick={() => setCancelPhrase(undefined)}
                       >
                         KEEP RUNNING
@@ -657,10 +657,6 @@ function invitationArrived(hash: string): boolean {
 }
 
 /** A read or a one-shot effect this console is already waiting on. */
-function busy(detail: Detail): boolean {
-  return detail.phase === "loading" || detail.phase === "replying" || detail.phase === "cancelling";
-}
-
 /** Live work only; what has finished is a count, so it never buries it. */
 function ProjectsSection({ state }: { state: StateView | undefined }) {
   const groups = state === undefined ? [] : remoteProjectGroups(state);

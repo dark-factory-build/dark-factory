@@ -748,13 +748,13 @@ func parse(args []string) (attemptCommand, bool, bool) {
 		return attemptCommand{kind: commandAttemptSource, id: values["--task"]}, false, ok && validHumanRequestKey(values["--task"])
 	case "succeed":
 		values, ok := pairedFlagValues(args[2:], true, "--result")
-		return attemptCommand{kind: commandSucceed, text: values["--result"]}, false, ok && (len(args) == 2 || strings.TrimSpace(values["--result"]) != "")
+		return attemptCommand{kind: commandSucceed, text: values["--result"]}, false, ok && utf8.ValidString(values["--result"]) && (len(args) == 2 || strings.TrimSpace(values["--result"]) != "")
 	case "block":
 		values, ok := pairedFlagValues(args[2:], true, "--detail")
-		return attemptCommand{kind: commandBlock, text: values["--detail"]}, false, ok && values["--detail"] != ""
+		return attemptCommand{kind: commandBlock, text: values["--detail"]}, false, ok && values["--detail"] != "" && utf8.ValidString(values["--detail"])
 	case "fail":
 		values, ok := pairedFlagValues(args[2:], true, "--detail")
-		return attemptCommand{kind: commandFail, text: values["--detail"]}, false, ok
+		return attemptCommand{kind: commandFail, text: values["--detail"]}, false, ok && utf8.ValidString(values["--detail"])
 	case "request-human":
 		// The repeatable options follow the fixed key and question.
 		head := min(len(args), 6)

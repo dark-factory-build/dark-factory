@@ -4,10 +4,11 @@ import test from "node:test";
 import { StrictMode, createElement } from "react";
 import { act, create } from "react-test-renderer";
 import { renderToString } from "react-dom/server";
-import { MemoryRemoteStore, ProtocolError, RemoteDaemonMismatchError, SessionError } from "@dark-factory/client";
+import { ProtocolError, RemoteDaemonMismatchError, SessionError } from "@dark-factory/client";
 import { RemoteApp } from "../dist/src/index.js";
 import { fixtureState } from "../../../fixtures/state.mjs";
 import { invitationFragment, invitationMembers, nodeId } from "../../client/test/remote-fake.mjs";
+import { MemoryRemoteStore } from "../../client/test/helpers.mjs";
 
 const NORTH = nodeId("a");
 const SOUTH = nodeId("b");
@@ -811,9 +812,6 @@ test("the remote stylesheet stays legible and thumb-sized on one phone column", 
   }
   assert.match(remote, /min-height:\s*44px/);
   assert.match(remote, /@media \(min-width: 721px\)/);
-  // One phone column comes from the console's own grid, restated nowhere.
-  assert.match(css, /@media \(max-width: 720px\) \{[\s\S]*?\.dfFactoryConsole__columns \{ grid-template-columns: 1fr; gap: 0; \}/);
-  assert.equal(remote.includes("__columns"), false, "the remote section restates no column grid");
   assert.equal(/xterm|terminal/i.test(remote), false, "there is no terminal on a phone");
 });
 

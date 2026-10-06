@@ -23,7 +23,6 @@ import {
   type SessionErrorCode,
   type SessionStatus,
   type DiscoveredAccountView,
-  type RepositoryMutation,
   type RepositoryView,
   type IntakeView,
   type StateView,
@@ -36,7 +35,7 @@ import {
 } from "@dark-factory/client";
 import { agentCurrentTask, type RunPathSample } from "./console-view.js";
 import { FactorySettingsCoordinator, type FactoryGitHubView, type FactoryRemoteInvite } from "./factory-settings-coordinator.js";
-import { HumanRequestFlow, type HumanRequestPhase } from "./human-request-flow.js";
+import { HumanRequestFlow, finiteError, type HumanRequestPhase } from "./human-request-flow.js";
 import { MAX_PENDING_INPUT_BYTES, TerminalController, type TerminalControllerSnapshot, type TerminalErrorSource, type TerminalSurface } from "./terminal-controller.js";
 
 type BrowserEndpoint = Readonly<{ url: string; host: string }>;
@@ -286,6 +285,7 @@ export class FactoryAppController {
   }
 
   get snapshot(): FactoryAppSnapshot { return this.#snapshot(); }
+  get settings(): FactorySettingsCoordinator { return this.#settings; }
 
   taskList(agentId: string, cursor?: { beforeUpdatedAtMs?: bigint; beforeTaskId?: string }): Promise<TaskListView> {
     return this.#client?.session?.getTaskList(agentId, cursor) ?? Promise.reject(new SessionError("closed"));
@@ -811,9 +811,6 @@ export class FactoryAppController {
     if (selected !== undefined && detail?.nextPeerOffset !== undefined && taskID !== undefined && revision !== undefined) void this.#loadTaskDetail(selected, taskID, revision, detail.nextPeerOffset, detail.head);
   }
 
-  /** The provider logins on this machine; SETTINGS explicitly asks for them. */
-  loadAccounts(): Promise<void> { return this.#settings.loadAccounts(); }
-
   /** Link one discovered login, then reread discovery so it shows as linked. */
   linkAccount(request: { provider: "claude_code" | "codex"; home: string; label: string }): Promise<void> {
     return this.#settings.linkAccount(request);
@@ -822,24 +819,6 @@ export class FactoryAppController {
   updateAccount(request: Parameters<BrowserSession["updateAccount"]>[0]): Promise<void> {
     return this.#settings.updateAccount(request);
   }
-
-  loadRepositories(projectId: string): Promise<void> { return this.#settings.loadRepositories(projectId); }
-
-  mutateRepository(request: RepositoryMutation): Promise<void> { return this.#settings.mutateRepository(request); }
-
-  loadIntake(projectId: string): Promise<void> { return this.#settings.loadIntake(projectId); }
-  intakeAction(projectId: string, request: Parameters<BrowserSession["intake"]>[0]): Promise<void> { return this.#settings.intakeAction(projectId, request); }
-
-  createProject(request: { name: string; root: string }): Promise<void> { return this.#settings.createProject(request); }
-
-  loadDevices(): Promise<void> { return this.#settings.loadDevices(); }
-
-  githubConnection(request: Parameters<BrowserSession["githubConnection"]>[0]): Promise<void> { return this.#settings.githubConnection(request); }
-
-  revokeDevice(request: { clientId: string; expectedRevision: bigint }): Promise<void> { return this.#settings.revokeDevice(request); }
-
-  /** The mint is never retried: a failure is reported and the operator asks again. */
-  inviteRemote(): Promise<void> { return this.#settings.inviteRemote(); }
 
   dismissRemoteInvite(): void {
     if (!this.#closed) this.#settings.dismissRemoteInvite();
@@ -1519,10 +1498,6 @@ export class FactoryAppController {
     this.#lastStatus = status;
     try { this.#options.onStatusChange?.(status); } catch { /* host callbacks cannot break controller ownership */ }
   }
-}
-
-function finiteError(error: unknown): SessionError | ProtocolError {
-  return error instanceof SessionError || error instanceof ProtocolError ? error : new SessionError("connection");
 }
 
 function sampleFor(taskId: string, taskRevision: bigint, projectId: string, answer: RunPathsView): RunPathSample | undefined {

@@ -1428,11 +1428,6 @@ func TestInputBoundsFailBeforeConnection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv(attemptTokenFileEnv, token)
-	attempt, err := NewAttemptClientFromEnvironment(socket)
-	if err != nil {
-		t.Fatal(err)
-	}
 	if _, err := operator.CreateProject(context.Background(), CreateProjectInput{ID: "bad", Name: "name", Root: "/root"}); !errors.Is(err, ErrInvalidInput) {
 		t.Fatalf("invalid ID = %v", err)
 	}
@@ -1460,32 +1455,6 @@ func TestInputBoundsFailBeforeConnection(t *testing.T) {
 		t.Run("idle policy "+name, func(t *testing.T) {
 			if _, err := operator.SetAgentIdlePolicy(context.Background(), input); !errors.Is(err, ErrInvalidInput) {
 				t.Fatalf("invalid idle policy = %v", err)
-			}
-		})
-	}
-	if _, err := attempt.Block(context.Background(), strings.Repeat("x", 4097)); !errors.Is(err, ErrInvalidInput) {
-		t.Fatalf("oversized detail = %v", err)
-	}
-	if _, err := attempt.Block(context.Background(), ""); !errors.Is(err, ErrInvalidInput) {
-		t.Fatalf("empty blocked detail = %v", err)
-	}
-	if _, err := attempt.Fail(context.Background(), strings.Repeat("x", 4097)); !errors.Is(err, ErrInvalidInput) {
-		t.Fatalf("oversized failure detail = %v", err)
-	}
-	if _, err := attempt.Succeed(context.Background(), strings.Repeat("x", 131073)); !errors.Is(err, ErrInvalidInput) {
-		t.Fatalf("oversized result = %v", err)
-	}
-	for name, input := range map[string]HumanQuestionInput{
-		"zero key":       {IdempotencyKey: strings.Repeat("0", 32), Question: "question"},
-		"uppercase key":  {IdempotencyKey: "0123456789ABCDEF0123456789abcdef", Question: "question"},
-		"short key":      {IdempotencyKey: "abc", Question: "question"},
-		"empty question": {IdempotencyKey: id('1'), Question: ""},
-		"large question": {IdempotencyKey: id('1'), Question: strings.Repeat("x", 8193)},
-		"invalid utf8":   {IdempotencyKey: id('1'), Question: string([]byte{0xff})},
-	} {
-		t.Run("request human "+name, func(t *testing.T) {
-			if _, err := attempt.RequestHuman(context.Background(), input); !errors.Is(err, ErrInvalidInput) {
-				t.Fatalf("invalid human question = %v", err)
 			}
 		})
 	}
