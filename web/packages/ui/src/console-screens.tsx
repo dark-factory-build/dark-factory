@@ -8,6 +8,7 @@ import {
   selectFloor,
   projectFloor,
   projectProposals,
+  projectLabel,
   type RunPathSample,
 } from "./console-view.js";
 import { FactoryScene, AgentSprite } from "./factory-scene/factory-scene.js";
@@ -15,14 +16,6 @@ import { inProgressProduction, productionKey, type ProductionContraption } from 
 import { type ProjectContentCall } from "./project-library.js";
 import { type SceneNode } from "./factory-scene/scene.js";
 import { DEFAULT_FLOOR_APPEARANCE, type FloorAppearance } from "./floor-appearance.js";
-
-function shortID(value: string): string {
-  return value.slice(0, 8);
-}
-
-function projectLabel(state: StateView | undefined, projectID: string): string {
-  return state?.projects.get(projectID)?.name ?? `project ${shortID(projectID)}`;
-}
 
 /** The phone's floor: every agent as its own sprite, with what it is doing. */
 export function AgentStrip({ state, ask }: { state: StateView | undefined; ask?: (agentId: string) => (() => void) | undefined }) {
@@ -39,7 +32,7 @@ export function AgentStrip({ state, ask }: { state: StateView | undefined; ask?:
             const cell = (
               <>
                 <AgentSprite agent={agent} activity={agentActivity(agent, state)} />
-                <span className="dfConsoleStrip__agentName">{agent.name} · {projectLabel(state, agent.project_id)}</span>
+                <span className="dfConsoleStrip__agentName">{agent.name} · {projectLabel(state?.projects, agent.project_id)}</span>
                 <span className="dfConsoleStrip__agentPhase">{status === "needs-you" ? "! needs you" : status}</span>
               </>
             );
@@ -276,11 +269,11 @@ function AgentRow({
   const task = agentCurrentTask(agent, state);
   let queued = 0;
   for (const item of state.tasks.values()) if (item.assigned_agent_id === agent.id && item.status === "queued") queued += 1;
-  const label = `${agent.name}: ${activity} · ${projectLabel(state, agent.project_id)}`;
+  const label = `${agent.name}: ${activity} · ${projectLabel(state?.projects, agent.project_id)}`;
   const cells = (
     <>
       <AgentSprite agent={agent} activity={agentActivity(agent, state)} />
-      <span className="dfConsoleRow__title">{agent.name} · {projectLabel(state, agent.project_id)}</span>
+      <span className="dfConsoleRow__title">{agent.name} · {projectLabel(state?.projects, agent.project_id)}</span>
       <span className="dfAgentList__provider">{agent.effective_model === "" ? agent.provider : `${agent.provider} · ${agent.effective_model}`}</span>
       <span className="dfAgentList__activity">{agent.archived ? "archived" : activity === "needs-you" ? "! needs you" : activity}</span>
       <span className="dfConsoleRow__agent">{task?.title ?? "no current task"}</span>

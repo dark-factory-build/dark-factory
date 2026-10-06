@@ -36,7 +36,7 @@ import {
 } from "@dark-factory/client";
 import { agentCurrentTask, type RunPathSample } from "./console-view.js";
 import { FactorySettingsCoordinator, type FactoryGitHubView, type FactoryRemoteInvite } from "./factory-settings-coordinator.js";
-import { HumanRequestFlow, type HumanRequestPhase } from "./human-request-flow.js";
+import { HumanRequestFlow, finiteError, type HumanRequestPhase } from "./human-request-flow.js";
 import { MAX_PENDING_INPUT_BYTES, TerminalController, type TerminalControllerSnapshot, type TerminalErrorSource, type TerminalSurface } from "./terminal-controller.js";
 
 type BrowserEndpoint = Readonly<{ url: string; host: string }>;
@@ -1519,10 +1519,6 @@ export class FactoryAppController {
     this.#lastStatus = status;
     try { this.#options.onStatusChange?.(status); } catch { /* host callbacks cannot break controller ownership */ }
   }
-}
-
-function finiteError(error: unknown): SessionError | ProtocolError {
-  return error instanceof SessionError || error instanceof ProtocolError ? error : new SessionError("connection");
 }
 
 function sampleFor(taskId: string, taskRevision: bigint, projectId: string, answer: RunPathsView): RunPathSample | undefined {

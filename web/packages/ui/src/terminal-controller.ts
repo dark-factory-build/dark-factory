@@ -10,6 +10,7 @@ import {
   type TerminalReset,
   type TerminalTarget,
 } from "@dark-factory/client";
+import { finiteError } from "./human-request-flow.js";
 
 const MAX_PENDING_INPUT_BYTES = 64 * 1024;
 
@@ -466,10 +467,6 @@ class TerminalController {
   #publish(): void {
     try { this.#options.onChange(this.#snapshot()); } catch { /* presentation callbacks never own the session */ }
   }
-}
-
-function finiteError(error: unknown): SessionError | ProtocolError {
-  return error instanceof SessionError || error instanceof ProtocolError ? error : new SessionError("connection");
 }
 
 export { MAX_PENDING_INPUT_BYTES, TerminalController };
