@@ -269,7 +269,8 @@ func (daemon *Daemon) finishReviewRouting(ctx context.Context, project kernel.Pr
 		return nil
 	}
 	if op.State == "failed" {
-		err = daemon.escalatePull(&op, "the Maintainer App did not enqueue it: "+op.Detail)
+		err = daemon.escalatePull(&op, "the merge queue did not take it: "+op.Detail)
+		op.Handled = true // escalated here: the failed pass must not escalate it again
 	} else {
 		err = daemon.routeSendBack(ctx, project, repository, &op, at)
 	}
