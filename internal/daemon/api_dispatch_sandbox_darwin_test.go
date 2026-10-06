@@ -62,6 +62,9 @@ func TestDispatchFixtureTraversesUnreadableAncestors(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := exec.Command("/usr/bin/sandbox-exec", "-p", "(version 1)(allow default)", "/usr/bin/true").Run(); err != nil {
+		t.Skipf("nested sandbox-exec unavailable: %v", err)
+	}
 	// Only directory data is denied: descendants remain authorized. This
 	// separates traversal from listing without loosening any live profile.
 	profile := fmt.Sprintf(`(version 1)(allow default)
