@@ -202,6 +202,19 @@ func TestReviewerAccountIsNeverThePullRequestAuthors(t *testing.T) {
 	}
 }
 
+// Every codex worker login authored the change, so the claude worker reviews.
+func TestReviewFallsBackToTheOtherProviderWhenOnlyAuthorsRemain(t *testing.T) {
+	backend, _ := reviewerFixture(t)
+	checkout, request := reviewCheckout(t)
+	if request.Provider != "codex" {
+		t.Fatalf("fixture provider = %q, want codex", request.Provider)
+	}
+	verdict, err := backend.Review(context.Background(), checkout, request)
+	if err != nil || verdict.Event != "ALLOW" || !strings.Contains(verdict.Body, "config=") {
+		t.Fatalf("verdict=%+v err=%v, want the claude reviewer's ALLOW", verdict, err)
+	}
+}
+
 type fixedReviewCheckout struct {
 	*daemonReviewBackend
 	dir string

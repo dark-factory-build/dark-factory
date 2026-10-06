@@ -456,21 +456,36 @@ var reviewDeadline = 20 * time.Minute
 var errProviderLimited = errors.New("provider_limited")
 
 func (b *daemonReviewBackend) Review(ctx context.Context, checkout string, request review.Request) (review.Verdict, error) {
-	kind := kernel.ProviderCodex
+	// Independence is a non-author account, not a provider: when every
+	// account of the requested provider authored the change, the other
+	// provider reviews it.
+	other := "claude"
 	if request.Provider == "claude" {
-		kind = kernel.ProviderClaudeCode
+		other = "codex"
 	}
-	homes, err := b.daemon.store.ReviewerAccountHomes(ctx, b.project, kind, b.repository, request.PullNumber)
-	if err != nil {
-		return review.Verdict{}, err
+	var kind kernel.Provider
+	var name string
+	var homes []string
+	for _, name = range []string{request.Provider, other} {
+		kind = kernel.ProviderCodex
+		if name == "claude" {
+			kind = kernel.ProviderClaudeCode
+		}
+		var err error
+		if homes, err = b.daemon.store.ReviewerAccountHomes(ctx, b.project, kind, b.repository, request.PullNumber); err != nil {
+			return review.Verdict{}, err
+		}
+		if len(homes) != 0 {
+			break
+		}
 	}
 	if len(homes) == 0 {
-		return review.Verdict{}, errors.New("review: no non-author worker account for the provider")
+		return review.Verdict{}, errors.New("review: no non-author worker account for any provider")
 	}
 	// The provider comes from the workers' tool path: launchd's PATH lacks it.
-	tool, err := provider.WalkToolPath(b.daemon.toolPath, request.Provider)
+	tool, err := provider.WalkToolPath(b.daemon.toolPath, name)
 	if err != nil {
-		return review.Verdict{}, fmt.Errorf("review: %s not on the tool path: %w", request.Provider, err)
+		return review.Verdict{}, fmt.Errorf("review: %s not on the tool path: %w", name, err)
 	}
 	ctx, cancel := context.WithTimeout(ctx, reviewDeadline)
 	defer cancel()
