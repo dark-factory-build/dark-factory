@@ -226,7 +226,7 @@ func encodeDecoded(frame ControlFrame) ([]byte, error) {
 	case TerminalLeaseRenew:
 		return encodeControl(frame.Type, frame.ID, value)
 	case TerminalLeaseRelease:
-		return EncodeControl(TypeTerminalLeaseRelease, frame.ID, value)
+		return encodeControl(TypeTerminalLeaseRelease, frame.ID, value)
 	case TerminalLeaseResult:
 		return encodeControl(TypeTerminalLeaseResult, frame.ID, value)
 	case TerminalResize:

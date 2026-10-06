@@ -315,9 +315,9 @@ func (fixture *blackBoxFixture) waitClient(t *testing.T, output func() string) *
 		client, err := api.NewOperatorClient(socket, token)
 		if err == nil {
 			callContext, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-			snapshot, healthErr := client.Snapshot(callContext)
+			_, healthErr := client.Snapshot(callContext)
 			cancel()
-			if healthErr == nil && snapshot.Head >= 0 {
+			if healthErr == nil {
 				return client
 			}
 		}
