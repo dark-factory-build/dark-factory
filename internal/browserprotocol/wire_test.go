@@ -661,6 +661,9 @@ func TestManifestMatchesImplementedRegistry(t *testing.T) {
 		if actual.Type == "" || actual.Direction == "" || actual.ID == "" || actual.Fixture == "" {
 			t.Fatalf("control[%d] incomplete: %+v", i, actual)
 		}
+		if (actual.ID == "required") != idRequired(MessageType(actual.Type)) {
+			t.Fatalf("%s id drift: %q", actual.Type, actual.ID)
+		}
 		if seenFixtures[actual.Fixture] {
 			t.Fatalf("duplicate control fixture %q", actual.Fixture)
 		}
