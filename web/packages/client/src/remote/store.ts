@@ -36,22 +36,6 @@ export interface RemoteStore {
 const DATABASE = "dark-factory-remote";
 const BINDINGS = "bindings";
 
-/** Test double and the shape every implementation must match. */
-export class MemoryRemoteStore implements RemoteStore {
-  #bindings = new Map<string, RemoteBinding>();
-
-  async list(): Promise<RemoteBinding[]> { return [...this.#bindings.values()].map(copy); }
-
-  async put(binding: RemoteBinding): Promise<void> {
-    validate(binding);
-    this.#bindings.set(binding.nodeId, copy(binding));
-  }
-
-  async forgetBinding(nodeId: string): Promise<void> { this.#bindings.delete(nodeId); }
-
-  async forgetDevice(): Promise<void> { this.#bindings.clear(); }
-}
-
 /**
  * The durable store. A CryptoKey survives structured cloning into IndexedDB
  * without ever becoming exportable, which is the only reason a browser can hold

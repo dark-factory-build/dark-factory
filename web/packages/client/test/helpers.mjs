@@ -1,21 +1,37 @@
-import { malformed, normalizeBoundary } from "./errors.js";
-import { MAX_TERMINAL_PAYLOAD, TERMINAL_FRAME_VERSION, TERMINAL_HEADER_BYTES } from "./manifest.js";
+import { ProtocolError } from "../dist/src/errors.js";
+import { MAX_TERMINAL_PAYLOAD, TERMINAL_FRAME_VERSION, TERMINAL_HEADER_BYTES } from "../dist/src/manifest.js";
 
-export type TerminalDirection = "input" | "output";
-export type TerminalFrame = {
-  direction: TerminalDirection;
-  sessionId: Uint8Array;
-  sequence: bigint;
-  leaseGeneration: bigint;
-  payload: Uint8Array;
-};
+export class MemoryRemoteStore {
+  #bindings = new Map();
 
-export function encodeTerminalInput(sessionId: Uint8Array, sequence: bigint, leaseGeneration: bigint, payload: Uint8Array): Uint8Array {
-  return normalizeBoundary(() => encode({ direction: "input", sessionId, sequence, leaseGeneration, payload }));
+  async list() { return [...this.#bindings.values()].map(copy); }
+  async put(binding) { this.#bindings.set(binding.nodeId, copy(binding)); }
+  async forgetBinding(nodeId) { this.#bindings.delete(nodeId); }
+  async forgetDevice() { this.#bindings.clear(); }
 }
-export function decodeTerminalOutput(data: Uint8Array): TerminalFrame { return normalizeBoundary(() => decode(data, "output")); }
 
-function encode(frame: TerminalFrame): Uint8Array {
+function copy(binding) {
+  const result = { ...binding };
+  if (binding.publicKeySEC1 !== undefined) result.publicKeySEC1 = binding.publicKeySEC1.slice();
+  return result;
+}
+
+export async function verifyP256Signature(publicKeySEC1, signature, signed) {
+  if (!(publicKeySEC1 instanceof Uint8Array) || !(signature instanceof Uint8Array) || !(signed instanceof Uint8Array)) throw new ProtocolError("malformed");
+  if (publicKeySEC1.length !== 65 || publicKeySEC1[0] !== 4 || signature.length !== 64) return false;
+  try {
+    const key = await globalThis.crypto.subtle.importKey("raw", publicKeySEC1, { name: "ECDSA", namedCurve: "P-256" }, false, ["verify"]);
+    return await globalThis.crypto.subtle.verify({ name: "ECDSA", hash: "SHA-256" }, key, signature, signed);
+  } catch { return false; }
+}
+
+export function encodeTerminalOutput(sessionId, sequence, payload) {
+  return encode({ direction: "output", sessionId, sequence, leaseGeneration: 0n, payload });
+}
+
+export function decodeTerminalInput(data) { return decode(data, "input"); }
+
+function encode(frame) {
   if (!(frame.sessionId instanceof Uint8Array) || !(frame.payload instanceof Uint8Array) || typeof frame.sequence !== "bigint" || typeof frame.leaseGeneration !== "bigint") malformed();
   if (frame.sessionId.length !== 16 || frame.sessionId.every((b) => b === 0) || frame.payload.length === 0 || frame.payload.length > MAX_TERMINAL_PAYLOAD) malformed();
   if (frame.sequence < 0n || frame.leaseGeneration < 0n || frame.sequence > 0xffff_ffff_ffff_ffffn || frame.leaseGeneration > 0xffff_ffff_ffff_ffffn) malformed();
@@ -25,7 +41,8 @@ function encode(frame: TerminalFrame): Uint8Array {
   result.set([0x44, 0x46, TERMINAL_FRAME_VERSION, frame.direction === "input" ? 1 : 2], 0); result.set(frame.sessionId, 4);
   view.setBigUint64(20, frame.sequence); view.setBigUint64(28, frame.leaseGeneration); view.setUint32(36, frame.payload.length); result.set(frame.payload, TERMINAL_HEADER_BYTES); return result;
 }
-function decode(data: Uint8Array, direction: TerminalDirection): TerminalFrame {
+
+function decode(data, direction) {
   if (!(data instanceof Uint8Array)) malformed();
   if (data.length < TERMINAL_HEADER_BYTES || data.length > TERMINAL_HEADER_BYTES + MAX_TERMINAL_PAYLOAD) malformed();
   const view = new DataView(data.buffer, data.byteOffset, data.byteLength); if (data[0] !== 0x44 || data[1] !== 0x46 || data[2] !== TERMINAL_FRAME_VERSION) malformed();
@@ -35,3 +52,5 @@ function decode(data: Uint8Array, direction: TerminalDirection): TerminalFrame {
   if ((direction === "input" && (sequence === 0n || leaseGeneration === 0n)) || (direction === "output" && (leaseGeneration !== 0n || sequence + BigInt(length) >= 0x1_0000_0000_0000_0000n))) malformed();
   return { direction, sessionId, sequence, leaseGeneration, payload: data.slice(TERMINAL_HEADER_BYTES) };
 }
+
+function malformed() { throw new ProtocolError("malformed"); }

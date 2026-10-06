@@ -38,7 +38,6 @@ export type TerminalOptions = Readonly<{
 export interface TerminalHandle {
   attach(): Promise<TerminalAttachOutcome>;
   acquireInput(): Promise<TerminalLease>;
-  releaseInput(): Promise<TerminalLeaseResult>;
   sendInput(bytes: Uint8Array): Promise<TerminalInputResult>;
   resize(rows: number, cols: number): Promise<{ sessionId: string; generation: bigint; rows: number; cols: number }>;
   detach(): Promise<void>;

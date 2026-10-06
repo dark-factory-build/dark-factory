@@ -4,10 +4,11 @@ import test from "node:test";
 import { StrictMode, createElement } from "react";
 import { act, create } from "react-test-renderer";
 import { renderToString } from "react-dom/server";
-import { MemoryRemoteStore, ProtocolError, RemoteDaemonMismatchError, SessionError } from "@dark-factory/client";
+import { ProtocolError, RemoteDaemonMismatchError, SessionError } from "@dark-factory/client";
 import { RemoteApp } from "../dist/src/index.js";
 import { fixtureState } from "../../../fixtures/state.mjs";
 import { invitationFragment, invitationMembers, nodeId } from "../../client/test/remote-fake.mjs";
+import { MemoryRemoteStore } from "../../client/test/helpers.mjs";
 
 const NORTH = nodeId("a");
 const SOUTH = nodeId("b");
