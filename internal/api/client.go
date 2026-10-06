@@ -407,9 +407,6 @@ func (client *OperatorClient) SetCapacity(ctx context.Context, expectedRevision 
 }
 
 func (client *AttemptClient) Succeed(ctx context.Context, result string) (MutationResult, error) {
-	if !validText(result, 0, 131072) {
-		return MutationResult{}, ErrInvalidInput
-	}
 	return client.client.mutate(ctx, "succeed", struct {
 		Result string `json:"result"`
 	}{Result: result})
@@ -427,9 +424,6 @@ func (client *AttemptClient) Task(ctx context.Context) (AttemptTask, error) {
 }
 
 func (client *AttemptClient) Source(ctx context.Context, taskID string) (RetainedChangeHandoff, error) {
-	if !validID(taskID) {
-		return RetainedChangeHandoff{}, ErrInvalidInput
-	}
 	var result RetainedChangeHandoff
 	if err := client.client.call(ctx, "source", struct {
 		TaskID string `json:"task_id"`
@@ -443,23 +437,14 @@ func (client *AttemptClient) Source(ctx context.Context, taskID string) (Retaine
 }
 
 func (client *AttemptClient) Block(ctx context.Context, detail string) (MutationResult, error) {
-	if !validText(detail, 1, 4096) {
-		return MutationResult{}, ErrInvalidInput
-	}
 	return client.client.attemptDetail(ctx, "block", detail)
 }
 
 func (client *AttemptClient) Fail(ctx context.Context, detail string) (MutationResult, error) {
-	if !validText(detail, 0, 4096) {
-		return MutationResult{}, ErrInvalidInput
-	}
 	return client.client.attemptDetail(ctx, "fail", detail)
 }
 
 func (client *AttemptClient) RequestHuman(ctx context.Context, input HumanQuestionInput) (MutationResult, error) {
-	if !validID(input.IdempotencyKey) || !validText(input.Question, 1, 8192) || kernel.ValidateHumanOptions(input.Options) != nil {
-		return MutationResult{}, ErrInvalidInput
-	}
 	return client.client.mutate(ctx, "request_human", input)
 }
 
@@ -478,12 +463,6 @@ func (client *AttemptClient) PeerInboxPage(ctx context.Context, offset, expected
 }
 
 func (client *AttemptClient) peerStatusPage(ctx context.Context, offset, targetOffset, expectedHead uint64, includeTargets bool) (PeerStatus, error) {
-	if offset > uint64(^uint64(0)>>1)-1 || targetOffset > uint64(^uint64(0)>>1)-4 || expectedHead > uint64(^uint64(0)>>1) || expectedHead == 0 && (offset != 0 || targetOffset != 0) {
-		return PeerStatus{}, ErrInvalidInput
-	}
-	if !includeTargets && targetOffset != 0 {
-		return PeerStatus{}, ErrInvalidInput
-	}
 	var result PeerStatus
 	if err := client.client.call(ctx, "peer_status", PeerStatusInput{Offset: offset, TargetOffset: targetOffset, ExpectedHead: expectedHead, IncludeTargets: includeTargets}, &result); err != nil {
 		return PeerStatus{}, err
@@ -495,23 +474,14 @@ func (client *AttemptClient) peerStatusPage(ctx context.Context, offset, targetO
 }
 
 func (client *AttemptClient) PeerAsk(ctx context.Context, input PeerQuestionInput) (MutationResult, error) {
-	if !validID(input.TargetTaskID) || !validID(input.IdempotencyKey) || !validText(input.Question, 1, 2048) {
-		return MutationResult{}, ErrInvalidInput
-	}
 	return client.client.mutate(ctx, "peer_ask", input)
 }
 
 func (client *AttemptClient) PeerAnswer(ctx context.Context, input PeerAnswerInput) (MutationResult, error) {
-	if !validID(input.QuestionID) || !validID(input.IdempotencyKey) || input.ExpectedRevision == 0 || !validText(input.Answer, 1, 2048) {
-		return MutationResult{}, ErrInvalidInput
-	}
 	return client.client.mutate(ctx, "peer_answer", input)
 }
 
 func (client *AttemptClient) TerminalObserve(ctx context.Context, input TerminalObserveInput) (TerminalObservation, error) {
-	if !validTerminalObservationInput(input) || input.Text {
-		return TerminalObservation{}, ErrInvalidInput
-	}
 	var result TerminalObservation
 	if err := client.client.call(ctx, "terminal_observe", input, &result); err != nil {
 		return TerminalObservation{}, err
@@ -526,24 +496,14 @@ func (client *AttemptClient) TerminalObserve(ctx context.Context, input Terminal
 // SendBack returns a finished task of the attempt's project to its queue
 // with a note; only an orchestrator's attempt is allowed to.
 func (client *AttemptClient) SendBack(ctx context.Context, input SendBackInput) (MutationResult, error) {
-	if !validID(input.TaskID) || !validText(input.Note, 1, 8192) {
-		return MutationResult{}, ErrInvalidInput
-	}
 	return client.client.mutate(ctx, "send_back", input)
 }
 
 func (client *AttemptClient) OverseerSnapshot(ctx context.Context) (OverseerSnapshot, error) {
-	return client.overseerSnapshot(ctx, OverseerSnapshotInput{})
+	return client.OverseerSnapshotPage(ctx, OverseerSnapshotInput{})
 }
 
 func (client *AttemptClient) OverseerSnapshotPage(ctx context.Context, input OverseerSnapshotInput) (OverseerSnapshot, error) {
-	if !validOverseerSnapshotInput(input) {
-		return OverseerSnapshot{}, ErrInvalidInput
-	}
-	return client.overseerSnapshot(ctx, input)
-}
-
-func (client *AttemptClient) overseerSnapshot(ctx context.Context, input OverseerSnapshotInput) (OverseerSnapshot, error) {
 	var result OverseerSnapshot
 	if err := client.client.call(ctx, "overseer_snapshot", input, &result); err != nil {
 		return OverseerSnapshot{}, err
@@ -555,58 +515,34 @@ func (client *AttemptClient) overseerSnapshot(ctx context.Context, input Oversee
 }
 
 func (client *AttemptClient) OverseerEnqueueTask(ctx context.Context, input OverseerTaskCreateInput) (MutationResult, error) {
-	if !validOverseerTaskCreateInput(input) {
-		return MutationResult{}, ErrInvalidInput
-	}
 	return client.client.mutate(ctx, "overseer_enqueue_task", input)
 }
 
 func (client *AttemptClient) OverseerUpdateTask(ctx context.Context, input OverseerTaskUpdateInput) (MutationResult, error) {
-	if !validOverseerTaskUpdateInput(input) {
-		return MutationResult{}, ErrInvalidInput
-	}
 	return client.client.mutate(ctx, "overseer_update_task", input)
 }
 
 func (client *AttemptClient) OverseerUpdateAgent(ctx context.Context, input OverseerAgentUpdateInput) (MutationResult, error) {
-	if !validID(input.AgentID) || input.ExpectedRevision == 0 {
-		return MutationResult{}, ErrInvalidInput
-	}
 	return client.client.mutate(ctx, "overseer_update_agent", input)
 }
 
 func (client *AttemptClient) OverseerStopRun(ctx context.Context, input OverseerRunStopInput) (MutationResult, error) {
-	if !validOverseerRunStopInput(input) {
-		return MutationResult{}, ErrInvalidInput
-	}
 	return client.client.mutate(ctx, "overseer_stop_run", input)
 }
 
 func (client *AttemptClient) OverseerReplaceRun(ctx context.Context, input OverseerRunReplaceInput) (MutationResult, error) {
-	if !validOverseerRunReplaceInput(input) {
-		return MutationResult{}, ErrInvalidInput
-	}
 	return client.client.mutate(ctx, "overseer_replace_run", input)
 }
 
 func (client *AttemptClient) OverseerMessageWorker(ctx context.Context, input OverseerWorkerMessageInput) (MutationResult, error) {
-	if !validOverseerWorkerMessageInput(input) {
-		return MutationResult{}, ErrInvalidInput
-	}
 	return client.client.mutate(ctx, "overseer_message_worker", input)
 }
 
 func (client *AttemptClient) OverseerInterruptWorker(ctx context.Context, input OverseerWorkerInterruptInput) (MutationResult, error) {
-	if !validOverseerWorkerInterruptInput(input) {
-		return MutationResult{}, ErrInvalidInput
-	}
 	return client.client.mutate(ctx, "overseer_interrupt_worker", input)
 }
 
 func (client *AttemptClient) OverseerReplyHuman(ctx context.Context, input OverseerHumanReplyInput) (MutationResult, error) {
-	if !validID(input.OperationID) || !validID(input.RequestID) || input.ExpectedRevision == 0 || !validText(input.Reply, 1, 8192) {
-		return MutationResult{}, ErrInvalidInput
-	}
 	return client.client.mutate(ctx, "overseer_reply_human", input)
 }
 

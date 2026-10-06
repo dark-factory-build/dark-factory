@@ -495,9 +495,11 @@ func TestDaemonDispatchesSendBackThroughBothDomains(t *testing.T) {
 		t.Fatalf("operator sending back a missing task = %v", err)
 	}
 	waitDispatch(t, done)
-	if _, err := active.client.SendBack(ctx, api.SendBackInput{TaskID: own, Note: ""}); !errors.Is(err, api.ErrInvalidInput) {
-		t.Fatalf("empty note left the client = %v", err)
+	done = fixture.serve(t)
+	if _, err := active.client.SendBack(ctx, api.SendBackInput{TaskID: own, Note: ""}); !errors.As(err, &remote) || remote.Code() != api.RemoteInvalidRequest {
+		t.Fatalf("empty note = %v", err)
 	}
+	waitDispatch(t, done)
 	// A note the task's provider could not be handed is too large, whatever
 	// the kernel would have said about the task.
 	claude, claudeTask := testID(61), testID(62)
