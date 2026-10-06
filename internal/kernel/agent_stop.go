@@ -28,9 +28,9 @@ func (store *Store) StopRunForBrowser(ctx context.Context, clientID BrowserClien
 	return store.stopRunTx(ctx, tx, request, successor, at)
 }
 
-// StopRunForOperator applies the same CAS and durable intervention receipt as
-// browser control, with the local operator as the actor.
-func (store *Store) StopRunForOperator(ctx context.Context, request TaskInterventionRequest, successor *NewTask, at UnixMillis) (TaskIntervention, error) {
+// StopRunForActor applies the same CAS and durable intervention receipt for an
+// operator or an authenticated overseer. A digest is used only for the latter.
+func (store *Store) StopRunForActor(ctx context.Context, actor TaskInterventionActor, digest AttemptDigest, request TaskInterventionRequest, successor *NewTask, at UnixMillis) (TaskIntervention, error) {
 	if request.Actor != 0 || request.ActorRunID != nil || request.ActorBrowserClientID != nil {
 		return TaskIntervention{}, ErrInvalidValue
 	}
@@ -39,28 +39,35 @@ func (store *Store) StopRunForOperator(ctx context.Context, request TaskInterven
 		return TaskIntervention{}, err
 	}
 	defer tx.Close()
-	request.Actor = TaskInterventionOperator
+	switch actor {
+	case TaskInterventionOperator:
+		request.Actor = TaskInterventionOperator
+	case TaskInterventionOrchestrator:
+		if len(digest.Bytes()) != DigestBytes {
+			return TaskIntervention{}, ErrInvalidValue
+		}
+		principal, found, err := runByDigest(ctx, tx.connection, digest)
+		if err != nil {
+			return TaskIntervention{}, err
+		}
+		if !found || principal.Role != RoleOrchestrator || principal.Phase != RunRunning || principal.CredentialRevokedAt != nil {
+			return TaskIntervention{}, ErrUnauthorized
+		}
+		request.Actor, request.ActorRunID = TaskInterventionOrchestrator, &principal.ID
+	default:
+		return TaskIntervention{}, ErrInvalidValue
+	}
 	return store.stopRunTx(ctx, tx, request, successor, at)
 }
 
+// StopRunForOperator is retained for callers that already have an operator
+// authority; new code should use StopRunForActor.
+func (store *Store) StopRunForOperator(ctx context.Context, request TaskInterventionRequest, successor *NewTask, at UnixMillis) (TaskIntervention, error) {
+	return store.StopRunForActor(ctx, TaskInterventionOperator, AttemptDigest{}, request, successor, at)
+}
+
 func (store *Store) StopRunForAttempt(ctx context.Context, digest AttemptDigest, request TaskInterventionRequest, successor *NewTask, at UnixMillis) (TaskIntervention, error) {
-	if request.Actor != 0 || request.ActorRunID != nil || request.ActorBrowserClientID != nil {
-		return TaskIntervention{}, ErrInvalidValue
-	}
-	tx, err := store.beginValidatedWrite(ctx)
-	if err != nil {
-		return TaskIntervention{}, err
-	}
-	defer tx.Close()
-	actor, found, err := runByDigest(ctx, tx.connection, digest)
-	if err != nil {
-		return TaskIntervention{}, err
-	}
-	if !found || actor.Role != RoleOrchestrator || actor.Phase != RunRunning || actor.CredentialRevokedAt != nil {
-		return TaskIntervention{}, ErrUnauthorized
-	}
-	request.Actor, request.ActorRunID = TaskInterventionOrchestrator, &actor.ID
-	return store.stopRunTx(ctx, tx, request, successor, at)
+	return store.StopRunForActor(ctx, TaskInterventionOrchestrator, digest, request, successor, at)
 }
 
 func (store *Store) stopRunTx(ctx context.Context, tx *writeTx, request TaskInterventionRequest, successor *NewTask, at UnixMillis) (TaskIntervention, error) {

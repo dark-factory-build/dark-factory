@@ -291,9 +291,9 @@ func (store *Store) ReserveTaskInterventionForBrowser(ctx context.Context, clien
 	return result, reserved, nil
 }
 
-// ReserveTaskInterventionForOperator records a local operator intervention in
-// the same idempotent receipt table used by browser and attempt control.
-func (store *Store) ReserveTaskInterventionForOperator(ctx context.Context, request TaskInterventionRequest, at UnixMillis) (TaskIntervention, bool, error) {
+// ReserveTaskInterventionForActor records an operator or authenticated
+// overseer intervention in the shared idempotent receipt table.
+func (store *Store) ReserveTaskInterventionForActor(ctx context.Context, actor TaskInterventionActor, digest AttemptDigest, request TaskInterventionRequest, at UnixMillis) (TaskIntervention, bool, error) {
 	if request.Actor != 0 || request.ActorRunID != nil || request.ActorBrowserClientID != nil {
 		return TaskIntervention{}, false, fmt.Errorf("%w: invalid operator task intervention", ErrInvalidValue)
 	}
@@ -302,7 +302,27 @@ func (store *Store) ReserveTaskInterventionForOperator(ctx context.Context, requ
 		return TaskIntervention{}, false, err
 	}
 	defer tx.Close()
-	request.Actor = TaskInterventionOperator
+	switch actor {
+	case TaskInterventionOperator:
+		request.Actor = TaskInterventionOperator
+	case TaskInterventionOrchestrator:
+		if len(digest.Bytes()) != DigestBytes {
+			return TaskIntervention{}, false, fmt.Errorf("%w: invalid attempt task intervention", ErrInvalidValue)
+		}
+		actorRun, found, err := runByDigest(ctx, tx.connection, digest)
+		if err != nil || !found {
+			if err == nil {
+				err = ErrUnauthorized
+			}
+			return TaskIntervention{}, false, err
+		}
+		if actorRun.Role != RoleOrchestrator || actorRun.Phase != RunRunning || actorRun.CredentialRevokedAt != nil {
+			return TaskIntervention{}, false, ErrUnauthorized
+		}
+		request.Actor, request.ActorRunID = TaskInterventionOrchestrator, &actorRun.ID
+	default:
+		return TaskIntervention{}, false, fmt.Errorf("%w: invalid task intervention actor", ErrInvalidValue)
+	}
 	if err := request.valid(); err != nil {
 		return TaskIntervention{}, false, err
 	}
@@ -316,39 +336,14 @@ func (store *Store) ReserveTaskInterventionForOperator(ctx context.Context, requ
 	return result, reserved, nil
 }
 
+func (store *Store) ReserveTaskInterventionForOperator(ctx context.Context, request TaskInterventionRequest, at UnixMillis) (TaskIntervention, bool, error) {
+	return store.ReserveTaskInterventionForActor(ctx, TaskInterventionOperator, AttemptDigest{}, request, at)
+}
+
 // ReserveTaskInterventionForAttempt rechecks a live orchestrator credential in
 // the same write transaction. The caller cannot nominate a different actor.
 func (store *Store) ReserveTaskInterventionForAttempt(ctx context.Context, digest AttemptDigest, request TaskInterventionRequest, at UnixMillis) (TaskIntervention, bool, error) {
-	if len(digest.Bytes()) != DigestBytes || request.Actor != 0 || request.ActorRunID != nil || request.ActorBrowserClientID != nil {
-		return TaskIntervention{}, false, fmt.Errorf("%w: invalid attempt task intervention", ErrInvalidValue)
-	}
-	tx, err := store.beginValidatedWrite(ctx)
-	if err != nil {
-		return TaskIntervention{}, false, err
-	}
-	defer tx.Close()
-	actorRun, found, err := runByDigest(ctx, tx.connection, digest)
-	if err != nil || !found {
-		if err == nil {
-			err = ErrUnauthorized
-		}
-		return TaskIntervention{}, false, err
-	}
-	if actorRun.Role != RoleOrchestrator || actorRun.Phase != RunRunning || actorRun.CredentialRevokedAt != nil {
-		return TaskIntervention{}, false, ErrUnauthorized
-	}
-	request.Actor, request.ActorRunID = TaskInterventionOrchestrator, &actorRun.ID
-	if err := request.valid(); err != nil {
-		return TaskIntervention{}, false, err
-	}
-	result, reserved, err := reserveTaskInterventionTx(ctx, tx, request, at)
-	if err != nil {
-		return TaskIntervention{}, false, err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return TaskIntervention{}, false, err
-	}
-	return result, reserved, nil
+	return store.ReserveTaskInterventionForActor(ctx, TaskInterventionOrchestrator, digest, request, at)
 }
 
 func reserveTaskInterventionTx(ctx context.Context, tx *writeTx, request TaskInterventionRequest, at UnixMillis) (TaskIntervention, bool, error) {
