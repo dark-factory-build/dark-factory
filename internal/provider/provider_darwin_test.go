@@ -321,6 +321,7 @@ func TestBuildShellReturnsExactImmutableLaunchAndTask(t *testing.T) {
 		"HOME=" + runtime.home,
 		"TMPDIR=" + runtime.temp,
 		"PATH=" + runtime.toolPath,
+		"DEVELOPER_DIR=" + install.TrustedSystemToolchainRoot(),
 		"LANG=C", "LC_ALL=C", "TERM=xterm-256color", "SHELL=/bin/sh",
 		"GIT_AUTHOR_NAME=" + GitIdentityName, "GIT_AUTHOR_EMAIL=" + GitIdentityEmail, "GIT_COMMITTER_NAME=" + GitIdentityName, "GIT_COMMITTER_EMAIL=" + GitIdentityEmail,
 		"GIT_CEILING_DIRECTORIES=" + runtime.gitCeiling,

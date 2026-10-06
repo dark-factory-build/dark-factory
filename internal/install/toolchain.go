@@ -11,6 +11,10 @@ import (
 
 const trustedSystemToolchainRoot = "/Library/Developer/CommandLineTools"
 
+// TrustedSystemToolchainRoot is the exact Apple Command Line Tools root used
+// for trusted system tooling such as Git.
+func TrustedSystemToolchainRoot() string { return trustedSystemToolchainRoot }
+
 const supportedNodeVersion = "v22.20.0"
 const supportedGoVersion = "1.27.0"
 
