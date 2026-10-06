@@ -347,13 +347,17 @@ func TestInitialRuntimeChildValidationPrecedesSelectionEffects(t *testing.T) {
 				t.Fatal(err)
 			}
 			var path string
+			root, _, valuesErr := binding.Values()
+			if valuesErr != nil {
+				t.Fatal(valuesErr)
+			}
 			switch name {
 			case "home":
-				path, err = binding.ProviderHome()
+				path = filepath.Join(root, changeworker.HomeName)
 			case "tmp":
-				path, err = binding.ProviderTemp()
+				path = filepath.Join(root, changeworker.TempName)
 			case "token":
-				path, err = binding.AttemptTokenPath()
+				path = filepath.Join(root, changeworker.AttemptTokenName)
 			}
 			if err != nil {
 				t.Fatal(err)

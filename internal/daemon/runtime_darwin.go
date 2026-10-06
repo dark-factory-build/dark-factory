@@ -317,14 +317,6 @@ func (binding *RuntimeBinding) ProviderHome() (string, error) {
 	return binding.fixedDirectory(changeworker.HomeName)
 }
 
-func (binding *RuntimeBinding) ProviderTemp() (string, error) {
-	return binding.fixedDirectory(changeworker.TempName)
-}
-
-func (binding *RuntimeBinding) AttemptTokenPath() (string, error) {
-	return binding.fixedFile(changeworker.AttemptTokenName)
-}
-
 func (binding *RuntimeBinding) fixedDirectory(name string) (string, error) {
 	if binding == nil || binding.runtime == nil {
 		return "", invalidContract(nil)

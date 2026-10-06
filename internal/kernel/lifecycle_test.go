@@ -10,6 +10,10 @@ import (
 	"testing"
 )
 
+func (store *Store) BeginResourceRelease(ctx context.Context, runID RunID, resourceID ResourceID, expected Revision, identity ResourceIdentity, at UnixMillis) (Resource, error) {
+	return store.transitionResource(ctx, runID, resourceID, expected, identity, "", ResourceReleasing, at)
+}
+
 func TestCredentialAuthorityExistsOnlyWhileExactRunIsRunning(t *testing.T) {
 	store, run, keys := admittedOrchestratorRun(t)
 	defer store.Close()

@@ -17,9 +17,6 @@ func EncodeTerminalTarget(id string, v TerminalTarget) ([]byte, error) {
 func EncodeTerminalAttached(id string, v TerminalAttached) ([]byte, error) {
 	return encodeControl(TypeTerminalAttached, id, v)
 }
-func EncodeTerminalLeaseRelease(id string, v TerminalLeaseRelease) ([]byte, error) {
-	return encodeControl(TypeTerminalLeaseRelease, id, v)
-}
 func EncodeTerminalLeaseResult(id string, v TerminalLeaseResult) ([]byte, error) {
 	return encodeControl(TypeTerminalLeaseResult, id, v)
 }

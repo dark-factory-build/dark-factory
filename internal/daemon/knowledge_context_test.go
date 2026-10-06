@@ -17,6 +17,18 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/runner"
 )
 
+func contentAccesses(ctx context.Context, store *kernel.Store, project kernel.ProjectID, refs ...kernel.ContentAccess) ([]kernel.ContentAccess, error) {
+	var result []kernel.ContentAccess
+	for _, ref := range refs {
+		page, err := store.ListContentRevisionAccesses(ctx, project, ref.ContentID, ref.ContentRevision, 0, 0)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, page.Items...)
+	}
+	return result, nil
+}
+
 func seedContextKnowledge(t *testing.T, f *dispatchFixture, project kernel.ProjectID, seed byte, kind kernel.ContentKind, metadata kernel.KnowledgeMetadata, body string) kernel.ContentRevision {
 	t.Helper()
 	id, err := decodeID(testID(seed), kernel.ContentIDFromBytes)
@@ -72,7 +84,7 @@ func TestKnowledgeReachesFreshProviderTaskAndPinsExplicitRevision(t *testing.T) 
 			if delivery, _, err := provider.PrepareTask(active.run.Provider, launch); err != nil || delivery == 0 {
 				t.Fatalf("provider delivery: %v %v", delivery, err)
 			}
-			accesses, err := f.store.ListContentAccesses(ctx, active.run.ID)
+			accesses, err := contentAccesses(ctx, f.store, active.run.ProjectID, kernel.ContentAccess{ContentID: lesson.ID, ContentRevision: lesson.Revision}, kernel.ContentAccess{ContentID: brief.ID, ContentRevision: brief.Revision})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -95,7 +107,7 @@ func TestKnowledgeReachesFreshProviderTaskAndPinsExplicitRevision(t *testing.T) 
 			if strings.Contains(assignment.Task, "OTHER BRANCH") {
 				t.Fatal("unverified branch leaked into task")
 			}
-			accesses, err = f.store.ListContentAccesses(ctx, active.run.ID)
+			accesses, err = contentAccesses(ctx, f.store, active.run.ProjectID, kernel.ContentAccess{ContentID: lesson.ID, ContentRevision: lesson.Revision}, kernel.ContentAccess{ContentID: brief.ID, ContentRevision: brief.Revision})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -193,7 +205,7 @@ func TestKnowledgeContextBoundsQuotingAndEmpty(t *testing.T) {
 func TestKnowledgeFallbackDoesNotRecordOmittedSupplies(t *testing.T) {
 	f := newDispatchFixture(t)
 	active := prepareActiveAttemptInProjectWithProvider(t, f, 81, testID(81), "orchestrator", "claude_code")
-	seedContextKnowledge(t, f, active.run.ProjectID, 201, kernel.ContentLesson, kernel.KnowledgeMetadata{Status: "tentative", Evidence: []string{"source"}}, "a useful lesson")
+	lesson := seedContextKnowledge(t, f, active.run.ProjectID, 201, kernel.ContentLesson, kernel.KnowledgeMetadata{Status: "tentative", Evidence: []string{"source"}}, "a useful lesson")
 	task := bytes.Repeat([]byte{'t'}, runner.MaxProviderTaskBytes)
 	launch, _, err := f.daemon.prepareKnowledgeTask(context.Background(), active.run, task, true)
 	if err != nil {
@@ -202,7 +214,7 @@ func TestKnowledgeFallbackDoesNotRecordOmittedSupplies(t *testing.T) {
 	if string(launch) != knowledgeTaskFetchInstruction {
 		t.Fatalf("oversized task lost fetch fallback: %q", knowledgeTextPrefix(string(launch), 100))
 	}
-	accesses, err := f.store.ListContentAccesses(context.Background(), active.run.ID)
+	accesses, err := contentAccesses(context.Background(), f.store, active.run.ProjectID, kernel.ContentAccess{ContentID: lesson.ID, ContentRevision: lesson.Revision})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -402,7 +414,9 @@ func TestKnowledgeCrossTaskReviewConclusionLoop(t *testing.T) {
 	if body.Body != "An absent caller credential must fail closed before any guarded effect." || !body.Complete {
 		t.Fatalf("retrieved conclusion: %+v", body)
 	}
-	accesses, err := f.store.ListContentAccesses(ctx, fresh.run.ID)
+	lessonID, _ := decodeID(lesson.ID, kernel.ContentIDFromBytes)
+	lessonRevision, _ := kernel.NewRevision(int64(lesson.Revision))
+	accesses, err := contentAccesses(ctx, f.store, fresh.run.ProjectID, kernel.ContentAccess{ContentID: lessonID, ContentRevision: lessonRevision})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -14,10 +14,19 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dark-factory-build/dark-factory/internal/changeworker"
 	"github.com/dark-factory-build/dark-factory/internal/install"
 	"github.com/dark-factory-build/dark-factory/internal/runner"
 	"golang.org/x/sys/unix"
 )
+
+func (binding *RuntimeBinding) ProviderTemp() (string, error) {
+	return binding.fixedDirectory(changeworker.TempName)
+}
+
+func (binding *RuntimeBinding) AttemptTokenPath() (string, error) {
+	return binding.fixedFile(changeworker.AttemptTokenName)
+}
 
 const (
 	runtimeTestName = "0123456789abcdef0123456789abcdef"
