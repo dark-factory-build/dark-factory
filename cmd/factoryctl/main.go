@@ -1855,33 +1855,74 @@ func parseOverseer(args []string) (attemptCommand, bool, bool) {
 	default:
 		return attemptCommand{}, false, false
 	}
-	flags, stringFlag, seen := newOnceFlagSet(strings.Join(args[1:3], " "))
+	flags, _, seen := newOnceFlagSet(strings.Join(args[1:3], " "))
 	var revision, taskRevision, runRevision, priority string
-	stringFlag("--agent", &command.agent)
-	stringFlag("--task", &command.id)
-	stringFlag("--request", &command.id)
-	stringFlag("--run", &command.run)
-	stringFlag("--successor-task", &command.project)
-	stringFlag("--successor-incarnation", &command.account)
-	stringFlag("--operation-id", &command.operationID)
-	stringFlag("--task-id", &command.id)
-	stringFlag("--incarnation-id", &command.project)
-	stringFlag("--revision", &revision)
-	stringFlag("--task-revision", &taskRevision)
-	stringFlag("--run-revision", &runRevision)
-	stringFlag("--title", &command.title)
-	stringFlag("--body", &command.body)
-	stringFlag("--priority", &priority)
-	stringFlag("--note", &command.text)
-	stringFlag("--detail", &command.text)
-	stringFlag("--message", &command.text)
-	stringFlag("--reply", &command.text)
-	stringFlag("--instruction", &command.text)
+	validatedStringFlag := func(name string, target *string, valid func(string) bool) {
+		flags.Func(name[2:], "", func(value string) error {
+			if seen[name] {
+				return errors.New("flag specified more than once")
+			}
+			if !valid(value) {
+				return errors.New("invalid flag value")
+			}
+			seen[name] = true
+			*target = value
+			return nil
+		})
+	}
+	key := func(value string) bool { return validHumanRequestKey(value) }
+	validatedStringFlag("--agent", &command.agent, func(value string) bool {
+		return key(value) || command.kind == commandOverseerTaskAdd && value == "any"
+	})
+	validatedStringFlag("--task", &command.id, key)
+	validatedStringFlag("--request", &command.id, key)
+	validatedStringFlag("--run", &command.run, key)
+	validatedStringFlag("--successor-task", &command.project, key)
+	validatedStringFlag("--successor-incarnation", &command.account, key)
+	validatedStringFlag("--operation-id", &command.operationID, key)
+	validatedStringFlag("--task-id", &command.id, func(value string) bool {
+		return command.kind == commandOverseerTaskAdd && key(value)
+	})
+	validatedStringFlag("--incarnation-id", &command.project, func(value string) bool {
+		return command.kind == commandOverseerTaskAdd && key(value)
+	})
+	validatedStringFlag("--revision", &revision, func(value string) bool { _, ok := parseRevision(value); return ok })
+	validatedStringFlag("--task-revision", &taskRevision, func(value string) bool { _, ok := parseRevision(value); return ok })
+	validatedStringFlag("--run-revision", &runRevision, func(value string) bool { _, ok := parseRevision(value); return ok })
+	validatedStringFlag("--title", &command.title, func(value string) bool {
+		return (command.kind == commandOverseerTaskAdd || command.kind == commandOverseerTaskUpdate) && validOperatorText(value, 1, 1024)
+	})
+	validatedStringFlag("--body", &command.body, func(value string) bool {
+		return (command.kind == commandOverseerTaskAdd || command.kind == commandOverseerTaskUpdate) && validOperatorText(value, 0, 131072)
+	})
+	validatedStringFlag("--priority", &priority, func(value string) bool {
+		parsed, err := strconv.ParseInt(value, 10, 64)
+		return err == nil && value == strconv.FormatInt(parsed, 10) && parsed >= -1_000_000 && parsed <= 1_000_000 && (command.kind == commandOverseerTaskAdd || command.kind == commandOverseerTaskUpdate)
+	})
+	textFlag := func(name string) {
+		validatedStringFlag(name, &command.text, func(value string) bool { return validOperatorText(value, 1, 8192) })
+	}
+	textFlag("--note")
+	textFlag("--detail")
+	textFlag("--message")
+	textFlag("--reply")
+	textFlag("--instruction")
 	flags.Func("prerequisite", "", func(value string) error {
-		command.prerequisites = append(command.prerequisites, api.TaskPrerequisiteInput{TaskID: value})
+		parts := strings.SplitN(value, ":", 2)
+		if command.kind != commandOverseerTaskAdd || len(parts) != 2 || !key(parts[0]) {
+			return errors.New("invalid flag value")
+		}
+		revision, ok := parseRevision(parts[1])
+		if !ok {
+			return errors.New("invalid flag value")
+		}
+		command.prerequisites = append(command.prerequisites, api.TaskPrerequisiteInput{TaskID: parts[0], WorkRevision: revision})
 		return nil
 	})
 	flags.Func("conflict-path", "", func(value string) error {
+		if command.kind != commandOverseerTaskAdd || !validOperatorText(value, 1, 4096) || strings.HasPrefix(value, "/") {
+			return errors.New("invalid flag value")
+		}
 		command.conflictPaths = append(command.conflictPaths, value)
 		return nil
 	})
@@ -1936,23 +1977,6 @@ func parseOverseer(args []string) (attemptCommand, bool, bool) {
 			return attemptCommand{}, false, false
 		}
 		command.priority, command.prioritySet = parsed, true
-	}
-	for index, prerequisite := range command.prerequisites {
-		parts := strings.SplitN(prerequisite.TaskID, ":", 2)
-		if command.kind != commandOverseerTaskAdd || len(parts) != 2 || !validHumanRequestKey(parts[0]) {
-			return attemptCommand{}, false, false
-		}
-		parsed, ok := parseRevision(parts[1])
-		if !ok {
-			return attemptCommand{}, false, false
-		}
-		prerequisite.TaskID, prerequisite.WorkRevision = parts[0], parsed
-		command.prerequisites[index] = prerequisite
-	}
-	for _, path := range command.conflictPaths {
-		if command.kind != commandOverseerTaskAdd || !validOperatorText(path, 1, 4096) || strings.HasPrefix(path, "/") {
-			return attemptCommand{}, false, false
-		}
 	}
 	if seen["--agent"] && !validHumanRequestKey(command.agent) && !(command.kind == commandOverseerTaskAdd && command.agent == "any") ||
 		seen["--task"] && !validHumanRequestKey(command.id) || seen["--request"] && !validHumanRequestKey(command.id) ||
