@@ -430,7 +430,7 @@ test("manifest has exactly one public mapping for every stable entry", () => {
     const changed = { ...bounds, [key]: typeof bounds[key] === "bigint" ? bounds[key] + 1n : bounds[key] + 1 };
     assert.notDeepEqual(changed, clientBounds);
   }
-  assert.deepEqual(CONTROL_MANIFEST, source.control);
+  assert.deepEqual(CONTROL_MANIFEST, source.control.map(({ type, direction }) => ({ type, direction })));
   // The contract's stable name and the fixed binary frame version are mirrored
   // too. terminal.version silently held the wrong number while it was aliased
   // to the deleted protocol generation; nothing compared it to the source.

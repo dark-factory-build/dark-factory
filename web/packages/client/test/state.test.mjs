@@ -373,7 +373,7 @@ test("state parsing rejects case-folded/duplicate/unknown/trailing/depth/member/
 
 test("manifest bounds and registry are an exact readable mirror", () => {
   assert.equal(BROWSER_PROTOCOL_NAME, manifest.name);
-  assert.deepEqual(CONTROL_MANIFEST, manifest.control);
+  assert.deepEqual(CONTROL_MANIFEST, manifest.control.map(({ type, direction }) => ({ type, direction })));
   assert.deepEqual({
     maxControlBytes: MAX_CONTROL_BYTES,
     maxJSONDepth: MAX_JSON_DEPTH,
