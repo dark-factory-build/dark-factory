@@ -101,7 +101,13 @@ func TestMain(m *testing.M) {
 			if err = child.Start(); err != nil {
 				break
 			}
-			if err = os.WriteFile(receipt, []byte(strconv.Itoa(child.Process.Pid)), 0o600); err != nil {
+			// Publish the receipt by rename so readers polling for it never
+			// observe the created-but-unwritten file.
+			partial := receipt + ".partial"
+			if err = os.WriteFile(partial, []byte(strconv.Itoa(child.Process.Pid)), 0o600); err == nil {
+				err = os.Rename(partial, receipt)
+			}
+			if err != nil {
 				_ = child.Process.Kill()
 				break
 			}

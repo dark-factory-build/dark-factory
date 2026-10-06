@@ -129,7 +129,7 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 			return result, err
 		}
 	case "production":
-		_ = backend.owner.refreshProduction(ctx, project)
+		backend.owner.refreshProductionDetached(project)
 		page := kernel.ProductionPage{Records: []kernel.ProductionRecord{}}
 		if !factoryOnly {
 			observed, e := backend.store.Production(ctx, project, int(input.Offset), int(input.Limit))
@@ -295,9 +295,6 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 		}
 		if latest := current.LatestRevision.Int64(); latest != int64(input.ExpectedRevision) && latest != int64(input.ExpectedRevision)+1 {
 			return result, browser.ErrStale
-		}
-		if current.Commit == "" {
-			_, _ = backend.owner.exportLegacyContent(ctx, id, int64(input.ExpectedRevision))
 		}
 		item, e := backend.store.DeprecateContent(ctx, id, project, rev, fmt.Sprintf("browser:%s", client.ID.String()), at)
 		if e != nil {

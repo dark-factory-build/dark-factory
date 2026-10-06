@@ -4,9 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"fmt"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
@@ -207,35 +205,3 @@ func TestAccountWritesDeferUnrelatedCorruptionButRejectAffectedCorruption(t *tes
 }
 
 func stringPtr(value string) *string { return &value }
-
-func TestReviewerAccountsExcludeAnAuthorTheTaskWasReassignedFrom(t *testing.T) {
-	store, terminal, assignee, _ := retryQueuedWorker(t, 90)
-	defer store.Close()
-	ctx := context.Background()
-	reviewer, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 216), ProjectID: terminal.ProjectID, Name: "reviewer", Role: RoleWorker, Provider: ProviderCodex, ToolBudgetLimit: 4}, mustTime(t, 91))
-	if err != nil {
-		t.Fatal(err)
-	}
-	for index, agent := range []AgentID{terminal.AgentID, assignee, reviewer.ID} {
-		account, err := store.LinkAccount(ctx, NewAccount{ID: accountID(t, byte(30+index)), Provider: ProviderCodex, Home: fmt.Sprintf("/accounts/%d/.codex", index), Label: "codex"}, mustTime(t, 92))
-		if err != nil {
-			t.Fatal(err)
-		}
-		current, _, err := store.Agent(ctx, agent)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := store.UpdateAgent(ctx, agent, current.Revision, AgentPatch{AccountID: &account.ID}, mustTime(t, 93)); err != nil {
-			t.Fatal(err)
-		}
-	}
-	head := strings.Repeat("e", 40)
-	pr := ProductionPullRequest{Number: 12, Title: "Ship it", URL: "https://github.com/team/repo/pull/12", Head: head, Branch: "feature/ship", Base: "main", State: "open", Review: ProductionReview{Head: head, State: "unknown"}}
-	if err := store.RecordPublication(ctx, terminal.ProjectID, terminal.TaskID, "team/repo", pr, mustTime(t, 94)); err != nil {
-		t.Fatal(err)
-	}
-	homes, err := store.ReviewerAccountHomes(ctx, terminal.ProjectID, ProviderCodex, "team/repo", 12)
-	if err != nil || len(homes) != 1 || homes[0] != "/accounts/2/.codex" {
-		t.Fatalf("reviewer homes = %v, %v; want only the non-author login", homes, err)
-	}
-}

@@ -343,7 +343,10 @@ func validateDatabaseSnapshot(ctx context.Context, connection *sql.Conn) error {
 	if err := validateDurableControls(ctx, connection); err != nil {
 		return err
 	}
-	return validateIntegrity(ctx, connection)
+	if err := validateIntegrity(ctx, connection); err != nil {
+		return err
+	}
+	return validateContentGitPins(ctx, connection)
 }
 
 func (store *Store) Close() error {

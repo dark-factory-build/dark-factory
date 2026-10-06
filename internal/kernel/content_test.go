@@ -64,49 +64,6 @@ func TestContentRevisionReplayAndHistoryRemainCASBound(t *testing.T) {
 	}
 }
 
-func TestContentExportRetiresLegacyBodyAndReplays(t *testing.T) {
-	store, run, _ := runningWorkerRun(t)
-	defer store.Close()
-	ctx := context.Background()
-	created, err := store.CreateContent(ctx, contentSpec(t, run.ProjectID, 39, "legacy"), mustTime(t, 39))
-	if err != nil {
-		t.Fatal(err)
-	}
-	corruptSQL(t, store, `UPDATE project_content_revisions SET body = 'legacy', object_format = NULL, commit_oid = NULL, path = NULL WHERE id = ? AND revision = 1`, created.ID.Bytes())
-	if err := store.CompleteContentExport(ctx, created.ID, 1, "legacy", "sha1", strings.Repeat("a", 40), ".dark-factory/content/item.md", RepositoryID(created.ProjectID), 1, 2); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.CompleteContentExport(ctx, created.ID, 1, "legacy", "sha1", strings.Repeat("a", 40), ".dark-factory/content/item.md", RepositoryID(created.ProjectID), 1, 2); err != nil {
-		t.Fatalf("export replay: %v", err)
-	}
-	got, err := store.Content(ctx, created.ID, 1)
-	if err != nil || got.Commit != strings.Repeat("a", 40) {
-		t.Fatalf("exported content = %+v, %v", got, err)
-	}
-	if _, _, err := store.LegacyContent(ctx, created.ID, 1); !errors.Is(err, ErrConflict) {
-		t.Fatalf("exported revision remained a legacy body: %v", err)
-	}
-}
-
-func TestLegacyContentDeprecationPreservesBodyUntilExport(t *testing.T) {
-	store, run, _ := runningWorkerRun(t)
-	defer store.Close()
-	ctx := context.Background()
-	created, err := store.CreateContent(ctx, contentSpec(t, run.ProjectID, 38, "legacy"), mustTime(t, 38))
-	if err != nil {
-		t.Fatal(err)
-	}
-	corruptSQL(t, store, `UPDATE project_content_revisions SET body = 'legacy', object_format = NULL, commit_oid = NULL, path = NULL, repository_dev = NULL, repository_inode = NULL WHERE id = ? AND revision = 1`, created.ID.Bytes())
-	deprecated, err := store.DeprecateContent(ctx, created.ID, run.ProjectID, created.Revision, "operator", mustTime(t, 39))
-	if err != nil || !deprecated.Deprecated {
-		t.Fatalf("legacy deprecation = %+v, %v", deprecated, err)
-	}
-	_, body, err := store.LegacyContent(ctx, created.ID, deprecated.Revision.Int64())
-	if err != nil || body != "legacy" {
-		t.Fatalf("deprecated legacy body = %q, %v", body, err)
-	}
-}
-
 func TestAttemptContentUsesLiveProjectAndProvenance(t *testing.T) {
 	store, run, _ := runningWorkerRun(t)
 	defer store.Close()
