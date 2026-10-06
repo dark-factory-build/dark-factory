@@ -873,29 +873,7 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 		runtimeOpen = false
 		return nil
 	}
-	run, err = daemon.attemptResultTail(ctx, spec.RuntimeParent, spec.ChangeParent, run, live, resultOutcome, runtimeDirectory, runtimeIdentity, keys.resources.RunnerProcess, keys.resources.RuntimeRoot, awaitConvergence, recordConvergence, closeRuntime)
-	// Spend is read from the provider's own session log once the run is over.
-	// The run's row is the receipt, so the write is retried without counting
-	// twice; a store that still refuses is reported with the figure it lost.
-	// ponytail: a run adopted by recovery after a daemon restart records none.
-	cwd := filepath.Join(spec.ChangeParent, finalName)
-	if !worker {
-		cwd = filepath.Join(gotRuntimePath, changeworker.HomeName)
-	}
-	if tokens := provider.RunTokens(run.Provider, spec.AccountHome, accountConfigDir, cwd, time.UnixMilli(run.AdmittedAt.Int64())); tokens > 0 {
-		var tokenErr error
-		for attempt := 0; attempt < 3; attempt++ {
-			if tokenErr = daemon.store.AddRunTokens(daemon.cleanupCtx, run.ID, tokens); tokenErr == nil {
-				break
-			}
-			time.Sleep(time.Duration(attempt+1) * 100 * time.Millisecond)
-		}
-		if tokenErr != nil {
-			LogFactoryd(daemon.log, "factoryd: run %s spent %d tokens that could not be recorded: %v\n", run.ID, tokens, tokenErr)
-			err = errors.Join(err, tokenErr)
-		}
-	}
-	return run, err
+	return daemon.attemptResultTail(ctx, spec.RuntimeParent, spec.ChangeParent, run, live, resultOutcome, runtimeDirectory, runtimeIdentity, keys.resources.RunnerProcess, keys.resources.RuntimeRoot, awaitConvergence, recordConvergence, closeRuntime)
 }
 
 // attemptResultTail is the shared post-release convergence both a freshly
@@ -921,7 +899,34 @@ func (daemon *Daemon) attemptResultTail(
 	awaitConvergence func() error,
 	recordConvergence func() (kernel.Run, error),
 	closeRuntime func() error,
-) (kernel.Run, error) {
+) (settledRun kernel.Run, resultErr error) {
+	// Spend is read from the provider's own session log once the run is over,
+	// however this daemon came to own it. The run's row is the receipt, so the
+	// write is retried without counting twice; a store that still refuses is
+	// logged with the figure it lost, never failing a run that settled.
+	// The account is read while the run is live: once it is terminal an
+	// overseer may move the agent to another account and its logs.
+	accountConfigDir, tokenErr := daemon.agentAccountConfigDir(daemon.cleanupCtx, run.AgentID)
+	defer func() {
+		run, accountHome, cwd := settledRun, daemon.accountHome.Load(), ""
+		if run.Role == kernel.RoleWorker && run.ChangeID != nil {
+			cwd = filepath.Join(changeParent, run.ChangeID.String())
+		} else if runtimeRoot, rootErr := runtimeChildPath(runtimeParent, run.ID.String()); rootErr == nil {
+			cwd = filepath.Join(runtimeRoot, changeworker.HomeName)
+		}
+		if run.ID == (kernel.RunID{}) || accountHome == nil || tokenErr != nil {
+			return
+		}
+		if tokens := provider.RunTokens(run.Provider, *accountHome, accountConfigDir, cwd, time.UnixMilli(run.AdmittedAt.Int64())); tokens > 0 {
+			for attempt := 0; attempt < 3; attempt++ {
+				if tokenErr = daemon.store.AddRunTokens(daemon.cleanupCtx, run.ID, tokens); tokenErr == nil {
+					return
+				}
+				time.Sleep(time.Duration(attempt+1) * 100 * time.Millisecond)
+			}
+			LogFactoryd(daemon.log, "factoryd: run %s spent %d tokens that could not be recorded: %v\n", run.ID, tokens, tokenErr)
+		}
+	}()
 	// The notice is shape-only and its socket is best-effort: a late credit or
 	// terminate write racing the runner's own exit poisons the control socket
 	// and loses queued frames. Authority is the exact no-replace artifact in

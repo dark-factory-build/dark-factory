@@ -41,6 +41,11 @@ func newRecoveryFixture(t *testing.T, seed byte) *recoveryFixture {
 
 func newRecoveryFixtureWithRole(t *testing.T, seed byte, role kernel.AgentRole) *recoveryFixture {
 	t.Helper()
+	return newRecoveryFixtureFor(t, seed, role, kernel.ProviderShell)
+}
+
+func newRecoveryFixtureFor(t *testing.T, seed byte, role kernel.AgentRole, provider kernel.Provider) *recoveryFixture {
+	t.Helper()
 	ctx := context.Background()
 	// Short prefix: a takeover.sock fixture binds a real Unix domain socket
 	// inside this tree, and sockaddr_un's sun_path budget is only 104 bytes.
@@ -91,7 +96,7 @@ func newRecoveryFixtureWithRole(t *testing.T, seed byte, role kernel.AgentRole) 
 		t.Fatal(err)
 	}
 	agentID := mustAgentID(t, testID(seed+1))
-	if _, err := store.CreateAgent(ctx, kernel.NewAgent{ID: agentID, ProjectID: projectID, Name: "recovery-agent", Role: role, Provider: kernel.ProviderShell, ToolBudgetLimit: 1}, at); err != nil {
+	if _, err := store.CreateAgent(ctx, kernel.NewAgent{ID: agentID, ProjectID: projectID, Name: "recovery-agent", Role: role, Provider: provider, ToolBudgetLimit: 1}, at); err != nil {
 		t.Fatal(err)
 	}
 	taskID := mustTaskID(t, testID(seed+2))
