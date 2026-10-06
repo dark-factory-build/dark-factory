@@ -237,42 +237,7 @@ func deprecateContentTx(ctx context.Context, tx *writeTx, id ContentID, project 
 		return ContentRevision{}, tx.Rollback(ErrConflict)
 	}
 	if current.Commit == "" {
-		var latest int64
-		if err := tx.connection.QueryRowContext(ctx, `SELECT MAX(revision) FROM project_content_revisions WHERE id = ?`, id.Bytes()).Scan(&latest); err != nil {
-			return ContentRevision{}, tx.Rollback(err)
-		}
-		if latest != expected.Int64() {
-			if latest > expected.Int64() {
-				existing, readErr := contentByRevision(ctx, tx.connection, id, expected.Int64()+1)
-				if readErr == nil && existing.Deprecated && existing.Author == author {
-					if rollbackErr := tx.Rollback(nil); rollbackErr != nil {
-						return ContentRevision{}, rollbackErr
-					}
-					return existing, nil
-				}
-			}
-			return ContentRevision{}, tx.Rollback(ErrConflict)
-		}
-		next := latest + 1
-		_, err := tx.connection.ExecContext(ctx, `INSERT INTO project_content_revisions(id, project_id, kind, revision, title, description, body, author, source_references, deprecated, created_at_ms) SELECT id, project_id, kind, ?, title, description, body, ?, source_references, 1, ? FROM project_content_revisions WHERE id = ? AND revision = ? AND commit_oid IS NULL`, next, author, at.Int64(), id.Bytes(), expected.Int64())
-		if err != nil {
-			return ContentRevision{}, tx.Rollback(err)
-		}
-		var repositoryID []byte
-		if err := tx.connection.QueryRowContext(ctx, `SELECT repository_id FROM content_repository_bindings WHERE content_id = ? AND content_revision = ?`, id.Bytes(), expected.Int64()).Scan(&repositoryID); err != nil {
-			return ContentRevision{}, tx.Rollback(err)
-		}
-		if _, err := tx.connection.ExecContext(ctx, `INSERT INTO content_repository_bindings(content_id, content_revision, repository_id) VALUES(?, ?, ?)`, id.Bytes(), next, repositoryID); err != nil {
-			return ContentRevision{}, tx.Rollback(err)
-		}
-		result, err := contentByRevision(ctx, tx.connection, id, next)
-		if err != nil {
-			return ContentRevision{}, tx.Rollback(err)
-		}
-		if err := tx.Commit(ctx); err != nil {
-			return ContentRevision{}, err
-		}
-		return result, nil
+		return ContentRevision{}, tx.Rollback(ErrCorruptState)
 	}
 	return reviseContentTx(ctx, tx, expected, NewContent{ID: id, ProjectID: project, Kind: current.Kind, Title: current.Title, Description: current.Description, Author: author, SourceReferences: current.SourceReferences, ObjectFormat: current.ObjectFormat, Commit: current.Commit, Path: current.Path, RepositoryDevice: current.RepositoryDevice, RepositoryInode: current.RepositoryInode}, true, at)
 }
@@ -287,80 +252,6 @@ func (store *Store) Content(ctx context.Context, id ContentID, revision int64) (
 	}
 	defer tx.Close()
 	return contentMetadataByRevision(ctx, tx.connection, id, revision)
-}
-
-// LegacyContent returns the body only for a pre-Git revision awaiting export.
-func (store *Store) LegacyContent(ctx context.Context, id ContentID, revision int64) (ContentRevision, string, error) {
-	if id.zero() || revision < 1 {
-		return ContentRevision{}, "", fmt.Errorf("%w: invalid content revision", ErrInvalidValue)
-	}
-	tx, err := store.beginRead(ctx)
-	if err != nil {
-		return ContentRevision{}, "", err
-	}
-	defer tx.Close()
-	content, err := contentMetadataByRevision(ctx, tx.connection, id, revision)
-	if err != nil {
-		return ContentRevision{}, "", err
-	}
-	if content.Commit != "" {
-		return ContentRevision{}, "", ErrConflict
-	}
-	var body string
-	if err := tx.connection.QueryRowContext(ctx, `SELECT body FROM project_content_revisions WHERE id = ? AND revision = ? AND commit_oid IS NULL`, id.Bytes(), revision).Scan(&body); err != nil {
-		return ContentRevision{}, "", err
-	}
-	return content, body, nil
-}
-
-// CompleteContentExport installs an immutable Git pin and retires the legacy
-// SQLite body. The body comparison makes replay safe without another journal.
-func (store *Store) CompleteContentExport(ctx context.Context, id ContentID, revision int64, body, objectFormat, commit, path string, repositoryID RepositoryID, repositoryDevice, repositoryInode int64) error {
-	if id.zero() || revision < 1 || repositoryID.zero() || objectFormat == "" || commit == "" || path == "" || repositoryDevice < 0 || repositoryInode <= 0 {
-		return fmt.Errorf("%w: invalid content export", ErrInvalidValue)
-	}
-	tx, err := store.beginValidatedWrite(ctx)
-	if err != nil {
-		return err
-	}
-	defer tx.Close()
-	result, err := tx.connection.ExecContext(ctx, `UPDATE project_content_revisions SET body = '', object_format = ?, commit_oid = ?, path = ?, repository_dev = ?, repository_inode = ? WHERE id = ? AND revision = ? AND body = ? AND commit_oid IS NULL`, objectFormat, commit, path, repositoryDevice, repositoryInode, id.Bytes(), revision, body)
-	if err != nil {
-		return tx.Rollback(err)
-	}
-	changed, err := result.RowsAffected()
-	if err != nil {
-		return tx.Rollback(err)
-	}
-	if changed != 1 {
-		var existingFormat, existingCommit, existingPath, existingBody string
-		var existingDevice, existingInode int64
-		err = tx.connection.QueryRowContext(ctx, `SELECT COALESCE(object_format, ''), COALESCE(commit_oid, ''), COALESCE(path, ''), body, COALESCE(repository_dev, -1), COALESCE(repository_inode, -1) FROM project_content_revisions WHERE id = ? AND revision = ?`, id.Bytes(), revision).Scan(&existingFormat, &existingCommit, &existingPath, &existingBody, &existingDevice, &existingInode)
-		if err != nil || existingFormat != objectFormat || existingCommit != commit || existingPath != path || existingBody != "" || existingDevice != repositoryDevice || existingInode != repositoryInode {
-			if err == nil {
-				err = ErrConflict
-			}
-			return tx.Rollback(err)
-		}
-	}
-	content, err := contentByRevision(ctx, tx.connection, id, revision)
-	if err != nil {
-		return tx.Rollback(err)
-	}
-	repository, found, err := repositoryByID(ctx, tx.connection, repositoryID)
-	if err != nil || !found || repository.ProjectID != content.ProjectID {
-		if err == nil {
-			err = ErrConflict
-		}
-		return tx.Rollback(err)
-	}
-	if _, err := tx.connection.ExecContext(ctx, `INSERT OR IGNORE INTO content_repository_bindings(content_id, content_revision, repository_id) VALUES(?, ?, ?)`, id.Bytes(), revision, repositoryID.Bytes()); err != nil {
-		return tx.Rollback(err)
-	}
-	if err := validateRepositoryBindings(ctx, tx.connection); err != nil {
-		return tx.Rollback(err)
-	}
-	return tx.Commit(ctx)
 }
 
 func contentMetadataByRevision(ctx context.Context, connection *sql.Conn, id ContentID, revision int64) (ContentRevision, error) {

@@ -65,30 +65,22 @@ func (daemon *Daemon) writeContentSource(ctx context.Context, spec kernel.NewCon
 		if readErr != nil {
 			return kernel.NewContent{}, readErr
 		}
-		if previous.Commit == "" {
-			previous, readErr = daemon.exportLegacyContent(ctx, previous.ID, previous.Revision.Int64())
-			if readErr != nil {
-				return kernel.NewContent{}, readErr
+		repository, found, readErr = daemon.store.ContentRepository(ctx, previous.ID, previous.Revision)
+		if readErr != nil || !found {
+			if readErr == nil {
+				readErr = kernel.ErrCorruptState
 			}
+			return kernel.NewContent{}, readErr
 		}
-		if previous.Commit != "" {
-			repository, found, readErr = daemon.store.ContentRepository(ctx, previous.ID, previous.Revision)
-			if readErr != nil || !found {
-				if readErr == nil {
-					readErr = kernel.ErrCorruptState
-				}
-				return kernel.NewContent{}, readErr
-			}
-			identity, readErr = change.NewRepositoryIdentity(uint64(previous.RepositoryDevice), uint64(previous.RepositoryInode))
-			if readErr != nil {
-				return kernel.NewContent{}, readErr
-			}
-			id, idErr := change.NewObjectIDFromHex(previous.ObjectFormat, previous.Commit)
-			if idErr != nil {
-				return kernel.NewContent{}, idErr
-			}
-			parent = &change.ContentSource{Commit: id, Path: previous.Path}
+		identity, readErr = change.NewRepositoryIdentity(uint64(previous.RepositoryDevice), uint64(previous.RepositoryInode))
+		if readErr != nil {
+			return kernel.NewContent{}, readErr
 		}
+		id, idErr := change.NewObjectIDFromHex(previous.ObjectFormat, previous.Commit)
+		if idErr != nil {
+			return kernel.NewContent{}, idErr
+		}
+		parent = &change.ContentSource{Commit: id, Path: previous.Path}
 	}
 	var source change.ContentSource
 	if spec.Commit != "" {
@@ -105,36 +97,7 @@ func (daemon *Daemon) writeContentSource(ctx context.Context, spec kernel.NewCon
 	return spec, nil
 }
 
-func (daemon *Daemon) exportLegacyContent(ctx context.Context, id kernel.ContentID, revision int64) (kernel.ContentRevision, error) {
-	legacy, body, err := daemon.store.LegacyContent(ctx, id, revision)
-	if err != nil {
-		if err == kernel.ErrConflict {
-			return daemon.store.Content(ctx, id, revision)
-		}
-		return kernel.ContentRevision{}, err
-	}
-	repository, found, err := daemon.store.ContentRepository(ctx, legacy.ID, legacy.Revision)
-	if err != nil {
-		return kernel.ContentRevision{}, err
-	}
-	if !found {
-		return kernel.ContentRevision{}, kernel.ErrCorruptState
-	}
-	spec := kernel.NewContent{ID: legacy.ID, ProjectID: legacy.ProjectID, RepositoryID: repository.ID, Body: body}
-	pinned, err := daemon.writeContentSource(ctx, spec, uint64(revision))
-	if err != nil {
-		return kernel.ContentRevision{}, err
-	}
-	if err := daemon.store.CompleteContentExport(ctx, id, revision, body, pinned.ObjectFormat, pinned.Commit, pinned.Path, pinned.RepositoryID, pinned.RepositoryDevice, pinned.RepositoryInode); err != nil {
-		return kernel.ContentRevision{}, err
-	}
-	return daemon.store.Content(ctx, id, revision)
-}
-
 func (daemon *Daemon) readContentSource(ctx context.Context, content kernel.ContentRevision) (string, error) {
-	if content.Commit == "" {
-		return "", kernel.ErrConflict
-	}
 	repository, found, err := daemon.store.ContentRepository(ctx, content.ID, content.Revision)
 	if err != nil || !found {
 		if err == nil {
@@ -158,18 +121,7 @@ func (daemon *Daemon) readContentSource(ctx context.Context, content kernel.Cont
 }
 
 func (daemon *Daemon) contentBodySource(ctx context.Context, content kernel.ContentRevision) (kernel.ContentRevision, string, error) {
-	if content.Commit != "" {
-		body, err := daemon.readContentSource(ctx, content)
-		return content, body, err
-	}
-	_, body, err := daemon.store.LegacyContent(ctx, content.ID, content.Revision.Int64())
-	if err != nil {
-		return content, "", err
-	}
-	if migrated, exportErr := daemon.exportLegacyContent(ctx, content.ID, content.Revision.Int64()); exportErr == nil {
-		content = migrated
-		body, err = daemon.readContentSource(ctx, content)
-	}
+	body, err := daemon.readContentSource(ctx, content)
 	return content, body, err
 }
 
@@ -323,12 +275,6 @@ func (daemon *Daemon) content(ctx context.Context, call api.Call) api.Reply {
 			}
 			if current.ProjectID != pid || current.LatestRevision.Int64() != int64(input.ExpectedRevision) {
 				return newErrorReply(api.RemoteRevisionConflict)
-			}
-			if current.Commit == "" {
-				if _, exportErr := daemon.exportLegacyContent(ctx, id, int64(input.ExpectedRevision)); exportErr != nil {
-					// The Store's deprecation path preserves a legacy body revision;
-					// a later authenticated read retries its Git export.
-				}
 			}
 			if operator {
 				v, e = daemon.store.DeprecateContent(ctx, id, pid, r, operatorProvenance, at)
