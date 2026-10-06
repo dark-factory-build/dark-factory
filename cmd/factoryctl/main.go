@@ -123,6 +123,7 @@ const (
     Only succeeded/cancelled tasks; retained filenames are marked removed.
   factoryctl storage compact
     Requires dispatch off and no nonterminal runs.
+  factoryctl backup create PATH | verify PATH
   factoryctl release SHA [--wait]
     Installs merged commit SHA into this factory's service, with rollback.
     --wait exits 0 verified, 1 failed or rolled back, 75 refused with no effect.
@@ -207,6 +208,8 @@ const (
 	commandCapacity
 	commandStatus
 	commandCompactStorage
+	commandBackupCreate
+	commandBackupVerify
 	commandOverseerStatus
 	commandOverseerTaskAdd
 	commandOverseerTaskUpdate
@@ -1508,6 +1511,13 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 	if len(args) == 2 && args[0] == "storage" && args[1] == "compact" {
 		return attemptCommand{kind: commandCompactStorage}, false, true
 	}
+	if len(args) == 3 && args[0] == "backup" && (args[1] == "create" || args[1] == "verify") && filepath.IsAbs(args[2]) {
+		kind := commandBackupCreate
+		if args[1] == "verify" {
+			kind = commandBackupVerify
+		}
+		return attemptCommand{kind: kind, text: args[2]}, false, true
+	}
 	if len(args) == 1 && args[0] == "status" {
 		return attemptCommand{kind: commandStatus}, false, true
 	}
@@ -2148,6 +2158,18 @@ func runOperator(ctx context.Context, command attemptCommand, getenv func(string
 		result, callErr := client.CompactStorage(callContext)
 		if callErr != nil {
 			return writeWebFailure(stderr, "storage compact", callErr)
+		}
+		return writeJSON(stdout, result)
+	case commandBackupCreate:
+		result, callErr := client.BackupCreate(callContext, command.text)
+		if callErr != nil {
+			return writeWebFailure(stderr, "backup create", callErr)
+		}
+		return writeJSON(stdout, result)
+	case commandBackupVerify:
+		result, callErr := client.BackupVerify(callContext, command.text)
+		if callErr != nil {
+			return writeWebFailure(stderr, "backup verify", callErr)
 		}
 		return writeJSON(stdout, result)
 	case commandStatus:

@@ -204,7 +204,7 @@ func (daemon *Daemon) HandleConnection(ctx context.Context, connection *api.Conn
 		dispatchContext, cancel = context.WithTimeout(ctx, retainedSourceDispatchTimeout)
 		defer cancel()
 	}
-	if call.Kind() == api.CallCompactStorage {
+	if call.Kind() == api.CallCompactStorage || call.Kind() == api.CallBackupCreate || call.Kind() == api.CallBackupVerify {
 		cancel()
 		dispatchContext, cancel = context.WithTimeout(ctx, storageCompactionDispatchTimeout)
 		defer cancel()
@@ -298,6 +298,26 @@ func (daemon *Daemon) dispatch(ctx context.Context, call api.Call) api.Reply {
 			return newErrorReply(remoteErrorCode(err))
 		}
 		return mutationReply(state.Head, state.Revision)
+	case api.CallBackupCreate:
+		path, _ := call.BackupPath()
+		if err := daemon.store.BackupTo(ctx, path); err != nil {
+			return newErrorReply(remoteErrorCode(err))
+		}
+		if err := kernel.WriteBackupManifest(path, time.Now()); err != nil {
+			return newErrorReply(remoteErrorCode(err))
+		}
+		reply, err := api.NewMutationReply(api.MutationResult{})
+		if err != nil {
+			return newErrorReply(api.RemoteInternal)
+		}
+		return reply
+	case api.CallBackupVerify:
+		path, _ := call.BackupPath()
+		manifest, err := kernel.VerifyBackup(ctx, path)
+		if err != nil {
+			return newErrorReply(remoteErrorCode(err))
+		}
+		return api.NewContentReply(manifest)
 	case api.CallSetCapacity:
 		return daemon.setCapacity(ctx, call)
 	case api.CallAccountsDiscover:

@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -29,6 +30,8 @@ const (
 	CallSetDispatch
 	CallSetCapacity
 	CallCompactStorage
+	CallBackupCreate
+	CallBackupVerify
 	CallAccountsDiscover
 	CallAccountLink
 	CallAgentSelectAccount
@@ -149,6 +152,7 @@ type Call struct {
 	webClient          WebClientRevocationInput
 	webAfter           string
 	expectedRevision   uint64
+	backupPath         string
 	enabled            bool
 	capacity           uint16
 	account            AccountLinkInput
@@ -170,6 +174,9 @@ func (call Call) MaintainerInput() (MaintainerInput, bool) {
 }
 
 func (call Call) Kind() CallKind { return call.kind }
+func (call Call) BackupPath() (string, bool) {
+	return call.backupPath, call.kind == CallBackupCreate || call.kind == CallBackupVerify
+}
 func (call Call) String() string { return "Call(<redacted>)" }
 func (call Call) GoString() string {
 	return "Call(<redacted>)"
@@ -861,6 +868,14 @@ func decodeCall(domain byte, bearer credential, encoded []byte) (Call, RemoteErr
 		if err := decodeExact(request.Params, &struct{}{}); err != nil {
 			return Call{}, RemoteInvalidRequest
 		}
+	case CallBackupCreate, CallBackupVerify:
+		var input struct {
+			Path string `json:"path"`
+		}
+		if err := decodeExact(request.Params, &input); err != nil || !validText(input.Path, 1, 4096) || !filepath.IsAbs(input.Path) {
+			return Call{}, RemoteInvalidRequest
+		}
+		call.backupPath = input.Path
 	case CallSetDispatch:
 		var input struct {
 			ExpectedRevision uint64 `json:"expected_revision"`
@@ -1079,6 +1094,10 @@ func methodKind(method string) (CallKind, byte) {
 		return CallSetDispatch, operatorDomain
 	case "compact_storage":
 		return CallCompactStorage, operatorDomain
+	case "backup_create":
+		return CallBackupCreate, operatorDomain
+	case "backup_verify":
+		return CallBackupVerify, operatorDomain
 	case "set_capacity":
 		return CallSetCapacity, operatorDomain
 	case "accounts_discover":
@@ -1301,8 +1320,10 @@ func replyMatches(kind CallKind, reply replyKind) bool {
 		return reply == replyOverseerSnapshot
 	case CallProjectRepository:
 		return reply == replyContent
-	case CallCreateProject, CallProjectLimits, CallCreateAgent, CallAgentIdlePolicy, CallAccountLink, CallAgentSelectAccount, CallAgentSelectModel, CallEnqueueTask, CallSetDispatch, CallSetCapacity, CallCompactStorage, CallSucceed, CallBlock, CallFail, CallRequestHuman, CallPeerAsk, CallPeerAnswer, CallSendBack, CallSendBackTask, CallOverseerEnqueueTask, CallOverseerUpdateTask, CallOverseerUpdateAgent, CallOverseerStopRun, CallOverseerReplaceRun, CallOverseerMessageWorker, CallOverseerInterruptWorker, CallOverseerReplyHuman, CallOperatorUpdateTask, CallOperatorUpdateAgent, CallOperatorStopRun, CallOperatorReplaceRun, CallOperatorMessageWorker, CallOperatorInterruptWorker, CallHumanReply:
+	case CallCreateProject, CallProjectLimits, CallCreateAgent, CallAgentIdlePolicy, CallAccountLink, CallAgentSelectAccount, CallAgentSelectModel, CallEnqueueTask, CallSetDispatch, CallSetCapacity, CallCompactStorage, CallBackupCreate, CallSucceed, CallBlock, CallFail, CallRequestHuman, CallPeerAsk, CallPeerAnswer, CallSendBack, CallSendBackTask, CallOverseerEnqueueTask, CallOverseerUpdateTask, CallOverseerUpdateAgent, CallOverseerStopRun, CallOverseerReplaceRun, CallOverseerMessageWorker, CallOverseerInterruptWorker, CallOverseerReplyHuman, CallOperatorUpdateTask, CallOperatorUpdateAgent, CallOperatorStopRun, CallOperatorReplaceRun, CallOperatorMessageWorker, CallOperatorInterruptWorker, CallHumanReply:
 		return reply == replyMutation
+	case CallBackupVerify:
+		return reply == replyContent
 	case CallWebStatus:
 		return reply == replyWebStatus
 	case CallWebListClients:

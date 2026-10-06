@@ -377,6 +377,28 @@ func (client *OperatorClient) CompactStorage(ctx context.Context) (MutationResul
 	return client.client.mutate(ctx, "compact_storage", struct{}{})
 }
 
+func (client *OperatorClient) BackupCreate(ctx context.Context, path string) (MutationResult, error) {
+	if !filepath.IsAbs(path) || !validText(path, 1, 4096) {
+		return MutationResult{}, ErrInvalidInput
+	}
+	return client.client.mutate(ctx, "backup_create", struct {
+		Path string `json:"path"`
+	}{path})
+}
+
+func (client *OperatorClient) BackupVerify(ctx context.Context, path string) (kernel.BackupManifest, error) {
+	if !filepath.IsAbs(path) || !validText(path, 1, 4096) {
+		return kernel.BackupManifest{}, ErrInvalidInput
+	}
+	var result kernel.BackupManifest
+	if err := client.client.call(ctx, "backup_verify", struct {
+		Path string `json:"path"`
+	}{path}, &result); err != nil {
+		return result, err
+	}
+	return result, nil
+}
+
 func (client *OperatorClient) UpdateAgent(ctx context.Context, input OverseerAgentUpdateInput) (MutationResult, error) {
 	if !validID(input.AgentID) || input.ExpectedRevision == 0 {
 		return MutationResult{}, ErrInvalidInput
