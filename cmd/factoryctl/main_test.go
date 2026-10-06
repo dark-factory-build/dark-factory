@@ -479,30 +479,30 @@ func usageRejection(stderr string) bool {
 	return stderr == usage || len(lines) == 2 && strings.HasPrefix(lines[0], "factoryctl ") && strings.HasPrefix(lines[1], "usage: factoryctl ")
 }
 
-func TestUsageFailureNamesTheSubcommandAndFlag(t *testing.T) {
+func TestUsageFailureNamesTheSubcommandUsageLine(t *testing.T) {
 	id := strings.Repeat("ab", 16)
 	terminal := "usage: factoryctl terminal observe --project ID --task ID --run ID [--cursor N] [--max-bytes N] [--text]\n"
 	for _, test := range []struct {
 		args []string
 		want string
 	}{
-		{[]string{"terminal", "observe", "--project", id, "--task", id, "--run", id, "--text", "--max-bytes", "1000000"}, "factoryctl terminal observe: --max-bytes must be 1-65536\n" + terminal},
-		{[]string{"terminal", "observe", "--project", "P", "--task", "T", "--run", "R", "--text", "--max-bytes", "1000000"}, "factoryctl terminal observe: invalid --project; invalid --task; invalid --run; --max-bytes must be 1-65536\n" + terminal},
-		{[]string{"terminal", "observe", "--project", id, "--run", id}, "factoryctl terminal observe: missing --task\n" + terminal},
-		{[]string{"terminal", "observe", "--project", id, "--task", id, "--run", id, "--text", "--text"}, "factoryctl terminal observe: duplicate flag --text\n" + terminal},
-		{[]string{"terminal", "observe", "--project", id, "--task", id, "--run", id, "--max=private"}, "factoryctl terminal observe: unknown flag --max\n" + terminal},
-		{[]string{"overseer", "status", "--offset", "3"}, "factoryctl overseer status: missing --head\nusage: factoryctl overseer status [--task ID] [--offset N --head HEAD] [--text-offset RUNES --head HEAD]\n"},
-		{[]string{"overseer", "status", "--offset", "0", "--task", "private"}, "factoryctl overseer status: invalid --task\nusage: factoryctl overseer status [--task ID] [--offset N --head HEAD] [--text-offset RUNES --head HEAD]\n"},
-		{[]string{"intake", "create", "--project", id, "--configuration", "{"}, "factoryctl intake create: invalid flag values or combination\nusage: factoryctl intake create --project ID --repository OWNER/REPO|--linear-team TEAM_ID --target-repository ID [--overseer ID] [--label LABEL] [--policy manual|trusted-authors] [--trusted-author LOGIN ...] [--poll-seconds N] [--admission-limit N] [--priority N] [--source ID] [--configuration JSON]\n"},
-		{[]string{"overseer", "status", "--task", id, "--text-offset", "0", "--head", "1"}, "factoryctl overseer status: --text-offset must be at least 1\nusage: factoryctl overseer status [--task ID] [--offset N --head HEAD] [--text-offset RUNES --head HEAD]\n"},
-		{[]string{"overseer", "task", "add", "--agent", "any", "--title", "t", "--prerequisite", id + ":1", "--priority", "1000001"}, "factoryctl overseer task add: --priority must be -1000000-1000000\nusage: factoryctl overseer task add --agent ID|any --title TEXT [--body TEXT] [--priority N] [--prerequisite TASK_ID:WORK_REVISION ...] [--conflict-path PATH ...] [--task-id ID --incarnation-id ID]\n"},
-		{[]string{"task", "add", "--project", id, "--agent", "any", "--title", "t", "--priority", "-1000001"}, "factoryctl task add: --priority must be -1000000-1000000\nusage: factoryctl task add --project ID [--repository ID] --agent ID|any --title TEXT [--body TEXT] [--priority N] [--task-id ID --incarnation-id ID]\n"},
-		{[]string{"web", "revoke", id, "--revision", "9223372036854775808"}, "factoryctl web revoke: invalid --revision\nusage: factoryctl web revoke CLIENT_ID --revision REVISION\n"},
-		{[]string{"web", "revoke", id, "--revision", "0"}, "factoryctl web revoke: --revision must be at least 1\nusage: factoryctl web revoke CLIENT_ID --revision REVISION\n"},
-		{[]string{"task", "add", "--project", id, "--agent", "any", "--title", "t", "--priority", "99999999999999999999"}, "factoryctl task add: --priority must be -1000000-1000000\nusage: factoryctl task add --project ID [--repository ID] --agent ID|any --title TEXT [--body TEXT] [--priority N] [--task-id ID --incarnation-id ID]\n"},
-		{[]string{"web", "revoke", "private", "--revision", "1"}, "factoryctl web revoke: invalid CLIENT_ID\nusage: factoryctl web revoke CLIENT_ID --revision REVISION\n"},
-		{[]string{"attempt", "content", "read", "--id", id}, "factoryctl attempt content read: missing --revision\nusage: factoryctl content read --id ID --revision REVISION\n"},
-		{[]string{"release", "a", "b"}, "factoryctl release: unexpected argument\nusage: factoryctl release SHA [--wait]\n"},
+		{[]string{"terminal", "observe", "--project", id, "--task", id, "--run", id, "--text", "--max-bytes", "1000000"}, "factoryctl terminal observe: invalid arguments\n" + terminal},
+		{[]string{"terminal", "observe", "--project", "P", "--task", "T", "--run", "R", "--text", "--max-bytes", "1000000"}, "factoryctl terminal observe: invalid arguments\n" + terminal},
+		{[]string{"terminal", "observe", "--project", id, "--run", id}, "factoryctl terminal observe: invalid arguments\n" + terminal},
+		{[]string{"terminal", "observe", "--project", id, "--task", id, "--run", id, "--text", "--text"}, "factoryctl terminal observe: invalid arguments\n" + terminal},
+		{[]string{"terminal", "observe", "--project", id, "--task", id, "--run", id, "--max=private"}, "factoryctl terminal observe: invalid arguments\n" + terminal},
+		{[]string{"overseer", "status", "--offset", "3"}, "factoryctl overseer status: invalid arguments\nusage: factoryctl overseer status [--task ID] [--offset N --head HEAD] [--text-offset RUNES --head HEAD]\n"},
+		{[]string{"overseer", "status", "--offset", "0", "--task", "private"}, "factoryctl overseer status: invalid arguments\nusage: factoryctl overseer status [--task ID] [--offset N --head HEAD] [--text-offset RUNES --head HEAD]\n"},
+		{[]string{"intake", "create", "--project", id, "--configuration", "{"}, "factoryctl intake create: invalid arguments\nusage: factoryctl intake create --project ID --repository OWNER/REPO|--linear-team TEAM_ID --target-repository ID [--overseer ID] [--label LABEL] [--policy manual|trusted-authors] [--trusted-author LOGIN ...] [--poll-seconds N] [--admission-limit N] [--priority N] [--source ID] [--configuration JSON]\n"},
+		{[]string{"overseer", "status", "--task", id, "--text-offset", "0", "--head", "1"}, "factoryctl overseer status: invalid arguments\nusage: factoryctl overseer status [--task ID] [--offset N --head HEAD] [--text-offset RUNES --head HEAD]\n"},
+		{[]string{"overseer", "task", "add", "--agent", "any", "--title", "t", "--prerequisite", id + ":1", "--priority", "1000001"}, "factoryctl overseer task add: invalid arguments\nusage: factoryctl overseer task add --agent ID|any --title TEXT [--body TEXT] [--priority N] [--prerequisite TASK_ID:WORK_REVISION ...] [--conflict-path PATH ...] [--task-id ID --incarnation-id ID]\n"},
+		{[]string{"task", "add", "--project", id, "--agent", "any", "--title", "t", "--priority", "-1000001"}, "factoryctl task add: invalid arguments\nusage: factoryctl task add --project ID [--repository ID] --agent ID|any --title TEXT [--body TEXT] [--priority N] [--task-id ID --incarnation-id ID]\n"},
+		{[]string{"web", "revoke", id, "--revision", "9223372036854775808"}, "factoryctl web revoke: invalid arguments\nusage: factoryctl web revoke CLIENT_ID --revision REVISION\n"},
+		{[]string{"web", "revoke", id, "--revision", "0"}, "factoryctl web revoke: invalid arguments\nusage: factoryctl web revoke CLIENT_ID --revision REVISION\n"},
+		{[]string{"task", "add", "--project", id, "--agent", "any", "--title", "t", "--priority", "99999999999999999999"}, "factoryctl task add: invalid arguments\nusage: factoryctl task add --project ID [--repository ID] --agent ID|any --title TEXT [--body TEXT] [--priority N] [--task-id ID --incarnation-id ID]\n"},
+		{[]string{"web", "revoke", "private", "--revision", "1"}, "factoryctl web revoke: invalid arguments\nusage: factoryctl web revoke CLIENT_ID --revision REVISION\n"},
+		{[]string{"attempt", "content", "read", "--id", id}, "factoryctl attempt content read: invalid arguments\nusage: factoryctl content read --id ID --revision REVISION\n"},
+		{[]string{"release", "a", "b"}, "factoryctl release: invalid arguments\nusage: factoryctl release SHA [--wait]\n"},
 		{[]string{"attempt", "unknown"}, usage},
 	} {
 		var stdout, stderr bytes.Buffer

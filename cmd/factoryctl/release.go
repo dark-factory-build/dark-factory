@@ -23,9 +23,8 @@ var (
 // The daemon restarts during the release, so --wait reads the durable record
 // until it settles and treats an unreachable daemon as not settled yet.
 func runRelease(ctx context.Context, args []string, getenv func(string) string, stdout, stderr io.Writer) int {
-	accepts := func(line []string) bool { return len(line) == 2 || len(line) == 3 && line[2] == "--wait" }
-	if line := append([]string{"release"}, args...); !accepts(line) {
-		return usageFailure(stderr, line, accepts)
+	if len(args) != 1 && (len(args) != 2 || args[1] != "--wait") {
+		return usageFailure(stderr, append([]string{"release"}, args...))
 	}
 	client, err := api.NewOperatorClient(getenv("DARK_FACTORY_SOCKET"), getenv("DARK_FACTORY_OPERATOR_TOKEN_FILE"))
 	if err != nil {

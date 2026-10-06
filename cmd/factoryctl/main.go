@@ -9,8 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"maps"
-	"math/bits"
 	"net"
 	"os"
 	"path/filepath"
@@ -384,7 +382,7 @@ func runWithDependencies(ctx context.Context, args []string, getenv func(string)
 		return 0
 	}
 	if !ok {
-		return usageFailure(stderr, args, func(args []string) bool { _, _, ok := parse(args); return ok })
+		return usageFailure(stderr, args)
 	}
 	if command.kind == commandInit || command.kind == commandDoctor {
 		return runHome(ctx, command, stdout, stderr)
@@ -1982,14 +1980,11 @@ func parseCount(value string, allowZero bool) (uint64, bool) {
 
 func helpFlag(value string) bool { return value == "-h" || value == "--help" }
 
-// usageFailure answers a rejected command line with one line naming what is
-// wrong, then the usage line of the subcommand it names; a line naming no
-// subcommand still gets the full usage. accepts stays the only validator:
-// each value is judged by restoring it into a command line made valid with
-// sample values, and probing that line also recovers numeric ranges.
-func usageFailure(stderr io.Writer, args []string, accepts func([]string) bool) int {
+// usageFailure answers a line parse rejected with the usage line of the
+// subcommand it names; a line naming no subcommand gets the full usage.
+func usageFailure(stderr io.Writer, args []string) int {
 	var line []string
-	consumed, rank, problem := 0, 3, ""
+	consumed := 0
 	for _, text := range strings.Split(usage, "\n") {
 		fields := strings.Fields(text)
 		words := 1
@@ -2002,218 +1997,17 @@ func usageFailure(stderr io.Writer, args []string, accepts func([]string) bool) 
 			for i := 1; matched && i < words; i++ {
 				matched = slices.Contains(strings.Split(fields[i], "|"), args[i-1+skip])
 			}
-			if matched && words-1+skip >= consumed {
-				if r, p := usageProblem(fields[words:], args, words-1+skip, accepts); words-1+skip > consumed || r < rank {
-					line, consumed, rank, problem = fields, words-1+skip, r, p
-				}
+			if matched && words-1+skip > consumed {
+				line, consumed = fields, words-1+skip
 			}
 		}
 	}
 	if line == nil {
 		_, _ = io.WriteString(stderr, usage)
 	} else {
-		_, _ = fmt.Fprintf(stderr, "factoryctl %s: %s\nusage: %s\n", strings.Join(args[:consumed], " "), problem, strings.Join(line, " "))
+		_, _ = fmt.Fprintf(stderr, "factoryctl %s: invalid arguments\nusage: %s\n", strings.Join(args[:consumed], " "), strings.Join(line, " "))
 	}
 	return exitUsage
-}
-
-// usageProblem ranks its finding: 0 a value, 1 a missing argument, 2 an
-// argument the usage line does not have. It names flags, never values. Flags
-// bracketed together, like [--offset N --head HEAD], come together.
-func usageProblem(spec, args []string, start int, accepts func([]string) bool) (int, string) {
-	type slot struct {
-		name, placeholder       string
-		groups                  []int
-		required, repeat, value bool
-	}
-	flags, slots := map[string]*slot{}, []*slot{}
-	var positionals []*slot
-	var last *slot
-	groups, next, alternative, pending := []int{0}, 0, false, false
-	for _, field := range strings.Fields(strings.NewReplacer("[", " [ ", "]", " ] ", "|--", " | --").Replace(strings.Join(spec, " "))) {
-		switch {
-		case field == "[":
-			next++
-			groups = append(groups, next)
-		case field == "]":
-			groups = groups[:len(groups)-1]
-		case field == "|" && last != nil:
-			last.required, alternative = false, true
-			if next++; len(groups) > 1 {
-				groups[len(groups)-1] = next
-			}
-		case field == "..." && last != nil:
-			last.repeat = true
-		case strings.HasPrefix(field, "--"):
-			if flags[field] == nil {
-				flags[field] = &slot{name: field, required: len(groups) == 1 && !alternative}
-				slots = append(slots, flags[field])
-			}
-			flags[field].groups = append(flags[field].groups, groups[len(groups)-1])
-			last, alternative, pending = flags[field], false, true
-			continue
-		case pending:
-			last.value, last.placeholder = true, field
-		case len(groups) == 1:
-			positionals = append(positionals, &slot{name: field, placeholder: field, required: true, value: true})
-		}
-		pending = false
-	}
-	slots = append(slots, positionals...)
-	seen, values := map[*slot]bool{}, map[int]*slot{}
-	for i := start; i < len(args); i++ {
-		s := flags[args[i]]
-		switch {
-		case !strings.HasPrefix(args[i], "--") && len(positionals) == 0:
-			return 2, "unexpected argument"
-		case !strings.HasPrefix(args[i], "--"):
-			s, positionals = positionals[0], positionals[1:]
-			values[i] = s
-		case s == nil:
-			return 2, "unknown flag " + strings.SplitN(args[i], "=", 2)[0]
-		case seen[s] && !s.repeat:
-			return 2, "duplicate flag " + s.name
-		case s.value && i+1 == len(args):
-			return 1, "missing value for " + s.name
-		case s.value:
-			i++
-			values[i] = s
-		}
-		seen[s] = true
-	}
-	// A flag in several brackets, like --head, requires nothing itself; a
-	// flag bracketed only in group g requires g's other flags. These are only
-	// candidates: the usage line cannot express every rule parse applies.
-	exclusive := func(group int) bool {
-		return group != 0 && slices.ContainsFunc(slots, func(other *slot) bool { return seen[other] && slices.Equal(other.groups, []int{group}) })
-	}
-	var missing, insert []string
-	extended := map[int]*slot{}
-	for _, s := range slots {
-		if !seen[s] && (s.required || slices.ContainsFunc(s.groups, exclusive)) {
-			missing = append(missing, "missing "+s.name)
-			if strings.HasPrefix(s.name, "--") {
-				insert = append(insert, s.name)
-			}
-			if s.value {
-				insert = append(insert, "")
-				extended[start+len(insert)-1] = s
-			}
-		}
-	}
-	for index, s := range values {
-		extended[index+len(insert)] = s
-	}
-	samples := func(placeholder string) []string {
-		var candidates []string
-		for _, value := range strings.Split(placeholder, "|") {
-			if value == strings.ToLower(value) {
-				candidates = append(candidates, value)
-			}
-		}
-		if strings.Contains(placeholder, "ID") || strings.HasPrefix(placeholder, "HEX") {
-			candidates = append(candidates, strings.Repeat("ab", 16+16*strings.Count(placeholder, "64")))
-		}
-		if placeholder == "ABSOLUTE" || placeholder == "PATH" {
-			candidates = append(candidates, "/tmp")
-		}
-		if strings.Contains(placeholder, "/") {
-			candidates = append(candidates, "o/r")
-		}
-		return append(candidates, "1", "64", "0", "x")
-	}
-	with := func(base []string, index int, value string) []string {
-		changed := slices.Clone(base)
-		changed[index] = value
-		return changed
-	}
-	// The cheapest fix parse accepts names the problems: each changed value
-	// and each added flag costs one, and the rest keep what was typed. Added
-	// flags take samples for free. ponytail: subset search caps at 12 values
-	// (then the generic message); search greedily past that.
-	search := func(line []string, of map[int]*slot, inserted int) ([]string, []int) {
-		var open, free []int
-		for _, index := range slices.Sorted(maps.Keys(of)) {
-			if index < start+inserted {
-				free = append(free, index)
-			} else {
-				open = append(open, index)
-			}
-		}
-		for size := 0; size <= len(open) && len(open) <= 12; size++ {
-			for mask := 0; mask < 1<<len(open); mask++ {
-				if bits.OnesCount(uint(mask)) != size {
-					continue
-				}
-				changed, chosen := slices.Clone(line), slices.Clone(free)
-				for bit, index := range open {
-					if mask&(1<<bit) != 0 {
-						chosen = append(chosen, index)
-					}
-				}
-				for _, index := range chosen {
-					changed[index] = samples(of[index].placeholder)[0]
-				}
-				for _, index := range chosen {
-					for _, sample := range samples(of[index].placeholder) {
-						if !accepts(changed) && accepts(with(changed, index, sample)) {
-							changed[index] = sample
-						}
-					}
-				}
-				if accepts(changed) {
-					return changed, chosen[len(free):]
-				}
-			}
-		}
-		return nil, nil
-	}
-	rank, problems := 0, []string(nil)
-	typed, withMissing := args, slices.Concat(args[:start], insert, args[start:])
-	valid, invalid := search(typed, values, 0)
-	if missing != nil {
-		if line, changed := search(withMissing, extended, len(insert)); line != nil && (valid == nil || len(missing)+len(changed) <= len(invalid)) {
-			typed, valid, invalid, values, rank, problems = withMissing, line, changed, extended, 1, missing
-		}
-	}
-	if valid == nil {
-		return 0, "invalid flag values or combination"
-	}
-	for _, index := range invalid {
-		name, problem := values[index].name, "invalid "+values[index].name
-		if value, err := strconv.ParseInt(valid[index], 10, 64); err == nil {
-			const far = 1 << 61
-			edge := func(ok, bad int64) int64 {
-				if accepts(with(valid, index, strconv.FormatInt(bad, 10))) {
-					return bad
-				}
-				for ok-bad > 1 || bad-ok > 1 {
-					if middle := ok + (bad-ok)/2; accepts(with(valid, index, strconv.FormatInt(middle, 10))) {
-						ok = middle
-					} else {
-						bad = middle
-					}
-				}
-				return ok
-			}
-			given, notInteger := strconv.ParseInt(typed[index], 10, 64)
-			switch low, high := edge(value, -far), edge(value, far); {
-			case notInteger != nil && !errors.Is(notInteger, strconv.ErrRange) || (low == -far || given >= low) && (high == far || given <= high):
-				// The probed bounds do not explain the typed value (ParseInt clamps an
-				// overflow to the int64 edge): say only invalid.
-			case high == far:
-				problem = fmt.Sprintf("%s must be at least %d", name, low)
-			case low == -far:
-				problem = fmt.Sprintf("%s must be at most %d", name, high)
-			case low == high:
-				problem = fmt.Sprintf("%s must be %d", name, low)
-			default:
-				problem = fmt.Sprintf("%s must be %d-%d", name, low, high)
-			}
-		}
-		problems = append(problems, problem)
-	}
-	return rank, strings.Join(problems, "; ")
 }
 
 func validHumanRequestKey(value string) bool {
