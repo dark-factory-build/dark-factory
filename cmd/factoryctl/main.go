@@ -1107,10 +1107,16 @@ func newOnceFlagSet(name string) (*flag.FlagSet, func(string, *string), map[stri
 	}, seen
 }
 
-// parsePairedFlags parses args as separate "--name value" pairs: it rejects
-// leftover arguments and the "--name=value" form.
+// parsePairedFlags parses args as separate "--name value" pairs: every name
+// token must be a bare double-dash flag, so the "--name=value", "-name" and
+// "--" forms are rejected along with leftover arguments.
 func parsePairedFlags(flags *flag.FlagSet, args []string) bool {
-	return flags.Parse(args) == nil && flags.NArg() == 0 && 2*flags.NFlag() == len(args)
+	for index := 0; index < len(args); index += 2 {
+		if name := args[index]; len(name) < 3 || name[:2] != "--" || strings.Contains(name, "=") {
+			return false
+		}
+	}
+	return flags.Parse(args) == nil && flags.NArg() == 0
 }
 
 func serviceConfigFor(command attemptCommand) install.ServiceConfig {
