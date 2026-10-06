@@ -32,6 +32,16 @@ func TestVersionRequiresNoHomeOrCredential(t *testing.T) {
 	}
 }
 
+func TestBackupCommandsAreTopLevelOperatorCommands(t *testing.T) {
+	path := "/private/tmp/factory-backup.sqlite3"
+	for _, action := range []string{"create", "verify"} {
+		command, help, ok := parse([]string{"backup", action, path})
+		if !ok || help || (action == "create" && command.kind != commandBackupCreate) || (action == "verify" && command.kind != commandBackupVerify) {
+			t.Fatalf("backup %s parse = %+v help=%v ok=%v", action, command, help, ok)
+		}
+	}
+}
+
 func TestTerminalObserveCursorIsNotResponseBudget(t *testing.T) {
 	id := "0123456789abcdef0123456789abcdef"
 	args := []string{"attempt", "terminal", "observe", "--project", id, "--task", id, "--run", id, "--cursor", "10000000", "--max-bytes", "1024"}

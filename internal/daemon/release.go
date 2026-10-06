@@ -309,11 +309,6 @@ func (daemon *Daemon) release(project kernel.ProjectID, root string, source chan
 	}
 	delivery.Phase = "swap"
 	_ = daemon.writeRelease(ctx, project, &delivery)
-	// The upgrade backup is the release lane's own fixed path: replace it.
-	if err := os.Remove(install.UpgradeBackupPath(daemon.home)); err != nil && !errors.Is(err, os.ErrNotExist) {
-		fail(err.Error())
-		return
-	}
 	if err := daemon.store.BackupTo(ctx, install.UpgradeBackupPath(daemon.home)); err != nil {
 		fail("backup: " + err.Error())
 		return

@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	_ "github.com/ncruces/go-sqlite3/driver"
 	"io"
@@ -17,13 +18,33 @@ import (
 // SchemaVersion is the user_version this build opens and writes.
 const SchemaVersion = userVersion
 
-// BackupTo writes a consistent copy of the database (VACUUM INTO) to path,
-// holding the writer gate so nothing commits during the copy. It never
-// removes anything: VACUUM INTO refuses an existing file, so no destination,
-// however aliased, can replace a live database file.
+// BackupTo replaces path with a consistent copy of the database (VACUUM
+// INTO), holding the writer gate so nothing commits during the copy.
 func (store *Store) BackupTo(ctx context.Context, path string) error {
-	if _, err := os.Lstat(path); err == nil {
-		return fmt.Errorf("%w: backup destination already exists", ErrConflict)
+	path = filepath.Clean(path)
+	store.bindingMu.RLock()
+	if store.pathBinding != nil && store.pathBinding.main != nil {
+		live := filepath.Join(store.pathBinding.authority.path, store.pathBinding.main.name)
+		if info, err := os.Stat(path); err == nil {
+			for _, source := range []*databaseFile{store.pathBinding.main, store.pathBinding.wal, store.pathBinding.shm} {
+				if source != nil && os.SameFile(info, source.info) {
+					store.bindingMu.RUnlock()
+					return fmt.Errorf("%w: backup destination is a live sqlite file", ErrConflict)
+				}
+			}
+		} else if !errors.Is(err, os.ErrNotExist) {
+			store.bindingMu.RUnlock()
+			return fmt.Errorf("inspect backup destination: %w", err)
+		}
+		store.bindingMu.RUnlock()
+		if path == live || path == live+"-wal" || path == live+"-shm" {
+			return fmt.Errorf("%w: backup destination is a live sqlite file", ErrConflict)
+		}
+	} else {
+		store.bindingMu.RUnlock()
+	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
 	}
 	tx, err := store.beginValidatedWrite(ctx)
 	if err != nil {
@@ -66,7 +87,15 @@ func WriteBackupManifest(path string, created time.Time) error {
 	}
 	data = append(data, '\n')
 	tmp := BackupManifestPath(path) + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+	file, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err := file.Write(data); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if err := file.Close(); err != nil {
 		return err
 	}
 	if err := os.Rename(tmp, BackupManifestPath(path)); err != nil {

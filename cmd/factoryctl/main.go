@@ -400,7 +400,7 @@ func runWithDependencies(ctx context.Context, args []string, getenv func(string)
 	if command.kind == commandRemoteStatus {
 		return runRemote(ctx, getenv, stdout, stderr)
 	}
-	if command.kind == commandAgentPaths || command.kind == commandOperatorTerminalObserve || command.kind == commandWorkerOperation || command.kind == commandProjectCreate || command.kind == commandProjectRepository || command.kind == commandIntake || command.kind == commandProjectLimits || command.kind == commandAgentCreate || command.kind == commandAgentIdlePolicy || command.kind == commandAccountsDiscover || command.kind == commandAccountsList || command.kind == commandAccountLink || command.kind == commandAgentSelectAccount || command.kind == commandAgentSelectModel || command.kind == commandTaskAdd || command.kind == commandTaskSendBack || command.kind == commandTaskRead || command.kind == commandDispatch || command.kind == commandCapacity || command.kind == commandStatus || command.kind == commandCompactStorage || command.kind == commandHumanList || command.kind == commandHumanReply {
+	if command.kind == commandAgentPaths || command.kind == commandOperatorTerminalObserve || command.kind == commandWorkerOperation || command.kind == commandProjectCreate || command.kind == commandProjectRepository || command.kind == commandIntake || command.kind == commandProjectLimits || command.kind == commandAgentCreate || command.kind == commandAgentIdlePolicy || command.kind == commandAccountsDiscover || command.kind == commandAccountsList || command.kind == commandAccountLink || command.kind == commandAgentSelectAccount || command.kind == commandAgentSelectModel || command.kind == commandTaskAdd || command.kind == commandTaskSendBack || command.kind == commandTaskRead || command.kind == commandDispatch || command.kind == commandCapacity || command.kind == commandStatus || command.kind == commandCompactStorage || command.kind == commandBackupCreate || command.kind == commandBackupVerify || command.kind == commandHumanList || command.kind == commandHumanReply {
 		return runOperator(ctx, command, getenv, stdout, stderr)
 	}
 	if command.kind >= commandContentCreate && command.kind <= commandContentAttachments && len(args) > 0 && args[0] == "content" {
@@ -667,7 +667,7 @@ func parse(args []string) (attemptCommand, bool, bool) {
 		command.operatorControl = ok
 		return command, help, ok
 	}
-	if len(args) >= 1 && (args[0] == "status" || args[0] == "storage" || args[0] == "content" || args[0] == "outcome" || args[0] == "project" || args[0] == "agent" || args[0] == "account" || args[0] == "task" || args[0] == "worker" || args[0] == "dispatch" || args[0] == "capacity" || args[0] == "intake") {
+	if len(args) >= 1 && (args[0] == "status" || args[0] == "storage" || args[0] == "backup" || args[0] == "content" || args[0] == "outcome" || args[0] == "project" || args[0] == "agent" || args[0] == "account" || args[0] == "task" || args[0] == "worker" || args[0] == "dispatch" || args[0] == "capacity" || args[0] == "intake") {
 		return parseOperator(args)
 	}
 	if len(args) >= 1 && args[0] == "overseer" {
