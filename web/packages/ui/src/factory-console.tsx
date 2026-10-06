@@ -4,6 +4,7 @@ import { type FactoryAgentSelection, type FactoryAppSnapshot, type FactoryHumanR
 import { AgentList, FactoryFloor } from "./console-screens.js";
 import { AgentPanel, ConsoleDialog, HumanRequestPanel, WorkPanel, TaskDetail, SettingsDialog, editErrorCopy, type AgentConfigEdit, type AgentPanelView, type TaskEdit, type TaskBrief, type TaskScope, type WorkFilter } from "./console-sidebar.js";
 import { ProjectLibrary, type ProjectContentCall } from "./project-library.js";
+import { activityTarget, onBoard, useKnowledgeActivity, type KnowledgeActivity } from "./project-board.js";
 import { useProduction } from "./production-data.js";
 import { deriveProductionView, inProgressProduction, productionKey } from "./production-view.js";
 import { ProductionPanel, asTask } from "./production-panel.js";
@@ -221,9 +222,11 @@ export function FactoryConsole({
   const [libraryOpen, setLibraryOpen] = useState(false);
   const [settingsTab, setSettingsTab] = useState<number>();
   useEffect(() => { if (settingsOpen !== true) setSettingsTab(undefined); }, [settingsOpen]);
-  const [knowledgeView, setKnowledgeView] = useState<{ board?: boolean; project?: string; entity?: string; id?: string; repository?: string }>({});
+  const [knowledgeView, setKnowledgeView] = useState<{ board?: boolean; project?: string; entity?: string; id?: string; revision?: number; repository?: string }>({});
   const [requestedEntity, setRequestedEntity] = useState<{ id: string }>();
-  const openKnowledge = (board: boolean, project?: string, entity?: string, id?: string, repository?: string) => { setKnowledgeView({ board, project: project ?? projectId, ...(entity ? { entity } : {}), ...(id ? { id } : {}), ...(repository ? { repository } : {}) }); setLibraryOpen(true); };
+  const openKnowledge = (board: boolean, project?: string, entity?: string, id?: string, repository?: string, revision?: number) => { setKnowledgeView({ board, project: project ?? projectId, ...(entity ? { entity } : {}), ...(id ? { id } : {}), ...(revision ? { revision } : {}), ...(repository ? { repository } : {}) }); setLibraryOpen(true); };
+  const knowledgeActivity = useKnowledgeActivity([...(scopedState?.projects.keys() ?? [])].sort(), ready ? onProjectContent : undefined);
+  const openActivity = (item: KnowledgeActivity) => { const target = activityTarget(item); openKnowledge(onBoard(item), item.project_id, undefined, target.id, undefined, target.revision); };
   const [requestedMission, setRequestedMission] = useState<{ projectId: string; id: string }>();
   const [byMission, setByMission] = useState(false);
   const [workFilter, setWorkFilter] = useState<WorkFilter>("all");
@@ -312,6 +315,7 @@ export function FactoryConsole({
           <button type="button" aria-pressed={detail === "floor" && view === "floor"} disabled={!ready} onClick={() => { onView?.("floor"); onDetail("floor"); }}>Floor</button>
           <button type="button" aria-pressed={detail === "floor" && view === "agents"} disabled={!ready || onView === undefined} onClick={() => { onView?.("agents"); onDetail("floor"); }}>Agents</button>
           <IconButton icon="list" aria-pressed={detail !== "floor" && selectedDetail === "work"} disabled={!ready} onClick={showWork}>Work <Badge n={waiting} /></IconButton>
+          <IconButton icon="chat" disabled={!ready} onClick={() => openKnowledge(true)}>Board</IconButton>
           <IconButton icon="book" disabled={!ready} onClick={() => openKnowledge(false)}>Library</IconButton>
         </nav>}
         <div className="dfConsoleLayout">
@@ -331,7 +335,7 @@ export function FactoryConsole({
                 ))}
               </div>} />
             {view === "floor"
-              ? <FactoryFloor requestedEntity={requestedEntity} onOpenBoard={(project, entity, id, repository) => openKnowledge(true, project, entity, id, repository)} changes={productionItems} selectedChange={selectedProduction} onSelectChange={selectProduction} onProjectContent={onProjectContent} onOpenLibrary={(id) => openKnowledge(false, id)} onOpenTasks={ready ? (id) => openWork(id, false) : undefined} onOpenMissions={ready ? (id) => openWork(id, true) : undefined} projectId={projectId} floorAppearance={floorAppearance} selectedTaskId={selectedTask?.id} onSelectTask={ready ? goTask : undefined} selectedAgentId={selectedDetail === "agent" ? selectedAgent?.id : undefined} state={scopedState} graphs={graphs} onLoadNode={onLoadNode} onAddTask={ready ? onAddTask : undefined} runPaths={runPaths} lastRunPaths={lastRunPaths} onSelectAgent={ready ? onSelectAgent : undefined} onSelectHumanRequest={ready ? selectRequest : undefined} connected={ready} />
+              ? <FactoryFloor activity={knowledgeActivity.recent} activityCues={knowledgeActivity.cues} onOpenActivity={ready ? openActivity : undefined} requestedEntity={requestedEntity} onOpenBoard={(project, entity, id, repository) => openKnowledge(true, project, entity, id, repository)} changes={productionItems} selectedChange={selectedProduction} onSelectChange={selectProduction} onProjectContent={onProjectContent} onOpenLibrary={(id) => openKnowledge(false, id)} onOpenTasks={ready ? (id) => openWork(id, false) : undefined} onOpenMissions={ready ? (id) => openWork(id, true) : undefined} projectId={projectId} floorAppearance={floorAppearance} selectedTaskId={selectedTask?.id} onSelectTask={ready ? goTask : undefined} selectedAgentId={selectedDetail === "agent" ? selectedAgent?.id : undefined} state={scopedState} graphs={graphs} onLoadNode={onLoadNode} onAddTask={ready ? onAddTask : undefined} runPaths={runPaths} lastRunPaths={lastRunPaths} onSelectAgent={ready ? onSelectAgent : undefined} onSelectHumanRequest={ready ? selectRequest : undefined} connected={ready} />
               : <AgentList state={scopedState} selectedAgentId={selectedAgent?.id} ready={ready} onSelectAgent={ready ? onSelectAgent : undefined} />}
           </section>
 
@@ -339,6 +343,7 @@ export function FactoryConsole({
             <div className="dfConsoleViewToggle" role="group" aria-label="Right panel">
               <IconButton icon="list" aria-pressed={selectedDetail === "work"} disabled={!ready || onDetail === undefined} onClick={showWork}>Work <Badge n={waiting} /></IconButton>
               <IconButton icon="terminal" aria-pressed={selectedDetail === "agent"} disabled={!ready || onDetail === undefined} onClick={() => onDetail?.("agent")}>Agent</IconButton>
+              <IconButton icon="chat" disabled={!ready} onClick={() => openKnowledge(true)}>Board</IconButton>
               <IconButton icon="book" disabled={!ready} onClick={() => openKnowledge(false)}>Library</IconButton>
             </div>
             {editError === undefined ? null : <p className="dfFactoryConsole__terminalError" role="alert">{editError}</p>}
@@ -405,8 +410,8 @@ export function FactoryConsole({
           </aside>
         </div>
       </main>
-      {!libraryOpen ? null : <ConsoleDialog label="Project library" title="Library" className="dfLibraryDialog" onClose={() => setLibraryOpen(false)}>
-        <ProjectLibrary open initialProjectId={knowledgeView.project} key={`${knowledgeView.project}:${knowledgeView.board}:${knowledgeView.entity}:${knowledgeView.id}`} board={knowledgeView.board} repository={knowledgeView.repository} entity={knowledgeView.entity} initialID={knowledgeView.id} onSource={(entity) => { selectProject(entity.split(":")[0]); setRequestedEntity({ id: entity.slice(entity.indexOf(":") + 1) }); setLibraryOpen(false); onView?.("floor"); }} onRecord={openKnowledgeRecord} state={state} call={ready ? onProjectContent : undefined} draft={(agent, instruction) => { setLibraryOpen(false); onDraftLibraryTask?.(agent, instruction); }} />
+      {!libraryOpen ? null : <ConsoleDialog key={knowledgeView.board ? "board" : "library"} label={knowledgeView.board ? "Discussion board" : "Project library"} title={knowledgeView.board ? "Board" : "Library"} className="dfLibraryDialog" onClose={() => setLibraryOpen(false)}>
+        <ProjectLibrary open initialProjectId={knowledgeView.project} key={`${knowledgeView.project}:${knowledgeView.board}:${knowledgeView.entity}:${knowledgeView.id}:${knowledgeView.revision}`} board={knowledgeView.board} repository={knowledgeView.repository} entity={knowledgeView.entity} initialID={knowledgeView.id} initialRevision={knowledgeView.revision} onSource={(entity) => { selectProject(entity.split(":")[0]); setRequestedEntity({ id: entity.slice(entity.indexOf(":") + 1) }); setLibraryOpen(false); onView?.("floor"); }} onRecord={openKnowledgeRecord} state={state} call={ready ? onProjectContent : undefined} draft={(agent, instruction) => { setLibraryOpen(false); onDraftLibraryTask?.(agent, instruction); }} />
       </ConsoleDialog>}
       {settingsOpen !== true ? null : (
         <SettingsDialog

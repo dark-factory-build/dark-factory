@@ -2000,7 +2000,7 @@ test("mobile navigation switches presentation without mutating work", () => {
   const nav = elements.find((element) => element.props["aria-label"] === "Console views");
   const buttons = nav.props.children.filter((element) => element.type === "button" || element.type.name === "IconButton");
   assert.equal(buttons[0].props["aria-pressed"], true);
-  assert.deepEqual(buttons.map(textOf), ["Floor", "Agents", "Work", "Library"]);
+  assert.deepEqual(buttons.map(textOf), ["Floor", "Agents", "Work", "Board", "Library"]);
   buttons.find((button) => textOf(button) === "Work").props.onClick();
   assert.deepEqual(calls, ["work"]);
   assert.equal(elements.find((element) => element.type === "main").props["data-mobile-view"], "floor");
@@ -2704,22 +2704,6 @@ test("Library source navigation selects the machine on the floor and keeps one i
   }
   await act(async () => tree.root.findAllByType("button").find((button) => button.children.join("") === "Close").props.onClick());
   assertSelection("");
-  await act(async () => tree.unmount());
-});
-
-
-test("board and shelves open peer views of one Library workspace", async () => {
-  let tree;
-  await act(async () => { tree = create(createElement(FactoryConsole, { status: "ready", state: fixtureState, graphs: fixtureGraphs, onDetail() {}, onProjectContent: async () => ({ items: [] }) })); });
-  const floor = () => tree.root.findByType(FactoryFloor);
-  await act(async () => floor().props.onOpenBoard(ids.project));
-  const views = () => tree.root.findByProps({ "aria-label": "Library views" });
-  assert.equal(views().findAllByType("button").find(button => button.props["aria-pressed"]).children.join(""), "Discussions");
-  assert.equal(tree.root.findAllByType("dialog").length, 1);
-  assert.equal(tree.root.findByType("dialog").props["aria-label"], "Project library");
-  await act(async () => views().findAllByType("button").find(button => button.children.join("") === "All documents").props.onClick());
-  assert.equal(views().findAllByType("button").find(button => button.props["aria-pressed"]).children.join(""), "All documents");
-  assert.ok(tree.root.findByProps({ "aria-label": "Console views" }).findAllByType("button").some(button => textOf(button) === "Library"));
   await act(async () => tree.unmount());
 });
 

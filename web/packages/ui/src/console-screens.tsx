@@ -14,6 +14,7 @@ import { type ProductionContraption } from "./production-view.js";
 import { type ProjectContentCall } from "./project-library.js";
 import type { SceneHall, SceneMachine } from "./factory-scene/scene.js";
 import { SectionHeader, Status } from "./console-kit.js";
+import { KnowledgeActivityList, activityLabel, onBoard, type KnowledgeActivity, type KnowledgeCue } from "./project-board.js";
 import { DEFAULT_FLOOR_APPEARANCE, type FloorAppearance } from "./floor-appearance.js";
 
 function shortID(value: string): string {
@@ -85,8 +86,12 @@ const NO_CHANGES: readonly ProductionContraption[] = [];
 /** The operational floor; every action opens an existing inspector or control. */
 export function FactoryFloor({
   changes = NO_CHANGES, selectedChange, onSelectChange, state, graphs, onLoadNode, onAddTask, runPaths, lastRunPaths, selectedAgentId, onSelectAgent,
-  onSelectHumanRequest, selectedTaskId, onSelectTask, onOpenTasks, onOpenMissions, onOpenLibrary, onOpenBoard, requestedEntity, connected = true, floorAppearance = DEFAULT_FLOOR_APPEARANCE, projectId,
+  onSelectHumanRequest, selectedTaskId, onSelectTask, onOpenTasks, onOpenMissions, onOpenLibrary, onOpenBoard, requestedEntity, connected = true, floorAppearance = DEFAULT_FLOOR_APPEARANCE, projectId, activity = [], activityCues = [], onOpenActivity,
 }: {
+  /** Recorded Board and Library operations, newest first, and the few just cued. */
+  activity?: readonly KnowledgeActivity[];
+  activityCues?: readonly KnowledgeCue[];
+  onOpenActivity?: (item: KnowledgeActivity) => void;
   changes?: readonly ProductionContraption[];
   selectedChange?: string;
   onSelectChange?: (key: string) => void;
@@ -139,6 +144,7 @@ export function FactoryFloor({
     <div className="dfFactoryFloor__scene">
     <FactoryScene
       tools={<>
+        {onOpenActivity === undefined ? null : <KnowledgeActivityList items={activity} state={state} onOpen={onOpenActivity} />}
         {unplaced > 0 ? <p className="dfFactoryEntityTools__notice" role="status">{unplaced} {unplaced === 1 ? "change is" : "changes are"} not fully placed on the floor; its pull request in Work lists every path.</p> : null}
         {unavailable.length > 0 ? <p className="dfFactoryEntityTools__notice" role="status">Source unavailable for {unavailable.map((source) => source.name).join(", ")}; those halls cannot be inferred.</p> : null}
       </>}
@@ -155,6 +161,7 @@ export function FactoryFloor({
       connected={connected}
       tasks={scene.tasks}
       peerQuestions={peerQuestions}
+      knowledgeCues={activityCues.map((cue) => ({ key: cue.key, agentId: cue.agent_id, board: onBoard(cue), reading: cue.operation === "read" || cue.operation === "delivered", label: activityLabel(cue, state), open: onOpenActivity === undefined ? undefined : () => onOpenActivity(cue) }))}
       requestedEntity={requestedEntity}
       onSelectTask={onSelectTask}
       onOpenTasks={onOpenTasks}
