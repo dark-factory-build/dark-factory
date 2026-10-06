@@ -185,7 +185,7 @@ func TestCreateHumanQuestionAndYieldIsAtomic(t *testing.T) {
 func TestResolvedContinuationPromotesThenReentersProviderAdmission(t *testing.T) {
 	ctx := context.Background()
 	proposal, _ := NewBlockedProposal("waiting for continuation")
-	store, run := finalizingReleasedRun(t, RoleOrchestrator, VerificationNone, proposal)
+	store, run := finalizingReleasedRun(t, RoleOrchestrator, proposal)
 	defer store.Close()
 	condition := ContinuationConditionID{}
 	conditionBytes := humanKey(226)

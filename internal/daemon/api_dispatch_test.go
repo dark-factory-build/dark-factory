@@ -273,7 +273,7 @@ func TestDaemonDispatchesOperatorCallsAndBoundsProjection(t *testing.T) {
 	}
 
 	project, found, err := fixture.store.Project(ctx, mustProjectID(t, projectInput.ID))
-	if err != nil || !found || project.Root != projectInput.Root || project.VerificationPolicy != kernel.VerificationNone {
+	if err != nil || !found || project.Root != projectInput.Root {
 		t.Fatalf("durable project = %+v, found=%v, err=%v", project, found, err)
 	}
 	agent, found, err := fixture.store.Agent(ctx, mustAgentID(t, testID(2)))

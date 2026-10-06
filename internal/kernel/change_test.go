@@ -75,7 +75,7 @@ func TestChangePreparedFactsSurviveRestart(t *testing.T) {
 // base, a second head, or a Change in any other phase is refused.
 func TestRecordChangeWorktreeFillsTheHeadOfAGitFreeChangeOnce(t *testing.T) {
 	blocked, _ := NewBlockedProposal("retry")
-	store, finalizing := finalizingReleasedRun(t, RoleWorker, VerificationNone, blocked)
+	store, finalizing := finalizingReleasedRun(t, RoleWorker, blocked)
 	defer store.Close()
 	ctx := context.Background()
 	change, found, err := store.Change(ctx, *finalizing.ChangeID)
@@ -283,7 +283,7 @@ func TestOrchestratorAdmissionIgnoresCandidateWithoutCreatingChange(t *testing.T
 
 func TestWorkerSettlementIsExactAndHistoricalFinalizationReplaySurvivesRetry(t *testing.T) {
 	blocked, _ := NewBlockedProposal("retry")
-	store, finalizing := finalizingReleasedRun(t, RoleWorker, VerificationNone, blocked)
+	store, finalizing := finalizingReleasedRun(t, RoleWorker, blocked)
 	defer store.Close()
 	change, found, err := store.Change(context.Background(), *finalizing.ChangeID)
 	if err != nil || !found || change.Selection == nil || change.HeadCommit == nil || change.Phase != ChangeAvailable {
@@ -315,7 +315,7 @@ func TestWorkerSettlementIsExactAndHistoricalFinalizationReplaySurvivesRetry(t *
 
 func TestNonterminalWorkerCannotSettleChange(t *testing.T) {
 	failed, _ := NewFailureProposal(FailureInternal, "cleanup")
-	store, finalizing := finalizingReleasedRun(t, RoleWorker, VerificationNone, failed)
+	store, finalizing := finalizingReleasedRun(t, RoleWorker, failed)
 	defer store.Close()
 	if _, err := store.writer.Exec(`UPDATE changes SET phase = 'retained', settled_run_id = ?, revision = revision + 1, updated_at_ms = 70 WHERE id = ?`, finalizing.ID.Bytes(), finalizing.ChangeID.Bytes()); err != nil {
 		t.Fatal(err)

@@ -492,7 +492,7 @@ func TestUpdateTaskCancelsATaskRequeuedAfterATerminalRun(t *testing.T) {
 func TestUpdateTaskRetiresABlockedTaskButNeverEditsIt(t *testing.T) {
 	for _, role := range []AgentRole{RoleWorker, RoleOrchestrator} {
 		blocked, _ := NewBlockedProposal("external prerequisite")
-		store, finalizing := finalizingReleasedRun(t, role, VerificationNone, blocked)
+		store, finalizing := finalizingReleasedRun(t, role, blocked)
 		func() {
 			defer store.Close()
 			ctx := context.Background()
@@ -527,7 +527,7 @@ func TestExpireBlockedTasksCancelsOnlyStaleUnaskedBlockedTasks(t *testing.T) {
 	ctx := context.Background()
 	blockedFixture := func(t *testing.T) (*Store, Task, Run) {
 		blocked, _ := NewBlockedProposal("external prerequisite")
-		store, finalizing := finalizingReleasedRun(t, RoleWorker, VerificationNone, blocked)
+		store, finalizing := finalizingReleasedRun(t, RoleWorker, blocked)
 		terminal, err := finalizeTestRun(t, store, finalizing, 70)
 		if err != nil {
 			t.Fatal(err)

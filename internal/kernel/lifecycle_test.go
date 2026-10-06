@@ -280,53 +280,6 @@ func TestFinalizerRequiresEveryReleasedResourceAndExactTask(t *testing.T) {
 	}
 }
 
-func TestConfiguredWorkerSuccessCannotFinalizeWithoutVerifierState(t *testing.T) {
-	success, _ := NewSuccessProposal("done")
-	for _, policy := range []VerificationPolicy{VerificationRustWorkspaceTest, VerificationGoWorkspaceTest} {
-		store, finalizing := finalizingReleasedRun(t, RoleWorker, policy, success)
-		before, _ := store.Factory(context.Background())
-		if _, err := store.FinalizeRun(context.Background(), finalizing.ID, finalizing.Revision, mustTime(t, 80)); !errors.Is(err, ErrConflict) {
-			store.Close()
-			t.Fatalf("policy %s finalization = %v", policy.String(), err)
-		}
-		fresh, found, err := store.Run(context.Background(), finalizing.ID)
-		after, _ := store.Factory(context.Background())
-		store.Close()
-		if err != nil || !found || fresh.Phase != RunFinalizing || fresh.Terminal != nil || fresh.CredentialRevokedAt == nil || after.Head != before.Head {
-			t.Fatalf("policy %s footprint run=%+v found=%v err=%v before=%+v after=%+v", policy.String(), fresh, found, err, before, after)
-		}
-	}
-}
-
-func TestOnlyConfiguredWorkerSuccessRequiresLaterVerifier(t *testing.T) {
-	success, _ := NewSuccessProposal("done")
-	blocked, _ := NewBlockedProposal("blocked")
-	failed, _ := NewFailureProposal(FailureInternal, "failed")
-	cancelled, _ := NewCancelledProposal("cancelled")
-	tests := []struct {
-		name     string
-		role     AgentRole
-		policy   VerificationPolicy
-		proposal Proposal
-	}{
-		{name: "orchestrator", role: RoleOrchestrator, policy: VerificationGoWorkspaceTest, proposal: success},
-		{name: "none policy", role: RoleWorker, policy: VerificationNone, proposal: success},
-		{name: "blocked", role: RoleWorker, policy: VerificationGoWorkspaceTest, proposal: blocked},
-		{name: "failed", role: RoleWorker, policy: VerificationGoWorkspaceTest, proposal: failed},
-		{name: "cancelled", role: RoleWorker, policy: VerificationGoWorkspaceTest, proposal: cancelled},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			store, finalizing := finalizingReleasedRun(t, test.role, test.policy, test.proposal)
-			defer store.Close()
-			terminal, err := finalizeTestRun(t, store, finalizing, 81)
-			if err != nil || terminal.Phase != RunTerminal || terminal.Terminal == nil || !terminal.Terminal.equal(test.proposal) {
-				t.Fatalf("terminal = %+v, %v", terminal, err)
-			}
-		})
-	}
-}
-
 func TestAttemptRequestedFailureHasOneTypedDurableCode(t *testing.T) {
 	store, running, keys := runningOrchestratorRun(t)
 	defer store.Close()
@@ -363,19 +316,18 @@ func TestAttemptRequestedFailureHasOneTypedDurableCode(t *testing.T) {
 	}
 }
 
-func TestVerificationAndTerminalCorruptionFailClosed(t *testing.T) {
+func TestTerminalCorruptionFailClosed(t *testing.T) {
 	tests := []struct {
 		name   string
 		mutate string
 	}{
-		{name: "unknown run policy", mutate: `UPDATE runs SET verification_policy = 'mystery'`},
 		{name: "unknown failure", mutate: `UPDATE runs SET terminal_code = 'mystery'`},
 		{name: "arbitrary mismatch", mutate: `UPDATE runs SET terminal_kind = 'blocked', terminal_code = NULL, terminal_detail = 'arbitrary', terminal_result = NULL`},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			proposal, _ := NewFailureProposal(FailureInternal, "failed")
-			store, finalizing := finalizingReleasedRun(t, RoleWorker, VerificationGoWorkspaceTest, proposal)
+			store, finalizing := finalizingReleasedRun(t, RoleWorker, proposal)
 			path := storePath(t, store)
 			if _, err := finalizeTestRun(t, store, finalizing, 80); err != nil {
 				t.Fatal(err)
@@ -394,15 +346,6 @@ func TestVerificationAndTerminalCorruptionFailClosed(t *testing.T) {
 			assertDatabaseEvidenceUnchanged(t, path, before)
 		})
 	}
-
-	t.Run("unknown project policy", func(t *testing.T) {
-		store, _, project, _ := newAdmissionStore(t, RoleOrchestrator, 2)
-		defer store.Close()
-		corruptSQL(t, store, `UPDATE projects SET verification_policy = 'mystery' WHERE id = ?`, project.ID.Bytes())
-		if _, _, err := store.Project(context.Background(), project.ID); !errors.Is(err, ErrCorruptState) {
-			t.Fatalf("corrupt Project = %v", err)
-		}
-	})
 }
 
 func TestFinalizingConsumesFactoryCapacity(t *testing.T) {
@@ -877,7 +820,7 @@ func TestResourcesReturnsCanonicalSetAfterTerminalization(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store, finalizing := finalizingReleasedRun(t, RoleOrchestrator, VerificationNone, proposal)
+	store, finalizing := finalizingReleasedRun(t, RoleOrchestrator, proposal)
 	defer store.Close()
 	terminal, err := store.FinalizeRun(context.Background(), finalizing.ID, finalizing.Revision, mustTime(t, 70))
 	if err != nil {
@@ -933,14 +876,14 @@ func runningOrchestratorRun(t *testing.T) (*Store, Run, AdmissionKeys) {
 	return store, running, keys
 }
 
-func finalizingReleasedRun(t *testing.T, role AgentRole, policy VerificationPolicy, proposal Proposal) (*Store, Run) {
+func finalizingReleasedRun(t *testing.T, role AgentRole, proposal Proposal) (*Store, Run) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "kernel.db")
 	store, err := createTestStore(context.Background(), path, FactoryConfig{DispatchEnabled: true, Capacity: 2}, mustTime(t, 1))
 	if err != nil {
 		t.Fatal(err)
 	}
-	project, err := store.CreateProject(context.Background(), NewProject{ID: projectID(t, 240), Name: "verified", Root: "/verified", VerificationPolicy: policy}, mustTime(t, 2))
+	project, err := store.CreateProject(context.Background(), NewProject{ID: projectID(t, 240), Name: "verified", Root: "/verified"}, mustTime(t, 2))
 	if err != nil {
 		store.Close()
 		t.Fatal(err)

@@ -126,7 +126,7 @@ func TestAdmissionWaitsForExactProducerWorkRevision(t *testing.T) {
 func TestAdmissionConsumesExactSuccessfulProducerRevision(t *testing.T) {
 	ctx := context.Background()
 	proposal, _ := NewSuccessProposal("producer result")
-	store, finalizing := finalizingReleasedRun(t, RoleOrchestrator, VerificationNone, proposal)
+	store, finalizing := finalizingReleasedRun(t, RoleOrchestrator, proposal)
 	defer store.Close()
 	producer, err := finalizeTestRun(t, store, finalizing, 60)
 	if err != nil {
@@ -1116,7 +1116,7 @@ func TestUnsucceededProducerCarriesPrerequisitePins(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			ctx := context.Background()
-			store, finalizing := finalizingReleasedRun(t, test.role, VerificationNone, test.proposal)
+			store, finalizing := finalizingReleasedRun(t, test.role, test.proposal)
 			defer store.Close()
 			consumerAgent, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 225), ProjectID: finalizing.ProjectID, Name: "consumer", Role: RoleOrchestrator, Provider: ProviderCodex, ToolBudgetLimit: 5}, mustTime(t, 50))
 			if err != nil {

@@ -230,7 +230,7 @@ func newFixture(t *testing.T, seed byte, test scenario, factoryctl, runnerExecut
 	}
 	projectID := projectID(t, seed)
 	result.agentID = agentID(t, seed+1)
-	project, err := result.store.CreateProject(context.Background(), kernel.NewProject{ID: projectID, Name: "e2e-project", Root: repository, VerificationPolicy: kernel.VerificationNone}, now)
+	project, err := result.store.CreateProject(context.Background(), kernel.NewProject{ID: projectID, Name: "e2e-project", Root: repository}, now)
 	if err != nil {
 		t.Fatal(err)
 	}

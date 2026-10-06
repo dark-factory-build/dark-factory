@@ -486,11 +486,10 @@ func (config FactoryConfig) normalized() (FactoryConfig, error) {
 }
 
 type NewProject struct {
-	SourceIdentity     *RepositorySourceIdentity
-	ID                 ProjectID
-	Name               string
-	Root               string
-	VerificationPolicy VerificationPolicy
+	SourceIdentity *RepositorySourceIdentity
+	ID             ProjectID
+	Name           string
+	Root           string
 }
 
 type NewAgent struct {
@@ -562,10 +561,9 @@ type FactoryState struct {
 }
 
 type Project struct {
-	ID                 ProjectID
-	Name               string
-	Root               string
-	VerificationPolicy VerificationPolicy
+	ID   ProjectID
+	Name string
+	Root string
 	// RunBudgetLimit is an absolute lifetime ceiling. Zero disables it; setting
 	// an allowance records RunsUsed + allowance so past runs never surprise a
 	// later operator configuration.

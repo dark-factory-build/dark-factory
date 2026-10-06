@@ -685,9 +685,6 @@ func (store *Store) finalizeRun(ctx context.Context, runID RunID, expected Revis
 	if at.Int64() < factory.updatedAt.Int64() {
 		return Run{}, tx.Rollback(ErrRevisionConflict)
 	}
-	if run.Role == RoleWorker && run.VerificationPolicy != VerificationNone && run.Proposal.kind == OutcomeSucceeded {
-		return Run{}, tx.Rollback(ErrConflict)
-	}
 	if relationships.session.State != TerminalSessionClosed {
 		return Run{}, tx.Rollback(ErrConflict)
 	}

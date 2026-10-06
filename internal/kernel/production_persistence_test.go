@@ -18,7 +18,7 @@ func TestProductionPersistsFinalizedConstructionPublicationAndRebase(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	store, finalizing := finalizingReleasedRun(t, RoleWorker, VerificationNone, proposal)
+	store, finalizing := finalizingReleasedRun(t, RoleWorker, proposal)
 	defer store.Close()
 
 	change, found, err := store.Change(ctx, *finalizing.ChangeID)
@@ -136,7 +136,7 @@ func TestPublishedReviewChangesAreSentBackToOriginExactlyOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store, finalizing := finalizingReleasedRun(t, RoleWorker, VerificationNone, proposal)
+	store, finalizing := finalizingReleasedRun(t, RoleWorker, proposal)
 	defer store.Close()
 	change, found, err := store.Change(ctx, *finalizing.ChangeID)
 	if err != nil || !found {
@@ -175,7 +175,7 @@ func TestPublishedReviewSendBackReachesTheWorkerNotThePublisher(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store, finalizing := finalizingReleasedRun(t, RoleWorker, VerificationNone, proposal)
+	store, finalizing := finalizingReleasedRun(t, RoleWorker, proposal)
 	defer store.Close()
 	change, found, err := store.Change(ctx, *finalizing.ChangeID)
 	if err != nil || !found || change.HeadCommit == nil {
@@ -232,7 +232,7 @@ func TestOverseerWakeRule(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store, finalizing := finalizingReleasedRun(t, RoleWorker, VerificationNone, proposal)
+	store, finalizing := finalizingReleasedRun(t, RoleWorker, proposal)
 	defer store.Close()
 	change, found, err := store.Change(ctx, *finalizing.ChangeID)
 	if err != nil || !found || change.HeadCommit == nil {
@@ -323,7 +323,7 @@ func TestProductionPublicationUsesOwnedChangeForTransformedHead(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			store, finalizing := finalizingReleasedRun(t, RoleWorker, VerificationNone, proposal)
+			store, finalizing := finalizingReleasedRun(t, RoleWorker, proposal)
 			defer store.Close()
 			change, found, err := store.Change(ctx, *finalizing.ChangeID)
 			if err != nil || !found || change.HeadCommit == nil {
@@ -457,7 +457,7 @@ func TestProductionObservationUsesVerifiedHeadRepositoryForTransformedHead(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	store, finalizing := finalizingReleasedRun(t, RoleWorker, VerificationNone, proposal)
+	store, finalizing := finalizingReleasedRun(t, RoleWorker, proposal)
 	defer store.Close()
 	change, found, err := store.Change(ctx, *finalizing.ChangeID)
 	if err != nil || !found || change.HeadCommit == nil {
@@ -581,7 +581,7 @@ func TestPublishableIntakeChangeIsFactorydsUntilPublishedOrFailed(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	store, finalizing := finalizingReleasedRun(t, RoleWorker, VerificationNone, proposal)
+	store, finalizing := finalizingReleasedRun(t, RoleWorker, proposal)
 	defer store.Close()
 	change, _, err := store.Change(ctx, *finalizing.ChangeID)
 	if err != nil {

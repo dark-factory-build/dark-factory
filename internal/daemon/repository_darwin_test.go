@@ -27,7 +27,7 @@ func TestSupervisorCompletesTasksFromEachRegisteredRepository(t *testing.T) {
 	if err != nil || !found {
 		t.Fatalf("project: found=%v err=%v", found, err)
 	}
-	if _, err := registerProject(ctx, fixture.store, kernel.NewProject{ID: project.ID, Name: project.Name, Root: first.Root, VerificationPolicy: project.VerificationPolicy}, supervisorTime()); err != nil {
+	if _, err := registerProject(ctx, fixture.store, kernel.NewProject{ID: project.ID, Name: project.Name, Root: first.Root}, supervisorTime()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -54,10 +54,10 @@ func TestSupervisorCompletesTasksFromEachRegisteredRepository(t *testing.T) {
 
 	// Creation replay uses the original registration, not the new default's
 	// release branch (which does not exist in the first checkout).
-	if _, err := registerProject(ctx, fixture.store, kernel.NewProject{ID: project.ID, Name: project.Name, Root: first.Root, VerificationPolicy: project.VerificationPolicy}, supervisorTime()); err != nil {
+	if _, err := registerProject(ctx, fixture.store, kernel.NewProject{ID: project.ID, Name: project.Name, Root: first.Root}, supervisorTime()); err != nil {
 		t.Fatalf("project creation replay after default change: %v", err)
 	}
-	if _, err := registerProject(ctx, fixture.store, kernel.NewProject{ID: project.ID, Name: project.Name, Root: second.Root, VerificationPolicy: project.VerificationPolicy}, supervisorTime()); err == nil {
+	if _, err := registerProject(ctx, fixture.store, kernel.NewProject{ID: project.ID, Name: project.Name, Root: second.Root}, supervisorTime()); err == nil {
 		t.Fatal("creation replay retargeted the original project root")
 	}
 
@@ -112,7 +112,7 @@ func TestRegisteredRepositoryReplacementCannotLaunchProvider(t *testing.T) {
 			if err != nil || !found {
 				t.Fatalf("project: %v %v", found, err)
 			}
-			if _, err := registerProject(ctx, fixture.store, kernel.NewProject{ID: project.ID, Name: project.Name, Root: repository.Root, VerificationPolicy: project.VerificationPolicy}, supervisorTime()); err != nil {
+			if _, err := registerProject(ctx, fixture.store, kernel.NewProject{ID: project.ID, Name: project.Name, Root: repository.Root}, supervisorTime()); err != nil {
 				t.Fatal(err)
 			}
 			switch target {

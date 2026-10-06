@@ -1109,7 +1109,7 @@ func (daemon *Daemon) createProject(ctx context.Context, call api.Call) api.Repl
 		return newErrorReply(api.RemoteInternal)
 	}
 	project, err := registerProject(ctx, daemon.store, kernel.NewProject{
-		ID: id, Name: input.Name, Root: input.Root, VerificationPolicy: kernel.VerificationNone,
+		ID: id, Name: input.Name, Root: input.Root,
 	}, at)
 	if err != nil {
 		return newErrorReply(remoteErrorCode(err))

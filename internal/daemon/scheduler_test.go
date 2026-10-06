@@ -365,7 +365,7 @@ func TestScheduledCompletionReloadsDurableRun(t *testing.T) {
 	agentID := schedulerAgentID(t, 2)
 	taskID := schedulerTaskID(t, 3)
 	incarnationID := schedulerIncarnationID(t, 4)
-	project, err := daemon.store.CreateProject(ctx, kernel.NewProject{ID: projectID, Name: "scheduler", Root: t.TempDir(), VerificationPolicy: kernel.VerificationNone}, at)
+	project, err := daemon.store.CreateProject(ctx, kernel.NewProject{ID: projectID, Name: "scheduler", Root: t.TempDir()}, at)
 	if err != nil {
 		t.Fatal(err)
 	}

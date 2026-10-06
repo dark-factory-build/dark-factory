@@ -2389,7 +2389,7 @@ func newSupervisorRoleFixture(t *testing.T, program string, role kernel.AgentRol
 	fixture.agentID = agentID
 	taskID := supervisorTaskID(t, 3)
 	fixture.taskID = taskID
-	project, err := store.CreateProject(context.Background(), kernel.NewProject{ID: projectID, Name: "project", Root: repository, VerificationPolicy: kernel.VerificationNone}, supervisorTime())
+	project, err := store.CreateProject(context.Background(), kernel.NewProject{ID: projectID, Name: "project", Root: repository}, supervisorTime())
 	if err != nil {
 		t.Fatal(err)
 	}
