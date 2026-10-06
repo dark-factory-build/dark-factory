@@ -27,7 +27,7 @@ type Request struct {
 	BaseRef    string
 	Body       string
 	Provider   string
-	Mergeable  string
+	Mergeable  *bool
 }
 
 type Operation struct {
@@ -294,7 +294,7 @@ func (c Coordinator) reconcileEnqueuing(ctx context.Context, op Operation, cause
 		err := c.Backend.Enqueue(ctx, op)
 		if errors.Is(err, ErrRejected) && strings.Contains(err.Error(), "rejected before execution") {
 			pull, pullErr := c.Backend.StoredPull(ctx, op.Request.PullNumber, op.Request.Head)
-			if pullErr == nil && strings.EqualFold(pull.Mergeable, "CONFLICTING") {
+			if pullErr == nil && pull.Mergeable != nil && !*pull.Mergeable {
 				op.State, op.RoutePending, op.Detail, op.UpdatedAt = "ejected", true, "The published pull request conflicts with origin/main. Rebase this Change onto origin/main and resolve the conflict.", c.Now()
 				return op, c.Store.Update(ctx, op)
 			}

@@ -361,7 +361,7 @@ func (b *daemonReviewBackend) StoredPull(ctx context.Context, pull uint64, head 
 			BaseSHA   string `json:"base_sha"`
 			BaseRef   string `json:"base_ref"`
 			Body      string `json:"body"`
-			Mergeable string `json:"mergeable"`
+			Mergeable *bool  `json:"mergeable"`
 		} `json:"pull_requests"`
 	}
 	if err := json.Unmarshal(response, &value); err != nil || len(value.PullRequests) != 1 {

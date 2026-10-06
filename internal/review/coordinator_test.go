@@ -292,7 +292,8 @@ func (b *refusingBackend) Enqueue(context.Context, Operation) error {
 
 func TestResumeSendsBackAConflictingPlannedEnqueue(t *testing.T) {
 	request := reviewRequest()
-	request.Mergeable = "CONFLICTING"
+	mergeable := false
+	request.Mergeable = &mergeable
 	store := &memoryStore{}
 	backend := &refusingBackend{observedBackend: observedBackend{fakeBackend: fakeBackend{storedPull: request}, receipt: Receipt{State: "planned"}}, refuse: fmt.Errorf("%w: refused: rejected before execution", ErrRejected)}
 	c := Coordinator{Store: store, Backend: backend, Now: func() time.Time { return time.Unix(10, 0) }}
