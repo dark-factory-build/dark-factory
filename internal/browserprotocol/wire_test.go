@@ -661,8 +661,12 @@ func TestManifestMatchesImplementedRegistry(t *testing.T) {
 		if actual.Type == "" || actual.Direction == "" || actual.ID == "" || actual.Fixture == "" {
 			t.Fatalf("control[%d] incomplete: %+v", i, actual)
 		}
-		if (actual.ID == "required") != idRequired(MessageType(actual.Type)) {
-			t.Fatalf("%s id drift: %q", actual.Type, actual.ID)
+		// The Go policy, probed: required rejects an absent id, forbidden a
+		// present one, optional takes both.
+		kind := MessageType(actual.Type)
+		policy := map[[2]bool]string{{false, true}: "required", {true, true}: "optional", {true, false}: "forbidden"}[[2]bool{validIDPresence("", false, kind), validIDPresence("state-1", true, kind)}]
+		if actual.ID != policy {
+			t.Fatalf("%s id drift: manifest %q, implementation %q", actual.Type, actual.ID, policy)
 		}
 		if seenFixtures[actual.Fixture] {
 			t.Fatalf("duplicate control fixture %q", actual.Fixture)
