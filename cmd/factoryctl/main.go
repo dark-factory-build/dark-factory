@@ -750,18 +750,18 @@ func parse(args []string) (attemptCommand, bool, bool) {
 		if len(args) == 2 {
 			return attemptCommand{kind: commandSucceed}, false, true
 		}
-		if len(args) == 4 && args[2] == "--result" && strings.TrimSpace(args[3]) != "" {
+		if len(args) == 4 && args[2] == "--result" && strings.TrimSpace(args[3]) != "" && utf8.ValidString(args[3]) {
 			return attemptCommand{kind: commandSucceed, text: args[3]}, false, true
 		}
 	case "block":
-		if len(args) == 4 && args[2] == "--detail" && args[3] != "" {
+		if len(args) == 4 && args[2] == "--detail" && args[3] != "" && utf8.ValidString(args[3]) {
 			return attemptCommand{kind: commandBlock, text: args[3]}, false, true
 		}
 	case "fail":
 		if len(args) == 2 {
 			return attemptCommand{kind: commandFail}, false, true
 		}
-		if len(args) == 4 && args[2] == "--detail" {
+		if len(args) == 4 && args[2] == "--detail" && utf8.ValidString(args[3]) {
 			return attemptCommand{kind: commandFail, text: args[3]}, false, true
 		}
 	case "request-human":

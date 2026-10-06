@@ -499,7 +499,10 @@ func TestDaemonDispatchesSendBackThroughBothDomains(t *testing.T) {
 	if _, err := active.client.SendBack(ctx, api.SendBackInput{TaskID: own, Note: ""}); !errors.As(err, &remote) || remote.Code() != api.RemoteInvalidRequest {
 		t.Fatalf("empty note = %v", err)
 	}
-	waitDispatch(t, done)
+	// The daemon refuses it on decode, before dispatch.
+	if err := <-done; !errors.Is(err, api.ErrProtocol) {
+		t.Fatalf("empty note handler = %v", err)
+	}
 	// A note the task's provider could not be handed is too large, whatever
 	// the kernel would have said about the task.
 	claude, claudeTask := testID(61), testID(62)
