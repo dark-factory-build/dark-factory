@@ -18,33 +18,13 @@ import (
 // SchemaVersion is the user_version this build opens and writes.
 const SchemaVersion = userVersion
 
-// BackupTo replaces path with a consistent copy of the database (VACUUM
-// INTO), holding the writer gate so nothing commits during the copy.
+// BackupTo writes a consistent copy of the database to a path that must not
+// exist (VACUUM INTO), holding the writer gate so nothing commits during it.
 func (store *Store) BackupTo(ctx context.Context, path string) error {
-	path = filepath.Clean(path)
-	store.bindingMu.RLock()
-	if store.pathBinding != nil && store.pathBinding.main != nil {
-		live := filepath.Join(store.pathBinding.authority.path, store.pathBinding.main.name)
-		if info, err := os.Stat(path); err == nil {
-			for _, source := range []*databaseFile{store.pathBinding.main, store.pathBinding.wal, store.pathBinding.shm} {
-				if source != nil && os.SameFile(info, source.info) {
-					store.bindingMu.RUnlock()
-					return fmt.Errorf("%w: backup destination is a live sqlite file", ErrConflict)
-				}
-			}
-		} else if !errors.Is(err, os.ErrNotExist) {
-			store.bindingMu.RUnlock()
-			return fmt.Errorf("inspect backup destination: %w", err)
-		}
-		store.bindingMu.RUnlock()
-		if path == live || path == live+"-wal" || path == live+"-shm" {
-			return fmt.Errorf("%w: backup destination is a live sqlite file", ErrConflict)
-		}
-	} else {
-		store.bindingMu.RUnlock()
-	}
-	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
+	if _, err := os.Lstat(path); err == nil {
+		return fmt.Errorf("%w: backup destination already exists", ErrConflict)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("inspect backup destination: %w", err)
 	}
 	tx, err := store.beginValidatedWrite(ctx)
 	if err != nil {
