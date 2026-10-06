@@ -335,21 +335,6 @@ func (binding *RuntimeBinding) fixedDirectory(name string) (string, error) {
 	return filepath.Join(binding.runtime.locator, name), nil
 }
 
-func (binding *RuntimeBinding) fixedFile(name string) (string, error) {
-	if binding == nil || binding.runtime == nil || name != changeworker.AttemptTokenName {
-		return "", invalidContract(nil)
-	}
-	binding.runtime.mu.Lock()
-	defer binding.runtime.mu.Unlock()
-	if err := binding.runtime.verifyAuthority(); err != nil {
-		return "", invalidContract(err)
-	}
-	if err := binding.runtime.verifyDiagnosticBinding(); err != nil {
-		return "", invalidContract(err)
-	}
-	return filepath.Join(binding.runtime.locator, name), nil
-}
-
 // DuplicateRunnerFiles transfers the exact private directory needed by the
 // wrapper and a least-privilege empty regular lifetime file. The returned
 // files share the Runtime's lifetime lock open-file description.
