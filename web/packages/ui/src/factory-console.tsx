@@ -9,7 +9,7 @@ import { deriveProductionView, inProgressProduction, productionKey } from "./pro
 import { ProductionPanel, asTask } from "./production-panel.js";
 import { MissionsPanel } from "./missions-panel.js";
 import { RemoteInvitePanel } from "./remote-invite.js";
-import { factoryCounters, entityLabel, projectLabel } from "./console-view.js";
+import { factoryCounters } from "./console-view.js";
 import { SpriteEditor } from "./factory-scene/sprite-editor.js";
 import { DEFAULT_FLOOR_APPEARANCE, loadFloorAppearance, resetFloorAppearance, saveFloorAppearance, type FloorAppearance } from "./floor-appearance.js";
 
@@ -474,4 +474,17 @@ function NeedsYouColumn({
         )}
     </section>
   );
+}
+
+function projectLabel(projects: ReadonlyMap<string, { name: string }> | undefined, projectID: string): string {
+  return projects?.get(projectID)?.name ?? `PROJECT ${shortID(projectID)}`;
+}
+
+function entityLabel(entities: ReadonlyMap<string, { name?: string; title?: string }> | undefined, id: string, fallback: string): string {
+  const entity = entities?.get(id);
+  return entity?.name ?? entity?.title ?? `${fallback} ${shortID(id)}`;
+}
+
+function shortID(value: string): string {
+  return value.slice(0, 8);
 }

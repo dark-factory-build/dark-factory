@@ -176,6 +176,8 @@ test("one screen keeps Factory and the operator panels together", () => {
   assert.match(markup, /North Workshop · Review the state projection/);
   assert.equal(markup.includes("DECISION NEEDED"), false, "an unopened request stays brief");
   assert.match(render({ detail: "queue" }), /aria-label="Tasks"/);
+  // No screen union survives: there is no navigation away from this screen.
+  assert.equal(markup.includes("dfFactoryConsole__homeLink"), false);
   assert.equal(markup.includes("BUILDING STATE UNAVAILABLE"), false);
 });
 

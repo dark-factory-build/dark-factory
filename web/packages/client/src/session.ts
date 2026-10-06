@@ -624,7 +624,7 @@ export class BrowserSession {
     }
     this.#terminalHandles.clear();
     if (previous !== undefined) this.#terminalHandles.add(previous);
-    const handle = createTerminalHandle({ runId: authority.descriptor.run_id, sessionId: authority.descriptor.session_id, runRevision: authority.descriptor.run_revision, sessionRevision: authority.descriptor.session_revision }, options, (_id, payload) => {
+    const handle = createTerminalHandle({ runId: authority.descriptor.run_id, sessionId: authority.descriptor.session_id, runRevision: authority.descriptor.run_revision, sessionRevision: authority.descriptor.session_revision }, options, (id, payload) => {
       this.#ensureLive();
       if (!this.#authenticated) throw new SessionError("unauthorized");
       this.#send(payload);

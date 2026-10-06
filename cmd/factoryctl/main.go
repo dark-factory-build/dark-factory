@@ -748,13 +748,13 @@ func parse(args []string) (attemptCommand, bool, bool) {
 		return attemptCommand{kind: commandAttemptSource, id: values["--task"]}, false, ok && validHumanRequestKey(values["--task"])
 	case "succeed":
 		values, ok := pairedFlagValues(args[2:], true, "--result")
-		return attemptCommand{kind: commandSucceed, text: values["--result"]}, false, ok && utf8.ValidString(values["--result"]) && (len(args) == 2 || strings.TrimSpace(values["--result"]) != "")
+		return attemptCommand{kind: commandSucceed, text: values["--result"]}, false, ok && (len(args) == 2 || strings.TrimSpace(values["--result"]) != "")
 	case "block":
 		values, ok := pairedFlagValues(args[2:], true, "--detail")
-		return attemptCommand{kind: commandBlock, text: values["--detail"]}, false, ok && values["--detail"] != "" && utf8.ValidString(values["--detail"])
+		return attemptCommand{kind: commandBlock, text: values["--detail"]}, false, ok && values["--detail"] != ""
 	case "fail":
 		values, ok := pairedFlagValues(args[2:], true, "--detail")
-		return attemptCommand{kind: commandFail, text: values["--detail"]}, false, ok && utf8.ValidString(values["--detail"])
+		return attemptCommand{kind: commandFail, text: values["--detail"]}, false, ok
 	case "request-human":
 		// The repeatable options follow the fixed key and question.
 		head := min(len(args), 6)
@@ -1530,8 +1530,10 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 		values, ok := pairedFlagValues(args[1:], false, "--workers", "--revision")
 		workers, workersOK := parseRevision(values["--workers"])
 		revision, revisionOK := parseRevision(values["--revision"])
-		ok = ok && workersOK && workers <= uint64(kernel.MaxFactoryCapacity) && revisionOK
-		return attemptCommand{kind: commandCapacity, capacity: uint16(workers), expectedRevision: revision}, false, ok
+		if !ok || !workersOK || workers > uint64(kernel.MaxFactoryCapacity) || !revisionOK {
+			return attemptCommand{}, false, false
+		}
+		return attemptCommand{kind: commandCapacity, capacity: uint16(workers), expectedRevision: revision}, false, true
 	}
 	if len(args) == 2 && args[0] == "account" && args[1] == "discover" {
 		return attemptCommand{kind: commandAccountsDiscover}, false, true

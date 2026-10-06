@@ -9,6 +9,7 @@ import {
   buildAuthTranscript,
   consumePairingChallenge,
   hexBytes,
+  verifyP256Signature,
   ProtocolError,
   SessionError,
   decodeClientControl,
@@ -16,7 +17,6 @@ import {
   encodeServerControl,
 } from "../dist/src/index.js";
 import { encodeAgentControlResult, encodeAuthResult, encodeHello, encodeHumanRequestCancelRunResult, encodeHumanRequestDetail, encodeHumanRequestReplyResult, encodePairResult, encodeProjectCreateResult, encodeRemoteInviteResult, encodeRepositories, encodeRepositoryMutateResult, encodeServerError, encodeStateChanged, encodeStateSnapshot, encodeTaskDetail, encodeTaskEnqueueResult, encodeTaskHistory, encodeTerminalAttached, encodeTerminalExit, encodeTerminalReset, encodeTerminalTarget } from "./server-frames.mjs";
-import { verifyP256Signature } from "./helpers.mjs";
 
 const challenge = "11".repeat(32);
 const daemonID = "22".repeat(16);

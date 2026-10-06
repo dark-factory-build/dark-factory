@@ -2,18 +2,6 @@ import { productionKey, proposedProduction, type ProductionContraption } from ".
 import { MAX_SNAPSHOT_ENTITIES, type AgentItem, type StateView, type TaskItem, type TopologyView } from "@dark-factory/client";
 import { compareText, inventoryLabels, type InventoryKind, type SceneNode, type SceneTopology, type SceneWorker, type SceneProposal } from "./factory-scene/scene.js";
 
-export const shortID = (value: string): string => value.slice(0, 8);
-export const shortRemoteID = shortID;
-export function projectLabel(projects: ReadonlyMap<string, { name: string }> | undefined, projectID: string): string { return projects?.get(projectID)?.name ?? `project ${shortID(projectID)}`; }
-export function entityLabel(entities: ReadonlyMap<string, { name?: string; title?: string }> | undefined, id: string, fallback: string): string { const entity = entities?.get(id); return entity?.name ?? entity?.title ?? `${fallback} ${shortID(id)}`; }
-export function dateLabel(value: bigint | number | undefined): string {
-  const milliseconds = typeof value === "bigint" ? value > BigInt(Number.MAX_SAFE_INTEGER) ? undefined : Number(value) : value;
-  if (milliseconds === undefined || !Number.isFinite(milliseconds)) return "DATE UNAVAILABLE";
-  const date = new Date(milliseconds);
-  return Number.isNaN(date.valueOf()) ? "DATE UNAVAILABLE" : date.toISOString().replace("T", " ").replace(".000Z", " UTC");
-}
-export function observedAt(value: number | undefined): string { if (value === undefined || !Number.isFinite(value) || value <= 0) return ""; try { return new Date(value).toISOString(); } catch { return ""; } }
-
 export type AgentActivity = "busy" | "waiting" | "needs-you" | "idle";
 /** The operator-facing state has one name for each actionable condition. */
 export type AgentStatus = "working" | "ready" | "needs-you" | "paused";
