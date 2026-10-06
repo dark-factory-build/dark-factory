@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -151,7 +152,9 @@ func selectGitWithTrust(ctx context.Context, gitExecutable, repositoryRoot, revi
 
 // refreshTrackingRevision runs for a fresh Change before its commit is pinned,
 // and best effort before a retained Change's run so a correction can see the
-// current base (FetchBase). Explicit local revisions never refresh source.
+// current base (FetchBase). HEAD means the origin's default branch, never the
+// registered checkout's own HEAD; only a checkout without an origin follows
+// its local HEAD and upstream. Explicit local revisions never refresh source.
 func refreshTrackingRevision(ctx context.Context, spec gitCommandSpec, revision string, verify func() error) (string, error) {
 	run := func(arguments ...string) ([]byte, error) {
 		spec.arguments = append([]string{"-C", spec.repository}, arguments...)
@@ -169,39 +172,30 @@ func refreshTrackingRevision(ctx context.Context, spec gitCommandSpec, revision 
 	}
 	var remote, branch string
 	if revision == "HEAD" {
-		// Empty upstream means a deliberately local project, including detached
-		// HEAD. This does not fall back when an actual configured fetch fails.
-		head, err := run("rev-parse", "--symbolic-full-name", "HEAD")
+		remotes, err := run("remote")
 		if err != nil {
 			return "", err
 		}
-		if strings.TrimSpace(string(head)) == "HEAD" {
-			return revision, nil
-		}
-		revision = strings.TrimSpace(string(head))
-		output, err := run("for-each-ref", "--count=1", "--format=%(upstream) %(upstream:remotename) %(upstream:remoteref)", revision)
-		if err != nil {
-			return "", err
-		}
-		fields := strings.Fields(string(output))
-		if len(fields) == 0 {
-			// Git also prints an empty upstream for broken tracking config.
-			// Only genuinely unconfigured branches may use their local source.
-			for _, field := range []string{"remote", "merge"} {
-				value, err := run("config", "--default", "", "--get", "branch."+strings.TrimPrefix(revision, "refs/heads/")+"."+field)
-				if err != nil {
-					return "", err
-				}
-				if len(bytes.TrimSpace(value)) != 0 {
-					return "", &ValidationError{Reason: "configured source upstream is invalid"}
-				}
+		if slices.Contains(strings.Fields(string(remotes)), "origin") {
+			// The owner's checkout may be stale or on any branch; the
+			// origin's own HEAD names the branch new work starts from.
+			observed, err := run("ls-remote", "--exit-code", "--symref", "origin", "HEAD")
+			if err != nil {
+				return "", err
 			}
-			return revision, nil
+			target, _, found := strings.Cut(string(observed), "\n")
+			target, ok := strings.CutPrefix(target, "ref: ")
+			target, isHead := strings.CutSuffix(target, "\tHEAD")
+			if !found || !ok || !isHead || !strings.HasPrefix(target, "refs/heads/") {
+				return "", &ValidationError{Reason: "origin default branch was not observed exactly"}
+			}
+			remote, branch = "origin", target
+		} else {
+			remote, branch, revision, err = localUpstream(run)
+			if err != nil {
+				return "", err
+			}
 		}
-		if len(fields) != 3 {
-			return "", &ValidationError{Reason: "configured source upstream is invalid"}
-		}
-		revision, remote, branch = fields[0], fields[1], fields[2]
 	} else if suffix, ok := strings.CutPrefix(revision, "refs/remotes/"); ok {
 		var found bool
 		remote, branch, found = strings.Cut(suffix, "/")
@@ -216,23 +210,79 @@ func refreshTrackingRevision(ctx context.Context, spec gitCommandSpec, revision 
 	if strings.HasPrefix(remote, "-") || !strings.HasPrefix(branch, "refs/heads/") {
 		return "", &ValidationError{Reason: "configured remote source is invalid"}
 	}
-	// Pin the remote observation before fetching objects. No shared ref or
-	// FETCH_HEAD is written, so simultaneous fresh starts cannot race a ref
-	// lock or rewrite an operator's branch through a custom fetch mapping.
-	observed, err := run("ls-remote", "--exit-code", "--refs", remote, branch)
+	// The base lands in a factory-owned ref, never a branch, tracking ref or
+	// FETCH_HEAD, and --refmap= keeps a custom fetch mapping from rewriting an
+	// operator's branch. Simultaneous fresh starts contend only for this ref's
+	// lock, and either winner is the remote's current tip.
+	target := factoryBaseRef(remote, branch)
+	fetch := []string{"-c", "core.hooksPath=/dev/null", "fetch", "--quiet", "--no-tags", "--no-recurse-submodules", "--no-write-fetch-head", "--no-auto-maintenance", "--refmap=", "--end-of-options", remote, "+" + branch + ":" + target}
+	delay := gitLockRetryDelay
+	for attempt := 0; ; attempt++ {
+		spec.arguments = append([]string{"-C", spec.repository}, fetch...)
+		result, err := runGitCapture(ctx, spec, maxGitSelectionOutput)
+		if err != nil {
+			return "", err
+		}
+		if err := verify(); err != nil {
+			return "", err
+		}
+		if result.exitCode == 0 {
+			return target, nil
+		}
+		if !isGitLockFailure(result.stderr) || attempt == gitLockRetries {
+			return "", &ValidationError{Reason: "source refresh failed; configured remote source was not selected"}
+		}
+		select {
+		case <-ctx.Done():
+			return "", newGitContextError(ctx.Err(), false)
+		case <-time.After(delay):
+		}
+		delay = min(delay*2, gitLockRetryMaxDelay)
+	}
+}
+
+// factoryBaseRef is the ref in the registered repository that holds the last
+// fetched tip of a remote base branch. Only the factory writes it.
+func factoryBaseRef(remote, branch string) string {
+	return "refs/factory/base/" + remote + "/" + strings.TrimPrefix(branch, "refs/heads/")
+}
+
+// localUpstream follows a checkout without an origin: its branch's configured
+// upstream, or the local branch or detached HEAD itself.
+func localUpstream(run func(...string) ([]byte, error)) (remote, branch, revision string, err error) {
+	// Empty upstream means a deliberately local project, including detached
+	// HEAD. This does not fall back when an actual configured fetch fails.
+	head, err := run("rev-parse", "--symbolic-full-name", "HEAD")
 	if err != nil {
-		return "", err
+		return "", "", "", err
 	}
-	fields := strings.Fields(string(observed))
-	if len(fields) != 2 || fields[1] != branch {
-		return "", &ValidationError{Reason: "configured remote source was not observed exactly"}
+	if strings.TrimSpace(string(head)) == "HEAD" {
+		return "", "", "HEAD", nil
 	}
-	commit, err := hex.DecodeString(fields[0])
-	if err != nil || (len(commit) != 20 && len(commit) != 32) {
-		return "", &ValidationError{Reason: "configured remote source commit is invalid"}
+	revision = strings.TrimSpace(string(head))
+	output, err := run("for-each-ref", "--count=1", "--format=%(upstream) %(upstream:remotename) %(upstream:remoteref)", revision)
+	if err != nil {
+		return "", "", "", err
 	}
-	_, err = run("-c", "core.hooksPath=/dev/null", "fetch", "--quiet", "--no-tags", "--no-recurse-submodules", "--no-write-fetch-head", "--no-auto-maintenance", "--refmap=", remote, fields[0])
-	return fields[0], err
+	fields := strings.Fields(string(output))
+	if len(fields) == 0 {
+		// Git also prints an empty upstream for broken tracking config.
+		// Only genuinely unconfigured branches may use their local source.
+		for _, field := range []string{"remote", "merge"} {
+			value, err := run("config", "--default", "", "--get", "branch."+strings.TrimPrefix(revision, "refs/heads/")+"."+field)
+			if err != nil {
+				return "", "", "", err
+			}
+			if len(bytes.TrimSpace(value)) != 0 {
+				return "", "", "", &ValidationError{Reason: "configured source upstream is invalid"}
+			}
+		}
+		return "", "", revision, nil
+	}
+	if len(fields) != 3 {
+		return "", "", "", &ValidationError{Reason: "configured source upstream is invalid"}
+	}
+	return fields[1], fields[2], fields[0], nil
 }
 
 func validateRevision(revision string) error {
