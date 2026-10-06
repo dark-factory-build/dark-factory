@@ -40,6 +40,10 @@ func TestParseServiceStatusIsOneExplicitCommand(t *testing.T) {
 		{"service", "install", "--home", home, "--home", home},
 		{"service", "install", "--home", home, "--label", ""},
 		{"service", "install", "--home", home, "--plist-dir", "relative"},
+		{"service", "status", "--home=" + home},
+		{"service", "status", "--home=" + home, "--"},
+		{"service", "status", "-home", home},
+		{"service", "status", "--home", home, "--"},
 		{"service_status", "--home", home},
 	} {
 		if _, _, ok := parse(args); ok {

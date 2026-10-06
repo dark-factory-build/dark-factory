@@ -924,19 +924,7 @@ func parseContent(args []string) (attemptCommand, bool, bool) {
 	if len(args) == start+3 && helpFlag(args[start+2]) {
 		return attemptCommand{}, true, true
 	}
-	flags := flag.NewFlagSet(args[start+1], flag.ContinueOnError)
-	flags.SetOutput(io.Discard)
-	seen := map[string]bool{}
-	stringFlag := func(name string, target *string) {
-		flags.Func(name[2:], "", func(value string) error {
-			if seen[name] {
-				return errors.New("flag specified more than once")
-			}
-			seen[name] = true
-			*target = value
-			return nil
-		})
-	}
+	flags, stringFlag, seen := newOnceFlagSet(args[start+1])
 	stringFlag("--project", &command.project)
 	stringFlag("--id", &command.contentID)
 	stringFlag("--task", &command.id)
@@ -1078,62 +1066,57 @@ func parseServiceCommand(args []string) (attemptCommand, bool, bool) {
 	default:
 		return attemptCommand{}, false, false
 	}
-	seen := map[string]bool{}
-	for index := 2; index < len(args); index += 2 {
-		if index+1 >= len(args) {
-			return attemptCommand{}, false, false
-		}
-		name, value := args[index], args[index+1]
-		if seen[name] {
-			return attemptCommand{}, false, false
-		}
-		seen[name] = true
-		switch name {
-		case "--home":
-			if !validHomeArg(value) {
-				return attemptCommand{}, false, false
-			}
-			command.home = value
-		case "--label":
-			if value == "" || len(value) > 127 {
-				return attemptCommand{}, false, false
-			}
-			command.label = value
-		case "--plist-dir":
-			if !validHomeArg(value) {
-				return attemptCommand{}, false, false
-			}
-			command.plistDir = value
-		case "--relay-origin":
-			// Only install renders a plist; every other verb recovers the
-			// origin from the receipt this install writes.
-			if command.kind != commandServiceInstall || !install.ValidRelayOrigin(value) {
-				return attemptCommand{}, false, false
-			}
-			command.relayOrigin = value
-		case "--tool-path":
-			if command.kind != commandServiceInstall || !install.ValidToolPath(value) {
-				return attemptCommand{}, false, false
-			}
-			command.toolPath = value
-		case "--toolchain-read-roots":
-			if command.kind != commandServiceInstall || value == "" || !install.ValidToolchainReadRoots(value) {
-				return attemptCommand{}, false, false
-			}
-			command.toolchainReadRoots = value
-		case "--development-browser-address":
-			if command.kind != commandServiceInstall || !install.ValidDevelopmentBrowserAddress(value) || value == "" {
-				return attemptCommand{}, false, false
-			}
-			command.browserAddress = value
-		default:
-			return attemptCommand{}, false, false
-		}
+	flags, stringFlag, seen := newOnceFlagSet(args[1])
+	stringFlag("--home", &command.home)
+	stringFlag("--label", &command.label)
+	stringFlag("--plist-dir", &command.plistDir)
+	stringFlag("--relay-origin", &command.relayOrigin)
+	stringFlag("--tool-path", &command.toolPath)
+	stringFlag("--toolchain-read-roots", &command.toolchainReadRoots)
+	stringFlag("--development-browser-address", &command.browserAddress)
+	if !parsePairedFlags(flags, args[2:]) || !validHomeArg(command.home) || seen["--label"] && (command.label == "" || len(command.label) > 127) || seen["--plist-dir"] && !validHomeArg(command.plistDir) {
+		return attemptCommand{}, false, false
 	}
-	if command.home == "" {
+	// Only install renders a plist; every other verb recovers the
+	// origin from the receipt this install writes.
+	installOnly := seen["--relay-origin"] || seen["--tool-path"] || seen["--toolchain-read-roots"] || seen["--development-browser-address"]
+	if installOnly && command.kind != commandServiceInstall || seen["--relay-origin"] && !install.ValidRelayOrigin(command.relayOrigin) || seen["--tool-path"] && !install.ValidToolPath(command.toolPath) {
+		return attemptCommand{}, false, false
+	}
+	if seen["--toolchain-read-roots"] && (command.toolchainReadRoots == "" || !install.ValidToolchainReadRoots(command.toolchainReadRoots)) || seen["--development-browser-address"] && (command.browserAddress == "" || !install.ValidDevelopmentBrowserAddress(command.browserAddress)) {
 		return attemptCommand{}, false, false
 	}
 	return command, false, true
+}
+
+// newOnceFlagSet returns a silent FlagSet, a function that registers a string
+// flag which is an error to give twice, and the set of flags given.
+func newOnceFlagSet(name string) (*flag.FlagSet, func(string, *string), map[string]bool) {
+	flags := flag.NewFlagSet(name, flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	seen := map[string]bool{}
+	return flags, func(name string, target *string) {
+		flags.Func(name[2:], "", func(value string) error {
+			if seen[name] {
+				return errors.New("flag specified more than once")
+			}
+			seen[name] = true
+			*target = value
+			return nil
+		})
+	}, seen
+}
+
+// parsePairedFlags parses args as separate "--name value" pairs: every name
+// token must be a bare double-dash flag, so the "--name=value", "-name" and
+// "--" forms are rejected along with leftover arguments.
+func parsePairedFlags(flags *flag.FlagSet, args []string) bool {
+	for index := 0; index < len(args); index += 2 {
+		if name := args[index]; len(name) < 3 || name[:2] != "--" || strings.Contains(name, "=") {
+			return false
+		}
+	}
+	return flags.Parse(args) == nil && flags.NArg() == 0
 }
 
 func serviceConfigFor(command attemptCommand) install.ServiceConfig {
@@ -1320,27 +1303,34 @@ func runHome(ctx context.Context, command attemptCommand, stdout, stderr io.Writ
 }
 
 func parseWeb(args []string) (attemptCommand, bool, bool) {
+	command, rest := attemptCommand{}, args[2:]
+	flags, stringFlag, seen := newOnceFlagSet(args[1])
+	var revision string
 	switch args[1] {
 	case "status":
-		if len(args) == 2 {
-			return attemptCommand{kind: commandWebStatus}, false, true
-		}
+		command.kind = commandWebStatus
 	case "list-clients":
-		if len(args) == 2 {
-			return attemptCommand{kind: commandWebListClients}, false, true
-		}
-		if len(args) == 4 && args[2] == "--after" && validHumanRequestKey(args[3]) {
-			return attemptCommand{kind: commandWebListClients, after: args[3]}, false, true
-		}
+		command.kind = commandWebListClients
+		stringFlag("--after", &command.after)
 	case "revoke":
-		if len(args) == 5 && validHumanRequestKey(args[2]) && args[3] == "--revision" {
-			revision, ok := parseRevision(args[4])
-			if ok {
-				return attemptCommand{kind: commandWebRevoke, id: args[2], expectedRevision: revision}, false, true
-			}
+		if len(args) < 3 || !validHumanRequestKey(args[2]) {
+			return attemptCommand{}, false, false
+		}
+		command.kind, command.id, rest = commandWebRevoke, args[2], args[3:]
+		stringFlag("--revision", &revision)
+	default:
+		return attemptCommand{}, false, false
+	}
+	if !parsePairedFlags(flags, rest) || seen["--after"] && !validHumanRequestKey(command.after) {
+		return attemptCommand{}, false, false
+	}
+	if command.kind == commandWebRevoke {
+		var ok bool
+		if command.expectedRevision, ok = parseRevision(revision); !ok {
+			return attemptCommand{}, false, false
 		}
 	}
-	return attemptCommand{}, false, false
+	return command, false, true
 }
 
 func parseOperator(args []string) (attemptCommand, bool, bool) {
