@@ -753,6 +753,22 @@ func TestRuntimeErrorsAreFixedAndPrivate(t *testing.T) {
 	}
 }
 
+// JSON encoding would turn invalid UTF-8 into U+FFFD, which the daemon would
+// accept as the attempt's text, so a raw argument is refused as usage.
+func TestAttemptTextRejectsInvalidUTF8BeforeConnection(t *testing.T) {
+	for _, argv := range [][]string{
+		{"attempt", "succeed", "--result", "\xff"},
+		{"attempt", "block", "--detail", "\xff"},
+		{"attempt", "fail", "--detail", "\xff"},
+	} {
+		var stdout, stderr bytes.Buffer
+		exit := run(context.Background(), argv, func(string) string { return "" }, &stdout, &stderr)
+		if exit != exitUsage || stdout.Len() != 0 || !strings.Contains(stderr.String(), "invalid arguments") {
+			t.Fatalf("%s = exit %d, stdout %q, stderr %q", argv[1], exit, stdout.String(), stderr.String())
+		}
+	}
+}
+
 func TestMissingSocketOrAttemptTokenCannotFallBack(t *testing.T) {
 	t.Run("missing socket", func(t *testing.T) {
 		t.Setenv("DARK_FACTORY_ATTEMPT_TOKEN_FILE", "/private/missing-attempt-token")
