@@ -76,7 +76,7 @@ export function FactoryApp({ onStatusChange, browserPort }: FactoryAppProps = {}
 
   const selectedProjectID = snapshot.selectedAgent === undefined ? undefined : snapshot.state?.agents.get(snapshot.selectedAgent.id)?.project_id;
   useEffect(() => {
-    if (snapshot.status === "ready" && selectedProjectID !== undefined) void owner.current?.loadRepositories(selectedProjectID);
+    if (snapshot.status === "ready" && selectedProjectID !== undefined) void owner.current?.settings.loadRepositories(selectedProjectID);
   }, [snapshot.status, selectedProjectID]);
 
   // Where the running agents are working is live, not regenerable: it is polled
@@ -132,18 +132,18 @@ export function FactoryApp({ onStatusChange, browserPort }: FactoryAppProps = {}
       onReplyHumanRequest={() => { void owner.current?.replyHumanRequest(); }}
       onCancelHumanRequest={() => { void owner.current?.cancelHumanRequest(); }}
       onCloseHumanRequest={() => owner.current?.clearHumanRequest()}
-      onLoadAccounts={() => { void owner.current?.loadAccounts(); }}
+      onLoadAccounts={() => { void owner.current?.settings.loadAccounts(); }}
       onLinkAccount={(login, label) => { void owner.current?.linkAccount({ provider: login.provider, home: login.home, label }); }}
       onUpdateAccount={(account, change) => { void owner.current?.updateAccount({ accountId: account.id, expectedRevision: account.revision, ...change }); }}
-      onLoadRepositories={snapshot.status === "ready" ? (projectId) => { void owner.current?.loadRepositories(projectId); } : undefined}
-      onMutateRepository={(request) => { void owner.current?.mutateRepository(request); }}
-      onCreateProject={(request) => { void owner.current?.createProject(request); }}
-      onLoadIntake={snapshot.status === "ready" ? (projectId) => { void owner.current?.loadIntake(projectId); } : undefined}
-      onIntakeAction={(projectId, request) => { void owner.current?.intakeAction(projectId, request); }}
-      onGitHub={(request) => { void owner.current?.githubConnection(request); }}
-      onInviteRemote={() => { void owner.current?.inviteRemote(); }}
-      onLoadDevices={() => { void owner.current?.loadDevices(); }}
-      onRevokeDevice={(device) => { void owner.current?.revokeDevice(device); }}
+      onLoadRepositories={snapshot.status === "ready" ? (projectId) => { void owner.current?.settings.loadRepositories(projectId); } : undefined}
+      onMutateRepository={(request) => { void owner.current?.settings.mutateRepository(request); }}
+      onCreateProject={(request) => { void owner.current?.settings.createProject(request); }}
+      onLoadIntake={snapshot.status === "ready" ? (projectId) => { void owner.current?.settings.loadIntake(projectId); } : undefined}
+      onIntakeAction={(projectId, request) => { void owner.current?.settings.intakeAction(projectId, request); }}
+      onGitHub={(request) => { void owner.current?.settings.githubConnection(request); }}
+      onInviteRemote={() => { void owner.current?.settings.inviteRemote(); }}
+      onLoadDevices={() => { void owner.current?.settings.loadDevices(); }}
+      onRevokeDevice={(device) => { void owner.current?.settings.revokeDevice(device); }}
       onDismissRemoteInvite={() => owner.current?.dismissRemoteInvite()}
       terminalContent={terminal}
     />
