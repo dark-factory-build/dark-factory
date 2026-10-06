@@ -204,9 +204,9 @@ func (store *Store) AdmitNext(ctx context.Context, keys AdmissionKeys, at UnixMi
 		provider_exit_kind, provider_exit_sequence, provider_exit_code, provider_exit_signal, provider_exit_at_ms,
 		runner_exit_kind, runner_exit_sequence, runner_exit_code, runner_exit_signal, runner_exit_at_ms,
 		revision, admitted_at_ms, running_at_ms, finalizing_at_ms, terminal_at_ms, updated_at_ms
-		) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'admitted', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, ?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 1, ?, NULL, NULL, NULL, ?)`,
+		) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'none', 'admitted', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, ?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 1, ?, NULL, NULL, NULL, ?)`,
 		keys.RunID.Bytes(), task.ProjectID.Bytes(), agent.ID.Bytes(), task.ID.Bytes(), task.IncarnationID.Bytes(), task.WorkRevision.Int64(),
-		changeID, admittedChangeRevision, agent.Role.String(), agent.Provider.String(), nullableString(agent.Model), nullableString(agent.ReasoningEffort), project.VerificationPolicy.String(),
+		changeID, admittedChangeRevision, agent.Role.String(), agent.Provider.String(), nullableString(agent.Model), nullableString(agent.ReasoningEffort),
 		keys.AttemptDigest.Bytes(), keys.ResultProofDigest.bytes(), at.Int64(), at.Int64())
 	if err != nil {
 		return AdmissionResult{}, tx.Rollback(classifyAdmissionConflict(ctx, tx.connection, keys, err))

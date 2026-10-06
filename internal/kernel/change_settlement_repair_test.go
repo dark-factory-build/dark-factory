@@ -251,7 +251,7 @@ func phaseRevision(phase ChangePhase) int64 {
 // head it left, and a later read of the Change sees exactly that head.
 func TestRunningWorkerSettlementMayUpdateContentOnStableTree(t *testing.T) {
 	blocked, _ := NewBlockedProposal("retain edits")
-	store, finalizing := finalizingReleasedRun(t, RoleWorker, VerificationNone, blocked)
+	store, finalizing := finalizingReleasedRun(t, RoleWorker, blocked)
 	defer store.Close()
 	change, found, err := store.Change(context.Background(), *finalizing.ChangeID)
 	if err != nil || !found || change.HeadCommit == nil {
@@ -289,7 +289,7 @@ func TestPreProviderRetainedRetryKeepsPublishedHead(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			blocked, _ := NewBlockedProposal("retain published edits")
-			store, firstFinalizing := finalizingReleasedRun(t, RoleWorker, VerificationNone, blocked)
+			store, firstFinalizing := finalizingReleasedRun(t, RoleWorker, blocked)
 			defer store.Close()
 			firstChange, found, err := store.Change(context.Background(), *firstFinalizing.ChangeID)
 			if err != nil || !found || firstChange.HeadCommit == nil {

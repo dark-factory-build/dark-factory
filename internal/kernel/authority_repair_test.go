@@ -52,7 +52,7 @@ func TestRunningAuthorityRejectsCorruptChangeRelationships(t *testing.T) {
 
 func TestTerminalRunRejectsMismatchedTaskOutcome(t *testing.T) {
 	proposal, _ := NewSuccessProposal("verified result")
-	store, finalizing := finalizingReleasedRun(t, RoleOrchestrator, VerificationNone, proposal)
+	store, finalizing := finalizingReleasedRun(t, RoleOrchestrator, proposal)
 	path := storePath(t, store)
 	terminal, err := store.FinalizeRun(context.Background(), finalizing.ID, finalizing.Revision, mustTime(t, 80))
 	if err != nil {
@@ -74,20 +74,6 @@ func TestTerminalRunRejectsMismatchedTaskOutcome(t *testing.T) {
 		t.Fatalf("Open = %v", err)
 	}
 	assertDatabaseEvidenceUnchanged(t, path, before)
-}
-
-func TestInjectedConfiguredWorkerSuccessTerminalFailsClosed(t *testing.T) {
-	proposal, _ := NewSuccessProposal("unverified")
-	store, finalizing := finalizingReleasedRun(t, RoleWorker, VerificationGoWorkspaceTest, proposal)
-	defer store.Close()
-	corruptSQL(t, store, `UPDATE runs SET phase = 'terminal', terminal_kind = proposal_kind, terminal_code = proposal_code, terminal_detail = proposal_detail, terminal_result = proposal_result, terminal_at_ms = 90, revision = revision + 1, updated_at_ms = 90 WHERE id = ?`, finalizing.ID.Bytes())
-	corruptSQL(t, store, `UPDATE tasks SET status = 'succeeded', result = 'unverified', completed_at_ms = 90, revision = revision + 1, updated_at_ms = 90 WHERE id = ?`, finalizing.TaskID.Bytes())
-	if _, _, err := store.Run(context.Background(), finalizing.ID); !errors.Is(err, ErrCorruptState) {
-		t.Fatalf("Run = %v", err)
-	}
-	if _, err := store.Snapshot(context.Background()); !errors.Is(err, ErrCorruptState) {
-		t.Fatalf("Snapshot = %v", err)
-	}
 }
 
 func TestAdmissionRejectsOverlapWithDurableRuntime(t *testing.T) {

@@ -134,7 +134,7 @@ func TestOverseerWakeSummarisesTasks(t *testing.T) {
 	}
 
 	blocked, _ := NewBlockedProposal("needs a decision")
-	store, finalizing := finalizingReleasedRun(t, RoleWorker, VerificationNone, blocked)
+	store, finalizing := finalizingReleasedRun(t, RoleWorker, blocked)
 	defer store.Close()
 	change, _, err := store.Change(ctx, *finalizing.ChangeID)
 	if err != nil {
@@ -192,7 +192,7 @@ func TestOverseerWakeSkipsPublishedIntakeSuccess(t *testing.T) {
 	for _, intake := range []bool{false, true} {
 		ctx := context.Background()
 		succeeded, _ := NewSuccessProposal("done")
-		store, finalizing := finalizingReleasedRun(t, RoleWorker, VerificationNone, succeeded)
+		store, finalizing := finalizingReleasedRun(t, RoleWorker, succeeded)
 		defer store.Close()
 		change, _, err := store.Change(ctx, *finalizing.ChangeID)
 		if err != nil {

@@ -12,7 +12,7 @@ func TestOverseerSnapshotIsProjectScopedAndTaskSelected(t *testing.T) {
 	ctx := context.Background()
 	store, run, _ := runningOrchestratorRun(t)
 	defer store.Close()
-	other, err := store.CreateProject(ctx, NewProject{ID: projectID(t, 241), Name: "other", Root: "/other", VerificationPolicy: VerificationNone}, mustTime(t, 40))
+	other, err := store.CreateProject(ctx, NewProject{ID: projectID(t, 241), Name: "other", Root: "/other"}, mustTime(t, 40))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -240,7 +240,7 @@ func TestRetainedChangeHandoffsInspectCurrentSettledOutcomes(t *testing.T) {
 		{name: "sent back", proposal: succeeded, sendBack: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			store, finalizing := finalizingReleasedRun(t, RoleWorker, VerificationNone, test.proposal)
+			store, finalizing := finalizingReleasedRun(t, RoleWorker, test.proposal)
 			defer store.Close()
 			if _, found, err := store.RetainedChangeHandoffForTask(context.Background(), finalizing.ProjectID, finalizing.TaskID); err != nil || found {
 				t.Fatalf("unsettled source handoff: found=%v err=%v", found, err)

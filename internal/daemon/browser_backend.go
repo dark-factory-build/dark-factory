@@ -536,7 +536,7 @@ func (backend *browserBackend) CreateProject(ctx context.Context, rawClient [bro
 	if err != nil {
 		return browserprotocol.ProjectCreateResult{}, mapBrowserError(err)
 	}
-	project, err := registerProject(ctx, backend.store, kernel.NewProject{ID: projectID, Name: request.Name, Root: request.Root, VerificationPolicy: kernel.VerificationNone}, at)
+	project, err := registerProject(ctx, backend.store, kernel.NewProject{ID: projectID, Name: request.Name, Root: request.Root}, at)
 	if err != nil {
 		return browserprotocol.ProjectCreateResult{}, consoleUpdateError(err)
 	}

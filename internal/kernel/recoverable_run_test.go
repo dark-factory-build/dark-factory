@@ -9,7 +9,7 @@ import (
 
 func TestRecoverableRunExactLookupMatchesPluralEntry(t *testing.T) {
 	success, _ := NewSuccessProposal("recoverable")
-	store, run := finalizingReleasedRun(t, RoleWorker, VerificationNone, success)
+	store, run := finalizingReleasedRun(t, RoleWorker, success)
 	defer store.Close()
 
 	all, err := store.RecoverableRuns(context.Background())
@@ -30,7 +30,7 @@ func TestRecoverableRunExactLookupMatchesPluralEntry(t *testing.T) {
 
 func TestRecoverableRunExactLookupReturnsNotFoundForTerminalAndUnknownRuns(t *testing.T) {
 	failure, _ := NewFailureProposal(FailureInternal, "terminal")
-	store, finalizing := finalizingReleasedRun(t, RoleOrchestrator, VerificationNone, failure)
+	store, finalizing := finalizingReleasedRun(t, RoleOrchestrator, failure)
 	defer store.Close()
 	if _, err := store.FinalizeRun(context.Background(), finalizing.ID, finalizing.Revision, mustTime(t, 70)); err != nil {
 		t.Fatal(err)
@@ -147,7 +147,7 @@ func TestRecoverableRunExactLookupRejectsUnrelatedIdentityCollision(t *testing.T
 
 func TestRecoverableRunExactLookupAllowsHistoricalTerminalTaskState(t *testing.T) {
 	failure, _ := NewFailureProposal(FailureInternal, "terminal")
-	store, finalizing := finalizingReleasedRun(t, RoleOrchestrator, VerificationNone, failure)
+	store, finalizing := finalizingReleasedRun(t, RoleOrchestrator, failure)
 	defer store.Close()
 	terminal, err := store.FinalizeRun(context.Background(), finalizing.ID, finalizing.Revision, mustTime(t, 70))
 	if err != nil {
@@ -161,7 +161,7 @@ func TestRecoverableRunExactLookupAllowsHistoricalTerminalTaskState(t *testing.T
 
 func TestTerminalRunRejectsUnownedLaterRunningTaskState(t *testing.T) {
 	failure, _ := NewFailureProposal(FailureInternal, "terminal")
-	store, finalizing := finalizingReleasedRun(t, RoleOrchestrator, VerificationNone, failure)
+	store, finalizing := finalizingReleasedRun(t, RoleOrchestrator, failure)
 	defer store.Close()
 	terminal, err := store.FinalizeRun(context.Background(), finalizing.ID, finalizing.Revision, mustTime(t, 70))
 	if err != nil {

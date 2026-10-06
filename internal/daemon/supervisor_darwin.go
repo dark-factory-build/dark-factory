@@ -328,16 +328,6 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 	// none and runs in its private runtime home, so every Change step below
 	// is a worker's alone.
 	worker := run.Role == kernel.RoleWorker
-	project, found, err := daemon.store.Project(ctx, run.ProjectID)
-	if err != nil || !found {
-		if err == nil {
-			err = kernel.ErrCorruptState
-		}
-		return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureInternal, err)
-	}
-	if project.VerificationPolicy != run.VerificationPolicy || project.VerificationPolicy != kernel.VerificationNone {
-		return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSpawn, fmt.Errorf("%w: verification is not part of the kernel spike", kernel.ErrInvalidValue))
-	}
 	repository, found, err := daemon.store.TaskRepository(ctx, run.TaskID)
 	if err != nil || !found {
 		if err == nil {

@@ -9,7 +9,7 @@ import (
 )
 
 const runColumns = `id, project_id, agent_id, task_id, task_incarnation_id,
-	    admitted_task_work_revision, change_id, admitted_change_revision, role, provider, model, reasoning_effort, verification_policy, phase,
+	    admitted_task_work_revision, change_id, admitted_change_revision, role, provider, model, reasoning_effort, phase,
     proposal_kind, proposal_code, proposal_detail, proposal_result,
     terminal_kind, terminal_code, terminal_detail, terminal_result,
 	credential_digest, result_proof_digest, credential_revoked_at_ms,
@@ -35,7 +35,7 @@ func scanRun(scanner rowScanner) (Run, bool, error) {
 	var rawID, rawProjectID, rawAgentID, rawTaskID, rawIncarnationID, rawDigest, rawResultProofDigest []byte
 	var rawChangeID nullableBlob
 	var admittedChangeRevision sql.NullInt64
-	var roleValue, providerValue, verificationValue, phaseValue string
+	var roleValue, providerValue, phaseValue string
 	var model, effort sql.NullString
 	var proposalKind, proposalCode, proposalDetail, proposalResult sql.NullString
 	var terminalKind, terminalCode, terminalDetail, terminalResult sql.NullString
@@ -47,7 +47,7 @@ func scanRun(scanner rowScanner) (Run, bool, error) {
 	var runningAt, finalizingAt, terminalAt sql.NullInt64
 	if err := scanner.Scan(
 		&rawID, &rawProjectID, &rawAgentID, &rawTaskID, &rawIncarnationID, &admittedWorkRevision, &rawChangeID, &admittedChangeRevision,
-		&roleValue, &providerValue, &model, &effort, &verificationValue, &phaseValue,
+		&roleValue, &providerValue, &model, &effort, &phaseValue,
 		&proposalKind, &proposalCode, &proposalDetail, &proposalResult,
 		&terminalKind, &terminalCode, &terminalDetail, &terminalResult,
 		&rawDigest, &rawResultProofDigest, &revokedAt,
@@ -68,20 +68,19 @@ func scanRun(scanner rowScanner) (Run, bool, error) {
 	workRevision, workErr := NewRevision(admittedWorkRevision)
 	role, roleErr := parseAgentRole(roleValue)
 	provider, providerErr := ParseProvider(providerValue)
-	verification, verificationErr := parseVerificationPolicy(verificationValue)
 	phase, phaseErr := parseRunPhase(phaseValue)
 	digest, digestErr := AttemptDigestFromBytes(rawDigest)
 	resultProofDigest, resultProofDigestErr := ResultProofDigestFromBytes(rawResultProofDigest)
 	rev, revisionErr := NewRevision(revision)
 	admittedTime, admittedErr := NewUnixMillis(admittedAt)
 	updatedTime, updatedErr := NewUnixMillis(updatedAt)
-	if idErr != nil || projectErr != nil || agentErr != nil || taskErr != nil || incarnationErr != nil || workErr != nil || roleErr != nil || providerErr != nil || verificationErr != nil || phaseErr != nil || digestErr != nil || resultProofDigestErr != nil || revisionErr != nil || admittedErr != nil || updatedErr != nil || updatedAt < admittedAt || model.Valid && model.String == "" || effort.Valid && effort.String == "" || validateStoredProviderControls(provider, nullStringValue(model), nullStringValue(effort)) != nil {
+	if idErr != nil || projectErr != nil || agentErr != nil || taskErr != nil || incarnationErr != nil || workErr != nil || roleErr != nil || providerErr != nil || phaseErr != nil || digestErr != nil || resultProofDigestErr != nil || revisionErr != nil || admittedErr != nil || updatedErr != nil || updatedAt < admittedAt || model.Valid && model.String == "" || effort.Valid && effort.String == "" || validateStoredProviderControls(provider, nullStringValue(model), nullStringValue(effort)) != nil {
 		return Run{}, false, fmt.Errorf("%w: invalid run controls", ErrCorruptState)
 	}
 	result := Run{
 		ID: id, ProjectID: projectID, AgentID: agentID, TaskID: taskID, TaskIncarnationID: incarnationID,
 		AdmittedTaskWorkRevision: workRevision, Role: role, Provider: provider,
-		Model: nullStringValue(model), ReasoningEffort: nullStringValue(effort), VerificationPolicy: verification, Phase: phase,
+		Model: nullStringValue(model), ReasoningEffort: nullStringValue(effort), Phase: phase,
 		CredentialDigest: digest, resultProofDigest: resultProofDigest, Revision: rev, AdmittedAt: admittedTime, UpdatedAt: updatedTime,
 	}
 	if rawChangeID.valid {
@@ -168,7 +167,7 @@ func scanRun(scanner rowScanner) (Run, bool, error) {
 			return Run{}, false, fmt.Errorf("%w: inconsistent finalizing run", ErrCorruptState)
 		}
 	case RunTerminal:
-		if result.FinalizingAt == nil || result.TerminalAt == nil || result.CredentialRevokedAt == nil || result.Proposal == nil || result.Terminal == nil || !result.Proposal.equal(*result.Terminal) || result.Role == RoleWorker && result.VerificationPolicy != VerificationNone && result.Proposal.kind == OutcomeSucceeded {
+		if result.FinalizingAt == nil || result.TerminalAt == nil || result.CredentialRevokedAt == nil || result.Proposal == nil || result.Terminal == nil || !result.Proposal.equal(*result.Terminal) {
 			return Run{}, false, fmt.Errorf("%w: inconsistent terminal run", ErrCorruptState)
 		}
 	}

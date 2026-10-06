@@ -493,40 +493,6 @@ func (proposal Proposal) valid() bool {
 }
 func (proposal Proposal) equal(other Proposal) bool { return proposal == other }
 
-type VerificationPolicy uint8
-
-const (
-	VerificationNone VerificationPolicy = iota + 1
-	VerificationRustWorkspaceTest
-	VerificationGoWorkspaceTest
-)
-
-func parseVerificationPolicy(value string) (VerificationPolicy, error) {
-	switch value {
-	case "none":
-		return VerificationNone, nil
-	case "rust_workspace_test":
-		return VerificationRustWorkspaceTest, nil
-	case "go_workspace_test":
-		return VerificationGoWorkspaceTest, nil
-	default:
-		return 0, corruptControl("verification policy", value)
-	}
-}
-
-func (policy VerificationPolicy) String() string {
-	switch policy {
-	case VerificationNone:
-		return "none"
-	case VerificationRustWorkspaceTest:
-		return "rust_workspace_test"
-	case VerificationGoWorkspaceTest:
-		return "go_workspace_test"
-	default:
-		return ""
-	}
-}
-
 type processExitKind uint8
 
 const (
@@ -776,7 +742,6 @@ type Run struct {
 	Provider                 Provider
 	Model                    string
 	ReasoningEffort          string
-	VerificationPolicy       VerificationPolicy
 	Phase                    RunPhase
 	Proposal                 *Proposal
 	Terminal                 *Proposal

@@ -19,9 +19,6 @@ type pendingInvalidation struct {
 }
 
 func (store *Store) CreateProject(ctx context.Context, spec NewProject, at UnixMillis) (Project, error) {
-	if spec.VerificationPolicy == 0 {
-		spec.VerificationPolicy = VerificationNone
-	}
 	if err := validateNewProject(spec); err != nil {
 		return Project{}, err
 	}
@@ -60,7 +57,7 @@ func (store *Store) CreateProject(ctx context.Context, spec NewProject, at UnixM
 	if rootExists {
 		return Project{}, tx.Rollback(ErrConflict)
 	}
-	if _, err := tx.connection.ExecContext(ctx, `INSERT INTO projects(id, name, root, verification_policy, revision, created_at_ms, updated_at_ms) VALUES(?, ?, ?, ?, 1, ?, ?)`, spec.ID.Bytes(), spec.Name, spec.Root, spec.VerificationPolicy.String(), at.Int64(), at.Int64()); err != nil {
+	if _, err := tx.connection.ExecContext(ctx, `INSERT INTO projects(id, name, root, verification_policy, revision, created_at_ms, updated_at_ms) VALUES(?, ?, ?, 'none', 1, ?, ?)`, spec.ID.Bytes(), spec.Name, spec.Root, at.Int64(), at.Int64()); err != nil {
 		return Project{}, tx.Rollback(err)
 	}
 	// Project creation keeps the old root input as the first durable binding so
@@ -428,7 +425,7 @@ func appendInvalidations(ctx context.Context, connection *sql.Conn, at UnixMilli
 }
 
 func validateNewProject(spec NewProject) error {
-	if spec.ID.zero() || byteLen(spec.Name) < 1 || byteLen(spec.Name) > 128 || !validAbsolutePath(spec.Root) || spec.VerificationPolicy.String() == "" {
+	if spec.ID.zero() || byteLen(spec.Name) < 1 || byteLen(spec.Name) > 128 || !validAbsolutePath(spec.Root) {
 		return fmt.Errorf("%w: invalid project", ErrInvalidValue)
 	}
 	return nil
@@ -703,7 +700,7 @@ func readAccounts(ctx context.Context, connection *sql.Conn) ([]Account, error) 
 }
 
 func projectMatchesCreation(existing Project, spec NewProject) bool {
-	return existing.Name == spec.Name && existing.Root == spec.Root && existing.VerificationPolicy == spec.VerificationPolicy && existing.Revision.Int64() == 1 && existing.UpdatedAt == existing.CreatedAt
+	return existing.Name == spec.Name && existing.Root == spec.Root && existing.Revision.Int64() == 1 && existing.UpdatedAt == existing.CreatedAt
 }
 
 func agentMatchesCreation(existing Agent, spec NewAgent) bool {

@@ -84,7 +84,7 @@ func TestAdmitNextRejectsBeforeFactoryTimestamp(t *testing.T) {
 
 func TestFinalizeRunRejectsBeforeFactoryTimestamp(t *testing.T) {
 	failure, _ := NewFailureProposal(FailureInternal, "cleanup")
-	store, finalizing := finalizingReleasedRun(t, RoleOrchestrator, VerificationNone, failure)
+	store, finalizing := finalizingReleasedRun(t, RoleOrchestrator, failure)
 	defer store.Close()
 	factory, err := store.Factory(context.Background())
 	if err != nil {
@@ -177,7 +177,7 @@ func TestReleaseProviderRejectsBeforeExit(t *testing.T) {
 
 func TestFinalizeRunRejectsBeforeResourceCleanupTime(t *testing.T) {
 	failure, _ := NewFailureProposal(FailureInternal, "cleanup")
-	store, run := finalizingReleasedRun(t, RoleOrchestrator, VerificationNone, failure)
+	store, run := finalizingReleasedRun(t, RoleOrchestrator, failure)
 	defer store.Close()
 	before := captureWriteFootprint(t, store)
 	if _, err := store.FinalizeRun(context.Background(), run.ID, run.Revision, mustTime(t, 45)); !errors.Is(err, ErrRevisionConflict) {
@@ -212,7 +212,7 @@ func TestRetryAdmissionCannotPrecedeQueuedTaskUpdate(t *testing.T) {
 // retry is admitted on the task's own Change.
 func TestSuccessfulTerminalCanBeSentBackAndRetried(t *testing.T) {
 	success, _ := NewSuccessProposal("finished")
-	store, finalizing := finalizingReleasedRun(t, RoleWorker, VerificationNone, success)
+	store, finalizing := finalizingReleasedRun(t, RoleWorker, success)
 	defer store.Close()
 	legacyInstruction := "read this:" + sentBackMarker + "1\n\nand fix it"
 	if _, err := store.writer.Exec(`UPDATE tasks SET body = ? WHERE id = ?`, legacyInstruction, finalizing.TaskID.Bytes()); err != nil {
@@ -351,7 +351,7 @@ func TestSendBackRefusesATaskWithoutARun(t *testing.T) {
 // unknown credential and (below) a worker's credential may not.
 func TestOrchestratorAttemptSendsBackAWorkerTask(t *testing.T) {
 	success, _ := NewSuccessProposal("finished")
-	store, finalizing := finalizingReleasedRun(t, RoleWorker, VerificationNone, success)
+	store, finalizing := finalizingReleasedRun(t, RoleWorker, success)
 	defer store.Close()
 	terminal, err := finalizeTestRun(t, store, finalizing, 80)
 	if err != nil {
@@ -470,7 +470,7 @@ func TestNonSuccessTerminalAllowsQueuedRetry(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			store, finalizing := finalizingReleasedRun(t, RoleWorker, VerificationNone, test.proposal)
+			store, finalizing := finalizingReleasedRun(t, RoleWorker, test.proposal)
 			defer store.Close()
 			terminal, err := finalizeTestRun(t, store, finalizing, 80)
 			if err != nil {
@@ -555,7 +555,7 @@ func TestEarlierSuccessfulRunMayPrecedeLaterHistory(t *testing.T) {
 // retry fresh on a reserved Change four revisions on.
 func TestRefusedPublicationAbandonsTheAvailableChangeAndRetriesFresh(t *testing.T) {
 	success, _ := NewSuccessProposal("finished")
-	store, finalizing := finalizingReleasedRun(t, RoleWorker, VerificationNone, success)
+	store, finalizing := finalizingReleasedRun(t, RoleWorker, success)
 	defer store.Close()
 	ctx := context.Background()
 	changeState, found, err := store.Change(ctx, *finalizing.ChangeID)
@@ -673,7 +673,7 @@ func TestSourceFailuresThatAreNotRefusalsRetryAsBefore(t *testing.T) {
 	})
 	t.Run("available", func(t *testing.T) {
 		failure, _ := NewFailureProposal(FailureSource, "source tree could not be adopted")
-		store, finalizing := finalizingReleasedRun(t, RoleWorker, VerificationNone, failure)
+		store, finalizing := finalizingReleasedRun(t, RoleWorker, failure)
 		defer store.Close()
 		ctx := context.Background()
 		change, found, err := store.Change(ctx, *finalizing.ChangeID)
@@ -703,7 +703,7 @@ func TestSourceFailuresThatAreNotRefusalsRetryAsBefore(t *testing.T) {
 // on, and the next retry starts fresh two revisions later.
 func TestRefusedPublicationOnARetainedRetryAbandonsAndRetriesFresh(t *testing.T) {
 	blocked, _ := NewBlockedProposal("retry")
-	store, finalizing := finalizingReleasedRun(t, RoleWorker, VerificationNone, blocked)
+	store, finalizing := finalizingReleasedRun(t, RoleWorker, blocked)
 	defer store.Close()
 	ctx := context.Background()
 	change, found, err := store.Change(ctx, *finalizing.ChangeID)
@@ -964,7 +964,7 @@ func TestRunningWorkerChangeCausalitySurvivesLaterPhases(t *testing.T) {
 
 	t.Run("terminal", func(t *testing.T) {
 		proposal, _ := NewSuccessProposal("done")
-		store, finalizing := finalizingReleasedRun(t, RoleWorker, VerificationNone, proposal)
+		store, finalizing := finalizingReleasedRun(t, RoleWorker, proposal)
 		defer store.Close()
 		terminal, err := finalizeTestRun(t, store, finalizing, 80)
 		if err != nil {
@@ -1428,13 +1428,13 @@ func TestChronologyScannersRejectImpossibleRows(t *testing.T) {
 		}},
 		{name: "finalizing credential mismatch", setup: func(t *testing.T) (*Store, func() error) {
 			failure, _ := NewFailureProposal(FailureInternal, "cleanup")
-			store, run := finalizingReleasedRun(t, RoleOrchestrator, VerificationNone, failure)
+			store, run := finalizingReleasedRun(t, RoleOrchestrator, failure)
 			corruptSQL(t, store, `UPDATE runs SET credential_revoked_at_ms = finalizing_at_ms - 1 WHERE id = ?`, run.ID.Bytes())
 			return store, func() error { _, _, err := store.Run(context.Background(), run.ID); return err }
 		}},
 		{name: "terminal before finalizing", setup: func(t *testing.T) (*Store, func() error) {
 			failure, _ := NewFailureProposal(FailureInternal, "cleanup")
-			store, run := finalizingReleasedRun(t, RoleOrchestrator, VerificationNone, failure)
+			store, run := finalizingReleasedRun(t, RoleOrchestrator, failure)
 			terminal, err := finalizeTestRun(t, store, run, 80)
 			if err != nil {
 				t.Fatal(err)
@@ -1450,21 +1450,21 @@ func TestChronologyScannersRejectImpossibleRows(t *testing.T) {
 		}},
 		{name: "finalizing resource before finalizing", setup: func(t *testing.T) (*Store, func() error) {
 			failure, _ := NewFailureProposal(FailureInternal, "cleanup")
-			store, run := finalizingReleasedRun(t, RoleOrchestrator, VerificationNone, failure)
+			store, run := finalizingReleasedRun(t, RoleOrchestrator, failure)
 			resource := resourceOfKind(t, resourcesForRunTest(t, store, run.ID), ResourceRuntimeRoot)
 			corruptSQL(t, store, `UPDATE resources SET updated_at_ms = 39 WHERE id = ?`, resource.ID.Bytes())
 			return store, func() error { _, _, err := store.Run(context.Background(), run.ID); return err }
 		}},
 		{name: "released provider before exit", setup: func(t *testing.T) (*Store, func() error) {
 			failure, _ := NewFailureProposal(FailureInternal, "cleanup")
-			store, run := finalizingReleasedRun(t, RoleOrchestrator, VerificationNone, failure)
+			store, run := finalizingReleasedRun(t, RoleOrchestrator, failure)
 			resource := resourceOfKind(t, resourcesForRunTest(t, store, run.ID), ResourceProviderProcess)
 			corruptSQL(t, store, `UPDATE resources SET released_at_ms = 40, updated_at_ms = 40 WHERE id = ?`, resource.ID.Bytes())
 			return store, func() error { _, _, err := store.Run(context.Background(), run.ID); return err }
 		}},
 		{name: "terminal before Change", setup: func(t *testing.T) (*Store, func() error) {
 			success, _ := NewSuccessProposal("done")
-			store, run := finalizingReleasedRun(t, RoleWorker, VerificationNone, success)
+			store, run := finalizingReleasedRun(t, RoleWorker, success)
 			terminal, err := finalizeTestRun(t, store, run, 80)
 			if err != nil {
 				t.Fatal(err)
@@ -1493,7 +1493,7 @@ func TestChronologyScannersRejectImpossibleRows(t *testing.T) {
 	})
 	t.Run("task completion checkpoint", func(t *testing.T) {
 		failure, _ := NewFailureProposal(FailureInternal, "cleanup")
-		store, run := finalizingReleasedRun(t, RoleOrchestrator, VerificationNone, failure)
+		store, run := finalizingReleasedRun(t, RoleOrchestrator, failure)
 		defer store.Close()
 		terminal, err := store.FinalizeRun(context.Background(), run.ID, run.Revision, mustTime(t, 80))
 		if err != nil {
@@ -1506,7 +1506,7 @@ func TestChronologyScannersRejectImpossibleRows(t *testing.T) {
 	})
 	t.Run("blocked task terminal checkpoint", func(t *testing.T) {
 		blocked, _ := NewBlockedProposal("blocked")
-		store, run := finalizingReleasedRun(t, RoleOrchestrator, VerificationNone, blocked)
+		store, run := finalizingReleasedRun(t, RoleOrchestrator, blocked)
 		defer store.Close()
 		terminal, err := store.FinalizeRun(context.Background(), run.ID, run.Revision, mustTime(t, 80))
 		if err != nil {
