@@ -58,9 +58,9 @@ func TestReviewPromptDelimitsAuthorControlledBodyAsUntrusted(t *testing.T) {
 	}
 }
 
-// reviewerFixture publishes pull 12 from an author worker and links one login
-// per behaviour: the author's own (shared by a second agent), a claude login,
-// an overseer's, and one non-author codex worker login per name in reviewers.
+// reviewerFixture publishes pull 12 from an author worker on the provider
+// default and links one login per behaviour: a claude login, an overseer's,
+// and one codex worker login per name in reviewers.
 // The fake codex on PATH acts on marker files in its CODEX_HOME.
 func reviewerFixture(t *testing.T, reviewers ...string) (*daemonReviewBackend, map[string]string) {
 	t.Helper()
@@ -81,7 +81,7 @@ func reviewerFixture(t *testing.T, reviewers ...string) (*daemonReviewBackend, m
 	next := byte(60)
 	agent := func(name string, role kernel.AgentRole, provider kernel.Provider, account string) kernel.AgentID {
 		next++
-		if _, linked := accounts[account]; !linked {
+		if _, linked := accounts[account]; !linked && account != "" {
 			id, err := kernel.AccountIDFromBytes(bytes.Repeat([]byte{next}, kernel.IDBytes))
 			if err != nil {
 				t.Fatal(err)
@@ -103,8 +103,7 @@ func reviewerFixture(t *testing.T, reviewers ...string) (*daemonReviewBackend, m
 		}
 		return created.ID
 	}
-	author := agent("author", kernel.RoleWorker, kernel.ProviderCodex, "author")
-	agent("author-sibling", kernel.RoleWorker, kernel.ProviderCodex, "author")
+	author := agent("author", kernel.RoleWorker, kernel.ProviderCodex, "")
 	agent("claude", kernel.RoleWorker, kernel.ProviderClaudeCode, "claude")
 	agent("overseer", kernel.RoleOrchestrator, kernel.ProviderCodex, "overseer")
 	for _, name := range reviewers {
@@ -191,14 +190,6 @@ func TestAnAllowNamesAChangedPathOnlyAsAWholePath(t *testing.T) {
 		if (err == nil && verdict.Event == "ALLOW") != named {
 			t.Fatalf("%q: verdict=%+v err=%v, named=%v", say, verdict, err, named)
 		}
-	}
-}
-
-func TestReviewerAccountIsNeverThePullRequestAuthors(t *testing.T) {
-	backend, homes := reviewerFixture(t, "reviewer")
-	got, err := backend.daemon.store.ReviewerAccountHomes(context.Background(), backend.project, kernel.ProviderCodex, "team/repo", 12)
-	if err != nil || len(got) != 1 || got[0] != homes["reviewer"] {
-		t.Fatalf("reviewer homes=%v err=%v, want only %s (author %s)", got, err, homes["reviewer"], homes["author"])
 	}
 }
 

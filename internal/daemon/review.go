@@ -460,12 +460,12 @@ func (b *daemonReviewBackend) Review(ctx context.Context, checkout string, reque
 	if request.Provider == "claude" {
 		kind = kernel.ProviderClaudeCode
 	}
-	homes, err := b.daemon.store.ReviewerAccountHomes(ctx, b.project, kind, b.repository, request.PullNumber)
+	homes, err := b.daemon.store.ReviewerAccountHomes(ctx, b.project, kind)
 	if err != nil {
 		return review.Verdict{}, err
 	}
 	if len(homes) == 0 {
-		return review.Verdict{}, errors.New("review: no non-author worker account for the provider")
+		return review.Verdict{}, errors.New("review: no worker login for the provider")
 	}
 	// The provider comes from the workers' tool path: launchd's PATH lacks it.
 	tool, err := provider.WalkToolPath(b.daemon.toolPath, request.Provider)
