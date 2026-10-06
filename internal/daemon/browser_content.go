@@ -296,9 +296,6 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 		if latest := current.LatestRevision.Int64(); latest != int64(input.ExpectedRevision) && latest != int64(input.ExpectedRevision)+1 {
 			return result, browser.ErrStale
 		}
-		if current.Commit == "" {
-			_, _ = backend.owner.exportLegacyContent(ctx, id, int64(input.ExpectedRevision))
-		}
 		item, e := backend.store.DeprecateContent(ctx, id, project, rev, fmt.Sprintf("browser:%s", client.ID.String()), at)
 		if e != nil {
 			return result, mapBrowserError(e)
