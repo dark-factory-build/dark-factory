@@ -647,6 +647,44 @@ func (store *Store) RecordPublicationWithReviewOperation(ctx context.Context, pr
 	return tx.Commit(ctx)
 }
 
+// KnownProductionPulls reads the repository's pull requests last seen open,
+// and which of them have publication tasks, in one query: a refresh paging the
+// UI-ordered Production view cost a sorted UNION per eight rows.
+func (store *Store) KnownProductionPulls(ctx context.Context, project ProjectID, repo string, limit int) ([]ProductionPullRequest, map[uint64]bool, error) {
+	if project.zero() || limit < 1 {
+		return nil, nil, ErrInvalidValue
+	}
+	tx, err := store.beginRead(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer tx.Close()
+	rows, err := tx.connection.QueryContext(ctx, `SELECT r.document, EXISTS (SELECT 1 FROM publication_tasks p WHERE p.project_id = r.project_id AND p.repository = r.repository AND p.pull_number = CAST(r.identity AS INTEGER))
+		FROM production_records r WHERE r.project_id = ? AND r.repository = ? AND r.kind = 'pull_request' AND json_extract(r.document, '$.state') = 'open'
+		ORDER BY CAST(r.identity AS INTEGER) LIMIT ?`, project.Bytes(), strings.ToLower(repo), limit)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+	pulls, published := []ProductionPullRequest{}, map[uint64]bool{}
+	for rows.Next() {
+		var body string
+		var tasks bool
+		if err := rows.Scan(&body, &tasks); err != nil {
+			return nil, nil, err
+		}
+		var pull ProductionPullRequest
+		if json.Unmarshal([]byte(body), &pull) != nil {
+			continue
+		}
+		pulls = append(pulls, pull)
+		if tasks {
+			published[pull.Number] = true
+		}
+	}
+	return pulls, published, rows.Err()
+}
+
 // RecordProductionReview preserves the exact commit covered by a review.
 // Refreshes may move the live PR to a newer head; that older head is evidence,
 // not permission to rewrite the review onto the new source.

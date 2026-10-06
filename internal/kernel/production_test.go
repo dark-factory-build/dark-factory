@@ -7,6 +7,9 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/ncruces/go-sqlite3"
+	sqliteDriver "github.com/ncruces/go-sqlite3/driver"
 )
 
 func TestProductionReviewUpsertsBeforeRefresh(t *testing.T) {
@@ -631,5 +634,72 @@ func TestCorrectedHeadSupersedesOlderInFlightReview(t *testing.T) {
 	}
 	if document, _, err = store.ReviewOperation(ctx, project.ID, "other"); err != nil || !strings.Contains(string(document), `"state":"superseded"`) {
 		t.Fatalf("plain-path other=%s err=%v", document, err)
+	}
+}
+
+// The refresh runs every five minutes over every production record; paging
+// the UI view cost a sorted UNION per eight rows and outran its deadline.
+func TestKnownProductionPullsIsOneBoundedQuery(t *testing.T) {
+	store, _, project, _ := newAdmissionStore(t, RoleOrchestrator, 2)
+	defer store.Close()
+	ctx := context.Background()
+	task, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 131), ProjectID: project.ID, IncarnationID: incarnationID(t, 132), Title: "publisher"}, mustTime(t, 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.readers.SetMaxOpenConns(1)
+	connection, err := store.readers.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	statements := 0
+	if err := connection.Raw(func(driverConnection any) error {
+		return driverConnection.(sqliteDriver.Conn).Raw().Trace(sqlite3.TRACE_STMT, func(sqlite3.TraceEvent, any, any) error {
+			statements++
+			return nil
+		})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	connection.Close()
+	read := func(want int) (int, map[uint64]bool) {
+		t.Helper()
+		statements = 0
+		pulls, published, err := store.KnownProductionPulls(ctx, project.ID, "Example/Factory", 100)
+		if err != nil || len(pulls) != want {
+			t.Fatalf("pulls=%d want=%d err=%v", len(pulls), want, err)
+		}
+		for _, pull := range pulls {
+			if pull.State != "open" {
+				t.Fatalf("non-open pull %+v", pull)
+			}
+		}
+		return statements, published
+	}
+	observe := func(at int64, first, count uint64) {
+		t.Helper()
+		observation := ProductionObservation{Repository: "example/factory", ObservedAt: at}
+		for number := first; number < first+count; number++ {
+			state := "open"
+			if number%2 == 0 {
+				state = "merged"
+			}
+			observation.PullRequests = append(observation.PullRequests, ProductionPullRequest{Number: number, Title: "pull", Head: strings.Repeat("a", 40), State: state})
+		}
+		if err := store.RecordProductionObservation(ctx, project.ID, observation, mustTime(t, at)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	observe(10, 1, 2)
+	few, _ := read(1)
+	for batch := uint64(0); batch < 6; batch++ {
+		observe(int64(11+batch), 3+batch*200, 200)
+	}
+	if _, err := store.writer.ExecContext(ctx, `INSERT INTO publication_tasks (project_id, repository, pull_number, task_id, created_at_ms) VALUES (?, 'example/factory', 3, ?, 20)`, project.ID.Bytes(), task.ID.Bytes()); err != nil {
+		t.Fatal(err)
+	}
+	many, published := read(100)
+	if few == 0 || many != few || len(published) != 1 || !published[3] {
+		t.Fatalf("statements few=%d many=%d published=%v", few, many, published)
 	}
 }

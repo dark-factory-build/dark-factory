@@ -43,8 +43,11 @@ func (daemon *Daemon) refreshProduction(ctx context.Context, project kernel.Proj
 		if !verified || !pinned || identity.PublicationRepository == "" {
 			continue
 		}
-		known, published, _ := daemon.knownProductionPulls(ctx, project, identity.PublicationRepository)
-		observation, err := daemon.pullRequestObservation(ctx, identity.PublicationRepository, githubID, known)
+		known, published, err := daemon.store.KnownProductionPulls(ctx, project, identity.PublicationRepository, productionRefreshPRLimit)
+		var observation kernel.ProductionObservation
+		if err == nil {
+			observation, err = daemon.pullRequestObservation(ctx, identity.PublicationRepository, githubID, known)
+		}
 		if err != nil {
 			LogFactoryd(daemon.log, "factoryd: refresh %s: %v\n", identity.PublicationRepository, err)
 			continue
@@ -84,6 +87,23 @@ func (daemon *Daemon) refreshProduction(ctx context.Context, project kernel.Proj
 		}
 	}
 	return nil
+}
+
+// refreshProductionDetached serves the browser's Production read, whose 3s
+// call budget a scan or a wait on the Maintainer lock (held for whole HTTP
+// calls) outlasted, cancelling every refresh. The read shows the last durable
+// observation; the refresh runs under the daemon's lifetime, bounded per HTTP
+// call by the Maintainer client's timeout once the lock is held.
+func (daemon *Daemon) refreshProductionDetached(project kernel.ProjectID) {
+	ctx := daemon.cleanupCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	go func() {
+		if err := daemon.refreshProduction(ctx, project); err != nil {
+			LogFactoryd(daemon.log, "factoryd: refresh %s: %v\n", project, err)
+		}
+	}()
 }
 
 func changedProductionHeads(known []kernel.ProductionPullRequest, observed []kernel.ProductionPullRequest) []kernel.ProductionPullRequest {
@@ -246,35 +266,4 @@ func parseMaintainerPullRequestPage(content []byte) (maintainerPullRequestPage, 
 		}
 	}
 	return page, nil
-}
-
-func (daemon *Daemon) knownProductionPulls(ctx context.Context, project kernel.ProjectID, repository string) ([]kernel.ProductionPullRequest, map[uint64]bool, error) {
-	known := []kernel.ProductionPullRequest{}
-	published := make(map[uint64]bool)
-	for offset, pages := 0, 0; pages < 128; pages++ {
-		page, err := daemon.store.Production(ctx, project, offset, 8)
-		if err != nil {
-			return nil, nil, err
-		}
-		for _, record := range page.Records {
-			if record.Kind != "pull_request" || !strings.EqualFold(record.Repository, repository) {
-				continue
-			}
-			var pull kernel.ProductionPullRequest
-			if json.Unmarshal(record.Document, &pull) == nil {
-				known = append(known, pull)
-				if len(record.Tasks) > 0 {
-					published[pull.Number] = true
-				}
-			}
-			if len(known) == productionRefreshPRLimit {
-				return known, published, nil
-			}
-		}
-		if page.NextOffset <= offset || page.NextOffset >= page.Total {
-			break
-		}
-		offset = page.NextOffset
-	}
-	return known, published, nil
 }
