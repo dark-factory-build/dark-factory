@@ -16,7 +16,7 @@ import (
 // decoded snapshot and its exact wire bytes.
 func adapterSnapshot(t *testing.T, fixture *adapterFixture, connection *websocket.Conn, id string) (browserprotocol.StateSnapshot, []byte) {
 	t.Helper()
-	payload, err := browserprotocol.EncodeStateGet(id, browserprotocol.StateGet{})
+	payload, err := testEncodeStateGet(id, browserprotocol.StateGet{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -52,7 +52,7 @@ func TestBrowserStateWatchAnnouncesACommitFromTheSnapshotGap(t *testing.T) {
 		t.Fatalf("commit did not advance head: snapshot=%d committed=%d", snapshot.Head, committed)
 	}
 
-	watch, err := browserprotocol.EncodeStateWatch("watch-1", browserprotocol.StateWatch{AfterHead: snapshot.Head})
+	watch, err := testEncodeStateWatch("watch-1", browserprotocol.StateWatch{AfterHead: snapshot.Head})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,7 +78,7 @@ func TestBrowserRevocationJoinsTheStateWatcher(t *testing.T) {
 	fixture := newAdapterFixture(t, kernel.BrowserCapabilityObserve)
 	connection := fixture.pair(t)
 	snapshot, _ := adapterSnapshot(t, fixture, connection, "state-1")
-	watch, err := browserprotocol.EncodeStateWatch("watch-1", browserprotocol.StateWatch{AfterHead: snapshot.Head})
+	watch, err := testEncodeStateWatch("watch-1", browserprotocol.StateWatch{AfterHead: snapshot.Head})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -230,7 +230,7 @@ func TestBrowserTaskEnqueueAppearsInTheNextSnapshotWithoutItsInstruction(t *test
 	}
 
 	const instruction = "ENQUEUE_PRIVATE_SENTINEL"
-	payload, err := browserprotocol.EncodeTaskEnqueue("enqueue", browserprotocol.TaskEnqueue{
+	payload, err := testEncodeTaskEnqueue("enqueue", browserprotocol.TaskEnqueue{
 		TaskID: taskID.String(), IncarnationID: incarnationID.String(), AgentID: agent.ID.String(),
 		ExpectedAgentRevision: decimalRevision(agent.Revision), Instruction: instruction,
 	})

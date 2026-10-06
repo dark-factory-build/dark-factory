@@ -42,9 +42,6 @@ type TaskList struct {
 	HasMore Bool       `json:"has_more"`
 }
 
-func EncodeTaskListGet(id string, value TaskListGet) ([]byte, error) {
-	return encodeControl(TypeTaskListGet, id, value)
-}
 func EncodeTaskList(id string, value TaskList) ([]byte, error) {
 	return encodeControl(TypeTaskList, id, value)
 }
@@ -62,6 +59,7 @@ type TaskDetailGet struct {
 	PeerOffset       Decimal  `json:"peer_offset,omitempty"`
 	ExpectedHead     *Decimal `json:"expected_head,omitempty"`
 }
+
 type TaskDetail struct {
 	TaskID         string             `json:"task_id"`
 	Revision       Decimal            `json:"revision"`
@@ -98,17 +96,8 @@ type TaskHistoryEntry struct {
 	CreatedAtMillis Decimal `json:"created_at_ms"`
 }
 
-func EncodeAgentControl(id string, value AgentControl) ([]byte, error) {
-	return encodeControl(TypeAgentControl, id, value)
-}
 func EncodeAgentControlResult(id string, value AgentControlResult) ([]byte, error) {
 	return encodeControl(TypeAgentControlResult, id, value)
-}
-func EncodeTaskHistoryGet(id string, value TaskHistoryGet) ([]byte, error) {
-	return encodeControl(TypeTaskHistoryGet, id, value)
-}
-func EncodeTaskDetailGet(id string, value TaskDetailGet) ([]byte, error) {
-	return encodeControl(TypeTaskDetailGet, id, value)
 }
 func EncodeTaskDetail(id string, value TaskDetail) ([]byte, error) {
 	return encodeControl(TypeTaskDetail, id, value)

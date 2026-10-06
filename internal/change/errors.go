@@ -10,10 +10,3 @@ func (e *ValidationError) Error() string { return "invalid Change input: " + e.R
 type LimitError struct{ Reason string }
 
 func (e *LimitError) Error() string { return "Change limit exceeded: " + e.Reason }
-
-// UnsupportedError reports a platform rejected before any filesystem effect.
-type UnsupportedError struct{ Platform string }
-
-func (e *UnsupportedError) Error() string {
-	return "Change worktrees are unsupported on " + e.Platform
-}

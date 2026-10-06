@@ -28,10 +28,6 @@ type RemoteInviteResult struct {
 	SVG         string  `json:"svg"`
 }
 
-func EncodeRemoteInvite(id string, value RemoteInvite) ([]byte, error) {
-	return encodeControl(TypeRemoteInvite, id, value)
-}
-
 func EncodeRemoteInviteResult(id string, value RemoteInviteResult) ([]byte, error) {
 	return encodeControl(TypeRemoteInviteResult, id, value)
 }
@@ -79,10 +75,6 @@ type PushSubscribe struct {
 // PushSubscribeResult carries nothing: the subscription is stored or the
 // request is refused.
 type PushSubscribeResult struct{}
-
-func EncodePushSubscribe(id string, value PushSubscribe) ([]byte, error) {
-	return encodeControl(TypePushSubscribe, id, value)
-}
 
 func EncodePushSubscribeResult(id string, value PushSubscribeResult) ([]byte, error) {
 	return encodeControl(TypePushSubscribeResult, id, value)

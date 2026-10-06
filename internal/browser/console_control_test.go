@@ -361,7 +361,7 @@ func TestIntakePreviewKeepsConnectionLiveAndUsesSnapshotBound(t *testing.T) {
 	connection.SetReadLimit(browserprotocol.MaxSnapshotBytes)
 	authenticate(t, connection)
 	writeClientFrame(t, connection, []byte(consoleFrame(t, browserprotocol.TypeIntake)))
-	state, _ := browserprotocol.EncodeStateGet("during-intake", browserprotocol.StateGet{})
+	state, _ := testEncodeStateGet("during-intake", browserprotocol.StateGet{})
 	writeClientFrame(t, connection, state)
 	if frame := readServerFrame(t, connection); frame.Type != browserprotocol.TypeStateSnapshot {
 		t.Fatalf("state stalled behind intake: %+v", frame)
@@ -401,7 +401,7 @@ func TestTreeWalksDoNotStallTheConnection(t *testing.T) {
 	writeClientFrame(t, connection, []byte(consoleFrame(t, browserprotocol.TypeRunPathsGet)))
 	// The first walk is blocked and the second waits behind it; a state read
 	// on the same connection is answered anyway.
-	state, _ := browserprotocol.EncodeStateGet("state-during-walk", browserprotocol.StateGet{})
+	state, _ := testEncodeStateGet("state-during-walk", browserprotocol.StateGet{})
 	writeClientFrame(t, connection, state)
 	if frame := readServerFrame(t, connection); frame.Type != browserprotocol.TypeStateSnapshot {
 		t.Fatalf("state during walks = %+v", frame)
@@ -577,7 +577,7 @@ func TestBrowserClientsListAndRevokeDispatchAndCorrelate(t *testing.T) {
 	connection, _ := dialServer(t, server, testOrigin)
 	authenticate(t, connection)
 
-	list, err := browserprotocol.EncodeBrowserClientsGet("clients", browserprotocol.BrowserClientsGet{})
+	list, err := testEncodeBrowserClientsGet("clients", browserprotocol.BrowserClientsGet{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -587,7 +587,7 @@ func TestBrowserClientsListAndRevokeDispatchAndCorrelate(t *testing.T) {
 		t.Fatalf("clients = %+v", frame)
 	}
 
-	revoke, err := browserprotocol.EncodeBrowserClientRevoke("revoke", browserprotocol.BrowserClientRevoke{ClientID: strings.Repeat("70", 16), ExpectedRevision: 1})
+	revoke, err := testEncodeBrowserClientRevoke("revoke", browserprotocol.BrowserClientRevoke{ClientID: strings.Repeat("70", 16), ExpectedRevision: 1})
 	if err != nil {
 		t.Fatal(err)
 	}

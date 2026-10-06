@@ -5,36 +5,17 @@ import (
 	"unicode/utf8"
 )
 
-func EncodeHumanRequestReply(id string, v HumanRequestReply) ([]byte, error) {
-	return encodeControl(TypeHumanRequestReply, id, v)
-}
 func EncodeHumanRequestReplyResult(id string, v HumanRequestReplyResult) ([]byte, error) {
 	return encodeControl(TypeHumanRequestReplyResult, id, v)
 }
-func EncodeHumanRequestCancelRun(id string, v HumanRequestCancelRun) ([]byte, error) {
-	return encodeControl(TypeHumanRequestCancelRun, id, v)
-}
 func EncodeHumanRequestCancelRunResult(id string, v HumanRequestCancelRunResult) ([]byte, error) {
 	return encodeControl(TypeHumanRequestCancelRunResult, id, v)
-}
-func EncodeTerminalAttach(id string, v TerminalAttach) ([]byte, error) {
-	return encodeControl(TypeTerminalAttach, id, v)
-}
-func EncodeTerminalTargetGet(id string, v TerminalTargetGet) ([]byte, error) {
-	return encodeControl(TypeTerminalTargetGet, id, v)
 }
 func EncodeTerminalTarget(id string, v TerminalTarget) ([]byte, error) {
 	return encodeControl(TypeTerminalTarget, id, v)
 }
 func EncodeTerminalAttached(id string, v TerminalAttached) ([]byte, error) {
 	return encodeControl(TypeTerminalAttached, id, v)
-}
-func EncodeTerminalAck(v TerminalAck) ([]byte, error) { return encodeControl(TypeTerminalAck, "", v) }
-func EncodeTerminalLeaseAcquire(id string, v TerminalLeaseAcquire) ([]byte, error) {
-	return encodeControl(TypeTerminalLeaseAcquire, id, v)
-}
-func EncodeTerminalLeaseRenew(id string, v TerminalLeaseRenew) ([]byte, error) {
-	return encodeControl(TypeTerminalLeaseRenew, id, v)
 }
 func EncodeTerminalLeaseRelease(id string, v TerminalLeaseRelease) ([]byte, error) {
 	return encodeControl(TypeTerminalLeaseRelease, id, v)
@@ -44,9 +25,6 @@ func EncodeTerminalLeaseResult(id string, v TerminalLeaseResult) ([]byte, error)
 }
 func EncodeTerminalResized(id string, v TerminalResized) ([]byte, error) {
 	return encodeControl(TypeTerminalResized, id, v)
-}
-func EncodeTerminalDetach(id string, v TerminalDetach) ([]byte, error) {
-	return encodeControl(TypeTerminalDetach, id, v)
 }
 func EncodeTerminalDetached(id string, v TerminalDetached) ([]byte, error) {
 	return encodeControl(TypeTerminalDetached, id, v)

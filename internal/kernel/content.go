@@ -476,8 +476,6 @@ func contentProvenance(authority AttemptAuthority) string {
 	return fmt.Sprintf("run:%s agent:%s role:%s", authority.RunID, authority.AgentID, authority.Role)
 }
 
-func evidenceProvenance(authority AttemptAuthority) string { return contentProvenance(authority) }
-
 func (store *Store) AttachContentToTask(ctx context.Context, task TaskID, project ProjectID, content ContentID, revision Revision, at UnixMillis) error {
 	tx, err := store.beginValidatedWrite(ctx)
 	if err != nil {

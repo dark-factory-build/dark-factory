@@ -52,7 +52,7 @@ func TestBrowserTaskEnqueueCreatesPrivateDurableTaskAndWakesScheduler(t *testing
 	data := bytes.Repeat([]byte{0, 1, 255}, 10000)
 	for offset := 0; offset < len(data); offset += browserprotocol.TaskAttachmentChunkBytes {
 		end := min(offset+browserprotocol.TaskAttachmentChunkBytes, len(data))
-		upload, err := browserprotocol.EncodeTaskAttachment(fmt.Sprintf("upload-%d", offset), browserprotocol.TaskAttachmentChunk{Index: 0, Offset: browserprotocol.Decimal(offset), Size: browserprotocol.Decimal(len(data)), Name: "screenshot.png", Data: data[offset:end]})
+		upload, err := testEncodeTaskAttachment(fmt.Sprintf("upload-%d", offset), browserprotocol.TaskAttachmentChunk{Index: 0, Offset: browserprotocol.Decimal(offset), Size: browserprotocol.Decimal(len(data)), Name: "screenshot.png", Data: data[offset:end]})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -62,7 +62,7 @@ func TestBrowserTaskEnqueueCreatesPrivateDurableTaskAndWakesScheduler(t *testing
 			t.Fatalf("upload: %+v", frame)
 		}
 		if offset == 0 {
-			partial, err := browserprotocol.EncodeTaskEnqueue("partial", browserprotocol.TaskEnqueue{TaskID: taskID.String(), IncarnationID: incarnationID.String(), AgentID: agent.ID.String(), ExpectedAgentRevision: browserprotocol.Decimal(agent.Revision.Int64()), Instruction: instruction, AttachmentCount: 1})
+			partial, err := testEncodeTaskEnqueue("partial", browserprotocol.TaskEnqueue{TaskID: taskID.String(), IncarnationID: incarnationID.String(), AgentID: agent.ID.String(), ExpectedAgentRevision: browserprotocol.Decimal(agent.Revision.Int64()), Instruction: instruction, AttachmentCount: 1})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -82,7 +82,7 @@ func TestBrowserTaskEnqueueCreatesPrivateDurableTaskAndWakesScheduler(t *testing
 		Instruction:           instruction,
 		AttachmentCount:       1,
 	}
-	payload, err := browserprotocol.EncodeTaskEnqueue("enqueue", request)
+	payload, err := testEncodeTaskEnqueue("enqueue", request)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -162,7 +162,7 @@ func TestBrowserTaskEnqueueRejectsMissingCapabilityAndStaleAgent(t *testing.T) {
 				revision++
 			}
 			request := browserprotocol.TaskEnqueue{TaskID: hex.EncodeToString(taskID.Bytes()), IncarnationID: hex.EncodeToString(incarnationID.Bytes()), AgentID: hex.EncodeToString(agent.ID.Bytes()), ExpectedAgentRevision: revision, Instruction: "must not persist"}
-			payload, err := browserprotocol.EncodeTaskEnqueue("enqueue", request)
+			payload, err := testEncodeTaskEnqueue("enqueue", request)
 			if err != nil {
 				t.Fatal(err)
 			}

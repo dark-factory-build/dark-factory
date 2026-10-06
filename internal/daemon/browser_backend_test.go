@@ -90,7 +90,7 @@ func (fixture *adapterFixture) pair(t *testing.T) *websocket.Conn {
 	if err != nil {
 		t.Fatal(err)
 	}
-	proof, err := browserprotocol.EncodePairProve("pair", browserprotocol.PairProve{
+	proof, err := testEncodePairProve("pair", browserprotocol.PairProve{
 		Challenge: hex.EncodeToString(challenge), PublicKeySEC1: hex.EncodeToString(publicKey), Signature: hex.EncodeToString(adapterSign(t, fixture.key, transcript)),
 	})
 	if err != nil {
@@ -143,7 +143,7 @@ func (fixture *adapterFixture) authenticate(t *testing.T) *websocket.Conn {
 	if err != nil {
 		t.Fatal(err)
 	}
-	proof, err := browserprotocol.EncodeAuthProve("auth", browserprotocol.AuthProve{ClientID: fixture.client.ID.String(), Signature: hex.EncodeToString(adapterSign(t, fixture.key, transcript))})
+	proof, err := testEncodeAuthProve("auth", browserprotocol.AuthProve{ClientID: fixture.client.ID.String(), Signature: hex.EncodeToString(adapterSign(t, fixture.key, transcript))})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -186,7 +186,7 @@ func adapterReadPayload(t *testing.T, connection *websocket.Conn) (browserprotoc
 	if kind != websocket.MessageText {
 		t.Fatalf("frame kind = %d", kind)
 	}
-	frame, err := browserprotocol.DecodeServerControl(payload)
+	frame, err := testDecodeServerControl(payload)
 	if err != nil {
 		t.Fatalf("decode server frame %q: %v", payload, err)
 	}
@@ -264,7 +264,7 @@ func TestBrowserAdapterPairsAuthenticatesSnapshotsAndReloadsRevocation(t *testin
 	}
 
 	paired := fixture.pair(t)
-	stateGet, _ := browserprotocol.EncodeStateGet("state-1", browserprotocol.StateGet{})
+	stateGet, _ := testEncodeStateGet("state-1", browserprotocol.StateGet{})
 	adapterWrite(t, paired, stateGet)
 	frame, payload := adapterReadPayload(t, paired)
 	if frame.Type != browserprotocol.TypeStateSnapshot {
@@ -288,7 +288,7 @@ func TestBrowserAdapterPairsAuthenticatesSnapshotsAndReloadsRevocation(t *testin
 	}
 
 	authenticated := fixture.authenticate(t)
-	stateGet, _ = browserprotocol.EncodeStateGet("state-2", browserprotocol.StateGet{})
+	stateGet, _ = testEncodeStateGet("state-2", browserprotocol.StateGet{})
 	adapterWrite(t, authenticated, stateGet)
 	if frame := adapterRead(t, authenticated); frame.Type != browserprotocol.TypeStateSnapshot {
 		t.Fatalf("authenticated state = %+v", frame)
@@ -297,7 +297,7 @@ func TestBrowserAdapterPairsAuthenticatesSnapshotsAndReloadsRevocation(t *testin
 	if err != nil || revoked.RevokedAt == nil {
 		t.Fatalf("revoke = %+v, %v", revoked, err)
 	}
-	stateGet, _ = browserprotocol.EncodeStateGet("state-3", browserprotocol.StateGet{})
+	stateGet, _ = testEncodeStateGet("state-3", browserprotocol.StateGet{})
 	adapterWrite(t, authenticated, stateGet)
 	frame = adapterRead(t, authenticated)
 	if frame.Type != browserprotocol.TypeError || frame.Body.(browserprotocol.Error).Code != browserprotocol.ErrorUnauthorized {
@@ -339,7 +339,7 @@ func TestBrowserAdapterBadPairProofDoesNotConsumeChallenge(t *testing.T) {
 	hello := adapterRead(t, connection).Body.(browserprotocol.Hello)
 	challenge := bytes.Repeat([]byte{0x43}, browserprotocol.ChallengeSize)
 	publicKey := elliptic.Marshal(elliptic.P256(), fixture.key.PublicKey.X, fixture.key.PublicKey.Y)
-	bad, _ := browserprotocol.EncodePairProve("bad", browserprotocol.PairProve{Challenge: hex.EncodeToString(challenge), PublicKeySEC1: hex.EncodeToString(publicKey), Signature: strings.Repeat("01", browserprotocol.SignatureSize)})
+	bad, _ := testEncodePairProve("bad", browserprotocol.PairProve{Challenge: hex.EncodeToString(challenge), PublicKeySEC1: hex.EncodeToString(publicKey), Signature: strings.Repeat("01", browserprotocol.SignatureSize)})
 	adapterWrite(t, connection, bad)
 	if frame := adapterRead(t, connection); frame.Type != browserprotocol.TypeError || frame.Body.(browserprotocol.Error).Code != browserprotocol.ErrorUnauthorized {
 		t.Fatalf("bad proof = %+v", frame)
@@ -385,7 +385,7 @@ func TestBrowserAdapterTerminalTargetProjectsExactActiveAndNoTarget(t *testing.T
 	if result.Target.RunID != run.ID.String() || result.Target.SessionID == "" || result.Target.RunRevision != decimalRevision(run.Revision) {
 		t.Fatalf("active target coordinates = %+v, run=%+v", result.Target, run)
 	}
-	wireRequest, err := browserprotocol.EncodeTerminalTargetGet("target-wire", request)
+	wireRequest, err := testEncodeTerminalTargetGet("target-wire", request)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -516,7 +516,7 @@ func TestBrowserAdapterEncodesYieldedHumanRequestWithoutTerminal(t *testing.T) {
 	if _, err := browserprotocol.EncodeHumanRequestDetail("yielded", detail); err != nil {
 		t.Fatalf("encode yielded detail: %v", err)
 	}
-	reply, err := browserprotocol.EncodeHumanRequestReply("yielded-reply", browserprotocol.HumanRequestReply{RequestID: request.ID.String(), ExpectedRevision: decimalRevision(request.Revision), Reply: "continue"})
+	reply, err := testEncodeHumanRequestReply("yielded-reply", browserprotocol.HumanRequestReply{RequestID: request.ID.String(), ExpectedRevision: decimalRevision(request.Revision), Reply: "continue"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -540,7 +540,7 @@ func TestBrowserAdapterEncodesYieldedHumanRequestWithoutTerminal(t *testing.T) {
 	if err != nil || cancelDetail.CancelRun == nil {
 		t.Fatalf("yielded cancellation detail = %+v, %v", cancelDetail, err)
 	}
-	cancel, err := browserprotocol.EncodeHumanRequestCancelRun("yielded-cancel", browserprotocol.HumanRequestCancelRun{RequestID: cancelRequest.ID.String(), ExpectedRequestRevision: cancelDetail.CancelRun.ExpectedRequestRevision, ExpectedRunRevision: cancelDetail.CancelRun.ExpectedRunRevision})
+	cancel, err := testEncodeHumanRequestCancelRun("yielded-cancel", browserprotocol.HumanRequestCancelRun{RequestID: cancelRequest.ID.String(), ExpectedRequestRevision: cancelDetail.CancelRun.ExpectedRequestRevision, ExpectedRunRevision: cancelDetail.CancelRun.ExpectedRunRevision})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -671,7 +671,7 @@ func TestBrowserAdapterRestartUsesNewBootAndDurableClient(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	proof, _ := browserprotocol.EncodeAuthProve("restart-auth", browserprotocol.AuthProve{ClientID: fixture.client.ID.String(), Signature: hex.EncodeToString(adapterSign(t, fixture.key, transcript))})
+	proof, _ := testEncodeAuthProve("restart-auth", browserprotocol.AuthProve{ClientID: fixture.client.ID.String(), Signature: hex.EncodeToString(adapterSign(t, fixture.key, transcript))})
 	adapterWrite(t, connection, proof)
 	if frame := adapterRead(t, connection); frame.Type != browserprotocol.TypeAuthResult {
 		t.Fatalf("restart auth = %+v", frame)

@@ -82,7 +82,7 @@ func TestTaskEnqueueDispatchesAndCorrelatesExactResult(t *testing.T) {
 	server := startTaskServer(t, backend)
 	connection, _ := dialServer(t, server, testOrigin)
 	authenticate(t, connection)
-	payload, err := browserprotocol.EncodeTaskEnqueue("enqueue", request)
+	payload, err := testEncodeTaskEnqueue("enqueue", request)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,7 +111,7 @@ func TestTaskEnqueueFailsClosedWithoutBackendAndOnMismatchedResult(t *testing.T)
 		ExpectedAgentRevision: 7,
 		Instruction:           "inspect the next failure",
 	}
-	payload, err := browserprotocol.EncodeTaskEnqueue("enqueue", request)
+	payload, err := testEncodeTaskEnqueue("enqueue", request)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -151,7 +151,7 @@ func TestRemoteInviteDispatchesAndCorrelatesTheMintedInvitation(t *testing.T) {
 		ExpiresAtMS: 1767225600000,
 		SVG:         `<svg viewBox="0 0 1 1"/>`,
 	}
-	payload, err := browserprotocol.EncodeRemoteInvite("invite", browserprotocol.RemoteInvite{})
+	payload, err := testEncodeRemoteInvite("invite", browserprotocol.RemoteInvite{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -188,7 +188,7 @@ func TestRemoteInviteDispatchesAndCorrelatesTheMintedInvitation(t *testing.T) {
 
 func TestPushSubscribeDispatchesAndCorrelatesItsResult(t *testing.T) {
 	subscription := browserprotocol.PushSubscribe{Endpoint: "https://web.push.apple.com/QGdfl/abc", PublicKey: "BGsX0fLhLEJH-Lzm5WOkQPJ3A32BLeszoPShOUXYmMKWT-NC4v4af5uO5-tKfA-eFivOM1drMV7Oy7ZAaDe_UfU", PrivateKey: "MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgAQ"}
-	payload, err := browserprotocol.EncodePushSubscribe("push", subscription)
+	payload, err := testEncodePushSubscribe("push", subscription)
 	if err != nil {
 		t.Fatal(err)
 	}

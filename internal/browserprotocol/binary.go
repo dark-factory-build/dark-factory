@@ -30,10 +30,6 @@ type TerminalFrame struct {
 	Payload         []byte
 }
 
-func EncodeTerminalInput(sessionID [16]byte, sequence, generation uint64, payload []byte) ([]byte, error) {
-	return encodeTerminalFrame(TerminalFrame{Opcode: TerminalInputOpcode, SessionID: sessionID, Sequence: sequence, LeaseGeneration: generation, Payload: payload})
-}
-
 func EncodeTerminalOutput(sessionID [16]byte, sequence uint64, payload []byte) ([]byte, error) {
 	return encodeTerminalFrame(TerminalFrame{Opcode: TerminalOutputOpcode, SessionID: sessionID, Sequence: sequence, Payload: payload})
 }

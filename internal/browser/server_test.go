@@ -285,7 +285,7 @@ func readServerFrame(t *testing.T, connection *websocket.Conn) browserprotocol.C
 	if kind != websocket.MessageText {
 		t.Fatalf("message type=%v", kind)
 	}
-	frame, err := browserprotocol.DecodeServerControl(payload)
+	frame, err := testDecodeServerControl(payload)
 	if err != nil {
 		t.Fatalf("decode %q: %v", payload, err)
 	}
@@ -308,7 +308,7 @@ func authenticate(t *testing.T, connection *websocket.Conn) browserprotocol.Hell
 		t.Fatalf("first frame=%s", helloFrame.Type)
 	}
 	hello := helloFrame.Body.(browserprotocol.Hello)
-	proof, err := browserprotocol.EncodeAuthProve("auth", browserprotocol.AuthProve{
+	proof, err := testEncodeAuthProve("auth", browserprotocol.AuthProve{
 		ClientID: testID, Signature: strings.Repeat("01", browserprotocol.SignatureSize),
 	})
 	if err != nil {
@@ -466,7 +466,7 @@ func TestHelloPairAndAuthBindValidatedRequest(t *testing.T) {
 	connection, _ := dialServer(t, server, testOrigin)
 	hello := readServerFrame(t, connection).Body.(browserprotocol.Hello)
 	publicKey := append([]byte{4}, make([]byte, browserprotocol.PublicKeySize-1)...)
-	pair, err := browserprotocol.EncodePairProve("pair", browserprotocol.PairProve{
+	pair, err := testEncodePairProve("pair", browserprotocol.PairProve{
 		Challenge:     strings.Repeat("04", browserprotocol.ChallengeSize),
 		PublicKeySEC1: hex.EncodeToString(publicKey),
 		Signature:     strings.Repeat("05", browserprotocol.SignatureSize),
@@ -502,7 +502,7 @@ func TestProofFailuresAndUnsupportedCapabilitiesFailClosed(t *testing.T) {
 			server := startServer(t, backend)
 			connection, _ := dialServer(t, server, testOrigin)
 			_ = readServerFrame(t, connection)
-			proof, _ := browserprotocol.EncodeAuthProve("auth", browserprotocol.AuthProve{ClientID: testID, Signature: strings.Repeat("01", 64)})
+			proof, _ := testEncodeAuthProve("auth", browserprotocol.AuthProve{ClientID: testID, Signature: strings.Repeat("01", 64)})
 			writeClientFrame(t, connection, proof)
 			assertError(t, readServerFrame(t, connection), browserprotocol.ErrorUnauthorized)
 		})
@@ -513,7 +513,7 @@ func TestProofFailuresAndUnsupportedCapabilitiesFailClosed(t *testing.T) {
 		server := startServer(t, backend)
 		connection, _ := dialServer(t, server, testOrigin)
 		_ = readServerFrame(t, connection)
-		proof, _ := browserprotocol.EncodeAuthProve("auth", browserprotocol.AuthProve{ClientID: testID, Signature: strings.Repeat("01", 64)})
+		proof, _ := testEncodeAuthProve("auth", browserprotocol.AuthProve{ClientID: testID, Signature: strings.Repeat("01", 64)})
 		writeClientFrame(t, connection, proof)
 		assertError(t, readServerFrame(t, connection), browserprotocol.ErrorUnauthorized)
 	}
@@ -525,7 +525,7 @@ func TestMalformedOversizedBinaryAndSecondAuthAreRejected(t *testing.T) {
 		server := startServer(t, backend)
 		connection, _ := dialServer(t, server, testOrigin)
 		_ = readServerFrame(t, connection)
-		request, _ := browserprotocol.EncodeStateGet("before-auth", browserprotocol.StateGet{})
+		request, _ := testEncodeStateGet("before-auth", browserprotocol.StateGet{})
 		writeClientFrame(t, connection, request)
 		assertError(t, readServerFrame(t, connection), browserprotocol.ErrorUnauthorized)
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -589,7 +589,7 @@ func TestMalformedOversizedBinaryAndSecondAuthAreRejected(t *testing.T) {
 		server := startServer(t, newFakeBackend())
 		connection, _ := dialServer(t, server, testOrigin)
 		authenticate(t, connection)
-		proof, _ := browserprotocol.EncodeAuthProve("auth-2", browserprotocol.AuthProve{ClientID: testID, Signature: strings.Repeat("01", 64)})
+		proof, _ := testEncodeAuthProve("auth-2", browserprotocol.AuthProve{ClientID: testID, Signature: strings.Repeat("01", 64)})
 		writeClientFrame(t, connection, proof)
 		assertError(t, readServerFrame(t, connection), browserprotocol.ErrorInvalidRequest)
 	})
@@ -606,7 +606,7 @@ func TestAuthenticationDeadline(t *testing.T) {
 	if err != nil || kind != websocket.MessageText {
 		t.Fatalf("deadline read kind=%v err=%v", kind, err)
 	}
-	frame, err := browserprotocol.DecodeServerControl(payload)
+	frame, err := testDecodeServerControl(payload)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -622,7 +622,7 @@ func TestAuthenticationDeadlineIncludesBackendProof(t *testing.T) {
 	server := startServer(t, backend)
 	connection, _ := dialServer(t, server, testOrigin)
 	_ = readServerFrame(t, connection)
-	proof, _ := browserprotocol.EncodeAuthProve("auth", browserprotocol.AuthProve{ClientID: testID, Signature: strings.Repeat("01", 64)})
+	proof, _ := testEncodeAuthProve("auth", browserprotocol.AuthProve{ClientID: testID, Signature: strings.Repeat("01", 64)})
 	started := time.Now()
 	writeClientFrame(t, connection, proof)
 	ctx, cancel := context.WithTimeout(context.Background(), authenticationLimit+2*time.Second)
@@ -631,7 +631,7 @@ func TestAuthenticationDeadlineIncludesBackendProof(t *testing.T) {
 	if err != nil || kind != websocket.MessageText {
 		t.Fatalf("proof deadline read kind=%v err=%v", kind, err)
 	}
-	frame, err := browserprotocol.DecodeServerControl(payload)
+	frame, err := testDecodeServerControl(payload)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -657,7 +657,7 @@ func TestStateOperationsChronologyCapabilitiesAndRedaction(t *testing.T) {
 	connection, _ := dialServer(t, server, testOrigin)
 	authenticate(t, connection)
 
-	state, _ := browserprotocol.EncodeStateGet("state", browserprotocol.StateGet{})
+	state, _ := testEncodeStateGet("state", browserprotocol.StateGet{})
 	writeClientFrame(t, connection, state)
 	frame := readServerFrame(t, connection)
 	if frame.Type != browserprotocol.TypeStateSnapshot || frame.ID != "state" {
@@ -668,13 +668,13 @@ func TestStateOperationsChronologyCapabilitiesAndRedaction(t *testing.T) {
 		t.Fatalf("snapshot=%+v", snapshot)
 	}
 
-	detailRequest, _ := browserprotocol.EncodeHumanRequestDetailGet("detail", browserprotocol.HumanRequestDetailGet{RequestID: requestID, ExpectedRevision: 1})
+	detailRequest, _ := testEncodeHumanRequestDetailGet("detail", browserprotocol.HumanRequestDetailGet{RequestID: requestID, ExpectedRevision: 1})
 	writeClientFrame(t, connection, detailRequest)
 	if detail := readServerFrame(t, connection); detail.Type != browserprotocol.TypeHumanRequestDetail {
 		t.Fatalf("detail=%+v", detail)
 	}
 
-	watch, _ := browserprotocol.EncodeStateWatch("watch", browserprotocol.StateWatch{AfterHead: 7})
+	watch, _ := testEncodeStateWatch("watch", browserprotocol.StateWatch{AfterHead: 7})
 	writeClientFrame(t, connection, watch)
 	backend.sub.updates <- StateUpdate{Head: 8}
 	changed := readServerFrame(t, connection)
@@ -692,7 +692,7 @@ func TestStateOperationsChronologyCapabilitiesAndRedaction(t *testing.T) {
 	}
 
 	backend.stateErr = errors.New("operator-token-SENTINEL provider-secret-SENTINEL")
-	redactedRequest, _ := browserprotocol.EncodeStateGet("redacted", browserprotocol.StateGet{})
+	redactedRequest, _ := testEncodeStateGet("redacted", browserprotocol.StateGet{})
 	writeClientFrame(t, connection, redactedRequest)
 	redacted := readServerFrame(t, connection)
 	assertError(t, redacted, browserprotocol.ErrorInternal)
@@ -766,7 +766,7 @@ func TestStateChangeHeadsAreStrictlyIncreasing(t *testing.T) {
 		server := startServer(t, backend)
 		connection, _ := dialServer(t, server, testOrigin)
 		authenticate(t, connection)
-		watch, _ := browserprotocol.EncodeStateWatch("watch", browserprotocol.StateWatch{AfterHead: 6})
+		watch, _ := testEncodeStateWatch("watch", browserprotocol.StateWatch{AfterHead: 6})
 		writeClientFrame(t, connection, watch)
 		backend.sub.updates <- StateUpdate{Head: 7}
 		if frame := readServerFrame(t, connection); frame.Type != browserprotocol.TypeStateChanged {
@@ -806,11 +806,11 @@ func TestOversizedSnapshotIsAFiniteTooLargeAnswer(t *testing.T) {
 	server := startServer(t, backend)
 	connection, _ := dialServer(t, server, testOrigin)
 	authenticate(t, connection)
-	request, _ := browserprotocol.EncodeStateGet("too-large", browserprotocol.StateGet{})
+	request, _ := testEncodeStateGet("too-large", browserprotocol.StateGet{})
 	writeClientFrame(t, connection, request)
 	assertError(t, readServerFrame(t, connection), browserprotocol.ErrorTooLarge)
 	// The refusal is finite: the same connection still serves a fitting snapshot.
-	again, _ := browserprotocol.EncodeStateGet("fits", browserprotocol.StateGet{})
+	again, _ := testEncodeStateGet("fits", browserprotocol.StateGet{})
 	writeClientFrame(t, connection, again)
 	if frame := readServerFrame(t, connection); frame.Type != browserprotocol.TypeStateSnapshot {
 		t.Fatalf("connection did not survive a too_large answer: %+v", frame)
@@ -826,7 +826,7 @@ func TestFiniteBackendErrorMapping(t *testing.T) {
 		backend.mu.Lock()
 		backend.stateErr = backendErr
 		backend.mu.Unlock()
-		request, _ := browserprotocol.EncodeStateGet(fmt.Sprintf("state-%d", index), browserprotocol.StateGet{})
+		request, _ := testEncodeStateGet(fmt.Sprintf("state-%d", index), browserprotocol.StateGet{})
 		writeClientFrame(t, connection, request)
 		frame := readServerFrame(t, connection)
 		want := []browserprotocol.ErrorCode{browserprotocol.ErrorNotFound, browserprotocol.ErrorStale, browserprotocol.ErrorTooLarge}[index]
@@ -841,7 +841,7 @@ func TestPrivateDetailRequiresCapabilityBeforeBackend(t *testing.T) {
 	server := startServer(t, backend)
 	connection, _ := dialServer(t, server, testOrigin)
 	authenticate(t, connection)
-	request, _ := browserprotocol.EncodeHumanRequestDetailGet("detail", browserprotocol.HumanRequestDetailGet{RequestID: requestID, ExpectedRevision: 1})
+	request, _ := testEncodeHumanRequestDetailGet("detail", browserprotocol.HumanRequestDetailGet{RequestID: requestID, ExpectedRevision: 1})
 	writeClientFrame(t, connection, request)
 	assertError(t, readServerFrame(t, connection), browserprotocol.ErrorUnauthorized)
 	backend.mu.Lock()
@@ -857,7 +857,7 @@ func TestDuplicateRequestIDAndConnectionLimit(t *testing.T) {
 		server := startServer(t, newFakeBackend())
 		connection, _ := dialServer(t, server, testOrigin)
 		authenticate(t, connection)
-		request, _ := browserprotocol.EncodeStateGet("same", browserprotocol.StateGet{})
+		request, _ := testEncodeStateGet("same", browserprotocol.StateGet{})
 		writeClientFrame(t, connection, request)
 		_ = readServerFrame(t, connection)
 		writeClientFrame(t, connection, request)
@@ -917,13 +917,13 @@ func TestRequestBudgetIsASlidingWindow(t *testing.T) {
 	// distinct operations may then complete; the next is rejected without
 	// backend work.
 	for index := 0; index < maxRequests-1; index++ {
-		request, _ := browserprotocol.EncodeStateGet(fmt.Sprintf("request-%d", index), browserprotocol.StateGet{})
+		request, _ := testEncodeStateGet(fmt.Sprintf("request-%d", index), browserprotocol.StateGet{})
 		writeClientFrame(t, connection, request)
 		if frame := readServerFrame(t, connection); frame.Type != browserprotocol.TypeStateSnapshot {
 			t.Fatalf("request %d response=%+v", index, frame)
 		}
 	}
-	request, _ := browserprotocol.EncodeStateGet("over-budget", browserprotocol.StateGet{})
+	request, _ := testEncodeStateGet("over-budget", browserprotocol.StateGet{})
 	writeClientFrame(t, connection, request)
 	frame := readServerFrame(t, connection)
 	assertError(t, frame, browserprotocol.ErrorRateLimited)
@@ -940,7 +940,7 @@ func TestRequestBudgetIsASlidingWindow(t *testing.T) {
 	// passed the same connection has budget again, and the id it refused is
 	// admitted like any other.
 	clock.Add(int64(requestWindow))
-	request, _ = browserprotocol.EncodeStateGet("over-budget", browserprotocol.StateGet{})
+	request, _ = testEncodeStateGet("over-budget", browserprotocol.StateGet{})
 	writeClientFrame(t, connection, request)
 	if frame := readServerFrame(t, connection); frame.Type != browserprotocol.TypeStateSnapshot || frame.ID != "over-budget" {
 		t.Fatalf("request after the window = %+v", frame)
@@ -1003,7 +1003,7 @@ func TestServerCloseWaitsForConnectionOwnedSubscriptionJoin(t *testing.T) {
 	server := startServer(t, backend)
 	connection, _ := dialServer(t, server, testOrigin)
 	authenticate(t, connection)
-	subscribe, _ := browserprotocol.EncodeStateWatch("sub", browserprotocol.StateWatch{})
+	subscribe, _ := testEncodeStateWatch("sub", browserprotocol.StateWatch{})
 	writeClientFrame(t, connection, subscribe)
 	deadline := time.Now().Add(time.Second)
 	for {
@@ -1051,7 +1051,7 @@ func TestSlowSubscriberCannotGrowTransportMemoryOrBlockShutdown(t *testing.T) {
 	// proof silently becomes a race between the producer and the buffer.
 	connection := dialStalledObserver(t, server)
 	authenticate(t, connection)
-	subscribe, _ := browserprotocol.EncodeStateWatch("slow", browserprotocol.StateWatch{AfterHead: 0})
+	subscribe, _ := testEncodeStateWatch("slow", browserprotocol.StateWatch{AfterHead: 0})
 	writeClientFrame(t, connection, subscribe)
 	deadline := time.Now().Add(2 * time.Second)
 	for {
@@ -1130,7 +1130,7 @@ func TestClosedStateWatchPreservesReconnectClassification(t *testing.T) {
 			defer func() { _ = server.Close() }()
 			connection, _ := dialServer(t, server, testOrigin)
 			authenticate(t, connection)
-			watch, _ := browserprotocol.EncodeStateWatch("watch", browserprotocol.StateWatch{AfterHead: 7})
+			watch, _ := testEncodeStateWatch("watch", browserprotocol.StateWatch{AfterHead: 7})
 			writeClientFrame(t, connection, watch)
 			backend.sub.updates <- StateUpdate{Head: 8}
 			if frame := readServerFrame(t, connection); frame.Type != browserprotocol.TypeStateChanged {

@@ -87,7 +87,7 @@ func TestRemotePairMintsAnExactInvitationBoundToTheNodeAndThisDaemon(t *testing.
 
 	// The ticket is a pair-purpose credential the relay will check against the
 	// node key alone, with the same lifetime as the durable challenge.
-	ticket, err := relayhost.VerifyTicket(identity.PublicKey(), values.Get("ticket"))
+	ticket, err := testVerifyTicket(identity.PublicKey(), values.Get("ticket"))
 	if err != nil {
 		t.Fatalf("relay ticket does not verify against the node key: %v", err)
 	}
@@ -162,11 +162,11 @@ func TestRemotePairMintsDistinctSecretsEachTime(t *testing.T) {
 	if firstValues.Get("ticket") == secondValues.Get("ticket") {
 		t.Fatal("two invitations reused one relay ticket")
 	}
-	firstTicket, err := relayhost.VerifyTicket(fixtureNodeKey(t, fixture), firstValues.Get("ticket"))
+	firstTicket, err := testVerifyTicket(fixtureNodeKey(t, fixture), firstValues.Get("ticket"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	secondTicket, err := relayhost.VerifyTicket(fixtureNodeKey(t, fixture), secondValues.Get("ticket"))
+	secondTicket, err := testVerifyTicket(fixtureNodeKey(t, fixture), secondValues.Get("ticket"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -314,7 +314,7 @@ func provePairWithChallenge(t *testing.T, fixture *adapterFixture, challenge []b
 	if err != nil {
 		t.Fatal(err)
 	}
-	proof, err := browserprotocol.EncodePairProve("pair", browserprotocol.PairProve{
+	proof, err := testEncodePairProve("pair", browserprotocol.PairProve{
 		Challenge: hex.EncodeToString(challenge), PublicKeySEC1: hex.EncodeToString(publicKey), Signature: hex.EncodeToString(adapterSign(t, key, transcript)),
 	})
 	if err != nil {

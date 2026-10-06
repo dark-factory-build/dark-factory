@@ -34,7 +34,7 @@ func TestBrowserProductionIsPrivateAndProjectScoped(t *testing.T) {
 	for index, id := range []kernel.ProjectID{project, other} {
 		input, _ := json.Marshal(map[string]any{"project_id": id.String(), "limit": 8})
 		request := browserprotocol.ProjectContent{Operation: "production", Input: input}
-		wire, err := browserprotocol.EncodeProjectContent(fmt.Sprintf("production-%d", index), request)
+		wire, err := testEncodeProjectContent(fmt.Sprintf("production-%d", index), request)
 		if err != nil {
 			t.Fatal(err)
 		}

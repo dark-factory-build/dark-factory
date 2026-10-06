@@ -223,32 +223,17 @@ type controlEnvelope struct {
 }
 
 func EncodeHello(value Hello) ([]byte, error) { return encodeControl(TypeHello, "", value) }
-func EncodePairProve(id string, value PairProve) ([]byte, error) {
-	return encodeControl(TypePairProve, id, value)
-}
 func EncodePairResult(id string, value PairResult) ([]byte, error) {
 	return encodeControl(TypePairResult, id, value)
-}
-func EncodeAuthProve(id string, value AuthProve) ([]byte, error) {
-	return encodeControl(TypeAuthProve, id, value)
 }
 func EncodeAuthResult(id string, value AuthResult) ([]byte, error) {
 	return encodeControl(TypeAuthResult, id, value)
 }
-func EncodeStateGet(id string, value StateGet) ([]byte, error) {
-	return encodeControl(TypeStateGet, id, value)
-}
 func EncodeStateSnapshot(id string, value StateSnapshot) ([]byte, error) {
 	return encodeControl(TypeStateSnapshot, id, value)
 }
-func EncodeStateWatch(id string, value StateWatch) ([]byte, error) {
-	return encodeControl(TypeStateWatch, id, value)
-}
 func EncodeStateChanged(id string, value StateChanged) ([]byte, error) {
 	return encodeControl(TypeStateChanged, id, value)
-}
-func EncodeHumanRequestDetailGet(id string, value HumanRequestDetailGet) ([]byte, error) {
-	return encodeControl(TypeHumanRequestDetailGet, id, value)
 }
 func EncodeHumanRequestDetail(id string, value HumanRequestDetail) ([]byte, error) {
 	return encodeControl(TypeHumanRequestDetail, id, value)
@@ -307,10 +292,6 @@ func DecodeClientControl(data []byte) (ControlFrame, error) {
 
 // DecodeServerControl accepts only frames factoryd may send. ERROR is
 // bidirectional; all other message directions are closed in the manifest.
-func DecodeServerControl(data []byte) (ControlFrame, error) {
-	return decodeControl(data, serverRole)
-}
-
 type senderRole byte
 
 const (

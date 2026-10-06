@@ -116,7 +116,7 @@ func TestBrowserLibraryRealWireAndCapabilityBoundaries(t *testing.T) {
 				t.Helper()
 				sequence++
 				raw, _ := json.Marshal(input)
-				wire, e := browserprotocol.EncodeProjectContent(fmt.Sprintf("library-%d", sequence), browserprotocol.ProjectContent{Operation: operation, Input: raw})
+				wire, e := testEncodeProjectContent(fmt.Sprintf("library-%d", sequence), browserprotocol.ProjectContent{Operation: operation, Input: raw})
 				if e != nil {
 					t.Fatal(e)
 				}
