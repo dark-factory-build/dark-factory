@@ -151,6 +151,12 @@ type OwnedChild struct {
 	testHardCleanup func() error
 }
 
+// These hooks are package-test-only seams. Production leaves them nil.
+var (
+	testExecGateSetup      func(*exec.Cmd)
+	testExecGateFinalCheck func(*os.File) error
+)
+
 // These seams exist only for package tests to force post-spawn cleanup paths;
 // production leaves both nil and always closes the real slave synchronously.
 var (
@@ -332,7 +338,7 @@ func prepareBlocked(lease *GateLease, gateExecutable string, spec *LaunchSpec, k
 		return nil, err
 	}
 	prepared.startFiles = append(prepared.startFiles, config)
-	if err := writeFrame(config, gateConfig{Version: 1, Target: spec.commit, LeaseDirectory: lease.dirIdentity, Lifetime: lease.lifetimeID, MarkerName: lease.basename, KeepDirectory: keepDirectoryAcrossExec, Control: spec.controlID, TestFinalCheck: spec.testFinal != nil, PTY: usePTY}, maxConfigBytes); err != nil {
+	if err := writeFrame(config, gateConfig{Version: 1, Target: spec.commit, LeaseDirectory: lease.dirIdentity, Lifetime: lease.lifetimeID, MarkerName: lease.basename, KeepDirectory: keepDirectoryAcrossExec, Control: spec.controlID, PTY: usePTY}, maxConfigBytes); err != nil {
 		return nil, err
 	}
 	if _, err := config.Seek(0, 0); err != nil {
@@ -425,8 +431,8 @@ func prepareBlocked(lease *GateLease, gateExecutable string, spec *LaunchSpec, k
 	if spec.controlID != nil {
 		cmd.ExtraFiles = append(cmd.ExtraFiles, spec.control)
 	}
-	if spec.testFinal != nil {
-		cmd.ExtraFiles = append(cmd.ExtraFiles, spec.testFinal)
+	if testExecGateSetup != nil {
+		testExecGateSetup(cmd)
 	}
 	if usePTY {
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true, Setctty: true, Ctty: 0}
@@ -1434,25 +1440,10 @@ func RunExecGate() error {
 		_ = writeFrame(status, gateFrame{Kind: "launch-error", Error: err.Error()}, maxFrameBytes)
 		return err
 	}
-	if cfg.TestFinalCheck {
-		// This package-test-only barrier makes the documented cooperative
-		// same-UID pathname race measurable; it is not a production defense.
-		seamFD := uintptr(11)
-		if control != nil {
-			seamFD = 12
-		}
-		seam := os.NewFile(seamFD, "test-final-check")
-		if seam == nil {
-			return ErrIdentity
-		}
-		if _, err := seam.Write([]byte{'R'}); err != nil {
+	if testExecGateFinalCheck != nil {
+		if err := testExecGateFinalCheck(control); err != nil {
 			return err
 		}
-		var ack [1]byte
-		if _, err := io.ReadFull(seam, ack[:]); err != nil || ack[0] != 'X' {
-			return fmt.Errorf("runner: test final-check seam: %v", err)
-		}
-		_ = seam.Close()
 	}
 	_ = target.Close()
 	if err := unix.Fchdir(int(cwd.Fd())); err != nil {

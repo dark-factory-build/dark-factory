@@ -162,7 +162,7 @@ func (c *AttemptController) Configure(spec AttemptSpec) error {
 	if err != nil {
 		return err
 	}
-	if spec.Wrapper.control != nil || spec.Wrapper.controlID != nil || len(spec.Wrapper.stdin) != 0 || spec.Wrapper.stdout != nil || spec.Wrapper.stderr != nil || spec.Wrapper.testFinal != nil || spec.Wrapper.testCurrentFinal {
+	if spec.Wrapper.control != nil || spec.Wrapper.controlID != nil || len(spec.Wrapper.stdin) != 0 || spec.Wrapper.stdout != nil || spec.Wrapper.stderr != nil || spec.Wrapper.testCurrentFinal {
 		return fmt.Errorf("runner: wrapper launch contains unsupported capabilities")
 	}
 	if len(spec.StartupInput) > MaxProviderTaskBytes || len(spec.StartupInput) > 0 && (!utf8.Valid(spec.StartupInput) || bytes.IndexByte(spec.StartupInput, 0) >= 0) {

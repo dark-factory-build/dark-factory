@@ -18,7 +18,6 @@ type gateConfig struct {
 	MarkerName     string                `json:"marker_name"`
 	KeepDirectory  bool                  `json:"keep_directory"`
 	Control        *descriptorCommitment `json:"control,omitempty"`
-	TestFinalCheck bool                  `json:"test_final_check,omitempty"`
 	PTY            bool                  `json:"pty,omitempty"`
 }
 

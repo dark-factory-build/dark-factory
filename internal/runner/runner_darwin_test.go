@@ -26,6 +26,39 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+var testFinalCheck *os.File
+
+func init() {
+	testExecGateSetup = func(cmd *exec.Cmd) {
+		if testFinalCheck == nil {
+			return
+		}
+		cmd.ExtraFiles = append(cmd.ExtraFiles, testFinalCheck)
+		cmd.Env = append(cmd.Env, "RUNNER_TEST_FINAL_CHECK=1")
+	}
+	testExecGateFinalCheck = func(control *os.File) error {
+		if os.Getenv("RUNNER_TEST_FINAL_CHECK") != "1" {
+			return nil
+		}
+		seamFD := uintptr(11)
+		if control != nil {
+			seamFD = 12
+		}
+		seam := os.NewFile(seamFD, "test-final-check")
+		if seam == nil {
+			return ErrIdentity
+		}
+		if _, err := seam.Write([]byte{'R'}); err != nil {
+			return err
+		}
+		var ack [1]byte
+		if _, err := io.ReadFull(seam, ack[:]); err != nil || ack[0] != 'X' {
+			return fmt.Errorf("runner: test final-check seam: %v", err)
+		}
+		return seam.Close()
+	}
+}
+
 func TestMain(m *testing.M) {
 	if os.Getenv("RUNNER_TEST_OWNER") == "1" {
 		owner := runParentDeathOwner
@@ -1947,8 +1980,9 @@ func TestSameUIDReplacementAfterFinalCheckIsExplicitlyOutOfScope(t *testing.T) {
 	gateBarrier := os.NewFile(uintptr(sockets[1]), "gate-final-check-test-barrier")
 	defer barrier.Close()
 	defer gateBarrier.Close()
-	spec.testFinal = gateBarrier
+	testFinalCheck = gateBarrier
 	child := f.startPrepared(spec, false)
+	testFinalCheck = nil
 	if err := gateBarrier.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -2001,8 +2035,9 @@ func TestExecErrorAfterFinalCheckIsTyped(t *testing.T) {
 	gateBarrier := os.NewFile(uintptr(sockets[1]), "gate-final-check-test-barrier")
 	defer barrier.Close()
 	defer gateBarrier.Close()
-	spec.testFinal = gateBarrier
+	testFinalCheck = gateBarrier
 	child := f.startPrepared(spec, false)
+	testFinalCheck = nil
 	if err := gateBarrier.Close(); err != nil {
 		t.Fatal(err)
 	}
