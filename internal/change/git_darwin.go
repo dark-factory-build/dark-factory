@@ -242,9 +242,12 @@ func refreshTrackingRevision(ctx context.Context, spec gitCommandSpec, revision 
 }
 
 // factoryBaseRef is the ref in the registered repository that holds the last
-// fetched tip of a remote base branch. Only the factory writes it.
+// fetched tip of a remote base branch. Only the factory writes it. Its leaf
+// is a digest, so one base's ref is never a directory of another's: a remote
+// default branch that moves from main to main/next still has a free ref.
 func factoryBaseRef(remote, branch string) string {
-	return "refs/factory/base/" + remote + "/" + strings.TrimPrefix(branch, "refs/heads/")
+	digest := sha256.Sum256([]byte(remote + "\x00" + branch))
+	return "refs/factory/base/" + hex.EncodeToString(digest[:])
 }
 
 // localUpstream follows a checkout without an origin: its branch's configured

@@ -1096,6 +1096,23 @@ func TestFreshSelectionStartsFromOriginDefaultBranchNotCheckout(t *testing.T) {
 	if got := runFixtureGitOutput(t, fixture.git, fixture.repository, "rev-parse", "HEAD"); got != head {
 		t.Fatalf("owner checkout moved: %s -> %s", head, got)
 	}
+	// The origin's default branch moves beneath its old name and back. The
+	// retained ref of one base must never block the ref of the next.
+	nested := branch + "/next"
+	for _, rename := range [][2]string{{branch, nested}, {nested, branch}} {
+		runFixtureGit(t, remote.git, remote.repository, "update-ref", "refs/factory-fixture/tip", rename[0])
+		runFixtureGit(t, remote.git, remote.repository, "update-ref", "-d", rename[0])
+		runFixtureGit(t, remote.git, remote.repository, "update-ref", rename[1], "refs/factory-fixture/tip")
+		runFixtureGit(t, remote.git, remote.repository, "symbolic-ref", "HEAD", rename[1])
+		runFixtureGit(t, remote.git, remote.repository, "update-ref", "-d", "refs/factory-fixture/tip")
+		selected, err := SelectRegisteredGit(ctx, fixture.git, fixture.repository, "HEAD", source)
+		if err != nil || selected.Base().Hex() != want {
+			t.Fatalf("default branch %s: base=%s want %s: %v", rename[1], selected.Base().Hex(), want, err)
+		}
+		if got := strings.TrimSpace(runFixtureGitOutput(t, fixture.git, fixture.repository, "rev-parse", factoryBaseRef("origin", rename[1]))); got != want {
+			t.Fatalf("factory base ref for %s=%s want %s", rename[1], got, want)
+		}
+	}
 	// An unreachable origin stops selection rather than falling back to the
 	// checkout's HEAD or the previously fetched factory ref.
 	runFixtureGit(t, fixture.git, fixture.repository, "remote", "set-url", "origin", filepath.Join(t.TempDir(), "missing"))
