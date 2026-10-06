@@ -463,10 +463,6 @@ func (client *AttemptClient) RequestHuman(ctx context.Context, input HumanQuesti
 	return client.client.mutate(ctx, "request_human", input)
 }
 
-func (client *AttemptClient) PeerStatus(ctx context.Context) (PeerStatus, error) {
-	return client.PeerStatusPage(ctx, 0, 0, 0)
-}
-
 func (client *AttemptClient) PeerStatusPage(ctx context.Context, offset, targetOffset, expectedHead uint64) (PeerStatus, error) {
 	return client.peerStatusPage(ctx, offset, targetOffset, expectedHead, true)
 }
@@ -530,10 +526,6 @@ func (client *AttemptClient) SendBack(ctx context.Context, input SendBackInput) 
 		return MutationResult{}, ErrInvalidInput
 	}
 	return client.client.mutate(ctx, "send_back", input)
-}
-
-func (client *AttemptClient) OverseerSnapshot(ctx context.Context) (OverseerSnapshot, error) {
-	return client.overseerSnapshot(ctx, OverseerSnapshotInput{})
 }
 
 func (client *AttemptClient) OverseerSnapshotPage(ctx context.Context, input OverseerSnapshotInput) (OverseerSnapshot, error) {

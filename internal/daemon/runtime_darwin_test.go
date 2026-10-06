@@ -24,10 +24,6 @@ func (binding *RuntimeBinding) ProviderTemp() (string, error) {
 	return binding.fixedDirectory(changeworker.TempName)
 }
 
-func (binding *RuntimeBinding) AttemptTokenPath() (string, error) {
-	return binding.fixedFile(changeworker.AttemptTokenName)
-}
-
 const (
 	runtimeTestName = "0123456789abcdef0123456789abcdef"
 	runtimeGoneName = "fedcba9876543210fedcba9876543210"
@@ -1031,9 +1027,6 @@ func TestRuntimeBindingRejectsFixedChildReplacement(t *testing.T) {
 			}
 			if _, err := binding.ProviderTemp(); !errors.Is(err, errInvalidContract) {
 				t.Fatalf("temp locator accepted replaced %s: %v", name, err)
-			}
-			if _, err := binding.AttemptTokenPath(); !errors.Is(err, errInvalidContract) {
-				t.Fatalf("token locator accepted replaced %s: %v", name, err)
 			}
 		})
 	}

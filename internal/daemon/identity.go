@@ -16,7 +16,6 @@ import (
 var (
 	errInvalidContract = errors.New("daemon: invalid private contract")
 	errRetainedRuntime = errors.New("daemon: private runtime effect retained")
-	errUnsupported     = errors.New("daemon: unsupported platform")
 )
 
 var birthMagic = [8]byte{'D', 'F', 'B', 'I', 'R', 'T', 'H', 1}
