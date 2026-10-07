@@ -152,10 +152,11 @@ type terminalOwner struct {
 	startupSubmitRetryInterval      time.Duration
 	humanReplyCorrelation           uint64
 	humanReplyCount                 uint32
-	// folderTail holds the first 16 KiB of output until Codex's folder dialog
-	// is answered or startup has passed; nil afterwards.
-	folderTail []byte
-	folderDone bool
+	// folderTail holds the latest startup output until Codex's folder dialog
+	// is answered or folderUntil passes; nil afterwards.
+	folderTail  []byte
+	folderUntil time.Time
+	folderDone  bool
 }
 
 // ponytail: the provider's output is opaque to the runner, so its readiness
@@ -428,7 +429,7 @@ func (o *terminalOwner) serve() (bool, error) {
 			if err := o.consumePTY(ev.bytes, ev.err); err != nil {
 				return o.daemonOpen, err
 			}
-			o.answerFolderAccess(ev.bytes)
+			o.answerFolderAccess(ev.bytes, time.Now())
 			// A continuously readable PTY must not starve the bounded startup
 			// watchdog. Check it after every read as well as on the idle tick.
 			if err := o.verifyStartupSubmit(); err != nil {
@@ -822,19 +823,28 @@ func (o *terminalOwner) writeTerminalPayload(payload []byte) (uint32, TerminalRe
 
 // Codex 0.160+ opens every folder the factory marks untrusted with a blocking
 // "Folder access" dialog whose default, option 1, is "Open restricted": exactly
-// the factory's intent. Within the first 16 KiB of output the runner answers
-// that one dialog once with CR and never any other, so an unknown dialog (for
-// example "Trust this folder?") still stalls instead of being accepted.
-func (o *terminalOwner) answerFolderAccess(data []byte) {
+// the factory's intent. During the first folderWindow of a session the runner
+// answers that one dialog once with CR and never any other, so an unknown
+// dialog (for example "Trust this folder?") still stalls. The window is time,
+// not bytes: a resumed session replays its whole transcript before the dialog.
+// Only the latest output is matched, dialog footer included, so a transcript
+// quoting the dialog is not mistaken for it.
+const folderWindow = 2 * time.Minute
+
+func (o *terminalOwner) answerFolderAccess(data []byte, now time.Time) {
 	if o.folderDone {
 		return
 	}
-	o.folderTail = append(o.folderTail, data...)
-	// Only the start of a session is startup: past it, nothing is answered,
-	// so a later screen quoting the dialog can never receive a CR.
-	if len(o.folderTail) > 16<<10 {
+	if o.folderUntil.IsZero() {
+		o.folderUntil = now.Add(folderWindow)
+	}
+	if now.After(o.folderUntil) {
 		o.folderDone, o.folderTail = true, nil
 		return
+	}
+	o.folderTail = append(o.folderTail, data...)
+	if len(o.folderTail) > 8<<10 {
+		o.folderTail = append([]byte(nil), o.folderTail[len(o.folderTail)-8<<10:]...)
 	}
 	if !isCodexFolderAccessDialog(o.folderTail) {
 		return
@@ -862,7 +872,7 @@ func isCodexFolderAccessDialog(output []byte) bool {
 			text = append(text, c)
 		}
 	}
-	return bytes.Contains(text, []byte("Folderaccess")) && bytes.Contains(text, []byte("1.Openrestricted")) && bytes.Contains(text, []byte("2.Quit"))
+	return bytes.Contains(text, []byte("Folderaccess")) && bytes.Contains(text, []byte("1.Openrestricted")) && bytes.Contains(text, []byte("2.Quit")) && bytes.Contains(text, []byte("entercontinue\u00b7escquit"))
 }
 
 func terminalPayloadResult(written, total int, err error) (uint32, TerminalResultStatus) {
