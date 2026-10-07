@@ -396,6 +396,20 @@ as authority for a retry or an old absence. Attempt commands read the private
 credential file for their exact run; an attempt cannot cross into operator
 authority.
 
+## Operational graph
+
+`internal/opgraph` infers what a project's repositories could do (deployment
+units, entry points, background loops, stores, queues and outside parties)
+from exact integrated-revision archives, without running project code. Runtime
+observations, from factoryd itself or pulled adapters, are bounded in-memory
+aggregates bound to that graph by OpenTelemetry-keyed selectors. Each node
+carries an evidence state, an observation state and an operational state;
+absence of telemetry is "unobserved", never "idle". The browser receives the
+graph as `OPERATIONAL_GRAPH`, lays it out as a plant and never sees a provider.
+None of it is durable state: losing it costs one archive read, and runtime
+readings truthfully restart as unobserved. The contract is
+[docs/development/OPERATIONAL_FACTORY.md](docs/development/OPERATIONAL_FACTORY.md).
+
 ## State outside SQLite
 
 The local socket and runtime roots are private daemon-owned files. The live

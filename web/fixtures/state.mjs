@@ -43,27 +43,36 @@ export const fixtureFloorState = {
   tasks: new Map(fixtureState.tasks).set(secondRunningTaskID, { id: secondRunningTaskID, project_id: secondProjectID, assigned_agent_id: secondAgentID, title: "Coordinate the release train", status: "running", priority: 9, revision: 16n }),
 };
 
-const nodeID = (prefix) => prefix.repeat(32);
+const nodeID = (prefix) => prefix.repeat(16);
+const reading = (evidence, observation, state, rate) => ({ evidence, observation, state, ...(rate === undefined ? {} : { rate_per_hour: rate }) });
+const summary = { components: 7, inferred: 6, observed: 3, quiet: 1, partial: 1, stale: 0, unobserved: 1, opaque: 1, runtime_only: 1, contradicted: 0 };
 
-/** The first project's structure: a repository root and its direct children. */
-export const fixtureTopology = {
-  projectId: projectID,
+/** The first project's operational graph: a daemon with routes, a store, a shared queue, an external and runtime-only activity. */
+export const fixtureGraph = {
+  project_id: projectID,
   digest: "ab".repeat(32),
-  sourceRevision: "c3".repeat(20),
-  dependencies: { source: "go-imports-package-manifests", omitted: 1, edges: [
-    { from: nodeID("c3"), to: nodeID("b2"), weight: 1 },
-    { from: nodeID("b2"), to: nodeID("d4"), weight: 2 },
-  ] },
+  observed_at: 1760000000000,
+  sources: [{ repository_id: "03".repeat(16), name: "north-workshop", kind: "integrated", target_ref: "main", revision: "c3".repeat(20), observed_at: 1760000000000 }],
   nodes: [
-    { id: nodeID("a1"), parent_id: "", kind: "repository", path: ".", label: "north-workshop", language: "", size_bucket: "large" },
-    { id: nodeID("b2"), parent_id: nodeID("a1"), kind: "package", path: "internal/kernel", label: "kernel", language: "go", size_bucket: "medium" },
-    { id: nodeID("c3"), parent_id: nodeID("a1"), kind: "module", path: "web", label: "web", language: "typescript", size_bucket: "small" },
-    { id: nodeID("d4"), parent_id: nodeID("b2"), kind: "directory", path: "internal/kernel/store", label: "store", language: "go", size_bucket: "tiny" },
+    { id: nodeID("a1"), kind: "processor", label: "kernel", runtime: "process", paths: ["internal/kernel"], ...reading("both", "partial", "active", 120) },
+    { id: nodeID("a2"), kind: "ingress", label: "/browser", unit: nodeID("a1"), trigger: "request", paths: ["internal/kernel/server.go"], ...reading("both", "observed", "active", 120), latency_p95_ms: 40 },
+    { id: nodeID("a3"), kind: "ingress", label: "/pair", unit: nodeID("a1"), trigger: "request", paths: ["internal/kernel/pair.go"], ...reading("static", "quiet", "idle") },
+    { id: nodeID("a4"), kind: "store", label: "state.db", unit: nodeID("a1"), paths: ["internal/kernel/store"], ...reading("static", "unobserved", "unknown") },
+    { id: nodeID("b1"), kind: "processor", label: "web", runtime: "browser", paths: ["web"], ...reading("static", "unobserved", "unknown") },
+    { id: nodeID("c1"), kind: "queue", label: "work queue", paths: [], ...reading("static", "opaque", "unknown") },
+    { id: nodeID("d1"), kind: "external", label: "api.github.com", paths: [], ...reading("static", "opaque", "unknown") },
+    { id: nodeID("e1"), kind: "unknown", label: "POST /mystery", paths: [], ...reading("runtime", "observed", "active", 3) },
   ],
+  edges: [
+    { from: nodeID("b1"), to: nodeID("a2"), kind: "calls", ...reading("both", "observed", "active", 120) },
+    { from: nodeID("a1"), to: nodeID("d1"), kind: "calls", ...reading("static", "unobserved", "unknown") },
+  ],
+  summary,
+  omitted: 0,
 };
 
-/** The floor takes one structure per project; the second one is unserved. */
-export const fixtureTopologies = new Map([[projectID, fixtureTopology]]);
+/** The floor takes one graph per project; the second one is unserved. */
+export const fixtureGraphs = new Map([[projectID, fixtureGraph]]);
 
 /** One observed live run; the other running agent deliberately stays unknown. */
 export const fixtureRunPaths = new Map([[agentID, {

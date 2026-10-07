@@ -74,13 +74,13 @@ func (daemon *Daemon) validateKnowledgeWrite(ctx context.Context, operator bool,
 	if !found || repository.ProjectID != spec.ProjectID {
 		return kernel.ErrUnauthorized
 	}
-	snapshot, err := daemon.repositoryTopology(ctx, repository)
+	graph, err := daemon.ProjectGraph(ctx, repository.ProjectID)
 	if err != nil {
 		return err
 	}
 	for _, entity := range metadata.Entities {
 		matched := false
-		for _, node := range snapshot.Nodes {
+		for _, node := range graph.graph.Nodes {
 			if entity == spec.ProjectID.String()+":"+node.ID {
 				matched = true
 				break
@@ -129,11 +129,11 @@ func (daemon *Daemon) knowledgeDTO(ctx context.Context, content kernel.ContentRe
 		result.ProjectedStatus = metadata.Status
 		return result
 	}
-	snapshot, err := daemon.repositoryTopology(ctx, repository)
+	revision, err := daemon.repositoryRevision(ctx, repository)
 	if err != nil {
 		result.ProjectedStatus = "needs_revalidation"
 		return result
 	}
-	result.ProjectedStatus = daemon.knowledgeSourceStatus(ctx, content, repository, snapshot.SourceRevision)
+	result.ProjectedStatus = daemon.knowledgeSourceStatus(ctx, content, repository, revision)
 	return result
 }

@@ -13,6 +13,7 @@ import (
 
 	"github.com/dark-factory-build/dark-factory/internal/api"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
+	"github.com/dark-factory-build/dark-factory/internal/opgraph"
 	"github.com/dark-factory-build/dark-factory/internal/provider"
 	"github.com/dark-factory-build/dark-factory/internal/runner"
 )
@@ -251,32 +252,35 @@ func TestKnowledgeSelectiveSourceRevalidation(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	write("internal/alpha/value.go", "package alpha\nconst Value=1\n")
-	write("internal/beta/value.go", "package beta\nconst Value=1\n")
+	write("go.mod", "module example.com/fixture\n")
+	write("cmd/alpha/main.go", "package main\nfunc main() {}\nconst Value=1\n")
+	write("cmd/beta/main.go", "package main\nfunc main() {}\nconst Value=1\n")
 	git("add", ".")
 	git("commit", "-m", "two scoped entities")
 	base := git("rev-parse", "HEAD")
-	snapshot, err := f.daemon.ProjectTopology(ctx, active.run.ProjectID)
+	graph, err := f.daemon.ProjectGraph(ctx, active.run.ProjectID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	entity := ""
-	for _, node := range snapshot.Nodes {
-		if node.RelativePath == "internal/alpha" {
-			entity = active.run.ProjectID.String() + ":" + node.ID
+	for _, node := range graph.graph.Nodes {
+		for _, module := range node.Modules {
+			if module.Path == "cmd/alpha" {
+				entity = active.run.ProjectID.String() + ":" + node.ID
+			}
 		}
 	}
 	if entity == "" {
-		t.Fatalf("alpha entity missing: %+v", snapshot)
+		t.Fatalf("alpha entity missing: %+v", graph.graph.Nodes)
 	}
 	note := seedContextKnowledge(t, f, active.run.ProjectID, 211, kernel.ContentLesson, kernel.KnowledgeMetadata{Status: "current", SourceRevision: base, Entities: []string{entity}, Evidence: []string{"review:alpha"}}, "Alpha Value is one.")
-	write("internal/beta/value.go", "package beta\nconst Value=2\n")
+	write("cmd/beta/main.go", "package main\nfunc main() {}\nconst Value=2\n")
 	git("add", ".")
 	git("commit", "-m", "unrelated beta edit")
 	if got := f.daemon.knowledgeSourceStatus(ctx, note, repository, git("rev-parse", "HEAD")); got != "current" {
 		t.Fatalf("unrelated source change invalidated alpha: %s", got)
 	}
-	write("internal/alpha/value.go", "package alpha\nconst Value=2\n")
+	write("cmd/alpha/main.go", "package main\nfunc main() {}\nconst Value=2\n")
 	git("add", ".")
 	git("commit", "-m", "alpha changed")
 	if got := f.daemon.knowledgeSourceStatus(ctx, note, repository, git("rev-parse", "HEAD")); got != "needs_revalidation" {
@@ -312,6 +316,11 @@ func TestKnowledgeCrossTaskReviewConclusionLoop(t *testing.T) {
 		return strings.TrimSpace(string(out))
 	}
 	originalBranch := git("symbolic-ref", "--short", "HEAD")
+	if err := os.WriteFile(filepath.Join(repository.Root, "main.go"), []byte("package main\nfunc main() {}\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	git("add", "main.go")
+	git("commit", "-m", "entry point")
 	git("checkout", "-b", "codex/knowledge-example")
 	filename := filepath.Join(repository.Root, "guard.go")
 	if err := os.WriteFile(filename, []byte("package fixture\nfunc Allowed() bool { return true }\n"), 0600); err != nil {
@@ -319,13 +328,13 @@ func TestKnowledgeCrossTaskReviewConclusionLoop(t *testing.T) {
 	}
 	git("add", "guard.go")
 	git("commit", "-m", "worker adds guard")
-	snapshot, err := f.daemon.ProjectTopology(ctx, reviewer.run.ProjectID)
+	graph, err := f.daemon.ProjectGraph(ctx, reviewer.run.ProjectID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	entity := ""
-	for _, node := range snapshot.Nodes {
-		if node.RelativePath == "." {
+	for _, node := range graph.graph.Nodes {
+		if node.Kind == opgraph.Processor {
 			entity = reviewer.run.ProjectID.String() + ":" + node.ID
 			break
 		}

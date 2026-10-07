@@ -205,7 +205,7 @@ type TaskBackend interface {
 }
 
 // ConsoleBackend is the optional console half of browser v1: the bounded
-// configuration and queue edits plus the on-demand project topology. It is a
+// configuration and queue edits plus the on-demand operational graph. It is a
 // separate seam for the same reason TaskBackend is: the state-only backend
 // used by bootstrap and tests must stay small.
 type ConsoleBackend interface {
@@ -217,7 +217,8 @@ type ConsoleBackend interface {
 	MutateRepository(context.Context, [browserprotocol.ClientIDSize]byte, browserprotocol.RepositoryMutate) (browserprotocol.RepositoryMutateResult, error)
 	Intake(context.Context, [browserprotocol.ClientIDSize]byte, browserprotocol.Intake) (browserprotocol.IntakeResult, error)
 	UpdateTask(context.Context, [browserprotocol.ClientIDSize]byte, browserprotocol.TaskUpdate) (browserprotocol.TaskUpdateResult, error)
-	Topology(context.Context, [browserprotocol.ClientIDSize]byte, browserprotocol.TopologyGet) (browserprotocol.Topology, error)
+	OperationalGraph(context.Context, [browserprotocol.ClientIDSize]byte, browserprotocol.OperationalGraphGet) (browserprotocol.OperationalGraph, error)
+	OperationalNode(context.Context, [browserprotocol.ClientIDSize]byte, browserprotocol.OperationalNodeGet) (browserprotocol.OperationalNode, error)
 	RunPaths(context.Context, [browserprotocol.ClientIDSize]byte, browserprotocol.RunPathsGet) (browserprotocol.RunPaths, error)
 	DiscoverAccounts(context.Context, [browserprotocol.ClientIDSize]byte, browserprotocol.AccountsDiscover) (browserprotocol.Accounts, error)
 	LinkAccount(context.Context, [browserprotocol.ClientIDSize]byte, browserprotocol.AccountLink) (browserprotocol.AccountLinkResult, error)

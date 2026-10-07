@@ -7,14 +7,15 @@ import { act, create } from "react-test-renderer";
 import { MAX_SNAPSHOT_ENTITIES, MAX_TASK_PRIORITY, ProtocolError, SessionError } from "@dark-factory/client";
 import { FactoryApp, FactoryConsole } from "../dist/src/index.js";
 import { layoutScene } from "../dist/src/factory-scene/scene.js";
-import { prepareFloor, selectFloor, projectFloor } from "../dist/src/console-view.js";
+import { projectGraph, projectFloor } from "../dist/src/console-view.js";
 import { FactoryFloor, StageMeter } from "../dist/src/console-screens.js";
 import { ProjectLibrary } from "../dist/src/project-library.js";
 import { SettingsDialog } from "../dist/src/console-sidebar.js";
 import { FactoryScene } from "../dist/src/factory-scene/factory-scene.js";
 import { TerminalPanel } from "../dist/src/factory-app.js";
 import { DEFAULT_FLOOR_APPEARANCE, readFloorAppearance } from "../dist/src/floor-appearance.js";
-import { fixtureState, fixtureTopologies, fixtureTopology } from "../../../fixtures/state.mjs";
+import { fixtureState, fixtureGraphs, fixtureGraph } from "../../../fixtures/state.mjs";
+import { graphWith, hex, unit } from "../../../fixtures/graph.mjs";
 const textOf = (node) => [].concat(node.props.children).flat(Infinity).filter((child) => typeof child === "string").join("").trim();
 
 const ids = {
@@ -71,8 +72,8 @@ const selectedRequest = (overrides = {}) => ({
 });
 
 // Compose the runtime's independently memoized projections for fixture assertions.
-function floorScene(state, topologies, runPaths, lastRunPaths, scopeId, page = 0) {
-  return projectFloor(state, selectFloor(prepareFloor(state?.projects, topologies), scopeId, page), runPaths, lastRunPaths);
+function floorScene(state, graphs, runPaths, lastRunPaths) {
+  return projectFloor(state, projectGraph(graphs, [...state?.projects.keys() ?? []].sort()), runPaths, lastRunPaths);
 }
 
 const runSample = (agentId, paths, taskId = ids.task, taskRevision = fixtureState.tasks.get(taskId)?.revision ?? 1n) => ({
@@ -89,7 +90,7 @@ test("error banner keeps its centered layout after the paragraph reset", () => {
   assert.match(css, /\.dfFactoryConsole__error\s*\{[\s\S]*?margin: 0 auto 1\.25rem;/);
   assert.match(css, /\.dfFactoryFloor__map \{ overflow: auto; max-height: 70vh;/);
   assert.match(css, /\.dfFactoryTooltip \{[^}]*-webkit-line-clamp: 8;[^}]*pointer-events: none;/, "a tooltip stays short enough to need no scrolling, and never takes the click meant for what it covers");
-  assert.match(render(), /class="dfFactoryFloor__map" role="region" aria-label="Scrollable codebase floor" tabindex="0"/);
+  assert.match(render(), /class="dfFactoryFloor__map" role="region" aria-label="Scrollable factory floor" tabindex="0"/);
   assert.equal(css.includes("@keyframes dfFactoryScene"), false);
 });
 
@@ -215,7 +216,7 @@ test("read-only decisions retain disabled suggestions and explain their status",
 
 test("the roster stays visible while the optional floor opens and closes", () => {
   const floor = render();
-  assert.match(floor, /aria-label="Dark Factory codebase floor"/);
+  assert.match(floor, /aria-label="Dark Factory operational floor"/);
 
   const agents = render({ view: "agents" });
   assert.match(agents, /aria-label="Agents"/);
@@ -231,36 +232,30 @@ test("the roster stays visible while the optional floor opens and closes", () =>
 });
 
 test("viewed geometry is independent of worker activity and population", () => {
-  const root = floorScene(fixtureState, fixtureTopologies).topology.nodes[0].id;
-  const baseline = floorScene(fixtureState, fixtureTopologies, undefined, undefined, root);
+  const baseline = floorScene(fixtureState, fixtureGraphs);
   const extra = { ...fixtureState.agents.get(ids.idleAgent), id: "ab".repeat(16), name: "Extra resting worker" };
   const changed = { ...fixtureState, agents: new Map([...fixtureState.agents].reverse()).set(extra.id, extra) };
-  const overlay = floorScene(changed, fixtureTopologies, new Map([[ids.agent, runSample(ids.agent, ["web"])]]), undefined, root);
-  assert.deepEqual(overlay.topology, baseline.topology);
-  assert.deepEqual(layoutScene(overlay.topology).rooms, layoutScene(baseline.topology).rooms);
+  const overlay = floorScene(changed, fixtureGraphs, new Map([[ids.agent, runSample(ids.agent, ["web"])]]));
+  assert.deepEqual(overlay.graph, baseline.graph);
+  assert.deepEqual(layoutScene(overlay.graph).rooms, layoutScene(baseline.graph).rooms);
   assert.deepEqual(new Set(overlay.workers.map((worker) => worker.id)), new Set(changed.agents.keys()));
   assert.equal(baseline.workers.find((worker) => worker.id === ids.agent).location, "unobserved");
-  const web = baseline.topology.nodes.find((node) => node.path === "web").id;
+  const web = baseline.graph.halls.find((hall) => hall.label === "web").id;
   assert.equal(overlay.workers.find((worker) => worker.id === ids.agent).nodeId, web);
-  const observed = floorScene(fixtureState, fixtureTopologies, undefined,
+  const observed = floorScene(fixtureState, fixtureGraphs, undefined,
     new Map([[ids.idleAgent, runSample(ids.idleAgent, ["web"], "72".repeat(16))]]))
     .workers.find((worker) => worker.id === ids.idleAgent);
   assert.deepEqual([observed.location, observed.nodeId, observed.locationLabel], ["last-observed", web, "web"]);
   const fallback = floorScene(fixtureState, undefined);
-  assert.equal(fallback.topology.nodes.length, fixtureState.projects.size);
-  assert.ok(fallback.topology.nodes.every((node) => node.sizeBucket === undefined));
+  assert.deepEqual(fallback.graph.halls, [], "no graph served, no halls invented");
   assert.ok(fallback.workers.every((worker) => worker.nodeId === undefined));
   const empty = floorScene(undefined, undefined);
-  assert.deepEqual([empty.topology.nodes, empty.workers, empty.tasks], [[], [], []]);
-  assert.equal(empty.omittedLocations, 0);
+  assert.deepEqual([empty.graph.halls, empty.workers, empty.tasks], [[], [], []]);
 });
 
 test("floor tasks retain every served task and its exact observed footprint", () => {
-  const repository = floorScene(fixtureState, fixtureTopologies).topology.nodes.find((node) => node.project?.id === ids.project);
-  const scene = floorScene(fixtureState, fixtureTopologies, new Map([[ids.agent, runSample(ids.agent, ["web", "internal/kernel/store"])] ]), undefined, repository.id);
-  const room = (path) => scene.topology.nodes.find((node) => node.path === path).id;
-  const store = `${ids.project}:${fixtureTopology.nodes.find((node) => node.path === "internal/kernel/store").id}`;
-  const web = room("web");
+  const scene = floorScene(fixtureState, fixtureGraphs, new Map([[ids.agent, runSample(ids.agent, ["web", "internal/kernel/store"])] ]));
+  const hall = (label) => scene.graph.halls.find((item) => item.label === label).id;
   assert.deepEqual(scene.tasks, [
     {
       id: ids.task,
@@ -268,10 +263,8 @@ test("floor tasks retain every served task and its exact observed footprint", ()
       projectId: ids.project,
       title: "Review the state projection",
       status: "running",
-      roomIds: [store, web],
-      representativeRoomId: store,
-      displayRoomIds: [room("internal/kernel"), web],
-      displayRoomId: room("internal/kernel"),
+      roomIds: [hall("kernel"), hall("web")],
+      representativeRoomId: hall("kernel"),
       observation: { taskRevision: fixtureState.tasks.get(ids.task).revision, runId: "71".repeat(16) },
       humanRequestIds: [ids.request],
     },
@@ -303,28 +296,15 @@ test("floor tasks retain every served task and its exact observed footprint", ()
       humanRequestIds: [],
     },
   ]);
-  assert.deepEqual(scene.workers.find((worker) => worker.id === ids.agent).nodeId, room("internal/kernel"));
-});
-
-
-
-test("malformed served containment degrades without cycles or invented parent links", () => {
-  const root = fixtureTopology.nodes[0];
-  const loop = { ...root, id: "e5".repeat(32), parent_id: "f6".repeat(32), path: "loop", label: "Loop" };
-  const back = { ...root, id: "f6".repeat(32), parent_id: loop.id, path: "back", label: "Back" };
-  const malformed = served({ ...fixtureTopology, nodes: [loop, back] });
-  const first = floorScene(fixtureState, malformed);
-  const second = floorScene(fixtureState, malformed);
-  assert.deepEqual(first, second, "invalid topology has a bounded deterministic projection");
-  assert.deepEqual(first.topology.nodes.filter((node) => node.project?.id === ids.project).map((node) => [node.id, node.parentId, node.sizeBucket]), [[ids.project, undefined, undefined]]);
-  assert.equal(first.aggregatedLocations, 0);
+  const worker = scene.workers.find((item) => item.id === ids.agent);
+  assert.deepEqual([worker.nodeId, worker.observedBayId], [hall("kernel"), "a4".repeat(16)], "at the store the run changed, in the unit holding it");
 });
 
 test("task footprints reject stale, retry, cancelled, terminal, and cross-project samples", () => {
   const original = fixtureState.tasks.get(ids.task);
   const sample = runSample(ids.agent, ["web"]);
   const footprint = (task, candidate = sample) => floorScene(
-    baseState({ tasks: new Map([[task.id, task]]) }), fixtureTopologies, new Map([[ids.agent, candidate]]),
+    baseState({ tasks: new Map([[task.id, task]]) }), fixtureGraphs, new Map([[ids.agent, candidate]]),
   ).tasks[0];
   for (const status of ["queued", "blocked", "succeeded", "failed", "cancelled"]) {
     const order = footprint({ ...original, status });
@@ -356,7 +336,7 @@ test("tasks join requests only by exact task, agent, and project identity", () =
   ]);
   const scene = floorScene(
     baseState({ tasks: new Map([[ids.task, fixtureState.tasks.get(ids.task)], [southTask.id, southTask]]), humanRequests: requests }),
-    served(fixtureTopology, topologyFor(ids.secondProject, [["repository", ".", "large"]])),
+    new Map(fixtureGraphs).set(ids.secondProject, graphWith([unit(0x71, "south", ["."])])),
     new Map([
       [ids.agent, runSample(ids.agent, ["web"])],
       [ids.orchestrator, { taskId: southTask.id, taskRevision: southTask.revision, runId: "73".repeat(16), projectId: ids.secondProject, paths: ["."] }],
@@ -366,33 +346,10 @@ test("tasks join requests only by exact task, agent, and project identity", () =
     [southTask.id, ids.secondProject, [southRequest.id]],
     [ids.task, ids.project, [request.id]],
   ]);
-  assert.equal(scene.tasks[0].roomIds.length, 1);
-  assert.equal(scene.tasks[0].roomIds[0].startsWith(`${ids.secondProject}:`), true);
+  assert.deepEqual(scene.tasks[0].roomIds, [hex(0x71)]);
 });
 
-/**
- * A served structure for any tree at all: each entry is [kind, path, size] with
- * its parent given by index, so a repository, a module and a package can all
- * sit at "." exactly as the daemon serves them.
- */
-function topologyFor(projectId, entries) {
-  return {
-    projectId,
-    digest: `${projectId}`.slice(0, 64),
-    sourceRevision: "",
-    nodes: entries.map(([kind, path, sizeBucket, parent], index) => ({
-      id: `${index}`.padStart(64, "0"),
-      parent_id: parent === undefined ? "" : `${parent}`.padStart(64, "0"),
-      kind,
-      path,
-      label: path === "." ? "root" : path.slice(path.lastIndexOf("/") + 1),
-      language: "",
-      size_bucket: sizeBucket,
-    })),
-  };
-}
-
-const served = (...views) => new Map(views.map((view) => [view.projectId, view]));
+const served = (...views) => new Map(views.map((view) => [view.project_id, view]));
 
 const PROJECT_NAME = "Any Project";
 
@@ -410,13 +367,13 @@ test("an active overseer without a path remains unknown", () => {
   agents.set(overseer.id, overseer);
   const task = { ...fixtureState.tasks.get(ids.task), id: "35".repeat(16), project_id: ids.project, assigned_agent_id: overseer.id, title: "Supervise", status: "running" };
   const state = baseState({ agents, tasks: new Map([[task.id, task]]) });
-  const worker = floorScene(state, fixtureTopologies).workers.find((item) => item.id === ids.orchestrator);
+  const worker = floorScene(state, fixtureGraphs).workers.find((item) => item.id === ids.orchestrator);
   assert.deepEqual([worker.location, worker.nodeId, worker.locationLabel], ["unobserved", undefined, undefined]);
-  const observed = floorScene(state, fixtureTopologies, new Map([[ids.orchestrator, {
-    taskId: task.id, taskRevision: task.revision, runId: "71".repeat(16), projectId: ids.project, paths: ["."],
+  const observed = floorScene(state, fixtureGraphs, new Map([[ids.orchestrator, {
+    taskId: task.id, taskRevision: task.revision, runId: "71".repeat(16), projectId: ids.project, paths: ["internal/kernel"],
   }]]))
     .workers.find((item) => item.id === ids.orchestrator);
-  assert.equal(observed.location, "working", "an observed overseer keeps the observed room");
+  assert.equal(observed.location, "working", "an observed overseer keeps the observed hall");
 });
 
 
@@ -465,9 +422,10 @@ test("the console never shows a kernel-grammar or retired vocabulary word", () =
   // "overseer" and private issue review left this list by owner decision: they
   // are console controls. Everything else is still kernel grammar. The lease
   // ban is anchored at a word start so it still catches lease/leased/leases
-  // without catching the floor's "release-ready".
+  // without catching the floor's "release-ready". The floor's quarantine bay is
+  // the operational plant's own word for unexplained runtime activity.
   for (const [name, markup] of surfaces) {
-    for (const forbidden of [/attempt/i, /converge/i, /finalize/i, /unresolved/i, /verdict/i, /\bALLOW\b/, /\bBLOCK\b/, /\blease/i, /quarantine/i, /work item/i, /cancel run/i]) {
+    for (const forbidden of [/attempt/i, /converge/i, /finalize/i, /unresolved/i, /verdict/i, /\bALLOW\b/, /\bBLOCK\b/, /\blease/i, /work item/i, /cancel run/i]) {
       assert.equal(forbidden.test(markup), false, `${name}: ${forbidden}`);
     }
   }
@@ -610,7 +568,7 @@ test("a terminal blocked task is neither building nor current agent work", () =>
 
 test("the production console exposes no speculative or unsupported surface", () => {
   for (const view of VIEWS) {
-    const markup = render({ view }).toLowerCase();
+    const markup = render({ view, graphs: new Map(fixtureGraphs).set(ids.secondProject, graphWith([])) }).toLowerCase();
     for (const text of ["not yet served", "awaiting deploy", "suggestions", "add work", ">accept</button>", "dismiss", "task record"]) {
       assert.equal(markup.includes(text), false, `${view}: ${text}`);
     }
@@ -1263,7 +1221,7 @@ test("SETTINGS opens and closes as a native modal, over whatever sidebar is open
 
 test("only the selected agent portrait offers appearance editing in either view", () => {
   for (const view of VIEWS) {
-    const props = { view, onSelectAgent: () => {}, onEditAppearance: () => {}, topologies: fixtureTopologies };
+    const props = { view, onSelectAgent: () => {}, onEditAppearance: () => {}, graphs: fixtureGraphs };
     assert.equal((render(props).match(/aria-label="Edit appearance for /g) ?? []).length, 0);
     const markup = render({ ...props, selectedAgent: agentSelection() });
     assert.equal((markup.match(/aria-label="Edit appearance for /g) ?? []).length, 1);
@@ -1855,7 +1813,7 @@ test("floor objects select the exact existing task detail and question route", a
   const questions = [];
   const queueSelections = [];
   const props = {
-    status: "ready", state: fixtureState, topologies: fixtureTopologies,
+    status: "ready", state: fixtureState, graphs: fixtureGraphs,
     runPaths: new Map([[ids.agent, runSample(ids.agent, ["internal/kernel/state.go"])]]),
     onLoadTaskDetail: async (task) => {
       loaded.push(task);
@@ -1881,8 +1839,6 @@ test("floor objects select the exact existing task detail and question route", a
   let tree;
   await act(async () => { tree = create(createElement(Harness)); });
   const task = fixtureState.tasks.get(ids.task);
-  const rootID = `${ids.project}:${fixtureTopology.nodes[0].id}`;
-  const kernelID = `${ids.project}:${fixtureTopology.nodes[1].id}`;
   await act(async () => { tree.root.findByProps({ "data-workbench-task-id": task.id }).props.onKeyDown({ key: "Enter", preventDefault() {} }); });
   assert.equal(loaded.length, 1);
   assert.equal(loaded[0], task);
@@ -1924,35 +1880,12 @@ test("floor objects select the exact existing task detail and question route", a
   await act(async () => tree.unmount());
 });
 
-test("dependency projection keeps served identity, hidden endpoints and project boundaries", () => {
-  const mirrored = new Map(fixtureTopologies).set(ids.secondProject, { ...fixtureTopology, projectId: ids.secondProject });
-  const rootID = `${ids.project}:${fixtureTopology.nodes[0].id}`;
-  const view = floorScene(fixtureState, mirrored, undefined, undefined, rootID);
-  const kernel = view.topology.nodes.find((node) => node.path === "internal/kernel");
-  assert.equal(kernel.language, "go");
-  assert.equal(kernel.childCount, 1);
-  assert.equal(kernel.dependencies.omitted, 1);
-  // kernel → store lies inside the kernel room here, so only web → kernel is a link between rooms.
-  const shownIDs = new Set(view.topology.nodes.map((node) => node.id));
-  assert.deepEqual(kernel.dependencies.links.map((link) => [link.direction, link.label, link.weight]), [["from", "web", 1]]);
-  assert.ok(view.topology.nodes.every((node) => node.dependencies.links.every((link) => shownIDs.has(link.nodeId) && link.nodeId !== node.id)), "every link joins two different rooms on this floor");
-  const fine = selectFloor(prepareFloor(fixtureState.projects, mirrored), "fine").topology.nodes;
-  assert.ok(fine.find((node) => node.id === kernel.id).dependencies.links.some((link) => link.label === "store" && link.direction === "to"));
-  assert.ok(kernel.dependencies.links.every((link) => link.nodeId.startsWith(`${ids.project}:`)), "matching node hashes in another project never cross-link");
-  const legacy = new Map([[ids.project, { ...fixtureTopology, dependencies: undefined }]]);
-  assert.equal(floorScene(fixtureState, legacy, undefined, undefined, rootID).topology.nodes[0].dependencies, undefined);
-  const hostile = new Map([[ids.project, { ...fixtureTopology, dependencies: { ...fixtureTopology.dependencies,
-    edges: [{ from: fixtureTopology.nodes[1].id, to: "foreign", weight: 1 }] } }]]);
-  assert.deepEqual(floorScene(fixtureState, hostile, undefined, undefined, rootID).topology.nodes.find((node) => node.id === kernel.id).dependencies.links, []);
-});
-
-
 test("floor omits the global evidence essay", () => {
-  const markup = renderToStaticMarkup(createElement(FactoryConsole, { status: "ready", state: fixtureState, topologies: fixtureTopologies, view: "floor" }));
+  const markup = renderToStaticMarkup(createElement(FactoryConsole, { status: "ready", state: fixtureState, graphs: fixtureGraphs, view: "floor" }));
   assert.doesNotMatch(markup, /Floor evidence|Rooms describe a repository snapshot/);
   assert.doesNotMatch(markup, /Scroll the floor to explore/);
   assert.doesNotMatch(markup, /Floor detail|Topology detail|Social furniture|one connected floor/);
-  assert.match(markup, /Find source/);
+  assert.match(markup, /Find machine/);
 });
 
 
@@ -2015,63 +1948,58 @@ test("mobile Floor and Agents tabs track both directions and restore after Tasks
 
 
 
-test("floor preparation survives draft and live snapshot updates but invalidates source facts", async () => {
+test("floor preparation survives draft and live snapshot updates and relayouts only when structure changes", async () => {
   let reads = 0;
-  const topology = { ...fixtureTopology, get nodes() { reads += 1; return fixtureTopology.nodes; } };
-  let topologies = new Map(fixtureTopologies).set(ids.project, topology);
+  const graph = { ...fixtureGraph, get nodes() { reads += 1; return fixtureGraph.nodes; } };
+  let graphs = new Map(fixtureGraphs).set(ids.project, graph);
   function DraftFloor({ state, connected = true }) {
     const [draft, setDraft] = useState("");
     return createElement("div", null,
       createElement("input", { value: draft, onChange: (event) => setDraft(event.target.value) }),
-      createElement(FactoryFloor, { state, topologies, connected }));
+      createElement(FactoryFloor, { state, graphs, connected }));
   }
   let renderer;
   await act(async () => { renderer = create(createElement(DraftFloor, { state: fixtureState })); });
   const scene = () => renderer.root.findByType(FactoryScene);
   const layout = () => renderer.root.find((node) => node.type.name === "SceneWorkers").props.layout;
   const preparedReads = reads;
-  const originalTopology = scene().props.topology;
+  const originalGraph = scene().props.graph;
   const originalLayout = layout();
   assert.ok(preparedReads > 0);
   await act(async () => { renderer.root.findAllByType("input").find((input) => input.props.type !== "search").props.onChange({ target: { value: "draft typing" } }); });
   assert.equal(reads, preparedReads);
-  assert.equal(scene().props.topology, originalTopology);
+  assert.equal(scene().props.graph, originalGraph);
   assert.equal(layout(), originalLayout);
   const fresh = { ...fixtureState, head: fixtureState.head + 1n, projects: new Map([...fixtureState.projects].map(([id, project]) => [id, { ...project }])), tasks: new Map(fixtureState.tasks), humanRequests: new Map() };
   fresh.tasks.set(ids.task, { ...fresh.tasks.get(ids.task), title: "Updated live task" });
   await act(async () => { renderer.update(createElement(DraftFloor, { state: fresh })); });
-  assert.equal(reads, preparedReads, "fresh snapshot project objects do not trigger topology validation");
+  assert.equal(reads, preparedReads, "fresh snapshot project objects do not rebuild the graph projection");
   assert.equal(scene().props.tasks.find((task) => task.id === ids.task).title, "Updated live task");
   assert.equal(layout(), originalLayout);
   await act(async () => { renderer.update(createElement(DraftFloor, { state: fresh, connected: false })); });
   await act(async () => { renderer.update(createElement(DraftFloor, { state: fresh, connected: true })); });
-  assert.equal(reads, preparedReads);
   assert.equal(layout(), originalLayout);
-  const roomId = originalTopology.nodes[0].id;
-  await act(async () => { scene().props.onSelectEntity(roomId); });
-  assert.equal(reads, preparedReads, "entity selection reuses prepared hierarchy");
+  await act(async () => { renderer.root.findAllByProps({ "aria-label": "Inspect kernel" })[0].props.onClick(); });
+  assert.equal(reads, preparedReads, "entity selection reuses the projection");
   assert.equal(layout(), originalLayout);
   const renamed = { ...fresh, projects: new Map(fresh.projects).set(ids.project, { ...fresh.projects.get(ids.project), name: "Renamed workshop" }) };
   await act(async () => { renderer.update(createElement(DraftFloor, { state: renamed })); });
-  assert.ok(reads > preparedReads);
   assert.match(JSON.stringify(renderer.toJSON()), /Renamed workshop/);
-  // A new input with the same digest must still validate and discard bad containment.
-  topologies = new Map(topologies).set(ids.project, { ...fixtureTopology, nodes: [{ ...fixtureTopology.nodes[0], parent_id: "missing" }] });
+  // A new answer with moved readings and the same digest replaces the graph but never relayouts.
+  const hot = { ...fixtureGraph, nodes: fixtureGraph.nodes.map((node) => node.kind === "ingress" && node.observation === "observed" ? { ...node, rate_per_hour: 999 } : node) };
+  graphs = new Map(graphs).set(ids.project, hot);
+  await act(async () => { renderer.update(createElement(DraftFloor, { state: renamed, connected: false })); });
   await act(async () => { renderer.update(createElement(DraftFloor, { state: renamed })); });
-  assert.equal(scene().props.topology.nodes.some((node) => node.id === ids.project), true);
-  assert.equal(scene().props.topology.nodes.some((node) => node.id === roomId), false);
+  assert.notEqual(scene().props.graph, originalGraph);
+  assert.equal(scene().props.graph.halls.flatMap((hall) => hall.machines).find((machine) => machine.label === "/browser").reading.ratePerHour, 999);
+  assert.equal(layout(), originalLayout, "readings never move a machine");
+  // A new digest is a new structure.
+  graphs = new Map(graphs).set(ids.project, { ...fixtureGraph, digest: "cd".repeat(32), nodes: fixtureGraph.nodes.filter((node) => node.label !== "web"), edges: [] });
+  await act(async () => { renderer.update(createElement(DraftFloor, { state: renamed, connected: false })); });
+  await act(async () => { renderer.update(createElement(DraftFloor, { state: renamed })); });
+  assert.deepEqual(scene().props.graph.halls.map((hall) => hall.label), ["kernel"]);
+  assert.notEqual(layout(), originalLayout);
   await act(async () => { renderer.unmount(); });
-});
-
-
-test("oversized direct topology falls back before traversing any node", () => {
-  let visited = 0;
-  const nodes = Array.from({ length: MAX_SNAPSHOT_ENTITIES + 1 }, () => ({
-    get id() { visited += 1; throw new Error("oversized topology was traversed"); },
-  }));
-  const scene = floorScene(fixtureState, served({ ...fixtureTopology, nodes }));
-  assert.equal(visited, 0);
-  assert.deepEqual(scene.topology.nodes.filter((node) => node.project?.id === ids.project).map((node) => [node.id, node.parentId, node.sizeBucket]), [[ids.project, undefined, undefined]]);
 });
 
 test("task meter displays every canonical status without conflating cancellation", () => {
@@ -2355,20 +2283,18 @@ test("open Sources reload destinations as well as sources after reconnect", asyn
 
 test("one project selector scopes floor, agents, tasks and project limits across view changes", async () => {
   let tree;
-  const topologies = new Map(fixtureTopologies).set(ids.secondProject, { ...fixtureTopology, projectId: ids.secondProject, inventoryOmitted: 12 });
-  const props = { status: "ready", state: fixtureState, topologies, selectedAgent: agentSelection(), onSelectAgent() {}, onSelectTask() {} };
+  const graphs = new Map(fixtureGraphs).set(ids.secondProject, graphWith([unit(0x71, "south", ["south"])]));
+  const props = { status: "ready", state: fixtureState, graphs, selectedAgent: agentSelection(), onSelectAgent() {}, onSelectTask() {} };
   await act(async () => { tree = create(createElement(FactoryConsole, props)); });
   const choose = async (value) => act(async () => tree.root.findByProps({ "aria-label": "Project" }).props.onChange({ currentTarget: { value } }));
   const floor = () => tree.root.findByType(FactoryFloor);
   await choose(ids.project);
   assert.equal(floor().props.projectId, ids.project);
   assert.equal(floor().props.state.projects.size, 1);
-  assert.ok(!tree.root.findAllByProps({ role: "status" }).some((status) => status.children.join("").includes("room inventories omitted")));
   assert.ok([...floor().props.state.agents.values()].every((agent) => agent.project_id === ids.project));
   assert.ok([...floor().props.state.tasks.values()].every((task) => task.project_id === ids.project));
-  assert.ok([...floor().findByType(FactoryScene).props.detailNodes.values()].every((node) => node.project.id === ids.project));
-  const rootID = `${ids.project}:${fixtureTopology.nodes[0].id}`;
-  assert.equal(tree.root.findAllByProps({ "data-enter-room-id": rootID }).length, 0);
+  const halls = () => floor().findByType(FactoryScene).props.graph.halls.map((hall) => hall.label).sort();
+  assert.deepEqual(halls(), ["kernel", "web"], "only the selected project's halls");
   await act(async () => { tree.update(createElement(FactoryConsole, { ...props, view: "agents", settingsOpen: true })); });
   const rows = tree.root.findAllByProps({ className: "dfConsoleRow dfAgentList__row" });
   assert.equal(rows.length, [...fixtureState.agents.values()].filter((agent) => agent.project_id === ids.project && !agent.archived).length);
@@ -2380,12 +2306,12 @@ test("one project selector scopes floor, agents, tasks and project limits across
   assert.equal(floor().props.projectId, ids.project, "switching views retains project scope");
   await choose("");
   assert.equal(floor().props.state.agents.size, fixtureState.agents.size);
+  assert.deepEqual(halls(), ["kernel", "south", "web"]);
   await choose(ids.project);
   await choose(ids.secondProject);
   assert.equal(floor().props.projectId, ids.secondProject);
-  assert.ok(tree.root.findAllByProps({ role: "status" }).some((status) => status.children.join("") === "Source inventory incomplete: 12 areas unavailable."));
   assert.equal(tree.root.findAllByProps({ "aria-label": `Agent ${fixtureState.agents.get(ids.agent).name}` }).length, 0, "a foreign selected agent cannot retain controls");
-  assert.ok([...floor().findByType(FactoryScene).props.detailNodes.values()].every((node) => node.project.id === ids.secondProject));
+  assert.deepEqual(halls(), ["south"]);
   assert.ok([...floor().props.state.tasks.values()].every((task) => task.project_id === ids.secondProject));
   await act(async () => tree.unmount());
 });
@@ -2397,7 +2323,7 @@ test("floor project changes clear task selection without restoring an old dialog
   const task = [...fixtureState.tasks.values()].find((task) => task.project_id === ids.secondProject);
   function Harness() {
     const [selectedTaskId, onSelectTask] = useState(task.id);
-    return createElement(FactoryConsole, { status: "ready", state: fixtureState, topologies: fixtureTopologies, selectedTaskId, onSelectTask });
+    return createElement(FactoryConsole, { status: "ready", state: fixtureState, graphs: fixtureGraphs, selectedTaskId, onSelectTask });
   }
   let tree;
   await act(async () => { tree = create(createElement(Harness)); });
@@ -2552,45 +2478,44 @@ test("Missions and Production share the task dialog and preserve their origin on
   }
 });
 
-test("one source inspector resets exact contents and retains the deepest repository discussion scope", async (t) => {
+test("one machine inspector loads its evidence on open, investigates once and discusses its own node", async (t) => {
   const warnings = [];
   t.mock.method(console, "error", (...args) => warnings.push(args.join(" ")));
-  const selected = selectFloor(prepareFloor(fixtureState.projects, fixtureTopologies), "fine");
-  const entity = [...selected.detailByID.values()].find((node) => node.project?.id === ids.project && node.path !== "." && node.path !== "");
-  assert.ok(entity);
-  const repository = "cd".repeat(16);
-  const topology = { ...fixtureTopology, sources: [{ repository_id: "ab".repeat(16), prefix: "", revision: "base" }, { repository_id: repository, prefix: entity.path, revision: "scoped" }] };
-  const calls = [], opens = [];
+  const store = fixtureGraph.nodes.find((node) => node.label === "state.db"), loads = [], opens = [], tasks = [];
+  const props = { state: fixtureState, graphs: fixtureGraphs, requestedEntity: { id: store.id }, floorAppearance: { ...DEFAULT_FLOOR_APPEARANCE, detail: "fine" },
+    onLoadNode: async (project, node) => { loads.push([project, node]); return { project_id: project, node_id: node, selectors: { "go.package": "internal/kernel/store" }, evidence: [{ origin: "static", source: "go-ast", confidence: "high" }], sources: [], modules: [], observers: [] }; },
+    onOpenBoard: (...args) => opens.push(args), onAddTask: async (...args) => { tasks.push(args); return true; } };
   let renderer;
-  const props = { state: fixtureState, topologies: new Map(fixtureTopologies).set(ids.project, topology), requestedEntity: { id: entity.id }, floorAppearance: { ...DEFAULT_FLOOR_APPEARANCE, detail: "fine" }, onProjectContent: async (operation, input) => { calls.push({ operation, input }); return { items: [] }; }, onOpenBoard: (...args) => opens.push(args) };
   await act(async () => { renderer = create(createElement(FactoryFloor, props)); });
+  const inspector = () => renderer.root.findAllByProps({ "aria-label": "Machine inspector" });
   const click = async (label) => { await act(async () => renderer.root.findAllByType("button").find((button) => button.children.join("") === label).props.onClick()); };
-  assert.equal(calls.length, 0, "selecting source never fetches notices or contents implicitly");
-  assert.equal(renderer.root.findAllByProps({ "aria-label": "Source inspector" }).length, 1);
-  assert.equal(renderer.root.findAllByProps({ "aria-label": "Source notices" }).length, 0);
-  await click("Read exact source contents");
-  assert.deepEqual(calls, [{ operation: "source_files", input: { project_id: ids.project, id: entity.id.slice(ids.project.length + 1), tested_source: "scoped", offset: 0, limit: 32 } }]);
-  await click("Discuss this source");
-  assert.deepEqual(opens, [[ids.project, entity.id, undefined, repository]]);
-  for (const source of [...selected.detailByID.values()].filter((node) => node.project?.id === ids.project).slice(0, 5)) {
-    await act(async () => renderer.update(createElement(FactoryFloor, { ...props, requestedEntity: { id: source.id } })));
-    const inspector = renderer.root.findAllByProps({ "aria-label": "Source inspector" });
-    assert.equal(inspector.length, 1);
-    assert.equal(inspector[0].findAllByType("code")[0].children.join(""), source.id);
-    assert.equal(inspector[0].findByType("details").props.open, undefined);
-    assert.ok(inspector[0].findAllByType("button").some((button) => button.children.join("") === "Read exact source contents"), "old exact contents do not follow the new source");
-    assert.equal(calls.length, 1, "source changes never start a second content or notice fetch");
-    await click("Discuss this source");
-    assert.deepEqual(opens.at(-1), [ids.project, source.id, undefined, source.path === entity.path || source.path.startsWith(`${entity.path}/`) ? repository : "ab".repeat(16)]);
-  }
-  assert.ok(!warnings.some((message) => message.includes("same key")), "source inspectors must have distinct reconciliation identities");
+  assert.equal(inspector().length, 1);
+  assert.deepEqual(loads, [[ids.project, store.id]], "evidence is fetched when the inspector opens, by its project and node");
+  assert.ok(inspector()[0].findAllByType("dt").some((term) => term.children.join("") === "go.package"), "the loaded selectors are shown");
+  await click("Discuss this machine");
+  assert.deepEqual(opens, [[ids.project, `${ids.project}:${store.id}`]]);
+  // No telemetry is worth a look: one task for the project's worker, queued behind nothing else.
+  await click("Investigate");
+  assert.equal(tasks.length, 1);
+  assert.equal(tasks[0][0].project_id, ids.project);
+  assert.equal(tasks[0][2], "any");
+  assert.match(tasks[0][1], /Investigate the store "state\.db" in kernel/);
+  assert.match(tasks[0][1], /Nothing observes this component/);
+  assert.ok(renderer.root.findAllByType("button").some((button) => button.props.disabled && button.children.join("") === "Investigation queued"), "asking twice is not possible");
+  // Another machine resets the inspector and fetches its own evidence.
+  const other = fixtureGraph.nodes.find((node) => node.label === "web");
+  await act(async () => renderer.update(createElement(FactoryFloor, { ...props, requestedEntity: { id: other.id } })));
+  assert.equal(inspector().length, 1);
+  assert.deepEqual(loads.at(-1), [ids.project, other.id]);
+  assert.ok(renderer.root.findAllByType("button").some((button) => button.children.join("") === "Investigate"), "the old investigation does not follow the new machine");
+  assert.ok(!warnings.some((message) => message.includes("same key")), "inspectors must have distinct reconciliation identities");
   await act(async () => renderer.unmount());
 });
 
 test("opening a project shelf scopes Library without changing the floor filter", async () => {
   const calls = [];
   let tree;
-  await act(async () => { tree = create(createElement(FactoryConsole, { status: "ready", state: fixtureState, topologies: fixtureTopologies,
+  await act(async () => { tree = create(createElement(FactoryConsole, { status: "ready", state: fixtureState, graphs: fixtureGraphs,
     onProjectContent: async (operation, input) => { calls.push({ operation, input }); return { items: [], next_offset: 0 }; },
   })); });
   await act(async () => tree.root.findByType(FactoryFloor).props.onOpenLibrary(ids.secondProject));
@@ -2602,38 +2527,29 @@ test("opening a project shelf scopes Library without changing the floor filter",
 });
 
 
-test("Library source navigation synchronizes the single inspector and canonical focus after manual selection", async () => {
-  const selected = selectFloor(prepareFloor(fixtureState.projects, fixtureTopologies), "fine");
-  const [first, destination] = [...selected.detailByID.values()].filter((node) => node.project?.id === ids.project && node.path !== ".");
-  assert.ok(first && destination && first.id !== destination.id);
+test("Library source navigation selects the machine on the floor and keeps one inspector", async () => {
+  const [first, destination] = [fixtureGraph.nodes.find((node) => node.label === "state.db"), fixtureGraph.nodes.find((node) => node.label === "web")];
   let tree;
-  await act(async () => { tree = create(createElement(FactoryConsole, { status: "ready", state: fixtureState, topologies: fixtureTopologies, onProjectContent: async () => ({ items: [] }) })); });
+  await act(async () => { tree = create(createElement(FactoryConsole, { status: "ready", state: fixtureState, graphs: fixtureGraphs, onProjectContent: async () => ({ items: [] }) })); });
   const assertSelection = (id) => {
-    const sources = tree.root.findAllByProps({ "aria-label": "Source inspector" });
-    assert.equal(sources.length, id ? 1 : 0);
-    const scene = tree.root.findByType(FactoryScene);
+    const inspectors = tree.root.findAllByProps({ "aria-label": "Machine inspector" });
+    assert.equal(inspectors.length, id ? 1 : 0);
     if (id) {
-      assert.equal(sources[0].findAllByType("code")[0].children.join(""), id);
-      assert.equal(sources[0].findByType("details").props.open, undefined);
-      assert.equal(scene.props.sourceDetails.props.node.id, id, "floor context follows the canonical selected source");
-    } else {
-      assert.equal(scene.props.sourceDetails, undefined, "closing clears the parent source context too");
-      assert.equal(scene.props.onDiscussSource, undefined);
+      assert.equal(inspectors[0].findAllByType("code")[0].children.join(""), id);
+      assert.equal(inspectors[0].findByType("details").props.open, undefined, "evidence starts collapsed");
     }
-    assert.equal(tree.root.findAllByProps({ "aria-label": "Inspect room" }).length, 0);
-    assert.equal(tree.root.findAllByProps({ "aria-label": "Source contents" }).length, 0);
   };
   for (let visit = 0; visit < 2; visit++) {
-    await act(async () => tree.root.findByProps({ type: "search" }).props.onChange({ target: { value: first.path } }));
-    await act(async () => tree.root.findByProps({ className: "dfFactoryEntityTools__results" }).findAllByType("button").find((button) => button.children.join("") === first.path).props.onClick());
+    await act(async () => tree.root.findByProps({ type: "search" }).props.onChange({ target: { value: first.label } }));
+    await act(async () => tree.root.findByProps({ className: "dfFactoryEntityTools__results" }).findAllByType("button").find((button) => button.children.join("") === `${first.label} · ${first.kind}`).props.onClick());
     assertSelection(first.id);
     await act(async () => tree.root.findByType(FactoryFloor).props.onOpenLibrary(ids.project));
-    await act(async () => tree.root.findByType(ProjectLibrary).props.onSource(destination.id));
+    await act(async () => tree.root.findByType(ProjectLibrary).props.onSource(`${ids.project}:${destination.id}`));
     assertSelection(destination.id);
     await act(async () => tree.root.findAllByType("button").find((button) => button.children.join("") === "Focus on floor").props.onClick());
     assertSelection(destination.id);
   }
-  await act(async () => tree.root.findAllByType("button").find((button) => button.children.join("") === "Close source").props.onClick());
+  await act(async () => tree.root.findAllByType("button").find((button) => button.children.join("") === "Close").props.onClick());
   assertSelection("");
   await act(async () => tree.unmount());
 });
@@ -2641,7 +2557,7 @@ test("Library source navigation synchronizes the single inspector and canonical 
 
 test("board and shelves open peer views of one Library workspace", async () => {
   let tree;
-  await act(async () => { tree = create(createElement(FactoryConsole, { status: "ready", state: fixtureState, topologies: fixtureTopologies, onDetail() {}, onProjectContent: async () => ({ items: [] }) })); });
+  await act(async () => { tree = create(createElement(FactoryConsole, { status: "ready", state: fixtureState, graphs: fixtureGraphs, onDetail() {}, onProjectContent: async () => ({ items: [] }) })); });
   const floor = () => tree.root.findByType(FactoryFloor);
   await act(async () => floor().props.onOpenBoard(ids.project));
   const views = () => tree.root.findByProps({ "aria-label": "Library views" });

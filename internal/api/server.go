@@ -112,6 +112,7 @@ type Call struct {
 	terminalObserve    TerminalObserveInput
 	peerIncludeTargets bool
 	kind               CallKind
+	method             string
 	digest             AttemptDigest
 	project            CreateProjectInput
 	repository         ProjectRepositoryInput
@@ -174,6 +175,9 @@ func (call Call) MaintainerInput() (MaintainerInput, bool) {
 }
 
 func (call Call) Kind() CallKind { return call.kind }
+
+// Method is the request's method name, for observation only.
+func (call Call) Method() string { return call.method }
 func (call Call) BackupPath() (string, bool) {
 	return call.backupPath, call.kind == CallBackupCreate || call.kind == CallBackupVerify
 }
@@ -381,6 +385,9 @@ const (
 )
 
 // Reply is constructed only through its fixed reply constructors.
+// Failed reports a reply that refuses or fails the call.
+func (reply Reply) Failed() bool { return reply.kind == replyError }
+
 type Reply struct {
 	terminalObservation TerminalObservation
 	kind                replyKind
@@ -790,7 +797,7 @@ func decodeCall(domain byte, bearer credential, encoded []byte) (Call, RemoteErr
 	if methodDomain != domain {
 		return Call{}, RemoteForbidden
 	}
-	call := Call{kind: kind}
+	call := Call{kind: kind, method: request.Method}
 	if domain == attemptDomain {
 		call.attempt = true
 		call.digest = digestAttemptCredential(bearer)

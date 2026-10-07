@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/dark-factory-build/dark-factory/internal/buildinfo"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
+	"github.com/dark-factory-build/dark-factory/internal/opgraph"
 	"github.com/ncruces/go-sqlite3"
 )
 
@@ -43,6 +45,11 @@ func (daemon *Daemon) RunScheduler(ctx context.Context, spec SupervisorSpec) err
 	if err := daemon.beginScheduler(); err != nil {
 		return err
 	}
+	// Starting is factoryd's own deploy: the floor shows the changeover. The
+	// wall clock, not the scheduler's: this is an observation, not a decision.
+	now := time.Now().UnixMilli()
+	daemon.runtimeStore().Record(opgraph.Observation{Source: "factoryd", Environment: "local", Kind: "deploy", Start: now, End: now + 1,
+		Attributes: map[string]string{"service.name": "factoryd"}, Version: buildinfo.Current().Receipt()})
 	defer daemon.endScheduler()
 
 	ownedCtx, cancel := context.WithCancel(ctx)

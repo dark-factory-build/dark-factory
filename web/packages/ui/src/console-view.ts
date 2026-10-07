@@ -1,6 +1,6 @@
 import { productionKey, proposedProduction, type ProductionContraption } from "./production-view.js";
-import { MAX_SNAPSHOT_ENTITIES, type AgentItem, type StateView, type TaskItem, type TopologyView } from "@dark-factory/client";
-import { compareText, inventoryLabels, type InventoryKind, type SceneNode, type SceneTopology, type SceneWorker, type SceneProposal } from "./factory-scene/scene.js";
+import type { AgentItem, GraphNode, GraphReading, OperationalGraphView, StateView, TaskItem } from "@dark-factory/client";
+import { compareText, type SceneFlow, type SceneGraph, type SceneHall, type SceneMachine, type SceneProposal, type SceneReading, type SceneWorker } from "./factory-scene/scene.js";
 
 export type AgentActivity = "busy" | "waiting" | "needs-you" | "idle";
 /** The operator-facing state has one name for each actionable condition. */
@@ -72,29 +72,26 @@ export function orderTasksForHome(state: StateView): readonly TaskItem[] {
   });
 }
 
-/** Flat grouping is presentation only; canonical source IDs never depend on detail. */
+/** Level of detail: plant (halls only), hall (stations, routes folded) or station (every route). */
 export type FloorDetail = "coarse" | "auto" | "fine";
-export const MAX_FLOOR_ROOMS = 96;
+const MAX_DOCKS = 6;
+
 export type FloorScene = Readonly<{
-  topology: SceneTopology;
+  graph: SceneGraph;
   workers: readonly SceneWorker[];
   tasks: readonly SceneTask[];
-  omittedLocations: number;
-  aggregatedLocations: number;
 }>;
 
-/** A served task and its observed footprint, without inferring any execution detail. */
+/** A served task and the machines its observed changes touch, without inferring any execution detail. */
 export type SceneTask = Readonly<{
   id: string;
   agentId: string;
   projectId: string;
   title: string;
   status: TaskItem["status"];
+  /** Halls holding the machines its observed changes touch. */
   roomIds: readonly string[];
   representativeRoomId?: string;
-  /** Derived display only; exact observed rooms above remain unchanged. */
-  displayRoomIds?: readonly string[];
-  displayRoomId?: string;
   observation?: Readonly<{ taskRevision: bigint; runId: string }>;
   humanRequestIds: readonly string[];
 }>;
@@ -108,230 +105,152 @@ export type RunPathSample = Readonly<{
   paths: readonly string[];
 }>;
 
-/** Disposable hierarchy and dependency indexes, rebuilt only for new source facts. */
-export function prepareFloor(projectMap: StateView["projects"] | undefined, topologies: ReadonlyMap<string, TopologyView> | undefined) {
-  const projects = projectMap === undefined ? [] : [...projectMap.values()].sort((left, right) => compareText(left.name, right.name) || compareText(left.id, right.id));
-  const hierarchies = projects.map((project) => projectHierarchy(project, topologies?.get(project.id)));
-  const blocksByProject = new Map(hierarchies.map((hierarchy) => [hierarchy.project.id, hierarchy.nodes]));
-  const roomByID = new Map(hierarchies.flatMap((hierarchy) => hierarchy.nodes).map((room) => [room.id, room]));
-  const children = new Map<string, SceneNode[]>();
-  for (const room of roomByID.values()) {
-    if (room.parentId !== undefined) children.set(room.parentId, [...(children.get(room.parentId) ?? []), room]);
-  }
-  for (const members of children.values()) members.sort((left, right) => compareText(left.path, right.path) || compareText(left.label, right.label) || compareText(left.id, right.id));
-  for (const room of roomByID.values()) {
-    const members = children.get(room.id) ?? [];
-    roomByID.set(room.id, { ...room, childCount: members.length, components: members.map((node) => ({ id: node.id, label: node.label, feature: node.inventory === undefined ? "unavailable" : (Object.keys(inventoryLabels) as InventoryKind[])
-      .filter((kind) => node.inventory!.total[kind] > 0)
-      .sort((left, right) => node.inventory!.total[right] - node.inventory!.total[left] || compareText(left, right))[0] ?? "empty" })) });
-  }
-  const digest = projects.map((project) => topologies?.get(project.id)?.digest).filter((value) => value !== undefined).join(" ");
-  return { hierarchies, blocksByProject, roomByID, children, digest };
+const reading = (value: GraphReading & { error_permille?: number; latency_p95_ms?: number; last_seen?: number; deployed_at?: number }): SceneReading => ({
+  evidence: value.evidence, observation: value.observation, state: value.state, ratePerHour: value.rate_per_hour ?? 0,
+  errorPermille: value.error_permille ?? 0, latencyMs: value.latency_p95_ms ?? 0, ...(value.last_seen === undefined ? {} : { lastSeen: value.last_seen }),
+  ...(value.deployed_at === undefined ? {} : { deployedAt: value.deployed_at }),
+});
+
+const STATE_ORDER = ["failing", "degraded", "active", "idle", "unknown"] as const;
+
+/** A fold of several machines claims only what all of them support. */
+function combine(readings: readonly SceneReading[]): SceneReading {
+  const observations = new Set(readings.map((item) => item.observation));
+  const observation = observations.size === 1 ? readings[0]!.observation : "partial";
+  const measured = readings.filter((item) => item.state !== "unknown");
+  const state = observation === "quiet" ? "idle" : measured.length === 0 ? "unknown"
+    : STATE_ORDER.find((candidate) => candidate !== "idle" && measured.some((item) => item.state === candidate)) ?? "unknown";
+  const evidence = new Set(readings.map((item) => item.evidence));
+  return { evidence: evidence.size === 1 ? readings[0]!.evidence : "both", observation, state,
+    ratePerHour: readings.reduce((sum, item) => sum + item.ratePerHour, 0), errorPermille: Math.max(0, ...readings.map((item) => item.errorPermille)),
+    latencyMs: Math.max(0, ...readings.map((item) => item.latencyMs)) };
 }
 
-const kindOrder = { repository: 0, directory: 1, module: 2, package: 3 };
-const countFiles = (node: SceneNode) => Object.values(node.inventory?.direct ?? {}).reduce((sum, count) => sum + count, 0);
-const emptyCounts = () => ({ source: 0, tests: 0, documentation: 0, configuration: 0, assets: 0, unclassified: 0 });
+const band = (node: GraphNode): SceneHall["band"] => node.runtime === "browser" ? 0 : node.runtime === "worker" || node.runtime === "server" ? 1 : node.runtime === "process" ? 2 : 3;
+const RUNTIME_ORDER = ["process", "server", "worker", "browser", "cli"];
 
-/** Every physical path has exactly one owner; same-path wrappers remain aliases. */
-export function selectFloor(prepared: ReturnType<typeof prepareFloor>, detail: FloorDetail = "auto") {
-  const { hierarchies, blocksByProject, roomByID } = prepared;
-  const owners = new Map<string, SceneNode>();
-  for (const node of roomByID.values()) {
-    const key = `${node.project?.id}:${node.path}`, old = owners.get(key);
-    if (old === undefined || kindOrder[node.kind] > kindOrder[old.kind]
-      || kindOrder[node.kind] === kindOrder[old.kind] && node.id < old.id) owners.set(key, node);
-  }
-  const canonical = [...owners.values()].sort((a, b) => compareText(a.project?.id ?? "", b.project?.id ?? "") || compareText(a.path, b.path) || compareText(a.id, b.id));
-  const canonicalOf = (node: SceneNode) => owners.get(`${node.project?.id}:${node.path}`)!;
-  const parentOf = (node: SceneNode): SceneNode | undefined => {
-    let parent = node.parentId === undefined ? undefined : roomByID.get(node.parentId);
-    while (parent !== undefined && parent.path === node.path) parent = parent.parentId === undefined ? undefined : roomByID.get(parent.parentId);
-    return parent === undefined ? undefined : canonicalOf(parent);
-  };
-  const children = new Map<string, SceneNode[]>();
-  for (const node of canonical) {
-    const parent = parentOf(node);
-    if (parent !== undefined) children.set(parent.id, [...children.get(parent.id) ?? [], node]);
-  }
-  const detailByID = new Map(canonical.map((node) => {
-    const links = new Map<string, NonNullable<SceneNode["dependencies"]>["links"][number]>();
-    for (const alias of roomByID.values()) {
-      if (canonicalOf(alias).id !== node.id) continue;
-      for (const link of alias.dependencies?.links ?? []) {
-        const target = roomByID.get(link.nodeId);
-        if (!target || canonicalOf(target).id === node.id) continue;
-        const owner = canonicalOf(target), key = `${link.direction}:${owner.id}`;
-        links.set(key, { ...link, nodeId: owner.id, label: owner.label, weight: (links.get(key)?.weight ?? 0) + link.weight });
+/**
+ * The world projection: operational nodes become halls, machines, yard stock,
+ * fence gates and quarantined activity. Only static evidence decides where a
+ * machine stands; runtime-only nodes wait in quarantine.
+ */
+export function projectGraph(graphs: ReadonlyMap<string, OperationalGraphView> | undefined, projects: readonly string[], detail: FloorDetail = "auto") {
+  const halls: SceneHall[] = [], shared: SceneMachine[] = [], parties: SceneMachine[] = [], quarantine: SceneMachine[] = [], flows = new Map<string, SceneFlow>();
+  /** Node id to the hall and machine that pictures it. */
+  const where = new Map<string, { hall?: string; machine: string }>();
+  const nodes: (GraphNode & { projectId: string })[] = [];
+  const digests: string[] = [];
+  for (const projectId of projects) {
+    const graph = graphs?.get(projectId);
+    if (graph === undefined) continue;
+    digests.push(graph.digest);
+    const byId = new Map(graph.nodes.map((node) => [node.id, node]));
+    for (const node of graph.nodes) nodes.push({ ...node, projectId });
+    const staticNode = (node: GraphNode) => node.evidence !== "runtime" && node.kind !== "unknown";
+    for (const unit of graph.nodes.filter((node) => node.kind === "processor" && staticNode(node))) {
+      const own = graph.nodes.filter((node) => node.unit === unit.id && staticNode(node)).sort((left, right) => compareText(left.label, right.label) || compareText(left.id, right.id));
+      const machines: SceneMachine[] = [];
+      const docks = own.filter((node) => node.kind === "ingress" && node.trigger !== "timer");
+      const foldDocks = detail === "coarse" || detail === "auto" && docks.length > MAX_DOCKS;
+      if (foldDocks && docks.length > 0 && detail !== "coarse") {
+        const id = `${unit.id}:docks`;
+        machines.push({ id, kind: "ingress", label: `${docks.length} routes`, represented: docks.map((node) => node.id), reading: combine(docks.map(reading)) });
+        for (const node of docks) where.set(node.id, { hall: unit.id, machine: id });
       }
-    }
-    const members = children.get(node.id) ?? [];
-    return [node.id, { ...node, childCount: members.length, components: members.map((member) => ({ id: member.id, label: member.label })),
-      ...(node.dependencies === undefined ? {} : { dependencies: { ...node.dependencies, links: [...links.values()] } }),
-    }] as const;
-  }));
-  const rootIds = new Set(hierarchies.map((hierarchy) => canonicalOf(hierarchy.projectRoom).id));
-  // Unwrap short namespace chains, not broad areas such as Go's internal/.
-  // A wide namespace remains a room containing its packages as assemblies.
-  const wrapper = (node: SceneNode) => ["internal", "src", "lib", "packages", "apps", "web"].includes(node.path.split("/").at(-1)!)
-    && (children.get(node.id)?.length ?? 0) > 0 && children.get(node.id)!.length <= 4;
-  const candidates = canonical.filter((node) => {
-    if (rootIds.has(node.id)) return true;
-    if (detail === "fine") return true;
-    const parent = parentOf(node);
-    if (detail === "coarse") return parent !== undefined && rootIds.has(parent.id);
-    if (wrapper(node)) return false;
-    if (Object.values(node.inventory?.total ?? {}).reduce((sum, count) => sum + count, 0) <= 4 && node.inventory !== undefined && !(children.get(node.id)?.length)) return false;
-    // Large direct packages warrant their own bay; this uses integrated source,
-    // never proposal counts or live worker activity.
-    if (node.kind === "package" && parent?.path.split("/").at(-1) === "internal" && countFiles(node) > 80) return true;
-    let ancestor = parent;
-    while (ancestor !== undefined && !rootIds.has(ancestor.id)) {
-      if (!wrapper(ancestor)) return false;
-      ancestor = parentOf(ancestor);
-    }
-    return true;
-  });
-  // Keep project roots, then stable path order. Overflow still belongs to a
-  // visible ancestor and stays searchable; activity never chooses room order.
-  const kept = new Set([...new Set([...rootIds, ...candidates.map((node) => node.id)])].slice(0, Math.max(MAX_FLOOR_ROOMS, rootIds.size)));
-  const visibleAncestor = (id: string | undefined): string | undefined => {
-    const source = id === undefined ? undefined : roomByID.get(id);
-    let node = source === undefined ? undefined : canonicalOf(source);
-    while (node !== undefined && !kept.has(node.id)) node = parentOf(node);
-    return node?.id;
-  };
-  const members = new Map<string, SceneNode[]>();
-  for (const node of canonical) {
-    const room = visibleAncestor(node.id);
-    if (room !== undefined) members.set(room, [...members.get(room) ?? [], node]);
-  }
-  const references = new Map<string, SceneNode[]>();
-  for (const node of roomByID.values()) {
-    const room = visibleAncestor(node.id);
-    if (room !== undefined) references.set(room, [...references.get(room) ?? [], node]);
-  }
-  const rooms: SceneNode[] = canonical.filter((node) => kept.has(node.id)).map((node) => {
-    const owned = members.get(node.id) ?? [];
-    const total = emptyCounts();
-    for (const member of owned) for (const kind of Object.keys(total) as InventoryKind[]) total[kind] += member.inventory?.direct[kind] ?? 0;
-    const links = new Map<string, NonNullable<SceneNode["dependencies"]>["links"][number]>();
-    for (const member of references.get(node.id) ?? []) for (const link of member.dependencies?.links ?? []) {
-      const targetID = visibleAncestor(link.nodeId);
-      if (targetID === undefined || targetID === node.id) continue;
-      const key = `${link.direction}:${targetID}`, target = roomByID.get(targetID)!;
-      links.set(key, { ...link, nodeId: targetID, label: target.label, path: target.path, weight: (links.get(key)?.weight ?? 0) + link.weight });
-    }
-    // A package includes its tests, manifests and manuals. Keep nested functional
-    // packages and substantial source directories as named assemblies, instead of
-    // giving every resource folder a separate workstation.
-    const assemblyOwners = new Set(owned.filter((member) => member.id === node.id || member.kind === "package"
-      || !["src", "lib", "scripts"].includes(member.path.split("/").at(-1)!) && (member.inventory?.direct.source ?? 0) > 4).map((member) => member.id));
-    const ownedIds = new Set(owned.map((member) => member.id));
-    const assemblyGroups = new Map<string, SceneNode[]>();
-    for (const member of owned) {
-      let owner = member;
-      while (!assemblyOwners.has(owner.id)) {
-        const parent = parentOf(owner);
-        if (!parent || !ownedIds.has(parent.id)) { owner = node; break; }
-        owner = parent;
+      for (const node of own) {
+        if (detail === "coarse" || foldDocks && docks.includes(node)) { where.set(node.id, where.get(node.id) ?? { hall: unit.id, machine: unit.id }); continue; }
+        machines.push({ id: node.id, kind: node.kind, label: node.label, ...(node.trigger === undefined ? {} : { trigger: node.trigger }), reading: reading(node) });
+        where.set(node.id, { hall: unit.id, machine: node.id });
       }
-      assemblyGroups.set(owner.id, [...assemblyGroups.get(owner.id) ?? [], member]);
+      halls.push({ id: unit.id, label: unit.label, ...(unit.runtime === undefined ? {} : { runtime: unit.runtime }), reading: reading(unit), band: band(unit), machines });
+      where.set(unit.id, { hall: unit.id, machine: unit.id });
     }
-    return {
-      ...node, label: node.path === "." ? node.project?.name ?? node.label : node.path, inventoryScope: "subtree",
-      inventory: owned.every((member) => member.inventory !== undefined) ? { ...node.inventory!, total } : undefined,
-      assemblies: [...assemblyGroups].flatMap(([id, group]) => {
-        const member = detailByID.get(id)!;
-        const total = emptyCounts();
-        for (const source of group) for (const kind of Object.keys(total) as InventoryKind[]) total[kind] += source.inventory?.direct[kind] ?? 0;
-        if (!Object.values(total).some(Boolean) && group.every((source) => source.inventory !== undefined)) return [];
-        const samples = group.flatMap((source) => (source.inventory?.samples ?? []).map((sample) => source.path === member.path ? sample : `${source.path.slice(member.path === "." ? 0 : member.path.length + 1)}/${sample}`)).slice(0, 32);
-        return [{ id, path: member.path, label: member.path === "." ? "Repository files" : member.path === node.path ? member.path.split("/").at(-1)! : member.path.slice(node.path === "." ? 0 : node.path.length + 1),
-          inventoryScope: "subtree" as const,
-          inventory: group.some((source) => source.inventory === undefined) ? undefined : { direct: member.inventory!.direct, total, samples, samples_omitted: Math.max(0, Object.values(total).reduce((sum, count) => sum + count, 0) - samples.length) },
-          sizeBucket: member.sizeBucket, representedIds: group.map((source) => source.id), dependencies: member.dependencies,
-        }];
-      }),
-      ...(node.dependencies === undefined ? {} : { dependencies: { ...node.dependencies, links: [...links.values()] } }),
-    };
-  });
-  return { blocksByProject, roomByID, detailByID, kept, visibleAncestor, canonical,
-    topology: { digest: `${prepared.digest}:${detail}`, nodes: rooms },
-    aggregatedLocations: Math.max(0, candidates.length - kept.size),
+    for (const node of graph.nodes) {
+      if (where.has(node.id)) continue;
+      const machine: SceneMachine = { id: node.id, kind: node.kind, label: node.label, reading: reading(node), ...(node.unit === undefined ? {} : { owner: byId.get(node.unit)?.label ?? "" }) };
+      if (node.kind === "external") { parties.push(machine); where.set(node.id, { machine: node.id }); }
+      else if (staticNode(node) && node.unit === undefined) { shared.push(machine); where.set(node.id, { hall: "yard", machine: node.id }); }
+      else { quarantine.push(machine); where.set(node.id, { hall: "quarantine", machine: node.id }); }
+    }
+    for (const edge of graph.edges) {
+      const from = where.get(edge.from)?.machine, to = where.get(edge.to)?.machine;
+      if (from === undefined || to === undefined || from === to) continue;
+      // Folded flows claim only what all of them support, like folded machines.
+      const key = `${from} ${to}`, held = flows.get(key);
+      flows.set(key, { from, to, kind: held?.kind ?? edge.kind, reading: held === undefined ? reading(edge) : combine([held.reading, reading(edge)]) });
+    }
+  }
+  quarantine.sort((left, right) => compareText(left.owner ?? "", right.owner ?? "") || compareText(left.label, right.label) || compareText(left.id, right.id));
+  const graph: SceneGraph = {
+    digest: `${digests.join(" ")}:${detail}:${quarantine.map((machine) => machine.id).join(",")}`,
+    halls, shared, parties, quarantine, flows: [...flows.values()],
+    observedAt: Math.max(0, ...projects.map((id) => graphs?.get(id)?.observed_at ?? 0)),
+    ...(projects.length === 1 && graphs?.get(projects[0]!) !== undefined ? { summary: graphs.get(projects[0]!)!.summary, sources: graphs.get(projects[0]!)!.sources } : {}),
   };
+  /**
+   * Which machine a changed path belongs to: the machine built from that
+   * file or directory, else the unit whose code area holds it (the most
+   * specific area wins; a running unit is preferred to a command-line tool).
+   */
+  const locate = (projectId: string, path: string): { hall: string; machine: string } | undefined => {
+    const within = (area: string) => area === "." || path === area || path.startsWith(`${area}/`);
+    const candidates = nodes.filter((node) => node.projectId === projectId && node.paths.some(within) && where.get(node.id)?.hall !== undefined);
+    const score = (node: GraphNode) => Math.max(...node.paths.filter(within).map((area) => area === "." ? 0 : area.length));
+    const leaf = candidates.filter((node) => node.kind !== "processor").sort((left, right) => score(right) - score(left) || compareText(left.id, right.id))[0];
+    const unit = candidates.filter((node) => node.kind === "processor").sort((left, right) => score(right) - score(left)
+      || RUNTIME_ORDER.indexOf(left.runtime ?? "cli") - RUNTIME_ORDER.indexOf(right.runtime ?? "cli") || compareText(left.id, right.id))[0];
+    const best = leaf !== undefined && (unit === undefined || score(leaf) >= score(unit)) ? leaf : unit;
+    const found = best === undefined ? undefined : where.get(best.id);
+    return found?.hall === undefined ? undefined : { hall: found.hall, machine: found.machine };
+  };
+  return { graph, locate, where };
 }
 
-/** Live task and observed-path projection reuses the selected static hierarchy. */
-export function projectFloor(state: StateView | undefined, selected: ReturnType<typeof selectFloor>, runPaths?: ReadonlyMap<string, RunPathSample>, lastRunPaths?: ReadonlyMap<string, RunPathSample>): FloorScene {
-  const { blocksByProject, roomByID, kept, visibleAncestor } = selected;
-  const liveRooms = new Set<string>();
+/** Live task and observed-path projection onto the world. */
+export function projectFloor(state: StateView | undefined, prepared: ReturnType<typeof projectGraph>, runPaths?: ReadonlyMap<string, RunPathSample>, lastRunPaths?: ReadonlyMap<string, RunPathSample>): FloorScene {
+  const footprint = (sample: RunPathSample | undefined) => {
+    const counts = new Map<string, { hall: string; machine: string; count: number }>();
+    for (const path of sample?.paths ?? []) {
+      const found = prepared.locate(sample!.projectId, path);
+      if (found === undefined) continue;
+      counts.set(found.machine, { ...found, count: (counts.get(found.machine)?.count ?? 0) + 1 });
+    }
+    return [...counts.values()].sort((left, right) => right.count - left.count || compareText(left.machine, right.machine));
+  };
   const tasks = state === undefined ? [] : [...state.tasks.values()]
-		.filter((task) => !state.agents.get(task.assigned_agent_id)?.archived)
+    .filter((task) => !state.agents.get(task.assigned_agent_id)?.archived)
     .sort((left, right) => compareText(left.id, right.id))
     .map((task) => {
       const sample = matchingRunSample(state, task, runPaths);
-      const footprint = runFootprint(blocksByProject.get(task.project_id) ?? [], sample);
-      const displayRoomIds = [...new Set(footprint.roomIds.map(visibleAncestor).filter((id): id is string => id !== undefined))];
-      const displayRoomId = visibleAncestor(footprint.representativeRoomId) ?? displayRoomIds[0];
+      const touched = footprint(sample);
       return {
-        id: task.id,
-        agentId: task.assigned_agent_id,
-        projectId: task.project_id,
-        title: task.title,
-        status: task.status,
-        roomIds: footprint.roomIds,
-        ...(footprint.representativeRoomId === undefined ? {} : { representativeRoomId: footprint.representativeRoomId }),
-        ...(sample === undefined ? {} : {
-          observation: { taskRevision: sample.taskRevision, runId: sample.runId },
-          displayRoomIds,
-          ...(displayRoomId === undefined ? {} : { displayRoomId }),
-        }),
+        id: task.id, agentId: task.assigned_agent_id, projectId: task.project_id, title: task.title, status: task.status,
+        roomIds: [...new Set(touched.map((item) => item.hall))].sort(compareText),
+        ...(touched[0] === undefined ? {} : { representativeRoomId: touched[0].hall }),
+        ...(sample === undefined ? {} : { observation: { taskRevision: sample.taskRevision, runId: sample.runId } }),
         humanRequestIds: [...state.humanRequests.values()]
           .filter((request) => request.task_id === task.id && request.agent_id === task.assigned_agent_id && request.project_id === task.project_id)
           .sort((left, right) => compareText(left.id, right.id))
           .map((request) => request.id),
       };
     });
-  const workByTask = new Map(tasks.map((order) => [order.id, order]));
-  const workers = state === undefined ? [] : [...state.agents.values()].filter((agent) => !agent.archived).map((agent) => {
+  const labels = new Map([...prepared.graph.halls.map((hall) => [hall.id, hall.label] as const), ["yard", "Shared yard"], ["quarantine", "Quarantine"]]);
+  const workers = state === undefined ? [] : [...state.agents.values()].filter((agent) => !agent.archived).map((agent): SceneWorker => {
     const task = agentCurrentTask(agent, state);
-    const block = blocksByProject.get(agent.project_id) ?? [];
-    const live = task === undefined ? undefined : workByTask.get(task.id)?.representativeRoomId;
+    const live = task === undefined ? undefined : footprint(matchingRunSample(state, task, runPaths))[0];
     const previous = lastRunPaths?.get(agent.id);
-    const last = previous?.projectId === agent.project_id && previous.paths.length > 0 ? runFootprint(block, previous).representativeRoomId : undefined;
-    const work = task === undefined ? undefined : workByTask.get(task.id);
-    const display = work?.displayRoomId;
-    const displayedObservation = display === undefined || visibleAncestor(live) === display ? live
-      : work?.roomIds.find((id) => visibleAncestor(id) === display);
-    let observedBayId: string | undefined;
-    if (display !== undefined && displayedObservation !== undefined) observedBayId = displayedObservation;
-    if (live !== undefined) liveRooms.add(display ?? live);
+    const last = previous?.projectId === agent.project_id && previous.paths.length > 0 ? footprint(previous)[0] : undefined;
     const location: SceneWorker["location"] = task === undefined ? last === undefined ? "resting" : "last-observed" : live !== undefined ? "working" : "unobserved";
-    const room = location === "working" ? roomByID.get(displayedObservation!) : location === "last-observed" ? roomByID.get(last!) : undefined;
+    const at = location === "working" ? live : location === "last-observed" ? last : undefined;
     return {
-      id: agent.id,
-      name: agent.name,
-      role: agent.role,
-      provider: agent.provider,
+      id: agent.id, name: agent.name, role: agent.role, provider: agent.provider,
       ...(agent.appearance === undefined ? {} : { appearance: agent.appearance }),
-      activity: agentActivity(agent, state),
-      paused: agent.paused,
-      location,
-      ...(room === undefined ? {} : { locationLabel: room.label }),
-      ...(location === "last-observed" && last !== undefined ? { nodeId: visibleAncestor(last) } : {}),
-      ...(location === "working" && live !== undefined ? {
-        nodeId: display ?? live,
-        locationWithin: display !== undefined && display !== displayedObservation,
-        ...(observedBayId === undefined ? {} : { observedBayId }),
-      } : {}),
+      activity: agentActivity(agent, state), paused: agent.paused, location,
+      ...(at === undefined ? {} : { locationLabel: labels.get(at.hall) ?? "", nodeId: at.hall }),
+      ...(location === "working" && live !== undefined ? { observedBayId: live.machine } : {}),
     };
   });
-  return {
-    topology: selected.topology, workers, tasks,
-    omittedLocations: [...liveRooms].filter((id) => !kept.has(id)).length,
-    aggregatedLocations: selected.aggregatedLocations,
-  };
+  return { graph: prepared.graph, workers, tasks };
 }
 
 /** A live sample is evidence only for its exact running task and assigned agent. */
@@ -351,122 +270,17 @@ function matchingRunSample(
     : undefined;
 }
 
-/**
- * Each changed path picks the deepest eligible room whose own path prefixes it
- * (the root's "." prefixes everything). Same-path kinds follow daemon NodeForPath
- * precedence; stable ids settle equivalent rooms. Every affected room is retained, while
- * the room holding the most paths is the representative; ties use room order.
- */
-function runFootprint(rooms: readonly SceneNode[], sample: RunPathSample | undefined): Readonly<{ roomIds: readonly string[]; representativeRoomId?: string }> {
-  const counts = new Map<SceneNode, number>();
-  for (const path of sample?.paths ?? []) {
-    const room = rooms
-      .filter((candidate) => candidate.path === "." || path === candidate.path || path.startsWith(`${candidate.path}/`))
-      .sort((left, right) => right.path.length - left.path.length || kindOrder[right.kind] - kindOrder[left.kind] || compareText(left.id, right.id))[0];
-    if (room !== undefined) counts.set(room, (counts.get(room) ?? 0) + 1);
-  }
-  const representativeRoomId = [...counts]
-    .sort(([left, leftCount], [right, rightCount]) => rightCount - leftCount || compareText(left.path, right.path) || compareText(left.id, right.id))[0]?.[0].id;
-  return {
-    roomIds: [...counts.keys()].sort((left, right) => compareText(left.path, right.path) || compareText(left.id, right.id)).map((room) => room.id),
-    ...(representativeRoomId === undefined ? {} : { representativeRoomId }),
-  };
-}
-
-/** All containment comes from served parent ids; paths and labels are display/activity data only. */
-function projectHierarchy(project: { id: string; name: string }, topology: TopologyView | undefined) {
-  const served = topology?.nodes ?? [];
-  const servedByID = new Map<string, typeof served[number]>();
-  const unique = served.length <= MAX_SNAPSHOT_ENTITIES && served.every((node) => !servedByID.has(node.id) && (servedByID.set(node.id, node), true));
-  // ponytail: this walks at most the protocol's 4,096 served nodes per node;
-  // a future larger graph should validate containment once at decode time.
-  const valid = served.length > 0 && unique
-    && served.every((node) => node.parent_id === "" || servedByID.has(node.parent_id))
-    && served.every((node) => {
-      const seen = new Set<string>();
-      let current = node;
-      while (current.parent_id !== "") {
-        if (seen.has(current.id)) return false;
-        seen.add(current.id);
-        const parent = servedByID.get(current.parent_id);
-        if (parent === undefined) return false;
-        current = parent;
-      }
-      return true;
-    });
-  const fallback: SceneNode = { id: project.id, path: ".", label: project.name, kind: "repository", inventoryScope: "subtree", project: { id: project.id, name: project.name } };
-  if (!valid) return { project, projectRoom: fallback, nodes: [fallback] };
-  const roots = served.filter((node) => node.parent_id === "");
-  // The daemon serves one repository root. If that root is unavailable or a
-  // malformed graph offers several roots, keep the honest unavailable room
-  // instead of manufacturing a containment edge from project text.
-  if (roots.length !== 1) return { project, projectRoom: fallback, nodes: [fallback] };
-  const root = roots[0]!;
-  const componentLabel = (node: typeof root) => node.kind === "package" && node.label === "main" && node.path !== "." ? node.path.split("/").at(-1)! : node.label;
-  const links = new Map<string, NonNullable<SceneNode["dependencies"]>["links"][number][]>();
-  for (const edge of topology?.dependencies?.edges ?? []) {
-    // Decoder owns endpoint validation; retain project scoping for direct projections too.
-    const from = servedByID.get(edge.from), to = servedByID.get(edge.to);
-    if (from === undefined || to === undefined) continue;
-    for (const [owner, target, direction] of [[from, to, "to"], [to, from, "from"]] as const) {
-      const entry = { nodeId: `${project.id}:${target.id}`, label: target.id === root.id ? project.name : target.label, path: target.path, direction, weight: edge.weight };
-      links.set(owner.id, [...(links.get(owner.id) ?? []), entry]);
-    }
-  }
-  const nodes = served.map((node) => ({
-    id: `${project.id}:${node.id}`,
-    ...(node.parent_id === "" ? {} : { parentId: `${project.id}:${node.parent_id}` }),
-    path: node.path,
-    label: node.id === root.id ? project.name : componentLabel(node),
-    kind: node.kind,
-    sizeBucket: node.size_bucket,
-    language: node.language,
-    inventoryScope: "subtree" as const,
-    ...(node.inventory === undefined ? {} : { inventory: node.inventory }),
-    ...(topology?.dependencies === undefined ? {} : { dependencies: { omitted: topology.dependencies.omitted, links: links.get(node.id) ?? [] } }),
-    project: { id: project.id, name: project.name },
-  }));
-  return { project, projectRoom: nodes.find((node) => node.id === `${project.id}:${root.id}`)!, nodes };
-}
-
-/** Project each proposal independently; never manufacture a combined future tree. */
-export function projectProposals(selected: ReturnType<typeof selectFloor>, items: readonly ProductionContraption[]) {
-  const provisional = new Map<string, SceneNode>();
-  const roomForPath = (project: string, path: string) => selected.canonical
-    .filter((node) => node.project?.id === project && (node.path === "." || path === node.path || path.startsWith(`${node.path}/`)))
-    .sort((a, b) => b.path.length - a.path.length || compareText(a.id, b.id))[0];
-  const proposals: SceneProposal[] = items.filter(proposedProduction).map((item) => {
-    const source = item.source;
-    const operations = source.paths.map((path) => {
-      const before = roomForPath(item.projectId, path.old_path ?? path.path);
-      const destination = roomForPath(item.projectId, path.path);
-      const directory = path.path.includes("/") ? path.path.slice(0, path.path.lastIndexOf("/")) : ".";
-      let roomId = selected.visibleAncestor(destination?.id);
-      let entityId = before?.id;
-      if (["added", "renamed"].includes(path.status) && destination !== undefined && directory !== destination.path) {
-        roomId = `${item.projectId}:proposed:${directory}`;
-        const id = `${roomId}@${productionKey(item)}`, existing = provisional.get(roomId);
-        if (!existing?.assemblies?.some((assembly) => assembly.id === id)) {
-          const paths = source.paths.filter((entry) => ["added", "renamed"].includes(entry.status) && entry.path.slice(0, entry.path.lastIndexOf("/")) === directory);
-          const counts = emptyCounts();
-          for (const entry of paths) counts[entry.resource ?? "unclassified"]++;
-          provisional.set(roomId, { id: roomId, path: directory, label: directory, kind: "directory", project: destination.project, inventoryScope: "direct", proposed: true, assemblies: [...existing?.assemblies ?? [], { id, proposalId: productionKey(item), path: directory, label: directory.split("/").at(-1)!, inventoryScope: "direct", representedIds: [roomId], sourceIncomplete: true, sourcePaths: paths.map((entry) => entry.path), inventory: { direct: counts, total: counts, samples: paths.map((entry) => entry.path.split("/").at(-1)!), samples_omitted: source.omitted } }] });
-        }
-        if (path.status === "added") entityId = roomId;
-      }
-      return { entityId, roomId, path: path.path, previousPath: path.old_path,
+/** Project each proposal onto the machines it changes; never manufacture a combined future plant. */
+export function projectProposals(prepared: ReturnType<typeof projectGraph>, items: readonly ProductionContraption[]) {
+  const proposals: SceneProposal[] = items.filter(proposedProduction).map((item) => ({
+    id: productionKey(item), title: item.pullRequest?.title || item.construction?.title || "Proposed change",
+    state: item.source.kind === "unavailable" ? "unavailable" : item.source.stale ? "stale" : "active", base: item.source.base, head: item.source.head,
+    operations: item.source.paths.map((path) => {
+      const found = prepared.locate(item.projectId, path.path) ?? (path.old_path === undefined ? undefined : prepared.locate(item.projectId, path.old_path));
+      return { ...(found === undefined ? {} : { entityId: found.machine, roomId: found.hall }), path: path.path, ...(path.old_path === undefined ? {} : { previousPath: path.old_path }),
         kind: ({ added: "addition", modified: "modification", deleted: "removal", renamed: "move" } as const)[path.status] };
-    });
-    return { id: productionKey(item), title: item.pullRequest?.title || item.construction?.title || "Proposed change",
-      state: source.kind === "unavailable" ? "unavailable" : source.stale ? "stale" : "active", base: source.base, head: source.head, operations,
-      relationships: source.relationships.map((edge) => ({ status: edge.status, fromPath: edge.from_path, toPath: edge.to_path, weight: edge.weight,
-        fromEntityId: provisional.get(`${item.projectId}:proposed:${edge.from_path}`)?.id ?? roomForPath(item.projectId, edge.from_path)?.id,
-        toEntityId: provisional.get(`${item.projectId}:proposed:${edge.to_path}`)?.id ?? roomForPath(item.projectId, edge.to_path)?.id,
-        fromId: provisional.get(`${item.projectId}:proposed:${edge.from_path}`)?.id ?? selected.visibleAncestor(roomForPath(item.projectId, edge.from_path)?.id),
-        toId: provisional.get(`${item.projectId}:proposed:${edge.to_path}`)?.id ?? selected.visibleAncestor(roomForPath(item.projectId, edge.to_path)?.id),
-      })),
-    };
-  });
+    }),
+  }));
   const reviewers = new Map<string, SceneWorker>();
   for (const item of items.filter(proposedProduction)) {
     const proposal = proposals.find((candidate) => candidate.id === productionKey(item))!;
@@ -476,20 +290,9 @@ export function projectProposals(selected: ReturnType<typeof selectFloor>, items
       if (reviewers.has(id)) continue;
       const working = actor.state === "running" && proposal.state === "active" && actor.head === proposal.head && operation !== undefined;
       reviewers.set(id, { id, name: actor.name || actor.id, role: "worker", activity: working ? "busy" : actor.state === "waiting" ? "waiting" : "idle",
-        location: working ? "working" : "resting", nodeId: working ? operation.roomId : undefined, observedBayId: working ? operation.entityId : undefined,
+        location: working ? "working" : "resting", ...(working ? { nodeId: operation.roomId, observedBayId: operation.entityId } : {}),
         review: { proposalId: proposal.id, scope: `Review assignment at ${actor.head || "unknown head"}; ${proposal.operations.length} observed paths. Individual file inspection is not observed.` } });
     }
   }
-  const addedRooms = [...provisional.values()].sort((a, b) => compareText(a.id, b.id)).slice(0, 16);
-  const addedIDs = new Set(addedRooms.map((room) => room.id));
-  const roomFallback = new Map([...provisional.values()].filter((room) => !addedIDs.has(room.id)).map((room) => [room.id, selected.visibleAncestor(roomForPath(room.project!.id, room.path)?.id)]));
-  for (const proposal of proposals) for (const operation of proposal.operations) {
-    if (operation.roomId !== undefined && roomFallback.has(operation.roomId)) Object.assign(operation, { roomId: roomFallback.get(operation.roomId) });
-  }
-  for (const proposal of proposals) for (const edge of proposal.relationships ?? []) {
-    if (edge.fromId && roomFallback.has(edge.fromId)) Object.assign(edge, { fromId: roomFallback.get(edge.fromId) });
-    if (edge.toId && roomFallback.has(edge.toId)) Object.assign(edge, { toId: roomFallback.get(edge.toId) });
-  }
-  const actors = [...reviewers.values()].map((actor) => actor.nodeId !== undefined && roomFallback.has(actor.nodeId) ? { ...actor, nodeId: roomFallback.get(actor.nodeId) } : actor);
-  return { topology: { ...selected.topology, nodes: [...selected.topology.nodes, ...addedRooms] }, proposals, reviewers: actors, aggregatedProposals: provisional.size - addedRooms.length };
+  return { proposals, reviewers: [...reviewers.values()] };
 }

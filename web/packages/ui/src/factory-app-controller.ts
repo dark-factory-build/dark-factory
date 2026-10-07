@@ -32,7 +32,8 @@ import {
   type TerminalReset,
   type RunPathsView,
   randomOperationID,
-  type TopologyView,
+  type OperationalGraphView,
+  type OperationalNodeView,
 } from "@dark-factory/client";
 import { agentCurrentTask, type RunPathSample } from "./console-view.js";
 import { FactorySettingsCoordinator, type FactoryGitHubView, type FactoryRemoteInvite } from "./factory-settings-coordinator.js";
@@ -53,7 +54,8 @@ const DEFAULT_BROWSER_ENDPOINT = browserEndpoint();
 const RUN_PATHS_POLL_MS = 10_000;
 // Structure changes as slowly as an edit lands, so the floor re-reads it once a
 // minute off the same timer rather than watching a filesystem it cannot see.
-const TOPOLOGY_POLL_TICKS = 6;
+// The graph carries live readings, so it is refreshed every other tick.
+const GRAPH_POLL_TICKS = 2;
 
 export type FactoryHumanRequestView = Readonly<{
   request: HumanRequestItem;
@@ -126,7 +128,7 @@ export type FactoryAppSnapshot = Readonly<{
   selectedAgent?: FactoryAgentSelection;
   terminal?: FactoryTerminalView;
   /** Regenerable structure per project, empty until the daemon serves it. */
-  topologies?: ReadonlyMap<string, TopologyView>;
+  graphs?: ReadonlyMap<string, OperationalGraphView>;
   /** Repository directories each running agent's live run is changing. */
   runPaths?: ReadonlyMap<string, RunPathSample>;
   /** Most recent observed paths remain an annotation after that run ends. */
@@ -162,7 +164,7 @@ export type FactoryAppStatus =
 type HumanSession = Pick<BrowserSession, "getHumanRequestDetail" | "replyHumanRequest" | "cancelHumanRequest">;
 type TerminalSession = Pick<BrowserSession, "resolveAgentTerminal" | "openTerminal" | "close">;
 type AgentTaskSession = Pick<BrowserSession, "enqueueAgentTaskWithFiles" | "enqueueAgentTask" | "controlAgent" | "getTaskHistory" | "getTaskDetail" | "resolveAgentTerminal">;
-type ConsoleSession = Pick<BrowserSession, "updateAgent" | "setProjectLimits" | "createProject" | "getRepositories" | "mutateRepository" | "intake" | "updateTask" | "getTopology" | "getRunPaths" | "getTaskList" | "discoverAccounts" | "linkAccount" | "updateAccount" | "listBrowserClients" | "revokeBrowserClient" | "githubConnection" | "clientId">;
+type ConsoleSession = Pick<BrowserSession, "updateAgent" | "setProjectLimits" | "createProject" | "getRepositories" | "mutateRepository" | "intake" | "updateTask" | "getOperationalGraph" | "getOperationalNode" | "getRunPaths" | "getTaskList" | "discoverAccounts" | "linkAccount" | "updateAccount" | "listBrowserClients" | "revokeBrowserClient" | "githubConnection" | "clientId">;
 type RemoteInviteSession = Pick<BrowserSession, "inviteRemote" | "capabilities">;
 type ControlledClient = Pick<BrowserClient, "connect" | "close"> & { readonly session?: HumanSession & TerminalSession & AgentTaskSession & ConsoleSession & RemoteInviteSession & Partial<Pick<BrowserSession, "projectContent" | "attachmentRetention" | "setDispatch">> };
 type ClientFactory = (options: BrowserSessionOptions) => ControlledClient;
@@ -258,8 +260,8 @@ export class FactoryAppController {
   #terminalReplacement: TerminalReplacement | undefined;
   #pendingTerminalInput = new Uint8Array(0);
   #pendingTerminalResize: { rows: number; cols: number } | undefined;
-  #topologies: ReadonlyMap<string, TopologyView> = new Map();
-  #topologyPending = new Set<string>();
+  #graphs: ReadonlyMap<string, OperationalGraphView> = new Map();
+  #graphPending = new Set<string>();
   #runPaths: ReadonlyMap<string, RunPathSample> = new Map();
   #lastRunPaths: ReadonlyMap<string, RunPathSample> = new Map();
   #runPathsTimer: ReturnType<typeof setInterval> | undefined;
@@ -392,44 +394,45 @@ export class FactoryAppController {
   }
 
   /**
-   * The floor's rooms, for every configured project and no other: topology is
-   * regenerable, not durable state, so it is fetched on demand, and a project
-   * the daemon cannot serve simply keeps the one room that stands for it.
+   * The floor's operational graph, for every configured project and no other.
+   * It is regenerable, not durable state, so it is fetched on demand, and a
+   * project the daemon cannot serve keeps the graph last served.
    */
-  loadTopology(): void {
+  loadGraphs(): void {
     const session = this.#client?.session;
     const state = this.#state;
     if (this.#closed || this.#status !== "ready" || session === undefined || state === undefined) return;
     // A project still answering the last round is not asked again: one slow
     // walk costs the floor its own room's refresh, never every other project's.
-    const asked = [...state.projects.keys()].filter((projectId) => !this.#topologyPending.has(projectId));
+    const asked = [...state.projects.keys()].filter((projectId) => !this.#graphPending.has(projectId));
     if (asked.length === 0) return;
     const generation = this.#generation;
     for (const projectId of asked) {
-      this.#topologyPending.add(projectId);
-      void session.getTopology(projectId).then(
-        (topology) => {
-          this.#topologyPending.delete(projectId);
-          // A structure whose digest did not move is not a new snapshot, so an
-          // unchanged repository does not re-render the floor once a minute.
-          if (!this.#current(generation) || this.#topologies.get(projectId)?.digest === topology.digest) return;
-          this.#topologies = new Map(this.#topologies).set(projectId, topology);
+      this.#graphPending.add(projectId);
+      void session.getOperationalGraph(projectId).then(
+        (graph) => {
+          this.#graphPending.delete(projectId);
+          // Live readings move without the structure moving; the floor lays
+          // out by digest, so a new reading never moves a machine.
+          if (!this.#current(generation)) return;
+          const first = !this.#graphs.has(projectId);
+          this.#graphs = new Map(this.#graphs).set(projectId, graph);
           this.#publish();
-          // A project just served has rooms its running agents can stand in:
-          // ask now, or as soon as the round in flight is answered.
-          if (this.#runPathsTimer === undefined) return;
+          // A project served for the first time has halls its running agents can stand in:
+          // ask now, or as soon as the round in flight is answered. A refresh waits for the tick.
+          if (!first || this.#runPathsTimer === undefined) return;
           if (this.#runPathsPending) this.#runPathsDue = true;
           else this.#pollRunPaths();
         },
         // A refused answer keeps the structure last served for that project
         // rather than emptying its block of rooms for one cycle.
-        () => { this.#topologyPending.delete(projectId); },
+        () => { this.#graphPending.delete(projectId); },
       );
     }
   }
 
   /**
-   * Where each running agent is working, and every sixth tick the structure it
+   * Where each running agent is working, and every other tick the graph it
    * is working on. Both are live hints, not durable state, so they are polled
    * only while the floor is on screen and the poll stops the moment the floor
    * is hidden or the session leaves ready.
@@ -446,7 +449,7 @@ export class FactoryAppController {
     this.#runPathsTimer = setInterval(() => {
       this.#pollRunPaths();
       this.#runPathsTicks += 1;
-      if (this.#runPathsTicks % TOPOLOGY_POLL_TICKS === 0) this.loadTopology();
+      if (this.#runPathsTicks % GRAPH_POLL_TICKS === 0) this.loadGraphs();
     }, RUN_PATHS_POLL_MS);
     this.#pollRunPaths();
   }
@@ -463,7 +466,7 @@ export class FactoryAppController {
     const running = [...state.agents.values()]
       .map((agent) => {
         const task = agentCurrentTask(agent, state);
-        return task === undefined || !this.#topologies.has(task.project_id) ? undefined : { agentId: agent.id, taskId: task.id, taskRevision: task.revision, projectId: task.project_id };
+        return task === undefined || !this.#graphs.has(task.project_id) ? undefined : { agentId: agent.id, taskId: task.id, taskRevision: task.revision, projectId: task.project_id };
       })
       .filter((task): task is { agentId: string; taskId: string; taskRevision: bigint; projectId: string } => task !== undefined);
     if (running.length === 0) {
@@ -638,6 +641,13 @@ export class FactoryAppController {
       this.#publish();
       return false;
     }
+  }
+
+  /** One operational node's evidence, read when its inspector opens. */
+  operationalNode(projectId: string, nodeId: string): Promise<OperationalNodeView> {
+    const session = this.#client?.session;
+    if (this.#closed || this.#status !== "ready" || session === undefined) return Promise.reject(new SessionError("closed"));
+    return session.getOperationalNode(projectId, nodeId);
   }
 
   /** Load private task text only when an operator opens its brief. */
@@ -984,9 +994,9 @@ export class FactoryAppController {
         }
       }
     }
-    // Topology belongs to a project; a project that is gone has no rooms.
-    if ([...this.#topologies.keys()].some((projectId) => !state.projects.has(projectId))) {
-      this.#topologies = new Map([...this.#topologies].filter(([projectId]) => state.projects.has(projectId)));
+    // A graph belongs to a project; a project that is gone has no halls.
+    if ([...this.#graphs.keys()].some((projectId) => !state.projects.has(projectId))) {
+      this.#graphs = new Map([...this.#graphs].filter(([projectId]) => state.projects.has(projectId)));
     }
     const selectedAgent = this.#selectedAgent;
     const replacementAgentID = this.#terminalReplacement?.agentId;
@@ -1440,7 +1450,7 @@ export class FactoryAppController {
       status: this.#status,
       state: this.#state,
       error: this.#error,
-      topologies: this.#topologies,
+      graphs: this.#graphs,
       runPaths: this.#runPaths,
       lastRunPaths: this.#lastRunPaths,
       edit: this.#edit,

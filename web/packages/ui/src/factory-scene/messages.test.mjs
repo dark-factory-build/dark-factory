@@ -6,6 +6,7 @@ import { FactoryScene } from "../../dist/src/factory-scene/factory-scene.js";
 import { layoutScene, placeWorkers } from "../../dist/src/factory-scene/scene.js";
 import { routeBetween } from "../../dist/src/factory-scene/movement.js";
 import { workerFrames } from "../../dist/src/factory-scene/appearance.js";
+import { hallsOf } from "../../../../fixtures/scene.mjs";
 import { endsAt, messageAt, observe, send } from "../../dist/src/factory-scene/messages.js";
 
 const task = (id, agentId, status) => ({ id, agentId, projectId: "p", title: id, status, roomIds: [], humanRequestIds: [] });
@@ -63,14 +64,14 @@ test("a pulse keeps to its route, paper flies over, and each end raises a hand i
 });
 
 test("the floor sends a question down the corridors, its answer back, and new work from the tray", async () => {
-  const topology = { digest: "mail", nodes: [..."abcdefghi"].map((id) => ({ id, parentId: "", path: id, label: id, kind: "package", sizeBucket: "small", inventoryScope: "direct", inventory: { direct: { source: 9, tests: 0, documentation: 0, configuration: 0, assets: 0, unclassified: 0 }, total: { source: 9, tests: 0, documentation: 0, configuration: 0, assets: 0, unclassified: 0 }, samples: [], samples_omitted: 0 } })) };
+  const graph = hallsOf([..."abcdefghi"]);
   const workers = [
     { id: "ada", name: "Ada", role: "worker", provider: "codex", activity: "busy", location: "working", nodeId: "a" },
     { id: "grace", name: "Grace", role: "worker", provider: "codex", activity: "busy", location: "working", nodeId: "h" },
     { id: "linus", name: "Linus", role: "worker", provider: "codex", activity: "idle", location: "resting" },
   ];
   const tasks = [{ ...task("t-ada", "ada", "running"), roomIds: ["a"] }, { ...task("t-grace", "grace", "running"), roomIds: ["h"] }, task("t-linus", "linus", "queued")];
-  const layout = layoutScene(topology), placements = placeWorkers(layout, workers);
+  const layout = layoutScene(graph), placements = placeWorkers(layout, workers);
   const route = routeBetween(layout, placements.find(({ id }) => id === "ada"), placements.find(({ id }) => id === "grace"));
   const onRoute = (point) => { let from = placements.find(({ id }) => id === "ada"); for (const to of route.points) { const d = Math.hypot(to.x - from.x, to.y - from.y), d1 = Math.hypot(point.x - from.x, point.y - from.y), d2 = Math.hypot(to.x - point.x, to.y - point.y); if (Math.abs(d1 + d2 - d) < 0.01) return true; from = to; } return false; };
 
@@ -90,7 +91,7 @@ test("the floor sends a question down the corridors, its answer back, and new wo
   const tooltipOf = (id) => renderer.root.findByProps({ "data-worker-id": id }).findAll((node) => node.props["data-tooltip"] !== undefined)[0].props["data-tooltip"];
   // Pets off: only messages may ask for animation frames here.
   const appearance = { scenery: "off", animation: "follow-device" };
-  const scene = (props) => createElement(FactoryScene, { topology, workers, tasks, appearance, ...props });
+  const scene = (props) => createElement(FactoryScene, { graph, workers, tasks, appearance, ...props });
   try {
     // The console mounts its floor before any state has arrived, then gets state and "connected" in one render.
     await act(async () => { renderer = create(scene({ workers: [], tasks: [], peerQuestions: [], connected: false })); });
@@ -157,10 +158,10 @@ test("the floor sends a question down the corridors, its answer back, and new wo
     assert.match(poseOf("linus"), /wave\.0$/, "whoever it is for takes it");
 
     // With the clock stopped nothing flies, and what is waiting is still said.
-    await act(async () => { renderer.update(createElement(FactoryScene, { topology, workers, tasks, appearance: { scenery: "off", animation: "off" }, peerQuestions: [question("q", "t-ada", "t-grace", true), question("q2", "t-grace", "t-ada")] })); });
+    await act(async () => { renderer.update(createElement(FactoryScene, { graph, workers, tasks, appearance: { scenery: "off", animation: "off" }, peerQuestions: [question("q", "t-ada", "t-grace", true), question("q2", "t-grace", "t-ada")] })); });
     assert.equal(all("data-pulse").length + all("data-call").length, 0);
     assert.match(tooltipOf("grace"), /\nAsked Ada · waiting for an answer$/);
-    await act(async () => { renderer.update(createElement(FactoryScene, { topology, workers, tasks, appearance: { scenery: "off", animation: "off" }, peerQuestions: [question("q2", "t-grace", "t-ada"), question("q3", "t-grace", "t-ada")] })); });
+    await act(async () => { renderer.update(createElement(FactoryScene, { graph, workers, tasks, appearance: { scenery: "off", animation: "off" }, peerQuestions: [question("q2", "t-grace", "t-ada"), question("q3", "t-grace", "t-ada")] })); });
     assert.equal(tooltipOf("grace").split("Asked Ada").length, 2, "two questions to the same person are said once");
   } finally {
     if (renderer) await act(async () => renderer.unmount());

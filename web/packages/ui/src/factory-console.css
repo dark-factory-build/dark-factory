@@ -1210,3 +1210,71 @@ summary.dfConsoleItem__summary { cursor: pointer; }
 @media (max-width: 640px) { .dfOutcomes__list button { flex-direction: column; gap: .5rem; } }
 
 .dfProjectLibrary__workspace > section[aria-label="Replies"] > button { margin-top: .75rem; }
+
+/* The operational plant. Paint is observation, the andon lamp is state, and
+   material only moves where a flow was observed. A blueprint has no telemetry
+   and is never drawn as a still machine. */
+.dfPlant {
+  --metal: #687282; --metal2: #454c57; --metalhi: #909aa8; --win: #0e1115; --outline: #0b0b0b;
+  --belt: #0e1013; --item: #e0843a; --ok: #5ad38a; --amber: #f2c94c; --red: #ff5f56; --lampoff: #2c3139;
+  --bp: #4cc3e6; --plate: #e5d5ad; --plateink: #191d24; --label: #c4c9d0; --hazard: #e6b93a; --shadow: rgba(0, 0, 0, .45);
+  shape-rendering: crispEdges;
+}
+.dfPlant text { font-family: ui-monospace, monospace; }
+.dfPlant__heading { fill: #b9cad5; font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: .08em; }
+.dfPlant__label { fill: var(--label); font-size: 8px; }
+.dfPlant__small { fill: #8f99a6; font-size: 7px; }
+.dfPlant__plate { fill: var(--plate); stroke: var(--outline); }
+.dfPlant__plateText { fill: var(--plateink); font-size: 10px; font-weight: 700; }
+.dfPlant .shd { fill: var(--shadow); }
+.dfPlant .m { fill: var(--metal); stroke: var(--outline); stroke-width: 1; }
+.dfPlant .md { fill: var(--metal2); }
+.dfPlant .mh { fill: var(--metalhi); }
+.dfPlant .win { fill: var(--win); }
+.dfPlant .dock { fill: var(--metal2); stroke: var(--outline); stroke-width: 1; }
+.dfPlant .chev { fill: var(--hazard); }
+.dfPlant .lamp { fill: var(--lampoff); }
+.dfPlant .crate { fill: var(--item); stroke: var(--outline); stroke-width: 1; }
+.dfPlant .qtag { fill: var(--amber); stroke: var(--outline); stroke-width: 1; }
+.dfPlant .qmark { fill: var(--outline); font-size: 8px; font-weight: 700; }
+.dfPlant .redtag { fill: var(--red); }
+.dfPlant .scrap { fill: var(--red); }
+.dfPlant__bin { fill: var(--metal2); stroke: var(--outline); }
+.dfPlant__hand { fill: none; stroke: var(--metalhi); stroke-width: 1.5; }
+.dfPlant .bptext { fill: var(--bp); font-size: 6px; }
+.dfPlant .pq { display: none; }
+.dfPlant .op-active .lamp { fill: var(--ok); }
+.dfPlant .op-degraded .lamp { fill: var(--amber); }
+.dfPlant .op-failing .lamp { fill: var(--red); }
+.dfPlant .s-quiet .lamp { fill: var(--ok); opacity: .45; }
+.dfPlant .s-partial .lamp.l2 { fill: var(--lampoff); }
+.dfPlant .s-partial .pq { display: inline; fill: url(#df-blueprint); stroke: var(--bp); stroke-width: 1; }
+.dfPlant .s-unobserved :is(.m, .md, .mh, .win, .dock, .crate) { fill: url(#df-blueprint); stroke: var(--bp); stroke-width: 1; }
+.dfPlant .s-unobserved :is(.lamp, .chev, .shd, .dfPlant__dwell) { display: none; }
+.dfPlant .s-stale { filter: grayscale(1); opacity: .6; }
+.dfPlant__gate { fill: var(--metal2); stroke: var(--outline); }
+.dfPlant .s-opaque .dfPlant__gate { fill: url(#df-fog); }
+.dfPlant__gate--runtime { stroke: var(--amber); stroke-dasharray: 2 2; }
+.dfPlant__fence { stroke: #59616e; stroke-width: 3; stroke-dasharray: 6 3; fill: none; }
+.dfPlant .b-base { fill: none; stroke: var(--belt); stroke-width: 6; stroke-linejoin: miter; }
+.dfPlant .b-inf { fill: none; stroke: var(--bp); stroke-width: 1.5; stroke-dasharray: 4 3; opacity: .7; }
+.dfPlant__material { fill: none; stroke: var(--item); stroke-width: 4; }
+.dfPlant__material--faulty { stroke: var(--red); }
+.dfPlant--moving .dfPlant__material { animation: dfPlantFlow 1s linear infinite; }
+.dfPlant--moving .op-failing .lamp { animation: dfPlantBlink .7s steps(1) infinite; }
+.dfPlant--moving .op-active .arm { animation: dfPlantArm 1.2s steps(2) infinite; }
+.dfPlant--selected :is(.m, .dock) { stroke: #80ddff; stroke-width: 2; }
+@keyframes dfPlantFlow { to { stroke-dashoffset: -40; } }
+@keyframes dfPlantBlink { 50% { fill: var(--lampoff); } }
+@keyframes dfPlantArm { 50% { transform: translateY(2px); } }
+@media (prefers-reduced-motion: reduce) { .dfPlant * { animation: none !important; } }
+.dfPlantCoverage { margin: 0 0 .5rem; font: 12px ui-monospace, monospace; }
+.dfPlantCoverage--observed { color: #5ad38a; }
+.dfPlantCoverage--partial { color: #f2c94c; }
+.dfPlantCoverage--unobserved { color: #4cc3e6; }
+.dfPlantReading.op-failing { color: #ff5f56; }
+.dfPlantReading.op-degraded { color: #f2c94c; }
+.dfPlantReading.s-unobserved { color: #4cc3e6; }
+.dfPlant__scaffold { fill: none; stroke: var(--hazard); stroke-width: 2; stroke-dasharray: 6 3; }
+.dfPlant__changed { fill: var(--hazard); stroke: var(--outline); }
+.dfPlant__changedText { fill: var(--outline); font-size: 10px; font-weight: 700; }

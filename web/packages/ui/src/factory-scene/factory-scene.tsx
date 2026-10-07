@@ -1,5 +1,5 @@
 import { useLayoutEffect, useEffect, useMemo, useRef, useState, type MouseEvent, type FocusEvent, type PointerEvent, type KeyboardEvent, type ReactNode } from "react";
-import type { PeerQuestionItem } from "@dark-factory/client";
+import type { OperationalNodeView, PeerQuestionItem } from "@dark-factory/client";
 import type { SceneTask } from "../console-view.js";
 import {
   PADDING,
@@ -10,13 +10,17 @@ import {
   placeWorkers,
   placeErrands,
   breakRoomNook,
-  inventoryLabels,
-  responsibility,
   proposalsForEntity,
   type RoomContent,
-  type SceneRoomLayout,
+  type SceneFlow,
+  type SceneGraph,
+  type SceneHall,
+  type SceneLayout,
+  type SceneMachine,
+  type ScenePoint,
   type SceneProposal,
-  type SceneTopology,
+  type SceneReading,
+  type SceneRoomLayout,
   type SceneWorker,
 } from "./scene.js";
 import { DEFAULT_FLOOR_APPEARANCE, type FloorAppearance } from "../floor-appearance.js";
@@ -31,17 +35,19 @@ import { spriteAtlas, spriteSheet, spriteSheetSize } from "./sprites/sprites.gen
 export type FactorySceneProps = Readonly<{
   proposals?: { items: readonly SceneProposal[]; selected?: string; onSelect: (id: string) => void };
   tools?: ReactNode;
-  sourceDetails?: ReactNode;
-  onDiscussSource?: () => void;
+  /** Read one machine's evidence when its inspector opens. */
+  onLoadNode?: (nodeId: string) => Promise<OperationalNodeView>;
+  /** Queue an investigation of a machine as an ordinary task. */
+  onInvestigate?: (machine: SceneMachine, hall?: SceneHall) => void;
+  onDiscussSource?: (nodeId: string) => void;
   requestedEntity?: { id: string };
   onSelectEntity?: (entityId: string | undefined) => void;
   onOpenLibrary?: (projectId?: string) => void;
   onOpenBoard?: (projectId?: string) => void;
   appearance?: FloorAppearance;
-  topology: SceneTopology;
+  graph: SceneGraph;
   /** Current project scope, when the floor has one. */
   projectId?: string;
-  detailNodes?: ReadonlyMap<string, SceneTopology["nodes"][number]>;
   workers: readonly SceneWorker[];
   tasks?: readonly SceneTask[];
   /** Questions between live tasks: shown as they are asked and answered, and stated while they wait. */
@@ -55,8 +61,6 @@ export type FactorySceneProps = Readonly<{
   onSelectHumanRequest?: (requestId: string) => void;
   /** A dropped session reconciles to its latest snapshot instead of replaying local motion. */
   connected?: boolean;
-  /** Current changed locations omitted by the bounded room map. */
-  omittedLocations?: number;
   /** The selected agent is highlighted without changing its deterministic placement. */
   selectedWorkerId?: string;
   /** Pointer convenience only; the AGENTS list is the keyboard path. */
@@ -70,6 +74,7 @@ export type AgentSpriteProps = Readonly<{
 }>;
 
 const FRAME = spriteAtlas.frame;
+const DAY = 24 * 60 * 60_000, CHANGEOVER = 10 * 60_000;
 const NO_QUESTIONS: readonly PeerQuestionItem[] = [];
 // Tables stand this far below a seat's centre: over the lap, under the hands.
 const TABLE_DROP = 29;
@@ -140,11 +145,11 @@ function useReducedMotion() {
 }
 
 /** One browser clock; source state only ever supplies the next local destination. */
-function useSceneMotion(layout: ReturnType<typeof layoutScene>, seated: ReturnType<typeof placeWorkers>, topologyDigest: string, connected: boolean, reduced: boolean, active: ReadonlySet<string>, workers: FactorySceneProps["workers"], errands: boolean, nearby: boolean, restless: (at: number) => boolean) {
+function useSceneMotion(layout: ReturnType<typeof layoutScene>, seated: ReturnType<typeof placeWorkers>, floorDigest: string, connected: boolean, reduced: boolean, active: ReadonlySet<string>, workers: FactorySceneProps["workers"], errands: boolean, nearby: boolean, restless: (at: number) => boolean) {
   const motions = useRef(new Map<string, MotionState>());
-  const priorTopology = useRef<string | undefined>(undefined);
+  const priorFloor = useRef<string | undefined>(undefined);
   const priorConnected = useRef<boolean | undefined>(undefined);
-  const motionsFloor = useRef(topologyDigest);
+  const motionsFloor = useRef(floorDigest);
   const [clock, setClockState] = useState(0);
   // Where nothing may move, or the floor has been replaced, remembered motion and turns are ignored at once.
   const moving = connected && !reduced && (typeof document === "undefined" || document.visibilityState === "visible");
@@ -158,7 +163,7 @@ function useSceneMotion(layout: ReturnType<typeof layoutScene>, seated: ReturnTy
     setClockState(at);
   };
   // The break room keeps no clock of its own: every couple of seconds of moving time it asks who has got up.
-  const errandClock = moving && errands && motionsFloor.current === topologyDigest ? Math.floor(movingTime.current.total / 2000) * 2000 : undefined;
+  const errandClock = moving && errands && motionsFloor.current === floorDigest ? Math.floor(movingTime.current.total / 2000) * 2000 : undefined;
   // Who holds which piece, so that a visit outlasts changes among the others resting.
   const errandsBefore = useRef<ReturnType<typeof placeWorkers>>([]);
   const placements = useMemo(() => {
@@ -172,15 +177,15 @@ function useSceneMotion(layout: ReturnType<typeof layoutScene>, seated: ReturnTy
   useEffect(() => {
     const at = now();
     const hidden = typeof document !== "undefined" && document.visibilityState !== "visible";
-    const topologyChanged = priorTopology.current !== undefined && priorTopology.current !== topologyDigest;
+    const floorChanged = priorFloor.current !== undefined && priorFloor.current !== floorDigest;
     const reconnected = priorConnected.current === false && connected;
-    priorTopology.current = topologyDigest;
+    priorFloor.current = floorDigest;
     priorConnected.current = connected;
     const previous = motions.current;
     const next = new Map<string, MotionState>();
     for (const placement of placements) {
       const old = previous.get(placement.id);
-      if (old === undefined || reduced || hidden || topologyChanged || reconnected || !connected) {
+      if (old === undefined || reduced || hidden || floorChanged || reconnected || !connected) {
         next.set(placement.id, { placement, point: placement });
         continue;
       }
@@ -196,10 +201,10 @@ function useSceneMotion(layout: ReturnType<typeof layoutScene>, seated: ReturnTy
         : { placement, point: current, route, startedAt: at });
     }
     motions.current = next;
-    if (motionsFloor.current !== topologyDigest) movingTime.current = { total: 0, last: undefined };
-    motionsFloor.current = topologyDigest;
+    if (motionsFloor.current !== floorDigest) movingTime.current = { total: 0, last: undefined };
+    motionsFloor.current = floorDigest;
     setClock(at);
-  }, [connected, layout, placements, reduced, topologyDigest]);
+  }, [connected, layout, placements, reduced, floorDigest]);
 
   useEffect(() => {
     if (!connected || reduced || typeof document !== "undefined" && document.visibilityState !== "visible" || typeof requestAnimationFrame !== "function") return;
@@ -229,7 +234,7 @@ function useSceneMotion(layout: ReturnType<typeof layoutScene>, seated: ReturnTy
   // floor it was worked out on has been replaced, everyone is simply drawn where they belong.
   const output = new Map<string, Readonly<{ x: number; y: number; motion: WorkerMotion; placement: ReturnType<typeof placeWorkers>[number] }>>();
   for (const placement of placements) {
-    const state = moving && motionsFloor.current === topologyDigest ? motions.current.get(placement.id) : undefined;
+    const state = moving && motionsFloor.current === floorDigest ? motions.current.get(placement.id) : undefined;
     const current = state === undefined ? { point: placement, walking: false } : motionPoint(state, clock);
     const at = moving ? clock + workerPhase(placement.id) : undefined;
     output.set(placement.id, {
@@ -245,11 +250,11 @@ function useSceneMotion(layout: ReturnType<typeof layoutScene>, seated: ReturnTy
 }
 
 /** The animation clock updates worker elements without rerendering the floor or atlas. */
-function SceneWorkers({ nearby, errands, furniture, restingSeats, tray, peerQuestions, layout, placements: seated, nodes, workers, tasks, connected, animate, selectedWorkerId, onSelectWorker, onSelectTask, onSelectHumanRequest, onSelectProposal }: Pick<FactorySceneProps, "workers" | "selectedWorkerId" | "onSelectWorker" | "onSelectTask" | "onSelectHumanRequest"> & {
+function SceneWorkers({ nearby, errands, furniture, restingSeats, tray, peerQuestions, layout, placements: seated, labels, workers, tasks, connected, animate, selectedWorkerId, onSelectWorker, onSelectTask, onSelectHumanRequest, onSelectProposal }: Pick<FactorySceneProps, "workers" | "selectedWorkerId" | "onSelectWorker" | "onSelectTask" | "onSelectHumanRequest"> & {
   onSelectProposal?: (id: string) => void;
   layout: ReturnType<typeof layoutScene>;
   placements: ReturnType<typeof placeWorkers>;
-  nodes: ReadonlyMap<string, SceneTopology["nodes"][number]>;
+  labels: ReadonlyMap<string, string>;
   tasks: readonly SceneTask[];
   connected: boolean;
   animate: boolean;
@@ -337,10 +342,9 @@ function SceneWorkers({ nearby, errands, furniture, restingSeats, tray, peerQues
         const position = positions.get(told.id) ?? { ...told, placement: told, motion: { action: "still", frame: 0 } as WorkerMotion };
         // Drawn as where their motion has them, which is a render behind where they have just been told to go.
         const placement = position.placement;
-        const room = placement.roomId === undefined ? undefined : nodes.get(placement.roomId);
-        const picturedSurface = layout.rooms.find((candidate) => candidate.id === placement.roomId)?.contents.some((item) => item.workSurface);
+        const room = placement.roomId === undefined ? undefined : { label: labels.get(placement.roomId) ?? "" };
         const location = worker.location === "working"
-          ? `representative location${worker.locationWithin ? " within this component; more specific observed area" : " near observed changes"}${worker.locationLabel === undefined && room === undefined ? "" : ` in ${worker.locationLabel ?? room?.label}`}; ${placement.area === "room" ? picturedSurface ? "at the pictured work surface" : "at a general work position; inventory unavailable or empty" : placement.area === "outside" ? "outside displayed rooms" : "worker area at capacity"}`
+          ? `at the machine its observed changes touch${worker.locationLabel === undefined ? "" : ` in ${worker.locationLabel}`}; ${placement.area === "room" ? "representative position, not exact file inspection" : placement.area === "outside" ? "outside displayed halls" : "worker area at capacity"}`
           : worker.location === "unobserved" ? "working; location not yet observed"
           : worker.location === "last-observed" && worker.locationLabel !== undefined ? `last observed near changes in ${worker.locationLabel}; resting area`
           : worker.paused ? "paused in resting area" : "ready in resting area";
@@ -374,7 +378,7 @@ function SceneWorkers({ nearby, errands, furniture, restingSeats, tray, peerQues
               <g data-seated={sitting ? placement.area === "resting" ? "coffee" : "planning" : undefined} data-active-pose={position.motion.action === "interacting" ? position.motion.frame : undefined}><g transform={`scale(${WORKER_SIZE / FRAME})${bob === 0 ? "" : ` translate(0 ${bob})`}${facingWest ? " scale(-1 1)" : ""}`}>{frames.map((frame) => <Frame key={frame} name={frame} x={-8} y={-8} />)}</g>
               </g>
             </g>
-            <g role="img" className="dfFactoryScene__target" data-tooltip={`${worker.name} · ${worker.activity}${worker.review ? `\nReview assignment: ${worker.review.scope}; representative visit, not exact file inspection` : ""}\n${placement.area === "room" ? `Working near ${worker.locationLabel ?? room?.label ?? "observed changes"}` : placement.errand === "shelf" ? "Taking a break · at the bookshelf" : placement.errand === "coffee" ? "Taking a break · at the coffee station" : placement.area === "resting" ? `${worker.paused ? "Paused · taking a break" : "Taking a break"}${stroking === undefined ? "" : " · fussing the cat"}${said}` : worker.location === "unobserved" ? "Planning · location not yet observed" : "Planning · work outside this room"}${[...new Set(asking)].join("")}`} aria-label={`${worker.name}, ${worker.review ? "reviewer" : worker.role}, ${worker.activity}, ${worker.review?.scope ?? location}`} {...sceneAction(worker.review && onSelectProposal ? () => onSelectProposal(worker.review!.proposalId) : onSelectWorker === undefined ? undefined : () => onSelectWorker(worker.id))}>
+            <g role="img" className="dfFactoryScene__target" data-tooltip={`${worker.name} · ${worker.activity}${worker.review ? `\nReview assignment: ${worker.review.scope}; representative visit, not exact file inspection` : ""}\n${placement.area === "room" ? `Working at ${worker.locationLabel ?? room?.label ?? "observed changes"}` : placement.errand === "shelf" ? "Taking a break · at the bookshelf" : placement.errand === "coffee" ? "Taking a break · at the coffee station" : placement.area === "resting" ? `${worker.paused ? "Paused · taking a break" : "Taking a break"}${stroking === undefined ? "" : " · fussing the cat"}${said}` : worker.location === "unobserved" ? "Planning · location not yet observed" : "Planning · work outside the halls shown"}${[...new Set(asking)].join("")}`} aria-label={`${worker.name}, ${worker.review ? "reviewer" : worker.role}, ${worker.activity}, ${worker.review?.scope ?? location}`} {...sceneAction(worker.review && onSelectProposal ? () => onSelectProposal(worker.review!.proposalId) : onSelectWorker === undefined ? undefined : () => onSelectWorker(worker.id))}>
                 <rect className="dfFactoryScene__focus" x={-12} y={-12} width="24" height="24" rx="3" fill="transparent" />
             </g>
             {worker.review === undefined ? null : <g aria-hidden="true"><rect x="7" y="1" width="10" height="13" fill="#e1d1aa" stroke="#5c787b" /><text x="12" y="10" textAnchor="middle" fill="#203d46" fontSize="8">R</text></g>}
@@ -408,29 +412,14 @@ function SceneWorkers({ nearby, errands, furniture, restingSeats, tray, peerQues
       </g></>;
 }
 
-/** A disposable SVG projection of topology and current factory state. */
-export function FactoryScene({ proposals, tools, sourceDetails, onDiscussSource, requestedEntity, onSelectEntity, onOpenLibrary, onOpenBoard, topology, detailNodes, workers, appearance = DEFAULT_FLOOR_APPEARANCE, omittedLocations = 0, selectedWorkerId, onSelectWorker, tasks = [], peerQuestions = NO_QUESTIONS, selectedTaskId, onSelectTask, onOpenTasks, onOpenMissions, onSelectHumanRequest, projectId, connected = true }: FactorySceneProps) {
-  const [selectedRoomId, setSelectedRoomId] = useState<string>();
+/** A disposable SVG projection of the operational world and current factory state. */
+export function FactoryScene({ proposals, tools, onLoadNode, onInvestigate, onDiscussSource, requestedEntity, onSelectEntity, onOpenLibrary, onOpenBoard, graph, workers, appearance = DEFAULT_FLOOR_APPEARANCE, selectedWorkerId, onSelectWorker, tasks = [], peerQuestions = NO_QUESTIONS, selectedTaskId, onSelectTask, onOpenTasks, onOpenMissions, onSelectHumanRequest, projectId, connected = true }: FactorySceneProps) {
+  const [selectedId, setSelectedId] = useState<string>();
   const [search, setSearch] = useState("");
   const mapElement = useRef<HTMLDivElement>(null);
-  const [viewport, setViewport] = useState<{ top: number; bottom: number }>();
-  const updateViewport = () => {
-    const map = mapElement.current, svg = map?.querySelector?.("svg");
-    if (!map || !svg || !map.clientHeight) return;
-    const scale = svg.getBoundingClientRect().width / svg.viewBox.baseVal.width;
-    if (scale > 0) { const top = (map.getBoundingClientRect().top - svg.getBoundingClientRect().top) / scale; setViewport({ top: top - 180, bottom: top + map.clientHeight / scale + 180 }); }
-  };
-  useEffect(() => {
-    updateViewport();
-    const map = mapElement.current;
-    if (!map || typeof ResizeObserver === "undefined") return;
-    const observer = new ResizeObserver(updateViewport); observer.observe(map);
-    return () => observer.disconnect();
-  }, [topology.digest]);
-  const selectEntity = (id: string | undefined) => { setSelectedRoomId(id); onSelectEntity?.(id); };
+  const selectEntity = (id: string | undefined) => { setSelectedId(id); onSelectEntity?.(id); };
   const [tooltip, setTooltip] = useState<{ text: string; x: number; y: number; top: number; bottom: number; room: number }>();
   const tooltipElement = useRef<HTMLDivElement>(null);
-  const [linkedFrom, setLinkedFrom] = useState<string>();
   useLayoutEffect(() => {
     if (!tooltip || !tooltipElement.current) return;
     const height = tooltipElement.current.getBoundingClientRect().height;
@@ -444,31 +433,19 @@ export function FactoryScene({ proposals, tools, sourceDetails, onDiscussSource,
     setTooltip({ text: target.getAttribute("data-tooltip")!, x: Math.max(8, Math.min(box.left, window.innerWidth - 272)), y: Math.max(8, box.bottom), top: box.top, bottom: box.bottom, room: window.innerHeight });
   };
   const retainFocusedTooltip = () => showTooltip(typeof document !== "undefined" && document.activeElement?.matches("[data-tooltip]") ? document.activeElement : null);
-  const inspect = (event: PointerEvent<HTMLDivElement> | FocusEvent<HTMLDivElement> | MouseEvent<HTMLDivElement>) => {
-    const element = event.target as Element;
-    showTooltip(element.closest("[data-tooltip]"));
-    setLinkedFrom(element.closest("[data-room-id]")?.getAttribute("data-room-id") ?? undefined);
-  };
-  const layout = useMemo(() => layoutScene(topology, proposals?.selected), [topology, proposals?.selected]);
+  const inspect = (event: PointerEvent<HTMLDivElement> | FocusEvent<HTMLDivElement> | MouseEvent<HTMLDivElement>) => showTooltip((event.target as Element).closest("[data-tooltip]"));
+  const layout = useMemo(() => layoutScene(graph), [graph.digest]);
   const placements = useMemo(() => placeWorkers(layout, workers, appearance.social), [layout, workers, appearance.social]);
+  // Live readings change without moving anything: they are looked up by id at draw time.
+  const machines = new Map<string, SceneMachine>([...graph.halls.flatMap((hall) => [[hall.id, { id: hall.id, kind: "processor", label: hall.label, reading: hall.reading }] as const, ...hall.machines.map((machine) => [machine.id, machine] as const)]),
+    ...[...graph.shared, ...graph.parties, ...graph.quarantine].map((machine) => [machine.id, machine] as const)]);
+  const hallOf = new Map(graph.halls.flatMap((hall) => [[hall.id, hall] as const, ...hall.machines.map((machine) => [machine.id, hall] as const)]));
+  const labels = new Map<string, string>([...graph.halls.map((hall) => [hall.id, hall.label] as const), ["yard", "Shared yard"], ["quarantine", "Quarantine"]]);
   const visibleProposals = proposals?.items.filter((proposal) => !proposals.selected || proposal.id === proposals.selected) ?? [];
-  const nodes = new Map(topology.nodes.filter((node) => !node.proposed || visibleProposals.some((proposal) => proposal.operations.some((operation) => operation.roomId === node.id))).map((node) => [node.id, node]));
-  const availableNodes = new Map(detailNodes ?? nodes);
-  for (const node of nodes.values()) if (node.proposed) availableNodes.set(node.id, { ...node, sourceIncomplete: true, components: (node.assemblies ?? []).filter((assembly) => !assembly.proposalId || visibleProposals.some((proposal) => proposal.id === assembly.proposalId)).map((assembly) => ({ id: assembly.id, label: assembly.label })) });
-  for (const node of nodes.values()) for (const assembly of node.assemblies ?? []) if ((!assembly.proposalId || visibleProposals.some((proposal) => proposal.id === assembly.proposalId)) && !availableNodes.has(assembly.id)) availableNodes.set(assembly.id, { ...assembly, kind: "directory", project: node.project });
-  const roomFor = (id: string) => layout.rooms.find((room) => room.id === id || nodes.get(room.id)?.assemblies?.some((assembly) => assembly.id === id || assembly.representedIds?.includes(id)));
-  const focusEntity = (id: string) => { selectEntity(id); const room = roomFor(id); if (room) Array.from(mapElement.current?.querySelectorAll("[data-room-id]") ?? []).find((element) => element.getAttribute("data-room-id") === room.id)?.scrollIntoView({ block: "center", inline: "center", behavior: "instant" }); };
+  const contentById = new Map(layout.rooms.flatMap((room) => room.contents.map((item) => [item.entityId, { item, room }] as const)));
+  const focusEntity = (id: string) => { selectEntity(id); const found = contentById.get(id); if (found) Array.from(mapElement.current?.querySelectorAll("[data-room-id]") ?? []).find((element) => element.getAttribute("data-room-id") === found.room.id)?.scrollIntoView({ block: "center", inline: "center", behavior: "instant" }); };
   useEffect(() => { if (requestedEntity) { setSearch(""); focusEntity(requestedEntity.id); } }, [requestedEntity]);
-  const operationMatches = (operation: SceneProposal["operations"][number], roomId: string, item?: RoomContent) => item === undefined
-    ? operation.roomId === roomId || operation.entityId === roomId
-    : operation.entityId === item.entityId || item.representedIds?.includes(operation.entityId ?? "") || operation.roomId === roomId && !operation.entityId;
-  const operationsFor = (roomId: string, item?: RoomContent) => visibleProposals.filter((proposal) => !item?.proposalId || item.proposalId === proposal.id).flatMap((proposal) => proposal.operations.filter((operation) => operationMatches(operation, roomId, item)).map((operation) => ({ proposal, operation })));
-  const selectedRoom = availableNodes.get(selectedRoomId ?? "");
-  const selectedAssembly = topology.nodes.flatMap((node) => node.assemblies ?? []).find((assembly) => assembly.id === selectedRoomId);
-  const contents = (selectedAssembly?.representedIds?.length ?? 0) > 1
-    ? selectedAssembly!.representedIds!.filter((id) => id !== selectedRoomId).flatMap((id) => { const node = availableNodes.get(id); return node ? [{ id, label: node.path }] : []; })
-    : selectedRoom?.components ?? [];
-  const links = selectedRoom?.dependencies?.links ?? [];
+  const operationsFor = (id: string) => visibleProposals.flatMap((proposal) => proposal.operations.filter((operation) => operation.entityId === id).map((operation) => ({ proposal, operation })));
   const resting = placements.filter((placement) => placement.area === "resting");
   const planning = placements.filter((placement) => placement.area !== "room" && placement.area !== "resting");
   const commonResting = resting.filter((placement) => placement.roomId === undefined);
@@ -477,25 +454,15 @@ export function FactoryScene({ proposals, tools, sourceDetails, onDiscussSource,
   const commonBottom = Math.max(layout.restingTop, ...seats.map(({ y }) => y)) + 32;
   const nook = breakRoomNook(layout, commonResting.length, planning.length, appearance.social === "nearby");
   const station = { missions: { x: PADDING + 40, y: 48 }, tasks: { x: PADDING + 120, y: 48 } };
-  const boardTop = Math.max(layout.height, commonBottom, 112, ...placements.map((placement) => placement.y + 24)) + PADDING;
   const sceneWidth = layout.width;
-  const sceneHeight = boardTop + PADDING;
-  const affected = new Map(layout.rooms.map((room) => [room.id, tasks.filter((order) => order.status === "running" && (order.displayRoomIds ?? order.roomIds).includes(room.id))]));
-  const cabling = useMemo(() => wires(layout, topology), [layout, topology]);
-  const proposedCables = visibleProposals.flatMap((proposal) => (proposal.relationships ?? []).flatMap((edge) => {
-    const from = nodes.get(edge.fromId ?? ""), to = nodes.get(edge.toId ?? "");
-    if (!from || !to) return [];
-    const routes = wires(layout, { digest: topology.digest, nodes: [{ ...from, dependencies: { omitted: 0, links: [{ nodeId: to.id, label: to.label, path: to.path, direction: "to", weight: edge.weight }] } }] }).routes;
-    return routes.map((route) => ({ ...route, edge, proposal }));
-  }));
+  const sceneHeight = Math.max(layout.height, commonBottom, 112, ...placements.map((placement) => placement.y + 24)) + 2 * PADDING;
+  const busy = new Map(layout.rooms.map((room) => [room.id, tasks.filter((order) => order.status === "running" && order.roomIds.includes(room.id))]));
+  const belts = useMemo(() => routeFlows(layout, graph.flows), [layout, graph.flows]);
   const queued = tasks.filter((order) => order.status === "queued").length;
-  // The hand-off origin is the visible task tray, below rather than beside the seats.
   const tray = station.tasks;
-  // A compact scope still needs room for readable labels, not poster-sized
-  // sprites; larger scopes retain their existing scrollable viewport.
-  const maxWidth = sceneWidth;
-  // One table per row, as long as the row, standing between the viewer and the
-  // people at it: it covers their laps, and what they rest with sits on it.
+  const animate = connected && appearance.animation !== "off";
+  // Changeovers are dated against the graph's own observation time, never the viewer's clock.
+  const observedAt = graph.observedAt ?? 0;
   const tables = [{ seats: seating.resting, planning: false }, { seats: seating.planning, planning: true }].flatMap(({ seats, planning }) =>
     [...new Set(seats.map((seat) => seat.y))].map((y) => { const row = seats.filter((seat) => seat.y === y), first = row[0]!;
       const tableWidth = row.at(-1)!.x - first.x + 36;
@@ -503,24 +470,28 @@ export function FactoryScene({ proposals, tools, sourceDetails, onDiscussSource,
         <rect x="-18" y="-21" width={tableWidth} height="10" fill={planning ? "#455c5e" : "#655d4c"} stroke="#8c8871" />
         {!planning ? null : <g><rect x="-17" y="-20" width={tableWidth - 2} height="8" fill="#9fae9e" /><path d={`M-14 -18h${Math.max(12, tableWidth - 18)}v3h-7v-3 M${tableWidth - 22} -17h4`} fill="none" stroke="#536e70" /></g>}
       </g>; }));
+  const selected = selectedId === undefined ? undefined : machines.get(selectedId);
+  const searchable = [...machines.values()];
 
   return (
     <>
     <div className="dfFactoryEntityTools">
-      <label>Find source <input type="search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Package, assembly or path" /></label>
-      {search === "" ? null : <div className="dfFactoryEntityTools__results">{[...availableNodes.values()].filter((node) => !node.proposed && `${node.label} ${node.path}`.toLowerCase().includes(search.toLowerCase())).slice(0, 30).map((node) => <button type="button" key={node.id} onClick={() => focusEntity(node.id)}>{node.path === "." ? node.label : node.path}</button>)}</div>}
+      {graph.summary === undefined ? null : <Coverage summary={graph.summary} />}
+      <label>Find machine <input type="search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Route, unit, store or party" /></label>
+      {search === "" ? null : <div className="dfFactoryEntityTools__results">{searchable.filter((machine) => `${machine.label} ${machine.kind}`.toLowerCase().includes(search.toLowerCase())).slice(0, 30).map((machine) => <button type="button" key={machine.id} onClick={() => focusEntity(machine.id)}>{machine.label} · {machine.kind}</button>)}</div>}
       {tools}
       {proposals?.selected && proposals.items.some((item) => item.id === proposals.selected) ? <p className="dfFactoryEntityTools__notice"><span className="dfFactoryEntityTools__selection">Viewing: {proposals.items.find((item) => item.id === proposals.selected)?.title}</span><button type="button" onClick={() => proposals.onSelect("")}>Clear selection</button></p> : null}
     </div>
-    <div ref={mapElement} className="dfFactoryFloor__map" onClick={inspect} onPointerOver={inspect} onFocus={inspect} onPointerLeave={() => { retainFocusedTooltip(); setLinkedFrom(undefined); }} onBlur={() => { setTooltip(undefined); setLinkedFrom(undefined); }} onScroll={() => { retainFocusedTooltip(); updateViewport(); }} onKeyDown={(event) => { if (event.key === "Escape") { setTooltip(undefined); setLinkedFrom(undefined); } }} role="region" aria-label="Scrollable codebase floor" tabIndex={0}>
+    <div ref={mapElement} className="dfFactoryFloor__map" onClick={inspect} onPointerOver={inspect} onFocus={inspect} onPointerLeave={retainFocusedTooltip} onBlur={() => setTooltip(undefined)} onScroll={retainFocusedTooltip} onKeyDown={(event) => { if (event.key === "Escape") setTooltip(undefined); }} role="region" aria-label="Scrollable factory floor" tabIndex={0}>
     <svg
       viewBox={`0 0 ${sceneWidth} ${sceneHeight}`}
       role="group"
-      aria-label="Dark Factory codebase floor"
-      data-topology-digest={topology.digest}
-      style={{ display: "block", width: "100%", minWidth: Math.min(sceneWidth, 864), maxWidth, height: "auto", margin: "0 auto", background: "#08131d" }}
+      aria-label="Dark Factory operational floor"
+      data-graph-digest={graph.digest}
+      className={animate ? "dfPlant dfPlant--moving" : "dfPlant"}
+      style={{ display: "block", width: "100%", minWidth: Math.min(sceneWidth, 864), maxWidth: sceneWidth, height: "auto", margin: "0 auto" }}
     >
-      <desc>{`${layout.rooms.length} topology spaces, ${workers.length} workers${omittedLocations === 0 ? "" : `, ${omittedLocations} current locations not shown in this view`}`}</desc>
+      <desc>{`${graph.halls.length} units, ${graph.shared.length} shared stores, ${graph.parties.length} external parties, ${graph.quarantine.length} unexplained runtime paths, ${workers.length} workers`}</desc>
       <defs>
         {/* The sheet enters the document once; every frame is a window on it. */}
         <image id="df-sheet" href={spriteSheet} width={spriteSheetSize.width} height={spriteSheetSize.height} style={{ imageRendering: "pixelated" }} />
@@ -538,97 +509,87 @@ export function FactoryScene({ proposals, tools, sourceDetails, onDiscussSource,
           <rect width="24" height="12" fill="#41494a" />
           <path d="M0 0h24 M0 6h24 M12 0v6 M0 6v6 M24 6v6" stroke="#20292d" strokeWidth="2" />
         </pattern>
+        <pattern id="df-blueprint" patternUnits="userSpaceOnUse" width="6" height="6"><rect width="6" height="6" fill="#4cc3e60f" /><path d="M0 6h6M6 0v6" stroke="#4cc3e633" strokeWidth="1" /></pattern>
+        <pattern id="df-fog" patternUnits="userSpaceOnUse" width="6" height="6" patternTransform="rotate(45)"><rect width="6" height="6" fill="#2c3139" /><path d="M0 0v6" stroke="#4a515b" strokeWidth="2" /></pattern>
+        <pattern id="df-hazard" patternUnits="userSpaceOnUse" width="12" height="12" patternTransform="rotate(45)"><rect width="12" height="12" fill="#1a1d22" /><rect width="6" height="12" fill="#e6b93a" /></pattern>
         <radialGradient id="df-lamplight" cx="50%" cy="45%" r="60%">
           <stop offset="0" stopColor="#f2dab0" stopOpacity=".24" />
           <stop offset="1" stopColor="#f2dab0" stopOpacity="0" />
         </radialGradient>
       </defs>
-      <rect width={layout.width} height={sceneHeight} fill="#08131d" />
+      <rect width={sceneWidth} height={sceneHeight} fill="#08131d" />
       {layout.corridors.map((corridor, index) => <rect key={index} data-corridor="" {...corridor} fill="url(#df-floor)" />)}
       <rect x={PADDING} y={16} width={ROOM_LEFT - PADDING} height={commonBottom - 16} fill="url(#df-floor)" />
-      {layout.headings.map((heading) => (
-        <text key={heading.y} data-floor-heading={heading.label} x={heading.x} y={heading.y + 11} fill="#b9cad5" fontFamily="ui-monospace, monospace" fontSize="9" fontWeight="700">
-          {shortLabel(heading.label)}
-        </text>
-      ))}
+      {layout.headings.map((heading) => <text key={heading.y} data-floor-heading={heading.label} x={heading.x} y={heading.y + 11} className="dfPlant__heading">{heading.label}</text>)}
 
       {layout.rooms.map((room) => {
-        const node = nodes.get(room.id);
-        if (node === undefined) return null;
-        const footprint = affected.get(room.id) ?? [];
-        const contents = room.contents.filter((item) => !item.proposalId || visibleProposals.some((proposal) => proposal.id === item.proposalId));
+        const hall = graph.halls.find((candidate) => candidate.id === room.id);
+        const footprint = busy.get(room.id) ?? [];
         const task = footprint.find((order) => order.id === selectedTaskId) ?? footprint[0];
         const operating = connected && task !== undefined;
-        const roomOperations = visibleProposals.flatMap((proposal) => proposal.operations.filter((operation) => operationMatches(operation, room.id) || node.assemblies?.some((assembly) => assembly.id === operation.entityId || assembly.representedIds?.includes(operation.entityId ?? ""))).map((operation) => ({ proposal, operation })));
-        const relevant = roomOperations.length > 0 || room.contents.some((item) => operationsFor(room.id, item).length > 0) || placements.some((placement) => placement.roomId === room.id) || roomFor(selectedRoomId ?? "")?.id === room.id;
-        if (layout.rooms.length > 20 && viewport && !relevant && (room.y + room.height < viewport.top || room.y > viewport.bottom)) return <g key={room.id} data-room-id={room.id} data-viewport-placeholder="true" aria-hidden="true"><rect x={room.x} y={room.y} width={room.width} height={room.height} fill="#222c2f" stroke="#465355" /><text x={room.x + 14} y={room.y + 28} fill="#91a69c" fontSize="10">{shortLabel(node.label, 32)}</text></g>;
-        return (
-          <g key={room.id} data-room-id={room.id} data-proposed-room={node.proposed || undefined}>
-
-            <rect x={room.x} y={room.y} width={room.width} height={room.height} fill="url(#df-floor)" />
+        return <g key={room.id} data-room-id={room.id} data-room-kind={room.kind}>
+          <rect x={room.x} y={room.y} width={room.width} height={room.height} fill={room.kind === "quarantine" ? "#1b1f25" : "url(#df-floor)"} />
+          {room.kind === "quarantine" ? <rect x={room.x + 2} y={room.y + 2} width={room.width - 4} height={room.height - 4} fill="none" stroke="url(#df-hazard)" strokeWidth="4" /> : <>
             <rect x={room.x} y={room.y} width={room.width} height="10" fill="url(#df-wall)" />
             <path data-room-walls="" d={`M${room.door.x - 16},${room.door.y} H${room.x} V${room.y} M${room.x + room.width},${room.y} V${room.door.y} H${room.door.x + 16}`} fill="none" stroke="#465355" strokeWidth="4" />
-            <path d={`M${room.x + 4} ${room.y + 10}v${room.height - 14} M${room.x + room.width - 4} ${room.y + 10}v${room.height - 14}`} stroke="#141f23" strokeWidth="2" />
-            <rect x={room.x + 4} y={room.y + 10} width={room.width - 8} height={room.height - 12} fill={operating ? "url(#df-lamplight)" : "#08131d"} opacity={operating ? 1 : .18} pointerEvents="none" />
-            {appearance.scenery === "off" ? null : <g aria-hidden="true" opacity={appearance.scenery === "subtle" ? .35 : .6}>
-              <path d={`M${room.door.x - 12} ${room.door.y - 8}h24 M${room.door.x - 7} ${room.door.y - 14}h14`} stroke="#53615c" strokeWidth="2" />
+          </>}
+          <rect x={room.x + 4} y={room.y + 10} width={room.width - 8} height={room.height - 12} fill={operating ? "url(#df-lamplight)" : "#08131d"} opacity={operating ? 1 : .18} pointerEvents="none" />
+          {hall === undefined ? null : <g className="dfFactoryScene__target" {...sceneAction(() => selectEntity(hall.id))} data-tooltip={machineInfo({ id: hall.id, kind: "processor", label: hall.label, reading: hall.reading }, hall)} aria-label={`Inspect ${hall.label}`}>
+            <rect className="dfFactoryScene__focus dfPlant__plate" x={room.x + 8} y={room.y + 12} width={Math.min(room.width - 44, 6 * Math.min(hall.label.length, Math.floor((room.width - 60) / 6)) + 14)} height="20" rx="2" />
+            <text x={room.x + 14} y={room.y + 26} className="dfPlant__plateText">{shortLabel(hall.label, Math.floor((room.width - 60) / 6))}</text>
+            {hall.runtime === undefined ? null : <text x={room.x + 10} y={room.y + 42} className="dfPlant__small">{hall.runtime}</text>}
+            {hall.reading.deployedAt === undefined || observedAt - hall.reading.deployedAt > DAY ? null : <g data-changeover={hall.reading.deployedAt}>
+              {observedAt - hall.reading.deployedAt < CHANGEOVER ? <path d={`M${room.x + 6} ${room.y + 10}h${room.width - 12}M${room.x + 10} ${room.y + 10}v${room.height - 20}M${room.x + room.width - 10} ${room.y + 10}v${room.height - 20}`} className="dfPlant__scaffold" /> : null}
+              <rect x={room.x + room.width - 30} y={room.y + 14} width="22" height="14" className="dfPlant__changed" /><text x={room.x + room.width - 19} y={room.y + 24} textAnchor="middle" className="dfPlant__changedText">Δ</text>
             </g>}
-            {contents.map((item) => {
-              const edits = operationsFor(room.id, item);
-              const proposedPaths = [...new Set(edits.map(({ operation }) => operation.path))];
-              const sourceHint = proposedPaths.find((path) => /\.(?:go|[cm]?[jt]sx?|py|rs|c|cpp|h|sh)$/.test(path));
-              const pictured = node.proposed && item.resourceCounts === undefined && sourceHint ? { ...item, kind: "source" as const, responsibility: responsibility(sourceHint) } : item;
-              return <g key={item.key} data-room-content={item.kind} data-entity-id={item.entityId} data-tooltip={item.entityId === undefined ? roomInfo(node) : `${item.label}${(item.representedIds?.length ?? 0) > 1 ? `\nAggregate of ${item.representedIds!.length} source areas` : ""}${item.sourceIncomplete ? "\nObserved proposed paths only; final contents and scale are not established." : ""}${item.parts?.length ? `\nFilename motifs: ${item.parts.map((part) => part.label).join(", ")}; not semantic analysis` : ""}\n${item.resourceCounts === undefined ? "Inventory unavailable" : Object.entries(item.resourceCounts).filter(([, count]) => count > 0).map(([kind, count]) => `${count} ${kind}`).join(" · ")}${edits.map(({ proposal, operation }) => `\n${proposal.title}: ${operation.kind} · ${operation.path}`).join("")}`} {...sceneAction(() => selectEntity(item.selectionId ?? item.entityId ?? room.id))} aria-label={`Inspect assembly ${item.label}`} className="dfFactoryScene__target">
-                <rect className="dfFactoryScene__focus" x={item.x - 4} y={item.y - 17} width={(item.labelWidth ?? item.width) + 8} height={item.height + 24} fill="transparent" />
-                <Equipment item={pictured} operating={operating} scenery={appearance.scenery} />
-                {item.entityId === undefined ? null : <text x={item.x} y={item.y - 6} fill="#d7ddcf" fontFamily="ui-monospace, monospace" fontSize="11">{shortLabel(item.label, Math.floor((item.labelWidth ?? item.width) / 6.6))}</text>}
-                {[...new Map(edits.map((edit) => [`${edit.proposal.id}:${edit.operation.kind}`, edit])).values()].slice(0, 4).map(({ proposal, operation }, index) => <ProposalMark key={`${proposal.id}:${operation.path}`} proposalId={proposal.id} item={item} kind={operation.kind} index={index} stale={proposal.state !== "active"} />)}
-              </g>;
-            })}
-            <g {...sceneAction(() => selectEntity(room.id))} className="dfFactoryScene__target" data-tooltip={roomInfo(node)} aria-label={`Inspect ${node.label}`}>
-              <rect className="dfFactoryScene__focus" x={room.x + 8} y={room.y + 12} width={room.width - 44} height="24" rx="2" fill="#182429" />
-              <text x={room.x + 14} y={room.y + 28} fill="#d7ddcf" fontFamily="ui-monospace, monospace" fontSize="10" fontWeight="700">{shortLabel(node.label, Math.floor((room.width - 54) / 6))}</text>
-            </g>
-            <g data-work-footprint={task === undefined ? undefined : room.id} data-room-operating={operating}
-              data-workbench-task-id={task?.id}
-              data-tooltip={task === undefined ? "No current work" : `${connected ? "Working" : "Disconnected · last observed work"} · ${task.title}${footprint.length > 1 ? `\n${footprint.length - 1} more tasks in this area` : ""}`}
-              aria-label={task === undefined ? "No current work" : `${connected ? "Working" : "Disconnected · last observed work"}: ${task.title}`}
-              {...sceneAction(task === undefined || onSelectTask === undefined ? undefined : () => onSelectTask(task.id))}>
-              <rect x={room.x + room.width - 32} y={room.y + 12} width="24" height="24" fill="transparent" />
-              <path d={`M${room.x + room.width - 26} ${room.y + 18}h14v10h-14Z`} fill="#303e40" stroke="#53605b" />
-              <rect x={room.x + room.width - 24} y={room.y + 20} width="10" height="5" fill={operating ? "#e5c58b" : "#626c64"} />
-            </g>
-            {(node.assemblies?.length ?? 0) <= 12 || node.proposed && proposals?.selected ? null : <text x={room.x + 136} y={room.door.y - 7} fill="#b8cabe" fontSize="10">+{node.assemblies!.length - (node.proposed ? 12 : 11)} {node.proposed ? "versions · select a Change" : "assemblies · search to inspect"}</text>}
-            {node.proposed ? <rect x={room.x + 3} y={room.y + 3} width={room.width - 6} height={room.height - 6} fill="none" stroke="#84bfd3" strokeDasharray="6 4" pointerEvents="none" /> : null}
-            {roomOperations.length === 0 ? null : <g {...sceneAction(() => proposals?.onSelect(roomOperations[0]!.proposal.id))} aria-label={`Inspect changes in ${node.label}`}><rect x={room.x + 8} y={room.door.y - 17} width="120" height="16" fill="#384643" /><text x={room.x + 12} y={room.door.y - 6} fill="#eed59c" fontSize="10">{roomOperations.length} proposed edits</text></g>}
-
-          </g>
-        );
+          </g>}
+          {task === undefined ? null : <g data-work-footprint={room.id} data-workbench-task-id={task.id} data-tooltip={`${connected ? "Working" : "Disconnected · last observed work"} · ${task.title}${footprint.length > 1 ? `\n${footprint.length - 1} more tasks here` : ""}`}
+            aria-label={`${connected ? "Working" : "Disconnected · last observed work"}: ${task.title}`} {...sceneAction(onSelectTask === undefined ? undefined : () => onSelectTask(task.id))}>
+            <rect x={room.x + room.width - 32} y={room.y + room.height - 30} width="24" height="24" fill="transparent" />
+            <path d={`M${room.x + room.width - 26} ${room.y + room.height - 24}h14v10h-14Z`} fill="#303e40" stroke="#53605b" />
+            <rect x={room.x + room.width - 24} y={room.y + room.height - 22} width="10" height="5" fill={operating ? "#e5c58b" : "#626c64"} />
+          </g>}
+        </g>;
       })}
 
+      <g aria-hidden="true" pointerEvents="none">{belts.map((belt) => <Belt key={belt.key} belt={belt} />)}</g>
 
+      {layout.rooms.flatMap((room) => room.contents.map((item) => {
+        const machine = machines.get(item.entityId) ?? item.machine;
+        const edits = operationsFor(item.entityId);
+        return <g key={item.key} data-entity-id={item.entityId} data-observation={machine.reading.observation} data-state={machine.reading.state} data-shape={item.shape}
+          data-tooltip={`${machineInfo(machine, hallOf.get(machine.id))}${edits.map(({ proposal, operation }) => `\n${proposal.title}: ${operation.kind} · ${operation.path}`).join("")}`}
+          {...sceneAction(() => selectEntity(item.entityId))} aria-label={`Inspect ${machine.label}`} className="dfFactoryScene__target">
+          <rect className="dfFactoryScene__focus" x={item.x - 4} y={item.y - 14} width={item.width + 8} height={item.height + 18} fill="transparent" />
+          <Station item={item} machine={machine} selected={selectedId === item.entityId} />
+          {[...new Map(edits.map((edit) => [`${edit.proposal.id}:${edit.operation.kind}`, edit])).values()].slice(0, 3).map(({ proposal, operation }, index) => <ProposalMark key={`${proposal.id}:${operation.path}`} proposalId={proposal.id} item={item} kind={operation.kind} index={index} stale={proposal.state !== "active"} />)}
+        </g>;
+      }))}
 
-      {appearance.scenery === "off" ? null : <g aria-hidden="true" fill="none" strokeLinecap="round" pointerEvents="none">
-        <g opacity={appearance.scenery === "subtle" ? .3 : .5}>{cabling.trunks.map((trunk, index) => <path key={index} data-wire-trunk={trunk.count} d={trunk.d} stroke={trunk.wall ? "#9aa69c" : "#728078"} strokeWidth={Math.min(trunk.wall ? 4 : 8, 1.5 * Math.sqrt(trunk.count))} />)}</g>
-        {cabling.routes.filter((wire) => linkedFrom === wire.from || linkedFrom === wire.to).map((wire) =>
-          <path key={`${wire.from} ${wire.to}`} data-wire={`${wire.from} ${wire.to}`} d={wire.d} stroke="#e5c58b" strokeWidth="1.5" opacity=".9" />)}
-      </g>}
-      {proposedCables.map(({ d, edge, proposal }, index) => <g key={`${proposal.id}:${index}`} data-proposed-relationship={edge.status} data-proposal-id={proposal.id} {...sceneAction(() => proposals?.onSelect(proposal.id))} aria-label={`${proposal.title}: ${edge.status} dependency ${edge.fromPath} to ${edge.toPath}`}>
-        <title>{`${proposal.title}: ${edge.status} ${edge.fromPath} → ${edge.toPath} · ${edge.weight} static links`}</title>
-        <path d={d} fill="none" stroke="transparent" strokeWidth="12" />
-        <path d={d} fill="none" stroke={edge.status === "added" ? "#a4d6e8" : "#e7a893"} strokeWidth="2" strokeDasharray={edge.status === "added" ? "8 4" : "2 5"} pointerEvents="none" />
-        <text x={(layout.rooms.find((room) => room.id === edge.fromId)?.door.x ?? 0) + 8} y={(layout.rooms.find((room) => room.id === edge.fromId)?.door.y ?? 0) - 6} fill="#ead8a4" fontSize="12" pointerEvents="none">{edge.status === "added" ? "+ link" : "× link"}</text>
-      </g>)}
+      <g data-fence="">
+        <path d={`M${layout.fence} 24V${layout.height}`} className="dfPlant__fence" />
+        {layout.gates.map((gate) => {
+          const machine = machines.get(gate.machine.id) ?? gate.machine;
+          return <g key={gate.machine.id} data-entity-id={gate.machine.id} data-observation={machine.reading.observation} data-state={machine.reading.state} className={`dfFactoryScene__target s-${machine.reading.observation} op-${machine.reading.state}`}
+            data-tooltip={machineInfo(machine)} {...sceneAction(() => selectEntity(gate.machine.id))} aria-label={`Inspect ${machine.label}`}>
+            <rect className="dfFactoryScene__focus" x={gate.x - 4} y={gate.y - 4} width={130} height={gate.height + 8} fill="transparent" />
+            <rect x={gate.x} y={gate.y} width={gate.width} height={gate.height} className={machine.reading.evidence === "runtime" ? "dfPlant__gate dfPlant__gate--runtime" : "dfPlant__gate"} />
+            <rect x={gate.x + 2} y={gate.y + gate.height / 2 - 2} width="3" height="4" className="lamp" />
+            <text x={gate.x + gate.width + 6} y={gate.y + 12} className="dfPlant__label">{shortLabel(machine.label, 20)}</text>
+            <text x={gate.x + gate.width + 6} y={gate.y + 23} className="dfPlant__small">{machine.reading.evidence === "runtime" ? "seen, not in code" : machine.reading.ratePerHour > 0 ? `${rate(machine.reading.ratePerHour)} · caller side` : "opaque"}</text>
+          </g>;
+        })}
+      </g>
+
       <g data-tooltip="Library · discussions" className={onOpenBoard ? "dfFactoryScene__target" : undefined} aria-label="Open project board" {...sceneAction(onOpenBoard === undefined ? undefined : () => onOpenBoard(projectId))} transform={`translate(${PADDING + 24} 90)`}><rect className="dfFactoryScene__focus" x="-8" y="-8" width="48" height="48" fill="transparent" /><g aria-hidden="true"><Frame name="prop.board" x={0} y={0} /><text x="0" y="30" fill="#d4ddd2" fontSize="10">DISCUSSIONS</text></g></g>
-      {/* Somewhere to go other than the table: against the back wall, muted like the rest of the furniture. */}
-      {nook?.furniture.filter((piece) => (!piece.roomId || nodes.has(piece.roomId)) && (appearance.scenery !== "off" || (piece.errand === "shelf" && onOpenLibrary))).map((piece) => <g key={piece.key} data-break-room={piece.errand} opacity=".8" transform={`translate(${piece.x} ${piece.y}) scale(${WORKER_SIZE / FRAME})`}>
-        {piece.errand !== "shelf" || onOpenLibrary === undefined ? null : <g className="dfFactoryScene__target" data-tooltip="Library · documents" {...sceneAction(() => onOpenLibrary(piece.roomId ? nodes.get(piece.roomId)?.project?.id : projectId))} aria-label="Open project library"><rect className="dfFactoryScene__focus" x="-9" y="-9" width="35" height="35" fill="transparent" /></g>}
+      {nook?.furniture.filter((piece) => (!piece.roomId || labels.has(piece.roomId)) && (appearance.scenery !== "off" || (piece.errand === "shelf" && onOpenLibrary))).map((piece) => <g key={piece.key} data-break-room={piece.errand} opacity=".8" transform={`translate(${piece.x} ${piece.y}) scale(${WORKER_SIZE / FRAME})`}>
+        {piece.errand !== "shelf" || onOpenLibrary === undefined ? null : <g className="dfFactoryScene__target" data-tooltip="Library · documents" {...sceneAction(() => onOpenLibrary(projectId))} aria-label="Open project library"><rect className="dfFactoryScene__focus" x="-9" y="-9" width="35" height="35" fill="transparent" /></g>}
         <g aria-hidden="true" pointerEvents="none"><Frame name={piece.errand === "shelf" ? "prop.bookshelf" : "prop.coffeestation"} x={0} y={0} />
         {piece.errand === "shelf" ? <text x="8" y="23" textAnchor="middle" fill="#d4ddd2" fontSize="4">LIBRARY</text> : null}
         {piece.errand !== "coffee" ? null : <path d="M2 15v3 M14 15v3" stroke="#303b3b" strokeWidth="2" />}</g>
       </g>)}
       {[
-        { label: "Break room", seats: seating.resting, planning: false, occupied: commonResting.length },
+        { label: "Break room · ambient", seats: seating.resting, planning: false, occupied: commonResting.length },
         { label: "Work tables", seats: seating.planning, planning: true, occupied: planning.length },
       ].filter(({ seats }) => seats.length > 0).map(({ label, seats, planning, occupied }) => {
         const top = seats[0]!.y;
@@ -641,10 +602,10 @@ export function FactoryScene({ proposals, tools, sourceDetails, onDiscussSource,
           </g>)}
         </g>;
       })}
-      {layout.rooms.length === 0 ? <text x={ROOM_LEFT} y="24" fill="#9db1be" fontFamily="ui-monospace, monospace" fontSize="10">EMPTY FLOOR</text> : null}
+      {layout.rooms.length === 0 ? <text x={ROOM_LEFT} y="24" fill="#9db1be" fontFamily="ui-monospace, monospace" fontSize="10">NO OPERATIONAL STRUCTURE INFERRED YET</text> : null}
 
       {placements.filter((placement) => placement.area === "resting" && placement.roomId !== undefined).map((seat) => <g key={seat.id} data-nearby-rest={seat.roomId} aria-hidden="true"><rect x={seat.x - 12} y={seat.y + 5} width="24" height="7" fill="#655948" stroke="#9b8b6b" /><path d={`M${seat.x - 8} ${seat.y + 12}v5m16-5v5`} stroke="#74664e" strokeWidth="3" /></g>)}
-      <SceneWorkers nearby={appearance.social === "nearby"} errands={appearance.scenery !== "off"} restingSeats={[...resting.filter((seat) => seat.roomId !== undefined), ...seating.resting]} tray={tray} peerQuestions={peerQuestions} furniture={tables} layout={layout} placements={placements} nodes={nodes} workers={workers} tasks={tasks} connected={connected} animate={appearance.animation !== "off"} selectedWorkerId={selectedWorkerId} onSelectWorker={onSelectWorker} onSelectTask={onSelectTask} onSelectHumanRequest={onSelectHumanRequest} onSelectProposal={proposals?.onSelect} />
+      <SceneWorkers nearby={appearance.social === "nearby"} errands={appearance.scenery !== "off"} restingSeats={[...resting.filter((seat) => seat.roomId !== undefined), ...seating.resting]} tray={tray} peerQuestions={peerQuestions} furniture={tables} layout={layout} placements={placements} labels={labels} workers={workers} tasks={tasks} connected={connected} animate={appearance.animation !== "off"} selectedWorkerId={selectedWorkerId} onSelectWorker={onSelectWorker} onSelectTask={onSelectTask} onSelectHumanRequest={onSelectHumanRequest} onSelectProposal={proposals?.onSelect} />
       <g data-common-table="planning" data-tooltip="Missions · inspect objectives" aria-label="Open Missions" className={onOpenMissions === undefined ? undefined : "dfFactoryScene__target"} {...sceneAction(onOpenMissions === undefined ? undefined : () => onOpenMissions(projectId))} transform={`translate(${station.missions.x} ${station.missions.y})`}>
         {onOpenMissions === undefined ? null : <rect className="dfFactoryScene__focus" x="-22" y="-22" width="44" height="44" fill="transparent" />}
         <rect x="-22" y="-8" width="44" height="16" fill="#455c5e" stroke="#8c8871" />
@@ -664,34 +625,12 @@ export function FactoryScene({ proposals, tools, sourceDetails, onDiscussSource,
         {[...Array(Math.min(queued, 3))].map((_, index) => <rect key={index} x="-10" y={-2 - index * 3} width="18" height="3" fill="#e4dcc0" stroke={tasks.some((task) => task.id === selectedTaskId && task.status === "queued") ? "#80ddff" : "#a6a087"} />)}
         <path d="M-12 -4v6h24v-6 M-12 2h24" fill="none" stroke="#c2b184" strokeWidth="2" />
       </g>
-
-
     </svg>
     {tooltip === undefined ? null : <div ref={tooltipElement} className="dfFactoryTooltip" role="tooltip" style={{ left: tooltip.x, top: tooltip.y, maxHeight: tooltip.room }}>{tooltip.text}</div>}
     </div>
-    {selectedRoom === undefined ? null : <section className="dfRoomDetails" aria-label="Source inspector" key={selectedRoom.id}>
-      <h3>{selectedRoom.label}</h3>
-      {selectedRoom.path === selectedRoom.label ? null : <p>{selectedRoom.path}</p>}
-      <button type="button" onClick={() => focusEntity(selectedRoom.id)}>Focus on floor</button>
-      {onDiscussSource ? <button type="button" onClick={onDiscussSource}>Discuss this source</button> : null}
-      <button type="button" onClick={() => selectEntity(undefined)}>Close source</button>
-      {selectedRoom.sourceIncomplete ? <p>Proposed contents and size are incomplete.</p> : null}
-      {proposals === undefined ? null : <div aria-label="Changes affecting selected source">{proposalsForEntity(topology, proposals.items, selectedRoom.id).map((proposal) => <button type="button" key={proposal.id} onClick={() => proposals.onSelect(proposal.id)}>{proposal.title}</button>)}</div>}
-      <details><summary>Source details</summary>
-        <p>Source reference <code>{selectedRoom.id}</code>{selectedRoom.language ? ` · ${selectedRoom.language}` : ""}</p>
-        {contents.length === 0 ? null : <ul aria-label="Contained source areas">{contents.map((component) => <li key={component.id}><button type="button" disabled={!availableNodes.has(component.id)} onClick={() => selectEntity(component.id)}>{component.label}</button></li>)}</ul>}
-        {selectedRoom.sourcePaths?.length ? <ul>{selectedRoom.sourcePaths.map((path) => <li key={path}><code>{path}</code></li>)}</ul> : null}
-        {selectedRoom.inventory === undefined ? <p>Inventory unavailable.</p> : <table><caption>{selectedRoom.sourceIncomplete ? "Observed proposed files" : "Scanned files"}</caption><thead><tr><th>Kind</th><th>Direct</th><th>Including children</th></tr></thead><tbody>{Object.entries(inventoryLabels).filter(([kind]) => selectedRoom.inventory!.direct[kind as keyof typeof inventoryLabels] > 0 || selectedRoom.inventory!.total[kind as keyof typeof inventoryLabels] > 0).map(([kind, label]) => <tr key={kind}><th>{label}</th><td>{selectedRoom.inventory!.direct[kind as keyof typeof inventoryLabels]}</td><td>{selectedRoom.inventory!.total[kind as keyof typeof inventoryLabels]}</td></tr>)}</tbody></table>}
-        {sourceDetails}
-        {selectedRoom.dependencies === undefined ? <p>Dependencies unavailable.</p> : <>
-          {links.length === 0 ? null : <ul aria-label="Static dependencies">{links.map((link) => <li key={`${link.direction}:${link.nodeId}`}>
-            {link.direction === "to" ? "Depends on " : "Used by "}
-            <button type="button" disabled={!availableNodes.has(link.nodeId)} onClick={() => selectEntity(link.nodeId)}>{link.path || link.label}</button>
-          </li>)}</ul>}
-          {selectedRoom.dependencies.omitted === 0 ? null : <p>{selectedRoom.dependencies.omitted} relationships omitted from this topology.</p>}
-        </>}
-      </details>
-    </section>}
+    {selected === undefined ? null : <MachineInspector key={selected.id} machine={selected} hall={hallOf.get(selected.id)} onLoadNode={onLoadNode} onInvestigate={onInvestigate}
+      proposals={proposals === undefined ? [] : proposalsForEntity(proposals.items, selected.id)} onSelectProposal={proposals?.onSelect}
+      onFocus={() => focusEntity(selected.id)} onDiscuss={onDiscussSource === undefined ? undefined : () => onDiscussSource(selected.id)} onClose={() => selectEntity(undefined)} />}
     </>
   );
 }
@@ -702,184 +641,169 @@ function sceneAction(select: (() => void) | undefined) {
   } };
 }
 
+/** Events per hour, in the unit a person reads quickly. */
+function rate(perHour: number) {
+  return perHour >= 120 ? `${Math.round(perHour / 60)}/min` : `${perHour}/h`;
+}
+
+const OBSERVATION_TEXT: Record<SceneReading["observation"], string> = {
+  observed: "Observed", quiet: "Observed, quiet", partial: "Partly observed", stale: "Stale: no current reading", unobserved: "No telemetry: activity unknown", opaque: "External: its own state cannot be seen",
+};
+const EVIDENCE_TEXT: Record<SceneReading["evidence"], string> = {
+  static: "Inferred from code", runtime: "Seen at runtime only; not in code", both: "In code and seen at runtime", uncertain: "Inferred from a name or literal", contradicted: "Runtime evidence contradicts the code",
+};
+
+/** What a machine is, what we know of it and how. Never claims more than the reading does. */
+function machineInfo(machine: SceneMachine, hall?: SceneHall) {
+  const reading = machine.reading;
+  const deployed = reading.deployedAt === undefined ? "" : `\nDeployed ${new Date(reading.deployedAt).toLocaleString([], { dateStyle: "short", timeStyle: "short" })}`;
+  const activity = reading.state === "unknown" ? "" : reading.state === "idle" ? " · idle" : ` · ${reading.state} · ${rate(reading.ratePerHour)}${reading.errorPermille > 0 ? ` · ${reading.errorPermille / 10}% errors` : ""}${reading.latencyMs > 0 ? ` · p95 ${reading.latencyMs} ms` : ""}`;
+  return `${machine.label}\n${machine.represented === undefined ? machine.kind : `${machine.represented.length} ${machine.kind} nodes`}${hall !== undefined && hall.id !== machine.id ? ` in ${hall.label}` : machine.owner ? ` from ${machine.owner}` : ""}\n${OBSERVATION_TEXT[reading.observation]}${activity}\n${EVIDENCE_TEXT[reading.evidence]}${deployed}`;
+}
+
+function Coverage({ summary }: { summary: NonNullable<SceneGraph["summary"]> }) {
+  return <p className="dfPlantCoverage" role="status" aria-label="Observation coverage">
+    <strong>{summary.inferred}</strong> inferred · <strong className="dfPlantCoverage--observed">{summary.observed + summary.quiet}</strong> observed · <strong className="dfPlantCoverage--partial">{summary.partial}</strong> partial · <strong className="dfPlantCoverage--unobserved">{summary.unobserved}</strong> unobserved
+    <small> · {summary.quiet} quiet · {summary.stale} stale · {summary.opaque} external{summary.runtime_only > 0 ? ` · ${summary.runtime_only} runtime-only` : ""}{summary.contradicted > 0 ? ` · ${summary.contradicted} contradicted` : ""}</small>
+  </p>;
+}
+
+/** One machine, pictured by its kind; its observation and state are its paint, lamp and motion. */
+function Station({ item, machine, selected }: { item: RoomContent; machine: SceneMachine; selected: boolean }) {
+  const { x, y, width: w, height: h } = item, reading = machine.reading;
+  const lamp = <g><rect x={x + w - 9} y={y + 3} width="3" height="4" className="lamp" /><rect x={x + w - 6} y={y + 3} width="3" height="4" className="lamp l2" /></g>;
+  const quarter = <rect x={x + w / 2} y={y} width={w / 2} height={h / 2} className="pq" />;
+  const scrap = reading.errorPermille > 0 && (reading.observation === "observed" || reading.observation === "partial")
+    ? <g data-scrap={reading.errorPermille}><rect x={x + w + 2} y={y + h - 14} width="10" height="14" className="dfPlant__bin" /><rect x={x + w + 4} y={y + h - 2 - Math.max(1, Math.round(10 * reading.errorPermille / 1000))} width="6" height={Math.max(1, Math.round(10 * reading.errorPermille / 1000))} className="scrap" /></g> : null;
+  // Latency is dwell: a slow machine holds more work in its window.
+  const held = reading.state === "unknown" || reading.state === "idle" ? 0 : Math.min(4, 1 + Math.floor(Math.log2(1 + reading.latencyMs / 50)));
+  const window = (wx: number, wy: number, ww: number, wh: number) => <g><rect x={wx} y={wy} width={ww} height={wh} className="win" />
+    {Array.from({ length: held }, (_, index) => <rect key={index} x={wx + 3 + index * 6} y={wy + wh / 2 - 2} width="4" height="4" className="crate dfPlant__dwell" />)}</g>;
+  const plaque = reading.observation === "unobserved" && w >= 40 ? <text x={x + w / 2} y={y + h / 2 + 3} textAnchor="middle" className="bptext">NO TELEMETRY</text> : null;
+  const stale = reading.observation === "stale" ? <text x={x} y={y + h + 9} className="dfPlant__small">last seen {reading.lastSeen === undefined ? "earlier" : new Date(reading.lastSeen).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</text> : null;
+  const tag = reading.evidence === "runtime" ? <g><rect x={x - 5} y={y - 6} width="10" height="11" className="qtag" /><text x={x} y={y + 3} textAnchor="middle" className="qmark">?</text></g>
+    : reading.evidence === "contradicted" ? <rect x={x - 4} y={y - 4} width="8" height="8" className="redtag" /> : null;
+  // Docks have the wall beside them for a label; everything else is labelled under its own footprint.
+  const label = item.shape === "line" ? null : item.shape === "dock" || item.shape === "manifold"
+    ? <text x={x} y={y - 3} className="dfPlant__label">{shortLabel(machine.label, 22)}</text>
+    : <text x={x + w / 2} y={y + h + 9} textAnchor="middle" className="dfPlant__label">{shortLabel(machine.label, Math.max(6, Math.floor((w + 10) / 5)))}</text>;
+  let body: ReactNode;
+  switch (item.shape) {
+    case "line": body = <g><rect x={x + 3} y={y + h} width={w - 2} height="3" className="shd" /><rect x={x} y={y} width={w} height={h} className="m" /><rect x={x + 1} y={y + 1} width={w - 2} height="4" className="mh" />
+      {window(x + 8, y + 12, w - 30, h - 22)}<rect x={x + w - 18} y={y + 12} width="10" height={h - 22} className="md" />{lamp}{quarter}
+      <text x={x + 4} y={y + h + 12} className="dfPlant__label">main line</text></g>; break;
+    case "dock": body = <g><rect x={x} y={y} width={w} height={h} className="dock" />{[0, 1, 2].map((index) => <rect key={index} x={x + 3 + index * 6} y={y + h - 5} width="4" height="3" className="chev" />)}<rect x={x + w - 14} y={y + 4} width="10" height={h - 8} className="win" />{lamp}{quarter}</g>; break;
+    case "manifold": body = <g><rect x={x} y={y} width={w} height={h} className="m" />{[0, 1, 2, 3].map((index) => <rect key={index} x={x + 4} y={y + 5 + index * 8} width={w - 18} height="4" className="dock" />)}{lamp}{quarter}
+      <text x={x + w / 2} y={y + h + 10} textAnchor="middle" className="dfPlant__small">{machine.represented?.length} routes</text></g>; break;
+    case "clock": body = <g><circle cx={x + w / 2} cy={y + h / 2} r={w / 2 - 1} className="m" /><circle cx={x + w / 2} cy={y + h / 2} r={w / 2 - 4} className="win" /><path d={`M${x + w / 2} ${y + h / 2}v-6m0 6h5`} className="dfPlant__hand" /></g>; break;
+    case "cell": body = <g><rect x={x} y={y + h - 10} width={w} height="10" className="m" /><rect x={x + w / 2 - 3} y={y + 4} width="6" height={h - 14} className="md arm" /><rect x={x + w / 2 - 8} y={y + 2} width="16" height="5" className="mh arm" />{lamp}{quarter}</g>; break;
+    case "silo": body = <g><rect x={x + 2} y={y + h} width={w - 2} height="3" className="shd" /><rect x={x + 3} y={y} width={w - 6} height={h} className="m" /><rect x={x} y={y + 3} width={w} height={h - 6} className="m" /><rect x={x + 3} y={y + 2} width={w - 6} height="3" className="mh" />{window(x + 6, y + 10, w - 12, 8)}{quarter}</g>; break;
+    case "conveyor": body = <g><path d={`M${x} ${y + h / 2}h${w}`} className="b-base" />{window(x + 4, y + 2, w - 8, h - 4)}</g>; break;
+    default: body = <g><rect x={x} y={y} width={w} height={h} className="crate" /><text x={x + w / 2} y={y + h / 2 + 3} textAnchor="middle" className="qmark">?</text></g>;
+  }
+  return <g className={`s-${reading.observation} op-${reading.state}${selected ? " dfPlant--selected" : ""}`}>{label}{body}{plaque}{scrap}{stale}{tag}</g>;
+}
+
+type BeltRoute = Readonly<{ key: string; points: readonly ScenePoint[]; reading: SceneReading; kind: string }>;
+
 /**
- * Static dependencies as floor cabling. Every link is routed once: out under
- * the desk and through the door, along corridors, down the nearest wall of any
- * row in between, and into a lower room down its side wall. At rest the shared
- * stretches are drawn once, thicker the more links they carry; a link's own
- * end-to-end route is only drawn when one of its rooms is inspected.
+ * Material moves only where a flow was observed: belt density reads as rate
+ * and speed is fixed. An edge nobody can see is a dashed blueprint run, never
+ * an empty belt.
  */
-function wires(layout: ReturnType<typeof layoutScene>, topology: SceneTopology) {
-  type Point = { x: number; y: number };
-  // Corridor cable sways by position alone, so a lit route lies exactly on its
-  // trunk; stretches pinned inside a wall or a doorway run straight.
-  const on = (across: boolean, fixed: number, along: number): Point =>
-    across ? { x: along, y: fixed + 2 * Math.sin(along / 28 + fixed) } : { x: fixed, y: along };
-  const spot = ({ x, y }: Point) => `${+x.toFixed(1)} ${+y.toFixed(1)}`;
-  const stretch = (across: boolean, fixed: number, from: number, to: number) => {
-    let d = "";
-    for (let along = from + (from < to ? 8 : -8); from < to ? along < to : along > to; along += from < to ? 8 : -8) d += `L${spot(on(across, fixed, along))}`;
-    return `${d}L${spot(on(across, fixed, to))}`;
-  };
-  const rooms = new Map(layout.rooms.map((room) => [room.id, room]));
-  const rowOf = (room: SceneRoomLayout) => room.door.y;
-  const rows = [...new Set(layout.rooms.map(rowOf))].sort((a, b) => a - b);
-  const pairs = new Set<string>();
-  for (const node of topology.nodes) for (const link of node.dependencies?.links ?? []) {
-    if (link.nodeId !== node.id && rooms.has(node.id) && rooms.has(link.nodeId)) pairs.add([node.id, link.nodeId].sort().join("\n"));
+function Belt({ belt }: { belt: BeltRoute }) {
+  const d = `M${belt.points.map((point) => `${point.x} ${point.y}`).join(" L")}`;
+  const reading = belt.reading;
+  if (reading.observation === "unobserved" || reading.observation === "stale" || reading.observation === "opaque" && reading.ratePerHour === 0 || reading.observation === "partial" && reading.state === "unknown") {
+    return <path d={d} className="b-inf" data-belt={belt.kind} data-observation={reading.observation} />;
   }
-  // Leads and corner bends, drawn once however many links share them.
-  const leads = new Map<string, { d: string; count: number }>();
-  const carry = (key: string, d: string) => leads.set(key, { d, count: (leads.get(key)?.count ?? 0) + 1 });
-  const lead = (room: SceneRoomLayout, wallX?: number) => {
-    const desk = room.contents.find((item) => item.workSurface);
-    const key = `${room.id} ${wallX ?? "door"}`;
-    let d: string;
-    if (wallX === undefined) {
-      const plug = desk === undefined ? { x: room.x + room.width / 2, y: room.y + 60 } : { x: desk.x + desk.width / 2, y: desk.y + 33 };
-      d = `M${plug.x} ${plug.y}C${plug.x + 14} ${plug.y + 22} ${room.door.x - 10} ${room.door.y - 18} ${room.door.x} ${room.door.y}`;
-    } else {
-      const left = wallX < room.x + room.width / 2;
-      const plug = desk === undefined ? { x: room.x + room.width / 2, y: room.y + 60 } : { x: left ? desk.x : desk.x + desk.width, y: desk.y + 22 };
-      d = `M${wallX} ${plug.y - 12}C${wallX} ${plug.y + 12} ${(wallX + plug.x) / 2} ${plug.y + 16} ${plug.x} ${plug.y}`;
+  const spacing = reading.ratePerHour === 0 ? 0 : Math.max(5, Math.round(48 / Math.log2(2 + reading.ratePerHour / 60)));
+  return <g data-belt={belt.kind} data-observation={reading.observation} data-state={reading.state}>
+    <path d={d} className="b-base" />
+    {spacing === 0 ? null : <path d={d} className={`dfPlant__material${reading.state === "failing" || reading.state === "degraded" ? " dfPlant__material--faulty" : ""}`} strokeDasharray={`3 ${spacing}`} />}
+    {reading.evidence === "runtime" ? <circle cx={belt.points[Math.floor(belt.points.length / 2)]!.x} cy={belt.points[Math.floor(belt.points.length / 2)]!.y} r="4" className="qtag" /> : null}
+  </g>;
+}
+
+/**
+ * Orthogonal belt runs: inside a hall directly between machines; between
+ * halls out of the door, along corridors and the spine, in at the far door;
+ * to a party along the corridor to the fence.
+ */
+function routeFlows(layout: SceneLayout, flows: readonly SceneFlow[]): readonly BeltRoute[] {
+  const at = new Map<string, { item?: RoomContent; room?: SceneRoomLayout; gate?: SceneLayout["gates"][number] }>();
+  for (const room of layout.rooms) for (const item of room.contents) at.set(item.entityId, { item, room });
+  for (const gate of layout.gates) at.set(gate.machine.id, { gate });
+  const spineX = ROOM_LEFT - 16;
+  const lane = (room: SceneRoomLayout) => room.door.y + 16;
+  const center = (item: RoomContent): ScenePoint => ({ x: item.x + item.width / 2, y: item.y + item.height / 2 });
+  return flows.flatMap((flow) => {
+    // Handles runs from the dock into the unit; draw every belt in the direction work moves.
+    const from = at.get(flow.from), to = at.get(flow.to);
+    if (from === undefined || to === undefined) return [];
+    const key = `${flow.from} ${flow.to}`;
+    if (from.item && to.item && from.room === to.room) {
+      const a = center(from.item), b = center(to.item);
+      const sx = a.x < b.x ? from.item.x + from.item.width : from.item.x, ex = a.x < b.x ? to.item.x : to.item.x + to.item.width;
+      return [{ key, kind: flow.kind, reading: flow.reading, points: [{ x: sx, y: a.y }, { x: (sx + ex) / 2, y: a.y }, { x: (sx + ex) / 2, y: b.y }, { x: ex, y: b.y }] }];
     }
-    carry(key, d);
-    return d;
-  };
-  // Axis-aligned stretches by channel, for counting what each one carries.
-  const channels = new Map<string, [number, number][]>();
-  const routes = [...pairs].sort().map((pair) => {
-    const [from, to] = (pair.split("\n").map((id) => rooms.get(id)!) as [SceneRoomLayout, SceneRoomLayout]).sort((a, b) => rowOf(a) - rowOf(b));
-    const points: Point[] = [{ x: from.door.x, y: from.door.y }, { x: from.door.x, y: from.door.y + 16 }];
-    let tail: string;
-    if (rowOf(from) === rowOf(to)) {
-      points.push({ x: to.door.x, y: to.door.y + 16 }, { x: to.door.x, y: to.door.y });
-      tail = lead(to);
-    } else {
-      const nearest = (row: number, x: number) => layout.rooms.filter((room) => rowOf(room) === row).flatMap((room) => [room.x, room.x + room.width])
-        .reduce((best, wall) => Math.abs(wall - x) < Math.abs(best - x) ? wall : best);
-      for (const row of rows.filter((row) => row > rowOf(from) && row < rowOf(to))) {
-        const wall = nearest(row, to.x + to.width / 2);
-        points.push({ x: wall, y: points.at(-1)!.y }, { x: wall, y: row + 16 });
-      }
-      const wall = Math.abs(to.x - points.at(-1)!.x) <= Math.abs(to.x + to.width - points.at(-1)!.x) ? to.x : to.x + to.width;
-      const desk = to.contents.find((item) => item.workSurface);
-      points.push({ x: wall, y: points.at(-1)!.y }, { x: wall, y: (desk === undefined ? to.y + 60 : desk.y + 22) - 12 });
-      tail = lead(to, wall);
+    if (from.room === undefined || from.item === undefined) return [];
+    const start = center(from.item), out: ScenePoint[] = [{ x: start.x, y: from.item.y + from.item.height }, { x: start.x, y: from.room.door.y - 6 }, { x: from.room.door.x, y: from.room.door.y - 6 }, from.room.door, { x: from.room.door.x, y: lane(from.room) }];
+    if (to.gate) {
+      const gateY = to.gate.y + to.gate.height / 2;
+      return [{ key, kind: flow.kind, reading: flow.reading, points: [...out, { x: layout.fence - 12, y: lane(from.room) }, { x: layout.fence - 12, y: gateY }, { x: to.gate.x, y: gateY }] }];
     }
-    let run = "", bent = "";
-    for (let at = 1; at < points.length; at += 1) {
-      const a = points[at - 1]!, b = points[at]!, before = points[at - 2], next = points[at + 1];
-      const across = a.y === b.y, fixed = across ? a.y : a.x, [start, end] = across ? [a.x, b.x] : [a.y, b.y];
-      // A vertical stretch that is not a door stub runs inside a wall.
-      const key = `${across ? "h" : at === 1 || (next === undefined && rowOf(from) === rowOf(to)) ? "v" : "w"}${fixed}`;
-      const corner = Math.min(8, Math.abs(end - start) / 2), way = Math.sign(end - start);
-      const entry = start + (before === undefined ? 0 : way * corner), exit = end - (next === undefined ? 0 : way * corner);
-      // A stretch stops short of each bend, so a turning cable curves into the bundle it joins.
-      channels.set(key, [...(channels.get(key) ?? []), [Math.min(entry, exit), Math.max(entry, exit)]]);
-      if (before !== undefined) { const bend = `${bent}Q${a.x} ${a.y} ${spot(on(across, fixed, entry))}`; carry(bend, `M${bend}`); }
-      run += `${before === undefined ? "M" : `Q${a.x} ${a.y} `}${spot(on(across, fixed, entry))}${stretch(across, fixed, entry, exit)}`;
-      bent = spot(on(across, fixed, exit));
-    }
-    return { from: from.id, to: to.id, d: `${lead(from)} ${run} ${tail}` };
+    if (to.room === undefined || to.item === undefined) return [];
+    const end = center(to.item);
+    const into: ScenePoint[] = [{ x: to.room.door.x, y: lane(to.room) }, to.room.door, { x: to.room.door.x, y: to.room.door.y - 6 }, { x: end.x, y: to.room.door.y - 6 }, { x: end.x, y: to.item.y + to.item.height }];
+    const across = lane(from.room) === lane(to.room) ? [] : [{ x: spineX, y: lane(from.room) }, { x: spineX, y: lane(to.room) }];
+    return [{ key, kind: flow.kind, reading: flow.reading, points: [...out, ...across, ...into] }];
   });
-  const trunks: { d: string; count: number; wall?: boolean }[] = [...leads.values()];
-  for (const [key, spans] of channels) {
-    const fixed = Number(key.slice(1)), cuts = [...new Set(spans.flat())].sort((a, b) => a - b);
-    for (let at = 1; at < cuts.length; at += 1) {
-      const lo = cuts[at - 1]!, hi = cuts[at]!, count = spans.filter(([from, to]) => from <= lo && to >= hi).length;
-      if (count === 0) continue;
-      trunks.push({ count, wall: key[0] === "w", d: `M${spot(on(key[0] === "h", fixed, lo))}${stretch(key[0] === "h", fixed, lo, hi)}` });
-    }
-  }
-  return { routes, trunks };
-}
-
-/** Furniture is subdued scenery, never a second set of file-category controls. */
-function Equipment({ item, operating, scenery }: { item: RoomContent; operating: boolean; scenery: FloorAppearance["scenery"] }) {
-  if (item.entityId !== undefined) {
-    const scale = item.scale ?? 0, rich = item.width >= 240 && item.height >= 120;
-    const color = operating ? "#b0d0c0" : "#91aca1";
-    const resources = Object.entries(item.resourceCounts ?? {}).filter(([, count]) => count > 0);
-    const associated = resources.filter(([kind]) => kind !== item.kind).slice(0, 3);
-    const mainWidth = rich && associated.length ? item.width - 90 : item.width;
-    const partColumns = Math.min(2, item.parts?.length ?? 0), partWidth = mainWidth / Math.max(1, partColumns);
-    const machineWidth = Math.min(mainWidth - 8, [48, 80, 128, 180][scale]!);
-    const machineHeight = Math.min(item.height - 30, [30, 46, 64, 80][scale]!);
-    const total = resources.reduce((sum, [, count]) => sum + count, 0);
-    const associatedStep = Math.min(40, (item.height - 24) / Math.max(1, associated.length));
-    return <g transform={`translate(${item.x} ${item.y})`} data-equipment-scale={item.resourceCounts === undefined || item.sourceIncomplete ? "unknown" : scale} data-responsibility={item.responsibility}>
-      {(item.parts?.length ?? 0) < 2 ? <ResourceMachine kind={item.kind} width={machineWidth} height={machineHeight} color={color} motif={item.responsibility} /> : <g data-assembly-parts="filename motifs">
-        {item.parts!.map((part, index) => {
-          const width = partWidth - 12, height = rich ? Math.min(44, (item.height - 24) / 2 - 20) : Math.min(34, item.height - 40), y = Math.floor(index / partColumns) * (item.height - 24) / 2;
-          return <g key={part.label} transform={`translate(${index % partColumns * partWidth} ${y})`}><ResourceMachine kind="source" width={width} height={height} color={color} motif={part.motif} /><text y={height + 16} fill="#ded3af" fontFamily="ui-monospace, monospace" fontSize="10">{shortLabel(part.label, Math.floor(width / 6))}</text></g>;
-        })}
-      </g>}
-      {associated.map(([kind, count], index) => <g key={kind} data-associated-equipment={kind} transform={`translate(${rich ? item.width - 76 : index * Math.min(24, item.width / Math.max(1, associated.length))} ${rich ? index * associatedStep : item.height - 28})`}>
-        {rich ? <ResourceMachine kind={kind} width={62} height={associatedStep - 18} color="#aec2ab" /> : <ResourceGlyph kind={kind} />}
-        {!rich ? null : <text x="0" y={associatedStep - 4} fill="#c9d2bc" fontSize="10">{inventoryLabels[kind as keyof typeof inventoryLabels]} {count}</text>}
-      </g>)}
-      {rich ? <g transform={`translate(0 ${item.height - Math.ceil(resources.length / 3) * 13})`}>{resources.map(([kind, count], index) => <g key={kind} data-resource-kind={kind} transform={`translate(${index % 3 * item.width / 3} ${Math.floor(index / 3) * 13})`}><ResourceGlyph kind={kind} /><text x="11" y="8" fill="#c3d1c6" fontFamily="ui-monospace, monospace" fontSize="10">{count} {inventoryLabels[kind as keyof typeof inventoryLabels].toLowerCase()}</text></g>)}</g>
-        : <text y={item.height} fill="#c3d1c6" fontFamily="ui-monospace, monospace" fontSize="10">{item.resourceCounts === undefined ? "Unknown" : `${total} ${item.sourceIncomplete ? "observed" : "files"}`}</text>}
-
-    </g>;
-  }
-  return <g transform={`translate(${item.x} ${item.y})`} opacity={operating ? .9 : .55}>
-    <rect x="4" y="27" width={item.width - 8} height="6" fill="#131e22" />
-    <rect y="12" width={item.width} height="16" rx="2" fill={item.furnishing === "console" ? "#455653" : "#665f4e"} stroke="#8a8067" />
-    <path d={`M4 29v5 M${item.width - 4} 29v5`} stroke="#424a46" strokeWidth="3" />
-    <g transform={`translate(${item.width / 2 - 8} 0)`}>
-      <rect width="16" height="12" fill="#3b4948" stroke="#65726b" />
-      <rect x="2" y="2" width="12" height="8" fill={operating ? "#779c95" : "#263e40"} />
-      {operating ? <path d="M4 4h8 M4 7h5" stroke="#bdd0b2" strokeWidth="1" /> : null}
-      <path d="M3 14h10" stroke="#9b9c86" strokeWidth="2" />
-    </g>
-    {scenery === "off" ? null : <g opacity={scenery === "subtle" ? .6 : 1}>
-    {item.furnishing === "drafting" ? <g>
-      <rect x="10" y="15" width="30" height="9" fill="#969480" />
-      <path d="M14 17h14v4H18v-4 M31 18h5" fill="none" stroke="#526b6b" />
-    </g> : item.furnishing === "console" ? <path d="M8 19h12 M8 22h7" stroke="#727e72" strokeWidth="2" /> : <rect x={item.width - 24} y="15" width="16" height="8" fill="#969480" />}
-
-    </g>}
-  </g>;
-}
-
-function ResourceGlyph({ kind }: { kind: string }) {
-  const path = kind === "source" ? "M0 2h6v6H0z M2 0v2m2-2v2m-2 6v2m2-2v2" : kind === "tests" ? "M0 0v6h6V0 M0 3h2l1-2 1 4 1-2h1 M1 8h4" : kind === "documentation" ? "M0 0h6v9H0z M2 1v7m2-6v5" : kind === "configuration" ? "M0 0h6v9H0z M1 2h4m-4 3h4m-3-4v2m1 1v2" : "M0 2h6v7H0z M0 5h6m-3-3v7";
-  return <path d={path} fill="none" stroke="#c7c6a6" strokeWidth=".8" />;
-}
-
-function ResourceMachine({ kind, width: w, height: h, color, motif }: { kind: string; width: number; height: number; color: string; motif?: RoomContent["responsibility"] }) {
-  if (kind === "documentation") return <g><path d={`M0 0h${w}v${h}H0z M0 ${h / 2}h${w}`} fill="#685f48" stroke={color} strokeWidth="2" />{Array.from({ length: Math.max(3, Math.floor(w / 9)) }, (_, i) => <path key={i} d={`M${5 + i * 8} 3v${h / 2 - 6}m2 7v${h / 2 - 6}`} stroke={i % 2 ? "#b0baa0" : "#9f846a"} strokeWidth="5" />)}</g>;
-  if (kind === "configuration") return <g><rect width={w - 8} height={h + 3} fill="#465e61" stroke={color} strokeWidth="2" /><path d={`M${w / 2} 1v${h} M5 7h${w / 2 - 10}m0 7H5 M${w / 2 + 5} 7h${w / 2 - 18}m0 7H${w / 2 + 5}`} stroke="#ccd2b5" strokeWidth="2" /><circle cx={w - 18} cy={h - 7} r="3" fill="#c5aa6c" /></g>;
-  if (kind === "tests") return <g><path d={`M0 ${h - 3}h${w}v6H0z M5 ${h + 3}v5m${w - 10}-5v5`} fill="#657263" stroke={color} /><rect x="5" y="0" width={w - 10} height={h - 4} rx="2" fill="#253e43" stroke={color} strokeWidth="2" /><path d={`M9 ${h / 2}h6l5-7 6 13 7-7h${Math.max(1, w - 43)}`} fill="none" stroke="#c9d49b" strokeWidth="2" /></g>;
-  if (kind === "assets" || kind === "unclassified") return <g><path d={`M0 0v${h + 5}M${w} 0v${h + 5}M0 ${h}h${w}M0 ${h / 2}h${w}`} stroke={color} strokeWidth="3" />{[0, 1, 2].map((i) => <rect key={i} x={4 + i * (w - 6) / 3} y="3" width={(w - 15) / 3} height={h - 7} fill={i % 2 ? "#8c7b58" : "#677b72"} stroke="#afb298" />)}</g>;
-  return <g>
-    <path d={`M0 ${h - 3}h${w}v7H0z M5 ${h + 4}v5m${w - 10}-5v5`} fill="#667764" stroke={color} />
-    {motif === "movement" ? <g><rect x="2" y="9" width={w - 4} height={h - 9} rx="6" fill="#3e5556" stroke={color} />{Array.from({ length: 3 + Math.floor(w / 25) }, (_, i) => <circle key={i} cx={8 + i * (w - 16) / (2 + Math.floor(w / 25))} cy={h - 7} r="4" fill="#223339" stroke="#b4c0aa" />)}<path d={`M8 4h${w - 21}l-4-3m4 3-4 3`} fill="none" stroke="#d4c394" strokeWidth="2" /></g>
-      : motif === "messaging" ? <g><path d={`M8 5h${w - 16}v${h - 8}H8z`} fill="#40565a" stroke={color} /><path d={`M8 5l${(w - 16) / 2} 10L${w - 8} 5 M${w / 2} 4V-3m-5 0h10`} fill="none" stroke="#cfbc91" strokeWidth="2" /><circle cx={w / 2} cy="-5" r="2" fill="#cbd9b8" /></g>
-      : motif === "admission" ? <g><path d={`M4 ${h}V2h${w - 8}v${h - 2}M${w / 2} 5v${h - 5}`} fill="#3e5052" stroke={color} strokeWidth="3" /><path d={`M10 ${h / 2}h${w - 20}l-5-4m5 4-5 4`} stroke="#d6bc82" fill="none" strokeWidth="2" /></g>
-      : motif === "selection" ? <g><rect x="2" width={w - 4} height={h - 2} fill="#425451" stroke={color} /><path d={`M9 4v${h - 10}m-4 0h15m5-15v${h - 10}m-4 0h15`} stroke="#c2c99e" strokeWidth="2" /><circle cx={w - 11} cy="10" r="5" fill="none" stroke="#d9c18f" strokeWidth="2" /><path d={`M${w - 7} 14l5 5`} stroke="#d9c18f" strokeWidth="2" /></g>
-      : motif === "interface" ? <g><rect x="2" width={w - 4} height={h - 6} fill="#334b53" stroke={color} strokeWidth="2" /><path d={`M6 4h${w - 12}v${h - 15}H6z M${w / 2} ${h - 6}v5m-8 0h16`} fill="none" stroke="#c4caae" strokeWidth="2" /></g>
-      : motif === "storage" ? <g>{[0, 1, 2].map((i) => <g key={i} transform={`translate(${2 + i * (w - 4) / 3} 0)`}><path d={`M0 4v${h - 9}q${(w - 10) / 6} 6 ${(w - 10) / 3} 0V4`} fill="#537073" stroke={color} /><ellipse cx={(w - 10) / 6} cy="4" rx={(w - 10) / 6} ry="4" fill="#779186" stroke={color} /></g>)}</g>
-      : <g><path d={`M3 5h${w - 6}v${h - 8}H3z M10 0h${w - 20}v5H10z`} fill="#455f5d" stroke={color} strokeWidth="2" /><circle cx={w / 2} cy={h / 2} r={6 + w / 18} fill="#263b40" stroke="#c4c7a7" strokeWidth="3" /><path d={`M${w / 2} ${h / 2 - 4}v8m-4-4h8`} stroke="#d5bf8d" strokeWidth="2" /></g>}
-  </g>;
 }
 
 function ProposalMark({ proposalId, item, kind, index, stale }: { proposalId: string; item: RoomContent; kind: SceneProposal["operations"][number]["kind"]; index: number; stale: boolean }) {
   const color = stale ? "#b1a9a0" : kind === "removal" ? "#dfa48e" : "#a8d8ea";
   return <g data-proposal-id={proposalId} data-proposal-kind={kind} pointerEvents="none" opacity={stale ? .65 : 1}>
-    {index !== 0 ? null : <><rect x={item.x - 2} y={item.y - 3} width={item.width + 4} height={item.height + 8} fill={kind === "addition" ? "#396d8950" : "none"} stroke={color} strokeWidth="2" strokeDasharray={kind === "addition" ? "5 3" : kind === "removal" ? "2 3" : undefined} />
-      {kind === "removal" ? <path d={`M${item.x + 5} ${item.y}l${item.width - 10} ${item.height}m-${item.width - 10} 0l${item.width - 10} -${item.height}`} stroke={color} strokeWidth="2" /> : kind === "move" ? <path d={`M${item.x + 8} ${item.y + 12}h${item.width - 16}l-8-6m8 6-8 6`} fill="none" stroke={color} strokeWidth="3" /> : kind === "modification" ? <path d={`M${item.x + item.width - 20} ${item.y + 2}l12 12m-16-13 4-4 5 1-1 5-4 4m11 7 3 3`} fill="none" stroke="#e7c27f" strokeWidth="3" /> : null}</>}
-    <rect x={item.x - 15} y={item.y + index * 15} width="12" height="12" fill="#203a46" stroke={color} />
-    <text x={item.x - 9} y={item.y + index * 15 + 9} fill={color} textAnchor="middle" fontSize="8">{kind === "addition" ? "+" : kind === "removal" ? "×" : kind === "move" ? "→" : "M"}</text>
+    {index !== 0 ? null : <rect x={item.x - 3} y={item.y - 3} width={item.width + 6} height={item.height + 6} fill="none" stroke={color} strokeWidth="2" strokeDasharray={kind === "addition" ? "5 3" : kind === "removal" ? "2 3" : undefined} />}
+    <rect x={item.x - 15} y={item.y + index * 13} width="11" height="11" fill="#203a46" stroke={color} />
+    <text x={item.x - 9.5} y={item.y + index * 13 + 8} fill={color} textAnchor="middle" fontSize="8">{kind === "addition" ? "+" : kind === "removal" ? "×" : kind === "move" ? "→" : "M"}</text>
   </g>;
 }
 
-function roomInfo(node: SceneTopology["nodes"][number]) {
-  const counts = node.inventory?.[node.inventoryScope === "direct" ? "direct" : "total"];
-  // The cabling is scenery; its content is stated here for every reader and appearance.
-  const links = [...new Set((node.dependencies?.links ?? []).map((link) => link.label))];
-  const inventory = counts === undefined ? "Inventory unavailable" : Object.entries(inventoryLabels).filter(([kind]) => counts[kind as keyof typeof counts] > 0).map(([kind, label]) => `${counts[kind as keyof typeof counts]} ${label.toLowerCase()}`).join(" · ") || "No scanned files";
-  return `${node.path === "." ? node.label : node.path}\n${node.language ? `${node.language} · ` : ""}${node.kind} · ${node.inventoryScope === "direct" ? "direct files" : "subtree"}\n${inventory}${links.length === 0 ? "" : `\nWired to ${links.slice(0, 6).join(", ")}${links.length > 6 ? ` +${links.length - 6}` : ""}`}`;
+/** The inspector loads evidence only when opened; runtime-only values are shown as data. */
+function MachineInspector({ machine, hall, onLoadNode, onInvestigate, proposals, onSelectProposal, onFocus, onDiscuss, onClose }: {
+  machine: SceneMachine; hall?: SceneHall; onLoadNode?: (id: string) => Promise<OperationalNodeView>; onInvestigate?: (machine: SceneMachine, hall?: SceneHall) => void;
+  proposals: readonly SceneProposal[]; onSelectProposal?: (id: string) => void; onFocus: () => void; onDiscuss?: () => void; onClose: () => void;
+}) {
+  const [detail, setDetail] = useState<OperationalNodeView | "unavailable">();
+  const [asked, setAsked] = useState(false);
+  useEffect(() => {
+    if (onLoadNode === undefined || machine.represented !== undefined) return;
+    let live = true;
+    onLoadNode(machine.id).then((value) => { if (live) setDetail(value); }, () => { if (live) setDetail("unavailable"); });
+    return () => { live = false; };
+  }, [machine.id]);
+  const reading = machine.reading;
+  const worth = reading.state === "failing" || reading.state === "degraded" || reading.evidence === "runtime" || reading.evidence === "contradicted" || reading.observation === "unobserved";
+  return <section className="dfRoomDetails" aria-label="Machine inspector">
+    <h3>{machine.label}</h3>
+    <p>{machine.represented === undefined ? machine.kind : `${machine.represented.length} folded ${machine.kind} nodes`}{hall !== undefined && hall.id !== machine.id ? ` in ${hall.label}` : ""}</p>
+    <p className={`dfPlantReading s-${reading.observation} op-${reading.state}`}>{OBSERVATION_TEXT[reading.observation]}{reading.state === "unknown" ? "" : ` · ${reading.state}`}{reading.ratePerHour > 0 ? ` · ${rate(reading.ratePerHour)}` : ""}{reading.errorPermille > 0 ? ` · ${reading.errorPermille / 10}% errors` : ""}{reading.latencyMs > 0 ? ` · p95 ${reading.latencyMs} ms` : ""}</p>
+    <p>{EVIDENCE_TEXT[reading.evidence]}</p>
+    <button type="button" onClick={onFocus}>Focus on floor</button>
+    {onDiscuss ? <button type="button" onClick={onDiscuss}>Discuss this machine</button> : null}
+    {onInvestigate && worth ? <button type="button" disabled={asked} onClick={() => { setAsked(true); onInvestigate(machine, hall); }}>{asked ? "Investigation queued" : "Investigate"}</button> : null}
+    <button type="button" onClick={onClose}>Close</button>
+    {proposals.length === 0 ? null : <div aria-label="Changes affecting this machine">{proposals.map((proposal) => <button type="button" key={proposal.id} onClick={() => onSelectProposal?.(proposal.id)}>{proposal.title}</button>)}</div>}
+    <details><summary>Evidence</summary>
+      <p>Node <code>{machine.id}</code></p>
+      {detail === undefined ? <p>{onLoadNode === undefined || machine.represented !== undefined ? "Evidence is available on each folded route." : "Loading evidence…"}</p> : detail === "unavailable" ? <p>Evidence unavailable.</p> : <>
+        {Object.keys(detail.selectors).length === 0 ? null : <dl>{Object.entries(detail.selectors).map(([key, value]) => <div key={key}><dt>{key}</dt><dd><code>{value}</code></dd></div>)}</dl>}
+        <ul aria-label="Evidence">{detail.evidence.map((item, index) => <li key={index}>{item.origin} · {item.source} · {item.confidence}{item.detail ? <> · <code>{item.detail}</code></> : null}</li>)}</ul>
+        {detail.sources.length === 0 ? null : <ul aria-label="Source locations">{detail.sources.map((location) => <li key={`${location.repository_id}:${location.path}:${location.line ?? 0}`}><code>{location.path}{location.line ? `:${location.line}` : ""}</code></li>)}</ul>}
+        {detail.modules.length === 0 ? null : <p>{detail.modules.length} code areas run in this unit.</p>}
+        <p>{detail.observers.length === 0 ? "No runtime source has reported on it." : `Seen by ${detail.observers.join(", ")}.`}</p>
+      </>}
+    </details>
+  </section>;
 }

@@ -9,17 +9,17 @@ import (
 	"io"
 	"math"
 	"path"
+	"slices"
 	"sort"
 	"sync"
 	"time"
-	"unicode/utf8"
 
 	"github.com/dark-factory-build/dark-factory/internal/api"
 	"github.com/dark-factory-build/dark-factory/internal/browser"
 	"github.com/dark-factory-build/dark-factory/internal/browserprotocol"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 	"github.com/dark-factory-build/dark-factory/internal/maintainer"
-	"github.com/dark-factory-build/dark-factory/internal/topology"
+	"github.com/dark-factory-build/dark-factory/internal/opgraph"
 )
 
 // browserStatePollInterval bounds how long a paired browser waits to learn
@@ -732,152 +732,174 @@ func (backend *browserBackend) UpdateTask(ctx context.Context, rawClient [browse
 	return browserprotocol.TaskUpdateResult{TaskID: task.ID.String(), Revision: decimalRevision(task.Revision)}, nil
 }
 
-// Topology serves the regenerable project structure the daemon already caches
-// on disk. Nodes only: containment is implied by parent, so v1 has no edges.
-func (backend *browserBackend) Topology(ctx context.Context, rawClient [browserprotocol.ClientIDSize]byte, request browserprotocol.TopologyGet) (browserprotocol.Topology, error) {
-	_, release, _, err := backend.authorize(ctx, rawClient, kernel.BrowserCapabilityObserve)
-	if err != nil {
-		return browserprotocol.Topology{}, err
-	}
-	// The walk reads no client state and may take most of its budget, so it
-	// runs outside the client's gate: a state or terminal call from the same
-	// client is not charged the walk's time. Each connection's walker keeps
-	// that connection to one walk at a time; a client with several
-	// connections may walk on each of them.
-	release()
-	if backend.owner == nil {
-		return browserprotocol.Topology{}, browser.ErrNotFound
-	}
-	projectID, err := decodeID(request.ProjectID, kernel.ProjectIDFromBytes)
-	if err != nil {
-		return browserprotocol.Topology{}, browser.ErrStale
-	}
-	snapshot, err := backend.owner.ProjectTopology(ctx, projectID)
-	if err != nil {
-		return browserprotocol.Topology{}, mapBrowserError(err)
-	}
-	return projectTopology(request.ProjectID, snapshot), nil
+// Observe records factoryd's own browser listener activity.
+func (backend *browserBackend) Observe(attributes map[string]string) {
+	backend.owner.observe("server", attributes, nil, false, 0)
 }
 
-// projectTopology is the one conversion from the derived graph to the wire.
-// The tree is a filesystem and bounds nothing; the wire bounds every node's
-// text. A node past a bound is dropped with everything under it, so one
-// long directory name costs its subtree instead of making the whole project
-// unserveable. Truncating instead would invent a label and could silently
-// merge two siblings that differ only past the cut.
-func projectTopology(projectID string, snapshot topology.Snapshot) browserprotocol.Topology {
-	result := browserprotocol.Topology{
-		ProjectID: projectID, Digest: snapshot.Digest, SourceRevision: snapshot.SourceRevision,
-		Nodes: make([]browserprotocol.TopologyNode, 0, len(snapshot.Nodes)),
+// OperationalGraph serves the project's operational structure with its
+// current runtime reading.
+func (backend *browserBackend) OperationalGraph(ctx context.Context, rawClient [browserprotocol.ClientIDSize]byte, request browserprotocol.OperationalGraphGet) (browserprotocol.OperationalGraph, error) {
+	live, graph, err := backend.liveGraph(ctx, rawClient, request.ProjectID)
+	if err != nil {
+		return browserprotocol.OperationalGraph{}, err
 	}
-	// Nodes are ordered by path and kind, which is not ancestry order: a root
-	// module sorts before the repository that contains it. So each node is
-	// decided by walking its own ancestor chain, never by slice position.
-	byID := make(map[string]topology.Node, len(snapshot.Nodes))
-	for _, node := range snapshot.Nodes {
-		byID[node.ID] = node
+	return graphFrame(request.ProjectID, graph, live, backend.now().UnixMilli()), nil
+}
+
+// OperationalNode serves one node's evidence for the inspector.
+func (backend *browserBackend) OperationalNode(ctx context.Context, rawClient [browserprotocol.ClientIDSize]byte, request browserprotocol.OperationalNodeGet) (browserprotocol.OperationalNode, error) {
+	live, _, err := backend.liveGraph(ctx, rawClient, request.ProjectID)
+	if err != nil {
+		return browserprotocol.OperationalNode{}, err
 	}
-	decided := make(map[string]bool, len(snapshot.Nodes))
-	var servable func(string) bool
-	servable = func(id string) bool {
-		if result, ok := decided[id]; ok {
-			return result
+	for _, node := range live.Graph.Nodes {
+		if node.ID != request.NodeID {
+			continue
 		}
-		node, ok := byID[id]
-		if !ok {
-			return false
+		result := browserprotocol.OperationalNode{ProjectID: request.ProjectID, NodeID: node.ID, Selectors: node.Selectors}
+		for _, item := range node.Evidence {
+			result.Evidence = append(result.Evidence, browserprotocol.GraphEvidence(item))
 		}
-		// Provisionally false, so a chain that loops back on corrupt input
-		// terminates and fails closed rather than recursing forever.
-		decided[id] = false
-		result := servableTopologyText(node) && (node.ParentID == "" || servable(node.ParentID))
-		decided[id] = result
+		for _, location := range node.Sources {
+			result.Sources = append(result.Sources, browserprotocol.GraphLocation{RepositoryID: location.Repository, Path: location.Path, Line: location.Line})
+		}
+		for _, location := range node.Modules {
+			result.Modules = append(result.Modules, browserprotocol.GraphLocation{RepositoryID: location.Repository, Path: location.Path})
+		}
+		result.Observers = live.Nodes[node.ID].Sources
+		return result, nil
+	}
+	return browserprotocol.OperationalNode{}, browser.ErrNotFound
+}
+
+// liveGraph reads the static graph outside the client's gate (it may take
+// most of its budget) and overlays the runtime store.
+func (backend *browserBackend) liveGraph(ctx context.Context, rawClient [browserprotocol.ClientIDSize]byte, rawProject string) (opgraph.Live, projectGraph, error) {
+	_, release, _, err := backend.authorize(ctx, rawClient, kernel.BrowserCapabilityObserve)
+	if err != nil {
+		return opgraph.Live{}, projectGraph{}, err
+	}
+	release()
+	if backend.owner == nil {
+		return opgraph.Live{}, projectGraph{}, browser.ErrNotFound
+	}
+	projectID, err := decodeID(rawProject, kernel.ProjectIDFromBytes)
+	if err != nil {
+		return opgraph.Live{}, projectGraph{}, browser.ErrStale
+	}
+	graph, err := backend.owner.ProjectGraph(ctx, projectID)
+	if err != nil {
+		return opgraph.Live{}, projectGraph{}, mapBrowserError(err)
+	}
+	return backend.owner.liveGraph(projectID, graph), graph, nil
+}
+
+// graphFrame is the one conversion from the live graph to the wire. Node
+// paths use the run-path spelling, so the console maps work onto nodes the
+// same way it maps it onto changes.
+func graphFrame(projectID string, graph projectGraph, live opgraph.Live, now int64) browserprotocol.OperationalGraph {
+	result := browserprotocol.OperationalGraph{ProjectID: projectID, Digest: graph.digest, ObservedAt: now, Sources: []browserprotocol.GraphSource{}}
+	for _, source := range graph.sources {
+		result.Sources = append(result.Sources, browserprotocol.GraphSource(source))
+	}
+	spell := func(location opgraph.Location) string {
+		if len(graph.sources) > 1 {
+			return path.Join(location.Repository, location.Path)
+		}
+		return location.Path
+	}
+	for _, node := range live.Graph.Nodes {
+		status := live.Nodes[node.ID]
+		frame := browserprotocol.GraphNode{ID: node.ID, Kind: string(node.Kind), Label: node.Label, Unit: node.Unit, Runtime: node.Runtime, Trigger: node.Trigger,
+			Paths: []string{}, Evidence: opgraph.State(node.Evidence), Observation: status.Observation, State: status.State,
+			RatePerHour: uint64(status.Rate * 60), ErrorPermille: uint32(status.ErrorRate * 1000), LatencyP95: uint32(status.LatencyP95), LastSeen: status.LastSeen, DeployedAt: status.DeployedAt}
+		if frame.Label == "" {
+			frame.Label = string(node.Kind)
+		}
+		for _, location := range append(append([]opgraph.Location{}, node.Modules...), node.Sources...) {
+			if spelled := spell(location); len(frame.Paths) < 128 && !slices.Contains(frame.Paths, spelled) {
+				frame.Paths = append(frame.Paths, spelled)
+			}
+		}
+		result.Nodes = append(result.Nodes, frame)
+	}
+	for _, edge := range live.Graph.Edges {
+		status := live.Edges[[3]string{edge.From, edge.To, string(edge.Kind)}]
+		result.Edges = append(result.Edges, browserprotocol.GraphEdge{From: edge.From, To: edge.To, Kind: string(edge.Kind), Evidence: opgraph.State(edge.Evidence),
+			Observation: status.Observation, State: status.State, RatePerHour: uint64(status.Rate * 60)})
+	}
+	summary := live.Summary
+	result.Summary = browserprotocol.GraphSummary{Components: uint32(summary.Components), Inferred: uint32(summary.Inferred), Observed: uint32(summary.Observed),
+		Quiet: uint32(summary.Quiet), Partial: uint32(summary.Partial), Stale: uint32(summary.Stale), Unobserved: uint32(summary.Unobserved),
+		Opaque: uint32(summary.Opaque), RuntimeOnly: uint32(summary.RuntimeOnly), Contradicted: uint32(summary.Contradicted)}
+	return fitGraphFrame(result)
+}
+
+// fitGraphFrame keeps the snapshot bound with one full encoding: sizes are
+// measured per item, then paths beyond the first go, then unobserved edges,
+// then runtime-only nodes and leaves from the end, each counted. A hall goes
+// only once nothing in it remains, so the frame always stays valid.
+func fitGraphFrame(result browserprotocol.OperationalGraph) browserprotocol.OperationalGraph {
+	const budget = browserprotocol.MaxSnapshotBytes - 1024
+	size := func(value any) int { encoded, _ := json.Marshal(value); return len(encoded) + 1 }
+	encoded, err := browserprotocol.EncodeOperationalGraph("graph", result)
+	total := len(encoded)
+	if err == nil && total <= budget && len(result.Edges) <= browserprotocol.MaxSnapshotEntities {
 		return result
 	}
-	for _, node := range snapshot.Nodes {
-		if !servable(node.ID) {
-			continue
+	if err != nil && !errors.Is(err, browserprotocol.ErrOversized) {
+		total = size(result)
+	}
+	for index := range result.Nodes {
+		if total <= budget {
+			break
 		}
-		result.Nodes = append(result.Nodes, browserprotocol.TopologyNode{
-			ID: node.ID, ParentID: node.ParentID, Kind: string(node.Kind), Path: node.RelativePath,
-			Label: node.Label, Language: node.Language, SizeBucket: node.SizeBucket,
-		})
-	}
-	for _, source := range snapshot.Sources {
-		result.Sources = append(result.Sources, browserprotocol.TopologySource(source))
-	}
-	dependencies := &browserprotocol.TopologyDependencies{Source: "go-imports-package-manifests", Edges: []browserprotocol.TopologyEdge{}}
-	for _, edge := range snapshot.Edges {
-		if edge.Kind == topology.EdgeImports {
-			dependencies.Omitted++
+		if paths := result.Nodes[index].Paths; len(paths) > 1 {
+			total -= size(paths) - size(paths[:1])
+			result.Nodes[index].Paths = paths[:1]
 		}
 	}
-	result.Dependencies = dependencies
-	inventoryOmitted := uint32(len(result.Nodes))
-	result.InventoryOmitted = &inventoryOmitted
-	// Reserve the control envelope; never grow the existing 1 MiB topology cap.
-	base, _ := json.Marshal(result)
-	remaining := browserprotocol.MaxSnapshotBytes - len(base) - 512
-	seen := make(map[[2]string]bool)
-	for _, edge := range snapshot.Edges {
-		pair := [2]string{edge.From, edge.To}
-		if edge.Kind != topology.EdgeImports || !servable(edge.From) || !servable(edge.To) || edge.From == edge.To || edge.Weight == 0 || seen[pair] {
-			continue
-		}
-		observed := browserprotocol.TopologyEdge{From: edge.From, To: edge.To, Weight: edge.Weight}
-		encoded, _ := json.Marshal(observed)
-		if len(dependencies.Edges) == browserprotocol.MaxTopologyEdges || len(encoded)+1 > remaining {
-			continue
-		}
-		dependencies.Edges = append(dependencies.Edges, observed)
-		dependencies.Omitted--
-		seen[pair] = true
-		remaining -= len(encoded) + 1
+	sort.SliceStable(result.Edges, func(i, j int) bool {
+		return result.Edges[i].Observation != "unobserved" && result.Edges[j].Observation == "unobserved"
+	})
+	for len(result.Edges) > 0 && (total > budget || len(result.Edges) > browserprotocol.MaxSnapshotEntities) {
+		total -= size(result.Edges[len(result.Edges)-1])
+		result.Edges = result.Edges[:len(result.Edges)-1]
 	}
-	// Count summaries follow useful dependencies. Filenames are last so one
-	// room cannot consume the budget needed to describe another room.
-	for i := range result.Nodes {
-		inventory := byID[result.Nodes[i].ID].Inventory
-		if inventory == nil {
-			inventoryOmitted--
-			continue
-		}
-		projected := &browserprotocol.TopologyInventory{
-			Direct:  browserprotocol.TopologyInventoryCounts(inventory.Direct),
-			Total:   browserprotocol.TopologyInventoryCounts(inventory.Total),
-			Samples: []string{}, SamplesOmitted: inventory.SamplesOmitted + uint32(len(inventory.Samples)),
-		}
-		encoded, _ := json.Marshal(projected)
-		cost := len(encoded) + len(`,"inventory":`)
-		if cost > remaining {
-			continue
-		}
-		result.Nodes[i].Inventory = projected
-		inventoryOmitted--
-		remaining -= cost
+	children := map[string]int{}
+	for _, node := range result.Nodes {
+		children[node.Unit]++
 	}
-	for i := range result.Nodes {
-		projected := result.Nodes[i].Inventory
-		if projected == nil {
-			continue
+	drop := func(keep func(browserprotocol.GraphNode) bool) {
+		kept := result.Nodes[:0]
+		removed := map[string]bool{}
+		for index := len(result.Nodes) - 1; index >= 0; index-- {
+			node := result.Nodes[index]
+			if total > budget && !keep(node) && children[node.ID] == 0 {
+				total -= size(node)
+				removed[node.ID] = true
+				children[node.Unit]--
+				result.Omitted++
+			}
 		}
-		inventory := byID[result.Nodes[i].ID].Inventory
-		if len(inventory.Samples) == 0 {
-			continue
+		for _, node := range result.Nodes {
+			if !removed[node.ID] {
+				kept = append(kept, node)
+			}
 		}
-		withSamples := *projected
-		withSamples.Samples = inventory.Samples
-		withSamples.SamplesOmitted = inventory.SamplesOmitted
-		before, _ := json.Marshal(projected)
-		after, _ := json.Marshal(withSamples)
-		cost := len(after) - len(before)
-		if cost > remaining {
-			continue
+		result.Nodes = kept
+		edges := result.Edges[:0]
+		for _, edge := range result.Edges {
+			if !removed[edge.From] && !removed[edge.To] {
+				edges = append(edges, edge)
+			}
 		}
-		projected.Samples = append([]string{}, inventory.Samples...)
-		projected.SamplesOmitted = inventory.SamplesOmitted
-		remaining -= cost
+		result.Edges = edges
 	}
+	drop(func(node browserprotocol.GraphNode) bool { return node.Evidence != "runtime" })
+	drop(func(node browserprotocol.GraphNode) bool { return node.Kind == "processor" })
+	drop(func(browserprotocol.GraphNode) bool { return false })
 	return result
 }
 
@@ -889,16 +911,6 @@ func consoleUpdateError(err error) error {
 		return browser.ErrInvalidRequest
 	}
 	return mapBrowserError(err)
-}
-
-func servableTopologyText(node topology.Node) bool {
-	return validTopologyText(node.RelativePath, 1, browserprotocol.MaxTaskTitleBytes) &&
-		validTopologyText(node.Label, 1, browserprotocol.MaxAgentNameBytes) &&
-		validTopologyText(node.Language, 0, browserprotocol.MaxAgentNameBytes)
-}
-
-func validTopologyText(value string, minimum, maximum int) bool {
-	return len(value) >= minimum && len(value) <= maximum && utf8.ValidString(value)
 }
 
 // SubscribePush stores one device's alert subscription under its own client
@@ -982,14 +994,14 @@ func (backend *browserBackend) admitRemoteInvite() bool {
 	return true
 }
 
-// RunPaths supplies sampled modified directories, not current worker attention. Like Topology it
+// RunPaths supplies sampled modified directories, not current worker attention. Like OperationalGraph it
 // is regenerable observation, so it carries no revision and no head.
 func (backend *browserBackend) RunPaths(ctx context.Context, rawClient [browserprotocol.ClientIDSize]byte, request browserprotocol.RunPathsGet) (browserprotocol.RunPaths, error) {
 	_, release, _, err := backend.authorize(ctx, rawClient, kernel.BrowserCapabilityObserve)
 	if err != nil {
 		return browserprotocol.RunPaths{}, err
 	}
-	release() // outside the client's gate, as Topology
+	release() // outside the client's gate, as OperationalGraph
 	if backend.owner == nil {
 		return browserprotocol.RunPaths{}, browser.ErrNotFound
 	}

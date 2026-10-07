@@ -11,6 +11,7 @@ import (
 
 	"github.com/dark-factory-build/dark-factory/internal/change"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
+	"github.com/dark-factory-build/dark-factory/internal/opgraph"
 	"github.com/dark-factory-build/dark-factory/internal/provider"
 	"github.com/dark-factory-build/dark-factory/internal/runner"
 )
@@ -94,25 +95,23 @@ func (daemon *Daemon) knowledgeSourceStatus(ctx context.Context, content kernel.
 	if len(observed.Paths) == 0 {
 		return metadata.Status
 	}
-	snapshot, err := daemon.ProjectTopology(ctx, content.ProjectID)
+	graph, err := daemon.ProjectGraph(ctx, content.ProjectID)
 	if err != nil {
 		return "needs_revalidation"
 	}
+	// An entity's claim covers the code it is built from: its source
+	// locations, and for a unit the modules it runs.
 	var paths []string
 	for _, entity := range metadata.Entities {
-		for _, node := range snapshot.Nodes {
-			if entity == content.ProjectID.String()+":"+node.ID {
-				relative := node.RelativePath
-				if len(snapshot.Sources) > 1 && relative == repository.ID.String() {
-					relative = "."
-				} else if len(snapshot.Sources) > 1 {
-					var own bool
-					relative, own = strings.CutPrefix(relative, repository.ID.String()+"/")
-					if !own {
-						return "needs_revalidation"
-					}
+		for _, node := range graph.graph.Nodes {
+			if entity != content.ProjectID.String()+":"+node.ID {
+				continue
+			}
+			for _, location := range append(append([]opgraph.Location{}, node.Sources...), node.Modules...) {
+				if location.Repository != repository.ID.String() {
+					return "needs_revalidation"
 				}
-				paths = append(paths, relative)
+				paths = append(paths, location.Path)
 			}
 		}
 	}
@@ -270,12 +269,8 @@ func (daemon *Daemon) knowledgeContext(ctx context.Context, run kernel.Run, task
 			}
 			if found && bound.ID != repository.ID {
 				sourceRepository, sourceHead = bound, ""
-				if snapshot, e := daemon.ProjectTopology(ctx, content.ProjectID); e == nil {
-					for _, source := range snapshot.Sources {
-						if source.RepositoryID == bound.ID.String() && source.Kind == "integrated" {
-							sourceHead = source.Revision
-						}
-					}
+				if revision, e := daemon.repositoryRevision(ctx, bound); e == nil {
+					sourceHead = revision
 				}
 			}
 		}

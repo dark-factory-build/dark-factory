@@ -18,7 +18,7 @@ import (
 // providerDefaultsFreshness bounds how stale a served provider default may be.
 // Reading one opens and parses the CLI's own configuration file, so a repeated
 // snapshot inside this window is answered from the last read. It mirrors
-// topologyFreshness: a cost guard, not state, and losing it costs one read.
+// graphFreshness: a cost guard, not state, and losing it costs one read.
 const providerDefaultsFreshness = 30 * time.Second
 
 // providerAccount is a provider and the configuration directory it reads. The

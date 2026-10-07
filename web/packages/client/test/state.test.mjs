@@ -515,24 +515,30 @@ test("linked accounts and agent account selections decode under the closed rules
   expectMalformed(() => decodeServerControl(fixture("accounts.json").replace('"provider":"codex"', '"provider":"shell"')));
 });
 
-test("topology inventory preserves unavailable versus zero and rejects malformed counts and samples", () => {
- const body = JSON.parse(fixture("topology.json")).body;
- assert.equal(decodeServerControl(JSON.stringify({ type: "TOPOLOGY", id: "inv", body })).body.nodes[0].inventory, undefined);
- const zero = { source: 0, tests: 0, documentation: 0, configuration: 0, assets: 0, unclassified: 0 };
- const valid = { direct: { ...zero, source: 2 }, total: { ...zero, source: 3 }, samples: ["a.go"], samples_omitted: 1 };
- const decode = (inventory, extra = {}) => decodeServerControl(JSON.stringify({ type: "TOPOLOGY", id: "inv", body: { ...body, ...extra, nodes: [{ ...body.nodes[0], inventory }] } }));
- assert.deepEqual(decode(valid, { inventory_omitted: 0 }).body.nodes[0].inventory, valid);
- assert.deepEqual(decode({ direct: zero, total: zero, samples: [], samples_omitted: 0 }).body.nodes[0].inventory.direct, zero);
- for (const inventory of [null, { ...valid, direct: { ...valid.direct, source: -1 } }, { ...valid, total: zero }, { ...valid, total: { ...zero, source: 50_001 } }, { ...valid, samples: null }, { ...valid, samples: ["../x"] }, { ...valid, samples: ["a".repeat(129)] }, { ...valid, samples: ["a", "a"], samples_omitted: 0 }, { ...valid, samples_omitted: 2 }, { ...valid, direct: { ...zero, Source: 2 } }]) expectMalformed(() => decode(inventory));
- expectMalformed(() => decode(valid, { inventory_omitted: 2 }));
- const future = { ...valid, future_detail: "additive" };
- assert.deepEqual(decode(future).body.nodes[0].inventory, valid);
+test("operational graph decoding refuses unsupported readings and dangling references", () => {
+ const body = JSON.parse(fixture("operational_graph.json")).body;
+ const decode = (change) => decodeServerControl(JSON.stringify({ type: "OPERATIONAL_GRAPH", id: "g", body: change(structuredClone(body)) }));
+ assert.equal(decode((b) => b).body.nodes.length, 4);
+ const bad = {
+  "unknown kind": (b) => { b.nodes[1].kind = "repository"; },
+  "malformed id": (b) => { b.nodes[1].id = "nope"; },
+  "idle unless quiet": (b) => { b.nodes[1].state = "idle"; },
+  "rate on unobserved": (b) => { Object.assign(b.nodes[1], { observation: "unobserved", state: "unknown", rate_per_hour: 5 }); },
+  "rate on stale": (b) => { Object.assign(b.nodes[1], { observation: "stale", state: "unknown", rate_per_hour: 5 }); },
+  "unit missing": (b) => { b.nodes[1].unit = "ff".repeat(16); },
+  "edge to missing node": (b) => { b.edges[0].to = "ff".repeat(16); },
+  "self edge": (b) => { b.edges[0].to = b.edges[0].from; },
+  "duplicate node": (b) => { b.nodes[2].id = b.nodes[1].id; },
+  "unknown evidence": (b) => { b.nodes[1].evidence = "guess"; },
+ };
+ for (const [name, change] of Object.entries(bad)) assert.throws(() => decode(change), ProtocolError, name);
+ assert.equal(decode((b) => { b.nodes[1].future = "additive"; return b; }).body.nodes[1].future, undefined);
 });
 
-test("integrated topology sources retain exact target identity and reject invented revisions", () => {
- const body = JSON.parse(fixture("topology.json")).body;
- const source = { repository_id: "11".repeat(16), prefix: "", kind: "integrated", target_ref: "refs/remotes/origin/main", revision: "a".repeat(40), observed_at: 1000 };
- const decode = (sources) => decodeServerControl(JSON.stringify({ type: "TOPOLOGY", id: "sources", body: { ...body, sources } }));
+test("integrated graph sources retain exact target identity and reject invented revisions", () => {
+ const body = JSON.parse(fixture("operational_graph.json")).body;
+ const source = body.sources[0];
+ const decode = (sources) => decodeServerControl(JSON.stringify({ type: "OPERATIONAL_GRAPH", id: "sources", body: { ...body, sources } }));
  assert.deepEqual(decode([source]).body.sources, [source]);
  for (const invalid of [{ ...source, revision: "" }, { ...source, kind: "approved" }, { ...source, repository_id: "unknown" }, { ...source, observed_at: -1 }, { ...source, revision: "main" }]) expectMalformed(() => decode([invalid]));
  assert.equal(decode([{ ...source, kind: "unavailable", revision: "", reason: "Target unavailable" }]).body.sources[0].kind, "unavailable");

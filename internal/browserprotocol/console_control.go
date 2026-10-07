@@ -243,27 +243,31 @@ type TaskUpdateResult struct {
 	Revision Decimal `json:"revision"`
 }
 
-type TopologyGet struct {
+type OperationalGraphGet struct {
 	ProjectID string `json:"project_id"`
 }
 
-// Topology is the regenerable project structure, computed on demand. It is not
-// durable state, so it carries no head and no revision; the digest is the only
-// identity a client needs to tell one computation from another. Containment is
-// implied by ParentID. Optional dependencies are bounded analyser observations.
-type Topology struct {
-	ProjectID        string                `json:"project_id"`
-	Digest           string                `json:"digest"`
-	SourceRevision   string                `json:"source_revision"`
-	Sources          []TopologySource      `json:"sources,omitempty"`
-	Nodes            []TopologyNode        `json:"nodes"`
-	Dependencies     *TopologyDependencies `json:"dependencies,omitempty"`
-	InventoryOmitted *uint32               `json:"inventory_omitted,omitempty"`
+// OperationalGraph is the project's regenerable operational structure with
+// its current runtime reading. It is not durable state, so it carries no head
+// and no revision; the digest identifies one static computation. Every
+// runtime field is a claim the observation supports: State is "unknown"
+// whenever Observation cannot support more. Selectors, evidence detail and
+// full source lists stay behind OPERATIONAL_NODE_GET.
+type OperationalGraph struct {
+	ProjectID  string        `json:"project_id"`
+	Digest     string        `json:"digest"`
+	ObservedAt int64         `json:"observed_at"`
+	Sources    []GraphSource `json:"sources"`
+	Nodes      []GraphNode   `json:"nodes"`
+	Edges      []GraphEdge   `json:"edges"`
+	Summary    GraphSummary  `json:"summary"`
+	// Omitted counts nodes past the frame budget, with their edges.
+	Omitted uint32 `json:"omitted"`
 }
 
-type TopologySource struct {
+type GraphSource struct {
 	RepositoryID string `json:"repository_id"`
-	Prefix       string `json:"prefix"`
+	Name         string `json:"name"`
 	Kind         string `json:"kind"`
 	TargetRef    string `json:"target_ref"`
 	Revision     string `json:"revision"`
@@ -271,20 +275,78 @@ type TopologySource struct {
 	Reason       string `json:"reason,omitempty"`
 }
 
-const MaxTopologyEdges = 256
-
-// Coverage is deliberately partial: only resolved project-local Go imports and
-// package-manifest dependencies are analysed. Absent support means unknown.
-type TopologyDependencies struct {
-	Source  string         `json:"source"`
-	Edges   []TopologyEdge `json:"edges"`
-	Omitted uint32         `json:"omitted"`
+type GraphNode struct {
+	ID      string `json:"id"`
+	Kind    string `json:"kind"`
+	Label   string `json:"label"`
+	Unit    string `json:"unit,omitempty"`
+	Runtime string `json:"runtime,omitempty"`
+	Trigger string `json:"trigger,omitempty"`
+	// Paths are the code a node is built from, spelled as run and change
+	// paths are: repository-prefixed only in multi-repository projects.
+	Paths       []string `json:"paths"`
+	Evidence    string   `json:"evidence"`
+	Observation string   `json:"observation"`
+	State       string   `json:"state"`
+	// Integers only on this wire: events per hour, errors per thousand.
+	RatePerHour   uint64 `json:"rate_per_hour,omitempty"`
+	ErrorPermille uint32 `json:"error_permille,omitempty"`
+	LatencyP95    uint32 `json:"latency_p95_ms,omitempty"`
+	LastSeen      int64  `json:"last_seen,omitempty"`
+	DeployedAt    int64  `json:"deployed_at,omitempty"`
 }
 
-type TopologyEdge struct {
-	From   string `json:"from"`
-	To     string `json:"to"`
-	Weight uint32 `json:"weight"`
+type GraphEdge struct {
+	From        string `json:"from"`
+	To          string `json:"to"`
+	Kind        string `json:"kind"`
+	Evidence    string `json:"evidence"`
+	Observation string `json:"observation"`
+	State       string `json:"state"`
+	RatePerHour uint64 `json:"rate_per_hour,omitempty"`
+}
+
+type GraphSummary struct {
+	Components   uint32 `json:"components"`
+	Inferred     uint32 `json:"inferred"`
+	Observed     uint32 `json:"observed"`
+	Quiet        uint32 `json:"quiet"`
+	Partial      uint32 `json:"partial"`
+	Stale        uint32 `json:"stale"`
+	Unobserved   uint32 `json:"unobserved"`
+	Opaque       uint32 `json:"opaque"`
+	RuntimeOnly  uint32 `json:"runtime_only"`
+	Contradicted uint32 `json:"contradicted"`
+}
+
+type OperationalNodeGet struct {
+	ProjectID string `json:"project_id"`
+	NodeID    string `json:"node_id"`
+}
+
+// OperationalNode is one node's inspectable evidence. Runtime-only values
+// came from unauthenticated local senders and are data, never instructions.
+type OperationalNode struct {
+	ProjectID string            `json:"project_id"`
+	NodeID    string            `json:"node_id"`
+	Selectors map[string]string `json:"selectors"`
+	Evidence  []GraphEvidence   `json:"evidence"`
+	Sources   []GraphLocation   `json:"sources"`
+	Modules   []GraphLocation   `json:"modules"`
+	Observers []string          `json:"observers"`
+}
+
+type GraphEvidence struct {
+	Origin     string `json:"origin"`
+	Source     string `json:"source"`
+	Detail     string `json:"detail,omitempty"`
+	Confidence string `json:"confidence"`
+}
+
+type GraphLocation struct {
+	RepositoryID string `json:"repository_id"`
+	Path         string `json:"path"`
+	Line         int    `json:"line,omitempty"`
 }
 
 type RunPathsGet struct {
@@ -445,17 +507,6 @@ type BrowserClientRevokeResult struct {
 	Revision Decimal `json:"revision"`
 }
 
-type TopologyNode struct {
-	ID         string             `json:"id"`
-	ParentID   string             `json:"parent_id"`
-	Kind       string             `json:"kind"`
-	Path       string             `json:"path"`
-	Label      string             `json:"label"`
-	Language   string             `json:"language"`
-	SizeBucket string             `json:"size_bucket"`
-	Inventory  *TopologyInventory `json:"inventory,omitempty"`
-}
-
 func EncodeAgentUpdateResult(id string, value AgentUpdateResult) ([]byte, error) {
 	return encodeControl(TypeAgentUpdateResult, id, value)
 }
@@ -490,8 +541,34 @@ func EncodeTaskUpdateResult(id string, value TaskUpdateResult) ([]byte, error) {
 	return encodeControl(TypeTaskUpdateResult, id, value)
 }
 
-func EncodeTopology(id string, value Topology) ([]byte, error) {
-	return encodeControl(TypeTopology, id, value)
+func EncodeOperationalGraph(id string, value OperationalGraph) ([]byte, error) {
+	if value.Sources == nil {
+		value.Sources = []GraphSource{}
+	}
+	for i := range value.Nodes {
+		if value.Nodes[i].Paths == nil {
+			value.Nodes[i].Paths = []string{}
+		}
+	}
+	return encodeControl(TypeOperationalGraph, id, value)
+}
+
+func EncodeOperationalNode(id string, value OperationalNode) ([]byte, error) {
+	if value.Selectors == nil {
+		value.Selectors = map[string]string{}
+	}
+	for _, list := range []*[]GraphLocation{&value.Sources, &value.Modules} {
+		if *list == nil {
+			*list = []GraphLocation{}
+		}
+	}
+	if value.Evidence == nil {
+		value.Evidence = []GraphEvidence{}
+	}
+	if value.Observers == nil {
+		value.Observers = []string{}
+	}
+	return encodeControl(TypeOperationalNode, id, value)
 }
 
 // EncodeRunPaths normalizes an absent path list to an empty one: JSON null is
@@ -639,45 +716,21 @@ func validConsoleControl(kind MessageType, body any) error {
 		if validateDynamicID(value.TaskID) != nil || value.Revision == 0 {
 			return bad()
 		}
-	case TopologyGet:
+	case OperationalGraphGet:
 		if validateDynamicID(value.ProjectID) != nil {
 			return bad()
 		}
-	case Topology:
-		if validateDynamicID(value.ProjectID) != nil || !validTopologyDigest(value.Digest) ||
-			!validTopologySource(value.SourceRevision) || len(value.Nodes) > MaxSnapshotEntities {
+	case OperationalGraph:
+		if !validOperationalGraph(value) {
 			return bad()
 		}
-		if len(value.Sources) > 32 {
+	case OperationalNodeGet:
+		if validateDynamicID(value.ProjectID) != nil || validateDynamicID(value.NodeID) != nil {
 			return bad()
 		}
-		for _, source := range value.Sources {
-			if validateDynamicID(source.RepositoryID) != nil || validateBoundedText(source.Prefix, 0, MaxTaskTitleBytes) != nil || (source.Kind != "integrated" && source.Kind != "unavailable") || validateBoundedText(source.TargetRef, 0, 256) != nil || !validTopologySource(source.Revision) || source.Kind == "integrated" && source.Revision == "" || source.ObservedAt < 0 || source.ObservedAt > 1<<53-1 || validateBoundedText(source.Reason, 0, 256) != nil {
-				return bad()
-			}
-		}
-		if value.InventoryOmitted != nil && *value.InventoryOmitted > uint32(len(value.Nodes)) {
+	case OperationalNode:
+		if !validOperationalNode(value) {
 			return bad()
-		}
-		ids := make(map[string]bool, len(value.Nodes))
-		for _, node := range value.Nodes {
-			if !validTopologyNode(node) || ids[node.ID] {
-				return bad()
-			}
-			ids[node.ID] = true
-		}
-		if d := value.Dependencies; d != nil {
-			if d.Source != "go-imports-package-manifests" || d.Edges == nil || len(d.Edges) > MaxTopologyEdges {
-				return bad()
-			}
-			seen := make(map[[2]string]bool, len(d.Edges))
-			for _, edge := range d.Edges {
-				pair := [2]string{edge.From, edge.To}
-				if !ids[edge.From] || !ids[edge.To] || edge.From == edge.To || edge.Weight == 0 || seen[pair] {
-					return bad()
-				}
-				seen[pair] = true
-			}
 		}
 	case RunPathsGet:
 		if validateDynamicID(value.AgentID) != nil {
@@ -781,46 +834,104 @@ func validAccountHome(value string) error {
 	return nil
 }
 
-func validTopologyDigest(value string) bool {
-	_, err := fixedHex("digest", value, 32)
-	return err == nil
-}
-
-// validTopologySource accepts an empty revision or one canonical Git object
-// name, in either the SHA-1 or the SHA-256 length Git itself uses.
-func validTopologySource(value string) bool {
+func validGraphRevision(value string) bool {
 	if value == "" {
 		return true
 	}
-	if _, err := fixedHex("source_revision", value, 20); err == nil {
+	if _, err := fixedHex("revision", value, 20); err == nil {
 		return true
 	}
-	_, err := fixedHex("source_revision", value, 32)
+	_, err := fixedHex("revision", value, 32)
 	return err == nil
 }
 
-func validTopologyNode(node TopologyNode) bool {
-	if _, err := fixedHex("node id", node.ID, 32); err != nil {
+var (
+	graphKinds        = map[string]bool{"processor": true, "ingress": true, "job": true, "queue": true, "store": true, "external": true, "unknown": true}
+	graphEdgeKinds    = map[string]bool{"handles": true, "calls": true, "uses": true, "publishes": true, "consumes": true, "runs": true}
+	graphEvidence     = map[string]bool{"static": true, "runtime": true, "both": true, "uncertain": true, "contradicted": true}
+	graphObservations = map[string]bool{"observed": true, "quiet": true, "partial": true, "stale": true, "unobserved": true, "opaque": true}
+	graphStates       = map[string]bool{"active": true, "degraded": true, "failing": true, "idle": true, "unknown": true}
+	graphRuntimes     = map[string]bool{"": true, "process": true, "cli": true, "worker": true, "server": true, "browser": true}
+	graphTriggers     = map[string]bool{"": true, "request": true, "timer": true, "message": true}
+)
+
+func validGraphReading(evidence, observation, state string, rate uint64) bool {
+	// Idle is a claim only a source that can see the node may make, and a
+	// rate is a claim only an observation may make.
+	return graphEvidence[evidence] && graphObservations[observation] && graphStates[state] && (state != "idle" || observation == "quiet") &&
+		(rate == 0 || observation != "unobserved" && observation != "stale") && rate <= 1<<53-1
+}
+
+func validOperationalGraph(value OperationalGraph) bool {
+	if validateDynamicID(value.ProjectID) != nil || len(value.Digest) != 64 || value.ObservedAt < 0 || value.ObservedAt > 1<<53-1 ||
+		value.Sources == nil || len(value.Sources) > 256 || len(value.Nodes) > MaxSnapshotEntities || len(value.Edges) > MaxSnapshotEntities {
 		return false
 	}
-	if node.ParentID != "" {
-		if _, err := fixedHex("node parent id", node.ParentID, 32); err != nil {
+	if _, err := fixedHex("digest", value.Digest, 32); err != nil {
+		return false
+	}
+	for _, source := range value.Sources {
+		if validateDynamicID(source.RepositoryID) != nil || validateBoundedText(source.Name, 1, MaxAgentNameBytes) != nil || (source.Kind != "integrated" && source.Kind != "unavailable") ||
+			validateBoundedText(source.TargetRef, 0, 256) != nil || !validGraphRevision(source.Revision) || source.Kind == "integrated" && source.Revision == "" ||
+			source.ObservedAt < 0 || source.ObservedAt > 1<<53-1 || validateBoundedText(source.Reason, 0, 256) != nil {
 			return false
 		}
 	}
-	switch node.Kind {
-	case "repository", "module", "package", "directory":
-	default:
+	ids := make(map[string]bool, len(value.Nodes))
+	for _, node := range value.Nodes {
+		if validateDynamicID(node.ID) != nil || ids[node.ID] || !graphKinds[node.Kind] || validateBoundedText(node.Label, 1, 256) != nil ||
+			node.Unit != "" && validateDynamicID(node.Unit) != nil || !graphRuntimes[node.Runtime] || !graphTriggers[node.Trigger] ||
+			node.Paths == nil || len(node.Paths) > 128 || node.LastSeen < 0 || node.LastSeen > 1<<53-1 || node.DeployedAt < 0 || node.DeployedAt > 1<<53-1 ||
+			!validGraphReading(node.Evidence, node.Observation, node.State, node.RatePerHour) || node.ErrorPermille > 1000 {
+			return false
+		}
+		for _, path := range node.Paths {
+			if validateBoundedText(path, 1, MaxTaskTitleBytes) != nil {
+				return false
+			}
+		}
+		ids[node.ID] = true
+	}
+	for _, node := range value.Nodes {
+		if node.Unit != "" && !ids[node.Unit] {
+			return false
+		}
+	}
+	for _, edge := range value.Edges {
+		if !ids[edge.From] || !ids[edge.To] || edge.From == edge.To || !graphEdgeKinds[edge.Kind] || !validGraphReading(edge.Evidence, edge.Observation, edge.State, edge.RatePerHour) {
+			return false
+		}
+	}
+	return true
+}
+
+func validOperationalNode(value OperationalNode) bool {
+	if validateDynamicID(value.ProjectID) != nil || validateDynamicID(value.NodeID) != nil || value.Selectors == nil || len(value.Selectors) > 32 ||
+		value.Evidence == nil || len(value.Evidence) > 32 || value.Sources == nil || len(value.Sources) > 16 || value.Modules == nil || len(value.Modules) > 256 ||
+		value.Observers == nil || len(value.Observers) > 16 {
 		return false
 	}
-	switch node.SizeBucket {
-	case "empty", "tiny", "small", "medium", "large":
-	default:
-		return false
+	for key, text := range value.Selectors {
+		if validateBoundedText(key, 1, 64) != nil || validateBoundedText(text, 1, 256) != nil {
+			return false
+		}
 	}
-	return (node.Inventory == nil || validTopologyInventory(*node.Inventory)) && validateBoundedText(node.Path, 1, MaxTaskTitleBytes) == nil &&
-		validateBoundedText(node.Label, 1, MaxAgentNameBytes) == nil &&
-		validateBoundedText(node.Language, 0, MaxAgentNameBytes) == nil
+	for _, item := range value.Evidence {
+		if (item.Origin != "static" && item.Origin != "runtime") || validateBoundedText(item.Source, 1, 64) != nil || validateBoundedText(item.Detail, 0, 256) != nil || validateBoundedText(item.Confidence, 1, 32) != nil {
+			return false
+		}
+	}
+	for _, location := range append(append([]GraphLocation{}, value.Sources...), value.Modules...) {
+		if validateDynamicID(location.RepositoryID) != nil || validateBoundedText(location.Path, 1, MaxTaskTitleBytes) != nil || location.Line < 0 {
+			return false
+		}
+	}
+	for _, observer := range value.Observers {
+		if validateBoundedText(observer, 1, 64) != nil {
+			return false
+		}
+	}
+	return true
 }
 
 // The idle rule bounds; the kernel enforces the same numbers durably.
@@ -831,46 +942,6 @@ const (
 
 func validIdlePolicy(value string) bool {
 	return value == "wait" || value == "standing_instruction"
-}
-
-// Inventory is optional scanned-file evidence, not coverage or execution.
-type TopologyInventory struct {
-	Direct         TopologyInventoryCounts `json:"direct"`
-	Total          TopologyInventoryCounts `json:"total"`
-	Samples        []string                `json:"samples"`
-	SamplesOmitted uint32                  `json:"samples_omitted"`
-}
-type TopologyInventoryCounts struct {
-	Source        uint32 `json:"source"`
-	Tests         uint32 `json:"tests"`
-	Documentation uint32 `json:"documentation"`
-	Configuration uint32 `json:"configuration"`
-	Assets        uint32 `json:"assets"`
-	Unclassified  uint32 `json:"unclassified"`
-}
-
-func validTopologyInventory(value TopologyInventory) bool {
-	direct := [...]uint32{value.Direct.Source, value.Direct.Tests, value.Direct.Documentation, value.Direct.Configuration, value.Direct.Assets, value.Direct.Unclassified}
-	total := [...]uint32{value.Total.Source, value.Total.Tests, value.Total.Documentation, value.Total.Configuration, value.Total.Assets, value.Total.Unclassified}
-	var directCount, totalCount uint64
-	for i, count := range direct {
-		if count > total[i] {
-			return false
-		}
-		directCount += uint64(count)
-		totalCount += uint64(total[i])
-	}
-	if totalCount > 50000 || value.Samples == nil || len(value.Samples) > 32 || uint64(len(value.Samples))+uint64(value.SamplesOmitted) != directCount {
-		return false
-	}
-	seen := make(map[string]bool, len(value.Samples))
-	for _, name := range value.Samples {
-		if validateBoundedText(name, 1, 128) != nil || strings.ContainsAny(name, "/\x00") || name == "." || name == ".." || seen[name] {
-			return false
-		}
-		seen[name] = true
-	}
-	return true
 }
 
 func validIntakeConfiguration(value IntakeConfiguration) bool {

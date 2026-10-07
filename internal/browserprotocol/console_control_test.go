@@ -13,7 +13,7 @@ import (
 func TestConsoleControlBounds(t *testing.T) {
 	agent := "02020202020202020202020202020202"
 	task := "03030303030303030303030303030303"
-	node := strings.Repeat("a1", 32)
+	node := strings.Repeat("a1", 16)
 	for _, frame := range []string{
 		// Every mutable member is optional; only the identity and the observed
 		// revision are required.
@@ -38,7 +38,7 @@ func TestConsoleControlBounds(t *testing.T) {
 		`{"type":"TASK_UPDATE","id":"x","body":{"task_id":"` + task + `","expected_revision":"7","status":"queued","title":"renamed"}}`,
 		`{"type":"TASK_UPDATE","id":"x","body":{"task_id":"` + task + `","expected_revision":"7","priority":1000001}}`,
 		`{"type":"TASK_UPDATE","id":"x","body":{"task_id":"` + task + `","expected_revision":"7","title":""}}`,
-		`{"type":"TOPOLOGY_GET","id":"x","body":{"project_id":"0000000000000000000000000000000"}}`,
+		`{"type":"OPERATIONAL_GRAPH_GET","id":"x","body":{"project_id":"0000000000000000000000000000000"}}`,
 		// An explicit null is not "absent". encoding/json would leave the
 		// pointer nil and report success with an advanced revision, while the
 		// browser's exact decoder refuses the same frame.
@@ -56,21 +56,25 @@ func TestConsoleControlBounds(t *testing.T) {
 			t.Fatalf("%s accepted: %v", frame, err)
 		}
 	}
-	topology := func(nodes string) string {
-		return `{"type":"TOPOLOGY","id":"x","body":{"project_id":"01010101010101010101010101010101","digest":"` +
-			strings.Repeat("ab", 32) + `","source_revision":"","nodes":[` + nodes + `]}}`
+	graph := func(nodes string) string {
+		return `{"type":"OPERATIONAL_GRAPH","id":"x","body":{"project_id":"01010101010101010101010101010101","digest":"` +
+			strings.Repeat("ab", 32) + `","observed_at":1,"sources":[],"nodes":[` + nodes + `],"edges":[],"summary":{"components":1,"inferred":1,"observed":0,"quiet":1,"partial":0,"stale":0,"unobserved":0,"opaque":0,"runtime_only":0,"contradicted":0},"omitted":0}}`
 	}
-	good := `{"id":"` + node + `","parent_id":"","kind":"package","path":"internal/kernel","label":"kernel","language":"go","size_bucket":"large"}`
-	if _, err := DecodeServerControl([]byte(topology(good))); err != nil {
-		t.Fatalf("topology refused: %v", err)
+	good := `{"id":"` + node + `","kind":"ingress","label":"GET /x","paths":["a.go"],"evidence":"static","observation":"quiet","state":"idle"}`
+	if _, err := DecodeServerControl([]byte(graph(good))); err != nil {
+		t.Fatalf("graph refused: %v", err)
 	}
 	for _, bad := range []string{
-		strings.Replace(good, `"kind":"package"`, `"kind":"symbol"`, 1),
-		strings.Replace(good, `"size_bucket":"large"`, `"size_bucket":"huge"`, 1),
+		strings.Replace(good, `"kind":"ingress"`, `"kind":"room"`, 1),
 		strings.Replace(good, `"id":"`+node+`"`, `"id":"a1"`, 1),
-		strings.Replace(good, `"label":"kernel"`, `"label":""`, 1),
+		strings.Replace(good, `"label":"GET /x"`, `"label":""`, 1),
+		// Idle is only ever a claim a covering source can make.
+		strings.Replace(good, `"observation":"quiet"`, `"observation":"unobserved"`, 1),
+		strings.Replace(good, `"state":"idle"`, `"state":"asleep"`, 1),
+		strings.Replace(good, `"paths":["a.go"],`, ``, 1),
+		strings.Replace(good, `"label"`, `"unit":"`+strings.Repeat("cd", 16)+`","label"`, 1),
 	} {
-		if _, err := DecodeServerControl([]byte(topology(bad))); err != ErrMalformed {
+		if _, err := DecodeServerControl([]byte(graph(bad))); err != ErrMalformed {
 			t.Fatalf("%s accepted: %v", bad, err)
 		}
 	}
@@ -102,47 +106,6 @@ func TestPageAccountsUsesCumulativeByteBoundedCursor(t *testing.T) {
 	}
 	if seen != len(items) {
 		t.Fatalf("paged %d accounts, want %d", seen, len(items))
-	}
-}
-
-// TOPOLOGY is the second frame allowed past the 64 KiB control bound: a
-// repository graph does not fit in it. The bound it does have is the
-// snapshot's, and it still fails closed.
-func TestTopologyIsBoundedBySnapshotBytesNotControlBytes(t *testing.T) {
-	nodes := func(count, pathBytes int) []TopologyNode {
-		result := make([]TopologyNode, 0, count)
-		for index := 0; index < count; index++ {
-			result = append(result, TopologyNode{
-				ID: fmt.Sprintf("%064x", index+1), Kind: "directory", Path: strings.Repeat("p", pathBytes),
-				Label: "leaf", SizeBucket: "small",
-			})
-		}
-		return result
-	}
-	body := func(items []TopologyNode) Topology {
-		return Topology{ProjectID: "01010101010101010101010101010101", Digest: strings.Repeat("ab", 32), Nodes: items}
-	}
-	wide, err := EncodeTopology("x", body(nodes(512, 128)))
-	if err != nil {
-		t.Fatalf("topology past the control bound: %v", err)
-	}
-	if len(wide) <= MaxControlBytes || len(wide) > MaxSnapshotBytes {
-		t.Fatalf("topology frame is %d bytes, want between %d and %d", len(wide), MaxControlBytes, MaxSnapshotBytes)
-	}
-	frame, err := DecodeServerControl(wide)
-	if err != nil || len(frame.Body.(Topology).Nodes) != 512 {
-		t.Fatalf("wide topology decode: %+v, %v", frame, err)
-	}
-	// The larger bound belongs to the server direction alone: a browser never
-	// sends this frame and cannot send one this size at all.
-	if _, err := DecodeClientControl(wide); err != ErrOversized {
-		t.Fatalf("topology crossed into the client decoder: %v", err)
-	}
-	if _, err := EncodeTopology("x", body(nodes(MaxSnapshotEntities, MaxTaskTitleBytes))); err != ErrOversized {
-		t.Fatalf("oversized topology encoded: %v", err)
-	}
-	if _, err := DecodeServerControl(make([]byte, MaxSnapshotBytes+1)); err != ErrOversized {
-		t.Fatalf("oversized frame decoded: %v", err)
 	}
 }
 
@@ -193,70 +156,6 @@ func TestProjectLimitsRequireExplicitValues(t *testing.T) {
 	}
 }
 
-func TestTopologyInventoryOptionalAndBounded(t *testing.T) {
-	var body Topology
-	frame, err := DecodeServerControl(fixtureBytes(t, "topology.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	body = frame.Body.(Topology)
-	if body.Nodes[0].Inventory != nil || body.InventoryOmitted != nil {
-		t.Fatal("legacy absent inventory is not unavailable")
-	}
-	valid := TopologyInventory{Direct: TopologyInventoryCounts{Source: 2}, Total: TopologyInventoryCounts{Source: 3}, Samples: []string{"a.go"}, SamplesOmitted: 1}
-	full := TopologyInventory{Direct: TopologyInventoryCounts{Source: 32}, Total: TopologyInventoryCounts{Source: 32}, Samples: []string{}}
-	for index := range 32 {
-		full.Samples = append(full.Samples, fmt.Sprintf("file-%d.go", index))
-	}
-	for _, inventory := range []TopologyInventory{valid, full, {Samples: []string{}}} {
-		body.Nodes[0].Inventory = &inventory
-		encoded, err := EncodeTopology("inventory", body)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := DecodeServerControl(encoded); err != nil {
-			t.Fatal(err)
-		}
-	}
-	for _, mutate := range []func(*TopologyInventory){
-		func(v *TopologyInventory) { v.Total.Source = 1 }, func(v *TopologyInventory) { v.Total.Source = 50001 },
-		func(v *TopologyInventory) { v.Samples = nil },
-		func(v *TopologyInventory) {
-			v.Direct.Source = 33
-			v.Total.Source = 33
-			v.Samples = []string{}
-			for index := range 33 {
-				v.Samples = append(v.Samples, fmt.Sprintf("file-%d.go", index))
-			}
-			v.SamplesOmitted = 0
-		}, func(v *TopologyInventory) { v.SamplesOmitted = 0 },
-		func(v *TopologyInventory) { v.Samples = []string{"a.go", "a.go"}; v.SamplesOmitted = 0 },
-		func(v *TopologyInventory) { v.Samples = []string{"../bad"} }, func(v *TopologyInventory) { v.Samples = []string{strings.Repeat("a", 129)} },
-	} {
-		inventory := valid
-		mutate(&inventory)
-		body.Nodes[0].Inventory = &inventory
-		wire, _ := json.Marshal(struct {
-			Type string   `json:"type"`
-			ID   string   `json:"id"`
-			Body Topology `json:"body"`
-		}{"TOPOLOGY", "inventory", body})
-		if _, err := DecodeServerControl(wire); err == nil {
-			t.Fatalf("invalid inventory accepted: %+v", inventory)
-		}
-	}
-	body.Nodes[0].Inventory = &valid
-	wire, err := EncodeTopology("inventory", body)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, bad := range []string{strings.Replace(string(wire), `"source":2`, `"Source":2`, 1), strings.Replace(string(wire), `"source":2,`, ``, 1), strings.Replace(string(wire), `"source":2`, `"source":-1`, 1)} {
-		if _, err := DecodeServerControl([]byte(bad)); err == nil {
-			t.Fatalf("invalid shape accepted: %s", bad)
-		}
-	}
-}
-
 func TestLinearIntakeControlsKeepCredentialsOutOfReplies(t *testing.T) {
 	for _, action := range []string{`"linear_connect","api_key":"private-test-key"`, `"linear_teams"`, `"linear_disconnect"`} {
 		frame := `{"type":"INTAKE","id":"linear","body":{"action":` + action + `}}`
@@ -277,5 +176,30 @@ func TestLinearIntakeControlsKeepCredentialsOutOfReplies(t *testing.T) {
 	encoded, err := json.Marshal(decoded.Body)
 	if err != nil || strings.Contains(string(encoded), "private-test-key") {
 		t.Fatal("credential in decoded reply", err)
+	}
+}
+
+// OPERATIONAL_GRAPH may pass the 64 KiB control bound, never the snapshot's.
+func TestOperationalGraphIsBoundedBySnapshotBytes(t *testing.T) {
+	body := func(count int) OperationalGraph {
+		value := OperationalGraph{ProjectID: "01010101010101010101010101010101", Digest: strings.Repeat("ab", 32)}
+		for index := range count {
+			value.Nodes = append(value.Nodes, GraphNode{ID: fmt.Sprintf("%032x", index+1), Kind: "ingress", Label: strings.Repeat("l", 200),
+				Paths: []string{strings.Repeat("p", 200)}, Evidence: "static", Observation: "unobserved", State: "unknown"})
+		}
+		return value
+	}
+	wide, err := EncodeOperationalGraph("x", body(512))
+	if err != nil || len(wide) <= MaxControlBytes {
+		t.Fatalf("graph frame: %d bytes, %v", len(wide), err)
+	}
+	if frame, err := DecodeServerControl(wide); err != nil || len(frame.Body.(OperationalGraph).Nodes) != 512 {
+		t.Fatalf("wide graph decode: %v", err)
+	}
+	if _, err := DecodeClientControl(wide); err == nil {
+		t.Fatal("graph crossed into the client decoder")
+	}
+	if _, err := EncodeOperationalGraph("x", body(MaxSnapshotEntities)); err != ErrOversized {
+		t.Fatalf("oversized graph encoded: %v", err)
 	}
 }

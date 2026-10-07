@@ -5,3 +5,5 @@ export { FactoryConsole } from "./factory-console.js";
 export type { ConsoleView, FactoryConsoleProps } from "./factory-console.js";
 export { RemoteApp } from "./remote/remote-app.js";
 export type { RemoteAppProps } from "./remote/remote-app.js";
+export * from "./public-floor.js";
+export { FactoryScene } from "./factory-scene/factory-scene.js";

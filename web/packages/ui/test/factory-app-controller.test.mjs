@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import test, { mock } from "node:test";
 import { SessionError } from "@dark-factory/client";
 import { FactoryAppController } from "../dist/src/factory-app-controller.js";
-import { fixtureState } from "../../../fixtures/state.mjs";
+import { fixtureGraph, fixtureState } from "../../../fixtures/state.mjs";
+
+const graphOf = (id, digest) => ({ ...fixtureGraph, project_id: id, digest });
 
 const challenge = "51".repeat(32);
 const request = [...fixtureState.humanRequests.values()][0];
@@ -52,7 +54,7 @@ function harness(overrides = {}) {
     updateTask: overrides.updateTask ?? (async () => { throw new SessionError("not_found"); }),
     getTaskHistory: overrides.getTaskHistory ?? (async () => { throw new SessionError("not_found"); }),
     getTaskDetail: overrides.getTaskDetail ?? (async () => { throw new SessionError("not_found"); }),
-    getTopology: overrides.getTopology ?? (async () => { throw new SessionError("not_found"); }),
+    getOperationalGraph: overrides.getOperationalGraph ?? (async () => { throw new SessionError("not_found"); }),
     getRunPaths: overrides.getRunPaths ?? (async () => { throw new SessionError("not_found"); }),
     discoverAccounts: overrides.discoverAccounts ?? (async () => []),
     updateAccount: overrides.updateAccount ?? (async () => ({ accountId: "00".repeat(16), revision: 2n })),
@@ -698,66 +700,61 @@ test("leaving the terminal keeps the agent selected; closing the sidebar does no
   assert.equal(context.latest().selectedAgent, undefined);
 });
 
-test("every project's topology is fetched, kept by id, and refreshed while the floor is shown", async (t) => {
+test("every project's operational graph is fetched, kept by id, and refreshed while the floor is shown", async (t) => {
   mock.timers.enable({ apis: ["setInterval"] });
   t.after(() => mock.timers.reset());
   const projects = [...fixtureState.projects.keys()];
   const asked = [];
   const digests = new Map(projects.map((id, index) => [id, `a${index}`.repeat(32)]));
-  let answer = async (id) => ({ projectId: id, digest: digests.get(id), sourceRevision: "", nodes: [] });
-  const context = harness({ getTopology: (id) => { asked.push(id); return answer(id); } });
+  let answer = async (id) => (graphOf(id, digests.get(id)));
+  const context = harness({ getOperationalGraph: (id) => { asked.push(id); return answer(id); } });
   context.controller.start();
   context.emitState(fixtureState);
   context.emitStatus("ready");
 
   // Every configured project is asked, none is preferred, and one round is in
   // flight at a time however many times the floor asks.
-  context.controller.loadTopology();
-  context.controller.loadTopology();
+  context.controller.loadGraphs();
+  context.controller.loadGraphs();
   await settle();
   assert.deepEqual(asked, projects);
-  assert.deepEqual([...context.latest().topologies.keys()], projects);
+  assert.deepEqual([...context.latest().graphs.keys()], projects);
 
-  // An unchanged round is not a new snapshot; a changed digest is.
+  // Readings move without the digest moving, so every answer replaces the graph and publishes.
   const published = context.snapshots.length;
-  context.controller.loadTopology();
-  await settle();
-  assert.equal(context.snapshots.length, published);
   digests.set(projects[0], "cd".repeat(32));
-  context.controller.loadTopology();
+  context.controller.loadGraphs();
   await settle();
-  assert.equal(context.snapshots.length, published + 1);
-  assert.equal(context.latest().topologies.get(projects[0]).digest, "cd".repeat(32));
+  assert.ok(context.snapshots.length > published);
+  assert.equal(context.latest().graphs.get(projects[0]).digest, "cd".repeat(32));
 
   // A project the daemon cannot serve keeps the structure last served for it,
   // and never costs the other projects theirs.
   const ready = answer;
   answer = async (id) => { if (id === projects[1]) throw new SessionError("not_found"); return ready(id); };
-  context.controller.loadTopology();
+  context.controller.loadGraphs();
   await settle();
-  assert.deepEqual([...context.latest().topologies.keys()], projects);
+  assert.deepEqual([...context.latest().graphs.keys()], projects);
 
   // A project still answering is not asked again; every other one still is.
   const held = deferred();
   answer = async (id) => (id === projects[0] ? held.promise : ready(id));
-  context.controller.loadTopology();
+  context.controller.loadGraphs();
   await settle();
   const during = asked.length;
-  context.controller.loadTopology();
+  context.controller.loadGraphs();
   await settle();
   assert.deepEqual(asked.slice(during), [projects[1]]);
   held.resolve(await ready(projects[0]));
   await settle();
   answer = ready;
 
-  // Code changes while the floor stays open: the run-paths timer re-reads the
-  // structure every sixth tick, and only then.
+  // Readings change while the floor stays open: the run-paths timer re-reads
+  // the graph every second tick, and only then.
   const rounds = asked.length;
   context.controller.watchRunPaths(true);
-  for (let tick = 0; tick < 5; tick += 1) {
-    mock.timers.tick(10_000);
-    await settle();
-  }
+  mock.timers.tick(10_000);
+  await settle();
   assert.equal(asked.length, rounds);
   mock.timers.tick(10_000);
   await settle();
@@ -766,7 +763,27 @@ test("every project's topology is fetched, kept by id, and refreshed while the f
 
   // A floor belongs to its project; when that project is gone, so is it.
   context.emitState({ ...fixtureState, projects: new Map([[projects[0], fixtureState.projects.get(projects[0])]]) });
-  assert.deepEqual([...context.latest().topologies.keys()], [projects[0]]);
+  assert.deepEqual([...context.latest().graphs.keys()], [projects[0]]);
+});
+
+test("a graph answer that outlives its controller or its project is never kept", async () => {
+  const [first, second] = [...fixtureState.projects.keys()];
+  const late = deferred();
+  const context = harness({ getOperationalGraph: (id) => (id === first ? late.promise : Promise.resolve(graphOf(id, "ab".repeat(32)))) });
+  context.controller.start();
+  context.emitState(fixtureState);
+  context.emitStatus("ready");
+  context.controller.loadGraphs();
+  await settle();
+  assert.deepEqual([...context.latest().graphs.keys()], [second], "a slow project does not hold back the others");
+  // The project goes away while its answer is in flight: its graph is not resurrected by the late reply.
+  context.emitState({ ...fixtureState, projects: new Map([[second, fixtureState.projects.get(second)]]) });
+  context.controller.close();
+  const published = context.snapshots.length;
+  late.resolve(graphOf(first, "cd".repeat(32)));
+  await settle();
+  assert.equal(context.snapshots.length, published, "a closed controller publishes nothing");
+  assert.equal(context.latest().graphs.has(first), false);
 });
 
 test("run paths are polled for running agents only while the floor is shown", async (t) => {
@@ -783,7 +800,7 @@ test("run paths are polled for running agents only while the floor is shown", as
     ["0b".repeat(16), { id: "0b".repeat(16), project_id: otherProject, assigned_agent_id: otherAgent, title: "Unserved", status: "running", priority: 1, revision: 1n }]]) };
   const context = harness({
     getRunPaths: (agentId) => { asked.push(agentId); return answer(agentId); },
-    getTopology: async (id) => { if (id !== servedProject) throw new SessionError("not_found"); return { projectId: id, digest: "ab".repeat(32), sourceRevision: "", nodes: [] }; },
+    getOperationalGraph: async (id) => { if (id !== servedProject) throw new SessionError("not_found"); return graphOf(id, "ab".repeat(32)); },
   });
   context.controller.start();
   context.emitState(state);
@@ -792,7 +809,7 @@ test("run paths are polled for running agents only while the floor is shown", as
   // One timer however many times the floor asks, and only the agents that are
   // on a running task in a served project are asked at all: the first round
   // has no structure yet, and the one the structure's arrival triggers does.
-  context.controller.loadTopology();
+  context.controller.loadGraphs();
   context.controller.watchRunPaths(true);
   context.controller.watchRunPaths(true);
   await settle();
@@ -863,13 +880,13 @@ test("a late path answer from an earlier revision only becomes a retained observ
   let asked = 0;
   const context = harness({
     getRunPaths: () => { asked += 1; return pending.promise; },
-    getTopology: async (id) => ({ projectId: id, digest: "ab".repeat(32), sourceRevision: "", nodes: [] }),
+    getOperationalGraph: async (id) => (graphOf(id, "ab".repeat(32))),
   });
   const original = [...fixtureState.tasks.values()].find((task) => task.assigned_agent_id === runningAgentID && task.status === "running");
   context.controller.start();
   context.emitState(fixtureState);
   context.emitStatus("ready");
-  context.controller.loadTopology();
+  context.controller.loadGraphs();
   await settle();
   context.controller.watchRunPaths(true);
   await settle();
@@ -969,12 +986,12 @@ test("closing the controller stops the run-paths timer", async (t) => {
   const [servedProject] = [...fixtureState.projects.keys()];
   const context = harness({
     getRunPaths: async (agentId) => { asked.push(agentId); return { agentId, runId: "0a".repeat(16), paths: [] }; },
-    getTopology: async (id) => ({ projectId: id, digest: "ab".repeat(32), sourceRevision: "", nodes: [] }),
+    getOperationalGraph: async (id) => (graphOf(id, "ab".repeat(32))),
   });
   context.controller.start();
   context.emitState(fixtureState);
   context.emitStatus("ready");
-  context.controller.loadTopology();
+  context.controller.loadGraphs();
   context.controller.watchRunPaths(true);
   await settle();
   await settle();
@@ -1000,15 +1017,15 @@ test("a structure arriving during a run-paths round is asked as soon as the roun
   const secondStructure = deferred();
   const context = harness({
     getRunPaths: (agentId) => { asked.push(agentId); return agentId === runningAgentID && asked.length === 1 ? firstAnswer.promise : Promise.resolve({ agentId, runId: "0a".repeat(16), paths: [] }); },
-    getTopology: async (id) => {
+    getOperationalGraph: async (id) => {
       if (id === secondProject) await secondStructure.promise;
-      return { projectId: id, digest: (id === firstProject ? "ab" : "cd").repeat(32), sourceRevision: "", nodes: [] };
+      return graphOf(id, (id === firstProject ? "ab" : "cd").repeat(32));
     },
   });
   context.controller.start();
   context.emitState(state);
   context.emitStatus("ready");
-  context.controller.loadTopology();
+  context.controller.loadGraphs();
   context.controller.watchRunPaths(true);
   await settle();
   await settle();
@@ -1031,15 +1048,15 @@ test("a structure arriving during a run-paths round is asked as soon as the roun
   const lateStructure = deferred();
   const other = harness({
     getRunPaths: (agentId) => { hidden.push(agentId); return hidden.length === 1 ? late.promise : Promise.resolve({ agentId, runId: "0a".repeat(16), paths: [] }); },
-    getTopology: async (id) => {
+    getOperationalGraph: async (id) => {
       if (id === secondProject) await lateStructure.promise;
-      return { projectId: id, digest: (id === firstProject ? "ab" : "cd").repeat(32), sourceRevision: "", nodes: [] };
+      return graphOf(id, (id === firstProject ? "ab" : "cd").repeat(32));
     },
   });
   other.controller.start();
   other.emitState(state);
   other.emitStatus("ready");
-  other.controller.loadTopology();
+  other.controller.loadGraphs();
   other.controller.watchRunPaths(true);
   await settle();
   await settle();
