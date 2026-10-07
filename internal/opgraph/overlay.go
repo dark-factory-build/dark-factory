@@ -430,9 +430,10 @@ func (run *overlay) bind(attributes map[string]string, unit string) *Node {
 		case unit != "*" && node.Unit != unit:
 			continue
 		}
-		// Work naming a route or method belongs to a node naming one, never
-		// to the listener it arrived on.
-		if salient(attributes) && !salient(node.Selectors) {
+		// An HTTP request belongs to a node naming a route, never to the
+		// listener it arrived on: an unmatched route stays visible as unknown.
+		// Methods on a socket whose code names none are that socket's work.
+		if attributes["http.route"]+attributes["url.path"] != "" && node.Selectors["http.route"] == "" {
 			continue
 		}
 		score, ok := match(node.Selectors, attributes)
