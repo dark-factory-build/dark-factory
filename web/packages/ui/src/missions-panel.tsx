@@ -81,8 +81,7 @@ export function MissionsPanel({ production = [], onProduction, requestedMission,
     void run(() => read(text(selected.id)), true);
   }, [active, call, selected?.id, state?.head, pending]);
   const changeDraft = (change: Partial<Draft>) => { if (projectId !== undefined && draft !== undefined) setDrafts((previous) => ({ ...previous, [projectId]: { ...draft, ...change } })); };
-  return <section className="dfMissions dfConsoleSidebar__panel" aria-label="Missions">
-    <h2>Missions</h2>
+  return <section className="dfMissions" aria-label="Missions">
     {project === undefined ? <p className="dfConsoleSidebar__inherit">Choose a project in the header to see its missions.</p> : <>
       <p className="dfConsoleSidebar__inherit">{project.name}</p>
       <div className="dfConsoleViewToggle">
@@ -104,7 +103,7 @@ export function MissionsPanel({ production = [], onProduction, requestedMission,
         <button disabled={Boolean(pending) || call === undefined}>Create mission</button>
         <button type="button" disabled={Boolean(pending)} onClick={() => setDrafts((previous) => { const next = { ...previous }; delete next[project.id]; return next; })}>Discard draft</button>
       </form>}
-      {loaded && items.length === 0 ? <p>Objectives owned by an overseer, with explicit acceptance criteria. No missions yet. Standalone tasks remain in Tasks.</p> : null}
+      {loaded && items.length === 0 ? <p>Objectives owned by an overseer, with explicit acceptance criteria. No missions yet. Standalone tasks stay in the Work list.</p> : null}
       {selected === undefined ? <ul className="dfMissions__list">{items.map((item) => <li key={text(item.id)}><button type="button" disabled={Boolean(pending) || call === undefined} onClick={() => void run(() => read(text(item.id)))}>{text(item.objective)} <span>{text(item.state)}{item.stale ? " · stale" : ""}</span></button></li>)}</ul> : null}
       {next === 0 || selected !== undefined ? null : <button type="button" disabled={Boolean(pending) || call === undefined} onClick={() => void run(() => list(next))}>{pending ? "Loading…" : "Show more"}</button>}
       {selected === undefined ? null : <article className="dfConsoleSidebar__section">

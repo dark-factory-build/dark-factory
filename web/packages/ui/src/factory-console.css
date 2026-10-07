@@ -842,11 +842,22 @@ summary.dfConsoleItem__summary { cursor: pointer; }
 .dfProduction__notice, .dfProduction small { color: var(--df-console-muted); font-size: var(--df-text-sm); }
 .dfProduction__notice { border: 1px solid var(--df-console-rule); padding: .35rem .45rem; }
 .dfProduction__notice p { margin-top: .4rem; }
-.dfProduction__queue { display: grid; gap: .35rem; }
-.dfProduction__row { display: grid; gap: .25rem; width: 100%; padding: .45rem .55rem; text-align: left; text-transform: none; }
-.dfProduction__row strong { font-size: var(--df-text-sm); }
 .dfProduction__detail { min-width: 0; overflow-wrap: anywhere; }
-.dfProduction__row strong, .dfProduction__row small { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dfWorkBar { display: flex; flex-wrap: wrap; gap: .25rem; align-items: center; margin-block: .6rem; }
+.dfWorkBar .dfConsoleRecentWork { margin: 0; padding: 0; border: 0; }
+.dfWorkBar .dfConsoleViewToggle { flex: 0 1 auto; }
+.dfWorkBar > button, .dfWorkBar .dfConsoleRecentWork button { padding-inline: .4rem; }
+.dfWorkRow__head { position: relative; padding: .7rem; overflow-wrap: anywhere; }
+.dfWorkRow__head .dfConsoleItem__meta { margin-top: .3rem; }
+.dfConsoleItem .dfWorkRow__title { text-align: left; padding: 0; }
+.dfConsoleItem__detail[hidden] { display: none; }
+.dfWorkRow__title::after { content: ""; position: absolute; inset: 0; }
+.dfWorkRow__head button:not(.dfWorkRow__title) { position: relative; z-index: 1; }
+.dfWorkRow > :not(.dfWorkRow__head) { margin: 0 .7rem .7rem; }
+.dfWorkRow > .dfConsoleItem__detail { margin: 0; }
+.dfWorkMeta { display: flex; flex-wrap: wrap; align-items: center; gap: .3rem; margin-top: .3rem; min-width: 0; }
+.dfWorkMeta .dfConsoleItem__meta { display: inline; margin: 0; }
+.dfWorkMeta button { min-height: 0; padding: .05rem .4rem; font-size: var(--df-text-xs); }
 .dfProduction__stages { display: flex; flex-wrap: wrap; gap: .2rem; }
 .dfStatus { display: inline-block; border: 1px solid var(--df-console-rule); padding: .05rem .4rem; color: var(--df-console-muted); font-size: var(--df-text-xs); font-style: normal; white-space: nowrap; }
 .dfStatus::first-letter { text-transform: uppercase; }

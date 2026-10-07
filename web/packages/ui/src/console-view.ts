@@ -1,5 +1,5 @@
 import { productionKey, proposedProduction, type ProductionContraption } from "./production-view.js";
-import type { AgentItem, GraphNode, GraphReading, OperationalGraphView, StateView, TaskItem } from "@dark-factory/client";
+import type { AgentItem, GraphNode, GraphReading, HumanRequestItem, OperationalGraphView, StateView, TaskItem } from "@dark-factory/client";
 import { compareText, type SceneFlow, type SceneGraph, type SceneHall, type SceneMachine, type SceneProposal, type SceneReading, type SceneWorker } from "./factory-scene/scene.js";
 
 export type AgentActivity = "busy" | "waiting" | "needs-you" | "idle";
@@ -50,10 +50,30 @@ export function primaryAgent(state: StateView): AgentItem | undefined {
       || compareText(left.id, right.id))[0];
 }
 
-export type FactoryCounters = Readonly<{ needsYou: number | undefined }>;
+export type WorkState = "needs-you" | "in-review" | "running" | "queued";
+export type WorkRow = Readonly<{ key: string; state: WorkState; title: string; task?: TaskItem; request?: HumanRequestItem; pr?: ProductionContraption; origin?: string }>;
 
-export function factoryCounters(state: StateView | undefined): FactoryCounters {
-  return { needsYou: state?.humanRequests.size };
+/** The one Work list: open tasks plus finished tasks whose PR is still in flight, attention first. */
+export function workRows(state: StateView | undefined, inProgress: readonly ProductionContraption[]): readonly WorkRow[] {
+  if (state === undefined) return [];
+  const requests = new Map([...state.humanRequests.values()].map((request) => [request.task_id, request]));
+  const rows = new Map<string, { task?: TaskItem; request?: HumanRequestItem; pr?: ProductionContraption; key: string }>();
+  for (const task of state.tasks.values()) if (task.status === "queued" || task.status === "running" || task.status === "blocked" || requests.has(task.id)) rows.set(task.id, { key: task.id, task, request: requests.get(task.id) });
+  for (const request of requests.values()) if (!state.tasks.has(request.task_id)) rows.set(request.task_id, { key: request.task_id, request });
+  for (const pr of inProgress) {
+    if (pr.pullRequest === undefined) continue;
+    const linked = pr.tasks.flatMap((id) => state.tasks.get(id) ?? []);
+    const open = linked.filter((task) => rows.has(task.id));
+    for (const task of open.length > 0 ? open : linked.slice(0, 1)) rows.set(task.id, { ...rows.get(task.id), key: task.id, task, pr });
+    if (linked.length === 0) rows.set(productionKey(pr), { key: productionKey(pr), pr });
+  }
+  const rank: Record<WorkState, number> = { "needs-you": 0, "in-review": 1, running: 2, queued: 3 };
+  return [...rows.values()].map(({ task, request, pr, key }): WorkRow => {
+    const terminal = task === undefined || task.status === "succeeded" || task.status === "failed" || task.status === "cancelled";
+    const origin = task === undefined ? undefined : task.issue_number !== undefined ? `#${task.issue_number}` : task.mission_id !== undefined ? "mission" : state.agents.get(task.assigned_agent_id)?.role === "orchestrator" ? "overseer" : undefined;
+    return { key, task, request, pr, origin, title: task?.title ?? pr?.pullRequest?.title ?? `Question from ${state.agents.get(request?.agent_id ?? "")?.name ?? "Agent"}`,
+      state: request !== undefined || task?.status === "blocked" ? "needs-you" : terminal ? "in-review" : task.status === "running" ? "running" : "queued" };
+  }).sort((a, b) => rank[a.state] - rank[b.state]);
 }
 
 /** Active work first, then queued, then finished; priority breaks ties. */

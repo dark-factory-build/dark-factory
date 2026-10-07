@@ -21,7 +21,7 @@ export type FactoryAppProps = {
 export function FactoryApp({ onStatusChange, browserPort }: FactoryAppProps = {}) {
   const [snapshot, setSnapshot] = useState<FactoryAppSnapshot>(INITIAL_SNAPSHOT);
   const [view, setView] = useState<ConsoleView>("floor");
-  const [detail, setDetail] = useState<ConsoleDetail>("needs-you");
+  const [detail, setDetail] = useState<ConsoleDetail>("work");
   const [agentPanel, setAgentPanel] = useState<AgentPanelView>("terminal");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [selectedTaskId, setSelectedTaskId] = useState<string>();
@@ -127,9 +127,9 @@ export function FactoryApp({ onStatusChange, browserPort }: FactoryAppProps = {}
       onLoadTaskDetail={(task, peerOffset, expectedHead) => owner.current?.taskDetail(task, peerOffset, expectedHead) ?? Promise.reject(new Error("closed"))}
       onLoadTaskHistory={(task) => owner.current?.taskHistory(task) ?? Promise.reject(new Error("closed"))}
       onLoadNode={(projectId, nodeId) => owner.current?.operationalNode(projectId, nodeId) ?? Promise.reject(new Error("closed"))}
-      onLoadTaskList={(agentId, cursor) => owner.current?.taskList(agentId, cursor) ?? Promise.reject(new Error("closed"))}
+      onLoadTaskList={(scope, cursor) => owner.current?.taskList(scope, cursor) ?? Promise.reject(new Error("closed"))}
       onOpenTerminalForHumanRequest={(request) => { setDetail("agent"); setAgentPanel("terminal"); owner.current?.openTerminalForHumanRequest(request); }}
-      onSelectHumanRequest={(request) => { setDetail("needs-you"); void owner.current?.selectHumanRequest(request); }}
+      onSelectHumanRequest={(request) => { setDetail("work"); void owner.current?.selectHumanRequest(request); }}
       onHumanReplyChange={(reply) => owner.current?.setHumanReply(reply)}
       onReplyHumanRequest={() => { void owner.current?.replyHumanRequest(); }}
       onCancelHumanRequest={() => { void owner.current?.cancelHumanRequest(); }}
