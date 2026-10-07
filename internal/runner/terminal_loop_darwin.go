@@ -3,6 +3,7 @@
 package runner
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -151,6 +152,10 @@ type terminalOwner struct {
 	startupSubmitRetryInterval      time.Duration
 	humanReplyCorrelation           uint64
 	humanReplyCount                 uint32
+	// folderTail holds the first 16 KiB of output until Codex's folder dialog
+	// is answered or startup has passed; nil afterwards.
+	folderTail []byte
+	folderDone bool
 }
 
 // ponytail: the provider's output is opaque to the runner, so its readiness
@@ -423,6 +428,7 @@ func (o *terminalOwner) serve() (bool, error) {
 			if err := o.consumePTY(ev.bytes, ev.err); err != nil {
 				return o.daemonOpen, err
 			}
+			o.answerFolderAccess(ev.bytes)
 			// A continuously readable PTY must not starve the bounded startup
 			// watchdog. Check it after every read as well as on the idle tick.
 			if err := o.verifyStartupSubmit(); err != nil {
@@ -812,6 +818,51 @@ func (o *terminalOwner) writeTerminalPayload(payload []byte) (uint32, TerminalRe
 	// authority in input, while daemon-authorized HumanRequest delivery remains
 	// a distinct deliberate operation.
 	return count, status
+}
+
+// Codex 0.160+ opens every folder the factory marks untrusted with a blocking
+// "Folder access" dialog whose default, option 1, is "Open restricted": exactly
+// the factory's intent. Within the first 16 KiB of output the runner answers
+// that one dialog once with CR and never any other, so an unknown dialog (for
+// example "Trust this folder?") still stalls instead of being accepted.
+func (o *terminalOwner) answerFolderAccess(data []byte) {
+	if o.folderDone {
+		return
+	}
+	o.folderTail = append(o.folderTail, data...)
+	// Only the start of a session is startup: past it, nothing is answered,
+	// so a later screen quoting the dialog can never receive a CR.
+	if len(o.folderTail) > 16<<10 {
+		o.folderDone, o.folderTail = true, nil
+		return
+	}
+	if !isCodexFolderAccessDialog(o.folderTail) {
+		return
+	}
+	o.folderDone, o.folderTail = true, nil
+	o.writeTerminalPayload([]byte{'\r'})
+}
+
+// isCodexFolderAccessDialog compares screen text with escape sequences and
+// spacing removed, because the TUI positions words with cursor moves.
+func isCodexFolderAccessDialog(output []byte) bool {
+	var text []byte
+	for i := 0; i < len(output); i++ {
+		c := output[i]
+		switch {
+		case c == 0x1b && i+1 < len(output) && output[i+1] == '[':
+			for i += 2; i < len(output) && (output[i] < 0x40 || output[i] > 0x7e); i++ {
+			}
+		case c == 0x1b && i+1 < len(output) && output[i+1] == ']':
+			for i += 2; i < len(output) && output[i] != 0x07 && !(output[i] == 0x1b && i+1 < len(output) && output[i+1] == '\\'); i++ {
+			}
+		case c == 0x1b:
+			i++
+		case c > ' ' && c != 0x7f:
+			text = append(text, c)
+		}
+	}
+	return bytes.Contains(text, []byte("Folderaccess")) && bytes.Contains(text, []byte("1.Openrestricted")) && bytes.Contains(text, []byte("2.Quit"))
 }
 
 func terminalPayloadResult(written, total int, err error) (uint32, TerminalResultStatus) {
