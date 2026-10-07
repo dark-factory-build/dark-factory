@@ -702,6 +702,8 @@ type TaskSummary struct {
 	Priority        int64
 	Revision        Revision
 	UpdatedAt       UnixMillis
+	IssueNumber     int64  // 0 when the task did not come from an accepted issue
+	MissionID       string // lowercase hex, empty outside a mission
 }
 
 type FactorySummary struct {

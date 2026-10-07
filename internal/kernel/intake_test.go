@@ -304,6 +304,15 @@ func TestAcceptedIntakeImportsOnceAcrossOverlappingSourcesAndWithdrawal(t *testi
 			if retry.ID != firstTask.ID || retry.IncarnationID != firstTask.IncarnationID {
 				t.Fatal("crash retry did not replay exact task")
 			}
+			public, err := store.ReadPublicSnapshot(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, row := range public.Tasks {
+				if row.ID == firstTask.ID && row.IssueNumber != 7 {
+					t.Fatalf("snapshot issue number = %d, want 7", row.IssueNumber)
+				}
+			}
 			terminal, err := store.UpdateTask(ctx, firstTask.ID, firstTask.Revision, TaskPatch{Cancel: true}, mustTime(t, 14))
 			if err != nil {
 				t.Fatal(err)

@@ -16,8 +16,10 @@ type TaskList struct {
 
 // ReadTaskList reads a bounded completion page in one transaction. The last
 // (update time, ID) is a keyset cursor, so unrelated events do not invalidate it.
-func (store *Store) ReadTaskList(ctx context.Context, agentID AgentID, beforeAt UnixMillis, beforeID TaskID) (TaskList, error) {
-	if agentID.zero() {
+// ponytail: a project page only holds assigned tasks, so terminal tasks that
+// never had an agent are excluded; widen the predicate if they must show.
+func (store *Store) ReadTaskList(ctx context.Context, agentID AgentID, projectID ProjectID, beforeAt UnixMillis, beforeID TaskID) (TaskList, error) {
+	if agentID.zero() == projectID.zero() {
 		return TaskList{}, ErrInvalidValue
 	}
 	tx, err := store.beginRead(ctx)
@@ -25,7 +27,15 @@ func (store *Store) ReadTaskList(ctx context.Context, agentID AgentID, beforeAt 
 		return TaskList{}, err
 	}
 	defer tx.Close()
-	if _, found, err := agentByID(ctx, tx.connection, agentID); err != nil {
+	scope, scopeID := `assigned_agent_id = ?`, agentID.Bytes()
+	var found bool
+	if agentID.zero() {
+		scope, scopeID = `project_id = ? AND assigned_agent_id IS NOT NULL`, projectID.Bytes()
+		_, found, err = projectByID(ctx, tx.connection, projectID)
+	} else {
+		_, found, err = agentByID(ctx, tx.connection, agentID)
+	}
+	if err != nil {
 		return TaskList{}, err
 	} else if !found {
 		return TaskList{}, ErrNotFound
@@ -35,11 +45,11 @@ func (store *Store) ReadTaskList(ctx context.Context, agentID AgentID, beforeAt 
 		return TaskList{}, err
 	}
 	result := TaskList{Head: factory.Head}
-	if err := tx.connection.QueryRowContext(ctx, `SELECT COUNT(*) FROM tasks WHERE assigned_agent_id = ? AND status NOT IN ('queued', 'running')`, agentID.Bytes()).Scan(&result.Total); err != nil {
+	if err := tx.connection.QueryRowContext(ctx, `SELECT COUNT(*) FROM tasks WHERE `+scope+` AND status NOT IN ('queued', 'running')`, scopeID).Scan(&result.Total); err != nil {
 		return TaskList{}, err
 	}
-	query := `SELECT ` + publicTaskColumns + ` FROM tasks WHERE assigned_agent_id = ? AND status NOT IN ('queued', 'running')`
-	args := []any{agentID.Bytes()}
+	query := `SELECT ` + publicTaskColumns + ` FROM tasks WHERE ` + scope + ` AND status NOT IN ('queued', 'running')`
+	args := []any{scopeID}
 	if !beforeID.zero() {
 		query += ` AND (updated_at_ms, id) < (?, ?)`
 		args = append(args, beforeAt.Int64(), beforeID.Bytes())

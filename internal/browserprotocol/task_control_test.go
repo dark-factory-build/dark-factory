@@ -182,3 +182,39 @@ func TestTaskAttachmentRejectsMalformedBinaryAndNullIndex(t *testing.T) {
 		}
 	}
 }
+
+func TestTaskListProjectScope(t *testing.T) {
+	project, agent := strings.Repeat("02", 16), strings.Repeat("03", 16)
+	wire, err := EncodeTaskListGet("list", TaskListGet{ProjectID: project})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if frame, err := DecodeClientControl(wire); err != nil || frame.Body.(TaskListGet).ProjectID != project {
+		t.Fatalf("project scope roundtrip: %+v %v", frame, err)
+	}
+	if _, err := EncodeTaskListGet("list", TaskListGet{AgentID: agent, ProjectID: project}); err == nil {
+		t.Fatal("both scopes accepted")
+	}
+	if _, err := EncodeTaskListGet("list", TaskListGet{}); err == nil {
+		t.Fatal("no scope accepted")
+	}
+	task := TaskItem{ID: strings.Repeat("01", 16), ProjectID: project, AssignedAgentID: agent, Title: "done", Status: "cancelled", Revision: 1, IssueNumber: 7, MissionID: strings.Repeat("05", 16)}
+	result := TaskList{ProjectID: project, Head: 1, Total: 1, Tasks: []TaskItem{task}}
+	wire, err = EncodeTaskList("list", result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if frame, err := DecodeServerControl(wire); err != nil || frame.Body.(TaskList).Tasks[0].IssueNumber != 7 {
+		t.Fatalf("project list roundtrip: %+v %v", frame, err)
+	}
+	result.Tasks = []TaskItem{task}
+	result.Tasks[0].ProjectID = strings.Repeat("04", 16)
+	if _, err := EncodeTaskList("list", result); err == nil {
+		t.Fatal("foreign project task accepted")
+	}
+	result.Tasks[0] = task
+	result.Tasks[0].MissionID = "nope"
+	if _, err := EncodeTaskList("list", result); err == nil {
+		t.Fatal("malformed mission id accepted")
+	}
+}
