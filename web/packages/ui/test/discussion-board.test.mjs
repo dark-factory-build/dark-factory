@@ -47,7 +47,7 @@ test("the Board is its own destination; the Library keeps documents only", async
     assert.equal(dialog().props["aria-label"], "Discussion board");
     await act(async () => tree.root.findByProps({ "aria-label": "Console views" }).findAllByType("button").find((button) => words(button) === "Library").props.onClick());
     assert.equal(dialog().props["aria-label"], "Project library");
-    assert.deepEqual(nav("Library views"), ["All documents", "Outcomes"]);
+    assert.deepEqual(nav("Library views"), ["Documents", "Outcomes"]);
     const search = calls.findLast((call) => call.operation === "search").input;
     assert.equal(search.documents_only, true, "the Library asks for documents, not threads");
     assert.ok(!dialog().findAllByType("option").some((option) => /Discussion|Reply/.test(words(option))));
