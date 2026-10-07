@@ -430,9 +430,12 @@ func (run *overlay) bind(attributes map[string]string, unit string) *Node {
 		case unit != "*" && node.Unit != unit:
 			continue
 		}
-		// Work naming a route or method belongs to a node naming one, never
-		// to the listener it arrived on.
-		if salient(attributes) && !salient(node.Selectors) {
+		// Work naming a route, destination or function belongs to a node
+		// naming one, never to the listener it arrived on: unmatched, it stays
+		// visible as unknown. Methods on a socket whose code names none are
+		// that socket's work.
+		rpcOnly := attributes["rpc.method"] != "" && attributes["http.route"]+attributes["url.path"]+attributes["messaging.destination.name"]+attributes["code.function.name"] == ""
+		if salient(attributes) && !salient(node.Selectors) && !rpcOnly {
 			continue
 		}
 		score, ok := match(node.Selectors, attributes)

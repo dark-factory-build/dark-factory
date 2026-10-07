@@ -265,3 +265,43 @@ func TestListenersPeersAndAmbiguousNames(t *testing.T) {
 		}
 	}
 }
+
+func TestMethodsOnASocketThatNamesNoneAreItsWork(t *testing.T) {
+	builder := NewBuilder("s")
+	daemon := builder.Node(Processor, "", "go:d", "daemon").Select("service.name", "daemon").Add(static("go-ast", "", Declared), nil)
+	socket := builder.Node(Ingress, daemon.ID, "listen:unix", "unix socket").Select("network.transport", "unix").Add(static("go-ast", "", Declared), nil)
+	graph, _ := builder.Graph()
+	now := 100 * minute
+	observations := []Observation{{Source: "factoryd", Kind: "server", Start: now - minute, End: now, Count: 9,
+		Attributes: map[string]string{"service.name": "daemon", "network.transport": "unix", "rpc.method": "snapshot"}}}
+	coverage := []Coverage{{Source: "factoryd", Unit: "daemon", Keys: []string{"service.name", "network.transport", "rpc.method"}, AsOf: now, TTL: minute}}
+	live := Overlay("s", graph, observations, coverage, nil, now, 15*minute)
+	invariant(t, live)
+	if got := live.Nodes[socket.ID]; got.Observation != "observed" || got.State != "active" {
+		t.Fatalf("socket = %+v", got)
+	}
+	if live.Summary.RuntimeOnly != 0 {
+		t.Fatalf("socket methods were quarantined: %+v", live.Summary)
+	}
+}
+
+func TestOnlyMethodsFallToABareListener(t *testing.T) {
+	builder := NewBuilder("s")
+	unit := builder.Node(Processor, "", "go:u", "u").Select("service.name", "u").Add(static("go-ast", "", Declared), nil)
+	listener := builder.Node(Ingress, unit.ID, "listen:tcp", "tcp listener").Select("network.transport", "tcp").Add(static("go-ast", "", Declared), nil)
+	graph, _ := builder.Graph()
+	now := 100 * minute
+	var observations []Observation
+	for _, attributes := range []map[string]string{
+		{"service.name": "u", "messaging.destination.name": "unknown-queue"},
+		{"service.name": "u", "code.function.name": "pkg.Unmatched"},
+		{"service.name": "u", "url.path": "/unmatched"},
+	} {
+		observations = append(observations, Observation{Source: "otlp", Kind: "server", Start: now - minute, End: now, Count: 3, Attributes: attributes})
+	}
+	live := Overlay("s", graph, observations, nil, nil, now, 15*minute)
+	invariant(t, live)
+	if live.Summary.RuntimeOnly != 3 || live.Nodes[listener.ID].State != "unknown" {
+		t.Fatalf("unmatched work was explained away by the listener: %+v, listener %+v", live.Summary, live.Nodes[listener.ID])
+	}
+}

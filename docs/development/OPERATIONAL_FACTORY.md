@@ -328,8 +328,9 @@ Correlation runs for each observation:
      every method, and `HEAD` matches `GET`.
 
    A concrete path matches the template with the most static segments. A tie
-   leaves the observation unbound. Work naming a route or method never binds
-   to the bare listener it arrived on.
+   leaves the observation unbound. An HTTP request never binds to the bare
+   listener it arrived on, so an unmatched route stays visible as unknown.
+   Methods on a socket whose code names none are that socket's work.
 2. **No unit.** An observation whose `service.name` names no unit of this
    project (and no alias) is not this project's. Runtime evidence is
    factory-wide, so it may belong to another project. It never binds into a

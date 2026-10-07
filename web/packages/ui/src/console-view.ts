@@ -166,7 +166,9 @@ export function projectGraph(graphs: ReadonlyMap<string, OperationalGraphView> |
     digests.push(graph.digest);
     const byId = new Map(graph.nodes.map((node) => [node.id, node]));
     for (const node of graph.nodes) nodes.push({ ...node, projectId });
-    const staticNode = (node: GraphNode) => node.evidence !== "runtime" && node.kind !== "unknown";
+    // Only runtime-only nodes are quarantined: a static "no recognised entry
+    // points" marker is part of its hall.
+    const staticNode = (node: GraphNode) => node.evidence !== "runtime";
     for (const unit of graph.nodes.filter((node) => node.kind === "processor" && staticNode(node))) {
       const own = graph.nodes.filter((node) => node.unit === unit.id && staticNode(node)).sort((left, right) => compareText(left.label, right.label) || compareText(left.id, right.id));
       const machines: SceneMachine[] = [];
