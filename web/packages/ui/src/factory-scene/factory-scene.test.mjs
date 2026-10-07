@@ -1315,8 +1315,14 @@ test("the plant overview is always there and zoom scales the one floor about the
     assert.equal(style().width, 2025);
     assert.equal(view.attributes.width, 600 / (2025 / width), "the overview window is the pane, in floor units");
     for (const axis of ["x", "y"]) assert.ok(Math.abs(centre()[axis] - before[axis]) < 1, `zoom keeps the floor's ${axis} under the pane's centre`);
+    // At the limit a further zoom changes nothing, and leaves nothing for the next change to replay.
+    for (let index = 0; index < 4; index += 1) await act(async () => button("Zoom in").props.onClick());
+    assert.equal(style().width, width * 4);
+    pane.scrollLeft = pane.scrollTop = 0;
+    await act(async () => button("Zoom in").props.onClick());
     await act(async () => button("Fit floor").props.onClick());
     assert.equal(style().width, "100%");
+    assert.deepEqual([pane.scrollLeft, pane.scrollTop], [0, 0], "fit applies no stale zoom anchor");
     // An empty plant has no overview and nothing to zoom.
     await act(async () => renderer.update(createElement(FactoryScene, { graph: sceneGraph([]), appearance: commons, workers: [] })));
     assert.equal(renderer.root.findAll((node) => node.props.className === "dfPlantOverview").length, 0);
