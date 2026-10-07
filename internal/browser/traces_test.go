@@ -1,10 +1,17 @@
 package browser
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"net/http"
-	"strings"
 	"testing"
+
+	"github.com/dark-factory-build/dark-factory/internal/opgraph"
+	commonv1 "go.opentelemetry.io/proto/otlp/common/v1"
+	resourcev1 "go.opentelemetry.io/proto/otlp/resource/v1"
+	tracev1 "go.opentelemetry.io/proto/otlp/trace/v1"
+	"google.golang.org/protobuf/proto"
 )
 
 type traceBackend struct {
@@ -17,13 +24,17 @@ func (backend *traceBackend) ReceiveTraces(body []byte) error {
 	return nil
 }
 
-// Only local processes may post traces: never a page, never protobuf.
-func TestTracesAcceptOnlyLocalJSON(t *testing.T) {
+// Only local processes may post traces, as JSON or as the protobuf most SDKs
+// send by default, gzipped or not; never a page and never a simple form type.
+func TestTracesAcceptOnlyLocalOTLP(t *testing.T) {
 	backend := &traceBackend{fakeBackend: newFakeBackend()}
 	server, _ := startHeldClockServer(t, backend)
-	post := func(contentType, origin string) int {
-		request, _ := http.NewRequest(http.MethodPost, "http://"+server.Addr()+TracesPath, strings.NewReader(`{"resourceSpans":[]}`))
+	post := func(contentType, encoding, origin string, body []byte) int {
+		request, _ := http.NewRequest(http.MethodPost, "http://"+server.Addr()+TracesPath, bytes.NewReader(body))
 		request.Header.Set("Content-Type", contentType)
+		if encoding != "" {
+			request.Header.Set("Content-Encoding", encoding)
+		}
 		if origin != "" {
 			request.Header.Set("Origin", origin)
 		}
@@ -34,17 +45,53 @@ func TestTracesAcceptOnlyLocalJSON(t *testing.T) {
 		response.Body.Close()
 		return response.StatusCode
 	}
-	if status := post("application/json", ""); status != http.StatusOK || len(backend.received) != 1 {
+	if status := post("application/json", "", "", []byte(`{"resourceSpans":[]}`)); status != http.StatusOK || len(backend.received) != 1 {
 		t.Fatalf("local JSON export = %d, received %d", status, len(backend.received))
 	}
-	if status := post("application/json", "https://evil.example"); status != http.StatusForbidden {
+	text := func(value string) *commonv1.AnyValue {
+		return &commonv1.AnyValue{Value: &commonv1.AnyValue_StringValue{StringValue: value}}
+	}
+	export, err := proto.Marshal(&tracev1.TracesData{ResourceSpans: []*tracev1.ResourceSpans{{
+		Resource: &resourcev1.Resource{Attributes: []*commonv1.KeyValue{{Key: "service.name", Value: text("shop")}}},
+		ScopeSpans: []*tracev1.ScopeSpans{{Spans: []*tracev1.Span{{
+			Kind: tracev1.Span_SPAN_KIND_SERVER, StartTimeUnixNano: 1_000_000_000, EndTimeUnixNano: 1_050_000_000,
+			Attributes: []*commonv1.KeyValue{{Key: "http.route", Value: text("/orders/{id}")}},
+		}}}},
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var zipped bytes.Buffer
+	writer := gzip.NewWriter(&zipped)
+	_, _ = writer.Write(export)
+	_ = writer.Close()
+	for _, encoding := range []string{"", "gzip"} {
+		body := export
+		if encoding == "gzip" {
+			body = zipped.Bytes()
+		}
+		if status := post("application/x-protobuf", encoding, "", body); status != http.StatusOK {
+			t.Fatalf("protobuf export (%q) = %d", encoding, status)
+		}
+		// The receiver gets the OTLP JSON mapping, which folds into one observation of the route.
+		observations, _, err := opgraph.DecodeOTLP([]byte(backend.received[len(backend.received)-1]), 2_000)
+		if err != nil || len(observations) != 1 || observations[0].Attributes["http.route"] != "/orders/{id}" || observations[0].Attributes["service.name"] != "shop" {
+			t.Fatalf("protobuf export (%q) folded to %+v, %v", encoding, observations, err)
+		}
+	}
+	if status := post("application/x-protobuf", "", "https://evil.example", export); status != http.StatusForbidden {
 		t.Fatalf("page-originated export = %d", status)
 	}
-	if status := post("application/x-protobuf", ""); status != http.StatusUnsupportedMediaType {
-		t.Fatalf("protobuf export = %d", status)
+	for _, simple := range []string{"text/plain", "application/x-www-form-urlencoded"} {
+		if status := post(simple, "", "", export); status != http.StatusUnsupportedMediaType {
+			t.Fatalf("%s export = %d", simple, status)
+		}
 	}
-	if len(backend.received) != 1 {
-		t.Fatal("a refused export reached the backend")
+	if status := post("application/x-protobuf", "", "", []byte("not protobuf")); status != http.StatusBadRequest {
+		t.Fatalf("malformed protobuf = %d", status)
+	}
+	if len(backend.received) != 3 {
+		t.Fatalf("refused exports reached the backend: %d received", len(backend.received))
 	}
 }
 

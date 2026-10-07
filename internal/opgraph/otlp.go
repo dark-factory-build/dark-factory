@@ -4,7 +4,22 @@ import (
 	"encoding/json"
 	"errors"
 	"strconv"
+
+	tracev1 "go.opentelemetry.io/proto/otlp/trace/v1"
+	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/proto"
 )
+
+// OTLPProtobufJSON maps an OTLP/HTTP protobuf trace export, the default of
+// most SDKs, to the OTLP JSON mapping DecodeOTLP reads. An export request is
+// wire-identical to TracesData (field 1, resource_spans).
+func OTLPProtobufJSON(body []byte) ([]byte, error) {
+	var traces tracev1.TracesData
+	if err := proto.Unmarshal(body, &traces); err != nil {
+		return nil, err
+	}
+	return protojson.MarshalOptions{UseEnumNumbers: true}.Marshal(&traces)
+}
 
 // OTLP/HTTP JSON trace export (opentelemetry-proto, JSON mapping): only the
 // fields that become observations are decoded; spans are folded and dropped.
