@@ -34,13 +34,17 @@ test("reconnect requires a new serving-runtime observation before confirming its
   try {
     await act(async () => { tree = create(createElement(Probe, { call: async () => page(build("old")) })); });
     assert.equal(state.runtime.source, "old");
+    assert.equal(state.read, true);
     await act(async () => { tree.update(createElement(Probe, {})); });
     assert.equal(state.runtime, undefined);
+    assert.equal(state.read, false);
     const pending = new Promise((done) => { resolve = done; });
     await act(async () => { tree.update(createElement(Probe, { call: () => pending })); });
     assert.equal(state.runtime, undefined);
+    assert.equal(state.read, false, "records kept from before the drop are not read on this connection");
     await act(async () => { resolve(page(build("new"))); await pending; });
     assert.equal(state.runtime.source, "new");
+    assert.equal(state.read, true);
   } finally {
     if (tree) await act(async () => tree.unmount());
     if (previousDocument === undefined) delete globalThis.document; else globalThis.document = previousDocument;

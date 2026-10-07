@@ -1417,10 +1417,15 @@ test("a crate moves once when its recorded stage changes, never on first sight o
   const at = (id = "k1") => renderer.root.findByProps({ "data-crate": id }).props.transform.match(/translate\(([-\d.]+) ([-\d.]+)\)/).slice(1).map(Number);
   const scene = (crates, connected = true) => createElement(FactoryScene, { graph, workers, tasks, proposals, crates, connected, appearance: { scenery: "off", animation: "follow-device" } });
   try {
-    await act(async () => { renderer = create(scene([], false)); });
-    await act(async () => { renderer.update(scene([crate(1)])); });
+    // The floor connects before its production records are read; they arrive a render later.
+    await act(async () => { renderer = create(scene(undefined, false)); });
+    await act(async () => { renderer.update(scene(undefined)); });
     await tick(16);
+    await act(async () => { renderer.update(scene([crate(1), crate(0, { id: "k0", number: 3 })])); });
+    await tick(16);
+    assert.equal(frames.size, 0, "the first read is history: nothing slides or flies in from its author");
     assert.deepEqual(at(), slot([crate(1)]), "what was already so when the floor opened stays put");
+    await act(async () => { renderer.update(scene([crate(1)])); });
 
     await act(async () => { renderer.update(scene([crate(2)])); });
     await tick(300);
@@ -1439,6 +1444,16 @@ test("a crate moves once when its recorded stage changes, never on first sight o
     await act(async () => { renderer.update(scene([crate(3)])); });
     await tick(16);
     assert.deepEqual(at(), slot([crate(3)]));
+    // Records kept from before a drop are unread on the new connection until refreshed; the refresh is a first look.
+    await act(async () => { renderer.update(scene([crate(3)], false)); });
+    await act(async () => { renderer.update(scene(undefined)); });
+    await act(async () => { renderer.update(scene([crate(1)])); });
+    await tick(16);
+    assert.equal(frames.size, 0, "what changed offline is not replayed");
+    assert.deepEqual(at(), slot([crate(1)]));
+    await act(async () => { renderer.update(scene([crate(3)])); });
+    await tick(16);
+    for (let step = 0; step < 80 && frames.size > 0; step += 1) await tick(16);
 
     // A newly opened change comes from the agent whose task opened it.
     const opened = [crate(3), crate(0, { id: "k2", number: 2 })];

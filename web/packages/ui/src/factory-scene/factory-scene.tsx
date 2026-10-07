@@ -38,7 +38,7 @@ import { spriteAtlas, spriteSheet, spriteSheetSize } from "./sprites/sprites.gen
 
 export type FactorySceneProps = Readonly<{
   proposals?: { items: readonly SceneProposal[]; selected?: string; onSelect: (id: string) => void };
-  /** Change requests on the outbound line; selecting one uses `proposals.onSelect`. */
+  /** Change requests on the outbound line; selecting one uses `proposals.onSelect`. Undefined until read on this connection. */
   crates?: readonly SceneCrate[];
   tools?: ReactNode;
   /** Read one machine's evidence when its inspector opens. */
@@ -88,7 +88,6 @@ const DAY = 24 * 60 * 60_000, CHANGEOVER = 10 * 60_000;
 const NO_QUESTIONS: readonly PeerQuestionItem[] = [];
 export type KnowledgeCueView = Readonly<{ key: string; agentId: string; board: boolean; reading: boolean; label: string; open?: () => void }>;
 const NO_CUES: readonly KnowledgeCueView[] = [];
-const NO_CRATES: readonly SceneCrate[] = [];
 
 /** A recorded operation, unlike ambient life, is labelled, focusable and opens what it used. */
 function KnowledgeCueMark({ cue, x, y, at }: { cue: KnowledgeCueView; x: number; y: number; at: string }) {
@@ -437,7 +436,7 @@ function SceneWorkers({ knowledgeCues, nearby, errands, furniture, restingSeats,
 }
 
 /** A disposable SVG projection of the operational world and current factory state. */
-export function FactoryScene({ proposals, crates = NO_CRATES, tools, onLoadNode, onInvestigate, onDiscussSource, requestedEntity, onSelectEntity, onOpenLibrary, onOpenBoard, graph, workers, appearance = DEFAULT_FLOOR_APPEARANCE, selectedWorkerId, onSelectWorker, tasks = [], peerQuestions = NO_QUESTIONS, knowledgeCues = NO_CUES, selectedTaskId, onSelectTask, onOpenTasks, onOpenMissions, onSelectHumanRequest, projectId, connected = true, reading = false }: FactorySceneProps) {
+export function FactoryScene({ proposals, crates, tools, onLoadNode, onInvestigate, onDiscussSource, requestedEntity, onSelectEntity, onOpenLibrary, onOpenBoard, graph, workers, appearance = DEFAULT_FLOOR_APPEARANCE, selectedWorkerId, onSelectWorker, tasks = [], peerQuestions = NO_QUESTIONS, knowledgeCues = NO_CUES, selectedTaskId, onSelectTask, onOpenTasks, onOpenMissions, onSelectHumanRequest, projectId, connected = true, reading = false }: FactorySceneProps) {
   const [selectedId, setSelectedId] = useState<string>();
   // The crate pointed at or focused: the machines its change touches are lit.
   const [lit, setLit] = useState<string>();
@@ -751,10 +750,10 @@ const MAX_ZOOM = 4;
  * first look, never a replay.
  */
 function WorkLine({ layout, crates, tasks, placements, connected, live, onLight, onSelect }: {
-  layout: SceneLayout; crates: readonly SceneCrate[]; tasks: readonly SceneTask[]; placements: ReturnType<typeof placeWorkers>;
+  layout: SceneLayout; crates: readonly SceneCrate[] | undefined; tasks: readonly SceneTask[]; placements: ReturnType<typeof placeWorkers>;
   connected: boolean; live: boolean; onLight: (id: string | undefined) => void; onSelect?: (id: string) => void;
 }) {
-  const placed = useMemo(() => placeCrates(layout, crates), [layout, crates]);
+  const placed = useMemo(() => placeCrates(layout, crates ?? []), [layout, crates]);
   const reduced = useReducedMotion();
   const moving = live && !reduced;
   const seen = useRef<ReadonlyMap<string, SceneCrate["station"]>>(undefined);
@@ -762,7 +761,8 @@ function WorkLine({ layout, crates, tasks, placements, connected, live, onLight,
   const flights = useRef<readonly FloorMessage[]>([]);
   const [clock, setClock] = useState(0);
   useEffect(() => {
-    if (!connected) { seen.current = undefined; flights.current = []; return; }
+    // Records not yet read on this connection are no look at all: the first read is history, never news.
+    if (!connected || crates === undefined) { seen.current = undefined; flights.current = []; return; }
     const { seen: next, moves } = observeCrates(seen.current, crates);
     seen.current = next;
     const started = now(), slots = new Map(placed.map((spot) => [spot.crate.id, spot]));
@@ -780,8 +780,9 @@ function WorkLine({ layout, crates, tasks, placements, connected, live, onLight,
     if (!moving || !flights.current.some((flight) => flight.startedAt + flight.travel > clock) || typeof requestAnimationFrame !== "function") return;
     const frame = requestAnimationFrame((time) => setClock(time));
     return () => cancelAnimationFrame(frame);
-  }, [clock, moving]);
-  if (crates.length === 0) return null;
+    // A new snapshot may land in the same millisecond as the last, so it asks for frames itself.
+  }, [clock, moving, placed]);
+  if (crates === undefined || crates.length === 0) return null;
   const belt = layout.line[0]!.y + 28;
   return <g data-work-line="">
     <path aria-hidden="true" d={`M${layout.line[0]!.x} ${belt + 3}H${layout.fence}`} className="b-base" />

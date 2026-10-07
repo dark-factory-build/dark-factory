@@ -68,5 +68,7 @@ export function useProduction(projects: readonly string[], call: ProjectContentC
   const notices = scoped.filter((record) => record.kind === "repository" && (record.document.unavailable || record.document.overflow)).map((record) => `${record.repository}: ${record.document.unavailable ? "some external evidence is unavailable" : "observation is bounded"}${record.document.overflow ? "; additional external records exist" : ""}.`);
   // The runtime identity belongs to this connection and is dropped when it goes;
   // the published release is a repository fact that no reconnect invalidates.
-  return { runtime: connected && runtimeGeneration.current === generation.current ? runtime : undefined, release, notices, records: scoped, error, overflow };
+  const read = connected && runtimeGeneration.current === generation.current;
+  // `read`: the records were read on this connection, so their changes are news, not history.
+  return { runtime: read ? runtime : undefined, read, release, notices, records: scoped, error, overflow };
 }
