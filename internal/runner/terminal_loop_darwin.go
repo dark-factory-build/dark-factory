@@ -153,10 +153,12 @@ type terminalOwner struct {
 	humanReplyCorrelation           uint64
 	humanReplyCount                 uint32
 	// folderTail holds the latest startup output until Codex's folder dialog
-	// is answered or folderUntil passes; nil afterwards.
-	folderTail  []byte
-	folderUntil time.Time
-	folderDone  bool
+	// is answered or folderUntil passes; nil afterwards. folderSeen is when the
+	// dialog was recognised; folderSent counts the CRs written for it.
+	folderTail                        []byte
+	folderUntil, folderSeen, folderAt time.Time
+	folderSent                        uint8
+	folderDone                        bool
 }
 
 // ponytail: the provider's output is opaque to the runner, so its readiness
@@ -386,6 +388,7 @@ func (o *terminalOwner) serve() (bool, error) {
 		}
 		switch ev.source {
 		case sourceTick:
+			o.folderTick(time.Now())
 			if stopped, err := o.handoverStep(); stopped || err != nil {
 				return o.daemonOpen, err
 			}
@@ -430,6 +433,7 @@ func (o *terminalOwner) serve() (bool, error) {
 				return o.daemonOpen, err
 			}
 			o.answerFolderAccess(ev.bytes, time.Now())
+			o.folderTick(time.Now())
 			// A continuously readable PTY must not starve the bounded startup
 			// watchdog. Check it after every read as well as on the idle tick.
 			if err := o.verifyStartupSubmit(); err != nil {
@@ -513,7 +517,7 @@ func (o *terminalOwner) nextEvent() (terminalReady, error) {
 		// While a startup CR is owed the wait is bounded, so the quiet prompt
 		// is noticed without any event arriving.
 		var timeout *unix.Timespec
-		if !o.enterBy.IsZero() || o.startupSubmitPending || o.handover != nil {
+		if !o.enterBy.IsZero() || o.startupSubmitPending || o.handover != nil || !o.folderSeen.IsZero() && !o.folderDone {
 			tick := unix.NsecToTimespec(int64(startupEnterTick))
 			timeout = &tick
 		}
@@ -831,6 +835,15 @@ func (o *terminalOwner) writeTerminalPayload(payload []byte) (uint32, TerminalRe
 // quoting the dialog is not mistaken for it.
 const folderWindow = 2 * time.Minute
 
+// Codex reads its terminal for replies to its own startup queries, which no
+// one answers here, and a CR arriving meanwhile is lost. So the CR waits for
+// folderQuiet of silence and is repeated, up to three times, while Codex
+// stays silent: any output after a CR means the dialog was answered.
+const (
+	folderQuiet = time.Second
+	folderRetry = 3 * time.Second
+)
+
 func (o *terminalOwner) answerFolderAccess(data []byte, now time.Time) {
 	if o.folderDone {
 		return
@@ -838,19 +851,34 @@ func (o *terminalOwner) answerFolderAccess(data []byte, now time.Time) {
 	if o.folderUntil.IsZero() {
 		o.folderUntil = now.Add(folderWindow)
 	}
-	if now.After(o.folderUntil) {
+	if now.After(o.folderUntil) || o.folderSent > 0 && len(data) > 0 {
 		o.folderDone, o.folderTail = true, nil
+		return
+	}
+	if !o.folderSeen.IsZero() {
 		return
 	}
 	o.folderTail = append(o.folderTail, data...)
 	if len(o.folderTail) > 8<<10 {
 		o.folderTail = append([]byte(nil), o.folderTail[len(o.folderTail)-8<<10:]...)
 	}
-	if !isCodexFolderAccessDialog(o.folderTail) {
+	if isCodexFolderAccessDialog(o.folderTail) {
+		o.folderSeen, o.folderTail = now, nil
+	}
+}
+
+func (o *terminalOwner) folderTick(now time.Time) {
+	if o.folderDone || o.folderSeen.IsZero() {
 		return
 	}
-	o.folderDone, o.folderTail = true, nil
-	o.writeTerminalPayload([]byte{'\r'})
+	switch {
+	case o.folderSent == 0 && now.Sub(o.folderSeen) >= folderQuiet && now.Sub(o.lastOutput) >= folderQuiet,
+		o.folderSent > 0 && o.folderSent < 3 && now.Sub(o.folderAt) >= folderRetry:
+		o.folderSent, o.folderAt = o.folderSent+1, now
+		o.writeTerminalPayload([]byte{'\r'})
+	case o.folderSent >= 3 && now.Sub(o.folderAt) >= folderRetry:
+		o.folderDone = true
+	}
 }
 
 // isCodexFolderAccessDialog compares screen text with escape sequences and
