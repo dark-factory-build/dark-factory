@@ -1128,6 +1128,7 @@ function IntakeSection({ projectId, active, state, repositories, intake, pending
   useEffect(() => { if (active && projectId) { callbacks.current.onLoadRepositories?.(projectId); } }, [active,projectId,onLoadRepositories !== undefined]);
   useEffect(() => { if (active && projectId && source) callbacks.current.onAction?.(projectId,{action:"preview",source_id:source.id,page:1}); }, [active,projectId,source?.id,source?.revision]);
   const act = (request:IntakeBody) => { if(projectId) onAction?.(projectId,request); };
+  useEffect(() => setAdding(false), [sources.length]);
   const project = projects.find((item)=>item.id===projectId);
   const current = source !== undefined && result?.source_id === source.id && result?.reviewed_revision === source.revision;
   return <section className="dfConsoleSidebar__section" aria-label="Sources"><h3>Sources</h3>
@@ -1151,9 +1152,9 @@ function IntakeSection({ projectId, active, state, repositories, intake, pending
         </article>;
       }):null}
       {current && result?.next_page ? <button type="button" disabled={busy} onClick={()=>act({action:"preview",source_id:source.id,page:result.next_page!})}>More issues</button>:null}
-    </>:<p>{busy ? "Checking…" : "No sources yet. Add one to see issues here."}</p>}
+    </>:adding ? null : <p>{busy ? "Checking…" : "No sources yet. Add one to see issues here."}</p>}
     {sources.length>0 ? <button type="button" onClick={()=>setAdding(!adding)}>{adding ? "Cancel" : "Add source"}</button> : null}
-    <IntakeForm key={`${source?.id ?? "new"}:${source?.revision}`} project={project} state={state} repositories={repositories?.get(project.id)} source={source} result={result} github={github} busy={busy} onAction={(id,request)=>{onAction?.(id,request);if(request.action==="create")setAdding(false);}}/>
+    <IntakeForm key={`${source?.id ?? "new"}:${source?.revision}`} project={project} state={state} repositories={repositories?.get(project.id)} source={source} result={result} github={github} busy={busy} onAction={onAction}/>
     </>}
   </section>;
 }

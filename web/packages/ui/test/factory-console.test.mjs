@@ -2254,6 +2254,31 @@ test("revised issue content can be accepted without discarding the prior receipt
 });
 
 
+test("a rejected create keeps the add form and its typed values", async () => {
+  const previous = globalThis.IS_REACT_ACT_ENVIRONMENT;
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+  let renderer;
+  const calls = [];
+  const source = { id: "88".repeat(16), project_id: ids.project, github_repository_id: 42n, repository: "example/widgets", target_repository_id: "89".repeat(16), overseer_agent_id: "", label: "bug", policy: "manual", trusted_authors: [], poll_seconds: 60, admission_limit: 25, enabled: true, revision: 1n };
+  const checkout = { id: "89".repeat(16), project_id: ids.project, name: "Widgets", root: "/private/source", base_ref: "main", enabled: true, default: true, revision: 1n };
+  try {
+    await act(async () => { renderer = create(createElement(FactoryConsole, { status: "ready", state: oneProjectState(), settingsOpen: true, onToggleSettings: () => {}, repositories: new Map([[ids.project, [checkout]]]), github: { result: { state: "ok", status: { repositories: [{ repository: "example/issues", repository_id: 42n }] } } }, intake: new Map([[ids.project, { state: "ok", sources: [source] }]]), onIntakeAction: (projectId, request) => calls.push(request) })); });
+    const sources = () => renderer.root.findByProps({ "aria-label": "Sources" });
+    await act(async () => sources().findAll((node) => node.type === "button" && node.props.children === "Add source")[0].props.onClick());
+    const form = () => sources().findAllByType("form")[0];
+    await act(async () => form().findAllByType("input")[0].props.onChange({ currentTarget: { value: "typed-label" } }));
+    await act(async () => form().props.onSubmit({ preventDefault() {} }));
+    assert.equal(calls.at(-1).action, "create");
+    assert.equal(form().findAllByType("input")[0].props.value, "typed-label");
+    assert.ok(form().findAll((node) => node.type === "button" && node.props.children === "Add source").length === 1, "still the add form, not the edit form");
+    assert.doesNotMatch(JSON.stringify(sources().findAll((node) => node.type === "p").map((node) => node.children)), /No sources yet/);
+  } finally {
+    if (renderer) await act(async () => renderer.unmount());
+    globalThis.IS_REACT_ACT_ENVIRONMENT = previous;
+  }
+});
+
+
 test("refreshing a changed source replaces stale configuration drafts", async () => {
   const previous = globalThis.IS_REACT_ACT_ENVIRONMENT;
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
