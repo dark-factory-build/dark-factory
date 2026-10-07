@@ -268,6 +268,10 @@ test("the pure scene model feeds a deterministic SVG renderer", () => {
   assert.equal(new Set(emptyPlacements.map(({ x, y }) => `${x},${y}`)).size, emptyWorkers.length);
   const emptySvg = render({ graph: sceneGraph([]), workers: emptyWorkers });
   assert.match(emptySvg, /NO OPERATIONAL STRUCTURE INFERRED YET/);
+  // Before the plant has been read, an empty floor says it is reading, not that nothing was found.
+  const readingSvg = render({ graph: sceneGraph([]), workers: emptyWorkers, reading: true });
+  assert.match(readingSvg, /READING THE PLANT…/);
+  assert.doesNotMatch(readingSvg, /NO OPERATIONAL STRUCTURE/);
   // An empty floor in a wide column stays a panel, not a poster.
   assert.match(emptySvg, new RegExp(`min-width:${Math.min(emptyLayout.width, 864)}px`));
   assert.match(emptySvg, /aria-label="Break room · ambient"/);

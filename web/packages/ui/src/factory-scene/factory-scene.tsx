@@ -64,6 +64,8 @@ export type FactorySceneProps = Readonly<{
   onSelectHumanRequest?: (requestId: string) => void;
   /** A dropped session reconciles to its latest snapshot instead of replaying local motion. */
   connected?: boolean;
+  /** The plant has not been read yet: an empty floor says so rather than claiming nothing was inferred. */
+  reading?: boolean;
   /** The selected agent is highlighted without changing its deterministic placement. */
   selectedWorkerId?: string;
   /** Pointer convenience only; the AGENTS list is the keyboard path. */
@@ -429,7 +431,7 @@ function SceneWorkers({ knowledgeCues, nearby, errands, furniture, restingSeats,
 }
 
 /** A disposable SVG projection of the operational world and current factory state. */
-export function FactoryScene({ proposals, tools, onLoadNode, onInvestigate, onDiscussSource, requestedEntity, onSelectEntity, onOpenLibrary, onOpenBoard, graph, workers, appearance = DEFAULT_FLOOR_APPEARANCE, selectedWorkerId, onSelectWorker, tasks = [], peerQuestions = NO_QUESTIONS, knowledgeCues = NO_CUES, selectedTaskId, onSelectTask, onOpenTasks, onOpenMissions, onSelectHumanRequest, projectId, connected = true }: FactorySceneProps) {
+export function FactoryScene({ proposals, tools, onLoadNode, onInvestigate, onDiscussSource, requestedEntity, onSelectEntity, onOpenLibrary, onOpenBoard, graph, workers, appearance = DEFAULT_FLOOR_APPEARANCE, selectedWorkerId, onSelectWorker, tasks = [], peerQuestions = NO_QUESTIONS, knowledgeCues = NO_CUES, selectedTaskId, onSelectTask, onOpenTasks, onOpenMissions, onSelectHumanRequest, projectId, connected = true, reading = false }: FactorySceneProps) {
   const [selectedId, setSelectedId] = useState<string>();
   const [search, setSearch] = useState("");
   const mapElement = useRef<HTMLDivElement>(null);
@@ -686,7 +688,7 @@ export function FactoryScene({ proposals, tools, onLoadNode, onInvestigate, onDi
           </g>)}
         </g>;
       })}
-      {layout.rooms.length === 0 ? <text x={ROOM_LEFT} y="24" fill="#9db1be" fontFamily="ui-monospace, monospace" fontSize="10">NO OPERATIONAL STRUCTURE INFERRED YET</text> : null}
+      {layout.rooms.length === 0 ? <text x={ROOM_LEFT} y="24" fill="#9db1be" fontFamily="ui-monospace, monospace" fontSize="10">{reading ? "READING THE PLANT…" : "NO OPERATIONAL STRUCTURE INFERRED YET"}</text> : null}
 
       {placements.filter((placement) => placement.area === "resting" && placement.roomId !== undefined).map((seat) => <g key={seat.id} data-nearby-rest={seat.roomId} aria-hidden="true"><rect x={seat.x - 12} y={seat.y + 5} width="24" height="7" fill="#655948" stroke="#9b8b6b" /><path d={`M${seat.x - 8} ${seat.y + 12}v5m16-5v5`} stroke="#74664e" strokeWidth="3" /></g>)}
       <SceneWorkers knowledgeCues={knowledgeCues} nearby={appearance.social === "nearby"} errands={appearance.scenery !== "off"} restingSeats={[...resting.filter((seat) => seat.roomId !== undefined), ...seating.resting]} tray={tray} peerQuestions={peerQuestions} furniture={tables} layout={layout} placements={placements} labels={labels} workers={workers} tasks={tasks} connected={connected} animate={appearance.animation !== "off"} selectedWorkerId={selectedWorkerId} onSelectWorker={onSelectWorker} onSelectTask={onSelectTask} onSelectHumanRequest={onSelectHumanRequest} onSelectProposal={proposals?.onSelect} />

@@ -159,6 +159,7 @@ export function FactoryFloor({
       projectId={projectId}
       workers={[...scene.workers, ...proposed.reviewers.filter((worker) => !selectedChange || worker.review?.proposalId === selectedChange)]}
       connected={connected}
+      reading={graphs === undefined || projects.some((id) => !graphs.has(id))}
       tasks={scene.tasks}
       peerQuestions={peerQuestions}
       knowledgeCues={activityCues.map((cue) => ({ key: cue.key, agentId: cue.agent_id, board: onBoard(cue), reading: cue.operation === "read" || cue.operation === "delivered", label: activityLabel(cue, state), open: onOpenActivity === undefined ? undefined : () => onOpenActivity(cue) }))}
