@@ -2,8 +2,8 @@ import { useEffect, useId, useRef, useState } from "react";
 import type { AgentItem, StateView, TaskItem } from "@dark-factory/client";
 import type { ProjectContentCall } from "./project-library.js";
 import { IconButton } from "./icons.js";
-import { SectionHeader, Status, formatTime } from "./console-kit.js";
-import { inProgressProduction, productionStages, productionKey, type ProductionContraption, type ProductionDelivery } from "./production-view.js";
+import { Status, formatTime } from "./console-kit.js";
+import { productionStages, productionKey, type ProductionContraption, type ProductionDelivery } from "./production-view.js";
 
 const text = (v: unknown) => typeof v === "string" ? v : "";
 const href = (v: unknown) => { try { const u = new URL(text(v)); return u.protocol === "https:" && !u.username && !u.password ? u.href : undefined; } catch { return undefined; } };
@@ -32,16 +32,15 @@ const keyOf = productionKey;
 const sourceStatus = ({ source }: ProductionContraption) => source.kind === "unavailable" ? "Source details unavailable" : source.stale ? "Source details out of date" : source.omitted > 0 ? "Source details incomplete" : "";
 export const asTask = (v: Record<string, unknown>, project: string): TaskItem => ({ id: text(v.task_id) || text(v.id), project_id: text(v.project_id) || project, assigned_agent_id: text(v.assigned_agent_id), title: text(v.title) || "Untitled task", status: text(v.status) as TaskItem["status"] || "blocked", blocked_reason: text(v.blocked_reason) || undefined, priority: Number(v.priority) || 0, revision: BigInt(text(v.revision) || "0"), updated_at_ms: text(v.updated_at_ms) ? BigInt(text(v.updated_at_ms)) : undefined });
 
-export function ProductionPanel({ items, selected, onSelect, state, call, connected = true, error, overflow = 0, loadMore, loading = false, active = true, onMission, onAgent, onOpenTask }: {
-  items: readonly ProductionContraption[]; selected?: string; onSelect: (key: string) => void; state?: StateView; call?: ProjectContentCall; connected?: boolean; error?: string; overflow?: number; loadMore?: () => void; loading?: boolean; active?: boolean; onMission?: (projectId: string, missionId: string) => void; onAgent?: (agent: AgentItem) => void; onOpenTask?: (task: TaskItem) => void;
+export function ProductionPanel({ items, selected, onSelect, state, call, connected = true, error, overflow = 0, active = true, onMission, onAgent, onOpenTask }: {
+  items: readonly ProductionContraption[]; selected?: string; onSelect: (key: string) => void; state?: StateView; call?: ProjectContentCall; connected?: boolean; error?: string; overflow?: number; active?: boolean; onMission?: (projectId: string, missionId: string) => void; onAgent?: (agent: AgentItem) => void; onOpenTask?: (task: TaskItem) => void;
 }) {
-  const [shown, setShown] = useState(12), [selectedTaskId, setSelectedTaskId] = useState<string>(), [loadedTasks, setLoadedTasks] = useState<Record<string, TaskItem>>({}), [taskError, setTaskError] = useState("");
+  const [selectedTaskId, setSelectedTaskId] = useState<string>(), [loadedTasks, setLoadedTasks] = useState<Record<string, TaskItem>>({}), [taskError, setTaskError] = useState("");
   const epoch = useRef(0), selectedTaskRef = useRef<string | undefined>(undefined);
-  const item = items.find((v) => keyOf(v) === selected), queue = items.filter(inProgressProduction), visible = queue.slice(0, shown);
+  const item = items.find((v) => keyOf(v) === selected);
   const taskFor = (v: ProductionContraption, id: string) => state?.tasks.get(id) ?? loadedTasks[`${v.projectId}:${id}`];
   useEffect(() => { epoch.current++; selectedTaskRef.current = undefined; setSelectedTaskId(undefined); setTaskError(""); }, [selected, connected, active]);
   useEffect(() => () => { epoch.current++; }, []);
-  const inspect = (key: string) => { epoch.current++; selectedTaskRef.current = undefined; setSelectedTaskId(undefined); setTaskError(""); onSelect(key); };
   const back = () => onSelect("");
   const loadTask = async (entry: ProductionContraption, id: string) => {
     if (!connected || !active || !onOpenTask) return;
@@ -51,14 +50,11 @@ export function ProductionPanel({ items, selected, onSelect, state, call, connec
     const generation = ++epoch.current; selectedTaskRef.current = id; setSelectedTaskId(id); setTaskError("");
     try { const result = await call("task_read", { project_id: entry.projectId, task_id: id }); if (generation === epoch.current && selected === keyOf(entry) && selectedTaskRef.current === id) { const task = asTask(result, entry.projectId); setLoadedTasks((old) => ({ ...old, [`${entry.projectId}:${id}`]: task })); setSelectedTaskId(undefined); onOpenTask(task); } } catch { if (generation === epoch.current) setTaskError("Task details are unavailable."); }
   };
-  const incomplete = queue.filter(sourceStatus).length;
   const project = item && state?.projects.get(item.projectId), owner = item?.tasks.map((id) => taskFor(item, id)).find(Boolean)?.assigned_agent_id, ownerAgent = owner ? state?.agents.get(owner) : undefined;
   return <section className="dfConsoleSidebar__panel dfProduction" aria-label="Production inspection">
-    <SectionHeader as="h2" title="Changes" />
-    {incomplete > 0 ? <p role="status">{incomplete} {incomplete === 1 ? "change is" : "changes are"} not fully shown on the floor.</p> : null}
     {!connected || error || overflow > 0 ? <details className="dfProduction__notice"><summary>{!connected ? "Last observed state" : error ? "Observation needs attention" : "Partial observation"}</summary>{!connected ? <p>Disconnected. This is the last observed state.</p> : null}{error ? <p role="alert">{error}</p> : null}{overflow > 0 ? <p>{overflow} more records are available.</p> : null}</details> : null}
     {item ? <article className="dfProduction__detail" aria-label={`Production details for ${title(item)}`}>
-      <IconButton icon="chevron-left" className="dfConsoleBack" onClick={back}>Back to Changes</IconButton><h3>{title(item)}</h3><p className="dfProduction__stages">{productionStages(item).map((stage) => <Status stage={stage} key={stage} />)}</p><p>{item.nextAction}</p>
+      <IconButton icon="chevron-left" className="dfConsoleBack" onClick={back}>Back to Work</IconButton><h3>{title(item)}</h3><p className="dfProduction__stages">{productionStages(item).map((stage) => <Status stage={stage} key={stage} />)}</p><p>{item.nextAction}</p>
       {sourceStatus(item) ? <p role="status">{sourceStatus(item)}</p> : null}
       <details aria-label="Before and proposed source"><summary>Source changes</summary>
         <p>{item.source.kind} observation{item.source.stale ? " · stale" : ""}{item.source.observedAt ? ` · ${observedAt(item.source.observedAt)}` : ""}</p>
@@ -75,9 +71,6 @@ export function ProductionPanel({ items, selected, onSelect, state, call, connec
       </details>
       {ownerAgent ? <button type="button" disabled={!connected || !onAgent} onClick={() => onAgent?.(ownerAgent)}>Talk to {ownerAgent.name}</button> : null}{item.missions.map((id) => <button key={id} type="button" disabled={!connected || !onMission} onClick={() => onMission?.(item.projectId, id)}>Open mission {id.slice(0, 8)}</button>)}
       {item.tasks.length ? <details><summary>Tasks · {item.tasks.length}</summary>{item.tasks.map((id) => { const task = taskFor(item, id); return <button key={id} type="button" disabled={!connected || !onOpenTask} onClick={() => void loadTask(item, id)}>Open {task?.title || id} · {task?.status || "inspect"}</button>; })}{selectedTaskId && !taskError ? <p role="status">Loading task…</p> : null}{taskError ? <p role="alert">{taskError}</p> : null}</details> : null}
-    </article> : <>
-      {visible.length ? <div className="dfProduction__queue">{visible.map((v) => <button key={keyOf(v)} type="button" className="dfProduction__row" onClick={() => inspect(keyOf(v))}><strong>{title(v)}</strong><span className="dfProduction__stages">{productionStages(v).map((stage) => <Status stage={stage} key={stage} />)}</span><small>{v.nextAction}</small>{sourceStatus(v) ? <small>{sourceStatus(v)}</small> : null}</button>)}</div> : <p className="dfFactoryConsole__empty">{loading ? "Loading work…" : "No work is in progress."}</p>}{queue.length > shown ? <button type="button" disabled={!connected} onClick={() => setShown((n) => n + 12)}>Show more</button> : null}{queue.length <= shown && overflow > 0 && loadMore ? <button type="button" disabled={!connected || loading} onClick={loadMore}>{loading ? "Loading…" : "Show more"}</button> : null}
-    </>}
-    <details><summary>Change history</summary>{items.filter((entry) => !inProgressProduction(entry)).map((entry) => <p key={keyOf(entry)}><button type="button" onClick={() => inspect(keyOf(entry))}>{title(entry)} · {entry.pullRequest?.state || entry.construction?.status || entry.status}</button></p>)}</details>
+    </article> : null}
   </section>;
 }

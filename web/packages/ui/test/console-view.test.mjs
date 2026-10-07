@@ -4,7 +4,7 @@ import {
   agentActivity,
   agentStatus,
   agentCurrentTask,
-  factoryCounters,
+  workRows,
   orderTasksForHome,
   primaryAgent,
 } from "../dist/src/console-view.js";
@@ -62,10 +62,15 @@ test("an active overseer beats a paused namesake before name ordering", () => {
   assert.equal(primaryAgent(state).id, active.id);
 });
 
-test("counters count only store-backed facts", () => {
-  const counters = factoryCounters(fixtureState);
-  assert.equal(counters.needsYou, 1);
-  assert.deepEqual(factoryCounters(undefined), { needsYou: undefined });
+test("work rows sort attention first and fold a finished task's open PR into one in-review row", () => {
+  const done = [...fixtureState.tasks.values()].find((task) => task.status === "succeeded");
+  const pr = { visualId: "c", projectId: done.project_id, tasks: [done.id], pullRequest: { number: 7 } };
+  const rows = workRows(fixtureState, [pr]);
+  assert.deepEqual(rows.map((row) => row.state), [...rows.map((row) => row.state)].sort((a, b) => ["needs-you", "in-review", "running", "queued"].indexOf(a) - ["needs-you", "in-review", "running", "queued"].indexOf(b)));
+  assert.equal(rows.filter((row) => row.state === "needs-you").length, fixtureState.humanRequests.size);
+  assert.equal(rows.find((row) => row.task?.id === done.id)?.state, "in-review");
+  assert.equal(rows.find((row) => row.task?.id === done.id)?.pr, pr);
+  assert.deepEqual(workRows(undefined, []), []);
 });
 
 test("home ordering puts active work first and finished work last", () => {

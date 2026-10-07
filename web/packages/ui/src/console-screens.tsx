@@ -139,7 +139,7 @@ export function FactoryFloor({
     <div className="dfFactoryFloor__scene">
     <FactoryScene
       tools={<>
-        {unplaced > 0 ? <p className="dfFactoryEntityTools__notice" role="status">{unplaced} {unplaced === 1 ? "change is" : "changes are"} not fully placed on the floor; Changes lists every path.</p> : null}
+        {unplaced > 0 ? <p className="dfFactoryEntityTools__notice" role="status">{unplaced} {unplaced === 1 ? "change is" : "changes are"} not fully placed on the floor; its pull request in Work lists every path.</p> : null}
         {unavailable.length > 0 ? <p className="dfFactoryEntityTools__notice" role="status">Source unavailable for {unavailable.map((source) => source.name).join(", ")}; those halls cannot be inferred.</p> : null}
       </>}
       onLoadNode={onLoadNode === undefined ? undefined : (nodeId) => { const project = projectOf(nodeId); return project === undefined ? Promise.reject(new Error("unknown node")) : onLoadNode(project, nodeId); }}
