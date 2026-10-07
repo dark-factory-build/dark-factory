@@ -801,7 +801,8 @@ func TestSupervisorCodexRetrievesExactTaskWithUsablePTY(t *testing.T) {
 		t.Fatalf("RunNext: %v", err)
 	}
 	fixture.assertTerminal(t, run, kernel.OutcomeSucceeded)
-	if run.Proposal == nil || run.Proposal.Result() != expectedTask+"\nPTY=120x40" {
+	library, _ := renderKnowledgeContext(kernel.ProviderCodex, run.ProjectID, nil, knowledgeContextBytes)
+	if run.Proposal == nil || run.Proposal.Result() != expectedTask+string(library)+"\nPTY=120x40" {
 		t.Fatalf("Codex task/PTY receipt = %q", run.Proposal.Result())
 	}
 	fixture.assertReleased(t, run)
