@@ -140,8 +140,17 @@ environment applicability fails closed for automatic selection; explicit histori
 references remain inspectable. Source revalidation compares only linked entity
 paths and preserves the author's immutable claim.
 
-The Board/Library buttons, floor board/shelves, and source notices open the same
-records. Browser fixture demonstrations are simulated UI operations; isolated
+The Board and the Library are separate destinations over the same records: the
+Board holds threads, replies and a read-only list of direct task-to-task
+questions (opened through the existing task conversation, which shows their
+delivery state); the Library holds documents, including conclusions saved from
+a thread with it as evidence. Posting to the Board never assigns work or
+notifies an agent. The browser's `activity` read lists recorded revisions and
+supplied/read receipts, newest first, without recording anything. The floor
+cues new operations once, briefly, beside the agent's current sprite and on the
+board or shelf, never moving anyone; its Activity list opens the exact thread
+or revision for agents that are off-screen or not drawn. The first listing
+after connecting or reconnecting is history and is never cued. Browser fixture demonstrations are simulated UI operations; isolated
 kernel/daemon/provider-boundary tests establish persistence and delivery. No model
 learning is inferred from either test.
 

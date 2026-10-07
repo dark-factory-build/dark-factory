@@ -23,6 +23,7 @@ import (
 type browserContentInput struct {
 	api.ContentInput
 	OpenOnly              bool                   `json:"open_only"`
+	DocumentsOnly         bool                   `json:"documents_only"`
 	Query                 string                 `json:"query"`
 	Branch                string                 `json:"branch"`
 	Entity                string                 `json:"entity"`
@@ -64,7 +65,7 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 	if err != nil && !factoryOnly {
 		return browserprotocol.ProjectContentResult{}, browser.ErrInvalidRequest
 	}
-	read := request.Operation == "search" || request.Operation == "accesses" || request.Operation == "list" || request.Operation == "read" || request.Operation == "body" || request.Operation == "attachments" || request.Operation == "outcome_list" || request.Operation == "outcome_read" || request.Operation == "mission_tasks" || request.Operation == "production" || request.Operation == "task_read"
+	read := request.Operation == "search" || request.Operation == "accesses" || request.Operation == "activity" || request.Operation == "list" || request.Operation == "read" || request.Operation == "body" || request.Operation == "attachments" || request.Operation == "outcome_list" || request.Operation == "outcome_read" || request.Operation == "mission_tasks" || request.Operation == "production" || request.Operation == "task_read"
 	_, release, client, err := backend.authorize(ctx, raw, kernel.BrowserCapabilityPrivateHumanRequestDetail)
 	if err != nil {
 		return browserprotocol.ProjectContentResult{}, err
@@ -106,7 +107,7 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 		}
 	}
 
-	if (request.Operation == "mission_tasks" || request.Operation == "production") && (input.Limit == 0 || input.Limit > 8) {
+	if (request.Operation == "mission_tasks" || request.Operation == "production" || request.Operation == "activity") && (input.Limit == 0 || input.Limit > 8) {
 		return result, browser.ErrInvalidRequest
 	}
 	switch request.Operation {
@@ -139,6 +140,11 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 			Runtime api.BuildIdentity    `json:"runtime"`
 			Release api.PublishedRelease `json:"release,omitzero"`
 		}{page, currentDaemonBuild(), latestPublishedRelease()}
+	case "activity":
+		output, err = backend.owner.contentActivity(ctx, project, int(input.Offset), int(input.Limit))
+		if err != nil {
+			return result, mapBrowserError(err)
+		}
 	case "accesses":
 		id, e := browserContentIDValue(input.ID)
 		rev, re := browserContentRevision(input.Revision)
@@ -159,7 +165,7 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 		if e != nil {
 			return result, mapBrowserError(e)
 		}
-		page, e := backend.store.SearchKnowledge(ctx, project, repository, kernel.KnowledgeQuery{OpenOnly: input.OpenOnly, Kind: kernel.ContentKind(input.Kind), Query: input.Query, Branch: input.Branch, Environment: input.Environment, Entity: input.Entity, Thread: input.Thread, Offset: int(input.Offset), Limit: int(input.Limit)})
+		page, e := backend.store.SearchKnowledge(ctx, project, repository, kernel.KnowledgeQuery{OpenOnly: input.OpenOnly, Documents: input.DocumentsOnly, Kind: kernel.ContentKind(input.Kind), Query: input.Query, Branch: input.Branch, Environment: input.Environment, Entity: input.Entity, Thread: input.Thread, Offset: int(input.Offset), Limit: int(input.Limit)})
 		if e != nil {
 			return result, mapBrowserError(e)
 		}
@@ -435,6 +441,42 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 		return browserprotocol.ProjectContentResult{}, browser.ErrTooLarge
 	}
 	return result, err
+}
+
+// contentActivity reports recorded knowledge operations for floor cues and the
+// Board's activity list. Authors are authority-derived; an agent revision names
+// its run as "run:ID agent:ID role:ROLE".
+func (daemon *Daemon) contentActivity(ctx context.Context, project kernel.ProjectID, offset, limit int) (map[string]any, error) {
+	page, err := daemon.store.ListContentActivity(ctx, project, offset, limit)
+	if err != nil {
+		return nil, err
+	}
+	items := make([]map[string]any, 0, len(page.Items))
+	for _, item := range page.Items {
+		content := item.Content
+		operation := map[string]string{"supplied": "delivered", "read": "read"}[item.Operation]
+		agent, task, run := "", "", ""
+		if operation == "" {
+			operation = "revised"
+			if content.Deprecated {
+				operation = "retired"
+			} else if content.Revision.Int64() == 1 {
+				operation = "posted"
+			}
+			for _, field := range strings.Fields(content.Author) {
+				if value, ok := strings.CutPrefix(field, "agent:"); ok {
+					agent = value
+				} else if value, ok := strings.CutPrefix(field, "run:"); ok {
+					run = value
+				}
+			}
+		} else {
+			agent, task, run = item.AgentID.String(), item.TaskID.String(), item.RunID.String()
+		}
+		metadata, _ := kernel.ParseKnowledgeMetadata(content.SourceReferences)
+		items = append(items, map[string]any{"operation": operation, "content_id": content.ID.String(), "content_revision": content.Revision.Int64(), "kind": string(content.Kind), "title": knowledgeTextPrefix(content.Title, 160), "author": knowledgeTextPrefix(content.Author, 160), "agent_id": agent, "task_id": task, "run_id": run, "thread_id": metadata.ThreadID, "at_ms": item.At.Int64()})
+	}
+	return map[string]any{"items": items, "next_offset": page.NextOffset}, nil
 }
 
 func validBrowserContentWrite(input browserContentInput) bool {

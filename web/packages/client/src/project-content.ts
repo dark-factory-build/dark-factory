@@ -1,6 +1,6 @@
 import { ProtocolError } from "./errors.js";
 
-export const PROJECT_CONTENT_OPERATIONS = ["search", "accesses", "list", "read", "body", "create", "revise", "deprecate", "attach", "attachments", "outcome_list", "outcome_read", "outcome_write", "mission_create", "mission_tasks", "production", "task_read"] as const;
+export const PROJECT_CONTENT_OPERATIONS = ["search", "accesses", "activity", "list", "read", "body", "create", "revise", "deprecate", "attach", "attachments", "outcome_list", "outcome_read", "outcome_write", "mission_create", "mission_tasks", "production", "task_read"] as const;
 export type ProjectContentOperation = typeof PROJECT_CONTENT_OPERATIONS[number];
 export type ProjectContentInput = Readonly<Record<string, unknown>>;
 export type ProjectContentOutput = Readonly<Record<string, unknown>>;

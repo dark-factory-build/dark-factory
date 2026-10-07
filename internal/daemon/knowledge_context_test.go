@@ -8,8 +8,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dark-factory-build/dark-factory/internal/api"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
@@ -472,5 +474,97 @@ func TestKnowledgeAndMaximumContinuationFitPrivateEnvelope(t *testing.T) {
 	}
 	if _, err := api.NewAttemptTaskReply(api.AttemptTask{Task: string(framed)}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// Two agents use the Board through the attempt API; the operator's activity
+// read reports exactly those recorded operations and records nothing itself.
+func TestBoardActivityReportsTwoAgentsRecordedOperations(t *testing.T) {
+	f := newDispatchFixture(t)
+	ctx := context.Background()
+	poster := prepareActiveAttemptInProjectWithProvider(t, f, 151, testID(151), "worker", "codex")
+	replier := prepareActiveAttemptInProjectWithProvider(t, f, 171, poster.run.ProjectID.String(), "worker", "codex")
+	project := poster.run.ProjectID
+	invoke := func(work func() error) {
+		t.Helper()
+		done := f.serve(t)
+		if err := work(); err != nil {
+			t.Fatal(err)
+		}
+		waitDispatch(t, done)
+	}
+	var thread, reply api.Content
+	invoke(func() (err error) {
+		thread, err = poster.client.ContentCreate(ctx, api.ContentInput{ID: testID(231), ProjectID: project.String(), Kind: string(kernel.ContentDiscussion), Title: "Does retry keep the run guard?", Body: "Question for anyone touching retries.", SourceReferences: `{"status":"tentative"}`})
+		return err
+	})
+	invoke(func() error {
+		_, err := replier.client.ContentBody(ctx, api.ContentBodyInput{ID: thread.ID, Revision: 1, Limit: 1024})
+		return err
+	})
+	invoke(func() (err error) {
+		reply, err = replier.client.ContentCreate(ctx, api.ContentInput{ID: testID(232), ProjectID: project.String(), Kind: string(kernel.ContentDiscussionReply), Title: "Reply", Body: "Yes; the exact run is reserved.", SourceReferences: `{"status":"tentative","thread_id":"` + thread.ID + `"}`})
+		return err
+	})
+	threadID, _ := decodeID(thread.ID, kernel.ContentIDFromBytes)
+	before, err := contentAccesses(ctx, f.store, project, kernel.ContentAccess{ContentID: threadID, ContentRevision: mustRevision(t, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	activity, err := f.daemon.contentActivity(ctx, project, 0, 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	type row struct{ operation, content, agent, run, thread string }
+	var got []row
+	for _, item := range activity["items"].([]map[string]any) {
+		got = append(got, row{item["operation"].(string), item["content_id"].(string), item["agent_id"].(string), item["run_id"].(string), item["thread_id"].(string)})
+	}
+	posterAgent, replierAgent := poster.run.AgentID.String(), replier.run.AgentID.String()
+	for _, want := range []row{
+		{"posted", reply.ID, replierAgent, replier.run.ID.String(), thread.ID},
+		{"read", thread.ID, replierAgent, replier.run.ID.String(), ""},
+		{"posted", thread.ID, posterAgent, poster.run.ID.String(), ""},
+	} {
+		if !slices.Contains(got, want) {
+			t.Fatalf("activity %+v lacks %+v", got, want)
+		}
+	}
+	if slices.ContainsFunc(got, func(item row) bool { return item.operation == "read" && item.agent == posterAgent }) {
+		t.Fatalf("activity invented a read: %+v", got)
+	}
+	after, err := contentAccesses(ctx, f.store, project, kernel.ContentAccess{ContentID: threadID, ContentRevision: mustRevision(t, 1)})
+	if err != nil || len(after) != len(before) {
+		t.Fatalf("activity recorded access: %d -> %d, %v", len(before), len(after), err)
+	}
+	other, _ := decodeID(testID(191), kernel.ProjectIDFromBytes)
+	if foreign, err := f.daemon.contentActivity(ctx, other, 0, 8); err != nil || len(foreign["items"].([]map[string]any)) != 0 {
+		t.Fatalf("foreign project activity: %v, %v", foreign, err)
+	}
+	operator, err := api.NewOperatorClient(f.socket, f.operator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var opened api.Content
+	invoke(func() (err error) {
+		opened, err = operator.ContentRead(ctx, api.ContentReadInput{ID: reply.ID, Revision: 1})
+		return err
+	})
+	if opened.Author != reply.Author || !strings.Contains(opened.SourceReferences, thread.ID) {
+		t.Fatalf("operator opened %+v", opened)
+	}
+	// The fixture clock is frozen; the conclusion is newest only once time moves.
+	f.daemon.now = func() time.Time { return time.UnixMilli(2000) }
+	var lesson api.Content
+	invoke(func() (err error) {
+		lesson, err = operator.ContentCreate(ctx, api.ContentInput{ID: testID(233), ProjectID: project.String(), Kind: string(kernel.ContentLesson), Title: "Conclusion: retry keeps the run guard", Body: "Retries reserve the exact run.", SourceReferences: `{"status":"tentative","thread_id":"` + thread.ID + `","evidence":["content:` + thread.ID + `@1","content:` + reply.ID + `@1"]}`})
+		return err
+	})
+	activity, err = f.daemon.contentActivity(ctx, project, 0, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first := activity["items"].([]map[string]any)[0]; first["content_id"] != lesson.ID || first["thread_id"] != thread.ID || first["agent_id"] != "" || activity["next_offset"] != 1 {
+		t.Fatalf("conclusion activity: %v", activity)
 	}
 }
