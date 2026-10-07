@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
@@ -442,8 +443,16 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 		return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSource, err)
 	}
 	var localCILeaseDir string
+	var traceReceiverPort uint16
 	if worker {
 		localCILeaseDir, _ = prepareLocalCILeaseDirectory(gitCommonDir)
+		// OTel-instrumented code a worker runs exports to the OTLP receiver
+		// on the browser listener; without one, it exports nowhere.
+		if web, ok := daemon.webRuntime(); ok {
+			if address, err := netip.ParseAddrPort(web.Addr()); err == nil {
+				traceReceiverPort = address.Port()
+			}
+		}
 	}
 	// An orchestrator's own working directory is a fresh runtime root every
 	// run, so it names its own agent's most recent terminal run's working
@@ -494,7 +503,7 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 		GitAuthor: daemon.gitAuthor(ctx), CustomerMaintainer: customerMaintainer, Provider: run.Provider, Role: run.Role, Model: run.Model, ReasoningEffort: run.ReasoningEffort,
 		AgentID: run.AgentID.String(), TaskIncarnationID: run.TaskIncarnationID.String(), PreviousWorkingDirectory: previousWorkingDirectory,
 		RuntimePath: gotRuntimePath, RuntimeIdentity: runtimeFileIdentity,
-		GitExecutable: spec.GitExecutable, FactoryctlExecutable: factoryctl.Path(), ToolPath: spec.ToolPath, ToolchainReadRoots: spec.ToolchainReadRoots, LocalCILeaseDir: localCILeaseDir, AccountHome: spec.AccountHome, AccountConfigDir: accountConfigDir, RepositoryRoot: repository.Root, RepositoryIdentity: repositoryIdentity, RepositoryGitIdentity: repositoryGitIdentity, RepositoryOriginDigest: repositoryOriginDigest, GitCommonDir: gitCommonDir,
+		GitExecutable: spec.GitExecutable, FactoryctlExecutable: factoryctl.Path(), ToolPath: spec.ToolPath, ToolchainReadRoots: spec.ToolchainReadRoots, LocalCILeaseDir: localCILeaseDir, TraceReceiverPort: traceReceiverPort, AccountHome: spec.AccountHome, AccountConfigDir: accountConfigDir, RepositoryRoot: repository.Root, RepositoryIdentity: repositoryIdentity, RepositoryGitIdentity: repositoryGitIdentity, RepositoryOriginDigest: repositoryOriginDigest, GitCommonDir: gitCommonDir,
 		Revision: repository.BaseRef, ChangeParent: spec.ChangeParent, FinalName: finalName,
 		AttemptSocket: spec.AttemptSocket, Retained: retained, ProviderTask: providerTask,
 	}

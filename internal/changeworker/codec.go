@@ -62,7 +62,10 @@ type Config struct {
 	ToolPath                 string
 	ToolchainReadRoots       string
 	LocalCILeaseDir          string
-	AccountHome              string
+	// TraceReceiverPort is factoryd's loopback OTLP listener a worker's
+	// commands export traces to; zero when it has none.
+	TraceReceiverPort uint16
+	AccountHome       string
 	// AccountConfigDir is the linked provider login this run launches with.
 	// Empty means the provider's own default configuration directory.
 	AccountConfigDir       string
@@ -130,6 +133,7 @@ type configWire struct {
 	ToolPath                 string             `json:"tool_path"`
 	ToolchainReadRoots       string             `json:"toolchain_read_roots,omitempty"`
 	LocalCILeaseDir          string             `json:"local_ci_lease_directory,omitempty"`
+	TraceReceiverPort        uint16             `json:"trace_receiver_port,omitempty"`
 	AccountHome              string             `json:"account_home"`
 	AccountConfigDir         string             `json:"account_config_dir"`
 	RepositoryRoot           string             `json:"repository_root"`
@@ -153,7 +157,7 @@ func EncodeConfig(config Config) ([]byte, error) {
 		Provider: config.Provider.String(), Role: config.Role.String(), Model: config.Model, ReasoningEffort: config.ReasoningEffort,
 		AgentID: config.AgentID, TaskIncarnationID: config.TaskIncarnationID, PreviousWorkingDirectory: config.PreviousWorkingDirectory,
 		RuntimePath: config.RuntimePath, RuntimeIdentity: identityWire{Device: config.RuntimeIdentity.Device, Inode: config.RuntimeIdentity.Inode},
-		GitExecutable: config.GitExecutable, FactoryctlExecutable: config.FactoryctlExecutable, ToolPath: config.ToolPath, ToolchainReadRoots: config.ToolchainReadRoots, LocalCILeaseDir: config.LocalCILeaseDir, AccountHome: config.AccountHome, AccountConfigDir: config.AccountConfigDir,
+		GitExecutable: config.GitExecutable, FactoryctlExecutable: config.FactoryctlExecutable, ToolPath: config.ToolPath, ToolchainReadRoots: config.ToolchainReadRoots, LocalCILeaseDir: config.LocalCILeaseDir, TraceReceiverPort: config.TraceReceiverPort, AccountHome: config.AccountHome, AccountConfigDir: config.AccountConfigDir,
 		RepositoryGitIdentity: identityWire{Device: config.RepositoryGitIdentity.Device(), Inode: config.RepositoryGitIdentity.Inode()}, RepositoryOriginDigest: config.RepositoryOriginDigest,
 		RepositoryRoot: config.RepositoryRoot, RepositoryIdentity: identityWire{Device: config.RepositoryIdentity.Device(), Inode: config.RepositoryIdentity.Inode()}, GitCommonDir: config.GitCommonDir, Revision: config.Revision,
 		ChangeParent: config.ChangeParent, FinalName: config.FinalName,
@@ -196,7 +200,7 @@ func DecodeConfig(encoded []byte) (Config, error) {
 		Provider: providerKind, Role: role, Model: wire.Model, ReasoningEffort: wire.ReasoningEffort,
 		AgentID: wire.AgentID, TaskIncarnationID: wire.TaskIncarnationID, PreviousWorkingDirectory: wire.PreviousWorkingDirectory,
 		RuntimePath: wire.RuntimePath, RuntimeIdentity: runner.FileIdentity{Device: wire.RuntimeIdentity.Device, Inode: wire.RuntimeIdentity.Inode},
-		GitExecutable: wire.GitExecutable, FactoryctlExecutable: wire.FactoryctlExecutable, ToolPath: wire.ToolPath, ToolchainReadRoots: wire.ToolchainReadRoots, LocalCILeaseDir: wire.LocalCILeaseDir, AccountHome: wire.AccountHome, AccountConfigDir: wire.AccountConfigDir,
+		GitExecutable: wire.GitExecutable, FactoryctlExecutable: wire.FactoryctlExecutable, ToolPath: wire.ToolPath, ToolchainReadRoots: wire.ToolchainReadRoots, LocalCILeaseDir: wire.LocalCILeaseDir, TraceReceiverPort: wire.TraceReceiverPort, AccountHome: wire.AccountHome, AccountConfigDir: wire.AccountConfigDir,
 		RepositoryGitIdentity: repositoryGitIdentity, RepositoryOriginDigest: wire.RepositoryOriginDigest,
 		RepositoryRoot: wire.RepositoryRoot, RepositoryIdentity: repositoryIdentity, GitCommonDir: wire.GitCommonDir, Revision: wire.Revision,
 		ChangeParent: wire.ChangeParent, FinalName: wire.FinalName,

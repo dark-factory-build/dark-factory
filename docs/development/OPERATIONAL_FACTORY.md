@@ -312,9 +312,19 @@ Pull adapters are configured in `observe.json` in the factory home:
 - With no configuration, the remote halls truthfully read `unobserved`.
 
 Local processes export with the standard
-`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://127.0.0.1:43123/v1/traces`, in the
-SDK's default `http/protobuf` or in `http/json`. factoryd folds every span
-into the runtime store and never keeps it.
+`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://127.0.0.1:43123/v1/traces` (the
+browser listener's port), in the SDK's default `http/protobuf` or in
+`http/json`. factoryd folds every span into the runtime store and never keeps
+it.
+
+Agents' runs export there with no per-project setup: a worker's environment
+carries `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` for that listener and
+`OTEL_RESOURCE_ATTRIBUTES=deployment.environment.name=local`, so the tests,
+dev servers and scripts it runs light up the plant if they are instrumented.
+An observation's environment is the span resource's
+`deployment.environment.name` (or the older `deployment.environment`),
+defaulting to `local`; it remains only what that process claimed, and its
+source stays `otlp`.
 
 ## 7. Correlation
 

@@ -1884,3 +1884,32 @@ func TestClaudeSettingsConfineTheRunToItsGrants(t *testing.T) {
 		t.Fatalf("launch reads user or project settings: %q", launch.Argv())
 	}
 }
+
+func TestWorkerEnvironmentExportsTracesToTheConfiguredReceiver(t *testing.T) {
+	want := []string{"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://127.0.0.1:43999/v1/traces", "OTEL_RESOURCE_ATTRIBUTES=deployment.environment.name=local"}
+	for _, kind := range []kernel.Provider{kernel.ProviderClaudeCode, kernel.ProviderCodex} {
+		installation, runtime, _ := nativeFixture(t, kind)
+		launch, err := Build(requestFor(t, kind, installation, runtime.WithTraceReceiver(43999), "", ""))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, entry := range want {
+			if !slices.Contains(launch.Environment(), entry) {
+				t.Fatalf("%s worker environment lacks %q: %q", kind, entry, launch.Environment())
+			}
+		}
+		if _, err := runner.PrepareCommittedExecSpec(launch.Executable(), launch.Argv(), launch.Environment(), t.TempDir()); err != nil {
+			t.Fatalf("runner refused the %s worker environment: %v", kind, err)
+		}
+		for _, other := range [][]string{
+			runtime.environmentForRole(kind, kernel.RoleWorker),
+			runtime.WithTraceReceiver(43999).environmentForRole(kind, kernel.RoleOrchestrator),
+		} {
+			for _, entry := range other {
+				if strings.HasPrefix(entry, "OTEL_") {
+					t.Fatalf("%s exported traces without a worker receiver: %q", kind, entry)
+				}
+			}
+		}
+	}
+}

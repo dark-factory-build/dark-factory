@@ -50,6 +50,19 @@ func TestOTLPExportBecomesObservationsAndKeyCoverage(t *testing.T) {
 	}
 }
 
+func TestOTLPEnvironmentComesFromTheResourceAndDefaultsToLocal(t *testing.T) {
+	for key, want := range map[string]string{"deployment.environment.name": "staging", "deployment.environment": "production", "service.namespace": "local"} {
+		export := `{"resourceSpans":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"api"}},{"key":"` + key + `","value":{"stringValue":"` + want + `"}}]},"scopeSpans":[{"spans":[{"kind":2}]}]}]}`
+		observations, coverage, err := DecodeOTLP([]byte(export), 0)
+		if err != nil || len(observations) != 1 || len(coverage) != 1 {
+			t.Fatalf("%s: observations=%+v coverage=%+v err=%v", key, observations, coverage, err)
+		}
+		if observations[0].Environment != want || coverage[0].Environment != want || observations[0].Source != "otlp" || coverage[0].Source != "otlp" {
+			t.Fatalf("%s: observation=%+v coverage=%+v, want environment %q from otlp", key, observations[0], coverage[0], want)
+		}
+	}
+}
+
 func TestCloudflareCoversEveryNamedScriptAtScriptGranularity(t *testing.T) {
 	var asked map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
