@@ -21,15 +21,30 @@ test("only what changes between two looks at the floor is news", () => {
   assert.deepEqual(observe(first.seen, started, [question("q0", "t-ada", "t-grace")]).events, [{ key: "assign t-grace", kind: "assign", to: "grace" }],
     "work is handed over when it was seen waiting and now runs for someone: not work with nobody, nor work first seen already running");
   assert.deepEqual(observe(first.seen, tasks, [question("q0", "t-ada", "t-grace", true), question("q1", "t-grace", "t-ada"), question("q2", "t-ada", "t-grace", true), question("q3", "t-ada", "t-gone"), question("q4", "t-ada", "t-ada2")]).events, [
-    { key: "answer q0", kind: "answer", from: "grace", to: "ada" },
-    { key: "ask q1", kind: "ask", from: "grace", to: "ada" },
-    { key: "answer q2", kind: "answer", from: "grace", to: "ada" },
+    { key: "answer q0", kind: "answer", from: "grace", to: "ada", subject: "q0" },
+    { key: "ask q1", kind: "ask", from: "grace", to: "ada", subject: "q1" },
+    { key: "answer q2", kind: "answer", from: "grace", to: "ada", subject: "q2" },
   ], "an answer goes back the way the question came; a question to nobody on this floor goes nowhere");
   // The snapshot carries only the newest questions: one that drops out of it and comes back unchanged was asked long ago.
   const without = observe(first.seen, tasks, []);
   assert.deepEqual(observe(without.seen, tasks, [question("q0", "t-ada", "t-grace")]).events, []);
   assert.deepEqual(observe(without.seen, tasks, [question("q0", "t-ada", "t-grace", true)]).events.map(({ key }) => key), ["answer q0"]);
   assert.deepEqual(observe(first.seen, [...tasks, task("t-ada2", "ada", "queued")], [question("q0", "t-ada", "t-grace"), question("q4", "t-ada", "t-ada2")]).events, [], "nobody signals themselves");
+});
+
+test("only new recorded reads and writes fly, one per agent, never after a fresh look", () => {
+  const cue = (key, agentId, reading) => ({ key, agentId, reading });
+  const first = observe(undefined, [], [], [cue("old", "ada", true)]);
+  assert.deepEqual(first.events, [], "what was recorded before the floor looked is history");
+  const next = observe(first.seen, [], [], [cue("old", "ada", true), cue("r1", "ada", true), cue("r2", "ada", true), cue("w1", "grace", false), cue("op", "", false)]);
+  assert.deepEqual(next.events, [
+    { key: "read r2", kind: "read", to: "ada", subject: "r2" },
+    { key: "post w1", kind: "post", from: "grace", subject: "w1" },
+  ], "a read comes to the agent, a write leaves it; a burst is its newest; an operator's write has nobody to fly from");
+  assert.deepEqual(observe(next.seen, [], [], [cue("r2", "ada", true)]).events, [], "each operation flies once");
+  const post = send(next.events[1], 0, { x: 0, y: 0 }, undefined, 100);
+  assert.equal(post.travel, 900, "recorded operations are paper, timed as handed-over work");
+  assert.deepEqual([messageAt(post, { x: 100, y: 0 }, 100).hailing, messageAt(post, { x: 100, y: 0 }, 950).hailing], ["from", undefined], "the writer raises a hand as it posts; the board does not");
 });
 
 test("a pulse keeps to its route, paper flies over, and each end raises a hand in turn", () => {
@@ -163,6 +178,88 @@ test("the floor sends a question down the corridors, its answer back, and new wo
     assert.match(tooltipOf("grace"), /\nAsked Ada · waiting for an answer$/);
     await act(async () => { renderer.update(createElement(FactoryScene, { graph, workers, tasks, appearance: { scenery: "off", animation: "off" }, peerQuestions: [question("q2", "t-grace", "t-ada"), question("q3", "t-grace", "t-ada")] })); });
     assert.equal(tooltipOf("grace").split("Asked Ada").length, 2, "two questions to the same person are said once");
+  } finally {
+    if (renderer) await act(async () => renderer.unmount());
+    for (const [key, value] of Object.entries(saved)) { if (value === undefined) delete globalThis[key]; else globalThis[key] = value; }
+  }
+});
+
+test("recorded operations fly between the agent and the shelf or board, open what they used, and never replay", async () => {
+  const graph = hallsOf([..."abc"]);
+  const workers = [
+    { id: "ada", name: "Ada", role: "worker", provider: "codex", activity: "busy", location: "working", nodeId: "a" },
+    { id: "grace", name: "Grace", role: "worker", provider: "codex", activity: "busy", location: "working", nodeId: "c" },
+    { id: "linus", name: "Linus", role: "worker", provider: "codex", activity: "idle", location: "resting" },
+  ];
+  const tasks = [{ ...task("t-ada", "ada", "running"), roomIds: ["a"] }, { ...task("t-grace", "grace", "running"), roomIds: ["c"] }];
+  const opened = [], boards = [];
+  const cue = (key, agentId, board, reading) => ({ key, agentId, board, reading, label: key, open: () => opened.push(key) });
+  const saved = { setTimeout: globalThis.setTimeout, clearTimeout: globalThis.clearTimeout, performance: globalThis.performance, requestAnimationFrame: globalThis.requestAnimationFrame, cancelAnimationFrame: globalThis.cancelAnimationFrame, window: globalThis.window, document: globalThis.document };
+  let clock = 1000, next = 0, renderer, reduced = false;
+  const timers = new Map(), frames = new Map();
+  globalThis.performance = { now: () => clock };
+  globalThis.setTimeout = (callback) => { timers.set(++next, callback); return next; };
+  globalThis.clearTimeout = (id) => timers.delete(id);
+  globalThis.requestAnimationFrame = (callback) => { frames.set(++next, callback); return next; };
+  globalThis.cancelAnimationFrame = (id) => frames.delete(id);
+  globalThis.window = { matchMedia: () => ({ matches: reduced, addEventListener() {}, removeEventListener() {} }) };
+  globalThis.document = { visibilityState: "visible", addEventListener() {}, removeEventListener() {} };
+  const tick = async (ms) => { await act(async () => { clock += ms; const bag = frames.size > 0 ? frames : timers; const [id, callback] = [...bag].at(-1); bag.delete(id); callback(clock); }); };
+  const marks = (at) => renderer.root.findAll((node) => node.props["data-knowledge-cue"] === at);
+  const point = (node) => node.props.transform.match(/translate\(([-\d.]+) ([-\d.]+)\)/).slice(1).map(Number);
+  const near = (a, b, within = 16) => Math.hypot(a[0] - b[0], a[1] - b[1]) < within;
+  const scene = (props) => createElement(FactoryScene, { graph, workers, tasks, appearance: { scenery: "off", animation: "follow-device" }, onOpenLibrary() {}, onOpenBoard: (project) => boards.push(project), ...props });
+  try {
+    await act(async () => { renderer = create(scene({ workers: [], tasks: [], connected: false })); });
+    await act(async () => { renderer.update(scene({ knowledgeCues: [cue("old", "ada", false, true)] })); });
+    await tick(16);
+    assert.equal(marks("flight").length, 0, "what was recorded before the floor looked does not fly");
+    assert.equal(marks("agent").length, 1, "but it is marked beside the agent");
+    const shelf = point(renderer.root.find((node) => node.props["data-break-room"] === "shelf"));
+    const ada = () => point(renderer.root.findByProps({ "data-worker-id": "ada" }));
+
+    await act(async () => { renderer.update(scene({ knowledgeCues: [cue("old", "ada", false, true), cue("r1", "ada", false, true), cue("x", "absent", false, true)] })); });
+    await tick(16);
+    assert.deepEqual(marks("flight").map((node) => node.props["data-knowledge-key"]), ["r1"], "a new read flies; an agent not on this floor gets no flight");
+    assert.ok(near(point(marks("flight")[0]), shelf, 24), `it leaves the shelf: ${point(marks("flight")[0])} vs ${shelf}`);
+    assert.deepEqual(marks("shelf").map((node) => node.props["data-knowledge-key"]), ["x"], "the shelf still marks the newest read");
+    assert.ok(!marks("agent").some((node) => node.props["data-knowledge-key"] === "r1"), "nothing beside the agent while it flies");
+    marks("flight")[0].props.onKeyDown({ key: "Enter", preventDefault() {} });
+    assert.deepEqual(opened, ["r1"], "keyboard activation opens the exact record");
+    const before = ada();
+    let last;
+    for (let step = 0; step < 80 && marks("flight").length > 0; step += 1) { last = point(marks("flight")[0]); await tick(16); }
+    assert.ok(near(last, ada(), 24), `it lands where the agent already is: ${last} vs ${ada()}`);
+    assert.deepEqual(ada(), before, "the agent never moves for it");
+    assert.ok(marks("agent").some((node) => node.props["data-knowledge-key"] === "r1"), "then it rests beside the agent");
+
+    await act(async () => { renderer.update(scene({ knowledgeCues: [cue("r1", "ada", false, true), cue("w1", "grace", true, false)] })); });
+    await tick(16);
+    const grace = point(renderer.root.findByProps({ "data-worker-id": "grace" }));
+    assert.ok(near(point(marks("flight")[0]), grace), "a post leaves the writer");
+    for (let step = 0; step < 80 && marks("flight").length > 0; step += 1) { last = point(marks("flight")[0]); await tick(16); }
+    const board = point(renderer.root.findByProps({ "aria-label": "Open discussion board" }));
+    assert.ok(near(last, [board[0] + 8, board[1] + 8], 24), `and lands at the board: ${last} vs ${board}`);
+
+    // A question's pulse opens the Board that lists it.
+    await act(async () => { renderer.update(scene({ knowledgeCues: [], peerQuestions: [question("q", "t-ada", "t-grace")] })); });
+    for (let step = 0; step < 40 && renderer.root.findAll((node) => node.props["data-pulse"] !== undefined).length === 0; step += 1) await tick(16);
+    renderer.root.find((node) => node.props["data-pulse"] === "ask").props.onKeyDown({ key: " ", preventDefault() {} });
+    assert.deepEqual(boards, ["p"]);
+
+    // After a dropped connection, what was recorded meanwhile is history.
+    await act(async () => { renderer.update(scene({ connected: false, knowledgeCues: [] })); });
+    await act(async () => { renderer.update(scene({ knowledgeCues: [cue("r2", "ada", false, true)] })); });
+    for (let step = 0; step < 10; step += 1) await tick(16);
+    assert.equal(marks("flight").length, 0, "nothing replays after a reconnect");
+
+    // Reduced motion: no flights, only the static marks.
+    reduced = true;
+    await act(async () => renderer.unmount());
+    await act(async () => { renderer = create(scene({ knowledgeCues: [] })); });
+    await act(async () => { renderer.update(scene({ knowledgeCues: [cue("r3", "ada", false, true)] })); });
+    assert.equal(marks("flight").length, 0);
+    assert.deepEqual(marks("agent").map((node) => node.props["data-knowledge-key"]), ["r3"]);
   } finally {
     if (renderer) await act(async () => renderer.unmount());
     for (const [key, value] of Object.entries(saved)) { if (value === undefined) delete globalThis[key]; else globalThis[key] = value; }

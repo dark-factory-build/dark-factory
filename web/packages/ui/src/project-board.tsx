@@ -34,7 +34,7 @@ export function activityLabel(item: KnowledgeActivity, state?: StateView): strin
 /**
  * Polls the recorded activity of the shown projects. The first look after
  * connecting, reconnecting or changing scope is history: it is listed, never
- * cued. Later operations are cued once, at most CUE_LIMIT at a time, for CUE_MS.
+ * cued. Later reads and writes are cued once, at most CUE_LIMIT at a time, for CUE_MS.
  * Reading this listing records nothing and retrieves no document text.
  */
 export function useKnowledgeActivity(projects: readonly string[], call: ProjectContentCall | undefined) {
@@ -63,7 +63,8 @@ export function useKnowledgeActivity(projects: readonly string[], call: ProjectC
         }
         const items = [...found.values()];
         items.sort((a, b) => b.at_ms - a.at_ms || a.key.localeCompare(b.key));
-        const fresh = history ? [] : items.filter((item) => !seen.current.has(item.key));
+        // What each run is given at launch is listed, never cued: it happens on every run.
+        const fresh = history ? [] : items.filter((item) => !seen.current.has(item.key) && item.operation !== "delivered");
         for (const item of items) seen.current.add(item.key);
         history = false;
         setRecent(items.slice(0, 8));
