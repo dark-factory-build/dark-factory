@@ -479,7 +479,7 @@ export function FactoryScene({ proposals, tools, onLoadNode, onInvestigate, onDi
   const sceneWidth = layout.width;
   const sceneHeight = Math.max(layout.height, commonBottom, 112, ...placements.map((placement) => placement.y + 24)) + 2 * PADDING;
   const busy = new Map(layout.rooms.map((room) => [room.id, tasks.filter((order) => order.status === "running" && order.roomIds.includes(room.id))]));
-  const belts = useMemo(() => routeFlows(layout, graph.flows), [layout, graph.flows]);
+  const belts = useMemo(() => [...hallIntake(layout, graph.halls), ...routeFlows(layout, graph.flows)], [layout, graph.halls, graph.flows]);
   const queued = tasks.filter((order) => order.status === "queued").length;
   const tray = station.tasks;
   const animate = connected && appearance.animation !== "off";
@@ -850,6 +850,23 @@ function Belt({ belt }: { belt: BeltRoute }) {
     {spacing === 0 ? null : <path d={d} className={`dfPlant__material${reading.state === "failing" || reading.state === "degraded" ? " dfPlant__material--faulty" : ""}`} strokeDasharray={`3 ${spacing}`} />}
     {reading.evidence === "runtime" ? <circle cx={belt.points[Math.floor(belt.points.length / 2)]!.x} cy={belt.points[Math.floor(belt.points.length / 2)]!.y} r="4" className="qtag" /> : null}
   </g>;
+}
+
+/**
+ * A hall's own intake: the unit's reading carried from its door to its main
+ * line. A source that counts traffic per service but not per route (a
+ * platform's per-script analytics) can say a unit is busy without saying
+ * which machine handled it, so the hall moves while its machines stay
+ * partial. A unit with no known state has no intake drawn at all.
+ */
+function hallIntake(layout: SceneLayout, halls: readonly SceneHall[]): readonly BeltRoute[] {
+  return halls.flatMap((hall) => {
+    const room = layout.rooms.find((candidate) => candidate.id === hall.id);
+    const line = room?.contents.find((item) => item.entityId === hall.id);
+    if (room === undefined || line === undefined || hall.reading.state === "unknown") return [];
+    const x = line.x + line.width / 2, below = line.y + line.height;
+    return [{ key: `intake ${hall.id}`, kind: "intake", reading: hall.reading, points: [room.door, { x: room.door.x, y: below + 8 }, { x, y: below + 8 }, { x, y: below }] }];
+  });
 }
 
 /**

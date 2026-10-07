@@ -1331,3 +1331,15 @@ test("the plant overview is always there and zoom scales the one floor about the
     globalThis.window = priorWindow;
   }
 });
+
+test("a hall known busy only as a whole moves its intake while its machines stay partial", () => {
+  const partialBusy = { ...busy, observation: "partial" };
+  const markup = renderToStaticMarkup(createElement(FactoryScene, { appearance: commons, workers: [], graph: sceneGraph([
+    hall("edge", { reading: partialBusy, machines: [machine("edge-in", "ingress", { label: "/in", trigger: "request", reading: { ...unread, observation: "partial" } })] }),
+    hall("dark"),
+  ]) }));
+  const intakes = [...markup.matchAll(/<g data-belt="intake" data-observation="([a-z]+)" data-state="([a-z]+)"/g)].map((match) => match.slice(1));
+  assert.deepEqual(intakes, [["partial", "active"]], "only the hall with a known state has an intake, and it carries material");
+  assert.match(markup, /data-belt="intake"[^>]*>(?:(?!<\/g>).)*dfPlant__material/s);
+  assert.match(markup, /data-entity-id="edge-in" data-observation="partial"/, "the machine itself is still only partly observed");
+});
