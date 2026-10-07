@@ -590,6 +590,24 @@ pub(crate) struct PullRequestMergeResult {
     pub(crate) entry_id: String,
     pub(crate) queue_state: Option<String>,
     pub(crate) merge_commit_sha: Option<String>,
+    pub(crate) merge_group: Option<MergeGroupRun>,
+}
+
+/// The newest completed merge-group run that built an open, no longer queued
+/// head: what GitHub would have merged, and why it did not.
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct MergeGroupRun {
+    pub(crate) run_id: i64,
+    pub(crate) url: String,
+    pub(crate) conclusion: String,
+    pub(crate) failed_jobs: Vec<MergeGroupJob>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct MergeGroupJob {
+    pub(crate) name: String,
+    pub(crate) conclusion: String,
+    pub(crate) annotations: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
@@ -1720,6 +1738,7 @@ impl AppAuthority {
                 entry_id: enqueue.entry_id,
                 queue_state: None,
                 merge_commit_sha: Some(merge_commit_sha),
+                merge_group: None,
             });
         }
         let queue = self
@@ -1746,18 +1765,26 @@ impl AppAuthority {
                     entry_id: entry.id,
                     queue_state: Some(entry.state),
                     merge_commit_sha: None,
+                    merge_group: None,
                 })
             }
-            None => Ok(PullRequestMergeResult {
-                pull_number: request.pull_number,
-                head_sha: request.head_sha,
-                base: request.base,
-                pull_state: pull.state,
-                state: MergeObservationState::NotQueued,
-                entry_id: enqueue.entry_id,
-                queue_state: None,
-                merge_commit_sha: None,
-            }),
+            None => {
+                let merge_group = match pull.state.as_str() {
+                    "open" => self.0.merge_group_run(&request).await,
+                    _ => None,
+                };
+                Ok(PullRequestMergeResult {
+                    pull_number: request.pull_number,
+                    head_sha: request.head_sha,
+                    base: request.base,
+                    pull_state: pull.state,
+                    state: MergeObservationState::NotQueued,
+                    entry_id: enqueue.entry_id,
+                    queue_state: None,
+                    merge_commit_sha: None,
+                    merge_group,
+                })
+            }
         }
     }
 }
@@ -3574,6 +3601,77 @@ impl Authority {
         }))
     }
 
+    /// Why an open head left the queue: the newest completed merge-group run
+    /// that built it, with its failed jobs' failure annotations. Best effort,
+    /// on its own Actions-read token, so an installation without that grant
+    /// or an unreadable run still observes NOT_QUEUED, only unexplained.
+    #[cfg(target_arch = "wasm32")]
+    async fn merge_group_run(&self, request: &ObservePullRequestMerge) -> Option<MergeGroupRun> {
+        let mut name = request.repository.clone();
+        let permissions = BTreeMap::from([
+            ("actions", "read"),
+            ("checks", "read"),
+            // The compare that pins the run to this head reads commits.
+            ("contents", "read"),
+            ("metadata", "read"),
+        ]);
+        let token = self
+            .installation_token(RepositoryName::requested(&mut name).ok()?, permissions)
+            .await
+            .ok()?;
+        let api = format!(
+            "https://api.github.com/repos/{}/{}",
+            token.repository.owner, token.repository.name
+        );
+        let runs: WorkflowRuns = github_json(
+            &format!("{api}/actions/runs?event=merge_group&status=completed&per_page=50"),
+            token.as_str(),
+        )
+        .await
+        .ok()?;
+        let run = select_merge_group_run(runs.workflow_runs, &request.base, request.pull_number)?;
+        let built: Comparison = github_json(
+            &format!("{api}/compare/{}...{}", request.head_sha, run.head_sha),
+            token.as_str(),
+        )
+        .await
+        .ok()?;
+        if !matches!(built.status.as_str(), "ahead" | "identical") {
+            return None;
+        }
+        let jobs: WorkflowJobs = github_json(
+            &format!(
+                "{api}/actions/runs/{}/jobs?filter=latest&per_page=100",
+                run.id
+            ),
+            token.as_str(),
+        )
+        .await
+        .ok()?;
+        let mut failed_jobs = Vec::new();
+        for job in jobs
+            .jobs
+            .into_iter()
+            .filter(WorkflowJob::failed)
+            .take(MERGE_GROUP_JOBS)
+        {
+            let annotations: Vec<Annotation> = github_json(
+                &format!("{api}/check-runs/{}/annotations?per_page=100", job.id),
+                token.as_str(),
+            )
+            .await
+            .unwrap_or_default();
+            failed_jobs.push(job.into_result(annotations));
+        }
+        valid_github_url(&run.html_url).ok()?;
+        Some(MergeGroupRun {
+            run_id: run.id,
+            url: run.html_url,
+            conclusion: run.conclusion?,
+            failed_jobs,
+        })
+    }
+
     async fn verify_ref(
         &self,
         token: &RepositoryToken,
@@ -4622,6 +4720,120 @@ impl TryFrom<CheckRun> for CheckResult {
             url: check.html_url,
         })
     }
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+const MERGE_GROUP_JOBS: usize = 3;
+#[cfg(any(target_arch = "wasm32", test))]
+const MERGE_GROUP_ANNOTATIONS: usize = 10;
+
+#[cfg(any(target_arch = "wasm32", test))]
+#[derive(Deserialize)]
+struct WorkflowRuns {
+    workflow_runs: Vec<WorkflowRun>,
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+#[derive(Deserialize)]
+struct WorkflowRun {
+    id: i64,
+    head_branch: Option<String>,
+    head_sha: String,
+    conclusion: Option<String>,
+    html_url: String,
+}
+
+#[cfg(target_arch = "wasm32")]
+#[derive(Deserialize)]
+struct Comparison {
+    status: String,
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+#[derive(Deserialize)]
+struct WorkflowJobs {
+    jobs: Vec<WorkflowJob>,
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+#[derive(Deserialize)]
+struct WorkflowJob {
+    id: i64,
+    name: String,
+    conclusion: Option<String>,
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+#[derive(Deserialize)]
+struct Annotation {
+    annotation_level: String,
+    message: String,
+}
+
+/// GitHub names a merge group's branch for the last pull request it adds,
+/// `gh-readonly-queue/<base>/pr-<number>-<base sha>`. Runs are newest first;
+/// of the runs on the newest such commit, a failed one explains the ejection.
+#[cfg(any(target_arch = "wasm32", test))]
+fn select_merge_group_run(
+    runs: Vec<WorkflowRun>,
+    base: &str,
+    pull_number: i64,
+) -> Option<WorkflowRun> {
+    let prefix = format!("gh-readonly-queue/{base}/pr-{pull_number}-");
+    let mut built = runs.into_iter().filter(|run| {
+        run.head_branch
+            .as_deref()
+            .is_some_and(|branch| branch.starts_with(&prefix))
+    });
+    let newest = built.next()?;
+    if !failed(newest.conclusion.as_deref()) {
+        if let Some(run) =
+            built.find(|run| run.head_sha == newest.head_sha && failed(run.conclusion.as_deref()))
+        {
+            return Some(run);
+        }
+    }
+    Some(newest)
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn failed(conclusion: Option<&str>) -> bool {
+    conclusion.is_some_and(|conclusion| !matches!(conclusion, "success" | "neutral" | "skipped"))
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+impl WorkflowJob {
+    fn failed(&self) -> bool {
+        failed(self.conclusion.as_deref())
+    }
+
+    /// Bounded failure annotations: the failing test lines CI writes, and
+    /// GitHub's own notes on a cancelled job or lost runner.
+    fn into_result(self, annotations: Vec<Annotation>) -> MergeGroupJob {
+        MergeGroupJob {
+            name: bounded_line(&self.name),
+            conclusion: self.conclusion.unwrap_or_default(),
+            annotations: annotations
+                .into_iter()
+                .filter(|annotation| annotation.annotation_level == "failure")
+                .map(|annotation| bounded_line(&annotation.message))
+                .filter(|line| !line.is_empty())
+                .take(MERGE_GROUP_ANNOTATIONS)
+                .collect(),
+        }
+    }
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn bounded_line(value: &str) -> String {
+    value
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(240)
+        .collect()
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
@@ -7571,6 +7783,56 @@ mod tests {
             request_digest(&corrected).unwrap(),
             request_digest(&corrected_other).unwrap()
         );
+    }
+
+    #[test]
+    fn merge_group_run_is_the_newest_failed_build_of_the_pull_with_bounded_annotations() {
+        let runs: WorkflowRuns = serde_json::from_value(serde_json::json!({"workflow_runs": [
+            {"id": 9, "head_branch": "gh-readonly-queue/main/pr-8-aaaa", "head_sha": "e".repeat(40), "conclusion": "failure", "html_url": "https://github.com/o/r/actions/runs/9"},
+            {"id": 7, "head_branch": "gh-readonly-queue/main/pr-7-bbbb", "head_sha": "c".repeat(40), "conclusion": "success", "html_url": "https://github.com/o/r/actions/runs/7"},
+            {"id": 6, "head_branch": "gh-readonly-queue/main/pr-7-bbbb", "head_sha": "c".repeat(40), "conclusion": "failure", "html_url": "https://github.com/o/r/actions/runs/6"},
+            {"id": 5, "head_branch": "gh-readonly-queue/main/pr-7-0000", "head_sha": "d".repeat(40), "conclusion": "failure", "html_url": "https://github.com/o/r/actions/runs/5"},
+            {"id": 4, "head_branch": null, "head_sha": "f".repeat(40), "conclusion": "failure", "html_url": "https://github.com/o/r/actions/runs/4"}
+        ]})).unwrap();
+        assert_eq!(
+            select_merge_group_run(runs.workflow_runs, "main", 7).map(|run| run.id),
+            Some(6)
+        );
+        assert!(select_merge_group_run(Vec::new(), "main", 7).is_none());
+
+        let jobs: WorkflowJobs = serde_json::from_value(serde_json::json!({"jobs": [
+            {"id": 1, "name": "scope", "conclusion": "success"},
+            {"id": 2, "name": "checks", "conclusion": "failure"},
+            {"id": 3, "name": "relay", "conclusion": null}
+        ]}))
+        .unwrap();
+        let failed: Vec<WorkflowJob> = jobs.jobs.into_iter().filter(WorkflowJob::failed).collect();
+        assert_eq!(failed.iter().map(|job| job.id).collect::<Vec<_>>(), [2]);
+        let mut annotations = vec![
+            Annotation {
+                annotation_level: "warning".into(),
+                message: "Node 20 is deprecated".into(),
+            },
+            Annotation {
+                annotation_level: "failure".into(),
+                message: "--- FAIL: TestDaemonServesTaskOnlyToLiveAttempt (0.41s)\nstack".into(),
+            },
+        ];
+        annotations.extend((0..20).map(|_| Annotation {
+            annotation_level: "failure".into(),
+            message: "x".repeat(500),
+        }));
+        let job = failed.into_iter().next().unwrap().into_result(annotations);
+        assert_eq!(
+            (job.name.as_str(), job.conclusion.as_str()),
+            ("checks", "failure")
+        );
+        assert_eq!(job.annotations.len(), MERGE_GROUP_ANNOTATIONS);
+        assert_eq!(
+            job.annotations[0],
+            "--- FAIL: TestDaemonServesTaskOnlyToLiveAttempt (0.41s)"
+        );
+        assert_eq!(job.annotations[1].len(), 240);
     }
 
     #[test]

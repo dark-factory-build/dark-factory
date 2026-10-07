@@ -239,6 +239,45 @@ func TestEjectionWithNoHeadFailureReenqueuesOnceThenEscalates(t *testing.T) {
 	}
 }
 
+// A merge-group run that failed on the code it built goes back to the author
+// with the run, job and failing tests, and the head is not re-enqueued; a
+// run lost to infrastructure is still re-enqueued exactly once (#1366).
+func TestFailedMergeGroupRunSendsCorrectionUnlessInfrastructure(t *testing.T) {
+	enqueued := Operation{ID: "op", EnqueueID: "enqueue", Request: reviewRequest(), State: "enqueued", Verdict: "allow", Submitted: true}
+	failed := &GroupRun{ID: 37527118828, URL: "https://github.com/o/r/actions/runs/37527118828", Conclusion: "failure", Jobs: []GroupJob{
+		{Name: "checks", Conclusion: "failure", Annotations: []string{"--- FAIL: TestDaemonServesTaskOnlyToLiveAttempt (0.41s)", "not ok 12 - board and shelves open peer views of one Library workspace"}},
+	}}
+	store, backend := &memoryStore{}, &fakeBackend{merge: Merge{State: "NOT_QUEUED", Open: true, Group: failed}}
+	c := Coordinator{Store: store, Backend: backend, Now: func() time.Time { return time.Unix(20, 0) }}
+	op, err := c.ObserveMerge(context.Background(), enqueued)
+	if err != nil || op.State != "ejected" || !op.RoutePending || op.Requeued || backend.enqueued || len(store.values) != 1 {
+		t.Fatalf("failed merge group=%+v err=%v enqueued=%v", op, err, backend.enqueued)
+	}
+	for _, want := range []string{enqueued.Request.Head, "37527118828", "Job checks (failure)", "TestDaemonServesTaskOnlyToLiveAttempt", "board and shelves open peer views"} {
+		if !strings.Contains(op.Detail, want) {
+			t.Fatalf("correction %q lacks %q", op.Detail, want)
+		}
+	}
+	for _, infra := range []*GroupRun{
+		{ID: 1, Conclusion: "cancelled", Jobs: []GroupJob{{Name: "checks", Conclusion: "cancelled"}}},
+		{ID: 2, Conclusion: "failure", Jobs: []GroupJob{{Name: "checks", Conclusion: "failure", Annotations: []string{"The self-hosted runner lost communication with the server."}}}},
+		{ID: 3, Conclusion: "failure", Jobs: []GroupJob{{Name: "checks", Conclusion: "startup_failure"}}},
+		// The always() aggregate fails because a gate never started.
+		{ID: 4, Conclusion: "failure", Jobs: []GroupJob{{Name: "checks", Conclusion: "startup_failure"}, {Name: "required", Conclusion: "failure", Annotations: []string{"Process completed with exit code 1."}}}},
+		{ID: 5, Conclusion: "failure", Jobs: []GroupJob{{Name: "required", Conclusion: "failure"}, {Name: "checks", Conclusion: "cancelled"}}},
+	} {
+		store, backend := &memoryStore{}, &fakeBackend{merge: Merge{State: "NOT_QUEUED", Open: true, Group: infra}}
+		c := Coordinator{Store: store, Backend: backend, Now: func() time.Time { return time.Unix(20, 0) }}
+		op, err := c.ObserveMerge(context.Background(), enqueued)
+		if err != nil || op.State != "enqueued" || !op.Requeued || !backend.enqueued {
+			t.Fatalf("infrastructure run %d=%+v err=%v", infra.ID, op, err)
+		}
+		if again, err := c.ObserveMerge(context.Background(), op); err == nil || again.State != "failed" {
+			t.Fatalf("infrastructure run %d re-enqueued twice: %+v", infra.ID, again)
+		}
+	}
+}
+
 // A planned enqueue was claimed by the broker but never run: resuming
 // resends the same operation id and the operation becomes enqueued.
 func TestResumeResendsAPlannedEnqueue(t *testing.T) {

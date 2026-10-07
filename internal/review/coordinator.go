@@ -87,10 +87,67 @@ type Backend interface {
 // Merge is one merge-queue observation: State is the Maintainer's
 // ACTIVE_QUEUE, MERGED_AFTER_ENQUEUE_ATTEMPT or NOT_QUEUED, and Failing names
 // the head's failing checks when an open pull request is no longer queued.
+// Group is the newest completed merge-group run that built this head, if any.
 type Merge struct {
 	State   string
 	Open    bool
 	Failing []string
+	Group   *GroupRun
+}
+
+type GroupRun struct {
+	ID         uint64     `json:"run_id"`
+	URL        string     `json:"url"`
+	Conclusion string     `json:"conclusion"`
+	Jobs       []GroupJob `json:"failed_jobs"`
+}
+
+type GroupJob struct {
+	Name        string   `json:"name"`
+	Conclusion  string   `json:"conclusion"`
+	Annotations []string `json:"annotations"`
+}
+
+// runnerLost are GitHub's own annotations for a job that never finished on
+// its runner; the code did not fail.
+var runnerLost = regexp.MustCompile(`(?i)runner has received a shutdown signal|lost communication with the server`)
+
+// defect reports a merge-group run that failed on the code it built, as
+// opposed to infrastructure: a cancelled run, a job that never started, or a
+// lost runner. The head merged with its base is what GitHub would merge, so
+// the defect is the author's to fix.
+func (g *GroupRun) defect() bool {
+	if g == nil || (g.Conclusion != "failure" && g.Conclusion != "timed_out") {
+		return false
+	}
+	// A job that was cancelled or never started fails the jobs downstream of
+	// it, such as an always() aggregate, so it decides the run on its own.
+	failed := false
+	for _, job := range g.Jobs {
+		switch {
+		case job.Conclusion == "cancelled" || job.Conclusion == "startup_failure" || runnerLost.MatchString(strings.Join(job.Annotations, "\n")):
+			return false
+		case job.Conclusion == "failure" || job.Conclusion == "timed_out":
+			failed = true
+		}
+	}
+	return failed
+}
+
+func (g *GroupRun) note(head string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "The merge queue removed exact head %s without merging it: merge-group run %d failed (%s). Fix the failures below against current origin/main.", head, g.ID, g.URL)
+	for _, job := range g.Jobs {
+		fmt.Fprintf(&b, "\n\nJob %s (%s):", job.Name, job.Conclusion)
+		for _, line := range job.Annotations {
+			b.WriteString("\n- " + line)
+		}
+	}
+	note := b.String()
+	if len(note) > 4000 {
+		note = strings.ToValidUTF8(note[:4000], "") + "\n…"
+	}
+	return note
 }
 
 type Coordinator struct {
@@ -204,11 +261,11 @@ func (c Coordinator) finishSubmitted(ctx context.Context, op Operation) (Operati
 }
 
 // ObserveMerge advances an enqueued operation from the merge queue: merged,
-// closed, or ejected while the pull request is still open. Only a failing
-// check on the head itself goes back to the author, routed like a
-// REQUEST_CHANGES. Merge-group checks run on the queue's merge commit, which
-// the author cannot see or rebase, so an ejection with none on the head is
-// re-enqueued once and escalated if the same head is ejected again.
+// closed, or ejected while the pull request is still open. A failing check
+// on the head, or a merge-group run that failed on the code it built, goes
+// back to the author, routed like a REQUEST_CHANGES. Any other ejection
+// (infrastructure, or no run found) is re-enqueued once and escalated if the
+// same head is ejected again.
 func (c Coordinator) ObserveMerge(ctx context.Context, op Operation) (Operation, error) {
 	if op.State != "enqueued" {
 		return op, errors.New("review: operation is not enqueued")
@@ -223,6 +280,8 @@ func (c Coordinator) ObserveMerge(ctx context.Context, op Operation) (Operation,
 		return op, nil
 	case !merge.Open:
 		op.State = "closed"
+	case len(merge.Failing) == 0 && merge.Group.defect():
+		op.State, op.RoutePending, op.Detail = "ejected", true, merge.Group.note(op.Request.Head)
 	case len(merge.Failing) == 0 && !op.Requeued:
 		op.Requeued = true
 		return c.finishSubmitted(ctx, op)

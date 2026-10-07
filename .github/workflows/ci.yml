@@ -264,7 +264,15 @@ jobs:
               echo "unknown macOS gate mode: $MACOS_MODE" >&2
               exit 1
               ;;
-          esac
+          esac 2>&1 | tee "$RUNNER_TEMP/macos-gate.log"
+
+      # factoryd reads these failure annotations when the merge queue ejects a
+      # head, so the worker's correction names the failing tests (#1366).
+      - name: Annotate failing tests
+        if: failure()
+        run: |
+          grep -E '^[[:space:]]*(--- FAIL: |not ok |✖ )' "$RUNNER_TEMP/macos-gate.log" | head -n 10 |
+            sed -e 's/^[[:space:]]*//' -e 's/%/%25/g' -e 's/^/::error title=Failing test::/' || true
 
       - name: Publish bounded workflow summary
         if: always()

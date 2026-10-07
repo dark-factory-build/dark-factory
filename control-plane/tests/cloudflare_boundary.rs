@@ -344,6 +344,7 @@ fn declared_output_schemas_name_the_fields_the_results_carry() {
                 "entry_id",
                 "queue_state",
                 "merge_commit_sha",
+                "merge_group",
             ][..],
         ),
     ] {
