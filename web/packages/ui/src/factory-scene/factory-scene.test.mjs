@@ -1287,3 +1287,41 @@ test("a deploy is a changeover dated by the graph, not by the viewer's clock", (
   assert.doesNotMatch(render(at - 2 * 24 * 60 * 60_000), /data-changeover=/);
   assert.doesNotMatch(render(undefined), /data-changeover=/);
 });
+
+test("the plant overview is always there and zoom scales the one floor about the pane's centre", async () => {
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+  const priorWindow = globalThis.window;
+  globalThis.window = { innerWidth: 1200, innerHeight: 800 };
+  const { width } = layoutScene(graph);
+  // A 600×400 pane over the floor; the floor's box follows its rendered width and the pane's scroll.
+  const pane = { scrollLeft: 0, scrollTop: 0, clientWidth: 600, clientHeight: 400, getBoundingClientRect: () => ({ left: 0, top: 0, width: 600, height: 400 }) };
+  const floor = { getBoundingClientRect: () => ({ left: -pane.scrollLeft, top: -pane.scrollTop, width: floorWidth() }) };
+  const view = { attributes: {}, setAttribute(name, value) { this.attributes[name] = Number(value); } };
+  let renderer;
+  const style = () => renderer.root.findAll((node) => node.props["data-graph-digest"] === graph.digest)[0]?.props.style ?? {};
+  const floorWidth = () => typeof style().width === "number" ? style().width : 900;
+  try {
+    await act(async () => { renderer = create(createElement(FactoryScene, { graph, appearance: commons, workers }), { createNodeMock: (element) => element.type === "svg" && element.props.viewBox?.startsWith("0 0 ") && element.props["data-graph-digest"] ? floor : element.type === "div" && element.props.className === "dfFactoryFloor__map" ? pane : element.type === "rect" && element.props["data-overview-view"] !== undefined ? view : {} }); });
+    const overview = renderer.root.findByProps({ className: "dfPlantMap" });
+    assert.match(overview.props["aria-label"], /^Plant overview: 3 units, 0 external, 2 workers$/);
+    assert.equal(overview.findAll((node) => node.props["data-overview-room"] !== undefined).length, layoutScene(graph).rooms.length);
+    const button = (label) => renderer.root.findAll((node) => node.type === "button" && node.props["aria-label"] === label)[0];
+    assert.equal(button("Zoom out").props.disabled, true, "fitted: nothing further out to show");
+    const centre = () => ({ x: (pane.scrollLeft + 300) / (floorWidth() / width), y: (pane.scrollTop + 200) / (floorWidth() / width) });
+    const before = centre();
+    await act(async () => button("Zoom in").props.onClick());
+    assert.equal(style().width, 1350);
+    await act(async () => button("Zoom in").props.onClick());
+    assert.equal(style().width, 2025);
+    assert.equal(view.attributes.width, 600 / (2025 / width), "the overview window is the pane, in floor units");
+    for (const axis of ["x", "y"]) assert.ok(Math.abs(centre()[axis] - before[axis]) < 1, `zoom keeps the floor's ${axis} under the pane's centre`);
+    await act(async () => button("Fit floor").props.onClick());
+    assert.equal(style().width, "100%");
+    // An empty plant has no overview and nothing to zoom.
+    await act(async () => renderer.update(createElement(FactoryScene, { graph: sceneGraph([]), appearance: commons, workers: [] })));
+    assert.equal(renderer.root.findAll((node) => node.props.className === "dfPlantOverview").length, 0);
+  } finally {
+    await act(async () => renderer?.unmount());
+    globalThis.window = priorWindow;
+  }
+});

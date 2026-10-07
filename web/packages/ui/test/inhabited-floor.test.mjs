@@ -23,7 +23,7 @@ const ids = (list) => list.map((item) => item.id);
 const record = (id, paths, overrides = {}) => ({ project_id: "project", repository: "owner/factory", kind: "pull_request", id, visual_id: id, observed_at: 1000, tasks: [], missions: [], document: { number: Number(id), title: `Change ${id}`, head: "b".repeat(40), state: "open", review: { head: "b".repeat(40), state: "allow" }, source: { kind: "committed", base: "a".repeat(40), head: "b".repeat(40), observed_at: 1000, paths, omitted: 0 }, ...overrides } });
 const items = (records, now = 1000) => Object.values(deriveProductionView([{ project_id: "project", repository: "owner/factory", kind: "repository", id: "repo", visual_id: "", observed_at: 1000, document: {}, tasks: [], missions: [] }, ...records], now).contraptions);
 
-test("request docks fold into one manifold in auto, stay whole in fine and vanish in coarse", () => {
+test("request docks fold into one manifold in auto, and stay whole in fine", () => {
   const few = prepare(graphWith(base(3))).graph.halls.find((hall) => hall.id === hex(1));
   assert.equal(few.machines.filter((machine) => machine.kind === "ingress").length, 3, "up to six docks are all shown");
   const nodes = base(8);
@@ -33,7 +33,6 @@ test("request docks fold into one manifold in auto, stay whole in fine and vanis
   assert.equal(auto[0].represented.length, 8);
   assert.equal(hallOf("fine").machines.filter((machine) => machine.kind === "ingress").length, 8);
   assert.equal(hallOf("fine").machines.some((machine) => machine.represented !== undefined), false);
-  assert.equal(hallOf("coarse").machines.length, 0, "the plant view keeps halls only");
   // Every folded route still resolves to the manifold, so a path touching one marks it.
   const folded = prepare(graphWith(nodes));
   assert.equal(folded.where.get(hex(13)).machine, auto[0].id);

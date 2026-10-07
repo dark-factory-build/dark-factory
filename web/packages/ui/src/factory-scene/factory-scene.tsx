@@ -1,4 +1,4 @@
-import { useLayoutEffect, useEffect, useMemo, useRef, useState, type MouseEvent, type FocusEvent, type PointerEvent, type KeyboardEvent, type ReactNode } from "react";
+import { useLayoutEffect, useEffect, useMemo, useRef, useState, type MouseEvent, type FocusEvent, type PointerEvent, type KeyboardEvent, type ReactNode, type RefObject } from "react";
 import type { OperationalNodeView, PeerQuestionItem } from "@dark-factory/client";
 import type { SceneTask } from "../console-view.js";
 import {
@@ -23,6 +23,7 @@ import {
   type SceneRoomLayout,
   type SceneWorker,
 } from "./scene.js";
+import { IconButton } from "../icons.js";
 import { DEFAULT_FLOOR_APPEARANCE, type FloorAppearance } from "../floor-appearance.js";
 import { breakRoomHabit, restingItem, workerFrames, workerPhase } from "./appearance.js";
 import { catAt, catBed, chats, gossip, type Seat } from "./idle-life.js";
@@ -417,6 +418,12 @@ export function FactoryScene({ proposals, tools, onLoadNode, onInvestigate, onDi
   const [selectedId, setSelectedId] = useState<string>();
   const [search, setSearch] = useState("");
   const mapElement = useRef<HTMLDivElement>(null);
+  const floorElement = useRef<SVGSVGElement>(null);
+  // Scene pixels per scene unit; undefined fits the floor to its pane.
+  const [zoom, setZoom] = useState<number>();
+  // The overview's window follows scrolling without rerendering the floor.
+  const viewElement = useRef<SVGRectElement>(null);
+  const anchor = useRef<{ x: number; y: number; px: number; py: number }>(undefined);
   const selectEntity = (id: string | undefined) => { setSelectedId(id); onSelectEntity?.(id); };
   const [tooltip, setTooltip] = useState<{ text: string; x: number; y: number; top: number; bottom: number; room: number }>();
   const tooltipElement = useRef<HTMLDivElement>(null);
@@ -471,6 +478,62 @@ export function FactoryScene({ proposals, tools, onLoadNode, onInvestigate, onDi
         {!planning ? null : <g><rect x="-17" y="-20" width={tableWidth - 2} height="8" fill="#9fae9e" /><path d={`M-14 -18h${Math.max(12, tableWidth - 18)}v3h-7v-3 M${tableWidth - 22} -17h4`} fill="none" stroke="#536e70" /></g>}
       </g>; }));
   const selected = selectedId === undefined ? undefined : machines.get(selectedId);
+  // Where the pane and the floor are, in client pixels, and how many pixels a scene unit is.
+  const frame = () => {
+    const map = mapElement.current, floor = floorElement.current;
+    if (typeof map?.getBoundingClientRect !== "function" || typeof floor?.getBoundingClientRect !== "function") return undefined;
+    const pane = map.getBoundingClientRect(), box = floor.getBoundingClientRect();
+    return { map, pane, box, scale: box.width / sceneWidth };
+  };
+  const measure = () => {
+    const at = frame(), view = viewElement.current;
+    if (!at || !view) return;
+    const x = Math.max(0, (at.pane.left - at.box.left) / at.scale), y = Math.max(0, (at.pane.top - at.box.top) / at.scale);
+    view.setAttribute?.("x", String(x));
+    view.setAttribute?.("y", String(y));
+    view.setAttribute?.("width", String(Math.min(sceneWidth - x, at.map.clientWidth / at.scale)));
+    view.setAttribute?.("height", String(Math.min(sceneHeight - y, at.map.clientHeight / at.scale)));
+  };
+  /** Zoom about a point of the pane (its centre by default), keeping that point of the floor under it. */
+  const zoomBy = (factor: number, px?: number, py?: number) => {
+    const at = frame();
+    if (!at) return;
+    const fit = Math.min(sceneWidth, Math.max(at.map.clientWidth, Math.min(sceneWidth, 864))) / sceneWidth;
+    const x = px ?? at.pane.width / 2, y = py ?? at.pane.height / 2;
+    anchor.current = { x: (at.pane.left + x - at.box.left) / at.scale, y: (at.pane.top + y - at.box.top) / at.scale, px: x, py: y };
+    const next = Math.min(MAX_ZOOM, at.scale * factor);
+    setZoom(next <= fit * 1.01 ? undefined : next);
+  };
+  /** Centre the pane on a point of the floor. */
+  const centreOn = (x: number, y: number) => {
+    const at = frame();
+    if (!at) return;
+    at.map.scrollLeft += at.box.left + x * at.scale - (at.pane.left + at.map.clientWidth / 2);
+    at.map.scrollTop += at.box.top + y * at.scale - (at.pane.top + at.map.clientHeight / 2);
+  };
+  useLayoutEffect(() => {
+    const at = frame(), point = anchor.current;
+    anchor.current = undefined;
+    if (at && point) {
+      at.map.scrollLeft += at.box.left + point.x * at.scale - (at.pane.left + point.px);
+      at.map.scrollTop += at.box.top + point.y * at.scale - (at.pane.top + point.py);
+    }
+    measure();
+  }, [zoom, sceneWidth, sceneHeight]);
+  useEffect(() => {
+    const map = mapElement.current;
+    if (!map || typeof window === "undefined") return;
+    // Pinch on a trackpad arrives as a ctrl-wheel; it must not zoom the page.
+    const wheel = (event: WheelEvent) => {
+      if (!event.ctrlKey && !event.metaKey) return;
+      event.preventDefault();
+      const pane = map.getBoundingClientRect();
+      zoomBy(Math.exp(-event.deltaY / 200), event.clientX - pane.left, event.clientY - pane.top);
+    };
+    map.addEventListener?.("wheel", wheel, { passive: false });
+    window.addEventListener?.("resize", measure);
+    return () => { map.removeEventListener?.("wheel", wheel); window.removeEventListener?.("resize", measure); };
+  }, [sceneWidth, sceneHeight]);
   const searchable = [...machines.values()];
 
   return (
@@ -482,14 +545,16 @@ export function FactoryScene({ proposals, tools, onLoadNode, onInvestigate, onDi
       {tools}
       {proposals?.selected && proposals.items.some((item) => item.id === proposals.selected) ? <p className="dfFactoryEntityTools__notice"><span className="dfFactoryEntityTools__selection">Viewing: {proposals.items.find((item) => item.id === proposals.selected)?.title}</span><button type="button" onClick={() => proposals.onSelect("")}>Clear selection</button></p> : null}
     </div>
-    <div ref={mapElement} className="dfFactoryFloor__map" onClick={inspect} onPointerOver={inspect} onFocus={inspect} onPointerLeave={retainFocusedTooltip} onBlur={() => setTooltip(undefined)} onScroll={retainFocusedTooltip} onKeyDown={(event) => { if (event.key === "Escape") setTooltip(undefined); }} role="region" aria-label="Scrollable factory floor" tabIndex={0}>
+    <div className="dfFactoryFloor__viewport">
+    <div ref={mapElement} className="dfFactoryFloor__map" onClick={inspect} onPointerOver={inspect} onFocus={inspect} onPointerLeave={retainFocusedTooltip} onBlur={() => setTooltip(undefined)} onScroll={() => { retainFocusedTooltip(); measure(); }} onKeyDown={(event) => { if (event.key === "Escape") setTooltip(undefined); }} role="region" aria-label="Scrollable factory floor" tabIndex={0}>
     <svg
+      ref={floorElement}
       viewBox={`0 0 ${sceneWidth} ${sceneHeight}`}
       role="group"
       aria-label="Dark Factory operational floor"
       data-graph-digest={graph.digest}
       className={animate ? "dfPlant dfPlant--moving" : "dfPlant"}
-      style={{ display: "block", width: "100%", minWidth: Math.min(sceneWidth, 864), maxWidth: sceneWidth, height: "auto", margin: "0 auto" }}
+      style={zoom === undefined ? { display: "block", width: "100%", minWidth: Math.min(sceneWidth, 864), maxWidth: sceneWidth, height: "auto", margin: "0 auto" } : { display: "block", width: Math.round(sceneWidth * zoom), height: "auto" }}
     >
       <desc>{`${graph.halls.length} units, ${graph.shared.length} shared stores, ${graph.parties.length} external parties, ${graph.quarantine.length} unexplained runtime paths, ${workers.length} workers`}</desc>
       <defs>
@@ -628,11 +693,54 @@ export function FactoryScene({ proposals, tools, onLoadNode, onInvestigate, onDi
     </svg>
     {tooltip === undefined ? null : <div ref={tooltipElement} className="dfFactoryTooltip" role="tooltip" style={{ left: tooltip.x, top: tooltip.y, maxHeight: tooltip.room }}>{tooltip.text}</div>}
     </div>
+    {layout.rooms.length === 0 ? null : <div className="dfPlantOverview">
+      <div className="dfPlantOverview__zoom" role="group" aria-label="Zoom">
+        <IconButton icon="minus" aria-label="Zoom out" disabled={zoom === undefined} onClick={() => zoomBy(1 / 1.5)} />
+        <IconButton icon="plus" aria-label="Zoom in" disabled={zoom !== undefined && zoom >= MAX_ZOOM} onClick={() => zoomBy(1.5)} />
+        <IconButton icon="fit" aria-label="Fit floor" disabled={zoom === undefined} onClick={() => setZoom(undefined)} />
+      </div>
+      <PlantMap layout={layout} width={sceneWidth} height={sceneHeight} machines={machines} graph={graph} placements={placements} workers={workers} viewElement={viewElement} onCentre={centreOn} />
+    </div>}
+    </div>
     {selected === undefined ? null : <MachineInspector key={selected.id} machine={selected} hall={hallOf.get(selected.id)} onLoadNode={onLoadNode} onInvestigate={onInvestigate}
       proposals={proposals === undefined ? [] : proposalsForEntity(proposals.items, selected.id)} onSelectProposal={proposals?.onSelect}
       onFocus={() => focusEntity(selected.id)} onDiscuss={onDiscussSource === undefined ? undefined : () => onDiscussSource(selected.id)} onClose={() => selectEntity(undefined)} />}
     </>
   );
+}
+
+const MAX_ZOOM = 4;
+
+/**
+ * The plant at a glance, always in view: halls painted by coverage, gates on
+ * the fence, where workers are and the window the floor shows. Pointing at it
+ * moves the floor there.
+ */
+function PlantMap({ layout, width, height, machines, graph, placements, workers, viewElement, onCentre }: {
+  layout: SceneLayout; width: number; height: number; machines: ReadonlyMap<string, SceneMachine>; graph: SceneGraph;
+  placements: ReturnType<typeof placeWorkers>; workers: readonly SceneWorker[]; viewElement: RefObject<SVGRectElement | null>; onCentre: (x: number, y: number) => void;
+}) {
+  const go = (event: PointerEvent<SVGSVGElement>) => {
+    if (event.type === "pointermove" && event.buttons !== 1) return;
+    const box = event.currentTarget.getBoundingClientRect();
+    onCentre((event.clientX - box.left) / box.width * width, (event.clientY - box.top) / box.height * height);
+  };
+  const needs = new Set(workers.filter((worker) => worker.activity === "needs-you").map((worker) => worker.id));
+  const halls = graph.halls.length;
+  // At most 12rem wide or 10rem tall, whichever the plant's shape reaches first.
+  return <svg className="dfPlantMap" viewBox={`0 0 ${width} ${height}`} style={{ width: `min(12rem, ${(10 * width / height).toFixed(2)}rem)` }} role="img" aria-label={`Plant overview: ${halls} ${halls === 1 ? "unit" : "units"}, ${graph.parties.length} external, ${workers.length} workers`}
+    onPointerDown={go} onPointerMove={go}>
+    <rect width={width} height={height} className="dfPlantMap__ground" />
+    {layout.rooms.map((room) => {
+      const reading = machines.get(room.id)?.reading;
+      return <rect key={room.id} data-overview-room={room.id} x={room.x} y={room.y} width={room.width} height={room.height}
+        className={`dfPlantMap__room dfPlantMap__room--${room.kind} s-${reading?.observation ?? "unobserved"} op-${reading?.state ?? "unknown"}`} />;
+    })}
+    <path d={`M${layout.fence} 24V${layout.height}`} className="dfPlantMap__fence" />
+    {layout.gates.map((gate) => <rect key={gate.machine.id} x={gate.x} y={gate.y} width={gate.width} height={gate.height} className={`dfPlantMap__gate s-${(machines.get(gate.machine.id) ?? gate.machine).reading.observation}`} />)}
+    {placements.map((placement) => <circle key={placement.id} cx={placement.x} cy={placement.y} r="10" className={needs.has(placement.id) ? "dfPlantMap__worker dfPlantMap__worker--needs" : "dfPlantMap__worker"} />)}
+    <rect ref={viewElement} data-overview-view="" width={width} height={height} className="dfPlantMap__view" />
+  </svg>;
 }
 
 function sceneAction(select: (() => void) | undefined) {

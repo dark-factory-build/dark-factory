@@ -3,7 +3,7 @@ import type { ButtonHTMLAttributes, ReactNode } from "react";
 const PATHS = {
   gear: "M12.5 8a4.5 4.5 0 1 1-9 0 4.5 4.5 0 0 1 9 0ZM8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.4 3.4l1.4 1.4M11.2 11.2l1.4 1.4M3.4 12.6l1.4-1.4M11.2 4.8l1.4-1.4",
   pause: "M5.5 3v10M10.5 3v10", play: "M5 3l8 5-8 5Z",
-  plus: "M8 3v10M3 8h10", refresh: "M13 8a5 5 0 1 1-1.5-3.5M13 2.5v2.5h-2.5",
+  plus: "M8 3v10M3 8h10", minus: "M3 8h10", fit: "M2.5 6V2.5H6M10 2.5h3.5V6M13.5 10v3.5H10M6 13.5H2.5V10", refresh: "M13 8a5 5 0 1 1-1.5-3.5M13 2.5v2.5h-2.5",
   close: "M3.5 3.5l9 9M12.5 3.5l-9 9", "chevron-left": "M10 3 5 8l5 5",
   inbox: "M2 9l1.5-5.5h9L14 9v4H2ZM2 9h3.5l1 1.5h3L11 9h3",
   list: "M5.5 4h8M5.5 8h8M5.5 12h8M2.5 4h.01M2.5 8h.01M2.5 12h.01",

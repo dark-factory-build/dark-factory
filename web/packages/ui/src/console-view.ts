@@ -92,8 +92,8 @@ export function orderTasksForHome(state: StateView): readonly TaskItem[] {
   });
 }
 
-/** Level of detail: plant (halls only), hall (stations, routes folded) or station (every route). */
-export type FloorDetail = "coarse" | "auto" | "fine";
+/** Routes folded past six per hall, or every route. The plant overview is the floor's minimap. */
+export type FloorDetail = "auto" | "fine";
 const MAX_DOCKS = 6;
 
 export type FloorScene = Readonly<{
@@ -173,14 +173,14 @@ export function projectGraph(graphs: ReadonlyMap<string, OperationalGraphView> |
       const own = graph.nodes.filter((node) => node.unit === unit.id && staticNode(node)).sort((left, right) => compareText(left.label, right.label) || compareText(left.id, right.id));
       const machines: SceneMachine[] = [];
       const docks = own.filter((node) => node.kind === "ingress" && node.trigger !== "timer");
-      const foldDocks = detail === "coarse" || detail === "auto" && docks.length > MAX_DOCKS;
-      if (foldDocks && docks.length > 0 && detail !== "coarse") {
+      const foldDocks = detail === "auto" && docks.length > MAX_DOCKS;
+      if (foldDocks) {
         const id = `${unit.id}:docks`;
         machines.push({ id, kind: "ingress", label: `${docks.length} routes`, represented: docks.map((node) => node.id), reading: combine(docks.map(reading)) });
         for (const node of docks) where.set(node.id, { hall: unit.id, machine: id });
       }
       for (const node of own) {
-        if (detail === "coarse" || foldDocks && docks.includes(node)) { where.set(node.id, where.get(node.id) ?? { hall: unit.id, machine: unit.id }); continue; }
+        if (foldDocks && docks.includes(node)) continue;
         machines.push({ id: node.id, kind: node.kind, label: node.label, ...(node.trigger === undefined ? {} : { trigger: node.trigger }), reading: reading(node) });
         where.set(node.id, { hall: unit.id, machine: node.id });
       }
