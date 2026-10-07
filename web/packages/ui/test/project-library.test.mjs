@@ -235,18 +235,17 @@ const visibleWords = (node) => typeof node === "string" ? node : node.type === "
 test("reader keeps named actions visible and opens one workspace at a time", async (t) => {
   const source = "project:opaque-one", other = "project:opaque-two", task = "aa".repeat(16), opened = [];
   const doc = { ...metadata, revision: 3, title: "Deployment guide", description: "Deployment guide", author: "run:opaque-author", repository_id: "bb".repeat(16), commit: "d".repeat(40), path: ".dark-factory/content/doc.md", source_references: JSON.stringify({ status: "current", source_revision: "c".repeat(40), branch: "private-branch", environment: "test-environment", entities: [source, other], record_type: "task", record_id: task, task_id: task }) };
-  const renderer = await mount(t, { open: true, onSource: (ref) => opened.push(ref), onRecord: (...args) => opened.push(args), call: async (operation) => operation === "search" ? { items: [doc] } : operation === "read" ? doc : { body: "Useful deployment steps.", complete: true } });
+  const renderer = await mount(t, { open: true, onSource: (ref) => opened.push(ref), onRecord: (...args) => opened.push(args), onUseInTask: (chip) => opened.push(chip), call: async (operation) => operation === "search" ? { items: [doc] } : operation === "read" ? doc : { body: "Useful deployment steps.", complete: true } });
   await click(renderer, "Deployment guide");
   const reader = renderer.root.findByProps({ "aria-label": "Selected library revision" });
   assert.match(visibleWords(reader), /Deployment guide.*Revision.*current.*Useful deployment steps/);
-  assert.match(visibleWords(reader), /Edit document.*Use in a task.*Sources & history/);
-  assert.doesNotMatch(visibleWords(reader), /opaque|Repository|Attach revision|unspecified|Manage/);
+  assert.match(visibleWords(reader), /Edit document.*Use in a new task.*Sources & history/);
+  assert.doesNotMatch(visibleWords(reader), /opaque|Repository|Attach|unspecified|Manage/);
   assert.equal(renderer.root.findAllByType("details").length, 0);
   assert.equal(renderer.root.findByProps({ type: "search" }).parent.type, "label", "search is visible at entry");
-  await click(renderer, "Use in a task");
-  assert.ok(renderer.root.findByProps({ "aria-label": "Attach to a task" }));
-  assert.equal(reader.findAllByType("pre").length, 0, "form replaces the body rather than stacking below it");
-  await click(renderer, "Cancel");
+  await click(renderer, "Use in a new task");
+  assert.deepEqual(opened.splice(0), [{ content_id: doc.id, revision: 3n, title: "Deployment guide", project_id: [...fixtureState.projects.keys()][0] }], "hands the exact revision to the New task form");
+  assert.equal(renderer.root.findAllByType("form").filter((form) => form.props["aria-label"] !== undefined && /task/i.test(form.props["aria-label"])).length, 0, "the Library keeps no task form");
   assert.deepEqual(reader.findByType("pre").children, ["Useful deployment steps."]);
   await click(renderer, "Sources & history");
   assert.equal(reader.findAllByType("pre").length, 0);

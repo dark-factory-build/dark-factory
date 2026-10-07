@@ -1,7 +1,8 @@
 import { ProjectOutcomes } from "./project-outcomes.js";
 import { DirectQuestions, authorName } from "./project-board.js";
+import type { TaskContentChip } from "./console-sidebar.js";
 import { useEffect, useRef, useState } from "react";
-import type { AgentItem, ProjectContentInput, ProjectContentOperation, ProjectContentOutput, StateView } from "@dark-factory/client";
+import type { ProjectContentInput, ProjectContentOperation, ProjectContentOutput, StateView } from "@dark-factory/client";
 
 export type ProjectContentCall = (operation: ProjectContentOperation, input: ProjectContentInput) => Promise<ProjectContentOutput>;
 type RecordValue = Readonly<Record<string, unknown>>;
@@ -24,12 +25,12 @@ const documentState = (item: RecordValue, metadata = knowledgeMetadata(item.sour
 };
 
 type LibraryProps = {
-  state?: StateView; call?: ProjectContentCall; draft?: (agent: AgentItem, instruction: string) => void;
+  state?: StateView; call?: ProjectContentCall; onUseInTask?: (content: TaskContentChip) => void;
   board?: boolean; entity?: string; repository?: string; initialID?: string; initialRevision?: number; onSource?: (entity: string) => void; onRecord?: (kind: string, id: string, project: string) => void | Promise<void>;
 };
 
 /** An intentional entry loads metadata; an unused Settings panel stays lazy. */
-export function ProjectLibrary({ state, call, draft, board = false, entity = "", repository = "", initialID = "", initialRevision, onSource, onRecord, open = false, initialProjectId = "" }: LibraryProps & { open?: boolean; initialProjectId?: string }) {
+export function ProjectLibrary({ state, call, onUseInTask, board = false, entity = "", repository = "", initialID = "", initialRevision, onSource, onRecord, open = false, initialProjectId = "" }: LibraryProps & { open?: boolean; initialProjectId?: string }) {
   const [expanded, setExpanded] = useState(false);
   const [view, setView] = useState("documents");
   const [project, setProject] = useState(initialProjectId);
@@ -40,14 +41,14 @@ export function ProjectLibrary({ state, call, draft, board = false, entity = "",
     {projects.length < 2 ? null : <label>Project <select value={projectID} onChange={(event) => setProject(event.target.value)}>{projects.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>}
     {board ? <p className="dfProjectLibrary__purpose">Ask questions, share findings and follow replies with agents and operators. Threads are retained for anyone to read; reusable guidance belongs in the Library.</p>
       : <nav className="dfProjectLibrary__actions dfProjectLibrary__views" aria-label="Library views">{[["documents", "Documents"], ["outcomes", "Outcomes"]].map(([value, label]) => <button key={value} type="button" aria-pressed={view === value} onClick={() => setView(value!)}>{label}</button>)}</nav>}
-    {view === "outcomes" && !board ? <ProjectOutcomes key={projectID} project={projectID} call={call} /> : <LibraryDocuments key={`${projectID}:${scoped ? `${entity}:${repository}:${initialID}:${initialRevision}` : ""}`} projectID={projectID} state={state} call={call} draft={draft} board={board} entity={scoped ? entity : ""} repository={scoped ? repository : ""} initialID={scoped ? initialID : ""} initialRevision={scoped ? initialRevision : undefined} onSource={onSource} onRecord={onRecord} />}
+    {view === "outcomes" && !board ? <ProjectOutcomes key={projectID} project={projectID} call={call} /> : <LibraryDocuments key={`${projectID}:${scoped ? `${entity}:${repository}:${initialID}:${initialRevision}` : ""}`} projectID={projectID} state={state} call={call} onUseInTask={onUseInTask} board={board} entity={scoped ? entity : ""} repository={scoped ? repository : ""} initialID={scoped ? initialID : ""} initialRevision={scoped ? initialRevision : undefined} onSource={onSource} onRecord={onRecord} />}
     {board ? <DirectQuestions state={state} projectID={projectID} onOpen={onRecord === undefined ? undefined : (id) => void Promise.resolve(onRecord("peer_question", id, projectID)).catch(() => undefined)} /> : null}
   </>;
   return open || board || initialID ? <section className="dfProjectLibrary" aria-label={board ? "Project board" : "Project library"}>{contents}</section>
     : <details className="dfConsoleSidebar__panel dfProjectLibrary" onToggle={(event) => setExpanded(event.currentTarget.open)}><summary>Project library</summary>{expanded ? contents : null}</details>;
 }
 
-function LibraryDocuments({ state, call, draft, projectID, board = false, entity = "", repository = "", initialID = "", initialRevision, onSource, onRecord }: LibraryProps & { projectID: string }) {
+function LibraryDocuments({ state, call, onUseInTask, projectID, board = false, entity = "", repository = "", initialID = "", initialRevision, onSource, onRecord }: LibraryProps & { projectID: string }) {
   const [items, setItems] = useState<RecordValue[]>([]), [next, setNext] = useState(0);
   const [selected, setSelected] = useState<RecordValue>();
   const [loaded, setLoaded] = useState(false);
@@ -189,7 +190,7 @@ function LibraryDocuments({ state, call, draft, projectID, board = false, entity
         {complete ? null : <button type="button" onClick={() => void run(() => loadBody())}>{bodyNext === 0 ? "Retry document text" : "Read more"}</button>}
         <div className="dfProjectLibrary__actions" aria-label="Document actions">
           <button type="button" disabled={!editable} onClick={() => { setNewKind(""); setEditing(true); }}>{discussion ? "Edit post" : "Edit document"}</button>
-          <button type="button" onClick={() => setPanel("attach")}>Use in a task</button>
+          <button type="button" disabled={!onUseInTask} onClick={() => onUseInTask?.({ content_id: text(selected.id), revision: BigInt(Number(selected.revision)), title: text(selected.title), project_id: projectID })}>Use in a new task</button>
           <button type="button" onClick={() => { setPanel("sources"); void run(() => loadHistory(selected)); }}>Sources &amp; history</button>
         </div>
         {!discussion ? null : <section aria-label="Replies">
@@ -210,11 +211,6 @@ function LibraryDocuments({ state, call, draft, projectID, board = false, entity
           <button type="button" onClick={() => begin("lesson", { ...metadata, resolved: false, pinned: false, thread_id: selected.id, evidence: [...strings(metadata.evidence), `content:${selected.id}@${selected.revision}`], status: "tentative" })}>Save conclusion</button>
         </section>}
 
-        </>}
-        {panel !== "attach" ? null : <>
-        <h4>Use in a task</h4><form aria-label="Attach to a task" onSubmit={(event) => { event.preventDefault(); const data = new FormData(event.currentTarget); void run(async () => { await request("attach", { task_id: data.get("task"), content_id: selected.id, content_revision: selected.revision }); setPanel("read"); setNotice("Attached to the task."); }); }}>
-          <label>Attach to queued task <select name="task" autoFocus required defaultValue=""><option value="" disabled>Select task</option>{[...(state?.tasks.values() ?? [])].filter((task) => task.project_id === projectID && task.status === "queued").map((task) => <option key={task.id} value={task.id}>{task.title}</option>)}</select></label><button>Attach revision</button>
-        </form>
         </>}
         {panel !== "sources" ? null : <>
         <div className="dfProjectLibrary__actions"><button type="button" disabled={!editable} onClick={() => { setNewKind(""); setEditing(true); }}>Edit sources</button><button type="button" onClick={() => { setPanel("accesses"); void run(() => loadRelated("accesses")); }}>Task access</button></div>
@@ -240,7 +236,6 @@ function LibraryDocuments({ state, call, draft, projectID, board = false, entity
         {accesses.map((item, index) => <p key={index}>Revision {String(item.content_revision ?? item.revision)} · {text(item.kind) || text(item.access_kind)} · Task {text(item.task_id)} · Run {text(item.run_id)} · Bytes {String(item.offset ?? 0)}–{Number(item.offset ?? 0) + Number(item.byte_length ?? 0)} · {String(item.created_at_ms ?? item.at_ms ?? "")}</p>)}
         {accessNext === 0 ? null : <button type="button" onClick={() => void run(() => loadRelated("accesses", accessNext))}>More task access</button>}
         {!pending && !error && accesses.length === 0 ? <p>No task access recorded.</p> : null}</>}
-        {["attach", "draft"].includes(panel) ? <button type="button" onClick={() => setPanel("read")}>Cancel</button> : null}
         </div>
       </section>}
       {!editing ? null : <form aria-label="Knowledge editor" key={newKind ? newID.current : `${selected?.id}:${selected?.revision}`} onSubmit={(event) => {

@@ -311,6 +311,18 @@ func (backend *browserBackend) EnqueueTask(ctx context.Context, rawClient [brows
 			return browserprotocol.TaskEnqueueResult{}, browser.ErrStale
 		}
 	}
+	content := make([]kernel.TaskContentReference, len(request.Content))
+	for i, item := range request.Content {
+		id, err := browserContentIDValue(item.ContentID)
+		if err != nil {
+			return browserprotocol.TaskEnqueueResult{}, browser.ErrStale
+		}
+		revision, err := browserContentRevision(uint64(item.Revision))
+		if err != nil {
+			return browserprotocol.TaskEnqueueResult{}, browser.ErrStale
+		}
+		content[i] = kernel.TaskContentReference{ContentID: id, ContentRevision: revision}
+	}
 	at, err := backend.timestamp()
 	if err != nil {
 		return browserprotocol.TaskEnqueueResult{}, mapBrowserError(err)
@@ -337,7 +349,7 @@ func (backend *browserBackend) EnqueueTask(ctx context.Context, rawClient [brows
 	} else if err := backend.prepareAgentInstruction(ctx, agentID, instruction); err != nil {
 		return browserprotocol.TaskEnqueueResult{}, err
 	}
-	result, err := backend.store.EnqueueTaskForBrowserAgentRepositoryMode(ctx, clientID, taskID, incarnationID, agentID, expectedAgentRevision, repositoryID, request.Instruction, mode, at, attachments...)
+	result, err := backend.store.EnqueueTaskForBrowserAgentRepositoryMode(ctx, clientID, taskID, incarnationID, agentID, expectedAgentRevision, repositoryID, request.Instruction, mode, at, content, attachments...)
 	if err != nil {
 		return browserprotocol.TaskEnqueueResult{}, mapBrowserError(err)
 	}
