@@ -34,7 +34,12 @@ const publicTaskIDs = `WITH public_task_ids AS (
 // chooses that agent's candidate, then compares candidates across agents by
 // taskQueueOrder; promoting it globally would present a false next-start order.
 const taskReplacementOrder = `EXISTS (SELECT 1 FROM task_interventions WHERE state = 'delivered' AND successor_task_id = tasks.id) DESC, `
-const publicTaskColumns = `id, project_id, assigned_agent_id, title, status, blocked_reason, priority, revision, updated_at_ms`
+
+// ponytail: mission_task_bindings has no task_id index, so the mission
+// subquery scans its primary key per row; index (task_id) if history pages slow.
+const publicTaskColumns = `id, project_id, assigned_agent_id, title, status, blocked_reason, priority, revision, updated_at_ms,
+ (SELECT a.issue_number FROM intake_task_bindings b JOIN intake_acceptances a ON a.id = b.acceptance_id WHERE b.task_id = tasks.id),
+ (SELECT lower(hex(mission_id)) FROM mission_task_bindings WHERE task_id = tasks.id ORDER BY created_at_ms, mission_id LIMIT 1)`
 
 // PublicBlockedReasonExcerptBytes bounds the block-reason excerpt served on a
 // blocked task's public row; the operator sees why at a glance, the full text
@@ -255,7 +260,9 @@ func scanPublicTasks(rows *sql.Rows) ([]TaskSummary, error) {
 		var title, rawStatus string
 		var rawBlockedReason sql.NullString
 		var priority, rawRevision, rawUpdatedAt int64
-		if err := rows.Scan(&rawID, &rawProjectID, &rawAgentID, &title, &rawStatus, &rawBlockedReason, &priority, &rawRevision, &rawUpdatedAt); err != nil {
+		var issue sql.NullInt64
+		var mission sql.NullString
+		if err := rows.Scan(&rawID, &rawProjectID, &rawAgentID, &title, &rawStatus, &rawBlockedReason, &priority, &rawRevision, &rawUpdatedAt, &issue, &mission); err != nil {
 			return nil, fmt.Errorf("scan public task: %w", err)
 		}
 		id, idErr := TaskIDFromBytes(rawID)
@@ -269,7 +276,7 @@ func scanPublicTasks(rows *sql.Rows) ([]TaskSummary, error) {
 			return nil, fmt.Errorf("%w: invalid public task", ErrCorruptState)
 		}
 		blockedReason, _ := overseerExcerpt(rawBlockedReason.String, PublicBlockedReasonExcerptBytes)
-		result = append(result, TaskSummary{ID: id, ProjectID: projectID, AssignedAgentID: agentID, Title: title, Status: status.String(), BlockedReason: blockedReason, Priority: priority, Revision: revision, UpdatedAt: updatedAt})
+		result = append(result, TaskSummary{ID: id, ProjectID: projectID, AssignedAgentID: agentID, Title: title, Status: status.String(), BlockedReason: blockedReason, Priority: priority, Revision: revision, UpdatedAt: updatedAt, IssueNumber: issue.Int64, MissionID: mission.String})
 	}
 	return result, rows.Err()
 }

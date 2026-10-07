@@ -472,3 +472,12 @@ test("Linear shares intake controls without a fabricated GitHub identity or key 
   assert.equal(decodeServerControl(JSON.stringify({...result,body:{...result.body,api_key:"private-test-key"}})).body.api_key,undefined);
   expectMalformed(()=>decodeServerControl(JSON.stringify({...result,body:{...result.body,sources:[{...source,github_repository_id:"42"}]}})));
 });
+
+test("project-scoped task lists decode origin fields and reject a foreign project's task", () => {
+  const project = "7a".repeat(16);
+  const task = { id: "01".repeat(16), project_id: project, assigned_agent_id: "03".repeat(16), title: "done", status: "cancelled", priority: 0, revision: 1n, updated_at_ms: 5n, issue_number: 7n, mission_id: "05".repeat(16) };
+  const list = (body) => encodeServerControl({ type: "TASK_LIST", id: "l", body: { head: 1n, total: 1n, has_more: false, ...body } });
+  assert.deepEqual(decodeServerControl(list({ project_id: project, tasks: [task] })).body.tasks[0], task);
+  expectMalformed(() => decodeServerControl(list({ project_id: project, tasks: [{ ...task, project_id: "7b".repeat(16) }] })));
+  expectMalformed(() => decodeServerControl(list({ project_id: project, agent_id: task.assigned_agent_id, tasks: [task] })));
+});

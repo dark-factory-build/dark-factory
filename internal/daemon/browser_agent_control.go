@@ -261,7 +261,13 @@ func (backend *browserBackend) TaskList(ctx context.Context, rawClient [browserp
 		return browserprotocol.TaskList{}, err
 	}
 	defer release()
-	agentID, err := decodeID(request.AgentID, kernel.AgentIDFromBytes)
+	var agentID kernel.AgentID
+	var projectID kernel.ProjectID
+	if request.AgentID != "" {
+		agentID, err = decodeID(request.AgentID, kernel.AgentIDFromBytes)
+	} else {
+		projectID, err = decodeID(request.ProjectID, kernel.ProjectIDFromBytes)
+	}
 	if err != nil {
 		return browserprotocol.TaskList{}, browser.ErrStale
 	}
@@ -282,11 +288,11 @@ func (backend *browserBackend) TaskList(ctx context.Context, rawClient [browserp
 	} else if request.BeforeUpdatedAt != nil {
 		return browserprotocol.TaskList{}, browser.ErrStale
 	}
-	page, err := backend.store.ReadTaskList(ctx, agentID, beforeAt, beforeID)
+	page, err := backend.store.ReadTaskList(ctx, agentID, projectID, beforeAt, beforeID)
 	if err != nil {
 		return browserprotocol.TaskList{}, mapBrowserError(err)
 	}
-	result := browserprotocol.TaskList{AgentID: request.AgentID, Head: browserprotocol.Decimal(page.Head.Int64()), Total: browserprotocol.Decimal(page.Total), Tasks: []browserprotocol.TaskItem{}, HasMore: browserprotocol.Bool(page.HasMore)}
+	result := browserprotocol.TaskList{AgentID: request.AgentID, ProjectID: request.ProjectID, Head: browserprotocol.Decimal(page.Head.Int64()), Total: browserprotocol.Decimal(page.Total), Tasks: []browserprotocol.TaskItem{}, HasMore: browserprotocol.Bool(page.HasMore)}
 	for _, task := range page.Tasks {
 		result.Tasks = append(result.Tasks, projectTask(task))
 	}

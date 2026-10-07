@@ -274,6 +274,12 @@ func TestBrowserTaskListRequiresPrivateCapabilityAndPagesCompletedWork(t *testin
 		} else if err != nil || result.AgentID != run.AgentID.String() || len(result.Tasks) != 0 || result.Total != 0 {
 			t.Fatalf("active task leaked to completed list = %+v %v", result, err)
 		}
+		if private {
+			byProject, err := fixture.backend.TaskList(context.Background(), rawBrowserClient(fixture.client.ID), browserprotocol.TaskListGet{ProjectID: run.ProjectID.String()})
+			if err != nil || byProject.ProjectID != run.ProjectID.String() || byProject.AgentID != "" || len(byProject.Tasks) != 0 {
+				t.Fatalf("project list = %+v %v", byProject, err)
+			}
+		}
 	}
 }
 

@@ -288,7 +288,7 @@ export class FactoryAppController {
   get snapshot(): FactoryAppSnapshot { return this.#snapshot(); }
 
   taskList(agentId: string, cursor?: { beforeUpdatedAtMs?: bigint; beforeTaskId?: string }): Promise<TaskListView> {
-    return this.#client?.session?.getTaskList(agentId, cursor) ?? Promise.reject(new SessionError("closed"));
+    return this.#client?.session?.getTaskList({ agent_id: agentId }, cursor) ?? Promise.reject(new SessionError("closed"));
   }
 
   start(): void {

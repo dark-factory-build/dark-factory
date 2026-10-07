@@ -58,7 +58,7 @@ export type SpriteAppearance = { automatic: boolean; skin: number; hair: number;
 export type AgentItem = { id: string; project_id: string; name: string; role: "orchestrator" | "worker"; provider: "claude_code" | "codex" | "shell"; appearance: SpriteAppearance; paused: boolean; archived?: boolean; model: string; reasoning_effort: string; effective_model: string; effective_reasoning_effort: string; model_source: string; revision: bigint; account_id: string; idle_policy: IdlePolicy; idle_after_seconds: number; idle_instruction: string; idle_run_budget: number; idle_runs_used: number };
 export type AccountItem = { id: string; provider: "claude_code" | "codex"; home: string; label: string; revision: bigint };
 /** An empty `assigned_agent_id` is queued shared work no worker has claimed yet; it is served only in `shared_tasks`. */
-export type TaskItem = { id: string; project_id: string; assigned_agent_id: string; title: string; status: "queued" | "running" | "blocked" | "succeeded" | "failed" | "cancelled"; blocked_reason?: string; priority: number; revision: bigint; updated_at_ms?: bigint };
+export type TaskItem = { id: string; project_id: string; assigned_agent_id: string; title: string; status: "queued" | "running" | "blocked" | "succeeded" | "failed" | "cancelled"; blocked_reason?: string; priority: number; revision: bigint; updated_at_ms?: bigint; issue_number?: bigint; mission_id?: string };
 export type HumanRequestItem = {
   id: string; project_id: string; agent_id: string; task_id: string;
   created_at: bigint; updated_at: bigint; revision: bigint; kind: "question";
@@ -106,8 +106,8 @@ export type TaskHistoryBody = { task_id: string; entries: TaskHistoryEntry[] };
 export type TaskDetailGetBody = { task_id: string; expected_revision: bigint; text_offset?: bigint; peer_offset?: bigint; expected_head?: bigint };
 export type TaskPeerQuestion = { id: string; source_task_id: string; target_task_id: string; question: string; answer?: string; recipient_delivery_state: string; answer_delivery_state: string; revision: bigint; created_at_ms: bigint; updated_at_ms: bigint };
 export type TaskDetailBody = { task_id: string; revision: bigint; head: bigint; instruction: string; feedback: string; outcome?: string; next_text_offset?: bigint; peer_questions: TaskPeerQuestion[]; next_peer_offset?: bigint };
-export type TaskListGetBody = { agent_id: string; before_updated_at_ms?: bigint; before_task_id?: string };
-export type TaskListBody = { agent_id: string; head: bigint; total: bigint; tasks: TaskItem[]; has_more: boolean };
+export type TaskListGetBody = { agent_id?: string; project_id?: string; before_updated_at_ms?: bigint; before_task_id?: string };
+export type TaskListBody = { agent_id?: string; project_id?: string; head: bigint; total: bigint; tasks: TaskItem[]; has_more: boolean };
 export type AgentUpdateBody = { agent_id: string; expected_revision: bigint; appearance?: SpriteAppearance; model?: string; reasoning_effort?: string; account_id?: string; paused?: boolean; archived?: boolean; idle_policy?: IdlePolicy; idle_after_seconds?: number; idle_instruction?: string; idle_run_budget?: number };
 export type AgentUpdateResultBody = { agent_id: string; revision: bigint };
 export type ProjectLimitsBody = { project_id: string; expected_revision: bigint; run_budget: bigint; max_run_seconds: number };
@@ -450,21 +450,21 @@ function validateBody(type: ControlType, body: unknown, wire: boolean): ControlB
     case "TASK_DETAIL_GET": { requireKeys(body, ["task_id", "expected_revision"], wire, ["text_offset", "peer_offset", "expected_head"]); const result: TaskDetailGetBody = { task_id: dynamicID(body.task_id), expected_revision: decimal(body.expected_revision, wire, true) }; if (present(body, "text_offset")) result.text_offset = decimal(body.text_offset, wire); if (present(body, "peer_offset")) result.peer_offset = decimal(body.peer_offset, wire); if (present(body, "expected_head")) result.expected_head = decimal(body.expected_head, wire, true); if ((result.peer_offset ?? 0n) !== 0n && result.expected_head === undefined) malformed(); return result; }
     case "TASK_DETAIL": requireKeys(body, ["task_id", "revision", "head", "instruction", "feedback", "peer_questions"], wire, ["outcome", "next_text_offset", "next_peer_offset"]); { if (!Array.isArray(body.peer_questions) || body.peer_questions.length > 1) malformed(); const result: TaskDetailBody = { task_id: dynamicID(body.task_id), revision: decimal(body.revision, wire, true), head: decimal(body.head, wire, true), instruction: boundedText(body.instruction, 0, MAX_TASK_INSTRUCTION_BYTES), feedback: boundedText(body.feedback, 0, MAX_TASK_INSTRUCTION_BYTES), peer_questions: body.peer_questions.map((item) => taskPeerQuestion(item, wire)) }; if (present(body, "outcome")) result.outcome = boundedText(body.outcome, 0, MAX_TASK_INSTRUCTION_BYTES); if (present(body, "next_text_offset")) result.next_text_offset = decimal(body.next_text_offset, wire, true); if (present(body, "next_peer_offset")) result.next_peer_offset = decimal(body.next_peer_offset, wire, true); return result; }
     case "TASK_LIST_GET": {
-      requireKeys(body, ["agent_id"], wire, ["before_updated_at_ms", "before_task_id"]);
-      const result: TaskListGetBody = { agent_id: dynamicID(body.agent_id) };
+      requireKeys(body, [], wire, ["agent_id", "project_id", "before_updated_at_ms", "before_task_id"]);
+      const result: TaskListGetBody = taskListScope(body);
       if (present(body, "before_updated_at_ms")) result.before_updated_at_ms = decimal(body.before_updated_at_ms, wire, true);
       if (present(body, "before_task_id")) result.before_task_id = dynamicID(body.before_task_id);
       if ((result.before_updated_at_ms === undefined) !== (result.before_task_id === undefined)) malformed();
       return result;
     }
     case "TASK_LIST": {
-      requireKeys(body, ["agent_id", "head", "total", "tasks", "has_more"], wire);
+      requireKeys(body, ["head", "total", "tasks", "has_more"], wire, ["agent_id", "project_id"]);
       if (!Array.isArray(body.tasks) || body.tasks.length > 10 || typeof body.has_more !== "boolean") malformed();
-      const agent_id = dynamicID(body.agent_id);
-      const tasks = body.tasks.map((item) => taskListItem(item, wire, agent_id));
+      const scope = taskListScope(body);
+      const tasks = body.tasks.map((item) => taskListItem(item, wire, scope));
       const total = decimal(body.total, wire);
       if (total < BigInt(tasks.length) || (body.has_more && tasks.length !== 10)) malformed();
-      return { agent_id, head: decimal(body.head, wire, true), total, tasks, has_more: body.has_more };
+      return { ...scope, head: decimal(body.head, wire, true), total, tasks, has_more: body.has_more };
     }
     case "AGENT_UPDATE": requireKeys(body, ["agent_id", "expected_revision"], wire, ["appearance", "model", "reasoning_effort", "account_id", "paused", "archived", "idle_policy", "idle_after_seconds", "idle_instruction", "idle_run_budget"]); { const result: AgentUpdateBody = { agent_id: dynamicID(body.agent_id), expected_revision: decimal(body.expected_revision, wire, true) }; if (present(body, "appearance")) result.appearance = spriteAppearance(body.appearance, wire); if (present(body, "model")) result.model = boundedText(body.model, 0, MAX_AGENT_MODEL_BYTES); if (present(body, "reasoning_effort")) result.reasoning_effort = boundedText(body.reasoning_effort, 0, MAX_AGENT_MODEL_BYTES); if (present(body, "account_id")) result.account_id = body.account_id === "" ? "" : dynamicID(body.account_id); if (present(body, "paused")) { if (typeof body.paused !== "boolean") malformed(); result.paused = body.paused; } if (present(body, "archived")) { if (typeof body.archived !== "boolean") malformed(); result.archived = body.archived; } if (present(body, "idle_policy")) result.idle_policy = idlePolicy(body.idle_policy); if (present(body, "idle_after_seconds")) result.idle_after_seconds = integer(body.idle_after_seconds, 0, MAX_IDLE_AFTER_SECONDS); if (present(body, "idle_instruction")) result.idle_instruction = boundedText(body.idle_instruction, 0, MAX_TASK_INSTRUCTION_BYTES); if (present(body, "idle_run_budget")) result.idle_run_budget = integer(body.idle_run_budget, 0, MAX_IDLE_RUN_BUDGET); return result; }
     case "AGENT_UPDATE_RESULT": requireKeys(body, ["agent_id", "revision"], wire); return { agent_id: dynamicID(body.agent_id), revision: decimal(body.revision, wire, true) };
@@ -849,21 +849,26 @@ function topologyNode(value: unknown, wire: boolean): TopologyNode {
   return { id: fixedHex(value.id, 32), parent_id: value.parent_id === "" ? "" : fixedHex(value.parent_id, 32), kind: value.kind as TopologyNode["kind"], path: boundedText(value.path, 1, MAX_TASK_TITLE_BYTES), label: boundedText(value.label, 1, MAX_AGENT_NAME_BYTES), language: boundedText(value.language, 0, MAX_AGENT_NAME_BYTES), size_bucket: value.size_bucket as TopologyNode["size_bucket"], ...(present(value, "inventory") ? { inventory: topologyInventory(value.inventory, wire) } : {}) };
 }
 function taskItem(value: unknown, wire: boolean): TaskItem {
-  if (!isObject(value)) malformed(); requireKeys(value, ["id", "project_id", "assigned_agent_id", "title", "status", "priority", "revision"], wire, ["updated_at_ms", "blocked_reason"]);
+  if (!isObject(value)) malformed(); requireKeys(value, ["id", "project_id", "assigned_agent_id", "title", "status", "priority", "revision"], wire, ["updated_at_ms", "blocked_reason", "issue_number", "mission_id"]);
   if (typeof value.status !== "string" || !["queued", "running", "blocked", "succeeded", "failed", "cancelled"].includes(value.status)) malformed();
   if (present(value, "blocked_reason") && value.status !== "blocked") malformed();
-  return { id: dynamicID(value.id), project_id: dynamicID(value.project_id), assigned_agent_id: dynamicID(value.assigned_agent_id), title: boundedText(value.title, 1, MAX_TASK_TITLE_BYTES), status: value.status as TaskItem["status"], priority: integer(value.priority, -MAX_TASK_PRIORITY, MAX_TASK_PRIORITY), revision: decimal(value.revision, wire, true), ...(present(value, "updated_at_ms") ? { updated_at_ms: decimal(value.updated_at_ms, wire, true) } : {}), ...(present(value, "blocked_reason") ? { blocked_reason: boundedText(value.blocked_reason, 0, MAX_TASK_BLOCKED_REASON_BYTES) } : {}) };
+  return { id: dynamicID(value.id), project_id: dynamicID(value.project_id), assigned_agent_id: dynamicID(value.assigned_agent_id), title: boundedText(value.title, 1, MAX_TASK_TITLE_BYTES), status: value.status as TaskItem["status"], priority: integer(value.priority, -MAX_TASK_PRIORITY, MAX_TASK_PRIORITY), revision: decimal(value.revision, wire, true), ...(present(value, "updated_at_ms") ? { updated_at_ms: decimal(value.updated_at_ms, wire, true) } : {}), ...(present(value, "blocked_reason") ? { blocked_reason: boundedText(value.blocked_reason, 0, MAX_TASK_BLOCKED_REASON_BYTES) } : {}), ...(present(value, "issue_number") ? { issue_number: decimal(value.issue_number, wire, true) } : {}), ...(present(value, "mission_id") ? { mission_id: dynamicID(value.mission_id) } : {}) };
 }
 /** Unclaimed queued work: decoded as a task item, with its empty agent kept. */
 function sharedTaskItem(value: unknown, wire: boolean): TaskItem {
   if (!isObject(value) || value.assigned_agent_id !== "" || value.status !== "queued") malformed();
   return { ...taskItem({ ...value, assigned_agent_id: "f".repeat(32) }, wire), assigned_agent_id: "" };
 }
-function taskListItem(value: unknown, wire: boolean, agentID: string): TaskItem {
+/** Exactly one of agent_id or project_id scopes a task list. */
+function taskListScope(body: Record<string, unknown>): { agent_id: string } | { project_id: string } {
+  if (present(body, "agent_id") === present(body, "project_id")) malformed();
+  return present(body, "agent_id") ? { agent_id: dynamicID(body.agent_id) } : { project_id: dynamicID(body.project_id) };
+}
+function taskListItem(value: unknown, wire: boolean, scope: { agent_id: string } | { project_id: string }): TaskItem {
   if (!isObject(value)) malformed();
-  requireKeys(value, ["id", "project_id", "assigned_agent_id", "title", "status", "priority", "revision", "updated_at_ms"], wire, ["blocked_reason"]);
+  requireKeys(value, ["id", "project_id", "assigned_agent_id", "title", "status", "priority", "revision", "updated_at_ms"], wire, ["blocked_reason", "issue_number", "mission_id"]);
   const task = taskItem(value, wire);
-  if (task.assigned_agent_id !== agentID || task.updated_at_ms === undefined || task.status === "queued" || task.status === "running") malformed();
+  if ("agent_id" in scope && task.assigned_agent_id !== scope.agent_id || "project_id" in scope && task.project_id !== scope.project_id || task.updated_at_ms === undefined || task.status === "queued" || task.status === "running") malformed();
   return task;
 }
 function agentControlAction(value: unknown): AgentControlAction {

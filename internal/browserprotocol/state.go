@@ -219,6 +219,8 @@ type TaskItem struct {
 	Priority        int64   `json:"priority"`
 	Revision        Decimal `json:"revision"`
 	UpdatedAtMillis Decimal `json:"updated_at_ms,omitempty"`
+	IssueNumber     Decimal `json:"issue_number,omitempty"`
+	MissionID       string  `json:"mission_id,omitempty"`
 }
 
 // HumanRequestItem is deliberately only the public card projection. Private
@@ -384,7 +386,7 @@ func validateSharedTaskItem(value TaskItem) error {
 }
 
 func validateTaskFields(value TaskItem) error {
-	if validateDynamicID(value.ID) != nil || validateDynamicID(value.ProjectID) != nil || validateBoundedText(value.Title, 1, MaxTaskTitleBytes) != nil || value.Priority < -MaxTaskPriority || value.Priority > MaxTaskPriority || value.Revision == 0 {
+	if validateDynamicID(value.ID) != nil || validateDynamicID(value.ProjectID) != nil || validateBoundedText(value.Title, 1, MaxTaskTitleBytes) != nil || value.Priority < -MaxTaskPriority || value.Priority > MaxTaskPriority || value.Revision == 0 || value.MissionID != "" && validateDynamicID(value.MissionID) != nil {
 		return fmt.Errorf("%w: task item", ErrMalformed)
 	}
 	if validateBoundedText(value.BlockedReason, 0, MaxBlockedReasonBytes) != nil || value.BlockedReason != "" && value.Status != "blocked" {

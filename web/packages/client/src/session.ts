@@ -171,6 +171,7 @@ export type TaskDetailView = Readonly<{ taskId: string; revision: bigint; head: 
 export type TopologyView = Readonly<{ projectId: string; digest: string; sourceRevision: string; sources?: TopologyBody["sources"]; inventoryOmitted?: number; nodes: readonly TopologyBody["nodes"][number][]; dependencies?: Readonly<{ source: "go-imports-package-manifests"; edges: readonly Readonly<{ from: string; to: string; weight: number }>[]; omitted: number }> }>;
 /** One agent's live run and the repository directories it has changed. */
 export type RunPathsView = Readonly<{ agentId: string; runId: string; paths: readonly string[] }>;
+/** `agentId` is the scope id: the agent, or the project for a project-scoped list. */
 export type TaskListView = Readonly<{ agentId: string; head: bigint; total: bigint; tasks: readonly TaskItem[]; hasMore: boolean }>;
 type InvitePending = { resolve: (value: RemoteInvite) => void; reject: (error: unknown) => void };
 type PushPending = { resolve: () => void; reject: (error: unknown) => void };
@@ -511,16 +512,17 @@ export class BrowserSession {
     return this.#accountRequest("PROJECT_CONTENT_RESULT", capability, "project-content", (id) => encodeClientControl({ type: "PROJECT_CONTENT", id, body: { operation, input } }), { operation });
   }
 
-  getTaskList(agentId: string, cursor: { beforeUpdatedAtMs?: bigint; beforeTaskId?: string } = {}): Promise<TaskListView> {
+  getTaskList(scope: { agent_id: string } | { project_id: string }, cursor: { beforeUpdatedAtMs?: bigint; beforeTaskId?: string } = {}): Promise<TaskListView> {
     try { this.#ensureLive(); } catch (error) { return Promise.reject(error); }
     if (!this.#authenticated || (this.#capabilities & CAPABILITIES.private_human_request_detail) === 0) return Promise.reject(new SessionError("unauthorized"));
-    if (!validDynamicID(agentId) || (cursor.beforeUpdatedAtMs === undefined) !== (cursor.beforeTaskId === undefined) || (cursor.beforeUpdatedAtMs !== undefined && (cursor.beforeUpdatedAtMs < 1n || cursor.beforeUpdatedAtMs > MAX_SQLITE_INTEGER)) || (cursor.beforeTaskId !== undefined && !validDynamicID(cursor.beforeTaskId))) return Promise.reject(new SessionError("invalid_request"));
+    const scopeId = "agent_id" in scope ? scope.agent_id : scope.project_id;
+    if (!validDynamicID(scopeId) || (cursor.beforeUpdatedAtMs === undefined) !== (cursor.beforeTaskId === undefined) || (cursor.beforeUpdatedAtMs !== undefined && (cursor.beforeUpdatedAtMs < 1n || cursor.beforeUpdatedAtMs > MAX_SQLITE_INTEGER)) || (cursor.beforeTaskId !== undefined && !validDynamicID(cursor.beforeTaskId))) return Promise.reject(new SessionError("invalid_request"));
     if (this.#consolePending.size >= MAX_ARRAY_ITEMS) return Promise.reject(new SessionError("rate_limited"));
     const id = this.#nextID("task-list");
-    const body = { agent_id: agentId, ...(cursor.beforeUpdatedAtMs === undefined ? {} : { before_updated_at_ms: cursor.beforeUpdatedAtMs, before_task_id: cursor.beforeTaskId! }) };
+    const body = { ...scope, ...(cursor.beforeUpdatedAtMs === undefined ? {} : { before_updated_at_ms: cursor.beforeUpdatedAtMs, before_task_id: cursor.beforeTaskId! }) };
     let payload: string;
     try { payload = encodeClientControl({ type: "TASK_LIST_GET", id, body }); } catch (error) { return Promise.reject(error); }
-    const result = new Promise<TaskListView>((resolve, reject) => this.#consolePending.set(id, { kind: "TASK_LIST", entityId: agentId, expectedRevision: 1n, resolve: resolve as (value: never) => void, reject }));
+    const result = new Promise<TaskListView>((resolve, reject) => this.#consolePending.set(id, { kind: "TASK_LIST", entityId: scopeId, expectedRevision: 1n, resolve: resolve as (value: never) => void, reject }));
     try { this.#send(payload); } catch { this.#fail(new SessionError("connection")); }
     return result;
   }
@@ -1283,7 +1285,7 @@ export class BrowserSession {
   #consoleResult(frame: Extract<ServerControlFrame, { type: "AGENT_UPDATE_RESULT" | "PROJECT_LIMITS_RESULT" | "TASK_UPDATE_RESULT" | "TOPOLOGY" | "RUN_PATHS" | "TASK_LIST" | "TASK_HISTORY" | "TASK_DETAIL" }>): void {
     const pending = this.#consolePending.get(frame.id);
     if (pending === undefined || pending.kind !== frame.type) throw new ProtocolError("malformed");
-    const identity = frame.type === "AGENT_UPDATE_RESULT" || frame.type === "RUN_PATHS" || frame.type === "TASK_LIST" ? frame.body.agent_id : (frame.type === "TASK_UPDATE_RESULT" || frame.type === "TASK_HISTORY" || frame.type === "TASK_DETAIL") ? frame.body.task_id : frame.body.project_id;
+    const identity = frame.type === "AGENT_UPDATE_RESULT" || frame.type === "RUN_PATHS" ? frame.body.agent_id : frame.type === "TASK_LIST" ? frame.body.agent_id ?? frame.body.project_id : (frame.type === "TASK_UPDATE_RESULT" || frame.type === "TASK_HISTORY" || frame.type === "TASK_DETAIL") ? frame.body.task_id : frame.body.project_id;
     if (identity !== pending.entityId || frame.type === "TASK_DETAIL" && frame.body.revision !== pending.expectedRevision) throw new ProtocolError("malformed");
     this.#consolePending.delete(frame.id);
     if (frame.type === "TASK_HISTORY") {
@@ -1302,7 +1304,7 @@ export class BrowserSession {
     if (frame.type === "PROJECT_LIMITS_RESULT") { pending.resolve(Object.freeze({ projectId: frame.body.project_id, revision: frame.body.revision }) as never); return; }
     if (frame.type === "TASK_UPDATE_RESULT") { pending.resolve(Object.freeze({ taskId: frame.body.task_id, revision: frame.body.revision }) as never); return; }
     if (frame.type === "RUN_PATHS") { pending.resolve(Object.freeze({ agentId: frame.body.agent_id, runId: frame.body.run_id, paths: Object.freeze([...frame.body.paths]) }) as never); return; }
-    if (frame.type === "TASK_LIST") { pending.resolve(Object.freeze({ agentId: frame.body.agent_id, head: frame.body.head, total: frame.body.total, tasks: Object.freeze(frame.body.tasks.map((task) => Object.freeze({ ...task }))), hasMore: frame.body.has_more }) as never); return; }
+    if (frame.type === "TASK_LIST") { pending.resolve(Object.freeze({ agentId: frame.body.agent_id ?? frame.body.project_id!, head: frame.body.head, total: frame.body.total, tasks: Object.freeze(frame.body.tasks.map((task) => Object.freeze({ ...task }))), hasMore: frame.body.has_more }) as never); return; }
     pending.resolve(Object.freeze({ projectId: frame.body.project_id, digest: frame.body.digest, sourceRevision: frame.body.source_revision, ...(frame.body.sources === undefined ? {} : {sources: Object.freeze(frame.body.sources.map((source) => Object.freeze({...source})))}), ...(frame.body.inventory_omitted === undefined ? {} : { inventoryOmitted: frame.body.inventory_omitted }), nodes: Object.freeze(frame.body.nodes.map((node) => Object.freeze({ ...node, ...(node.inventory === undefined ? {} : { inventory: Object.freeze({ ...node.inventory, direct: Object.freeze({ ...node.inventory.direct }), total: Object.freeze({ ...node.inventory.total }), samples: Object.freeze([...node.inventory.samples]) }) }) }))), ...(frame.body.dependencies === undefined ? {} : { dependencies: Object.freeze({ ...frame.body.dependencies, edges: Object.freeze(frame.body.dependencies.edges.map((edge) => Object.freeze({ ...edge }))) }) }) }) as never);
   }
 

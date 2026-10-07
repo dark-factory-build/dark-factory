@@ -3,6 +3,8 @@ package kernel
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
+	"errors"
 	"reflect"
 	"testing"
 )
@@ -38,7 +40,7 @@ func TestCompletedWorkDoesNotFillActiveSnapshotAndPagesIndependently(t *testing.
 	if err != nil || len(snapshot.Tasks) != 1 || snapshot.Tasks[0].ID != publicTaskID(t, count) {
 		t.Fatalf("active snapshot = %+v, %v", snapshot.Tasks, err)
 	}
-	first, err := store.ReadTaskList(ctx, agent.ID, UnixMillis{}, TaskID{})
+	first, err := store.ReadTaskList(ctx, agent.ID, ProjectID{}, UnixMillis{}, TaskID{})
 	if err != nil || first.Total != count || !first.HasMore || len(first.Tasks) != TaskListPageSize || first.Tasks[0].ID != publicTaskID(t, count) {
 		t.Fatalf("first page = %+v, %v", first, err)
 	}
@@ -51,11 +53,11 @@ func TestCompletedWorkDoesNotFillActiveSnapshotAndPagesIndependently(t *testing.
 		t.Fatal(err)
 	}
 	last := first.Tasks[len(first.Tasks)-1]
-	second, err := store.ReadTaskList(ctx, agent.ID, last.UpdatedAt, last.ID)
+	second, err := store.ReadTaskList(ctx, agent.ID, ProjectID{}, last.UpdatedAt, last.ID)
 	if err != nil || second.Total != count+1 || len(second.Tasks) != TaskListPageSize || second.Tasks[0].ID != publicTaskID(t, count-TaskListPageSize) {
 		t.Fatalf("second page = %+v, %v", second, err)
 	}
-	tail, err := store.ReadTaskList(ctx, agent.ID, mustTime(t, 10), publicTaskID(t, 10))
+	tail, err := store.ReadTaskList(ctx, agent.ID, ProjectID{}, mustTime(t, 10), publicTaskID(t, 10))
 	if err != nil || tail.HasMore || len(tail.Tasks) != 9 || tail.Tasks[8].ID != publicTaskID(t, 1) {
 		t.Fatalf("oldest history = %+v, %v", tail, err)
 	}
@@ -133,5 +135,64 @@ func TestPublicQueueKeepsReplacementAheadOnlyWithinItsAgent(t *testing.T) {
 	admitted, err := store.AdmitNext(ctx, admissionKeys(t, 249, nil), mustTime(t, 51))
 	if err != nil || !admitted.Admitted() || admitted.Run.TaskID != global.ID {
 		t.Fatalf("global candidate remains first = %+v, err=%v", admitted, err)
+	}
+}
+
+func TestProjectTaskListPagesEveryAgentInOneProject(t *testing.T) {
+	store, _, project, first := newAdmissionStore(t, RoleOrchestrator, 2)
+	defer store.Close()
+	ctx := context.Background()
+	second, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 3), ProjectID: project.ID, Name: "b", Role: RoleWorker, Provider: ProviderCodex, ToolBudgetLimit: 5}, mustTime(t, 3))
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := store.CreateProject(ctx, NewProject{ID: projectID(t, 9), Name: "q", Root: "/other"}, mustTime(t, 3))
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherAgent, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 8), ProjectID: other.ID, Name: "c", Role: RoleWorker, Provider: ProviderCodex, ToolBudgetLimit: 5}, mustTime(t, 3))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const count = TaskListPageSize + 2
+	insert := func(i int, proj ProjectID, agent AgentID, status string) {
+		id := publicTaskID(t, i)
+		if _, err := store.writer.ExecContext(ctx, `INSERT INTO tasks(id,project_id,assigned_agent_id,incarnation_id,work_revision,title,body,status,priority,completed_at_ms,revision,created_at_ms,updated_at_ms) VALUES(?,?,?,?,1,'t','',?,0,CASE WHEN ? = 'cancelled' THEN ? END,1,0,?)`, id.Bytes(), proj.Bytes(), agent.Bytes(), id.Bytes(), status, status, i, i); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 1; i <= count; i++ {
+		agent := first.ID
+		if i%2 == 0 {
+			agent = second.ID
+		}
+		insert(i, project.ID, agent, "cancelled")
+	}
+	insert(count+1, project.ID, first.ID, "queued")
+	insert(count+2, project.ID, second.ID, "running")
+	insert(count+3, other.ID, otherAgent.ID, "cancelled")
+	if _, err := store.writer.ExecContext(ctx, `INSERT INTO mission_task_bindings(mission_id,task_id,project_id,created_at_ms) VALUES(?,?,?,0)`, publicTaskID(t, 500).Bytes(), publicTaskID(t, count).Bytes(), project.ID.Bytes()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.writer.Exec(fixtureTaskRepositorySQL); err != nil {
+		t.Fatal(err)
+	}
+	page, err := store.ReadTaskList(ctx, AgentID{}, project.ID, UnixMillis{}, TaskID{})
+	if err != nil || page.Total != count || !page.HasMore || len(page.Tasks) != TaskListPageSize || page.Tasks[0].ID != publicTaskID(t, count) || page.Tasks[0].MissionID != hex.EncodeToString(publicTaskID(t, 500).Bytes()) || page.Tasks[1].MissionID != "" {
+		t.Fatalf("first page = %+v, %v", page, err)
+	}
+	last := page.Tasks[len(page.Tasks)-1]
+	rest, err := store.ReadTaskList(ctx, AgentID{}, project.ID, last.UpdatedAt, last.ID)
+	if err != nil || rest.HasMore || len(rest.Tasks) != 2 || rest.Tasks[1].ID != publicTaskID(t, 1) {
+		t.Fatalf("second page = %+v, %v", rest, err)
+	}
+	if _, err := store.ReadTaskList(ctx, first.ID, project.ID, UnixMillis{}, TaskID{}); !errors.Is(err, ErrInvalidValue) {
+		t.Fatalf("both scopes = %v", err)
+	}
+	if _, err := store.ReadTaskList(ctx, AgentID{}, ProjectID{}, UnixMillis{}, TaskID{}); !errors.Is(err, ErrInvalidValue) {
+		t.Fatalf("no scope = %v", err)
+	}
+	if _, err := store.ReadTaskList(ctx, AgentID{}, projectID(t, 77), UnixMillis{}, TaskID{}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("unknown project = %v", err)
 	}
 }
