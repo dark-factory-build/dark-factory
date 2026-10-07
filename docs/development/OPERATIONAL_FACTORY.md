@@ -299,14 +299,15 @@ Pull adapters are configured in `observe.json` in the factory home:
 
 ```json
 {"sources": [{"adapter": "cloudflare", "environment": "production",
-  "account": "<account id>", "token_file": "/path/to/read-only-token",
+  "account": "<account id>", "token": "<read-only API token>",
   "services": {"dark-factory-relay": "dark-factory-relay"}}]}
 ```
 
 - `services` maps a platform name to the unit's `service.name`, and doubles
   as the alias table for correlation.
 - The token is an operator-created read-only API token (Account Analytics
-  Read). It is read from its file at each poll and never served.
+  Read). It lives in `observe.json`, inside the owner-only factory home like
+  `operator.token`, and is never served.
 - factoryd polls each source at most every five minutes, in the background,
   for the last five minutes.
 - With no configuration, the remote halls truthfully read `unobserved`.
