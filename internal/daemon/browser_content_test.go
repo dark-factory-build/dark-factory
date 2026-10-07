@@ -134,7 +134,7 @@ func TestBrowserLibraryRealWireAndCapabilityBoundaries(t *testing.T) {
 				t.Fatalf("read = %+v", frame)
 			}
 			var meta api.Content
-			if err := json.Unmarshal(frame.Body.(browserprotocol.ProjectContentResult).Output, &meta); err != nil || meta.ID != content.String() || meta.Revision != 1 || meta.LatestRevision != 2 || meta.Body != "" {
+			if err := json.Unmarshal(frame.Body.(browserprotocol.ProjectContentResult).Output, &meta); err != nil || meta.ID != content.String() || meta.Revision != 1 || meta.CreatedAtMs != 11 || meta.LatestRevision != 2 || meta.Body != "" {
 				t.Fatalf("metadata = %+v %v", meta, err)
 			}
 			frame = send("body", map[string]any{"project_id": project.String(), "id": content.String(), "revision": 1, "limit": 8192})

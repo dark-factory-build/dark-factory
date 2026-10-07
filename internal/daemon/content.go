@@ -12,7 +12,7 @@ import (
 
 func revision(n uint64) (kernel.Revision, error) { return kernel.NewRevision(int64(n)) }
 func contentDTO(v kernel.ContentRevision) api.Content {
-	return api.Content{ID: v.ID.String(), ProjectID: v.ProjectID.String(), Kind: string(v.Kind), Title: v.Title, Description: v.Description, Author: v.Author, SourceReferences: v.SourceReferences, ObjectFormat: v.ObjectFormat, Commit: v.Commit, Path: v.Path, Revision: uint64(v.Revision.Int64()), LatestRevision: uint64(v.LatestRevision.Int64()), Deprecated: v.Deprecated}
+	return api.Content{ID: v.ID.String(), ProjectID: v.ProjectID.String(), Kind: string(v.Kind), Title: v.Title, Description: v.Description, Author: v.Author, SourceReferences: v.SourceReferences, ObjectFormat: v.ObjectFormat, Commit: v.Commit, Path: v.Path, Revision: uint64(v.Revision.Int64()), CreatedAtMs: uint64(v.CreatedAt.Int64()), LatestRevision: uint64(v.LatestRevision.Int64()), Deprecated: v.Deprecated}
 }
 func attachmentDTO(v kernel.TaskContentReference) api.ContentAttachment {
 	return api.ContentAttachment{TaskID: v.TaskID.String(), ProjectID: v.ProjectID.String(), TaskWorkRevision: uint64(v.TaskWorkRevision.Int64()), ContentID: v.ContentID.String(), ContentRevision: uint64(v.ContentRevision.Int64()), AttachedAtMs: uint64(v.AttachedAt.Int64())}
