@@ -986,8 +986,9 @@ func TestDaemonServesCurrentWorkerAssignmentReceipt(t *testing.T) {
 		t.Fatalf("worker Change = %+v, found=%v, err=%v", change, found, err)
 	}
 	wantBase := hex.EncodeToString(change.Selection.Commit().Bytes())
+	library, _ := renderKnowledgeContext(active.run.Provider, active.run.ProjectID, nil, knowledgeContextBytes)
 	want := api.AttemptTask{
-		Task:                   "private",
+		Task:                   "private" + string(library),
 		TaskID:                 active.run.TaskID.String(),
 		IncarnationID:          active.run.TaskIncarnationID.String(),
 		WorkRevision:           uint64(active.run.AdmittedTaskWorkRevision.Int64()),
@@ -1313,7 +1314,8 @@ func TestDaemonServesTaskOnlyToLiveAttempt(t *testing.T) {
 	active := prepareActiveAttempt(t, fixture, 51)
 	done := fixture.serve(t)
 	task, err := active.client.Task(context.Background())
-	if err != nil || !strings.HasPrefix(task.Task, "private\n\nProject knowledge") {
+	library, _ := renderKnowledgeContext(active.run.Provider, active.run.ProjectID, nil, knowledgeContextBytes)
+	if err != nil || task.Task != "private"+string(library) {
 		t.Fatalf("attempt task = %+v, %v", task, err)
 	}
 	waitDispatch(t, done)
