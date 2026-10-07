@@ -3611,6 +3611,8 @@ impl Authority {
         let permissions = BTreeMap::from([
             ("actions", "read"),
             ("checks", "read"),
+            // The compare that pins the run to this head reads commits.
+            ("contents", "read"),
             ("metadata", "read"),
         ]);
         let token = self

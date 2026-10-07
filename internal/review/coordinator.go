@@ -120,14 +120,15 @@ func (g *GroupRun) defect() bool {
 	if g == nil || (g.Conclusion != "failure" && g.Conclusion != "timed_out") {
 		return false
 	}
+	// A job that was cancelled or never started fails the jobs downstream of
+	// it, such as an always() aggregate, so it decides the run on its own.
 	failed := false
 	for _, job := range g.Jobs {
-		if job.Conclusion != "failure" && job.Conclusion != "timed_out" {
-			continue
-		}
-		failed = true
-		if runnerLost.MatchString(strings.Join(job.Annotations, "\n")) {
+		switch {
+		case job.Conclusion == "cancelled" || job.Conclusion == "startup_failure" || runnerLost.MatchString(strings.Join(job.Annotations, "\n")):
 			return false
+		case job.Conclusion == "failure" || job.Conclusion == "timed_out":
+			failed = true
 		}
 	}
 	return failed

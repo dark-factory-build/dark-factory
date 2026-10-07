@@ -262,6 +262,9 @@ func TestFailedMergeGroupRunSendsCorrectionUnlessInfrastructure(t *testing.T) {
 		{ID: 1, Conclusion: "cancelled", Jobs: []GroupJob{{Name: "checks", Conclusion: "cancelled"}}},
 		{ID: 2, Conclusion: "failure", Jobs: []GroupJob{{Name: "checks", Conclusion: "failure", Annotations: []string{"The self-hosted runner lost communication with the server."}}}},
 		{ID: 3, Conclusion: "failure", Jobs: []GroupJob{{Name: "checks", Conclusion: "startup_failure"}}},
+		// The always() aggregate fails because a gate never started.
+		{ID: 4, Conclusion: "failure", Jobs: []GroupJob{{Name: "checks", Conclusion: "startup_failure"}, {Name: "required", Conclusion: "failure", Annotations: []string{"Process completed with exit code 1."}}}},
+		{ID: 5, Conclusion: "failure", Jobs: []GroupJob{{Name: "required", Conclusion: "failure"}, {Name: "checks", Conclusion: "cancelled"}}},
 	} {
 		store, backend := &memoryStore{}, &fakeBackend{merge: Merge{State: "NOT_QUEUED", Open: true, Group: infra}}
 		c := Coordinator{Store: store, Backend: backend, Now: func() time.Time { return time.Unix(20, 0) }}
