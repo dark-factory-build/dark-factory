@@ -2619,3 +2619,19 @@ test("Needs you lists and counts only the chosen project's requests", async () =
   assert.match(text, /Nothing needs your attention/);
   await act(async () => tree.unmount());
 });
+
+test("opening a question from the Library switches the header to its project so the reply form renders", async () => {
+  const other = fixtureState.humanRequests.get(ids.request).project_id === ids.project ? ids.secondProject : ids.project;
+  function Harness() {
+    const [chosen, setChosen] = useState();
+    return createElement(FactoryConsole, { status: "ready", state: fixtureState, onDetail() {}, detail: "needs-you", selectedHumanRequest: chosen, onSelectHumanRequest: (request) => setChosen(selectedRequest({ request })), onCloseHumanRequest() {}, onReplyHumanRequest() {} });
+  }
+  let tree;
+  await act(async () => { tree = create(createElement(Harness)); });
+  await act(async () => tree.root.findByProps({ "aria-label": "Project" }).props.onChange({ currentTarget: { value: other } }));
+  await act(async () => tree.root.findByType(FactoryFloor).props.onOpenLibrary(other));
+  await act(async () => tree.root.findByType(ProjectLibrary).props.onRecord("human_request", ids.request, fixtureState.humanRequests.get(ids.request).project_id));
+  assert.equal(tree.root.findByProps({ "aria-label": "Project" }).props.value, fixtureState.humanRequests.get(ids.request).project_id);
+  assert.equal(tree.root.findAllByProps({ "aria-label": "Selected question" }).length > 0, true);
+  await act(async () => tree.unmount());
+});

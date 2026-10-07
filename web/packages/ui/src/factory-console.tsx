@@ -197,6 +197,7 @@ export function FactoryConsole({
     setProjectId(next);
     if (next !== projectId && selectedTaskId !== undefined) onSelectTask?.(undefined);
   };
+  const selectRequest = onSelectHumanRequest === undefined ? undefined : (request: Parameters<NonNullable<typeof onSelectHumanRequest>>[0]) => { selectProject(request.project_id); onSelectHumanRequest(request); };
   const scopedState = useMemo(() => state === undefined || projectId === undefined ? state : {
     ...state,
     projects: new Map([...state.projects].filter(([id]) => id === projectId)),
@@ -235,7 +236,7 @@ export function FactoryConsole({
       else if (onProjectContent) setRelatedTask(asTask(await onProjectContent("task_read", { project_id: project, task_id: id }), project));
       else throw new Error("Task details unavailable.");
     } else if (kind === "human_request") {
-      const request = state?.humanRequests.get(id); if (!request) throw new Error("Request is outside active state. Its retained identity remains linked here."); onSelectHumanRequest?.(request);
+      const request = state?.humanRequests.get(id); if (!request) throw new Error("Request is outside active state. Its retained identity remains linked here."); selectRequest?.(request);
     } else {
       const record = productionData.records.find((item) => item.project_id === project && item.id === id);
       const item = productionItems.find((item) => item.projectId === project && item.visualId === (record?.visual_id ?? id));
@@ -314,7 +315,7 @@ export function FactoryConsole({
               </div>
             </div>
             {view === "floor"
-              ? <FactoryFloor requestedEntity={requestedEntity} onOpenBoard={(project, entity, id, repository) => openKnowledge(true, project, entity, id, repository)} changes={productionItems} selectedChange={selectedProduction} onSelectChange={selectProduction} onProjectContent={onProjectContent} onOpenLibrary={(id) => openKnowledge(false, id)} onOpenTasks={ready ? (id) => { selectProject(id); onDetail?.("queue"); } : undefined} onOpenMissions={ready ? (id) => { selectProject(id); onDetail?.("missions"); } : undefined} projectId={projectId} floorAppearance={floorAppearance} selectedTaskId={selectedTask?.id} onSelectTask={ready ? selectTask : undefined} selectedAgentId={selectedDetail === "agent" ? selectedAgent?.id : undefined} state={scopedState} topologies={topologies} runPaths={runPaths} lastRunPaths={lastRunPaths} onSelectAgent={ready ? onSelectAgent : undefined} onSelectHumanRequest={ready ? onSelectHumanRequest : undefined} connected={ready} />
+              ? <FactoryFloor requestedEntity={requestedEntity} onOpenBoard={(project, entity, id, repository) => openKnowledge(true, project, entity, id, repository)} changes={productionItems} selectedChange={selectedProduction} onSelectChange={selectProduction} onProjectContent={onProjectContent} onOpenLibrary={(id) => openKnowledge(false, id)} onOpenTasks={ready ? (id) => { selectProject(id); onDetail?.("queue"); } : undefined} onOpenMissions={ready ? (id) => { selectProject(id); onDetail?.("missions"); } : undefined} projectId={projectId} floorAppearance={floorAppearance} selectedTaskId={selectedTask?.id} onSelectTask={ready ? selectTask : undefined} selectedAgentId={selectedDetail === "agent" ? selectedAgent?.id : undefined} state={scopedState} topologies={topologies} runPaths={runPaths} lastRunPaths={lastRunPaths} onSelectAgent={ready ? onSelectAgent : undefined} onSelectHumanRequest={ready ? selectRequest : undefined} connected={ready} />
               : <AgentList state={scopedState} selectedAgentId={selectedAgent?.id} ready={ready} onSelectAgent={ready ? onSelectAgent : undefined} />}
           </section>
 
@@ -333,7 +334,7 @@ export function FactoryConsole({
                 state={scopedState}
                 status={status}
                 selectedHumanRequest={selectedHumanRequest}
-                onSelectHumanRequest={onSelectHumanRequest}
+                onSelectHumanRequest={selectRequest}
                 onCloseHumanRequest={onCloseHumanRequest}
                 selectedContent={selectedHumanRequest === undefined ? null : <HumanRequestPanel
                   selected={selectedHumanRequest}
