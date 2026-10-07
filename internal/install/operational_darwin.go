@@ -6,7 +6,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"sync"
@@ -540,36 +539,35 @@ func inspectOperationalHome(ctx context.Context, path string, home *os.File) err
 }
 
 func readOperationalCensus(home *os.File) (map[string]bool, error) {
-	names, err := home.Readdirnames(memberCount + 10)
-	if err != nil && !errors.Is(err, io.EOF) {
+	names, err := home.Readdirnames(-1)
+	if err != nil {
 		return nil, fmt.Errorf("enumerate operational home: %w", err)
 	}
-	if len(names) < memberCount || len(names) > memberCount+9 {
-		return nil, fmt.Errorf("%w: operational home census has %d entries", ErrInvalidHome, len(names))
-	}
 	seen := make(map[string]bool, len(names))
+	// Named members are typed by their own checks. Any other entry must be a
+	// plain regular file and is ignored: the running build judges the home
+	// of the build replacing it, so a file a newer factoryd writes (public.key,
+	// observe.json, linear.json, maintainer.json) must never refuse the
+	// release that adds or fixes it. Symlinks, directories and special files
+	// stay fatal. The relay connector's directory is the one named optional
+	// member.
 	allowed := map[string]bool{
 		formatName: true, databaseName: true, tokenName: true, lockName: true,
 		lockAnchorName: true,
 		runtimesName:   true, changesName: true,
 		databaseName + "-wal": true, databaseName + "-shm": true,
-		// Written by the relay connector after this home first opened, so a
-		// daemon that has ever carried --relay-origin must still be able to
-		// reopen its own home.
-		RelayDirectoryName:       true,
-		maintainerCredentialName: true, maintainerCredentialStage: true,
-		"linear.json": true, "linear.json.staging": true,
-		// Written by factoryd after first open: the public-identity secret
-		// (public_world.go) and the owner's optional observation config
-		// (opgraph.go). Both must survive a release.
-		"public.key": true, "observe.json": true,
+		RelayDirectoryName: true,
 	}
 	for _, name := range names {
-		if seen[name] {
-			return nil, fmt.Errorf("%w: duplicate operational home entry", ErrInvalidHome)
-		}
 		if !allowed[name] {
-			return nil, fmt.Errorf("%w: unknown operational home entry %s", ErrInvalidHome, name)
+			var stat unix.Stat_t
+			if err := unix.Fstatat(int(home.Fd()), name, &stat, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+				return nil, fmt.Errorf("inspect operational home entry %s: %w", name, err)
+			}
+			if stat.Mode&unix.S_IFMT != unix.S_IFREG {
+				return nil, fmt.Errorf("%w: operational home entry %s is not a regular file", ErrInvalidHome, name)
+			}
+			continue
 		}
 		seen[name] = true
 	}

@@ -1067,6 +1067,20 @@ func TestServiceUpgradeSwapsAtomicallyAndRollsBack(t *testing.T) {
 	}
 }
 
+// #1388: the running build validates the home before swapping in its
+// successor, so a file only a newer factoryd writes must not refuse the
+// release, or no release could ever add one (as public.key once did).
+func TestServiceUpgradeAcceptsAHomeFileOnlyANewerBuildKnows(t *testing.T) {
+	fixture, next, identity := upgradeFixture(t)
+	if err := os.WriteFile(filepath.Join(fixture.home, "written-by-a-newer-build.json"), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := ServiceUpgrade(context.Background(), fixture.home, next, identity, 33); err != nil {
+		t.Fatalf("upgrade refused a home file only the new build knows: %v", err)
+	}
+	fixture.requireProgram(t, "current", "#!next")
+}
+
 func TestServiceUpgradeFailureBeforeTheSwapLeavesCurrentUntouched(t *testing.T) {
 	plant := func(path string) func(*testing.T, *manageFixture, string) {
 		return func(t *testing.T, fixture *manageFixture, _ string) {

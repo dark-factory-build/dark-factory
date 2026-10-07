@@ -18,6 +18,7 @@ import (
 
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 	_ "github.com/ncruces/go-sqlite3/driver"
+	"golang.org/x/sys/unix"
 )
 
 func TestOperationalHomeLeasesPopulatedGoHome(t *testing.T) {
@@ -724,26 +725,50 @@ func TestOperationalHomeLockReplacementStillContends(t *testing.T) {
 	}
 }
 
-func TestOperationalHomeRejectsUnknownRootEntry(t *testing.T) {
-	parent := installTempDir(t)
-	homePath := filepath.Join(parent, "home")
-	if _, err := Init(context.Background(), homePath); err != nil {
-		t.Fatal(err)
-	}
-	hostile := filepath.Join(homePath, "hostile")
-	if err := os.WriteFile(hostile, []byte("must remain"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	before, err := os.ReadFile(hostile)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := OpenOperationalHome(context.Background(), homePath); err == nil {
-		t.Fatal("unknown root entry was accepted")
-	}
-	after, err := os.ReadFile(hostile)
-	if err != nil || !bytes.Equal(after, before) {
-		t.Fatalf("unknown root entry changed after refusal: %q, %v", after, err)
+// The census tolerates a regular file it does not name, so a release that adds
+// a home file is never refused by the build it replaces, but still refuses a
+// symlink, directory or special file planted at the home root.
+func TestOperationalHomeRejectsPlantedRootEntries(t *testing.T) {
+	for _, plant := range []struct {
+		name  string
+		make  func(string) error
+		valid bool
+	}{
+		{"regular", func(path string) error { return os.WriteFile(path, []byte("must remain"), 0o600) }, true},
+		{"symlink", func(path string) error { return os.Symlink("/etc/hosts", path) }, false},
+		{"directory", func(path string) error { return os.Mkdir(path, 0o700) }, false},
+		{"fifo", func(path string) error { return unix.Mkfifo(path, 0o600) }, false},
+	} {
+		t.Run(plant.name, func(t *testing.T) {
+			parent := installTempDir(t)
+			homePath := filepath.Join(parent, "home")
+			if _, err := Init(context.Background(), homePath); err != nil {
+				t.Fatal(err)
+			}
+			planted := filepath.Join(homePath, "planted")
+			if err := plant.make(planted); err != nil {
+				t.Fatal(err)
+			}
+			before, err := os.Lstat(planted)
+			if err != nil {
+				t.Fatal(err)
+			}
+			home, err := OpenOperationalHome(context.Background(), homePath)
+			if plant.valid {
+				if err != nil {
+					t.Fatalf("unknown regular file refused: %v", err)
+				}
+				if err := home.Close(); err != nil {
+					t.Fatal(err)
+				}
+			} else if !errors.Is(err, ErrInvalidHome) {
+				t.Fatalf("planted %s = %v, want invalid home", plant.name, err)
+			}
+			after, err := os.Lstat(planted)
+			if err != nil || !os.SameFile(before, after) || before.ModTime() != after.ModTime() {
+				t.Fatalf("planted entry changed: %v", err)
+			}
+		})
 	}
 }
 
