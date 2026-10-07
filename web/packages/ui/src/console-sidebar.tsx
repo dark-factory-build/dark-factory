@@ -641,7 +641,6 @@ export function SettingsDialog({
   onIntakeAction,
   onSelectTask,
   pairing,
-  library,
   runtime,
   release,
   onClose,
@@ -674,7 +673,6 @@ export function SettingsDialog({
   intake?: ReadonlyMap<string, IntakeView>; intakePending?: ReadonlySet<string>; intakeErrors?: ReadonlyMap<string, string>; onLoadIntake?: (projectId: string) => void; onIntakeAction?: (projectId: string, request: IntakeBody) => void;
   /** A self-contained "PAIR A PHONE" surface mounts here. */
   pairing?: ReactNode;
-  library?: ReactNode;
   /** The build of the daemon answering this connection, observed not asserted. */
   runtime?: RuntimeBuild;
   release?: PublishedRelease;
@@ -692,9 +690,8 @@ export function SettingsDialog({
   const settingsId = useId();
   const tabs = [
     { label: "Projects", content: <>
-        <RepositoriesSection state={state} repositories={repositories} pending={repositoryPending} errors={repositoryErrors} onLoad={onLoadRepositories} onMutate={onMutateRepository} onCreateProject={onCreateProject} />
+        <RepositoriesSection projectId={projectId} state={state} repositories={repositories} pending={repositoryPending} errors={repositoryErrors} onLoad={onLoadRepositories} onMutate={onMutateRepository} onCreateProject={onCreateProject} />
         <IntakeSection github={github} onSelectTask={onSelectTask} state={state} repositories={repositories} intake={intake} pending={intakePending} errors={intakeErrors} onLoad={onLoadIntake} onLoadRepositories={onLoadRepositories} onAction={onIntakeAction} />
-        {library}
         <AttachmentRetentionSection call={ready ? onAttachmentRetention : undefined} />
         <details className="dfConsoleSidebar__section" aria-label="Run limits">
           <summary>Run limits</summary>
@@ -718,12 +715,6 @@ export function SettingsDialog({
         {pairing ?? <p className="dfFactoryConsole__empty">Pairing unavailable</p>}
     </section> },
     { label: "Appearance", content: <FloorAppearanceSection appearance={floorAppearance} onChange={onFloorAppearanceChange} onReset={onResetFloorAppearance} /> },
-    { label: "Help", content: <section className="dfConsoleSidebar__section" aria-label="Help and feedback">
-        <h3>Help and feedback</h3>
-        <p><a href="https://darkfactory.build/feedback?kind=bug" target="_blank" rel="noopener noreferrer">Report a problem</a></p>
-        <p><a href="https://darkfactory.build/feedback?kind=feature" target="_blank" rel="noopener noreferrer">Request a feature</a></p>
-        <p><a href="https://darkfactory.build/backlog" target="_blank" rel="noopener noreferrer">Public backlog</a></p>
-    </section> },
     { label: "Updates", content: <UpdatesSection runtime={runtime} release={release} /> },
   ];
   return <ConsoleDialog label="Settings" title="Settings" onClose={onClose}>
@@ -745,6 +736,9 @@ export function SettingsDialog({
       id={`${settingsId}-panel-${index}`} aria-labelledby={`${settingsId}-tab-${index}`} hidden={tab !== index} tabIndex={0}>
       {content}
     </div>)}
+    <p className="dfConsoleSidebar__inherit">
+      <a href="https://darkfactory.build/feedback?kind=bug" target="_blank" rel="noopener noreferrer">Report a problem</a> · <a href="https://darkfactory.build/feedback?kind=feature" target="_blank" rel="noopener noreferrer">Request a feature</a> · <a href="https://darkfactory.build/backlog" target="_blank" rel="noopener noreferrer">Public backlog</a>
+    </p>
   </ConsoleDialog>;
 }
 
@@ -761,7 +755,8 @@ function UpdatesSection({ runtime, release }: { runtime?: RuntimeBuild; release?
   </section>;
 }
 
-function RepositoriesSection({ state, repositories, pending, errors, onLoad, onMutate, onCreateProject }: {
+function RepositoriesSection({ projectId: scoped, state, repositories, pending, errors, onLoad, onMutate, onCreateProject }: {
+  projectId?: string;
   state: StateView | undefined;
   repositories?: ReadonlyMap<string, readonly RepositoryView[]>;
   pending?: ReadonlySet<string>;
@@ -775,13 +770,13 @@ function RepositoriesSection({ state, repositories, pending, errors, onLoad, onM
   load.current = onLoad;
   const [open, setOpen] = useState(false);
   const [selection, setSelection] = useState("");
-  const projectId = projects.find((project) => project.id === selection)?.id ?? projects[0]?.id;
+  const projectId = projects.find((project) => project.id === (scoped ?? selection))?.id ?? projects[0]?.id;
   const canLoad = onLoad !== undefined;
   useEffect(() => { if (open && canLoad && projectId) load.current?.(projectId); }, [open, projectId, canLoad]);
   return <details className="dfConsoleSidebar__section" aria-label="Repositories" onToggle={(event) => { if (event.target === event.currentTarget) setOpen(event.currentTarget.open); }}>
     <summary>Repositories</summary>
     <p className="dfConsoleSidebar__inherit">Use a checkout on the factory’s Mac.</p>
-    {projects.length > 1 ? <label>Project<select value={projectId} onChange={(event) => setSelection(event.currentTarget.value)}>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label> : null}
+    {projects.length > 1 && scoped === undefined ? <label>Project<select value={projectId} onChange={(event) => setSelection(event.currentTarget.value)}>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label> : null}
     {projects.filter((project) => project.id === projectId).map((project) => <RepositoryProject key={project.id} project={project} items={repositories?.get(project.id)} pending={pending?.has(project.id) === true} error={errors?.get(project.id)} onMutate={onMutate} />)}
     <details><summary>New project</summary><ProjectCreateForm onCreate={onCreateProject} error={errors?.get("create")} /></details>
   </details>;
@@ -927,7 +922,6 @@ function FloorAppearanceSection({ appearance, onChange, onReset }: {
   return <section className="dfConsoleSidebar__section" aria-label="FLOOR APPEARANCE">
     <h3>Floor appearance</h3>
     <p>Saved in this browser. Automatic groups broad areas; Fine exposes directories on the same floor.</p>
-    <p>Equipment size uses eligible files: S 1–4, M 5–20, L 21–80, XL 81+. Machine motifs are name hints. ? means scale is unavailable; dashed + / × cables mark proposed dependencies.</p>
     <label>Scenery<select value={appearance.scenery} onChange={(event) => onChange({ ...appearance, scenery: event.currentTarget.value as FloorAppearance["scenery"] })}><option value="off">Off</option><option value="subtle">Subtle</option><option value="rich">Rich</option></select></label>
     <label>Topology detail<select value={appearance.detail ?? "auto"} onChange={(event) => onChange({ ...appearance, detail: event.currentTarget.value as FloorAppearance["detail"] })}><option value="coarse">Coarse</option><option value="auto">Automatic</option><option value="fine">Fine</option></select></label>
     <label>Social furniture<select value={appearance.social ?? "nearby"} onChange={(event) => onChange({ ...appearance, social: event.currentTarget.value as FloorAppearance["social"] })}><option value="nearby">Within the base</option><option value="commons">Common tables</option></select></label>

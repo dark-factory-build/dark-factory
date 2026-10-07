@@ -10,11 +10,11 @@ const rows = (value: unknown): RecordValue[] => Array.isArray(value) ? value as 
 type Draft = { objective: string; criteria: string; owner: string; id: string };
 
 /** Missions use the durable outcome record; work success never accepts an objective. */
-export function MissionsPanel({ production = [], onProduction, requestedMission, state, projectId, active, call, onProject, onSelectAgent, onOpenTask }: {
+export function MissionsPanel({ production = [], onProduction, requestedMission, state, projectId, active, call, onSelectAgent, onOpenTask }: {
   production?: readonly ProductionContraption[]; onProduction?: (key: string) => void;
   requestedMission?: { projectId: string; id: string };
   state?: StateView; projectId?: string; active: boolean; call?: ProjectContentCall;
-  onProject: (id: string) => void; onSelectAgent?: (agent: AgentItem) => void; onOpenTask?: (task: TaskItem) => void;
+  onSelectAgent?: (agent: AgentItem) => void; onOpenTask?: (task: TaskItem) => void;
 }) {
   const [items, setItems] = useState<RecordValue[]>([]);
   const [selected, setSelected] = useState<RecordValue>();
@@ -81,8 +81,7 @@ export function MissionsPanel({ production = [], onProduction, requestedMission,
   const changeDraft = (change: Partial<Draft>) => { if (projectId !== undefined && draft !== undefined) setDrafts((previous) => ({ ...previous, [projectId]: { ...draft, ...change } })); };
   return <section className="dfMissions dfConsoleSidebar__panel" aria-label="Missions">
     <h2>Missions</h2>
-    <p className="dfConsoleSidebar__inherit">Objectives owned by an overseer, with explicit acceptance criteria.</p>
-    {project === undefined ? <label>Choose a project<select aria-label="Mission project" value="" onChange={(event) => onProject(event.target.value)}><option value="" disabled>Select project</option>{[...state?.projects.values() ?? []].map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label> : <>
+    {project === undefined ? <p className="dfConsoleSidebar__inherit">Choose a project in the header to see its missions.</p> : <>
       <p className="dfConsoleSidebar__inherit">{project.name}</p>
       <div className="dfConsoleViewToggle">
         <button type="button" disabled={Boolean(pending) || call === undefined} onClick={() => void run(async () => { await list(); if (selected !== undefined) await read(text(selected.id)); })}>Refresh</button>
@@ -103,7 +102,7 @@ export function MissionsPanel({ production = [], onProduction, requestedMission,
         <button disabled={Boolean(pending) || call === undefined}>Create mission</button>
         <button type="button" disabled={Boolean(pending)} onClick={() => setDrafts((previous) => { const next = { ...previous }; delete next[project.id]; return next; })}>Discard draft</button>
       </form>}
-      {loaded && items.length === 0 ? <p>No missions yet. Standalone tasks remain in Tasks.</p> : null}
+      {loaded && items.length === 0 ? <p>Objectives owned by an overseer, with explicit acceptance criteria. No missions yet. Standalone tasks remain in Tasks.</p> : null}
       {selected === undefined ? <ul className="dfMissions__list">{items.map((item) => <li key={text(item.id)}><button type="button" disabled={Boolean(pending) || call === undefined} onClick={() => void run(() => read(text(item.id)))}>{text(item.objective)} <span>{text(item.state)}{item.stale ? " · stale" : ""}</span></button></li>)}</ul> : null}
       {next === 0 || selected !== undefined ? null : <button type="button" disabled={Boolean(pending) || call === undefined} onClick={() => void run(() => list(next))}>{pending ? "Loading…" : "Show more"}</button>}
       {selected === undefined ? null : <article className="dfConsoleSidebar__section">

@@ -52,9 +52,11 @@ export function ProductionPanel({ items, selected, onSelect, state, call, connec
     const generation = ++epoch.current; selectedTaskRef.current = id; setSelectedTaskId(id); setTaskError("");
     try { const result = await call("task_read", { project_id: entry.projectId, task_id: id }); if (generation === epoch.current && selected === keyOf(entry) && selectedTaskRef.current === id) { const task = asTask(result, entry.projectId); setLoadedTasks((old) => ({ ...old, [`${entry.projectId}:${id}`]: task })); setSelectedTaskId(undefined); onOpenTask(task); } } catch { if (generation === epoch.current) setTaskError("Task details are unavailable."); }
   };
+  const incomplete = queue.filter(sourceStatus).length;
   const project = item && state?.projects.get(item.projectId), owner = item?.tasks.map((id) => taskFor(item, id)).find(Boolean)?.assigned_agent_id, ownerAgent = owner ? state?.agents.get(owner) : undefined;
   return <section className="dfConsoleSidebar__panel dfProduction" aria-label="Production inspection">
-    <div className="dfProduction__heading"><h2>Changes</h2><span>{queue.length} in progress{overflow > 0 ? " (loaded)" : ""}</span></div>
+    <div className="dfProduction__heading"><h2>Changes</h2></div>
+    {incomplete > 0 ? <p role="status">{incomplete} {incomplete === 1 ? "change is" : "changes are"} not fully shown on the floor.</p> : null}
     {!connected || error || overflow > 0 ? <details className="dfProduction__notice"><summary>{!connected ? "Last observed state" : error ? "Observation needs attention" : "Partial observation"}</summary>{!connected ? <p>Disconnected. This is the last observed state.</p> : null}{error ? <p role="alert">{error}</p> : null}{overflow > 0 ? <p>{overflow} more records are available.</p> : null}</details> : null}
     {item ? <article className="dfProduction__detail" aria-label={`Production details for ${title(item)}`}>
       <button type="button" className="dfConsoleBack" onClick={back}>← Back to Changes</button><h3>{title(item)}</h3><p className="dfProduction__stages">{productionStages(item).map((stage) => <span className="dfStatus" data-stage={stage} key={stage}>{stage}</span>)}</p><p>{item.nextAction}</p>

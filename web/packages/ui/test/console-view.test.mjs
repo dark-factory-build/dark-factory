@@ -64,9 +64,8 @@ test("an active overseer beats a paused namesake before name ordering", () => {
 
 test("counters count only store-backed facts", () => {
   const counters = factoryCounters(fixtureState);
-  assert.equal(counters.queued, 1);
   assert.equal(counters.needsYou, 1);
-  assert.deepEqual(factoryCounters(undefined), { queued: undefined, needsYou: undefined });
+  assert.deepEqual(factoryCounters(undefined), { needsYou: undefined });
 });
 
 test("home ordering puts active work first and finished work last", () => {

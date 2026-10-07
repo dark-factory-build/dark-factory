@@ -169,7 +169,7 @@ test("one screen keeps Factory and the operator panels together", () => {
   assert.doesNotMatch(markup, /ACTIVE RUNS|OPERATOR VIEW/);
   assert.equal(markup.includes("<dt>QUEUED</dt>"), false);
   assert.equal(markup.includes("<dt>NEEDS YOU</dt>"), false);
-  assert.match(markup, /Needs you <span>1<\/span>/);
+  assert.match(markup, /Needs you (<!-- -->)?1</);
   assert.match(markup, />Tasks<\/button>/);
   assert.match(markup, /Builder One asks/);
   assert.match(markup, /Review the state projection/);
@@ -541,7 +541,7 @@ test("Needs You and Queue keep every served item reachable", () => {
   const queue = render({ state: bounded, detail: "queue" });
   assert.equal((queue.match(/<li class="dfConsoleItem"/g) ?? []).length, 9);
   assert.equal((markup.match(/\+1 more/g) ?? []).length, 0);
-  assert.match(markup, />9 items</);
+  assert.doesNotMatch(markup, /9 items/);
   assert.match(queue, /Task 8/);
   assert.equal((render({ state: bounded, view: "agents" }).match(/dfAgentList__row/g) ?? []).length, 0, "no handler, no button");
   assert.equal((render({ state: bounded, view: "agents", onSelectAgent: () => {} }).match(/dfAgentList__row/g) ?? []).length, 9);
@@ -710,6 +710,7 @@ test("opening a selected question restores that agent's terminal panel", async (
     await act(async () => { renderer.root.findAllByType("button").find((button) => button.props.children === "Settings" && typeof button.props.onClick === "function").props.onClick(); });
     await act(async () => { renderer.root.findByProps({ "aria-label": "Project" }).props.onChange({ currentTarget: { value: ids.secondProject } }); });
     assert.equal(renderer.root.findAllByProps({ "aria-label": "Terminal" }).length, 0);
+    await act(async () => { renderer.root.findByProps({ "aria-label": "Project" }).props.onChange({ currentTarget: { value: "" } }); });
     await act(async () => { renderer.root.findAllByType("button").find((button) => Array.isArray(button.props.children) && button.props.children[0] === "Needs you ").props.onClick(); });
     await act(async () => { renderer.root.findAllByType("button").find((button) => button.props.children === "Open terminal").props.onClick(); });
     assert.equal(renderer.root.findByProps({ "aria-label": "Project" }).props.value, ids.project, "opening a global question switches to its agent’s project");
@@ -2363,7 +2364,7 @@ test("settings tabs hide other sections, support keyboard navigation and retain 
     await act(async () => { renderer = create(createElement(FactoryConsole, {status:"ready",state:baseState(),settingsOpen:true,onToggleSettings(){},onCreateProject(){}})); });
     const tabs = () => renderer.root.findAllByProps({role:"tab"});
     const panels = () => renderer.root.findAllByProps({role:"tabpanel"});
-    assert.deepEqual(tabs().map(tab=>tab.props.children),["Projects","Connections","Devices","Appearance","Help","Updates"]);
+    assert.deepEqual(tabs().map(tab=>tab.props.children),["Projects","Connections","Devices","Appearance","Updates"]);
     const selected = (index) => {
       assert.deepEqual(tabs().map(tab=>tab.props["aria-selected"]),tabs().map((_,i)=>i===index));
       assert.equal(panels().filter(panel=>!panel.props.hidden).length,1);
@@ -2381,7 +2382,7 @@ test("settings tabs hide other sections, support keyboard navigation and retain 
     selected(1);
     let focused=-1;
     const parentElement={querySelectorAll(){return tabs().map((_,i)=>({focus(){focused=i;}}));}};
-    for (const [key,want] of [["End",5],["ArrowRight",0],["ArrowLeft",5],["Home",0]]) {
+    for (const [key,want] of [["End",4],["ArrowRight",0],["ArrowLeft",4],["Home",0]]) {
       let prevented=false;
       await act(async()=>tabs().find(tab=>tab.props["aria-selected"]).props.onKeyDown({key,preventDefault(){prevented=true;},currentTarget:{parentElement}}));
       assert.equal(prevented,true);assert.equal(focused,want);selected(want);
@@ -2581,5 +2582,56 @@ test("board and shelves open peer views of one Library workspace", async () => {
   await act(async () => views().findAllByType("button").find(button => button.children.join("") === "All documents").props.onClick());
   assert.equal(views().findAllByType("button").find(button => button.props["aria-pressed"]).children.join(""), "All documents");
   assert.ok(tree.root.findByProps({ "aria-label": "Console views" }).findAllByType("button").some(button => button.children.join("") === "Library"));
+  await act(async () => tree.unmount());
+});
+
+test("one project is selected automatically, with no header picker, and a missions prompt when several exist", () => {
+  const one = baseState({ projects: new Map([...fixtureState.projects].slice(0, 1)) });
+  const single = render({ state: one, detail: "missions" });
+  assert.equal(single.includes('aria-label="Project"'), false);
+  assert.equal(single.includes("Mission project"), false);
+  assert.match(single, /Missions/);
+  const many = render({ detail: "missions" });
+  assert.match(many, /aria-label="Project"/);
+  assert.match(many, /Choose a project in the header/);
+  assert.equal(many.includes("Mission project"), false);
+});
+
+test("Needs you and Changes counts hide at zero, and Help is gone", () => {
+  const markup = render({ state: baseState({ humanRequests: new Map() }), onDetail() {} });
+  assert.equal(/Needs you (<!-- -->)?\d/.test(markup), false);
+  assert.equal(/Changes (<!-- -->)?\d/.test(markup), false);
+  assert.equal(markup.includes("Help"), false);
+  assert.equal(markup.includes(" items"), false);
+});
+
+test("Needs you lists and counts only the chosen project's requests", async () => {
+  let tree;
+  await act(async () => { tree = create(createElement(FactoryConsole, { status: "ready", state: fixtureState, onDetail() {} })); });
+  const request = [...fixtureState.humanRequests.values()][0];
+  const other = request.project_id === ids.project ? ids.secondProject : ids.project;
+  await act(async () => tree.root.findByProps({ "aria-label": "Project" }).props.onChange({ currentTarget: { value: other } }));
+  const text = JSON.stringify(tree.toJSON());
+  assert.equal(text.includes(" asks"), false);
+  const tabs = tree.root.findAllByType("button").filter((button) => Array.isArray(button.props.children) && button.props.children[0] === "Needs you ");
+  assert.ok(tabs.length > 0);
+  assert.ok(tabs.every((button) => button.props.children[1] === ""));
+  assert.match(text, /Nothing needs your attention/);
+  await act(async () => tree.unmount());
+});
+
+test("opening a question from the Library switches the header to its project so the reply form renders", async () => {
+  const other = fixtureState.humanRequests.get(ids.request).project_id === ids.project ? ids.secondProject : ids.project;
+  function Harness() {
+    const [chosen, setChosen] = useState();
+    return createElement(FactoryConsole, { status: "ready", state: fixtureState, onDetail() {}, detail: "needs-you", selectedHumanRequest: chosen, onSelectHumanRequest: (request) => setChosen(selectedRequest({ request })), onCloseHumanRequest() {}, onReplyHumanRequest() {} });
+  }
+  let tree;
+  await act(async () => { tree = create(createElement(Harness)); });
+  await act(async () => tree.root.findByProps({ "aria-label": "Project" }).props.onChange({ currentTarget: { value: other } }));
+  await act(async () => tree.root.findByType(FactoryFloor).props.onOpenLibrary(other));
+  await act(async () => tree.root.findByType(ProjectLibrary).props.onRecord("human_request", ids.request, fixtureState.humanRequests.get(ids.request).project_id));
+  assert.equal(tree.root.findByProps({ "aria-label": "Project" }).props.value, fixtureState.humanRequests.get(ids.request).project_id);
+  assert.equal(tree.root.findAllByProps({ "aria-label": "Selected question" }).length > 0, true);
   await act(async () => tree.unmount());
 });

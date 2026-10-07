@@ -173,27 +173,23 @@ test("clicking grouped equipment exposes child edits and relationship changes in
 });
 
 
-test("thirty proposals retain one floor Changes action and collapsed Help", async () => {
+test("thirty proposals draw no floor Changes button or Help", async () => {
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   const records = Array.from({ length: 30 }, (_, i) => record(String(i + 1), [{ status: "modified", path: "internal/kernel/movement.go" }]));
   for (const entry of records) entry.document.source.relationships = [];
-  const changes = items(records), selected = [], opened = [];
-  const props = { state: { projects, agents: new Map(), tasks: new Map(), humanRequests: new Map() }, topologies: new Map([[project.id, topology]]), changes, floorAppearance: { detail: "auto", social: "nearby" }, onSelectChange: (id) => selected.push(id), onOpenChanges: () => opened.push("changes") };
+  const changes = items(records), selected = [] ;
+  const props = { state: { projects, agents: new Map(), tasks: new Map(), humanRequests: new Map() }, topologies: new Map([[project.id, topology]]), changes, floorAppearance: { detail: "auto", social: "nearby" }, onSelectChange: (id) => selected.push(id) };
   const text = (value) => typeof value === "string" ? value : (value.children ?? []).map(text).join("");
   let tree;
   try {
     await act(async () => { tree = create(createElement(FactoryFloor, props)); });
     const header = () => tree.root.findByProps({ className: "dfFactoryEntityTools" });
     assert.equal(header().findAllByProps({ type: "search" }).length, 1);
-    assert.deepEqual(header().findAllByType("button").map(text), ["Changes · 30"]);
-    const help = header().findByType("details");
-    assert.equal(text(help.findByType("summary")), "Help");
-    assert.equal(help.props.open, undefined);
-    await act(async () => header().findByType("button").props.onClick());
-    assert.deepEqual(opened, ["changes"]);
+    assert.deepEqual(header().findAllByType("button").map(text), []);
+    assert.equal(header().findAllByType("details").length, 0);
     await act(async () => tree.update(createElement(FactoryFloor, { ...props, selectedChange: productionKey(changes[29]) })));
     assert.match(text(header()), /Viewing: Change 30/);
-    assert.deepEqual(header().findAllByType("button").map(text), ["Changes · 30", "Clear selection"]);
+    assert.deepEqual(header().findAllByType("button").map(text), ["Clear selection"]);
     await act(async () => header().findAllByType("button").find((button) => text(button) === "Clear selection").props.onClick());
     assert.deepEqual(selected, [""]);
   } finally { if (tree) await act(async () => tree.unmount()); }
