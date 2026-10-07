@@ -88,6 +88,22 @@ export type SceneWorker = Readonly<{
 
 export type ScenePoint = Readonly<{ x: number; y: number }>;
 
+/** One change request on the outbound line, at the station its records put it. */
+export type SceneCrate = Readonly<{
+  /** The production key, which is also its proposal's id. */
+  id: string;
+  number: number;
+  title: string;
+  station: 0 | 1 | 2 | 3;
+  /** The recorded stages, as the Work row names them. */
+  stage: string;
+  fault: boolean;
+  taskIds: readonly string[];
+}>;
+
+export const LINE_STATIONS = ["Review", "Checks", "Merge queue", "Shipped"] as const;
+export const LINE_SLOTS = 8;
+
 type SceneRect = Readonly<{ x: number; y: number; width: number; height: number }>;
 export type SceneRoomLayout = SceneRect & Readonly<{
   id: string;
@@ -111,6 +127,8 @@ export type SceneLayout = Readonly<{
   /** The fence line's x; gates hang on it. */
   fence: number;
   restingTop: number;
+  /** The outbound line along the top, from beside the desks to the fence. Fixed: it is there, empty, with no work. */
+  line: readonly (SceneRect & Readonly<{ label: string }>)[];
 }>;
 
 export type SceneWorkerPlacement = Readonly<{
@@ -143,7 +161,9 @@ const CORRIDOR = 32;
 export const COMMON_WIDTH = 192;
 export const PADDING = 16;
 export const ROOM_LEFT = PADDING + COMMON_WIDTH + 16 + CORRIDOR;
-const FLOOR_TOP = 48;
+// The outbound line runs along the top beside the desks; halls start below it, a constant away.
+const LINE_TOP = 32;
+const FLOOR_TOP = LINE_TOP + 40 + 16;
 export const WORKER_GAP = 40;
 export const WORKER_SIZE = 20;
 const BAY = 176;
@@ -267,7 +287,17 @@ export function layoutScene(graph: SceneGraph): SceneLayout {
   const parties = [...graph.parties].sort((left, right) => compareText(left.id, right.id));
   const gates = parties.map((machine, index): SceneGate => ({ machine, x: fence - 6, y: FLOOR_TOP + 16 + index * 44, width: 12, height: 28 }));
   const height = Math.max(224, top, ...gates.map((gate) => gate.y + gate.height + 24));
-  return { width: fence + 140, height, rooms, headings, corridors, gates, fence, restingTop: 168 };
+  const line = LINE_STATIONS.map((label, index) => ({ label, x: ROOM_LEFT + index * BAY, y: LINE_TOP, width: BAY, height: 40 }));
+  return { width: fence + 140, height, rooms, headings, corridors, gates, fence, restingTop: 168, line };
+}
+
+/** Newest first within a station; past the eighth, crates wait unseen behind the "+N". */
+export function placeCrates(layout: SceneLayout, crates: readonly SceneCrate[]) {
+  const counts = [0, 0, 0, 0] as [number, number, number, number];
+  return [...crates].sort((left, right) => right.number - left.number || compareText(left.id, right.id)).map((crate) => {
+    const station = layout.line[crate.station]!, slot = counts[crate.station]++;
+    return { crate, shown: slot < LINE_SLOTS, x: station.x + 16 + Math.min(slot, LINE_SLOTS) * 18, y: station.y + 28 };
+  });
 }
 
 export function placeWorkers(layout: SceneLayout, workers: readonly SceneWorker[], social: "nearby" | "commons" = "commons"): readonly SceneWorkerPlacement[] {

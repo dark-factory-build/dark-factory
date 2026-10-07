@@ -22,6 +22,8 @@ export function useProduction(projects: readonly string[], call: ProjectContentC
   const [overflow, setOverflow] = useState(0);
   const generation = useRef(0);
   const runtimeGeneration = useRef(-1);
+  // The project list those records were read for: a switch is a first read too.
+  const readKey = useRef("");
   const caller = useRef(call); caller.current = call;
   const connected = call !== undefined;
   const key = JSON.stringify(projects);
@@ -54,7 +56,7 @@ export function useProduction(projects: readonly string[], call: ProjectContentC
             if (page === PAGES - 1) remaining += Math.max(0, result.total - offset);
           }
         }
-        if (!stopped) { runtimeGeneration.current = current; setRuntime(currentRuntime); setRelease(currentRelease); setRecords(next); setOverflow(remaining); setError(""); }
+        if (!stopped) { runtimeGeneration.current = current; readKey.current = key; setRuntime(currentRuntime); setRelease(currentRelease); setRecords(next); setOverflow(remaining); setError(""); }
       } catch { if (!stopped) setError("Production observation unavailable. Previously read work is retained."); }
       finally { busy = false; }
     };
@@ -68,5 +70,7 @@ export function useProduction(projects: readonly string[], call: ProjectContentC
   const notices = scoped.filter((record) => record.kind === "repository" && (record.document.unavailable || record.document.overflow)).map((record) => `${record.repository}: ${record.document.unavailable ? "some external evidence is unavailable" : "observation is bounded"}${record.document.overflow ? "; additional external records exist" : ""}.`);
   // The runtime identity belongs to this connection and is dropped when it goes;
   // the published release is a repository fact that no reconnect invalidates.
-  return { runtime: connected && runtimeGeneration.current === generation.current ? runtime : undefined, release, notices, records: scoped, error, overflow };
+  const read = connected && runtimeGeneration.current === generation.current && readKey.current === key;
+  // `read`: the records were read on this connection, so their changes are news, not history.
+  return { runtime: read ? runtime : undefined, read, release, notices, records: scoped, error, overflow };
 }

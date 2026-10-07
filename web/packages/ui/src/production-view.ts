@@ -1,3 +1,5 @@
+import type { SceneCrate } from "./factory-scene/scene.js";
+
 /** Facts persisted by the operator production projection. */
 export type ProductionRecord = Readonly<{
   project_id?: string;
@@ -50,6 +52,8 @@ export type ProductionContraption = Readonly<{
   deliveries: readonly (ProductionDelivery & { verified: boolean })[];
   reviewers: readonly ProductionReviewer[];
   completed: boolean; completedAt: number; status: string; nextAction: string;
+  /** When its records were last observed: the snapshot's own clock. */
+  observedAt: number;
 }>;
 export type ProductionView = Readonly<{
   contraptions: Readonly<Record<string, ProductionContraption>>;
@@ -185,6 +189,27 @@ export function productionStages(item: ProductionContraption): string[] {
   return correction ? ["Correction", ci] : merge ? [merge, ci] : [review, ci];
 }
 
+const SHIPPED_FOR = 24 * 60 * 60_000;
+
+/**
+ * Each open or merged pull request as a crate on the floor's outbound line, at
+ * the first gate its records have not passed: review, then current-head
+ * checks, then the merge queue; merged is shipped for a day after its
+ * recorded merge, timed by the records' own latest observation, never the
+ * viewer's clock. Closed unmerged is gone.
+ */
+export function projectCrates(items: readonly ProductionContraption[]): SceneCrate[] {
+  const now = Math.max(0, ...items.map((item) => item.observedAt));
+  return items.flatMap((item) => {
+    const pr = item.pullRequest;
+    if (pr === undefined || pr.state !== "open" && (pr.state !== "merged" || now - item.completedAt > SHIPPED_FOR)) return [];
+    const stages = productionStages(item);
+    const station = pr.state === "merged" ? 3 : stages[0] === "Merge queued" ? 2 : item.review.allowed ? 1 : 0;
+    return [{ id: productionKey(item), number: pr.number, title: pr.title, station, stage: stages.join(" · "), taskIds: item.tasks,
+      fault: stages.some((stage) => stage === "Correction" || stage === "CI failed" || stage === "Delivery blocked") }];
+  });
+}
+
 /** Pure, bounded derivation. `now` is an explicit observation time, never a timer. */
 export function deriveProductionView(records: readonly ProductionRecord[], now = 0): ProductionView {
   const latest = latestRecords(records);
@@ -220,7 +245,7 @@ export function deriveProductionView(records: readonly ProductionRecord[], now =
     const closedUnmerged = pr?.state === "closed" && !pr.merge;
     const completed = closedUnmerged || pr?.state === "merged" && pullDeliveries.length > 0 && latestDestinations(pullDeliveries).every((delivery) => delivery.verified);
     const doc = construction ? object(construction.document) : {};
-    contraptions[key] = { source, visualId: item.visualId, projectId: item.scope.projectId, repository: item.scope.repository, construction: construction ? { title: text(doc.title), phase: text(doc.phase), status: text(doc.status), head: text(doc.head), task_id: text(doc.task_id), blocked_reason: text(doc.blocked_reason), has_changes: typeof doc.has_changes === "boolean" ? doc.has_changes : undefined, needs_you: doc.needs_you === true } : undefined, pullRequest: pr, tasks: [...new Set([...(construction?.tasks ?? []), ...(pull?.tasks ?? [])])], missions: [...new Set([...(construction?.missions ?? []), ...(pull?.missions ?? [])])], linksOverflow: Boolean(construction?.links_overflow || pull?.links_overflow), review: reviewView, checks: pullChecks, deliveries: pullDeliveries, reviewers: assigned, completed: Boolean(completed), completedAt: Date.parse(pr?.merged_at ?? "") || pull?.observed_at || 0, status: completed ? (closedUnmerged ? "closed-unmerged" : "delivered") : text(pr?.state) || text(doc.status) || text(doc.phase) || "construction", nextAction: pr ? nextAction(pr, reviewView, pullChecks, pullDeliveries) : constructionNextAction(doc) };
+    contraptions[key] = { source, visualId: item.visualId, projectId: item.scope.projectId, repository: item.scope.repository, construction: construction ? { title: text(doc.title), phase: text(doc.phase), status: text(doc.status), head: text(doc.head), task_id: text(doc.task_id), blocked_reason: text(doc.blocked_reason), has_changes: typeof doc.has_changes === "boolean" ? doc.has_changes : undefined, needs_you: doc.needs_you === true } : undefined, pullRequest: pr, tasks: [...new Set([...(construction?.tasks ?? []), ...(pull?.tasks ?? [])])], missions: [...new Set([...(construction?.missions ?? []), ...(pull?.missions ?? [])])], linksOverflow: Boolean(construction?.links_overflow || pull?.links_overflow), review: reviewView, checks: pullChecks, deliveries: pullDeliveries, reviewers: assigned, completed: Boolean(completed), completedAt: Date.parse(pr?.merged_at ?? "") || pull?.observed_at || 0, observedAt: Math.max(pull?.observed_at ?? 0, construction?.observed_at ?? 0), status: completed ? (closedUnmerged ? "closed-unmerged" : "delivered") : text(pr?.state) || text(doc.status) || text(doc.phase) || "construction", nextAction: pr ? nextAction(pr, reviewView, pullChecks, pullDeliveries) : constructionNextAction(doc) };
   }
   return { contraptions, checks, deliveries, reviewers };
 }

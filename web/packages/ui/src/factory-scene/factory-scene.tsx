@@ -11,7 +11,10 @@ import {
   placeErrands,
   breakRoomNook,
   proposalsForEntity,
+  placeCrates,
+  LINE_SLOTS,
   type RoomContent,
+  type SceneCrate,
   type SceneFlow,
   type SceneGraph,
   type SceneHall,
@@ -27,7 +30,7 @@ import { IconButton } from "../icons.js";
 import { DEFAULT_FLOOR_APPEARANCE, type FloorAppearance } from "../floor-appearance.js";
 import { breakRoomHabit, restingItem, workerFrames, workerPhase } from "./appearance.js";
 import { catAt, catBed, chats, gossip, type Seat } from "./idle-life.js";
-import { endsAt, messageAt, observe, send, type FloorMessage, type Seen } from "./messages.js";
+import { endsAt, messageAt, observe, observeCrates, send, type FloorMessage, type Seen } from "./messages.js";
 import { directionBetween, pointOnRoute, routeFromCurrent, routeBetween, samePoint, type WorkerMotion } from "./movement.js";
 import { spriteAtlas, spriteSheet, spriteSheetSize } from "./sprites/sprites.generated.js";
 
@@ -35,6 +38,8 @@ import { spriteAtlas, spriteSheet, spriteSheetSize } from "./sprites/sprites.gen
 
 export type FactorySceneProps = Readonly<{
   proposals?: { items: readonly SceneProposal[]; selected?: string; onSelect: (id: string) => void };
+  /** Change requests on the outbound line; selecting one uses `proposals.onSelect`. Undefined until read on this connection. */
+  crates?: readonly SceneCrate[];
   tools?: ReactNode;
   /** Read one machine's evidence when its inspector opens. */
   onLoadNode?: (nodeId: string) => Promise<OperationalNodeView>;
@@ -431,8 +436,11 @@ function SceneWorkers({ knowledgeCues, nearby, errands, furniture, restingSeats,
 }
 
 /** A disposable SVG projection of the operational world and current factory state. */
-export function FactoryScene({ proposals, tools, onLoadNode, onInvestigate, onDiscussSource, requestedEntity, onSelectEntity, onOpenLibrary, onOpenBoard, graph, workers, appearance = DEFAULT_FLOOR_APPEARANCE, selectedWorkerId, onSelectWorker, tasks = [], peerQuestions = NO_QUESTIONS, knowledgeCues = NO_CUES, selectedTaskId, onSelectTask, onOpenTasks, onOpenMissions, onSelectHumanRequest, projectId, connected = true, reading = false }: FactorySceneProps) {
+export function FactoryScene({ proposals, crates, tools, onLoadNode, onInvestigate, onDiscussSource, requestedEntity, onSelectEntity, onOpenLibrary, onOpenBoard, graph, workers, appearance = DEFAULT_FLOOR_APPEARANCE, selectedWorkerId, onSelectWorker, tasks = [], peerQuestions = NO_QUESTIONS, knowledgeCues = NO_CUES, selectedTaskId, onSelectTask, onOpenTasks, onOpenMissions, onSelectHumanRequest, projectId, connected = true, reading = false }: FactorySceneProps) {
   const [selectedId, setSelectedId] = useState<string>();
+  // The crate pointed at or focused: the machines its change touches are lit.
+  const [lit, setLit] = useState<string>();
+  const litIds = new Set(proposals?.items.find((proposal) => proposal.id === lit)?.operations.map((operation) => operation.entityId));
   const [search, setSearch] = useState("");
   const mapElement = useRef<HTMLDivElement>(null);
   const floorElement = useRef<SVGSVGElement>(null);
@@ -646,6 +654,7 @@ export function FactoryScene({ proposals, tools, onLoadNode, onInvestigate, onDi
           {...sceneAction(() => selectEntity(item.entityId))} aria-label={`Inspect ${machine.label}`} className="dfFactoryScene__target">
           <rect className="dfFactoryScene__focus" x={item.x - 4} y={item.y - 14} width={item.width + 8} height={item.height + 18} fill="transparent" />
           <Station item={item} machine={machine} selected={selectedId === item.entityId} />
+          {litIds.has(item.entityId) ? <rect data-lit="" className="dfFactoryScene__selection" x={item.x - 6} y={item.y - 6} width={item.width + 12} height={item.height + 12} /> : null}
           {[...new Map(edits.map((edit) => [`${edit.proposal.id}:${edit.operation.kind}`, edit])).values()].slice(0, 3).map(({ proposal, operation }, index) => <ProposalMark key={`${proposal.id}:${operation.path}`} proposalId={proposal.id} item={item} kind={operation.kind} index={index} stale={proposal.state !== "active"} />)}
         </g>;
       }))}
@@ -664,6 +673,8 @@ export function FactoryScene({ proposals, tools, onLoadNode, onInvestigate, onDi
           </g>;
         })}
       </g>
+
+      <WorkLine layout={layout} crates={crates} tasks={tasks} placements={placements} connected={connected} live={animate} onLight={setLit} onSelect={proposals?.onSelect} />
 
       <g data-tooltip="Discussion board" className={onOpenBoard ? "dfFactoryScene__target" : undefined} aria-label="Open discussion board" {...sceneAction(onOpenBoard === undefined ? undefined : () => onOpenBoard(projectId))} transform={`translate(${PADDING + 24} 90)`}><rect className="dfFactoryScene__focus" x="-8" y="-8" width="48" height="48" fill="transparent" /><g aria-hidden="true"><Frame name="prop.board" x={0} y={0} /><text x="0" y="30" fill="#d4ddd2" fontSize="10">BOARD</text></g></g>
       {(() => { const cue = knowledgeCues.filter((item) => item.board).at(-1); return cue === undefined ? null : <KnowledgeCueMark cue={cue} x={PADDING + 58} y={88} at="board" />; })()}
@@ -731,6 +742,69 @@ export function FactoryScene({ proposals, tools, onLoadNode, onInvestigate, onDi
 }
 
 const MAX_ZOOM = 4;
+
+/**
+ * Change requests on the outbound line to the fence. A crate stands where its
+ * records put it and moves only when they change: once along the line, or,
+ * when just opened, from the agent whose task opened it. Reconnecting is a
+ * first look, never a replay.
+ */
+function WorkLine({ layout, crates, tasks, placements, connected, live, onLight, onSelect }: {
+  layout: SceneLayout; crates: readonly SceneCrate[] | undefined; tasks: readonly SceneTask[]; placements: ReturnType<typeof placeWorkers>;
+  connected: boolean; live: boolean; onLight: (id: string | undefined) => void; onSelect?: (id: string) => void;
+}) {
+  const placed = useMemo(() => placeCrates(layout, crates ?? []), [layout, crates]);
+  const reduced = useReducedMotion();
+  const moving = live && !reduced;
+  const seen = useRef<ReadonlyMap<string, SceneCrate["station"]>>(undefined);
+  const resting = useRef(new Map<string, ScenePoint>());
+  const flights = useRef<readonly FloorMessage[]>([]);
+  const [clock, setClock] = useState(0);
+  useEffect(() => {
+    // Records not yet read on this connection are no look at all: the first read is history, never news.
+    if (!connected || crates === undefined) { seen.current = undefined; flights.current = []; return; }
+    const { seen: next, moves } = observeCrates(seen.current, crates);
+    seen.current = next;
+    const started = now(), slots = new Map(placed.map((spot) => [spot.crate.id, spot]));
+    const sent = (moving ? moves : []).flatMap(({ crate, from }) => {
+      const to = slots.get(crate.id)!;
+      const origin = from === undefined ? placements.find((placement) => tasks.some((task) => crate.taskIds.includes(task.id) && task.agentId === placement.id)) : resting.current.get(crate.id);
+      // Along the line it slides; from its author it is handed over like paper from the tray.
+      return !to.shown || origin === undefined ? [] : [send({ key: crate.id, kind: "assign", to: crate.id }, started, origin, from === undefined ? undefined : { points: [to], length: Math.hypot(to.x - origin.x, to.y - origin.y) }, 0)];
+    });
+    flights.current = [...new Map([...flights.current, ...sent].filter((flight) => flight.startedAt + flight.travel > started).map((flight) => [flight.key, flight])).values()].slice(-16);
+    resting.current = new Map(placed.map((spot) => [spot.crate.id, spot]));
+    setClock(started);
+  }, [placed, connected]);
+  useEffect(() => {
+    if (!moving || !flights.current.some((flight) => flight.startedAt + flight.travel > clock) || typeof requestAnimationFrame !== "function") return;
+    const frame = requestAnimationFrame((time) => setClock(time));
+    return () => cancelAnimationFrame(frame);
+    // A new snapshot may land in the same millisecond as the last, so it asks for frames itself.
+  }, [clock, moving, placed]);
+  if (crates === undefined || crates.length === 0) return null;
+  const belt = layout.line[0]!.y + 28;
+  return <g data-work-line="">
+    <path aria-hidden="true" d={`M${layout.line[0]!.x} ${belt + 3}H${layout.fence}`} className="b-base" />
+    {layout.line.map((station, index) => { const count = crates.filter((crate) => crate.station === index).length; return <g key={station.label} aria-hidden="true">
+      <rect x={station.x} y={station.y} width="2" height={station.height} className="md" />
+      <text x={station.x + 6} y={station.y + 9} className="dfPlant__label" fontSize="8">{station.label.toUpperCase()} · {count}</text>
+      {count > LINE_SLOTS ? <text data-crate-overflow={count - LINE_SLOTS} x={station.x + 10 + LINE_SLOTS * 18} y={belt + 3} className="dfPlant__small" fontSize="7">+{count - LINE_SLOTS}</text> : null}
+    </g>; })}
+    {placed.filter((spot) => spot.shown).map(({ crate, x, y }) => {
+      const flight = moving ? flights.current.find((candidate) => candidate.key === crate.id) : undefined;
+      const point = (flight === undefined ? undefined : messageAt(flight, { x, y }, clock).point) ?? { x, y };
+      return <g key={crate.id} data-crate={crate.id} data-crate-station={crate.station} data-fault={crate.fault ? "" : undefined} className="dfFactoryScene__target"
+        data-tooltip={`PR #${crate.number} · ${crate.title}\n${layout.line[crate.station]!.label} · ${crate.stage}`} aria-label={`PR #${crate.number} ${crate.title}: ${crate.stage}`}
+        {...sceneAction(onSelect === undefined ? undefined : () => onSelect(crate.id))} onPointerEnter={() => onLight(crate.id)} onPointerLeave={() => onLight(undefined)} onFocus={() => onLight(crate.id)} onBlur={() => onLight(undefined)}
+        transform={`translate(${point.x} ${point.y})`}>
+        <rect className="dfFactoryScene__focus" x="-9" y="-12" width="18" height="16" fill="transparent" />
+        <rect x="-7" y="-9" width="14" height="10" className="crate" />
+        {crate.fault ? <rect x="3" y="-12" width="6" height="6" className="redtag" /> : null}
+      </g>;
+    })}
+  </g>;
+}
 
 /**
  * The plant at a glance, always in view: halls painted by coverage, gates on
