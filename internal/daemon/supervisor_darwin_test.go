@@ -209,7 +209,9 @@ func runSupervisorCodexFixture() error {
 	if err != nil {
 		return err
 	}
-	if task.Task == "capacity" {
+	// The Library line follows every task; fixture directives precede it.
+	directive, _, _ := strings.Cut(task.Task, "\n\nProject knowledge")
+	if directive == "capacity" {
 		// Codex's capacity warning, glyph and message styled apart; the real
 		// CLI then idles at its prompt.
 		fmt.Print("\x1b[33m⚠\x1b[39m \x1b[1mSelected model is at capacity. Please try a different model.\x1b[22m\r\n")
@@ -225,7 +227,7 @@ func runSupervisorCodexFixture() error {
 	// An explicit target request must cross the runner, Change worker, provider
 	// profile and live daemon registry; task launch and status never select a
 	// project-latest tree.
-	target, overseer := strings.CutPrefix(task.Task, "handoff ")
+	target, overseer := strings.CutPrefix(directive, "handoff ")
 	if !overseer {
 		target = ""
 	}
@@ -799,7 +801,8 @@ func TestSupervisorCodexRetrievesExactTaskWithUsablePTY(t *testing.T) {
 		t.Fatalf("RunNext: %v", err)
 	}
 	fixture.assertTerminal(t, run, kernel.OutcomeSucceeded)
-	if run.Proposal == nil || run.Proposal.Result() != expectedTask+"\nPTY=120x40" {
+	library, _ := renderKnowledgeContext(kernel.ProviderCodex, run.ProjectID, nil, knowledgeContextBytes)
+	if run.Proposal == nil || run.Proposal.Result() != expectedTask+string(library)+"\nPTY=120x40" {
 		t.Fatalf("Codex task/PTY receipt = %q", run.Proposal.Result())
 	}
 	fixture.assertReleased(t, run)
