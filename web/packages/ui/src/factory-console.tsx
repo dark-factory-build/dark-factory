@@ -9,7 +9,7 @@ import { deriveProductionView, inProgressProduction, productionKey } from "./pro
 import { ProductionPanel, asTask } from "./production-panel.js";
 import { MissionsPanel } from "./missions-panel.js";
 import { RemoteInvitePanel } from "./remote-invite.js";
-import { workRows } from "./console-view.js";
+import { needsYou, workRows } from "./console-view.js";
 import { IconButton } from "./icons.js";
 import { Badge, SectionHeader } from "./console-kit.js";
 import { SpriteEditor } from "./factory-scene/sprite-editor.js";
@@ -235,8 +235,9 @@ export function FactoryConsole({
   // Routes into Work from outside it (floor, Library, Settings) reset the view first so the answer form or task is never hidden.
   const selectRequest = pickRequest === undefined ? undefined : (request: Parameters<typeof pickRequest>[0]) => { openWork(request.project_id, false); pickRequest(request); };
   const goTask = selectTask === undefined ? undefined : (id: string) => { openWork(projectId, false); selectTask(id); };
-  const rows = useMemo(() => workRows(scopedState, inProgressItems), [scopedState, inProgressItems]);
-  const needsYou = rows.filter((row) => row.state === "needs-you").length;
+  const sources = projectId === undefined ? undefined : intake?.get(projectId)?.sources;
+  const rows = useMemo(() => workRows(scopedState, inProgressItems, sources), [scopedState, inProgressItems, sources]);
+  const waiting = rows.filter(needsYou).length;
   const agent = selectedAgent === undefined ? undefined : scopedState?.agents.get(selectedAgent.id);
   const selectedDetail = (detail === "floor" ? "work" : detail) ?? (selectedAgent === undefined ? "work" : "agent");
   const [relatedTask, setRelatedTask] = useState<TaskItem>();
@@ -303,7 +304,7 @@ export function FactoryConsole({
         {onDetail === undefined ? null : <nav className="dfMobileNav dfConsoleViewToggle" aria-label="Console views">
           <button type="button" aria-pressed={detail === "floor" && view === "floor"} disabled={!ready} onClick={() => { onView?.("floor"); onDetail("floor"); }}>Floor</button>
           <button type="button" aria-pressed={detail === "floor" && view === "agents"} disabled={!ready || onView === undefined} onClick={() => { onView?.("agents"); onDetail("floor"); }}>Agents</button>
-          <IconButton icon="list" aria-pressed={detail !== "floor" && selectedDetail === "work"} disabled={!ready} onClick={showWork}>Work <Badge n={needsYou} /></IconButton>
+          <IconButton icon="list" aria-pressed={detail !== "floor" && selectedDetail === "work"} disabled={!ready} onClick={showWork}>Work <Badge n={waiting} /></IconButton>
           <IconButton icon="book" disabled={!ready} onClick={() => openKnowledge(false)}>Library</IconButton>
         </nav>}
         <div className="dfConsoleLayout">
@@ -329,7 +330,7 @@ export function FactoryConsole({
 
           <aside className="dfConsoleSidebar" aria-label="Selected detail">
             <div className="dfConsoleViewToggle" role="group" aria-label="Right panel">
-              <IconButton icon="list" aria-pressed={selectedDetail === "work"} disabled={!ready || onDetail === undefined} onClick={showWork}>Work <Badge n={needsYou} /></IconButton>
+              <IconButton icon="list" aria-pressed={selectedDetail === "work"} disabled={!ready || onDetail === undefined} onClick={showWork}>Work <Badge n={waiting} /></IconButton>
               <IconButton icon="terminal" aria-pressed={selectedDetail === "agent"} disabled={!ready || onDetail === undefined} onClick={() => onDetail?.("agent")}>Agent</IconButton>
               <IconButton icon="book" disabled={!ready} onClick={() => openKnowledge(false)}>Library</IconButton>
             </div>
@@ -367,7 +368,8 @@ export function FactoryConsole({
                 />}
                 onSelectProduction={selectProduction}
                 onMission={(task) => openMission(task.project_id, task.mission_id!)}
-                sources={projectId === undefined ? undefined : intake?.get(projectId)?.sources}
+                sources={sources}
+                onIntakeAction={ready ? onIntakeAction : undefined}
                 onManageSources={ready && onToggleSettings !== undefined ? () => { setSettingsTab(1); if (settingsOpen !== true) onToggleSettings(); } : undefined}
               /></div>
             </div>

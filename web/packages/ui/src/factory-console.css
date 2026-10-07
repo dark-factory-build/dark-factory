@@ -1210,7 +1210,7 @@ summary.dfConsoleItem__summary { cursor: pointer; }
 .dfProjectLibrary__documents button strong { display: block; margin-bottom: .25rem; }
 
 .dfStatus[data-stage$="passed"], .dfStatus[data-stage="succeeded"], .dfStatus[data-stage="working"], .dfStatus[data-stage="ready"], .dfStatus[data-stage="Delivered"], .dfStatus[data-stage="accepted"], .dfStatus[data-stage$="running"], .dfStatus[data-stage="Construction"], .dfStatus[data-stage="Deploying"], .dfStatus[data-stage="Merge"], .dfStatus[data-stage="Merge queued"] { color: var(--df-console-accent); }
-.dfStatus[data-stage="Blocked"], .dfStatus[data-stage="blocked"], .dfStatus[data-stage="needs-you"], .dfStatus[data-stage="open"], .dfStatus[data-stage="paused"], .dfStatus[data-stage="Delivery blocked"], .dfStatus[data-stage="Correction"], .dfStatus[data-stage="reopened"] { color: var(--df-console-warning); }
+.dfStatus[data-stage="Blocked"], .dfStatus[data-stage="blocked"], .dfStatus[data-stage="needs-you"], .dfStatus[data-stage="inbox"], .dfStatus[data-stage="open"], .dfStatus[data-stage="paused"], .dfStatus[data-stage="Delivery blocked"], .dfStatus[data-stage="Correction"], .dfStatus[data-stage="reopened"] { color: var(--df-console-warning); }
 .dfStatus[data-stage="Failed"], .dfStatus[data-stage="cancelled"], .dfStatus[data-stage$="failed"] { color: var(--df-console-alert); }
 
 .dfProjectLibrary button[data-knowledge-status="needs_revalidation"] { border-color: var(--df-console-warning); }

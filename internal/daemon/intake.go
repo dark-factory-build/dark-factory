@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"slices"
 	"strings"
 	"time"
 
@@ -283,6 +284,10 @@ func (daemon *Daemon) Intake(ctx context.Context, input api.IntakeInput) api.Int
 		accepted, acceptErr := daemon.store.AcceptIntakeSnapshot(ctx, source.ID, snapshot, at, source.Revision)
 		if acceptErr != nil {
 			return intakeFailure(acceptErr)
+		}
+		if poll := daemon.intakePolls[source.ID]; poll != nil {
+			// A fresh slice: a listed copy may still be encoding outside intakeMu.
+			poll.sync.Waiting = slices.DeleteFunc(slices.Clone(poll.sync.Waiting), func(candidate api.IntakeCandidate) bool { return candidate.Number == input.IssueNumber })
 		}
 		if accepted.WithdrawnAt != nil {
 			return api.IntakeResult{State: "withdrawn", AcceptanceID: accepted.ID.String(), TaskID: accepted.TaskID.String()}

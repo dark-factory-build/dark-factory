@@ -153,11 +153,12 @@ type Intake struct {
 	AcceptanceID     string               `json:"acceptance_id,omitempty"`
 }
 type IntakeSync struct {
-	LastAttemptAt Decimal `json:"last_attempt_at"`
-	LastSuccessAt Decimal `json:"last_success_at"`
-	ImportedTasks uint16  `json:"imported_tasks"`
-	State         string  `json:"state"`
-	Error         string  `json:"error"`
+	LastAttemptAt Decimal           `json:"last_attempt_at"`
+	LastSuccessAt Decimal           `json:"last_success_at"`
+	ImportedTasks uint16            `json:"imported_tasks"`
+	State         string            `json:"state"`
+	Error         string            `json:"error"`
+	Waiting       []IntakeCandidate `json:"waiting,omitempty"`
 }
 type IntakeSource struct {
 	LinearTeamID string      `json:"linear_team_id,omitempty"`
@@ -1030,11 +1031,15 @@ func validIntakeResult(value IntakeResult) bool {
 		if validateDynamicID(source.ID) != nil || validateDynamicID(source.ProjectID) != nil || source.GitHubRepositoryID == 0 && source.LinearTeamID == "" || source.GitHubRepositoryID != 0 && source.LinearTeamID != "" || source.GitHubRepositoryID > Decimal(MaxSQLiteInteger) || source.Revision == 0 || !validIntakeConfiguration(IntakeConfiguration{LinearTeamID: source.LinearTeamID, PriorityDefault: source.PriorityDefault, PriorityByLabel: source.PriorityByLabel, Repository: source.Repository, TargetRepositoryID: source.TargetRepositoryID, OverseerAgentID: source.OverseerAgentID, Label: source.Label, Policy: source.Policy, TrustedAuthors: source.TrustedAuthors, PollSeconds: source.PollSeconds, AdmissionLimit: source.AdmissionLimit}) {
 			return false
 		}
-		if source.Sync != nil && (source.Sync.LastAttemptAt > Decimal(MaxSQLiteInteger) || source.Sync.LastSuccessAt > Decimal(MaxSQLiteInteger) || source.Sync.ImportedTasks > 200 || (source.Sync.State != "ok" && source.Sync.State != "paused" && source.Sync.State != "error") || validateBoundedText(source.Sync.Error, 0, 128) != nil) {
+		if source.Sync != nil && (source.Sync.LastAttemptAt > Decimal(MaxSQLiteInteger) || source.Sync.LastSuccessAt > Decimal(MaxSQLiteInteger) || source.Sync.ImportedTasks > 200 || (source.Sync.State != "ok" && source.Sync.State != "paused" && source.Sync.State != "error") || validateBoundedText(source.Sync.Error, 0, 128) != nil || len(source.Sync.Waiting) > 100 || !validIntakeCandidates(source.Sync.Waiting)) {
 			return false
 		}
 	}
-	for _, candidate := range value.Candidates {
+	return validIntakeCandidates(value.Candidates)
+}
+
+func validIntakeCandidates(candidates []IntakeCandidate) bool {
+	for _, candidate := range candidates {
 		if candidate.Number == 0 || candidate.Number > Decimal(MaxSQLiteInteger) || validateBoundedText(candidate.URL, 0, 4096) != nil || validateBoundedText(candidate.Title, 0, 900) != nil || validateBoundedText(candidate.Body, 0, 5000) != nil || validateBoundedText(candidate.Author, 0, 44) != nil || len(candidate.Labels) > MaxSnapshotEntities || len(candidate.ContentHash) != 64 || validateBoundedText(candidate.Reason, 1, 128) != nil || candidate.AcceptanceID != "" && validateDynamicID(candidate.AcceptanceID) != nil || candidate.TaskID != "" && validateDynamicID(candidate.TaskID) != nil {
 			return false
 		}

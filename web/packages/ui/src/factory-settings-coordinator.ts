@@ -131,6 +131,8 @@ export class FactorySettingsCoordinator {
 
   async intakeAction(projectId: string, request: Parameters<BrowserSession["intake"]>[0]): Promise<void> {
     if (!this.#owner.ready() || this.#owner.session() === undefined) return;
+    // Accepting from Work refreshes the local list; only an open issue review reads the backlog again.
+    const previewed = this.#intake.get(projectId)?.candidates !== undefined;
     if (["preview","refresh","accept","update"].includes(request.action)) {
       const prior = this.#intake.get(projectId);
       if (prior !== undefined) this.#intake.set(projectId, { ...prior, candidates: undefined, reviewed_revision: undefined, next_page: undefined });
@@ -153,8 +155,11 @@ export class FactorySettingsCoordinator {
         ...(result.imported_tasks === undefined ? { imported_tasks: [] } : {}),
       }));
       if (request.action === "accept" && result.state === "imported" && request.source_id !== undefined) {
-        const preview = await session.intake({action:"preview",source_id:request.source_id,page:1});
-        if (current()) this.#intake.set(projectId,{...this.#intake.get(projectId),...preview});
+        for (const next of [{action:"list" as const,project_id:projectId}, ...(previewed ? [{action:"preview" as const,source_id:request.source_id,page:1}] : [])]) {
+          const refreshed = await session.intake(next);
+          if (!current()) return;
+          this.#intake.set(projectId,{...this.#intake.get(projectId),...refreshed});
+        }
       }
     }, { scoped: true, overlap: true });
   }

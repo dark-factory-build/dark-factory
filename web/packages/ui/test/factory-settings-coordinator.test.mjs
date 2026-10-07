@@ -231,13 +231,20 @@ test("approval adds to queue and refreshes the same source without another click
     calls.push(request);
     if (request.action === "accept") return {state:"accepted",acceptance_id:"receipt"};
     if (request.action === "import") return {state:"imported",task_id:"task"};
+    if (request.action === "list") return {state:"ok",sources:[]};
     if (request.action === "preview") return {state:"ok",source_id:"source",reviewed_revision:1n,candidates:[{reason:"already_accepted",task_id:"task"}]};
     throw new Error(request.action);
   }};
   const coordinator = new FactorySettingsCoordinator({session:()=>session,ready:()=>true,generation:()=>1,current:()=>true,errorCode:()=>"error",publish(){}});
-  await coordinator.intakeAction("project",{action:"accept",source_id:"source",expected_revision:1n,issue_number:7n,content_hash:"ab".repeat(32)});
-  assert.deepEqual(calls.slice(1),[{action:"import",acceptance_id:"receipt"},{action:"preview",source_id:"source",page:1}]);
+  const accept = {action:"accept",source_id:"source",expected_revision:1n,issue_number:7n,content_hash:"ab".repeat(32)};
+  await coordinator.intakeAction("project",accept);
+  assert.deepEqual(calls.slice(1),[{action:"import",acceptance_id:"receipt"},{action:"list",project_id:"project"}],"accepting from Work reads no backlog");
+  calls.length = 0;
+  await coordinator.intakeAction("project",{action:"preview",source_id:"source",page:1});
+  await coordinator.intakeAction("project",accept);
+  assert.deepEqual(calls.slice(2),[{action:"import",acceptance_id:"receipt"},{action:"list",project_id:"project"},{action:"preview",source_id:"source",page:1}]);
   assert.equal(coordinator.intake.get("project").candidates[0].task_id,"task");
+  assert.deepEqual(coordinator.intake.get("project").sources,[]);
 });
 
 test("an acceptance response from a replaced session cannot trigger import", async () => {
