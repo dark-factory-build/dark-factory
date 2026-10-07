@@ -50,3 +50,25 @@ test("reconnect requires a new serving-runtime observation before confirming its
     if (previousDocument === undefined) delete globalThis.document; else globalThis.document = previousDocument;
   }
 });
+
+test("switching projects is a first read too: nothing read for the new list counts until it arrives", async () => {
+  const previousDocument = globalThis.document;
+  globalThis.document = Object.assign(new EventTarget(), { visibilityState: "visible" });
+  const page = { records: [], total: 0, next_offset: 0 };
+  const seen = [];
+  let tree, resolve;
+  function Probe({ projects, call }) { const state = useProduction(projects, call); seen.push([projects.join(), state.read]); return null; }
+  try {
+    await act(async () => { tree = create(createElement(Probe, { projects: ["a"], call: async () => page })); });
+    assert.deepEqual(seen.at(-1), ["a", true]);
+    const pending = new Promise((done) => { resolve = done; });
+    seen.length = 0;
+    await act(async () => { tree.update(createElement(Probe, { projects: ["b"], call: () => pending })); });
+    assert.ok(seen.length > 0 && seen.every(([projects, read]) => projects === "b" && read === false), `not read for b, from its first render: ${JSON.stringify(seen)}`);
+    await act(async () => { resolve(page); await pending; });
+    assert.deepEqual(seen.at(-1), ["b", true]);
+  } finally {
+    if (tree) await act(async () => tree.unmount());
+    if (previousDocument === undefined) delete globalThis.document; else globalThis.document = previousDocument;
+  }
+});
