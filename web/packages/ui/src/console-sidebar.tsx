@@ -643,7 +643,6 @@ export function SettingsDialog({
   intake,
   intakePending,
   intakeErrors,
-  onLoadIntake,
   onIntakeAction,
   onSelectTask,
   initialTab,
@@ -679,7 +678,7 @@ export function SettingsDialog({
   onSelectTask?: (id:string)=>void;
   /** The tab to open on; 1 is Connections. */
   initialTab?: number;
-  intake?: ReadonlyMap<string, IntakeView>; intakePending?: ReadonlySet<string>; intakeErrors?: ReadonlyMap<string, string>; onLoadIntake?: (projectId: string) => void; onIntakeAction?: (projectId: string, request: IntakeBody) => void;
+  intake?: ReadonlyMap<string, IntakeView>; intakePending?: ReadonlySet<string>; intakeErrors?: ReadonlyMap<string, string>; onIntakeAction?: (projectId: string, request: IntakeBody) => void;
   /** A self-contained "PAIR A PHONE" surface mounts here. */
   pairing?: ReactNode;
   /** The build of the daemon answering this connection, observed not asserted. */
@@ -717,7 +716,7 @@ export function SettingsDialog({
           onRefresh={onLoadAccounts}
         />
         <GitHubSection github={github} onGitHub={onGitHub} />
-        <IntakeSection active={tab === 1} projectId={projectId} github={github} onSelectTask={onSelectTask} state={state} repositories={repositories} intake={intake} pending={intakePending} errors={intakeErrors} onLoad={onLoadIntake} onLoadRepositories={onLoadRepositories} onAction={onIntakeAction} />
+        <IntakeSection active={tab === 1} projectId={projectId} github={github} onSelectTask={onSelectTask} state={state} repositories={repositories} intake={intake} pending={intakePending} errors={intakeErrors} onLoadRepositories={onLoadRepositories} onAction={onIntakeAction} />
     </> },
     { label: "Devices", content: <section className="dfConsoleSidebar__section" aria-label="PAIRING">
         <h3>Devices &amp; pairing</h3>
@@ -1118,7 +1117,7 @@ export function HumanRequestPanel({
   );
 }
 
-function IntakeSection({ projectId: headerProject, active, state, repositories, intake, pending, errors, onLoad, onLoadRepositories, onAction, github, onSelectTask }: { projectId?: string; active: boolean; state: StateView | undefined; repositories?: ReadonlyMap<string, readonly RepositoryView[]>; intake?: ReadonlyMap<string, IntakeView>; pending?: ReadonlySet<string>; errors?: ReadonlyMap<string, string>; onLoad?: (projectId: string) => void; onLoadRepositories?: (projectId: string) => void; onAction?: (projectId: string, request: IntakeBody) => void; github?: FactoryGitHubView; onSelectTask?: (id:string)=>void }) {
+function IntakeSection({ projectId: headerProject, active, state, repositories, intake, pending, errors, onLoadRepositories, onAction, github, onSelectTask }: { projectId?: string; active: boolean; state: StateView | undefined; repositories?: ReadonlyMap<string, readonly RepositoryView[]>; intake?: ReadonlyMap<string, IntakeView>; pending?: ReadonlySet<string>; errors?: ReadonlyMap<string, string>; onLoadRepositories?: (projectId: string) => void; onAction?: (projectId: string, request: IntakeBody) => void; github?: FactoryGitHubView; onSelectTask?: (id:string)=>void }) {
   const projects = state === undefined ? [] : [...state.projects.values()];
   const [sourceSelection, setSourceSelection] = useState(""), [adding, setAdding] = useState(false);
   const projectId = headerProject ?? (projects.length === 1 ? projects[0]!.id : undefined);
@@ -1126,8 +1125,8 @@ function IntakeSection({ projectId: headerProject, active, state, repositories, 
   const sources = result?.sources ?? [];
   const source = adding ? undefined : sources.find((item) => item.id === sourceSelection) ?? sources[0];
   const busy = projectId !== undefined && (pending?.has(projectId) ?? false);
-  const callbacks = useRef({onLoad,onLoadRepositories,onAction}); callbacks.current={onLoad,onLoadRepositories,onAction};
-  useEffect(() => { if (active && projectId) { callbacks.current.onLoad?.(projectId); callbacks.current.onLoadRepositories?.(projectId); } }, [active,projectId,onLoad !== undefined,onLoadRepositories !== undefined]);
+  const callbacks = useRef({onLoadRepositories,onAction}); callbacks.current={onLoadRepositories,onAction};
+  useEffect(() => { if (active && projectId) { callbacks.current.onLoadRepositories?.(projectId); } }, [active,projectId,onLoadRepositories !== undefined]);
   useEffect(() => { if (active && projectId && source) callbacks.current.onAction?.(projectId,{action:"preview",source_id:source.id,page:1}); }, [active,projectId,source?.id,source?.revision]);
   const act = (request:IntakeBody) => { if(projectId) onAction?.(projectId,request); };
   const project = projects.find((item)=>item.id===projectId);
