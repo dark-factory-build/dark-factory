@@ -127,7 +127,7 @@ test("disconnected source and revision evidence remains readable without enabled
     const markup = renderToStaticMarkup(createElement(ProductionPanel, { items: [item], selected: productionKey(item), onSelect() {}, connected: false }));
     for (const evidence of ["Last observed state", "Disconnected. This is the last observed state.", "Source details out of date", "before.go", "after.go", "observed-dirty-tree", "Commit checks and approval do not cover these edits.", active.pullRequest.head]) assert.ok(markup.includes(evidence));
     assert.ok(tree.root.findAllByType("button").filter((button) => button.children.join("").startsWith("Open ")).every((button) => button.props.disabled));
-    assert.equal(tree.root.findAllByType("button").find((button) => button.children.join("") === "← Back to Changes").props.disabled, undefined);
+    assert.equal(tree.root.findAllByType("button").find((button) => button.props.children.some?.((child) => child === "Back to Changes")).props.disabled, undefined);
   } finally { if (tree) await act(async () => tree.unmount()); }
 });
 

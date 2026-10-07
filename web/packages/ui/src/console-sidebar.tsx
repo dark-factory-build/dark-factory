@@ -6,6 +6,8 @@ import { rankLabel } from "./console-screens.js";
 import { AgentSprite } from "./factory-scene/factory-scene.js";
 import { agentStatus, agentCurrentTask, agentActivity } from "./console-view.js";
 import { AnswerControls } from "./console-interactions.js";
+import { Icon, IconButton } from "./icons.js";
+import { SectionHeader, Status, formatTime } from "./console-kit.js";
 import type { FloorAppearance } from "./floor-appearance.js";
 import type { PublishedRelease, RuntimeBuild } from "./production-data.js";
 
@@ -76,9 +78,9 @@ export function AgentPanel({
   const errorCopy = edit?.target === agent.id ? editErrorCopy(edit) : undefined;
   const archived = agent.archived === true;
   const queueHint = !archived && agent.paused
-    ? "QUEUE PAUSED"
+    ? "Queue paused"
     : current === undefined && queued.length > 0
-      ? "QUEUED · WAITING FOR CAPACITY"
+      ? "Queued · waiting for capacity"
       : undefined;
   // A form remounts when the served value moves under it and when its own
   // edit is refused, so a rejected change reverts instead of being resent on
@@ -92,7 +94,7 @@ export function AgentPanel({
       <div className="dfConsoleSidebar__heading">
         <button type="button" className="dfAgentSpriteEdit" aria-label={`Edit appearance for ${agent.name}`} onClick={() => onEditAppearance?.(agent)} disabled={archived || onEditAppearance === undefined}>
           <AgentSprite agent={agent} activity={state === undefined ? "waiting" : agentActivity(agent, state)} />
-          <svg className="dfAgentSpriteEdit__icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 11.5 10.5 4 12 5.5 4.5 13 2 14Zm7-8L11.5 2 14 4.5 12.5 6Z" /></svg>
+          <Icon name="pencil" className="dfAgentSpriteEdit__icon" />
         </button>
         <div>
           <p className="dfFactoryConsole__eyebrow">{rankLabel(agent.role)} · {agent.provider}{agent.effective_model === "" ? "" : ` · ${agent.effective_model}`}</p>
@@ -101,7 +103,7 @@ export function AgentPanel({
         </div>
       </div>
 
-      <p className="dfConsoleSidebar__status">{archived ? "archived" : activity === "needs-you" ? "! needs you" : activity}</p>
+      <p className="dfConsoleSidebar__status"><Status stage={archived ? "archived" : activity} /></p>
       {queueHint === undefined ? null : <p className="dfConsoleSidebar__inherit">{queueHint}</p>}
 
       {archived ? null : <div className="dfConsoleViewToggle" role="group" aria-label="Agent controls">
@@ -127,13 +129,6 @@ export function AgentPanel({
   );
 }
 
-function dateLabel(value: bigint | undefined): string {
-  if (value === undefined || value > BigInt(Number.MAX_SAFE_INTEGER)) return "DATE UNAVAILABLE";
-  const date = new Date(Number(value));
-  return Number.isNaN(date.valueOf()) ? "DATE UNAVAILABLE" : date.toISOString().replace("T", " ").replace(".000Z", " UTC");
-}
-
-
 function pullRequests(value: string): readonly Readonly<{ href: string; label: string }>[] {
   const found = new Map<string, string>();
   for (const match of value.matchAll(/https:\/\/github\.com\/([A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?)\/([A-Za-z0-9_.-]+)\/pull\/([1-9][0-9]*)\b/g)) {
@@ -154,7 +149,7 @@ export function ConsoleDialog({ label, title, className = "", onClose, children 
   const close = () => dialog.current?.close();
   return <dialog ref={dialog} className={`dfConsoleDialog ${className}`.trim()} aria-label={label} onClose={onClose} onClick={(event) => { if (event.target === dialog.current) close(); }}>
     <div className="dfConsoleSidebar__panel">
-      <div className="dfConsoleSidebar__heading"><h2>{title}</h2>{onClose === undefined ? null : <button type="button" onClick={close}>CLOSE</button>}</div>
+      <SectionHeader as="h2" title={title} actions={onClose === undefined ? null : <IconButton icon="close" aria-label="Close" onClick={close} />} />
       {children}
     </div>
   </dialog>;
@@ -200,18 +195,18 @@ function RecentWork({
   }, [open, agent.id, completionRevision]);
   const selected = page.find((task) => task.id === selectedId) ?? page[0];
   return <div className="dfConsoleRecentWork dfConsoleSidebar__section">
-    <button type="button" onClick={() => setOpen(true)}>RECENT WORK{total === undefined ? "" : ` · ${total}`}</button>
-    {!open ? null : <ConsoleDialog className="dfRecentWorkDialog" label={`Recent work for ${agent.name}`} title={`RECENT WORK · ${agent.name}`} onClose={() => setOpen(false)}>
-        {failed ? <p role="alert">RECENT WORK UNAVAILABLE <button type="button" onClick={() => load(false)}>RETRY</button></p> : null}
+    <button type="button" onClick={() => setOpen(true)}>Recent work{total === undefined ? "" : ` · ${total}`}</button>
+    {!open ? null : <ConsoleDialog className="dfRecentWorkDialog" label={`Recent work for ${agent.name}`} title={`Recent work · ${agent.name}`} onClose={() => setOpen(false)}>
+        {failed ? <p role="alert">Recent work unavailable <button type="button" onClick={() => load(false)}>Retry</button></p> : null}
         <div className="dfRecentWorkLayout">
           <nav aria-label="Completed work">
             <p>{total === undefined ? "Loading work…" : `${total} completed or blocked tasks`}</p>
             <ol className="dfConsoleItems">{page.map((task) => <li key={task.id}>
               <button type="button" className="dfRecentWorkRow" aria-pressed={selected?.id === task.id} onClick={() => setSelectedId(task.id)}>
-                <strong>{task.title}</strong><span>{task.status.replaceAll("_", " ")}</span><time>{dateLabel(task.updated_at_ms)}</time>
+                <strong>{task.title}</strong><Status stage={task.status} /><time>{formatTime(task.updated_at_ms)}</time>
               </button>
             </li>)}</ol>
-            {!hasMore ? null : <button type="button" disabled={pending} onClick={() => load(true)}>{pending ? "LOADING" : "SHOW MORE"}</button>}
+            {!hasMore ? null : <button type="button" disabled={pending} onClick={() => load(true)}>{pending ? "Loading" : "Show more"}</button>}
           </nav>
           {selected === undefined ? <p>{pending ? "Loading recent work…" : "No completed or blocked tasks."}</p> : <TaskDetail key={`${selected.id}:${selected.revision}`} task={selected} onLoadTaskDetail={onLoadTaskDetail} onLoadTaskHistory={onLoadTaskHistory} />}
         </div>
@@ -241,13 +236,13 @@ export function TaskDetail({ task, onLoadTaskDetail, onLoadTaskHistory }: {
     void historyLoader.current?.(task).then((loaded) => { if (live) { setHistory(loaded); setHistoryError(false); } }).catch(() => { if (live) setHistoryError(true); });
     return () => { live = false; };
   }, [task.id, task.revision]);
-  const taskDate = dateLabel(task.updated_at_ms);
+  const taskDate = formatTime(task.updated_at_ms);
   const links = brief === undefined ? [] : pullRequests(`${brief.outcome ?? ""}\n${brief.feedback}`);
   return <article className="dfRecentWorkDetail" aria-label="Work details">
     <h3>{task.title}</h3>
-    <p>{task.status.replaceAll("_", " ")}{taskDate === "DATE UNAVAILABLE" ? null : <> · <time title={taskDate}>{new Date(Number(task.updated_at_ms)).toLocaleString("en-GB", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", timeZone: "UTC" })} UTC</time></>}</p>
-    {detailError || onLoadTaskDetail === undefined ? <p role="alert">DETAIL UNAVAILABLE</p> : brief === undefined ? <p>LOADING DETAILS</p> : <>
-      {brief.outcome ? <><h4>OUTCOME</h4><p className="dfRecentWorkText">{brief.outcome}</p></> : ["running", "queued"].includes(task.status) ? null : <p>No recorded outcome.</p>}
+    <p><Status stage={task.status} />{taskDate === "" ? null : <> · <time>{taskDate}</time></>}</p>
+    {detailError || onLoadTaskDetail === undefined ? <p role="alert">Detail unavailable</p> : brief === undefined ? <p>Loading details</p> : <>
+      {brief.outcome ? <><h4>Outcome</h4><p className="dfRecentWorkText">{brief.outcome}</p></> : ["running", "queued"].includes(task.status) ? null : <p>No recorded outcome.</p>}
       {links.length === 0 ? null : <p>{links.map((link) => <a key={link.href} href={link.href} target="_blank" rel="noreferrer">PR · {link.label}</a>)}</p>}
       {brief.instruction === "" ? null : <details><summary>Instruction</summary><p className="dfRecentWorkText">{brief.instruction}</p></details>}
       {brief.feedback === "" ? null : <details><summary>Review feedback</summary><p className="dfRecentWorkText">{brief.feedback}</p></details>}
@@ -259,7 +254,7 @@ export function TaskDetail({ task, onLoadTaskDetail, onLoadTaskHistory }: {
       }} />}
     </>}
     <details><summary>History</summary>
-      {historyError ? <p role="alert">THE FACTORY REFUSED THIS HISTORY</p> : onLoadTaskHistory === undefined ? <p>HISTORY UNAVAILABLE</p> : history === undefined ? <p>LOADING HISTORY</p> : history.entries.length === 0 ? <p>No history.</p> : <ol>{history.entries.map((entry) => <li key={entry.operationId}><strong>{entry.kind} · {entry.status}</strong><p>{entry.actor}{entry.body === "" ? "" : ` · ${entry.body}`}</p><time>{dateLabel(entry.createdAtMs)}</time></li>)}</ol>}
+      {historyError ? <p role="alert">The factory refused this history</p> : onLoadTaskHistory === undefined ? <p>History unavailable</p> : history === undefined ? <p>Loading history</p> : history.entries.length === 0 ? <p>No history.</p> : <ol>{history.entries.map((entry) => <li key={entry.operationId}><strong>{entry.kind} · {entry.status}</strong><p>{entry.actor}{entry.body === "" ? "" : ` · ${entry.body}`}</p><time>{formatTime(entry.createdAtMs)}</time></li>)}</ol>}
       {history?.entries.length === 32 ? <p>Showing the newest 32 events.</p> : null}
     </details>
   </article>;
@@ -300,10 +295,10 @@ export function QueuePanel({
     // An orchestrator's passes are its own rule at work; they live on its Agent tab.
     const rows = tasks.filter((task) => task.status === status && state.agents.get(task.assigned_agent_id)?.role !== "orchestrator");
     return rows.length === 0 ? null : <section className="dfConsoleSidebar__section" aria-label={`${label} tasks`}>
-      <h3>{label} <span>{rows.length}</span></h3>
+      <SectionHeader title={label} count={rows.length} />
       <ul className="dfConsoleItems">{rows.map((task) => <li className="dfConsoleItem" key={task.id}><div className="dfConsoleItem__summary">
         <button type="button" className="dfConsoleItem__taskTitle" disabled={!ready || onSelectTask === undefined} aria-pressed={selectedTaskId === task.id} onClick={() => onSelectTask?.(task.id)}>{task.title}</button>
-        <span className="dfConsoleItem__meta">{state.projects.get(task.project_id)?.name ?? task.project_id} · {name(task)}{status === "blocked" && task.updated_at_ms !== undefined ? ` · since ${dateLabel(task.updated_at_ms)}` : ""}</span>
+        <span className="dfConsoleItem__meta">{state.projects.get(task.project_id)?.name ?? task.project_id} · {name(task)}{status === "blocked" && formatTime(task.updated_at_ms) !== "" ? ` · since ${formatTime(task.updated_at_ms)}` : ""}</span>
         {status === "blocked" && task.blocked_reason ? <p className="dfConsoleItem__meta">{task.blocked_reason}</p> : null}
         {status !== "blocked" || onEditTask === undefined ? null : <><button type="button" aria-label={`Retry ${task.title}`} disabled={!ready || edit?.pending === true} onClick={() => { void onEditTask(task, { retry: true }); }}>Retry</button><button type="button" aria-label={`Cancel ${task.title}`} disabled={!ready || edit?.pending === true} onClick={() => { void onEditTask(task, { cancel: true }); }}>Cancel</button></>}
       </div></li>)}</ul>
@@ -317,7 +312,7 @@ export function QueuePanel({
     {opened("blocked", "Blocked")}
     {opened("running", "Running")}
     <section className="dfConsoleSidebar__section" aria-label="Queued tasks">
-      <h3>Queued <span>{queued.length}</span></h3>
+      <SectionHeader title="Queued" count={queued.length} />
       {queued.length === 0 ? <p className="dfFactoryConsole__empty">No queued tasks</p> : <ul className="dfConsoleItems">{queued.map((task) => <QueuedTask
         selected={selectedTaskId === task.id}
         onSelectTask={onSelectTask}
@@ -385,7 +380,7 @@ function NewTask({ agents, state, disabled, onAddTask }: {
       <small>Paste images or drop files here. Up to 8 files, 8 MiB total.</small>
       {files.length === 0 ? null : <ul aria-label="Task attachments">{files.map((file, index) => <li key={index}><AttachmentPreview file={file} /><span>{file.name} · {Math.ceil(file.size / 1024)} KiB</span><button type="button" aria-label={`Remove ${file.name}`} disabled={busy} onClick={() => { setFiles(files.filter((_, i) => i !== index)); setFileError(""); }}>Remove</button></li>)}</ul>}
       {fileError === "" ? null : <p role="alert">{fileError}</p>}
-      <button disabled={busy}>{submitting ? "Adding task…" : "Add to queue"}</button>
+      <IconButton icon="plus" type="submit" disabled={busy}>{submitting ? "Adding task…" : "Add to queue"}</IconButton>
     </form>
   </details>;
 }
@@ -471,12 +466,12 @@ function AgentConfig({
     <form className="dfConsoleSidebar__section dfConsoleSidebar__config" aria-label="Agent configuration" onSubmit={submit}>
       {agent.provider === "shell" ? <p className="dfConsoleSidebar__inherit">shell has no model</p> : (
         <>
-          <label htmlFor={`df-model-${agent.id}`}>MODEL</label>
+          <label htmlFor={`df-model-${agent.id}`}>Model</label>
           <input id={`df-model-${agent.id}`} value={model} placeholder={agent.effective_model} disabled={pending} onChange={(event) => setModel(event.currentTarget.value)} />
-          <label htmlFor={`df-effort-${agent.id}`}>REASONING EFFORT</label>
+          <label htmlFor={`df-effort-${agent.id}`}>Reasoning effort</label>
           <input id={`df-effort-${agent.id}`} value={reasoningEffort} placeholder={agent.effective_reasoning_effort} disabled={pending} onChange={(event) => setReasoningEffort(event.currentTarget.value)} />
           <p className="dfConsoleSidebar__inherit">{modelSourceCaption(agent)}</p>
-          <label htmlFor={`df-account-${agent.id}`}>ACCOUNT</label>
+          <label htmlFor={`df-account-${agent.id}`}>Account</label>
           <select id={`df-account-${agent.id}`} value={accountId} disabled={pending} onChange={(event) => setAccountId(event.currentTarget.value)}>
             <option value="">provider default</option>
             {accounts.filter((account) => account.provider === agent.provider).map((account) => (
@@ -487,27 +482,27 @@ function AgentConfig({
       )}
       <label className="dfConsoleSidebar__toggle" htmlFor={`df-paused-${agent.id}`}>
         <input id={`df-paused-${agent.id}`} type="checkbox" checked={paused} disabled={pending} onChange={(event) => setPaused(event.currentTarget.checked)} />
-        PAUSED
+        Paused
       </label>
-      {agent.role !== "worker" || agent.archived === undefined ? null : archiveConfirm ? <span><button type="button" autoFocus disabled={pending || !ready} onClick={() => onSave({ archived: true })}>Confirm archive</button><button type="button" disabled={pending} onClick={() => setArchiveConfirm(false)}>Keep worker</button></span> : <button type="button" disabled={pending || !ready} onClick={() => setArchiveConfirm(true)}>Archive worker</button>}
-      <h3>{supervising ? "SUPERVISION" : "RULES"}</h3>
-      <label htmlFor={`df-idle-${agent.id}`}>{supervising ? "WHEN WORK CHANGES" : "WHEN READY"}</label>
+      {agent.role !== "worker" || agent.archived === undefined ? null : archiveConfirm ? <span><button type="button" className="dfDanger" autoFocus disabled={pending || !ready} onClick={() => onSave({ archived: true })}>Confirm archive</button><button type="button" disabled={pending} onClick={() => setArchiveConfirm(false)}>Keep worker</button></span> : <button type="button" className="dfDanger" disabled={pending || !ready} onClick={() => setArchiveConfirm(true)}>Archive worker</button>}
+      <h3>{supervising ? "Supervision" : "Rules"}</h3>
+      <label htmlFor={`df-idle-${agent.id}`}>{supervising ? "When work changes" : "When ready"}</label>
       <select id={`df-idle-${agent.id}`} value={idlePolicy} disabled={pending} onChange={(event) => setIdlePolicy(event.currentTarget.value as typeof idlePolicy)}>
         <option value="wait">wait for work</option>
         <option value="standing_instruction">{supervising ? "supervise worker activity" : "run a standing instruction"}</option>
       </select>
       {idlePolicy === "standing_instruction" ? (
         <>
-          <label htmlFor={`df-idle-after-${agent.id}`}>{supervising ? "COOLDOWN SECONDS" : "AFTER SECONDS READY"}</label>
+          <label htmlFor={`df-idle-after-${agent.id}`}>{supervising ? "Cooldown seconds" : "After seconds ready"}</label>
           <input id={`df-idle-after-${agent.id}`} inputMode="numeric" value={idleAfterSeconds} disabled={pending} onChange={(event) => setIdleAfterSeconds(event.currentTarget.value)} />
-          <label htmlFor={`df-idle-instruction-${agent.id}`}>INSTRUCTION</label>
+          <label htmlFor={`df-idle-instruction-${agent.id}`}>Instruction</label>
           <textarea id={`df-idle-instruction-${agent.id}`} rows={3} value={idleInstruction} disabled={pending} onChange={(event) => setIdleInstruction(event.currentTarget.value)} />
           <p className="dfConsoleSidebar__inherit">{agent.idle_runs_used} idle runs</p>
           {supervising ? <p className="dfConsoleSidebar__inherit">initial inspection, then worker events</p> : null}
           {ruleIncomplete ? <p className="dfConsoleSidebar__inherit">a standing instruction needs at least a second and text</p> : null}
         </>
       ) : null}
-      <button type="submit" disabled={pending || !ready || ruleIncomplete}>{pending ? "SAVING" : "SAVE"}</button>
+      <button type="submit" disabled={pending || !ready || ruleIncomplete}>{pending ? "Saving" : "Save"}</button>
     </form>
   );
 }
@@ -566,31 +561,31 @@ function QueuedTask({
     }
   };
   if (onEditTask === undefined) {
-    return <li className="dfConsoleItem"><button type="button" className="dfConsoleItem__summary dfConsoleItem__taskTitle" disabled={!ready || onSelectTask === undefined} aria-pressed={selected === true} onClick={() => onSelectTask?.(task.id)}>{task.title}<span className="dfConsoleItem__meta">{projectName} · {task.assigned_agent_id === "" ? "ANY ELIGIBLE WORKER" : peers.find((agent) => agent.id === task.assigned_agent_id)?.name ?? "AGENT"}</span></button></li>;
+    return <li className="dfConsoleItem"><button type="button" className="dfConsoleItem__summary dfConsoleItem__taskTitle" disabled={!ready || onSelectTask === undefined} aria-pressed={selected === true} onClick={() => onSelectTask?.(task.id)}>{task.title}<span className="dfConsoleItem__meta">{projectName} · {task.assigned_agent_id === "" ? "Any eligible worker" : peers.find((agent) => agent.id === task.assigned_agent_id)?.name ?? "Agent"}</span></button></li>;
   }
   return (
     <li>
       <details className="dfConsoleItem" onToggle={(event) => { if (event.currentTarget.open && brief === undefined && !loading) void load(); }}>
-        <summary className="dfConsoleItem__summary"><strong>{task.title}</strong><span className="dfConsoleItem__meta">{projectName} · {task.assigned_agent_id === "" ? "ANY ELIGIBLE WORKER" : peers.find((agent) => agent.id === task.assigned_agent_id)?.name ?? "AGENT"} · QUEUED · PRIORITY {task.priority}</span></summary>
+        <summary className="dfConsoleItem__summary"><strong>{task.title}</strong><span className="dfConsoleItem__meta">{projectName} · {task.assigned_agent_id === "" ? "Any eligible worker" : peers.find((agent) => agent.id === task.assigned_agent_id)?.name ?? "Agent"} · Priority {task.priority}</span></summary>
         <div className="dfConsoleItem__detail">
         {open ? <>
-          <label htmlFor={`df-title-${task.id}`}>TITLE</label>
+          <label htmlFor={`df-title-${task.id}`}>Title</label>
           <input id={`df-title-${task.id}`} value={title} disabled={disabled || loading || stale} onChange={(event) => setTitle(event.currentTarget.value)} />
-          <label htmlFor={`df-instruction-${task.id}`}>INSTRUCTION</label>
+          <label htmlFor={`df-instruction-${task.id}`}>Instruction</label>
           <textarea id={`df-instruction-${task.id}`} rows={4} value={instruction} disabled={disabled || loading || stale} onChange={(event) => setInstruction(event.currentTarget.value)} />
-          {brief?.feedback === "" || brief === undefined ? null : <><label>RETAINED REVIEW FEEDBACK</label><pre className="dfConsoleSidebar__feedback">{brief.feedback}</pre></>}
+          {brief?.feedback === "" || brief === undefined ? null : <><label>Retained review feedback</label><pre className="dfConsoleSidebar__feedback">{brief.feedback}</pre></>}
         {brief === undefined ? null : <TaskConversation brief={brief} pending={loading} onOlder={brief.nextPeerOffset === undefined ? undefined : () => { void load(brief.nextPeerOffset, brief.head); }} />}
-        {stale ? <p role="alert">TASK CHANGED — REOPEN BRIEF TO SAVE</p> : null}
+        {stale ? <p role="alert">Task changed — reopen brief to save</p> : null}
           <div className="dfConsoleSidebar__taskActions">
-            <button type="button" disabled={disabled || loading || stale || title.trim() === ""} onClick={async () => { if (await onEditTask(task, { title, body: instruction })) setOpen(false); }}>{pending ? "SAVING" : "SAVE BRIEF"}</button>
-            {stale ? <button type="button" disabled={loading} onClick={() => { void load(); }}>REOPEN BRIEF</button> : null}
-            <button type="button" disabled={loading} onClick={() => setOpen(false)}>DISCARD</button>
+            <button type="button" disabled={disabled || loading || stale || title.trim() === ""} onClick={async () => { if (await onEditTask(task, { title, body: instruction })) setOpen(false); }}>{pending ? "Saving" : "Save brief"}</button>
+            {stale ? <button type="button" disabled={loading} onClick={() => { void load(); }}>Reopen brief</button> : null}
+            <button type="button" disabled={loading} onClick={() => setOpen(false)}>Discard</button>
           </div>
-        </> : <button type="button" disabled={disabled || loading || onLoadTaskDetail === undefined} onClick={() => { void load(); }}>{loading ? "LOADING BRIEF" : "EDIT BRIEF"}</button>}
-        {detailError ? <p role="alert">{open ? "COULD NOT LOAD DETAILS. SAVE OR DISCARD YOUR DRAFT, THEN REOPEN TO RETRY." : "COULD NOT LOAD DETAILS. REOPEN THE BRIEF TO RETRY."}</p> : null}
+        </> : <button type="button" disabled={disabled || loading || onLoadTaskDetail === undefined} onClick={() => { void load(); }}>{loading ? "Loading brief" : "Edit brief"}</button>}
+        {detailError ? <p role="alert">{open ? "Could not load details. Save or discard your draft, then reopen to retry." : "Could not load details. Reopen the brief to retry."}</p> : null}
         <div className="dfConsoleSidebar__taskActions">
-          <button type="button" aria-label={`Increase priority for ${task.title}`} disabled={disabled || task.priority === MAX_TASK_PRIORITY} onClick={() => { void onEditTask(task, { priority: task.priority + 1 }); }}>INCREASE PRIORITY</button>
-          <button type="button" aria-label={`Decrease priority for ${task.title}`} disabled={disabled || task.priority === -MAX_TASK_PRIORITY} onClick={() => { void onEditTask(task, { priority: task.priority - 1 }); }}>DECREASE PRIORITY</button>
+          <button type="button" aria-label={`Increase priority for ${task.title}`} disabled={disabled || task.priority === MAX_TASK_PRIORITY} onClick={() => { void onEditTask(task, { priority: task.priority + 1 }); }}>Increase priority</button>
+          <button type="button" aria-label={`Decrease priority for ${task.title}`} disabled={disabled || task.priority === -MAX_TASK_PRIORITY} onClick={() => { void onEditTask(task, { priority: task.priority - 1 }); }}>Decrease priority</button>
           <label className="dfFactoryConsole__visuallyHidden" htmlFor={`df-assign-${task.id}`}>Agent for {task.title}</label>
           <select
             id={`df-assign-${task.id}`}
@@ -603,7 +598,7 @@ function QueuedTask({
               ...peers.filter((peer) => !peer.archived && (task.assigned_agent_id !== "" || peer.role === "worker")).map((peer) => <option key={peer.id} value={peer.id}>{peer.name}</option>),
             ]}
           </select>
-          <button type="button" disabled={disabled} onClick={() => { void onEditTask(task, { cancel: true }); }}>CANCEL</button>
+          <button type="button" disabled={disabled} onClick={() => { void onEditTask(task, { cancel: true }); }}>Cancel</button>
         </div>
         </div>
       </details>
@@ -718,7 +713,7 @@ export function SettingsDialog({
         <GitHubSection github={github} onGitHub={onGitHub} />
         <IntakeSection active={tab === 1} projectId={projectId} github={github} onSelectTask={onSelectTask} state={state} repositories={repositories} intake={intake} pending={intakePending} errors={intakeErrors} onLoadRepositories={onLoadRepositories} onAction={onIntakeAction} />
     </> },
-    { label: "Devices", content: <section className="dfConsoleSidebar__section" aria-label="PAIRING">
+    { label: "Devices", content: <section className="dfConsoleSidebar__section" aria-label="Pairing">
         <h3>Devices &amp; pairing</h3>
         {pairing ?? <p className="dfFactoryConsole__empty">Pairing unavailable</p>}
     </section> },
@@ -744,7 +739,7 @@ export function SettingsDialog({
       id={`${settingsId}-panel-${index}`} aria-labelledby={`${settingsId}-tab-${index}`} hidden={tab !== index} tabIndex={0}>
       {content}
     </div>)}
-    <p className="dfConsoleSidebar__inherit">
+    <p className="dfSettingsFeedback">
       <a href="https://darkfactory.build/feedback?kind=bug" target="_blank" rel="noopener noreferrer">Report a problem</a> · <a href="https://darkfactory.build/feedback?kind=feature" target="_blank" rel="noopener noreferrer">Request a feature</a> · <a href="https://darkfactory.build/backlog" target="_blank" rel="noopener noreferrer">Public backlog</a>
     </p>
   </ConsoleDialog>;
@@ -797,26 +792,26 @@ function ProjectCreateForm({ onCreate, error }: { onCreate?: (request: { name: s
     {error === undefined ? null : <p role="alert">{error}</p>}
     <label>Name<input value={name} onChange={(event) => setName(event.currentTarget.value)} /></label>
     <label>Existing checkout<input value={root} placeholder="/absolute/path" onChange={(event) => setRoot(event.currentTarget.value)} /></label>
-    <button type="submit" disabled={onCreate === undefined || !name.trim() || !root.startsWith("/")}>CREATE PROJECT</button>
+    <IconButton icon="plus" type="submit" disabled={onCreate === undefined || !name.trim() || !root.startsWith("/")}>Create project</IconButton>
   </form>;
 }
 
 function RepositoryProject({ project, items, pending, error, onMutate }: { project: ProjectItem; items?: readonly RepositoryView[]; pending: boolean; error?: string; onMutate?: (request: RepositoryMutation) => void }) {
   const [name, setName] = useState(""); const [root, setRoot] = useState(""); const [baseRef, setBaseRef] = useState("");
   return <section className="dfConsoleSidebar__section" aria-label={`Repositories for ${project.name}`}>
-    <h3>{project.name}</h3>{error === undefined ? null : <p role="alert">{error}</p>}
-    {items === undefined ? <p className="dfFactoryConsole__empty">{pending ? "LOADING REPOSITORIES" : "REPOSITORIES UNAVAILABLE"}</p> : <ul className="dfFactoryConsole__list">{items.map((item) => <RepositoryRow key={`${item.id}:${item.revision}`} project={project} item={item} pending={pending} onMutate={onMutate} />)}</ul>}
+    <h4>{project.name}</h4>{error === undefined ? null : <p role="alert">{error}</p>}
+    {items === undefined ? <p className="dfFactoryConsole__empty">{pending ? "Loading repositories" : "Repositories unavailable"}</p> : <ul className="dfFactoryConsole__list">{items.map((item) => <RepositoryRow key={`${item.id}:${item.revision}`} project={project} item={item} pending={pending} onMutate={onMutate} />)}</ul>}
     <details><summary>Add repository</summary><form onSubmit={(event) => { event.preventDefault(); if (name.trim() && root.startsWith("/") && baseRef.trim()) onMutate?.({ projectId: project.id, action: "add", name: name.trim(), root, baseRef: baseRef.trim() }); }}>
       <label>Name<input value={name} onChange={(event) => setName(event.currentTarget.value)} /></label>
       <label>Existing checkout<input value={root} placeholder="/absolute/path" onChange={(event) => setRoot(event.currentTarget.value)} /></label>
       <label>Base branch<input value={baseRef} placeholder="Repository’s base branch" onChange={(event) => setBaseRef(event.currentTarget.value)} /></label>
-      <button type="submit" disabled={pending || onMutate === undefined || !name.trim() || !root.startsWith("/") || !baseRef.trim()}>ADD REPOSITORY</button>
+      <IconButton icon="plus" type="submit" disabled={pending || onMutate === undefined || !name.trim() || !root.startsWith("/") || !baseRef.trim()}>Add repository</IconButton>
     </form></details>
   </section>;
 }
 
 function RepositoryRow({ project, item, pending, onMutate }: { project: ProjectItem; item: RepositoryView; pending: boolean; onMutate?: (request: RepositoryMutation) => void }) {
-  const [name, setName] = useState(item.name); const [baseRef, setBaseRef] = useState(item.base_ref);
+  const [name, setName] = useState(item.name); const [baseRef, setBaseRef] = useState(item.base_ref); const [removing, setRemoving] = useState(false);
   const request = (action: RepositoryMutation["action"]) => {
     if (action === "github" || action === "fetch") onMutate?.({ projectId: project.id, repositoryId: item.id, action });
     else if (action === "name") onMutate?.({ projectId: project.id, repositoryId: item.id, expectedRevision: item.revision, action, name });
@@ -827,14 +822,14 @@ function RepositoryRow({ project, item, pending, onMutate }: { project: ProjectI
   const fetchState = item.fetch_state ?? "unchecked";
   const publicationState = item.publication_state ?? "unchecked";
   const githubID = item.github_repository_id === undefined ? undefined : item.github_repository_id.toString();
-  return <li className="dfConsoleSidebar__account"><p className="dfConsoleRow__title">{item.name}{item.default ? " · DEFAULT" : ""}</p><p>{item.base_ref}{item.enabled ? "" : " · Disabled"}</p>
-    <div aria-label="Repository readiness"><p className="dfFactoryConsole__eyebrow">FETCH: {fetchState.toUpperCase()}</p><p className="dfFactoryConsole__eyebrow">PUBLICATION: {publicationState === "ready" ? "IDENTITY VERIFIED" : publicationState.toUpperCase()}</p>{fetchState === "setup_required" ? <p role="status">Check the base branch and Git login on the factory’s Mac, then retry in Edit.</p> : null}{item.readiness_message === undefined ? null : <p role="status">{item.readiness_message}</p>}
+  return <li className="dfConsoleSidebar__account"><p className="dfConsoleRow__title">{item.name}{item.default ? " · Default" : ""}</p><p>{item.base_ref}{item.enabled ? "" : " · Disabled"}</p>
+    <div aria-label="Repository readiness"><p className="dfFactoryConsole__eyebrow">Fetch: {fetchState.replaceAll("_", " ")}</p><p className="dfFactoryConsole__eyebrow">Publication: {publicationState === "ready" ? "Identity verified" : publicationState.replaceAll("_", " ")}</p>{fetchState === "setup_required" ? <p role="status">Check the base branch and Git login on the factory’s Mac, then retry in Edit.</p> : null}{item.readiness_message === undefined ? null : <p role="status">{item.readiness_message}</p>}
     </div>
     <details><summary>Edit</summary><p>{item.root}{githubID === undefined ? "" : ` · GitHub ID ${githubID}`}</p>
-      <button type="button" disabled={pending} onClick={() => request("fetch")}>{fetchState === "ready" ? "REFRESH FETCH READINESS" : "CHECK FETCH READINESS"}</button><button type="button" disabled={pending} onClick={() => request("github")}>{publicationState === "ready" ? "REFRESH GITHUB BINDING" : "VERIFY GITHUB BINDING"}</button>
-    <label>Name<input value={name} disabled={pending} onChange={(event) => setName(event.currentTarget.value)} /></label><button type="button" disabled={pending || !name.trim() || name === item.name} onClick={() => request("name")}>SAVE NAME</button>
-    <label>Base<input value={baseRef} disabled={pending} onChange={(event) => setBaseRef(event.currentTarget.value)} /></label><button type="button" disabled={pending || !baseRef.trim() || baseRef === item.base_ref} onClick={() => request("base")}>SAVE BASE</button>
-    <button type="button" disabled={pending || item.default} onClick={() => request("default")}>MAKE DEFAULT</button><button type="button" disabled={pending || item.default} onClick={() => request("enabled")}>{item.enabled ? "DISABLE" : "ENABLE"}</button><button type="button" disabled={pending || item.default} onClick={() => request("remove")}>REMOVE</button></details>
+      <button type="button" disabled={pending} onClick={() => request("fetch")}>{fetchState === "ready" ? "Refresh fetch readiness" : "Check fetch readiness"}</button><button type="button" disabled={pending} onClick={() => request("github")}>{publicationState === "ready" ? "Refresh GitHub binding" : "Verify GitHub binding"}</button>
+    <label>Name<input value={name} disabled={pending} onChange={(event) => setName(event.currentTarget.value)} /></label><button type="button" disabled={pending || !name.trim() || name === item.name} onClick={() => request("name")}>Save name</button>
+    <label>Base<input value={baseRef} disabled={pending} onChange={(event) => setBaseRef(event.currentTarget.value)} /></label><button type="button" disabled={pending || !baseRef.trim() || baseRef === item.base_ref} onClick={() => request("base")}>Save base</button>
+    <button type="button" disabled={pending || item.default} onClick={() => request("default")}>Make default</button><button type="button" disabled={pending || item.default} onClick={() => request("enabled")}>{item.enabled ? "Disable" : "Enable"}</button>{removing ? <><button type="button" className="dfDanger" autoFocus disabled={pending} onClick={() => { setRemoving(false); request("remove"); }}>Confirm remove</button><button type="button" onClick={() => setRemoving(false)}>Keep</button></> : <IconButton icon="trash" className="dfDanger" disabled={pending || item.default} onClick={() => setRemoving(true)}>Remove</IconButton>}</details>
   </li>;
 }
 
@@ -862,6 +857,7 @@ function GitHubSection({ github, onGitHub }: { github?: FactoryGitHubView; onGit
   const [installationID, setInstallationID] = useState<number>();
   const [selected, setSelected] = useState<Record<string, GitHubDelegationBody>>({});
   const [installationSeen, setInstallationSeen] = useState(false);
+  const [disconnecting, setDisconnecting] = useState(false);
   const [installationPage, setInstallationPage] = useState(1);
   const [repositoryPage, setRepositoryPage] = useState(1);
   const [loadedRepositories, setLoadedRepositories] = useState<{ installationID: number; value: NonNullable<NonNullable<FactoryGitHubView["result"]>["repositories"]> }>();
@@ -903,21 +899,21 @@ function GitHubSection({ github, onGitHub }: { github?: FactoryGitHubView; onGit
     repositorySource.current = repositories;
     setLoadedRepositories(repositories === undefined || installationID === undefined ? undefined : { installationID, value: repositories });
   }, [repositories, installationID]);
-  return <section className="dfConsoleSidebar__section" aria-label="GITHUB SETTINGS">
-    <h3>GITHUB</h3>
-    <p className="dfConsoleSidebar__inherit">{status.toUpperCase().replaceAll("_", " ")}</p>
+  return <section className="dfConsoleSidebar__section" aria-label="GitHub settings">
+    <h3>GitHub</h3>
+    <p className="dfConsoleSidebar__inherit"><Status stage={status} /></p>
     {status === "denied" ? <p className="dfFactoryConsole__terminalError" role="alert">Access expired or was denied. Reconnect GitHub.</p> : null}
     {status === "unavailable" ? <p className="dfFactoryConsole__terminalError" role="alert">GitHub is unavailable. Try again.</p> : null}
-    {github?.error === undefined ? null : <p className="dfFactoryConsole__terminalError" role="alert">GITHUB SETTINGS UNAVAILABLE · {github.error.toUpperCase()}</p>}
-    {canConnect ? <button type="button" disabled={busy || onGitHub === undefined} onClick={() => load({ action: recoveryAction })}>{status === "disconnected" && connectionID === "" ? "CONNECT GITHUB" : status === "disconnect_pending" ? "RETRY DISCONNECT" : status === "pending" || status === "awaiting_confirmation" || status === "denied" || status === "disconnected" ? "RESET GITHUB ACCESS" : "RETRY GITHUB ACCESS"}</button> : null}
-    {result?.authorization?.authorization_url === undefined ? null : <p><a href={result.authorization.authorization_url} target="_blank" rel="noreferrer">AUTHORIZE ON GITHUB</a></p>}
-    {result?.authorization !== undefined ? <form onSubmit={(event) => { event.preventDefault(); if (/^[0-9A-F]{10}$/.test(code)) load({ action: "confirm", code }); }}><label htmlFor="df-github-code">Confirmation code</label><input id="df-github-code" value={code} maxLength={10} inputMode="text" onChange={(event) => setCode(event.currentTarget.value.toUpperCase())} /><button type="submit" disabled={busy || code.length !== 10}>CONFIRM</button></form> : null}
-    {connected ? <div className="dfConsoleSidebar__taskActions"><button type="button" disabled={busy} onClick={() => { setInstallationPage(1); setInstallationSeen(false); load({ action: "refresh" }); }}>REFRESH ACCESS</button><button type="button" disabled={busy} onClick={() => load({ action: "disconnect" })}>DISCONNECT</button></div> : null}
+    {github?.error === undefined ? null : <p className="dfFactoryConsole__terminalError" role="alert">GitHub settings unavailable · {github.error}</p>}
+    {canConnect ? <button type="button" disabled={busy || onGitHub === undefined} onClick={() => load({ action: recoveryAction })}>{status === "disconnected" && connectionID === "" ? "Connect GitHub" : status === "disconnect_pending" ? "Retry disconnect" : status === "pending" || status === "awaiting_confirmation" || status === "denied" || status === "disconnected" ? "Reset GitHub access" : "Retry GitHub access"}</button> : null}
+    {result?.authorization?.authorization_url === undefined ? null : <p><a href={result.authorization.authorization_url} target="_blank" rel="noreferrer">Authorize on GitHub</a></p>}
+    {result?.authorization !== undefined ? <form onSubmit={(event) => { event.preventDefault(); if (/^[0-9A-F]{10}$/.test(code)) load({ action: "confirm", code }); }}><label htmlFor="df-github-code">Confirmation code</label><input id="df-github-code" value={code} maxLength={10} inputMode="text" onChange={(event) => setCode(event.currentTarget.value.toUpperCase())} /><button type="submit" disabled={busy || code.length !== 10}>Confirm</button></form> : null}
+    {connected ? <div className="dfConsoleSidebar__taskActions"><IconButton icon="refresh" disabled={busy} onClick={() => { setInstallationPage(1); setInstallationSeen(false); load({ action: "refresh" }); }}>Refresh access</IconButton>{disconnecting ? <><button type="button" className="dfDanger" autoFocus disabled={busy} onClick={() => { setDisconnecting(false); load({ action: "disconnect" }); }}>Confirm disconnect</button><button type="button" onClick={() => setDisconnecting(false)}>Keep connected</button></> : <IconButton icon="trash" className="dfDanger" disabled={busy} onClick={() => setDisconnecting(true)}>Disconnect</IconButton>}</div> : null}
     {!connected ? null : <details open={(result?.status?.repositories.length ?? 0) === 0}><summary>Repository access</summary>
       <h4>Accounts</h4>
-      {installations === undefined ? <p className="dfFactoryConsole__empty">Refresh to find GitHub accounts.</p> : installations.installations.length === 0 ? <><p className="dfFactoryConsole__empty">An organization owner may need to approve the Dark Factory app.</p>{!installationSeen && installations.next_page === undefined && nativeInstallURL(installations.installation_url) !== undefined ? <p><a href={nativeInstallURL(installations.installation_url)} target="_blank" rel="noreferrer">INSTALL OR REQUEST GITHUB APP ACCESS</a></p> : null}</> : <ul className="dfFactoryConsole__list">{installations.installations.map((item) => { const manage = nativeManageURL(item.html_url); return <li key={item.id} className="dfConsoleSidebar__account"><p className="dfConsoleRow__title">{item.account.login} · {item.eligibility || "available"}</p>{item.suspended_at !== null ? <p className="dfConsoleSidebar__inherit">Suspended. Restore access on GitHub.</p> : null}<div className="dfConsoleSidebar__taskActions"><button type="button" disabled={busy || item.suspended_at !== null} onClick={() => { setInstallationID(item.id); setLoadedRepositories(undefined); setRepositoryPage(1); load({ action: "repositories", installation_id: item.id, page: 1 }); }}>CHOOSE REPOSITORIES</button>{manage === undefined ? null : <a href={manage} target="_blank" rel="noreferrer">MANAGE ON GITHUB</a>}</div></li>; })}</ul>}
-      <div className="dfConsoleSidebar__taskActions">{installationPage > 1 ? <button type="button" disabled={busy} onClick={() => { const page = installationPage - 1; setInstallationPage(page); load({ action: "installations", page }); }}>PREVIOUS INSTALLATIONS</button> : null}{installations?.next_page === undefined ? null : <button type="button" disabled={busy} onClick={() => { const page = installations.next_page!; setInstallationPage(page); load({ action: "installations", page }); }}>MORE INSTALLATIONS</button>}</div>
-      {installationID === undefined || visibleRepositories === undefined ? null : <><h4>REPOSITORIES · PAGE {repositoryPage}</h4>{visibleRepositories.repositories.length === 0 ? <p className="dfFactoryConsole__empty">NO REPOSITORIES AVAILABLE</p> : <ul className="dfConsoleSidebar__list">{visibleRepositories.repositories.map((item) => { const key = `${installationID}:${item.id}`; const chosen = selected[key]; return <li key={item.id}><label><input type="checkbox" checked={chosen !== undefined} disabled={busy || selectedItems.length >= 100 && chosen === undefined} onChange={(event) => setSelected((current) => { const next = { ...current }; if (event.currentTarget.checked) next[key] = { installation_id: installationID, repository_id: item.id, repository: item.full_name }; else delete next[key]; return next; })} /> {item.full_name}{item.permissions.push ? "" : " · READ ONLY"}</label></li>; })}</ul>}<div className="dfConsoleSidebar__taskActions"><button type="button" disabled={busy} onClick={() => load({ action: "delegate", repositories: selectedItems })}>Save access ({selectedItems.length}/100)</button>{visibleRepositories.next_page === undefined ? null : <button type="button" disabled={busy} onClick={() => { const page = visibleRepositories.next_page!; setRepositoryPage(page); load({ action: "repositories", installation_id: installationID, page }); }}>MORE REPOSITORIES</button>}</div></>}
+      {installations === undefined ? <p className="dfFactoryConsole__empty">Refresh to find GitHub accounts.</p> : installations.installations.length === 0 ? <><p className="dfFactoryConsole__empty">An organization owner may need to approve the Dark Factory app.</p>{!installationSeen && installations.next_page === undefined && nativeInstallURL(installations.installation_url) !== undefined ? <p><a href={nativeInstallURL(installations.installation_url)} target="_blank" rel="noreferrer">Install or request GitHub app access</a></p> : null}</> : <ul className="dfFactoryConsole__list">{installations.installations.map((item) => { const manage = nativeManageURL(item.html_url); return <li key={item.id} className="dfConsoleSidebar__account"><p className="dfConsoleRow__title">{item.account.login} · {item.eligibility || "available"}</p>{item.suspended_at !== null ? <p className="dfConsoleSidebar__inherit">Suspended. Restore access on GitHub.</p> : null}<div className="dfConsoleSidebar__taskActions"><button type="button" disabled={busy || item.suspended_at !== null} onClick={() => { setInstallationID(item.id); setLoadedRepositories(undefined); setRepositoryPage(1); load({ action: "repositories", installation_id: item.id, page: 1 }); }}>Choose repositories</button>{manage === undefined ? null : <a href={manage} target="_blank" rel="noreferrer">Manage on GitHub</a>}</div></li>; })}</ul>}
+      <div className="dfConsoleSidebar__taskActions">{installationPage > 1 ? <button type="button" disabled={busy} onClick={() => { const page = installationPage - 1; setInstallationPage(page); load({ action: "installations", page }); }}>Previous installations</button> : null}{installations?.next_page === undefined ? null : <button type="button" disabled={busy} onClick={() => { const page = installations.next_page!; setInstallationPage(page); load({ action: "installations", page }); }}>More installations</button>}</div>
+      {installationID === undefined || visibleRepositories === undefined ? null : <><h4>Repositories · page {repositoryPage}</h4>{visibleRepositories.repositories.length === 0 ? <p className="dfFactoryConsole__empty">No repositories available</p> : <ul className="dfConsoleSidebar__list">{visibleRepositories.repositories.map((item) => { const key = `${installationID}:${item.id}`; const chosen = selected[key]; return <li key={item.id}><label><input type="checkbox" checked={chosen !== undefined} disabled={busy || selectedItems.length >= 100 && chosen === undefined} onChange={(event) => setSelected((current) => { const next = { ...current }; if (event.currentTarget.checked) next[key] = { installation_id: installationID, repository_id: item.id, repository: item.full_name }; else delete next[key]; return next; })} /> {item.full_name}{item.permissions.push ? "" : " · Read only"}</label></li>; })}</ul>}<div className="dfConsoleSidebar__taskActions"><button type="button" disabled={busy} onClick={() => load({ action: "delegate", repositories: selectedItems })}>Save access ({selectedItems.length}/100)</button>{visibleRepositories.next_page === undefined ? null : <button type="button" disabled={busy} onClick={() => { const page = visibleRepositories.next_page!; setRepositoryPage(page); load({ action: "repositories", installation_id: installationID, page }); }}>More repositories</button>}</div></>}
     </details>}
   </section>;
 }
@@ -927,7 +923,7 @@ function FloorAppearanceSection({ appearance, onChange, onReset }: {
   onChange: (appearance: FloorAppearance) => void;
   onReset: () => void;
 }) {
-  return <section className="dfConsoleSidebar__section" aria-label="FLOOR APPEARANCE">
+  return <section className="dfConsoleSidebar__section dfFloorAppearance" aria-label="Floor appearance">
     <h3>Floor appearance</h3>
     <p>Saved in this browser. Automatic groups broad areas; Fine exposes directories on the same floor.</p>
     <label>Scenery<select value={appearance.scenery} onChange={(event) => onChange({ ...appearance, scenery: event.currentTarget.value as FloorAppearance["scenery"] })}><option value="off">Off</option><option value="subtle">Subtle</option><option value="rich">Rich</option></select></label>
@@ -969,31 +965,31 @@ function ProjectLimitsForm({ project, edit, ready, onSave }: {
     event.preventDefault();
     if (unlimited) {
       const duration = Number(seconds);
-      if (!/^\d+$/.test(seconds) || !Number.isSafeInteger(duration) || duration > 86400) { setLocalError("DURATION MUST BE 0–86400 SECONDS"); return; }
+      if (!/^\d+$/.test(seconds) || !Number.isSafeInteger(duration) || duration > 86400) { setLocalError("Duration must be 0–86400 seconds"); return; }
       setLocalError(undefined);
       onSave?.(project, { runBudget: 0n, maxRunSeconds: duration });
       return;
     }
     let allowance: bigint;
-    try { allowance = BigInt(runs); } catch { setLocalError("ENTER A WHOLE NUMBER OF FUTURE RUNS"); return; }
+    try { allowance = BigInt(runs); } catch { setLocalError("Enter a whole number of future runs"); return; }
     const duration = Number(seconds);
-    if (allowance < 1n) { setLocalError("FINITE ALLOWANCE MUST BE AT LEAST 1 FUTURE RUN"); return; }
-    if (!/^\d+$/.test(seconds) || !Number.isSafeInteger(duration) || duration > 86400) { setLocalError("DURATION MUST BE 0–86400 SECONDS"); return; }
+    if (allowance < 1n) { setLocalError("Finite allowance must be at least 1 future run"); return; }
+    if (!/^\d+$/.test(seconds) || !Number.isSafeInteger(duration) || duration > 86400) { setLocalError("Duration must be 0–86400 seconds"); return; }
     setLocalError(undefined);
     onSave?.(project, { runBudget: allowance, maxRunSeconds: duration });
   };
   const error = localError ?? (refused ? editErrorCopy(edit) : undefined);
   return <form className="dfConsoleSidebar__config" onSubmit={submit} aria-label={`Limits for ${project.name}`}>
     <h4>{project.name}</h4>
-    <p className="dfConsoleSidebar__inherit">{project.runs_used.toString()} RUNS USED · {project.run_budget_limit === 0n ? "UNLIMITED" : `${remaining.toString()} FUTURE RUNS LEFT`}</p>
-    <label><input type="checkbox" checked={unlimited} disabled={pending || !ready} onChange={(event) => { setUnlimited(event.currentTarget.checked); setLocalError(undefined); }} /> UNLIMITED RUNS</label>
-    <label htmlFor={`df-project-runs-${project.id}`}>REMAINING RUN ALLOWANCE</label>
+    <p className="dfConsoleSidebar__inherit">{project.runs_used.toString()} runs used · {project.run_budget_limit === 0n ? "unlimited" : `${remaining.toString()} future runs left`}</p>
+    <label><input type="checkbox" checked={unlimited} disabled={pending || !ready} onChange={(event) => { setUnlimited(event.currentTarget.checked); setLocalError(undefined); }} /> Unlimited runs</label>
+    <label htmlFor={`df-project-runs-${project.id}`}>Remaining run allowance</label>
     <input id={`df-project-runs-${project.id}`} inputMode="numeric" value={runs} disabled={pending || !ready || unlimited} onChange={(event) => { setRuns(event.currentTarget.value); setLocalError(undefined); }} />
-    <label htmlFor={`df-project-seconds-${project.id}`}>MAX SECONDS PER RUN (0 = UNLIMITED)</label>
+    <label htmlFor={`df-project-seconds-${project.id}`}>Max seconds per run (0 = unlimited)</label>
     <input id={`df-project-seconds-${project.id}`} inputMode="numeric" value={seconds} disabled={pending || !ready} onChange={(event) => { setSeconds(event.currentTarget.value); setLocalError(undefined); }} />
     {error === undefined ? null : <p className="dfFactoryConsole__terminalError" role="alert">{error}</p>}
     {remaining === 0n && project.run_budget_limit !== 0n && !unlimited ? <p className="dfConsoleSidebar__inherit">No runs left. Add runs or choose Unlimited.</p> : null}
-    <button type="submit" disabled={pending || !ready || onSave === undefined}>{pending ? "SAVING" : "SAVE"}</button>
+    <button type="submit" disabled={pending || !ready || onSave === undefined}>{pending ? "Saving" : "Save"}</button>
   </form>;
 }
 
@@ -1019,14 +1015,15 @@ function AccountsSection({
   onRefresh?: () => void;
 }) {
   const [labels, setLabels] = useState<Record<string, string>>({});
+  const [unlinking, setUnlinking] = useState<string>();
   const linked = state === undefined ? [] : [...state.accounts.values()];
   const unlinked = (accounts ?? []).filter((login) => login.linked_id === "");
   return (
-    <div className="dfConsoleSidebar__section" aria-label="ACCOUNTS">
+    <div className="dfConsoleSidebar__section" aria-label="Accounts">
       <h3>Agent accounts</h3>
       {accounts !== undefined && linked.length === 0 && unlinked.length === 0 ? <p>Sign in with your provider CLI on this Mac, then refresh.</p> : null}
-      <button type="button" disabled={pending || onRefresh === undefined} onClick={onRefresh}>{pending ? "REFRESHING" : "REFRESH ACCOUNTS"}</button>
-      {error === undefined ? null : <p className="dfFactoryConsole__terminalError" role="alert">{EDIT_ERRORS.get(error) ?? "THE FACTORY REFUSED THIS"}</p>}
+      <IconButton icon="refresh" disabled={pending || onRefresh === undefined} onClick={onRefresh}>{pending ? "Refreshing" : "Refresh accounts"}</IconButton>
+      {error === undefined ? null : <p className="dfFactoryConsole__terminalError" role="alert">{EDIT_ERRORS.get(error) ?? "The factory refused this"}</p>}
       {linked.length === 0 ? <p className="dfFactoryConsole__empty">No accounts linked.</p> : (
         <ul className="dfFactoryConsole__list">
           {linked.map((account) => {
@@ -1036,12 +1033,14 @@ function AccountsSection({
               <li key={`${account.id}:${account.revision}`} className="dfConsoleSidebar__account">
                 <p className="dfConsoleRow__title">{account.label} · {account.provider.replaceAll("_", " ")}</p>
                 {identity === "" ? null : <p>{identity}</p>}
-                {!login?.unavailable_reason ? null : <p className="dfConsoleSidebar__inherit">ACCOUNT UNAVAILABLE · {login.unavailable_reason}. Sign in again using <code>{account.home}</code>, then refresh.</p>}
+                {!login?.unavailable_reason ? null : <p className="dfConsoleSidebar__inherit">Account unavailable · {login.unavailable_reason}. Sign in again using <code>{account.home}</code>, then refresh.</p>}
                 <details><summary>Edit account</summary><div className="dfConsoleSidebar__taskActions">
                   <label className="dfFactoryConsole__visuallyHidden" htmlFor={`df-linked-account-${account.id}`}>Label for {account.label}</label>
                   <input id={`df-linked-account-${account.id}`} value={labels[`${account.id}:${account.revision}`] ?? account.label} disabled={pending || onUpdate === undefined} onChange={(event) => { const value = event.currentTarget.value; setLabels((current) => ({ ...current, [`${account.id}:${account.revision}`]: value })); }} />
-                  <button type="button" disabled={pending || onUpdate === undefined || !(labels[`${account.id}:${account.revision}`] ?? account.label).trim() || (labels[`${account.id}:${account.revision}`] ?? account.label) === account.label} onClick={() => onUpdate?.(account, { label: labels[`${account.id}:${account.revision}`] ?? account.label })}>SAVE LABEL</button>
-                  <button type="button" disabled={pending || onUpdate === undefined || [...(state?.agents.values() ?? [])].some((agent) => agent.account_id === account.id)} onClick={() => onUpdate?.(account, { remove: true })} title="Keeps the provider signed in">UNLINK</button>
+                  <button type="button" disabled={pending || onUpdate === undefined || !(labels[`${account.id}:${account.revision}`] ?? account.label).trim() || (labels[`${account.id}:${account.revision}`] ?? account.label) === account.label} onClick={() => onUpdate?.(account, { label: labels[`${account.id}:${account.revision}`] ?? account.label })}>Save label</button>
+                  {unlinking === account.id
+                    ? <><button type="button" className="dfDanger" autoFocus disabled={pending || [...(state?.agents.values() ?? [])].some((agent) => agent.account_id === account.id)} onClick={() => { setUnlinking(undefined); onUpdate?.(account, { remove: true }); }}>Confirm unlink</button><button type="button" onClick={() => setUnlinking(undefined)}>Keep linked</button></>
+                    : <IconButton icon="trash" className="dfDanger" disabled={pending || onUpdate === undefined || [...(state?.agents.values() ?? [])].some((agent) => agent.account_id === account.id)} onClick={() => setUnlinking(account.id)} title="Keeps the provider signed in">Unlink</IconButton>}
                 </div>
                 {[...(state?.agents.values() ?? [])].some((agent) => agent.account_id === account.id) ? <p className="dfConsoleSidebar__inherit">In use. Reassign its agents before unlinking.</p> : null}</details>
               </li>
@@ -1051,7 +1050,7 @@ function AccountsSection({
       )}
 
       <h3>Available accounts</h3>
-      {accounts === undefined ? <p className="dfFactoryConsole__empty">{pending ? "LOOKING" : "Refresh to find accounts."}</p>
+      {accounts === undefined ? <p className="dfFactoryConsole__empty">{pending ? "Looking" : "Refresh to find accounts."}</p>
         : unlinked.length === 0 ? <p className="dfFactoryConsole__empty">No other accounts found.</p> : (
         <ul className="dfFactoryConsole__list">
           {unlinked.map((login, index) => (
@@ -1071,7 +1070,7 @@ function AccountsSection({
                   disabled={pending || onLink === undefined || (labels[login.home] ?? login.label).trim() === ""}
                   onClick={() => onLink?.(login, labels[login.home] ?? login.label)}
                 >
-                  LINK
+                  Link
                 </button>
               </div>
             </li>
@@ -1101,14 +1100,14 @@ export function HumanRequestPanel({
   const busy = selected.phase === "replying" || selected.phase === "cancelling";
   return (
     <article className="dfFactoryConsole__humanRequest" aria-label="Selected question" aria-live="polite">
-      {selected.phase === "loading" ? <p className="dfFactoryConsole__empty">LOADING THE QUESTION…</p> : (
+      {selected.phase === "loading" ? <p className="dfFactoryConsole__empty">Loading the question…</p> : (
         <>
-          <h3>DECISION NEEDED</h3>
+          <h3>Decision needed</h3>
           <p className="dfFactoryConsole__question">{selected.question}</p>
-          <AnswerControls surface="factory" options={selected.options} canReply={selected.canReply} reply={selected.reply} replyMaxBytes={selected.replyMaxBytes} busy={busy} onReplyChange={onReplyChange} onReply={onReply} submitLabel="ANSWER" submittingLabel="ANSWERING…" />
-          {selected.canReply ? null : <p className="dfFactoryConsole__empty">{selected.request.status === "open" ? "THIS OPEN DECISION IS READ-ONLY IN THIS VIEW." : `THIS DECISION IS ${selected.request.status.replaceAll("_", " ").toUpperCase()}.`}</p>}
+          <AnswerControls surface="factory" options={selected.options} canReply={selected.canReply} reply={selected.reply} replyMaxBytes={selected.replyMaxBytes} busy={busy} onReplyChange={onReplyChange} onReply={onReply} submitLabel="Answer" submittingLabel="Answering…" />
+          {selected.canReply ? null : <p className="dfFactoryConsole__empty">{selected.request.status === "open" ? "This open decision is read-only in this view." : `This decision is ${selected.request.status.replaceAll("_", " ")}.`}</p>}
           <div className="dfFactoryConsole__humanActions">
-            {selected.canCancel ? <button type="button" disabled={busy || onCancel === undefined} onClick={onCancel}>STOP TASK</button> : null}
+            {selected.canCancel ? <button type="button" disabled={busy || onCancel === undefined} onClick={onCancel}>Stop task</button> : null}
             {onOpenTerminal === undefined ? null : <button type="button" disabled={busy || !terminalReady} onClick={() => onOpenTerminal(selected.request)}>Open terminal</button>}
           </div>
         </>
@@ -1137,7 +1136,7 @@ function IntakeSection({ projectId, active, state, repositories, intake, pending
     {result && !["ok","accepted","imported"].includes(result.state) ? <p role="status">{result.state === "unavailable" ? "Connection unavailable. Check access and try again." : result.state.replaceAll("_"," ")}</p>:null}
     {source ? <>
       {sources.length>1 ? <label>Source<select value={source.id} onChange={(event)=>setSourceSelection(event.currentTarget.value)}>{sources.map((item)=><option key={item.id} value={item.id}>{item.repository}</option>)}</select></label>:<p>{source.repository}</p>}
-      <button type="button" disabled={busy} onClick={()=>act({action:"preview",source_id:source.id,page:1})}>Refresh</button>
+      <IconButton icon="refresh" disabled={busy} onClick={()=>act({action:"preview",source_id:source.id,page:1})}>Refresh</IconButton>
       <button type="button" disabled={busy || (!source.enabled && source.policy!=="manual" && !current)} onClick={()=>act(source.enabled ? {action:"pause",source_id:source.id,expected_revision:source.revision}:{action:"enable",source_id:source.id,expected_revision:source.revision,reviewed_revision:source.revision})}>{source.enabled ? "Pause" : "Resume"}</button>
       {source.sync?.error ? <p role="alert">Checking failed. Check the connection and refresh.</p>:null}
       {current ? result?.candidates?.map((candidate)=>{
@@ -1153,7 +1152,7 @@ function IntakeSection({ projectId, active, state, repositories, intake, pending
       }):null}
       {current && result?.next_page ? <button type="button" disabled={busy} onClick={()=>act({action:"preview",source_id:source.id,page:result.next_page!})}>More issues</button>:null}
     </>:adding ? null : <p>{busy ? "Checking…" : "No sources yet. Add one to see issues here."}</p>}
-    {sources.length>0 ? <button type="button" onClick={()=>setAdding(!adding)}>{adding ? "Cancel" : "Add source"}</button> : null}
+    {sources.length>0 ? (adding ? <button type="button" onClick={()=>setAdding(false)}>Cancel</button> : <IconButton icon="plus" onClick={()=>setAdding(true)}>Add source</IconButton>) : null}
     <IntakeForm key={`${source?.id ?? "new"}:${source?.revision}`} project={project} state={state} repositories={repositories?.get(project.id)} source={source} result={result} github={github} busy={busy} onAction={onAction}/>
     </>}
   </section>;
@@ -1184,7 +1183,7 @@ function IntakeForm({ project, state, repositories, source, result, github, busy
     {source ? null:<label>Source<select value={provider} onChange={(event)=>{setProvider(event.currentTarget.value);if(event.currentTarget.value==="linear")act({action:"linear_teams"});}}><option value="github">GitHub Issues</option><option value="linear">Linear</option></select></label>}
     {provider==="linear" ? <>
       {teams.length ? <label>Team<select value={selectedTeam?.id ?? ""} onChange={(event)=>setTeam(event.currentTarget.value)}><option value="">Choose a team</option>{teams.map((item)=><option key={item.id} value={item.id}>{item.name}</option>)}</select></label>:<label>Linear read-only API key<input type="password" value={key} autoComplete="off" maxLength={512} onChange={(event)=>setKey(event.currentTarget.value)}/></label>}
-      {teams.length ? <button type="button" disabled={busy} onClick={()=>act({action:"linear_disconnect"})}>Disconnect Linear</button>:<button type="button" disabled={busy || key.length<10} onClick={()=>{act({action:"linear_connect",api_key:key});setKey("");}}>Connect Linear</button>}
+      {teams.length ? <button type="button" className="dfDanger" disabled={busy} onClick={()=>act({action:"linear_disconnect"})}>Disconnect Linear</button>:<button type="button" disabled={busy || key.length<10} onClick={()=>{act({action:"linear_connect",api_key:key});setKey("");}}>Connect Linear</button>}
     </>:<label>GitHub repository<select value={selectedRepository} onChange={(event)=>setRepository(event.currentTarget.value)}><option value="">Choose a repository</option>{githubRepositories.map((item)=><option key={item.repository_id} value={item.repository}>{item.repository}</option>)}{source && !githubRepositories.some((item)=>item.repository===source.repository) ? <option value={source.repository}>{source.repository}</option>:null}</select></label>}
     <label>Label filter (only issues with it are imported; blank imports every issue)<input value={label} onChange={(event)=>setLabel(event.currentTarget.value)}/></label>
     {!destination ? <p>Add a code repository to this project first.</p>:null}
@@ -1194,7 +1193,7 @@ function IntakeForm({ project, state, repositories, source, result, github, busy
       {provider==="github" ? <><label>Approval<select value={policy} onChange={(event)=>setPolicy(event.currentTarget.value as "manual"|"trusted_authors")}><option value="manual">Require my approval</option><option value="trusted_authors">Allow trusted authors</option></select></label>{policy==="trusted_authors" ? <label>Trusted authors<input value={authors} onChange={(event)=>setAuthors(event.currentTarget.value)}/></label>:null}</>:null}
       <label>Check every (seconds)<input value={poll} onChange={(event)=>setPoll(event.currentTarget.value)}/></label><label>Maximum imports per check<input value={limit} onChange={(event)=>setLimit(event.currentTarget.value)}/></label>
     </details>
-    <button type="submit" disabled={busy || !destination}>{source ? "Save":"Add source"}</button>
+    {source ? <button type="submit" disabled={busy || !destination}>Save</button> : <IconButton icon="plus" type="submit" disabled={busy || !destination}>Add source</IconButton>}
   </form>;
 }
 

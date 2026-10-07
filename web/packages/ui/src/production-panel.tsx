@@ -1,14 +1,13 @@
 import { useEffect, useId, useRef, useState } from "react";
 import type { AgentItem, StateView, TaskItem } from "@dark-factory/client";
 import type { ProjectContentCall } from "./project-library.js";
+import { IconButton } from "./icons.js";
+import { SectionHeader, Status, formatTime } from "./console-kit.js";
 import { inProgressProduction, productionStages, productionKey, type ProductionContraption, type ProductionDelivery } from "./production-view.js";
 
 const text = (v: unknown) => typeof v === "string" ? v : "";
 const href = (v: unknown) => { try { const u = new URL(text(v)); return u.protocol === "https:" && !u.username && !u.password ? u.href : undefined; } catch { return undefined; } };
-const observedAt = (value: number | undefined) => {
-  if (value === undefined || !Number.isFinite(value) || value <= 0) return "";
-  try { return new Date(value).toISOString(); } catch { return ""; }
-};
+const observedAt = formatTime;
 
 /** The receipts recorded for one pull request's own deliveries. */
 function DeliveryEvidence({ deliveries, current = true }: { deliveries: readonly ProductionDelivery[]; current?: boolean }) {
@@ -55,11 +54,11 @@ export function ProductionPanel({ items, selected, onSelect, state, call, connec
   const incomplete = queue.filter(sourceStatus).length;
   const project = item && state?.projects.get(item.projectId), owner = item?.tasks.map((id) => taskFor(item, id)).find(Boolean)?.assigned_agent_id, ownerAgent = owner ? state?.agents.get(owner) : undefined;
   return <section className="dfConsoleSidebar__panel dfProduction" aria-label="Production inspection">
-    <div className="dfProduction__heading"><h2>Changes</h2></div>
+    <SectionHeader as="h2" title="Changes" />
     {incomplete > 0 ? <p role="status">{incomplete} {incomplete === 1 ? "change is" : "changes are"} not fully shown on the floor.</p> : null}
     {!connected || error || overflow > 0 ? <details className="dfProduction__notice"><summary>{!connected ? "Last observed state" : error ? "Observation needs attention" : "Partial observation"}</summary>{!connected ? <p>Disconnected. This is the last observed state.</p> : null}{error ? <p role="alert">{error}</p> : null}{overflow > 0 ? <p>{overflow} more records are available.</p> : null}</details> : null}
     {item ? <article className="dfProduction__detail" aria-label={`Production details for ${title(item)}`}>
-      <button type="button" className="dfConsoleBack" onClick={back}>← Back to Changes</button><h3>{title(item)}</h3><p className="dfProduction__stages">{productionStages(item).map((stage) => <span className="dfStatus" data-stage={stage} key={stage}>{stage}</span>)}</p><p>{item.nextAction}</p>
+      <IconButton icon="chevron-left" className="dfConsoleBack" onClick={back}>Back to Changes</IconButton><h3>{title(item)}</h3><p className="dfProduction__stages">{productionStages(item).map((stage) => <Status stage={stage} key={stage} />)}</p><p>{item.nextAction}</p>
       {sourceStatus(item) ? <p role="status">{sourceStatus(item)}</p> : null}
       <details aria-label="Before and proposed source"><summary>Source changes</summary>
         <p>{item.source.kind} observation{item.source.stale ? " · stale" : ""}{item.source.observedAt ? ` · ${observedAt(item.source.observedAt)}` : ""}</p>
@@ -80,7 +79,7 @@ export function ProductionPanel({ items, selected, onSelect, state, call, connec
       {ownerAgent ? <button type="button" disabled={!connected || !onAgent} onClick={() => onAgent?.(ownerAgent)}>Talk to {ownerAgent.name}</button> : null}{item.missions.map((id) => <button key={id} type="button" disabled={!connected || !onMission} onClick={() => onMission?.(item.projectId, id)}>Open mission {id.slice(0, 8)}</button>)}
       {item.tasks.length ? <details><summary>Tasks · {item.tasks.length}</summary>{item.tasks.map((id) => { const task = taskFor(item, id); return <button key={id} type="button" disabled={!connected || !onOpenTask} onClick={() => void loadTask(item, id)}>Open {task?.title || id} · {task?.status || "inspect"}</button>; })}{selectedTaskId && !taskError ? <p role="status">Loading task…</p> : null}{taskError ? <p role="alert">{taskError}</p> : null}</details> : null}
     </article> : <>
-      {visible.length ? <div className="dfProduction__queue">{visible.map((v) => <button key={keyOf(v)} type="button" className="dfProduction__row" onClick={() => inspect(keyOf(v))}><strong>{title(v)}</strong><span className="dfProduction__stages">{productionStages(v).map((stage) => <span className="dfStatus" data-stage={stage} key={stage}>{stage}</span>)}</span><small>{v.nextAction}</small>{sourceStatus(v) ? <small>{sourceStatus(v)}</small> : null}</button>)}</div> : <p className="dfFactoryConsole__empty">{loading ? "Loading work…" : "No work is in progress."}</p>}{queue.length > shown ? <button type="button" disabled={!connected} onClick={() => setShown((n) => n + 12)}>Show more</button> : null}{queue.length <= shown && overflow > 0 && loadMore ? <button type="button" disabled={!connected || loading} onClick={loadMore}>{loading ? "Loading…" : "Show more"}</button> : null}
+      {visible.length ? <div className="dfProduction__queue">{visible.map((v) => <button key={keyOf(v)} type="button" className="dfProduction__row" onClick={() => inspect(keyOf(v))}><strong>{title(v)}</strong><span className="dfProduction__stages">{productionStages(v).map((stage) => <Status stage={stage} key={stage} />)}</span><small>{v.nextAction}</small>{sourceStatus(v) ? <small>{sourceStatus(v)}</small> : null}</button>)}</div> : <p className="dfFactoryConsole__empty">{loading ? "Loading work…" : "No work is in progress."}</p>}{queue.length > shown ? <button type="button" disabled={!connected} onClick={() => setShown((n) => n + 12)}>Show more</button> : null}{queue.length <= shown && overflow > 0 && loadMore ? <button type="button" disabled={!connected || loading} onClick={loadMore}>{loading ? "Loading…" : "Show more"}</button> : null}
     </>}
     <details><summary>Change history</summary>{items.filter((entry) => !inProgressProduction(entry)).map((entry) => <p key={keyOf(entry)}><button type="button" onClick={() => inspect(keyOf(entry))}>{title(entry)} · {entry.pullRequest?.state || entry.construction?.status || entry.status}</button></p>)}</details>
   </section>;

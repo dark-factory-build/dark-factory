@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { ProjectContentCall } from "./project-library.js";
+import { IconButton } from "./icons.js";
+import { SectionHeader, Status } from "./console-kit.js";
 
 type Value = Record<string, unknown>;
 const string = (value: unknown): string => typeof value === "string" ? value : "";
@@ -59,15 +61,15 @@ export function ProjectOutcomes({ project, call }: { project: string; call?: Pro
   return <section className="dfOutcomes" aria-label="Project outcomes">
     <fieldset disabled={pending || call === undefined || project === ""} aria-busy={pending}>
       {selected || editing ? null : <>
-        <div className="dfProjectLibrary__actions"><h3>Outcomes</h3><button type="button" onClick={() => { newID.current = crypto.randomUUID().replaceAll("-", ""); setSelected(undefined); setKind("outcome"); setEditing(true); }}>New outcome</button></div>
-        <ul className="dfOutcomes__list" aria-label="All outcomes">{items.map((item) => <li key={string(item.id)}><button type="button" onClick={() => void run(() => read(string(item.id)))}><strong>{string(item.objective)}</strong><span className="dfStatus" data-stage={string(item.state)}>{string(item.state)}{item.stale === true ? " · needs revalidation" : ""}</span></button></li>)}</ul>
+        <SectionHeader title="Outcomes" actions={<IconButton icon="plus" onClick={() => { newID.current = crypto.randomUUID().replaceAll("-", ""); setSelected(undefined); setKind("outcome"); setEditing(true); }}>New outcome</IconButton>} />
+        <ul className="dfOutcomes__list" aria-label="All outcomes">{items.map((item) => <li key={string(item.id)}><button type="button" onClick={() => void run(() => read(string(item.id)))}><strong>{string(item.objective)}</strong><Status stage={string(item.state)}>{string(item.state)}{item.stale === true ? " · needs revalidation" : ""}</Status></button></li>)}</ul>
         {loading ? <p role="status">Loading outcomes…</p> : items.length || listError ? null : <p>No outcomes yet.</p>}
         {!listError ? null : <p role="alert">{listError} <button type="button" onClick={() => void list()}>Retry</button></p>}
       </>}
       {selected === undefined || editing ? null : <article className="dfOutcomes__detail">
-        <div className="dfProjectLibrary__actions"><button type="button" onClick={() => setSelected(undefined)}><svg aria-hidden="true" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2"><path d="m12 5-7 7 7 7M5 12h15" /></svg> All outcomes</button><button type="button" onClick={() => setEditing(true)}>Edit outcome</button></div>
+        <div className="dfProjectLibrary__actions"><IconButton icon="chevron-left" onClick={() => setSelected(undefined)}>All outcomes</IconButton><button type="button" onClick={() => setEditing(true)}>Edit outcome</button></div>
         <h3>{string(document.objective)}</h3>
-        <p className="dfOutcomes__meta"><span className="dfStatus" data-stage={string(document.state)}>{string(document.state)}</span> · Revision {String(selected.revision)} · {string(selected.author)} ({string(selected.authority)})</p>
+        <p className="dfOutcomes__meta"><Status stage={string(document.state)} /> · Revision {String(selected.revision)} · {string(selected.author)} ({string(selected.authority)})</p>
         <form className="dfProjectLibrary__revision" aria-label="Outcome revision" onSubmit={(event) => { event.preventDefault(); const revision = Number(new FormData(event.currentTarget).get("revision")); if (Number.isSafeInteger(revision) && revision > 0) void run(() => read(string(selected.id), revision)); }}><label>Revision <input name="revision" type="number" min="1" defaultValue={Number(selected.revision)} key={`${selected.id}:${selected.revision}`} required /></label><button>Read revision</button></form>
         {selected.stale === true ? <p role="status">Objective changed · needs revalidation</p> : null}
         {!Array.isArray(selected.missing_references) || selected.missing_references.length === 0 ? null : <p role="status">Missing references: {selected.missing_references.join(", ")}</p>}

@@ -51,7 +51,7 @@ const inventory = {
     "transcript.d.ts", "transcript.js", "provenance.json",
   ],
   ui: [
-    "console-interactions.d.ts", "console-interactions.js",
+    "console-interactions.d.ts", "console-interactions.js", "console-kit.d.ts", "console-kit.js", "icons.d.ts", "icons.js",
     "console-screens.d.ts", "console-screens.js", "console-sidebar.d.ts", "console-sidebar.js",
     "console-view.d.ts", "console-view.js",
     "factory-settings-coordinator.d.ts", "factory-settings-coordinator.js",

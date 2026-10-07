@@ -15,6 +15,7 @@ import { FactoryScene } from "../dist/src/factory-scene/factory-scene.js";
 import { TerminalPanel } from "../dist/src/factory-app.js";
 import { DEFAULT_FLOOR_APPEARANCE, readFloorAppearance } from "../dist/src/floor-appearance.js";
 import { fixtureState, fixtureTopologies, fixtureTopology } from "../../../fixtures/state.mjs";
+const textOf = (node) => [].concat(node.props.children).flat(Infinity).filter((child) => typeof child === "string").join("").trim();
 
 const ids = {
   project: [...fixtureState.projects.keys()][0],
@@ -111,13 +112,13 @@ test("repository roots stay inside private settings", () => {
   const settings = render({ settingsOpen: true, repositories });
   assert.match(settings, /Repositories/);
   assert.match(settings, new RegExp(root));
-  assert.match(settings, /FETCH: SETUP_REQUIRED/);
-  assert.match(settings, /PUBLICATION: IDENTITY VERIFIED/);
+  assert.match(settings, /Fetch: setup required/);
+  assert.match(settings, /Publication: Identity verified/);
   assert.match(settings, /base branch and Git login/);
-  assert.match(settings, /CHECK FETCH READINESS/);
-  assert.match(settings, /REFRESH GITHUB BINDING/);
+  assert.match(settings, /Check fetch readiness/);
+  assert.match(settings, /Refresh GitHub binding/);
   assert.match(settings, /Git checkout needs operator setup\./);
-  assert.match(settings, /ADD REPOSITORY/);
+  assert.match(settings, /Add repository/);
 });
 
 test("floor appearance waits for storage, changes while disconnected, and resets only itself", () => {
@@ -170,12 +171,12 @@ test("one screen keeps Factory and the operator panels together", () => {
   assert.doesNotMatch(markup, /ACTIVE RUNS|OPERATOR VIEW/);
   assert.equal(markup.includes("<dt>QUEUED</dt>"), false);
   assert.equal(markup.includes("<dt>NEEDS YOU</dt>"), false);
-  assert.match(markup, /Needs you (<!-- -->)?1</);
+  assert.match(markup, /Needs you <span class="dfBadge">1<\/span>/);
   assert.match(markup, />Tasks<\/button>/);
   assert.match(markup, /Builder One asks/);
   assert.match(markup, /Review the state projection/);
   assert.match(markup, /North Workshop · Review the state projection/);
-  assert.equal(markup.includes("DECISION NEEDED"), false, "an unopened request stays brief");
+  assert.equal(markup.includes("Decision needed"), false, "an unopened request stays brief");
   assert.match(render({ detail: "queue" }), /aria-label="Tasks"/);
   // No screen union survives: there is no navigation away from this screen.
   assert.equal(markup.includes("dfFactoryConsole__homeLink"), false);
@@ -184,9 +185,9 @@ test("one screen keeps Factory and the operator panels together", () => {
 
 test("a selected decision names the action and keeps one collapse control", () => {
   const markup = render({ selectedHumanRequest: selectedRequest(), onCloseHumanRequest: () => {}, onReplyHumanRequest: () => {}, onCancelHumanRequest: () => {} });
-  assert.match(markup, /<h3>DECISION NEEDED<\/h3>/);
-  assert.match(markup, />STOP TASK<\/button>/);
-  assert.equal(markup.includes(">CLOSE</button>"), false);
+  assert.match(markup, /<h3>Decision needed<\/h3>/);
+  assert.match(markup, />Stop task<\/button>/);
+  assert.equal(markup.includes(">Close</button>"), false);
 });
 
 test("a suggested answer sends on the one tap it looks like", () => {
@@ -195,21 +196,21 @@ test("a suggested answer sends on the one tap it looks like", () => {
   elements.find((element) => element.type === "button" && Array.isArray(element.props.children) && element.props.children[0] === "Continue").props.onClick();
   assert.deepEqual(calls, ["Continue", "sent"], "the floor sends too: one shared control, one behaviour");
   const markup = render({ selectedHumanRequest: selectedRequest({ options: ["Continue", "Stop"] }) });
-  assert.match(markup, />Continue · RECOMMENDED<\/button>/);
+  assert.match(markup, />Continue · Recommended<\/button>/);
   assert.match(markup, />Stop<\/button>/);
 });
 
 test("read-only decisions retain disabled suggestions and explain their status", () => {
   const open = render({ selectedHumanRequest: selectedRequest({ options: ["Keep accounts", "Include users"], canReply: false }) });
   assert.match(open, /aria-label="Suggested answers"/);
-  assert.match(open, />Keep accounts · RECOMMENDED<\/button>/);
+  assert.match(open, />Keep accounts · Recommended<\/button>/);
   assert.match(open, />Include users<\/button>/);
   assert.match(open, /<button type="button" disabled="">Keep accounts/);
-  assert.match(open, /THIS OPEN DECISION IS READ-ONLY IN THIS VIEW\./);
-  assert.equal(open.includes("YOUR ANSWER"), false);
+  assert.match(open, /This open decision is read-only in this view\./);
+  assert.equal(open.includes("Your answer"), false);
 
   const deliveryUnknown = render({ selectedHumanRequest: selectedRequest({ request: { ...fixtureState.humanRequests.get(ids.request), status: "delivery_unknown" }, canReply: false }) });
-  assert.match(deliveryUnknown, /THIS DECISION IS DELIVERY UNKNOWN\./);
+  assert.match(deliveryUnknown, /This decision is delivery unknown\./);
 });
 
 test("the roster stays visible while the optional floor opens and closes", () => {
@@ -218,10 +219,10 @@ test("the roster stays visible while the optional floor opens and closes", () =>
 
   const agents = render({ view: "agents" });
   assert.match(agents, /aria-label="Agents"/);
-  assert.match(agents, /aria-label="OVERSEER"/);
+  assert.match(agents, /aria-label="Overseer"/);
   // Rank is the served role, oversight first, and nothing invents a new field.
-  const overseer = agents.indexOf('aria-label="OVERSEER"');
-  const worker = agents.indexOf('aria-label="WORKER"');
+  const overseer = agents.indexOf('aria-label="Overseer"');
+  const worker = agents.indexOf('aria-label="Worker"');
   assert.ok(overseer > -1 && worker > overseer);
   assert.ok(agents.indexOf("Dispatch Lead") < agents.indexOf("Builder One"));
   assert.match(agents, /Builder One[\s\S]*?claude_code[\s\S]*?needs you/);
@@ -470,13 +471,13 @@ test("the console never shows a kernel-grammar or retired vocabulary word", () =
       assert.equal(forbidden.test(markup), false, `${name}: ${forbidden}`);
     }
   }
-  assert.match(render({ view: "agents" }), />OVERSEER</);
+  assert.match(render({ view: "agents" }), />Overseer</);
 });
 
 test("transitional session statuses have stable live labels and offer no factory action", () => {
   for (const status of ["idle", "connecting", "authenticating", "syncing", "closed"]) {
     const markup = render({ status, onSelectAgent: () => {}, onSelectHumanRequest: () => {}, onView: () => {}, onToggleSettings: () => {} });
-    assert.match(markup, new RegExp(`>${status.toUpperCase()}<`));
+    assert.match(markup, new RegExp(`>${status[0].toUpperCase()}${status.slice(1)}<`));
     assert.match(markup, /class="dfFactoryConsole__connection" aria-label="Connection status:/);
     // SETTINGS is the only button before the factory is ready; the floor is a
     // native disclosure, not a factory action.
@@ -498,7 +499,7 @@ test("closed and pairing-uncertain errors have no ineffective action", () => {
     // closed console is SETTINGS, which changes nothing in the factory.
     assert.equal((markup.match(/<button(?![^>]*disabled)/g) ?? []).length, 1);
     assert.doesNotMatch(markup, /role="alert"[^>]*>[^<]*<button/);
-    assert.equal(markup.includes("RETRY CONNECTION"), false);
+    assert.equal(markup.includes("Retry connection"), false);
     assert.equal(markup.includes("Error:"), false);
     assert.equal(markup.includes("secret"), false);
   }
@@ -620,7 +621,7 @@ test("an unavailable snapshot is explicit and does not invent runtime state", ()
   const markup = render({ state: undefined, status: "syncing" });
   assert.match(markup, /Waiting for the latest state…/);
   assert.match(markup, /Waiting for the latest state…/);
-  assert.match(markup, /Connection status: SYNCING/);
+  assert.match(markup, /Connection status: Syncing/);
   assert.match(markup, />Tasks<\/button>/);
   assert.equal(markup.includes("NO QUEUED TASKS"), false);
   assert.equal(markup.includes("all quiet"), false);
@@ -630,12 +631,12 @@ test("an unavailable snapshot is explicit and does not invent runtime state", ()
 test("HumanRequest delivery states remain visibly distinct", () => {
   const request = fixtureState.humanRequests.get(ids.request);
   for (const [status, label] of [
-    ["open", "OPEN"],
-    ["delivering", "DELIVERING"],
-    ["delivery_unknown", "DELIVERY UNKNOWN"],
+    ["open", "open"],
+    ["delivering", "delivering"],
+    ["delivery_unknown", "delivery unknown"],
   ]) {
     const markup = render({ state: baseState({ humanRequests: new Map([[request.id, { ...request, status }]]) }) });
-    assert.match(markup, new RegExp(`>${label} ·`));
+    assert.match(markup, new RegExp(`data-stage="${status}">${label}</span> `));
   }
 });
 
@@ -646,7 +647,7 @@ test("the two-column console keeps one mounted terminal slot", () => {
   assert.match(css, /\.dfConsoleRow\s*\{[^}]*flex-wrap: wrap;/);
   assert.match(css, /\.dfConsoleLayout\s*\{[^}]*grid-template-columns: minmax\(0, 2fr\) minmax\(0, 1fr\);/);
   assert.match(css, /\.dfFactoryConsole__instructionActions\s*\{[^}]*display: flex;[^}]*flex-wrap: wrap;/);
-  for (const rule of [/\.dfConsoleDialog \*/, /\.dfConsoleDialog button,/, /\.dfConsoleDialog button:disabled,[\s\S]*?\{/, /\.dfConsoleDialog\s*\{[^}]*font-family: ui-monospace/, /\.dfConsoleDialog\s*\{[^}]*color: var\(--df-console-text\)/]) {
+  for (const rule of [/\.dfConsoleDialog \*/, /\.dfConsoleDialog button,/, /\.dfConsoleDialog button:disabled,[\s\S]*?\{/, /\.dfConsoleShell\s*\{[^}]*font-family: var\(--df-font-mono\)/, /\.dfConsoleDialog\s*\{[^}]*color: var\(--df-console-text\)/]) {
     assert.match(css, rule);
   }
   // The panel scrolls, never the <dialog>: a scrollbar click on the dialog
@@ -656,7 +657,7 @@ test("the two-column console keeps one mounted terminal slot", () => {
   assert.match(css, /:focus-visible\s*\{\s*outline: 2px solid var\(--df-console-accent\);/);
 
   const withTerminal = render({ selectedAgent: agentSelection(), terminalContent: createElement("section", { "aria-label": "Agent terminal" }) });
-  assert.match(withTerminal, /<h1>DARK FACTORY<\/h1>/);
+  assert.match(withTerminal, /<h1>Dark Factory<\/h1>/);
   assert.match(withTerminal, /dfConsoleLayout__left[\s\S]*?dfConsoleSidebar/);
   assert.match(withTerminal, /dfConsoleSidebar__terminalSlot" aria-label="Terminal"><section aria-label="Agent terminal"><\/section>/);
   assert.equal(withTerminal.includes("dfConsoleLayout__right"), false);
@@ -712,7 +713,7 @@ test("opening a selected question restores that agent's terminal panel", async (
     await act(async () => { renderer.root.findByProps({ "aria-label": "Project" }).props.onChange({ currentTarget: { value: ids.secondProject } }); });
     assert.equal(renderer.root.findAllByProps({ "aria-label": "Terminal" }).length, 0);
     await act(async () => { renderer.root.findByProps({ "aria-label": "Project" }).props.onChange({ currentTarget: { value: "" } }); });
-    await act(async () => { renderer.root.findAllByType("button").find((button) => Array.isArray(button.props.children) && button.props.children[0] === "Needs you ").props.onClick(); });
+    await act(async () => { renderer.root.findAllByType("button").find((button) => textOf(button).startsWith("Needs you")).props.onClick(); });
     await act(async () => { renderer.root.findAllByType("button").find((button) => button.props.children === "Open terminal").props.onClick(); });
     assert.equal(renderer.root.findByProps({ "aria-label": "Project" }).props.value, ids.project, "opening a global question switches to its agent’s project");
     const terminal = renderer.root.findByProps({ "aria-label": "Terminal" });
@@ -761,8 +762,8 @@ test("a paused agent with queued work says the queue is paused", () => {
     state: baseState({ agents }),
     selectedAgent: { id: agent.id, name: agent.name, revision: agent.revision },
   });
-  assert.match(markup, />QUEUE PAUSED</);
-  assert.equal(markup.includes("QUEUED · WAITING FOR CAPACITY"), false);
+  assert.match(markup, />Queue paused</);
+  assert.equal(markup.includes("Queued · waiting for capacity"), false);
 });
 
 test("unclaimed shared work waits under its project until an eligible worker claims it", () => {
@@ -775,7 +776,7 @@ test("unclaimed shared work waits under its project until an eligible worker cla
     onEditTask: () => {},
   });
   assert.match(markup, /Anyone free/);
-  assert.match(markup, /ANY ELIGIBLE WORKER · QUEUED · PRIORITY/);
+  assert.match(markup, /Any eligible worker · Priority/);
   assert.match(markup, /<option value="" disabled=""[^>]*>Any eligible worker<\/option>/);
 });
 
@@ -812,7 +813,7 @@ test("the queued task row keeps served order and changes its exact priority", as
     const queueRows = renderer.root.findByProps({ "aria-label": "Tasks" }).findAllByType("details").filter((row) => row.props.className === "dfConsoleItem");
     assert.deepEqual(queueRows.map((row) => row.findByType("strong").props.children), [queued.title, other.title], "the queue keeps the server's per-agent order, rather than re-sorting priority");
     assert.ok(!renderer.root.findAllByType("p").some((paragraph) => paragraph.props.children === "Grouped by agent · no global start order"));
-    assert.ok(renderer.root.findAllByType("span").some((span) => (Array.isArray(span.props.children) ? span.props.children.join("") : String(span.props.children)).includes("QUEUED · PRIORITY 2")));
+    assert.ok(renderer.root.findAllByType("span").some((span) => (Array.isArray(span.props.children) ? span.props.children.join("") : String(span.props.children)).includes("Priority 2")));
     await act(async () => { byLabel(`Increase priority for ${queued.title}`).props.onClick(); });
     assert.deepEqual(edits.at(-1), [queued.id, { priority: queued.priority + 1 }]);
     await act(async () => { byLabel(`Decrease priority for ${other.title}`).props.onClick(); });
@@ -827,7 +828,7 @@ test("the queued task row keeps served order and changes its exact priority", as
 
     await act(async () => { renderer.update(createElement(FactoryConsole, props)); });
 
-    const editBrief = () => renderer.root.findAllByType("button").find((button) => button.props.children === "EDIT BRIEF");
+    const editBrief = () => renderer.root.findAllByType("button").find((button) => button.props.children === "Edit brief");
     const firstRow = renderer.root.findByProps({ "aria-label": "Tasks" }).findAllByType("details").find((row) => row.props.className === "dfConsoleItem");
     assert.equal(firstRow.props.open, undefined, "queue rows start collapsed");
     assert.deepEqual(detailReads, [], "collapsed queued rows do not read private briefs");
@@ -838,7 +839,7 @@ test("the queued task row keeps served order and changes its exact priority", as
     const instruction = renderer.root.findAllByType("textarea").find((input) => input.props.id === `df-instruction-${queued.id}`);
     await act(async () => { instruction.props.onChange({ currentTarget: { value: "Replacement brief" } }); });
 		assert.ok(renderer.root.findAllByType("pre").some((item) => item.props.children === "Review this carefully"));
-    await act(async () => { await renderer.root.findAllByType("button").find((button) => button.props.children === "SAVE BRIEF").props.onClick(); });
+    await act(async () => { await renderer.root.findAllByType("button").find((button) => button.props.children === "Save brief").props.onClick(); });
     assert.deepEqual(edits.at(-1), [queued.id, { title: "Renamed", body: "Replacement brief" }]);
     await act(async () => { firstRow.props.onToggle({ currentTarget: { open: false } }); firstRow.props.onToggle({ currentTarget: { open: true } }); });
     assert.deepEqual(detailReads, [queued.id], "reopening a cached row does not overwrite the brief");
@@ -850,7 +851,7 @@ test("the queued task row keeps served order and changes its exact priority", as
     await act(async () => { assign.props.onChange({ currentTarget: { value: "23".repeat(16) } }); });
     assert.deepEqual(edits.at(-1), [queued.id, { assignedAgentId: "23".repeat(16) }]);
 
-    await act(async () => { renderer.root.findAllByType("button").find((button) => button.props.children === "CANCEL").props.onClick(); });
+    await act(async () => { renderer.root.findAllByType("button").find((button) => button.props.children === "Cancel").props.onClick(); });
     assert.deepEqual(edits.at(-1), [queued.id, { cancel: true }]);
 
     // A refused brief edit preserves the operator's drafts at the unchanged
@@ -864,13 +865,13 @@ test("the queued task row keeps served order and changes its exact priority", as
     await act(async () => { await renderer.root.findAllByType("button").find((button) => button.props.children === "Older conversation").props.onClick(); });
     assert.equal(titleValue(), "Keep this draft");
     assert.equal(instructionValue(), "Keep this instruction");
-    assert.ok(renderer.root.findAllByProps({ role: "alert" }).some((item) => String(item.props.children).includes("SAVE OR DISCARD YOUR DRAFT")));
+    assert.ok(renderer.root.findAllByProps({ role: "alert" }).some((item) => String(item.props.children).includes("Save or discard your draft")));
     const revised = baseState({ tasks: new Map([[queued.id, { ...queued, assigned_agent_id: ids.agent, revision: queued.revision + 1n }], [other.id, { ...other, assigned_agent_id: ids.agent }]]) });
     await act(async () => { renderer.update(createElement(FactoryConsole, { ...props, state: revised })); });
     assert.equal(titleValue(), "Keep this draft");
     assert.equal(instructionValue(), "Keep this instruction");
-    assert.equal(renderer.root.findAllByProps({ role: "alert" }).some((item) => String(item.props.children).includes("TASK CHANGED")), true);
-    assert.equal(renderer.root.findAllByType("button").find((button) => button.props.children === "SAVE BRIEF").props.disabled, true);
+    assert.equal(renderer.root.findAllByProps({ role: "alert" }).some((item) => String(item.props.children).includes("Task changed")), true);
+    assert.equal(renderer.root.findAllByType("button").find((button) => button.props.children === "Save brief").props.disabled, true);
     await act(async () => { renderer.unmount(); });
   } finally {
     globalThis.IS_REACT_ACT_ENVIRONMENT = previousAct;
@@ -985,7 +986,7 @@ test("recent work remains collapsed, bounded, and private until opened", async (
   const detail = renderer.root.findByProps({ "aria-label": "Work details" });
   assert.ok(detail.findAllByType("p").some((item) => item.props.children === `Outcome ${detailCalls[0][0]}`));
   assert.deepEqual(detail.findAllByType("a").map((link) => link.props.href), ["https://github.com/example-owner/example-repo/pull/42"]);
-  await act(async () => { renderer.root.findAllByType("button").find((button) => button.props.children === "SHOW MORE").props.onClick(); });
+  await act(async () => { renderer.root.findAllByType("button").find((button) => button.props.children === "Show more").props.onClick(); });
   assert.equal(detailCalls.length, 1, "pagination does not fetch private details for unselected work");
   assert.deepEqual(listCalls[1], { beforeUpdatedAtMs: 1_700_000_000_002n, beforeTaskId: "00000000000000000000000000000003" });
   assert.equal(items().length, 12);
@@ -1041,7 +1042,7 @@ test("a rejected edit says plainly that the durable value did not change", () =>
   assert.equal((markup.match(/role="alert"/g) ?? []).length, 1, "a config refusal has one shared alert");
   const unknown = render({ selectedAgent: agentSelection(), onSaveAgentConfig: () => {}, edit: { target: ids.agent, pending: false, error: { code: "internal" } } });
   assert.match(unknown, /The edit did not complete\./);
-  assert.match(render({ selectedAgent: agentSelection(), onSaveAgentConfig: () => {}, edit: { pending: true } }), />SAVING</);
+  assert.match(render({ selectedAgent: agentSelection(), onSaveAgentConfig: () => {}, edit: { pending: true } }), />Saving</);
 });
 
 test("a queued edit refusal remains visible after its task leaves the queue", () => {
@@ -1069,14 +1070,14 @@ test("the settings modal keeps actionable settings compact", () => {
   assert.doesNotMatch(markup, /<dt>(RUN ALLOWANCE|PER-RUN LIMIT)<\/dt>/);
   assert.equal((markup.match(/aria-label="Limits for North Workshop"/g) ?? []).length, 1);
   assert.equal((markup.match(/aria-label="Limits for South Workshop"/g) ?? []).length, 1);
-  assert.match(markup, /5 RUNS USED · 7 FUTURE RUNS LEFT/);
-  assert.match(markup, /3 RUNS USED · UNLIMITED/);
+  assert.match(markup, /5 runs used · 7 future runs left/);
+  assert.match(markup, /3 runs used · unlimited/);
   assert.match(markup, /value="900"/);
-  assert.match(markup, /aria-label="PAIRING"/);
+  assert.match(markup, /aria-label="Pairing"/);
   assert.match(markup, /Pairing unavailable/);
   // The peer PR drops its own component into the same slot.
-  const paired = render({ settingsOpen: true, onToggleSettings: () => {}, pairing: createElement("p", null, "PAIR A PHONE") });
-  assert.match(paired, /PAIR A PHONE/);
+  const paired = render({ settingsOpen: true, onToggleSettings: () => {}, pairing: createElement("p", null, "Pair a phone") });
+  assert.match(paired, /Pair a phone/);
   assert.equal(paired.includes("Pairing unavailable"), false);
   // The modal is over the console, so it neither closes nor replaces a sidebar.
   const both = render({ settingsOpen: true, onToggleSettings: () => {}, selectedAgent: agentSelection() });
@@ -1088,36 +1089,36 @@ test("private GitHub settings stays behind the paired admin surface", async () =
   const calls = [];
   const settings = { settingsOpen: true, onToggleSettings: () => {}, onGitHub: (request) => calls.push(request) };
   const disconnected = render(settings);
-  assert.match(disconnected, /aria-label="GITHUB SETTINGS"/);
-  assert.match(disconnected, />DISCONNECTED</);
-  assert.match(disconnected, />CONNECT GITHUB<\/button>/);
+  assert.match(disconnected, /aria-label="GitHub settings"/);
+  assert.match(disconnected, />disconnected</);
+  assert.match(disconnected, />Connect GitHub<\/button>/);
   let renderer;
   act(() => { renderer = create(createElement(FactoryConsole, { status: "ready", state: baseState(), ...settings })); });
-  act(() => { renderer.root.findAllByType("button").find((button) => button.props.children === "CONNECT GITHUB").props.onClick(); });
+  act(() => { renderer.root.findAllByType("button").find((button) => button.props.children === "Connect GitHub").props.onClick(); });
   assert.ok(calls.some((request) => request.action === "connect"));
   renderer.unmount();
   const denied = render({ ...settings, github: { pending: false, result: { state: "denied" } } });
   assert.match(denied, /Access expired or was denied/);
   act(() => { renderer = create(createElement(FactoryConsole, { status: "ready", state: baseState(), ...settings, github: { pending: false, result: { state: "denied" } } })); });
-  act(() => { renderer.root.findAllByType("button").find((button) => button.props.children === "RESET GITHUB ACCESS").props.onClick(); });
+  act(() => { renderer.root.findAllByType("button").find((button) => button.props.children === "Reset GitHub access").props.onClick(); });
   assert.equal(calls.at(-1).action, "disconnect");
   renderer.unmount();
   const unavailable = render({ ...settings, github: { pending: false, result: { state: "unavailable" } } });
   assert.match(unavailable, /GitHub is unavailable/);
   const disconnectPending = render({ ...settings, github: { pending: false, result: { state: "ok", status: { connection_id: "", state: "disconnect_pending", repositories: [] } } } });
-  assert.match(disconnectPending, /RETRY DISCONNECT/);
+  assert.match(disconnectPending, /Retry disconnect/);
   const awaitingConfirmation = render({ ...settings, github: { pending: false, result: { state: "ok", status: { connection_id: "c", state: "awaiting_confirmation", repositories: [] } } } });
-  assert.match(awaitingConfirmation, /RESET GITHUB ACCESS/);
+  assert.match(awaitingConfirmation, /Reset GitHub access/);
   const connecting = render({ ...settings, github: { pending: false, result: { state: "ok", authorization: { connection_id: "c", authorization_url: "https://github.com/login/oauth/authorize", expires_at: 123n } } } });
-  assert.match(connecting, /RESET GITHUB ACCESS/);
+  assert.match(connecting, /Reset GitHub access/);
   const expired = render({ ...settings, github: { pending: false, result: { state: "ok", status: { connection_id: "c", state: "disconnected", repositories: [] } } } });
-  assert.match(expired, /RESET GITHUB ACCESS/);
+  assert.match(expired, /Reset GitHub access/);
   act(() => { renderer = create(createElement(FactoryConsole, { status: "ready", state: baseState(), ...settings, github: { pending: false, result: { state: "ok", status: { connection_id: "c", state: "disconnected", repositories: [] } } } })); });
-  act(() => { renderer.root.findAllByType("button").find((button) => button.props.children === "RESET GITHUB ACCESS").props.onClick(); });
+  act(() => { renderer.root.findAllByType("button").find((button) => button.props.children === "Reset GitHub access").props.onClick(); });
   assert.equal(calls.at(-1).action, "disconnect");
   renderer.unmount();
   act(() => { renderer = create(createElement(FactoryConsole, { status: "ready", state: baseState(), ...settings, github: { pending: false, result: { state: "unavailable" } } })); });
-  act(() => { renderer.root.findAllByType("button").find((button) => button.props.children === "RETRY GITHUB ACCESS").props.onClick(); });
+  act(() => { renderer.root.findAllByType("button").find((button) => button.props.children === "Retry GitHub access").props.onClick(); });
   assert.equal(calls.at(-1).action, "refresh");
   renderer.unmount();
   const connected = render({ ...settings, github: { pending: false, result: {
@@ -1125,59 +1126,59 @@ test("private GitHub settings stays behind the paired admin surface", async () =
     status: { connection_id: "c", state: "connected", repositories: [] },
     installations: { installations: [{ id: 7, account: { id: 8, login: "factory-org" }, suspended_at: null, html_url: "https://github.com/settings/installations/7", eligibility: "available" }], next_page: 2 },
   } } });
-  assert.match(connected, /REFRESH ACCESS/);
-  assert.match(connected, /DISCONNECT/);
+  assert.match(connected, /Refresh access/);
+  assert.match(connected, /Disconnect/);
   assert.match(connected, /factory-org · available/);
   assert.match(connected, /href="https:\/\/github.com\/settings\/installations\/7"/);
-  assert.match(connected, /MORE INSTALLATIONS/);
+  assert.match(connected, /More installations/);
   assert.equal(connected.includes("javascript:"), false);
   assert.equal(connected.includes("evil.example"), false);
-  assert.match(disconnected, /GITHUB/);
+  assert.match(disconnected, /GitHub/);
 
   const noInstallation = render({ ...settings, github: { pending: false, result: { state: "ok", status: { connection_id: "c", state: "connected", repositories: [] }, installations: { installations: [], installation_url: "https://github.com/apps/factory-maintainer/installations/new" } } } });
-  assert.match(noInstallation, /INSTALL OR REQUEST GITHUB APP ACCESS/);
+  assert.match(noInstallation, /Install or request GitHub app access/);
   assert.match(noInstallation, /href="https:\/\/github.com\/apps\/factory-maintainer\/installations\/new"/);
   const pendingInstallationPages = render({ ...settings, github: { pending: false, result: { state: "ok", status: { connection_id: "c", state: "connected", repositories: [] }, installations: { installations: [], next_page: 2, installation_url: "https://github.com/apps/factory-maintainer/installations/new" } } } });
-  assert.doesNotMatch(pendingInstallationPages, /INSTALL OR REQUEST GITHUB APP ACCESS/);
+  assert.doesNotMatch(pendingInstallationPages, /Install or request GitHub app access/);
   const unavailableInstall = render({ ...settings, github: { pending: false, result: { state: "ok", status: { connection_id: "c", state: "connected", repositories: [] }, installations: { installations: [], installation_url: "https://evil.example\/apps\/factory\/installations\/new" } } } });
-  assert.doesNotMatch(unavailableInstall, /INSTALL OR REQUEST GITHUB APP ACCESS/);
+  assert.doesNotMatch(unavailableInstall, /Install or request GitHub app access/);
   const visibleInstall = render({ ...settings, github: { pending: false, result: { state: "ok", status: { connection_id: "c", state: "connected", repositories: [] }, installations: { installations: [{ id: 7, account: { id: 8, login: "factory-org" }, suspended_at: null, eligibility: "available" }], installation_url: "https://github.com/apps/factory-maintainer/installations/new" } } } });
-  assert.doesNotMatch(visibleInstall, /INSTALL OR REQUEST GITHUB APP ACCESS/);
+  assert.doesNotMatch(visibleInstall, /Install or request GitHub app access/);
 
   const pagerCalls = [];
   const pageProps = (installations) => ({ status: "ready", state: baseState(), settingsOpen: true, onToggleSettings: () => {}, onGitHub: (request) => pagerCalls.push(request), github: { pending: false, result: { state: "ok", status: { connection_id: "pager", state: "connected", repositories: [] }, installations } } });
   act(() => { renderer = create(createElement(FactoryConsole, pageProps({ installations: [{ id: 7, account: { id: 8, login: "factory-org" }, suspended_at: null, html_url: "https://github.com/settings/installations/7", eligibility: "available" }], next_page: 2 }))); });
   pagerCalls.length = 0;
-  act(() => { renderer.root.findAllByType("button").find((button) => button.props.children === "MORE INSTALLATIONS").props.onClick(); });
+  act(() => { renderer.root.findAllByType("button").find((button) => button.props.children === "More installations").props.onClick(); });
   act(() => { renderer.update(createElement(FactoryConsole, pageProps({ installations: [{ id: 8, account: { id: 9, login: "another-org" }, suspended_at: null, html_url: "https://github.com/settings/installations/8", eligibility: "available" }], next_page: 3 }))); });
-  assert.equal(renderer.root.findAllByType("button").some((button) => button.props.children === "PREVIOUS INSTALLATIONS"), true);
-  act(() => { renderer.root.findAllByType("button").find((button) => button.props.children === "REFRESH ACCESS").props.onClick(); });
+  assert.equal(renderer.root.findAllByType("button").some((button) => textOf(button) === "Previous installations"), true);
+  act(() => { renderer.root.findAllByType("button").find((button) => textOf(button) === "Refresh access").props.onClick(); });
   assert.deepEqual(pagerCalls, [{ action: "installations", page: 2 }, { action: "refresh" }]);
-  assert.equal(renderer.root.findAllByType("button").some((button) => button.props.children === "PREVIOUS INSTALLATIONS"), false);
+  assert.equal(renderer.root.findAllByType("button").some((button) => textOf(button) === "Previous installations"), false);
   renderer.unmount();
 
   const retainedInstallations = (installations) => ({ status: "ready", state: baseState(), settingsOpen: true, onToggleSettings: () => {}, onGitHub: () => {}, github: { pending: false, result: { state: "ok", status: { connection_id: "retained", state: "connected", repositories: [] }, installations } } });
   act(() => { renderer = create(createElement(FactoryConsole, retainedInstallations({ installations: [{ id: 7, account: { id: 8, login: "factory-org" }, suspended_at: null, eligibility: "available" }], next_page: 2, installation_url: "https://github.com/apps/factory-maintainer/installations/new" }))); });
   act(() => { renderer.update(createElement(FactoryConsole, retainedInstallations({ installations: [], installation_url: "https://github.com/apps/factory-maintainer/installations/new" }))); });
-  assert.equal(renderer.root.findAllByType("a").some((anchor) => String(anchor.props.children).includes("INSTALL OR REQUEST GITHUB APP ACCESS")), false);
+  assert.equal(renderer.root.findAllByType("a").some((anchor) => String(anchor.props.children).includes("Install or request GitHub app access")), false);
   renderer.unmount();
 
   const refreshCalls = [];
   const refreshProps = (installations) => ({ status: "ready", state: baseState(), settingsOpen: true, onToggleSettings: () => {}, onGitHub: (request) => refreshCalls.push(request), github: { pending: false, result: { state: "ok", status: { connection_id: "refresh-link", state: "connected", repositories: [] }, installations } } });
   act(() => { renderer = create(createElement(FactoryConsole, refreshProps({ installations: [{ id: 7, account: { id: 8, login: "factory-org" }, suspended_at: null, eligibility: "available" }] }))); });
-  act(() => { renderer.root.findAllByType("button").find((button) => button.props.children === "REFRESH ACCESS").props.onClick(); });
+  act(() => { renderer.root.findAllByType("button").find((button) => textOf(button) === "Refresh access").props.onClick(); });
   act(() => { renderer.update(createElement(FactoryConsole, refreshProps({ installations: [], installation_url: "https://github.com/apps/factory-maintainer/installations/new" }))); });
   assert.equal(refreshCalls.at(-1).action, "refresh");
-  assert.equal(renderer.root.findAllByType("a").some((anchor) => String(anchor.props.children).includes("INSTALL OR REQUEST GITHUB APP ACCESS")), true);
+  assert.equal(renderer.root.findAllByType("a").some((anchor) => String(anchor.props.children).includes("Install or request GitHub app access")), true);
   renderer.unmount();
 
   const repositoryCalls = [];
   const statusRepositories = [];
   const repositoryProps = (repositories, delegated = statusRepositories, installationID = 7) => ({ status: "ready", state: baseState(), settingsOpen: true, onToggleSettings: () => {}, onGitHub: (request) => repositoryCalls.push(request), github: { pending: false, result: { state: "ok", status: { connection_id: "c", state: "connected", repositories: delegated }, installations: { installations: [{ id: installationID, account: { id: 8, login: "factory-org" }, suspended_at: null, eligibility: "available" }], }, repositories } } });
   act(() => { renderer = create(createElement(FactoryConsole, repositoryProps({ repositories: [{ id: 101, full_name: "factory-org/one", permissions: { pull: true, push: true, maintain: true, admin: true } }], next_page: 2 }))); });
-  act(() => { renderer.root.findAllByType("button").find((button) => button.props.children === "CHOOSE REPOSITORIES").props.onClick(); });
+  act(() => { renderer.root.findAllByType("button").find((button) => button.props.children === "Choose repositories").props.onClick(); });
   act(() => { renderer.update(createElement(FactoryConsole, repositoryProps({ repositories: [{ id: 101, full_name: "factory-org/one", permissions: { pull: true, push: true, maintain: true, admin: true } }], next_page: 2 }))); });
-  act(() => { renderer.root.findByProps({"aria-label":"GITHUB SETTINGS"}).findAllByType("input").find((input) => input.props.type === "checkbox").props.onChange({ currentTarget: { checked: true } }); });
+  act(() => { renderer.root.findByProps({"aria-label":"GitHub settings"}).findAllByType("input").find((input) => input.props.type === "checkbox").props.onChange({ currentTarget: { checked: true } }); });
   await act(async () => { renderer.update(createElement(FactoryConsole, repositoryProps({ repositories: [{ id: 102, full_name: "factory-org/two", permissions: { pull: true, push: true, maintain: true, admin: true } }] }))); });
   act(() => { renderer.root.findAllByType("button").find((button) => String(button.props.children).startsWith("Save access")).props.onClick(); });
   assert.deepEqual(repositoryCalls.find((request) => request.action === "delegate"), { action: "delegate", repositories: [{ installation_id: 7, repository_id: 101, repository: "factory-org/one" }] });
@@ -1185,13 +1186,13 @@ test("private GitHub settings stays behind the paired admin surface", async () =
 
   const delegated = [{ installation_id: 7, repository_id: 101, repository: "factory-org/one" }];
   act(() => { renderer = create(createElement(FactoryConsole, repositoryProps({ repositories: [{ id: 101, full_name: "factory-org/one", permissions: { pull: true, push: true, maintain: true, admin: true } }] }, delegated))); });
-  act(() => { renderer.root.findAllByType("button").find((button) => button.props.children === "CHOOSE REPOSITORIES").props.onClick(); });
+  act(() => { renderer.root.findAllByType("button").find((button) => button.props.children === "Choose repositories").props.onClick(); });
   act(() => { renderer.update(createElement(FactoryConsole, repositoryProps({ repositories: [{ id: 101, full_name: "factory-org/one", permissions: { pull: true, push: true, maintain: true, admin: true } }] }, delegated))); });
-  assert.equal(renderer.root.findByProps({"aria-label":"GITHUB SETTINGS"}).findAllByType("input").find((input) => input.props.type === "checkbox").props.checked, true);
+  assert.equal(renderer.root.findByProps({"aria-label":"GitHub settings"}).findAllByType("input").find((input) => input.props.type === "checkbox").props.checked, true);
   act(() => { renderer.update(createElement(FactoryConsole, repositoryProps({ repositories: [{ id: 101, full_name: "factory-org/one", permissions: { pull: true, push: true, maintain: true, admin: true } }] }, []))); });
-  assert.equal(renderer.root.findByProps({"aria-label":"GITHUB SETTINGS"}).findAllByType("input").find((input) => input.props.type === "checkbox").props.checked, false);
+  assert.equal(renderer.root.findByProps({"aria-label":"GitHub settings"}).findAllByType("input").find((input) => input.props.type === "checkbox").props.checked, false);
   act(() => { renderer.update(createElement(FactoryConsole, repositoryProps({ repositories: [{ id: 101, full_name: "factory-org/one", permissions: { pull: true, push: true, maintain: true, admin: true } }] }, [], 8))); });
-  act(() => { renderer.root.findAllByType("button").find((button) => button.props.children === "CHOOSE REPOSITORIES").props.onClick(); });
+  act(() => { renderer.root.findAllByType("button").find((button) => button.props.children === "Choose repositories").props.onClick(); });
   assert.equal(renderer.root.findAllByProps({ className: "dfConsoleSidebar__list" }).length, 0);
   act(() => { renderer.update(createElement(FactoryConsole, repositoryProps({ repositories: [{ id: 202, full_name: "factory-org/two", permissions: { pull: true, push: true, maintain: true, admin: true } }] }, [], 8))); });
   assert.equal(renderer.root.findAllByProps({ className: "dfConsoleSidebar__list" }).length, 1);
@@ -1202,10 +1203,10 @@ test("settings edits project limits as future runs with an explicit unlimited ch
   const markup = render({ settingsOpen: true, onToggleSettings: () => {}, onSaveProjectLimits: () => {} });
   assert.match(markup, /aria-label="Project limits"/);
   assert.match(markup, /value="7"/);
-  assert.match(markup, /REMAINING RUN ALLOWANCE/);
-  assert.match(markup, /UNLIMITED RUNS/);
+  assert.match(markup, /Remaining run allowance/);
+  assert.match(markup, /Unlimited runs/);
   assert.match(markup, /value="0"/);
-  assert.match(markup, /MAX SECONDS PER RUN \(0 = UNLIMITED\)/);
+  assert.match(markup, /Max seconds per run \(0 = unlimited\)/);
   assert.doesNotMatch(markup, /AUTONOMOUS GITHUB ISSUE WORK REQUIRES BOTH LIMITS/);
 });
 
@@ -1220,7 +1221,7 @@ test("settings rejects a blank per-run duration before saving", async () => {
   await act(async () => { inputs[2].props.onChange({ currentTarget: { value: "" } }); });
   await act(async () => { form.props.onSubmit({ preventDefault: () => {} }); });
   assert.equal(calls.length, 0);
-  assert.match(JSON.stringify(renderer.toJSON()), /DURATION MUST BE 0–86400 SECONDS/);
+  assert.match(JSON.stringify(renderer.toJSON()), /Duration must be 0–86400 seconds/);
   await act(async () => { renderer.unmount(); });
 });
 
@@ -1248,7 +1249,7 @@ test("SETTINGS opens and closes as a native modal, over whatever sidebar is open
 
     // Every exit goes through close(), so focus always returns to SETTINGS,
     // and the close event is what tells the console the modal is gone.
-    renderer.root.findAllByType("button").find((button) => button.props.children === "CLOSE").props.onClick();
+    renderer.root.findAllByType("button").find((button) => button.props["aria-label"] === "Close").props.onClick();
     dialog.props.onClick({ target: node });
     dialog.props.onClick({ target: {} });
     assert.deepEqual(calls, ["showModal", "close", "close"]);
@@ -1287,7 +1288,7 @@ test("one sprite editor previews categories and saves one atomic appearance", as
       }), { createNodeMock: () => node });
     });
     const dialog = renderer.root.findByProps({ "aria-label": "Edit appearance for Builder One" });
-    assert.deepEqual(dialog.findAllByType("label").map((label) => label.findByType("span").children.join("")), ["SKIN TONE", "HAIR STYLE", "HAIR COLOUR", "FACE DETAIL", "CLOTHING STYLE", "CLOTHING COLOUR", "SHOES", "TOOL", "HEADWEAR"]);
+    assert.deepEqual(dialog.findAllByType("label").map((label) => label.findByType("span").children.join("")), ["Skin tone", "Hair style", "Hair colour", "Face detail", "Clothing style", "Clothing colour", "Shoes", "Tool", "Headwear"]);
     assert.equal(dialog.findAllByProps({ className: "dfAgentSprite" }).length, 1);
     await act(async () => { dialog.findAllByType("select")[0].props.onChange({ target: { value: "3" } }); });
     await act(async () => { dialog.findByType("form").props.onSubmit({ preventDefault() {} }); });
@@ -1330,14 +1331,14 @@ test("Factory and Agents are explicit left-side alternatives", () => {
   assert.match(render({ view: "agents" }), /aria-label="Agents"/);
   // The top bar keeps the wordmark, the counters, and SETTINGS.
   const actions = floor.split('class="dfConsoleBar__actions"')[1];
-  assert.match(actions.slice(0, actions.indexOf("</div>")), />Settings</);
-  assert.match(floor, /<h2[^>]*>FACTORY FLOOR<\/h2>/);
+  assert.match(actions.slice(0, actions.indexOf("</div>")), /aria-label="Settings"/);
+  assert.match(floor, /<h2[^>]*>Factory floor<\/h2>/);
 });
 
 test("FactoryApp server-renders without reading browser globals", () => {
   const markup = renderToStaticMarkup(createElement(FactoryApp));
   assert.match(markup, /Factory operator console/);
-  assert.match(markup, />IDLE</);
+  assert.match(markup, />Idle</);
   assert.match(markup, /Waiting for the latest state…/);
 });
 
@@ -1355,12 +1356,12 @@ test("selected hostile private detail is escaped and actions remain semantic", (
   // Selected detail expands in its original list row, with one heading.
   assert.match(markup, /<details class="dfConsoleItem" open=""><summary[^>]*><strong>Builder One asks<\/strong>/);
   assert.match(markup, /<article class="dfFactoryConsole__humanRequest"/);
-  assert.match(markup, /OPEN · North Workshop · Review the state projection/);
+  assert.match(markup, /open<\/span> North Workshop · Review the state projection/);
   assert.match(markup, /&lt;script&gt;steal\(authority\)&lt;\/script&gt;/);
   assert.equal(markup.includes("<script>"), false);
   assert.match(markup, /<textarea[^>]*>&lt;reply&gt;<\/textarea>/);
-  assert.match(markup, />ANSWER</);
-  assert.match(markup, />STOP TASK</);
+  assert.match(markup, />Answer</);
+  assert.match(markup, />Stop task</);
   assert.equal(markup.includes("expectedRunRevision"), false);
 });
 
@@ -1391,7 +1392,7 @@ test("request, reply, cancel, and summary collapse forward only presentation int
   selectedElements.find((element) => element.type === "textarea").props.onChange({ currentTarget: { value: "Proceed." } });
   let prevented = false;
   selectedElements.find((element) => element.type === "form").props.onSubmit({ preventDefault: () => { prevented = true; } });
-  selectedElements.find((element) => element.type === "button" && element.props.children === "STOP TASK").props.onClick();
+  selectedElements.find((element) => element.type === "button" && element.props.children === "Stop task").props.onClick();
   selectedElements.find((element) => element.type === "summary" && element.props.className === "dfConsoleItem__summary").props.onClick({ preventDefault() {} });
   assert.equal(prevented, true);
   assert.deepEqual(calls.slice(1), [["change", "Proceed."], ["reply"], ["cancel"], ["close"]]);
@@ -1431,8 +1432,8 @@ test("the view toggle and settings forward exactly one intent each", () => {
     onView: (value) => calls.push(["view", value]),
     onToggleSettings: () => calls.push(["settings"]),
   });
-  const chrome = elements.filter((element) => element.type === "button" && ["Settings", "Floor", "Agents"].includes(element.props.children));
-  assert.deepEqual(chrome.map((element) => element.props.children), ["Settings", "Floor", "Agents"]);
+  const chrome = elements.filter((element) => element.type === "button" && ["Settings", "Floor", "Agents"].includes(element.props["aria-label"] ?? element.props.children));
+  assert.deepEqual(chrome.map((element) => element.props["aria-label"] ?? element.props.children), ["Settings", "Floor", "Agents"]);
   chrome[0].props.onClick();
   chrome.find((element) => element.props.children === "Agents").props.onClick();
   assert.deepEqual(calls, [["settings"], ["view", "agents"]]);
@@ -1455,30 +1456,30 @@ function expand(node, result = []) {
   return result;
 }
 
-test("PAIR A PHONE appears in settings only with authority, and shows the minted code", () => {
+test("Pair a phone appears in settings only with authority, and shows the minted code", () => {
   const svg = '<svg viewBox="0 0 1 1"/>';
   const link = "https://app.darkfactory.build/remote#df_remote&node=n0&expires=1767225600";
   const settings = { settingsOpen: true, onToggleSettings: () => {} };
   // Pairing lives in the settings sidebar, which is the only place it shows.
-  assert.equal(render({ ...settings }).includes("PAIR A PHONE"), false);
-  assert.match(render({ ...settings, remoteInviteAllowed: true }), /PAIR A PHONE/);
-  assert.equal(render({ remoteInviteAllowed: true }).includes("PAIR A PHONE"), false, "not without settings");
-  assert.match(render({ ...settings, remoteInviteAllowed: true, selectedAgent: agentSelection() }), /PAIR A PHONE/, "the modal is over the sidebar, not behind it");
+  assert.equal(render({ ...settings }).includes("Pair a phone"), false);
+  assert.match(render({ ...settings, remoteInviteAllowed: true }), /Pair a phone/);
+  assert.equal(render({ remoteInviteAllowed: true }).includes("Pair a phone"), false, "not without settings");
+  assert.match(render({ ...settings, remoteInviteAllowed: true, selectedAgent: agentSelection() }), /Pair a phone/, "the modal is over the sidebar, not behind it");
   // Its slot still takes an explicit override.
   assert.match(render({ ...settings, remoteInviteAllowed: true, pairing: createElement("p", null, "OTHER") }), /OTHER/);
 
   const shown = render({ ...settings, remoteInviteAllowed: true, remoteInvite: { link, svg, expiresAtMs: 1767225600000n } });
   assert.ok(shown.includes(`src="data:image/svg+xml;utf8,${encodeURIComponent(svg)}"`), shown);
   assert.ok(shown.includes(link.replaceAll("&", "&amp;")));
-  assert.match(shown, /DISMISS/);
+  assert.match(shown, /Dismiss/);
   // The minted code is never handed to the browser as markup. The floor draws
   // its own SVG, so the check names the invite's exact bytes.
   assert.equal(shown.includes(svg), false);
 
   const failed = render({ ...settings, remoteInviteAllowed: true, remoteInviteError: "not_found" });
-  assert.match(failed, /NO PAIRING CODE — NOT FOUND/);
-  assert.match(failed, /DISMISS/);
-  assert.equal(render({ ...settings, remoteInviteAllowed: true }).includes("DISMISS"), false);
+  assert.match(failed, /No pairing code — not found/);
+  assert.match(failed, /Dismiss/);
+  assert.equal(render({ ...settings, remoteInviteAllowed: true }).includes("Dismiss"), false);
 });
 
 const shellAgent = { id: ids.agent, project_id: ids.project, name: "Shell Hand", role: "worker", provider: "shell", paused: true, model: "", reasoning_effort: "", effective_model: "", effective_reasoning_effort: "", model_source: "", revision: 10n };
@@ -1521,7 +1522,7 @@ test("archived workers stay selectable from the archived view and expose only re
     assert.match(text, /Restore paused/);
     assert.equal(text.includes("Archive worker"), false);
     assert.equal(text.includes("TERMINAL"), false);
-    assert.equal(text.includes("QUEUE PAUSED"), false);
+    assert.equal(text.includes("Queue paused"), false);
     assert.equal(renderer.root.findByProps({ className: "dfAgentSpriteEdit" }).props.disabled, true);
     await act(async () => { renderer.unmount(); });
   } finally {
@@ -1603,7 +1604,7 @@ test("the shell provider has no model inputs but keeps PAUSED", () => {
   assert.equal(markup.includes("df-effort-"), false);
   // The daemon rejects a model for shell; pausing it is still an edit.
   assert.match(markup, /id="df-paused-[0-9a-f]+"/);
-  assert.match(markup, />PAUSED</);
+  assert.match(markup, />Paused</);
 });
 
 test("the agent config offers its provider's linked accounts and the provider default", async () => {
@@ -1677,27 +1678,29 @@ test("settings asks the daemon for logins on open and links the one the operator
     await act(async () => { renderer = create(createElement(FactoryConsole, props)); });
     // Discovery is an observation, so opening SETTINGS is what asks for it.
     assert.deepEqual(asked, ["asked"]);
-    const section = renderer.root.findAllByProps({ "aria-label": "ACCOUNTS" })[0];
+    const section = renderer.root.findAllByProps({ "aria-label": "Accounts" })[0];
     assert.ok(section !== undefined);
     assert.equal(JSON.stringify(renderer.toJSON()).includes(login.home), false, "account paths stay out of the common flow");
     assert.equal(JSON.stringify(renderer.toJSON()).includes(login.default_model), false, "model details stay out of account linking");
     const label = renderer.root.findAllByType("input").find((input) => input.props.id === `df-account-label-${login.provider}-0`);
     await act(async () => { label.props.onChange({ currentTarget: { value: "dogfood" } }); });
-    const link = renderer.root.findAllByType("button").find((button) => button.props.children === "LINK");
+    const link = renderer.root.findAllByType("button").find((button) => button.props.children === "Link");
     await act(async () => { link.props.onClick(); });
     assert.deepEqual(linkings, [[login.home, "dogfood"]]);
     const account = [...props.state.accounts.values()][0];
     const linkedLabel = renderer.root.findAllByType("input").find((input) => input.props.id === `df-linked-account-${account.id}`);
     await act(async () => { linkedLabel.props.onChange({ currentTarget: { value: "personal" } }); });
-    const button = (name) => renderer.root.findAllByType("button").find((item) => item.props.children === name);
-    await act(async () => { button("SAVE LABEL").props.onClick(); });
+    const button = (name) => renderer.root.findAllByType("button").find((item) => textOf(item) === name);
+    await act(async () => { button("Save label").props.onClick(); });
     assert.deepEqual(updates, [[account.id, account.revision, { label: "personal" }]]);
-    assert.equal(button("UNLINK").props.disabled, true, "an agent still references this account");
+    assert.equal(button("Unlink").props.disabled, true, "an agent still references this account");
     await act(async () => { renderer.update(createElement(FactoryConsole, { ...props, state: { ...props.state, agents: new Map() } })); });
-    assert.equal(button("UNLINK").props.disabled, false);
-    await act(async () => { button("UNLINK").props.onClick(); });
+    assert.equal(button("Unlink").props.disabled, false);
+    await act(async () => { button("Unlink").props.onClick(); });
+    assert.notDeepEqual(updates.at(-1)?.[2], { remove: true }, "unlinking asks for confirmation first");
+    await act(async () => { button("Confirm unlink").props.onClick(); });
     assert.deepEqual(updates.at(-1), [account.id, account.revision, { remove: true }]);
-    await act(async () => { button("REFRESH ACCOUNTS").props.onClick(); });
+    await act(async () => { button("Refresh accounts").props.onClick(); });
     assert.equal(asked.length, 2);
 
 
@@ -1741,7 +1744,7 @@ test("settings keeps an unavailable linked account visible with recovery guidanc
     linked_id: account.id,
     unavailable_reason: "login is no longer discoverable",
   }] });
-  assert.match(markup, /ACCOUNT UNAVAILABLE · login is no longer discoverable\./);
+  assert.match(markup, /Account unavailable · login is no longer discoverable\./);
   assert.ok(markup.includes(`Sign in again using <code>${account.home}</code>, then refresh.`));
 });
 
@@ -1799,11 +1802,11 @@ test("overseer supervision names worker events and a seconds cooldown", () => {
   const agents = new Map(fixtureState.agents);
   agents.set(agent.id, agent);
   const markup = render({ state: baseState({ agents }), selectedAgent: { id: agent.id, name: agent.name, revision: agent.revision }, onSaveAgentConfig: () => {} });
-  for (const text of ["SUPERVISION", "WHEN WORK CHANGES", "supervise worker activity", "COOLDOWN SECONDS", "initial inspection, then worker events"]) assert.match(markup, new RegExp(text));
+  for (const text of ["Supervision", "When work changes", "supervise worker activity", "Cooldown seconds", "initial inspection, then worker events"]) assert.match(markup, new RegExp(text));
   assert.match(markup, new RegExp(`id="df-idle-after-${agent.id}"[^>]*value="10"`));
 });
 
-test("PAIRED DEVICES lists what the factory granted and revokes any device but this one", async () => {
+test("Paired devices lists what the factory granted and revokes any device but this one", async () => {
   const own = "60".repeat(16);
   const phone = "70".repeat(16);
   const asked = [];
@@ -1829,22 +1832,22 @@ test("PAIRED DEVICES lists what the factory granted and revokes any device but t
   const rows = renderer.root.findAllByProps({ className: "dfFactoryConsole__device" });
   assert.equal(rows.length, 2);
   const label = (row) => [].concat(row.findAllByType("span")[0].props.children).join("");
-  assert.equal(label(rows[0]), "BROWSER · THIS BROWSER");
-  assert.equal(label(rows[1]), "PHONE");
-  const buttons = () => renderer.root.findAllByType("button").filter((button) => ["REVOKE", "CONFIRM REVOKE", "KEEP"].includes(button.props.children));
+  assert.equal(label(rows[0]), "Browser · This browser");
+  assert.equal(label(rows[1]), "Phone");
+  const buttons = () => renderer.root.findAllByType("button").filter((button) => ["Revoke", "Confirm revoke", "Keep"].includes(button.props.children));
   assert.equal(buttons().length, 1, "only the phone can be revoked, never this console");
   await act(async () => { buttons()[0].props.onClick(); });
-  assert.deepEqual(buttons().map((button) => button.props.children), ["CONFIRM REVOKE", "KEEP"]);
-  await act(async () => { buttons().find((button) => button.props.children === "KEEP").props.onClick(); });
-  assert.deepEqual(revoked, [], "KEEP revokes nothing");
+  assert.deepEqual(buttons().map((button) => button.props.children), ["Confirm revoke", "Keep"]);
+  await act(async () => { buttons().find((button) => button.props.children === "Keep").props.onClick(); });
+  assert.deepEqual(revoked, [], "Keep revokes nothing");
   await act(async () => { buttons()[0].props.onClick(); });
-  await act(async () => { buttons().find((button) => button.props.children === "CONFIRM REVOKE").props.onClick(); });
+  await act(async () => { buttons().find((button) => button.props.children === "Confirm revoke").props.onClick(); });
   assert.deepEqual(revoked, [{ clientId: phone, expectedRevision: 3n }]);
 
   const empty = render({ settingsOpen: true, onToggleSettings: () => {}, remoteInviteAllowed: true, devices: { clients: [], more: false } });
-  assert.match(empty, /PAIRED DEVICES/);
+  assert.match(empty, /Paired devices/);
   assert.match(empty, /nothing paired/);
-  assert.match(render({ settingsOpen: true, onToggleSettings: () => {}, remoteInviteAllowed: true, devicesError: "unauthorized" }), /DEVICES — UNAUTHORIZED/);
+  assert.match(render({ settingsOpen: true, onToggleSettings: () => {}, remoteInviteAllowed: true, devicesError: "unauthorized" }), /Devices — unauthorized/);
 });
 
 test("floor objects select the exact existing task detail and question route", async () => {
@@ -1960,9 +1963,9 @@ test("mobile navigation switches presentation without mutating work", () => {
   const calls = [];
   const elements = consoleElements({ status: "ready", state: fixtureState, detail: "floor", onDetail: (value) => calls.push(value) });
   const nav = elements.find((element) => element.props["aria-label"] === "Console views");
-  const buttons = nav.props.children.filter((element) => element.type === "button");
+  const buttons = nav.props.children.filter((element) => element.type === "button" || element.type.name === "IconButton");
   assert.equal(buttons[0].props["aria-pressed"], true);
-  buttons.find((button) => button.props.children === "Tasks").props.onClick();
+  buttons.find((button) => textOf(button) === "Tasks").props.onClick();
   assert.deepEqual(calls, ["queue"]);
   buttons.find((button) => button.props.children === "Missions").props.onClick();
   assert.deepEqual(calls, ["queue", "missions"]);
@@ -2168,7 +2171,7 @@ test("issue review refuses a stale preview before acceptance", async () => {
   const review = { source_id: source.id, state: "ok", sources: [source], candidates: [{ number: 17n, url: "https://github.com/example/widgets/issues/17", title: "Fix parser", body: "Keep this exact reviewed body.", author: "reporter", labels: ["bug"], content_hash: "ab".repeat(32), reason: "needs_manual_acceptance" }], reviewed_revision: 2n, next_page: 2 };
   try {
     await act(async () => { renderer = create(createElement(FactoryConsole, { status: "ready", state: oneProjectState(), settingsOpen: true, onToggleSettings: () => {}, intake: new Map([[ids.project, review]]), onIntakeAction: (projectId, request) => calls.push({ projectId, request }) })); });
-    const preview = renderer.root.findByProps({ "aria-label": "Sources" }).findAll((node) => node.type === "button" && node.props.children === "Refresh")[0];
+    const preview = renderer.root.findByProps({ "aria-label": "Sources" }).findAll((node) => node.type === "button" && textOf(node) === "Refresh")[0];
     await act(async () => preview.props.onClick());
     assert.deepEqual(calls, [{ projectId: ids.project, request: { action: "preview", source_id: source.id, page: 1 } }]);
     assert.equal(renderer.root.findAll((node) => node.type === "button" && node.props.children === "Accept").length, 0);
@@ -2215,7 +2218,7 @@ test("editing an intake filter preserves migrated priority rules", async () => {
   const source = { id: "88".repeat(16), project_id: ids.project, github_repository_id: 42n, repository: "example/widgets", target_repository_id: "89".repeat(16), overseer_agent_id: ids.orchestrator, label: "bug", policy: "manual", trusted_authors: [], poll_seconds: 60, admission_limit: 25, enabled: false, revision: 3n, priority_default: 2, priority_by_label: { urgent: 10 } };
   try {
     await act(async () => { renderer = create(createElement(FactoryConsole, { status: "ready", state: oneProjectState(), settingsOpen: true, onToggleSettings: () => {}, intake: new Map([[ids.project, { state: "ok", sources: [source] }]]), onIntakeAction: (projectId, request) => calls.push(request) })); });
-    const form = renderer.root.findAllByType("form").find((form) => form.findAllByType("button").some((button) => button.props.children === "Save"));
+    const form = renderer.root.findByProps({ "aria-label": "Sources" }).findAllByType("form").find((form) => form.findAllByType("button").some((button) => button.props.children === "Save"));
     await act(async () => form.findAllByType("input").find((input) => input.props.value === "bug").props.onChange({ currentTarget: { value: "enhancement" } }));
     await act(async () => form.props.onSubmit({ preventDefault() {} }));
     assert.equal(calls.length, 1);
@@ -2239,7 +2242,7 @@ test("revised issue content can be accepted without discarding the prior receipt
   const review = { source_id: source.id, state: "ok", sources: [source], candidates: [candidate], reviewed_revision: 3n };
   try {
     await act(async () => { renderer = create(createElement(FactoryConsole, { status: "ready", state: oneProjectState(), settingsOpen: true, onToggleSettings: () => {}, intake: new Map([[ids.project, review]]), onIntakeAction: (projectId, request) => calls.push(request) })); });
-    await act(async () => renderer.root.findByProps({ "aria-label": "Sources" }).findAll((node) => node.type === "button" && node.props.children === "Refresh")[0].props.onClick());
+    await act(async () => renderer.root.findByProps({ "aria-label": "Sources" }).findAll((node) => node.type === "button" && textOf(node) === "Refresh")[0].props.onClick());
     const content = renderer.root.findAllByType("details").find((node) => node.findAllByType("summary").some((summary) => summary.props.children === "Details") && node.findAllByType("details").length === 1);
     assert.equal(content.props.open, undefined, "issue bodies are collapsed until selected");
     assert.equal(content.findAll((node) => node.type === "button" && node.props.children === "Accept").length, 1, "acceptance stays inside content review");
@@ -2264,13 +2267,13 @@ test("a rejected create keeps the add form and its typed values", async () => {
   try {
     await act(async () => { renderer = create(createElement(FactoryConsole, { status: "ready", state: oneProjectState(), settingsOpen: true, onToggleSettings: () => {}, repositories: new Map([[ids.project, [checkout]]]), github: { result: { state: "ok", status: { repositories: [{ repository: "example/issues", repository_id: 42n }] } } }, intake: new Map([[ids.project, { state: "ok", sources: [source] }]]), onIntakeAction: (projectId, request) => calls.push(request) })); });
     const sources = () => renderer.root.findByProps({ "aria-label": "Sources" });
-    await act(async () => sources().findAll((node) => node.type === "button" && node.props.children === "Add source")[0].props.onClick());
+    await act(async () => sources().findAll((node) => node.type === "button" && textOf(node) === "Add source")[0].props.onClick());
     const form = () => sources().findAllByType("form")[0];
     await act(async () => form().findAllByType("input")[0].props.onChange({ currentTarget: { value: "typed-label" } }));
     await act(async () => form().props.onSubmit({ preventDefault() {} }));
     assert.equal(calls.at(-1).action, "create");
     assert.equal(form().findAllByType("input")[0].props.value, "typed-label");
-    assert.ok(form().findAll((node) => node.type === "button" && node.props.children === "Add source").length === 1, "still the add form, not the edit form");
+    assert.ok(form().findAll((node) => node.type === "button" && textOf(node) === "Add source").length === 1, "still the add form, not the edit form");
     assert.doesNotMatch(JSON.stringify(sources().findAll((node) => node.type === "p").map((node) => node.children)), /No sources yet/);
   } finally {
     if (renderer) await act(async () => renderer.unmount());
@@ -2290,7 +2293,7 @@ test("refreshing a changed source replaces stale configuration drafts", async ()
     await act(async () => { renderer = create(createElement(FactoryConsole, props(source))); });
     const changed = { ...source, revision: 4n, target_repository_id: "90".repeat(16), label: "enhancement", policy: "trusted_authors", trusted_authors: ["reviewer"] };
     await act(async () => renderer.update(createElement(FactoryConsole, props(changed))));
-    const form = renderer.root.findAllByType("form").find((form) => form.findAllByType("button").some((button) => button.props.children === "Save"));
+    const form = renderer.root.findByProps({ "aria-label": "Sources" }).findAllByType("form").find((form) => form.findAllByType("button").some((button) => button.props.children === "Save"));
     await act(async () => form.props.onSubmit({ preventDefault() {} }));
     assert.equal(calls.length, 1);
     assert.equal(calls[0].expected_revision, 4n);
@@ -2313,7 +2316,7 @@ test("new issue sources select the sole overseer and default checkout without op
   const checkout = { id: "89".repeat(16), project_id: ids.project, name: "Widgets", root: "/private/source", base_ref: "release", enabled: true, default: true, revision: 1n };
   try {
     await act(async () => { renderer = create(createElement(FactoryConsole, { status: "ready", state: baseState({ projects: oneProjectState().projects, agents: new Map([[ids.orchestrator, { ...fixtureState.agents.get(ids.orchestrator), project_id: ids.project }]]) }), settingsOpen: true, onToggleSettings: () => {}, repositories: new Map([[ids.project, [checkout]]]), github: {result:{state:"ok",status:{repositories:[{repository:"example/issues",repository_id:42n}]}}}, onIntakeAction: (projectId, request) => calls.push(request) })); });
-    const form = renderer.root.findAllByType("form").find((form) => form.findAllByType("button").some((button) => button.props.children === "Add source"));
+    const form = renderer.root.findAllByType("form").find((form) => form.findAllByType("button").some((button) => textOf(button) === "Add source"));
     const policy = form.findAllByType("select").find((select) => select.props.value === "manual");
     await act(async () => policy.props.onChange({ currentTarget: { value: "trusted_authors" } }));
     await act(async () => form.props.onSubmit({ preventDefault() {} }));
@@ -2442,7 +2445,7 @@ test("settings tabs hide other sections, support keyboard navigation and retain 
       }
     };
     selected(0);
-    const form=renderer.root.findAllByType("form").find(form=>form.findAllByType("button").some(button=>button.props.children==="CREATE PROJECT"));
+    const form=renderer.root.findAllByType("form").find(form=>form.findAllByType("button").some(button=>textOf(button)==="Create project"));
     await act(async()=>form.findAllByType("input")[0].props.onChange({currentTarget:{value:"Unfinished project"}}));
     await act(async()=>tabs()[1].props.onClick());
     selected(1);
@@ -2521,7 +2524,7 @@ test("new-work admission reports acknowledgement and preserves active work", asy
     onSetDispatch: (revision, enabled) => { calls.push({ revision, enabled }); return new Promise((resolve) => { acknowledge = resolve; }); },
   })); });
   const label = fixtureState.factory.dispatch_enabled ? "Pause new work" : "Resume new work";
-  const control = tree.root.findAllByType("button").find((button) => button.children.join("") === label);
+  const control = tree.root.findAllByType("button").find((button) => textOf(button) === label);
   await act(async () => control.props.onClick());
   assert.deepEqual(calls, [{ revision: fixtureState.factory.revision, enabled: !fixtureState.factory.dispatch_enabled }]);
   assert.match(JSON.stringify(tree.toJSON()), /Waiting…/);
@@ -2647,7 +2650,7 @@ test("board and shelves open peer views of one Library workspace", async () => {
   assert.equal(tree.root.findByType("dialog").props["aria-label"], "Project library");
   await act(async () => views().findAllByType("button").find(button => button.children.join("") === "All documents").props.onClick());
   assert.equal(views().findAllByType("button").find(button => button.props["aria-pressed"]).children.join(""), "All documents");
-  assert.ok(tree.root.findByProps({ "aria-label": "Console views" }).findAllByType("button").some(button => button.children.join("") === "Library"));
+  assert.ok(tree.root.findByProps({ "aria-label": "Console views" }).findAllByType("button").some(button => textOf(button) === "Library"));
   await act(async () => tree.unmount());
 });
 
@@ -2679,9 +2682,9 @@ test("Needs you lists and counts only the chosen project's requests", async () =
   await act(async () => tree.root.findByProps({ "aria-label": "Project" }).props.onChange({ currentTarget: { value: other } }));
   const text = JSON.stringify(tree.toJSON());
   assert.equal(text.includes(" asks"), false);
-  const tabs = tree.root.findAllByType("button").filter((button) => Array.isArray(button.props.children) && button.props.children[0] === "Needs you ");
+  const tabs = tree.root.findAllByType("button").filter((button) => textOf(button).startsWith("Needs you"));
   assert.ok(tabs.length > 0);
-  assert.ok(tabs.every((button) => button.props.children[1] === ""));
+  assert.ok(tabs.every((button) => !/\d/.test(textOf(button))));
   assert.match(text, /Nothing needs your attention/);
   await act(async () => tree.unmount());
 });

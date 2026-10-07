@@ -14,6 +14,7 @@ import { FactoryScene, AgentSprite } from "./factory-scene/factory-scene.js";
 import { type ProductionContraption } from "./production-view.js";
 import { type ProjectContentCall } from "./project-library.js";
 import { type SceneNode } from "./factory-scene/scene.js";
+import { SectionHeader, Status } from "./console-kit.js";
 import { DEFAULT_FLOOR_APPEARANCE, type FloorAppearance } from "./floor-appearance.js";
 
 function shortID(value: string): string {
@@ -40,7 +41,7 @@ export function AgentStrip({ state, ask }: { state: StateView | undefined; ask?:
               <>
                 <AgentSprite agent={agent} activity={agentActivity(agent, state)} />
                 <span className="dfConsoleStrip__agentName">{agent.name} · {projectLabel(state, agent.project_id)}</span>
-                <span className="dfConsoleStrip__agentPhase">{status === "needs-you" ? "! needs you" : status}</span>
+                <span className="dfConsoleStrip__agentPhase"><Status stage={status} /></span>
               </>
             );
             const className = `dfConsoleStrip__agent dfConsoleStrip__agent--${status}`;
@@ -191,7 +192,7 @@ function SourceContents({ node, topology, call }: { node: SceneNode; topology?: 
 
 /** Rank is the served role: an orchestrator oversees, a worker builds. */
 export function rankLabel(role: AgentItem["role"]): string {
-  return role === "orchestrator" ? "OVERSEER" : "WORKER";
+  return role === "orchestrator" ? "Overseer" : "Worker";
 }
 
 /** Agents grouped by rank, oversight first. */
@@ -218,10 +219,7 @@ export function AgentList({
         if (members.length === 0) return null;
         return (
           <section key={role} aria-label={rankLabel(role)}>
-            <div className="dfFactoryConsole__sectionHeading">
-              <h2>{rankLabel(role)}</h2>
-              <span>{members.length}</span>
-            </div>
+            <SectionHeader title={rankLabel(role)} count={members.length} />
             <ul className="dfConsoleRows">
               {members.map((agent) => (
                 <li key={agent.id}>
@@ -265,7 +263,7 @@ function AgentRow({
       <AgentSprite agent={agent} activity={agentActivity(agent, state)} />
       <span className="dfConsoleRow__title">{agent.name} · {projectLabel(state, agent.project_id)}</span>
       <span className="dfAgentList__provider">{agent.effective_model === "" ? agent.provider : `${agent.provider} · ${agent.effective_model}`}</span>
-      <span className="dfAgentList__activity">{agent.archived ? "archived" : activity === "needs-you" ? "! needs you" : activity}</span>
+      <span className="dfAgentList__activity"><Status stage={agent.archived ? "archived" : activity} /></span>
       <span className="dfConsoleRow__agent">{task?.title ?? "no current task"}</span>
       <span className="dfAgentList__count">{queued} queued</span>
     </>
