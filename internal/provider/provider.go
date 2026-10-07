@@ -13,6 +13,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"syscall"
 	"unicode/utf8"
@@ -209,6 +210,9 @@ type RuntimePaths struct {
 	// environment still has no Git credential helper, SSH or prompt.
 	gitCommonDir         string
 	gitCommonDirWritable bool
+	// traceReceiverPort is factoryd's loopback OTLP listener; zero exports
+	// nothing.
+	traceReceiverPort uint16
 }
 
 // WithLocalCILeaseDirectory carries daemon-resolved lease storage below the
@@ -244,6 +248,13 @@ func (runtime RuntimePaths) WithGitAuthor(author gitauthor.Identity) (RuntimePat
 // (attempt maintainer-mcp); only a GitHub-connected home enables it.
 func (runtime RuntimePaths) WithCustomerMaintainer(enabled bool) RuntimePaths {
 	runtime.customerMaintainer = enabled
+	return runtime
+}
+
+// WithTraceReceiver points a worker's instrumented commands at factoryd's
+// loopback OTLP receiver; zero leaves the environment without it.
+func (runtime RuntimePaths) WithTraceReceiver(port uint16) RuntimePaths {
+	runtime.traceReceiverPort = port
 	return runtime
 }
 
@@ -1092,6 +1103,14 @@ func (runtime RuntimePaths) environmentForRole(kind kernel.Provider, role kernel
 			environment = append(environment,
 				"GOMODCACHE="+goModuleCachePath(runtime.accountHome),
 				"DF_CI_GO_MODULE_CACHE="+goModuleCachePath(runtime.accountHome))
+			// Code under test that is OTel-instrumented lights up the plant.
+			// Only the traces endpoint is named, so neither CLI nor any
+			// metrics or logs exporter is redirected.
+			if runtime.traceReceiverPort != 0 {
+				environment = append(environment,
+					"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://127.0.0.1:"+strconv.Itoa(int(runtime.traceReceiverPort))+"/v1/traces",
+					"OTEL_RESOURCE_ATTRIBUTES=deployment.environment.name=local")
+			}
 		}
 		if kind == kernel.ProviderClaudeCode {
 			environment = append(environment, "DF_CI_CACHE_ROOT="+filepath.Join(runtime.home, ".cache", "dark-factory", "local-ci", "trusted"))

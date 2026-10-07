@@ -55,6 +55,7 @@ var otlpRenamed = map[string]string{
 	"http.method": "http.request.method", "http.target": "url.path", "net.peer.name": "server.address", "net.host.name": "server.address",
 	"net.host.port": "server.port", "net.peer.port": "server.port", "db.system": "db.system.name", "messaging.destination": "messaging.destination.name",
 	"code.function": "code.function.name", "code.filepath": "code.file.path",
+	"deployment.environment": "deployment.environment.name",
 }
 
 var otlpKinds = map[int]string{1: "internal", 2: "server", 3: "client", 4: "producer", 5: "consumer"}
@@ -71,17 +72,25 @@ func DecodeOTLP(body []byte, now int64) ([]Observation, []Coverage, error) {
 		return nil, nil, err
 	}
 	var observations []Observation
-	keys := map[string]map[string]bool{}
+	// Coverage is per service and the environment its process claimed. The
+	// claim stays the process's own, so the source is still otlp.
+	type unit struct{ service, environment string }
+	keys := map[unit]map[string]bool{}
 	for _, resource := range traces.ResourceSpans {
-		service := attributes(resource.Resource.Attributes)["service.name"]
+		resourceAttributes := attributes(resource.Resource.Attributes)
+		service, environment := resourceAttributes["service.name"], resourceAttributes["deployment.environment.name"]
 		if service == "" {
 			continue
 		}
+		if environment == "" {
+			environment = "local"
+		}
+		covered := unit{service, environment}
 		for _, scope := range resource.ScopeSpans {
 			for _, span := range scope.Spans {
 				// Only a service that sent spans is covered.
-				if keys[service] == nil {
-					keys[service] = map[string]bool{"service.name": true}
+				if keys[covered] == nil {
+					keys[covered] = map[string]bool{"service.name": true}
 				}
 				kind := otlpKinds[span.Kind]
 				if kind == "" {
@@ -98,12 +107,12 @@ func DecodeOTLP(body []byte, now int64) ([]Observation, []Coverage, error) {
 				}
 				for key := range own {
 					if selectorKeys[key] && kind != "client" && kind != "producer" {
-						keys[service][key] = true
+						keys[covered][key] = true
 					}
 				}
 				start, _ := strconv.ParseInt(span.Start, 10, 64)
 				end, _ := strconv.ParseInt(span.End, 10, 64)
-				item := Observation{Source: "otlp", Environment: "local", Kind: kind, Start: now, End: now + 1, Attributes: own, Peer: peer, Count: 1}
+				item := Observation{Source: "otlp", Environment: environment, Kind: kind, Start: now, End: now + 1, Attributes: own, Peer: peer, Count: 1}
 				if end > start {
 					item.LatencyP95 = float64(end-start) / 1e6
 				}
@@ -118,8 +127,8 @@ func DecodeOTLP(body []byte, now int64) ([]Observation, []Coverage, error) {
 		}
 	}
 	var coverage []Coverage
-	for service, seen := range keys {
-		item := Coverage{Source: "otlp", Environment: "local", Unit: service, AsOf: now, TTL: 15 * 60_000}
+	for covered, seen := range keys {
+		item := Coverage{Source: "otlp", Environment: covered.environment, Unit: covered.service, AsOf: now, TTL: 15 * 60_000}
 		for key := range seen {
 			item.Keys = append(item.Keys, key)
 		}
