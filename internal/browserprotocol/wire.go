@@ -1079,7 +1079,7 @@ func rejectNullMembers(kind MessageType, body []byte) error {
 	case TypeTaskAttachment:
 		fields = []string{"index", "offset", "size", "name", "data"}
 	case TypeTaskEnqueue:
-		fields = []string{"mode", "attachment_count"}
+		fields = []string{"mode", "attachment_count", "content"}
 	case TypeTaskUpdate:
 		fields = []string{"title", "priority", "assigned_agent_id", "status"}
 	default:

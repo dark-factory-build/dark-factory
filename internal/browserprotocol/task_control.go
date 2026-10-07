@@ -8,6 +8,7 @@ import (
 const MaxTaskInstructionBytes = 32768
 const MaxTaskAttachmentBytes = 8 << 20
 const MaxTaskAttachments = 8
+const MaxTaskContent = 8
 const TaskAttachmentChunkBytes = 24 << 10
 
 type TaskAttachment struct {
@@ -47,6 +48,13 @@ type TaskEnqueue struct {
 	Mode                  string           `json:"mode,omitempty"`
 	AttachmentCount       int              `json:"attachment_count,omitempty"`
 	Attachments           []TaskAttachment `json:"-"`
+	// Content pins Library revisions to the task in the enqueue transaction.
+	Content []TaskContent `json:"content,omitempty"`
+}
+
+type TaskContent struct {
+	ContentID string  `json:"content_id"`
+	Revision  Decimal `json:"revision"`
 }
 
 type TaskEnqueueResult struct {
@@ -85,8 +93,13 @@ func validTaskControl(kind MessageType, body any) error {
 			return bad()
 		}
 	case TaskEnqueue:
-		if value.AttachmentCount < 0 || value.AttachmentCount > MaxTaskAttachments {
+		if value.AttachmentCount < 0 || value.AttachmentCount > MaxTaskAttachments || len(value.Content) > MaxTaskContent {
 			return bad()
+		}
+		for _, item := range value.Content {
+			if !id(item.ContentID) || !positive(item.Revision) {
+				return bad()
+			}
 		}
 		if value.Mode != "" && value.Mode != "now" && value.Mode != "queue" && value.Mode != "any" || !id(value.TaskID) || !id(value.IncarnationID) || !id(value.AgentID) || value.RepositoryID != "" && !id(value.RepositoryID) || !positive(value.ExpectedAgentRevision) || !utf8.ValidString(value.Instruction) || len(value.Instruction) == 0 || len([]byte(value.Instruction)) > MaxTaskInstructionBytes {
 			return bad()

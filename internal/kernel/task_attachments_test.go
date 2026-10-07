@@ -15,7 +15,7 @@ func TestTaskAttachmentsAtomicReplayAndReopen(t *testing.T) {
 	id := taskID(t, 181)
 	files := []TaskAttachment{{Name: "../Screenshot.png", Data: []byte{0, 1, 255}}}
 	enqueue := func(files []TaskAttachment) (BrowserTaskEnqueue, error) {
-		return store.EnqueueTaskForBrowserAgentRepositoryMode(ctx, client.ID, id, incarnationID(t, 182), agent.ID, agent.Revision, RepositoryID{}, "Inspect this", BrowserEnqueueQueue, mustTime(t, 102), files...)
+		return store.EnqueueTaskForBrowserAgentRepositoryMode(ctx, client.ID, id, incarnationID(t, 182), agent.ID, agent.Revision, RepositoryID{}, "Inspect this", BrowserEnqueueQueue, mustTime(t, 102), nil, files...)
 	}
 	result, err := enqueue(files)
 	if err != nil {
@@ -48,7 +48,7 @@ func TestTaskAttachmentsAtomicReplayAndReopen(t *testing.T) {
 		t.Fatalf("reopened attachments: %+v, %v", got, err)
 	}
 	badID := taskID(t, 183)
-	_, err = store.EnqueueTaskForBrowserAgentRepositoryMode(ctx, client.ID, badID, incarnationID(t, 184), agent.ID, agent.Revision, RepositoryID{}, "bad", BrowserEnqueueQueue, mustTime(t, 103), TaskAttachment{Name: "empty.txt"})
+	_, err = store.EnqueueTaskForBrowserAgentRepositoryMode(ctx, client.ID, badID, incarnationID(t, 184), agent.ID, agent.Revision, RepositoryID{}, "bad", BrowserEnqueueQueue, mustTime(t, 103), nil, TaskAttachment{Name: "empty.txt"})
 	if !errors.Is(err, ErrInvalidValue) {
 		t.Fatalf("empty file accepted: %v", err)
 	}
@@ -73,7 +73,7 @@ func TestAttachmentCleanupAndCompactionPreserveHistory(t *testing.T) {
 	store, path, _, agent := newAdmissionStore(t, RoleWorker, 1)
 	client := terminalTargetClient(t, store, browserTestID(t, 180), BrowserCapabilityHumanActions|BrowserCapabilityObserve)
 	id := taskID(t, 181)
-	created, err := store.EnqueueTaskForBrowserAgentRepositoryMode(ctx, client.ID, id, incarnationID(t, 182), agent.ID, agent.Revision, RepositoryID{}, "Inspect file", BrowserEnqueueQueue, mustTime(t, 102), TaskAttachment{Name: "large.png", Data: make([]byte, 2<<20)})
+	created, err := store.EnqueueTaskForBrowserAgentRepositoryMode(ctx, client.ID, id, incarnationID(t, 182), agent.ID, agent.Revision, RepositoryID{}, "Inspect file", BrowserEnqueueQueue, mustTime(t, 102), nil, TaskAttachment{Name: "large.png", Data: make([]byte, 2<<20)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -166,7 +166,7 @@ func TestAutomaticAttachmentRetention(t *testing.T) {
 	store, path, _, agent := newAdmissionStore(t, RoleWorker, 1)
 	client := terminalTargetClient(t, store, browserTestID(t, 180), BrowserCapabilityHumanActions|BrowserCapabilityObserve)
 	id := taskID(t, 181)
-	created, err := store.EnqueueTaskForBrowserAgentRepositoryMode(ctx, client.ID, id, incarnationID(t, 182), agent.ID, agent.Revision, RepositoryID{}, "Inspect", BrowserEnqueueQueue, mustTime(t, 102), TaskAttachment{Name: "test.png", Data: []byte("image")})
+	created, err := store.EnqueueTaskForBrowserAgentRepositoryMode(ctx, client.ID, id, incarnationID(t, 182), agent.ID, agent.Revision, RepositoryID{}, "Inspect", BrowserEnqueueQueue, mustTime(t, 102), nil, TaskAttachment{Name: "test.png", Data: []byte("image")})
 	if err != nil {
 		t.Fatal(err)
 	}

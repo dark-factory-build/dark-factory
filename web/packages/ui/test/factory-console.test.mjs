@@ -2571,6 +2571,35 @@ test("new task retains pasted files on failure, supports removal, and clears on 
   } finally { globalThis.FormData = nativeFormData; await act(async () => renderer.unmount()); }
 });
 
+test("Use in a new task opens New task with removable Library chips that are submitted with the task", async () => {
+  const attempts = [];
+  let tree;
+  function Harness() { const [detail, setDetail] = useState("floor"); return createElement(FactoryConsole, { status: "ready", state: fixtureState, detail, onDetail: setDetail, onProjectContent: async () => ({ items: [], next_offset: 0 }), onAddTask: async (...args) => { attempts.push(args); return true; } }); }
+  await act(async () => { tree = create(createElement(Harness)); });
+  const guide = { content_id: "ab".repeat(16), revision: 3n, title: "Deployment guide", project_id: ids.project };
+  const notes = { content_id: "cd".repeat(16), revision: 1n, title: "Release notes", project_id: ids.project };
+  await act(async () => tree.root.findByType(FactoryFloor).props.onOpenLibrary(ids.project));
+  await act(async () => tree.root.findByType(ProjectLibrary).props.onUseInTask(guide));
+  assert.equal(tree.root.findAllByType(ProjectLibrary).length, 0, "the Library closes into the existing form");
+  await act(async () => tree.root.findByType(FactoryFloor).props.onOpenLibrary(ids.project));
+  await act(async () => tree.root.findByType(ProjectLibrary).props.onUseInTask(notes));
+  const form = () => tree.root.findByProps({ "aria-label": "New task" });
+  assert.equal(form().parent.props.open, true, "New task opens with the chosen context");
+  const chips = () => tree.root.findAllByProps({ "aria-label": "Library context" }).flatMap((list) => list.findAllByType("li").map((item) => textOf(item.findByType("span"))));
+  assert.deepEqual(chips(), ["Deployment guide · Revision 3", "Release notes · Revision 1"]);
+  const targets = form().findByType("select").findAllByType("option").map((option) => option.props.value);
+  assert.ok(targets.length > 0 && targets.every((value) => value === `any:${ids.project}` || fixtureState.agents.get(value)?.project_id === ids.project), "targets stay in the content's project");
+  await act(async () => tree.root.findByProps({ "aria-label": "Remove Release notes" }).props.onClick());
+  assert.deepEqual(chips(), ["Deployment guide · Revision 3"]);
+  const nativeFormData = globalThis.FormData;
+  globalThis.FormData = class { get(name) { return name === "target" ? `any:${ids.project}` : "Follow the guide"; } };
+  try { await act(async () => form().props.onSubmit({ preventDefault() {}, currentTarget: { reset() {} } })); } finally { globalThis.FormData = nativeFormData; }
+  assert.deepEqual(attempts[0].slice(1, 3), ["Follow the guide", "any"]);
+  assert.deepEqual(attempts[0][4], [guide], "the chip is submitted with the task");
+  assert.deepEqual(chips(), [], "an added task clears its context");
+  await act(async () => tree.unmount());
+});
+
 test("Settings persists automatic attachment cleanup and keeps saved value on failure", async () => {
   let saved = false, fail = false, renderer;
   const calls = [];

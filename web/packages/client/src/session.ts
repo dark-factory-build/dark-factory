@@ -23,6 +23,7 @@ import {
   type ServerControlFrame,
   type StateChangedFrame,
   type StateSnapshotFrame,
+  type TaskContentPin,
   type TaskEnqueueResultBody,
   type TaskItem,
   type TaskPeerQuestion,
@@ -303,7 +304,7 @@ export class BrowserSession {
   get pairingBlocked(): boolean { return this.#pairingBlocked; }
   get authAttempted(): boolean { return this.#authAttempted; }
 
-  enqueueAgentTask(request: { agentId: string; expectedAgentRevision: bigint; repositoryId?: string; instruction: string; mode?: "now" | "queue" | "any"; attachmentCount?: number }): Promise<{ taskId: string; revision: bigint }> {
+  enqueueAgentTask(request: { agentId: string; expectedAgentRevision: bigint; repositoryId?: string; instruction: string; mode?: "now" | "queue" | "any"; attachmentCount?: number; content?: TaskContentPin[] }): Promise<{ taskId: string; revision: bigint }> {
     try { this.#ensureLive(); } catch (error) { return Promise.reject(error); }
     if (!this.#authenticated) return Promise.reject(new SessionError("unauthorized"));
     if (this.#uploading && request.attachmentCount === undefined) return Promise.reject(new SessionError("rate_limited"));
@@ -316,7 +317,7 @@ export class BrowserSession {
     try { taskId = this.#randomID(); incarnationId = this.#randomID(); } catch (error) { return Promise.reject(error); }
     const id = this.#nextID("task-enqueue");
     let payload: string;
-    try { payload = encodeClientControl({ type: "TASK_ENQUEUE", id, body: { task_id: taskId, incarnation_id: incarnationId, agent_id: request.agentId, ...(request.attachmentCount ? { attachment_count: request.attachmentCount } : {}), ...(request.repositoryId === undefined ? {} : { repository_id: request.repositoryId }), expected_agent_revision: request.expectedAgentRevision, instruction: request.instruction, ...(request.mode === "queue" || request.mode === "any" ? { mode: request.mode } : {}) } }); } catch (error) { return Promise.reject(error); }
+    try { payload = encodeClientControl({ type: "TASK_ENQUEUE", id, body: { task_id: taskId, incarnation_id: incarnationId, agent_id: request.agentId, ...(request.attachmentCount ? { attachment_count: request.attachmentCount } : {}), ...(request.repositoryId === undefined ? {} : { repository_id: request.repositoryId }), expected_agent_revision: request.expectedAgentRevision, instruction: request.instruction, ...(request.mode === "queue" || request.mode === "any" ? { mode: request.mode } : {}), ...(request.content?.length ? { content: request.content } : {}) } }); } catch (error) { return Promise.reject(error); }
     const result = new Promise<{ taskId: string; revision: bigint }>((resolve, reject) => this.#taskPending.set(id, { taskId, expectedAgentRevision: request.expectedAgentRevision, resolve, reject }));
     try { this.#send(payload); } catch { this.#fail(new SessionError("connection")); }
     return result;
@@ -515,7 +516,7 @@ export class BrowserSession {
 
   projectContent(operation: ProjectContentOperation, input: ProjectContentInput): Promise<ProjectContentOutput> {
     try { projectContentOperation(operation); } catch (error) { return Promise.reject(error); }
-    const write = operation === "create" || operation === "revise" || operation === "deprecate" || operation === "attach" || operation === "outcome_write" || (operation as string) === "mission_create";
+    const write = operation === "create" || operation === "revise" || operation === "deprecate" || operation === "outcome_write" || (operation as string) === "mission_create";
     const capability = CAPABILITIES.private_human_request_detail | (write ? CAPABILITIES.human_actions : 0);
     if ((this.#capabilities & capability) !== capability) return Promise.reject(new SessionError("unauthorized"));
     return this.#accountRequest("PROJECT_CONTENT_RESULT", capability, "project-content", (id) => encodeClientControl({ type: "PROJECT_CONTENT", id, body: { operation, input } }), { operation });

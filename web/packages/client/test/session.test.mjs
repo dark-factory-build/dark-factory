@@ -242,6 +242,17 @@ test("authenticated HumanRequest methods emit exact frames and correlate results
   session.close();
 });
 
+test("task enqueue carries Library pins only when chosen", async () => {
+  const { session, socket } = await openHumanSession();
+  const pin = { content_id: "ab".repeat(16), revision: 3n };
+  void session.enqueueAgentTask({ agentId: "77".repeat(16), expectedAgentRevision: 7n, instruction: "Use the guide", content: [pin] }).catch(() => undefined);
+  assert.deepEqual(decodeClientControl(socket.sent.at(-1)).body.content, [pin]);
+  void session.enqueueAgentTask({ agentId: "77".repeat(16), expectedAgentRevision: 7n, instruction: "No context", content: [] }).catch(() => undefined);
+  assert.equal("content" in decodeClientControl(socket.sent.at(-1)).body, false);
+  await assert.rejects(session.enqueueAgentTask({ agentId: "77".repeat(16), expectedAgentRevision: 7n, instruction: "Bad pin", content: [{ content_id: "ab".repeat(16), revision: 0n }] }));
+  session.close();
+});
+
 test("authenticated task enqueue mints exact IDs and correlates the durable result", async () => {
   const { session, socket } = await openHumanSession();
   const agentId = "77".repeat(16);

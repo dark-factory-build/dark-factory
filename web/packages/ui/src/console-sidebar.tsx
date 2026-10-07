@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from "react";
-import { MAX_TASK_ATTACHMENTS, MAX_TASK_ATTACHMENT_BYTES, MAX_TASK_PRIORITY, type IntakeView, type IntakeBody, type DiscoveredAccount, type AccountItem, type AgentItem, type GitHubConnectionBody, type GitHubDelegationBody, type HumanRequestItem, type ProjectItem, type RepositoryMutation, type RepositoryView, type StateView, type TaskHistoryView, type TaskItem, type TaskListView, type TaskPeerQuestion } from "@dark-factory/client";
+import { MAX_TASK_ATTACHMENTS, MAX_TASK_ATTACHMENT_BYTES, MAX_TASK_PRIORITY, type IntakeView, type IntakeBody, type DiscoveredAccount, type AccountItem, type AgentItem, type GitHubConnectionBody, type GitHubDelegationBody, type HumanRequestItem, type ProjectItem, type RepositoryMutation, type RepositoryView, type StateView, type TaskHistoryView, type TaskItem, type TaskListView, type TaskPeerQuestion, type TaskContentPin } from "@dark-factory/client";
 import type { FactoryEditView, FactoryHumanRequestView } from "./factory-app-controller.js";
 import type { FactoryGitHubView } from "./factory-settings-coordinator.js";
 import { rankLabel } from "./console-screens.js";
@@ -282,9 +282,13 @@ function WorkRowShell({ title, chips, meta, onOpen, disabled = false, pressed, e
   </li>;
 }
 
+/** A Library revision the operator chose for the next task, named for its chip. */
+export type TaskContentChip = TaskContentPin & { title: string; project_id: string };
+export type AddTask = (agent: AgentItem, instruction: string, mode: "queue" | "any", files?: readonly File[], content?: readonly TaskContentChip[]) => Promise<boolean>;
+
 /** One list for everything open: what needs you, what is in review, running and queued. */
 export function WorkPanel({
-  state, rows, projectId, filter, onFilter, byMission, onByMission, missions, edit, ready, onEditTask, onAddTask, onLoadTaskDetail, onLoadTaskHistory, onLoadTaskList,
+  state, rows, projectId, filter, onFilter, byMission, onByMission, missions, edit, ready, onEditTask, onAddTask, taskContent = [], onTaskContent = () => undefined, onLoadTaskDetail, onLoadTaskHistory, onLoadTaskList,
   selectedTaskId, onSelectTask, selectedHumanRequest, onSelectHumanRequest, onCloseHumanRequest, requestContent, onSelectProduction, onMission, sources, onManageSources, onIntakeAction, intake,
 }: {
   /** The local source list for the shown project; undefined until loaded. */
@@ -307,7 +311,10 @@ export function WorkPanel({
   edit?: FactoryEditView;
   ready: boolean;
   onEditTask?: (task: TaskItem, change: TaskEdit) => Promise<boolean>;
-  onAddTask?: (agent: AgentItem, instruction: string, mode: "queue" | "any", files?: readonly File[]) => Promise<boolean>;
+  onAddTask?: AddTask;
+  /** Library revisions chosen with "Use in a new task", pinned when the task is added. */
+  taskContent?: readonly TaskContentChip[];
+  onTaskContent?: (content: readonly TaskContentChip[]) => void;
   onLoadTaskDetail?: (task: TaskItem, peerOffset?: bigint, expectedHead?: bigint) => Promise<TaskBrief>;
   onLoadTaskHistory?: (task: TaskItem) => Promise<TaskHistoryView>;
   onLoadTaskList?: (scope: TaskScope, cursor?: TaskCursor) => Promise<TaskListView>;
@@ -356,7 +363,7 @@ export function WorkPanel({
   return <section className="dfConsoleSidebar__panel" aria-label="Work">
     {onManageSources === undefined ? null : <p className="dfConsoleItem__meta" role="status" aria-label="Task sources">{sources === undefined ? "Sources: not loaded yet" : sources.length === 0 ? "No sources — tasks come only from New task" : `Sources: ${sources.map((item) => `${item.repository} · ${item.label === "" ? "every issue" : `label ${item.label}`}${item.enabled ? "" : " (paused)"}`).join("; ")}`} <button type="button" onClick={onManageSources}>Manage</button></p>}
     {state.factory.dispatch_enabled ? null : <p role="status">New work is paused. Queued tasks wait; active processes continue. An administrator can resume new work above.</p>}
-    {onAddTask === undefined ? null : <NewTask agents={agents} state={state} disabled={!ready || edit?.pending === true} onAddTask={onAddTask} />}
+    {onAddTask === undefined ? null : <NewTask agents={agents} state={state} disabled={!ready || edit?.pending === true} onAddTask={onAddTask} content={taskContent} onContent={onTaskContent} />}
     <div className="dfWorkBar">
       <div className="dfConsoleViewToggle" role="group" aria-label="Work filter">
         {FILTERS.map(([value, label]) => <button key={value} type="button" aria-pressed={!byMission && filter === value} disabled={!ready} onClick={() => onFilter(value)}>{label} {value === "needs-you" ? <Badge n={rows.filter(needsYou).length} /> : null}</button>)}
@@ -373,13 +380,20 @@ export function WorkPanel({
   </section>;
 }
 
-/** The target is one agent, or "any:" plus a project whose first worker names the shared queue. */
-function NewTask({ agents, state, disabled, onAddTask }: {
+/**
+ * The target is one agent, or "any:" plus a project whose first worker names the shared queue.
+ * Library context limits the targets to its project, since a pin cannot cross projects.
+ */
+function NewTask({ agents, state, disabled, onAddTask, content, onContent }: {
   agents: readonly AgentItem[];
   state: StateView;
   disabled: boolean;
-  onAddTask: (agent: AgentItem, instruction: string, mode: "queue" | "any", files?: readonly File[]) => Promise<boolean>;
+  onAddTask: AddTask;
+  content: readonly TaskContentChip[];
+  onContent: (content: readonly TaskContentChip[]) => void;
 }) {
+  const [open, setOpen] = useState(content.length > 0);
+  useEffect(() => { if (content.length > 0) setOpen(true); }, [content]);
   const [files, setFiles] = useState<readonly File[]>([]);
   const [fileError, setFileError] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -391,12 +405,13 @@ function NewTask({ agents, state, disabled, onAddTask }: {
     if (incoming.some((file) => file.size === 0 || new TextEncoder().encode(file.name).length > 255 || /[\u0000-\u001f\u007f-\u009f]/u.test(file.name))) { setFileError("Choose nonempty files with names under 256 bytes and no control characters."); return; }
     setFiles(next); setFileError("");
   };
-  const live = agents.filter((agent) => !agent.archived);
+  const scope = content[0]?.project_id;
+  const live = agents.filter((agent) => !agent.archived && (scope === undefined || agent.project_id === scope));
   const shared = [...state.projects.values()].flatMap((project) => {
     const worker = live.find((agent) => agent.project_id === project.id && agent.role === "worker");
     return worker === undefined ? [] : [{ project, worker }];
   });
-  return <details className="dfConsoleSidebar__section"><summary>New task</summary>
+  return <details className="dfConsoleSidebar__section" open={open} onToggle={(event) => setOpen(event.currentTarget.open)}><summary>New task</summary>
     <form className="dfFactoryConsole__reply" aria-label="New task"
       onDragOver={(event) => { if (event.dataTransfer.types.includes("Files")) event.preventDefault(); }}
       onDrop={(event) => { if (event.dataTransfer.files.length > 0) { event.preventDefault(); addFiles(Array.from(event.dataTransfer.files)); } }}
@@ -410,13 +425,14 @@ function NewTask({ agents, state, disabled, onAddTask }: {
       const instruction = String(data.get("instruction"));
       if (busy || agent === undefined || instruction.trim() === "") return;
       setSubmitting(true);
-      void onAddTask(agent, instruction, target.startsWith("any:") ? "any" : "queue", files).then((added) => { if (added) { form.reset(); setFiles([]); setFileError(""); } }).catch(() => setFileError("Submission failed. Your files are still here; try again.")).finally(() => setSubmitting(false));
+      void onAddTask(agent, instruction, target.startsWith("any:") ? "any" : "queue", files, content).then((added) => { if (added) { form.reset(); setFiles([]); setFileError(""); onContent([]); } }).catch(() => setFileError("Submission failed. Your files are still here; try again.")).finally(() => setSubmitting(false));
     }}>
       <label htmlFor="df-new-task-target">For</label>
       <select id="df-new-task-target" name="target" required disabled={busy}>
         {shared.map(({ project }) => <option key={project.id} value={`any:${project.id}`}>Any eligible worker · {project.name}</option>)}
         {live.map((agent) => <option key={agent.id} value={agent.id}>{agent.name}</option>)}
       </select>
+      {content.length === 0 ? null : <ul aria-label="Library context">{content.map((item) => <li key={item.content_id}><span>{item.title} · Revision {String(item.revision)}</span><button type="button" aria-label={`Remove ${item.title}`} disabled={busy} onClick={() => onContent(content.filter((other) => other !== item))}>Remove</button></li>)}</ul>}
       <label htmlFor="df-new-task-instruction">Instruction</label>
       <textarea id="df-new-task-instruction" name="instruction" rows={4} required disabled={busy} />
       <label htmlFor="df-new-task-files">Attach files</label>

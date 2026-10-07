@@ -11,7 +11,7 @@ import {
   MAX_AGENT_NAME_BYTES,
   MAX_MODEL_SOURCE_BYTES,
   MAX_ARRAY_ITEMS,
-  MAX_CONTROL_BYTES, MAX_TASK_ATTACHMENTS, MAX_TASK_ATTACHMENT_BYTES, TASK_ATTACHMENT_CHUNK_BYTES,
+  MAX_CONTROL_BYTES, MAX_TASK_ATTACHMENTS, MAX_TASK_ATTACHMENT_BYTES, MAX_TASK_CONTENT, TASK_ATTACHMENT_CHUNK_BYTES,
   MAX_FACTORY_CAPACITY,
   MAX_HUMAN_QUESTION_BYTES,
   MAX_HUMAN_REPLY_BYTES,
@@ -95,7 +95,9 @@ export type HumanRequestCancelRunResultBody = { run_id: string; run_revision: bi
 /** `mode` "any" queues the instruction for any eligible worker in the pane agent's project. */
 export type TaskAttachmentBody = { index: number; offset: bigint; size: bigint; name: string; data: string };
 export type TaskAttachmentResultBody = { offset: bigint };
-export type TaskEnqueueBody = { task_id: string; incarnation_id: string; agent_id: string; repository_id?: string; expected_agent_revision: bigint; instruction: string; mode?: "now" | "queue" | "any"; attachment_count?: number };
+export type TaskEnqueueBody = { task_id: string; incarnation_id: string; agent_id: string; repository_id?: string; expected_agent_revision: bigint; instruction: string; mode?: "now" | "queue" | "any"; attachment_count?: number; content?: TaskContentPin[] };
+/** A Library revision pinned to the task in the enqueue transaction. */
+export type TaskContentPin = { content_id: string; revision: bigint };
 export type TaskEnqueueResultBody = { task_id: string; revision: bigint; agent_revision: bigint };
 export type AgentControlAction = "message" | "interrupt" | "stop" | "replace";
 export type AgentControlBody = { operation_id: string; task_id: string; run_id: string; expected_task_revision: bigint; expected_run_revision: bigint; action: AgentControlAction; instruction: string; successor_task_id: string; successor_incarnation_id: string };
@@ -428,11 +430,13 @@ function validateBody(type: ControlType, body: unknown, wire: boolean): ControlB
       if (offset > BigInt(MAX_TASK_ATTACHMENT_BYTES)) malformed(); return { offset };
     }
     case "TASK_ENQUEUE": {
-      requireKeys(body, ["task_id", "incarnation_id", "agent_id", "expected_agent_revision", "instruction"], wire, ["repository_id", "mode", "attachment_count"]);
+      requireKeys(body, ["task_id", "incarnation_id", "agent_id", "expected_agent_revision", "instruction"], wire, ["repository_id", "mode", "attachment_count", "content"]);
+      if (present(body, "content") && (!Array.isArray(body.content) || body.content.length > MAX_TASK_CONTENT)) malformed();
+      const content = present(body, "content") ? (body.content as unknown[]).map((item) => { if (!isObject(item)) malformed(); requireKeys(item, ["content_id", "revision"], wire); return { content_id: dynamicID(item.content_id), revision: decimal(item.revision, wire, true) }; }) : undefined;
       const mode = present(body, "mode") ? body.mode : undefined;
       if (mode !== undefined && mode !== "now" && mode !== "queue" && mode !== "any") malformed();
       const repository_id = present(body, "repository_id") ? dynamicID(body.repository_id) : undefined;
-      return { ...(present(body, "attachment_count") ? { attachment_count: integer(body.attachment_count, 0, MAX_TASK_ATTACHMENTS) } : {}), task_id: dynamicID(body.task_id), incarnation_id: dynamicID(body.incarnation_id), agent_id: dynamicID(body.agent_id), ...(repository_id === undefined ? {} : { repository_id }), expected_agent_revision: decimal(body.expected_agent_revision, wire, true), instruction: boundedText(body.instruction, 1, MAX_TASK_INSTRUCTION_BYTES), ...(mode === undefined ? {} : { mode }) };
+      return { ...(present(body, "attachment_count") ? { attachment_count: integer(body.attachment_count, 0, MAX_TASK_ATTACHMENTS) } : {}), task_id: dynamicID(body.task_id), incarnation_id: dynamicID(body.incarnation_id), agent_id: dynamicID(body.agent_id), ...(repository_id === undefined ? {} : { repository_id }), expected_agent_revision: decimal(body.expected_agent_revision, wire, true), instruction: boundedText(body.instruction, 1, MAX_TASK_INSTRUCTION_BYTES), ...(mode === undefined ? {} : { mode }), ...(content === undefined ? {} : { content }) };
     }
     case "TASK_ENQUEUE_RESULT": requireKeys(body, ["task_id", "revision", "agent_revision"], wire); return { task_id: dynamicID(body.task_id), revision: decimal(body.revision, wire, true), agent_revision: decimal(body.agent_revision, wire, true) };
     case "AGENT_CONTROL": {

@@ -49,6 +49,19 @@ func TestTaskEnqueueControlBoundsAndDirection(t *testing.T) {
 	} else if frame, err := DecodeClientControl(wire); err != nil || frame.Body.(TaskEnqueue).RepositoryID != request.RepositoryID {
 		t.Fatalf("repository selection did not round-trip: %+v %v", frame, err)
 	}
+	request.Content = []TaskContent{{ContentID: strings.Repeat("05", 16), Revision: 3}}
+	if wire, err := EncodeTaskEnqueue("enqueue-content", request); err != nil {
+		t.Fatal(err)
+	} else if frame, err := DecodeClientControl(wire); err != nil || frame.Body.(TaskEnqueue).Content[0] != request.Content[0] {
+		t.Fatalf("content pin did not round-trip: %+v %v", frame, err)
+	}
+	for _, content := range [][]TaskContent{{{ContentID: strings.Repeat("05", 16)}}, {{ContentID: "x", Revision: 1}}, make([]TaskContent, MaxTaskContent+1)} {
+		request.Content = content
+		if _, err := EncodeTaskEnqueue("enqueue-content", request); err == nil {
+			t.Fatalf("invalid content pin accepted: %+v", content)
+		}
+	}
+	request.Content = nil
 	request.Mode = "everyone"
 	if _, err := EncodeTaskEnqueue("enqueue-5", request); err == nil {
 		t.Fatal("unknown mode accepted")
