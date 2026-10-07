@@ -566,7 +566,7 @@ fn tools() -> Value {
     }, {
         "name": "observe_pull_request_merge",
         "title": "Observe an exact-head merge outcome",
-        "description": "Bind to the completed App enqueue attempt and return whether that exact pull request head is still in its default-branch merge queue, merged after the attempt, or no longer queued. NOT_QUEUED does not guess why the entry disappeared.",
+        "description": "Bind to the completed App enqueue attempt and return whether that exact pull request head is still in its default-branch merge queue, merged after the attempt, or no longer queued. NOT_QUEUED on an open pull request carries the newest completed merge-group run that built the head, when one is readable.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -590,9 +590,29 @@ fn tools() -> Value {
                 "state": {"type": "string", "enum": ["ACTIVE_QUEUE", "MERGED_AFTER_ENQUEUE_ATTEMPT", "NOT_QUEUED"]},
                 "entry_id": {"type": "string"},
                 "queue_state": {"type": ["string", "null"]},
-                "merge_commit_sha": {"type": ["string", "null"]}
+                "merge_commit_sha": {"type": ["string", "null"]},
+                "merge_group": {
+                    "type": ["object", "null"],
+                    "properties": {
+                        "run_id": {"type": "integer"},
+                        "url": {"type": "string"},
+                        "conclusion": {"type": "string"},
+                        "failed_jobs": {"type": "array", "maxItems": 3, "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string"},
+                                "conclusion": {"type": "string"},
+                                "annotations": {"type": "array", "maxItems": 10, "items": {"type": "string", "maxLength": 240}}
+                            },
+                            "required": ["name", "conclusion", "annotations"],
+                            "additionalProperties": false
+                        }}
+                    },
+                    "required": ["run_id", "url", "conclusion", "failed_jobs"],
+                    "additionalProperties": false
+                }
             },
-            "required": ["pull_number", "head_sha", "base", "pull_state", "state", "entry_id", "queue_state", "merge_commit_sha"],
+            "required": ["pull_number", "head_sha", "base", "pull_state", "state", "entry_id", "queue_state", "merge_commit_sha", "merge_group"],
             "additionalProperties": false
         },
         "annotations": {"readOnlyHint": true, "destructiveHint": false, "openWorldHint": true}

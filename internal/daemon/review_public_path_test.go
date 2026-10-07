@@ -451,8 +451,10 @@ func TestMergeQueueEjectionSendsBackOnceAndAMergeCloses(t *testing.T) {
 	for _, test := range []struct {
 		merge review.Merge
 		state string
+		note  string
 	}{
-		{merge: review.Merge{State: "NOT_QUEUED", Open: true, Failing: []string{"ci / go", "ci / ui"}}, state: "ejected"},
+		{merge: review.Merge{State: "NOT_QUEUED", Open: true, Failing: []string{"ci / go", "ci / ui"}}, state: "ejected", note: "Failing checks: ci / go, ci / ui."},
+		{merge: review.Merge{State: "NOT_QUEUED", Open: true, Group: &review.GroupRun{ID: 37516424704, Conclusion: "failure", Jobs: []review.GroupJob{{Name: "checks", Conclusion: "failure", Annotations: []string{"not ok 3 - board and shelves open peer views of one Library workspace"}}}}}, state: "ejected", note: "not ok 3 - board and shelves open peer views of one Library workspace"},
 		{merge: review.Merge{State: "MERGED_AFTER_ENQUEUE_ATTEMPT"}, state: "merged"},
 	} {
 		fixture, project, task, settle := publishedTask(t)
@@ -474,7 +476,7 @@ func TestMergeQueueEjectionSendsBackOnceAndAMergeCloses(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		sentBack := current.WorkRevision.Int64() == 2 && strings.Contains(kernel.TaskFeedback(current), "Failing checks: ci / go, ci / ui.")
+		sentBack := current.WorkRevision.Int64() == 2 && test.note != "" && strings.Contains(kernel.TaskFeedback(current), test.note)
 		if op.State != test.state || op.RoutePending || sentBack != (test.state == "ejected") || current.WorkRevision.Int64() > 2 {
 			t.Fatalf("%s: operation=%+v task revision %d feedback %q", test.state, op, current.WorkRevision.Int64(), kernel.TaskFeedback(current))
 		}

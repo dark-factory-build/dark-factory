@@ -706,14 +706,15 @@ func (b *daemonReviewBackend) ObserveMerge(ctx context.Context, operation review
 		return mergeFromPull(pull, operation, err)
 	}
 	var merge struct {
-		Head  string `json:"head_sha"`
-		State string `json:"state"`
-		Pull  string `json:"pull_state"`
+		Head  string           `json:"head_sha"`
+		State string           `json:"state"`
+		Pull  string           `json:"pull_state"`
+		Group *review.GroupRun `json:"merge_group"`
 	}
 	if json.Unmarshal(response, &merge) != nil || merge.Head != operation.Request.Head {
 		return review.Merge{}, errors.New("review: Maintainer returned an invalid merge observation")
 	}
-	result := review.Merge{State: merge.State, Open: merge.Pull == "open"}
+	result := review.Merge{State: merge.State, Open: merge.Pull == "open", Group: merge.Group}
 	if merge.State != "NOT_QUEUED" || !result.Open {
 		return result, nil
 	}
