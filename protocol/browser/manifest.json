@@ -381,16 +381,28 @@
       "fixture": "task_update_result.json"
     },
     {
-      "type": "TOPOLOGY_GET",
+      "type": "OPERATIONAL_GRAPH_GET",
       "direction": "client",
       "id": "required",
-      "fixture": "topology_get.json"
+      "fixture": "operational_graph_get.json"
     },
     {
-      "type": "TOPOLOGY",
+      "type": "OPERATIONAL_GRAPH",
       "direction": "server",
       "id": "required",
-      "fixture": "topology.json"
+      "fixture": "operational_graph.json"
+    },
+    {
+      "type": "OPERATIONAL_NODE_GET",
+      "direction": "client",
+      "id": "required",
+      "fixture": "operational_node_get.json"
+    },
+    {
+      "type": "OPERATIONAL_NODE",
+      "direction": "server",
+      "id": "required",
+      "fixture": "operational_node.json"
     },
     {
       "type": "RUN_PATHS_GET",

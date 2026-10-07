@@ -60,7 +60,7 @@ if [ "$go_check_mode" = source ]; then
     "$go" test -short -timeout=20m \
         ./internal/browserprotocol \
         ./internal/provider \
-        ./internal/topology
+        ./internal/opgraph
 fi
 
 # A direct run (a worker's check loop) skips the TypeScript block when nothing

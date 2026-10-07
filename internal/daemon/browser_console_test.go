@@ -10,13 +10,13 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/dark-factory-build/dark-factory/internal/browser"
 	"github.com/dark-factory-build/dark-factory/internal/browserprotocol"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
-	"github.com/dark-factory-build/dark-factory/internal/topology"
 )
 
 // consoleFixture pairs one browser client and gives it a project, an agent and
@@ -55,8 +55,8 @@ func newConsoleFixture(t *testing.T, capabilities kernel.BrowserCapabilityMask, 
 func consoleRoot(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
-	writeTopologyFixture(t, root, "go.mod", "module example.com/console\n")
-	writeTopologyFixture(t, root, "one/one.go", "package one\n")
+	writeSourceFixture(t, root, "go.mod", "module example.com/console\n")
+	writeSourceFixture(t, root, "one/one.go", "package one\n")
 	return root
 }
 
@@ -143,9 +143,9 @@ func TestBrowserConsoleAcceptsLegacyZeroStandingInstructionBudget(t *testing.T) 
 	}
 }
 
-// Topology is an observation; the two updates are operator mutations. An
+// The graph is an observation; the two updates are operator mutations. An
 // observe-only pairing may do the first and none of the second.
-func TestBrowserConsoleGatesUpdatesOnHumanActionsButNotTopology(t *testing.T) {
+func TestBrowserConsoleGatesUpdatesOnHumanActionsButNotTheGraph(t *testing.T) {
 	root := consoleRoot(t)
 	fixture := newConsoleFixture(t, kernel.BrowserCapabilityObserve, root)
 	ctx := context.Background()
@@ -166,27 +166,22 @@ func TestBrowserConsoleGatesUpdatesOnHumanActionsButNotTopology(t *testing.T) {
 	if err != nil || !found || stored.Revision != fixture.agent.Revision || stored.Paused {
 		t.Fatalf("agent after refused update = %+v, found=%v, err=%v", stored, found, err)
 	}
-	result, err := fixture.backend.Topology(ctx, client, browserprotocol.TopologyGet{ProjectID: fixture.project.ID.String()})
+	result, err := fixture.backend.OperationalGraph(ctx, client, browserprotocol.OperationalGraphGet{ProjectID: fixture.project.ID.String()})
 	// This checkout has no registered target. Observation remains authorized,
 	// but mutable checkout files must not become the finished factory.
-	if err != nil || result.ProjectID != fixture.project.ID.String() || len(result.Digest) != 64 || len(result.Nodes) != 1 || len(result.Sources) != 1 || result.Sources[0].Kind != "unavailable" || result.Nodes[0].Inventory != nil {
-		t.Fatalf("observe-only topology = %+v, %v", result, err)
-	}
-	for _, node := range result.Nodes {
-		if node.Kind == "" || node.Path == "" || node.SizeBucket == "" {
-			t.Fatalf("topology node is not projected: %+v", node)
-		}
+	if err != nil || result.ProjectID != fixture.project.ID.String() || len(result.Digest) != 64 || !onlyRoot(result.Nodes) || len(result.Sources) != 1 || result.Sources[0].Kind != "unavailable" {
+		t.Fatalf("observe-only graph = %+v, %v", result, err)
 	}
 	// An unknown project is not found; a caller that gave up gets a retryable
 	// answer rather than a fault.
 	unknown, _ := kernel.ProjectIDFromBytes(adapterID(t, 0x25))
-	if _, err := fixture.backend.Topology(ctx, client, browserprotocol.TopologyGet{ProjectID: unknown.String()}); !errors.Is(err, browser.ErrNotFound) {
-		t.Fatalf("unknown project topology = %v", err)
+	if _, err := fixture.backend.OperationalGraph(ctx, client, browserprotocol.OperationalGraphGet{ProjectID: unknown.String()}); !errors.Is(err, browser.ErrNotFound) {
+		t.Fatalf("unknown project graph = %v", err)
 	}
 	cancelled, cancel := context.WithCancel(ctx)
 	cancel()
-	if _, err := fixture.backend.Topology(cancelled, client, browserprotocol.TopologyGet{ProjectID: fixture.project.ID.String()}); !errors.Is(err, browser.ErrRateLimited) {
-		t.Fatalf("abandoned topology request = %v", err)
+	if _, err := fixture.backend.OperationalGraph(cancelled, client, browserprotocol.OperationalGraphGet{ProjectID: fixture.project.ID.String()}); !errors.Is(err, browser.ErrRateLimited) {
+		t.Fatalf("abandoned graph request = %v", err)
 	}
 }
 
@@ -262,61 +257,6 @@ func TestBrowserEffectVerdictSurvivesItsDeadlineCause(t *testing.T) {
 	}
 }
 
-// The tree bounds nothing. A node the wire cannot carry is dropped with its
-// subtree so the whole project stays serveable.
-func TestProjectTopologyDropsNodesTheWireCannotCarry(t *testing.T) {
-	root := topology.Node{ID: strings.Repeat("a1", 32), Kind: topology.NodeRepository, RelativePath: ".", Label: "repository", SizeBucket: "small"}
-	longLabel := topology.Node{ID: strings.Repeat("b2", 32), ParentID: root.ID, Kind: topology.NodeDirectory, RelativePath: "wide", Label: strings.Repeat("l", browserprotocol.MaxAgentNameBytes+1), SizeBucket: "small"}
-	childOfLongLabel := topology.Node{ID: strings.Repeat("c3", 32), ParentID: longLabel.ID, Kind: topology.NodeDirectory, RelativePath: "wide/inner", Label: "inner", SizeBucket: "small"}
-	longPath := topology.Node{ID: strings.Repeat("d4", 32), ParentID: root.ID, Kind: topology.NodeDirectory, RelativePath: strings.Repeat("p", browserprotocol.MaxTaskTitleBytes+1), Label: "deep", SizeBucket: "small"}
-	invalidUTF8 := topology.Node{ID: strings.Repeat("e5", 32), ParentID: root.ID, Kind: topology.NodeDirectory, RelativePath: "bad", Label: string([]byte{0xff}), SizeBucket: "small"}
-	keeper := topology.Node{ID: strings.Repeat("f6", 32), ParentID: root.ID, Kind: topology.NodePackage, RelativePath: "internal/kernel", Label: "kernel", Language: "go", SizeBucket: "large"}
-	snapshot := topology.Snapshot{
-		Digest: strings.Repeat("ab", 32),
-		Nodes:  []topology.Node{root, longLabel, childOfLongLabel, longPath, invalidUTF8, keeper},
-	}
-	result := projectTopology("01010101010101010101010101010101", snapshot)
-	served := make([]string, 0, len(result.Nodes))
-	for _, node := range result.Nodes {
-		served = append(served, node.ID)
-	}
-	if len(served) != 2 || served[0] != root.ID || served[1] != keeper.ID {
-		t.Fatalf("served nodes = %v", served)
-	}
-	// The frame the console actually receives must encode.
-	if _, err := browserprotocol.EncodeTopology("topology", result); err != nil {
-		t.Fatalf("clamped topology did not encode: %v", err)
-	}
-}
-
-// A directory the filesystem accepts but the wire cannot label is real: 129
-// bytes is a legal name everywhere Dark Factory runs.
-func TestBrowserConsoleServesAProjectWithAnOverLongDirectoryName(t *testing.T) {
-	root := consoleRoot(t)
-	writeTopologyFixture(t, root, strings.Repeat("d", browserprotocol.MaxAgentNameBytes+1)+"/inner/inner.go", "package inner\n")
-	snapshot, err := topology.Build(context.Background(), root, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	result := projectTopology("01010101010101010101010101010101", snapshot)
-	if err != nil {
-		t.Fatalf("topology with an over-long directory = %v", err)
-	}
-	// The over-long directory costs its own subtree and nothing else: the
-	// module, the repository and the "one" package are still served.
-	if len(result.Nodes) != 3 {
-		t.Fatalf("served %d nodes: %+v", len(result.Nodes), result.Nodes)
-	}
-	for _, node := range result.Nodes {
-		if len(node.Label) > browserprotocol.MaxAgentNameBytes || len(node.Path) > browserprotocol.MaxTaskTitleBytes {
-			t.Fatalf("served an unencodable node: %+v", node)
-		}
-	}
-	if _, err := browserprotocol.EncodeTopology("topology", result); err != nil {
-		t.Fatalf("daemon-produced topology did not encode: %v", err)
-	}
-}
-
 // Reassignment inside the project is the queue edit the console offers beside
 // reorder and cancel.
 func TestBrowserConsoleReassignsATaskWithinItsProject(t *testing.T) {
@@ -337,38 +277,6 @@ func TestBrowserConsoleReassignsATaskWithinItsProject(t *testing.T) {
 	stored, found, err := fixture.store.Task(ctx, fixture.task.ID)
 	if err != nil || !found || stored.AssignedAgentID != second.ID || stored.Status != kernel.TaskQueued {
 		t.Fatalf("reassigned task = %+v, found=%v, err=%v", stored, found, err)
-	}
-}
-
-// The derived graph is ordered by path and kind, not by ancestry: a root
-// go.mod puts the module node before the repository that contains it. A
-// projection that trusted slice order dropped the module as "parent absent"
-// and, because every top-level node hangs off it, the whole tree with it.
-func TestProjectTopologyKeepsARootModuleAheadOfItsRepository(t *testing.T) {
-	root := t.TempDir()
-	writeTopologyFixture(t, root, "go.mod", "module example.com/console\n")
-	writeTopologyFixture(t, root, "one/one.go", "package one\n")
-	snapshot, err := topology.Build(context.Background(), root, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	// The shape this guards against only exists when the module sorts first.
-	if len(snapshot.Nodes) == 0 || snapshot.Nodes[0].Kind != topology.NodeModule {
-		t.Fatalf("fixture does not reproduce the ordering: %+v", snapshot.Nodes)
-	}
-	served := projectTopology("01010101010101010101010101010101", snapshot)
-	if len(served.Nodes) != len(snapshot.Nodes) {
-		t.Fatalf("served %d of %d nodes: %+v", len(served.Nodes), len(snapshot.Nodes), served.Nodes)
-	}
-	kinds := make(map[string]int, len(served.Nodes))
-	for _, node := range served.Nodes {
-		kinds[node.Kind]++
-	}
-	if kinds["module"] != 1 || kinds["repository"] != 1 || kinds["package"] != 1 {
-		t.Fatalf("served kinds = %v", kinds)
-	}
-	if _, err := browserprotocol.EncodeTopology("topology", served); err != nil {
-		t.Fatalf("served topology did not encode: %v", err)
 	}
 }
 
@@ -699,106 +607,6 @@ func TestBrowserClientsListNewestFirstAndRevokeOthersOnly(t *testing.T) {
 	}
 }
 
-func TestProjectTopologyBoundsDependencyEvidence(t *testing.T) {
-	root := topology.Node{ID: strings.Repeat("a1", 32), Kind: topology.NodeRepository, RelativePath: ".", Label: "repository", SizeBucket: "small"}
-	snapshot := topology.Snapshot{Digest: strings.Repeat("ab", 32), Nodes: []topology.Node{root}}
-	for i := 0; i < browserprotocol.MaxTopologyEdges+4; i++ {
-		node := topology.Node{ID: fmt.Sprintf("%064x", i+1), ParentID: root.ID, Kind: topology.NodePackage, RelativePath: fmt.Sprintf("p%d", i), Label: "package", SizeBucket: "small"}
-		snapshot.Nodes = append(snapshot.Nodes, node)
-		snapshot.Edges = append(snapshot.Edges, topology.Edge{From: root.ID, To: node.ID, Kind: topology.EdgeImports, Weight: 2})
-	}
-	snapshot.Edges = append(snapshot.Edges, topology.Edge{From: root.ID, To: strings.Repeat("ff", 32), Kind: topology.EdgeImports, Weight: 1})
-	result := projectTopology("01010101010101010101010101010101", snapshot)
-	if result.Dependencies == nil || len(result.Dependencies.Edges) != browserprotocol.MaxTopologyEdges || result.Dependencies.Omitted != 5 {
-		t.Fatalf("bounded dependencies: %+v", result.Dependencies)
-	}
-	if _, err := browserprotocol.EncodeTopology("topology", result); err != nil {
-		t.Fatal(err)
-	}
-	edge := result.Dependencies.Edges[0]
-	result.Dependencies.Edges = append(result.Dependencies.Edges[:1:1], edge)
-	if _, err := browserprotocol.EncodeTopology("topology", result); err == nil {
-		t.Fatal("duplicate relationship accepted")
-	}
-	result.Dependencies.Edges = []browserprotocol.TopologyEdge{{From: root.ID, To: strings.Repeat("ff", 32), Weight: 1}}
-	if _, err := browserprotocol.EncodeTopology("topology", result); err == nil {
-		t.Fatal("foreign endpoint accepted")
-	}
-	result.Dependencies = nil
-	if _, err := browserprotocol.EncodeTopology("topology", result); err != nil {
-		t.Fatalf("legacy topology rejected: %v", err)
-	}
-}
-
-func TestProjectTopologyInventoryFitsExistingResponseBudget(t *testing.T) {
-	snapshot := topology.Snapshot{Digest: strings.Repeat("ab", 32)}
-	for i := 0; i < browserprotocol.MaxSnapshotEntities; i++ {
-		snapshot.Nodes = append(snapshot.Nodes, topology.Node{ID: fmt.Sprintf("%064x", i+1), Kind: topology.NodeDirectory, RelativePath: fmt.Sprintf("p%d", i), Label: "room", SizeBucket: "small", Inventory: &topology.Inventory{
-			Direct: topology.InventoryCounts{Source: 3}, Total: topology.InventoryCounts{Source: 3}, Samples: []string{strings.Repeat("a", 128), strings.Repeat("b", 128), strings.Repeat("c", 128)},
-		}})
-	}
-	result := projectTopology("01010101010101010101010101010101", snapshot)
-	omitted := uint32(0)
-	for _, node := range result.Nodes {
-		if node.Inventory == nil {
-			omitted++
-		}
-	}
-	if len(result.Nodes) != len(snapshot.Nodes) || omitted == 0 || omitted == uint32(len(result.Nodes)) || result.InventoryOmitted == nil || *result.InventoryOmitted != omitted {
-		t.Fatalf("inventory omissions = %d, reported %v", omitted, result.InventoryOmitted)
-	}
-	wire, err := browserprotocol.EncodeTopology("inventory", result)
-	if err != nil || len(wire) > browserprotocol.MaxSnapshotBytes {
-		t.Fatalf("bounded inventory wire: %d bytes, %v", len(wire), err)
-	}
-	if snapshot.Nodes[0].Inventory.SamplesOmitted != 0 || len(snapshot.Nodes[0].Inventory.Samples) != 3 {
-		t.Fatal("projection mutated cached inventory")
-	}
-}
-
-func TestProjectTopologyPrioritizesDependenciesAndCountsOverFilenames(t *testing.T) {
-	snapshot := topology.Snapshot{Digest: strings.Repeat("ab", 32)}
-	for i := 0; i < browserprotocol.MaxSnapshotEntities; i++ {
-		snapshot.Nodes = append(snapshot.Nodes, topology.Node{ID: fmt.Sprintf("%064x", i+1), Kind: topology.NodeDirectory, RelativePath: fmt.Sprintf("p%d", i), Label: "room", SizeBucket: "small", Inventory: &topology.Inventory{
-			Direct: topology.InventoryCounts{Source: 3}, Total: topology.InventoryCounts{Source: 3}, Samples: []string{strings.Repeat("a", 128), strings.Repeat("b", 128), strings.Repeat("c", 128)},
-		}})
-		if i > 0 && i <= browserprotocol.MaxTopologyEdges {
-			snapshot.Edges = append(snapshot.Edges, topology.Edge{From: snapshot.Nodes[0].ID, To: snapshot.Nodes[i].ID, Kind: topology.EdgeImports, Weight: 1})
-		}
-	}
-	projectID := "01010101010101010101010101010101"
-	result := projectTopology(projectID, snapshot)
-	if len(result.Dependencies.Edges) != len(snapshot.Edges) || result.Dependencies.Omitted != 0 {
-		t.Fatalf("filenames crowded out dependencies: served %d of %d, omitted %d", len(result.Dependencies.Edges), len(snapshot.Edges), result.Dependencies.Omitted)
-	}
-	wire, err := browserprotocol.EncodeTopology("budget", result)
-	if err != nil || len(wire) > browserprotocol.MaxSnapshotBytes {
-		t.Fatalf("combined response: %d bytes, %v", len(wire), err)
-	}
-	for _, node := range result.Nodes {
-		if inventory := node.Inventory; inventory != nil && len(inventory.Samples)+int(inventory.SamplesOmitted) != 3 {
-			t.Fatalf("inexact sample omission: %+v", inventory)
-		}
-	}
-	small := projectTopology(projectID, topology.Snapshot{Digest: snapshot.Digest, Nodes: snapshot.Nodes[:1]})
-	if len(small.Nodes[0].Inventory.Samples) != 3 || small.Nodes[0].Inventory.SamplesOmitted != 0 {
-		t.Fatal("filenames were omitted despite available response capacity")
-	}
-	for i := range snapshot.Nodes {
-		snapshot.Nodes[i].Inventory.Samples = nil
-		snapshot.Nodes[i].Inventory.SamplesOmitted = 3
-	}
-	countsOnly := projectTopology(projectID, snapshot)
-	if *result.InventoryOmitted != *countsOnly.InventoryOmitted {
-		t.Fatalf("filenames crowded out counts: omitted %d versus %d without filenames", *result.InventoryOmitted, *countsOnly.InventoryOmitted)
-	}
-	again, _ := browserprotocol.EncodeTopology("budget", projectTopology(projectID, snapshot))
-	expected, _ := browserprotocol.EncodeTopology("budget", countsOnly)
-	if !bytes.Equal(again, expected) {
-		t.Fatal("projection is not deterministic")
-	}
-}
-
 func TestBrowserAttachmentRetentionRequiresAdministration(t *testing.T) {
 	for _, capability := range []kernel.BrowserCapabilityMask{kernel.BrowserCapabilityObserve, kernel.BrowserCapabilityAdministration} {
 		fixture := newAdapterFixture(t, capability|kernel.BrowserCapabilityObserve)
@@ -873,4 +681,14 @@ func TestBrowserFactoryDispatchRequiresAdministrationAndAcknowledgesRevision(t *
 			t.Fatalf("stale dispatch: %v", err)
 		}
 	}
+}
+
+// An unavailable source leaves only the fallback nodes at the repository root.
+func onlyRoot(nodes []browserprotocol.GraphNode) bool {
+	for _, node := range nodes {
+		if slices.ContainsFunc(node.Paths, func(path string) bool { return path != "." }) {
+			return false
+		}
+	}
+	return true
 }

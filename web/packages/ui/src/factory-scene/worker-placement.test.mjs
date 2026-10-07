@@ -4,7 +4,7 @@ import { COMMON_WIDTH, PADDING, breakRoomNook, commonSeating, placeWorkers } fro
 
 const room = (id, index = 0) => {
   const x = 256 + index % 2 * 392, y = 64 + Math.floor(index / 2) * 416, width = 392, height = 384;
-  return { id, x, y, width, height, door: { x: x + width / 2, y: y + height }, contents: Array.from({ length: 6 }, (_, slot) => ({
+  return { id, kind: "hall", x, y, width, height, door: { x: x + width / 2, y: y + height }, contents: Array.from({ length: 6 }, (_, slot) => ({
     key: `${id}-${slot}`, entityId: `${id}-${slot}`, representedIds: [`${id}-alias-${slot}`], kind: "source", label: `${slot}`, count: 1, workSurface: true,
     x: x + 24 + slot % 2 * 172, y: y + 36 + Math.floor(slot / 2) * 96, width: 144, height: 48,
   })) };
@@ -26,7 +26,7 @@ test("work slots belong to the observed assembly surface, including aliases", ()
   assert.deepEqual(placeWorkers(layout, [...workers].reverse()), placed);
   for (const at of placed) {
     const source = workers.find((person) => person.id === at.id), item = layout.rooms[0].contents[Math.floor(workers.indexOf(source) / 2)];
-    assert.equal(at.y, item.y + item.height + 10);
+    assert.equal(at.y, item.y + item.height + 12);
     assert.ok(at.x >= item.x && at.x <= item.x + item.width);
   }
 });
@@ -65,28 +65,10 @@ test("side commons has exact occupied seats, bounded columns, and separate plann
   }
 });
 
-test("social furniture stays put and its standing destinations clear rest and work targets", () => {
-  const layout = floor(3), workers = Array.from({ length: 6 }, (_, index) => worker(`rest-${index}`, { nodeId: `room-${Math.floor(index / 2)}` }));
-  workers.push(...layout.rooms.map((room) => worker(`work-${room.id}`, { nodeId: room.id, observedBayId: `${room.id}-5`, activity: "busy", location: "working" })));
-  const placed = placeWorkers(layout, workers, "nearby"), nook = breakRoomNook(layout, 0, 0, true);
+test("the commons furniture stays put whoever rests nearby or works", () => {
+  const layout = floor(3), nook = breakRoomNook(layout, 0, 0, true);
   assert.deepEqual(nook, breakRoomNook(layout, 100, 100, true));
-  assert.equal(nook.furniture.length, 5);
-  assert.deepEqual(nook.furniture.slice(0, 2).map(({ x, y, stand }) => ({ x, y, stand })), [
-    { x: 136, y: 90, stand: { x: 146, y: 136 } }, { x: 174, y: 90, stand: { x: 184, y: 136 } },
+  assert.deepEqual(nook.furniture.map(({ errand, roomId, x, y, stand }) => ({ errand, roomId, x, y, stand })), [
+    { errand: "shelf", roomId: undefined, x: 136, y: 90, stand: { x: 146, y: 136 } }, { errand: "coffee", roomId: undefined, x: 174, y: 90, stand: { x: 184, y: 136 } },
   ]);
-  for (const piece of nook.furniture.filter((item) => item.roomId)) {
-    const destination = layout.rooms.find((candidate) => candidate.id === piece.roomId);
-    assert.ok(piece.x >= destination.x && piece.x + 20 <= destination.x + destination.width);
-    assert.ok(piece.y >= Math.max(...destination.contents.map((item) => item.y + item.height)));
-    const occupants = placed.filter((person) => person.roomId === piece.roomId);
-    separated([...occupants, { id: piece.key, ...piece.stand }]);
-    const approach = [destination.door, { x: destination.door.x, y: piece.stand.y }, piece.stand];
-    for (let index = 1; index < approach.length; index++) for (const person of occupants) {
-      const from = approach[index - 1], to = approach[index];
-      const x = Math.max(Math.min(from.x, to.x), Math.min(person.x, Math.max(from.x, to.x)));
-      const y = Math.max(Math.min(from.y, to.y), Math.min(person.y, Math.max(from.y, to.y)));
-      assert.ok(Math.abs(person.x - x) >= 24 || Math.abs(person.y - y) >= 24, `furniture access crosses ${person.id}`);
-    }
-    assert.equal(piece.stand.y, destination.door.y - 48, "furniture access uses the lane above the seated pair");
-  }
 });

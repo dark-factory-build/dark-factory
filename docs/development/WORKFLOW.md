@@ -116,7 +116,7 @@ Knowledge kinds are `project_brief`, `decision`, `lesson`, `observation`,
 `discussion`, `discussion_reply`, and procedures with structured metadata.
 Legacy free-form procedure references remain readable. Metadata accepts `status`
 (`tentative`, `current`, `needs_revalidation`, `superseded`), `evidence`, `entities`
-(stable project-ID:topology-node-ID references), `source_revision`, `branch`,
+(stable project-ID:operational-node-ID references), `source_revision`, `branch`,
 `environment`, `thread_id`, `task_id`, `change_id`, `record_type`/`record_id`,
 `mentions`, `resolved`, `pinned`, `supersedes`, and `scope` (repository by default,
 or project-wide for operator-authored material). Unknown/duplicate fields are

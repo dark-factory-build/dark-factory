@@ -23,14 +23,18 @@ import (
 )
 
 const (
-	Path           = "/browser"
-	PairPath       = "/pair"
+	Path     = "/browser"
+	PairPath = "/pair"
+	// TracesPath accepts OTLP/HTTP JSON trace exports from local processes.
+	TracesPath = "/v1/traces"
+	// PublicPath serves the safe public projection of one project.
+	PublicPath     = "/v1/public/"
 	maxOrigins     = 8
 	maxConnections = 32
 	// One coherent snapshot is one request, and a notification burst
 	// collapses into at most one trailing refresh. 1,024 per requestWindow
 	// leaves ample room for refreshes, detail reads, terminal control, task
-	// enqueue and the floor's run-path and topology polling.
+	// enqueue and the floor's run-path and operational-graph polling.
 	maxRequests         = 1024
 	readQueueSize       = 8
 	maxHeaderBytes      = 8 << 10
@@ -45,6 +49,24 @@ type Config struct {
 	Address        string
 	AllowedOrigins []string
 	Backend        Backend
+}
+
+// Observer is an optional Backend capability: the daemon watching its own
+// listener. Only fixed protocol names reach it, never request content.
+type Observer interface {
+	Observe(attributes map[string]string)
+}
+
+// TraceReceiver is an optional Backend capability: aggregate a local OTLP
+// trace export without retaining it.
+type TraceReceiver interface {
+	ReceiveTraces(body []byte) error
+}
+
+// PublicProjector is an optional Backend capability: the public projection
+// of one project, already reduced to its allowlist.
+type PublicProjector interface {
+	PublicWorld(ctx context.Context, projectID string) ([]byte, error)
 }
 
 type clientLifecycle struct {
@@ -268,8 +290,21 @@ func (server *Server) CloseClient(clientID [browserprotocol.ClientIDSize]byte) e
 }
 
 func (server *Server) handle(writer http.ResponseWriter, request *http.Request) {
+	if observer, ok := server.backend.(Observer); ok && (request.URL.Path == Path || request.URL.Path == PairPath) {
+		host, port, _ := net.SplitHostPort(server.host)
+		observer.Observe(map[string]string{"network.transport": "tcp", "server.address": host, "server.port": port})
+		observer.Observe(map[string]string{"url.path": request.URL.Path, "http.request.method": request.Method})
+	}
 	if request.URL.Path == PairPath {
 		server.handlePair(writer, request)
+		return
+	}
+	if request.URL.Path == TracesPath {
+		server.handleTraces(writer, request)
+		return
+	}
+	if strings.HasPrefix(request.URL.Path, PublicPath) {
+		server.handlePublic(writer, request)
 		return
 	}
 	if request.URL.Path != Path || request.URL.EscapedPath() != Path || request.URL.RawQuery != "" {
@@ -660,4 +695,51 @@ func zero16(value [16]byte) bool {
 		}
 	}
 	return true
+}
+
+// handleTraces takes OTLP/HTTP JSON from local processes only: a browser
+// page carries an Origin and cannot send JSON without a preflight this
+// listener never answers. Protobuf is refused; bodies are bounded.
+func (server *Server) handleTraces(writer http.ResponseWriter, request *http.Request) {
+	receiver, ok := server.backend.(TraceReceiver)
+	switch {
+	case !ok:
+		http.Error(writer, http.StatusText(http.StatusNotFound), http.StatusNotFound)
+		return
+	case request.Method != http.MethodPost:
+		http.Error(writer, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
+		return
+	case request.Header.Get("Origin") != "":
+		http.Error(writer, http.StatusText(http.StatusForbidden), http.StatusForbidden)
+		return
+	case !strings.HasPrefix(request.Header.Get("Content-Type"), "application/json"):
+		http.Error(writer, http.StatusText(http.StatusUnsupportedMediaType), http.StatusUnsupportedMediaType)
+		return
+	}
+	body, err := io.ReadAll(http.MaxBytesReader(writer, request.Body, browserprotocol.MaxSnapshotBytes))
+	if err != nil || receiver.ReceiveTraces(body) != nil {
+		http.Error(writer, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
+		return
+	}
+	writer.Header().Set("Content-Type", "application/json")
+	_, _ = writer.Write([]byte("{}"))
+}
+
+// handlePublic answers only a local reader that names this listener: no page
+// (no Origin) and no rebound hostname (Host must be the listener itself).
+func (server *Server) handlePublic(writer http.ResponseWriter, request *http.Request) {
+	projector, ok := server.backend.(PublicProjector)
+	if !ok || request.Method != http.MethodGet || request.Header.Get("Origin") != "" || request.Host != server.host {
+		http.Error(writer, http.StatusText(http.StatusNotFound), http.StatusNotFound)
+		return
+	}
+	ctx, cancel := context.WithTimeout(request.Context(), backendCallLimit)
+	defer cancel()
+	body, err := projector.PublicWorld(ctx, strings.TrimPrefix(request.URL.Path, PublicPath))
+	if err != nil {
+		http.Error(writer, http.StatusText(http.StatusNotFound), http.StatusNotFound)
+		return
+	}
+	writer.Header().Set("Content-Type", "application/json")
+	_, _ = writer.Write(body)
 }

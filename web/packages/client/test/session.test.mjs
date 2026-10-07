@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { MAX_ARRAY_ITEMS } from "../dist/src/manifest.js";
 import {
@@ -454,7 +455,7 @@ test("ordinary private task reads retain correlation, authority and shared pendi
     const rejected = pending.map((promise) => assert.rejects(promise, { code: "closed" }));
     const sent = socket.sent.length;
     for (const read of reads) await assert.rejects(read.request(session), { code: "rate_limited" });
-    await assert.rejects(session.getTopology(taskId), { code: "rate_limited" });
+    await assert.rejects(session.getOperationalGraph(taskId), { code: "rate_limited" });
     assert.equal(socket.sent.length, sent);
     session.close();
     await Promise.all(rejected);
@@ -498,39 +499,25 @@ test("console edits and topology carry exact bodies and correlate their results"
   // A retry re-queues the task as it stands, so an edit or a cancel beside it is refused, not dropped.
   for (const extra of [{ title: "renamed" }, { priority: 2 }, { cancel: true }]) await assert.rejects(session.updateTask({ taskId, expectedRevision: 5n, retry: true, ...extra }), { code: "invalid_request" });
 
-  const node = { id: "a1".repeat(32), parent_id: "", kind: "repository", path: ".", label: "repo", language: "", size_bucket: "medium" };
-  const topologyPending = session.getTopology(projectId);
-  const topologyFrame = decodeClientControl(socket.sent.at(-1));
-  assert.equal(topologyFrame.type, "TOPOLOGY_GET");
-  socket.reply(encodeServerControl({ type: "TOPOLOGY", id: topologyFrame.id, body: { project_id: projectId, digest: "ab".repeat(32), source_revision: "", nodes: [node] } }));
-  const topology = await topologyPending;
-  assert.equal(topology.digest, "ab".repeat(32));
-  assert.deepEqual(topology.nodes, [node]);
-  assert.equal(topology.dependencies, undefined, "old daemon support remains unknown");
-  const child = { ...node, id: "cd".repeat(32), parent_id: node.id, path: "child", label: "child" };
-  const dependencies = { source: "go-imports-package-manifests", edges: [{ from: node.id, to: child.id, weight: 2 }], omitted: 3 };
-  const observedPending = session.getTopology(projectId);
-  const observedFrame = decodeClientControl(socket.sent.at(-1));
-  const counts = { source: 0, tests: 0, documentation: 0, configuration: 0, assets: 0, unclassified: 0 };
-  const inventory = { direct: counts, total: counts, samples: [], samples_omitted: 0 };
-  const observedBody = { project_id: projectId, digest: "ab".repeat(32), source_revision: "", nodes: [{ ...node, inventory }, child], dependencies, inventory_omitted: 1 };
-  socket.reply(encodeServerControl({ type: "TOPOLOGY", id: observedFrame.id, body: observedBody }));
-  const observed = await observedPending;
-  assert.deepEqual(observed.dependencies, dependencies);
-  assert.ok(Object.isFrozen(observed.dependencies.edges[0]));
-  assert.equal(topology.inventoryOmitted, undefined);
-  assert.equal(observed.inventoryOmitted, 1);
-  assert.deepEqual(observed.nodes[0].inventory, inventory);
-  assert.ok(Object.isFrozen(observed.nodes[0].inventory.direct));
-  assert.ok(Object.isFrozen(observed.nodes[0].inventory.samples));
-  for (const invalid of [
-    { ...dependencies, edges: [{ from: node.id, to: "ef".repeat(32), weight: 1 }] },
-    { ...dependencies, edges: [dependencies.edges[0], dependencies.edges[0]] },
-    { ...dependencies, edges: Array.from({ length: 257 }, () => dependencies.edges[0]) },
-    { ...dependencies, omitted: -1 },
-    { ...dependencies, source: "runtime-traffic" },
-  ]) assert.throws(() => decodeServerControl(JSON.stringify({ type: "TOPOLOGY", id: "invalid", body: { ...observedBody, dependencies: invalid } })), "invalid relationship evidence is rejected");
+  const graphBody = JSON.parse(readFileSync(new URL("../../../../protocol/browser/fixtures/operational_graph.json", import.meta.url), "utf8")).body;
+  const graphPending = session.getOperationalGraph(graphBody.project_id);
+  const graphFrame = decodeClientControl(socket.sent.at(-1));
+  assert.equal(graphFrame.type, "OPERATIONAL_GRAPH_GET");
+  assert.deepEqual(graphFrame.body, { project_id: graphBody.project_id });
+  socket.reply(encodeServerControl({ type: "OPERATIONAL_GRAPH", id: graphFrame.id, body: graphBody }));
+  const graph = await graphPending;
+  assert.equal(graph.digest, graphBody.digest);
+  assert.equal(graph.nodes.length, graphBody.nodes.length);
+  assert.equal(graph.summary.components, 4);
 
+  const nodeId = graphBody.nodes[0].id;
+  const nodePending = session.getOperationalNode(graphBody.project_id, nodeId);
+  const nodeFrame = decodeClientControl(socket.sent.at(-1));
+  assert.equal(nodeFrame.type, "OPERATIONAL_NODE_GET");
+  assert.deepEqual(nodeFrame.body, { project_id: graphBody.project_id, node_id: nodeId });
+  const nodeBody = JSON.parse(readFileSync(new URL("../../../../protocol/browser/fixtures/operational_node.json", import.meta.url), "utf8")).body;
+  socket.reply(encodeServerControl({ type: "OPERATIONAL_NODE", id: nodeFrame.id, body: { ...nodeBody, project_id: graphBody.project_id, node_id: nodeId } }));
+  assert.equal((await nodePending).node_id, nodeId);
 
   // An agent with no live run answers with no run identity and no rooms.
   const idlePending = session.getRunPaths(agentId);

@@ -18,6 +18,7 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 	"github.com/dark-factory-build/dark-factory/internal/linear"
 	"github.com/dark-factory-build/dark-factory/internal/maintainer"
+	"github.com/dark-factory-build/dark-factory/internal/opgraph"
 	"github.com/dark-factory-build/dark-factory/internal/provider"
 	"github.com/dark-factory-build/dark-factory/internal/review"
 )
@@ -95,13 +96,18 @@ type Daemon struct {
 	push               *pushStore
 	browserClientGates *browserClientGates
 
-	// topologies holds the last regenerable topology per project for a short
-	// window. It is a cost guard, not state: losing it only costs one walk.
-	topologyMu sync.Mutex
-	topologies map[kernel.ProjectID]topologySnapshot
+	// graphs holds the last regenerable Operational Graph per project for a
+	// short window. It is a cost guard, not state: losing it costs one read.
+	// runtime holds bounded in-memory runtime aggregates; losing it reads as
+	// stale or unobserved, never as idle.
+	graphMu sync.Mutex
+	graphs  map[kernel.ProjectID]graphSnapshot
+	runtime *opgraph.Runtime
+	// polled is when the configured pull adapters last ran.
+	polled time.Time
 
 	// providerDefaultCache holds the last read of each provider account's own
-	// configured model for a short window, on the same terms as topologies:
+	// configured model for a short window, on the same terms as graphs:
 	// a cost guard over a file read, never state.
 	providerDefaultMu    sync.Mutex
 	providerDefaultCache map[providerAccount]providerDefault
@@ -230,10 +236,12 @@ func (daemon *Daemon) HandleConnection(ctx context.Context, connection *api.Conn
 		daemon.clearOutcomeReceipt(attempt)
 		return responseErr
 	}
+	started := time.Now()
 	reply, err := connection.Dispatch(func(call api.Call) api.Reply { return daemon.dispatch(dispatchContext, call) })
 	if err != nil {
 		return err
 	}
+	daemon.observe("server", map[string]string{"network.transport": "unix", "rpc.method": call.Method()}, nil, reply.Failed(), time.Since(started))
 	return connection.Respond(reply)
 }
 

@@ -20,7 +20,7 @@ type consoleDispatchBackend struct {
 	limits        browserprotocol.ProjectLimitsResult
 	dispatch      browserprotocol.FactoryDispatchResult
 	task          browserprotocol.TaskUpdateResult
-	topology      browserprotocol.Topology
+	graph         browserprotocol.OperationalGraph
 	account       browserprotocol.AccountLinkResult
 	accountUpdate browserprotocol.AccountUpdateResult
 	clients       browserprotocol.BrowserClients
@@ -28,7 +28,7 @@ type consoleDispatchBackend struct {
 	err           error
 	calls         int
 	intake        *browserprotocol.IntakeResult
-	walking       chan struct{} // when set, Topology and RunPaths block until it is closed, whatever the context says
+	walking       chan struct{} // when set, OperationalGraph and RunPaths block until it is closed, whatever the context says
 	budgets       []time.Time   // each walk's context deadline, in the order the walks started
 }
 
@@ -42,9 +42,9 @@ func newConsoleDispatchBackend() *consoleDispatchBackend {
 	backend.task = browserprotocol.TaskUpdateResult{TaskID: consoleTaskID, Revision: 4}
 	backend.account = browserprotocol.AccountLinkResult{AccountID: consoleAccountID, Revision: 1}
 	backend.accountUpdate = browserprotocol.AccountUpdateResult{AccountID: consoleAccountID, Revision: 2}
-	backend.topology = browserprotocol.Topology{
+	backend.graph = browserprotocol.OperationalGraph{
 		ProjectID: consoleProjectID, Digest: strings.Repeat("ab", 32),
-		Nodes: []browserprotocol.TopologyNode{{ID: strings.Repeat("a1", 32), Kind: "repository", Path: ".", Label: "repository", SizeBucket: "small"}},
+		Nodes: []browserprotocol.GraphNode{{ID: strings.Repeat("a1", 16), Kind: "processor", Label: "service", Paths: []string{"."}, Evidence: "static", Observation: "unobserved", State: "unknown"}},
 	}
 	return backend
 }
@@ -121,14 +121,21 @@ func (backend *consoleDispatchBackend) Intake(ctx context.Context, client [brows
 	return browserprotocol.IntakeResult{State: "ok", ImportedTasks: []string{}}, nil
 }
 
-func (backend *consoleDispatchBackend) Topology(ctx context.Context, client [browserprotocol.ClientIDSize]byte, _ browserprotocol.TopologyGet) (browserprotocol.Topology, error) {
+func (backend *consoleDispatchBackend) OperationalGraph(ctx context.Context, client [browserprotocol.ClientIDSize]byte, _ browserprotocol.OperationalGraphGet) (browserprotocol.OperationalGraph, error) {
 	if err := backend.record(client); err != nil {
-		return browserprotocol.Topology{}, err
+		return browserprotocol.OperationalGraph{}, err
 	}
 	if err := backend.walk(ctx); err != nil {
-		return browserprotocol.Topology{}, err
+		return browserprotocol.OperationalGraph{}, err
 	}
-	return backend.topology, nil
+	return backend.graph, nil
+}
+
+func (backend *consoleDispatchBackend) OperationalNode(_ context.Context, client [browserprotocol.ClientIDSize]byte, request browserprotocol.OperationalNodeGet) (browserprotocol.OperationalNode, error) {
+	if err := backend.record(client); err != nil {
+		return browserprotocol.OperationalNode{}, err
+	}
+	return browserprotocol.OperationalNode{ProjectID: request.ProjectID, NodeID: request.NodeID}, nil
 }
 
 func (backend *consoleDispatchBackend) RunPaths(ctx context.Context, client [browserprotocol.ClientIDSize]byte, request browserprotocol.RunPathsGet) (browserprotocol.RunPaths, error) {
@@ -233,8 +240,10 @@ var consoleRequests = []struct {
 		`{"type":"INTAKE","id":"console-intake","body":{"action":"preview","source_id":"` + consoleAgentID + `","page":1}}`},
 	{browserprotocol.TypeTaskUpdate, browserprotocol.TypeTaskUpdateResult,
 		`{"type":"TASK_UPDATE","id":"console-task","body":{"task_id":"` + consoleTaskID + `","expected_revision":"3","status":"cancelled"}}`},
-	{browserprotocol.TypeTopologyGet, browserprotocol.TypeTopology,
-		`{"type":"TOPOLOGY_GET","id":"console-topology","body":{"project_id":"` + consoleProjectID + `"}}`},
+	{browserprotocol.TypeOperationalGraphGet, browserprotocol.TypeOperationalGraph,
+		`{"type":"OPERATIONAL_GRAPH_GET","id":"console-topology","body":{"project_id":"` + consoleProjectID + `"}}`},
+	{browserprotocol.TypeOperationalNodeGet, browserprotocol.TypeOperationalNode,
+		`{"type":"OPERATIONAL_NODE_GET","id":"console-node","body":{"project_id":"` + consoleProjectID + `","node_id":"` + consoleAgentID + `"}}`},
 	{browserprotocol.TypeRunPathsGet, browserprotocol.TypeRunPaths,
 		`{"type":"RUN_PATHS_GET","id":"console-rooms","body":{"agent_id":"` + consoleAgentID + `"}}`},
 	{browserprotocol.TypeAccountsDiscover, browserprotocol.TypeAccounts,
@@ -315,7 +324,7 @@ func TestConsoleControlFailsClosedWithoutBackendAndOnBackendRefusal(t *testing.T
 			{browserprotocol.TypeAccountUpdate, func(backend *consoleDispatchBackend) { backend.accountUpdate.Revision = 1 }},
 			{browserprotocol.TypeAccountUpdate, func(backend *consoleDispatchBackend) { backend.accountUpdate.Revision = 3 }},
 			{browserprotocol.TypeAccountUpdate, func(backend *consoleDispatchBackend) { backend.accountUpdate.AccountID = consoleTaskID }},
-			{browserprotocol.TypeTopologyGet, func(backend *consoleDispatchBackend) { backend.topology.ProjectID = consoleAgentID }},
+			{browserprotocol.TypeOperationalGraphGet, func(backend *consoleDispatchBackend) { backend.graph.ProjectID = consoleAgentID }},
 		} {
 			backend := newConsoleDispatchBackend()
 			corrupt.mutate(backend)
@@ -339,7 +348,7 @@ func consoleFrame(t *testing.T, kind browserprotocol.MessageType) string {
 	return ""
 }
 
-// TOPOLOGY_GET and RUN_PATHS_GET may walk a tree under the call budget. The
+// OPERATIONAL_GRAPH_GET and RUN_PATHS_GET may read source under the call budget. The
 // connection keeps serving while they do, and a refusal from that path still
 // ends it the way dispatch would.
 func TestIntakePreviewKeepsConnectionLiveAndUsesSnapshotBound(t *testing.T) {
@@ -397,7 +406,7 @@ func TestTreeWalksDoNotStallTheConnection(t *testing.T) {
 	server, clock := startHeldClockServer(t, backend)
 	connection, _ := dialServer(t, server, testOrigin)
 	authenticate(t, connection)
-	writeClientFrame(t, connection, []byte(consoleFrame(t, browserprotocol.TypeTopologyGet)))
+	writeClientFrame(t, connection, []byte(consoleFrame(t, browserprotocol.TypeOperationalGraphGet)))
 	writeClientFrame(t, connection, []byte(consoleFrame(t, browserprotocol.TypeRunPathsGet)))
 	// The first walk is blocked and the second waits behind it; a state read
 	// on the same connection is answered anyway.
@@ -423,7 +432,7 @@ func TestTreeWalksDoNotStallTheConnection(t *testing.T) {
 	backend.setWalking(second)
 	time.Sleep(hold)
 	close(first)
-	if frame := readServerFrame(t, connection); frame.Type != browserprotocol.TypeTopology {
+	if frame := readServerFrame(t, connection); frame.Type != browserprotocol.TypeOperationalGraph {
 		t.Fatalf("first walk answer = %+v", frame)
 	}
 	close(second)
@@ -439,7 +448,7 @@ func TestTreeWalksDoNotStallTheConnection(t *testing.T) {
 	// The backend refusal path still ends the connection as dispatch would.
 	backend.setWalking(nil)
 	backend.setErr(ErrUnauthorized)
-	writeClientFrame(t, connection, []byte(strings.Replace(consoleFrame(t, browserprotocol.TypeTopologyGet), "console-topology", "console-topology-2", 1)))
+	writeClientFrame(t, connection, []byte(strings.Replace(consoleFrame(t, browserprotocol.TypeOperationalGraphGet), "console-topology", "console-topology-2", 1)))
 	assertError(t, readServerFrame(t, connection), browserprotocol.ErrorUnauthorized)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -482,7 +491,7 @@ func TestTreeWalksDoNotStallTheConnection(t *testing.T) {
 	clock.Add(int64(requestWindow))
 	writeClientFrame(t, held, walkFrame("console-rooms-fill-1"))
 	writeClientFrame(t, held, walkFrame("console-rooms-fill-2"))
-	writeClientFrame(t, held, []byte(consoleFrame(t, browserprotocol.TypeTopologyGet)))
+	writeClientFrame(t, held, []byte(consoleFrame(t, browserprotocol.TypeOperationalGraphGet)))
 	over := readServerFrame(t, held)
 	assertError(t, over, browserprotocol.ErrorRateLimited)
 	if over.ID != "console-topology" || !bool(over.Body.(browserprotocol.Error).Retryable) {

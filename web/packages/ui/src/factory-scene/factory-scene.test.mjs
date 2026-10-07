@@ -13,20 +13,15 @@ import { COMMON_WIDTH, PADDING, ROOM_LEFT, WORKER_SIZE, breakRoomNook, commonSea
 import { breakRoomHabit, resolvedAppearance, restingItem, spriteOptions, workerFrames, workerPhase } from "../../dist/src/factory-scene/appearance.js";
 import { pointOnRoute, routeBetween, routeFromCurrent, routeFromSpine } from "../../dist/src/factory-scene/movement.js";
 import { spriteAtlas, spriteSheet, spriteSheetSize } from "../../dist/src/factory-scene/sprites/sprites.generated.js";
+import { busy, hall, hallsOf, machine, sceneGraph, unread } from "../../../../fixtures/scene.mjs";
 
-const topology = {
-  digest: "fixture-1",
-  nodes: [
-    { id: "repo", parentId: "", path: ".", label: "Repository", kind: "repository", sizeBucket: "large" },
-    { id: "lib", parentId: "repo", path: "packages/lib", label: "<Shared & Library> 📦📦", kind: "package", sizeBucket: "medium" },
-    { id: "src", parentId: "lib", path: "packages/lib/src", label: "Source", kind: "directory", sizeBucket: "small" },
-  ],
-};
+const graph = sceneGraph([
+  hall("repo", { band: 1 }),
+  hall("lib", { label: "<Shared & Library> 📦📦", machines: [machine("lib-in", "ingress", { label: "/in", trigger: "request", reading: busy }), machine("lib-db", "store", { label: "db" })] }),
+  hall("src", { machines: [machine("src-job", "job")] }),
+]);
 
-const fileCounts = { source: 200, tests: 140, documentation: 36, configuration: 6, assets: 98, unclassified: 4 };
-const inventoryTopology = { ...topology, nodes: topology.nodes.map((node) => ({ ...node,
-  inventory: { direct: fileCounts, total: fileCounts, samples: [], samples_omitted: 484 },
-})) };
+const commons = { social: "commons", scenery: "subtle", animation: "follow-device" };
 
 const workers = [
   { id: "worker-b", name: "Builder", role: "worker", provider: "codex", activity: "busy", location: "working", nodeId: "src" },
@@ -58,20 +53,8 @@ function idForIdentity(identity) {
 }
 
 function render(props = {}) {
-  return renderToStaticMarkup(createElement(FactoryScene, { topology, workers, ...props }));
+  return renderToStaticMarkup(createElement(FactoryScene, { graph, appearance: commons, workers, appearance: commons, ...props }));
 }
-
-test("single-room project headings omit duplicate copy without moving the building", () => {
-  const node = { ...topology.nodes[0], project: { id: "project-a", name: "Repository" } };
-  const landing = layoutScene({ digest: "landing", nodes: [node] });
-  const distinct = layoutScene({ digest: "landing", nodes: [{ ...node, label: "Subsystem" }] });
-  assert.deepEqual(landing.headings, []);
-  assert.equal(distinct.headings[0].label, "Repository");
-  assert.deepEqual(landing.rooms, distinct.rooms);
-  assert.deepEqual(landing.corridors, distinct.corridors);
-  const multiple = layoutScene({ digest: "children", nodes: [node, { ...node, id: "child", path: "child" }] });
-  assert.equal(multiple.headings[0].label, "Repository");
-});
 
 function overlaps(left, right) {
   return left.x <= right.x + right.width && right.x <= left.x + left.width
@@ -149,17 +132,16 @@ function assertRouteGeometry(layout, start, route, message) {
 }
 
 test("the pure scene model feeds a deterministic SVG renderer", () => {
-  const layout = layoutScene(topology);
-  assert.deepEqual(layout, layoutScene({ ...topology, nodes: [...topology.nodes].reverse() }));
-  assert.equal(layout.rooms[0].contents.length, 0, "unknown composition does not invent room contents");
+  const layout = layoutScene(graph);
+  assert.deepEqual(layout, layoutScene({ ...graph, halls: [...graph.halls].reverse() }));
+  assert.equal(layout.rooms.find((room) => room.id === "src").contents.length, 2, "a hall holds its main line and its machines");
 
   for (const room of layout.rooms) {
     assert.ok(room.door.y === room.y + room.height && room.door.x > room.x && room.door.x < room.x + room.width);
     assert.ok(layout.corridors.some((corridor) => room.door.x >= corridor.x && room.door.x <= corridor.x + corridor.width && room.door.y >= corridor.y && room.door.y <= corridor.y + corridor.height), `door ${room.id} reaches a corridor`);
   }
   for (const count of [1, 2, 3, 4, 5, 11, 24]) {
-    const many = { digest: `${count}`, nodes: Array.from({ length: count }, (_, index) => ({ id: `room-${index}`, parentId: "", path: `room-${index}`, label: `Room ${index}`, kind: "directory", inventory: inventoryTopology.nodes[0].inventory, sizeBucket: ["empty", "tiny", "small", "medium", "large"][index % 5] })) };
-    const connected = layoutScene(many);
+    const connected = layoutScene(hallsOf(Array.from({ length: count }, (_, index) => `room-${index}`)));
     assert.equal(corridorReachability(connected), true, `${count} rooms remain reachable from the spine`);
     for (const room of connected.rooms) {
       const placement = placeWorkers(connected, [{ ...workers[0], nodeId: room.id }])[0];
@@ -169,25 +151,12 @@ test("the pure scene model feeds a deterministic SVG renderer", () => {
       assertRouteGeometry(connected, { x: connected.corridors.at(-1).x + connected.corridors.at(-1).width / 2, y: connected.restingTop }, route, room.id);
     }
   }
-  const multi = layoutScene({ digest: "multi", nodes: Array.from({ length: 4 }, (_, index) => ({
-    id: `project-${index}`, parentId: "", path: ".", label: `Project ${index}`, kind: "repository", sizeBucket: "large",
-    project: { id: `p-${index % 2}`, name: `Project ${index % 2}` },
-  })) });
-  assert.equal(corridorReachability(multi), true, "multi-project rooms remain reachable from the spine");
-
-  const buckets = ["empty", "tiny", "small", "medium", "large"];
-  const sized = layoutScene({ digest: "sizes", nodes: buckets.map((sizeBucket) => ({ id: sizeBucket, path: sizeBucket, label: sizeBucket, kind: "directory", sizeBucket })) });
-  const areas = buckets.map((bucket) => { const room = sized.rooms.find((room) => room.id === bucket); return room.width * room.height; });
-  assert.equal(new Set(areas).size, 1, "unobserved composition gets a compact fixed footprint, not guessed content scale");
-  const rescanned = layoutScene({ ...sized, digest: "rescanned", nodes: buckets.map((sizeBucket) => ({ id: sizeBucket, path: sizeBucket, label: sizeBucket, kind: "directory", sizeBucket: "large" })) });
-  assert.deepEqual(sized.rooms, rescanned.rooms, "file volume changes do not move walls");
-  assert.ok(sized.rooms.every((room) => room.x >= ROOM_LEFT), "source rooms stay beside the commons");
-  for (const room of sized.rooms) {
-    const next = sized.rooms.find((other) => other.y === room.y && other.x > room.x);
+  const crowded = layoutScene(hallsOf(["a", "b", "c", "d", "e"]));
+  assert.ok(crowded.rooms.every((room) => room.x >= ROOM_LEFT), "halls stay beside the commons");
+  for (const room of crowded.rooms) {
+    const next = crowded.rooms.find((other) => other.y === room.y && other.x > room.x);
     if (next) assert.equal(room.x + room.width, next.x, "neighbouring rooms share walls");
   }
-  assert.ok(areas[4] <= areas[0] * 3, "one large component cannot dominate the map");
-  assert.equal(corridorReachability(sized), true, "mixed footprints share reachable doorway edges");
 
   const placements = placeWorkers(layout, workers);
   assert.deepEqual(placements, placeWorkers(layout, [...workers].reverse()));
@@ -197,25 +166,13 @@ test("the pure scene model feeds a deterministic SVG renderer", () => {
   assert.equal(workerFrames(workers[1]).at(-1), "person.alert", "the alert rides above whoever needs you");
 
   const first = render();
-  const reordered = render({
-    topology: { ...topology, nodes: [...topology.nodes].reverse() },
-    workers: [...workers].reverse(),
-  });
+  const reordered = render({ graph: { ...graph, halls: [...graph.halls].reverse() }, workers: [...workers].reverse() });
   assert.equal(first, reordered);
-  assert.match(first, /data-topology-digest="fixture-1"/);
+  assert.match(first, /data-graph-digest="repo,lib,src"/);
   assert.equal(first.includes(">STAGED</text>"), false);
   assert.match(first, /data-room-id="src"/);
-  assert.match(first, /package · subtree/);
-  assert.match(first, /Find source/);
+  assert.match(first, /Find machine/);
   assert.doesNotMatch(first, /Inspect room|<select/);
-  const compact = renderToStaticMarkup(createElement(FactoryScene, {
-    topology: { digest: "compact", nodes: [{ id: "p", path: ".", label: "Project", kind: "repository", sizeBucket: "large" }] },
-    workers: [], omittedLocations: 1,
-  }));
-  const compactWidth = Number(compact.match(/viewBox="0 0 (\d+)/)[1]);
-  assert.ok(Number(compact.match(/max-width:(\d+)px/)[1]) <= compactWidth * 2, "a one-room scope caps sprite magnification");
-  assert.match(compact, /current locations not shown in this view/);
-  assert.equal(compact.includes("omitted by the room cap"), false);
   assert.match(first, /&lt;Shared &amp; Library/);
   assert.equal(first.includes("�"), false);
   assert.equal((first.match(/data-worker-id=/g) ?? []).length, workers.length);
@@ -243,13 +200,13 @@ test("the pure scene model feeds a deterministic SVG renderer", () => {
   assert.match(unobserved, /aria-label="Work tables"/);
   assert.match(unobserved, /working; location not yet observed/);
   assert.doesNotMatch(unobserved, /data-worker-task-id/);
-  assert.match(first, /aria-label="Break room"/);
+  assert.match(first, /aria-label="Break room · ambient"/);
   const restPosition = first.match(/data-worker-id="worker-a"[^>]*transform="translate\(([^ ]+) ([0-9.]+)\)"/);
   assert.ok(Number(restPosition[1]) >= PADDING + 12 && Number(restPosition[1]) <= PADDING + COMMON_WIDTH - 12);
-  assert.equal(Number(restPosition[2]), layout.restingTop, "resting remains near the entrance regardless of source-room depth");
-  const capped = render({ workers: [{ ...workers[0], location: "working", locationLabel: "Source", nodeId: undefined }], omittedLocations: 1 });
+  assert.equal(Number(restPosition[2]), layout.restingTop, "resting remains near the entrance regardless of hall depth");
+  const capped = render({ workers: [{ ...workers[0], location: "working", locationLabel: "Source", nodeId: undefined }] });
   assert.match(capped, /aria-label="Work tables"/);
-  assert.match(capped, /representative location near observed changes in Source; outside displayed rooms/);
+  assert.match(capped, /at the machine its observed changes touch in Source; outside displayed halls/);
   const observed = render({ workers: [{ ...workers[1], location: "last-observed", locationLabel: "Source" }] });
   assert.match(observed, /last observed near changes in Source/);
 
@@ -274,7 +231,8 @@ test("the pure scene model feeds a deterministic SVG renderer", () => {
   const densePlacements = placeWorkers(layout, denseWorkers);
   assert.equal(new Set(densePlacements.map(({ x, y }) => `${x},${y}`)).size, denseWorkers.length);
   const srcRoom = layout.rooms.find((room) => room.id === "src");
-  assert.deepEqual(densePlacements[0], { id: "worker-0", area: "room", roomId: "src", x: srcRoom.door.x, y: srcRoom.door.y - 32 });
+  const line = srcRoom.contents.find((item) => item.shape === "line");
+  assert.deepEqual(densePlacements[0], { id: "worker-0", area: "room", roomId: "src", x: line.x + line.width / 2, y: line.y + line.height + WORKER_SIZE / 2 + 2 });
   for (const placement of densePlacements.filter(({ area }) => area === "room")) {
     assert.ok(placement.x - WORKER_SIZE / 2 >= srcRoom.x && placement.x + WORKER_SIZE / 2 <= srcRoom.x + srcRoom.width);
     assert.ok(placement.y - WORKER_SIZE / 2 >= srcRoom.y && placement.y + WORKER_SIZE / 2 <= srcRoom.y + srcRoom.height);
@@ -300,71 +258,45 @@ test("the pure scene model feeds a deterministic SVG renderer", () => {
   assert.equal(directStagingTop, layout.restingTop + 64, "unobserved work shares the planning section below occupied breaks");
   assert.ok(Math.abs(directOutside[0].y - directOutside[1].y) >= 24, "break and planning seats remain separate");
 
-  const changed = layoutScene({
-    digest: "fixture-2",
-    nodes: [...topology.nodes, { id: "docs", parentId: "repo", path: "docs", label: "Docs", kind: "directory", sizeBucket: "tiny" }],
-  });
+  const changed = layoutScene({ ...graph, digest: "fixture-2", halls: [...graph.halls, hall("docs")] });
   assert.equal(changed.rooms.some((room) => room.id === "docs"), true);
   assert.notDeepEqual(changed, layout);
 
-  const emptyLayout = layoutScene({ digest: "empty", nodes: [] });
+  const emptyLayout = layoutScene(sceneGraph([]));
   const emptyWorkers = denseWorkers.slice(0, 20).map(({ nodeId: _nodeId, location: _location, ...worker }) => ({ ...worker, location: "resting" }));
   const emptyPlacements = placeWorkers(emptyLayout, emptyWorkers);
   assert.equal(new Set(emptyPlacements.map(({ x, y }) => `${x},${y}`)).size, emptyWorkers.length);
-  const emptySvg = render({ topology: { digest: "empty", nodes: [] }, workers: emptyWorkers });
-  assert.match(emptySvg, /EMPTY FLOOR/);
+  const emptySvg = render({ graph: sceneGraph([]), workers: emptyWorkers });
+  assert.match(emptySvg, /NO OPERATIONAL STRUCTURE INFERRED YET/);
   // An empty floor in a wide column stays a panel, not a poster.
-  assert.match(emptySvg, new RegExp(`min-width:${emptyLayout.width}px`));
-  assert.match(emptySvg, /aria-label="Break room"/);
-  const emptyLabel = emptySvg.match(/<text x="([^"]+)" y="([0-9.]+)"[^>]*>EMPTY FLOOR<\/text>/);
+  assert.match(emptySvg, new RegExp(`min-width:${Math.min(emptyLayout.width, 864)}px`));
+  assert.match(emptySvg, /aria-label="Break room · ambient"/);
+  const emptyLabel = emptySvg.match(/<text x="([^"]+)" y="([0-9.]+)"[^>]*>NO OPERATIONAL STRUCTURE INFERRED YET<\/text>/);
   const emptyHeight = Number(emptySvg.match(/viewBox="0 0 [^ ]+ ([0-9.]+)"/)[1]);
   assert.ok(emptyLabel !== null);
-  assert.ok(Number(emptyLabel[1]) >= ROOM_LEFT, "empty-source label is separate from the side commons");
+  assert.ok(Number(emptyLabel[1]) >= ROOM_LEFT, "empty-floor label is separate from the side commons");
   assert.ok(emptyHeight > Number(emptyLabel[2]), "empty-floor label remains inside the scene");
-  const emptyWithStaging = render({
-    topology: { digest: "empty", nodes: [] },
-    workers: [...emptyWorkers, { ...workers[0], location: "unobserved", nodeId: undefined }],
-  });
+  const emptyWithStaging = render({ graph: sceneGraph([]), workers: [...emptyWorkers, { ...workers[0], location: "unobserved", nodeId: undefined }] });
   const stagingArea = emptyWithStaging.match(/aria-label="Work tables"><text x="[^"]+" y="([0-9.]+)"/);
-  const stagingLabel = emptyWithStaging.match(/<text x="[^"]+" y="([0-9.]+)"[^>]*>EMPTY FLOOR<\/text>/);
+  const stagingLabel = emptyWithStaging.match(/<text x="[^"]+" y="([0-9.]+)"[^>]*>NO OPERATIONAL STRUCTURE INFERRED YET<\/text>/);
   assert.ok(stagingArea !== null && stagingLabel !== null);
   assert.ok(Number(stagingLabel[1]) + PADDING <= Number(stagingArea[1]), "empty-floor label clears the staging area");
 });
 
-test("rooms group under their project's heading and stay on the tile grid", () => {
-  const grouped = {
-    digest: "fixture-2",
-    nodes: [
-      { id: "b-root", parentId: "", path: ".", label: "Beta", kind: "repository", project: { id: "p-b", name: "Beta Works" } },
-      { id: "a-web", parentId: "a-root", path: "web", label: "web", kind: "package", project: { id: "p-a", name: "Alpha Works" } },
-      { id: "b-src", parentId: "b-root", path: "src", label: "src", kind: "directory", project: { id: "p-b", name: "Beta Works" } },
-      { id: "a-root", parentId: "", path: ".", label: "Alpha", kind: "repository", project: { id: "p-a", name: "Alpha Works" } },
-      { id: "a-cmd", parentId: "a-root", path: "cmd", label: "cmd", kind: "directory", project: { id: "p-a", name: "Alpha Works" } },
-    ],
-  };
-  const layout = layoutScene(grouped);
-  assert.deepEqual(layout, layoutScene({ ...grouped, nodes: [...grouped.nodes].reverse() }));
-  assert.deepEqual(layout.rooms.map((room) => room.id), ["a-cmd", "a-web", "a-root", "b-src", "b-root"]);
-  assert.deepEqual(layout.headings.map((heading) => heading.label), ["Alpha Works", "Beta Works"]);
-  const [alpha, beta] = layout.headings;
-  for (const room of layout.rooms.slice(0, 3)) assert.ok(room.y > alpha.y && room.y < beta.y, `${room.id} outside Alpha`);
-  for (const room of layout.rooms.slice(3)) assert.ok(room.y > beta.y, `${room.id} outside Beta`);
-  for (const room of layout.rooms) {
-    assert.ok(room.door.y === room.y + room.height);
-  }
-  // Two projects with one name are still two blocks under two headings.
-  const twins = layoutScene({ ...grouped, nodes: grouped.nodes.map((node) => ({ ...node, project: { id: node.project.id, name: "Twin" } })) });
-  assert.deepEqual(twins.headings.map((heading) => heading.label), ["Twin", "Twin"]);
-  assert.deepEqual(twins.rooms.map((room) => room.id), layout.rooms.map((room) => room.id));
-  // The heading is its own element at the row the layout gave it, and every
-  // door sits on the tile grid like the room it opens.
-  const markup = renderToStaticMarkup(createElement(FactoryScene, { topology: grouped, workers: [] }));
-  for (const heading of layout.headings) {
-    assert.match(markup, new RegExp(`<text data-floor-heading="${heading.label}" x="${heading.x}" y="${heading.y + 11}"[^>]*>${heading.label}</text>`));
-  }
-  assert.equal((markup.match(/data-room-walls=/g) ?? []).length, layout.rooms.length);
-  // Rooms without a project stand under no heading, as before.
-  assert.deepEqual(layoutScene(topology).headings, []);
+test("halls sit in bands then id order, and nothing live or runtime-only moves a hall or a machine", () => {
+  const unit = (id, band, extra) => hall(id, { band, machines: [machine(`${id}-in`, "ingress", { trigger: "request" }), machine(`${id}-db`, "store")], ...extra });
+  const base = sceneGraph([unit("zeta", 2), unit("beta", 1), unit("alpha", 2), unit("front", 0)], { shared: [machine("shared-queue", "queue")], parties: [machine("github", "external")] });
+  const layout = layoutScene(base);
+  assert.deepEqual(layout.rooms.filter((room) => room.kind === "hall").map((room) => room.id), ["front", "beta", "alpha", "zeta"], "band first, then id");
+  assert.deepEqual(layout.headings.map((heading) => heading.label), ["Clients", "Public", "Internal", "Shared yard"]);
+  assert.equal(layout.rooms.find((room) => room.id === "yard").kind, "yard");
+  assert.equal(layout.gates.length, 1);
+  const stable = ({ rooms }) => rooms.filter((room) => room.kind !== "quarantine").map(({ id, x, y, width, height, contents }) => ({ id, x, y, width, height, contents: contents.map(({ key, x, y, width, height }) => ({ key, x, y, width, height })) }));
+  const live = { ...base, quarantine: [machine("mystery", "unknown", { reading: { ...busy, evidence: "runtime" } })],
+    halls: base.halls.map((item) => ({ ...item, reading: busy, machines: item.machines.map((m) => ({ ...m, reading: busy })) })) };
+  const grown = layoutScene(live);
+  assert.deepEqual(stable(grown), stable(layout), "a runtime-only node and new readings move nothing");
+  assert.deepEqual(grown.rooms.at(-1).kind, "quarantine", "the quarantine bay comes last of all");
 });
 
 test("worker identity is stable while operational state changes", () => {
@@ -490,7 +422,7 @@ test("every generated person layer is reachable, including fallbacks", () => {
 });
 
 test("movement uses clear corridor lanes, doors and standing points", () => {
-  const layout = layoutScene(topology);
+  const layout = layoutScene(graph);
   const placements = placeWorkers(layout, [
     { ...workers[0], id: "source", nodeId: "src" },
     { ...workers[0], id: "destination", nodeId: "lib" },
@@ -515,17 +447,18 @@ test("movement uses clear corridor lanes, doors and standing points", () => {
   assert.ok(sourceDoorAt >= 0 && destinationDoorAt > sourceDoorAt, "the route leaves and enters through the actual doors");
   for (const [room, corridor] of [[sourceRoom, sourceCorridor], [destinationRoom, destinationCorridor]]) assert.ok(route.points.some((point) => point.x === room.door.x && point.y === corridor.y + corridor.height / 2), "every door connects through its corridor lane");
   if (sourceCorridor.y !== destinationCorridor.y) assert.ok(route.points.some((point) => point.x === center), "separate rows connect through the spine");
-  assert.deepEqual(route.points.at(-1), { x: destination.x, y: destination.y });
+  assert.deepEqual({ x: route.points.at(-1).x, y: route.points.at(-1).y }, { x: destination.x, y: destination.y });
   assertRouteGeometry(layout, source, route, "room to room");
-  // Every crowded standing slot uses the actual opening, never its own offset
+  // Every standing slot at the main line uses the actual opening, never its own offset
   // x-coordinate through a bottom wall.
-  for (const offset of [0, -24, 24, -48, 48]) {
+  for (const offset of [0, -24, 24]) {
     const crowded = { ...source, x: sourcePlacement.x + offset };
     const crowdedRoute = routeBetween(layout, crowded, destination);
     assert.ok(crowdedRoute);
     assert.ok(crowdedRoute.points.some((point) => point.x === sourceRoom.door.x && point.y === sourceRoom.door.y));
     if (offset !== 0) assert.deepEqual(crowdedRoute.points.slice(0, 2), [{ x: sourceRoom.door.x, y: crowded.y }, sourceRoom.door]);
-    assert.deepEqual(crowdedRoute.points.slice(-2), [destinationRoom.door, { x: destinationRoom.door.x, y: destination.y }]);
+    const inside = crowdedRoute.points.slice(crowdedRoute.points.findIndex((point) => point.x === destinationRoom.door.x && point.y === destinationRoom.door.y) + 1).map(({ x, y }) => ({ x, y }));
+    assert.deepEqual([inside[0], inside.at(-1)], [{ x: destinationRoom.door.x, y: destination.y }, { x: destination.x, y: destination.y }], "enter by the actual door, rise to standing level, then stand");
     assertRouteGeometry(layout, crowded, crowdedRoute, `crowded source ${offset}`);
   }
   const [resting, staging] = placeWorkers(layout, [
@@ -548,10 +481,7 @@ test("movement uses clear corridor lanes, doors and standing points", () => {
 });
 
 test("rapid retargeting uses the room containing the rendered worker", () => {
-  const layout = layoutScene({
-    digest: "rapid-retarget",
-    nodes: ["A", "B", "C", "D"].map((id) => ({ id, parentId: "", path: id, label: id, kind: "directory", sizeBucket: "tiny" })),
-  });
+  const layout = layoutScene(hallsOf(["A", "B", "C", "D"]));
   const placements = new Map(placeWorkers(layout, ["A", "B", "C", "D"].map((id) => ({ id, name: id, role: "worker", activity: "busy", location: "working", nodeId: id }))).map((placement) => [placement.id, placement]));
   const a = placements.get("A");
   const b = placements.get("B");
@@ -567,16 +497,14 @@ test("rapid retargeting uses the room containing the rendered worker", () => {
   for (const destination of [c, d]) {
     const route = routeFromCurrent(layout, enteredB, destination);
     assert.ok(route);
-    assert.deepEqual(route.points[0], { x: enteredB.x, y: bRoom.door.y });
+    assert.ok(route.points.some((point) => point.x === bRoom.door.x && point.y === bRoom.door.y), "the route leaves through B's own door");
+    assert.ok(route.points.every((point) => point.x !== layout.rooms[0].door.x), "and never through A's");
     assertRouteGeometry(layout, enteredB, route, `rapid retarget to ${destination.id}`);
   }
 });
 
 test("retargets leave the current room or corridor through a clear lane", () => {
-  const layout = layoutScene({
-    digest: "retarget-lanes",
-    nodes: ["A", "B", "C", "D"].map((id) => ({ id, parentId: "", path: id, label: id, kind: "directory", sizeBucket: "tiny" })),
-  });
+  const layout = layoutScene(hallsOf(["A", "B", "C", "D"]));
   const placements = new Map(placeWorkers(layout, ["A", "B", "C", "D"].map((id) => ({ id, name: id, role: "worker", activity: "busy", location: "working", nodeId: id }))).map((placement) => [placement.id, placement]));
   const source = placements.get("A");
   const destination = placements.get("D");
@@ -622,7 +550,7 @@ test("tables stand in front of whoever sits at them, with each resting worker's 
   const markup = render({ workers: seatedWorkers });
   const lastWorker = markup.lastIndexOf("data-worker-id="), firstTable = markup.indexOf("data-common-table="), firstItem = markup.indexOf("data-table-item=");
   assert.ok(lastWorker < firstTable && firstTable < firstItem, "workers, then the tables over their laps, then what lies on the tables");
-  assert.equal((markup.match(/data-common-table="resting"/g) ?? []).length, new Set(commonSeating(layoutScene(topology), 10, 1).resting.map((seat) => seat.y)).size, "one table a row");
+  assert.equal((markup.match(/data-common-table="resting"/g) ?? []).length, new Set(commonSeating(layoutScene(graph), 10, 1).resting.map((seat) => seat.y)).size, "one table a row");
   // A first render puts each clock at the worker's own phase: a thing is on the table exactly when it is not in hand.
   for (const worker of seatedWorkers.filter((candidate) => candidate.location === "resting")) {
     const rest = restingItem(worker, worker.activity === "needs-you" ? undefined : workerPhase(worker.id));
@@ -646,10 +574,10 @@ test("resting workers take fair, uninterrupted turns at the break-room furniture
   assert.deepEqual([...new Set(crowd.map(breakRoomHabit))].sort(), ["coffee", "shelf"]);
 
   // The furniture stands inside the room, clear of every seat, on a wide floor and on the narrowest.
-  const wide = layoutScene({ digest: "wide", nodes: Array.from({ length: 16 }, (_, index) => ({ ...topology.nodes[0], id: `room-${index}`, path: `room-${index}` })) });
+  const wide = layoutScene(hallsOf(Array.from({ length: 16 }, (_, index) => `room-${index}`)));
   const nook = breakRoomNook(wide, 12, 1);
   assert.deepEqual(nook.furniture.map((piece) => piece.errand), ["shelf", "coffee"]);
-  const narrow = layoutScene({ digest: "narrow", nodes: [topology.nodes[0]] }), narrowNook = breakRoomNook(narrow, 40, 40);
+  const narrow = layoutScene(hallsOf(["room-0"])), narrowNook = breakRoomNook(narrow, 40, 40);
   assert.deepEqual(narrowNook.furniture.map((piece) => piece.errand), ["shelf", "coffee"]);
   for (const [layout, pieces, counts] of [[wide, nook.furniture, [12, 1]], [narrow, narrowNook.furniture, [40, 40]]]) for (const piece of pieces) {
     assert.ok(piece.x >= PADDING && piece.x + WORKER_SIZE <= PADDING + COMMON_WIDTH && piece.stand.x + 12 <= PADDING + COMMON_WIDTH);
@@ -743,7 +671,7 @@ test("resting workers take fair, uninterrupted turns at the break-room furniture
   assert.ok(workerFrames(crowd[0], { action: "still", frame: 0, at: 0 }, undefined, "coffee").includes("person.held.cup.chest"));
   assert.ok(atShelf.every((name) => !name.startsWith("person.tool.")));
   // The floor draws exactly the furniture the nook has, and none with the scenery off.
-  assert.equal((render().match(/data-break-room=/g) ?? []).length, breakRoomNook(layoutScene(topology), 0, 1).furniture.length);
+  assert.equal((render().match(/data-break-room=/g) ?? []).length, breakRoomNook(layoutScene(graph), 0, 1).furniture.length);
   assert.equal((render({ appearance: { scenery: "off", animation: "on" } }).match(/data-break-room=/g) ?? []).length, 0);
 });
 
@@ -768,17 +696,17 @@ test("a floor mounted late still starts seated, then someone gets up, stands at 
     const commits = [];
     // In every commit, pose and place are of one moment: whoever is drawn standing at the
     // furniture is drawn at the furniture, never for a frame at their seat.
-    const stands = new Set(breakRoomNook(layoutScene(inventoryTopology), 10, 0).furniture.map((piece) => `translate(${piece.stand.x} ${piece.stand.y})`));
+    const stands = new Set(breakRoomNook(layoutScene(graph), 10, 0).furniture.map((piece) => `translate(${piece.stand.x} ${piece.stand.y})`));
     const misplaced = () => renderer === undefined ? 0 : renderer.root.findAll((node) => typeof node.props["data-tooltip"] === "string" && /at the (bookshelf|coffee station)/.test(node.props["data-tooltip"]))
       .filter((node) => node.parent.props["data-worker-action"] !== "walking" && !stands.has(node.parent.props.transform)).length;
-    const scene = (props) => createElement(Profiler, { id: "floor", onRender: () => commits.push(misplaced()) }, createElement(FactoryScene, { topology: inventoryTopology, workers: resting, connected: true, ...props }));
+    const scene = (props) => createElement(Profiler, { id: "floor", onRender: () => commits.push(misplaced()) }, createElement(FactoryScene, { graph, appearance: commons, workers: resting, connected: true, ...props }));
     await act(async () => { renderer = create(scene({})); });
     // Where each sprite is actually drawn, against the seat it belongs in.
     const outOfSeat = (floor) => {
       const seatOf = new Map(placeWorkers(layoutScene(floor), resting).map((placement) => [placement.id, `translate(${placement.x} ${placement.y})`]));
       return renderer.root.findAll((node) => node.props["data-worker-id"] !== undefined).filter((node) => node.props.transform !== seatOf.get(node.props["data-worker-id"])).length;
     };
-    const pieces = breakRoomNook(layoutScene(inventoryTopology), resting.length, 0).furniture.length;
+    const pieces = breakRoomNook(layoutScene(graph), resting.length, 0).furniture.length;
     const away = () => renderer.root.findAll((node) => typeof node.props["data-tooltip"] === "string" && /at the (bookshelf|coffee station)/.test(node.props["data-tooltip"]));
     const standingWithIt = () => away().some((node) => node.parent.props["data-worker-action"] === "still" && node.parent.findAllByType("use").some((use) => /held\.(book|cup)\.chest/.test(use.props.href)));
     const tick = async () => {
@@ -812,12 +740,12 @@ test("a floor mounted late still starts seated, then someone gets up, stands at 
     };
     const untilSomeoneStands = async () => { for (let step = 0; step < 3000 && !standingWithIt(); step++) await tick(); assert.ok(standingWithIt()); };
     for (const [how, still, resume] of [
-      ["with animation turned off", { appearance: { scenery: "subtle", animation: "off" } }, {}],
+      ["with animation turned off", { appearance: { ...commons, animation: "off" } }, {}],
       ["on disconnect", { connected: false }, {}],
     ]) {
       await untilSomeoneStands();
       const seen = [];
-      await act(async () => { renderer.update(createElement(Profiler, { id: "floor", onRender: () => seen.push(away().length + outOfSeat(inventoryTopology)) }, createElement(FactoryScene, { topology: inventoryTopology, workers: resting, connected: true, ...still }))); });
+      await act(async () => { renderer.update(createElement(Profiler, { id: "floor", onRender: () => seen.push(away().length + outOfSeat(graph)) }, createElement(FactoryScene, { graph, appearance: commons, workers: resting, connected: true, ...still }))); });
       assert.ok(seen.length > 0 && seen.every((count) => count === 0), `${how}: someone was drawn at or placed by the furniture in a commit after the floor was stilled: ${seen}`);
       seatedNow(how);
       await act(async () => { renderer.update(scene(resume)); });
@@ -846,9 +774,9 @@ test("a floor mounted late still starts seated, then someone gets up, stands at 
     // Another floor starts again from seated, however long this one had been going.
     for (let step = 0; step < 3000 && away().length === 0; step++) await tick();
     assert.ok(away().length > 0, "someone is up when the floor changes");
-    const another = { ...inventoryTopology, digest: "another-floor", nodes: [...inventoryTopology.nodes, { ...inventoryTopology.nodes[0], id: "extra-1", path: "extra-1" }, { ...inventoryTopology.nodes[0], id: "extra-2", path: "extra-2" }] };
+    const another = { ...graph, digest: "another-floor", halls: [...graph.halls, hall("extra-1"), hall("extra-2")] };
     const floorCommits = [];
-    await act(async () => { renderer.update(createElement(Profiler, { id: "floor", onRender: () => floorCommits.push(away().length + outOfSeat(another)) }, createElement(FactoryScene, { topology: another, workers: resting, connected: true }))); });
+    await act(async () => { renderer.update(createElement(Profiler, { id: "floor", onRender: () => floorCommits.push(away().length + outOfSeat(another)) }, createElement(FactoryScene, { graph: another, appearance: commons, workers: resting, connected: true }))); });
     assert.ok(floorCommits.length > 0 && floorCommits.every((count) => count === 0), `someone was drawn out of their seat in a commit of the new floor: ${floorCommits}`);
     // Judged by what is drawn, from the very first render of the new floor: nobody at the
     // furniture, nobody walking, nobody on their feet with a book or a cup.
@@ -868,7 +796,6 @@ test("a floor mounted late still starts seated, then someone gets up, stands at 
 });
 
 test("a walking worker is drawn facing where they go, and only a westward walk is mirrored", async () => {
-  const topology = inventoryTopology;
   const saved = { requestAnimationFrame: globalThis.requestAnimationFrame, cancelAnimationFrame: globalThis.cancelAnimationFrame, performance: globalThis.performance };
   let clock = 0, pending;
   globalThis.performance = { now: () => clock };
@@ -876,7 +803,7 @@ test("a walking worker is drawn facing where they go, and only a westward walk i
   globalThis.cancelAnimationFrame = () => { pending = undefined; };
   let renderer;
   try {
-    await act(async () => { renderer = create(createElement(FactoryScene, { topology, workers, connected: true })); });
+    await act(async () => { renderer = create(createElement(FactoryScene, { graph, appearance: commons, workers, connected: true })); });
     const drawn = () => {
       const worker = renderer.root.findByProps({ "data-worker-id": workers[0].id });
       const sprite = worker.findAll((node) => node.type === "g" && typeof node.props.transform === "string" && node.props.transform.startsWith("scale("))[0];
@@ -894,7 +821,7 @@ test("a walking worker is drawn facing where they go, and only a westward walk i
     check();
     // There and back again covers both horizontal directions of the same route.
     for (const nodeId of ["lib", "src"]) {
-      await act(async () => { renderer.update(createElement(FactoryScene, { topology, workers: [{ ...workers[0], nodeId }, workers[1]], connected: true })); });
+      await act(async () => { renderer.update(createElement(FactoryScene, { graph, appearance: commons, workers: [{ ...workers[0], nodeId }, workers[1]], connected: true })); });
       for (let step = 0; step < 400 && pending !== undefined; step++) { const tick = pending; pending = undefined; clock += 40; await act(async () => { tick(clock); }); check(); }
       assert.notEqual(drawn().action, "walking", "the route ends");
     }
@@ -907,7 +834,6 @@ test("a walking worker is drawn facing where they go, and only a westward walk i
 });
 
 test("the production scene stops motion on disconnect and unmount", async () => {
-  const topology = inventoryTopology;
   const requested = [];
   const cancelled = [];
   const requestAnimationFrame = globalThis.requestAnimationFrame;
@@ -916,9 +842,9 @@ test("the production scene stops motion on disconnect and unmount", async () => 
   globalThis.cancelAnimationFrame = (id) => { cancelled.push(id); };
   try {
     let renderer;
-    await act(async () => { renderer = create(createElement(FactoryScene, { topology, workers, connected: true })); });
+    await act(async () => { renderer = create(createElement(FactoryScene, { graph, appearance: commons, workers, connected: true })); });
     const moved = [{ ...workers[0], nodeId: "lib" }, workers[1]];
-    await act(async () => { renderer.update(createElement(FactoryScene, { topology, workers: moved, connected: true })); });
+    await act(async () => { renderer.update(createElement(FactoryScene, { graph, appearance: commons, workers: moved, connected: true })); });
     assert.ok(requested.length > 0, "one scene clock schedules the route");
     const staticRoomProps = renderer.root.findByProps({ "data-room-id": "lib" }).props;
     const atlasProps = renderer.root.findByType("defs").props;
@@ -929,19 +855,19 @@ test("the production scene stops motion on disconnect and unmount", async () => 
     assert.equal(renderer.root.findByType("defs").props, atlasProps, "RAF does not recreate the sprite atlas");
     assert.equal(renderer.root.find((node) => node.type.name === "SceneWorkers").props.layout, layoutBeforeTick);
     assert.notEqual(renderer.root.findByProps({ "data-worker-id": workers[0].id }).props.transform, workerBeforeTick);
-    await act(async () => { renderer.update(createElement(FactoryScene, { topology: { ...topology, digest: "metadata-only", nodes: topology.nodes.map((node) => ({ ...node, dependencies: { omitted: 1, links: [] } })) }, workers: moved, connected: true })); });
-    assert.equal(renderer.root.findByProps({ "data-worker-id": workers[0].id }).props["data-worker-action"], "walking", "a metadata-only digest change preserves the route");
+    await act(async () => { renderer.update(createElement(FactoryScene, { graph: { ...graph, halls: graph.halls.map((item) => ({ ...item, reading: busy })) }, appearance: commons, workers: moved, connected: true })); });
+    assert.equal(renderer.root.findByProps({ "data-worker-id": workers[0].id }).props["data-worker-action"], "walking", "a reading-only change preserves the route");
 
-    await act(async () => { renderer.update(createElement(FactoryScene, { topology, workers: moved, connected: false })); });
-    const destination = placeWorkers(layoutScene(topology), moved).find((placement) => placement.id === workers[0].id);
+    await act(async () => { renderer.update(createElement(FactoryScene, { graph, appearance: commons, workers: moved, connected: false })); });
+    const destination = placeWorkers(layoutScene(graph), moved).find((placement) => placement.id === workers[0].id);
     assert.ok(destination);
     assert.equal(renderer.root.findByProps({ "data-worker-id": workers[0].id }).props.transform, `translate(${destination.x} ${destination.y})`);
     assert.ok(cancelled.length > 0, "disconnect cleans the pending animation frame");
 
-    await act(async () => { renderer.update(createElement(FactoryScene, { topology, workers, connected: false })); });
-    await act(async () => { renderer.update(createElement(FactoryScene, { topology, workers, connected: true })); });
+    await act(async () => { renderer.update(createElement(FactoryScene, { graph, appearance: commons, workers, connected: false })); });
+    await act(async () => { renderer.update(createElement(FactoryScene, { graph, appearance: commons, workers, connected: true })); });
     assert.equal(renderer.root.findByProps({ "data-worker-id": workers[0].id }).props["data-worker-action"], "interacting", "reconnect snaps to current observed work instead of replaying the missed route");
-    await act(async () => { renderer.update(createElement(FactoryScene, { topology, workers: moved, connected: true })); });
+    await act(async () => { renderer.update(createElement(FactoryScene, { graph, appearance: commons, workers: moved, connected: true })); });
     assert.ok(requested.length > cancelled.length, "a later observed change starts a fresh route");
     await act(async () => { renderer.unmount(); });
     assert.equal(cancelled.length, requested.length, "unmount cleans every scheduled scene frame");
@@ -1006,7 +932,7 @@ test("stationary tasks expose affected areas and link the existing queue and que
     id: `task-${index}`, agentId: "worker-b", projectId: "project",
     title: index === 0 ? "<script>unsafe & title</script>" : `Task ${index}`,
     status: index === 0 ? "running" : "queued",
-    roomIds: index === 0 ? ["lib", "src", "outside"] : [],
+    roomIds: index === 0 ? ["lib", "src"] : [],
     ...(index === 0 ? { representativeRoomId: "src" } : {}),
     humanRequestIds: index === 0 ? ["question-1"] : [],
   }));
@@ -1029,11 +955,9 @@ test("stationary tasks expose affected areas and link the existing queue and que
   assert.match(markup, /&lt;script&gt;unsafe &amp; title&lt;\/script&gt;/);
   assert.doesNotMatch(markup, /<script>/);
   assert.doesNotMatch(markup, /stroke-dasharray|CHANGES WITHIN|CHANGED|>task-0</);
-  assert.equal((markup.match(/data-room-operating="true"/g) ?? []).length, 2);
   const disconnected = render({ tasks, connected: false });
-  assert.doesNotMatch(disconnected, /data-room-operating="true"|aria-label="Working:/);
+  assert.doesNotMatch(disconnected, /aria-label="Working:/);
   assert.match(disconnected, /aria-label="Disconnected · last observed work:/);
-  assert.doesNotMatch(render({ tasks: tasks.map((task) => ({ ...task, status: "succeeded" })) }), /data-room-operating="true"/);
   const noObservation = render({ tasks: [{ ...tasks[0], roomIds: [], humanRequestIds: [] }] });
   assert.doesNotMatch(noObservation, /data-work-footprint=|data-human-request-id=/);
 });
@@ -1047,7 +971,7 @@ test("the tray and planning table expose stable project actions", () => {
 test("planning table detail stays within the tabletop for multi-worker rows", () => {
   const planningWorkers = [0, 1].map((index) => ({ ...workers[0], id: `planner-${index}`, location: "unobserved", nodeId: undefined }));
   const markup = render({ workers: planningWorkers });
-  const seats = commonSeating(layoutScene(topology), 0, planningWorkers.length).planning;
+  const seats = commonSeating(layoutScene(graph), 0, planningWorkers.length).planning;
   const tableWidth = seats.at(-1).x - seats[0].x + 36;
   assert.match(markup, new RegExp(`M${tableWidth - 22} -17h4`), "detail line ends at the tabletop edge");
   assert.doesNotMatch(markup, new RegExp(`M${tableWidth - 13} -17h4`), "detail line does not extend beyond the tabletop");
@@ -1061,7 +985,8 @@ test("floor action hit areas invoke existing task and mission routes", async () 
   let renderer;
   await act(async () => {
     renderer = create(createElement(FactoryScene, {
-      topology,
+      graph,
+      appearance: commons,
       projectId: "project",
       workers,
       tasks: [task],
@@ -1098,8 +1023,8 @@ test("queue selection picks the exact task sharing a representative workstation"
 
 test("larger workers fit compact common seating in narrow, wide and crowded floors", () => {
   for (const roomCount of [1, 3, 11]) {
-    const nodes = Array.from({ length: roomCount }, (_, index) => ({ ...inventoryTopology.nodes[0], id: `room-${index}`, path: `room-${index}` }));
-    const layout = layoutScene({ digest: "proportions", nodes });
+    const floor = hallsOf(Array.from({ length: roomCount }, (_, index) => `room-${index}`));
+    const layout = layoutScene(floor);
     for (const count of [0, 1, 12, 100]) {
       const seating = commonSeating(layout, count, count);
       const seats = [...seating.resting, ...seating.planning];
@@ -1112,7 +1037,7 @@ test("larger workers fit compact common seating in narrow, wide and crowded floo
       assert.equal(seating.planning.length, count);
       if (count > 0) assert.equal(seating.planning[0].y - seating.resting.at(-1).y, 64);
       const previewWorkers = seats.map((seat, index) => ({ ...workers[0], id: `seat-${index}`, location: index < seating.resting.length ? "resting" : "unobserved" }));
-      const markup = render({ topology: { digest: "proportions", nodes }, workers: previewWorkers });
+      const markup = render({ graph: floor, workers: previewWorkers });
       if (count > 0) assert.ok(markup.includes('transform="scale(1.25)"'));
       assert.equal((markup.match(/aria-label="Work tables"/g) ?? []).length, count > 0 ? 1 : 0);
       const height = Number(markup.match(/viewBox="0 0 [^ ]+ ([^"]+)"/)[1]);
@@ -1121,42 +1046,49 @@ test("larger workers fit compact common seating in narrow, wide and crowded floo
   }
 });
 
-test("narrow bays truncate full-width titles while retaining their accessible name", () => {
-  for (const glyph of ["界", "😀", "👨‍👩‍👧‍👦", "🇯🇵", "é"]) {
-    const label = glyph.repeat(15);
-    const nodes = ["a", "b"].map((id) => ({ ...inventoryTopology.nodes[0], id, path: ".", label }));
-    const markup = render({ topology: { digest: "wide-titles", nodes }, workers: [] });
-    const shown = markup.match(/font-size="10" font-weight="700">([^<]+)<\/text>/)?.[1];
-    assert.ok(shown?.endsWith("…"), "the visible room title fits a narrow bay");
-    assert.ok([...new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(shown)].length < 15);
+test("narrow halls truncate full-width titles while retaining their accessible name", () => {
+  for (const glyph of ["界", "😀", "👨‍👩‍👧‍👦", "🇯🇵", "é"]) {
+    const label = glyph.repeat(30);
+    const markup = render({ graph: sceneGraph(["a", "b"].map((id) => hall(id, { label }))), workers: [] });
+    const shown = markup.match(/class="dfPlant__plateText" font-size="10">([^<]+)<\/text>/)?.[1];
+    assert.ok(shown?.endsWith("…"), "the visible hall title fits its plate");
+    assert.ok([...new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(shown)].length < 30);
     assert.match(markup, new RegExp(`aria-label="Inspect ${label}`), "full title remains accessible");
     assert.doesNotMatch(markup, new RegExp(`>${label}</text>`));
   }
 });
 
-test("pictured contents and occupied surface slots leave door routes clear in every footprint", () => {
+test("pictured contents and occupied work slots leave door routes clear in every footprint", () => {
+  const typical = (index) => [machine(`d${index}`, "ingress", { trigger: "request" }), machine(`e${index}`, "ingress", { trigger: "request" }), machine(`s${index}`, "store")];
+  const everything = (index) => [...typical(index), machine(`f${index}`, "ingress", { trigger: "request" }), machine(`t${index}`, "ingress", { trigger: "timer" }), machine(`q${index}`, "queue"), machine(`r${index}`, "store"), machine(`j${index}`, "job"), machine(`k${index}`, "job")];
   for (const count of [1, 4, 11]) {
-    const nodes = Array.from({ length: count }, (_, index) => ({ ...inventoryTopology.nodes[0], id: `room-${index}`, path: `room-${index}` }));
-    const layout = layoutScene({ digest: "contents", nodes });
+    const layout = layoutScene(sceneGraph(Array.from({ length: count }, (_, index) => hall(`room-${index}`, { machines: typical(index) }))));
     for (const room of layout.rooms) {
       assert.equal(corridorReachability(layout), true);
-      const surface = room.contents.find((item) => item.workSurface);
+      const surface = room.contents.find((item) => item.shape === "line");
       assert.ok(surface);
       const placements = placeWorkers(layout, Array.from({ length: 12 }, (_, index) => ({ ...workers[0], id: `person-${index}`, nodeId: room.id })));
       const occupied = placements.filter((item) => item.area === "room");
       assert.ok(occupied.length > 0 && occupied.length < placements.length);
       assert.equal(occupied[0].x, surface.x + surface.width / 2);
-      assert.equal(occupied[0].y, surface.y + surface.height + WORKER_SIZE / 2);
+      assert.equal(occupied[0].y, surface.y + surface.height + WORKER_SIZE / 2 + 2);
       for (const person of occupied) {
         assert.ok(person.x - WORKER_SIZE / 2 >= surface.x && person.x + WORKER_SIZE / 2 <= surface.x + surface.width);
-        const lane = { x: Math.min(person.x, room.door.x) - WORKER_SIZE / 2, y: person.y - WORKER_SIZE / 2, width: Math.abs(person.x - room.door.x) + WORKER_SIZE, height: WORKER_SIZE };
-        for (const object of room.contents) assert.ok(object.y + object.height <= lane.y || !overlaps(object, lane), "route never crosses pictured content interiors");
         const route = routeFromSpine(layout, { x: layout.corridors.at(-1).x + layout.corridors.at(-1).width / 2, y: layout.restingTop }, person);
         assert.ok(route);
         assertRouteGeometry(layout, { x: layout.corridors.at(-1).x + layout.corridors.at(-1).width / 2, y: layout.restingTop }, route, room.id);
       }
-      for (let index = 0; index < room.contents.length; index++) for (const other of room.contents.slice(index + 1)) assert.equal(overlaps(room.contents[index], other), false);
+      // Anyone beside the door can reach every machine without crossing another.
+      const seat = placeWorkers(layout, [{ ...workers[0], location: "resting", nodeId: room.id }], "nearby")[0];
+      for (const item of room.contents) {
+        const atWork = placeWorkers(layout, [{ ...workers[0], nodeId: room.id, observedBayId: item.entityId }])[0];
+        assertRouteGeometry(layout, seat, routeBetween(layout, seat, atWork), `${room.id} to ${item.entityId}`);
+      }
     }
+  }
+  // However many machines a hall has, none is drawn over another.
+  for (const room of layoutScene(sceneGraph([0, 1, 2].map((index) => hall(`room-${index}`, { machines: everything(index).slice(0, index * 4 + 4) })))).rooms) {
+    for (let index = 0; index < room.contents.length; index++) for (const other of room.contents.slice(index + 1)) assert.equal(overlaps(room.contents[index], other), false, `${room.id}: ${room.contents[index].key} over ${other.key}`);
   }
 });
 
@@ -1167,14 +1099,14 @@ test("compact tooltips open on hover, focus and tap without opening component de
   globalThis.window = { innerWidth: 390, innerHeight: 844 };
   let renderer;
   try {
-    await act(async () => { renderer = create(createElement(FactoryScene, { topology: inventoryTopology, workers: [] }), { createNodeMock: () => ({ getBoundingClientRect: () => ({ height: window.innerHeight === 320 ? 160 : 60 }) }) }); });
+    await act(async () => { renderer = create(createElement(FactoryScene, { graph, appearance: commons, workers: [] }), { createNodeMock: () => ({ getBoundingClientRect: () => ({ height: window.innerHeight === 320 ? 160 : 60 }) }) }); });
     const map = renderer.root.findByProps({ className: "dfFactoryFloor__map" });
     const target = renderer.root.findAll((node) => node.props["data-tooltip"])[0];
     const event = { target: { closest: () => ({ querySelector: () => null, getBoundingClientRect: () => ({ left: 380, top: 806, bottom: 830 }), getAttribute: () => target.props["data-tooltip"] }) } };
     for (const handler of ["onPointerOver", "onFocus", "onClick"]) {
       await act(async () => map.props[handler](event));
       const tip = renderer.root.findByProps({ role: "tooltip" });
-      assert.match(tip.props.children, /200 source/);
+      assert.match(tip.props.children, /No telemetry/);
       assert.ok(tip.props.style.left <= 118 && tip.props.style.top + 60 <= 806, "no room below: the tooltip sits above its target, not over it");
       await act(async () => map.props.onKeyDown({ key: "Escape" }));
       assert.equal(renderer.root.findAllByProps({ role: "tooltip" }).length, 0);
@@ -1203,37 +1135,7 @@ test("compact tooltips open on hover, focus and tap without opening component de
   }
 });
 
-test("inventory equipment is bounded, counted once and clears standing lanes in every room size", () => {
-  const counts = { source: 200, tests: 140, documentation: 36, configuration: 6, assets: 98, unclassified: 4 };
-  for (const sizeBucket of ["tiny", "small", "medium", "large"]) {
-    const node = { ...topology.nodes[0], sizeBucket, inventory: { direct: counts, total: counts, samples: ["main.go"], samples_omitted: 483 }, components: [{ id: "a", label: "A" }, { id: "b", label: "B" }, { id: "c", label: "C" }] };
-    const room = layoutScene({ digest: "inventory", nodes: [node] }).rooms[0];
-    const contents = room.contents;
-    assert.ok(contents.length > 0 && contents.length <= 6);
-    assert.equal(new Set(contents.map((item) => item.key)).size, contents.length);
-    for (let index = 0; index < contents.length; index++) for (const other of contents.slice(index + 1)) assert.equal(overlaps(contents[index], other), false, "plans and equipment have distinct occupied rectangles");
-    assert.deepEqual(contents, layoutScene({ digest: "inventory", nodes: [node] }).rooms[0].contents);
-    const increased = { ...node, inventory: { ...node.inventory, direct: { ...counts, source: 201 }, total: { ...counts, source: 201 } } };
-    const incremented = layoutScene({ digest: "increment", nodes: [increased] }).rooms[0].contents;
-    assert.deepEqual(incremented.map(({ count, ...item }) => item), contents.map(({ count, ...item }) => item), "one more file updates a count, not repeated arithmetic equipment");
-    assert.equal(incremented.find((item) => item.kind === "source").count, 201);
-    for (const item of contents) {
-      assert.ok(item.width >= 32 && item.height >= 24, "equipment is multi-tile, not tiny prop labels");
-      assert.ok(item.x >= room.x + 8 && item.x + item.width <= room.x + room.width - 8);
-      assert.ok(item.y >= room.y + 40 && item.y + item.height <= room.door.y - 32, "all crowded standing slots and routes stay clear");
-    }
-    for (const kind of Object.keys(counts)) {
-      const group = contents.filter((item) => item.kind === kind);
-      if (group.length) assert.equal(group.reduce((sum, item) => sum + item.count, 0), counts[kind], "multiple equipment groups partition represented counts");
-    }
-    const plain = { ...node, components: [], inventory: undefined };
-    assert.deepEqual(layoutScene({ digest: "plain", nodes: [plain] }).rooms[0].contents, [], "unavailable does not invent equipment");
-    assert.deepEqual(layoutScene({ digest: "zero", nodes: [{ ...plain, inventory: { ...node.inventory, total: Object.fromEntries(Object.keys(counts).map((key) => [key, 0])) } }] }).rooms[0].contents, [], "explicit zero inventory stays empty");
-  }
-});
-
 test("stationary active workers animate while idle, reduced, hidden and disconnected clocks stop", async () => {
-  const topology = inventoryTopology;
   const saved = { setTimeout: globalThis.setTimeout, clearTimeout: globalThis.clearTimeout, performance: globalThis.performance, requestAnimationFrame: globalThis.requestAnimationFrame, cancelAnimationFrame: globalThis.cancelAnimationFrame, window: globalThis.window, document: globalThis.document };
   const frames = new Map();
   const timers = new Map();
@@ -1249,7 +1151,7 @@ test("stationary active workers animate while idle, reduced, hidden and disconne
   globalThis.cancelAnimationFrame = (id) => frames.delete(id);
   let renderer;
   try {
-    await act(async () => { renderer = create(createElement(FactoryScene, { topology, workers, connected: true })); });
+    await act(async () => { renderer = create(createElement(FactoryScene, { graph, appearance: commons, workers, connected: true })); });
     assert.equal(timers.size, 1);
     const staticRoom = renderer.root.findByProps({ "data-room-id": "src" }).props;
     const frameNames = () => renderer.root.findByProps({ "data-worker-id": workers[0].id }).findAllByType("use").map((node) => node.props.href);
@@ -1266,23 +1168,23 @@ test("stationary active workers animate while idle, reduced, hidden and disconne
     assert.equal(timers.size, 0);
     await act(async () => { media.matches = false; mediaListener(); });
     assert.equal(timers.size, 1);
-    await act(async () => { renderer.update(createElement(FactoryScene, { topology, workers, connected: false })); });
+    await act(async () => { renderer.update(createElement(FactoryScene, { graph, appearance: commons, workers, connected: false })); });
     assert.equal(timers.size, 0);
-    await act(async () => { renderer.update(createElement(FactoryScene, { topology, workers, connected: true })); });
+    await act(async () => { renderer.update(createElement(FactoryScene, { graph, appearance: commons, workers, connected: true })); });
     assert.equal(timers.size, 1);
     const planningWorkers = [...workers, { ...workers[0], id: "planning", location: "unobserved", nodeId: undefined }];
-    await act(async () => { renderer.update(createElement(FactoryScene, { topology, workers: planningWorkers, connected: true, appearance: { scenery: "subtle", animation: "off" } })); });
+    await act(async () => { renderer.update(createElement(FactoryScene, { graph, appearance: commons, workers: planningWorkers, connected: true, appearance: { ...commons, animation: "off" } })); });
     assert.equal(timers.size, 0, "animation-off stops the clock");
     assert.equal(frames.size, 0, "animation-off stops movement");
     assert.equal(renderer.root.findAllByProps({ "data-planning-light": "" }).length, 1, "connected planning lamp stays lit with animation off");
-    await act(async () => { renderer.update(createElement(FactoryScene, { topology, workers: planningWorkers, connected: false, appearance: { scenery: "subtle", animation: "off" } })); });
+    await act(async () => { renderer.update(createElement(FactoryScene, { graph, appearance: commons, workers: planningWorkers, connected: false, appearance: { ...commons, animation: "off" } })); });
     assert.equal(renderer.root.findAllByProps({ "data-planning-light": "" }).length, 0, "disconnect extinguishes planning lamps");
-    await act(async () => { renderer.update(createElement(FactoryScene, { topology, workers: workers.map((worker) => ({ ...worker, activity: "waiting", location: "resting" })), connected: false })); });
-    await act(async () => { renderer.update(createElement(FactoryScene, { topology, workers: [], connected: true })); });
+    await act(async () => { renderer.update(createElement(FactoryScene, { graph, appearance: commons, workers: workers.map((worker) => ({ ...worker, activity: "waiting", location: "resting" })), connected: false })); });
+    await act(async () => { renderer.update(createElement(FactoryScene, { graph, appearance: commons, workers: [], connected: true })); });
     assert.equal(timers.size, 0, "idle floor leaves no continuous animation clock");
-    await act(async () => { renderer.update(createElement(FactoryScene, { topology: { ...topology, nodes: topology.nodes.map(({ inventory, ...node }) => node) }, workers, connected: true })); });
+    await act(async () => { renderer.update(createElement(FactoryScene, { graph, appearance: commons, workers, connected: true })); });
     assert.equal(timers.size, 1, "people on the floor keep its slow pulse");
-    assert.equal(renderer.root.findByProps({ "data-worker-id": workers[0].id }).props["data-worker-action"], "still");
+    assert.equal(renderer.root.findByProps({ "data-worker-id": workers[0].id }).props["data-worker-action"], "interacting");
   } finally {
     if (renderer) await act(async () => renderer.unmount());
     for (const [key, value] of Object.entries(saved)) { if (value === undefined) delete globalThis[key]; else globalThis[key] = value; }
@@ -1290,114 +1192,12 @@ test("stationary active workers animate while idle, reduced, hidden and disconne
 });
 
 
-test("direct rooms picture only direct counts while subtree rooms retain descendants", () => {
-  const direct = { source: 1, tests: 0, documentation: 0, configuration: 0, assets: 0, unclassified: 0 };
-  const node = { ...inventoryTopology.nodes[0], inventory: { ...inventoryTopology.nodes[0].inventory, direct } };
-  const displayed = (inventoryScope) => layoutScene({ digest: "scope", nodes: [{ ...node, inventoryScope }] }).rooms[0].contents;
-  assert.deepEqual(displayed("direct").map(({ kind, count }) => ({ kind, count })), [{ kind: "source", count: 1 }]);
-  assert.equal(displayed("subtree").find((item) => item.kind === "source").count, fileCounts.source);
-});
-
-test("dependencies are cabled between shown rooms, routes light on inspection, and the floor carries no native tooltip", async () => {
-  const link = (nodeId) => ({ omitted: 0, links: [{ nodeId, label: nodeId, path: nodeId, direction: "to", weight: 1 }] });
-  const linked = { ...topology, nodes: topology.nodes.map((node) => ({ ...node, dependencies: node.id === "lib" ? link("src") : node.id === "src" ? link("lib") : link("hidden") })) };
-  const markup = renderToStaticMarkup(createElement(FactoryScene, { topology: linked, workers: [] }));
-  assert.ok([...markup.matchAll(/data-wire-trunk="1" d="([^"]+)"/g)].every((match) => !/NaN|undefined/.test(match[1])));
-  assert.match(markup, /data-wire-trunk/);
-  assert.doesNotMatch(markup, /data-wire=|<title>/);
-  assert.doesNotMatch(renderToStaticMarkup(createElement(FactoryScene, { topology, workers: [] })), /data-wire/);
-
-  const priorWindow = globalThis.window;
-  globalThis.window = { innerWidth: 390, innerHeight: 844 };
-  try {
-    let renderer;
-    await act(async () => { renderer = create(createElement(FactoryScene, { topology: linked, workers: [] })); });
-    const map = renderer.root.findByProps({ className: "dfFactoryFloor__map" });
-    const over = (roomId) => ({ target: { closest: (selector) => selector === "[data-room-id]" ? { getAttribute: () => roomId } : null } });
-    const lit = () => renderer.root.findAll((node) => node.props["data-wire"] !== undefined).map((node) => node.props["data-wire"]);
-    // Both directions of one edge are a single wire; hidden endpoints draw nothing.
-    await act(async () => map.props.onPointerOver(over("src")));
-    assert.deepEqual(lit(), ["lib src"]);
-    await act(async () => map.props.onPointerOver(over("repo")));
-    assert.deepEqual(lit(), []);
-    for (const leave of [() => map.props.onBlur(), () => map.props.onKeyDown({ key: "Escape" }), () => map.props.onPointerLeave()]) {
-      await act(async () => map.props.onFocus(over("lib")));
-      assert.deepEqual(lit(), ["lib src"]);
-      await act(async () => leave());
-      assert.deepEqual(lit(), [], "a lit route never outlives the inspection that lit it");
-    }
-    assert.match(renderer.root.findAll((node) => node.props["data-tooltip"]?.includes("Wired to"))[0].props["data-tooltip"], /Wired to (lib|src|hidden)$/);
-  } finally { globalThis.window = priorWindow; }
-});
-
-test("component and dependency selection inspect every supplied link without navigating", async () => {
-  const links = Array.from({ length: 10 }, (_, index) => ({ nodeId: `hidden-${index}`, label: `Hidden ${index}`, path: `area-${index}`, direction: "to", weight: 1 }));
-  const root = { ...topology.nodes[0], components: [{ id: "hidden-0", label: "Hidden 0" }], dependencies: { omitted: 3, links } };
-  const detailNodes = new Map([root, ...links.map((link) => ({ ...root, id: link.nodeId, label: link.label, path: link.path, dependencies: { omitted: 0, links: [] } }))].map((node) => [node.id, node]));
-  const entered = [];
-  let tree;
-  await act(async () => { tree = create(createElement(FactoryScene, { topology: { ...topology, nodes: [root] }, detailNodes, workers: [], onSelectEntity: (id) => entered.push(id) })); });
-  const details = () => tree.root.findByProps({ "aria-label": "Source inspector" });
-  const selectedReference = () => details().findAllByType("code")[0].children.join("");
-  await act(async () => tree.root.findByProps({ "aria-label": `Inspect ${root.label}` }).props.onKeyDown({ key: "Enter", preventDefault() {} }));
-  assert.equal(details().findByType("details").props.open, undefined, "source details start collapsed");
-  const dependencies = details().findAllByType("li").filter((item) => item.children.includes("Depends on "));
-  assert.equal(dependencies.length, 10);
-  await act(async () => dependencies[9].findByType("button").props.onClick());
-  assert.equal(selectedReference(), "hidden-9");
-  assert.deepEqual(entered, [root.id, "hidden-9"]);
-  assert.equal(tree.root.findAllByProps({ "data-room-id": root.id }).length, 1);
-  await act(async () => details().findAllByType("button").find((button) => button.children.join("") === "Hidden 0").props.onClick());
-  assert.equal(selectedReference(), "hidden-0");
-  assert.deepEqual(entered, [root.id, "hidden-9", "hidden-0"]);
-  assert.equal(details().findAllByType("button").some((button) => button.children.join("") === "Open contents"), false);
-  await act(async () => tree.unmount());
-});
-
-test("flat assemblies have bounded resource shapes, file scale and unchanged room geometry during work", () => {
-  const counts = (source, tests = 0, documentation = 0) => ({ source, tests, documentation, configuration: 1, assets: 0, unclassified: 0 });
-  const assemblies = ["movement", "messages", "source", "admission", "store", "docs", "assets", "config", "queue", "tests", "browser", "overflow", "hidden"].map((name, index) => ({
-    id: name, path: `src/${name}`, label: name, inventoryScope: "direct", representedIds: [name],
-    inventory: { direct: counts(index === 0 ? 1 : 120, index, index), total: counts(index === 0 ? 1 : 120, index, index), samples: ["browser_messages.go", "admission.go", "admission_test.go"], samples_omitted: 0 },
-  }));
-  const room = { ...topology.nodes[0], assemblies };
-  const floor = { digest: "assemblies", nodes: [room, { ...room, id: "other", path: "other", assemblies: assemblies.slice(0, 1) }] };
-  const layout = layoutScene(floor), assembledRoom = layout.rooms.find((candidate) => candidate.id === room.id);
-  assert.equal(assembledRoom.contents.length, 12, "bounded picture retains overflow in canonical details");
-  assert.ok(assembledRoom.height < 800, "aggregation bounds the area for arbitrarily many source entities");
-  for (const kind of Object.keys(counts(0))) assert.equal(assembledRoom.contents.reduce((sum, item) => sum + item.resourceCounts[kind], 0), assemblies.reduce((sum, item) => sum + item.inventory.direct[kind], 0), `overflow equipment owns every ${kind} file exactly once`);
-  const hiddenWorker = placeWorkers(layout, [{ ...workers[0], nodeId: room.id, observedBayId: "hidden" }])[0];
-  const aggregate = assembledRoom.contents.at(-1);
-  assert.ok(aggregate.representedIds.includes("hidden"));
-  assert.equal(hiddenWorker.x, aggregate.x + aggregate.width / 2, "hidden active assembly is represented at aggregate equipment, never unrelated machinery");
-  for (const room of layout.rooms) for (const neighbor of layout.rooms.filter((other) => other !== room && other.y === room.y)) assert.equal(room.height, neighbor.height, "shared-wall rooms have no unexplained row holes");
-  const changed = layoutScene({ ...floor, nodes: floor.nodes.map((node) => ({ ...node, assemblies: node.assemblies.map((assembly) => ({ ...assembly, inventory: { ...assembly.inventory, direct: counts(200) } })) })) });
-  const geometry = ({ contents, ...rectangle }) => rectangle;
-  assert.deepEqual(changed.rooms.map(geometry), layout.rooms.map(geometry), "file counts change equipment, not room positions");
-  const appended = layoutScene({ ...floor, nodes: [...floor.nodes, { ...room, id: "new", path: "new", proposed: true }] });
-  assert.deepEqual(appended.rooms.slice(0, 2), layout.rooms, "new proposed rooms never shift finished rooms");
-  const markup = render({ topology: floor, workers: [] });
-  for (const motif of ["movement", "messaging", "selection", "admission", "storage"]) assert.match(markup, new RegExp(`data-responsibility="${motif}"`));
-  assert.match(markup, /data-assembly-parts="filename motifs"/);
-  assert.match(markup, /Filename motifs:.*admission/);
-  assert.match(markup, /data-associated-equipment="tests"/);
-  assert.match(markup, /data-associated-equipment="documentation"/);
-  assert.match(markup, /data-equipment-scale="0"/);
-  assert.match(markup, /data-equipment-scale="3"/);
-  assert.match(markup, /2 more assemblies/);
-  assert.match(markup, /\+2 assemblies/);
-  assert.doesNotMatch(markup, /Production area|Open contents/);
-});
-
-test("proposals remain separate selectable overlays and a reviewer uses the same actor system", async () => {
-  const assembly = { id: "equipment", path: "src/messages", label: "messages", inventoryScope: "direct", inventory: inventoryTopology.nodes[0].inventory };
-  const room = { ...topology.nodes[0], assemblies: [assembly] };
-  const floor = { digest: "proposals", nodes: [room] };
-  const operations = ["addition", "modification", "removal", "move"].map((kind) => ({ entityId: assembly.id, roomId: room.id, path: `src/messages/${kind}.ts`, kind }));
+test("proposals remain separate selectable marks on machines and a reviewer uses the same actor system", async () => {
+  const operations = ["addition", "modification", "removal", "move"].map((kind) => ({ entityId: "lib-in", roomId: "lib", path: `internal/lib/${kind}.go`, kind }));
   const items = [{ id: "first", title: "First change", state: "active", operations }, { id: "second", title: "Second change", state: "stale", operations: [operations[1]] }];
-  const inspected = [], actors = [{ ...workers[0], id: "review-run", nodeId: room.id, observedBayId: assembly.id, review: { proposalId: "first", scope: "Assigned changed assemblies; file inspection unavailable" } }];
+  const inspected = [], actors = [{ ...workers[0], id: "review-run", nodeId: "lib", observedBayId: "lib-in", review: { proposalId: "first", scope: "Assigned changed paths; file inspection unavailable" } }];
   let tree;
-  await act(async () => { tree = create(createElement(FactoryScene, { topology: floor, workers: actors, proposals: { items, selected: "second", onSelect: (id) => inspected.push(id) } })); });
+  await act(async () => { tree = create(createElement(FactoryScene, { graph, appearance: commons, workers: actors, proposals: { items, selected: "second", onSelect: (id) => inspected.push(id) } })); });
   assert.equal(tree.root.findAllByProps({ "data-proposal-kind": "modification" }).length, 1);
   assert.equal(tree.root.findAllByProps({ "data-proposal-kind": "removal" }).length, 0, "selected future is never blended with concurrent work");
   const reviewer = tree.root.findByProps({ "data-reviewer-id": "review-run" });
@@ -1407,132 +1207,83 @@ test("proposals remain separate selectable overlays and a reviewer uses the same
   await act(async () => tree.unmount());
 });
 
-test("distributed rest and shelves keep deterministic destinations off equipment and within rooms", () => {
-  const assemblies = Array.from({ length: 6 }, (_, index) => ({ id: `assembly-${index}`, path: `src/assembly-${index}`, label: `Assembly ${index}`, inventoryScope: "direct", inventory: inventoryTopology.nodes[0].inventory }));
-  const floor = { digest: "rest", nodes: [{ ...topology.nodes[0], assemblies }] };
-  const layout = layoutScene(floor), room = layout.rooms[0];
-  const idle = [{ ...workers[0], id: "reader", activity: "idle", location: "resting", nodeId: room.id }, { ...workers[0], id: "friend", activity: "idle", location: "resting", nodeId: room.id }];
+test("resting nearby keeps deterministic routes to every machine of the hall", () => {
+  const layout = layoutScene(sceneGraph([hall("lib", { machines: [machine("a", "ingress", { trigger: "request" }), machine("e", "ingress", { trigger: "request" }), machine("b", "store")] })])), room = layout.rooms[0];
+  const idle = ["reader", "friend"].map((id) => ({ ...workers[0], id, activity: "idle", location: "resting", nodeId: room.id }));
   const resting = placeWorkers(layout, idle, "nearby");
   assert.ok(resting.every((placement) => placement.area === "resting" && placement.roomId === room.id));
-  const nook = breakRoomNook(layout, 2, 0, true);
-  assert.equal(nook.furniture.filter((piece) => piece.roomId === room.id).length, 1);
-  for (const entity of assemblies) {
-    const atWork = placeWorkers(layout, [{ ...workers[0], nodeId: room.id, observedBayId: entity.id }])[0];
+  assert.ok(breakRoomNook(layout, 2, 0, true).furniture.every((piece) => piece.roomId === undefined), "the break room is only in the commons");
+  for (const entity of room.contents) {
+    const atWork = placeWorkers(layout, [{ ...workers[0], nodeId: room.id, observedBayId: entity.entityId }])[0];
     const route = routeBetween(layout, resting[0], atWork);
-    assert.ok(route, `route to ${entity.id}`);
-    assertRouteGeometry(layout, resting[0], route, entity.id);
+    assert.ok(route, `route to ${entity.entityId}`);
+    assertRouteGeometry(layout, resting[0], route, entity.entityId);
   }
 });
-
-
-test("selecting a proposal hides unrelated new rooms without moving integrated equipment", () => {
-  const provisional = { id: "new", path: "new/area", label: "Proposed area", kind: "directory", proposed: true };
-  const floor = { ...topology, nodes: [...topology.nodes, provisional] };
-  const items = [{ id: "addition", title: "New area", state: "active", operations: [{ roomId: "new", entityId: "new", path: "new/area/file.go", kind: "addition" }] },
-    { id: "edit", title: "Existing edit", state: "active", operations: [{ roomId: "repo", entityId: "repo", path: "main.go", kind: "modification" }] }];
-  const all = render({ topology: floor, workers: [], proposals: { items, onSelect() {} } });
-  const selected = render({ topology: floor, workers: [], proposals: { items, selected: "edit", onSelect() {} } });
-  assert.match(all, /data-proposed-room="true"/);
-  assert.doesNotMatch(selected, /data-proposed-room="true"|value="new"/);
-  assert.match(selected, /data-room-id="repo"/);
-  assert.equal(all.match(/viewBox="([^"]+)"/)[1], selected.match(/viewBox="([^"]+)"/)[1], "selection keeps the spatial map stable");
-});
-
-
-test("proposed resource versions and dependency cables remain distinct and inspectable", () => {
-  const inventory = { direct: { source: 1, tests: 1, documentation: 1, configuration: 1, assets: 0, unclassified: 0 }, total: fileCounts, samples: [], samples_omitted: 0 };
-  const room = { ...topology.nodes[1], proposed: true, assemblies: [{ id: "first-version", proposalId: "first", path: "new", label: "New", inventoryScope: "direct", inventory, sourceIncomplete: true, representedIds: ["lib"] }, { id: "second-version", proposalId: "second", path: "new", label: "Other future", inventoryScope: "direct", inventory, representedIds: ["lib"] }] };
-  const first = { id: "first", title: "First", operations: [{ roomId: "lib", entityId: "lib", path: "new/code.go", kind: "addition" }], relationships: [{ status: "added", fromId: "lib", toId: "repo", fromPath: "new", toPath: ".", weight: 1 }, { status: "removed", fromId: "repo", toId: "src", fromPath: ".", toPath: "src", weight: 1 }] };
-  const second = { id: "second", title: "Second", operations: [{ roomId: "lib", entityId: "lib", path: "new/other.go", kind: "addition" }] };
-  const markup = render({ topology: { ...topology, nodes: [topology.nodes[0], room, topology.nodes[2]] }, workers: [], proposals: { items: [first, second], selected: "first", onSelect() {} } });
-  for (const resource of ["tests", "configuration", "documentation"]) assert.match(markup, new RegExp(`data-associated-equipment="${resource}"`));
-  assert.match(markup, /data-equipment-scale="unknown"/);
-  assert.match(markup, /data-proposed-relationship="added"/);
-  assert.match(markup, /data-proposed-relationship="removed"/);
-  assert.match(markup, /First: added dependency new to ./);
-  assert.doesNotMatch(markup, /data-entity-id="second-version"|value="second-version"/);
-});
-
-
-test("large real collections fill their work zone with readable sampled modules while small equipment stays small", () => {
-  const inventory = (source) => ({ direct: { source, tests: source > 4 ? 40 : 0, documentation: 0, configuration: 0, assets: 0, unclassified: 0 }, total: fileCounts, samples: ["browser.go", "intake.go", "provider.go", "recovery.go", "runtime.go", "supervisor.go"], samples_omitted: source - 6 });
-  const nodes = [3, 125, 141, 10].map((source, index) => ({ ...topology.nodes[0], sizeBucket: source > 80 ? "large" : source <= 4 ? "tiny" : "small", id: `room${index}`, path: `room${index}`, assemblies: [{ id: `entity${index}`, path: `room${index}`, label: `Collection ${index}`, inventoryScope: "direct", inventory: inventory(source) }] }));
-  const layout = layoutScene({ digest: "actual-scale", nodes });
-  const small = layout.rooms[0].contents[0], large = layout.rooms[1].contents[0];
-  assert.ok(large.width * large.height >= small.width * small.height * 6, "large collections have substantial machinery, not only a larger badge");
-  assert.equal(large.parts.length, 4);
-  assert.ok(small.labelWidth > small.width, "source names use the available cell, independently of machine size");
-  assert.ok(layout.rooms[1].width > layout.rooms[0].width, "large source areas occupy a bounded wider room");
-  for (const room of layout.rooms) {
-    assert.ok(room.contents.every((item) => item.y + item.height <= room.door.y - 84), "local rest and furniture keep a clear access lane");
-    const atWork = placeWorkers(layout, [{ ...workers[0], nodeId: room.id, observedBayId: room.contents[0].entityId }])[0];
-    const spine = layout.corridors.at(-1), start = { x: spine.x + spine.width / 2, y: layout.restingTop };
-    const route = routeFromSpine(layout, start, atWork);
-    assert.ok(route);
-    assertRouteGeometry(layout, start, route, room.id);
-  }
-  const markup = render({ topology: { digest: "actual-scale", nodes }, workers: [] });
-  assert.match(markup, /font-size="10">browser<\/text>/);
-  assert.match(markup, /font-size="10">125 source<\/text>/);
-  assert.doesNotMatch(markup, /font-size="6"/);
-});
-
-test("thirteen competing proposed versions are never aggregated and selecting the thirteenth composes only that version", () => {
-  const assemblies = Array.from({ length: 13 }, (_, index) => ({ id: `version-${index + 1}`, proposalId: `change-${index + 1}`, path: "new", label: `Version ${index + 1}`, inventoryScope: "direct", inventory: inventoryTopology.nodes[0].inventory, sourceIncomplete: true, representedIds: ["new"] }));
-  const floor = { digest: "thirteen-futures", nodes: [{ ...topology.nodes[0], assemblies: [] }, { ...topology.nodes[1], id: "new", path: "new", proposed: true, assemblies }] };
-  const items = assemblies.map((assembly) => ({ id: assembly.proposalId, title: assembly.label, state: "active", operations: [{ roomId: "new", entityId: "new", path: `new/${assembly.id}.go`, kind: "addition" }] }));
-  const all = layoutScene(floor);
-  assert.deepEqual(all.rooms[1].contents.map((item) => item.proposalId), items.slice(0, 12).map((item) => item.id));
-  assert.ok(all.rooms[1].contents.every((item) => item.sourceIncomplete));
-  const markup = render({ topology: floor, workers: [], proposals: { items, onSelect() {} } });
-  assert.match(markup, /\+1 versions · select a Change/);
-  assert.doesNotMatch(markup, /data-entity-id="new:aggregate"/);
-  for (const selected of ["change-1", "change-13"]) {
-    const layout = layoutScene(floor, selected);
-    assert.equal(layout.rooms[1].contents.length, 1);
-    assert.equal(layout.rooms[1].contents[0].proposalId, selected);
-    assert.deepEqual(layout.rooms.map(({ contents, ...geometry }) => geometry), all.rooms.map(({ contents, ...geometry }) => geometry));
-    const selectedMarkup = render({ topology: floor, workers: [], proposals: { items, selected, onSelect() {} } });
-    assert.equal((selectedMarkup.match(/data-entity-id="version-/g) ?? []).length, 1);
-    assert.match(selectedMarkup, new RegExp(`data-entity-id="version-${selected.slice("change-".length)}"`));
-    assert.match(selectedMarkup, /data-equipment-scale="unknown"/);
-  }
-});
-
 
 test("nearby resting actors do not leave ghost tables or seats in the side commons", () => {
-  const node = { ...inventoryTopology.nodes[0], assemblies: [{ id: "equipment", path: ".", label: "Equipment", inventoryScope: "direct", inventory: inventoryTopology.nodes[0].inventory }] };
-  const people = ["one", "two"].map((id) => ({ ...workers[0], id, activity: "idle", paused: id === "one", location: "last-observed", nodeId: node.id }));
-  const floor = { digest: "no-ghost-seats", nodes: [node] };
+  const floor = sceneGraph([hall("lib", { machines: [machine("lib-db", "store")] })]);
+  const people = ["one", "two"].map((id) => ({ ...workers[0], id, activity: "idle", paused: id === "one", location: "last-observed", nodeId: "lib" }));
   const appearance = { social: "nearby", scenery: "off", animation: "off" };
-  const markup = render({ topology: floor, workers: people, appearance });
+  const markup = render({ graph: floor, workers: people, appearance });
   assert.equal((markup.match(/data-nearby-rest=/g) ?? []).length, 2);
   assert.equal((markup.match(/data-worker-id=/g) ?? []).length, 2);
   assert.doesNotMatch(markup, /data-common-seat=|data-common-table="resting"/);
   assert.match(markup, /Paused · taking a break/);
-  const waiting = render({ topology: floor, workers: [...people, { ...workers[0], id: "unlocated", location: "unobserved" }], appearance });
+  const waiting = render({ graph: floor, workers: [...people, { ...workers[0], id: "unlocated", location: "unobserved" }], appearance });
   assert.equal((waiting.match(/data-common-seat="planning"/g) ?? []).length, 1);
   assert.doesNotMatch(waiting, /data-common-seat="resting"|data-common-table="resting"/);
   assert.match(waiting, /working; location not yet observed/);
 });
 
-test("room shelves open their own project library while the commons keeps the floor scope", async () => {
+test("the commons shelf opens the floor's project library", async () => {
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
-  for (const [projectId, firstProject] of [[undefined, "project-a"], ["floor-project", "project-b"]]) {
-    const nodes = ["project-a", "project-b"].map((id) => ({ ...inventoryTopology.nodes[0], id: `${id}:source`, path: "src", label: "Source", project: { id, name: id === firstProject ? "Alpha" : "Beta" }, assemblies: [{ id: `${id}:equipment`, path: "src", label: "Equipment", inventoryScope: "direct", inventory: inventoryTopology.nodes[0].inventory }] }));
-    const floor = { digest: `shelf-scope-${firstProject}`, nodes }, before = structuredClone(floor), opened = [];
-    let tree;
-    await act(async () => { tree = create(createElement(FactoryScene, { topology: floor, workers: [], projectId, appearance: { social: "nearby", scenery: "off", animation: "off" }, onOpenLibrary: (id) => opened.push(id) })); });
-    assert.deepEqual(opened, [], "rendering ambient furniture does not retrieve library content");
-    const shelves = tree.root.findAllByProps({ "aria-label": "Open project library" });
-    assert.equal(shelves.length, 2, "the commons and the first room have shelves; the other room has coffee");
-    for (const shelf of shelves) {
-      assert.equal(shelf.props["data-tooltip"], "Library · documents");
-      assert.equal(shelf.props.className, "dfFactoryScene__target");
-      await act(async () => shelf.props.onKeyDown({ key: "Enter", preventDefault() {} }));
-    }
-    assert.deepEqual(opened, [projectId, firstProject], "each bookshelf invokes the existing library with its actual project scope");
-    assert.deepEqual(floor, before, "opening a library does not alter source topology");
-    await act(async () => tree.unmount());
-  }
+  const opened = [];
+  let tree;
+  await act(async () => { tree = create(createElement(FactoryScene, { graph, appearance: commons, workers: [], projectId: "floor-project", appearance: { social: "nearby", scenery: "off", animation: "off" }, onOpenLibrary: (id) => opened.push(id) })); });
+  assert.deepEqual(opened, [], "rendering ambient furniture does not retrieve library content");
+  const shelves = tree.root.findAllByProps({ "aria-label": "Open project library" });
+  assert.equal(shelves.length, 1);
+  assert.equal(shelves[0].props["data-tooltip"], "Library · documents");
+  await act(async () => shelves[0].props.onKeyDown({ key: "Enter", preventDefault() {} }));
+  assert.deepEqual(opened, ["floor-project"]);
+  await act(async () => tree.unmount());
+});
+
+test("an unobserved machine is a blueprint with no material belt; an observed edge with a rate carries material", () => {
+  const floor = sceneGraph([hall("web", { band: 0, machines: [machine("web-ui", "job")] }), hall("api", { machines: [machine("api-in", "ingress", { trigger: "request", reading: busy }), machine("api-db", "store")] })], {
+    parties: [machine("github", "external", { reading: { ...unread, observation: "opaque" } })],
+    flows: [{ from: "web-ui", to: "api-in", kind: "calls", reading: busy }, { from: "api", to: "api-db", kind: "uses", reading: unread }, { from: "api", to: "github", kind: "calls", reading: unread }],
+  });
+  const markup = render({ graph: floor, workers: [] });
+  assert.match(markup, /data-entity-id="api-db" data-observation="unobserved" data-state="unknown" data-shape="silo"/);
+  assert.match(markup, /data-entity-id="api-in" data-observation="observed" data-state="active" data-shape="dock"/);
+  assert.match(markup, /data-entity-id="github" data-observation="opaque"/);
+  assert.match(markup, /data-fence/);
+  // the observed edge draws material
+  assert.match(markup, /<g data-belt="calls" data-observation="observed" data-state="active"><path[^>]*class="b-base"><\/path><path[^>]*class="dfPlant__material"/);
+  assert.equal((markup.match(/data-belt="uses" data-observation="unobserved"/g) ?? []).length, 1, "an unobserved edge is a dashed blueprint run");
+  assert.equal(markup.includes('data-belt="uses" data-observation="unobserved" data-state'), false, "and carries no material");
+  assert.equal((markup.match(/dfPlant__material/g) ?? []).length, 1, "only the observed belt moves material");
+});
+
+test("the coverage header shows the summary numbers", () => {
+  const summary = { components: 7, inferred: 6, observed: 3, quiet: 1, partial: 1, stale: 0, unobserved: 1, opaque: 1, runtime_only: 1, contradicted: 0 };
+  const markup = render({ graph: { ...graph, summary }, workers: [] });
+  const header = markup.match(/aria-label="Observation coverage"[^>]*>(.*?)<\/p>/)[1].replace(/<[^>]+>/g, "");
+  assert.equal(header, "6 inferred · 4 observed · 1 partial · 1 unobserved · 1 quiet · 0 stale · 1 external · 1 runtime-only");
+  assert.doesNotMatch(render({ workers: [] }), /Observation coverage/, "no summary, no claim");
+});
+
+test("a deploy is a changeover dated by the graph, not by the viewer's clock", () => {
+  const at = 1_760_000_000_000;
+  const render = (deployedAt) => renderToStaticMarkup(createElement(FactoryScene, { graph: sceneGraph([hall("unit", { reading: { ...busy, deployedAt } })], { observedAt: at }), workers: [] }));
+  const fresh = render(at - 60_000);
+  assert.match(fresh, /data-changeover=/);
+  assert.match(fresh, /dfPlant__scaffold/);
+  const earlier = render(at - 3 * 60 * 60_000);
+  assert.match(earlier, /data-changeover=/);
+  assert.doesNotMatch(earlier, /dfPlant__scaffold/);
+  assert.doesNotMatch(render(at - 2 * 24 * 60 * 60_000), /data-changeover=/);
+  assert.doesNotMatch(render(undefined), /data-changeover=/);
 });

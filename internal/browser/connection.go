@@ -377,6 +377,9 @@ func (current *connection) serve() {
 }
 
 func (current *connection) dispatch(frame browserprotocol.ControlFrame) bool {
+	if observer, ok := current.server.backend.(Observer); ok {
+		observer.Observe(map[string]string{"url.path": Path, "rpc.method": string(frame.Type)})
+	}
 	ctx, cancel := context.WithTimeout(current.ctx, backendCallLimit)
 	defer cancel()
 	var payload []byte
@@ -681,7 +684,7 @@ func (current *connection) dispatch(frame browserprotocol.ControlFrame) bool {
 			return false
 		}
 		payload, err = browserprotocol.EncodeTaskUpdateResult(frame.ID, result)
-	case browserprotocol.TopologyGet, browserprotocol.RunPathsGet, browserprotocol.AgentControl, browserprotocol.HumanRequestReply, browserprotocol.HumanRequestCancelRun, browserprotocol.Intake, browserprotocol.GitHubConnection, browserprotocol.RepositoryMutate:
+	case browserprotocol.OperationalGraphGet, browserprotocol.OperationalNodeGet, browserprotocol.RunPathsGet, browserprotocol.AgentControl, browserprotocol.HumanRequestReply, browserprotocol.HumanRequestCancelRun, browserprotocol.Intake, browserprotocol.GitHubConnection, browserprotocol.RepositoryMutate:
 		// These may use their whole call budget. That must not hold up state
 		// and terminal frames, so one worker answers them in arrival order,
 		// each under its own budget from the moment it starts; the websocket
@@ -1336,25 +1339,39 @@ func (current *connection) observe(frame browserprotocol.ControlFrame) {
 			break
 		}
 		payload, err = browserprotocol.EncodeGitHubConnectionResult(frame.ID, result)
-	case browserprotocol.TopologyGet:
+	case browserprotocol.OperationalGraphGet:
 		if current.server.consoleBackend == nil {
 			err = ErrUnauthorized
 			break
 		}
-		var result browserprotocol.Topology
-		if result, err = current.server.consoleBackend.Topology(ctx, current.principal.ClientID, body); err != nil {
+		var result browserprotocol.OperationalGraph
+		if result, err = current.server.consoleBackend.OperationalGraph(ctx, current.principal.ClientID, body); err != nil {
 			break
 		}
 		if result.ProjectID != body.ProjectID {
 			err = errBackendResult
 			break
 		}
-		// Topology shares the snapshot byte bound, so an oversized one is the
-		// same finite too_large answer a snapshot gives.
+		// The graph shares the snapshot byte bound, so an oversized one is
+		// the same finite too_large answer a snapshot gives.
 		write = current.writeSnapshot
-		if payload, err = browserprotocol.EncodeTopology(frame.ID, result); errors.Is(err, browserprotocol.ErrOversized) {
+		if payload, err = browserprotocol.EncodeOperationalGraph(frame.ID, result); errors.Is(err, browserprotocol.ErrOversized) {
 			err = ErrTooLarge
 		}
+	case browserprotocol.OperationalNodeGet:
+		if current.server.consoleBackend == nil {
+			err = ErrUnauthorized
+			break
+		}
+		var result browserprotocol.OperationalNode
+		if result, err = current.server.consoleBackend.OperationalNode(ctx, current.principal.ClientID, body); err != nil {
+			break
+		}
+		if result.ProjectID != body.ProjectID || result.NodeID != body.NodeID {
+			err = errBackendResult
+			break
+		}
+		payload, err = browserprotocol.EncodeOperationalNode(frame.ID, result)
 	case browserprotocol.RunPathsGet:
 		if current.server.consoleBackend == nil {
 			err = ErrUnauthorized

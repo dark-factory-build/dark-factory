@@ -1,63 +1,71 @@
-import type { SpriteAppearance, TopologyView } from "@dark-factory/client";
+import type { GraphNode, GraphReading, GraphSummary, GraphSource, SpriteAppearance } from "@dark-factory/client";
 
-export type SceneTopology = Readonly<{
-  digest: string;
-  nodes: readonly SceneNode[];
+/** A node's runtime reading, as the floor shows it. Static evidence never sets state. */
+export type SceneReading = Readonly<{
+  evidence: GraphReading["evidence"];
+  observation: GraphReading["observation"];
+  state: GraphReading["state"];
+  ratePerHour: number;
+  errorPermille: number;
+  latencyMs: number;
+  lastSeen?: number;
+  /** The unit's last observed deploy: a changeover, not traffic. */
+  deployedAt?: number;
 }>;
 
-export type SceneAssembly = Readonly<{
-  id: string; path: string; label: string;
-  inventoryScope: "direct" | "subtree";
-  inventory?: TopologyView["nodes"][number]["inventory"];
-  sizeBucket?: "empty" | "tiny" | "small" | "medium" | "large";
-  proposalId?: string;
-  purpose?: string; sourcePaths?: readonly string[]; sourceIncomplete?: boolean;
-  representedIds?: readonly string[];
-  dependencies?: Readonly<{ omitted: number; links: readonly Readonly<{ nodeId: string; label: string; path: string; direction: "to" | "from"; weight: number }>[] }>;
+/** One machine on the floor: one operational node, or a fold of several. */
+export type SceneMachine = Readonly<{
+  id: string;
+  kind: GraphNode["kind"];
+  label: string;
+  trigger?: GraphNode["trigger"];
+  reading: SceneReading;
+  /** Nodes this machine stands for when it folds several (a manifold of routes). */
+  represented?: readonly string[];
+  /** The unit a quarantined or shared machine belongs to, for its label. */
+  owner?: string;
+}>;
+
+/** A deployment unit: one hall. Repository never decides its walls. */
+export type SceneHall = Readonly<{
+  id: string;
+  label: string;
+  runtime?: GraphNode["runtime"];
+  reading: SceneReading;
+  /** Placement band: clients, public, internal, tools. Static evidence alone decides it. */
+  band: 0 | 1 | 2 | 3;
+  machines: readonly SceneMachine[];
+}>;
+
+export type SceneFlow = Readonly<{ from: string; to: string; kind: string; reading: SceneReading }>;
+
+/** The world model: operational graph and runtime reading, grouped for one floor. */
+export type SceneGraph = Readonly<{
+  /** Changes only when static structure or the detail level changes. */
+  digest: string;
+  halls: readonly SceneHall[];
+  /** Stores and queues no single unit owns. */
+  shared: readonly SceneMachine[];
+  /** External parties at the fence. */
+  parties: readonly SceneMachine[];
+  /** Runtime activity no static node explains. */
+  quarantine: readonly SceneMachine[];
+  flows: readonly SceneFlow[];
+  summary?: GraphSummary;
+  sources?: readonly GraphSource[];
+  /** When the daemon read the runtime state shown. */
+  observedAt?: number;
 }>;
 
 export type SceneProposal = Readonly<{
   id: string; title: string; state: "active" | "stale" | "unavailable"; base?: string; head?: string;
-  /** Cable endpoints use displayed rooms; entity endpoints retain canonical source ownership. */
-  relationships?: readonly Readonly<{ status: "added" | "removed"; fromId?: string; toId?: string; fromEntityId?: string; toEntityId?: string; fromPath: string; toPath: string; weight: number }>[];
-  operations: readonly Readonly<{ entityId?: string; roomId?: string; path: string; previousPath?: string; kind: "addition" | "modification" | "removal" | "move"; label?: string }>[];
+  operations: readonly Readonly<{ entityId?: string; roomId?: string; path: string; previousPath?: string; kind: "addition" | "modification" | "removal" | "move" }>[];
 }>;
 
-export type SceneNode = Readonly<{
-  assemblies?: readonly SceneAssembly[];
-  proposed?: boolean;
-  sourceIncomplete?: boolean; sourcePaths?: readonly string[];
-  id: string;
-  /** Served parent identity; this is navigation data, never derived from text. */
-  parentId?: string;
-  path: string;
-  label: string;
-  kind: "repository" | "module" | "package" | "directory";
-  /** Absent when the room stands for a project rather than a served node. */
-  sizeBucket?: "empty" | "tiny" | "small" | "medium" | "large";
-  language?: string;
-  childCount?: number;
-  components?: readonly Readonly<{ id: string; label: string; feature?: InventoryKind | "empty" | "unavailable" }>[];
-  inventoryScope: "direct" | "subtree";
-  inventory?: TopologyView["nodes"][number]["inventory"];
-  dependencies?: Readonly<{
-    omitted: number;
-    links: readonly Readonly<{ nodeId: string; label: string; path: string; direction: "to" | "from"; weight: number }>[];
-  }>;
-  /** The project this room belongs to: rooms sharing an id are laid out together under its name. */
-  project?: Readonly<{ id: string; name: string }>;
-}>;
-
-/** Inspect the displayed group's proposals without replacing its canonical identity. */
-export function proposalsForEntity(topology: SceneTopology, proposals: readonly SceneProposal[], id?: string): readonly SceneProposal[] {
+/** The changes touching one machine or hall. */
+export function proposalsForEntity(proposals: readonly SceneProposal[], id?: string): readonly SceneProposal[] {
   if (id === undefined) return [];
-  const members = new Set([id]);
-  for (const room of topology.nodes) for (const assembly of room.assemblies ?? []) if (room.id === id || assembly.id === id) {
-    members.add(assembly.id);
-    for (const member of assembly.representedIds ?? []) members.add(member);
-  }
-  return proposals.filter((proposal) => proposal.operations.some((operation) => members.has(operation.entityId ?? "") || operation.roomId === id)
-    || proposal.relationships?.some((edge) => members.has(edge.fromEntityId ?? edge.fromId ?? "") || members.has(edge.toEntityId ?? edge.toId ?? "")));
+  return proposals.filter((proposal) => proposal.operations.some((operation) => operation.entityId === id || operation.roomId === id));
 }
 
 export type SceneWorker = Readonly<{
@@ -68,12 +76,12 @@ export type SceneWorker = Readonly<{
   activity: "busy" | "waiting" | "needs-you" | "idle";
   paused?: boolean;
   appearance?: SpriteAppearance;
-  /** Live work is placed in a room; retained samples annotate the resting area. */
+  /** Live work is placed in a hall; retained samples annotate the resting area. */
   location?: "working" | "last-observed" | "unobserved" | "resting";
   locationLabel?: string;
-  /** The displayed room contains the more specific observed area. */
-  locationWithin?: boolean;
+  /** The hall the worker is in. */
   nodeId?: string;
+  /** The machine within that hall. */
   observedBayId?: string;
   review?: Readonly<{ proposalId: string; scope: string }>;
 }>;
@@ -83,11 +91,15 @@ export type ScenePoint = Readonly<{ x: number; y: number }>;
 type SceneRect = Readonly<{ x: number; y: number; width: number; height: number }>;
 export type SceneRoomLayout = SceneRect & Readonly<{
   id: string;
+  kind: "hall" | "yard" | "quarantine";
   door: ScenePoint;
   contents: readonly RoomContent[];
 }>;
 
 type SceneHeading = Readonly<{ label: string; x: number; y: number }>;
+
+/** A gate in the perimeter fence for one external party. */
+export type SceneGate = SceneRect & Readonly<{ machine: SceneMachine }>;
 
 export type SceneLayout = Readonly<{
   width: number;
@@ -95,6 +107,9 @@ export type SceneLayout = Readonly<{
   rooms: readonly SceneRoomLayout[];
   headings: readonly SceneHeading[];
   corridors: readonly SceneRect[];
+  gates: readonly SceneGate[];
+  /** The fence line's x; gates hang on it. */
+  fence: number;
   restingTop: number;
 }>;
 
@@ -111,7 +126,19 @@ export type SceneWorkerPlacement = Readonly<{
 
 export type BreakRoomErrand = "shelf" | "coffee";
 
-// Workshop bays share walls; dimensions never depend on live work.
+/** How a machine is pictured. A shape is chosen from the node kind, never its name. */
+export type StationShape = "line" | "dock" | "manifold" | "clock" | "cell" | "silo" | "conveyor" | "crate";
+
+export type RoomContent = SceneRect & Readonly<{
+  key: string;
+  entityId: string;
+  representedIds?: readonly string[];
+  shape: StationShape;
+  machine: SceneMachine;
+  workSurface: true;
+}>;
+
+// Halls share walls; dimensions never depend on live work.
 const CORRIDOR = 32;
 export const COMMON_WIDTH = 192;
 export const PADDING = 16;
@@ -119,61 +146,126 @@ export const ROOM_LEFT = PADDING + COMMON_WIDTH + 16 + CORRIDOR;
 const FLOOR_TOP = 48;
 export const WORKER_GAP = 40;
 export const WORKER_SIZE = 20;
+const BAY = 176;
+const COLUMNS = 4;
+const YARD = 120;
+const BAND_LABELS = ["Clients", "Public", "Internal", "Tools"] as const;
 
 /** Ordering for the floor: byte order over served fields, never a locale. */
 export function compareText(left: string, right: string) {
   return left < right ? -1 : left > right ? 1 : 0;
 }
 
-/** Topology alone fixes buildings. Corridors express access, never imports. */
-export function layoutScene(topology: SceneTopology, selectedProposalId?: string): SceneLayout {
-  const nodes = [...topology.nodes].sort((left, right) =>
-    Number(Boolean(left.proposed)) - Number(Boolean(right.proposed)) || compareText(left.project?.name ?? "", right.project?.name ?? "") || compareText(left.project?.id ?? "", right.project?.id ?? "")
-    || Number(left.path === ".") - Number(right.path === ".") || compareText(left.path, right.path) || compareText(left.label, right.label) || compareText(left.id, right.id));
-  const groups = new Map<string, SceneNode[]>();
-  for (const node of nodes) groups.set(`${node.proposed ? "proposed:" : ""}${node.project?.id ?? ""}`, [...(groups.get(`${node.proposed ? "proposed:" : ""}${node.project?.id ?? ""}`) ?? []), node]);
-  const assembled = nodes.some((node) => node.assemblies !== undefined);
-  const units = (node: SceneNode) => !assembled ? 1 : (node.assemblies?.length ?? 0) > 6 ? 4
-    : (node.assemblies?.length ?? 0) > 1 || node.sizeBucket === "large" ? 2 : 1;
-  const columns = Math.min(4, Math.max(1, ...[...groups.values()].filter((group) => !group[0]?.proposed).map((group) => group.reduce((sum, node) => sum + units(node), 0))));
-  const bay = 160;
-  const width = ROOM_LEFT + columns * bay + PADDING;
+const shapeOf = (machine: SceneMachine): StationShape => machine.represented !== undefined ? "manifold"
+  : machine.kind === "ingress" ? machine.trigger === "timer" ? "clock" : "dock"
+  : machine.kind === "job" ? "cell" : machine.kind === "store" ? "silo" : machine.kind === "queue" ? "conveyor"
+  : machine.kind === "processor" ? "line" : "crate";
+
+const size: Record<StationShape, { width: number; height: number }> = {
+  line: { width: 96, height: 44 }, dock: { width: 40, height: 18 }, manifold: { width: 44, height: 40 }, clock: { width: 22, height: 22 },
+  cell: { width: 34, height: 30 }, silo: { width: 28, height: 40 }, conveyor: { width: 64, height: 16 }, crate: { width: 22, height: 22 },
+};
+
+/**
+ * Lay out a hall's stations in fixed zones by kind: intake docks along the
+ * left wall, timers by the door, the main line in the middle, cells across
+ * the top and silos to the right. Static machines only, so live data never
+ * moves a machine.
+ */
+function composeHall(hall: SceneHall, room: SceneRect): readonly RoomContent[] {
+  const place = (machine: SceneMachine, x: number, y: number): RoomContent => {
+    const shape = shapeOf(machine);
+    return { key: machine.id, entityId: machine.id, ...(machine.represented === undefined ? {} : { representedIds: machine.represented }), shape, machine, workSurface: true, x, y, ...size[shape] };
+  };
+  const docks = hall.machines.filter((machine) => machine.kind === "ingress" && machine.trigger !== "timer");
+  const clocks = hall.machines.filter((machine) => machine.kind === "ingress" && machine.trigger === "timer");
+  const cells = hall.machines.filter((machine) => machine.kind === "job");
+  const silos = hall.machines.filter((machine) => machine.kind === "store" || machine.kind === "queue");
+  const top = room.y + 44, contents: RoomContent[] = [];
+  docks.forEach((machine, index) => contents.push(place(machine, room.x + 22, top + 8 + index * 40)));
+  clocks.forEach((machine, index) => contents.push(place(machine, room.x + room.width - 30 - index * 26, room.y + 14)));
+  const lineX = room.x + Math.max(72, Math.floor((room.width - size.line.width) / 2));
+  const lineY = top + 34 + (cells.length === 0 ? 0 : 30);
+  contents.push(place({ id: hall.id, kind: "processor", label: hall.label, reading: hall.reading }, lineX, lineY));
+  const right = room.x + room.width - 50;
+  const perRow = Math.max(1, Math.floor((right - lineX) / 42));
+  cells.forEach((machine, index) => contents.push(place(machine, lineX + (index % perRow) * 42, top + 6 + Math.floor(index / perRow) * 34)));
+  silos.forEach((machine, index) => contents.push(place(machine, right - Math.floor(index / 3) * 36, top + 8 + (index % 3) * 62)));
+  return contents;
+}
+
+function hallUnits(hall: SceneHall) {
+  const count = hall.machines.length;
+  // Silos stand right of the main line, so a hall holding any is never a single bay.
+  return Math.max(count <= 4 ? 1 : count <= 10 ? 2 : 3, hall.machines.some((machine) => machine.kind === "store" || machine.kind === "queue") ? 2 : 1);
+}
+
+function hallHeight(hall: SceneHall) {
+  const docks = hall.machines.filter((machine) => machine.kind === "ingress" && machine.trigger !== "timer").length;
+  const silos = hall.machines.filter((machine) => machine.kind === "store" || machine.kind === "queue").length;
+  const cells = hall.machines.some((machine) => machine.kind === "job") ? 30 : 0;
+  return Math.max(hall.machines.length === 0 ? 132 : 176, 44 + 16 + docks * 40, 44 + 16 + Math.min(3, silos) * 62, 44 + 34 + cells + size.line.height + 56);
+}
+
+/**
+ * Halls sit in fixed bands (clients, public, internal, tools) and in ID order
+ * within a band, so a new edge or a busy hour never moves a hall. Shared
+ * stores stand in the yard after the halls; runtime-only activity waits in a
+ * quarantine bay last of all, so it can grow without shifting anything.
+ * External parties are gates in the fence along the right edge.
+ */
+export function layoutScene(graph: SceneGraph): SceneLayout {
+  const halls = [...graph.halls].sort((left, right) => left.band - right.band || compareText(left.id, right.id));
+  const width = ROOM_LEFT + COLUMNS * BAY + PADDING;
+  const fence = width + 8;
   const rooms: SceneRoomLayout[] = [], headings: SceneHeading[] = [], corridors: SceneRect[] = [];
   let top = FLOOR_TOP;
-  for (const members of groups.values()) {
-    const project = members[0]!.project;
-    if (project !== undefined) {
-      if (members.length !== 1 || members[0]!.label !== project.name) headings.push({ label: project.name, x: ROOM_LEFT, y: top });
-      top += 16;
-    }
+  type Member = { id: string; kind: SceneRoomLayout["kind"]; span: number; height: number; compose: (room: SceneRect) => readonly RoomContent[] };
+  const placeRow = (members: readonly Member[]) => {
     for (let start = 0; start < members.length;) {
-      const row: { node: SceneNode; span: number }[] = [];
+      const row: Member[] = [];
       let used = 0;
       while (start < members.length) {
-        const node = members[start]!, span = Math.min(columns, units(node));
-        if (used + span > columns) break;
-        row.push({ node, span }); used += span; start++;
+        const member = members[start]!, span = Math.min(COLUMNS, member.span);
+        if (used + span > COLUMNS) break;
+        row.push({ ...member, span }); used += span; start++;
       }
-      const height = assembled ? Math.max(...row.map(({ node, span }) => {
-        const count = Math.min(12, node.assemblies?.length ?? 0);
-        const across = Math.min(span, Math.max(1, count));
-        return count <= 1 ? (node.sizeBucket === "large" ? 274 : 208) : 146 + (Math.ceil(count / across) - 1) * 110 + (count > across ? 68 : 128);
-      })) : 144;
+      const height = Math.max(...row.map((member) => member.height));
       let x = ROOM_LEFT;
-      for (const { node, span } of row) {
-        const rectangle = { x, y: top, width: span * bay, height };
-        rooms.push({ id: node.id, ...rectangle, contents: composeRoom(node, rectangle, selectedProposalId),
-          door: { x: x + rectangle.width / 2, y: top + height } });
+      for (const member of row) {
+        const rectangle = { x, y: top, width: member.span * BAY, height };
+        rooms.push({ id: member.id, kind: member.kind, ...rectangle, contents: member.compose(rectangle), door: { x: x + rectangle.width / 2, y: top + height } });
         x += rectangle.width;
       }
       corridors.push({ x: ROOM_LEFT - CORRIDOR, y: top + height, width: x - ROOM_LEFT + CORRIDOR, height: CORRIDOR });
       top += height + CORRIDOR;
     }
+  };
+  for (const band of [0, 1, 2, 3] as const) {
+    const members = halls.filter((hall) => hall.band === band);
+    if (members.length === 0) continue;
+    headings.push({ label: BAND_LABELS[band], x: ROOM_LEFT, y: top });
+    top += 16;
+    placeRow(members.map((hall) => ({ id: hall.id, kind: "hall" as const, span: hallUnits(hall), height: hallHeight(hall), compose: (room: SceneRect) => composeHall(hall, room) })));
   }
-  // The entrance stays beside the source rooms, including on large repositories.
-  // Live actors can extend its seating downwards without moving any source area.
+  const yardRoom = (id: string, kind: SceneRoomLayout["kind"], label: string, machines: readonly SceneMachine[]) => {
+    if (machines.length === 0) return;
+    headings.push({ label, x: ROOM_LEFT, y: top });
+    top += 16;
+    const perRow = COLUMNS * 4, rowsNeeded = Math.ceil(machines.length / perRow);
+    placeRow([{ id, kind, span: COLUMNS, height: Math.max(YARD, 56 + rowsNeeded * 66), compose: (room) => machines.map((machine, index): RoomContent => {
+      const shape = shapeOf(machine);
+      return { key: machine.id, entityId: machine.id, shape, machine, workSurface: true, x: room.x + 24 + (index % perRow) * (BAY / 4), y: room.y + 40 + Math.floor(index / perRow) * 66, ...size[shape] };
+    }) }]);
+  };
+  yardRoom("yard", "yard", "Shared yard", [...graph.shared].sort((left, right) => compareText(left.id, right.id)));
+  yardRoom("quarantine", "quarantine", "Quarantine · runtime activity the code does not explain", graph.quarantine);
+  // The entrance stays beside the halls, including on large plants.
   corridors.push({ x: ROOM_LEFT - CORRIDOR, y: FLOOR_TOP, width: CORRIDOR, height: Math.max(160, top - FLOOR_TOP) });
-  return { width, height: Math.max(224, top), rooms, headings, corridors, restingTop: 168 };
+  const parties = [...graph.parties].sort((left, right) => compareText(left.id, right.id));
+  const gates = parties.map((machine, index): SceneGate => ({ machine, x: fence - 6, y: FLOOR_TOP + 16 + index * 44, width: 12, height: 28 }));
+  const height = Math.max(224, top, ...gates.map((gate) => gate.y + gate.height + 24));
+  return { width: fence + 140, height, rooms, headings, corridors, gates, fence, restingTop: 168 };
 }
 
 export function placeWorkers(layout: SceneLayout, workers: readonly SceneWorker[], social: "nearby" | "commons" = "commons"): readonly SceneWorkerPlacement[] {
@@ -194,7 +286,7 @@ export function placeWorkers(layout: SceneLayout, workers: readonly SceneWorker[
     if (position === undefined) { areas.overflow.push(worker); continue; }
     placed.push({ id: worker.id, area: "room", roomId: room.id, ...position });
   }
-  const nearby = social === "nearby" ? layout.rooms.filter((room) => room.contents.some((item) => item.entityId !== undefined)) : [];
+  const nearby = social === "nearby" ? layout.rooms.filter((room) => room.kind === "hall") : [];
   const localCounts = new Map<string, number>();
   const commons: SceneWorker[] = [];
   // Known locations keep their seats before unlocated idle workers join a nearby pair.
@@ -224,18 +316,13 @@ export function commonSeating(layout: SceneLayout, restingCount: number, plannin
     layout.restingTop + (restingCount === 0 ? 0 : (Math.ceil(restingCount / 4) - 1) * WORKER_GAP + 64)) };
 }
 
-
-/** Stable furniture in the side commons and above each local resting pair. */
-export function breakRoomNook(layout: SceneLayout, _restingCount: number, _planningCount: number, nearby = false) {
+/** Stable furniture in the side commons. Halls hold machinery, not break-room furniture. */
+export function breakRoomNook(_layout: SceneLayout, _restingCount: number, _planningCount: number, _nearby = false) {
   return { width: COMMON_WIDTH, furniture: (["shelf", "coffee"] as const).map((errand, index) => ({
     errand, key: String(errand), roomId: undefined as string | undefined,
     x: PADDING + 120 + index * 38, y: 90,
     stand: { x: PADDING + 130 + index * 38, y: 136 },
-  })).concat(!nearby ? [] : layout.rooms.filter((room) => room.contents.some((item) => item.entityId !== undefined)).map((room, index) => ({
-    errand: index % 2 === 0 ? "shelf" as const : "coffee" as const, key: room.id, roomId: room.id,
-    x: room.x + room.width - 42, y: room.door.y - 79,
-    stand: { x: room.x + room.width - 30, y: room.door.y - 48 },
-  }))) };
+  })) };
 }
 
 // Each piece of furniture is visited in turns: free for the first part of a turn, then one visitor.
@@ -265,67 +352,11 @@ export function placeErrands(placements: readonly SceneWorkerPlacement[], nook: 
   return placements.map((placement) => { const piece = visiting.get(placement.id); return piece === undefined ? placement : { ...placement, errand: piece.errand, errandKey: piece.key, ...piece.stand }; });
 }
 
-/** Pictured surface slots also determine standing destinations; no parallel workstation map. */
+/** A worker stands in front of the machine they are working on; no parallel workstation map. */
 export function workPositions(room: SceneRoomLayout, entityId?: string): readonly ScenePoint[] {
-  const surface = room.contents.find((item) => item.workSurface && (item.entityId === entityId || item.representedIds?.includes(entityId ?? ""))) ?? room.contents.find((item) => item.workSurface);
+  const surface = room.contents.find((item) => item.entityId === entityId || item.representedIds?.includes(entityId ?? ""))
+    ?? room.contents.find((item) => item.shape === "line") ?? room.contents[0];
   if (surface === undefined) return [{ x: room.door.x, y: room.door.y - 32 }];
-  const offsets = surface.width >= 120 ? [0, -24, 24, -48, 48] : surface.width >= 88 ? [0, -24, 24] : [0, -24];
-  return offsets.map((offset) => ({ x: surface.x + surface.width / 2 + offset, y: surface.y + surface.height + WORKER_SIZE / 2 }));
-}
-
-export type InventoryKind = keyof typeof inventoryLabels;
-export const inventoryLabels = { source: "Source", tests: "Tests", documentation: "Docs", configuration: "Config", assets: "Assets", unclassified: "Unclassified" } as const;
-type ContentKind = keyof typeof inventoryLabels;
-export type Responsibility = "movement" | "messaging" | "selection" | "admission" | "storage" | "interface" | "generic";
-/** Name-based visual hints, never claims of analysis. */
-export function responsibility(path: string): Responsibility {
-  const name = path.toLowerCase();
-  return /movement|routing|transport/.test(name) ? "movement" : /message|event|protocol|relay/.test(name) ? "messaging" : /topology|source|selection/.test(name) ? "selection" : /admission|queue|dispatch|task/.test(name) ? "admission" : /store|persist|database|sqlite/.test(name) ? "storage" : /browser|console|interface/.test(name) ? "interface" : "generic";
-}
-/** Eligible file counts, clamped to four visual buckets; generated/vendor files are excluded upstream. */
-export function equipmentScale(count: number): number { return count <= 4 ? 0 : count <= 20 ? 1 : count <= 80 ? 2 : 3; }
-export type RoomContent = SceneRect & Readonly<{ key: string; kind: ContentKind; label: string; labelWidth?: number; count: number; entityId?: string; selectionId?: string; representedIds?: readonly string[]; resourceCounts?: Readonly<Record<InventoryKind, number>>; proposalId?: string; sourceIncomplete?: boolean; responsibility?: Responsibility; scale?: number; parts?: readonly Readonly<{ label: string; motif: Responsibility }>[]; workSurface?: boolean; furnishing?: "console" | "bench" | "drafting" }>;
-
-/** File-backed equipment fills a bounded work zone; the access lanes stay clear. */
-function composeRoom(node: SceneNode, room: SceneRect, selectedProposalId?: string): readonly RoomContent[] {
-  if (node.assemblies !== undefined) {
-    const assemblies = node.assemblies.filter((assembly) => !assembly.proposalId || !selectedProposalId || assembly.proposalId === selectedProposalId);
-    // Proposed versions are alternatives, never inputs to an aggregate inventory.
-    const rest = assemblies.slice(11);
-    const sum = { source: 0, tests: 0, documentation: 0, configuration: 0, assets: 0, unclassified: 0 };
-    for (const assembly of rest) for (const kind of Object.keys(sum) as InventoryKind[]) sum[kind] += assembly.inventory?.[assembly.inventoryScope === "direct" ? "direct" : "total"][kind] ?? 0;
-    const shown: readonly SceneAssembly[] = assemblies.some((assembly) => assembly.proposalId) ? assemblies.slice(0, 12) : assemblies.length <= 12 ? assemblies : [...assemblies.slice(0, 11), {
-      id: `${node.id}:aggregate`, path: node.path, label: `${rest.length} more assemblies`, inventoryScope: "direct",
-      representedIds: rest.flatMap((assembly) => [assembly.id, ...assembly.representedIds ?? []]),
-      inventory: rest.some((assembly) => assembly.inventory === undefined) ? undefined : { direct: sum, total: sum, samples: [], samples_omitted: Object.values(sum).reduce((a, b) => a + b, 0) },
-    }];
-    const columns = Math.min(Math.max(1, Math.floor(room.width / 160)), shown.length), rows = Math.ceil(shown.length / Math.max(1, columns));
-    const cellWidth = (room.width - 48) / Math.max(1, columns), cellHeight = rows > 1 ? 110 : room.height - 146;
-    return shown.map((assembly, index) => {
-      const counts = assembly.inventory?.[assembly.inventoryScope === "direct" ? "direct" : "total"];
-      const kinds = (Object.keys(inventoryLabels) as InventoryKind[]).filter((kind) => (counts?.[kind] ?? 0) > 0);
-      const kind = kinds.includes("source") ? "source" : kinds.sort((a, b) => counts![b] - counts![a] || compareText(a, b))[0] ?? "unclassified";
-      const total = Object.values(counts ?? {}).reduce((sum, count) => sum + count, 0);
-      const scale = equipmentScale(total);
-      const width = Math.min(cellWidth - (columns > 1 ? 16 : 0), [76, 128, 260, 344][scale]!);
-      // Leave a standing lane for 24px actor targets before the next row's label.
-      const height = Math.min(cellHeight - (rows > 1 ? 42 : 0), [62, 90, 150, 164][scale]!);
-      const sampleFamilies = (assembly.inventory?.samples ?? []).map((path) => path.split("/").at(-1)!.replace(/(?:[._-](?:test|tests|spec))?\.[^.]+$/, "").split(/[._-]/)[0]!).filter(Boolean);
-      const families = [...new Set(sampleFamilies)];
-      const parts = scale < 2 || kind !== "source" ? [] : families.sort((a, b) => Number(responsibility(b) !== "generic") - Number(responsibility(a) !== "generic") || sampleFamilies.filter((family) => family === b).length - sampleFamilies.filter((family) => family === a).length || compareText(a, b)).slice(0, width >= 240 && height >= 120 ? 4 : 2).map((label) => ({ label, motif: responsibility(label) }));
-      return { key: assembly.id, entityId: assembly.id, selectionId: assembly.id === `${node.id}:aggregate` ? node.id : undefined, representedIds: assembly.representedIds, kind, label: assembly.label, count: counts?.[kind] ?? 0, resourceCounts: counts, proposalId: assembly.proposalId, sourceIncomplete: assembly.sourceIncomplete, parts, responsibility: responsibility(assembly.path), scale, workSurface: true,
-        x: room.x + 24 + (index % Math.max(1, columns)) * cellWidth, y: room.y + 62 + Math.floor(index / Math.max(1, columns)) * cellHeight, width, height, labelWidth: cellWidth - (columns > 1 ? 16 : 0) };
-    });
-  }
-  const counts = node.inventory?.[node.inventoryScope === "direct" ? "direct" : "total"];
-  if (counts === undefined) return [];
-  const primary = (Object.keys(inventoryLabels) as Array<keyof typeof inventoryLabels>)
-    .filter((kind) => counts[kind] > 0)
-    .sort((a, b) => counts[b] - counts[a] || compareText(a, b))[0];
-  if (primary === undefined) return [];
-  const furnishing = room.width < 160 ? "console" : room.width < 192 ? "bench" : "drafting";
-  const width = furnishing === "console" ? 72 : furnishing === "bench" ? 88 : 104;
-  const x = furnishing === "console" ? room.x + 24 : furnishing === "bench" ? room.x + room.width - width - 24 : room.x + (room.width - width) / 2;
-  return [{ key: primary, kind: primary, label: inventoryLabels[primary], count: counts[primary], workSurface: true, furnishing,
-    x, y: room.y + 48, width, height: 32 }];
+  const offsets = surface.width >= 88 ? [0, -24, 24] : [0, -24];
+  return offsets.map((offset) => ({ x: surface.x + surface.width / 2 + offset, y: surface.y + surface.height + WORKER_SIZE / 2 + 2 }));
 }

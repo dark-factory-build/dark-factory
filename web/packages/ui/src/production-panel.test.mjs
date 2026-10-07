@@ -6,7 +6,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { productionKey } from "../dist/src/production-view.js";
 import { ProductionPanel } from "../dist/src/production-panel.js";
 
-const active = { source: { kind: "unavailable", base: "", head: "", observation: "", observedAt: 0, paths: [], relationships: [], relationshipsOmitted: 0, relationshipsUnavailable: "unavailable", omitted: 0, reason: "unavailable", stale: true }, visualId: "change:1", projectId: "project", repository: "owner/repo", tasks: ["task-1", "task-2"], missions: ["mission-1"], pullRequest: { number: 7, title: "Machine", head: "a".repeat(40), state: "open", url: "https://github.com/owner/repo/pull/7" }, review: { head: "a".repeat(40), state: "allow", current: true, allowed: true, sourceFresh: true, findings: "", url: "" }, reviewers: [], checks: [{ id: "check-1", repository: "owner/repo", name: "CI", revision: "a".repeat(40), scope: "head", state: "running", conclusion: "", pull_requests: [7], jobs: [], overflow: 0, applicable: true }], deliveries: [], completed: false, status: "open", nextAction: "Current-head checks are running." };
+const active = { source: { kind: "unavailable", base: "", head: "", observation: "", observedAt: 0, paths: [], omitted: 0, reason: "unavailable", stale: true }, visualId: "change:1", projectId: "project", repository: "owner/repo", tasks: ["task-1", "task-2"], missions: ["mission-1"], pullRequest: { number: 7, title: "Machine", head: "a".repeat(40), state: "open", url: "https://github.com/owner/repo/pull/7" }, review: { head: "a".repeat(40), state: "allow", current: true, allowed: true, sourceFresh: true, findings: "", url: "" }, reviewers: [], checks: [{ id: "check-1", repository: "owner/repo", name: "CI", revision: "a".repeat(40), scope: "head", state: "running", conclusion: "", pull_requests: [7], jobs: [], overflow: 0, applicable: true }], deliveries: [], completed: false, status: "open", nextAction: "Current-head checks are running." };
 const completed = { ...active, visualId: "change:2", pullRequest: { ...active.pullRequest, title: "Delivered", state: "merged" }, completed: true, status: "delivered" };
 
 test("production queue excludes completed work and shows simultaneous review and CI stages", () => {
@@ -98,7 +98,7 @@ test("one Show more control expands loaded work before requesting another page",
 
 
 test("source disclosure distinguishes observed empty files from unavailable and omitted edits", () => {
-  const complete = { ...active.source, kind: "committed", base: "b".repeat(40), head: active.pullRequest.head, target: "refs/heads/main", stale: false, reason: "", relationshipsUnavailable: "" };
+  const complete = { ...active.source, kind: "committed", base: "b".repeat(40), head: active.pullRequest.head, target: "refs/heads/main", stale: false, reason: "" };
   for (const [source, expected, status] of [
     [complete, "No observed file edits.", ""],
     [{ ...complete, kind: "unavailable", reason: "Snapshot missing" }, "File edits unavailable.", "Source details unavailable"],
@@ -118,7 +118,7 @@ test("source disclosure distinguishes observed empty files from unavailable and 
 
 test("disconnected source and revision evidence remains readable without enabled work actions", async () => {
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
-  const item = { ...active, source: { ...active.source, kind: "working-tree", base: "b".repeat(40), head: active.pullRequest.head, observation: "observed-dirty-tree", paths: [{ status: "renamed", old_path: "before.go", path: "after.go" }], reason: "", relationshipsUnavailable: "" } };
+  const item = { ...active, source: { ...active.source, kind: "working-tree", base: "b".repeat(40), head: active.pullRequest.head, observation: "observed-dirty-tree", paths: [{ status: "renamed", old_path: "before.go", path: "after.go" }], reason: "" } };
   let tree;
   try {
     await act(async () => { tree = create(createElement(ProductionPanel, { items: [item], selected: productionKey(item), onSelect() {}, connected: false, onOpenTask() {}, onMission() {} })); });
@@ -129,20 +129,4 @@ test("disconnected source and revision evidence remains readable without enabled
     assert.ok(tree.root.findAllByType("button").filter((button) => button.children.join("").startsWith("Open ")).every((button) => button.props.disabled));
     assert.equal(tree.root.findAllByType("button").find((button) => button.props.children.some?.((child) => child === "Back to Changes")).props.disabled, undefined);
   } finally { if (tree) await act(async () => tree.unmount()); }
-});
-
-
-test("missing or omitted relationship evidence never asserts no dependency changes", () => {
-  for (const [kind, omitted, unavailable, expected] of [
-    ["unavailable", 0, "", "Static dependency changes unavailable."],
-    ["committed", 3, "", "Dependency changes are outside this observation."],
-    ["committed", 0, "Analysis refused", "Analysis refused"],
-    ["committed", 0, "", "No static dependency changes in this observation."],
-  ]) {
-    const item = { ...active, source: { ...active.source, kind, relationships: [], relationshipsOmitted: omitted, relationshipsUnavailable: unavailable } };
-    const markup = renderToStaticMarkup(createElement(ProductionPanel, { items: [item], selected: productionKey(item), onSelect() {} }));
-    assert.ok(markup.includes(expected));
-    if (kind === "unavailable" || omitted || unavailable) assert.doesNotMatch(markup, /No static dependency changes/);
-    if (omitted) assert.match(markup, /3 relationship changes omitted/);
-  }
 });

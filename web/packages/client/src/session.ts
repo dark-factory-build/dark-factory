@@ -28,7 +28,8 @@ import {
   type TaskPeerQuestion,
   type TaskUpdateBody,
   type TerminalTargetDescriptor,
-  type TopologyBody,
+  type OperationalGraphBody,
+  type OperationalNodeBody,
   type IntakeBody,
   type IntakeResultBody,
   type GitHubConnectionBody,
@@ -150,7 +151,7 @@ type HumanPending = {
 };
 type TaskPending = { taskId: string; expectedAgentRevision: bigint; resolve: (value: { taskId: string; revision: bigint }) => void; reject: (error: unknown) => void };
 type AgentControlPending = { operationId: string; taskId: string; runId: string; resolve: (value: AgentControlResult) => void; reject: (error: unknown) => void };
-type ConsolePending = { kind: "AGENT_UPDATE_RESULT" | "PROJECT_LIMITS_RESULT" | "TASK_UPDATE_RESULT" | "TOPOLOGY" | "RUN_PATHS" | "TASK_LIST" | "TASK_HISTORY" | "TASK_DETAIL"; entityId: string; expectedRevision: bigint; resolve: (value: never) => void; reject: (error: unknown) => void };
+type ConsolePending = { kind: "AGENT_UPDATE_RESULT" | "PROJECT_LIMITS_RESULT" | "TASK_UPDATE_RESULT" | "OPERATIONAL_GRAPH" | "OPERATIONAL_NODE" | "RUN_PATHS" | "TASK_LIST" | "TASK_HISTORY" | "TASK_DETAIL"; entityId: string; expectedRevision: bigint; resolve: (value: never) => void; reject: (error: unknown) => void };
 
 export type AgentUpdateResult = Readonly<{ agentId: string; revision: bigint }>;
 export type ProjectLimitsResult = Readonly<{ projectId: string; revision: bigint }>;
@@ -168,7 +169,10 @@ export type AgentControlRequest = Readonly<{
 export type AgentControlResult = Readonly<{ operationId: string; taskId: string; runId: string; status: AgentControlResultBody["status"]; successorTaskId: string }>;
 export type TaskHistoryView = Readonly<{ taskId: string; entries: readonly Readonly<{ operationId: string; kind: AgentControlAction; actor: string; body: string; status: "pending" | "delivered" | "unknown" | "rejected"; createdAtMs: bigint }>[] }>;
 export type TaskDetailView = Readonly<{ taskId: string; revision: bigint; head: bigint; instruction: string; feedback: string; outcome?: string; nextTextOffset?: bigint; peerQuestions: readonly TaskPeerQuestion[]; nextPeerOffset?: bigint }>;
-export type TopologyView = Readonly<{ projectId: string; digest: string; sourceRevision: string; sources?: TopologyBody["sources"]; inventoryOmitted?: number; nodes: readonly TopologyBody["nodes"][number][]; dependencies?: Readonly<{ source: "go-imports-package-manifests"; edges: readonly Readonly<{ from: string; to: string; weight: number }>[]; omitted: number }> }>;
+/** The project's operational structure with its current runtime reading. */
+export type OperationalGraphView = OperationalGraphBody;
+/** One node's inspectable evidence; runtime-only values are data, never instructions. */
+export type OperationalNodeView = OperationalNodeBody;
 /** One agent's live run and the repository directories it has changed. */
 export type RunPathsView = Readonly<{ agentId: string; runId: string; paths: readonly string[] }>;
 /** `agentId` is the scope id: the agent, or the project for a project-scoped list. */
@@ -481,9 +485,14 @@ export class BrowserSession {
     return this.#consoleRequest("TASK_UPDATE_RESULT", request.taskId, request.expectedRevision, "task-update", (id) => encodeClientControl({ type: "TASK_UPDATE", id, body }));
   }
 
-  /** The project's regenerable structure, computed on demand by the daemon. */
-  getTopology(projectId: string): Promise<TopologyView> {
-    return this.#consoleRequest("TOPOLOGY", projectId, 1n, "topology", (id) => encodeClientControl({ type: "TOPOLOGY_GET", id, body: { project_id: projectId } }));
+  /** The project's operational graph, computed on demand by the daemon. */
+  getOperationalGraph(projectId: string): Promise<OperationalGraphView> {
+    return this.#consoleRequest("OPERATIONAL_GRAPH", projectId, 1n, "graph", (id) => encodeClientControl({ type: "OPERATIONAL_GRAPH_GET", id, body: { project_id: projectId } }));
+  }
+
+  /** One operational node's selectors, evidence and sources. */
+  getOperationalNode(projectId: string, nodeId: string): Promise<OperationalNodeView> {
+    return this.#consoleRequest("OPERATIONAL_NODE", `${projectId}:${nodeId}`, 1n, "node", (id) => encodeClientControl({ type: "OPERATIONAL_NODE_GET", id, body: { project_id: projectId, node_id: nodeId } }));
   }
 
   /** The directories one agent's live run has changed; no run, no paths. */
@@ -890,7 +899,7 @@ export class BrowserSession {
       this.#agentControlResult(frame.body, frame.id);
       return;
     }
-    if (frame.type === "AGENT_UPDATE_RESULT" || frame.type === "PROJECT_LIMITS_RESULT" || frame.type === "TASK_UPDATE_RESULT" || frame.type === "TOPOLOGY" || frame.type === "RUN_PATHS" || frame.type === "TASK_LIST" || frame.type === "TASK_HISTORY" || frame.type === "TASK_DETAIL") {
+    if (frame.type === "AGENT_UPDATE_RESULT" || frame.type === "PROJECT_LIMITS_RESULT" || frame.type === "TASK_UPDATE_RESULT" || frame.type === "OPERATIONAL_GRAPH" || frame.type === "OPERATIONAL_NODE" || frame.type === "RUN_PATHS" || frame.type === "TASK_LIST" || frame.type === "TASK_HISTORY" || frame.type === "TASK_DETAIL") {
       this.#consoleResult(frame);
       return;
     }
@@ -1270,9 +1279,9 @@ export class BrowserSession {
   #consoleRequest<T>(kind: ConsolePending["kind"], entityId: string, expectedRevision: bigint, prefix: string, encode: (id: string) => string): Promise<T> {
     try { this.#ensureLive(); } catch (error) { return Promise.reject(error); }
     if (!this.#authenticated) return Promise.reject(new SessionError("unauthorized"));
-    const capability = kind === "TASK_HISTORY" || kind === "TASK_DETAIL" ? CAPABILITIES.private_human_request_detail : kind === "TOPOLOGY" || kind === "RUN_PATHS" ? CAPABILITIES.observe : kind === "PROJECT_LIMITS_RESULT" ? CAPABILITIES.administration : CAPABILITIES.human_actions;
+    const capability = kind === "TASK_HISTORY" || kind === "TASK_DETAIL" ? CAPABILITIES.private_human_request_detail : kind === "OPERATIONAL_GRAPH" || kind === "OPERATIONAL_NODE" || kind === "RUN_PATHS" ? CAPABILITIES.observe : kind === "PROJECT_LIMITS_RESULT" ? CAPABILITIES.administration : CAPABILITIES.human_actions;
     if ((this.#capabilities & capability) === 0) return Promise.reject(new SessionError("unauthorized"));
-    if (!validDynamicID(entityId) || expectedRevision < 1n || expectedRevision > MAX_SQLITE_INTEGER) return Promise.reject(new SessionError("invalid_request"));
+    if (!entityId.split(":").every(validDynamicID) || expectedRevision < 1n || expectedRevision > MAX_SQLITE_INTEGER) return Promise.reject(new SessionError("invalid_request"));
     if (this.#consolePending.size >= MAX_ARRAY_ITEMS) return Promise.reject(new SessionError("rate_limited"));
     const id = this.#nextID(prefix);
     let payload: string;
@@ -1282,10 +1291,10 @@ export class BrowserSession {
     return result;
   }
 
-  #consoleResult(frame: Extract<ServerControlFrame, { type: "AGENT_UPDATE_RESULT" | "PROJECT_LIMITS_RESULT" | "TASK_UPDATE_RESULT" | "TOPOLOGY" | "RUN_PATHS" | "TASK_LIST" | "TASK_HISTORY" | "TASK_DETAIL" }>): void {
+  #consoleResult(frame: Extract<ServerControlFrame, { type: "AGENT_UPDATE_RESULT" | "PROJECT_LIMITS_RESULT" | "TASK_UPDATE_RESULT" | "OPERATIONAL_GRAPH" | "OPERATIONAL_NODE" | "RUN_PATHS" | "TASK_LIST" | "TASK_HISTORY" | "TASK_DETAIL" }>): void {
     const pending = this.#consolePending.get(frame.id);
     if (pending === undefined || pending.kind !== frame.type) throw new ProtocolError("malformed");
-    const identity = frame.type === "AGENT_UPDATE_RESULT" || frame.type === "RUN_PATHS" ? frame.body.agent_id : frame.type === "TASK_LIST" ? frame.body.agent_id ?? frame.body.project_id : (frame.type === "TASK_UPDATE_RESULT" || frame.type === "TASK_HISTORY" || frame.type === "TASK_DETAIL") ? frame.body.task_id : frame.body.project_id;
+    const identity = frame.type === "AGENT_UPDATE_RESULT" || frame.type === "RUN_PATHS" ? frame.body.agent_id : frame.type === "TASK_LIST" ? frame.body.agent_id ?? frame.body.project_id : (frame.type === "TASK_UPDATE_RESULT" || frame.type === "TASK_HISTORY" || frame.type === "TASK_DETAIL") ? frame.body.task_id : frame.type === "OPERATIONAL_NODE" ? `${frame.body.project_id}:${frame.body.node_id}` : frame.body.project_id;
     if (identity !== pending.entityId || frame.type === "TASK_DETAIL" && frame.body.revision !== pending.expectedRevision) throw new ProtocolError("malformed");
     this.#consolePending.delete(frame.id);
     if (frame.type === "TASK_HISTORY") {
@@ -1305,7 +1314,8 @@ export class BrowserSession {
     if (frame.type === "TASK_UPDATE_RESULT") { pending.resolve(Object.freeze({ taskId: frame.body.task_id, revision: frame.body.revision }) as never); return; }
     if (frame.type === "RUN_PATHS") { pending.resolve(Object.freeze({ agentId: frame.body.agent_id, runId: frame.body.run_id, paths: Object.freeze([...frame.body.paths]) }) as never); return; }
     if (frame.type === "TASK_LIST") { pending.resolve(Object.freeze({ agentId: frame.body.agent_id ?? frame.body.project_id!, head: frame.body.head, total: frame.body.total, tasks: Object.freeze(frame.body.tasks.map((task) => Object.freeze({ ...task }))), hasMore: frame.body.has_more }) as never); return; }
-    pending.resolve(Object.freeze({ projectId: frame.body.project_id, digest: frame.body.digest, sourceRevision: frame.body.source_revision, ...(frame.body.sources === undefined ? {} : {sources: Object.freeze(frame.body.sources.map((source) => Object.freeze({...source})))}), ...(frame.body.inventory_omitted === undefined ? {} : { inventoryOmitted: frame.body.inventory_omitted }), nodes: Object.freeze(frame.body.nodes.map((node) => Object.freeze({ ...node, ...(node.inventory === undefined ? {} : { inventory: Object.freeze({ ...node.inventory, direct: Object.freeze({ ...node.inventory.direct }), total: Object.freeze({ ...node.inventory.total }), samples: Object.freeze([...node.inventory.samples]) }) }) }))), ...(frame.body.dependencies === undefined ? {} : { dependencies: Object.freeze({ ...frame.body.dependencies, edges: Object.freeze(frame.body.dependencies.edges.map((edge) => Object.freeze({ ...edge }))) }) }) }) as never);
+    // Decoded frames are fresh objects; freezing the top level keeps callers honest.
+    pending.resolve(Object.freeze(frame.body) as never);
   }
 
 

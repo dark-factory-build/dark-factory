@@ -72,7 +72,7 @@ export function FactoryApp({ onStatusChange, browserPort }: FactoryAppProps = {}
   // projects changes under them.
   const projectKey = snapshot.state === undefined ? "" : [...snapshot.state.projects.keys()].join(" ");
   useEffect(() => {
-    if (view === "floor" && snapshot.status === "ready") owner.current?.loadTopology();
+    if (view === "floor" && snapshot.status === "ready") owner.current?.loadGraphs();
   }, [view, snapshot.status, projectKey]);
 
   const selectedProjectID = snapshot.selectedAgent === undefined ? undefined : snapshot.state?.agents.get(snapshot.selectedAgent.id)?.project_id;
@@ -126,6 +126,7 @@ export function FactoryApp({ onStatusChange, browserPort }: FactoryAppProps = {}
       onAddTask={(agent, instruction, mode, files) => owner.current?.addTask(agent, instruction, mode, files) ?? Promise.resolve(false)}
       onLoadTaskDetail={(task, peerOffset, expectedHead) => owner.current?.taskDetail(task, peerOffset, expectedHead) ?? Promise.reject(new Error("closed"))}
       onLoadTaskHistory={(task) => owner.current?.taskHistory(task) ?? Promise.reject(new Error("closed"))}
+      onLoadNode={(projectId, nodeId) => owner.current?.operationalNode(projectId, nodeId) ?? Promise.reject(new Error("closed"))}
       onLoadTaskList={(agentId, cursor) => owner.current?.taskList(agentId, cursor) ?? Promise.reject(new Error("closed"))}
       onOpenTerminalForHumanRequest={(request) => { setDetail("agent"); setAgentPanel("terminal"); owner.current?.openTerminalForHumanRequest(request); }}
       onSelectHumanRequest={(request) => { setDetail("needs-you"); void owner.current?.selectHumanRequest(request); }}

@@ -1,11 +1,10 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import type { AgentItem, HumanRequestItem, StateView, TaskItem, TopologyView } from "@dark-factory/client";
+import { useMemo, useState } from "react";
+import type { AgentItem, HumanRequestItem, OperationalGraphView, OperationalNodeView, StateView, TaskItem } from "@dark-factory/client";
 import {
   agentStatus,
   agentActivity,
   agentCurrentTask,
-  prepareFloor,
-  selectFloor,
+  projectGraph,
   projectFloor,
   projectProposals,
   type RunPathSample,
@@ -13,7 +12,7 @@ import {
 import { FactoryScene, AgentSprite } from "./factory-scene/factory-scene.js";
 import { type ProductionContraption } from "./production-view.js";
 import { type ProjectContentCall } from "./project-library.js";
-import { type SceneNode } from "./factory-scene/scene.js";
+import type { SceneHall, SceneMachine } from "./factory-scene/scene.js";
 import { SectionHeader, Status } from "./console-kit.js";
 import { DEFAULT_FLOOR_APPEARANCE, type FloorAppearance } from "./floor-appearance.js";
 
@@ -83,16 +82,18 @@ export function StageMeter({ stage }: { stage: TaskItem["status"] }) {
 
 const NO_CHANGES: readonly ProductionContraption[] = [];
 
-/** Flat source projection; every action opens an existing inspector or control. */
+/** The operational floor; every action opens an existing inspector or control. */
 export function FactoryFloor({
-  changes = NO_CHANGES, selectedChange, onSelectChange, state, topologies, runPaths, lastRunPaths, selectedAgentId, onSelectAgent,
-  onSelectHumanRequest, selectedTaskId, onSelectTask, onOpenTasks, onOpenMissions, onOpenLibrary, onOpenBoard, requestedEntity, connected = true, floorAppearance = DEFAULT_FLOOR_APPEARANCE, projectId, onProjectContent,
+  changes = NO_CHANGES, selectedChange, onSelectChange, state, graphs, onLoadNode, onAddTask, runPaths, lastRunPaths, selectedAgentId, onSelectAgent,
+  onSelectHumanRequest, selectedTaskId, onSelectTask, onOpenTasks, onOpenMissions, onOpenLibrary, onOpenBoard, requestedEntity, connected = true, floorAppearance = DEFAULT_FLOOR_APPEARANCE, projectId,
 }: {
   changes?: readonly ProductionContraption[];
   selectedChange?: string;
   onSelectChange?: (key: string) => void;
   state: StateView | undefined;
-  topologies: ReadonlyMap<string, TopologyView> | undefined;
+  graphs: ReadonlyMap<string, OperationalGraphView> | undefined;
+  onLoadNode?: (projectId: string, nodeId: string) => Promise<OperationalNodeView>;
+  onAddTask?: (agent: AgentItem, instruction: string, mode: "queue" | "any") => Promise<boolean>;
   runPaths?: ReadonlyMap<string, RunPathSample>;
   lastRunPaths?: ReadonlyMap<string, RunPathSample>;
   selectedAgentId?: string;
@@ -110,38 +111,51 @@ export function FactoryFloor({
   projectId?: string;
   onProjectContent?: ProjectContentCall;
 }) {
-  const [selectedEntity, setSelectedEntity] = useState<string>();
-  const projectsKey = JSON.stringify([...state?.projects.values() ?? []].map(({ id, name }) => [id, name]).sort(([left], [right]) => left!.localeCompare(right!)));
-  const prepared = useMemo(() => prepareFloor(state?.projects, topologies), [projectsKey, topologies]);
-  const selected = useMemo(() => selectFloor(prepared, floorAppearance.detail ?? "auto"), [prepared, floorAppearance.detail]);
-  const scene = useMemo(() => projectFloor(state, selected, runPaths, lastRunPaths), [state, selected, runPaths, lastRunPaths]);
-  const proposed = useMemo(() => projectProposals(selected, changes), [selected, changes]);
+  const projects = useMemo(() => [...state?.projects.values() ?? []].map(({ id }) => id).sort(), [JSON.stringify([...state?.projects.keys() ?? []].sort())]);
+  const prepared = useMemo(() => projectGraph(graphs, projects, floorAppearance.detail ?? "auto"), [graphs, projects, floorAppearance.detail]);
+  const scene = useMemo(() => projectFloor(state, prepared, runPaths, lastRunPaths), [state, prepared, runPaths, lastRunPaths]);
+  const proposed = useMemo(() => projectProposals(prepared, changes), [prepared, changes]);
   const peerQuestions = useMemo(() => [...(state?.peerQuestions?.values() ?? [])], [state]);
-  const inventoryOmitted = [...(state?.projects.keys() ?? [])].reduce((count, id) => count + (topologies?.get(id)?.inventoryOmitted ?? 0), 0);
-  const entity = selected.detailByID.get(selectedEntity ?? "");
-  const topology = topologies?.get(entity?.project?.id ?? "");
+  const projectOf = (nodeId: string) => projects.find((id) => graphs?.get(id)?.nodes.some((node) => node.id === nodeId || nodeId.startsWith(`${node.id}:`)));
+  const unplaced = proposed.proposals.filter((proposal) => proposal.state === "unavailable" || proposal.operations.some((operation) => operation.roomId === undefined)).length;
+  const unavailable = projects.flatMap((id) => graphs?.get(id)?.sources.filter((source) => source.kind === "unavailable") ?? []);
+  const investigate = onAddTask === undefined || state === undefined ? undefined : (machine: SceneMachine, hall?: SceneHall) => {
+    const project = projectOf(machine.id) ?? projectId;
+    const agent = [...state.agents.values()].filter((candidate) => !candidate.archived && candidate.project_id === project).sort((left, right) => Number(left.role === "orchestrator") - Number(right.role === "orchestrator") || left.id.localeCompare(right.id))[0];
+    if (agent === undefined) return;
+    // Only the node's identity, static label and counts: runtime-only values
+    // come from unauthenticated local senders and never enter instructions.
+    const reading = machine.reading;
+    const label = reading.evidence === "runtime" ? `runtime-only ${machine.kind}` : machine.label;
+    void onAddTask(agent, [
+      `Investigate the ${machine.kind} "${label}"${hall !== undefined && hall.id !== machine.id ? ` in ${hall.label}` : ""} (operational node ${machine.represented?.join(", ") ?? machine.id}).`,
+      `Observation: ${reading.observation}; state: ${reading.state}; evidence: ${reading.evidence}; ${reading.ratePerHour} events/hour; ${reading.errorPermille / 10}% errors; p95 ${reading.latencyMs} ms.`,
+      reading.evidence === "runtime" ? "The code does not explain this runtime activity. Find what serves it and make the static model and the code agree, or report why it cannot be explained."
+        : reading.observation === "unobserved" ? "Nothing observes this component. Find a way to observe it with the project's existing tooling, or report why it cannot be observed."
+        : "Find the cause, fix it, and report what changed. Use the factory's ordinary change, review and release path.",
+    ].join("\n"), "any");
+  };
   return <div className="dfFactoryFloor">
     <div className="dfFactoryFloor__scene">
     <FactoryScene
       tools={<>
-        {inventoryOmitted > 0 ? <p className="dfFactoryEntityTools__notice" role="status">Source inventory incomplete: {inventoryOmitted} areas unavailable.</p> : null}
+        {unplaced > 0 ? <p className="dfFactoryEntityTools__notice" role="status">{unplaced} {unplaced === 1 ? "change is" : "changes are"} not fully placed on the floor; Changes lists every path.</p> : null}
+        {unavailable.length > 0 ? <p className="dfFactoryEntityTools__notice" role="status">Source unavailable for {unavailable.map((source) => source.name).join(", ")}; those halls cannot be inferred.</p> : null}
       </>}
-      sourceDetails={entity === undefined ? undefined : <SourceContents key={`${entity.id}:${topology?.digest}`} node={entity} topology={topology} call={connected ? onProjectContent : undefined} />}
-      onDiscussSource={entity === undefined || onOpenBoard === undefined ? undefined : () => onOpenBoard(entity.project?.id, entity.id, undefined, sourceForNode(entity, topology)?.repository_id)}
+      onLoadNode={onLoadNode === undefined ? undefined : (nodeId) => { const project = projectOf(nodeId); return project === undefined ? Promise.reject(new Error("unknown node")) : onLoadNode(project, nodeId); }}
+      onInvestigate={investigate}
+      onDiscussSource={onOpenBoard === undefined ? undefined : (nodeId) => { const project = projectOf(nodeId); onOpenBoard(project, project === undefined ? undefined : `${project}:${nodeId}`); }}
       proposals={{ items: proposed.proposals, selected: selectedChange, onSelect: (id) => onSelectChange?.(id) }}
       appearance={floorAppearance}
       selectedWorkerId={selectedAgentId}
       selectedTaskId={selectedTaskId}
-      topology={proposed.topology}
+      graph={scene.graph}
       projectId={projectId}
-      detailNodes={selected.detailByID}
       workers={[...scene.workers, ...proposed.reviewers.filter((worker) => !selectedChange || worker.review?.proposalId === selectedChange)]}
       connected={connected}
       tasks={scene.tasks}
       peerQuestions={peerQuestions}
-      omittedLocations={scene.omittedLocations}
       requestedEntity={requestedEntity}
-      onSelectEntity={setSelectedEntity}
       onSelectTask={onSelectTask}
       onOpenTasks={onOpenTasks}
       onOpenMissions={onOpenMissions}
@@ -161,36 +175,6 @@ export function FactoryFloor({
   </div>;
 }
 
-
-const sourceForNode = (node: SceneNode, topology?: TopologyView) => [...topology?.sources ?? []].filter((source) => source.prefix === "" || node.path === source.prefix || node.path.startsWith(`${source.prefix}/`)).sort((a, b) => b.prefix.length - a.prefix.length)[0];
-
-function SourceContents({ node, topology, call }: { node: SceneNode; topology?: TopologyView; call?: ProjectContentCall }) {
-  const [files, setFiles] = useState<Readonly<Record<string, unknown>>[]>([]), [next, setNext] = useState(0), [loaded, setLoaded] = useState(false), [pending, setPending] = useState(false), [notice, setNotice] = useState("");
-  const epoch = useRef(0);
-  useEffect(() => () => { epoch.current++; }, []);
-  useEffect(() => { epoch.current++; setPending(false); }, [call]);
-  const read = async () => {
-    if (!call || !node.project || pending) return;
-    const generation = ++epoch.current;
-    setPending(true); setNotice("");
-    try {
-      const result = await call("source_files", { project_id: node.project.id, id: node.id.slice(node.project.id.length + 1), tested_source: sourceForNode(node, topology)?.revision ?? topology?.sourceRevision ?? "", offset: loaded ? next : 0, limit: 32 });
-      if (generation !== epoch.current) return;
-      if (result.unavailable) { setNotice(String(result.unavailable)); return; }
-      setFiles((old) => [...old, ...(Array.isArray(result.files) ? result.files as Readonly<Record<string, unknown>>[] : [])]);
-      setNext(Number(result.next_offset) || 0); setLoaded(true);
-      setNotice(`${typeof result.total === "number" ? result.total : "Unknown number of"} directly owned files · ${String(result.revision || "revision unavailable")}`);
-    } catch { if (generation === epoch.current) setNotice("Source contents unavailable. Refresh the topology before retrying."); }
-    finally { if (generation === epoch.current) setPending(false); }
-  };
-  return <>
-    {loaded && next === 0 ? null : <button type="button" disabled={!call || pending} onClick={() => void read()}>{pending ? "Reading source…" : loaded ? "More source files" : "Read exact source contents"}</button>}
-    {notice ? <p role="status">{notice}</p> : null}
-    {files.length === 0 ? null : <ul>{files.map((file) => <li key={String(file.path)}><code>{String(file.path)}</code> · {String(file.kind)} · {String(file.bytes)} bytes</li>)}</ul>}
-  </>;
-}
-
-/** Rank is the served role: an orchestrator oversees, a worker builds. */
 export function rankLabel(role: AgentItem["role"]): string {
   return role === "orchestrator" ? "Overseer" : "Worker";
 }

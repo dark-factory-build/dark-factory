@@ -340,7 +340,7 @@ func validateKnowledge(ctx context.Context, c *sql.Conn, spec NewContent, expect
 
 func validateKnowledgeEntity(ctx context.Context, c *sql.Conn, project ProjectID, entity string) error {
 	raw, ok := strings.CutPrefix(entity, project.String()+":")
-	if !ok || len(raw) != 64 {
+	if !ok || len(raw) != 32 {
 		return ErrInvalidValue
 	}
 	if _, err := hex.DecodeString(raw); err != nil {
