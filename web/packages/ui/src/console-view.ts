@@ -50,18 +50,10 @@ export function primaryAgent(state: StateView): AgentItem | undefined {
       || compareText(left.id, right.id))[0];
 }
 
-export type FactoryCounters = Readonly<{
-  queued: number | undefined;
-  needsYou: number | undefined;
-}>;
+export type FactoryCounters = Readonly<{ needsYou: number | undefined }>;
 
 export function factoryCounters(state: StateView | undefined): FactoryCounters {
-  if (state === undefined) return { queued: undefined, needsYou: undefined };
-  let queued = 0;
-  for (const task of state.tasks.values()) {
-    if (task.status === "queued") queued += 1;
-  }
-  return { queued, needsYou: state.humanRequests.size };
+  return { needsYou: state?.humanRequests.size };
 }
 
 /** Active work first, then queued, then finished; priority breaks ties. */

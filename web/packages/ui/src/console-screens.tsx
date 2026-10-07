@@ -11,7 +11,7 @@ import {
   type RunPathSample,
 } from "./console-view.js";
 import { FactoryScene, AgentSprite } from "./factory-scene/factory-scene.js";
-import { inProgressProduction, productionKey, type ProductionContraption } from "./production-view.js";
+import { type ProductionContraption } from "./production-view.js";
 import { type ProjectContentCall } from "./project-library.js";
 import { type SceneNode } from "./factory-scene/scene.js";
 import { DEFAULT_FLOOR_APPEARANCE, type FloorAppearance } from "./floor-appearance.js";
@@ -85,12 +85,11 @@ const NO_CHANGES: readonly ProductionContraption[] = [];
 /** Flat source projection; every action opens an existing inspector or control. */
 export function FactoryFloor({
   changes = NO_CHANGES, selectedChange, onSelectChange, state, topologies, runPaths, lastRunPaths, selectedAgentId, onSelectAgent,
-  onSelectHumanRequest, selectedTaskId, onSelectTask, onOpenTasks, onOpenMissions, onOpenLibrary, onOpenBoard, onOpenChanges, requestedEntity, connected = true, floorAppearance = DEFAULT_FLOOR_APPEARANCE, projectId, onProjectContent,
+  onSelectHumanRequest, selectedTaskId, onSelectTask, onOpenTasks, onOpenMissions, onOpenLibrary, onOpenBoard, requestedEntity, connected = true, floorAppearance = DEFAULT_FLOOR_APPEARANCE, projectId, onProjectContent,
 }: {
   changes?: readonly ProductionContraption[];
   selectedChange?: string;
   onSelectChange?: (key: string) => void;
-  onOpenChanges?: () => void;
   state: StateView | undefined;
   topologies: ReadonlyMap<string, TopologyView> | undefined;
   runPaths?: ReadonlyMap<string, RunPathSample>;
@@ -108,7 +107,6 @@ export function FactoryFloor({
   connected?: boolean;
   floorAppearance: FloorAppearance;
   projectId?: string;
-  onProject?: (projectId: string | undefined) => void;
   onProjectContent?: ProjectContentCall;
 }) {
   const [selectedEntity, setSelectedEntity] = useState<string>();
@@ -120,26 +118,11 @@ export function FactoryFloor({
   const peerQuestions = useMemo(() => [...(state?.peerQuestions?.values() ?? [])], [state]);
   const inventoryOmitted = [...(state?.projects.keys() ?? [])].reduce((count, id) => count + (topologies?.get(id)?.inventoryOmitted ?? 0), 0);
   const entity = selected.detailByID.get(selectedEntity ?? "");
-  const incompleteChanges = proposed.proposals.filter((proposal) => {
-    const source = changes.find((item) => productionKey(item) === proposal.id)?.source;
-    return proposal.state === "unavailable" || (source?.omitted ?? 0) > 0 || (source?.relationshipsOmitted ?? 0) > 0 || Boolean(source?.relationshipsUnavailable) || proposal.operations.some((operation) => !operation.roomId) || proposal.relationships?.some((edge) => !edge.fromId || !edge.toId);
-  }).length;
   const topology = topologies?.get(entity?.project?.id ?? "");
   return <div className="dfFactoryFloor">
     <div className="dfFactoryFloor__scene">
     <FactoryScene
       tools={<>
-        <button type="button" disabled={!onOpenChanges} onClick={onOpenChanges}>Changes · {changes.filter(inProgressProduction).length}</button>
-        <details className="dfFactoryHelp"><summary>Help</summary>
-          <p>Select equipment to inspect it. Search finds source areas beyond the visible rooms.</p>
-          <p className="dfFactoryLegend">⚙ Code · ⏚ Tests · ▤ Config · ▥ Docs · ▦ Assets</p>
-          <p>Frames are additions, repair marks are edits, and crossed equipment is proposed removal. Select a Change to view its proposal.</p>
-          <h4>Integrated source</h4>
-          {[...(state?.projects.values() ?? [])].map((project) => { const source = topologies?.get(project.id); return <p key={project.id}>{project.name}: {source?.sources?.length ? source.sources.map((item) => <span key={item.repository_id}> · {item.repository_id} · {item.target_ref || "target unavailable"} · {item.kind} · <code>{item.revision || "revision unavailable"}</code>{item.reason ? `: ${item.reason}` : ""}</span>) : <code>{source?.sourceRevision || "integrated revision unavailable"}</code>}</p>; })}
-          {scene.aggregatedLocations > 0 ? <p>{scene.aggregatedLocations} source areas grouped into larger assemblies; search reaches every served entity.</p> : null}
-          {proposed.aggregatedProposals > 0 ? <p>{proposed.aggregatedProposals} proposed areas grouped into their owning rooms. Full paths are in Changes.</p> : null}
-        </details>
-        {incompleteChanges > 0 ? <p className="dfFactoryEntityTools__notice" role="status">{incompleteChanges} {incompleteChanges === 1 ? "change is" : "changes are"} not fully shown on the floor. <button type="button" disabled={!onOpenChanges} onClick={onOpenChanges}>View changes</button></p> : null}
         {inventoryOmitted > 0 ? <p className="dfFactoryEntityTools__notice" role="status">Source inventory incomplete: {inventoryOmitted} areas unavailable.</p> : null}
       </>}
       sourceDetails={entity === undefined ? undefined : <SourceContents key={`${entity.id}:${topology?.digest}`} node={entity} topology={topology} call={connected ? onProjectContent : undefined} />}
