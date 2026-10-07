@@ -710,6 +710,7 @@ test("opening a selected question restores that agent's terminal panel", async (
     await act(async () => { renderer.root.findAllByType("button").find((button) => button.props.children === "Settings" && typeof button.props.onClick === "function").props.onClick(); });
     await act(async () => { renderer.root.findByProps({ "aria-label": "Project" }).props.onChange({ currentTarget: { value: ids.secondProject } }); });
     assert.equal(renderer.root.findAllByProps({ "aria-label": "Terminal" }).length, 0);
+    await act(async () => { renderer.root.findByProps({ "aria-label": "Project" }).props.onChange({ currentTarget: { value: "" } }); });
     await act(async () => { renderer.root.findAllByType("button").find((button) => Array.isArray(button.props.children) && button.props.children[0] === "Needs you ").props.onClick(); });
     await act(async () => { renderer.root.findAllByType("button").find((button) => button.props.children === "Open terminal").props.onClick(); });
     assert.equal(renderer.root.findByProps({ "aria-label": "Project" }).props.value, ids.project, "opening a global question switches to its agent’s project");
@@ -2602,4 +2603,19 @@ test("Needs you and Changes counts hide at zero, and Help is gone", () => {
   assert.equal(/Changes (<!-- -->)?\d/.test(markup), false);
   assert.equal(markup.includes("Help"), false);
   assert.equal(markup.includes(" items"), false);
+});
+
+test("Needs you lists and counts only the chosen project's requests", async () => {
+  let tree;
+  await act(async () => { tree = create(createElement(FactoryConsole, { status: "ready", state: fixtureState, onDetail() {} })); });
+  const request = [...fixtureState.humanRequests.values()][0];
+  const other = request.project_id === ids.project ? ids.secondProject : ids.project;
+  await act(async () => tree.root.findByProps({ "aria-label": "Project" }).props.onChange({ currentTarget: { value: other } }));
+  const text = JSON.stringify(tree.toJSON());
+  assert.equal(text.includes(" asks"), false);
+  const tabs = tree.root.findAllByType("button").filter((button) => Array.isArray(button.props.children) && button.props.children[0] === "Needs you ");
+  assert.ok(tabs.length > 0);
+  assert.ok(tabs.every((button) => button.props.children[1] === ""));
+  assert.match(text, /Nothing needs your attention/);
+  await act(async () => tree.unmount());
 });

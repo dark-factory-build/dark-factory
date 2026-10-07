@@ -202,6 +202,7 @@ export function FactoryConsole({
     projects: new Map([...state.projects].filter(([id]) => id === projectId)),
     agents: new Map([...state.agents].filter(([, agent]) => agent.project_id === projectId)),
     tasks: new Map([...state.tasks].filter(([, task]) => task.project_id === projectId)),
+    humanRequests: new Map([...state.humanRequests].filter(([, request]) => request.project_id === projectId)),
   }, [state, projectId]);
   const selectedTask = selectedTaskId === undefined ? undefined : scopedState?.tasks.get(selectedTaskId);
   const selectTask = onSelectTask === undefined ? undefined : (id: string) => { onSelectTask(id); onDetail?.("queue"); };
