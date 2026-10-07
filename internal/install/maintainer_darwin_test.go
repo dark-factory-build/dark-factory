@@ -82,7 +82,8 @@ func TestMaintainerCredentialPrivateRestartAndCrash(t *testing.T) {
 
 func TestOperationalCensusIncludesEveryCredentialAndRejectsOverflow(t *testing.T) {
 	path := t.TempDir()
-	for _, name := range []string{formatName, databaseName, tokenName, lockName, lockAnchorName, runtimesName, changesName, databaseName + "-wal", databaseName + "-shm", RelayDirectoryName, maintainerCredentialName, maintainerCredentialStage, "linear.json", "linear.json.staging"} {
+	members := []string{formatName, databaseName, tokenName, lockName, lockAnchorName, runtimesName, changesName, databaseName + "-wal", databaseName + "-shm", RelayDirectoryName, maintainerCredentialName, maintainerCredentialStage, "linear.json", "linear.json.staging", "public.key", "observe.json"}
+	for _, name := range members {
 		if err := os.WriteFile(filepath.Join(path, name), nil, 0600); err != nil {
 			t.Fatal(err)
 		}
@@ -102,7 +103,7 @@ func TestOperationalCensusIncludesEveryCredentialAndRejectsOverflow(t *testing.T
 		if overflow && err == nil {
 			t.Fatal("overflow entry accepted")
 		}
-		if !overflow && (err != nil || len(names) != 14) {
+		if !overflow && (err != nil || len(names) != len(members)) {
 			t.Fatalf("optional members truncated: %d %v", len(names), err)
 		}
 	}
