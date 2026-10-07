@@ -30,8 +30,15 @@ func loop() { for range time.NewTicker(time.Second).C {} }
 func unused() { exec.Command("never-called") }
 `),
 			"cmd/tool/main.go": []byte(`package main
-import "example.com/core/internal/api"
-func main() { api.Call() }
+import ("example.com/core/internal/api"; "example.com/core/internal/broker")
+func main() { api.Call(); client := broker.New(); client.Send(nil) }
+`),
+			"internal/broker/broker.go": []byte(`package broker
+import "net/http"
+const Origin = "https://broker.payments.io"
+type Client struct{ origin, docs string }
+func New() *Client { return &Client{origin: Origin, docs: "https://docs.unread.io"} }
+func (c *Client) Send(ctx context.Context) { http.NewRequestWithContext(ctx, "POST", c.origin+"/v1/send", nil) }
 `),
 			"internal/api/api.go": []byte(`package api
 import ("net/http"; _ "github.com/jackc/pgx/v5")
@@ -137,13 +144,14 @@ func TestInferGo(t *testing.T) {
 		{"server", "runs", "loop"},
 		{"server", "calls", "api.payments.io"},
 		{"tool", "calls", "api.payments.io"},
+		{"tool", "calls", "broker.payments.io"}, // a URL constant stored in a field a request reads
 		{"server", "uses", "postgresql"},
 	} {
 		if !edge(graph, byID, want[0], want[1], want[2]) {
 			t.Errorf("missing edge %v", want)
 		}
 	}
-	for _, absent := range []string{"never-called", "test-only.io", "/only-if-called"} {
+	for _, absent := range []string{"never-called", "test-only.io", "/only-if-called", "docs.unread.io"} {
 		if len(byLabel[absent]) != 0 {
 			t.Errorf("%q came from code no binary calls", absent)
 		}
