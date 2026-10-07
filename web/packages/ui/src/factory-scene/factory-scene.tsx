@@ -313,7 +313,8 @@ function SceneWorkers({ knowledgeCues, shelf, board, onOpenBoard, nearby, errand
     mail.current = [...kept, ...(!live.current ? [] : events).flatMap((event) => {
       const cue = knowledgeCues.find((item) => item.key === event.subject), furniture = cue === undefined ? undefined : cue.board ? board : shelf;
       const seat = seated.find((placement) => placement.id === event.to), from = seated.find((placement) => placement.id === event.from), to = event.to === undefined ? furniture : seat;
-      const origin = from ?? (event.kind === "read" ? furniture : tray), agent = cue?.agentId;
+      // A write leaves the writer where it is drawn, walking or on an errand, not its seat.
+      const origin = (event.kind === "post" ? positions.get(event.from!) : from) ?? (event.kind === "read" ? furniture : tray), agent = cue?.agentId;
       if (to === undefined || origin === undefined || event.from !== undefined && from === undefined || kept.some((message) => message.key === event.key) || agent !== undefined && recording.has(agent)) return [];
       if (agent !== undefined) recording.add(agent);
       return [{ ...send(event, started, origin, from === undefined || seat === undefined || isPaper(event.kind) ? undefined : routeBetween(layout, from, seat), Math.hypot(to.x - origin.x, to.y - origin.y)), end: seat === undefined ? to : undefined }];

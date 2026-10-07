@@ -233,10 +233,17 @@ test("recorded operations fly between the agent and the shelf or board, open wha
     assert.deepEqual(ada(), before, "the agent never moves for it");
     assert.ok(marks("agent").some((node) => node.props["data-knowledge-key"] === "r1"), "then it rests beside the agent");
 
-    await act(async () => { renderer.update(scene({ knowledgeCues: [cue("r1", "ada", false, true), cue("w1", "grace", true, false)] })); });
+    // The writer is walking to another hall when it posts: the paper leaves the sprite, not either seat.
+    const seat = point(renderer.root.findByProps({ "data-worker-id": "grace" }));
+    const moved = workers.map((worker) => worker.id === "grace" ? { ...worker, nodeId: "a" } : worker);
+    await act(async () => { renderer.update(scene({ workers: moved, knowledgeCues: [cue("r1", "ada", false, true)] })); });
+    for (let step = 0; step < 15; step += 1) await tick(16);
+    assert.equal(renderer.root.findByProps({ "data-worker-id": "grace" }).props["data-worker-action"], "walking");
+    await act(async () => { renderer.update(scene({ workers: moved, knowledgeCues: [cue("r1", "ada", false, true), cue("w1", "grace", true, false)] })); });
     await tick(16);
     const grace = point(renderer.root.findByProps({ "data-worker-id": "grace" }));
-    assert.ok(near(point(marks("flight")[0]), grace), "a post leaves the writer");
+    assert.ok(!near(grace, seat, 24), "she has left her seat");
+    assert.ok(near(point(marks("flight")[0]), grace), `a post leaves the writer where she is drawn: ${point(marks("flight")[0])} vs ${grace}`);
     for (let step = 0; step < 80 && marks("flight").length > 0; step += 1) { last = point(marks("flight")[0]); await tick(16); }
     const board = point(renderer.root.findByProps({ "aria-label": "Open discussion board" }));
     assert.ok(near(last, [board[0] + 8, board[1] + 8], 24), `and lands at the board: ${last} vs ${board}`);
