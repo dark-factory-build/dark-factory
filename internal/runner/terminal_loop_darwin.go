@@ -152,10 +152,10 @@ type terminalOwner struct {
 	startupSubmitRetryInterval      time.Duration
 	humanReplyCorrelation           uint64
 	humanReplyCount                 uint32
-	// folderTail holds recent startup output until Codex's folder dialog is
-	// answered once; nil afterwards.
-	folderTail     []byte
-	folderAnswered bool
+	// folderTail holds the first 16 KiB of output until Codex's folder dialog
+	// is answered or startup has passed; nil afterwards.
+	folderTail []byte
+	folderDone bool
 }
 
 // ponytail: the provider's output is opaque to the runner, so its readiness
@@ -822,21 +822,24 @@ func (o *terminalOwner) writeTerminalPayload(payload []byte) (uint32, TerminalRe
 
 // Codex 0.160+ opens every folder the factory marks untrusted with a blocking
 // "Folder access" dialog whose default, option 1, is "Open restricted": exactly
-// the factory's intent. The runner answers that one dialog once with CR and
-// never any other, so an unknown dialog (for example "Trust this folder?")
-// still stalls instead of being accepted.
+// the factory's intent. Within the first 16 KiB of output the runner answers
+// that one dialog once with CR and never any other, so an unknown dialog (for
+// example "Trust this folder?") still stalls instead of being accepted.
 func (o *terminalOwner) answerFolderAccess(data []byte) {
-	if o.folderAnswered {
+	if o.folderDone {
 		return
 	}
 	o.folderTail = append(o.folderTail, data...)
+	// Only the start of a session is startup: past it, nothing is answered,
+	// so a later screen quoting the dialog can never receive a CR.
 	if len(o.folderTail) > 16<<10 {
-		o.folderTail = o.folderTail[len(o.folderTail)-16<<10:]
+		o.folderDone, o.folderTail = true, nil
+		return
 	}
 	if !isCodexFolderAccessDialog(o.folderTail) {
 		return
 	}
-	o.folderAnswered, o.folderTail = true, nil
+	o.folderDone, o.folderTail = true, nil
 	o.writeTerminalPayload([]byte{'\r'})
 }
 
