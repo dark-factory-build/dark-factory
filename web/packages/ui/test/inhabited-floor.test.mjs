@@ -166,3 +166,12 @@ test("thirty proposals draw no floor Changes button or Help", async () => {
     assert.deepEqual(selected, [""]);
   } finally { if (tree) await act(async () => tree.unmount()); }
 });
+
+test("a repository nothing recognised is one hall with its marker inside, not quarantine", () => {
+  const graph = graphWith([unit(1, "worker", ["."], { runtime: "process" }), graphNode(2, "unknown", "No recognised entry points", { unit: hex(1), evidence: "uncertain" })]);
+  const prepared = projectGraph(new Map([["project", graph]]), ["project"]);
+  assert.equal(prepared.graph.quarantine.length, 0);
+  const layout = layoutScene(prepared.graph);
+  assert.deepEqual(layout.rooms.map((room) => room.kind), ["hall"]);
+  assert.ok(layout.rooms[0].contents.some((item) => item.entityId === hex(2) && item.shape === "crate"));
+});

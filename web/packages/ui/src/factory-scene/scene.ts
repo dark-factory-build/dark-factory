@@ -191,6 +191,8 @@ function composeHall(hall: SceneHall, room: SceneRect): readonly RoomContent[] {
   const perRow = Math.max(1, Math.floor((right - lineX) / 42));
   cells.forEach((machine, index) => contents.push(place(machine, lineX + (index % perRow) * 42, top + 6 + Math.floor(index / perRow) * 34)));
   silos.forEach((machine, index) => contents.push(place(machine, right - Math.floor(index / 3) * 36, top + 8 + (index % 3) * 62)));
+  // What the code shows but nothing recognised waits by the door as a crate.
+  hall.machines.filter((machine) => machine.kind === "unknown").forEach((machine, index) => contents.push(place(machine, room.x + 14 + index * 28, room.y + room.height - 40)));
   return contents;
 }
 
