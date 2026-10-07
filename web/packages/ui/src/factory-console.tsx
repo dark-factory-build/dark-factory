@@ -299,7 +299,7 @@ export function FactoryConsole({
           <IconButton icon="git-pull-request" aria-pressed={detail === "production"} onClick={openChanges}>Changes <Badge n={inProgressItems.length} /></IconButton>
           <IconButton icon="list" aria-pressed={detail === "queue"} disabled={!ready} onClick={() => onDetail("queue")}>Tasks</IconButton>
           <IconButton icon="inbox" aria-pressed={detail !== "floor" && selectedDetail === "needs-you"} disabled={!ready} onClick={() => onDetail("needs-you")}>Needs you <Badge n={counters.needsYou} /></IconButton>
-          <button type="button" disabled={!ready} onClick={() => openKnowledge(false)}>Library</button>
+          <IconButton icon="book" disabled={!ready} onClick={() => openKnowledge(false)}>Library</IconButton>
         </nav>}
         <div className="dfConsoleLayout">
           <section className="dfConsoleLayout__left dfFactoryConsole__section" aria-label={view === "floor" ? "Factory floor" : "Agents"}>
@@ -324,7 +324,7 @@ export function FactoryConsole({
 
           <aside className="dfConsoleSidebar" aria-label="Selected detail">
             <div className="dfConsoleViewToggle" role="group" aria-label="Right panel">
-              <button type="button" disabled={!ready} onClick={() => openKnowledge(false)}>Library</button>
+              <IconButton icon="book" disabled={!ready} onClick={() => openKnowledge(false)}>Library</IconButton>
               <IconButton icon="inbox" aria-pressed={selectedDetail === "needs-you"} disabled={!ready || onDetail === undefined} onClick={() => onDetail?.("needs-you")}>Needs you <Badge n={counters.needsYou} /></IconButton>
               <button type="button" aria-pressed={selectedDetail === "missions"} disabled={!ready || onDetail === undefined} onClick={() => onDetail?.("missions")}>Missions</button>
               <IconButton icon="list" aria-pressed={selectedDetail === "queue"} disabled={!ready || onDetail === undefined} onClick={() => onDetail?.("queue")}>Tasks</IconButton>
@@ -454,7 +454,7 @@ function NeedsYouColumn({
           <ul className="dfConsoleItems">
             {requests.map((request) => {
               const selected = selectedHumanRequest?.request.id === request.id;
-                            const disabled = status !== "ready" || busy || (selected ? onCloseHumanRequest === undefined : onSelectHumanRequest === undefined);
+              const disabled = status !== "ready" || busy || (selected ? onCloseHumanRequest === undefined : onSelectHumanRequest === undefined);
               return (
                 <li key={request.id}>
                   <details className="dfConsoleItem" open={selected}>

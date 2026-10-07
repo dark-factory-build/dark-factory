@@ -739,7 +739,7 @@ export function SettingsDialog({
       id={`${settingsId}-panel-${index}`} aria-labelledby={`${settingsId}-tab-${index}`} hidden={tab !== index} tabIndex={0}>
       {content}
     </div>)}
-    <p className="dfConsoleSidebar__inherit">
+    <p className="dfSettingsFeedback">
       <a href="https://darkfactory.build/feedback?kind=bug" target="_blank" rel="noopener noreferrer">Report a problem</a> · <a href="https://darkfactory.build/feedback?kind=feature" target="_blank" rel="noopener noreferrer">Request a feature</a> · <a href="https://darkfactory.build/backlog" target="_blank" rel="noopener noreferrer">Public backlog</a>
     </p>
   </ConsoleDialog>;
@@ -799,7 +799,7 @@ function ProjectCreateForm({ onCreate, error }: { onCreate?: (request: { name: s
 function RepositoryProject({ project, items, pending, error, onMutate }: { project: ProjectItem; items?: readonly RepositoryView[]; pending: boolean; error?: string; onMutate?: (request: RepositoryMutation) => void }) {
   const [name, setName] = useState(""); const [root, setRoot] = useState(""); const [baseRef, setBaseRef] = useState("");
   return <section className="dfConsoleSidebar__section" aria-label={`Repositories for ${project.name}`}>
-    <h3>{project.name}</h3>{error === undefined ? null : <p role="alert">{error}</p>}
+    <h4>{project.name}</h4>{error === undefined ? null : <p role="alert">{error}</p>}
     {items === undefined ? <p className="dfFactoryConsole__empty">{pending ? "Loading repositories" : "Repositories unavailable"}</p> : <ul className="dfFactoryConsole__list">{items.map((item) => <RepositoryRow key={`${item.id}:${item.revision}`} project={project} item={item} pending={pending} onMutate={onMutate} />)}</ul>}
     <details><summary>Add repository</summary><form onSubmit={(event) => { event.preventDefault(); if (name.trim() && root.startsWith("/") && baseRef.trim()) onMutate?.({ projectId: project.id, action: "add", name: name.trim(), root, baseRef: baseRef.trim() }); }}>
       <label>Name<input value={name} onChange={(event) => setName(event.currentTarget.value)} /></label>
@@ -923,7 +923,7 @@ function FloorAppearanceSection({ appearance, onChange, onReset }: {
   onChange: (appearance: FloorAppearance) => void;
   onReset: () => void;
 }) {
-  return <section className="dfConsoleSidebar__section" aria-label="Floor appearance">
+  return <section className="dfConsoleSidebar__section dfFloorAppearance" aria-label="Floor appearance">
     <h3>Floor appearance</h3>
     <p>Saved in this browser. Automatic groups broad areas; Fine exposes directories on the same floor.</p>
     <label>Scenery<select value={appearance.scenery} onChange={(event) => onChange({ ...appearance, scenery: event.currentTarget.value as FloorAppearance["scenery"] })}><option value="off">Off</option><option value="subtle">Subtle</option><option value="rich">Rich</option></select></label>
@@ -1039,7 +1039,7 @@ function AccountsSection({
                   <input id={`df-linked-account-${account.id}`} value={labels[`${account.id}:${account.revision}`] ?? account.label} disabled={pending || onUpdate === undefined} onChange={(event) => { const value = event.currentTarget.value; setLabels((current) => ({ ...current, [`${account.id}:${account.revision}`]: value })); }} />
                   <button type="button" disabled={pending || onUpdate === undefined || !(labels[`${account.id}:${account.revision}`] ?? account.label).trim() || (labels[`${account.id}:${account.revision}`] ?? account.label) === account.label} onClick={() => onUpdate?.(account, { label: labels[`${account.id}:${account.revision}`] ?? account.label })}>Save label</button>
                   {unlinking === account.id
-                    ? <><button type="button" className="dfDanger" autoFocus disabled={pending} onClick={() => { setUnlinking(undefined); onUpdate?.(account, { remove: true }); }}>Confirm unlink</button><button type="button" onClick={() => setUnlinking(undefined)}>Keep linked</button></>
+                    ? <><button type="button" className="dfDanger" autoFocus disabled={pending || [...(state?.agents.values() ?? [])].some((agent) => agent.account_id === account.id)} onClick={() => { setUnlinking(undefined); onUpdate?.(account, { remove: true }); }}>Confirm unlink</button><button type="button" onClick={() => setUnlinking(undefined)}>Keep linked</button></>
                     : <IconButton icon="trash" className="dfDanger" disabled={pending || onUpdate === undefined || [...(state?.agents.values() ?? [])].some((agent) => agent.account_id === account.id)} onClick={() => setUnlinking(account.id)} title="Keeps the provider signed in">Unlink</IconButton>}
                 </div>
                 {[...(state?.agents.values() ?? [])].some((agent) => agent.account_id === account.id) ? <p className="dfConsoleSidebar__inherit">In use. Reassign its agents before unlinking.</p> : null}</details>

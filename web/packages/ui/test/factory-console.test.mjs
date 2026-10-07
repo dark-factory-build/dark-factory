@@ -2650,7 +2650,7 @@ test("board and shelves open peer views of one Library workspace", async () => {
   assert.equal(tree.root.findByType("dialog").props["aria-label"], "Project library");
   await act(async () => views().findAllByType("button").find(button => button.children.join("") === "All documents").props.onClick());
   assert.equal(views().findAllByType("button").find(button => button.props["aria-pressed"]).children.join(""), "All documents");
-  assert.ok(tree.root.findByProps({ "aria-label": "Console views" }).findAllByType("button").some(button => button.children.join("") === "Library"));
+  assert.ok(tree.root.findByProps({ "aria-label": "Console views" }).findAllByType("button").some(button => textOf(button) === "Library"));
   await act(async () => tree.unmount());
 });
 
