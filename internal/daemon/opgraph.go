@@ -203,12 +203,13 @@ func (daemon *Daemon) liveGraph(projectID kernel.ProjectID, graph projectGraph) 
 
 // observeSource is one pull adapter the operator configured in
 // <home>/observe.json. Services maps a platform name (a Worker script) to
-// the unit's service.name; the token file stays in the daemon.
+// the unit's service.name. The token sits in the file itself, inside the
+// owner-only home like operator.token, and is never served.
 type observeSource struct {
 	Adapter     string            `json:"adapter"`
 	Environment string            `json:"environment"`
 	Account     string            `json:"account"`
-	TokenFile   string            `json:"token_file"`
+	Token       string            `json:"token"`
 	Services    map[string]string `json:"services"`
 }
 
@@ -249,16 +250,15 @@ func (daemon *Daemon) pollSources(sources []observeSource) {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 		defer cancel()
 		for _, source := range sources {
-			token, err := os.ReadFile(source.TokenFile)
-			if err != nil || source.Adapter != "cloudflare" {
-				LogFactoryd(daemon.log, "factoryd: observe %s: unsupported or unreadable token\n", source.Adapter)
+			if source.Token == "" || source.Adapter != "cloudflare" {
+				LogFactoryd(daemon.log, "factoryd: observe %s: unsupported adapter or no token\n", source.Adapter)
 				continue
 			}
 			scripts := make([]string, 0, len(source.Services))
 			for script := range source.Services {
 				scripts = append(scripts, script)
 			}
-			observations, coverage, err := opgraph.PullCloudflare(ctx, observeClient, source.Account, strings.TrimSpace(string(token)), scripts, source.Environment, now, pollInterval)
+			observations, coverage, err := opgraph.PullCloudflare(ctx, observeClient, source.Account, strings.TrimSpace(source.Token), scripts, source.Environment, now, pollInterval)
 			if err != nil {
 				LogFactoryd(daemon.log, "factoryd: observe cloudflare: %v\n", err)
 				continue
