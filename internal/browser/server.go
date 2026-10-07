@@ -1,6 +1,7 @@
 package browser
 
 import (
+	"compress/gzip"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -20,6 +21,7 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/dark-factory-build/dark-factory/internal/browserprotocol"
+	"github.com/dark-factory-build/dark-factory/internal/opgraph"
 )
 
 const (
@@ -697,9 +699,10 @@ func zero16(value [16]byte) bool {
 	return true
 }
 
-// handleTraces takes OTLP/HTTP JSON from local processes only: a browser
-// page carries an Origin and cannot send JSON without a preflight this
-// listener never answers. Protobuf is refused; bodies are bounded.
+// handleTraces takes OTLP/HTTP, JSON or protobuf, optionally gzipped, from
+// local processes only: a browser page carries an Origin and cannot send
+// either type without a preflight this listener never answers. Bodies are
+// bounded before and after decompression.
 func (server *Server) handleTraces(writer http.ResponseWriter, request *http.Request) {
 	receiver, ok := server.backend.(TraceReceiver)
 	switch {
@@ -712,11 +715,28 @@ func (server *Server) handleTraces(writer http.ResponseWriter, request *http.Req
 	case request.Header.Get("Origin") != "":
 		http.Error(writer, http.StatusText(http.StatusForbidden), http.StatusForbidden)
 		return
-	case !strings.HasPrefix(request.Header.Get("Content-Type"), "application/json"):
+	}
+	protobuf := strings.HasPrefix(request.Header.Get("Content-Type"), "application/x-protobuf")
+	if !protobuf && !strings.HasPrefix(request.Header.Get("Content-Type"), "application/json") {
 		http.Error(writer, http.StatusText(http.StatusUnsupportedMediaType), http.StatusUnsupportedMediaType)
 		return
 	}
-	body, err := io.ReadAll(http.MaxBytesReader(writer, request.Body, browserprotocol.MaxSnapshotBytes))
+	var reader io.Reader = http.MaxBytesReader(writer, request.Body, browserprotocol.MaxSnapshotBytes)
+	if request.Header.Get("Content-Encoding") == "gzip" {
+		unzipped, err := gzip.NewReader(reader)
+		if err != nil {
+			http.Error(writer, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
+			return
+		}
+		reader = io.LimitReader(unzipped, browserprotocol.MaxSnapshotBytes+1)
+	}
+	body, err := io.ReadAll(reader)
+	if err == nil && len(body) > browserprotocol.MaxSnapshotBytes {
+		err = errors.New("trace export too large")
+	}
+	if err == nil && protobuf {
+		body, err = opgraph.OTLPProtobufJSON(body)
+	}
 	if err != nil || receiver.ReceiveTraces(body) != nil {
 		http.Error(writer, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
 		return
