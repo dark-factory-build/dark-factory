@@ -167,6 +167,33 @@ func (daemon *Daemon) observe(kind string, attributes, peer map[string]string, f
 	daemon.runtimeStore().Record(item)
 }
 
+// observedTransport records each outbound request as a client span: the
+// peer host, the method, failure (transport error or 5xx) and duration.
+// URLs, paths, queries, headers and bodies are never recorded.
+type observedTransport struct {
+	daemon *Daemon
+	next   http.RoundTripper
+}
+
+func (transport observedTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	next := transport.next
+	if next == nil {
+		next = http.DefaultTransport
+	}
+	started := time.Now()
+	response, err := next.RoundTrip(request)
+	transport.daemon.observe("client", map[string]string{"http.request.method": request.Method},
+		map[string]string{"server.address": strings.ToLower(request.URL.Hostname())}, err != nil || response.StatusCode >= 500, time.Since(started))
+	return response, err
+}
+
+// observed returns a copy of client whose requests factoryd records.
+func (daemon *Daemon) observed(client *http.Client) *http.Client {
+	copied := *client
+	copied.Transport = observedTransport{daemon: daemon, next: client.Transport}
+	return &copied
+}
+
 func (daemon *Daemon) runtimeStore() *opgraph.Runtime {
 	daemon.graphMu.Lock()
 	defer daemon.graphMu.Unlock()
@@ -258,7 +285,7 @@ func (daemon *Daemon) pollSources(sources []observeSource) {
 			for script := range source.Services {
 				scripts = append(scripts, script)
 			}
-			observations, coverage, err := opgraph.PullCloudflare(ctx, observeClient, source.Account, strings.TrimSpace(source.Token), scripts, source.Environment, now, pollInterval)
+			observations, coverage, err := opgraph.PullCloudflare(ctx, daemon.observed(observeClient), source.Account, strings.TrimSpace(source.Token), scripts, source.Environment, now, pollInterval)
 			if err != nil {
 				LogFactoryd(daemon.log, "factoryd: observe cloudflare: %v\n", err)
 				continue

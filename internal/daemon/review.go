@@ -514,7 +514,11 @@ func (b *daemonReviewBackend) Review(ctx context.Context, checkout string, reque
 		// streams its transcript and token count to stderr.
 		var stdout, stderr strings.Builder
 		command.Stdout, command.Stderr = &stdout, &stderr
+		launched := time.Now()
 		err := command.Run()
+		// A non-zero exit ran; only a process that never started is a failed launch.
+		var exited *exec.ExitError
+		b.daemon.observe("client", map[string]string{}, map[string]string{"process.executable.name": filepath.Base(tool)}, err != nil && !errors.As(err, &exited), time.Since(launched))
 		output := []byte(stdout.String() + stderr.String())
 		if ctx.Err() != nil {
 			return review.Verdict{}, fmt.Errorf("review: provider deadline: %w", ctx.Err())

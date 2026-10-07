@@ -5,6 +5,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -219,4 +222,50 @@ func TestPublicSecretIsWholeOrRefused(t *testing.T) {
 	if _, err := daemon.publicSecret(); err == nil {
 		t.Fatal("a damaged secret was used")
 	}
+}
+
+// An outbound request is a client span on the gate inference drew for its
+// host, and only the host and method are kept.
+func TestOutboundRequestsLightTheirExternalGate(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.WriteHeader(http.StatusBadGateway)
+	}))
+	defer server.Close()
+	daemon := &Daemon{now: time.Now}
+	client := daemon.observed(&http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, network, server.Listener.Addr().String())
+	}}})
+	response, err := client.Get("http://API.github.com/repos/owner/secret-repo?token=hidden")
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+
+	observations, _ := daemon.runtimeStore().Snapshot(time.Now().UnixMilli())
+	if len(observations) != 1 {
+		t.Fatalf("observations = %+v", observations)
+	}
+	item := observations[0]
+	if item.Kind != "client" || item.Errors != 1 || item.Peer["server.address"] != "api.github.com" || item.Attributes["http.request.method"] != "GET" {
+		t.Fatalf("observation = %+v", item)
+	}
+	if recorded := fmt.Sprint(item); strings.Contains(recorded, "repos") || strings.Contains(recorded, "secret") || strings.Contains(recorded, "hidden") {
+		t.Fatalf("the path or query was recorded: %s", recorded)
+	}
+
+	source := "package main\nimport \"net/http\"\nfunc main() { http.Get(\"https://api.github.com/repos\") }\n"
+	graph, err := opgraph.Infer("s", []opgraph.Repository{{ID: "r", Name: "r", Files: map[string][]byte{"go.mod": []byte("module example.com/x\n"), "cmd/factoryd/main.go": []byte(source)}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	live := opgraph.Overlay("s", graph, observations, nil, nil, time.Now().UnixMilli(), runtimeWindow.Milliseconds())
+	for _, node := range live.Graph.Nodes {
+		if node.Kind == opgraph.External && node.Selectors["server.address"] == "api.github.com" {
+			if got := live.Nodes[node.ID]; got.State != "failing" || opgraph.State(node.Evidence) == "runtime" {
+				t.Fatalf("gate = %+v, evidence %s", got, opgraph.State(node.Evidence))
+			}
+			return
+		}
+	}
+	t.Fatalf("no inferred gate for api.github.com in %+v", live.Graph.Nodes)
 }

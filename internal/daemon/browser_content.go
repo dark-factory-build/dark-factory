@@ -139,7 +139,7 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 			kernel.ProductionPage
 			Runtime api.BuildIdentity    `json:"runtime"`
 			Release api.PublishedRelease `json:"release,omitzero"`
-		}{page, currentDaemonBuild(), latestPublishedRelease()}
+		}{page, currentDaemonBuild(), latestPublishedRelease(backend.owner)}
 	case "activity":
 		output, err = backend.owner.contentActivity(ctx, project, int(input.Offset), int(input.Limit))
 		if err != nil {

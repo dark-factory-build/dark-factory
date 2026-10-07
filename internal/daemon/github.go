@@ -17,8 +17,12 @@ func (daemon *Daemon) ConfigureMaintainer(home *install.OperationalHome) error {
 	if err != nil {
 		return err
 	}
+	host.Instrument(daemon.observed)
 	daemon.github = host
 	daemon.linear, err = linear.Open(home)
+	if err == nil {
+		daemon.linear.Instrument(daemon.observed)
+	}
 	return err
 }
 

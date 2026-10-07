@@ -38,6 +38,10 @@ type scheduledOwner struct {
 // joins every synchronous RunNext call it starts. SQLite still chooses the
 // exact runnable work and enforces capacity inside AdmitNext; wakeups and the
 // single unobserved probe are only bounded scheduling hints.
+// schedulerFunction is RunScheduler as a code.function.name, the name its
+// timer node is inferred under.
+const schedulerFunction = "github.com/dark-factory-build/dark-factory/internal/daemon.Daemon.RunScheduler"
+
 func (daemon *Daemon) RunScheduler(ctx context.Context, spec SupervisorSpec) error {
 	if daemon == nil || daemon.store == nil || ctx == nil {
 		return fmt.Errorf("%w: invalid scheduler", kernel.ErrInvalidValue)
@@ -135,6 +139,7 @@ func (daemon *Daemon) RunScheduler(ctx context.Context, spec SupervisorSpec) err
 				startProbe()
 			}
 		case <-pollEvents:
+			tick := time.Now()
 			if !stopping && resultErr == nil {
 				if now := daemon.now(); !now.Before(nextAttachmentCleanup) {
 					if at, err := kernel.NewUnixMillis(now.UnixMilli()); err == nil {
@@ -174,6 +179,7 @@ func (daemon *Daemon) RunScheduler(ctx context.Context, spec SupervisorSpec) err
 				daemon.tickIntake(ownedCtx)
 				daemon.tickRelease(ownedCtx)
 			}
+			daemon.observe("internal", map[string]string{"code.function.name": schedulerFunction}, nil, resultErr != nil, time.Since(tick))
 			if !stopping && resultErr == nil && probeID == 0 {
 				startProbe()
 			}

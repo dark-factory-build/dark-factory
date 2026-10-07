@@ -54,22 +54,22 @@ var (
 	releasePending  bool
 )
 
-func latestPublishedRelease() api.PublishedRelease {
+func latestPublishedRelease(daemon *Daemon) api.PublishedRelease {
 	releaseMu.Lock()
 	defer releaseMu.Unlock()
 	if !releasePending && !time.Now().Before(releaseNext) {
 		releasePending = true
-		go refreshPublishedRelease()
+		go refreshPublishedRelease(daemon)
 	}
 	return releaseValue
 }
 
-func refreshPublishedRelease() {
+func refreshPublishedRelease(daemon *Daemon) {
 	releaseMu.Lock()
 	client, endpoint := releaseClient, releaseEndpoint
 	releaseMu.Unlock()
 	// The client's own timeout bounds the whole exchange, body included.
-	value, err := readPublishedRelease(context.Background(), client, endpoint)
+	value, err := readPublishedRelease(context.Background(), daemon.observed(client), endpoint)
 	releaseMu.Lock()
 	defer releaseMu.Unlock()
 	releasePending, releaseNext = false, time.Now().Add(releaseInterval)

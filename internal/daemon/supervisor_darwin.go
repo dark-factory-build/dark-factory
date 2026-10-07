@@ -609,7 +609,9 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 		_ = childControl.Close()
 		return daemon.failRun(run, kernel.FailureInternal, err)
 	}
+	launched := time.Now()
 	child, err := runner.StartBlocked(lease, spec.RunnerExecutable, outer, true)
+	daemon.observe("client", map[string]string{}, map[string]string{"process.executable.name": filepath.Base(spec.RunnerExecutable)}, err != nil, time.Since(launched))
 	_ = childControl.Close()
 	if err != nil {
 		controllerOpen = false
