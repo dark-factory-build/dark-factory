@@ -217,6 +217,9 @@ export function FactoryConsole({
   });
   const [selectedProduction, setSelectedProduction] = useState<string>();
   const [libraryOpen, setLibraryOpen] = useState(false);
+  useEffect(() => { if (ready && projectId !== undefined) onLoadIntake?.(projectId); }, [ready, projectId, onLoadIntake !== undefined]);
+  const [settingsTab, setSettingsTab] = useState<number>();
+  useEffect(() => { if (settingsOpen !== true) setSettingsTab(undefined); }, [settingsOpen]);
   const [knowledgeView, setKnowledgeView] = useState<{ board?: boolean; project?: string; entity?: string; id?: string; repository?: string }>({});
   const [requestedEntity, setRequestedEntity] = useState<{ id: string }>();
   const openKnowledge = (board: boolean, project?: string, entity?: string, id?: string, repository?: string) => { setKnowledgeView({ board, project: project ?? projectId, ...(entity ? { entity } : {}), ...(id ? { id } : {}), ...(repository ? { repository } : {}) }); setLibraryOpen(true); };
@@ -358,6 +361,8 @@ export function FactoryConsole({
                 onLoadTaskDetail={onLoadTaskDetail}
                 selectedTaskId={selectedTask?.id}
                 onSelectTask={ready ? selectTask : undefined}
+                sources={projectId === undefined ? undefined : intake?.get(projectId)?.sources}
+                onManageSources={ready && onToggleSettings !== undefined ? () => { setSettingsTab(1); if (settingsOpen !== true) onToggleSettings(); } : undefined}
               />
             </div>
             <div hidden={selectedDetail !== "agent"}>
@@ -391,6 +396,7 @@ export function FactoryConsole({
         <SettingsDialog
           onAttachmentRetention={ready ? onAttachmentRetention : undefined}
           projectId={projectId}
+          initialTab={settingsTab}
           floorAppearance={floorAppearance}
           onFloorAppearanceChange={changeFloorAppearance}
           onResetFloorAppearance={resetAppearance}
@@ -411,7 +417,6 @@ export function FactoryConsole({
           intake={intake}
           intakePending={intakePending}
           intakeErrors={intakeErrors}
-          onLoadIntake={onLoadIntake}
           onIntakeAction={onIntakeAction}
           onSelectTask={selectTask === undefined ? undefined : (id) => { onToggleSettings?.(); selectTask(id); }}
           github={github}
