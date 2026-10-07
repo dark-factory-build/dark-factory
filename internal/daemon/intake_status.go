@@ -16,6 +16,7 @@ type intakePoll struct {
 	cursor   string
 	due      time.Time
 	sync     api.IntakeSync
+	waiting  []api.IntakeCandidate // this scan's, published to sync when it wraps
 }
 
 // tickIntake polls every due intake source beside the scheduler loop, one
@@ -86,12 +87,22 @@ func (daemon *Daemon) pollIntakeSource(ctx context.Context, source kernel.Intake
 		poll.sync.State, poll.sync.Error = "error", result.State
 		return
 	}
+	for _, candidate := range result.Candidates {
+		// ponytail: the inbox keeps 100 per source; a larger backlog stays in Sources.
+		if (candidate.Reason == string(kernel.IntakeNeedsManualAcceptance) || candidate.Reason == string(kernel.IntakeUntrustedAuthor)) && len(poll.waiting) < 100 {
+			candidate.Body = ""
+			poll.waiting = append(poll.waiting, candidate)
+		}
+	}
 	page := poll.page
 	poll.page, poll.cursor = 1, result.AcceptanceCursor
 	if result.NextPage != nil && *result.NextPage > page {
 		poll.page = *result.NextPage
 	}
 	poll.due = now.Add(interval)
+	if poll.page == 1 {
+		poll.sync.Waiting, poll.waiting = poll.waiting, nil
+	}
 	if poll.page != 1 || poll.cursor != "" {
 		// A backlog continues promptly instead of waiting a full interval.
 		poll.due = now.Add(5 * time.Second)

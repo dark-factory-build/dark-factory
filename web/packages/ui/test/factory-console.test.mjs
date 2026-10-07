@@ -2188,6 +2188,61 @@ test("the Tasks panel names its sources and Manage opens Settings at Connections
   }
 });
 
+test("Work shows issues waiting for approval as Needs you inbox rows with Accept", async () => {
+  const previous = globalThis.IS_REACT_ACT_ENVIRONMENT;
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+  let renderer;
+  const calls = [];
+  const waiting = { number: 17n, url: "https://github.com/example/widgets/issues/17", title: "Fix parser", body: "", author: "reporter", labels: ["bug"], content_hash: "ab".repeat(32), reason: "untrusted_author" };
+  const source = { id: "88".repeat(16), project_id: ids.project, github_repository_id: 42n, repository: "example/widgets", target_repository_id: "89".repeat(16), overseer_agent_id: "", label: "bug", policy: "trusted_authors", trusted_authors: ["owner"], poll_seconds: 60, admission_limit: 25, enabled: true, revision: 3n, sync: { last_attempt_at: 1n, last_success_at: 1n, imported_tasks: 0, state: "ok", error: "", waiting: [waiting] } };
+  try {
+    await act(async () => { renderer = create(createElement(FactoryConsole, { status: "ready", state: oneProjectState(), intake: new Map([[ids.project, { state: "ok", sources: [source] }]]), onIntakeAction: (projectId, request) => calls.push({ projectId, request }) })); });
+    const work = renderer.root.findByProps({ "aria-label": "Work" });
+    await act(async () => work.findAllByType("button").find((button) => textOf(button).startsWith("Needs you")).props.onClick());
+    const text = (node) => typeof node === "string" ? node : node.children.map(text).join(" ");
+    const row = work.findAll((node) => node.type === "li" && text(node).includes("Fix parser"))[0];
+    assert.match(text(row), /inbox/);
+    assert.match(text(row), /#17/);
+    await act(async () => row.findByProps({ "aria-label": "Accept Fix parser" }).props.onClick());
+    assert.deepEqual(calls, [{ projectId: ids.project, request: { action: "accept", source_id: source.id, expected_revision: 3n, issue_number: 17n, content_hash: "ab".repeat(32) } }]);
+    let toggled = 0;
+    const props = renderer.root.findByType(FactoryConsole).props;
+    await act(async () => renderer.update(createElement(FactoryConsole, { ...props, onToggleSettings: () => { toggled++; }, intake: new Map([[ids.project, { state: "content_changed", sources: [source] }]]) })));
+    const alert = renderer.root.findByProps({ role: "alert" });
+    assert.match(text(alert), /Could not accept:\s+content changed/);
+    await act(async () => alert.findByType("button").props.onClick());
+    assert.equal(toggled, 1, "a stale issue routes to Sources for fresh content");
+    await act(async () => renderer.update(createElement(FactoryConsole, { ...props, intakePending: new Set([ids.project]) })));
+    assert.equal(renderer.root.findByProps({ "aria-label": "Accept Fix parser" }).props.disabled, true, "a pending accept cannot be resubmitted");
+  } finally {
+    if (renderer) await act(async () => renderer.unmount());
+    globalThis.IS_REACT_ACT_ENVIRONMENT = previous;
+  }
+});
+
+test("open Work re-reads the local intake list so issues polled later reach the inbox", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  const previous = globalThis.IS_REACT_ACT_ENVIRONMENT;
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+  let renderer;
+  const loads = [];
+  const source = { id: "88".repeat(16), project_id: ids.project, github_repository_id: 42n, repository: "example/widgets", target_repository_id: "89".repeat(16), overseer_agent_id: "", label: "bug", policy: "manual", trusted_authors: [], poll_seconds: 60, admission_limit: 25, enabled: true, revision: 3n };
+  const props = (sources) => ({ status: "ready", state: oneProjectState(), intake: new Map([[ids.project, { state: "ok", sources }]]), onLoadIntake: (id) => loads.push(id), onIntakeAction: () => {} });
+  try {
+    await act(async () => { renderer = create(createElement(FactoryConsole, props([source]))); });
+    assert.deepEqual(loads, [ids.project]);
+    assert.equal(renderer.root.findAll((node) => node.props["aria-label"] === "Accept Fix parser").length, 0);
+    await act(async () => t.mock.timers.tick(30_000));
+    assert.deepEqual(loads, [ids.project, ids.project], "Work refreshes the local list without a project change");
+    const waiting = { number: 17n, url: "https://github.com/example/widgets/issues/17", title: "Fix parser", body: "", author: "reporter", labels: [], content_hash: "ab".repeat(32), reason: "needs_manual_acceptance" };
+    await act(async () => renderer.update(createElement(FactoryConsole, props([{ ...source, sync: { last_attempt_at: 2n, last_success_at: 2n, imported_tasks: 0, state: "ok", error: "", waiting: [waiting] } }]))));
+    assert.equal(renderer.root.findAll((node) => node.props["aria-label"] === "Accept Fix parser").length, 1);
+  } finally {
+    if (renderer) await act(async () => renderer.unmount());
+    globalThis.IS_REACT_ACT_ENVIRONMENT = previous;
+  }
+});
+
 test("issue review refuses a stale preview before acceptance", async () => {
   const previous = globalThis.IS_REACT_ACT_ENVIRONMENT;
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;

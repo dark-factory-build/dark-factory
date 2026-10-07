@@ -52,6 +52,8 @@ type IntakeSync struct {
 	ImportedTasks uint16 `json:"imported_tasks"`
 	State         string `json:"state"`
 	Error         string `json:"error"`
+	// Waiting is what the last full poll found needing acceptance, without bodies.
+	Waiting []IntakeCandidate `json:"waiting,omitempty"`
 }
 type IntakeSource struct {
 	LinearTeamID    string           `json:"linear_team_id,omitempty"`

@@ -4,7 +4,7 @@ import type { FactoryEditView, FactoryHumanRequestView } from "./factory-app-con
 import type { FactoryGitHubView } from "./factory-settings-coordinator.js";
 import { rankLabel } from "./console-screens.js";
 import { AgentSprite } from "./factory-scene/factory-scene.js";
-import { agentStatus, agentCurrentTask, agentActivity, type WorkRow, type WorkState } from "./console-view.js";
+import { agentStatus, agentCurrentTask, agentActivity, needsYou, type WorkRow, type WorkState } from "./console-view.js";
 import { productionKey, productionStages } from "./production-view.js";
 import { AnswerControls } from "./console-interactions.js";
 import { Icon, IconButton, type IconName } from "./icons.js";
@@ -285,11 +285,14 @@ function WorkRowShell({ title, chips, meta, onOpen, disabled = false, pressed, e
 /** One list for everything open: what needs you, what is in review, running and queued. */
 export function WorkPanel({
   state, rows, projectId, filter, onFilter, byMission, onByMission, missions, edit, ready, onEditTask, onAddTask, onLoadTaskDetail, onLoadTaskHistory, onLoadTaskList,
-  selectedTaskId, onSelectTask, selectedHumanRequest, onSelectHumanRequest, onCloseHumanRequest, requestContent, onSelectProduction, onMission, sources, onManageSources,
+  selectedTaskId, onSelectTask, selectedHumanRequest, onSelectHumanRequest, onCloseHumanRequest, requestContent, onSelectProduction, onMission, sources, onManageSources, onIntakeAction, intake,
 }: {
   /** The local source list for the shown project; undefined until loaded. */
   sources?: readonly { id: string; repository: string; label: string; enabled: boolean }[];
   onManageSources?: () => void;
+  onIntakeAction?: (projectId: string, request: IntakeBody) => void;
+  /** The shown project's last intake outcome; a failed Accept routes to Sources for fresh content. */
+  intake?: Readonly<{ state?: string; failed: boolean; busy: boolean }>;
   selectedTaskId?: string;
   onSelectTask?: (taskId: string) => void;
   state: StateView | undefined;
@@ -318,7 +321,7 @@ export function WorkPanel({
   const [overseer, setOverseer] = useState(false);
   if (state === undefined) return <section className="dfConsoleSidebar__panel" aria-label="Work"><p className="dfFactoryConsole__empty">Waiting for the latest state…</p></section>;
   const agents = [...state.agents.values()];
-  const shown = rows.filter((row) => (filter === "all" || row.state === filter) && (overseer || row.origin !== "overseer" || row.state === "needs-you"));
+  const shown = rows.filter((row) => (filter === "all" || row.state === filter || filter === "needs-you" && needsYou(row)) && (overseer || row.origin !== "overseer" || row.state === "needs-you"));
   const busy = selectedHumanRequest?.phase === "replying" || selectedHumanRequest?.phase === "cancelling";
   const owner = (task?: TaskItem) => task === undefined ? "" : task.assigned_agent_id === "" ? "Any eligible worker" : state.agents.get(task.assigned_agent_id)?.name ?? "Agent";
   const chips = (row: WorkRow) => <>
@@ -328,6 +331,12 @@ export function WorkPanel({
   </>;
   const item = (row: WorkRow) => {
     const { task, request } = row;
+    if (row.intake !== undefined) {
+      const { source, candidate } = row.intake;
+      return <WorkRowShell key={row.key} title={row.title} chips={chips(row)} meta={`${source.repository} · by ${candidate.author}`}>
+        <div className="dfConsoleSidebar__taskActions"><button type="button" aria-label={`Accept ${row.title}`} disabled={!ready || !source.enabled || intake?.busy === true || onIntakeAction === undefined} onClick={() => onIntakeAction?.(source.project_id, { action: "accept", source_id: source.id, expected_revision: source.revision, issue_number: candidate.number, content_hash: candidate.content_hash })}>Accept</button></div>
+      </WorkRowShell>;
+    }
     const named = projectId === undefined && state.projects.size > 1 ? state.projects.get(task?.project_id ?? request?.project_id ?? row.pr?.projectId ?? "")?.name : undefined;
     const blocked = task?.status === "blocked";
     const meta = [named, request === undefined ? owner(task) : `${state.agents.get(request.agent_id)?.name ?? "Agent"} asks`, blocked && formatTime(task.updated_at_ms) ? `since ${formatTime(task.updated_at_ms)}` : ""].filter(Boolean).join(" · ");
@@ -350,13 +359,14 @@ export function WorkPanel({
     {onAddTask === undefined ? null : <NewTask agents={agents} state={state} disabled={!ready || edit?.pending === true} onAddTask={onAddTask} />}
     <div className="dfWorkBar">
       <div className="dfConsoleViewToggle" role="group" aria-label="Work filter">
-        {FILTERS.map(([value, label]) => <button key={value} type="button" aria-pressed={!byMission && filter === value} disabled={!ready} onClick={() => onFilter(value)}>{label} {value === "needs-you" ? <Badge n={rows.filter((row) => row.state === value).length} /> : null}</button>)}
+        {FILTERS.map(([value, label]) => <button key={value} type="button" aria-pressed={!byMission && filter === value} disabled={!ready} onClick={() => onFilter(value)}>{label} {value === "needs-you" ? <Badge n={rows.filter(needsYou).length} /> : null}</button>)}
         <button type="button" aria-pressed={byMission} disabled={!ready} onClick={onByMission}>By mission</button>
       </div>
       {byMission ? null : <IconButton icon="terminal" aria-label="Show overseer passes" aria-pressed={overseer} disabled={!ready} onClick={() => setOverseer(!overseer)} />}
       {projectId === undefined ? <IconButton icon="history" aria-label="History" title="Choose a project" disabled /> : <RecentWork scope={{ project_id: projectId }} name={state.projects.get(projectId)?.name ?? projectId} label="History" icon="history" completionRevision={[...state.tasks.values()].map((task) => `${task.id}:${task.revision}`).join(" ")} onLoadTaskList={onLoadTaskList} onLoadTaskDetail={onLoadTaskDetail} onLoadTaskHistory={onLoadTaskHistory} />}
     </div>
     <div hidden={byMission}>
+      {rows.some((row) => row.intake !== undefined) && (intake?.failed || !["ok", "accepted", "imported", "withdrawn", "withdrawal_pending", undefined].includes(intake?.state)) ? <p role="alert">Could not accept: {intake?.failed ? "try again" : intake?.state?.replaceAll("_", " ")}. {onManageSources === undefined ? null : <button type="button" onClick={onManageSources}>Review in Sources</button>}</p> : null}
       {shown.length === 0 ? <p className="dfFactoryConsole__empty">{filter === "all" ? "No open work" : "Nothing here"}</p> : <ul className="dfConsoleItems">{shown.map(item)}</ul>}
     </div>
     <div hidden={!byMission}>{missions}</div>

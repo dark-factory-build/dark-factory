@@ -1,5 +1,5 @@
 import { productionKey, proposedProduction, type ProductionContraption } from "./production-view.js";
-import type { AgentItem, GraphNode, GraphReading, HumanRequestItem, OperationalGraphView, StateView, TaskItem } from "@dark-factory/client";
+import type { AgentItem, GraphNode, GraphReading, HumanRequestItem, IntakeCandidate, IntakeSource, OperationalGraphView, StateView, TaskItem } from "@dark-factory/client";
 import { compareText, type SceneFlow, type SceneGraph, type SceneHall, type SceneMachine, type SceneProposal, type SceneReading, type SceneWorker } from "./factory-scene/scene.js";
 
 export type AgentActivity = "busy" | "waiting" | "needs-you" | "idle";
@@ -50,11 +50,13 @@ export function primaryAgent(state: StateView): AgentItem | undefined {
       || compareText(left.id, right.id))[0];
 }
 
-export type WorkState = "needs-you" | "in-review" | "running" | "queued";
-export type WorkRow = Readonly<{ key: string; state: WorkState; title: string; task?: TaskItem; request?: HumanRequestItem; pr?: ProductionContraption; origin?: string }>;
+export type WorkState = "needs-you" | "inbox" | "in-review" | "running" | "queued";
+export type WorkRow = Readonly<{ key: string; state: WorkState; title: string; task?: TaskItem; request?: HumanRequestItem; pr?: ProductionContraption; origin?: string; intake?: Readonly<{ source: IntakeSource; candidate: IntakeCandidate }> }>;
+/** An issue waiting at the door needs the operator as much as a question does. */
+export const needsYou = (row: WorkRow) => row.state === "needs-you" || row.state === "inbox";
 
-/** The one Work list: open tasks plus finished tasks whose PR is still in flight, attention first. */
-export function workRows(state: StateView | undefined, inProgress: readonly ProductionContraption[]): readonly WorkRow[] {
+/** The one Work list: issues the intake poll found waiting for acceptance, open tasks, and finished tasks whose PR is still in flight, attention first. */
+export function workRows(state: StateView | undefined, inProgress: readonly ProductionContraption[], sources: readonly IntakeSource[] = []): readonly WorkRow[] {
   if (state === undefined) return [];
   const requests = new Map([...state.humanRequests.values()].map((request) => [request.task_id, request]));
   const rows = new Map<string, { task?: TaskItem; request?: HumanRequestItem; pr?: ProductionContraption; key: string }>();
@@ -67,13 +69,14 @@ export function workRows(state: StateView | undefined, inProgress: readonly Prod
     for (const task of open.length > 0 ? open : linked.slice(0, 1)) rows.set(task.id, { ...rows.get(task.id), key: task.id, task, pr });
     if (linked.length === 0) rows.set(productionKey(pr), { key: productionKey(pr), pr });
   }
-  const rank: Record<WorkState, number> = { "needs-you": 0, "in-review": 1, running: 2, queued: 3 };
-  return [...rows.values()].map(({ task, request, pr, key }): WorkRow => {
+  const rank: Record<WorkState, number> = { "needs-you": 0, inbox: 1, "in-review": 2, running: 3, queued: 4 };
+  const inbox = sources.flatMap((source) => (source.sync?.waiting ?? []).map((candidate): WorkRow => ({ key: `${source.id}:${candidate.number}`, state: "inbox", title: candidate.title, origin: `#${candidate.number}`, intake: { source, candidate } })));
+  return [...inbox, ...[...rows.values()].map(({ task, request, pr, key }): WorkRow => {
     const terminal = task === undefined || task.status === "succeeded" || task.status === "failed" || task.status === "cancelled";
     const origin = task === undefined ? undefined : task.issue_number !== undefined ? `#${task.issue_number}` : task.mission_id !== undefined ? "mission" : state.agents.get(task.assigned_agent_id)?.role === "orchestrator" ? "overseer" : undefined;
     return { key, task, request, pr, origin, title: task?.title ?? pr?.pullRequest?.title ?? `Question from ${state.agents.get(request?.agent_id ?? "")?.name ?? "Agent"}`,
       state: request !== undefined || task?.status === "blocked" ? "needs-you" : terminal ? "in-review" : task.status === "running" ? "running" : "queued" };
-  }).sort((a, b) => rank[a.state] - rank[b.state]);
+  })].sort((a, b) => rank[a.state] - rank[b.state]);
 }
 
 /** Active work first, then queued, then finished; priority breaks ties. */
