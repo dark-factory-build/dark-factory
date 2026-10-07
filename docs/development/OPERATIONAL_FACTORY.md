@@ -474,12 +474,18 @@ and those are exactly latency, backlog, errors and retries.
 
 ## 11. Level of detail and scale
 
-The UI chooses detail from zoom, never from data:
+There is one detailed floor, and the viewer zooms and scrolls it. Detail
+never depends on data:
 
-- **Plant** (far): halls only. Hall-to-hall belts carry aggregate flow, and
-  hall colour shows coverage.
-- **Hall** (default): one station per node. Ingress beyond 6 per hall folds
-  into a manifold, and the quarantine bay aggregates unknowns.
+- **Overview** (always visible): a minimap of the whole plant in the floor's
+  corner. It shows halls coloured by coverage, gates, workers and the visible
+  window. Clicking or dragging it moves the floor.
+- **Floor** (zoomable): one station per node. Ingress beyond 6 per hall folds
+  into a manifold unless the viewer picks "every route", and the quarantine
+  bay aggregates unknowns. Zoom (buttons, or ctrl/pinch and the wheel) scales
+  the floor without moving anything on it.
+- **Station** (on selection): the inspector shows selectors, evidence and
+  sources.
 
 The `OPERATIONAL_GRAPH` frame carries for each node only:
 
@@ -490,8 +496,6 @@ The `OPERATIONAL_GRAPH` frame carries for each node only:
 Selectors, evidence and the full source list come from
 `OPERATIONAL_NODE_GET` when the inspector opens. This keeps 4,096 nodes inside
 the 1 MiB frame.
-- **Station** (near, or on selection): every route door, selectors, evidence
-  and sources.
 
 Layout is deterministic and stable:
 
