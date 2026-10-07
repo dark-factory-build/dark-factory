@@ -1023,5 +1023,3 @@ function rejectDuplicateKeys(text: string, arrayLimit: number): void {
 function validateJSONNumber(value: string): void { if (!/^-?(0|[1-9][0-9]*)$/.test(value) || value === "-0") malformed(); let parsed: bigint; try { parsed = BigInt(value); } catch { malformed(); } if (parsed < -9_007_199_254_740_991n || parsed > 9_007_199_254_740_991n) malformed(); }
 
 function idlePolicy(value: unknown): IdlePolicy { if (value !== "wait" && value !== "standing_instruction") malformed(); return value; }
-
-
