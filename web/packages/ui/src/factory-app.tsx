@@ -60,13 +60,6 @@ export function FactoryApp({ onStatusChange, browserPort }: FactoryAppProps = {}
     controller.selectAgent(agent);
   }, [snapshot]);
 
-  const selectedAgentID = snapshot.selectedAgent?.id;
-  const previousSelectedAgentID = useRef<string | undefined>(selectedAgentID);
-  useEffect(() => {
-    if (previousSelectedAgentID.current === undefined && selectedAgentID !== undefined) setDetail("agent");
-    previousSelectedAgentID.current = selectedAgentID;
-  }, [selectedAgentID]);
-
   // The floor's rooms are regenerable, so they are fetched when the floor is
   // shown, whenever a fresh session becomes ready, and whenever the set of
   // projects changes under them.

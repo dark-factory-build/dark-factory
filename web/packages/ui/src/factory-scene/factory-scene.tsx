@@ -500,9 +500,11 @@ export function FactoryScene({ proposals, tools, onLoadNode, onInvestigate, onDi
     if (!at) return;
     const fit = Math.min(sceneWidth, Math.max(at.map.clientWidth, Math.min(sceneWidth, 864))) / sceneWidth;
     const x = px ?? at.pane.width / 2, y = py ?? at.pane.height / 2;
+    const scaled = Math.min(MAX_ZOOM, at.scale * factor), next = scaled <= fit * 1.01 ? undefined : scaled;
+    // A zoom that changes nothing leaves no anchor for a later change to apply.
+    if (next === zoom) return;
     anchor.current = { x: (at.pane.left + x - at.box.left) / at.scale, y: (at.pane.top + y - at.box.top) / at.scale, px: x, py: y };
-    const next = Math.min(MAX_ZOOM, at.scale * factor);
-    setZoom(next <= fit * 1.01 ? undefined : next);
+    setZoom(next);
   };
   /** Centre the pane on a point of the floor. */
   const centreOn = (x: number, y: number) => {
