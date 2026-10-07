@@ -9,7 +9,7 @@
     "test:relay": "node --test tests/*.test.mjs"
   },
   "overrides": {
-    "sharp": "0.35.4"
+    "sharp": "0.35.5"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "5.20261005.1",
