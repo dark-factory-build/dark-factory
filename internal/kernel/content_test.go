@@ -223,3 +223,49 @@ func TestOrchestratorTaskContentAttachmentBoundIsEnforced(t *testing.T) {
 		}
 	}
 }
+
+func TestContentActivityListsRecordedWritesAndReadsOnly(t *testing.T) {
+	store, run, _ := runningWorkerRun(t)
+	defer store.Close()
+	ctx := context.Background()
+	operator, err := store.CreateContent(ctx, contentSpec(t, run.ProjectID, 46, "operator"), mustTime(t, 40))
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent, err := store.CreateContentForAttempt(ctx, run.CredentialDigest, contentSpec(t, run.ProjectID, 47, "agent"), mustTime(t, 41))
+	if err != nil {
+		t.Fatal(err)
+	}
+	read := ContentAccess{ContentID: operator.ID, ContentRevision: operator.Revision, Kind: "read", ByteLength: 4, CreatedAt: mustTime(t, 42)}
+	if err := store.RecordContentAccessForAttempt(ctx, run.CredentialDigest, read); err != nil {
+		t.Fatal(err)
+	}
+	read.Offset, read.CreatedAt = 4, mustTime(t, 43)
+	if err := store.RecordContentAccessForAttempt(ctx, run.CredentialDigest, read); err != nil {
+		t.Fatal(err)
+	}
+	page, err := store.ListContentActivity(ctx, run.ProjectID, 0, 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := []string{}
+	for _, item := range page.Items {
+		got = append(got, fmt.Sprintf("%s %s %d %v %d", item.Operation, item.Content.Title, item.Content.ID.Bytes()[0], item.AgentID == run.AgentID, item.At.Int64()))
+	}
+	// Two pages of one read are one receipt at its latest page; the agent's own write names no run here (its author does).
+	if want := []string{"read procedure 46 true 43", "revision procedure 47 false 41", "revision procedure 46 false 40"}; strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("activity = %q", got)
+	}
+	if !strings.Contains(page.Items[1].Content.Author, run.AgentID.String()) || agent.ID != page.Items[1].Content.ID {
+		t.Fatalf("agent provenance = %+v", page.Items[1].Content)
+	}
+	if first, err := store.ListContentActivity(ctx, run.ProjectID, 0, 1); err != nil || len(first.Items) != 1 || first.NextOffset != 1 {
+		t.Fatalf("bounded page = %+v, %v", first, err)
+	}
+	if foreign, err := store.ListContentActivity(ctx, projectID(t, 48), 0, 8); err != nil || len(foreign.Items) != 0 {
+		t.Fatalf("foreign project = %+v, %v", foreign, err)
+	}
+	if _, err := store.ListContentActivity(ctx, run.ProjectID, 0, 0); !errors.Is(err, ErrInvalidValue) {
+		t.Fatalf("unbounded page = %v", err)
+	}
+}

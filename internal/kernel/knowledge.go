@@ -40,7 +40,8 @@ type KnowledgeMetadata struct {
 }
 
 type KnowledgeQuery struct {
-	OpenOnly                                   bool
+	// Documents leaves Board threads and replies to the Board.
+	OpenOnly, Documents                        bool
 	Kind                                       ContentKind
 	Query, Branch, Environment, Entity, Thread string
 	Offset, Limit                              int
@@ -409,6 +410,9 @@ func searchKnowledge(ctx context.Context, c *sql.Conn, project ProjectID, reposi
 	if q.Kind != "" {
 		query += ` AND c.kind=?`
 		args = append(args, string(q.Kind))
+	}
+	if q.Documents {
+		query += ` AND c.kind NOT IN ('discussion','discussion_reply')`
 	}
 	if q.Query != "" {
 		query += ` AND instr(lower(c.title||' '||c.description||' '||c.source_references),lower(?))>0`

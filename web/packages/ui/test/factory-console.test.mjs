@@ -2567,19 +2567,3 @@ test("Library source navigation synchronizes the single inspector and canonical 
   assertSelection("");
   await act(async () => tree.unmount());
 });
-
-
-test("board and shelves open peer views of one Library workspace", async () => {
-  let tree;
-  await act(async () => { tree = create(createElement(FactoryConsole, { status: "ready", state: fixtureState, topologies: fixtureTopologies, onDetail() {}, onProjectContent: async () => ({ items: [] }) })); });
-  const floor = () => tree.root.findByType(FactoryFloor);
-  await act(async () => floor().props.onOpenBoard(ids.project));
-  const views = () => tree.root.findByProps({ "aria-label": "Library views" });
-  assert.equal(views().findAllByType("button").find(button => button.props["aria-pressed"]).children.join(""), "Discussions");
-  assert.equal(tree.root.findAllByType("dialog").length, 1);
-  assert.equal(tree.root.findByType("dialog").props["aria-label"], "Project library");
-  await act(async () => views().findAllByType("button").find(button => button.children.join("") === "All documents").props.onClick());
-  assert.equal(views().findAllByType("button").find(button => button.props["aria-pressed"]).children.join(""), "All documents");
-  assert.ok(tree.root.findByProps({ "aria-label": "Console views" }).findAllByType("button").some(button => button.children.join("") === "Library"));
-  await act(async () => tree.unmount());
-});

@@ -1,4 +1,5 @@
 import { ProjectOutcomes } from "./project-outcomes.js";
+import { DirectQuestions, authorName } from "./project-board.js";
 import { useEffect, useRef, useState } from "react";
 import type { AgentItem, ProjectContentInput, ProjectContentOperation, ProjectContentOutput, StateView } from "@dark-factory/client";
 
@@ -10,6 +11,7 @@ const strings = (value: unknown): string[] => Array.isArray(value) ? value.filte
 const id = (): string => crypto.randomUUID().replaceAll("-", "");
 const kindLabel = (kind: string): string => ({ project_brief: "Project brief", decision: "Decision", procedure: "Procedure", lesson: "Lesson", observation: "Note", discussion: "Discussion", discussion_reply: "Reply" }[kind] ?? kind.replaceAll("_", " "));
 const kinds = ["project_brief", "decision", "procedure", "lesson", "observation", "discussion", "discussion_reply"];
+const documentKinds = kinds.filter((kind) => !kind.startsWith("discussion"));
 export function knowledgeMetadata(value: unknown): RecordValue {
   try { const parsed: unknown = JSON.parse(text(value)); return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as RecordValue : {}; } catch { return {}; }
 }
@@ -22,27 +24,29 @@ const documentState = (item: RecordValue, metadata = knowledgeMetadata(item.sour
 
 type LibraryProps = {
   state?: StateView; call?: ProjectContentCall; draft?: (agent: AgentItem, instruction: string) => void;
-  board?: boolean; entity?: string; repository?: string; initialID?: string; onSource?: (entity: string) => void; onRecord?: (kind: string, id: string, project: string) => void | Promise<void>;
+  board?: boolean; entity?: string; repository?: string; initialID?: string; initialRevision?: number; onSource?: (entity: string) => void; onRecord?: (kind: string, id: string, project: string) => void | Promise<void>;
 };
 
 /** An intentional entry loads metadata; an unused Settings panel stays lazy. */
-export function ProjectLibrary({ state, call, draft, board = false, entity = "", repository = "", initialID = "", onSource, onRecord, open = false, initialProjectId = "" }: LibraryProps & { open?: boolean; initialProjectId?: string }) {
+export function ProjectLibrary({ state, call, draft, board = false, entity = "", repository = "", initialID = "", initialRevision, onSource, onRecord, open = false, initialProjectId = "" }: LibraryProps & { open?: boolean; initialProjectId?: string }) {
   const [expanded, setExpanded] = useState(false);
-  const [view, setView] = useState(board ? "discussions" : "documents");
+  const [view, setView] = useState("documents");
   const [project, setProject] = useState(initialProjectId);
   const projects = [...(state?.projects.values() ?? [])];
   const projectID = projects.find((item) => item.id === project)?.id ?? projects[0]?.id ?? "";
   const scoped = projectID === (initialProjectId || projects[0]?.id);
   const contents = <>
     {projects.length < 2 ? null : <label>Project <select value={projectID} onChange={(event) => setProject(event.target.value)}>{projects.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>}
-    <nav className="dfProjectLibrary__actions dfProjectLibrary__views" aria-label="Library views">{[["documents", "All documents"], ["discussions", "Discussions"], ["outcomes", "Outcomes"]].map(([value, label]) => <button key={value} type="button" aria-pressed={view === value} onClick={() => setView(value!)}>{label}</button>)}</nav>
-    {view === "outcomes" ? <ProjectOutcomes key={projectID} project={projectID} call={call} /> : <LibraryDocuments key={`${projectID}:${view}:${scoped ? `${entity}:${repository}:${initialID}` : ""}`} projectID={projectID} state={state} call={call} draft={draft} board={view === "discussions"} entity={scoped ? entity : ""} repository={scoped ? repository : ""} initialID={scoped && (view === "discussions") === board ? initialID : ""} onSource={onSource} onRecord={onRecord} />}
+    {board ? <><p className="dfProjectLibrary__purpose">Ask questions, share findings and follow replies with agents and operators. Threads are retained for anyone to read; reusable guidance belongs in the Library.</p></>
+      : <nav className="dfProjectLibrary__actions dfProjectLibrary__views" aria-label="Library views">{[["documents", "All documents"], ["outcomes", "Outcomes"]].map(([value, label]) => <button key={value} type="button" aria-pressed={view === value} onClick={() => setView(value!)}>{label}</button>)}</nav>}
+    {view === "outcomes" && !board ? <ProjectOutcomes key={projectID} project={projectID} call={call} /> : <LibraryDocuments key={`${projectID}:${scoped ? `${entity}:${repository}:${initialID}:${initialRevision}` : ""}`} projectID={projectID} state={state} call={call} draft={draft} board={board} entity={scoped ? entity : ""} repository={scoped ? repository : ""} initialID={scoped ? initialID : ""} initialRevision={scoped ? initialRevision : undefined} onSource={onSource} onRecord={onRecord} />}
+    {board ? <DirectQuestions state={state} projectID={projectID} onOpen={onRecord === undefined ? undefined : (id) => void Promise.resolve(onRecord("peer_question", id, projectID)).catch(() => undefined)} /> : null}
   </>;
   return open || board || initialID ? <section className="dfProjectLibrary" aria-label={board ? "Project board" : "Project library"}>{contents}</section>
     : <details className="dfConsoleSidebar__panel dfProjectLibrary" onToggle={(event) => setExpanded(event.currentTarget.open)}><summary>Project library</summary>{expanded ? contents : null}</details>;
 }
 
-function LibraryDocuments({ state, call, draft, projectID, board = false, entity = "", repository = "", initialID = "", onSource, onRecord }: LibraryProps & { projectID: string }) {
+function LibraryDocuments({ state, call, draft, projectID, board = false, entity = "", repository = "", initialID = "", initialRevision, onSource, onRecord }: LibraryProps & { projectID: string }) {
   const [items, setItems] = useState<RecordValue[]>([]), [next, setNext] = useState(0);
   const [selected, setSelected] = useState<RecordValue>();
   const [loaded, setLoaded] = useState(false);
@@ -77,7 +81,7 @@ function LibraryDocuments({ state, call, draft, projectID, board = false, entity
   };
   const list = async (offset = 0) => {
     const generation = epoch.current;
-    if (offset === 0) listQuery.current = { ...filters, kind: board ? "discussion" : filters.kind, open_only: board && !showResolved };
+    if (offset === 0) listQuery.current = { ...filters, kind: board ? "discussion" : filters.kind, open_only: board && !showResolved, documents_only: !board };
     const result = await request("search", { ...listQuery.current, offset, limit: 4 });
     if (generation !== epoch.current) return;
     setItems((existing) => [...new Map([...(offset === 0 ? [] : existing), ...rows(result.items)].map((item) => [text(item.id), item])).values()]);
@@ -99,11 +103,11 @@ function LibraryDocuments({ state, call, draft, projectID, board = false, entity
   };
   const available = call !== undefined && projectID !== "";
   useEffect(() => {
-    const load = () => { if (available) void run(async () => { const generation = epoch.current; await list(); if (generation === epoch.current && initialID && initialRead.current !== initialID) { initialRead.current = initialID; await read(initialID); } }); };
+    const load = () => { if (available) void run(async () => { const generation = epoch.current; await list(); if (generation === epoch.current && initialID && initialRead.current !== initialID) { initialRead.current = initialID; await read(initialID, initialRevision); } }); };
     const timer = searchTimer.current = filters.query ? setTimeout(load, 250) : undefined;
     if (!timer) load();
     return () => { clearTimeout(timer); epoch.current++; };
-  }, [available, initialID, filters, showResolved]);
+  }, [available, initialID, initialRevision, filters, showResolved]);
   const loadBody = async (content = selected, offset = bodyNext) => {
     if (content === undefined) return;
     const generation = epoch.current;
@@ -150,9 +154,9 @@ function LibraryDocuments({ state, call, draft, projectID, board = false, entity
       <form role="search" onSubmit={(event) => { event.preventDefault(); void run(() => list()); }}>
         <div className="dfProjectLibrary__toolbar">
           <label className="dfProjectLibrary__search">Search {board ? "discussions" : "documents"}<input type="search" value={filters.query} onChange={(event) => setFilters({ ...filters, query: event.target.value })} /></label>
-          {board ? <label><input type="checkbox" checked={showResolved} onChange={(event) => setShowResolved(event.target.checked)} /> Include resolved</label> : <label>Category <select value={filters.kind} onChange={(event) => setFilters({ ...filters, kind: event.target.value })}><option value="">All categories</option>{kinds.map((kind) => <option key={kind} value={kind}>{kindLabel(kind)}</option>)}</select></label>}
+          {board ? <label><input type="checkbox" checked={showResolved} onChange={(event) => setShowResolved(event.target.checked)} /> Include resolved</label> : <label>Category <select value={filters.kind} onChange={(event) => setFilters({ ...filters, kind: event.target.value })}><option value="">All categories</option>{documentKinds.map((kind) => <option key={kind} value={kind}>{kindLabel(kind)}</option>)}</select></label>}
           {board && ![filters.repository_id, filters.branch, filters.environment, filters.entity].some(Boolean) ? null : <button type="button" aria-expanded={sourceFilters} onClick={() => setSourceFilters(!sourceFilters)}>Source filters{[filters.repository_id, filters.branch, filters.environment, filters.entity].filter(Boolean).length ? ` (${[filters.repository_id, filters.branch, filters.environment, filters.entity].filter(Boolean).length})` : ""}</button>}
-          {board ? null : <button type="button" onClick={() => begin("observation", { status: "tentative", entities: filters.entity ? [filters.entity] : [] })}>New document</button>}
+          {board ? <button type="button" onClick={() => begin("discussion", { status: "tentative", entities: filters.entity ? [filters.entity] : [] })}>Start a thread</button> : <button type="button" onClick={() => begin("observation", { status: "tentative", entities: filters.entity ? [filters.entity] : [] })}>New document</button>}
         </div>
         {!sourceFilters ? null : <fieldset className="dfProjectLibrary__fields"><legend>Filter by source</legend>{(["repository_id", "branch", "environment", "entity"] as const).map((key) => <label key={key}>{key.replaceAll("_", " ")} <input value={filters[key]} onChange={(event) => setFilters({ ...filters, [key]: event.target.value })} /></label>)}</fieldset>}
       </form>
@@ -165,7 +169,8 @@ function LibraryDocuments({ state, call, draft, projectID, board = false, entity
       <div className="dfProjectLibrary__reader">
       {selected === undefined || editing ? null : <section aria-label="Selected library revision">
         <h3>{text(selected.title)}</h3>
-        <p className="dfProjectLibrary__meta" data-knowledge-status={text(selected.projected_status || metadata.status)}>{kindLabel(text(selected.kind))} · Revision {String(selected.revision)}{documentState(selected, metadata) ? ` · ${documentState(selected, metadata)}` : ""}</p>
+        <p className="dfProjectLibrary__meta" data-knowledge-status={text(selected.projected_status || metadata.status)}>{kindLabel(text(selected.kind))} · Revision {String(selected.revision)}{authorName(text(selected.author), state) ? ` · by ${authorName(text(selected.author), state)}` : ""}{documentState(selected, metadata) ? ` · ${documentState(selected, metadata)}` : ""}</p>
+        {discussion && (text(metadata.task_id) || text(metadata.record_id)) ? <p><button type="button" disabled={!onRecord} onClick={() => void run(async () => { await onRecord?.(text(metadata.record_id) ? text(metadata.record_type) : "task", text(metadata.record_id) || text(metadata.task_id), projectID); })}>View linked {text(metadata.record_id) ? text(metadata.record_type) || "record" : "task"}</button></p> : null}
         {panel === "read" ? null : <button type="button" onClick={() => setPanel("read")}>← Read document</button>}
         {threadID && !discussion ? <p><button type="button" onClick={() => void run(() => read(threadID))}>Back to discussion</button></p> : null}
         <div className="dfProjectLibrary__workspace">
@@ -183,7 +188,7 @@ function LibraryDocuments({ state, call, draft, projectID, board = false, entity
             <button type="button" disabled={!editable} onClick={() => void run(() => updateThread({ resolved: !metadata.resolved }))}>{metadata.resolved ? "Reopen discussion" : "Resolve discussion"}</button>
             <button type="button" disabled={!editable} onClick={() => void run(() => updateThread({ pinned: !metadata.pinned }))}>{metadata.pinned ? "Unpin discussion" : "Pin discussion"}</button>
           </div>
-          {replies.map((reply) => <article className="dfProjectLibrary__reply" key={text(reply.id)}><p className="dfProjectLibrary__meta">{text(reply.author) || "Reply"} · Revision {String(reply.revision)}</p><pre>{text(reply.body)}</pre>{reply.complete ? null : <button type="button" onClick={() => void run(() => read(text(reply.id), Number(reply.revision)))}>Read full reply</button>}</article>)}{replyNext === 0 ? null : <button type="button" onClick={() => void run(() => loadRelated("search", replyNext))}>More replies</button>}
+          {replies.map((reply) => <article className="dfProjectLibrary__reply" key={text(reply.id)}><p className="dfProjectLibrary__meta">{authorName(text(reply.author), state) || "Reply"} · Revision {String(reply.revision)}</p><pre>{text(reply.body)}</pre>{reply.complete ? null : <button type="button" onClick={() => void run(() => read(text(reply.id), Number(reply.revision)))}>Read full reply</button>}</article>)}{replyNext === 0 ? null : <button type="button" onClick={() => void run(() => loadRelated("search", replyNext))}>More replies</button>}
           <form key={text(selected.id)} aria-label="Reply to discussion" onSubmit={(event) => {
             event.preventDefault(); const form = event.currentTarget, reply = String(new FormData(form).get("reply") ?? "").trim();
             if (!reply) return;
@@ -245,9 +250,11 @@ function LibraryDocuments({ state, call, draft, projectID, board = false, entity
         const updatedBody = editingSources ? body : String(data.get("body"));
         void run(async () => { const value = await request(newKind ? "create" : "revise", { id: newKind ? newID.current : selected?.id, expected_revision: newKind ? 0 : selected?.revision, repository_id: editingSources ? data.get("repository_id") : newKind && !seed.thread_id ? filters.repository_id : selected?.repository_id, kind, title: editingSources ? selected?.title : data.get("title"), description: editingSources ? data.get("description") : newKind ? "" : selected?.description, body: updatedBody, source_references: (kinds.includes(kind) && (kind !== "procedure" || Boolean(newKind) || Object.keys(metadata).length > 0)) ? JSON.stringify(details) : editingSources ? data.get("source_references") : selected?.source_references }); selectRevision(value, updatedBody); setNotice("Saved."); await list(); });
       }}>
-        <h3>{editingSources ? "Edit sources" : newKind === "lesson" && seed.thread_id ? "Save conclusion" : newKind ? "New document" : "Edit document"}</h3>
+        <h3>{editingSources ? "Edit sources" : newKind === "discussion" ? "Start a thread" : newKind === "lesson" && seed.thread_id ? "Save conclusion" : newKind ? "New document" : "Edit document"}</h3>
+        {newKind === "discussion" ? <p>Anyone with access to this project can read and reply. Posting does not assign work or notify an agent; use Tasks to assign work.</p> : null}
+        {newKind === "lesson" && seed.thread_id ? <p>Saved to the Library with this thread as evidence. The thread and its history stay on the Board.</p> : null}
         {editingSources ? null : <>
-          {!newKind ? <p>{kindLabel(editorKind)}</p> : <label>Category <select name="kind" defaultValue={editorKind} onChange={(event) => setNewKind(event.target.value)}>{kinds.filter(kind => !kind.startsWith("discussion")).map(kind => <option key={kind} value={kind}>{kindLabel(kind)}</option>)}</select></label>}
+          {!newKind || newKind === "discussion" ? <p>{kindLabel(editorKind)}</p> : <label>Category <select name="kind" defaultValue={editorKind} onChange={(event) => setNewKind(event.target.value)}>{documentKinds.map(kind => <option key={kind} value={kind}>{kindLabel(kind)}</option>)}</select></label>}
           <label>Title <input name="title" autoFocus defaultValue={newKind ? newKind === "lesson" && seed.thread_id ? `Conclusion: ${text(selected?.title)}` : "" : text(selected?.title)} required /></label>
           <label>Text <textarea name="body" rows={12} defaultValue={newKind ? "" : body} required /></label>
           {!newKind || !["decision", "lesson", "project_brief"].includes(editorKind) ? null : <label>Supporting references <textarea name="evidence" defaultValue={strings(editorMeta.evidence).join("\n")} required={editorKind !== "project_brief"} /></label>}

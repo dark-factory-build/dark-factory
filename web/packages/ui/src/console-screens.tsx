@@ -13,6 +13,7 @@ import {
 import { FactoryScene, AgentSprite } from "./factory-scene/factory-scene.js";
 import { inProgressProduction, productionKey, type ProductionContraption } from "./production-view.js";
 import { type ProjectContentCall } from "./project-library.js";
+import { KnowledgeActivityList, activityLabel, onBoard, type KnowledgeActivity, type KnowledgeCue } from "./project-board.js";
 import { type SceneNode } from "./factory-scene/scene.js";
 import { DEFAULT_FLOOR_APPEARANCE, type FloorAppearance } from "./floor-appearance.js";
 
@@ -85,8 +86,12 @@ const NO_CHANGES: readonly ProductionContraption[] = [];
 /** Flat source projection; every action opens an existing inspector or control. */
 export function FactoryFloor({
   changes = NO_CHANGES, selectedChange, onSelectChange, state, topologies, runPaths, lastRunPaths, selectedAgentId, onSelectAgent,
-  onSelectHumanRequest, selectedTaskId, onSelectTask, onOpenTasks, onOpenMissions, onOpenLibrary, onOpenBoard, onOpenChanges, requestedEntity, connected = true, floorAppearance = DEFAULT_FLOOR_APPEARANCE, projectId, onProjectContent,
+  onSelectHumanRequest, selectedTaskId, onSelectTask, onOpenTasks, onOpenMissions, onOpenLibrary, onOpenBoard, onOpenChanges, requestedEntity, connected = true, floorAppearance = DEFAULT_FLOOR_APPEARANCE, projectId, onProjectContent, activity = [], activityCues = [], onOpenActivity,
 }: {
+  /** Recorded Board and Library operations, newest first, and the few just cued. */
+  activity?: readonly KnowledgeActivity[];
+  activityCues?: readonly KnowledgeCue[];
+  onOpenActivity?: (item: KnowledgeActivity) => void;
   changes?: readonly ProductionContraption[];
   selectedChange?: string;
   onSelectChange?: (key: string) => void;
@@ -130,6 +135,7 @@ export function FactoryFloor({
     <FactoryScene
       tools={<>
         <button type="button" disabled={!onOpenChanges} onClick={onOpenChanges}>Changes · {changes.filter(inProgressProduction).length}</button>
+        {onOpenActivity === undefined ? null : <KnowledgeActivityList items={activity} state={state} onOpen={onOpenActivity} />}
         <details className="dfFactoryHelp"><summary>Help</summary>
           <p>Select equipment to inspect it. Search finds source areas beyond the visible rooms.</p>
           <p className="dfFactoryLegend">⚙ Code · ⏚ Tests · ▤ Config · ▥ Docs · ▦ Assets</p>
@@ -155,6 +161,7 @@ export function FactoryFloor({
       connected={connected}
       tasks={scene.tasks}
       peerQuestions={peerQuestions}
+      knowledgeCues={activityCues.map((cue) => ({ key: cue.key, agentId: cue.agent_id, board: onBoard(cue), reading: cue.operation === "read" || cue.operation === "delivered", label: activityLabel(cue, state), open: onOpenActivity === undefined ? undefined : () => onOpenActivity(cue) }))}
       omittedLocations={scene.omittedLocations}
       requestedEntity={requestedEntity}
       onSelectEntity={setSelectedEntity}

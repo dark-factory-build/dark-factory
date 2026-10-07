@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/coder/websocket"
@@ -84,5 +85,24 @@ func TestKnowledgeBoardRealStoreRoundTrip(t *testing.T) {
 	accesses := must("accesses", map[string]any{"id": conclusionID, "revision": 1, "limit": 4})
 	if len(accesses["items"].([]any)) != 0 {
 		t.Fatal("browser metadata use invented worker access")
+	}
+	activity := must("activity", map[string]any{"limit": 8})["items"].([]any)
+	operations := []string{}
+	for _, item := range activity {
+		row := item.(map[string]any)
+		operations = append(operations, fmt.Sprint(row["operation"], " ", row["content_id"] == id || row["thread_id"] == id, " ", row["agent_id"]))
+	}
+	if want := "posted true |revised true |posted true |posted true "; strings.Join(operations, "|") != want {
+		t.Fatalf("board activity = %q", operations)
+	}
+	if _, err := call("activity", map[string]any{"limit": 9}); err == nil {
+		t.Fatal("unbounded activity accepted")
+	}
+	if foreign := must("activity", map[string]any{"project_id": other.String(), "limit": 8}); len(foreign["items"].([]any)) != 0 {
+		t.Fatal("cross-project activity leak")
+	}
+	documents := must("search", map[string]any{"documents_only": true, "limit": 4})["items"].([]any)
+	if len(documents) != 1 || documents[0].(map[string]any)["id"] != conclusionID {
+		t.Fatalf("library documents include board threads: %v", documents)
 	}
 }

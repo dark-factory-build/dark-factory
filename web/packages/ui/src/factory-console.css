@@ -874,6 +874,12 @@ summary.dfConsoleItem__summary { cursor: pointer; }
 .dfFactoryEntityTools__notice { flex-basis: 100%; display: flex; align-items: baseline; flex-wrap: wrap; gap: .4rem; margin: 0; font-size: .8rem; }
 .dfFactoryEntityTools__selection { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: min(100%, 32rem); }
 .dfFactoryHelp[open] { flex-basis: 100%; overflow-wrap: anywhere; }
+.dfKnowledgeActivity ul, .dfBoardQuestions ul { list-style: none; margin: .4rem 0; padding: 0; display: grid; gap: .35rem; }
+.dfKnowledgeActivity button { max-width: 100%; overflow-wrap: anywhere; text-align: left; }
+/* A recorded operation appears once, briefly; ambient life never uses this mark. */
+.dfKnowledgeCue { animation: dfKnowledgeCue 400ms ease-out both; }
+@keyframes dfKnowledgeCue { from { opacity: 0; } to { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .dfKnowledgeCue { animation: none; } }
 .dfFactoryLegend { color: #b2c6be; font-size: .72rem; line-height: 1.7; margin: .4rem 0; }
 .dfRoomDetails { padding-top: .75rem; }
 .dfRoomDetails table { font-size: .75rem; }
