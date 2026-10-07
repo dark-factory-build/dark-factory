@@ -275,7 +275,12 @@ export function QueuePanel({
   onLoadTaskDetail,
   selectedTaskId,
   onSelectTask,
+  sources,
+  onManageSources,
 }: {
+  /** The local source list for the shown project; undefined until loaded. */
+  sources?: readonly { id: string; repository: string; label: string; enabled: boolean }[];
+  onManageSources?: () => void;
   selectedTaskId?: string;
   onSelectTask?: (taskId: string) => void;
   state: StateView | undefined;
@@ -306,6 +311,7 @@ export function QueuePanel({
     </section>;
   };
   return <section className="dfConsoleSidebar__panel" aria-label="Tasks">
+    {onManageSources === undefined ? null : <p className="dfConsoleItem__meta" role="status" aria-label="Task sources">{sources === undefined ? "Sources: not loaded yet" : sources.length === 0 ? "No sources — tasks come only from New task" : `Sources: ${sources.map((item) => `${item.repository} · ${item.label === "" ? "every issue" : `label ${item.label}`}${item.enabled ? "" : " (paused)"}`).join("; ")}`} <button type="button" onClick={onManageSources}>Manage</button></p>}
     {state.factory.dispatch_enabled ? null : <p role="status">New work is paused. Queued tasks wait; active processes continue. An administrator can resume new work above.</p>}
     {onAddTask === undefined ? null : <NewTask agents={agents} state={state} disabled={!ready || edit?.pending === true} onAddTask={onAddTask} />}
     {opened("blocked", "Blocked")}
@@ -640,6 +646,7 @@ export function SettingsDialog({
   onLoadIntake,
   onIntakeAction,
   onSelectTask,
+  initialTab,
   pairing,
   runtime,
   release,
@@ -670,6 +677,8 @@ export function SettingsDialog({
   onMutateRepository?: (request: RepositoryMutation) => void;
   onCreateProject?: (request: { name: string; root: string }) => void;
   onSelectTask?: (id:string)=>void;
+  /** The tab to open on; 1 is Connections. */
+  initialTab?: number;
   intake?: ReadonlyMap<string, IntakeView>; intakePending?: ReadonlySet<string>; intakeErrors?: ReadonlyMap<string, string>; onLoadIntake?: (projectId: string) => void; onIntakeAction?: (projectId: string, request: IntakeBody) => void;
   /** A self-contained "PAIR A PHONE" surface mounts here. */
   pairing?: ReactNode;
@@ -686,12 +695,11 @@ export function SettingsDialog({
   const loadGitHub = useRef(onGitHub);
   loadGitHub.current = onGitHub;
   useEffect(() => { if (ready) loadGitHub.current?.({ action: "status" }); }, [ready]);
-  const [tab, setTab] = useState(0);
+  const [tab, setTab] = useState(initialTab ?? 0);
   const settingsId = useId();
   const tabs = [
     { label: "Projects", content: <>
         <RepositoriesSection projectId={projectId} state={state} repositories={repositories} pending={repositoryPending} errors={repositoryErrors} onLoad={onLoadRepositories} onMutate={onMutateRepository} onCreateProject={onCreateProject} />
-        <IntakeSection github={github} onSelectTask={onSelectTask} state={state} repositories={repositories} intake={intake} pending={intakePending} errors={intakeErrors} onLoad={onLoadIntake} onLoadRepositories={onLoadRepositories} onAction={onIntakeAction} />
         <AttachmentRetentionSection call={ready ? onAttachmentRetention : undefined} />
         <details className="dfConsoleSidebar__section" aria-label="Run limits">
           <summary>Run limits</summary>
@@ -709,6 +717,7 @@ export function SettingsDialog({
           onRefresh={onLoadAccounts}
         />
         <GitHubSection github={github} onGitHub={onGitHub} />
+        <IntakeSection active={tab === 1} projectId={projectId} github={github} onSelectTask={onSelectTask} state={state} repositories={repositories} intake={intake} pending={intakePending} errors={intakeErrors} onLoad={onLoadIntake} onLoadRepositories={onLoadRepositories} onAction={onIntakeAction} />
     </> },
     { label: "Devices", content: <section className="dfConsoleSidebar__section" aria-label="PAIRING">
         <h3>Devices &amp; pairing</h3>
@@ -1109,48 +1118,46 @@ export function HumanRequestPanel({
   );
 }
 
-function IntakeSection({ state, repositories, intake, pending, errors, onLoad, onLoadRepositories, onAction, github, onSelectTask }: { state: StateView | undefined; repositories?: ReadonlyMap<string, readonly RepositoryView[]>; intake?: ReadonlyMap<string, IntakeView>; pending?: ReadonlySet<string>; errors?: ReadonlyMap<string, string>; onLoad?: (projectId: string) => void; onLoadRepositories?: (projectId: string) => void; onAction?: (projectId: string, request: IntakeBody) => void; github?: FactoryGitHubView; onSelectTask?: (id:string)=>void }) {
+function IntakeSection({ projectId: headerProject, active, state, repositories, intake, pending, errors, onLoad, onLoadRepositories, onAction, github, onSelectTask }: { projectId?: string; active: boolean; state: StateView | undefined; repositories?: ReadonlyMap<string, readonly RepositoryView[]>; intake?: ReadonlyMap<string, IntakeView>; pending?: ReadonlySet<string>; errors?: ReadonlyMap<string, string>; onLoad?: (projectId: string) => void; onLoadRepositories?: (projectId: string) => void; onAction?: (projectId: string, request: IntakeBody) => void; github?: FactoryGitHubView; onSelectTask?: (id:string)=>void }) {
   const projects = state === undefined ? [] : [...state.projects.values()];
-  const [open, setOpen] = useState(false), [selection, setSelection] = useState(""), [sourceSelection, setSourceSelection] = useState("");
-  const projectId = projects.find((project) => project.id === selection)?.id ?? projects[0]?.id;
+  const [sourceSelection, setSourceSelection] = useState(""), [adding, setAdding] = useState(false);
+  const projectId = headerProject ?? (projects.length === 1 ? projects[0]!.id : undefined);
   const result = projectId === undefined ? undefined : intake?.get(projectId);
   const sources = result?.sources ?? [];
-  const source = sources.find((item) => item.id === sourceSelection) ?? sources[0];
+  const source = adding ? undefined : sources.find((item) => item.id === sourceSelection) ?? sources[0];
   const busy = projectId !== undefined && (pending?.has(projectId) ?? false);
   const callbacks = useRef({onLoad,onLoadRepositories,onAction}); callbacks.current={onLoad,onLoadRepositories,onAction};
-  useEffect(() => { if (open && projectId) { callbacks.current.onLoad?.(projectId); callbacks.current.onLoadRepositories?.(projectId); } }, [open,projectId,onLoad !== undefined,onLoadRepositories !== undefined]);
-  useEffect(() => { if (open && projectId && source) callbacks.current.onAction?.(projectId,{action:"preview",source_id:source.id,page:1}); }, [open,projectId,source?.id,source?.revision]);
+  useEffect(() => { if (active && projectId) { callbacks.current.onLoad?.(projectId); callbacks.current.onLoadRepositories?.(projectId); } }, [active,projectId,onLoad !== undefined,onLoadRepositories !== undefined]);
+  useEffect(() => { if (active && projectId && source) callbacks.current.onAction?.(projectId,{action:"preview",source_id:source.id,page:1}); }, [active,projectId,source?.id,source?.revision]);
   const act = (request:IntakeBody) => { if(projectId) onAction?.(projectId,request); };
   const project = projects.find((item)=>item.id===projectId);
   const current = source !== undefined && result?.source_id === source.id && result?.reviewed_revision === source.revision;
-  return <details className="dfConsoleSidebar__section" aria-label="Issue intake" onToggle={(event)=>{if(event.target===event.currentTarget)setOpen(event.currentTarget.open);}}><summary>Issue inbox</summary>
-    {projects.length>1 ? <label>Project<select value={projectId} onChange={(event)=>{setSelection(event.currentTarget.value);setSourceSelection("");}}>{projects.map((item)=><option key={item.id} value={item.id}>{item.name}</option>)}</select></label>:null}
+  return <section className="dfConsoleSidebar__section" aria-label="Sources"><h3>Sources</h3>
+    {project === undefined ? <p>Choose a project in the header to manage its sources.</p> : <>
     {projectId && errors?.get(projectId) ? <p role="alert">Could not check issues. Try again.</p>:null}
     {result && !["ok","accepted","imported"].includes(result.state) ? <p role="status">{result.state === "unavailable" ? "Connection unavailable. Check access and try again." : result.state.replaceAll("_"," ")}</p>:null}
     {source ? <>
-      {sources.length>1 ? <label>Backlog<select value={source.id} onChange={(event)=>setSourceSelection(event.currentTarget.value)}>{sources.map((item)=><option key={item.id} value={item.id}>{item.repository}</option>)}</select></label>:<p>{source.repository}</p>}
+      {sources.length>1 ? <label>Source<select value={source.id} onChange={(event)=>setSourceSelection(event.currentTarget.value)}>{sources.map((item)=><option key={item.id} value={item.id}>{item.repository}</option>)}</select></label>:<p>{source.repository}</p>}
       <button type="button" disabled={busy} onClick={()=>act({action:"preview",source_id:source.id,page:1})}>Refresh</button>
-      <details><summary>Backlog settings</summary>
-        <p>{source.enabled ? "Active" : "Paused"}</p>
-        <button type="button" disabled={busy || (!source.enabled && source.policy!=="manual" && !current)} onClick={()=>act(source.enabled ? {action:"pause",source_id:source.id,expected_revision:source.revision}:{action:"enable",source_id:source.id,expected_revision:source.revision,reviewed_revision:source.revision})}>{source.enabled ? "Pause" : "Resume"}</button>
-        {source.sync?.error ? <p role="alert">Checking failed. Check the connection and refresh.</p>:null}
-        {project ? <IntakeForm key={`${source.id}:${source.revision}`} project={project} state={state} repositories={repositories?.get(project.id)} source={source} result={result} github={github} busy={busy} onAction={onAction}/>:null}
-      </details>
+      <button type="button" disabled={busy || (!source.enabled && source.policy!=="manual" && !current)} onClick={()=>act(source.enabled ? {action:"pause",source_id:source.id,expected_revision:source.revision}:{action:"enable",source_id:source.id,expected_revision:source.revision,reviewed_revision:source.revision})}>{source.enabled ? "Pause" : "Resume"}</button>
+      {source.sync?.error ? <p role="alert">Checking failed. Check the connection and refresh.</p>:null}
       {current ? result?.candidates?.map((candidate)=>{
         const imported = candidate.task_id !== undefined && state?.tasks.has(candidate.task_id);
         const canAccept = !candidate.truncated && ["needs_manual_acceptance","untrusted_author","content_changed","eligible_trusted_author"].includes(candidate.reason);
         const status = imported ? "Added" : candidate.reason === "content_changed" ? "Updated" : canAccept ? "Needs approval" : candidate.reason.replaceAll("_"," ");
         return <article key={`${source.id}:${candidate.number}:${candidate.content_hash}`}><p><a href={candidate.url} target="_blank" rel="noreferrer">{candidate.title}</a> · {status}</p>
           <details><summary>Details</summary><p style={{whiteSpace:"pre-wrap"}}>{candidate.body}</p>
-          {canAccept ? <button type="button" disabled={busy || !source.enabled} onClick={()=>act({action:"accept",source_id:source.id,expected_revision:source.revision,issue_number:candidate.number,content_hash:candidate.content_hash})}>Add to queue</button>:null}</details>
+          {canAccept ? <button type="button" disabled={busy || !source.enabled} onClick={()=>act({action:"accept",source_id:source.id,expected_revision:source.revision,issue_number:candidate.number,content_hash:candidate.content_hash})}>Accept</button>:null}</details>
           {imported ? <button type="button" disabled={onSelectTask===undefined} onClick={()=>onSelectTask?.(candidate.task_id!)}>View task</button>:null}
           {candidate.acceptance_id && !["withdrawn","withdrawal_pending"].includes(candidate.reason) ? <button type="button" disabled={busy} onClick={()=>act({action:"withdraw",acceptance_id:candidate.acceptance_id})}>Withdraw</button>:null}
         </article>;
       }):null}
       {current && result?.next_page ? <button type="button" disabled={busy} onClick={()=>act({action:"preview",source_id:source.id,page:result.next_page!})}>More issues</button>:null}
-    </>:<p>{busy ? "Checking…" : "Add a backlog to see issues here."}</p>}
-    {project ? <IntakeForm project={project} state={state} repositories={repositories?.get(project.id)} result={result} github={github} busy={busy} onAction={onAction}/>:null}
-  </details>;
+    </>:<p>{busy ? "Checking…" : "No sources yet. Add one to see issues here."}</p>}
+    {sources.length>0 ? <button type="button" onClick={()=>setAdding(!adding)}>{adding ? "Cancel" : "Add source"}</button> : null}
+    <IntakeForm key={`${source?.id ?? "new"}:${source?.revision}`} project={project} state={state} repositories={repositories?.get(project.id)} source={source} result={result} github={github} busy={busy} onAction={(id,request)=>{onAction?.(id,request);if(request.action==="create")setAdding(false);}}/>
+    </>}
+  </section>;
 }
 
 function IntakeForm({ project, state, repositories, source, result, github, busy, onAction }: { project: ProjectItem; state: StateView | undefined; repositories?: readonly RepositoryView[]; source?: import("@dark-factory/client").IntakeSource; result?: IntakeView; github?: FactoryGitHubView; busy:boolean; onAction?: (projectId:string,request:IntakeBody)=>void }) {
@@ -1174,13 +1181,13 @@ function IntakeForm({ project, state, repositories, source, result, github, busy
     const configuration={...(source?.priority_default===undefined ? {}:{priority_default:source.priority_default}),...(source?.priority_by_label===undefined ? {}:{priority_by_label:source.priority_by_label}),...(provider==="linear" ? {linear_team_id:linearId}:{}),repository:provider==="linear" ? selectedTeam?.name ?? source?.repository ?? "Linear":selectedRepository,target_repository_id:destination,overseer_agent_id:overseer,label:label.trim(),policy:provider==="linear" ? "manual" as const:policy,trusted_authors:provider==="linear"||policy==="manual" ? []:authors.split(",").map((value)=>value.trim()).filter(Boolean),poll_seconds:Number(poll),admission_limit:Number(limit)};
     act(source ? {action:"update",source_id:source.id,project_id:project.id,expected_revision:source.revision,configuration}:{action:"create",project_id:project.id,configuration});
   };
-  return <details><summary>{source ? "Edit backlog":"Add backlog"}</summary><form onSubmit={submit}>
+  return <form onSubmit={submit}>
     {source ? null:<label>Source<select value={provider} onChange={(event)=>{setProvider(event.currentTarget.value);if(event.currentTarget.value==="linear")act({action:"linear_teams"});}}><option value="github">GitHub Issues</option><option value="linear">Linear</option></select></label>}
     {provider==="linear" ? <>
       {teams.length ? <label>Team<select value={selectedTeam?.id ?? ""} onChange={(event)=>setTeam(event.currentTarget.value)}><option value="">Choose a team</option>{teams.map((item)=><option key={item.id} value={item.id}>{item.name}</option>)}</select></label>:<label>Linear read-only API key<input type="password" value={key} autoComplete="off" maxLength={512} onChange={(event)=>setKey(event.currentTarget.value)}/></label>}
       {teams.length ? <button type="button" disabled={busy} onClick={()=>act({action:"linear_disconnect"})}>Disconnect Linear</button>:<button type="button" disabled={busy || key.length<10} onClick={()=>{act({action:"linear_connect",api_key:key});setKey("");}}>Connect Linear</button>}
-    </>:<label>GitHub backlog<select value={selectedRepository} onChange={(event)=>setRepository(event.currentTarget.value)}><option value="">Choose a repository</option>{githubRepositories.map((item)=><option key={item.repository_id} value={item.repository}>{item.repository}</option>)}{source && !githubRepositories.some((item)=>item.repository===source.repository) ? <option value={source.repository}>{source.repository}</option>:null}</select></label>}
-    <label>Label (optional)<input value={label} onChange={(event)=>setLabel(event.currentTarget.value)}/></label>
+    </>:<label>GitHub repository<select value={selectedRepository} onChange={(event)=>setRepository(event.currentTarget.value)}><option value="">Choose a repository</option>{githubRepositories.map((item)=><option key={item.repository_id} value={item.repository}>{item.repository}</option>)}{source && !githubRepositories.some((item)=>item.repository===source.repository) ? <option value={source.repository}>{source.repository}</option>:null}</select></label>}
+    <label>Label filter (only issues with it are imported; blank imports every issue)<input value={label} onChange={(event)=>setLabel(event.currentTarget.value)}/></label>
     {!destination ? <p>Add a code repository to this project first.</p>:null}
     <details><summary>Advanced</summary>
       <label>Code repository<select value={destination} onChange={(event)=>setTarget(event.currentTarget.value)}>{targets.map((item)=><option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
@@ -1188,8 +1195,8 @@ function IntakeForm({ project, state, repositories, source, result, github, busy
       {provider==="github" ? <><label>Approval<select value={policy} onChange={(event)=>setPolicy(event.currentTarget.value as "manual"|"trusted_authors")}><option value="manual">Require my approval</option><option value="trusted_authors">Allow trusted authors</option></select></label>{policy==="trusted_authors" ? <label>Trusted authors<input value={authors} onChange={(event)=>setAuthors(event.currentTarget.value)}/></label>:null}</>:null}
       <label>Check every (seconds)<input value={poll} onChange={(event)=>setPoll(event.currentTarget.value)}/></label><label>Maximum imports per check<input value={limit} onChange={(event)=>setLimit(event.currentTarget.value)}/></label>
     </details>
-    <button type="submit" disabled={busy || !destination}>{source ? "Save":"Add backlog"}</button>
-  </form></details>;
+    <button type="submit" disabled={busy || !destination}>{source ? "Save":"Add source"}</button>
+  </form>;
 }
 
 function AttachmentRetentionSection({ call }: { call?: (enabled?: boolean) => Promise<boolean> }) {
