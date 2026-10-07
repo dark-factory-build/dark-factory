@@ -180,3 +180,66 @@ func TestObserveSourceFramesUntrackedFiles(t *testing.T) {
 		t.Fatal("executable mode inherited old observation")
 	}
 }
+
+func TestArchiveSourceFollowsUpstreamNotLaggingBranch(t *testing.T) {
+	fixture := newLocalGitFixture(t, "sha1")
+	ctx := context.Background()
+	git := func(arguments ...string) string {
+		t.Helper()
+		return strings.TrimSpace(runFixtureGitOutput(t, fixture.git, fixture.repository, arguments...))
+	}
+	identity, err := InspectRepositorySource(ctx, fixture.git, fixture.repository, "", fixture.identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if revision, _, err := ArchiveSource(ctx, fixture.git, fixture.repository, "HEAD", identity); err != nil || revision != fixture.base.Hex() {
+		t.Fatalf("no upstream: %s %v", revision, err)
+	}
+	branch := git("symbolic-ref", "--short", "HEAD")
+	upstream := git("commit-tree", "-p", "HEAD", "-m", "integrated", "HEAD^{tree}")
+	git("config", "remote.origin.url", filepath.Join(t.TempDir(), "absent"))
+	git("config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*")
+	git("config", "branch."+branch+".remote", "origin")
+	git("config", "branch."+branch+".merge", "refs/heads/"+branch)
+	identity, err = InspectRepositorySource(ctx, fixture.git, fixture.repository, "", fixture.identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Configured but never fetched: the local branch is all there is.
+	if revision, _, err := ArchiveSource(ctx, fixture.git, fixture.repository, "HEAD", identity); err != nil || revision != fixture.base.Hex() {
+		t.Fatalf("unfetched upstream: %s %v", revision, err)
+	}
+	git("update-ref", "refs/remotes/origin/"+branch, upstream)
+	for _, target := range []string{"HEAD", branch, "origin/" + branch} {
+		if revision, _, err := ArchiveSource(ctx, fixture.git, fixture.repository, target, identity); err != nil || revision != upstream {
+			t.Fatalf("%s read %s, want upstream %s: %v", target, revision, upstream, err)
+		}
+	}
+	// Parked on a feature branch whose upstream is ahead: HEAD is still
+	// origin's default branch, as for change starts; the named branch is not.
+	feature := git("commit-tree", "-p", upstream, "-m", "unmerged", "HEAD^{tree}")
+	git("checkout", "-q", "-b", "feature")
+	git("update-ref", "refs/remotes/origin/feature", feature)
+	git("config", "branch.feature.remote", "origin")
+	git("config", "branch.feature.merge", "refs/heads/feature")
+	if revision, _, err := ArchiveSource(ctx, fixture.git, fixture.repository, "HEAD", identity); err != nil || revision != feature {
+		t.Fatalf("without origin/HEAD, HEAD read %s, want its upstream %s: %v", revision, feature, err)
+	}
+	git("symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/"+branch)
+	for target, want := range map[string]string{"HEAD": upstream, "feature": feature} {
+		if revision, _, err := ArchiveSource(ctx, fixture.git, fixture.repository, target, identity); err != nil || revision != want {
+			t.Fatalf("%s read %s, want %s: %v", target, revision, want, err)
+		}
+	}
+	// A change start's fetch is the integrated target when strictly newer.
+	fetched := git("commit-tree", "-p", upstream, "-m", "fetched", "HEAD^{tree}")
+	git("update-ref", factoryBaseRef("origin", "refs/heads/"+branch), fetched)
+	for _, target := range []string{"HEAD", "origin/" + branch} {
+		if revision, _, err := ArchiveSource(ctx, fixture.git, fixture.repository, target, identity); err != nil || revision != fetched {
+			t.Fatalf("%s read %s, want factory fetch %s: %v", target, revision, fetched, err)
+		}
+	}
+	if git("rev-parse", "HEAD") != fixture.base.Hex() {
+		t.Fatal("archive moved the checkout")
+	}
+}

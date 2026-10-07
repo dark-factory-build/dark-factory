@@ -191,7 +191,7 @@ func refreshTrackingRevision(ctx context.Context, spec gitCommandSpec, revision 
 			}
 			remote, branch = "origin", target
 		} else {
-			remote, branch, revision, err = localUpstream(run)
+			remote, branch, revision, err = localUpstream(run, "HEAD")
 			if err != nil {
 				return "", err
 			}
@@ -250,19 +250,23 @@ func factoryBaseRef(remote, branch string) string {
 	return "refs/factory/base/" + hex.EncodeToString(digest[:])
 }
 
-// localUpstream follows a checkout without an origin: its branch's configured
-// upstream, or the local branch or detached HEAD itself.
-func localUpstream(run func(...string) ([]byte, error)) (remote, branch, revision string, err error) {
+// localUpstream follows target when it names a local branch: that branch's
+// configured upstream, or the branch itself. Any other target (detached HEAD,
+// a remote-tracking ref, an object ID) is returned by its full name.
+func localUpstream(run func(...string) ([]byte, error), target string) (remote, branch, revision string, err error) {
 	// Empty upstream means a deliberately local project, including detached
 	// HEAD. This does not fall back when an actual configured fetch fails.
-	head, err := run("rev-parse", "--symbolic-full-name", "HEAD")
+	head, err := run("rev-parse", "--verify", "--quiet", "--symbolic-full-name", "--end-of-options", target)
 	if err != nil {
 		return "", "", "", err
 	}
-	if strings.TrimSpace(string(head)) == "HEAD" {
-		return "", "", "HEAD", nil
-	}
 	revision = strings.TrimSpace(string(head))
+	if !strings.HasPrefix(revision, "refs/heads/") {
+		if revision == "" {
+			revision = target
+		}
+		return "", "", revision, nil
+	}
 	output, err := run("for-each-ref", "--count=1", "--format=%(upstream) %(upstream:remotename) %(upstream:remoteref)", revision)
 	if err != nil {
 		return "", "", "", err
