@@ -1117,10 +1117,9 @@ export function HumanRequestPanel({
   );
 }
 
-function IntakeSection({ projectId: headerProject, active, state, repositories, intake, pending, errors, onLoadRepositories, onAction, github, onSelectTask }: { projectId?: string; active: boolean; state: StateView | undefined; repositories?: ReadonlyMap<string, readonly RepositoryView[]>; intake?: ReadonlyMap<string, IntakeView>; pending?: ReadonlySet<string>; errors?: ReadonlyMap<string, string>; onLoadRepositories?: (projectId: string) => void; onAction?: (projectId: string, request: IntakeBody) => void; github?: FactoryGitHubView; onSelectTask?: (id:string)=>void }) {
+function IntakeSection({ projectId, active, state, repositories, intake, pending, errors, onLoadRepositories, onAction, github, onSelectTask }: { projectId?: string; active: boolean; state: StateView | undefined; repositories?: ReadonlyMap<string, readonly RepositoryView[]>; intake?: ReadonlyMap<string, IntakeView>; pending?: ReadonlySet<string>; errors?: ReadonlyMap<string, string>; onLoadRepositories?: (projectId: string) => void; onAction?: (projectId: string, request: IntakeBody) => void; github?: FactoryGitHubView; onSelectTask?: (id:string)=>void }) {
   const projects = state === undefined ? [] : [...state.projects.values()];
   const [sourceSelection, setSourceSelection] = useState(""), [adding, setAdding] = useState(false);
-  const projectId = headerProject ?? (projects.length === 1 ? projects[0]!.id : undefined);
   const result = projectId === undefined ? undefined : intake?.get(projectId);
   const sources = result?.sources ?? [];
   const source = adding ? undefined : sources.find((item) => item.id === sourceSelection) ?? sources[0];

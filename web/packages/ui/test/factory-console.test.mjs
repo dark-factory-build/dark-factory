@@ -2168,7 +2168,7 @@ test("issue review refuses a stale preview before acceptance", async () => {
   const review = { source_id: source.id, state: "ok", sources: [source], candidates: [{ number: 17n, url: "https://github.com/example/widgets/issues/17", title: "Fix parser", body: "Keep this exact reviewed body.", author: "reporter", labels: ["bug"], content_hash: "ab".repeat(32), reason: "needs_manual_acceptance" }], reviewed_revision: 2n, next_page: 2 };
   try {
     await act(async () => { renderer = create(createElement(FactoryConsole, { status: "ready", state: oneProjectState(), settingsOpen: true, onToggleSettings: () => {}, intake: new Map([[ids.project, review]]), onIntakeAction: (projectId, request) => calls.push({ projectId, request }) })); });
-    const preview = renderer.root.findAll((node) => node.type === "button" && node.props.children === "Refresh")[0];
+    const preview = renderer.root.findByProps({ "aria-label": "Sources" }).findAll((node) => node.type === "button" && node.props.children === "Refresh")[0];
     await act(async () => preview.props.onClick());
     assert.deepEqual(calls, [{ projectId: ids.project, request: { action: "preview", source_id: source.id, page: 1 } }]);
     assert.equal(renderer.root.findAll((node) => node.type === "button" && node.props.children === "Accept").length, 0);
@@ -2239,7 +2239,7 @@ test("revised issue content can be accepted without discarding the prior receipt
   const review = { source_id: source.id, state: "ok", sources: [source], candidates: [candidate], reviewed_revision: 3n };
   try {
     await act(async () => { renderer = create(createElement(FactoryConsole, { status: "ready", state: oneProjectState(), settingsOpen: true, onToggleSettings: () => {}, intake: new Map([[ids.project, review]]), onIntakeAction: (projectId, request) => calls.push(request) })); });
-    await act(async () => renderer.root.findAll((node) => node.type === "button" && node.props.children === "Refresh")[0].props.onClick());
+    await act(async () => renderer.root.findByProps({ "aria-label": "Sources" }).findAll((node) => node.type === "button" && node.props.children === "Refresh")[0].props.onClick());
     const content = renderer.root.findAllByType("details").find((node) => node.findAllByType("summary").some((summary) => summary.props.children === "Details") && node.findAllByType("details").length === 1);
     assert.equal(content.props.open, undefined, "issue bodies are collapsed until selected");
     assert.equal(content.findAll((node) => node.type === "button" && node.props.children === "Accept").length, 1, "acceptance stays inside content review");

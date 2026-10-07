@@ -217,8 +217,7 @@ export function FactoryConsole({
   });
   const [selectedProduction, setSelectedProduction] = useState<string>();
   const [libraryOpen, setLibraryOpen] = useState(false);
-  const sourceProject = projectId ?? (state?.projects.size === 1 ? [...state.projects.keys()][0] : undefined);
-  useEffect(() => { if (ready && sourceProject !== undefined) onLoadIntake?.(sourceProject); }, [ready, sourceProject, onLoadIntake !== undefined]);
+  useEffect(() => { if (ready && projectId !== undefined) onLoadIntake?.(projectId); }, [ready, projectId, onLoadIntake !== undefined]);
   const [settingsTab, setSettingsTab] = useState<number>();
   useEffect(() => { if (settingsOpen !== true) setSettingsTab(undefined); }, [settingsOpen]);
   const [knowledgeView, setKnowledgeView] = useState<{ board?: boolean; project?: string; entity?: string; id?: string; repository?: string }>({});
@@ -362,7 +361,7 @@ export function FactoryConsole({
                 onLoadTaskDetail={onLoadTaskDetail}
                 selectedTaskId={selectedTask?.id}
                 onSelectTask={ready ? selectTask : undefined}
-                sources={sourceProject === undefined ? undefined : intake?.get(sourceProject)?.sources}
+                sources={projectId === undefined ? undefined : intake?.get(projectId)?.sources}
                 onManageSources={ready && onToggleSettings !== undefined ? () => { setSettingsTab(1); if (settingsOpen !== true) onToggleSettings(); } : undefined}
               />
             </div>
