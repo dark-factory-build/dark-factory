@@ -10,7 +10,7 @@ import {
   type RunPathSample,
 } from "./console-view.js";
 import { FactoryScene, AgentSprite } from "./factory-scene/factory-scene.js";
-import { type ProductionContraption } from "./production-view.js";
+import { projectCrates, type ProductionContraption } from "./production-view.js";
 import { type ProjectContentCall } from "./project-library.js";
 import type { SceneHall, SceneMachine } from "./factory-scene/scene.js";
 import { SectionHeader, Status } from "./console-kit.js";
@@ -85,7 +85,7 @@ const NO_CHANGES: readonly ProductionContraption[] = [];
 
 /** The operational floor; every action opens an existing inspector or control. */
 export function FactoryFloor({
-  changes = NO_CHANGES, selectedChange, onSelectChange, state, graphs, onLoadNode, onAddTask, runPaths, lastRunPaths, selectedAgentId, onSelectAgent,
+  changes = NO_CHANGES, changesRead = false, selectedChange, onSelectChange, state, graphs, onLoadNode, onAddTask, runPaths, lastRunPaths, selectedAgentId, onSelectAgent,
   onSelectHumanRequest, selectedTaskId, onSelectTask, onOpenTasks, onOpenMissions, onOpenLibrary, onOpenBoard, requestedEntity, connected = true, floorAppearance = DEFAULT_FLOOR_APPEARANCE, projectId, activity = [], activityCues = [], onOpenActivity,
 }: {
   /** Recorded Board and Library operations, newest first, and the few just cued. */
@@ -93,6 +93,8 @@ export function FactoryFloor({
   activityCues?: readonly KnowledgeCue[];
   onOpenActivity?: (item: KnowledgeActivity) => void;
   changes?: readonly ProductionContraption[];
+  /** Whether `changes` were read on this connection; until then the work line has nothing to look at. */
+  changesRead?: boolean;
   selectedChange?: string;
   onSelectChange?: (key: string) => void;
   state: StateView | undefined;
@@ -120,6 +122,7 @@ export function FactoryFloor({
   const prepared = useMemo(() => projectGraph(graphs, projects, floorAppearance.detail ?? "auto"), [graphs, projects, floorAppearance.detail]);
   const scene = useMemo(() => projectFloor(state, prepared, runPaths, lastRunPaths), [state, prepared, runPaths, lastRunPaths]);
   const proposed = useMemo(() => projectProposals(prepared, changes), [prepared, changes]);
+  const crates = useMemo(() => changesRead ? projectCrates(changes) : undefined, [changes, changesRead]);
   const peerQuestions = useMemo(() => [...(state?.peerQuestions?.values() ?? [])], [state]);
   const projectOf = (nodeId: string) => projects.find((id) => graphs?.get(id)?.nodes.some((node) => node.id === nodeId || nodeId.startsWith(`${node.id}:`)));
   const unplaced = proposed.proposals.filter((proposal) => proposal.state === "unavailable" || proposal.operations.some((operation) => operation.roomId === undefined)).length;
@@ -152,6 +155,7 @@ export function FactoryFloor({
       onInvestigate={investigate}
       onDiscussSource={onOpenBoard === undefined ? undefined : (nodeId) => { const project = projectOf(nodeId); onOpenBoard(project, project === undefined ? undefined : `${project}:${nodeId}`); }}
       proposals={{ items: proposed.proposals, selected: selectedChange, onSelect: (id) => onSelectChange?.(id) }}
+      crates={crates}
       appearance={floorAppearance}
       selectedWorkerId={selectedAgentId}
       selectedTaskId={selectedTaskId}
@@ -159,6 +163,7 @@ export function FactoryFloor({
       projectId={projectId}
       workers={[...scene.workers, ...proposed.reviewers.filter((worker) => !selectedChange || worker.review?.proposalId === selectedChange)]}
       connected={connected}
+      reading={graphs === undefined || projects.some((id) => !graphs.has(id))}
       tasks={scene.tasks}
       peerQuestions={peerQuestions}
       knowledgeCues={activityCues.map((cue) => ({ key: cue.key, agentId: cue.agent_id, board: onBoard(cue), reading: cue.operation === "read", label: activityLabel(cue, state), open: onOpenActivity === undefined ? undefined : () => onOpenActivity(cue) }))}

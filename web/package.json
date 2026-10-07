@@ -6,8 +6,8 @@
   "scripts": {
     "packages:build": "corepack pnpm --filter @dark-factory/client build && corepack pnpm --filter @dark-factory/ui build",
     "build": "corepack pnpm run packages:build",
-    "test": "corepack pnpm run packages:build && node --test packages/client/test/*.test.mjs packages/ui/test/*.test.mjs packages/ui/src/factory-scene/*.test.mjs",
-    "check": "corepack pnpm run packages:build && node --test packages/client/test/*.test.mjs packages/ui/test/*.test.mjs packages/ui/src/factory-scene/*.test.mjs",
+    "test": "corepack pnpm run packages:build && node --test packages/client/test/*.test.mjs packages/ui/test/*.test.mjs packages/ui/src/factory-scene/*.test.mjs packages/ui/src/production-*.test.mjs",
+    "check": "corepack pnpm run packages:build && node --test packages/client/test/*.test.mjs packages/ui/test/*.test.mjs packages/ui/src/factory-scene/*.test.mjs packages/ui/src/production-*.test.mjs",
     "artifact:test": "./scripts/package-artifacts test"
   },
   "devDependencies": {

@@ -9,7 +9,8 @@ import { Profiler, createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { act, create } from "react-test-renderer";
 import { AgentSprite, FactoryScene } from "../../dist/src/factory-scene/factory-scene.js";
-import { COMMON_WIDTH, PADDING, ROOM_LEFT, WORKER_SIZE, breakRoomNook, commonSeating, layoutScene, placeErrands, placeWorkers } from "../../dist/src/factory-scene/scene.js";
+import { COMMON_WIDTH, PADDING, ROOM_LEFT, WORKER_SIZE, breakRoomNook, commonSeating, layoutScene, placeCrates, placeErrands, placeWorkers } from "../../dist/src/factory-scene/scene.js";
+import { deriveProductionView, projectCrates } from "../../dist/src/production-view.js";
 import { breakRoomHabit, resolvedAppearance, restingItem, spriteOptions, workerFrames, workerPhase } from "../../dist/src/factory-scene/appearance.js";
 import { pointOnRoute, routeBetween, routeFromCurrent, routeFromSpine } from "../../dist/src/factory-scene/movement.js";
 import { spriteAtlas, spriteSheet, spriteSheetSize } from "../../dist/src/factory-scene/sprites/sprites.generated.js";
@@ -268,6 +269,10 @@ test("the pure scene model feeds a deterministic SVG renderer", () => {
   assert.equal(new Set(emptyPlacements.map(({ x, y }) => `${x},${y}`)).size, emptyWorkers.length);
   const emptySvg = render({ graph: sceneGraph([]), workers: emptyWorkers });
   assert.match(emptySvg, /NO OPERATIONAL STRUCTURE INFERRED YET/);
+  // Before the plant has been read, an empty floor says it is reading, not that nothing was found.
+  const readingSvg = render({ graph: sceneGraph([]), workers: emptyWorkers, reading: true });
+  assert.match(readingSvg, /READING THE PLANT…/);
+  assert.doesNotMatch(readingSvg, /NO OPERATIONAL STRUCTURE/);
   // An empty floor in a wide column stays a panel, not a poster.
   assert.match(emptySvg, new RegExp(`min-width:${Math.min(emptyLayout.width, 864)}px`));
   assert.match(emptySvg, /aria-label="Break room · ambient"/);
@@ -1250,7 +1255,7 @@ test("the commons shelf opens the floor's project library", async () => {
   await act(async () => tree.unmount());
 });
 
-test("an unobserved machine is a blueprint with no material belt; an observed edge with a rate carries material", () => {
+test("an unobserved machine is greyed with no material belt; an observed edge with a rate carries material", () => {
   const floor = sceneGraph([hall("web", { band: 0, machines: [machine("web-ui", "job")] }), hall("api", { machines: [machine("api-in", "ingress", { trigger: "request", reading: busy }), machine("api-db", "store")] })], {
     parties: [machine("github", "external", { reading: { ...unread, observation: "opaque" } })],
     flows: [{ from: "web-ui", to: "api-in", kind: "calls", reading: busy }, { from: "api", to: "api-db", kind: "uses", reading: unread }, { from: "api", to: "github", kind: "calls", reading: unread }],
@@ -1262,7 +1267,7 @@ test("an unobserved machine is a blueprint with no material belt; an observed ed
   assert.match(markup, /data-fence/);
   // the observed edge draws material
   assert.match(markup, /<g data-belt="calls" data-observation="observed" data-state="active"><path[^>]*class="b-base"><\/path><path[^>]*class="dfPlant__material"/);
-  assert.equal((markup.match(/data-belt="uses" data-observation="unobserved"/g) ?? []).length, 1, "an unobserved edge is a dashed blueprint run");
+  assert.equal((markup.match(/data-belt="uses" data-observation="unobserved"/g) ?? []).length, 1, "an unobserved edge is a faint dashed run");
   assert.equal(markup.includes('data-belt="uses" data-observation="unobserved" data-state'), false, "and carries no material");
   assert.equal((markup.match(/dfPlant__material/g) ?? []).length, 1, "only the observed belt moves material");
 });
@@ -1329,5 +1334,146 @@ test("the plant overview is always there and zoom scales the one floor about the
   } finally {
     await act(async () => renderer?.unmount());
     globalThis.window = priorWindow;
+  }
+});
+
+test("a hall known busy only as a whole moves its intake while its machines stay partial", () => {
+  const partialBusy = { ...busy, observation: "partial" };
+  const markup = renderToStaticMarkup(createElement(FactoryScene, { appearance: commons, workers: [], graph: sceneGraph([
+    hall("edge", { reading: partialBusy, machines: [machine("edge-in", "ingress", { label: "/in", trigger: "request", reading: { ...unread, observation: "partial" } })] }),
+    hall("dark"),
+  ]) }));
+  const intakes = [...markup.matchAll(/<g data-belt="intake" data-observation="([a-z]+)" data-state="([a-z]+)"/g)].map((match) => match.slice(1));
+  assert.deepEqual(intakes, [["partial", "active"]], "only the hall with a known state has an intake, and it carries material");
+  assert.match(markup, /data-belt="intake"[^>]*>(?:(?!<\/g>).)*dfPlant__material/s);
+  assert.match(markup, /data-entity-id="edge-in" data-observation="partial"/, "the machine itself is still only partly observed");
+});
+
+const pr = (number, document = {}, extra = {}) => ({ repository: "owner/repo", project_id: "project", kind: "pull_request", id: String(number), visual_id: `change:${number}`, observed_at: 10, tasks: [], missions: [], ...extra,
+  document: { number, title: `Change ${number}`, head: "a".repeat(40), state: "open", ...document } });
+const ciCheck = (number, state, conclusion) => ({ repository: "owner/repo", project_id: "project", kind: "check", id: `ci-${number}`, visual_id: "", observed_at: 10, tasks: [], missions: [],
+  document: { name: "CI", revision: "a".repeat(40), scope: "head", state, conclusion, pull_requests: [number] } });
+const allow = { review: { head: "a".repeat(40), state: "allow" } };
+const cratesOf = (records) => projectCrates(Object.values(deriveProductionView(records).contraptions));
+const atStation = (crates, number) => crates.find((crate) => crate.number === number);
+
+test("the outbound line puts each change request at the station its records name, and nowhere without one", () => {
+  const crates = cratesOf([
+    pr(1), pr(2, { review: { head: "a".repeat(40), state: "block" } }),
+    pr(3, allow), ciCheck(3, "in_progress", ""), pr(4, allow), ciCheck(4, "completed", "failure"),
+    pr(5, { ...allow, merge_queue: "queued" }), ciCheck(5, "completed", "success"),
+    pr(6, { ...allow, state: "merged", merge: "d".repeat(40) }), pr(7, { state: "closed" }),
+  ]);
+  // Shipped holds a day of merges by the records' own clock; older ones have left the line.
+  const day = 24 * 60 * 60_000, merged = (number, at) => pr(number, { ...allow, state: "merged", merge: "d".repeat(40), merged_at: new Date(at).toISOString() }, { observed_at: day * 3 });
+  assert.deepEqual(cratesOf([merged(8, day * 2 + 1), merged(9, day * 2 - 1)]).map((crate) => crate.number), [8]);
+  assert.deepEqual(crates.map((crate) => [crate.number, crate.station, crate.fault]).sort((a, b) => a[0] - b[0]),
+    [[1, 0, false], [2, 0, true], [3, 1, false], [4, 1, true], [5, 2, false], [6, 3, false]], "closed unmerged is gone");
+  assert.match(atStation(crates, 2).stage, /Correction/);
+
+  const markup = render({ crates, connected: true });
+  assert.deepEqual([...markup.matchAll(/data-crate-station="(\d)"( data-fault="")?[^>]*aria-label="PR #(\d+)/g)].map((match) => [Number(match[3]), Number(match[1]), match[2] !== undefined]).sort((a, b) => a[0] - b[0]),
+    crates.map((crate) => [crate.number, crate.station, crate.fault]).sort((a, b) => a[0] - b[0]), "drawn where the records put them");
+  assert.match(markup, /PR #2 · Change 2\nReview · Correction/, "the tooltip says the number, title and stage");
+  assert.equal((markup.match(/class="redtag"/g) ?? []).length, 2, "a blocked review and a failed check show the fault");
+  assert.doesNotMatch(render({ connected: true }), /data-work-line/, "no change requests, no line");
+  assert.doesNotMatch(render({ crates: [], connected: true }), /data-crate/);
+
+  // Machines never move for it: the line is a fixed band above every hall and gate, there with or without work.
+  const layout = layoutScene(graph);
+  const below = Math.max(...layout.line.map((station) => station.y + station.height));
+  assert.ok([...layout.rooms, ...layout.gates, ...layout.headings].every((item) => item.y >= below));
+  assert.deepEqual(layoutScene(graph), layout);
+  assert.ok(layout.line.at(-1).x + layout.line.at(-1).width <= layout.fence, "the last station stands inside the fence");
+
+  // Deterministic, newest first, eight to a station and then a count.
+  const many = Array.from({ length: 11 }, (_, index) => ({ id: `c${index}`, number: index + 1, title: "x", station: 0, stage: "Review pending", fault: false, taskIds: [] }));
+  const once = placeCrates(layout, many), again = placeCrates(layout, [...many].reverse());
+  assert.deepEqual(once, again);
+  assert.deepEqual(once.filter((spot) => spot.shown).map((spot) => spot.crate.number), [11, 10, 9, 8, 7, 6, 5, 4]);
+  assert.match(render({ crates: many }), /data-crate-overflow="3"[^>]*>\+3</);
+});
+
+test("a crate moves once when its recorded stage changes, never on first sight or reconnect, and lights what it changes", async () => {
+  const graph = sceneGraph([hall("a", { machines: [machine("a-in", "ingress", { trigger: "request" })] })]);
+  const workers = [{ id: "ada", name: "Ada", role: "worker", activity: "busy", location: "working", nodeId: "a" }];
+  const tasks = [{ id: "t1", agentId: "ada", projectId: "p", title: "t", status: "running", roomIds: ["a"], humanRequestIds: [] }];
+  const crate = (station, extra = {}) => ({ id: "k1", number: 1, title: "One", station, stage: "s", fault: false, taskIds: ["t1"], ...extra });
+  const proposals = { items: [{ id: "k1", title: "One", state: "active", operations: [{ entityId: "a-in", roomId: "a", path: "x", kind: "modification" }] }], onSelect: (id) => selected.push(id) };
+  const selected = [];
+  const layout = layoutScene(graph);
+  const slot = (crates, id = "k1") => { const spot = placeCrates(layout, crates).find((item) => item.crate.id === id); return [spot.x, spot.y]; };
+  const saved = { performance: globalThis.performance, requestAnimationFrame: globalThis.requestAnimationFrame, cancelAnimationFrame: globalThis.cancelAnimationFrame, window: globalThis.window, document: globalThis.document, setTimeout: globalThis.setTimeout, clearTimeout: globalThis.clearTimeout };
+  let clock = 1000, next = 0, renderer;
+  const frames = new Map();
+  globalThis.performance = { now: () => clock };
+  globalThis.setTimeout = () => ++next;
+  globalThis.clearTimeout = () => {};
+  globalThis.requestAnimationFrame = (callback) => { frames.set(++next, callback); return next; };
+  globalThis.cancelAnimationFrame = (id) => frames.delete(id);
+  globalThis.window = { matchMedia: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }) };
+  globalThis.document = { visibilityState: "visible", addEventListener() {}, removeEventListener() {} };
+  const tick = async (ms) => { await act(async () => { clock += ms; for (const [id, callback] of [...frames]) { frames.delete(id); callback(clock); } }); };
+  const at = (id = "k1") => renderer.root.findByProps({ "data-crate": id }).props.transform.match(/translate\(([-\d.]+) ([-\d.]+)\)/).slice(1).map(Number);
+  const scene = (crates, connected = true) => createElement(FactoryScene, { graph, workers, tasks, proposals, crates, connected, appearance: { scenery: "off", animation: "follow-device" } });
+  try {
+    // The floor connects before its production records are read; they arrive a render later.
+    await act(async () => { renderer = create(scene(undefined, false)); });
+    await act(async () => { renderer.update(scene(undefined)); });
+    await tick(16);
+    await act(async () => { renderer.update(scene([crate(1), crate(0, { id: "k0", number: 3 })])); });
+    await tick(16);
+    assert.equal(frames.size, 0, "the first read is history: nothing slides or flies in from its author");
+    assert.deepEqual(at(), slot([crate(1)]), "what was already so when the floor opened stays put");
+    await act(async () => { renderer.update(scene([crate(1)])); });
+
+    await act(async () => { renderer.update(scene([crate(2)])); });
+    await tick(300);
+    const midway = at();
+    assert.ok(midway[0] > slot([crate(1)])[0] && midway[0] < slot([crate(2)])[0], `slides along the line: ${midway}`);
+    assert.equal(midway[1], slot([crate(2)])[1], "on the belt, not over it");
+    for (let step = 0; step < 80 && frames.size > 0; step += 1) await tick(16);
+    assert.deepEqual(at(), slot([crate(2)]));
+    assert.equal(frames.size, 0, "and then nothing moves");
+    await act(async () => { renderer.update(scene([crate(2, { stage: "other" })])); });
+    await tick(16);
+    assert.equal(frames.size, 0, "a change that is not a stage change moves nothing");
+
+    // Reconnecting is a first look: what changed meanwhile is history.
+    await act(async () => { renderer.update(scene([crate(2)], false)); });
+    await act(async () => { renderer.update(scene([crate(3)])); });
+    await tick(16);
+    assert.deepEqual(at(), slot([crate(3)]));
+    // Records kept from before a drop are unread on the new connection until refreshed; the refresh is a first look.
+    await act(async () => { renderer.update(scene([crate(3)], false)); });
+    await act(async () => { renderer.update(scene(undefined)); });
+    await act(async () => { renderer.update(scene([crate(1)])); });
+    await tick(16);
+    assert.equal(frames.size, 0, "what changed offline is not replayed");
+    assert.deepEqual(at(), slot([crate(1)]));
+    await act(async () => { renderer.update(scene([crate(3)])); });
+    await tick(16);
+    for (let step = 0; step < 80 && frames.size > 0; step += 1) await tick(16);
+
+    // A newly opened change comes from the agent whose task opened it.
+    const opened = [crate(3), crate(0, { id: "k2", number: 2 })];
+    await act(async () => { renderer.update(scene(opened)); });
+    await tick(16);
+    const ada = placeWorkers(layout, workers)[0];
+    assert.ok(Math.hypot(at("k2")[0] - ada.x, at("k2")[1] - ada.y) < Math.hypot(slot(opened, "k2")[0] - ada.x, slot(opened, "k2")[1] - ada.y) - 20, `leaves Ada: ${at("k2")}`);
+    for (let step = 0; step < 80 && frames.size > 0; step += 1) await tick(16);
+    assert.deepEqual(at("k2"), slot(opened, "k2"));
+
+    const target = renderer.root.findByProps({ "data-crate": "k1" });
+    assert.equal(renderer.root.findAll((node) => node.props["data-lit"] !== undefined).length, 0);
+    await act(async () => target.props.onPointerEnter());
+    assert.deepEqual(renderer.root.findAll((node) => node.props["data-lit"] !== undefined && node.type === "rect").length, 1, "the machine its change touches is lit");
+    await act(async () => target.props.onPointerLeave());
+    assert.equal(renderer.root.findAll((node) => node.props["data-lit"] !== undefined).length, 0);
+    await act(async () => target.props.onClick());
+    assert.deepEqual(selected, ["k1"], "and it opens its Work row");
+  } finally {
+    if (renderer) await act(async () => renderer.unmount());
+    for (const [key, value] of Object.entries(saved)) { if (value === undefined) delete globalThis[key]; else globalThis[key] = value; }
   }
 });

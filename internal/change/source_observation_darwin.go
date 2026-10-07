@@ -17,7 +17,11 @@ import (
 )
 
 // ArchiveSource reads the configured target without fetching, changing refs,
-// executing filters, or consulting the checkout's working files.
+// executing filters, or consulting the checkout's working files. HEAD means
+// origin's default branch, as for change starts; a named local branch is read
+// at its upstream, since the checkout's own branch may lag what was
+// integrated; a remote base is read at the factory's own fetched copy
+// (factoryBaseRef) when that is strictly newer than the tracking ref.
 func ArchiveSource(ctx context.Context, git, root, target string, expected RepositorySourceIdentity) (string, []byte, error) {
 	if err := validateRevision(target); err != nil {
 		return "", nil, err
@@ -35,11 +39,10 @@ func ArchiveSource(ctx context.Context, git, root, target string, expected Repos
 		err = &ValidationError{Reason: "registered source identity changed"}
 		return "", nil, err
 	}
-	revision, err := a.succeed(ctx, 256, "-C", root, "rev-parse", "--verify", "--end-of-options", target+"^{commit}")
+	head, err := integratedRevision(ctx, a, root, target)
 	if err != nil {
 		return "", nil, err
 	}
-	head := strings.TrimSpace(string(revision))
 	archive, err := a.succeed(ctx, 64<<20, "-C", root, "-c", "tar.umask=0077", "archive", "--format=tar", head)
 	if err != nil {
 		return "", nil, err
@@ -272,4 +275,45 @@ func verifySourceArchive(tree, archive []byte, oidLength int) error {
 		return &ValidationError{Reason: "archive omits integrated source"}
 	}
 	return nil
+}
+
+// integratedRevision resolves target to the commit inference reads. It never
+// fetches: change starts refresh factoryBaseRef, and the owner's fetches
+// refresh tracking refs, so the newer of the two is the best local evidence.
+func integratedRevision(ctx context.Context, a *gitAuthority, root, target string) (string, error) {
+	commit := func(ref string) (string, error) {
+		output, err := a.succeed(ctx, 256, "-C", root, "rev-parse", "--verify", "--quiet", "--end-of-options", ref+"^{commit}")
+		return strings.TrimSpace(string(output)), err
+	}
+	run := func(arguments ...string) ([]byte, error) {
+		return a.succeed(ctx, 4096, append([]string{"-C", root}, arguments...)...)
+	}
+	var remote, branch, ref string
+	// Offline, origin's default branch is the symbolic ref Git records on
+	// clone or remote set-head; without it, HEAD falls back as a branch does.
+	if output, err := run("symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"); target == "HEAD" && err == nil {
+		ref = strings.TrimSpace(string(output))
+	} else if remote, branch, ref, err = localUpstream(run, target); err != nil {
+		return "", err
+	}
+	if suffix, ok := strings.CutPrefix(ref, "refs/remotes/"); ok && remote == "" {
+		remote, branch, _ = strings.Cut(suffix, "/")
+		branch = "refs/heads/" + branch
+	}
+	head, err := commit(ref)
+	if err != nil {
+		// An upstream never fetched into this checkout: read the target itself.
+		return commit(target)
+	}
+	if remote == "" || remote == "." {
+		return head, nil
+	}
+	fetched, err := commit(factoryBaseRef(remote, branch))
+	if err != nil || fetched == head {
+		return head, nil
+	}
+	if _, err := a.succeed(ctx, 256, "-C", root, "merge-base", "--is-ancestor", head, fetched); err == nil {
+		return fetched, nil
+	}
+	return head, nil
 }

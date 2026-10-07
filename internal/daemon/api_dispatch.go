@@ -1683,7 +1683,7 @@ func (daemon *Daemon) requestHuman(ctx context.Context, call api.Call) api.Reply
 	// A replayed idempotency key returns the earlier question; only a question
 	// that opened just now wakes the phones.
 	if request.CreatedAt == at {
-		go daemon.notifyPush(context.WithoutCancel(ctx), pushClient)
+		go daemon.notifyPush(context.WithoutCancel(ctx), daemon.observed(pushClient))
 	}
 	return daemon.mutation(ctx, request.Revision)
 }

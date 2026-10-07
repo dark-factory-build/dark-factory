@@ -757,7 +757,7 @@ summary.dfConsoleItem__summary { cursor: pointer; }
 .dfPlantMap__room { fill: #2a3437; stroke: #08131d; stroke-width: 6; }
 .dfPlantMap__room.s-observed, .dfPlantMap__room.s-quiet { fill: #2f6b4a; }
 .dfPlantMap__room.s-partial { fill: #6b5a24; }
-.dfPlantMap__room.s-unobserved { fill: #173a48; }
+.dfPlantMap__room.s-unobserved { fill: #262e36; }
 .dfPlantMap__room.s-stale { fill: #3a3f45; }
 .dfPlantMap__room.op-degraded { stroke: #f2c94c; }
 .dfPlantMap__room.op-failing { stroke: #ff5f56; }
@@ -1257,7 +1257,7 @@ summary.dfConsoleItem__summary { cursor: pointer; }
 .dfPlant {
   --metal: #687282; --metal2: #454c57; --metalhi: #909aa8; --win: #0e1115; --outline: #0b0b0b;
   --belt: #0e1013; --item: #e0843a; --ok: #5ad38a; --amber: #f2c94c; --red: #ff5f56; --lampoff: #2c3139;
-  --bp: #4cc3e6; --plate: #e5d5ad; --plateink: #191d24; --label: #c4c9d0; --hazard: #e6b93a; --shadow: rgba(0, 0, 0, .45);
+  --bp: #4cc3e6; --unknown: #7f93a8; --plate: #e5d5ad; --plateink: #191d24; --label: #c4c9d0; --hazard: #e6b93a; --shadow: rgba(0, 0, 0, .45);
   shape-rendering: crispEdges;
 }
 .dfPlant text { font-family: ui-monospace, monospace; }
@@ -1281,23 +1281,26 @@ summary.dfConsoleItem__summary { cursor: pointer; }
 .dfPlant .scrap { fill: var(--red); }
 .dfPlant__bin { fill: var(--metal2); stroke: var(--outline); }
 .dfPlant__hand { fill: none; stroke: var(--metalhi); stroke-width: 1.5; }
-.dfPlant .bptext { fill: var(--bp); }
+.dfPlant .bptext { fill: var(--unknown); }
 .dfPlant .pq { display: none; }
 .dfPlant .op-active .lamp { fill: var(--ok); }
 .dfPlant .op-degraded .lamp { fill: var(--amber); }
 .dfPlant .op-failing .lamp { fill: var(--red); }
 .dfPlant .s-quiet .lamp { fill: var(--ok); opacity: .45; }
 .dfPlant .s-partial .lamp.l2 { fill: var(--lampoff); }
-.dfPlant .s-partial .pq { display: inline; fill: url(#df-blueprint); stroke: var(--bp); stroke-width: 1; }
-.dfPlant .s-unobserved :is(.m, .md, .mh, .win, .dock, .crate) { fill: url(#df-blueprint); stroke: var(--bp); stroke-width: 1; }
-.dfPlant .s-unobserved :is(.lamp, .chev, .shd, .dfPlant__dwell) { display: none; }
+.dfPlant .s-partial .pq { display: inline; fill: var(--unknown); fill-opacity: .25; stroke: var(--unknown); stroke-width: 1; }
+/* Unobserved: the machine is built but nothing reports on it. Greyed, with an
+   unknown lamp and its plate, so it never reads as an idle (dark-lamped) one. */
+.dfPlant .s-unobserved { filter: grayscale(1); opacity: .55; }
+.dfPlant .s-unobserved .lamp { fill: var(--unknown); }
+.dfPlant .s-unobserved :is(.chev, .dfPlant__dwell) { display: none; }
 .dfPlant .s-stale { filter: grayscale(1); opacity: .6; }
 .dfPlant__gate { fill: var(--metal2); stroke: var(--outline); }
 .dfPlant .s-opaque .dfPlant__gate { fill: url(#df-fog); }
 .dfPlant__gate--runtime { stroke: var(--amber); stroke-dasharray: 2 2; }
 .dfPlant__fence { stroke: #59616e; stroke-width: 3; stroke-dasharray: 6 3; fill: none; }
 .dfPlant .b-base { fill: none; stroke: var(--belt); stroke-width: 6; stroke-linejoin: miter; }
-.dfPlant .b-inf { fill: none; stroke: var(--bp); stroke-width: 1.5; stroke-dasharray: 4 3; opacity: .7; }
+.dfPlant .b-inf { fill: none; stroke: var(--unknown); stroke-width: 1.5; stroke-dasharray: 4 3; opacity: .45; }
 .dfPlant__material { fill: none; stroke: var(--item); stroke-width: 4; }
 .dfPlant__material--faulty { stroke: var(--red); }
 .dfPlant--moving .dfPlant__material { animation: dfPlantFlow 1s linear infinite; }
@@ -1314,7 +1317,7 @@ summary.dfConsoleItem__summary { cursor: pointer; }
 .dfPlantCoverage--unobserved { color: #4cc3e6; }
 .dfPlantReading.op-failing { color: #ff5f56; }
 .dfPlantReading.op-degraded { color: #f2c94c; }
-.dfPlantReading.s-unobserved { color: #4cc3e6; }
+.dfPlantReading.s-unobserved { color: #7f93a8; }
 .dfPlant__scaffold { fill: none; stroke: var(--hazard); stroke-width: 2; stroke-dasharray: 6 3; }
 .dfPlant__changed { fill: var(--hazard); stroke: var(--outline); }
 .dfPlant__changedText { fill: var(--outline); font-weight: 700; }

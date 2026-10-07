@@ -362,6 +362,9 @@ func (run *overlay) observe(item Observation) {
 		if target == nil {
 			target = run.reach(item.Peer)
 		}
+		if id := run.unit(item.Peer["process.executable.name"]); target == nil && id != "" {
+			target = run.builder.Lookup(id) // a launch of one of this system's units
+		}
 		if target == nil {
 			target = run.runtimeParty(item.Peer)
 		}

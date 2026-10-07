@@ -4,6 +4,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"net/url"
 	"path"
 	"regexp"
 	"sort"
@@ -158,8 +159,17 @@ func (run *inference) goSource(repository Repository, names []string) {
 			names = append(names, name)
 		}
 		sort.Strings(names)
+		fields, reads := map[string][]*url.URL{}, []fieldRead{}
 		for _, name := range names {
-			(&goWalk{run: run, repository: repository, set: set, pkg: pkg, file: pkg.files[name], name: name, packageUnits: units, reached: reached, consts: consts}).walk()
+			(&goWalk{run: run, repository: repository, set: set, pkg: pkg, file: pkg.files[name], name: name, packageUnits: units, reached: reached, consts: consts, fields: fields, reads: &reads}).walk()
+		}
+		// ponytail: fields match by name across the package's types, like
+		// methods in reachableFuncs; add types if two types' fields collide.
+		for _, read := range reads {
+			for _, target := range fields[read.field] {
+				read.call.target = target
+				run.calls = append(run.calls, read.call)
+			}
 		}
 		for imported := range pkg.imports {
 			if known := knownClient(imported, goClients); known != nil {
@@ -260,6 +270,15 @@ type goWalk struct {
 	reached      map[*ast.FuncDecl][]string
 	consts       map[string]map[string]string
 	function     string
+	// fields holds URLs reachable code stores in a struct field; reads are
+	// request arguments built from a field, resolved once the package is walked.
+	fields map[string][]*url.URL
+	reads  *[]fieldRead
+}
+
+type fieldRead struct {
+	field string
+	call  call
 }
 
 var (
@@ -354,11 +373,24 @@ func (walk *goWalk) node(node ast.Node) bool {
 			}
 		}
 	case *ast.KeyValueExpr:
-		if key, ok := value.Key.(*ast.Ident); ok && urlName.MatchString(key.Name) {
+		if key, ok := value.Key.(*ast.Ident); ok {
 			if text, ok := walk.str(value.Value); ok {
 				if target := parseTarget(text); target != nil {
-					walk.run.calls = append(walk.run.calls, call{owner: walk.owner(), target: target, at: walk.at(value.Pos()),
-						evidence: static("go-ast", key.Name, Heuristic)})
+					walk.fields[key.Name] = append(walk.fields[key.Name], target)
+					if urlName.MatchString(key.Name) {
+						walk.run.calls = append(walk.run.calls, call{owner: walk.owner(), target: target, at: walk.at(value.Pos()),
+							evidence: static("go-ast", key.Name, Heuristic)})
+					}
+				}
+			}
+		}
+	case *ast.AssignStmt:
+		for index, left := range value.Lhs {
+			if selector, ok := left.(*ast.SelectorExpr); ok && len(value.Rhs) == len(value.Lhs) {
+				if text, ok := walk.str(value.Rhs[index]); ok {
+					if target := parseTarget(text); target != nil {
+						walk.fields[selector.Sel.Name] = append(walk.fields[selector.Sel.Name], target)
+					}
 				}
 			}
 		}
@@ -461,11 +493,27 @@ func (walk *goWalk) callExpr(expr *ast.CallExpr) {
 		return
 	}
 	for _, arg := range expr.Args {
-		if text, ok := walk.str(arg); ok {
+		// A URL prefix names the host whatever path is appended to it.
+		prefix := arg
+		for {
+			sum, ok := prefix.(*ast.BinaryExpr)
+			if !ok || sum.Op != token.ADD {
+				break
+			}
+			prefix = sum.X
+		}
+		text, ok := walk.str(arg)
+		if !ok {
+			text, ok = walk.str(prefix)
+		}
+		if ok {
 			if target := parseTarget(text); target != nil {
 				walk.run.calls = append(walk.run.calls, call{owner: walk.owner(), target: target, at: walk.at(arg.Pos()),
 					evidence: static("go-ast", "argument to "+name, Inferred)})
 			}
+		} else if field, ok := prefix.(*ast.SelectorExpr); ok {
+			*walk.reads = append(*walk.reads, fieldRead{field: field.Sel.Name, call: call{owner: walk.owner(), at: walk.at(arg.Pos()),
+				evidence: static("go-ast", "argument to "+name+" from field "+field.Sel.Name, Inferred)}})
 		}
 	}
 }

@@ -5,6 +5,7 @@ export const BROWSER_PROTOCOL_NAME = "dark-factory/browser" as const;
 /** The fixed third byte of every binary terminal frame, beside the "DF" magic. */
 export const TERMINAL_FRAME_VERSION = 1 as const;
 export const MAX_TASK_ATTACHMENTS = 8;
+export const MAX_TASK_CONTENT = 8;
 export const MAX_TASK_ATTACHMENT_BYTES = 8 * 1024 * 1024;
 export const TASK_ATTACHMENT_CHUNK_BYTES = 24 * 1024;
 export const MAX_CONTROL_BYTES = 64 * 1024;

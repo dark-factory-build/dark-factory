@@ -425,6 +425,7 @@ type Content struct {
 	Commit           string `json:"commit,omitempty"`
 	Path             string `json:"path,omitempty"`
 	Revision         uint64 `json:"revision"`
+	CreatedAtMs      uint64 `json:"created_at_ms"`
 	Deprecated       bool   `json:"deprecated"`
 	LatestRevision   uint64 `json:"latest_revision"`
 }
