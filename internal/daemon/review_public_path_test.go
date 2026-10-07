@@ -355,7 +355,7 @@ func reviewPublicFixture(t *testing.T) (*dispatchFixture, kernel.ProjectID) {
 
 func lastDurableReview(t *testing.T, store *kernel.Store, project kernel.ProjectID) review.Operation {
 	t.Helper()
-	page, err := store.Production(context.Background(), project, 0, 8)
+	page, err := store.Production(context.Background(), project, 0, 8, kernel.UnixMillis{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -616,7 +616,7 @@ func TestFailedReviewRetriesOnceThenEscalatesOnce(t *testing.T) {
 	now := fixture.daemon.now
 	fixture.daemon.now = func() time.Time { return now().Add(time.Duration(offset.Load())) }
 	ops := func() (failed, handled int) {
-		page, err := fixture.store.Production(ctx, project, 0, 8)
+		page, err := fixture.store.Production(ctx, project, 0, 8, kernel.UnixMillis{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -648,7 +648,7 @@ func TestFailedReviewRetriesOnceThenEscalatesOnce(t *testing.T) {
 	for range 2 {
 		tick()
 	}
-	page, err := fixture.store.Production(ctx, project, 0, 8)
+	page, err := fixture.store.Production(ctx, project, 0, 8, kernel.UnixMillis{})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -347,7 +347,7 @@ export function FactoryConsole({
             </div>
             {editError === undefined ? null : <p className="dfFactoryConsole__terminalError" role="alert">{editError}</p>}
             <div hidden={selectedDetail !== "work"}>
-              <div hidden={!shownProduction}><ProductionPanel items={productionItems} selected={selectedProduction} onSelect={selectProduction} state={state} call={ready ? onProjectContent : undefined} connected={ready} error={[productionData.error, ...productionData.notices].filter(Boolean).join(" ")} overflow={productionData.overflow} active={selectedDetail === "work" && shownProduction} onMission={openMission} onAgent={ready ? onSelectAgent : undefined} onOpenTask={setRelatedTask} /></div>
+              <div hidden={!shownProduction}><ProductionPanel items={productionItems} selected={selectedProduction} onSelect={selectProduction} state={state} call={ready ? onProjectContent : undefined} connected={ready} error={[productionData.error, ...productionData.notices].filter(Boolean).join(" ")} active={selectedDetail === "work" && shownProduction} onMission={openMission} onAgent={ready ? onSelectAgent : undefined} onOpenTask={setRelatedTask} /></div>
               <div hidden={shownProduction}><WorkPanel
                 state={scopedState}
                 rows={rows}

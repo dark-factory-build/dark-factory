@@ -72,3 +72,26 @@ test("switching projects is a first read too: nothing read for the new list coun
     if (previousDocument === undefined) delete globalThis.document; else globalThis.document = previousDocument;
   }
 });
+
+test("every page of the relevant set is read until next_offset is 0, with no record ceiling", async () => {
+  const previousDocument = globalThis.document;
+  globalThis.document = Object.assign(new EventTarget(), { visibilityState: "visible" });
+  const total = 300;
+  const offsets = [];
+  let state, tree;
+  const call = async (_operation, { offset, limit }) => {
+    offsets.push(offset);
+    const records = Array.from({ length: Math.min(limit, total - offset) }, (_, index) => ({ repository: "owner/repo", kind: "pull_request", id: String(offset + index), visual_id: "", observed_at: 1, document: {}, tasks: [], missions: [] }));
+    return { records, total, next_offset: offset + records.length < total ? offset + records.length : 0 };
+  };
+  function Probe() { state = useProduction(["project"], call); return null; }
+  try {
+    await act(async () => { tree = create(createElement(Probe)); });
+    assert.equal(state.records.length, total);
+    assert.equal(offsets.length, Math.ceil(total / 8));
+    assert.equal("overflow" in state, false);
+  } finally {
+    if (tree) await act(async () => tree.unmount());
+    if (previousDocument === undefined) delete globalThis.document; else globalThis.document = previousDocument;
+  }
+});

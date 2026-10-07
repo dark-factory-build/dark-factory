@@ -43,7 +43,7 @@ func TestProductionPersistsFinalizedConstructionPublicationAndRebase(t *testing.
 		t.Fatal(err)
 	}
 	change.HeadCommit = &moved
-	page, err := store.Production(ctx, terminal.ProjectID, 0, 8)
+	page, err := store.Production(ctx, terminal.ProjectID, 0, 8, UnixMillis{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -62,7 +62,7 @@ func TestProductionPersistsFinalizedConstructionPublicationAndRebase(t *testing.
 	if err := store.RecordProductionObservation(ctx, terminal.ProjectID, observation, mustTime(t, 80)); err != nil {
 		t.Fatal(err)
 	}
-	page, err = store.Production(ctx, terminal.ProjectID, 0, 8)
+	page, err = store.Production(ctx, terminal.ProjectID, 0, 8, UnixMillis{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,7 +77,7 @@ func TestProductionPersistsFinalizedConstructionPublicationAndRebase(t *testing.
 	if err := store.RecordPublication(ctx, terminal.ProjectID, terminal.TaskID, "example/factory", pr, mustTime(t, 81)); err != nil {
 		t.Fatal(err)
 	}
-	page, err = store.Production(ctx, terminal.ProjectID, 0, 8)
+	page, err = store.Production(ctx, terminal.ProjectID, 0, 8, UnixMillis{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,7 +101,7 @@ func TestProductionPersistsFinalizedConstructionPublicationAndRebase(t *testing.
 	if err := store.RecordProductionObservation(ctx, terminal.ProjectID, observation, mustTime(t, 82)); err != nil {
 		t.Fatal(err)
 	}
-	page, err = store.Production(ctx, terminal.ProjectID, 0, 8)
+	page, err = store.Production(ctx, terminal.ProjectID, 0, 8, UnixMillis{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,7 +120,7 @@ func TestProductionPersistsFinalizedConstructionPublicationAndRebase(t *testing.
 	if err := store.RecordPublication(ctx, terminal.ProjectID, terminal.TaskID, "example/factory", second, mustTime(t, 83)); err != nil {
 		t.Fatal(err)
 	}
-	page, err = store.Production(ctx, terminal.ProjectID, 0, 8)
+	page, err = store.Production(ctx, terminal.ProjectID, 0, 8, UnixMillis{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -349,7 +349,7 @@ func TestProductionPublicationUsesOwnedChangeForTransformedHead(t *testing.T) {
 			if err := store.RecordProductionObservation(ctx, terminal.ProjectID, ProductionObservation{Repository: "example/factory", ObservedAt: 79, PullRequests: []ProductionPullRequest{pr}}, mustTime(t, 79)); err != nil {
 				t.Fatal(err)
 			}
-			page, err := store.Production(ctx, terminal.ProjectID, 0, 8)
+			page, err := store.Production(ctx, terminal.ProjectID, 0, 8, UnixMillis{})
 			if err != nil || productionRecord(t, page, "pull_request", "7").VisualID == "change:"+change.ID.String() {
 				t.Fatalf("unacknowledged transformed observation = %+v, err=%v", page, err)
 			}
@@ -364,7 +364,7 @@ func TestProductionPublicationUsesOwnedChangeForTransformedHead(t *testing.T) {
 			} else if err := store.RecordPublication(ctx, terminal.ProjectID, publisher.ID, "example/factory", pr, mustTime(t, 80)); err != nil {
 				t.Fatal(err)
 			}
-			page, err = store.Production(ctx, terminal.ProjectID, 0, 8)
+			page, err = store.Production(ctx, terminal.ProjectID, 0, 8, UnixMillis{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -396,7 +396,7 @@ func TestProductionPublicationUsesOwnedChangeForTransformedHead(t *testing.T) {
 			if err := store.RecordPublication(ctx, terminal.ProjectID, unrelatedTask.ID, "example/factory", unrelated, mustTime(t, 81)); err != nil {
 				t.Fatal(err)
 			}
-			page, err = store.Production(ctx, terminal.ProjectID, 0, 8)
+			page, err = store.Production(ctx, terminal.ProjectID, 0, 8, UnixMillis{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -438,7 +438,7 @@ func TestProductionPublicationUsesOwnedChangeForTransformedHead(t *testing.T) {
 			if err := store.RecordPublication(ctx, terminal.ProjectID, publisher.ID, "example/factory", ambiguous, mustTime(t, 83)); err != nil {
 				t.Fatal(err)
 			}
-			page, err = store.Production(ctx, terminal.ProjectID, 0, 8)
+			page, err = store.Production(ctx, terminal.ProjectID, 0, 8, UnixMillis{})
 			if err != nil || productionRecord(t, page, "pull_request", "9").VisualID != "example/factory#9" {
 				t.Fatalf("ambiguous publication = %+v, %v", page, err)
 			}
@@ -483,7 +483,7 @@ func TestProductionObservationUsesVerifiedHeadRepositoryForTransformedHead(t *te
 		if err := store.RecordProductionObservation(ctx, terminal.ProjectID, ProductionObservation{Repository: "example/factory", ObservedAt: 79, PullRequests: []ProductionPullRequest{pr}}, mustTime(t, 79)); err != nil {
 			t.Fatal(err)
 		}
-		page, err := store.Production(ctx, terminal.ProjectID, 0, 8)
+		page, err := store.Production(ctx, terminal.ProjectID, 0, 8, UnixMillis{})
 		if err != nil || containsString(productionRecord(t, page, "pull_request", "7").Tasks, terminal.TaskID.String()) {
 			t.Fatalf("unverified task repository linked producer: %+v, %v", page, err)
 		}
@@ -494,7 +494,7 @@ func TestProductionObservationUsesVerifiedHeadRepositoryForTransformedHead(t *te
 	if err := store.RecordProductionObservation(ctx, terminal.ProjectID, ProductionObservation{Repository: "example/factory", ObservedAt: 80, PullRequests: []ProductionPullRequest{pr}}, mustTime(t, 80)); err != nil {
 		t.Fatal(err)
 	}
-	page, err := store.Production(ctx, terminal.ProjectID, 0, 8)
+	page, err := store.Production(ctx, terminal.ProjectID, 0, 8, UnixMillis{})
 	item := productionRecord(t, page, "pull_request", "7")
 	if err != nil || item == nil || item.VisualID != "change:"+change.ID.String() || !containsString(item.Tasks, terminal.TaskID.String()) || productionRecord(t, page, "construction", "") != nil {
 		t.Fatalf("verified transformed observation = %+v, err=%v", page, err)
@@ -507,7 +507,7 @@ func TestProductionObservationUsesVerifiedHeadRepositoryForTransformedHead(t *te
 		if err := store.RecordProductionObservation(ctx, terminal.ProjectID, ProductionObservation{Repository: "example/factory", ObservedAt: 81, PullRequests: []ProductionPullRequest{fork}}, mustTime(t, 81)); err != nil {
 			t.Fatal(err)
 		}
-		page, err = store.Production(ctx, terminal.ProjectID, 0, 8)
+		page, err = store.Production(ctx, terminal.ProjectID, 0, 8, UnixMillis{})
 		item := productionRecord(t, page, "pull_request", "8")
 		if err != nil || item == nil || item.VisualID != "example/factory#8" {
 			t.Fatalf("unverified head repository %q associated Change: %+v, err=%v", headRepository, item, err)
@@ -542,7 +542,7 @@ func TestProductionSurvivesReopen(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	page, err := store.Production(ctx, project.ID, 0, 8)
+	page, err := store.Production(ctx, project.ID, 0, 8, UnixMillis{})
 	if err != nil {
 		t.Fatal(err)
 	}

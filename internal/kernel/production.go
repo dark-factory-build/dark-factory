@@ -993,7 +993,36 @@ const productionRows = `SELECT repository, kind, identity, visual_id, document, 
  LEFT JOIN project_repositories r ON r.id = b.repository_id
  WHERE c.project_id = ? AND NOT EXISTS (SELECT 1 FROM publication_tasks p WHERE p.change_id = c.id)`
 
-func (store *Store) Production(ctx context.Context, project ProjectID, offset, limit int) (ProductionPage, error) {
+// ProductionRecent matches the floor's SHIPPED window: work settled longer ago
+// is history, not production.
+const ProductionRecent = 24 * time.Hour
+
+// Production reads what is relevant now, defined by state rather than a count:
+// repository rows; open PRs; queued, running, blocked or needs-you
+// constructions; deliveries that are not terminal, including blocked ones no
+// later verified delivery of the same kind and destination supersedes;
+// anything observed within ProductionRecent before at; the PRs those
+// deliveries name; PRs whose tasks belong to a mission not yet accepted; and
+// every check, reviewer and delivery of each of those PRs.
+const productionRelevant = `WITH recs AS (` + productionRows + `),
+ flagged AS (SELECT *, kind = 'repository' OR observed_at_ms >= ?
+	OR (kind = 'pull_request' AND json_extract(document, '$.state') = 'open')
+	OR (kind = 'construction' AND (json_extract(document, '$.status') IN ('queued', 'running', 'blocked') OR json_extract(document, '$.needs_you')))
+	OR (kind = 'delivery' AND COALESCE(json_extract(document, '$.state'), '') NOT IN ('verified', 'failed', 'blocked'))
+	OR (kind = 'delivery' AND json_extract(document, '$.state') = 'blocked' AND NOT EXISTS (SELECT 1 FROM recs v WHERE v.kind = 'delivery' AND v.repository = r.repository
+		AND json_extract(v.document, '$.kind') IS json_extract(r.document, '$.kind') AND json_extract(v.document, '$.destination') IS json_extract(r.document, '$.destination')
+		AND json_extract(v.document, '$.state') = 'verified' AND COALESCE(json_extract(v.document, '$.updated_at'), v.observed_at_ms) > COALESCE(json_extract(r.document, '$.updated_at'), r.observed_at_ms))) AS live FROM recs r),
+ missions AS (SELECT o.id FROM project_outcome_revisions o WHERE o.project_id = ? AND json_extract(o.document, '$.kind') = 'mission' AND json_extract(o.document, '$.state') <> 'accepted'
+	AND o.revision = (SELECT MAX(revision) FROM project_outcome_revisions WHERE id = o.id)),
+ pulls AS (SELECT repository, CAST(identity AS INTEGER) AS number FROM flagged WHERE kind = 'pull_request' AND live
+	UNION SELECT f.repository, j.value FROM flagged f, json_each(f.document, '$.pull_requests') j WHERE f.kind = 'delivery' AND f.live
+	UNION SELECT t.repository, t.pull_number FROM publication_tasks t JOIN mission_task_bindings b ON b.task_id = t.task_id WHERE b.mission_id IN (SELECT id FROM missions))
+ SELECT repository, kind, identity, visual_id, document, observed_at_ms FROM flagged f WHERE live
+	OR (kind = 'pull_request' AND EXISTS (SELECT 1 FROM pulls p WHERE p.repository = f.repository AND p.number = CAST(f.identity AS INTEGER)))
+	OR (kind IN ('check', 'delivery') AND EXISTS (SELECT 1 FROM pulls p, json_each(f.document, '$.pull_requests') j WHERE p.repository = f.repository AND p.number = j.value))
+	OR (kind = 'reviewer' AND EXISTS (SELECT 1 FROM pulls p WHERE p.repository = f.repository AND p.number = COALESCE(json_extract(f.document, '$.number'), json_extract(f.document, '$.request.PullNumber'))))`
+
+func (store *Store) Production(ctx context.Context, project ProjectID, offset, limit int, at UnixMillis) (ProductionPage, error) {
 	if project.zero() || offset < 0 || limit < 1 || limit > 8 {
 		return ProductionPage{}, ErrInvalidValue
 	}
@@ -1003,14 +1032,11 @@ func (store *Store) Production(ctx context.Context, project ProjectID, offset, l
 	}
 	defer tx.Close()
 	page := ProductionPage{Records: []ProductionRecord{}}
-	attentionAfter := PublicationAttentionAfter.Milliseconds()
-	if err := tx.connection.QueryRowContext(ctx, "SELECT count(*) FROM ("+productionRows+")", project.Bytes(), attentionAfter, project.Bytes()).Scan(&page.Total); err != nil {
+	args := []any{project.Bytes(), PublicationAttentionAfter.Milliseconds(), project.Bytes(), at.Int64() - ProductionRecent.Milliseconds(), project.Bytes()}
+	if err := tx.connection.QueryRowContext(ctx, "SELECT count(*) FROM ("+productionRelevant+")", args...).Scan(&page.Total); err != nil {
 		return page, err
 	}
-	// Load delivery evidence before merged PRs so bounded reads can identify completed work.
-	rows, err := tx.connection.QueryContext(ctx, "SELECT * FROM ("+productionRows+") ORDER BY CASE\n"+
-		" WHEN kind = 'repository' THEN 0\n"+
-		" WHEN kind = 'pull_request' AND json_extract(document, '$.state') = 'open' THEN 1\n"+" WHEN kind = 'construction' AND json_extract(document, '$.status') IN ('queued', 'running', 'blocked') THEN 2\n"+" WHEN kind = 'delivery' THEN 3\n"+" WHEN kind IN ('pull_request', 'check', 'reviewer') THEN 4\n"+" WHEN kind = 'construction' THEN 5\n"+" ELSE 6 END, repository, identity LIMIT ? OFFSET ?", project.Bytes(), attentionAfter, project.Bytes(), limit, offset)
+	rows, err := tx.connection.QueryContext(ctx, "SELECT * FROM ("+productionRelevant+") ORDER BY observed_at_ms DESC, kind, repository, identity LIMIT ? OFFSET ?", append(args, limit, offset)...)
 	if err != nil {
 		return page, err
 	}
