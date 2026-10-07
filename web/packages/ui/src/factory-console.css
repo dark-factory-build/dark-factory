@@ -847,13 +847,12 @@ summary.dfConsoleItem__summary { cursor: pointer; }
 .dfWorkBar .dfConsoleRecentWork { margin: 0; padding: 0; border: 0; }
 .dfWorkBar .dfConsoleViewToggle { flex: 0 1 auto; }
 .dfWorkBar > button, .dfWorkBar .dfConsoleRecentWork button { padding-inline: .4rem; }
-.dfWorkRow { position: relative; }
-.dfWorkRow__head { padding: .7rem; overflow-wrap: anywhere; }
+.dfWorkRow__head { position: relative; padding: .7rem; overflow-wrap: anywhere; }
 .dfWorkRow__head .dfConsoleItem__meta { margin-top: .3rem; }
 .dfConsoleItem .dfWorkRow__title { text-align: left; padding: 0; }
 .dfConsoleItem__detail[hidden] { display: none; }
 .dfWorkRow__title::after { content: ""; position: absolute; inset: 0; }
-.dfWorkRow button:not(.dfWorkRow__title), .dfWorkRow a { position: relative; z-index: 1; }
+.dfWorkRow__head button:not(.dfWorkRow__title) { position: relative; z-index: 1; }
 .dfWorkRow > :not(.dfWorkRow__head) { margin: 0 .7rem .7rem; }
 .dfWorkRow > .dfConsoleItem__detail { margin: 0; }
 .dfWorkMeta { display: flex; flex-wrap: wrap; align-items: center; gap: .3rem; margin-top: .3rem; min-width: 0; }
