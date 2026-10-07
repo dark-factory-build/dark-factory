@@ -1250,7 +1250,7 @@ test("the commons shelf opens the floor's project library", async () => {
   await act(async () => tree.unmount());
 });
 
-test("an unobserved machine is a blueprint with no material belt; an observed edge with a rate carries material", () => {
+test("an unobserved machine is greyed with no material belt; an observed edge with a rate carries material", () => {
   const floor = sceneGraph([hall("web", { band: 0, machines: [machine("web-ui", "job")] }), hall("api", { machines: [machine("api-in", "ingress", { trigger: "request", reading: busy }), machine("api-db", "store")] })], {
     parties: [machine("github", "external", { reading: { ...unread, observation: "opaque" } })],
     flows: [{ from: "web-ui", to: "api-in", kind: "calls", reading: busy }, { from: "api", to: "api-db", kind: "uses", reading: unread }, { from: "api", to: "github", kind: "calls", reading: unread }],
@@ -1262,7 +1262,7 @@ test("an unobserved machine is a blueprint with no material belt; an observed ed
   assert.match(markup, /data-fence/);
   // the observed edge draws material
   assert.match(markup, /<g data-belt="calls" data-observation="observed" data-state="active"><path[^>]*class="b-base"><\/path><path[^>]*class="dfPlant__material"/);
-  assert.equal((markup.match(/data-belt="uses" data-observation="unobserved"/g) ?? []).length, 1, "an unobserved edge is a dashed blueprint run");
+  assert.equal((markup.match(/data-belt="uses" data-observation="unobserved"/g) ?? []).length, 1, "an unobserved edge is a faint dashed run");
   assert.equal(markup.includes('data-belt="uses" data-observation="unobserved" data-state'), false, "and carries no material");
   assert.equal((markup.match(/dfPlant__material/g) ?? []).length, 1, "only the observed belt moves material");
 });

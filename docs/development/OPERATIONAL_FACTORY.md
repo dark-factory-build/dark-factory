@@ -465,10 +465,10 @@ data.
 | Retries | Items loop back on a recirculation belt. |
 | Deploy | Changeover: scaffold and a version plate flip. Change marks remain for 24 hours. |
 | Dormant | **Observed quiet**: the machine is solid and lit, but still. |
-| Unobserved | **Blueprint**: cyan outline, no fill, no material, plaque "no telemetry". Never drawn as a still machine. |
+| Unobserved | **Greyed machine**: built but translucent and colourless, an unknown (grey-blue) lamp, plate "no telemetry", no material. Never drawn as an idle machine, whose lamp is dark. |
 | Partial | Solid machine with a blueprint quarter and a half-lit lamp. |
 | Stale | Desaturated, with a "last seen" tag. |
-| Inferred-only edge | Dashed blueprint belt with no material. |
+| Inferred-only edge | Faint grey dashed belt with no material. |
 | Observed edge | Solid belt carrying material. |
 | Runtime-only edge | Solid belt with a `?` tag. |
 | Contradicted | A red tag. |
