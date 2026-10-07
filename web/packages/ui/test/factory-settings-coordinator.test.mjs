@@ -198,6 +198,8 @@ test("failed preview cannot enable and reaccepting clears an older withdrawal re
   await coordinator.loadIntake("project");
   await coordinator.intakeAction("project", { action: "preview", source_id: source.id, page: 1 });
   assert.equal(coordinator.intake.get("project").reviewed_revision, 2n);
+  await coordinator.loadIntake("project");
+  assert.equal(coordinator.intake.get("project").reviewed_revision, 2n, "a list refresh keeps the open review");
   previewFails = true;
   await coordinator.intakeAction("project", { action: "preview", source_id: source.id, page: 1 });
   assert.equal(coordinator.intake.get("project").reviewed_revision, undefined);

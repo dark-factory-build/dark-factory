@@ -125,7 +125,9 @@ export class FactorySettingsCoordinator {
   async loadIntake(projectId: string): Promise<void> {
     await this.#observe(["intake", projectId], async (session, current) => {
       const result = await session.intake({ action: "list", project_id: projectId });
-      if (current()) this.#intake.set(projectId, result);
+      // A refresh keeps an open issue review and the last action's outcome.
+      const prior = this.#intake.get(projectId);
+      if (current()) this.#intake.set(projectId, prior === undefined ? result : { ...prior, sources: result.sources });
     }, { scoped: true });
   }
 

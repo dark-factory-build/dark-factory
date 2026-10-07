@@ -2220,6 +2220,29 @@ test("Work shows issues waiting for approval as Needs you inbox rows with Accept
   }
 });
 
+test("open Work re-reads the local intake list so issues polled later reach the inbox", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  const previous = globalThis.IS_REACT_ACT_ENVIRONMENT;
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+  let renderer;
+  const loads = [];
+  const source = { id: "88".repeat(16), project_id: ids.project, github_repository_id: 42n, repository: "example/widgets", target_repository_id: "89".repeat(16), overseer_agent_id: "", label: "bug", policy: "manual", trusted_authors: [], poll_seconds: 60, admission_limit: 25, enabled: true, revision: 3n };
+  const props = (sources) => ({ status: "ready", state: oneProjectState(), intake: new Map([[ids.project, { state: "ok", sources }]]), onLoadIntake: (id) => loads.push(id), onIntakeAction: () => {} });
+  try {
+    await act(async () => { renderer = create(createElement(FactoryConsole, props([source]))); });
+    assert.deepEqual(loads, [ids.project]);
+    assert.equal(renderer.root.findAll((node) => node.props["aria-label"] === "Accept Fix parser").length, 0);
+    await act(async () => t.mock.timers.tick(30_000));
+    assert.deepEqual(loads, [ids.project, ids.project], "Work refreshes the local list without a project change");
+    const waiting = { number: 17n, url: "https://github.com/example/widgets/issues/17", title: "Fix parser", body: "", author: "reporter", labels: [], content_hash: "ab".repeat(32), reason: "needs_manual_acceptance" };
+    await act(async () => renderer.update(createElement(FactoryConsole, props([{ ...source, sync: { last_attempt_at: 2n, last_success_at: 2n, imported_tasks: 0, state: "ok", error: "", waiting: [waiting] } }]))));
+    assert.equal(renderer.root.findAll((node) => node.props["aria-label"] === "Accept Fix parser").length, 1);
+  } finally {
+    if (renderer) await act(async () => renderer.unmount());
+    globalThis.IS_REACT_ACT_ENVIRONMENT = previous;
+  }
+});
+
 test("issue review refuses a stale preview before acceptance", async () => {
   const previous = globalThis.IS_REACT_ACT_ENVIRONMENT;
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;

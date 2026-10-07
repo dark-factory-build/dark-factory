@@ -219,7 +219,6 @@ export function FactoryConsole({
   const [selectedProduction, setSelectedProduction] = useState<string>();
   const shownProduction = productionItems.some((item) => productionKey(item) === selectedProduction);
   const [libraryOpen, setLibraryOpen] = useState(false);
-  useEffect(() => { if (ready && projectId !== undefined) onLoadIntake?.(projectId); }, [ready, projectId, onLoadIntake !== undefined]);
   const [settingsTab, setSettingsTab] = useState<number>();
   useEffect(() => { if (settingsOpen !== true) setSettingsTab(undefined); }, [settingsOpen]);
   const [knowledgeView, setKnowledgeView] = useState<{ board?: boolean; project?: string; entity?: string; id?: string; repository?: string }>({});
@@ -240,6 +239,14 @@ export function FactoryConsole({
   const waiting = rows.filter(needsYou).length;
   const agent = selectedAgent === undefined ? undefined : scopedState?.agents.get(selectedAgent.id);
   const selectedDetail = (detail === "floor" ? "work" : detail) ?? (selectedAgent === undefined ? "work" : "agent");
+  // Work's inbox is the daemon's last intake poll: re-read that local list (never the backlog) while Work is shown.
+  useEffect(() => {
+    if (!ready || projectId === undefined || onLoadIntake === undefined) return;
+    onLoadIntake(projectId);
+    if (selectedDetail !== "work") return;
+    const timer = setInterval(() => onLoadIntake(projectId), 30_000);
+    return () => clearInterval(timer);
+  }, [ready, projectId, onLoadIntake !== undefined, selectedDetail === "work"]);
   const [relatedTask, setRelatedTask] = useState<TaskItem>();
   useEffect(() => { setRelatedTask(undefined); }, [selectedDetail, projectId]);
   const openKnowledgeRecord = async (kind: string, id: string, project: string) => {
