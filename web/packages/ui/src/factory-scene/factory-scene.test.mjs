@@ -1050,7 +1050,7 @@ test("narrow halls truncate full-width titles while retaining their accessible n
   for (const glyph of ["界", "😀", "👨‍👩‍👧‍👦", "🇯🇵", "é"]) {
     const label = glyph.repeat(30);
     const markup = render({ graph: sceneGraph(["a", "b"].map((id) => hall(id, { label }))), workers: [] });
-    const shown = markup.match(/class="dfPlant__plateText">([^<]+)<\/text>/)?.[1];
+    const shown = markup.match(/class="dfPlant__plateText" font-size="10">([^<]+)<\/text>/)?.[1];
     assert.ok(shown?.endsWith("…"), "the visible hall title fits its plate");
     assert.ok([...new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(shown)].length < 30);
     assert.match(markup, new RegExp(`aria-label="Inspect ${label}`), "full title remains accessible");

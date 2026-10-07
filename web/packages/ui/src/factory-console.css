@@ -1221,11 +1221,11 @@ summary.dfConsoleItem__summary { cursor: pointer; }
   shape-rendering: crispEdges;
 }
 .dfPlant text { font-family: ui-monospace, monospace; }
-.dfPlant__heading { fill: #b9cad5; font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: .08em; }
-.dfPlant__label { fill: var(--label); font-size: 8px; }
-.dfPlant__small { fill: #8f99a6; font-size: 7px; }
+.dfPlant__heading { fill: #b9cad5; font-weight: 700; text-transform: uppercase; letter-spacing: .08em; }
+.dfPlant__label { fill: var(--label); }
+.dfPlant__small { fill: #8f99a6; }
 .dfPlant__plate { fill: var(--plate); stroke: var(--outline); }
-.dfPlant__plateText { fill: var(--plateink); font-size: 10px; font-weight: 700; }
+.dfPlant__plateText { fill: var(--plateink); font-weight: 700; }
 .dfPlant .shd { fill: var(--shadow); }
 .dfPlant .m { fill: var(--metal); stroke: var(--outline); stroke-width: 1; }
 .dfPlant .md { fill: var(--metal2); }
@@ -1236,12 +1236,12 @@ summary.dfConsoleItem__summary { cursor: pointer; }
 .dfPlant .lamp { fill: var(--lampoff); }
 .dfPlant .crate { fill: var(--item); stroke: var(--outline); stroke-width: 1; }
 .dfPlant .qtag { fill: var(--amber); stroke: var(--outline); stroke-width: 1; }
-.dfPlant .qmark { fill: var(--outline); font-size: 8px; font-weight: 700; }
+.dfPlant .qmark { fill: var(--outline); font-weight: 700; }
 .dfPlant .redtag { fill: var(--red); }
 .dfPlant .scrap { fill: var(--red); }
 .dfPlant__bin { fill: var(--metal2); stroke: var(--outline); }
 .dfPlant__hand { fill: none; stroke: var(--metalhi); stroke-width: 1.5; }
-.dfPlant .bptext { fill: var(--bp); font-size: 6px; }
+.dfPlant .bptext { fill: var(--bp); }
 .dfPlant .pq { display: none; }
 .dfPlant .op-active .lamp { fill: var(--ok); }
 .dfPlant .op-degraded .lamp { fill: var(--amber); }
@@ -1277,4 +1277,4 @@ summary.dfConsoleItem__summary { cursor: pointer; }
 .dfPlantReading.s-unobserved { color: #4cc3e6; }
 .dfPlant__scaffold { fill: none; stroke: var(--hazard); stroke-width: 2; stroke-dasharray: 6 3; }
 .dfPlant__changed { fill: var(--hazard); stroke: var(--outline); }
-.dfPlant__changedText { fill: var(--outline); font-size: 10px; font-weight: 700; }
+.dfPlant__changedText { fill: var(--outline); font-weight: 700; }

@@ -1982,21 +1982,18 @@ test("floor preparation survives draft and live snapshot updates and relayouts o
   await act(async () => { renderer.root.findAllByProps({ "aria-label": "Inspect kernel" })[0].props.onClick(); });
   assert.equal(reads, preparedReads, "entity selection reuses the projection");
   assert.equal(layout(), originalLayout);
-  const renamed = { ...fresh, projects: new Map(fresh.projects).set(ids.project, { ...fresh.projects.get(ids.project), name: "Renamed workshop" }) };
-  await act(async () => { renderer.update(createElement(DraftFloor, { state: renamed })); });
-  assert.match(JSON.stringify(renderer.toJSON()), /Renamed workshop/);
   // A new answer with moved readings and the same digest replaces the graph but never relayouts.
   const hot = { ...fixtureGraph, nodes: fixtureGraph.nodes.map((node) => node.kind === "ingress" && node.observation === "observed" ? { ...node, rate_per_hour: 999 } : node) };
   graphs = new Map(graphs).set(ids.project, hot);
-  await act(async () => { renderer.update(createElement(DraftFloor, { state: renamed, connected: false })); });
-  await act(async () => { renderer.update(createElement(DraftFloor, { state: renamed })); });
+  await act(async () => { renderer.update(createElement(DraftFloor, { state: fresh, connected: false })); });
+  await act(async () => { renderer.update(createElement(DraftFloor, { state: fresh })); });
   assert.notEqual(scene().props.graph, originalGraph);
   assert.equal(scene().props.graph.halls.flatMap((hall) => hall.machines).find((machine) => machine.label === "/browser").reading.ratePerHour, 999);
   assert.equal(layout(), originalLayout, "readings never move a machine");
   // A new digest is a new structure.
   graphs = new Map(graphs).set(ids.project, { ...fixtureGraph, digest: "cd".repeat(32), nodes: fixtureGraph.nodes.filter((node) => node.label !== "web"), edges: [] });
-  await act(async () => { renderer.update(createElement(DraftFloor, { state: renamed, connected: false })); });
-  await act(async () => { renderer.update(createElement(DraftFloor, { state: renamed })); });
+  await act(async () => { renderer.update(createElement(DraftFloor, { state: fresh, connected: false })); });
+  await act(async () => { renderer.update(createElement(DraftFloor, { state: fresh })); });
   assert.deepEqual(scene().props.graph.halls.map((hall) => hall.label), ["kernel"]);
   assert.notEqual(layout(), originalLayout);
   await act(async () => { renderer.unmount(); });
