@@ -276,9 +276,17 @@ granularity is a fixed table in code, not a runtime claim.
 
 - **`factoryd`**: the daemon observes its own listeners: browser messages,
   HTTP requests and local API operations, counted with `rpc.method`,
-  `url.path` and `network.transport`. Its outgoing work (provider launches,
-  GitHub calls) is not observed yet. Coverage is local and current while the
-  daemon runs.
+  `url.path` and `network.transport`. Its outgoing work is client spans:
+  each HTTP request (Maintainer, Linear, release check, push, Cloudflare
+  pull) by peer `server.address` and `http.request.method`, failing on a
+  transport error or a 5xx, never with its URL, path, query, headers or
+  body; and each factory-runner or reviewer CLI launch by peer
+  `process.executable.name`, failing only when the process cannot start,
+  which lands on the unit of that name when the system has one. Each scheduler tick is an internal span with
+  `code.function.name`, binding to its timer. SQLite and relay traffic are
+  not observed. Only the listeners are claimed as coverage, so silent
+  outgoing work reads partial, never idle. Coverage is local and current
+  while the daemon runs.
 - **`otlp`**: an OTLP/HTTP receiver on the loopback listener
   (`POST /v1/traces`) for any local process of any system. It takes the
   protobuf most SDKs send by default as well as JSON, optionally gzipped,

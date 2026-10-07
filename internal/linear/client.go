@@ -41,6 +41,12 @@ func Open(home *install.OperationalHome) (*Host, error) {
 	}
 	return h, nil
 }
+
+// Instrument wraps the HTTP client before the host is shared.
+func (h *Host) Instrument(wrap func(*http.Client) *http.Client) {
+	h.client = wrap(h.client)
+}
+
 func (h *Host) Connect(ctx context.Context, key string) ([]Team, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()

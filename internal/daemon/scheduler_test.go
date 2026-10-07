@@ -139,16 +139,21 @@ func TestSchedulerCancellationBeforeAdmissionObservation(t *testing.T) {
 		polls := make(chan time.Time, 1)
 		polls <- time.Now()
 		clockCalls := 0
+		var handling sync.Once
 		daemon.now = func() time.Time {
 			clockCalls++
 			if clockCalls == 1 {
 				return time.Now()
 			}
-			close(polling)
-			<-returning
-			// Let the canceled probe enqueue completion while the scheduler
-			// is still handling its poll, so both select inputs are ready.
-			runtime.Gosched()
+			// The poll's first clock read holds the scheduler; later reads
+			// in the same poll (its self-observation) pass straight through.
+			handling.Do(func() {
+				close(polling)
+				<-returning
+				// Let the canceled probe enqueue completion while the scheduler
+				// is still handling its poll, so both select inputs are ready.
+				runtime.Gosched()
+			})
 			return time.Now()
 		}
 		spec := SupervisorSpec{schedulerPoll: polls, scheduledAttempt: func(ctx context.Context, _ SupervisorSpec) (kernel.Run, error) {

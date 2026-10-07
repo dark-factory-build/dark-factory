@@ -173,6 +173,7 @@ func TestOutboundPeerAndContradiction(t *testing.T) {
 	observations := []Observation{
 		{Source: "otlp", Kind: "client", Start: now - minute, End: now, Attributes: map[string]string{"service.name": "api"}, Peer: map[string]string{"server.address": "api.stripe.com"}, Count: 4, Errors: 3},
 		{Source: "otlp", Kind: "client", Start: now - minute, End: now, Attributes: map[string]string{"service.name": "api"}, Peer: map[string]string{"server.address": "hooks.slack.com"}, Count: 1},
+		{Source: "otlp", Kind: "client", Start: now - minute, End: now, Attributes: map[string]string{"service.name": "api"}, Peer: map[string]string{"process.executable.name": "billing"}, Count: 1},
 		{Source: "otlp", Kind: "server", Start: now - minute, End: now, Attributes: map[string]string{"service.name": "billing", "http.route": "/users/me", "http.request.method": "GET"}, Count: 1},
 		{Source: "otlp", Kind: "server", Start: now - minute, End: now, Attributes: map[string]string{"service.name": "billing", "http.route": "/orders", "http.request.method": "POST"}, Count: 1},
 	}
@@ -186,9 +187,15 @@ func TestOutboundPeerAndContradiction(t *testing.T) {
 	if got["hooks.slack.com"] == nil || got["hooks.slack.com"].Observation != "observed" {
 		t.Errorf("runtime-only party = %+v", got["hooks.slack.com"])
 	}
+	if got := live.Edges[[3]string{ID("s", "", "wrangler:api"), ID("s", "", "a"), string(Calls)}]; got == nil || got.Observation != "observed" {
+		t.Errorf("launch of a unit's executable = %+v, want an observed call to that unit", got)
+	}
 	for _, node := range live.Graph.Nodes {
 		if node.Label == "me" && State(node.Evidence) != "contradicted" {
 			t.Errorf("/users/me served by another unit is %s", State(node.Evidence))
+		}
+		if node.Label == "billing" && node.Kind == External {
+			t.Error("a launched unit was minted as an external party")
 		}
 		// A one-segment route proves nothing about who serves it.
 		if node.Label == "orders" && State(node.Evidence) == "contradicted" {

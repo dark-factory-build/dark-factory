@@ -91,7 +91,7 @@ func TestPublishedReleaseIsValidatedCachedAndNeverBlocksTheConsole(t *testing.T)
 		bodies <- body
 		// The refresh cannot retake the lock before this call returns, so a
 		// console request is answered from the cache it had, never from GitHub.
-		if served := latestPublishedRelease(); served != cached {
+		if served := latestPublishedRelease(nil); served != cached {
 			t.Fatalf("a console request waited for GitHub: %+v", served)
 		}
 	}
@@ -105,7 +105,7 @@ func TestPublishedReleaseIsValidatedCachedAndNeverBlocksTheConsole(t *testing.T)
 	// rate-limited or offline host never reaches out more often than a healthy one.
 	open(`not json`)
 	refused := settle()
-	if value := latestPublishedRelease(); value != (api.PublishedRelease{}) {
+	if value := latestPublishedRelease(nil); value != (api.PublishedRelease{}) {
 		t.Fatalf("a refused read invented a release: %+v", value)
 	}
 	if refused.Before(time.Now().Add(releaseInterval - time.Minute)) {
@@ -114,7 +114,7 @@ func TestPublishedReleaseIsValidatedCachedAndNeverBlocksTheConsole(t *testing.T)
 
 	open(`{"tag_name":"v0.4.3"}`)
 	served := settle()
-	if value := latestPublishedRelease(); value.Version != "v0.4.3" {
+	if value := latestPublishedRelease(nil); value.Version != "v0.4.3" {
 		t.Fatalf("the cached release never arrived: %+v", value)
 	}
 	if served.Before(time.Now().Add(releaseInterval - time.Minute)) {
