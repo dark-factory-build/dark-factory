@@ -370,6 +370,7 @@ export function FactoryConsole({
                 onMission={(task) => openMission(task.project_id, task.mission_id!)}
                 sources={sources}
                 onIntakeAction={ready ? onIntakeAction : undefined}
+                intake={projectId === undefined ? undefined : { state: intake?.get(projectId)?.state, failed: intakeErrors?.has(projectId) === true, busy: intakePending?.has(projectId) === true }}
                 onManageSources={ready && onToggleSettings !== undefined ? () => { setSettingsTab(1); if (settingsOpen !== true) onToggleSettings(); } : undefined}
               /></div>
             </div>

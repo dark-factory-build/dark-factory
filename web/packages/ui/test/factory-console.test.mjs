@@ -2205,6 +2205,15 @@ test("Work shows issues waiting for approval as Needs you inbox rows with Accept
     assert.match(text(row), /#17/);
     await act(async () => row.findByProps({ "aria-label": "Accept Fix parser" }).props.onClick());
     assert.deepEqual(calls, [{ projectId: ids.project, request: { action: "accept", source_id: source.id, expected_revision: 3n, issue_number: 17n, content_hash: "ab".repeat(32) } }]);
+    let toggled = 0;
+    const props = renderer.root.findByType(FactoryConsole).props;
+    await act(async () => renderer.update(createElement(FactoryConsole, { ...props, onToggleSettings: () => { toggled++; }, intake: new Map([[ids.project, { state: "content_changed", sources: [source] }]]) })));
+    const alert = renderer.root.findByProps({ role: "alert" });
+    assert.match(text(alert), /Could not accept:\s+content changed/);
+    await act(async () => alert.findByType("button").props.onClick());
+    assert.equal(toggled, 1, "a stale issue routes to Sources for fresh content");
+    await act(async () => renderer.update(createElement(FactoryConsole, { ...props, intakePending: new Set([ids.project]) })));
+    assert.equal(renderer.root.findByProps({ "aria-label": "Accept Fix parser" }).props.disabled, true, "a pending accept cannot be resubmitted");
   } finally {
     if (renderer) await act(async () => renderer.unmount());
     globalThis.IS_REACT_ACT_ENVIRONMENT = previous;
