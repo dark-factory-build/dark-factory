@@ -84,6 +84,15 @@ in either installation order. Its ANY WORKER control and the Any eligible
 worker queue group appear only after the site is re-vendored from a merged
 runtime commit that contains them.
 
+**New home file.** The running build checks the home before it swaps in the
+release, so it judges the new build's home by its own, older rules. The home
+census therefore ignores any regular file at the home root it does not name;
+only symlinks, directories and special files there are refused
+(`readOperationalCensus` in `internal/install/operational_darwin.go`). A
+release may add a plain file to the home without any allowlist edit. A
+release that adds anything else at the home root, such as a directory, is
+refused by the build before it and must be installed by hand as above.
+
 **Schema change.** A release backs the store up before the swap, and a
 rolled-back trial restores that backup when the schema version moved, so the
 old build never opens a newer schema. To roll back by hand after a promotion,

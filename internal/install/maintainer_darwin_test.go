@@ -90,7 +90,7 @@ func TestOperationalCensusIncludesEveryCredentialAndRejectsOverflow(t *testing.T
 	}
 	for _, overflow := range []bool{false, true} {
 		if overflow {
-			if err := os.WriteFile(filepath.Join(path, "unexpected"), nil, 0600); err != nil {
+			if err := os.Symlink(formatName, filepath.Join(path, "unexpected")); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -101,10 +101,10 @@ func TestOperationalCensusIncludesEveryCredentialAndRejectsOverflow(t *testing.T
 		names, err := readOperationalCensus(dir)
 		dir.Close()
 		if overflow && err == nil {
-			t.Fatal("overflow entry accepted")
+			t.Fatal("planted symlink accepted")
 		}
-		if !overflow && (err != nil || len(names) != len(members)) {
-			t.Fatalf("optional members truncated: %d %v", len(names), err)
+		if !overflow && (err != nil || !names[RelayDirectoryName] || !names[databaseName+"-shm"]) {
+			t.Fatalf("optional members refused: %v %v", names, err)
 		}
 	}
 }
