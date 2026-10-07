@@ -1,10 +1,12 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
+import { IconButton } from "../icons.js";
+import { SectionHeader } from "../console-kit.js";
 import type { AgentItem, SpriteAppearance } from "@dark-factory/client";
 import { AgentSprite } from "./factory-scene.js";
 import { automaticAppearance, randomAppearance, resolvedAppearance, spriteOptions } from "./appearance.js";
 
 const groups = ["skin", "hair", "hair_colour", "face", "outfit", "clothes_colour", "shoes", "tool", "headwear"] as const;
-const labels = { skin: "SKIN TONE", hair: "HAIR STYLE", hair_colour: "HAIR COLOUR", face: "FACE DETAIL", outfit: "CLOTHING STYLE", clothes_colour: "CLOTHING COLOUR", shoes: "SHOES", tool: "TOOL", headwear: "HEADWEAR" } as const;
+const labels = { skin: "Skin tone", hair: "Hair style", hair_colour: "Hair colour", face: "Face detail", outfit: "Clothing style", clothes_colour: "Clothing colour", shoes: "Shoes", tool: "Tool", headwear: "Headwear" } as const;
 const activities = ["waiting", "busy", "needs-you", "idle"] as const;
 
 export function SpriteEditor({ agent, pending, error, onSave, onClose }: {
@@ -23,12 +25,12 @@ export function SpriteEditor({ agent, pending, error, onSave, onClose }: {
   const submit = async (event: FormEvent) => { event.preventDefault(); setSubmitting(true); if (await onSave(draft.automatic ? { ...draft, skin: 0, hair: 0, hair_colour: 0, face: 0, outfit: 0, clothes_colour: 0, shoes: 0, tool: 0, headwear: 0 } : draft)) close(); else setSubmitting(false); };
   return <dialog ref={dialog} className="dfConsoleDialog dfSpriteEditor" aria-label={`Edit appearance for ${agent.name}`} onClose={onClose} onClick={(event) => { if (event.target === dialog.current) close(); }}>
     <form className="dfConsoleSidebar__panel" onSubmit={submit}>
-      <div className="dfConsoleSidebar__heading"><h2>EDIT APPEARANCE · {agent.name}</h2><button type="button" onClick={close}>CLOSE</button></div>
+      <SectionHeader as="h2" title={`Edit appearance · ${agent.name}`} actions={<IconButton icon="close" aria-label="Close" onClick={close} />} />
       {error === undefined ? null : <p role="alert">{error}</p>}
       <div className="dfSpriteEditor__preview">
         <AgentSprite agent={{ ...agent, appearance: draft }} activity={activity} />
         <div className="dfConsoleViewToggle" role="group" aria-label="Preview activity">
-          {activities.map((value) => <button key={value} type="button" aria-pressed={activity === value} onClick={() => setActivity(value)}>{value.replace("needs-you", "ALERT")}</button>)}
+          {activities.map((value) => <button key={value} type="button" aria-pressed={activity === value} onClick={() => setActivity(value)}>{value.replace("needs-you", "Alert")}</button>)}
         </div>
       </div>
       <div className="dfSpriteEditor__groups">
@@ -37,9 +39,9 @@ export function SpriteEditor({ agent, pending, error, onSave, onClose }: {
         </select></label>)}
       </div>
       <div className="dfSpriteEditor__actions">
-        <button type="button" onClick={() => setDraft(randomAppearance())}>RANDOMISE</button>
-        <button type="button" aria-pressed={draft.automatic} onClick={() => setDraft(automaticAppearance(agent))}>AUTOMATIC</button>
-        <button type="submit" disabled={pending || submitting}>{pending || submitting ? "SAVING" : "SAVE"}</button>
+        <button type="button" onClick={() => setDraft(randomAppearance())}>Randomise</button>
+        <button type="button" aria-pressed={draft.automatic} onClick={() => setDraft(automaticAppearance(agent))}>Automatic</button>
+        <button type="submit" disabled={pending || submitting}>{pending || submitting ? "Saving" : "Save"}</button>
       </div>
     </form>
   </dialog>;

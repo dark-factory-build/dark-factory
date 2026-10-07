@@ -3,6 +3,8 @@ import { useEffect, useRef, useState } from "react";
 import type { AgentItem, StateView, TaskItem } from "@dark-factory/client";
 import type { ProductionContraption } from "./production-view.js";
 import type { ProjectContentCall } from "./project-library.js";
+import { IconButton } from "./icons.js";
+import { Status } from "./console-kit.js";
 
 type RecordValue = Record<string, unknown>;
 const text = (value: unknown): string => typeof value === "string" ? value : "";
@@ -84,8 +86,8 @@ export function MissionsPanel({ production = [], onProduction, requestedMission,
     {project === undefined ? <p className="dfConsoleSidebar__inherit">Choose a project in the header to see its missions.</p> : <>
       <p className="dfConsoleSidebar__inherit">{project.name}</p>
       <div className="dfConsoleViewToggle">
-        <button type="button" disabled={Boolean(pending) || call === undefined} onClick={() => void run(async () => { await list(); if (selected !== undefined) await read(text(selected.id)); })}>Refresh</button>
-        <button type="button" disabled={Boolean(pending) || call === undefined || owners.length === 0} onClick={() => { if (draft === undefined) setDrafts((previous) => ({ ...previous, [project.id]: { objective: "", criteria: "", owner: owners[0]!.id, id: crypto.randomUUID().replaceAll("-", "") } })); }}>New mission</button>
+        <IconButton icon="refresh" disabled={Boolean(pending) || call === undefined} onClick={() => void run(async () => { await list(); if (selected !== undefined) await read(text(selected.id)); })}>Refresh</IconButton>
+        <IconButton icon="plus" disabled={Boolean(pending) || call === undefined || owners.length === 0} onClick={() => { if (draft === undefined) setDrafts((previous) => ({ ...previous, [project.id]: { objective: "", criteria: "", owner: owners[0]!.id, id: crypto.randomUUID().replaceAll("-", "") } })); }}>New mission</IconButton>
       </div>
       {owners.length === 0 ? <p>Add an overseer in project settings to create a mission.</p> : null}
       {draft === undefined ? null : <form className="dfConsoleSidebar__config" onSubmit={(event) => { event.preventDefault(); void run(async () => {
@@ -106,9 +108,9 @@ export function MissionsPanel({ production = [], onProduction, requestedMission,
       {selected === undefined ? <ul className="dfMissions__list">{items.map((item) => <li key={text(item.id)}><button type="button" disabled={Boolean(pending) || call === undefined} onClick={() => void run(() => read(text(item.id)))}>{text(item.objective)} <span>{text(item.state)}{item.stale ? " · stale" : ""}</span></button></li>)}</ul> : null}
       {next === 0 || selected !== undefined ? null : <button type="button" disabled={Boolean(pending) || call === undefined} onClick={() => void run(() => list(next))}>{pending ? "Loading…" : "Show more"}</button>}
       {selected === undefined ? null : <article className="dfConsoleSidebar__section">
-        <button type="button" className="dfConsoleBack" onClick={() => { generation.current++; setPending(""); setSelected(undefined); setTasks([]); setTaskNext(0); }}>← Back to Missions</button>
+        <IconButton icon="chevron-left" className="dfConsoleBack" onClick={() => { generation.current++; setPending(""); setSelected(undefined); setTasks([]); setTaskNext(0); }}>Back to Missions</IconButton>
         <h3>{text(document.objective)}</h3>
-        <p><span className="dfStatus" data-stage={text(document.state)}>{text(document.state)}</span> · {owner?.name ?? (text(selected.owner_name) || "Owner unavailable")}</p>
+        <p><Status stage={text(document.state)} /> · {owner?.name ?? (text(selected.owner_name) || "Owner unavailable")}</p>
         {selected.stale ? <p role="status">The objective changed. Earlier acceptance is stale.</p> : null}
         <h4>Next action</h4><p className="dfMissions__text">{text(document.remaining_work) || anchor?.blocked_reason || (document.state === "accepted" ? "Acceptance recorded." : "Awaiting the overseer’s next recorded action.")}</p>
         {owner === undefined ? null : <button type="button" disabled={call === undefined || onSelectAgent === undefined} onClick={() => onSelectAgent?.(owner)}>Talk to {owner.name}</button>}

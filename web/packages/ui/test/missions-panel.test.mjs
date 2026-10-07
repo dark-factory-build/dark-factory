@@ -4,11 +4,12 @@ import { createElement } from "react";
 import { act, create } from "react-test-renderer";
 import { MissionsPanel } from "../dist/src/missions-panel.js";
 import { fixtureState } from "../../../fixtures/state.mjs";
+const textOf = (node) => [].concat(node.props.children).flat(Infinity).filter((child) => typeof child === "string").join("").trim();
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 const project = [...fixtureState.projects.keys()][1];
 const overseer = [...fixtureState.agents.values()].find((agent) => agent.project_id === project && agent.role === "orchestrator");
-const button = (tree, label) => tree.root.findAllByType("button").find((node) => node.children.join("") === label);
+const button = (tree, label) => tree.root.findAllByType("button").find((node) => textOf(node) === label);
 
 test("mission drafts survive state updates and creation waits for acknowledgement", async () => {
   const calls = [];
@@ -96,7 +97,7 @@ test("mission details lead with action and open related tasks without a nested i
   await act(async () => tree.root.findAllByType("button").find(node => node.children.join("").includes("Related task")).props.onClick());
   assert.equal(opened[0].id, "task");
   assert.equal(tree.root.findAllByProps({"aria-label": "Work details"}).length, 0);
-  await act(async () => button(tree, "← Back to Missions").props.onClick());
+  await act(async () => button(tree, "Back to Missions").props.onClick());
   assert.ok(tree.root.findAllByType("button").some(node => node.children[0] === mission.objective));
   await act(async () => tree.unmount());
 });

@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode, type SyntheticEvent } from "react";
+import { IconButton } from "./icons.js";
 import { browserEndpoint, FactoryAppController, type FactoryAppSnapshot, type FactoryAppStatus, type FactoryTerminalView } from "./factory-app-controller.js";
 import { FactoryConsole, type ConsoleDetail, type ConsoleView } from "./factory-console.js";
 import { TaskConversation, type AgentPanelView } from "./console-sidebar.js";
@@ -164,18 +165,18 @@ export function TerminalPanel({
       {terminal.error === undefined ? null : (
         <p className="dfFactoryConsole__terminalError" role="alert">
           {terminal.errorSource === "display"
-            ? terminal.hasOutputSurface ? "TERMINAL DISPLAY ERROR" : "TERMINAL DISPLAY UNAVAILABLE"
+            ? terminal.hasOutputSurface ? "Terminal display error" : "Terminal display unavailable"
             : terminal.errorSource === "input"
               ? terminal.phase === "ready"
-                ? terminal.error.code === "stale" ? "TERMINAL OPEN ELSEWHERE" : terminal.error.code === "invalid_request"
-                  ? "INPUT REJECTED"
-                  : "INPUT UNAVAILABLE"
+                ? terminal.error.code === "stale" ? "Terminal open elsewhere" : terminal.error.code === "invalid_request"
+                  ? "Input rejected"
+                  : "Input unavailable"
                 : terminal.error.code === "connection"
-                  ? "TERMINAL INPUT CONNECTION LOST"
-                  : "TERMINAL INPUT UNAVAILABLE"
+                  ? "Terminal input connection lost"
+                  : "Terminal input unavailable"
               : terminal.phase === "ready" && !terminal.writable && terminal.error.code === "stale"
-            ? "TERMINAL OPEN ELSEWHERE"
-            : "TERMINAL ATTACH UNAVAILABLE"}
+            ? "Terminal open elsewhere"
+            : "Terminal attach unavailable"}
         </p>
       )}
       {!terminal.resets ? null : (
@@ -183,7 +184,7 @@ export function TerminalPanel({
           Earlier output is no longer retained; showing new output.
         </p>
       )}
-      {terminal.taskTitle !== undefined && terminal.paused ? <p className="dfFactoryConsole__instructionState">QUEUE PAUSED</p> : null}
+      {terminal.taskTitle !== undefined && terminal.paused ? <p className="dfFactoryConsole__instructionState">Queue paused</p> : null}
       {children}
     </section>
   );
@@ -202,7 +203,7 @@ export function TerminalContent({
   const terminalHost = terminal.hasOutputSurface || (terminal.taskTitle !== undefined && !terminal.finishing)
     ? <TerminalHost key={`${terminal.agentId}:${terminal.surfaceVersion}`} controller={controller} surfaceVersion={terminal.surfaceVersion} />
     : undefined;
-  if (terminal.finishing) return <>{terminalHost}<p className="dfFactoryConsole__instructionState">FINISHING</p></>;
+  if (terminal.finishing) return <>{terminalHost}<p className="dfFactoryConsole__instructionState">Finishing</p></>;
   if (terminal.taskTitle !== undefined) return <>{terminalHost}<AgentTaskTools terminal={terminal} controller={controller} repositories={repositories} /></>;
   return <>{terminalHost}<AgentIdleTools terminal={terminal} controller={controller} repositories={repositories} /></>;
 }
@@ -231,21 +232,21 @@ function AgentSteering({ terminal, controller }: { terminal: FactoryTerminalView
   const unknown = terminal.controlStatus === "delivery_unknown" || terminal.controlError?.code === "connection";
   const refused = terminal.controlStatus === "rejected" || (terminal.controlError !== undefined && ["invalid_request", "unauthorized", "stale", "too_large", "rate_limited", "not_found", "unsupported"].includes(terminal.controlError.code));
   const status = terminal.controlStatus === "stopping"
-    ? "STOPPING CURRENT WORK"
+    ? "Stopping current work"
     : terminal.controlStatus === "queued"
-      ? "REPLACEMENT QUEUED"
+      ? "Replacement queued"
       : refused
-        ? "CONTROL NOT SENT"
+        ? "Control not sent"
         : unknown
-          ? "DELIVERY COULD NOT BE CONFIRMED — CHECK TERMINAL/HISTORY BEFORE SENDING AGAIN"
+          ? "Delivery could not be confirmed — check terminal/history before sending again"
           : undefined;
-  if (!terminal.controlReady) return <p className="dfFactoryConsole__instructionState">{terminal.finishing ? "FINISHING" : "STARTING"}</p>;
+  if (!terminal.controlReady) return <p className="dfFactoryConsole__instructionState">{terminal.finishing ? "Finishing" : "Starting"}</p>;
   return (
     <section className="dfFactoryConsole__steering" aria-label={`Controls for ${terminal.agentName}`}>
       <div className="dfFactoryConsole__instructionActions">
         {status === undefined ? null : <span role={unknown || terminal.controlStatus === "rejected" ? "alert" : "status"}>{status}</span>}
-        <button type="button" disabled={pending} onClick={() => { void controller.controlAgent("interrupt"); }}>INTERRUPT</button>
-        <button type="button" disabled={pending} onClick={() => { void controller.controlAgent("stop"); }}>STOP CURRENT</button>
+        <button type="button" disabled={pending} onClick={() => { void controller.controlAgent("interrupt"); }}>Interrupt</button>
+        <button type="button" disabled={pending} onClick={() => { void controller.controlAgent("stop"); }}>Stop current</button>
       </div>
       <TaskHistory terminal={terminal} onRefresh={() => controller.loadTaskHistory()} onLoadConversation={() => controller.loadTaskDetail()} onLoadOlderConversation={() => controller.loadOlderTaskConversation()} />
     </section>
@@ -256,14 +257,14 @@ function TaskHistory({ terminal, onRefresh, onLoadConversation, onLoadOlderConve
   const history = terminal.history;
   return (
     <details className="dfFactoryConsole__history" aria-label="Task control history">
-      <summary>HISTORY</summary>
-      <div className="dfFactoryConsole__historyHeading"><button type="button" disabled={terminal.historyPending} onClick={onRefresh}>{terminal.historyPending ? "LOADING" : "REFRESH"}</button><button type="button" disabled={terminal.taskDetailPending} onClick={onLoadConversation}>{terminal.taskDetailPending ? "LOADING" : "VIEW CONVERSATION"}</button></div>
-      {history === undefined || history.entries.length === 0 ? <p className="dfFactoryConsole__instructionState">{terminal.historyPending ? "LOADING RECEIPTS" : "NO DURABLE CONTROLS YET"}</p> : (
+      <summary>History</summary>
+      <div className="dfFactoryConsole__historyHeading"><IconButton icon="refresh" disabled={terminal.historyPending} onClick={onRefresh}>{terminal.historyPending ? "Loading" : "Refresh"}</IconButton><button type="button" disabled={terminal.taskDetailPending} onClick={onLoadConversation}>{terminal.taskDetailPending ? "Loading" : "View conversation"}</button></div>
+      {history === undefined || history.entries.length === 0 ? <p className="dfFactoryConsole__instructionState">{terminal.historyPending ? "Loading receipts" : "No durable controls yet"}</p> : (
         <ol>
-          {history.entries.map((entry) => <li key={entry.operationId}><strong>{entry.kind.toUpperCase()} · {entry.status.toUpperCase()}</strong><span>{entry.actor}{entry.body === "" ? "" : ` · ${entry.body}`}</span></li>)}
+          {history.entries.map((entry) => <li key={entry.operationId}><strong>{entry.kind} · {entry.status}</strong><span>{entry.actor}{entry.body === "" ? "" : ` · ${entry.body}`}</span></li>)}
         </ol>
       )}
-		{terminal.taskDetailError === undefined ? null : <p role="alert">THE FACTORY REFUSED THIS HISTORY</p>}
+		{terminal.taskDetailError === undefined ? null : <p role="alert">The factory refused this history</p>}
 		{terminal.taskDetail === undefined ? null : <TaskConversation brief={terminal.taskDetail} pending={terminal.taskDetailPending} onOlder={terminal.taskDetail.nextPeerOffset === undefined ? undefined : onLoadOlderConversation} />}
     </details>
   );
@@ -301,13 +302,13 @@ export function AgentInstruction({
   const onKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     if ((event.metaKey || event.ctrlKey) && event.key === "Enter") void submit(event);
   };
-  if (mode === "now" && terminal.paused) return <p className="dfFactoryConsole__instructionState">PAUSED</p>;
-  if (mode === "now" && terminal.queued) return <p className="dfFactoryConsole__instructionState">QUEUED · WAITING FOR CAPACITY</p>;
+  if (mode === "now" && terminal.paused) return <p className="dfFactoryConsole__instructionState">Paused</p>;
+  if (mode === "now" && terminal.queued) return <p className="dfFactoryConsole__instructionState">Queued · waiting for capacity</p>;
   const errorCopy = terminal.instructionError === undefined
     ? undefined
     : ["invalid_request", "unauthorized", "stale", "too_large", "rate_limited", "not_found", "crypto_unavailable", "unsupported"].includes(terminal.instructionError.code)
-      ? "NOT SENT"
-      : "SEND NOT CONFIRMED — CHECK TASKS BEFORE RETRYING";
+      ? "Not sent"
+      : "Send not confirmed — check tasks before retrying";
   return (
     <form className={`dfFactoryConsole__instruction${mode === "queue" ? " dfFactoryConsole__instruction--queue" : ""}`} onSubmit={(event) => { void submit(event); }}>
       <label className="dfFactoryConsole__visuallyHidden" htmlFor={`df-instruction-${terminal.agentId}-${mode}`}>
@@ -327,10 +328,10 @@ export function AgentInstruction({
         {enabled.length < 2 ? null : <label>Checkout<select value={repositoryId} onChange={(event) => setRepositoryId(event.currentTarget.value)}><option value="">{enabled.some((repository) => repository.default) ? "Project default" : "Choose checkout"}</option>{enabled.map((repository) => <option key={repository.id} value={repository.id}>{repository.name}</option>)}</select></label>}
         {errorCopy === undefined ? null : <span role="alert">{errorCopy}</span>}
         <button type="submit" disabled={terminal.instructionPending || instruction.trim().length === 0}>
-          {terminal.instructionPending ? "SENDING" : mode === "queue" ? "ADD TO QUEUE" : "START"}
+          {terminal.instructionPending ? "Sending" : mode === "queue" ? "Add to queue" : "Start"}
         </button>
         <button type="button" aria-label={`Queue for any eligible worker in ${terminal.agentName}'s project`} disabled={terminal.instructionPending || instruction.trim().length === 0} onClick={() => { void submit(undefined, "any"); }}>
-          ANY WORKER
+          Any worker
         </button>
       </div>
     </form>

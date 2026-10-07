@@ -346,7 +346,7 @@ test("a suggested answer sends as soon as it is tapped", async () => {
   const manager = fakeManager([northFactory()], new Map([[NORTH, session]]));
   await withApp(props(manager), async (renderer) => {
     await act(async () => { buttons(renderer, "dfRemote__answer")[0].props.onClick(); });
-    const suggested = allButtons(renderer).find((control) => flat(control.props.children) === "Continue · RECOMMENDED");
+    const suggested = allButtons(renderer).find((control) => flat(control.props.children) === "Continue · Recommended");
     assert.ok(suggested !== undefined);
     await act(async () => { suggested.props.onClick(); });
     assert.deepEqual(session.calls.reply.map((call) => call.reply), ["Continue"], "one tap answers; a second, separate tap is a trap on a card that looks like a button");
@@ -359,7 +359,7 @@ test("read-only questions keep their suggested answers disabled", async () => {
   const manager = fakeManager([northFactory()], new Map([[NORTH, session]]));
   await withApp(props(manager), async (renderer) => {
     await act(async () => { buttons(renderer, "dfRemote__answer")[0].props.onClick(); });
-    const suggested = allButtons(renderer).find((control) => flat(control.props.children) === "Continue · RECOMMENDED");
+    const suggested = allButtons(renderer).find((control) => flat(control.props.children) === "Continue · Recommended");
     assert.ok(suggested !== undefined);
     assert.equal(suggested.props.disabled, true);
     assert.equal(renderer.root.findAllByProps({ className: "dfRemote__replyText" }).length, 0);

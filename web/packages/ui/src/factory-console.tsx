@@ -10,6 +10,8 @@ import { ProductionPanel, asTask } from "./production-panel.js";
 import { MissionsPanel } from "./missions-panel.js";
 import { RemoteInvitePanel } from "./remote-invite.js";
 import { factoryCounters } from "./console-view.js";
+import { IconButton } from "./icons.js";
+import { Badge, SectionHeader, Status } from "./console-kit.js";
 import { SpriteEditor } from "./factory-scene/sprite-editor.js";
 import { DEFAULT_FLOOR_APPEARANCE, loadFloorAppearance, resetFloorAppearance, saveFloorAppearance, type FloorAppearance } from "./floor-appearance.js";
 
@@ -69,12 +71,12 @@ export type FactoryConsoleProps = FactoryAppSnapshot & {
 };
 
 const STATUS_LABELS: Record<FactoryAppSnapshot["status"], string> = {
-  idle: "IDLE",
-  connecting: "CONNECTING",
-  authenticating: "AUTHENTICATING",
-  syncing: "SYNCING",
-  ready: "READY",
-  closed: "CLOSED",
+  idle: "Idle",
+  connecting: "Connecting",
+  authenticating: "Authenticating",
+  syncing: "Syncing",
+  ready: "Ready",
+  closed: "Closed",
 };
 
 const ERROR_LABELS = new Map<string, string>([
@@ -257,19 +259,19 @@ export function FactoryConsole({
       <main className="dfFactoryConsole" aria-label="Factory operator console" data-mobile-view={onDetail === undefined ? undefined : detail === "floor" ? "floor" : "detail"}>
         <header className="dfFactoryConsole__header">
           <div>
-            <h1>DARK FACTORY</h1>
+            <h1>Dark Factory</h1>
           </div>
           {state?.projects.size === 1 ? null : <label>Project <select aria-label="Project" value={projectId ?? ""} onChange={(event) => selectProject(event.currentTarget.value || undefined)}>
             <option value="">All projects</option>
             {[...state?.projects.values() ?? []].sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id)).map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
           </select></label>}
           <div className="dfConsoleBar__actions">
-            <button type="button" disabled={!ready || state === undefined || onSetDispatch === undefined || dispatchPending} title={onSetDispatch === undefined ? "Administrator access is required to change new-work admission." : "Controls admission of new work. Active processes continue."} onClick={() => {
+            <IconButton icon={state?.factory.dispatch_enabled ? "pause" : "play"} disabled={!ready || state === undefined || onSetDispatch === undefined || dispatchPending} title={onSetDispatch === undefined ? "Administrator access is required to change new-work admission." : "Controls admission of new work. Active processes continue."} onClick={() => {
               if (state === undefined || onSetDispatch === undefined || dispatchPending) return;
               setDispatchPending(true); setDispatchError(""); setDispatchNotice("");
               void onSetDispatch(state.factory.revision, !state.factory.dispatch_enabled).then((result) => setDispatchNotice(result.enabled ? "New work resumed." : "New work paused. Active processes continue."), () => setDispatchError("The admission change could not be confirmed. Check connection and administrator access, then refresh before retrying.")).finally(() => setDispatchPending(false));
-            }}>{dispatchPending ? "Waiting…" : state?.factory.dispatch_enabled ? "Pause new work" : "Resume new work"}</button>
-            <button type="button" aria-pressed={settingsOpen === true} disabled={onToggleSettings === undefined} onClick={onToggleSettings}>Settings</button>
+            }}>{dispatchPending ? "Waiting…" : state?.factory.dispatch_enabled ? "Pause new work" : "Resume new work"}</IconButton>
+            <IconButton icon="gear" aria-label="Settings" aria-pressed={settingsOpen === true} disabled={onToggleSettings === undefined} onClick={onToggleSettings} />
           </div>
           <div
             className={ready || error !== undefined ? "dfFactoryConsole__visuallyHidden" : "dfFactoryConsole__connection"}
@@ -294,15 +296,14 @@ export function FactoryConsole({
           <button type="button" aria-pressed={detail === "floor" && view === "floor"} disabled={!ready} onClick={() => { onView?.("floor"); onDetail("floor"); }}>Floor</button>
           <button type="button" aria-pressed={detail === "floor" && view === "agents"} disabled={!ready || onView === undefined} onClick={() => { onView?.("agents"); onDetail("floor"); }}>Agents</button>
           <button type="button" aria-pressed={detail === "missions"} disabled={!ready} onClick={() => onDetail("missions")}>Missions</button>
-          <button type="button" aria-pressed={detail === "production"} onClick={openChanges}>Changes {inProgressItems.length || ""}</button>
-          <button type="button" aria-pressed={detail === "queue"} disabled={!ready} onClick={() => onDetail("queue")}>Tasks</button>
-          <button type="button" aria-pressed={detail !== "floor" && selectedDetail === "needs-you"} disabled={!ready} onClick={() => onDetail("needs-you")}>Needs you {counters.needsYou || ""}</button>
+          <IconButton icon="git-pull-request" aria-pressed={detail === "production"} onClick={openChanges}>Changes <Badge n={inProgressItems.length} /></IconButton>
+          <IconButton icon="list" aria-pressed={detail === "queue"} disabled={!ready} onClick={() => onDetail("queue")}>Tasks</IconButton>
+          <IconButton icon="inbox" aria-pressed={detail !== "floor" && selectedDetail === "needs-you"} disabled={!ready} onClick={() => onDetail("needs-you")}>Needs you <Badge n={counters.needsYou} /></IconButton>
           <button type="button" disabled={!ready} onClick={() => openKnowledge(false)}>Library</button>
         </nav>}
         <div className="dfConsoleLayout">
           <section className="dfConsoleLayout__left dfFactoryConsole__section" aria-label={view === "floor" ? "Factory floor" : "Agents"}>
-            <div className="dfFactoryConsole__sectionHeading">
-              <h2 className="dfFactoryConsole__visuallyHidden">{view === "floor" ? "FACTORY FLOOR" : "AGENTS"}</h2>
+            <SectionHeader as="h2" hidden title={view === "floor" ? "Factory floor" : "Agents"} actions={
               <div className="dfConsoleViewToggle" role="group" aria-label="Left view">
                 {(["floor", "agents"] as const).map((option) => (
                   <button
@@ -315,8 +316,7 @@ export function FactoryConsole({
                     {option === "floor" ? "Floor" : "Agents"}
                   </button>
                 ))}
-              </div>
-            </div>
+              </div>} />
             {view === "floor"
               ? <FactoryFloor requestedEntity={requestedEntity} onOpenBoard={(project, entity, id, repository) => openKnowledge(true, project, entity, id, repository)} changes={productionItems} selectedChange={selectedProduction} onSelectChange={selectProduction} onProjectContent={onProjectContent} onOpenLibrary={(id) => openKnowledge(false, id)} onOpenTasks={ready ? (id) => { selectProject(id); onDetail?.("queue"); } : undefined} onOpenMissions={ready ? (id) => { selectProject(id); onDetail?.("missions"); } : undefined} projectId={projectId} floorAppearance={floorAppearance} selectedTaskId={selectedTask?.id} onSelectTask={ready ? selectTask : undefined} selectedAgentId={selectedDetail === "agent" ? selectedAgent?.id : undefined} state={scopedState} topologies={topologies} runPaths={runPaths} lastRunPaths={lastRunPaths} onSelectAgent={ready ? onSelectAgent : undefined} onSelectHumanRequest={ready ? selectRequest : undefined} connected={ready} />
               : <AgentList state={scopedState} selectedAgentId={selectedAgent?.id} ready={ready} onSelectAgent={ready ? onSelectAgent : undefined} />}
@@ -325,11 +325,11 @@ export function FactoryConsole({
           <aside className="dfConsoleSidebar" aria-label="Selected detail">
             <div className="dfConsoleViewToggle" role="group" aria-label="Right panel">
               <button type="button" disabled={!ready} onClick={() => openKnowledge(false)}>Library</button>
-              <button type="button" aria-pressed={selectedDetail === "needs-you"} disabled={!ready || onDetail === undefined} onClick={() => onDetail?.("needs-you")}>Needs you {counters.needsYou || ""}</button>
+              <IconButton icon="inbox" aria-pressed={selectedDetail === "needs-you"} disabled={!ready || onDetail === undefined} onClick={() => onDetail?.("needs-you")}>Needs you <Badge n={counters.needsYou} /></IconButton>
               <button type="button" aria-pressed={selectedDetail === "missions"} disabled={!ready || onDetail === undefined} onClick={() => onDetail?.("missions")}>Missions</button>
-              <button type="button" aria-pressed={selectedDetail === "queue"} disabled={!ready || onDetail === undefined} onClick={() => onDetail?.("queue")}>Tasks</button>
-              <button type="button" aria-pressed={selectedDetail === "production"} disabled={onDetail === undefined} onClick={openChanges}>Changes {inProgressItems.length || ""}</button>
-              <button type="button" aria-pressed={selectedDetail === "agent"} disabled={!ready || onDetail === undefined} onClick={() => onDetail?.("agent")}>Agent</button>
+              <IconButton icon="list" aria-pressed={selectedDetail === "queue"} disabled={!ready || onDetail === undefined} onClick={() => onDetail?.("queue")}>Tasks</IconButton>
+              <IconButton icon="git-pull-request" aria-pressed={selectedDetail === "production"} disabled={onDetail === undefined} onClick={openChanges}>Changes <Badge n={inProgressItems.length} /></IconButton>
+              <IconButton icon="terminal" aria-pressed={selectedDetail === "agent"} disabled={!ready || onDetail === undefined} onClick={() => onDetail?.("agent")}>Agent</IconButton>
             </div>
             {editError === undefined ? null : <p className="dfFactoryConsole__terminalError" role="alert">{editError}</p>}
             <div hidden={selectedDetail !== "needs-you"}>
@@ -366,7 +366,7 @@ export function FactoryConsole({
               />
             </div>
             <div hidden={selectedDetail !== "agent"}>
-              {agent === undefined ? <p className="dfFactoryConsole__empty">SELECT AN AGENT TO OPEN CONTROLS</p> : <AgentPanel
+              {agent === undefined ? <p className="dfFactoryConsole__empty">Select an agent to open controls</p> : <AgentPanel
                 key={agent.id}
                 agent={agent}
                 state={scopedState}
@@ -382,14 +382,14 @@ export function FactoryConsole({
                 onPanel={onAgentPanel}
               />}
             </div>
-            {inspectedTask === undefined ? null : <ConsoleDialog key={inspectedTask.id} label="Task details" title="TASK" onClose={() => { if (relatedTask) setRelatedTask(undefined); else onSelectTask?.(undefined); }}>
+            {inspectedTask === undefined ? null : <ConsoleDialog key={inspectedTask.id} label="Task details" title="Task" onClose={() => { if (relatedTask) setRelatedTask(undefined); else onSelectTask?.(undefined); }}>
               <TaskDetail key={inspectedTask.id} task={inspectedTask} onLoadTaskDetail={onLoadTaskDetail} onLoadTaskHistory={onLoadTaskHistory} />
               {relatedTask?.status === "queued" && state?.tasks.has(relatedTask.id) && selectTask ? <button type="button" disabled={!ready} onClick={() => { setRelatedTask(undefined); selectTask(relatedTask.id); }}>Open in Tasks</button> : null}
             </ConsoleDialog>}
           </aside>
         </div>
       </main>
-      {!libraryOpen ? null : <ConsoleDialog label="Project library" title="LIBRARY" className="dfLibraryDialog" onClose={() => setLibraryOpen(false)}>
+      {!libraryOpen ? null : <ConsoleDialog label="Project library" title="Library" className="dfLibraryDialog" onClose={() => setLibraryOpen(false)}>
         <ProjectLibrary open initialProjectId={knowledgeView.project} key={`${knowledgeView.project}:${knowledgeView.board}:${knowledgeView.entity}:${knowledgeView.id}`} board={knowledgeView.board} repository={knowledgeView.repository} entity={knowledgeView.entity} initialID={knowledgeView.id} onSource={(entity) => { selectProject(entity.split(":")[0]); setRequestedEntity({ id: entity }); setLibraryOpen(false); onView?.("floor"); }} onRecord={openKnowledgeRecord} state={state} call={ready ? onProjectContent : undefined} draft={(agent, instruction) => { setLibraryOpen(false); onDraftLibraryTask?.(agent, instruction); }} />
       </ConsoleDialog>}
       {settingsOpen !== true ? null : (
@@ -454,8 +454,7 @@ function NeedsYouColumn({
           <ul className="dfConsoleItems">
             {requests.map((request) => {
               const selected = selectedHumanRequest?.request.id === request.id;
-              const label = request.status.replaceAll("_", " ").toUpperCase();
-              const disabled = status !== "ready" || busy || (selected ? onCloseHumanRequest === undefined : onSelectHumanRequest === undefined);
+                            const disabled = status !== "ready" || busy || (selected ? onCloseHumanRequest === undefined : onSelectHumanRequest === undefined);
               return (
                 <li key={request.id}>
                   <details className="dfConsoleItem" open={selected}>
@@ -465,8 +464,8 @@ function NeedsYouColumn({
                       if (selected) onCloseHumanRequest?.();
                       else onSelectHumanRequest?.(request);
                     }}>
-                      <strong>{entityLabel(state?.agents, request.agent_id, "AGENT")} asks</strong>
-                      <span className="dfConsoleItem__meta">{label} · {projectLabel(state?.projects, request.project_id)} · {entityLabel(state?.tasks, request.task_id, "TASK")}</span>
+                      <strong>{entityLabel(state?.agents, request.agent_id, "Agent")} asks</strong>
+                      <span className="dfConsoleItem__meta"><Status stage={request.status} /> {projectLabel(state?.projects, request.project_id)} · {entityLabel(state?.tasks, request.task_id, "Task")}</span>
                     </summary>
                     {selected ? <div className="dfConsoleItem__detail">{selectedContent}</div> : null}
                   </details>
@@ -480,7 +479,7 @@ function NeedsYouColumn({
 }
 
 function projectLabel(projects: ReadonlyMap<string, { name: string }> | undefined, projectID: string): string {
-  return projects?.get(projectID)?.name ?? `PROJECT ${shortID(projectID)}`;
+  return projects?.get(projectID)?.name ?? `Project ${shortID(projectID)}`;
 }
 
 function entityLabel(entities: ReadonlyMap<string, { name?: string; title?: string }> | undefined, id: string, fallback: string): string {

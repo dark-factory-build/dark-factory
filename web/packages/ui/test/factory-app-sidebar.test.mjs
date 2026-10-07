@@ -4,6 +4,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { act, create } from "react-test-renderer";
 import { AgentInstruction, TerminalContent, TerminalPanel } from "../dist/src/factory-app.js";
+const textOf = (node) => [].concat(node.props.children).flat(Infinity).filter((child) => typeof child === "string").join("").trim();
 
 function terminalView(overrides = {}) {
   return {
@@ -36,8 +37,8 @@ test("the terminal is a quiet sidebar", () => {
   assert.match(markup, /dfFactoryConsole__terminalPanel/);
   assert.match(markup, />Repair finalization<\/p>/);
   assert.match(markup, /live terminal surface/);
-  assert.equal(markup.includes("CLOSE"), false);
-  for (const noise of ["CURRENT RUN TERMINAL", "READY", "you have control", "watching", "take control", "hand back", "Steer"]) {
+  assert.equal(markup.includes("Close"), false);
+  for (const noise of ["CURRENT RUN TERMINAL", "Ready", "you have control", "watching", "take control", "hand back", "Steer"]) {
     assert.equal(markup.includes(noise), false, noise);
   }
   assert.equal((markup.match(/<button/g) ?? []).length, 0, "the terminal has no duplicate controls");
@@ -48,7 +49,7 @@ test("finalizing work shows no blank terminal or idle input", () => {
     terminal: terminalView({ taskTitle: "Repair finalization", finishing: true }),
     controller: {},
   }));
-  assert.match(markup, />FINISHING<\/p>/);
+  assert.match(markup, />Finishing<\/p>/);
   assert.equal(markup.includes("textarea"), false);
   assert.equal(markup.includes('role="application"'), false);
 });
@@ -90,7 +91,7 @@ test("an instruction can be queued for any eligible worker in the project", asyn
       }));
     });
     await act(async () => { renderer.root.findByType("textarea").props.onChange({ target: { value: "Whoever is free: fix the flaky test" } }); });
-    const anyWorker = renderer.root.findAllByType("button").find((button) => button.props.children === "ANY WORKER");
+    const anyWorker = renderer.root.findAllByType("button").find((button) => button.props.children === "Any worker");
     assert.equal(anyWorker.props["aria-label"], "Queue for any eligible worker in Builder One's project");
     await act(async () => { anyWorker.props.onClick(); });
     assert.deepEqual(submitted, [["Whoever is free: fix the flaky test", "any"]]);
@@ -106,7 +107,7 @@ test("paused agents remain identifiable without a false input", () => {
     terminal: terminalView({ phase: "idle", writable: false, paused: true }),
     onSubmit: async () => true,
   }));
-  assert.match(markup, />PAUSED<\/p>/);
+  assert.match(markup, />Paused<\/p>/);
   assert.equal(markup.includes("textarea"), false);
 });
 
@@ -119,7 +120,7 @@ test("paused or capacity-queued idle agents can add follow-up work", () => {
     const id = `df-instruction-${"21".repeat(16)}-queue`;
     assert.match(markup, new RegExp(`for="${id}"`));
     assert.match(markup, new RegExp(`id="${id}"`));
-    assert.match(markup, />ADD TO QUEUE</);
+    assert.match(markup, />Add to queue</);
   }
 });
 
@@ -128,7 +129,7 @@ test("queued instructions state their capacity wait", () => {
     terminal: terminalView({ phase: "idle", writable: false, queued: true }),
     onSubmit: async () => true,
   }));
-  assert.match(markup, /QUEUED · WAITING FOR CAPACITY/);
+  assert.match(markup, /Queued · waiting for capacity/);
   assert.equal(markup.includes("textarea"), false);
 });
 
@@ -137,8 +138,8 @@ test("an uncertain instruction send never claims the task was absent", () => {
     terminal: terminalView({ phase: "idle", writable: false, instructionError: { code: "connection" } }),
     onSubmit: async () => false,
   }));
-  assert.match(markup, /SEND NOT CONFIRMED — CHECK TASKS BEFORE RETRYING/);
-  assert.equal(markup.includes(">NOT SENT<"), false);
+  assert.match(markup, /Send not confirmed — check tasks before retrying/);
+  assert.equal(markup.includes(">Not sent<"), false);
 });
 
 test("a definite steering refusal is visible", () => {
@@ -146,7 +147,7 @@ test("a definite steering refusal is visible", () => {
     terminal: terminalView({ taskTitle: "Standing inspection", controlReady: true, controlError: { code: "stale" } }),
     controller: {},
   }));
-  assert.match(markup, />CONTROL NOT SENT</);
+  assert.match(markup, />Control not sent</);
 });
 
 test("active task control history stays mounted in a native disclosure", () => {
@@ -154,9 +155,9 @@ test("active task control history stays mounted in a native disclosure", () => {
     terminal: terminalView({ taskTitle: "Standing inspection", controlReady: true }),
     controller: {},
   }));
-  assert.match(markup, /<details class="dfFactoryConsole__history" aria-label="Task control history"><summary>HISTORY<\/summary>/);
-  assert.match(markup, />REFRESH<\/button>/);
-  assert.match(markup, />VIEW CONVERSATION<\/button>/);
+  assert.match(markup, /<details class="dfFactoryConsole__history" aria-label="Task control history"><summary>History<\/summary>/);
+  assert.match(markup, />Refresh<\/button>/);
+  assert.match(markup, />View conversation<\/button>/);
 });
 
 test("a controller-owned draft and refusal survive the composer changing to a follow-up", () => {
@@ -168,7 +169,7 @@ test("a controller-owned draft and refusal survive the composer changing to a fo
   }));
   assert.match(markup, /Add follow-up work/);
   assert.match(markup, />Keep this task<\/textarea>/);
-  assert.match(markup, />NOT SENT</);
+  assert.match(markup, />Not sent</);
 });
 
 test("crypto-unavailable preflight is definitively not sent", () => {
@@ -176,32 +177,32 @@ test("crypto-unavailable preflight is definitively not sent", () => {
     terminal: terminalView({ phase: "idle", writable: false, instructionError: { code: "crypto_unavailable" } }),
     onSubmit: async () => false,
   }));
-  assert.match(markup, />NOT SENT</);
+  assert.match(markup, />Not sent</);
   assert.equal(markup.includes("SEND NOT CONFIRMED"), false);
 });
 
 test("exceptional input ownership and replay loss are concise", () => {
   const occupied = renderToStaticMarkup(panel(terminalView({ writable: false, error: { code: "stale" } })));
-  assert.match(occupied, /TERMINAL OPEN ELSEWHERE/);
-  assert.match(renderToStaticMarkup(panel(terminalView({ writable: false, error: { code: "stale" }, errorSource: "input" }))), /TERMINAL OPEN ELSEWHERE/);
+  assert.match(occupied, /Terminal open elsewhere/);
+  assert.match(renderToStaticMarkup(panel(terminalView({ writable: false, error: { code: "stale" }, errorSource: "input" }))), /Terminal open elsewhere/);
   const unavailable = renderToStaticMarkup(panel(terminalView({ writable: false, error: { code: "connection" } })));
-  assert.match(unavailable, /TERMINAL ATTACH UNAVAILABLE/);
-  assert.equal(unavailable.includes("TERMINAL OPEN ELSEWHERE"), false);
+  assert.match(unavailable, /Terminal attach unavailable/);
+  assert.equal(unavailable.includes("Terminal open elsewhere"), false);
   const inputRejected = renderToStaticMarkup(panel(terminalView({ writable: true, hasOutputSurface: true, error: { code: "invalid_request" }, errorSource: "input" })));
-  assert.match(inputRejected, /INPUT REJECTED/);
-  assert.equal(inputRejected.includes("TERMINAL ATTACH UNAVAILABLE"), false);
+  assert.match(inputRejected, /Input rejected/);
+  assert.equal(inputRejected.includes("Terminal attach unavailable"), false);
   const inputLeaseUnavailable = renderToStaticMarkup(panel(terminalView({ writable: false, hasOutputSurface: true, error: { code: "connection" }, errorSource: "input" })));
-  assert.match(inputLeaseUnavailable, /INPUT UNAVAILABLE/);
-  assert.equal(inputLeaseUnavailable.includes("TERMINAL ATTACH UNAVAILABLE"), false);
+  assert.match(inputLeaseUnavailable, /Input unavailable/);
+  assert.equal(inputLeaseUnavailable.includes("Terminal attach unavailable"), false);
   const inputConnectionLost = renderToStaticMarkup(panel(terminalView({ phase: "closed", writable: false, error: { code: "connection" }, errorSource: "input" })));
-  assert.match(inputConnectionLost, /TERMINAL INPUT CONNECTION LOST/);
+  assert.match(inputConnectionLost, /Terminal input connection lost/);
   assert.equal(inputConnectionLost.includes("ATTACHMENT REMAINS LIVE"), false);
   const displayProblem = renderToStaticMarkup(panel(terminalView({ hasOutputSurface: true, error: { code: "internal" }, errorSource: "display" })));
-  assert.match(displayProblem, /TERMINAL DISPLAY ERROR/);
+  assert.match(displayProblem, /Terminal display error/);
   const reset = renderToStaticMarkup(panel(terminalView({ resets: 1 })));
   assert.match(reset, /Earlier output is no longer retained/);
   const quiet = renderToStaticMarkup(panel());
-  assert.equal(quiet.includes("TERMINAL OPEN ELSEWHERE"), false);
+  assert.equal(quiet.includes("Terminal open elsewhere"), false);
   assert.equal(quiet.includes("Earlier output"), false);
 });
 
