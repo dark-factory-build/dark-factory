@@ -83,7 +83,8 @@ export function useKnowledgeActivity(projects: readonly string[], call: ProjectC
     const timer = setTimeout(() => { const at = Date.now(); setCues((old) => old.filter((cue) => at - cue.shownAt < CUE_MS)); }, Math.max(0, CUE_MS - (Date.now() - cues[0]!.shownAt)));
     return () => clearTimeout(timer);
   }, [cues]);
-  return { recent, cues };
+  // A changed scope may still hold the previous projects' rows until its first read succeeds.
+  return { recent: recent.filter((item) => projects.includes(item.project_id)), cues };
 }
 
 /** The floor's list of recorded operations: the keyboard path, and the only one for agents not drawn. */

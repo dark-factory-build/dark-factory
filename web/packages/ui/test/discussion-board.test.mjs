@@ -120,6 +120,22 @@ test("activity cues come only from new recorded operations, are bounded, expire 
   });
 });
 
+test("activity from a previous project scope is never shown or opened from the new one", async () => {
+  await withDocument(async () => {
+    let state, fail = false;
+    const call = async () => { if (fail) throw new Error("unavailable"); return { items: [row("posted", "aa", 10)] }; };
+    function Probe({ projects }) { state = useKnowledgeActivity(projects, call); return null; }
+    let tree;
+    try {
+      await act(async () => { tree = create(createElement(Probe, { projects: [project] })); });
+      assert.equal(state.recent.length, 1);
+      fail = true;
+      await act(async () => tree.update(createElement(Probe, { projects: ["other-project"] })));
+      assert.equal(state.recent.length, 0, "the old project's activity stays listed after a failed read of the new one");
+    } finally { if (tree) await act(async () => tree.unmount()); }
+  });
+});
+
 test("cues appear where agents already are, without moving anyone, and stay inspectable", () => {
   const graph = sceneGraph([hall("repo", { band: 1 }), hall("src", { machines: [machine("src-job", "job")] })]);
   const workers = [
