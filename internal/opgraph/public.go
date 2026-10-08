@@ -113,7 +113,25 @@ type Worker struct {
 	Unit     string // operational node ID of the unit it works in, if known
 }
 
-var publicNames = map[Kind]string{Processor: "Unit", Ingress: "Ingress", Job: "Job", Queue: "Queue", Store: "Store", External: "External", Unknown: "Unknown"}
+// Public names say what a station is in plain words: a unit by its runtime,
+// an entrance by its trigger, a job by whether CI runs it.
+var (
+	publicNames  = map[Kind]string{Processor: "Unit", Ingress: "Entrance", Job: "Background task", Queue: "Queue", Store: "Store", External: "Outside service", Unknown: "Unknown"}
+	unitNames    = map[string]string{"browser": "Web app", "server": "Web server", "worker": "Edge function", "process": "Service", "cli": "Tool", "ci": "CI pipeline"}
+	triggerNames = map[string]string{"timer": "Timer", "message": "Inbox"}
+)
+
+func publicName(node Node, runtimes map[string]string) string {
+	switch {
+	case node.Kind == Processor && unitNames[node.Runtime] != "":
+		return unitNames[node.Runtime]
+	case node.Kind == Ingress && triggerNames[node.Trigger] != "":
+		return triggerNames[node.Trigger]
+	case node.Kind == Job && runtimes[node.Unit] == "ci":
+		return "Check"
+	}
+	return publicNames[node.Kind]
+}
 
 // Public projects the live graph with an operator secret: IDs are keyed
 // hashes, so they are stable for this factory and meaningless elsewhere;
@@ -125,10 +143,14 @@ func Public(live Live, secret []byte, workers []Worker, crates []Crate, now int6
 		mac.Write([]byte(raw))
 		return hex.EncodeToString(mac.Sum(nil)[:16])
 	}
+	runtimes := map[string]string{}
+	for _, node := range live.Graph.Nodes {
+		runtimes[node.ID] = node.Runtime
+	}
 	nodes := make([]PublicNode, 0, len(live.Graph.Nodes))
 	for _, node := range live.Graph.Nodes {
 		status := live.Nodes[node.ID]
-		item := PublicNode{ID: id(node.ID), Kind: node.Kind, Runtime: node.Runtime, Trigger: node.Trigger, Evidence: State(node.Evidence),
+		item := PublicNode{ID: id(node.ID), Kind: node.Kind, Label: publicName(node, runtimes), Runtime: node.Runtime, Trigger: node.Trigger, Evidence: State(node.Evidence),
 			Observation: status.Observation, State: status.State, Activity: activity(status), Deployed: status.DeployedAt > now-24*60*60_000}
 		if node.Unit != "" {
 			item.Unit = id(node.Unit)
@@ -136,10 +158,10 @@ func Public(live Live, secret []byte, workers []Worker, crates []Crate, now int6
 		nodes = append(nodes, item)
 	}
 	sort.Slice(nodes, func(i, j int) bool { return nodes[i].ID < nodes[j].ID })
-	ordinal := map[Kind]int{}
+	ordinal := map[string]int{}
 	for index := range nodes {
-		ordinal[nodes[index].Kind]++
-		nodes[index].Label = publicNames[nodes[index].Kind] + " " + strconv.Itoa(ordinal[nodes[index].Kind])
+		ordinal[nodes[index].Label]++
+		nodes[index].Label += " " + strconv.Itoa(ordinal[nodes[index].Label])
 	}
 	edges := []PublicEdge{}
 	for _, edge := range live.Graph.Edges {
