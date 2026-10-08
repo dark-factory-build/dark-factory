@@ -478,11 +478,10 @@ export function FactoryScene({ proposals, crates, tools, onLoadNode, onInvestiga
   const [search, setSearch] = useState("");
   const mapElement = useRef<HTMLDivElement>(null);
   const floorElement = useRef<SVGSVGElement>(null);
-  // Scene pixels per scene unit; undefined fits the floor to its pane.
+  // Scene pixels per scene unit; undefined fits the whole floor to its pane.
   const [zoom, setZoom] = useState<number>();
-  // Zoomed to twice the fitted scale or more, a manifold lists its routes inside its own footprint.
-  const fitScale = useRef(1);
-  const close = zoom !== undefined && zoom >= 2 * fitScale.current;
+  // Fitted, the whole floor is in view, never enlarged into a poster. The pane's size is set by CSS, never by the floor inside it, so fitting cannot feed back into it.
+  const [pane, setPane] = useState<{ width: number; height: number }>();
   // The overview's window follows scrolling without rerendering the floor.
   const viewElement = useRef<SVGRectElement>(null);
   const anchor = useRef<{ x: number; y: number; px: number; py: number }>(undefined);
@@ -522,6 +521,9 @@ export function FactoryScene({ proposals, crates, tools, onLoadNode, onInvestiga
   const nook = breakRoomNook(layout, commonResting.length, planning.length, appearance.social === "nearby");
   const sceneWidth = layout.width;
   const sceneHeight = Math.max(layout.height, commonBottom, 112, ...placements.map((placement) => placement.y + 24)) + 2 * PADDING;
+  const fit = pane === undefined ? undefined : Math.min(1, pane.width / sceneWidth, pane.height / sceneHeight);
+  // Zoomed to twice the fitted scale or more, a manifold lists its routes inside its own footprint.
+  const close = zoom !== undefined && zoom >= 2 * (fit ?? 1);
   const belts = useMemo(() => [...hallIntake(layout, graph.halls), ...routeFlows(layout, graph.flows)], [layout, graph.halls, graph.flows]);
   const queued = tasks.filter((order) => order.status === "queued").length;
   // The implements are always there: each opens its panel and the tray shows the queue. Coffee is scenery only.
@@ -563,14 +565,16 @@ export function FactoryScene({ proposals, crates, tools, onLoadNode, onInvestiga
   const zoomBy = (factor: number, px?: number, py?: number) => {
     const at = frame();
     if (!at) return;
-    const fit = fitScale.current = Math.min(sceneWidth, Math.max(at.map.clientWidth, Math.min(sceneWidth, 864))) / sceneWidth;
     const x = px ?? at.pane.width / 2, y = py ?? at.pane.height / 2;
-    const scaled = Math.min(MAX_ZOOM, at.scale * factor), next = scaled <= fit * 1.01 ? undefined : scaled;
+    const scaled = Math.min(MAX_ZOOM, at.scale * factor), next = scaled <= (fit ?? 0) * 1.01 ? undefined : scaled;
     // A zoom that changes nothing leaves no anchor for a later change to apply.
     if (next === zoom) return;
     anchor.current = { x: (at.pane.left + x - at.box.left) / at.scale, y: (at.pane.top + y - at.box.top) / at.scale, px: x, py: y };
     setZoom(next);
   };
+  // The wheel listener outlives renders, so it zooms through whichever zoomBy saw the latest zoom.
+  const zoomer = useRef(zoomBy);
+  zoomer.current = zoomBy;
   /** Centre the pane on a point of the floor. */
   const centreOn = (x: number, y: number) => {
     const at = frame();
@@ -586,7 +590,18 @@ export function FactoryScene({ proposals, crates, tools, onLoadNode, onInvestiga
       at.map.scrollTop += at.box.top + point.y * at.scale - (at.pane.top + point.py);
     }
     measure();
-  }, [zoom, sceneWidth, sceneHeight]);
+  }, [zoom, pane, sceneWidth, sceneHeight]);
+  useLayoutEffect(() => {
+    const map = mapElement.current;
+    if (!map) return;
+    // A hidden (zero-sized) pane keeps the last fit.
+    const size = () => { const width = map.clientWidth, height = map.clientHeight; if (width > 0 && height > 0) setPane((old) => old?.width === width && old.height === height ? old : { width, height }); };
+    size();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(size);
+    observer.observe(map);
+    return () => observer.disconnect();
+  }, []);
   useEffect(() => {
     const map = mapElement.current;
     if (!map || typeof window === "undefined") return;
@@ -595,12 +610,11 @@ export function FactoryScene({ proposals, crates, tools, onLoadNode, onInvestiga
       if (!event.ctrlKey && !event.metaKey) return;
       event.preventDefault();
       const pane = map.getBoundingClientRect();
-      zoomBy(Math.exp(-event.deltaY / 200), event.clientX - pane.left, event.clientY - pane.top);
+      zoomer.current(Math.exp(-event.deltaY / 200), event.clientX - pane.left, event.clientY - pane.top);
     };
     map.addEventListener?.("wheel", wheel, { passive: false });
-    window.addEventListener?.("resize", measure);
-    return () => { map.removeEventListener?.("wheel", wheel); window.removeEventListener?.("resize", measure); };
-  }, [sceneWidth, sceneHeight]);
+    return () => map.removeEventListener?.("wheel", wheel);
+  }, []);
   const searchable = [...machines.values()];
 
   return (
@@ -613,7 +627,7 @@ export function FactoryScene({ proposals, crates, tools, onLoadNode, onInvestiga
       {proposals?.selected && proposals.items.some((item) => item.id === proposals.selected) ? <p className="dfFactoryEntityTools__notice"><span className="dfFactoryEntityTools__selection">Viewing: {proposals.items.find((item) => item.id === proposals.selected)?.title}</span><button type="button" onClick={() => proposals.onSelect("")}>Clear selection</button></p> : null}
     </div>
     <div className="dfFactoryFloor__viewport">
-    <div ref={mapElement} className="dfFactoryFloor__map" onClick={inspect} onPointerOver={inspect} onFocus={inspect} onPointerLeave={retainFocusedTooltip} onBlur={() => setTooltip(undefined)} onScroll={() => { retainFocusedTooltip(); measure(); }} onKeyDown={(event) => { if (event.key === "Escape") setTooltip(undefined); }} role="region" aria-label="Scrollable factory floor" tabIndex={0}>
+    <div ref={mapElement} className="dfFactoryFloor__map" onClick={inspect} onPointerOver={inspect} onFocus={inspect} onPointerLeave={retainFocusedTooltip} onBlur={() => setTooltip(undefined)} onScroll={() => { retainFocusedTooltip(); measure(); }} onKeyDown={(event) => { if (event.key === "Escape") setTooltip(undefined); }} role="region" aria-label="Scrollable factory floor" tabIndex={0} style={zoom === undefined ? { overflow: "hidden" } : undefined}>
     <svg
       ref={floorElement}
       viewBox={`0 0 ${sceneWidth} ${sceneHeight}`}
@@ -621,7 +635,7 @@ export function FactoryScene({ proposals, crates, tools, onLoadNode, onInvestiga
       aria-label="Dark Factory operational floor"
       data-graph-digest={graph.digest}
       className={animate ? "dfPlant dfPlant--moving" : "dfPlant"}
-      style={zoom === undefined ? { display: "block", width: "100%", minWidth: Math.min(sceneWidth, 864), maxWidth: sceneWidth, height: "auto", margin: "0 auto" } : { display: "block", width: Math.round(sceneWidth * zoom), height: "auto" }}
+      style={(zoom ?? fit) === undefined ? { display: "block", width: "100%", maxWidth: sceneWidth, height: "auto", margin: "0 auto" } : { display: "block", width: Math.floor(sceneWidth * (zoom ?? fit)!), height: Math.floor(sceneHeight * (zoom ?? fit)!), margin: "0 auto" }}
     >
       <desc>{`${graph.halls.length} units, ${graph.shared.length} shared stores, ${graph.parties.length} external parties, ${graph.quarantine.length} unexplained runtime paths, ${workers.length} workers`}</desc>
       <defs>
@@ -1022,14 +1036,19 @@ function MachineInspector({ machine, hall, onLoadNode, onInvestigate, proposals,
   machine: SceneMachine; hall?: SceneHall; onLoadNode?: (id: string) => Promise<OperationalNodeView>; onInvestigate?: (machine: SceneMachine, hall?: SceneHall) => void;
   proposals: readonly SceneProposal[]; onSelectProposal?: (id: string) => void; onFocus: () => void; onDiscuss?: () => void; onClose: () => void;
 }) {
-  const [detail, setDetail] = useState<OperationalNodeView | "unavailable">();
+  // A fold lists its members; the one chosen is inspected here, and only its own answer is ever shown.
+  const folded = machine.represented, [member, setMember] = useState<number>(), [returned, setReturned] = useState<number>();
+  const nodeId = folded === undefined ? machine.id : member === undefined ? undefined : folded[member];
+  const name = (index: number) => machine.routes?.[index] ?? folded![index]!;
+  const [loaded, setLoaded] = useState<{ id: string; value: OperationalNodeView | "unavailable" }>();
+  const detail = loaded !== undefined && loaded.id === nodeId ? loaded.value : undefined;
   const [asked, setAsked] = useState(false);
   useEffect(() => {
-    if (onLoadNode === undefined || machine.represented !== undefined) return;
+    if (onLoadNode === undefined || nodeId === undefined) return;
     let live = true;
-    onLoadNode(machine.id).then((value) => { if (live) setDetail(value); }, () => { if (live) setDetail("unavailable"); });
+    onLoadNode(nodeId).then((value) => { if (live) setLoaded({ id: nodeId, value }); }, () => { if (live) setLoaded({ id: nodeId, value: "unavailable" }); });
     return () => { live = false; };
-  }, [machine.id]);
+  }, [nodeId]);
   const reading = machine.reading;
   const worth = reading.state === "failing" || reading.state === "degraded" || reading.evidence === "runtime" || reading.evidence === "contradicted" || reading.observation === "unobserved";
   return <section className="dfRoomDetails" aria-label="Machine inspector">
@@ -1042,15 +1061,18 @@ function MachineInspector({ machine, hall, onLoadNode, onInvestigate, proposals,
     {onInvestigate && worth ? <button type="button" disabled={asked} onClick={() => { setAsked(true); onInvestigate(machine, hall); }}>{asked ? "Investigation queued" : "Investigate"}</button> : null}
     <button type="button" onClick={onClose}>Close</button>
     {proposals.length === 0 ? null : <div aria-label="Changes affecting this machine">{proposals.map((proposal) => <button type="button" key={proposal.id} onClick={() => onSelectProposal?.(proposal.id)}>{proposal.title}</button>)}</div>}
-    <details><summary>Evidence</summary>
-      <p>Node <code>{machine.id}</code></p>
-      {detail === undefined ? <p>{onLoadNode === undefined || machine.represented !== undefined ? "Evidence is available on each folded route." : "Loading evidence…"}</p> : detail === "unavailable" ? <p>Evidence unavailable.</p> : <>
+    {folded === undefined ? null : member === undefined
+      ? <ul className="dfRoomDetails__members" aria-label="Folded routes">{folded.map((id, index) => <li key={id}>{onLoadNode === undefined ? name(index) : <button type="button" autoFocus={index === returned} onClick={() => setMember(index)}>{name(index)}</button>}</li>)}</ul>
+      : <p><button type="button" autoFocus onClick={() => { setReturned(member); setMember(undefined); }}>Back to folded routes</button> {name(member)}</p>}
+    {nodeId === undefined ? null : <details open={folded !== undefined || undefined}><summary>Evidence</summary>
+      <p>Node <code>{nodeId}</code></p>
+      {detail === undefined ? <p>{onLoadNode === undefined ? "Evidence is not available here." : "Loading evidence…"}</p> : detail === "unavailable" ? <p>Evidence unavailable.</p> : <>
         {Object.keys(detail.selectors).length === 0 ? null : <dl>{Object.entries(detail.selectors).map(([key, value]) => <div key={key}><dt>{key}</dt><dd><code>{value}</code></dd></div>)}</dl>}
         <ul aria-label="Evidence">{detail.evidence.map((item, index) => <li key={index}>{item.origin} · {item.source} · {item.confidence}{item.detail ? <> · <code>{item.detail}</code></> : null}</li>)}</ul>
         {detail.sources.length === 0 ? null : <ul aria-label="Source locations">{detail.sources.map((location) => <li key={`${location.repository_id}:${location.path}:${location.line ?? 0}`}><code>{location.path}{location.line ? `:${location.line}` : ""}</code></li>)}</ul>}
         {detail.modules.length === 0 ? null : <p>{detail.modules.length} code areas run in this unit.</p>}
         <p>{detail.observers.length === 0 ? "No runtime source has reported on it." : `Seen by ${detail.observers.join(", ")}.`}</p>
       </>}
-    </details>
+    </details>}
   </section>;
 }
