@@ -184,7 +184,7 @@ func TestFactorydPublishesASettledIntakeChange(t *testing.T) {
 	if pr := readProductionPull(t, fixture.store, c.Task.ProjectID, 31); pr.Head != secondCommit || pr.Branch != "factory/"+c.Change.String()[:12] {
 		t.Fatalf("recorded pull = %+v", pr)
 	}
-	page, err := fixture.store.Production(ctx, c.Task.ProjectID, 0, 8)
+	page, err := fixture.store.Production(ctx, c.Task.ProjectID, 0, 8, kernel.UnixMillis{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -376,7 +376,7 @@ func TestDisabledAcceptedRepositoryEscalatesOnce(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	page, err := fixture.store.Production(ctx, c.Task.ProjectID, 0, 8)
+	page, err := fixture.store.Production(ctx, c.Task.ProjectID, 0, 8, kernel.UnixMillis{})
 	if err != nil {
 		t.Fatal(err)
 	}
