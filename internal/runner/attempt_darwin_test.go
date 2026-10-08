@@ -255,6 +255,42 @@ func TestAttemptConfigureFreezesAndRejectsStartupInput(t *testing.T) {
 	}
 }
 
+func TestAttemptRunnerKillsDetachedRunProcesses(t *testing.T) {
+	f := newAttemptFixture(t, "detached", "")
+	inner := f.activateOuter()
+	f.advanceToProvider()
+	if err := f.controller.Release(StageProvider); err != nil {
+		t.Fatal(err)
+	}
+	if event, err := f.controller.Next(4 * time.Second); err != nil || event.Kind != AttemptTerminalFrame || event.Frame == nil || event.Frame.Kind != TerminalReady {
+		t.Fatalf("terminal ready=%+v err=%v output=%q", event, err, f.output())
+	}
+	descendantPath := filepath.Join(f.root, "descendant.pid")
+	waitFile(t, descendantPath)
+	body, err := os.ReadFile(descendantPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(body)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	detached, err := readIdentity(pid)
+	t.Cleanup(func() {
+		if got, err := readIdentity(pid); err == nil && got == detached {
+			_ = unix.Kill(pid, unix.SIGKILL)
+		}
+	})
+	if sid, sidErr := unix.Getsid(pid); err != nil || sidErr != nil || detached.PGID == inner.PGID || sid == inner.PID {
+		t.Fatalf("grandchild did not detach: %+v sid=%d err=%v/%v inner=%+v", detached, sid, err, sidErr, inner)
+	}
+	if err := os.WriteFile(filepath.Join(f.root, "finish"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f.finishAndAck()
+	waitExactAbsence(t, detached)
+}
+
 func shellWitness(value, path string) string {
 	pending := path + ".pending"
 	return fmt.Sprintf("printf '%%s' %s > %q && mv %q %q", value, pending, pending, path)
@@ -366,7 +402,7 @@ func runAttemptWorkerHelper(args []string) error {
 			script += fmt.Sprintf("IFS= read -r interactive || exit 100; %s || exit 101; while test ! -f %q; do sleep 0.01; done", interactiveWitness, filepath.Join(root, "finish"))
 		}
 		provider = ExecSpec{Target: "/bin/sh", Args: []string{"-c", script}, Env: []string{"PATH=/usr/bin:/bin", "LANG=C"}, Cwd: providerCwd}
-	case "shell", "shell-input", "term", "leader", "tail", "reply", "reply-submit", "reply-submit-exit", "loud-adoption", "handoff-worker-eof":
+	case "shell", "shell-input", "term", "leader", "detached", "tail", "reply", "reply-submit", "reply-submit-exit", "loud-adoption", "handoff-worker-eof":
 		providerWitness := shellWitness("$$", filepath.Join(root, "provider.pid"))
 		script := fmt.Sprintf("test -z \"${HOME+x}\" || exit 90; test -z \"${DARK_FACTORY_ATTEMPT_TOKEN+x}\" || exit 91; for n in 3 4 5 6 7 8 9; do test ! -e /dev/fd/$n || exit 92; done; test -f /dev/fd/10 || exit 93; test ! -s /dev/fd/10 || exit 94; test -f /dev/fd/11 || exit 97; IFS= read -r task < /dev/fd/11; test \"$task\" = one-startup || exit 98; cat /dev/fd/10/change-worker.config >/dev/null 2>&1 && exit 95; cd /dev/fd/10 >/dev/null 2>&1 && exit 96; %s; printf 'pre-output\\n'; while test ! -f %q; do sleep 0.01; done; printf 'post-output\\n'; printf x >> %q; while test ! -f %q; do sleep 0.01; done", providerWitness, filepath.Join(root, "continue"), filepath.Join(root, "provider.effect"), filepath.Join(root, "finish"))
 		if mode == "shell-input" {
@@ -377,6 +413,15 @@ func runAttemptWorkerHelper(args []string) error {
 		}
 		if mode == "leader" {
 			script = fmt.Sprintf("sleep 30 & %s; %s; while test ! -f %q; do sleep 0.01; done; exit 0", shellWitness("$!", filepath.Join(root, "descendant.pid")), providerWitness, filepath.Join(root, "leader.release"))
+		}
+		if mode == "detached" {
+			// A backgrounded server that leaves the provider's session and
+			// group, and is reparented to launchd once the provider exits (#1403).
+			executable, err := os.Executable()
+			if err != nil {
+				return err
+			}
+			script = fmt.Sprintf("%q --detached-helper %q </dev/null >/dev/null 2>&1 & %s; while test ! -f %q; do sleep 0.01; done", executable, filepath.Join(root, "descendant.pid"), providerWitness, filepath.Join(root, "finish"))
 		}
 		if mode == "tail" {
 			script = "printf 'tail-output\\n'; exit 0"
@@ -398,6 +443,9 @@ func runAttemptWorkerHelper(args []string) error {
 			providerTask = []byte("one-startup\n")
 		}
 		provider = ExecSpec{Target: "/bin/sh", Args: []string{"-c", script}, Env: []string{"PATH=/usr/bin:/bin", "LANG=C"}, Cwd: providerCwd}
+		if mode == "detached" {
+			provider.Env = append(provider.Env, "TMPDIR="+providerCwd)
+		}
 	case "binary", "seam", "lifetime", "lease-seam", "proof-census", "cwd", "cwd-seam", "cwd-unrelated", "cwd-file", "cwd-closed", "cwd-reused", "cwd-mode", "cwd-inherited", "cwd-inherited-11":
 		if len(args) != 3 {
 			return errors.New("attempt worker: missing binary target")
