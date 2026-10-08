@@ -22,6 +22,16 @@ Shell and Codex are proven end to end. A Claude Code worker is proven by one
 live run against its signed-in CLI; a Claude Code overseer is fixture-proven
 only.
 
+Agents run on your Mac as your user. The sandbox confines the commands and file
+tools an agent uses; the provider process and its MCP servers sit outside it,
+and configured providers receive task and repository material.
+
+Project token budgets count billable tokens recorded from each provider's
+session log: uncached input plus output (and Claude cache creation), excluding
+cached input reads; they measure tokens, not money. A run the daemon recovers
+after a restart, or one whose provider log is missing, records none, so real
+usage can exceed the ceiling.
+
 ## Select an existing provider account
 
 Use `factoryctl account discover` or `factoryctl account list` to inspect existing

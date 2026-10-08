@@ -4,6 +4,18 @@ Dark Factory separates model policy from durable work authority. This file
 describes the current Go runtime's attempt kernel, daemon-owned Change model,
 and fail-closed process boundary. It is a contract, not a component catalogue.
 
+## Ownership map
+
+| Concern | Owner |
+| --- | --- |
+| Durable state: SQLite schema, migrations, admission and lifecycle transitions | `internal/kernel` |
+| Daemon effects: dispatch, supervision, review, publication, recovery | `internal/daemon`, `cmd/factoryd` |
+| Change worktrees and Git source | `internal/change`, `internal/changeworker` |
+| Provider launching: launch facts, sandbox grants, PTY process groups | `internal/provider`, `internal/runner`, `cmd/factory-runner` |
+| Client contracts: local socket API, browser transport, CLI | `internal/api`, `internal/browser`, `internal/browserprotocol`, `cmd/factoryctl`, `web/packages/client` |
+| Projection: operational graph, public world, graph to plant | `internal/opgraph`, `internal/daemon/public_world.go`, `web/packages/ui/src/console-view.ts`, `web/packages/ui/src/public-floor.ts` |
+| Rendering: floor layout, scene, console | `web/packages/ui/src/factory-scene`, `web/packages/ui/src` |
+
 ## Durable model
 
 `RunId` is the attempt identity. A task can be queued without a run; a run
