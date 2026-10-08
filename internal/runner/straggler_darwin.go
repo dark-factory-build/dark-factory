@@ -14,8 +14,8 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// killRunStragglers kills every process of this user whose environment names
-// a path inside the run's private runtime root: descendants that left the
+// killRunStragglers kills every process of this user whose TMPDIR is inside
+// the run's private runtime root: descendants that left the
 // provider's group and session (setsid, double fork) and now live on under
 // launchd (#1403). Only the run's own processes are given those paths.
 func killRunStragglers(runtime *os.File) error {
@@ -44,8 +44,7 @@ func killRunStragglers(runtime *os.File) error {
 	return fmt.Errorf("runner: run processes outlived the run")
 }
 
-// environmentNames reports whether pid's exec-time environment holds a path
-// that resolves inside root. kern.procargs2 is argc, the exec path and its NUL
+// environmentNames reports whether pid's exec-time TMPDIR resolves inside root. kern.procargs2 is argc, the exec path and its NUL
 // padding, argc arguments, then the environment up to an empty string.
 func environmentNames(pid int, root string) bool {
 	raw, err := unix.SysctlRaw("kern.procargs2", pid)
@@ -64,8 +63,12 @@ func environmentNames(pid int, root string) bool {
 		if len(entry) == 0 {
 			return false
 		}
+		// Only TMPDIR: the run gives its provider a private one and every child
+		// inherits it, while other variables naming run paths (the attempt
+		// token file, for one) may sit in the environment of a process that
+		// merely talks to the run, factoryd included.
 		name, value, _ := strings.Cut(string(entry), "=")
-		if name == "PWD" || name == "OLDPWD" || !strings.Contains(value, "/"+filepath.Base(root)) {
+		if name != "TMPDIR" || !strings.Contains(value, "/"+filepath.Base(root)) {
 			continue
 		}
 		if real, err := filepath.EvalSymlinks(value); err == nil && (real == root || strings.HasPrefix(real, root+"/")) {
