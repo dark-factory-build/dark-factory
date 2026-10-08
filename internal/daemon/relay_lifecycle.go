@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/dark-factory-build/dark-factory/internal/browser"
 	"github.com/dark-factory-build/dark-factory/internal/install"
@@ -27,6 +28,9 @@ type RelayRuntime struct {
 	identity       relayhost.Identity
 	relayOrigin    string
 	browserAddress string
+
+	stopFeed context.CancelFunc
+	feedDone chan struct{}
 
 	closeOnce sync.Once
 	closeErr  error
@@ -71,10 +75,12 @@ func (daemon *Daemon) DialRelay(ctx context.Context, relayOrigin, home string, b
 	if err != nil {
 		return nil, err
 	}
-	runtime := &RelayRuntime{daemon: daemon, connector: connector, identity: identity, relayOrigin: relayOrigin, browserAddress: browserAddress}
+	feedContext, stopFeed := context.WithCancel(ctx)
+	runtime := &RelayRuntime{daemon: daemon, connector: connector, identity: identity, relayOrigin: relayOrigin, browserAddress: browserAddress, stopFeed: stopFeed, feedDone: make(chan struct{})}
 	daemon.browserMu.Lock()
 	if daemon.browserClosing || daemon.relay != nil {
 		daemon.browserMu.Unlock()
+		stopFeed()
 		_ = connector.Close()
 		return nil, browser.ErrUnauthorized
 	}
@@ -83,7 +89,27 @@ func (daemon *Daemon) DialRelay(ctx context.Context, relayOrigin, home string, b
 	// bound to the one home that owns the relay.
 	daemon.push = newPushStore(filepath.Join(home, install.RelayDirectoryName))
 	daemon.browserMu.Unlock()
+	if project := daemon.observeConfig().PublicProject; project != "" {
+		LogFactoryd(daemon.log, "factoryd: publishing project %s as public world %s\n", project, identity.PublicID())
+	}
+	go runtime.feed(feedContext)
 	return runtime, nil
+}
+
+// feed publishes the opted-in public world over this relay connection.
+func (runtime *RelayRuntime) feed(ctx context.Context) {
+	defer close(runtime.feedDone)
+	var state publicFeed
+	ticker := time.NewTicker(publicFeedInterval / 4)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			runtime.daemon.publishPublicWorld(ctx, &state, runtime.connector.Publish)
+		}
+	}
 }
 
 // Status reports what the connector currently observes.
@@ -99,6 +125,8 @@ func (runtime *RelayRuntime) Close() error {
 		return nil
 	}
 	runtime.closeOnce.Do(func() {
+		runtime.stopFeed()
+		<-runtime.feedDone
 		runtime.closeErr = runtime.connector.Close()
 		if runtime.daemon != nil {
 			runtime.daemon.browserMu.Lock()

@@ -79,3 +79,42 @@ test('controller rate limits use arrival time, close the offender and notify the
 	assert.equal(records.at(-1).connection, 1);
 	assert.equal(records.at(-1).type, RECORD_TEXT);
 });
+
+test('a host publishes at most every thirty seconds, and an empty world retracts', async (t) => {
+	let now = 10_000;
+	t.mock.method(Date, 'now', () => now);
+	const originalPair = globalThis.WebSocketRequestResponsePair;
+	globalThis.WebSocketRequestResponsePair = class {};
+	t.after(() => {
+		if (originalPair === undefined) delete globalThis.WebSocketRequestResponsePair;
+		else globalThis.WebSocketRequestResponsePair = originalPair;
+	});
+	const { encodeRecords, RECORD_PUBLISH } = await import('../src/envelope.ts');
+	const { publicIdForKey } = await import('../src/tokens.ts');
+	const key = new Uint8Array(32).fill(7);
+	const puts = [];
+	const relay = new FactoryRelay({
+		setWebSocketAutoResponse() {},
+		getWebSockets: () => [],
+		storage: { get: async () => ({ key: Buffer.from(key).toString('base64url'), generation: 1, sequence: 1 }) },
+	}, {
+		FACTORY_RELAY: {
+			getByName: (name) => ({
+				fetch: async (url, init) => { puts.push({ name, url, method: init.method, body: new TextDecoder().decode(init.body) }); return new Response(null, { status: 204 }); },
+			}),
+		},
+	});
+	const host = { deserializeAttachment: () => ({ role: 'host', connection: 0, controller: '' }), close() {} };
+	const publish = (text) => relay.webSocketMessage(host, encodeRecords([{ type: RECORD_PUBLISH, connection: 0, payload: new TextEncoder().encode(text) }]));
+
+	await publish('{"generated_at":1}');
+	now += 29_999;
+	await publish('{"generated_at":2}');
+	now += 1;
+	await publish('');
+	const id = await publicIdForKey(key);
+	assert.deepEqual(puts, [
+		{ name: `public:${id}`, url: `https://relay/public/${id}`, method: 'PUT', body: '{"generated_at":1}' },
+		{ name: `public:${id}`, url: `https://relay/public/${id}`, method: 'PUT', body: '' },
+	]);
+});

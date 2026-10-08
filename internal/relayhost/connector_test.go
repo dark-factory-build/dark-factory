@@ -527,6 +527,30 @@ func TestRevokeSendsOneRecord(t *testing.T) {
 	fixture.connector.Revoke(clientID)
 }
 
+func TestPublishSendsTheWorldVerbatimWithinTheBound(t *testing.T) {
+	fixture := newHarness(t, nil)
+	host := fixture.relay.accept(t)
+	world := []byte(`{"generated_at":1}`)
+	// The relay accepts before the connector installs its queue.
+	for deadline := time.Now().Add(testDeadline); !fixture.connector.Publish(world); time.Sleep(time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("a connected publish was refused")
+		}
+	}
+	if record := host.expect(t, RecordPublish, 0); !bytes.Equal(record.Payload, world) {
+		t.Fatalf("published %q, want %q", record.Payload, world)
+	}
+	if fixture.connector.Publish(make([]byte, MaxPublicWorldBytes+1)) {
+		t.Fatal("a world past the relay's bound was queued")
+	}
+	if err := fixture.connector.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if fixture.connector.Publish(world) {
+		t.Fatal("a closed connector reported a publish")
+	}
+}
+
 func TestAForbiddenHostIsRetriedNoFasterThanHalfTheCeiling(t *testing.T) {
 	fixture := newPreparedHarness(t, func(relay *fakeRelay) { relay.forbid = true }, func(config *Config) {
 		config.BaseBackoff = 5 * time.Millisecond

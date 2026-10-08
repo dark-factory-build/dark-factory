@@ -229,6 +229,19 @@ func (connector *Connector) Revoke(clientID [ControllerIDSize]byte) {
 	queue.push(nil, Record{Type: RecordRevoke, Connection: 0, Payload: payload})
 }
 
+// Publish hands the relay this factory's public world, or an empty payload to
+// retract it. It reports false when there is no relay connection to carry it
+// or the world is past the relay's bound, so the caller tries again later.
+func (connector *Connector) Publish(world []byte) bool {
+	if connector == nil || len(world) > MaxPublicWorldBytes {
+		return false
+	}
+	connector.mu.Lock()
+	queue := connector.queue
+	connector.mu.Unlock()
+	return queue != nil && queue.push(nil, Record{Type: RecordPublish, Payload: world})
+}
+
 // Close stops the reconnect loop and joins every goroutine it owns.
 func (connector *Connector) Close() error {
 	if connector == nil {
@@ -483,9 +496,9 @@ func (connector *Connector) apply(ctx context.Context, record Record, queue *out
 	case RecordClose:
 		return connector.closeSession(record)
 	default:
-		// DecodeRecords admits only the closed set above, and REVOKE is host
-		// to relay only.
-		return fmt.Errorf("%w: REVOKE is host to relay only", ErrRelayProtocol)
+		// DecodeRecords admits only the closed set above; REVOKE and PUBLISH
+		// are host to relay only.
+		return fmt.Errorf("%w: record 0x%02x is host to relay only", ErrRelayProtocol, byte(record.Type))
 	}
 }
 

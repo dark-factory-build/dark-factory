@@ -103,6 +103,21 @@ func NodeIDFromPublicKey(key ed25519.PublicKey) string {
 	return strings.ToLower(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(digest[:20]))
 }
 
+// PublicID names this factory's published world on the relay. It is the same
+// shape as the node id but hashes a domain prefix with the key, so a reader of
+// the public world cannot derive the node id that controllers dial, and only
+// the holder of this key can publish under it.
+func (identity Identity) PublicID() string {
+	key := identity.PublicKey()
+	if key == nil {
+		return ""
+	}
+	digest := sha256.Sum256(append([]byte(publicDomain), key...))
+	return strings.ToLower(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(digest[:20]))
+}
+
+const publicDomain = "dark-factory-relay/public\n"
+
 func prepareDirectory(directory string) error {
 	if err := os.MkdirAll(directory, 0o700); err != nil {
 		return errors.Join(fmt.Errorf("%w: create %s", ErrIdentity, directory), err)

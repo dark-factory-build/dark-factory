@@ -11,9 +11,11 @@ import { decodeBase64UrlExact } from './encoding.js';
 import {
 	CONTROLLER_MESSAGE_LIMIT,
 	HOST_MESSAGE_LIMIT,
+	PUBLIC_WORLD_LIMIT,
 	RECORD_BINARY,
 	RECORD_CLOSE,
 	RECORD_OPEN,
+	RECORD_PUBLISH,
 	RECORD_REVOKE,
 	RECORD_TEXT,
 	encodeRecords,
@@ -21,7 +23,7 @@ import {
 	textRecord,
 	type RelayRecord,
 } from './envelope.js';
-import { NODE_ID_PATTERN, verifyHostToken, verifyProof, verifyTicket, type TicketPurpose } from './tokens.js';
+import { NODE_ID_PATTERN, publicIdForKey, verifyHostToken, verifyProof, verifyTicket, type TicketPurpose } from './tokens.js';
 
 export const SUBPROTOCOL = 'dark-factory-relay';
 
@@ -45,12 +47,23 @@ const CONTROLLER_SOCKETS_PER_CONTROLLER = 4;
 const BURST_MESSAGES = 120;
 const SUSTAINED_MESSAGES_PER_SECOND = 60;
 
+/** A host may replace its public world at most this often; the daemon sends once a minute. */
+const PUBLISH_INTERVAL_MS = 30_000;
+
 const APPLICATION_CLOSE_MIN = 3000;
 const APPLICATION_CLOSE_MAX = 4999;
 
 export interface Env {
 	PWA_ORIGIN: string;
+	SITE_ORIGIN: string;
 	FACTORY_RELAY: DurableObjectNamespace;
+	PUBLIC_READS: RateLimit;
+}
+
+/** The one record a `public:<id>` object keeps: the latest world and when it arrived. */
+interface StoredWorld {
+	body: string;
+	at: number;
 }
 
 interface StoredHost {
@@ -125,6 +138,8 @@ export class FactoryRelay implements DurableObject {
 	/** Rate-limit state is per live socket only; hibernation resets a bucket that
 	 * has necessarily been idle long enough to have refilled anyway. */
 	readonly #buckets = new WeakMap<WebSocket, Bucket>();
+	/** When this node last published; in memory only, like the buckets. */
+	#publishedAt = Number.NEGATIVE_INFINITY;
 
 	constructor(ctx: DurableObjectState, env: Env) {
 		this.#ctx = ctx;
@@ -134,6 +149,9 @@ export class FactoryRelay implements DurableObject {
 
 	async fetch(request: Request): Promise<Response> {
 		const url = new URL(request.url);
+		// Reached only as `public:<id>`: a GET routed by the Worker, or a PUT
+		// from the node object that proved the key the id hashes.
+		if (url.pathname.startsWith('/public/')) return await this.#world(request);
 		const match = /^\/(host|controller)\/([^/]+)$/.exec(url.pathname);
 		if (match === null) return refuse(404);
 		const [, kind, node] = match as unknown as [string, string, string];
@@ -267,13 +285,10 @@ export class FactoryRelay implements DurableObject {
 
 	// -- socket events ------------------------------------------------------
 
-	webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): void {
+	webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): void | Promise<void> {
 		const attachment = attachmentOf(ws);
 		if (attachment === null || attachment.role === 'retired') return;
-		if (attachment.role === 'host') {
-			this.#onHostMessage(ws, message);
-			return;
-		}
+		if (attachment.role === 'host') return this.#onHostMessage(ws, message);
 		this.#onControllerMessage(ws, attachment, message);
 	}
 
@@ -294,7 +309,7 @@ export class FactoryRelay implements DurableObject {
 
 	// -- host traffic -------------------------------------------------------
 
-	#onHostMessage(ws: WebSocket, message: string | ArrayBuffer): void {
+	#onHostMessage(ws: WebSocket, message: string | ArrayBuffer): void | Promise<void> {
 		if (typeof message === 'string') {
 			// `ping` never reaches here: setWebSocketAutoResponse answers it. Any
 			// other text on the host socket is off-envelope.
@@ -314,9 +329,57 @@ export class FactoryRelay implements DurableObject {
 			);
 			return;
 		}
+		const published: Promise<void>[] = [];
 		for (const record of parsed.records) {
-			if (!this.#dispatch(ws, record)) return;
+			if (record.type === RECORD_PUBLISH) {
+				published.push(this.#publish(record.payload));
+				continue;
+			}
+			if (!this.#dispatch(ws, record)) break;
 		}
+		if (published.length > 0) return Promise.all(published).then(() => undefined);
+	}
+
+	// -- public world -------------------------------------------------------
+
+	/**
+	 * Stores this node's latest public world in the `public:<id>` object its key
+	 * names. A world that is too large, not a JSON object with a numeric
+	 * `generated_at`, or sooner than the interval is dropped without ending the
+	 * host: it hurts no one but its own feed. An empty payload retracts it.
+	 */
+	async #publish(payload: Uint8Array): Promise<void> {
+		const now = Date.now();
+		if (payload.length > PUBLIC_WORLD_LIMIT || now - this.#publishedAt < PUBLISH_INTERVAL_MS) return;
+		if (payload.length > 0 && typeof decodeJson(payload)?.generated_at !== 'number') return;
+		this.#publishedAt = now;
+		const stored = (await this.#ctx.storage.get<StoredHost>('host')) ?? null;
+		const key = stored === null ? null : decodeBase64UrlExact(stored.key, 32);
+		if (key === null) return;
+		const id = await publicIdForKey(key);
+		try {
+			await this.#env.FACTORY_RELAY.getByName(`public:${id}`).fetch(`https://relay/public/${id}`, {
+				method: 'PUT',
+				body: payload.slice(),
+			});
+		} catch {
+			// The next change publishes again; nothing is queued.
+		}
+	}
+
+	async #world(request: Request): Promise<Response> {
+		if (request.method === 'PUT') {
+			const body = await request.text();
+			if (body === '') await this.#ctx.storage.delete('world');
+			else await this.#ctx.storage.put<StoredWorld>('world', { body, at: Date.now() });
+			return new Response(null, { status: 204 });
+		}
+		const world = await this.#ctx.storage.get<StoredWorld>('world');
+		if (world === undefined) return refuse(404);
+		return new Response(world.body, {
+			status: 200,
+			headers: { 'content-type': 'application/json', 'last-modified': new Date(world.at).toUTCString() },
+		});
 	}
 
 	/** Returns false when the host socket was torn down by this record. */

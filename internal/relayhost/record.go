@@ -21,11 +21,16 @@ const (
 	RecordClose RecordType = 0x04
 	// RecordRevoke is host to relay only and always uses connection 0.
 	RecordRevoke RecordType = 0x05
+	// RecordPublish is host to relay only and always uses connection 0. Its
+	// payload is this factory's PublicWorld bytes, or empty to retract it.
+	RecordPublish RecordType = 0x06
 )
 
 const (
 	// MaxHostMessageBytes bounds one whole binary message on the host socket.
 	MaxHostMessageBytes = 4 << 20
+	// MaxPublicWorldBytes bounds one PUBLISH payload, exactly as the relay does.
+	MaxPublicWorldBytes = 128 << 10
 	// maxRecordPayloadBytes bounds one record payload: the 1 MiB snapshot
 	// bound plus the envelope slack the relay contract allows.
 	maxRecordPayloadBytes = (1 << 20) + 64
@@ -50,7 +55,7 @@ type Record struct {
 }
 
 func (kind RecordType) known() bool {
-	return kind >= RecordOpen && kind <= RecordRevoke
+	return kind >= RecordOpen && kind <= RecordPublish
 }
 
 // AppendRecord appends the wire encoding of one record to dst.

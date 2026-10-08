@@ -43,6 +43,7 @@ type tokenFixture struct {
 	Seed          string        `json:"seed"`
 	PublicKey     string        `json:"publicKey"`
 	NodeID        string        `json:"nodeId"`
+	PublicID      string        `json:"publicId"`
 	Generation    uint64        `json:"generation"`
 	HostToken     hostFixture   `json:"hostToken"`
 	PairTicket    ticketFixture `json:"pairTicket"`
@@ -196,6 +197,7 @@ func TestWriteTokenVectors(t *testing.T) {
 		Seed:       base64.RawURLEncoding.EncodeToString(seed),
 		PublicKey:  base64.RawURLEncoding.EncodeToString(public),
 		NodeID:     nodeID,
+		PublicID:   identity.PublicID(),
 		Generation: generation,
 		HostToken: hostFixture{
 			Sequence:    sequence,
@@ -267,6 +269,9 @@ func TestTokenVectorsMatchFixture(t *testing.T) {
 		t.Fatalf("NodeIDFromPublicKey = %q, fixture recorded %q", got, fixture.NodeID)
 	}
 	identity := Identity{private: private, nodeID: fixture.NodeID, generation: fixture.Generation}
+	if got := identity.PublicID(); got != fixture.PublicID || got == fixture.NodeID {
+		t.Fatalf("PublicID = %q, fixture recorded %q (node id %q)", got, fixture.PublicID, fixture.NodeID)
+	}
 
 	// Host token: VerifyHostToken accepts it with the recorded fields, and
 	// re-minting from the same inputs reproduces the exact recorded text.
