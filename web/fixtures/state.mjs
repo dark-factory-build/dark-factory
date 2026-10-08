@@ -56,7 +56,7 @@ export const fixtureGraph = {
   nodes: [
     { id: nodeID("a1"), kind: "processor", label: "kernel", runtime: "process", paths: ["internal/kernel"], ...reading("both", "partial", "active", 120) },
     { id: nodeID("a2"), kind: "ingress", label: "/browser", unit: nodeID("a1"), trigger: "request", paths: ["internal/kernel/server.go"], ...reading("both", "observed", "active", 120), latency_p95_ms: 40 },
-    { id: nodeID("a3"), kind: "ingress", label: "/pair", unit: nodeID("a1"), trigger: "request", paths: ["internal/kernel/pair.go"], ...reading("static", "quiet", "idle") },
+    { id: nodeID("a3"), kind: "ingress", label: "/v1/traces", unit: nodeID("a1"), trigger: "request", paths: ["internal/kernel/traces.go"], ...reading("static", "quiet", "idle") },
     { id: nodeID("a4"), kind: "store", label: "state.db", unit: nodeID("a1"), paths: ["internal/kernel/store"], ...reading("static", "unobserved", "unknown") },
     { id: nodeID("b1"), kind: "processor", label: "web", runtime: "browser", paths: ["web"], ...reading("static", "unobserved", "unknown") },
     { id: nodeID("c1"), kind: "queue", label: "work queue", paths: [], ...reading("static", "opaque", "unknown") },

@@ -61,12 +61,12 @@ func TestBlackBoxServiceLifecycle(t *testing.T) {
 	if state.State != "running" || state.PID <= 1 {
 		t.Fatalf("install state = %+v (%s)", state, output)
 	}
-	// A fresh install names the pair page and reports whether it opened it,
-	// inside the JSON: the whole result is one parseable document. runFactoryctl
-	// gives the child no PATH, so `open` is not findable and no browser can be
-	// launched — which is also what keeps this test from throwing a window onto
-	// the operator's screen.
-	if state.BrowserOpened {
+	// A fresh install mints one pairing link over the operator API and reports
+	// whether it opened it, inside the JSON, which never carries the link.
+	// runFactoryctl gives the child no PATH, so `open` is not findable and no
+	// browser can be launched — which is also what keeps this test from
+	// throwing a window onto the operator's screen.
+	if state.BrowserOpened || strings.Contains(output, "df_pair") {
 		t.Fatalf("install pairing report = %+v (%s)", state, output)
 	}
 	stderr, err := os.Lstat(filepath.Join(install.ServiceDirectoryPath(fixture.home), "factoryd.stderr.log"))
@@ -82,10 +82,12 @@ func TestBlackBoxServiceLifecycle(t *testing.T) {
 	if err != nil || !web.Ready || web.Address == "127.0.0.1:43123" {
 		t.Fatalf("disposable browser status = %+v, %v", web, err)
 	}
-	pairAddress := "http://" + web.Address + "/pair"
+	if web.ActiveChallenges != 1 {
+		t.Fatalf("install minted %d pairing challenges, want 1", web.ActiveChallenges)
+	}
 	connection, err := net.DialTimeout("tcp", web.Address, time.Second)
 	if err != nil {
-		t.Fatalf("disposable pair listener %q: %v", pairAddress, err)
+		t.Fatalf("disposable browser listener %q: %v", web.Address, err)
 	}
 	_ = connection.Close()
 
@@ -309,7 +311,6 @@ func serviceStartupOutput(path string) func() string {
 type serviceStateOutput struct {
 	State         string `json:"state"`
 	PID           int    `json:"pid"`
-	PairPage      string `json:"pair_page"`
 	BrowserOpened bool   `json:"browser_opened"`
 }
 

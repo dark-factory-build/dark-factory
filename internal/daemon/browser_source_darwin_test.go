@@ -156,7 +156,7 @@ func serve(w http.ResponseWriter, request *http.Request) {
 	if request.URL.Path == "/browser" {
 		return
 	}
-	if request.URL.Path == "/pair" {
+	if request.URL.Path == "/v1/traces" {
 		return
 	}
 }
@@ -194,8 +194,8 @@ func serve(w http.ResponseWriter, request *http.Request) {
 		t.Fatalf("/browser = %+v of %+v", got, frame.Nodes)
 	}
 	// Covered but never matched yet: partial, never idle.
-	if got := reading["/pair"]; got.Observation != "partial" || got.State != "unknown" {
-		t.Fatalf("/pair = %+v", got)
+	if got := reading["/v1/traces"]; got.Observation != "partial" || got.State != "unknown" {
+		t.Fatalf("/v1/traces = %+v", got)
 	}
 	// The public projection of the same floor carries no private label and
 	// keeps its identities stable across reads under this home's own secret.
@@ -205,7 +205,7 @@ func serve(w http.ResponseWriter, request *http.Request) {
 		t.Fatal(err)
 	}
 	second, _ := backend.PublicWorld(ctx, project.String())
-	for _, private := range []string{"/browser", "/pair", "factoryd", "43123", project.String()} {
+	for _, private := range []string{"/browser", "/v1/traces", "factoryd", "43123", project.String()} {
 		if strings.Contains(string(first), private) {
 			t.Fatalf("public world leaks %q: %s", private, first)
 		}
