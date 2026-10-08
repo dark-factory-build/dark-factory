@@ -26,6 +26,10 @@ var (
 	formulaTemplate = template.Must(template.New("dark-factory.rb").Parse(formulaSource))
 	releaseTag      = regexp.MustCompile(`^v[0-9][A-Za-z0-9._-]*$`)
 	repositoryName  = regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`)
+	// noticesPath is read from the working directory (the checkout the
+	// release workflow and factoryd's self-release package from) and ships
+	// beside the binaries in every archive.
+	noticesPath = "THIRD_PARTY_NOTICES"
 	// releaseTargets is the one fixed packaging order; input order never matters.
 	releaseTargets = [2][2]string{{"aarch64-apple-darwin", "darwin/arm64"}, {"x86_64-apple-darwin", "darwin/amd64"}}
 )
@@ -179,6 +183,10 @@ func packageTarget(binDir, archivePath string, identity Identity) (unpacked, siz
 	if err := ValidateTargetBounds(unpacked); err != nil {
 		return 0, 0, "", err
 	}
+	notices, err := os.ReadFile(noticesPath)
+	if err != nil {
+		return 0, 0, "", err
+	}
 
 	output, err := os.OpenFile(archivePath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
 	if err != nil {
@@ -192,9 +200,16 @@ func packageTarget(binDir, archivePath string, identity Identity) (unpacked, siz
 	hash := sha256.New()
 	compressed := gzip.NewWriter(io.MultiWriter(output, hash)) // zero header mtime
 	archive := tar.NewWriter(compressed)
-	for _, component := range components {
+	for _, component := range append(components, "THIRD_PARTY_NOTICES") {
+		mode := int64(0o755)
+		if component == "THIRD_PARTY_NOTICES" {
+			sizes[component], mode = int64(len(notices)), 0o644
+			if err := os.WriteFile(filepath.Join(payload, component), notices, 0o600); err != nil {
+				return 0, 0, "", err
+			}
+		}
 		if err := archive.WriteHeader(&tar.Header{
-			Typeflag: tar.TypeReg, Name: component, Size: sizes[component], Mode: 0o755,
+			Typeflag: tar.TypeReg, Name: component, Size: sizes[component], Mode: mode,
 			Uname: "root", Gname: "wheel", ModTime: time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC), Format: tar.FormatUSTAR,
 		}); err != nil {
 			return 0, 0, "", err

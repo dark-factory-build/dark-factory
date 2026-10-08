@@ -15,6 +15,8 @@ import (
 	"time"
 )
 
+func init() { noticesPath = "../../THIRD_PARTY_NOTICES" }
+
 var releaseAssetNames = []string{
 	"dark-factory-v1.2.3-aarch64-apple-darwin.tar.gz", "dark-factory-v1.2.3-x86_64-apple-darwin.tar.gz",
 	"SHA256SUMS", "dark-factory.rb",
@@ -164,16 +166,23 @@ func assertArchive(t *testing.T, content []byte, inputs string) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if header.Mode != 0o755 || header.Uid != 0 || header.Gid != 0 || header.Uname != "root" || header.Gname != "wheel" ||
+		mode := int64(0o755)
+		if header.Name == "THIRD_PARTY_NOTICES" {
+			mode = 0o644
+		}
+		if header.Mode != mode || header.Uid != 0 || header.Gid != 0 || header.Uname != "root" || header.Gname != "wheel" ||
 			!header.ModTime.Equal(time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)) || header.Typeflag != tar.TypeReg {
 			t.Fatalf("archive member metadata is not normalized: %+v", header)
+		}
+		if header.Name == "THIRD_PARTY_NOTICES" {
+			inputs = "../.."
 		}
 		if !bytes.Equal(member, readFile(t, filepath.Join(inputs, header.Name))) {
 			t.Fatalf("%s is not the verified input binary", header.Name)
 		}
 		names = append(names, header.Name)
 	}
-	if fmt.Sprint(names) != "[factoryd factory-runner factoryctl]" {
+	if fmt.Sprint(names) != "[factoryd factory-runner factoryctl THIRD_PARTY_NOTICES]" {
 		t.Fatalf("archive members = %v", names)
 	}
 }
