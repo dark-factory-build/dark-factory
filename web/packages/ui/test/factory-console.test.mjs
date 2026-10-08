@@ -255,7 +255,7 @@ test("viewed geometry is independent of worker activity and population", () => {
   assert.deepEqual([empty.graph.halls, empty.workers, empty.tasks], [[], [], []]);
 });
 
-test("floor tasks retain every served task and its exact observed footprint", () => {
+test("floor tasks retain every served task and its exact observed run", () => {
   const scene = floorScene(fixtureState, fixtureGraphs, new Map([[ids.agent, runSample(ids.agent, ["web", "internal/kernel/store"])] ]));
   const hall = (label) => scene.graph.halls.find((item) => item.label === label).id;
   assert.deepEqual(scene.tasks, [
@@ -265,8 +265,6 @@ test("floor tasks retain every served task and its exact observed footprint", ()
       projectId: ids.project,
       title: "Review the state projection",
       status: "running",
-      roomIds: [hall("kernel"), hall("web")],
-      representativeRoomId: hall("kernel"),
       observation: { taskRevision: fixtureState.tasks.get(ids.task).revision, runId: "71".repeat(16) },
       humanRequestIds: [ids.request],
     },
@@ -276,7 +274,6 @@ test("floor tasks retain every served task and its exact observed footprint", ()
       projectId: ids.secondProject,
       title: "Tighten the queue ordering",
       status: "queued",
-      roomIds: [],
       humanRequestIds: [],
     },
     {
@@ -285,7 +282,6 @@ test("floor tasks retain every served task and its exact observed footprint", ()
       projectId: ids.project,
       title: "Close the resize race",
       status: "succeeded",
-      roomIds: [],
       humanRequestIds: [],
     },
     {
@@ -294,7 +290,6 @@ test("floor tasks retain every served task and its exact observed footprint", ()
       projectId: ids.secondProject,
       title: "Probe the flaky gate",
       status: "failed",
-      roomIds: [],
       humanRequestIds: [],
     },
   ]);
@@ -310,12 +305,12 @@ test("task footprints reject stale, retry, cancelled, terminal, and cross-projec
   ).tasks[0];
   for (const status of ["queued", "blocked", "succeeded", "failed", "cancelled"]) {
     const order = footprint({ ...original, status });
-    assert.deepEqual([order.roomIds, order.representativeRoomId], [[], undefined], status);
+    assert.equal(order.observation, undefined, status);
   }
   const retry = { ...original, revision: original.revision + 1n };
-  assert.deepEqual([footprint(retry).roomIds, footprint(retry).representativeRoomId], [[], undefined]);
+  assert.equal(footprint(retry).observation, undefined);
   const crossProject = { ...original, project_id: ids.secondProject };
-  assert.deepEqual([footprint(crossProject, { ...sample, projectId: ids.secondProject }).roomIds, footprint(crossProject, { ...sample, projectId: ids.secondProject }).representativeRoomId], [[], undefined]);
+  assert.equal(footprint(crossProject, { ...sample, projectId: ids.secondProject }).observation, undefined);
 });
 
 test("tasks join requests only by exact task, agent, and project identity", () => {
@@ -348,7 +343,7 @@ test("tasks join requests only by exact task, agent, and project identity", () =
     [southTask.id, ids.secondProject, [southRequest.id]],
     [ids.task, ids.project, [request.id]],
   ]);
-  assert.deepEqual(scene.tasks[0].roomIds, [hex(0x71)]);
+  assert.equal(scene.tasks[0].observation.runId, "73".repeat(16));
 });
 
 const served = (...views) => new Map(views.map((view) => [view.project_id, view]));
@@ -1910,7 +1905,7 @@ test("Paired devices lists what the factory granted and revokes any device but t
   assert.match(render({ settingsOpen: true, onToggleSettings: () => {}, remoteInviteAllowed: true, devicesError: "unauthorized" }), /Devices — unauthorized/);
 });
 
-test("floor objects select the exact existing task detail and question route", async () => {
+test("task selection and floor questions open the exact existing task detail and question route", async () => {
   const loaded = [];
   const questions = [];
   const queueSelections = [];
@@ -1941,7 +1936,9 @@ test("floor objects select the exact existing task detail and question route", a
   let tree;
   await act(async () => { tree = create(createElement(Harness)); });
   const task = fixtureState.tasks.get(ids.task);
-  await act(async () => { tree.root.findByProps({ "data-workbench-task-id": task.id }).props.onKeyDown({ key: "Enter", preventDefault() {} }); });
+  // A running task with an open question is listed as that question; selecting the task is the console's own route.
+  const openRunning = () => act(async () => { tree.root.findByType(FactoryConsole).props.onSelectTask(task.id); });
+  await openRunning();
   assert.equal(loaded.length, 1);
   assert.equal(loaded[0], task);
   assert.deepEqual(queueSelections, [task.id]);
@@ -1956,7 +1953,7 @@ test("floor objects select the exact existing task detail and question route", a
   assert.equal(tree.root.findAllByProps({ "data-floor-inbox": 1 }).length, 1, "the floor shows the pile; the panel is where it is read");
   const queuedTask = fixtureState.tasks.get("32".repeat(16));
   await act(async () => { tree.update(createElement(Harness, { editable: true })); });
-  await act(async () => { tree.root.findByProps({ "data-workbench-task-id": task.id }).props.onKeyDown({ key: "Enter", preventDefault() {} }); });
+  await openRunning();
   // The selected running task is retried: a queued, editable task has its inline editor, not a dialog.
   const requeued = new Map(fixtureState.tasks).set(task.id, { ...task, status: "queued" });
   await act(async () => { tree.update(createElement(Harness, { editable: true, state: { ...fixtureState, tasks: requeued } })); });
@@ -1973,7 +1970,7 @@ test("floor objects select the exact existing task detail and question route", a
   await act(async () => { tree.root.findByProps({ "data-human-request-id": ids.request }).props.onClick(); });
   assert.equal(questions[0], fixtureState.humanRequests.get(ids.request));
   assert.equal(tree.root.findByProps({ "aria-label": "Selected question" }).findByProps({ className: "dfFactoryConsole__question" }).children.join(""), "Should the migration also cover the users table? The plan only names accounts.");
-  await act(async () => { tree.root.findByProps({ "data-workbench-task-id": task.id }).props.onKeyDown({ key: "Enter", preventDefault() {} }); });
+  await openRunning();
   assert.equal(tree.root.findAllByProps({ "aria-label": "Task details" }).length, 1);
   const tasks = new Map(fixtureState.tasks);
   tasks.delete(task.id);
@@ -2664,7 +2661,7 @@ test("one machine inspector loads its evidence on open, investigates once and di
   const warnings = [];
   t.mock.method(console, "error", (...args) => warnings.push(args.join(" ")));
   const store = fixtureGraph.nodes.find((node) => node.label === "state.db"), loads = [], opens = [], tasks = [];
-  const props = { state: fixtureState, graphs: fixtureGraphs, requestedEntity: { id: store.id }, floorAppearance: { ...DEFAULT_FLOOR_APPEARANCE, detail: "fine" },
+  const props = { state: fixtureState, graphs: fixtureGraphs, requestedEntity: { id: store.id }, floorAppearance: DEFAULT_FLOOR_APPEARANCE,
     onLoadNode: async (project, node) => { loads.push([project, node]); return { project_id: project, node_id: node, selectors: { "go.package": "internal/kernel/store" }, evidence: [{ origin: "static", source: "go-ast", confidence: "high" }], sources: [], modules: [], observers: [] }; },
     onOpenBoard: (...args) => opens.push(args), onAddTask: async (...args) => { tasks.push(args); return true; } };
   let renderer;

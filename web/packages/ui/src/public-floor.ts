@@ -1,5 +1,5 @@
 import type { GraphNode, GraphSummary, OperationalGraphView } from "@dark-factory/client";
-import { projectGraph, type FloorDetail } from "./console-view.js";
+import { projectGraph } from "./console-view.js";
 import type { SceneWorker } from "./factory-scene/scene.js";
 
 /** The public projection factoryd serves at /v1/public/<project>: an allowlist, never private labels. */
@@ -18,7 +18,7 @@ type Activity = "none" | "low" | "medium" | "high";
 const RATE: Record<Activity, number> = { none: 0, low: 30, medium: 600, high: 6000 };
 
 /** The same world the operator sees, from the public projection alone. */
-export function publicFloor(world: PublicWorld, detail: FloorDetail = "auto") {
+export function publicFloor(world: PublicWorld) {
   const graph: OperationalGraphView = {
     project_id: "public", digest: world.nodes.map((node) => node.id).join("").slice(0, 64).padEnd(64, "0"), observed_at: world.generated_at,
     sources: [], summary: world.summary, omitted: 0,
@@ -29,7 +29,7 @@ export function publicFloor(world: PublicWorld, detail: FloorDetail = "auto") {
       ...(node.deployed ? { deployed_at: world.generated_at } : {}) })),
     edges: world.edges.map((edge) => ({ from: edge.from, to: edge.to, kind: edge.kind, evidence: edge.evidence, observation: edge.observation, state: edge.state, rate_per_hour: RATE[edge.activity] })),
   };
-  const prepared = projectGraph(new Map([["public", graph]]), ["public"], detail);
+  const prepared = projectGraph(new Map([["public", graph]]), ["public"]);
   const workers = world.workers.map((worker, index): SceneWorker => {
     const hall = worker.unit === undefined ? undefined : prepared.where.get(worker.unit)?.hall;
     return { id: `public-${index}`, name: `Worker ${index + 1}`, role: "worker", activity: worker.activity,

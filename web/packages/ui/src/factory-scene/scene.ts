@@ -22,6 +22,8 @@ export type SceneMachine = Readonly<{
   reading: SceneReading;
   /** Nodes this machine stands for when it folds several (a manifold of routes). */
   represented?: readonly string[];
+  /** The folded routes' labels, listed inside the manifold when zoomed in. */
+  routes?: readonly string[];
   /** The unit a quarantined or shared machine belongs to, for its label. */
   owner?: string;
 }>;
