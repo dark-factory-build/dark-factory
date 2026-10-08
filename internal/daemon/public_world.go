@@ -82,9 +82,10 @@ func (backend *browserBackend) PublicWorld(ctx context.Context, rawProject strin
 // an interval and a tick.
 const publicFeedInterval = time.Minute
 
-// publicFeed is what the relay last accepted from this run.
+// publicFeed is what this run last handed the relay, and on which connection.
 type publicFeed struct {
 	sent []byte // nil until the first publish of this run
+	on   any    // the relay connection it was queued on
 	at   time.Time
 }
 
@@ -93,7 +94,7 @@ type publicFeed struct {
 // once per interval and only when they changed. With no project configured it
 // publishes an empty world once per run, which retracts whatever an earlier
 // run left on the relay.
-func (daemon *Daemon) publishPublicWorld(ctx context.Context, feed *publicFeed, publish func([]byte) bool) {
+func (daemon *Daemon) publishPublicWorld(ctx context.Context, feed *publicFeed, publish func([]byte) any, connection func() any) {
 	now := daemon.now()
 	if now.Sub(feed.at) < publicFeedInterval {
 		return
@@ -111,11 +112,13 @@ func (daemon *Daemon) publishPublicWorld(ctx context.Context, feed *publicFeed, 
 			return
 		}
 	}
-	if feed.sent != nil && bytes.Equal(world, feed.sent) {
+	// A connection lost after the record was queued may have lost it too, so a
+	// new connection is sent the current world, retraction included, again.
+	if feed.sent != nil && bytes.Equal(world, feed.sent) && feed.on == connection() {
 		return
 	}
-	if publish(world) {
-		feed.sent, feed.at = world, now
+	if on := publish(world); on != nil {
+		feed.sent, feed.on, feed.at = world, on, now
 	}
 }
 

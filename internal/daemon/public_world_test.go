@@ -22,9 +22,10 @@ func TestPublicWorldPublishesOnlyWhenOptedInChangedAndDue(t *testing.T) {
 	fixture.daemon.now = func() time.Time { return now }
 	var sent [][]byte
 	var feed publicFeed
+	connection := new(int)
 	tick := func(at time.Duration) {
 		now = start.Add(at)
-		fixture.daemon.publishPublicWorld(ctx, &feed, func(world []byte) bool { sent = append(sent, world); return true })
+		fixture.daemon.publishPublicWorld(ctx, &feed, func(world []byte) any { sent = append(sent, world); return connection }, func() any { return connection })
 	}
 	configure := func(body string) {
 		if err := os.WriteFile(filepath.Join(fixture.daemon.home, "observe.json"), []byte(body), 0o600); err != nil {
@@ -75,5 +76,14 @@ func TestPublicWorldPublishesOnlyWhenOptedInChangedAndDue(t *testing.T) {
 	tick(400 * time.Second)
 	if len(sent) != 4 || len(sent[3]) != 0 {
 		t.Fatalf("opting out published %q, want one empty retraction", sent[3:])
+	}
+
+	// A new relay connection may have lost what the old one queued, so the
+	// retraction is sent again on it, once.
+	connection = new(int)
+	tick(460 * time.Second)
+	tick(520 * time.Second)
+	if len(sent) != 5 || len(sent[4]) != 0 {
+		t.Fatalf("after reconnecting published %q, want the retraction once more", sent[4:])
 	}
 }

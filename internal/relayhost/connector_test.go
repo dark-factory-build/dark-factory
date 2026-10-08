@@ -532,7 +532,7 @@ func TestPublishSendsTheWorldVerbatimWithinTheBound(t *testing.T) {
 	host := fixture.relay.accept(t)
 	world := []byte(`{"generated_at":1}`)
 	// The relay accepts before the connector installs its queue.
-	for deadline := time.Now().Add(testDeadline); !fixture.connector.Publish(world); time.Sleep(time.Millisecond) {
+	for deadline := time.Now().Add(testDeadline); fixture.connector.Publish(world) == nil; time.Sleep(time.Millisecond) {
 		if time.Now().After(deadline) {
 			t.Fatal("a connected publish was refused")
 		}
@@ -540,13 +540,13 @@ func TestPublishSendsTheWorldVerbatimWithinTheBound(t *testing.T) {
 	if record := host.expect(t, RecordPublish, 0); !bytes.Equal(record.Payload, world) {
 		t.Fatalf("published %q, want %q", record.Payload, world)
 	}
-	if fixture.connector.Publish(make([]byte, MaxPublicWorldBytes+1)) {
+	if fixture.connector.Publish(make([]byte, MaxPublicWorldBytes+1)) != nil {
 		t.Fatal("a world past the relay's bound was queued")
 	}
 	if err := fixture.connector.Close(); err != nil {
 		t.Fatalf("close: %v", err)
 	}
-	if fixture.connector.Publish(world) {
+	if fixture.connector.Publish(world) != nil {
 		t.Fatal("a closed connector reported a publish")
 	}
 }

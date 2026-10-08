@@ -107,7 +107,7 @@ func (runtime *RelayRuntime) feed(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			runtime.daemon.publishPublicWorld(ctx, &state, runtime.connector.Publish)
+			runtime.daemon.publishPublicWorld(ctx, &state, runtime.connector.Publish, runtime.connector.Connection)
 		}
 	}
 }

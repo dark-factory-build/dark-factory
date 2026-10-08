@@ -80,7 +80,7 @@ test('controller rate limits use arrival time, close the offender and notify the
 	assert.equal(records.at(-1).type, RECORD_TEXT);
 });
 
-test('a host publishes at most every thirty seconds, and an empty world retracts', async (t) => {
+test('a host publishes at most every thirty seconds, and an empty world retracts at once', async (t) => {
 	let now = 10_000;
 	t.mock.method(Date, 'now', () => now);
 	const originalPair = globalThis.WebSocketRequestResponsePair;
@@ -110,11 +110,14 @@ test('a host publishes at most every thirty seconds, and an empty world retracts
 	await publish('{"generated_at":1}');
 	now += 29_999;
 	await publish('{"generated_at":2}');
-	now += 1;
+	// A retraction is never held back by the interval: stopping must stop at once.
 	await publish('');
+	now += 1;
+	await publish('{"generated_at":3}');
 	const id = await publicIdForKey(key);
 	assert.deepEqual(puts, [
 		{ name: `public:${id}`, url: `https://relay/public/${id}`, method: 'PUT', body: '{"generated_at":1}' },
 		{ name: `public:${id}`, url: `https://relay/public/${id}`, method: 'PUT', body: '' },
+		{ name: `public:${id}`, url: `https://relay/public/${id}`, method: 'PUT', body: '{"generated_at":3}' },
 	]);
 });
