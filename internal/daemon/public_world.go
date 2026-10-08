@@ -73,8 +73,29 @@ func (backend *browserBackend) PublicWorld(ctx context.Context, rawProject strin
 		}
 		workers = append(workers, worker)
 	}
-	now := daemon.now().UnixMilli()
-	return json.Marshal(opgraph.Public(daemon.liveGraph(projectID, graph), secret, workers, now))
+	crates, ledger, err := daemon.publicWork(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
+	world := opgraph.Public(daemon.liveGraph(projectID, graph), secret, workers, crates, daemon.now().UnixMilli())
+	world.Ledger = ledger
+	encoded, err := json.Marshal(world)
+	// Past the relay's bound, the oldest merges are listed no more, then the
+	// oldest open pull requests (their counts stay), then the ledger goes.
+	for err == nil && len(encoded) > relayhost.MaxPublicWorldBytes && world.Ledger != nil {
+		ledger := *world.Ledger
+		world.Ledger = &ledger
+		switch {
+		case len(ledger.Merged) > 0:
+			ledger.Merged = ledger.Merged[:len(ledger.Merged)/2]
+		case len(ledger.Open) > 0:
+			ledger.Open = ledger.Open[:len(ledger.Open)/2]
+		default:
+			world.Ledger = nil
+		}
+		encoded, err = json.Marshal(world)
+	}
+	return encoded, err
 }
 
 // publicFeedInterval is the least time between two publishes of the public

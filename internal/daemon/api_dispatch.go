@@ -61,6 +61,10 @@ type Daemon struct {
 	// outside a paired client's gate.
 	browserRemote       func(context.Context, string)
 	productionRefreshMu sync.Mutex
+	// publicRepos caches what an anonymous GitHub reader sees of each
+	// repository the public world names (public_work.go).
+	publicRepoMu        sync.Mutex
+	publicRepos         map[string]*publicRepository
 	productionRefreshAt map[kernel.ProjectID]time.Time
 	// The scheduler's merge-pipeline pass (tickMergePipeline): the next pass
 	// time, read only by the scheduler loop, and whether a pass is running.

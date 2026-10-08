@@ -69,7 +69,9 @@ export function proposedProduction(item: ProductionContraption): boolean {
   return item.pullRequest !== undefined ? !["closed", "merged"].includes(item.pullRequest.state) : item.construction?.status !== "cancelled" && !(item.construction?.status === "succeeded" && item.construction.has_changes === false);
 }
 
-const STALE_AFTER = 180_000;
+// Two production refresh intervals (factoryd productionRefreshInterval, 5 min):
+// a record is stale once a refresh was missed, not between two on time.
+const STALE_AFTER = 600_000;
 const text = (value: unknown) => typeof value === "string" ? value : "";
 const numbers = (value: unknown) => Array.isArray(value) ? value.filter((item): item is number => typeof item === "number" && Number.isSafeInteger(item) && item > 0) : [];
 const object = (value: unknown): Record<string, unknown> => value !== null && typeof value === "object" ? value as Record<string, unknown> : {};

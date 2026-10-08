@@ -148,7 +148,7 @@ test("dirty and mismatched heads cannot inherit approval or checks", () => {
     const [item] = items([record("1", [], { source: { ...source, observed_at: 1000, paths: [{ status: "modified", path: "internal/alpha/movement.go" }] } }), check]);
     assert.equal(item.review.current, false); assert.equal(item.review.allowed, false); assert.equal(item.checks[0].applicable, false);
   }
-  assert.equal(items([record("1", [])], 200000)[0].source.stale, true);
+  assert.equal(items([record("1", [])], 700000)[0].source.stale, true);
 });
 
 test("unsafe and unavailable source stays explicit without invented paths", () => {

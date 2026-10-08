@@ -20,6 +20,60 @@ type PublicWorld struct {
 	Nodes       []PublicNode   `json:"nodes"`
 	Edges       []PublicEdge   `json:"edges"`
 	Workers     []PublicWorker `json:"workers"`
+	// Crates is the outbound work line: never a title, number or branch.
+	Crates []PublicCrate `json:"crates"`
+	// Ledger is present only when a repository is public on GitHub, and then
+	// carries only that repository's public work.
+	Ledger *PublicLedger `json:"ledger,omitempty"`
+}
+
+// Crate is one pull request on the outbound line: Key names it privately,
+// Station is REVIEW 0, CHECKS 1, MERGE QUEUE 2 or SHIPPED 3.
+type Crate struct {
+	Key     string
+	Station int
+	Fault   bool
+}
+
+type PublicCrate struct {
+	ID      string `json:"id"`
+	Station int    `json:"station"`
+	Fault   bool   `json:"fault,omitempty"`
+}
+
+// PublicLedger is what is already public on GitHub about the factory's public
+// repositories, as its own records saw it. Times are UTC RFC 3339.
+type PublicLedger struct {
+	// WindowDays is the rolling window Merged and MergedCount cover.
+	WindowDays  int          `json:"window_days"`
+	Open        []LedgerPull `json:"open"`
+	OpenCount   int          `json:"open_count"`
+	Issues      []LedgerPull `json:"issues"`
+	IssueCount  int          `json:"issue_count"`
+	Merged      []LedgerPull `json:"merged"` // newest first
+	MergedCount int          `json:"merged_count"`
+	Releases    []LedgerTag  `json:"releases"` // newest first
+	Clock       []LedgerDay  `json:"clock"`    // oldest first
+}
+
+type LedgerPull struct {
+	Number   uint64 `json:"number"`
+	Title    string `json:"title"`
+	URL      string `json:"url"`
+	MergedAt string `json:"merged_at,omitempty"`
+}
+
+type LedgerTag struct {
+	Tag         string `json:"tag"`
+	URL         string `json:"url"`
+	PublishedAt string `json:"published_at"`
+	Prerelease  bool   `json:"prerelease,omitempty"`
+}
+
+// LedgerDay is one UTC day of recorded merges, hour by hour.
+type LedgerDay struct {
+	Date  string  `json:"date"`
+	Hours [24]int `json:"hours"`
 }
 
 type PublicNode struct {
@@ -65,7 +119,7 @@ var publicNames = map[Kind]string{Processor: "Unit", Ingress: "Ingress", Job: "J
 // hashes, so they are stable for this factory and meaningless elsewhere;
 // labels are ordinals in hashed-ID order, so they do not shift as other
 // nodes come and go. Time is bucketed to five minutes.
-func Public(live Live, secret []byte, workers []Worker, now int64) PublicWorld {
+func Public(live Live, secret []byte, workers []Worker, crates []Crate, now int64) PublicWorld {
 	id := func(raw string) string {
 		mac := hmac.New(sha256.New, secret)
 		mac.Write([]byte(raw))
@@ -104,7 +158,12 @@ func Public(live Live, secret []byte, workers []Worker, now int64) PublicWorld {
 		public = append(public, item)
 	}
 	sort.Slice(public, func(i, j int) bool { return public[i].Unit+public[i].Activity < public[j].Unit+public[j].Activity })
-	return PublicWorld{GeneratedAt: now - now%(5*60_000), Summary: live.Summary, Nodes: nodes, Edges: edges, Workers: public}
+	line := []PublicCrate{}
+	for _, crate := range crates {
+		line = append(line, PublicCrate{ID: id("crate:" + crate.Key), Station: crate.Station, Fault: crate.Fault})
+	}
+	sort.Slice(line, func(i, j int) bool { return line[i].ID < line[j].ID })
+	return PublicWorld{GeneratedAt: now - now%(5*60_000), Summary: live.Summary, Nodes: nodes, Edges: edges, Workers: public, Crates: line}
 }
 
 // activity buckets a rate by powers of eight per hour, so exact traffic and

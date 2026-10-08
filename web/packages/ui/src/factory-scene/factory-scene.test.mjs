@@ -11,6 +11,7 @@ import { act, create } from "react-test-renderer";
 import { AgentSprite, FactoryScene } from "../../dist/src/factory-scene/factory-scene.js";
 import { COMMON_WIDTH, PADDING, ROOM_LEFT, WORKER_SIZE, breakRoomNook, commonSeating, layoutScene, placeCrates, placeErrands, placeWorkers } from "../../dist/src/factory-scene/scene.js";
 import { deriveProductionView, projectCrates } from "../../dist/src/production-view.js";
+import { publicFloor } from "../../dist/src/public-floor.js";
 import { breakRoomHabit, resolvedAppearance, restingItem, spriteOptions, workerFrames, workerPhase } from "../../dist/src/factory-scene/appearance.js";
 import { pointOnRoute, routeBetween, routeFromCurrent, routeFromSpine } from "../../dist/src/factory-scene/movement.js";
 import { spriteAtlas, spriteSheet, spriteSheetSize } from "../../dist/src/factory-scene/sprites/sprites.generated.js";
@@ -1403,6 +1404,25 @@ test("the outbound line puts each change request at the station its records name
   assert.deepEqual(once, again);
   assert.deepEqual(once.filter((spot) => spot.shown).map((spot) => spot.crate.number), [11, 10, 9, 8, 7, 6, 5, 4]);
   assert.match(render({ crates: many }), /data-crate-overflow="3"[^>]*>\+3</);
+});
+
+test("the console and factoryd put the shared fixture's records at the same stations", () => {
+  // factoryd's publicCrates (internal/daemon/public_work_test.go) reads the same file.
+  const fixture = JSON.parse(readFileSync(new URL("../../../../fixtures/production-crates.json", import.meta.url), "utf8"));
+  const crates = projectCrates(Object.values(deriveProductionView(fixture.records, fixture.now).contraptions));
+  assert.deepEqual(crates.map((crate) => [crate.number, crate.station, crate.fault]).sort((a, b) => a[0] - b[0]), fixture.crates);
+});
+
+test("the public floor puts published crates on the line by station alone, never a number or title", () => {
+  const world = { generated_at: 0, summary: { components: 0, inferred: 0, observed: 0, quiet: 0, partial: 0, stale: 0, unobserved: 0, opaque: 0, runtime_only: 0, contradicted: 0 }, nodes: [], edges: [], workers: [],
+    crates: [{ id: "f".repeat(32), station: 2 }, { id: "e".repeat(32), station: 0, fault: true }] };
+  const { crates } = publicFloor(world);
+  assert.deepEqual(crates.map((crate) => [crate.id, crate.station, crate.fault, crate.number, crate.title]), [["f".repeat(32), 2, false, 0, ""], ["e".repeat(32), 0, true, 0, ""]]);
+  assert.deepEqual(publicFloor({ ...world, crates: undefined }).crates, [], "an older factory publishes no line");
+  const markup = render({ crates, connected: true });
+  assert.match(markup, /data-crate="e{32}" data-crate-station="0" data-fault=""[^>]*data-tooltip="A change request\nReview · needs correction"/);
+  assert.match(markup, /aria-label="A change request: Merge queue"/);
+  assert.doesNotMatch(markup, /PR #/);
 });
 
 test("a crate moves once when its recorded stage changes, never on first sight or reconnect, and lights what it changes", async () => {
