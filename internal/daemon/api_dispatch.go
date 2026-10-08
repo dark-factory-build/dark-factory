@@ -128,6 +128,10 @@ type Daemon struct {
 	gitExecutable atomic.Pointer[string]
 	runPathsMu    sync.Mutex
 	runPaths      map[kernel.RunID]runPathsResult
+	// telemetry holds each live or recently ended run's agent telemetry
+	// counts; like runtime, losing it reads as no telemetry, never as zero.
+	telemetryMu sync.Mutex
+	telemetry   map[kernel.RunID]*runTelemetry
 
 	attemptMu sync.Mutex
 	attempts  map[kernel.RunID]*liveAttempt

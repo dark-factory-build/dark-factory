@@ -1,10 +1,16 @@
 package opgraph
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"slices"
 	"strconv"
+	"strings"
 
+	commonv1 "go.opentelemetry.io/proto/otlp/common/v1"
+	logsv1 "go.opentelemetry.io/proto/otlp/logs/v1"
+	metricsv1 "go.opentelemetry.io/proto/otlp/metrics/v1"
 	tracev1 "go.opentelemetry.io/proto/otlp/trace/v1"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
@@ -155,4 +161,184 @@ func attributes(values []otlpAttribute) map[string]string {
 		}
 	}
 	return result
+}
+
+// RunAttribute is the resource attribute factoryd gives every agent run it
+// launches (OTEL_RESOURCE_ATTRIBUTES). Agent telemetry is attributed by it
+// alone, never by anything a record says about itself.
+const RunAttribute = "dark_factory.run.id"
+
+// Agent telemetry quantities. Counts and cost are all that survive decoding.
+const (
+	TokensIn   = "tokens_in"
+	TokensOut  = "tokens_out"
+	CostUSD    = "cost_usd"
+	ToolCall   = "tool_call"
+	APIRequest = "api_request"
+)
+
+// AgentPoint is one counted fact an agent CLI exported about a run. Series is
+// set only for a cumulative metric point: the identity whose last value the
+// caller subtracts.
+type AgentPoint struct {
+	Run    string
+	Kind   string
+	Value  float64
+	Series string
+}
+
+// DecodeAgentLogs counts tool calls and API requests in an OTLP logs export
+// (LogsData is wire-identical to the export request). Events are named by
+// their event.name attribute (Claude Code "tool_result", Codex
+// "codex.tool_result"); bodies and every other attribute are dropped unread.
+func DecodeAgentLogs(body []byte, protobuf bool) ([]AgentPoint, error) {
+	var data logsv1.LogsData
+	if err := unmarshalOTLP(body, protobuf, &data); err != nil {
+		return nil, err
+	}
+	var points []AgentPoint
+	for _, resource := range data.GetResourceLogs() {
+		run := runOf(resource.GetResource().GetAttributes())
+		if run == "" {
+			continue
+		}
+		for _, scope := range resource.GetScopeLogs() {
+			for _, record := range scope.GetLogRecords() {
+				name := stringAttribute(record.GetAttributes(), "event.name")
+				if name == "" {
+					name = record.GetEventName()
+				}
+				switch {
+				case strings.HasSuffix(name, "tool_result"):
+					points = append(points, AgentPoint{Run: run, Kind: ToolCall, Value: 1})
+				case strings.HasSuffix(name, "api_request"):
+					points = append(points, AgentPoint{Run: run, Kind: APIRequest, Value: 1})
+				}
+				if len(points) > maxObservations {
+					return nil, errors.New("otlp export too large")
+				}
+			}
+		}
+	}
+	return points, nil
+}
+
+// DecodeAgentMetrics reads token and cost metrics from an OTLP metrics export:
+// a name with "token" and "usage" split by its token type attribute (Claude
+// Code claude_code.token.usage, Codex codex.turn.token_usage, GenAI
+// gen_ai.client.token.usage), and a name with "cost" in USD or, by its
+// "microusd" suffix, micro-USD. Sums and histogram sums of either temporality.
+func DecodeAgentMetrics(body []byte, protobuf bool) ([]AgentPoint, error) {
+	var data metricsv1.MetricsData
+	if err := unmarshalOTLP(body, protobuf, &data); err != nil {
+		return nil, err
+	}
+	var points []AgentPoint
+	for _, resource := range data.GetResourceMetrics() {
+		run := runOf(resource.GetResource().GetAttributes())
+		if run == "" {
+			continue
+		}
+		for _, scope := range resource.GetScopeMetrics() {
+			for _, metric := range scope.GetMetrics() {
+				name, scale, cost := metric.GetName(), 1.0, false
+				switch {
+				case strings.Contains(name, "cost") && strings.HasSuffix(name, "microusd"):
+					scale, cost = 1e-6, true
+				case strings.Contains(name, "cost") && metric.GetUnit() == "USD":
+					cost = true
+				case !strings.Contains(name, "token") || !strings.Contains(name, "usage"):
+					continue
+				}
+				type sample struct {
+					attributes []*commonv1.KeyValue
+					start      uint64
+					value      float64
+				}
+				var samples []sample
+				var temporality metricsv1.AggregationTemporality
+				if sum := metric.GetSum(); sum != nil {
+					temporality = sum.GetAggregationTemporality()
+					for _, point := range sum.GetDataPoints() {
+						value := point.GetAsDouble()
+						if _, ok := point.GetValue().(*metricsv1.NumberDataPoint_AsInt); ok {
+							value = float64(point.GetAsInt())
+						}
+						samples = append(samples, sample{point.GetAttributes(), point.GetStartTimeUnixNano(), value})
+					}
+				} else if histogram := metric.GetHistogram(); histogram != nil {
+					temporality = histogram.GetAggregationTemporality()
+					for _, point := range histogram.GetDataPoints() {
+						samples = append(samples, sample{point.GetAttributes(), point.GetStartTimeUnixNano(), point.GetSum()})
+					}
+				}
+				for _, item := range samples {
+					kind := CostUSD
+					if !cost {
+						switch tokenType(item.attributes) {
+						case "input":
+							kind = TokensIn
+						case "output":
+							kind = TokensOut
+						default:
+							continue
+						}
+					}
+					if item.value < 0 {
+						continue
+					}
+					point := AgentPoint{Run: run, Kind: kind, Value: item.value * scale}
+					if temporality == metricsv1.AggregationTemporality_AGGREGATION_TEMPORALITY_CUMULATIVE {
+						point.Series = seriesKey(name, item.start, item.attributes)
+					}
+					points = append(points, point)
+					if len(points) > maxObservations {
+						return nil, errors.New("otlp export too large")
+					}
+				}
+			}
+		}
+	}
+	return points, nil
+}
+
+func unmarshalOTLP(body []byte, protobuf bool, message proto.Message) error {
+	if protobuf {
+		return proto.Unmarshal(body, message)
+	}
+	return protojson.UnmarshalOptions{DiscardUnknown: true}.Unmarshal(body, message)
+}
+
+func runOf(attributes []*commonv1.KeyValue) string {
+	return stringAttribute(attributes, RunAttribute)
+}
+
+func stringAttribute(attributes []*commonv1.KeyValue, key string) string {
+	for _, item := range attributes {
+		if item.GetKey() == key {
+			return item.GetValue().GetStringValue()
+		}
+	}
+	return ""
+}
+
+func tokenType(attributes []*commonv1.KeyValue) string {
+	for _, key := range []string{"type", "token_type", "gen_ai.token.type"} {
+		if value := stringAttribute(attributes, key); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+// seriesKey names one cumulative series within a run by a digest, so no
+// attribute value (a session or account id) outlives the export.
+func seriesKey(name string, start uint64, attributes []*commonv1.KeyValue) string {
+	parts := make([]string, 0, len(attributes))
+	for _, item := range attributes {
+		parts = append(parts, item.GetKey()+"="+item.GetValue().String())
+	}
+	slices.Sort(parts)
+	sum := sha256.Sum256([]byte(name + "\x00" + strconv.FormatUint(start, 10) + "\x00" + strings.Join(parts, "\x00")))
+	return string(sum[:])
 }

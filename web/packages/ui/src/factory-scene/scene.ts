@@ -1,4 +1,4 @@
-import type { GraphNode, GraphReading, GraphSummary, GraphSource, SpriteAppearance } from "@dark-factory/client";
+import type { GraphNode, GraphReading, GraphSummary, GraphSource, RunTelemetry, SpriteAppearance } from "@dark-factory/client";
 
 /** A node's runtime reading, as the floor shows it. Static evidence never sets state. */
 export type SceneReading = Readonly<{
@@ -86,7 +86,30 @@ export type SceneWorker = Readonly<{
   /** The machine within that hall. */
   observedBayId?: string;
   review?: Readonly<{ proposalId: string; scope: string }>;
+  /** What the live run's agent CLI recorded; absent when it recorded nothing. */
+  telemetry?: Readonly<RunTelemetry>;
 }>;
+
+/** A busy worker whose agent recorded no tool call or API request for this long is shown waiting. */
+export const QUIET_SECONDS = 120;
+
+/** Recorded effort and spend as one line, e.g. "12.4k tokens · $0.31 · 18 tool calls"; only what was recorded. */
+export function telemetryLine(telemetry: RunTelemetry): string {
+  const tokens = telemetry.tokens_in + telemetry.tokens_out;
+  const cost = telemetry.cost_micro_usd / 1e6;
+  return [
+    tokens === 0 ? "" : `${tokens < 1000 ? tokens : tokens < 1e6 ? `${(tokens / 1e3).toFixed(1)}k` : `${(tokens / 1e6).toFixed(1)}M`} tokens`,
+    cost === 0 ? "" : cost < 0.01 ? "<$0.01" : `$${cost.toFixed(2)}`,
+    telemetry.tool_calls === 0 ? "" : `${telemetry.tool_calls} tool call${telemetry.tool_calls === 1 ? "" : "s"}`,
+  ].filter((part) => part !== "").join(" · ");
+}
+
+/** Tooltip lines for a worker's recorded effort, and its recorded silence once that reads as waiting. */
+export function recordedEffort(telemetry: RunTelemetry): string {
+  const line = telemetryLine(telemetry);
+  const quiet = telemetry.quiet_seconds ?? 0;
+  return `${line === "" ? "" : `\n${line}`}${quiet >= QUIET_SECONDS ? `\nNo tool call or API request recorded for ${Math.floor(quiet / 60)}m` : ""}`;
+}
 
 export type ScenePoint = Readonly<{ x: number; y: number }>;
 

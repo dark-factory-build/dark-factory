@@ -211,8 +211,10 @@ type RuntimePaths struct {
 	gitCommonDir         string
 	gitCommonDirWritable bool
 	// traceReceiverPort is factoryd's loopback OTLP listener; zero exports
-	// nothing.
+	// nothing. telemetryRunID names the run in the agent CLI's own telemetry
+	// resource; empty leaves that telemetry off.
 	traceReceiverPort uint16
+	telemetryRunID    string
 }
 
 // WithLocalCILeaseDirectory carries daemon-resolved lease storage below the
@@ -251,11 +253,19 @@ func (runtime RuntimePaths) WithCustomerMaintainer(enabled bool) RuntimePaths {
 	return runtime
 }
 
-// WithTraceReceiver points a worker's instrumented commands at factoryd's
-// loopback OTLP receiver; zero leaves the environment without it.
-func (runtime RuntimePaths) WithTraceReceiver(port uint16) RuntimePaths {
-	runtime.traceReceiverPort = port
+// WithTraceReceiver points a worker's instrumented commands, and with a run
+// id its agent CLI's own metrics and logs, at factoryd's loopback OTLP
+// receiver; zero leaves the environment without it.
+func (runtime RuntimePaths) WithTraceReceiver(port uint16, runID string) RuntimePaths {
+	runtime.traceReceiverPort, runtime.telemetryRunID = port, runID
 	return runtime
+}
+
+func (runtime RuntimePaths) telemetryReceiver() string {
+	if runtime.traceReceiverPort == 0 || runtime.telemetryRunID == "" {
+		return ""
+	}
+	return "http://127.0.0.1:" + strconv.Itoa(int(runtime.traceReceiverPort))
 }
 
 func NewRuntimePaths(home, temp, socket, token, factoryctl, gitCeiling, toolPath, accountHome, accountConfig, toolchainReadRoots string) (RuntimePaths, error) {
@@ -718,6 +728,14 @@ func Build(request Request) (Launch, error) {
 			argv = append(argv, "-c", fmt.Sprintf("model_reasoning_effort=%q", request.reasoningEffort))
 		}
 		environment := request.runtime.environmentForRole(request.provider, request.role)
+		// Codex exports only through its [otel] configuration; its resource
+		// still reads OTEL_RESOURCE_ATTRIBUTES, which names the run.
+		if receiver := request.runtime.telemetryReceiver(); receiver != "" && request.role == kernel.RoleWorker {
+			argv = append(argv,
+				"-c", "otel.exporter={otlp-http={endpoint="+tomlBasicString(receiver+"/v1/logs")+`,protocol="binary"}}`,
+				"-c", "otel.metrics_exporter={otlp-http={endpoint="+tomlBasicString(receiver+"/v1/metrics")+`,protocol="binary"}}`,
+				"-c", "otel.log_user_prompt=false")
+		}
 		if request.role == kernel.RoleOrchestrator && request.runtime.customerMaintainer {
 			argv = append(argv, "-c", "mcp_servers.dark_factory_maintainer={command="+tomlBasicString(request.runtime.factoryctl)+`,args=["attempt","maintainer-mcp"],env_vars=["DARK_FACTORY_SOCKET","DARK_FACTORY_ATTEMPT_TOKEN_FILE"],enabled=true,required=true,default_tools_approval_mode="approve"}`)
 		}
@@ -1104,12 +1122,27 @@ func (runtime RuntimePaths) environmentForRole(kind kernel.Provider, role kernel
 				"GOMODCACHE="+goModuleCachePath(runtime.accountHome),
 				"DF_CI_GO_MODULE_CACHE="+goModuleCachePath(runtime.accountHome))
 			// Code under test that is OTel-instrumented lights up the plant.
-			// Only the traces endpoint is named, so neither CLI nor any
-			// metrics or logs exporter is redirected.
+			// The agent CLI's own metrics and logs carry the run id in their
+			// resource, the only thing factoryd attributes them by.
 			if runtime.traceReceiverPort != 0 {
+				resource := "deployment.environment.name=local"
+				if runtime.telemetryRunID != "" {
+					resource += ",dark_factory.run.id=" + runtime.telemetryRunID
+				}
 				environment = append(environment,
 					"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://127.0.0.1:"+strconv.Itoa(int(runtime.traceReceiverPort))+"/v1/traces",
-					"OTEL_RESOURCE_ATTRIBUTES=deployment.environment.name=local")
+					"OTEL_RESOURCE_ATTRIBUTES="+resource)
+			}
+			// Claude Code exports only when told to. Prompt and tool content
+			// stays off: none of its OTEL_LOG_* switches can reach the runner.
+			if receiver := runtime.telemetryReceiver(); receiver != "" && kind == kernel.ProviderClaudeCode {
+				environment = append(environment,
+					"CLAUDE_CODE_ENABLE_TELEMETRY=1",
+					"OTEL_METRICS_EXPORTER=otlp",
+					"OTEL_LOGS_EXPORTER=otlp",
+					"OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf",
+					"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT="+receiver+"/v1/metrics",
+					"OTEL_EXPORTER_OTLP_LOGS_ENDPOINT="+receiver+"/v1/logs")
 			}
 		}
 		if kind == kernel.ProviderClaudeCode {

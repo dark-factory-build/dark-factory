@@ -1,9 +1,10 @@
 import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from "react";
-import { MAX_TASK_ATTACHMENTS, MAX_TASK_ATTACHMENT_BYTES, MAX_TASK_PRIORITY, type IntakeView, type IntakeBody, type DiscoveredAccount, type AccountItem, type AgentItem, type GitHubConnectionBody, type GitHubDelegationBody, type HumanRequestItem, type ProjectItem, type RepositoryMutation, type RepositoryView, type StateView, type TaskHistoryView, type TaskItem, type TaskListView, type TaskPeerQuestion, type TaskContentPin } from "@dark-factory/client";
+import { MAX_TASK_ATTACHMENTS, MAX_TASK_ATTACHMENT_BYTES, MAX_TASK_PRIORITY, type IntakeView, type IntakeBody, type DiscoveredAccount, type AccountItem, type AgentItem, type GitHubConnectionBody, type GitHubDelegationBody, type HumanRequestItem, type ProjectItem, type RepositoryMutation, type RunTelemetry, type RepositoryView, type StateView, type TaskHistoryView, type TaskItem, type TaskListView, type TaskPeerQuestion, type TaskContentPin } from "@dark-factory/client";
 import type { FactoryEditView, FactoryHumanRequestView } from "./factory-app-controller.js";
 import type { FactoryGitHubView } from "./factory-settings-coordinator.js";
 import { rankLabel } from "./console-screens.js";
 import { AgentSprite } from "./factory-scene/factory-scene.js";
+import { telemetryLine } from "./factory-scene/scene.js";
 import { agentStatus, agentCurrentTask, agentActivity, needsYou, type WorkRow, type WorkState } from "./console-view.js";
 import { productionKey, productionStages } from "./production-view.js";
 import { AnswerControls } from "./console-interactions.js";
@@ -56,6 +57,7 @@ export function AgentPanel({
   terminalContent,
   panel: panelProp,
   onPanel,
+  telemetry,
 }: {
   agent: AgentItem;
   state: StateView | undefined;
@@ -70,7 +72,10 @@ export function AgentPanel({
   terminalContent?: ReactNode;
   panel?: AgentPanelView;
   onPanel?: (panel: AgentPanelView) => void;
+  /** What the current run's agent CLI recorded; absent when it recorded nothing. */
+  telemetry?: RunTelemetry;
 }) {
+  const effort = telemetry === undefined ? "" : telemetryLine(telemetry);
   const activity = state === undefined ? "ready" : agentStatus(agent, state);
   const current = state === undefined ? undefined : agentCurrentTask(agent, state);
   const queued = state === undefined ? [] : [...state.tasks.values()]
@@ -108,6 +113,7 @@ export function AgentPanel({
 
       <p className="dfConsoleSidebar__status"><Status stage={archived ? "archived" : activity} /></p>
       {queueHint === undefined ? null : <p className="dfConsoleSidebar__inherit">{queueHint}</p>}
+      {effort === "" ? null : <p className="dfConsoleSidebar__inherit" aria-label={`Recorded by the agent: ${effort}`}>{effort}</p>}
 
       {archived ? null : <div className="dfConsoleViewToggle" role="group" aria-label="Agent controls">
         <button type="button" aria-pressed={panel === "terminal"} onClick={() => selectPanel("terminal")}>Terminal</button>

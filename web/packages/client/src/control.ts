@@ -151,7 +151,9 @@ export type OperationalGraphBody = Readonly<{ project_id: string; digest: string
 export type GraphLocation = Readonly<{ repository_id: string; path: string; line?: number }>;
 export type OperationalNodeBody = Readonly<{ project_id: string; node_id: string; selectors: Readonly<Record<string, string>>; evidence: readonly Readonly<{ origin: "static" | "runtime"; source: string; detail?: string; confidence: string }>[]; sources: readonly GraphLocation[]; modules: readonly GraphLocation[]; observers: readonly string[] }>;
 export type RunPathsGetBody = { agent_id: string };
-export type RunPathsBody = { agent_id: string; run_id: string; paths: string[] };
+/** One run's recorded agent effort and spend: counts and cost, never content. */
+export type RunTelemetry = { tokens_in: number; tokens_out: number; cost_micro_usd: number; tool_calls: number; api_requests: number; quiet_seconds?: number };
+export type RunPathsBody = { agent_id: string; run_id: string; paths: string[]; telemetry?: RunTelemetry };
 export type AccountsDiscoverBody = { offset?: number };
 export type DiscoveredAccount = { provider: "claude_code" | "codex"; home: string; label: string; email: string; organization: string; default_model: string; default_reasoning_effort: string; linked_id: string; unavailable_reason?: string };
 export type AccountsBody = { accounts: DiscoveredAccount[]; next_offset?: number };
@@ -502,7 +504,7 @@ function validateBody(type: ControlType, body: unknown, wire: boolean): ControlB
     case "OPERATIONAL_NODE": return operationalNodeBody(body, wire);
     case "RUN_PATHS_GET": requireKeys(body, ["agent_id"], wire); return { agent_id: dynamicID(body.agent_id) };
     // No live run means no rooms, so an empty run identity carries no paths.
-    case "RUN_PATHS": requireKeys(body, ["agent_id", "run_id", "paths"], wire); { if (!Array.isArray(body.paths) || body.paths.length > MAX_ARRAY_ITEMS) malformed(); if (body.run_id === "" && body.paths.length !== 0) malformed(); return { agent_id: dynamicID(body.agent_id), run_id: body.run_id === "" ? "" : dynamicID(body.run_id), paths: body.paths.map((item) => boundedText(item, 1, MAX_TASK_TITLE_BYTES)) }; }
+    case "RUN_PATHS": requireKeys(body, ["agent_id", "run_id", "paths"], wire, ["telemetry"]); { if (!Array.isArray(body.paths) || body.paths.length > MAX_ARRAY_ITEMS) malformed(); if (body.run_id === "" && (body.paths.length !== 0 || present(body, "telemetry"))) malformed(); return { agent_id: dynamicID(body.agent_id), run_id: body.run_id === "" ? "" : dynamicID(body.run_id), paths: body.paths.map((item) => boundedText(item, 1, MAX_TASK_TITLE_BYTES)), ...(present(body, "telemetry") ? { telemetry: runTelemetry(body.telemetry, wire) } : {}) }; }
     case "ACCOUNTS_DISCOVER": requireKeys(body, [], wire, ["offset"]); { const offset = present(body, "offset") ? integer(body.offset, 0, Number.MAX_SAFE_INTEGER) : undefined; return offset === undefined ? {} : { offset }; }
     case "ACCOUNTS": requireKeys(body, ["accounts"], wire, ["next_offset"]); { if (!Array.isArray(body.accounts) || body.accounts.length > MAX_SNAPSHOT_ENTITIES) malformed(); const next_offset = present(body, "next_offset") ? integer(body.next_offset, 1, Number.MAX_SAFE_INTEGER) : undefined; return { accounts: body.accounts.map((item) => discoveredAccount(item, wire)), ...(next_offset === undefined ? {} : { next_offset }) }; }
     case "ACCOUNT_LINK": requireKeys(body, ["provider", "home", "label"], wire); return { provider: accountProvider(body.provider), home: accountHome(body.home), label: boundedText(body.label, 1, MAX_AGENT_NAME_BYTES) };
@@ -986,6 +988,13 @@ function capabilities(value: unknown): number { const result = integer(value, 0,
 function validID(value: string): boolean { return value.length > 0 && value.length <= 64 && [...value].every((character) => character.charCodeAt(0) >= 0x21 && character.charCodeAt(0) <= 0x7e); }
 function isControlType(value: unknown): value is ControlType { return typeof value === "string" && (CONTROL_TYPES as readonly string[]).includes(value); }
 function isObject(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null && !Array.isArray(value); }
+function runTelemetry(value: unknown, wire: boolean): RunTelemetry {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) malformed();
+  const item = value as Record<string, unknown>;
+  requireKeys(item, ["tokens_in", "tokens_out", "cost_micro_usd", "tool_calls", "api_requests"], wire, ["quiet_seconds"]);
+  const count = (key: string) => integer(item[key], 0, Number.MAX_SAFE_INTEGER);
+  return { tokens_in: count("tokens_in"), tokens_out: count("tokens_out"), cost_micro_usd: count("cost_micro_usd"), tool_calls: count("tool_calls"), api_requests: count("api_requests"), ...(present(item, "quiet_seconds") ? { quiet_seconds: count("quiet_seconds") } : {}) };
+}
 function present(value: Record<string, unknown>, key: string): boolean { return Object.prototype.hasOwnProperty.call(value, key); }
 /**
  * Every required member must be present and every member this build knows is

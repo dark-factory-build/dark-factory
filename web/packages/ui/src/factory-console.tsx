@@ -10,7 +10,7 @@ import { deriveProductionView, inProgressProduction, productionKey } from "./pro
 import { ProductionPanel, asTask } from "./production-panel.js";
 import { MissionsPanel } from "./missions-panel.js";
 import { RemoteInvitePanel } from "./remote-invite.js";
-import { needsYou, workRows } from "./console-view.js";
+import { agentTelemetry, needsYou, workRows } from "./console-view.js";
 import { IconButton } from "./icons.js";
 import { Badge, SectionHeader } from "./console-kit.js";
 import { SpriteEditor } from "./factory-scene/sprite-editor.js";
@@ -402,6 +402,7 @@ export function FactoryConsole({
                 terminalContent={terminalContent}
                 panel={agentPanel}
                 onPanel={onAgentPanel}
+                telemetry={agentTelemetry(agent, scopedState, runPaths)}
               />}
             </div>
             {inspectedTask === undefined ? null : <ConsoleDialog key={inspectedTask.id} label="Task details" title="Task" onClose={() => { if (relatedTask) setRelatedTask(undefined); else onSelectTask?.(undefined); }}>

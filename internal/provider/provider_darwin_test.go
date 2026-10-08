@@ -1889,7 +1889,7 @@ func TestWorkerEnvironmentExportsTracesToTheConfiguredReceiver(t *testing.T) {
 	want := []string{"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://127.0.0.1:43999/v1/traces", "OTEL_RESOURCE_ATTRIBUTES=deployment.environment.name=local"}
 	for _, kind := range []kernel.Provider{kernel.ProviderClaudeCode, kernel.ProviderCodex} {
 		installation, runtime, _ := nativeFixture(t, kind)
-		launch, err := Build(requestFor(t, kind, installation, runtime.WithTraceReceiver(43999), "", ""))
+		launch, err := Build(requestFor(t, kind, installation, runtime.WithTraceReceiver(43999, ""), "", ""))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1903,12 +1903,61 @@ func TestWorkerEnvironmentExportsTracesToTheConfiguredReceiver(t *testing.T) {
 		}
 		for _, other := range [][]string{
 			runtime.environmentForRole(kind, kernel.RoleWorker),
-			runtime.WithTraceReceiver(43999).environmentForRole(kind, kernel.RoleOrchestrator),
+			runtime.WithTraceReceiver(43999, "").environmentForRole(kind, kernel.RoleOrchestrator),
 		} {
 			for _, entry := range other {
 				if strings.HasPrefix(entry, "OTEL_") {
 					t.Fatalf("%s exported traces without a worker receiver: %q", kind, entry)
 				}
+			}
+		}
+		// Without a run id the agent CLI's own telemetry stays off.
+		if slices.ContainsFunc(launch.Environment(), func(entry string) bool { return strings.HasPrefix(entry, "CLAUDE_CODE_ENABLE_TELEMETRY") }) ||
+			slices.ContainsFunc(launch.Argv(), func(arg string) bool { return strings.HasPrefix(arg, "otel.") }) {
+			t.Fatalf("%s enabled agent telemetry without a run id: %q %q", kind, launch.Environment(), launch.Argv())
+		}
+	}
+}
+
+// A worker's agent CLI exports its own metrics and logs to the receiver, with
+// the run id factoryd attributes them by; prompt content stays off.
+func TestWorkerAgentTelemetryNamesItsRun(t *testing.T) {
+	const run = "0123456789abcdef0123456789abcdef"
+	resource := "OTEL_RESOURCE_ATTRIBUTES=deployment.environment.name=local,dark_factory.run.id=" + run
+	for _, test := range []struct {
+		kind kernel.Provider
+		env  []string
+		argv []string
+	}{
+		{kernel.ProviderClaudeCode, []string{resource, "CLAUDE_CODE_ENABLE_TELEMETRY=1", "OTEL_METRICS_EXPORTER=otlp", "OTEL_LOGS_EXPORTER=otlp", "OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf",
+			"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT=http://127.0.0.1:43999/v1/metrics", "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=http://127.0.0.1:43999/v1/logs"}, nil},
+		{kernel.ProviderCodex, []string{resource}, []string{`otel.exporter={otlp-http={endpoint="http://127.0.0.1:43999/v1/logs",protocol="binary"}}`,
+			`otel.metrics_exporter={otlp-http={endpoint="http://127.0.0.1:43999/v1/metrics",protocol="binary"}}`, "otel.log_user_prompt=false"}},
+	} {
+		installation, runtime, _ := nativeFixture(t, test.kind)
+		launch, err := Build(requestFor(t, test.kind, installation, runtime.WithTraceReceiver(43999, run), "", ""))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, entry := range test.env {
+			if !slices.Contains(launch.Environment(), entry) {
+				t.Fatalf("%s worker environment lacks %q: %q", test.kind, entry, launch.Environment())
+			}
+		}
+		for _, entry := range test.argv {
+			if index := slices.Index(launch.Argv(), entry); index < 1 || launch.Argv()[index-1] != "-c" {
+				t.Fatalf("%s worker argv lacks -c %q: %q", test.kind, entry, launch.Argv())
+			}
+		}
+		if test.kind == kernel.ProviderCodex && slices.ContainsFunc(launch.Environment(), func(entry string) bool { return strings.HasPrefix(entry, "CLAUDE_CODE_") }) {
+			t.Fatalf("codex worker carries Claude Code switches: %q", launch.Environment())
+		}
+		if _, err := runner.PrepareCommittedExecSpec(launch.Executable(), launch.Argv(), launch.Environment(), t.TempDir()); err != nil {
+			t.Fatalf("runner refused the %s worker telemetry: %v", test.kind, err)
+		}
+		for _, entry := range runtime.WithTraceReceiver(43999, run).environmentForRole(test.kind, kernel.RoleOrchestrator) {
+			if strings.HasPrefix(entry, "OTEL_") || strings.HasPrefix(entry, "CLAUDE_CODE_ENABLE") {
+				t.Fatalf("%s orchestrator exported telemetry: %q", test.kind, entry)
 			}
 		}
 	}

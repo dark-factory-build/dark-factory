@@ -5,7 +5,7 @@ import { act, create } from "react-test-renderer";
 import { FactoryFloor } from "../dist/src/console-screens.js";
 import { projectGraph, projectProposals, projectFloor } from "../dist/src/console-view.js";
 import { deriveProductionView, productionKey } from "../dist/src/production-view.js";
-import { layoutScene } from "../dist/src/factory-scene/scene.js";
+import { layoutScene, recordedEffort, telemetryLine } from "../dist/src/factory-scene/scene.js";
 import { hex, node as graphNode, unit, graphWith, observed, quiet } from "../../../fixtures/graph.mjs";
 
 const project = { id: "project", name: "Factory" }, projects = new Map([[project.id, project]]);
@@ -87,6 +87,30 @@ test("a worker stands at the machine whose path matches the run path, else at th
   assert.equal(place("web/src/app.ts").nodeId, hex(2));
   // A stale sample (another revision) is no evidence at all.
   assert.equal(projectFloor(state, prepared, new Map([["actor", { taskId: "task", taskRevision: 2n, runId: "run", projectId: "project", paths: ["web/x.ts"] }]])).workers[0].location, "unobserved");
+});
+
+test("a worker carries its run's recorded effort only when the run recorded some", () => {
+  const prepared = prepare(graphWith(base(2)));
+  const state = { projects, agents: new Map([["actor", { id: "actor", project_id: "project", name: "Worker", role: "worker" }]]), tasks: new Map([["task", { id: "task", project_id: "project", assigned_agent_id: "actor", status: "running", revision: 1n, title: "Edit" }]]), humanRequests: new Map() };
+  const worker = (telemetry) => projectFloor(state, prepared, new Map([["actor", { taskId: "task", taskRevision: 1n, runId: "run", projectId: "project", paths: [], ...(telemetry === undefined ? {} : { telemetry }) }]])).workers[0];
+  const silent = worker();
+  assert.equal("telemetry" in silent, false, "no telemetry is not zero telemetry");
+  assert.equal(silent.activity, "busy");
+  const recorded = { tokens_in: 12000, tokens_out: 400, cost_micro_usd: 310000, tool_calls: 18, api_requests: 9, quiet_seconds: 12 };
+  const busy = worker(recorded);
+  assert.deepEqual(busy.telemetry, recorded);
+  assert.equal(busy.activity, "busy");
+  assert.equal(telemetryLine(recorded), "12.4k tokens · $0.31 · 18 tool calls");
+  assert.equal(recordedEffort(recorded), "\n12.4k tokens · $0.31 · 18 tool calls");
+  // Recorded silence makes a busy worker wait, and the tooltip says why.
+  const stalled = worker({ ...recorded, quiet_seconds: 300 });
+  assert.equal(stalled.activity, "waiting");
+  assert.match(recordedEffort(stalled.telemetry), /No tool call or API request recorded for 5m$/);
+  // A recorded zero is left out rather than shown.
+  assert.equal(telemetryLine({ tokens_in: 0, tokens_out: 0, cost_micro_usd: 0, tool_calls: 0, api_requests: 1 }), "");
+  assert.equal(telemetryLine({ tokens_in: 900, tokens_out: 0, cost_micro_usd: 4000, tool_calls: 1, api_requests: 1 }), "900 tokens · <$0.01 · 1 tool call");
+  // A sample for another task revision lends the worker nothing.
+  assert.equal("telemetry" in projectFloor(state, prepared, new Map([["actor", { taskId: "task", taskRevision: 2n, runId: "run", projectId: "project", paths: [], telemetry: recorded }]])).workers[0], false);
 });
 
 test("flows join the machines that picture their endpoints, keep the busiest of parallel edges and skip a machine's own", () => {

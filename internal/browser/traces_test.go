@@ -4,7 +4,10 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"errors"
+	"fmt"
 	"net/http"
+	"slices"
 	"testing"
 
 	"github.com/dark-factory-build/dark-factory/internal/opgraph"
@@ -92,6 +95,86 @@ func TestTracesAcceptOnlyLocalOTLP(t *testing.T) {
 	}
 	if len(backend.received) != 3 {
 		t.Fatalf("refused exports reached the backend: %d received", len(backend.received))
+	}
+}
+
+type agentTelemetryBackend struct {
+	*fakeBackend
+	received []string
+}
+
+func (backend *agentTelemetryBackend) ReceiveAgentTelemetry(path string, body []byte, protobuf bool) error {
+	if string(body) == "refuse" {
+		return errors.New("malformed")
+	}
+	backend.received = append(backend.received, fmt.Sprint(path, " ", protobuf, " ", string(body)))
+	return nil
+}
+
+// Agent metrics and logs take the same local-only path as traces: no page, no
+// simple form type, POST only, gzip decoded before the backend sees it.
+func TestAgentTelemetryAcceptsOnlyLocalOTLP(t *testing.T) {
+	backend := &agentTelemetryBackend{fakeBackend: newFakeBackend()}
+	server, _ := startHeldClockServer(t, backend)
+	send := func(method, path, contentType, encoding, origin string, body []byte) int {
+		request, _ := http.NewRequest(method, "http://"+server.Addr()+path, bytes.NewReader(body))
+		request.Header.Set("Content-Type", contentType)
+		if encoding != "" {
+			request.Header.Set("Content-Encoding", encoding)
+		}
+		if origin != "" {
+			request.Header.Set("Origin", origin)
+		}
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response.Body.Close()
+		return response.StatusCode
+	}
+	var zipped bytes.Buffer
+	writer := gzip.NewWriter(&zipped)
+	_, _ = writer.Write([]byte("export"))
+	_ = writer.Close()
+	for _, path := range []string{MetricsPath, LogsPath} {
+		backend.received = nil
+		if status := send(http.MethodPost, path, "application/json", "", "", []byte("{}")); status != http.StatusOK {
+			t.Fatalf("%s JSON = %d", path, status)
+		}
+		if status := send(http.MethodPost, path, "application/x-protobuf", "gzip", "", zipped.Bytes()); status != http.StatusOK {
+			t.Fatalf("%s gzipped protobuf = %d", path, status)
+		}
+		if want := []string{path + " false {}", path + " true export"}; !slices.Equal(backend.received, want) {
+			t.Fatalf("%s received %q, want %q", path, backend.received, want)
+		}
+		for _, refused := range []struct {
+			method, contentType, origin, body string
+			status                            int
+		}{
+			{http.MethodPost, "application/x-protobuf", "https://evil.example", "export", http.StatusForbidden},
+			{http.MethodPost, "text/plain", "", "export", http.StatusUnsupportedMediaType},
+			{http.MethodGet, "application/json", "", "", http.StatusMethodNotAllowed},
+			{http.MethodPost, "application/json", "", "refuse", http.StatusBadRequest},
+		} {
+			if status := send(refused.method, path, refused.contentType, "", refused.origin, []byte(refused.body)); status != refused.status {
+				t.Fatalf("%s %+v = %d", path, refused, status)
+			}
+		}
+		if len(backend.received) != 2 {
+			t.Fatalf("%s refused exports reached the backend: %q", path, backend.received)
+		}
+	}
+	// A backend without the capability has no such endpoint.
+	plain, _ := startHeldClockServer(t, newFakeBackend())
+	request, _ := http.NewRequest(http.MethodPost, "http://"+plain.Addr()+MetricsPath, bytes.NewReader([]byte("{}")))
+	request.Header.Set("Content-Type", "application/json")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusNotFound {
+		t.Fatalf("metrics without a receiver = %d", response.StatusCode)
 	}
 }
 
