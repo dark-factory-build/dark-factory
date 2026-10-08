@@ -423,24 +423,21 @@ jobs:
       - name: Verify the adversarial review verdict
         env:
           GH_TOKEN: ${{ github.token }}
+          # Numeric publisher ids trusted beyond repository maintainers, set
+          # by administrators as a repository variable, never in this file.
+          DF_REVIEW_TRUSTED_PUBLISHERS: ${{ vars.DF_REVIEW_TRUSTED_PUBLISHERS }}
         run: |
           set -euo pipefail
           # Both gating events name the pull request in GITHUB_REF, so this
           # job does not branch on the event.
-          # ponytail: the default branch predates the Go gate only while the
-          # change that adds it merges; delete the shell fallback after that.
           gate="${RUNNER_TEMP}/gate"
-          if [ -d internal/review/gate ]; then
-            go build -o "${gate}" ./internal/review/gate
-          else
-            cp scripts/verify-adversarial-review.sh "${gate}"
-          fi
+          go build -o "${gate}" ./internal/review/gate
           number="$("${gate}" --pull-number)"
           head="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${number}" --jq '.head.sha')"
-          # Projection only: four fields per review and no decision, so the
+          # Projection only: five fields per review and no decision, so the
           # logic that gates every merge stays somewhere a test can drive it.
           gh api "repos/${GITHUB_REPOSITORY}/pulls/${number}/reviews" --paginate \
-            --jq '.[] | [.commit_id, .state, (.user.id | tostring), ((.body // "") | gsub("[\n\r\t]"; " "))] | @tsv' \
+            --jq '.[] | [.commit_id, .state, (.user.id | tostring), ((.body // "") | gsub("[\n\r\t]"; " ")), .author_association] | @tsv' \
             >"${RUNNER_TEMP}/reviews.tsv"
           DF_REVIEW_HEAD_SHA="${head}" DF_REVIEW_REVIEWS="${RUNNER_TEMP}/reviews.tsv" \
             "${gate}"

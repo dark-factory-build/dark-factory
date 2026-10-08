@@ -94,19 +94,14 @@ func run(args []string, env func(string) string, stdout, stderr io.Writer) int {
 			continue
 		}
 		field := strings.Split(line, "\t")
-		// ponytail: interim. A four-field record predates the trust field and
-		// trusts every publisher, as before, while the workflow that emits five
-		// fields merges; that change deletes this mode.
-		if len(field) != 4 && len(field) != 5 {
+		if len(field) != 5 {
 			return fail("malformed review record")
 		}
 		commit, state, author, body := field[0], field[1], field[2], field[3]
-		trust := len(field) == 4 || trusted[author]
-		if len(field) == 5 {
-			switch field[4] {
-			case "OWNER", "MEMBER", "COLLABORATOR":
-				trust = true
-			}
+		trust := trusted[author]
+		switch field[4] {
+		case "OWNER", "MEMBER", "COLLABORATOR":
+			trust = true
 		}
 		// GitHub supplies the authenticated publisher identity.
 		if !digits.MatchString(author) {
