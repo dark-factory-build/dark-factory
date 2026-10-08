@@ -76,6 +76,6 @@ func run() error {
 	fmt.Fprintf(&out, "==== Go standard library and runtime\n\n-- LICENSE\n\n%s\n", golang)
 	out.WriteString("Embedded tree-sitter WebAssembly builds (internal/opgraph/treesitter)\n\n")
 	out.Write(grammars)
-	_, err = os.Stdout.WriteString(out.String())
+	_, err = os.Stdout.WriteString(strings.TrimRight(out.String(), "\n") + "\n")
 	return err
 }
