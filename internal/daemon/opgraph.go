@@ -19,8 +19,9 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/opgraph"
 )
 
-// graphFreshness bounds how stale a served graph may be, avoiding repeated
-// archive reads inside this window.
+// graphFreshness bounds how stale a graph ProjectGraph serves may be, avoiding
+// repeated archive reads inside this window. PlantGraph alone may serve an
+// older one while its refresh runs.
 const graphFreshness = 30 * time.Second
 
 // graphSource records the configured integrated target each repository was
@@ -48,8 +49,20 @@ type graphSnapshot struct {
 }
 
 // ProjectGraph returns the static Operational Graph of a project's
-// repositories, regenerated from their integrated targets.
+// repositories, regenerated from their integrated targets and never older
+// than graphFreshness: knowledge writes are checked against it.
 func (daemon *Daemon) ProjectGraph(ctx context.Context, projectID kernel.ProjectID) (projectGraph, error) {
+	return daemon.projectGraph(ctx, projectID, false)
+}
+
+// PlantGraph is ProjectGraph for drawing the plant: once a graph exists, an
+// older one is served at once while its refresh runs, so a build slower than
+// a browser call never blanks the plant.
+func (daemon *Daemon) PlantGraph(ctx context.Context, projectID kernel.ProjectID) (projectGraph, error) {
+	return daemon.projectGraph(ctx, projectID, true)
+}
+
+func (daemon *Daemon) projectGraph(ctx context.Context, projectID kernel.ProjectID, stale bool) (projectGraph, error) {
 	if daemon == nil || daemon.store == nil {
 		return projectGraph{}, fmt.Errorf("%w: invalid daemon", kernel.ErrInvalidValue)
 	}
@@ -75,9 +88,10 @@ func (daemon *Daemon) ProjectGraph(ctx context.Context, projectID kernel.Project
 		daemon.graphMu.Unlock()
 		return held.value, nil
 	}
+	// Only a build of this configuration answers this caller.
 	build := daemon.graphBuilds[projectID]
-	if build == nil {
-		build = &graphBuild{done: make(chan struct{})}
+	if build == nil || build.configuration != configuration {
+		build = &graphBuild{done: make(chan struct{}), configuration: configuration}
 		if daemon.graphBuilds == nil {
 			daemon.graphBuilds = make(map[kernel.ProjectID]*graphBuild)
 		}
@@ -85,8 +99,7 @@ func (daemon *Daemon) ProjectGraph(ctx context.Context, projectID kernel.Project
 		go daemon.buildProjectGraph(projectID, repositories, configuration, now, build)
 	}
 	daemon.graphMu.Unlock()
-	// A stale graph is served while its refresh runs.
-	if usable {
+	if usable && stale {
 		return held.value, nil
 	}
 	select {
@@ -98,15 +111,16 @@ func (daemon *Daemon) ProjectGraph(ctx context.Context, projectID kernel.Project
 	held, ok = daemon.graphs[projectID]
 	daemon.graphMu.Unlock()
 	if build.err != nil || !ok || held.configuration != configuration {
-		return projectGraph{}, errors.Join(build.err, errors.New("the project's graph is being rebuilt"))
+		return projectGraph{}, errors.Join(build.err, errors.New("the project's graph changed while it was built"))
 	}
 	return held.value, nil
 }
 
 // graphBuild is one running graph build; err is set before done closes.
 type graphBuild struct {
-	done chan struct{}
-	err  error
+	done          chan struct{}
+	configuration string
+	err           error
 }
 
 // graphBuildLimit bounds one build. A build reads every repository's archive
@@ -126,7 +140,9 @@ func (daemon *Daemon) buildProjectGraph(projectID kernel.ProjectID, repositories
 		daemon.graphs[projectID] = graphSnapshot{value: result, at: at, configuration: configuration}
 	}
 	build.err = err
-	delete(daemon.graphBuilds, projectID)
+	if daemon.graphBuilds[projectID] == build {
+		delete(daemon.graphBuilds, projectID)
+	}
 	daemon.graphMu.Unlock()
 	close(build.done)
 }

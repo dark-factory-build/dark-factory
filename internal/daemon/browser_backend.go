@@ -800,7 +800,7 @@ func (backend *browserBackend) liveGraph(ctx context.Context, rawClient [browser
 	if err != nil {
 		return opgraph.Live{}, projectGraph{}, browser.ErrStale
 	}
-	graph, err := backend.owner.ProjectGraph(ctx, projectID)
+	graph, err := backend.owner.PlantGraph(ctx, projectID)
 	if err != nil {
 		return opgraph.Live{}, projectGraph{}, mapBrowserError(err)
 	}
