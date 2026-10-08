@@ -61,3 +61,23 @@ func TestLocatePrefersSpecificModulesAndRunningUnits(t *testing.T) {
 		}
 	}
 }
+
+// Public names come from what is already public (runtime, trigger, the unit's
+// runtime) and count per name, so a CI check never reads as a background loop.
+func TestPublicNamesSayWhatAStationIs(t *testing.T) {
+	graph := Graph{Nodes: []Node{
+		{ID: "ci", Kind: Processor, Runtime: "ci"}, {ID: "edge", Kind: Processor, Runtime: "worker"},
+		{ID: "check", Kind: Job, Unit: "ci"}, {ID: "loop", Kind: Job, Unit: "edge"},
+		{ID: "route", Kind: Ingress, Unit: "edge", Trigger: "request"}, {ID: "cron", Kind: Ingress, Unit: "edge", Trigger: "timer"},
+		{ID: "api", Kind: External},
+	}}
+	got := map[string]bool{}
+	for _, node := range Public(Overlay("s", graph, nil, nil, nil, 0, minute), []byte("k"), nil, nil, 0).Nodes {
+		got[node.Label] = true
+	}
+	for _, want := range []string{"CI pipeline 1", "Edge function 1", "Check 1", "Background task 1", "Entrance 1", "Timer 1", "Outside service 1"} {
+		if !got[want] {
+			t.Errorf("missing %q in %v", want, got)
+		}
+	}
+}

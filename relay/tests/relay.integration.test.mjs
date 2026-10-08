@@ -858,17 +858,19 @@ test('the ingest bucket bounds bytes, not requests', async () => {
 	const { secret, digest } = ingestSecret();
 	host.tap.send(encodeRecord(RECORD_INGEST_KEY, 0, digest));
 	await host.tap.quiet(100);
-	// Many small pushes pass; 4 MiB of large ones exhaust the burst.
+	// Many small pushes pass; 4 MiB of large ones exhaust the burst. The test
+	// worker never refills, so the fourth 1 MiB push finds under 1 MiB left
+	// however slowly the first three arrive.
 	for (let index = 0; index < 20; index += 1) assert.equal((await push(node, secret)).status, 200);
 	const large = Buffer.alloc(1024 * 1024);
 	// A refusal does not read the body, so the upload may be cut instead of
 	// answered 429.
 	const statuses = [];
-	for (let index = 0; index < 6; index += 1) {
+	for (let index = 0; index < 4; index += 1) {
 		statuses.push(await push(node, secret, { body: large }).then((response) => response.status, () => 'refused'));
 	}
 	assert.deepEqual(statuses.slice(0, 3), [200, 200, 200]);
-	assert.ok([429, 'refused'].includes(statuses[5]), String(statuses));
+	assert.ok([429, 'refused'].includes(statuses[3]), String(statuses));
 });
 
 test('a malformed ingest key ends the host', async () => {

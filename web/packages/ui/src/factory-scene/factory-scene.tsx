@@ -641,7 +641,6 @@ export function FactoryScene({ proposals, crates, tools, onLoadNode, onInvestiga
           <rect width="24" height="12" fill="#41494a" />
           <path d="M0 0h24 M0 6h24 M12 0v6 M0 6v6 M24 6v6" stroke="#20292d" strokeWidth="2" />
         </pattern>
-        <pattern id="df-blueprint" patternUnits="userSpaceOnUse" width="6" height="6"><rect width="6" height="6" fill="#4cc3e60f" /><path d="M0 6h6M6 0v6" stroke="#4cc3e633" strokeWidth="1" /></pattern>
         <pattern id="df-fog" patternUnits="userSpaceOnUse" width="6" height="6" patternTransform="rotate(45)"><rect width="6" height="6" fill="#2c3139" /><path d="M0 0v6" stroke="#4a515b" strokeWidth="2" /></pattern>
         <pattern id="df-hazard" patternUnits="userSpaceOnUse" width="12" height="12" patternTransform="rotate(45)"><rect width="12" height="12" fill="#1a1d22" /><rect width="6" height="12" fill="#e6b93a" /></pattern>
         <radialGradient id="df-lamplight" cx="50%" cy="45%" r="60%">
@@ -666,7 +665,7 @@ export function FactoryScene({ proposals, crates, tools, onLoadNode, onInvestiga
           {hall === undefined ? null : <g className="dfFactoryScene__target" {...sceneAction(() => selectEntity(hall.id))} data-tooltip={machineInfo({ id: hall.id, kind: "processor", label: hall.label, reading: hall.reading }, hall)} aria-label={`Inspect ${hall.label}`}>
             <rect className="dfFactoryScene__focus dfPlant__plate" x={room.x + 8} y={room.y + 12} width={Math.min(room.width - 44, 6 * Math.min(hall.label.length, Math.floor((room.width - 60) / 6)) + 14)} height="20" rx="2" />
             <text x={room.x + 14} y={room.y + 26} className="dfPlant__plateText" fontSize="10">{shortLabel(hall.label, Math.floor((room.width - 60) / 6))}</text>
-            {hall.runtime === undefined ? null : <text x={room.x + 10} y={room.y + 42} className="dfPlant__small" fontSize="7">{hall.runtime}</text>}
+            {hall.runtime === undefined ? null : <text x={room.x + 14 + Math.min(room.width - 44, 6 * Math.min(hall.label.length, Math.floor((room.width - 60) / 6)) + 14)} y={room.y + 25} className="dfPlant__small" fontSize="7">{RUNTIME_TEXT[hall.runtime]}</text>}
             {hall.reading.deployedAt === undefined || observedAt - hall.reading.deployedAt > DAY ? null : <g data-changeover={hall.reading.deployedAt}>
               {observedAt - hall.reading.deployedAt < CHANGEOVER ? <path d={`M${room.x + 6} ${room.y + 10}h${room.width - 12}M${room.x + 10} ${room.y + 10}v${room.height - 20}M${room.x + room.width - 10} ${room.y + 10}v${room.height - 20}`} className="dfPlant__scaffold" /> : null}
               <rect x={room.x + room.width - 30} y={room.y + 14} width="22" height="14" className="dfPlant__changed" /><text x={room.x + room.width - 19} y={room.y + 24} textAnchor="middle" className="dfPlant__changedText" fontSize="10">Δ</text>
@@ -698,7 +697,7 @@ export function FactoryScene({ proposals, crates, tools, onLoadNode, onInvestiga
             <rect x={gate.x} y={gate.y} width={gate.width} height={gate.height} className={machine.reading.evidence === "runtime" ? "dfPlant__gate dfPlant__gate--runtime" : "dfPlant__gate"} />
             <rect x={gate.x + 2} y={gate.y + gate.height / 2 - 2} width="3" height="4" className="lamp" />
             <text x={gate.x + gate.width + 6} y={gate.y + 12} className="dfPlant__label" fontSize="8">{shortLabel(machine.label, 20)}</text>
-            <text x={gate.x + gate.width + 6} y={gate.y + 23} className="dfPlant__small" fontSize="7">{machine.reading.evidence === "runtime" ? "seen, not in code" : machine.reading.ratePerHour > 0 ? `${rate(machine.reading.ratePerHour)} · caller side` : "opaque"}</text>
+            <text x={gate.x + gate.width + 6} y={gate.y + 23} className="dfPlant__small" fontSize="7">{machine.reading.evidence === "runtime" ? "seen, not in code" : machine.reading.ratePerHour > 0 ? `${rate(machine.reading.ratePerHour)} · measured from our side` : "can't see inside"}</text>
           </g>;
         })}
       </g>
@@ -865,6 +864,10 @@ function rate(perHour: number) {
   return perHour >= 120 ? `${Math.round(perHour / 60)}/min` : `${perHour}/h`;
 }
 
+// What a unit's runtime is, in words that never read as the factory's own workers.
+const RUNTIME_TEXT: Record<NonNullable<SceneHall["runtime"]>, string> = {
+  browser: "runs in the browser", server: "web server", worker: "edge function", process: "always-on service", cli: "command-line tool", ci: "CI pipeline",
+};
 const OBSERVATION_TEXT: Record<SceneReading["observation"], string> = {
   observed: "Observed", quiet: "Observed, quiet", partial: "Partly observed", stale: "Stale: no current reading", unobserved: "No telemetry: activity unknown", opaque: "External: its own state cannot be seen",
 };
@@ -882,16 +885,17 @@ function machineInfo(machine: SceneMachine, hall?: SceneHall) {
 
 function Coverage({ summary }: { summary: NonNullable<SceneGraph["summary"]> }) {
   return <p className="dfPlantCoverage" role="status" aria-label="Observation coverage">
-    <strong>{summary.inferred}</strong> inferred · <strong className="dfPlantCoverage--observed">{summary.observed + summary.quiet}</strong> observed · <strong className="dfPlantCoverage--partial">{summary.partial}</strong> partial · <strong className="dfPlantCoverage--unobserved">{summary.unobserved}</strong> unobserved
-    <small> · {summary.quiet} quiet · {summary.stale} stale · {summary.opaque} external{summary.runtime_only > 0 ? ` · ${summary.runtime_only} runtime-only` : ""}{summary.contradicted > 0 ? ` · ${summary.contradicted} contradicted` : ""}</small>
+    {(["observed", "quiet", "partial", "stale", "unobserved", "opaque"] as const).map((key, index) => <span key={key}>{index === 0 ? "" : " · "}<strong className={`dfPlantCoverage--${key}`}>{summary[key]}</strong> {OBSERVATION_TEXT[key].split(":")[0]!.toLowerCase()}</span>)}
+    <small>{summary.runtime_only > 0 ? ` · ${summary.runtime_only} runtime-only` : ""}{summary.contradicted > 0 ? ` · ${summary.contradicted} contradicted` : ""}</small>
   </p>;
 }
 
 /** One machine, pictured by its kind; its observation and state are its paint, lamp and motion. */
 function Station({ item, machine, selected, close }: { item: RoomContent; machine: SceneMachine; selected: boolean; close: boolean }) {
   const { x, y, width: w, height: h } = item, reading = machine.reading;
-  const lamp = <g><rect x={x + w - 9} y={y + 3} width="3" height="4" className="lamp" /><rect x={x + w - 6} y={y + 3} width="3" height="4" className="lamp l2" /></g>;
-  const quarter = <rect x={x + w / 2} y={y} width={w / 2} height={h / 2} className="pq" />;
+  // A cell's body is its base; every other station carries its lamp at the top.
+  const ly = item.shape === "cell" ? y + h - 7 : y + 3;
+  const lamp = <g><rect x={x + w - 9} y={ly} width="3" height="4" className="lamp" /><rect x={x + w - 6} y={ly} width="3" height="4" className="lamp l2" /></g>;
   const scrap = reading.errorPermille > 0 && (reading.observation === "observed" || reading.observation === "partial")
     ? <g data-scrap={reading.errorPermille}><rect x={x + w + 2} y={y + h - 14} width="10" height="14" className="dfPlant__bin" /><rect x={x + w + 4} y={y + h - 2 - Math.max(1, Math.round(10 * reading.errorPermille / 1000))} width="6" height={Math.max(1, Math.round(10 * reading.errorPermille / 1000))} className="scrap" /></g> : null;
   // Latency is dwell: a slow machine holds more work in its window.
@@ -909,20 +913,19 @@ function Station({ item, machine, selected, close }: { item: RoomContent; machin
   let body: ReactNode;
   switch (item.shape) {
     case "line": body = <g><rect x={x + 3} y={y + h} width={w - 2} height="3" className="shd" /><rect x={x} y={y} width={w} height={h} className="m" /><rect x={x + 1} y={y + 1} width={w - 2} height="4" className="mh" />
-      {window(x + 8, y + 12, w - 30, h - 22)}<rect x={x + w - 18} y={y + 12} width="10" height={h - 22} className="md" />{lamp}{quarter}
+      {window(x + 8, y + 12, w - 30, h - 22)}<rect x={x + w - 18} y={y + 12} width="10" height={h - 22} className="md" />{lamp}
       <text x={x + 4} y={y + h + 12} className="dfPlant__label" fontSize="8">main line</text></g>; break;
-    case "dock": body = <g><rect x={x} y={y} width={w} height={h} className="dock" />{[0, 1, 2].map((index) => <rect key={index} x={x + 3 + index * 6} y={y + h - 5} width="4" height="3" className="chev" />)}<rect x={x + w - 14} y={y + 4} width="10" height={h - 8} className="win" />{lamp}{quarter}</g>; break;
+    case "dock": body = <g><rect x={x} y={y} width={w} height={h} className="dock" />{[0, 1, 2].map((index) => <rect key={index} x={x + 3 + index * 6} y={y + h - 5} width="4" height="3" className="chev" />)}<rect x={x + w - 14} y={y + 4} width="10" height={h - 8} className="win" />{lamp}</g>; break;
     case "manifold": {
       const routes = machine.routes ?? [], rows = Math.floor((h - 4) / 5);
       const lines = routes.length > rows ? [...routes.slice(0, rows - 1).map((route) => shortLabel(route, 14)), `+${routes.length - rows + 1} more`] : routes.map((route) => shortLabel(route, 14));
       body = <g><rect x={x} y={y} width={w} height={h} className="m" />{close && lines.length > 0
         ? <g data-manifold-routes="">{lines.map((line, index) => <text key={index} x={x + 3} y={y + 7 + index * 5} className="dfPlant__small" fontSize="4">{line}</text>)}</g>
-        : [0, 1, 2, 3].map((index) => <rect key={index} x={x + 4} y={y + 5 + index * 8} width={w - 18} height="4" className="dock" />)}{lamp}{quarter}
-      <text x={x + w / 2} y={y + h + 10} textAnchor="middle" className="dfPlant__small" fontSize="7">{machine.represented?.length} routes</text></g>; break;
+        : [0, 1, 2, 3].map((index) => <rect key={index} x={x + 4} y={y + 5 + index * 8} width={w - 18} height="4" className="dock" />)}{lamp}</g>; break;
     }
     case "clock": body = <g><circle cx={x + w / 2} cy={y + h / 2} r={w / 2 - 1} className="m" /><circle cx={x + w / 2} cy={y + h / 2} r={w / 2 - 4} className="win" /><path d={`M${x + w / 2} ${y + h / 2}v-6m0 6h5`} className="dfPlant__hand" /></g>; break;
-    case "cell": body = <g><rect x={x} y={y + h - 10} width={w} height="10" className="m" /><rect x={x + w / 2 - 3} y={y + 4} width="6" height={h - 14} className="md arm" /><rect x={x + w / 2 - 8} y={y + 2} width="16" height="5" className="mh arm" />{lamp}{quarter}</g>; break;
-    case "silo": body = <g><rect x={x + 2} y={y + h} width={w - 2} height="3" className="shd" /><rect x={x + 3} y={y} width={w - 6} height={h} className="m" /><rect x={x} y={y + 3} width={w} height={h - 6} className="m" /><rect x={x + 3} y={y + 2} width={w - 6} height="3" className="mh" />{window(x + 6, y + 10, w - 12, 8)}{quarter}</g>; break;
+    case "cell": body = <g><rect x={x} y={y + h - 10} width={w} height="10" className="m" /><rect x={x + w / 2 - 3} y={y + 4} width="6" height={h - 14} className="md arm" /><rect x={x + w / 2 - 8} y={y + 2} width="16" height="5" className="mh arm" />{lamp}</g>; break;
+    case "silo": body = <g><rect x={x + 2} y={y + h} width={w - 2} height="3" className="shd" /><rect x={x + 3} y={y} width={w - 6} height={h} className="m" /><rect x={x} y={y + 3} width={w} height={h - 6} className="m" /><rect x={x + 3} y={y + 2} width={w - 6} height="3" className="mh" />{window(x + 6, y + 10, w - 12, 8)}{lamp}</g>; break;
     case "conveyor": body = <g><path d={`M${x} ${y + h / 2}h${w}`} className="b-base" />{window(x + 4, y + 2, w - 8, h - 4)}</g>; break;
     default: body = <g><rect x={x} y={y} width={w} height={h} className="crate" /><text x={x + w / 2} y={y + h / 2 + 3} textAnchor="middle" className="qmark" fontSize="8">?</text></g>;
   }
@@ -951,8 +954,8 @@ function Belt({ belt }: { belt: BeltRoute }) {
 }
 
 /**
- * A hall's own intake: the unit's reading carried from its door to its main
- * line. A source that counts traffic per service but not per route (a
+ * A hall's own intake: the unit's reading carried from its only dock, else
+ * its door, to its main line. A source that counts traffic per service but not per route (a
  * platform's per-script analytics) can say a unit is busy without saying
  * which machine handled it, so the hall moves while its machines stay
  * partial. A unit with no known state has no intake drawn at all.
@@ -962,6 +965,12 @@ function hallIntake(layout: SceneLayout, halls: readonly SceneHall[]): readonly 
     const room = layout.rooms.find((candidate) => candidate.id === hall.id);
     const line = room?.contents.find((item) => item.entityId === hall.id);
     if (room === undefined || line === undefined || hall.reading.state === "unknown") return [];
+    // One dock (or the manifold that folds them all) is where every arrival comes in; with several, which one is unknown.
+    const [dock, other] = room.contents.filter((item) => item.shape === "manifold" || item.shape === "dock");
+    if (dock !== undefined && other === undefined) {
+      const sx = dock.x + dock.width, sy = dock.y + dock.height / 2, mx = (sx + line.x) / 2, ey = line.y + line.height / 2;
+      return [{ key: `intake ${hall.id}`, kind: "intake", reading: hall.reading, points: [{ x: sx, y: sy }, { x: mx, y: sy }, { x: mx, y: ey }, { x: line.x, y: ey }] }];
+    }
     const x = line.x + line.width / 2, below = line.y + line.height;
     return [{ key: `intake ${hall.id}`, kind: "intake", reading: hall.reading, points: [room.door, { x: room.door.x, y: below + 8 }, { x, y: below + 8 }, { x, y: below }] }];
   });
@@ -986,6 +995,11 @@ function routeFlows(layout: SceneLayout, flows: readonly SceneFlow[]): readonly 
     const key = `${flow.from} ${flow.to}`;
     if (from.item && to.item && from.room === to.room) {
       const a = center(from.item), b = center(to.item);
+      // A cell stands on its base above the line, so its belt joins top and bottom; others join side to side.
+      if (from.item.shape === "cell" || to.item.shape === "cell") {
+        const sy = a.y < b.y ? from.item.y + from.item.height : from.item.y, ey = a.y < b.y ? to.item.y : to.item.y + to.item.height;
+        return [{ key, kind: flow.kind, reading: flow.reading, points: [{ x: a.x, y: sy }, { x: a.x, y: (sy + ey) / 2 }, { x: b.x, y: (sy + ey) / 2 }, { x: b.x, y: ey }] }];
+      }
       const sx = a.x < b.x ? from.item.x + from.item.width : from.item.x, ex = a.x < b.x ? to.item.x : to.item.x + to.item.width;
       return [{ key, kind: flow.kind, reading: flow.reading, points: [{ x: sx, y: a.y }, { x: (sx + ex) / 2, y: a.y }, { x: (sx + ex) / 2, y: b.y }, { x: ex, y: b.y }] }];
     }

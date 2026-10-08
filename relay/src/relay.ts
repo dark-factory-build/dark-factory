@@ -74,6 +74,8 @@ export interface Env {
 	SITE_ORIGIN: string;
 	FACTORY_RELAY: DurableObjectNamespace;
 	PUBLIC_READS: RateLimit;
+	/** Unset in deployment; `wrangler dev` sets 0 so the integration tests can exhaust the burst on any clock. */
+	INGEST_BYTES_PER_SECOND?: string;
 }
 
 /** The one record a `public:<id>` object keeps: the latest world and when it arrived. */
@@ -425,7 +427,8 @@ export class FactoryRelay implements DurableObject {
 		const length = Number(request.headers.get('Content-Length')) + INGEST_PUSH_BYTES;
 		const now = Date.now();
 		const bucket = this.#ingestBucket;
-		bucket.tokens = Math.min(INGEST_BURST_BYTES, bucket.tokens + ((now - bucket.at) / 1000) * INGEST_BYTES_PER_SECOND);
+		const rate = Number(this.#env.INGEST_BYTES_PER_SECOND ?? INGEST_BYTES_PER_SECOND);
+		bucket.tokens = Math.min(INGEST_BURST_BYTES, bucket.tokens + ((now - bucket.at) / 1000) * rate);
 		bucket.at = now;
 		if (bucket.tokens < length) return refuse(429);
 		bucket.tokens -= length;

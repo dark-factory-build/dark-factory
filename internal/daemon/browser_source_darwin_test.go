@@ -4,6 +4,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -86,6 +87,56 @@ func TestIntegratedGraphIgnoresProposedCheckout(t *testing.T) {
 	paths := graphPaths(multi)
 	if len(multi.sources) != 2 || multi.sources[1].Kind != "integrated" || !slices.Contains(paths, repository+":cmd/committed") || !slices.Contains(paths, secondID.String()+":cmd/second") {
 		t.Fatalf("multi-repository graph = %+v %v", multi.sources, paths)
+	}
+}
+
+// A caller that gives up does not stop the build: the graph is ready for the
+// next caller, so a build slower than any one call still lands.
+func TestAProjectGraphBuildOutlivesItsCaller(t *testing.T) {
+	root := contentRepositoryFixture(t)
+	fixture := newDispatchFixture(t)
+	commitSourceFixture(t, root, "cmd/committed", mainSource)
+	source, err := inspectRegisteredRepository(context.Background(), root, "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	project := mustProjectID(t, testID(233))
+	at, _ := kernel.NewUnixMillis(200)
+	if _, err := fixture.store.CreateProject(context.Background(), kernel.NewProject{ID: project, Name: "source", Root: root, SourceIdentity: &source}, at); err != nil {
+		t.Fatal(err)
+	}
+	// Once the build has started, hold the lock it needs to finish and let the
+	// caller leave: the caller cannot have been answered.
+	caller, cancel := context.WithCancel(context.Background())
+	answered := make(chan error, 1)
+	go func() {
+		_, err := fixture.daemon.ProjectGraph(caller, project)
+		answered <- err
+	}()
+	for {
+		fixture.daemon.graphMu.Lock()
+		if fixture.daemon.graphBuilds[project] != nil {
+			break
+		}
+		fixture.daemon.graphMu.Unlock()
+		time.Sleep(time.Millisecond)
+	}
+	cancel()
+	err = <-answered
+	fixture.daemon.graphMu.Unlock()
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("a caller that left mid-build got %v", err)
+	}
+	for deadline := time.Now().Add(30 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		fixture.daemon.graphMu.Lock()
+		_, built := fixture.daemon.graphs[project]
+		fixture.daemon.graphMu.Unlock()
+		if built {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the build stopped with its caller")
+		}
 	}
 }
 

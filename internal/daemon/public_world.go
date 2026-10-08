@@ -29,7 +29,7 @@ func (backend *browserBackend) PublicWorld(ctx context.Context, rawProject strin
 		return nil, browser.ErrNotFound
 	}
 	daemon := backend.owner
-	graph, err := daemon.ProjectGraph(ctx, projectID)
+	graph, err := daemon.PlantGraph(ctx, projectID)
 	if err != nil {
 		return nil, mapBrowserError(err)
 	}
