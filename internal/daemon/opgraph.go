@@ -70,12 +70,68 @@ func (daemon *Daemon) ProjectGraph(ctx context.Context, projectID kernel.Project
 	configuration, now := string(configurationBytes), daemon.now()
 	daemon.graphMu.Lock()
 	held, ok := daemon.graphs[projectID]
-	daemon.graphMu.Unlock()
-	if ok && held.configuration == configuration && !now.Before(held.at) && now.Sub(held.at) < graphFreshness {
+	usable := ok && held.configuration == configuration
+	if usable && !now.Before(held.at) && now.Sub(held.at) < graphFreshness {
+		daemon.graphMu.Unlock()
 		return held.value, nil
 	}
-	// ponytail: two connections can read the same project at once; add a
-	// per-project build gate if the duplicated archive read ever matters.
+	build := daemon.graphBuilds[projectID]
+	if build == nil {
+		build = &graphBuild{done: make(chan struct{})}
+		if daemon.graphBuilds == nil {
+			daemon.graphBuilds = make(map[kernel.ProjectID]*graphBuild)
+		}
+		daemon.graphBuilds[projectID] = build
+		go daemon.buildProjectGraph(projectID, repositories, configuration, now, build)
+	}
+	daemon.graphMu.Unlock()
+	// A stale graph is served while its refresh runs.
+	if usable {
+		return held.value, nil
+	}
+	select {
+	case <-build.done:
+	case <-ctx.Done():
+		return projectGraph{}, ctx.Err()
+	}
+	daemon.graphMu.Lock()
+	held, ok = daemon.graphs[projectID]
+	daemon.graphMu.Unlock()
+	if build.err != nil || !ok || held.configuration != configuration {
+		return projectGraph{}, errors.Join(build.err, errors.New("the project's graph is being rebuilt"))
+	}
+	return held.value, nil
+}
+
+// graphBuild is one running graph build; err is set before done closes.
+type graphBuild struct {
+	done chan struct{}
+	err  error
+}
+
+// graphBuildLimit bounds one build. A build reads every repository's archive
+// and infers from it, which can outlast any one caller, so it runs detached:
+// a caller that gives up still leaves the graph to the next.
+const graphBuildLimit = 5 * time.Minute
+
+func (daemon *Daemon) buildProjectGraph(projectID kernel.ProjectID, repositories []kernel.ProjectRepository, configuration string, at time.Time, build *graphBuild) {
+	ctx, cancel := context.WithTimeout(context.Background(), graphBuildLimit)
+	defer cancel()
+	result, err := daemon.inferProjectGraph(ctx, projectID, repositories)
+	daemon.graphMu.Lock()
+	if err == nil {
+		if daemon.graphs == nil {
+			daemon.graphs = make(map[kernel.ProjectID]graphSnapshot)
+		}
+		daemon.graphs[projectID] = graphSnapshot{value: result, at: at, configuration: configuration}
+	}
+	build.err = err
+	delete(daemon.graphBuilds, projectID)
+	daemon.graphMu.Unlock()
+	close(build.done)
+}
+
+func (daemon *Daemon) inferProjectGraph(ctx context.Context, projectID kernel.ProjectID, repositories []kernel.ProjectRepository) (projectGraph, error) {
 	var result projectGraph
 	inputs := make([]opgraph.Repository, 0, len(repositories))
 	for _, repository := range repositories {
@@ -88,6 +144,7 @@ func (daemon *Daemon) ProjectGraph(ctx context.Context, projectID kernel.Project
 	}
 	// A system past the node bound is drawn as far as the bound allows,
 	// never refused whole.
+	var err error
 	result.graph, err = opgraph.Infer(projectID.String(), inputs)
 	if err != nil && !errors.Is(err, opgraph.ErrBounds) {
 		return projectGraph{}, err
@@ -98,12 +155,6 @@ func (daemon *Daemon) ProjectGraph(ctx context.Context, projectID kernel.Project
 	}{result.graph, result.sources})
 	digest := sha256.Sum256(encoded)
 	result.digest = hex.EncodeToString(digest[:])
-	daemon.graphMu.Lock()
-	if daemon.graphs == nil {
-		daemon.graphs = make(map[kernel.ProjectID]graphSnapshot)
-	}
-	daemon.graphs[projectID] = graphSnapshot{value: result, at: now, configuration: configuration}
-	daemon.graphMu.Unlock()
 	return result, nil
 }
 
