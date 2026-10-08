@@ -33,6 +33,8 @@ type unit struct {
 	at       Location
 	deps     map[string]bool // package dependencies, for library ownership
 	modules  []string        // code areas beyond root, for Go binaries
+	entries  []string        // script entry files, when the package names them
+	reach    map[string]bool // files its entries import, transitively; nil is every file
 	id       string
 }
 
@@ -74,6 +76,8 @@ type inference struct {
 	bindings  []serviceBinding
 	hostHints []hostHint
 	unitDeps  []unitDeps
+	// scriptImports holds each script file's relative imports.
+	scriptImports map[string][]string
 }
 
 type jsPackage struct {
@@ -181,7 +185,15 @@ func (run *inference) ownerUnits(units []*unit, found owner, kind Kind, trigger 
 	if len(atRoot) == 0 {
 		atRoot = run.dependents(units, found)
 	}
-	return choose(atRoot, found.browser, kind, trigger)
+	// Like a Go function no binary calls, a script file no entry imports
+	// belongs to no process.
+	reached := atRoot[:0:0]
+	for _, candidate := range atRoot {
+		if candidate.reach == nil || candidate.reach[found.file] || grammars[strings.ToLower(path.Ext(found.file))] == "" {
+			reached = append(reached, candidate)
+		}
+	}
+	return choose(reached, found.browser, kind, trigger)
 }
 
 // dependents finds units depending on the JavaScript library holding a file.
@@ -292,6 +304,7 @@ func (run *inference) resolve(system string, repositories []Repository) (Graph, 
 			}
 		}
 	}
+	run.reachScripts(units, repositories)
 	run.applyHints(units)
 	for _, hint := range run.hostHints {
 		for _, owned := range run.ownerUnits(units, hint.owner, Ingress, "request") {

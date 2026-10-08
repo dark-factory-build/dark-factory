@@ -38,6 +38,7 @@ export class UsersController {
   @Post() create() {}
 }
 `),
+			"src/scripts/seed.ts": []byte("import express from 'express';\nconst app = express();\napp.get('/never', h);\n"),
 			"src/queues.ts": []byte(`import { Queue, Worker } from 'bullmq';
 import { Kafka } from 'kafkajs';
 const emails = new Queue('emails');
@@ -231,7 +232,9 @@ func TestInferLanguages(t *testing.T) {
 	if queue := one(t, byLabel, "orders"); queue.Selectors["messaging.destination.name"] != "orders" || queue.Kind != Queue {
 		t.Errorf("queue = %+v", queue)
 	}
-	for _, absent := range []string{"docs.only-a-link.io", "commented.io", "GET view engine", "ApplicationJob"} {
+	// The node package starts dist/main.js: built from src/main.ts, which
+	// imports what runs. A script it never imports is no route of the API.
+	for _, absent := range []string{"docs.only-a-link.io", "commented.io", "GET view engine", "GET /never", "ApplicationJob"} {
 		if len(byLabel[absent]) != 0 {
 			t.Errorf("%q became a node", absent)
 		}

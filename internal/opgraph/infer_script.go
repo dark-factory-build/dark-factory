@@ -45,6 +45,16 @@ func (run *inference) scripts(repository Repository, names []string) {
 		}
 		x.clients()
 		x.outbound()
+		if x.language == "javascript" || x.language == "typescript" || x.language == "tsx" {
+			if run.scriptImports == nil {
+				run.scriptImports = map[string][]string{}
+			}
+			for _, imported := range found.imports {
+				if strings.HasPrefix(imported, ".") {
+					run.scriptImports[repository.ID+"\x00"+found.file] = append(run.scriptImports[repository.ID+"\x00"+found.file], imported)
+				}
+			}
+		}
 	})
 	django.resolve()
 }
@@ -1022,4 +1032,56 @@ func (x *script) outbound() {
 type hostHint struct {
 	owner owner
 	host  string
+}
+
+// reachScripts gives each unit with entry files the script files those
+// entries import, transitively. An entry that names no file in the
+// repository (a build output) is mapped back to its source, or reach stays
+// unknown and every file counts.
+func (run *inference) reachScripts(units []*unit, repositories []Repository) {
+	files := map[string]map[string][]byte{}
+	for _, repository := range repositories {
+		files[repository.ID] = repository.Files
+	}
+	resolve := func(repo, name string) string {
+		stem := strings.TrimSuffix(name, path.Ext(name))
+		for _, candidate := range []string{name, stem + ".ts", stem + ".tsx", stem + ".mts", stem + ".js", stem + ".jsx", stem + ".mjs", stem + ".cjs",
+			name + ".ts", name + ".tsx", name + ".js", name + "/index.ts", name + "/index.tsx", name + "/index.js"} {
+			if files[repo][candidate] != nil {
+				return candidate
+			}
+		}
+		return ""
+	}
+	for _, candidate := range units {
+		var queue []string
+		for _, entry := range candidate.entries {
+			found := resolve(candidate.repo, entry)
+			for _, output := range []string{"dist", "build", "lib", "out"} {
+				if found == "" && strings.HasPrefix(entry, path.Join(candidate.root, output)+"/") {
+					found = resolve(candidate.repo, path.Join(candidate.root, "src", strings.TrimPrefix(entry, path.Join(candidate.root, output)+"/")))
+				}
+			}
+			if found != "" {
+				queue = append(queue, found)
+			}
+		}
+		if len(queue) == 0 {
+			continue
+		}
+		candidate.reach = map[string]bool{}
+		for len(queue) > 0 {
+			file := queue[0]
+			queue = queue[1:]
+			if candidate.reach[file] {
+				continue
+			}
+			candidate.reach[file] = true
+			for _, imported := range run.scriptImports[candidate.repo+"\x00"+file] {
+				if next := resolve(candidate.repo, path.Join(path.Dir(file), imported)); next != "" {
+					queue = append(queue, next)
+				}
+			}
+		}
+	}
 }
