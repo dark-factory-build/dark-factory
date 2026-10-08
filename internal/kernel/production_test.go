@@ -758,3 +758,37 @@ func TestKnownProductionPullsIsOneBoundedQuery(t *testing.T) {
 		t.Fatalf("statements few=%d many=%d published=%v", few, many, published)
 	}
 }
+
+// A pull head is settled once every stored head check on it has completed
+// without failing; one running or failed check, or a merge-group run, never
+// settles it.
+func TestSettledProductionChecks(t *testing.T) {
+	store, _, project, _ := newAdmissionStore(t, RoleOrchestrator, 2)
+	defer store.Close()
+	ctx := context.Background()
+	a, b := strings.Repeat("a", 40), strings.Repeat("b", 40)
+	check := func(id, revision, scope, state string, pull uint64) ProductionCheck {
+		conclusion := ""
+		if state == "completed" {
+			conclusion = "success"
+		}
+		return ProductionCheck{ID: id, Name: "go", Revision: revision, Scope: scope, State: state, Conclusion: conclusion, URL: "https://github.com/o/r/runs/" + id, PullRequests: []uint64{pull}, Jobs: []ProductionJob{}}
+	}
+	observation := ProductionObservation{Repository: "example/factory", ObservedAt: 10, Checks: []ProductionCheck{
+		check("1", a, "head", "completed", 1), check("2", a, "head", "completed", 1),
+		check("3", b, "head", "completed", 2), check("4", b, "head", "in_progress", 2),
+		check("5", a, "merge_group", "completed", 3),
+	}}
+	for index, conclusion := range []string{"failure", "timed_out", "cancelled", "action_required", "startup_failure"} {
+		failed := check(fmt.Sprint(10+index), b, "head", "completed", uint64(4+index))
+		failed.Conclusion = conclusion
+		observation.Checks = append(observation.Checks, check(fmt.Sprint(20+index), b, "head", "completed", uint64(4+index)), failed)
+	}
+	if err := store.RecordProductionObservation(ctx, project.ID, observation, mustTime(t, 10)); err != nil {
+		t.Fatal(err)
+	}
+	settled, err := store.SettledProductionChecks(ctx, project.ID, "Example/Factory")
+	if err != nil || len(settled) != 1 || !settled[ProductionHead{Number: 1, Head: a}] {
+		t.Fatalf("settled %v, %v", settled, err)
+	}
+}

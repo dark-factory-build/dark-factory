@@ -2,12 +2,16 @@ package daemon
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"path"
 	"strings"
 	"time"
 
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
+	"github.com/dark-factory-build/dark-factory/internal/opgraph"
 	"github.com/dark-factory-build/dark-factory/internal/review"
 )
 
@@ -44,9 +48,13 @@ func (daemon *Daemon) refreshProduction(ctx context.Context, project kernel.Proj
 			continue
 		}
 		known, published, err := daemon.store.KnownProductionPulls(ctx, project, identity.PublicationRepository, productionRefreshPRLimit)
+		var settled map[kernel.ProductionHead]bool
+		if err == nil {
+			settled, err = daemon.store.SettledProductionChecks(ctx, project, identity.PublicationRepository)
+		}
 		var observation kernel.ProductionObservation
 		if err == nil {
-			observation, err = daemon.pullRequestObservation(ctx, identity.PublicationRepository, githubID, known)
+			observation, err = pullRequestObservation(ctx, daemon.github.MCP, identity.PublicationRepository, githubID, known, settled)
 		}
 		if err != nil {
 			LogFactoryd(daemon.log, "factoryd: refresh %s: %v\n", identity.PublicationRepository, err)
@@ -85,6 +93,7 @@ func (daemon *Daemon) refreshProduction(ctx context.Context, project kernel.Proj
 		for _, op := range prepared {
 			daemon.launchReview(project, op)
 		}
+		recordCIObservations(daemon.runtimeStore(), repository.ID.String(), observation, at.Int64())
 	}
 	return nil
 }
@@ -148,8 +157,11 @@ type maintainerPullRequest struct {
 	Review         kernel.ProductionReview `json:"review"`
 }
 
-func (daemon *Daemon) pullRequestObservation(ctx context.Context, repository string, githubID uint64, known []kernel.ProductionPullRequest) (kernel.ProductionObservation, error) {
-	page, err := daemon.readMaintainerPullRequests(ctx, repository, githubID, map[string]any{"repository": repository, "page": 1, "per_page": productionRefreshPRLimit})
+// maintainerMCP is the broker call, daemon.github.MCP in production.
+type maintainerMCP func(ctx context.Context, request json.RawMessage, repositories map[string]uint64) (json.RawMessage, error)
+
+func pullRequestObservation(ctx context.Context, call maintainerMCP, repository string, githubID uint64, known []kernel.ProductionPullRequest, settled map[kernel.ProductionHead]bool) (kernel.ProductionObservation, error) {
+	page, err := readMaintainerPullRequests(ctx, call, repository, githubID, map[string]any{"repository": repository, "page": 1, "per_page": productionRefreshPRLimit})
 	if err != nil {
 		return kernel.ProductionObservation{}, err
 	}
@@ -159,7 +171,7 @@ func (daemon *Daemon) pullRequestObservation(ctx context.Context, repository str
 		seen[pull.Number] = true
 	}
 	for _, prior := range rereadPulls(known, seen) {
-		exact, err := daemon.readMaintainerPullRequests(ctx, repository, githubID, map[string]any{"repository": repository, "page": 1, "per_page": 1, "pull_number": prior.Number})
+		exact, err := readMaintainerPullRequests(ctx, call, repository, githubID, map[string]any{"repository": repository, "page": 1, "per_page": 1, "pull_number": prior.Number})
 		if err == nil {
 			open = append(open, exact.PullRequests...)
 		}
@@ -168,7 +180,7 @@ func (daemon *Daemon) pullRequestObservation(ctx context.Context, repository str
 	for _, pull := range known {
 		prior[pull.Number] = pull.Review
 	}
-	result := kernel.ProductionObservation{Repository: repository, PullRequests: []kernel.ProductionPullRequest{}}
+	result := kernel.ProductionObservation{Repository: repository, PullRequests: []kernel.ProductionPullRequest{}, Checks: []kernel.ProductionCheck{}}
 	result.Overflow = productionPullRequestOverflow(page)
 	for _, value := range open {
 		if value.Number == 0 || len(value.Head) != 40 || strings.Trim(value.Head, "0123456789abcdef") != "" {
@@ -180,7 +192,90 @@ func (daemon *Daemon) pullRequestObservation(ctx context.Context, repository str
 		}
 		result.PullRequests = append(result.PullRequests, pr)
 	}
+	// Every pull read here is open or was open at the last refresh. Its
+	// checks are read until every run on its current head has completed, so
+	// the cost follows CI activity, not the number of open pulls. The host
+	// controller that recorded checks was deleted (#1133) and nothing
+	// replaced it (#1404).
+	for _, pr := range result.PullRequests {
+		if settled[kernel.ProductionHead{Number: pr.Number, Head: strings.ToLower(pr.Head)}] {
+			continue
+		}
+		checks, err := readMaintainerChecks(ctx, call, repository, githubID, pr)
+		if err != nil {
+			result.Unavailable = "checks"
+			continue
+		}
+		// One observation writes at most the store's bound. Pulls that do not
+		// fit stay unsettled and are read on the next refresh; coverage is not
+		// claimed meanwhile.
+		if len(result.Checks)+len(checks) > kernel.MaxObservationChecks {
+			result.Unavailable = "checks"
+			break
+		}
+		result.Checks = append(result.Checks, checks...)
+	}
 	return result, nil
+}
+
+// recordCIObservations is the github adapter: the checks a refresh read
+// light the jobs of the repository's CI unit, and fail them on a failed
+// conclusion. A refresh reads only heads whose checks can still change, so a
+// job lights while it runs and once when it settles. Silence is claimed only
+// when no read failed and the pull page was complete.
+func recordCIObservations(store *opgraph.Runtime, repository string, observation kernel.ProductionObservation, now int64) {
+	unit := opgraph.CIUnit(repository)
+	for _, check := range observation.Checks {
+		item := opgraph.Observation{Source: "github", Environment: "ci", Kind: "internal", Start: now - productionRefreshInterval.Milliseconds(), End: now,
+			Attributes: map[string]string{"service.name": unit, "cicd.pipeline.task.name": opgraph.CheckName(check.Name)}, Count: 1}
+		switch check.Conclusion {
+		case "failure", "timed_out", "startup_failure":
+			item.Errors = 1
+		}
+		store.Record(item)
+	}
+	if observation.Unavailable == "" && observation.Overflow == 0 {
+		store.Cover(opgraph.Coverage{Source: "github", Environment: "ci", Unit: unit, Keys: opgraph.CIKeys, AsOf: now, TTL: 2 * productionRefreshInterval.Milliseconds()})
+	}
+}
+
+// readMaintainerChecks maps observe_pull_request_checks to one record per
+// head and check name, so a re-run replaces the earlier result instead of
+// sitting beside it; the run itself stays named by its URL.
+func readMaintainerChecks(ctx context.Context, call maintainerMCP, repository string, githubID uint64, pr kernel.ProductionPullRequest) ([]kernel.ProductionCheck, error) {
+	content, err := maintainerTool(ctx, call, repository, githubID, "observe_pull_request_checks", map[string]any{"repository": repository, "pull_number": pr.Number, "head_sha": pr.Head})
+	if err != nil {
+		return nil, err
+	}
+	var value struct {
+		Head   string `json:"head_sha"`
+		Checks []struct {
+			Name       string  `json:"name"`
+			Status     string  `json:"status"`
+			Conclusion *string `json:"conclusion"`
+			URL        string  `json:"url"`
+		} `json:"checks"`
+	}
+	if json.Unmarshal(content, &value) != nil || !strings.EqualFold(value.Head, pr.Head) || len(value.Checks) > 100 {
+		return nil, fmt.Errorf("invalid checks response")
+	}
+	checks := make([]kernel.ProductionCheck, 0, len(value.Checks))
+	for _, check := range value.Checks {
+		if check.Conclusion != nil && *check.Conclusion == "skipped" {
+			continue // a job whose condition was false never ran; GitHub counts it as passing
+		}
+		id := path.Base(check.URL)
+		if id == "" || strings.Trim(id, "0123456789") != "" {
+			return nil, fmt.Errorf("invalid check url")
+		}
+		conclusion := ""
+		if check.Conclusion != nil {
+			conclusion = *check.Conclusion
+		}
+		key := sha256.Sum256([]byte(strings.ToLower(pr.Head) + "\x00" + check.Name))
+		checks = append(checks, kernel.ProductionCheck{ID: hex.EncodeToString(key[:16]), Name: check.Name, Revision: strings.ToLower(pr.Head), Scope: "head", State: check.Status, Conclusion: conclusion, URL: check.URL, PullRequests: []uint64{pr.Number}, Jobs: []kernel.ProductionJob{}})
+	}
+	return checks, nil
 }
 
 // rereadPulls are the pulls last seen open that the open page no longer
@@ -226,17 +321,26 @@ type maintainerPullRequestPage struct {
 	NextPage     *int                    `json:"next_page"`
 }
 
-func (daemon *Daemon) readMaintainerPullRequests(ctx context.Context, repository string, githubID uint64, arguments map[string]any) (maintainerPullRequestPage, error) {
-	request, err := json.Marshal(map[string]any{
-		"jsonrpc": "2.0", "id": 1, "method": "tools/call",
-		"params": map[string]any{"name": "list_pull_requests", "arguments": arguments},
-	})
+func readMaintainerPullRequests(ctx context.Context, call maintainerMCP, repository string, githubID uint64, arguments map[string]any) (maintainerPullRequestPage, error) {
+	content, err := maintainerTool(ctx, call, repository, githubID, "list_pull_requests", arguments)
 	if err != nil {
 		return maintainerPullRequestPage{}, err
 	}
-	response, err := daemon.github.MCP(ctx, request, map[string]uint64{repository: githubID})
+	return parseMaintainerPullRequestPage(content)
+}
+
+// maintainerTool calls one broker tool and returns its structured content.
+func maintainerTool(ctx context.Context, call maintainerMCP, repository string, githubID uint64, name string, arguments map[string]any) (json.RawMessage, error) {
+	request, err := json.Marshal(map[string]any{
+		"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+		"params": map[string]any{"name": name, "arguments": arguments},
+	})
 	if err != nil {
-		return maintainerPullRequestPage{}, err
+		return nil, err
+	}
+	response, err := call(ctx, request, map[string]uint64{repository: githubID})
+	if err != nil {
+		return nil, err
 	}
 	var envelope struct {
 		Result struct {
@@ -246,13 +350,9 @@ func (daemon *Daemon) readMaintainerPullRequests(ctx context.Context, repository
 		Error json.RawMessage `json:"error"`
 	}
 	if json.Unmarshal(response, &envelope) != nil || envelope.Result.IsError || len(envelope.Error) != 0 {
-		return maintainerPullRequestPage{}, fmt.Errorf("invalid pull request response")
+		return nil, fmt.Errorf("invalid %s response", name)
 	}
-	page, err := parseMaintainerPullRequestPage(envelope.Result.Content)
-	if err != nil {
-		return maintainerPullRequestPage{}, err
-	}
-	return page, nil
+	return envelope.Result.Content, nil
 }
 
 func parseMaintainerPullRequestPage(content []byte) (maintainerPullRequestPage, error) {

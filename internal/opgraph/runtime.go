@@ -43,7 +43,7 @@ var selectorKeys = map[string]bool{
 	"service.name": true, "http.request.method": true, "http.route": true, "url.path": true, "rpc.method": true,
 	"messaging.destination.name": true, "messaging.system": true, "db.system.name": true, "db.namespace": true,
 	"server.address": true, "server.port": true, "network.transport": true, "code.function.name": true,
-	"code.file.path": true, "process.executable.name": true, "peer.service": true,
+	"code.file.path": true, "process.executable.name": true, "peer.service": true, "cicd.pipeline.task.name": true,
 }
 
 const (

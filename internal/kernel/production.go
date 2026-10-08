@@ -219,8 +219,12 @@ func (store *Store) PublishingProjects(ctx context.Context) ([]ProjectID, error)
 	return projects, rows.Err()
 }
 
+// MaxObservationChecks is the most check records one production observation
+// may write.
+const MaxObservationChecks = 256
+
 func validProductionObservation(project ProjectID, observation ProductionObservation, at UnixMillis) bool {
-	return !project.zero() && productionRepository.MatchString(observation.Repository) && observation.ObservedAt >= 1 && observation.ObservedAt <= at.Int64()+5000 && observation.Overflow >= 0 && validOutcomeText(observation.Unavailable, 256) && len(observation.PullRequests) <= 256 && len(observation.Checks) <= 256 && len(observation.Reviewers) <= 256 && len(observation.Deliveries) <= 128
+	return !project.zero() && productionRepository.MatchString(observation.Repository) && observation.ObservedAt >= 1 && observation.ObservedAt <= at.Int64()+5000 && observation.Overflow >= 0 && validOutcomeText(observation.Unavailable, 256) && len(observation.PullRequests) <= 256 && len(observation.Checks) <= MaxObservationChecks && len(observation.Reviewers) <= 256 && len(observation.Deliveries) <= 128
 }
 
 // RecordProductionObservation accepts facts only from the operator authority.
@@ -683,6 +687,46 @@ func (store *Store) KnownProductionPulls(ctx context.Context, project ProjectID,
 		}
 	}
 	return pulls, published, rows.Err()
+}
+
+// ProductionHead is one pull request at one head commit.
+type ProductionHead struct {
+	Number uint64
+	Head   string // lower-case
+}
+
+// SettledProductionChecks is every pull head whose stored head checks have
+// all completed without failing: a refresh need not read them again. A
+// failed head stays unsettled, since re-runs mostly follow failures.
+func (store *Store) SettledProductionChecks(ctx context.Context, project ProjectID, repo string) (map[ProductionHead]bool, error) {
+	if project.zero() {
+		return nil, ErrInvalidValue
+	}
+	tx, err := store.beginRead(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Close()
+	rows, err := tx.connection.QueryContext(ctx, `SELECT CAST(j.value AS INTEGER), lower(json_extract(r.document, '$.revision'))
+		FROM production_records r, json_each(r.document, '$.pull_requests') j
+		WHERE r.project_id = ? AND r.repository = ? AND r.kind = 'check' AND json_extract(r.document, '$.scope') = 'head'
+		GROUP BY 1, 2 HAVING MIN(json_extract(r.document, '$.state') = 'completed'
+			AND COALESCE(json_extract(r.document, '$.conclusion'), '') NOT IN ('failure', 'timed_out', 'cancelled', 'action_required', 'startup_failure')) = 1`, project.Bytes(), strings.ToLower(repo))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	settled := map[ProductionHead]bool{}
+	for rows.Next() {
+		var head ProductionHead
+		var number int64
+		if err := rows.Scan(&number, &head.Head); err != nil {
+			return nil, err
+		}
+		head.Number = uint64(number)
+		settled[head] = true
+	}
+	return settled, rows.Err()
 }
 
 // RecordProductionReview preserves the exact commit covered by a review.

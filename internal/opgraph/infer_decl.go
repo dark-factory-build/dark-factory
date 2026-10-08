@@ -21,6 +21,8 @@ func (run *inference) declarations(repository Repository, names []string) {
 		at := Location{Repository: repository.ID, Path: name}
 		here := owner{repo: repository.ID, file: name}
 		switch {
+		case workflowFile(name):
+			run.workflow(repository.ID, body, at)
 		case strings.HasPrefix(base, "wrangler."):
 			run.wrangler(repository.ID, dir, base, body, at)
 		case strings.HasPrefix(base, "docker-compose") || strings.HasPrefix(base, "compose."):
