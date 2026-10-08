@@ -99,9 +99,10 @@ test("activity cues come only from new recorded operations, are bounded, expire 
       await act(async () => { tree = create(createElement(Probe, { call })); });
       assert.equal(state.recent.length, 1, "history is listed");
       assert.equal(state.cues.length, 0, "history is never cued");
-      page = [row("read", "bb", 20, { agent_id: reader, run_id: "r1", task_id: doneTask }), ...page];
+      page = [row("read", "bb", 20, { agent_id: reader, run_id: "r1", task_id: doneTask }), row("delivered", "bb", 19, { agent_id: reader, run_id: "r1", task_id: doneTask }), ...page];
       await act(async () => { globalThis.document.dispatchEvent(new Event("visibilitychange")); });
-      assert.deepEqual(state.cues.map((cue) => cue.operation), ["read"]);
+      assert.deepEqual(state.cues.map((cue) => cue.operation), ["read"], "what a run is given at launch is not cued");
+      assert.ok(state.recent.some((item) => item.operation === "delivered"), "but it is listed");
       await act(async () => { globalThis.document.dispatchEvent(new Event("visibilitychange")); });
       assert.equal(state.cues.length, 1, "an operation is cued once");
       page = [...Array.from({ length: 6 }, (_, index) => row("posted", String(index + 1).repeat(2), 30 + index)), ...page];

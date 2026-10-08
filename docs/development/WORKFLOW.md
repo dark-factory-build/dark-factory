@@ -147,10 +147,14 @@ delivery state); the Library holds documents, including conclusions saved from
 a thread with it as evidence. Posting to the Board never assigns work or
 notifies an agent. The browser's `activity` read lists recorded revisions and
 supplied/read receipts, newest first, without recording anything. The floor
-cues new operations once, briefly, beside the agent's current sprite and on the
-board or shelf, never moving anyone; its Activity list opens the exact thread
-or revision for agents that are off-screen or not drawn. The first listing
-after connecting or reconnecting is history and is never cued. Browser fixture demonstrations are simulated UI operations; isolated
+cues new reads and writes once, briefly: a read flies from the shelf or board
+to wherever the agent already is, a write flies from the agent to them (one
+flight per agent; none under reduced motion), then rests beside the sprite and
+on the board or shelf, never moving anyone. What a run is supplied at launch is
+listed but never cued. Flights, marks and the Activity list open the exact
+thread or revision, the last for agents that are off-screen or not drawn; a
+direct question's pulse opens the Board. The first listing after connecting or
+reconnecting is history and is never cued. Browser fixture demonstrations are simulated UI operations; isolated
 kernel/daemon/provider-boundary tests establish persistence and delivery. No model
 learning is inferred from either test.
 
