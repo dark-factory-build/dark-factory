@@ -1265,7 +1265,7 @@ test("the coverage header shows the summary numbers", () => {
   const summary = { components: 7, inferred: 6, observed: 3, quiet: 1, partial: 1, stale: 0, unobserved: 1, opaque: 1, runtime_only: 1, contradicted: 0 };
   const markup = render({ graph: { ...graph, summary }, workers: [] });
   const header = markup.match(/aria-label="Observation coverage"[^>]*>(.*?)<\/p>/)[1].replace(/<[^>]+>/g, "");
-  assert.equal(header, "6 inferred · 4 observed · 1 partial · 1 unobserved · 1 quiet · 0 stale · 1 external · 1 runtime-only");
+  assert.equal(header, "3 observed · 1 observed, quiet · 1 partly observed · 0 stale · 1 no telemetry · 1 external · 1 runtime-only", "observation counts add up to the components");
   assert.doesNotMatch(render({ workers: [] }), /Observation coverage/, "no summary, no claim");
 });
 
@@ -1365,6 +1365,21 @@ test("a hall known busy only as a whole moves its intake while its machines stay
   assert.deepEqual(intakes, [["partial", "active"]], "only the hall with a known state has an intake, and it carries material");
   assert.match(markup, /data-belt="intake"[^>]*>(?:(?!<\/g>).)*dfPlant__material/s);
   assert.match(markup, /data-entity-id="edge-in" data-observation="partial"/, "the machine itself is still only partly observed");
+});
+
+test("a unit's runtime is said in words, a cell's belt meets its base, and one dock feeds the intake", () => {
+  const graph = sceneGraph([hall("edge", { runtime: "worker", reading: busy, machines: [machine("edge-in", "ingress", { trigger: "request" }), machine("edge-job", "job")] })],
+    { flows: [{ from: "edge", to: "edge-job", kind: "runs", reading: unread }] });
+  const markup = renderToStaticMarkup(createElement(FactoryScene, { appearance: commons, workers: [], graph }));
+  assert.match(markup, />edge function</);
+  assert.doesNotMatch(markup, />worker</);
+  const items = Object.fromEntries(layoutScene(graph).rooms[0].contents.map((item) => [item.entityId, item]));
+  const belt = (kind) => markup.match(new RegExp(`<path d="([^"]+)" class="b-inf" data-belt="${kind}"|<g data-belt="${kind}"[^>]*><path d="([^"]+)"`)).slice(1).find(Boolean);
+  const [line, cell, dock] = [items.edge, items["edge-job"], items["edge-in"]];
+  assert.ok(belt("runs").startsWith(`M${line.x + line.width / 2} ${line.y} `) && belt("runs").endsWith(` L${cell.x + cell.width / 2} ${cell.y + cell.height}`), "from the line's top into the cell's base");
+  assert.ok(belt("intake").startsWith(`M${dock.x + dock.width} ${dock.y + dock.height / 2} `), "arrivals come in at the dock");
+  const world = { generated_at: 0, summary: graph.summary, nodes: [{ id: "u", kind: "processor", label: "Edge function 1", runtime: "worker", evidence: "static", observation: "unobserved", state: "unknown", activity: "none" }], edges: [], workers: [] };
+  assert.equal(publicFloor(world).graph.halls[0].runtime, undefined, "a public name already says the runtime");
 });
 
 const pr = (number, document = {}, extra = {}) => ({ repository: "owner/repo", project_id: "project", kind: "pull_request", id: String(number), visual_id: `change:${number}`, observed_at: 10, tasks: [], missions: [], ...extra,

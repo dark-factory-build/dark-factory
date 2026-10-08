@@ -54,5 +54,6 @@ export function publicFloor(world: PublicWorld) {
   });
   // Public crates carry no number or title; the scene names them by station alone.
   const crates = (world.crates ?? []).map((crate): SceneCrate => ({ id: crate.id, number: 0, title: "", station: crate.station, stage: "", fault: crate.fault === true, taskIds: [] }));
-  return { graph: prepared.graph, workers, crates };
+  // A public unit is named by its runtime, so a runtime subtitle would only repeat the name.
+  return { graph: { ...prepared.graph, halls: prepared.graph.halls.map(({ runtime: _, ...hall }) => hall) }, workers, crates };
 }

@@ -1282,13 +1282,11 @@ summary.dfConsoleItem__summary { cursor: pointer; }
 .dfPlant__bin { fill: var(--metal2); stroke: var(--outline); }
 .dfPlant__hand { fill: none; stroke: var(--metalhi); stroke-width: 1.5; }
 .dfPlant .bptext { fill: var(--unknown); }
-.dfPlant .pq { display: none; }
 .dfPlant .op-active .lamp { fill: var(--ok); }
 .dfPlant .op-degraded .lamp { fill: var(--amber); }
 .dfPlant .op-failing .lamp { fill: var(--red); }
 .dfPlant .s-quiet .lamp { fill: var(--ok); opacity: .45; }
 .dfPlant .s-partial .lamp.l2 { fill: var(--lampoff); }
-.dfPlant .s-partial .pq { display: inline; fill: var(--unknown); fill-opacity: .25; stroke: var(--unknown); stroke-width: 1; }
 /* Unobserved: the machine is built but nothing reports on it. Greyed, with an
    unknown lamp and its plate, so it never reads as an idle (dark-lamped) one. */
 .dfPlant .s-unobserved { filter: grayscale(1); opacity: .55; }

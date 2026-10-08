@@ -616,7 +616,7 @@ data.
 | Deployment unit | A **hall**: a walled production building with the unit's name plate. Repository is a coloured tag on the plate, not a wall. |
 | Ingress | An **intake dock** on the hall's left wall. Arriving material comes in from the yard. More than six routes fold into one manifold with a count; zoomed in to twice the fitted scale or more, the manifold lists its routes inside its own footprint. |
 | Processor work | The hall's **main line**: a press or assembler. |
-| Job | A **cell** with an arm. |
+| Job | A **cell** with an arm, standing on a base; its belt rises from the main line into the base. |
 | Timer ingress | A **clock** on the hall wall, sending a pulse. |
 | Queue | An **accumulation conveyor** between halls. Backlog piles up visibly on it. |
 | Store | A **silo**, tank or rack store. Reads and writes are pipe pulses. |
@@ -632,7 +632,7 @@ data.
 | Deploy | Changeover: scaffold and a version plate flip. Change marks remain for 24 hours. |
 | Dormant | **Observed quiet**: the machine is solid and lit, but still. |
 | Unobserved | **Greyed machine**: built but translucent and colourless, an unknown (grey-blue) lamp, plate "no telemetry", no material. Never drawn as an idle machine, whose lamp is dark. |
-| Partial | Solid machine with a blueprint quarter and a half-lit lamp. |
+| Partial | Solid machine with a half-lit lamp; the tooltip says "partly observed". |
 | Stale | Desaturated, with a "last seen" tag. |
 | Inferred-only edge | Faint grey dashed belt with no material. |
 | Observed edge | Solid belt carrying material. |
@@ -728,7 +728,11 @@ One state, two projections, both computed by factoryd:
 `opgraph.Public` contains only:
 
 - node kind, an anonymous stable ID (`HMAC(project secret, id)`), and an
-  ordinal label ("Intake 3")
+  ordinal label in plain words, counted per word: a unit by its runtime
+  ("Web app", "Web server", "Edge function", "Service", "Tool",
+  "CI pipeline"), an ingress by its trigger ("Entrance", "Timer",
+  "Inbox"), a job by its unit ("Check" in CI, else "Background task"),
+  then "Store", "Queue", "Outside service" and "Unknown"
 - hall grouping, edges and their evidence state
 - coverage and operational state
 - bucketed activity: none, low, medium or high, from log₂ of rate
