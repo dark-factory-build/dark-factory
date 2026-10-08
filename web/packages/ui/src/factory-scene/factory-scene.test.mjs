@@ -932,18 +932,15 @@ test("the committed sprite module is exactly what the generator writes", () => {
   }
 });
 
-test("stationary tasks expose affected areas and link the existing queue and questions", () => {
+test("stationary tasks link the existing queue and questions", () => {
   const tasks = Array.from({ length: 11 }, (_, index) => ({
     id: `task-${index}`, agentId: "worker-b", projectId: "project",
     title: index === 0 ? "<script>unsafe & title</script>" : `Task ${index}`,
     status: index === 0 ? "running" : "queued",
-    roomIds: index === 0 ? ["lib", "src"] : [],
-    ...(index === 0 ? { representativeRoomId: "src" } : {}),
     humanRequestIds: index === 0 ? ["question-1"] : [],
   }));
   const markup = render({ tasks, onSelectTask() {}, onSelectHumanRequest() {}, onOpenTasks() {} });
   assert.equal((markup.match(/data-floor-inbox="10"/g) ?? []).length, 1);
-  assert.equal((markup.match(/data-work-footprint=/g) ?? []).length, 2);
   // The tray is a distinct, keyboard reachable route into the existing Tasks panel.
   assert.match(markup, /data-floor-inbox="10"[^>]*aria-label="Open Tasks"[^>]*role="button"[^>]*tabindex="0"/);
   // Selecting queued work in the panel still lights its pile on the floor.
@@ -952,19 +949,14 @@ test("stationary tasks expose affected areas and link the existing queue and que
   const idle = render({ tasks: [tasks[0]], onSelectTask() {} });
   assert.match(idle, /data-floor-inbox="0"/);
   assert.doesNotMatch(idle, /QUEUE/);
-  assert.match(markup, /data-workbench-task-id="task-0"/);
   assert.match(markup, /data-human-request-id="question-1"/);
   assert.match(markup, /aria-label="Question from Builder"/);
   assert.doesNotMatch(markup, /Work order|data-work-order-id/);
   assert.match(markup, /role="button" tabindex="0"/);
-  assert.match(markup, /&lt;script&gt;unsafe &amp; title&lt;\/script&gt;/);
   assert.doesNotMatch(markup, /<script>/);
   assert.doesNotMatch(markup, /stroke-dasharray|CHANGES WITHIN|CHANGED|>task-0</);
-  const disconnected = render({ tasks, connected: false });
-  assert.doesNotMatch(disconnected, /aria-label="Working:/);
-  assert.match(disconnected, /aria-label="Disconnected · last observed work:/);
-  const noObservation = render({ tasks: [{ ...tasks[0], roomIds: [], humanRequestIds: [] }] });
-  assert.doesNotMatch(noObservation, /data-work-footprint=|data-human-request-id=/);
+  const noObservation = render({ tasks: [{ ...tasks[0], humanRequestIds: [] }] });
+  assert.doesNotMatch(noObservation, /data-human-request-id=/);
 });
 
 test("the tray and planning table expose stable project actions", () => {
@@ -986,7 +978,7 @@ test("floor action hit areas invoke existing task and mission routes", async () 
   let tasksOpened;
   let missionsOpened;
   let conversationTask;
-  const task = { id: "task-peer", agentId: "worker-b", projectId: "project", title: "Peer work", status: "running", roomIds: [], humanRequestIds: [] };
+  const task = { id: "task-peer", agentId: "worker-b", projectId: "project", title: "Peer work", status: "running", humanRequestIds: [] };
   let renderer;
   await act(async () => {
     renderer = create(createElement(FactoryScene, {
@@ -1015,14 +1007,6 @@ test("floor action hit areas invoke existing task and mission routes", async () 
   await act(async () => renderer.root.findByProps({ "data-peer-question-count": 1 }).props.onClick());
   assert.equal(conversationTask, "task-peer");
   await act(async () => renderer.unmount());
-});
-
-
-test("queue selection picks the exact task sharing a representative workstation", () => {
-  const tasks = ["first", "second"].map((id) => ({ id, agentId: "worker-b", projectId: "project", title: id, status: "running", roomIds: ["src"], representativeRoomId: "src", humanRequestIds: [] }));
-  const markup = render({ tasks, selectedTaskId: "second", onSelectTask() {} });
-  assert.match(markup, /data-workbench-task-id="second"/);
-  assert.doesNotMatch(markup, /data-workbench-task-id="first"/);
 });
 
 
@@ -1197,14 +1181,12 @@ test("stationary active workers animate while idle, reduced, hidden and disconne
 });
 
 
-test("proposals remain separate selectable marks on machines and a reviewer uses the same actor system", async () => {
+test("a reviewer of a proposal uses the same actor system", async () => {
   const operations = ["addition", "modification", "removal", "move"].map((kind) => ({ entityId: "lib-in", roomId: "lib", path: `internal/lib/${kind}.go`, kind }));
   const items = [{ id: "first", title: "First change", state: "active", operations }, { id: "second", title: "Second change", state: "stale", operations: [operations[1]] }];
   const inspected = [], actors = [{ ...workers[0], id: "review-run", nodeId: "lib", observedBayId: "lib-in", review: { proposalId: "first", scope: "Assigned changed paths; file inspection unavailable" } }];
   let tree;
   await act(async () => { tree = create(createElement(FactoryScene, { graph, appearance: commons, workers: actors, proposals: { items, selected: "second", onSelect: (id) => inspected.push(id) } })); });
-  assert.equal(tree.root.findAllByProps({ "data-proposal-kind": "modification" }).length, 1);
-  assert.equal(tree.root.findAllByProps({ "data-proposal-kind": "removal" }).length, 0, "selected future is never blended with concurrent work");
   const reviewer = tree.root.findByProps({ "data-reviewer-id": "review-run" });
   assert.equal(tree.root.findAllByProps({ "data-worker-id": "review-run" }).length, 1);
   await act(async () => reviewer.findAll((node) => node.props.role === "button")[0].props.onKeyDown({ key: "Enter", preventDefault() {} }));
@@ -1337,6 +1319,35 @@ test("the plant overview is always there and zoom scales the one floor about the
   }
 });
 
+test("zooming to twice the fitted scale lists a manifold's routes inside its unmoved footprint", async () => {
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+  const priorWindow = globalThis.window;
+  globalThis.window = { innerWidth: 1200, innerHeight: 800 };
+  const routes = Array.from({ length: 9 }, (_, index) => `/route-${index}`);
+  const folded = sceneGraph([hall("api", { machines: [machine("api", "processor"), machine("api:docks", "ingress", { label: "9 routes", represented: routes, routes })] })]);
+  const pane = { scrollLeft: 0, scrollTop: 0, clientWidth: 600, clientHeight: 400, getBoundingClientRect: () => ({ left: 0, top: 0, width: 600, height: 400 }) };
+  let renderer;
+  const style = () => renderer.root.findAll((node) => node.props["data-graph-digest"] === folded.digest)[0].props.style;
+  const floor = { getBoundingClientRect: () => ({ left: 0, top: 0, width: typeof style().width === "number" ? style().width : layoutScene(folded).width }) };
+  const manifold = () => renderer.root.findAll((node) => node.props["data-shape"] === "manifold")[0];
+  const box = () => manifold().findAllByType("rect")[0].props;
+  try {
+    await act(async () => { renderer = create(createElement(FactoryScene, { graph: folded, appearance: commons, workers: [] }), { createNodeMock: (element) => element.props["data-graph-digest"] ? floor : element.props.className === "dfFactoryFloor__map" ? pane : {} }); });
+    const zoomIn = () => act(async () => renderer.root.findAll((node) => node.type === "button" && node.props["aria-label"] === "Zoom in")[0].props.onClick());
+    const fitted = box();
+    assert.equal(manifold().findAllByProps({ "data-manifold-routes": "" }).length, 0, "fitted, a manifold shows its dock bars");
+    await zoomIn();
+    assert.equal(manifold().findAllByProps({ "data-manifold-routes": "" }).length, 0, "1.5x is not yet close enough to read");
+    await zoomIn();
+    const lines = manifold().findByProps({ "data-manifold-routes": "" }).findAllByType("text").map((node) => node.children.join(""));
+    assert.deepEqual(lines, [...routes.slice(0, 6), "+3 more"]);
+    assert.deepEqual(box(), fitted, "detail never moves or resizes the manifold");
+  } finally {
+    await act(async () => renderer?.unmount());
+    globalThis.window = priorWindow;
+  }
+});
+
 test("a hall known busy only as a whole moves its intake while its machines stay partial", () => {
   const partialBusy = { ...busy, observation: "partial" };
   const markup = renderToStaticMarkup(createElement(FactoryScene, { appearance: commons, workers: [], graph: sceneGraph([
@@ -1397,7 +1408,7 @@ test("the outbound line puts each change request at the station its records name
 test("a crate moves once when its recorded stage changes, never on first sight or reconnect, and lights what it changes", async () => {
   const graph = sceneGraph([hall("a", { machines: [machine("a-in", "ingress", { trigger: "request" })] })]);
   const workers = [{ id: "ada", name: "Ada", role: "worker", activity: "busy", location: "working", nodeId: "a" }];
-  const tasks = [{ id: "t1", agentId: "ada", projectId: "p", title: "t", status: "running", roomIds: ["a"], humanRequestIds: [] }];
+  const tasks = [{ id: "t1", agentId: "ada", projectId: "p", title: "t", status: "running", humanRequestIds: [] }];
   const crate = (station, extra = {}) => ({ id: "k1", number: 1, title: "One", station, stage: "s", fault: false, taskIds: ["t1"], ...extra });
   const proposals = { items: [{ id: "k1", title: "One", state: "active", operations: [{ entityId: "a-in", roomId: "a", path: "x", kind: "modification" }] }], onSelect: (id) => selected.push(id) };
   const selected = [];

@@ -64,7 +64,7 @@ test("gossip says only what is true of the floor", () => {
     { id: "grace", name: "Grace", role: "worker", activity: "needs-you" },
     { id: "linus", name: "Linus", role: "worker", activity: "idle", paused: true },
   ];
-  const task = (id, agentId, status, title = id) => ({ id, agentId, projectId: "p", title, status, roomIds: [], humanRequestIds: [] });
+  const task = (id, agentId, status, title = id) => ({ id, agentId, projectId: "p", title, status, humanRequestIds: [] });
   assert.deepEqual(gossip(workers, []), [
     { line: "Grace is still waiting on an answer.", reply: "Aren't we all.", about: ["grace"] },
     { line: "Linus has been paused.", reply: "Lucky them.", about: ["linus"] },
@@ -136,7 +136,7 @@ test("the floor shows the cat, what is said and the heart, and none of it withou
   globalThis.window = { matchMedia: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }) };
   globalThis.document = { visibilityState: "visible", addEventListener() {}, removeEventListener() {} };
   try {
-    await act(async () => { renderer = create(createElement(FactoryScene, { graph, appearance: commons, workers, tasks: [{ id: "t", agentId: "nobody", projectId: "p", title: "t", status: "queued", roomIds: [], humanRequestIds: [] }] })); });
+    await act(async () => { renderer = create(createElement(FactoryScene, { graph, appearance: commons, workers, tasks: [{ id: "t", agentId: "nobody", projectId: "p", title: "t", status: "queued", humanRequestIds: [] }] })); });
     const seen = { bubbles: new Set(), said: new Set(), cat: new Set(), hearts: 0, smooth: 0 };
     let wasted = 0;
     for (let tick = 0; tick < 6000; tick += 1) {
@@ -171,7 +171,7 @@ test("the floor shows the cat, what is said and the heart, and none of it withou
     assert.ok([...seen.said].some((said) => /^\w+: [^\n]+$/.test(said)), "the opener is heard before the reply");
     // An empty floor's clock is stopped, whatever moment it is mounted at: even mid-prowl, nothing asks for frames.
     for (let at = 0; at < 180_000; at += 500) {
-      await act(async () => { clock = 10_000_000 + at; renderer.update(createElement(FactoryScene, { graph, appearance: commons, workers: [], tasks: [{ id: String(at), agentId: "nobody", projectId: "p", title: "t", status: "queued", roomIds: [], humanRequestIds: [] }] })); });
+      await act(async () => { clock = 10_000_000 + at; renderer.update(createElement(FactoryScene, { graph, appearance: commons, workers: [], tasks: [{ id: String(at), agentId: "nobody", projectId: "p", title: "t", status: "queued", humanRequestIds: [] }] })); });
       assert.equal(frames.size, 0, `an empty floor asked for frames at ${at}`);
     }
     await act(async () => { renderer.update(createElement(FactoryScene, { graph, workers, appearance: { ...commons, scenery: "rich", animation: "off" } })); });

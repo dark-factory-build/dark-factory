@@ -119,7 +119,7 @@ export function FactoryFloor({
   onProjectContent?: ProjectContentCall;
 }) {
   const projects = useMemo(() => [...state?.projects.values() ?? []].map(({ id }) => id).sort(), [JSON.stringify([...state?.projects.keys() ?? []].sort())]);
-  const prepared = useMemo(() => projectGraph(graphs, projects, floorAppearance.detail ?? "auto"), [graphs, projects, floorAppearance.detail]);
+  const prepared = useMemo(() => projectGraph(graphs, projects), [graphs, projects]);
   const scene = useMemo(() => projectFloor(state, prepared, runPaths, lastRunPaths), [state, prepared, runPaths, lastRunPaths]);
   const proposed = useMemo(() => projectProposals(prepared, changes), [prepared, changes]);
   const crates = useMemo(() => changesRead ? projectCrates(changes) : undefined, [changes, changesRead]);

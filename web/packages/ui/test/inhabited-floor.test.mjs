@@ -9,7 +9,7 @@ import { layoutScene } from "../dist/src/factory-scene/scene.js";
 import { hex, node as graphNode, unit, graphWith, observed, quiet } from "../../../fixtures/graph.mjs";
 
 const project = { id: "project", name: "Factory" }, projects = new Map([[project.id, project]]);
-const prepare = (graph, detail) => projectGraph(new Map([[project.id, graph]]), [project.id], detail);
+const prepare = (graph) => projectGraph(new Map([[project.id, graph]]), [project.id]);
 // alpha (a server) with routes and a store, web (a browser), a shared queue, an external and runtime-only activity.
 const route = (n, extra = {}) => graphNode(n, "ingress", `/r${n}`, { unit: hex(1), trigger: "request", paths: [`internal/alpha/r${n}.go`], ...extra });
 const base = (docks = 3) => [
@@ -23,16 +23,14 @@ const ids = (list) => list.map((item) => item.id);
 const record = (id, paths, overrides = {}) => ({ project_id: "project", repository: "owner/factory", kind: "pull_request", id, visual_id: id, observed_at: 1000, tasks: [], missions: [], document: { number: Number(id), title: `Change ${id}`, head: "b".repeat(40), state: "open", review: { head: "b".repeat(40), state: "allow" }, source: { kind: "committed", base: "a".repeat(40), head: "b".repeat(40), observed_at: 1000, paths, omitted: 0 }, ...overrides } });
 const items = (records, now = 1000) => Object.values(deriveProductionView([{ project_id: "project", repository: "owner/factory", kind: "repository", id: "repo", visual_id: "", observed_at: 1000, document: {}, tasks: [], missions: [] }, ...records], now).contraptions);
 
-test("request docks fold into one manifold in auto, and stay whole in fine", () => {
+test("request docks fold into one manifold past six, carrying their labels", () => {
   const few = prepare(graphWith(base(3))).graph.halls.find((hall) => hall.id === hex(1));
   assert.equal(few.machines.filter((machine) => machine.kind === "ingress").length, 3, "up to six docks are all shown");
   const nodes = base(8);
-  const hallOf = (detail) => prepare(graphWith(nodes), detail).graph.halls.find((hall) => hall.id === hex(1));
-  const auto = hallOf("auto").machines.filter((machine) => machine.kind === "ingress");
+  const auto = prepare(graphWith(nodes)).graph.halls.find((hall) => hall.id === hex(1)).machines.filter((machine) => machine.kind === "ingress");
   assert.equal(auto.length, 1);
   assert.equal(auto[0].represented.length, 8);
-  assert.equal(hallOf("fine").machines.filter((machine) => machine.kind === "ingress").length, 8);
-  assert.equal(hallOf("fine").machines.some((machine) => machine.represented !== undefined), false);
+  assert.deepEqual(auto[0].routes, ["/r10", "/r11", "/r12", "/r13", "/r14", "/r15", "/r16", "/r17"]);
   // Every folded route still resolves to the manifold, so a path touching one marks it.
   const folded = prepare(graphWith(nodes));
   assert.equal(folded.where.get(hex(13)).machine, auto[0].id);
@@ -149,7 +147,7 @@ test("thirty proposals draw no floor Changes button or Help", async () => {
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   const records = Array.from({ length: 30 }, (_, i) => record(String(i + 1), [{ status: "modified", path: "internal/alpha/movement.go" }]));
   const changes = items(records), selected = [];
-  const props = { state: { projects, agents: new Map(), tasks: new Map(), humanRequests: new Map() }, graphs: new Map([[project.id, graphWith(base(2))]]), changes, floorAppearance: { detail: "auto", social: "nearby" }, onSelectChange: (id) => selected.push(id) };
+  const props = { state: { projects, agents: new Map(), tasks: new Map(), humanRequests: new Map() }, graphs: new Map([[project.id, graphWith(base(2))]]), changes, floorAppearance: { social: "nearby" }, onSelectChange: (id) => selected.push(id) };
   const text = (value) => typeof value === "string" ? value : (value.children ?? []).map(text).join("");
   let tree;
   try {

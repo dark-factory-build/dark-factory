@@ -95,8 +95,7 @@ export function orderTasksForHome(state: StateView): readonly TaskItem[] {
   });
 }
 
-/** Routes folded past six per hall, or every route. The plant overview is the floor's minimap. */
-export type FloorDetail = "auto" | "fine";
+/** Routes fold into a manifold past six per hall; zooming in lists them inside it. */
 const MAX_DOCKS = 6;
 
 export type FloorScene = Readonly<{
@@ -105,16 +104,13 @@ export type FloorScene = Readonly<{
   tasks: readonly SceneTask[];
 }>;
 
-/** A served task and the machines its observed changes touch, without inferring any execution detail. */
+/** A served task and the run sample observed for it, without inferring any execution detail. */
 export type SceneTask = Readonly<{
   id: string;
   agentId: string;
   projectId: string;
   title: string;
   status: TaskItem["status"];
-  /** Halls holding the machines its observed changes touch. */
-  roomIds: readonly string[];
-  representativeRoomId?: string;
   observation?: Readonly<{ taskRevision: bigint; runId: string }>;
   humanRequestIds: readonly string[];
 }>;
@@ -157,7 +153,7 @@ const RUNTIME_ORDER = ["process", "server", "worker", "browser", "cli"];
  * fence gates and quarantined activity. Only static evidence decides where a
  * machine stands; runtime-only nodes wait in quarantine.
  */
-export function projectGraph(graphs: ReadonlyMap<string, OperationalGraphView> | undefined, projects: readonly string[], detail: FloorDetail = "auto") {
+export function projectGraph(graphs: ReadonlyMap<string, OperationalGraphView> | undefined, projects: readonly string[]) {
   const halls: SceneHall[] = [], shared: SceneMachine[] = [], parties: SceneMachine[] = [], quarantine: SceneMachine[] = [], flows = new Map<string, SceneFlow>();
   /** Node id to the hall and machine that pictures it. */
   const where = new Map<string, { hall?: string; machine: string }>();
@@ -176,10 +172,10 @@ export function projectGraph(graphs: ReadonlyMap<string, OperationalGraphView> |
       const own = graph.nodes.filter((node) => node.unit === unit.id && staticNode(node)).sort((left, right) => compareText(left.label, right.label) || compareText(left.id, right.id));
       const machines: SceneMachine[] = [];
       const docks = own.filter((node) => node.kind === "ingress" && node.trigger !== "timer");
-      const foldDocks = detail === "auto" && docks.length > MAX_DOCKS;
+      const foldDocks = docks.length > MAX_DOCKS;
       if (foldDocks) {
         const id = `${unit.id}:docks`;
-        machines.push({ id, kind: "ingress", label: `${docks.length} routes`, represented: docks.map((node) => node.id), reading: combine(docks.map(reading)) });
+        machines.push({ id, kind: "ingress", label: `${docks.length} routes`, represented: docks.map((node) => node.id), routes: docks.map((node) => node.label), reading: combine(docks.map(reading)) });
         for (const node of docks) where.set(node.id, { hall: unit.id, machine: id });
       }
       for (const node of own) {
@@ -207,7 +203,7 @@ export function projectGraph(graphs: ReadonlyMap<string, OperationalGraphView> |
   }
   quarantine.sort((left, right) => compareText(left.owner ?? "", right.owner ?? "") || compareText(left.label, right.label) || compareText(left.id, right.id));
   const graph: SceneGraph = {
-    digest: `${digests.join(" ")}:${detail}:${quarantine.map((machine) => machine.id).join(",")}`,
+    digest: `${digests.join(" ")}:${quarantine.map((machine) => machine.id).join(",")}`,
     halls, shared, parties, quarantine, flows: [...flows.values()],
     observedAt: Math.max(0, ...projects.map((id) => graphs?.get(id)?.observed_at ?? 0)),
     ...(projects.length === 1 && graphs?.get(projects[0]!) !== undefined ? { summary: graphs.get(projects[0]!)!.summary, sources: graphs.get(projects[0]!)!.sources } : {}),
@@ -247,11 +243,8 @@ export function projectFloor(state: StateView | undefined, prepared: ReturnType<
     .sort((left, right) => compareText(left.id, right.id))
     .map((task) => {
       const sample = matchingRunSample(state, task, runPaths);
-      const touched = footprint(sample);
       return {
         id: task.id, agentId: task.assigned_agent_id, projectId: task.project_id, title: task.title, status: task.status,
-        roomIds: [...new Set(touched.map((item) => item.hall))].sort(compareText),
-        ...(touched[0] === undefined ? {} : { representativeRoomId: touched[0].hall }),
         ...(sample === undefined ? {} : { observation: { taskRevision: sample.taskRevision, runId: sample.runId } }),
         humanRequestIds: [...state.humanRequests.values()]
           .filter((request) => request.task_id === task.id && request.agent_id === task.assigned_agent_id && request.project_id === task.project_id)

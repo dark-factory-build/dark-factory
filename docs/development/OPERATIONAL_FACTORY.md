@@ -47,7 +47,7 @@ whether it was happening, or whether we could even tell.
 | `movement.ts` routing over doors and corridors | `wires()`: import cables become flow lines between machines | `internal/daemon/topology.go`, the `projectTopology` wire builder |
 | `idle-life.ts` (cat, chatter), `messages.ts` (paper, peer pulses) | `console-view.ts` floor selection: units and halls replace room selection | `TOPOLOGY_GET` / `TOPOLOGY`, client decode, fixtures |
 | Break room, errands, commons, Missions/Tasks/Library stations | `runFootprint`: changed paths now map to operational nodes | Name-based `responsibility()` motifs, file-count `equipmentScale` |
-| Reviewer pseudo-workers, change marks (`ProposalMark`) | Proposal relationships: import deltas give way to changed operational nodes | Inventory inspector, `source_files`, the "detail" grouping setting |
+| Reviewer pseudo-workers | Proposal relationships: import deltas give way to changed operational nodes | Inventory inspector, `source_files`, the "detail" grouping setting |
 | `RUN_PATHS` sampling, the production panel and its delivery data | Floor legend and help | `FACTORY_FLOOR.md` |
 | Camera, scrolling, search, inspector shell, reduced motion | | Knowledge `entities` validation and context paths now resolve through operational node IDs and their sources (`kernel/knowledge.go`, `daemon/knowledge.go`, `daemon/knowledge_context.go`, the Library form). The live database held zero entity references on 7 Oct 2026 (5 revisions checked). |
 
@@ -456,7 +456,7 @@ data.
 | Meaning | Picture |
 | --- | --- |
 | Deployment unit | A **hall**: a walled production building with the unit's name plate. Repository is a coloured tag on the plate, not a wall. |
-| Ingress | An **intake dock** on the hall's left wall. Arriving material comes in from the yard. More than six routes fold into one manifold with a count. |
+| Ingress | An **intake dock** on the hall's left wall. Arriving material comes in from the yard. More than six routes fold into one manifold with a count; zoomed in to twice the fitted scale or more, the manifold lists its routes inside its own footprint. |
 | Processor work | The hall's **main line**: a press or assembler. |
 | Job | A **cell** with an arm. |
 | Timer ingress | A **clock** on the hall wall, sending a pulse. |
@@ -501,10 +501,11 @@ never depends on data:
 - **Overview** (always visible): a minimap of the whole plant in the floor's
   corner. It shows halls coloured by coverage, gates, workers and the visible
   window. Clicking or dragging it moves the floor.
-- **Floor** (zoomable): one station per node. Ingress beyond 6 per hall folds
-  into a manifold unless the viewer picks "every route", and the quarantine
-  bay aggregates unknowns. Zoom (buttons, or ctrl/pinch and the wheel) scales
-  the floor without moving anything on it.
+- **Floor** (zoomable): one station per node. Ingress beyond 6 per hall always
+  folds into a manifold, and the quarantine bay aggregates unknowns. Zoom
+  (buttons, or ctrl/pinch and the wheel) scales the floor without moving
+  anything on it. At twice the fitted scale or more, a manifold lists its
+  routes by label inside its own footprint; there is no detail setting.
 - **Station** (on selection): the inspector shows selectors, evidence and
   sources.
 

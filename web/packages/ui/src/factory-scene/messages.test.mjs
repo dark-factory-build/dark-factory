@@ -9,7 +9,7 @@ import { workerFrames } from "../../dist/src/factory-scene/appearance.js";
 import { hallsOf } from "../../../../fixtures/scene.mjs";
 import { endsAt, messageAt, observe, send } from "../../dist/src/factory-scene/messages.js";
 
-const task = (id, agentId, status) => ({ id, agentId, projectId: "p", title: id, status, roomIds: [], humanRequestIds: [] });
+const task = (id, agentId, status) => ({ id, agentId, projectId: "p", title: id, status, humanRequestIds: [] });
 const question = (id, source, target, answered = false) => ({ id, source_task_id: source, target_task_id: target, answered, revision: 1n });
 
 test("only what changes between two looks at the floor is news", () => {
@@ -70,7 +70,7 @@ test("the floor sends a question down the corridors, its answer back, and new wo
     { id: "grace", name: "Grace", role: "worker", provider: "codex", activity: "busy", location: "working", nodeId: "h" },
     { id: "linus", name: "Linus", role: "worker", provider: "codex", activity: "idle", location: "resting" },
   ];
-  const tasks = [{ ...task("t-ada", "ada", "running"), roomIds: ["a"] }, { ...task("t-grace", "grace", "running"), roomIds: ["h"] }, task("t-linus", "linus", "queued")];
+  const tasks = [task("t-ada", "ada", "running"), task("t-grace", "grace", "running"), task("t-linus", "linus", "queued")];
   const layout = layoutScene(graph), placements = placeWorkers(layout, workers);
   const route = routeBetween(layout, placements.find(({ id }) => id === "ada"), placements.find(({ id }) => id === "grace"));
   const onRoute = (point) => { let from = placements.find(({ id }) => id === "ada"); for (const to of route.points) { const d = Math.hypot(to.x - from.x, to.y - from.y), d1 = Math.hypot(point.x - from.x, point.y - from.y), d2 = Math.hypot(to.x - point.x, to.y - point.y); if (Math.abs(d1 + d2 - d) < 0.01) return true; from = to; } return false; };
