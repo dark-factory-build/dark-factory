@@ -92,6 +92,20 @@ func TestMain(m *testing.M) {
 		}
 		os.Exit(0)
 	}
+	if len(os.Args) == 3 && os.Args[1] == "--detached-helper" {
+		_, err := unix.Setsid()
+		if err == nil {
+			err = os.WriteFile(os.Args[2]+".pending", []byte(strconv.Itoa(os.Getpid())), 0o600)
+		}
+		if err == nil {
+			err = os.Rename(os.Args[2]+".pending", os.Args[2])
+		}
+		if err != nil {
+			os.Exit(91)
+		}
+		time.Sleep(time.Minute)
+		os.Exit(0)
+	}
 	if len(os.Args) == 3 && os.Args[1] == "--attempt-provider" {
 		if err := os.WriteFile(os.Args[2], []byte("provider"), 0o600); err != nil {
 			fmt.Fprintln(os.Stderr, err)

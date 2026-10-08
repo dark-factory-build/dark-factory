@@ -1759,6 +1759,7 @@ func finishAttemptWithExit(child *OwnedChild, dir *os.File, cfg attemptConfig, r
 	if cleanupErr != nil {
 		return errors.Join(cause, fmt.Errorf("runner: converge inner: %w", cleanupErr))
 	}
+	cause = errors.Join(cause, killRunStragglers(dir))
 	// An AttemptResult is evidence that the complete owner cleanup path was
 	// observed. Protocol or kill errors marked unresolved must never be turned
 	// into durable convergence evidence merely because Wait eventually returned.
