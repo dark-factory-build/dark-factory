@@ -57,6 +57,8 @@ const SUSTAINED_MESSAGES_PER_SECOND = 60;
  */
 const INGEST_BURST_BYTES = 4 * 1024 * 1024;
 const INGEST_BYTES_PER_SECOND = 1024 * 1024;
+/** Each push also costs this much, so empty pushes are bounded too (256 a second). */
+const INGEST_PUSH_BYTES = 4096;
 /** Flags of an INGEST record. */
 const INGEST_PROTOBUF = 1;
 const INGEST_GZIP = 2;
@@ -420,7 +422,7 @@ export class FactoryRelay implements DurableObject {
 		const protobuf = type.startsWith('application/x-protobuf');
 		if ((!protobuf && !type.startsWith('application/json')) || !['', 'identity', 'gzip'].includes(encoding)) return refuse(415);
 		// The Worker admitted only a Content-Length of at most 1 MiB.
-		const length = Number(request.headers.get('Content-Length'));
+		const length = Number(request.headers.get('Content-Length')) + INGEST_PUSH_BYTES;
 		const now = Date.now();
 		const bucket = this.#ingestBucket;
 		bucket.tokens = Math.min(INGEST_BURST_BYTES, bucket.tokens + ((now - bucket.at) / 1000) * INGEST_BYTES_PER_SECOND);

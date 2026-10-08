@@ -442,8 +442,8 @@ SDK in the app, which the factory can add itself as an ordinary change.
   no connected host, or a bearer whose SHA-256 is not the host's digest (401
   either way, so a stranger learns nothing about whether the factory is up);
   an unsupported `Content-Type` or `Content-Encoding` (415); a byte bucket
-  that cannot cover the `Content-Length` (429; 4 MiB of burst refilled at
-  1 MiB a second, in memory per object). Bytes, not requests: an app sends one
+  that cannot cover the `Content-Length` plus 4 KiB per push (429; 4 MiB of
+  burst refilled at 1 MiB a second, in memory per object). Bytes, not requests: an app sends one
   small export per invocation where a collector sends a few large ones.
   Only then is the body read, bounded to 1 MiB, and sent to the host as one
   `INGEST` record (0x08, relay to host, connection 0): one byte of flags
@@ -490,7 +490,8 @@ reader.
   refused before its body is read. The bucket is spent only after
   authentication, so strangers cannot spend a factory's budget.
 - **Authenticated flood.** 4 MiB of burst, then 1 MiB a second, charged by
-  `Content-Length` before any body is read, so concurrent pushes cannot pile
+  `Content-Length` plus 4 KiB per push (so at most 256 empty pushes a second)
+  before any body is read, so concurrent pushes cannot pile
   bodies into the object's memory. factoryd delivers off the relay reader with
   at most 4 MiB pending, so controllers are never stalled and a bad export
   never drops the connection.

@@ -547,8 +547,8 @@ func (connector *Connector) apply(ctx context.Context, record Record, queue *out
 		if record.Connection != 0 || len(record.Payload) == 0 {
 			return fmt.Errorf("%w: malformed INGEST", ErrRelayProtocol)
 		}
-		// Each push also costs a fixed amount, which bounds how many deliver at once.
-		cost := int64(len(record.Payload)) + 1024
+		// Each push also costs the relay's fixed 4 KiB, so the two bounds match.
+		cost := int64(len(record.Payload)) + 4096
 		if connector.ingesting.Add(cost) > maxIngestPending {
 			connector.ingesting.Add(-cost)
 			return nil
