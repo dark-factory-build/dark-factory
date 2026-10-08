@@ -230,16 +230,26 @@ function composeHall(hall: SceneHall, room: SceneRect): readonly RoomContent[] {
   const top = room.y + 44, contents: RoomContent[] = [];
   docks.forEach((machine, index) => contents.push(place(machine, room.x + 22, top + 8 + index * 40)));
   clocks.forEach((machine, index) => contents.push(place(machine, room.x + room.width - 30 - index * 26, room.y + 14)));
-  const lineX = room.x + Math.max(72, Math.floor((room.width - size.line.width) / 2));
-  const lineY = top + 34 + (cells.length === 0 ? 0 : 30);
-  contents.push(place({ id: hall.id, kind: "processor", label: hall.label, reading: hall.reading }, lineX, lineY));
+  const { lineOffset, perRow, below } = cellGrid(cells.length, room.width);
+  const lineX = room.x + lineOffset;
+  contents.push(place({ id: hall.id, kind: "processor", label: hall.label, reading: hall.reading }, lineX, top + 34 + below));
   const right = room.x + room.width - 50;
-  const perRow = Math.max(1, Math.floor((right - lineX) / 42));
-  cells.forEach((machine, index) => contents.push(place(machine, lineX + (index % perRow) * 42, top + 6 + Math.floor(index / perRow) * 34)));
+  cells.forEach((machine, index) => contents.push(place(machine, lineX + (index % perRow) * 42, top + 6 + Math.floor(index / perRow) * CELL_ROW)));
   silos.forEach((machine, index) => contents.push(place(machine, right - Math.floor(index / 3) * 36, top + 8 + (index % 3) * 62)));
   // What the code shows but nothing recognised waits by the door as a crate.
   hall.machines.filter((machine) => machine.kind === "unknown").forEach((machine, index) => contents.push(place(machine, room.x + 14 + index * 28, room.y + room.height - 40)));
   return contents;
+}
+
+// A cell row is the cell and the label under it, so rows never overlap.
+const CELL_ROW = 44;
+
+/** Where the main line stands and how the job cells wrap above it, from the hall's width alone. */
+function cellGrid(cells: number, width: number) {
+  const lineOffset = Math.max(72, Math.floor((width - size.line.width) / 2));
+  const perRow = Math.max(1, Math.floor((width - 50 - lineOffset) / 42));
+  const rows = Math.ceil(cells / perRow);
+  return { lineOffset, perRow, below: rows === 0 ? 0 : 30 + (rows - 1) * CELL_ROW };
 }
 
 function hallUnits(hall: SceneHall) {
@@ -251,7 +261,7 @@ function hallUnits(hall: SceneHall) {
 function hallHeight(hall: SceneHall) {
   const docks = hall.machines.filter((machine) => machine.kind === "ingress" && machine.trigger !== "timer").length;
   const silos = hall.machines.filter((machine) => machine.kind === "store" || machine.kind === "queue").length;
-  const cells = hall.machines.some((machine) => machine.kind === "job") ? 30 : 0;
+  const cells = cellGrid(hall.machines.filter((machine) => machine.kind === "job").length, hallUnits(hall) * BAY).below;
   return Math.max(hall.machines.length === 0 ? 132 : 176, 44 + 16 + docks * 40, 44 + 16 + Math.min(3, silos) * 62, 44 + 34 + cells + size.line.height + 56);
 }
 

@@ -1514,3 +1514,22 @@ test("a crate moves once when its recorded stage changes, never on first sight o
     for (const [key, value] of Object.entries(saved)) { if (value === undefined) delete globalThis[key]; else globalThis[key] = value; }
   }
 });
+
+test("a hall with many jobs wraps them in rows that clear each other's labels and the main line", () => {
+  const jobs = Array.from({ length: 17 }, (_, index) => machine(`ci-job-${index}`, "job"));
+  const layout = layoutScene(sceneGraph([hall("ci", { machines: jobs })]));
+  const room = layout.rooms.find((candidate) => candidate.id === "ci");
+  const cells = room.contents.filter((item) => item.shape === "cell");
+  const line = room.contents.find((item) => item.shape === "line");
+  assert.equal(cells.length, 17);
+  const label = 12; // a cell's label sits under it
+  for (const a of cells) {
+    for (const b of cells) {
+      if (a === b) continue;
+      const overlap = a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height + label && b.y < a.y + a.height + label;
+      assert.ok(!overlap, `cells ${a.key} and ${b.key} overlap`);
+    }
+    assert.ok(a.y + a.height + label <= line.y, `cell ${a.key} runs into the main line`);
+  }
+  assert.ok(line.y + line.height <= room.y + room.height, "the main line stays inside its hall");
+});
