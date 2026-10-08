@@ -587,6 +587,20 @@ test("console edits and topology carry exact bodies and correlate their results"
   session.close();
 });
 
+test("telemetry ingest correlates its result and carries a minted secret only in that answer", async () => {
+  const { session, socket } = await openHumanSession();
+  const pending = session.telemetryIngest("mint");
+  const frame = decodeClientControl(socket.sent.at(-1));
+  assert.equal(frame.type, "TELEMETRY_INGEST");
+  assert.deepEqual(frame.body, { action: "mint" });
+  const body = { url: "https://relay.darkfactory.build/ingest/n0/v1/traces", secret: "A".repeat(43), active: true };
+  socket.reply(encodeServerControl({ type: "TELEMETRY_INGEST_RESULT", id: frame.id, body }));
+  assert.deepEqual(await pending, body);
+  // A secret with nothing active is not a shape the factory sends.
+  assert.throws(() => encodeServerControl({ type: "TELEMETRY_INGEST_RESULT", id: "x", body: { ...body, active: false } }));
+  session.close();
+});
+
 test("remote invitation correlates its own result and needs bounded human-actions authority", async () => {
   const invitation = {
     link: "https://app.darkfactory.build/remote#df_remote&node=n0&expires=1767225600",

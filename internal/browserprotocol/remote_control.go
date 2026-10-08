@@ -32,6 +32,24 @@ func EncodeRemoteInviteResult(id string, value RemoteInviteResult) ([]byte, erro
 	return encodeControl(TypeRemoteInviteResult, id, value)
 }
 
+// TelemetryIngest reads the telemetry ingest endpoint ("status"), mints a new
+// secret for it ("mint", which rotates), or revokes it ("revoke").
+type TelemetryIngest struct {
+	Action string `json:"action"`
+}
+
+// TelemetryIngestResult names the ingest URL. Secret is the bearer, non-empty
+// only in the answer to a mint: the factory keeps only its digest.
+type TelemetryIngestResult struct {
+	URL    string `json:"url"`
+	Secret string `json:"secret"`
+	Active Bool   `json:"active"`
+}
+
+func EncodeTelemetryIngestResult(id string, value TelemetryIngestResult) ([]byte, error) {
+	return encodeControl(TypeTelemetryIngestResult, id, value)
+}
+
 // MaxPushEndpointBytes bounds a push service URL; the services in use issue
 // URLs a few hundred bytes long.
 const MaxPushEndpointBytes = 2048
@@ -109,6 +127,17 @@ func validRemoteControl(kind MessageType, body any) error {
 	switch value := body.(type) {
 	case RemoteInvite:
 	case PushSubscribeResult:
+	case TelemetryIngest:
+		if value.Action != "status" && value.Action != "mint" && value.Action != "revoke" {
+			return bad()
+		}
+	case TelemetryIngestResult:
+		// The secret is 32 bytes as unpadded base64url, the only bearer the relay admits.
+		if len(value.URL) > MaxRemoteInviteLinkBytes || !printable(value.URL) || !strings.HasSuffix(value.URL, "/v1/traces") ||
+			!strings.HasPrefix(value.URL, "https://") && !strings.HasPrefix(value.URL, "http://") ||
+			value.Secret != "" && (!base64URL(value.Secret, 43, 43) || !bool(value.Active)) {
+			return bad()
+		}
 	case PushSubscribe:
 		// 87 characters is exactly one uncompressed P-256 point; a PKCS#8
 		// P-256 private key exports to 138 bytes, bounded loosely.

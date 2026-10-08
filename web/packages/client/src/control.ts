@@ -195,6 +195,9 @@ export type RemoteInviteResultBody = { link: string; expires_at_ms: bigint; svg:
 /** One device's Web Push subscription plus the VAPID key pair it minted for it, base64url without padding. */
 export type PushSubscribeBody = { endpoint: string; public_key: string; private_key: string };
 export type PushSubscribeResultBody = Record<string, never>;
+export type TelemetryIngestBody = { action: "status" | "mint" | "revoke" };
+/** `secret` is the bearer, non-empty only in the answer to a mint. */
+export type TelemetryIngestResultBody = { url: string; secret: string; active: boolean };
 const MAX_PUSH_ENDPOINT_BYTES = 2048;
 const BASE64URL = /^[A-Za-z0-9_-]+$/;
 /** The push services behind every browser that can install the remote console; the daemon refuses any other host. */
@@ -269,6 +272,7 @@ export type ServerControlFrame = { type: "ATTACHMENT_RETENTION_RESULT"; id: stri
   | { type: "TERMINAL_TARGET"; id: string; body: TerminalTargetBody }
   | { type: "REMOTE_INVITE_RESULT"; id: string; body: RemoteInviteResultBody }
   | { type: "PUSH_SUBSCRIBE_RESULT"; id: string; body: PushSubscribeResultBody }
+  | { type: "TELEMETRY_INGEST_RESULT"; id: string; body: TelemetryIngestResultBody }
   | TerminalServerControlFrame | ErrorFrame | UnknownServerControlFrame;
 export type ClientControlFrame = { type: "ATTACHMENT_RETENTION"; id: string; body: { enabled?: boolean } } | { type: "FACTORY_DISPATCH"; id: string; body: FactoryDispatchBody } | { type: "PROJECT_CONTENT"; id: string; body: ProjectContentRequest } | PairProveFrame | AuthProveFrame | StateGetFrame | StateWatchFrame | HumanRequestDetailGetFrame
   | { type: "HUMAN_REQUEST_REPLY"; id: string; body: HumanRequestReplyBody }
@@ -298,6 +302,7 @@ export type ClientControlFrame = { type: "ATTACHMENT_RETENTION"; id: string; bod
   | { type: "TERMINAL_TARGET_GET"; id: string; body: TerminalTargetGetBody }
   | { type: "REMOTE_INVITE"; id: string; body: RemoteInviteBody }
   | { type: "PUSH_SUBSCRIBE"; id: string; body: PushSubscribeBody }
+  | { type: "TELEMETRY_INGEST"; id: string; body: TelemetryIngestBody }
   | TerminalControlFrame | ErrorFrame;
 type ControlBody = ClientControlFrame["body"] | ServerControlFrame["body"];
 
@@ -541,6 +546,8 @@ function validateBody(type: ControlType, body: unknown, wire: boolean): ControlB
     case "REMOTE_INVITE": requireKeys(body, [], wire); return {};
     case "PUSH_SUBSCRIBE": requireKeys(body, ["endpoint", "public_key", "private_key"], wire); { const endpoint = boundedText(body.endpoint, 9, MAX_PUSH_ENDPOINT_BYTES); if (/[\u0000-\u001f\u007f]/.test(endpoint) || !pushServiceEndpoint(endpoint) || typeof body.public_key !== "string" || body.public_key.length !== 87 || !BASE64URL.test(body.public_key) || typeof body.private_key !== "string" || body.private_key.length === 0 || body.private_key.length > 512 || !BASE64URL.test(body.private_key)) malformed(); return { endpoint, public_key: body.public_key, private_key: body.private_key }; }
     case "PUSH_SUBSCRIBE_RESULT": requireKeys(body, [], wire); return {};
+    case "TELEMETRY_INGEST": requireKeys(body, ["action"], wire); if (body.action !== "status" && body.action !== "mint" && body.action !== "revoke") malformed(); return { action: body.action };
+    case "TELEMETRY_INGEST_RESULT": requireKeys(body, ["url", "secret", "active"], wire); { const url = boundedText(body.url, 1, MAX_REMOTE_INVITE_LINK_BYTES); if (!/^https?:\/\//.test(url) || !url.endsWith("/v1/traces") || /[\u0000-\u001f\u007f]/.test(url) || typeof body.secret !== "string" || typeof body.active !== "boolean" || body.secret !== "" && (body.secret.length !== 43 || !BASE64URL.test(body.secret) || !body.active)) malformed(); return { url, secret: body.secret, active: body.active }; }
     case "REMOTE_INVITE_RESULT": requireKeys(body, ["link", "expires_at_ms", "svg"], wire); { const link = boundedText(body.link, 1, MAX_REMOTE_INVITE_LINK_BYTES); const svg = boundedText(body.svg, 1, MAX_REMOTE_INVITE_SVG_BYTES); if (!link.startsWith(REMOTE_INVITE_LINK_PREFIX) || /[\u0000-\u001f\u007f]/.test(link) || !svg.startsWith("<svg")) malformed(); return { link, expires_at_ms: decimal(body.expires_at_ms, wire, true), svg }; }
     case "ERROR": requireKeys(body, ["code", "retryable"], wire); if (typeof body.code !== "string" || typeof body.retryable !== "boolean") malformed(); if (!(ERROR_CODES as readonly string[]).includes(body.code)) { if (!wire) malformed(); return { code: "internal", retryable: false }; } return { code: body.code as ErrorCode, retryable: body.retryable };
   }

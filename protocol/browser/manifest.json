@@ -513,6 +513,18 @@
       "fixture": "push_subscribe_result.json"
     },
     {
+      "type": "TELEMETRY_INGEST",
+      "direction": "client",
+      "id": "required",
+      "fixture": "telemetry_ingest.json"
+    },
+    {
+      "type": "TELEMETRY_INGEST_RESULT",
+      "direction": "server",
+      "id": "required",
+      "fixture": "telemetry_ingest_result.json"
+    },
+    {
       "type": "ERROR",
       "direction": "both",
       "id": "optional",

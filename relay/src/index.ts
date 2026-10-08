@@ -2,6 +2,7 @@
 // decision that matters happens inside the per-node Durable Object.
 
 import { FactoryRelay, type Env } from './relay.js';
+import { INGEST_LIMIT } from './envelope.js';
 import { NODE_ID_PATTERN } from './tokens.js';
 
 export { FactoryRelay };
@@ -17,6 +18,8 @@ export default {
 		}
 		const read = /^\/public\/([^/]+)$/.exec(url.pathname);
 		if (read !== null) return await readWorld(request, env, read[1] as string);
+		const ingest = /^\/ingest\/([^/]+)\/v1\/traces$/.exec(url.pathname);
+		if (ingest !== null) return await routeIngest(request, env, ingest[1] as string);
 		const match = /^\/(?:host|controller)\/([^/]+)$/.exec(url.pathname);
 		if (match === null) return new Response(null, { status: 404 });
 		const node = match[1] as string;
@@ -47,4 +50,21 @@ async function readWorld(request: Request, env: Env, id: string): Promise<Respon
 	const served = new Headers(world.headers);
 	for (const [name, value] of Object.entries(headers)) served.set(name, value);
 	return new Response(world.body, { status: world.status, headers: served });
+}
+
+/**
+ * A remote platform's OTLP traces push. Everything that needs no state is
+ * refused here, bodiless, before any object wakes: the node object then
+ * checks the secret, the media type and its rate before reading the body.
+ */
+async function routeIngest(request: Request, env: Env, node: string): Promise<Response> {
+	if (!NODE_ID_PATTERN.test(node)) return new Response(null, { status: 404 });
+	if (request.method !== 'POST') return new Response(null, { status: 405, headers: { allow: 'POST' } });
+	if (!/^Bearer [A-Za-z0-9_-]{43}$/.test(request.headers.get('Authorization') ?? '')) {
+		return new Response(null, { status: 401 });
+	}
+	const length = request.headers.get('Content-Length');
+	if (length === null || !/^\d{1,7}$/.test(length)) return new Response(null, { status: 411 });
+	if (Number(length) > INGEST_LIMIT) return new Response(null, { status: 413 });
+	return await env.FACTORY_RELAY.getByName(node).fetch(request);
 }

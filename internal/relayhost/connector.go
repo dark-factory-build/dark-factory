@@ -1,6 +1,7 @@
 package relayhost
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -72,6 +73,9 @@ type Config struct {
 	DeviceKey func(ctx context.Context, clientID [ControllerIDSize]byte) ([DeviceKeySize]byte, bool, error)
 	// TicketLifetime is how long an injected control ticket stays valid.
 	TicketLifetime time.Duration
+	// IngestKey is the SHA-256 of the factory's telemetry ingest secret, or
+	// nil when none is minted. SetIngestKey replaces it.
+	IngestKey []byte
 
 	// Dialer, Now, BaseBackoff, MaxBackoff, PingInterval and PongTimeout are
 	// the test seams. The timing members are configurable because a test that
@@ -119,6 +123,11 @@ type Connector struct {
 	sequence  uint64
 	sessions  map[uint32]*session
 	queue     *outboundQueue
+	// ingestKey is the current ingest digest, queued first on every connection.
+	ingestKey []byte
+	// ingesting holds the one relayed telemetry push being delivered; a push
+	// arriving meanwhile is dropped, never queued.
+	ingesting chan struct{}
 
 	sessionGroup sync.WaitGroup
 }
@@ -142,12 +151,14 @@ func Dial(ctx context.Context, config Config) (*Connector, error) {
 	config = config.withDefaults()
 	owned, cancel := context.WithCancel(ctx)
 	connector := &Connector{
-		config:   config,
-		hostURL:  strings.TrimSuffix(config.RelayOrigin, "/") + "/host/" + config.Identity.NodeID(),
-		ctx:      owned,
-		cancel:   cancel,
-		done:     make(chan struct{}),
-		sessions: make(map[uint32]*session),
+		config:    config,
+		hostURL:   strings.TrimSuffix(config.RelayOrigin, "/") + "/host/" + config.Identity.NodeID(),
+		ctx:       owned,
+		cancel:    cancel,
+		done:      make(chan struct{}),
+		sessions:  make(map[uint32]*session),
+		ingesting: make(chan struct{}, 1),
+		ingestKey: config.IngestKey,
 	}
 	go connector.run()
 	return connector, nil
@@ -244,6 +255,21 @@ func (connector *Connector) Publish(world []byte) any {
 		return nil
 	}
 	return queue
+}
+
+// SetIngestKey replaces the ingest secret digest, or revokes it with nil, and
+// tells the relay at once if connected. It holds the lock that swaps
+// connections, so a new connection can never start with the old digest.
+func (connector *Connector) SetIngestKey(digest []byte) {
+	if connector == nil {
+		return
+	}
+	connector.mu.Lock()
+	defer connector.mu.Unlock()
+	connector.ingestKey = digest
+	if connector.queue != nil {
+		connector.queue.push(nil, Record{Type: RecordIngestKey, Payload: digest})
+	}
 }
 
 // Connection names the current relay connection, or nil without one. A
@@ -363,6 +389,10 @@ func (connector *Connector) serve(relay *websocket.Conn) {
 	connector.mu.Lock()
 	connector.connected = true
 	connector.queue = queue
+	// A new relay socket starts with no digest, so only a minted one is sent.
+	if connector.ingestKey != nil {
+		queue.push(nil, Record{Type: RecordIngestKey, Payload: connector.ingestKey})
+	}
 	connector.mu.Unlock()
 
 	var writer sync.WaitGroup
@@ -513,9 +543,26 @@ func (connector *Connector) apply(ctx context.Context, record Record, queue *out
 		return nil
 	case RecordClose:
 		return connector.closeSession(record)
+	case RecordIngest:
+		if record.Connection != 0 || len(record.Payload) == 0 {
+			return fmt.Errorf("%w: malformed INGEST", ErrRelayProtocol)
+		}
+		select {
+		case connector.ingesting <- struct{}{}:
+		default:
+			return nil
+		}
+		flags, body := record.Payload[0], bytes.Clone(record.Payload[1:])
+		connector.sessionGroup.Add(1)
+		go func() {
+			defer connector.sessionGroup.Done()
+			defer func() { <-connector.ingesting }()
+			connector.ingest(ctx, flags, body)
+		}()
+		return nil
 	default:
-		// DecodeRecords admits only the closed set above; REVOKE and PUBLISH
-		// are host to relay only.
+		// DecodeRecords admits only the closed set above; REVOKE, PUBLISH and
+		// INGEST_KEY are host to relay only.
 		return fmt.Errorf("%w: record 0x%02x is host to relay only", ErrRelayProtocol, byte(record.Type))
 	}
 }
@@ -582,6 +629,40 @@ func (connector *Connector) closeSession(record Record) error {
 	connector.shutdownAsync(current, websocket.StatusNormalClosure)
 	return nil
 }
+
+// Flags of an INGEST record.
+const (
+	ingestProtobuf = 1 << 0
+	ingestGzip     = 1 << 1
+)
+
+var ingestClient = &http.Client{Timeout: 10 * time.Second}
+
+// ingest posts one relayed traces push to the daemon's own loopback OTLP
+// receiver, exactly as a local exporter would, marked remote so spans that
+// name no environment are not taken for local ones.
+func (connector *Connector) ingest(ctx context.Context, flags byte, body []byte) {
+	target, _ := url.Parse(connector.config.BrowserURL) // validated by Dial
+	target.Scheme, target.Path = strings.Replace(target.Scheme, "ws", "http", 1), "/v1/traces"
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, target.String(), bytes.NewReader(body))
+	if err != nil {
+		return
+	}
+	request.Header.Set("Content-Type", "application/json")
+	if flags&ingestProtobuf != 0 {
+		request.Header.Set("Content-Type", "application/x-protobuf")
+	}
+	if flags&ingestGzip != 0 {
+		request.Header.Set("Content-Encoding", "gzip")
+	}
+	request.Header.Set(RemoteHeader, "1")
+	if response, err := ingestClient.Do(request); err == nil {
+		_ = response.Body.Close()
+	}
+}
+
+// RemoteHeader marks an OTLP export the relay carried from a remote platform.
+const RemoteHeader = "Dark-Factory-Remote"
 
 // shutdownAsync closes one loopback socket off the read loop while keeping it
 // inside the group Close joins.

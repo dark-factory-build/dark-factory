@@ -22,6 +22,7 @@ import (
 	"github.com/coder/websocket"
 	"github.com/dark-factory-build/dark-factory/internal/browserprotocol"
 	"github.com/dark-factory-build/dark-factory/internal/opgraph"
+	"github.com/dark-factory-build/dark-factory/internal/relayhost"
 )
 
 const (
@@ -62,10 +63,10 @@ type Observer interface {
 	Observe(attributes map[string]string)
 }
 
-// TraceReceiver is an optional Backend capability: aggregate a local OTLP
-// trace export without retaining it.
+// TraceReceiver is an optional Backend capability: aggregate an OTLP trace
+// export without retaining it. remote marks one the relay carried.
 type TraceReceiver interface {
-	ReceiveTraces(body []byte) error
+	ReceiveTraces(body []byte, remote bool) error
 }
 
 // AgentTelemetryReceiver is an optional Backend capability: count a local
@@ -752,7 +753,7 @@ func (server *Server) handleOTLP(writer http.ResponseWriter, request *http.Reque
 			body, err = opgraph.OTLPProtobufJSON(body)
 		}
 		if err == nil {
-			err = traces.ReceiveTraces(body)
+			err = traces.ReceiveTraces(body, request.Header.Get(relayhost.RemoteHeader) != "")
 		}
 	}
 	if err != nil {

@@ -7,6 +7,7 @@ import {
   type RepositoryView,
   type IntakeView,
   type GitHubConnectionResult,
+  type TelemetryIngest,
 } from "@dark-factory/client";
 
 const LOOPBACK_GRANT = CAPABILITIES.human_actions | CAPABILITIES.terminal_input;
@@ -19,7 +20,7 @@ export type FactoryRemoteInvite = Readonly<{
 
 export type FactoryGitHubView = Readonly<{ result?: GitHubConnectionResult; pending: boolean; error?: string }>;
 
-type SettingsSession = Pick<BrowserSession, "discoverAccounts" | "linkAccount" | "updateAccount" | "inviteRemote" | "listBrowserClients" | "revokeBrowserClient" | "githubConnection" | "intake" | "getRepositories" | "mutateRepository" | "createProject" | "capabilities" | "clientId">;
+type SettingsSession = Pick<BrowserSession, "discoverAccounts" | "linkAccount" | "updateAccount" | "inviteRemote" | "telemetryIngest" | "listBrowserClients" | "revokeBrowserClient" | "githubConnection" | "intake" | "getRepositories" | "mutateRepository" | "createProject" | "capabilities" | "clientId">;
 
 type SettingsOwner = Readonly<{
   session(): SettingsSession | undefined;
@@ -299,6 +300,13 @@ export class FactorySettingsCoordinator {
       const invite = await session.inviteRemote();
       if (current()) this.#remoteInvite = { link: invite.link, svg: invite.svg, expiresAtMs: invite.expiresAtMs };
     }, { quiet: true, release: true, failed: () => { this.#remoteInvite = undefined; } });
+  }
+
+  /** A minted secret goes only to the caller, never into published state. */
+  async telemetryIngest(action: Parameters<BrowserSession["telemetryIngest"]>[0]): Promise<TelemetryIngest> {
+    const session = this.#owner.session();
+    if (!this.#owner.ready() || session === undefined) throw new Error("unavailable");
+    try { return await session.telemetryIngest(action); } catch (error) { throw new Error(this.#owner.errorCode(error)); }
   }
 
   dismissRemoteInvite(): void {

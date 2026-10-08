@@ -13,6 +13,7 @@ import {
   type ProjectContentOutput,
   type BrowserSession,
   type BrowserSessionOptions,
+  type TelemetryIngest,
   type AgentItem,
   type SpriteAppearance,
   type ProjectItem,
@@ -166,7 +167,7 @@ type HumanSession = Pick<BrowserSession, "getHumanRequestDetail" | "replyHumanRe
 type TerminalSession = Pick<BrowserSession, "resolveAgentTerminal" | "openTerminal" | "close">;
 type AgentTaskSession = Pick<BrowserSession, "enqueueAgentTaskWithFiles" | "enqueueAgentTask" | "controlAgent" | "getTaskHistory" | "getTaskDetail" | "resolveAgentTerminal">;
 type ConsoleSession = Pick<BrowserSession, "updateAgent" | "setProjectLimits" | "createProject" | "getRepositories" | "mutateRepository" | "intake" | "updateTask" | "getOperationalGraph" | "getOperationalNode" | "getRunPaths" | "getTaskList" | "discoverAccounts" | "linkAccount" | "updateAccount" | "listBrowserClients" | "revokeBrowserClient" | "githubConnection" | "clientId">;
-type RemoteInviteSession = Pick<BrowserSession, "inviteRemote" | "capabilities">;
+type RemoteInviteSession = Pick<BrowserSession, "inviteRemote" | "telemetryIngest" | "capabilities">;
 type ControlledClient = Pick<BrowserClient, "connect" | "close"> & { readonly session?: HumanSession & TerminalSession & AgentTaskSession & ConsoleSession & RemoteInviteSession & Partial<Pick<BrowserSession, "projectContent" | "attachmentRetention" | "setDispatch">> };
 type ClientFactory = (options: BrowserSessionOptions) => ControlledClient;
 
@@ -851,6 +852,8 @@ export class FactoryAppController {
 
   /** The mint is never retried: a failure is reported and the operator asks again. */
   inviteRemote(): Promise<void> { return this.#settings.inviteRemote(); }
+
+  telemetryIngest(action: Parameters<BrowserSession["telemetryIngest"]>[0]): Promise<TelemetryIngest> { return this.#settings.telemetryIngest(action); }
 
   dismissRemoteInvite(): void {
     if (!this.#closed) this.#settings.dismissRemoteInvite();

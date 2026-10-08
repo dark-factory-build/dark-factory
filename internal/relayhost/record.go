@@ -24,6 +24,13 @@ const (
 	// RecordPublish is host to relay only and always uses connection 0. Its
 	// payload is this factory's PublicWorld bytes, or empty to retract it.
 	RecordPublish RecordType = 0x06
+	// RecordIngestKey is host to relay only and always uses connection 0. Its
+	// payload is the SHA-256 of this factory's telemetry ingest secret, or
+	// empty to revoke it.
+	RecordIngestKey RecordType = 0x07
+	// RecordIngest is relay to host only and always uses connection 0: one
+	// authenticated OTLP traces push, a flags byte then the body.
+	RecordIngest RecordType = 0x08
 )
 
 const (
@@ -55,7 +62,7 @@ type Record struct {
 }
 
 func (kind RecordType) known() bool {
-	return kind >= RecordOpen && kind <= RecordPublish
+	return kind >= RecordOpen && kind <= RecordIngest
 }
 
 // AppendRecord appends the wire encoding of one record to dst.

@@ -313,20 +313,47 @@ granularity is a fixed table in code, not a runtime claim.
   selector, since the broker reads checks of pull request heads alone; a
   push-only workflow's jobs stay partial. Coverage is claimed only when no read
   failed and the pull page was complete. No API call is added.
-- **`github` deploys (designed, not built):** GitHub Deployments need the
-  App's `deployments: read` permission, which it does not hold. The broker
-  operation is `list_deployments {repository, per_page ≤ 30}` returning
-  `{id, environment, sha, ref, created_at, state, url}` per deployment, the
-  state from its newest status, minted with `deployments: read` and
-  `metadata: read`. factoryd would map each to a `deploy` observation on the
-  unit `observe.json`'s `services` names for that environment, setting
-  `deployed_at`. Owner steps: in the App's settings, Permissions →
-  Repository → Deployments → Read-only, save; then on each installation
-  (Settings → Applications → the App → Review request) accept the new
-  permission; then deploy the Worker carrying the tool.
-- **Not yet built:** `vercel` (runtime logs), Sentry and PostHog. Each is an
-  adapter of the same shape. They are added when a system that needs one is
-  configured. An unused adapter is dead code.
+- **`github` deploys (designed, not built; waits on the App permission):**
+  GitHub Deployments are written by whatever deploys (Vercel's GitHub
+  integration, Actions, any CD tool), so one read covers every platform that
+  records them. The App needs `deployments: read`, which it does not hold yet.
+  - *Broker:* `list_deployments {repository, per_page ≤ 30}` in
+    `control-plane/src/github_app.rs`, minted with `deployments: read` and
+    `metadata: read`, newest first, returning per deployment
+    `{id, environment, production_environment, sha, ref, created_at, state,
+    updated_at}`, the state
+    and `updated_at` from its newest status (one status read per deployment,
+    `per_page=1`). No URLs, payloads or creators.
+  - *factoryd:* the production refresh calls it once per enabled repository
+    whose plant has a deployed unit, at the refresh's own cadence. Each
+    deployment whose newest status is `success` becomes one `deploy`
+    observation (`source` `github`, environment from GitHub, `End` its
+    status time) on a unit: the repository's only deployed unit, or the one
+    `observe.json`'s `services` names for that environment; with several and
+    no mapping it lands on none, and the hall stays as it was. The overlay
+    already turns a deploy into `deployed_at` and the hall's changeover; no
+    plant or site code changes. `failure`/`error` count as errors on that
+    unit; `in_progress`/`queued` are not drawn.
+  - *SHIPPED means deployed:* a merged crate moves from SHIPPED to deployed
+    when a successful deployment of the repository's production environment
+    (the one `observe.json` names, else the environment GitHub flags
+    `production_environment`) was created at or after its merge on the
+    default branch. Without deployment records, SHIPPED keeps meaning merged,
+    and the line says so.
+  - *Owner steps:* dark-factory-build → Settings → Developer settings →
+    GitHub Apps → dark-factory-maintainer → Edit → Permissions & events →
+    Repository permissions → Deployments → Read-only → Save changes; then
+    Settings → GitHub Apps → Installed → dark-factory-maintainer → Configure →
+    Review request → Accept new permissions, with each repository whose
+    deploys should show in Repository access. Customers' installations accept
+    the same request. Then merge the broker operation and deploy the
+    control-plane Worker before the factoryd that calls it.
+- **`otlp` remote (push):** platforms that push OpenTelemetry (Vercel Trace
+  Drains, a collector, any OTLP/HTTP exporter) reach the same receiver through
+  the relay. See *Remote ingest* below. There is no Vercel-specific code.
+- **Not yet built:** Sentry and PostHog pull adapters. Each is an adapter of
+  the same shape, added when a system that needs one is configured. An unused
+  adapter is dead code.
 
 Pull adapters are configured in `observe.json` in the factory home:
 
@@ -377,6 +404,94 @@ tooltip and agent panel show only non-zero recorded counts, and a busy worker
 whose agent recorded nothing for two minutes is drawn waiting. Prompt text,
 tool input and output and every other attribute are discarded while decoding.
 Spend is never in the public projection.
+
+### Remote ingest
+
+A remote system's truth comes from the system itself, so a platform that can
+push OTLP pushes it to its factory. The factory has no inbound address; the
+relay it already dials carries the push.
+
+- **Endpoint.** `POST https://relay.darkfactory.build/ingest/<node id>/v1/traces`
+  with `Authorization: Bearer <secret>`, `Content-Type`
+  `application/x-protobuf` or `application/json`, optionally
+  `Content-Encoding: gzip`. Vercel: Team Settings → Drains → Traces → Custom
+  endpoint, that URL, Protobuf, the header under Custom Headers. The secret is
+  never in the URL.
+- **Secret.** The operator asks for one in the console (Settings → Devices &
+  pairing → Telemetry ingest).
+  factoryd mints 32 random bytes, shows them once, and keeps only their
+  SHA-256 in `<home>/ingest.sha256` (0600). Minting again rotates: the old
+  secret stops at once. Revoking deletes the file.
+- **Relay.** On every relay connection, and whenever the digest changes,
+  factoryd sends an `INGEST_KEY` record (0x07, host to relay, connection 0)
+  carrying the 32-byte digest, or nothing to revoke. factoryd keeps the
+  current digest in memory and queues it first on each new connection. The
+  relay keeps it in the host socket's attachment, so it lives exactly as long
+  as that socket: no storage, nothing to delete on close, replace or redeploy.
+  The Worker refuses, bodiless and before waking any object: anything but
+  `POST` to `/v1/traces`, a bearer that is not 43 base64url characters, a
+  missing `Content-Length` or one over 1 MiB. The node object then refuses:
+  no connected host, or a bearer whose SHA-256 is not the host's digest (401
+  either way, so a stranger learns nothing about whether the factory is up);
+  an unsupported `Content-Type` or `Content-Encoding` (415); an empty token
+  bucket (429; a burst of 5, refilled at one a second, in memory per object).
+  Only then is the body read, bounded to 1 MiB, and sent to the host as one
+  `INGEST` record (0x08, relay to host, connection 0): one byte of flags
+  (protobuf, gzip) and the body. The relay answers 200 `{}` without waiting,
+  and stores and logs nothing of it.
+- **factoryd.** The connector never fails the relay connection over an
+  export. It copies the record and hands it to one delivery goroutine; if one
+  is still running, the export is dropped. Delivery posts it to the loopback
+  receiver (`/v1/traces`) exactly as a local exporter would, marked remote: the
+  same 1 MiB bound after decompression, the same decoding and fold. Remote
+  spans are recorded with source `otlp-remote`, and their environment is the
+  resource's `deployment.environment.name` or `remote`; a claim of `local` is
+  read as `remote`. Only traces are taken: the metrics and logs paths count a
+  running agent's own telemetry and nothing remote belongs there.
+- **Correlation.** A pushed span lands on the unit whose `service.name` it
+  carries, or the one `observe.json`'s `services` alias table names for it.
+  Coverage is per `service.name` that sent spans, exactly as for local OTLP.
+
+#### Threat note (remote ingest)
+
+Reviewed adversarially before building; the review moved the rate limit
+before the body read and out of the per-location rate-limit binding, the
+digest from storage into the socket attachment, and the decode off the relay
+reader.
+
+- **Forged telemetry.** Writing into a factory's plant needs its secret,
+  256 random bits. A holder of a leaked secret can make that factory's remote
+  units, and its public projection in buckets, show activity that did not
+  happen, up to the rate. Remote spans carry their own source and never pass
+  as local. The operator rotates or revokes in the console.
+- **Secret exposure.** The secret is never in a URL. The relay's code never
+  logs headers, and Cloudflare's invocation logs were checked for the
+  `Authorization` header on the first deploy. It is shown once, over the
+  authenticated operator connection (relayed controller frames pass through
+  the relay, which already carries them). factoryd and the relay keep only its
+  digest; an unreadable `ingest.sha256` counts as revoked.
+- **Node id in the URL.** The node id already names `/host` and
+  `/controller`. Alone it opens neither: a host needs a token signed by the
+  node key, a controller a ticket signed by it. The URL sits in the
+  operator's platform settings, not on any public page.
+- **Unauthenticated load.** Malformed requests stop in the Worker. A
+  well-formed one with the wrong secret costs one object request and is
+  refused before its body is read. The bucket is spent only after
+  authentication, so strangers cannot spend a factory's budget.
+- **Authenticated flood.** A burst of 5, then one push a second of at most
+  1 MiB, checked before any body is read, so concurrent pushes cannot pile
+  bodies into the object's memory. factoryd decodes one at a time off the
+  relay reader, so controllers are never stalled and a bad export never drops
+  the connection; one arriving mid-decode is dropped.
+- **Decoder exposure.** The OTLP decoder was reachable only from local
+  processes. It is now reachable by a secret holder. It is memory-safe Go,
+  bounded at 1 MiB after decompression, and every span, with or without a
+  `service.name`, counts toward the per-export observation cap.
+- **Stale or revoked secrets.** A digest lives only in its socket's
+  attachment, and each connection starts with the current one. A secret
+  revoked while offline never delivers.
+- **Storage at rest.** None. The digest is socket state; pushes are in flight
+  only.
 
 ## 7. Correlation
 

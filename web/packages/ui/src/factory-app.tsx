@@ -139,6 +139,7 @@ export function FactoryApp({ onStatusChange, browserPort }: FactoryAppProps = {}
       onLoadDevices={() => { void owner.current?.loadDevices(); }}
       onRevokeDevice={(device) => { void owner.current?.revokeDevice(device); }}
       onDismissRemoteInvite={() => owner.current?.dismissRemoteInvite()}
+      onTelemetryIngest={(action) => owner.current?.telemetryIngest(action) ?? Promise.reject(new Error("closed"))}
       terminalContent={terminal}
     />
   );

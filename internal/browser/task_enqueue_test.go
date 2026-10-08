@@ -39,6 +39,10 @@ func (backend *taskDispatchBackend) EnqueueTask(_ context.Context, client [brows
 	return backend.result, backend.err
 }
 
+func (backend *taskDispatchBackend) TelemetryIngest(context.Context, [browserprotocol.ClientIDSize]byte, browserprotocol.TelemetryIngest) (browserprotocol.TelemetryIngestResult, error) {
+	return browserprotocol.TelemetryIngestResult{}, ErrUnauthorized
+}
+
 func (backend *taskDispatchBackend) SubscribePush(_ context.Context, client [browserprotocol.ClientIDSize]byte, subscription browserprotocol.PushSubscribe) error {
 	backend.mu.Lock()
 	defer backend.mu.Unlock()
