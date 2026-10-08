@@ -60,11 +60,11 @@ default browser already paired; see [installation](docs/install.md).
 ## Your first task
 
 Every command below talks to the daemon over its local socket, authenticated
-by the operator token file in the home:
+by the operator token file in the home. For the default home `~/.dark-factory`
+they find both without configuration; for another home, export
+`DARK_FACTORY_SOCKET` and `DARK_FACTORY_OPERATOR_TOKEN_FILE` first.
 
 ```sh
-export DARK_FACTORY_SOCKET="$HOME/.dark-factory/runtimes/factory.sock"
-export DARK_FACTORY_OPERATOR_TOKEN_FILE="$HOME/.dark-factory/operator.token"
 factoryctl dispatch on
 factoryctl project create --name "My project" --root "$PWD"
 factoryctl agent create --project PROJECT_ID --name builder --provider codex --tool-budget 100

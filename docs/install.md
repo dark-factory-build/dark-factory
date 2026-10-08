@@ -103,37 +103,14 @@ The CLI cannot delete origin-scoped browser storage; pairing afresh with
 
 ## Start your first worker
 
-After pairing the browser, use the CLI once to create a project and its first
-worker. A signed-in `codex` CLI must be installed where the managed daemon can
-find it; see [provider discovery](providers.md). From an existing committed
-Git checkout, run:
-
-```sh
-# Optional for the default home:
-export DARK_FACTORY_SOCKET="$HOME/.dark-factory/runtimes/factory.sock"
-export DARK_FACTORY_OPERATOR_TOKEN_FILE="$HOME/.dark-factory/operator.token"
-factoryctl dispatch on
-factoryctl project create --name "My project" --root "$PWD"
-```
-
-Copy the returned project ID into `PROJECT_ID` below. Creating the project also
-registers its checkout as the initial repository. Then copy the returned agent
-ID into `AGENT_ID`:
-
-```sh
-factoryctl agent create --project PROJECT_ID --name builder \
-  --provider codex --tool-budget 100
-factoryctl task add --project PROJECT_ID --agent AGENT_ID \
-  --title "Improve one documented setup step" \
-  --body "Read README.md and the project layout. Correct one concise setup or contributor instruction supported by the code, run git diff --check, and report the files changed."
-```
-
-Poll `factoryctl status` until the task settles, then see [Inspect a
-result](#inspect-a-result). Select **builder** on the paired factory floor to
-watch its terminal and inspect its result. Send feedback or queue the next instruction from that panel.
-`factoryctl account discover` and `factoryctl account list` help inspect a
-missing Codex login. Settings → Repositories also supports project creation and
-additional checkouts; worker creation currently uses the CLI.
+After pairing the browser, follow [Your first task](../README.md#your-first-task)
+from an existing committed Git checkout. A signed-in `codex` CLI must be
+installed where the managed daemon can find it; see [provider
+discovery](providers.md). Creating the project also registers its checkout as
+the initial repository. `factoryctl account discover` and `factoryctl account
+list` help inspect a missing Codex login. Settings → Repositories also supports
+project creation and additional checkouts; worker creation currently uses the
+CLI.
 
 ## Working in the console
 
@@ -214,8 +191,9 @@ GitHub connection publishes it.
 A failed task keeps its history: a worker that exits without reporting an
 outcome settles `failed` with the outcome `provider exited before an attempt
 outcome`. Retry it with `factoryctl task update --task TASK_ID --revision
-REVISION --retry`, or send a completed result back with
-`factoryctl task send-back --task TASK_ID --note TEXT`.
+REVISION --retry`, or send a completed model result back with
+`factoryctl task send-back --task TASK_ID --note TEXT` (shell tasks take no
+note, so send-back refuses them).
 
 ## Try a task without a model
 
