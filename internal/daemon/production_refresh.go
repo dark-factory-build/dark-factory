@@ -2,6 +2,8 @@ package daemon
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"path"
@@ -237,8 +239,9 @@ func recordCIObservations(store *opgraph.Runtime, repository string, observation
 	}
 }
 
-// readMaintainerChecks maps observe_pull_request_checks, one record per check
-// run, keyed by the run's GitHub id (the last segment of its URL).
+// readMaintainerChecks maps observe_pull_request_checks to one record per
+// head and check name, so a re-run replaces the earlier result instead of
+// sitting beside it; the run itself stays named by its URL.
 func readMaintainerChecks(ctx context.Context, call maintainerMCP, repository string, githubID uint64, pr kernel.ProductionPullRequest) ([]kernel.ProductionCheck, error) {
 	content, err := maintainerTool(ctx, call, repository, githubID, "observe_pull_request_checks", map[string]any{"repository": repository, "pull_number": pr.Number, "head_sha": pr.Head})
 	if err != nil {
@@ -269,7 +272,8 @@ func readMaintainerChecks(ctx context.Context, call maintainerMCP, repository st
 		if check.Conclusion != nil {
 			conclusion = *check.Conclusion
 		}
-		checks = append(checks, kernel.ProductionCheck{ID: id, Name: check.Name, Revision: strings.ToLower(pr.Head), Scope: "head", State: check.Status, Conclusion: conclusion, URL: check.URL, PullRequests: []uint64{pr.Number}, Jobs: []kernel.ProductionJob{}})
+		key := sha256.Sum256([]byte(strings.ToLower(pr.Head) + "\x00" + check.Name))
+		checks = append(checks, kernel.ProductionCheck{ID: hex.EncodeToString(key[:16]), Name: check.Name, Revision: strings.ToLower(pr.Head), Scope: "head", State: check.Status, Conclusion: conclusion, URL: check.URL, PullRequests: []uint64{pr.Number}, Jobs: []kernel.ProductionJob{}})
 	}
 	return checks, nil
 }

@@ -62,10 +62,10 @@ func TestRefreshObservesCurrentHeadChecks(t *testing.T) {
 		t.Fatalf("read %v, observation %+v", read, got)
 	}
 	failed, running := got.Checks[0], got.Checks[1]
-	if failed.ID != "91" || failed.Name != "go" || failed.Revision != heads[8] || failed.Scope != "head" || failed.State != "completed" || failed.Conclusion != "failure" || len(failed.PullRequests) != 1 || failed.PullRequests[0] != 8 {
+	if len(failed.ID) != 32 || failed.Name != "go" || failed.Revision != heads[8] || failed.Scope != "head" || failed.State != "completed" || failed.Conclusion != "failure" || len(failed.PullRequests) != 1 || failed.PullRequests[0] != 8 {
 		t.Fatalf("failed check %+v", failed)
 	}
-	if running.ID != "92" || running.State != "in_progress" || running.Conclusion != "" {
+	if running.ID == failed.ID || len(running.ID) != 32 || running.State != "in_progress" || running.Conclusion != "" {
 		t.Fatalf("running check %+v", running)
 	}
 }
@@ -139,5 +139,26 @@ func TestRefreshedChecksLightTheirWorkflowJobs(t *testing.T) {
 	}
 	if len(got) != len(want) {
 		t.Fatalf("nodes %v", got)
+	}
+}
+
+// A re-run is a new GitHub check run under the same name: it must land on
+// the same record, so a passing re-run replaces the failure it retried.
+func TestARerunReplacesTheCheckItRetried(t *testing.T) {
+	head := strings.Repeat("f", 40)
+	runs := []string{`{"name":"go","status":"completed","conclusion":"failure","url":"https://github.com/o/r/actions/runs/5/job/91"}`, `{"name":"go","status":"completed","conclusion":"success","url":"https://github.com/o/r/actions/runs/6/job/97"}`}
+	var got []kernel.ProductionCheck
+	for _, run := range runs {
+		call := func(context.Context, json.RawMessage, map[string]uint64) (json.RawMessage, error) {
+			return json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"structuredContent":{"pull_number":3,"head_sha":"` + head + `","checks":[` + run + `]}}}`), nil
+		}
+		checks, err := readMaintainerChecks(context.Background(), call, "o/r", 1, kernel.ProductionPullRequest{Number: 3, Head: head})
+		if err != nil || len(checks) != 1 {
+			t.Fatalf("checks %+v, %v", checks, err)
+		}
+		got = append(got, checks[0])
+	}
+	if got[0].ID != got[1].ID || got[1].Conclusion != "success" || got[0].URL == got[1].URL {
+		t.Fatalf("the re-run did not replace the failure: %+v", got)
 	}
 }
