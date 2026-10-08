@@ -731,8 +731,8 @@ One state, two projections, both computed by factoryd:
   ordinal label in plain words, counted per word: a unit by its runtime
   ("Web app", "Web server", "Edge function", "Service", "Tool",
   "CI pipeline"), an ingress by its trigger ("Entrance", "Timer",
-  "Inbox"), a job by its unit ("Check" in CI, else "Background task"),
-  then "Store", "Queue", "Outside service" and "Unknown"
+  "Inbox"), a job by its unit ("Check" in CI, else "Loop", short enough
+  to fit its station), then "Store", "Queue", "Outside service" and "Unknown"
 - hall grouping, edges and their evidence state
 - coverage and operational state
 - bucketed activity: none, low, medium or high, from log₂ of rate
