@@ -692,21 +692,22 @@ the 1 MiB frame.
 
 Layout is deterministic and stable:
 
-1. Halls sit in fixed bands by runtime: browser units, then edge and server
-   units (Workers, web servers), then long-running processes, then
-   command-line tools. Within a band they are ordered by ID. Adding an edge
-   never reorders halls. A hall's width grows with its static machines, so a
-   new route can move later halls along its band; it never moves them
-   between bands.
-2. Within a hall, stations sit in fixed zones by kind.
+1. Halls are packed into rows in runtime order: browser units, then edge and
+   server units (Workers, web servers), then long-running processes, then
+   command-line tools; within a runtime, by ID. Rows run on across runtimes
+   without breaks or headings; each hall's nameplate carries its runtime.
+   Adding an edge never reorders halls. A hall's width grows with its static
+   machines, so a new route can move later halls along the rows.
+2. Within a hall, stations sit in fixed zones by kind, at their drawn widths:
+   docks and timers on the left, stock and unrecognised crates on the right,
+   job cells over the main line between them. The room grows to hold them.
 3. A shared store or queue sits in the yard beside the hall of its lowest-ID
    user.
 4. External gates follow the fence in ID order.
 5. Runtime-only nodes go only into the quarantine bay, so live data never
    moves static machines.
 
-Bounds: 4,096 nodes and 4,096 edges served; 64 halls drawn, with the rest
-folded into "N more units".
+Bounds: 4,096 nodes and 4,096 edges served.
 
 ## 12. Workers
 

@@ -194,8 +194,6 @@ export const WORKER_GAP = 40;
 export const WORKER_SIZE = 20;
 const BAY = 176;
 const COLUMNS = 4;
-const YARD = 120;
-const BAND_LABELS = ["Clients", "Public", "Internal", "Tools"] as const;
 
 /** Ordering for the floor: byte order over served fields, never a locale. */
 export function compareText(left: string, right: string) {
@@ -212,62 +210,88 @@ const size: Record<StationShape, { width: number; height: number }> = {
   cell: { width: 34, height: 30 }, silo: { width: 28, height: 40 }, conveyor: { width: 64, height: 16 }, crate: { width: 22, height: 22 },
 };
 
+// Machines stand on rows of one pitch, bottom-aligned, so the strip under every row is
+// clear across the hall: a worker walks in from a side lane to any machine. The side
+// lanes and the doorway stay clear because nothing stands within LANE of a wall.
+const ROW = 66, LANE = 22, GAP = 12;
+const rowBottom = (row: number) => 88 + row * ROW;
+const roomHeight = (rows: number) => 56 + rows * ROW;
+
+type Spot = Readonly<{ machine: SceneMachine; x: number; row: number }>;
+const widthOf = (machine: SceneMachine) => size[shapeOf(machine)].width;
+
+/** Columns of `rows` machines, each as wide as its widest machine, walking away from `from`. */
+function stack(machines: readonly SceneMachine[], rows: number, from: number, direction: 1 | -1) {
+  const spots: Spot[] = [];
+  let used = 0;
+  for (let start = 0; start < machines.length; start += rows) {
+    const column = machines.slice(start, start + rows), width = Math.max(...column.map(widthOf));
+    const left = direction === 1 ? from + used : from - used - width;
+    column.forEach((machine, row) => spots.push({ machine, row, x: left + (width - widthOf(machine)) / 2 }));
+    used += width + GAP;
+  }
+  return { spots, width: used };
+}
+
 /**
- * Lay out a hall's stations in fixed zones by kind: intake docks along the
- * left wall, timers by the door, the main line in the middle, cells across
- * the top and silos to the right. Static machines only, so live data never
- * moves a machine.
+ * A hall's stations in zones by kind: intake docks then timers along the left
+ * wall, stock and unrecognised crates along the right, job cells in the middle
+ * with the main line under them. Static machines only, so live data never moves
+ * one. Undefined when the zones cannot fit the width.
  */
-function composeHall(hall: SceneHall, room: SceneRect): readonly RoomContent[] {
-  const place = (machine: SceneMachine, x: number, y: number): RoomContent => {
-    const shape = shapeOf(machine);
-    return { key: machine.id, entityId: machine.id, ...(machine.represented === undefined ? {} : { representedIds: machine.represented }), shape, machine, workSurface: true, x, y, ...size[shape] };
-  };
-  const docks = hall.machines.filter((machine) => machine.kind === "ingress" && machine.trigger !== "timer");
-  const clocks = hall.machines.filter((machine) => machine.kind === "ingress" && machine.trigger === "timer");
+function planHall(hall: SceneHall, width: number) {
+  const left = hall.machines.filter((machine) => machine.kind === "ingress" && machine.trigger !== "timer")
+    .concat(hall.machines.filter((machine) => machine.kind === "ingress" && machine.trigger === "timer"));
+  const right = hall.machines.filter((machine) => machine.kind === "store" || machine.kind === "queue" || machine.kind === "unknown");
   const cells = hall.machines.filter((machine) => machine.kind === "job");
-  const silos = hall.machines.filter((machine) => machine.kind === "store" || machine.kind === "queue");
-  const top = room.y + 44, contents: RoomContent[] = [];
-  docks.forEach((machine, index) => contents.push(place(machine, room.x + 22, top + 8 + index * 40)));
-  clocks.forEach((machine, index) => contents.push(place(machine, room.x + room.width - 30 - index * 26, room.y + 14)));
-  const { lineOffset, perRow, below } = cellGrid(cells.length, room.width);
-  const lineX = room.x + lineOffset;
-  contents.push(place({ id: hall.id, kind: "processor", label: hall.label, reading: hall.reading }, lineX, top + 34 + below));
-  const right = room.x + room.width - 50;
-  cells.forEach((machine, index) => contents.push(place(machine, lineX + (index % perRow) * 42, top + 6 + Math.floor(index / perRow) * CELL_ROW)));
-  silos.forEach((machine, index) => contents.push(place(machine, right - Math.floor(index / 3) * 36, top + 8 + (index % 3) * 62)));
-  // What the code shows but nothing recognised waits by the door as a crate.
-  hall.machines.filter((machine) => machine.kind === "unknown").forEach((machine, index) => contents.push(place(machine, room.x + 14 + index * 28, room.y + room.height - 40)));
-  return contents;
+  let best: { rows: number; spots: readonly Spot[] } | undefined;
+  // ponytail: tries every column height; a hall holds tens of machines, not thousands.
+  for (let per = 1; per <= Math.max(1, left.length, right.length); per++) {
+    const west = stack(left, per, LANE, 1), east = stack(right, per, width - LANE, -1);
+    const from = LANE + west.width, to = width - LANE - east.width, span = to - from;
+    if (span < size.line.width) continue;
+    const perRow = Math.floor((span - size.cell.width) / 42) + 1, cellRows = Math.ceil(cells.length / perRow);
+    const rows = Math.max(Math.min(per, left.length), Math.min(per, right.length), cellRows + 1);
+    if (best !== undefined && best.rows < rows) continue;
+    const cellsLeft = from + Math.floor((span - Math.min(cells.length, perRow) * 42 + 8) / 2);
+    best = { rows, spots: [...west.spots, ...east.spots,
+      ...cells.map((machine, index) => ({ machine, row: Math.floor(index / perRow), x: cellsLeft + (index % perRow) * 42 })),
+      { machine: { id: hall.id, kind: "processor", label: hall.label, reading: hall.reading }, row: cellRows, x: from + Math.floor((span - size.line.width) / 2) }] };
+  }
+  return best;
 }
 
-// A cell row is the cell and the label under it, so rows never overlap.
-const CELL_ROW = 44;
-
-/** Where the main line stands and how the job cells wrap above it, from the hall's width alone. */
-function cellGrid(cells: number, width: number) {
-  const lineOffset = Math.max(72, Math.floor((width - size.line.width) / 2));
-  const perRow = Math.max(1, Math.floor((width - 50 - lineOffset) / 42));
-  const rows = Math.ceil(cells / perRow);
-  return { lineOffset, perRow, below: rows === 0 ? 0 : 30 + (rows - 1) * CELL_ROW };
+/** Shared and quarantined stock: left to right at their own widths, wrapping at the wall. */
+function flow(machines: readonly SceneMachine[], width: number) {
+  let x = LANE, row = 0;
+  const spots = machines.map((machine): Spot => {
+    if (x > LANE && x + widthOf(machine) > width - LANE) { row++; x = LANE; }
+    x += widthOf(machine) + GAP;
+    return { machine, row, x: x - widthOf(machine) - GAP };
+  });
+  return { rows: machines.length === 0 ? 0 : row + 1, spots };
 }
 
-function hallUnits(hall: SceneHall) {
+function placeSpots(spots: readonly Spot[], room: SceneRect): readonly RoomContent[] {
+  return spots.map(({ machine, x, row }) => {
+    const shape = shapeOf(machine);
+    return { key: machine.id, entityId: machine.id, ...(machine.represented === undefined ? {} : { representedIds: machine.represented }), shape, machine, workSurface: true,
+      x: room.x + x, y: room.y + rowBottom(row) - size[shape].height, ...size[shape] };
+  });
+}
+
+/** The narrowest hall, from a span its machine count suggests, whose zones fit. */
+function fitHall(hall: SceneHall) {
   const count = hall.machines.length;
-  // Silos stand right of the main line, so a hall holding any is never a single bay.
-  return Math.max(count <= 4 ? 1 : count <= 10 ? 2 : 3, hall.machines.some((machine) => machine.kind === "store" || machine.kind === "queue") ? 2 : 1);
-}
-
-function hallHeight(hall: SceneHall) {
-  const docks = hall.machines.filter((machine) => machine.kind === "ingress" && machine.trigger !== "timer").length;
-  const silos = hall.machines.filter((machine) => machine.kind === "store" || machine.kind === "queue").length;
-  const cells = cellGrid(hall.machines.filter((machine) => machine.kind === "job").length, hallUnits(hall) * BAY).below;
-  return Math.max(hall.machines.length === 0 ? 132 : 176, 44 + 16 + docks * 40, 44 + 16 + Math.min(3, silos) * 62, 44 + 34 + cells + size.line.height + 56);
+  for (let span = count <= 4 ? 1 : count <= 10 ? 2 : 3; ; span++) {
+    const plan = planHall(hall, span * BAY);
+    if (plan !== undefined || span >= COLUMNS) return { span, plan: plan ?? { rows: 1, spots: [] } };
+  }
 }
 
 /**
- * Halls sit in fixed bands (clients, public, internal, tools) and in ID order
- * within a band, so a new edge or a busy hour never moves a hall. Shared
+ * Halls are packed in band order (clients, public, internal, tools), then ID
+ * order, so a new edge or a busy hour never moves a hall. Shared
  * stores stand in the yard after the halls; runtime-only activity waits in a
  * quarantine bay last of all, so it can grow without shifting anything.
  * External parties are gates in the fence along the right edge.
@@ -299,22 +323,17 @@ export function layoutScene(graph: SceneGraph): SceneLayout {
       top += height + CORRIDOR;
     }
   };
-  for (const band of [0, 1, 2, 3] as const) {
-    const members = halls.filter((hall) => hall.band === band);
-    if (members.length === 0) continue;
-    headings.push({ label: BAND_LABELS[band], x: ROOM_LEFT, y: top });
-    top += 16;
-    placeRow(members.map((hall) => ({ id: hall.id, kind: "hall" as const, span: hallUnits(hall), height: hallHeight(hall), compose: (room: SceneRect) => composeHall(hall, room) })));
-  }
+  // One continuous packing: band then id, so same-runtime halls stay adjacent without a row break per band.
+  placeRow(halls.map((hall) => {
+    const { span, plan } = fitHall(hall);
+    return { id: hall.id, kind: "hall" as const, span, height: roomHeight(plan.rows), compose: (room: SceneRect) => placeSpots(plan.spots, room) };
+  }));
   const yardRoom = (id: string, kind: SceneRoomLayout["kind"], label: string, machines: readonly SceneMachine[]) => {
     if (machines.length === 0) return;
     headings.push({ label, x: ROOM_LEFT, y: top });
     top += 16;
-    const perRow = COLUMNS * 4, rowsNeeded = Math.ceil(machines.length / perRow);
-    placeRow([{ id, kind, span: COLUMNS, height: Math.max(YARD, 56 + rowsNeeded * 66), compose: (room) => machines.map((machine, index): RoomContent => {
-      const shape = shapeOf(machine);
-      return { key: machine.id, entityId: machine.id, shape, machine, workSurface: true, x: room.x + 24 + (index % perRow) * (BAY / 4), y: room.y + 40 + Math.floor(index / perRow) * 66, ...size[shape] };
-    }) }]);
+    const plan = flow(machines, COLUMNS * BAY);
+    placeRow([{ id, kind, span: COLUMNS, height: roomHeight(plan.rows), compose: (room) => placeSpots(plan.spots, room) }]);
   };
   yardRoom("yard", "yard", "Shared yard", [...graph.shared].sort((left, right) => compareText(left.id, right.id)));
   yardRoom("quarantine", "quarantine", "Quarantine · runtime activity the code does not explain", graph.quarantine);

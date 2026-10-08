@@ -289,12 +289,12 @@ test("the pure scene model feeds a deterministic SVG renderer", () => {
   assert.ok(Number(stagingLabel[1]) + PADDING <= Number(stagingArea[1]), "empty-floor label clears the staging area");
 });
 
-test("halls sit in bands then id order, and nothing live or runtime-only moves a hall or a machine", () => {
+test("halls pack in band then id order, and nothing live or runtime-only moves a hall or a machine", () => {
   const unit = (id, band, extra) => hall(id, { band, machines: [machine(`${id}-in`, "ingress", { trigger: "request" }), machine(`${id}-db`, "store")], ...extra });
   const base = sceneGraph([unit("zeta", 2), unit("beta", 1), unit("alpha", 2), unit("front", 0)], { shared: [machine("shared-queue", "queue")], parties: [machine("github", "external")] });
   const layout = layoutScene(base);
   assert.deepEqual(layout.rooms.filter((room) => room.kind === "hall").map((room) => room.id), ["front", "beta", "alpha", "zeta"], "band first, then id");
-  assert.deepEqual(layout.headings.map((heading) => heading.label), ["Clients", "Public", "Internal", "Shared yard"]);
+  assert.deepEqual(layout.headings.map((heading) => heading.label), ["Shared yard"], "no band headings; only the yard is named");
   assert.equal(layout.rooms.find((room) => room.id === "yard").kind, "yard");
   assert.equal(layout.gates.length, 1);
   const stable = ({ rooms }) => rooms.filter((room) => room.kind !== "quarantine").map(({ id, x, y, width, height, contents }) => ({ id, x, y, width, height, contents: contents.map(({ key, x, y, width, height }) => ({ key, x, y, width, height })) }));
@@ -1088,6 +1088,67 @@ test("pictured contents and occupied work slots leave door routes clear in every
   }
 });
 
+test("every footprint fits its room: no wall escape, no overlap, doorway clear, every machine reachable", () => {
+  const many = (prefix, count, kind, extra = {}) => Array.from({ length: count }, (_, index) => machine(`${prefix}-${kind}-${index}`, kind, extra));
+  const all = (prefix) => [...many(prefix, 6, "ingress", { trigger: "request" }), ...many(prefix, 12, "ingress", { trigger: "timer" }), ...many(prefix, 10, "queue"),
+    ...many(prefix, 7, "store"), ...many(prefix, 20, "unknown"), ...many(prefix, 20, "job")];
+  const fixtures = {
+    empty: sceneGraph([]),
+    small: sceneGraph([hall("a", { machines: [machine("a-in", "ingress", { trigger: "request" }), machine("a-db", "store")] })]),
+    mixed: sceneGraph([
+      hall("all", { machines: all("all") }),
+      hall("fold", { band: 1, machines: [machine("fold:docks", "ingress", { represented: ["r1", "r2"], routes: ["/a", "/b"] }), ...many("fold", 1, "queue")] }),
+      ...["queue", "store", "unknown", "job"].map((kind, band) => hall(`only-${kind}`, { band, machines: many(kind, 10, kind) })),
+    ], { shared: [...many("shared", 20, "queue"), ...many("shared", 20, "store")], quarantine: many("ghost", 30, "unknown") }),
+    larger: sceneGraph(Array.from({ length: 40 }, (_, index) => hall(`h${String(index).padStart(2, "0")}`, { band: index % 4, machines: all(`h${index}`).filter((_, at) => at % (index + 2) === 0) }))),
+  };
+  const strictly = (left, right) => left.x < right.x + right.width && right.x < left.x + left.width && left.y < right.y + right.height && right.y < left.y + left.height;
+  for (const [name, graph] of Object.entries(fixtures)) {
+    const layout = layoutScene(graph);
+    for (const [index, room] of layout.rooms.entries()) {
+      for (const other of layout.rooms.slice(index + 1)) assert.equal(strictly(room, other), false, `${name}: ${room.id} over ${other.id}`);
+      const doorway = { x: room.door.x - 16, y: room.door.y - 32, width: 32, height: 32 };
+      for (const [at, item] of room.contents.entries()) {
+        assert.ok(item.x >= room.x && item.y >= room.y && item.x + item.width <= room.x + room.width && item.y + item.height <= room.y + room.height, `${name}: ${item.key} escapes ${room.id}`);
+        assert.equal(strictly(item, doorway), false, `${name}: ${item.key} blocks ${room.id}'s doorway`);
+        for (const other of room.contents.slice(at + 1)) assert.equal(overlaps(item, other), false, `${name}: ${item.key} over ${other.key}`);
+      }
+      if (room.kind !== "hall" || name === "larger") continue;
+      const seat = placeWorkers(layout, [{ ...workers[0], location: "resting", nodeId: room.id }], "nearby")[0];
+      for (const item of room.contents) {
+        const atWork = placeWorkers(layout, [{ ...workers[0], nodeId: room.id, observedBayId: item.entityId }])[0];
+        assertRouteGeometry(layout, seat, routeBetween(layout, seat, atWork), `${name}: ${room.id} to ${item.entityId}`);
+      }
+    }
+  }
+});
+
+test("halls pack on across runtimes: four halls in four bands are no taller than four in one", () => {
+  const four = (band) => sceneGraph([0, 1, 2, 3].map((index) => hall(`h${index}`, { band: band ?? index })));
+  assert.ok(layoutScene(four()).height <= layoutScene(four(2)).height);
+});
+
+test("a walk between halls on one aisle keeps to that aisle", () => {
+  const layout = layoutScene(sceneGraph([0, 1, 2, 3].map((index) => hall(`h${index}`))));
+  const [first, , , last] = layout.rooms, spine = layout.corridors.at(-1);
+  assert.equal(first.door.y, last.door.y, "the fixture's halls share a row");
+  const at = (room) => placeWorkers(layout, [{ ...workers[0], nodeId: room.id }])[0];
+  const route = routeBetween(layout, at(first), at(last));
+  assertRouteGeometry(layout, at(first), route, "same aisle");
+  assert.ok(route.points.every((point) => point.x > spine.x + spine.width), "never back to the entrance spine");
+});
+
+test("the public layout key covers every unit's static shape and nothing live", () => {
+  const node = (id, extra = {}) => ({ id, kind: "processor", label: id, runtime: "process", evidence: "static", observation: "unobserved", state: "unknown", activity: "none", ...extra });
+  const world = { generated_at: 0, summary: graph.summary, nodes: [node("a"), node("b"), node("c"), node("a-db", { kind: "store", unit: "a" })], edges: [], workers: [] };
+  const key = (changed) => publicFloor({ ...world, ...changed }).graph.digest;
+  for (const [what, nodes] of [["a late unit", [...world.nodes, node("z")]], ["a runtime", [...world.nodes.slice(0, 2), node("c", { runtime: "cli" })]],
+    ["an owner", [...world.nodes.slice(0, 3), node("a-db", { kind: "store", unit: "b" })]], ["a kind", [...world.nodes.slice(0, 3), node("a-db", { kind: "queue", unit: "a" })]]]) {
+    assert.notEqual(key({ nodes }), key(), `${what} relays the floor`);
+  }
+  assert.equal(key({ generated_at: 9, nodes: world.nodes.map((item) => ({ ...item, activity: "high", state: "active", observation: "observed" })), workers: [{ activity: "busy", unit: "a" }] }), key(), "traffic, state and workers never do");
+});
+
 test("compact tooltips open on hover, focus and tap without opening component details", async () => {
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   const priorWindow = globalThis.window;
@@ -1371,7 +1432,7 @@ test("a unit's runtime is said in words, a cell's belt meets its base, and one d
   const graph = sceneGraph([hall("edge", { runtime: "worker", reading: busy, machines: [machine("edge-in", "ingress", { trigger: "request" }), machine("edge-job", "job")] })],
     { flows: [{ from: "edge", to: "edge-job", kind: "runs", reading: unread }] });
   const markup = renderToStaticMarkup(createElement(FactoryScene, { appearance: commons, workers: [], graph }));
-  assert.match(markup, />edge function</);
+  assert.match(markup, /<tspan data-runtime="worker"[^>]*> ·edge<\/tspan>/, "the runtime rides in the nameplate");
   assert.doesNotMatch(markup, />worker</);
   const items = Object.fromEntries(layoutScene(graph).rooms[0].contents.map((item) => [item.entityId, item]));
   const belt = (kind) => markup.match(new RegExp(`<path d="([^"]+)" class="b-inf" data-belt="${kind}"|<g data-belt="${kind}"[^>]*><path d="([^"]+)"`)).slice(1).find(Boolean);

@@ -37,7 +37,8 @@ const RATE: Record<Activity, number> = { none: 0, low: 30, medium: 600, high: 60
 /** The same world the operator sees, from the public projection alone. */
 export function publicFloor(world: PublicWorld) {
   const graph: OperationalGraphView = {
-    project_id: "public", digest: world.nodes.map((node) => node.id).join("").slice(0, 64).padEnd(64, "0"), observed_at: world.generated_at,
+    // The layout key: every node's static shape, never its traffic, state or the workers.
+    project_id: "public", digest: JSON.stringify(world.nodes.map((node) => [node.id, node.kind, node.label, node.unit, node.runtime, node.trigger, node.evidence === "runtime"])), observed_at: world.generated_at,
     sources: [], summary: world.summary, omitted: 0,
     nodes: world.nodes.map((node) => ({ id: node.id, kind: node.kind, label: node.label, ...(node.unit === undefined ? {} : { unit: node.unit }),
       ...(node.runtime === undefined ? {} : { runtime: node.runtime }), ...(node.trigger === undefined ? {} : { trigger: node.trigger }),

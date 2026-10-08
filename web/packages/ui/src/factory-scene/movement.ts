@@ -105,7 +105,7 @@ function enterRoom(layout: SceneLayout, room: SceneLayout["rooms"][number], to: 
 
 /**
  * The only moving route: leave a known room through its existing door, use the
- * corridor spine, then enter the next room beside its pictured work surface.
+ * row's aisle (and the corridor spine when the rows differ), then enter the next room beside its pictured work surface.
  * The connected resting/staging common space is also reachable by that spine;
  * workers outside displayed rooms use the planning tables.
  */
@@ -122,9 +122,11 @@ export function routeBetween(
   const mainSpine = spine(layout);
   if (mainSpine === undefined) return undefined;
   const center = mainSpine.x + mainSpine.width / 2;
-  const sourceRoute = source === undefined ? commonRoomLanes(layout, from, { x: center, y: layout.restingTop - AISLE }, center) : leaveRoom(layout, source, from, center);
+  // Halls on one aisle are walked between along it, not by way of the spine.
+  const via = source !== undefined && destination !== undefined && rowCorridor(layout, source) === rowCorridor(layout, destination) ? destination.door.x : center;
+  const sourceRoute = source === undefined ? commonRoomLanes(layout, from, { x: center, y: layout.restingTop - AISLE }, center) : leaveRoom(layout, source, from, via);
   if (sourceRoute === undefined) return undefined;
-  const destinationRoute = destination === undefined ? [...commonRoomLanes(layout, sourceRoute.at(-1) ?? from, to, center), to] : enterRoom(layout, destination, to, center);
+  const destinationRoute = destination === undefined ? [...commonRoomLanes(layout, sourceRoute.at(-1) ?? from, to, center), to] : enterRoom(layout, destination, to, via);
   if (destinationRoute === undefined) return undefined;
   const points = [
     ...sourceRoute,

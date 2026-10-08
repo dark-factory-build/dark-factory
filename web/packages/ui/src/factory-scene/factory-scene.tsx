@@ -655,6 +655,8 @@ export function FactoryScene({ proposals, crates, tools, onLoadNode, onInvestiga
 
       {layout.rooms.map((room) => {
         const hall = graph.halls.find((candidate) => candidate.id === room.id);
+        // The runtime rides in the nameplate after the name, which gives way to it.
+        const badge = hall?.runtime === undefined ? "" : ` ·${RUNTIME_TEXT[hall.runtime]}`, fits = Math.floor((room.width - 60 - badge.length * 5) / 6);
         return <g key={room.id} data-room-id={room.id} data-room-kind={room.kind}>
           <rect x={room.x} y={room.y} width={room.width} height={room.height} fill={room.kind === "quarantine" ? "#1b1f25" : "url(#df-floor)"} />
           {room.kind === "quarantine" ? <rect x={room.x + 2} y={room.y + 2} width={room.width - 4} height={room.height - 4} fill="none" stroke="url(#df-hazard)" strokeWidth="4" /> : <>
@@ -663,9 +665,8 @@ export function FactoryScene({ proposals, crates, tools, onLoadNode, onInvestiga
           </>}
           <rect x={room.x + 4} y={room.y + 10} width={room.width - 8} height={room.height - 12} fill="#08131d" opacity=".18" pointerEvents="none" />
           {hall === undefined ? null : <g className="dfFactoryScene__target" {...sceneAction(() => selectEntity(hall.id))} data-tooltip={machineInfo({ id: hall.id, kind: "processor", label: hall.label, reading: hall.reading }, hall)} aria-label={`Inspect ${hall.label}`}>
-            <rect className="dfFactoryScene__focus dfPlant__plate" x={room.x + 8} y={room.y + 12} width={Math.min(room.width - 44, 6 * Math.min(hall.label.length, Math.floor((room.width - 60) / 6)) + 14)} height="20" rx="2" />
-            <text x={room.x + 14} y={room.y + 26} className="dfPlant__plateText" fontSize="10">{shortLabel(hall.label, Math.floor((room.width - 60) / 6))}</text>
-            {hall.runtime === undefined ? null : <text x={room.x + 14 + Math.min(room.width - 44, 6 * Math.min(hall.label.length, Math.floor((room.width - 60) / 6)) + 14)} y={room.y + 25} className="dfPlant__small" fontSize="7">{RUNTIME_TEXT[hall.runtime]}</text>}
+            <rect className="dfFactoryScene__focus dfPlant__plate" x={room.x + 8} y={room.y + 12} width={Math.min(room.width - 44, 6 * Math.min(hall.label.length, fits) + 14 + badge.length * 5)} height="20" rx="2" />
+            <text x={room.x + 14} y={room.y + 26} className="dfPlant__plateText" fontSize="10">{shortLabel(hall.label, fits)}{badge === "" ? null : <tspan data-runtime={hall.runtime} className="dfPlant__small" fontSize="7">{badge}</tspan>}</text>
             {hall.reading.deployedAt === undefined || observedAt - hall.reading.deployedAt > DAY ? null : <g data-changeover={hall.reading.deployedAt}>
               {observedAt - hall.reading.deployedAt < CHANGEOVER ? <path d={`M${room.x + 6} ${room.y + 10}h${room.width - 12}M${room.x + 10} ${room.y + 10}v${room.height - 20}M${room.x + room.width - 10} ${room.y + 10}v${room.height - 20}`} className="dfPlant__scaffold" /> : null}
               <rect x={room.x + room.width - 30} y={room.y + 14} width="22" height="14" className="dfPlant__changed" /><text x={room.x + room.width - 19} y={room.y + 24} textAnchor="middle" className="dfPlant__changedText" fontSize="10">Δ</text>
@@ -866,7 +867,7 @@ function rate(perHour: number) {
 
 // What a unit's runtime is, in words that never read as the factory's own workers.
 const RUNTIME_TEXT: Record<NonNullable<SceneHall["runtime"]>, string> = {
-  browser: "runs in the browser", server: "web server", worker: "edge function", process: "always-on service", cli: "command-line tool", ci: "CI pipeline",
+  browser: "browser", server: "server", worker: "edge", process: "daemon", cli: "cli", ci: "ci",
 };
 const OBSERVATION_TEXT: Record<SceneReading["observation"], string> = {
   observed: "Observed", quiet: "Observed, quiet", partial: "Partly observed", stale: "Stale: no current reading", unobserved: "No telemetry: activity unknown", opaque: "External: its own state cannot be seen",
