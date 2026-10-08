@@ -3,6 +3,7 @@ package treesitter
 import (
 	"context"
 	"errors"
+	"os"
 	"strings"
 	"testing"
 )
@@ -115,5 +116,18 @@ func TestBudgetStopDoesNotLeakIntoTheNextFile(t *testing.T) {
 	want := Capture{"route", "/new", strings.Index(source, "/new"), strings.Index(source, "/new") + 4, 1}
 	if len(matches) != 1 || matches[0].Captures[1] != want {
 		t.Fatalf("matches after a stopped file = %+v, want only %+v", matches, want)
+	}
+}
+
+// Every pinned build must ship with its licence in THIRD_PARTY_NOTICES.
+func TestPinnedBuildsHaveLicences(t *testing.T) {
+	licences, err := os.ReadFile("wasm/LICENSES.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, pin := range pins {
+		if !strings.Contains(string(licences), "== "+pin.source) {
+			t.Errorf("%s: no licence for %s in wasm/LICENSES.txt", name, pin.source)
+		}
 	}
 }

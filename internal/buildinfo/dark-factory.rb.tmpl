@@ -28,6 +28,7 @@ class DarkFactory < Formula
 
   def install
     bin.install "factoryd", "factory-runner", "factoryctl"
+    prefix.install "THIRD_PARTY_NOTICES"
   end
 
   def caveats
