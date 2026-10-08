@@ -547,8 +547,12 @@ func (connector *Connector) apply(ctx context.Context, record Record, queue *out
 		if record.Connection != 0 || len(record.Payload) == 0 {
 			return fmt.Errorf("%w: malformed INGEST", ErrRelayProtocol)
 		}
-		// Each push also costs the relay's fixed 4 KiB, so the two bounds match.
-		cost := int64(len(record.Payload)) + 4096
+		// Each push costs what the relay charged it (its body plus 4 KiB), but a
+		// gzipped one costs the 1 MiB it may unpack to: the bound is on memory.
+		cost := int64(len(record.Payload)-1) + 4096
+		if record.Payload[0]&ingestGzip != 0 {
+			cost = 1<<20 + 4096
+		}
 		if connector.ingesting.Add(cost) > maxIngestPending {
 			connector.ingesting.Add(-cost)
 			return nil

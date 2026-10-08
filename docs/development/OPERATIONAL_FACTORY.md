@@ -451,8 +451,8 @@ SDK in the app, which the factory can add itself as an ordinary change.
   and stores and logs nothing of it.
 - **factoryd.** The connector never fails the relay connection over an
   export. It copies the record and delivers it off the relay reader; exports
-  awaiting delivery are bounded at the relay's 4 MiB burst, past which one is
-  dropped. Delivery posts it to the loopback
+  awaiting delivery are bounded at 4 MiB of memory (a gzipped export counts
+  as the 1 MiB it may unpack to), past which one is dropped. Delivery posts it to the loopback
   receiver (`/v1/traces`) exactly as a local exporter would, marked remote: the
   same 1 MiB bound after decompression, the same decoding and fold. Remote
   spans are recorded with source `otlp-remote`, and their environment is the
@@ -493,7 +493,8 @@ reader.
   `Content-Length` plus 4 KiB per push (so at most 256 empty pushes a second)
   before any body is read, so concurrent pushes cannot pile
   bodies into the object's memory. factoryd delivers off the relay reader with
-  at most 4 MiB pending, so controllers are never stalled and a bad export
+  at most 4 MiB pending, gzipped exports counted at their 1 MiB unpacked
+  bound, so controllers are never stalled and a bad export
   never drops the connection.
 - **Decoder exposure.** The OTLP decoder was reachable only from local
   processes. It is now reachable by a secret holder. It is memory-safe Go,
