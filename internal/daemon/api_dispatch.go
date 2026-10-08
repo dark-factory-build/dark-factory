@@ -106,7 +106,9 @@ type Daemon struct {
 	// stale or unobserved, never as idle.
 	graphMu sync.Mutex
 	graphs  map[kernel.ProjectID]graphSnapshot
-	runtime *opgraph.Runtime
+	// graphBuilds is the one build running per project.
+	graphBuilds map[kernel.ProjectID]*graphBuild
+	runtime     *opgraph.Runtime
 	// polled is when the configured pull adapters last ran.
 	polled time.Time
 
