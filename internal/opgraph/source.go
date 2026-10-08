@@ -79,6 +79,9 @@ func Analysable(name string) bool {
 			return false
 		}
 	}
+	if workflowFile(name) {
+		return true
+	}
 	if Classify(name) == "tests" {
 		return false
 	}

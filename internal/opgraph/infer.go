@@ -239,7 +239,7 @@ func (run *inference) resolve(system string, repositories []Repository) (Graph, 
 	for _, repository := range repositories {
 		found := false
 		for _, candidate := range units {
-			found = found || candidate.repo == repository.ID
+			found = found || candidate.repo == repository.ID && candidate.runtime != "ci" // CI builds the code; it is not the code
 		}
 		// A library repository belongs to the units depending on it.
 		for _, library := range run.packages {

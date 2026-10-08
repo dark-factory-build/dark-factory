@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
+	"github.com/dark-factory-build/dark-factory/internal/opgraph"
 	"github.com/dark-factory-build/dark-factory/internal/review"
 )
 
@@ -90,6 +91,7 @@ func (daemon *Daemon) refreshProduction(ctx context.Context, project kernel.Proj
 		for _, op := range prepared {
 			daemon.launchReview(project, op)
 		}
+		recordCIObservations(daemon.runtimeStore(), repository.ID.String(), observation, at.Int64())
 	}
 	return nil
 }
@@ -205,6 +207,27 @@ func pullRequestObservation(ctx context.Context, call maintainerMCP, repository 
 		result.Checks = append(result.Checks, checks...)
 	}
 	return result, nil
+}
+
+// recordCIObservations is the github adapter: the checks a refresh read
+// light the jobs of the repository's CI unit, and fail them on a failed
+// conclusion. A refresh reads only heads whose checks can still change, so a
+// job lights while it runs and once when it settles. Silence is claimed only
+// when no read failed and the pull page was complete.
+func recordCIObservations(store *opgraph.Runtime, repository string, observation kernel.ProductionObservation, now int64) {
+	unit := opgraph.CIUnit(repository)
+	for _, check := range observation.Checks {
+		item := opgraph.Observation{Source: "github", Environment: "ci", Kind: "internal", Start: now - productionRefreshInterval.Milliseconds(), End: now,
+			Attributes: map[string]string{"service.name": unit, "cicd.pipeline.task.name": opgraph.CheckName(check.Name)}, Count: 1}
+		switch check.Conclusion {
+		case "failure", "timed_out", "startup_failure":
+			item.Errors = 1
+		}
+		store.Record(item)
+	}
+	if observation.Unavailable == "" && observation.Overflow == 0 {
+		store.Cover(opgraph.Coverage{Source: "github", Environment: "ci", Unit: unit, Keys: opgraph.CIKeys, AsOf: now, TTL: 2 * productionRefreshInterval.Milliseconds()})
+	}
 }
 
 // readMaintainerChecks maps observe_pull_request_checks, one record per check

@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
+	"github.com/dark-factory-build/dark-factory/internal/opgraph"
 )
 
 func TestRefreshRereadsOnlyPullsLastSeenOpen(t *testing.T) {
@@ -64,5 +66,42 @@ func TestRefreshObservesCurrentHeadChecks(t *testing.T) {
 	}
 	if running.ID != "92" || running.State != "in_progress" || running.Conclusion != "" {
 		t.Fatalf("running check %+v", running)
+	}
+}
+
+// The github adapter: a pull-request workflow's jobs light and fail from the
+// checks a refresh read; a job never seen and a push-only workflow's job stay
+// partial, and CI alone does not count as the repository's code.
+func TestRefreshedChecksLightTheirWorkflowJobs(t *testing.T) {
+	repo := opgraph.Repository{ID: "r1", Name: "app", Files: map[string][]byte{
+		".github/workflows/ci.yml":      []byte("name: CI\non:\n  pull_request:\n  merge_group:\njobs:\n  go:\n    runs-on: x\n  lint:\n    name: Lint (${{ matrix.os }})\n  docs:\n    runs-on: x\n"),
+		".github/workflows/release.yml": []byte("name: Release\non: [push]\njobs:\n  release:\n    runs-on: x\n"),
+	}}
+	graph, err := opgraph.Infer("s", []opgraph.Repository{repo})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := int64(10 * time.Hour / time.Millisecond)
+	store := opgraph.NewRuntime(time.Hour)
+	recordCIObservations(store, "r1", kernel.ProductionObservation{Checks: []kernel.ProductionCheck{
+		{Name: "go", State: "completed", Conclusion: "failure"},
+		{Name: "Lint (macos)", State: "in_progress"},
+	}}, now)
+	observations, coverage := store.Snapshot(now)
+	live := opgraph.Overlay("s", graph, observations, coverage, nil, now, runtimeWindow.Milliseconds())
+	got := map[string]string{}
+	for _, node := range live.Graph.Nodes {
+		status := live.Nodes[node.ID]
+		got[node.Label] = status.Observation + "/" + status.State
+	}
+	want := map[string]string{"CI / go": "observed/failing", "CI / Lint": "observed/active", "CI / docs": "partial/unknown", "Release / release": "partial/unknown", "GitHub Actions": "partial/failing",
+		"app": "unobserved/unknown", "No recognised entry points": "unobserved/unknown"}
+	for label, reading := range want {
+		if got[label] != reading {
+			t.Fatalf("%s reads %q, want %q (all %v)", label, got[label], reading, got)
+		}
+	}
+	if len(got) != len(want) {
+		t.Fatalf("nodes %v", got)
 	}
 }
