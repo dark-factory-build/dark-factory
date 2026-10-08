@@ -67,10 +67,11 @@ navigation.
 | Framework and platform config: `wrangler.toml`/`.jsonc`, `vercel.json`, `package.json`, `go.mod`, `Cargo.toml`, Next.js `app/` conventions, compose files | **Used.** Most structure is declared. The extractors parse what the frameworks themselves read. |
 | Dependency manifests: `requirements.txt`, `pyproject.toml`, `Gemfile`, `pom.xml`, `build.gradle`, `go.mod`, `package.json`, `Cargo.toml` | **Used.** A small table maps well-known clients to stores, queues and external parties. For example, psycopg or pg becomes a Postgres store, and celery, sidekiq or bullmq becomes a queue. |
 | Deployment declarations: compose services, `Procfile`, `fly.toml`, wrangler, Next.js | **Used.** They declare units in any language. |
-| ast-grep, Tree-sitter | Not adopted. A tool that is optional on `PATH` would make the node set, and so the IDs and layout, depend on the machine. Cgo bindings break the pure-Go build. Route and call patterns in TypeScript, Python, Ruby, Java and Rust are instead a small table of `inferred` regular expressions. The upgrade path is ast-grep rules with the same table shape, if precision ever needs it. |
+| Tree-sitter grammars as WebAssembly, run by wazero | **Used** for TypeScript/JavaScript, Python, Ruby, Java, Kotlin and Rust (`internal/opgraph/treesitter`). The released web-tree-sitter runtime and grammar `.wasm` builds are embedded and pinned by SHA-256, so the result never depends on the machine and the build stays `CGO_ENABLED=0`. Queries shape calls, decorators, annotations, bindings and imports; Go code decides what each shape means per framework, resolves string constants within a file, and follows in-file router mounts. A match is `declared` when the file imports the framework that runs it, else `inferred`. Files over 256 KiB, past 32 MiB per repository, or past a deterministic work budget yield nothing; a 2 s per-file deadline backs the budget for pathologically nested input. Script files a package's entry (`main`, `bin`, `start`) never imports belong to no unit, as Go functions no binary calls do. Reachability follows relative imports only: a file reached solely through a path alias (`@/…`) or a dynamic `require` belongs to no unit. |
+| ast-grep | Not adopted. A tool that is optional on `PATH` would make the node set, and so the IDs and layout, depend on the machine. |
 | SCIP (scip-go, scip-typescript), gopls, tsserver | Not adopted. Each needs a build or type check. They provide precise references, which an operational graph does not need. Symbol strings embed versions, so they are unstable as identities. |
 | CodeQL | Rejected. Its licence restricts it to open-source codebases, and it builds a database in minutes, not milliseconds. |
-| Semgrep CE / Opengrep | Rejected. It is a heavy runtime, and Semgrep's maintained rules carry a restrictive licence. The pattern table covers the same cases. |
+| Semgrep CE / Opengrep | Rejected. It is a heavy runtime, and Semgrep's maintained rules carry a restrictive licence. The tree-sitter queries cover the same cases. |
 | stack-graphs | Rejected: archived in 2025. |
 
 The bespoke part is small and declarative. Each extractor maps a framework's
@@ -144,7 +145,7 @@ table is configured.
 **Evidence.** Each item records:
 
 - origin: `static` or `runtime`
-- extractor or source: `go-ast`, `wrangler`, `nextjs`, `otlp`, `cloudflare`
+- extractor or source: `go-ast`, `tree-sitter`, `wrangler`, `nextjs`, `otlp`, `cloudflare`
 - a short detail
 - `confidence`:
   - `declared`: parsed from a declaration the framework executes
@@ -203,7 +204,8 @@ on it by name, across repositories.
   - `db: postgres` becomes a store and `redis` a store
   - `celery` in requirements becomes a queue that both units use (a manifest
     cannot say which side publishes)
-  - `urls.py` `path()` entries become ingress at `inferred` confidence
+  - `urls.py` `path()` entries become ingress, mounted under the routes that
+    `include()` them, `declared` when the file imports `django.urls`
 - **Rails:**
   - `config.ru` becomes a unit
   - `config/routes.rb` verbs become ingress

@@ -138,7 +138,7 @@ func (run *inference) manifest(packages []string, found owner, at Location, deta
 	sort.Strings(packages)
 	for _, name := range packages {
 		if entry := knownClient(name, manifestClients); entry != nil {
-			run.client(*entry, found, at, detail+" "+name)
+			run.client(*entry, found, at, "manifest", detail+" "+name)
 		}
 	}
 }
@@ -371,7 +371,7 @@ func (run *inference) compose(repo, dir string, body []byte, at Location) {
 			}
 			entry := client(infrastructure.image, infrastructure.kind, infrastructure.system)
 			entry.shared = true
-			run.client(entry, owner{units: users}, at, "compose service "+name)
+			run.client(entry, owner{units: users}, at, "manifest", "compose service "+name)
 			break
 		}
 	}
@@ -396,6 +396,7 @@ var serverFrameworks = []string{"express", "fastify", "koa", "hono", "@hono/node
 func (run *inference) packageJSON(repo, dir string, body []byte, at Location, names []string) {
 	var manifest struct {
 		Name                 string            `json:"name"`
+		Main                 string            `json:"main"`
 		Bin                  any               `json:"bin"`
 		Scripts              map[string]string `json:"scripts"`
 		Dependencies         map[string]string `json:"dependencies"`
@@ -451,6 +452,29 @@ func (run *inference) packageJSON(repo, dir string, body []byte, at Location, na
 			// A package that starts as a process is one, framework or not (a queue worker).
 			run.addUnit(unit{repo: repo, root: dir, key: "node:" + label, label: label, runtime: "process", role: role(label, false),
 				names: []string{label}, deps: deps, evidence: static("package.json", "start script", Inferred), at: at})
+		}
+	}
+	// A process's entry files bound what of its package it runs.
+	var entries []string
+	switch bin := manifest.Bin.(type) {
+	case string:
+		entries = append(entries, bin)
+	case map[string]any:
+		for _, name := range keys(bin) {
+			entries = append(entries, toString(bin[name]))
+		}
+	}
+	if start := strings.Fields(manifest.Scripts["start"]); len(start) > 1 && contains([]string{"node", "tsx", "ts-node", "bun"}, start[0]) {
+		entries = append(entries, start[len(start)-1])
+	}
+	if manifest.Main != "" {
+		entries = append(entries, manifest.Main)
+	}
+	for _, held := range run.units {
+		if held.repo == repo && held.key == "node:"+label {
+			for _, entry := range entries {
+				held.entries = append(held.entries, path.Join(dir, entry))
+			}
 		}
 	}
 	run.manifest(keys(deps), owner{repo: repo, file: at.Path}, at, "package.json")

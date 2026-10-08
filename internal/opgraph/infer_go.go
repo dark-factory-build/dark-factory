@@ -173,7 +173,7 @@ func (run *inference) goSource(repository Repository, names []string) {
 		}
 		for imported := range pkg.imports {
 			if known := knownClient(imported, goClients); known != nil {
-				run.client(*known, owner{units: units}, Location{Repository: repository.ID, Path: dir}, "go import "+imported)
+				run.client(*known, owner{units: units}, Location{Repository: repository.ID, Path: dir}, "manifest", "go import "+imported)
 			}
 		}
 	}

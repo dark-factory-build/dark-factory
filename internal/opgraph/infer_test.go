@@ -205,7 +205,8 @@ func TestInferDeclarations(t *testing.T) {
 	if status := one(t, byLabel, "GET /status"); status.Unit != rails.ID {
 		t.Error("rails route not owned by its rack unit")
 	}
-	one(t, byLabel, "/orders")
+	one(t, byLabel, "GET /orders/:id")
+	one(t, byLabel, "PATCH /orders/:id")
 	if !edge(graph, byID, "rails", "uses", "sidekiq") {
 		t.Error("sidekiq queue missing")
 	}
