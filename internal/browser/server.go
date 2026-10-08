@@ -27,8 +27,11 @@ import (
 const (
 	Path     = "/browser"
 	PairPath = "/pair"
-	// TracesPath accepts OTLP/HTTP JSON trace exports from local processes.
+	// TracesPath accepts OTLP/HTTP trace exports from local processes.
 	TracesPath = "/v1/traces"
+	// MetricsPath and LogsPath accept OTLP/HTTP agent telemetry exports.
+	MetricsPath = "/v1/metrics"
+	LogsPath    = "/v1/logs"
 	// PublicPath serves the safe public projection of one project.
 	PublicPath     = "/v1/public/"
 	maxOrigins     = 8
@@ -63,6 +66,13 @@ type Observer interface {
 // trace export without retaining it.
 type TraceReceiver interface {
 	ReceiveTraces(body []byte) error
+}
+
+// AgentTelemetryReceiver is an optional Backend capability: count a local
+// OTLP metrics or logs export (path is MetricsPath or LogsPath) against the
+// runs its resources name, keeping no record.
+type AgentTelemetryReceiver interface {
+	ReceiveAgentTelemetry(path string, body []byte, protobuf bool) error
 }
 
 // PublicProjector is an optional Backend capability: the public projection
@@ -301,8 +311,8 @@ func (server *Server) handle(writer http.ResponseWriter, request *http.Request) 
 		server.handlePair(writer, request)
 		return
 	}
-	if request.URL.Path == TracesPath {
-		server.handleTraces(writer, request)
+	if request.URL.Path == TracesPath || request.URL.Path == MetricsPath || request.URL.Path == LogsPath {
+		server.handleOTLP(writer, request)
 		return
 	}
 	if strings.HasPrefix(request.URL.Path, PublicPath) {
@@ -699,14 +709,15 @@ func zero16(value [16]byte) bool {
 	return true
 }
 
-// handleTraces takes OTLP/HTTP, JSON or protobuf, optionally gzipped, from
-// local processes only: a browser page carries an Origin and cannot send
-// either type without a preflight this listener never answers. Bodies are
-// bounded before and after decompression.
-func (server *Server) handleTraces(writer http.ResponseWriter, request *http.Request) {
-	receiver, ok := server.backend.(TraceReceiver)
+// handleOTLP takes OTLP/HTTP traces, metrics or logs, protobuf or JSON,
+// optionally gzipped, from local processes only: a browser page carries an
+// Origin and cannot send either type without a preflight this listener never
+// answers. Bodies are bounded before and after decompression.
+func (server *Server) handleOTLP(writer http.ResponseWriter, request *http.Request) {
+	traces, _ := server.backend.(TraceReceiver)
+	agents, _ := server.backend.(AgentTelemetryReceiver)
 	switch {
-	case !ok:
+	case request.URL.Path == TracesPath && traces == nil || request.URL.Path != TracesPath && agents == nil:
 		http.Error(writer, http.StatusText(http.StatusNotFound), http.StatusNotFound)
 		return
 	case request.Method != http.MethodPost:
@@ -732,12 +743,19 @@ func (server *Server) handleTraces(writer http.ResponseWriter, request *http.Req
 	}
 	body, err := io.ReadAll(reader)
 	if err == nil && len(body) > browserprotocol.MaxSnapshotBytes {
-		err = errors.New("trace export too large")
+		err = errors.New("otlp export too large")
 	}
-	if err == nil && protobuf {
-		body, err = opgraph.OTLPProtobufJSON(body)
+	if err == nil && request.URL.Path != TracesPath {
+		err = agents.ReceiveAgentTelemetry(request.URL.Path, body, protobuf)
+	} else if err == nil {
+		if protobuf {
+			body, err = opgraph.OTLPProtobufJSON(body)
+		}
+		if err == nil {
+			err = traces.ReceiveTraces(body)
+		}
 	}
-	if err != nil || receiver.ReceiveTraces(body) != nil {
+	if err != nil {
 		http.Error(writer, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
 		return
 	}

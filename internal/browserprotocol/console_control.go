@@ -363,6 +363,21 @@ type RunPaths struct {
 	AgentID string   `json:"agent_id"`
 	RunID   string   `json:"run_id"`
 	Paths   []string `json:"paths"`
+	// Telemetry is what the run's agent CLI recorded about itself, absent
+	// when it recorded nothing.
+	Telemetry *RunTelemetry `json:"telemetry,omitempty"`
+}
+
+// RunTelemetry is one run's recorded agent effort and spend: counts and cost,
+// never content. QuietSeconds is the time since its last recorded tool call or
+// API request, absent before the first.
+type RunTelemetry struct {
+	TokensIn     uint64  `json:"tokens_in"`
+	TokensOut    uint64  `json:"tokens_out"`
+	CostMicroUSD uint64  `json:"cost_micro_usd"`
+	ToolCalls    uint64  `json:"tool_calls"`
+	APIRequests  uint64  `json:"api_requests"`
+	QuietSeconds *uint64 `json:"quiet_seconds,omitempty"`
 }
 
 // AccountsDiscover asks what provider logins exist on this machine. It is an
@@ -742,7 +757,8 @@ func validConsoleControl(kind MessageType, body any) error {
 		// paths. The array itself keeps the generic control item bound.
 		if validateDynamicID(value.AgentID) != nil || value.Paths == nil || len(value.Paths) > MaxJSONArray ||
 			value.RunID == "" && len(value.Paths) != 0 ||
-			value.RunID != "" && validateDynamicID(value.RunID) != nil {
+			value.RunID != "" && validateDynamicID(value.RunID) != nil ||
+			value.Telemetry != nil && (value.RunID == "" || !validRunTelemetry(*value.Telemetry)) {
 			return bad()
 		}
 		for _, path := range value.Paths {
@@ -1050,4 +1066,13 @@ func validIntakeCandidates(candidates []IntakeCandidate) bool {
 		}
 	}
 	return true
+}
+
+func validRunTelemetry(value RunTelemetry) bool {
+	for _, count := range []uint64{value.TokensIn, value.TokensOut, value.CostMicroUSD, value.ToolCalls, value.APIRequests} {
+		if count > uint64(MaxJSONInteger) {
+			return false
+		}
+	}
+	return value.QuietSeconds == nil || *value.QuietSeconds <= uint64(MaxJSONInteger)
 }

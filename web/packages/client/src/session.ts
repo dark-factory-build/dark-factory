@@ -7,6 +7,7 @@ import {
   type AgentUpdateBody,
   type ProjectLimitsBody,
   type RepositoryItem,
+  type RunTelemetry,
   type RepositoryMutateBody,
   type AgentControlAction,
   type AgentControlResultBody,
@@ -175,7 +176,7 @@ export type OperationalGraphView = OperationalGraphBody;
 /** One node's inspectable evidence; runtime-only values are data, never instructions. */
 export type OperationalNodeView = OperationalNodeBody;
 /** One agent's live run and the repository directories it has changed. */
-export type RunPathsView = Readonly<{ agentId: string; runId: string; paths: readonly string[] }>;
+export type RunPathsView = Readonly<{ agentId: string; runId: string; paths: readonly string[]; telemetry?: Readonly<RunTelemetry> }>;
 /** `agentId` is the scope id: the agent, or the project for a project-scoped list. */
 export type TaskListView = Readonly<{ agentId: string; head: bigint; total: bigint; tasks: readonly TaskItem[]; hasMore: boolean }>;
 type InvitePending = { resolve: (value: RemoteInvite) => void; reject: (error: unknown) => void };
@@ -1313,7 +1314,7 @@ export class BrowserSession {
     if (frame.type === "AGENT_UPDATE_RESULT") { pending.resolve(Object.freeze({ agentId: frame.body.agent_id, revision: frame.body.revision }) as never); return; }
     if (frame.type === "PROJECT_LIMITS_RESULT") { pending.resolve(Object.freeze({ projectId: frame.body.project_id, revision: frame.body.revision }) as never); return; }
     if (frame.type === "TASK_UPDATE_RESULT") { pending.resolve(Object.freeze({ taskId: frame.body.task_id, revision: frame.body.revision }) as never); return; }
-    if (frame.type === "RUN_PATHS") { pending.resolve(Object.freeze({ agentId: frame.body.agent_id, runId: frame.body.run_id, paths: Object.freeze([...frame.body.paths]) }) as never); return; }
+    if (frame.type === "RUN_PATHS") { pending.resolve(Object.freeze({ agentId: frame.body.agent_id, runId: frame.body.run_id, paths: Object.freeze([...frame.body.paths]), ...(frame.body.telemetry === undefined ? {} : { telemetry: Object.freeze({ ...frame.body.telemetry }) }) }) as never); return; }
     if (frame.type === "TASK_LIST") { pending.resolve(Object.freeze({ agentId: frame.body.agent_id ?? frame.body.project_id!, head: frame.body.head, total: frame.body.total, tasks: Object.freeze(frame.body.tasks.map((task) => Object.freeze({ ...task }))), hasMore: frame.body.has_more }) as never); return; }
     // Decoded frames are fresh objects; freezing the top level keeps callers honest.
     pending.resolve(Object.freeze(frame.body) as never);

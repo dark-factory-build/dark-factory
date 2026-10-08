@@ -1,1 +1,1 @@
-{"type":"RUN_PATHS","id":"run-paths-1","body":{"agent_id":"02020202020202020202020202020202","run_id":"04040404040404040404040404040404","paths":["internal/kernel","web/packages/ui/src"]}}
+{"type":"RUN_PATHS","id":"run-paths-1","body":{"agent_id":"02020202020202020202020202020202","run_id":"04040404040404040404040404040404","paths":["internal/kernel","web/packages/ui/src"],"telemetry":{"tokens_in":12000,"tokens_out":400,"cost_micro_usd":310000,"tool_calls":18,"api_requests":9,"quiet_seconds":12}}}

@@ -335,6 +335,24 @@ An observation's environment is the span resource's
 defaulting to `local`; it remains only what that process claimed, and its
 source stays `otlp`.
 
+**Agent telemetry.** The same listener takes `POST /v1/metrics` and
+`POST /v1/logs` from a worker's own agent CLI, on the same terms as traces.
+The worker's `OTEL_RESOURCE_ATTRIBUTES` adds `dark_factory.run.id=<run id>`,
+and only an export whose resource names a run factoryd is running (or ended
+within the last 15 minutes) is counted; anything else is dropped. Claude Code
+is enabled with `CLAUDE_CODE_ENABLE_TELEMETRY=1`, the `otlp` metrics and logs
+exporters and the metrics and logs endpoints; Codex through per-run
+`-c otel.exporter=…` and `-c otel.metrics_exporter=…` overrides, since only its
+configuration turns its exporters on. factoryd keeps, per run and in memory only:
+input and output tokens and cost (from `*token*usage*` and `*cost*` metrics,
+either temporality), tool calls and API requests (log events whose
+`event.name` ends `tool_result` or `api_request`), and the time of the last
+one. They ride the console's `RUN_PATHS` answer as `telemetry`; the floor
+tooltip and agent panel show only non-zero recorded counts, and a busy worker
+whose agent recorded nothing for two minutes is drawn waiting. Prompt text,
+tool input and output and every other attribute are discarded while decoding.
+Spend is never in the public projection.
+
 ## 7. Correlation
 
 Correlation runs for each observation:
@@ -662,7 +680,9 @@ and it is stated on the page.
   `observe.json`, held in daemon memory, and never served. Adapters only
   read.
 - **OTLP receiver.** Loopback only. It accepts no browser `Origin` and only
-  `application/json`, up to 1 MiB, and aggregates without retaining spans.
+  `application/json` or `application/x-protobuf`, up to 1 MiB after
+  decompression, and aggregates without retaining spans, metrics or log
+  records. Agent telemetry keeps counts and cost only.
   Attribute values are length-bounded, and only the selector keys listed in
   section 4 are kept, so arbitrary payload data never reaches the graph.
 - **Static extraction.** Reads exact-revision archives (`BuildArchive`) and

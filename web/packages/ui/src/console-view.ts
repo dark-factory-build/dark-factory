@@ -1,6 +1,6 @@
 import { productionKey, proposedProduction, type ProductionContraption } from "./production-view.js";
-import type { AgentItem, GraphNode, GraphReading, HumanRequestItem, IntakeCandidate, IntakeSource, OperationalGraphView, StateView, TaskItem } from "@dark-factory/client";
-import { compareText, type SceneFlow, type SceneGraph, type SceneHall, type SceneMachine, type SceneProposal, type SceneReading, type SceneWorker } from "./factory-scene/scene.js";
+import type { AgentItem, GraphNode, GraphReading, HumanRequestItem, IntakeCandidate, IntakeSource, OperationalGraphView, RunTelemetry, StateView, TaskItem } from "@dark-factory/client";
+import { compareText, QUIET_SECONDS, type SceneFlow, type SceneGraph, type SceneHall, type SceneMachine, type SceneProposal, type SceneReading, type SceneWorker } from "./factory-scene/scene.js";
 
 export type AgentActivity = "busy" | "waiting" | "needs-you" | "idle";
 /** The operator-facing state has one name for each actionable condition. */
@@ -122,6 +122,7 @@ export type RunPathSample = Readonly<{
   runId: string;
   projectId: string;
   paths: readonly string[];
+  telemetry?: Readonly<RunTelemetry>;
 }>;
 
 const reading = (value: GraphReading & { error_permille?: number; latency_p95_ms?: number; last_seen?: number; deployed_at?: number }): SceneReading => ({
@@ -255,7 +256,12 @@ export function projectFloor(state: StateView | undefined, prepared: ReturnType<
   const labels = new Map([...prepared.graph.halls.map((hall) => [hall.id, hall.label] as const), ["yard", "Shared yard"], ["quarantine", "Quarantine"]]);
   const workers = state === undefined ? [] : [...state.agents.values()].filter((agent) => !agent.archived).map((agent): SceneWorker => {
     const task = agentCurrentTask(agent, state);
-    const live = task === undefined ? undefined : footprint(matchingRunSample(state, task, runPaths))[0];
+    const sample = task === undefined ? undefined : matchingRunSample(state, task, runPaths);
+    const live = footprint(sample)[0];
+    const telemetry = sample?.telemetry;
+    // Recorded silence, not a guess: a busy agent that has made no tool call
+    // or API request for a while is waiting on something.
+    const activity = agentActivity(agent, state);
     const previous = lastRunPaths?.get(agent.id);
     const last = previous?.projectId === agent.project_id && previous.paths.length > 0 ? footprint(previous)[0] : undefined;
     const location: SceneWorker["location"] = task === undefined ? last === undefined ? "resting" : "last-observed" : live !== undefined ? "working" : "unobserved";
@@ -263,12 +269,19 @@ export function projectFloor(state: StateView | undefined, prepared: ReturnType<
     return {
       id: agent.id, name: agent.name, role: agent.role, provider: agent.provider,
       ...(agent.appearance === undefined ? {} : { appearance: agent.appearance }),
-      activity: agentActivity(agent, state), paused: agent.paused, location,
+      activity: activity === "busy" && (telemetry?.quiet_seconds ?? 0) >= QUIET_SECONDS ? "waiting" : activity, paused: agent.paused, location,
+      ...(telemetry === undefined ? {} : { telemetry }),
       ...(at === undefined ? {} : { locationLabel: labels.get(at.hall) ?? "", nodeId: at.hall }),
       ...(location === "working" && live !== undefined ? { observedBayId: live.machine } : {}),
     };
   });
   return { graph: prepared.graph, workers, tasks };
+}
+
+/** The current run's recorded telemetry, only while its sample is for the agent's exact running task. */
+export function agentTelemetry(agent: AgentItem, state: StateView | undefined, runPaths: ReadonlyMap<string, RunPathSample> | undefined): RunTelemetry | undefined {
+  const task = state === undefined ? undefined : agentCurrentTask(agent, state);
+  return state === undefined || task === undefined ? undefined : matchingRunSample(state, task, runPaths)?.telemetry;
 }
 
 /** A live sample is evidence only for its exact running task and assigned agent. */

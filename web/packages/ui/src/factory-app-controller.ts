@@ -1538,14 +1538,15 @@ function finiteError(error: unknown): SessionError | ProtocolError {
 
 function sampleFor(taskId: string, taskRevision: bigint, projectId: string, answer: RunPathsView): RunPathSample | undefined {
   if (typeof answer.runId !== "string" || answer.runId === "") return undefined;
-  return Object.freeze({ taskId, taskRevision, projectId, runId: answer.runId, paths: Object.freeze([...answer.paths]) });
+  return Object.freeze({ taskId, taskRevision, projectId, runId: answer.runId, paths: Object.freeze([...answer.paths]), ...(answer.telemetry === undefined ? {} : { telemetry: answer.telemetry }) });
 }
 
 function sameSamples(left: ReadonlyMap<string, RunPathSample>, right: ReadonlyMap<string, RunPathSample>): boolean {
   return left.size === right.size && [...left].every(([agentId, sample]) => {
     const candidate = right.get(agentId);
     return candidate !== undefined && candidate.taskId === sample.taskId && candidate.taskRevision === sample.taskRevision && candidate.projectId === sample.projectId && candidate.runId === sample.runId
-      && candidate.paths.length === sample.paths.length && candidate.paths.every((path, index) => path === sample.paths[index]);
+      && candidate.paths.length === sample.paths.length && candidate.paths.every((path, index) => path === sample.paths[index])
+      && JSON.stringify(candidate.telemetry) === JSON.stringify(sample.telemetry);
   });
 }
 

@@ -544,6 +544,15 @@ test("console edits and topology carry exact bodies and correlate their results"
   socket.reply(encodeServerControl({ type: "RUN_PATHS", id: runPathsFrame.id, body: { agent_id: agentId, run_id: runId, paths: ["internal/kernel", "web/packages/ui/src"] } }));
   assert.deepEqual(await runPathsPending, { agentId, runId, paths: ["internal/kernel", "web/packages/ui/src"] });
 
+  // A run's recorded telemetry is carried as served; it never rides an empty run.
+  const telemetry = { tokens_in: 12000, tokens_out: 400, cost_micro_usd: 310000, tool_calls: 18, api_requests: 9, quiet_seconds: 12 };
+  const telemetryPending = session.getRunPaths(agentId);
+  socket.reply(encodeServerControl({ type: "RUN_PATHS", id: decodeClientControl(socket.sent.at(-1)).id, body: { agent_id: agentId, run_id: runId, paths: [], telemetry } }));
+  assert.deepEqual(await telemetryPending, { agentId, runId, paths: [], telemetry });
+  for (const body of [{ agent_id: agentId, run_id: "", paths: [], telemetry }, { agent_id: agentId, run_id: runId, paths: [], telemetry: { ...telemetry, tool_calls: -1 } }, { agent_id: agentId, run_id: runId, paths: [], telemetry: { ...telemetry, tokens_in: undefined } }]) {
+    assert.throws(() => decodeServerControl(JSON.stringify({ type: "RUN_PATHS", id: "x", body })), /malformed/);
+  }
+
   const listPending = session.getTaskList({ agent_id: agentId }, { beforeUpdatedAtMs: 20n, beforeTaskId: taskId });
   const listFrame = decodeClientControl(socket.sent.at(-1));
   assert.equal(listFrame.type, "TASK_LIST_GET");

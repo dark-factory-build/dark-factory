@@ -1046,6 +1046,7 @@ func (backend *browserBackend) RunPaths(ctx context.Context, rawClient [browserp
 			}
 		}
 		result.RunID = runID.String()
+		result.Telemetry = backend.owner.runTelemetryView(runID)
 	}
 	return result, nil
 }

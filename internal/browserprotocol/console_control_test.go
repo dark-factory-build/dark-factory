@@ -129,6 +129,10 @@ func TestRunPathsBounds(t *testing.T) {
 		runPaths(run, `""`),
 		runPaths(run, strings.Join(rooms, ",")),
 		`{"type":"RUN_PATHS","id":"x","body":{"agent_id":"` + agent + `","run_id":"` + run + `","paths":null}}`,
+		// Telemetry belongs to a run and stays within JSON's exact integers.
+		`{"type":"RUN_PATHS","id":"x","body":{"agent_id":"` + agent + `","run_id":"","paths":[],"telemetry":{"tokens_in":1,"tokens_out":0,"cost_micro_usd":0,"tool_calls":0,"api_requests":0}}}`,
+		`{"type":"RUN_PATHS","id":"x","body":{"agent_id":"` + agent + `","run_id":"` + run + `","paths":[],"telemetry":{"tokens_in":9007199254740992,"tokens_out":0,"cost_micro_usd":0,"tool_calls":0,"api_requests":0}}}`,
+		`{"type":"RUN_PATHS","id":"x","body":{"agent_id":"` + agent + `","run_id":"` + run + `","paths":[],"telemetry":{"tokens_in":-1,"tokens_out":0,"cost_micro_usd":0,"tool_calls":0,"api_requests":0}}}`,
 	} {
 		if _, err := DecodeServerControl([]byte(frame)); err != ErrMalformed {
 			t.Fatalf("%s accepted: %v", frame, err)

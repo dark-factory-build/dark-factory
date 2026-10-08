@@ -808,6 +808,17 @@ test("selecting an agent exposes terminal and configuration controls", () => {
   assert.equal(readOnly.includes("Open terminal"), false);
 });
 
+test("the agent panel shows recorded effort only for the current run that recorded it", () => {
+  const telemetry = { tokens_in: 12000, tokens_out: 400, cost_micro_usd: 310000, tool_calls: 18, api_requests: 9, quiet_seconds: 4 };
+  assert.equal(fixtureState.tasks.get(ids.task).assigned_agent_id, ids.agent);
+  assert.equal(fixtureState.tasks.get(ids.task).status, "running");
+  const withTelemetry = render({ selectedAgent: agentSelection(), runPaths: new Map([[ids.agent, { ...runSample(ids.agent, []), telemetry }]]) });
+  assert.match(withTelemetry, /aria-label="Agent Builder One"[\s\S]*>12\.4k tokens · \$0\.31 · 18 tool calls</);
+  for (const runPaths of [undefined, new Map([[ids.agent, runSample(ids.agent, [])]]), new Map([[ids.agent, { ...runSample(ids.agent, [], ids.task, 99n), telemetry }]])]) {
+    assert.doesNotMatch(render({ selectedAgent: agentSelection(), runPaths }), /tokens|tool call/);
+  }
+});
+
 test("a paused agent with queued work says the queue is paused", () => {
   const task = [...fixtureState.tasks.values()].find((item) => item.status === "queued");
   const selected = fixtureState.agents.get(task.assigned_agent_id);
