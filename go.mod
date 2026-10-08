@@ -6,6 +6,7 @@ require (
 	github.com/BurntSushi/toml v1.6.0
 	github.com/coder/websocket v1.8.15
 	github.com/ncruces/go-sqlite3 v0.35.3
+	github.com/tetratelabs/wazero v1.12.0
 	go.opentelemetry.io/proto/otlp v1.11.0
 	go.yaml.in/yaml/v3 v3.0.5
 	golang.org/x/sys v0.47.0
