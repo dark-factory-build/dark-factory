@@ -14,11 +14,14 @@ export const RECORD_TEXT = 0x02;
 export const RECORD_BINARY = 0x03;
 export const RECORD_CLOSE = 0x04;
 export const RECORD_REVOKE = 0x05;
+export const RECORD_PUBLISH = 0x06;
 
 /** A host message may not exceed 4 MiB. */
 export const HOST_MESSAGE_LIMIT = 4 * 1024 * 1024;
 /** A controller message may not exceed 64 KiB. */
 export const CONTROLLER_MESSAGE_LIMIT = 64 * 1024;
+/** A published public world may not exceed 128 KiB; a larger one is dropped. */
+export const PUBLIC_WORLD_LIMIT = 128 * 1024;
 /** One record payload may not exceed 1 MiB + 64 bytes. */
 export const RECORD_PAYLOAD_LIMIT = 1024 * 1024 + 64;
 
@@ -33,7 +36,7 @@ export type ParseFailure = 'truncated' | 'unknown-type' | 'oversize-record';
 export type ParseResult = { ok: true; records: RelayRecord[] } | { ok: false; failure: ParseFailure };
 
 /** Types a host is allowed to send. OPEN is relay→host only. */
-const HOST_SENDABLE = new Set([RECORD_TEXT, RECORD_BINARY, RECORD_CLOSE, RECORD_REVOKE]);
+const HOST_SENDABLE = new Set([RECORD_TEXT, RECORD_BINARY, RECORD_CLOSE, RECORD_REVOKE, RECORD_PUBLISH]);
 
 export function parseHostMessage(bytes: Uint8Array): ParseResult {
 	const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);

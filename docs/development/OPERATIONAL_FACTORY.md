@@ -587,21 +587,72 @@ It never contains:
 Ordinal labels are assigned in HMAC-ID order, so they do not shift as other
 nodes come and go.
 
-The relay is not the publishing path. It forwards opaque frames, stores only
-its host record, and its node ID is the pairing identity.
-
-Instead, factoryd serves the projection to local readers only, at
+factoryd serves the projection to local readers at
 `GET http://127.0.0.1:43123/v1/public/<project id>`. It refuses any request
 carrying an `Origin`, and any whose `Host` is not the listener itself (DNS
 rebinding). Public identities are keyed by a 32-byte secret,
 `public.key` (mode 0600), which never leaves the home.
 
-Publishing is an explicit operator action, so nothing leaves the machine by
-default. The operator saves that JSON into the site repository, and the site
-renders it with the same world and renderer in read-only mode.
+### Live feed
 
-What remains visible is the shape (node and edge counts), bucketed activity
-and hall-level worker presence. That is acceptable for public repositories,
+Publishing is opt-in per factory. Nothing leaves the machine until the
+operator names one project in `observe.json`:
+
+```json
+{ "public_project": "<project id>", "sources": [] }
+```
+
+factoryd then sends that project's PublicWorld bytes, exactly what
+`/v1/public` serves, over its existing relay connection as a `PUBLISH`
+record. It sends at most once a minute and only when the bytes changed.
+`generated_at` moves every five minutes, so a running factory publishes at
+least that often. On start it logs the public id it publishes under. The
+relay keeps only the latest world per factory and serves it read-only at
+`GET https://relay.darkfactory.build/public/<public id>`.
+`Last-Modified` is when the relay received it. The site polls that URL on
+`/log`, falls back to its committed snapshot, and reads a feed older than
+seven minutes as not live.
+
+The public id is `base32(SHA-256("dark-factory-relay/public\n" ‖ node public
+key)[:20])`. It has the node id's shape but cannot be turned back into it,
+and the node key never leaves the relay and the home. A reader of the site
+learns nothing it could use to dial `/host` or `/controller`.
+
+### Threat note
+
+- **Spoofing another factory's world.** A world is stored under the public
+  id derived from the key whose host token the node's Durable Object
+  verified. The relay never accepts an id from the publisher, and the
+  public object takes writes only from that node object. The Worker
+  forwards only `GET` to it. Claiming another factory's id needs its node
+  key.
+- **Oversized or abusive publishes.** A world over 128 KiB, one that is not
+  a JSON object with a numeric `generated_at`, or one sooner than 30 s after
+  the last is dropped. It costs one record on an already authenticated
+  socket and only ever replaces the sender's own single record. Storage is
+  O(1) per factory, with no history and no listing endpoint.
+- **Leaking private data.** The publisher has one source:
+  `browserBackend.PublicWorld`, the `/v1/public` handler, which marshals
+  `opgraph.Public`. Its allowlist is enforced by its output type, not by
+  redaction. The bytes go to the relay unchanged, and the relay stores them
+  verbatim and adds nothing. One thing is new: `Last-Modified` tells a
+  reader, to the minute, when the public world last changed. The world
+  itself still holds only bucketed activity.
+- **Cost of public reads.** Each read is one Worker request and one Durable
+  Object read. Reads are rate limited per client address (60 a minute), and
+  `Cache-Control: public, max-age=15` covers repeat polls. CORS admits only
+  `https://www.darkfactory.build`, but CORS is not access control: the
+  world is public by design. If reads ever cost real money, put
+  `caches.default` in front of the object.
+- **Stopping.** Remove `public_project` from `observe.json`. Within a minute
+  factoryd publishes an empty world, and the relay deletes the stored one.
+  Every start without the setting does the same once, so a world left by an
+  earlier run is retracted too. Stopping the relay (`--relay-origin` unset)
+  stops publishing as well. The last world then stays as "last seen" until
+  a later start retracts it.
+
+What remains visible is the shape (node and edge counts), bucketed activity,
+hall-level worker presence and, for a live feed, when it last changed. That is acceptable for public repositories,
 and it is stated on the page.
 
 ## 14. Security and privacy

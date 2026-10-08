@@ -16,8 +16,10 @@ import {
 	RECORD_BINARY,
 	RECORD_CLOSE,
 	RECORD_OPEN,
+	RECORD_PUBLISH,
 	RECORD_REVOKE,
 	RECORD_TEXT,
+	SITE_ORIGIN,
 	SUBPROTOCOL,
 	corrupt,
 	createControllerId,
@@ -713,6 +715,78 @@ test('a truncated record ends the host', async () => {
 	assert.equal((await controller.tap.waitClosed()).code, 4001);
 });
 
+// -- public world -----------------------------------------------------------
+
+function publish(host, world) {
+	host.tap.send(encodeRecord(RECORD_PUBLISH, 0, typeof world === 'string' ? world : JSON.stringify(world)));
+}
+
+/** Reads one public id until it answers `status`; the store lands after the record. */
+async function readPublic(id, status = 200) {
+	for (let attempt = 0; ; attempt += 1) {
+		const response = await fetch(`${worker.origin}/public/${id}`);
+		if (response.status === status || attempt === 20) return response;
+		await response.arrayBuffer();
+		await new Promise((resolve) => setTimeout(resolve, 150));
+	}
+}
+
+test('a published world is served verbatim by public id with CORS for the site only', async () => {
+	const { node, host } = await withHost();
+	const world = JSON.stringify({ generated_at: 1_791_392_400_000, nodes: [], edges: [], workers: [] });
+	publish(host, world);
+
+	const response = await readPublic(node.publicId);
+	assert.equal(response.status, 200);
+	assert.equal(await response.text(), world);
+	assert.equal(response.headers.get('content-type'), 'application/json');
+	assert.equal(response.headers.get('access-control-allow-origin'), SITE_ORIGIN);
+	assert.equal(response.headers.get('cache-control'), 'public, max-age=15');
+	assert.ok(Math.abs(Date.parse(response.headers.get('last-modified')) - Date.now()) < 60_000);
+	// The public id is not the node id, and the node id names no world.
+	assert.notEqual(node.publicId, node.id);
+	assert.equal((await fetch(`${worker.origin}/public/${node.id}`)).status, 404);
+	// Read-only, and the host keeps its socket.
+	for (const method of ['PUT', 'POST', 'DELETE']) {
+		const refused = await fetch(`${worker.origin}/public/${node.publicId}`, { method, body: method === 'DELETE' ? undefined : '{}' });
+		assert.equal(refused.status, 405, method);
+	}
+	assert.equal(await (await readPublic(node.publicId)).text(), world);
+	assert.equal((await host.tap.quiet(100)).closed, null);
+});
+
+test('a factory publishes only under its own public id', async () => {
+	const alpha = await withHost();
+	const bravo = await withHost();
+	publish(alpha.host, { generated_at: 1, owner: 'alpha' });
+	assert.equal((await (await readPublic(alpha.node.publicId)).json()).owner, 'alpha');
+	publish(bravo.host, { generated_at: 2, owner: 'bravo' });
+	assert.equal((await (await readPublic(bravo.node.publicId)).json()).owner, 'bravo');
+	assert.equal((await (await readPublic(alpha.node.publicId)).json()).owner, 'alpha');
+	// A host token for alpha's node id signed with bravo's key is refused, so
+	// bravo has no other way to reach alpha's object.
+	const forged = await openHost(worker.origin, alpha.node.id, mintHostToken(alpha.node, { signer: bravo.node, generation: 9 }));
+	assert.equal(forged.status, 403);
+});
+
+test('an oversized or malformed world is dropped without ending the host', async () => {
+	const { node, host } = await withHost();
+	publish(host, JSON.stringify({ generated_at: 1, pad: 'x'.repeat(128 * 1024) }));
+	publish(host, 'not json');
+	publish(host, { nodes: [] });
+	assert.equal((await host.tap.quiet(400)).closed, null);
+	assert.equal((await fetch(`${worker.origin}/public/${node.publicId}`)).status, 404);
+});
+
+test('there is no listing and no history', async () => {
+	for (const path of ['/public', '/public/', '/public/all', `/public/${createNode().publicId}/history`]) {
+		assert.equal((await fetch(`${worker.origin}${path}`)).status, 404, path);
+	}
+	const unknown = await fetch(`${worker.origin}/public/${createNode().publicId}`);
+	assert.equal(unknown.status, 404);
+	assert.equal(unknown.headers.get('access-control-allow-origin'), SITE_ORIGIN);
+});
+
 // -- harness ----------------------------------------------------------------
 
 test('a wrangler child that dies between tests is replaced before the next one', async (t) => {
@@ -796,11 +870,14 @@ test('no frame, token, or payload reaches disk or the log', async () => {
 		{ key: 'host', value: { key: node.key, generation: 1, sequence: 1 } },
 	]);
 
-	// And no object anywhere in this run wrote a key other than `host`: the
-	// ticket and deny lists really are gone, not merely unused by this test.
+	// And no object anywhere in this run wrote a key other than `host`, or
+	// `world` in a public object: the ticket and deny lists really are gone,
+	// not merely unused by this test.
 	assert.deepEqual(
 		objects.flatMap(({ node: name, records }) =>
-			records.filter(({ key }) => key !== 'host').map(({ key }) => `${name}:${key}`),
+			records
+				.filter(({ key }) => key !== (name?.startsWith('public:') ? 'world' : 'host'))
+				.map(({ key }) => `${name}:${key}`),
 		),
 		[],
 	);

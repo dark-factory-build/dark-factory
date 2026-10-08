@@ -240,22 +240,28 @@ type observeSource struct {
 	Services    map[string]string `json:"services"`
 }
 
-func (daemon *Daemon) observeSources() []observeSource {
+func (daemon *Daemon) observeSources() []observeSource { return daemon.observeConfig().Sources }
+
+// observeConfig is <home>/observe.json. PublicProject opts one project's
+// public world into publishing over the relay; absent, nothing is published.
+type observeConfig struct {
+	Sources       []observeSource `json:"sources"`
+	PublicProject string          `json:"public_project"`
+}
+
+func (daemon *Daemon) observeConfig() (config observeConfig) {
 	if daemon.home == "" {
-		return nil
+		return config
 	}
 	body, err := os.ReadFile(filepath.Join(daemon.home, "observe.json"))
 	if err != nil {
-		return nil
-	}
-	var config struct {
-		Sources []observeSource `json:"sources"`
+		return config
 	}
 	if err := json.Unmarshal(body, &config); err != nil {
 		LogFactoryd(daemon.log, "factoryd: observe.json: %v\n", err)
-		return nil
+		return observeConfig{}
 	}
-	return config.Sources
+	return config
 }
 
 const pollInterval = 5 * time.Minute
