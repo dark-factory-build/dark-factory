@@ -740,8 +740,8 @@ func (b *daemonReviewBackend) ObserveMerge(ctx context.Context, operation review
 	return result, nil
 }
 
-// mergeFromPull settles an enqueued operation from a pull request read when
-// the merge receipt cannot: merged or closed ends it, open stays enqueued.
+// mergeFromPull settles an enqueued operation when its receipt cannot: open or
+// merged at its head; closed, or superseded by a new head (#1407), ends it closed.
 func mergeFromPull(response json.RawMessage, operation review.Operation, cause error) (review.Merge, error) {
 	var value struct {
 		PullRequests []struct {
@@ -749,15 +749,15 @@ func mergeFromPull(response json.RawMessage, operation review.Operation, cause e
 			State   string `json:"state"`
 		} `json:"pull_requests"`
 	}
-	if json.Unmarshal(response, &value) != nil || len(value.PullRequests) != 1 || !strings.EqualFold(value.PullRequests[0].HeadSHA, operation.Request.Head) {
+	if json.Unmarshal(response, &value) != nil || len(value.PullRequests) != 1 || value.PullRequests[0].HeadSHA == "" {
 		return review.Merge{}, cause
 	}
-	switch value.PullRequests[0].State {
-	case "merged":
-		return review.Merge{State: "MERGED_AFTER_ENQUEUE_ATTEMPT"}, nil
-	case "closed":
+	switch pull := value.PullRequests[0]; {
+	case !strings.EqualFold(pull.HeadSHA, operation.Request.Head), pull.State == "closed":
 		return review.Merge{State: "NOT_QUEUED"}, nil
-	case "open":
+	case pull.State == "merged":
+		return review.Merge{State: "MERGED_AFTER_ENQUEUE_ATTEMPT"}, nil
+	case pull.State == "open":
 		return review.Merge{State: "ACTIVE_QUEUE", Open: true}, nil
 	}
 	return review.Merge{}, cause
