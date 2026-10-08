@@ -69,6 +69,7 @@ test("the commons furniture stays put whoever rests nearby or works", () => {
   const layout = floor(3), nook = breakRoomNook(layout, 0, 0, true);
   assert.deepEqual(nook, breakRoomNook(layout, 100, 100, true));
   assert.deepEqual(nook.furniture.map(({ errand, roomId, x, y, stand }) => ({ errand, roomId, x, y, stand })), [
-    { errand: "shelf", roomId: undefined, x: 136, y: 90, stand: { x: 146, y: 136 } }, { errand: "coffee", roomId: undefined, x: 174, y: 90, stand: { x: 184, y: 136 } },
+    { errand: "shelf", roomId: undefined, x: 136, y: 70, stand: { x: 142, y: 136 } }, { errand: "coffee", roomId: undefined, x: 174, y: 70, stand: { x: 180, y: 136 } },
+    { errand: "board", roomId: undefined, x: 22, y: 70, stand: { x: 28, y: 136 } }, { errand: "missions", roomId: undefined, x: 60, y: 70, stand: { x: 66, y: 136 } }, { errand: "tasks", roomId: undefined, x: 98, y: 70, stand: { x: 104, y: 136 } },
   ]);
 });

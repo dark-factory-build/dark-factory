@@ -74,13 +74,13 @@ There is no campaign scheduler or autonomous optimization loop.
 
 ## Browser use
 
-The planning table opens **Missions**, scoped to a project. Creating a mission
+The break room's planning table opens **Missions**, scoped to a project. Creating a mission
 atomically saves the existing outcome record and queues a normal task for its
 selected overseer. Delegated tasks retain their mission association; standalone
 tasks remain valid. Mission details show durable related work and link to the
 owner's existing controls. Task success does not accept the mission: acceptance
 still requires the outcome's reason, authorized judgment, and conclusion.
-The tray opens the existing **Tasks** panel. **Pause new work** changes admission
+Its task tray, whose pile shows the queue, opens the existing **Tasks** panel. **Pause new work** changes admission
 only; active processes continue. Mission creation and admission changes wait for
 daemon acknowledgement.
 

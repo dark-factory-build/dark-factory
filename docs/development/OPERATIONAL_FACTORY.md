@@ -46,7 +46,7 @@ whether it was happening, or whether we could even tell.
 | Worker sprites, identity, appearance, sprite editor | `layoutScene`, `composeRoom`: rooms from directories | `internal/topology` graph, IDs and inventories |
 | `movement.ts` routing over doors and corridors | `wires()`: import cables become flow lines between machines | `internal/daemon/topology.go`, the `projectTopology` wire builder |
 | `idle-life.ts` (cat, chatter), `messages.ts` (paper, peer pulses) | `console-view.ts` floor selection: units and halls replace room selection | `TOPOLOGY_GET` / `TOPOLOGY`, client decode, fixtures |
-| Break room, errands, commons, Missions/Tasks/Library stations | `runFootprint`: changed paths now map to operational nodes | Name-based `responsibility()` motifs, file-count `equipmentScale` |
+| Break room, errands, commons, its board/Missions/Tasks/Library implements | `runFootprint`: changed paths now map to operational nodes | Name-based `responsibility()` motifs, file-count `equipmentScale` |
 | Reviewer pseudo-workers | Proposal relationships: import deltas give way to changed operational nodes | Inventory inspector, `source_files`, the "detail" grouping setting |
 | `RUN_PATHS` sampling, the production panel and its delivery data | Floor legend and help | `FACTORY_FLOOR.md` |
 | Camera, scrolling, search, inspector shell, reduced motion | | Knowledge `entities` validation and context paths now resolve through operational node IDs and their sources (`kernel/knowledge.go`, `daemon/knowledge.go`, `daemon/knowledge_context.go`, the Library form). The live database held zero entity references on 7 Oct 2026 (5 revisions checked). |

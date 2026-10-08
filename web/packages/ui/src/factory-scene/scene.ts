@@ -167,7 +167,8 @@ export type SceneWorkerPlacement = Readonly<{
   y: number;
 }>;
 
-export type BreakRoomErrand = "shelf" | "coffee";
+/** Coffee is ambient; the rest are implements, used when a recorded event says so (shelf also ambiently). */
+export type BreakRoomErrand = "shelf" | "coffee" | "board" | "missions" | "tasks";
 
 /** How a machine is pictured. A shape is chosen from the node kind, never its name. */
 export type StationShape = "line" | "dock" | "manifold" | "clock" | "cell" | "silo" | "conveyor" | "crate";
@@ -373,12 +374,19 @@ export function commonSeating(layout: SceneLayout, restingCount: number, plannin
     layout.restingTop + (restingCount === 0 ? 0 : (Math.ceil(restingCount / 4) - 1) * WORKER_GAP + 64)) };
 }
 
-/** Stable furniture in the side commons. Halls hold machinery, not break-room furniture. */
+// Left to right along the break room's back wall.
+const NOOK_ORDER: readonly BreakRoomErrand[] = ["board", "missions", "tasks", "shelf", "coffee"];
+
+/**
+ * Stable furniture in the side commons, never moved by data. Halls hold machinery, not break-room furniture.
+ * Ambient turns come first in the list, so their timing never depends on the implements beside them.
+ */
 export function breakRoomNook(_layout: SceneLayout, _restingCount: number, _planningCount: number, _nearby = false) {
-  return { width: COMMON_WIDTH, furniture: (["shelf", "coffee"] as const).map((errand, index) => ({
+  return { width: COMMON_WIDTH, furniture: (["shelf", "coffee", "board", "missions", "tasks"] as const).map((errand) => ({
     errand, key: String(errand), roomId: undefined as string | undefined,
-    x: PADDING + 120 + index * 38, y: 90,
-    stand: { x: PADDING + 130 + index * 38, y: 136 },
+    // High enough that a cue over a visitor's head clears the implement's sign.
+    x: PADDING + 6 + NOOK_ORDER.indexOf(errand) * 38, y: 70,
+    stand: { x: PADDING + 12 + NOOK_ORDER.indexOf(errand) * 38, y: 136 },
   })) };
 }
 

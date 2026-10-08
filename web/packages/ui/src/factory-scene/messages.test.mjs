@@ -3,7 +3,7 @@ import test from "node:test";
 import { createElement } from "react";
 import { act, create } from "react-test-renderer";
 import { FactoryScene } from "../../dist/src/factory-scene/factory-scene.js";
-import { layoutScene, placeWorkers } from "../../dist/src/factory-scene/scene.js";
+import { breakRoomNook, layoutScene, placeWorkers } from "../../dist/src/factory-scene/scene.js";
 import { routeBetween } from "../../dist/src/factory-scene/movement.js";
 import { workerFrames } from "../../dist/src/factory-scene/appearance.js";
 import { hallsOf } from "../../../../fixtures/scene.mjs";
@@ -84,8 +84,9 @@ test("the floor sends a question down the corridors, its answer back, and new wo
     { id: "ada", name: "Ada", role: "worker", provider: "codex", activity: "busy", location: "working", nodeId: "a" },
     { id: "grace", name: "Grace", role: "worker", provider: "codex", activity: "busy", location: "working", nodeId: "h" },
     { id: "linus", name: "Linus", role: "worker", provider: "codex", activity: "idle", location: "resting" },
+    { id: "margaret", name: "Margaret", role: "worker", provider: "codex", activity: "busy", location: "unobserved" },
   ];
-  const tasks = [task("t-ada", "ada", "running"), task("t-grace", "grace", "running"), task("t-linus", "linus", "queued")];
+  const tasks = [task("t-ada", "ada", "running"), task("t-grace", "grace", "running"), task("t-linus", "linus", "queued"), task("t-margaret", "margaret", "queued")];
   const layout = layoutScene(graph), placements = placeWorkers(layout, workers);
   const route = routeBetween(layout, placements.find(({ id }) => id === "ada"), placements.find(({ id }) => id === "grace"));
   const onRoute = (point) => { let from = placements.find(({ id }) => id === "ada"); for (const to of route.points) { const d = Math.hypot(to.x - from.x, to.y - from.y), d1 = Math.hypot(point.x - from.x, point.y - from.y), d2 = Math.hypot(to.x - point.x, to.y - point.y); if (Math.abs(d1 + d2 - d) < 0.01) return true; from = to; } return false; };
@@ -162,15 +163,21 @@ test("the floor sends a question down the corridors, its answer back, and new wo
     assert.equal(all("data-pulse")[0].props["data-pulse"], "answer");
     for (let step = 0; step < 700 && frames.size > 0; step += 1) await tick(16);
 
-    const started = tasks.map((item) => item.id === "t-linus" ? { ...item, status: "running" } : item);
+    const started = tasks.map((item) => item.status === "queued" ? { ...item, status: "running" } : item);
+    const seat = renderer.root.findByProps({ "data-worker-id": "linus" }).props.transform;
     await act(async () => { renderer.update(scene({ tasks: started, peerQuestions: [question("q", "t-ada", "t-grace", true)] })); });
     await tick(16);
-    const tray = all("data-floor-inbox")[0].props.transform.match(/translate\(([\d.]+) ([\d.]+)\)/).slice(1).map(Number);
+    const tray = all("data-floor-inbox")[0].props.transform.match(/translate\(([\d.]+) ([\d.]+)\)/).slice(1).map(Number).map((at) => at + 10);
     const paper = () => all("data-paper")[0]?.props.transform.match(/translate\(([-\d.]+) ([-\d.]+)\)/).slice(1).map(Number);
+    assert.deepEqual(all("data-paper").map((node) => node.props["data-paper"]), ["margaret"], "paper flies to whoever is at work; the idle fetch their own");
     assert.ok(Math.hypot(paper()[0] - tray[0], paper()[1] - tray[1]) < 12, `paper starts at the tray: ${paper()} vs ${tray}`);
     assert.equal(all("data-call").length, 0, "nobody throws it");
     for (let step = 0; step < 80 && paper() !== undefined; step += 1) await tick(16);
-    assert.match(poseOf("linus"), /wave\.0$/, "whoever it is for takes it");
+    assert.match(poseOf("margaret"), /wave\.0$/, "whoever it is for takes it");
+    for (let step = 0; step < 200 && !/Recorded use · at the task tray/.test(tooltipOf("linus")); step += 1) await tick(16);
+    assert.match(tooltipOf("linus"), /Recorded use · at the task tray/, "Linus walked over to the tray for his work");
+    for (let step = 0; step < 400 && renderer.root.findByProps({ "data-worker-id": "linus" }).props.transform !== seat; step += 1) await tick(50);
+    assert.equal(renderer.root.findByProps({ "data-worker-id": "linus" }).props.transform, seat, "and went back to his seat");
 
     // With the clock stopped nothing flies, and what is waiting is still said.
     await act(async () => { renderer.update(createElement(FactoryScene, { graph, workers, tasks, appearance: { scenery: "off", animation: "off" }, peerQuestions: [question("q", "t-ada", "t-grace", true), question("q2", "t-grace", "t-ada")] })); });
@@ -267,6 +274,76 @@ test("recorded operations fly between the agent and the shelf or board, open wha
     await act(async () => { renderer.update(scene({ knowledgeCues: [cue("r3", "ada", false, true)] })); });
     assert.equal(marks("flight").length, 0);
     assert.deepEqual(marks("agent").map((node) => node.props["data-knowledge-key"]), ["r3"]);
+  } finally {
+    if (renderer) await act(async () => renderer.unmount());
+    for (const [key, value] of Object.entries(saved)) { if (value === undefined) delete globalThis[key]; else globalThis[key] = value; }
+  }
+});
+
+test("a recorded read sends an idle worker to the shelf once; a busy one stays put; nothing replays", async () => {
+  const graph = hallsOf([..."ab"]);
+  const workers = [
+    { id: "ada", name: "Ada", role: "worker", provider: "codex", activity: "busy", location: "working", nodeId: "a" },
+    { id: "linus", name: "Linus", role: "worker", provider: "codex", activity: "idle", location: "resting" },
+  ];
+  const tasks = [{ ...task("t-ada", "ada", "running"), roomIds: ["a"] }];
+  const cue = (key, agentId, board = false) => ({ key, agentId, board, reading: !board, label: key });
+  const saved = { setTimeout: globalThis.setTimeout, clearTimeout: globalThis.clearTimeout, performance: globalThis.performance, requestAnimationFrame: globalThis.requestAnimationFrame, cancelAnimationFrame: globalThis.cancelAnimationFrame, window: globalThis.window, document: globalThis.document };
+  let clock = 1000, next = 0, renderer;
+  const timers = new Map(), frames = new Map();
+  globalThis.performance = { now: () => clock };
+  globalThis.setTimeout = (callback) => { timers.set(++next, callback); return next; };
+  globalThis.clearTimeout = (id) => timers.delete(id);
+  globalThis.requestAnimationFrame = (callback) => { frames.set(++next, callback); return next; };
+  globalThis.cancelAnimationFrame = (id) => frames.delete(id);
+  globalThis.window = { matchMedia: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }) };
+  globalThis.document = { visibilityState: "visible", addEventListener() {}, removeEventListener() {} };
+  const tick = async (ms) => { await act(async () => { clock += ms; const bag = frames.size > 0 ? frames : timers; const [id, callback] = [...bag].at(-1); bag.delete(id); callback(clock); }); };
+  const where = (id) => renderer.root.findByProps({ "data-worker-id": id }).props.transform;
+  const pose = (id) => renderer.root.findByProps({ "data-worker-id": id }).findAllByType("use").map((use) => use.props.href);
+  const stand = breakRoomNook(layoutScene(graph), 0, 0).furniture.find((piece) => piece.errand === "shelf").stand;
+  // Scenery off: no ambient errands, so any walk to the shelf is the recorded one.
+  const scene = (props) => createElement(FactoryScene, { graph, workers, tasks, appearance: { scenery: "off", animation: "follow-device" }, ...props });
+  // Counts arrivals at the shelf over a stretch of floor time.
+  const watch = async (ms) => { let arrivals = 0, there = where("linus") === `translate(${stand.x} ${stand.y})`; for (let spent = 0; spent < ms; spent += 50) { await tick(50); const at = where("linus") === `translate(${stand.x} ${stand.y})`; if (at && !there) arrivals += 1; there = at; } return arrivals; };
+  try {
+    await act(async () => { renderer = create(scene({ workers: [], tasks: [], connected: false })); });
+    await act(async () => { renderer.update(scene({ knowledgeCues: [cue("old", "linus")] })); });
+    const seat = where("linus"), bench = where("ada");
+    assert.equal(await watch(4000), 0, "what was recorded before the floor looked sends nobody anywhere");
+    await act(async () => { renderer.update(scene({ connected: false, knowledgeCues: [cue("old", "linus")] })); });
+    await act(async () => { renderer.update(scene({ knowledgeCues: [cue("old", "linus"), cue("missed", "linus")] })); });
+    assert.equal(await watch(4000), 0, "nor does what was recorded while disconnected");
+
+    await act(async () => { renderer.update(scene({ knowledgeCues: [cue("old", "linus"), cue("missed", "linus"), cue("r1", "linus"), cue("w1", "ada", true)] })); });
+    await tick(16);
+    assert.deepEqual(renderer.root.findAll((node) => node.props["data-knowledge-cue"] === "flight").map((node) => node.props["data-knowledge-key"]), ["w1"], "the busy writer's post flies; the idle reader goes in person");
+    let arrived = false;
+    for (let step = 0; step < 300 && !arrived; step += 1) { await tick(16); arrived = where("linus") === `translate(${stand.x} ${stand.y})`; }
+    assert.ok(arrived, "the reader walks to the shelf");
+    assert.ok(pose("linus").includes("#df-frame-person.held.book.chest"), "and stands there, book in hand");
+    const cues = (at) => renderer.root.findAll((node) => node.props["data-knowledge-cue"] === at);
+    assert.deepEqual(cues("agent").filter((node) => node.props["data-knowledge-key"] === "r1").length, 1, "marked as recorded, unlike an ambient errand");
+    assert.deepEqual(cues("shelf"), [], "one mark per event: the visitor carries it, not the shelf as well");
+    assert.deepEqual(cues("board").map((node) => node.props["data-knowledge-key"]), ["w1"], "the busy writer's post is marked on the board it flew to");
+    // No mark covers a sign: not the one over a visitor's head at any implement, nor the one above the implement itself.
+    const xy = (node) => node.props.transform.match(/translate\(([-\d.]+) ([-\d.]+)\)/).slice(1).map(Number);
+    const box = ([x, y]) => ({ left: x - 9, right: x + 9, top: y - 9, bottom: y + 9 });
+    const [overHead, overImplement] = [xy(cues("agent").find((node) => node.props["data-knowledge-key"] === "r1")), xy(cues("board")[0])];
+    const nook = breakRoomNook(layoutScene(graph), 0, 0).furniture, board = nook.find((piece) => piece.errand === "board");
+    const signs = { board: "BOARD", missions: "MISSIONS", tasks: "TASKS", shelf: "LIBRARY" };
+    for (const piece of nook.filter((item) => signs[item.errand])) {
+      // The sign: 4 sprite units of text, scaled to the floor, under the implement's 16-unit frame.
+      const scale = 20 / 16, width = signs[piece.errand].length * 0.6 * 4 * scale, base = piece.y + 23 * scale;
+      const sign = { left: piece.x + 8 * scale - width / 2, right: piece.x + 8 * scale + width / 2, top: base - 4 * scale, bottom: base + scale };
+      for (const [what, mark] of [["over a visitor", box([overHead[0] - stand.x + piece.stand.x, overHead[1] - stand.y + piece.stand.y])], ["over the implement", box([overImplement[0] - board.x + piece.x, overImplement[1] - board.y + piece.y])]]) {
+        assert.ok(mark.right <= sign.left || mark.left >= sign.right || mark.bottom <= sign.top || mark.top >= sign.bottom, `the mark ${what} covers the ${piece.errand} sign: ${JSON.stringify([mark, sign])}`);
+      }
+    }
+    assert.equal(where("ada"), bench, "the busy writer is never moved");
+    await act(async () => { renderer.update(scene({ knowledgeCues: [cue("old", "linus"), cue("missed", "linus"), cue("r1", "linus"), cue("w1", "ada", true)] })); });
+    assert.equal(await watch(12000), 0, "the visit is brief and happens once");
+    assert.equal(where("linus"), seat, "then the reader sits back down");
   } finally {
     if (renderer) await act(async () => renderer.unmount());
     for (const [key, value] of Object.entries(saved)) { if (value === undefined) delete globalThis[key]; else globalThis[key] = value; }
