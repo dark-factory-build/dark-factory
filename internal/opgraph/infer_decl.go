@@ -138,7 +138,7 @@ func (run *inference) manifest(packages []string, found owner, at Location, deta
 	sort.Strings(packages)
 	for _, name := range packages {
 		if entry := knownClient(name, manifestClients); entry != nil {
-			run.client(*entry, found, at, detail+" "+name)
+			run.client(*entry, found, at, "manifest", detail+" "+name)
 		}
 	}
 }
@@ -371,7 +371,7 @@ func (run *inference) compose(repo, dir string, body []byte, at Location) {
 			}
 			entry := client(infrastructure.image, infrastructure.kind, infrastructure.system)
 			entry.shared = true
-			run.client(entry, owner{units: users}, at, "compose service "+name)
+			run.client(entry, owner{units: users}, at, "manifest", "compose service "+name)
 			break
 		}
 	}
