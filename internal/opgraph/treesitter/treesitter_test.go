@@ -86,3 +86,34 @@ func TestBoundsDegradeOneFile(t *testing.T) {
 	}
 	tree.Close()
 }
+
+// A file stopped by its budget leaves nothing behind: the next file of the
+// same grammar parses from its own start and matches its own text.
+func TestBudgetStopDoesNotLeakIntoTheNextFile(t *testing.T) {
+	p, err := New(context.Background(), "javascript")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { p.Close() }()
+	if _, err := p.Parse([]byte(strings.Repeat("app.get(\"/old\", h); x = foo(1, \"a\") + bar[2];\n", 40000))); !errors.Is(err, ErrBudget) {
+		t.Fatalf("expected the huge file to exhaust its budget, got %v", err)
+	}
+	q, err := p.Query(`(call_expression function: (member_expression property: (property_identifier) @method) arguments: (arguments . (string (string_fragment) @route)))`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := `app.get("/new", handler);`
+	tree, err := p.Parse([]byte(source))
+	if err != nil {
+		t.Fatalf("parser unusable after a stopped file: %v", err)
+	}
+	defer tree.Close()
+	matches, err := tree.Matches(q)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := Capture{"route", "/new", strings.Index(source, "/new"), strings.Index(source, "/new") + 4, 1}
+	if len(matches) != 1 || matches[0].Captures[1] != want {
+		t.Fatalf("matches after a stopped file = %+v, want only %+v", matches, want)
+	}
+}

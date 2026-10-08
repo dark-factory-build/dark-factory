@@ -389,6 +389,11 @@ func (p *Parser) Parse(source []byte) (*Tree, error) {
 		if handle != 0 {
 			_, _ = p.call("ts_tree_delete", handle)
 		}
+		// A cancelled parse is kept for resumption; the next file must start
+		// fresh, not continue the abandoned one.
+		if _, err := p.call("ts_parser_reset", p.parser); err != nil {
+			return nil, err
+		}
 		return nil, ErrBudget
 	}
 	tree.tree = handle
