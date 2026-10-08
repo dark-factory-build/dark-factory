@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -66,6 +67,41 @@ func TestRefreshObservesCurrentHeadChecks(t *testing.T) {
 	}
 	if running.ID != "92" || running.State != "in_progress" || running.Conclusion != "" {
 		t.Fatalf("running check %+v", running)
+	}
+}
+
+// Many unsettled pulls never overflow one observation: reading stops at the
+// store's bound, coverage is not claimed, and what is left is read next time.
+func TestRefreshStopsAtTheObservationsCheckBound(t *testing.T) {
+	pulls := make([]string, 0, 30)
+	for number := 1; number <= 30; number++ {
+		pulls = append(pulls, fmt.Sprintf(`{"number":%d,"head_sha":"%040x","state":"open"}`, number, number))
+	}
+	reads := 0
+	call := func(_ context.Context, request json.RawMessage, _ map[string]uint64) (json.RawMessage, error) {
+		content := `{"pull_requests":[` + strings.Join(pulls, ",") + `],"next_page":null}`
+		if strings.Contains(string(request), "observe_pull_request_checks") {
+			reads++
+			var value struct {
+				Params struct {
+					Arguments map[string]any `json:"arguments"`
+				} `json:"params"`
+			}
+			_ = json.Unmarshal(request, &value)
+			checks := make([]string, 0, 20)
+			for run := 0; run < 20; run++ {
+				checks = append(checks, fmt.Sprintf(`{"name":"job%d","status":"in_progress","conclusion":null,"url":"https://github.com/o/r/runs/%d%02d"}`, run, reads, run))
+			}
+			content = `{"pull_number":1,"head_sha":"` + value.Params.Arguments["head_sha"].(string) + `","checks":[` + strings.Join(checks, ",") + `]}`
+		}
+		return json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"structuredContent":` + content + `}}`), nil
+	}
+	got, err := pullRequestObservation(context.Background(), call, "o/r", 1, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Checks) > kernel.MaxObservationChecks || len(got.Checks) != 240 || got.Unavailable != "checks" || len(got.PullRequests) != 30 {
+		t.Fatalf("%d checks, unavailable %q, %d pulls", len(got.Checks), got.Unavailable, len(got.PullRequests))
 	}
 }
 

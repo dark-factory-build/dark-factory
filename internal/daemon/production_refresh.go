@@ -204,6 +204,13 @@ func pullRequestObservation(ctx context.Context, call maintainerMCP, repository 
 			result.Unavailable = "checks"
 			continue
 		}
+		// One observation writes at most the store's bound. Pulls that do not
+		// fit stay unsettled and are read on the next refresh; coverage is not
+		// claimed meanwhile.
+		if len(result.Checks)+len(checks) > kernel.MaxObservationChecks {
+			result.Unavailable = "checks"
+			break
+		}
 		result.Checks = append(result.Checks, checks...)
 	}
 	return result, nil

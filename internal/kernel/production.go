@@ -219,8 +219,12 @@ func (store *Store) PublishingProjects(ctx context.Context) ([]ProjectID, error)
 	return projects, rows.Err()
 }
 
+// MaxObservationChecks is the most check records one production observation
+// may write.
+const MaxObservationChecks = 256
+
 func validProductionObservation(project ProjectID, observation ProductionObservation, at UnixMillis) bool {
-	return !project.zero() && productionRepository.MatchString(observation.Repository) && observation.ObservedAt >= 1 && observation.ObservedAt <= at.Int64()+5000 && observation.Overflow >= 0 && validOutcomeText(observation.Unavailable, 256) && len(observation.PullRequests) <= 256 && len(observation.Checks) <= 256 && len(observation.Reviewers) <= 256 && len(observation.Deliveries) <= 128
+	return !project.zero() && productionRepository.MatchString(observation.Repository) && observation.ObservedAt >= 1 && observation.ObservedAt <= at.Int64()+5000 && observation.Overflow >= 0 && validOutcomeText(observation.Unavailable, 256) && len(observation.PullRequests) <= 256 && len(observation.Checks) <= MaxObservationChecks && len(observation.Reviewers) <= 256 && len(observation.Deliveries) <= 128
 }
 
 // RecordProductionObservation accepts facts only from the operator authority.
