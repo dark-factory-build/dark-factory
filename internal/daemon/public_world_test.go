@@ -21,7 +21,7 @@ func TestPublicWorldPublishesOnlyWhenOptedInChangedAndDue(t *testing.T) {
 	now := start
 	fixture.daemon.now = func() time.Time { return now }
 	var sent [][]byte
-	var feed publicFeed
+	feed := publicFeed{at: start}
 	connection := new(int)
 	tick := func(at time.Duration) {
 		now = start.Add(at)
@@ -40,27 +40,31 @@ func TestPublicWorldPublishesOnlyWhenOptedInChangedAndDue(t *testing.T) {
 		return world
 	}
 
-	// Off by default: one empty publish retracts an earlier run's world, then
-	// nothing however long the factory runs.
+	// Off by default: a run waits an interval, publishes one empty world that
+	// retracts an earlier run's, then nothing however long it runs.
 	tick(0)
 	tick(30 * time.Second)
+	if len(sent) != 0 {
+		t.Fatalf("published %q before an interval passed", sent)
+	}
+	tick(60 * time.Second)
 	if len(sent) != 1 || sent[0] == nil || len(sent[0]) != 0 {
 		t.Fatalf("unconfigured publishes = %q, want one empty retraction", sent)
 	}
 
 	// Opting in is a change, but it waits out the interval since the last publish.
 	configure(`{"public_project":"` + project.ID.String() + `"}`)
-	tick(59 * time.Second)
+	tick(119 * time.Second)
 	if len(sent) != 1 {
 		t.Fatalf("published %d times inside the interval", len(sent))
 	}
-	tick(60 * time.Second)
+	tick(120 * time.Second)
 	if len(sent) != 2 || !bytes.Equal(sent[1], served()) {
 		t.Fatalf("published %q, want exactly the served PublicWorld %q", sent[len(sent)-1], served())
 	}
 
 	// Due but unchanged: nothing. Changed (a new five-minute bucket): published.
-	tick(150 * time.Second)
+	tick(190 * time.Second)
 	if len(sent) != 2 {
 		t.Fatalf("an unchanged world was republished")
 	}

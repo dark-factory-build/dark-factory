@@ -346,14 +346,13 @@ export class FactoryRelay implements DurableObject {
 	 * Stores this node's latest public world in the `public:<id>` object its key
 	 * names. A world that is too large, not a JSON object with a numeric
 	 * `generated_at`, or sooner than the interval is dropped without ending the
-	 * host: it hurts no one but its own feed. An empty payload retracts it, always.
+	 * host: it hurts no one but its own feed. An empty payload retracts it.
 	 */
 	async #publish(payload: Uint8Array): Promise<void> {
 		const now = Date.now();
-		// A retraction is always applied: it only ever deletes this node's own world.
-		if (payload.length > PUBLIC_WORLD_LIMIT || (payload.length > 0 && now - this.#publishedAt < PUBLISH_INTERVAL_MS)) return;
+		if (payload.length > PUBLIC_WORLD_LIMIT || now - this.#publishedAt < PUBLISH_INTERVAL_MS) return;
 		if (payload.length > 0 && typeof decodeJson(payload)?.generated_at !== 'number') return;
-		if (payload.length > 0) this.#publishedAt = now;
+		this.#publishedAt = now;
 		const stored = (await this.#ctx.storage.get<StoredHost>('host')) ?? null;
 		const key = stored === null ? null : decodeBase64UrlExact(stored.key, 32);
 		if (key === null) return;

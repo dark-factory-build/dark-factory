@@ -99,7 +99,10 @@ func (daemon *Daemon) DialRelay(ctx context.Context, relayOrigin, home string, b
 // feed publishes the opted-in public world over this relay connection.
 func (runtime *RelayRuntime) feed(ctx context.Context) {
 	defer close(runtime.feedDone)
-	var state publicFeed
+	// A run's first publish waits a full interval, so it always lands past the
+	// relay's 30 s spacing from whatever an earlier run last sent: a restart
+	// that opts out is never refused.
+	state := publicFeed{at: runtime.daemon.now()}
 	ticker := time.NewTicker(publicFeedInterval / 4)
 	defer ticker.Stop()
 	for {
