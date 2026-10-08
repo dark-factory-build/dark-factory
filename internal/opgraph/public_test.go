@@ -29,16 +29,16 @@ func main() { http.HandleFunc("GET /` + canary + `/route", nil); http.Get(` + ca
 			unit = node.ID
 		}
 	}
-	world := Public(live, []byte("secret"), []Worker{{Activity: "busy", Unit: unit}}, 123_456_789)
+	world := Public(live, []byte("secret"), []Worker{{Activity: "busy", Unit: unit}}, []Crate{{Key: canary + "/repo#7", Station: 2, Fault: true}}, 123_456_789)
 	encoded, _ := json.Marshal(world)
 	if strings.Contains(strings.ToLower(string(encoded)), strings.ToLower(canary)) || strings.Contains(string(encoded), unit) {
 		t.Fatalf("private data leaked: %s", encoded)
 	}
-	if world.GeneratedAt%(5*60_000) != 0 || len(world.Workers) != 1 || world.Workers[0].Unit == "" {
+	if world.GeneratedAt%(5*60_000) != 0 || len(world.Workers) != 1 || world.Workers[0].Unit == "" || len(world.Crates) != 1 || world.Crates[0] != (PublicCrate{ID: world.Crates[0].ID, Station: 2, Fault: true}) || len(world.Crates[0].ID) != 32 {
 		t.Fatalf("world = %+v", world)
 	}
-	again := Public(live, []byte("secret"), nil, 0)
-	other := Public(live, []byte("another"), nil, 0)
+	again := Public(live, []byte("secret"), nil, nil, 0)
+	other := Public(live, []byte("another"), nil, nil, 0)
 	if again.Nodes[0].ID != world.Nodes[0].ID || other.Nodes[0].ID == world.Nodes[0].ID {
 		t.Fatal("public identities are not stable per secret")
 	}

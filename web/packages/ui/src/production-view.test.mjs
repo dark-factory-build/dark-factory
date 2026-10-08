@@ -34,9 +34,9 @@ test("a review for an older head is visibly stale", () => {
 
 test("a fresh daemon PR row is actionable without stale labels", () => {
   const machine = Object.values(deriveProductionView([
-    record("repository", "owner/repo", "", {}, { observed_at: 200_000 }),
-    record("pull_request", "7", "change:1", { number: 7, title: "Machine", head, state: "open", review: { head, state: "allow" } }, { observed_at: 200_000 }),
-  ], 200_000).contraptions)[0];
+    record("repository", "owner/repo", "", {}, { observed_at: 700_000 }),
+    record("pull_request", "7", "change:1", { number: 7, title: "Machine", head, state: "open", review: { head, state: "allow" } }, { observed_at: 700_000 }),
+  ], 700_000).contraptions)[0];
   assert.equal(machine.review.sourceFresh, true);
   assert.doesNotMatch(productionStages(machine).join(" "), /stale/);
 });
@@ -51,7 +51,7 @@ test("merged is incomplete until every known destination is verified", () => {
 });
 
 test("stale repository health blocks actionability but preserves historical review", () => {
-  const view = deriveProductionView([record("repository", "owner/repo", "", { unavailable: "" }, { observed_at: 1 }), record("pull_request", "7", "change:1", { number: 7, title: "Machine", head, state: "open", review: { head, state: "allow" } })], 200_000);
+  const view = deriveProductionView([record("repository", "owner/repo", "", { unavailable: "" }, { observed_at: 1 }), record("pull_request", "7", "change:1", { number: 7, title: "Machine", head, state: "open", review: { head, state: "allow" } })], 700_000);
   const machine = view.contraptions[key];
   assert.equal(machine.review.current, true);
   assert.equal(machine.review.allowed, false);
@@ -69,11 +69,11 @@ test("construction and PR with one visual identity remain one contraption", () =
 
 test("fresh repository reads cannot keep old active processes running", () => {
   const view = deriveProductionView([
-    record("repository", "owner/repo", "", {}, { observed_at: 200_000 }),
-    record("pull_request", "7", "change:1", { number: 7, head, state: "open", review: { head, state: "allow" } }, { observed_at: 200_000 }),
+    record("repository", "owner/repo", "", {}, { observed_at: 700_000 }),
+    record("pull_request", "7", "change:1", { number: 7, head, state: "open", review: { head, state: "allow" } }, { observed_at: 700_000 }),
     record("check", "old", "", { revision: head, scope: "head", state: "in_progress", pull_requests: [7] }),
     record("reviewer", "old", "", { number: 7, head, state: "running" }),
-  ], 200_000);
+  ], 700_000);
   const machine = view.contraptions[key];
   assert.equal(machine.checks[0].state, "stale");
   assert.equal(machine.reviewers[0].state, "stale");
@@ -110,7 +110,7 @@ test("tied delivery timestamps never let success hide an unresolved attempt", ()
 
 
 test("re-reading an old running release receipt does not prove continuing installation activity", () => {
-  const view = deriveProductionView([record("delivery", "attempt", "", { destination: "host", state: "running", updated_at: 1, pull_requests: [] }, { observed_at: 200_000 })], 200_000);
+  const view = deriveProductionView([record("delivery", "attempt", "", { destination: "host", state: "running", updated_at: 1, pull_requests: [] }, { observed_at: 700_000 })], 700_000);
   assert.equal(view.deliveries["project\0owner/repo\0attempt"].state, "stale");
 });
 

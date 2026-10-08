@@ -1,0 +1,394 @@
+{
+ "comment": "One rule, two implementations: factoryd publicCrates (Go) and projectCrates (production-view.ts) must both put these records at these stations.",
+ "now": 100000000,
+ "records": [
+  {
+   "repository": "owner/repo",
+   "project_id": "project",
+   "kind": "repository",
+   "id": "owner/repo",
+   "visual_id": "",
+   "observed_at": 99940000,
+   "tasks": [],
+   "missions": [],
+   "document": {
+    "unavailable": ""
+   }
+  },
+  {
+   "repository": "owner/repo",
+   "project_id": "project",
+   "kind": "pull_request",
+   "id": "1",
+   "visual_id": "change:1",
+   "observed_at": 99940000,
+   "tasks": [],
+   "missions": [],
+   "document": {
+    "number": 1,
+    "title": "Change 1",
+    "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "state": "open",
+    "review": {
+     "head": "",
+     "state": "unknown"
+    }
+   }
+  },
+  {
+   "repository": "owner/repo",
+   "project_id": "project",
+   "kind": "pull_request",
+   "id": "2",
+   "visual_id": "change:2",
+   "observed_at": 99940000,
+   "tasks": [],
+   "missions": [],
+   "document": {
+    "number": 2,
+    "title": "Change 2",
+    "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "state": "open",
+    "review": {
+     "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "state": "block"
+    }
+   }
+  },
+  {
+   "repository": "owner/repo",
+   "project_id": "project",
+   "kind": "pull_request",
+   "id": "3",
+   "visual_id": "change:3",
+   "observed_at": 99940000,
+   "tasks": [],
+   "missions": [],
+   "document": {
+    "number": 3,
+    "title": "Change 3",
+    "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "state": "open",
+    "review": {
+     "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "state": "allow"
+    }
+   }
+  },
+  {
+   "repository": "owner/repo",
+   "project_id": "project",
+   "kind": "check",
+   "id": "ci-3",
+   "visual_id": "",
+   "observed_at": 99940000,
+   "tasks": [],
+   "missions": [],
+   "document": {
+    "name": "CI",
+    "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "scope": "head",
+    "state": "in_progress",
+    "conclusion": "",
+    "pull_requests": [
+     3
+    ]
+   }
+  },
+  {
+   "repository": "owner/repo",
+   "project_id": "project",
+   "kind": "pull_request",
+   "id": "4",
+   "visual_id": "change:4",
+   "observed_at": 99940000,
+   "tasks": [],
+   "missions": [],
+   "document": {
+    "number": 4,
+    "title": "Change 4",
+    "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "state": "open",
+    "review": {
+     "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "state": "allow"
+    }
+   }
+  },
+  {
+   "repository": "owner/repo",
+   "project_id": "project",
+   "kind": "check",
+   "id": "ci-4",
+   "visual_id": "",
+   "observed_at": 99940000,
+   "tasks": [],
+   "missions": [],
+   "document": {
+    "name": "CI",
+    "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "scope": "head",
+    "state": "completed",
+    "conclusion": "failure",
+    "pull_requests": [
+     4
+    ]
+   }
+  },
+  {
+   "repository": "owner/repo",
+   "project_id": "project",
+   "kind": "pull_request",
+   "id": "5",
+   "visual_id": "change:5",
+   "observed_at": 99940000,
+   "tasks": [],
+   "missions": [],
+   "document": {
+    "number": 5,
+    "title": "Change 5",
+    "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "state": "open",
+    "review": {
+     "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "state": "allow"
+    },
+    "merge_queue": "queued"
+   }
+  },
+  {
+   "repository": "owner/repo",
+   "project_id": "project",
+   "kind": "check",
+   "id": "ci-5",
+   "visual_id": "",
+   "observed_at": 99940000,
+   "tasks": [],
+   "missions": [],
+   "document": {
+    "name": "CI",
+    "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "scope": "head",
+    "state": "completed",
+    "conclusion": "success",
+    "pull_requests": [
+     5
+    ]
+   }
+  },
+  {
+   "repository": "owner/repo",
+   "project_id": "project",
+   "kind": "pull_request",
+   "id": "6",
+   "visual_id": "change:6",
+   "observed_at": 99940000,
+   "tasks": [],
+   "missions": [],
+   "document": {
+    "number": 6,
+    "title": "Change 6",
+    "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "state": "merged",
+    "review": {
+     "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "state": "allow"
+    },
+    "merge": "dddddddddddddddddddddddddddddddddddddddd",
+    "merged_at": "1970-01-02T02:46:40Z"
+   }
+  },
+  {
+   "repository": "owner/repo",
+   "project_id": "project",
+   "kind": "pull_request",
+   "id": "7",
+   "visual_id": "change:7",
+   "observed_at": 99940000,
+   "tasks": [],
+   "missions": [],
+   "document": {
+    "number": 7,
+    "title": "Change 7",
+    "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "state": "closed",
+    "review": {
+     "head": "",
+     "state": "unknown"
+    }
+   }
+  },
+  {
+   "repository": "owner/repo",
+   "project_id": "project",
+   "kind": "pull_request",
+   "id": "8",
+   "visual_id": "change:8",
+   "observed_at": 99940000,
+   "tasks": [],
+   "missions": [],
+   "document": {
+    "number": 8,
+    "title": "Change 8",
+    "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "state": "merged",
+    "review": {
+     "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "state": "allow"
+    },
+    "merge": "dddddddddddddddddddddddddddddddddddddddd",
+    "merged_at": "1970-01-01T02:46:40Z"
+   }
+  },
+  {
+   "repository": "owner/repo",
+   "project_id": "project",
+   "kind": "pull_request",
+   "id": "9",
+   "visual_id": "change:9",
+   "observed_at": 99940000,
+   "tasks": [],
+   "missions": [],
+   "document": {
+    "number": 9,
+    "title": "Change 9",
+    "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "state": "merged",
+    "review": {
+     "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "state": "allow"
+    },
+    "merge": "dddddddddddddddddddddddddddddddddddddddd",
+    "merged_at": "1970-01-02T02:46:40Z"
+   }
+  },
+  {
+   "repository": "owner/repo",
+   "project_id": "project",
+   "kind": "delivery",
+   "id": "d9",
+   "visual_id": "",
+   "observed_at": 99940000,
+   "tasks": [],
+   "missions": [],
+   "document": {
+    "kind": "site",
+    "destination": "site",
+    "revision": "dddddddddddddddddddddddddddddddddddddddd",
+    "state": "blocked",
+    "updated_at": 99940000,
+    "pull_requests": [
+     9
+    ]
+   }
+  },
+  {
+   "repository": "owner/repo",
+   "project_id": "project",
+   "kind": "pull_request",
+   "id": "10",
+   "visual_id": "change:10",
+   "observed_at": 99340000,
+   "tasks": [],
+   "missions": [],
+   "document": {
+    "number": 10,
+    "title": "Change 10",
+    "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "state": "open",
+    "review": {
+     "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "state": "allow"
+    }
+   }
+  },
+  {
+   "repository": "owner/repo",
+   "project_id": "project",
+   "kind": "pull_request",
+   "id": "11",
+   "visual_id": "change:11",
+   "observed_at": 99940000,
+   "tasks": [],
+   "missions": [],
+   "document": {
+    "number": 11,
+    "title": "Change 11",
+    "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "state": "open",
+    "review": {
+     "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "state": "allow"
+    },
+    "merge_queue": "queued"
+   }
+  },
+  {
+   "repository": "owner/repo",
+   "project_id": "project",
+   "kind": "check",
+   "id": "ci-11",
+   "visual_id": "",
+   "observed_at": 99940000,
+   "tasks": [],
+   "missions": [],
+   "document": {
+    "name": "CI",
+    "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "scope": "head",
+    "state": "completed",
+    "conclusion": "failure",
+    "pull_requests": [
+     11
+    ]
+   }
+  }
+ ],
+ "crates": [
+  [
+   1,
+   0,
+   false
+  ],
+  [
+   2,
+   0,
+   true
+  ],
+  [
+   3,
+   1,
+   false
+  ],
+  [
+   4,
+   1,
+   true
+  ],
+  [
+   5,
+   2,
+   false
+  ],
+  [
+   6,
+   3,
+   false
+  ],
+  [
+   9,
+   3,
+   true
+  ],
+  [
+   10,
+   0,
+   false
+  ],
+  [
+   11,
+   1,
+   true
+  ]
+ ]
+}

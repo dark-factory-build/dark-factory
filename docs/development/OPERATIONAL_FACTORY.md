@@ -598,6 +598,24 @@ One state, two projections, both computed by factoryd:
 Workers appear as an anonymous count by activity and location (hall), with
 no names or task text. Deploy and changeover events carry no versions.
 
+The outbound work line appears as crates: each open pull request, and each
+merged one for a day, as an anonymous stable ID (`HMAC(secret, "crate:" +
+repository#number)`), its station (review, checks, merge queue, shipped) and
+a fault flag, never a title, number or branch. factoryd places them by the
+console's rule (`publicCrates`, `projectCrates`; one shared fixture,
+`web/fixtures/production-crates.json`, holds both to it) on its own clock.
+
+A `ledger` is added only for repositories GitHub serves to an anonymous
+reader: factoryd reads each repository's releases without credentials once
+an hour, and only a 200 makes it public; anything else, or no answer yet,
+is private and adds nothing. The ledger carries what those public
+repositories already show: every open pull request, every accepted issue
+not yet finished, merges in the last 7 days and a 21-day hourly clock of
+them from production and intake records, and the releases published in
+those 21 days, paged from the same anonymous read. Past the
+relay's bound the oldest listed merges, then open pull requests, give way;
+their counts stay.
+
 It never contains:
 
 - labels or paths from source

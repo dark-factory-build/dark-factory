@@ -1,6 +1,6 @@
 import type { GraphNode, GraphSummary, OperationalGraphView } from "@dark-factory/client";
 import { projectGraph } from "./console-view.js";
-import type { SceneWorker } from "./factory-scene/scene.js";
+import type { SceneCrate, SceneWorker } from "./factory-scene/scene.js";
 
 /** The public projection factoryd serves at /v1/public/<project>: an allowlist, never private labels. */
 export type PublicWorld = Readonly<{
@@ -10,6 +10,23 @@ export type PublicWorld = Readonly<{
     evidence: GraphNode["evidence"]; observation: GraphNode["observation"]; state: GraphNode["state"]; activity: Activity; deployed?: boolean }>[];
   edges: readonly Readonly<{ from: string; to: string; kind: OperationalGraphView["edges"][number]["kind"]; evidence: GraphNode["evidence"]; observation: GraphNode["observation"]; state: GraphNode["state"]; activity: Activity }>[];
   workers: readonly Readonly<{ activity: SceneWorker["activity"]; unit?: string }>[];
+  /** The outbound work line: a keyed id, station and fault, never a title, number or branch. Absent from older factories. */
+  crates?: readonly Readonly<{ id: string; station: SceneCrate["station"]; fault?: boolean }>[];
+  /** Present only for repositories public on GitHub. */
+  ledger?: PublicLedger;
+}>;
+
+type LedgerItem = Readonly<{ number: number; title: string; url: string }>;
+/** What is already public on GitHub about the factory's public repositories, as its records saw it. Times are UTC RFC 3339. */
+export type PublicLedger = Readonly<{
+  window_days: number;
+  open: readonly LedgerItem[]; open_count: number;
+  issues: readonly LedgerItem[]; issue_count: number;
+  /** Merges within the window, newest first; merged_count counts them all when the list is cut. */
+  merged: readonly (LedgerItem & Readonly<{ merged_at: string }>)[]; merged_count: number;
+  releases: readonly Readonly<{ tag: string; url: string; published_at: string; prerelease?: boolean }>[];
+  /** UTC days, oldest first, from the first recorded merge: 24 hourly merge counts each. */
+  clock: readonly Readonly<{ date: string; hours: readonly number[] }>[];
 }>;
 
 type Activity = "none" | "low" | "medium" | "high";
@@ -35,5 +52,7 @@ export function publicFloor(world: PublicWorld) {
     return { id: `public-${index}`, name: `Worker ${index + 1}`, role: "worker", activity: worker.activity,
       location: worker.activity === "busy" ? hall === undefined ? "unobserved" : "working" : "resting", ...(hall === undefined ? {} : { nodeId: hall }) };
   });
-  return { graph: prepared.graph, workers };
+  // Public crates carry no number or title; the scene names them by station alone.
+  const crates = (world.crates ?? []).map((crate): SceneCrate => ({ id: crate.id, number: 0, title: "", station: crate.station, stage: "", fault: crate.fault === true, taskIds: [] }));
+  return { graph: prepared.graph, workers, crates };
 }
