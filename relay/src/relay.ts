@@ -50,9 +50,15 @@ const CONTROLLER_SOCKETS_PER_CONTROLLER = 4;
 const BURST_MESSAGES = 120;
 const SUSTAINED_MESSAGES_PER_SECOND = 60;
 
-/** Ingest token bucket per factory: a burst of 5, refilled at one a second. */
-const INGEST_BURST = 5;
-const INGEST_PER_SECOND = 1;
+/**
+ * Ingest byte bucket per factory: 4 MiB of burst, refilled at 1 MiB a second.
+ * Bytes, not requests: an app exporting once per invocation sends many small
+ * pushes where a collector sends a few large ones.
+ */
+const INGEST_BURST_BYTES = 4 * 1024 * 1024;
+const INGEST_BYTES_PER_SECOND = 1024 * 1024;
+/** Each push also costs this much, so empty pushes are bounded too (256 a second). */
+const INGEST_PUSH_BYTES = 4096;
 /** Flags of an INGEST record. */
 const INGEST_PROTOBUF = 1;
 const INGEST_GZIP = 2;
@@ -68,6 +74,8 @@ export interface Env {
 	SITE_ORIGIN: string;
 	FACTORY_RELAY: DurableObjectNamespace;
 	PUBLIC_READS: RateLimit;
+	/** Unset in deployment; `wrangler dev` sets 0 so the integration tests can exhaust the burst on any clock. */
+	INGEST_BYTES_PER_SECOND?: string;
 }
 
 /** The one record a `public:<id>` object keeps: the latest world and when it arrived. */
@@ -155,7 +163,7 @@ export class FactoryRelay implements DurableObject {
 	/** When this node last published; in memory only, like the buckets. */
 	#publishedAt = Number.NEGATIVE_INFINITY;
 	/** This node's ingest token bucket; in memory only, like the others. */
-	#ingestBucket: Bucket = { tokens: INGEST_BURST, at: 0 };
+	#ingestBucket: Bucket = { tokens: INGEST_BURST_BYTES, at: 0 };
 
 	constructor(ctx: DurableObjectState, env: Env) {
 		this.#ctx = ctx;
@@ -415,12 +423,15 @@ export class FactoryRelay implements DurableObject {
 		const encoding = request.headers.get('Content-Encoding') ?? '';
 		const protobuf = type.startsWith('application/x-protobuf');
 		if ((!protobuf && !type.startsWith('application/json')) || !['', 'identity', 'gzip'].includes(encoding)) return refuse(415);
+		// The Worker admitted only a Content-Length of at most 1 MiB.
+		const length = Number(request.headers.get('Content-Length')) + INGEST_PUSH_BYTES;
 		const now = Date.now();
 		const bucket = this.#ingestBucket;
-		bucket.tokens = Math.min(INGEST_BURST, bucket.tokens + ((now - bucket.at) / 1000) * INGEST_PER_SECOND);
+		const rate = Number(this.#env.INGEST_BYTES_PER_SECOND ?? INGEST_BYTES_PER_SECOND);
+		bucket.tokens = Math.min(INGEST_BURST_BYTES, bucket.tokens + ((now - bucket.at) / 1000) * rate);
 		bucket.at = now;
-		if (bucket.tokens < 1) return refuse(429);
-		bucket.tokens -= 1;
+		if (bucket.tokens < length) return refuse(429);
+		bucket.tokens -= length;
 		const body = new Uint8Array(await request.arrayBuffer());
 		if (body.length > INGEST_LIMIT) return refuse(413);
 		const payload = new Uint8Array(body.length + 1);

@@ -241,7 +241,7 @@ renderer never sees a provider.
 
 ```text
 Observation {
-  source        adapter id ("factoryd", "otlp", "cloudflare", "vercel", "github")
+  source        adapter id ("factoryd", "otlp", "otlp-remote", "cloudflare", "github")
   scope         local | remote | client | operational
   environment   "local", "production", …
   window        [start, end) in ms
@@ -270,9 +270,8 @@ granularity is a fixed table in code, not a runtime claim.
 | Adapter | Granularity |
 | --- | --- |
 | `cloudflare` | `service.name` only (per Worker) |
-| `vercel` | `service.name`, method, path |
 | `factoryd` | `service.name`, `rpc.method`, `url.path`, `process.executable.name`, `server.address` |
-| `otlp` | whatever keys a span carried for that service |
+| `otlp`, `otlp-remote` | whatever keys a span carried for that service |
 | `github` | `service.name`, `cicd.pipeline.task.name` (per workflow job) |
 
 **Adapters, in order of yield:**
@@ -348,9 +347,9 @@ granularity is a fixed table in code, not a runtime claim.
     deploys should show in Repository access. Customers' installations accept
     the same request. Then merge the broker operation and deploy the
     control-plane Worker before the factoryd that calls it.
-- **`otlp` remote (push):** platforms that push OpenTelemetry (Vercel Trace
-  Drains, a collector, any OTLP/HTTP exporter) reach the same receiver through
-  the relay. See *Remote ingest* below. There is no Vercel-specific code.
+- **`otlp-remote` (push):** a deployed system exports its own OpenTelemetry
+  traces to its factory through the relay, on any platform and any plan. See
+  *Remote ingest* below. There is no platform-specific code.
 - **Not yet built:** Sentry and PostHog pull adapters. Each is an adapter of
   the same shape, added when a system that needs one is configured. An unused
   adapter is dead code.
@@ -407,16 +406,25 @@ Spend is never in the public projection.
 
 ### Remote ingest
 
-A remote system's truth comes from the system itself, so a platform that can
-push OTLP pushes it to its factory. The factory has no inbound address; the
-relay it already dials carries the push.
+A remote system's truth comes from the system itself, so the deployed app
+exports its own traces to its factory. The factory has no inbound address;
+the relay it already dials carries them. This is the one path for every
+platform: it needs no platform feature, plan or vendor drain, only an OTel
+SDK in the app, which the factory can add itself as an ordinary change.
 
 - **Endpoint.** `POST https://relay.darkfactory.build/ingest/<node id>/v1/traces`
   with `Authorization: Bearer <secret>`, `Content-Type`
   `application/x-protobuf` or `application/json`, optionally
-  `Content-Encoding: gzip`. Vercel: Team Settings → Drains → Traces → Custom
-  endpoint, that URL, Protobuf, the header under Custom Headers. The secret is
-  never in the URL.
+  `Content-Encoding: gzip`. The secret is never in the URL.
+- **App setup.** The standard exporter variables, set in the platform's
+  production environment:
+  `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=<that URL>` and
+  `OTEL_EXPORTER_OTLP_TRACES_HEADERS=Authorization=Bearer%20<secret>` (the
+  value is URL-encoded), with `service.name` the unit's name. A Next.js app on
+  Vercel registers `@vercel/otel` in `instrumentation.ts` with an OTLP
+  exporter. Each server invocation exports its own spans; static and
+  CDN-cached responses run no code and send none, so they stay unknown, never
+  idle.
 - **Secret.** The operator asks for one in the console (Settings → Devices &
   pairing → Telemetry ingest).
   factoryd mints 32 random bytes, shows them once, and keeps only their
@@ -433,15 +441,18 @@ relay it already dials carries the push.
   missing `Content-Length` or one over 1 MiB. The node object then refuses:
   no connected host, or a bearer whose SHA-256 is not the host's digest (401
   either way, so a stranger learns nothing about whether the factory is up);
-  an unsupported `Content-Type` or `Content-Encoding` (415); an empty token
-  bucket (429; a burst of 5, refilled at one a second, in memory per object).
+  an unsupported `Content-Type` or `Content-Encoding` (415); a byte bucket
+  that cannot cover the `Content-Length` plus 4 KiB per push (429; 4 MiB of
+  burst refilled at 1 MiB a second, in memory per object). Bytes, not requests: an app sends one
+  small export per invocation where a collector sends a few large ones.
   Only then is the body read, bounded to 1 MiB, and sent to the host as one
   `INGEST` record (0x08, relay to host, connection 0): one byte of flags
   (protobuf, gzip) and the body. The relay answers 200 `{}` without waiting,
   and stores and logs nothing of it.
 - **factoryd.** The connector never fails the relay connection over an
-  export. It copies the record and hands it to one delivery goroutine; if one
-  is still running, the export is dropped. Delivery posts it to the loopback
+  export. It copies the record and delivers it off the relay reader; exports
+  awaiting delivery are bounded at 4 MiB of memory (a gzipped export counts
+  as the 1 MiB it may unpack to), past which one is dropped. Delivery posts it to the loopback
   receiver (`/v1/traces`) exactly as a local exporter would, marked remote: the
   same 1 MiB bound after decompression, the same decoding and fold. Remote
   spans are recorded with source `otlp-remote`, and their environment is the
@@ -478,11 +489,13 @@ reader.
   well-formed one with the wrong secret costs one object request and is
   refused before its body is read. The bucket is spent only after
   authentication, so strangers cannot spend a factory's budget.
-- **Authenticated flood.** A burst of 5, then one push a second of at most
-  1 MiB, checked before any body is read, so concurrent pushes cannot pile
-  bodies into the object's memory. factoryd decodes one at a time off the
-  relay reader, so controllers are never stalled and a bad export never drops
-  the connection; one arriving mid-decode is dropped.
+- **Authenticated flood.** 4 MiB of burst, then 1 MiB a second, charged by
+  `Content-Length` plus 4 KiB per push (so at most 256 empty pushes a second)
+  before any body is read, so concurrent pushes cannot pile
+  bodies into the object's memory. factoryd delivers off the relay reader with
+  at most 4 MiB pending, gzipped exports counted at their 1 MiB unpacked
+  bound, so controllers are never stalled and a bad export
+  never drops the connection.
 - **Decoder exposure.** The OTLP decoder was reachable only from local
   processes. It is now reachable by a secret holder. It is memory-safe Go,
   bounded at 1 MiB after decompression, and every span, with or without a

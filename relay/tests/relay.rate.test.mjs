@@ -118,3 +118,41 @@ test('a host publishes at most every thirty seconds, and an empty world retracts
 		{ name: `public:${id}`, url: `https://relay/public/${id}`, method: 'PUT', body: '' },
 	]);
 });
+
+test('the ingest bucket refills at 1 MiB a second unless the environment sets a rate', async (t) => {
+	let now = 10_000;
+	t.mock.method(Date, 'now', () => now);
+	const originalPair = globalThis.WebSocketRequestResponsePair;
+	globalThis.WebSocketRequestResponsePair = class {};
+	t.after(() => {
+		if (originalPair === undefined) delete globalThis.WebSocketRequestResponsePair;
+		else globalThis.WebSocketRequestResponsePair = originalPair;
+	});
+	const digest = Buffer.from(await crypto.subtle.digest('SHA-256', new TextEncoder().encode('secret'))).toString('hex');
+	const host = {
+		deserializeAttachment: () => ({ role: 'host', connection: 0, controller: '', ingest: digest }),
+		send() {},
+	};
+	const ctx = { setWebSocketAutoResponse() {}, getWebSockets: (tag) => (tag === 'host' ? [host] : []) };
+	const mebibyte = new Uint8Array(1024 * 1024);
+	const push = (relay) =>
+		relay
+			.fetch(
+				new Request('https://relay/ingest/node/v1/traces', {
+					method: 'POST',
+					headers: { authorization: 'Bearer secret', 'content-type': 'application/x-protobuf', 'content-length': String(mebibyte.length) },
+					body: mebibyte,
+				}),
+			)
+			.then((response) => response.status);
+
+	// Each push costs 1 MiB + 4 KiB, so a 4 MiB burst admits three.
+	for (const [env, refilled] of [[{}, 200], [{ INGEST_BYTES_PER_SECOND: '0' }, 429]]) {
+		const relay = new FactoryRelay(ctx, env);
+		const statuses = [];
+		for (let index = 0; index < 4; index += 1) statuses.push(await push(relay));
+		assert.deepEqual(statuses, [200, 200, 200, 429]);
+		now += 1000;
+		assert.equal(await push(relay), refilled);
+	}
+});

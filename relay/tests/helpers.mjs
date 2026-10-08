@@ -399,6 +399,9 @@ export async function startWorker(persistence) {
 			persistence,
 			'--log-level',
 			'log',
+			// Ingest refill off, so a burst test does not depend on how fast CI uploads.
+			'--var',
+			'INGEST_BYTES_PER_SECOND:0',
 		],
 		{
 			cwd: root,
