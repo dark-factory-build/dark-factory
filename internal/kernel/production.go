@@ -685,6 +685,46 @@ func (store *Store) KnownProductionPulls(ctx context.Context, project ProjectID,
 	return pulls, published, rows.Err()
 }
 
+// ProductionHead is one pull request at one head commit.
+type ProductionHead struct {
+	Number uint64
+	Head   string // lower-case
+}
+
+// SettledProductionChecks is every pull head whose stored head checks have
+// all completed without failing: a refresh need not read them again. A
+// failed head stays unsettled, since re-runs mostly follow failures.
+func (store *Store) SettledProductionChecks(ctx context.Context, project ProjectID, repo string) (map[ProductionHead]bool, error) {
+	if project.zero() {
+		return nil, ErrInvalidValue
+	}
+	tx, err := store.beginRead(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Close()
+	rows, err := tx.connection.QueryContext(ctx, `SELECT CAST(j.value AS INTEGER), lower(json_extract(r.document, '$.revision'))
+		FROM production_records r, json_each(r.document, '$.pull_requests') j
+		WHERE r.project_id = ? AND r.repository = ? AND r.kind = 'check' AND json_extract(r.document, '$.scope') = 'head'
+		GROUP BY 1, 2 HAVING MIN(json_extract(r.document, '$.state') = 'completed'
+			AND COALESCE(json_extract(r.document, '$.conclusion'), '') NOT IN ('failure', 'timed_out', 'cancelled', 'action_required', 'startup_failure')) = 1`, project.Bytes(), strings.ToLower(repo))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	settled := map[ProductionHead]bool{}
+	for rows.Next() {
+		var head ProductionHead
+		var number int64
+		if err := rows.Scan(&number, &head.Head); err != nil {
+			return nil, err
+		}
+		head.Number = uint64(number)
+		settled[head] = true
+	}
+	return settled, rows.Err()
+}
+
 // RecordProductionReview preserves the exact commit covered by a review.
 // Refreshes may move the live PR to a newer head; that older head is evidence,
 // not permission to rewrite the review onto the new source.
