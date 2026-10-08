@@ -782,6 +782,17 @@ func (current *connection) dispatch(frame browserprotocol.ControlFrame) bool {
 			break
 		}
 		payload, err = browserprotocol.EncodeRemoteInviteResult(frame.ID, invitation)
+	case browserprotocol.TelemetryIngest:
+		if current.server.taskBackend == nil {
+			err = ErrUnauthorized
+			break
+		}
+		result, backendErr := current.server.taskBackend.TelemetryIngest(ctx, current.principal.ClientID, body)
+		if backendErr != nil {
+			err = backendErr
+			break
+		}
+		payload, err = browserprotocol.EncodeTelemetryIngestResult(frame.ID, result)
 	case browserprotocol.PushSubscribe:
 		if current.server.taskBackend == nil {
 			err = ErrUnauthorized

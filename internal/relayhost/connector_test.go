@@ -551,6 +551,32 @@ func TestPublishSendsTheWorldVerbatimWithinTheBound(t *testing.T) {
 	}
 }
 
+// The digest goes first on a connection and again on each change; a relayed
+// export reaches the loopback OTLP receiver as an ordinary local post, marked
+// remote, and a malformed one ends the connection only for framing.
+func TestIngestKeyAndRelayedExports(t *testing.T) {
+	digest := bytes.Repeat([]byte{7}, 32)
+	fixture := newHarness(t, func(config *Config) { config.IngestKey = digest })
+	host := fixture.relay.accept(t)
+	if record := host.expect(t, RecordIngestKey, 0); !bytes.Equal(record.Payload, digest) {
+		t.Fatalf("first record carried %x, want the digest", record.Payload)
+	}
+	fixture.connector.SetIngestKey(nil)
+	if record := host.expect(t, RecordIngestKey, 0); len(record.Payload) != 0 {
+		t.Fatalf("revocation carried %x", record.Payload)
+	}
+	host.send(t, Record{Type: RecordIngest, Payload: append([]byte{ingestProtobuf | ingestGzip}, "spans"...)})
+	select {
+	case export := <-fixture.loopback.exports:
+		if string(export.body) != "spans" || export.header.Get("Content-Type") != "application/x-protobuf" ||
+			export.header.Get("Content-Encoding") != "gzip" || export.header.Get(RemoteHeader) == "" {
+			t.Fatalf("relayed export arrived as %q with %v", export.body, export.header)
+		}
+	case <-time.After(testDeadline):
+		t.Fatal("the relayed export never reached the loopback receiver")
+	}
+}
+
 func TestAForbiddenHostIsRetriedNoFasterThanHalfTheCeiling(t *testing.T) {
 	fixture := newPreparedHarness(t, func(relay *fakeRelay) { relay.forbid = true }, func(config *Config) {
 		config.BaseBackoff = 5 * time.Millisecond

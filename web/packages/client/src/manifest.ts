@@ -93,6 +93,7 @@ export const CONTROL_MANIFEST = [
   { type: "GITHUB_CONNECTION", direction: "client" }, { type: "GITHUB_CONNECTION_RESULT", direction: "server" },
   { type: "REMOTE_INVITE", direction: "client" }, { type: "REMOTE_INVITE_RESULT", direction: "server" },
   { type: "PUSH_SUBSCRIBE", direction: "client" }, { type: "PUSH_SUBSCRIBE_RESULT", direction: "server" },
+  { type: "TELEMETRY_INGEST", direction: "client" }, { type: "TELEMETRY_INGEST_RESULT", direction: "server" },
   { type: "ERROR", direction: "both" },
   { type: "AGENT_CONTROL", direction: "client" }, { type: "AGENT_CONTROL_RESULT", direction: "server" },
   { type: "TASK_HISTORY_GET", direction: "client" }, { type: "TASK_HISTORY", direction: "server" },

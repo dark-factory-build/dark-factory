@@ -72,23 +72,37 @@ var peerKeys = map[string]bool{"server.address": true, "server.port": true, "pee
 // DecodeOTLP folds one OTLP/HTTP JSON trace export into observations and
 // per-service coverage. A service is covered only for the selector keys its
 // spans actually carried, so silence on a route it never tags stays unknown.
-func DecodeOTLP(body []byte, now int64) ([]Observation, []Coverage, error) {
+// A remote export (pushed through the relay) has its own source and never
+// passes as local.
+func DecodeOTLP(body []byte, now int64, remote bool) ([]Observation, []Coverage, error) {
 	var traces otlpTraces
 	if err := json.Unmarshal(body, &traces); err != nil {
 		return nil, nil, err
 	}
 	var observations []Observation
+	source, spans := "otlp", 0
+	if remote {
+		source = "otlp-remote"
+	}
 	// Coverage is per service and the environment its process claimed. The
 	// claim stays the process's own, so the source is still otlp.
 	type unit struct{ service, environment string }
 	keys := map[unit]map[string]bool{}
 	for _, resource := range traces.ResourceSpans {
+		// Every span counts toward the cap, attributed or not.
+		for _, scope := range resource.ScopeSpans {
+			if spans += len(scope.Spans); spans > maxObservations {
+				return nil, nil, errors.New("otlp export too large")
+			}
+		}
 		resourceAttributes := attributes(resource.Resource.Attributes)
 		service, environment := resourceAttributes["service.name"], resourceAttributes["deployment.environment.name"]
 		if service == "" {
 			continue
 		}
-		if environment == "" {
+		if remote && (environment == "" || environment == "local") {
+			environment = "remote"
+		} else if environment == "" {
 			environment = "local"
 		}
 		covered := unit{service, environment}
@@ -118,7 +132,7 @@ func DecodeOTLP(body []byte, now int64) ([]Observation, []Coverage, error) {
 				}
 				start, _ := strconv.ParseInt(span.Start, 10, 64)
 				end, _ := strconv.ParseInt(span.End, 10, 64)
-				item := Observation{Source: "otlp", Environment: environment, Kind: kind, Start: now, End: now + 1, Attributes: own, Peer: peer, Count: 1}
+				item := Observation{Source: source, Environment: environment, Kind: kind, Start: now, End: now + 1, Attributes: own, Peer: peer, Count: 1}
 				if end > start {
 					item.LatencyP95 = float64(end-start) / 1e6
 				}
@@ -126,15 +140,12 @@ func DecodeOTLP(body []byte, now int64) ([]Observation, []Coverage, error) {
 					item.Errors = 1
 				}
 				observations = append(observations, item)
-				if len(observations) > maxObservations {
-					return nil, nil, errors.New("otlp export too large")
-				}
 			}
 		}
 	}
 	var coverage []Coverage
 	for covered, seen := range keys {
-		item := Coverage{Source: "otlp", Environment: covered.environment, Unit: covered.service, AsOf: now, TTL: 15 * 60_000}
+		item := Coverage{Source: source, Environment: covered.environment, Unit: covered.service, AsOf: now, TTL: 15 * 60_000}
 		for key := range seen {
 			item.Keys = append(item.Keys, key)
 		}

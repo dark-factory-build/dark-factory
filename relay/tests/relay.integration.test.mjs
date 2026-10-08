@@ -4,7 +4,7 @@
 // child is shared for speed; every test mints its own node id for isolation.
 
 import assert from 'node:assert/strict';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { mkdtemp, readFile, readdir, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -15,6 +15,8 @@ import {
 	PWA_ORIGIN,
 	RECORD_BINARY,
 	RECORD_CLOSE,
+	RECORD_INGEST,
+	RECORD_INGEST_KEY,
 	RECORD_OPEN,
 	RECORD_PUBLISH,
 	RECORD_REVOKE,
@@ -785,6 +787,79 @@ test('there is no listing and no history', async () => {
 	const unknown = await fetch(`${worker.origin}/public/${createNode().publicId}`);
 	assert.equal(unknown.status, 404);
 	assert.equal(unknown.headers.get('access-control-allow-origin'), SITE_ORIGIN);
+});
+
+// -- remote ingest ------------------------------------------------------------
+
+function ingestSecret() {
+	const secret = randomBytes(32).toString('base64url');
+	return { secret, digest: createHash('sha256').update(secret).digest() };
+}
+
+function push(node, secret, { body = 'spans', type = 'application/x-protobuf', encoding, method = 'POST' } = {}) {
+	const headers = { 'content-type': type };
+	if (secret !== undefined) headers.authorization = `Bearer ${secret}`;
+	if (encoding !== undefined) headers['content-encoding'] = encoding;
+	return fetch(`${worker.origin}/ingest/${node.id}/v1/traces`, { method, headers, body: method === 'GET' ? undefined : body });
+}
+
+test('an authenticated push reaches the host as one flagged INGEST record and nothing else', async () => {
+	const { node, host } = await withHost();
+	const { secret, digest } = ingestSecret();
+	host.tap.send(encodeRecord(RECORD_INGEST_KEY, 0, digest));
+	await host.tap.quiet(100);
+	const response = await push(node, secret, { encoding: 'gzip' });
+	assert.equal(response.status, 200);
+	assert.equal(await response.text(), '{}');
+	const record = await host.tap.nextRecordOf(RECORD_INGEST);
+	assert.equal(record.connection, 0);
+	assert.deepEqual([...record.payload], [3, ...Buffer.from('spans')]);
+	const json = await push(node, secret, { type: 'application/json', body: '{}' });
+	assert.equal(json.status, 200);
+	assert.deepEqual([...(await host.tap.nextRecordOf(RECORD_INGEST)).payload], [0, ...Buffer.from('{}')]);
+});
+
+test('an ingest push is refused without the secret, without a host, or out of shape', async () => {
+	const { node, host } = await withHost();
+	const { secret, digest } = ingestSecret();
+	// No digest yet: refused like a wrong secret.
+	assert.equal((await push(node, secret)).status, 401);
+	host.tap.send(encodeRecord(RECORD_INGEST_KEY, 0, digest));
+	await host.tap.quiet(100);
+	assert.equal((await push(node, ingestSecret().secret)).status, 401);
+	assert.equal((await push(node, undefined)).status, 401);
+	assert.equal((await push(node, 'short')).status, 401);
+	assert.equal((await push(node, secret, { method: 'GET' })).status, 405);
+	assert.equal((await push(node, secret, { type: 'text/plain' })).status, 415);
+	assert.equal((await push(node, secret, { encoding: 'br' })).status, 415);
+	assert.equal((await push(node, secret, { body: Buffer.alloc(1024 * 1024 + 1) })).status, 413);
+	assert.equal((await fetch(`${worker.origin}/ingest/${node.id}/v1/logs`, { method: 'POST', body: 'x' })).status, 404);
+	await host.tap.quiet(200);
+	assert.ok(!host.tap.records.some((record) => record.type === RECORD_INGEST));
+	// Revoked: an empty key.
+	host.tap.send(encodeRecord(RECORD_INGEST_KEY, 0, Buffer.alloc(0)));
+	await host.tap.quiet(100);
+	assert.equal((await push(node, secret)).status, 401);
+});
+
+test('the digest dies with its host socket and the bucket bounds a burst', async () => {
+	const { node, host } = await withHost();
+	const { secret, digest } = ingestSecret();
+	host.tap.send(encodeRecord(RECORD_INGEST_KEY, 0, digest));
+	await host.tap.quiet(100);
+	const statuses = [];
+	for (let index = 0; index < 7; index += 1) statuses.push((await push(node, secret)).status);
+	assert.deepEqual(statuses.slice(0, 5), [200, 200, 200, 200, 200]);
+	assert.equal(statuses[6], 429);
+	const next = await openHost(worker.origin, node.id, mintHostToken(node, { sequence: 2 }));
+	assert.equal(next.status, 101);
+	assert.equal((await push(node, secret)).status, 401);
+});
+
+test('a malformed ingest key ends the host', async () => {
+	const { host } = await withHost();
+	host.tap.send(encodeRecord(RECORD_INGEST_KEY, 0, Buffer.alloc(5)));
+	assert.equal((await host.tap.waitClosed()).code, 4004);
 });
 
 // -- harness ----------------------------------------------------------------

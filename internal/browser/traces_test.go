@@ -22,7 +22,7 @@ type traceBackend struct {
 	received []string
 }
 
-func (backend *traceBackend) ReceiveTraces(body []byte) error {
+func (backend *traceBackend) ReceiveTraces(body []byte, remote bool) error {
 	backend.received = append(backend.received, string(body))
 	return nil
 }
@@ -77,7 +77,7 @@ func TestTracesAcceptOnlyLocalOTLP(t *testing.T) {
 			t.Fatalf("protobuf export (%q) = %d", encoding, status)
 		}
 		// The receiver gets the OTLP JSON mapping, which folds into one observation of the route.
-		observations, _, err := opgraph.DecodeOTLP([]byte(backend.received[len(backend.received)-1]), 2_000)
+		observations, _, err := opgraph.DecodeOTLP([]byte(backend.received[len(backend.received)-1]), 2_000, false)
 		if err != nil || len(observations) != 1 || observations[0].Attributes["http.route"] != "/orders/{id}" || observations[0].Attributes["service.name"] != "shop" {
 			t.Fatalf("protobuf export (%q) folded to %+v, %v", encoding, observations, err)
 		}

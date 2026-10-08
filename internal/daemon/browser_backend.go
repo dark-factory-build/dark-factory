@@ -987,6 +987,29 @@ func (backend *browserBackend) RemoteInvite(ctx context.Context, rawClient [brow
 	return browserprotocol.RemoteInviteResult{Link: invitation.Link, ExpiresAtMS: browserprotocol.Decimal(invitation.Expires * 1000), SVG: code}, nil
 }
 
+// TelemetryIngest reports, mints or revokes the secret a platform presents to
+// push OTLP traces through the relay. It needs administration, which a remote
+// grant never carries.
+func (backend *browserBackend) TelemetryIngest(ctx context.Context, rawClient [browserprotocol.ClientIDSize]byte, request browserprotocol.TelemetryIngest) (browserprotocol.TelemetryIngestResult, error) {
+	_, release, _, err := backend.authorize(ctx, rawClient, kernel.BrowserCapabilityAdministration)
+	if err != nil {
+		return browserprotocol.TelemetryIngestResult{}, err
+	}
+	defer release()
+	if backend.owner == nil {
+		return browserprotocol.TelemetryIngestResult{}, browser.ErrUnauthorized
+	}
+	relay, err := backend.owner.relayRuntime()
+	if err != nil {
+		return browserprotocol.TelemetryIngestResult{}, mapBrowserError(err)
+	}
+	url, secret, active, err := relay.ingest(request.Action)
+	if err != nil {
+		return browserprotocol.TelemetryIngestResult{}, mapBrowserError(err)
+	}
+	return browserprotocol.TelemetryIngestResult{URL: url, Secret: secret, Active: browserprotocol.Bool(active)}, nil
+}
+
 // admitRemoteInvite bounds minting to four invitations per challenge TTL. The
 // page asks; it does not choose this bound. Four per TTL means even a console
 // looping REMOTE_INVITE holds at most four of the 32 live challenge slots, so

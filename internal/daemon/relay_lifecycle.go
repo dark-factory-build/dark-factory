@@ -2,8 +2,14 @@ package daemon
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
+	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -28,6 +34,10 @@ type RelayRuntime struct {
 	identity       relayhost.Identity
 	relayOrigin    string
 	browserAddress string
+	// ingestPath holds the SHA-256 of the telemetry ingest secret; ingestMu
+	// keeps that file and the connector's digest in step.
+	ingestPath string
+	ingestMu   sync.Mutex
 
 	stopFeed context.CancelFunc
 	feedDone chan struct{}
@@ -40,6 +50,9 @@ type RelayRuntime struct {
 // the operator names another. A remote invitation omits the address when it is
 // this one, which is most of the time and several QR modules.
 const DefaultBrowserAddress = "127.0.0.1:43123"
+
+// ingestKeyFileName is the home file holding the ingest secret's digest.
+const ingestKeyFileName = "ingest.sha256"
 
 // DialRelay starts the outbound relay connector for one already-listening
 // browser runtime. It returns before the relay is reachable; an unreachable
@@ -71,12 +84,13 @@ func (daemon *Daemon) DialRelay(ctx context.Context, relayOrigin, home string, b
 		Identity:    identity,
 		BrowserURL:  "ws://" + browserAddress + browser.Path,
 		DeviceKey:   daemon.relayDeviceKey,
+		IngestKey:   readIngestKey(filepath.Join(home, ingestKeyFileName)),
 	})
 	if err != nil {
 		return nil, err
 	}
 	feedContext, stopFeed := context.WithCancel(ctx)
-	runtime := &RelayRuntime{daemon: daemon, connector: connector, identity: identity, relayOrigin: relayOrigin, browserAddress: browserAddress, stopFeed: stopFeed, feedDone: make(chan struct{})}
+	runtime := &RelayRuntime{daemon: daemon, connector: connector, identity: identity, relayOrigin: relayOrigin, browserAddress: browserAddress, ingestPath: filepath.Join(home, ingestKeyFileName), stopFeed: stopFeed, feedDone: make(chan struct{})}
 	daemon.browserMu.Lock()
 	if daemon.browserClosing || daemon.relay != nil {
 		daemon.browserMu.Unlock()
@@ -113,6 +127,49 @@ func (runtime *RelayRuntime) feed(ctx context.Context) {
 			runtime.daemon.publishPublicWorld(ctx, &state, runtime.connector.Publish, runtime.connector.Connection)
 		}
 	}
+}
+
+// readIngestKey returns the stored digest. Anything but exactly 32 readable
+// bytes counts as revoked.
+func readIngestKey(path string) []byte {
+	digest, err := os.ReadFile(path)
+	if err != nil || len(digest) != sha256.Size {
+		return nil
+	}
+	return digest
+}
+
+// ingest applies one TELEMETRY_INGEST action. A mint returns the new secret,
+// which nothing keeps: only its SHA-256 is stored and handed to the relay.
+func (runtime *RelayRuntime) ingest(action string) (url, secret string, active bool, err error) {
+	runtime.ingestMu.Lock()
+	defer runtime.ingestMu.Unlock()
+	switch action {
+	case "mint":
+		var raw [32]byte
+		_, _ = rand.Read(raw[:])
+		secret = base64.RawURLEncoding.EncodeToString(raw[:])
+		// The relay hashes the bearer string exactly as presented.
+		digest := sha256.Sum256([]byte(secret))
+		temporary := runtime.ingestPath + ".tmp"
+		if err := os.WriteFile(temporary, digest[:], 0o600); err != nil {
+			return "", "", false, err
+		}
+		if err := os.Rename(temporary, runtime.ingestPath); err != nil {
+			return "", "", false, err
+		}
+		runtime.connector.SetIngestKey(digest[:])
+	case "revoke":
+		// Revoke in memory first: a file that will not go still stops the
+		// secret on this connection.
+		runtime.connector.SetIngestKey(nil)
+		if err := os.Remove(runtime.ingestPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return "", "", false, err
+		}
+	}
+	// ws→http and wss→https: the relay serves ingest on its own origin.
+	url = "http" + strings.TrimPrefix(runtime.relayOrigin, "ws") + "/ingest/" + runtime.identity.NodeID() + "/v1/traces"
+	return url, secret, readIngestKey(runtime.ingestPath) != nil, nil
 }
 
 // Status reports what the connector currently observes.

@@ -19,7 +19,7 @@ const otlpExport = `{"resourceSpans":[{"resource":{"attributes":[{"key":"service
  ]}]}]}`
 
 func TestOTLPExportBecomesObservationsAndKeyCoverage(t *testing.T) {
-	observations, coverage, err := DecodeOTLP([]byte(otlpExport), 10*minute)
+	observations, coverage, err := DecodeOTLP([]byte(otlpExport), 10*minute, false)
 	if err != nil || len(observations) != 2 || len(coverage) != 1 {
 		t.Fatalf("observations=%+v coverage=%+v err=%v", observations, coverage, err)
 	}
@@ -45,7 +45,7 @@ func TestOTLPExportBecomesObservationsAndKeyCoverage(t *testing.T) {
 			t.Fatal("payload attribute retained")
 		}
 	}
-	if _, _, err := DecodeOTLP([]byte("not json"), 0); err == nil {
+	if _, _, err := DecodeOTLP([]byte("not json"), 0, false); err == nil {
 		t.Fatal("garbage accepted")
 	}
 }
@@ -53,12 +53,25 @@ func TestOTLPExportBecomesObservationsAndKeyCoverage(t *testing.T) {
 func TestOTLPEnvironmentComesFromTheResourceAndDefaultsToLocal(t *testing.T) {
 	for key, want := range map[string]string{"deployment.environment.name": "staging", "deployment.environment": "production", "service.namespace": "local"} {
 		export := `{"resourceSpans":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"api"}},{"key":"` + key + `","value":{"stringValue":"` + want + `"}}]},"scopeSpans":[{"spans":[{"kind":2}]}]}]}`
-		observations, coverage, err := DecodeOTLP([]byte(export), 0)
+		observations, coverage, err := DecodeOTLP([]byte(export), 0, false)
 		if err != nil || len(observations) != 1 || len(coverage) != 1 {
 			t.Fatalf("%s: observations=%+v coverage=%+v err=%v", key, observations, coverage, err)
 		}
 		if observations[0].Environment != want || coverage[0].Environment != want || observations[0].Source != "otlp" || coverage[0].Source != "otlp" {
 			t.Fatalf("%s: observation=%+v coverage=%+v, want environment %q from otlp", key, observations[0], coverage[0], want)
+		}
+	}
+}
+
+// A relayed export has its own source and never passes as local, even when
+// it claims to be.
+func TestRemoteOTLPIsNeverLocal(t *testing.T) {
+	for claim, want := range map[string]string{"": "remote", "local": "remote", "production": "production"} {
+		export := `{"resourceSpans":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"site"}},{"key":"deployment.environment.name","value":{"stringValue":"` + claim + `"}}]},"scopeSpans":[{"spans":[{"kind":2}]}]}]}`
+		observations, coverage, err := DecodeOTLP([]byte(export), 0, true)
+		if err != nil || len(observations) != 1 || observations[0].Environment != want || observations[0].Source != "otlp-remote" ||
+			coverage[0].Environment != want || coverage[0].Source != "otlp-remote" {
+			t.Fatalf("claim %q: observations=%+v coverage=%+v err=%v", claim, observations, coverage, err)
 		}
 	}
 }

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import type { DiscoveredAccount, AccountItem, AgentItem, GitHubConnectionBody, OperationalNodeView, ProjectItem, RepositoryMutation, SpriteAppearance, TaskHistoryView, TaskItem, TaskListView } from "@dark-factory/client";
+import type { DiscoveredAccount, AccountItem, AgentItem, GitHubConnectionBody, OperationalNodeView, ProjectItem, RepositoryMutation, SpriteAppearance, TaskHistoryView, TaskItem, TaskListView, TelemetryIngest, TelemetryIngestBody } from "@dark-factory/client";
 import { type FactoryAgentSelection, type FactoryAppSnapshot, type FactoryHumanRequestView } from "./factory-app-controller.js";
 import { AgentList, FactoryFloor } from "./console-screens.js";
 import { AgentPanel, ConsoleDialog, HumanRequestPanel, WorkPanel, TaskDetail, SettingsDialog, editErrorCopy, type AgentConfigEdit, type AgentPanelView, type TaskEdit, type TaskBrief, type TaskScope, type TaskContentChip, type AddTask, type WorkFilter } from "./console-sidebar.js";
@@ -9,7 +9,7 @@ import { useProduction } from "./production-data.js";
 import { deriveProductionView, inProgressProduction, productionKey } from "./production-view.js";
 import { ProductionPanel, asTask } from "./production-panel.js";
 import { MissionsPanel } from "./missions-panel.js";
-import { RemoteInvitePanel } from "./remote-invite.js";
+import { RemoteInvitePanel, TelemetryIngestPanel } from "./remote-invite.js";
 import { agentTelemetry, needsYou, workRows } from "./console-view.js";
 import { IconButton } from "./icons.js";
 import { Badge, SectionHeader } from "./console-kit.js";
@@ -55,6 +55,7 @@ export type FactoryConsoleProps = FactoryAppSnapshot & {
   onCloseHumanRequest?: () => void;
   onInviteRemote?: () => void;
   onDismissRemoteInvite?: () => void;
+  onTelemetryIngest?: (action: TelemetryIngestBody["action"]) => Promise<TelemetryIngest>;
   onLoadDevices?: () => void;
   onRevokeDevice?: (device: { clientId: string; expectedRevision: bigint }) => void;
   onLoadAccounts?: () => void;
@@ -148,6 +149,7 @@ export function FactoryConsole({
   remoteInviteError,
   onInviteRemote,
   onDismissRemoteInvite,
+  onTelemetryIngest,
   devices,
   devicesError,
   ownClientId,
@@ -447,7 +449,10 @@ export function FactoryConsole({
           edit={edit}
           onSaveProjectLimits={onSaveProjectLimits}
           pairing={pairing ?? (!remoteInviteAllowed ? undefined : (
-            <RemoteInvitePanel invite={remoteInvite} error={remoteInviteError} onInvite={onInviteRemote} onDismiss={onDismissRemoteInvite} devices={devices} devicesError={devicesError} ownClientId={ownClientId} onLoadDevices={onLoadDevices} onRevokeDevice={onRevokeDevice} />
+            <>
+              <RemoteInvitePanel invite={remoteInvite} error={remoteInviteError} onInvite={onInviteRemote} onDismiss={onDismissRemoteInvite} devices={devices} devicesError={devicesError} ownClientId={ownClientId} onLoadDevices={onLoadDevices} onRevokeDevice={onRevokeDevice} />
+              {onTelemetryIngest === undefined ? null : <TelemetryIngestPanel onIngest={onTelemetryIngest} />}
+            </>
           ))}
           runtime={productionData.runtime}
           release={productionData.release}

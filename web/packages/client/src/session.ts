@@ -21,6 +21,8 @@ import {
   type PairResultFrame,
   type PushSubscribeBody,
   type RemoteInviteResultBody,
+  type TelemetryIngestBody,
+  type TelemetryIngestResultBody,
   type ServerControlFrame,
   type StateChangedFrame,
   type StateSnapshotFrame,
@@ -181,7 +183,7 @@ export type RunPathsView = Readonly<{ agentId: string; runId: string; paths: rea
 export type TaskListView = Readonly<{ agentId: string; head: bigint; total: bigint; tasks: readonly TaskItem[]; hasMore: boolean }>;
 type InvitePending = { resolve: (value: RemoteInvite) => void; reject: (error: unknown) => void };
 type PushPending = { resolve: () => void; reject: (error: unknown) => void };
-type AccountPending = { operation?: ProjectContentOperation; kind: "ATTACHMENT_RETENTION_RESULT" | "FACTORY_DISPATCH_RESULT" | "PROJECT_CONTENT_RESULT" | "ACCOUNTS" | "ACCOUNT_LINK_RESULT" | "ACCOUNT_UPDATE_RESULT" | "BROWSER_CLIENTS" | "BROWSER_CLIENT_REVOKE_RESULT" | "PROJECT_CREATE_RESULT" | "REPOSITORIES" | "REPOSITORY_MUTATE_RESULT"; accountId?: string; entityId?: string; expectedRevision?: bigint; enabled?: boolean; action?: RepositoryMutateBody["action"]; resolve: (value: never) => void; reject: (error: unknown) => void };
+type AccountPending = { operation?: ProjectContentOperation; kind: "TELEMETRY_INGEST_RESULT" | "ATTACHMENT_RETENTION_RESULT" | "FACTORY_DISPATCH_RESULT" | "PROJECT_CONTENT_RESULT" | "ACCOUNTS" | "ACCOUNT_LINK_RESULT" | "ACCOUNT_UPDATE_RESULT" | "BROWSER_CLIENTS" | "BROWSER_CLIENT_REVOKE_RESULT" | "PROJECT_CREATE_RESULT" | "REPOSITORIES" | "REPOSITORY_MUTATE_RESULT"; accountId?: string; entityId?: string; expectedRevision?: bigint; enabled?: boolean; action?: RepositoryMutateBody["action"]; resolve: (value: never) => void; reject: (error: unknown) => void };
 
 type GitHubPending = { resolve: (value: GitHubConnectionResult) => void; reject: (error: unknown) => void };
 
@@ -208,6 +210,8 @@ export type GitHubConnectionResult = Readonly<GitHubConnectionResultBody>;
 
 /** One minted remote pairing invitation and the code that carries it. */
 export type RemoteInvite = Readonly<{ link: string; expiresAtMs: bigint; svg: string }>;
+/** The telemetry ingest endpoint; `secret` is non-empty only in the answer to a mint, and nothing keeps it. */
+export type TelemetryIngest = Readonly<TelemetryIngestResultBody>;
 
 export type HumanRequestCancelRunDescriptor = Readonly<{
   requestId: string;
@@ -595,6 +599,11 @@ export class BrowserSession {
     return result;
   }
 
+  /** Reads, mints (rotating) or revokes the telemetry ingest secret. */
+  telemetryIngest(action: TelemetryIngestBody["action"]): Promise<TelemetryIngest> {
+    return this.#accountRequest<TelemetryIngest>("TELEMETRY_INGEST_RESULT", CAPABILITIES.administration, "telemetry-ingest", (id) => encodeClientControl({ type: "TELEMETRY_INGEST", id, body: { action } }));
+  }
+
   /** Hands the factory this device's alert subscription. Observing is all it
    * takes: a device may only ask to be woken. A daemon that predates alerts
    * answers ERROR unsupported, which rejects this promise and nothing else. */
@@ -916,7 +925,7 @@ export class BrowserSession {
       pending.resolve();
       return;
     }
-    if (frame.type === "ATTACHMENT_RETENTION_RESULT" || frame.type === "FACTORY_DISPATCH_RESULT" || frame.type === "PROJECT_CONTENT_RESULT" || frame.type === "ACCOUNTS" || frame.type === "ACCOUNT_LINK_RESULT" || frame.type === "ACCOUNT_UPDATE_RESULT" || frame.type === "BROWSER_CLIENTS" || frame.type === "BROWSER_CLIENT_REVOKE_RESULT" || frame.type === "PROJECT_CREATE_RESULT" || frame.type === "REPOSITORIES" || frame.type === "REPOSITORY_MUTATE_RESULT") {
+    if (frame.type === "TELEMETRY_INGEST_RESULT" || frame.type === "ATTACHMENT_RETENTION_RESULT" || frame.type === "FACTORY_DISPATCH_RESULT" || frame.type === "PROJECT_CONTENT_RESULT" || frame.type === "ACCOUNTS" || frame.type === "ACCOUNT_LINK_RESULT" || frame.type === "ACCOUNT_UPDATE_RESULT" || frame.type === "BROWSER_CLIENTS" || frame.type === "BROWSER_CLIENT_REVOKE_RESULT" || frame.type === "PROJECT_CREATE_RESULT" || frame.type === "REPOSITORIES" || frame.type === "REPOSITORY_MUTATE_RESULT") {
       this.#accountResult(frame);
       return;
     }
@@ -1337,10 +1346,10 @@ export class BrowserSession {
     return result;
   }
 
-  #accountResult(frame: Extract<ServerControlFrame, { type: "ATTACHMENT_RETENTION_RESULT" | "FACTORY_DISPATCH_RESULT" | "PROJECT_CONTENT_RESULT" | "ACCOUNTS" | "ACCOUNT_LINK_RESULT" | "ACCOUNT_UPDATE_RESULT" | "BROWSER_CLIENTS" | "BROWSER_CLIENT_REVOKE_RESULT" | "PROJECT_CREATE_RESULT" | "REPOSITORIES" | "REPOSITORY_MUTATE_RESULT" }>): void {
+  #accountResult(frame: Extract<ServerControlFrame, { type: "TELEMETRY_INGEST_RESULT" | "ATTACHMENT_RETENTION_RESULT" | "FACTORY_DISPATCH_RESULT" | "PROJECT_CONTENT_RESULT" | "ACCOUNTS" | "ACCOUNT_LINK_RESULT" | "ACCOUNT_UPDATE_RESULT" | "BROWSER_CLIENTS" | "BROWSER_CLIENT_REVOKE_RESULT" | "PROJECT_CREATE_RESULT" | "REPOSITORIES" | "REPOSITORY_MUTATE_RESULT" }>): void {
     const pending = this.#accountPending.get(frame.id);
     if (pending === undefined || pending.kind !== frame.type) throw new ProtocolError("malformed");
-    if (frame.type === "ATTACHMENT_RETENTION_RESULT") { this.#accountPending.delete(frame.id); pending.resolve(Object.freeze(frame.body) as never); return; }
+    if (frame.type === "ATTACHMENT_RETENTION_RESULT" || frame.type === "TELEMETRY_INGEST_RESULT") { this.#accountPending.delete(frame.id); pending.resolve(Object.freeze(frame.body) as never); return; }
     if (frame.type === "FACTORY_DISPATCH_RESULT") {
       if (pending.expectedRevision === undefined || pending.enabled === undefined || frame.body.revision !== pending.expectedRevision + 1n || frame.body.enabled !== pending.enabled) throw new ProtocolError("malformed");
       this.#accountPending.delete(frame.id); pending.resolve(Object.freeze(frame.body) as never); return;

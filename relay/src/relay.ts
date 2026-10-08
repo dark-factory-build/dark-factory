@@ -11,9 +11,12 @@ import { decodeBase64UrlExact } from './encoding.js';
 import {
 	CONTROLLER_MESSAGE_LIMIT,
 	HOST_MESSAGE_LIMIT,
+	INGEST_LIMIT,
 	PUBLIC_WORLD_LIMIT,
 	RECORD_BINARY,
 	RECORD_CLOSE,
+	RECORD_INGEST,
+	RECORD_INGEST_KEY,
 	RECORD_OPEN,
 	RECORD_PUBLISH,
 	RECORD_REVOKE,
@@ -47,6 +50,13 @@ const CONTROLLER_SOCKETS_PER_CONTROLLER = 4;
 const BURST_MESSAGES = 120;
 const SUSTAINED_MESSAGES_PER_SECOND = 60;
 
+/** Ingest token bucket per factory: a burst of 5, refilled at one a second. */
+const INGEST_BURST = 5;
+const INGEST_PER_SECOND = 1;
+/** Flags of an INGEST record. */
+const INGEST_PROTOBUF = 1;
+const INGEST_GZIP = 2;
+
 /** A host may replace its public world at most this often; the daemon sends once a minute. */
 const PUBLISH_INTERVAL_MS = 30_000;
 
@@ -78,6 +88,8 @@ interface Attachment {
 	role: Role;
 	connection: number;
 	controller: string;
+	/** Host only: hex SHA-256 of the ingest secret. It lives exactly as long as the socket. */
+	ingest?: string;
 }
 
 interface Bucket {
@@ -102,7 +114,9 @@ function attachmentOf(ws: WebSocket): Attachment | null {
 	const candidate = raw as Partial<Attachment>;
 	if (candidate.role !== 'host' && candidate.role !== 'controller' && candidate.role !== 'retired') return null;
 	if (typeof candidate.connection !== 'number' || typeof candidate.controller !== 'string') return null;
-	return { role: candidate.role, connection: candidate.connection, controller: candidate.controller };
+	const attachment: Attachment = { role: candidate.role, connection: candidate.connection, controller: candidate.controller };
+	if (typeof candidate.ingest === 'string') attachment.ingest = candidate.ingest;
+	return attachment;
 }
 
 /** The WebSocket protocol caps a close reason at 123 UTF-8 bytes. */
@@ -140,6 +154,8 @@ export class FactoryRelay implements DurableObject {
 	readonly #buckets = new WeakMap<WebSocket, Bucket>();
 	/** When this node last published; in memory only, like the buckets. */
 	#publishedAt = Number.NEGATIVE_INFINITY;
+	/** This node's ingest token bucket; in memory only, like the others. */
+	#ingestBucket: Bucket = { tokens: INGEST_BURST, at: 0 };
 
 	constructor(ctx: DurableObjectState, env: Env) {
 		this.#ctx = ctx;
@@ -152,6 +168,7 @@ export class FactoryRelay implements DurableObject {
 		// Reached only as `public:<id>`: a GET routed by the Worker, or a PUT
 		// from the node object that proved the key the id hashes.
 		if (url.pathname.startsWith('/public/')) return await this.#world(request);
+		if (url.pathname.startsWith('/ingest/')) return await this.#ingest(request);
 		const match = /^\/(host|controller)\/([^/]+)$/.exec(url.pathname);
 		if (match === null) return refuse(404);
 		const [, kind, node] = match as unknown as [string, string, string];
@@ -335,6 +352,18 @@ export class FactoryRelay implements DurableObject {
 				published.push(this.#publish(record.payload));
 				continue;
 			}
+			if (record.type === RECORD_INGEST_KEY) {
+				if (record.connection !== 0 || (record.payload.length !== 0 && record.payload.length !== 32)) {
+					this.#failHost(ws, CLOSE_PROTOCOL, 'malformed ingest key');
+					break;
+				}
+				const attachment = attachmentOf(ws);
+				if (attachment === null) break;
+				delete attachment.ingest;
+				if (record.payload.length === 32) attachment.ingest = hex(record.payload);
+				ws.serializeAttachment(attachment);
+				continue;
+			}
 			if (!this.#dispatch(ws, record)) break;
 		}
 		if (published.length > 0) return Promise.all(published).then(() => undefined);
@@ -365,6 +394,40 @@ export class FactoryRelay implements DurableObject {
 		} catch {
 			// The next change publishes again; nothing is queued.
 		}
+	}
+
+	// -- remote ingest ------------------------------------------------------
+
+	/**
+	 * One OTLP traces push, already shaped by the Worker. The secret is checked
+	 * against the connected host's digest; without a host there is no digest,
+	 * so a stranger cannot tell an offline factory from a wrong secret. The
+	 * bucket is spent only after authentication and before the body is read,
+	 * so concurrent pushes cannot pile bodies up here. Nothing is stored.
+	 */
+	async #ingest(request: Request): Promise<Response> {
+		const host = this.#host();
+		const digest = host === null ? undefined : attachmentOf(host)?.ingest;
+		const bearer = (request.headers.get('Authorization') ?? '').slice('Bearer '.length);
+		const presented = hex(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(bearer))));
+		if (host === null || digest === undefined || presented !== digest) return refuse(401);
+		const type = request.headers.get('Content-Type') ?? '';
+		const encoding = request.headers.get('Content-Encoding') ?? '';
+		const protobuf = type.startsWith('application/x-protobuf');
+		if ((!protobuf && !type.startsWith('application/json')) || !['', 'identity', 'gzip'].includes(encoding)) return refuse(415);
+		const now = Date.now();
+		const bucket = this.#ingestBucket;
+		bucket.tokens = Math.min(INGEST_BURST, bucket.tokens + ((now - bucket.at) / 1000) * INGEST_PER_SECOND);
+		bucket.at = now;
+		if (bucket.tokens < 1) return refuse(429);
+		bucket.tokens -= 1;
+		const body = new Uint8Array(await request.arrayBuffer());
+		if (body.length > INGEST_LIMIT) return refuse(413);
+		const payload = new Uint8Array(body.length + 1);
+		payload[0] = (protobuf ? INGEST_PROTOBUF : 0) | (encoding === 'gzip' ? INGEST_GZIP : 0);
+		payload.set(body, 1);
+		this.#sendToHost([{ type: RECORD_INGEST, connection: 0, payload }]);
+		return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
 	}
 
 	async #world(request: Request): Promise<Response> {
@@ -545,6 +608,10 @@ function trySend(ws: WebSocket, payload: string | ArrayBuffer): void {
 	} catch {
 		// The peer vanished between lookup and send; nothing is queued for it.
 	}
+}
+
+function hex(bytes: Uint8Array): string {
+	return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
 }
 
 function decodeJson(payload: Uint8Array): Record<string, unknown> | null {

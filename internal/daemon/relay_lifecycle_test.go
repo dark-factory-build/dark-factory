@@ -6,11 +6,14 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -576,4 +579,86 @@ func TestRelayDropForcesAFreshSessionWithNoReplayedFrames(t *testing.T) {
 		t.Fatalf("fresh snapshot head = %d, want the unchanged durable head %d", after.Head, before.Head)
 	}
 	resumed.quiet(t)
+}
+
+func TestBrowserTelemetryIngestMintsRotatesAndRevokesTheRelayDigest(t *testing.T) {
+	fixture := newAdapterFixture(t, webCapabilities)
+	relay, runtime, identity := dialRelayFixture(t, fixture)
+	fixture.pair(t)
+	host := relay.accept(t)
+	records := make(chan relayhost.Record, 8)
+	host.mu.Lock()
+	host.routes[0] = records
+	host.mu.Unlock()
+	ctx := context.Background()
+	client := rawBrowserClient(fixture.client.ID)
+	ingest := func(action string) browserprotocol.TelemetryIngestResult {
+		t.Helper()
+		result, err := fixture.backend.TelemetryIngest(ctx, client, browserprotocol.TelemetryIngest{Action: action})
+		if err != nil {
+			t.Fatalf("%s: %v", action, err)
+		}
+		if want := "http" + strings.TrimPrefix(relay.origin(), "ws") + "/ingest/" + identity.NodeID() + "/v1/traces"; result.URL != want {
+			t.Fatalf("%s url = %q, want %q", action, result.URL, want)
+		}
+		return result
+	}
+	digestSent := func(want []byte) {
+		t.Helper()
+		select {
+		case record := <-records:
+			if record.Type != relayhost.RecordIngestKey || !bytes.Equal(record.Payload, want) {
+				t.Fatalf("relay got %v %x, want INGEST_KEY %x", record.Type, record.Payload, want)
+			}
+		case <-time.After(relayTestDeadline):
+			t.Fatal("the relay never got the ingest key")
+		}
+	}
+
+	if status := ingest("status"); status.Active || status.Secret != "" {
+		t.Fatalf("fresh status = %+v", status)
+	}
+	minted := ingest("mint")
+	digest := sha256.Sum256([]byte(minted.Secret))
+	if !minted.Active || len(minted.Secret) != 43 {
+		t.Fatalf("mint = %+v", minted)
+	}
+	digestSent(digest[:])
+	info, err := os.Stat(runtime.ingestPath)
+	if err != nil || info.Mode().Perm() != 0o600 || filepath.Base(runtime.ingestPath) != "ingest.sha256" {
+		t.Fatalf("digest file %s: %v %v", runtime.ingestPath, info, err)
+	}
+	if stored, _ := os.ReadFile(runtime.ingestPath); !bytes.Equal(stored, digest[:]) {
+		t.Fatalf("stored %x, want %x", stored, digest)
+	}
+	if status := ingest("status"); !status.Active || status.Secret != "" {
+		t.Fatalf("status after mint = %+v", status)
+	}
+	if rotated := ingest("mint"); rotated.Secret == minted.Secret {
+		t.Fatal("a second mint did not rotate the secret")
+	} else {
+		next := sha256.Sum256([]byte(rotated.Secret))
+		digestSent(next[:])
+	}
+	if revoked := ingest("revoke"); revoked.Active || revoked.Secret != "" {
+		t.Fatalf("revoke = %+v", revoked)
+	}
+	digestSent(nil)
+	if _, err := os.Stat(runtime.ingestPath); !os.IsNotExist(err) {
+		t.Fatalf("revoke left the digest file: %v", err)
+	}
+	if again := ingest("revoke"); again.Active {
+		t.Fatalf("second revoke = %+v", again)
+	}
+	digestSent(nil)
+	// A wrong-sized file counts as revoked.
+	if err := os.WriteFile(runtime.ingestPath, []byte("short"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if status := ingest("status"); status.Active {
+		t.Fatalf("a 5-byte digest file reads as active")
+	}
+	if readIngestKey(runtime.ingestPath) != nil {
+		t.Fatal("a wrong-sized digest file is handed to the relay")
+	}
 }

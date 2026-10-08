@@ -22,6 +22,8 @@ export const RECORD_BINARY = 0x03;
 export const RECORD_CLOSE = 0x04;
 export const RECORD_REVOKE = 0x05;
 export const RECORD_PUBLISH = 0x06;
+export const RECORD_INGEST_KEY = 0x07;
+export const RECORD_INGEST = 0x08;
 export const SITE_ORIGIN = 'https://www.darkfactory.build';
 
 const BASE32_LOWER = 'abcdefghijklmnopqrstuvwxyz234567';

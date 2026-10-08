@@ -309,12 +309,12 @@ func (daemon *Daemon) pollSources(sources []observeSource) {
 
 var observeClient = &http.Client{Timeout: 30 * time.Second}
 
-// ReceiveTraces folds a local OTLP/HTTP JSON export into the runtime store.
-func (backend *browserBackend) ReceiveTraces(body []byte) error {
+// ReceiveTraces folds an OTLP/HTTP JSON export into the runtime store.
+func (backend *browserBackend) ReceiveTraces(body []byte, remote bool) error {
 	if backend.owner == nil {
 		return browser.ErrNotFound
 	}
-	observations, coverage, err := opgraph.DecodeOTLP(body, backend.owner.now().UnixMilli())
+	observations, coverage, err := opgraph.DecodeOTLP(body, backend.owner.now().UnixMilli(), remote)
 	if err != nil {
 		return err
 	}
