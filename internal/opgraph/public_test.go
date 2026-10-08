@@ -75,7 +75,7 @@ func TestPublicNamesSayWhatAStationIs(t *testing.T) {
 	for _, node := range Public(Overlay("s", graph, nil, nil, nil, 0, minute), []byte("k"), nil, nil, 0).Nodes {
 		got[node.Label] = true
 	}
-	for _, want := range []string{"CI pipeline 1", "Edge function 1", "Check 1", "Background task 1", "Entrance 1", "Timer 1", "Outside service 1"} {
+	for _, want := range []string{"CI pipeline 1", "Edge function 1", "Check 1", "Loop 1", "Entrance 1", "Timer 1", "Outside service 1"} {
 		if !got[want] {
 			t.Errorf("missing %q in %v", want, got)
 		}

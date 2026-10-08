@@ -116,7 +116,7 @@ type Worker struct {
 // Public names say what a station is in plain words: a unit by its runtime,
 // an entrance by its trigger, a job by whether CI runs it.
 var (
-	publicNames  = map[Kind]string{Processor: "Unit", Ingress: "Entrance", Job: "Background task", Queue: "Queue", Store: "Store", External: "Outside service", Unknown: "Unknown"}
+	publicNames  = map[Kind]string{Processor: "Unit", Ingress: "Entrance", Job: "Loop", Queue: "Queue", Store: "Store", External: "Outside service", Unknown: "Unknown"}
 	unitNames    = map[string]string{"browser": "Web app", "server": "Web server", "worker": "Edge function", "process": "Service", "cli": "Tool", "ci": "CI pipeline"}
 	triggerNames = map[string]string{"timer": "Timer", "message": "Inbox"}
 )
