@@ -842,18 +842,33 @@ test('an ingest push is refused without the secret, without a host, or out of sh
 	assert.equal((await push(node, secret)).status, 401);
 });
 
-test('the digest dies with its host socket and the bucket bounds a burst', async () => {
+test('the digest dies with its host socket', async () => {
 	const { node, host } = await withHost();
 	const { secret, digest } = ingestSecret();
 	host.tap.send(encodeRecord(RECORD_INGEST_KEY, 0, digest));
 	await host.tap.quiet(100);
-	const statuses = [];
-	for (let index = 0; index < 7; index += 1) statuses.push((await push(node, secret)).status);
-	assert.deepEqual(statuses.slice(0, 5), [200, 200, 200, 200, 200]);
-	assert.equal(statuses[6], 429);
+	assert.equal((await push(node, secret)).status, 200);
 	const next = await openHost(worker.origin, node.id, mintHostToken(node, { sequence: 2 }));
 	assert.equal(next.status, 101);
 	assert.equal((await push(node, secret)).status, 401);
+});
+
+test('the ingest bucket bounds bytes, not requests', async () => {
+	const { node, host } = await withHost();
+	const { secret, digest } = ingestSecret();
+	host.tap.send(encodeRecord(RECORD_INGEST_KEY, 0, digest));
+	await host.tap.quiet(100);
+	// Many small pushes pass; 4 MiB of large ones exhaust the burst.
+	for (let index = 0; index < 20; index += 1) assert.equal((await push(node, secret)).status, 200);
+	const large = Buffer.alloc(1024 * 1024);
+	// A refusal does not read the body, so the upload may be cut instead of
+	// answered 429.
+	const statuses = [];
+	for (let index = 0; index < 6; index += 1) {
+		statuses.push(await push(node, secret, { body: large }).then((response) => response.status, () => 'refused'));
+	}
+	assert.deepEqual(statuses.slice(0, 3), [200, 200, 200]);
+	assert.ok([429, 'refused'].includes(statuses[5]), String(statuses));
 });
 
 test('a malformed ingest key ends the host', async () => {

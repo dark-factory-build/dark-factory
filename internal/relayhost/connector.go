@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
@@ -125,9 +126,9 @@ type Connector struct {
 	queue     *outboundQueue
 	// ingestKey is the current ingest digest, queued first on every connection.
 	ingestKey []byte
-	// ingesting holds the one relayed telemetry push being delivered; a push
-	// arriving meanwhile is dropped, never queued.
-	ingesting chan struct{}
+	// ingesting is the bytes of relayed telemetry pushes still being
+	// delivered; a push past maxIngestPending is dropped, never queued.
+	ingesting atomic.Int64
 
 	sessionGroup sync.WaitGroup
 }
@@ -157,7 +158,6 @@ func Dial(ctx context.Context, config Config) (*Connector, error) {
 		cancel:    cancel,
 		done:      make(chan struct{}),
 		sessions:  make(map[uint32]*session),
-		ingesting: make(chan struct{}, 1),
 		ingestKey: config.IngestKey,
 	}
 	go connector.run()
@@ -547,16 +547,17 @@ func (connector *Connector) apply(ctx context.Context, record Record, queue *out
 		if record.Connection != 0 || len(record.Payload) == 0 {
 			return fmt.Errorf("%w: malformed INGEST", ErrRelayProtocol)
 		}
-		select {
-		case connector.ingesting <- struct{}{}:
-		default:
+		// Each push also costs a fixed amount, which bounds how many deliver at once.
+		cost := int64(len(record.Payload)) + 1024
+		if connector.ingesting.Add(cost) > maxIngestPending {
+			connector.ingesting.Add(-cost)
 			return nil
 		}
 		flags, body := record.Payload[0], bytes.Clone(record.Payload[1:])
 		connector.sessionGroup.Add(1)
 		go func() {
 			defer connector.sessionGroup.Done()
-			defer func() { <-connector.ingesting }()
+			defer connector.ingesting.Add(-cost)
 			connector.ingest(ctx, flags, body)
 		}()
 		return nil
@@ -629,6 +630,10 @@ func (connector *Connector) closeSession(record Record) error {
 	connector.shutdownAsync(current, websocket.StatusNormalClosure)
 	return nil
 }
+
+// maxIngestPending bounds relayed telemetry awaiting delivery: the relay's own
+// burst, so a factory keeping up never drops a push.
+const maxIngestPending = 4 << 20
 
 // Flags of an INGEST record.
 const (
