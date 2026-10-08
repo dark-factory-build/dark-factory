@@ -531,10 +531,7 @@ func TestProductionReadsTheRelevantSetWithoutACap(t *testing.T) {
 	}
 	records, total := read()
 	got := map[string]bool{}
-	for index, record := range records {
-		if index > 0 && record.ObservedAt > records[index-1].ObservedAt {
-			t.Fatalf("records are not newest first at %d: %+v", index, records)
-		}
+	for _, record := range records {
 		if record.Kind != "construction" && !strings.HasPrefix(record.ID, "2") {
 			got[record.Kind+":"+record.ID] = true
 		}

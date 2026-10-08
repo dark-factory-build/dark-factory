@@ -1036,7 +1036,7 @@ func (store *Store) Production(ctx context.Context, project ProjectID, offset, l
 	if err := tx.connection.QueryRowContext(ctx, "SELECT count(*) FROM ("+productionRelevant+")", args...).Scan(&page.Total); err != nil {
 		return page, err
 	}
-	rows, err := tx.connection.QueryContext(ctx, "SELECT * FROM ("+productionRelevant+") ORDER BY observed_at_ms DESC, kind, repository, identity LIMIT ? OFFSET ?", append(args, limit, offset)...)
+	rows, err := tx.connection.QueryContext(ctx, "SELECT * FROM ("+productionRelevant+") ORDER BY kind, repository, identity LIMIT ? OFFSET ?", append(args, limit, offset)...)
 	if err != nil {
 		return page, err
 	}
