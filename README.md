@@ -58,7 +58,7 @@ short CLI setup is still required; once the worker appears, use its console
 panel to inspect results and queue more work. Try one small documentation
 correction before handing over a larger goal.
 
-On the floor, select the tray for **Tasks** or the planning table for **Missions**.
+In the floor's break room, select the task tray for **Tasks**, the planning table for **Missions**, the board or the bookshelf.
 A mission records an objective and acceptance criteria for an overseer; its related
 work remains inspectable after workers finish. **Pause new work** stops new
 admission while active processes continue.

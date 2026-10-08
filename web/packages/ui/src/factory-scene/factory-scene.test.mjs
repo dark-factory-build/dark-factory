@@ -581,9 +581,9 @@ test("resting workers take fair, uninterrupted turns at the break-room furniture
   // The furniture stands inside the room, clear of every seat, on a wide floor and on the narrowest.
   const wide = layoutScene(hallsOf(Array.from({ length: 16 }, (_, index) => `room-${index}`)));
   const nook = breakRoomNook(wide, 12, 1);
-  assert.deepEqual(nook.furniture.map((piece) => piece.errand), ["shelf", "coffee"]);
+  assert.deepEqual(nook.furniture.map((piece) => piece.errand), ["shelf", "coffee", "board", "missions", "tasks"]);
   const narrow = layoutScene(hallsOf(["room-0"])), narrowNook = breakRoomNook(narrow, 40, 40);
-  assert.deepEqual(narrowNook.furniture.map((piece) => piece.errand), ["shelf", "coffee"]);
+  assert.deepEqual(narrowNook.furniture.map((piece) => piece.errand), ["shelf", "coffee", "board", "missions", "tasks"]);
   for (const [layout, pieces, counts] of [[wide, nook.furniture, [12, 1]], [narrow, narrowNook.furniture, [40, 40]]]) for (const piece of pieces) {
     assert.ok(piece.x >= PADDING && piece.x + WORKER_SIZE <= PADDING + COMMON_WIDTH && piece.stand.x + 12 <= PADDING + COMMON_WIDTH);
     assert.ok(piece.y >= 16 && piece.y + WORKER_SIZE < layout.restingTop, "break furniture stays above common seating");
@@ -620,9 +620,9 @@ test("resting workers take fair, uninterrupted turns at the break-room furniture
   // the visitor in the order, or another leaving, mid-turn changes nothing; it ends with the turn,
   // or when the visitor themselves stops resting.
   let mid = 0, held = [];
-  for (let at = 0, last = []; at < 1800000 && mid === 0; at += 2000) { last = placeErrands(placements, nook, (id) => habits.get(id), at, last); if (last.filter((placement) => placement.errand !== undefined).length === nook.furniture.length) { mid = at; held = last; } }
+  for (let at = 0, last = []; at < 1800000 && mid === 0; at += 2000) { last = placeErrands(placements, nook, (id) => habits.get(id), at, last); if (last.filter((placement) => placement.errand !== undefined).length === 2) { mid = at; held = last; } }
   const holders = held.filter((placement) => placement.errand !== undefined);
-  assert.equal(holders.length, nook.furniture.length, "a moment with every piece occupied");
+  assert.equal(holders.length, 2, "a moment with the shelf and the coffee both occupied: the implements have no ambient turns");
   const newcomer = person("aaa-first-in-order"), joined = placeWorkers(wide, [...crowd, newcomer, person("planner", { location: "unobserved" }), person("asking", { activity: "needs-you" })]);
   for (const suits of ["shelf", "coffee"]) {
     const habit = (id) => id === newcomer.id ? suits : habits.get(id);
@@ -675,9 +675,10 @@ test("resting workers take fair, uninterrupted turns at the break-room furniture
   assert.ok(atShelf.some((name) => name.endsWith(".hold")) && atShelf.includes("person.held.book.chest") && atShelf.some((name) => name.includes("legs.") && name.endsWith(".stand")));
   assert.ok(workerFrames(crowd[0], { action: "still", frame: 0, at: 0 }, undefined, "coffee").includes("person.held.cup.chest"));
   assert.ok(atShelf.every((name) => !name.startsWith("person.tool.")));
-  // The floor draws exactly the furniture the nook has, and none with the scenery off.
+  for (const implement of ["board", "missions", "tasks"]) assert.ok(workerFrames(crowd[0], { action: "still", frame: 0, at: 0 }, undefined, implement).includes("person.held.clipboard.chest"), implement);
+  // The floor draws exactly the furniture the nook has; with the scenery off, only the implements, never the coffee.
   assert.equal((render().match(/data-break-room=/g) ?? []).length, breakRoomNook(layoutScene(graph), 0, 1).furniture.length);
-  assert.equal((render({ appearance: { scenery: "off", animation: "on" } }).match(/data-break-room=/g) ?? []).length, 0);
+  assert.deepEqual(render({ appearance: { scenery: "off", animation: "on" } }).match(/data-break-room="\w+"/g), ['data-break-room="shelf"', 'data-break-room="board"', 'data-break-room="missions"', 'data-break-room="tasks"']);
 });
 
 test("a floor mounted late still starts seated, then someone gets up, stands at the furniture, and comes back", async () => {
@@ -945,6 +946,8 @@ test("stationary tasks link the existing queue and questions", () => {
   assert.match(markup, /data-floor-inbox="10"[^>]*aria-label="Open Tasks"[^>]*role="button"[^>]*tabindex="0"/);
   // Selecting queued work in the panel still lights its pile on the floor.
   assert.match(render({ tasks, selectedTaskId: "task-1", onSelectTask() {} }), /data-floor-inbox="10"[\s\S]*?stroke="#80ddff"/);
+  const pile = (html) => html.match(/data-floor-inbox="\d+"[\s\S]*?<\/g><\/g>/)[0].match(/fill="#e4dcc0"/g)?.length ?? 0;
+  assert.deepEqual([pile(markup), pile(render({ tasks: tasks.slice(0, 3) })), pile(render({ tasks: [tasks[0]] }))], [3, 2, 0], "the pile follows the queue, up to three papers");
   // The tray is furniture: it stays when nothing waits, and says so.
   const idle = render({ tasks: [tasks[0]], onSelectTask() {} });
   assert.match(idle, /data-floor-inbox="0"/);
@@ -959,10 +962,16 @@ test("stationary tasks link the existing queue and questions", () => {
   assert.doesNotMatch(noObservation, /data-human-request-id=/);
 });
 
-test("the tray and planning table expose stable project actions", () => {
-  const markup = render({ projectId: "project-a", onOpenTasks() {}, onOpenMissions() {} });
-  assert.match(markup, /data-floor-inbox="0"[^>]*aria-label="Open Tasks"[^>]*role="button"[^>]*tabindex="0"/);
-  assert.match(markup, /data-common-table="planning"[^>]*data-tooltip="Missions · inspect objectives"[^>]*aria-label="Open Missions"[^>]*role="button"[^>]*tabindex="0"/);
+test("the separate desks are gone: the break room's implements open their panels", () => {
+  const markup = render({ projectId: "project-a", onOpenTasks() {}, onOpenMissions() {}, onOpenBoard() {}, onOpenLibrary() {} });
+  assert.doesNotMatch(markup, /data-floor-tray-desk|data-common-table="planning"/);
+  assert.equal((markup.match(/>(BOARD|MISSIONS|TASKS|LIBRARY)</g) ?? []).length, 4, "each implement signed once");
+  assert.match(markup, /data-break-room="tasks" data-floor-inbox="0"[^>]*aria-label="Open Tasks"[^>]*role="button"[^>]*tabindex="0"/);
+  assert.match(markup, /data-break-room="missions"[^>]*data-tooltip="Missions · inspect objectives"[^>]*aria-label="Open Missions"[^>]*role="button"[^>]*tabindex="0"/);
+  assert.match(markup, /data-break-room="board"[^>]*aria-label="Open discussion board"[^>]*role="button"[^>]*tabindex="0"/);
+  assert.match(markup, /data-break-room="shelf"[^>]*aria-label="Open project library"[^>]*role="button"[^>]*tabindex="0"/);
+  // Without a panel to open, an implement is scenery, not a dead button.
+  assert.doesNotMatch(render({ projectId: "project-a" }), /data-break-room="missions"[^>]*role="button"/);
 });
 
 test("planning table detail stays within the tabletop for multi-worker rows", () => {
@@ -995,13 +1004,10 @@ test("floor action hit areas invoke existing task and mission routes", async () 
     }));
   });
   const tray = renderer.root.findByProps({ "data-floor-inbox": 0 });
-  const planning = renderer.root.findByProps({ "data-common-table": "planning" });
-  const trayFocus = tray.findAllByType("rect").find((node) => Number(node.props.width) === 44);
-  const planningFocus = planning.findAllByType("rect").find((node) => Number(node.props.width) === 44);
-  assert.deepEqual({ x: Number(trayFocus.props.x), y: Number(trayFocus.props.y), width: Number(trayFocus.props.width), height: Number(trayFocus.props.height) }, { x: -22, y: -22, width: 44, height: 44 });
-  assert.deepEqual({ x: Number(planningFocus.props.x), y: Number(planningFocus.props.y), width: Number(planningFocus.props.width), height: Number(planningFocus.props.height) }, { x: -22, y: -22, width: 44, height: 44 });
+  const planning = renderer.root.findByProps({ "data-break-room": "missions" });
+  for (const target of [tray, planning]) assert.equal(target.findAll((node) => node.props.className === "dfFactoryScene__focus").length, 1, "one focus ring per implement");
   await act(async () => tray.props.onClick());
-  await act(async () => planning.props.onClick());
+  await act(async () => planning.props.onKeyDown({ key: "Enter", preventDefault() {} }));
   assert.equal(tasksOpened, "project");
   assert.equal(missionsOpened, "project");
   await act(async () => renderer.root.findByProps({ "data-peer-question-count": 1 }).props.onClick());

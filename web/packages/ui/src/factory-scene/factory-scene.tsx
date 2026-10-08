@@ -25,6 +25,7 @@ import {
   type SceneReading,
   type SceneRoomLayout,
   type SceneWorker,
+  type BreakRoomErrand,
   recordedEffort,
 } from "./scene.js";
 import { IconButton } from "../icons.js";
@@ -89,6 +90,10 @@ const DAY = 24 * 60 * 60_000, CHANGEOVER = 10 * 60_000;
 const NO_QUESTIONS: readonly PeerQuestionItem[] = [];
 export type KnowledgeCueView = Readonly<{ key: string; agentId: string; board: boolean; reading: boolean; label: string; open?: () => void }>;
 const NO_CUES: readonly KnowledgeCueView[] = [];
+type Implement = ReturnType<typeof breakRoomNook>["furniture"][number];
+const IMPLEMENT_NAMES: Record<BreakRoomErrand, string> = { shelf: "bookshelf", coffee: "coffee station", board: "discussion board", missions: "planning table", tasks: "task tray" };
+// A recorded visit: the walk over (the far end of the nook is a few seconds away by the aisles), a while at the implement, then back.
+const VISIT = 10000;
 
 /** A recorded operation, unlike ambient life, is labelled, focusable and opens what it used. */
 function KnowledgeCueMark({ cue, x, y, at }: { cue: KnowledgeCueView; x: number; y: number; at: string }) {
@@ -166,7 +171,7 @@ function useReducedMotion() {
 }
 
 /** One browser clock; source state only ever supplies the next local destination. */
-function useSceneMotion(layout: ReturnType<typeof layoutScene>, seated: ReturnType<typeof placeWorkers>, floorDigest: string, connected: boolean, reduced: boolean, active: ReadonlySet<string>, workers: FactorySceneProps["workers"], errands: boolean, nearby: boolean, restless: (at: number) => boolean) {
+function useSceneMotion(layout: ReturnType<typeof layoutScene>, seated: ReturnType<typeof placeWorkers>, floorDigest: string, connected: boolean, reduced: boolean, active: ReadonlySet<string>, workers: FactorySceneProps["workers"], errands: boolean, nearby: boolean, restless: (at: number) => boolean, visits: ReadonlyMap<string, Implement>) {
   const motions = useRef(new Map<string, MotionState>());
   const priorFloor = useRef<string | undefined>(undefined);
   const priorConnected = useRef<boolean | undefined>(undefined);
@@ -187,13 +192,16 @@ function useSceneMotion(layout: ReturnType<typeof layoutScene>, seated: ReturnTy
   const errandClock = moving && errands && motionsFloor.current === floorDigest ? Math.floor(movingTime.current.total / 2000) * 2000 : undefined;
   // Who holds which piece, so that a visit outlasts changes among the others resting.
   const errandsBefore = useRef<ReturnType<typeof placeWorkers>>([]);
+  const visitKey = [...visits].map(([id, piece]) => `${id} ${piece.key}`).join(" ");
   const placements = useMemo(() => {
-    // With the scenery off there is no furniture to walk to.
-    if (errandClock === undefined) return errandsBefore.current = seated;
-    const nook = breakRoomNook(layout, seated.filter((placement) => placement.area === "resting" && placement.roomId === undefined).length, seated.filter((placement) => placement.area !== "room" && placement.area !== "resting").length, nearby);
     const byId = new Map(workers.map((worker) => [worker.id, worker]));
-    return errandsBefore.current = placeErrands(seated, nook, (id) => { const worker = byId.get(id); return worker === undefined ? undefined : breakRoomHabit(worker); }, errandClock, errandsBefore.current);
-  }, [seated, errandClock, layout, workers, nearby]);
+    // With the scenery off there are no ambient errands, only recorded visits.
+    const ambient = errandsBefore.current = errandClock === undefined ? seated
+      : placeErrands(seated, breakRoomNook(layout, 0, 0, nearby), (id) => { const worker = byId.get(id); return worker === undefined ? undefined : breakRoomHabit(worker); }, errandClock, errandsBefore.current);
+    // A recorded visit outranks an ambient one: whoever idled at that piece sits back down.
+    const taken = new Set([...visits.values()].map((piece) => piece.key));
+    return ambient.map((placement, index) => { const piece = visits.get(placement.id); return piece !== undefined && placement.area === "resting" ? { ...seated[index]!, errand: piece.errand, errandKey: `use ${piece.key}`, ...piece.stand } : placement.errandKey !== undefined && taken.has(placement.errandKey) ? seated[index]! : placement; });
+  }, [seated, errandClock, layout, workers, nearby, visitKey]);
 
   useEffect(() => {
     const at = now();
@@ -271,7 +279,7 @@ function useSceneMotion(layout: ReturnType<typeof layoutScene>, seated: ReturnTy
 }
 
 /** The animation clock updates worker elements without rerendering the floor or atlas. */
-function SceneWorkers({ knowledgeCues, shelf, board, onOpenBoard, nearby, errands, furniture, restingSeats, tray, peerQuestions, layout, placements: seated, labels, workers, tasks, connected, animate, selectedWorkerId, onSelectWorker, onSelectTask, onSelectHumanRequest, onSelectProposal }: Pick<FactorySceneProps, "workers" | "selectedWorkerId" | "onSelectWorker" | "onSelectTask" | "onSelectHumanRequest"> & {
+function SceneWorkers({ knowledgeCues, nook, onOpenBoard, nearby, errands, furniture, restingSeats, peerQuestions, layout, placements: seated, labels, workers, tasks, connected, animate, selectedWorkerId, onSelectWorker, onSelectTask, onSelectHumanRequest, onSelectProposal }: Pick<FactorySceneProps, "workers" | "selectedWorkerId" | "onSelectWorker" | "onSelectTask" | "onSelectHumanRequest"> & {
   onSelectProposal?: (id: string) => void;
   layout: ReturnType<typeof layoutScene>;
   placements: ReturnType<typeof placeWorkers>;
@@ -286,11 +294,8 @@ function SceneWorkers({ knowledgeCues, shelf, board, onOpenBoard, nearby, errand
   nearby: boolean;
   /** The break room's seats, where its idle life happens. */
   restingSeats: readonly Seat[];
-  /** Where waiting work is kept, and so where handed-over work comes from. */
-  tray: { x: number; y: number };
-  /** Where a recorded Library or Board operation flies from or to; without one, nothing flies. */
-  shelf?: { x: number; y: number };
-  board: { x: number; y: number };
+  /** The break room's implements: where handed-over work and recorded Library or Board operations come from or go to. */
+  nook: readonly Implement[];
   onOpenBoard?: (projectId?: string) => void;
   peerQuestions: readonly PeerQuestionItem[];
   knowledgeCues: readonly KnowledgeCueView[];
@@ -300,8 +305,13 @@ function SceneWorkers({ knowledgeCues, shelf, board, onOpenBoard, nearby, errand
   const active = useMemo(() => new Set(workers.filter((worker) => worker.location === "working" && worker.activity === "busy" && seated.some((placement) => placement.id === worker.id && placement.area === "room" && layout.rooms.find((room) => room.id === placement.roomId)?.contents.some((item) => item.workSurface))).map((worker) => worker.id)), [workers, seated, layout]);
   const reduced = useReducedMotion();
   const mail = useRef<readonly (FloorMessage & { end?: { x: number; y: number } })[]>([]);
-  const { placements, positions, pulse } = useSceneMotion(layout, seated, geometryKey, connected && animate, reduced, active, workers, errands, nearby, (at) => mail.current.some((message) => endsAt(message) > at) || errands && catAt(restingSeats.filter((seat) => seat.y === restingSeats[0]!.y), at)?.moving === true);
+  // Who is up using an implement because of a recorded event, and until when.
+  const visits = useRef(new Map<string, { piece: Implement; until: number }>());
+  const visiting = new Map(reduced ? [] : [...visits.current].filter(([, visit]) => visit.until > now()).map(([id, visit]) => [id, visit.piece]));
+  const { placements, positions, pulse } = useSceneMotion(layout, seated, geometryKey, connected && animate, reduced, active, workers, errands, nearby, (at) => mail.current.some((message) => endsAt(message) > at) || errands && catAt(restingSeats.filter((seat) => seat.y === restingSeats[0]!.y), at)?.moving === true, visiting);
+  const centre = (errand: BreakRoomErrand) => { const piece = nook.find((item) => item.errand === errand); return piece && { x: piece.x + WORKER_SIZE / 2, y: piece.y + WORKER_SIZE / 2 }; };
   const workerById = new Map(workers.map((worker) => [worker.id, worker]));
+  const visitor = (id: string) => positions.get(id)?.placement.errandKey?.startsWith("use ") === true;
   // Nobody on the floor, no pulse: what lives there rests as it does under any stopped clock.
   const at = placements.length === 0 ? undefined : pulse;
   // What changed since the last look is sent across the floor once; with the clock stopped it is only noted.
@@ -311,18 +321,26 @@ function SceneWorkers({ knowledgeCues, shelf, board, onOpenBoard, nearby, errand
   useEffect(() => {
     // The floor is mounted before there is any state, and may lose it again: a look only counts while
     // connected, so the first snapshot after connecting or reconnecting is history, never a burst of old news.
-    if (!connected) { seen.current = undefined; return; }
+    if (!connected) { seen.current = undefined; visits.current.clear(); return; }
     const { seen: next, events } = observe(seen.current, tasks, peerQuestions, knowledgeCues);
     seen.current = next;
     const started = now();
     const kept = mail.current.filter((message) => endsAt(message) > started);
     // A recorded operation flies between the agent, wherever it already is, and the shelf or board; one per agent at a time.
     const recording = new Set(kept.flatMap((message) => message.kind === "read" || message.kind === "post" ? [message.from ?? message.to] : []));
+    visits.current = new Map([...visits.current].filter(([, visit]) => visit.until > started));
     mail.current = [...kept, ...(!live.current ? [] : events).flatMap((event) => {
-      const cue = knowledgeCues.find((item) => item.key === event.subject), furniture = cue === undefined ? undefined : cue.board ? board : shelf;
+      const cue = knowledgeCues.find((item) => item.key === event.subject), furniture = cue === undefined ? undefined : centre(cue.board ? "board" : "shelf");
+      // Someone idling in the break room gets up and uses the implement instead; anyone at work stays put and the message flies.
+      const who = event.kind === "post" ? event.from : event.kind === "ask" || event.kind === "answer" ? undefined : event.to;
+      const piece = nook.find((item) => item.errand === (event.kind === "assign" ? "tasks" : cue?.board ? "board" : "shelf"));
+      if (who !== undefined && piece !== undefined && !reduced && seated.some((placement) => placement.id === who && placement.area === "resting" && placement.roomId === undefined)) {
+        if (!visits.current.has(who)) visits.current.set(who, { piece, until: started + VISIT });
+        return [];
+      }
       const seat = seated.find((placement) => placement.id === event.to), from = seated.find((placement) => placement.id === event.from), to = event.to === undefined ? furniture : seat;
       // A write leaves the writer where it is drawn, walking or on an errand, not its seat.
-      const origin = (event.kind === "post" ? positions.get(event.from!) : from) ?? (event.kind === "read" ? furniture : tray), agent = cue?.agentId;
+      const origin = (event.kind === "post" ? positions.get(event.from!) : from) ?? (event.kind === "read" ? furniture : centre("tasks")), agent = cue?.agentId;
       if (to === undefined || origin === undefined || event.from !== undefined && from === undefined || kept.some((message) => message.key === event.key) || agent !== undefined && recording.has(agent)) return [];
       if (agent !== undefined) recording.add(agent);
       return [{ ...send(event, started, origin, from === undefined || seat === undefined || isPaper(event.kind) ? undefined : routeBetween(layout, from, seat), Math.hypot(to.x - origin.x, to.y - origin.y)), end: seat === undefined ? to : undefined }];
@@ -412,7 +430,7 @@ function SceneWorkers({ knowledgeCues, shelf, board, onOpenBoard, nearby, errand
               <g data-seated={sitting ? placement.area === "resting" ? "coffee" : "planning" : undefined} data-active-pose={position.motion.action === "interacting" ? position.motion.frame : undefined}><g transform={`scale(${WORKER_SIZE / FRAME})${bob === 0 ? "" : ` translate(0 ${bob})`}${facingWest ? " scale(-1 1)" : ""}`}>{frames.map((frame) => <Frame key={frame} name={frame} x={-8} y={-8} />)}</g>
               </g>
             </g>
-            <g role="img" className="dfFactoryScene__target" data-tooltip={`${worker.name} · ${worker.activity}${worker.review ? `\nReview assignment: ${worker.review.scope}; representative visit, not exact file inspection` : ""}\n${placement.area === "room" ? `Working at ${worker.locationLabel ?? room?.label ?? "observed changes"}` : placement.errand === "shelf" ? "Taking a break · at the bookshelf" : placement.errand === "coffee" ? "Taking a break · at the coffee station" : placement.area === "resting" ? `${worker.paused ? "Paused · taking a break" : "Taking a break"}${stroking === undefined ? "" : " · fussing the cat"}${said}` : worker.location === "unobserved" ? "Planning · location not yet observed" : "Planning · work outside the halls shown"}${worker.telemetry === undefined ? "" : recordedEffort(worker.telemetry)}${[...new Set(asking)].join("")}`} aria-label={`${worker.name}, ${worker.review ? "reviewer" : worker.role}, ${worker.activity}, ${worker.review?.scope ?? location}`} {...sceneAction(worker.review && onSelectProposal ? () => onSelectProposal(worker.review!.proposalId) : onSelectWorker === undefined ? undefined : () => onSelectWorker(worker.id))}>
+            <g role="img" className="dfFactoryScene__target" data-tooltip={`${worker.name} · ${worker.activity}${worker.review ? `\nReview assignment: ${worker.review.scope}; representative visit, not exact file inspection` : ""}\n${placement.area === "room" ? `Working at ${worker.locationLabel ?? room?.label ?? "observed changes"}` : placement.errand !== undefined ? `${placement.errandKey?.startsWith("use ") ? "Recorded use" : "Taking a break"} · at the ${IMPLEMENT_NAMES[placement.errand]}` : placement.area === "resting" ? `${worker.paused ? "Paused · taking a break" : "Taking a break"}${stroking === undefined ? "" : " · fussing the cat"}${said}` : worker.location === "unobserved" ? "Planning · location not yet observed" : "Planning · work outside the halls shown"}${worker.telemetry === undefined ? "" : recordedEffort(worker.telemetry)}${[...new Set(asking)].join("")}`} aria-label={`${worker.name}, ${worker.review ? "reviewer" : worker.role}, ${worker.activity}, ${worker.review?.scope ?? location}`} {...sceneAction(worker.review && onSelectProposal ? () => onSelectProposal(worker.review!.proposalId) : onSelectWorker === undefined ? undefined : () => onSelectWorker(worker.id))}>
                 <rect className="dfFactoryScene__focus" x={-12} y={-12} width="24" height="24" rx="3" fill="transparent" />
             </g>
             {worker.review === undefined ? null : <g aria-hidden="true"><rect x="7" y="1" width="10" height="13" fill="#e1d1aa" stroke="#5c787b" /><text x="12" y="10" textAnchor="middle" fill="#203d46" fontSize="8">R</text></g>}
@@ -439,7 +457,9 @@ function SceneWorkers({ knowledgeCues, shelf, board, onOpenBoard, nearby, errand
       {cat !== undefined && cat.y === rows[0]?.[0]?.y ? puss : null}
       {/* What an agent just recorded flies between it and the shelf or board, then rests beside it, newest per agent. */}
       {flights.map(({ message, point }) => { const cue = cueOf.get(message.subject ?? ""); return point === undefined || cue === undefined ? null : <KnowledgeCueMark key={message.key} cue={cue} x={point.x} y={point.y} at="flight" />; })}
-      {[...new Map(knowledgeCues.filter((cue) => positions.has(cue.agentId) && !flights.some(({ message, point }) => point !== undefined && message.subject === cue.key)).map((cue) => [cue.agentId, cue])).values()].map((cue) => { const position = positions.get(cue.agentId)!; return <KnowledgeCueMark key={cue.key} cue={cue} x={position.x - 20} y={position.y - 32} at="agent" />; })}
+      {[...new Map(knowledgeCues.filter((cue) => positions.has(cue.agentId) && !flights.some(({ message, point }) => point !== undefined && message.subject === cue.key)).map((cue) => [cue.agentId, cue])).values()].map((cue) => { const position = positions.get(cue.agentId)!, using = visitor(cue.agentId); return <KnowledgeCueMark key={cue.key} cue={cue} x={position.x + (using ? 0 : -20)} y={position.y - (using ? 24 : 32)} at="agent" />; })}
+      {/* The newest operation nobody walked over for is marked above the board or shelf it used, clear of its sign: one mark per event. */}
+      {(["board", "shelf"] as const).map((errand) => { const cue = knowledgeCues.filter((item) => item.board === (errand === "board") && !visitor(item.agentId)).at(-1), piece = nook.find((item) => item.errand === errand); return cue === undefined || piece === undefined ? null : <KnowledgeCueMark key={errand} cue={cue} x={piece.x + WORKER_SIZE / 2} y={piece.y - 9} at={errand} />; })}
       {/* Said and felt, over everyone's heads: never words on the floor, those are in the tooltip. */}
       <g aria-hidden="true" pointerEvents="none">
         {[...calling].map(([id, glyph]) => { const position = positions.get(id); return position === undefined ? null : <g key={`call ${id}`} data-bubble={glyph} data-call={id} transform={`translate(${position.x} ${position.y}) scale(${WORKER_SIZE / FRAME})`}><Frame name={`bubble.${glyph}`} x={1} y={-21} /></g>; })}
@@ -500,13 +520,18 @@ export function FactoryScene({ proposals, crates, tools, onLoadNode, onInvestiga
   const seats = [...seating.resting, ...seating.planning];
   const commonBottom = Math.max(layout.restingTop, ...seats.map(({ y }) => y)) + 32;
   const nook = breakRoomNook(layout, commonResting.length, planning.length, appearance.social === "nearby");
-  const station = { missions: { x: PADDING + 40, y: 48 }, tasks: { x: PADDING + 120, y: 48 } };
   const sceneWidth = layout.width;
   const sceneHeight = Math.max(layout.height, commonBottom, 112, ...placements.map((placement) => placement.y + 24)) + 2 * PADDING;
   const belts = useMemo(() => [...hallIntake(layout, graph.halls), ...routeFlows(layout, graph.flows)], [layout, graph.halls, graph.flows]);
   const queued = tasks.filter((order) => order.status === "queued").length;
-  const tray = station.tasks;
-  const shelf = nook?.furniture.find((piece) => piece.errand === "shelf" && (!piece.roomId || labels.has(piece.roomId)) && (appearance.scenery !== "off" || onOpenLibrary));
+  // The implements are always there: each opens its panel and the tray shows the queue. Coffee is scenery only.
+  const implementsShown = nook.furniture.filter((piece) => piece.errand !== "coffee" || appearance.scenery !== "off");
+  const opens: Partial<Record<BreakRoomErrand, readonly [((projectId?: string) => void) | undefined, string, string, string]>> = {
+    board: [onOpenBoard, "Discussion board", "Open discussion board", "BOARD"],
+    missions: [onOpenMissions, "Missions · inspect objectives", "Open Missions", "MISSIONS"],
+    tasks: [onOpenTasks, queued === 0 ? "Tasks · queue is empty" : `Tasks · ${queued} queued`, "Open Tasks", "TASKS"],
+    shelf: [onOpenLibrary, "Library · documents", "Open project library", "LIBRARY"],
+  };
   const animate = connected && appearance.animation !== "off";
   // Changeovers are dated against the graph's own observation time, never the viewer's clock.
   const observedAt = graph.observedAt ?? 0;
@@ -680,22 +705,27 @@ export function FactoryScene({ proposals, crates, tools, onLoadNode, onInvestiga
 
       <WorkLine layout={layout} crates={crates} tasks={tasks} placements={placements} connected={connected} live={animate} onLight={setLit} onSelect={proposals?.onSelect} />
 
-      <g data-tooltip="Discussion board" className={onOpenBoard ? "dfFactoryScene__target" : undefined} aria-label="Open discussion board" {...sceneAction(onOpenBoard === undefined ? undefined : () => onOpenBoard(projectId))} transform={`translate(${PADDING + 24} 90)`}><rect className="dfFactoryScene__focus" x="-8" y="-8" width="48" height="48" fill="transparent" /><g aria-hidden="true"><Frame name="prop.board" x={0} y={0} /><text x="0" y="30" fill="#d4ddd2" fontSize="10">BOARD</text></g></g>
-      {(() => { const cue = knowledgeCues.filter((item) => item.board).at(-1); return cue === undefined ? null : <KnowledgeCueMark cue={cue} x={PADDING + 58} y={88} at="board" />; })()}
-      {nook?.furniture.filter((piece) => (!piece.roomId || labels.has(piece.roomId)) && (appearance.scenery !== "off" || (piece.errand === "shelf" && onOpenLibrary))).map((piece) => <g key={piece.key} data-break-room={piece.errand} opacity=".8" transform={`translate(${piece.x} ${piece.y}) scale(${WORKER_SIZE / FRAME})`}>
-        {piece.errand !== "shelf" || onOpenLibrary === undefined ? null : <g className="dfFactoryScene__target" data-tooltip="Library · documents" {...sceneAction(() => onOpenLibrary(projectId))} aria-label="Open project library"><rect className="dfFactoryScene__focus" x="-9" y="-9" width="35" height="35" fill="transparent" /></g>}
-        <g aria-hidden="true" pointerEvents="none"><Frame name={piece.errand === "shelf" ? "prop.bookshelf" : "prop.coffeestation"} x={0} y={0} />
-        {piece.errand === "shelf" ? <text x="8" y="23" textAnchor="middle" fill="#d4ddd2" fontSize="4">LIBRARY</text> : null}
-        {piece.errand !== "coffee" ? null : <path d="M2 15v3 M14 15v3" stroke="#303b3b" strokeWidth="2" />}</g>
-      </g>)}
-      {(() => { const cue = knowledgeCues.filter((item) => !item.board).at(-1); return cue === undefined || shelf === undefined ? null : <KnowledgeCueMark cue={cue} x={shelf.x + WORKER_SIZE} y={shelf.y} at="shelf" />; })()}
+      {implementsShown.map((piece) => { const [open, tooltip, label, sign] = opens[piece.errand] ?? []; return <g key={piece.key} data-break-room={piece.errand} data-floor-inbox={piece.errand === "tasks" ? queued : undefined}
+        {...(open === undefined ? {} : { className: "dfFactoryScene__target", "data-tooltip": tooltip, "aria-label": label, ...sceneAction(() => open(projectId)) })} transform={`translate(${piece.x} ${piece.y}) scale(${WORKER_SIZE / FRAME})`}>
+        {open === undefined ? null : <rect className="dfFactoryScene__focus" x="-2" y="-2" width="20" height="28" fill="transparent" />}
+        <g aria-hidden="true" pointerEvents="none" opacity=".8">
+          {piece.errand === "missions" ? <g><rect x="0" y="7" width="16" height="5" fill="#455c5e" stroke="#8c8871" strokeWidth=".5" /><rect x=".5" y="7.5" width="15" height="3" fill="#9fae9e" /><path d="M2 8.5h7v1.5H5 M11 9h2" fill="none" stroke="#536e70" strokeWidth=".5" /><path d="M2 12v4 M14 12v4" stroke="#393f3c" strokeWidth="1.5" /></g>
+            : piece.errand === "tasks" ? <g><rect x="0" y="9" width="16" height="4" fill="#5b5545" stroke="#a08f68" strokeWidth=".5" /><path d="M2 13v3 M14 13v3" stroke="#393b35" strokeWidth="1.5" />
+              {/* Waiting work, as the pile in a real tray: it says how the queue is doing. */}
+              {[...Array(Math.min(queued, 3))].map((_, index) => <rect key={index} x="4" y={7 - index * 1.5} width="8" height="1.5" fill="#e4dcc0" strokeWidth=".4" stroke={tasks.some((task) => task.id === selectedTaskId && task.status === "queued") ? "#80ddff" : "#a6a087"} />)}
+              <path d="M3 7v2h10v-2" fill="none" stroke="#c2b184" /></g>
+            : <Frame name={piece.errand === "shelf" ? "prop.bookshelf" : piece.errand === "board" ? "prop.board" : "prop.coffeestation"} x={0} y={0} />}
+          {sign === undefined ? <path d="M2 15v3 M14 15v3" stroke="#303b3b" strokeWidth="2" /> : <text x="8" y="23" textAnchor="middle" fill="#d4ddd2" fontSize="4">{sign}</text>}
+        </g>
+      </g>; })}
       {[
         { label: "Break room · ambient", seats: seating.resting, planning: false, occupied: commonResting.length },
         { label: "Work tables", seats: seating.planning, planning: true, occupied: planning.length },
       ].filter(({ seats }) => seats.length > 0).map(({ label, seats, planning, occupied }) => {
         const top = seats[0]!.y;
         return <g key={label} role="group" aria-label={label}>
-          <text x={seats[0]!.x - 18} y={top - 27} fill="#9db1be" fontFamily="ui-monospace, monospace" fontSize="8">{label}</text>
+          {/* The break room's sign hangs over its implements, clear of whoever stands at them. */}
+          <text x={seats[0]!.x - 18} y={planning ? top - 27 : 46} fill="#9db1be" fontFamily="ui-monospace, monospace" fontSize="8">{label}</text>
           {/* A stool only where someone sits; the tables stand in front of them, drawn after the workers. */}
           {seats.slice(0, occupied).map((seat, index) => <g key={index} aria-hidden="true" data-common-seat={planning ? "planning" : "resting"} transform={`translate(${seat.x} ${seat.y})`}>
             <rect x="-7" y="3" width="14" height="6" rx="2" fill="#655948" stroke="#897c61" />
@@ -706,26 +736,7 @@ export function FactoryScene({ proposals, crates, tools, onLoadNode, onInvestiga
       {layout.rooms.length === 0 ? <text x={ROOM_LEFT} y="24" fill="#9db1be" fontFamily="ui-monospace, monospace" fontSize="10">{reading ? "READING THE PLANT…" : "NO OPERATIONAL STRUCTURE INFERRED YET"}</text> : null}
 
       {placements.filter((placement) => placement.area === "resting" && placement.roomId !== undefined).map((seat) => <g key={seat.id} data-nearby-rest={seat.roomId} aria-hidden="true"><rect x={seat.x - 12} y={seat.y + 5} width="24" height="7" fill="#655948" stroke="#9b8b6b" /><path d={`M${seat.x - 8} ${seat.y + 12}v5m16-5v5`} stroke="#74664e" strokeWidth="3" /></g>)}
-      <SceneWorkers knowledgeCues={knowledgeCues} shelf={shelf === undefined ? undefined : { x: shelf.x + WORKER_SIZE / 2, y: shelf.y + WORKER_SIZE / 2 }} board={{ x: PADDING + 32, y: 98 }} onOpenBoard={onOpenBoard} nearby={appearance.social === "nearby"} errands={appearance.scenery !== "off"} restingSeats={[...resting.filter((seat) => seat.roomId !== undefined), ...seating.resting]} tray={tray} peerQuestions={peerQuestions} furniture={tables} layout={layout} placements={placements} labels={labels} workers={workers} tasks={tasks} connected={connected} animate={appearance.animation !== "off"} selectedWorkerId={selectedWorkerId} onSelectWorker={onSelectWorker} onSelectTask={onSelectTask} onSelectHumanRequest={onSelectHumanRequest} onSelectProposal={proposals?.onSelect} />
-      <g data-common-table="planning" data-tooltip="Missions · inspect objectives" aria-label="Open Missions" className={onOpenMissions === undefined ? undefined : "dfFactoryScene__target"} {...sceneAction(onOpenMissions === undefined ? undefined : () => onOpenMissions(projectId))} transform={`translate(${station.missions.x} ${station.missions.y})`}>
-        {onOpenMissions === undefined ? null : <rect className="dfFactoryScene__focus" x="-22" y="-22" width="44" height="44" fill="transparent" />}
-        <rect x="-22" y="-8" width="44" height="16" fill="#455c5e" stroke="#8c8871" />
-        <path d="M-17 8v7 M17 8v7" stroke="#393f3c" strokeWidth="3" />
-        <rect x="-21" y="-7" width="42" height="14" fill="#9fae9e" /><path d="M-18 -5h24v4H-6v-4 M9 -4h6" fill="none" stroke="#536e70" />
-        <text x="0" y="-12" textAnchor="middle" fill="#d4ddd2" fontFamily="ui-monospace, monospace" fontSize="10">MISSIONS</text>
-      </g>
-      <g aria-hidden="true" pointerEvents="none" data-floor-tray-desk="" transform={`translate(${tray.x} ${tray.y})`}>
-        <rect x="-22" y="-8" width="44" height="16" fill="#5b5545" stroke="#a08f68" />
-        <path d="M-17 8v7 M17 8v7" stroke="#393b35" strokeWidth="3" />
-        <text x="0" y="-12" textAnchor="middle" fill="#d9c58d" fontFamily="ui-monospace, monospace" fontSize="10">TASKS</text>
-      </g>
-      {/* Waiting work, as the tray it would be on a real desk. The pile says
-          how the queue is doing; the target opens the existing Tasks panel. */}
-      <g data-floor-inbox={queued} data-tooltip={queued === 0 ? "Tasks · queue is empty" : `Tasks · ${queued} queued`} aria-label="Open Tasks" className={onOpenTasks === undefined ? undefined : "dfFactoryScene__target"} {...sceneAction(onOpenTasks === undefined ? undefined : () => onOpenTasks(projectId))} transform={`translate(${tray.x} ${tray.y})`}>
-        {onOpenTasks === undefined ? null : <rect className="dfFactoryScene__focus" x="-22" y="-22" width="44" height="44" fill="transparent" />}
-        {[...Array(Math.min(queued, 3))].map((_, index) => <rect key={index} x="-10" y={-2 - index * 3} width="18" height="3" fill="#e4dcc0" stroke={tasks.some((task) => task.id === selectedTaskId && task.status === "queued") ? "#80ddff" : "#a6a087"} />)}
-        <path d="M-12 -4v6h24v-6 M-12 2h24" fill="none" stroke="#c2b184" strokeWidth="2" />
-      </g>
+      <SceneWorkers knowledgeCues={knowledgeCues} nook={implementsShown} onOpenBoard={onOpenBoard} nearby={appearance.social === "nearby"} errands={appearance.scenery !== "off"} restingSeats={[...resting.filter((seat) => seat.roomId !== undefined), ...seating.resting]} peerQuestions={peerQuestions} furniture={tables} layout={layout} placements={placements} labels={labels} workers={workers} tasks={tasks} connected={connected} animate={appearance.animation !== "off"} selectedWorkerId={selectedWorkerId} onSelectWorker={onSelectWorker} onSelectTask={onSelectTask} onSelectHumanRequest={onSelectHumanRequest} onSelectProposal={proposals?.onSelect} />
     </svg>
     {tooltip === undefined ? null : <div ref={tooltipElement} className="dfFactoryTooltip" role="tooltip" style={{ left: tooltip.x, top: tooltip.y, maxHeight: tooltip.room }}>{tooltip.text}</div>}
     </div>

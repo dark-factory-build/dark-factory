@@ -147,10 +147,12 @@ delivery state); the Library holds documents, including conclusions saved from
 a thread with it as evidence. Posting to the Board never assigns work or
 notifies an agent. The browser's `activity` read lists recorded revisions and
 supplied/read receipts, newest first, without recording anything. The floor
-cues new reads and writes once, briefly: a read flies from the shelf or board
-to wherever the agent already is, a write flies from the agent to them (one
-flight per agent; none under reduced motion), then rests beside the sprite and
-on the board or shelf, never moving anyone. What a run is supplied at launch is
+cues new reads and writes once, briefly. An agent idling in the common break
+room gets up, uses the bookshelf or board for a few seconds and sits back down,
+as it fetches newly started work from the task tray. An agent at work is never
+moved: a read flies from the shelf or board to wherever it is, a write flies
+from it to them (one per agent). Nothing walks or flies under reduced motion.
+The cue then rests beside the sprite and on the board or shelf. What a run is supplied at launch is
 listed but never cued. Flights, marks and the Activity list open the exact
 thread or revision, the last for agents that are off-screen or not drawn; a
 direct question's pulse opens the Board. The first listing after connecting or
