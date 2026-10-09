@@ -294,7 +294,7 @@ func (daemon *Daemon) routeSendBack(ctx context.Context, project kernel.ProjectI
 		err = daemon.escalatePull(op, "its send-back reached no task:\n\n"+note)
 	case err != nil:
 		return err // a running task refuses it until it settles
-	case !strings.Contains(kernel.TaskFeedback(task), "review-operation: "+op.ID+"\n") || task.WorkRevision.Int64() < 2:
+	case !strings.Contains(kernel.TaskFeedback(task), "review-operation: "+op.ID+"\n") || task.WorkRevision.Int64() < 1:
 		return errors.New("review: send-back did not move the task")
 	case task.WorkRevision.Int64() > 3:
 		err = daemon.escalatePull(op, "it is past two repair rounds; the latest went back to its task:\n\n"+note)

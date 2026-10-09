@@ -50,11 +50,15 @@ func (daemon *Daemon) publishSettledChanges(ctx context.Context) {
 }
 
 func (daemon *Daemon) publishSettledChange(ctx context.Context, c kernel.PublishableChange) error {
-	target, verified, err := daemon.store.RepositorySourceIdentity(ctx, c.Accepted.RepositoryID)
+	repositoryID := c.Accepted.RepositoryID
+	if repositoryID == (kernel.RepositoryID{}) {
+		repositoryID = c.Repository
+	}
+	target, verified, err := daemon.store.RepositorySourceIdentity(ctx, repositoryID)
 	if err != nil {
 		return err
 	}
-	id, pinned, err := daemon.store.RepositoryGitHubID(ctx, c.Accepted.RepositoryID)
+	id, pinned, err := daemon.store.RepositoryGitHubID(ctx, repositoryID)
 	if err != nil {
 		return err
 	}
@@ -64,7 +68,7 @@ func (daemon *Daemon) publishSettledChange(ctx context.Context, c kernel.Publish
 	repo := strings.ToLower(target.PublicationRepository)
 	// Accepted work keeps its destination, but a disabled repository is
 	// neither cloned nor reviewed: the overseer or operator decides.
-	if repository, found, err := daemon.store.ProjectRepository(ctx, c.Accepted.RepositoryID); err != nil || !found || !repository.Enabled {
+	if repository, found, err := daemon.store.ProjectRepository(ctx, repositoryID); err != nil || !found || !repository.Enabled {
 		return daemon.publishFailed(ctx, c, repo, errors.Join(err, errors.New("repository disabled for new work")))
 	}
 	backend := &daemonReviewBackend{daemon: daemon, project: c.Task.ProjectID, repository: repo, repositoryID: id}
