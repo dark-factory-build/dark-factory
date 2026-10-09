@@ -249,20 +249,32 @@ func (store *Store) SendBackTaskForAttempt(ctx context.Context, digest AttemptDi
 	return updated, nil
 }
 
-// RetryTaskForOverseer atomically returns a settled blocked/failed worker
-// task to the queue under the same task identity, reassigned when a
-// replacement worker is named and otherwise kept with its current worker.
-// Keeping the assignment change and retry transition in one validated write
-// prevents the old worker from being admitted between two operator calls.
+// RetryTaskForOverseer atomically returns a settled blocked or failed worker
+// task, or one cancelled by an automatic end, to the queue under the same task
+// identity, reassigned when a replacement worker is named and otherwise kept
+// with its current worker. Keeping the assignment change and retry transition
+// in one validated write prevents the old worker from being admitted between
+// two operator calls. RetryTaskForOperator also retries any cancelled task,
+// including one cancelled before a worker claimed it.
 func (store *Store) RetryTaskForOverseer(ctx context.Context, digest AttemptDigest, id TaskID, expected Revision, assigned AgentID, at UnixMillis) (Task, error) {
-	return store.retryTask(ctx, &digest, id, expected, assigned, at)
+	return store.retryTask(ctx, &digest, id, expected, assigned, at, 0)
 }
 
 func (store *Store) RetryTaskForOperator(ctx context.Context, id TaskID, expected Revision, assigned AgentID, at UnixMillis) (Task, error) {
-	return store.retryTask(ctx, nil, id, expected, assigned, at)
+	return store.retryTask(ctx, nil, id, expected, assigned, at, 0)
 }
 
-func (store *Store) retryTask(ctx context.Context, digest *AttemptDigest, id TaskID, expected Revision, assigned AgentID, at UnixMillis) (Task, error) {
+// RetryIntakeTask is an open intake issue retrying its own task: only after an
+// automatic end (a failure, a run-limit cancel, a blocked expiry), never an
+// operator's cancel, and at most IntakeRetryLimit times.
+func (store *Store) RetryIntakeTask(ctx context.Context, id TaskID, expected Revision, at UnixMillis) (Task, error) {
+	return store.retryTask(ctx, nil, id, expected, AgentID{}, at, IntakeRetryLimit)
+}
+
+// IntakeRetryLimit bounds an issue's retries; past it the task is the overseer's.
+const IntakeRetryLimit = 3
+
+func (store *Store) retryTask(ctx context.Context, digest *AttemptDigest, id TaskID, expected Revision, assigned AgentID, at UnixMillis, intakeLimit int64) (Task, error) {
 	if id.zero() || expected.Int64() < 1 {
 		return Task{}, fmt.Errorf("%w: invalid task retry", ErrInvalidValue)
 	}
@@ -271,6 +283,11 @@ func (store *Store) retryTask(ctx context.Context, digest *AttemptDigest, id Tas
 		return Task{}, err
 	}
 	defer tx.Close()
+	return store.retryTaskTx(ctx, tx, digest, id, expected, assigned, at, intakeLimit)
+}
+
+// retryTaskTx is retryTask inside tx, which it commits or rolls back.
+func (store *Store) retryTaskTx(ctx context.Context, tx *writeTx, digest *AttemptDigest, id TaskID, expected Revision, assigned AgentID, at UnixMillis, intakeLimit int64) (Task, error) {
 	var project ProjectID
 	if digest != nil {
 		run, err := overseerRun(ctx, tx.connection, *digest)
@@ -293,8 +310,29 @@ func (store *Store) retryTask(ctx context.Context, digest *AttemptDigest, id Tas
 	if task.Revision != expected {
 		return Task{}, tx.Rollback(ErrRevisionConflict)
 	}
-	if task.Status != TaskBlocked && task.Status != TaskFailed {
+	if task.Status != TaskBlocked && task.Status != TaskFailed && task.Status != TaskCancelled {
 		return Task{}, tx.Rollback(ErrConflict)
+	}
+	// Only the operator revives its own cancel or a withdrawn issue's task; the
+	// overseer and intake retry automatic ends, read from the task's current
+	// state: a failure, a run-limit cancel of the run at its work revision, or
+	// a blocked expiry recorded at its row revision. Intake keeps its bound.
+	if digest != nil || intakeLimit > 0 {
+		var automatic, withdrawn bool
+		var retries int64
+		if err := tx.connection.QueryRowContext(ctx, `SELECT `+taskEndedAutomatically+`, `+taskIssueWithdrawn+`,
+			(SELECT count(*) FROM task_automatic_events WHERE task_id = t.id AND kind = 'intake_retried') FROM tasks AS t WHERE t.id = ?`,
+			id.Bytes()).Scan(&automatic, &withdrawn, &retries); err != nil {
+			return Task{}, tx.Rollback(err)
+		}
+		if withdrawn || task.Status == TaskCancelled && !automatic || intakeLimit > 0 && (!automatic || retries >= intakeLimit) {
+			return Task{}, tx.Rollback(ErrConflict)
+		}
+		if intakeLimit > 0 {
+			if _, err := tx.connection.ExecContext(ctx, `INSERT INTO task_automatic_events(task_id, task_revision, kind, at_ms) VALUES (?, ?, 'intake_retried', ?)`, id.Bytes(), task.Revision.Int64(), at.Int64()); err != nil {
+				return Task{}, tx.Rollback(err)
+			}
+		}
 	}
 	if at.Int64() < task.UpdatedAt.Int64() {
 		return Task{}, tx.Rollback(ErrRevisionConflict)
@@ -302,15 +340,18 @@ func (store *Store) retryTask(ctx context.Context, digest *AttemptDigest, id Tas
 	if assigned.zero() {
 		assigned = task.AssignedAgentID
 	}
-	original, found, err := agentByID(ctx, tx.connection, task.AssignedAgentID)
-	if err != nil {
-		return Task{}, tx.Rollback(err)
-	}
 	// A retry is an overseer operation on a settled worker task. Validate the
 	// existing owner as well as the replacement so retry cannot be used to
-	// move an orchestrator-owned task into the worker queue.
-	if !found || original.ProjectID != task.ProjectID || original.Role != RoleWorker {
-		return Task{}, tx.Rollback(ErrUnauthorized)
+	// move an orchestrator-owned task into the worker queue. Admission assigns
+	// a worker, so an unassigned task is shared worker work never admitted.
+	if !task.AssignedAgentID.zero() {
+		original, found, err := agentByID(ctx, tx.connection, task.AssignedAgentID)
+		if err != nil {
+			return Task{}, tx.Rollback(err)
+		}
+		if !found || original.ProjectID != task.ProjectID || original.Role != RoleWorker {
+			return Task{}, tx.Rollback(ErrUnauthorized)
+		}
 	}
 	var active int
 	if err := tx.connection.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM runs WHERE task_id = ? AND phase <> 'terminal')`, id.Bytes()).Scan(&active); err != nil {
@@ -319,25 +360,32 @@ func (store *Store) retryTask(ctx context.Context, digest *AttemptDigest, id Tas
 	if active != 0 {
 		return Task{}, tx.Rollback(ErrConflict)
 	}
-	agent, found, err := agentByID(ctx, tx.connection, assigned)
-	if err != nil {
+	if err := refuseAwaitedTask(ctx, tx.connection, id); err != nil {
 		return Task{}, tx.Rollback(err)
 	}
-	if !found || agent.ProjectID != project || agent.Role != RoleWorker {
-		return Task{}, tx.Rollback(ErrUnauthorized)
+	if !assigned.zero() {
+		agent, found, err := agentByID(ctx, tx.connection, assigned)
+		if err != nil {
+			return Task{}, tx.Rollback(err)
+		}
+		if !found || agent.ProjectID != project || agent.Role != RoleWorker {
+			return Task{}, tx.Rollback(ErrUnauthorized)
+		}
+		if agent.Archived {
+			return Task{}, tx.Rollback(ErrConflict)
+		}
 	}
-	if agent.Archived {
-		return Task{}, tx.Rollback(ErrConflict)
-	}
+	// A task cancelled before admission has no run at its work revision and
+	// is queued again at that revision; any other retry starts the next one.
 	var runs int64
 	if err := tx.connection.QueryRowContext(ctx, `SELECT COUNT(*) FROM runs WHERE task_id = ? AND task_incarnation_id = ? AND admitted_task_work_revision = ?`, id.Bytes(), task.IncarnationID.Bytes(), task.WorkRevision.Int64()).Scan(&runs); err != nil {
 		return Task{}, tx.Rollback(err)
 	}
-	if runs != 1 {
+	if runs > 1 || runs == 0 && task.Status != TaskCancelled {
 		return Task{}, tx.Rollback(ErrConflict)
 	}
-	next := task.WorkRevision.Int64() + 1
-	result, err := tx.connection.ExecContext(ctx, `UPDATE tasks SET status = 'queued', assigned_agent_id = ?, work_revision = ?, blocked_reason = NULL, result = NULL, completed_at_ms = NULL, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND revision = ? AND status IN ('blocked', 'failed')`, assigned.Bytes(), next, at.Int64(), id.Bytes(), expected.Int64())
+	next := task.WorkRevision.Int64() + runs
+	result, err := tx.connection.ExecContext(ctx, `UPDATE tasks SET status = 'queued', assigned_agent_id = ?, work_revision = ?, blocked_reason = NULL, result = NULL, completed_at_ms = NULL, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND revision = ? AND status IN ('blocked', 'failed', 'cancelled')`, nullableAgentID(assigned), next, at.Int64(), id.Bytes(), expected.Int64())
 	if err := requireOneRow(result, err); err != nil {
 		return Task{}, tx.Rollback(err)
 	}
@@ -390,6 +438,9 @@ func sendBackTask(ctx context.Context, connection *sql.Conn, task Task, note str
 	default:
 		return Task{}, ErrConflict
 	}
+	if err := refuseAwaitedTask(ctx, connection, task.ID); err != nil {
+		return Task{}, err
+	}
 	if at.Int64() < task.UpdatedAt.Int64() {
 		return Task{}, ErrRevisionConflict
 	}
@@ -432,6 +483,30 @@ func sendBackTask(ctx context.Context, connection *sql.Conn, task Task, note str
 // carryPrerequisites moves consumers still waiting on a producer revision that
 // ended without success to the producer's next revision. Only a success can be
 // superseded, so a requeue, retry or send-back never strands a consumer.
+// taskEndedAutomatically holds while task t's current end is automatic: a
+// failure, a run-limit cancel of the run at its work revision, or a blocked
+// expiry recorded at its row revision. Retries and overseer wakes share it.
+const taskEndedAutomatically = `(t.status = 'failed' OR t.status = 'cancelled' AND (
+	EXISTS (SELECT 1 FROM task_automatic_events AS e WHERE e.task_id = t.id AND e.task_revision = t.revision AND e.kind = 'blocked_expired')
+	OR EXISTS (SELECT 1 FROM runs AS r WHERE r.task_id = t.id AND r.admitted_task_work_revision = t.work_revision AND r.terminal_kind = 'cancelled' AND r.terminal_detail = '` + RunLimitDetail + `')))`
+
+// taskIssueWithdrawn holds while task t's intake receipt is withdrawn.
+const taskIssueWithdrawn = `EXISTS (SELECT 1 FROM intake_task_bindings AS b JOIN intake_acceptances AS a ON a.id = b.acceptance_id WHERE b.task_id = t.id AND a.withdrawn_at_ms IS NOT NULL)`
+
+// refuseAwaitedTask keeps a task's work revision while a continuation (a
+// yield, or a stalled-item card) waits on it: moving it would strand the
+// continuation, and validation runs before a write, not at its commit.
+func refuseAwaitedTask(ctx context.Context, connection *sql.Conn, id TaskID) error {
+	var awaited bool
+	if err := connection.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM continuations WHERE task_id = ? AND state IN ('waiting', 'queued'))`, id.Bytes()).Scan(&awaited); err != nil {
+		return err
+	}
+	if awaited {
+		return fmt.Errorf("%w: the task waits on a continuation", ErrConflict)
+	}
+	return nil
+}
+
 func carryPrerequisites(ctx context.Context, connection *sql.Conn, producer Task, next int64) error {
 	_, err := connection.ExecContext(ctx, `UPDATE task_prerequisites SET upstream_work_revision = ? WHERE upstream_task_id = ? AND upstream_work_revision = ? AND consumed_run_id IS NULL`, next, producer.ID.Bytes(), producer.WorkRevision.Int64())
 	return err

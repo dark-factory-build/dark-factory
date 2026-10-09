@@ -125,8 +125,8 @@ var (
 	// releaseBuild, releaseUpgrade and releaseExit are package-test seams.
 	releaseBuild   = buildRelease
 	releaseUpgrade = install.ServiceUpgrade
-	// SIGTERM shuts down cleanly; factoryd then exits 75 because a trial
-	// marker names another build, and launchd restarts the new binaries.
+	// SIGTERM shuts down cleanly; factoryd then supervises the staged build's
+	// trial because the upgrade marker names another build.
 	releaseExit = func() { _ = syscall.Kill(os.Getpid(), syscall.SIGTERM) }
 	// releasePoll spaces base observations; releaseHead is a package-test seam.
 	releasePoll = 2 * time.Minute
@@ -223,9 +223,6 @@ func (daemon *Daemon) Release(ctx context.Context, sha string, start bool) (kern
 		delivery.State, delivery.Phase = "verified", ""
 	}
 	if err == nil {
-		err = validateReleaseAncestry(ctx, root, source, sha)
-	}
-	if err == nil {
 		err = daemon.writeRelease(ctx, project, &delivery)
 	}
 	if err != nil || delivery.State == "verified" {
@@ -234,39 +231,6 @@ func (daemon *Daemon) Release(ctx context.Context, sha string, start bool) (kern
 	}
 	go daemon.release(project, root, source, delivery)
 	return delivery, nil
-}
-
-func validateReleaseAncestry(ctx context.Context, root string, source change.RepositorySourceIdentity, sha string) error {
-	if !buildinfo.Current().Release() {
-		return nil
-	}
-	directory, err := os.MkdirTemp("", "dark-factory-release-check-")
-	if err != nil {
-		return err
-	}
-	defer os.RemoveAll(directory)
-	tree := filepath.Join(directory, "tree")
-	if err := change.ReviewCheckout(ctx, change.TrustedGitExecutable, root, source, tree, "", sha, sha, selfBase); err != nil {
-		return fmt.Errorf("release checkout: %w", err)
-	}
-	return rejectStaleRelease(ctx, tree, sha)
-}
-
-func rejectStaleRelease(ctx context.Context, root, sha string) error {
-	running := buildinfo.Current()
-	if !running.Release() {
-		return nil
-	}
-	command := exec.CommandContext(ctx, change.TrustedGitExecutable, "-C", root, "merge-base", "--is-ancestor", sha, running.Source())
-	if err := command.Run(); err == nil {
-		return fmt.Errorf("%w: release %s is not newer than running build %s", kernel.ErrConflict, sha, running.Source())
-	} else {
-		var exitError *exec.ExitError
-		if errors.As(err, &exitError) && exitError.ExitCode() == 1 {
-			return nil
-		}
-		return fmt.Errorf("check release ancestry: %w", err)
-	}
 }
 
 func (daemon *Daemon) writeRelease(ctx context.Context, project kernel.ProjectID, delivery *kernel.ProductionDelivery) error {
@@ -311,11 +275,14 @@ func (daemon *Daemon) selfRepositorySource(ctx context.Context) (project kernel.
 	return project, "", source, errors.Join(err, fmt.Errorf("%w: no registered checkout of %s", kernel.ErrNotFound, selfRepository))
 }
 
-// release builds, drains, backs up and swaps; the restarted build promotes or
-// rolls back. Every failure before the swap leaves the factory as it was.
+// release builds, drains, backs up and stages, then shuts this build down to
+// supervise the staged build's trial. Nothing launchd runs changes until that
+// trial promotes it.
 func (daemon *Daemon) release(project kernel.ProjectID, root string, source change.RepositorySourceIdentity, delivery kernel.ProductionDelivery) {
 	ctx := daemon.cleanupCtx
 	fail := func(reason string) {
+		// Nothing was staged, so the backup has no release to outlive.
+		_ = install.RemoveUpgrade(daemon.home)
 		daemon.releaseHold.Store(false)
 		daemon.releaseBusy.Store(false)
 		delivery.State, delivery.Reason = "failed", reason
@@ -343,7 +310,7 @@ func (daemon *Daemon) release(project kernel.ProjectID, root string, source chan
 		fail(err.Error())
 		return
 	}
-	delivery.Phase = "swap"
+	delivery.Phase = "stage"
 	_ = daemon.writeRelease(ctx, project, &delivery)
 	backup := install.UpgradeBackupPath(daemon.home)
 	_ = os.Remove(backup) // BackupTo refuses whatever this could not remove.
@@ -351,7 +318,7 @@ func (daemon *Daemon) release(project kernel.ProjectID, root string, source chan
 		fail("backup: " + err.Error())
 		return
 	}
-	if err := releaseUpgrade(ctx, daemon.home, filepath.Join(directory, "bin"), identity, kernel.SchemaVersion); err != nil {
+	if err := releaseUpgrade(ctx, daemon.home, filepath.Join(directory, "bin"), identity); err != nil {
 		fail("upgrade: " + err.Error())
 		return
 	}
@@ -399,12 +366,31 @@ func buildRelease(ctx context.Context, daemon *Daemon, root string, source chang
 	if err := change.ReviewCheckout(ctx, change.TrustedGitExecutable, root, source, tree, "", sha, sha, selfBase); err != nil {
 		return buildinfo.Identity{}, fmt.Errorf("release checkout: %w", err)
 	}
+	if running := buildinfo.Current(); running.Release() {
+		if err := releaseDescends(ctx, root, tree, running.Source(), sha); err != nil {
+			return buildinfo.Identity{}, err
+		}
+	}
 	// /usr/bin/env resolves go on the operator's tool path, not ours.
 	return buildinfo.BuildRelease(ctx, tree, sha, runtime.GOOS+"/"+runtime.GOARCH, filepath.Join(directory, "bin"), daemon.toolEnvironment(), func(command *exec.Cmd) {
 		command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 		command.Cancel = func() error { return syscall.Kill(-command.Process.Pid, syscall.SIGKILL) }
 		command.WaitDelay = 5 * time.Second
 	})
+}
+
+// releaseDescends refuses a commit that is not the running build or one of
+// its descendants, so a release never downgrades the factory (#1390).
+func releaseDescends(ctx context.Context, root, tree, running, sha string) error {
+	_, err := gitOutput(ctx, filepath.Join(tree, ".git"), "merge-base", "--is-ancestor", running, sha)
+	var exit *exec.ExitError
+	if errors.As(err, &exit) && exit.ExitCode() == 1 {
+		return fmt.Errorf("%w: %s does not descend from the running build %s", kernel.ErrConflict, sha, running)
+	}
+	if err != nil {
+		return fmt.Errorf("%w: the running build %s is not in the release checkout's history: unshallow the registered checkout (git -C %s fetch --unshallow origin) or install a build of %s", kernel.ErrConflict, running, root, selfBase)
+	}
+	return nil
 }
 
 // ConfigureHost sets the factory home and the operator's tool path.

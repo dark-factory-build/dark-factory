@@ -33,10 +33,12 @@ const (
 // durable Store and live attempt owners. It does not own an accept loop; the
 // caller accepts and hands one connection to HandleConnection.
 type Daemon struct {
-	log      io.Writer
-	intakeMu sync.Mutex
-	linear   *linear.Host
-	github   *maintainer.Host
+	log io.Writer
+	// statusOnly is set before the listener opens, so it needs no lock.
+	statusOnly bool
+	intakeMu   sync.Mutex
+	linear     *linear.Host
+	github     *maintainer.Host
 	// The scheduler's intake pass (tickIntake): per-source progress, guarded
 	// by intakeMu, and whether a pass is running.
 	intakePolls map[kernel.IntakeSourceID]*intakePoll
@@ -192,6 +194,10 @@ func (daemon *Daemon) livenessTimestamp() time.Time {
 	return time.Now()
 }
 
+// AnswerStatusOnly makes the daemon refuse every call but web_status: a
+// trial build must act on nothing while it proves itself.
+func (daemon *Daemon) AnswerStatusOnly() { daemon.statusOnly = true }
+
 // HandleConnection synchronously consumes exactly one authenticated request,
 // dispatches it, writes exactly one response, and closes the connection. The
 // API transport has already authenticated the domain and credential before a
@@ -204,6 +210,9 @@ func (daemon *Daemon) HandleConnection(ctx context.Context, connection *api.Conn
 	call, err := connection.Receive(ctx)
 	if err != nil {
 		return err
+	}
+	if daemon.statusOnly && call.Kind() != api.CallWebStatus {
+		return fmt.Errorf("%w: a trial build answers only web_status", kernel.ErrConflict)
 	}
 	// The overseer snapshot is observation, not provider work. Counting the
 	// request itself would make a snapshot unable to report the quiet interval

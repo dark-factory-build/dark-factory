@@ -4,226 +4,333 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
-	"fmt"
-	"io"
+	"net"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
-	"github.com/dark-factory-build/dark-factory/internal/buildinfo"
 	"github.com/dark-factory-build/dark-factory/internal/install"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 )
 
-var trialTarget = strings.Repeat("7", 40)
-
-type trialSeams struct {
-	exits     chan int
-	rollbacks chan string
-	verify    error
+// The trial child is this test binary, re-executed as a staged build.
+func TestMain(m *testing.M) {
+	switch os.Getenv("FACTORYD_TEST_CHILD") {
+	case "":
+		os.Exit(m.Run())
+	case "panic":
+		panic("a build that panics before run")
+	case "hang":
+		time.Sleep(time.Hour)
+	default:
+		main()
+	}
 }
 
-// trialHome is an initialized home whose service directory holds marker,
-// with every process-ending effect of the trial boot recorded instead.
-func trialHome(t *testing.T, marker install.UpgradeMarker) (string, *trialSeams) {
+var runningSource = strings.Repeat("6", 40)
+
+const currentProgram = "#!/bin/sh\n"
+
+// stagedHome is an initialized home with a release staged as bin/previous:
+// this test binary, running as mode, under an upgrade marker naming target.
+func stagedHome(t *testing.T, mode, target string) string {
 	t.Helper()
 	home := initializedHome(t)
-	if err := os.Mkdir(install.ServiceDirectoryPath(home), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := install.WriteUpgradeMarker(home, marker); err != nil {
-		t.Fatal(err)
-	}
-	seams := &trialSeams{exits: make(chan int, 4), rollbacks: make(chan string, 4)}
-	source, exit, rollback, verify, limit, promote := selfSource, trialExit, rollbackService, verifyRelease, trialLimit, promoteAfter
-	t.Cleanup(func() {
-		selfSource, trialExit, rollbackService, verifyRelease, trialLimit, promoteAfter = source, exit, rollback, verify, limit, promote
-	})
-	selfSource = func() string { return trialTarget }
-	trialExit = func(code int) { seams.exits <- code }
-	rollbackService = func(_ context.Context, _ string, restore bool, reason string) error {
-		seams.rollbacks <- fmt.Sprintf("restore=%t %s", restore, reason)
-		return nil
-	}
-	verifyRelease = func(context.Context, string, buildinfo.Identity) error { return seams.verify }
-	trialLimit, promoteAfter = time.Minute, 20*time.Millisecond
-	return home, seams
-}
-
-func readMarker(t *testing.T, home string) (install.UpgradeMarker, bool) {
-	t.Helper()
-	marker, present, err := install.ReadUpgradeMarker(home)
+	bin := filepath.Join(install.ServiceDirectoryPath(home), "bin")
+	self, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
 	}
-	return marker, present
-}
-
-// boot runs factoryd once as launchd would and returns its exit status.
-func boot(t *testing.T, home string) int {
-	t.Helper()
-	return run(context.Background(), []string{"--home", home}, io.Discard, io.Discard)
-}
-
-func TestTrialBuildPromotesOnceItStaysUpAndVerifies(t *testing.T) {
-	home, seams := trialHome(t, install.UpgradeMarker{Target: trialTarget, UserVersion: kernel.SchemaVersion, State: install.UpgradeTrial})
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() { done <- serve(ctx, testConfig(home)) }()
-	deadline := time.Now().Add(5 * time.Second)
-	for _, present := readMarker(t, home); present; _, present = readMarker(t, home) {
-		if time.Now().After(deadline) {
-			t.Fatal("the trial build was never promoted")
+	digest := sha256.Sum256([]byte(currentProgram))
+	for _, step := range []error{
+		os.MkdirAll(filepath.Join(bin, "current"), 0o700), os.MkdirAll(filepath.Join(bin, "previous"), 0o700),
+		os.WriteFile(filepath.Join(bin, "current", "factoryd"), []byte(currentProgram), 0o700),
+		// A link, not a copy: on macOS a copy of the running test binary
+		// makes this tree refuse the test's writes while the child runs.
+		os.Link(self, filepath.Join(bin, "previous", "factoryd")),
+		os.WriteFile(filepath.Join(install.ServiceDirectoryPath(home), "receipt"), []byte(`{"program_digest":"`+hex.EncodeToString(digest[:])+`"}`), 0o600),
+		install.WriteUpgradeMarker(home, install.UpgradeMarker{Target: target}),
+	} {
+		if step != nil {
+			t.Fatal(step)
 		}
-		time.Sleep(10 * time.Millisecond)
 	}
-	cancel()
-	if err := <-done; err != nil || len(seams.exits) != 0 || len(seams.rollbacks) != 0 {
-		t.Fatalf("promoted build = %v, exits %d, rollbacks %d", err, len(seams.exits), len(seams.rollbacks))
+	t.Setenv("FACTORYD_TEST_CHILD", mode)
+	source, limit, poll := selfSource, trialLimit, trialPoll
+	t.Cleanup(func() { selfSource, trialLimit, trialPoll = source, limit, poll })
+	selfSource = func() string { return runningSource }
+	trialLimit, trialPoll = time.Minute, 50*time.Millisecond
+	return home
+}
+
+func childArgs(home string, extra ...string) []string {
+	return append([]string{"--home", home, "--runner", "/bin/sh", "--factoryctl", "/bin/sh", "--development-browser-address", "127.0.0.1:0"}, extra...)
+}
+
+// requireNotPromoted: launchd still runs the old build, and the marker
+// carries why for the old build's next boot to record.
+func requireNotPromoted(t *testing.T, home string, err error, reason string) {
+	t.Helper()
+	if !errors.Is(err, errRestart) {
+		t.Fatalf("trial = %v", err)
+	}
+	if current, _ := os.ReadFile(filepath.Join(install.ServiceDirectoryPath(home), "bin", "current", "factoryd")); string(current) != currentProgram {
+		t.Fatal("an unproven build became current")
+	}
+	if marker, present, _ := install.ReadUpgradeMarker(home); !present || !strings.Contains(marker.Reason, reason) {
+		t.Fatalf("marker = %+v, %t (trial %v)", marker, present, err)
 	}
 }
 
-func TestTrialBuildThatCannotForgetItsMarkerRecordsNothingAndRollsBack(t *testing.T) {
-	home, seams := trialHome(t, install.UpgradeMarker{Target: trialTarget, UserVersion: kernel.SchemaVersion, State: install.UpgradeTrial})
-	restore := removeUpgrade
-	t.Cleanup(func() { removeUpgrade = restore })
-	removals := make(chan struct{}, 4)
-	removeUpgrade = func(string) error { removals <- struct{}{}; return errors.New("read-only") }
-	trialLimit = 300 * time.Millisecond
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() { done <- serve(ctx, testConfig(home)) }()
-	<-removals
-	// Not promoted: the trial limit still ends the build.
-	if code := <-seams.exits; code != exitRestart {
-		t.Fatalf("exit = %d", code)
+// #1390: the staged build decided its own rollback, so a build that panicked,
+// refused its arguments or hung before it rolled back was restarted forever.
+func TestStagedBuildThatPanicsIsNeverPromoted(t *testing.T) {
+	home := stagedHome(t, "panic", "development")
+	requireNotPromoted(t, home, superviseTrial(home, childArgs(home), install.UpgradeMarker{Target: "development"}), "exit status 2")
+}
+
+func TestStagedBuildThatRejectsItsArgumentsIsNeverPromoted(t *testing.T) {
+	home := stagedHome(t, "serve", "development")
+	args := childArgs(home, "--flag-only-the-old-build-knows", "x")
+	requireNotPromoted(t, home, superviseTrial(home, args, install.UpgradeMarker{Target: "development"}), "exit status 64")
+}
+
+func TestStagedBuildThatHangsIsStoppedAndNeverPromoted(t *testing.T) {
+	home := stagedHome(t, "hang", "development")
+	trialLimit = time.Second
+	requireNotPromoted(t, home, superviseTrial(home, childArgs(home), install.UpgradeMarker{Target: "development"}), "answered false")
+}
+
+func TestStagedBuildThatAnswersAsAnotherReleaseIsNeverPromoted(t *testing.T) {
+	home := stagedHome(t, "serve", strings.Repeat("7", 40))
+	trialLimit = 3 * time.Second
+	requireNotPromoted(t, home, superviseTrial(home, childArgs(home), install.UpgradeMarker{Target: strings.Repeat("7", 40)}), "answered false")
+}
+
+func TestStagedBuildThatAnswersAndStopsCleanlyIsPromoted(t *testing.T) {
+	home := stagedHome(t, "serve", "development")
+	if err := superviseTrial(home, childArgs(home), install.UpgradeMarker{Target: "development"}); !errors.Is(err, errRestart) || !strings.HasSuffix(err.Error(), ": promoted development") {
+		t.Fatalf("trial = %v", err)
 	}
-	cancel()
-	<-done
-	if marker, present := readMarker(t, home); !present || marker.Boots != 1 {
+	if current, _ := os.ReadFile(filepath.Join(install.ServiceDirectoryPath(home), "bin", "current", "factoryd")); string(current) == currentProgram {
+		t.Fatal("the proven build was not promoted")
+	}
+	// The child left the release for the build launchd starts next.
+	if marker, present, _ := install.ReadUpgradeMarker(home); !present || marker.Reason != "" {
 		t.Fatalf("marker = %+v, %t", marker, present)
 	}
-	if exit := boot(t, home); exit != exitRestart || <-seams.rollbacks != "restore=false the new build exited before it was promoted" {
-		t.Fatalf("next boot exit = %d", exit)
-	}
+	selfSource = func() string { return "development" }
+	bootUntilSettled(t, home)
 }
 
-func TestTrialBuildThatCrashesAtBootRollsBackOnItsSecondBoot(t *testing.T) {
-	home, seams := trialHome(t, install.UpgradeMarker{Target: trialTarget, UserVersion: kernel.SchemaVersion, State: install.UpgradeTrial})
-	startupPhaseHook = func(phase string) {
-		if phase == "store" {
-			panic("crash at boot")
+// A failed trial whose child migrated the store leaves a schema the old
+// build refuses: the old build restores its backup and serves.
+func TestOldBuildRestoresTheBackupOnlyOverAMigratedStore(t *testing.T) {
+	for _, migrated := range []bool{true, false} {
+		home := stagedHome(t, "serve", strings.Repeat("7", 40))
+		database := filepath.Join(home, "factory.sqlite3")
+		backup := []byte("not a database: restoring it would refuse the boot")
+		if migrated {
+			var err error
+			if backup, err = os.ReadFile(database); err != nil {
+				t.Fatal(err)
+			}
+			if output, err := exec.Command("/usr/bin/sqlite3", database, "PRAGMA user_version = 999999").CombinedOutput(); err != nil {
+				t.Fatalf("migrate: %v %s", err, output)
+			}
 		}
-	}
-	func() {
-		defer func() { _ = recover() }()
-		_ = serve(context.Background(), testConfig(home))
-	}()
-	startupPhaseHook = nil
-	if marker, _ := readMarker(t, home); marker.Boots != 1 || len(seams.rollbacks) != 0 {
-		t.Fatalf("first boot marker = %+v", marker)
-	}
-	if exit := boot(t, home); exit != exitRestart {
-		t.Fatalf("second boot exit = %d", exit)
-	}
-	if got := <-seams.rollbacks; got != "restore=false the new build exited before it was promoted" {
-		t.Fatalf("rollback = %q", got)
-	}
-}
-
-func TestTrialBuildFailingVerificationAfterItIsUpRollsBack(t *testing.T) {
-	home, seams := trialHome(t, install.UpgradeMarker{Target: trialTarget, UserVersion: kernel.SchemaVersion, State: install.UpgradeTrial})
-	seams.verify = errors.New("factory-runner reports another build")
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() { done <- serve(ctx, testConfig(home)) }()
-	if code := <-seams.exits; code != exitRestart {
-		t.Fatalf("exit = %d", code)
-	}
-	cancel()
-	<-done
-	marker, _ := readMarker(t, home)
-	if marker.Boots != 1 || !strings.Contains(marker.Reason, "factory-runner reports another build") {
-		t.Fatalf("marker = %+v", marker)
-	}
-	if exit := boot(t, home); exit != exitRestart || !strings.Contains(<-seams.rollbacks, "verification failed") {
-		t.Fatalf("next boot exit = %d", exit)
-	}
-}
-
-func TestHungTrialBuildIsStoppedByTheTrialLimit(t *testing.T) {
-	home, seams := trialHome(t, install.UpgradeMarker{Target: trialTarget, UserVersion: kernel.SchemaVersion, State: install.UpgradeTrial})
-	trialLimit = 20 * time.Millisecond
-	hung := make(chan struct{})
-	startupPhaseHook = func(phase string) {
-		if phase == "store" {
-			<-hung
+		if err := os.WriteFile(install.UpgradeBackupPath(home), backup, 0o600); err != nil {
+			t.Fatal(err)
 		}
-	}
-	defer func() { startupPhaseHook = nil }()
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() { done <- serve(ctx, testConfig(home)) }()
-	if code := <-seams.exits; code != exitRestart {
-		t.Fatalf("exit = %d", code)
-	}
-	cancel()
-	close(hung)
-	<-done
-	if marker, _ := readMarker(t, home); marker.Boots != 1 {
-		t.Fatalf("marker = %+v", marker)
-	}
-}
-
-func TestRollbackRestoresTheDatabaseOnlyWhenTheSchemaMoved(t *testing.T) {
-	for _, test := range []struct {
-		userVersion int
-		want        string
-	}{{kernel.SchemaVersion - 1, "restore=true"}, {kernel.SchemaVersion, "restore=false"}} {
-		home, seams := trialHome(t, install.UpgradeMarker{Target: trialTarget, UserVersion: test.userVersion, Boots: 1, State: install.UpgradeTrial})
-		if exit := boot(t, home); exit != exitRestart || !strings.HasPrefix(<-seams.rollbacks, test.want+" ") {
-			t.Fatalf("user_version %d: exit %d", test.userVersion, exit)
+		// Unmigrated, the store keeps this build's writes since the backup.
+		bootUntilSettled(t, home)
+		if _, err := os.Lstat(install.UpgradeBackupPath(home)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("migrated=%t: backup = %v", migrated, err)
 		}
 	}
 }
 
-func TestOldBuildRecordsTheRollbackThenRestartsOnlyForANewRelease(t *testing.T) {
-	home, _ := trialHome(t, install.UpgradeMarker{Target: trialTarget, UserVersion: kernel.SchemaVersion, State: install.UpgradeRolledBack, Reason: "crashed"})
-	selfSource = func() string { return strings.Repeat("6", 40) }
-	// The local API is up before the old build settles the release, so wait
-	// for the removal itself rather than for the socket.
-	realRemove := removeUpgrade
-	t.Cleanup(func() { removeUpgrade = realRemove })
-	removed := make(chan struct{})
-	removeUpgrade = func(home string) error { defer close(removed); return realRemove(home) }
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() { done <- serve(ctx, testConfig(home)) }()
-	<-removed
-	if _, present := readMarker(t, home); present {
-		t.Fatal("the old build kept the rolled back marker")
+// A backup restores only a failed trial's migration: never without a marker
+// naming another build, and never over a store refused for another reason.
+func TestOldBuildNeverRestoresTheBackupOverAnyOtherRefusal(t *testing.T) {
+	for name, damage := range map[string]string{"no marker": "PRAGMA user_version = 999999", "changed schema": "CREATE TABLE written_by_hand (x)"} {
+		home := stagedHome(t, "serve", strings.Repeat("7", 40))
+		if name == "no marker" {
+			if err := os.Remove(filepath.Join(install.ServiceDirectoryPath(home), "upgrade")); err != nil {
+				t.Fatal(err)
+			}
+		}
+		database := filepath.Join(home, "factory.sqlite3")
+		backup, err := os.ReadFile(database)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(install.UpgradeBackupPath(home), backup, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if output, err := exec.Command("/usr/bin/sqlite3", database, damage).CombinedOutput(); err != nil {
+			t.Fatalf("%s: %v %s", name, err, output)
+		}
+		// Bounded, so a build that restored and served fails here, not hangs.
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		err = serve(ctx, testConfig(home))
+		cancel()
+		if !errors.Is(err, kernel.ErrForeignDatabase) {
+			t.Fatalf("%s: serve = %v", name, err)
+		}
+		if _, err := os.Lstat(install.UpgradeBackupPath(home)); err != nil {
+			t.Fatalf("%s: the backup replaced the store: %v", name, err)
+		}
 	}
-	// A release swaps the binaries, leaves a trial marker and shuts down.
-	if err := install.WriteUpgradeMarker(home, install.UpgradeMarker{Target: trialTarget, State: install.UpgradeTrial}); err != nil {
+}
+
+// A staged build that cannot bind the browser fails its trial: every boot
+// step that can refuse the process runs there.
+func TestStagedBuildThatCannotBindTheBrowserIsNeverPromoted(t *testing.T) {
+	home := stagedHome(t, "serve", "development")
+	held, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
 		t.Fatal(err)
 	}
-	cancel()
-	if err := <-done; !errors.Is(err, errRestart) {
-		t.Fatalf("shutdown after a swap = %v", err)
+	defer held.Close()
+	args := []string{"--home", home, "--runner", "/bin/sh", "--factoryctl", "/bin/sh", "--development-browser-address", held.Addr().String()}
+	requireNotPromoted(t, home, superviseTrial(home, args, install.UpgradeMarker{Target: "development"}), "answered false")
+}
+
+// launchd does not end a trial child whose supervisor died, so the old
+// build's boot stops the orphan holding the home before it opens it.
+func TestOldBuildRestartedMidTrialStopsTheOrphanedChild(t *testing.T) {
+	home := stagedHome(t, "serve", strings.Repeat("7", 40))
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	child := exec.Command(self, childArgs(home)...)
+	child.Env = append(os.Environ(), trialEnv+"=1")
+	child.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := child.Start(); err != nil {
+		t.Fatal(err)
+	}
+	exited := make(chan error, 1)
+	go func() { exited <- child.Wait() }()
+	t.Cleanup(func() { _ = child.Process.Kill() })
+	if err := install.WriteUpgradeMarker(home, install.UpgradeMarker{Target: strings.Repeat("7", 40), Trial: child.Process.Pid, TrialStart: processStart(child.Process.Pid)}); err != nil {
+		t.Fatal(err)
+	}
+	waitOperatorClient(t, home)
+	bootUntilSettled(t, home)
+	select {
+	case <-exited:
+	default:
+		t.Fatal("the orphaned trial child still runs")
 	}
 }
 
-func TestTrialBuildStoppedBeforePromotionIsNotRestarted(t *testing.T) {
-	home, _ := trialHome(t, install.UpgradeMarker{Target: trialTarget, UserVersion: kernel.SchemaVersion, State: install.UpgradeTrial})
-	promoteAfter = time.Hour
+// A pid the trial child no longer owns belongs to someone else: the boot
+// kills only the process that started when the child did.
+func TestOldBuildNeverKillsAReusedTrialPid(t *testing.T) {
+	home := stagedHome(t, "serve", strings.Repeat("7", 40))
+	other := exec.Command("/bin/sleep", "30")
+	other.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := other.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = other.Process.Kill(); _ = other.Wait() })
+	if err := install.WriteUpgradeMarker(home, install.UpgradeMarker{Target: strings.Repeat("7", 40), Trial: other.Process.Pid, TrialStart: processStart(other.Process.Pid) - 1}); err != nil {
+		t.Fatal(err)
+	}
+	bootUntilSettled(t, home)
+	if err := other.Process.Signal(syscall.Signal(0)); err != nil {
+		t.Fatalf("the boot killed an unrelated process: %v", err)
+	}
+}
+
+// A trial child proves it boots and answers as the release, and acts on
+// nothing: no recovery, scheduler (so no dispatch, intake, release or GitHub
+// tick), browser or relay, every other call refused, and its release left
+// for the supervisor.
+func TestTrialChildAnswersStatusAndActsOnNothing(t *testing.T) {
+	home := stagedHome(t, "serve", "development")
+	t.Setenv(trialEnv, "1")
+	var phases []string
+	startupPhaseHook = func(phase string) { phases = append(phases, phase) }
+	t.Cleanup(func() { startupPhaseHook = nil })
+	// Bounded on its own: the child stops at trialLimit with no supervisor.
+	trialLimit = 2 * time.Second
+	done := make(chan error, 1)
+	go func() { done <- serve(context.Background(), testConfig(home)) }()
+	client := waitOperatorClient(t, home)
+	if web, err := client.WebStatus(context.Background()); err != nil || web.Build.Source != "development" || web.State != "stopped" {
+		t.Fatalf("web_status = %+v, %v", web, err)
+	}
+	if _, err := client.Snapshot(context.Background()); err == nil {
+		t.Fatal("a trial build answered a call other than web_status")
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("serve = %v", err)
+	}
+	if got := strings.Join(phases, ","); got != "home,store,runtime parent,supervisor spec,maintainer,local API,listener,browser,trial" {
+		t.Fatalf("trial phases = %s", got)
+	}
+	if _, present, _ := install.ReadUpgradeMarker(home); !present {
+		t.Fatal("the trial child settled its own release")
+	}
+}
+
+// A torn marker is discarded, not crash-looped, even over a store the trial
+// child migrated: with a backup present it is a failed trial.
+func TestUnreadableMarkerIsDiscardedNotCrashLooped(t *testing.T) {
+	for _, migrated := range []bool{false, true} {
+		home := stagedHome(t, "serve", "x")
+		if migrated {
+			database := filepath.Join(home, "factory.sqlite3")
+			backup, err := os.ReadFile(database)
+			if err == nil {
+				err = os.WriteFile(install.UpgradeBackupPath(home), backup, 0o600)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if output, err := exec.Command("/usr/bin/sqlite3", database, "PRAGMA user_version = 999999").CombinedOutput(); err != nil {
+				t.Fatalf("migrate: %v %s", err, output)
+			}
+		}
+		if err := os.WriteFile(filepath.Join(install.ServiceDirectoryPath(home), "upgrade"), []byte("{"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		bootUntilSettled(t, home)
+	}
+}
+
+// bootUntilSettled serves as launchd's next boot would until the release is
+// settled, then stops.
+func bootUntilSettled(t *testing.T, home string) {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- serve(ctx, testConfig(home)) }()
-	waitOperatorClient(t, home)
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		if _, present, err := install.ReadUpgradeMarker(home); !present && err == nil {
+			break
+		}
+		select {
+		case err := <-done:
+			t.Fatalf("boot = %v", err)
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the boot never settled the release")
+		}
+	}
 	cancel()
 	if err := <-done; err != nil {
-		t.Fatalf("stopped trial build = %v", err)
+		t.Fatalf("serve = %v", err)
 	}
 }

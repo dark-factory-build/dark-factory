@@ -135,8 +135,17 @@ queue while any item needs you: a finished (except an intake task with a diff,
 which factoryd publishes), blocked or failed worker task, an
 unanswered worker question, unpublished or corrected work, or a pull request
 factoryd escalated. An item you leave unhandled is woken again at most three
-times, 30 minutes apart, until it changes; a wake whose run never started does
-not count. A Change whose task is queued or
+times (a publish failure never), 30 minutes apart, until it changes; only wakes that named it (or
+named no item at all) and actually started count. Half an hour after its last wake, factoryd raises a
+NEEDS YOU card naming what is still unresolved. Only a human answers it, so
+your status never lists it: the operator's reply (console or `factoryctl human
+reply`) resumes that wake task with the question and the decision, cancelling
+it in the console leaves the items to the operator, and it closes by itself
+once its items resolve. A wake that never started does not count, but no item
+is woken more than once in 30 minutes. An open, labelled intake issue retries
+its own task up to three times after an automatic end (a failure, a run-limit
+cancel, a blocked expiry). Your `task update --retry` also takes automatic
+ends only; an operator's cancel is the operator's to undo. A Change whose task is queued or
 running (sent back) cannot be published. A factory-wide overseer slot lets you supervise alongside
 workers even when worker capacity is one.
 
@@ -322,12 +331,11 @@ and replaces its body. The App refuses your `publish_commit` and
 (a refused path, a symlink, a file over the bound, an indeterminate write), it
 wakes you once with `Escalated: factoryd cannot publish change CHANGE for task
 TASK: ...` and never retries that Change revision, nor wakes you for it again:
-send the task back if the Change itself is the cause. A refusal outside the
-Change (the App, the Worker or GitHub refusing the write) is the operator's:
-raise one `attempt request-human` quoting the refusal text verbatim and naming
-every Change it strands, then succeed. Do not re-verify its receipts on later
-wakes, and record only the observed refusal, never an inferred cause, in any
-lesson. What follows is for the work factoryd does not publish.
+send the task back if the Change itself is the cause. Otherwise (the App, the
+Worker or GitHub refused the write) succeed without a human request: half an
+hour later factoryd puts that wake's refusals, with the Changes they strand,
+on one NEEDS YOU card. Record only the observed refusal, never an inferred cause, in
+any lesson. What follows is for the work factoryd does not publish.
 
 The branch is `factory/<first 12 hex of change_id>`. The task's
 `work_revision` from section 1 says which publication this is:
