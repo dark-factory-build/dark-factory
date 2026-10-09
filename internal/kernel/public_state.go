@@ -3,6 +3,7 @@ package kernel
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 )
 
@@ -204,7 +205,7 @@ func readPublicAccounts(ctx context.Context, connection *sql.Conn) ([]AccountSum
 // at all, so it cannot reach a projection by accident.
 
 func readPublicProjects(ctx context.Context, connection *sql.Conn) ([]ProjectSummary, error) {
-	rows, err := connection.QueryContext(ctx, `SELECT id, name, run_budget_limit, runs_used, max_run_seconds, revision FROM projects ORDER BY id`)
+	rows, err := connection.QueryContext(ctx, `SELECT id, name, run_budget_limit, runs_used, max_run_seconds, revision, specialist_runs, specialist_open_proposals FROM projects ORDER BY id`)
 	if err != nil {
 		return nil, fmt.Errorf("read public projects: %w", err)
 	}
@@ -213,8 +214,8 @@ func readPublicProjects(ctx context.Context, connection *sql.Conn) ([]ProjectSum
 	for rows.Next() {
 		var rawID []byte
 		var name string
-		var runBudget, runsUsed, maxRunSeconds, rawRevision int64
-		if err := rows.Scan(&rawID, &name, &runBudget, &runsUsed, &maxRunSeconds, &rawRevision); err != nil {
+		var runBudget, runsUsed, maxRunSeconds, rawRevision, specialistRuns, openProposals int64
+		if err := rows.Scan(&rawID, &name, &runBudget, &runsUsed, &maxRunSeconds, &rawRevision, &specialistRuns, &openProposals); err != nil {
 			return nil, fmt.Errorf("scan public project: %w", err)
 		}
 		id, idErr := ProjectIDFromBytes(rawID)
@@ -222,7 +223,7 @@ func readPublicProjects(ctx context.Context, connection *sql.Conn) ([]ProjectSum
 		if idErr != nil || revisionErr != nil || byteLen(name) < 1 || byteLen(name) > 128 || runBudget < 0 || runsUsed < 0 || maxRunSeconds < 0 || maxRunSeconds > maxProjectRunSeconds || runBudget != 0 && runsUsed > runBudget {
 			return nil, fmt.Errorf("%w: invalid public project", ErrCorruptState)
 		}
-		result = append(result, ProjectSummary{ID: id, Name: name, RunBudgetLimit: uint64(runBudget), RunsUsed: uint64(runsUsed), MaxRunSeconds: uint32(maxRunSeconds), Revision: revision})
+		result = append(result, ProjectSummary{ID: id, Name: name, RunBudgetLimit: uint64(runBudget), RunsUsed: uint64(runsUsed), MaxRunSeconds: uint32(maxRunSeconds), SpecialistRuns: uint32(specialistRuns), SpecialistOpenProposals: uint32(openProposals), Revision: revision})
 	}
 	return result, rows.Err()
 }
@@ -241,7 +242,24 @@ func readPublicAgents(ctx context.Context, connection *sql.Conn) ([]AgentSummary
 		}
 		result = append(result, summary)
 	}
-	return result, rows.Err()
+	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
+		return nil, err
+	}
+	for index, summary := range result {
+		if summary.Role != RoleWorker.String() || summary.Idle.Policy != IdleStandingInstruction {
+			continue
+		}
+		agent, found, err := agentByID(ctx, connection, summary.ID)
+		if err != nil || !found {
+			return nil, errors.Join(err, ErrCorruptState)
+		}
+		state, _, _, err := specialistSchedule(ctx, connection, agent)
+		if err != nil {
+			return nil, err
+		}
+		result[index].Specialist = &state
+	}
+	return result, nil
 }
 
 func readPublicTasks(ctx context.Context, connection *sql.Conn) ([]TaskSummary, error) {
@@ -324,17 +342,17 @@ func readPublicHumanRequests(ctx context.Context, connection *sql.Conn) ([]Human
 // agentSummarySelect is the one derivation of the served agent summary.
 // Provider is included as a public fact; live activity is deliberately
 // absent (see AgentSummary).
-const agentSummarySelect = `SELECT a.id, a.project_id, a.name, a.role, a.provider, a.paused, a.archived, a.appearance, a.model, a.reasoning_effort, a.account_id, a.revision, a.idle_policy, a.idle_after_seconds, a.idle_instruction, a.idle_run_budget, a.idle_runs_used, a.tool_budget_limit, a.tool_calls_used FROM agents a`
+const agentSummarySelect = `SELECT a.id, a.project_id, a.name, a.role, a.provider, a.paused, a.archived, a.appearance, a.model, a.reasoning_effort, a.account_id, a.revision, a.idle_policy, a.idle_after_seconds, a.idle_instruction, a.idle_run_budget, a.idle_runs_used, a.tool_budget_limit, a.tool_calls_used, a.idle_wake_on FROM agents a`
 
 func scanAgentSummary(scanner rowScanner) (AgentSummary, error) {
 	var rawID, rawProjectID, rawAccountID []byte
-	var name, rawRole, rawProvider, rawAppearance, rawIdlePolicy, idleInstruction string
+	var name, rawRole, rawProvider, rawAppearance, rawIdlePolicy, idleInstruction, wakeOn string
 	var model, effort sql.NullString
 	var paused, archived, rawRevision, idleAfter, idleBudget, idleUsed, toolBudget, toolUsed int64
-	if err := scanner.Scan(&rawID, &rawProjectID, &name, &rawRole, &rawProvider, &paused, &archived, &rawAppearance, &model, &effort, &rawAccountID, &rawRevision, &rawIdlePolicy, &idleAfter, &idleInstruction, &idleBudget, &idleUsed, &toolBudget, &toolUsed); err != nil {
+	if err := scanner.Scan(&rawID, &rawProjectID, &name, &rawRole, &rawProvider, &paused, &archived, &rawAppearance, &model, &effort, &rawAccountID, &rawRevision, &rawIdlePolicy, &idleAfter, &idleInstruction, &idleBudget, &idleUsed, &toolBudget, &toolUsed, &wakeOn); err != nil {
 		return AgentSummary{}, err
 	}
-	idle, idleErr := idleRuleFromRow(rawIdlePolicy, idleAfter, idleInstruction, idleBudget, idleUsed)
+	idle, idleErr := idleRuleFromRow(rawIdlePolicy, idleAfter, idleInstruction, idleBudget, idleUsed, wakeOn)
 	id, idErr := AgentIDFromBytes(rawID)
 	accountID, accountErr := optionalAccountID(rawAccountID)
 	projectID, projectErr := ProjectIDFromBytes(rawProjectID)

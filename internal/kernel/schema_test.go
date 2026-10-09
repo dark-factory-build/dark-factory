@@ -155,7 +155,7 @@ func TestOpenRejectsUnknownVersionAndPartialIdentity(t *testing.T) {
 			}
 		},
 		"earlier version": func(t *testing.T, raw *sql.DB) {
-			if _, err := raw.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, v36UserVersion-1)); err != nil {
+			if _, err := raw.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, v37UserVersion-1)); err != nil {
 				t.Fatal(err)
 			}
 		},

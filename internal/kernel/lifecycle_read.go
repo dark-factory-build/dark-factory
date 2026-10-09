@@ -624,7 +624,12 @@ func authenticateAttempt(ctx context.Context, connection *sql.Conn, digest Attem
 	if err != nil {
 		return AttemptAuthority{}, err
 	}
-	return AttemptAuthority{RunID: run.ID, ProjectID: run.ProjectID, AgentID: run.AgentID, TaskID: run.TaskID, TaskIncarnation: run.TaskIncarnationID, AdmittedTaskWorkRevision: run.AdmittedTaskWorkRevision, Role: run.Role, Provider: run.Provider, ChangeID: run.ChangeID, AdmittedChangeRevision: run.AdmittedChangeRevision, CurrentChangeRevision: currentChangeRevision, BaseCommit: baseCommit, ContinuationContexts: contexts, task: effectiveTask}, nil
+	// Only a specialist's review (its carrier) reads beyond its own task.
+	var specialist bool
+	if err := connection.QueryRowContext(ctx, `SELECT role = 'worker' AND idle_policy = 'standing_instruction' AND ? FROM agents WHERE id = ?`, relationships.task.Title == overseerWakeTitle, run.AgentID.Bytes()).Scan(&specialist); err != nil {
+		return AttemptAuthority{}, err
+	}
+	return AttemptAuthority{Specialist: specialist, RunID: run.ID, ProjectID: run.ProjectID, AgentID: run.AgentID, TaskID: run.TaskID, TaskIncarnation: run.TaskIncarnationID, AdmittedTaskWorkRevision: run.AdmittedTaskWorkRevision, Role: run.Role, Provider: run.Provider, ChangeID: run.ChangeID, AdmittedChangeRevision: run.AdmittedChangeRevision, CurrentChangeRevision: currentChangeRevision, BaseCommit: baseCommit, ContinuationContexts: contexts, task: effectiveTask}, nil
 }
 
 // LatestTaskRun is the task's newest run for that incarnation.

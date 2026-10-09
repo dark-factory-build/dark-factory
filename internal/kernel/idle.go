@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"fmt"
+	"slices"
 	"strings"
 	"unicode/utf8"
 
@@ -23,7 +24,7 @@ func validateIdleRule(rule IdleRule) error {
 	if _, err := ParseIdlePolicy(string(rule.Policy)); err != nil {
 		return err
 	}
-	if rule.AfterSeconds > MaxIdleAfterSeconds || rule.RunBudget > MaxIdleRunBudget ||
+	if rule.AfterSeconds > MaxIdleAfterSeconds || rule.RunBudget > MaxIdleRunBudget || !slices.Contains([]string{"", "failures", "merges", "failures,merges"}, rule.WakeOn) ||
 		!utf8.ValidString(rule.Instruction) || byteLen(rule.Instruction) > maxIdleInstruction {
 		return fmt.Errorf("%w: idle rule out of bounds", ErrInvalidValue)
 	}
@@ -43,15 +44,15 @@ func validateIdleRuleForProvider(provider Provider, rule IdleRule) error {
 	return nil
 }
 
-func idleRuleFromRow(policy string, after int64, instruction string, budget, used int64) (IdleRule, error) {
+func idleRuleFromRow(policy string, after int64, instruction string, budget, used int64, wakeOn string) (IdleRule, error) {
 	if after < 0 || after > MaxIdleAfterSeconds || budget < 0 || budget > MaxIdleRunBudget || used < 0 {
 		return IdleRule{}, fmt.Errorf("%w: idle rule out of bounds", ErrInvalidValue)
 	}
-	rule := IdleRule{Policy: IdlePolicy(policy), AfterSeconds: uint32(after), Instruction: instruction, RunBudget: uint32(budget), RunsUsed: uint32(used)}
+	rule := IdleRule{Policy: IdlePolicy(policy), AfterSeconds: uint32(after), Instruction: instruction, RunBudget: uint32(budget), RunsUsed: uint32(used), WakeOn: wakeOn}
 	return rule, validateIdleRule(rule)
 }
 
-func enqueueStandingTaskWithBody(ctx context.Context, connection *sql.Conn, agent Agent, body string, at UnixMillis) (Task, error) {
+func enqueueStandingTaskWithBody(ctx context.Context, connection *sql.Conn, agent Agent, body string, priority int64, at UnixMillis) (Task, error) {
 	var ids [2][IDBytes]byte
 	for index := range ids {
 		if _, err := rand.Read(ids[index][:]); err != nil || ids[index] == [IDBytes]byte{} {
@@ -63,7 +64,7 @@ func enqueueStandingTaskWithBody(ctx context.Context, connection *sql.Conn, agen
 	}
 	taskID, _ := TaskIDFromBytes(ids[0][:])
 	incarnationID, _ := IncarnationIDFromBytes(ids[1][:])
-	spec := NewTask{ID: taskID, ProjectID: agent.ProjectID, AssignedAgentID: agent.ID, IncarnationID: incarnationID, Title: overseerWakeTitle, Body: body, Priority: overseerWakePriority}
+	spec := NewTask{ID: taskID, ProjectID: agent.ProjectID, AssignedAgentID: agent.ID, IncarnationID: incarnationID, Title: overseerWakeTitle, Body: body, Priority: priority}
 	if err := validateNewTask(spec); err != nil {
 		return Task{}, err
 	}

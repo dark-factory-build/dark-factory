@@ -6,6 +6,10 @@ export type AgentActivity = "busy" | "waiting" | "needs-you" | "idle";
 /** The operator-facing state has one name for each actionable condition. */
 export type AgentStatus = "working" | "ready" | "needs-you" | "paused";
 
+/** A specialist is an ordinary worker whose idle rule is a standing instruction; its reviews carry this title. */
+export const isSpecialist = (agent: AgentItem | undefined) => agent?.role === "worker" && agent.idle_policy === "standing_instruction";
+export const STANDING_TITLE = "Standing instruction";
+
 /** Tasks an agent is on right now (durable assignment, live statuses). */
 export function agentCurrentTask(agent: AgentItem, state: StateView): TaskItem | undefined {
 	if (agent.archived) return undefined;
@@ -73,7 +77,7 @@ export function workRows(state: StateView | undefined, inProgress: readonly Prod
   const inbox = sources.flatMap((source) => (source.sync?.waiting ?? []).map((candidate): WorkRow => ({ key: `${source.id}:${candidate.number}`, state: "inbox", title: candidate.title, origin: `#${candidate.number}`, intake: { source, candidate } })));
   return [...inbox, ...[...rows.values()].map(({ task, request, pr, key }): WorkRow => {
     const terminal = task === undefined || task.status === "succeeded" || task.status === "failed" || task.status === "cancelled";
-    const origin = task === undefined ? undefined : task.issue_number !== undefined ? `#${task.issue_number}` : task.mission_id !== undefined ? "mission" : state.agents.get(task.assigned_agent_id)?.role === "orchestrator" ? "overseer" : undefined;
+    const origin = task === undefined ? undefined : task.issue_number !== undefined ? `#${task.issue_number}` : task.mission_id !== undefined ? "mission" : state.agents.get(task.assigned_agent_id)?.role === "orchestrator" ? "overseer" : task.title === STANDING_TITLE && isSpecialist(state.agents.get(task.assigned_agent_id)) ? "specialist" : undefined;
     return { key, task, request, pr, origin, title: task?.title ?? pr?.pullRequest?.title ?? `Question from ${state.agents.get(request?.agent_id ?? "")?.name ?? "Agent"}`,
       state: request !== undefined || task?.status === "blocked" ? "needs-you" : terminal ? "in-review" : task.status === "running" ? "running" : "queued" };
   })].sort((a, b) => rank[a.state] - rank[b.state]);
@@ -263,7 +267,7 @@ export function projectFloor(state: StateView | undefined, prepared: ReturnType<
     const location: SceneWorker["location"] = task === undefined ? last === undefined ? "resting" : "last-observed" : live !== undefined ? "working" : "unobserved";
     const at = location === "working" ? live : location === "last-observed" ? last : undefined;
     return {
-      id: agent.id, name: agent.name, role: agent.role, provider: agent.provider,
+      id: agent.id, name: agent.name, role: agent.role, provider: agent.provider, ...(isSpecialist(agent) ? { specialist: true } : {}),
       ...(agent.appearance === undefined ? {} : { appearance: agent.appearance }),
       activity: activity === "busy" && (telemetry?.quiet_seconds ?? 0) >= QUIET_SECONDS ? "waiting" : activity, paused: agent.paused, location,
       ...(telemetry === undefined ? {} : { telemetry }),

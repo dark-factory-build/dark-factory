@@ -397,6 +397,8 @@ export function FactoryConsole({
                 panel={agentPanel}
                 onPanel={onAgentPanel}
                 telemetry={agentTelemetry(agent, scopedState, runPaths)}
+                contributions={knowledgeActivity.recent}
+                onOpenActivity={ready ? openActivity : undefined}
               />}
               </div>
             </div>
