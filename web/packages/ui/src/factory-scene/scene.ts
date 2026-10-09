@@ -241,7 +241,7 @@ function composeHall(hall: SceneHall, room: SceneRect): readonly RoomContent[] {
   return contents;
 }
 
-// A cell row is the cell and the label under it, so rows never overlap.
+// A cell row is the label and the cell under it, so rows never overlap.
 const CELL_ROW = 44;
 
 /** Where the main line stands and how the job cells wrap above it, from the hall's width alone. */

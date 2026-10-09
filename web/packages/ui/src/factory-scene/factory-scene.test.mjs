@@ -1265,19 +1265,15 @@ test("the coverage header shows the summary numbers", () => {
   const summary = { components: 7, inferred: 6, observed: 3, quiet: 1, partial: 1, stale: 0, unobserved: 1, opaque: 1, runtime_only: 1, contradicted: 0 };
   const markup = render({ graph: { ...graph, summary }, workers: [] });
   const header = markup.match(/aria-label="Observation coverage"[^>]*>(.*?)<\/p>/)[1].replace(/<[^>]+>/g, "");
-  assert.equal(header, "3 observed · 1 observed, quiet · 1 partly observed · 0 stale · 1 no telemetry · 1 external · 1 runtime-only", "observation counts add up to the components");
+  assert.equal(header, "3 observed · 1 observed, quiet · 1 partly observed · 0 stale · 1 no telemetry · 1 external · 1 runtime-only · grey machines have no telemetry: unknown, not idle", "observation counts add up to the components");
   assert.doesNotMatch(render({ workers: [] }), /Observation coverage/, "no summary, no claim");
 });
 
 test("a deploy is a changeover dated by the graph, not by the viewer's clock", () => {
   const at = 1_760_000_000_000;
   const render = (deployedAt) => renderToStaticMarkup(createElement(FactoryScene, { graph: sceneGraph([hall("unit", { reading: { ...busy, deployedAt } })], { observedAt: at }), workers: [] }));
-  const fresh = render(at - 60_000);
-  assert.match(fresh, /data-changeover=/);
-  assert.match(fresh, /dfPlant__scaffold/);
-  const earlier = render(at - 3 * 60 * 60_000);
-  assert.match(earlier, /data-changeover=/);
-  assert.doesNotMatch(earlier, /dfPlant__scaffold/);
+  assert.match(render(at - 60_000), /data-changeover="[^"]*"[^>]*>deployed</);
+  assert.match(render(at - 3 * 60 * 60_000), /data-changeover=/);
   assert.doesNotMatch(render(at - 2 * 24 * 60 * 60_000), /data-changeover=/);
   assert.doesNotMatch(render(undefined), /data-changeover=/);
 });
@@ -1537,14 +1533,14 @@ test("a hall with many jobs wraps them in rows that clear each other's labels an
   const cells = room.contents.filter((item) => item.shape === "cell");
   const line = room.contents.find((item) => item.shape === "line");
   assert.equal(cells.length, 17);
-  const label = 12; // a cell's label sits under it
+  const label = 12; // a cell's label sits over it, clear of the belt into its base
   for (const a of cells) {
     for (const b of cells) {
       if (a === b) continue;
       const overlap = a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height + label && b.y < a.y + a.height + label;
       assert.ok(!overlap, `cells ${a.key} and ${b.key} overlap`);
     }
-    assert.ok(a.y + a.height + label <= line.y, `cell ${a.key} runs into the main line`);
+    assert.ok(a.y + a.height <= line.y, `cell ${a.key} runs into the main line`);
   }
   assert.ok(line.y + line.height <= room.y + room.height, "the main line stays inside its hall");
 });

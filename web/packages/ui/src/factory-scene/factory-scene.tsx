@@ -86,7 +86,7 @@ export type AgentSpriteProps = Readonly<{
 }>;
 
 const FRAME = spriteAtlas.frame;
-const DAY = 24 * 60 * 60_000, CHANGEOVER = 10 * 60_000;
+const DAY = 24 * 60 * 60_000;
 const NO_QUESTIONS: readonly PeerQuestionItem[] = [];
 export type KnowledgeCueView = Readonly<{ key: string; agentId: string; board: boolean; reading: boolean; label: string; open?: () => void }>;
 const NO_CUES: readonly KnowledgeCueView[] = [];
@@ -666,10 +666,7 @@ export function FactoryScene({ proposals, crates, tools, onLoadNode, onInvestiga
             <rect className="dfFactoryScene__focus dfPlant__plate" x={room.x + 8} y={room.y + 12} width={Math.min(room.width - 44, 6 * Math.min(hall.label.length, Math.floor((room.width - 60) / 6)) + 14)} height="20" rx="2" />
             <text x={room.x + 14} y={room.y + 26} className="dfPlant__plateText" fontSize="10">{shortLabel(hall.label, Math.floor((room.width - 60) / 6))}</text>
             {hall.runtime === undefined ? null : <text x={room.x + 14 + Math.min(room.width - 44, 6 * Math.min(hall.label.length, Math.floor((room.width - 60) / 6)) + 14)} y={room.y + 25} className="dfPlant__small" fontSize="7">{RUNTIME_TEXT[hall.runtime]}</text>}
-            {hall.reading.deployedAt === undefined || observedAt - hall.reading.deployedAt > DAY ? null : <g data-changeover={hall.reading.deployedAt}>
-              {observedAt - hall.reading.deployedAt < CHANGEOVER ? <path d={`M${room.x + 6} ${room.y + 10}h${room.width - 12}M${room.x + 10} ${room.y + 10}v${room.height - 20}M${room.x + room.width - 10} ${room.y + 10}v${room.height - 20}`} className="dfPlant__scaffold" /> : null}
-              <rect x={room.x + room.width - 30} y={room.y + 14} width="22" height="14" className="dfPlant__changed" /><text x={room.x + room.width - 19} y={room.y + 24} textAnchor="middle" className="dfPlant__changedText" fontSize="10">Δ</text>
-            </g>}
+            {hall.reading.deployedAt === undefined || observedAt - hall.reading.deployedAt > DAY ? null : <text data-changeover={hall.reading.deployedAt} x={room.x + 8} y={room.y + 42} className="dfPlant__small" fontSize="7">deployed</text>}
           </g>}
         </g>;
       })}
@@ -886,7 +883,7 @@ function machineInfo(machine: SceneMachine, hall?: SceneHall) {
 function Coverage({ summary }: { summary: NonNullable<SceneGraph["summary"]> }) {
   return <p className="dfPlantCoverage" role="status" aria-label="Observation coverage">
     {(["observed", "quiet", "partial", "stale", "unobserved", "opaque"] as const).map((key, index) => <span key={key}>{index === 0 ? "" : " · "}<strong className={`dfPlantCoverage--${key}`}>{summary[key]}</strong> {OBSERVATION_TEXT[key].split(":")[0]!.toLowerCase()}</span>)}
-    <small>{summary.runtime_only > 0 ? ` · ${summary.runtime_only} runtime-only` : ""}{summary.contradicted > 0 ? ` · ${summary.contradicted} contradicted` : ""}</small>
+    <small>{summary.runtime_only > 0 ? ` · ${summary.runtime_only} runtime-only` : ""}{summary.contradicted > 0 ? ` · ${summary.contradicted} contradicted` : ""}{summary.unobserved > 0 ? " · grey machines have no telemetry: unknown, not idle" : ""}</small>
   </p>;
 }
 
@@ -906,10 +903,10 @@ function Station({ item, machine, selected, close }: { item: RoomContent; machin
   const stale = reading.observation === "stale" ? <text x={x} y={y + h + 9} className="dfPlant__small" fontSize="7">last seen {reading.lastSeen === undefined ? "earlier" : new Date(reading.lastSeen).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</text> : null;
   const tag = reading.evidence === "runtime" ? <g><rect x={x - 5} y={y - 6} width="10" height="11" className="qtag" /><text x={x} y={y + 3} textAnchor="middle" className="qmark" fontSize="8">?</text></g>
     : reading.evidence === "contradicted" ? <rect x={x - 4} y={y - 4} width="8" height="8" className="redtag" /> : null;
-  // Docks have the wall beside them for a label; everything else is labelled under its own footprint.
+  // Docks have the wall beside them for a label; a cell's belt rises into its base, so its label sits above; everything else is labelled underneath.
   const label = item.shape === "line" ? null : item.shape === "dock" || item.shape === "manifold"
     ? <text x={x} y={y - 3} className="dfPlant__label" fontSize="8">{shortLabel(machine.label, 22)}</text>
-    : <text x={x + w / 2} y={y + h + 9} textAnchor="middle" className="dfPlant__label" fontSize="8">{shortLabel(machine.label, Math.max(6, Math.floor((w + 10) / 5)))}</text>;
+    : <text x={x + w / 2} y={item.shape === "cell" ? y - 3 : y + h + 9} textAnchor="middle" className="dfPlant__label" fontSize="8">{shortLabel(machine.label, Math.max(6, Math.floor((w + 10) / 5)))}</text>;
   let body: ReactNode;
   switch (item.shape) {
     case "line": body = <g><rect x={x + 3} y={y + h} width={w - 2} height="3" className="shd" /><rect x={x} y={y} width={w} height={h} className="m" /><rect x={x + 1} y={y + 1} width={w - 2} height="4" className="mh" />
