@@ -321,6 +321,14 @@ head, and must independently prove descendants and disposable paths are gone. A 
 trap, sleep, `Drop`, broad PID scan, or cleanup performed only by the process a
 test kills is not absence proof.
 
+`scripts/go-e2e.sh daemon` also runs the orchestrated-work acceptance
+scenario (`TestBlackBoxOrchestratorAcceptance`) against a throwaway home,
+socket and factoryd: delegation, fan-out and fan-in, one worker completing and
+one blocking, project and role authority, and a factoryd kill between fan-out
+and fan-in. A failed wait names the task, its status and its bounded durable
+outcome. Handing over a live provider to a new factoryd is
+`TestBlackBoxDaemonHandoverReplacesFactorydUnderALiveProvider`.
+
 The real disposable launchd check is `scripts/go-service-e2e.sh`. Run it only
 when install or service ownership changes; it is not a routine extra gate.
 

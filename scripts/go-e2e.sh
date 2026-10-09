@@ -76,6 +76,6 @@ case "$mode" in
     daemon|all)
         export DARK_FACTORY_DAEMON_E2E=1
         export DARK_FACTORY_E2E_FACTORYD="$e2e_root/factoryd"
-        "$go" test -v -timeout=10m -count=1 -p 1 -run 'TestBlackBoxDaemonLifecycle|TestBlackBoxDaemonHandoverReplacesFactorydUnderALiveProvider' ./internal/e2e
+        "$go" test -v -timeout=10m -count=1 -p 1 -run 'TestBlackBoxDaemonLifecycle|TestBlackBoxDaemonHandoverReplacesFactorydUnderALiveProvider|TestBlackBoxOrchestratorAcceptance' ./internal/e2e
         echo "go-daemon-e2e: PASS" ;;
 esac
