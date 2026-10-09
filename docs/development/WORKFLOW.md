@@ -25,17 +25,13 @@ It runs Go formatting, vetting, ordinary short tests, the TypeScript build and
 tests, and `git diff --check`. It does not acquire the process lease. During
 implementation, run this check plus the focused tests for the changed package
 that your environment can run. A factory worker reports a check its sandbox
-cannot run as "verified by gate" instead of blocking on it.
+cannot run as "not run locally; required by the gate" instead of blocking on
+it.
 
-The full local gate runs before every review, at the exact head and outside
-any worker sandbox. A failure is rerun once at the head (a pass then counts,
-and the failure is kept as flake evidence). The reproducing failures are the
-tests that failed in both head runs. With none in common the failure is a flake
-and review proceeds; otherwise the gate runs once at the base, and the
-reproducing failures the base does not share go back to the author by name.
-Head failures with no parsed test names go back without a base run. A wrapper
-failure where nothing ran is a host blocker, never author work. Run it yourself when broad local integration proof
-is needed:
+factoryd does not run the full gate before review: it reviews the exact head,
+and the protected merge queue's required CI is the full gate on the combined
+tree. A queue ejection comes back to the author naming the failing checks. Run
+the full local gate yourself when broad local integration proof is needed:
 
 ```sh
 ./scripts/local-ci.sh
@@ -298,7 +294,8 @@ go build -o "$df_dev_root/factory-runner" ./cmd/factory-runner
 df_dev_home="$df_dev_root/factory"
 "$df_dev_root/factoryctl" init --home "$df_dev_home"
 "$df_dev_root/factoryctl" doctor --home "$df_dev_home"
-"$df_dev_root/factoryd" --home "$df_dev_home" &
+"$df_dev_root/factoryd" --home "$df_dev_home" \
+  --development-browser-address 127.0.0.1:43999 &
 
 until [ -S "$df_dev_home/runtimes/factory.sock" ]; do sleep 0.2; done
 export DARK_FACTORY_SOCKET="$df_dev_home/runtimes/factory.sock"
@@ -307,7 +304,8 @@ export DARK_FACTORY_OPERATOR_TOKEN_FILE="$df_dev_home/operator.token"
 ```
 
 The root is under `/private/tmp` because `/tmp` is a symlink on macOS and the
-home walk rejects symlinks. Run `doctor` while the home is stopped. Every
+home walk rejects symlinks. The browser address keeps the check off an
+installed factory's `127.0.0.1:43123`. Run `doctor` while the home is stopped. Every
 operator request needs both client environment variables.
 
 Lifecycle fixtures use a tiny temporary Git repository and the shell provider.

@@ -1,10 +1,11 @@
 # Repository context
 
-Dark Factory is a Darwin-first Go runtime: `factoryd` owns durable work and
+Dark Factory is a macOS-only Go runtime: `factoryd` owns durable work and
 provider processes, while `factoryctl` and the loopback web console use the
 same local API. It is not a hosted runtime, coding model, or general agent
-framework. The shell-provider and real Codex loops are proven; real Claude work
-is not.
+framework. The shell-provider and real Codex loops are proven; a Claude Code
+worker is proven by one live run and a Claude Code overseer by fixtures only.
+Console development under `web/` is portable and needs only Node.
 
 Dark Factory applies constraints to agents it launches through runtime
 configuration and enforcement. Those constraints do not govern agents working
@@ -35,7 +36,8 @@ factoryd reviews the exact head without running it first, and a queue
 ejection comes back to the author naming the failing checks. A factory worker that
 cannot run a check inside its sandbox (a nested `sandbox-exec`, system Perl,
 the daemon supervisor fixtures, the full gate itself) does not block on it:
-it lists that check as "verified by gate" in its result and finishes.
+it lists that check as "not run locally; required by the gate" in its result
+and finishes.
 
 Record the exact head, the checks run, and the checks left to the gate. For CI
 changes, also run the affected gate fixtures. Get the independent review with
