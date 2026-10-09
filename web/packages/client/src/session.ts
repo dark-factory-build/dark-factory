@@ -42,7 +42,7 @@ import {
 import { ProtocolError, type ProtocolErrorCode } from "./errors.js";
 import { CAPABILITIES, MAX_AGENT_MODEL_BYTES, MAX_AGENT_NAME_BYTES,
   MAX_IDLE_AFTER_SECONDS,
-  MAX_IDLE_RUN_BUDGET, MAX_ARRAY_ITEMS, MAX_HUMAN_REPLY_BYTES, MAX_SQLITE_INTEGER, MAX_TASK_INSTRUCTION_BYTES, MAX_TASK_PRIORITY, MAX_TASK_TITLE_BYTES, type CapabilityMask, type ErrorCode } from "./manifest.js";
+  MAX_IDLE_RUN_BUDGET, MAX_OUTSTANDING_REQUESTS, MAX_HUMAN_REPLY_BYTES, MAX_SQLITE_INTEGER, MAX_TASK_INSTRUCTION_BYTES, MAX_TASK_PRIORITY, MAX_TASK_TITLE_BYTES, type CapabilityMask, type ErrorCode } from "./manifest.js";
 import { snapshotView, type StateView } from "./state.js";
 import { createTerminalHandle, terminalControlFrame, type InternalTerminalHandle, type TerminalHandle, type TerminalOptions } from "./terminal_session.js";
 import { decodeTerminalServer } from "./terminal_session.js";
@@ -294,7 +294,7 @@ export class BrowserSession {
     if (!validDynamicID(request.agentId) || request.repositoryId !== undefined && !validDynamicID(request.repositoryId) || request.expectedAgentRevision < 1n || request.expectedAgentRevision > MAX_SQLITE_INTEGER || request.mode !== undefined && request.mode !== "now" && request.mode !== "queue" && request.mode !== "any") return Promise.reject(new SessionError("invalid_request"));
     const bytes = new TextEncoder().encode(request.instruction).length;
     if (bytes < 1 || bytes > MAX_TASK_INSTRUCTION_BYTES || /^[ \t\r\n]*$/.test(request.instruction)) return Promise.reject(new SessionError("invalid_request"));
-    if (this.#requests.size >= MAX_ARRAY_ITEMS) return Promise.reject(new SessionError("rate_limited"));
+    if (this.#requests.size >= MAX_OUTSTANDING_REQUESTS) return Promise.reject(new SessionError("rate_limited"));
     let taskId: string, incarnationId: string;
     try { taskId = this.#randomID(); incarnationId = this.#randomID(); } catch (error) { return Promise.reject(error); }
     const id = this.#nextID("task-enqueue");
@@ -337,7 +337,7 @@ export class BrowserSession {
     if (!validDynamicID(request.operationId) || !validDynamicID(request.taskId) || request.expectedTaskRevision < 1n || request.expectedTaskRevision > MAX_SQLITE_INTEGER || !validAgentControlRequest(request.action, instruction, successorTaskId, successorIncarnationId)) return Promise.reject(new SessionError("invalid_request"));
     let target: TargetAuthority;
     try { target = this.#targetAuthority(request.target); } catch (error) { return Promise.reject(error); }
-    if (this.#requests.size >= MAX_ARRAY_ITEMS) return Promise.reject(new SessionError("rate_limited"));
+    if (this.#requests.size >= MAX_OUTSTANDING_REQUESTS) return Promise.reject(new SessionError("rate_limited"));
     const id = this.#nextID("agent-control");
     let payload: string;
     try {
@@ -435,7 +435,7 @@ export class BrowserSession {
   intake(request: IntakeBody): Promise<IntakeView> {
     try { this.#ensureLive(); } catch (error) { return Promise.reject(error); }
     if ((this.#capabilities & CAPABILITIES.administration) === 0) return Promise.reject(new SessionError("unauthorized"));
-    if (this.#requests.size >= MAX_ARRAY_ITEMS) return Promise.reject(new SessionError("rate_limited"));
+    if (this.#requests.size >= MAX_OUTSTANDING_REQUESTS) return Promise.reject(new SessionError("rate_limited"));
     const id = this.#nextID("intake"); let payload: string; let body = request;
     try { if (body.action === "create" && body.source_id === undefined) body = { ...body, source_id: this.#randomID() }; payload = encodeClientControl({ type: "INTAKE", id, body: body }); } catch (error) { return Promise.reject(error); }
     return this.#track(id, { kind: "INTAKE_RESULT" }, payload);
@@ -501,7 +501,7 @@ export class BrowserSession {
     if (!this.#authenticated || (this.#capabilities & CAPABILITIES.private_human_request_detail) === 0) return Promise.reject(new SessionError("unauthorized"));
     const scopeId = "agent_id" in scope ? scope.agent_id : scope.project_id;
     if (!validDynamicID(scopeId) || (cursor.beforeUpdatedAtMs === undefined) !== (cursor.beforeTaskId === undefined) || (cursor.beforeUpdatedAtMs !== undefined && (cursor.beforeUpdatedAtMs < 1n || cursor.beforeUpdatedAtMs > MAX_SQLITE_INTEGER)) || (cursor.beforeTaskId !== undefined && !validDynamicID(cursor.beforeTaskId))) return Promise.reject(new SessionError("invalid_request"));
-    if (this.#requests.size >= MAX_ARRAY_ITEMS) return Promise.reject(new SessionError("rate_limited"));
+    if (this.#requests.size >= MAX_OUTSTANDING_REQUESTS) return Promise.reject(new SessionError("rate_limited"));
     const id = this.#nextID("task-list");
     const body = { ...scope, ...(cursor.beforeUpdatedAtMs === undefined ? {} : { before_updated_at_ms: cursor.beforeUpdatedAtMs, before_task_id: cursor.beforeTaskId! }) };
     let payload: string;
@@ -557,7 +557,7 @@ export class BrowserSession {
     if (!this.#authenticated) return Promise.reject(new SessionError("unauthorized"));
     const loopbackGrant = CAPABILITIES.human_actions | CAPABILITIES.terminal_input;
     if ((this.#capabilities & loopbackGrant) !== loopbackGrant) return Promise.reject(new SessionError("unauthorized"));
-    if (this.#requests.size >= MAX_ARRAY_ITEMS) return Promise.reject(new SessionError("rate_limited"));
+    if (this.#requests.size >= MAX_OUTSTANDING_REQUESTS) return Promise.reject(new SessionError("rate_limited"));
     const id = this.#nextID("remote-invite");
     let payload: string;
     try { payload = encodeClientControl({ type: "REMOTE_INVITE", id, body: {} }); } catch (error) { return Promise.reject(error); }
@@ -575,7 +575,7 @@ export class BrowserSession {
   subscribePush(subscription: PushSubscribeBody): Promise<void> {
     try { this.#ensureLive(); } catch (error) { return Promise.reject(error); }
     if (!this.#authenticated) return Promise.reject(new SessionError("unauthorized"));
-    if (this.#requests.size >= MAX_ARRAY_ITEMS) return Promise.reject(new SessionError("rate_limited"));
+    if (this.#requests.size >= MAX_OUTSTANDING_REQUESTS) return Promise.reject(new SessionError("rate_limited"));
     const id = this.#nextID("push-subscribe");
     let payload: string;
     try { payload = encodeClientControl({ type: "PUSH_SUBSCRIBE", id, body: subscription }); } catch (error) { return Promise.reject(error); }
@@ -587,7 +587,7 @@ export class BrowserSession {
     if (!this.#authenticated) return Promise.reject(new SessionError("unauthorized"));
     if ((this.#capabilities & CAPABILITIES.observe) === 0) return Promise.reject(new SessionError("unauthorized"));
     if (!validDynamicID(request.agentId) || request.expectedAgentRevision < 1n || request.expectedAgentRevision > MAX_SQLITE_INTEGER || request.expectedHead < 0n || request.expectedHead > MAX_SQLITE_INTEGER) return Promise.reject(new SessionError("invalid_request"));
-    if (this.#requests.size >= MAX_ARRAY_ITEMS) return Promise.reject(new SessionError("rate_limited"));
+    if (this.#requests.size >= MAX_OUTSTANDING_REQUESTS) return Promise.reject(new SessionError("rate_limited"));
     const id = this.#nextID("terminal-target");
     let payload: string;
     try { payload = encodeClientControl({ type: "TERMINAL_TARGET_GET", id, body: { agent_id: request.agentId, expected_agent_revision: request.expectedAgentRevision, expected_head: request.expectedHead } }); } catch (error) { return Promise.reject(error); }
@@ -1146,7 +1146,7 @@ export class BrowserSession {
   #ensureHumanOperation(requestId: string): void {
     this.#ensureLive();
     if (!this.#authenticated) throw new SessionError("unauthorized");
-    if (this.#requests.size >= MAX_ARRAY_ITEMS) throw new SessionError("rate_limited");
+    if (this.#requests.size >= MAX_OUTSTANDING_REQUESTS) throw new SessionError("rate_limited");
     for (const pending of this.#requests.values()) if ((pending as Partial<HumanPending>).requestId === requestId) throw new SessionError("rate_limited");
   }
 
@@ -1161,7 +1161,7 @@ export class BrowserSession {
   githubConnection(request: GitHubConnectionBody): Promise<GitHubConnectionResult> {
     try { this.#ensureLive(); } catch (error) { return Promise.reject(error); }
     if (!this.#authenticated || (this.#capabilities & CAPABILITIES.administration) === 0) return Promise.reject(new SessionError("unauthorized"));
-    if (this.#requests.size >= MAX_ARRAY_ITEMS) return Promise.reject(new SessionError("rate_limited"));
+    if (this.#requests.size >= MAX_OUTSTANDING_REQUESTS) return Promise.reject(new SessionError("rate_limited"));
     const id = this.#nextID("github");
     let payload: string;
     try { payload = encodeClientControl({ type: "GITHUB_CONNECTION", id, body: request }); } catch (error) { return Promise.reject(error); }
@@ -1174,7 +1174,7 @@ export class BrowserSession {
     const capability = kind === "TASK_HISTORY" || kind === "TASK_DETAIL" ? CAPABILITIES.private_human_request_detail : kind === "OPERATIONAL_GRAPH" || kind === "OPERATIONAL_NODE" || kind === "RUN_PATHS" ? CAPABILITIES.observe : kind === "PROJECT_LIMITS_RESULT" ? CAPABILITIES.administration : CAPABILITIES.human_actions;
     if ((this.#capabilities & capability) === 0) return Promise.reject(new SessionError("unauthorized"));
     if (!entityId.split(":").every(validDynamicID) || expectedRevision < 1n || expectedRevision > MAX_SQLITE_INTEGER) return Promise.reject(new SessionError("invalid_request"));
-    if (this.#requests.size >= MAX_ARRAY_ITEMS) return Promise.reject(new SessionError("rate_limited"));
+    if (this.#requests.size >= MAX_OUTSTANDING_REQUESTS) return Promise.reject(new SessionError("rate_limited"));
     const id = this.#nextID(prefix);
     let payload: string;
     try { payload = encode(id); } catch (error) { return Promise.reject(error); }
@@ -1215,7 +1215,7 @@ export class BrowserSession {
     try { this.#ensureLive(); } catch (error) { return Promise.reject(error); }
     if (!this.#authenticated) return Promise.reject(new SessionError("unauthorized"));
     if ((this.#capabilities & capability) === 0) return Promise.reject(new SessionError("unauthorized"));
-    if (this.#requests.size >= MAX_ARRAY_ITEMS) return Promise.reject(new SessionError("rate_limited"));
+    if (this.#requests.size >= MAX_OUTSTANDING_REQUESTS) return Promise.reject(new SessionError("rate_limited"));
     const id = this.#nextID(prefix);
     let payload: string;
     try { payload = encode(id); } catch (error) { return Promise.reject(error); }

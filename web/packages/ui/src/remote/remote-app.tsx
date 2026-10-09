@@ -25,6 +25,7 @@ import {
   INVITATION_UNREADABLE,
   REMOTE_STATUS_GLYPH,
   REQUEST_CLOSED,
+  REQUEST_UNREAD,
   remoteActionable,
   remoteDeliveryNotice,
   remoteFactoryBanner,
@@ -151,6 +152,7 @@ export function RemoteApp(props: RemoteAppProps = {}) {
       replaceReady: true,
       unavailableNotice: FACTORY_UNREACHABLE,
       absentNotice: REQUEST_CLOSED,
+      loadFailureNotice: REQUEST_UNREAD,
       actionFailureNotice: remoteDeliveryNotice,
     });
     human.current = flow;

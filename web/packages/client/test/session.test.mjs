@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { MAX_ARRAY_ITEMS } from "../dist/src/manifest.js";
+import { MAX_ARRAY_ITEMS, MAX_OUTSTANDING_REQUESTS } from "../dist/src/manifest.js";
 import {
   BrowserSession,
   BrowserClient,
@@ -462,7 +462,7 @@ test("ordinary private task reads retain correlation, authority and shared pendi
   });
   await t.test("mixed reads share the existing bounded console request budget", async () => {
     const { session, socket } = await openHumanSession();
-    const pending = Array.from({ length: MAX_ARRAY_ITEMS }, (_, index) => reads[index % 2].request(session));
+    const pending = Array.from({ length: MAX_OUTSTANDING_REQUESTS }, (_, index) => reads[index % 2].request(session));
     const rejected = pending.map((promise) => assert.rejects(promise, { code: "closed" }));
     const sent = socket.sent.length;
     for (const read of reads) await assert.rejects(read.request(session), { code: "rate_limited" });
@@ -773,7 +773,7 @@ test("HumanRequest detail operations are bounded and exact-envelope correlated",
   await t.test("capacity and same-subject gates are finite", async () => {
     const { session } = await openHumanSession();
     const pending = [];
-    for (let index = 1; index <= 32; index += 1) {
+    for (let index = 1; index <= MAX_OUTSTANDING_REQUESTS; index += 1) {
       const requestId = index.toString(16).padStart(32, "0");
       pending.push(session.getHumanRequestDetail({ requestId, expectedRevision: 1n }).then(() => "resolved", (error) => error));
       if (index === 1) await assert.rejects(session.getHumanRequestDetail({ requestId, expectedRevision: 1n }), (error) => error instanceof SessionError && error.code === "rate_limited");
@@ -1771,7 +1771,7 @@ test("terminal target discovery is bounded, exact-correlated, and null is explic
   });
   await session.connect();
   await new Promise((resolve) => setTimeout(resolve, 10));
-  const pending = Array.from({ length: MAX_ARRAY_ITEMS }, () => session.resolveAgentTerminal({ agentId, expectedAgentRevision: 1n, expectedHead: 1n }));
+  const pending = Array.from({ length: MAX_OUTSTANDING_REQUESTS }, () => session.resolveAgentTerminal({ agentId, expectedAgentRevision: 1n, expectedHead: 1n }));
   await assert.rejects(session.resolveAgentTerminal({ agentId, expectedAgentRevision: 1n, expectedHead: 1n }), (error) => error instanceof SessionError && error.code === "rate_limited");
   const first = decodeClientControl(socket.sent.find((wire) => decodeClientControl(wire).type === "TERMINAL_TARGET_GET"));
   socket.reply(encodeTerminalTarget(first.id, { agent_id: agentId, agent_revision: 1n, head: 1n, target: null }));
@@ -2302,6 +2302,17 @@ test("a retryable ERROR for one read rejects that read alone and keeps the sessi
     assert.deepEqual(errors, []);
     session.close();
   }
+});
+
+test("outstanding reads of one kind leave room for another up to the daemon's budget", async () => {
+  const { session, socket } = await openHumanSession();
+  const paths = Array.from({ length: MAX_ARRAY_ITEMS }, () => session.getRunPaths("bb".repeat(16)));
+  const closed = paths.map((promise) => assert.rejects(promise, { code: "closed" }));
+  const detail = session.getHumanRequestDetail({ requestId: "aa".repeat(16), expectedRevision: 1n });
+  assert.equal(lastFrame(socket, "HUMAN_REQUEST_DETAIL_GET").type, "HUMAN_REQUEST_DETAIL_GET");
+  session.close();
+  await assert.rejects(detail, { code: "closed" });
+  await Promise.all(closed);
 });
 
 test("an undecodable reply for a known request rejects only that request", async () => {
