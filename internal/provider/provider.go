@@ -827,8 +827,7 @@ func codexProfile(name string, grants []grant, network string, denied ...string)
 
 // CodexReadOnly is the -c overrides that let a Codex exec's local commands
 // read only paths (and Codex's minimal system profile), with no network. It
-// replaces --sandbox read-only, which reads the whole disk. Codex runs its own
-// executable inside the sandbox, so the caller grants it too; each path is
+// replaces --sandbox read-only, which reads the whole disk. Each path is
 // granted under its resolved spelling as well. The minimal profile lets
 // commands read and write the shared temporary directories, so those are
 // denied; a more specific grant beneath them still applies.

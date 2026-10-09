@@ -289,15 +289,21 @@ func TestReviewLimitNeedsTheCodexMarkerAndACodexReviewer(t *testing.T) {
 	}
 }
 
-// The Codex reviewer's local commands may read the checkout and nothing else
-// the operator owns: a deny-root permission profile, never --sandbox, which
+// The Codex reviewer's local commands may read the checkout and the objects it
+// borrows, and nothing else the operator owns: a deny-root permission profile, never --sandbox, which
 // would override it and reads the whole disk.
 func TestCodexReviewerReadsOnlyItsCheckout(t *testing.T) {
 	backend, homes := reviewerFixture(t, "argv")
 	if err := os.WriteFile(filepath.Join(homes["argv"], "argv"), nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	checkout, request := reviewCheckout(t)
+	// Like ReviewCheckout, the checkout borrows the registered repository's
+	// objects through alternates, which git in the checkout must read.
+	registered, request := reviewCheckout(t)
+	checkout := filepath.Join(t.TempDir(), "repo")
+	if output, err := exec.Command("git", "clone", "-q", "--shared", registered, checkout).CombinedOutput(); err != nil {
+		t.Fatalf("clone: %v %s", err, output)
+	}
 	if _, err := backend.Review(context.Background(), checkout, request); err != nil {
 		t.Fatal(err)
 	}
@@ -309,7 +315,7 @@ func TestCodexReviewerReadsOnlyItsCheckout(t *testing.T) {
 	t.Logf("reviewer argv: %q", argv)
 	joined := strings.Join(argv, "\n")
 	profile := "\n" + `permissions.dark-factory-review={filesystem={":root"="deny",":minimal"="read","/private/tmp"="deny","/private/var/tmp"="deny",` + strconv.Quote(checkout) + `="read",`
-	if strings.Contains(joined, "--sandbox") || strings.Contains(joined, "sandbox_mode") || strings.Contains(joined, `"write"`) || !strings.Contains(joined, "\ndefault_permissions=\"dark-factory-review\"\n") || !strings.Contains(joined, profile) || !strings.Contains(joined, "},network={enabled=false}}\n") {
+	if strings.Contains(joined, "--sandbox") || strings.Contains(joined, "sandbox_mode") || strings.Contains(joined, `"write"`) || !strings.Contains(joined, "\ndefault_permissions=\"dark-factory-review\"\n") || !strings.Contains(joined, profile) || !strings.Contains(joined, strconv.Quote(filepath.Join(registered, ".git", "objects"))+`="read"`) || !strings.Contains(joined, "},network={enabled=false}}\n") {
 		t.Fatalf("reviewer argv = %q, want the deny-root read-only profile and no --sandbox", argv)
 	}
 }

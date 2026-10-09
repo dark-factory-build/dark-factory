@@ -498,7 +498,13 @@ func (b *daemonReviewBackend) Review(ctx context.Context, checkout string, reque
 			environment = append(environment, claudeLogin(home))
 		} else {
 			command = exec.CommandContext(ctx, tool, "exec", "--disable", "computer_use", "--disable", "browser_use", "--disable", "plugins", "--ephemeral", "--ignore-user-config", "--strict-config", "-c", "approval_policy={ granular={sandbox_approval=false,rules=false,mcp_elicitations=false,request_permissions=false,skill_approval=false}}", "--ignore-rules", "--skip-git-repo-check")
-			command.Args = append(append(command.Args, provider.CodexReadOnly(checkout, tool)...), prompt)
+			// Git in the checkout reads the registered repository's objects
+			// through the alternates file ReviewCheckout wrote.
+			readable := []string{checkout}
+			if alternates, err := os.ReadFile(filepath.Join(checkout, ".git", "objects", "info", "alternates")); err == nil {
+				readable = append(readable, strings.Split(strings.TrimSpace(string(alternates)), "\n")...)
+			}
+			command.Args = append(append(command.Args, provider.CodexReadOnly(readable...)...), prompt)
 			environment = append(environment, "CODEX_HOME="+home)
 		}
 		// The CLI finds its keychain login under $USER (#1107).

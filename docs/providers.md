@@ -301,15 +301,17 @@ The exec-only `--ignore-user-config` flag remains confined to factoryd's reviewe
 factoryd's Codex reviewer runs with a deny-root permission profile
 (`provider.CodexReadOnly`), not `--sandbox read-only`, whose legacy policy lets
 local commands read the whole disk and would override a profile. Its commands
-may read the review checkout (including `.git/change.diff`), the Codex
-executable and Codex's minimal system profile; `/private/tmp` and
+may read the review checkout (including `.git/change.diff`), the registered
+repository's object store that the checkout borrows through its alternates
+file, and Codex's minimal system profile; `/private/tmp` and
 `/private/var/tmp`, which that profile otherwise opens for reading and writing,
 are denied. They write nothing and have no network. The provider process itself,
 its `CODEX_HOME` login and model traffic are outside this boundary. Checked
 natively on CLI 0.160.1: a sibling of the checkout, the home directory, the user
 and shared temp directories, by absolute path, `../` and symlink, writes to the
-checkout and to `CODEX_HOME`, and a nested `codex` asking for full access were
-all refused. factoryd's Claude reviewer has no shell: `--restricted --safe-mode`
+checkout, to `CODEX_HOME` and to the borrowed object store, and a nested
+`codex` asking for full access were all refused, while `git log`, `git show` and
+`git diff base...HEAD` worked in a `ReviewCheckout` checkout. factoryd's Claude reviewer has no shell: `--restricted --safe-mode`
 with only Read, Grep and Glob, which were refused the same outside reads.
 Factory-owned MCP servers and command permissions are supplied explicitly at launch.
 
