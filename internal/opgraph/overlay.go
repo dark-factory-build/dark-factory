@@ -1,7 +1,6 @@
 package opgraph
 
 import (
-	"slices"
 	"sort"
 	"strings"
 )
@@ -228,7 +227,8 @@ func unitObservation(node *Node, current []Coverage, expired bool, status *Statu
 }
 
 // silentHost: an exact outside host every caller of which is a current source
-// that reports server.address, so a call would have been seen. There is no
+// that reports its outbound peers (Coverage.Peers; a listening server.address
+// is not that), so a call would have been seen. There is no
 // guessed prefix to be wrong about, unlike a route.
 func silentHost(builder *Builder, node *Node, callers []string, current map[string][]Coverage) bool {
 	if node.Selectors["server.address"] == "" || len(callers) == 0 {
@@ -240,7 +240,7 @@ func silentHost(builder *Builder, node *Node, callers []string, current map[stri
 		}
 		reports := false
 		for _, item := range current[caller] {
-			reports = reports || slices.Contains(item.Keys, "server.address")
+			reports = reports || item.Peers
 		}
 		if !reports {
 			return false

@@ -282,7 +282,7 @@ const runtimeWindow = 15 * time.Minute
 func (daemon *Daemon) liveGraph(projectID kernel.ProjectID, graph projectGraph) opgraph.Live {
 	now := daemon.now().UnixMilli()
 	store := daemon.runtimeStore()
-	store.Cover(opgraph.Coverage{Source: "factoryd", Environment: "local", Unit: "factoryd", Keys: selfCoverageKeys, AsOf: now, TTL: runtimeWindow.Milliseconds()})
+	store.Cover(opgraph.Coverage{Source: "factoryd", Environment: "local", Unit: "factoryd", Keys: selfCoverageKeys, Peers: true, AsOf: now, TTL: runtimeWindow.Milliseconds()})
 	sources := daemon.observeSources()
 	daemon.pollSources(sources)
 	aliases := map[string]string{}
