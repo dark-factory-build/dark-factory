@@ -69,8 +69,11 @@ func (daemon *Daemon) refreshProduction(ctx context.Context, project kernel.Proj
 		}
 		observation.ObservedAt = at.Int64()
 		if units := daemon.deployedUnits(project, repository.ID.String()); len(units) > 0 {
-			if observation.DeployedAt, err = recordDeployments(ctx, daemon.github.MCP, identity.PublicationRepository, githubID, units, daemon.observeSources(), daemon.runtimeStore(), at.Int64()); err != nil {
+			var hosts map[string][]string
+			if observation.DeployedAt, hosts, err = recordDeployments(ctx, daemon.github.MCP, identity.PublicationRepository, githubID, units, daemon.observeSources(), daemon.runtimeStore(), at.Int64()); err != nil {
 				LogFactoryd(daemon.log, "factoryd: refresh %s deployments: %v\n", identity.PublicationRepository, err)
+			} else {
+				daemon.setHosts("github\x00"+identity.PublicationRepository, hosts)
 			}
 		}
 		prepared := make([]review.Operation, 0, len(corrections))
@@ -269,11 +272,12 @@ func (daemon *Daemon) deployedUnits(project kernel.ProjectID, repository string)
 // failure or error since the last refresh counts as an error there; other
 // states are not drawn, and no coverage is claimed. It returns the newest
 // successful production deployment's creation time (0 when production has
-// none), nil when GitHub records no production deployment.
-func recordDeployments(ctx context.Context, call maintainerMCP, repository string, githubID uint64, units []string, sources []observeSource, store *opgraph.Runtime, now int64) (*int64, error) {
+// none), nil when GitHub records no production deployment, and the hosts
+// each unit's successful deployments serve at.
+func recordDeployments(ctx context.Context, call maintainerMCP, repository string, githubID uint64, units []string, sources []observeSource, store *opgraph.Runtime, now int64) (*int64, map[string][]string, error) {
 	content, err := maintainerTool(ctx, call, repository, githubID, "list_deployments", map[string]any{"repository": repository, "per_page": 30})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	var value struct {
 		Deployments []struct {
@@ -282,10 +286,11 @@ func recordDeployments(ctx context.Context, call maintainerMCP, repository strin
 			CreatedAt   string `json:"created_at"`
 			State       string `json:"state"`
 			UpdatedAt   string `json:"updated_at"`
+			Host        string `json:"environment_host"`
 		} `json:"deployments"`
 	}
 	if json.Unmarshal(content, &value) != nil || len(value.Deployments) > 30 {
-		return nil, fmt.Errorf("invalid deployments response")
+		return nil, nil, fmt.Errorf("invalid deployments response")
 	}
 	// ponytail: one production environment and alias map per home, not per
 	// repository; key them by repository if two systems ever disagree.
@@ -297,11 +302,12 @@ func recordDeployments(ctx context.Context, call maintainerMCP, repository strin
 		}
 	}
 	var deployedAt *int64
+	hosts := map[string][]string{}
 	for _, deployment := range value.Deployments {
 		created, createdErr := time.Parse(time.RFC3339, deployment.CreatedAt)
 		updated, updatedErr := time.Parse(time.RFC3339, deployment.UpdatedAt)
 		if createdErr != nil || updatedErr != nil {
-			return nil, fmt.Errorf("invalid deployment time")
+			return nil, nil, fmt.Errorf("invalid deployment time")
 		}
 		isProduction := deployment.Environment == production || production == "" && deployment.Production
 		if isProduction {
@@ -325,6 +331,9 @@ func recordDeployments(ctx context.Context, call maintainerMCP, repository strin
 		case deployment.State == "success":
 			item.Kind = "deploy"
 			store.Record(item)
+			if deployment.Host != "" {
+				hosts[unit] = append(hosts[unit], deployment.Host)
+			}
 		case (deployment.State == "failure" || deployment.State == "error") && item.End > now-productionRefreshInterval.Milliseconds():
 			// Read again every refresh, a failure counts once: refreshes are
 			// at least an interval apart. ponytail: one older than that when
@@ -333,7 +342,7 @@ func recordDeployments(ctx context.Context, call maintainerMCP, repository strin
 			store.Record(item)
 		}
 	}
-	return deployedAt, nil
+	return deployedAt, hosts, nil
 }
 
 // readMaintainerChecks maps observe_pull_request_checks to one record per

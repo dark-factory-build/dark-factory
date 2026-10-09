@@ -113,7 +113,7 @@ func TestRefreshedChecksLightTheirWorkflowJobs(t *testing.T) {
 		".github/workflows/ci.yml":      []byte("name: CI\non:\n  pull_request:\n  merge_group:\njobs:\n  go:\n    runs-on: x\n  lint:\n    name: Lint (${{ matrix.os }})\n  docs:\n    runs-on: x\n"),
 		".github/workflows/release.yml": []byte("name: Release\non: [push]\njobs:\n  release:\n    runs-on: x\n"),
 	}}
-	graph, err := opgraph.Infer("s", []opgraph.Repository{repo})
+	graph, err := opgraph.Infer("s", []opgraph.Repository{repo}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -168,7 +168,7 @@ func TestARerunReplacesTheCheckItRetried(t *testing.T) {
 // error; a preview, an in-progress deploy and an old failure draw nothing.
 // The newest successful production creation time is what ships merges.
 func TestDeploymentsChangeOverTheDeployedUnit(t *testing.T) {
-	graph, err := opgraph.Infer("s", []opgraph.Repository{{ID: "r1", Name: "app", Files: map[string][]byte{"fly.toml": []byte("app = \"web\"\n")}}})
+	graph, err := opgraph.Infer("s", []opgraph.Repository{{ID: "r1", Name: "app", Files: map[string][]byte{"fly.toml": []byte("app = \"web\"\n")}}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -181,7 +181,7 @@ func TestDeploymentsChangeOverTheDeployedUnit(t *testing.T) {
 	now := time.Date(2026, 10, 9, 12, 0, 0, 0, time.UTC)
 	stamp := func(ago time.Duration) string { return now.Add(-ago).Format(time.RFC3339) }
 	deployment := func(environment string, production bool, state string, created, updated time.Duration) string {
-		return fmt.Sprintf(`{"id":1,"environment":%q,"production_environment":%t,"sha":"%s","ref":"main","created_at":%q,"state":%q,"updated_at":%q}`, environment, production, strings.Repeat("a", 40), stamp(created), state, stamp(updated))
+		return fmt.Sprintf(`{"id":1,"environment":%q,"production_environment":%t,"sha":"%s","ref":"main","created_at":%q,"state":%q,"updated_at":%q,"environment_host":"%s.example.app"}`, environment, production, strings.Repeat("a", 40), stamp(created), state, stamp(updated), state)
 	}
 	var calls []string
 	call := func(_ context.Context, request json.RawMessage, _ map[string]uint64) (json.RawMessage, error) {
@@ -196,9 +196,14 @@ func TestDeploymentsChangeOverTheDeployedUnit(t *testing.T) {
 		return json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"structuredContent":{"deployments":[` + list + `]}}}`), nil
 	}
 	store := opgraph.NewRuntime(time.Hour)
-	deployedAt, err := recordDeployments(context.Background(), call, "o/r", 1, units, nil, store, now.UnixMilli())
+	deployedAt, hosts, err := recordDeployments(context.Background(), call, "o/r", 1, units, nil, store, now.UnixMilli())
 	if err != nil || deployedAt == nil || *deployedAt != now.Add(-10*time.Minute).UnixMilli() {
 		t.Fatalf("deployed at %v, %v", deployedAt, err)
+	}
+	// The unit serves where its successful deployments say; an unmapped
+	// preview's host is no unit's.
+	if len(hosts) != 1 || strings.Join(hosts["web"], ",") != "success.example.app" {
+		t.Fatalf("hosts %v", hosts)
 	}
 	if len(calls) != 1 || !strings.Contains(calls[0], `"name":"list_deployments"`) || !strings.Contains(calls[0], `"per_page":30`) {
 		t.Fatalf("calls %v", calls)
@@ -216,7 +221,7 @@ func TestDeploymentsChangeOverTheDeployedUnit(t *testing.T) {
 		}
 		// Several deployed units and no services mapping: nothing lands.
 		quiet := opgraph.NewRuntime(time.Hour)
-		if _, err := recordDeployments(context.Background(), call, "o/r", 1, []string{"web", "worker"}, nil, quiet, now.UnixMilli()); err != nil {
+		if _, _, err := recordDeployments(context.Background(), call, "o/r", 1, []string{"web", "worker"}, nil, quiet, now.UnixMilli()); err != nil {
 			t.Fatal(err)
 		}
 		if held, _ := quiet.Snapshot(now.UnixMilli()); len(held) != 0 {

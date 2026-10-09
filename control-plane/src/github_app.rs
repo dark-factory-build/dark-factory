@@ -724,7 +724,7 @@ pub(crate) struct ChecksResult {
 /// GitHub Deployments, newest first, each with its newest status. Whatever
 /// deploys (Vercel, Actions, any CD tool) writes them, so one read covers
 /// every platform that records them. No URLs, payloads, descriptions or
-/// creators leave GitHub.
+/// creators leave GitHub; of the environment URL, only its host does.
 #[derive(Debug, Serialize)]
 pub(crate) struct DeploymentsResult {
     pub(crate) deployments: Vec<DeploymentResult>,
@@ -744,6 +744,9 @@ pub(crate) struct DeploymentResult {
     /// `updated_at` is then its `created_at`.
     pub(crate) state: String,
     pub(crate) updated_at: String,
+    /// The host of the newest status's environment URL: where the deployment
+    /// serves. Its path and query never leave GitHub.
+    pub(crate) environment_host: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -3751,10 +3754,15 @@ impl Authority {
                 token.as_str(),
             )
             .await?;
-            let (state, updated_at) = match statuses.into_iter().next() {
-                Some(status) => (status.state, status.updated_at),
-                None => ("pending".to_owned(), deployment.created_at.clone()),
+            let (state, updated_at, environment_url) = match statuses.into_iter().next() {
+                Some(status) => (status.state, status.updated_at, status.environment_url),
+                None => ("pending".to_owned(), deployment.created_at.clone(), None),
             };
+            let environment_host = environment_url
+                .and_then(|url| worker::Url::parse(&url).ok())
+                .filter(|url| matches!(url.scheme(), "http" | "https"))
+                .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
+                .filter(|host| host.len() <= 253);
             if !matches!(
                 state.as_str(),
                 "error" | "failure" | "inactive" | "in_progress" | "queued" | "pending" | "success"
@@ -3771,6 +3779,7 @@ impl Authority {
                 created_at: deployment.created_at,
                 state,
                 updated_at,
+                environment_host,
             });
         }
         Ok(DeploymentsResult { deployments })
@@ -4528,6 +4537,8 @@ struct Deployment {
 struct DeploymentStatus {
     state: String,
     updated_at: String,
+    #[serde(default)]
+    environment_url: Option<String>,
 }
 
 #[cfg(target_arch = "wasm32")]

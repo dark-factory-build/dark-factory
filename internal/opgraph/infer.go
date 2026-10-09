@@ -12,8 +12,11 @@ import (
 // Infer builds the static Operational Graph of one system from its
 // repositories. It never executes project code: every extractor parses a
 // declaration its framework reads, or matches a recorded code pattern.
-func Infer(system string, repositories []Repository) (Graph, error) {
-	run := &inference{}
+// hosts are the hosts a platform reports each runtime name serves (a
+// Worker's custom domains, a deployment's environment URL); a unit
+// answering to the name serves them as its own.
+func Infer(system string, repositories []Repository, hosts map[string][]string) (Graph, error) {
+	run := &inference{platformHosts: hosts}
 	for _, repository := range repositories {
 		run.repository(repository)
 	}
@@ -41,7 +44,7 @@ type unit struct {
 
 // owner says which units a finding belongs to.
 type owner struct {
-	units   []string // explicit unit keys (Go reachability)
+	units   []string // explicit unit keys (Go reachability), in repo when set
 	repo    string
 	file    string
 	browser bool // the finding runs in a browser when its unit has one
@@ -78,6 +81,8 @@ type inference struct {
 	bindings  []serviceBinding
 	hostHints []hostHint
 	unitDeps  []unitDeps
+	// platformHosts are hosts by runtime name, read from the platform.
+	platformHosts map[string][]string
 	// scriptImports holds each script file's relative imports.
 	scriptImports map[string][]string
 }
@@ -165,7 +170,7 @@ func (run *inference) ownerUnits(units []*unit, found owner, kind Kind, trigger 
 		result := []*unit{}
 		for _, candidate := range units {
 			for _, key := range found.units {
-				if candidate.key == key {
+				if candidate.key == key && (found.repo == "" || candidate.repo == found.repo) {
 					result = append(result, candidate)
 				}
 			}
@@ -311,6 +316,16 @@ func (run *inference) resolve(system string, repositories []Repository) (Graph, 
 	for _, hint := range run.hostHints {
 		for _, owned := range run.ownerUnits(units, hint.owner, Ingress, TriggerRequest) {
 			owned.hosts = append(owned.hosts, hint.host)
+		}
+	}
+	// A platform host is served like a declared route, so calls to it, read
+	// from code or seen at runtime, reach the unit.
+	for _, candidate := range units {
+		for _, name := range candidate.names {
+			for _, host := range run.platformHosts[name] {
+				run.find(finding{owner: owner{units: []string{candidate.key}, repo: candidate.repo}, kind: Ingress, key: "host:" + host, label: host, trigger: TriggerRequest, edge: Handles,
+					selectors: map[string]string{"server.address": host}, evidence: static("platform", "served host", Declared)})
+			}
 		}
 	}
 	for _, found := range run.findings {

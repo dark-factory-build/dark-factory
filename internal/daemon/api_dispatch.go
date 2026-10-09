@@ -111,6 +111,9 @@ type Daemon struct {
 	runtime     *opgraph.Runtime
 	// polled is when the configured pull adapters last ran.
 	polled time.Time
+	// hosts are the hosts each platform source last reported a unit serves,
+	// by source and then service.name; the graph is inferred with them.
+	hosts map[string]map[string][]string
 
 	// providerDefaultCache holds the last read of each provider account's own
 	// configured model for a short window, on the same terms as graphs:

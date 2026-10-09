@@ -343,6 +343,7 @@ fn declared_output_schemas_name_the_fields_the_results_carry() {
                 "created_at",
                 "state",
                 "updated_at",
+                "environment_host",
             ][..],
         ),
         (

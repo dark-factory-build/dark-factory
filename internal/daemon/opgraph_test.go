@@ -134,7 +134,7 @@ func TestGraphFramePrefixesPathsOnlyForMultipleRepositories(t *testing.T) {
 	project, first, second := strings.Repeat("a1", 16), strings.Repeat("b2", 16), strings.Repeat("c3", 16)
 	files := map[string][]byte{"go.mod": []byte("module example.com/x\n"), "cmd/x/main.go": []byte(mainSource),
 		".github/workflows/ci.yml": []byte("on: pull_request\njobs:\n  test:\n    runs-on: macos-15\n")}
-	graph, err := opgraph.Infer(project, []opgraph.Repository{{ID: first, Name: "one", Files: files}})
+	graph, err := opgraph.Infer(project, []opgraph.Repository{{ID: first, Name: "one", Files: files}}, nil)
 	if err != nil || len(graph.Nodes) == 0 {
 		t.Fatalf("graph = %+v, %v", graph, err)
 	}
@@ -257,7 +257,7 @@ func TestOutboundRequestsLightTheirExternalGate(t *testing.T) {
 	}
 
 	source := "package main\nimport \"net/http\"\nfunc main() { http.Get(\"https://api.github.com/repos\") }\n"
-	graph, err := opgraph.Infer("s", []opgraph.Repository{{ID: "r", Name: "r", Files: map[string][]byte{"go.mod": []byte("module example.com/x\n"), "cmd/factoryd/main.go": []byte(source)}}})
+	graph, err := opgraph.Infer("s", []opgraph.Repository{{ID: "r", Name: "r", Files: map[string][]byte{"go.mod": []byte("module example.com/x\n"), "cmd/factoryd/main.go": []byte(source)}}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -295,7 +295,7 @@ func TestOwnRepositoryGraphEncodesWithLiveEvidence(t *testing.T) {
 			}
 		}
 	}
-	graph, err := opgraph.Infer(project, repositories)
+	graph, err := opgraph.Infer(project, repositories, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
