@@ -9,6 +9,7 @@ import (
 )
 
 func TestOverseerSnapshotIsProjectScopedAndTaskSelected(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, run, _ := runningOrchestratorRun(t)
 	defer store.Close()
@@ -77,6 +78,7 @@ func TestOverseerSnapshotIsProjectScopedAndTaskSelected(t *testing.T) {
 }
 
 func TestOverseerSnapshotPagesWithHeadFenceAndTaskTextChunks(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, run, _ := runningOrchestratorRun(t)
 	defer store.Close()
@@ -118,6 +120,7 @@ func TestOverseerSnapshotPagesWithHeadFenceAndTaskTextChunks(t *testing.T) {
 }
 
 func TestOverseerSnapshotBoundsTerminalHistoryButKeepsActionableTasks(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, run, _ := runningOrchestratorRun(t)
 	defer store.Close()
@@ -176,6 +179,7 @@ func TestOverseerSnapshotBoundsTerminalHistoryButKeepsActionableTasks(t *testing
 }
 
 func TestOverseerCannotAnswerItsOwnHumanRequest(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, run, _ := runningOrchestratorRun(t)
 	defer store.Close()
@@ -189,6 +193,7 @@ func TestOverseerCannotAnswerItsOwnHumanRequest(t *testing.T) {
 }
 
 func TestOverseerHumanReplyTargetsOnlyWorkers(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, worker, overseer, _ := runningWorkerAndOverseer(t)
 	defer store.Close()
@@ -209,6 +214,7 @@ func TestOverseerHumanReplyTargetsOnlyWorkers(t *testing.T) {
 }
 
 func TestRetainedChangeHandoffsInspectCurrentSettledOutcomes(t *testing.T) {
+	t.Parallel()
 	succeeded, err := NewSuccessProposal("finished")
 	if err != nil {
 		t.Fatal(err)
@@ -277,6 +283,7 @@ func TestRetainedChangeHandoffsInspectCurrentSettledOutcomes(t *testing.T) {
 }
 
 func TestOverseerSnapshotFirstPageShowsYieldedTerminalQuestionAndRefusesOrphan(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, worker, overseer, _ := runningWorkerAndOverseer(t)
 	defer store.Close()

@@ -20,4 +20,15 @@ if [ -z "$lease_dir" ]; then
 fi
 (umask 077 && mkdir -p "$lease_dir/.dark-factory-local-ci.lock")
 export DARK_FACTORY_LOCAL_CI_LEASE_HELD=1
-exec lockf -k "$lease_dir/.dark-factory-local-ci.lock/descriptor" "$@"
+lease_log=$lease_dir/.dark-factory-local-ci.lock/lease.log
+lease_requested_at=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+export lease_log lease_requested_at
+exec lockf -k "$lease_dir/.dark-factory-local-ci.lock/descriptor" sh -c '
+    lease_acquired_at=$(date -u "+%Y-%m-%dT%H:%M:%SZ")
+    lease_status=0
+    "$@" || lease_status=$?
+    lease_released_at=$(date -u "+%Y-%m-%dT%H:%M:%SZ")
+    printf "command=%s requested_at=%s acquired_at=%s released_at=%s\\n" \
+        "$*" "$lease_requested_at" "$lease_acquired_at" "$lease_released_at" >>"$lease_log"
+    exit "$lease_status"
+' sh "$@"

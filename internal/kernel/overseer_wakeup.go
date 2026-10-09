@@ -29,18 +29,17 @@ const (
 // overseer acts on it (a blocked or failed worker task, an unanswered worker
 // question, finished work not yet published or corrected behind its open pull
 // request, a pull request factoryd escalated while it stays open at the
-// escalated head); a succeeded worker task, and a Change factoryd could not
-// publish (it has no pull request), need one look. An accepted intake task
-// that succeeded with a diff needs none: factoryd publishes it, and the
-// Change item covers a publication that never happens, except while factoryd
-// records it refused: that publish failure, at the Change's current revision,
-// replaces it. An intake task the
+// escalated head); a succeeded worker task needs one look. An accepted intake
+// task that succeeded with a diff needs none: factoryd publishes it, and the
+// Change item covers a publication that never happens. While factoryd records
+// that Change revision's publication refused, the item is that refusal, at the
+// Change's version however often the hourly retry repeats it. An intake task the
 // overseer could retry (an automatic end) is an item too; an operator's cancel
 // and a withdrawn issue's task are not. An item is due when
 // no carrier named it since that version; after that, at most once per
 // OverseerRewakeAfter, while no carrier that named it started (one look), or
 // while it persists and at most its rewakes did: one wake and three re-wakes
-// per item version (none for a publish failure, which an overseer cannot
+// per item version (none for a refused publication, which an overseer cannot
 // retry), once the newest due item is overseerWakeSettle old or the oldest
 // overseerWakeMaxDelay old. A persistent item past its re-wakes is stalled
 // (overseerStalledItems).
@@ -68,10 +67,12 @@ item AS (
 	      AND EXISTS (SELECT 1 FROM changes AS c WHERE c.task_id = t.id AND c.head_commit <> c.base_commit))
 	UNION ALL SELECT r.task_id, h.created_at_ms, 3, '', lower(hex(r.task_id)) FROM human_requests AS h JOIN runs AS r ON r.id = h.run_id
 	WHERE r.project_id = ?1 AND r.role = 'worker' AND h.status IN ('open', 'delivering', 'delivery_unknown')
-	UNION ALL SELECT c.task_id, c.updated_at_ms, 3, '', lower(hex(c.task_id)) FROM changes AS c JOIN tasks AS t ON t.id = c.task_id
+	UNION ALL SELECT CASE WHEN f.identity IS NULL THEN c.task_id END, c.updated_at_ms, CASE WHEN f.identity IS NULL THEN 3 ELSE 0 END,
+	  printf('factoryd cannot publish change %s for task %s: %s', lower(hex(c.id)), lower(hex(c.task_id)), json_extract(f.document, '$.detail')),
+	  COALESCE('[reviewer:' || f.identity || ']', lower(hex(c.task_id))) FROM changes AS c JOIN tasks AS t ON t.id = c.task_id
+	LEFT JOIN production_records AS f ON f.project_id = c.project_id AND f.kind = 'reviewer' AND f.identity = 'publish-' || lower(hex(c.id)) || '-' || c.revision
 	WHERE c.project_id = ?1 AND t.status = 'succeeded' AND c.head_commit IS NOT NULL AND c.base_commit IS NOT NULL
 	  AND c.head_commit <> c.base_commit AND c.updated_at_ms + ?2 <= ?3
-	  AND NOT EXISTS (SELECT 1 FROM production_records AS r WHERE r.project_id = c.project_id AND r.kind = 'reviewer' AND r.identity = 'publish-' || lower(hex(c.id)) || '-' || c.revision)
 	  AND (NOT EXISTS (SELECT 1 FROM publication_tasks AS p WHERE p.change_id = c.id)
 	       OR EXISTS (SELECT 1 FROM publication_tasks AS p JOIN production_records AS r
 	           ON r.project_id = p.project_id AND r.repository = p.repository AND r.kind = 'pull_request' AND r.identity = CAST(p.pull_number AS TEXT)
@@ -86,12 +87,7 @@ item AS (
 	  AND p.identity = CAST(json_extract(e.document, '$.request.PullNumber') AS TEXT)
 	WHERE e.project_id = ?1 AND e.kind = 'reviewer' AND COALESCE(json_extract(e.document, '$.escalation'), '') <> ''
 	  AND COALESCE(json_extract(e.document, '$.route_pending'), 0) = 0 AND json_extract(p.document, '$.state') = 'open'
-	  AND lower(json_extract(p.document, '$.head')) = lower(json_extract(e.document, '$.request.Head'))
-	UNION ALL SELECT NULL, e.observed_at_ms, 0, json_extract(e.document, '$.escalation'), '[reviewer:' || e.identity || ']' FROM production_records AS e
-	JOIN changes AS c ON c.project_id = e.project_id AND e.identity = 'publish-' || lower(hex(c.id)) || '-' || c.revision
-	JOIN tasks AS t ON t.id = c.task_id AND t.status = 'succeeded'
-	WHERE e.project_id = ?1 AND e.kind = 'reviewer' AND json_extract(e.document, '$.state') = 'publish_failed'
-	  AND COALESCE(json_extract(e.document, '$.escalation'), '') <> ''),
+	  AND lower(json_extract(p.document, '$.head')) = lower(json_extract(e.document, '$.request.Head'))),
 counted AS (SELECT item.*, (SELECT count(*) FROM carrier WHERE ` + overseerWakeNames + `) AS named,
 	(SELECT MAX(at) FROM carrier WHERE ` + overseerWakeNames + `) AS named_at,
 	(SELECT count(*) FROM carrier WHERE started AND ` + overseerWakeNames + `) AS wakes,

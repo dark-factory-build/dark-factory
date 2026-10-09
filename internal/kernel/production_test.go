@@ -14,6 +14,7 @@ import (
 )
 
 func TestProductionReviewUpsertsBeforeRefresh(t *testing.T) {
+	t.Parallel()
 	store, _, project, _ := newAdmissionStore(t, RoleOrchestrator, 2)
 	defer store.Close()
 	ctx := context.Background()
@@ -38,6 +39,7 @@ func TestProductionReviewUpsertsBeforeRefresh(t *testing.T) {
 // snapshot carrying that copy. A verdict recorded during the wait must
 // survive the later write.
 func TestProductionObservationKeepsAReviewRecordedDuringTheRefresh(t *testing.T) {
+	t.Parallel()
 	store, _, project, _ := newAdmissionStore(t, RoleOrchestrator, 2)
 	defer store.Close()
 	ctx := context.Background()
@@ -76,6 +78,7 @@ func TestProductionObservationKeepsAReviewRecordedDuringTheRefresh(t *testing.T)
 }
 
 func TestProductionReviewBlockSurvivesASameHeadAllow(t *testing.T) {
+	t.Parallel()
 	store, _, project, _ := newAdmissionStore(t, RoleOrchestrator, 2)
 	defer store.Close()
 	ctx := context.Background()
@@ -105,6 +108,7 @@ func TestProductionReviewBlockSurvivesASameHeadAllow(t *testing.T) {
 }
 
 func TestProductionReviewIdentitylessBlockSurvivesPlainAllow(t *testing.T) {
+	t.Parallel()
 	store, _, project, _ := newAdmissionStore(t, RoleOrchestrator, 2)
 	defer store.Close()
 	ctx := context.Background()
@@ -137,6 +141,7 @@ func TestProductionReviewIdentitylessBlockSurvivesPlainAllow(t *testing.T) {
 }
 
 func TestCorrectedProductionHeadStoresRecoverableReviewClaimAtomically(t *testing.T) {
+	t.Parallel()
 	store, path, project, _ := newAdmissionStore(t, RoleOrchestrator, 2)
 	ctx := context.Background()
 	oldHead := strings.Repeat("a", 40)
@@ -192,6 +197,7 @@ func TestCorrectedProductionHeadStoresRecoverableReviewClaimAtomically(t *testin
 }
 
 func TestRequestChangesReviewRecoveryPreservesRoutePending(t *testing.T) {
+	t.Parallel()
 	store, _, project, _ := newAdmissionStore(t, RoleOrchestrator, 2)
 	defer store.Close()
 	ctx := context.Background()
@@ -235,6 +241,7 @@ func TestRequestChangesReviewRecoveryPreservesRoutePending(t *testing.T) {
 }
 
 func TestRequestChangesBeforeSubmitDoesNotBecomeRoutePending(t *testing.T) {
+	t.Parallel()
 	store, _, project, _ := newAdmissionStore(t, RoleOrchestrator, 2)
 	defer store.Close()
 	ctx := context.Background()
@@ -276,6 +283,7 @@ func TestRequestChangesBeforeSubmitDoesNotBecomeRoutePending(t *testing.T) {
 }
 
 func TestProductionPersistsRevisionEvidenceWithoutRewinding(t *testing.T) {
+	t.Parallel()
 	store, _, project, _ := newAdmissionStore(t, RoleOrchestrator, 2)
 	defer store.Close()
 	ctx := context.Background()
@@ -358,6 +366,7 @@ func TestProductionPersistsRevisionEvidenceWithoutRewinding(t *testing.T) {
 }
 
 func TestProductionHealthRoundTripsAndInvalidObservationRollsBack(t *testing.T) {
+	t.Parallel()
 	store, _, project, _ := newAdmissionStore(t, RoleOrchestrator, 2)
 	defer store.Close()
 	ctx := context.Background()
@@ -401,6 +410,7 @@ func TestProductionHealthRoundTripsAndInvalidObservationRollsBack(t *testing.T) 
 }
 
 func TestProductionReadsTheRelevantSetWithoutACap(t *testing.T) {
+	t.Parallel()
 	store, _, project, agent := newAdmissionStore(t, RoleOrchestrator, 2)
 	defer store.Close()
 	ctx := context.Background()
@@ -546,6 +556,7 @@ func TestProductionReadsTheRelevantSetWithoutACap(t *testing.T) {
 }
 
 func TestProductionCanonicalizesLegacyRuntimeDestinationsAndDeduplicates(t *testing.T) {
+	t.Parallel()
 	store, _, project, _ := newAdmissionStore(t, RoleOrchestrator, 2)
 	defer store.Close()
 	ctx := context.Background()
@@ -623,6 +634,7 @@ func TestProductionCanonicalizesLegacyRuntimeDestinationsAndDeduplicates(t *test
 }
 
 func TestCorrectedHeadSupersedesOlderInFlightReview(t *testing.T) {
+	t.Parallel()
 	store, _, project, _ := newAdmissionStore(t, RoleOrchestrator, 2)
 	defer store.Close()
 	ctx := context.Background()
@@ -675,6 +687,7 @@ func TestCorrectedHeadSupersedesOlderInFlightReview(t *testing.T) {
 // The refresh runs every five minutes over every production record; paging
 // the UI view cost a sorted UNION per eight rows and outran its deadline.
 func TestKnownProductionPullsIsOneBoundedQuery(t *testing.T) {
+	t.Parallel()
 	store, _, project, _ := newAdmissionStore(t, RoleOrchestrator, 2)
 	defer store.Close()
 	ctx := context.Background()
@@ -743,6 +756,7 @@ func TestKnownProductionPullsIsOneBoundedQuery(t *testing.T) {
 // without failing; one running or failed check, or a merge-group run, never
 // settles it.
 func TestSettledProductionChecks(t *testing.T) {
+	t.Parallel()
 	store, _, project, _ := newAdmissionStore(t, RoleOrchestrator, 2)
 	defer store.Close()
 	ctx := context.Background()
@@ -776,6 +790,7 @@ func TestSettledProductionChecks(t *testing.T) {
 // Deployment records, once seen, survive a refresh that could not read them
 // and only move forward, so a failed read never ships or unships a merge.
 func TestProductionRepositoryKeepsItsNewestDeployment(t *testing.T) {
+	t.Parallel()
 	store, _, project, _ := newAdmissionStore(t, RoleOrchestrator, 2)
 	defer store.Close()
 	ctx := context.Background()

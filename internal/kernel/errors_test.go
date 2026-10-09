@@ -6,6 +6,7 @@ import (
 )
 
 func TestNewOutcomeUnknownErrorPreservesTypedCause(t *testing.T) {
+	t.Parallel()
 	cause := errors.New("durable result unavailable")
 	err := NewOutcomeUnknownError(cause)
 	var unknown *OutcomeUnknownError
