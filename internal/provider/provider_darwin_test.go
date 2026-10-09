@@ -18,6 +18,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/dark-factory-build/dark-factory/internal/change"
 	"github.com/dark-factory-build/dark-factory/internal/gitauthor"
 	"github.com/dark-factory-build/dark-factory/internal/install"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
@@ -1641,12 +1642,22 @@ printf '#include <stdio.h>\nint main(void) { puts("sdk-ok"); return 0; }\n' > sd
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The Change is a linked worktree; Codex protects the registration its
+	// gitfile names, where a commit writes index.lock and COMMIT_EDITMSG.
+	registration := filepath.Join(gitDirectory, "worktrees", filepath.Base(request.workingDirectory))
+	if err := os.MkdirAll(registration, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(request.workingDirectory, ".git"), []byte("gitdir: "+registration+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	worktreeScript := `set -eu
+ printf lock > "$3/index.lock"
  printf ref > "$1/refs/factory-branch"
  printf object > "$1/objects/new"
  if (printf forbidden > "$2/tracked.go") 2>/dev/null; then exit 34; fi
  `
-	if out, err := run("/bin/sh", "-c", worktreeScript, "proof", gitDirectory, root); err != nil {
+	if out, err := run("/bin/sh", "-c", worktreeScript, "proof", gitDirectory, root, registration); err != nil {
 		t.Fatalf("worker Git directory grant: %v\n%s", err, out)
 	}
 	request.runtime, err = request.runtime.WithGitCommonDirectory(gitDirectory, false)
@@ -1705,13 +1716,17 @@ func TestCodexLocalCILeaseGrantExcludesGitMetadata(t *testing.T) {
 // else of the repository or the Changes parent is granted.
 func TestCodexLaunchGrantsTheRepositoryGitDirectoryByRole(t *testing.T) {
 	installation, runtime, _ := nativeFixture(t, kernel.ProviderCodex)
-	gitDirectory := "/private/project/.git"
 	for _, writable := range []bool{true, false} {
+		request := requestFor(t, kernel.ProviderCodex, installation, runtime, "", "")
+		// A fresh Change's private Git, and its registration Git names after
+		// the worktree: Codex 0.160 makes it read-only unless granted itself.
+		gitDirectory := change.GitDirectoryForChange("/private/project", request.workingDirectory)
+		registration := filepath.Join(gitDirectory, "worktrees", filepath.Base(request.workingDirectory))
 		granted, err := runtime.WithGitCommonDirectory(gitDirectory, writable)
 		if err != nil {
 			t.Fatal(err)
 		}
-		request := requestFor(t, kernel.ProviderCodex, installation, granted, "", "")
+		request.runtime = granted
 		launch, err := Build(request)
 		if err != nil {
 			t.Fatal(err)
@@ -1729,6 +1744,9 @@ func TestCodexLaunchGrantsTheRepositoryGitDirectoryByRole(t *testing.T) {
 		}
 		if !strings.Contains(policy, tomlBasicString(gitDirectory)+`="`+access+`"`) {
 			t.Fatalf("launch omitted the Git directory grant: %q", policy)
+		}
+		if strings.Contains(policy, tomlBasicString(registration)+`="write"`) != writable {
+			t.Fatalf("worktree registration write grant = %v, want %v: %q", !writable, writable, policy)
 		}
 		if strings.Contains(policy, tomlBasicString("/private/project")+`="`) || strings.Contains(policy, tomlBasicString("/private/factory/changes")+`="`) {
 			t.Fatalf("Git directory grant widened: %q", policy)

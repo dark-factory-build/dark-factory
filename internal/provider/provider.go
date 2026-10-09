@@ -796,6 +796,12 @@ func sandboxGrants(request Request) []grant {
 	}
 	if request.runtime.gitCommonDir != "" {
 		grants = append(grants, grant{request.runtime.gitCommonDir, request.runtime.gitCommonDirWritable})
+		if request.runtime.gitCommonDirWritable {
+			// Codex 0.160 makes the Git directory a writable root's gitfile names
+			// read-only. Name the Change's own registration (Git names it after
+			// the worktree) so its index, HEAD and logs stay writable for commits.
+			grants = append(grants, grant{filepath.Join(request.runtime.gitCommonDir, "worktrees", filepath.Base(request.workingDirectory)), true})
+		}
 	}
 	return grants
 }
