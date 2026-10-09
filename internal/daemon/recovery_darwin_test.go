@@ -332,12 +332,14 @@ func TestReconciliationWaitsForBriefWriterContention(t *testing.T) {
 	}()
 
 	// The write must wait out the held writer rather than give up, and
-	// preserve the admitted run's durable failure transition.
+	// preserve the admitted run's durable failure transition. Hold it from
+	// the first write past the retired 3 x 250ms reconciliation window, which
+	// would have exhausted its attempts and failed here.
 	<-writing
 	select {
 	case outcome := <-completed:
 		t.Fatalf("reconciliation finished while the writer was held: %+v, %v", outcome.run, outcome.err)
-	case <-time.After(100 * time.Millisecond):
+	case <-time.After(time.Second):
 	}
 	if _, err := connection.ExecContext(context.Background(), "ROLLBACK"); err != nil {
 		t.Fatal(err)
