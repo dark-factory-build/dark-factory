@@ -13,14 +13,13 @@ check_pin() {
 
 check_pin scripts/local-ci.sh "go-ci-owned.sh" "the authoritative Go gate stage"
 
-check_pin .github/workflows/ci.yml 'brew install go' "fresh hosted macOS Go provisioning"
+check_pin .github/workflows/ci.yml 'https://dl.google.com/go/$go_archive.sha256' "checksum-verified go.dev Go provisioning"
 check_pin .github/workflows/ci.yml 'node-v22.20.0-darwin-' "isolated Node 22.20.0 with bundled Corepack"
 check_pin .github/workflows/ci.yml '"$node_bin/node" "$node_bin/corepack" --version' "the exact Node/Corepack pair preflight"
 if grep -Eq 'brew (install|upgrade) node' .github/workflows/ci.yml; then
     echo "CI must not mutate the shared Homebrew Node installation" >&2
     exit 1
 fi
-check_pin .github/workflows/ci.yml 'brew update' "fresh hosted Homebrew metadata before Go provisioning"
 check_pin .github/workflows/release.yml 'brew install go' "fresh hosted macOS Go provisioning"
 check_pin .github/workflows/release.yml 'echo "/opt/homebrew/bin" >> "$GITHUB_PATH"' "the bootstrapped Go path for later release steps"
 

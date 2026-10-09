@@ -7,13 +7,18 @@ on:
   # combination is green. Without this trigger the queue would wait forever
   # for a `required` context that never reports.
   merge_group:
+  # A merge queue run can restore only caches saved on its own throwaway
+  # `gh-readonly-queue/**` ref or on `main`. `main` keeps a warm compiler and
+  # package cache so queue runs never start cold; no gate runs on push.
+  push:
+    branches: [main]
   # A manual run is the explicit path for platform investigation on the
   # persistent Mac. A conflict-free merge is not followed by a duplicate
   # full gate: the PR and merge-queue trees already supplied that evidence.
   workflow_dispatch:
     inputs:
       runner:
-        description: Mac runner (hosted can seed the main-branch cache)
+        description: Mac runner
         type: choice
         default: dark-factory-mac
         options: [dark-factory-mac, macos-latest]
@@ -53,7 +58,7 @@ jobs:
   # the release gate, and protocol, dependency, CI, or unknown paths use the
   # full Darwin gate.
   scope:
-    if: github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch' || github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
@@ -74,6 +79,10 @@ jobs:
           }
           if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
             emit_all
+            exit 0
+          fi
+          if [ "$GITHUB_EVENT_NAME" = push ]; then
+            printf '%s\n' macos=true macos_mode=warm control_plane=false relay=false >>"$GITHUB_OUTPUT"
             exit 0
           fi
           case "$GITHUB_SHA" in
@@ -156,8 +165,16 @@ jobs:
   checks:
     needs: scope
     if: needs.scope.result == 'success' && needs.scope.outputs.macos == 'true'
-    runs-on: ${{ github.event_name == 'merge_group' && 'macos-latest' || inputs.runner || 'dark-factory-mac' }}
+    runs-on: ${{ (github.event_name == 'merge_group' || github.event_name == 'push') && 'macos-latest' || inputs.runner || 'dark-factory-mac' }}
     timeout-minutes: 30
+    # The full and runtime gates split across parallel Macs; queued Mac jobs
+    # wait for a free runner rather than fail. Every shard must pass and runs
+    # to completion: a cancelled sibling would read to factoryd as an
+    # infrastructure failure and hide the failing tests (#1366).
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON((needs.scope.outputs.macos_mode == 'full' || needs.scope.outputs.macos_mode == 'runtime') && '["daemon","packages","source"]' || '["source"]') }}
     steps:
       # No actions/checkout: codeload.github.com (which serves an action's
       # tarball) can 429 independently of git itself and has, for over an
@@ -192,16 +209,22 @@ jobs:
           git checkout --force --detach FETCH_HEAD
           git clean -ffdx
 
-      - name: Provide the Homebrew Go toolchain
+      - name: Provide the Go toolchain
         run: |
-          set -euxo pipefail
-          if [ ! -x /opt/homebrew/bin/go ]; then
-            # The hosted image's bundled formula can trail go.mod. Go's
-            # auto-download cannot satisfy clean helpers using GOTOOLCHAIN=local.
-            brew update
-            HOMEBREW_NO_AUTO_UPDATE=1 brew install go
-          fi
-          /opt/homebrew/bin/go version
+          set -euo pipefail
+          case $(uname -m) in
+            arm64) go_arch=arm64 ;;
+            x86_64) go_arch=amd64 ;;
+            *) echo "unsupported macOS architecture" >&2; exit 1 ;;
+          esac
+          go_archive=go1.27.2.darwin-$go_arch.tar.gz
+          curl --fail --silent --show-error --location "https://dl.google.com/go/$go_archive" -o "$RUNNER_TEMP/$go_archive"
+          checksum=$(curl --fail --silent --show-error --location "https://dl.google.com/go/$go_archive.sha256")
+          printf '%s  %s\n' "$checksum" "$RUNNER_TEMP/$go_archive" | shasum -a 256 -c -
+          rm -rf "$RUNNER_TEMP/go"
+          tar -xzf "$RUNNER_TEMP/$go_archive" -C "$RUNNER_TEMP"
+          "$RUNNER_TEMP/go/bin/go" version
+          printf '%s\n' "$RUNNER_TEMP/go/bin" >> "$GITHUB_PATH"
 
       - name: Provide an isolated Node and Corepack pair
         run: |
@@ -230,21 +253,26 @@ jobs:
         id: cache-toolchain
         run: |
           printf 'DF_CI_CACHE_ROOT=%s/dark-factory-ci-cache\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
-          printf 'go=%s\n' "$(/opt/homebrew/bin/go env GOVERSION)" >> "$GITHUB_OUTPUT"
+          printf 'go=%s\n' "$(go env GOVERSION)" >> "$GITHUB_OUTPUT"
 
+      # Restore only: queue refs are thrown away, so a save there is
+      # unreadable by later runs. The push-to-main run saves.
       - name: Restore reusable compiler and package caches
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ${{ runner.temp }}/dark-factory-ci-cache/go-build
             ${{ runner.temp }}/dark-factory-ci-cache/go-mod
             ${{ runner.temp }}/dark-factory-ci-cache/corepack
             ${{ runner.temp }}/dark-factory-ci-cache/pnpm-store
-          key: ci-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-toolchain.outputs.go }}-node22.20.0-${{ hashFiles('go.sum', 'web/pnpm-lock.yaml', 'web/package.json') }}
+          key: ci-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-toolchain.outputs.go }}-node22.20.0-${{ hashFiles('go.sum', 'web/pnpm-lock.yaml', 'web/package.json') }}-${{ github.sha }}
+          restore-keys: |
+            ci-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-toolchain.outputs.go }}-node22.20.0-${{ hashFiles('go.sum', 'web/pnpm-lock.yaml', 'web/package.json') }}-
 
       - name: Run the macOS source gate
         env:
           MACOS_MODE: ${{ needs.scope.outputs.macos_mode }}
+          SHARD: ${{ matrix.shard }}
         run: |
           set -euo pipefail
           case "$MACOS_MODE" in
@@ -252,19 +280,33 @@ jobs:
               ./scripts/local-ci.sh --ui
               ;;
             runtime)
-              ./scripts/local-ci.sh --runtime
+              ./scripts/local-ci.sh --runtime "$SHARD"
               ;;
             release)
               ./scripts/local-ci.sh --release
               ;;
+            warm)
+              ./scripts/local-ci.sh --warm
+              ;;
             full)
-              ./scripts/local-ci.sh
+              ./scripts/local-ci.sh --full "$SHARD"
               ;;
             *)
               echo "unknown macOS gate mode: $MACOS_MODE" >&2
               exit 1
               ;;
           esac 2>&1 | tee "$RUNNER_TEMP/macos-gate.log"
+
+      - name: Save the warm main-branch cache
+        if: github.event_name == 'push'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ${{ runner.temp }}/dark-factory-ci-cache/go-build
+            ${{ runner.temp }}/dark-factory-ci-cache/go-mod
+            ${{ runner.temp }}/dark-factory-ci-cache/corepack
+            ${{ runner.temp }}/dark-factory-ci-cache/pnpm-store
+          key: ci-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-toolchain.outputs.go }}-node22.20.0-${{ hashFiles('go.sum', 'web/pnpm-lock.yaml', 'web/package.json') }}-${{ github.sha }}
 
       # factoryd reads these failure annotations when the merge queue ejects a
       # head, so the worker's correction names the failing tests (#1366).
