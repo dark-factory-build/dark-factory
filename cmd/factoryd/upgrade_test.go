@@ -48,15 +48,13 @@ func stagedHome(t *testing.T, mode, target string) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	staged, err := os.ReadFile(self)
-	if err != nil {
-		t.Fatal(err)
-	}
 	digest := sha256.Sum256([]byte(currentProgram))
 	for _, step := range []error{
 		os.MkdirAll(filepath.Join(bin, "current"), 0o700), os.MkdirAll(filepath.Join(bin, "previous"), 0o700),
 		os.WriteFile(filepath.Join(bin, "current", "factoryd"), []byte(currentProgram), 0o700),
-		os.WriteFile(filepath.Join(bin, "previous", "factoryd"), staged, 0o700),
+		// A link, not a copy: on macOS a copy of the running test binary
+		// makes this tree refuse the test's writes while the child runs.
+		os.Link(self, filepath.Join(bin, "previous", "factoryd")),
 		os.WriteFile(filepath.Join(install.ServiceDirectoryPath(home), "receipt"), []byte(`{"program_digest":"`+hex.EncodeToString(digest[:])+`"}`), 0o600),
 		install.WriteUpgradeMarker(home, install.UpgradeMarker{Target: target}),
 	} {
@@ -87,7 +85,7 @@ func requireNotPromoted(t *testing.T, home string, err error, reason string) {
 		t.Fatal("an unproven build became current")
 	}
 	if marker, present, _ := install.ReadUpgradeMarker(home); !present || !strings.Contains(marker.Reason, reason) {
-		t.Fatalf("marker = %+v, %t", marker, present)
+		t.Fatalf("marker = %+v, %t (trial %v)", marker, present, err)
 	}
 }
 
@@ -286,12 +284,29 @@ func TestTrialChildAnswersStatusAndActsOnNothing(t *testing.T) {
 	}
 }
 
+// A torn marker is discarded, not crash-looped, even over a store the trial
+// child migrated: with a backup present it is a failed trial.
 func TestUnreadableMarkerIsDiscardedNotCrashLooped(t *testing.T) {
-	home := stagedHome(t, "serve", "x")
-	if err := os.WriteFile(filepath.Join(install.ServiceDirectoryPath(home), "upgrade"), []byte("{"), 0o600); err != nil {
-		t.Fatal(err)
+	for _, migrated := range []bool{false, true} {
+		home := stagedHome(t, "serve", "x")
+		if migrated {
+			database := filepath.Join(home, "factory.sqlite3")
+			backup, err := os.ReadFile(database)
+			if err == nil {
+				err = os.WriteFile(install.UpgradeBackupPath(home), backup, 0o600)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if output, err := exec.Command("/usr/bin/sqlite3", database, "PRAGMA user_version = 999999").CombinedOutput(); err != nil {
+				t.Fatalf("migrate: %v %s", err, output)
+			}
+		}
+		if err := os.WriteFile(filepath.Join(install.ServiceDirectoryPath(home), "upgrade"), []byte("{"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		bootUntilSettled(t, home)
 	}
-	bootUntilSettled(t, home)
 }
 
 // bootUntilSettled serves as launchd's next boot would until the release is

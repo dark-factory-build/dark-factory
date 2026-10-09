@@ -51,7 +51,7 @@ func (store *Store) migrateLegacy(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	_, version, err := inspectIdentity(ctx, connection)
+	appID, version, err := inspectIdentity(ctx, connection)
 	if err != nil {
 		releaseUncertainConnection(connection)
 		return err
@@ -62,7 +62,7 @@ func (store *Store) migrateLegacy(ctx context.Context) error {
 	case v35UserVersion:
 	default:
 		cause := ErrForeignDatabase
-		if version > userVersion {
+		if appID == applicationID && version > userVersion {
 			cause = ErrNewerSchema
 		}
 		return errors.Join(fmt.Errorf("%w: home is at user_version %d, this build requires %d", cause, version, userVersion), connection.Close())

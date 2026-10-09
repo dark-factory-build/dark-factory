@@ -341,11 +341,11 @@ func serve(ctx context.Context, configuration config) error {
 		}
 	}
 	owner, err := openProcess(ctx, configuration)
-	// A store a newer build migrated, under a marker naming another build,
-	// is a failed trial's migration; the backup is the store this build left.
-	// Nothing else restores it: any other failed trial keeps this build's
-	// writes since the backup.
-	if marker, upgrading, _ := install.ReadUpgradeMarker(configuration.home); errors.Is(err, kernel.ErrNewerSchema) && upgrading && marker.Target != selfSource() && os.Getenv(trialEnv) == "" {
+	// A store a newer build migrated, under a marker naming another build
+	// (or one torn unreadable), is a failed trial's migration; the backup is
+	// the store this build left. Nothing else restores it: any other failed
+	// trial keeps this build's writes since the backup.
+	if marker, upgrading, markerErr := install.ReadUpgradeMarker(configuration.home); errors.Is(err, kernel.ErrNewerSchema) && (markerErr != nil || upgrading && marker.Target != selfSource()) && os.Getenv(trialEnv) == "" {
 		if err = install.RestoreUpgradeBackup(configuration.home); err == nil {
 			owner, err = openProcess(ctx, configuration)
 		}

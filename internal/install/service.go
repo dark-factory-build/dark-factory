@@ -86,11 +86,9 @@ func WriteUpgradeMarker(home string, marker UpgradeMarker) error {
 	if err != nil {
 		return err
 	}
-	stage := filepath.Join(ServiceDirectoryPath(home), "."+upgradeMarkerName+".stage")
-	if err := os.WriteFile(stage, body, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(stage, filepath.Join(ServiceDirectoryPath(home), upgradeMarkerName))
+	// Synced before and after the rename: a torn marker after a power cut
+	// would leave a migrated store no boot can settle.
+	return replaceFile(ServiceDirectoryPath(home), upgradeMarkerName, body, 0o600)
 }
 
 func runReleaseIdentities(ctx context.Context, directory string, expected buildinfo.Identity) error {
