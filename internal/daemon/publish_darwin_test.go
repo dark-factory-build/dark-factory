@@ -27,6 +27,7 @@ type fakePublishMaintainer struct {
 	writes         []map[string]any // every write sent
 	refuse         string           // a path publish_commit refuses
 	externalRefuse bool             // the Maintainer refuses before the App can apply it
+	unavailable    bool             // the Maintainer authority is temporarily unavailable
 	loseNext       bool             // the next write lands but its response is lost
 }
 
@@ -51,6 +52,9 @@ func (f *fakePublishMaintainer) call(_ context.Context, name string, arguments m
 		return nil, fmt.Errorf("conflict: operation %s replayed", id)
 	}
 	f.writes = append(f.writes, map[string]any{"name": name, "arguments": arguments})
+	if f.unavailable {
+		return nil, fmt.Errorf("review: Maintainer rejected operation: unavailable: Maintainer authority is unavailable.")
+	}
 	var result json.RawMessage
 	switch name {
 	case "publish_commit":
@@ -391,6 +395,27 @@ func TestExternalPublicationRefusalRetriesWhenItClears(t *testing.T) {
 	}
 	if len(app.writes) != 3 {
 		t.Fatalf("writes after refusal cleared = %d, want 3", len(app.writes))
+	}
+}
+
+func TestUnavailablePublicationRetriesWhenServiceRecovers(t *testing.T) {
+	fixture, c, source, app, checkout := publishFixture(t, 1, false)
+	app.unavailable = true
+	ctx := context.Background()
+	if err := fixture.daemon.publishChange(ctx, c, "team/repo", source, app.call, checkout); err != nil {
+		t.Fatal(err)
+	}
+	document, found, err := fixture.store.ReviewOperation(ctx, c.Task.ProjectID, kernel.PublishFailureID(c.Change, c.Revision))
+	var op review.Operation
+	if err != nil || !found || json.Unmarshal(document, &op) != nil || !op.Retryable {
+		t.Fatalf("unavailable refusal = %s %v %v", document, found, err)
+	}
+	app.unavailable = false
+	if err := fixture.daemon.publishChange(ctx, c, "team/repo", source, app.call, checkout); err != nil {
+		t.Fatal(err)
+	}
+	if len(app.writes) != 4 {
+		t.Fatalf("writes after service recovery = %d, want 4", len(app.writes))
 	}
 }
 

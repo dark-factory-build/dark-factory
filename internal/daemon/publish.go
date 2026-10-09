@@ -148,6 +148,7 @@ func publicationFailureRetryable(err error) bool {
 	text := err.Error()
 	return strings.Contains(text, "review: Maintainer rejected operation: refused:") ||
 		strings.Contains(text, "review: Maintainer rejected operation: conflict:") ||
+		strings.Contains(text, "review: Maintainer rejected operation: unavailable:") ||
 		strings.Contains(text, "repository disabled for new work")
 }
 
