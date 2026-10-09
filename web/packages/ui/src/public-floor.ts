@@ -37,7 +37,9 @@ const RATE: Record<Activity, number> = { none: 0, low: 30, medium: 600, high: 60
 /** The same world the operator sees, from the public projection alone. */
 export function publicFloor(world: PublicWorld) {
   const graph: OperationalGraphView = {
-    project_id: "public", digest: world.nodes.map((node) => node.id).join("").slice(0, 64).padEnd(64, "0"), observed_at: world.generated_at,
+    // The layout key: every placement input (each node's static shape, each edge), never traffic, state or the workers.
+    project_id: "public", digest: JSON.stringify([world.nodes.map((node) => [node.id, node.kind, node.label, node.unit, node.runtime, node.trigger, node.evidence === "runtime"]),
+      world.edges.map((edge) => [edge.from, edge.to, edge.kind])]), observed_at: world.generated_at,
     sources: [], summary: world.summary, omitted: 0,
     nodes: world.nodes.map((node) => ({ id: node.id, kind: node.kind, label: node.label, ...(node.unit === undefined ? {} : { unit: node.unit }),
       ...(node.runtime === undefined ? {} : { runtime: node.runtime }), ...(node.trigger === undefined ? {} : { trigger: node.trigger }),
@@ -48,12 +50,12 @@ export function publicFloor(world: PublicWorld) {
   };
   const prepared = projectGraph(new Map([["public", graph]]), ["public"]);
   const workers = world.workers.map((worker, index): SceneWorker => {
-    const hall = worker.unit === undefined ? undefined : prepared.where.get(worker.unit)?.hall;
+    const unit = worker.unit === undefined ? undefined : prepared.where.get(worker.unit)?.unit;
     return { id: `public-${index}`, name: `Worker ${index + 1}`, role: "worker", activity: worker.activity,
-      location: worker.activity === "busy" ? hall === undefined ? "unobserved" : "working" : "resting", ...(hall === undefined ? {} : { nodeId: hall }) };
+      location: worker.activity === "busy" ? unit === undefined ? "unobserved" : "working" : "resting", ...(unit === undefined ? {} : { nodeId: unit }) };
   });
   // Public crates carry no number or title; the scene names them by station alone.
   const crates = (world.crates ?? []).map((crate): SceneCrate => ({ id: crate.id, number: 0, title: "", station: crate.station, stage: "", fault: crate.fault === true, taskIds: [] }));
   // A public unit is named by its runtime, so a runtime subtitle would only repeat the name.
-  return { graph: { ...prepared.graph, halls: prepared.graph.halls.map(({ runtime: _, ...hall }) => hall) }, workers, crates };
+  return { graph: { ...prepared.graph, units: prepared.graph.units.map(({ runtime: _, ...unit }) => unit) }, workers, crates };
 }

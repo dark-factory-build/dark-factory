@@ -420,7 +420,7 @@ export class FactoryAppController {
           const first = !this.#graphs.has(projectId);
           this.#graphs = new Map(this.#graphs).set(projectId, graph);
           this.#publish();
-          // A project served for the first time has halls its running agents can stand in:
+          // A project served for the first time has machines its running agents can stand at:
           // ask now, or as soon as the round in flight is answered. A refresh waits for the tick.
           if (!first || this.#runPathsTimer === undefined) return;
           if (this.#runPathsPending) this.#runPathsDue = true;
@@ -998,7 +998,7 @@ export class FactoryAppController {
         }
       }
     }
-    // A graph belongs to a project; a project that is gone has no halls.
+    // A graph belongs to a project; a project that is gone has no machines.
     if ([...this.#graphs.keys()].some((projectId) => !state.projects.has(projectId))) {
       this.#graphs = new Map([...this.#graphs].filter(([projectId]) => state.projects.has(projectId)));
     }

@@ -8,13 +8,12 @@ Keep parallel work in one place instead of juggling separate agent sessions.
 
 <picture>
   <source media="(max-width: 600px)" srcset="docs/assets/factory-floor-demo-mobile.png">
-  <img src="docs/assets/factory-floor-demo.png" alt="Dark Factory console showing the factory floor with sample workers, queued work, and an open Needs You decision">
+  <img src="docs/assets/factory-floor-demo.png" alt="Dark Factory floor: machines from three repositories on one shared floor, joined by square belts, over faint unit areas, with an outside gate, the development block and sample workers">
 </picture>
 
-*The console with labelled demo data and no daemon connected. This capture
-predates the operational floor, where each hall is one deployment unit of your
-software and workers stand at the machines their changes touch; see [the
-operational factory](docs/development/OPERATIONAL_FACTORY.md).*
+*The factory floor drawn from a demo graph: three repositories' units on one
+shared floor, belts between them and sample workers. No daemon is connected; see [the operational
+factory](docs/development/OPERATIONAL_FACTORY.md).*
 
 [Get started](#install) · [Website](https://www.darkfactory.build) ·
 [Console (requires pairing)](https://app.darkfactory.build) ·
@@ -22,7 +21,7 @@ operational factory](docs/development/OPERATIONAL_FACTORY.md).*
 
 ## What you can do
 
-- **See the work.** The floor pictures your software as a plant: each hall is a deployment unit, its machines are routes, jobs and stores, and a worker walks to the part its change touches. Select a worker to see its activity.
+- **See the work.** The floor pictures your software as one connected plant: its machines are routes, jobs and stores, grouped into faint areas by deployment unit and joined by belts, and a worker walks to the part its change touches. Select a worker to see its activity.
 - **Coordinate a team.** Let an overseer break down goals, assign workers, and follow up on their results.
 - **Keep work moving.** Queue and prioritize work across projects and repositories. Assign a named agent or the next available worker.
 - **Stay in control.** Open agent terminals, send instructions, and answer Needs You decisions from the same console.

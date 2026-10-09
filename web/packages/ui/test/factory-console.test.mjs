@@ -90,7 +90,7 @@ test("error banner keeps its centered layout after the paragraph reset", () => {
   const css = readFileSync(new URL("../src/factory-console.css", import.meta.url), "utf8");
   assert.match(css, /\.dfFactoryConsole :where\(h1, h2, p, dl, ul\),[\s\S]*?\.dfConsoleSidebar :where\(h1, h2, h3, p, dl, ul\)\s*\{\s*margin: 0;\s*\}/);
   assert.match(css, /\.dfFactoryConsole__error\s*\{[\s\S]*?margin: 0 auto 1\.25rem;/);
-  assert.match(css, /\.dfFactoryFloor__map \{ overflow: auto; max-height: 70vh;/);
+  assert.match(css, /\.dfFactoryFloor__map \{ overflow: auto; height: min\(70vh, 720px\);/);
   assert.match(css, /\.dfFactoryTooltip \{[^}]*-webkit-line-clamp: 8;[^}]*pointer-events: none;/, "a tooltip stays short enough to need no scrolling, and never takes the click meant for what it covers");
   assert.match(render(), /class="dfFactoryFloor__map" role="region" aria-label="Scrollable factory floor" tabindex="0"/);
   assert.equal(css.includes("@keyframes dfFactoryScene"), false);
@@ -239,25 +239,25 @@ test("viewed geometry is independent of worker activity and population", () => {
   const changed = { ...fixtureState, agents: new Map([...fixtureState.agents].reverse()).set(extra.id, extra) };
   const overlay = floorScene(changed, fixtureGraphs, new Map([[ids.agent, runSample(ids.agent, ["web"])]]));
   assert.deepEqual(overlay.graph, baseline.graph);
-  assert.deepEqual(layoutScene(overlay.graph).rooms, layoutScene(baseline.graph).rooms);
+  assert.deepEqual(layoutScene(overlay.graph).stations, layoutScene(baseline.graph).stations);
   assert.deepEqual(new Set(overlay.workers.map((worker) => worker.id)), new Set(changed.agents.keys()));
   assert.equal(baseline.workers.find((worker) => worker.id === ids.agent).location, "unobserved");
-  const web = baseline.graph.halls.find((hall) => hall.label === "web").id;
+  const web = baseline.graph.units.find((item) => item.label === "web").id;
   assert.equal(overlay.workers.find((worker) => worker.id === ids.agent).nodeId, web);
   const observed = floorScene(fixtureState, fixtureGraphs, undefined,
     new Map([[ids.idleAgent, runSample(ids.idleAgent, ["web"], "72".repeat(16))]]))
     .workers.find((worker) => worker.id === ids.idleAgent);
   assert.deepEqual([observed.location, observed.nodeId, observed.locationLabel], ["last-observed", web, "web"]);
   const fallback = floorScene(fixtureState, undefined);
-  assert.deepEqual(fallback.graph.halls, [], "no graph served, no halls invented");
+  assert.deepEqual(fallback.graph.units, [], "no graph served, no units invented");
   assert.ok(fallback.workers.every((worker) => worker.nodeId === undefined));
   const empty = floorScene(undefined, undefined);
-  assert.deepEqual([empty.graph.halls, empty.workers, empty.tasks], [[], [], []]);
+  assert.deepEqual([empty.graph.units, empty.workers, empty.tasks], [[], [], []]);
 });
 
 test("floor tasks retain every served task and its exact observed run", () => {
   const scene = floorScene(fixtureState, fixtureGraphs, new Map([[ids.agent, runSample(ids.agent, ["web", "internal/kernel/store"])] ]));
-  const hall = (label) => scene.graph.halls.find((item) => item.label === label).id;
+  const unitId = (label) => scene.graph.units.find((item) => item.label === label).id;
   assert.deepEqual(scene.tasks, [
     {
       id: ids.task,
@@ -294,7 +294,7 @@ test("floor tasks retain every served task and its exact observed run", () => {
     },
   ]);
   const worker = scene.workers.find((item) => item.id === ids.agent);
-  assert.deepEqual([worker.nodeId, worker.observedBayId], [hall("kernel"), "a4".repeat(16)], "at the store the run changed, in the unit holding it");
+  assert.deepEqual([worker.nodeId, worker.observedBayId], [unitId("kernel"), "a4".repeat(16)], "at the store the run changed, in the unit holding it");
 });
 
 test("task footprints reject stale, retry, cancelled, terminal, and cross-project samples", () => {
@@ -370,7 +370,7 @@ test("an active overseer without a path remains unknown", () => {
     taskId: task.id, taskRevision: task.revision, runId: "71".repeat(16), projectId: ids.project, paths: ["internal/kernel"],
   }]]))
     .workers.find((item) => item.id === ids.orchestrator);
-  assert.equal(observed.location, "working", "an observed overseer keeps the observed hall");
+  assert.equal(observed.location, "working", "an observed overseer keeps the observed unit");
 });
 
 
@@ -2097,13 +2097,13 @@ test("floor preparation survives draft and live snapshot updates and relayouts o
   await act(async () => { renderer.update(createElement(DraftFloor, { state: fresh, connected: false })); });
   await act(async () => { renderer.update(createElement(DraftFloor, { state: fresh })); });
   assert.notEqual(scene().props.graph, originalGraph);
-  assert.equal(scene().props.graph.halls.flatMap((hall) => hall.machines).find((machine) => machine.label === "/browser").reading.ratePerHour, 999);
+  assert.equal(scene().props.graph.units.flatMap((item) => item.machines).find((machine) => machine.label === "/browser").reading.ratePerHour, 999);
   assert.equal(layout(), originalLayout, "readings never move a machine");
   // A new digest is a new structure.
   graphs = new Map(graphs).set(ids.project, { ...fixtureGraph, digest: "cd".repeat(32), nodes: fixtureGraph.nodes.filter((node) => node.label !== "web"), edges: [] });
   await act(async () => { renderer.update(createElement(DraftFloor, { state: fresh, connected: false })); });
   await act(async () => { renderer.update(createElement(DraftFloor, { state: fresh })); });
-  assert.deepEqual(scene().props.graph.halls.map((hall) => hall.label), ["kernel"]);
+  assert.deepEqual(scene().props.graph.units.map((item) => item.label), ["kernel"]);
   assert.notEqual(layout(), originalLayout);
   await act(async () => { renderer.unmount(); });
 });
@@ -2454,8 +2454,8 @@ test("one project selector scopes floor, agents, tasks and project limits across
   assert.equal(floor().props.state.projects.size, 1);
   assert.ok([...floor().props.state.agents.values()].every((agent) => agent.project_id === ids.project));
   assert.ok([...floor().props.state.tasks.values()].every((task) => task.project_id === ids.project));
-  const halls = () => floor().findByType(FactoryScene).props.graph.halls.map((hall) => hall.label).sort();
-  assert.deepEqual(halls(), ["kernel", "web"], "only the selected project's halls");
+  const units = () => floor().findByType(FactoryScene).props.graph.units.map((item) => item.label).sort();
+  assert.deepEqual(units(), ["kernel", "web"], "only the selected project's units");
   await act(async () => { tree.update(createElement(FactoryConsole, { ...props, view: "agents", settingsOpen: true })); });
   const rows = tree.root.findAllByProps({ className: "dfConsoleRow dfAgentList__row" });
   assert.equal(rows.length, [...fixtureState.agents.values()].filter((agent) => agent.project_id === ids.project && !agent.archived).length);
@@ -2467,12 +2467,12 @@ test("one project selector scopes floor, agents, tasks and project limits across
   assert.equal(floor().props.projectId, ids.project, "switching views retains project scope");
   await choose("");
   assert.equal(floor().props.state.agents.size, fixtureState.agents.size);
-  assert.deepEqual(halls(), ["kernel", "south", "web"]);
+  assert.deepEqual(units(), ["kernel", "south", "web"]);
   await choose(ids.project);
   await choose(ids.secondProject);
   assert.equal(floor().props.projectId, ids.secondProject);
   assert.equal(tree.root.findAllByProps({ "aria-label": `Agent ${fixtureState.agents.get(ids.agent).name}` }).length, 0, "a foreign selected agent cannot retain controls");
-  assert.deepEqual(halls(), ["south"]);
+  assert.deepEqual(units(), ["south"]);
   assert.ok([...floor().props.state.tasks.values()].every((task) => task.project_id === ids.secondProject));
   await act(async () => tree.unmount());
 });
