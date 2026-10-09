@@ -6,10 +6,11 @@ integration; its `vercel.json` build runs the site's own artifact
 verification. Nothing here deploys it.
 
 ```sh
-factoryctl release <commit-sha> [--wait]
+factoryctl release <commit-sha> [--start] [--wait]
 ```
 
-`factoryctl release` asks the running factoryd to install a commit merged into
+`factoryctl release <commit-sha>` reads the durable release record. Add
+`--start` to ask the running factoryd to install a commit merged into
 `main` of its registered dark-factory checkout. factoryd:
 
 1. builds `factoryd`, `factoryctl` and `factory-runner` at that commit from a
