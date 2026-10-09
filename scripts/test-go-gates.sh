@@ -183,7 +183,7 @@ set -e
 printf '%s\n' "$process_output" | /usr/bin/grep -F 'fixture selected unknown package' >/dev/null \
     || fail "new process package was not selected: $process_output"
 # A CI shard runs only its own stages; the three shards cover every stage.
-for shard_case in '1daemon:daemon process tests' '1packages:process-sensitive Go tests' '3source:Git boundary resource census'; do
+for shard_case in '1daemon:daemon process tests' '1packages:cacheable Go tests' '3source:Git boundary resource census'; do
     shard_stages=${shard_case%%[a-z]*}
     shard=${shard_case#?}
     shard=${shard%%:*}
