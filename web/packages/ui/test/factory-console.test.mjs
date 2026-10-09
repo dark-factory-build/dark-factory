@@ -96,6 +96,15 @@ test("error banner keeps its centered layout after the paragraph reset", () => {
   assert.equal(css.includes("@keyframes dfFactoryScene"), false);
 });
 
+test("a rejected graph call shows an error state with retry instead of reading", () => {
+  const markup = renderToStaticMarkup(createElement(FactoryFloor, {
+    state: oneProjectState(), graphs: new Map(), graphErrors: new Map([[ids.project, "rejected"]]), onRetryGraphs() {},
+  }));
+  assert.match(markup, /Could not read the operational structure/);
+  assert.match(markup, />Retry<\/button>/);
+  assert.doesNotMatch(markup, /READING THE PLANT…/);
+});
+
 test("floor appearance is local, field-validated, and available before a connection", () => {
   assert.deepEqual(readFloorAppearance('{"scenery":"off","dependencyLinks":"bad","labels":"names-and-counts","taskProps":false,"animation":"off"}'), {
     ...DEFAULT_FLOOR_APPEARANCE, scenery: "off", animation: "off",

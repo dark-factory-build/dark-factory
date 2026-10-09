@@ -131,6 +131,7 @@ export type FactoryAppSnapshot = Readonly<{
   terminal?: FactoryTerminalView;
   /** Regenerable structure per project, empty until the daemon serves it. */
   graphs?: ReadonlyMap<string, OperationalGraphView>;
+  graphErrors?: ReadonlyMap<string, string>;
   /** Repository directories each running agent's live run is changing. */
   runPaths?: ReadonlyMap<string, RunPathSample>;
   /** Most recent observed paths remain an annotation after that run ends. */
@@ -263,6 +264,7 @@ export class FactoryAppController {
   #pendingTerminalInput = new Uint8Array(0);
   #pendingTerminalResize: { rows: number; cols: number } | undefined;
   #graphs: ReadonlyMap<string, OperationalGraphView> = new Map();
+  #graphErrors: ReadonlyMap<string, string> = new Map();
   #graphPending = new Set<string>();
   #runPaths: ReadonlyMap<string, RunPathSample> = new Map();
   #lastRunPaths: ReadonlyMap<string, RunPathSample> = new Map();
@@ -419,6 +421,11 @@ export class FactoryAppController {
           if (!this.#current(generation)) return;
           const first = !this.#graphs.has(projectId);
           this.#graphs = new Map(this.#graphs).set(projectId, graph);
+          if (this.#graphErrors.has(projectId)) {
+            const graphErrors = new Map(this.#graphErrors);
+            graphErrors.delete(projectId);
+            this.#graphErrors = graphErrors;
+          }
           this.#publish();
           // A project served for the first time has halls its running agents can stand in:
           // ask now, or as soon as the round in flight is answered. A refresh waits for the tick.
@@ -428,7 +435,12 @@ export class FactoryAppController {
         },
         // A refused answer keeps the structure last served for that project
         // rather than emptying its block of rooms for one cycle.
-        () => { this.#graphPending.delete(projectId); },
+        (error) => {
+          this.#graphPending.delete(projectId);
+          if (!this.#current(generation)) return;
+          this.#graphErrors = new Map(this.#graphErrors).set(projectId, error instanceof Error ? error.message : "The operational structure could not be read.");
+          this.#publish();
+        },
       );
     }
   }
@@ -1002,6 +1014,9 @@ export class FactoryAppController {
     if ([...this.#graphs.keys()].some((projectId) => !state.projects.has(projectId))) {
       this.#graphs = new Map([...this.#graphs].filter(([projectId]) => state.projects.has(projectId)));
     }
+    if ([...this.#graphErrors.keys()].some((projectId) => !state.projects.has(projectId))) {
+      this.#graphErrors = new Map([...this.#graphErrors].filter(([projectId]) => state.projects.has(projectId)));
+    }
     const selectedAgent = this.#selectedAgent;
     const replacementAgentID = this.#terminalReplacement?.agentId;
     if (replacementAgentID !== undefined) {
@@ -1455,6 +1470,7 @@ export class FactoryAppController {
       state: this.#state,
       error: this.#error,
       graphs: this.#graphs,
+      graphErrors: this.#graphErrors,
       runPaths: this.#runPaths,
       lastRunPaths: this.#lastRunPaths,
       edit: this.#edit,

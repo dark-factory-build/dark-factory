@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log"
 	"sync"
 	"time"
 
@@ -26,6 +27,8 @@ var (
 	errBackendResult             = errors.New("browser: invalid backend result")
 	errInvalidTerminalAttachment = errors.New("browser: invalid terminal attachment")
 )
+
+var graphEncodeFailures sync.Map
 
 type incoming struct {
 	kind websocket.MessageType
@@ -1366,8 +1369,13 @@ func (current *connection) observe(frame browserprotocol.ControlFrame) {
 		// The graph shares the snapshot byte bound, so an oversized one is
 		// the same finite too_large answer a snapshot gives.
 		write = current.writeSnapshot
-		if payload, err = browserprotocol.EncodeOperationalGraph(frame.ID, result); errors.Is(err, browserprotocol.ErrOversized) {
-			err = ErrTooLarge
+		if payload, err = browserprotocol.EncodeOperationalGraph(frame.ID, result); err != nil {
+			if _, logged := graphEncodeFailures.LoadOrStore(result.Digest, struct{}{}); !logged {
+				log.Printf("browser: operational graph encode failed for digest %s: %v", result.Digest, err)
+			}
+			if errors.Is(err, browserprotocol.ErrOversized) {
+				err = ErrTooLarge
+			}
 		}
 	case browserprotocol.OperationalNodeGet:
 		if current.server.consoleBackend == nil {

@@ -96,6 +96,7 @@ export function FactoryApp({ onStatusChange, browserPort }: FactoryAppProps = {}
       selectedTaskId={selectedTaskId}
       onSelectTask={setSelectedTaskId}
       {...snapshot}
+      onRetryGraphs={() => owner.current?.loadGraphs()}
       view={view}
       onView={setView}
       detail={detail}

@@ -85,7 +85,7 @@ const NO_CHANGES: readonly ProductionContraption[] = [];
 
 /** The operational floor; every action opens an existing inspector or control. */
 export function FactoryFloor({
-  changes = NO_CHANGES, changesRead = false, selectedChange, onSelectChange, state, graphs, onLoadNode, onAddTask, runPaths, lastRunPaths, selectedAgentId, onSelectAgent,
+  changes = NO_CHANGES, changesRead = false, selectedChange, onSelectChange, state, graphs, graphErrors, onRetryGraphs, onLoadNode, onAddTask, runPaths, lastRunPaths, selectedAgentId, onSelectAgent,
   onSelectHumanRequest, selectedTaskId, onSelectTask, onOpenTasks, onOpenMissions, onOpenLibrary, onOpenBoard, requestedEntity, connected = true, floorAppearance = DEFAULT_FLOOR_APPEARANCE, projectId, activity = [], activityCues = [], onOpenActivity,
 }: {
   /** Recorded Board and Library operations, newest first, and the few just cued. */
@@ -99,6 +99,8 @@ export function FactoryFloor({
   onSelectChange?: (key: string) => void;
   state: StateView | undefined;
   graphs: ReadonlyMap<string, OperationalGraphView> | undefined;
+  graphErrors?: ReadonlyMap<string, string>;
+  onRetryGraphs?: () => void;
   onLoadNode?: (projectId: string, nodeId: string) => Promise<OperationalNodeView>;
   onAddTask?: (agent: AgentItem, instruction: string, mode: "queue" | "any") => Promise<boolean>;
   runPaths?: ReadonlyMap<string, RunPathSample>;
@@ -147,6 +149,7 @@ export function FactoryFloor({
     <div className="dfFactoryFloor__scene">
     <FactoryScene
       tools={<>
+        {graphErrors !== undefined && graphErrors.size > 0 ? <p role="alert">Could not read the operational structure. <button type="button" onClick={onRetryGraphs}>Retry</button></p> : null}
         {onOpenActivity === undefined ? null : <KnowledgeActivityList items={activity} state={state} onOpen={onOpenActivity} />}
         {unplaced > 0 ? <p className="dfFactoryEntityTools__notice" role="status">{unplaced} {unplaced === 1 ? "change is" : "changes are"} not fully placed on the floor; its pull request in Work lists every path.</p> : null}
         {unavailable.length > 0 ? <p className="dfFactoryEntityTools__notice" role="status">Source unavailable for {unavailable.map((source) => source.name).join(", ")}; those halls cannot be inferred.</p> : null}
@@ -163,7 +166,7 @@ export function FactoryFloor({
       projectId={projectId}
       workers={[...scene.workers, ...proposed.reviewers.filter((worker) => !selectedChange || worker.review?.proposalId === selectedChange)]}
       connected={connected}
-      reading={graphs === undefined || projects.some((id) => !graphs.has(id))}
+      reading={(graphErrors === undefined || graphErrors.size === 0) && (graphs === undefined || projects.some((id) => !graphs.has(id)))}
       tasks={scene.tasks}
       peerQuestions={peerQuestions}
       knowledgeCues={activityCues.map((cue) => ({ key: cue.key, agentId: cue.agent_id, board: onBoard(cue), reading: cue.operation === "read", label: activityLabel(cue, state), open: onOpenActivity === undefined ? undefined : () => onOpenActivity(cue) }))}
