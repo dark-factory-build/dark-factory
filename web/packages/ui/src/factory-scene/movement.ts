@@ -158,7 +158,7 @@ function navigate(solids: readonly SceneRect[], radius: number, width: number, h
 }
 
 // Belts run on their own grid, square: every crossing is a right angle, and two belts never share a run.
-const BELT_CELL = 8, BEND = 3, CROSSING = 14, SLACK = 12, PER_RUN = 400;
+const BELT_CELL = 8, BEND = 3, CROSSING = 14, SLACK = 12, PER_RUN = 200;
 // Nothing crosses this close to a label, a port, a junction or a machine.
 export const CROSSING_CLEARANCE = 10;
 const H = 1, V = 2;
