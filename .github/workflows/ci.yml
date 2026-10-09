@@ -168,8 +168,11 @@ jobs:
     runs-on: ${{ (github.event_name == 'merge_group' || github.event_name == 'push') && 'macos-latest' || inputs.runner || 'dark-factory-mac' }}
     timeout-minutes: 30
     # The full and runtime gates split across parallel Macs; queued Mac jobs
-    # wait for a free runner rather than fail. Every shard must pass.
+    # wait for a free runner rather than fail. Every shard must pass and runs
+    # to completion: a cancelled sibling would read to factoryd as an
+    # infrastructure failure and hide the failing tests (#1366).
     strategy:
+      fail-fast: false
       matrix:
         shard: ${{ fromJSON((needs.scope.outputs.macos_mode == 'full' || needs.scope.outputs.macos_mode == 'runtime') && '["daemon","packages","source"]' || '["source"]') }}
     steps:

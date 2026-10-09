@@ -277,6 +277,7 @@ run_scope push '' false
     'control_plane=false macos=true macos_mode=warm relay=false ' ]
 require_job checks './scripts/local-ci.sh --warm'
 require_job checks 'actions/cache/restore@'
+require_job checks 'fail-fast: false'
 require_job checks "if: github.event_name == 'push'"
 if run_scope merge_group bad false >/dev/null 2>&1; then
     echo "invalid scope commit passed" >&2
