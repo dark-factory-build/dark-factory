@@ -2,6 +2,7 @@ package provider
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha1"
 	"crypto/sha256"
 	"encoding/json"
@@ -10,6 +11,7 @@ import (
 	"io"
 	"maps"
 	"os"
+	"os/exec"
 	"os/user"
 	"path/filepath"
 	"slices"
@@ -792,7 +794,9 @@ func sandboxGrants(request Request) []grant {
 	// consume that cache, but never mutate the operator home or the cache that
 	// belongs to another trust context.
 	if request.role == kernel.RoleWorker && request.installation.provider != kernel.ProviderShell {
-		grants = append(grants, grant{goModuleCachePath(request.runtime.accountHome), false})
+		grants = append(grants,
+			grant{goModuleCachePath(request.runtime.accountHome), false},
+			grant{pnpmStorePath(request.runtime.accountHome), false})
 	}
 	for _, root := range filepath.SplitList(request.runtime.toolchainReadRoots) {
 		grants = append(grants, grant{root, false})
@@ -1141,6 +1145,8 @@ func (runtime RuntimePaths) environmentForRole(kind kernel.Provider, role kernel
 			"CARGO_HOME="+filepath.Join(runtime.home, ".cargo"),
 			"RUSTUP_HOME="+filepath.Join(runtime.accountHome, ".rustup"),
 			"COREPACK_HOME="+filepath.Join(runtime.home, ".cache", "corepack"),
+			"COREPACK_ENABLE_NETWORK=0",
+			"pnpm_config_store_dir="+pnpmStorePath(runtime.accountHome),
 			"npm_config_cache="+filepath.Join(runtime.home, ".cache", "npm"),
 			"XDG_CACHE_HOME="+filepath.Join(runtime.home, ".cache"))
 		if role == kernel.RoleWorker {
@@ -1218,11 +1224,68 @@ func (runtime RuntimePaths) environmentForRole(kind kernel.Provider, role kernel
 	)
 }
 
+// PrepareWebDependencies installs the locked web workspace into a Change
+// from the factory-maintained, read-only pnpm store. It runs before the
+// provider sandbox is built because pnpm must create the Change's
+// node_modules tree; --offline and COREPACK_ENABLE_NETWORK=0 keep this host
+// preparation from becoming a network escape hatch.
+func (runtime RuntimePaths) PrepareWebDependencies(ctx context.Context, workingDirectory string) error {
+	if !runtime.valid() || !validAbsolute(workingDirectory, maxPathBytes) {
+		return ErrInvalid
+	}
+	web := filepath.Join(workingDirectory, "web")
+	if _, err := os.Stat(filepath.Join(web, "package.json")); errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	if err := validatePnpmStoreDirectory(runtime.accountHome); err != nil {
+		return err
+	}
+	toolPath := ""
+	for _, directory := range filepath.SplitList(runtime.toolPath) {
+		if _, err := os.Stat(filepath.Join(directory, "node")); err == nil {
+			toolPath = directory
+			break
+		}
+	}
+	if toolPath == "" {
+		return fmt.Errorf("provider: Node tool is unavailable")
+	}
+	command := exec.CommandContext(ctx, filepath.Join(toolPath, "node"), filepath.Join(toolPath, "corepack"), "pnpm", "install", "--offline", "--frozen-lockfile", "--ignore-scripts")
+	command.Dir = web
+	command.Env = runtime.environmentForRole(kernel.ProviderCodex, kernel.RoleWorker)
+	if output, err := command.CombinedOutput(); err != nil {
+		return fmt.Errorf("provider: prepare web dependencies: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	return nil
+}
+
 // goModuleCachePath is the one shared-cache path native workers may see. It
 // matches local-ci-environment.sh's trusted cache layout and deliberately
 // leaves the rest of the account home outside the provider grant.
 func goModuleCachePath(accountHome string) string {
 	return filepath.Join(accountHome, "Library", "Caches", "dark-factory", "local-ci", "trusted", "go-mod")
+}
+
+func pnpmStorePath(accountHome string) string {
+	return filepath.Join(accountHome, "Library", "Caches", "dark-factory", "local-ci", "trusted", "pnpm-store")
+}
+
+func validatePnpmStoreDirectory(accountHome string) error {
+	path := pnpmStorePath(accountHome)
+	info, err := os.Lstat(path)
+	if err != nil {
+		return fmt.Errorf("provider: inspect trusted pnpm store: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return fmt.Errorf("provider: trusted pnpm store is not a directory")
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || uint64(stat.Uid) != uint64(os.Geteuid()) || info.Mode().Perm()&0o022 != 0 {
+		return fmt.Errorf("provider: trusted pnpm store has unsafe ownership or mode")
+	}
+	return nil
 }
 
 // PrepareGoModuleCache provisions the exact trusted directory that native
