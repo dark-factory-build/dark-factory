@@ -255,7 +255,7 @@ function cellGrid(cells: number, width: number) {
 function hallUnits(hall: SceneHall) {
   const count = hall.machines.length;
   // Silos stand right of the main line, so a hall holding any is never a single bay.
-  return Math.max(count <= 4 ? 1 : count <= 10 ? 2 : 3, hall.machines.some((machine) => machine.kind === "store" || machine.kind === "queue") ? 2 : 1);
+  return Math.max(count <= 4 ? 1 : count <= 10 ? 2 : COLUMNS, hall.machines.some((machine) => machine.kind === "store" || machine.kind === "queue") ? 2 : 1);
 }
 
 function hallHeight(hall: SceneHall) {

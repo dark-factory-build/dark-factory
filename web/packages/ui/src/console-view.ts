@@ -97,6 +97,7 @@ export function orderTasksForHome(state: StateView): readonly TaskItem[] {
 
 /** Routes fold into a manifold past six per hall; zooming in lists them inside it. */
 const MAX_DOCKS = 6;
+const MAX_UNFLOWS = 100;
 
 export type FloorScene = Readonly<{
   graph: SceneGraph;
@@ -173,13 +174,21 @@ export function projectGraph(graphs: ReadonlyMap<string, OperationalGraphView> |
       const own = graph.nodes.filter((node) => node.unit === unit.id && staticNode(node)).sort((left, right) => compareText(left.label, right.label) || compareText(left.id, right.id));
       const machines: SceneMachine[] = [];
       const docks = own.filter((node) => node.kind === "ingress" && node.trigger !== "timer");
-      const foldDocks = docks.length > MAX_DOCKS;
+      const connected = new Set(graph.edges.flatMap((edge) => [edge.from, edge.to]));
+      const foldOwned = own.length > MAX_UNFLOWS && own.every((node) => !connected.has(node.id));
+      const foldDocks = !foldOwned && docks.length > MAX_DOCKS;
+      if (foldOwned) {
+        const id = `${unit.id}:owned`;
+        machines.push({ id, kind: "job", label: `${own.length} owned nodes`, represented: own.map((node) => node.id), reading: combine(own.map(reading)) });
+        for (const node of own) where.set(node.id, { hall: unit.id, machine: id });
+      }
       if (foldDocks) {
         const id = `${unit.id}:docks`;
         machines.push({ id, kind: "ingress", label: `${docks.length} routes`, represented: docks.map((node) => node.id), routes: docks.map((node) => node.label), reading: combine(docks.map(reading)) });
         for (const node of docks) where.set(node.id, { hall: unit.id, machine: id });
       }
       for (const node of own) {
+        if (foldOwned) continue;
         if (foldDocks && docks.includes(node)) continue;
         machines.push({ id: node.id, kind: node.kind, label: node.label, ...(node.trigger === undefined ? {} : { trigger: node.trigger }), reading: reading(node) });
         where.set(node.id, { hall: unit.id, machine: node.id });

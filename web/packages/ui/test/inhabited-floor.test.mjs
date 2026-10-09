@@ -37,6 +37,18 @@ test("request docks fold into one manifold past six, carrying their labels", () 
   assert.equal(folded.locate(project.id, "internal/alpha/r13.go").machine, auto[0].id);
 });
 
+test("only large ownership-only units fold; observed flows keep their members", () => {
+  const owned = (count) => [...base(0), ...Array.from({ length: count }, (_, index) => graphNode(100 + index, "job", `job-${index}`, { unit: hex(1) }))];
+  const hundred = prepare(graphWith(owned(99))).graph.halls.find((item) => item.id === hex(1));
+  assert.equal(hundred.machines.length, 100, "the cap is not reached at one hundred members");
+  const folded = prepare(graphWith(owned(101))).graph.halls.find((item) => item.id === hex(1));
+  assert.equal(folded.machines.length, 1);
+  assert.equal(folded.machines[0].represented.length, 102);
+  const edges = Array.from({ length: 150 }, (_, index) => ({ from: hex(100 + index), to: hex(1), kind: "runs", evidence: "static", observation: "unobserved", state: "unknown" }));
+  const connected = prepare(graphWith(owned(150), edges)).graph.halls.find((item) => item.id === hex(1));
+  assert.equal(connected.machines.length, 151, "flow-linked members remain individually placed");
+});
+
 test("runtime-only and unknown nodes are quarantined, externals become gates and shared stores go to the yard", () => {
   const { graph, where } = prepare(graphWith(base(2)));
   assert.deepEqual(ids(graph.quarantine), [hex(60)]);

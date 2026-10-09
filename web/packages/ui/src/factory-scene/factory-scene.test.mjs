@@ -305,6 +305,11 @@ test("halls sit in bands then id order, and nothing live or runtime-only moves a
   assert.deepEqual(grown.rooms.at(-1).kind, "quarantine", "the quarantine bay comes last of all");
 });
 
+test("a large development hall fills its shelf instead of leaving a right-hand bay empty", () => {
+  const large = hall("development", { machines: Array.from({ length: 11 }, (_, index) => machine(`job-${index}`, "job")) });
+  assert.equal(layoutScene(sceneGraph([large])).rooms[0].width, 704);
+});
+
 test("worker identity is stable while operational state changes", () => {
   const base = { id: "stable-worker", name: "Builder", role: "worker", provider: "codex", activity: "busy", nodeId: "src" };
   const stableIdentity = 3;
@@ -1349,6 +1354,12 @@ test("zooming to twice the fitted scale lists a manifold's routes inside its unm
     await act(async () => renderer?.unmount());
     globalThis.window = priorWindow;
   }
+});
+
+test("a hub tooltip names route ends and shortens from the middle", () => {
+  const routes = ["→ share/orders/very-long-alpha", "→ share/orders/very-long-beta"];
+  const markup = renderToStaticMarkup(createElement(FactoryScene, { graph: sceneGraph([hall("api", { machines: [machine("api:docks", "ingress", { label: "2 routes", represented: routes, routes })] })]), appearance: commons, workers: [] }));
+  assert.match(markup, /data-tooltip="2 routes\n→ share[^\"]*alpha\n→ share[^\"]*beta/);
 });
 
 test("a hall known busy only as a whole moves its intake while its machines stay partial", () => {
