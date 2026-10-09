@@ -164,7 +164,7 @@ func TestTerminalObservationAPIReadsExactBoundedSnapshot(t *testing.T) {
 	if err := fixture.daemon.registerLiveAttempt(live); err != nil {
 		t.Fatal(err)
 	}
-	startLiveAttempt(live, ctx)
+	startLiveAttempt(live, context.Background())
 	t.Cleanup(func() { _ = live.close(); _ = peer.Close() })
 	data := []byte("compile\nAuthorization: Bearer secret-value\ndone\n")
 	input := api.TerminalObserveInput{ProjectID: active.run.ProjectID.String(), TaskID: active.run.TaskID.String(), RunID: active.run.ID.String(), MaxBytes: 65536}
@@ -385,7 +385,7 @@ func TestOperatorTerminalObservationReadsExactRunningWorkerAndOverseer(t *testin
 	if err := fixture.daemon.registerLiveAttempt(live); err != nil {
 		t.Fatal(err)
 	}
-	startLiveAttempt(live, ctx)
+	startLiveAttempt(live, context.Background())
 	t.Cleanup(func() { _ = live.close(); _ = peer.Close() })
 	data := []byte("worker output\nAuthorization: Bearer secret-value\n")
 	read := func(target activeAttempt) api.TerminalObservation {

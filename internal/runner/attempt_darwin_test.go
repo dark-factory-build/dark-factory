@@ -173,6 +173,25 @@ func newWorkerConfigFixture(t *testing.T) (*WorkerControl, *os.File) {
 	return worker, peer
 }
 
+// A provider release slower than the control read deadline made the worker
+// exit 70 and the daemon's release write fail with a broken pipe (#1082).
+func TestWorkerAwaitsSlowReleaseWithoutDeadline(t *testing.T) {
+	shortenWait(t, &attemptControlTimeout)
+	worker, peer := newWorkerConfigFixture(t)
+	worker.state = workerPopulationReported
+	delay := 2 * attemptControlTimeout
+	written := make(chan error, 1)
+	time.AfterFunc(delay, func() {
+		written <- writeFrame(peer, attemptFrame{Version: 1, Kind: "release", Stage: StageProvider}, maxFrameBytes)
+	})
+	if err := worker.AwaitProvider(); err != nil {
+		t.Fatalf("release after %s = %v", delay, err)
+	}
+	if err := <-written; err != nil {
+		t.Fatal(err)
+	}
+}
+
 func writeRawWorkerConfigFrame(t *testing.T, peer *os.File, body []byte) {
 	t.Helper()
 	var header [4]byte

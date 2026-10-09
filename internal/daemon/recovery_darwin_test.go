@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -320,16 +321,26 @@ func TestReconciliationWaitsForBriefWriterContention(t *testing.T) {
 		err error
 	}
 	cause := errors.New("writer contention")
+	// The clock is read immediately before the durable failure write.
+	writing := make(chan struct{})
+	var once sync.Once
+	fixture.daemon.now = func() time.Time { once.Do(func() { close(writing) }); return time.Now() }
 	completed := make(chan result, 1)
 	go func() {
 		run, err := fixture.daemon.failRunBeforeRuntime(context.Background(), fixture.run, fixture.keys.Resources.RuntimeRoot, kernel.FailureInternal, cause)
 		completed <- result{run: run, err: err}
 	}()
 
-	// The retired 250ms reconciliation window exhausted all three attempts
-	// before this writer releases; the shared two-second store bound must wait
-	// and preserve the admitted run's durable failure transition.
-	time.Sleep(time.Second)
+	// The write must wait out the held writer rather than give up, and
+	// preserve the admitted run's durable failure transition. Hold it from
+	// the first write past the retired 3 x 250ms reconciliation window, which
+	// would have exhausted its attempts and failed here.
+	<-writing
+	select {
+	case outcome := <-completed:
+		t.Fatalf("reconciliation finished while the writer was held: %+v, %v", outcome.run, outcome.err)
+	case <-time.After(time.Second):
+	}
 	if _, err := connection.ExecContext(context.Background(), "ROLLBACK"); err != nil {
 		t.Fatal(err)
 	}
