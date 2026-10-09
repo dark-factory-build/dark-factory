@@ -8,7 +8,7 @@ Keep parallel work in one place instead of juggling separate agent sessions.
 
 <picture>
   <source media="(max-width: 600px)" srcset="docs/assets/factory-floor-demo-mobile.png">
-  <img src="docs/assets/factory-floor-demo.png" alt="Dark Factory demo showing kernel and store rooms, sample workers, queued work, and an open Needs You decision">
+  <img src="docs/assets/factory-floor-demo.png" alt="Dark Factory floor: machines from three repositories on one shared floor, joined by belts, with faint unit areas, an outside gate, the commons and sample workers">
 </picture>
 
 *Actual console with labelled demo data: sample workers, codebase rooms, and a
