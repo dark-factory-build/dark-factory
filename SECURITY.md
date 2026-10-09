@@ -30,7 +30,10 @@ install, and `factoryctl web pair` makes it on demand. Either hands the one-shot
 link straight to the default browser and never prints it. The loopback listener
 mints nothing, whatever Fetch Metadata, Origin, Referer or Host a request
 carries, because a sandboxed worker can reach loopback TCP (Codex and Claude
-worker sandboxes both allow network) while it cannot read `operator.token`.
+worker sandboxes both allow network) while, for a factory home outside the
+system temporary directories as installed, it cannot read `operator.token`
+(the Codex worker profile leaves `/private/tmp` and `/private/var/tmp`
+readable).
 Restricted workers therefore cannot pair a browser. An unrestricted program
 running as the operator's user can already read `operator.token` and is the
 operator for every purpose; that is the same-user boundary, not a pairing one.
