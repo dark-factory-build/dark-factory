@@ -18,11 +18,11 @@ const (
 	// MaxProviderTaskBytes is the outer bound on exact provider task material.
 	// Individual delivery paths may impose a smaller bound.
 	MaxProviderTaskBytes = 128 << 10
-	// MaxCodexTaskBytes is the smaller bound imposed by Codex's attempt-API
-	// delivery path. Keep producers of Codex tasks on the same exact ceiling.
-	MaxCodexTaskBytes = 8 << 10
-	ProviderTaskPath  = "/dev/fd/11"
-	providerTaskFD    = 11
+	// MaxNativeTaskBytes is the smaller bound imposed by the Claude and Codex
+	// attempt-API delivery path. Keep producers of their tasks on this ceiling.
+	MaxNativeTaskBytes = 8 << 10
+	ProviderTaskPath   = "/dev/fd/11"
+	providerTaskFD     = 11
 
 	// MaxEnvironmentEntryBytes is shared with producers of exact environment
 	// entries so a value accepted before admission cannot fail only after a
@@ -47,12 +47,11 @@ const (
 )
 
 var (
-	ErrUnsupported       = errors.New("runner: unsupported platform")
-	ErrState             = errors.New("runner: invalid lifecycle state")
-	ErrIdentity          = errors.New("runner: identity mismatch")
-	ErrUnresolved        = errors.New("runner: process state unresolved")
-	ErrConflict          = errors.New("runner: durable record conflict")
-	ErrStartupUnverified = errors.New("runner: provider startup submission unverified")
+	ErrUnsupported = errors.New("runner: unsupported platform")
+	ErrState       = errors.New("runner: invalid lifecycle state")
+	ErrIdentity    = errors.New("runner: identity mismatch")
+	ErrUnresolved  = errors.New("runner: process state unresolved")
+	ErrConflict    = errors.New("runner: durable record conflict")
 )
 
 type Birth struct {

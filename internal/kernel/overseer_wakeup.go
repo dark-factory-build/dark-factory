@@ -247,13 +247,9 @@ func overseerWakeInstruction(provider Provider, instruction, counts string, line
 }
 
 func wakeBodyFits(provider Provider, body string) bool {
-	if provider == ProviderClaudeCode {
-		_, err := runner.PrepareClaudeTask([]byte(body))
-		return err == nil
-	}
 	limit := runner.MaxProviderTaskBytes
-	if provider == ProviderCodex {
-		limit = runner.MaxCodexTaskBytes
+	if provider != ProviderShell {
+		limit = runner.MaxNativeTaskBytes
 	}
 	return byteLen(body) <= limit
 }

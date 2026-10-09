@@ -185,7 +185,7 @@ func runProvider(ctx context.Context) (resultErr error) {
 			_ = cwd.Close()
 			return err
 		}
-	} else if delivery != provider.TaskDeliveryStartupTerminal && delivery != provider.TaskDeliveryAttemptAPI {
+	} else if delivery != provider.TaskDeliveryAttemptAPI {
 		_ = cwd.Close()
 		return provider.ErrInvalid
 	}

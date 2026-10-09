@@ -105,8 +105,8 @@ func TestRunLivenessFailsAttemptThatNeverBecomesReady(t *testing.T) {
 	}
 }
 
-// A Codex run must call the attempt API first, so a TUI that paints without
-// one is stuck and is requeued as never started at the short budget.
+// A Claude or Codex run must call the attempt API first, so a TUI that paints
+// without one is stuck and is requeued as never started at the short budget.
 func TestRunLivenessFailsCallFirstAttemptThatPaintsWithoutACall(t *testing.T) {
 	fixture := newDispatchFixture(t)
 	active := prepareActiveAttempt(t, fixture, 211)

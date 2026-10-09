@@ -149,7 +149,7 @@ func TestCodexContinuationContextPreservesMaximumOriginalTask(t *testing.T) {
 	var condition kernel.ContinuationConditionID
 	copy(condition[:], supervisorIDBytes(240))
 	revision, _ := kernel.NewRevision(1)
-	task := bytes.Repeat([]byte{'x'}, runner.MaxCodexTaskBytes)
+	task := bytes.Repeat([]byte{'x'}, runner.MaxNativeTaskBytes)
 	contexts := []kernel.ContinuationContext{{ConditionKind: kernel.ConditionHumanRequest, ConditionID: condition, ConditionRevision: revision, ResolutionDetail: "continue"}}
 	framed, err := providerTaskWithContinuationContext(kernel.ProviderCodex, task, contexts)
 	if err == nil || framed != nil {
@@ -527,32 +527,13 @@ func TestSupervisorRunsOrchestratorInItsPrivateHomeWithoutAChange(t *testing.T) 
 	}
 }
 
-// runSupervisorClaudeFixture stands in for the Claude CLI: it takes its
-// terminal out of canonical mode as the CLI does, reads the prompt the
-// runner types until the keystroke that submits it, and reports whether the
-// task quoted at the prompt's end is exactly the task the attempt holds.
+// runSupervisorClaudeFixture stands in for the Claude CLI: it starts from
+// the bootstrap prompt, the last argv element after "--", with nothing typed
+// into its terminal, and fetches its task through the attempt API as that
+// prompt says. The task never appears in argv.
 func runSupervisorClaudeFixture() error {
-	termios, err := unix.IoctlGetTermios(0, unix.TIOCGETA)
-	if err != nil {
-		return err
-	}
-	termios.Lflag &^= unix.ICANON | unix.ECHO
-	termios.Cc[unix.VMIN], termios.Cc[unix.VTIME] = 1, 0
-	if err := unix.IoctlSetTermios(0, unix.TIOCSETA, termios); err != nil {
-		return err
-	}
-	var line []byte
-	buf := make([]byte, 4096)
-	for {
-		n, err := os.Stdin.Read(buf)
-		if err != nil {
-			return err
-		}
-		line = append(line, buf[:n]...)
-		if end := bytes.IndexAny(line, "\r\n"); end >= 0 {
-			line = line[:end]
-			break
-		}
+	if len(os.Args) < 2 || os.Args[len(os.Args)-2] != "--" || !strings.Contains(os.Args[len(os.Args)-1], `argv ["attempt","task"] before doing anything else`) {
+		return fmt.Errorf("launch argv lacks the bootstrap prompt")
 	}
 	client, err := api.NewAttemptClientFromEnvironment(os.Getenv("DARK_FACTORY_SOCKET"))
 	if err != nil {
@@ -564,16 +545,12 @@ func runSupervisorClaudeFixture() error {
 	if err != nil {
 		return err
 	}
+	for _, arg := range os.Args {
+		if strings.Contains(arg, task.Task) {
+			return fmt.Errorf("task reached argv")
+		}
+	}
 	result := "exact"
-	var typed string
-	if quote := bytes.IndexByte(line, '"'); quote < 0 {
-		return fmt.Errorf("no quoted task in %d typed bytes", len(line))
-	} else if err := json.Unmarshal(line[quote:], &typed); err != nil {
-		return fmt.Errorf("quoted task in %d typed bytes: %w", len(line), err)
-	}
-	if typed != task.Task {
-		return fmt.Errorf("typed task is %d bytes, the attempt's is %d", len(typed), len(task.Task))
-	}
 	// Stand in for the real CLI's own transcript write, so a later launch's
 	// on-disk check (provider.claudeSessionSelection) can observe this exact
 	// session the same way it would against the real tool. The escaping here
@@ -593,9 +570,10 @@ func runSupervisorClaudeFixture() error {
 	return err
 }
 
-// A Claude task longer than a terminal line or a socket buffer reaches the
-// CLI whole, through the real runner, worker and PTY.
-func TestSupervisorClaudeReceivesALongTaskThroughTheTerminal(t *testing.T) {
+// Claude starts from the bootstrap prompt and fetches a task longer than a
+// terminal line through the attempt API, as Codex does, through the real
+// runner, worker and PTY.
+func TestSupervisorClaudeFetchesALongTaskThroughTheAttemptAPI(t *testing.T) {
 	task := strings.Repeat("Codify the operator scripts and the deploy order. ", 128)
 	fixture := newSupervisorFixture(t, "unused shell task")
 	if err := replaceSupervisorAgentLaunchControls(fixture.storePath, fixture.agentID, kernel.ProviderClaudeCode, "", ""); err != nil {
