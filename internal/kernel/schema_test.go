@@ -322,7 +322,7 @@ func TestLiteralImmediateExclusionAndCancelledWait(t *testing.T) {
 	project := NewProject{ID: projectID(t, 9), Name: "blocked", Root: filepath.Join(t.TempDir(), "root")}
 	_, err = store.CreateProject(deadline, project, mustTime(t, 5))
 	var unknown *OutcomeUnknownError
-	if !errors.As(err, &unknown) || !errors.Is(err, context.DeadlineExceeded) {
+	if errors.As(err, &unknown) || !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("cancelled writer error = %v", err)
 	}
 	if _, err := other.Exec(`ROLLBACK`); err != nil {
