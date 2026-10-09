@@ -1,6 +1,7 @@
 package opgraph
 
 import (
+	"slices"
 	"sort"
 	"strings"
 )
@@ -251,11 +252,28 @@ func silentHost(builder *Builder, node *Node, callers []string, current map[stri
 
 // NotConnected redraws an outside host as unobserved: the factory knows no
 // integration is configured, so there is nothing to observe, not a silence.
-func (live *Live) NotConnected(host string) {
+// Only a host every caller of which is the unit named service: another unit
+// may call it with a connection of its own.
+func (live *Live) NotConnected(host, service string) {
 	moved := map[string]bool{}
+	callers := map[string][]string{}
+	byID := map[string]Node{}
+	for _, node := range live.Graph.Nodes {
+		byID[node.ID] = node
+	}
+	for _, edge := range live.Graph.Edges {
+		from := byID[edge.From]
+		if from.Unit != "" {
+			from = byID[from.Unit]
+		}
+		callers[edge.To] = append(callers[edge.To], from.Selectors["service.name"])
+	}
 	for _, node := range live.Graph.Nodes {
 		status := live.Nodes[node.ID]
-		if node.Kind != External || node.Selectors["server.address"] != host || status == nil || status.count > 0 {
+		if node.Kind != External || node.Selectors["server.address"] != host || status == nil || status.count > 0 || len(callers[node.ID]) == 0 {
+			continue
+		}
+		if slices.ContainsFunc(callers[node.ID], func(name string) bool { return name != service }) {
 			continue
 		}
 		switch status.Observation {

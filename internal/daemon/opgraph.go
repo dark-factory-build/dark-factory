@@ -294,7 +294,7 @@ func (daemon *Daemon) liveGraph(projectID kernel.ProjectID, graph projectGraph) 
 	observations, coverage := store.Snapshot(now)
 	live := opgraph.Overlay(projectID.String(), graph.graph, observations, coverage, aliases, now, runtimeWindow.Milliseconds())
 	if daemon.linear == nil || !daemon.linear.Connected() {
-		live.NotConnected("api.linear.app")
+		live.NotConnected("api.linear.app", "factoryd")
 	}
 	return live
 }

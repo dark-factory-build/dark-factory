@@ -332,7 +332,12 @@ func TestSilentOutsideHostIsQuietUnlessNotConnected(t *testing.T) {
 	if got := labels(live)["api.stripe.com"]; got.Observation != "quiet" || got.State != "idle" || live.Edges[edge].Observation != "quiet" {
 		t.Errorf("host the only caller reports on = %+v, edge %+v", got, live.Edges[edge])
 	}
-	live.NotConnected("api.stripe.com")
+	other := Overlay("s", overlayGraph(), nil, cover(true, "service.name", "server.address"), nil, now, 15*minute)
+	other.NotConnected("api.stripe.com", "billing")
+	if got := labels(other)["api.stripe.com"]; got.Observation != "quiet" {
+		t.Errorf("host called by another unit was redrawn: %+v", got)
+	}
+	live.NotConnected("api.stripe.com", "api")
 	if got := labels(live)["api.stripe.com"]; got.Observation != "unobserved" || got.State != "unknown" || live.Edges[edge].Observation != "unobserved" || live.Summary.Quiet != 0 || live.Summary.Unobserved == 0 {
 		t.Errorf("unconnected host = %+v, edge %+v, summary %+v", got, live.Edges[edge], live.Summary)
 	}
