@@ -1,10 +1,17 @@
 #!/bin/sh
 set -eu
 
-case "$#:${1-}" in
-    0:|1:--client-built) client_built=${1-} ;;
-    *) echo "usage: scripts/go-ci-owned.sh [--client-built]" >&2; exit 2 ;;
-esac
+client_built=
+shard=
+for argument; do
+    case "$argument" in
+        --client-built) client_built=$argument ;;
+        daemon|packages|source) shard=$argument ;;
+        *) echo "usage: scripts/go-ci-owned.sh [--client-built] [daemon|packages|source]" >&2; exit 2 ;;
+    esac
+done
+# With no shard every stage runs; CI runs each shard on its own Mac.
+in_shard() { [ -z "$shard" ] || [ "$shard" = "$1" ]; }
 script_dir=$(CDPATH= cd -- "$(/usr/bin/dirname "$0")" && pwd -P)
 repository_root=$(CDPATH= cd -- "$script_dir/.." && pwd -P)
 CDPATH= cd -- "$repository_root"
@@ -32,15 +39,20 @@ go=${DF_CI_GO-}
 # package scheduling sensitivity. Keep each causal stage uncached and isolated;
 # every other package is discovered below so a new package cannot silently skip
 # tests. The five ordinary packages and internal/e2e have their own gates.
-echo "go-ci: Git boundary resource census"
-go_gate_stage 1200 "$go" test -short -timeout=20m -count=1 ./internal/change
+if in_shard source; then
+    echo "go-ci: Git boundary resource census"
+    go_gate_stage 1200 "$go" test -short -timeout=20m -count=1 ./internal/change
 
-echo "go-ci: Change worker process tests"
-go_gate_stage 1200 "$go" test -short -timeout=20m -count=1 ./internal/changeworker
+    echo "go-ci: Change worker process tests"
+    go_gate_stage 1200 "$go" test -short -timeout=20m -count=1 ./internal/changeworker
+fi
 
-echo "go-ci: daemon process tests"
-go_gate_stage 1200 "$go" test -short -timeout=20m -count=1 ./internal/daemon
+if in_shard daemon; then
+    echo "go-ci: daemon process tests"
+    go_gate_stage 1200 "$go" test -short -timeout=20m -count=1 ./internal/daemon
+fi
 
+if in_shard packages; then
 echo "go-ci: process-sensitive Go tests"
 set --
 packages=$("$go" list ./...)
@@ -60,7 +72,10 @@ done
 if [ "$#" -gt 0 ]; then
     go_gate_stage 1200 "$go" test -short -timeout=20m -count=1 "$@"
 fi
+fi
 
-echo "go-ci: browser, daemon and runner E2E"
-go_gate_stage 1500 "$script_dir/go-e2e.sh" all ${client_built:+"$client_built"}
+if in_shard source; then
+    echo "go-ci: browser, daemon and runner E2E"
+    go_gate_stage 1500 "$script_dir/go-e2e.sh" all ${client_built:+"$client_built"}
+fi
 echo "go-ci: PASS"

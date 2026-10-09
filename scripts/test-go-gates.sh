@@ -176,6 +176,18 @@ set -e
 [ "$process_status" -eq 0 ] || fail "successful process fixture failed: $process_output"
 printf '%s\n' "$process_output" | /usr/bin/grep -F 'fixture selected unknown package' >/dev/null \
     || fail "new process package was not selected: $process_output"
+# A CI shard runs only its own stages; the three shards cover every stage.
+for shard_case in '1daemon:daemon process tests' '1packages:process-sensitive Go tests' '3source:Git boundary resource census'; do
+    shard_stages=${shard_case%%[a-z]*}
+    shard=${shard_case#?}
+    shard=${shard%%:*}
+    shard_output=$(CDPATH= cd -- "$process" && \
+        PATH="$process/bin:/usr/bin:/bin" /bin/sh ./scripts/go-ci-owned.sh "$shard" 2>&1) \
+        || fail "$shard shard failed: $shard_output"
+    [ "$(printf '%s\n' "$shard_output" | /usr/bin/grep -v '^go-ci: PASS' | /usr/bin/grep -c '^go-ci: ')" -eq "$shard_stages" ] \
+        && printf '%s\n' "$shard_output" | /usr/bin/grep -F "go-ci: ${shard_case#*:}" >/dev/null \
+        || fail "$shard shard ran the wrong stages: $shard_output"
+done
 if (CDPATH= cd -- "$process" && DF_GATE_FAULT=go-list \
     PATH="$process/bin:/usr/bin:/bin" /bin/sh ./scripts/go-ci-owned.sh) >"$temporary/discovery.out" 2>&1; then
     fail "failed package discovery silently skipped process tests"

@@ -71,7 +71,7 @@ require_job() {
 assert_job_field eligibility if "github.event_name == 'pull_request'"
 require_job eligibility 'git diff --check "$BASE_SHA" "$GITHUB_SHA"'
 full_events="github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch'"
-assert_job_field scope if "$full_events"
+assert_job_field scope if "$full_events || github.event_name == 'push'"
 assert_job_field checks needs "scope"
 assert_job_field checks if "needs.scope.result == 'success' && needs.scope.outputs.macos == 'true'"
 assert_job_field control-plane needs "scope"
@@ -271,6 +271,13 @@ scope_case true false false full web/packages/ui/src/console-view.ts web/package
 run_scope workflow_dispatch '' false
 [ "$(sort "$temporary/scope-output" | tr '\n' ' ')" = \
     'control_plane=true macos=true macos_mode=full relay=true ' ]
+# A push to main only warms the cache that queue runs restore.
+run_scope push '' false
+[ "$(sort "$temporary/scope-output" | tr '\n' ' ')" = \
+    'control_plane=false macos=true macos_mode=warm relay=false ' ]
+require_job checks './scripts/local-ci.sh --warm'
+require_job checks 'actions/cache/restore@'
+require_job checks "if: github.event_name == 'push'"
 if run_scope merge_group bad false >/dev/null 2>&1; then
     echo "invalid scope commit passed" >&2
     exit 1
