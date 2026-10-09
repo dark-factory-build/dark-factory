@@ -4,8 +4,18 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"strings"
 	"testing"
 )
+
+func mustIntakeSourceID(t *testing.T, seed byte) IntakeSourceID {
+	t.Helper()
+	id, err := IntakeSourceIDFromBytes(bytes.Repeat([]byte{seed}, IDBytes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
 
 func runningIntakeOverseer(t *testing.T) (*Store, Run, IntakeSource, IntakeAcceptance) {
 	t.Helper()
@@ -80,6 +90,79 @@ func TestIntakeImportNeitherWakesNorAssignsTheOverseer(t *testing.T) {
 	}
 	if result, err := store.AdmitNext(ctx, admissionKeys(t, 225, nil), mustTime(t, 8)); err != nil || result.Admitted() {
 		t.Fatalf("overseer admitted to intake work: %+v %v", result, err)
+	}
+}
+
+func TestCancelledIntakeCanBeWithdrawnThenImported(t *testing.T) {
+	ctx := context.Background()
+	store, _, project, _ := newAdmissionStore(t, RoleOrchestrator, 4)
+	defer store.Close()
+	sourceID := mustIntakeSourceID(t, 235)
+	source, err := store.CreateIntakeSource(ctx, NewIntakeSource{ID: sourceID, GitHubRepositoryID: 42, GitHubRepositoryName: "owner/source", ProjectID: project.ID, TargetRepositoryID: RepositoryID(project.ID), Policy: IntakePolicyManual, PollSeconds: 60, AdmissionLimit: 25}, mustTime(t, 4))
+	if err == nil {
+		source, err = store.SetIntakeSourceEnabled(ctx, source.ID, source.Revision, true, mustTime(t, 5))
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	accepted, err := store.AcceptIntakeSnapshot(ctx, source.ID, intakeSnapshotForTest(), mustTime(t, 6))
+	if err == nil {
+		_, err = store.ImportIntakeAcceptance(ctx, accepted.ID, mustTime(t, 7))
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 236), ProjectID: accepted.ProjectID, Name: "worker", Role: RoleWorker, Provider: ProviderShell, ToolBudgetLimit: 10}, mustTime(t, 40))
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, found, err := store.Task(ctx, accepted.TaskID)
+	if err != nil || !found {
+		t.Fatalf("intake task: %+v %v", task, err)
+	}
+	corruptSQL(t, store, `UPDATE tasks SET assigned_agent_id = ? WHERE id = ?`, worker.ID.Bytes(), task.ID.Bytes())
+	if _, err := store.WithdrawIntakeAcceptance(ctx, accepted.ID, mustTime(t, 41)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.writer.ExecContext(ctx, `UPDATE tasks SET status = 'cancelled', completed_at_ms = ?, updated_at_ms = ? WHERE id = ?`, 42, 42, task.ID.Bytes()); err != nil {
+		t.Fatal(err)
+	}
+	requeued, err := store.ImportIntakeAcceptance(ctx, accepted.ID, mustTime(t, 43), source)
+	if err != nil || requeued.Status != TaskQueued || requeued.WorkRevision.Int64() != task.WorkRevision.Int64()+1 {
+		t.Fatalf("reimported intake task: %+v %v", requeued, err)
+	}
+	current, found, err := store.IntakeAcceptance(ctx, accepted.ID)
+	if err != nil || !found || current.WithdrawnAt != nil {
+		t.Fatalf("reimported acceptance: %+v %v %v", current, found, err)
+	}
+}
+
+func TestFailedIntakeWakesItsConfiguredOverseer(t *testing.T) {
+	ctx := context.Background()
+	store, run, source, accepted := runningIntakeOverseer(t)
+	policy, after, instruction := IdleStandingInstruction, uint32(1), "Supervise."
+	overseer, found, err := store.Agent(ctx, run.AgentID)
+	if err != nil || !found {
+		t.Fatalf("overseer: %+v %v", overseer, err)
+	}
+	if _, err := store.UpdateAgent(ctx, run.AgentID, overseer.Revision, AgentPatch{IdlePolicy: &policy, IdleAfterSeconds: &after, IdleInstruction: &instruction}, mustTime(t, 40)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.writer.ExecContext(ctx, `UPDATE tasks SET status = 'failed', completed_at_ms = ?, updated_at_ms = ? WHERE id = ?`, 1000, 1000, accepted.TaskID.Bytes()); err != nil {
+		t.Fatal(err)
+	}
+	read, err := store.beginRead(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer read.Close()
+	overseer, found, err = agentByID(ctx, read.connection, source.OverseerAgentID)
+	if err != nil || !found {
+		t.Fatalf("overseer: %+v %v", overseer, err)
+	}
+	body, due, err := overseerWake(ctx, read.connection, overseer, 1000+overseerWakeSettle.Milliseconds())
+	if err != nil || !due || !strings.Contains(body, accepted.TaskID.String()) {
+		t.Fatalf("failed intake wake: due=%v body=%q err=%v", due, body, err)
 	}
 }
 
