@@ -312,41 +312,31 @@ granularity is a fixed table in code, not a runtime claim.
   selector, since the broker reads checks of pull request heads alone; a
   push-only workflow's jobs stay partial. Coverage is claimed only when no read
   failed and the pull page was complete. No API call is added.
-- **`github` deploys (designed, not built; waits on the App permission):**
-  GitHub Deployments are written by whatever deploys (Vercel's GitHub
-  integration, Actions, any CD tool), so one read covers every platform that
-  records them. The App needs `deployments: read`, which it does not hold yet.
-  - *Broker:* `list_deployments {repository, per_page ≤ 30}` in
-    `control-plane/src/github_app.rs`, minted with `deployments: read` and
-    `metadata: read`, newest first, returning per deployment
-    `{id, environment, production_environment, sha, ref, created_at, state,
-    updated_at}`, the state
-    and `updated_at` from its newest status (one status read per deployment,
-    `per_page=1`). No URLs, payloads or creators.
-  - *factoryd:* the production refresh calls it once per enabled repository
-    whose plant has a deployed unit, at the refresh's own cadence. Each
-    deployment whose newest status is `success` becomes one `deploy`
-    observation (`source` `github`, environment from GitHub, `End` its
-    status time) on a unit: the repository's only deployed unit, or the one
-    `observe.json`'s `services` names for that environment; with several and
-    no mapping it lands on none, and the hall stays as it was. The overlay
-    already turns a deploy into `deployed_at` and the hall's changeover; no
-    plant or site code changes. `failure`/`error` count as errors on that
-    unit; `in_progress`/`queued` are not drawn.
-  - *SHIPPED means deployed:* a merged crate moves from SHIPPED to deployed
-    when a successful deployment of the repository's production environment
-    (the one `observe.json` names, else the environment GitHub flags
-    `production_environment`) was created at or after its merge on the
-    default branch. Without deployment records, SHIPPED keeps meaning merged,
-    and the line says so.
-  - *Owner steps:* dark-factory-build → Settings → Developer settings →
-    GitHub Apps → dark-factory-maintainer → Edit → Permissions & events →
-    Repository permissions → Deployments → Read-only → Save changes; then
-    Settings → GitHub Apps → Installed → dark-factory-maintainer → Configure →
-    Review request → Accept new permissions, with each repository whose
-    deploys should show in Repository access. Customers' installations accept
-    the same request. Then merge the broker operation and deploy the
-    control-plane Worker before the factoryd that calls it.
+- **`github` deploys:** GitHub Deployments are written by whatever deploys
+  (Vercel's GitHub integration, Actions, any CD tool), so one read covers
+  every platform that records them. The broker's `list_deployments
+  {repository, per_page ≤ 30}` mints `deployments: read` and `metadata: read`
+  and returns each deployment, newest first, as `{id, environment,
+  production_environment, sha, ref, created_at, state, updated_at}`, the state
+  and time from its newest status (`pending` at `created_at` when it has
+  none); no URLs, payloads, descriptions or creators. The production refresh
+  calls it once per repository whose plant has a deployed unit. A deployment
+  whose newest status is `success` becomes one `deploy` observation (`End` its
+  status time) on a unit: the one a `github` source's `services` maps its
+  environment to, else, for the production environment, the repository's only
+  deployed unit; with several and no mapping it lands on none. A `failure` or
+  `error` since the last refresh counts as an error there; other states are
+  not drawn, and no coverage is claimed. The production environment is the
+  `github` source's `environment`, else the one GitHub flags
+  `production_environment`:
+
+  ```json
+  {"adapter": "github", "environment": "Production", "services": {"Production": "web"}}
+  ```
+
+  The newest successful production deployment also moves the work line: see
+  *SHIPPED* in section 13. A customer's installation accepts the
+  `Deployments: read` request before its deploys show.
 - **`otlp-remote` (push):** a deployed system exports its own OpenTelemetry
   traces to its factory through the relay, on any platform and any plan. See
   *Remote ingest* below. There is no platform-specific code.
@@ -759,6 +749,11 @@ repository#number)`), its station (review, checks, merge queue, shipped) and
 a fault flag, never a title, number or branch. factoryd places them by the
 console's rule (`publicCrates`, `projectCrates`; one shared fixture,
 `web/fixtures/production-crates.json`, holds both to it) on its own clock.
+*SHIPPED* means deployed where the repository has GitHub deployment records
+of its production environment: a merged crate ships once a successful one
+was created at or after its merge, and waits at the merge queue's end until
+then. The repository record keeps the newest such time once seen, so a failed
+read moves nothing. Without deployment records, SHIPPED means merged.
 
 A `ledger` is added only for repositories GitHub serves to an anonymous
 reader: factoryd reads each repository's releases without credentials once

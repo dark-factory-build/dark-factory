@@ -350,6 +350,9 @@ func (daemon *Daemon) pollSources(sources []observeSource) {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 		defer cancel()
 		for _, source := range sources {
+			if source.Adapter == "github" {
+				continue // the production refresh reads GitHub deployments
+			}
 			if source.Token == "" || source.Adapter != "cloudflare" {
 				LogFactoryd(daemon.log, "factoryd: observe %s: unsupported adapter or no token\n", source.Adapter)
 				continue

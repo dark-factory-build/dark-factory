@@ -792,3 +792,37 @@ func TestSettledProductionChecks(t *testing.T) {
 		t.Fatalf("settled %v, %v", settled, err)
 	}
 }
+
+// Deployment records, once seen, survive a refresh that could not read them
+// and only move forward, so a failed read never ships or unships a merge.
+func TestProductionRepositoryKeepsItsNewestDeployment(t *testing.T) {
+	store, _, project, _ := newAdmissionStore(t, RoleOrchestrator, 2)
+	defer store.Close()
+	ctx := context.Background()
+	deployed := func(at int64) *int64 { return &at }
+	var got []string
+	for index, value := range []*int64{nil, deployed(0), deployed(7), nil, deployed(5)} {
+		at := int64(10 + index)
+		if err := store.RecordProductionObservation(ctx, project.ID, ProductionObservation{Repository: "example/factory", ObservedAt: at, DeployedAt: value}, mustTime(t, at)); err != nil {
+			t.Fatal(err)
+		}
+		page, err := store.Production(ctx, project.ID, 0, 8, UnixMillis{})
+		if err != nil || len(page.Records) != 1 {
+			t.Fatalf("page=%+v err=%v", page, err)
+		}
+		var health struct {
+			DeployedAt *int64 `json:"deployed_at"`
+		}
+		if err := json.Unmarshal(page.Records[0].Document, &health); err != nil {
+			t.Fatal(err)
+		}
+		if health.DeployedAt == nil {
+			got = append(got, "none")
+		} else {
+			got = append(got, fmt.Sprint(*health.DeployedAt))
+		}
+	}
+	if strings.Join(got, " ") != "none 0 7 7 7" {
+		t.Fatalf("deployed_at over refreshes = %v", got)
+	}
+}

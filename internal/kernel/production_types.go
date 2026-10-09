@@ -11,6 +11,10 @@ type ProductionObservation struct {
 	Deliveries   []ProductionDelivery    `json:"deliveries"`
 	Unavailable  string                  `json:"unavailable,omitempty"`
 	Overflow     int                     `json:"overflow,omitempty"`
+	// DeployedAt is the newest successful production deployment GitHub
+	// records for the repository, in Unix ms; 0 when it records production
+	// deployments but none succeeded, nil when this refresh did not read them.
+	DeployedAt *int64 `json:"deployed_at,omitempty"`
 }
 
 type ProductionPullRequest struct {

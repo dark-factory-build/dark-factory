@@ -333,6 +333,19 @@ fn declared_output_schemas_name_the_fields_the_results_carry() {
         ),
         ("create_issue", "IssueResult", &["number", "url"][..]),
         (
+            "list_deployments.deployments",
+            "DeploymentResult",
+            &[
+                "id",
+                "environment",
+                "production_environment",
+                "sha",
+                "created_at",
+                "state",
+                "updated_at",
+            ][..],
+        ),
+        (
             "observe_pull_request_merge",
             "PullRequestMergeResult",
             &[
@@ -454,6 +467,7 @@ fn every_repository_tool_requires_the_repository_it_acts_on() {
         "update_pull_request_body",
         "submit_pull_request_review",
         "observe_pull_request_checks",
+        "list_deployments",
         "observe_pull_request_merge",
         "publish_commit",
         "enqueue_pull_request",
@@ -543,6 +557,7 @@ fn mcp_surface_is_installation_bound_and_typed() {
         "update_pull_request_body",
         "submit_pull_request_review",
         "observe_pull_request_checks",
+        "list_deployments",
         "observe_pull_request_merge",
         "publish_commit",
         "enqueue_pull_request",

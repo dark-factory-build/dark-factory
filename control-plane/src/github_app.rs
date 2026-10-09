@@ -366,6 +366,13 @@ pub(crate) struct ObservePullRequestChecks {
     pub(crate) head_sha: String,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ListDeployments {
+    pub(crate) repository: String,
+    pub(crate) per_page: u32,
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 pub(crate) struct RepositoryResult {
     pub(crate) repository: String,
@@ -733,6 +740,31 @@ pub(crate) struct ChecksResult {
     pub(crate) pull_number: i64,
     pub(crate) head_sha: String,
     pub(crate) checks: Vec<CheckResult>,
+}
+
+/// GitHub Deployments, newest first, each with its newest status. Whatever
+/// deploys (Vercel, Actions, any CD tool) writes them, so one read covers
+/// every platform that records them. No URLs, payloads, descriptions or
+/// creators leave GitHub.
+#[derive(Debug, Serialize)]
+pub(crate) struct DeploymentsResult {
+    pub(crate) deployments: Vec<DeploymentResult>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct DeploymentResult {
+    pub(crate) id: i64,
+    pub(crate) environment: String,
+    pub(crate) production_environment: bool,
+    pub(crate) sha: String,
+    #[serde(rename = "ref")]
+    pub(crate) reference: String,
+    pub(crate) created_at: String,
+    /// The newest status's state. A deployment with no status yet is
+    /// `pending`, as GitHub's own deployment state reads, and its
+    /// `updated_at` is then its `created_at`.
+    pub(crate) state: String,
+    pub(crate) updated_at: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1656,6 +1688,23 @@ impl AppAuthority {
     }
 
     #[cfg(target_arch = "wasm32")]
+    pub(crate) async fn list_deployments(
+        &self,
+        mut request: ListDeployments,
+    ) -> Result<DeploymentsResult, OperationError> {
+        request.validate()?;
+        let repository = RepositoryName::requested(&mut request.repository)?;
+        let token = self
+            .0
+            .installation_token(
+                repository,
+                BTreeMap::from([("deployments", "read"), ("metadata", "read")]),
+            )
+            .await?;
+        self.0.deployments(&token, request.per_page).await
+    }
+
+    #[cfg(target_arch = "wasm32")]
     pub(crate) async fn observe_pull_request_merge(
         &self,
         journal: &DeliveryJournal,
@@ -2133,6 +2182,15 @@ impl ObservePullRequestChecks {
     fn validate(&self) -> Result<(), OperationError> {
         valid_exact_integer(self.pull_number)?;
         valid_sha(&self.head_sha)
+    }
+}
+
+impl ListDeployments {
+    fn validate(&self) -> Result<(), OperationError> {
+        (1..=30)
+            .contains(&self.per_page)
+            .then_some(())
+            .ok_or(OperationError::InvalidInput)
     }
 }
 
@@ -3907,6 +3965,60 @@ impl Authority {
             checks,
         })
     }
+
+    async fn deployments(
+        &self,
+        token: &RepositoryToken,
+        per_page: u32,
+    ) -> Result<DeploymentsResult, OperationError> {
+        let api = format!(
+            "https://api.github.com/repos/{}/{}/deployments",
+            token.repository.owner, token.repository.name
+        );
+        let listed: Vec<Deployment> =
+            github_json(&format!("{api}?per_page={per_page}"), token.as_str()).await?;
+        if listed.len() > per_page as usize {
+            return Err(OperationError::Unavailable);
+        }
+        let mut deployments = Vec::with_capacity(listed.len());
+        for deployment in listed {
+            // Upstream data that fails these bounds is a failed read, never
+            // a shorter list.
+            valid_exact_integer(deployment.id)
+                .and(valid_text(&deployment.environment, 1, 256, false))
+                .and(valid_sha(&deployment.sha))
+                .and(valid_text(&deployment.reference, 1, 256, false))
+                .and(valid_github_timestamp(&deployment.created_at))
+                .map_err(|_| OperationError::Unavailable)?;
+            let statuses: Vec<DeploymentStatus> = github_json(
+                &format!("{api}/{}/statuses?per_page=1", deployment.id),
+                token.as_str(),
+            )
+            .await?;
+            let (state, updated_at) = match statuses.into_iter().next() {
+                Some(status) => (status.state, status.updated_at),
+                None => ("pending".to_owned(), deployment.created_at.clone()),
+            };
+            if !matches!(
+                state.as_str(),
+                "error" | "failure" | "inactive" | "in_progress" | "queued" | "pending" | "success"
+            ) || valid_github_timestamp(&updated_at).is_err()
+            {
+                return Err(OperationError::Unavailable);
+            }
+            deployments.push(DeploymentResult {
+                id: deployment.id,
+                environment: deployment.environment,
+                production_environment: deployment.production_environment,
+                sha: deployment.sha,
+                reference: deployment.reference,
+                created_at: deployment.created_at,
+                state,
+                updated_at,
+            });
+        }
+        Ok(DeploymentsResult { deployments })
+    }
 }
 
 struct Credential(String);
@@ -4669,6 +4781,26 @@ impl PullRequestReview {
             verdict: request.event.verdict().into(),
         })
     }
+}
+
+#[cfg(target_arch = "wasm32")]
+#[derive(Deserialize)]
+struct Deployment {
+    id: i64,
+    environment: String,
+    #[serde(default)]
+    production_environment: bool,
+    sha: String,
+    #[serde(rename = "ref")]
+    reference: String,
+    created_at: String,
+}
+
+#[cfg(target_arch = "wasm32")]
+#[derive(Deserialize)]
+struct DeploymentStatus {
+    state: String,
+    updated_at: String,
 }
 
 #[cfg(target_arch = "wasm32")]
