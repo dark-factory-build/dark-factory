@@ -98,10 +98,6 @@ gh api -X POST repos/OWNER/REPO/pulls/N/reviews -f commit_id=HEAD \
 Dark-Factory-Review: allow HEAD"
 ```
 
-Interim: until the workflow projects `author_association` (a follow-up change
-that also deletes this mode), the gate receives four-field records and trusts
-every publisher, as it did before.
-
 A review carries `Dark-Factory-Review: allow HEAD`, `block` or `note`
 (`factoryctl review` writes it). Use `block` for an unresolved finding or `note` for evidence without approval.
 A plain GitHub approval without the explicit verdict does not satisfy this
