@@ -302,7 +302,7 @@ granularity is a fixed table in code, not a runtime claim.
   instrumentation needed.
 - **`github`**: CI for any repository the factory publishes to, through the
   Maintainer broker it already holds; no token of its own. Inference reads
-  `.github/workflows/*.yml` into one `GitHub Actions` unit per repository
+  `.github/workflows/*.yml` into one `GitHub Actions · <repository>` unit per repository, named after it
   (`service.name` `github-actions:<repository id>`), each workflow job a job
   node labelled `<workflow> / <job>`. The production refresh already reads
   `observe_pull_request_checks` for each pull head whose checks can still
