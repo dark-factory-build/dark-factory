@@ -603,7 +603,7 @@ func TestDaemonDispatchesSendBackThroughBothDomains(t *testing.T) {
 	}
 	waitDispatch(t, done)
 	done = fixture.serve(t)
-	if _, err := operator.SendBackTask(ctx, api.SendBackInput{TaskID: claudeTask, Note: strings.Repeat("&", 1024)}); !errors.As(err, &remote) || remote.Code() != api.RemoteTooLarge {
+	if _, err := operator.SendBackTask(ctx, api.SendBackInput{TaskID: claudeTask, Note: strings.Repeat("&", 1300)}); !errors.As(err, &remote) || remote.Code() != api.RemoteTooLarge {
 		t.Fatalf("a note past the provider's prompt = %v", err)
 	}
 	waitDispatch(t, done)
@@ -632,7 +632,7 @@ func TestDaemonDispatchesSendBackThroughBothDomains(t *testing.T) {
 	}
 	waitDispatch(t, done)
 	done = fixture.serve(t)
-	if _, err := active.client.SendBack(ctx, api.SendBackInput{TaskID: foreign, Note: strings.Repeat("&", 1024)}); !errors.As(err, &remote) || remote.Code() != api.RemoteUnauthorized {
+	if _, err := active.client.SendBack(ctx, api.SendBackInput{TaskID: foreign, Note: strings.Repeat("&", 1300)}); !errors.As(err, &remote) || remote.Code() != api.RemoteUnauthorized {
 		t.Fatalf("another project's task with an oversized note = %v", err)
 	}
 	waitDispatch(t, done)
