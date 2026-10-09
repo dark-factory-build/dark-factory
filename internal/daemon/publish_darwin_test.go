@@ -381,29 +381,30 @@ func TestDisabledAcceptedRepositoryEscalatesOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	c.Accepted.RepositoryID = id
-	for range 2 {
+	// The first pass escalates; a repeat only refreshes the one record.
+	for _, escalation := range []string{"factoryd cannot publish change " + c.Change.String() + " for task " + c.Task.ID.String() + ": repository disabled for new work", ""} {
 		if err := fixture.daemon.publishSettledChange(ctx, c); err != nil {
 			t.Fatal(err)
 		}
-	}
-	page, err := fixture.store.Production(ctx, c.Task.ProjectID, 0, 8, kernel.UnixMillis{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	escalations := 0
-	for _, record := range page.Records {
-		var op review.Operation
-		if record.Kind == "reviewer" && json.Unmarshal(record.Document, &op) == nil && op.Escalation != "" {
-			escalations++
-			if op.ID != kernel.PublishFailureID(c.Change, c.Revision) || op.Escalation != "factoryd cannot publish change "+c.Change.String()+" for task "+c.Task.ID.String()+": repository disabled for new work" {
-				t.Fatalf("escalation = %+v", op)
+		page, err := fixture.store.Production(ctx, c.Task.ProjectID, 0, 8, kernel.UnixMillis{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		failures := 0
+		for _, record := range page.Records {
+			var op review.Operation
+			if record.Kind == "reviewer" && json.Unmarshal(record.Document, &op) == nil && op.State == "publish_failed" {
+				failures++
+				if op.ID != kernel.PublishFailureID(c.Change, c.Revision) || op.Escalation != escalation || op.Detail != "repository disabled for new work" {
+					t.Fatalf("failure record = %+v", op)
+				}
+			}
+			if record.Kind == "pull_request" {
+				t.Fatalf("published into a disabled repository: %s", record.Document)
 			}
 		}
-		if record.Kind == "pull_request" {
-			t.Fatalf("published into a disabled repository: %s", record.Document)
+		if failures != 1 {
+			t.Fatalf("failure records = %d, want 1", failures)
 		}
-	}
-	if escalations != 1 {
-		t.Fatalf("escalations = %d, want 1", escalations)
 	}
 }
