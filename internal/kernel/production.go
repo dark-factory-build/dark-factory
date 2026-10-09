@@ -869,6 +869,30 @@ func (store *Store) RecordReviewRetry(ctx context.Context, project ProjectID, re
 	return tx.Commit(ctx)
 }
 
+// ClearPublishFailure removes the recorded publish failure id, so the next
+// publication pass tries that Change revision again. It reports whether one
+// was removed.
+func (store *Store) ClearPublishFailure(ctx context.Context, project ProjectID, id string) (bool, error) {
+	if project.zero() || !validOutcomeText(id, 128) {
+		return false, ErrInvalidValue
+	}
+	tx, err := store.beginValidatedWrite(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Close()
+	result, err := tx.connection.ExecContext(ctx, `DELETE FROM production_records WHERE project_id = ? AND kind = 'reviewer' AND identity = ?
+		AND json_extract(document, '$.state') = 'publish_failed'`, project.Bytes(), id)
+	if err != nil {
+		return false, tx.Rollback(err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, tx.Rollback(err)
+	}
+	return affected == 1, tx.Commit(ctx)
+}
+
 // ReviewOperation returns the last durable state for a daemon-owned review.
 func (store *Store) ReviewOperation(ctx context.Context, project ProjectID, operationID string) ([]byte, bool, error) {
 	if project.zero() || !validOutcomeText(operationID, 128) {
