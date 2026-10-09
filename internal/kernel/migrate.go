@@ -6,23 +6,35 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 )
 
-// v36UserVersion is the one earlier version Open migrates: v37 added
-// task_automatic_events and changed nothing else.
-const v36UserVersion = 36
+// Open migrates the two earlier versions. v38 names the retryable failure
+// code 'transient' where v37 named 'runner_exit', which nothing ever wrote;
+// v37 added task_automatic_events to v36 and changed nothing else.
+const (
+	v36UserVersion = 36
+	v37UserVersion = 37
+)
 
-func v36SchemaStatements() []string {
-	return slices.DeleteFunc(slices.Clone(schemaStatements), func(statement string) bool { return statement == taskAutomaticEventsTable })
+func legacySchemaStatements(version int) []string {
+	statements := slices.DeleteFunc(slices.Clone(schemaStatements), func(statement string) bool {
+		return version == v36UserVersion && statement == taskAutomaticEventsTable
+	})
+	for index, statement := range statements {
+		statements[index] = strings.ReplaceAll(statement, "'transient'", "'runner_exit'")
+	}
+	return statements
 }
 
-// validateOpenableSnapshot accepts a current database or an exact v36 one,
-// whose durable controls are checked inside the migration before it commits.
+// validateOpenableSnapshot accepts a current database or an exact v36 or v37
+// one, whose durable controls are checked inside the migration before it
+// commits.
 func validateOpenableSnapshot(ctx context.Context, connection *sql.Conn) error {
 	if _, version, err := inspectIdentity(ctx, connection); err != nil {
 		return err
-	} else if version == v36UserVersion {
-		if err := validateSchemaVersion(ctx, connection, version, v36SchemaStatements()); err != nil {
+	} else if version == v36UserVersion || version == v37UserVersion {
+		if err := validateSchemaVersion(ctx, connection, version, legacySchemaStatements(version)); err != nil {
 			return err
 		}
 		if err := validateIntegrity(ctx, connection); err != nil {
@@ -44,7 +56,7 @@ func validateContentGitPins(ctx context.Context, connection *sql.Conn) error {
 	return nil
 }
 
-// migrateLegacy takes an exact v36 home to the current schema in one
+// migrateLegacy takes an exact v36 or v37 home to the current schema in one
 // transaction, or leaves it byte-untouched and refuses; it refuses any other
 // earlier version. Open calls it with the writer before the store is
 // published, and before refreshing its pinned sidecar facts, which the
@@ -63,7 +75,7 @@ func (store *Store) migrateLegacy(ctx context.Context) error {
 	switch version {
 	case userVersion:
 		return connection.Close()
-	case v36UserVersion:
+	case v36UserVersion, v37UserVersion:
 	default:
 		cause := ErrForeignDatabase
 		if appID == applicationID && version > userVersion {
@@ -71,18 +83,32 @@ func (store *Store) migrateLegacy(ctx context.Context) error {
 		}
 		return errors.Join(fmt.Errorf("%w: home is at user_version %d, this build requires %d", cause, version, userVersion), connection.Close())
 	}
-	if err := migrateTransaction(ctx, connection, migrateV36); err != nil {
+	if err := migrateTransaction(ctx, connection, func(ctx context.Context, connection *sql.Conn) error {
+		return migrateFrom(ctx, connection, version)
+	}); err != nil {
 		releaseUncertainConnection(connection)
 		return err
 	}
 	return connection.Close()
 }
 
-func migrateV36(ctx context.Context, connection *sql.Conn) error {
-	if err := validateSchemaVersion(ctx, connection, v36UserVersion, v36SchemaStatements()); err != nil {
+// migrateFrom rewrites the runs table's failure-code checks in place: the
+// value it replaces was never written, so no row can violate the new text,
+// and RESET makes this connection enforce it.
+func migrateFrom(ctx context.Context, connection *sql.Conn, version int) error {
+	if err := validateSchemaVersion(ctx, connection, version, legacySchemaStatements(version)); err != nil {
 		return err
 	}
-	for _, statement := range []string{taskAutomaticEventsTable, fmt.Sprintf("PRAGMA user_version = %d", userVersion)} {
+	var statements []string
+	if version == v36UserVersion {
+		statements = append(statements, taskAutomaticEventsTable)
+	}
+	statements = append(statements,
+		"PRAGMA writable_schema = ON",
+		`UPDATE sqlite_schema SET sql = replace(sql, '''runner_exit''', '''transient''') WHERE type = 'table' AND name = 'runs'`,
+		"PRAGMA writable_schema = RESET",
+		fmt.Sprintf("PRAGMA user_version = %d", userVersion))
+	for _, statement := range statements {
 		if _, err := connection.ExecContext(ctx, statement); err != nil {
 			return err
 		}

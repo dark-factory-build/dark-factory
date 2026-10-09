@@ -71,7 +71,7 @@ func reviewerFixture(t *testing.T, reviewers ...string) (*daemonReviewBackend, m
 	if err := os.WriteFile(filepath.Join(bin, "codex"), []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(bin, "claude"), []byte("#!/bin/sh\n[ -e \"$HOME/.claude/limited\" ] && { echo \"■ You've hit your usage limit\"; exit 1; }\necho \"home=$HOME config=${CLAUDE_CONFIG_DIR-unset} read changed.go\"\necho \"VERDICT: ALLOW\"\n"), 0o700); err != nil {
+	if err := os.WriteFile(filepath.Join(bin, "claude"), []byte("#!/bin/sh\n[ -e \"$HOME/.claude/limited\" ] && { echo \"■ You've hit your usage limit\"; exit 1; }\necho \"home=$HOME config=${CLAUDE_CONFIG_DIR-unset} updater=${DISABLE_AUTOUPDATER-unset} read changed.go\"\necho \"VERDICT: ALLOW\"\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	// The fakes are only on the tool path, as under launchd.
@@ -257,18 +257,9 @@ func TestDefaultDirectoryClaudeLoginReviewsThroughItsHome(t *testing.T) {
 	checkout, request := reviewCheckout(t)
 	request.Provider = "claude"
 	verdict, err := backend.Review(context.Background(), checkout, request)
-	want := "home=" + filepath.Dir(homes["claude"]) + " config=unset"
+	want := "home=" + filepath.Dir(homes["claude"]) + " config=unset updater=1"
 	if err != nil || !strings.Contains(verdict.Body, want) {
 		t.Fatalf("verdict=%+v err=%v, want %q", verdict, err, want)
-	}
-}
-
-func TestClaudeLoginNamesOnlyANonDefaultDirectory(t *testing.T) {
-	if got := claudeLogin("/accounts/work/.claude"); got != "HOME=/accounts/work" {
-		t.Fatalf("default login = %q", got)
-	}
-	if got := claudeLogin("/accounts/work/.claude-second"); got != "CLAUDE_CONFIG_DIR=/accounts/work/.claude-second" {
-		t.Fatalf("sibling login = %q", got)
 	}
 }
 

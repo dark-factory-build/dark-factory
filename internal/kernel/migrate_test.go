@@ -12,15 +12,16 @@ import (
 	"testing"
 )
 
-// A current home opens untouched; a v36 home (the current schema without
-// task_automatic_events) migrates and keeps every row.
-func TestCurrentAndV36HomesOpenWithEveryRow(t *testing.T) {
-	for _, v36 := range []bool{false, true} {
-		t.Run(fmt.Sprintf("v36=%v", v36), func(t *testing.T) { testHomeOpensWithEveryRow(t, v36) })
+// A current home opens untouched; a v37 home (runs naming 'runner_exit' for
+// 'transient') and a v36 one (also without task_automatic_events) migrate,
+// keep every row, and then record a transient failure.
+func TestCurrentAndLegacyHomesOpenWithEveryRow(t *testing.T) {
+	for _, version := range []int{userVersion, v37UserVersion, v36UserVersion} {
+		t.Run(fmt.Sprintf("v%d", version), func(t *testing.T) { testHomeOpensWithEveryRow(t, version) })
 	}
 }
 
-func testHomeOpensWithEveryRow(t *testing.T, v36 bool) {
+func testHomeOpensWithEveryRow(t *testing.T, version int) {
 	ctx := context.Background()
 	store, path := newTestStore(t)
 	seedDurableAuthority(t, store)
@@ -32,11 +33,18 @@ func testHomeOpensWithEveryRow(t *testing.T, v36 bool) {
 	if err := connection.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if v36 {
-		for _, statement := range []string{"DROP TABLE task_automatic_events", fmt.Sprintf("PRAGMA user_version = %d", v36UserVersion)} {
-			if _, err := store.writer.ExecContext(ctx, statement); err != nil {
-				t.Fatal(err)
-			}
+	var statements []string
+	if version == v36UserVersion {
+		statements = append(statements, "DROP TABLE task_automatic_events")
+	}
+	if version != userVersion {
+		statements = append(statements, "PRAGMA writable_schema = ON",
+			`UPDATE sqlite_schema SET sql = replace(sql, '''transient''', '''runner_exit''') WHERE name = 'runs'`,
+			"PRAGMA writable_schema = OFF", fmt.Sprintf("PRAGMA user_version = %d", version))
+	}
+	for _, statement := range statements {
+		if _, err := store.writer.ExecContext(ctx, statement); err != nil {
+			t.Fatal(err)
 		}
 	}
 	if err := store.Close(); err != nil {
@@ -58,6 +66,15 @@ func testHomeOpensWithEveryRow(t *testing.T, v36 bool) {
 	}
 	if after := snapshotRows(t, ctx, again); !reflect.DeepEqual(before, after) {
 		t.Fatal("opening the home changed rows")
+	}
+	// The migrating writer itself enforces the new check.
+	tx, err := reopened.writer.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `UPDATE runs SET phase = 'finalizing', proposal_kind = 'failed', proposal_code = 'transient', proposal_detail = 'x', credential_revoked_at_ms = 5, finalizing_at_ms = 5 WHERE id = ?`, runID(t, 5).Bytes()); err != nil {
+		t.Fatalf("record a transient failure: %v", err)
 	}
 }
 
@@ -102,10 +119,10 @@ func snapshotRows(t *testing.T, ctx context.Context, connection *sql.Conn) map[s
 // re-pins here.
 func TestSchemaDigestsArePinned(t *testing.T) {
 	sum := sha256.Sum256([]byte(strings.Join(schemaStatements, "\n")))
-	if got := hex.EncodeToString(sum[:]); got != "819c191d4e411ad35a2f7cf19db739d0492d0f8cf1c9c5fe0bd50a5197b5bb6c" {
+	if got := hex.EncodeToString(sum[:]); got != "0fd358c97036e55d36f6805eb8e0d3999d57b7ddeb1576211e44fb7b0596d24a" {
 		t.Errorf("current schema digest = %s", got)
 	}
-	sum = sha256.Sum256([]byte(strings.Join(v36SchemaStatements(), "\n")))
+	sum = sha256.Sum256([]byte(strings.Join(legacySchemaStatements(v36UserVersion), "\n")))
 	if got := hex.EncodeToString(sum[:]); got != "bfc5b62285b00148bc836d389f684eb3112e551952f477e27354cf35174460f0" {
 		t.Errorf("v36 schema digest = %s", got)
 	}

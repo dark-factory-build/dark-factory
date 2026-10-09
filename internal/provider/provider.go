@@ -659,7 +659,6 @@ func Build(request Request) (Launch, error) {
 			},
 		}
 		environment := request.runtime.environmentForRole(request.provider, request.role)
-		environment = append(environment, "DISABLE_AUTOUPDATER=1")
 		if browser != "" {
 			servers["factory_browser"] = map[string]any{"command": browser, "args": browserArgs}
 		}
@@ -1106,18 +1105,17 @@ func (runtime RuntimePaths) valid() bool {
 }
 
 func (runtime RuntimePaths) environmentForRole(kind kernel.Provider, role kernel.AgentRole) []string {
-	home := runtime.home
-	if kind == kernel.ProviderClaudeCode {
-		home = runtime.accountHome
-	}
 	environment := []string{
 		"DARK_FACTORY_TASK_ATTACHMENTS=" + filepath.Join(runtime.home, "task-attachments"),
 		"DARK_FACTORY_SOCKET=" + runtime.socket,
 		"DARK_FACTORY_ATTEMPT_TOKEN_FILE=" + runtime.token,
 		"DARK_FACTORY_FACTORYCTL=" + runtime.factoryctl,
-		"HOME=" + home,
 		"TMPDIR=" + runtime.temp,
 		"PATH=" + runtime.toolPath,
+	}
+	// Claude Code's HOME is its account's, from AccountEnvironment below.
+	if kind != kernel.ProviderClaudeCode {
+		environment = append(environment, "HOME="+runtime.home)
 	}
 	if role == kernel.RoleWorker {
 		// A bare /usr/bin/git is Apple's xcrun shim. Pin its developer
@@ -1175,24 +1173,7 @@ func (runtime RuntimePaths) environmentForRole(kind kernel.Provider, role kernel
 			environment = append(environment, "DF_CI_CACHE_ROOT="+filepath.Join(runtime.home, ".cache", "dark-factory", "local-ci", "trusted"))
 		}
 	}
-	switch kind {
-	case kernel.ProviderCodex:
-		environment = append(environment, "CODEX_HOME="+codexConfigHome(runtime))
-	case kernel.ProviderClaudeCode:
-		// Only a directory beside the default one is named. The default is
-		// what the CLI already reaches through HOME, and its OAuth account
-		// lives in $HOME/.claude.json rather than inside it, so naming it
-		// would point the CLI at the flags-only file it does contain and
-		// launch the run with no login at all.
-		if configDir := claudeConfigHome(runtime); configDir != ConfigHome(kernel.ProviderClaudeCode, runtime.accountHome) {
-			environment = append(environment, "CLAUDE_CONFIG_DIR="+configDir)
-		}
-		// The CLI finds its keychain login under $USER; without it a
-		// logged-in account launches as "Not logged in" (#1107).
-		if account, err := user.Current(); err == nil {
-			environment = append(environment, "USER="+account.Username)
-		}
-	}
+	environment = append(environment, AccountEnvironment(kind, runtime.accountHome, runtime.accountConfig)...)
 	if runtime.localCILeaseDir != "" {
 		environment = append(environment, "DARK_FACTORY_LOCAL_CI_DIRECTORY="+runtime.localCILeaseDir)
 	}
@@ -1216,6 +1197,35 @@ func (runtime RuntimePaths) environmentForRole(kind kernel.Provider, role kernel
 		"GIT_SSH_COMMAND=/usr/bin/false",
 		"GH_CONFIG_DIR=/dev/null",
 	)
+}
+
+// AccountEnvironment selects one provider login, configuration directory
+// accountConfig ("" for the default) under accountHome, and sets the CLI's
+// fixed switches. Worker launches and factoryd's reviewer both take it, so
+// their provider environments cannot drift apart.
+func AccountEnvironment(kind kernel.Provider, accountHome, accountConfig string) []string {
+	runtime := RuntimePaths{accountHome: accountHome, accountConfig: accountConfig}
+	switch kind {
+	case kernel.ProviderCodex:
+		return []string{"CODEX_HOME=" + codexConfigHome(runtime)}
+	case kernel.ProviderClaudeCode:
+		environment := []string{"HOME=" + accountHome, "DISABLE_AUTOUPDATER=1"}
+		// Only a directory beside the default one is named. The default is
+		// what the CLI already reaches through HOME, and its OAuth account
+		// lives in $HOME/.claude.json rather than inside it, so naming it
+		// would point the CLI at the flags-only file it does contain and
+		// launch the run with no login at all.
+		if configDir := claudeConfigHome(runtime); configDir != ConfigHome(kernel.ProviderClaudeCode, accountHome) {
+			environment = append(environment, "CLAUDE_CONFIG_DIR="+configDir)
+		}
+		// The CLI finds its keychain login under $USER; without it a
+		// logged-in account launches as "Not logged in" (#1107).
+		if account, err := user.Current(); err == nil {
+			environment = append(environment, "USER="+account.Username)
+		}
+		return environment
+	}
+	return nil
 }
 
 // goModuleCachePath is the one shared-cache path native workers may see. It

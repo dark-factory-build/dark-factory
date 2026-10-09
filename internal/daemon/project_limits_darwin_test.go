@@ -195,7 +195,7 @@ func TestCodexModelCapacityRequeuesOnce(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		run, err := fixture.daemon.RunNext(ctx, fixture.spec)
 		cancel()
-		if err != nil || run.Proposal == nil || run.Proposal.Code() != kernel.FailureProviderExit || run.Proposal.Detail() != kernel.ProviderCapacityRunDetail {
+		if err != nil || run.Proposal == nil || run.Proposal.Code() != kernel.FailureTransient || run.Proposal.Detail() != kernel.ProviderCapacityRunDetail {
 			t.Fatalf("capacity run = %v, err=%v", run.Proposal, err)
 		}
 		fixture.assertReleased(t, run)

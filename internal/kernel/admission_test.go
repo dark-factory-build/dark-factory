@@ -1102,8 +1102,8 @@ func TestReviewHandoffTextIsAnOrdinaryTask(t *testing.T) {
 // requeue, a retry, a send-back) carries its consumers' pins forward: only a
 // success can be superseded, so nothing else may strand a consumer.
 func TestUnsucceededProducerCarriesPrerequisitePins(t *testing.T) {
-	neverStarted, _ := NewFailureProposal(FailureProtocol, NeverStartedRunDetail)
-	overseerLimit, _ := NewFailureProposal(FailureProtocol, OverseerRunLimitDetail)
+	neverStarted, _ := NewFailureProposal(FailureTransient, NeverStartedRunDetail)
+	overseerLimit, _ := NewFailureProposal(FailureTransient, OverseerRunLimitDetail)
 	failed, _ := NewFailureProposal(FailureInternal, "retry")
 	for _, test := range []struct {
 		name     string

@@ -272,7 +272,7 @@ func TestOverseerRewakesCountPerItem(t *testing.T) {
 func TestOverseerNeverStartedWakeLeavesItemDue(t *testing.T) {
 	for _, detail := range []string{NeverStartedRunDetail, "provider exited"} {
 		ctx := context.Background()
-		neverStarted, _ := NewFailureProposal(FailureProtocol, NeverStartedRunDetail)
+		neverStarted, _ := NewFailureProposal(FailureTransient, NeverStartedRunDetail)
 		store, finalizing := finalizingReleasedRun(t, RoleOrchestrator, neverStarted)
 		defer store.Close()
 		if _, err := finalizeTestRun(t, store, finalizing, 60); err != nil {
@@ -337,7 +337,11 @@ func settleCarrier(t *testing.T, store *Store, at int64, seed byte, detail strin
 	if run, err = store.ActivateRun(ctx, run.ID, session.ID, run.Revision, session.Revision, mustTime(t, at+5)); err != nil {
 		t.Fatal(err)
 	}
-	failure, err := NewFailureProposal(FailureProtocol, detail)
+	code := FailureProtocol
+	if detail == NeverStartedRunDetail {
+		code = FailureTransient
+	}
+	failure, err := NewFailureProposal(code, detail)
 	if err != nil {
 		t.Fatal(err)
 	}
