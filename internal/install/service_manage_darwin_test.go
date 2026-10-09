@@ -1092,8 +1092,7 @@ func TestServiceUpgradeOrPromotionFailureLeavesCurrentUntouched(t *testing.T) {
 		"verify": func(*testing.T, *manageFixture, string) {
 			verifyServiceRelease = func(context.Context, string, string, buildinfo.Identity) error { return ErrServiceForeign }
 		},
-		"marker":  plant("." + upgradeMarkerName + ".stage"),
-		"receipt": plant("." + serviceReceiptName + ".stage"),
+		"marker": plant("." + upgradeMarkerName + ".stage"),
 		"swap": func(t *testing.T, _ *manageFixture, _ string) {
 			restore := renameSwap
 			t.Cleanup(func() { renameSwap = restore })
@@ -1116,6 +1115,31 @@ func TestServiceUpgradeOrPromotionFailureLeavesCurrentUntouched(t *testing.T) {
 			fixture.requireProgram(t, "current", "#!binary")
 		})
 	}
+}
+
+// The rename is promotion's commit point; a crash before the receipt names
+// the new program is repaired by the next boot's rebind.
+func TestPromotionInterruptedBeforeTheReceiptIsRepaired(t *testing.T) {
+	fixture, next, identity := upgradeFixture(t)
+	if err := ServiceUpgrade(context.Background(), fixture.home, next, identity); err != nil {
+		t.Fatal(err)
+	}
+	stage := filepath.Join(ServiceDirectoryPath(fixture.home), "."+serviceReceiptName+".stage")
+	if err := os.Mkdir(stage, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := PromoteService(fixture.home); err == nil {
+		t.Fatal("promotion wrote the receipt through a planted stage")
+	}
+	if err := os.Remove(stage); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if err := RebindServiceReceipt(fixture.home); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fixture.requireProgram(t, "current", "#!next")
 }
 
 func TestRestoreUpgradeBackupPutsBackTheDatabaseOnce(t *testing.T) {

@@ -446,39 +446,43 @@ func RestoreUpgradeBackup(home string) error {
 	return os.Rename(UpgradeBackupPath(home), filepath.Join(home, databaseName))
 }
 
-// PromoteService makes the staged bin/previous current in one rename and
-// rebinds the receipt to the program now current. Only the digest changes, so
-// the receipt is rewritten without being interpreted.
+// PromoteService makes the staged bin/previous current in one rename, the
+// commit point, then binds the receipt to it. A crash between the two is
+// repaired by the next boot's RebindServiceReceipt.
 func PromoteService(home string) error {
+	bin := filepath.Join(ServiceDirectoryPath(home), "bin")
+	if err := renameSwap(filepath.Join(bin, "previous"), filepath.Join(bin, "current"), unix.RENAME_SWAP); err != nil {
+		return errors.Join(ErrServiceAmbiguous, err)
+	}
+	_ = syncServiceDirectory(bin)
+	return RebindServiceReceipt(home)
+}
+
+// RebindServiceReceipt binds the receipt to the program in bin/current when
+// it names the one in bin/previous. Only the digest changes, so the receipt
+// is rewritten without being interpreted.
+func RebindServiceReceipt(home string) error {
 	bin := filepath.Join(ServiceDirectoryPath(home), "bin")
 	current, err := digestServiceFile(filepath.Join(bin, "current", "factoryd"))
 	if err != nil {
 		return err
 	}
-	next, err := digestServiceFile(filepath.Join(bin, "previous", "factoryd"))
+	other, err := digestServiceFile(filepath.Join(bin, "previous", "factoryd"))
 	if err != nil {
 		return err
 	}
-	receiptPath := filepath.Join(ServiceDirectoryPath(home), serviceReceiptName)
-	before, err := os.ReadFile(receiptPath)
+	before, err := os.ReadFile(filepath.Join(ServiceDirectoryPath(home), serviceReceiptName))
 	if err != nil {
 		return errors.Join(ErrServiceReceipt, err)
 	}
-	// A receipt already naming next is an interrupted earlier swap.
-	after := bytes.Replace(before, []byte(current), []byte(next), 1)
-	if !bytes.Contains(after, []byte(`"`+next+`"`)) {
+	after := bytes.Replace(before, []byte(`"`+other+`"`), []byte(`"`+current+`"`), 1)
+	if !bytes.Contains(after, []byte(`"`+current+`"`)) {
 		return fmt.Errorf("%w: receipt names neither installed program", ErrServiceReceipt)
 	}
-	if err := replaceFile(ServiceDirectoryPath(home), serviceReceiptName, after, 0o600); err != nil {
-		return err
+	if bytes.Equal(before, after) {
+		return nil
 	}
-	// The swap is the commit point and the last step that can fail.
-	if err := renameSwap(filepath.Join(bin, "previous"), filepath.Join(bin, "current"), unix.RENAME_SWAP); err != nil {
-		_ = replaceFile(ServiceDirectoryPath(home), serviceReceiptName, before, 0o600)
-		return errors.Join(ErrServiceAmbiguous, err)
-	}
-	_ = syncServiceDirectory(bin)
-	return nil
+	return replaceFile(ServiceDirectoryPath(home), serviceReceiptName, after, 0o600)
 }
 
 var renameSwap = unix.RenamexNp

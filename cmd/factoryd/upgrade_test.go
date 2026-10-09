@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -130,25 +131,44 @@ func TestStagedBuildThatAnswersAndStopsCleanlyIsPromoted(t *testing.T) {
 	bootUntilSettled(t, home)
 }
 
-// The parent died mid-trial after the child migrated the database: launchd
-// restarts the old build, which restores its backup before opening the store.
-func TestOldBuildRestartedMidTrialRestoresItsDatabase(t *testing.T) {
-	home := stagedHome(t, "serve", strings.Repeat("7", 40))
-	database := filepath.Join(home, "factory.sqlite3")
-	original, err := os.ReadFile(database)
+// A failed trial whose child migrated the store leaves a schema the old
+// build refuses: the old build restores its backup and serves.
+func TestOldBuildRestoresTheBackupOnlyOverAMigratedStore(t *testing.T) {
+	for _, migrated := range []bool{true, false} {
+		home := stagedHome(t, "serve", strings.Repeat("7", 40))
+		database := filepath.Join(home, "factory.sqlite3")
+		backup := []byte("not a database: restoring it would refuse the boot")
+		if migrated {
+			var err error
+			if backup, err = os.ReadFile(database); err != nil {
+				t.Fatal(err)
+			}
+			if output, err := exec.Command("/usr/bin/sqlite3", database, "PRAGMA user_version = 999999").CombinedOutput(); err != nil {
+				t.Fatalf("migrate: %v %s", err, output)
+			}
+		}
+		if err := os.WriteFile(install.UpgradeBackupPath(home), backup, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		// Unmigrated, the store keeps this build's writes since the backup.
+		bootUntilSettled(t, home)
+		if _, err := os.Lstat(install.UpgradeBackupPath(home)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("migrated=%t: backup = %v", migrated, err)
+		}
+	}
+}
+
+// A staged build that cannot bind the browser fails its trial: every boot
+// step that can refuse the process runs there.
+func TestStagedBuildThatCannotBindTheBrowserIsNeverPromoted(t *testing.T) {
+	home := stagedHome(t, "serve", "development")
+	held, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(install.UpgradeBackupPath(home), original, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(database, []byte("a schema only the new build reads"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	bootUntilSettled(t, home)
-	if _, err := os.Lstat(install.UpgradeBackupPath(home)); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("backup = %v", err)
-	}
+	defer held.Close()
+	args := []string{"--home", home, "--runner", "/bin/sh", "--factoryctl", "/bin/sh", "--development-browser-address", held.Addr().String()}
+	requireNotPromoted(t, home, superviseTrial(home, args, install.UpgradeMarker{Target: "development"}), "answered false")
 }
 
 // launchd does not end a trial child whose supervisor died, so the old
@@ -209,21 +229,21 @@ func TestTrialChildAnswersStatusAndActsOnNothing(t *testing.T) {
 	var phases []string
 	startupPhaseHook = func(phase string) { phases = append(phases, phase) }
 	t.Cleanup(func() { startupPhaseHook = nil })
-	ctx, cancel := context.WithCancel(context.Background())
+	// Bounded on its own: the child stops at trialLimit with no supervisor.
+	trialLimit = 2 * time.Second
 	done := make(chan error, 1)
-	go func() { done <- serve(ctx, testConfig(home)) }()
+	go func() { done <- serve(context.Background(), testConfig(home)) }()
 	client := waitOperatorClient(t, home)
-	if web, err := client.WebStatus(context.Background()); err != nil || web.Build.Source != "development" {
+	if web, err := client.WebStatus(context.Background()); err != nil || web.Build.Source != "development" || web.State != "stopped" {
 		t.Fatalf("web_status = %+v, %v", web, err)
 	}
 	if _, err := client.Snapshot(context.Background()); err == nil {
 		t.Fatal("a trial build answered a call other than web_status")
 	}
-	cancel()
 	if err := <-done; err != nil {
 		t.Fatalf("serve = %v", err)
 	}
-	if got := strings.Join(phases, ","); got != "home,store,runtime parent,supervisor spec,trial" {
+	if got := strings.Join(phases, ","); got != "home,store,runtime parent,supervisor spec,maintainer,local API,listener,browser,trial" {
 		t.Fatalf("trial phases = %s", got)
 	}
 	if _, present, _ := install.ReadUpgradeMarker(home); !present {
