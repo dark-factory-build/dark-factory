@@ -150,9 +150,9 @@ func selectGitWithTrust(ctx context.Context, gitExecutable, repositoryRoot, revi
 	}, nil
 }
 
-// refreshTrackingRevision runs for a fresh Change before its commit is pinned,
-// and best effort before a retained Change's run so a correction can see the
-// current base (FetchBase). HEAD means the origin's default branch, never the
+// refreshTrackingRevision runs for a fresh Change before its commit is pinned.
+// Retained Changes refresh their current base in factoryd before the worker
+// runs (FetchBase). HEAD means the origin's default branch, never the
 // registered checkout's own HEAD; only a checkout without an origin follows
 // its local HEAD and upstream. Explicit local revisions never refresh source.
 func refreshTrackingRevision(ctx context.Context, spec gitCommandSpec, revision string, verify func() error) (string, error) {

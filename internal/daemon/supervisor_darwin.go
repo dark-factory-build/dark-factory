@@ -719,6 +719,18 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 		return daemon.failRun(run, kernel.FailureSource, errInvalidContract)
 	}
 	if worker {
+		if retained != nil {
+			// The registered checkout is factoryd's fetch boundary. Refresh the
+			// current base there, then copy that exact commit into the retained
+			// Change before the worker can run a correction offline.
+			current, selectErr := change.SelectRegisteredGit(ctx, spec.GitExecutable, repository.Root, repository.BaseRef, change.RepositorySourceIdentity{Root: repositoryIdentity, Git: repositoryGitIdentity, OriginDigest: repositoryOriginDigest})
+			if selectErr != nil {
+				return daemon.failRun(run, kernel.FailureSource, selectErr)
+			}
+			if fetchErr := change.FetchBase(ctx, current, filepath.Join(spec.ChangeParent, finalName)); fetchErr != nil {
+				return daemon.failRun(run, kernel.FailureSource, fetchErr)
+			}
+		}
 		// The daemon reads the worktree itself: fresh Changes use private Git
 		// administration; retained worktrees keep their layout. Verify the branch
 		// at the base for a fresh or adopted Change and at the settled head for
