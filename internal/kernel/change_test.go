@@ -8,6 +8,7 @@ import (
 )
 
 func TestChangePreparedAndAvailableAreExactReplayableCheckpoints(t *testing.T) {
+	t.Parallel()
 	store, change := ownedReservedChange(t)
 	defer store.Close()
 	selection := testChangeSelection(t)
@@ -48,6 +49,7 @@ func TestChangePreparedAndAvailableAreExactReplayableCheckpoints(t *testing.T) {
 }
 
 func TestChangePreparedFactsSurviveRestart(t *testing.T) {
+	t.Parallel()
 	store, change := ownedReservedChange(t)
 	path := storePath(t, store)
 	selection := testChangeSelection(t)
@@ -74,6 +76,7 @@ func TestChangePreparedFactsSurviveRestart(t *testing.T) {
 // retry and settlement history proves is unchanged; a head that is not the
 // base, a second head, or a Change in any other phase is refused.
 func TestRecordChangeWorktreeFillsTheHeadOfAGitFreeChangeOnce(t *testing.T) {
+	t.Parallel()
 	blocked, _ := NewBlockedProposal("retry")
 	store, finalizing := finalizingReleasedRun(t, RoleWorker, blocked)
 	defer store.Close()
@@ -130,6 +133,7 @@ func TestRecordChangeWorktreeFillsTheHeadOfAGitFreeChangeOnce(t *testing.T) {
 }
 
 func TestChangeSchemaIsPathFreeCanonicalAndCircularlyBound(t *testing.T) {
+	t.Parallel()
 	store, _ := newTestStore(t)
 	defer store.Close()
 	rows, err := store.readers.Query(`PRAGMA table_info(changes)`)
@@ -189,6 +193,7 @@ func TestChangeSchemaIsPathFreeCanonicalAndCircularlyBound(t *testing.T) {
 }
 
 func TestPartialPreparedFactsFailClosed(t *testing.T) {
+	t.Parallel()
 	for name, mutation := range map[string]string{
 		"missing base":                `UPDATE changes SET base_commit = NULL, object_format = NULL, repository_dev = NULL, repository_inode = NULL WHERE id = ?`,
 		"missing repository identity": `UPDATE changes SET repository_inode = NULL WHERE id = ?`,
@@ -218,6 +223,7 @@ func TestPartialPreparedFactsFailClosed(t *testing.T) {
 }
 
 func TestRepositoryIdentitySchemaRequiresExactPairedStoreIntegers(t *testing.T) {
+	t.Parallel()
 	store, change := ownedReservedChange(t)
 	defer store.Close()
 	prepared, err := store.RecordChangePrepared(context.Background(), change.ID, change.Revision, testChangeSelection(t), mustTime(t, 10))
@@ -240,6 +246,7 @@ func TestRepositoryIdentitySchemaRequiresExactPairedStoreIntegers(t *testing.T) 
 }
 
 func TestRetryAdmissionUsesCanonicalChangeAndIgnoresFreshCandidate(t *testing.T) {
+	t.Parallel()
 	store, terminal, _, keys := retryQueuedWorker(t, 40)
 	defer store.Close()
 	before, found, err := store.Change(context.Background(), *terminal.ChangeID)
@@ -266,6 +273,7 @@ func TestRetryAdmissionUsesCanonicalChangeAndIgnoresFreshCandidate(t *testing.T)
 }
 
 func TestOrchestratorAdmissionIgnoresCandidateWithoutCreatingChange(t *testing.T) {
+	t.Parallel()
 	store, _, project, agent := newAdmissionStore(t, RoleOrchestrator, 2)
 	defer store.Close()
 	if _, err := store.EnqueueTask(context.Background(), NewTask{ID: taskID(t, 180), ProjectID: project.ID, AssignedAgentID: agent.ID, IncarnationID: incarnationID(t, 181), Title: "orchestrate"}, mustTime(t, 5)); err != nil {
@@ -282,6 +290,7 @@ func TestOrchestratorAdmissionIgnoresCandidateWithoutCreatingChange(t *testing.T
 }
 
 func TestWorkerSettlementIsExactAndHistoricalFinalizationReplaySurvivesRetry(t *testing.T) {
+	t.Parallel()
 	blocked, _ := NewBlockedProposal("retry")
 	store, finalizing := finalizingReleasedRun(t, RoleWorker, blocked)
 	defer store.Close()
@@ -314,6 +323,7 @@ func TestWorkerSettlementIsExactAndHistoricalFinalizationReplaySurvivesRetry(t *
 }
 
 func TestNonterminalWorkerCannotSettleChange(t *testing.T) {
+	t.Parallel()
 	failed, _ := NewFailureProposal(FailureInternal, "cleanup")
 	store, finalizing := finalizingReleasedRun(t, RoleWorker, failed)
 	defer store.Close()

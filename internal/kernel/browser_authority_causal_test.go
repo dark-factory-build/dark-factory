@@ -49,6 +49,7 @@ func mintBrowserChallenge(t *testing.T, store *Store, seed byte, boot BootID, cr
 }
 
 func TestBrowserChallengeCommitOutcomeReconcilesExactIdentity(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name         string
 		fault        storeFaultKind
@@ -84,6 +85,7 @@ func TestBrowserChallengeCommitOutcomeReconcilesExactIdentity(t *testing.T) {
 }
 
 func TestInvalidateBrowserPairingChallengesSurfacesAmbiguousCommit(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name         string
 		fault        storeFaultKind
@@ -129,6 +131,7 @@ func browserTableCount(t *testing.T, store *Store, table string) int64 {
 }
 
 func TestBrowserCapabilityHasRequiresSingleKnownBit(t *testing.T) {
+	t.Parallel()
 	mask := BrowserCapabilityObserve | BrowserCapabilityTerminalInput
 	if !mask.Has(BrowserCapabilityObserve) || !mask.Has(BrowserCapabilityTerminalInput) {
 		t.Fatalf("known capability probe rejected: %v", mask)
@@ -141,6 +144,7 @@ func TestBrowserCapabilityHasRequiresSingleKnownBit(t *testing.T) {
 }
 
 func TestBrowserClientPagesAreBoundedDeterministicAndPrivate(t *testing.T) {
+	t.Parallel()
 	store, _ := newBrowserStore(t)
 	defer store.Close()
 	ctx := context.Background()
@@ -196,6 +200,7 @@ func TestBrowserClientPagesAreBoundedDeterministicAndPrivate(t *testing.T) {
 }
 
 func TestBrowserClientCursorValidatesCompleteRowBeforePaging(t *testing.T) {
+	t.Parallel()
 	variants := []struct {
 		name   string
 		mutate string
@@ -262,6 +267,7 @@ func assertReleaseRejectedWithoutMutation(t *testing.T, store *Store, runID RunI
 }
 
 func TestBrowserDaemonIDFreshStableAndCorruptionFailsClosed(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, path := newBrowserStore(t)
 	first, err := store.Factory(ctx)
@@ -308,6 +314,7 @@ func TestBrowserDaemonIDFreshStableAndCorruptionFailsClosed(t *testing.T) {
 }
 
 func TestBrowserFreshSchemaReopenAndTerminalLeaseForeignKey(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, path := newBrowserStore(t)
 	connection, err := store.readerConnection(ctx)
@@ -351,6 +358,7 @@ func TestBrowserFreshSchemaReopenAndTerminalLeaseForeignKey(t *testing.T) {
 }
 
 func TestBrowserChallengeBoundsBootOriginExpiryAndPruning(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, _ := newBrowserStore(t)
 	defer store.Close()
@@ -450,6 +458,7 @@ func TestBrowserChallengeBoundsBootOriginExpiryAndPruning(t *testing.T) {
 }
 
 func TestBrowserChallengeRetentionBoundFailsClosedOnOpen(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, path := newBrowserStore(t)
 	boot := browserTestBoot(t, 6)
@@ -473,6 +482,7 @@ func TestBrowserChallengeRetentionBoundFailsClosedOnOpen(t *testing.T) {
 }
 
 func TestBrowserChallengeInsertErrorsRemainSpecific(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, _ := newBrowserStore(t)
 	defer store.Close()
@@ -493,6 +503,7 @@ func TestBrowserChallengeInsertErrorsRemainSpecific(t *testing.T) {
 }
 
 func TestBrowserRestartPreservesClientAndChallengeUntilBootChanges(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, path := newBrowserStore(t)
 	boot := browserTestBoot(t, 115)
@@ -522,6 +533,7 @@ func TestBrowserRestartPreservesClientAndChallengeUntilBootChanges(t *testing.T)
 }
 
 func TestBrowserConcurrentRedemptionAndDuplicateFingerprintConsumes(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, _ := newBrowserStore(t)
 	defer store.Close()
@@ -580,6 +592,7 @@ func TestBrowserConcurrentRedemptionAndDuplicateFingerprintConsumes(t *testing.T
 }
 
 func TestBrowserKeyValidationAndClientIDCollisionRollback(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, _ := newBrowserStore(t)
 	defer store.Close()
@@ -631,6 +644,7 @@ func mustECDSAPoint(t *testing.T, publicKey []byte) (*big.Int, *big.Int) {
 }
 
 func TestBrowserSecurityEventsArePrivateBoundedAndGapSafe(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, _ := newBrowserStore(t)
 	defer store.Close()
@@ -692,6 +706,7 @@ func TestBrowserSecurityEventsArePrivateBoundedAndGapSafe(t *testing.T) {
 }
 
 func TestBrowserPairingSecurityEventFailureAndSequenceOverflowRollBack(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, _ := newBrowserStore(t)
 	defer store.Close()
@@ -731,6 +746,7 @@ func TestBrowserPairingSecurityEventFailureAndSequenceOverflowRollBack(t *testin
 }
 
 func TestBrowserRevokeExpectedRevisionAndNoDuplicateEvent(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, _ := newBrowserStore(t)
 	defer store.Close()
@@ -768,6 +784,7 @@ func TestBrowserRevokeExpectedRevisionAndNoDuplicateEvent(t *testing.T) {
 }
 
 func TestBrowserAuthorityRawCorruptionFailsClosed(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name   string
 		mutate func(*testing.T, *Store)
@@ -852,6 +869,7 @@ func TestBrowserAuthorityRawCorruptionFailsClosed(t *testing.T) {
 }
 
 func TestTerminalSessionReadsValidateLeaseClientRelationship(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name   string
 		mutate func(*testing.T, *Store, BrowserClient)
@@ -968,6 +986,7 @@ func activateAllResourcesUnique(t *testing.T, store *Store, run Run, at, identit
 }
 
 func TestTerminalLeaseCapabilityCompetitionExpiryAndRenewal(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, run, _ := runningOrchestratorRun(t)
 	defer store.Close()
@@ -1022,6 +1041,7 @@ func TestTerminalLeaseCapabilityCompetitionExpiryAndRenewal(t *testing.T) {
 }
 
 func TestTerminalLeaseConcurrentAcquireHasOneDurableWinner(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, run, _ := runningOrchestratorRun(t)
 	defer store.Close()
@@ -1059,6 +1079,7 @@ func TestTerminalLeaseConcurrentAcquireHasOneDurableWinner(t *testing.T) {
 }
 
 func TestCheckTerminalLeaseIsExactReadOnlyAuthorization(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, run, _ := runningOrchestratorRun(t)
 	defer store.Close()
@@ -1125,6 +1146,7 @@ func TestCheckTerminalLeaseIsExactReadOnlyAuthorization(t *testing.T) {
 }
 
 func TestRevokeTerminalLeaseAllowsExpiredExactGenerationAndCannotTouchReplacement(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, run, _ := runningOrchestratorRun(t)
 	defer store.Close()
@@ -1179,6 +1201,7 @@ func TestRevokeTerminalLeaseAllowsExpiredExactGenerationAndCannotTouchReplacemen
 }
 
 func TestRevokeTerminalLeaseGuardedUpdateRollsBack(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, run, _ := runningOrchestratorRun(t)
 	defer store.Close()
@@ -1205,6 +1228,7 @@ func TestRevokeTerminalLeaseGuardedUpdateRollsBack(t *testing.T) {
 }
 
 func TestTerminalLeaseSuppressedUpdateRollsBackAuthority(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, run, _ := runningOrchestratorRun(t)
 	defer store.Close()
@@ -1227,6 +1251,7 @@ func TestTerminalLeaseSuppressedUpdateRollsBackAuthority(t *testing.T) {
 }
 
 func TestTerminalLeaseSequenceReleasePartialResetAndFreshGeneration(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, run, _ := runningOrchestratorRun(t)
 	defer store.Close()
@@ -1284,6 +1309,7 @@ func TestTerminalLeaseSequenceReleasePartialResetAndFreshGeneration(t *testing.T
 }
 
 func TestTerminalLeaseReleaseRequiresActiveExactHolder(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, run, _ := runningOrchestratorRun(t)
 	defer store.Close()
@@ -1350,6 +1376,7 @@ func TestTerminalLeaseReleaseRequiresActiveExactHolder(t *testing.T) {
 }
 
 func TestRevokeBrowserClientAtomicallyClearsMultipleLeases(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, firstRun, _ := runningOrchestratorRun(t)
 	defer store.Close()
@@ -1430,6 +1457,7 @@ func TestRevokeBrowserClientAtomicallyClearsMultipleLeases(t *testing.T) {
 }
 
 func TestBrowserLeaseCorruptionFailsClosedOnReadAndOpen(t *testing.T) {
+	t.Parallel()
 	t.Run("generation", func(t *testing.T) {
 		store, run, _ := runningOrchestratorRun(t)
 		session := terminalSessionForRunTest(t, store, run.ID)
@@ -1461,6 +1489,7 @@ func TestBrowserLeaseCorruptionFailsClosedOnReadAndOpen(t *testing.T) {
 }
 
 func TestTerminalLeaseHolderSupersedesItsOwnUnexpiredLease(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, run, _ := runningOrchestratorRun(t)
 	defer store.Close()

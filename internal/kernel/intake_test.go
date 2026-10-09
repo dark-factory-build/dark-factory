@@ -29,6 +29,7 @@ func intakeSnapshotForTest() IntakeIssueSnapshot {
 }
 
 func TestPreviewIntakeRequiresReviewAfterAnyContentEdit(t *testing.T) {
+	t.Parallel()
 	source := intakeSourceForTest(t, IntakePolicyTrustedAuthors)
 	snapshot := intakeSnapshotForTest()
 	if got := PreviewIntake(source, snapshot, nil); got != IntakeEligibleTrusted {
@@ -80,6 +81,7 @@ func TestPreviewIntakeRequiresReviewAfterAnyContentEdit(t *testing.T) {
 }
 
 func TestPreviewIntakeMarksOversizedContentUnsupported(t *testing.T) {
+	t.Parallel()
 	source := intakeSourceForTest(t, IntakePolicyManual)
 	snapshot := intakeSnapshotForTest()
 	snapshot.Body = string(make([]byte, maxIntakeBodyBytes+1))
@@ -89,6 +91,7 @@ func TestPreviewIntakeMarksOversizedContentUnsupported(t *testing.T) {
 }
 
 func TestIntakeAcceptanceIDsDoNotContainSourceConfigurationIdentity(t *testing.T) {
+	t.Parallel()
 	snapshot := intakeSnapshotForTest()
 	project := projectID(t, 1)
 	repository := repositoryID(t, 2)
@@ -114,6 +117,7 @@ func TestIntakeAcceptanceIDsDoNotContainSourceConfigurationIdentity(t *testing.T
 }
 
 func TestIntakeContentHashIsOnlyReviewedTitleAndBody(t *testing.T) {
+	t.Parallel()
 	snapshot := intakeSnapshotForTest()
 	original := snapshot.ContentHash()
 	snapshot.AuthorLogin = "other"
@@ -127,6 +131,7 @@ func TestIntakeContentHashIsOnlyReviewedTitleAndBody(t *testing.T) {
 }
 
 func TestIntakeSourceValidationRejectsUnstableConfiguration(t *testing.T) {
+	t.Parallel()
 	for name, mutate := range map[string]func(*IntakeSource){
 		"empty trusted set": func(source *IntakeSource) { source.TrustedGitHubLogins = nil },
 		"duplicate trusted login": func(source *IntakeSource) {
@@ -146,6 +151,7 @@ func TestIntakeSourceValidationRejectsUnstableConfiguration(t *testing.T) {
 }
 
 func TestIntakeSourceTrustedAuthorLimit(t *testing.T) {
+	t.Parallel()
 	source := intakeSourceForTest(t, IntakePolicyTrustedAuthors)
 	source.TrustedGitHubLogins = make([]string, maxTrustedGitHubLogins)
 	for index := range source.TrustedGitHubLogins {
@@ -161,6 +167,7 @@ func TestIntakeSourceTrustedAuthorLimit(t *testing.T) {
 }
 
 func TestCreateIntakeSourceCapsGlobalSourcesAfterExactReplay(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, _ := newTestStore(t)
 	defer store.Close()
@@ -198,6 +205,7 @@ func TestCreateIntakeSourceCapsGlobalSourcesAfterExactReplay(t *testing.T) {
 }
 
 func TestAcceptedIntakeImportsOnceAcrossOverlappingSourcesAndWithdrawal(t *testing.T) {
+	t.Parallel()
 	for _, linear := range []bool{false, true} {
 		t.Run(fmt.Sprint("linear=", linear), func(t *testing.T) {
 			ctx := context.Background()
@@ -340,6 +348,7 @@ func TestAcceptedIntakeImportsOnceAcrossOverlappingSourcesAndWithdrawal(t *testi
 }
 
 func TestPendingIntakeAcceptancesSkipsSupersededWithdrawnAndImportedReceipts(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, _ := newTestStore(t)
 	defer store.Close()
@@ -438,6 +447,7 @@ func TestPendingIntakeAcceptancesSkipsSupersededWithdrawnAndImportedReceipts(t *
 }
 
 func TestTrustedIntakeSourcePersistsAndValidatesAuthorsAfterReopen(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, path := newTestStore(t)
 	defer store.Close()
@@ -484,6 +494,7 @@ func TestTrustedIntakeSourcePersistsAndValidatesAuthorsAfterReopen(t *testing.T)
 }
 
 func TestBotAuthorMetadataNeverGrantsAutomaticAcceptance(t *testing.T) {
+	t.Parallel()
 	source := intakeSourceForTest(t, IntakePolicyTrustedAuthors)
 	for _, login := range []string{"maintainer", "github-actions[bot]"} {
 		snapshot := intakeSnapshotForTest()
@@ -503,6 +514,7 @@ func TestBotAuthorMetadataNeverGrantsAutomaticAcceptance(t *testing.T) {
 }
 
 func TestIntakePriorityRulesBoundEncodedOperatorConfiguration(t *testing.T) {
+	t.Parallel()
 	source := intakeSourceForTest(t, IntakePolicyManual)
 	source.PriorityByLabel = map[string]int64{}
 	for i := 0; i < 25; i++ {
@@ -525,6 +537,7 @@ func TestIntakePriorityRulesBoundEncodedOperatorConfiguration(t *testing.T) {
 }
 
 func TestIntakeRestoredContentIsRefusedAfterNewerReceipt(t *testing.T) {
+	t.Parallel()
 	for _, imported := range []bool{false, true} {
 		t.Run(fmt.Sprint(imported), func(t *testing.T) {
 			ctx := context.Background()
@@ -573,6 +586,7 @@ func TestIntakeRestoredContentIsRefusedAfterNewerReceipt(t *testing.T) {
 }
 
 func TestIntakeTaskBodyKeepsATitleOnlyIssuesInstruction(t *testing.T) {
+	t.Parallel()
 	accepted := IntakeAcceptance{SourceRepository: "owner/repository"}
 	accepted.Snapshot.Title, accepted.Snapshot.IssueNumber = "Fix the flake", 7
 	if got := intakeTaskBody(accepted); got != "Fix the flake\n\nSource: https://github.com/owner/repository/issues/7\nFACTORY_SOURCE owner/repository#7" {

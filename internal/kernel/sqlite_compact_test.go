@@ -10,6 +10,7 @@ import (
 )
 
 func TestBackupToRefusesAnyExistingDestination(t *testing.T) {
+	t.Parallel()
 	store, live := newTestStore(t)
 	defer store.Close()
 	ctx := context.Background()

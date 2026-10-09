@@ -33,6 +33,7 @@ func browserTestBoot(t *testing.T, first byte) BootID {
 }
 
 func TestBrowserPairingConsumesAndDerivesIdentity(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, err := createTestStore(ctx, filepath.Join(t.TempDir(), "kernel.db"), FactoryConfig{}, UnixMillis{})
 	if err != nil {
@@ -82,6 +83,7 @@ func TestBrowserPairingConsumesAndDerivesIdentity(t *testing.T) {
 }
 
 func TestTerminalLeaseGuardsAndPrivateChronology(t *testing.T) {
+	t.Parallel()
 	store, run, keys := runningOrchestratorRun(t)
 	defer store.Close()
 	ctx := context.Background()

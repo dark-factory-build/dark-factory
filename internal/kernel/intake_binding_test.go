@@ -60,6 +60,7 @@ func runningIntakeOverseer(t *testing.T) (*Store, Run, IntakeSource, IntakeAccep
 }
 
 func TestIntakeImportNeitherWakesNorAssignsTheOverseer(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, _, project, overseer := newAdmissionStore(t, RoleOrchestrator, 4)
 	defer store.Close()
@@ -94,6 +95,7 @@ func TestIntakeImportNeitherWakesNorAssignsTheOverseer(t *testing.T) {
 }
 
 func TestCancelledIntakeCanBeWithdrawnThenImported(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, _, project, _ := newAdmissionStore(t, RoleOrchestrator, 4)
 	defer store.Close()
@@ -147,6 +149,7 @@ func TestCancelledIntakeCanBeWithdrawnThenImported(t *testing.T) {
 // overseer could retry, and not after an operator's cancel or once its issue
 // is withdrawn.
 func TestFailedIntakeWakesItsConfiguredOverseer(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name, status            string
 		expired, withdrawn, due bool
@@ -201,6 +204,7 @@ func TestFailedIntakeWakesItsConfiguredOverseer(t *testing.T) {
 // the issue was accepted again with new content, the old receipt stays
 // withdrawn and its task stays cancelled.
 func TestWithdrawnOlderIntakeContentIsNotReinstated(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, source := intakeExactRevisionStore(t)
 	if _, err := store.SetIntakeSourceEnabled(ctx, source.ID, source.Revision, true, mustTime(t, 6)); err != nil {
@@ -235,6 +239,7 @@ func TestWithdrawnOlderIntakeContentIsNotReinstated(t *testing.T) {
 }
 
 func TestIntakeDescendantsRetainSourceAndDestinationAndCannotAdoptForeignReplay(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, run, source, accepted := runningIntakeOverseer(t)
 	other, err := store.AddProjectRepository(ctx, NewProjectRepository{ID: repositoryID(t, 221), ProjectID: run.ProjectID, Name: "other", Root: "/other-intake", BaseRef: "release"}, mustTime(t, 40))
@@ -303,6 +308,7 @@ func TestIntakeDescendantsRetainSourceAndDestinationAndCannotAdoptForeignReplay(
 }
 
 func TestIntakeWithdrawalBlocksDelegationAndAdmissionAndFindsChildren(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, run, source, accepted := runningIntakeOverseer(t)
 	worker, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 230), ProjectID: run.ProjectID, Name: "worker", Role: RoleWorker, Provider: ProviderShell, ToolBudgetLimit: 10}, mustTime(t, 40))
@@ -359,6 +365,7 @@ func TestIntakeWithdrawalBlocksDelegationAndAdmissionAndFindsChildren(t *testing
 }
 
 func TestIntakeReplacementInheritsBinding(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, run, _, accepted := runningIntakeOverseer(t)
 	task, _, err := store.Task(ctx, run.TaskID)
@@ -387,6 +394,7 @@ func TestIntakeReplacementInheritsBinding(t *testing.T) {
 }
 
 func TestIntakeBindingCorruptionRefusedBeforeMutation(t *testing.T) {
+	t.Parallel()
 	for _, statement := range []string{
 		`DELETE FROM intake_task_bindings`,
 		`UPDATE task_repository_bindings SET repository_id = ? WHERE task_id = ?`,

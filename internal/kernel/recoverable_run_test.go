@@ -8,6 +8,7 @@ import (
 )
 
 func TestRecoverableRunExactLookupMatchesPluralEntry(t *testing.T) {
+	t.Parallel()
 	success, _ := NewSuccessProposal("recoverable")
 	store, run := finalizingReleasedRun(t, RoleWorker, success)
 	defer store.Close()
@@ -29,6 +30,7 @@ func TestRecoverableRunExactLookupMatchesPluralEntry(t *testing.T) {
 }
 
 func TestRecoverableRunExactLookupReturnsNotFoundForTerminalAndUnknownRuns(t *testing.T) {
+	t.Parallel()
 	failure, _ := NewFailureProposal(FailureInternal, "terminal")
 	store, finalizing := finalizingReleasedRun(t, RoleOrchestrator, failure)
 	defer store.Close()
@@ -50,6 +52,7 @@ func TestRecoverableRunExactLookupReturnsNotFoundForTerminalAndUnknownRuns(t *te
 }
 
 func TestRecoverableRunExactLookupValidatesExactRelationships(t *testing.T) {
+	t.Parallel()
 	store, run, _ := runningOrchestratorRun(t)
 	defer store.Close()
 	corruptSQL(t, store, `UPDATE resources SET state = 'released', released_at_ms = updated_at_ms WHERE run_id = ? AND kind = 'runtime_root'`, run.ID.Bytes())
@@ -59,6 +62,7 @@ func TestRecoverableRunExactLookupValidatesExactRelationships(t *testing.T) {
 }
 
 func TestRecoverableRunExactLookupRejectsUnrelatedOwnershipCorruption(t *testing.T) {
+	t.Parallel()
 	store, _, project, firstAgent := newAdmissionStore(t, RoleWorker, 4)
 	defer store.Close()
 	if _, err := store.EnqueueTask(context.Background(), NewTask{ID: taskID(t, 180), ProjectID: project.ID, AssignedAgentID: firstAgent.ID, IncarnationID: incarnationID(t, 181), Title: "first"}, mustTime(t, 5)); err != nil {
@@ -89,6 +93,7 @@ func TestRecoverableRunExactLookupRejectsUnrelatedOwnershipCorruption(t *testing
 }
 
 func TestRecoverableRunExactLookupRejectsUnrelatedIdentityCollision(t *testing.T) {
+	t.Parallel()
 	store, _, project, firstAgent := newAdmissionStore(t, RoleWorker, 4)
 	defer store.Close()
 	if _, err := store.EnqueueTask(context.Background(), NewTask{ID: taskID(t, 190), ProjectID: project.ID, AssignedAgentID: firstAgent.ID, IncarnationID: incarnationID(t, 191), Title: "first"}, mustTime(t, 5)); err != nil {
@@ -146,6 +151,7 @@ func TestRecoverableRunExactLookupRejectsUnrelatedIdentityCollision(t *testing.T
 }
 
 func TestRecoverableRunExactLookupAllowsHistoricalTerminalTaskState(t *testing.T) {
+	t.Parallel()
 	failure, _ := NewFailureProposal(FailureInternal, "terminal")
 	store, finalizing := finalizingReleasedRun(t, RoleOrchestrator, failure)
 	defer store.Close()
@@ -160,6 +166,7 @@ func TestRecoverableRunExactLookupAllowsHistoricalTerminalTaskState(t *testing.T
 }
 
 func TestTerminalRunRejectsUnownedLaterRunningTaskState(t *testing.T) {
+	t.Parallel()
 	failure, _ := NewFailureProposal(FailureInternal, "terminal")
 	store, finalizing := finalizingReleasedRun(t, RoleOrchestrator, failure)
 	defer store.Close()
@@ -174,6 +181,7 @@ func TestTerminalRunRejectsUnownedLaterRunningTaskState(t *testing.T) {
 }
 
 func TestRecoverableRunExactLookupReloadsDurableState(t *testing.T) {
+	t.Parallel()
 	store, run, keys := runningOrchestratorRun(t)
 	defer store.Close()
 	first, found, err := store.RecoverableRun(context.Background(), run.ID)

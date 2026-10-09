@@ -3,6 +3,7 @@ package kernel
 import "testing"
 
 func TestAgentAppearanceEncoding(t *testing.T) {
+	t.Parallel()
 	want := AgentAppearance{Skin: 1, Hair: 2, HairColour: 3, Face: 4, Outfit: 5, ClothesColour: 6, Shoes: 7, Tool: 8, Headwear: 9}
 	encoded := encodeAgentAppearance(want)
 	got, err := decodeAgentAppearance(encoded)

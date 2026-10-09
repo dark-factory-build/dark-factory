@@ -31,6 +31,7 @@ func repeatBytes(value byte, count int) []byte {
 }
 
 func TestContentRevisionReplayAndHistoryRemainCASBound(t *testing.T) {
+	t.Parallel()
 	store, run, _ := runningWorkerRun(t)
 	defer store.Close()
 	ctx := context.Background()
@@ -65,6 +66,7 @@ func TestContentRevisionReplayAndHistoryRemainCASBound(t *testing.T) {
 }
 
 func TestAttemptContentUsesLiveProjectAndProvenance(t *testing.T) {
+	t.Parallel()
 	store, run, _ := runningWorkerRun(t)
 	defer store.Close()
 	ctx := context.Background()
@@ -94,6 +96,7 @@ func TestAttemptContentUsesLiveProjectAndProvenance(t *testing.T) {
 }
 
 func TestContentAttachmentsEnforceAttemptRoleAndPinWork(t *testing.T) {
+	t.Parallel()
 	store, worker, _ := runningWorkerRun(t)
 	defer store.Close()
 	ctx := context.Background()
@@ -133,6 +136,7 @@ func TestContentAttachmentsEnforceAttemptRoleAndPinWork(t *testing.T) {
 }
 
 func TestAttemptContentRejectsRevokedCredentialWithoutMutation(t *testing.T) {
+	t.Parallel()
 	store, run, keys := runningWorkerRun(t)
 	defer store.Close()
 	ctx := context.Background()
@@ -153,6 +157,7 @@ func TestAttemptContentRejectsRevokedCredentialWithoutMutation(t *testing.T) {
 }
 
 func TestContentDeprecationReplayUsesExpectedRevisionAfterLaterRevision(t *testing.T) {
+	t.Parallel()
 	store, run, _ := runningWorkerRun(t)
 	defer store.Close()
 	ctx := context.Background()
@@ -178,6 +183,7 @@ func TestContentDeprecationReplayUsesExpectedRevisionAfterLaterRevision(t *testi
 }
 
 func TestTaskContentAttachmentBoundIsEnforced(t *testing.T) {
+	t.Parallel()
 	store, run, _ := runningWorkerRun(t)
 	defer store.Close()
 	ctx := context.Background()
@@ -202,6 +208,7 @@ func TestTaskContentAttachmentBoundIsEnforced(t *testing.T) {
 }
 
 func TestOrchestratorTaskContentAttachmentBoundIsEnforced(t *testing.T) {
+	t.Parallel()
 	store, overseer, _ := runningOrchestratorRun(t)
 	defer store.Close()
 	ctx := context.Background()
@@ -225,6 +232,7 @@ func TestOrchestratorTaskContentAttachmentBoundIsEnforced(t *testing.T) {
 }
 
 func TestContentActivityListsRecordedWritesAndReadsOnly(t *testing.T) {
+	t.Parallel()
 	store, run, _ := runningWorkerRun(t)
 	defer store.Close()
 	ctx := context.Background()
