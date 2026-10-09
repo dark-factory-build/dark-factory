@@ -716,14 +716,15 @@ Approach (`factory-scene/scene.ts`, `factory-scene/movement.ts`; nothing in
    free spot with the shortest weighted distance to its neighbours plus a
    charge for growing the group's bounds; if none is free it takes the
    nearest free spot on a spiral. Two bounded passes then move each station
-   to a better free spot if one exists. Then the groups are packed: the
-   largest first, the development neighbourhood (the commons, its work
-   tables and the outbound line, one block) beside it, then the rest,
-   largest first. Each tucks against a placed footprint
-   where the floor's bounds stay smallest and nearest a 16:10 shape, with a
-   gap that keeps unrelated groups visibly apart. Only IDs, kinds, labels, ownership and
-   flows enter; traffic, state, workers and the pane never do, so input
-   order, a busy hour, zoom or a resize cannot move anything.
+   to a better free spot if one exists. Then the groups are packed on
+   shelves, tallest first, with a gap that keeps unrelated groups visibly
+   apart; the shelf width is the one that keeps the floor smallest and
+   nearest 16:10 (chains of unrelated units do not make a strip). The
+   development block (the commons, its work tables and the outbound line)
+   goes last, at the bottom, at a fixed width. Only IDs, kinds, labels,
+   ownership and flows enter; traffic, state, workers, the agent count and
+   the pane never do, so input order, a busy hour, zoom or a resize cannot
+   move anything.
 3. **Stability.** Given the previous layout, a structural change keeps every
    station that still exists where it was, places new ones beside their
    placed neighbours (or beside the floor for a new group), and leaves the
@@ -732,7 +733,9 @@ Approach (`factory-scene/scene.ts`, `factory-scene/movement.ts`; nothing in
    quarter of the stations would be placed afresh, the floor is laid out cold
    again. Nothing is stored: a reload lays the same structure out exactly
    as before, and only a structural change between sessions (machines,
-   flows, ownership, or the number of agents) can rebuild it.
+   flows or ownership) can rebuild it. The agent count only furnishes the
+   development block, which grows downward from where it stands, below
+   everything; nothing new is ever placed under it.
 4. **Walking.** One geometry serves placement, solids, interaction positions
    and navigation. Machine bodies, the commons tables and the break-room
    implements are solid; labels, belts, area tints and the work line are
@@ -746,32 +749,42 @@ Approach (`factory-scene/scene.ts`, `factory-scene/movement.ts`; nothing in
    starts from where the worker is drawn. If no route exists the worker is
    put at its destination, marked as not walked, and never drawn through a
    machine. Execution never waits for a sprite.
-5. **Belts.** Belts run on their own 8 px grid, square: every crossing is a
-   right angle. They keep off machine bodies, every label, the spots workers
-   stand at and the development block, and they leave a machine only from
-   its sides or its top, never its front. They are laid shortest first; each
-   takes the facing ports and the run cheapest in length, bends and
-   crossings. No belt runs along another, so belts between the same places
-   lie a cell apart as a bundle. A crossing goes straight through, never
-   where the other belt turns, and never within 10 px of a label, a port, a
-   junction or a machine; it is drawn as a bridge (a deck and two rails),
-   unlike a junction's dot. When every port of a machine is taken, a belt
-   joins a belt already serving it square-on, at a junction dot.
-6. **Areas.** A unit's members whose footprints face each other across no
-   more than an aisle and a bit merge into one irregular region, the gap
+5. **Belts.** Belts run on their own 8 px grid, square. They keep off
+   machine bodies, every label, the spots workers stand at and the
+   development block, and they leave a machine only from its sides or its
+   top, never its front. They are laid shortest first; each takes the
+   facing ports and the run cheapest in length, bends and crossings. When
+   every port of a machine is taken, a belt joins a belt already serving it
+   square-on, at a junction dot. For every routed belt these hold: it is
+   square; it never runs along another belt (belts between the same places
+   lie a cell apart, as a bundle); it crosses another only straight
+   through, at a right angle, never where the other turns and never within
+   10 px of a label, a port, a junction or a machine; and every crossing is
+   drawn as a bridge (a deck and two rails), unlike a junction's dot.
+   Each run is searched only in a window round its two ends, its work is
+   bounded by its length, and all runs share a budget that grows linearly
+   with their number. A connection with no belt route inside that is an
+   **overhead link**: a thin, faint, dashed line, square, laid round machine
+   bodies and labels only. It never passes through a machine or a label, but
+   it may cross or follow belts and other links and carries no bridges or
+   material; the crossing rules above are for belts alone.
+6. **Areas.** A unit's members whose footprints face each other, side to
+   side or corner to corner, across no more than two aisles merge into one
+   irregular region, the gap
    bridged only where no other machine is in the way; members further apart
    are separate lobes. A region covers only its members' footprints and the
    gaps between them, never another machine. Each region is named once, at
-   its top left, in floor its own footprints leave clear.
+   its top left, in floor its own footprints leave clear, and neighbouring
+   areas never share a hue while the palette of eight allows.
 
 **The development neighbourhood** is the commons (break room and work
 tables) with the outbound line right below it. Its size comes from its
 contents: a seat and a table place for every agent at rest, the work tables
 for half of them, four to a table, and only the implements the floor offers
-(board, missions, tasks, library, and coffee with scenery on). The agent
-count is structural for this block alone: with the previous layout a
-different count resizes it in place, or moves it beside the floor if it no
-longer fits, and no machine moves. Which agents are busy never changes it.
+(board, missions, tasks, library, and coffee with scenery on). It is
+always as wide, and sits at the bottom of the floor, so a different agent
+count only makes it taller, downward, and never moves a machine or a belt.
+Which agents are busy never changes it.
 Anyone beyond its seats (a reviewer passing through) sits on a bench below
 the floor.
 
@@ -786,7 +799,12 @@ per structural change. Kept positions after a change can leave
 holes until the next cold layout, and a new machine whose neighbours are
 surrounded takes the nearest free floor, which can be a few machines away.
 Large, highly connected graphs make the group nearly square, so a very wide
-or very tall pane leaves margin.
+or very tall pane leaves margin. On dense random floors with long flows
+across the whole floor, about half the connections become overhead links.
+Rendering a floor (layout, areas and belts, measured with
+`renderToStaticMarkup`) takes about 0.1 s at 200 nodes, 0.25 s at 1,000 and
+0.85 s at 4,100 nodes with 3,900 edges on a laptop, and runs only when the
+structure changes; a reading, a worker or the agent count never reruns it.
 
 Bounds: 4,096 nodes and 4,096 edges served.
 

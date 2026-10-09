@@ -136,7 +136,6 @@ export type StationShape = "line" | "dock" | "manifold" | "clock" | "cell" | "si
 
 /** One machine where it stands: its body is solid, its label and the spot in front of it are floor. */
 export type SceneStation = SceneRect & Readonly<{
-  key: string;
   entityId: string;
   representedIds?: readonly string[];
   shape: StationShape;
@@ -175,7 +174,7 @@ export type SceneLayout = Readonly<{
  * into one irregular patch of floor. `rects` tile it without overlapping;
  * `outline` traces its edge; `label` is where its one name goes.
  */
-export type SceneRegion = Readonly<{ unit: string; lobe: number; rects: readonly SceneRect[]; outline: string; label: ScenePoint & Readonly<{ width: number }> }>;
+export type SceneRegion = Readonly<{ unit: string; lobe: number; hue: number; rects: readonly SceneRect[]; outline: string; label: ScenePoint & Readonly<{ width: number }> }>;
 
 export type SceneWorkerPlacement = Readonly<{
   id: string;
@@ -251,14 +250,29 @@ const union = (rects: readonly SceneRect[]) => {
 
 type Links = ReadonlyMap<string, ReadonlyMap<string, number>>;
 
-/** Whether a rectangle overlaps any of these (grown by `pad`): bucketed, so a check costs the same however large the floor. */
-function occupied(rects: readonly SceneRect[], pad = 0) {
+/** Rectangles in buckets, so finding an overlap costs the same however large the floor. */
+function bucketed(pad = 0) {
   const SIZE = 160, buckets = new Map<number, SceneRect[]>();
-  const each = (rect: SceneRect, visit: (key: number) => void) => {
-    for (let x = Math.floor(rect.x / SIZE); x <= Math.floor((rect.x + rect.width) / SIZE); x++) for (let y = Math.floor(rect.y / SIZE); y <= Math.floor((rect.y + rect.height) / SIZE); y++) visit(x * 65536 + y);
+  const grow = (rect: SceneRect) => pad === 0 ? rect : { x: rect.x - pad, y: rect.y - pad, width: rect.width + 2 * pad, height: rect.height + 2 * pad };
+  const each = (rect: SceneRect, visit: (bucket: SceneRect[]) => void, make = false) => {
+    for (let x = Math.floor(rect.x / SIZE); x <= Math.floor((rect.x + rect.width) / SIZE); x++) for (let y = Math.floor(rect.y / SIZE); y <= Math.floor((rect.y + rect.height) / SIZE); y++) {
+      const key = x * 65536 + y, bucket = buckets.get(key) ?? (make ? [] : undefined);
+      if (bucket === undefined) continue;
+      if (make) buckets.set(key, bucket);
+      visit(bucket);
+    }
   };
-  for (const rect of rects) { const grown = { x: rect.x - pad, y: rect.y - pad, width: rect.width + 2 * pad, height: rect.height + 2 * pad }; each(grown, (key) => { const bucket = buckets.get(key); if (bucket === undefined) buckets.set(key, [grown]); else bucket.push(grown); }); }
-  return (rect: SceneRect) => { let hit = false; each(rect, (key) => { hit ||= (buckets.get(key) ?? []).some((other) => overlaps(rect, other)); }); return hit; };
+  return {
+    add: (rect: SceneRect) => each(grow(rect), (bucket) => bucket.push(rect), true),
+    remove: (rect: SceneRect) => each(grow(rect), (bucket) => { const index = bucket.indexOf(rect); if (index >= 0) bucket.splice(index, 1); }),
+    hits: (rect: SceneRect, counts: (other: SceneRect) => boolean = () => true) => { let hit = false; each(grow(rect), (bucket) => { hit ||= bucket.some((other) => overlaps(rect, grow(other)) && counts(other)); }); return hit; },
+  };
+}
+
+function occupied(rects: readonly SceneRect[], pad = 0) {
+  const index = bucketed(pad);
+  for (const rect of rects) index.add(rect);
+  return index.hits;
 }
 
 /** Every free spot touching a placed rectangle: each side at three alignments, and each corner. */
@@ -269,16 +283,27 @@ function around(rect: SceneRect, width: number, height: number, gap = 0) {
     { x: r, y: b }, { x: l, y: b }, { x: r, y: t }, { x: l, y: t }].map((point) => ({ x: Math.round(point.x), y: Math.round(point.y) }));
 }
 
+/** Footprints placed so far, with an overlap index and their bounds kept as they grow. */
+function floorOf() {
+  const placed = new Map<string, Rect>(), index = bucketed();
+  let bounds: Rect | undefined;
+  return {
+    placed, index, bounds: () => bounds,
+    put(key: string, rect: Rect) { placed.set(key, rect); index.add(rect); bounds = bounds === undefined ? rect : union([bounds, rect]); },
+    take(key: string) { const rect = placed.get(key)!; placed.delete(key); index.remove(rect); return rect; },
+  };
+}
+
 /**
  * The free spot for one footprint: beside a placed neighbour, where the
  * weighted distance to its placed neighbours plus the growth of the bounds is
  * least. A spiral around them is the fallback, so placement always ends. A
  * current spot, when given, is kept unless another is clearly better.
  */
-function placeOne(key: string, width: number, height: number, placed: ReadonlyMap<string, Rect>, links: Links, current?: Rect): Rect {
-  if (placed.size === 0) return current ?? { x: 0, y: 0, width, height };
-  const near = [...(links.get(key) ?? [])].filter(([other]) => placed.has(other)).map(([other, weight]) => ({ rect: placed.get(other)!, weight }));
-  const others = [...placed.values()], bounds = union(others), taken = occupied(others);
+function placeOne(key: string, width: number, height: number, floor: ReturnType<typeof floorOf>, links: Links, current?: Rect): Rect {
+  const bounds = floor.bounds();
+  if (bounds === undefined) return current ?? { x: 0, y: 0, width, height };
+  const near = [...(links.get(key) ?? [])].filter(([other]) => floor.placed.has(other)).map(([other, weight]) => ({ rect: floor.placed.get(other)!, weight }));
   const score = (spot: Rect) => {
     const at = centre(spot), grown = union([bounds, spot]);
     return near.reduce((sum, { rect, weight }) => { const other = centre(rect); return sum + weight * Math.hypot(at.x - other.x, at.y - other.y); }, 0)
@@ -286,83 +311,76 @@ function placeOne(key: string, width: number, height: number, placed: ReadonlyMa
   };
   let best = current === undefined ? undefined : { spot: current, score: score(current) - 1 };
   const consider = (spot: Rect) => {
-    if (taken(spot)) return;
+    if (floor.index.hits(spot)) return;
     const value = score(spot);
     if (best === undefined || value < best.score - 1e-9 || Math.abs(value - best.score) <= 1e-9 && (spot.y < best.spot.y || spot.y === best.spot.y && spot.x < best.spot.x)) best = { spot, score: value };
   };
   for (const { rect } of near) for (const point of around(rect, width, height)) consider({ ...point, width, height });
   const from = near.length === 0 ? centre(bounds) : centre(union(near.map(({ rect }) => rect)));
+  // Rings as coarse as the footprint is small: a crowded neighbourhood is searched in a few dozen rings, not hundreds.
+  const pitch = Math.max(16, Math.round(Math.min(width, height) / 2));
   for (let ring = 1; best === undefined; ring++) {
-    const reach = ring * 16;
-    for (let step = -reach; step <= reach; step += 16) for (const [dx, dy] of [[step, -reach], [step, reach], [-reach, step], [reach, step]]) {
+    const reach = ring * pitch;
+    for (let step = -reach; step <= reach; step += pitch) for (const [dx, dy] of [[step, -reach], [step, reach], [-reach, step], [reach, step]]) {
       consider({ x: Math.round(from.x - width / 2 + dx!), y: Math.round(from.y - height / 2 + dy!), width, height });
     }
   }
   return best.spot;
 }
 
-/**
- * The order a connected group is placed in: its most linked footprint, then whichever is most linked to those placed.
- * ponytail: rescans what is left each step, O(n² × links); keep running weights if floors reach thousands of stations.
- */
+/** The order footprints are placed in: the most linked first, then whichever is most linked to those placed (ties by total links, then id). */
 function placementOrder(keys: readonly string[], links: Links, placed: ReadonlySet<string> = new Set()) {
-  const weight = (key: string, among: ReadonlySet<string> | undefined) => [...(links.get(key) ?? [])].reduce((sum, [other, value]) => among === undefined || among.has(other) ? sum + value : sum, 0);
-  const done = new Set(placed), order: string[] = [], left = [...keys].sort(compareText);
+  const total = (key: string) => [...(links.get(key) ?? [])].reduce((sum, [, value]) => sum + value, 0);
+  const left = [...keys].sort(compareText), toPlaced = new Map(left.map((key) => [key, [...(links.get(key) ?? [])].reduce((sum, [other, value]) => placed.has(other) ? sum + value : sum, 0)]));
+  const totals = new Map(left.map((key) => [key, total(key)])), order: string[] = [];
   while (left.length > 0) {
     let pick = 0;
     for (let index = 1; index < left.length; index++) {
-      const a = left[index]!, b = left[pick]!, byPlaced = weight(a, done) - weight(b, done);
-      if (byPlaced > 0 || byPlaced === 0 && weight(a, undefined) > weight(b, undefined)) pick = index;
+      const a = left[index]!, b = left[pick]!, byPlaced = toPlaced.get(a)! - toPlaced.get(b)!;
+      if (byPlaced > 0 || byPlaced === 0 && totals.get(a)! > totals.get(b)!) pick = index;
     }
     const [key] = left.splice(pick, 1);
     order.push(key!);
-    done.add(key!);
+    for (const [other, value] of links.get(key!) ?? []) if (toPlaced.has(other)) toPlaced.set(other, toPlaced.get(other)! + value);
   }
   return order;
 }
 
 /** A connected group laid out from nothing: placed in order, then two bounded passes that move a footprint only to a better free spot. */
 function layoutGroup(keys: readonly string[], sizes: ReadonlyMap<string, { width: number; height: number }>, links: Links) {
-  const placed = new Map<string, Rect>(), order = placementOrder(keys, links);
-  for (const key of order) { const { width, height } = sizes.get(key)!; placed.set(key, placeOne(key, width, height, placed, links)); }
+  const floor = floorOf(), order = placementOrder(keys, links);
+  for (const key of order) { const { width, height } = sizes.get(key)!; floor.put(key, placeOne(key, width, height, floor, links)); }
   for (let pass = 0; pass < 2 && order.length > 1; pass++) for (const key of order) {
-    const current = placed.get(key)!;
-    placed.delete(key);
-    placed.set(key, placeOne(key, current.width, current.height, placed, links, current));
+    const current = floor.take(key);
+    floor.put(key, placeOne(key, current.width, current.height, floor, links, current));
   }
-  return placed;
+  return floor.placed;
 }
 
 /**
- * Where a group goes beside those placed: touching a placed footprint, a gap
- * clear of every other group's footprints (so it can tuck into a corner
- * another group leaves), where the floor stays smallest and nearest its usual
- * shape.
+ * Groups on shelves, tallest first, the development block last, at the
+ * bottom, so it can grow downward past everything. The shelf width is the
+ * one, among the widths the groups' running sums offer, that keeps the floor
+ * smallest and nearest 16:10, whatever the pane.
  */
-function besideGroups(placed: readonly Rect[], group: readonly Rect[]) {
-  const bounds = union(group);
-  if (placed.length === 0) return { x: bounds.x, y: bounds.y };
-  const taken = occupied(placed, GROUP_GAP - 1), floor = union(placed);
-  let best: { x: number; y: number; cost: number } | undefined;
-  // ponytail: every placed footprint anchors every footprint of the group: O(placed × group) per group, fine to a few thousand stations.
-  for (const anchor of placed) for (const piece of group) for (const spot of around(anchor, piece.width, piece.height, GROUP_GAP)) {
-    const dx = spot.x - piece.x, dy = spot.y - piece.y;
-    if (group.some((rect) => taken({ ...rect, x: rect.x + dx, y: rect.y + dy }))) continue;
-    const all = union([floor, { ...bounds, x: bounds.x + dx, y: bounds.y + dy }]), cost = all.width * all.height * (1 + 0.5 * Math.abs(Math.log(all.width / all.height / ASPECT)));
-    const x = bounds.x + dx, y = bounds.y + dy;
-    if (best === undefined || cost < best.cost - 1e-6 || Math.abs(cost - best.cost) <= 1e-6 && (y < best.y || y === best.y && x < best.x)) best = { x, y, cost };
-  }
-  return best!;
-}
-
-/** Groups packed in order, each beside the placed ones. */
-function packGroups(groups: readonly ReadonlyMap<string, Rect>[]) {
-  const out = new Map<string, Rect>();
-  for (const group of groups) {
-    const rects = [...group.values()], bounds = union(rects), spot = besideGroups([...out.values()], rects);
-    for (const [key, rect] of group) out.set(key, { ...rect, x: rect.x + spot.x - bounds.x, y: rect.y + spot.y - bounds.y });
-  }
-  return out;
+function packGroups(groups: readonly ReadonlyMap<string, Rect>[], facility: Rect) {
+  const boxes = [...groups.map((group) => ({ group, bounds: union([...group.values()]) })).sort((a, b) => b.bounds.height - a.bounds.height || compareText([...a.group.keys()][0]!, [...b.group.keys()][0]!)),
+    { group: new Map([[FACILITIES, facility]]), bounds: facility }];
+  const shelve = (shelf: number) => {
+    const out = new Map<string, Rect>();
+    let x = 0, y = 0, tallest = 0, wide = 0;
+    for (const { group, bounds } of boxes) {
+      if (x > 0 && x + bounds.width > shelf) { y += tallest + GROUP_GAP; x = 0; tallest = 0; }
+      for (const [key, rect] of group) out.set(key, { ...rect, x: rect.x - bounds.x + x, y: rect.y - bounds.y + y });
+      x += bounds.width + GROUP_GAP; tallest = Math.max(tallest, bounds.height); wide = Math.max(wide, x - GROUP_GAP);
+    }
+    const high = y + tallest;
+    return { out, cost: wide * high * (1 + 2 * Math.abs(Math.log(wide / high / ASPECT))) };
+  };
+  let sum = 0;
+  const widths = [...new Set([Math.max(...boxes.map(({ bounds }) => bounds.width)), ...boxes.map(({ bounds }) => sum += bounds.width + GROUP_GAP)])];
+  // ponytail: one packing per candidate width, O(groups²); a binary search on width if floors reach thousands of groups.
+  return widths.map(shelve).reduce((best, next) => next.cost < best.cost ? next : best).out;
 }
 
 type Piece = { key: string; machine: SceneMachine; unit?: string };
@@ -380,7 +398,6 @@ function linksOf(graph: SceneGraph, keys: ReadonlySet<string>) {
   for (const flow of graph.flows) link(flow.from, flow.to, 1);
   // Neighbours in id order, so sums and ties never depend on the order the graph arrived in.
   return new Map([...links].sort(([left], [right]) => compareText(left, right)).map(([key, row]) => [key, new Map([...row].sort(([left], [right]) => compareText(left, right)))]));
-  return links;
 }
 
 /** Connected groups by link, each named by its least key, largest first. */
@@ -396,14 +413,23 @@ function groupsOf(keys: readonly string[], links: Links) {
   return groups.sort((left, right) => right.length - left.length || compareText(left[0]!, right[0]!));
 }
 
+/** The machinery's floor: everything but how the development block is furnished, which never moves a machine. */
+export type SceneMachinery = Pick<SceneLayout, "width" | "height" | "stations" | "regions" | "facilities">;
+
+// The development block is always this wide; its height starts here and grows with the agents, downward.
+const FACILITY_WIDTH = Math.max(5 * 38 + 8, 3 * WORKER_GAP + 48, LINE_WIDTH + 8) + 2 * MARGIN;
+const facilityHeight = (commonHeight: number) => commonHeight + LINE_GAP + LINE_ROW * LINE_STATIONS.length + 2 * MARGIN;
+const RESERVE = { x: 0, y: 0, width: FACILITY_WIDTH, height: facilityHeight(116 + ROW_PITCH + 30) };
+
 /**
  * The floor, from structure alone: every machine at its drawn size, related
- * machines beside each other, unrelated groups apart, shared stores beside
- * their users. Ids, kinds, labels, ownership and flows decide it; traffic,
- * state, workers and the pane never do. Given the previous layout, a small
- * structural change keeps every machine that still exists where it stood.
+ * machines beside each other, unrelated groups apart on a floor near 16:10,
+ * shared stores beside their users. Ids, kinds, labels, ownership and flows
+ * decide it; traffic, state, workers, the agent count and the pane never do.
+ * Given the previous floor, a small structural change keeps every machine
+ * that still exists where it stood.
  */
-export function layoutScene(graph: SceneGraph, previous?: SceneLayout, needs: CommonsNeeds = { agents: 8, implements: NOOK_ORDER }): SceneLayout {
+export function placeMachinery(graph: SceneGraph, previous?: SceneMachinery): SceneMachinery {
   const pieces: Piece[] = [];
   for (const unit of graph.units) {
     pieces.push({ key: unit.id, machine: { id: unit.id, kind: "processor", label: unit.label, reading: unit.reading }, unit: unit.id });
@@ -412,76 +438,78 @@ export function layoutScene(graph: SceneGraph, previous?: SceneLayout, needs: Co
   for (const machine of [...graph.shared, ...graph.parties, ...graph.quarantine]) pieces.push({ key: machine.id, machine });
   // Input order never matters: everything below works in id order.
   pieces.sort((left, right) => compareText(left.key, right.key));
-  // The commons is as big as what is in it: tables for the agents, the implements present. A different agent count is a
-  // structural change for the commons alone; with the previous layout it resizes in place and nothing else moves.
-  const present = NOOK_ORDER.filter((errand) => needs.implements.includes(errand)), perRow = Math.min(4, Math.max(1, needs.agents)), rows = Math.max(1, Math.ceil(needs.agents / perRow));
-  // Every agent can rest at once; at most half are ever planning away from a machine at once.
-  const planningRows = Math.max(1, Math.ceil(Math.ceil(needs.agents / 2) / perRow));
-  const restingAt = present.length > 0 ? 116 : 40, commonHeight = restingAt + (rows + planningRows - 1) * ROW_PITCH + 30;
-  const commonWidth = Math.max(present.length * 38 + 8, (perRow - 1) * WORKER_GAP + 48, 96);
-  const facility = { width: Math.max(commonWidth, LINE_WIDTH + 8) + 2 * MARGIN, height: commonHeight + LINE_GAP + LINE_ROW * LINE_STATIONS.length + 2 * MARGIN };
   const geometry = new Map(pieces.map((piece) => [piece.key, sides(piece.machine)]));
-  const sizes = new Map([...pieces.map((piece) => [piece.key, geometry.get(piece.key)!.footprint] as const), [FACILITIES, facility] as const]);
-  const keys = [...sizes.keys()];
-  const links = linksOf(graph, new Set(keys));
-  // A floor laid out before any agent was known (the console's first render) is no history to keep.
-  const placed = (previous === undefined || previous.seats.agents === 0 ? undefined : keep(previous, keys, sizes, links)) ?? cold(keys, sizes, links);
+  const sizes = new Map(pieces.map((piece) => [piece.key, geometry.get(piece.key)!.footprint] as const));
+  const keys = [...sizes.keys()], links = linksOf(graph, new Set(keys));
+  const placed = (previous === undefined ? undefined : keep(previous, keys, sizes, links)) ?? cold(keys, sizes, links);
   // Shift to the floor's corner; a shift moves everything together.
   const all = [...placed.values()], left = Math.min(...all.map((rect) => rect.x)) - PADDING, top = Math.min(...all.map((rect) => rect.y)) - PADDING;
   const at = (key: string) => { const rect = placed.get(key)!; return { ...rect, x: rect.x - left, y: rect.y - top }; };
   const stations = pieces.map((piece): SceneStation => {
     const { shape, width, height, anchor, label, footprint } = geometry.get(piece.key)!, spot = at(piece.key);
     const x = spot.x - footprint.x, y = spot.y - footprint.y, machine = piece.machine;
-    return { key: piece.key, entityId: piece.key, ...(machine.represented === undefined ? {} : { representedIds: machine.represented }), shape, machine,
+    return { entityId: piece.key, ...(machine.represented === undefined ? {} : { representedIds: machine.represented }), shape, machine,
       ...(piece.unit === undefined ? {} : { unit: piece.unit }), x, y, width, height, anchor: { x: x + anchor.x, y: y + anchor.y }, label: { ...label, x: x + label.x, y: y + label.y }, footprint: spot };
   });
-  const block = at(FACILITIES), commons = { x: block.x + MARGIN, y: block.y + MARGIN, width: commonWidth, height: commonHeight };
+  return { width: Math.max(...all.map((rect) => rect.x + rect.width)) - left + PADDING, height: Math.max(...all.map((rect) => rect.y + rect.height)) - top + PADDING, stations, regions: regionsOf(stations), facilities: at(FACILITIES) };
+}
+
+/** The floor with its development block furnished for these agents and implements: it grows downward from where it stands. */
+export function furnish(machinery: SceneMachinery, needs: CommonsNeeds): SceneLayout {
+  // The commons is as big as what is in it: a seat for every agent at rest, work tables for half of them, four to a table,
+  // and only the implements this floor offers.
+  const present = NOOK_ORDER.filter((errand) => needs.implements.includes(errand)), perRow = Math.min(4, Math.max(1, needs.agents)), rows = Math.max(1, Math.ceil(needs.agents / perRow));
+  const planningRows = Math.max(1, Math.ceil(Math.ceil(needs.agents / 2) / perRow));
+  const restingAt = present.length > 0 ? 116 : 40, commonHeight = restingAt + (rows + planningRows - 1) * ROW_PITCH + 30;
+  const commonWidth = Math.max(present.length * 38 + 8, (perRow - 1) * WORKER_GAP + 48, 96);
+  const block = { ...machinery.facilities, height: Math.max(machinery.facilities.height, facilityHeight(commonHeight)) };
+  const commons = { x: block.x + MARGIN, y: block.y + MARGIN, width: commonWidth, height: commonHeight };
   const line = LINE_STATIONS.map((label, index) => ({ label, x: commons.x + 8, y: commons.y + commonHeight + LINE_GAP + index * LINE_ROW, width: LINE_WIDTH, height: LINE_ROW - 4 }));
   const restingTop = commons.y + restingAt, seats = { agents: needs.agents, perRow, rows, planningRows };
-  const regions = regionsOf(stations);
-  const width = Math.max(...[...placed.keys()].map((key) => at(key).x + at(key).width)) + PADDING;
-  const height = Math.max(...[...placed.keys()].map((key) => at(key).y + at(key).height)) + PADDING;
   const furniture = [...tables({ commons, restingTop, seats }), ...nookPieces(commons, present).map((piece) => ({ x: piece.x, y: piece.y, width: 20, height: 30 }))];
-  return { width, height, stations, regions, facilities: block, commons, restingTop, seats, implements: present, line, solids: [...stations, ...furniture].map(({ x, y, width, height }) => ({ x, y, width, height })) };
+  return { ...machinery, height: Math.max(machinery.height, block.y + block.height + PADDING), facilities: block, commons, restingTop, seats, implements: present, line,
+    solids: [...machinery.stations, ...furniture].map(({ x, y, width, height }) => ({ x, y, width, height })) };
+}
+
+export function layoutScene(graph: SceneGraph, previous?: SceneMachinery, needs: CommonsNeeds = { agents: 8, implements: NOOK_ORDER }): SceneLayout {
+  return furnish(placeMachinery(graph, previous), needs);
 }
 
 function cold(keys: readonly string[], sizes: ReadonlyMap<string, { width: number; height: number }>, links: Links) {
-  const groups = groupsOf(keys, links).map((group) => layoutGroup(group, sizes, links));
-  // The facilities go second, beside the largest group, which is where most work happens.
-  const facilities = groups.findIndex((group) => group.has(FACILITIES));
-  const [first, ...rest] = groups.filter((_, index) => index !== facilities);
-  return packGroups([...(first === undefined ? [] : [first]), groups[facilities]!, ...rest]);
+  return packGroups(groupsOf(keys, links).map((group) => layoutGroup(group, sizes, links)), RESERVE);
 }
 
 /**
  * Local stability: footprints that still exist stay where they were and new
- * ones are placed beside their placed neighbours, or beside the floor when
- * they have none. Undefined when the change is too large for that to stay
- * readable, so the floor is laid out cold.
+ * ones are placed beside their placed neighbours, or in the nearest free
+ * floor when they have none, never under the development block, which grows
+ * down. Undefined when the change is too large for that to stay readable, so
+ * the floor is laid out cold.
  */
-function keep(previous: SceneLayout, keys: readonly string[], sizes: ReadonlyMap<string, { width: number; height: number }>, links: Links) {
-  const before = new Map<string, SceneRect>([...previous.stations.map((station) => [station.key, station.footprint] as const), [FACILITIES, previous.facilities]]);
-  const placed = new Map<string, Rect>();
+function keep(previous: SceneMachinery, keys: readonly string[], sizes: ReadonlyMap<string, { width: number; height: number }>, links: Links) {
+  const before = new Map(previous.stations.map((station) => [station.entityId, station.footprint] as const));
+  const floor = floorOf();
   for (const key of [...keys].sort(compareText)) {
     const was = before.get(key);
     if (was === undefined) continue;
     const { width, height } = sizes.get(key)!, spot = { x: was.x, y: was.y, width, height };
     // One that has grown into a neighbour is placed afresh beside its neighbours, like a new one.
-    if (![...placed.values()].some((rect) => overlaps(rect, spot))) placed.set(key, spot);
+    if (!floor.index.hits(spot)) floor.put(key, spot);
   }
-  const fresh = keys.filter((key) => !placed.has(key));
+  const fresh = keys.filter((key) => !floor.placed.has(key));
   if (fresh.length > Math.max(4, keys.length / 4)) return undefined;
-  for (const key of placementOrder(fresh, links, new Set(placed.keys()))) {
-    const { width, height } = sizes.get(key)!;
-    const linked = [...(links.get(key) ?? [])].some(([other]) => placed.has(other));
-    // A new group of its own starts beside the floor, apart from it.
-    placed.set(key, linked ? placeOne(key, width, height, placed, links) : { ...besideGroups([...placed.values()], [{ x: 0, y: 0, width, height }]), width, height });
-  }
-  return placed;
+  const block = { ...RESERVE, x: previous.facilities.x, y: previous.facilities.y };
+  floor.put(FACILITIES, block);
+  // Nothing new stands under the development block: it grows that way.
+  floor.index.add({ ...block, height: 1e6 });
+  for (const key of placementOrder(fresh, links, new Set(floor.placed.keys()))) { const { width, height } = sizes.get(key)!; floor.put(key, placeOne(key, width, height, floor, links)); }
+  return floor.placed;
 }
 
-// Members of a unit closer than this (about one aisle and a bit) share one region; farther apart they are separate lobes.
-const BRIDGE = 2 * MARGIN + 16, REGION_INSET = 4, REGION_CELL = 6;
+// Members of a unit closer than this (two aisles) share one region; farther apart they are separate lobes.
+const BRIDGE = 4 * MARGIN + 8, REGION_INSET = 0, REGION_CELL = 6;
+// Area hues, far apart on the wheel; neighbouring areas never share one when the palette allows.
+const HUES = [210, 35, 140, 290, 0, 180, 80, 330];
 
 /**
  * Areas are painted after layout from where machines stand: a unit's members
@@ -491,19 +519,22 @@ const BRIDGE = 2 * MARGIN + 16, REGION_INSET = 4, REGION_CELL = 6;
  * footprint or any floor that is not between its own members.
  */
 function regionsOf(stations: readonly SceneStation[]): readonly SceneRegion[] {
-  const inset = (rect: SceneRect) => ({ x: rect.x + REGION_INSET, y: rect.y + REGION_INSET, width: rect.width - 2 * REGION_INSET, height: rect.height - 2 * REGION_INSET });
-  const units = [...new Set(stations.flatMap((station) => station.unit ?? []))].sort(compareText);
-  return units.flatMap((unit) => {
-    const members = stations.filter((station) => station.unit === unit), rects = members.map((station) => inset(station.footprint));
-    const blocked = occupied(stations.filter((station) => station.unit !== unit).map((station) => inset(station.footprint)));
+  const inset = (station: SceneStation) => ({ x: station.footprint.x + REGION_INSET, y: station.footprint.y + REGION_INSET, width: station.footprint.width - 2 * REGION_INSET, height: station.footprint.height - 2 * REGION_INSET, unit: station.unit });
+  const units = [...new Set(stations.flatMap((station) => station.unit ?? []))].sort(compareText), everyone = bucketed();
+  for (const station of stations) everyone.add(inset(station));
+  const byUnit = new Map(units.map((unit) => [unit, stations.filter((station) => station.unit === unit)]));
+  const regions = units.flatMap((unit) => {
+    const rects = byUnit.get(unit)!.map(inset), blocked = (rect: SceneRect) => everyone.hits(rect, (other) => (other as { unit?: string }).unit !== unit);
     const parent = rects.map((_, index) => index), find = (index: number): number => parent[index] === index ? index : parent[index] = find(parent[index]!);
     const bridges: { at: number; rect: SceneRect }[] = [];
     for (let i = 0; i < rects.length; i++) for (let j = i + 1; j < rects.length; j++) {
       const a = rects[i]!, b = rects[j]!;
       const x0 = Math.max(a.x, b.x), x1 = Math.min(a.x + a.width, b.x + b.width), y0 = Math.max(a.y, b.y), y1 = Math.min(a.y + a.height, b.y + b.height);
-      // Face to face across a gap: the bridge is the span they share, as wide as the gap.
-      const bridge = x1 - x0 >= 12 && y1 < y0 && y0 - y1 <= BRIDGE ? { x: x0, y: y1, width: x1 - x0, height: y0 - y1 }
-        : y1 - y0 >= 12 && x1 < x0 && x0 - x1 <= BRIDGE ? { x: x1, y: y0, width: x0 - x1, height: y1 - y0 } : undefined;
+      // Face to face across a gap: the bridge is the span they share, as wide as the gap. Corner to corner: the band
+      // between them, as wide as both, which meets each along an edge.
+      const bridge = x1 - x0 >= 12 && y1 <= y0 && y0 - y1 <= BRIDGE ? { x: x0, y: y1, width: x1 - x0, height: y0 - y1 }
+        : y1 - y0 >= 12 && x1 <= x0 && x0 - x1 <= BRIDGE ? { x: x1, y: y0, width: x0 - x1, height: y1 - y0 }
+        : x1 <= x0 && y1 <= y0 && x0 - x1 <= BRIDGE && y0 - y1 <= BRIDGE ? { x: Math.min(a.x, b.x), y: y1, width: Math.max(a.x + a.width, b.x + b.width) - Math.min(a.x, b.x), height: y0 - y1 } : undefined;
       if (bridge === undefined || blocked(bridge)) continue;
       parent[find(i)] = find(j);
       bridges.push({ at: i, rect: bridge });
@@ -511,8 +542,17 @@ function regionsOf(stations: readonly SceneStation[]): readonly SceneRegion[] {
     const lobes = new Map<number, SceneRect[]>();
     rects.forEach((rect, index) => lobes.set(find(index), [...lobes.get(find(index)) ?? [], rect]));
     for (const { at, rect } of bridges) lobes.get(find(at))!.push(rect);
-    return [...lobes.values()].map((parts, lobe) => ({ unit, lobe, ...trace(parts) }));
+    return [...lobes.values()].map((parts, lobe) => ({ unit, lobe, hue: 0, bounds: union(parts), ...trace(parts) }));
   });
+  // Greedy colouring in unit order: each unit takes the first hue no neighbouring area (within an aisle) has.
+  const hue = new Map<string, number>(), nearby = bucketed(24);
+  for (const region of regions) nearby.add({ ...region.bounds, unit: region.unit } as SceneRect);
+  for (const unit of units) {
+    const taken = new Set<number>();
+    for (const region of regions) if (region.unit === unit) nearby.hits(region.bounds, (other) => { const owner = (other as { unit?: string }).unit!; if (owner !== unit && hue.has(owner)) taken.add(hue.get(owner)!); return false; });
+    hue.set(unit, HUES.find((value) => !taken.has(value)) ?? HUES[hue.size % HUES.length]!);
+  }
+  return regions.map(({ bounds: _, ...region }) => ({ ...region, hue: hue.get(region.unit)! }));
 }
 
 /** A patch of floor made of rectangles, as non-overlapping row runs, its outline, and the top-left corner for its name. */
@@ -596,19 +636,19 @@ export function placeWorkers(layout: SceneLayout, workers: readonly SceneWorker[
     if (station === undefined) { areas.outside.push(worker); continue; }
     const position = workPositions(layout, station).find((point) => !occupied(point));
     if (position === undefined) { areas.overflow.push(worker); continue; }
-    placed.push({ id: worker.id, area: "work", stationId: station.key, ...position });
+    placed.push({ id: worker.id, area: "work", stationId: station.entityId, ...position });
   }
   // Resting nearby is beside a unit's main machine.
-  const nearby = social === "nearby" ? layout.stations.filter((station) => station.unit === station.key) : [];
+  const nearby = social === "nearby" ? layout.stations.filter((station) => station.unit === station.entityId) : [];
   const localCounts = new Map<string, number>();
   const commons: SceneWorker[] = [];
   // Known locations keep their seats before unlocated idle workers join a nearby pair.
-  const resting = areas.resting.sort((left, right) => Number(nearby.some((station) => station.key === right.nodeId)) - Number(nearby.some((station) => station.key === left.nodeId)) || compareText(left.id, right.id));
+  const resting = areas.resting.sort((left, right) => Number(nearby.some((station) => station.entityId === right.nodeId)) - Number(nearby.some((station) => station.entityId === left.nodeId)) || compareText(left.id, right.id));
   for (const worker of resting) {
-    const known = nearby.find((station) => station.key === worker.nodeId);
-    const candidates = known ? [known] : [...nearby.filter((station) => localCounts.get(station.key) === 1), ...nearby.slice(0, 3)];
-    const seat = candidates.filter((station) => (localCounts.get(station.key) ?? 0) < 2)
-      .flatMap((station) => [-24, 24].map((offset) => ({ stationId: station.key, x: station.anchor.x + offset, y: station.anchor.y + 24 })))
+    const known = nearby.find((station) => station.entityId === worker.nodeId);
+    const candidates = known ? [known] : [...nearby.filter((station) => localCounts.get(station.entityId) === 1), ...nearby.slice(0, 3)];
+    const seat = candidates.filter((station) => (localCounts.get(station.entityId) ?? 0) < 2)
+      .flatMap((station) => [-24, 24].map((offset) => ({ stationId: station.entityId, x: station.anchor.x + offset, y: station.anchor.y + 24 })))
       .find((point) => !occupied(point) && standable(layout, point));
     if (seat === undefined) { commons.push(worker); continue; }
     placed.push({ id: worker.id, area: "resting", ...seat });

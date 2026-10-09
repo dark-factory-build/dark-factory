@@ -98,15 +98,11 @@ function search(grid: Grid, start: number, goal: number) {
   const cost = new Float64Array(size).fill(Infinity), from = new Int32Array(size).fill(-1), closed = new Uint8Array(size);
   const gx = goal % columns, gy = Math.floor(goal / columns);
   const guess = (cell: number) => { const dx = Math.abs(cell % columns - gx), dy = Math.abs(Math.floor(cell / columns) - gy); return Math.max(dx, dy) + (Math.SQRT2 - 1) * Math.min(dx, dy); };
-  // A binary heap of [estimate, cell]; ties go to the lower cell, so a route never depends on timing.
-  const heap: [number, number][] = [];
-  const less = (a: [number, number], b: [number, number]) => a[0] < b[0] - 1e-9 || Math.abs(a[0] - b[0]) <= 1e-9 && a[1] < b[1];
-  const push = (item: [number, number]) => { heap.push(item); for (let i = heap.length - 1; i > 0;) { const parent = (i - 1) >> 1; if (!less(heap[i]!, heap[parent]!)) break; [heap[i], heap[parent]] = [heap[parent]!, heap[i]!]; i = parent; } };
-  const pop = () => { const top = heap[0]!, last = heap.pop()!; if (heap.length > 0) { heap[0] = last; for (let i = 0; ;) { const l = 2 * i + 1, r = l + 1; let m = i; if (l < heap.length && less(heap[l]!, heap[m]!)) m = l; if (r < heap.length && less(heap[r]!, heap[m]!)) m = r; if (m === i) break; [heap[i], heap[m]] = [heap[m]!, heap[i]!]; i = m; } } return top; };
+  const queue = heap();
   cost[start] = 0;
-  push([guess(start), start]);
-  while (heap.length > 0) {
-    const [, cell] = pop();
+  queue.push([guess(start), start]);
+  while (queue.size() > 0) {
+    const [, cell] = queue.pop();
     if (closed[cell] === 1) continue;
     if (cell === goal) {
       const path = [cell];
@@ -122,7 +118,7 @@ function search(grid: Grid, start: number, goal: number) {
       if (blocked[next] === 1 || closed[next] === 1) continue;
       if (dx !== 0 && dy !== 0 && (blocked[y * columns + nx] === 1 || blocked[ny * columns + x] === 1)) continue;
       const step = cost[cell]! + (dx !== 0 && dy !== 0 ? Math.SQRT2 : 1);
-      if (step < cost[next]!) { cost[next] = step; from[next] = cell; push([step + guess(next), next]); }
+      if (step < cost[next]!) { cost[next] = step; from[next] = cell; queue.push([step + guess(next), next]); }
     }
   }
   return undefined;
@@ -161,16 +157,17 @@ function navigate(solids: readonly SceneRect[], radius: number, width: number, h
   return route(smooth(solids, [from, ...cells.map((cell) => cellCentre(grid, cell)), to], radius));
 }
 
-// Belts run on their own coarse grid, square: so every crossing is a right angle, and two belts never share a run.
-const BELT_CELL = 8, BEND = 3, CROSSING = 14, SEARCH_LIMIT = 30000;
+// Belts run on their own grid, square: every crossing is a right angle, and two belts never share a run.
+const BELT_CELL = 8, BEND = 3, CROSSING = 14, SLACK = 12, PER_RUN = 1500;
 // Nothing crosses this close to a label, a port, a junction or a machine.
 export const CROSSING_CLEARANCE = 10;
 const H = 1, V = 2;
 
 export type BeltCrossing = Readonly<{ x: number; y: number; over: "h" | "v" }>;
+type Floor = Pick<SceneLayout, "width" | "height" | "stations" | "regions" | "facilities">;
 
-/** What a belt keeps off: machine bodies, every label, where workers stand, and the development neighbourhood. */
-export function beltObstacles(layout: SceneLayout): readonly SceneRect[] {
+/** What a belt keeps off: machine bodies, every label, where workers stand, and the development block. */
+export function beltObstacles(layout: Floor): readonly SceneRect[] {
   const reach = WORKER_SIZE / 2, block = layout.facilities, inset = 12;
   return [...layout.stations.flatMap((station) => [station as SceneRect, station.label, { x: station.anchor.x - reach, y: station.anchor.y - reach, width: 2 * reach, height: 2 * reach }]),
     ...layout.regions.map((region) => regionLabelBox(region)), { x: block.x + inset, y: block.y + inset, width: block.width - 2 * inset, height: block.height - 2 * inset }];
@@ -186,159 +183,176 @@ export function regionLabelBox(region: SceneLayout["regions"][number]): SceneRec
  * ports (a machine's sides, its top when no label hangs there; never its
  * front) whose run is cheapest in length, bends and crossings. A run never
  * goes along another belt, so parallel belts lie side by side a cell apart, a
- * bundle, not a braid. It may cross one only straight through, at a right
+ * bundle, not a braid. It crosses one only straight through, at a right
  * angle, away from labels, ports, junctions and machines, and never where the
- * other turns. Undefined runs are drawn straight between their nearest sides.
+ * other turns. With every port of a machine taken it joins a belt serving it,
+ * square-on, at a junction. Each run searches only round its two ends, and
+ * all of them share a budget that grows with their number; a run that finds
+ * no belt route within it is an overhead link instead: laid round machines
+ * and labels alone, drawn faint and dashed, and kept out of the belt rules.
  */
-export function beltRoutes(layout: SceneLayout, pairs: readonly Readonly<{ key: string; from: SceneStation; to: SceneStation }>[]) {
+export function beltRoutes(layout: Floor, pairs: readonly Readonly<{ key: string; from: SceneStation; to: SceneStation }>[]) {
   const obstacles = beltObstacles(layout), columns = Math.ceil(layout.width / BELT_CELL), rows = Math.ceil(layout.height / BELT_CELL), size = columns * rows;
-  const square = (cell: number, by: number) => ({ x: (cell % columns) * BELT_CELL - by, y: Math.floor(cell / columns) * BELT_CELL - by, width: BELT_CELL + 2 * by, height: BELT_CELL + 2 * by });
-  const blocked = new Uint8Array(size), near = new Uint8Array(size), occupied = new Uint8Array(size);
-  const hitsBlocked = occupiedBy(obstacles), hitsNear = occupiedBy(obstacles, CROSSING_CLEARANCE - 2);
-  for (let cell = 0; cell < size; cell++) { blocked[cell] = hitsBlocked(square(cell, 2)) ? 1 : 0; near[cell] = hitsNear(square(cell, 0)) ? 1 : 0; }
-  const centre = (cell: number) => ({ x: (cell % columns) * BELT_CELL + BELT_CELL / 2, y: Math.floor(cell / columns) * BELT_CELL + BELT_CELL / 2 });
-  const step = [1, -1, columns, -columns], DIRECTIONS = [0, 1, 2, 3];
-  const valid = (cell: number, direction: number) => direction === 0 ? cell % columns !== columns - 1 : direction === 1 ? cell % columns !== 0 : direction === 2 ? cell + columns < size : cell - columns >= 0;
-  const used = new Set<string>(), bridged = new Uint8Array(size);
+  const raster = (rects: readonly SceneRect[], pad: number) => {
+    const cells = new Uint8Array(size);
+    for (const rect of rects) for (let row = Math.max(0, Math.floor((rect.y - pad) / BELT_CELL)); row < Math.min(rows, Math.ceil((rect.y + rect.height + pad) / BELT_CELL)); row++)
+      for (let column = Math.max(0, Math.floor((rect.x - pad) / BELT_CELL)); column < Math.min(columns, Math.ceil((rect.x + rect.width + pad) / BELT_CELL)); column++) cells[row * columns + column] = 1;
+    return cells;
+  };
   const labels = [...layout.stations.map((station) => station.label), ...layout.regions.map(regionLabelBox)];
-  /** A machine's ports on one side: where a belt leaves its edge, the free cell it starts from, and the way out. */
-  const portsOf = (station: SceneStation, side: 0 | 1 | 3) => {
-    const outward = side, span = side === 3 ? [station.x + 3, station.x + station.width - 3] : [station.y + 3, station.y + station.height - 3];
-    const across = (side === 3 ? station.x + station.width / 2 : station.y + station.height / 2), slots: { edge: ScenePoint; cell: number; out: number; key: string }[] = [];
-    for (let line = Math.floor(span[0]! / BELT_CELL); line <= Math.floor(span[1]! / BELT_CELL); line++) {
-      const at = Math.min(span[1]!, Math.max(span[0]!, line * BELT_CELL + BELT_CELL / 2));
-      const edge = side === 0 ? { x: station.x + station.width, y: at } : side === 1 ? { x: station.x, y: at } : { x: at, y: station.y };
-      let cell = side === 3 ? Math.floor((station.y - 1) / BELT_CELL) * columns + line : line * columns + Math.floor((side === 0 ? station.x + station.width + 1 : station.x - 1) / BELT_CELL);
-      for (let tries = 0; tries < 5 && cell >= 0 && cell < size && blocked[cell] === 1; tries++) cell = valid(cell, outward) ? cell + step[outward]! : -1;
-      // A port is clear of every label on its way out, and of any crossing near it.
-      if (cell >= 0 && cell < size && blocked[cell] === 0 && bridged[cell] === 0 && labels.every((rect) => !crosses(edge, centre(cell), rect))) slots.push({ edge, cell, out: outward, key: `${station.key} ${side} ${line}` });
+  const blocked = raster(obstacles, 2), near = raster(obstacles, CROSSING_CLEARANCE - 2), labelled = raster(labels, 0), occupied = new Uint8Array(size), bridged = new Uint8Array(size);
+  const centre = (cell: number) => ({ x: (cell % columns) * BELT_CELL + BELT_CELL / 2, y: Math.floor(cell / columns) * BELT_CELL + BELT_CELL / 2 });
+  const mark = (cells: Uint8Array, cell: number) => { for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) { const column = cell % columns + dx, row = Math.floor(cell / columns) + dy; if (column >= 0 && row >= 0 && column < columns && row < rows) cells[row * columns + column] = 1; } };
+  const used = new Set<string>();
+  /** A machine's ports on one side: where a belt leaves its edge, square to it, the free cell it starts from, and the way out. */
+  const portsOf = (station: SceneStation, side: 0 | 1 | 3, belt = true) => {
+    const span = side === 3 ? [station.x + 3, station.x + station.width - 3] : [station.y + 3, station.y + station.height - 3];
+    const across = side === 3 ? station.x + station.width / 2 : station.y + station.height / 2, slots: { edge: ScenePoint; cell: number; out: number; key: string }[] = [];
+    for (let line = Math.ceil((span[0]! - BELT_CELL / 2) / BELT_CELL); line * BELT_CELL + BELT_CELL / 2 <= span[1]!; line++) {
+      const at = line * BELT_CELL + BELT_CELL / 2, edge = side === 0 ? { x: station.x + station.width, y: at } : side === 1 ? { x: station.x, y: at } : { x: at, y: station.y };
+      const step = side === 0 ? 1 : side === 1 ? -1 : -columns;
+      let cell = side === 3 ? Math.floor((station.y - 1) / BELT_CELL) * columns + line : line * columns + Math.floor((side === 0 ? station.x + station.width + 1 : station.x - 1) / BELT_CELL), clear = true;
+      for (let tries = 0; tries < 5 && cell >= 0 && cell < size && blocked[cell] === 1; tries++) { clear &&= labelled[cell] === 0; cell += step; }
+      // A port is clear of every label on its way out, and a belt's of any crossing near it.
+      if (clear && cell >= 0 && cell < size && blocked[cell] === 0 && (!belt || bridged[cell] === 0) && labelled[cell] === 0) slots.push({ edge, cell, out: side, key: `${station.entityId} ${side} ${line}` });
     }
     return slots.sort((a, b) => Math.abs((side === 3 ? a.edge.x : a.edge.y) - across) - Math.abs((side === 3 ? b.edge.x : b.edge.y) - across));
   };
   const sidesOf = (station: SceneStation, toward: ScenePoint): (0 | 1 | 3)[] => {
     const middle = { x: station.x + station.width / 2, y: station.y + station.height / 2 };
-    const facing: 0 | 1 = toward.x >= middle.x ? 0 : 1, other: 0 | 1 = facing === 0 ? 1 : 0;
-    const top = station.shape !== "dock" && station.shape !== "manifold";
+    const facing: 0 | 1 = toward.x >= middle.x ? 0 : 1, other: 0 | 1 = facing === 0 ? 1 : 0, top = station.shape !== "dock" && station.shape !== "manifold";
     const order: (0 | 1 | 3)[] = toward.y < middle.y - station.height && top ? [3, facing, other] : [facing, ...(top ? [3 as const] : []), other];
     return order.filter((side) => !(side === 0 && station.shape === "gate"));
   };
-  // One set of search arrays for every run; a generation stamp says which entries belong to this one.
-  const states = size * 4, cost = new Float64Array(states), from = new Int32Array(states), stamp = new Uint32Array(states), done = new Uint32Array(states);
-  let generation = 0;
-  const search = (start: number, out: number, goal: number, arrive: number, shareRuns = false, anywhere = false, joins?: ReadonlyMap<number, number>) => {
+  let spent = 0, generation = 0, cost = new Float64Array(0), from = new Int32Array(0), stamp = new Uint32Array(0), done = new Uint32Array(0);
+  const budget = 150_000 + PER_RUN * pairs.length;
+  /**
+   * One run, searched only in a window round its ends. Modes: 0 keeps every belt rule; 1 may also run along a laid belt's
+   * straight run as a trunk; 2 is an overhead link, which keeps off machines and labels and nothing else.
+   */
+  const search = (start: number, out: number, goal: number, arrive: number, mode: 0 | 1 | 2, joins?: ReadonlyMap<number, number>, slack = SLACK) => {
+    const ends = [start, ...(goal >= 0 ? [goal] : [...(joins?.keys() ?? [])])];
+    const x0 = Math.max(0, Math.min(...ends.map((cell) => cell % columns)) - slack), x1 = Math.min(columns - 1, Math.max(...ends.map((cell) => cell % columns)) + slack);
+    const y0 = Math.max(0, Math.min(...ends.map((cell) => Math.floor(cell / columns))) - slack), y1 = Math.min(rows - 1, Math.max(...ends.map((cell) => Math.floor(cell / columns))) + slack);
+    const width = x1 - x0 + 1, local = (cell: number) => (Math.floor(cell / columns) - y0) * width + cell % columns - x0, states = width * (y1 - y0 + 1) * 4;
+    // One set of search arrays for every run, grown as needed; a generation stamp says which entries are this run's.
+    if (cost.length < states) { cost = new Float64Array(states); from = new Int32Array(states); stamp = new Uint32Array(states); done = new Uint32Array(states); }
     generation++;
-    // Joining, a run crosses nothing within a junction's reach of where it might end.
-    const joinNear = new Uint8Array(joins === undefined ? 0 : size);
-    for (const cell of joins?.keys() ?? []) for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) { const column = cell % columns + dx, row = Math.floor(cell / columns) + dy; if (column >= 0 && row >= 0 && column < columns && row < rows) joinNear[row * columns + column] = 1; }
-    const costOf = (state: number) => stamp[state] === generation ? cost[state]! : Infinity;
+    const costOf = (key: number) => stamp[key] === generation ? cost[key]! : Infinity;
+    const joinNear = new Set<number>();
+    for (const cell of joins?.keys() ?? []) for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) joinNear.add(cell + dy * columns + dx);
     const gx = goal % columns, gy = Math.floor(goal / columns), guess = (cell: number) => goal < 0 ? 0 : 1.5 * (Math.abs(cell % columns - gx) + Math.abs(Math.floor(cell / columns) - gy));
-    const heap: [number, number][] = [];
-    const less = (a: [number, number], b: [number, number]) => a[0] < b[0] || a[0] === b[0] && a[1] < b[1];
-    const push = (item: [number, number]) => { heap.push(item); for (let i = heap.length - 1; i > 0;) { const parent = (i - 1) >> 1; if (!less(heap[i]!, heap[parent]!)) break; [heap[i], heap[parent]] = [heap[parent]!, heap[i]!]; i = parent; } };
-    const pop = () => { const top = heap[0]!, last = heap.pop()!; if (heap.length > 0) { heap[0] = last; for (let i = 0; ;) { const l = 2 * i + 1, r = l + 1; let m = i; if (l < heap.length && less(heap[l]!, heap[m]!)) m = l; if (r < heap.length && less(heap[r]!, heap[m]!)) m = r; if (m === i) break; [heap[i], heap[m]] = [heap[m]!, heap[i]!]; i = m; } } return top; };
-    const first = start * 4 + out;
-    stamp[first] = generation; cost[first] = 0; from[first] = -1; push([guess(start), first]);
-    for (let expanded = 0; heap.length > 0 && expanded < SEARCH_LIMIT; expanded++) {
-      const [, state] = pop();
-      if (done[state] === generation) continue;
-      done[state] = generation;
-      const cell = state >> 2, direction = state & 3;
+    const queue = heap(), first = start * 4 + out;
+    stamp[local(start) * 4 + out] = generation; cost[local(start) * 4 + out] = 0; from[local(start) * 4 + out] = -1; queue.push([guess(start), first]);
+    // A run that has not arrived within a few times its own length is not going to: each run's work is bounded by its length.
+    const cap = Math.min(states, 80 * (width + y1 - y0 + 1));
+    for (let expanded = 0; queue.size() > 0 && expanded < cap; expanded++) {
+      if (mode < 2 && spent++ > budget) return undefined;
+      const [, state] = queue.pop(), cell = state >> 2, direction = state & 3, here = local(cell) * 4 + direction;
+      if (done[here] === generation) continue;
+      done[here] = generation;
       // A join ends square-on on another belt's straight run: a junction.
       const joined = joins?.has(cell) === true && cell !== start && (joins.get(cell)! & (direction < 2 ? H : V)) === 0;
       if (cell === goal && direction === arrive || joined) {
         const path = [state];
-        while (from[path[0]!]! !== -1) path.unshift(from[path[0]!]!);
-        return { cost: cost[state]!, cells: path.map((item) => item >> 2) };
+        for (let back = from[here]!; back !== -1; back = from[local(back >> 2) * 4 + (back & 3)]!) path.unshift(back);
+        return { cost: cost[here]!, cells: path.map((item) => item >> 2) };
       }
       // Straight through a crossing: no turning on another belt.
-      const crossingHere = !anywhere && cell !== start && (occupied[cell]! & (direction < 2 ? V : H)) !== 0;
-      for (const next of DIRECTIONS) {
-        if (next === (direction ^ 1) || crossingHere && next !== direction || !valid(cell, next)) continue;
-        const target = cell + step[next]!, along = next < 2 ? H : V, across = next < 2 ? V : H;
+      const crossingHere = mode < 2 && cell !== start && (occupied[cell]! & (direction < 2 ? V : H)) !== 0;
+      for (const next of [0, 1, 2, 3]) {
+        const column = cell % columns + (next === 0 ? 1 : next === 1 ? -1 : 0), row = Math.floor(cell / columns) + (next === 2 ? 1 : next === 3 ? -1 : 0);
+        if (next === (direction ^ 1) || crossingHere && next !== direction || column < x0 || column > x1 || row < y0 || row > y1) continue;
+        const target = row * columns + column, along = next < 2 ? H : V, across = next < 2 ? V : H;
         if (blocked[target] === 1) continue;
         const ending = target === goal || joins?.has(target) === true && near[target] === 0 && bridged[target] === 0 && occupied[target] === joins.get(target) && (joins.get(target)! & along) === 0;
-        const sharing = !ending && !anywhere && (occupied[target]! & along) !== 0;
-        if (sharing && (!shareRuns || (occupied[target]! & across) !== 0)) continue;
-        const crossing = !ending && !anywhere && !sharing && (occupied[target]! & across) !== 0;
-        if (crossing && (near[target] === 1 || joinNear[target] === 1)) continue;
-        const value = cost[state]! + 1 + (next === direction ? 0 : BEND) + (crossing ? CROSSING : 0) + (sharing ? 4 : 0), key = target * 4 + next;
-        if (value < costOf(key)) { stamp[key] = generation; cost[key] = value; from[key] = state; push([value + guess(target), key]); }
+        const sharing = !ending && mode < 2 && (occupied[target]! & along) !== 0;
+        if (sharing && (mode === 0 || (occupied[target]! & across) !== 0)) continue;
+        const crossing = !ending && mode < 2 && !sharing && (occupied[target]! & across) !== 0;
+        if (crossing && (near[target] === 1 || joinNear.has(target))) continue;
+        const value = cost[here]! + 1 + (next === direction ? 0 : BEND) + (crossing ? CROSSING : 0) + (sharing ? 4 : 0), key = local(target) * 4 + next;
+        if (value < costOf(key)) { stamp[key] = generation; cost[key] = value; from[key] = state; queue.push([value + guess(target), target * 4 + next]); }
       }
     }
     return undefined;
   };
-  const routes = new Map<string, readonly ScenePoint[]>(), crossings: BeltCrossing[] = [], junctions: ScenePoint[] = [];
+  const routes = new Map<string, readonly ScenePoint[]>(), crossings: BeltCrossing[] = [], junctions: ScenePoint[] = [], links = new Set<string>();
   // Each machine's laid belts, as the straight cells another belt may join square-on, with their direction.
   const runsAt = new Map<string, Map<number, number>>();
   const middle = (station: SceneStation) => ({ x: station.x + station.width / 2, y: station.y + station.height / 2 });
   const span = ({ from, to }: (typeof pairs)[number]) => Math.hypot(middle(from).x - middle(to).x, middle(from).y - middle(to).y);
   for (const pair of [...pairs].sort((left, right) => span(left) - span(right) || (left.key < right.key ? -1 : 1))) {
-    let best: { cost: number; cells: number[]; start: { edge: ScenePoint; key: string }; end: { edge: ScenePoint; key: string } } | undefined;
+    type Found = { cost: number; cells: number[]; start: { edge: ScenePoint; key: string }; end: { edge: ScenePoint; key: string } };
+    let best: Found | undefined, reversed = false, link = false;
+    const slot = (station: SceneStation, side: 0 | 1 | 3) => portsOf(station, side).find((item) => !used.has(item.key));
     // The two sides facing each other first; every side only when those find no run.
     for (const reach of [2, 3]) for (const fromSide of best === undefined ? sidesOf(pair.from, middle(pair.to)).slice(0, reach) : []) for (const toSide of sidesOf(pair.to, middle(pair.from)).slice(0, reach)) {
-      if (reach === 3 && sidesOf(pair.from, middle(pair.to)).indexOf(fromSide) < 2 && sidesOf(pair.to, middle(pair.from)).indexOf(toSide) < 2) continue;
-      const start = portsOf(pair.from, fromSide).find((slot) => !used.has(slot.key)) ?? portsOf(pair.from, fromSide)[0];
-      const end = portsOf(pair.to, toSide).find((slot) => !used.has(slot.key)) ?? portsOf(pair.to, toSide)[0];
+      if (best !== undefined || reach === 3 && sidesOf(pair.from, middle(pair.to)).indexOf(fromSide) < 2 && sidesOf(pair.to, middle(pair.from)).indexOf(toSide) < 2) continue;
+      const start = slot(pair.from, fromSide), end = slot(pair.to, toSide);
       if (start === undefined || end === undefined || start.cell === end.cell) continue;
-      // The facing sides are tried first; the first run found is kept.
-      const found = best === undefined ? search(start.cell, start.out, end.cell, end.out ^ 1) : undefined;
+      const found = search(start.cell, start.out, end.cell, end.out ^ 1, 0);
       if (found !== undefined) best = { ...found, start, end };
     }
-    // With every port taken, a run joins square-on a belt already serving the machine it is going to (or coming from): a junction.
-    let reversed = false;
-    for (const [here, there, flip] of [[pair.from, pair.to, false], [pair.to, pair.from, true]] as const) for (const side of best === undefined ? sidesOf(here, middle(there)) : []) {
-      const start = portsOf(here, side).find((slot) => !used.has(slot.key)) ?? portsOf(here, side)[0], joins = runsAt.get(there.key);
-      if (start === undefined || joins === undefined) continue;
-      const found = search(start.cell, start.out, -1, -1, false, false, joins);
+    // With every port taken, a run joins square-on a belt already serving the machine it is going to (or coming from).
+    for (const [here, there, flip] of [[pair.from, pair.to, false], [pair.to, pair.from, true]] as const) for (const side of best === undefined ? sidesOf(here, middle(there)).slice(0, 2) : []) {
+      const start = slot(here, side);
+      // Only a belt's cells near the machine count: a junction is where the belts meet it, not across the floor.
+      const at = middle(there), reach = 2 * SLACK * BELT_CELL, joins = new Map([...runsAt.get(there.entityId) ?? []].filter(([cell]) => Math.abs(centre(cell).x - at.x) + Math.abs(centre(cell).y - at.y) <= reach));
+      if (best !== undefined || start === undefined || joins.size === 0) continue;
+      const found = search(start.cell, start.out, -1, -1, 0, joins);
       if (found !== undefined) { best = { ...found, start, end: { edge: centre(found.cells.at(-1)!), key: "" } }; reversed = flip; }
     }
-    // Hemmed in further, a run may join a laid belt's straight run as a trunk; failing even that, it is laid round machines
-    // and labels alone, over whatever belts are there.
-    for (const anywhere of [false, true]) for (const fromSide of best === undefined ? sidesOf(pair.from, middle(pair.to)) : []) for (const toSide of sidesOf(pair.to, middle(pair.from))) {
-      const start = portsOf(pair.from, fromSide)[0], end = portsOf(pair.to, toSide)[0];
-      if (start === undefined || end === undefined || start.cell === end.cell) continue;
-      const found = search(start.cell, start.out, end.cell, end.out ^ 1, true, anywhere);
-      if (found !== undefined && (best === undefined || found.cost < best.cost)) best = { ...found, start, end };
+    // Past that, or past the budget, it is an overhead link.
+    for (const reach of [1, 3]) for (const fromSide of best === undefined ? sidesOf(pair.from, middle(pair.to)).slice(0, reach) : []) for (const toSide of sidesOf(pair.to, middle(pair.from)).slice(0, reach)) {
+      const start = portsOf(pair.from, fromSide, false)[0], end = portsOf(pair.to, toSide, false)[0];
+      if (best !== undefined || start === undefined || end === undefined || start.cell === end.cell) continue;
+      const found = search(start.cell, start.out, end.cell, end.out ^ 1, 2, undefined, reach === 1 ? SLACK : 4 * SLACK);
+      if (found !== undefined) best = { ...found, start, end };
+      link = true;
     }
-    if (best === undefined) {
-      const a = middle(pair.from), b = middle(pair.to);
-      routes.set(pair.key, [{ x: b.x >= a.x ? pair.from.x + pair.from.width : pair.from.x, y: a.y }, { x: a.x > b.x ? pair.to.x + pair.to.width : pair.to.x, y: b.y }]);
-      continue;
-    }
-    used.add(best.start.key); if (best.end.key !== "") used.add(best.end.key); else junctions.push(best.end.edge);
+    if (best === undefined) continue;
     const cells = best.cells;
-    cells.forEach((cell, index) => {
-      const before = cells[index - 1], after = cells[index + 1];
-      const marks = (before === undefined ? 0 : Math.abs(cell - before) === 1 ? H : V) | (after === undefined ? 0 : Math.abs(after - cell) === 1 ? H : V);
-      const crossed = index > 0 && index < cells.length - 1 && marks !== (H | V) && (occupied[cell]! & (marks === H ? V : H)) !== 0;
-      if (crossed) {
-        crossings.push({ ...centre(cell), over: marks === H ? "h" : "v" });
-        for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) { const column = cell % columns + dx, row = Math.floor(cell / columns) + dy; if (column >= 0 && row >= 0 && column < columns && row < rows) bridged[row * columns + column] = 1; }
-      }
-      occupied[cell] = occupied[cell]! | (index === 0 || index === cells.length - 1 ? H | V : marks);
-    });
-    // Nothing crosses near a port: its cells join the floor kept clear of crossings.
-    for (const end of [cells[0]!, cells.at(-1)!]) for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) {
-      const column = end % columns + dx, row = Math.floor(end / columns) + dy;
-      if (column >= 0 && row >= 0 && column < columns && row < rows) near[row * columns + column] = 1;
-    }
-    for (const station of [pair.from, pair.to]) {
-      const runs = runsAt.get(station.key) ?? new Map<number, number>();
-      cells.forEach((cell, index) => { if (index > 1 && index < cells.length - 2 && (occupied[cell] === H || occupied[cell] === V)) runs.set(cell, occupied[cell]!); });
-      runsAt.set(station.key, runs);
-    }
     // Only the corners are kept: a straight run is one leg.
     const corners = cells.filter((cell, index) => index === 0 || index === cells.length - 1 || (cell - cells[index - 1]!) !== (cells[index + 1]! - cell)).map(centre);
     const points = [best.start.edge, ...corners, ...(best.end.key === "" ? [] : [best.end.edge])];
     // A run laid from the far end is drawn the way material moves.
     routes.set(pair.key, reversed ? points.reverse() : points);
+    if (link) { links.add(pair.key); continue; }
+    used.add(best.start.key); if (best.end.key !== "") used.add(best.end.key); else junctions.push(best.end.edge);
+    cells.forEach((cell, index) => {
+      const before = cells[index - 1], after = cells[index + 1];
+      const marks = (before === undefined ? 0 : Math.abs(cell - before) === 1 ? H : V) | (after === undefined ? 0 : Math.abs(after - cell) === 1 ? H : V);
+      if (index > 0 && index < cells.length - 1 && marks !== (H | V) && (occupied[cell]! & (marks === H ? V : H)) !== 0) {
+        crossings.push({ ...centre(cell), over: marks === H ? "h" : "v" });
+        mark(bridged, cell);
+      }
+      occupied[cell] = occupied[cell]! | (index === 0 || index === cells.length - 1 ? H | V : marks);
+    });
+    // Nothing crosses near a port or a junction.
+    for (const end of [cells[0]!, cells.at(-1)!]) mark(near, end);
+    for (const station of [pair.from, pair.to]) {
+      const runs = runsAt.get(station.entityId) ?? new Map<number, number>();
+      cells.forEach((cell, index) => { if (index > 1 && index < cells.length - 2 && (occupied[cell] === H || occupied[cell] === V)) runs.set(cell, occupied[cell]!); });
+      runsAt.set(station.entityId, runs);
+    }
   }
-  return { routes, crossings, junctions };
+  return { routes, crossings, junctions, links };
 }
 
-/** Whether a rectangle overlaps any of these, grown by `pad`. */
-function occupiedBy(rects: readonly SceneRect[], pad = 0) {
-  return (rect: SceneRect) => rects.some((other) => rect.x < other.x + other.width + pad && other.x - pad < rect.x + rect.width && rect.y < other.y + other.height + pad && other.y - pad < rect.y + rect.height);
+/** A binary heap of [estimate, id] in two flat arrays; ties go to the lower id, so a route never depends on timing. Estimates are halves, so exact comparison is safe. */
+function heap() {
+  const keys: number[] = [], ids: number[] = [];
+  const less = (a: number, b: number) => keys[a]! < keys[b]! || keys[a] === keys[b] && ids[a]! < ids[b]!;
+  const swap = (a: number, b: number) => { [keys[a], keys[b]] = [keys[b]!, keys[a]!]; [ids[a], ids[b]] = [ids[b]!, ids[a]!]; };
+  return {
+    size: () => keys.length,
+    push([key, id]: [number, number]) { keys.push(key); ids.push(id); for (let i = keys.length - 1; i > 0;) { const parent = (i - 1) >> 1; if (!less(i, parent)) break; swap(i, parent); i = parent; } },
+    pop(): [number, number] {
+      const top: [number, number] = [keys[0]!, ids[0]!], key = keys.pop()!, id = ids.pop()!;
+      if (keys.length > 0) { keys[0] = key; ids[0] = id; for (let i = 0; ;) { const l = 2 * i + 1, r = l + 1; let m = i; if (l < keys.length && less(l, m)) m = l; if (r < keys.length && less(r, m)) m = r; if (m === i) break; swap(i, m); i = m; } }
+      return top;
+    },
+  };
 }
 
 function route(points: readonly ScenePoint[]): Route {

@@ -71,7 +71,7 @@ function assertWalk(layout, start, route, to, message) {
   const points = [start, ...route.points];
   for (let index = 1; index < points.length; index++) {
     assert.ok(walkable(layout.solids, points[index - 1], points[index]), `${message}: leg ${index} passes too close to a solid`);
-    for (const station of layout.stations) assert.equal(crosses(points[index - 1], points[index], station), false, `${message}: leg ${index} goes through ${station.key}`);
+    for (const station of layout.stations) assert.equal(crosses(points[index - 1], points[index], station), false, `${message}: leg ${index} goes through ${station.entityId}`);
   }
   assert.deepEqual({ x: points.at(-1).x, y: points.at(-1).y }, { x: to.x, y: to.y }, `${message}: ends where it was sent`);
 }
@@ -79,14 +79,14 @@ function assertWalk(layout, start, route, to, message) {
 test("the pure scene model feeds a deterministic SVG renderer", () => {
   const layout = layoutScene(graph);
   assert.deepEqual(layout, layoutScene({ ...graph, units: [...graph.units].reverse() }));
-  assert.deepEqual(layout.stations.filter((station) => station.unit === "src").map((station) => station.key).sort(), ["src", "src-job"], "a unit is its main machine and its machines");
+  assert.deepEqual(layout.stations.filter((station) => station.unit === "src").map((station) => station.entityId).sort(), ["src", "src-job"], "a unit is its main machine and its machines");
   for (const count of [1, 2, 3, 4, 5, 11, 24]) {
     const connected = layoutScene(unitsOf(Array.from({ length: count }, (_, index) => `unit-${index}`)));
     const rest = commonSeating(connected, 1, 0).resting[0];
     for (const station of connected.stations) {
-      const placement = placeWorkers(connected, [{ ...workers[0], nodeId: station.key }])[0];
-      assert.equal(placement.stationId, station.key);
-      assertWalk(connected, rest, findRoute(connected, rest, placement), placement, `${count}: ${station.key}`);
+      const placement = placeWorkers(connected, [{ ...workers[0], nodeId: station.entityId }])[0];
+      assert.equal(placement.stationId, station.entityId);
+      assertWalk(connected, rest, findRoute(connected, rest, placement), placement, `${count}: ${station.entityId}`);
     }
   }
 
@@ -162,7 +162,7 @@ test("the pure scene model feeds a deterministic SVG renderer", () => {
   }));
   const densePlacements = placeWorkers(layout, denseWorkers);
   assert.equal(new Set(densePlacements.map(({ x, y }) => `${x},${y}`)).size, denseWorkers.length);
-  const line = layout.stations.find((station) => station.key === "src");
+  const line = layout.stations.find((station) => station.entityId === "src");
   assert.deepEqual(densePlacements[0], { id: "worker-0", area: "work", stationId: "src", ...line.anchor });
   for (const placement of densePlacements.filter(({ area }) => area === "work")) assert.ok(standable(layout, placement), `${placement.id} stands on free floor`);
   const denseSvg = render({ workers: denseWorkers });
@@ -177,7 +177,7 @@ test("the pure scene model feeds a deterministic SVG renderer", () => {
   assert.ok(Math.abs(directOutside[0].y - directOutside[1].y) >= 24, "break and planning seats remain separate");
 
   const changed = layoutScene({ ...graph, digest: "fixture-2", units: [...graph.units, unit("docs")] });
-  assert.equal(changed.stations.some((station) => station.key === "docs"), true);
+  assert.equal(changed.stations.some((station) => station.entityId === "docs"), true);
   assert.notDeepEqual(changed, layout);
 
   const emptyLayout = floorFor(sceneGraph([]), { workers: denseWorkers.slice(0, 20) });
@@ -202,14 +202,14 @@ test("nothing live, runtime-only or worker-made moves a machine", () => {
   const base = sceneGraph([owned("zeta"), owned("beta"), owned("alpha"), owned("front")], { shared: [machine("shared-queue", "queue")], parties: [machine("github", "external")],
     flows: [{ from: "alpha", to: "shared-queue", kind: "publishes", reading: unread }, { from: "beta", to: "shared-queue", kind: "consumes", reading: unread }, { from: "front", to: "github", kind: "calls", reading: unread }] });
   const layout = layoutScene(base);
-  const stable = (floor) => floor.stations.map(({ key, x, y, width, height }) => ({ key, x, y, width, height }));
+  const stable = (floor) => floor.stations.map(({ entityId: key, x, y, width, height }) => ({ key, x, y, width, height }));
   const live = { ...base, units: base.units.map((item) => ({ ...item, reading: { ...busy, errorPermille: 500, latencyMs: 9000 }, machines: item.machines.map((m) => ({ ...m, reading: { ...busy, ratePerHour: 1e6, state: "failing" } })) })),
     flows: base.flows.map((flow) => ({ ...flow, reading: { ...busy, ratePerHour: 1e6 } })) };
   assert.deepEqual(stable(layoutScene(live)), stable(layout), "traffic, faults and state move nothing");
   const workersEverywhere = Array.from({ length: 60 }, (_, index) => ({ id: `w${index}`, name: "w", role: "worker", activity: "busy", location: "working", nodeId: "alpha" }));
   placeWorkers(layout, workersEverywhere);
   assert.deepEqual(stable(layoutScene(base)), stable(layout), "nor do workers");
-  assert.equal(layout.stations.find((station) => station.key === "github").shape, "gate", "an external party is a gate, visibly outside");
+  assert.equal(layout.stations.find((station) => station.entityId === "github").shape, "gate", "an external party is a gate, visibly outside");
   // Runtime-only activity is new structure, but it arrives beside what stands: nothing already there moves relative to anything else.
   const arrived = layoutScene({ ...base, digest: "arrived", quarantine: [machine("mystery", "unknown", { reading: { ...busy, evidence: "runtime" }, claims: "alpha" })] }, layout);
   const relative = (floor) => { const [first] = floor.stations; return stable(floor).filter((station) => station.key !== "mystery").map((station) => ({ ...station, x: station.x - first.x, y: station.y - first.y })); };
@@ -362,7 +362,7 @@ test("a walk crosses the shared floor directly, around machines, never through o
   const machines = sceneGraph([unit("a", { machines: [machine("a-1", "store"), machine("a-2", "job"), machine("a-3", "queue")] }), unit("b", { machines: [machine("b-1", "store")] })],
     { flows: [{ from: "a", to: "b", kind: "calls", reading: unread }] });
   const floor = layoutScene(machines);
-  for (const from of floor.stations) for (const to of floor.stations) if (from !== to) assertWalk(floor, from.anchor, findRoute(floor, from.anchor, to.anchor), to.anchor, `${from.key} to ${to.key}`);
+  for (const from of floor.stations) for (const to of floor.stations) if (from !== to) assertWalk(floor, from.anchor, findRoute(floor, from.anchor, to.anchor), to.anchor, `${from.entityId} to ${to.entityId}`);
 });
 
 test("a retargeted walk starts where the worker is drawn, and a walk that cannot be made is said, not faked", () => {
@@ -540,7 +540,7 @@ test("a floor mounted late still starts seated, then someone gets up, stands at 
     await act(async () => { renderer = create(scene({})); });
     // Where each sprite is actually drawn, against the seat it belongs in.
     const outOfSeat = (floor) => {
-      const seatOf = new Map(placeWorkers(floorFor(floor, { workers: resting, ...libraryOpen }), resting).map((placement) => [placement.id, `translate(${placement.x} ${placement.y})`]));
+      const seatOf = new Map(placeWorkers(renderer.root.find((node) => node.type.name === "SceneWorkers").props.layout, resting).map((placement) => [placement.id, `translate(${placement.x} ${placement.y})`]));
       return renderer.root.findAll((node) => node.props["data-worker-id"] !== undefined).filter((node) => node.props.transform !== seatOf.get(node.props["data-worker-id"])).length;
     };
     const pieces = breakRoomNook(floorFor(graph, { workers: resting, ...libraryOpen })).furniture.length;
@@ -657,8 +657,9 @@ test("a walking worker is drawn facing where they go, and only a westward walk i
     };
     check();
     // There and back again covers both horizontal directions of the same route.
-    for (const nodeId of ["lib", "src"]) {
-      await act(async () => { renderer.update(createElement(FactoryScene, { graph, appearance: commons, workers: [{ ...workers[0], nodeId }, workers[1]], connected: true })); });
+    // Across the floor and back, then down to the commons to rest.
+    for (const where of [{ nodeId: "lib" }, { nodeId: "src" }, { location: "resting", activity: "idle", nodeId: undefined }]) {
+      await act(async () => { renderer.update(createElement(FactoryScene, { graph, appearance: commons, workers: [{ ...workers[0], ...where }, workers[1]], connected: true })); });
       for (let step = 0; step < 400 && pending !== undefined; step++) { const tick = pending; pending = undefined; clock += 40; await act(async () => { tick(clock); }); check(); }
       assert.notEqual(drawn().action, "walking", "the route ends");
     }
@@ -1213,6 +1214,17 @@ test("a fold's inspector lists its routes and shows only the chosen route's evid
   } finally {
     await act(async () => renderer?.unmount());
   }
+  // A request for a member (the Library naming its source) opens the fold with that member chosen, and loads it.
+  loads.length = 0;
+  let member;
+  try {
+    await act(async () => { member = create(createElement(FactoryScene, { graph: folded, appearance: commons, workers: [], onLoadNode, requestedEntity: { id: "n1" } })); });
+    assert.deepEqual(loads, ["n1"]);
+    assert.match(JSON.stringify(member.toJSON()), /Back to folded routes/);
+    assert.match(JSON.stringify(member.root.findByProps({ "aria-label": "Machine inspector" }).findByType("h3").children), /3 routes/);
+  } finally {
+    await act(async () => member?.unmount());
+  }
   // A public floor names the routes without loading anything.
   let publicRenderer;
   await act(async () => { publicRenderer = create(createElement(FactoryScene, { graph: folded, appearance: commons, workers: [], requestedEntity: { id: "api:docks" } })); });
@@ -1315,7 +1327,7 @@ test("the outbound line puts each change request at the station its records name
   const layout = layoutScene(graph);
   for (const station of layout.line) {
     assert.ok(station.x >= layout.facilities.x && station.x + station.width <= layout.facilities.x + layout.facilities.width && station.y + station.height <= layout.facilities.y + layout.facilities.height);
-    for (const machine of layout.stations) assert.ok(station.x >= machine.footprint.x + machine.footprint.width || machine.footprint.x >= station.x + station.width || station.y >= machine.footprint.y + machine.footprint.height || machine.footprint.y >= station.y + station.height, `${station.label} clear of ${machine.key}`);
+    for (const machine of layout.stations) assert.ok(station.x >= machine.footprint.x + machine.footprint.width || machine.footprint.x >= station.x + station.width || station.y >= machine.footprint.y + machine.footprint.height || machine.footprint.y >= station.y + station.height, `${station.label} clear of ${machine.entityId}`);
   }
   assert.deepEqual(layoutScene(graph), layout);
 

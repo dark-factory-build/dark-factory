@@ -20,12 +20,12 @@ test("work slots belong to the observed machine, including a fold's members, and
   separated(placed);
   assert.deepEqual(placeWorkers(layout, [...workers].reverse()), placed);
   for (const at of placed.filter((placement) => placement.area === "work")) {
-    const source = workers.find((person) => person.id === at.id), station = layout.stations.find((item) => item.key === at.stationId);
-    assert.ok(station.key === source.observedBayId || station.representedIds?.includes(source.observedBayId), `${at.id} works at its own machine`);
+    const source = workers.find((person) => person.id === at.id), station = layout.stations.find((item) => item.entityId === at.stationId);
+    assert.ok(station.entityId === source.observedBayId || station.representedIds?.includes(source.observedBayId), `${at.id} works at its own machine`);
     assert.ok(Math.hypot(at.x - station.anchor.x, at.y - station.anchor.y) <= 36, "beside it");
     assert.ok(standable(layout, at), `${at.id} stands clear of every solid`);
   }
-  assert.deepEqual(placed.find((placement) => placement.id === "worker-00"), { id: "worker-00", area: "work", stationId: "unit-0-0", ...layout.stations.find((item) => item.key === "unit-0-0").anchor });
+  assert.deepEqual(placed.find((placement) => placement.id === "worker-00"), { id: "worker-00", area: "work", stationId: "unit-0-0", ...layout.stations.find((item) => item.entityId === "unit-0-0").anchor });
 });
 
 test("nearby rest forms pairs beside a unit's main machine without duplicating seats in the commons", () => {
@@ -74,7 +74,7 @@ test("a change in the number of agents resizes the commons in place; no machine 
   const before = layoutScene(units(6), undefined, { agents: 3, implements: ["board", "coffee"] });
   for (const agents of [1, 8, 20]) {
     const after = layoutScene(units(6), before, { agents, implements: ["board", "coffee"] });
-    assert.deepEqual(after.stations.map(({ key, x, y }) => [key, x - after.stations[0].x, y - after.stations[0].y]), before.stations.map(({ key, x, y }) => [key, x - before.stations[0].x, y - before.stations[0].y]), `${agents} agents`);
+    assert.deepEqual(after.stations.map(({ entityId: key, x, y }) => [key, x - after.stations[0].x, y - after.stations[0].y]), before.stations.map(({ entityId: key, x, y }) => [key, x - before.stations[0].x, y - before.stations[0].y]), `${agents} agents`);
     for (const station of after.stations) assert.ok(!(station.footprint.x < after.facilities.x + after.facilities.width && after.facilities.x < station.footprint.x + station.footprint.width && station.footprint.y < after.facilities.y + after.facilities.height && after.facilities.y < station.footprint.y + station.footprint.height), "clear of every machine");
   }
 });

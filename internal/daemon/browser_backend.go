@@ -850,7 +850,7 @@ func graphFrame(projectID string, graph projectGraph, live opgraph.Live, now int
 
 // fitGraphFrame keeps the snapshot bound with one full encoding: sizes are
 // measured per item, then paths beyond the first go, then unobserved edges,
-// then runtime-only nodes and leaves from the end, each counted. A hall goes
+// then runtime-only nodes and leaves from the end, each counted. A unit goes
 // only once nothing in it remains, so the frame always stays valid.
 func fitGraphFrame(result browserprotocol.OperationalGraph) browserprotocol.OperationalGraph {
 	const budget = browserprotocol.MaxSnapshotBytes - 1024

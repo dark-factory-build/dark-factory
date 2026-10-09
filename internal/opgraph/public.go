@@ -101,7 +101,7 @@ type PublicEdge struct {
 	Activity    string `json:"activity"`
 }
 
-// PublicWorker is one agent: what it is doing and which hall it is in.
+// PublicWorker is one agent: what it is doing and which unit it is at.
 type PublicWorker struct {
 	Activity string `json:"activity"` // busy | waiting | needs-you | idle
 	Unit     string `json:"unit,omitempty"`

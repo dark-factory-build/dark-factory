@@ -46,14 +46,14 @@ test("runtime-only and unknown nodes stay unexplained, externals become gates, a
   for (const id of [40, 50, 60]) assert.equal(where.get(hex(id)).unit, undefined, "no owner invented");
   assert.equal(where.get(hex(30)).unit, hex(1));
   const layout = layoutScene(graph);
-  assert.deepEqual(layout.stations.filter((station) => station.shape === "gate").map((station) => station.key), [hex(50)]);
-  assert.equal(layout.stations.filter((station) => station.key === hex(40)).length, 1, "a shared store is one machine, never one per user");
-  assert.deepEqual(layout.regions.map((region) => region.unit).sort(), [hex(1), hex(2)], "areas are units' alone; shared, external and unexplained machines stand on neutral floor");
+  assert.deepEqual(layout.stations.filter((station) => station.shape === "gate").map((station) => station.entityId), [hex(50)]);
+  assert.equal(layout.stations.filter((station) => station.entityId === hex(40)).length, 1, "a shared store is one machine, never one per user");
+  assert.deepEqual([...new Set(layout.regions.map((region) => region.unit))].sort(), [hex(1), hex(2)], "areas are units' alone; shared, external and unexplained machines stand on neutral floor");
   // A runtime-only node with a unit is still the runtime's claim, not the code's: it stands near the unit, outside its area.
   const claimed = prepare(graphWith([...base(2), graphNode(61, "ingress", "/seen", { unit: hex(1), evidence: "runtime", ...observed })])).graph;
   assert.deepEqual(ids(claimed.quarantine), [hex(60), hex(61)].sort());
   assert.equal(claimed.quarantine.find((machine) => machine.id === hex(61)).claims, hex(1));
-  assert.equal(layoutScene(claimed).stations.find((station) => station.key === hex(61)).unit, undefined);
+  assert.equal(layoutScene(claimed).stations.find((station) => station.entityId === hex(61)).unit, undefined);
 });
 
 test("a folded manifold never claims idle unless every member is quiet", () => {
@@ -195,5 +195,5 @@ test("a repository nothing recognised is one unit with its marker beside it, not
   const prepared = projectGraph(new Map([["project", graph]]), ["project"]);
   assert.equal(prepared.graph.quarantine.length, 0);
   const layout = layoutScene(prepared.graph);
-  assert.deepEqual(layout.stations.map((station) => [station.key, station.unit, station.shape]), [[hex(1), hex(1), "line"], [hex(2), hex(1), "crate"]]);
+  assert.deepEqual(layout.stations.map((station) => [station.entityId, station.unit, station.shape]), [[hex(1), hex(1), "line"], [hex(2), hex(1), "crate"]]);
 });
