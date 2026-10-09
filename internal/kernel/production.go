@@ -534,19 +534,25 @@ const factorydPublishesAcceptance = `(SELECT count(*) FROM intake_task_bindings 
 	WHERE s.acceptance_id = a.id AND sa.role IS NOT 'orchestrator') = 1
 	AND EXISTS (SELECT 1 FROM repository_source_identities i WHERE i.repository_id = a.repository_id AND i.github_repository_id = a.github_repository_id)`
 
+// PublishRetryAfter is how long a recorded publish failure holds back its
+// Change revision; then the next pass retries it, so a refusal fixed outside
+// factoryd heals itself.
+const PublishRetryAfter = time.Hour
+
 // PublishFailureID names the one reviewer record of factoryd failing to
-// publish a Change revision; while it exists that revision is not retried.
+// publish a Change revision.
 func PublishFailureID(change ChangeID, revision Revision) string {
 	return fmt.Sprintf("publish-%s-%d", change, revision.Int64())
 }
 
 // PublishableChanges lists, oldest first, the current settled Changes of
 // succeeded tasks bound to a live intake acceptance factoryd publishes, whose
-// head differs from their base, with no recorded publish failure at that
-// Change revision: with no publication of that Change or task, at any work
-// revision, or above work revision 1 settled since factoryd last published
-// that Change on its still-open pull request (publication_tasks.created_at_ms).
-func (store *Store) PublishableChanges(ctx context.Context) ([]PublishableChange, error) {
+// head differs from their base, with no publish failure at that Change
+// revision recorded within PublishRetryAfter of at: with no publication of
+// that Change or task, at any work revision, or above work revision 1
+// settled since factoryd last published that Change on its still-open pull
+// request (publication_tasks.created_at_ms).
+func (store *Store) PublishableChanges(ctx context.Context, at UnixMillis) ([]PublishableChange, error) {
 	tx, err := store.beginRead(ctx)
 	if err != nil {
 		return nil, err
@@ -562,8 +568,8 @@ func (store *Store) PublishableChanges(ctx context.Context) ([]PublishableChange
 		  AND `+factorydPublishesAcceptance+`
 		  AND (p.pull_number IS NOT NULL OR NOT EXISTS (SELECT 1 FROM publication_tasks q WHERE q.change_id = c.id OR q.task_id = c.task_id))
 		  AND NOT EXISTS (SELECT 1 FROM production_records r WHERE r.project_id = c.project_id AND r.kind = 'reviewer'
-		      AND r.identity = 'publish-' || lower(hex(c.id)) || '-' || c.revision)
-		ORDER BY c.updated_at_ms`)
+		      AND r.identity = 'publish-' || lower(hex(c.id)) || '-' || c.revision AND r.observed_at_ms + ? > ?)
+		ORDER BY c.updated_at_ms`, PublishRetryAfter.Milliseconds(), at.Int64())
 	if err != nil {
 		return nil, err
 	}
@@ -865,30 +871,6 @@ func (store *Store) RecordReviewRetry(ctx context.Context, project ProjectID, re
 		return tx.Rollback(err)
 	}
 	return tx.Commit(ctx)
-}
-
-// ClearPublishFailure removes the recorded publish failure id, so the next
-// publication pass tries that Change revision again. It reports whether one
-// was removed.
-func (store *Store) ClearPublishFailure(ctx context.Context, project ProjectID, id string) (bool, error) {
-	if project.zero() || !validOutcomeText(id, 128) {
-		return false, ErrInvalidValue
-	}
-	tx, err := store.beginValidatedWrite(ctx)
-	if err != nil {
-		return false, err
-	}
-	defer tx.Close()
-	result, err := tx.connection.ExecContext(ctx, `DELETE FROM production_records WHERE project_id = ? AND kind = 'reviewer' AND identity = ?
-		AND json_extract(document, '$.state') = 'publish_failed'`, project.Bytes(), id)
-	if err != nil {
-		return false, tx.Rollback(err)
-	}
-	affected, err := result.RowsAffected()
-	if err != nil {
-		return false, tx.Rollback(err)
-	}
-	return affected == 1, tx.Commit(ctx)
 }
 
 // ReviewOperation returns the last durable state for a daemon-owned review.

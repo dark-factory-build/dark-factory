@@ -337,6 +337,16 @@ func TestRefusedPublicationEscalatesOnce(t *testing.T) {
 	if len(app.writes) != 1 {
 		t.Fatalf("writes = %d", len(app.writes))
 	}
+	// A retry past the window that is refused again refreshes the record
+	// without escalating a second time.
+	if err := fixture.daemon.publishChange(ctx, c, "team/repo", source, app.call, checkout); err != nil {
+		t.Fatal(err)
+	}
+	document, found, err = fixture.store.ReviewOperation(ctx, c.Task.ProjectID, kernel.PublishFailureID(c.Change, c.Revision))
+	op = review.Operation{}
+	if err != nil || !found || json.Unmarshal(document, &op) != nil || op.State != "publish_failed" || op.Escalation != "" || !strings.Contains(op.Detail, "refused: .github/workflows") {
+		t.Fatalf("repeat failure record = %s %v %v", document, found, err)
+	}
 }
 
 func TestPublicationRedactsEmailsAndUUID5MatchesTheRunbook(t *testing.T) {
