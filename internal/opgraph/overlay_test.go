@@ -354,6 +354,7 @@ func TestSilentOutsideHostIsQuietUnlessNotConnected(t *testing.T) {
 		t.Errorf("host called by another unit was redrawn: %+v", got)
 	}
 	live.NotConnected("api.stripe.com", "api")
+	invariant(t, live)
 	if got := labels(live)["api.stripe.com"]; got.Observation != "unobserved" || got.State != "unknown" || live.Edges[edge].Observation != "unobserved" || live.Summary.Quiet != 0 || live.Summary.Unobserved == 0 {
 		t.Errorf("unconnected host = %+v, edge %+v, summary %+v", got, live.Edges[edge], live.Summary)
 	}
