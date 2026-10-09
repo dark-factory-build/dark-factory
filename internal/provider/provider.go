@@ -36,6 +36,7 @@ const (
 	maxPathBytes     = 4096
 	claudeConfigDir  = ".claude"
 	codexConfigDir   = ".codex"
+	pnpmVersion      = "11.19.0"
 	// bootstrapPrompt is both native providers' fixed positional prompt: the
 	// exact task is read through the attempt API, never typed into the PTY.
 	bootstrapPrompt = `Use the factory_attempt.factory tool with argv ["attempt","task"] before doing anything else. The returned JSON task field is the exact task: complete only that task. Use this tool for every factoryctl attempt or overseer command, passing argv without the executable; shell commands cannot access the attempt API. Peer collaboration is asynchronous: use argv ["attempt","peer","status"] to read or answer task-linked questions, but it grants no task or terminal control. For a stale paged peer status, restart from the first page. Before exiting, report the durable outcome with attempt succeed, block, or fail through this tool. When assigned a writable task checkout, read and edit it directly, including corrections after send-back. Never substitute another task or private Change path. Scope file discovery to the task checkout and private runtime home. Locate tools with command -v and the checkout's documented setup. Never recursively search the user home, Library, Documents, Desktop, Music or Photos for tools or instructions. If a required path is not provided or present, report the missing prerequisite instead of widening the search. In UI review, screenshots are illustrative only and never blocking evidence; judge correctness from render tests and source behavior.`
@@ -1242,6 +1243,9 @@ func (runtime RuntimePaths) PrepareWebDependencies(ctx context.Context, workingD
 	if err := validatePnpmStoreDirectory(runtime.accountHome); err != nil {
 		return err
 	}
+	if err := prepareCorepackPnpm(runtime.accountHome, runtime.home); err != nil {
+		return err
+	}
 	toolPath := ""
 	for _, directory := range filepath.SplitList(runtime.toolPath) {
 		if _, err := os.Stat(filepath.Join(directory, "node")); err == nil {
@@ -1259,6 +1263,65 @@ func (runtime RuntimePaths) PrepareWebDependencies(ctx context.Context, workingD
 		return fmt.Errorf("provider: prepare web dependencies: %w: %s", err, strings.TrimSpace(string(output)))
 	}
 	return nil
+}
+
+func prepareCorepackPnpm(accountHome, runtimeHome string) error {
+	source := filepath.Join(accountHome, ".cache", "node", "corepack", "v1", "pnpm", pnpmVersion)
+	packagePath := filepath.Join(source, "package.json")
+	packageStat, err := os.Lstat(packagePath)
+	if err != nil || packageStat.Mode()&os.ModeSymlink != 0 || !packageStat.Mode().IsRegular() {
+		return fmt.Errorf("provider: inspect trusted pnpm executable: invalid package metadata")
+	}
+	packageJSON, err := os.ReadFile(packagePath)
+	if err != nil {
+		return fmt.Errorf("provider: inspect trusted pnpm executable: %w", err)
+	}
+	var packageInfo struct {
+		Name    string `json:"name"`
+		Version string `json:"version"`
+	}
+	if json.Unmarshal(packageJSON, &packageInfo) != nil || packageInfo.Name != "pnpm" || packageInfo.Version != pnpmVersion {
+		return fmt.Errorf("provider: trusted pnpm executable is not pinned")
+	}
+	destination := filepath.Join(runtimeHome, ".cache", "corepack", "v1", "pnpm", pnpmVersion)
+	if err := os.MkdirAll(destination, 0o700); err != nil {
+		return err
+	}
+	return filepath.WalkDir(source, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			return fmt.Errorf("provider: trusted pnpm executable contains a symlink")
+		}
+		relative, err := filepath.Rel(source, path)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(destination, relative)
+		if entry.IsDir() {
+			return os.MkdirAll(target, 0o700)
+		}
+		if !entry.Type().IsRegular() {
+			return fmt.Errorf("provider: trusted pnpm executable contains a non-regular file")
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		input, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		output, err := os.OpenFile(target, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, info.Mode().Perm())
+		if err != nil {
+			_ = input.Close()
+			return err
+		}
+		_, copyErr := io.Copy(output, input)
+		closeErr := errors.Join(input.Close(), output.Close())
+		return errors.Join(copyErr, closeErr, os.Chmod(target, info.Mode().Perm()))
+	})
 }
 
 // goModuleCachePath is the one shared-cache path native workers may see. It

@@ -4,6 +4,7 @@ package provider
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -120,6 +121,47 @@ func TestPrepareGoModuleCacheCreatesTrustedTree(t *testing.T) {
 	}
 	if info.Mode().Perm() != 0o700 {
 		t.Fatalf("trusted Go module cache mode = %o, want 700", info.Mode().Perm())
+	}
+}
+
+func TestPrepareWebDependenciesProvisionsPinnedCorepackPnpm(t *testing.T) {
+	root := t.TempDir()
+	toolDir := filepath.Join(root, "tools")
+	if err := os.Mkdir(toolDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	node := filepath.Join(toolDir, "node")
+	if err := os.WriteFile(node, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	account := filepath.Join(root, "account")
+	corepackPnpm := filepath.Join(account, ".cache", "node", "corepack", "v1", "pnpm", pnpmVersion)
+	if err := os.MkdirAll(corepackPnpm, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(corepackPnpm, "package.json"), []byte(`{"name":"pnpm","version":"11.19.0"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(corepackPnpm, "bin.mjs"), []byte("pinned"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(pnpmStorePath(account), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runtime := runtimeFixture(t, toolDir, account)
+	working := filepath.Join(root, "change")
+	if err := os.MkdirAll(filepath.Join(working, "web"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(working, "web", "package.json"), []byte(`{"packageManager":"pnpm@11.19.0"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.PrepareWebDependencies(context.Background(), working); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(filepath.Join(runtime.home, ".cache", "corepack", "v1", "pnpm", pnpmVersion, "bin.mjs"))
+	if err != nil || string(got) != "pinned" {
+		t.Fatalf("private Corepack pnpm = %q, %v", got, err)
 	}
 }
 
