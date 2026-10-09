@@ -23,7 +23,21 @@ var (
 // The daemon restarts during the release, so --wait reads the durable record
 // until it settles and treats an unreachable daemon as not settled yet.
 func runRelease(ctx context.Context, args []string, getenv func(string) string, stdout, stderr io.Writer) int {
-	if len(args) != 1 && (len(args) != 2 || args[1] != "--wait") {
+	if len(args) < 1 || len(args) > 3 {
+		return usageFailure(stderr, append([]string{"release"}, args...))
+	}
+	start, wait := false, false
+	for _, arg := range args[1:] {
+		switch arg {
+		case "--start":
+			start = true
+		case "--wait":
+			wait = true
+		default:
+			return usageFailure(stderr, append([]string{"release"}, args...))
+		}
+	}
+	if wait && !start {
 		return usageFailure(stderr, append([]string{"release"}, args...))
 	}
 	client, err := api.NewOperatorClient(getenv("DARK_FACTORY_SOCKET"), getenv("DARK_FACTORY_OPERATOR_TOKEN_FILE"))
@@ -31,11 +45,23 @@ func runRelease(ctx context.Context, args []string, getenv func(string) string, 
 		_, _ = io.WriteString(stderr, "factoryctl: operator client configuration is invalid\n")
 		return exitFailure
 	}
-	return release(ctx, len(args) == 2, func(start bool) (kernel.ProductionDelivery, error) {
+	call := func(start bool) (kernel.ProductionDelivery, error) {
 		callContext, cancel := context.WithTimeout(ctx, 30*time.Second)
 		defer cancel()
 		return client.Release(callContext, api.ReleaseInput{SHA: args[0], Start: start})
-	}, stdout, stderr)
+	}
+	if !start {
+		delivery, err := call(false)
+		if err != nil {
+			writeWebFailure(stderr, "release", err)
+			return exitRefused
+		}
+		if err := json.NewEncoder(stdout).Encode(delivery); err != nil {
+			return exitFailure
+		}
+		return 0
+	}
+	return release(ctx, wait, call, stdout, stderr)
 }
 
 func release(ctx context.Context, wait bool, call func(start bool) (kernel.ProductionDelivery, error), stdout, stderr io.Writer) int {

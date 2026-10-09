@@ -223,6 +223,9 @@ func (daemon *Daemon) Release(ctx context.Context, sha string, start bool) (kern
 		delivery.State, delivery.Phase = "verified", ""
 	}
 	if err == nil {
+		err = rejectStaleRelease(ctx, root, sha)
+	}
+	if err == nil {
 		err = daemon.writeRelease(ctx, project, &delivery)
 	}
 	if err != nil || delivery.State == "verified" {
@@ -231,6 +234,23 @@ func (daemon *Daemon) Release(ctx context.Context, sha string, start bool) (kern
 	}
 	go daemon.release(project, root, source, delivery)
 	return delivery, nil
+}
+
+func rejectStaleRelease(ctx context.Context, root, sha string) error {
+	running := buildinfo.Current()
+	if !running.Release() {
+		return nil
+	}
+	command := exec.CommandContext(ctx, change.TrustedGitExecutable, "-C", root, "merge-base", "--is-ancestor", sha, running.Source())
+	if err := command.Run(); err == nil {
+		return fmt.Errorf("%w: release %s is not newer than running build %s", kernel.ErrConflict, sha, running.Source())
+	} else {
+		var exitError *exec.ExitError
+		if errors.As(err, &exitError) && exitError.ExitCode() == 1 {
+			return nil
+		}
+		return fmt.Errorf("check release ancestry: %w", err)
+	}
 }
 
 func (daemon *Daemon) writeRelease(ctx context.Context, project kernel.ProjectID, delivery *kernel.ProductionDelivery) error {

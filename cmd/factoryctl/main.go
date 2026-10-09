@@ -121,7 +121,7 @@ const (
   factoryctl storage compact
     Requires dispatch off and no nonterminal runs.
   factoryctl backup create PATH | verify PATH
-  factoryctl release SHA [--wait]
+	  factoryctl release SHA [--start] [--wait]
     Installs merged commit SHA into this factory's service, with rollback.
     --wait exits 0 verified, 1 failed or rolled back, 75 refused with no effect.
   factoryctl task read --task ID --revision REVISION [--offset N]
