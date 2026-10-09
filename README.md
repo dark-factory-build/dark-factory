@@ -21,7 +21,7 @@ factory](docs/development/OPERATIONAL_FACTORY.md).*
 
 ## What you can do
 
-- **See the work.** The floor pictures your software as a plant: each hall is a deployment unit, its machines are routes, jobs and stores, and a worker walks to the part its change touches. Select a worker to see its activity.
+- **See the work.** The floor pictures your software as one connected plant: its machines are routes, jobs and stores, grouped into faint areas by deployment unit and joined by belts, and a worker walks to the part its change touches. Select a worker to see its activity.
 - **Coordinate a team.** Let an overseer break down goals, assign workers, and follow up on their results.
 - **Keep work moving.** Queue and prioritize work across projects and repositories. Assign a named agent or the next available worker.
 - **Stay in control.** Open agent terminals, send instructions, and answer Needs You decisions from the same console.
