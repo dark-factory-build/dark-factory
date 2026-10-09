@@ -264,15 +264,6 @@ func (backend *browserBackend) TerminalTarget(ctx context.Context, rawClient [br
 	return result, nil
 }
 
-// PairLink is the pair page's mint: the one-shot launch link OpenBrowser
-// returns.
-func (backend *browserBackend) PairLink(ctx context.Context) (string, error) {
-	if backend == nil || backend.owner == nil {
-		return "", browser.ErrUnauthorized
-	}
-	return backend.owner.OpenBrowser(ctx)
-}
-
 func (backend *browserBackend) AuthorizeTaskAttachments(ctx context.Context, rawClient [browserprotocol.ClientIDSize]byte) error {
 	_, release, _, err := backend.authorize(ctx, rawClient, kernel.BrowserCapabilityHumanActions)
 	if err != nil {
@@ -1013,7 +1004,7 @@ func (backend *browserBackend) TelemetryIngest(ctx context.Context, rawClient [b
 // admitRemoteInvite bounds minting to four invitations per challenge TTL. The
 // page asks; it does not choose this bound. Four per TTL means even a console
 // looping REMOTE_INVITE holds at most four of the 32 live challenge slots, so
-// the loopback /pair page can always still mint one, while an operator
+// factoryctl web pair can always still mint one, while an operator
 // re-minting after a failed scan never reaches the limit. An admitted attempt
 // spends its slot whether or not the mint that follows succeeds.
 func (backend *browserBackend) admitRemoteInvite() bool {

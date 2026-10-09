@@ -139,9 +139,9 @@ not count against this active-state limit.
 The wire contract is unversioned and tolerates additive change. There is no
 envelope generation, no versioned loopback path, no version in the pairing and
 auth transcript domains, and no protocol identity in the published artifacts;
-the loopback path is `/browser`, and `/pair` beside it is the one HTML page
-the daemon serves: a script-free confirm page whose form mints a pairing
-challenge and redirects to the hosted console. A control frame carrying a
+the loopback path is `/browser`, and the listener serves no HTML: a loopback
+pairing challenge is minted only by the operator-domain `web_pair` call, which
+hands its link to the default browser. A control frame carrying a
 member this build does not know is served, so the hosted console and the
 daemon tolerate additive members in either installation order. New message
 types still require daemon support; deploy that support before a console
@@ -195,7 +195,7 @@ non-active origins expose no reply or cancellation authority; corrupt active
 relationships fail closed rather than resembling unavailability.
 `administration` is the operator's own bit: discovering and linking this
 machine's provider logins and choosing which one an agent runs as. A pairing
-minted on loopback carries it; a relay pairing does not.
+minted by the operator's `web_pair` carries it; a relay pairing does not.
 
 A reply contains only request ID, expected request revision, and bounded text.
 The Store derives the originating run and commits a unique delivery receipt

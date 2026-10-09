@@ -149,6 +149,14 @@ type WebStatus struct {
 	Build            BuildIdentity `json:"build,omitzero"`
 }
 
+// WebPair carries a one-shot browser pairing link to the operator. The link
+// is a credential: callers hand it straight to a browser and never print it.
+type WebPair struct {
+	Link string `json:"link"`
+}
+
+func (WebPair) String() string { return "WebPair(<redacted>)" }
+
 // BuildIdentity is the bounded public identity of the daemon serving this
 // status. Development builds keep Release false even when VCS metadata is
 // available as a useful source revision.

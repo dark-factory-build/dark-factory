@@ -3,14 +3,12 @@ package daemon
 import (
 	"context"
 	"encoding/hex"
-	"errors"
 	"net/http"
 	"net/url"
 	"strings"
 	"testing"
 
 	"github.com/dark-factory-build/dark-factory/internal/api"
-	"github.com/dark-factory-build/dark-factory/internal/browser"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 )
 
@@ -38,11 +36,6 @@ func TestWebOperatorOpenStatusListAndRevoke(t *testing.T) {
 	parsed, err := url.Parse(link)
 	if err != nil || parsed.Scheme != "https" || parsed.Host != "app.darkfactory.build" || parsed.Path != "/" || parsed.RawQuery != "" || !strings.HasPrefix(parsed.Fragment, "df_pair=") {
 		t.Fatalf("launch URL = %q, err=%v", link, err)
-	}
-	// The mint is the pair page's only credential source, so a backend with no
-	// owner must produce nothing at all.
-	if _, err := (&browserBackend{}).PairLink(ctx); !errors.Is(err, browser.ErrUnauthorized) {
-		t.Fatalf("ownerless pair link = %v", err)
 	}
 	rawChallenge, err := hex.DecodeString(strings.TrimPrefix(parsed.Fragment, "df_pair="))
 	if err != nil || len(rawChallenge) != 32 {
@@ -72,6 +65,14 @@ func TestWebOperatorOpenStatusListAndRevoke(t *testing.T) {
 	if err != nil || len(page.Clients) != 1 || page.Clients[0].RevokedAtMs == nil || page.Clients[0].Revision != uint64(fixture.client.Revision.Int64()+1) {
 		t.Fatalf("revoked client page = %+v, %v", page, err)
 	}
+	// Revocation invalidates every live challenge; the operator can still pair
+	// afresh with no client left.
+	if _, err := fixture.daemon.OpenBrowser(ctx); err != nil {
+		t.Fatalf("pair after revoking every client = %v", err)
+	}
+	if status, err = fixture.daemon.WebStatus(ctx); err != nil || status.ActiveChallenges != 1 {
+		t.Fatalf("post-revoke status = %+v, %v", status, err)
+	}
 }
 
 func TestWebStatusKeepsTheRelayBoundLoopbackListener(t *testing.T) {
@@ -92,39 +93,55 @@ func TestWebStatusKeepsTheRelayBoundLoopbackListener(t *testing.T) {
 	}
 }
 
-// TestPairPageMintsTheSameChallengeAsTheOwnerMint drives the production listener
-// the way a browser does: the page's own same-origin form post answers with a
-// redirect carrying a fresh challenge, and the daemon counts it exactly once.
-func TestPairPageMintsTheSameChallengeAsTheOwnerMint(t *testing.T) {
-	fixture := newAdapterFixture(t, kernel.BrowserCapabilityObserve|kernel.BrowserCapabilityPrivateHumanRequestDetail)
+// TestOnlyTheOperatorAPIMintsABrowserPairing reproduces the forged requests a
+// sandboxed worker could send to the loopback listener -- the Fetch Metadata,
+// Origin, Referer and Host a browser would carry -- and proves none of them
+// mints a challenge, while the operator-domain web_pair call does.
+func TestOnlyTheOperatorAPIMintsABrowserPairing(t *testing.T) {
+	fixture := newDispatchFixture(t)
+	runtime, err := fixture.daemon.ListenBrowser("127.0.0.1:0", []string{webProductionOrigin})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = fixture.daemon.Close() })
 	ctx := context.Background()
-	status, err := fixture.daemon.WebStatus(ctx)
-	if err != nil || status.ActiveChallenges != 1 {
-		t.Fatalf("initial status = %+v, %v", status, err)
-	}
+	address := runtime.server.Addr()
 	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	request, err := http.NewRequest(http.MethodPost, "http://"+status.Address+"/pair", strings.NewReader(""))
+	for _, method := range []string{http.MethodGet, http.MethodPost} {
+		for _, site := range []string{"none", "same-origin"} {
+			request, err := http.NewRequest(method, "http://"+address+"/pair", strings.NewReader(""))
+			if err != nil {
+				t.Fatal(err)
+			}
+			for key, value := range map[string]string{"Sec-Fetch-Mode": "navigate", "Sec-Fetch-Dest": "document", "Sec-Fetch-Site": site, "Sec-Fetch-User": "?1", "Origin": webProductionOrigin, "Referer": webProductionOrigin + "/"} {
+				request.Header.Set(key, value)
+			}
+			response, err := client.Do(request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = response.Body.Close()
+			if response.StatusCode != http.StatusNotFound || response.Header.Get("Location") != "" {
+				t.Fatalf("forged %s /pair (%s) = %d location %q", method, site, response.StatusCode, response.Header.Get("Location"))
+			}
+		}
+	}
+	if status, err := fixture.daemon.WebStatus(ctx); err != nil || status.ActiveChallenges != 0 {
+		t.Fatalf("forged requests minted: %+v, %v", status, err)
+	}
+
+	operator, err := api.NewOperatorClient(fixture.socket, fixture.operator)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for key, value := range map[string]string{"Sec-Fetch-Mode": "navigate", "Sec-Fetch-Dest": "document", "Sec-Fetch-Site": "same-origin"} {
-		request.Header.Set(key, value)
+	done := fixture.serve(t)
+	link, err := operator.WebPair(ctx)
+	waitDispatch(t, done)
+	challenge, found := strings.CutPrefix(link, webProductionOrigin+"/#df_pair=")
+	if raw, decodeErr := hex.DecodeString(challenge); err != nil || !found || decodeErr != nil || len(raw) != 32 {
+		t.Fatalf("web_pair = %v (link well-formed: %t)", err, found && decodeErr == nil)
 	}
-	response, err := client.Do(request)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_ = response.Body.Close()
-	location := response.Header.Get("Location")
-	parsed, parseErr := url.Parse(location)
-	if response.StatusCode != http.StatusSeeOther || parseErr != nil || parsed.Scheme != "https" || parsed.Host != "app.darkfactory.build" || parsed.Path != "/" || !strings.HasPrefix(parsed.Fragment, "df_pair=") {
-		t.Fatalf("pair post status=%d location=%q err=%v", response.StatusCode, location, parseErr)
-	}
-	if raw, err := hex.DecodeString(strings.TrimPrefix(parsed.Fragment, "df_pair=")); err != nil || len(raw) != 32 {
-		t.Fatalf("pair challenge = %q, err=%v", parsed.Fragment, err)
-	}
-	status, err = fixture.daemon.WebStatus(ctx)
-	if err != nil || status.ActiveChallenges != 2 {
-		t.Fatalf("post-pair status = %+v, %v", status, err)
+	if status, err := fixture.daemon.WebStatus(ctx); err != nil || status.ActiveChallenges != 1 {
+		t.Fatalf("web_pair status = %+v, %v", status, err)
 	}
 }
