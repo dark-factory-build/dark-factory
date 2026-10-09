@@ -846,8 +846,8 @@ test("a unit's main machine truncates a full-width name while keeping its access
 });
 
 test("the public layout key covers every placement input and nothing live", () => {
-  const node = (id, extra = {}) => ({ id, kind: "processor", label: id, runtime: "process", evidence: "static", observation: "unobserved", state: "unknown", activity: "none", ...extra });
-  const edge = (from, to, extra = {}) => ({ from, to, kind: "calls", evidence: "static", observation: "unobserved", state: "unknown", activity: "none", ...extra });
+  const node = (id, extra = {}) => ({ id, kind: "processor", label: id, runtime: "process", evidence: "static", observation: "unobserved", state: "unknown", rate_per_hour: 0, ...extra });
+  const edge = (from, to, extra = {}) => ({ from, to, kind: "calls", evidence: "static", observation: "unobserved", state: "unknown", rate_per_hour: 0, ...extra });
   // Many ids, so a change far past the first few still has to change the key.
   const many = Array.from({ length: 40 }, (_, index) => node(`unit-${String(index).padStart(2, "0")}`));
   const world = { generated_at: 0, summary: graph.summary, nodes: [node("a"), node("b"), node("c"), node("a-db", { kind: "store", unit: "a" }), ...many], edges: [edge("a", "b")], workers: [] };
@@ -860,8 +860,8 @@ test("the public layout key covers every placement input and nothing live", () =
   for (const [what, edges] of [["a new connection", [...world.edges, edge("b", "c")]], ["a connection gone", []], ["a connection's kind", [edge("a", "b", { kind: "uses" })]]]) {
     assert.notEqual(key({ edges }), key(), `${what} relays the floor`);
   }
-  assert.equal(key({ edges: [edge("a", "b", { activity: "high", state: "active", observation: "observed" })] }), key(), "a connection's traffic does not");
-  assert.equal(key({ generated_at: 9, nodes: world.nodes.map((item) => ({ ...item, activity: "high", state: "active", observation: "observed" })), workers: [{ activity: "busy", unit: "a" }] }), key(), "traffic, state and workers never do");
+  assert.equal(key({ edges: [edge("a", "b", { rate_per_hour: 6000, state: "active", observation: "observed" })] }), key(), "a connection's traffic does not");
+  assert.equal(key({ generated_at: 9, nodes: world.nodes.map((item) => ({ ...item, rate_per_hour: 6000, state: "active", observation: "observed" })), workers: [{ activity: "busy", unit: "a" }] }), key(), "traffic, state and workers never do");
 });
 
 test("compact tooltips open on hover, focus and tap without opening component details", async () => {
@@ -1247,7 +1247,7 @@ test("a unit's runtime is said in words, each belt runs port to port between the
   const [line, cell, dock] = [items.edge, items["edge-job"], items["edge-in"]];
   assert.ok(touches(belt("runs")[0], line) && touches(belt("runs").at(-1), cell), "from a port on the main machine to a port on the cell");
   assert.ok(touches(belt("intake")[0], dock) && touches(belt("intake").at(-1), line), "arrivals come in at the dock");
-  const world = { generated_at: 0, summary: graph.summary, nodes: [{ id: "u", kind: "processor", label: "Edge function 1", runtime: "worker", evidence: "static", observation: "unobserved", state: "unknown", activity: "none" }], edges: [], workers: [] };
+  const world = { generated_at: 0, summary: graph.summary, nodes: [{ id: "u", kind: "processor", label: "Edge function 1", runtime: "worker", evidence: "static", observation: "unobserved", state: "unknown", rate_per_hour: 0 }], edges: [], workers: [] };
   assert.equal(publicFloor(world).graph.units[0].runtime, undefined, "a public name already says the runtime");
 });
 
@@ -1306,16 +1306,16 @@ test("the console and factoryd put the shared fixture's records at the same stat
   assert.deepEqual(crates.map((crate) => [crate.number, crate.station, crate.fault]).sort((a, b) => a[0] - b[0]), fixture.crates);
 });
 
-test("the public floor puts published crates on the line by station alone, never a number or title", () => {
+test("the public floor puts crates on the line by station, with a number and title only when published", () => {
   const world = { generated_at: 0, summary: { components: 0, inferred: 0, observed: 0, quiet: 0, partial: 0, stale: 0, unobserved: 0, opaque: 0, runtime_only: 0, contradicted: 0 }, nodes: [], edges: [], workers: [],
-    crates: [{ id: "f".repeat(32), station: 2 }, { id: "e".repeat(32), station: 0, fault: true }] };
+    crates: [{ id: "f".repeat(32), station: 2, number: 7, title: "Fix it" }, { id: "e".repeat(32), station: 0, fault: true }] };
   const { crates } = publicFloor(world);
-  assert.deepEqual(crates.map((crate) => [crate.id, crate.station, crate.fault, crate.number, crate.title]), [["f".repeat(32), 2, false, 0, ""], ["e".repeat(32), 0, true, 0, ""]]);
+  assert.deepEqual(crates.map((crate) => [crate.id, crate.station, crate.fault, crate.number, crate.title]), [["f".repeat(32), 2, false, 7, "Fix it"], ["e".repeat(32), 0, true, 0, ""]]);
   assert.deepEqual(publicFloor({ ...world, crates: undefined }).crates, [], "an older factory publishes no line");
   const markup = render({ crates, connected: true });
   assert.match(markup, /data-crate="e{32}" data-crate-station="0" data-fault=""[^>]*data-tooltip="A change request\nReview · needs correction"/);
-  assert.match(markup, /aria-label="A change request: Merge queue"/);
-  assert.doesNotMatch(markup, /PR #/);
+  assert.match(markup, /aria-label="PR #7 Fix it: Merge queue"/);
+  assert.equal(markup.match(/PR #/g)?.length, 2, "only the published crate is named");
 });
 
 test("a crate moves once when its recorded stage changes, never on first sight or reconnect, and lights what it changes", async () => {

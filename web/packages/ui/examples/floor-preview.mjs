@@ -11,22 +11,22 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { FactoryScene, publicFloor } from "@dark-factory/ui";
 
 const seen = { evidence: "both", observation: "observed", state: "active" };
-const quiet = { evidence: "static", observation: "unobserved", state: "unknown", activity: "none" };
+const quiet = { evidence: "static", observation: "unobserved", state: "unknown", rate_per_hour: 0 };
 /** @type {import("@dark-factory/ui").PublicWorld} */
 const world = {
   generated_at: Date.now(),
   summary: { components: 6, inferred: 6, observed: 3, quiet: 0, partial: 0, stale: 0, unobserved: 3, opaque: 0, runtime_only: 0, contradicted: 0 },
   nodes: [
-    { id: "api", kind: "processor", label: "API server", runtime: "server", ...seen, activity: "medium" },
-    { id: "api-orders", kind: "ingress", label: "POST /orders", unit: "api", trigger: "request", ...seen, activity: "medium" },
+    { id: "api", kind: "processor", label: "API server", runtime: "server", ...seen, rate_per_hour: 600 },
+    { id: "api-orders", kind: "ingress", label: "POST /orders", unit: "api", trigger: "request", ...seen, rate_per_hour: 600 },
     { id: "api-nightly", kind: "job", label: "nightly report", unit: "api", ...quiet },
-    { id: "web", kind: "processor", label: "Web app", runtime: "browser", ...seen, activity: "low" },
+    { id: "web", kind: "processor", label: "Web app", runtime: "browser", ...seen, rate_per_hour: 30 },
     { id: "db", kind: "store", label: "orders db", ...quiet },
     { id: "pay", kind: "external", label: "payments", ...quiet },
   ],
   edges: [
-    { from: "web", to: "api-orders", kind: "calls", ...seen, activity: "low" },
-    { from: "api", to: "db", kind: "uses", ...seen, activity: "medium" },
+    { from: "web", to: "api-orders", kind: "calls", ...seen, rate_per_hour: 30 },
+    { from: "api", to: "db", kind: "uses", ...seen, rate_per_hour: 600 },
     { from: "api", to: "pay", kind: "calls", ...quiet },
   ],
   workers: [{ activity: "busy", unit: "api" }, { activity: "idle" }],

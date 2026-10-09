@@ -851,10 +851,18 @@ The plant is what the software does. Workers are what agents do to it.
 One state, two projections, both computed by factoryd:
 
 - **Operator** (paired browser): everything above.
-- **Public** (`dark-factory-site`): an allowlist built by
-  `opgraph.Public`.
+- **Public** (`dark-factory-site`): built by `opgraph.Public`.
 
-`opgraph.Public` contains only:
+The projection has one switch, the anonymous visibility read described below.
+A node is **named** when it has static sources and every one of them is in a
+repository GitHub serves to an anonymous reader. A named node publishes its
+real static label (unit, route, store, external host, job or check name), its
+source paths and its exact rate per hour, and an edge between two named nodes
+its exact rate. Every other node is anonymous: a node from a private repository,
+and a runtime-only node (no static source, so its label could come from an
+unauthenticated sender) get the ordinal projection.
+
+For a node that is not named, `opgraph.Public` contains only:
 
 - node kind, an anonymous stable ID (`HMAC(project secret, id)`), and an
   ordinal label in plain words, counted per word: a unit by its runtime
@@ -864,7 +872,10 @@ One state, two projections, both computed by factoryd:
   to fit its station), then "Store", "Queue", "Outside service" and "Unknown"
 - unit grouping, edges and their evidence state
 - coverage and operational state
-- bucketed activity: none, low, medium or high, from log₂ of rate
+- a bucketed rate: 0, 30, 600 or 6000 per hour, from log₂ of the real rate
+
+Every node keeps its HMAC id, and edges, coverage, state and unit grouping are
+shape either way.
 
 Workers appear as an anonymous count by activity and location (unit), with
 no names or task text. Deploy and changeover events carry no versions.
@@ -872,7 +883,8 @@ no names or task text. Deploy and changeover events carry no versions.
 The outbound work line appears as crates: each open pull request, and each
 merged one for a day, as an anonymous stable ID (`HMAC(secret, "crate:" +
 repository#number)`), its station (review, checks, merge queue, shipped) and
-a fault flag, never a title, number or branch. factoryd places them by the
+a fault flag. For a public repository it also carries the pull request's
+number and title, which GitHub already shows; never a branch. factoryd places them by the
 console's rule (`publicCrates`, `projectCrates`; one shared fixture,
 `web/fixtures/production-crates.json`, holds both to it) on its own clock.
 *SHIPPED* means deployed where the repository has GitHub deployment records
@@ -897,13 +909,13 @@ their counts stay.
 
 It never contains:
 
-- labels or paths from source
-- selectors, hostnames, routes or secrets
-- binding names
-- issue or PR text, errors or terminal output
+- anything from a private repository beyond shape and ordinal names
+- selectors (runtime attribute values), secrets or binding names
+- task text, issue text, errors or terminal output
+- worker or account names
 
-Ordinal labels are assigned in HMAC-ID order, so they do not shift as other
-nodes come and go.
+Ordinal labels are assigned in HMAC-ID order among the anonymous nodes, so they
+do not shift as other nodes come and go.
 
 factoryd serves the projection to local readers at
 `GET http://127.0.0.1:43123/v1/public/<project id>`. It refuses any request
@@ -952,10 +964,16 @@ learns nothing it could use to dial `/host` or `/controller`.
 - **Leaking private data.** The publisher has one source:
   `browserBackend.PublicWorld`, the `/v1/public` handler, which marshals
   `opgraph.Public`. Its allowlist is enforced by its output type, not by
-  redaction. The bytes go to the relay unchanged, and the relay stores them
-  verbatim and adds nothing. One thing is new: `Last-Modified` tells a
-  reader, to the minute, when the public world last changed. The world
-  itself still holds only bucketed activity.
+  redaction, and the one switch that lets a name through is the anonymous
+  visibility read: a repository is named only when GitHub answered its
+  releases to a reader without credentials, so a private repository is
+  anonymous until proven public, and a repository that turns private is
+  anonymous within the hour. The bytes go to the relay unchanged, and the
+  relay stores them verbatim and adds nothing. `Last-Modified` tells a
+  reader, to the minute, when the public world last changed, and a named
+  node's exact rate shows its traffic. Both are acceptable because the
+  repository's source, pull requests and merges are already public; they
+  would not be for a private one, which is why the switch is per repository.
 - **Cost of public reads.** Each read is one Worker request and one Durable
   Object read. Reads are rate limited per client address (60 a minute), and
   `Cache-Control: public, max-age=15` covers repeat polls. CORS admits only
@@ -969,9 +987,10 @@ learns nothing it could use to dial `/host` or `/controller`.
   stops publishing as well. The last world then stays as "last seen" until
   a later start retracts it.
 
-What remains visible is the shape (node and edge counts), bucketed activity,
-unit-level worker presence and, for a live feed, when it last changed. That is acceptable for public repositories,
-and it is stated on the page.
+What remains visible for a private repository is the shape (node and edge
+counts), bucketed rates, unit-level worker presence and, for a live feed, when
+it last changed. For a public one the page also shows its real names and
+rates, which the source and pull request history already show.
 
 ## 14. Security and privacy
 
@@ -987,9 +1006,11 @@ and it is stated on the page.
 - **Static extraction.** Reads exact-revision archives (`BuildArchive`) and
   never executes project code or external analysers. URL literals keep scheme, host and path template only, never query
   strings or credentials.
-- **Public projection.** An allowlist, never redaction. A test serialises a
+- **Public projection.** Real names only for repositories GitHub serves
+  anonymously; otherwise an allowlist, never redaction. A test serialises a
   projection built from a graph seeded with canary secrets in every field and
-  asserts that none appear.
+  asserts that none appear, and another that a runtime-only node stays
+  ordinal beside a named one.
 - **Operator frame.** Bounded by the existing 1 MiB frame. Node detail
   carries source paths and selectors (operator-visible today), never source
   text.
