@@ -50,6 +50,11 @@ item AS (
 	       OR EXISTS (SELECT 1 FROM publication_tasks AS p JOIN production_records AS r
 	           ON r.project_id = p.project_id AND r.repository = p.repository AND r.kind = 'pull_request' AND r.identity = CAST(p.pull_number AS TEXT)
 	           WHERE p.change_id = c.id AND json_extract(r.document, '$.state') = 'open' AND c.updated_at_ms > p.created_at_ms))
+	UNION ALL SELECT t.id, t.updated_at_ms, 1, '' FROM tasks AS t
+	JOIN intake_task_bindings AS b ON b.task_id = t.id
+	JOIN intake_acceptances AS i ON i.id = b.acceptance_id
+	JOIN agents AS o ON o.id = i.overseer_agent_id
+	WHERE t.project_id = ?1 AND o.id = ?4 AND t.status IN ('failed', 'cancelled')
 	UNION ALL SELECT NULL, e.observed_at_ms, 1, json_extract(e.document, '$.escalation') FROM production_records AS e
 	JOIN production_records AS p ON p.project_id = e.project_id AND p.repository = e.repository AND p.kind = 'pull_request'
 	  AND p.identity = CAST(json_extract(e.document, '$.request.PullNumber') AS TEXT)

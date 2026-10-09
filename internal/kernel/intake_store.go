@@ -571,7 +571,47 @@ func (store *Store) importIntakeAcceptance(ctx context.Context, id IntakeAccepta
 		return Task{}, tx.Rollback(err)
 	}
 	if accepted.WithdrawnAt != nil {
-		return Task{}, tx.Rollback(ErrConflict)
+		task, found, err := taskByID(ctx, tx.connection, accepted.TaskID)
+		if err != nil {
+			return Task{}, tx.Rollback(err)
+		}
+		if !found {
+			return Task{}, tx.Rollback(ErrConflict)
+		}
+		if task.Status != TaskFailed && task.Status != TaskCancelled || task.AssignedAgentID.zero() {
+			return Task{}, tx.Rollback(ErrConflict)
+		}
+		var active int
+		if err := tx.connection.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM runs WHERE task_id = ? AND phase <> 'terminal')`, task.ID.Bytes()).Scan(&active); err != nil || active != 0 {
+			if err == nil {
+				err = ErrConflict
+			}
+			return Task{}, tx.Rollback(err)
+		}
+		if _, err := tx.connection.ExecContext(ctx, `UPDATE intake_acceptances SET withdrawn_at_ms = NULL WHERE id = ? AND withdrawn_at_ms IS NOT NULL`, id.Bytes()); err != nil {
+			return Task{}, tx.Rollback(err)
+		}
+		next := task.WorkRevision.Int64() + 1
+		if _, err := tx.connection.ExecContext(ctx, `UPDATE tasks SET status = 'queued', work_revision = ?, blocked_reason = NULL, result = NULL, completed_at_ms = NULL, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND revision = ? AND status IN ('failed', 'cancelled')`, next, at.Int64(), task.ID.Bytes(), task.Revision.Int64()); err != nil {
+			return Task{}, tx.Rollback(err)
+		}
+		if err := carryPrerequisites(ctx, tx.connection, task, next); err != nil {
+			return Task{}, tx.Rollback(err)
+		}
+		if err := appendInvalidations(ctx, tx.connection, at, []pendingInvalidation{{kind: EntityTask, id: task.ID.Bytes(), revision: task.Revision.Int64() + 1}}); err != nil {
+			return Task{}, tx.Rollback(err)
+		}
+		value, found, err := taskByID(ctx, tx.connection, task.ID)
+		if err != nil || !found {
+			if err == nil {
+				err = ErrCorruptState
+			}
+			return Task{}, tx.Rollback(err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return Task{}, err
+		}
+		return value, nil
 	}
 	if len(expectedSource) > 1 {
 		return Task{}, tx.Rollback(ErrInvalidValue)
