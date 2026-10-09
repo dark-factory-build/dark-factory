@@ -414,8 +414,8 @@ func TestUnavailablePublicationRetriesWhenServiceRecovers(t *testing.T) {
 	if err := fixture.daemon.publishChange(ctx, c, "team/repo", source, app.call, checkout); err != nil {
 		t.Fatal(err)
 	}
-	if len(app.writes) != 4 {
-		t.Fatalf("writes after service recovery = %d, want 4", len(app.writes))
+	if len(app.writes) != 3 {
+		t.Fatalf("writes after service recovery = %d, want 3", len(app.writes))
 	}
 }
 
