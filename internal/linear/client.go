@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/dark-factory-build/dark-factory/internal/install"
@@ -27,6 +28,7 @@ type Host struct {
 	mu     sync.Mutex
 	home   *install.OperationalHome
 	key    string
+	linked atomic.Bool // key != "", readable without mu while a request holds it
 	client *http.Client
 }
 
@@ -39,6 +41,7 @@ func Open(home *install.OperationalHome) (*Host, error) {
 	if len(data) > 0 && json.Unmarshal(data, &h.key) != nil {
 		return nil, ErrUnavailable
 	}
+	h.linked.Store(h.key != "")
 	return h, nil
 }
 
@@ -48,11 +51,7 @@ func (h *Host) Instrument(wrap func(*http.Client) *http.Client) {
 }
 
 // Connected is true while a key is held.
-func (h *Host) Connected() bool {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	return h.key != ""
-}
+func (h *Host) Connected() bool { return h.linked.Load() }
 
 func (h *Host) Connect(ctx context.Context, key string) ([]Team, error) {
 	h.mu.Lock()
@@ -69,6 +68,7 @@ func (h *Host) Connect(ctx context.Context, key string) ([]Team, error) {
 		return nil, err
 	}
 	h.key = key
+	h.linked.Store(true)
 	return teams, nil
 }
 func (h *Host) Disconnect() error {
@@ -78,6 +78,7 @@ func (h *Host) Disconnect() error {
 		return err
 	}
 	h.key = ""
+	h.linked.Store(false)
 	return nil
 }
 func (h *Host) Teams(ctx context.Context) ([]Team, error) {

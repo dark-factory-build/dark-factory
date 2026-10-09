@@ -271,9 +271,9 @@ func (daemon *Daemon) runtimeStore() *opgraph.Runtime {
 }
 
 // Self-observation claims exactly what factoryd instruments: its browser
-// listener and routes, and its local API socket. Background loops and
-// outbound calls are recorded when seen but not claimed, so their silence
-// reads as partial or unobserved, never idle.
+// listener and routes, its local API socket and all its outbound HTTP, so a
+// silent exact outside host is quiet. Background loops are recorded when seen
+// but not claimed, so their silence reads as partial or unobserved, never idle.
 var selfCoverageKeys = []string{"service.name", "http.route", "url.path", "rpc.method", "network.transport", "server.address", "server.port"}
 
 const runtimeWindow = 15 * time.Minute
