@@ -312,3 +312,43 @@ func TestOnlyMethodsFallToABareListener(t *testing.T) {
 		t.Fatalf("unmatched work was explained away by the listener: %+v, listener %+v", live.Summary, live.Nodes[listener.ID])
 	}
 }
+
+func TestSilentOutsideHostIsQuietUnlessNotConnected(t *testing.T) {
+	now := 100 * minute
+	cover := func(source string, keys ...string) []Coverage {
+		return []Coverage{{Source: source, Unit: "api", Keys: keys, AsOf: now, TTL: minute}}
+	}
+	edge := [3]string{ID("s", "", "wrangler:api"), ID("s", "", "host:api.stripe.com"), string(Calls)}
+	graph := overlayGraph()
+	storeID, unitID := ID("s", "", "store:db"), ID("s", "", "wrangler:api")
+	graph.Nodes = append(graph.Nodes, Node{ID: storeID, Kind: Store, Label: "db", Evidence: []Evidence{static("go-ast", "", Inferred)}})
+	graph.Edges = append(graph.Edges, Edge{From: unitID, To: storeID, Kind: Uses, Evidence: []Evidence{static("go-ast", "", Inferred)}})
+	toolID := ID("s", "", "process:tool")
+	graph.Nodes = append(graph.Nodes, Node{ID: toolID, Kind: External, Label: "tool", Selectors: map[string]string{"process.executable.name": "tool"}, Evidence: []Evidence{static("go-ast", "", Inferred)}})
+	graph.Edges = append(graph.Edges, Edge{From: unitID, To: toolID, Kind: Calls, Evidence: []Evidence{static("go-ast", "", Inferred)}})
+	live := Overlay("s", graph, nil, cover("factoryd", "service.name", "server.address"), nil, now, 15*minute)
+	invariant(t, live)
+	if got := live.Edges[[3]string{unitID, toolID, string(Calls)}]; got == nil || got.Observation != "unobserved" || labels(live)["tool"].Observation != "opaque" {
+		t.Errorf("launch with no calls = %+v, node %+v", got, labels(live)["tool"])
+	}
+	// Silence is claimed for HTTP hosts only: an unseen store or launched process is not a silent one.
+	if got := live.Edges[[3]string{unitID, storeID, string(Uses)}]; got == nil || got.Observation != "unobserved" {
+		t.Errorf("uses edge to a store under a peer-reporting caller = %+v", got)
+	}
+	if got := labels(live)["api.stripe.com"]; got.Observation != "quiet" || got.State != "idle" || live.Edges[edge].Observation != "quiet" {
+		t.Errorf("host the only caller reports on = %+v, edge %+v", got, live.Edges[edge])
+	}
+	other := Overlay("s", overlayGraph(), nil, cover("factoryd", "service.name", "server.address"), nil, now, 15*minute)
+	other.NotConnected("api.stripe.com", "billing")
+	if got := labels(other)["api.stripe.com"]; got.Observation != "quiet" {
+		t.Errorf("host called by another unit was redrawn: %+v", got)
+	}
+	live.NotConnected("api.stripe.com", "api")
+	if got := labels(live)["api.stripe.com"]; got.Observation != "unobserved" || got.State != "unknown" || live.Edges[edge].Observation != "unobserved" || live.Summary.Quiet != 0 || live.Summary.Unobserved == 0 {
+		t.Errorf("unconnected host = %+v, edge %+v, summary %+v", got, live.Edges[edge], live.Summary)
+	}
+	// Another source listing server.address (an OTLP server's own address) leaves the host opaque.
+	if got := labels(Overlay("s", overlayGraph(), nil, cover("otlp", "service.name", "server.address"), nil, now, 15*minute))["api.stripe.com"]; got.Observation != "opaque" {
+		t.Errorf("host with an unreporting caller = %+v", got)
+	}
+}

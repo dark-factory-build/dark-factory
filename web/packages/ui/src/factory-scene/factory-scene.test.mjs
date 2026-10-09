@@ -1017,6 +1017,13 @@ test("the shelf opens the floor's project library", async () => {
   await act(async () => tree.unmount());
 });
 
+test("an outside gate says not connected or no calls instead of claiming it cannot be seen", () => {
+  const caption = (observation) => render({ graph: sceneGraph([unit("api", { machines: [machine("api-in", "ingress")] })], { parties: [machine("linear", "external", { reading: { ...unread, observation } })], flows: [] }), workers: [] });
+  assert.match(caption("unobserved"), /not connected/);
+  assert.match(caption("quiet"), /no calls in 15 min/);
+  assert.match(caption("opaque"), /can&#x27;t see inside|can't see inside/);
+});
+
 test("an unobserved machine is greyed with no material belt; an observed edge with a rate carries material", () => {
   const floor = sceneGraph([unit("web", { machines: [machine("web-ui", "job")] }), unit("api", { machines: [machine("api-in", "ingress", { trigger: "request", reading: busy }), machine("api-db", "store")] })], {
     parties: [machine("github", "external", { reading: { ...unread, observation: "opaque" } })],

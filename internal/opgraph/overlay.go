@@ -1,6 +1,7 @@
 package opgraph
 
 import (
+	"slices"
 	"sort"
 	"strings"
 )
@@ -115,6 +116,9 @@ func Overlay(system string, static Graph, observations []Observation, coverage [
 			}
 		case node.Kind == External:
 			status.Observation = "opaque"
+			if status.count == 0 && silentHost(run.builder, node, users[node.ID], current) {
+				status.Observation = "quiet"
+			}
 		case node.Unit == "" && node.Kind != Processor:
 			status.Observation = sharedObservation(node, users[node.ID], current, status)
 		default:
@@ -154,7 +158,7 @@ func Overlay(system string, static Graph, observations []Observation, coverage [
 			status = &copied
 		case status.count > 0:
 			status.Observation = "observed"
-		case hasPeers(current[edge.From]):
+		case hasPeers(current[edge.From]), edge.Kind == Calls && live.Nodes[edge.To].Observation == "quiet" && byID[edge.To].Kind == External:
 			status.Observation = "quiet"
 		case expired[edge.From]:
 			status.Observation = "stale"
@@ -221,6 +225,73 @@ func unitObservation(node *Node, current []Coverage, expired bool, status *Statu
 		return "stale"
 	}
 	return "unobserved"
+}
+
+// silentHost: an exact outside HTTP host every caller of which is covered by
+// factoryd's self-observation, which records all its outbound HTTP, so a call
+// would have been seen. There is no guessed prefix to be wrong about, unlike
+// a route. Nothing else's silence is claimed.
+func silentHost(builder *Builder, node *Node, callers []string, current map[string][]Coverage) bool {
+	if node.Selectors["server.address"] == "" || len(callers) == 0 {
+		return false
+	}
+	for _, caller := range callers {
+		if from := builder.nodes[caller]; from != nil && from.Unit != "" {
+			caller = from.Unit
+		}
+		reports := false
+		for _, item := range current[caller] {
+			reports = reports || item.Source == "factoryd"
+		}
+		if !reports {
+			return false
+		}
+	}
+	return true
+}
+
+// NotConnected redraws an outside host as unobserved: the factory knows no
+// integration is configured, so there is nothing to observe, not a silence.
+// Only a host every caller of which is the unit named service: another unit
+// may call it with a connection of its own.
+func (live *Live) NotConnected(host, service string) {
+	moved := map[string]bool{}
+	callers := map[string][]string{}
+	byID := map[string]Node{}
+	for _, node := range live.Graph.Nodes {
+		byID[node.ID] = node
+	}
+	for _, edge := range live.Graph.Edges {
+		from := byID[edge.From]
+		if from.Unit != "" {
+			from = byID[from.Unit]
+		}
+		callers[edge.To] = append(callers[edge.To], from.Selectors["service.name"])
+	}
+	for _, node := range live.Graph.Nodes {
+		status := live.Nodes[node.ID]
+		if node.Kind != External || node.Selectors["server.address"] != host || status == nil || status.count > 0 || len(callers[node.ID]) == 0 {
+			continue
+		}
+		if slices.ContainsFunc(callers[node.ID], func(name string) bool { return name != service }) {
+			continue
+		}
+		switch status.Observation {
+		case "opaque":
+			live.Summary.Opaque--
+		case "quiet":
+			live.Summary.Quiet--
+		default:
+			continue
+		}
+		live.Summary.Unobserved++
+		status.Observation, status.State, moved[node.ID] = "unobserved", "unknown", true
+	}
+	for key, status := range live.Edges {
+		if moved[key[1]] && status.count == 0 {
+			status.Observation, status.State = "unobserved", "unknown"
+		}
+	}
 }
 
 func runtimeSeen(node *Node) bool {

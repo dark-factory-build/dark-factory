@@ -271,8 +271,9 @@ func (daemon *Daemon) runtimeStore() *opgraph.Runtime {
 }
 
 // Self-observation claims exactly what factoryd instruments: its browser
-// listener and routes, and its local API socket. Background loops and
-// outbound calls are recorded when seen but not claimed, so their silence
+// listener and routes and its local API socket. It records all its outbound
+// HTTP, so only an exact HTTP host it alone calls can read quiet; launches and
+// background loops are recorded when seen but not claimed, so their silence
 // reads as partial or unobserved, never idle.
 var selfCoverageKeys = []string{"service.name", "http.route", "url.path", "rpc.method", "network.transport", "server.address", "server.port"}
 
@@ -292,7 +293,11 @@ func (daemon *Daemon) liveGraph(projectID kernel.ProjectID, graph projectGraph) 
 		}
 	}
 	observations, coverage := store.Snapshot(now)
-	return opgraph.Overlay(projectID.String(), graph.graph, observations, coverage, aliases, now, runtimeWindow.Milliseconds())
+	live := opgraph.Overlay(projectID.String(), graph.graph, observations, coverage, aliases, now, runtimeWindow.Milliseconds())
+	if daemon.linear == nil || !daemon.linear.Connected() {
+		live.NotConnected("api.linear.app", "factoryd")
+	}
+	return live
 }
 
 // observeSource is one pull adapter the operator configured in

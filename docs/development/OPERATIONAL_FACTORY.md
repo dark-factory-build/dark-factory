@@ -566,10 +566,10 @@ node and nothing inside it.
 | Observation state | Meaning |
 | --- | --- |
 | `observed` | A covering source saw activity within the window. |
-| `quiet` | A covering source is current and saw nothing in the window, and the source has bound traffic to this node before. Silence is not claimed for a static guess the source has never matched: a route whose prefix the code hid stays `partial`. A timer is never `quiet`, because it can be silent for longer than any window held. |
+| `quiet` | A covering source is current and saw nothing in the window, and the source has bound traffic to this node before. Silence is not claimed for a static guess the source has never matched: a route whose prefix the code hid stays `partial`. A timer is never `quiet`, because it can be silent for longer than any window held. An outside host matched exactly by `server.address` is `quiet` only when every caller is `factoryd`, whose self-observation records all its outbound HTTP (launches and other non-HTTP calls never read `quiet`), and none called in the window: there is no guessed prefix to be wrong about. |
 | `partial` | Only a coarser source sees it. For a leaf, the unit is covered but the node is not, so the unit's traffic may or may not pass through it. For a processor, some of its nodes are covered and some are not. |
 | `stale` | It was covered, but the source has not reported within its TTL. |
-| `unobserved` | No source can see it. |
+| `unobserved` | No source can see it. An outside host whose integration `factoryd` knows is not configured (Linear with no key) is also `unobserved`, drawn `not connected`: there is nothing to observe, which is not a silence. |
 | `opaque` | An external party. Calls to it may be observed from the caller's side, but its own state never is. |
 
 | Operational state | Allowed when |
@@ -582,6 +582,8 @@ Static evidence never produces an operational state. Tests in
 `internal/opgraph` assert that only `quiet` is ever `idle`. A further test
 covers a unit that is observed while its child is unbound: the child is not
 idle.
+
+`factoryd`'s launches of `factory-runner` are recorded as a client call with `process.executable.name`; the overlay binds that name to the unit whose `service.name` it is, so the unit lights from the caller's side.
 
 Edges follow the same rule. An edge is observed only through a source that
 reports peers, such as `factoryd`'s outbound calls or client spans. Otherwise
