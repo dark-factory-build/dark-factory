@@ -29,8 +29,11 @@ const (
 // publicCrates is projectCrates in production-view.ts over the same records,
 // timed by the factory's clock: each open pull request at the first gate its
 // records have not passed (review, current-head checks, merge queue), each
-// merged one shipped for a day, closed unmerged gone. A blocked review or a
-// failed current-head check is a fault; merged, a blocked or failed delivery.
+// merged one shipped for a day, closed unmerged gone. Where GitHub records
+// deployments, merged ships only once a successful production deployment was
+// created at or after the merge, and waits at the merge queue's end until
+// then. A blocked review or a failed current-head check is a fault; merged, a
+// blocked or failed delivery.
 // ponytail: the console also stales a review whose head its local source
 // observation contradicts; factoryd takes the recorded head as the source.
 func publicCrates(records []kernel.ProductionRecord, now int64) []opgraph.Crate {
@@ -46,11 +49,18 @@ func publicCrates(records []kernel.ProductionRecord, now int64) []opgraph.Crate 
 	failed := map[string]bool{}  // repository#number#head with a failed head check
 	blocked := map[string]bool{} // repository#number with a blocked latest delivery
 	latest := map[string]kernel.ProductionDelivery{}
+	deployed := map[string]int64{} // newest successful production deployment
 	for _, record := range records {
 		switch record.Kind {
 		case "repository":
-			var health struct{ Unavailable string }
+			var health struct {
+				Unavailable string
+				DeployedAt  *int64 `json:"deployed_at"`
+			}
 			healthy[record.Repository] = json.Unmarshal(record.Document, &health) == nil && fresh(record.ObservedAt, health.Unavailable)
+			if health.DeployedAt != nil {
+				deployed[record.Repository] = *health.DeployedAt
+			}
 		case "check":
 			var check kernel.ProductionCheck
 			if json.Unmarshal(record.Document, &check) == nil && check.Scope == "head" && slices.Contains([]string{"failure", "timed_out", "action_required"}, check.Conclusion) {
@@ -90,7 +100,11 @@ func publicCrates(records []kernel.ProductionRecord, now int64) []opgraph.Crate 
 				at = merged.UnixMilli()
 			}
 			if now-at <= shippedFor.Milliseconds() {
-				crates = append(crates, opgraph.Crate{Key: key, Station: 3, Fault: blocked[key]})
+				station := 3
+				if deployedAt, ok := deployed[record.Repository]; ok && deployedAt < at {
+					station = 2
+				}
+				crates = append(crates, opgraph.Crate{Key: key, Station: station, Fault: blocked[key]})
 			}
 		case "open":
 			current := pr.Review.Head != "" && pr.Review.Head == pr.Head

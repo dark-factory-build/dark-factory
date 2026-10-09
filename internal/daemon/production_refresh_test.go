@@ -162,3 +162,67 @@ func TestARerunReplacesTheCheckItRetried(t *testing.T) {
 		t.Fatalf("the re-run did not replace the failure: %+v", got)
 	}
 }
+
+// The github deploys adapter: a successful production deployment changes
+// over the repository's only deployed unit and a fresh failure counts as its
+// error; a preview, an in-progress deploy and an old failure draw nothing.
+// The newest successful production creation time is what ships merges.
+func TestDeploymentsChangeOverTheDeployedUnit(t *testing.T) {
+	graph, err := opgraph.Infer("s", []opgraph.Repository{{ID: "r1", Name: "app", Files: map[string][]byte{"fly.toml": []byte("app = \"web\"\n")}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var project kernel.ProjectID
+	daemon := &Daemon{graphs: map[kernel.ProjectID]graphSnapshot{project: {value: projectGraph{graph: graph}}}}
+	units := daemon.deployedUnits(project, "r1")
+	if len(units) != 1 || units[0] != "web" || len(daemon.deployedUnits(project, "r2")) != 0 {
+		t.Fatalf("deployed units %v", units)
+	}
+	now := time.Date(2026, 10, 9, 12, 0, 0, 0, time.UTC)
+	stamp := func(ago time.Duration) string { return now.Add(-ago).Format(time.RFC3339) }
+	deployment := func(environment string, production bool, state string, created, updated time.Duration) string {
+		return fmt.Sprintf(`{"id":1,"environment":%q,"production_environment":%t,"sha":"%s","ref":"main","created_at":%q,"state":%q,"updated_at":%q}`, environment, production, strings.Repeat("a", 40), stamp(created), state, stamp(updated))
+	}
+	var calls []string
+	call := func(_ context.Context, request json.RawMessage, _ map[string]uint64) (json.RawMessage, error) {
+		calls = append(calls, string(request))
+		list := strings.Join([]string{
+			deployment("Production", true, "in_progress", time.Minute, time.Minute),
+			deployment("Preview", false, "success", 2*time.Minute, 2*time.Minute),
+			deployment("Production", true, "failure", 3*time.Minute, 3*time.Minute),
+			deployment("Production", true, "success", 10*time.Minute, 8*time.Minute),
+			deployment("Production", true, "error", 2*time.Hour, 2*time.Hour),
+		}, ",")
+		return json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"structuredContent":{"deployments":[` + list + `]}}}`), nil
+	}
+	store := opgraph.NewRuntime(time.Hour)
+	deployedAt, err := recordDeployments(context.Background(), call, "o/r", 1, units, nil, store, now.UnixMilli())
+	if err != nil || deployedAt == nil || *deployedAt != now.Add(-10*time.Minute).UnixMilli() {
+		t.Fatalf("deployed at %v, %v", deployedAt, err)
+	}
+	if len(calls) != 1 || !strings.Contains(calls[0], `"name":"list_deployments"`) || !strings.Contains(calls[0], `"per_page":30`) {
+		t.Fatalf("calls %v", calls)
+	}
+	observations, coverage := store.Snapshot(now.UnixMilli())
+	live := opgraph.Overlay("s", graph, observations, coverage, nil, now.UnixMilli(), runtimeWindow.Milliseconds())
+	for _, node := range live.Graph.Nodes {
+		if node.Label != "web" {
+			continue
+		}
+		status := live.Nodes[node.ID]
+		changed := now.Add(-8 * time.Minute).Truncate(time.Minute).Add(time.Minute).UnixMilli()
+		if status.DeployedAt != changed || status.ErrorRate != 1 || status.State != "failing" || len(coverage) != 0 {
+			t.Fatalf("web %+v, coverage %v", status, coverage)
+		}
+		// Several deployed units and no services mapping: nothing lands.
+		quiet := opgraph.NewRuntime(time.Hour)
+		if _, err := recordDeployments(context.Background(), call, "o/r", 1, []string{"web", "worker"}, nil, quiet, now.UnixMilli()); err != nil {
+			t.Fatal(err)
+		}
+		if held, _ := quiet.Snapshot(now.UnixMilli()); len(held) != 0 {
+			t.Fatalf("unmapped deployments drawn: %+v", held)
+		}
+		return
+	}
+	t.Fatal("no web unit")
+}

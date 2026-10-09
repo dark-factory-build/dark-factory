@@ -10,8 +10,8 @@ use crate::{
     BrokerState,
     access::AccessAuthority,
     github_app::{
-        AppAuthority, CreateIssue, CreatePullRequest, EnqueuePullRequest, ListIssues,
-        ListPullRequests, ObserveFile, ObserveIssue, ObservePullRequestChecks,
+        AppAuthority, CreateIssue, CreatePullRequest, EnqueuePullRequest, ListDeployments,
+        ListIssues, ListPullRequests, ObserveFile, ObserveIssue, ObservePullRequestChecks,
         ObservePullRequestMerge, ObserveRef, ObserveRepository, ObserveTree, OperationError,
         PublishCommit, SubmitPullRequestReview, UpdatePullRequestBody, canonical_operation_id,
     },
@@ -564,6 +564,46 @@ fn tools() -> Value {
         },
         "annotations": {"readOnlyHint": true, "destructiveHint": false, "openWorldHint": true}
     }, {
+        "name": "list_deployments",
+        "title": "List deployments",
+        "description": "Return the newest GitHub Deployments, newest first, each with its newest status's state and time (pending when it has none). No URLs, payloads or creators.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "repository": {"type": "string", "pattern": "^[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}$"},
+                "per_page": {"type": "integer", "minimum": 1, "maximum": 30}
+            },
+            "required": ["repository", "per_page"],
+            "additionalProperties": false
+        },
+        "outputSchema": {
+            "type": "object",
+            "properties": {
+                "deployments": {
+                    "type": "array",
+                    "maxItems": 30,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "integer", "minimum": 1},
+                            "environment": {"type": "string"},
+                            "production_environment": {"type": "boolean"},
+                            "sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+                            "ref": {"type": "string"},
+                            "created_at": {"type": "string"},
+                            "state": {"type": "string", "enum": ["error", "failure", "inactive", "in_progress", "queued", "pending", "success"]},
+                            "updated_at": {"type": "string"}
+                        },
+                        "required": ["id", "environment", "production_environment", "sha", "ref", "created_at", "state", "updated_at"],
+                        "additionalProperties": false
+                    }
+                }
+            },
+            "required": ["deployments"],
+            "additionalProperties": false
+        },
+        "annotations": {"readOnlyHint": true, "destructiveHint": false, "openWorldHint": true}
+    }, {
         "name": "observe_pull_request_merge",
         "title": "Observe an exact-head merge outcome",
         "description": "Bind to the completed App enqueue attempt and return whether that exact pull request head is still in its default-branch merge queue, merged after the attempt, or no longer queued. NOT_QUEUED on an open pull request carries the newest completed merge-group run that built the head, when one is readable.",
@@ -907,6 +947,15 @@ async fn call_tool(id: Value, request: &Map<String, Value>, mcp: &McpState) -> R
                 Ok(result) => {
                     serialized_tool_result(id, &result, "Exact-head check runs were observed.")
                 }
+                Err(error) => operation_error(id, error),
+            }
+        }
+        Some("list_deployments") => {
+            let Ok(arguments) = serde_json::from_value::<ListDeployments>(arguments) else {
+                return json_rpc_error(id, -32602, "Invalid params");
+            };
+            match mcp.app.list_deployments(arguments).await {
+                Ok(result) => serialized_tool_result(id, &result, "Deployments were observed."),
                 Err(error) => operation_error(id, error),
             }
         }

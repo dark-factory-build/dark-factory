@@ -1,11 +1,13 @@
 package daemon
 
 import (
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"path"
 	"strings"
 	"time"
@@ -66,6 +68,11 @@ func (daemon *Daemon) refreshProduction(ctx context.Context, project kernel.Proj
 			return err
 		}
 		observation.ObservedAt = at.Int64()
+		if units := daemon.deployedUnits(project, repository.ID.String()); len(units) > 0 {
+			if observation.DeployedAt, err = recordDeployments(ctx, daemon.github.MCP, identity.PublicationRepository, githubID, units, daemon.observeSources(), daemon.runtimeStore(), at.Int64()); err != nil {
+				LogFactoryd(daemon.log, "factoryd: refresh %s deployments: %v\n", identity.PublicationRepository, err)
+			}
+		}
 		prepared := make([]review.Operation, 0, len(corrections))
 		for _, correction := range corrections {
 			if !published[correction.Number] {
@@ -237,6 +244,96 @@ func recordCIObservations(store *opgraph.Runtime, repository string, observation
 	if observation.Unavailable == "" && observation.Overflow == 0 {
 		store.Cover(opgraph.Coverage{Source: "github", Environment: "ci", Unit: unit, Keys: opgraph.CIKeys, AsOf: now, TTL: 2 * productionRefreshInterval.Milliseconds()})
 	}
+}
+
+// deployedUnits are the service names of a repository's units that a
+// deployment declaration names, from the plant graph last built; none
+// before the first build.
+func (daemon *Daemon) deployedUnits(project kernel.ProjectID, repository string) []string {
+	daemon.graphMu.Lock()
+	graph := daemon.graphs[project].value.graph
+	daemon.graphMu.Unlock()
+	var units []string
+	for _, node := range graph.Nodes {
+		if name := node.Selectors["service.name"]; node.Deployed && name != "" && len(node.Modules) > 0 && node.Modules[0].Repository == repository {
+			units = append(units, name)
+		}
+	}
+	return units
+}
+
+// recordDeployments is the github deploys adapter. Each deployment GitHub
+// records whose newest status is success is a deploy on its unit: the one a
+// github source in observe.json maps its environment to in services, else,
+// for the production environment, the repository's only deployed unit. A
+// failure or error since the last refresh counts as an error there; other
+// states are not drawn, and no coverage is claimed. It returns the newest
+// successful production deployment's creation time (0 when production has
+// none), nil when GitHub records no production deployment.
+func recordDeployments(ctx context.Context, call maintainerMCP, repository string, githubID uint64, units []string, sources []observeSource, store *opgraph.Runtime, now int64) (*int64, error) {
+	content, err := maintainerTool(ctx, call, repository, githubID, "list_deployments", map[string]any{"repository": repository, "per_page": 30})
+	if err != nil {
+		return nil, err
+	}
+	var value struct {
+		Deployments []struct {
+			Environment string `json:"environment"`
+			Production  bool   `json:"production_environment"`
+			CreatedAt   string `json:"created_at"`
+			State       string `json:"state"`
+			UpdatedAt   string `json:"updated_at"`
+		} `json:"deployments"`
+	}
+	if json.Unmarshal(content, &value) != nil || len(value.Deployments) > 30 {
+		return nil, fmt.Errorf("invalid deployments response")
+	}
+	// ponytail: one production environment and alias map per home, not per
+	// repository; key them by repository if two systems ever disagree.
+	production, aliases := "", map[string]string{}
+	for _, source := range sources {
+		if source.Adapter == "github" {
+			production = cmp.Or(source.Environment, production)
+			maps.Copy(aliases, source.Services)
+		}
+	}
+	var deployedAt *int64
+	for _, deployment := range value.Deployments {
+		created, createdErr := time.Parse(time.RFC3339, deployment.CreatedAt)
+		updated, updatedErr := time.Parse(time.RFC3339, deployment.UpdatedAt)
+		if createdErr != nil || updatedErr != nil {
+			return nil, fmt.Errorf("invalid deployment time")
+		}
+		isProduction := deployment.Environment == production || production == "" && deployment.Production
+		if isProduction {
+			at := int64(0)
+			if deployedAt != nil {
+				at = *deployedAt
+			}
+			if deployment.State == "success" {
+				at = max(at, created.UnixMilli())
+			}
+			deployedAt = &at
+		}
+		unit := aliases[deployment.Environment]
+		if unit == "" && isProduction && len(units) == 1 {
+			unit = units[0]
+		}
+		item := opgraph.Observation{Source: "github", Environment: deployment.Environment, Start: updated.UnixMilli(), End: updated.UnixMilli(),
+			Attributes: map[string]string{"service.name": unit}, Count: 1}
+		switch {
+		case unit == "":
+		case deployment.State == "success":
+			item.Kind = "deploy"
+			store.Record(item)
+		case (deployment.State == "failure" || deployment.State == "error") && item.End > now-productionRefreshInterval.Milliseconds():
+			// Read again every refresh, a failure counts once: refreshes are
+			// at least an interval apart. ponytail: one older than that when
+			// first read is not counted; remember the last refresh if it matters.
+			item.Kind, item.Errors = "internal", 1
+			store.Record(item)
+		}
+	}
+	return deployedAt, nil
 }
 
 // readMaintainerChecks maps observe_pull_request_checks to one record per

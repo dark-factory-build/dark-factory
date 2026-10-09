@@ -35,7 +35,7 @@ func TestPublicCratesMatchTheConsoleRule(t *testing.T) {
 	}
 	var got, want []string
 	for _, crate := range publicCrates(fixture.Records, fixture.Now) {
-		got = append(got, fmt.Sprintf("%s %d %v", strings.TrimPrefix(crate.Key, "owner/repo#"), crate.Station, crate.Fault))
+		got = append(got, fmt.Sprintf("%s %d %v", crate.Key[strings.LastIndex(crate.Key, "#")+1:], crate.Station, crate.Fault))
 	}
 	for _, crate := range fixture.Crates {
 		want = append(want, fmt.Sprintf("%v %v %v", crate[0], crate[1], crate[2]))

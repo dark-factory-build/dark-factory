@@ -270,7 +270,7 @@ func (run *inference) resolve(system string, repositories []Repository) (Graph, 
 	for _, candidate := range units {
 		node := builder.Node(Processor, "", candidate.repo+":"+candidate.key, candidate.label)
 		candidate.id = node.ID
-		node.Runtime = candidate.runtime
+		node.Runtime, node.Deployed = candidate.runtime, candidate.deployed
 		at := candidate.at
 		node.Add(candidate.evidence, &at)
 		modules := candidate.modules
