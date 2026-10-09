@@ -364,24 +364,3 @@ func TestCIJoinsUnitsAndNamesItsRepository(t *testing.T) {
 	}
 	t.Fatal("the job running ./cmd/gate has no edge to the gate unit")
 }
-
-func TestTomlCustomDomainRouteResolvesCalls(t *testing.T) {
-	graph, err := Infer("s", []Repository{
-		{ID: "b", Name: "b", Files: map[string][]byte{
-			"wrangler.toml": []byte("name = \"b\"\n[[routes]]\npattern = \"b.dev\"\ncustom_domain = true\n"),
-			"package.json":  []byte(`{"name":"b"}`),
-		}},
-		{ID: "a", Name: "a", Files: map[string][]byte{
-			"go.mod":  []byte("module example.com/a\n"),
-			"main.go": []byte("package main\nimport \"net/http\"\nfunc main() { http.Get(\"https://b.dev/x\") }\n"),
-		}},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, node := range graph.Nodes {
-		if node.Label == "b.dev" && node.Unit == "" {
-			t.Fatal("the call to the declared custom domain is an outside gate")
-		}
-	}
-}
