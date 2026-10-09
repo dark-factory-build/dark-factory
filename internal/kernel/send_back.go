@@ -47,6 +47,9 @@ func (store *Store) SendBackPublishedReview(ctx context.Context, project Project
 			if !strings.EqualFold(observed.Head, head) {
 				return Task{}, tx.Rollback(ErrSuperseded)
 			}
+			if observed.HeadRepository != "" && !strings.EqualFold(observed.HeadRepository, repository) {
+				return Task{}, tx.Rollback(ErrNotFound)
+			}
 			var repositoryBytes []byte
 			if err := tx.connection.QueryRowContext(ctx, `SELECT r.id FROM project_repositories r JOIN repository_source_identities i ON i.repository_id = r.id WHERE r.project_id = ? AND lower(i.publication_repository) = ? LIMIT 1`, project.Bytes(), repository).Scan(&repositoryBytes); err != nil {
 				if errors.Is(err, sql.ErrNoRows) {
