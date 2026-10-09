@@ -158,6 +158,9 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 		return true, json.Unmarshal(observed.Result, result)
 	}
 	branch := "factory/" + c.Change.String()[:12]
+	if c.Repair && c.Branch != "" {
+		branch = c.Branch
+	}
 	refHead := func(branch string) (string, error) {
 		response, err := call(ctx, "observe_ref", map[string]any{"repository": repo, "branch": branch})
 		var ref struct {

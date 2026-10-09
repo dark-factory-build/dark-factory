@@ -47,6 +47,17 @@ func (store *Store) SendBackPublishedReview(ctx context.Context, project Project
 			if !strings.EqualFold(observed.Head, head) {
 				return Task{}, tx.Rollback(ErrSuperseded)
 			}
+			var repositoryBytes []byte
+			if err := tx.connection.QueryRowContext(ctx, `SELECT r.id FROM project_repositories r JOIN repository_source_identities i ON i.repository_id = r.id WHERE r.project_id = ? AND lower(i.publication_repository) = ? LIMIT 1`, project.Bytes(), repository).Scan(&repositoryBytes); err != nil {
+				if errors.Is(err, sql.ErrNoRows) {
+					return Task{}, tx.Rollback(ErrNotFound)
+				}
+				return Task{}, tx.Rollback(err)
+			}
+			repositoryID, err := RepositoryIDFromBytes(repositoryBytes)
+			if err != nil {
+				return Task{}, tx.Rollback(err)
+			}
 			var ids [2][IDBytes]byte
 			for index := range ids {
 				if _, err := rand.Read(ids[index][:]); err != nil || ids[index] == ([IDBytes]byte{}) {
@@ -59,7 +70,7 @@ func (store *Store) SendBackPublishedReview(ctx context.Context, project Project
 			taskID, _ := TaskIDFromBytes(ids[0][:])
 			incarnationID, _ := IncarnationIDFromBytes(ids[1][:])
 			instruction := fmt.Sprintf("Repair %s#%d at exact head %s.", repository, pull, head)
-			created, err := insertTaskOnConnection(ctx, tx.connection, NewTask{ID: taskID, ProjectID: project, IncarnationID: incarnationID, Title: fmt.Sprintf("Repair %s#%d", repository, pull), Body: instruction}, at)
+			created, err := insertTaskOnConnection(ctx, tx.connection, NewTask{ID: taskID, ProjectID: project, RepositoryID: repositoryID, IncarnationID: incarnationID, Title: fmt.Sprintf("Repair %s#%d", repository, pull), Body: instruction}, at)
 			if err != nil {
 				return Task{}, tx.Rollback(err)
 			}
