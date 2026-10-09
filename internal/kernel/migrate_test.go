@@ -12,27 +12,18 @@ import (
 	"testing"
 )
 
-// A current home opens untouched; a v35 home (the same schema) migrates its
-// 'enqueuing' review operations to 'enqueued' and keeps every other row.
-func TestCurrentAndV35HomesOpenWithEveryRow(t *testing.T) {
-	for _, v35 := range []bool{false, true} {
-		t.Run(fmt.Sprintf("v35=%v", v35), func(t *testing.T) { testHomeOpensWithEveryRow(t, v35) })
+// A current home opens untouched; a v36 home (the current schema without
+// task_automatic_events) migrates and keeps every row.
+func TestCurrentAndV36HomesOpenWithEveryRow(t *testing.T) {
+	for _, v36 := range []bool{false, true} {
+		t.Run(fmt.Sprintf("v36=%v", v36), func(t *testing.T) { testHomeOpensWithEveryRow(t, v36) })
 	}
 }
 
-func testHomeOpensWithEveryRow(t *testing.T, v35 bool) {
+func testHomeOpensWithEveryRow(t *testing.T, v36 bool) {
 	ctx := context.Background()
 	store, path := newTestStore(t)
 	seedDurableAuthority(t, store)
-	operation := map[string]any{"id": "allowed", "state": "enqueuing", "enqueue_id": "e", "request": map[string]any{"Repository": "example/factory", "PullNumber": 7, "Head": strings.Repeat("a", 40)}}
-	if err := store.RecordReviewOperation(ctx, projectID(t, 1), "example/factory", "allowed", operation, mustTime(t, 6)); err != nil {
-		t.Fatal(err)
-	}
-	if v35 {
-		if _, err := store.writer.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", v35UserVersion)); err != nil {
-			t.Fatal(err)
-		}
-	}
 	connection, err := store.readerConnection(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -40,6 +31,13 @@ func testHomeOpensWithEveryRow(t *testing.T, v35 bool) {
 	before := snapshotRows(t, ctx, connection)
 	if err := connection.Close(); err != nil {
 		t.Fatal(err)
+	}
+	if v36 {
+		for _, statement := range []string{"DROP TABLE task_automatic_events", fmt.Sprintf("PRAGMA user_version = %d", v36UserVersion)} {
+			if _, err := store.writer.ExecContext(ctx, statement); err != nil {
+				t.Fatal(err)
+			}
+		}
 	}
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
@@ -58,13 +56,8 @@ func testHomeOpensWithEveryRow(t *testing.T, v35 bool) {
 	if _, version, err := inspectIdentity(ctx, again); err != nil || version != userVersion {
 		t.Fatalf("user_version = %d, %v, want %d", version, err, userVersion)
 	}
-	if v35 {
-		for index, row := range before["production_records"] {
-			before["production_records"][index] = strings.Replace(row, `"state":"enqueuing"`, `"state":"enqueued"`, 1)
-		}
-	}
 	if after := snapshotRows(t, ctx, again); !reflect.DeepEqual(before, after) {
-		t.Fatalf("opening the home changed rows:\n%v\n%v", before["production_records"], after["production_records"])
+		t.Fatal("opening the home changed rows")
 	}
 }
 
@@ -109,7 +102,11 @@ func snapshotRows(t *testing.T, ctx context.Context, connection *sql.Conn) map[s
 // re-pins here.
 func TestSchemaDigestsArePinned(t *testing.T) {
 	sum := sha256.Sum256([]byte(strings.Join(schemaStatements, "\n")))
-	if got := hex.EncodeToString(sum[:]); got != "bfc5b62285b00148bc836d389f684eb3112e551952f477e27354cf35174460f0" {
+	if got := hex.EncodeToString(sum[:]); got != "819c191d4e411ad35a2f7cf19db739d0492d0f8cf1c9c5fe0bd50a5197b5bb6c" {
 		t.Errorf("current schema digest = %s", got)
+	}
+	sum = sha256.Sum256([]byte(strings.Join(v36SchemaStatements(), "\n")))
+	if got := hex.EncodeToString(sum[:]); got != "bfc5b62285b00148bc836d389f684eb3112e551952f477e27354cf35174460f0" {
+		t.Errorf("v36 schema digest = %s", got)
 	}
 }

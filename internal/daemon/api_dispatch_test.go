@@ -1371,7 +1371,7 @@ func TestOverseerPastAProjectLimitIsRequeuedAndAWorkerCancelled(t *testing.T) {
 	}{
 		{57, "orchestrator", 60, kernel.OutcomeFailed, kernel.OverseerRunLimitDetail},
 		{67, "orchestrator", kernel.MaxOverseerRunSeconds, kernel.OutcomeFailed, kernel.OverseerRunLimitDetail},
-		{77, "worker", 60, kernel.OutcomeCancelled, runLimitDetail},
+		{77, "worker", 60, kernel.OutcomeCancelled, kernel.RunLimitDetail},
 	} {
 		fixture := newDispatchFixture(t)
 		active := prepareActiveAttemptInProjectWithProvider(t, fixture, test.seed, testID(test.seed), test.role, "codex")

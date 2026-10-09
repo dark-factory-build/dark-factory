@@ -285,11 +285,8 @@ func TestOverseerWakeRule(t *testing.T) {
 	if again := wake(at + 2*rewake); len(again) != 0 {
 		t.Fatalf("second carrier while one is queued = %+v", again)
 	}
-	carrier := first[0]
 	for round := range 4 {
-		if _, err := store.UpdateTask(ctx, carrier.ID, carrier.Revision, TaskPatch{Cancel: true}, mustTime(t, at+1)); err != nil {
-			t.Fatal(err)
-		}
+		settleCarrier(t, store, at+1, byte(31+21*round), "ran")
 		if early := wake(at + rewake - 1); len(early) != 0 {
 			t.Fatalf("round %d re-woke early = %+v", round, early)
 		}
@@ -303,7 +300,7 @@ func TestOverseerWakeRule(t *testing.T) {
 		if len(next) != 1 {
 			t.Fatalf("re-wake %d = %+v", round+1, next)
 		}
-		carrier, at = next[0], at+rewake
+		at += rewake
 	}
 	// Publication clears it.
 	pr := ProductionPullRequest{Number: 7, Title: "Ship", URL: "https://github.com/example/factory/pull/7", Head: hex.EncodeToString(head.Bytes()), Branch: "factory/" + change.ID.String()[:12], Base: "main", State: "open", Review: ProductionReview{Head: hex.EncodeToString(head.Bytes()), State: "unknown"}}

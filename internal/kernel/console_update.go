@@ -34,6 +34,7 @@ type TaskPatch struct {
 	Priority        *int64
 	AssignedAgentID *AgentID
 	Cancel          bool
+	expired         bool // factoryd's blocked expiry, recorded as an automatic end
 }
 
 // UpdateAgent applies one bounded configuration edit to an existing agent at
@@ -299,6 +300,11 @@ func (store *Store) updateTask(ctx context.Context, digest *AttemptDigest, id Ta
 	if task.Revision != expected || at.Int64() < task.UpdatedAt.Int64() {
 		return Task{}, tx.Rollback(ErrRevisionConflict)
 	}
+	if retire {
+		if err := refuseAwaitedTask(ctx, tx.connection, task.ID); err != nil {
+			return Task{}, tx.Rollback(err)
+		}
+	}
 	if patch.Title != nil {
 		task.Title = *patch.Title
 	}
@@ -348,6 +354,11 @@ func (store *Store) updateTask(ctx context.Context, digest *AttemptDigest, id Ta
 			return Task{}, tx.Rollback(err)
 		}
 	}
+	if patch.expired {
+		if _, err := tx.connection.ExecContext(ctx, `INSERT INTO task_automatic_events(task_id, task_revision, kind, at_ms) VALUES (?, ?, 'blocked_expired', ?)`, id.Bytes(), expected.Int64()+1, at.Int64()); err != nil {
+			return Task{}, tx.Rollback(err)
+		}
+	}
 	if err := appendInvalidations(ctx, tx.connection, at, []pendingInvalidation{{kind: EntityTask, id: id.Bytes(), revision: expected.Int64() + 1}}); err != nil {
 		return Task{}, tx.Rollback(err)
 	}
@@ -370,9 +381,9 @@ const (
 	BlockedExpiryReason = "expired: blocked 24h with no action"
 )
 
-// ExpireBlockedTasks retires, through the operator cancel path, every task
-// blocked unchanged for BlockedExpiry that has no open human request. Its
-// Change is left retained. A task changed since the read loses the revision
+// ExpireBlockedTasks retires, through the operator cancel path and recorded as
+// an automatic end, every task blocked unchanged for BlockedExpiry that has no
+// open human request. Its Change is left retained. A task changed since the read loses the revision
 // race and is reconsidered on a later tick.
 func (store *Store) ExpireBlockedTasks(ctx context.Context, at UnixMillis) ([]TaskID, error) {
 	var ids [][]byte
@@ -407,7 +418,7 @@ func (store *Store) ExpireBlockedTasks(ctx context.Context, at UnixMillis) ([]Ta
 		if err != nil {
 			return expired, err
 		}
-		_, err = store.UpdateTaskForOperator(ctx, id, revision, TaskPatch{Cancel: true}, at)
+		_, err = store.UpdateTaskForOperator(ctx, id, revision, TaskPatch{Cancel: true, expired: true}, at)
 		if errors.Is(err, ErrConflict) || errors.Is(err, ErrRevisionConflict) {
 			continue
 		}

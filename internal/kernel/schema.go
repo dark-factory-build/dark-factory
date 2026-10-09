@@ -9,7 +9,7 @@ import (
 
 const (
 	applicationID = 0x4446474f
-	userVersion   = 36
+	userVersion   = 37
 
 	// SQLite reserves the exact lower-case "sqlite_" prefix. Use a literal,
 	// binary prefix test: LIKE would treat '_' as a wildcard and hide names
@@ -628,7 +628,20 @@ var schemaStatements = []string{
     payload BLOB NOT NULL CHECK (length(payload) <= 1048576 AND length(payload) <= head - floor),
     captured_at_ms INTEGER NOT NULL CHECK (captured_at_ms >= 0)
 ) STRICT, WITHOUT ROWID`,
+	taskAutomaticEventsTable,
 }
+
+// taskAutomaticEventsTable records what factoryd did to a task on its own,
+// at the task row revision it left: a blocked expiry, which is the cause of
+// the task's end only while the task is still at that revision (any later
+// transition, an operator's cancel included, moves it), and each intake retry,
+// which the retry bound counts. An operator cancel records nothing.
+const taskAutomaticEventsTable = `CREATE TABLE task_automatic_events (
+    task_id BLOB NOT NULL CHECK (length(task_id) = 16) REFERENCES tasks(id),
+    task_revision INTEGER NOT NULL CHECK (task_revision >= 1),
+    kind TEXT NOT NULL CHECK (kind IN ('blocked_expired', 'intake_retried')),
+    at_ms INTEGER NOT NULL CHECK (at_ms >= 0)
+) STRICT`
 
 type schemaObject struct {
 	kind string

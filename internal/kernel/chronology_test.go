@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -1542,4 +1543,298 @@ func activateResourcesAt(t *testing.T, store *Store, run Run, at int64) Run {
 		t.Fatal(err)
 	}
 	return activeRun
+}
+
+// A cancelled worker task can be retried: one that ran starts its next work
+// revision; shared work cancelled before admission is queued again as it was.
+func TestRetryTaskRequeuesCancelledTask(t *testing.T) {
+	ctx := context.Background()
+	cancelled, err := NewCancelledProposal("expired")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, finalizing := finalizingReleasedRun(t, RoleWorker, cancelled)
+	defer store.Close()
+	if _, err := finalizeTestRun(t, store, finalizing, 60); err != nil {
+		t.Fatal(err)
+	}
+	task, _, err := store.Task(ctx, finalizing.TaskID)
+	if err != nil || task.Status != TaskCancelled {
+		t.Fatalf("settled task = %+v, %v", task, err)
+	}
+	if task, err = store.RetryTaskForOperator(ctx, task.ID, task.Revision, AgentID{}, mustTime(t, 70)); err != nil || task.Status != TaskQueued || task.WorkRevision.Int64() != 2 || task.AssignedAgentID != finalizing.AgentID {
+		t.Fatalf("retried ran task = %+v, %v", task, err)
+	}
+	shared, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 90), IncarnationID: incarnationID(t, 91), ProjectID: finalizing.ProjectID, Title: "shared"}, mustTime(t, 71))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if shared, err = store.UpdateTask(ctx, shared.ID, shared.Revision, TaskPatch{Cancel: true}, mustTime(t, 72)); err != nil {
+		t.Fatal(err)
+	}
+	if shared, err = store.RetryTaskForOperator(ctx, shared.ID, shared.Revision, AgentID{}, mustTime(t, 73)); err != nil || shared.Status != TaskQueued || shared.WorkRevision.Int64() != 1 || shared.AssignedAgentID != (AgentID{}) {
+		t.Fatalf("retried unadmitted task = %+v, %v", shared, err)
+	}
+}
+
+// An intake retry follows only an automatic end (a failure, a run-limit
+// cancel, a blocked expiry), never an operator's cancel, and stops at its
+// bound of recorded retries.
+func TestRetryIntakeTaskOnlyAfterAutomaticEndWithinBound(t *testing.T) {
+	ctx := context.Background()
+	failed, _ := NewFailureProposal(FailureInternal, "crashed")
+	limited, _ := NewCancelledProposal(RunLimitDetail)
+	stopped, _ := NewCancelledProposal("stopped by operator")
+	blocked, _ := NewBlockedProposal("needs a decision")
+	for _, test := range []struct {
+		name      string
+		proposal  Proposal
+		end       func(*Store, Task) error
+		automatic bool
+	}{
+		{"failure", failed, nil, true},
+		{"run limit", limited, nil, true},
+		{"operator stop", stopped, nil, false},
+		{"blocked expiry", blocked, func(store *Store, _ Task) error {
+			expired, err := store.ExpireBlockedTasks(ctx, mustTime(t, 60+BlockedExpiry.Milliseconds()))
+			if err == nil && len(expired) != 1 {
+				err = errors.New("expiry did not cancel the blocked task")
+			}
+			return err
+		}, true},
+		{"operator cancel of a blocked task", blocked, func(store *Store, task Task) error {
+			_, err := store.UpdateTaskForOperator(ctx, task.ID, task.Revision, TaskPatch{Cancel: true}, mustTime(t, 61))
+			return err
+		}, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store, finalizing := finalizingReleasedRun(t, RoleWorker, test.proposal)
+			defer store.Close()
+			if _, err := finalizeTestRun(t, store, finalizing, 60); err != nil {
+				t.Fatal(err)
+			}
+			task, _, err := store.Task(ctx, finalizing.TaskID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if test.end != nil {
+				if err := test.end(store, task); err != nil {
+					t.Fatal(err)
+				}
+				if task, _, err = store.Task(ctx, finalizing.TaskID); err != nil {
+					t.Fatal(err)
+				}
+			}
+			at := mustTime(t, 100+BlockedExpiry.Milliseconds())
+			if !test.automatic {
+				if _, err := store.RetryIntakeTask(ctx, task.ID, task.Revision, at); !errors.Is(err, ErrConflict) {
+					t.Fatalf("operator end retried: %v", err)
+				}
+				return
+			}
+			// The bound's worth of recorded retries, all at this very revision
+			// (a retry of a task cancelled before admission keeps it): refused
+			// at the bound, admitted one below it.
+			for range IntakeRetryLimit {
+				if _, err := store.writer.ExecContext(ctx, `INSERT INTO task_automatic_events(task_id, task_revision, kind, at_ms) VALUES (?, ?, 'intake_retried', 1)`, task.ID.Bytes(), task.Revision.Int64()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := store.RetryIntakeTask(ctx, task.ID, task.Revision, at); !errors.Is(err, ErrConflict) {
+				t.Fatalf("retry past the bound: %v", err)
+			}
+			if _, err := store.writer.ExecContext(ctx, `DELETE FROM task_automatic_events WHERE rowid = (SELECT max(rowid) FROM task_automatic_events)`); err != nil {
+				t.Fatal(err)
+			}
+			if retried, err := store.RetryIntakeTask(ctx, task.ID, task.Revision, at); err != nil || retried.Status != TaskQueued {
+				t.Fatalf("automatic end not retried: %+v, %v", retried, err)
+			}
+		})
+	}
+}
+
+// A task a continuation waits on keeps its work revision: neither a retry, a
+// send-back nor a blocked cancel may strand the continuation.
+func TestAwaitedTaskRefusesRetryAndSendBack(t *testing.T) {
+	ctx := context.Background()
+	blocked, _ := NewBlockedProposal("waits on a card")
+	store, finalizing := finalizingReleasedRun(t, RoleWorker, blocked)
+	defer store.Close()
+	if _, err := finalizeTestRun(t, store, finalizing, 60); err != nil {
+		t.Fatal(err)
+	}
+	task, _, err := store.Task(ctx, finalizing.TaskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx, err := store.beginValidatedWrite(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := insertWaitingContinuation(ctx, tx.connection, task, ConditionHumanRequest, ContinuationConditionID(humanKey(9)), mustRevision(t, 1), mustTime(t, 61)); err != nil {
+		t.Fatal(tx.Rollback(err))
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	tx.Close()
+	if _, err := store.RetryTaskForOperator(ctx, task.ID, task.Revision, AgentID{}, mustTime(t, 62)); !errors.Is(err, ErrConflict) {
+		t.Fatalf("retry of an awaited task: %v", err)
+	}
+	if _, err := store.SendBackTask(ctx, task.ID, task.Revision, "again", mustTime(t, 62)); !errors.Is(err, ErrConflict) {
+		t.Fatalf("send-back of an awaited task: %v", err)
+	}
+	if _, err := store.UpdateTaskForOperator(ctx, task.ID, task.Revision, TaskPatch{Cancel: true}, mustTime(t, 62)); !errors.Is(err, ErrConflict) {
+		t.Fatalf("blocked cancel of an awaited task: %v", err)
+	}
+	if current, _, err := store.Task(ctx, task.ID); err != nil || current.Revision != task.Revision {
+		t.Fatalf("awaited task changed: %+v, %v", current, err)
+	}
+}
+
+// The overseer retries automatic ends only: an operator's cancel is the
+// operator's to undo.
+func TestOverseerRetryLeavesAnOperatorCancel(t *testing.T) {
+	ctx := context.Background()
+	store, terminal, _ := terminalPreRunningWorker(t)
+	defer store.Close()
+	overseerKeys, _ := runningOverseerKeys(t, store, terminal.ProjectID, 35)
+	cancelled, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 90), IncarnationID: incarnationID(t, 91), ProjectID: terminal.ProjectID, Title: "shared"}, mustTime(t, 43))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cancelled, err = store.UpdateTaskForOperator(ctx, cancelled.ID, cancelled.Revision, TaskPatch{Cancel: true}, mustTime(t, 44)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.RetryTaskForOverseer(ctx, overseerKeys.AttemptDigest, cancelled.ID, cancelled.Revision, AgentID{}, mustTime(t, 45)); !errors.Is(err, ErrConflict) {
+		t.Fatalf("overseer revived an operator cancel: %v", err)
+	}
+	if _, err := store.RetryTaskForOperator(ctx, cancelled.ID, cancelled.Revision, AgentID{}, mustTime(t, 45)); err != nil {
+		t.Fatalf("operator retry of its own cancel: %v", err)
+	}
+	failed, _, err := store.Task(ctx, terminal.TaskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.RetryTaskForOverseer(ctx, overseerKeys.AttemptDigest, failed.ID, failed.Revision, AgentID{}, mustTime(t, 46)); err != nil {
+		t.Fatalf("overseer retry of a failure: %v", err)
+	}
+}
+
+// The reviewer's sequence: blocked, expired (automatic), retried, cancelled by
+// the operator, retried again. The last retry must see the operator's cancel,
+// not the earlier expiry, for intake and the overseer alike.
+func TestRetryAfterExpiryLeavesTheOperatorsLaterCancel(t *testing.T) {
+	ctx := context.Background()
+	blocked, _ := NewBlockedProposal("needs a decision")
+	for _, overseer := range []bool{false, true} {
+		t.Run(fmt.Sprint("overseer=", overseer), func(t *testing.T) {
+			store, finalizing := finalizingReleasedRun(t, RoleWorker, blocked)
+			defer store.Close()
+			if _, err := finalizeTestRun(t, store, finalizing, 60); err != nil {
+				t.Fatal(err)
+			}
+			digest := runningOverseerDigest(t, store, finalizing.ProjectID, 61)
+			retry := func(task Task, at int64) (Task, error) {
+				if overseer {
+					return store.RetryTaskForOverseer(ctx, digest, task.ID, task.Revision, AgentID{}, mustTime(t, at))
+				}
+				return store.RetryIntakeTask(ctx, task.ID, task.Revision, mustTime(t, at))
+			}
+			expiry := 60 + BlockedExpiry.Milliseconds()
+			if expired, err := store.ExpireBlockedTasks(ctx, mustTime(t, expiry)); err != nil || len(expired) != 1 {
+				t.Fatalf("expiry = %v, %v", expired, err)
+			}
+			task, _, err := store.Task(ctx, finalizing.TaskID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if task, err = retry(task, expiry+1); err != nil || task.Status != TaskQueued {
+				t.Fatalf("retry after expiry = %+v, %v", task, err)
+			}
+			if task, err = store.UpdateTaskForOperator(ctx, task.ID, task.Revision, TaskPatch{Cancel: true}, mustTime(t, expiry+2)); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := retry(task, expiry+3); !errors.Is(err, ErrConflict) {
+				t.Fatalf("operator cancel revived: %v", err)
+			}
+		})
+	}
+}
+
+// The overseer leaves a withdrawn issue's task alone, even after a failure.
+func TestOverseerRetryLeavesAWithdrawnIssue(t *testing.T) {
+	ctx := context.Background()
+	store, source := intakeExactRevisionStore(t)
+	if _, err := store.SetIntakeSourceEnabled(ctx, source.ID, source.Revision, true, mustTime(t, 6)); err != nil {
+		t.Fatal(err)
+	}
+	accepted, err := store.AcceptIntakeSnapshot(ctx, source.ID, intakeSnapshotForTest(), mustTime(t, 7))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ImportIntakeAcceptance(ctx, accepted.ID, mustTime(t, 8)); err != nil {
+		t.Fatal(err)
+	}
+	candidate := changeID(t, 212)
+	keys := admissionKeys(t, 213, &candidate)
+	admission, err := store.AdmitNext(ctx, keys, mustTime(t, 10))
+	if err != nil || !admission.Admitted() {
+		t.Fatalf("worker admission = %+v, %v", admission, err)
+	}
+	run := *admission.Run
+	runtime := resourceOfKind(t, resourcesForRunTest(t, store, run.ID), ResourceRuntimeRoot)
+	runtimeIdentity, _ := NewPathResourceIdentity(301, 302)
+	if _, err := store.ActivateResource(ctx, run.ID, runtime.ID, runtime.Revision, runtimeIdentity, mustTime(t, 11)); err != nil {
+		t.Fatal(err)
+	}
+	failure, _ := NewFailureProposal(FailureInternal, "crashed")
+	finalizing, err := store.FailRun(ctx, run.ID, run.Revision, failure, mustTime(t, 11))
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime = resourceOfKind(t, resourcesForRunTest(t, store, run.ID), ResourceRuntimeRoot)
+	if _, err := store.ReleaseResource(ctx, run.ID, runtime.ID, runtime.Revision, runtime.Identity, mustTime(t, 12)); err != nil {
+		t.Fatal(err)
+	}
+	settlement, _ := NewAbandonedChangeSettlement(*admission.Run.AdmittedChangeRevision)
+	if _, err := store.FinalizeWorkerRun(ctx, finalizing.ID, finalizing.Revision, settlement, mustTime(t, 12)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.WithdrawIntakeAcceptance(ctx, accepted.ID, mustTime(t, 13)); err != nil {
+		t.Fatal(err)
+	}
+	digest := runningOverseerDigest(t, store, source.ProjectID, 14)
+	task, _, err := store.Task(ctx, accepted.TaskID)
+	if err != nil || task.Status != TaskFailed {
+		t.Fatalf("failed intake task = %+v, %v", task, err)
+	}
+	if _, err := store.RetryTaskForOverseer(ctx, digest, task.ID, task.Revision, AgentID{}, mustTime(t, 30)); !errors.Is(err, ErrConflict) {
+		t.Fatalf("overseer retried a withdrawn issue's task: %v", err)
+	}
+}
+
+// runningOverseerDigest starts an overseer run of its own task in project at
+// at, on admission keys and identities no worker fixture uses.
+func runningOverseerDigest(t *testing.T, store *Store, project ProjectID, at int64) AttemptDigest {
+	t.Helper()
+	ctx := context.Background()
+	overseer, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 60), ProjectID: project, Name: "overseer", Role: RoleOrchestrator, Provider: ProviderCodex, ToolBudgetLimit: 4}, mustTime(t, at))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 61), ProjectID: project, AssignedAgentID: overseer.ID, IncarnationID: incarnationID(t, 62), Title: "oversee"}, mustTime(t, at)); err != nil {
+		t.Fatal(err)
+	}
+	keys := admissionKeys(t, 100, nil)
+	admission, err := store.AdmitNext(ctx, keys, mustTime(t, at+1))
+	if err != nil || !admission.Admitted() {
+		t.Fatalf("overseer admission = %+v, %v", admission, err)
+	}
+	run := activateAllResourcesUnique(t, store, *admission.Run, at+2, 100)
+	session := terminalSessionForRunTest(t, store, run.ID)
+	if _, err := store.ActivateRun(ctx, run.ID, session.ID, run.Revision, session.Revision, mustTime(t, at+6)); err != nil {
+		t.Fatal(err)
+	}
+	return keys.AttemptDigest
 }
