@@ -29,6 +29,13 @@ type fakePublishMaintainer struct {
 	loseNext bool             // the next write lands but its response is lost
 }
 
+func TestRepairPublicationUsesTaskTitle(t *testing.T) {
+	want := "Repair team/repo#31"
+	if got := publicationMessage(kernel.PublishableChange{Task: kernel.Task{Title: want}}); got != want {
+		t.Fatalf("repair publication message = %q, want %q", got, want)
+	}
+}
+
 func (f *fakePublishMaintainer) call(_ context.Context, name string, arguments map[string]any) (json.RawMessage, error) {
 	id, _ := arguments["operation_id"].(string)
 	switch name {
