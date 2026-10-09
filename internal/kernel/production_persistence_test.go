@@ -720,11 +720,23 @@ func TestPublishableIntakeChangeIsFactorydsUntilPublishedOrFailed(t *testing.T) 
 	if found, err := store.PublishableChanges(ctx, mustTime(t, 70+PublishRetryAfter.Milliseconds())); err != nil || len(found) != 1 {
 		t.Fatalf("a publish failure past its window is not retried: %+v %v", found, err)
 	}
-	// A change-caused refusal is terminal even after the retry window.
-	if err := store.RecordReviewOperation(ctx, worker.ProjectID, "example/factory", PublishFailureID(change.ID, found[0].Revision), map[string]any{"id": PublishFailureID(change.ID, found[0].Revision), "state": "publish_failed", "handled": true, "request": map[string]any{}}, mustTime(t, 70)); err != nil {
+	// A pre-upgrade publish failure has no retryable field; preserve its
+	// recoverable retry behavior while the old record ages out.
+	legacyFailure := map[string]any{"id": PublishFailureID(change.ID, found[0].Revision), "state": "publish_failed", "handled": true, "request": map[string]any{}}
+	if err := store.RecordReviewOperation(ctx, worker.ProjectID, "example/factory", PublishFailureID(change.ID, found[0].Revision), legacyFailure, mustTime(t, 80)); err != nil {
 		t.Fatal(err)
 	}
-	if found, err := store.PublishableChanges(ctx, mustTime(t, 70+PublishRetryAfter.Milliseconds())); err != nil || len(found) != 0 {
+	if found, err := store.PublishableChanges(ctx, mustTime(t, 80)); err != nil || len(found) != 0 {
+		t.Fatalf("a legacy publish failure retried inside its window: %+v %v", found, err)
+	}
+	if found, err := store.PublishableChanges(ctx, mustTime(t, 80+PublishRetryAfter.Milliseconds())); err != nil || len(found) != 1 {
+		t.Fatalf("a legacy publish failure was not retried past its window: %+v %v", found, err)
+	}
+	// A change-caused refusal is terminal even after the retry window.
+	if err := store.RecordReviewOperation(ctx, worker.ProjectID, "example/factory", PublishFailureID(change.ID, found[0].Revision), map[string]any{"id": PublishFailureID(change.ID, found[0].Revision), "state": "publish_failed", "retryable": false, "handled": true, "request": map[string]any{}}, mustTime(t, 90)); err != nil {
+		t.Fatal(err)
+	}
+	if found, err := store.PublishableChanges(ctx, mustTime(t, 90+PublishRetryAfter.Milliseconds())); err != nil || len(found) != 0 {
 		t.Fatalf("a permanent publish failure was retried: %+v %v", found, err)
 	}
 	if pending, err := store.InFlightReviewOperations(ctx); err != nil || len(pending) != 0 {
