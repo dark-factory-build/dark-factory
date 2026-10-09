@@ -34,23 +34,7 @@ func testHomeOpensWithEveryRow(t *testing.T, version int) {
 	if err := connection.Close(); err != nil {
 		t.Fatal(err)
 	}
-	var statements []string
-	if version == v36UserVersion {
-		statements = append(statements, "DROP TABLE task_automatic_events")
-	}
-	if version != userVersion {
-		statements = append(statements, "PRAGMA writable_schema = ON",
-			`UPDATE sqlite_schema SET sql = replace(sql, '''transient''', '''runner_exit''') WHERE name = 'runs'`,
-			"PRAGMA writable_schema = OFF", fmt.Sprintf("PRAGMA user_version = %d", version))
-	}
-	for _, statement := range statements {
-		if _, err := store.writer.ExecContext(ctx, statement); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := store.Close(); err != nil {
-		t.Fatal(err)
-	}
+	downgradeHome(t, store, version)
 
 	reopened, err := Open(ctx, path)
 	if err != nil {
@@ -76,6 +60,74 @@ func testHomeOpensWithEveryRow(t *testing.T, version int) {
 	defer tx.Rollback()
 	if _, err := tx.ExecContext(ctx, `UPDATE runs SET phase = 'finalizing', proposal_kind = 'failed', proposal_code = 'transient', proposal_detail = 'x', credential_revoked_at_ms = 5, finalizing_at_ms = 5 WHERE id = ?`, runID(t, 5).Bytes()); err != nil {
 		t.Fatalf("record a transient failure: %v", err)
+	}
+}
+
+// downgradeHome turns a current home into an exact earlier one and closes it.
+func downgradeHome(t *testing.T, store *Store, version int) {
+	t.Helper()
+	var statements []string
+	if version == v36UserVersion {
+		statements = append(statements, "DROP TABLE task_automatic_events")
+	}
+	if version != userVersion {
+		statements = append(statements, "PRAGMA writable_schema = ON",
+			`UPDATE sqlite_schema SET sql = replace(sql, '''transient''', '''runner_exit''') WHERE name = 'runs'`,
+			"PRAGMA writable_schema = OFF", fmt.Sprintf("PRAGMA user_version = %d", version))
+	}
+	for _, statement := range statements {
+		if _, err := store.writer.ExecContext(context.Background(), statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A v37 or v36 never-started failure keeps its retry across the migration: a run
+// finalizing at the upgrade still requeues its task, and a terminal one still
+// counts as the previous run that ended the same way.
+func TestLegacyRetryableFailuresMigrate(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		version  int
+		terminal bool
+	}{{v37UserVersion, false}, {v37UserVersion, true}, {v36UserVersion, false}, {v36UserVersion, true}} {
+		version, terminal := test.version, test.terminal
+		t.Run(fmt.Sprintf("v%d/terminal=%v", version, terminal), func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			legacy, _ := NewFailureProposal(FailureProtocol, NeverStartedRunDetail)
+			store, run := finalizingReleasedRun(t, RoleOrchestrator, legacy)
+			var path string
+			if err := store.writer.QueryRowContext(ctx, `SELECT file FROM pragma_database_list WHERE name = 'main'`).Scan(&path); err != nil {
+				t.Fatal(err)
+			}
+			if terminal {
+				if _, err := finalizeTestRun(t, store, run, 60); err != nil {
+					t.Fatal(err)
+				}
+			}
+			downgradeHome(t, store, version)
+			reopened, err := Open(ctx, path)
+			if err != nil {
+				t.Fatalf("Open home: %v", err)
+			}
+			defer reopened.Close()
+			if !terminal {
+				if run, err = finalizeTestRun(t, reopened, run, 60); err != nil {
+					t.Fatal(err)
+				}
+				if task, _, err := reopened.Task(ctx, run.TaskID); err != nil || task.Status != TaskQueued {
+					t.Fatalf("task after finalization = %v, %v, want queued", task.Status, err)
+				}
+			}
+			var codes string
+			if err := reopened.writer.QueryRowContext(ctx, `SELECT proposal_code || '/' || terminal_code FROM runs WHERE id = ?`, run.ID.Bytes()).Scan(&codes); err != nil || codes != "transient/transient" {
+				t.Fatalf("run codes = %q, %v", codes, err)
+			}
+		})
 	}
 }
 

@@ -93,25 +93,40 @@ func (store *Store) migrateLegacy(ctx context.Context) error {
 }
 
 // migrateFrom rewrites the runs table's failure-code checks in place: the
-// value it replaces was never written, so no row can violate the new text,
-// and RESET makes this connection enforce it.
+// value it replaces was never written, so no row can violate the new text.
+// Bumping schema_version makes every connection, this one and the open
+// readers, load the new text, as SQLite's own ALTER TABLE procedure does.
 func migrateFrom(ctx context.Context, connection *sql.Conn, version int) error {
 	if err := validateSchemaVersion(ctx, connection, version, legacySchemaStatements(version)); err != nil {
 		return err
 	}
-	var statements []string
 	if version == v36UserVersion {
-		statements = append(statements, taskAutomaticEventsTable)
+		if _, err := connection.ExecContext(ctx, taskAutomaticEventsTable); err != nil {
+			return err
+		}
 	}
-	statements = append(statements,
+	var schemaVersion int
+	if err := connection.QueryRowContext(ctx, "PRAGMA schema_version").Scan(&schemaVersion); err != nil {
+		return err
+	}
+	for _, statement := range []string{
 		"PRAGMA writable_schema = ON",
 		`UPDATE sqlite_schema SET sql = replace(sql, '''runner_exit''', '''transient''') WHERE type = 'table' AND name = 'runs'`,
-		"PRAGMA writable_schema = RESET",
-		fmt.Sprintf("PRAGMA user_version = %d", userVersion))
-	for _, statement := range statements {
+		"PRAGMA writable_schema = OFF",
+		fmt.Sprintf("PRAGMA schema_version = %d", schemaVersion+1),
+		fmt.Sprintf("PRAGMA user_version = %d", userVersion),
+	} {
 		if _, err := connection.ExecContext(ctx, statement); err != nil {
 			return err
 		}
+	}
+	// The earlier retryable failures take the code, so finalization and the
+	// retry-history match treat them as before. A terminal run's code is its
+	// proposal's.
+	if _, err := connection.ExecContext(ctx, `UPDATE runs SET proposal_code = 'transient', terminal_code = iif(terminal_code IS NULL, NULL, 'transient')
+		WHERE proposal_code = 'protocol' AND proposal_detail IN (?, ?) OR proposal_code = 'provider_exit' AND proposal_detail = ?`,
+		NeverStartedRunDetail, OverseerRunLimitDetail, ProviderCapacityRunDetail); err != nil {
+		return err
 	}
 	if err := validateExactSchema(ctx, connection); err != nil {
 		return err
