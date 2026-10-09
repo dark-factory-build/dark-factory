@@ -147,7 +147,8 @@ func (daemon *Daemon) publishFailed(ctx context.Context, c kernel.PublishableCha
 func publicationFailureRetryable(err error) bool {
 	text := err.Error()
 	return strings.Contains(text, "review: Maintainer rejected operation: refused:") ||
-		strings.Contains(text, "review: Maintainer rejected operation: conflict:")
+		strings.Contains(text, "review: Maintainer rejected operation: conflict:") ||
+		strings.Contains(text, "repository disabled for new work")
 }
 
 // publishPull is the overseer runbook's publication, made deterministic:

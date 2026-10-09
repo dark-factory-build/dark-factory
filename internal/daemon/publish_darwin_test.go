@@ -440,7 +440,7 @@ func TestDisabledAcceptedRepositoryEscalatesOnce(t *testing.T) {
 			var op review.Operation
 			if record.Kind == "reviewer" && json.Unmarshal(record.Document, &op) == nil && op.State == "publish_failed" {
 				failures++
-				if op.ID != kernel.PublishFailureID(c.Change, c.Revision) || op.Escalation != escalation || op.Detail != "repository disabled for new work" {
+				if op.ID != kernel.PublishFailureID(c.Change, c.Revision) || !op.Retryable || op.Escalation != escalation || op.Detail != "repository disabled for new work" {
 					t.Fatalf("failure record = %+v", op)
 				}
 			}
