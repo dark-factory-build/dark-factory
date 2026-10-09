@@ -832,7 +832,7 @@ summary.dfConsoleItem__summary { cursor: pointer; }
 
 /* One floor: source search, projection controls and proposal selection stay reachable. */
 .dfFactoryEntityTools { display: flex; align-items: baseline; flex-wrap: wrap; gap: .5rem; padding: .5rem; background: #122027; border-bottom: 1px solid #3c5051; }
-.dfFactoryEntityTools label { display: flex; align-items: center; gap: .5rem; flex: 1 1 15rem; }
+.dfFactoryEntityTools label { display: flex; align-items: center; gap: .5rem; flex: 1 1 24rem; }
 .dfFactoryEntityTools input { width: 100%; min-width: 0; flex: 1; color: inherit; background: var(--df-console-background); border: 1px solid var(--df-console-rule); padding: .5rem; font: inherit; }
 .dfFactoryEntityTools__results { order: 1; flex-basis: 100%; display: flex; flex-wrap: wrap; gap: .4rem; max-height: 9rem; overflow: auto; }
 .dfFactoryEntityTools__results button { max-width: 100%; overflow-wrap: anywhere; font-size: var(--df-text-xs); }
@@ -1316,6 +1316,3 @@ summary.dfConsoleItem__summary { cursor: pointer; }
 .dfPlantReading.op-failing { color: #ff5f56; }
 .dfPlantReading.op-degraded { color: #f2c94c; }
 .dfPlantReading.s-unobserved { color: #7f93a8; }
-.dfPlant__scaffold { fill: none; stroke: var(--hazard); stroke-width: 2; stroke-dasharray: 6 3; }
-.dfPlant__changed { fill: var(--hazard); stroke: var(--outline); }
-.dfPlant__changedText { fill: var(--outline); font-weight: 700; }

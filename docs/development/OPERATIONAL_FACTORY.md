@@ -636,7 +636,7 @@ data.
 | Latency | Dwell: items wait visibly inside a machine's window. |
 | Errors | Items drop into a scrap bin, which fills with error rate. The andon lamp turns amber or red. |
 | Retries | Items loop back on a recirculation belt. |
-| Deploy | Changeover: scaffold and a version plate flip. Change marks remain for 24 hours. |
+| Deploy | A muted "deployed" tag under the name plate for 24 hours; the tooltip gives the time. |
 | Dormant | **Observed quiet**: the machine is solid and lit, but still. |
 | Unobserved | **Greyed machine**: built but translucent and colourless, an unknown (grey-blue) lamp, plate "no telemetry", no material. Never drawn as an idle machine, whose lamp is dark. |
 | Partial | Solid machine with a half-lit lamp; the tooltip says "partly observed". |
@@ -895,3 +895,7 @@ The attacks cover:
 They must also answer one question: is there a materially simpler
 architecture with the same outcome? Findings and resolutions are recorded on
 the pull requests.
+
+A failed merge-queue run on a factory-reviewed branch is repaired by the
+factory itself: it pushes a fix commit carrying `Dark-Factory-Operation` to
+that branch. A human pushing to the same branch must fetch first.
