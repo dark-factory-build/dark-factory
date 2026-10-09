@@ -46,6 +46,19 @@ func BuildRelease(ctx context.Context, dir, source, target, out string, environm
 	if versionErr != nil || moduleErr != nil || goVersion == nil || !ok {
 		return Identity{}, errors.New("release source has no exact VERSION or go.mod toolchain")
 	}
+	// factoryd embeds the console bundle (internal/browser/console), which is
+	// built here rather than committed.
+	for _, step := range [][]string{{"install", "--frozen-lockfile", "--ignore-scripts"}, {"run", "console"}} {
+		command := exec.CommandContext(ctx, "/usr/bin/env", append([]string{"corepack", "pnpm"}, step...)...)
+		command.Dir = filepath.Join(dir, "web")
+		command.Env = append(environment, "CI=true")
+		if prepare != nil {
+			prepare(command)
+		}
+		if log, err := command.CombinedOutput(); err != nil {
+			return Identity{}, fmt.Errorf("console %s: %v: %s", step[0], err, log[max(0, len(log)-1024):])
+		}
+	}
 	goos, goarch, _ := strings.Cut(target, "/")
 	for _, name := range []string{"factoryd", "factoryctl", "factory-runner"} {
 		output := filepath.Join(out, name)

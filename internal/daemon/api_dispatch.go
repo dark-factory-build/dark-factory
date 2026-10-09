@@ -94,6 +94,9 @@ type Daemon struct {
 	browserLifecycleMu sync.Mutex
 	browsers           map[*BrowserRuntime]struct{}
 	browserClosing     bool
+	// console is the signed console bundle, its first 32 bytes the node
+	// public key (relayhost.SignConsole); nil without a home or a bundle.
+	console []byte
 	// relay is the optional outbound relay connector. It is a client of the
 	// browser listener above, not a second authority, so it shares that
 	// listener's lifecycle gate.

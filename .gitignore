@@ -20,3 +20,4 @@ node_modules/
 /factoryd
 /factoryctl
 /factory-runner
+/internal/browser/console/console.js

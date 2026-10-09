@@ -5,8 +5,7 @@
   "sideEffects": ["dist/src/**/*.css"],
   "exports": {
     ".": { "types": "./dist/src/index.d.ts", "import": "./dist/src/index.js" },
-    "./styles.css": "./dist/src/factory-console.css",
-    "./provenance": "./dist/src/provenance.json"
+    "./styles.css": "./dist/src/factory-console.css"
   },
   "files": ["dist/src"],
   "scripts": { "typecheck": "tsc --noEmit", "build": "rm -rf dist && tsc -p tsconfig.json && cp src/factory-console.css dist/src/factory-console.css" },

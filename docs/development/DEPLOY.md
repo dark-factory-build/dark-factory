@@ -2,8 +2,11 @@
 
 The public site (`https://app.darkfactory.build`) deploys to Vercel
 production from `main` of the dark-factory-site repository via Vercel's Git
-integration; its `vercel.json` build runs the site's own artifact
-verification. Nothing here deploys it.
+integration. Nothing here deploys it. Its pages are thin shells: the console
+itself is `web/` built into factoryd (`internal/browser/console`), served at
+`/console.js` on loopback and through the relay, and signed by the node key
+the page pinned at pairing. So a daemon release ships its own console, and no
+change here waits on a site deploy.
 
 ```sh
 factoryctl release <commit-sha> [--start] [--wait]
@@ -95,18 +98,8 @@ not an enforced filesystem boundary or a provider-permission change.
 **Pairing capability mask.** Both ends accept any subset of the five known
 capability bits with `observe` set, and reject any other bit as malformed:
 `knownCapabilities` in `internal/browserprotocol/wire.go` and `capabilities()`
-in `web/packages/client/src/control.ts`, which bounds the value at 31. So a
-change that ADDS a capability bit must deploy the site BEFORE the daemon is
-reinstalled: a daemon granting the new bit to a console still running the old
-client makes every deployed console reject its own authentication result. A
-change that only narrows the granted mask needs no ordering.
-
-**Shared queue.** Queued work no worker has claimed yet reaches the console
-in the additive `shared_tasks` member; every `tasks` item still names its
-agent, so a console vendored before the shared queue keeps decoding snapshots
-in either installation order. Its ANY WORKER control and the Any eligible
-worker queue group appear only after the site is re-vendored from a merged
-runtime commit that contains them.
+in `web/packages/client/src/control.ts`, which bounds the value at 31. Both ship
+in the same factoryd build, so adding a bit needs no deploy ordering.
 
 **New home file.** The running build checks the home before it stages the
 release, so it judges the new build's home by its own, older rules. The home

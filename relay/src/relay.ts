@@ -3,18 +3,21 @@
 // interprets a Dark Factory message, never queues while a peer is away, and
 // never logs a payload, token, or key.
 //
-// It persists exactly one record, `host`. Revocation and ticket single-use are
+// It persists the `host` record and the host's latest signed `console`
+// bundle, which only page shells interpret. Revocation and ticket single-use are
 // deliberately not remembered here: the daemon's own challenge is the durable
 // authority, and a second copy of it would only be a second thing to get wrong.
 
 import { decodeBase64UrlExact } from './encoding.js';
 import {
+	CONSOLE_LIMIT,
 	CONTROLLER_MESSAGE_LIMIT,
 	HOST_MESSAGE_LIMIT,
 	INGEST_LIMIT,
 	PUBLIC_WORLD_LIMIT,
 	RECORD_BINARY,
 	RECORD_CLOSE,
+	RECORD_CONSOLE,
 	RECORD_INGEST,
 	RECORD_INGEST_KEY,
 	RECORD_OPEN,
@@ -160,6 +163,8 @@ export class FactoryRelay implements DurableObject {
 	/** Rate-limit state is per live socket only; hibernation resets a bucket that
 	 * has necessarily been idle long enough to have refilled anyway. */
 	readonly #buckets = new WeakMap<WebSocket, Bucket>();
+	/** Host sockets that already sent their console; one each. */
+	readonly #consoled = new WeakSet<WebSocket>();
 	/** When this node last published; in memory only, like the buckets. */
 	#publishedAt = Number.NEGATIVE_INFINITY;
 	/** This node's ingest token bucket; in memory only, like the others. */
@@ -176,6 +181,8 @@ export class FactoryRelay implements DurableObject {
 		// Reached only as `public:<id>`: a GET routed by the Worker, or a PUT
 		// from the node object that proved the key the id hashes.
 		if (url.pathname.startsWith('/public/')) return await this.#world(request);
+		// Reached as `<node>` by a GET the Worker routed.
+		if (url.pathname.startsWith('/console/')) return await this.#readConsole();
 		if (url.pathname.startsWith('/ingest/')) return await this.#ingest(request);
 		const match = /^\/(host|controller)\/([^/]+)$/.exec(url.pathname);
 		if (match === null) return refuse(404);
@@ -360,6 +367,10 @@ export class FactoryRelay implements DurableObject {
 				published.push(this.#publish(record.payload));
 				continue;
 			}
+			if (record.type === RECORD_CONSOLE) {
+				published.push(this.#publishConsole(ws, record.payload));
+				continue;
+			}
 			if (record.type === RECORD_INGEST_KEY) {
 				if (record.connection !== 0 || (record.payload.length !== 0 && record.payload.length !== 32)) {
 					this.#failHost(ws, CLOSE_PROTOCOL, 'malformed ingest key');
@@ -390,12 +401,36 @@ export class FactoryRelay implements DurableObject {
 		if (payload.length > PUBLIC_WORLD_LIMIT || now - this.#publishedAt < PUBLISH_INTERVAL_MS) return;
 		if (payload.length > 0 && typeof decodeJson(payload)?.generated_at !== 'number') return;
 		this.#publishedAt = now;
+		await this.#putPublic('', payload);
+	}
+
+	/**
+	 * Keeps this build's signed console where phones read it: here by node id
+	 * for the remote console, and in the `public:<id>` object for the public
+	 * log. The relay never checks the signature; every page shell does. One
+	 * per host socket, so a host cannot churn either object.
+	 */
+	async #publishConsole(ws: WebSocket, payload: Uint8Array): Promise<void> {
+		if (payload.length > CONSOLE_LIMIT || this.#consoled.has(ws)) return;
+		this.#consoled.add(ws);
+		await this.#ctx.storage.put('console', payload.slice());
+		await this.#putPublic('/console', payload);
+	}
+
+	async #readConsole(): Promise<Response> {
+		const bundle = await this.#ctx.storage.get<Uint8Array>('console');
+		if (bundle === undefined) return refuse(404);
+		return new Response(bundle, { status: 200, headers: { 'content-type': 'application/octet-stream' } });
+	}
+
+	/** PUTs payload to `public:<id>` at suffix, for the id this node's stored key names. */
+	async #putPublic(suffix: string, payload: Uint8Array): Promise<void> {
 		const stored = (await this.#ctx.storage.get<StoredHost>('host')) ?? null;
 		const key = stored === null ? null : decodeBase64UrlExact(stored.key, 32);
 		if (key === null) return;
 		const id = await publicIdForKey(key);
 		try {
-			await this.#env.FACTORY_RELAY.getByName(`public:${id}`).fetch(`https://relay/public/${id}`, {
+			await this.#env.FACTORY_RELAY.getByName(`public:${id}`).fetch(`https://relay/public/${id}${suffix}`, {
 				method: 'PUT',
 				body: payload.slice(),
 			});
@@ -442,6 +477,11 @@ export class FactoryRelay implements DurableObject {
 	}
 
 	async #world(request: Request): Promise<Response> {
+		if (new URL(request.url).pathname.endsWith('/console')) {
+			if (request.method !== 'PUT') return await this.#readConsole();
+			await this.#ctx.storage.put('console', new Uint8Array(await request.arrayBuffer()));
+			return new Response(null, { status: 204 });
+		}
 		if (request.method === 'PUT') {
 			const body = await request.text();
 			if (body === '') await this.#ctx.storage.delete('world');
