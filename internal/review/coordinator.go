@@ -64,6 +64,9 @@ type Store interface {
 	// CreateRetry reserves the one allowed retry and creates its operation in
 	// the same durable transaction, so two callers cannot replay one failure.
 	CreateRetry(context.Context, Operation, Operation) error
+	// Blocked reports a block of record at this exact head. The merge queue's
+	// review gate refuses such a head whatever later ALLOW it carries.
+	Blocked(context.Context, uint64, string) (bool, error)
 }
 
 type Backend interface {
@@ -208,7 +211,17 @@ func (c Coordinator) Resume(ctx context.Context, op Operation) (Operation, error
 }
 
 func (c Coordinator) finishSubmitted(ctx context.Context, op Operation) (Operation, error) {
-	op.Submitted, op.State, op.UpdatedAt = true, "enqueued", c.Now()
+	op.Submitted = true
+	// A second opinion does not clear a same-head block (#1300): the queue's
+	// review job would fail and eject every entry behind it.
+	if op.Verdict == "allow" {
+		if blocked, err := c.Store.Blocked(ctx, op.Request.PullNumber, op.Request.Head); err != nil {
+			return op, err
+		} else if blocked {
+			return c.fail(ctx, op, fmt.Errorf("a blocking verdict of record stands at exact head %s, so the merge queue's review gate refuses it: push a fix or record an operation-bound correction", op.Request.Head), false)
+		}
+	}
+	op.State, op.UpdatedAt = "enqueued", c.Now()
 	if op.Verdict != "allow" {
 		// Routing task feedback is a separate durable step. Keep the
 		// completed operation recoverable until that step has committed.
