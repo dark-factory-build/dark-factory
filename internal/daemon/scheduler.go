@@ -12,7 +12,11 @@ import (
 	"github.com/ncruces/go-sqlite3"
 )
 
-const schedulerPollInterval = time.Second
+const (
+	schedulerPollInterval = time.Second
+	// schedulerMaxBackoff is the most polls a failure pauses the scheduler.
+	schedulerMaxBackoff = 64
+)
 
 type schedulerEventKind uint8
 
@@ -74,23 +78,36 @@ func (daemon *Daemon) RunScheduler(ctx context.Context, spec SupervisorSpec) err
 	var nextAttachmentCleanup time.Time
 	stopping := false
 	var resultErr error
+	var backoff, paused int
+	// Cancellation is shutdown: it hands live attempts to the next daemon. So a
+	// failure while factoryd runs never cancels attempts or ends the scheduler,
+	// which would crash-loop factoryd on a fault in durable data. It is logged
+	// and pauses ticks and new probes for a doubling number of polls, while the
+	// console and API keep serving. Failures during shutdown are returned.
+	fail := func(err error) {
+		if cancellation := ownedCtx.Err(); cancellation != nil {
+			if !schedulerOnlyCancellation(err, cancellation) {
+				resultErr = errors.Join(resultErr, err)
+			}
+			return
+		}
+		backoff = min(max(backoff*2, 1), schedulerMaxBackoff)
+		paused = backoff
+		LogFactoryd(daemon.log, "factoryd: scheduler paused for %d polls: %v\n", backoff, err)
+	}
 	// Dispatch is an advisory scheduling gate; admission still validates the
 	// complete durable graph atomically when dispatch resumes.
 	dispatchEnabled := func() bool {
 		factory, err := daemon.store.Factory(ownedCtx)
 		if err != nil {
-			if cancellation := ownedCtx.Err(); cancellation == nil || !schedulerOnlyCancellation(err, cancellation) {
-				resultErr = errors.Join(resultErr, err)
-			}
-			stopping = true
-			cancel()
+			fail(err)
 			return false
 		}
 		return factory.DispatchEnabled && !daemon.releaseHold.Load()
 	}
 
 	startProbe := func() {
-		if !dispatchEnabled() {
+		if paused > 0 || !dispatchEnabled() {
 			return
 		}
 		nextID++
@@ -135,12 +152,16 @@ func (daemon *Daemon) RunScheduler(ctx context.Context, spec SupervisorSpec) err
 			}
 			ctxDone = nil
 		case <-daemon.schedulerWake:
-			if !stopping && resultErr == nil && probeID == 0 {
+			if !stopping && probeID == 0 {
 				startProbe()
 			}
 		case <-pollEvents:
+			if paused > 0 {
+				paused--
+				continue
+			}
 			tick := time.Now()
-			if !stopping && resultErr == nil {
+			if !stopping {
 				if now := daemon.now(); !now.Before(nextAttachmentCleanup) {
 					if at, err := kernel.NewUnixMillis(now.UnixMilli()); err == nil {
 						expired, _ := daemon.store.ExpireBlockedTasks(ownedCtx, at)
@@ -154,53 +175,35 @@ func (daemon *Daemon) RunScheduler(ctx context.Context, spec SupervisorSpec) err
 				}
 				// Overseer wakes are derived on enabled ticks ahead of the probe
 				// that admits them; pausing defers them and loses nothing, since the
-				// rule is level-triggered. A failed round is retried next tick.
+				// rule is level-triggered. A failed round is retried after its pause.
 				if err := daemon.enforceRunLiveness(ownedCtx, spec); err != nil {
-					// Cancellation can interrupt the read before the Done arm runs.
-					// Preserve unrelated failures even when shutdown races with them.
-					if cancellation := ownedCtx.Err(); cancellation == nil || !schedulerOnlyCancellation(err, cancellation) {
-						resultErr = err
-					}
-					stopping = true
-					cancel()
+					fail(err)
 				} else if at, err := daemon.timestamp(); err == nil && dispatchEnabled() {
 					_, _ = daemon.store.EnqueueOverseerWakeups(ownedCtx, at)
 					if _, promoteErr := daemon.store.PromoteQueuedContinuations(ownedCtx, at); promoteErr != nil {
-						if cancellation := ownedCtx.Err(); cancellation == nil || !schedulerOnlyCancellation(promoteErr, cancellation) {
-							resultErr = promoteErr
-						}
-						stopping = true
-						cancel()
+						fail(promoteErr)
 					}
 				}
 			}
-			if !stopping && resultErr == nil {
+			if !stopping && paused == 0 {
 				daemon.tickMergePipeline(ownedCtx)
 				daemon.tickIntake(ownedCtx)
 				daemon.tickRelease(ownedCtx)
 			}
-			daemon.observe("internal", map[string]string{"code.function.name": schedulerFunction}, nil, resultErr != nil, time.Since(tick))
-			if !stopping && resultErr == nil && probeID == 0 {
+			daemon.observe("internal", map[string]string{"code.function.name": schedulerFunction}, nil, paused > 0, time.Since(tick))
+			if !stopping && probeID == 0 {
 				startProbe()
 			}
 		case event := <-events:
 			owner := owners[event.id]
 			if owner == nil {
-				resultErr = errors.Join(resultErr, fmt.Errorf("%w: unknown scheduler owner", kernel.ErrCorruptState))
-				if !stopping {
-					stopping = true
-					cancel()
-				}
+				fail(fmt.Errorf("%w: unknown scheduler owner", kernel.ErrCorruptState))
 				continue
 			}
 			switch event.kind {
 			case schedulerAdmission:
 				if owner.observed || event.err != nil {
-					resultErr = errors.Join(resultErr, event.err, fmt.Errorf("%w: duplicate admission observation", kernel.ErrCorruptState))
-					if !stopping {
-						stopping = true
-						cancel()
-					}
+					fail(errors.Join(event.err, fmt.Errorf("%w: duplicate admission observation", kernel.ErrCorruptState)))
 					continue
 				}
 				owner.observed = true
@@ -208,7 +211,7 @@ func (daemon *Daemon) RunScheduler(ctx context.Context, spec SupervisorSpec) err
 				if probeID == event.id {
 					probeID = 0
 				}
-				if event.admitted && !stopping && resultErr == nil {
+				if event.admitted && !stopping {
 					startProbe()
 				}
 			case schedulerDone:
@@ -221,27 +224,20 @@ func (daemon *Daemon) RunScheduler(ctx context.Context, spec SupervisorSpec) err
 					// Completion can beat the cancellation select arm. The context,
 					// not which event was selected first, determines cancellation.
 					if cancellation := ownedCtx.Err(); cancellation == nil || !schedulerOnlyCancellation(event.err, cancellation) {
-						resultErr = errors.Join(resultErr, event.err, fmt.Errorf("%w: attempt ended before admission was observed", kernel.ErrCorruptState))
+						fail(errors.Join(event.err, fmt.Errorf("%w: attempt ended before admission was observed", kernel.ErrCorruptState)))
 					}
 				} else if owner.admitted {
 					if completionErr := validateCompletion(event.run); completionErr != nil {
-						resultErr = errors.Join(resultErr, event.err, completionErr)
+						fail(errors.Join(event.err, completionErr))
 					}
 				} else if event.run.ID != (kernel.RunID{}) || event.err == nil || !errors.Is(event.err, kernel.ErrConflict) {
-					resultErr = errors.Join(resultErr, event.err, fmt.Errorf("%w: invalid no-admission completion", kernel.ErrCorruptState))
+					fail(errors.Join(event.err, fmt.Errorf("%w: invalid no-admission completion", kernel.ErrCorruptState)))
 				}
-				if resultErr != nil && !stopping {
-					stopping = true
-					cancel()
-				} else if admittedOwner && !stopping && probeID == 0 {
+				if admittedOwner && !stopping && probeID == 0 {
 					startProbe()
 				}
 			default:
-				resultErr = errors.Join(resultErr, fmt.Errorf("%w: invalid scheduler event", kernel.ErrCorruptState))
-				if !stopping {
-					stopping = true
-					cancel()
-				}
+				fail(fmt.Errorf("%w: invalid scheduler event", kernel.ErrCorruptState))
 			}
 		}
 	}
