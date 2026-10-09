@@ -19,7 +19,9 @@ import (
 type publicReviewBackend struct {
 	killed, submitAmbiguous, requestChanges bool
 	enqueueRefused, queued                  bool
+	leaveUnqueued                           int
 	reviews, submits, enqueues              int
+	enqueueSignal                           atomic.Int32
 	enqueuedBase, enqueuedSHA, enqueuedBody string
 	journal                                 map[string]string
 	observations                            map[string]review.Receipt
@@ -55,11 +57,16 @@ func (b *publicReviewBackend) Submit(_ context.Context, operation review.Operati
 }
 func (b *publicReviewBackend) Enqueue(_ context.Context, operation review.Operation) error {
 	b.enqueues++
+	b.enqueueSignal.Add(1)
 	b.enqueuedBase, b.enqueuedSHA, b.enqueuedBody = operation.Request.BaseRef, operation.Request.Base, operation.Request.Body
 	if b.enqueueRefused {
 		return errors.New("review: Maintainer rejected operation: refused: rejected before execution as UNPROCESSABLE")
 	}
-	b.queued = true
+	if b.leaveUnqueued > 0 {
+		b.leaveUnqueued--
+	} else {
+		b.queued = true
+	}
 	return nil
 }
 
@@ -498,29 +505,19 @@ func TestReviewVerdictWakesMergePipelinePastRefreshGate(t *testing.T) {
 	settle()
 	customerMode(t, fixture)
 	ctx := context.Background()
-	backend := &publicReviewBackend{}
+	backend := &publicReviewBackend{leaveUnqueued: 1}
 	fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return backend }
+	fixture.daemon.pipelineAt.Store(time.Now().Add(productionRefreshInterval).UnixNano())
 
 	if _, err := reviewNow(ctx, fixture.daemon, project, publishedReviewRequest()); err != nil {
 		t.Fatal(err)
 	}
 	deadline := time.Now().Add(2 * time.Second)
-	for fixture.daemon.pipelineBusy.Load() && time.Now().Before(deadline) {
+	for backend.enqueueSignal.Load() != 2 && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
 	}
-	if backend.enqueues != 1 {
-		t.Fatalf("initial verdict enqueues=%d, want 1", backend.enqueues)
-	}
-	fixture.daemon.pipelineAt.Store(time.Now().Add(productionRefreshInterval).UnixNano())
-	backend.queued = false
-	fixture.daemon.pipelineAt.Store(0)
-	fixture.daemon.tickMergePipeline(ctx)
-	deadline = time.Now().Add(2 * time.Second)
-	for backend.enqueues != 2 && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
-	}
-	if backend.enqueues != 2 {
-		t.Fatalf("woken merge pass enqueues=%d, want 2", backend.enqueues)
+	if backend.enqueueSignal.Load() != 2 {
+		t.Fatalf("verdict wake enqueues=%d, want 2", backend.enqueueSignal.Load())
 	}
 }
 
