@@ -156,7 +156,7 @@ func migrateProductionRuntimeRecords(ctx context.Context, c *sql.Conn, project P
 }
 
 func validProductionPull(pr ProductionPullRequest) bool {
-	return pr.Number > 0 && pr.Number <= 1<<53-1 && validOutcomeText(pr.Title, 1024) && pr.Title != "" && productionURL(pr.URL) && productionSHA(pr.Head) && productionSHA(pr.BaseSHA) && productionSHA(pr.Merge) && productionSHA(pr.Review.Head) && (pr.HeadRepository == "" || productionRepository.MatchString(pr.HeadRepository)) && validOutcomeText(pr.Branch, 256) && validOutcomeText(pr.Base, 256) && validOutcomeText(pr.MergeQueue, 64) && validOutcomeText(pr.MergedAt, 64) && validOutcomeText(pr.NextAction, 2048) && validOutcomeText(pr.Review.State, 64) && validOutcomeText(pr.Review.Findings, maxProductionReviewFindings) && validOutcomeText(pr.Review.OperationID, 128) && validOutcomeText(pr.Review.CorrectsReviewOperationID, 128) && productionURL(pr.Review.URL) && (pr.State == "open" || pr.State == "closed" || pr.State == "merged")
+	return pr.Number > 0 && pr.Number <= 1<<53-1 && validOutcomeText(pr.Title, 1024) && pr.Title != "" && productionURL(pr.URL) && productionSHA(pr.Head) && productionSHA(pr.BaseSHA) && productionSHA(pr.Merge) && productionSHA(pr.Review.Head) && (pr.HeadRepository == "" || productionRepository.MatchString(pr.HeadRepository)) && validOutcomeText(pr.Branch, 256) && validOutcomeText(pr.Base, 256) && validOutcomeText(pr.MergeQueue, 64) && validOutcomeText(pr.MergedAt, 64) && validOutcomeText(pr.NextAction, 2048) && validOutcomeText(pr.Review.State, 64) && validOutcomeText(pr.Review.Findings, maxProductionReviewFindings) && validOutcomeText(pr.Review.OperationID, 128) && productionURL(pr.Review.URL) && (pr.State == "open" || pr.State == "closed" || pr.State == "merged")
 }
 
 func productionRecordOnConnection(ctx context.Context, c *sql.Conn, project ProjectID, repo, kind, id, visual string, value any, at int64) error {
@@ -313,7 +313,7 @@ func (store *Store) recordProductionObservation(ctx context.Context, c *sql.Conn
 		}
 		if _, err := c.ExecContext(ctx, `UPDATE production_records SET document = json_set(document, '$.state', 'superseded'), observed_at_ms = ?
 			WHERE project_id = ? AND repository = ? AND kind = 'reviewer' AND json_extract(document, '$.request.PullNumber') = ?
-			  AND lower(json_extract(document, '$.request.Head')) <> lower(?) AND json_extract(document, '$.state') IN ('running', 'submitting', 'enqueuing')`,
+			  AND lower(json_extract(document, '$.request.Head')) <> lower(?) AND json_extract(document, '$.state') IN ('running', 'submitting', 'enqueued')`,
 			at.Int64(), project.Bytes(), observation.Repository, int64(pr.Number), pr.Head); err != nil {
 			return err
 		}
@@ -759,7 +759,7 @@ func storedProductionReview(ctx context.Context, c *sql.Conn, project ProjectID,
 }
 
 func (store *Store) RecordProductionReview(ctx context.Context, project ProjectID, repo string, number uint64, review ProductionReview, at UnixMillis) error {
-	if project.zero() || !productionRepository.MatchString(repo) || number == 0 || number > 1<<53-1 || !productionSHA(review.Head) || !validOutcomeText(review.State, 64) || !validOutcomeText(review.Findings, maxProductionReviewFindings) || !validOutcomeText(review.OperationID, 128) || !validOutcomeText(review.CorrectsReviewOperationID, 128) || (review.CorrectsReviewOperationID != "" && review.State != "allow") || !productionURL(review.URL) {
+	if project.zero() || !productionRepository.MatchString(repo) || number == 0 || number > 1<<53-1 || !productionSHA(review.Head) || !validOutcomeText(review.State, 64) || !validOutcomeText(review.Findings, maxProductionReviewFindings) || !validOutcomeText(review.OperationID, 128) || !productionURL(review.URL) {
 		return ErrInvalidValue
 	}
 	repo = strings.ToLower(repo)
@@ -785,10 +785,8 @@ func (store *Store) RecordProductionReview(ctx context.Context, project ProjectI
 	if json.Unmarshal([]byte(body), &pr) != nil || pr.Number != number || !validProductionPull(pr) {
 		return tx.Rollback(ErrCorruptState)
 	}
-	correction := pr.Review.OperationID != "" && review.CorrectsReviewOperationID == pr.Review.OperationID
-	if review.State == "allow" && pr.Review.Head == review.Head && pr.Review.State == "block" && !correction {
-		// A plain or unrelated ALLOW is not a correction. An identity-less
-		// block cannot be implicitly corrected by an empty identity.
+	if review.State == "allow" && pr.Review.Head == review.Head && pr.Review.State == "block" {
+		// Nothing clears a block at the same head.
 		return tx.Commit(ctx)
 	}
 	pr.Review = review
@@ -891,8 +889,8 @@ func (store *Store) ReviewOperation(ctx context.Context, project ProjectID, oper
 }
 
 // InFlightReviewOperations returns every unfinished review operation: reviews
-// to relaunch, review writes whose external receipts may have been lost, enqueued
-// heads awaiting the merge queue, results whose task routing has not landed,
+// to relaunch, verdict writes whose external receipts may have been lost,
+// allowed heads awaiting merge, results whose task routing has not landed,
 // and unhandled failures of a still-open pull request at the same head.
 func (store *Store) InFlightReviewOperations(ctx context.Context) ([]PendingReviewOperation, error) {
 	tx, err := store.beginRead(ctx)
@@ -902,7 +900,7 @@ func (store *Store) InFlightReviewOperations(ctx context.Context) ([]PendingRevi
 	defer tx.Close()
 	rows, err := tx.connection.QueryContext(ctx, `SELECT project_id, repository, identity, document, (SELECT json_extract(p.document, '$.state') = 'open' AND lower(json_extract(p.document, '$.head')) = lower(json_extract(r.document, '$.request.Head'))
                 FROM production_records p WHERE p.project_id = r.project_id AND p.repository = r.repository AND p.kind = 'pull_request' AND p.identity = CAST(json_extract(r.document, '$.request.PullNumber') AS TEXT)) AS live
-        FROM production_records r WHERE kind = 'reviewer' AND (json_extract(document, '$.state') IN ('running', 'submitting', 'enqueuing', 'enqueued') OR json_extract(document, '$.route_pending') = 1
+        FROM production_records r WHERE kind = 'reviewer' AND (json_extract(document, '$.state') IN ('running', 'submitting', 'enqueued') OR json_extract(document, '$.route_pending') = 1
             OR (json_extract(document, '$.state') = 'failed' AND json_extract(document, '$.handled') IS NOT 1 AND live))
           AND json_type(document, '$.request') = 'object'`)
 	if err != nil {
@@ -933,9 +931,9 @@ func (store *Store) InFlightReviewOperations(ctx context.Context) ([]PendingRevi
 }
 
 // RecoverRunningReviewOperations reconciles review claims left by a stopped
-// daemon. A REQUEST_CHANGES verdict with a durable submit receipt and without
-// an enqueue receipt remains a completed, route-pending operation; a claim with
-// no verdict or enqueue stays running for startup to relaunch; others fail.
+// daemon. A submitted REQUEST_CHANGES verdict remains a completed,
+// route-pending operation; a claim with no verdict stays running for startup
+// to relaunch; others fail.
 // A 'gating' claim from before the pre-review gate was removed is the same.
 // An external reviewer observation uses the same projection kind but does not
 // have the durable operation request object.
@@ -979,16 +977,13 @@ func (store *Store) RecoverRunningReviewOperations(ctx context.Context, at UnixM
 		if err := json.Unmarshal(fields["id"], &operationID); err != nil || operationID == "" {
 			continue
 		}
-		var verdict, enqueueID, retryOf, state string
-		var submitted bool
+		var verdict, retryOf, state string
 		_ = json.Unmarshal(fields["verdict"], &verdict)
-		_ = json.Unmarshal(fields["enqueue_id"], &enqueueID)
-		if _ = json.Unmarshal(fields["state"], &state); state == "running" && verdict == "" && enqueueID == "" {
+		if _ = json.Unmarshal(fields["state"], &state); state == "running" && verdict == "" {
 			continue // startup relaunches it as it stands
 		}
 		_ = json.Unmarshal(fields["retry_of"], &retryOf)
-		_ = json.Unmarshal(fields["submitted"], &submitted)
-		retryable, _ := json.Marshal(verdict == "" && enqueueID == "" && retryOf == "")
+		retryable, _ := json.Marshal(verdict == "" && retryOf == "")
 		fields["retryable"] = retryable
 		candidates = append(candidates, candidate{project: project, repository: repository, identity: identity, document: fields})
 	}
@@ -1004,12 +999,11 @@ func (store *Store) RecoverRunningReviewOperations(ctx context.Context, at UnixM
 		return 0, tx.Rollback(err)
 	}
 	for _, item := range candidates {
-		var verdict, enqueueID string
+		var verdict string
 		var submitted bool
 		_ = json.Unmarshal(item.document["verdict"], &verdict)
-		_ = json.Unmarshal(item.document["enqueue_id"], &enqueueID)
 		_ = json.Unmarshal(item.document["submitted"], &submitted)
-		if verdict == "request_changes" && submitted && enqueueID == "" {
+		if verdict == "request_changes" && submitted {
 			// The provider write and completed state may already be durable,
 			// while task routing was interrupted immediately afterward.
 			// Preserve a recoverable route marker instead of converting this
@@ -1017,7 +1011,7 @@ func (store *Store) RecoverRunningReviewOperations(ctx context.Context, at UnixM
 			item.document["state"] = json.RawMessage(`"completed"`)
 			item.document["route_pending"] = json.RawMessage(`true`)
 			delete(item.document, "detail")
-		} else if verdict == "" && enqueueID == "" {
+		} else if verdict == "" {
 			// Nothing external was written: startup relaunches it, so a
 			// daemon restart (every release) never fails a review.
 			item.document["state"] = json.RawMessage(`"running"`)

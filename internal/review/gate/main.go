@@ -25,10 +25,7 @@ import (
 
 func main() { os.Exit(run(os.Args[1:], os.Getenv, os.Stdout, os.Stderr)) }
 
-var (
-	digits  = regexp.MustCompile(`^[1-9][0-9]*$`)
-	blockOp = regexp.MustCompile(`.*dark-factory-operation:([0-9a-f-]+):`)
-)
+var digits = regexp.MustCompile(`^[1-9][0-9]*$`)
 
 func run(args []string, env func(string) string, stdout, stderr io.Writer) int {
 	fail := func(format string, a ...any) int {
@@ -81,11 +78,8 @@ func run(args []string, env func(string) string, stdout, stderr io.Writer) int {
 		}
 	}
 
-	correction := regexp.MustCompile(`.*Dark-Factory-Review: allow ` + head + ` Dark-Factory-Review-Correction: ([0-9a-f-]+) <!-- dark-factory-operation:`)
 	var findings strings.Builder
-	var blocks [][2]string
-	corrections := map[[2]string]bool{}
-	allowed, considered := 0, 0
+	allowed, blocked, considered := 0, 0, 0
 	// Each line is commit_id, state, numeric publisher id, flattened body and
 	// author_association, exactly the workflow's @tsv projection; anything
 	// else fails closed.
@@ -119,37 +113,17 @@ func run(args []string, env func(string) string, stdout, stderr io.Writer) int {
 			}
 		}
 		// An untrusted publisher's review is listed as feedback, never counted.
-		// GitHub's own blocking state blocks even without a verdict line, and
-		// its blocks carry no correctable operation.
+		// GitHub's own blocking state blocks even without a verdict line.
 		if !trust {
 			verdict = "untrusted publisher"
-		} else if state == "CHANGES_REQUESTED" {
-			blocks = append(blocks, [2]string{author, ""})
+		} else if state == "CHANGES_REQUESTED" || verdict == "block" {
+			blocked++
 			verdict = "block"
-		} else if verdict == "block" {
-			op := ""
-			if m := blockOp.FindStringSubmatch(body); m != nil {
-				op = m[1]
-			}
-			blocks = append(blocks, [2]string{author, op})
 		} else if verdict == "allow" {
 			allowed++
-			// Only the original publisher can correct its own blocked operation.
-			if m := correction.FindStringSubmatch(body); m != nil {
-				corrections[[2]string{author, m[1]}] = true
-			}
 		}
 		fmt.Fprintf(&findings, "<details><summary><code>%s</code> — <code>%s</code></summary>\n\n<pre>%s</pre>\n\n</details>\n\n",
 			bounded(verdict), bounded(state), bounded(body))
-	}
-
-	// A correction clears only its publisher's exact blocked operation; a
-	// block without one (including CHANGES_REQUESTED) stays conservative.
-	blocked := 0
-	for _, b := range blocks {
-		if !corrections[b] { // an operation-less block never matches
-			blocked++
-		}
 	}
 
 	summary := fmt.Sprintf("### Adversarial review\n\n- Head: <code>%s</code>\n- Reviews at this head: <code>%d</code>\n\n%s", head, considered, findings.String())

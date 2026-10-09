@@ -43,18 +43,18 @@ func (f *fakePublishMaintainer) call(_ context.Context, name string, arguments m
 		return json.Marshal(map[string]any{"operation_id": id, "state": "missing"})
 	}
 	if _, replay := f.journal[id]; replay {
-		return nil, fmt.Errorf("%w: conflict: operation %s replayed", review.ErrRejected, id)
+		return nil, fmt.Errorf("conflict: operation %s replayed", id)
 	}
 	f.writes = append(f.writes, map[string]any{"name": name, "arguments": arguments})
 	var result json.RawMessage
 	switch name {
 	case "publish_commit":
 		if f.tip != "" && arguments["expected_head_sha"] != f.tip {
-			return nil, fmt.Errorf("%w: conflict: branch is at %s, not %v", review.ErrRejected, f.tip, arguments["expected_head_sha"])
+			return nil, fmt.Errorf("conflict: branch is at %s, not %v", f.tip, arguments["expected_head_sha"])
 		}
 		for _, entry := range arguments["changes"].([]map[string]any) {
 			if f.refuse != "" && strings.HasPrefix(entry["path"].(string), f.refuse) {
-				return nil, fmt.Errorf("%w: refused: %s cannot be written", review.ErrRejected, f.refuse)
+				return nil, fmt.Errorf("refused: %s cannot be written", f.refuse)
 			}
 		}
 		f.tip = fmt.Sprintf("%x", sha1.Sum([]byte(id)))

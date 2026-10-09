@@ -19,7 +19,6 @@ const (
 	human    = "202"
 	outsider = "303"
 	blk      = "11111111-1111-4111-8111-111111111111"
-	fix      = "22222222-2222-4222-8222-222222222222"
 )
 
 // rec is one line of the workflow's @tsv projection.
@@ -36,10 +35,6 @@ func block(c string) string { return "Dark-Factory-Review: block " + c }
 
 func blockMarked(c string) string {
 	return "Finding. " + block(c) + " <!-- dark-factory-operation:" + blk + ":old-digest -->"
-}
-
-func correcting(c, extra string) string {
-	return "Corrected. " + allow(c) + extra + " Dark-Factory-Review-Correction: " + blk + " <!-- dark-factory-operation:" + fix + ":new-digest -->"
 }
 
 // gate runs the decision over reviews with app trusted by id and returns
@@ -80,15 +75,10 @@ func TestDecision(t *testing.T) {
 		{"block outranks an allow", rec(head, "COMMENTED", app, allow(head)) + rec(head, "COMMENTED", app, block(head)), false, []string{"**BLOCKED**"}},
 		{"other publisher block outranks an allow", rec(head, "COMMENTED", app, allow(head)) + rec(head, "COMMENTED", human, block(head)), false, []string{"**BLOCKED**"}},
 		{"block in the same body outranks an allow", rec(head, "COMMENTED", human, allow(head)+" "+block(head)), false, []string{"**BLOCKED**"}},
-		{"exact operation correction clears a block", rec(head, "COMMENTED", app, blockMarked(head)) + rec(head, "COMMENTED", app, correcting(head, "")), true, []string{"**ALLOWED**"}},
-		{"another publisher cannot correct", rec(head, "COMMENTED", app, blockMarked(head)) + rec(head, "COMMENTED", human, correcting(head, "")), false, []string{"**BLOCKED**"}},
-		{"unbound allow cannot clear a block", rec(head, "COMMENTED", app, blockMarked(head)) + rec(head, "COMMENTED", app, allow(head)), false, []string{"**BLOCKED**"}},
-		{"correction before the verdict line", rec(head, "COMMENTED", app, blockMarked(head)) + rec(head, "COMMENTED", app, "Dark-Factory-Review-Correction: "+blk+" x "+allow(head)+" <!-- dark-factory-operation:"+fix+":d -->"), false, []string{"**BLOCKED**"}},
-		{"correction separated from the verdict line", rec(head, "COMMENTED", app, blockMarked(head)) + rec(head, "COMMENTED", app, correcting(head, " extra text")), false, []string{"**BLOCKED**"}},
+		{"a later allow cannot clear a block", rec(head, "COMMENTED", app, blockMarked(head)) + rec(head, "COMMENTED", app, allow(head)), false, []string{"**BLOCKED**"}},
 		{"block at the previous head", rec(other, "COMMENTED", app, block(other)) + rec(head, "COMMENTED", app, allow(head)), true, []string{"**ALLOWED**"}},
 		{"CHANGES_REQUESTED blocks without a line", rec(head, "CHANGES_REQUESTED", app, "no verdict line"), false, []string{"**BLOCKED**"}},
 		{"CHANGES_REQUESTED outranks an allow", rec(head, "COMMENTED", app, allow(head)) + rec(head, "CHANGES_REQUESTED", app, "no verdict line"), false, []string{"**BLOCKED**"}},
-		{"CHANGES_REQUESTED is not correctable", rec(head, "CHANGES_REQUESTED", human, blockMarked(head)) + rec(head, "COMMENTED", human, correcting(head, "")), false, []string{"**BLOCKED**"}},
 		{"APPROVED can allow", rec(head, "APPROVED", app, allow(head)), true, nil},
 		{"empty body does not mask a verdict", rec(head, "COMMENTED", app, "") + rec(head, "COMMENTED", app, allow(head)), true, nil},
 		{"empty body is not a verdict", rec(head, "COMMENTED", app, ""), false, nil},
@@ -105,7 +95,6 @@ func TestDecision(t *testing.T) {
 		{"outsider allow is feedback", rec(head, "COMMENTED", outsider, "Looks fine. "+allow(head)), false, []string{"**NO VERDICT**", "untrusted publisher", "Looks fine."}},
 		{"outsider block does not veto", rec(head, "COMMENTED", app, allow(head)) + rec(head, "COMMENTED", outsider, block(head)), true, []string{"**ALLOWED**"}},
 		{"outsider CHANGES_REQUESTED does not veto", rec(head, "COMMENTED", app, allow(head)) + rec(head, "CHANGES_REQUESTED", outsider, "no"), true, []string{"**ALLOWED**"}},
-		{"outsider cannot correct", rec(head, "COMMENTED", app, blockMarked(head)) + rec(head, "COMMENTED", outsider, correcting(head, "")), false, []string{"**BLOCKED**"}},
 		{"contributor not in the list is untrusted", strings.Replace(rec(head, "COMMENTED", outsider, allow(head)), "NONE", "CONTRIBUTOR", 1), false, []string{"**NO VERDICT**"}},
 		{"control bytes are neutralised", rec(head, "COMMENTED", app, "carriage\x1b[2Ktrick  "+block(head)), false, []string{"carriage?[2Ktrick"}},
 		{"findings are escaped", rec(head, "COMMENTED", app, "Finding: <script>alert(1)</script> & the launch path. "+block(head)), false, []string{"&lt;script&gt;", "&amp; the launch path"}},
@@ -209,7 +198,6 @@ func TestWireContract(t *testing.T) {
 	rs, workflow := read("control-plane/src/github_app.rs"), read(".github/workflows/ci.yml")
 	for _, w := range []string{
 		`const REVIEW_VERDICT_PREFIX: &str = "Dark-Factory-Review:";`,
-		`const REVIEW_CORRECTION_PREFIX: &str = "Dark-Factory-Review-Correction:";`,
 		`const OPERATION_MARKER_PREFIX: &str = "<!-- dark-factory-operation:";`,
 		// Every verdict is a COMMENT review: the App authors the pull requests
 		// it reviews and GitHub refuses a self-review that takes a side.
