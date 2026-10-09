@@ -3,6 +3,7 @@ package kernel
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -834,6 +835,11 @@ func corruptSQL(t *testing.T, store *Store, statement string, args ...any) {
 		t.Fatal(err)
 	}
 	defer connection.Close()
+	corruptSQLOnConnection(t, connection, statement, args...)
+}
+
+func corruptSQLOnConnection(t *testing.T, connection *sql.Conn, statement string, args ...any) {
+	t.Helper()
 	// The fixed connection set cannot replace a poisoned connection, so
 	// restore the pragmas instead of discarding it.
 	defer connection.ExecContext(context.Background(), `PRAGMA ignore_check_constraints = OFF; PRAGMA foreign_keys = ON`)
