@@ -90,7 +90,7 @@ test("error banner keeps its centered layout after the paragraph reset", () => {
   const css = readFileSync(new URL("../src/factory-console.css", import.meta.url), "utf8");
   assert.match(css, /\.dfFactoryConsole :where\(h1, h2, p, dl, ul\),[\s\S]*?\.dfConsoleSidebar :where\(h1, h2, h3, p, dl, ul\)\s*\{\s*margin: 0;\s*\}/);
   assert.match(css, /\.dfFactoryConsole__error\s*\{[\s\S]*?margin: 0 auto 1\.25rem;/);
-  assert.match(css, /\.dfFactoryFloor__map \{ overflow: auto; height: min\(70vh, 720px\);/);
+  assert.match(css, /\.dfFactoryFloor__map \{ position: absolute; inset: 0; overflow: auto; height: 100%;/);
   assert.match(css, /\.dfFactoryTooltip \{[^}]*-webkit-line-clamp: 8;[^}]*pointer-events: none;/, "a tooltip stays short enough to need no scrolling, and never takes the click meant for what it covers");
   assert.match(render(), /class="dfFactoryFloor__map" role="region" aria-label="Scrollable factory floor" tabindex="0"/);
   assert.equal(css.includes("@keyframes dfFactoryScene"), false);
@@ -168,7 +168,7 @@ test("blocked floor-appearance storage leaves the console renderable", () => {
 test("one screen keeps Factory and the operator panels together", () => {
   const markup = render();
   assert.match(markup, /<main class="dfFactoryConsole" aria-label="Factory operator console">/);
-  for (const label of ["Factory floor", "Selected detail", "Work", "Left view", "Right panel"]) {
+  for (const label of ["Factory floor", "Selected detail", "Work", "Right panel"]) {
     assert.match(markup, new RegExp(`aria-label="${label}"`));
   }
   assert.doesNotMatch(markup, /ACTIVE RUNS|OPERATOR VIEW/);
@@ -216,12 +216,11 @@ test("read-only decisions retain disabled suggestions and explain their status",
   assert.match(deliveryUnknown, /This decision is delivery unknown\./);
 });
 
-test("the roster stays visible while the optional floor opens and closes", () => {
+test("the sidebar roster groups agents while the floor stays visible", () => {
   const floor = render();
   assert.match(floor, /aria-label="Dark Factory operational floor"/);
 
-  const agents = render({ view: "agents" });
-  assert.match(agents, /aria-label="Agents"/);
+  const agents = render({ detail: "agent" }).split('class="dfAgentList"')[1];
   assert.match(agents, /aria-label="Overseer"/);
   // Rank is the served role, oversight first, and nothing invents a new field.
   const overseer = agents.indexOf('aria-label="Overseer"');
@@ -411,7 +410,7 @@ test("the console never shows a kernel-grammar or retired vocabulary word", () =
   }, createElement("div"));
   const surfaces = [
     ...VIEWS.map((view) => [view, render({ ...withDetail, view })]),
-    ["agent", render({ view: "agents", selectedAgent: agentSelection(), onSaveAgentConfig: () => {} })],
+    ["agent", render({ detail: "agent", selectedAgent: agentSelection(), onSaveAgentConfig: () => {} })],
     ["settings", render({ settingsOpen: true, onToggleSettings: () => {} })],
     ["terminal", renderToStaticMarkup(terminalView())],
     ["terminal-reset", renderToStaticMarkup(terminalView({ terminal: { resets: 1 } }))],
@@ -426,7 +425,7 @@ test("the console never shows a kernel-grammar or retired vocabulary word", () =
       assert.equal(forbidden.test(markup), false, `${name}: ${forbidden}`);
     }
   }
-  assert.match(render({ view: "agents" }), />Overseer</);
+  assert.match(render({ detail: "agent" }), />Overseer</);
 });
 
 test("transitional session statuses have stable live labels and offer no factory action", () => {
@@ -477,7 +476,7 @@ test("unknown and inherited error codes use a finite fallback", () => {
 test("Work keeps every served item reachable", () => {
   const emptyState = baseState({ projects: new Map(), agents: new Map(), tasks: new Map(), humanRequests: new Map() });
   assert.match(render({ state: emptyState }), /No open work/);
-  assert.match(render({ state: emptyState, view: "agents" }), /no agents/);
+  assert.match(render({ state: emptyState, detail: "agent" }), /no agents/);
 
   const agents = new Map();
   const tasks = new Map();
@@ -497,8 +496,8 @@ test("Work keeps every served item reachable", () => {
   assert.equal((markup.match(/\+1 more/g) ?? []).length, 0);
   assert.doesNotMatch(markup, /9 items/);
   assert.match(markup, /Task 8/);
-  assert.equal((render({ state: bounded, view: "agents" }).match(/dfAgentList__row/g) ?? []).length, 0, "no handler, no button");
-  assert.equal((render({ state: bounded, view: "agents", onSelectAgent: () => {} }).match(/dfAgentList__row/g) ?? []).length, 9);
+  assert.equal((render({ state: bounded, detail: "agent" }).match(/dfAgentList__row/g) ?? []).length, 0, "no handler, no button");
+  assert.equal((render({ state: bounded, detail: "agent", onSelectAgent: () => {} }).match(/dfAgentList__row/g) ?? []).length, 9);
 });
 
 test("Work keeps running tasks visible beside queued ones", () => {
@@ -663,7 +662,7 @@ test("a terminal blocked task is neither building nor current agent work", () =>
     tasks: new Map([[ids.task, { ...fixtureState.tasks.get(ids.task), status: "blocked" }]]),
     humanRequests: new Map(),
   });
-  const markup = render({ state, view: "agents" });
+  const markup = render({ state, detail: "agent" });
   assert.match(markup, /aria-label="Builder One: ready · North Workshop"/);
   assert.equal(markup.includes('aria-label="Builder One: busy"'), false);
 });
@@ -685,7 +684,7 @@ test("an unavailable snapshot is explicit and does not invent runtime state", ()
   assert.match(markup, /Work <\/button>/);
   assert.equal(markup.includes("NO QUEUED TASKS"), false);
   assert.equal(markup.includes("all quiet"), false);
-  assert.match(render({ state: undefined, status: "syncing", view: "agents" }), /waiting for the factory/);
+  assert.match(render({ state: undefined, status: "syncing", detail: "agent" }), /waiting for the factory/);
 });
 
 test("HumanRequest delivery states remain visibly distinct", () => {
@@ -784,7 +783,7 @@ test("opening a selected question restores that agent's terminal panel", async (
 
 test("selecting an agent exposes terminal and configuration controls", () => {
   const markup = render({
-    view: "agents",
+    detail: "agent",
     selectedAgent: agentSelection(),
     onSelectAgent: () => {},
     onSaveAgentConfig: () => {},
@@ -1391,15 +1390,12 @@ test("a refused appearance edit keeps the editor and its draft", async () => {
   } finally { globalThis.IS_REACT_ACT_ENVIRONMENT = previousAct; }
 });
 
-test("Factory and Agents are explicit left-side alternatives", () => {
-  const floor = render();
-  assert.match(floor, /aria-label="Left view"/);
-  assert.match(floor, /aria-pressed="true" disabled="">Floor/);
-  assert.match(render({ view: "agents" }), /aria-label="Agents"/);
-  // The top bar keeps the wordmark, the counters, and SETTINGS.
-  const actions = floor.split('class="dfConsoleBar__actions"')[1];
-  assert.match(actions.slice(0, actions.indexOf("</div>")), /aria-label="Settings"/);
-  assert.match(floor, /<h2[^>]*>Factory floor<\/h2>/);
+test("the floor stays on the left and the agent roster lives in the sidebar", () => {
+  const floor = render({ detail: "agent" });
+  assert.doesNotMatch(floor, /aria-label="Left view"/);
+  assert.ok(floor.indexOf('aria-label="Agents"') > floor.indexOf('aria-label="Selected detail"'));
+  assert.match(floor, /aria-label="Factory floor"/);
+  assert.match(floor, /aria-label="Pull request progress"/);
 });
 
 test("FactoryApp server-renders without reading browser globals", () => {
@@ -1471,7 +1467,7 @@ test("agent and question terminal actions expose only current public intent", as
   const calls = [];
   let renderer;
   await act(async () => { renderer = create(createElement(FactoryConsole, {
-    status: "ready", state: baseState(), view: "agents", selectedHumanRequest: selectedRequest(),
+    status: "ready", state: baseState(), detail: "agent", selectedHumanRequest: selectedRequest(),
     onSelectAgent: (value) => calls.push(["agent", value]),
     onOpenTerminalForHumanRequest: (value) => calls.push(["request", value]),
   })); });
@@ -1490,19 +1486,13 @@ test("agent and question terminal actions expose only current public intent", as
   assert.equal(markup.includes("sessionId"), false);
 });
 
-test("the view toggle and settings forward exactly one intent each", () => {
+test("settings and the sidebar Agents tab forward one intent each", () => {
   const calls = [];
-  const elements = consoleElements({
-    status: "ready",
-    state: baseState(),
-    onView: (value) => calls.push(["view", value]),
-    onToggleSettings: () => calls.push(["settings"]),
-  });
-  const chrome = elements.filter((element) => element.type === "button" && ["Settings", "Floor", "Agents"].includes(element.props["aria-label"] ?? element.props.children));
-  assert.deepEqual(chrome.map((element) => element.props["aria-label"] ?? element.props.children), ["Settings", "Floor", "Agents"]);
-  chrome[0].props.onClick();
-  chrome.find((element) => element.props.children === "Agents").props.onClick();
-  assert.deepEqual(calls, [["settings"], ["view", "agents"]]);
+  const elements = consoleElements({ status: "ready", state: baseState(), onDetail: (value) => calls.push(value), onToggleSettings: () => calls.push("settings") });
+  elements.find((element) => element.type === "button" && element.props["aria-label"] === "Settings").props.onClick();
+  const tabs = elements.find((element) => element.props["aria-label"] === "Right panel");
+  tabs.props.children.find((element) => element.props.children === "Agents").props.onClick();
+  assert.deepEqual(calls, ["settings", "agent"]);
 });
 
 function expand(node, result = []) {
@@ -1551,7 +1541,7 @@ test("Pair a phone appears in settings only with authority, and shows the minted
 const shellAgent = { id: ids.agent, project_id: ids.project, name: "Shell Hand", role: "worker", provider: "shell", paused: true, model: "", reasoning_effort: "", effective_model: "", effective_reasoning_effort: "", model_source: "", revision: 10n };
 
 const withAgent = (agent) => render({
-  view: "agents",
+  detail: "agent",
   state: baseState({ agents: new Map([[agent.id, agent]]) }),
   selectedAgent: { id: agent.id, name: agent.name, revision: agent.revision },
   onSaveAgentConfig: () => {},
@@ -1562,7 +1552,7 @@ const inheritingAgent = () => fixtureState.agents.get("23".repeat(16));
 test("the console shows the model an agent will actually run with", () => {
   // An agent that names no model still runs with one. The row and the panel
   // header say which, so a blank is never read as "no model".
-  const rows = render({ view: "agents" });
+  const rows = render({ detail: "agent" });
   assert.match(rows, /codex · gpt-6-astra/);
   assert.match(rows, /claude_code · claude-opus-5/);
   assert.match(withAgent(inheritingAgent()), /Builder Two[\s\S]*?codex · gpt-6-astra/);
@@ -1577,12 +1567,12 @@ test("archived workers stay selectable from the archived view and expose only re
   const state = baseState({ agents: new Map([[worker.id, worker]]) });
   try {
     let renderer;
-    await act(async () => { renderer = create(createElement(FactoryConsole, { status: "ready", state, view: "agents", onSelectAgent() {} })); });
+    await act(async () => { renderer = create(createElement(FactoryConsole, { status: "ready", state, detail: "agent", onSelectAgent() {} })); });
     assert.equal(renderer.root.findAllByType("button").some((button) => String(button.props.className).includes("dfAgentList__row")), false);
-    const archived = renderer.root.findByType("input");
+    const archived = renderer.root.findByProps({ type: "checkbox" });
     await act(async () => { archived.props.onChange({ currentTarget: { checked: true } }); });
     assert.equal(renderer.root.findAllByType("button").some((button) => String(button.props.className).includes("dfAgentList__row")), true);
-    await act(async () => { renderer.update(createElement(FactoryConsole, { status: "ready", state, view: "agents", selectedAgent: { id: worker.id, name: worker.name, revision: worker.revision }, onSaveAgentConfig() {} })); });
+    await act(async () => { renderer.update(createElement(FactoryConsole, { status: "ready", state, detail: "agent", selectedAgent: { id: worker.id, name: worker.name, revision: worker.revision }, onSaveAgentConfig() {} })); });
     const text = JSON.stringify(renderer.toJSON());
     assert.match(text, /archived/);
     assert.match(text, /Restore paused/);
@@ -2015,47 +2005,31 @@ test("mobile navigation switches presentation without mutating work", () => {
 });
 
 
-test("mobile Floor and Agents tabs track both directions and restore after Work", async () => {
+test("mobile Agents opens the sidebar roster and selection keeps the floor mounted", async () => {
   let tree;
   function Harness() {
-    const [view, setView] = useState("agents");
     const [detail, setDetail] = useState("work");
-    return createElement(FactoryConsole, { status: "ready", state: fixtureState, view, onView: setView, detail, onDetail: setDetail });
+    const [selectedAgent, setAgent] = useState();
+    return createElement(FactoryConsole, { status: "ready", state: fixtureState, detail, onDetail: setDetail, selectedAgent,
+      onSelectAgent: (agent) => { setAgent(agent); setDetail("agent"); } });
   }
   await act(async () => { tree = create(createElement(Harness)); });
-  assert.equal(tree.root.findByType(FactoryConsole).props.view, "agents");
+  const floor = tree.root.findByProps({ className: "dfFactoryFloor__map" });
   const nav = tree.root.findByProps({ "aria-label": "Console views" });
-  await act(async () => { nav.findAllByType("button")[0].props.onClick(); });
-  assert.equal(tree.root.findByType(FactoryConsole).props.view, "floor");
-  assert.equal(tree.root.findByType(FactoryConsole).props.detail, "floor");
-  assert.equal(tree.root.findByType("main").props["data-mobile-view"], "floor");
-  await act(async () => { nav.findAllByType("button")[1].props.onClick(); });
-  assert.equal(tree.root.findByType(FactoryConsole).props.view, "agents");
-  assert.equal(nav.findAllByType("button")[0].props["aria-pressed"], false);
-  assert.equal(nav.findAllByType("button")[1].props["aria-pressed"], true);
-  await act(async () => { nav.findAllByType("button")[2].props.onClick(); });
+  await act(async () => nav.findAllByType("button")[1].props.onClick());
   assert.equal(tree.root.findByType("main").props["data-mobile-view"], "detail");
-  await act(async () => { nav.findAllByType("button")[1].props.onClick(); });
-  assert.equal(tree.root.findByType("main").props["data-mobile-view"], "floor");
   assert.equal(nav.findAllByType("button")[1].props["aria-pressed"], true);
+  const roster = tree.root.findByProps({ className: "dfAgentList" });
+  await act(async () => roster.findAllByType("button")[0].props.onClick());
+  assert.ok(tree.root.findByType(FactoryConsole).props.selectedAgent);
+  assert.equal(tree.root.findAllByProps({ className: "dfAgentList" }).length, 0);
+  await act(async () => tree.root.findAllByType("button").find((button) => button.props.children === "All agents").props.onClick());
+  assert.equal(tree.root.findAllByProps({ className: "dfAgentList" }).length, 1);
+  await act(async () => nav.findAllByType("button")[0].props.onClick());
+  assert.equal(tree.root.findByType("main").props["data-mobile-view"], "floor");
+  assert.equal(tree.root.findByProps({ className: "dfFactoryFloor__map" }), floor);
   await act(async () => tree.unmount());
 });
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 test("floor preparation survives draft and live snapshot updates and relayouts only when structure changes", async () => {
   let reads = 0;
@@ -2456,7 +2430,8 @@ test("one project selector scopes floor, agents, tasks and project limits across
   assert.ok([...floor().props.state.tasks.values()].every((task) => task.project_id === ids.project));
   const units = () => floor().findByType(FactoryScene).props.graph.units.map((item) => item.label).sort();
   assert.deepEqual(units(), ["kernel", "web"], "only the selected project's units");
-  await act(async () => { tree.update(createElement(FactoryConsole, { ...props, view: "agents", settingsOpen: true })); });
+  await act(async () => { tree.update(createElement(FactoryConsole, { ...props, detail: "agent", settingsOpen: true })); });
+  await act(async () => tree.root.findAllByType("button").find((button) => button.props.children === "All agents").props.onClick());
   const rows = tree.root.findAllByProps({ className: "dfConsoleRow dfAgentList__row" });
   assert.equal(rows.length, [...fixtureState.agents.values()].filter((agent) => agent.project_id === ids.project && !agent.archived).length);
   assert.ok(rows.every((row) => row.props["aria-label"].includes(fixtureState.projects.get(ids.project).name)));
@@ -2731,7 +2706,7 @@ test("Library source navigation selects the machine on the floor and keeps one i
   };
   for (let visit = 0; visit < 2; visit++) {
     await act(async () => tree.root.findByProps({ type: "search" }).props.onChange({ target: { value: first.label } }));
-    await act(async () => tree.root.findByProps({ className: "dfFactoryEntityTools__results" }).findAllByType("button").find((button) => button.children.join("") === `${first.label} · ${first.kind}`).props.onClick());
+    await act(async () => tree.root.findByProps({ className: "dfFactoryEntityTools__results" }).findAllByType("button").find((button) => button.children.join("") === `${first.label} · ${first.kind}`).props.onClick({ currentTarget: { closest: () => null } }));
     assertSelection(first.id);
     await act(async () => tree.root.findByType(FactoryFloor).props.onOpenLibrary(ids.project));
     await act(async () => tree.root.findByType(ProjectLibrary).props.onSource(`${ids.project}:${destination.id}`));

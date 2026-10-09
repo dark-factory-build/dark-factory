@@ -181,11 +181,11 @@ test("thirty proposals draw no floor Changes button or Help", async () => {
     const header = () => tree.root.findByProps({ className: "dfFactoryEntityTools" });
     assert.equal(header().findAllByProps({ type: "search" }).length, 1);
     assert.deepEqual(header().findAllByType("button").map(text), []);
-    assert.equal(header().findAllByType("details").length, 0);
+    assert.ok(header().findAllByType("details").length >= 4, "PR stages have compact menus");
     await act(async () => tree.update(createElement(FactoryFloor, { ...props, selectedChange: productionKey(changes[29]) })));
-    assert.match(text(header()), /Viewing: Change 30/);
-    assert.deepEqual(header().findAllByType("button").map(text), ["Clear selection"]);
-    await act(async () => header().findAllByType("button").find((button) => text(button) === "Clear selection").props.onClick());
+    assert.equal(header().findByProps({ title: "Change 30" }).props.children, "Clear PR ×");
+    assert.deepEqual(header().findAllByType("button").map(text), ["Clear PR ×"]);
+    await act(async () => header().findAllByType("button").find((button) => text(button) === "Clear PR ×").props.onClick());
     assert.deepEqual(selected, [""]);
   } finally { if (tree) await act(async () => tree.unmount()); }
 });

@@ -12,9 +12,8 @@ import {
   placeErrands,
   breakRoomNook,
   proposalsForEntity,
-  placeCrates,
   stationOf,
-  LINE_SLOTS,
+  LINE_STATIONS,
   type SceneCrate,
   type SceneGraph,
   type SceneLayout,
@@ -33,7 +32,7 @@ import { IconButton } from "../icons.js";
 import { DEFAULT_FLOOR_APPEARANCE, type FloorAppearance } from "../floor-appearance.js";
 import { breakRoomHabit, restingItem, workerFrames, workerPhase } from "./appearance.js";
 import { catAt, catBed, chats, gossip, type Seat } from "./idle-life.js";
-import { endsAt, isPaper, messageAt, observe, observeCrates, send, type FloorMessage, type Seen } from "./messages.js";
+import { endsAt, isPaper, messageAt, observe, send, type FloorMessage, type Seen } from "./messages.js";
 import { beltRoutes, type BeltStub, directionBetween, findRoute, pointOnRoute, samePoint, type WorkerMotion } from "./movement.js";
 import { spriteAtlas, spriteSheet, spriteSheetSize } from "./sprites/sprites.generated.js";
 
@@ -41,7 +40,7 @@ import { spriteAtlas, spriteSheet, spriteSheetSize } from "./sprites/sprites.gen
 
 export type FactorySceneProps = Readonly<{
   proposals?: { items: readonly SceneProposal[]; selected?: string; onSelect: (id: string) => void };
-  /** Change requests on the outbound line; selecting one uses `proposals.onSelect`. Undefined until read on this connection. */
+  /** Change requests in the header; selecting one uses `proposals.onSelect`. Undefined until read on this connection. */
   crates?: readonly SceneCrate[];
   tools?: ReactNode;
   /** Read one machine's evidence when its inspector opens. */
@@ -641,13 +640,16 @@ export function FactoryScene({ proposals, crates, tools, onLoadNode, onInvestiga
   const searchable = [...machines.values()];
 
   return (
-    <>
+    <div className="dfFactoryFloor__scene">
     <div className="dfFactoryEntityTools">
-      {graph.summary === undefined ? null : <Coverage summary={graph.summary} />}
-      <label>Find machine <input type="search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Route, unit, store or party" /></label>
-      {search === "" ? null : <div className="dfFactoryEntityTools__results">{searchable.filter((machine) => `${machine.label} ${machine.kind}`.toLowerCase().includes(search.toLowerCase())).slice(0, 30).map((machine) => <button type="button" key={machine.id} onClick={() => focusEntity(machine.id)}>{machine.label} · {machine.kind}</button>)}</div>}
+      <WorkLine crates={crates} connected={connected} onLight={setLit} onSelect={proposals?.onSelect} />
+      <details className="dfFloorMenu dfFloorSearch" name="floor-tools"><summary>Search</summary><div className="dfFloorMenu__body">
+        <label>Find machine <input type="search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Route, unit, store or party" /></label>
+        {search === "" ? null : <div className="dfFactoryEntityTools__results">{searchable.filter((machine) => `${machine.label} ${machine.kind}`.toLowerCase().includes(search.toLowerCase())).slice(0, 30).map((machine) => <button type="button" key={machine.id} onClick={(event) => { focusEntity(machine.id); event.currentTarget.closest("details")?.removeAttribute("open"); }}>{machine.label} · {machine.kind}</button>)}</div>}
+      </div></details>
+      {graph.summary === undefined ? null : <details className="dfFloorMenu" name="floor-tools"><summary>Telemetry</summary><div className="dfFloorMenu__body"><Coverage summary={graph.summary} /></div></details>}
       {tools}
-      {proposals?.selected && proposals.items.some((item) => item.id === proposals.selected) ? <p className="dfFactoryEntityTools__notice"><span className="dfFactoryEntityTools__selection">Viewing: {proposals.items.find((item) => item.id === proposals.selected)?.title}</span><button type="button" onClick={() => proposals.onSelect("")}>Clear selection</button></p> : null}
+      {proposals?.selected && proposals.items.some((item) => item.id === proposals.selected) ? <button type="button" title={proposals.items.find((item) => item.id === proposals.selected)?.title} onClick={() => proposals.onSelect("")}>Clear PR ×</button> : null}
     </div>
     <div className="dfFactoryFloor__viewport">
     <div ref={mapElement} className="dfFactoryFloor__map" onClick={inspect} onPointerOver={inspect} onFocus={inspect} onPointerLeave={retainFocusedTooltip} onBlur={() => setTooltip(undefined)} onScroll={() => { retainFocusedTooltip(); measure(); }} onKeyDown={(event) => { if (event.key === "Escape") setTooltip(undefined); }} role="region" aria-label="Scrollable factory floor" tabIndex={0} style={zoom === undefined ? { overflow: "hidden" } : undefined}>
@@ -688,9 +690,6 @@ export function FactoryScene({ proposals, crates, tools, onLoadNode, onInvestiga
         <path d={region.outline} className="dfPlant__regionEdge" stroke={tint(region.hue, .4)} />
         <text data-region-label={region.unit} x={region.label.x} y={region.label.y} className="dfPlant__regionLabel" fontSize="7">{shortLabel(unitOf.get(region.unit)?.label ?? "", Math.max(4, Math.floor(region.label.width / 5)))}</text>
       </g>)}</g>
-      {/* Development: the outbound line, apart from the running system. */}
-      <rect data-development="" x={layout.facilities.x + 8} y={layout.facilities.y + 8} width={layout.facilities.width - 16} height={layout.facilities.height - 16} rx="6" className="dfPlant__development" />
-      <text x={layout.facilities.x + MARGIN} y={layout.facilities.y + 6} className="dfPlant__regionLabel" fontSize="7">DEVELOPMENT</text>
 
       <g aria-hidden="true" pointerEvents="none">
         {belts.map((belt) => <Belt key={belt.key} belt={belt} lit={members.has(belt.from) || members.has(belt.to)} />)}
@@ -715,7 +714,6 @@ export function FactoryScene({ proposals, crates, tools, onLoadNode, onInvestiga
         </g>;
       })}
 
-      <WorkLine layout={layout} crates={crates} tasks={tasks} placements={placements} connected={connected} live={animate} onLight={setLit} onSelect={proposals?.onSelect} />
 
       {implementsShown.map((piece) => { const [open, tooltip, label, sign] = opens[piece.errand] ?? []; return <g key={piece.key} data-break-room={piece.errand} data-floor-inbox={piece.errand === "tasks" ? queued : undefined}
         {...(open === undefined ? {} : { className: "dfFactoryScene__target", "data-tooltip": tooltip, "aria-label": label, ...sceneAction(() => open(projectId)) })} transform={`translate(${piece.x} ${piece.y}) scale(${WORKER_SIZE / FRAME})`}>
@@ -750,75 +748,35 @@ export function FactoryScene({ proposals, crates, tools, onLoadNode, onInvestiga
     {selected === undefined ? null : <MachineInspector key={selectedId} machine={selected} chosen={fold === undefined ? undefined : fold.represented!.indexOf(selectedId!)} unit={unitOf.get(selected.id)} onLoadNode={onLoadNode} onInvestigate={onInvestigate}
       proposals={proposals === undefined ? [] : proposalsForEntity(proposals.items, selected.id)} onSelectProposal={proposals?.onSelect}
       onFocus={() => focusEntity(selected.id)} onDiscuss={onDiscussSource === undefined ? undefined : () => onDiscussSource(selected.id)} onClose={() => selectEntity(undefined)} />}
-    </>
+    </div>
   );
 }
 
 const MAX_ZOOM = 4;
 const OVERVIEW_KEY = "dfFloorOverview";
 
-/**
- * Change requests on the outbound line. A crate stands where its
- * records put it and moves only when they change: once along the line, or,
- * when just opened, from the agent whose task opened it. Reconnecting is a
- * first look, never a replay.
- */
-function WorkLine({ layout, crates, tasks, placements, connected, live, onLight, onSelect }: {
-  layout: SceneLayout; crates: readonly SceneCrate[] | undefined; tasks: readonly SceneTask[]; placements: ReturnType<typeof placeWorkers>;
-  connected: boolean; live: boolean; onLight: (id: string | undefined) => void; onSelect?: (id: string) => void;
+/** The same durable PR stages, available without zooming into the floor. */
+function WorkLine({ crates, connected, onLight, onSelect }: {
+  crates: readonly SceneCrate[] | undefined; connected: boolean;
+  onLight: (id: string | undefined) => void; onSelect?: (id: string) => void;
 }) {
-  const placed = useMemo(() => placeCrates(layout, crates ?? []), [layout, crates]);
-  const reduced = useReducedMotion();
-  const moving = live && !reduced;
-  const seen = useRef<ReadonlyMap<string, SceneCrate["station"]>>(undefined);
-  const resting = useRef(new Map<string, ScenePoint>());
-  const flights = useRef<readonly FloorMessage[]>([]);
-  const [clock, setClock] = useState(0);
-  useEffect(() => {
-    // Records not yet read on this connection are no look at all: the first read is history, never news.
-    if (!connected || crates === undefined) { seen.current = undefined; flights.current = []; return; }
-    const { seen: next, moves } = observeCrates(seen.current, crates);
-    seen.current = next;
-    const started = now(), slots = new Map(placed.map((spot) => [spot.crate.id, spot]));
-    const sent = (moving ? moves : []).flatMap(({ crate, from }) => {
-      const to = slots.get(crate.id)!;
-      const origin = from === undefined ? placements.find((placement) => tasks.some((task) => crate.taskIds.includes(task.id) && task.agentId === placement.id)) : resting.current.get(crate.id);
-      // Along the line it slides; from its author it is handed over like paper from the tray.
-      return !to.shown || origin === undefined ? [] : [send({ key: crate.id, kind: "assign", to: crate.id }, started, origin, from === undefined ? undefined : { points: [to], length: Math.hypot(to.x - origin.x, to.y - origin.y) }, 0)];
-    });
-    flights.current = [...new Map([...flights.current, ...sent].filter((flight) => flight.startedAt + flight.travel > started).map((flight) => [flight.key, flight])).values()].slice(-16);
-    resting.current = new Map(placed.map((spot) => [spot.crate.id, spot]));
-    setClock(started);
-  }, [placed, connected]);
-  useEffect(() => {
-    if (!moving || !flights.current.some((flight) => flight.startedAt + flight.travel > clock) || typeof requestAnimationFrame !== "function") return;
-    const frame = requestAnimationFrame((time) => setClock(time));
-    return () => cancelAnimationFrame(frame);
-    // A new snapshot may land in the same millisecond as the last, so it asks for frames itself.
-  }, [clock, moving, placed]);
-  // The line is always there: one row and one belt per station, top to bottom.
-  const belt = (station: SceneLayout["line"][number]) => station.y + 19;
-  return <g data-work-line="">
-    <path aria-hidden="true" d={layout.line.map((station) => `M${station.x} ${belt(station)}H${station.x + station.width}`).join("")} className="b-base" />
-    {layout.line.map((station, index) => { const count = (crates ?? []).filter((crate) => crate.station === index).length; return <g key={station.label} aria-hidden="true">
-      <rect x={station.x} y={station.y} width="2" height={station.height} className="md" />
-      <text x={station.x + 6} y={station.y + 9} className="dfPlant__label" fontSize="8">{station.label.toUpperCase()} · {count}</text>
-      {count > LINE_SLOTS ? <text data-crate-overflow={count - LINE_SLOTS} x={station.x + 10 + LINE_SLOTS * 18} y={belt(station)} className="dfPlant__small" fontSize="7">+{count - LINE_SLOTS}</text> : null}
-    </g>; })}
-    {placed.filter((spot) => spot.shown).map(({ crate, x, y }) => {
-      const flight = moving ? flights.current.find((candidate) => candidate.key === crate.id) : undefined;
-      const point = (flight === undefined ? undefined : messageAt(flight, { x, y }, clock).point) ?? { x, y };
-      return <g key={crate.id} data-crate={crate.id} data-crate-station={crate.station} data-fault={crate.fault ? "" : undefined} className="dfFactoryScene__target"
-        data-tooltip={crate.number > 0 ? `PR #${crate.number} · ${crate.title}\n${layout.line[crate.station]!.label}${crate.stage ? ` · ${crate.stage}` : ""}` : `A change request\n${layout.line[crate.station]!.label}${crate.fault ? " · needs correction" : ""}`}
-        aria-label={crate.number > 0 ? `PR #${crate.number} ${crate.title}: ${crate.stage || layout.line[crate.station]!.label}` : `A change request: ${layout.line[crate.station]!.label}${crate.fault ? ", needs correction" : ""}`}
-        {...sceneAction(onSelect === undefined ? undefined : () => onSelect(crate.id))} onPointerEnter={() => onLight(crate.id)} onPointerLeave={() => onLight(undefined)} onFocus={() => onLight(crate.id)} onBlur={() => onLight(undefined)}
-        transform={`translate(${point.x} ${point.y})`}>
-        <rect className="dfFactoryScene__focus" x="-9" y="-12" width="18" height="16" fill="transparent" />
-        <rect x="-7" y="-9" width="14" height="10" className="crate" />
-        {crate.fault ? <rect x="3" y="-12" width="6" height="6" className="redtag" /> : null}
-      </g>;
+  return <nav className="dfWorkLine" aria-label="Pull request progress" data-work-line="">
+    {LINE_STATIONS.map((label, index) => {
+      const members = (crates ?? []).filter((crate) => crate.station === index).sort((a, b) => b.number - a.number || a.id.localeCompare(b.id));
+      return <details key={label} className="dfFloorMenu" name="floor-tools">
+        <summary>{label} <strong>{!connected || crates === undefined ? "—" : members.length}</strong></summary>
+        <div className="dfFloorMenu__body">
+          {!connected ? <p>Disconnected · showing last known changes</p> : crates === undefined ? <p>Reading changes…</p> : members.length === 0 ? <p>No changes</p> : null}
+          {members.map((crate) => <button type="button" key={crate.id} data-crate={crate.id} data-crate-station={crate.station} data-fault={crate.fault ? "" : undefined}
+            aria-label={crate.number > 0 ? `PR #${crate.number} ${crate.title}: ${crate.stage || label}` : `A change request: ${label}${crate.fault ? ", needs correction" : ""}`}
+            disabled={!connected || onSelect === undefined} onClick={(event) => { onSelect?.(crate.id); event.currentTarget.closest("details")?.removeAttribute("open"); }}
+            onPointerEnter={() => onLight(crate.id)} onPointerLeave={() => onLight(undefined)} onFocus={() => onLight(crate.id)} onBlur={() => onLight(undefined)}>
+            <span aria-hidden="true" className="dfWorkLine__crate" />{crate.number > 0 ? `#${crate.number} ${crate.title}` : "Change request"}{crate.fault ? " · needs correction" : ""}
+          </button>)}
+        </div>
+      </details>;
     })}
-  </g>;
+  </nav>;
 }
 
 /**
@@ -844,7 +802,6 @@ function PlantMap({ layout, width, height, machines, graph, placements, workers,
     onPointerDown={go} onPointerMove={go}>
     <rect width={width} height={height} className="dfPlantMap__ground" />
     {layout.regions.map((region) => <g key={`${region.unit} ${region.lobe}`} fill={tint(region.hue)}>{region.rects.map((rect, index) => <rect key={index} {...rect} />)}</g>)}
-    <rect {...layout.facilities} className="dfPlantMap__development" />
     {layout.stations.map((station) => {
       const reading = (machines.get(station.entityId) ?? station.machine).reading;
       return <rect key={station.entityId} data-overview-station={station.entityId} x={station.x} y={station.y} width={station.width} height={station.height}

@@ -60,7 +60,7 @@ test("the fixtures stand in free floor between the machines, and only the machin
   const rects = layout.fixtures.map(whole), overlap = (a, b) => a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height;
   for (const [index, rect] of rects.entries()) {
     assert.ok(layout.stations.every((station) => !overlap(rect, station.footprint)), `${layout.fixtures[index].errand} is clear of every machine's footprint`);
-    assert.ok(!overlap(rect, layout.facilities) && rects.every((other, at) => at === index || !overlap(rect, other)), "and of the line and each other");
+    assert.ok(rects.every((other, at) => at === index || !overlap(rect, other)), "and of each other");
     assert.ok(rect.x >= 0 && rect.x + rect.width <= layout.width && rect.y + rect.height <= layout.height, "on the floor");
     assert.ok(standable(layout, layout.fixtures[index].stand), `${layout.fixtures[index].errand} is used from free floor`);
   }

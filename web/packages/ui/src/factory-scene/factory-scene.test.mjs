@@ -9,7 +9,7 @@ import { Profiler, createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { act, create } from "react-test-renderer";
 import { AgentSprite, FactoryScene, offeredFixtures } from "../../dist/src/factory-scene/factory-scene.js";
-import { WORKER_SIZE, breakRoomNook, layoutScene, placeCrates, placeErrands, placeWorkers, standable } from "../../dist/src/factory-scene/scene.js";
+import { WORKER_SIZE, breakRoomNook, layoutScene, placeErrands, placeWorkers, standable } from "../../dist/src/factory-scene/scene.js";
 import { deriveProductionView, projectCrates } from "../../dist/src/production-view.js";
 import { publicFloor } from "../../dist/src/public-floor.js";
 import { breakRoomHabit, resolvedAppearance, restingItem, spriteOptions, workerFrames, workerPhase } from "../../dist/src/factory-scene/appearance.js";
@@ -1286,27 +1286,19 @@ test("the outbound line puts each change request at the station its records name
   const markup = render({ crates, connected: true });
   assert.deepEqual([...markup.matchAll(/data-crate-station="(\d)"( data-fault="")?[^>]*aria-label="PR #(\d+)/g)].map((match) => [Number(match[3]), Number(match[1]), match[2] !== undefined]).sort((a, b) => a[0] - b[0]),
     crates.map((crate) => [crate.number, crate.station, crate.fault]).sort((a, b) => a[0] - b[0]), "drawn where the records put them");
-  assert.match(markup, /PR #2 · Change 2\nReview · Correction/, "the tooltip says the number, title and stage");
-  assert.equal((markup.match(/class="redtag"/g) ?? []).length, 2, "a blocked review and a failed check show the fault");
+  assert.match(markup, /aria-label="PR #2 Change 2: Correction/, "the button names the number, title and stage");
+  assert.equal((markup.match(/data-fault=""/g) ?? []).length, 2, "a blocked review and a failed check show the fault");
   const empty = render({ connected: true });
   assert.match(empty, /data-work-line/, "the line is always there");
   assert.doesNotMatch(empty, /data-crate=/, "with no change requests, nothing on it");
   assert.doesNotMatch(render({ crates: [], connected: true }), /data-crate/);
 
-  // Machines never move for it: the line stands in its own block, apart from every machine, there with or without work.
-  const layout = layoutScene(graph);
-  for (const station of layout.line) {
-    assert.ok(station.x >= layout.facilities.x && station.x + station.width <= layout.facilities.x + layout.facilities.width && station.y + station.height <= layout.facilities.y + layout.facilities.height);
-    for (const machine of layout.stations) assert.ok(station.x >= machine.footprint.x + machine.footprint.width || machine.footprint.x >= station.x + station.width || station.y >= machine.footprint.y + machine.footprint.height || machine.footprint.y >= station.y + station.height, `${station.label} clear of ${machine.entityId}`);
-  }
-  assert.deepEqual(layoutScene(graph), layout);
-
-  // Deterministic, newest first, eight to a station and then a count.
+  assert.ok(markup.indexOf('data-work-line') < markup.indexOf('class="dfFactoryFloor__viewport"'), "progress lives in the header");
+  assert.doesNotMatch(markup, /data-development=/);
   const many = Array.from({ length: 11 }, (_, index) => ({ id: `c${index}`, number: index + 1, title: "x", station: 0, stage: "Review pending", fault: false, taskIds: [] }));
-  const once = placeCrates(layout, many), again = placeCrates(layout, [...many].reverse());
-  assert.deepEqual(once, again);
-  assert.deepEqual(once.filter((spot) => spot.shown).map((spot) => spot.crate.number), [11, 10, 9, 8, 7, 6, 5, 4]);
-  assert.match(render({ crates: many }), /data-crate-overflow="3"[^>]*>\+3</);
+  const all = render({ crates: many });
+  assert.equal(all, render({ crates: [...many].reverse() }));
+  assert.deepEqual([...all.matchAll(/aria-label="PR #(\d+)/g)].map((match) => Number(match[1])), [11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1], "every PR is reachable, newest first");
 });
 
 test("the console and factoryd put the shared fixture's records at the same stations", () => {
@@ -1323,91 +1315,28 @@ test("the public floor puts crates on the line by station, with a number and tit
   assert.deepEqual(crates.map((crate) => [crate.id, crate.station, crate.fault, crate.number, crate.title]), [["f".repeat(32), 2, false, 7, "Fix it"], ["e".repeat(32), 0, true, 0, ""]]);
   assert.deepEqual(publicFloor({ ...world, crates: undefined }).crates, [], "an older factory publishes no line");
   const markup = render({ crates, connected: true });
-  assert.match(markup, /data-crate="e{32}" data-crate-station="0" data-fault=""[^>]*data-tooltip="A change request\nReview · needs correction"/);
+  assert.match(markup, /data-crate="e{32}" data-crate-station="0" data-fault=""[^>]*aria-label="A change request: Review, needs correction"/);
   assert.match(markup, /aria-label="PR #7 Fix it: Merge queue"/);
-  assert.equal(markup.match(/PR #/g)?.length, 2, "only the published crate is named");
+  assert.equal(markup.match(/PR #/g)?.length, 1, "only the published crate is named");
 });
 
-test("a crate moves once when its recorded stage changes, never on first sight or reconnect, and lights what it changes", async () => {
-  const graph = sceneGraph([unit("a", { machines: [machine("a-in", "ingress", { trigger: "request" })] })]);
-  const workers = [{ id: "ada", name: "Ada", role: "worker", activity: "busy", location: "working", nodeId: "a" }];
-  const tasks = [{ id: "t1", agentId: "ada", projectId: "p", title: "t", status: "running", humanRequestIds: [] }];
-  const crate = (station, extra = {}) => ({ id: "k1", number: 1, title: "One", station, stage: "s", fault: false, taskIds: ["t1"], ...extra });
-  const proposals = { items: [{ id: "k1", title: "One", state: "active", operations: [{ entityId: "a-in", unitId: "a", path: "x", kind: "modification" }] }], onSelect: (id) => selected.push(id) };
+test("header PRs follow recorded stages, light affected machines and open Work", async () => {
+  const changedGraph = sceneGraph([unit("a")]);
   const selected = [];
-  const layout = floorFor(graph, { workers, appearance: { scenery: "off" } });
-  const slot = (crates, id = "k1") => { const spot = placeCrates(layout, crates).find((item) => item.crate.id === id); return [spot.x, spot.y]; };
-  const saved = { performance: globalThis.performance, requestAnimationFrame: globalThis.requestAnimationFrame, cancelAnimationFrame: globalThis.cancelAnimationFrame, window: globalThis.window, document: globalThis.document, setTimeout: globalThis.setTimeout, clearTimeout: globalThis.clearTimeout };
-  let clock = 1000, next = 0, renderer;
-  const frames = new Map();
-  globalThis.performance = { now: () => clock };
-  globalThis.setTimeout = () => ++next;
-  globalThis.clearTimeout = () => {};
-  globalThis.requestAnimationFrame = (callback) => { frames.set(++next, callback); return next; };
-  globalThis.cancelAnimationFrame = (id) => frames.delete(id);
-  globalThis.window = { matchMedia: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }) };
-  globalThis.document = { visibilityState: "visible", addEventListener() {}, removeEventListener() {} };
-  const tick = async (ms) => { await act(async () => { clock += ms; for (const [id, callback] of [...frames]) { frames.delete(id); callback(clock); } }); };
-  const at = (id = "k1") => renderer.root.findByProps({ "data-crate": id }).props.transform.match(/translate\(([-\d.]+) ([-\d.]+)\)/).slice(1).map(Number);
-  const scene = (crates, connected = true) => createElement(FactoryScene, { graph, workers, tasks, proposals, crates, connected, appearance: { scenery: "off", animation: "follow-device" } });
+  const crate = { id: "k1", number: 1, title: "Fix", station: 0, stage: "Review", fault: false, taskIds: [] };
+  const props = { graph: changedGraph, workers: [], connected: true, proposals: { items: [{ id: "k1", title: "Fix", state: "open", operations: [{ entityId: "a", kind: "modify" }] }], onSelect: (id) => selected.push(id) } };
+  let tree;
   try {
-    // The floor connects before its production records are read; they arrive a render later.
-    await act(async () => { renderer = create(scene(undefined, false)); });
-    await act(async () => { renderer.update(scene(undefined)); });
-    await tick(16);
-    await act(async () => { renderer.update(scene([crate(1), crate(0, { id: "k0", number: 3 })])); });
-    await tick(16);
-    assert.equal(frames.size, 0, "the first read is history: nothing slides or flies in from its author");
-    assert.deepEqual(at(), slot([crate(1)]), "what was already so when the floor opened stays put");
-    await act(async () => { renderer.update(scene([crate(1)])); });
-
-    await act(async () => { renderer.update(scene([crate(2)])); });
-    await tick(300);
-    const midway = at(), [from, to] = [slot([crate(1)]), slot([crate(2)])];
-    assert.ok(midway[1] > from[1] && midway[1] < to[1], `slides down the line from one station's row to the next: ${midway}`);
-    assert.ok(Math.abs((midway[0] - from[0]) * (to[1] - from[1]) - (midway[1] - from[1]) * (to[0] - from[0])) < 1e-6, "along the belt between them");
-    for (let step = 0; step < 80 && frames.size > 0; step += 1) await tick(16);
-    assert.deepEqual(at(), slot([crate(2)]));
-    assert.equal(frames.size, 0, "and then nothing moves");
-    await act(async () => { renderer.update(scene([crate(2, { stage: "other" })])); });
-    await tick(16);
-    assert.equal(frames.size, 0, "a change that is not a stage change moves nothing");
-
-    // Reconnecting is a first look: what changed meanwhile is history.
-    await act(async () => { renderer.update(scene([crate(2)], false)); });
-    await act(async () => { renderer.update(scene([crate(3)])); });
-    await tick(16);
-    assert.deepEqual(at(), slot([crate(3)]));
-    // Records kept from before a drop are unread on the new connection until refreshed; the refresh is a first look.
-    await act(async () => { renderer.update(scene([crate(3)], false)); });
-    await act(async () => { renderer.update(scene(undefined)); });
-    await act(async () => { renderer.update(scene([crate(1)])); });
-    await tick(16);
-    assert.equal(frames.size, 0, "what changed offline is not replayed");
-    assert.deepEqual(at(), slot([crate(1)]));
-    await act(async () => { renderer.update(scene([crate(3)])); });
-    await tick(16);
-    for (let step = 0; step < 80 && frames.size > 0; step += 1) await tick(16);
-
-    // A newly opened change comes from the agent whose task opened it.
-    const opened = [crate(3), crate(0, { id: "k2", number: 2 })];
-    await act(async () => { renderer.update(scene(opened)); });
-    await tick(16);
-    const ada = placeWorkers(layout, workers)[0];
-    assert.ok(Math.hypot(at("k2")[0] - ada.x, at("k2")[1] - ada.y) < Math.hypot(slot(opened, "k2")[0] - ada.x, slot(opened, "k2")[1] - ada.y) - 20, `leaves Ada: ${at("k2")}`);
-    for (let step = 0; step < 80 && frames.size > 0; step += 1) await tick(16);
-    assert.deepEqual(at("k2"), slot(opened, "k2"));
-
-    const target = renderer.root.findByProps({ "data-crate": "k1" });
-    assert.equal(renderer.root.findAll((node) => node.props["data-lit"] !== undefined).length, 0);
-    await act(async () => target.props.onPointerEnter());
-    assert.deepEqual(renderer.root.findAll((node) => node.props["data-lit"] !== undefined && node.type === "rect").length, 1, "the machine its change touches is lit");
-    await act(async () => target.props.onPointerLeave());
-    assert.equal(renderer.root.findAll((node) => node.props["data-lit"] !== undefined).length, 0);
-    await act(async () => target.props.onClick());
-    assert.deepEqual(selected, ["k1"], "and it opens its Work row");
-  } finally {
-    if (renderer) await act(async () => renderer.unmount());
-    for (const [key, value] of Object.entries(saved)) { if (value === undefined) delete globalThis[key]; else globalThis[key] = value; }
-  }
+    await act(async () => { tree = create(createElement(FactoryScene, { ...props, crates: [crate] })); });
+    const target = () => tree.root.findByProps({ "data-crate": "k1" });
+    await act(async () => target().props.onPointerEnter());
+    assert.ok(tree.root.findAll((node) => node.type === "rect" && node.props["data-lit"] !== undefined).length > 0);
+    await act(async () => target().props.onClick({ currentTarget: { closest: () => null } }));
+    assert.deepEqual(selected, ["k1"]);
+    await act(async () => { tree.update(createElement(FactoryScene, { ...props, crates: [{ ...crate, station: 2, stage: "Queued" }] })); });
+    assert.equal(target().props["data-crate-station"], 2);
+    await act(async () => { tree.update(createElement(FactoryScene, { ...props, connected: false, crates: [crate] })); });
+    assert.equal(target().props.disabled, true);
+    assert.ok(JSON.stringify(tree.toJSON()).includes("Disconnected"));
+  } finally { if (tree) await act(async () => tree.unmount()); }
 });
