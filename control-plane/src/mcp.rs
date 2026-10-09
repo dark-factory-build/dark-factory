@@ -546,7 +546,7 @@ fn tools() -> Value {
     }, {
         "name": "list_deployments",
         "title": "List deployments",
-        "description": "Return the newest GitHub Deployments, newest first, each with its newest status's state and time (pending when it has none). No URLs, payloads or creators.",
+        "description": "Return the newest GitHub Deployments, newest first, each with its newest status's state and time (pending when it has none) and the host its environment URL names. No URLs, payloads or creators.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -572,9 +572,10 @@ fn tools() -> Value {
                             "ref": {"type": "string"},
                             "created_at": {"type": "string"},
                             "state": {"type": "string", "enum": ["error", "failure", "inactive", "in_progress", "queued", "pending", "success"]},
-                            "updated_at": {"type": "string"}
+                            "updated_at": {"type": "string"},
+                            "environment_host": {"type": ["string", "null"]}
                         },
-                        "required": ["id", "environment", "production_environment", "sha", "ref", "created_at", "state", "updated_at"],
+                        "required": ["id", "environment", "production_environment", "sha", "ref", "created_at", "state", "updated_at", "environment_host"],
                         "additionalProperties": false
                     }
                 }

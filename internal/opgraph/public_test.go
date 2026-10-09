@@ -16,7 +16,7 @@ import ("net/http"; "os/exec")
 const ` + canary + `URL = "https://api.` + strings.ToLower(canary) + `secret.com/v1/token?key=` + canary + `"
 func main() { http.HandleFunc("GET /` + canary + `/route", nil); http.Get(` + canary + `URL); exec.Command("` + canary + `tool") }
 `)}}}
-	graph, err := Infer(canary+"system", repositories)
+	graph, err := Infer(canary+"system", repositories, nil)
 	if err != nil || len(graph.Nodes) < 3 {
 		t.Fatalf("fixture graph: %d nodes, %v", len(graph.Nodes), err)
 	}

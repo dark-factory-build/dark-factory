@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -69,7 +70,8 @@ func (daemon *Daemon) projectGraph(ctx context.Context, projectID kernel.Project
 	if err != nil {
 		return projectGraph{}, err
 	}
-	configurationBytes, err := json.Marshal(repositories)
+	hosts := daemon.unitHosts()
+	configurationBytes, err := json.Marshal([]any{repositories, hosts})
 	if err != nil {
 		return projectGraph{}, err
 	}
@@ -89,7 +91,7 @@ func (daemon *Daemon) projectGraph(ctx context.Context, projectID kernel.Project
 			daemon.graphBuilds = make(map[kernel.ProjectID]*graphBuild)
 		}
 		daemon.graphBuilds[projectID] = build
-		go daemon.buildProjectGraph(projectID, repositories, configuration, now, build)
+		go daemon.buildProjectGraph(projectID, repositories, hosts, configuration, now, build)
 	}
 	daemon.graphMu.Unlock()
 	if usable && stale {
@@ -121,10 +123,10 @@ type graphBuild struct {
 // a caller that gives up still leaves the graph to the next.
 const graphBuildLimit = 5 * time.Minute
 
-func (daemon *Daemon) buildProjectGraph(projectID kernel.ProjectID, repositories []kernel.ProjectRepository, configuration string, at time.Time, build *graphBuild) {
+func (daemon *Daemon) buildProjectGraph(projectID kernel.ProjectID, repositories []kernel.ProjectRepository, hosts map[string][]string, configuration string, at time.Time, build *graphBuild) {
 	ctx, cancel := context.WithTimeout(context.Background(), graphBuildLimit)
 	defer cancel()
-	result, err := daemon.inferProjectGraph(ctx, projectID, repositories)
+	result, err := daemon.inferProjectGraph(ctx, projectID, repositories, hosts)
 	daemon.graphMu.Lock()
 	if err == nil {
 		if daemon.graphs == nil {
@@ -140,7 +142,7 @@ func (daemon *Daemon) buildProjectGraph(projectID kernel.ProjectID, repositories
 	close(build.done)
 }
 
-func (daemon *Daemon) inferProjectGraph(ctx context.Context, projectID kernel.ProjectID, repositories []kernel.ProjectRepository) (projectGraph, error) {
+func (daemon *Daemon) inferProjectGraph(ctx context.Context, projectID kernel.ProjectID, repositories []kernel.ProjectRepository, hosts map[string][]string) (projectGraph, error) {
 	var result projectGraph
 	inputs := make([]opgraph.Repository, 0, len(repositories))
 	for _, repository := range repositories {
@@ -154,7 +156,7 @@ func (daemon *Daemon) inferProjectGraph(ctx context.Context, projectID kernel.Pr
 	// A system past the node bound is drawn as far as the bound allows,
 	// never refused whole.
 	var err error
-	result.graph, err = opgraph.Infer(projectID.String(), inputs)
+	result.graph, err = opgraph.Infer(projectID.String(), inputs, hosts)
 	if err != nil && !errors.Is(err, opgraph.ErrBounds) {
 		return projectGraph{}, err
 	}
@@ -165,6 +167,34 @@ func (daemon *Daemon) inferProjectGraph(ctx context.Context, projectID kernel.Pr
 	digest := sha256.Sum256(encoded)
 	result.digest = hex.EncodeToString(digest[:])
 	return result, nil
+}
+
+// setHosts records the hosts one platform source reports, replacing its last.
+func (daemon *Daemon) setHosts(source string, hosts map[string][]string) {
+	daemon.graphMu.Lock()
+	defer daemon.graphMu.Unlock()
+	if daemon.hosts == nil {
+		daemon.hosts = map[string]map[string][]string{}
+	}
+	daemon.hosts[source] = hosts
+}
+
+// unitHosts merges every source's hosts, sorted, so equal hosts configure
+// the same graph.
+func (daemon *Daemon) unitHosts() map[string][]string {
+	daemon.graphMu.Lock()
+	defer daemon.graphMu.Unlock()
+	merged := map[string][]string{}
+	for _, byUnit := range daemon.hosts {
+		for unit, hosts := range byUnit {
+			merged[unit] = append(merged[unit], hosts...)
+		}
+	}
+	for unit, hosts := range merged {
+		slices.Sort(hosts)
+		merged[unit] = slices.Compact(hosts)
+	}
+	return merged
 }
 
 // repositorySource reads one repository's integrated target archive. An
@@ -358,6 +388,11 @@ func (daemon *Daemon) pollSources(sources []observeSource) {
 			scripts := make([]string, 0, len(source.Services))
 			for script := range source.Services {
 				scripts = append(scripts, script)
+			}
+			if hosts, err := opgraph.CloudflareDomains(ctx, daemon.observed(observeClient), source.Account, strings.TrimSpace(source.Token), source.Services); err != nil {
+				LogFactoryd(daemon.log, "factoryd: observe cloudflare domains: %v\n", err)
+			} else {
+				daemon.setHosts("cloudflare\x00"+source.Account+"\x00"+source.Environment, hosts)
 			}
 			observations, coverage, err := opgraph.PullCloudflare(ctx, daemon.observed(observeClient), source.Account, strings.TrimSpace(source.Token), scripts, source.Environment, now, pollInterval)
 			if err != nil {
