@@ -54,6 +54,12 @@ case "$1:${2-}" in
             github.com/dark-factory-build/dark-factory/internal/e2e \
             github.com/dark-factory-build/dark-factory/internal/newpackage
         ;;
+    list:-m) echo github.com/dark-factory-build/dark-factory ;;
+    list:-test)
+        printf '%s\n' \
+            'github.com/dark-factory-build/dark-factory/internal/daemon.test|fmt|github.com/dark-factory-build/dark-factory/internal/kernel' \
+            'github.com/dark-factory-build/dark-factory/internal/change.test|fmt|github.com/dark-factory-build/dark-factory/internal/change [github.com/dark-factory-build/dark-factory/internal/change.test]'
+        ;;
     vet:./...)
         [ "${DF_GATE_FAULT-}" != vet ] || { echo 'fixture vet failure' >&2; exit 1; }
         ;;
@@ -188,6 +194,25 @@ for shard_case in '1daemon:daemon process tests' '1packages:process-sensitive Go
         && printf '%s\n' "$shard_output" | /usr/bin/grep -F "go-ci: ${shard_case#*:}" >/dev/null \
         || fail "$shard shard ran the wrong stages: $shard_output"
 done
+# Affected mode runs only stages whose tests depend on a changed package:
+# kernel changed, daemon's tests import kernel, change's tests do not.
+(
+    CDPATH= cd -- "$process"
+    /usr/bin/git init -q
+    /bin/mkdir -p internal/kernel
+    : >internal/kernel/kernel.go
+    /usr/bin/git add internal/kernel/kernel.go
+    /usr/bin/git -c user.name=fixture -c user.email=fixture@example.invalid commit -qm base
+    printf '%s\n' 'package kernel' >internal/kernel/kernel.go
+    /usr/bin/git -c user.name=fixture -c user.email=fixture@example.invalid commit -qam change
+)
+affected_output=$(CDPATH= cd -- "$process" && \
+    PATH="$process/bin:/usr/bin:/bin" /bin/sh ./scripts/go-ci-owned.sh --affected HEAD~1 2>&1) \
+    || fail "affected run failed: $affected_output"
+printf '%s\n' "$affected_output" | /usr/bin/grep -F 'go-ci: daemon process tests' >/dev/null \
+    && ! printf '%s\n' "$affected_output" | /usr/bin/grep -F 'go-ci: Git boundary resource census' >/dev/null \
+    && ! printf '%s\n' "$affected_output" | /usr/bin/grep -F 'go-ci: browser, daemon and runner E2E' >/dev/null \
+    || fail "affected run selected the wrong stages: $affected_output"
 if (CDPATH= cd -- "$process" && DF_GATE_FAULT=go-list \
     PATH="$process/bin:/usr/bin:/bin" /bin/sh ./scripts/go-ci-owned.sh) >"$temporary/discovery.out" 2>&1; then
     fail "failed package discovery silently skipped process tests"
