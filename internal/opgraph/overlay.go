@@ -158,7 +158,7 @@ func Overlay(system string, static Graph, observations []Observation, coverage [
 			status = &copied
 		case status.count > 0:
 			status.Observation = "observed"
-		case edge.Kind == Calls && hasPeers(current[edge.From]), live.Nodes[edge.To].Observation == "quiet" && byID[edge.To].Kind == External:
+		case hasPeers(current[edge.From]), edge.Kind == Calls && live.Nodes[edge.To].Observation == "quiet" && byID[edge.To].Kind == External:
 			status.Observation = "quiet"
 		case expired[edge.From]:
 			status.Observation = "stale"
@@ -227,10 +227,10 @@ func unitObservation(node *Node, current []Coverage, expired bool, status *Statu
 	return "unobserved"
 }
 
-// silentHost: an exact outside host every caller of which is a current source
-// that reports its outbound peers (Coverage.Peers; a listening server.address
-// is not that), so a call would have been seen. There is no
-// guessed prefix to be wrong about, unlike a route.
+// silentHost: an exact outside HTTP host every caller of which is covered by
+// factoryd's self-observation, which records all its outbound HTTP, so a call
+// would have been seen. There is no guessed prefix to be wrong about, unlike
+// a route. Nothing else's silence is claimed.
 func silentHost(builder *Builder, node *Node, callers []string, current map[string][]Coverage) bool {
 	if node.Selectors["server.address"] == "" || len(callers) == 0 {
 		return false
@@ -241,7 +241,7 @@ func silentHost(builder *Builder, node *Node, callers []string, current map[stri
 		}
 		reports := false
 		for _, item := range current[caller] {
-			reports = reports || item.Peers
+			reports = reports || item.Source == "factoryd"
 		}
 		if !reports {
 			return false
@@ -310,7 +310,7 @@ func sharedObservation(node *Node, users []string, current map[string][]Coverage
 	seen := false
 	for _, user := range users {
 		for _, item := range current[user] {
-			if covers(item, node) {
+			if item.Peers || covers(item, node) {
 				return "quiet"
 			}
 			seen = true

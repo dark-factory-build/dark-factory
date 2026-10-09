@@ -271,9 +271,10 @@ func (daemon *Daemon) runtimeStore() *opgraph.Runtime {
 }
 
 // Self-observation claims exactly what factoryd instruments: its browser
-// listener and routes, its local API socket and all its outbound HTTP, so a
-// silent exact outside host is quiet. Background loops are recorded when seen
-// but not claimed, so their silence reads as partial or unobserved, never idle.
+// listener and routes and its local API socket. It records all its outbound
+// HTTP, so only an exact HTTP host it alone calls can read quiet; launches and
+// background loops are recorded when seen but not claimed, so their silence
+// reads as partial or unobserved, never idle.
 var selfCoverageKeys = []string{"service.name", "http.route", "url.path", "rpc.method", "network.transport", "server.address", "server.port"}
 
 const runtimeWindow = 15 * time.Minute
@@ -282,7 +283,7 @@ const runtimeWindow = 15 * time.Minute
 func (daemon *Daemon) liveGraph(projectID kernel.ProjectID, graph projectGraph) opgraph.Live {
 	now := daemon.now().UnixMilli()
 	store := daemon.runtimeStore()
-	store.Cover(opgraph.Coverage{Source: "factoryd", Environment: "local", Unit: "factoryd", Keys: selfCoverageKeys, Peers: true, AsOf: now, TTL: runtimeWindow.Milliseconds()})
+	store.Cover(opgraph.Coverage{Source: "factoryd", Environment: "local", Unit: "factoryd", Keys: selfCoverageKeys, AsOf: now, TTL: runtimeWindow.Milliseconds()})
 	sources := daemon.observeSources()
 	daemon.pollSources(sources)
 	aliases := map[string]string{}
