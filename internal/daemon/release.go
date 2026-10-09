@@ -223,7 +223,7 @@ func (daemon *Daemon) Release(ctx context.Context, sha string, start bool) (kern
 		delivery.State, delivery.Phase = "verified", ""
 	}
 	if err == nil {
-		err = rejectStaleRelease(ctx, root, sha)
+		err = validateReleaseAncestry(ctx, root, source, sha)
 	}
 	if err == nil {
 		err = daemon.writeRelease(ctx, project, &delivery)
@@ -234,6 +234,22 @@ func (daemon *Daemon) Release(ctx context.Context, sha string, start bool) (kern
 	}
 	go daemon.release(project, root, source, delivery)
 	return delivery, nil
+}
+
+func validateReleaseAncestry(ctx context.Context, root string, source change.RepositorySourceIdentity, sha string) error {
+	if !buildinfo.Current().Release() {
+		return nil
+	}
+	directory, err := os.MkdirTemp("", "dark-factory-release-check-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(directory)
+	tree := filepath.Join(directory, "tree")
+	if err := change.ReviewCheckout(ctx, change.TrustedGitExecutable, root, source, tree, "", sha, sha, selfBase); err != nil {
+		return fmt.Errorf("release checkout: %w", err)
+	}
+	return rejectStaleRelease(ctx, tree, sha)
 }
 
 func rejectStaleRelease(ctx context.Context, root, sha string) error {
