@@ -506,10 +506,18 @@ func TestShellLaunchControlCorruptionFailsClosed(t *testing.T) {
 			} else {
 				target = agent.ID.Bytes()
 			}
-			if _, err := store.writer.ExecContext(ctx, test.statement, target); err == nil {
+			connection, err := store.writer.Conn(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer connection.Close()
+			if _, err := connection.ExecContext(ctx, test.statement, target); err == nil {
 				t.Fatal("SQLite accepted ignored shell launch controls")
 			}
-			corruptSQL(t, store, test.statement, target)
+			corruptSQLOnConnection(t, connection, test.statement, target)
+			if err := connection.Close(); err != nil {
+				t.Fatal(err)
+			}
 			if test.run {
 				if _, _, err := store.Run(ctx, keys.RunID); !errors.Is(err, ErrCorruptState) {
 					t.Fatalf("Run error = %v", err)
