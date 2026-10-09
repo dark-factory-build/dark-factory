@@ -872,15 +872,18 @@ func TestServerReceiveCancellationCutsJoinWatcher(t *testing.T) {
 				}
 				closeAPITestListener(t, listener)
 			}
+			// A leak grows the census by one per iteration. An earlier test's
+			// goroutine or descriptor may still be finishing at the baseline
+			// and go meanwhile, so only growth is a leak.
 			deadline := time.Now().Add(500 * time.Millisecond)
-			for runtime.NumGoroutine() != baselineGoroutines && time.Now().Before(deadline) {
+			for runtime.NumGoroutine() > baselineGoroutines && time.Now().Before(deadline) {
 				time.Sleep(5 * time.Millisecond)
 			}
-			if after := runtime.NumGoroutine(); after != baselineGoroutines {
-				t.Fatalf("cancelled receives changed goroutine census: before=%d after=%d", baselineGoroutines, after)
+			if after := runtime.NumGoroutine(); after > baselineGoroutines {
+				t.Fatalf("cancelled receives grew goroutine census: before=%d after=%d", baselineGoroutines, after)
 			}
-			if after := countTestFDs(t); after != baselineFDs {
-				t.Fatalf("cancelled receives changed FD census: before=%d after=%d", baselineFDs, after)
+			if after := countTestFDs(t); after > baselineFDs {
+				t.Fatalf("cancelled receives grew FD census: before=%d after=%d", baselineFDs, after)
 			}
 		})
 	}
