@@ -250,6 +250,15 @@ test("two factories switch which projects the console shows", async () => {
   });
 });
 
+test("a factory with no pending questions hides its needs-you count", async () => {
+  const manager = fakeManager([northFactory(), southFactory({ state: { ...southState, humanRequests: new Map() } })]);
+  await withApp(props(manager), (renderer) => {
+    const counts = renderer.root.findAllByProps({ className: "dfRemote__factoryCount" });
+    assert.equal(counts.length, 1);
+    assert.match(flat(counts[0]), /needs you/);
+  });
+});
+
 test("NEEDS YOU aggregates both factories and tags each item with its label", async () => {
   const manager = fakeManager([northFactory(), southFactory()]);
   await withApp(props(manager), (renderer) => {

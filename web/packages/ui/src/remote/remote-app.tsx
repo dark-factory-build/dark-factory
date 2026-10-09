@@ -457,7 +457,7 @@ export function RemoteApp(props: RemoteAppProps = {}) {
                       <span className="dfRemote__factoryGlyph" aria-hidden="true">{REMOTE_STATUS_GLYPH[factory.status]}</span>
                       <span className="dfRemote__factoryLabel">{nameOf(factory)}</span>
                       <span className="dfRemote__factoryStatus"><Status stage={factory.status} /></span>
-                      <span className="dfRemote__factoryCount"><Badge n={waiting} /> needs you</span>
+                      {waiting === 0 ? null : <span className="dfRemote__factoryCount"><Badge n={waiting} /> needs you</span>}
                     </button>
                   </li>
                 );
