@@ -756,7 +756,7 @@ func Build(request Request) (Launch, error) {
 
 // The provider keeps its account/model configuration, but local commands get
 // only the Change, disposable runtime paths and the attempt API inputs. Codex's
-// minimal platform profile still includes its documented system/temp exceptions.
+// minimal platform profile still includes its documented system exceptions.
 // grant is one path a native provider's local commands may reach.
 type grant struct {
 	path  string
@@ -810,11 +810,11 @@ func codexPermissions(request Request) (string, error) {
 	return value, nil
 }
 
-func codexProfile(name string, grants []grant, network string, denied ...string) string {
-	entries := []string{`":root"="deny"`, `":minimal"="read"`}
-	for _, path := range denied {
-		entries = append(entries, tomlBasicString(path)+`="deny"`)
-	}
+// codexProfile renders grants over Codex's minimal system profile. That profile
+// lets commands read and write the shared temporary directories, so those are
+// denied; a more specific grant beneath them still applies.
+func codexProfile(name string, grants []grant, network string) string {
+	entries := []string{`":root"="deny"`, `":minimal"="read"`, `"/private/tmp"="deny"`, `"/private/var/tmp"="deny"`}
 	for _, grant := range grants {
 		access := "read"
 		if grant.write {
@@ -828,9 +828,7 @@ func codexProfile(name string, grants []grant, network string, denied ...string)
 // CodexReadOnly is the -c overrides that let a Codex exec's local commands
 // read only paths (and Codex's minimal system profile), with no network. It
 // replaces --sandbox read-only, which reads the whole disk. Each path is
-// granted under its resolved spelling as well. The minimal profile lets
-// commands read and write the shared temporary directories, so those are
-// denied; a more specific grant beneath them still applies.
+// granted under its resolved spelling as well.
 func CodexReadOnly(paths ...string) []string {
 	var grants []grant
 	for _, path := range paths {
@@ -839,7 +837,7 @@ func CodexReadOnly(paths ...string) []string {
 			grants = append(grants, grant{resolved, false})
 		}
 	}
-	return []string{"-c", `default_permissions="dark-factory-review"`, "-c", codexProfile("dark-factory-review", grants, "{enabled=false}", "/private/tmp", "/private/var/tmp")}
+	return []string{"-c", `default_permissions="dark-factory-review"`, "-c", codexProfile("dark-factory-review", grants, "{enabled=false}")}
 }
 
 // claudeSettings confines a Claude Code run to the same grants Codex gets.

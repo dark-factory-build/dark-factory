@@ -237,8 +237,9 @@ Codex local commands use a launch-derived permission profile: the Change,
 private runtime home and temp directory are writable; current same-project
 retained Change trees selected at launch are individually readable; the exact provider
 executable, factoryctl, attempt token and socket are readable. Other file
-access is denied except Codex's minimal platform/runtime paths, including its
-temp exceptions. An optional startup `--toolchain-read-roots` path list adds
+access is denied except Codex's minimal platform/runtime paths; the shared
+`/private/tmp` and `/private/var/tmp`, which that profile otherwise opens for
+reading and writing, are denied, as for the reviewer. An optional startup `--toolchain-read-roots` path list adds
 read-only access to exact installed software directories (for example one
 Node installation including its Corepack libraries, or one Go `libexec`).
 This is not inferred from PATH and does not pin every child executable.
