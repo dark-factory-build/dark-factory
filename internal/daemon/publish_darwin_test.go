@@ -23,6 +23,7 @@ type fakePublishMaintainer struct {
 	main     string
 	tip      string // the pull request branch's head
 	journal  map[string]json.RawMessage
+	planned  map[string]bool  // ids a write stopped before GitHub
 	writes   []map[string]any // every write sent
 	refuse   string           // a path publish_commit refuses
 	loseNext bool             // the next write lands but its response is lost
@@ -40,9 +41,12 @@ func (f *fakePublishMaintainer) call(_ context.Context, name string, arguments m
 		if result, ok := f.journal[id]; ok {
 			return json.Marshal(map[string]any{"operation_id": id, "state": "completed", "result": result})
 		}
+		if f.planned[id] {
+			return json.Marshal(map[string]any{"operation_id": id, "state": "planned"})
+		}
 		return json.Marshal(map[string]any{"operation_id": id, "state": "missing"})
 	}
-	if _, replay := f.journal[id]; replay {
+	if _, replay := f.journal[id]; replay || f.planned[id] {
 		return nil, fmt.Errorf("conflict: operation %s replayed", id)
 	}
 	f.writes = append(f.writes, map[string]any{"name": name, "arguments": arguments})
@@ -230,6 +234,22 @@ func TestFirstPublicationOfAChangedHeadBuildsOnItsBranch(t *testing.T) {
 	if commit["operation_id"] != uuid5("dark-factory:"+c.Change.String()+":publish-"+c.Head[:8]+"-1") || commit["expected_head_sha"] != stale || len(changes) != 1 || changes[0]["path"] != "f00.txt" ||
 		pull["operation_id"] != uuid5("dark-factory:"+c.Change.String()+":pr-"+c.Head[:8]) || pull["head_sha"] != app.tip {
 		t.Fatalf("commit = %+v pull = %+v", commit, pull)
+	}
+}
+
+// A pull request create left planned (stopped before GitHub, bound to the
+// main it named) is not replayed against a moved main: the create goes under
+// an id bound to the current main.
+func TestAPlannedPullRequestCreateMovesToTheCurrentMain(t *testing.T) {
+	fixture, c, source, app, checkout := publishFixture(t, 1, false)
+	ctx := context.Background()
+	app.planned = map[string]bool{uuid5("dark-factory:" + c.Change.String() + ":pr-" + c.Head[:8]): true}
+	if err := fixture.daemon.publishChange(ctx, c, "team/repo", source, app.call, checkout); err != nil {
+		t.Fatal(err)
+	}
+	pull := app.writes[len(app.writes)-1]["arguments"].(map[string]any)
+	if pull["operation_id"] != uuid5("dark-factory:"+c.Change.String()+":pr-"+c.Head[:8]+"-"+app.main) || pull["base_sha"] != app.main {
+		t.Fatalf("pull request = %+v", pull)
 	}
 }
 
