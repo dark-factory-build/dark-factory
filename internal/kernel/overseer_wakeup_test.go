@@ -231,35 +231,39 @@ func TestOverseerWakeSkipsPublishedIntakeSuccess(t *testing.T) {
 	}
 }
 
-// An item's re-wakes are counted per item: wakes about other items do not use
-// them up.
+// An item's re-wakes are counted per item: targeted wakes about other items do
+// not use them up, while a bare instruction (the causal record overflowed) or
+// a full wake counts for every item.
 func TestOverseerRewakesCountPerItem(t *testing.T) {
-	ctx := context.Background()
-	store, worker, overseer := wakeFixture(t)
-	head := strings.Repeat("a", 40)
-	escalate(t, store, worker.ProjectID, "7", "open", head, head, 1000)
-	at := 1000 + overseerWakeSettle.Milliseconds()
-	for index, body := range []string{"", "Escalated: stuck 8", "Escalated: stuck 8", "Escalated: stuck 8", "Escalated: stuck 8"} {
-		var carrier Task
-		if index == 0 {
-			tasks, err := store.EnqueueOverseerWakeups(ctx, mustTime(t, at))
-			if err != nil || len(tasks) != 1 || !strings.Contains(tasks[0].Body, "Escalated: stuck 7") {
-				t.Fatalf("first wake = %+v, %v", tasks, err)
+	for other, due := range map[string]bool{"Factory causal wake: mode=targeted; \nEscalated: stuck 8": true, "Supervise.": false} {
+		ctx := context.Background()
+		store, worker, overseer := wakeFixture(t)
+		head := strings.Repeat("a", 40)
+		escalate(t, store, worker.ProjectID, "7", "open", head, head, 1000)
+		at := 1000 + overseerWakeSettle.Milliseconds()
+		for index := range 5 {
+			var carrier Task
+			if index == 0 {
+				tasks, err := store.EnqueueOverseerWakeups(ctx, mustTime(t, at))
+				if err != nil || len(tasks) != 1 || !strings.Contains(tasks[0].Body, "Escalated: stuck 7") {
+					t.Fatalf("first wake = %+v, %v", tasks, err)
+				}
+				carrier = tasks[0]
+			} else {
+				var err error
+				if carrier, err = store.EnqueueTask(ctx, NewTask{ID: taskID(t, uint8(40+index)), IncarnationID: incarnationID(t, uint8(50+index)), ProjectID: overseer.ProjectID, AssignedAgentID: overseer.ID, Title: overseerWakeTitle, Body: other}, mustTime(t, at)); err != nil {
+					t.Fatal(err)
+				}
 			}
-			carrier = tasks[0]
-		} else {
-			var err error
-			if carrier, err = store.EnqueueTask(ctx, NewTask{ID: taskID(t, uint8(40+index)), IncarnationID: incarnationID(t, uint8(50+index)), ProjectID: overseer.ProjectID, AssignedAgentID: overseer.ID, Title: overseerWakeTitle, Body: body}, mustTime(t, at)); err != nil {
+			if _, err := store.UpdateTask(ctx, carrier.ID, carrier.Revision, TaskPatch{Cancel: true}, mustTime(t, at+1)); err != nil {
 				t.Fatal(err)
 			}
+			at++
 		}
-		if _, err := store.UpdateTask(ctx, carrier.ID, carrier.Revision, TaskPatch{Cancel: true}, mustTime(t, at+1)); err != nil {
-			t.Fatal(err)
+		bodies := wakeBodies(t, store, at+OverseerRewakeAfter.Milliseconds())
+		if got := len(bodies) == 1 && strings.Contains(bodies[0], "Escalated: stuck 7"); got != due {
+			t.Fatalf("after four %q wakes: wake = %q, want due=%v", other, bodies, due)
 		}
-		at++
-	}
-	if bodies := wakeBodies(t, store, at+OverseerRewakeAfter.Milliseconds()); len(bodies) != 1 || !strings.Contains(bodies[0], "Escalated: stuck 7") {
-		t.Fatalf("re-wake after wakes about other items = %q", bodies)
 	}
 }
 
