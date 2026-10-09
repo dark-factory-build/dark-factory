@@ -437,7 +437,7 @@ fixture_go=$(command -v go) || fail "go is unavailable for the local-ci fixture"
 /bin/ln -s "$fixture_go" "$local_fixture/configured/go"
 /bin/chmod 755 "$local_fixture/configured/node" "$local_fixture/configured/corepack"
 for local_child in \
-    check-toolchain-pins.sh test-local-ci-environment.sh test-new-worktree.sh \
+    check-toolchain-pins.sh test-local-ci-environment.sh test-with-local-ci-lease.sh test-new-worktree.sh \
     test-release.sh test-github-step-summary.sh \
     test-repository-settings.sh \
     test-go-gates.sh test-go-e2e-tools.sh go-ci-owned.sh \
