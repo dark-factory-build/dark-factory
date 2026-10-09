@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { WORKER_SIZE, breakRoomNook, commonSeating, layoutScene, placeWorkers, standable } from "../../dist/src/factory-scene/scene.js";
+import { breakRoomNook, layoutScene, placeWorkers, standable } from "../../dist/src/factory-scene/scene.js";
 import { machine, sceneGraph, unit } from "../../../../fixtures/scene.mjs";
 
 // Units of six machines each, one of them a fold standing for aliases.
@@ -28,62 +28,48 @@ test("work slots belong to the observed machine, including a fold's members, and
   assert.deepEqual(placed.find((placement) => placement.id === "worker-00"), { id: "worker-00", area: "work", stationId: "unit-0-0", ...layout.stations.find((item) => item.entityId === "unit-0-0").anchor });
 });
 
-test("nearby rest forms pairs beside a unit's main machine without duplicating seats in the commons", () => {
+test("anyone not at work stands beside a machine: the one last worked at, else beside someone alone, with no cap", () => {
   const layout = layoutScene(units(20));
-  const known = Array.from({ length: 5 }, (_, index) => worker(`known-${index}`, { nodeId: "unit-7", location: "last-observed", paused: index === 0 }));
+  const known = Array.from({ length: 9 }, (_, index) => worker(`known-${index}`, { nodeId: "unit-7", location: "last-observed", paused: index === 0 }));
   const unknown = Array.from({ length: 8 }, (_, index) => worker(`unknown-${index}`));
   const source = [...known, ...unknown, worker("working", { nodeId: "unit-0", observedBayId: "unit-0-5", activity: "waiting", location: "working" }), worker("unobserved", { activity: "waiting", location: "unobserved" })];
-  const before = structuredClone(source), placed = placeWorkers(layout, source, "nearby");
+  const before = structuredClone(source), placed = placeWorkers(layout, source);
   assert.deepEqual(source, before, "ambient placement does not mutate authoritative state");
-  assert.deepEqual(placeWorkers(layout, [...source].reverse(), "nearby"), placed);
-  const local = placed.filter((person) => person.area === "resting" && person.stationId !== undefined), common = placed.filter((person) => person.area === "resting" && person.stationId === undefined);
-  assert.equal(local.filter((person) => person.stationId === "unit-7").length, 2);
-  assert.equal(common.filter((person) => person.id.startsWith("known-")).length, 3, "a known full destination does not become unrelated work elsewhere");
-  const clusters = new Map();
-  for (const person of local) clusters.set(person.stationId, (clusters.get(person.stationId) ?? 0) + 1);
-  assert.ok(clusters.size <= 4, "unlocated idle workers use three shared destinations, not every unit");
-  assert.ok([...clusters.values()].every((count) => count === 2));
-  for (const person of local) assert.ok(standable(layout, person), `${person.id} rests on free floor`);
+  assert.deepEqual(placeWorkers(layout, [...source].reverse()), placed);
+  const main = layout.stations.find((station) => station.entityId === "unit-7");
+  const beside = placed.filter((person) => person.id.startsWith("known-"));
+  assert.ok(beside.every((person) => person.area === "resting" && person.stationId === "unit-7"), "all nine rest at the machine they last worked at");
+  assert.ok(beside.every((person) => Math.abs(person.x - main.anchor.x) <= 24 + 48 * 2 && person.y > main.anchor.y), "beside it and below its standing spot");
+  const others = placed.filter((person) => person.id.startsWith("unknown-") || person.id === "unobserved");
+  const sharing = new Map();
+  for (const person of others) sharing.set(person.stationId, (sharing.get(person.stationId) ?? 0) + 1);
+  assert.ok([...sharing.values()].every((count) => count <= 2) && sharing.size === Math.ceil(others.length / 2), "the rest pair up beside each other, each pair at a machine of its own");
   assert.equal(placed.find((person) => person.id === "unobserved").area, "staging");
   assert.equal(placed.find((person) => person.id === "working").area, "work");
+  for (const person of placed) assert.ok(standable(layout, person), `${person.id} stands on free floor`);
   separated(placed);
-  assert.deepEqual(common.map(({ x, y }) => ({ x, y })).sort((a, b) => a.y - b.y || a.x - b.x), commonSeating(layout, common.length, 1).resting);
+  const crowd = placeWorkers(layout, Array.from({ length: 300 }, (_, index) => worker(`rest-${String(index).padStart(3, "0")}`, { nodeId: "unit-3" })));
+  assert.equal(crowd.length, 300, "nobody is turned away");
+  separated(crowd);
+  assert.equal(placeWorkers(layoutScene(sceneGraph([])), [worker("alone")]).length, 1, "an empty floor still has room");
 });
 
-test("the commons seats every agent at rest and half at the work tables; anyone more sits on benches below the floor", () => {
-  const sized = (agents) => layoutScene(units(2), undefined, { agents, implements: ["board", "missions", "tasks", "shelf", "coffee"] });
-  const layout = sized(6), inside = (seat) => seat.x - WORKER_SIZE / 2 >= layout.commons.x && seat.x + WORKER_SIZE / 2 <= layout.commons.x + layout.commons.width && seat.y >= layout.commons.y && seat.y <= layout.commons.y + layout.commons.height;
-  assert.deepEqual(commonSeating(layout, 0, 0), { resting: [], planning: [] });
-  for (const [rest, plan] of [[0, 1], [1, 0], [1, 1], [5, 3], [6, 6], [30, 30]]) {
-    const seating = commonSeating(layout, rest, plan);
-    assert.equal(seating.resting.length, rest);
-    assert.equal(seating.planning.length, plan);
-    assert.ok(seating.resting.slice(0, 6).every(inside) && seating.planning.slice(0, 3).every(inside), "six agents: six resting seats, three at work tables");
-    for (const seat of [...seating.resting.slice(8), ...seating.planning.slice(4)]) assert.ok(seat.y > layout.height, "past the commons, below everything");
-    separated([...seating.resting, ...seating.planning].map((seat, index) => ({ id: index, ...seat })));
+test("the fixtures stand in free floor between the machines, and only the machines place them", () => {
+  const layout = layoutScene(units(3)), whole = (piece) => ({ x: piece.x - 8, y: piece.y - 8, width: 36, height: 88 });
+  assert.deepEqual(layout.fixtures.map((piece) => piece.errand), ["board", "missions", "tasks", "shelf", "coffee"]);
+  const rects = layout.fixtures.map(whole), overlap = (a, b) => a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height;
+  for (const [index, rect] of rects.entries()) {
+    assert.ok(layout.stations.every((station) => !overlap(rect, station.footprint)), `${layout.fixtures[index].errand} is clear of every machine's footprint`);
+    assert.ok(!overlap(rect, layout.facilities) && rects.every((other, at) => at === index || !overlap(rect, other)), "and of the line and each other");
+    assert.ok(rect.x >= 0 && rect.x + rect.width <= layout.width && rect.y + rect.height <= layout.height, "on the floor");
+    assert.ok(standable(layout, layout.fixtures[index].stand), `${layout.fixtures[index].errand} is used from free floor`);
   }
-  // The commons grows with the agents and nothing else: two agents get a small one, twelve a larger one.
-  const two = sized(2).commons, twelve = sized(12).commons;
-  assert.ok(two.width * two.height < layout.commons.width * layout.commons.height && layout.commons.width * layout.commons.height < twelve.width * twelve.height);
-  assert.ok(layoutScene(units(2), undefined, { agents: 2, implements: [] }).commons.height < two.height, "implements take room only when present");
-  const crowd = Array.from({ length: 40 }, (_, index) => worker(`rest-${String(index).padStart(2, "0")}`));
-  assert.ok(placeWorkers(layout, crowd).every((seat) => inside(seat) || seat.y > layout.height));
-});
-
-test("a change in the number of agents resizes the commons in place; no machine moves", () => {
-  const before = layoutScene(units(6), undefined, { agents: 3, implements: ["board", "coffee"] });
-  for (const agents of [1, 8, 20]) {
-    const after = layoutScene(units(6), before, { agents, implements: ["board", "coffee"] });
-    assert.deepEqual(after.stations.map(({ entityId: key, x, y }) => [key, x - after.stations[0].x, y - after.stations[0].y]), before.stations.map(({ entityId: key, x, y }) => [key, x - before.stations[0].x, y - before.stations[0].y]), `${agents} agents`);
-    for (const station of after.stations) assert.ok(!(station.footprint.x < after.facilities.x + after.facilities.width && after.facilities.x < station.footprint.x + station.footprint.width && station.footprint.y < after.facilities.y + after.facilities.height && after.facilities.y < station.footprint.y + station.footprint.height), "clear of every machine");
-  }
-});
-
-test("the commons furniture stays put whoever rests or works", () => {
-  const layout = layoutScene(units(3)), nook = breakRoomNook(layout), { x, y } = layout.commons;
-  assert.deepEqual(nook.furniture.map(({ errand, x: px, y: py, stand }) => ({ errand, x: px - x, y: py - y, stand: { x: stand.x - x, y: stand.y - y } })), [
-    { errand: "shelf", x: 120, y: 18, stand: { x: 126, y: 84 } }, { errand: "coffee", x: 158, y: 18, stand: { x: 164, y: 84 } },
-    { errand: "board", x: 6, y: 18, stand: { x: 12, y: 84 } }, { errand: "missions", x: 44, y: 18, stand: { x: 50, y: 84 } }, { errand: "tasks", x: 82, y: 18, stand: { x: 88, y: 84 } },
-  ]);
-  for (const piece of nook.furniture) assert.ok(standable(layout, piece.stand), `${piece.errand} is used from free floor`);
+  // Who is offered or at rest never moves one, nor a machine; a floor with no gap puts them below.
+  const fewer = layoutScene(units(3), undefined, ["coffee"]);
+  assert.deepEqual(fewer.fixtures, layout.fixtures);
+  assert.deepEqual(breakRoomNook(fewer).furniture.map((piece) => piece.errand), ["coffee"]);
+  assert.deepEqual(fewer.stations, layout.stations);
+  const tight = layoutScene(units(1));
+  assert.ok(tight.fixtures.every((piece) => piece.y + 88 <= tight.height), "the floor grows to hold what no gap could");
+  for (const piece of tight.fixtures) assert.ok(standable(tight, piece.stand));
 });

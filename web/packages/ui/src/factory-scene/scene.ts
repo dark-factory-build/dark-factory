@@ -156,16 +156,15 @@ export type SceneLayout = Readonly<{
   stations: readonly SceneStation[];
   /** Each unit's area: the footprints of its stations, in lobes where they are apart. Painted only; layout never reads it. */
   regions: readonly SceneRegion[];
-  /** The development neighbourhood: the commons and the outbound line, placed as one block. */
+  /** The outbound line's block. Fixed size. */
   facilities: SceneRect;
-  commons: SceneRect;
-  restingTop: number;
-  /** Seats per table row and rows of each kind, from the number of agents; and the implements actually there. */
-  seats: Readonly<{ agents: number; perRow: number; rows: number; planningRows: number }>;
+  /** The five fixtures, each in free floor between machines. They depend on the machines alone, never on who is offered or who is here. */
+  fixtures: readonly SceneFixture[];
+  /** The fixtures this floor shows. */
   implements: readonly BreakRoomErrand[];
   /** The outbound line, one row per station. Fixed: it is there, empty, with no work. */
   line: readonly (SceneRect & Readonly<{ label: string }>)[];
-  /** What nobody walks through: machine bodies, commons tables and implements. */
+  /** What nobody walks through: machine bodies and fixtures. */
   solids: readonly SceneRect[];
 }>;
 
@@ -191,16 +190,14 @@ export type SceneWorkerPlacement = Readonly<{
 /** Coffee is ambient; the rest are implements, used when a recorded event says so (shelf also ambiently). */
 export type BreakRoomErrand = "shelf" | "coffee" | "board" | "missions" | "tasks";
 
+/** A piece of furniture and the spot a worker stands to use it. */
+export type SceneFixture = Readonly<{ errand: BreakRoomErrand; x: number; y: number; stand: ScenePoint }>;
+
 export const PADDING = 16;
-/** What the commons holds: a seat for every agent at rest and at the work tables, and the implements the floor offers. */
-export type CommonsNeeds = Readonly<{ agents: number; implements: readonly BreakRoomErrand[] }>;
-export const WORKER_GAP = 40;
 export const WORKER_SIZE = 20;
 /** Half an aisle around every footprint: two neighbours leave a worker room to pass with the walking grid's slack. */
 export const MARGIN = 18;
-// The commons, sized to what is in it: implements along the top, two rows of four seats, a planning row; the
-// outbound line right below it. Rows of seats are further apart than seats in a row, so the aisle behind a table is always walkable.
-const ROW_PITCH = 56, LINE_ROW = 28, LINE_GAP = 8, LINE_WIDTH = 176;
+const LINE_ROW = 28, LINE_WIDTH = 176;
 // Unrelated groups stand this much further apart than neighbours, so a disconnected group reads as one.
 const GROUP_GAP = 24;
 const ASPECT = 1.6;
@@ -381,8 +378,7 @@ function rows(order: readonly string[], sizes: ReadonlyMap<string, { width: numb
 }
 
 /**
- * Groups on shelves, tallest first, the development block last, at the
- * bottom, so it can grow downward past everything. The shelf width is the
+ * Groups on shelves, tallest first, the outbound line's block last. The shelf width is the
  * one, among the widths the groups' running sums offer, that keeps the floor
  * smallest and nearest 16:10, whatever the pane.
  */
@@ -436,13 +432,12 @@ function groupsOf(keys: readonly string[], links: Links) {
   return groups.sort((left, right) => right.length - left.length || compareText(left[0]!, right[0]!));
 }
 
-/** The machinery's floor: everything but how the development block is furnished, which never moves a machine. */
-export type SceneMachinery = Pick<SceneLayout, "width" | "height" | "stations" | "regions" | "facilities">;
+/** The machinery's floor: the machines, the outbound line's block and the fixtures, which depend on the machines alone. */
+export type SceneMachinery = Pick<SceneLayout, "width" | "height" | "stations" | "regions" | "facilities" | "fixtures">;
 
-// The development block is always this wide; its height starts here and grows with the agents, downward.
-const FACILITY_WIDTH = Math.max(5 * 38 + 8, 3 * WORKER_GAP + 48, LINE_WIDTH + 8) + 2 * MARGIN;
-const facilityHeight = (commonHeight: number) => commonHeight + LINE_GAP + LINE_ROW * LINE_STATIONS.length + 2 * MARGIN;
-const RESERVE = { x: 0, y: 0, width: FACILITY_WIDTH, height: facilityHeight(116 + ROW_PITCH + 30) };
+const RESERVE = { x: 0, y: 0, width: LINE_WIDTH + 8 + 2 * MARGIN, height: LINE_ROW * LINE_STATIONS.length + 2 * MARGIN };
+// A fixture is 20 by 30; its zone adds room to stand in front of it and a walkway round it.
+const ZONE_W = 36, ZONE_H = 88;
 
 /**
  * The floor, from structure alone: every machine at its drawn size, related
@@ -474,28 +469,38 @@ export function placeMachinery(graph: SceneGraph, previous?: SceneMachinery): Sc
     return { entityId: piece.key, ...(machine.represented === undefined ? {} : { representedIds: machine.represented }), shape, machine,
       ...(piece.unit === undefined ? {} : { unit: piece.unit }), x, y, width, height, anchor: { x: x + anchor.x, y: y + anchor.y }, label: { ...label, x: x + label.x, y: y + label.y }, footprint: spot };
   });
-  return { width: Math.max(...all.map((rect) => rect.x + rect.width)) - left + PADDING, height: Math.max(...all.map((rect) => rect.y + rect.height)) - top + PADDING, stations, regions: regionsOf(stations), facilities: at(FACILITIES) };
+  const width = Math.max(...all.map((rect) => rect.x + rect.width)) - left + PADDING, height = Math.max(...all.map((rect) => rect.y + rect.height)) - top + PADDING;
+  const facilities = at(FACILITIES), fixtures = placeFixtures([...stations.map((station) => station.footprint), facilities], width, height);
+  return { width, height: Math.max(height, ...fixtures.map((piece) => piece.y + ZONE_H + PADDING)), stations, regions: regionsOf(stations), facilities, fixtures };
 }
 
-/** The floor with its development block furnished for these agents and implements: it grows downward from where it stands. */
-export function furnish(machinery: SceneMachinery, needs: CommonsNeeds): SceneLayout {
-  // The commons is as big as what is in it: a seat for every agent at rest, work tables for half of them, four to a table,
-  // and only the implements this floor offers.
-  const present = NOOK_ORDER.filter((errand) => needs.implements.includes(errand)), perRow = Math.min(4, Math.max(1, needs.agents)), rows = Math.max(1, Math.ceil(needs.agents / perRow));
-  const planningRows = Math.max(1, Math.ceil(Math.ceil(needs.agents / 2) / perRow));
-  const restingAt = present.length > 0 ? 116 : 40, commonHeight = restingAt + (rows + planningRows - 1) * ROW_PITCH + 30;
-  const commonWidth = Math.max(present.length * 38 + 8, (perRow - 1) * WORKER_GAP + 48, 96);
-  const block = { ...machinery.facilities, height: Math.max(machinery.facilities.height, facilityHeight(commonHeight)) };
-  const commons = { x: block.x + MARGIN, y: block.y + MARGIN, width: commonWidth, height: commonHeight };
-  const line = LINE_STATIONS.map((label, index) => ({ label, x: commons.x + 8, y: commons.y + commonHeight + LINE_GAP + index * LINE_ROW, width: LINE_WIDTH, height: LINE_ROW - 4 }));
-  const restingTop = commons.y + restingAt, seats = { agents: needs.agents, perRow, rows, planningRows };
-  const furniture = [...tables({ commons, restingTop, seats }), ...nookPieces(commons, present).map((piece) => ({ x: piece.x, y: piece.y, width: 20, height: 30 }))];
-  return { ...machinery, height: Math.max(machinery.height, block.y + block.height + PADDING), facilities: block, commons, restingTop, seats, implements: present, line,
-    solids: [...machinery.stations, ...furniture].map(({ x, y, width, height }) => ({ x, y, width, height })) };
+/**
+ * Each fixture in the free floor nearest the middle of the machinery, one after
+ * another in a fixed order: between machines when there is a gap, below them when
+ * there is none. Only the machines decide it, so nothing live ever moves one.
+ */
+function placeFixtures(blocks: readonly SceneRect[], width: number, height: number): readonly SceneFixture[] {
+  const hits = occupied(blocks), zones: SceneRect[] = [], spots: ScenePoint[] = [];
+  for (let y = PADDING; y <= height + NOOK_ORDER.length * ZONE_H; y += 12) for (let x = PADDING; x + ZONE_W <= width - PADDING; x += 12) spots.push({ x, y });
+  const far = (spot: ScenePoint) => Math.hypot(spot.x + ZONE_W / 2 - width / 2, spot.y + ZONE_H / 2 - height / 2);
+  spots.sort((a, b) => far(a) - far(b) || a.y - b.y || a.x - b.x);
+  return NOOK_ORDER.map((errand) => {
+    const spot = spots.find((at) => { const zone = { ...at, width: ZONE_W, height: ZONE_H }; return !hits(zone) && !zones.some((other) => overlaps(zone, other)); })!;
+    zones.push({ ...spot, width: ZONE_W, height: ZONE_H });
+    return { errand, x: spot.x + 8, y: spot.y + 8, stand: { x: spot.x + 18, y: spot.y + 74 } };
+  });
 }
 
-export function layoutScene(graph: SceneGraph, previous?: SceneMachinery, needs: CommonsNeeds = { agents: 8, implements: NOOK_ORDER }): SceneLayout {
-  return furnish(placeMachinery(graph, previous), needs);
+/** The floor with the fixtures this floor shows; which they are never moves a machine or a fixture. */
+export function furnish(machinery: SceneMachinery, offered: readonly BreakRoomErrand[]): SceneLayout {
+  const present = NOOK_ORDER.filter((errand) => offered.includes(errand)), { facilities } = machinery;
+  const line = LINE_STATIONS.map((label, index) => ({ label, x: facilities.x + MARGIN + 8, y: facilities.y + MARGIN + index * LINE_ROW, width: LINE_WIDTH, height: LINE_ROW - 4 }));
+  const furniture = machinery.fixtures.filter((piece) => present.includes(piece.errand)).map((piece) => ({ x: piece.x, y: piece.y, width: 20, height: 30 }));
+  return { ...machinery, implements: present, line, solids: [...machinery.stations, ...furniture].map(({ x, y, width, height }) => ({ x, y, width, height })) };
+}
+
+export function layoutScene(graph: SceneGraph, previous?: SceneMachinery, offered: readonly BreakRoomErrand[] = NOOK_ORDER): SceneLayout {
+  return furnish(placeMachinery(graph, previous), offered);
 }
 
 function cold(keys: readonly string[], sizes: ReadonlyMap<string, { width: number; height: number }>, links: Links) {
@@ -505,8 +510,7 @@ function cold(keys: readonly string[], sizes: ReadonlyMap<string, { width: numbe
 /**
  * Local stability: footprints that still exist stay where they were and new
  * ones are placed beside their placed neighbours, or in the nearest free
- * floor when they have none, never under the development block, which grows
- * down. Undefined when the change is too large for that to stay readable, so
+ * floor when they have none. Undefined when the change is too large for that to stay readable, so
  * the floor is laid out cold.
  */
 function keep(previous: SceneMachinery, keys: readonly string[], sizes: ReadonlyMap<string, { width: number; height: number }>, links: Links) {
@@ -523,8 +527,6 @@ function keep(previous: SceneMachinery, keys: readonly string[], sizes: Readonly
   if (fresh.length > Math.max(4, keys.length / 4)) return undefined;
   const block = { ...RESERVE, x: previous.facilities.x, y: previous.facilities.y };
   floor.put(FACILITIES, block);
-  // Nothing new stands under the development block: it grows that way.
-  floor.index.add({ ...block, height: 1e6 });
   for (const key of placementOrder(fresh, links, new Set(floor.placed.keys()))) { const { width, height } = sizes.get(key)!; floor.put(key, placeOne(key, width, height, floor, links)); }
   return floor.placed;
 }
@@ -605,25 +607,6 @@ function trace(parts: readonly SceneRect[]) {
   return { rects, outline: edges.join(""), label: { x: top.x + 4, y: top.y + 10, width: top.width - 8 } };
 }
 
-/** The furniture in the commons: left to right along its back wall. */
-function nookPieces(commons: SceneRect, present: readonly BreakRoomErrand[]) {
-  return present.map((errand, index) => ({ errand, x: commons.x + 6 + index * 38, y: commons.y + 18, stand: { x: commons.x + 12 + index * 38, y: commons.y + 84 } }));
-}
-
-/** The commons tables, each with the bench its seats are on: one per row of seats, always there, and solid. Nobody walks over a sitter. */
-function tables(layout: Pick<SceneLayout, "commons" | "restingTop" | "seats">) {
-  const { rows, perRow, planningRows } = layout.seats, top = planningTop(layout);
-  return [...Array.from({ length: rows }, (_, row) => layout.restingTop + row * ROW_PITCH), ...Array.from({ length: planningRows }, (_, row) => top + row * ROW_PITCH)]
-    .map((y) => ({ x: layout.commons.x + 6, y: y + 3, width: (perRow - 1) * WORKER_GAP + 36, height: 15 }));
-}
-
-const planningTop = (layout: Pick<SceneLayout, "restingTop" | "seats">) => layout.restingTop + layout.seats.rows * ROW_PITCH;
-
-/** The tables drawn in the commons, as rows of seat positions. */
-export function commonTables(layout: SceneLayout) {
-  return tables(layout).map((table, index) => ({ ...table, planning: index >= layout.seats.rows }));
-}
-
 /** Newest first within a station; past the eighth, crates wait unseen behind the "+N". */
 export function placeCrates(layout: SceneLayout, crates: readonly SceneCrate[]) {
   const counts = [0, 0, 0, 0] as [number, number, number, number];
@@ -650,69 +633,51 @@ export function workPositions(layout: SceneLayout, station: SceneStation): reado
   return [[0, 0], [-24, 0], [24, 0], [0, 24], [-24, 24], [24, 24]].map(([dx, dy]) => ({ x: x + dx!, y: y + dy! })).filter((point, index) => index === 0 || standable(layout, point));
 }
 
-export function placeWorkers(layout: SceneLayout, workers: readonly SceneWorker[], social: "nearby" | "commons" = "commons"): readonly SceneWorkerPlacement[] {
+export function placeWorkers(layout: SceneLayout, workers: readonly SceneWorker[]): readonly SceneWorkerPlacement[] {
   const sorted = [...workers].sort((left, right) => compareText(left.id, right.id));
   const placed: SceneWorkerPlacement[] = [];
   // ponytail: a bounded actor list uses linear collision checks; use spatial buckets if thousands are displayed.
-  const occupied = (point: ScenePoint) => placed.some((other) => Math.abs(point.x - other.x) < 24 && Math.abs(point.y - other.y) < 24);
-  const areas: Record<"resting" | "staging" | "outside" | "overflow", SceneWorker[]> = { resting: [], staging: [], outside: [], overflow: [] };
+  // Nobody stands where a visitor to a fixture would.
+  const occupied = (point: ScenePoint) => [...placed, ...layout.fixtures.map((piece) => piece.stand)].some((other) => Math.abs(point.x - other.x) < 24 && Math.abs(point.y - other.y) < 24);
+  const resting: { worker: SceneWorker; area: "resting" | "staging" | "outside" | "overflow" }[] = [];
+  const homeOf = (worker: SceneWorker) => stationOf(layout, worker.observedBayId) ?? stationOf(layout, worker.nodeId);
   for (const worker of sorted) {
-    if (worker.location !== "working") {
-      areas[worker.location === "unobserved" ? "staging" : "resting"].push(worker);
-      continue;
-    }
-    const station = stationOf(layout, worker.observedBayId) ?? stationOf(layout, worker.nodeId);
-    if (station === undefined) { areas.outside.push(worker); continue; }
+    if (worker.location !== "working") { resting.push({ worker, area: worker.location === "unobserved" ? "staging" : "resting" }); continue; }
+    const station = homeOf(worker);
+    if (station === undefined) { resting.push({ worker, area: "outside" }); continue; }
     const position = workPositions(layout, station).find((point) => !occupied(point));
-    if (position === undefined) { areas.overflow.push(worker); continue; }
+    if (position === undefined) { resting.push({ worker, area: "overflow" }); continue; }
     placed.push({ id: worker.id, area: "work", stationId: station.entityId, ...position });
   }
-  // Resting nearby is beside a unit's main machine.
-  const nearby = social === "nearby" ? layout.stations.filter((station) => station.unit === station.entityId) : [];
-  const localCounts = new Map<string, number>();
-  const commons: SceneWorker[] = [];
-  // Known locations keep their seats before unlocated idle workers join a nearby pair.
-  const resting = areas.resting.sort((left, right) => Number(nearby.some((station) => station.entityId === right.nodeId)) - Number(nearby.some((station) => station.entityId === left.nodeId)) || compareText(left.id, right.id));
-  for (const worker of resting) {
-    const known = nearby.find((station) => station.entityId === worker.nodeId);
-    const candidates = known ? [known] : [...nearby.filter((station) => localCounts.get(station.entityId) === 1), ...nearby.slice(0, 3)];
-    const seat = candidates.filter((station) => (localCounts.get(station.entityId) ?? 0) < 2)
-      .flatMap((station) => [-24, 24].map((offset) => ({ stationId: station.entityId, x: station.anchor.x + offset, y: station.anchor.y + 24 })))
-      .find((point) => !occupied(point) && standable(layout, point));
-    if (seat === undefined) { commons.push(worker); continue; }
-    placed.push({ id: worker.id, area: "resting", ...seat });
-    localCounts.set(seat.stationId, (localCounts.get(seat.stationId) ?? 0) + 1);
+  // Anyone not at work stands beside a machine: the one they last worked at, else beside someone who is alone, else
+  // the first free one. Rows fan out beside and then below it for as long as there are people; nobody is turned away.
+  const homes = layout.stations.length > 0 ? layout.stations.map((station) => ({ id: station.entityId as string | undefined, ...station.anchor })) : [{ id: undefined, x: 2 * PADDING + 8, y: PADDING }];
+  const crowd = new Map<string | undefined, number>();
+  const beside = (home: ScenePoint) => {
+    for (let row = 1; ; row++) for (let step = 0; step < 3; step++) for (const side of [-1, 1]) {
+      const point = { x: Math.min(layout.width - PADDING, Math.max(PADDING, home.x + side * (24 + 48 * step))), y: home.y + 24 * row };
+      if (!occupied(point) && standable(layout, point)) return point;
+    }
+  };
+  // Those with a machine take their places first.
+  resting.sort((left, right) => Number(homeOf(right.worker) !== undefined) - Number(homeOf(left.worker) !== undefined) || compareText(left.worker.id, right.worker.id));
+  for (const { worker, area } of resting) {
+    const station = homeOf(worker), home = station === undefined ? (homes.find((next) => crowd.get(next.id) === 1) ?? homes.find((next) => !crowd.has(next.id)) ?? homes[0]!) : { id: station.entityId as string | undefined, ...station.anchor };
+    crowd.set(home.id, (crowd.get(home.id) ?? 0) + 1);
+    placed.push({ id: worker.id, area, ...(home.id === undefined ? {} : { stationId: home.id }), ...beside(home)! });
   }
-  const planning = (["staging", "outside", "overflow"] as const).flatMap((area) => areas[area].map((worker) => ({ worker, area })));
-  const seats = commonSeating(layout, commons.length, planning.length);
-  commons.forEach((worker, slot) => placed.push({ id: worker.id, area: "resting", ...seats.resting[slot]! }));
-  planning.forEach(({ worker, area }, slot) => placed.push({ id: worker.id, area, ...seats.planning[slot]! }));
   return placed.sort((left, right) => compareText(left.id, right.id));
 }
 
-/**
- * The commons seats every agent at rest and half of them at the work tables, up to four to a table.
- * Anyone more (a reviewer passing through) sits on a bench below the floor, so they never move a machine.
- */
-export function commonSeating(layout: SceneLayout, restingCount: number, planningCount: number) {
-  const { perRow, rows, planningRows } = layout.seats, row = (slot: number, top: number) => ({ x: layout.commons.x + 24 + (slot % perRow) * WORKER_GAP, y: top + Math.floor(slot / perRow) * ROW_PITCH });
-  let bench = 0;
-  const benches = () => { const slot = bench++; return { x: PADDING + 24 + (slot % 4) * WORKER_GAP, y: layout.height + 24 + Math.floor(slot / 4) * ROW_PITCH }; };
-  const resting = Array.from({ length: restingCount }, (_, slot) => slot < perRow * rows ? row(slot, layout.restingTop) : benches());
-  const planning = Array.from({ length: planningCount }, (_, slot) => slot < perRow * planningRows ? row(slot, planningTop(layout)) : benches());
-  return { resting, planning };
-}
-
-// Left to right along the break room's back wall.
+// Left to right along the board wall: the order the five are placed in.
 const NOOK_ORDER: readonly BreakRoomErrand[] = ["board", "missions", "tasks", "shelf", "coffee"];
 
 /**
- * Stable furniture in the commons, never moved by data.
+ * Stable furniture, never moved by data.
  * Ambient turns come first in the list, so their timing never depends on the implements beside them.
  */
 export function breakRoomNook(layout: SceneLayout) {
-  const pieces = nookPieces(layout.commons, layout.implements);
-  return { width: layout.commons.width, furniture: (["shelf", "coffee", "board", "missions", "tasks"] as const).flatMap((errand) => { const piece = pieces.find((item) => item.errand === errand); return piece === undefined ? [] : [{ ...piece, key: String(errand) }]; }) };
+  return { furniture: (["shelf", "coffee", "board", "missions", "tasks"] as const).flatMap((errand) => { const piece = layout.fixtures.find((item) => item.errand === errand); return piece === undefined || !layout.implements.includes(errand) ? [] : [{ ...piece, key: String(errand) }]; }) };
 }
 
 // Each piece of furniture is visited in turns: free for the first part of a turn, then one visitor.
@@ -732,7 +697,7 @@ export function placeErrands(placements: readonly SceneWorkerPlacement[], nook: 
   for (const [index, piece] of nook.furniture.entries()) {
     // Later pieces run behind the first, so every piece's first turn begins free.
     const clock = at - index * TURN / 2, turn = Math.floor(clock / TURN);
-    const suited = placements.filter((placement) => placement.area === "resting" && placement.stationId === undefined && habitOf(placement.id) === piece.errand);
+    const suited = placements.filter((placement) => placement.area === "resting" && habitOf(placement.id) === piece.errand);
     // Whoever has the piece keeps it for as long as they rest and the turn runs, whoever else
     // sits down or leaves meanwhile. (Every turn starts free, so nobody is carried into the next.)
     const holder = before.find((placement) => placement.errandKey === piece.key || placement.errandKey === undefined && placement.errand === piece.errand)?.id;

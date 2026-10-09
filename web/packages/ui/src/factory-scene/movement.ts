@@ -168,12 +168,13 @@ export type BeltCrossing = Readonly<{ x: number; y: number; over: "h" | "v" }>;
 export type BeltStub = Readonly<{ points: readonly ScenePoint[]; name: string; text?: SceneRect & Readonly<{ value: string }> }>;
 // A stub's name is set in a 6px monospace face, about this wide a character.
 const STUB_CHAR = 3.7;
-type Floor = Pick<SceneLayout, "width" | "height" | "stations" | "regions" | "facilities">;
+type Floor = Pick<SceneLayout, "width" | "height" | "stations" | "regions" | "facilities" | "fixtures">;
 
-/** What a belt keeps off: machine bodies, every label, where workers stand, and the development block. */
+/** What a belt keeps off: machine bodies, every label, where workers stand, the fixtures and the outbound line. */
 export function beltObstacles(layout: Floor): readonly SceneRect[] {
   const reach = WORKER_SIZE / 2, block = layout.facilities, inset = 12;
   return [...layout.stations.flatMap((station) => [station as SceneRect, station.label, { x: station.anchor.x - reach, y: station.anchor.y - reach, width: 2 * reach, height: 2 * reach }]),
+    ...layout.fixtures.flatMap((piece) => [{ x: piece.x, y: piece.y, width: 20, height: 30 }, { x: piece.stand.x - reach, y: piece.stand.y - reach, width: 2 * reach, height: 2 * reach }]),
     ...layout.regions.map((region) => regionLabelBox(region)), { x: block.x + inset, y: block.y + inset, width: block.width - 2 * inset, height: block.height - 2 * inset }];
 }
 

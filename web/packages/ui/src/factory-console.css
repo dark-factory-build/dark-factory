@@ -756,7 +756,7 @@ summary.dfConsoleItem__summary { cursor: pointer; }
 .dfPlantOverview__zoom .dfPlantOverview__toggle { min-width: 1.75rem; line-height: 1; font: 11px ui-monospace, monospace; }
 .dfPlantMap { display: block; max-width: 100%; height: auto; background: #08131d; border: 1px solid #3c5051; box-shadow: 0 2px 8px rgba(0, 0, 0, .5); cursor: crosshair; touch-action: none; shape-rendering: crispEdges; }
 .dfPlantMap__ground { fill: #08131d; }
-.dfPlantMap__commons { fill: #2a3437; }
+.dfPlantMap__development { fill: #2a3437; }
 .dfPlantMap__station { fill: #4a515b; }
 .dfPlantMap__station.s-observed, .dfPlantMap__station.s-quiet { fill: #5ad38a; }
 .dfPlantMap__station.s-partial { fill: #c9a640; }
@@ -1292,8 +1292,8 @@ summary.dfConsoleItem__summary { cursor: pointer; }
 .dfPlant__gate { fill: var(--metal2); stroke: var(--outline); }
 .dfPlant .s-opaque .dfPlant__gate { fill: url(#df-fog); }
 .dfPlant__gate--runtime { stroke: var(--amber); stroke-dasharray: 2 2; }
-/* The commons and the outbound line: furniture on the shared floor, not a room. */
-.dfPlant__commons { fill: #2b3437; stroke: #3c4a4c; stroke-width: 1; stroke-dasharray: 3 3; }
+/* The outbound line's block: on the shared floor, not a room. */
+.dfPlant__development { fill: #2b3437; stroke: #3c4a4c; stroke-width: 1; stroke-dasharray: 3 3; }
 /* A belt lies on a dark casing, so one belt crossing another reads as passing over it, never as joining it. */
 .dfPlant__casing { fill: none; stroke: #08131d; stroke-width: 9; stroke-linejoin: round; }
 .dfPlant__casing--lit { stroke: #80ddff; opacity: .55; }
