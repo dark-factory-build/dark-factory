@@ -418,17 +418,15 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 	}
 	var repositoryGitIdentity change.RepositoryIdentity
 	var repositoryOriginDigest [32]byte
-	if retained == nil {
-		source, sourceErr := inspectRegisteredRepository(ctx, repository.Root, "")
-		if sourceErr == nil {
-			sourceErr = daemon.store.BindRepositorySource(ctx, repository.ID, source)
-		}
-		if sourceErr != nil {
-			return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSource, sourceErr)
-		}
-		repositoryGitIdentity, _ = change.NewRepositoryIdentity(source.GitDevice, source.GitInode)
-		repositoryOriginDigest = source.OriginDigest
+	source, sourceErr := inspectRegisteredRepository(ctx, repository.Root, "")
+	if sourceErr == nil && retained == nil {
+		sourceErr = daemon.store.BindRepositorySource(ctx, repository.ID, source)
 	}
+	if sourceErr != nil {
+		return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSource, sourceErr)
+	}
+	repositoryGitIdentity, _ = change.NewRepositoryIdentity(source.GitDevice, source.GitInode)
+	repositoryOriginDigest = source.OriginDigest
 	// The repository's Git directory holds every Change worktree's refs and
 	// commits; a run that cannot resolve it has no source to work in. CI is an
 	// optional execution capability on top: an unavailable or unsafe lease

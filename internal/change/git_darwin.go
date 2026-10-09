@@ -1331,14 +1331,28 @@ func FetchBase(ctx context.Context, selection Selection, path string) error {
 	}
 	defer authority.close()
 	admin := GitDirectoryForChange(selection.repositoryRoot, path)
-	if err := validatePrivateGitAdmin(admin); err != nil {
-		return err
+	gitArgs := []string{"-c", "core.hooksPath=/dev/null", "-c", "protocol.file.allow=always"}
+	if err := validatePrivateGitAdmin(admin); err == nil {
+		gitArgs = append(gitArgs, "--git-dir", admin)
+	} else {
+		// Adopted Changes retain Git's canonical linked-worktree
+		// administration rather than receiving a deterministic private bare
+		// repository. Fetch through the worktree so its existing Git admin is
+		// preserved while the worker still gets the tracked base ref.
+		if _, inspectErr := authority.inspectWorktree(ctx, path); inspectErr != nil {
+			return err
+		}
+		gitArgs = append(gitArgs, "-C", path)
 	}
-	_, err = authority.succeed(ctx, maxGitSelectionOutput, "-c", "core.hooksPath=/dev/null", "-c", "protocol.file.allow=always", "--git-dir", admin, "fetch", "--quiet", "--no-tags", "--no-write-fetch-head", "--no-auto-maintenance", "--no-recurse-submodules", selection.repositoryRoot, selection.base.Hex()+":refs/remotes/origin/main")
+	gitArgs = append(gitArgs, "fetch", "--quiet", "--no-tags", "--no-write-fetch-head", "--no-auto-maintenance", "--no-recurse-submodules", selection.repositoryRoot, selection.base.Hex()+":refs/remotes/origin/main")
+	_, err = authority.succeed(ctx, maxGitSelectionOutput, gitArgs...)
 	if err != nil {
 		return newGitError(gitFailureProcess)
 	}
-	return validatePrivateGitAdmin(admin)
+	if _, privateErr := os.Stat(filepath.Join(admin, "config")); privateErr == nil {
+		return validatePrivateGitAdmin(admin)
+	}
+	return nil
 }
 
 // InspectWorktree verifies that path is a linked worktree of the repository
