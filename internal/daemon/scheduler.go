@@ -12,7 +12,11 @@ import (
 	"github.com/ncruces/go-sqlite3"
 )
 
-const schedulerPollInterval = time.Second
+const (
+	schedulerPollInterval = time.Second
+	// schedulerMaxBackoff is the most polls a failed round waits to retry.
+	schedulerMaxBackoff = 64
+)
 
 type schedulerEventKind uint8
 
@@ -55,7 +59,35 @@ func (daemon *Daemon) RunScheduler(ctx context.Context, spec SupervisorSpec) err
 	daemon.runtimeStore().Record(opgraph.Observation{Source: "factoryd", Environment: "local", Kind: "deploy", Start: now, End: now + 1,
 		Attributes: map[string]string{"service.name": "factoryd"}, Version: buildinfo.Current().Receipt()})
 	defer daemon.endScheduler()
+	if spec.schedulerPoll == nil {
+		poll := time.NewTicker(schedulerPollInterval)
+		defer poll.Stop()
+		spec.schedulerPoll = poll.C
+	}
+	// A failed round has cancelled and joined its attempts. Repeating durable
+	// faults must not crash-loop factoryd, so the round is logged and retried
+	// after a doubling number of polls while the console and API keep serving.
+	backoff := 1
+	for {
+		err := daemon.schedulerRound(ctx, spec)
+		if err == nil || ctx.Err() != nil {
+			return err
+		}
+		LogFactoryd(daemon.log, "factoryd: scheduler round failed, retrying after %d polls: %v\n", backoff, err)
+		for range backoff {
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-spec.schedulerPoll:
+			}
+		}
+		backoff = min(backoff*2, schedulerMaxBackoff)
+	}
+}
 
+// schedulerRound runs admission until shutdown or the first failure, then
+// cancels and joins every attempt it started.
+func (daemon *Daemon) schedulerRound(ctx context.Context, spec SupervisorSpec) error {
 	ownedCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	runAttempt := spec.scheduledAttempt
@@ -113,12 +145,6 @@ func (daemon *Daemon) RunScheduler(ctx context.Context, spec SupervisorSpec) err
 	}
 
 	pollEvents := spec.schedulerPoll
-	var poll *time.Ticker
-	if pollEvents == nil {
-		poll = time.NewTicker(schedulerPollInterval)
-		pollEvents = poll.C
-		defer poll.Stop()
-	}
 	ctxDone := ctx.Done()
 	if err := ownedCtx.Err(); err == nil {
 		startProbe()
@@ -127,6 +153,10 @@ func (daemon *Daemon) RunScheduler(ctx context.Context, spec SupervisorSpec) err
 	}
 
 	for !stopping || len(owners) != 0 {
+		if stopping {
+			// Polls left while joining belong to RunScheduler's backoff.
+			pollEvents = nil
+		}
 		select {
 		case <-ctxDone:
 			if !stopping {

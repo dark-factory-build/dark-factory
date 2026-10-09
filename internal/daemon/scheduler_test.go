@@ -186,7 +186,7 @@ func TestSchedulerUnobservedCompletionPreservesUnexpectedErrors(t *testing.T) {
 				}
 				return kernel.Run{}, cause
 			}}
-			if err := daemon.RunScheduler(ctx, spec); !errors.Is(err, kernel.ErrCorruptState) || !errors.Is(err, cause) {
+			if err := daemon.schedulerRound(ctx, spec); !errors.Is(err, kernel.ErrCorruptState) || !errors.Is(err, cause) {
 				t.Fatalf("unobserved completion lost unexpected failure: %v", err)
 			}
 		})
@@ -217,7 +217,7 @@ func TestSchedulerUnobservedCompletionPreservesJoinedFailures(t *testing.T) {
 				cancel()
 				return kernel.Run{}, test.outcome
 			}}
-			err := daemon.RunScheduler(ctx, spec)
+			err := daemon.schedulerRound(ctx, spec)
 			if test.failure {
 				if !errors.Is(err, test.outcome) || !errors.Is(err, kernel.ErrCorruptState) {
 					t.Fatalf("joined failure lost: %v", err)
@@ -236,7 +236,7 @@ func TestSchedulerRejectsDuplicateAdmissionObservation(t *testing.T) {
 		spec.admissionObserved(false)
 		return kernel.Run{}, fmt.Errorf("%w: empty", kernel.ErrConflict)
 	}}
-	err := daemon.RunScheduler(context.Background(), spec)
+	err := daemon.schedulerRound(context.Background(), spec)
 	if !errors.Is(err, kernel.ErrCorruptState) {
 		t.Fatalf("duplicate observation = %v", err)
 	}
@@ -249,7 +249,7 @@ func TestSchedulerRejectsUnexpectedNoAdmissionResult(t *testing.T) {
 		spec.admissionObserved(false)
 		return kernel.Run{}, sentinel
 	}}
-	err := daemon.RunScheduler(context.Background(), spec)
+	err := daemon.schedulerRound(context.Background(), spec)
 	if !errors.Is(err, sentinel) || !errors.Is(err, kernel.ErrCorruptState) {
 		t.Fatalf("unexpected no-admission result = %v", err)
 	}
@@ -267,7 +267,7 @@ func TestSchedulerPreservesUnsettledAttemptError(t *testing.T) {
 		<-ctx.Done()
 		return kernel.Run{}, ctx.Err()
 	}}
-	err := daemon.RunScheduler(context.Background(), spec)
+	err := daemon.schedulerRound(context.Background(), spec)
 	if !errors.Is(err, cause) || !schedulerOutcomeUnknown(err) {
 		t.Fatalf("unsettled attempt cause lost: %v", err)
 	}
@@ -290,7 +290,7 @@ func TestSchedulerStopsAndJoinsAfterNonterminalCompletion(t *testing.T) {
 		},
 		scheduledCompletion: func(kernel.Run) error { return sentinel },
 	}
-	err := daemon.RunScheduler(context.Background(), spec)
+	err := daemon.schedulerRound(context.Background(), spec)
 	if !errors.Is(err, sentinel) {
 		t.Fatalf("nonterminal completion = %v", err)
 	}
@@ -322,7 +322,7 @@ func TestSchedulerStopsAfterPersistentUncertainCompletionRead(t *testing.T) {
 			return kernel.Run{}, ctx.Err()
 		},
 	}
-	err := daemon.RunScheduler(context.Background(), spec)
+	err := daemon.schedulerRound(context.Background(), spec)
 	if !errors.Is(err, sentinel) || completionReads.Load() != supervisorReconcileAttempts {
 		t.Fatalf("persistent completion = %v after %d reads", err, completionReads.Load())
 	}
@@ -577,6 +577,49 @@ func TestSchedulerCancellationDoesNotHideLimitPollFailure(t *testing.T) {
 	}
 }
 
+// A tick failure that repeats on the same data is logged once per backoff
+// window and retried; the scheduler never ends factoryd, which keeps serving.
+func TestSchedulerRetriesARepeatingTickFailureWithBackoff(t *testing.T) {
+	daemon := newSchedulerTestDaemon(t)
+	var log bytes.Buffer
+	daemon.ConfigureLog(&log)
+	daemon.now = func() time.Time { return time.UnixMilli(-1) }
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	polls := make(chan time.Time)
+	var calls atomic.Int64
+	done := make(chan error, 1)
+	go func() {
+		done <- daemon.RunScheduler(ctx, SupervisorSpec{schedulerPoll: polls, scheduledAttempt: func(_ context.Context, spec SupervisorSpec) (kernel.Run, error) {
+			calls.Add(1)
+			spec.admissionObserved(false)
+			return kernel.Run{}, fmt.Errorf("%w: empty", kernel.ErrConflict)
+		}})
+	}()
+	// Rounds fail on polls 1, 3 and 6, after backoffs of 1 and 2 polls; poll 7
+	// is taken by the third backoff, so all three failures are logged.
+	for range 7 {
+		select {
+		case polls <- time.Now():
+		case err := <-done:
+			t.Fatalf("scheduler stopped on a repeating tick failure: %v", err)
+		}
+	}
+	if failures := bytes.Count(log.Bytes(), []byte("scheduler round failed")); failures != 3 || calls.Load() != 3 {
+		t.Fatalf("failures logged=%d rounds=%d\n%s", failures, calls.Load(), log.String())
+	}
+	if _, err := daemon.WebStatus(ctx); err != nil {
+		t.Fatalf("web_status while the scheduler retries: %v", err)
+	}
+	if reply := daemon.snapshot(ctx); reply.Failed() {
+		t.Fatal("console snapshot failed while the scheduler retries")
+	}
+	cancel()
+	if err := waitSchedulerDone(t, done); err != nil {
+		t.Fatalf("scheduler shutdown = %v", err)
+	}
+}
+
 func TestSchedulerPreservesAdmittedRunWhenAttemptCompletionIsUnknown(t *testing.T) {
 	daemon := newSchedulerTestDaemon(t)
 	runID := schedulerRunID(t, 7)
@@ -592,7 +635,7 @@ func TestSchedulerPreservesAdmittedRunWhenAttemptCompletionIsUnknown(t *testing.
 			return sentinel
 		},
 	}
-	err := daemon.RunScheduler(context.Background(), spec)
+	err := daemon.schedulerRound(context.Background(), spec)
 	if !errors.Is(err, sentinel) || completed.ID != runID || completed.Phase != kernel.RunFinalizing {
 		t.Fatalf("unknown completion lost admitted run: run=%+v err=%v", completed, err)
 	}
