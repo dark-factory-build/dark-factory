@@ -677,7 +677,11 @@ func validateSchemaVersion(ctx context.Context, connection *sql.Conn, wantVersio
 		return err
 	}
 	if appID != applicationID || version != wantVersion {
-		return fmt.Errorf("%w: application_id=%#x user_version=%d, this build opens only %#x/%d", ErrForeignDatabase, appID, version, applicationID, wantVersion)
+		cause := ErrForeignDatabase
+		if appID == applicationID && version > wantVersion {
+			cause = ErrNewerSchema
+		}
+		return fmt.Errorf("%w: application_id=%#x user_version=%d, this build opens only %#x/%d", cause, appID, version, applicationID, wantVersion)
 	}
 
 	expected := expectedSchemaOf(statements)
