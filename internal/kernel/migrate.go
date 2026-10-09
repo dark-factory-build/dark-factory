@@ -61,7 +61,11 @@ func (store *Store) migrateLegacy(ctx context.Context) error {
 		return connection.Close()
 	case v35UserVersion:
 	default:
-		return errors.Join(fmt.Errorf("%w: home is at user_version %d, this build requires %d", ErrForeignDatabase, version, userVersion), connection.Close())
+		cause := ErrForeignDatabase
+		if version > userVersion {
+			cause = ErrNewerSchema
+		}
+		return errors.Join(fmt.Errorf("%w: home is at user_version %d, this build requires %d", cause, version, userVersion), connection.Close())
 	}
 	if err := migrateTransaction(ctx, connection, migrateV35); err != nil {
 		releaseUncertainConnection(connection)

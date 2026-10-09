@@ -256,6 +256,10 @@ func TestReleaseRecordsAFailedUpgradeAndNeverRestarts(t *testing.T) {
 	if <-events != "build /self-repository" || <-events != "upgrade" || len(events) != 0 {
 		t.Fatal("a failed upgrade went on to restart")
 	}
+	// A backup never outlives its release.
+	if _, err := os.Lstat(install.UpgradeBackupPath(fixture.daemon.home)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a failed release left its backup: %v", err)
+	}
 }
 
 func TestTickReleasesEachNewBaseTipOnce(t *testing.T) {

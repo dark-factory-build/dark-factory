@@ -117,10 +117,13 @@ release may add a plain file to the home without any allowlist edit. A
 release that adds anything else at the home root, such as a directory, is
 refused by the build before it and must be installed by hand as above.
 
-**Schema change.** A release backs the store up before staging. When the old
-build boots after a failed trial and refuses the store as foreign (the trial
-child migrated it), it restores that backup and opens it; otherwise it keeps
-the store, with its own writes since the backup. To roll back by hand after a promotion,
+**Schema change.** A release backs the store up before staging. The old build
+restores that backup only when it boots under a marker naming another build
+and refuses the store for a `user_version` above its own (the trial child
+migrated it); any other refusal is reported, never restored over. Otherwise
+it keeps the store, with its own writes since the backup. The backup is
+removed when the release fails before staging and when a boot settles the
+marker, so it never outlives its release. To roll back by hand after a promotion,
 stop the service, confirm the daemon released `home.lock`, restore a backup
 over `factory.sqlite3`, delete `factory.sqlite3-wal` and `factory.sqlite3-shm`,
 and install the previous binaries.

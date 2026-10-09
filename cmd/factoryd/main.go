@@ -341,10 +341,11 @@ func serve(ctx context.Context, configuration config) error {
 		}
 	}
 	owner, err := openProcess(ctx, configuration)
-	// A store this build refuses while an upgrade backup exists is a trial's
-	// migration; the backup is the store this build left. Any other failed
-	// trial keeps this build's writes since the backup.
-	if errors.Is(err, kernel.ErrForeignDatabase) && os.Getenv(trialEnv) == "" {
+	// A store a newer build migrated, under a marker naming another build,
+	// is a failed trial's migration; the backup is the store this build left.
+	// Nothing else restores it: any other failed trial keeps this build's
+	// writes since the backup.
+	if marker, upgrading, _ := install.ReadUpgradeMarker(configuration.home); errors.Is(err, kernel.ErrNewerSchema) && upgrading && marker.Target != selfSource() && os.Getenv(trialEnv) == "" {
 		if err = install.RestoreUpgradeBackup(configuration.home); err == nil {
 			owner, err = openProcess(ctx, configuration)
 		}
@@ -377,6 +378,9 @@ func serve(ctx context.Context, configuration config) error {
 		} else {
 			owner.settleRelease(ctx, configuration.home, marker.Target, "failed", cmp.Or(marker.Reason, "interrupted before promotion"))
 		}
+	} else if err := install.RemoveUpgrade(configuration.home); err != nil {
+		// A backup never outlives its release.
+		daemon.LogFactoryd(recoveryLog, "factoryd: removing a stale upgrade backup: %v\n", err)
 	}
 	if err := owner.wait(ctx); err != nil {
 		return err
@@ -544,8 +548,10 @@ func openProcess(ctx context.Context, configuration config) (_ *process, resultE
 		// Git executable to settle its worktree; publish it before the sweep
 		// runs rather than waiting for the first admitted attempt to remember it.
 		owner.daemon.RememberSupervisorAccount(owner.supervisorSpec.ChangeParent, owner.supervisorSpec.AccountHome, owner.supervisorSpec.GitExecutable)
-		// The sweep runs to a quiet state before any listener opens so no client
-		// can act on unrecovered durable state. A run the sweep leaves unresolved
+		// A sweep that succeeds runs to a quiet state before any listener
+		// opens, so no client acts on unrecovered durable state. One that
+		// fails is reported and the listener opens anyway; the scheduler's
+		// ownerless-run sweep retries it. A run the sweep leaves unresolved
 		// is durable fail-closed residue, reported but never a boot refusal.
 		dispositions, err := owner.daemon.RecoverAbandonedRuns(ownedContext, owner.runtimeParent, owner.supervisorSpec.ChangeParent)
 		if err != nil {

@@ -281,6 +281,8 @@ func (daemon *Daemon) selfRepositorySource(ctx context.Context) (project kernel.
 func (daemon *Daemon) release(project kernel.ProjectID, root string, source change.RepositorySourceIdentity, delivery kernel.ProductionDelivery) {
 	ctx := daemon.cleanupCtx
 	fail := func(reason string) {
+		// Nothing was staged, so the backup has no release to outlive.
+		_ = install.RemoveUpgrade(daemon.home)
 		daemon.releaseHold.Store(false)
 		daemon.releaseBusy.Store(false)
 		delivery.State, delivery.Reason = "failed", reason

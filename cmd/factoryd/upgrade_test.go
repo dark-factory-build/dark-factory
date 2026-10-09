@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/dark-factory-build/dark-factory/internal/install"
+	"github.com/dark-factory-build/dark-factory/internal/kernel"
 )
 
 // The trial child is this test binary, re-executed as a staged build.
@@ -154,6 +155,40 @@ func TestOldBuildRestoresTheBackupOnlyOverAMigratedStore(t *testing.T) {
 		bootUntilSettled(t, home)
 		if _, err := os.Lstat(install.UpgradeBackupPath(home)); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("migrated=%t: backup = %v", migrated, err)
+		}
+	}
+}
+
+// A backup restores only a failed trial's migration: never without a marker
+// naming another build, and never over a store refused for another reason.
+func TestOldBuildNeverRestoresTheBackupOverAnyOtherRefusal(t *testing.T) {
+	for name, damage := range map[string]string{"no marker": "PRAGMA user_version = 999999", "changed schema": "CREATE TABLE written_by_hand (x)"} {
+		home := stagedHome(t, "serve", strings.Repeat("7", 40))
+		if name == "no marker" {
+			if err := os.Remove(filepath.Join(install.ServiceDirectoryPath(home), "upgrade")); err != nil {
+				t.Fatal(err)
+			}
+		}
+		database := filepath.Join(home, "factory.sqlite3")
+		backup, err := os.ReadFile(database)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(install.UpgradeBackupPath(home), backup, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if output, err := exec.Command("/usr/bin/sqlite3", database, damage).CombinedOutput(); err != nil {
+			t.Fatalf("%s: %v %s", name, err, output)
+		}
+		// Bounded, so a build that restored and served fails here, not hangs.
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		err = serve(ctx, testConfig(home))
+		cancel()
+		if !errors.Is(err, kernel.ErrForeignDatabase) {
+			t.Fatalf("%s: serve = %v", name, err)
+		}
+		if _, err := os.Lstat(install.UpgradeBackupPath(home)); err != nil {
+			t.Fatalf("%s: the backup replaced the store: %v", name, err)
 		}
 	}
 }
