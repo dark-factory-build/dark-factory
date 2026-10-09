@@ -475,8 +475,8 @@ func TestBuildNativeReturnsExactArgvEnvironmentAndSafeStartupTask(t *testing.T) 
 			if test.kind == kernel.ProviderClaudeCode && !slices.Contains(launch.Environment(), "DISABLE_AUTOUPDATER=1") {
 				t.Fatalf("Claude launch lacks updater suppression: %q", launch.Environment())
 			}
-			if test.kind == kernel.ProviderCodex && slices.Contains(launch.Environment(), "DISABLE_AUTOUPDATER=1") {
-				t.Fatalf("Codex launch inherited Claude updater suppression: %q", launch.Environment())
+			if test.kind == kernel.ProviderCodex && !slices.Contains(launch.Environment(), "DISABLE_AUTOUPDATER=1") {
+				t.Fatalf("Codex launch lacks updater suppression: %q", launch.Environment())
 			}
 			for _, entry := range launch.Environment() {
 				if strings.HasPrefix(entry, "HOME=") && entry != "HOME="+wantHome {

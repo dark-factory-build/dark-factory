@@ -1177,7 +1177,10 @@ func (runtime RuntimePaths) environmentForRole(kind kernel.Provider, role kernel
 	}
 	switch kind {
 	case kernel.ProviderCodex:
-		environment = append(environment, "CODEX_HOME="+codexConfigHome(runtime))
+		// Keep the launched CLI from replacing the committed executable behind
+		// the daemon's back. The daemon adopts provider binaries only at its
+		// own verified boundary.
+		environment = append(environment, "CODEX_HOME="+codexConfigHome(runtime), "DISABLE_AUTOUPDATER=1")
 	case kernel.ProviderClaudeCode:
 		// Only a directory beside the default one is named. The default is
 		// what the CLI already reaches through HOME, and its OAuth account
