@@ -21,6 +21,10 @@ const (
 	productionStaleAfter = 2 * productionRefreshInterval
 	// shippedFor is production-view.ts SHIPPED_FOR and kernel.ProductionRecent.
 	shippedFor = kernel.ProductionRecent
+	// deployingFor is production-view.ts DEPLOYING_FOR: how recent a
+	// repository's last production deployment must be for a merge to wait on
+	// the next one.
+	deployingFor = 7 * 24 * time.Hour
 	// The site's ledger windows: merges listed, and days on the operating clock.
 	ledgerWindowDays = 7
 	ledgerClockDays  = 21
@@ -101,7 +105,9 @@ func publicCrates(records []kernel.ProductionRecord, now int64) []opgraph.Crate 
 			}
 			if now-at <= shippedFor.Milliseconds() {
 				station := 3
-				if deployedAt, ok := deployed[record.Repository]; ok && deployedAt < at {
+				// A repository that has not deployed this way within deployingFor
+				// of the merge no longer does: the merge ships.
+				if deployedAt, ok := deployed[record.Repository]; ok && deployedAt < at && at-deployedAt <= deployingFor.Milliseconds() {
 					station = 2
 				}
 				crates = append(crates, opgraph.Crate{Key: key, Station: station, Fault: blocked[key]})

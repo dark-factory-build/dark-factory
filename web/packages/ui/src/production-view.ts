@@ -194,6 +194,8 @@ export function productionStages(item: ProductionContraption): string[] {
 }
 
 const SHIPPED_FOR = 24 * 60 * 60_000;
+/** factoryd deployingFor: a repository whose last production deployment is older than this at a merge no longer deploys that way, so the merge ships. */
+const DEPLOYING_FOR = 7 * 24 * 60 * 60_000;
 
 /**
  * Each open or merged pull request as a crate on the floor's outbound line, at
@@ -210,7 +212,7 @@ export function projectCrates(items: readonly ProductionContraption[]): SceneCra
     const pr = item.pullRequest;
     if (pr === undefined || pr.state !== "open" && (pr.state !== "merged" || now - item.completedAt > SHIPPED_FOR)) return [];
     const stages = productionStages(item);
-    const station = pr.state === "merged" ? item.deployedAt === undefined || item.deployedAt >= item.completedAt ? 3 : 2 : stages[0] === "Merge queued" ? 2 : item.review.allowed ? 1 : 0;
+    const station = pr.state === "merged" ? item.deployedAt === undefined || item.deployedAt >= item.completedAt || item.completedAt - item.deployedAt > DEPLOYING_FOR ? 3 : 2 : stages[0] === "Merge queued" ? 2 : item.review.allowed ? 1 : 0;
     return [{ id: productionKey(item), number: pr.number, title: pr.title, station, stage: stages.join(" · "), taskIds: item.tasks,
       fault: stages.some((stage) => stage === "Correction" || stage === "CI failed" || stage === "Delivery blocked") }];
   });

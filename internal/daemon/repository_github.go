@@ -10,6 +10,8 @@ import (
 
 // BindProjectRepositoryGitHub is called only by explicit operator registration.
 // The host learns a numeric ID from live broker authority, never caller input.
+// A disabled repository may be bound too: the pin lets the factory read its
+// production state (checks, deployments), and disabled still means no new work.
 func (daemon *Daemon) BindProjectRepositoryGitHub(ctx context.Context, id kernel.RepositoryID) error {
 	if daemon.github == nil {
 		return maintainer.ErrUnavailable
@@ -18,7 +20,7 @@ func (daemon *Daemon) BindProjectRepositoryGitHub(ctx context.Context, id kernel
 	if err != nil {
 		return err
 	}
-	if !found || !repository.Enabled {
+	if !found {
 		return kernel.ErrConflict
 	}
 	current, err := inspectRegisteredRepository(ctx, repository.Root, repository.BaseRef)
