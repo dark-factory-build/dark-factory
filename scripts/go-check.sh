@@ -54,13 +54,11 @@ if [ "$go_check_mode" = source ]; then
     echo "go-check: go vet ./..."
     "$go" vet ./...
 
-    # These packages contain ordinary source and data-contract tests. Packages
-    # that create sockets, PTYs, subprocesses, or services run in the process gate.
-    echo "go-check: ordinary Go tests"
-    "$go" test -short -timeout=20m \
-        ./internal/browserprotocol \
-        ./internal/provider \
-        ./internal/opgraph
+    # Keep one small cacheable package in the ordinary source gate for fast
+    # feedback; the owned Go gate runs the complete package classification.
+    echo "go-check: cacheable Go smoke test"
+    "$go" test -short -timeout=20m ./internal/browserprotocol
+
 fi
 
 # A direct run (a worker's check loop) skips the TypeScript block when nothing
