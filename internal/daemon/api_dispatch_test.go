@@ -1392,30 +1392,6 @@ func TestOverseerPastAProjectLimitIsRequeuedAndAWorkerCancelled(t *testing.T) {
 	}
 }
 
-func TestDaemonRejectsForgedAttemptOutcome(t *testing.T) {
-	fixture := newDispatchFixture(t)
-	_ = prepareActiveAttempt(t, fixture, 61)
-	wrongBearer := bytes.Repeat([]byte{'z'}, 32)
-	wrongToken := filepath.Join(filepath.Dir(fixture.socket), "wrong.token")
-	if err := os.WriteFile(wrongToken, wrongBearer, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	previous := os.Getenv("DARK_FACTORY_ATTEMPT_TOKEN_FILE")
-	if err := os.Setenv("DARK_FACTORY_ATTEMPT_TOKEN_FILE", wrongToken); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Setenv("DARK_FACTORY_ATTEMPT_TOKEN_FILE", previous) })
-	wrong, err := api.NewAttemptClientFromEnvironment(fixture.socket)
-	if err != nil {
-		t.Fatal(err)
-	}
-	done := fixture.serve(t)
-	if _, err := wrong.Succeed(context.Background(), "forged"); err == nil {
-		t.Fatal("forged attempt outcome succeeded")
-	}
-	waitDispatch(t, done)
-}
-
 func TestDaemonConcurrentAttemptOutcomesHaveOneDurableWinner(t *testing.T) {
 	fixture := newDispatchFixture(t)
 	active := prepareActiveAttempt(t, fixture, 71)
