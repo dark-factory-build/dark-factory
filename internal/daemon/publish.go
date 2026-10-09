@@ -272,6 +272,13 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 	result = strings.ToValidUTF8(result[:min(len(result), 24000)], "")
 	body := fmt.Sprintf("%s\n\nPublished by factoryd from Change %s at %s: +%d -%d across %d files from %s.\n\nThe merge queue runs the gate.", result, c.Change, head, added, deleted, files, from)
 	if c.Pull != 0 {
+		if c.Repair {
+			at, err := daemon.timestamp()
+			if err != nil {
+				return err
+			}
+			return daemon.store.RecordCorrectionPublished(ctx, c, at)
+		}
 		// The corrected body keeps its closing line; factoryd's refresh
 		// reviews the new head.
 		step := "body-" + head[:8]

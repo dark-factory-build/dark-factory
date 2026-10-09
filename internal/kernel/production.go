@@ -563,7 +563,7 @@ func (store *Store) PublishableChanges(ctx context.Context) ([]PublishableChange
 		  AND EXISTS (SELECT 1 FROM production_records r WHERE r.project_id = p.project_id AND r.repository = p.repository AND r.kind = 'pull_request'
 		      AND r.identity = CAST(p.pull_number AS TEXT) AND json_extract(r.document, '$.state') = 'open')
 		WHERE c.phase = 'retained' AND t.status = 'succeeded' AND a.withdrawn_at_ms IS NULL AND c.head_commit <> c.base_commit
-		  AND ((a.id IS NOT NULL AND `+factorydPublishesAcceptance+`) OR EXISTS (SELECT 1 FROM publication_tasks repair WHERE repair.project_id = c.project_id AND repair.task_id = c.task_id))
+		  AND ((a.id IS NOT NULL AND `+factorydPublishesAcceptance+`) OR (a.id IS NULL AND EXISTS (SELECT 1 FROM publication_tasks repair WHERE repair.project_id = c.project_id AND repair.task_id = c.task_id)))
 		  AND (p.pull_number IS NOT NULL OR NOT EXISTS (SELECT 1 FROM publication_tasks q WHERE q.change_id = c.id OR q.task_id = c.task_id))
 		  AND NOT EXISTS (SELECT 1 FROM production_records r WHERE r.project_id = c.project_id AND r.kind = 'reviewer'
 		      AND r.identity = 'publish-' || lower(hex(c.id)) || '-' || c.revision)
