@@ -415,3 +415,33 @@ func TestPlatformHostReachesItsUnit(t *testing.T) {
 		t.Fatal("a runtime call to the platform host did not reach the unit")
 	}
 }
+
+// Units in two repositories can share a key (each Procfile's web); a
+// platform host belongs only to the one answering to the name.
+func TestPlatformHostStaysInItsRepository(t *testing.T) {
+	app := func(name string) map[string][]byte {
+		return map[string][]byte{
+			"Procfile":     []byte("web: node index.js\n"),
+			"package.json": []byte(`{"name":"` + name + `","dependencies":{"express":"4"}}`),
+			"index.js":     []byte("const app = require('express')()\napp.get('/x', h)\napp.listen(3000)\n"),
+		}
+	}
+	graph, err := Infer("s", []Repository{{ID: "ra", Name: "ra", Files: app("app-a")}, {ID: "rb", Name: "rb", Files: app("app-b")}},
+		map[string][]string{"app-a": {"a.darkfactory.build"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	byID := map[string]Node{}
+	for _, node := range graph.Nodes {
+		byID[node.ID] = node
+	}
+	var owners []string
+	for _, node := range graph.Nodes {
+		if node.Kind == Ingress && node.Selectors["server.address"] == "a.darkfactory.build" {
+			owners = append(owners, byID[node.Unit].Modules[0].Repository)
+		}
+	}
+	if strings.Join(owners, ",") != "ra" {
+		t.Fatalf("host owned by %v, want ra alone", owners)
+	}
+}

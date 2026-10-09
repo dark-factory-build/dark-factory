@@ -44,7 +44,7 @@ type unit struct {
 
 // owner says which units a finding belongs to.
 type owner struct {
-	units   []string // explicit unit keys (Go reachability)
+	units   []string // explicit unit keys (Go reachability), in repo when set
 	repo    string
 	file    string
 	browser bool // the finding runs in a browser when its unit has one
@@ -170,7 +170,7 @@ func (run *inference) ownerUnits(units []*unit, found owner, kind Kind, trigger 
 		result := []*unit{}
 		for _, candidate := range units {
 			for _, key := range found.units {
-				if candidate.key == key {
+				if candidate.key == key && (found.repo == "" || candidate.repo == found.repo) {
 					result = append(result, candidate)
 				}
 			}
@@ -323,7 +323,7 @@ func (run *inference) resolve(system string, repositories []Repository) (Graph, 
 	for _, candidate := range units {
 		for _, name := range candidate.names {
 			for _, host := range run.platformHosts[name] {
-				run.find(finding{owner: owner{units: []string{candidate.key}}, kind: Ingress, key: "host:" + host, label: host, trigger: TriggerRequest, edge: Handles,
+				run.find(finding{owner: owner{units: []string{candidate.key}, repo: candidate.repo}, kind: Ingress, key: "host:" + host, label: host, trigger: TriggerRequest, edge: Handles,
 					selectors: map[string]string{"server.address": host}, evidence: static("platform", "served host", Declared)})
 			}
 		}
