@@ -2,7 +2,7 @@
 set -eu
 
 script_dir=$(CDPATH= cd -- "$(/usr/bin/dirname "$0")" && pwd -P)
-[ "$#" -le 2 ] || { echo "usage: scripts/local-ci.sh [--full|--runtime|--release|--ui|--warm] [daemon|packages|source]" >&2; exit 2; }
+[ "$#" -le 2 ] || { echo "usage: scripts/local-ci.sh [--full|--runtime|--release|--ui|--warm] [daemon|packages|source] | --affected [BASE]" >&2; exit 2; }
 case "${1-}" in
     '') local_ci_mode=full ;;
     --full) local_ci_mode=full ;;
@@ -10,15 +10,21 @@ case "${1-}" in
     --release) local_ci_mode=release ;;
     --ui) local_ci_mode=ui ;;
     --warm) local_ci_mode=warm ;;
-    *) echo "usage: scripts/local-ci.sh [--full|--runtime|--release|--ui|--warm] [daemon|packages|source]" >&2; exit 2 ;;
+    --affected) local_ci_mode=affected ;;
+    *) echo "usage: scripts/local-ci.sh [--full|--runtime|--release|--ui|--warm] [daemon|packages|source] | --affected [BASE]" >&2; exit 2 ;;
 esac
 # CI splits the full and runtime gates across parallel Macs. A shard runs one
 # part of go-ci-owned.sh; "source" also runs everything outside it. No shard
 # runs everything, as before.
 local_ci_shard=${2-}
+affected_base=
+if [ "$local_ci_mode" = affected ]; then
+    affected_base=$local_ci_shard
+    local_ci_shard=
+fi
 case "$local_ci_shard" in
     ''|daemon|packages|source) ;;
-    *) echo "usage: scripts/local-ci.sh [--full|--runtime|--release|--ui|--warm] [daemon|packages|source]" >&2; exit 2 ;;
+    *) echo "usage: scripts/local-ci.sh [--full|--runtime|--release|--ui|--warm] [daemon|packages|source] | --affected [BASE]" >&2; exit 2 ;;
 esac
 in_source_shard() { [ "$local_ci_shard" != daemon ] && [ "$local_ci_shard" != packages ]; }
 # Refuse outside Git before creating cache state; inherited Git locators must
@@ -46,6 +52,20 @@ if [ "$local_ci_mode" = warm ]; then
     # packages in go-build matter.
     GOTOOLCHAIN=local "$DF_CI_GO" test -c -o "$XDG_CACHE_HOME/warm-test-binaries/" ./...
     echo "local-ci: PASS (warm)"
+    exit 0
+fi
+
+# A pull request's own check (and a worker's pre-publish check): the source
+# gate, then only the process tests that depend on what changed since BASE.
+if [ "$local_ci_mode" = affected ]; then
+    affected_base=$(git rev-parse --verify "${affected_base:-$(git merge-base origin/main HEAD)}^{commit}")
+    ./scripts/go-check.sh
+    if [ "${DARK_FACTORY_LOCAL_CI_LEASE_HELD-}" = 1 ]; then
+        /bin/sh "$script_dir/go-ci-owned.sh" --client-built --affected "$affected_base"
+    else
+        "$script_dir/with-local-ci-lease.sh" /bin/sh "$script_dir/go-ci-owned.sh" --client-built --affected "$affected_base"
+    fi
+    echo "local-ci: PASS (affected since $affected_base)"
     exit 0
 fi
 

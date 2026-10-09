@@ -25,7 +25,10 @@ product surface; never weaken a test to make it pass.
 ## Agent check loop
 
 During implementation, run `./scripts/go-check.sh` and the focused tests for
-the changed risk that your environment can run. Process-sensitive Go tests use
+the changed risk that your environment can run. Before publishing, run
+`./scripts/local-ci.sh --affected`: the same source gate plus the tests of every
+package that depends on your change, which each pull request must pass before
+it can enter the queue. Process-sensitive Go tests use
 `-count=1` and run through `./scripts/with-local-ci-lease.sh`, which keeps one
 heavy process run on the Mac without making source checks wait. Use
 `./scripts/local-ci.sh --ui`, `--runtime`, or `--release` when working across
