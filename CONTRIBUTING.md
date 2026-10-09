@@ -47,6 +47,28 @@ The gate checks:
   `userVersion` and adds one migration step from the version before it,
   proven on a copy of a live home; Open refuses every other version.
 
+## Console development without Go
+
+The console in `web/` needs only Node 22 or later with Corepack; no Go, provider
+login or running factory. The routine and full gates above still need Go, and
+`./scripts/go-check.sh --ui` is not a Go-free route. From `web/`:
+
+```sh
+corepack pnpm install --frozen-lockfile
+corepack pnpm test
+corepack pnpm run preview:floor
+```
+
+`preview:floor` builds the packages and renders
+[`packages/ui/examples/floor-preview.mjs`](web/packages/ui/examples/floor-preview.mjs)
+to a static HTML file whose path it prints. It feeds a small `PublicWorld` (the
+public projection factoryd serves at `/v1/public/PROJECT`) through the exported
+`publicFloor` and `FactoryScene`, the same way an embedding page would. Edit
+that world or anything under `packages/ui/src`, rerun, and reload the file. The
+preview is static: no animation, selection or live updates. The test fixture
+builders in `web/fixtures/scene.mjs` and `web/fixtures/graph.mjs` cover shapes
+the example does not.
+
 ## Where to start
 
 - **A bug or a small gap**: [GitHub issues labelled

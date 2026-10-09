@@ -127,10 +127,12 @@ func TestProjectGraphReadsOneSourcePerRepositoryAndInvalidatesConfiguration(t *t
 }
 
 // A node's paths are repository-prefixed only when more than one repository
-// feeds the project, matching run and change paths.
+// feeds the project, matching run and change paths. Every inferred runtime,
+// the CI unit's included, encodes on the wire.
 func TestGraphFramePrefixesPathsOnlyForMultipleRepositories(t *testing.T) {
 	project, first, second := strings.Repeat("a1", 16), strings.Repeat("b2", 16), strings.Repeat("c3", 16)
-	files := map[string][]byte{"go.mod": []byte("module example.com/x\n"), "cmd/x/main.go": []byte(mainSource)}
+	files := map[string][]byte{"go.mod": []byte("module example.com/x\n"), "cmd/x/main.go": []byte(mainSource),
+		".github/workflows/ci.yml": []byte("on: pull_request\njobs:\n  test:\n    runs-on: macos-15\n")}
 	graph, err := opgraph.Infer(project, []opgraph.Repository{{ID: first, Name: "one", Files: files}})
 	if err != nil || len(graph.Nodes) == 0 {
 		t.Fatalf("graph = %+v, %v", graph, err)

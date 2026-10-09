@@ -2,13 +2,14 @@
   "name": "dark-factory-web",
   "private": true,
   "packageManager": "pnpm@11.19.0",
-  "engines": { "node": ">=20" },
+  "engines": { "node": ">=22" },
   "scripts": {
     "packages:build": "corepack pnpm --filter @dark-factory/client build && corepack pnpm --filter @dark-factory/ui build",
     "build": "corepack pnpm run packages:build",
     "test": "corepack pnpm run packages:build && node --test packages/client/test/*.test.mjs packages/ui/test/*.test.mjs packages/ui/src/factory-scene/*.test.mjs packages/ui/src/production-*.test.mjs",
     "check": "corepack pnpm run packages:build && node --test packages/client/test/*.test.mjs packages/ui/test/*.test.mjs packages/ui/src/factory-scene/*.test.mjs packages/ui/src/production-*.test.mjs",
-    "artifact:test": "./scripts/package-artifacts test"
+    "artifact:test": "./scripts/package-artifacts test",
+    "preview:floor": "corepack pnpm run packages:build && node packages/ui/examples/floor-preview.mjs"
   },
   "devDependencies": {
     "typescript": "5.8.3",

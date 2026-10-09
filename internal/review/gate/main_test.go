@@ -144,9 +144,10 @@ func TestDecision(t *testing.T) {
 			t.Fatalf("malformed trusted %q: exit %d %s", trusted, code, out)
 		}
 	}
-	// ponytail: interim four-field projection trusts any publisher, as before.
-	if code, out, _ := gateTrusting(t, "", head, head+"\tCOMMENTED\t"+outsider+"\t"+allow(head)+"\n"); code != 0 {
-		t.Fatalf("legacy record refused: %s", out)
+	// A four-field record carries no trust: a projection without
+	// author_association must not fall back to trusting everyone.
+	if code, out, _ := gateTrusting(t, app, head, head+"\tCOMMENTED\t"+app+"\t"+allow(head)+"\n"); code == 0 || !strings.Contains(out, "malformed review record") {
+		t.Fatalf("four-field record: exit %d %s", code, out)
 	}
 	// The publisher identity must be numeric.
 	for _, p := range []string{"", "0", " 101", "reviewer-login"} {
@@ -224,6 +225,8 @@ func TestWireContract(t *testing.T) {
 		"refs/heads/${DEFAULT_BRANCH}",
 		"if: github.event_name == 'merge_group'",
 		"(.user.id | tostring)",
+		`gsub("[\n\r\t]"; " ")), .author_association] | @tsv`,
+		"DF_REVIEW_TRUSTED_PUBLISHERS: ${{ vars.DF_REVIEW_TRUSTED_PUBLISHERS }}",
 	} {
 		if !strings.Contains(workflow, w) {
 			t.Errorf("ci.yml lacks %s", w)
