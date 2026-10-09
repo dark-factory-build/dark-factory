@@ -272,7 +272,7 @@ func validateConfig(config Config) error {
 }
 
 func prepareProviderTask(kind kernel.Provider, task []byte) (provider.TaskDelivery, []byte, error) {
-	if kind == kernel.ProviderCodex {
+	if kind != kernel.ProviderShell {
 		if len(task) != 0 {
 			return 0, nil, provider.ErrInvalid
 		}

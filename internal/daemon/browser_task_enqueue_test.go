@@ -227,7 +227,7 @@ func TestBrowserTaskEnqueueRejectsMissingCapabilityAndStaleAgent(t *testing.T) {
 
 func TestTaskAttachmentsCountTowardsProviderInputLimit(t *testing.T) {
 	files := []kernel.TaskAttachment{{Name: "reference.png", Data: []byte{1}}}
-	body := strings.Repeat("x", runner.MaxCodexTaskBytes)
+	body := strings.Repeat("x", runner.MaxNativeTaskBytes)
 	if err := prepareTaskText(kernel.ProviderCodex, "title", body); err != nil {
 		t.Fatal(err)
 	}

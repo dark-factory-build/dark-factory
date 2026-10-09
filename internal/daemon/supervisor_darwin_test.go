@@ -149,7 +149,7 @@ func TestCodexContinuationContextPreservesMaximumOriginalTask(t *testing.T) {
 	var condition kernel.ContinuationConditionID
 	copy(condition[:], supervisorIDBytes(240))
 	revision, _ := kernel.NewRevision(1)
-	task := bytes.Repeat([]byte{'x'}, runner.MaxCodexTaskBytes)
+	task := bytes.Repeat([]byte{'x'}, runner.MaxNativeTaskBytes)
 	contexts := []kernel.ContinuationContext{{ConditionKind: kernel.ConditionHumanRequest, ConditionID: condition, ConditionRevision: revision, ResolutionDetail: "continue"}}
 	framed, err := providerTaskWithContinuationContext(kernel.ProviderCodex, task, contexts)
 	if err == nil || framed != nil {

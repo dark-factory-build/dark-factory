@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/dark-factory-build/dark-factory/internal/browser"
@@ -32,8 +31,9 @@ const (
 	liveAttemptEffectLimit      = 4 * time.Second
 	stalledRunLivenessThreshold = 10 * time.Minute
 	// firstOutputBudget bounds a run that never started: no attempt API call
-	// (Codex's bootstrap makes `attempt task` its first act, so painting a TUI
-	// without one is stuck) or, for other providers, no terminal byte. Admission
+	// (the Claude and Codex bootstrap prompt makes `attempt task` its first
+	// act, so painting a TUI without one is stuck) or, for shell, no terminal
+	// byte. Admission
 	// to running was 23 s at p99 over 3708 live runs; it is requeued once.
 	firstOutputBudget = 3 * time.Minute
 )
@@ -279,11 +279,10 @@ type liveAttempt struct {
 	diagnosticReplayCorrelation uint64
 	diagnosticReplayHead        uint64
 
-	commands        chan liveAttemptCommand
-	wake            chan struct{}
-	done            chan struct{}
-	result          chan liveAttemptResult
-	startupEvidence atomic.Bool
+	commands chan liveAttemptCommand
+	wake     chan struct{}
+	done     chan struct{}
+	result   chan liveAttemptResult
 
 	// outcomeReceiptPending is set and cleared only under daemon.operationMu.
 	// It spans durable finalization through the reporting client's validated
@@ -406,26 +405,6 @@ func (attempt *liveAttempt) markAttemptAPICall(at time.Time) {
 		attempt.lastAttemptAPICallAt = at
 	}
 	attempt.livenessMu.Unlock()
-	attempt.startupEvidence.Store(true)
-	select {
-	case attempt.wake <- struct{}{}:
-	default:
-	}
-}
-
-// deliverStartupEvidence is the sole owner-loop write for the authenticated
-// provider-work signal. Keeping it here preserves controller serialization and
-// makes the runner's evidence arrival causal rather than timing-based PTY
-// inference.
-func (attempt *liveAttempt) deliverStartupEvidence() error {
-	if attempt == nil || !attempt.startupEvidence.Load() || !attempt.readySeen || attempt.controller == nil {
-		return nil
-	}
-	if err := attempt.controller.SendTerminalCommand(runner.TerminalCommand{Kind: runner.TerminalStartupEvidence}); err != nil {
-		return err
-	}
-	attempt.startupEvidence.Store(false)
-	return nil
 }
 
 func stalledRunLiveness(now, started, lastOutput, lastAPICall time.Time, threshold time.Duration) bool {
