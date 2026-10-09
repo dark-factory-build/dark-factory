@@ -175,7 +175,7 @@ func TestStopRunForAttemptTargetsOnlyWorkers(t *testing.T) {
 		t.Fatal(err)
 	}
 	withLegacyOrchestratorTarget(t, store, worker.ID, func(tx *writeTx) {
-		_, err := store.stopRunTx(ctx, tx, TaskInterventionRequest{OperationID: operation, TaskID: task.ID, RunID: worker.ID, ExpectedTaskRevision: task.Revision, ExpectedRunRevision: worker.Revision, Actor: TaskInterventionOrchestrator, ActorRunID: &overseer.ID, Kind: TaskInterventionStop}, nil, mustTime(t, 400))
+		_, err := store.stopRunTx(ctx, tx, TaskInterventionRequest{OperationID: operation, TaskID: task.ID, RunID: worker.ID, ExpectedTaskRevision: task.Revision, ExpectedRunRevision: worker.Revision, Actor: TaskInterventionOrchestrator, ActorRunID: &overseer.ID, Kind: TaskInterventionStop}, nil, mustTime(t, 400), true)
 		if !errors.Is(err, ErrUnauthorized) {
 			t.Fatalf("legacy orchestrator target stop = %v", err)
 		}

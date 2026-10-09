@@ -134,6 +134,15 @@ identity; agent notes cannot create project briefs, promote current guidance, or
 revise another author's protected knowledge. Operator capability is required for
 promotion. Text cannot grant capabilities.
 
+Specialist records are observations by `record_type`: a `proposal` (one per
+run, at most the project's `specialist_open_proposals` open per agent); a
+`contribution` or `amendment` naming its `task_id` or a free-form `record_id`
+such as `issue:#12`; a `review` bound to the `source_revision` it examined
+(its `record_id`, if any, is a reviewer record); `research` citing at least
+one `evidence` entry; and a `follow_up` whose `record_id` is a proposal. A `decision`
+with `"record_type":"proposal"` and the proposal's `record_id` resolves it; only
+an overseer attempt or the operator may write one.
+
 Task preparation freezes a bounded selection of exact document revisions,
 prioritizing explicit attachments and the project brief. The normal knowledge
 addition is at most 3 KiB, plus at most 4 KiB for all explicitly attached

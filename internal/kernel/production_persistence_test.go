@@ -258,13 +258,6 @@ func TestOverseerWakeRule(t *testing.T) {
 		t.Fatal(err)
 	}
 	policy, after, instruction := IdleStandingInstruction, uint32(1), "Publish completed Changes."
-	worker, _, err := store.Agent(ctx, terminal.AgentID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.UpdateAgent(ctx, worker.ID, worker.Revision, AgentPatch{IdlePolicy: &policy, IdleAfterSeconds: &after, IdleInstruction: &instruction}, mustTime(t, 80)); !errors.Is(err, ErrInvalidValue) {
-		t.Fatalf("worker standing instruction err=%v", err)
-	}
 	overseer, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 191), ProjectID: terminal.ProjectID, Name: "overseer", Role: RoleOrchestrator, Provider: ProviderCodex, ToolBudgetLimit: 8}, mustTime(t, 80))
 	if err != nil {
 		t.Fatal(err)

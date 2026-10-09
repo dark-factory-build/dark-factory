@@ -12,12 +12,12 @@ import (
 	"testing"
 )
 
-// A current home opens untouched; a v37 home (runs naming 'runner_exit' for
-// 'transient') and a v36 one (also without task_automatic_events) migrate,
+// A current home opens untouched; a v38 home (runs naming 'runner_exit' for
+// 'transient') and a v37 one (also without the specialist columns) migrate,
 // keep every row, and then record a transient failure.
 func TestCurrentAndLegacyHomesOpenWithEveryRow(t *testing.T) {
 	t.Parallel()
-	for _, version := range []int{userVersion, v37UserVersion, v36UserVersion} {
+	for _, version := range []int{userVersion, v38UserVersion, v37UserVersion} {
 		t.Run(fmt.Sprintf("v%d", version), func(t *testing.T) { testHomeOpensWithEveryRow(t, version) })
 	}
 }
@@ -67,8 +67,8 @@ func testHomeOpensWithEveryRow(t *testing.T, version int) {
 func downgradeHome(t *testing.T, store *Store, version int) {
 	t.Helper()
 	var statements []string
-	if version == v36UserVersion {
-		statements = append(statements, "DROP TABLE task_automatic_events")
+	if version == v37UserVersion {
+		statements = append(statements, "ALTER TABLE agents DROP COLUMN idle_wake_on", "ALTER TABLE projects DROP COLUMN specialist_open_proposals", "ALTER TABLE projects DROP COLUMN specialist_runs")
 	}
 	if version != userVersion {
 		statements = append(statements, "PRAGMA writable_schema = ON",
@@ -85,7 +85,7 @@ func downgradeHome(t *testing.T, store *Store, version int) {
 	}
 }
 
-// A v37 or v36 never-started failure keeps its retry across the migration: a run
+// A v38 or v37 never-started failure keeps its retry across the migration: a run
 // finalizing at the upgrade still requeues its task, and a terminal one still
 // counts as the previous run that ended the same way.
 func TestLegacyRetryableFailuresMigrate(t *testing.T) {
@@ -93,7 +93,7 @@ func TestLegacyRetryableFailuresMigrate(t *testing.T) {
 	for _, test := range []struct {
 		version  int
 		terminal bool
-	}{{v37UserVersion, false}, {v37UserVersion, true}, {v36UserVersion, false}, {v36UserVersion, true}} {
+	}{{v38UserVersion, false}, {v38UserVersion, true}, {v37UserVersion, false}, {v37UserVersion, true}} {
 		version, terminal := test.version, test.terminal
 		t.Run(fmt.Sprintf("v%d/terminal=%v", version, terminal), func(t *testing.T) {
 			t.Parallel()
@@ -173,11 +173,15 @@ func snapshotRows(t *testing.T, ctx context.Context, connection *sql.Conn) map[s
 func TestSchemaDigestsArePinned(t *testing.T) {
 	t.Parallel()
 	sum := sha256.Sum256([]byte(strings.Join(schemaStatements, "\n")))
-	if got := hex.EncodeToString(sum[:]); got != "0fd358c97036e55d36f6805eb8e0d3999d57b7ddeb1576211e44fb7b0596d24a" {
+	if got := hex.EncodeToString(sum[:]); got != "3a54481cb3246bb70309c06135c4b61d5efc739bcf5c38b6432aa4b698f5f25b" {
 		t.Errorf("current schema digest = %s", got)
 	}
-	sum = sha256.Sum256([]byte(strings.Join(legacySchemaStatements(v36UserVersion), "\n")))
-	if got := hex.EncodeToString(sum[:]); got != "bfc5b62285b00148bc836d389f684eb3112e551952f477e27354cf35174460f0" {
-		t.Errorf("v36 schema digest = %s", got)
+	sum = sha256.Sum256([]byte(strings.Join(legacySchemaStatements(v38UserVersion), "\n")))
+	if got := hex.EncodeToString(sum[:]); got != "29c9a3043f03be927336f6331f7c7ce24bcab875fb4607fc55003b688739fc2e" {
+		t.Errorf("v38 schema digest = %s", got)
+	}
+	sum = sha256.Sum256([]byte(strings.Join(legacySchemaStatements(v37UserVersion), "\n")))
+	if got := hex.EncodeToString(sum[:]); got != "819c191d4e411ad35a2f7cf19db739d0492d0f8cf1c9c5fe0bd50a5197b5bb6c" {
+		t.Errorf("v37 schema digest = %s", got)
 	}
 }

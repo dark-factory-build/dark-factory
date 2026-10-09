@@ -97,7 +97,12 @@ func (store *Store) OverseerSnapshotForAttempt(ctx context.Context, digest Attem
 		return OverseerSnapshot{}, err
 	}
 	defer read.Close()
-	authority, err := overseerRun(ctx, read.connection, digest)
+	// A specialist reads its project's status too; every overseer write
+	// stays with the orchestrator (overseerRun).
+	authority, err := authenticateAttempt(ctx, read.connection, digest)
+	if err == nil && authority.Role != RoleOrchestrator && !authority.Specialist {
+		err = ErrUnauthorized
+	}
 	if err != nil {
 		return OverseerSnapshot{}, err
 	}

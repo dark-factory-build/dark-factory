@@ -1356,7 +1356,11 @@ func inspectWorktree(ctx context.Context, gitExecutable, repositoryRoot string, 
 		return WorktreeFacts{}, err
 	}
 	defer authority.close()
-	return authority.inspectWorktree(ctx, path)
+	facts, err := authority.inspectWorktree(ctx, path)
+	if invalid := (*ValidationError)(nil); errors.As(err, &invalid) && verifyGitAuthority(authority.repositoryRoot, authority.repository, authority.gitExecutable, authority.gitIdentity) == nil {
+		invalid.Worktree = true
+	}
+	return facts, err
 }
 
 // DescendsFrom reports whether the worktree's head descends from base: the

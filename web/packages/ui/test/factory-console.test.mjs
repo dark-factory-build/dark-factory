@@ -643,7 +643,7 @@ test("Work lists blocked work, hides overseer passes until asked, flags dispatch
   assert.deepEqual(edits.at(-1), ["b1".repeat(16), { retry: true }], "or sent round again in one step");
   const titled = (title) => panel.findAllByType("button").some((button) => button.children.join("") === title);
   assert.ok(!titled("Standing instruction"), "an overseer pass is hidden by default");
-  await act(async () => { panel.findByProps({ "aria-label": "Show overseer passes" }).props.onClick(); });
+  await act(async () => { panel.findByProps({ "aria-label": "Show overseer and specialist passes" }).props.onClick(); });
   assert.ok(titled("Standing instruction"), "and shown once asked for");
   assert.ok(panel.findAllByProps({ role: "status" }).some((node) => node.children.join("").includes("New work is paused")));
   const form = panel.findByProps({ "aria-label": "New task" });
@@ -1823,7 +1823,7 @@ test("the RULES block saves an idle rule and sends only what changed", async () 
   await act(async () => { field(`df-idle-${ids.agent}`).props.onChange({ currentTarget: { value: "standing_instruction" } }); });
   await act(async () => { field(`df-idle-after-${ids.agent}`).props.onChange({ currentTarget: { value: "2" } }); });
   await act(async () => { field(`df-idle-instruction-${ids.agent}`).props.onChange({ currentTarget: { value: "Look for follow-up work." } }); });
-  assert.equal(field(`df-idle-budget-${ids.agent}`), undefined);
+  assert.notEqual(field(`df-idle-budget-${ids.agent}`), undefined);
   await act(async () => { form().props.onSubmit({ preventDefault() {} }); });
   assert.deepEqual(edits.at(-1), { idlePolicy: "standing_instruction", idleAfterSeconds: 2, idleInstruction: "Look for follow-up work." });
   // A rule the daemon would refuse never leaves the form: no wait means no
@@ -1850,7 +1850,7 @@ test("the RULES block saves an idle rule and sends only what changed", async () 
   await act(async () => { spentField(`df-idle-instruction-${ids.agent}`).props.onChange({ currentTarget: { value: "Look for follow-up work, then tidy." } }); });
   await act(async () => { spentRenderer.root.findAllByType("form")[0].props.onSubmit({ preventDefault() {} }); });
   assert.deepEqual(again.at(-1), { idlePolicy: "standing_instruction", idleAfterSeconds: 600, idleInstruction: "Look for follow-up work, then tidy." });
-  assert.equal(spentField(`df-idle-budget-${ids.agent}`), undefined);
+  assert.notEqual(spentField(`df-idle-budget-${ids.agent}`), undefined);
 });
 
 test("overseer supervision names worker events and a seconds cooldown", () => {
@@ -2768,4 +2768,32 @@ test("opening a question from the Library switches the header to its project so 
   assert.equal(tree.root.findByProps({ "aria-label": "Project" }).props.value, fixtureState.humanRequests.get(ids.request).project_id);
   assert.equal(tree.root.findAllByProps({ "aria-label": "Selected question" }).length > 0, true);
   await act(async () => tree.unmount());
+});
+
+test("a specialist is grouped, states what it is doing and owes, and Stop archives once idle", async () => {
+  const worker = fixtureState.agents.get(ids.agent);
+  const specialist = { ...worker, id: "5a".repeat(16), name: "Doc Watcher", archived: false, idle_policy: "standing_instruction", idle_after_seconds: 600, idle_instruction: "Keep the docs true to the code.\nSecond line stays out.", idle_run_budget: 4, idle_runs_used: 1, idle_wake_on: "failures",
+    specialist: { next_review_at_ms: 1750000000000, next_reason: "events", waiting: "capacity", quiet_reviews: 0, open_proposals: 1, open_proposal_limit: 3, last_review_task_id: "" } };
+  const state = baseState({ agents: new Map([...fixtureState.agents, [specialist.id, specialist]]), humanRequests: new Map() });
+  const markup = renderToStaticMarkup(createElement(FactoryConsole, { status: "ready", detail: "agent", state, selectedAgent: { id: specialist.id, name: specialist.name, revision: specialist.revision }, onSaveAgentConfig() {} }));
+  assert.match(renderToStaticMarkup(createElement(FactoryConsole, { status: "ready", detail: "agent", state })), /<section aria-label="Specialist">/, "its own group");
+  assert.match(markup, /waiting: waiting for a free background slot/);
+  assert.match(markup, /aria-label="Remit">Keep the docs true to the code\.</);
+  assert.match(markup, /Next review .*\(events\) or sooner on failures/);
+  assert.match(markup, /Reviews 1\/4 · open proposals 1\/3/);
+  assert.match(markup, /Stop specialist/);
+  assert.doesNotMatch(markup, /Archive worker/);
+  // Stop asks first, then archives; a running review is ended by the same archive.
+  const edits = [];
+  let renderer;
+  await act(async () => { renderer = create(createElement(FactoryConsole, { status: "ready", detail: "agent", state, selectedAgent: { id: specialist.id, name: specialist.name, revision: specialist.revision }, onSaveAgentConfig: (c) => edits.push(c) })); });
+  const button = (label) => renderer.root.findAllByType("button").find((b) => b.children.join("") === label);
+  await act(async () => { button("Stop specialist").props.onClick(); });
+  assert.deepEqual(edits, []);
+  await act(async () => { button("Confirm stop").props.onClick(); });
+  assert.deepEqual(edits, [{ archived: true }]);
+  const running = baseState({ agents: state.agents, humanRequests: new Map(), tasks: new Map([...fixtureState.tasks, ["c1".repeat(16), { ...fixtureState.tasks.get(ids.task), id: "c1".repeat(16), title: "Standing instruction", status: "running", assigned_agent_id: specialist.id }]]) });
+  const live = renderToStaticMarkup(createElement(FactoryConsole, { status: "ready", detail: "agent", state: running, selectedAgent: { id: specialist.id, name: specialist.name, revision: specialist.revision }, onSaveAgentConfig() {} }));
+  assert.match(live, /working: a review is running/);
+  assert.match(live, /Stop specialist/);
 });

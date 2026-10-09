@@ -9,12 +9,19 @@ import (
 
 const (
 	applicationID = 0x4446474f
-	userVersion   = 38
+	userVersion   = 39
 
 	// SQLite reserves the exact lower-case "sqlite_" prefix. Use a literal,
 	// binary prefix test: LIKE would treat '_' as a wildcard and hide names
 	// such as sqliteXforeign from exact schema validation.
 	internalSchemaNamePredicate = "substr(name, 1, 7) = 'sqlite_' COLLATE BINARY"
+)
+
+// The v38 columns, as SQLite records them after ALTER TABLE ADD COLUMN:
+// each definition is spliced in after the last column, behind ", ".
+const (
+	agentWakeOnColumn        = `, idle_wake_on TEXT NOT NULL DEFAULT '' CHECK (idle_wake_on IN ('', 'failures', 'merges', 'failures,merges'))`
+	projectSpecialistColumns = `, specialist_runs INTEGER NOT NULL DEFAULT 1 CHECK (specialist_runs BETWEEN 0 AND 16), specialist_open_proposals INTEGER NOT NULL DEFAULT 3 CHECK (specialist_open_proposals BETWEEN 0 AND 32)`
 )
 
 var schemaStatements = []string{
@@ -102,7 +109,7 @@ var schemaStatements = []string{
     revision INTEGER NOT NULL CHECK (revision >= 1),
     created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
     updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= created_at_ms)
-) STRICT, WITHOUT ROWID`,
+` + projectSpecialistColumns + `) STRICT, WITHOUT ROWID`,
 	`CREATE UNIQUE INDEX projects_root_unique ON projects(root)`,
 	`CREATE TABLE project_repositories (
     id BLOB PRIMARY KEY CHECK (length(id) = 16 AND id <> zeroblob(16)),
@@ -211,7 +218,7 @@ var schemaStatements = []string{
     tool_calls_used INTEGER NOT NULL CHECK (tool_calls_used >= 0 AND tool_calls_used <= tool_budget_limit),
     revision INTEGER NOT NULL CHECK (revision >= 1),
     created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
-    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= created_at_ms),
+    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= created_at_ms)` + agentWakeOnColumn + `,
     CHECK (provider <> 'shell' OR (model IS NULL AND reasoning_effort IS NULL AND account_id IS NULL)),
     CHECK (idle_policy <> 'standing_instruction' OR (idle_after_seconds >= 1 AND idle_instruction <> ''))
 ) STRICT, WITHOUT ROWID`,

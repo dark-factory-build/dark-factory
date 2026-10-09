@@ -75,6 +75,8 @@ export type SceneWorker = Readonly<{
   name: string;
   role: "orchestrator" | "worker";
   provider?: "claude_code" | "codex" | "shell";
+  /** A worker with a standing instruction. */
+  specialist?: boolean;
   activity: "busy" | "waiting" | "needs-you" | "idle";
   paused?: boolean;
   appearance?: SpriteAppearance;

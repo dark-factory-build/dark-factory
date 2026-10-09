@@ -372,17 +372,16 @@ func TestSettleRunAbandonsUnpublishedWorkerChange(t *testing.T) {
 	}
 }
 
-// An available Change whose path holds something that is not its worktree
-// settles nothing: the run stays finalizing and discoverable. A path that is
-// gone is a refusal: the run fails visibly and the Change is abandoned.
+// A Change whose worktree cannot be read for a fault that may pass settles
+// nothing: the run stays finalizing and discoverable. A path that is gone is
+// a refusal: the run fails visibly and the Change is abandoned.
 func TestSettleRunRefusesUnverifiableAndAbandonsMissingWorktree(t *testing.T) {
 	fixture := newRecoveryFixtureWithRole(t, 0x80, kernel.RoleWorker)
 	ctx := context.Background()
 	changeState, path := fixture.settlementWorktree(t)
 	before := fixture.failBeforeRuntime(t)
-	if err := os.Remove(filepath.Join(path, ".git")); err != nil {
-		t.Fatal(err)
-	}
+	git := fixture.daemon.gitExecutable.Load()
+	fixture.daemon.gitExecutable.Store(nil)
 	settled, err := fixture.daemon.settleRun(context.Background(), fixture.changeParent, fixture.run.ID)
 	if !errors.Is(err, kernel.ErrConflict) {
 		t.Fatalf("unverifiable worktree settlement = %+v, %v", settled, err)
@@ -391,6 +390,7 @@ func TestSettleRunRefusesUnverifiableAndAbandonsMissingWorktree(t *testing.T) {
 	if after.Phase != kernel.RunFinalizing || after.Revision != before.Revision {
 		t.Fatalf("refused settlement mutated the run: %+v -> %+v", before, after)
 	}
+	fixture.daemon.gitExecutable.Store(git)
 	if err := os.RemoveAll(path); err != nil {
 		t.Fatal(err)
 	}
@@ -400,6 +400,57 @@ func TestSettleRunRefusesUnverifiableAndAbandonsMissingWorktree(t *testing.T) {
 	}
 	if abandoned, found, err := fixture.store.Change(ctx, changeState.ID); err != nil || !found || abandoned.Phase != kernel.ChangeAbandoned {
 		t.Fatalf("change after refusal = %+v, found=%v, %v", abandoned, found, err)
+	}
+}
+
+// A worker that adds a remote to its private Change config made a worktree
+// that will never verify. The run settles as a refusal naming why instead of
+// staying finalizing, so a release drain is not held by it for good.
+func TestSettleRunRefusesAChangeWhosePrivateConfigGainedARemote(t *testing.T) {
+	fixture := newRecoveryFixtureWithRole(t, 0x81, kernel.RoleWorker)
+	ctx := context.Background()
+	changeState, path := fixture.settlementWorktree(t)
+	// Remake the worktree with private administration, as AddPrivateWorktree does.
+	repository := filepath.Join(filepath.Dir(filepath.Dir(fixture.parentPath)), "repo")
+	git := change.TrustedGitExecutable
+	branch := change.BranchName(changeState.ID.String())
+	base := strings.TrimSpace(settlementGit(t, git, repository, "rev-parse", "HEAD"))
+	settlementGit(t, git, repository, "worktree", "remove", "--force", path)
+	settlementGit(t, git, repository, "branch", "-D", branch)
+	admin := change.GitDirectoryForChange(repository, path)
+	if err := os.MkdirAll(filepath.Dir(admin), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	settlementGit(t, git, repository, "init", "-q", "--bare", admin)
+	settlementGit(t, git, repository, "--git-dir", admin, "fetch", "-q", "--no-tags", "--no-write-fetch-head", repository, base)
+	settlementGit(t, git, repository, "--git-dir", admin, "worktree", "add", "-q", "-b", branch, path, base)
+	if err := os.Chmod(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	config, err := os.OpenFile(filepath.Join(admin, "config"), os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := config.WriteString("[remote \"origin\"]\n\turl = https://example.invalid/repo.git\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.Close(); err != nil {
+		t.Fatal(err)
+	}
+	fixture.failBeforeRuntime(t)
+	settled, err := fixture.daemon.settleRun(ctx, fixture.changeParent, fixture.run.ID)
+	if err != nil || settled.Phase != kernel.RunTerminal || settled.Terminal == nil || settled.Terminal.Code() != kernel.FailureSource ||
+		!strings.Contains(settled.Terminal.Detail(), "private Change Git config grants unsupported authority") {
+		t.Fatalf("settlement of a Change with a remote = %+v, %v", settled, err)
+	}
+	if abandoned, found, err := fixture.store.Change(ctx, changeState.ID); err != nil || !found || abandoned.Phase != kernel.ChangeAbandoned {
+		t.Fatalf("change after refusal = %+v, found=%v, %v", abandoned, found, err)
+	}
+	limit, poll := releaseDrainLimit, releaseDrainPoll
+	t.Cleanup(func() { releaseDrainLimit, releaseDrainPoll = limit, poll })
+	releaseDrainLimit, releaseDrainPoll = 100*time.Millisecond, 5*time.Millisecond
+	if blocking, err := fixture.daemon.drainForRelease(ctx); err != nil || blocking != "" {
+		t.Fatalf("release drain = %q, %v", blocking, err)
 	}
 }
 

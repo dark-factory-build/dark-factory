@@ -2066,6 +2066,15 @@ test("an agent's idle rule travels on AGENT_UPDATE and comes back on the snapsho
   const uncapped = { ...legacy.body.agents[0], idle_policy: "standing_instruction", idle_after_seconds: 1, idle_instruction: "Inspect work", idle_run_budget: 0, idle_runs_used: 1000001 };
   const history = decodeServerControl(encodeServerControl({ ...legacy, body: { ...legacy.body, agents: [uncapped] } }));
   assert.equal(history.body.agents[0].idle_runs_used, 1000001);
+  // Specialist members are additive: absent stays absent, present is closed and validated.
+  assert.ok(!("idle_wake_on" in legacy.body.agents[0]) && !("specialist" in legacy.body.agents[0]));
+  const spec = { next_review_at_ms: 1750000000000, next_reason: "events", waiting: "capacity", quiet_reviews: 1, open_proposals: 2, open_proposal_limit: 3, last_review_task_id: "" };
+  const withSpecialist = decodeServerControl(encodeServerControl({ ...legacy, body: { ...legacy.body, agents: [{ ...uncapped, idle_wake_on: "failures,merges", specialist: spec }] } }));
+  assert.deepEqual([withSpecialist.body.agents[0].idle_wake_on, withSpecialist.body.agents[0].specialist], ["failures,merges", spec]);
+  assert.throws(() => decodeServerControl(encodeServerControl({ ...legacy, body: { ...legacy.body, agents: [{ ...uncapped, idle_wake_on: "sometimes" }] } })));
+  const wakeFrame = session.updateAgent({ agentId, expectedRevision: 4n, idleWakeOn: "merges" });
+  assert.equal(JSON.parse(socket.sent.at(-1)).body.idle_wake_on, "merges");
+  wakeFrame.catch(() => {});
   session.close();
 });
 

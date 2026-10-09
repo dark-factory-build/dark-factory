@@ -9,31 +9,35 @@ import (
 	"strings"
 )
 
-// Open migrates the two earlier versions. v38 names the retryable failure
-// code 'transient' where v37 named 'runner_exit', which nothing ever wrote;
-// v37 added task_automatic_events to v36 and changed nothing else.
+// Open migrates the two earlier versions. v39 names the retryable failure
+// code 'transient' where v38 named 'runner_exit', which nothing ever wrote;
+// v38 added the specialist columns (agents.idle_wake_on,
+// projects.specialist_runs and projects.specialist_open_proposals) to v37
+// and changed nothing else.
 const (
-	v36UserVersion = 36
 	v37UserVersion = 37
+	v38UserVersion = 38
 )
 
 func legacySchemaStatements(version int) []string {
-	statements := slices.DeleteFunc(slices.Clone(schemaStatements), func(statement string) bool {
-		return version == v36UserVersion && statement == taskAutomaticEventsTable
-	})
+	replacer := strings.NewReplacer("'transient'", "'runner_exit'")
+	if version == v37UserVersion {
+		replacer = strings.NewReplacer("'transient'", "'runner_exit'", agentWakeOnColumn, "", projectSpecialistColumns, "")
+	}
+	statements := slices.Clone(schemaStatements)
 	for index, statement := range statements {
-		statements[index] = strings.ReplaceAll(statement, "'transient'", "'runner_exit'")
+		statements[index] = replacer.Replace(statement)
 	}
 	return statements
 }
 
-// validateOpenableSnapshot accepts a current database or an exact v36 or v37
+// validateOpenableSnapshot accepts a current database or an exact v37 or v38
 // one, whose durable controls are checked inside the migration before it
 // commits.
 func validateOpenableSnapshot(ctx context.Context, connection *sql.Conn) error {
 	if _, version, err := inspectIdentity(ctx, connection); err != nil {
 		return err
-	} else if version == v36UserVersion || version == v37UserVersion {
+	} else if version == v37UserVersion || version == v38UserVersion {
 		if err := validateSchemaVersion(ctx, connection, version, legacySchemaStatements(version)); err != nil {
 			return err
 		}
@@ -56,7 +60,7 @@ func validateContentGitPins(ctx context.Context, connection *sql.Conn) error {
 	return nil
 }
 
-// migrateLegacy takes an exact v36 or v37 home to the current schema in one
+// migrateLegacy takes an exact v37 or v38 home to the current schema in one
 // transaction, or leaves it byte-untouched and refuses; it refuses any other
 // earlier version. Open calls it with the writer before the store is
 // published, and before refreshing its pinned sidecar facts, which the
@@ -75,7 +79,7 @@ func (store *Store) migrateLegacy(ctx context.Context) error {
 	switch version {
 	case userVersion:
 		return connection.Close()
-	case v36UserVersion, v37UserVersion:
+	case v37UserVersion, v38UserVersion:
 	default:
 		cause := ErrForeignDatabase
 		if appID == applicationID && version > userVersion {
@@ -100,9 +104,16 @@ func migrateFrom(ctx context.Context, connection *sql.Conn, version int) error {
 	if err := validateSchemaVersion(ctx, connection, version, legacySchemaStatements(version)); err != nil {
 		return err
 	}
-	if version == v36UserVersion {
-		if _, err := connection.ExecContext(ctx, taskAutomaticEventsTable); err != nil {
-			return err
+	if version == v37UserVersion {
+		columns := strings.Split(projectSpecialistColumns, ", ")[1:]
+		for _, statement := range []string{
+			"ALTER TABLE agents ADD COLUMN " + strings.TrimPrefix(agentWakeOnColumn, ", "),
+			"ALTER TABLE projects ADD COLUMN " + columns[0],
+			"ALTER TABLE projects ADD COLUMN " + columns[1],
+		} {
+			if _, err := connection.ExecContext(ctx, statement); err != nil {
+				return err
+			}
 		}
 	}
 	var schemaVersion int

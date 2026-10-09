@@ -4,6 +4,7 @@ import {
   agentStatus,
   agentActivity,
   agentCurrentTask,
+  isSpecialist,
   projectGraph,
   projectFloor,
   projectProposals,
@@ -191,8 +192,8 @@ export function FactoryFloor({
   </div>;
 }
 
-export function rankLabel(role: AgentItem["role"]): string {
-  return role === "orchestrator" ? "Overseer" : "Worker";
+export function rankLabel(role: AgentItem["role"] | "specialist"): string {
+  return role === "orchestrator" ? "Overseer" : role === "specialist" ? "Specialist" : "Worker";
 }
 
 /** Agents grouped by rank, oversight first. */
@@ -214,8 +215,8 @@ export function AgentList({
     <div className="dfAgentList">
       <label><input type="checkbox" checked={showArchived} onChange={(event) => setShowArchived(event.currentTarget.checked)} /> Show archived</label>
       {agents.length === 0 ? <p className="dfFactoryConsole__empty">no agents</p> : null}
-      {(["orchestrator", "worker"] as const).map((role) => {
-        const members = agents.filter((agent) => agent.role === role);
+      {(["orchestrator", "specialist", "worker"] as const).map((role) => {
+        const members = agents.filter((agent) => role === "specialist" ? isSpecialist(agent) : agent.role === role && !isSpecialist(agent));
         if (members.length === 0) return null;
         return (
           <section key={role} aria-label={rankLabel(role)}>
