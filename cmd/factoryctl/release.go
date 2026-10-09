@@ -26,7 +26,7 @@ var (
 // the release, so --wait reads the durable record until it settles and
 // treats an unreachable daemon as not settled yet.
 func runRelease(ctx context.Context, args []string, getenv func(string) string, stdout, stderr io.Writer) int {
-	if len(args) == 0 || !slices.Contains([]string{"", "--start", "--wait", "--start --wait"}, strings.Join(args[1:], " ")) {
+	if len(args) == 0 || !slices.Contains([]string{"", "--start", "--wait", "--start --wait", "--wait --start"}, strings.Join(args[1:], " ")) {
 		return usageFailure(stderr, append([]string{"release"}, args...))
 	}
 	start, wait := slices.Contains(args, "--start"), slices.Contains(args, "--wait")

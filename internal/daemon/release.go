@@ -125,8 +125,8 @@ var (
 	// releaseBuild, releaseUpgrade and releaseExit are package-test seams.
 	releaseBuild   = buildRelease
 	releaseUpgrade = install.ServiceUpgrade
-	// SIGTERM shuts down cleanly; factoryd then exits 75 because a trial
-	// marker names another build, and launchd restarts the new binaries.
+	// SIGTERM shuts down cleanly; factoryd then supervises the staged build's
+	// trial because the upgrade marker names another build.
 	releaseExit = func() { _ = syscall.Kill(os.Getpid(), syscall.SIGTERM) }
 	// releasePoll spaces base observations; releaseHead is a package-test seam.
 	releasePoll = 2 * time.Minute
@@ -275,8 +275,9 @@ func (daemon *Daemon) selfRepositorySource(ctx context.Context) (project kernel.
 	return project, "", source, errors.Join(err, fmt.Errorf("%w: no registered checkout of %s", kernel.ErrNotFound, selfRepository))
 }
 
-// release builds, drains, backs up and swaps; the restarted build promotes or
-// rolls back. Every failure before the swap leaves the factory as it was.
+// release builds, drains, backs up and stages, then shuts this build down to
+// supervise the staged build's trial. Nothing launchd runs changes until that
+// trial promotes it.
 func (daemon *Daemon) release(project kernel.ProjectID, root string, source change.RepositorySourceIdentity, delivery kernel.ProductionDelivery) {
 	ctx := daemon.cleanupCtx
 	fail := func(reason string) {
@@ -315,7 +316,7 @@ func (daemon *Daemon) release(project kernel.ProjectID, root string, source chan
 		fail("backup: " + err.Error())
 		return
 	}
-	if err := releaseUpgrade(ctx, daemon.home, filepath.Join(directory, "bin"), identity, kernel.SchemaVersion); err != nil {
+	if err := releaseUpgrade(ctx, daemon.home, filepath.Join(directory, "bin"), identity); err != nil {
 		fail("upgrade: " + err.Error())
 		return
 	}
@@ -364,7 +365,7 @@ func buildRelease(ctx context.Context, daemon *Daemon, root string, source chang
 		return buildinfo.Identity{}, fmt.Errorf("release checkout: %w", err)
 	}
 	if running := buildinfo.Current(); running.Release() {
-		if err := releaseDescends(ctx, tree, running.Source(), sha); err != nil {
+		if err := releaseDescends(ctx, root, tree, running.Source(), sha); err != nil {
 			return buildinfo.Identity{}, err
 		}
 	}
@@ -378,9 +379,14 @@ func buildRelease(ctx context.Context, daemon *Daemon, root string, source chang
 
 // releaseDescends refuses a commit that is not the running build or one of
 // its descendants, so a release never downgrades the factory (#1390).
-func releaseDescends(ctx context.Context, tree, running, sha string) error {
-	if _, err := gitOutput(ctx, filepath.Join(tree, ".git"), "merge-base", "--is-ancestor", running, sha); err != nil {
+func releaseDescends(ctx context.Context, root, tree, running, sha string) error {
+	_, err := gitOutput(ctx, filepath.Join(tree, ".git"), "merge-base", "--is-ancestor", running, sha)
+	var exit *exec.ExitError
+	if errors.As(err, &exit) && exit.ExitCode() == 1 {
 		return fmt.Errorf("%w: %s does not descend from the running build %s", kernel.ErrConflict, sha, running)
+	}
+	if err != nil {
+		return fmt.Errorf("%w: the running build %s is not in the release checkout's history: unshallow the registered checkout (git -C %s fetch --unshallow origin) or install a build of %s", kernel.ErrConflict, running, root, selfBase)
 	}
 	return nil
 }

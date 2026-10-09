@@ -1036,26 +1036,23 @@ func (fixture *manageFixture) requireProgram(t *testing.T, directory, want strin
 	}
 }
 
-func TestServiceUpgradeSwapsAtomicallyAndRollsBack(t *testing.T) {
+// A release only stages: launchd keeps running bin/current until the old
+// build's supervised trial promotes the staged set.
+func TestServiceUpgradeStagesAndOnlyPromotionSwaps(t *testing.T) {
 	fixture, next, identity := upgradeFixture(t)
-	if err := ServiceUpgrade(context.Background(), fixture.home, next, identity, 33); err != nil {
-		t.Fatal(err)
-	}
-	fixture.requireProgram(t, "current", "#!next")
-	fixture.requireProgram(t, "previous", "#!binary")
-	marker, present, err := ReadUpgradeMarker(fixture.home)
-	if err != nil || !present || marker != (UpgradeMarker{Target: identity.Source(), UserVersion: 33, State: UpgradeTrial}) {
-		t.Fatalf("marker = %+v, %t, %v", marker, present, err)
-	}
-
-	if err := ServiceRollback(fixture.home, false, "verification failed"); err != nil {
+	if err := ServiceUpgrade(context.Background(), fixture.home, next, identity); err != nil {
 		t.Fatal(err)
 	}
 	fixture.requireProgram(t, "current", "#!binary")
-	marker, _, err = ReadUpgradeMarker(fixture.home)
-	if err != nil || marker.State != UpgradeRolledBack || marker.Reason != "verification failed" {
-		t.Fatalf("rolled back marker = %+v, %v", marker, err)
+	fixture.requireProgram(t, "previous", "#!next")
+	marker, present, err := ReadUpgradeMarker(fixture.home)
+	if err != nil || !present || marker != (UpgradeMarker{Target: identity.Source()}) {
+		t.Fatalf("marker = %+v, %t, %v", marker, present, err)
 	}
+	if err := PromoteService(fixture.home); err != nil {
+		t.Fatal(err)
+	}
+	fixture.requireProgram(t, "current", "#!next")
 
 	// Uninstall resolves the kept package and the marker too.
 	removed := &recordedLaunchctl{results: []launchctlResult{fixture.printRunning(41), {status: 0}, {status: launchctlNotFound}}}
@@ -1067,57 +1064,21 @@ func TestServiceUpgradeSwapsAtomicallyAndRollsBack(t *testing.T) {
 	}
 }
 
-// #1388: the running build validates the home before swapping in its
-// successor, so a file only a newer factoryd writes must not refuse the
-// release, or no release could ever add one (as public.key once did).
+// #1388: the running build validates the home before staging its successor,
+// so a file only a newer factoryd writes must not refuse the release, or no
+// release could ever add one (as public.key once did).
 func TestServiceUpgradeAcceptsAHomeFileOnlyANewerBuildKnows(t *testing.T) {
 	fixture, next, identity := upgradeFixture(t)
 	if err := os.WriteFile(filepath.Join(fixture.home, "written-by-a-newer-build.json"), []byte("{}"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := ServiceUpgrade(context.Background(), fixture.home, next, identity, 33); err != nil {
+	if err := ServiceUpgrade(context.Background(), fixture.home, next, identity); err != nil {
 		t.Fatalf("upgrade refused a home file only the new build knows: %v", err)
 	}
-	fixture.requireProgram(t, "current", "#!next")
+	fixture.requireProgram(t, "previous", "#!next")
 }
 
-// #1390: the build being rolled back judges nothing. A home its census
-// refuses, and a receipt it would not parse, still roll back.
-func TestServiceRollbackIgnoresTheTrialBuildsHomeAndReceiptRules(t *testing.T) {
-	fixture, next, identity := upgradeFixture(t)
-	if err := ServiceUpgrade(context.Background(), fixture.home, next, identity, 33); err != nil {
-		t.Fatal(err)
-	}
-	refused := filepath.Join(fixture.home, "directory-the-census-refuses")
-	if err := os.Mkdir(refused, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Remove(refused) })
-	receipt := filepath.Join(ServiceDirectoryPath(fixture.home), serviceReceiptName)
-	body, err := os.ReadFile(receipt)
-	if err != nil {
-		t.Fatal(err)
-	}
-	body = append([]byte(`{"field_only_the_old_build_knows":1,`), body[1:]...)
-	if err := os.WriteFile(receipt, body, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := withServiceMutation(context.Background(), fixture.home, func(*serviceHomeCapability) (ServiceStatus, error) { return ServiceStatus{}, nil }); err == nil {
-		t.Fatal("the census accepted the planted directory")
-	}
-	if err := ServiceRollback(fixture.home, false, "census"); err != nil {
-		t.Fatalf("rollback = %v", err)
-	}
-	if program, err := os.ReadFile(filepath.Join(ServiceDirectoryPath(fixture.home), "bin", "current", "factoryd")); err != nil || !bytes.HasPrefix(program, []byte("#!binary")) {
-		t.Fatalf("current program = %q, %v", program, err)
-	}
-	after, err := os.ReadFile(receipt)
-	if err != nil || !bytes.Contains(after, []byte("field_only_the_old_build_knows")) || bytes.Equal(after, body) {
-		t.Fatalf("receipt after rollback = %s, %v", after, err)
-	}
-}
-
-func TestServiceUpgradeFailureBeforeTheSwapLeavesCurrentUntouched(t *testing.T) {
+func TestServiceUpgradeOrPromotionFailureLeavesCurrentUntouched(t *testing.T) {
 	plant := func(path string) func(*testing.T, *manageFixture, string) {
 		return func(t *testing.T, fixture *manageFixture, _ string) {
 			if err := os.Mkdir(filepath.Join(ServiceDirectoryPath(fixture.home), path), 0o700); err != nil {
@@ -1142,11 +1103,12 @@ func TestServiceUpgradeFailureBeforeTheSwapLeavesCurrentUntouched(t *testing.T) 
 		t.Run(name, func(t *testing.T) {
 			fixture, next, identity := upgradeFixture(t)
 			fault(t, fixture, next)
-			if err := ServiceUpgrade(context.Background(), fixture.home, next, identity, 33); err == nil {
-				t.Fatal("faulted upgrade succeeded")
+			err := ServiceUpgrade(context.Background(), fixture.home, next, identity)
+			if err == nil {
+				err = PromoteService(fixture.home)
 			}
-			if _, present, _ := ReadUpgradeMarker(fixture.home); present {
-				t.Fatal("faulted upgrade left a trial marker")
+			if err == nil {
+				t.Fatal("faulted upgrade succeeded")
 			}
 			for _, cleanup := range []string{"." + upgradeMarkerName + ".stage", "." + serviceReceiptName + ".stage"} {
 				_ = os.Remove(filepath.Join(ServiceDirectoryPath(fixture.home), cleanup))
@@ -1156,53 +1118,53 @@ func TestServiceUpgradeFailureBeforeTheSwapLeavesCurrentUntouched(t *testing.T) 
 	}
 }
 
-func TestServiceRollbackRestoresTheDatabaseOnlyWhenTheSchemaMoved(t *testing.T) {
-	fixture, next, identity := upgradeFixture(t)
+func TestRestoreUpgradeBackupPutsBackTheDatabaseOnce(t *testing.T) {
+	fixture, _, _ := upgradeFixture(t)
 	database := filepath.Join(fixture.home, databaseName)
 	original, err := os.ReadFile(database)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The GitHub connection lives beside the database and must outlive both.
+	// The GitHub connection lives beside the database and must outlive it.
 	connection := filepath.Join(fixture.home, maintainerCredentialName)
 	if err := os.WriteFile(connection, []byte("connection"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	requireConnection := func(stage string) {
-		if body, err := os.ReadFile(connection); err != nil || string(body) != "connection" {
-			t.Fatalf("%s lost %s: %v", stage, maintainerCredentialName, err)
+	// The backup BackupTo takes, then the trial build's migration.
+	if err := os.WriteFile(UpgradeBackupPath(fixture.home), original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// A trial child still holding the home keeps its database.
+	held, err := OpenOperationalHome(context.Background(), fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := RestoreUpgradeBackup(fixture.home); !errors.Is(err, ErrBusy) {
+		t.Fatalf("restore under a held home = %v", err)
+	}
+	if err := held.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{database, database + "-wal", database + "-shm"} {
+		if err := os.WriteFile(path, []byte("migrated"), 0o600); err != nil {
+			t.Fatal(err)
 		}
 	}
-	for _, restore := range []bool{false, true} {
-		if err := ServiceUpgrade(context.Background(), fixture.home, next, identity, 33); err != nil {
+	for range 2 {
+		if err := RestoreUpgradeBackup(fixture.home); err != nil {
 			t.Fatal(err)
 		}
-		requireConnection("upgrade")
-		// The backup BackupTo takes, then the trial build's migration.
-		if err := os.WriteFile(UpgradeBackupPath(fixture.home), original, 0o600); err != nil {
-			t.Fatal(err)
-		}
-		for _, sidecar := range []string{"-wal", "-shm"} {
-			if err := os.WriteFile(database+sidecar, nil, 0o600); err != nil {
-				t.Fatal(err)
-			}
-		}
-		if err := ServiceRollback(fixture.home, restore, "schema"); err != nil {
-			t.Fatal(err)
-		}
-		_, backupErr := os.Lstat(UpgradeBackupPath(fixture.home))
-		_, walErr := os.Lstat(database + "-wal")
-		if restore != errors.Is(backupErr, os.ErrNotExist) || restore != errors.Is(walErr, os.ErrNotExist) {
-			t.Fatalf("restore=%t: backup %v, wal %v", restore, backupErr, walErr)
-		}
-		if body, err := os.ReadFile(database); err != nil || !bytes.Equal(body, original) {
-			t.Fatalf("database after rollback: %v", err)
-		}
-		requireConnection("rollback")
-		fixture.requireProgram(t, "current", "#!binary")
-		if err := RemoveUpgrade(fixture.home); err != nil {
-			t.Fatal(err)
-		}
+	}
+	_, backupErr := os.Lstat(UpgradeBackupPath(fixture.home))
+	_, walErr := os.Lstat(database + "-wal")
+	if !errors.Is(backupErr, os.ErrNotExist) || !errors.Is(walErr, os.ErrNotExist) {
+		t.Fatalf("backup %v, wal %v", backupErr, walErr)
+	}
+	if body, err := os.ReadFile(database); err != nil || !bytes.Equal(body, original) {
+		t.Fatalf("database after restore: %v", err)
+	}
+	if body, err := os.ReadFile(connection); err != nil || string(body) != "connection" {
+		t.Fatalf("restore lost %s: %v", maintainerCredentialName, err)
 	}
 }
 

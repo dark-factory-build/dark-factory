@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
+	"strings"
 	"testing"
 	"time"
 
@@ -58,5 +60,15 @@ func TestReleaseWaitsAcrossTheRestartAndMapsTheOutcome(t *testing.T) {
 	}
 	if got := release(context.Background(), false, false, read, io.Discard, io.Discard); got != 0 {
 		t.Errorf("read: exit %d", got)
+	}
+}
+
+func TestReleaseFlagsParseInEitherOrder(t *testing.T) {
+	for _, flags := range [][]string{{"--start", "--wait"}, {"--wait", "--start"}} {
+		var stderr bytes.Buffer
+		runRelease(context.Background(), append([]string{"sha"}, flags...), func(string) string { return "" }, io.Discard, &stderr)
+		if strings.Contains(stderr.String(), "invalid arguments") {
+			t.Errorf("%v: %s", flags, stderr.String())
+		}
 	}
 }

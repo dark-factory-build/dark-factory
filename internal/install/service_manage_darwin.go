@@ -379,11 +379,11 @@ var verifyServiceRelease = func(ctx context.Context, sourceDir, stagedDir string
 	return runReleaseIdentities(ctx, stagedDir, expected)
 }
 
-// ServiceUpgrade installs the verified release binaries in sourceDir over
-// bin/current with one atomic swap, keeping the replaced set as bin/previous,
-// and leaves a trial marker for the next boot. userVersion is the running
-// build's schema version, so a rollback knows whether the database moved.
-func ServiceUpgrade(ctx context.Context, home, sourceDir string, expected buildinfo.Identity, userVersion int) error {
+// ServiceUpgrade stages the verified release binaries in sourceDir as
+// bin/previous and writes the upgrade marker naming them. Nothing launchd
+// runs changes: the running build supervises their trial and only then
+// promotes them with PromoteService.
+func ServiceUpgrade(ctx context.Context, home, sourceDir string, expected buildinfo.Identity) error {
 	if ctx == nil || !validServicePath(sourceDir) || !expected.Release() {
 		return fmt.Errorf("%w: invalid upgrade request", ErrServiceAmbiguous)
 	}
@@ -395,8 +395,6 @@ func ServiceUpgrade(ctx context.Context, home, sourceDir string, expected buildi
 		if err := receiptMatchesInstallation(receipt, home, ServiceConfig{Label: receipt.Label}, receipt.PlistPath); err != nil {
 			return ServiceStatus{}, err
 		}
-		// The new set is staged as bin/previous, so the one swap below both
-		// installs it and keeps the replaced set for a rollback.
 		previous := filepath.Join(ServiceDirectoryPath(home), "bin", "previous")
 		if err := removeOwnedTree(previous); err != nil {
 			return ServiceStatus{}, err
@@ -412,57 +410,46 @@ func ServiceUpgrade(ctx context.Context, home, sourceDir string, expected buildi
 		if err := verifyServiceRelease(ctx, sourceDir, previous, expected); err != nil {
 			return ServiceStatus{}, err
 		}
-		if err := WriteUpgradeMarker(home, UpgradeMarker{Target: expected.Source(), UserVersion: userVersion, State: UpgradeTrial}); err != nil {
+		if err := WriteUpgradeMarker(home, UpgradeMarker{Target: expected.Source()}); err != nil {
 			return ServiceStatus{}, fmt.Errorf("%w: write upgrade marker: %v", ErrServiceAmbiguous, err)
-		}
-		if err := swapServicePackage(home); err != nil {
-			_ = RemoveUpgrade(home)
-			return ServiceStatus{}, err
 		}
 		return ServiceStatus{}, nil
 	})
 	return err
 }
 
-// ServiceRollback swaps bin/previous back into bin/current, restores the
-// pre-upgrade database when restoreDatabase is set, and marks the marker
-// rolled back with reason for the old build to record. The build being
-// rolled back runs it, so it applies none of that build's home, census or
-// receipt rules: a build that rejects the home must still undo itself.
-func ServiceRollback(home string, restoreDatabase bool, reason string) error {
-	marker, present, err := ReadUpgradeMarker(home)
-	if err != nil || !present {
-		return errors.Join(errors.New("no upgrade to roll back"), err)
+// RestoreUpgradeBackup puts back the database the old build backed up before
+// staging, for a release that never promoted. It holds the home lock, so no
+// trial child still has the database open, and runs before the home opens,
+// whose census binds the database file. It is repeatable: a consumed backup
+// means it already happened.
+func RestoreUpgradeBackup(home string) error {
+	if _, err := os.Lstat(UpgradeBackupPath(home)); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
 	}
-	// The database goes first: it is repeatable (a consumed backup means it
-	// already happened), and the old build cannot open a newer schema.
-	if restoreDatabase {
-		if _, err := os.Lstat(UpgradeBackupPath(home)); err == nil {
-			for _, sidecar := range []string{"-wal", "-shm"} {
-				if err := os.Remove(filepath.Join(home, databaseName+sidecar)); err != nil && !errors.Is(err, os.ErrNotExist) {
-					return err
-				}
-			}
-			if err := os.Rename(UpgradeBackupPath(home), filepath.Join(home, databaseName)); err != nil {
-				return err
-			}
-		} else if !errors.Is(err, os.ErrNotExist) {
+	lock, err := os.OpenFile(filepath.Join(home, lockName), os.O_RDWR|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
+	if err := unix.Flock(int(lock.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		return errors.Join(ErrBusy, err)
+	}
+	for _, sidecar := range []string{"-wal", "-shm"} {
+		if err := os.Remove(filepath.Join(home, databaseName+sidecar)); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
 	}
-	if err := swapServicePackage(home); err != nil {
-		return err
-	}
-	// ponytail: a crash between the swap and this write leaves the old build
-	// a non-final marker; it records the release failed all the same.
-	marker.State, marker.Reason = UpgradeRolledBack, reason
-	return WriteUpgradeMarker(home, marker)
+	return os.Rename(UpgradeBackupPath(home), filepath.Join(home, databaseName))
 }
 
-// swapServicePackage exchanges bin/previous and bin/current in one rename and
+// PromoteService makes the staged bin/previous current in one rename and
 // rebinds the receipt to the program now current. Only the digest changes, so
-// the receipt is rewritten without being interpreted by this build.
-func swapServicePackage(home string) error {
+// the receipt is rewritten without being interpreted.
+func PromoteService(home string) error {
 	bin := filepath.Join(ServiceDirectoryPath(home), "bin")
 	current, err := digestServiceFile(filepath.Join(bin, "current", "factoryd"))
 	if err != nil {

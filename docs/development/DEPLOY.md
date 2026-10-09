@@ -27,25 +27,28 @@ downgrades the factory. factoryd:
    hold;
 3. backs up the store with `VACUUM INTO` to `<home>.service/upgrade.sqlite3`;
 4. stages the three binaries as `bin/previous`, checks each is the exact
-   release artifact and reports that identity when run, swaps `bin/previous`
-   and `bin/current` in one rename, rebinds the receipt's program digest,
-   writes the trial marker `<home>.service/upgrade`, and exits 75, so launchd
-   (`KeepAlive` on unsuccessful exit) starts the new binaries.
+   release artifact and reports that identity when run, and writes the
+   upgrade marker `<home>.service/upgrade` naming the release. Nothing launchd
+   runs has changed.
 
-The new build boots on trial. Before it parses its arguments or reads its
-configuration or home, it counts the boot in the marker, so a build that
-rejects the installed flags, settings or home still rolls back on its next
-boot. Sixty seconds after it is up it runs all three
-installed binaries; if each reports its release identity, the release is
-recorded `verified` and the marker and backup are removed. If it crashes or
-exits before that, is not promoted within 5 minutes, or fails verification,
-its next boot swaps `bin/previous` back, rebinds the receipt's program digest,
-restores the backup when the old build's schema version differs, and exits 75,
-without applying any of its own home or receipt checks; the old build then records the
-release `failed` with the reason. The record is the production delivery
-`release:<sha>`. `--wait` follows it across the restart and exits 0 when
-verified, 1 when it failed after the swap or rolled back, and 75 when the call
-was refused or the release failed before the swap.
+The running build then shuts down, releasing the home, socket and browser
+port, and runs the staged `factoryd` as its own child with the same
+arguments. The child is promoted only if it answers a `web_status` call as the
+release within 5 minutes and then stops cleanly when asked: the parent swaps
+`bin/previous` and `bin/current` in one rename and rebinds the receipt's
+program digest. A child that panics, refuses its arguments, hangs or answers
+as another build is stopped and nothing is swapped. Either way the parent
+exits 75, so launchd (`KeepAlive` on unsuccessful exit) starts `bin/current`,
+which settles the release at boot: a marker naming itself is recorded
+`verified`; any other marker is recorded `failed` with the reason, after the
+backup is restored under the home lock. The staged build never decides its own
+rollback, and launchd never runs a build that has not proven itself. If the
+parent dies mid-trial, launchd starts the old build, which kills the trial
+child's process group (recorded in the marker; launchd does not end it) and
+recovers the same way. The record is the
+production delivery `release:<sha>`. `--wait` follows it across the restart
+and exits 0 when verified, 1 when it failed after staging, and 75 when the
+call was refused or the release failed before staging.
 
 factoryd also releases itself. Where the home has a registered checkout of
 dark-factory, every two minutes it reads `main`'s tip with `git ls-remote
@@ -92,7 +95,7 @@ in either installation order. Its ANY WORKER control and the Any eligible
 worker queue group appear only after the site is re-vendored from a merged
 runtime commit that contains them.
 
-**New home file.** The running build checks the home before it swaps in the
+**New home file.** The running build checks the home before it stages the
 release, so it judges the new build's home by its own, older rules. The home
 census therefore ignores any regular file at the home root it does not name;
 only symlinks, directories and special files there are refused
@@ -101,9 +104,9 @@ release may add a plain file to the home without any allowlist edit. A
 release that adds anything else at the home root, such as a directory, is
 refused by the build before it and must be installed by hand as above.
 
-**Schema change.** A release backs the store up before the swap, and a
-rolled-back trial restores that backup when the schema version moved, so the
-old build never opens a newer schema. To roll back by hand after a promotion,
+**Schema change.** A release backs the store up before staging, and the old
+build restores that backup whenever the release did not promote, so it never
+opens a schema its trial child migrated. To roll back by hand after a promotion,
 stop the service, confirm the daemon released `home.lock`, restore a backup
 over `factory.sqlite3`, delete `factory.sqlite3-wal` and `factory.sqlite3-shm`,
 and install the previous binaries.

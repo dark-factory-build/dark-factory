@@ -156,9 +156,9 @@ func releaseFixture(t *testing.T) (*dispatchFixture, func(), chan string) {
 		value, _ := buildinfo.Expected("1.2.3", sha, "darwin/arm64")
 		return value, nil
 	}
-	releaseUpgrade = func(_ context.Context, upgradeHome, _ string, identity buildinfo.Identity, userVersion int) error {
-		if _, err := os.Stat(install.UpgradeBackupPath(upgradeHome)); err != nil || userVersion != kernel.SchemaVersion {
-			t.Errorf("upgrade without a backup: %v, user_version %d", err, userVersion)
+	releaseUpgrade = func(_ context.Context, upgradeHome, _ string, identity buildinfo.Identity) error {
+		if _, err := os.Stat(install.UpgradeBackupPath(upgradeHome)); err != nil {
+			t.Errorf("upgrade without a backup: %v", err)
 		}
 		events <- "upgrade " + identity.Source()
 		return nil
@@ -241,7 +241,7 @@ func TestReleaseDrainTimeoutReleasesTheHoldAndNeverWritesDispatch(t *testing.T) 
 func TestReleaseRecordsAFailedUpgradeAndNeverRestarts(t *testing.T) {
 	fixture, settle, events := releaseFixture(t)
 	settle()
-	releaseUpgrade = func(context.Context, string, string, buildinfo.Identity, int) error {
+	releaseUpgrade = func(context.Context, string, string, buildinfo.Identity) error {
 		events <- "upgrade"
 		return errors.New("receipt")
 	}
@@ -296,7 +296,7 @@ func TestTickReleasesEachNewBaseTipOnce(t *testing.T) {
 		t.Fatal("a released tip was released again")
 	}
 
-	releaseUpgrade = func(context.Context, string, string, buildinfo.Identity, int) error { return errors.New("receipt") }
+	releaseUpgrade = func(context.Context, string, string, buildinfo.Identity) error { return errors.New("receipt") }
 	tick(failed)
 	awaitRelease(t, fixture.daemon, failed, func(value kernel.ProductionDelivery) bool { return value.State == "failed" })
 	<-events
@@ -393,12 +393,16 @@ func TestReleaseRefusesACommitOlderThanTheRunningBuild(t *testing.T) {
 	git("commit", "--quiet", "--allow-empty", "-m", "running")
 	running := git("rev-parse", "HEAD")
 	ctx := context.Background()
-	if err := releaseDescends(ctx, tree, running, older); !errors.Is(err, kernel.ErrConflict) {
+	if err := releaseDescends(ctx, "ROOT", tree, running, older); !errors.Is(err, kernel.ErrConflict) {
 		t.Fatalf("older release = %v", err)
+	}
+	// A running build the checkout lacks names the fix, not a downgrade.
+	if err := releaseDescends(ctx, "ROOT", tree, strings.Repeat("1", 40), running); err == nil || !strings.Contains(err.Error(), "git -C ROOT fetch --unshallow origin") {
+		t.Fatalf("missing running build = %v", err)
 	}
 	git("commit", "--quiet", "--allow-empty", "-m", "newer")
 	for _, sha := range []string{running, git("rev-parse", "HEAD")} {
-		if err := releaseDescends(ctx, tree, running, sha); err != nil {
+		if err := releaseDescends(ctx, "ROOT", tree, running, sha); err != nil {
 			t.Fatalf("release %s = %v", sha, err)
 		}
 	}

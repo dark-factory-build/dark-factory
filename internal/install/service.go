@@ -51,21 +51,17 @@ var (
 var serviceBinaryNames = [3]string{"factoryd", "factoryctl", "factory-runner"}
 
 // UpgradeMarker is the one in-flight self-upgrade, kept at
-// <home>.service/upgrade from the swap until the trial build is promoted or
-// the old build has recorded the rollback.
+// <home>.service/upgrade from staging until a boot settles it: the build it
+// names is current only once its supervised trial promoted it.
 type UpgradeMarker struct {
-	Target      string `json:"target"`
-	UserVersion int    `json:"user_version"`
-	Boots       int    `json:"boots"`
-	State       string `json:"state"`
-	Reason      string `json:"reason,omitempty"`
+	Target string `json:"target"`
+	Reason string `json:"reason,omitempty"`
+	// Trial is the process group of a running trial child, for the boot
+	// after a supervisor that died mid-trial to stop.
+	Trial int `json:"trial,omitempty"`
 }
 
-const (
-	UpgradeTrial      = "trial"
-	UpgradeRolledBack = "rolled_back"
-	upgradeMarkerName = "upgrade"
-)
+const upgradeMarkerName = "upgrade"
 
 // UpgradeBackupPath is the database copy taken just before the swap.
 func UpgradeBackupPath(home string) string {
@@ -93,12 +89,6 @@ func WriteUpgradeMarker(home string, marker UpgradeMarker) error {
 		return err
 	}
 	return os.Rename(stage, filepath.Join(ServiceDirectoryPath(home), upgradeMarkerName))
-}
-
-// VerifyInstalledRelease runs each installed binary and requires it to
-// report exactly the expected release identity.
-func VerifyInstalledRelease(ctx context.Context, home string, expected buildinfo.Identity) error {
-	return runReleaseIdentities(ctx, filepath.Join(ServiceDirectoryPath(home), "bin", "current"), expected)
 }
 
 func runReleaseIdentities(ctx context.Context, directory string, expected buildinfo.Identity) error {
