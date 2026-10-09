@@ -408,7 +408,8 @@ EOF
     "$local_fixture/poison/corepack" "$local_fixture/poison/go" \
     "$local_fixture/scripts/go-check.sh"
 /bin/cp "$local_fixture/poison/node" "$local_fixture/poison/corepack" "$local_fixture/configured/"
-/bin/ln -s /opt/homebrew/Cellar/go/1.27.0/libexec/bin/go "$local_fixture/configured/go"
+fixture_go=$(command -v go) || fail "go is unavailable for the local-ci fixture"
+/bin/ln -s "$fixture_go" "$local_fixture/configured/go"
 /bin/chmod 755 "$local_fixture/configured/node" "$local_fixture/configured/corepack"
 for local_child in \
     check-toolchain-pins.sh test-local-ci-environment.sh test-new-worktree.sh \
@@ -431,7 +432,7 @@ run_local_fault() {
     set +e
     local_output=$(CDPATH= cd -- "$local_fixture" && DARK_FACTORY_LOCAL_CI_LEASE_HELD=1 \
         DF_GATE_FAULT="$local_mode" \
-        PATH="$local_fixture/configured:/opt/homebrew/bin:/usr/bin:/bin" \
+        PATH="$local_fixture/configured:/usr/bin:/bin" \
         /bin/sh ./scripts/local-ci.sh "$local_gate_mode" 2>&1)
     local_status=$?
     set -e
@@ -452,7 +453,7 @@ set +e
 local_output=$(CDPATH= cd -- "$local_fixture" && \
     DARK_FACTORY_LOCAL_CI_LEASE_HELD=1 DF_GATE_FAULT=env \
     OPENAI_API_KEY=probe-secret \
-    PATH="$local_fixture/configured:/opt/homebrew/bin:/usr/bin:/bin" \
+    PATH="$local_fixture/configured:/usr/bin:/bin" \
     GIT_DIR="$temporary/poisoned-git" GIT_WORK_TREE="$temporary/poisoned-tree" \
     GIT_CONFIG_GLOBAL="$temporary/poisoned-global" GIT_CONFIG_SYSTEM="$temporary/poisoned-system" \
     GIT_CONFIG_NOSYSTEM=0 /bin/sh ./scripts/local-ci.sh 2>&1)
@@ -472,7 +473,7 @@ local_cache_root=$(sed -n '2p' "$local_fixture/cache-roots")
 run_local_mode() {
     selected_mode=$1
     local_output=$(CDPATH= cd -- "$local_fixture" && DARK_FACTORY_LOCAL_CI_LEASE_HELD=1 \
-        PATH="$local_fixture/configured:/opt/homebrew/bin:/usr/bin:/bin" \
+        PATH="$local_fixture/configured:/usr/bin:/bin" \
         /bin/sh ./scripts/local-ci.sh "$selected_mode" 2>&1)
     printf '%s\n' "$local_output" | /usr/bin/grep -F "local-ci: PASS (${selected_mode#--})" >/dev/null \
         || fail "$selected_mode did not report its selected scope: $local_output"
@@ -484,7 +485,7 @@ run_local_mode --runtime
 run_local_mode --release
 : >"$local_fixture/lease-calls"
 local_output=$(CDPATH= cd -- "$local_fixture" && DARK_FACTORY_LOCAL_CI_LEASE_HELD=1 \
-    PATH="$local_fixture/configured:/opt/homebrew/bin:/usr/bin:/bin" \
+    PATH="$local_fixture/configured:/usr/bin:/bin" \
     /bin/sh ./scripts/local-ci.sh --ui 2>&1)
 printf '%s\n' "$local_output" | /usr/bin/grep -F 'local-ci: PASS (ui)' >/dev/null \
     || fail "UI gate did not complete: $local_output"
@@ -492,13 +493,13 @@ printf '%s\n' "$local_output" | /usr/bin/grep -F 'local-ci: PASS (ui)' >/dev/nul
 for selected_mode in --ui --release --runtime; do
     : >"$local_fixture/lease-calls"
     local_output=$(CDPATH= cd -- "$local_fixture" && DARK_FACTORY_LOCAL_CI_LEASE_HELD=0 \
-        PATH="$local_fixture/configured:/opt/homebrew/bin:/usr/bin:/bin" \
+        PATH="$local_fixture/configured:/usr/bin:/bin" \
         /bin/sh ./scripts/local-ci.sh "$selected_mode" 2>&1)
     [ -s "$local_fixture/lease-calls" ] || fail "$selected_mode ran heavy checks without the lease"
 done
 set +e
 local_output=$(CDPATH= cd -- "$local_fixture" && DARK_FACTORY_LOCAL_CI_LEASE_HELD=1 \
-    DF_GATE_FAULT=ui PATH="$local_fixture/configured:/opt/homebrew/bin:/usr/bin:/bin" \
+    DF_GATE_FAULT=ui PATH="$local_fixture/configured:/usr/bin:/bin" \
     /bin/sh ./scripts/local-ci.sh --ui 2>&1)
 local_status=$?
 set -e
