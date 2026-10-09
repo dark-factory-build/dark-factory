@@ -213,7 +213,9 @@ func TestAdvanceDecidesFromOnePullObservation(t *testing.T) {
 	for _, test := range []struct {
 		name       string
 		enqueues   int
+		refusals   int
 		escalation string
+		escalated  bool // an escalation is recorded afterwards
 		pull       *Pull
 		enqueueErr error
 		state      string
@@ -227,18 +229,19 @@ func TestAdvanceDecidesFromOnePullObservation(t *testing.T) {
 		{name: "conflict", pull: open(func(p *Pull) { p.Mergeable = &conflicting; p.Queued = true }), state: "ejected", writes: 1, detail: "conflicts with main. Rebase this Change onto origin/main"},
 		{name: "failing check at head", enqueues: 1, pull: open(func(p *Pull) { p.Failing = []string{"ci / go", "ci / ui"}; p.Pending = true }), state: "ejected", writes: 1, detail: "Failing checks: ci / go, ci / ui."},
 		{name: "queued", enqueues: 1, pull: open(func(p *Pull) { p.Queued = true }), state: "enqueued"},
-		{name: "queued clears an escalation", enqueues: 1, escalation: "stalled", pull: open(func(p *Pull) { p.Queued = true }), state: "enqueued", writes: 1},
+		{name: "queued clears an escalation", enqueues: 1, refusals: RefusalsBeforeEscalation, escalation: "stalled", pull: open(func(p *Pull) { p.Queued = true }), state: "enqueued", writes: 1},
 		{name: "checks running", pull: open(func(p *Pull) { p.Pending = true }), state: "enqueued"},
 		{name: "allowed and not queued", state: "enqueued", calls: 1, writes: 1},
 		{name: "ejected once is re-queued", enqueues: 1, pull: open(func(p *Pull) { p.Group = group }), state: "enqueued", calls: 1, writes: 1},
 		{name: "ejected again names the group", enqueues: 2, pull: open(func(p *Pull) { p.Group = group }), state: "ejected", writes: 1, detail: "run 37527118828 failed"},
 		{name: "ejected again with no group", enqueues: 2, state: "ejected", writes: 1, detail: "no merge-group run that built it was readable"},
-		{name: "refused enqueue escalates once", enqueueErr: errors.New("refused"), state: "enqueued", writes: 1},
-		{name: "refused enqueue stays escalated", escalation: "stalled", enqueueErr: errors.New("refused"), state: "enqueued"},
+		{name: "a refused enqueue waits", enqueueErr: errors.New("refused"), state: "enqueued", writes: 1},
+		{name: "a persisting refusal escalates", refusals: RefusalsBeforeEscalation - 1, enqueueErr: errors.New("refused"), state: "enqueued", writes: 1, escalated: true},
+		{name: "an escalated refusal is not escalated again", refusals: RefusalsBeforeEscalation, escalation: "stalled", enqueueErr: errors.New("refused"), state: "enqueued", writes: 1, escalated: true},
 	} {
 		store, backend := &memoryStore{}, &fakeBackend{pull: test.pull, enqueueErr: test.enqueueErr}
 		c := Coordinator{Store: store, Backend: backend, Now: func() time.Time { return time.Unix(20, 0) }}
-		before := Operation{ID: "op", Request: reviewRequest(), State: "enqueued", Verdict: "allow", Submitted: true, Enqueues: test.enqueues, Escalation: test.escalation}
+		before := Operation{ID: "op", Request: reviewRequest(), State: "enqueued", Verdict: "allow", Submitted: true, Enqueues: test.enqueues, Refusals: test.refusals, Escalation: test.escalation}
 		op, err := c.Advance(context.Background(), before)
 		if (err != nil) != (test.enqueueErr != nil) || op.State != test.state || op.RoutePending != (test.state == "ejected") || backend.enqueues != test.calls || len(store.values) != test.writes || !strings.Contains(op.Detail, test.detail) {
 			t.Fatalf("%s: operation=%+v err=%v enqueues=%d writes=%d", test.name, op, err, backend.enqueues, len(store.values))
@@ -246,7 +249,7 @@ func TestAdvanceDecidesFromOnePullObservation(t *testing.T) {
 		if test.state == "ejected" && !strings.Contains(op.Detail, head) {
 			t.Fatalf("%s: send-back %q does not name the head", test.name, op.Detail)
 		}
-		if wantEscalated := test.enqueueErr != nil; (op.Escalation != "") != wantEscalated || (test.escalation == "stalled" && wantEscalated && op.Escalation != "stalled") {
+		if (op.Escalation != "") != test.escalated || (test.escalation != "" && test.escalated && op.Escalation != test.escalation) {
 			t.Fatalf("%s: escalation=%q", test.name, op.Escalation)
 		}
 		if test.calls == 1 && op.Enqueues != test.enqueues+1 {
@@ -279,17 +282,38 @@ func TestIndeterminateEnqueueIsSettledByTheNextObservation(t *testing.T) {
 	backend := &fakeBackend{enqueueErr: errors.New("the outcome is indeterminate")}
 	c := Coordinator{Store: store, Backend: backend, Now: func() time.Time { return time.Unix(20, 0) }}
 	op, err := c.Advance(context.Background(), Operation{ID: "op", Request: reviewRequest(), State: "enqueued", Verdict: "allow", Submitted: true})
-	if err == nil || op.State != "enqueued" || op.Escalation == "" {
+	if err == nil || op.State != "enqueued" || op.Escalation != "" || op.Refusals != 1 {
 		t.Fatalf("indeterminate: operation=%+v err=%v", op, err)
 	}
-	// It landed after all: the queue shows it, and the escalation clears.
+	// It landed after all: the queue shows it, and the count clears.
 	backend.pull = &Pull{Head: op.Request.Head, State: "open", Queued: true}
-	if landed, err := c.Advance(context.Background(), op); err != nil || landed.State != "enqueued" || landed.Escalation != "" {
+	if landed, err := c.Advance(context.Background(), op); err != nil || landed.State != "enqueued" || landed.Refusals != 0 {
 		t.Fatalf("landed: operation=%+v err=%v", landed, err)
 	}
 	// It did not land: the next pass simply ensures it is queued.
 	backend.pull, backend.enqueueErr = nil, nil
-	if queued, err := c.Advance(context.Background(), op); err != nil || queued.State != "enqueued" || queued.Escalation != "" || queued.Enqueues != 1 {
+	if queued, err := c.Advance(context.Background(), op); err != nil || queued.State != "enqueued" || queued.Refusals != 0 || queued.Enqueues != 1 {
 		t.Fatalf("retried: operation=%+v err=%v", queued, err)
+	}
+}
+
+// A refusal is escalated only once it has persisted for
+// RefusalsBeforeEscalation consecutive passes, and only once.
+func TestPersistingRefusalEscalatesOnceAfterTheGracePasses(t *testing.T) {
+	store := &memoryStore{}
+	c := Coordinator{Store: store, Backend: &fakeBackend{enqueueErr: errors.New("rejected before execution as UNPROCESSABLE")}, Now: func() time.Time { return time.Unix(20, 0) }}
+	op := Operation{ID: "op", Request: reviewRequest(), State: "enqueued", Verdict: "allow", Submitted: true}
+	for pass := 1; pass <= RefusalsBeforeEscalation+2; pass++ {
+		next, err := c.Advance(context.Background(), op)
+		if err == nil || next.State != "enqueued" || next.Refusals != pass || (next.Escalation != "") != (pass >= RefusalsBeforeEscalation) {
+			t.Fatalf("pass %d: operation=%+v err=%v", pass, next, err)
+		}
+		if pass > RefusalsBeforeEscalation && next.Escalation != op.Escalation {
+			t.Fatalf("pass %d re-escalated: %q", pass, next.Escalation)
+		}
+		op = next
+	}
+	if !strings.Contains(op.Escalation, "UNPROCESSABLE") {
+		t.Fatalf("escalation = %q", op.Escalation)
 	}
 }

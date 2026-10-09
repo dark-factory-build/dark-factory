@@ -151,12 +151,10 @@ The live maintainer broker exposes only these repository-scoped operations:
 - create one PR for that exact branch and base;
 - replace one open PR body and return its observed head;
 - submit one bounded exact-head review verdict through the Pull Request Review
-  API; an independent ALLOW may explicitly correct a prior App review
-  operation at the same head when the correction is bound to that exact
-  operation;
-- observe Check Runs and eventual merge state for one exact PR head;
-- enqueue one exact reviewed head for merge after its bound checks and
-  approvals.
+  API; nothing clears a block at the same head;
+- observe Check Runs, marked by whether the base branch's rules require them,
+  and eventual merge state for one exact PR head;
+- ensure one exact reviewed head is in its base's merge queue.
 
 Replacing the already-open canonical bodies for #126, #153, and #188 is a
 one-time Phase 0 bootstrap action, not a maintainer-broker operation. It must

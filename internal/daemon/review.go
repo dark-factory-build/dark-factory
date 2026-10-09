@@ -688,7 +688,7 @@ func reviewedBodyDigest(operation review.Operation) string {
 
 // ObservePull reads the pull request, then, only while it is open at the
 // operation's head and not conflicting, its merge-queue entry and, when it is
-// not queued, its checks and newest merge-group run.
+// not queued, its required checks and newest merge-group run.
 func (b *daemonReviewBackend) ObservePull(ctx context.Context, operation review.Operation) (review.Pull, error) {
 	request := operation.Request
 	response, err := b.callResponse(ctx, "list_pull_requests", map[string]any{"repository": b.repository, "page": 1, "per_page": 1, "pull_number": request.PullNumber})
@@ -730,24 +730,37 @@ func (b *daemonReviewBackend) ObservePull(ctx context.Context, operation review.
 	}
 	pull.Group = merge.Group
 	response, err = b.callResponse(ctx, "observe_pull_request_checks", map[string]any{"repository": b.repository, "pull_number": request.PullNumber, "head_sha": request.Head})
+	if err != nil {
+		return review.Pull{}, err
+	}
+	pull.Failing, pull.Pending, err = requiredChecks(response)
+	return pull, err
+}
+
+// requiredChecks reads the failing and unfinished checks the base branch's
+// rules require. An optional check that fails or never finishes decides
+// nothing: it cannot block the merge.
+func requiredChecks(response json.RawMessage) (failing []string, pending bool, err error) {
 	var checks struct {
 		Checks []struct {
 			Name       string  `json:"name"`
 			Conclusion *string `json:"conclusion"`
+			Required   bool    `json:"required"`
 		} `json:"checks"`
 	}
-	if err != nil || json.Unmarshal(response, &checks) != nil {
-		return review.Pull{}, errors.Join(err, errors.New("review: Maintainer returned invalid checks"))
+	if json.Unmarshal(response, &checks) != nil {
+		return nil, false, errors.New("review: Maintainer returned invalid checks")
 	}
 	for _, check := range checks.Checks {
 		switch {
+		case !check.Required:
 		case check.Conclusion == nil:
-			pull.Pending = true
+			pending = true
 		case *check.Conclusion != "success" && *check.Conclusion != "neutral" && *check.Conclusion != "skipped":
-			pull.Failing = append(pull.Failing, check.Name)
+			failing = append(failing, check.Name)
 		}
 	}
-	return pull, nil
+	return failing, pending, nil
 }
 
 func (b *daemonReviewBackend) call(ctx context.Context, name string, arguments map[string]any) error {

@@ -756,6 +756,8 @@ pub(crate) struct CheckResult {
     pub(crate) status: String,
     pub(crate) conclusion: Option<String>,
     pub(crate) url: String,
+    /// The pull request's base branch rules require this check by name.
+    pub(crate) required: bool,
 }
 
 impl AppAuthority {
@@ -1546,10 +1548,11 @@ impl AppAuthority {
                 ]),
             )
             .await?;
-        self.0
+        let pull = self
+            .0
             .verify_pull_request_head(&token, request.pull_number, &request.head_sha)
             .await?;
-        self.0.checks(&token, request).await
+        self.0.checks(&token, request, &pull.base.name).await
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -3683,15 +3686,25 @@ impl Authority {
         &self,
         token: &RepositoryToken,
         request: ObservePullRequestChecks,
+        base: &str,
     ) -> Result<ChecksResult, OperationError> {
+        let api = format!(
+            "https://api.github.com/repos/{}/{}",
+            token.repository.owner, token.repository.name
+        );
         let response: CheckRuns = github_json(
-            &format!(
-                "https://api.github.com/repos/{}/{}/commits/{}/check-runs?per_page=100",
-                token.repository.owner, token.repository.name, request.head_sha
-            ),
+            &format!("{api}/commits/{}/check-runs?per_page=100", request.head_sha),
             token.as_str(),
         )
         .await?;
+        // The rules active on the base branch, rulesets' required status
+        // checks among them; readable with Metadata read.
+        let rules: Vec<BranchRule> = github_json(
+            &format!("{api}/rules/branches/{}?per_page=100", percent_encode(base)),
+            token.as_str(),
+        )
+        .await?;
+        let required = required_check_names(&rules);
         if !(0..=100).contains(&response.total_count)
             || response.total_count as usize != response.check_runs.len()
         {
@@ -3702,6 +3715,9 @@ impl Authority {
             .into_iter()
             .map(CheckResult::try_from)
             .collect::<Result<Vec<_>, _>>()?;
+        for check in &mut checks {
+            check.required = required.contains(&check.name);
+        }
         checks.sort_by(|left, right| left.name.cmp(&right.name));
         Ok(ChecksResult {
             pull_number: request.pull_number,
@@ -4589,8 +4605,32 @@ impl TryFrom<CheckRun> for CheckResult {
             status: check.status,
             conclusion: check.conclusion,
             url: check.html_url,
+            required: false,
         })
     }
+}
+
+/// One rule GitHub reports active on a branch; only the required status
+/// checks rule's parameters are read.
+#[cfg(any(target_arch = "wasm32", test))]
+#[derive(Deserialize)]
+struct BranchRule {
+    #[serde(rename = "type")]
+    kind: String,
+    #[serde(default)]
+    parameters: serde_json::Value,
+}
+
+/// The status-check names a branch's rules require.
+#[cfg(any(target_arch = "wasm32", test))]
+fn required_check_names(rules: &[BranchRule]) -> std::collections::BTreeSet<String> {
+    rules
+        .iter()
+        .filter(|rule| rule.kind == "required_status_checks")
+        .filter_map(|rule| rule.parameters["required_status_checks"].as_array())
+        .flatten()
+        .filter_map(|check| check["context"].as_str().map(str::to_owned))
+        .collect()
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
@@ -7513,6 +7553,24 @@ mod tests {
             }
             .matches(&allow)
         );
+    }
+
+    #[test]
+    fn required_checks_come_from_the_branch_rules() {
+        let rules: Vec<BranchRule> = serde_json::from_value(serde_json::json!([
+            {"type": "merge_queue", "parameters": {"merge_method": "SQUASH"}, "ruleset_id": 1},
+            {"type": "required_status_checks", "parameters": {
+                "strict_required_status_checks_policy": false,
+                "required_status_checks": [{"context": "checks", "integration_id": 15368}, {"context": "review"}]
+            }, "ruleset_id": 1},
+            {"type": "deletion"}
+        ]))
+        .unwrap();
+        assert_eq!(
+            required_check_names(&rules).into_iter().collect::<Vec<_>>(),
+            ["checks", "review"]
+        );
+        assert!(required_check_names(&[]).is_empty());
     }
 
     #[test]

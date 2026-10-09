@@ -539,6 +539,11 @@ func TestRefusedEnqueueBecomesAnOverseerItem(t *testing.T) {
 	if _, err := reviewNow(ctx, fixture.daemon, project, publishedReviewRequest()); err == nil {
 		t.Fatal("a refused enqueue reported success")
 	}
+	for range review.RefusalsBeforeEscalation - 1 {
+		if _, err := fixture.daemon.advanceReviewOperations(ctx, false); err != nil {
+			t.Fatal(err)
+		}
+	}
 	op := lastDurableReview(t, fixture.store, project)
 	if op.State != "enqueued" || op.RoutePending || !strings.Contains(op.Escalation, "would not take it") {
 		t.Fatalf("refused enqueue operation = %+v", op)
@@ -734,9 +739,9 @@ func TestStuckSubmitEscalatesOnceAndKeepsResuming(t *testing.T) {
 	}
 }
 
-// An enqueue GitHub refuses with every check passed is escalated once and
-// resent each tick; it is queued when GitHub accepts it, clearing the
-// escalation, and ends when its pull request closes.
+// An enqueue GitHub refuses with every required check passed is resent each
+// tick without escalating; it is queued when GitHub accepts it, and ends when
+// its pull request closes.
 func TestRefusedEnqueueResendsEachTickAndEndsFromThePull(t *testing.T) {
 	fixture, project, _, settle := publishedTask(t)
 	settle()
@@ -753,12 +758,11 @@ func TestRefusedEnqueueResendsEachTickAndEndsFromThePull(t *testing.T) {
 		}
 		return lastDurableReview(t, fixture.store, project)
 	}
-	escalated := lastDurableReview(t, fixture.store, project)
-	if op := tick(); op.State != "enqueued" || op.Escalation != escalated.Escalation || op.Escalation == "" || backend.enqueues != 2 {
+	if op := tick(); op.State != "enqueued" || op.Escalation != "" || op.Refusals != 2 || backend.enqueues != 2 {
 		t.Fatalf("refused again: %+v (enqueues %d)", op, backend.enqueues)
 	}
 	backend.enqueueRefused = false
-	if op := tick(); op.State != "enqueued" || op.Escalation != "" || op.Enqueues != 1 || backend.enqueues != 3 {
+	if op := tick(); op.State != "enqueued" || op.Refusals != 0 || op.Enqueues != 1 || backend.enqueues != 3 {
 		t.Fatalf("accepted: %+v (enqueues %d)", op, backend.enqueues)
 	}
 	backend.pull = &review.Pull{Head: publishedReviewRequest().Head, State: "closed"}
@@ -793,5 +797,25 @@ func TestReviewBindsTheStoredBody(t *testing.T) {
 	fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return backend }
 	if _, err := reviewNow(context.Background(), fixture.daemon, project, publishedReviewRequest()); err != nil || backend.enqueuedBody != "fixture body\n" {
 		t.Fatalf("err=%v enqueued body %q", err, backend.enqueuedBody)
+	}
+}
+
+// Only the checks the base branch's rules require gate the merge: an optional
+// check that fails (CodeQL), is cancelled or never finishes decides nothing.
+func TestOnlyRequiredChecksGateTheMerge(t *testing.T) {
+	failing, pending, err := requiredChecks(json.RawMessage(`{"checks":[
+		{"name":"checks","conclusion":"success","required":true},
+		{"name":"review","conclusion":"skipped","required":true},
+		{"name":"CodeQL","conclusion":"failure","required":false},
+		{"name":"stale lint","conclusion":"cancelled","required":false},
+		{"name":"preview","conclusion":null,"required":false}]}`))
+	if err != nil || len(failing) != 0 || pending {
+		t.Fatalf("optional checks decided: failing=%v pending=%v err=%v", failing, pending, err)
+	}
+	failing, pending, err = requiredChecks(json.RawMessage(`{"checks":[
+		{"name":"checks","conclusion":"failure","required":true},
+		{"name":"ui","conclusion":null,"required":true}]}`))
+	if err != nil || strings.Join(failing, ",") != "checks" || !pending {
+		t.Fatalf("required checks ignored: failing=%v pending=%v err=%v", failing, pending, err)
 	}
 }

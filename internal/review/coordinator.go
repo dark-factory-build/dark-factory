@@ -38,6 +38,7 @@ type Operation struct {
 	Escalation   string    `json:"escalation,omitempty"` // why factoryd cannot advance it: due to the overseer
 	Handled      bool      `json:"handled,omitempty"`    // a failure already retried or escalated
 	Enqueues     int       `json:"enqueues,omitempty"`   // times factoryd put this head in the merge queue
+	Refusals     int       `json:"refusals,omitempty"`   // consecutive passes whose enqueue failed
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
 }
@@ -87,8 +88,8 @@ type Pull struct {
 	State     string // open, closed or merged
 	Mergeable *bool  // nil while GitHub computes it
 	Queued    bool
-	Failing   []string  // checks at the head that finished unsuccessfully
-	Pending   bool      // a check at the head has not finished
+	Failing   []string  // required checks at the head that finished unsuccessfully
+	Pending   bool      // a required check at the head has not finished
 	Group     *GroupRun // the newest completed merge-group run that built the head
 }
 
@@ -123,6 +124,10 @@ func (g *GroupRun) note(head string) string {
 	}
 	return note
 }
+
+// RefusalsBeforeEscalation is how many consecutive passes may fail to
+// enqueue before the overseer is told: 30 minutes at the 5-minute merge tick.
+const RefusalsBeforeEscalation = 6
 
 type Coordinator struct {
 	Store   Store
@@ -238,10 +243,10 @@ func (c Coordinator) Advance(ctx context.Context, op Operation) (Operation, erro
 	case pull.Mergeable != nil && !*pull.Mergeable:
 		op.State, op.RoutePending = "ejected", true
 		op.Detail = fmt.Sprintf("Exact head %s conflicts with %s. Rebase this Change onto origin/%s and resolve the conflict.", head, op.Request.BaseRef, op.Request.BaseRef)
-	case pull.Queued && op.Escalation == "":
+	case pull.Queued && op.Escalation == "" && op.Refusals == 0:
 		return op, nil
 	case pull.Queued:
-		op.Escalation = ""
+		op.Escalation, op.Refusals = "", 0
 	case len(pull.Failing) > 0:
 		op.State, op.RoutePending = "ejected", true
 		op.Detail = fmt.Sprintf("Exact head %s cannot merge. Failing checks: %s.", head, strings.Join(pull.Failing, ", "))
@@ -252,14 +257,16 @@ func (c Coordinator) Advance(ctx context.Context, op Operation) (Operation, erro
 		op.State, op.RoutePending, op.Detail = "ejected", true, pull.Group.note(head)
 	default:
 		if err := c.Backend.Enqueue(ctx, op); err != nil {
-			if op.Escalation != "" {
-				return op, err
+			// A transient failure, or a merge landing between the read and
+			// the write, settles on a later pass; one that persists is
+			// escalated once.
+			if op.Refusals++; op.Refusals == RefusalsBeforeEscalation {
+				op.Escalate(fmt.Sprintf("the merge queue would not take it in %d passes with every required check on that head passing: %v", op.Refusals, err))
 			}
-			op.Escalate("the merge queue would not take it with every check on that head passing: " + err.Error())
 			op.UpdatedAt = c.Now()
 			return op, errors.Join(err, c.Store.Update(ctx, op))
 		}
-		op.Enqueues, op.Escalation = op.Enqueues+1, ""
+		op.Enqueues, op.Refusals, op.Escalation = op.Enqueues+1, 0, ""
 	}
 	op.UpdatedAt = c.Now()
 	return op, c.Store.Update(ctx, op)
