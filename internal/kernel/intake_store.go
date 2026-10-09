@@ -571,47 +571,25 @@ func (store *Store) importIntakeAcceptance(ctx context.Context, id IntakeAccepta
 		return Task{}, tx.Rollback(err)
 	}
 	if accepted.WithdrawnAt != nil {
+		// Importing a withdrawn receipt again lifts its withdrawal (for the
+		// latest content only) and retries its failed or cancelled task in the
+		// same write, through the operator retry: a task that never ran stays
+		// at its work revision, and one a continuation waits on is refused.
 		task, found, err := taskByID(ctx, tx.connection, accepted.TaskID)
 		if err != nil {
 			return Task{}, tx.Rollback(err)
 		}
-		if !found {
+		latest, latestFound, err := latestIntakeAcceptance(ctx, tx.connection, accepted.Snapshot, accepted.ProjectID, accepted.RepositoryID)
+		if err != nil {
+			return Task{}, tx.Rollback(err)
+		}
+		if !found || task.Status != TaskFailed && task.Status != TaskCancelled || !latestFound || latest.ID != accepted.ID {
 			return Task{}, tx.Rollback(ErrConflict)
 		}
-		if task.Status != TaskFailed && task.Status != TaskCancelled || task.AssignedAgentID.zero() {
-			return Task{}, tx.Rollback(ErrConflict)
-		}
-		var active int
-		if err := tx.connection.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM runs WHERE task_id = ? AND phase <> 'terminal')`, task.ID.Bytes()).Scan(&active); err != nil || active != 0 {
-			if err == nil {
-				err = ErrConflict
-			}
+		if _, err := tx.connection.ExecContext(ctx, `UPDATE intake_acceptances SET withdrawn_at_ms = NULL WHERE id = ?`, id.Bytes()); err != nil {
 			return Task{}, tx.Rollback(err)
 		}
-		if _, err := tx.connection.ExecContext(ctx, `UPDATE intake_acceptances SET withdrawn_at_ms = NULL WHERE id = ? AND withdrawn_at_ms IS NOT NULL`, id.Bytes()); err != nil {
-			return Task{}, tx.Rollback(err)
-		}
-		next := task.WorkRevision.Int64() + 1
-		if _, err := tx.connection.ExecContext(ctx, `UPDATE tasks SET status = 'queued', work_revision = ?, blocked_reason = NULL, result = NULL, completed_at_ms = NULL, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND revision = ? AND status IN ('failed', 'cancelled')`, next, at.Int64(), task.ID.Bytes(), task.Revision.Int64()); err != nil {
-			return Task{}, tx.Rollback(err)
-		}
-		if err := carryPrerequisites(ctx, tx.connection, task, next); err != nil {
-			return Task{}, tx.Rollback(err)
-		}
-		if err := appendInvalidations(ctx, tx.connection, at, []pendingInvalidation{{kind: EntityTask, id: task.ID.Bytes(), revision: task.Revision.Int64() + 1}}); err != nil {
-			return Task{}, tx.Rollback(err)
-		}
-		value, found, err := taskByID(ctx, tx.connection, task.ID)
-		if err != nil || !found {
-			if err == nil {
-				err = ErrCorruptState
-			}
-			return Task{}, tx.Rollback(err)
-		}
-		if err := tx.Commit(ctx); err != nil {
-			return Task{}, err
-		}
-		return value, nil
+		return store.retryTaskTx(ctx, tx, nil, task.ID, task.Revision, AgentID{}, at, 0)
 	}
 	if len(expectedSource) > 1 {
 		return Task{}, tx.Rollback(ErrInvalidValue)

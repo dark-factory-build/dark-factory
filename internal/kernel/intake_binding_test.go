@@ -127,13 +127,19 @@ func TestCancelledIntakeCanBeWithdrawnThenImported(t *testing.T) {
 	if _, err := store.writer.ExecContext(ctx, `UPDATE tasks SET status = 'cancelled', completed_at_ms = ?, updated_at_ms = ? WHERE id = ?`, 42, 42, task.ID.Bytes()); err != nil {
 		t.Fatal(err)
 	}
+	// It never ran, so it is queued again at its work revision, and the next
+	// validated write still finds the history consistent.
 	requeued, err := store.ImportIntakeAcceptance(ctx, accepted.ID, mustTime(t, 43), source)
-	if err != nil || requeued.Status != TaskQueued || requeued.WorkRevision.Int64() != task.WorkRevision.Int64()+1 {
+	if err != nil || requeued.Status != TaskQueued || requeued.WorkRevision != task.WorkRevision {
 		t.Fatalf("reimported intake task: %+v %v", requeued, err)
 	}
 	current, found, err := store.IntakeAcceptance(ctx, accepted.ID)
 	if err != nil || !found || current.WithdrawnAt != nil {
 		t.Fatalf("reimported acceptance: %+v %v %v", current, found, err)
+	}
+	priority := int64(3)
+	if _, err := store.UpdateTaskForOperator(ctx, requeued.ID, requeued.Revision, TaskPatch{Priority: &priority}, mustTime(t, 44)); err != nil {
+		t.Fatalf("next validated write after reimport: %v", err)
 	}
 }
 

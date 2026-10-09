@@ -5,20 +5,24 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"slices"
 )
 
-// v35UserVersion is the one earlier version Open migrates. v36 has the same
-// schema; it drops the review-operation state 'enqueuing', so a v35 home's
-// operations in it become 'enqueued', where each pass ensures the exact head
-// is queued.
-const v35UserVersion = 35
+// v36UserVersion is the one earlier version Open migrates: v37 added
+// task_automatic_events and changed nothing else.
+const v36UserVersion = 36
 
-// validateOpenableSnapshot accepts a current database or an exact v35 one.
+func v36SchemaStatements() []string {
+	return slices.DeleteFunc(slices.Clone(schemaStatements), func(statement string) bool { return statement == taskAutomaticEventsTable })
+}
+
+// validateOpenableSnapshot accepts a current database or an exact v36 one,
+// whose durable controls are checked inside the migration before it commits.
 func validateOpenableSnapshot(ctx context.Context, connection *sql.Conn) error {
 	if _, version, err := inspectIdentity(ctx, connection); err != nil {
 		return err
-	} else if version == v35UserVersion {
-		if err := validateSchemaVersion(ctx, connection, version, schemaStatements); err != nil {
+	} else if version == v36UserVersion {
+		if err := validateSchemaVersion(ctx, connection, version, v36SchemaStatements()); err != nil {
 			return err
 		}
 		if err := validateIntegrity(ctx, connection); err != nil {
@@ -40,7 +44,7 @@ func validateContentGitPins(ctx context.Context, connection *sql.Conn) error {
 	return nil
 }
 
-// migrateLegacy takes an exact v35 home to the current schema in one
+// migrateLegacy takes an exact v36 home to the current schema in one
 // transaction, or leaves it byte-untouched and refuses; it refuses any other
 // earlier version. Open calls it with the writer before the store is
 // published, and before refreshing its pinned sidecar facts, which the
@@ -59,23 +63,22 @@ func (store *Store) migrateLegacy(ctx context.Context) error {
 	switch version {
 	case userVersion:
 		return connection.Close()
-	case v35UserVersion:
+	case v36UserVersion:
 	default:
 		return errors.Join(fmt.Errorf("%w: home is at user_version %d, this build requires %d", ErrForeignDatabase, version, userVersion), connection.Close())
 	}
-	if err := migrateTransaction(ctx, connection, migrateV35); err != nil {
+	if err := migrateTransaction(ctx, connection, migrateV36); err != nil {
 		releaseUncertainConnection(connection)
 		return err
 	}
 	return connection.Close()
 }
 
-func migrateV35(ctx context.Context, connection *sql.Conn) error {
-	if err := validateSchemaVersion(ctx, connection, v35UserVersion, schemaStatements); err != nil {
+func migrateV36(ctx context.Context, connection *sql.Conn) error {
+	if err := validateSchemaVersion(ctx, connection, v36UserVersion, v36SchemaStatements()); err != nil {
 		return err
 	}
-	for _, statement := range []string{`UPDATE production_records SET document = json_set(document, '$.state', 'enqueued')
-        WHERE kind = 'reviewer' AND json_extract(document, '$.state') = 'enqueuing'`, fmt.Sprintf("PRAGMA user_version = %d", userVersion)} {
+	for _, statement := range []string{taskAutomaticEventsTable, fmt.Sprintf("PRAGMA user_version = %d", userVersion)} {
 		if _, err := connection.ExecContext(ctx, statement); err != nil {
 			return err
 		}
