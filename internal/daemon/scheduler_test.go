@@ -3,6 +3,7 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -128,6 +129,34 @@ func TestSchedulerWakeAndPollCannotRaceHeldUnobservedProbe(t *testing.T) {
 	cancel()
 	if err := waitSchedulerDone(t, done); err != nil {
 		t.Fatalf("scheduler shutdown = %v", err)
+	}
+}
+
+// Shutdown cancels a scheduler write that may be waiting in BEGIN IMMEDIATE.
+// That BEGIN wrote nothing, so its error is the shutdown, not an unknown
+// outcome that RunScheduler must report (the merge-queue flake).
+func TestSchedulerShutdownDuringBeginIsCleanShutdown(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "kernel.sqlite")
+	store, err := createTestStore(context.Background(), path, kernel.FactoryConfig{DispatchEnabled: true, Capacity: 2}, schedulerTime(t, 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	lock, err := sql.Open("sqlite3", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	lock.SetMaxOpenConns(1)
+	if _, err := lock.Exec("BEGIN IMMEDIATE"); err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Exec("ROLLBACK")
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(100*time.Millisecond, cancel)
+	_, err = store.PromoteQueuedContinuations(ctx, schedulerTime(t, 2))
+	if err == nil || !schedulerOnlyCancellation(err, ctx.Err()) {
+		t.Fatalf("cancelled BEGIN = %v, want a clean shutdown", err)
 	}
 }
 

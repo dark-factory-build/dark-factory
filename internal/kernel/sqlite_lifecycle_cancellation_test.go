@@ -79,8 +79,8 @@ func TestCallerCancellationDuringBeginKeepsTheRetainedWriterSet(t *testing.T) {
 			t.Fatalf("cancelled BEGIN error = %v, want context.Canceled", beginErr)
 		}
 		var unknown *OutcomeUnknownError
-		if !errors.As(beginErr, &unknown) {
-			t.Fatalf("cancelled BEGIN error = %v, want OutcomeUnknownError", beginErr)
+		if errors.As(beginErr, &unknown) {
+			t.Fatalf("cancelled BEGIN error = %v; BEGIN writes nothing, so its outcome is known", beginErr)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("cancelled BEGIN did not return while the write lock was held")

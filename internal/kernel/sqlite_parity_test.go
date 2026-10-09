@@ -509,7 +509,7 @@ func assertFaultConnectionRetained(t *testing.T, plan *storeFaultPlan, currentID
 	}
 }
 
-func TestConcreteStoreAmbiguousBeginAndCommitAreNotReplayed(t *testing.T) {
+func TestConcreteStoreFailedBeginAndAmbiguousCommitAreNotReplayed(t *testing.T) {
 	tests := []struct {
 		name             string
 		fault            storeFaultKind
@@ -535,8 +535,10 @@ func TestConcreteStoreAmbiguousBeginAndCommitAreNotReplayed(t *testing.T) {
 			plan.arm(test.fault)
 			if _, err := store.SetDispatch(context.Background(), mustRevision(t, 1), true, mustTime(t, 2)); err == nil {
 				t.Fatal("faulted SetDispatch succeeded")
-			} else {
+			} else if begin := test.fault == storeFaultBeginBefore || test.fault == storeFaultBeginAfter; !begin {
 				requireStoreOutcomeUnknown(t, err)
+			} else if unknown := (*OutcomeUnknownError)(nil); errors.As(err, &unknown) || !errors.Is(err, errInjectedSQLiteResponse) {
+				t.Fatalf("failed BEGIN = %v, want a known outcome", err)
 			}
 			assertFaultWriterDisposition(t, store, plan, test.wantRetained)
 			state, err := store.Factory(context.Background())
