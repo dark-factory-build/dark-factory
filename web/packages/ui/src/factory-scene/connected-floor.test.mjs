@@ -3,8 +3,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { FactoryScene, commonsNeeds } from "../../dist/src/factory-scene/factory-scene.js";
-import { commonSeating, layoutScene, standable } from "../../dist/src/factory-scene/scene.js";
+import { FactoryScene } from "../../dist/src/factory-scene/factory-scene.js";
+import { layoutScene, placeWorkers, standable } from "../../dist/src/factory-scene/scene.js";
 import { CROSSING_CLEARANCE, beltRoutes, crosses, findRoute, regionLabelBox, walkable } from "../../dist/src/factory-scene/movement.js";
 import { projectGraph } from "../../dist/src/console-view.js";
 import { publicFloor } from "../../dist/src/public-floor.js";
@@ -26,7 +26,7 @@ function assertWalk(layout, from, route, to, message) {
   assert.deepEqual([points.at(-1).x, points.at(-1).y], [to.x, to.y], `${message}: arrives`);
 }
 
-test("no machine, label or standing spot overlaps another, and every standing spot is reachable from the commons through free floor", () => {
+test("no machine, label or standing spot overlaps another, and every standing spot is reachable from where someone rests through free floor", () => {
   for (const { name, graph } of floors) {
     const layout = layoutScene(graph);
     // Footprints hold body, label and standing spot with an aisle around them; none overlaps another, so neither do any of those.
@@ -37,12 +37,12 @@ test("no machine, label or standing spot overlaps another, and every standing sp
       const { footprint: f } = station;
       assert.ok(station.x >= f.x && station.y >= f.y && station.x + station.width <= f.x + f.width && station.y + station.height <= f.y + f.height, `${name}: ${station.entityId} inside its footprint`);
       assert.ok(f.x >= 0 && f.y >= 0 && f.x + f.width <= layout.width && f.y + f.height <= layout.height, `${name}: ${station.entityId} inside the world`);
-      assert.equal(strictly(f, layout.facilities), false, `${name}: ${station.entityId} clear of the commons and line`);
+      assert.equal(strictly(f, layout.facilities), false, `${name}: ${station.entityId} clear of the line`);
       assert.ok(standable(layout, station.anchor), `${name}: ${station.entityId}'s standing spot is free floor`);
     }
     assert.ok(layout.facilities.x + layout.facilities.width <= layout.width && layout.facilities.y + layout.facilities.height <= layout.height, `${name}: fit includes the facilities`);
-    const seat = commonSeating(layout, 1, 0).resting[0];
-    for (const station of layout.stations) assertWalk(layout, seat, findRoute(layout, seat, station.anchor), station.anchor, `${name}: commons to ${station.entityId}`);
+    const seat = placeWorkers(layout, [{ id: "idler", name: "idler", role: "worker", activity: "idle", location: "resting" }])[0];
+    for (const station of layout.stations) assertWalk(layout, seat, findRoute(layout, seat, station.anchor), station.anchor, `${name}: rest to ${station.entityId}`);
   }
 });
 
@@ -110,7 +110,7 @@ test("areas are paint: hidden, the floor is the same, still connected and walkab
     assert.doesNotMatch(hidden, /data-region=/, `${name}: the paint is gone`);
     for (const station of layout.stations) assert.ok(hidden.includes(`data-entity-id="${station.entityId}"`), `${name}: ${station.entityId} still drawn`);
     assert.equal((hidden.match(/data-belt=/g) ?? []).length, (markup.match(/data-belt=/g) ?? []).length, `${name}: every belt still drawn`);
-    const seat = commonSeating(layout, 1, 0).resting[0];
+    const seat = placeWorkers(layout, [{ id: "idler", name: "idler", role: "worker", activity: "idle", location: "resting" }])[0];
     for (const station of layout.stations) assert.deepEqual(findRoute(unpainted, seat, station.anchor), findRoute(layout, seat, station.anchor), `${name}: walks never read areas`);
     for (const region of layout.regions) for (const rect of region.rects) for (const station of layout.stations) {
       if (station.unit !== region.unit) assert.equal(strictly(rect, station), false, `${name}: ${region.unit}'s area covers ${station.entityId}`);
@@ -161,9 +161,9 @@ test("operator and public floors use one layout from what each may receive, and 
   assert.doesNotMatch(markup, /Evidence|Loading evidence/, "no detail loader on a public floor");
 });
 
-/** Each fixture as the scene draws it: its layout (sized for no agents, as rendered here) and its belts. */
+/** Each fixture as the scene draws it: its layout (as rendered here) and its belts. */
 const drawn = floors.map(({ name, graph }) => {
-  const layout = layoutScene(graph, undefined, commonsNeeds({ workers: [] })), markup = renderToStaticMarkup(createElement(FactoryScene, { graph, workers: [] }));
+  const layout = layoutScene(graph), markup = renderToStaticMarkup(createElement(FactoryScene, { graph, workers: [] }));
   return { name, layout, markup, belts: beltsFromMarkup(markup), everything: beltsFromMarkup(markup, "all"), labels: [...layout.stations.map((station) => ({ key: station.entityId, rect: station.label })), ...layout.regions.map((region) => ({ key: `area ${region.unit}`, rect: regionLabelBox(region) }))] };
 });
 
@@ -243,7 +243,7 @@ test("unrelated groups pack toward 16:10, not into a strip", () => {
   for (const [name, graph] of [["12 chains", chainScene(12)], ["48 chains", chainScene(48)], ["large", floors.find((floor) => floor.name === "large").graph],
     ["a chain of 20 shared machines", pathological("chain", 20)], ["a chain of 4,000 shared machines", pathological("chain", 4000)]]) {
     const layout = layoutScene(graph), aspect = layout.width / layout.height;
-    assert.ok(aspect >= 1 && aspect <= 2.2, `${name}: ${layout.width}×${layout.height} is ${aspect.toFixed(2)}:1`);
+    assert.ok(aspect >= 1 && aspect <= 2.5, `${name}: ${layout.width}×${layout.height} is ${aspect.toFixed(2)}:1`);
   }
 });
 

@@ -3,12 +3,12 @@ import { hash } from "./appearance.js";
 import type { ScenePoint, SceneWorker } from "./scene.js";
 
 /**
- * What goes on in the break room when nobody is asking anything of it: a cat,
+ * What goes on beside the machines when nobody is asking anything of anyone: a cat,
  * and small talk between neighbours. All of it is a function of the floor's
  * clock and who is sitting where; it is never stored, served or sent.
  */
 
-/** One seat of the break room's first table, left to right. `free` people are seated, still, and not asking for anyone. */
+/** One place someone rests beside a machine, left to right. `free` people are seated, still, and not asking for anyone. */
 export type Seat = ScenePoint & Readonly<{ id?: string; free?: boolean }>;
 
 export type Cat = ScenePoint & Readonly<{

@@ -31,7 +31,7 @@ Work was mapped onto the tree by changed paths. `RUN_PATHS` sampled a running
 Change's touched directories, and the UI matched those to the deepest room.
 
 Everything that brings the floor to life was independent of that tree:
-movement, idle life, the break room and cat, messages and peer questions,
+movement, idle life, the cat and coffee, messages and peer questions,
 sprites, worker identity, reviewers and the production panel. That code
 survives.
 
@@ -46,7 +46,7 @@ whether it was happening, or whether we could even tell.
 | Worker sprites, identity, appearance, sprite editor | `layoutScene`, `composeRoom`: rooms from directories | `internal/topology` graph, IDs and inventories |
 | `movement.ts` routing over doors and corridors | `wires()`: import cables become flow lines between machines | `internal/daemon/topology.go`, the `projectTopology` wire builder |
 | `idle-life.ts` (cat, chatter), `messages.ts` (paper, peer pulses) | `console-view.ts` floor selection: units and halls replace room selection | `TOPOLOGY_GET` / `TOPOLOGY`, client decode, fixtures |
-| Break room, errands, commons, its board/Missions/Tasks/Library implements | `runFootprint`: changed paths now map to operational nodes | Name-based `responsibility()` motifs, file-count `equipmentScale` |
+| Errands and the board/Missions/Tasks/Library fixtures | `runFootprint`: changed paths now map to operational nodes | Name-based `responsibility()` motifs, file-count `equipmentScale` |
 | Reviewer pseudo-workers | Proposal relationships: import deltas give way to changed operational nodes | Inventory inspector, `source_files`, the "detail" grouping setting |
 | `RUN_PATHS` sampling, the production panel and its delivery data | Floor legend and help | `FACTORY_FLOOR.md` |
 | Camera, scrolling, search, inspector shell, reduced motion | | Knowledge `entities` validation and context paths now resolve through operational node IDs and their sources (`kernel/knowledge.go`, `daemon/knowledge.go`, `daemon/knowledge_context.go`, the Library form). The live database held zero entity references on 7 Oct 2026 (5 revisions checked). |
@@ -727,8 +727,7 @@ Approach (`factory-scene/scene.ts`, `factory-scene/movement.ts`; nothing in
    shelves, tallest first, with a gap that keeps unrelated groups visibly
    apart; the shelf width is the one that keeps the floor smallest and
    nearest 16:10 (chains of unrelated units do not make a strip). The
-   development block (the commons, its work tables and the outbound line)
-   goes last, at the bottom, at a fixed width. Only IDs, kinds, labels,
+   outbound line's block goes last, at the bottom, at a fixed size. Only IDs, kinds, labels,
    ownership and flows enter; traffic, state, workers, the agent count and
    the pane never do, so input order, a busy hour, zoom or a resize cannot
    move anything.
@@ -740,12 +739,10 @@ Approach (`factory-scene/scene.ts`, `factory-scene/movement.ts`; nothing in
    quarter of the stations would be placed afresh, the floor is laid out cold
    again. Nothing is stored: a reload lays the same structure out exactly
    as before, and only a structural change between sessions (machines,
-   flows or ownership) can rebuild it. The agent count only furnishes the
-   development block, which grows downward from where it stands, below
-   everything; nothing new is ever placed under it.
+   flows or ownership) can rebuild it. Neither the agent count nor
+   which fixtures are offered moves anything.
 4. **Walking.** One geometry serves placement, solids, interaction positions
-   and navigation. Machine bodies, the commons tables and the break-room
-   implements are solid; labels, belts, area tints and the work line are
+   and navigation. Machine bodies and the fixtures are solid; labels, belts, area tints and the work line are
    floor markings. Workers walk an occupancy grid (6 px cells; a cell is
    free when a worker anywhere in it clears every solid) with
    diagonal steps that never cut a corner, then the path is pulled straight
@@ -792,16 +789,16 @@ Approach (`factory-scene/scene.ts`, `factory-scene/movement.ts`; nothing in
    its top left, in floor its own footprints leave clear, and neighbouring
    areas never share a hue while the palette of eight allows.
 
-**The development neighbourhood** is the commons (break room and work
-tables) with the outbound line right below it. Its size comes from its
-contents: a seat and a table place for every agent at rest, the work tables
-for half of them, four to a table, and only the implements the floor offers
-(board, missions, tasks, library, and coffee with scenery on). It is
-always as wide, and sits at the bottom of the floor, so a different agent
-count only makes it taller, downward, and never moves a machine or a belt.
-Which agents are busy never changes it.
-Anyone beyond its seats (a reviewer passing through) sits on a bench below
-the floor.
+**Fixtures and rest.** There is no break room. The five fixtures (board,
+Missions, task tray, library, coffee) are placed once the machines are, each
+in the free floor nearest the middle of the machinery, in a fixed order: between
+machines when there is a gap, below them when there is none. Only the machines
+decide it, so who is at work, which fixtures a floor offers or how many agents
+there are never moves a fixture or a machine. A worker not at work (resting,
+planning, outside the machines shown, or with its machine full) stands beside
+a machine: the one it last worked at, else beside someone who is alone, else
+the first free one. Rows fan out beside it and then below it, with no cap on
+how many. The outbound line has a block of its own, with a fixed size.
 
 Trade-offs: the greedy placement is not an optimiser. It keeps related
 machines close and the floor compact on the fixtures, but a long chain or a
@@ -834,9 +831,9 @@ The plant is what the software does. Workers are what agents do to it.
   the paths (longest prefix). With no node match it falls back to the unit
   whose source root contains them. The worker walks to that machine and
   works there.
-- With no sample, the worker waits at the planning tables. With no task, the
-  worker rests in the commons, or beside its unit's main line when rest is
-  set to nearby.
+- With no sample, the worker waits beside the machine its unit names. With no task, the
+  worker rests beside the machine it last worked at, else beside a machine
+  with someone alone, else the first free one.
 - Reviewers carry a clipboard at the changed machines. CI and checks show on
   the outbound line's Checks station while the Change's checks run. A merge followed by a
   deploy observation for that unit plays the changeover.

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createElement } from "react";
 import { act, create } from "react-test-renderer";
-import { FactoryScene, commonsNeeds } from "../../dist/src/factory-scene/factory-scene.js";
+import { FactoryScene, offeredFixtures } from "../../dist/src/factory-scene/factory-scene.js";
 import { breakRoomNook, layoutScene, placeWorkers } from "../../dist/src/factory-scene/scene.js";
 import { findRoute } from "../../dist/src/factory-scene/movement.js";
 import { workerFrames } from "../../dist/src/factory-scene/appearance.js";
@@ -87,7 +87,7 @@ test("the floor sends a question along the walk between them, its answer back, a
     { id: "margaret", name: "Margaret", role: "worker", provider: "codex", activity: "busy", location: "unobserved" },
   ];
   const tasks = [task("t-ada", "ada", "running"), task("t-grace", "grace", "running"), task("t-linus", "linus", "queued"), task("t-margaret", "margaret", "queued")];
-  // The walk is the one on the floor as drawn: its commons is sized by who is on it.
+  // The walk is the one on the floor as drawn: its fixtures stand where the machines leave room.
   const drawn = () => renderer.root.find((node) => node.type.name === "SceneWorkers").props.layout;
   const walk = () => { const layout = drawn(), placements = placeWorkers(layout, workers); return { placements, route: findRoute(layout, placements.find(({ id }) => id === "ada"), placements.find(({ id }) => id === "grace")) }; };
   const onRoute = (point) => { const { placements, route } = walk(); let from = placements.find(({ id }) => id === "ada"); for (const to of route.points) { const d = Math.hypot(to.x - from.x, to.y - from.y), d1 = Math.hypot(point.x - from.x, point.y - from.y), d2 = Math.hypot(to.x - point.x, to.y - point.y); if (Math.abs(d1 + d2 - d) < 0.01) return true; from = to; } return false; };
@@ -304,7 +304,7 @@ test("a recorded read sends an idle worker to the shelf once; a busy one stays p
   const pose = (id) => renderer.root.findByProps({ "data-worker-id": id }).findAllByType("use").map((use) => use.props.href);
   // Scenery off: no ambient errands, so any walk to the shelf is the recorded one. The floor offers its library and board.
   const offers = { onOpenLibrary() {}, onOpenBoard() {} };
-  const stand = breakRoomNook(layoutScene(graph, undefined, commonsNeeds({ workers, appearance: { scenery: "off" }, ...offers }))).furniture.find((piece) => piece.errand === "shelf").stand;
+  const stand = breakRoomNook(layoutScene(graph, undefined, offeredFixtures({ workers, appearance: { scenery: "off" }, ...offers }))).furniture.find((piece) => piece.errand === "shelf").stand;
   const scene = (props) => createElement(FactoryScene, { graph, workers, tasks, appearance: { scenery: "off", animation: "follow-device" }, ...offers, ...props });
   // Counts arrivals at the shelf over a stretch of floor time.
   const watch = async (ms) => { let arrivals = 0, there = where("linus") === `translate(${stand.x} ${stand.y})`; for (let spent = 0; spent < ms; spent += 50) { await tick(50); const at = where("linus") === `translate(${stand.x} ${stand.y})`; if (at && !there) arrivals += 1; there = at; } return arrivals; };
@@ -332,7 +332,7 @@ test("a recorded read sends an idle worker to the shelf once; a busy one stays p
     const xy = (node) => node.props.transform.match(/translate\(([-\d.]+) ([-\d.]+)\)/).slice(1).map(Number);
     const box = ([x, y]) => ({ left: x - 9, right: x + 9, top: y - 9, bottom: y + 9 });
     const [overHead, overImplement] = [xy(cues("agent").find((node) => node.props["data-knowledge-key"] === "r1")), xy(cues("board")[0])];
-    const nook = breakRoomNook(layoutScene(graph, undefined, commonsNeeds({ workers, appearance: { scenery: "off" }, ...offers }))).furniture, board = nook.find((piece) => piece.errand === "board");
+    const nook = breakRoomNook(layoutScene(graph, undefined, offeredFixtures({ workers, appearance: { scenery: "off" }, ...offers }))).furniture, board = nook.find((piece) => piece.errand === "board");
     const signs = { board: "BOARD", missions: "MISSIONS", tasks: "TASKS", shelf: "LIBRARY" };
     for (const piece of nook.filter((item) => signs[item.errand])) {
       // The sign: 4 sprite units of text, scaled to the floor, under the implement's 16-unit frame.

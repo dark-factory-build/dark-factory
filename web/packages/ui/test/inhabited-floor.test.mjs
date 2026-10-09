@@ -173,7 +173,7 @@ test("thirty proposals draw no floor Changes button or Help", async () => {
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   const records = Array.from({ length: 30 }, (_, i) => record(String(i + 1), [{ status: "modified", path: "internal/alpha/movement.go" }]));
   const changes = items(records), selected = [];
-  const props = { state: { projects, agents: new Map(), tasks: new Map(), humanRequests: new Map() }, graphs: new Map([[project.id, graphWith(base(2))]]), changes, floorAppearance: { social: "nearby" }, onSelectChange: (id) => selected.push(id) };
+  const props = { state: { projects, agents: new Map(), tasks: new Map(), humanRequests: new Map() }, graphs: new Map([[project.id, graphWith(base(2))]]), changes, onSelectChange: (id) => selected.push(id) };
   const text = (value) => typeof value === "string" ? value : (value.children ?? []).map(text).join("");
   let tree;
   try {

@@ -133,7 +133,7 @@ stopping current work, and Show archived lets you inspect or restore a drained
 worker without erasing its history. Factory capacity counts workers; one
 overseer can run alongside them.
 
-In the floor's break room, select the task tray for **Tasks**, the planning
+On the floor, select the task tray for **Tasks**, the planning
 table for **Missions**, the board or the bookshelf. A mission records an
 objective and acceptance criteria for an overseer; its related work remains
 inspectable after workers finish. **Pause new work** stops new admission while

@@ -986,7 +986,6 @@ function FloorAppearanceSection({ appearance, onChange, onReset }: {
     <h3>Floor appearance</h3>
     <p>Saved in this browser.</p>
     <label>Scenery<select value={appearance.scenery} onChange={(event) => onChange({ ...appearance, scenery: event.currentTarget.value as FloorAppearance["scenery"] })}><option value="off">Off</option><option value="subtle">Subtle</option><option value="rich">Rich</option></select></label>
-    <label>Social furniture<select value={appearance.social ?? "nearby"} onChange={(event) => onChange({ ...appearance, social: event.currentTarget.value as FloorAppearance["social"] })}><option value="nearby">Within the base</option><option value="commons">Common tables</option></select></label>
     <label>Animation<select value={appearance.animation} onChange={(event) => onChange({ ...appearance, animation: event.currentTarget.value as FloorAppearance["animation"] })}><option value="follow-device">Follow device</option><option value="off">Off</option></select></label>
     <button type="button" onClick={onReset}>Reset floor appearance</button>
   </section>;
