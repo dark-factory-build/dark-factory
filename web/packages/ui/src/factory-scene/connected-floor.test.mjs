@@ -151,8 +151,8 @@ test("disconnected, external and unexplained components stay visibly apart and n
 test("operator and public floors use one layout from what each may receive, and the public one carries no private detail", () => {
   const { wire } = floors.find((floor) => floor.name === "multi-repo");
   const world = { generated_at: 1, summary: wire.summary, workers: [], crates: [],
-    nodes: wire.nodes.map((node) => ({ id: node.id, kind: node.kind, label: node.label, ...(node.unit === undefined ? {} : { unit: node.unit }), ...(node.trigger === undefined ? {} : { trigger: node.trigger }), evidence: node.evidence, observation: node.observation, state: node.state, activity: "none" })),
-    edges: wire.edges.map((edge) => ({ from: edge.from, to: edge.to, kind: edge.kind, evidence: edge.evidence, observation: edge.observation, state: edge.state, activity: "none" })) };
+    nodes: wire.nodes.map((node) => ({ id: node.id, kind: node.kind, label: node.label, ...(node.unit === undefined ? {} : { unit: node.unit }), ...(node.trigger === undefined ? {} : { trigger: node.trigger }), evidence: node.evidence, observation: node.observation, state: node.state, rate_per_hour: 0 })),
+    edges: wire.edges.map((edge) => ({ from: edge.from, to: edge.to, kind: edge.kind, evidence: edge.evidence, observation: edge.observation, state: edge.state, rate_per_hour: 0 })) };
   const operator = layoutScene(project(wire)), shown = publicFloor(world);
   assert.deepEqual(layoutScene(shown.graph).stations.map(({ entityId: key, x, y }) => [key, x, y]), operator.stations.map(({ entityId: key, x, y }) => [key, x, y]), "the same structure lays out the same");
   assert.deepEqual(shown.graph.sources, []);

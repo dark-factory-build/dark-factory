@@ -11,16 +11,17 @@ import (
 	"strings"
 )
 
-// PublicWorld is the safe projection of one factory. It is an allowlist:
-// kinds, shape, coverage, bucketed activity and where workers are, never
-// labels, paths, selectors, hosts, routes, versions, people or task text.
+// PublicWorld is the safe projection of one factory. Nodes from repositories
+// GitHub serves anonymously keep their real static labels, source paths and
+// rates; everything else is shape under ordinal names and bucketed rates.
+// Selectors, versions, people, task text and errors never appear.
 type PublicWorld struct {
 	GeneratedAt int64          `json:"generated_at"`
 	Summary     Summary        `json:"summary"`
 	Nodes       []PublicNode   `json:"nodes"`
 	Edges       []PublicEdge   `json:"edges"`
 	Workers     []PublicWorker `json:"workers"`
-	// Crates is the outbound work line: never a title, number or branch.
+	// Crates is the outbound work line: number and title only for public repositories.
 	Crates []PublicCrate `json:"crates"`
 	// Ledger is present only when a repository is public on GitHub, and then
 	// carries only that repository's public work.
@@ -29,16 +30,23 @@ type PublicWorld struct {
 
 // Crate is one pull request on the outbound line: Key names it privately,
 // Station is REVIEW 0, CHECKS 1, MERGE QUEUE 2 or SHIPPED 3.
+// Repository is its lowercase owner/name; Number and Title are published
+// only when that repository is named.
 type Crate struct {
-	Key     string
-	Station int
-	Fault   bool
+	Key        string
+	Station    int
+	Fault      bool
+	Repository string
+	Number     uint64
+	Title      string
 }
 
 type PublicCrate struct {
 	ID      string `json:"id"`
 	Station int    `json:"station"`
 	Fault   bool   `json:"fault,omitempty"`
+	Number  uint64 `json:"number,omitempty"`
+	Title   string `json:"title,omitempty"`
 }
 
 // PublicLedger is what is already public on GitHub about the factory's public
@@ -86,19 +94,21 @@ type PublicNode struct {
 	Evidence    string `json:"evidence"`
 	Observation string `json:"observation"`
 	State       string `json:"state"`
-	Activity    string `json:"activity"` // none | low | medium | high
+	// RatePerHour is exact for a named node, else one of 0, 30, 600, 6000.
+	RatePerHour float64  `json:"rate_per_hour"`
+	Paths       []string `json:"paths,omitempty"` // named nodes only
 	// Deployed says a changeover was observed in the last day; never when.
 	Deployed bool `json:"deployed,omitempty"`
 }
 
 type PublicEdge struct {
-	From        string `json:"from"`
-	To          string `json:"to"`
-	Kind        string `json:"kind"`
-	Evidence    string `json:"evidence"`
-	Observation string `json:"observation"`
-	State       string `json:"state"`
-	Activity    string `json:"activity"`
+	From        string  `json:"from"`
+	To          string  `json:"to"`
+	Kind        string  `json:"kind"`
+	Evidence    string  `json:"evidence"`
+	Observation string  `json:"observation"`
+	State       string  `json:"state"`
+	RatePerHour float64 `json:"rate_per_hour"`
 }
 
 // PublicWorker is one agent: what it is doing and which unit it is at.
@@ -134,24 +144,40 @@ func publicName(node Node, runtimes map[string]string) string {
 }
 
 // Public projects the live graph with an operator secret: IDs are keyed
-// hashes, so they are stable for this factory and meaningless elsewhere;
-// labels are ordinals in hashed-ID order, so they do not shift as other
-// nodes come and go. Time is bucketed to five minutes.
-func Public(live Live, secret []byte, workers []Worker, crates []Crate, now int64) PublicWorld {
+// hashes, so they are stable for this factory and meaningless elsewhere.
+// named holds the repository IDs and lowercase owner/names GitHub serves
+// anonymously. A node whose every source is in named keeps its label, paths
+// and exact rate; any other node (private, or runtime-only with no source)
+// gets an ordinal label, in hashed-ID order so it does not shift as other
+// nodes come and go, and a bucketed rate. Time is bucketed to five minutes.
+func Public(live Live, secret []byte, workers []Worker, crates []Crate, named map[string]bool, now int64) PublicWorld {
 	id := func(raw string) string {
 		mac := hmac.New(sha256.New, secret)
 		mac.Write([]byte(raw))
 		return hex.EncodeToString(mac.Sum(nil)[:16])
 	}
 	runtimes := map[string]string{}
+	open := map[string]bool{} // raw node ID
 	for _, node := range live.Graph.Nodes {
 		runtimes[node.ID] = node.Runtime
+		places := append(append([]Location{}, node.Sources...), node.Modules...)
+		open[node.ID] = len(places) > 0
+		for _, place := range places {
+			open[node.ID] = open[node.ID] && named[place.Repository]
+		}
 	}
 	nodes := make([]PublicNode, 0, len(live.Graph.Nodes))
+	real := map[string]bool{} // hashed ID
 	for _, node := range live.Graph.Nodes {
 		status := live.Nodes[node.ID]
 		item := PublicNode{ID: id(node.ID), Kind: node.Kind, Label: publicName(node, runtimes), Runtime: node.Runtime, Trigger: node.Trigger, Evidence: State(node.Evidence),
-			Observation: status.Observation, State: status.State, Activity: activity(status), Deployed: status.DeployedAt > now-24*60*60_000}
+			Observation: status.Observation, State: status.State, RatePerHour: rate(status, open[node.ID]), Deployed: status.DeployedAt > now-24*60*60_000}
+		if open[node.ID] {
+			real[item.ID], item.Label = true, node.Label
+			for _, source := range node.Sources {
+				item.Paths = append(item.Paths, source.Path)
+			}
+		}
 		if node.Unit != "" {
 			item.Unit = id(node.Unit)
 		}
@@ -160,13 +186,15 @@ func Public(live Live, secret []byte, workers []Worker, crates []Crate, now int6
 	sort.Slice(nodes, func(i, j int) bool { return nodes[i].ID < nodes[j].ID })
 	ordinal := map[string]int{}
 	for index := range nodes {
-		ordinal[nodes[index].Label]++
-		nodes[index].Label += " " + strconv.Itoa(ordinal[nodes[index].Label])
+		if !real[nodes[index].ID] {
+			ordinal[nodes[index].Label]++
+			nodes[index].Label += " " + strconv.Itoa(ordinal[nodes[index].Label])
+		}
 	}
 	edges := []PublicEdge{}
 	for _, edge := range live.Graph.Edges {
 		status := live.Edges[[3]string{edge.From, edge.To, string(edge.Kind)}]
-		edges = append(edges, PublicEdge{From: id(edge.From), To: id(edge.To), Kind: string(edge.Kind), Evidence: State(edge.Evidence), Observation: status.Observation, State: status.State, Activity: activity(status)})
+		edges = append(edges, PublicEdge{From: id(edge.From), To: id(edge.To), Kind: string(edge.Kind), Evidence: State(edge.Evidence), Observation: status.Observation, State: status.State, RatePerHour: rate(status, open[edge.From] && open[edge.To])})
 	}
 	sort.Slice(edges, func(i, j int) bool {
 		return edges[i].From+edges[i].To+edges[i].Kind < edges[j].From+edges[j].To+edges[j].Kind
@@ -182,25 +210,32 @@ func Public(live Live, secret []byte, workers []Worker, crates []Crate, now int6
 	sort.Slice(public, func(i, j int) bool { return public[i].Unit+public[i].Activity < public[j].Unit+public[j].Activity })
 	line := []PublicCrate{}
 	for _, crate := range crates {
-		line = append(line, PublicCrate{ID: id("crate:" + crate.Key), Station: crate.Station, Fault: crate.Fault})
+		item := PublicCrate{ID: id("crate:" + crate.Key), Station: crate.Station, Fault: crate.Fault}
+		if named[crate.Repository] {
+			item.Number, item.Title = crate.Number, crate.Title
+		}
+		line = append(line, item)
 	}
 	sort.Slice(line, func(i, j int) bool { return line[i].ID < line[j].ID })
 	return PublicWorld{GeneratedAt: now - now%(5*60_000), Summary: live.Summary, Nodes: nodes, Edges: edges, Workers: public, Crates: line}
 }
 
-// activity buckets a rate by powers of eight per hour, so exact traffic and
-// its timing never leave the machine.
-func activity(status *Status) string {
+// rate is the exact rate per hour for a named reading; otherwise it is
+// bucketed to 0, 30, 600 or 6000 (powers of eight per hour), so exact
+// traffic and its timing stay on the machine.
+func rate(status *Status, exact bool) float64 {
 	perHour := status.Rate * 60
 	switch {
 	case status.State == "unknown" || status.State == "idle" || perHour < 1:
-		return "none"
+		return 0
+	case exact:
+		return perHour
 	case math.Log2(perHour) < 6:
-		return "low"
+		return 30
 	case math.Log2(perHour) < 12:
-		return "medium"
+		return 600
 	}
-	return "high"
+	return 6000
 }
 
 // Locate finds the unit whose code area holds a repository path: the most

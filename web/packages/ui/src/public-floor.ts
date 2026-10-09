@@ -2,16 +2,16 @@ import type { GraphNode, GraphSummary, OperationalGraphView } from "@dark-factor
 import { projectGraph } from "./console-view.js";
 import type { SceneCrate, SceneWorker } from "./factory-scene/scene.js";
 
-/** The public projection factoryd serves at /v1/public/<project>: an allowlist, never private labels. */
+/** The public projection factoryd serves at /v1/public/<project>: real labels only for repositories public on GitHub, ordinals otherwise. */
 export type PublicWorld = Readonly<{
   generated_at: number;
   summary: GraphSummary;
   nodes: readonly Readonly<{ id: string; kind: GraphNode["kind"]; label: string; unit?: string; runtime?: GraphNode["runtime"]; trigger?: GraphNode["trigger"];
-    evidence: GraphNode["evidence"]; observation: GraphNode["observation"]; state: GraphNode["state"]; activity: Activity; deployed?: boolean }>[];
-  edges: readonly Readonly<{ from: string; to: string; kind: OperationalGraphView["edges"][number]["kind"]; evidence: GraphNode["evidence"]; observation: GraphNode["observation"]; state: GraphNode["state"]; activity: Activity }>[];
+    evidence: GraphNode["evidence"]; observation: GraphNode["observation"]; state: GraphNode["state"]; rate_per_hour: number; paths?: readonly string[]; deployed?: boolean }>[];
+  edges: readonly Readonly<{ from: string; to: string; kind: OperationalGraphView["edges"][number]["kind"]; evidence: GraphNode["evidence"]; observation: GraphNode["observation"]; state: GraphNode["state"]; rate_per_hour: number }>[];
   workers: readonly Readonly<{ activity: SceneWorker["activity"]; unit?: string }>[];
-  /** The outbound work line: a keyed id, station and fault, never a title, number or branch. Absent from older factories. */
-  crates?: readonly Readonly<{ id: string; station: SceneCrate["station"]; fault?: boolean }>[];
+  /** The outbound work line: a keyed id, station and fault; number and title only for public repositories. Absent from older factories. */
+  crates?: readonly Readonly<{ id: string; station: SceneCrate["station"]; fault?: boolean; number?: number; title?: string }>[];
   /** Present only for repositories public on GitHub. */
   ledger?: PublicLedger;
 }>;
@@ -29,11 +29,6 @@ export type PublicLedger = Readonly<{
   clock: readonly Readonly<{ date: string; hours: readonly number[] }>[];
 }>;
 
-type Activity = "none" | "low" | "medium" | "high";
-
-// A bucket becomes a representative rate, so belts read busier or quieter without exact traffic.
-const RATE: Record<Activity, number> = { none: 0, low: 30, medium: 600, high: 6000 };
-
 /** The same world the operator sees, from the public projection alone. */
 export function publicFloor(world: PublicWorld) {
   const graph: OperationalGraphView = {
@@ -43,10 +38,10 @@ export function publicFloor(world: PublicWorld) {
     sources: [], summary: world.summary, omitted: 0,
     nodes: world.nodes.map((node) => ({ id: node.id, kind: node.kind, label: node.label, ...(node.unit === undefined ? {} : { unit: node.unit }),
       ...(node.runtime === undefined ? {} : { runtime: node.runtime }), ...(node.trigger === undefined ? {} : { trigger: node.trigger }),
-      paths: [], evidence: node.evidence, observation: node.observation, state: node.state, rate_per_hour: RATE[node.activity],
+      paths: node.paths ?? [], evidence: node.evidence, observation: node.observation, state: node.state, rate_per_hour: node.rate_per_hour,
       // Public deploys say only "within the last day"; the stamp is the projection's own time.
       ...(node.deployed ? { deployed_at: world.generated_at } : {}) })),
-    edges: world.edges.map((edge) => ({ from: edge.from, to: edge.to, kind: edge.kind, evidence: edge.evidence, observation: edge.observation, state: edge.state, rate_per_hour: RATE[edge.activity] })),
+    edges: world.edges.map((edge) => ({ from: edge.from, to: edge.to, kind: edge.kind, evidence: edge.evidence, observation: edge.observation, state: edge.state, rate_per_hour: edge.rate_per_hour })),
   };
   const prepared = projectGraph(new Map([["public", graph]]), ["public"]);
   const workers = world.workers.map((worker, index): SceneWorker => {
@@ -54,8 +49,8 @@ export function publicFloor(world: PublicWorld) {
     return { id: `public-${index}`, name: `Worker ${index + 1}`, role: "worker", activity: worker.activity,
       location: worker.activity === "busy" ? unit === undefined ? "unobserved" : "working" : "resting", ...(unit === undefined ? {} : { nodeId: unit }) };
   });
-  // Public crates carry no number or title; the scene names them by station alone.
-  const crates = (world.crates ?? []).map((crate): SceneCrate => ({ id: crate.id, number: 0, title: "", station: crate.station, stage: "", fault: crate.fault === true, taskIds: [] }));
-  // A public unit is named by its runtime, so a runtime subtitle would only repeat the name.
+  // A crate from a private repository carries no number or title; the scene names it by station alone.
+  const crates = (world.crates ?? []).map((crate): SceneCrate => ({ id: crate.id, number: crate.number ?? 0, title: crate.title ?? "", station: crate.station, stage: "", fault: crate.fault === true, taskIds: [] }));
+  // An ordinal unit name already says the runtime, so a runtime subtitle would only repeat it.
   return { graph: { ...prepared.graph, units: prepared.graph.units.map(({ runtime: _, ...unit }) => unit) }, workers, crates };
 }

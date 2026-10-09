@@ -831,8 +831,8 @@ function WorkLine({ layout, crates, tasks, placements, connected, live, onLight,
       const flight = moving ? flights.current.find((candidate) => candidate.key === crate.id) : undefined;
       const point = (flight === undefined ? undefined : messageAt(flight, { x, y }, clock).point) ?? { x, y };
       return <g key={crate.id} data-crate={crate.id} data-crate-station={crate.station} data-fault={crate.fault ? "" : undefined} className="dfFactoryScene__target"
-        data-tooltip={crate.number > 0 ? `PR #${crate.number} · ${crate.title}\n${layout.line[crate.station]!.label} · ${crate.stage}` : `A change request\n${layout.line[crate.station]!.label}${crate.fault ? " · needs correction" : ""}`}
-        aria-label={crate.number > 0 ? `PR #${crate.number} ${crate.title}: ${crate.stage}` : `A change request: ${layout.line[crate.station]!.label}${crate.fault ? ", needs correction" : ""}`}
+        data-tooltip={crate.number > 0 ? `PR #${crate.number} · ${crate.title}\n${layout.line[crate.station]!.label}${crate.stage ? ` · ${crate.stage}` : ""}` : `A change request\n${layout.line[crate.station]!.label}${crate.fault ? " · needs correction" : ""}`}
+        aria-label={crate.number > 0 ? `PR #${crate.number} ${crate.title}: ${crate.stage || layout.line[crate.station]!.label}` : `A change request: ${layout.line[crate.station]!.label}${crate.fault ? ", needs correction" : ""}`}
         {...sceneAction(onSelect === undefined ? undefined : () => onSelect(crate.id))} onPointerEnter={() => onLight(crate.id)} onPointerLeave={() => onLight(undefined)} onFocus={() => onLight(crate.id)} onBlur={() => onLight(undefined)}
         transform={`translate(${point.x} ${point.y})`}>
         <rect className="dfFactoryScene__focus" x="-9" y="-12" width="18" height="16" fill="transparent" />
