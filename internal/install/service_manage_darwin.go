@@ -415,7 +415,7 @@ func ServiceUpgrade(ctx context.Context, home, sourceDir string, expected buildi
 		if err := WriteUpgradeMarker(home, UpgradeMarker{Target: expected.Source(), UserVersion: userVersion, State: UpgradeTrial}); err != nil {
 			return ServiceStatus{}, fmt.Errorf("%w: write upgrade marker: %v", ErrServiceAmbiguous, err)
 		}
-		if err := swapServicePackage(home, receipt); err != nil {
+		if err := swapServicePackage(home); err != nil {
 			_ = RemoveUpgrade(home)
 			return ServiceStatus{}, err
 		}
@@ -426,8 +426,10 @@ func ServiceUpgrade(ctx context.Context, home, sourceDir string, expected buildi
 
 // ServiceRollback swaps bin/previous back into bin/current, restores the
 // pre-upgrade database when restoreDatabase is set, and marks the marker
-// rolled back with reason for the old build to record.
-func ServiceRollback(ctx context.Context, home string, restoreDatabase bool, reason string) error {
+// rolled back with reason for the old build to record. The build being
+// rolled back runs it, so it applies none of that build's home, census or
+// receipt rules: a build that rejects the home must still undo itself.
+func ServiceRollback(home string, restoreDatabase bool, reason string) error {
 	marker, present, err := ReadUpgradeMarker(home)
 	if err != nil || !present {
 		return errors.Join(errors.New("no upgrade to roll back"), err)
@@ -448,13 +450,7 @@ func ServiceRollback(ctx context.Context, home string, restoreDatabase bool, rea
 			return err
 		}
 	}
-	if _, err := withServiceMutation(ctx, home, func(*serviceHomeCapability) (ServiceStatus, error) {
-		receipt, present, err := readServiceReceipt(home)
-		if err != nil || !present {
-			return ServiceStatus{}, errors.Join(ErrServiceAmbiguous, errors.New("no installed service to roll back"), err)
-		}
-		return ServiceStatus{}, swapServicePackage(home, receipt)
-	}); err != nil {
+	if err := swapServicePackage(home); err != nil {
 		return err
 	}
 	// ponytail: a crash between the swap and this write leaves the old build
@@ -464,21 +460,27 @@ func ServiceRollback(ctx context.Context, home string, restoreDatabase bool, rea
 }
 
 // swapServicePackage exchanges bin/previous and bin/current in one rename and
-// rebinds the receipt to the program now current.
-func swapServicePackage(home string, receipt serviceReceipt) error {
+// rebinds the receipt to the program now current. Only the digest changes, so
+// the receipt is rewritten without being interpreted by this build.
+func swapServicePackage(home string) error {
 	bin := filepath.Join(ServiceDirectoryPath(home), "bin")
-	digest, err := digestServiceFile(filepath.Join(bin, "previous", "factoryd"))
+	current, err := digestServiceFile(filepath.Join(bin, "current", "factoryd"))
 	if err != nil {
 		return err
 	}
-	before, err := encodeServiceReceipt(receipt)
+	next, err := digestServiceFile(filepath.Join(bin, "previous", "factoryd"))
 	if err != nil {
 		return err
 	}
-	receipt.ProgramDigest = digest
-	after, err := encodeServiceReceipt(receipt)
+	receiptPath := filepath.Join(ServiceDirectoryPath(home), serviceReceiptName)
+	before, err := os.ReadFile(receiptPath)
 	if err != nil {
-		return err
+		return errors.Join(ErrServiceReceipt, err)
+	}
+	// A receipt already naming next is an interrupted earlier swap.
+	after := bytes.Replace(before, []byte(current), []byte(next), 1)
+	if !bytes.Contains(after, []byte(`"`+next+`"`)) {
+		return fmt.Errorf("%w: receipt names neither installed program", ErrServiceReceipt)
 	}
 	if err := replaceFile(ServiceDirectoryPath(home), serviceReceiptName, after, 0o600); err != nil {
 		return err

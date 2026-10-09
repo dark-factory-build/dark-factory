@@ -181,6 +181,15 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		}
 		return 0
 	}
+	// Before parse, so a trial build that rejects its arguments, settings
+	// or home still rolls back (#1390).
+	if err := trialBoot(args); err != nil {
+		daemon.LogFactoryd(recoveryLog, "factoryd: %v\n", err)
+		if errors.Is(err, errRestart) {
+			return exitRestart
+		}
+		return exitFailure
+	}
 	configuration, help, ok := parse(args)
 	if help {
 		_, _ = io.WriteString(stdout, usage)
@@ -336,8 +345,6 @@ func serve(ctx context.Context, configuration config) error {
 			return errors.New("invalid factoryd configuration")
 		}
 	}
-	// The trial boot runs before the store opens, so a rollback can restore
-	// the database the old build expects.
 	marker, upgrading, err := install.ReadUpgradeMarker(configuration.home)
 	if err != nil {
 		return err
@@ -345,19 +352,6 @@ func serve(ctx context.Context, configuration config) error {
 	trial := upgrading && marker.Target == selfSource()
 	var limit *time.Timer
 	if trial {
-		marker.Boots++
-		// Any boot after the first means the trial build exited: it crashed,
-		// hung past trialLimit, or failed verification.
-		if marker.Boots >= 2 {
-			reason := cmp.Or(marker.Reason, "the new build exited before it was promoted")
-			if err := rollbackService(ctx, configuration.home, marker.UserVersion != kernel.SchemaVersion, reason); err != nil {
-				return fmt.Errorf("roll back release %s: %w", marker.Target, err)
-			}
-			return fmt.Errorf("%w: rolled back %s: %s", errRestart, marker.Target, reason)
-		}
-		if err := install.WriteUpgradeMarker(configuration.home, marker); err != nil {
-			return err
-		}
 		limit = time.AfterFunc(trialLimit, func() { trialExit(exitRestart) })
 		defer limit.Stop()
 	}
@@ -382,6 +376,34 @@ func serve(ctx context.Context, configuration config) error {
 		return fmt.Errorf("%w: %s installed", errRestart, next.Target)
 	}
 	return nil
+}
+
+// trialBoot counts a trial build's boot from --home alone, before the store
+// opens, so a rollback can restore the database the old build expects. Any
+// boot after the first means the trial build exited.
+func trialBoot(args []string) error {
+	home := ""
+	for index := 0; index+1 < len(args); index++ {
+		if args[index] == "--home" && validHome(args[index+1]) {
+			home = args[index+1]
+		}
+	}
+	if home == "" {
+		return nil
+	}
+	marker, upgrading, err := install.ReadUpgradeMarker(home)
+	if err != nil || !upgrading || marker.Target != selfSource() {
+		return err
+	}
+	marker.Boots++
+	if marker.Boots < 2 {
+		return install.WriteUpgradeMarker(home, marker)
+	}
+	reason := cmp.Or(marker.Reason, "the new build exited before it was promoted")
+	if err := rollbackService(home, marker.UserVersion != kernel.SchemaVersion, reason); err != nil {
+		return fmt.Errorf("roll back release %s: %w", marker.Target, err)
+	}
+	return fmt.Errorf("%w: rolled back %s: %s", errRestart, marker.Target, reason)
 }
 
 // promote verifies the trial build once it has stayed up, then records the

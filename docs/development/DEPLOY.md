@@ -9,9 +9,11 @@ verification. Nothing here deploys it.
 factoryctl release <commit-sha> [--start] [--wait]
 ```
 
-`factoryctl release <commit-sha>` reads the durable release record. Add
-`--start` to ask the running factoryd to install a commit merged into
-`main` of its registered dark-factory checkout. factoryd:
+`factoryctl release <commit-sha>` only reads that commit's release record.
+`--start` asks the running factoryd to install the commit, which must be merged
+into `main` of its registered dark-factory checkout and be the running build or
+a descendant of it; an older or unrelated commit is refused, so a release never
+downgrades the factory. factoryd:
 
 1. builds `factoryd`, `factoryctl` and `factory-runner` at that commit from a
    disposable clone, one build at a time with the review gate, with
@@ -30,12 +32,16 @@ factoryctl release <commit-sha> [--start] [--wait]
    writes the trial marker `<home>.service/upgrade`, and exits 75, so launchd
    (`KeepAlive` on unsuccessful exit) starts the new binaries.
 
-The new build boots on trial. Sixty seconds after it is up it runs all three
+The new build boots on trial. Before it parses its arguments or reads its
+configuration or home, it counts the boot in the marker, so a build that
+rejects the installed flags, settings or home still rolls back on its next
+boot. Sixty seconds after it is up it runs all three
 installed binaries; if each reports its release identity, the release is
 recorded `verified` and the marker and backup are removed. If it crashes or
 exits before that, is not promoted within 5 minutes, or fails verification,
-its next boot swaps `bin/previous` back, restores the backup when the old
-build's schema version differs, and exits 75; the old build then records the
+its next boot swaps `bin/previous` back, rebinds the receipt's program digest,
+restores the backup when the old build's schema version differs, and exits 75,
+without applying any of its own home or receipt checks; the old build then records the
 release `failed` with the reason. The record is the production delivery
 `release:<sha>`. `--wait` follows it across the restart and exits 0 when
 verified, 1 when it failed after the swap or rolled back, and 75 when the call
@@ -45,7 +51,8 @@ factoryd also releases itself. Where the home has a registered checkout of
 dark-factory, every two minutes it reads `main`'s tip with `git ls-remote
 origin` (no GitHub REST call) and releases that tip when no `release:<sha>`
 record exists. A recorded tip, running, verified or failed, is never started
-again: a failed release waits for a newer tip or a manual `factoryctl release`.
+again: a failed release waits for a newer tip or a manual `factoryctl release
+<commit-sha> --start`.
 Merged work is not followed up after release; a `Closes #N` footer closes its
 issue on merge.
 The build that introduces `factoryctl release` cannot be released by the

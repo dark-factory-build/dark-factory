@@ -43,7 +43,7 @@ func trialHome(t *testing.T, marker install.UpgradeMarker) (string, *trialSeams)
 	})
 	selfSource = func() string { return trialTarget }
 	trialExit = func(code int) { seams.exits <- code }
-	rollbackService = func(_ context.Context, _ string, restore bool, reason string) error {
+	rollbackService = func(_ string, restore bool, reason string) error {
 		seams.rollbacks <- fmt.Sprintf("restore=%t %s", restore, reason)
 		return nil
 	}
@@ -71,7 +71,7 @@ func TestTrialBuildPromotesOnceItStaysUpAndVerifies(t *testing.T) {
 	home, seams := trialHome(t, install.UpgradeMarker{Target: trialTarget, UserVersion: kernel.SchemaVersion, State: install.UpgradeTrial})
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- serve(ctx, testConfig(home)) }()
+	go func() { done <- trialServe(ctx, home) }()
 	deadline := time.Now().Add(5 * time.Second)
 	for _, present := readMarker(t, home); present; _, present = readMarker(t, home) {
 		if time.Now().After(deadline) {
@@ -94,7 +94,7 @@ func TestTrialBuildThatCannotForgetItsMarkerRecordsNothingAndRollsBack(t *testin
 	trialLimit = 300 * time.Millisecond
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- serve(ctx, testConfig(home)) }()
+	go func() { done <- trialServe(ctx, home) }()
 	<-removals
 	// Not promoted: the trial limit still ends the build.
 	if code := <-seams.exits; code != exitRestart {
@@ -119,7 +119,7 @@ func TestTrialBuildThatCrashesAtBootRollsBackOnItsSecondBoot(t *testing.T) {
 	}
 	func() {
 		defer func() { _ = recover() }()
-		_ = serve(context.Background(), testConfig(home))
+		_ = trialServe(context.Background(), home)
 	}()
 	startupPhaseHook = nil
 	if marker, _ := readMarker(t, home); marker.Boots != 1 || len(seams.rollbacks) != 0 {
@@ -138,7 +138,7 @@ func TestTrialBuildFailingVerificationAfterItIsUpRollsBack(t *testing.T) {
 	seams.verify = errors.New("factory-runner reports another build")
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- serve(ctx, testConfig(home)) }()
+	go func() { done <- trialServe(ctx, home) }()
 	if code := <-seams.exits; code != exitRestart {
 		t.Fatalf("exit = %d", code)
 	}
@@ -165,7 +165,7 @@ func TestHungTrialBuildIsStoppedByTheTrialLimit(t *testing.T) {
 	defer func() { startupPhaseHook = nil }()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- serve(ctx, testConfig(home)) }()
+	go func() { done <- trialServe(ctx, home) }()
 	if code := <-seams.exits; code != exitRestart {
 		t.Fatalf("exit = %d", code)
 	}
@@ -200,7 +200,7 @@ func TestOldBuildRecordsTheRollbackThenRestartsOnlyForANewRelease(t *testing.T) 
 	removeUpgrade = func(home string) error { defer close(removed); return realRemove(home) }
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- serve(ctx, testConfig(home)) }()
+	go func() { done <- trialServe(ctx, home) }()
 	<-removed
 	if _, present := readMarker(t, home); present {
 		t.Fatal("the old build kept the rolled back marker")
@@ -220,10 +220,34 @@ func TestTrialBuildStoppedBeforePromotionIsNotRestarted(t *testing.T) {
 	promoteAfter = time.Hour
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- serve(ctx, testConfig(home)) }()
+	go func() { done <- trialServe(ctx, home) }()
 	waitOperatorClient(t, home)
 	cancel()
 	if err := <-done; err != nil {
 		t.Fatalf("stopped trial build = %v", err)
+	}
+}
+
+// trialServe boots as run does: the trial boot is counted before serve.
+func trialServe(ctx context.Context, home string) error {
+	if err := trialBoot([]string{"--home", home}); err != nil {
+		return err
+	}
+	return serve(ctx, testConfig(home))
+}
+
+// #1390: a trial build that refuses the installed arguments exited before it
+// read its marker, so launchd restarted it forever instead of rolling back.
+func TestTrialBuildThatRejectsItsArgumentsStillRollsBack(t *testing.T) {
+	home, seams := trialHome(t, install.UpgradeMarker{Target: trialTarget, UserVersion: kernel.SchemaVersion, State: install.UpgradeTrial})
+	args := []string{"--flag-only-the-old-build-knows", "x", "--home", home}
+	if exit := run(context.Background(), args, io.Discard, io.Discard); exit != exitUsage {
+		t.Fatalf("first boot exit = %d", exit)
+	}
+	if exit := run(context.Background(), args, io.Discard, io.Discard); exit != exitRestart {
+		t.Fatalf("second boot exit = %d", exit)
+	}
+	if got := <-seams.rollbacks; got != "restore=false the new build exited before it was promoted" {
+		t.Fatalf("rollback = %q", got)
 	}
 }

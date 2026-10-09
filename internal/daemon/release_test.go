@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -372,5 +373,33 @@ func TestSchedulerAdmitsNothingWhileAReleaseHoldsAdmission(t *testing.T) {
 	cancel()
 	if err := waitSchedulerDone(t, done); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// #1390: reading an older commit's release once started it and downgraded
+// the factory. A release must descend from the running build.
+func TestReleaseRefusesACommitOlderThanTheRunningBuild(t *testing.T) {
+	tree := t.TempDir()
+	git := func(args ...string) string {
+		output, err := exec.Command(change.TrustedGitExecutable, append([]string{"-C", tree, "-c", "user.name=test", "-c", "user.email=test@example.invalid"}, args...)...).Output()
+		if err != nil {
+			t.Fatalf("git %v: %v", args, err)
+		}
+		return strings.TrimSpace(string(output))
+	}
+	git("init", "--quiet")
+	git("commit", "--quiet", "--allow-empty", "-m", "older")
+	older := git("rev-parse", "HEAD")
+	git("commit", "--quiet", "--allow-empty", "-m", "running")
+	running := git("rev-parse", "HEAD")
+	ctx := context.Background()
+	if err := releaseDescends(ctx, tree, running, older); !errors.Is(err, kernel.ErrConflict) {
+		t.Fatalf("older release = %v", err)
+	}
+	git("commit", "--quiet", "--allow-empty", "-m", "newer")
+	for _, sha := range []string{running, git("rev-parse", "HEAD")} {
+		if err := releaseDescends(ctx, tree, running, sha); err != nil {
+			t.Fatalf("release %s = %v", sha, err)
+		}
 	}
 }

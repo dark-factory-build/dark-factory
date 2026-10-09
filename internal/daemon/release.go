@@ -223,9 +223,6 @@ func (daemon *Daemon) Release(ctx context.Context, sha string, start bool) (kern
 		delivery.State, delivery.Phase = "verified", ""
 	}
 	if err == nil {
-		err = validateReleaseAncestry(ctx, root, source, sha)
-	}
-	if err == nil {
 		err = daemon.writeRelease(ctx, project, &delivery)
 	}
 	if err != nil || delivery.State == "verified" {
@@ -234,39 +231,6 @@ func (daemon *Daemon) Release(ctx context.Context, sha string, start bool) (kern
 	}
 	go daemon.release(project, root, source, delivery)
 	return delivery, nil
-}
-
-func validateReleaseAncestry(ctx context.Context, root string, source change.RepositorySourceIdentity, sha string) error {
-	if !buildinfo.Current().Release() {
-		return nil
-	}
-	directory, err := os.MkdirTemp("", "dark-factory-release-check-")
-	if err != nil {
-		return err
-	}
-	defer os.RemoveAll(directory)
-	tree := filepath.Join(directory, "tree")
-	if err := change.ReviewCheckout(ctx, change.TrustedGitExecutable, root, source, tree, "", sha, sha, selfBase); err != nil {
-		return fmt.Errorf("release checkout: %w", err)
-	}
-	return rejectStaleRelease(ctx, tree, sha)
-}
-
-func rejectStaleRelease(ctx context.Context, root, sha string) error {
-	running := buildinfo.Current()
-	if !running.Release() {
-		return nil
-	}
-	command := exec.CommandContext(ctx, change.TrustedGitExecutable, "-C", root, "merge-base", "--is-ancestor", sha, running.Source())
-	if err := command.Run(); err == nil {
-		return fmt.Errorf("%w: release %s is not newer than running build %s", kernel.ErrConflict, sha, running.Source())
-	} else {
-		var exitError *exec.ExitError
-		if errors.As(err, &exitError) && exitError.ExitCode() == 1 {
-			return nil
-		}
-		return fmt.Errorf("check release ancestry: %w", err)
-	}
 }
 
 func (daemon *Daemon) writeRelease(ctx context.Context, project kernel.ProjectID, delivery *kernel.ProductionDelivery) error {
@@ -399,12 +363,26 @@ func buildRelease(ctx context.Context, daemon *Daemon, root string, source chang
 	if err := change.ReviewCheckout(ctx, change.TrustedGitExecutable, root, source, tree, "", sha, sha, selfBase); err != nil {
 		return buildinfo.Identity{}, fmt.Errorf("release checkout: %w", err)
 	}
+	if running := buildinfo.Current(); running.Release() {
+		if err := releaseDescends(ctx, tree, running.Source(), sha); err != nil {
+			return buildinfo.Identity{}, err
+		}
+	}
 	// /usr/bin/env resolves go on the operator's tool path, not ours.
 	return buildinfo.BuildRelease(ctx, tree, sha, runtime.GOOS+"/"+runtime.GOARCH, filepath.Join(directory, "bin"), daemon.toolEnvironment(), func(command *exec.Cmd) {
 		command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 		command.Cancel = func() error { return syscall.Kill(-command.Process.Pid, syscall.SIGKILL) }
 		command.WaitDelay = 5 * time.Second
 	})
+}
+
+// releaseDescends refuses a commit that is not the running build or one of
+// its descendants, so a release never downgrades the factory (#1390).
+func releaseDescends(ctx context.Context, tree, running, sha string) error {
+	if _, err := gitOutput(ctx, filepath.Join(tree, ".git"), "merge-base", "--is-ancestor", running, sha); err != nil {
+		return fmt.Errorf("%w: %s does not descend from the running build %s", kernel.ErrConflict, sha, running)
+	}
+	return nil
 }
 
 // ConfigureHost sets the factory home and the operator's tool path.

@@ -1048,7 +1048,7 @@ func TestServiceUpgradeSwapsAtomicallyAndRollsBack(t *testing.T) {
 		t.Fatalf("marker = %+v, %t, %v", marker, present, err)
 	}
 
-	if err := ServiceRollback(context.Background(), fixture.home, false, "verification failed"); err != nil {
+	if err := ServiceRollback(fixture.home, false, "verification failed"); err != nil {
 		t.Fatal(err)
 	}
 	fixture.requireProgram(t, "current", "#!binary")
@@ -1079,6 +1079,42 @@ func TestServiceUpgradeAcceptsAHomeFileOnlyANewerBuildKnows(t *testing.T) {
 		t.Fatalf("upgrade refused a home file only the new build knows: %v", err)
 	}
 	fixture.requireProgram(t, "current", "#!next")
+}
+
+// #1390: the build being rolled back judges nothing. A home its census
+// refuses, and a receipt it would not parse, still roll back.
+func TestServiceRollbackIgnoresTheTrialBuildsHomeAndReceiptRules(t *testing.T) {
+	fixture, next, identity := upgradeFixture(t)
+	if err := ServiceUpgrade(context.Background(), fixture.home, next, identity, 33); err != nil {
+		t.Fatal(err)
+	}
+	refused := filepath.Join(fixture.home, "directory-the-census-refuses")
+	if err := os.Mkdir(refused, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Remove(refused) })
+	receipt := filepath.Join(ServiceDirectoryPath(fixture.home), serviceReceiptName)
+	body, err := os.ReadFile(receipt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body = append([]byte(`{"field_only_the_old_build_knows":1,`), body[1:]...)
+	if err := os.WriteFile(receipt, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := withServiceMutation(context.Background(), fixture.home, func(*serviceHomeCapability) (ServiceStatus, error) { return ServiceStatus{}, nil }); err == nil {
+		t.Fatal("the census accepted the planted directory")
+	}
+	if err := ServiceRollback(fixture.home, false, "census"); err != nil {
+		t.Fatalf("rollback = %v", err)
+	}
+	if program, err := os.ReadFile(filepath.Join(ServiceDirectoryPath(fixture.home), "bin", "current", "factoryd")); err != nil || !bytes.HasPrefix(program, []byte("#!binary")) {
+		t.Fatalf("current program = %q, %v", program, err)
+	}
+	after, err := os.ReadFile(receipt)
+	if err != nil || !bytes.Contains(after, []byte("field_only_the_old_build_knows")) || bytes.Equal(after, body) {
+		t.Fatalf("receipt after rollback = %s, %v", after, err)
+	}
 }
 
 func TestServiceUpgradeFailureBeforeTheSwapLeavesCurrentUntouched(t *testing.T) {
@@ -1151,7 +1187,7 @@ func TestServiceRollbackRestoresTheDatabaseOnlyWhenTheSchemaMoved(t *testing.T) 
 				t.Fatal(err)
 			}
 		}
-		if err := ServiceRollback(context.Background(), fixture.home, restore, "schema"); err != nil {
+		if err := ServiceRollback(fixture.home, restore, "schema"); err != nil {
 			t.Fatal(err)
 		}
 		_, backupErr := os.Lstat(UpgradeBackupPath(fixture.home))

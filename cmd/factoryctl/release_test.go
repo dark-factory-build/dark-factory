@@ -39,14 +39,24 @@ func TestReleaseWaitsAcrossTheRestartAndMapsTheOutcome(t *testing.T) {
 			}
 			return next, nil
 		}
-		if got := release(context.Background(), test.wait, call, io.Discard, io.Discard); got != test.want {
+		if got := release(context.Background(), true, test.wait, call, io.Discard, io.Discard); got != test.want {
 			t.Errorf("%s: exit %d, want %d", test.name, got, test.want)
 		}
 	}
 	refused := func(bool) (kernel.ProductionDelivery, error) {
 		return kernel.ProductionDelivery{}, errors.New("conflict")
 	}
-	if got := release(context.Background(), true, refused, io.Discard, io.Discard); got != exitRefused {
+	if got := release(context.Background(), true, true, refused, io.Discard, io.Discard); got != exitRefused {
 		t.Errorf("refused start: exit %d", got)
+	}
+	// #1390: reading a release must never start one.
+	read := func(start bool) (kernel.ProductionDelivery, error) {
+		if start {
+			t.Fatal("reading a release started it")
+		}
+		return kernel.ProductionDelivery{State: "verified"}, nil
+	}
+	if got := release(context.Background(), false, false, read, io.Discard, io.Discard); got != 0 {
+		t.Errorf("read: exit %d", got)
 	}
 }

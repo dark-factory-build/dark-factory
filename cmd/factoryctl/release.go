@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/dark-factory-build/dark-factory/internal/api"
@@ -19,53 +21,29 @@ var (
 	releasePoll      = 2 * time.Second
 )
 
-// runRelease asks factoryd to release a merged commit into its own service.
-// The daemon restarts during the release, so --wait reads the durable record
-// until it settles and treats an unreachable daemon as not settled yet.
+// runRelease reads the release of a merged commit, and with --start asks
+// factoryd to release it into its own service. The daemon restarts during
+// the release, so --wait reads the durable record until it settles and
+// treats an unreachable daemon as not settled yet.
 func runRelease(ctx context.Context, args []string, getenv func(string) string, stdout, stderr io.Writer) int {
-	if len(args) < 1 || len(args) > 3 {
+	if len(args) == 0 || !slices.Contains([]string{"", "--start", "--wait", "--start --wait"}, strings.Join(args[1:], " ")) {
 		return usageFailure(stderr, append([]string{"release"}, args...))
 	}
-	start, wait := false, false
-	for _, arg := range args[1:] {
-		switch arg {
-		case "--start":
-			start = true
-		case "--wait":
-			wait = true
-		default:
-			return usageFailure(stderr, append([]string{"release"}, args...))
-		}
-	}
-	if wait && !start {
-		return usageFailure(stderr, append([]string{"release"}, args...))
-	}
+	start, wait := slices.Contains(args, "--start"), slices.Contains(args, "--wait")
 	client, err := api.NewOperatorClient(getenv("DARK_FACTORY_SOCKET"), getenv("DARK_FACTORY_OPERATOR_TOKEN_FILE"))
 	if err != nil {
 		_, _ = io.WriteString(stderr, "factoryctl: operator client configuration is invalid\n")
 		return exitFailure
 	}
-	call := func(start bool) (kernel.ProductionDelivery, error) {
+	return release(ctx, start, wait, func(start bool) (kernel.ProductionDelivery, error) {
 		callContext, cancel := context.WithTimeout(ctx, 30*time.Second)
 		defer cancel()
 		return client.Release(callContext, api.ReleaseInput{SHA: args[0], Start: start})
-	}
-	if !start {
-		delivery, err := call(false)
-		if err != nil {
-			writeWebFailure(stderr, "release", err)
-			return exitRefused
-		}
-		if err := json.NewEncoder(stdout).Encode(delivery); err != nil {
-			return exitFailure
-		}
-		return 0
-	}
-	return release(ctx, wait, call, stdout, stderr)
+	}, stdout, stderr)
 }
 
-func release(ctx context.Context, wait bool, call func(start bool) (kernel.ProductionDelivery, error), stdout, stderr io.Writer) int {
-	delivery, err := call(true)
+func release(ctx context.Context, start, wait bool, call func(start bool) (kernel.ProductionDelivery, error), stdout, stderr io.Writer) int {
+	delivery, err := call(start)
 	if err != nil {
 		writeWebFailure(stderr, "release", err)
 		return exitRefused
