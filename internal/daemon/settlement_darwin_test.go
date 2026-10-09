@@ -603,6 +603,7 @@ func TestScheduledCompletionSurfacesUnsettledRun(t *testing.T) {
 func TestSettlementWaitsForWriterUsingLifecycleContext(t *testing.T) {
 	for _, role := range []kernel.AgentRole{kernel.RoleOrchestrator, kernel.RoleWorker} {
 		t.Run(role.String(), func(t *testing.T) {
+			shrinkStoreTimeout(t)
 			fixture := newRecoveryFixtureWithRole(t, 0xb0, role)
 			fixture.failBeforeRuntime(t)
 			lock, err := sql.Open("sqlite3", "file:"+fixture.storePath)
