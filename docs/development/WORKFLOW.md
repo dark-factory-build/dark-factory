@@ -76,18 +76,38 @@ check is a delivery condition, not by itself a source-review defect. Reviewers
 still block concrete defects and false verification claims; neither local test
 evidence nor an ALLOW verdict bypasses the protected gates.
 
-Any account that can submit a GitHub pull-request review may publish an
-independent assessment. There is no publisher allowlist. The assessment must
-come from a separate reviewer; identify that reviewer, the examined head,
-findings and checks in the review body. The publisher attests to that work.
-GitHub authenticates the publisher, but neither the account identity nor the
-verdict marker proves reviewer independence.
+Only a trusted publisher records a verdict: an account whose GitHub
+`author_association` on the review is `OWNER`, `MEMBER` or `COLLABORATOR`, or
+a numeric user id listed in the repository variable
+`DF_REVIEW_TRUSTED_PUBLISHERS` (comma-separated; administrators set it outside
+pull-request files, for example to the Maintainer App bot's user id). An
+unset or empty variable trusts maintainers only; a malformed one fails the
+gate. Anyone else's review is listed as ordinary feedback: its markers and
+`CHANGES_REQUESTED` neither allow nor block.
+
+Trust is about the publisher, not the reviewer. The assessment must come from
+a separate reviewer; identify that reviewer, the examined head, findings and
+checks in the review body. The publisher attests to that work. GitHub
+authenticates the publisher, but neither the account identity nor the verdict
+marker proves reviewer independence. An authorised maintainer can publish an
+independently obtained agent review with host credentials:
+
+```sh
+gh api -X POST repos/OWNER/REPO/pulls/N/reviews -f commit_id=HEAD \
+  -f event=COMMENT -f body="Reviewer: ... Findings: ... Checks: ...
+Dark-Factory-Review: allow HEAD"
+```
+
+Interim: until the workflow projects `author_association` (a follow-up change
+that also deletes this mode), the gate receives four-field records and trusts
+every publisher, as it did before.
 
 A review carries `Dark-Factory-Review: allow HEAD`, `block` or `note`
 (`factoryctl review` writes it). Use `block` for an unresolved finding or `note` for evidence without approval.
 A plain GitHub approval without the explicit verdict does not satisfy this
-gate. Pending and dismissed reviews do not count. A block or GitHub
-`CHANGES_REQUESTED` at the same head wins over an allow, regardless of publisher.
+gate. Pending and dismissed reviews do not count. A trusted block or
+`CHANGES_REQUESTED` at the same head wins over an allow, whichever trusted
+publisher recorded it.
 A new head requires fresh review. An operation-bound correction must come from
 the original block's publisher and name that exact operation. The publisher
 attests that the finding was resolved or withdrawn; another publisher's

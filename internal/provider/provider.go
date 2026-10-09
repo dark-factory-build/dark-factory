@@ -801,21 +801,45 @@ func sandboxGrants(request Request) []grant {
 }
 
 func codexPermissions(request Request) (string, error) {
+	// Codex merges profile tables. Use the existing private runtime identity
+	// rather than a shared name that could inherit an account profile.
+	value := codexProfile(codexPermissionName(request.runtime), sandboxGrants(request), `{enabled=true,unix_sockets={`+tomlBasicString(request.runtime.socket)+`="allow"}}`)
+	if len(value) > runner.MaxArgumentBytes {
+		return "", ErrInvalid
+	}
+	return value, nil
+}
+
+func codexProfile(name string, grants []grant, network string, denied ...string) string {
 	entries := []string{`":root"="deny"`, `":minimal"="read"`}
-	for _, grant := range sandboxGrants(request) {
+	for _, path := range denied {
+		entries = append(entries, tomlBasicString(path)+`="deny"`)
+	}
+	for _, grant := range grants {
 		access := "read"
 		if grant.write {
 			access = "write"
 		}
 		entries = append(entries, tomlBasicString(grant.path)+`="`+access+`"`)
 	}
-	// Codex merges profile tables. Use the existing private runtime identity
-	// rather than a shared name that could inherit an account profile.
-	value := "permissions." + codexPermissionName(request.runtime) + `={filesystem={` + strings.Join(entries, ",") + `},network={enabled=true,unix_sockets={` + tomlBasicString(request.runtime.socket) + `="allow"}}}`
-	if len(value) > runner.MaxArgumentBytes {
-		return "", ErrInvalid
+	return "permissions." + name + `={filesystem={` + strings.Join(entries, ",") + `},network=` + network + `}`
+}
+
+// CodexReadOnly is the -c overrides that let a Codex exec's local commands
+// read only paths (and Codex's minimal system profile), with no network. It
+// replaces --sandbox read-only, which reads the whole disk. Each path is
+// granted under its resolved spelling as well. The minimal profile lets
+// commands read and write the shared temporary directories, so those are
+// denied; a more specific grant beneath them still applies.
+func CodexReadOnly(paths ...string) []string {
+	var grants []grant
+	for _, path := range paths {
+		grants = append(grants, grant{path, false})
+		if resolved, err := filepath.EvalSymlinks(path); err == nil && resolved != path {
+			grants = append(grants, grant{resolved, false})
+		}
 	}
-	return value, nil
+	return []string{"-c", `default_permissions="dark-factory-review"`, "-c", codexProfile("dark-factory-review", grants, "{enabled=false}", "/private/tmp", "/private/var/tmp")}
 }
 
 // claudeSettings confines a Claude Code run to the same grants Codex gets.

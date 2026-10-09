@@ -1,9 +1,12 @@
 // Command gate verifies independent-review attestations at one exact pull
-// request head. Any GitHub review publisher may record the verdict of a
-// separate reviewer. The publisher authenticates the record; this gate does
-// not prove reviewer independence. GitHub permissions, protected merge and
-// required CI still apply. The merge queue runs the default branch's copy,
-// after review publication.
+// request head. Only a trusted publisher records a verdict: a repository
+// owner, member or collaborator (GitHub's author_association), or a numeric
+// user id listed in DF_REVIEW_TRUSTED_PUBLISHERS. Anyone else's review is
+// feedback without allow or veto. The publisher authenticates the record;
+// the reviewer it names is a separate identity and this gate does not prove
+// its independence. GitHub permissions, protected merge and required CI still
+// apply. The merge queue runs the default branch's copy, after review
+// publication.
 //
 //	gate --pull-number   prints the pull request named by GITHUB_REF
 //	gate                 decides DF_REVIEW_HEAD_SHA from DF_REVIEW_REVIEWS
@@ -68,23 +71,44 @@ func run(args []string, env func(string) string, stdout, stderr io.Writer) int {
 		return fail("DF_REVIEW_REVIEWS must name a readable file")
 	}
 
+	trusted := map[string]bool{}
+	if list := strings.TrimSpace(env("DF_REVIEW_TRUSTED_PUBLISHERS")); list != "" {
+		for _, id := range strings.Split(list, ",") {
+			if id = strings.TrimSpace(id); !digits.MatchString(id) {
+				return fail("DF_REVIEW_TRUSTED_PUBLISHERS must list numeric user ids")
+			}
+			trusted[id] = true
+		}
+	}
+
 	correction := regexp.MustCompile(`.*Dark-Factory-Review: allow ` + head + ` Dark-Factory-Review-Correction: ([0-9a-f-]+) <!-- dark-factory-operation:`)
 	var findings strings.Builder
 	var blocks [][2]string
 	corrections := map[[2]string]bool{}
 	allowed, considered := 0, 0
-	// Each line is commit_id, state, numeric publisher id and flattened body,
-	// exactly the workflow's @tsv projection; anything else fails closed.
+	// Each line is commit_id, state, numeric publisher id, flattened body and
+	// author_association, exactly the workflow's @tsv projection; anything
+	// else fails closed.
 	for _, line := range strings.Split(string(data), "\n") {
 		if line == "" {
 			continue
 		}
 		field := strings.Split(line, "\t")
-		if len(field) != 4 {
+		// ponytail: interim. A four-field record predates the trust field and
+		// trusts every publisher, as before, while the workflow that emits five
+		// fields merges; that change deletes this mode.
+		if len(field) != 4 && len(field) != 5 {
 			return fail("malformed review record")
 		}
 		commit, state, author, body := field[0], field[1], field[2], field[3]
-		// GitHub supplies the authenticated publisher identity; no allowlist.
+		trust := len(field) == 4 || trusted[author]
+		if len(field) == 5 {
+			switch field[4] {
+			case "OWNER", "MEMBER", "COLLABORATOR":
+				trust = true
+			}
+		}
+		// GitHub supplies the authenticated publisher identity.
 		if !digits.MatchString(author) {
 			return fail("malformed review publisher")
 		}
@@ -99,9 +123,12 @@ func run(args []string, env func(string) string, stdout, stderr io.Writer) int {
 				break
 			}
 		}
+		// An untrusted publisher's review is listed as feedback, never counted.
 		// GitHub's own blocking state blocks even without a verdict line, and
 		// its blocks carry no correctable operation.
-		if state == "CHANGES_REQUESTED" {
+		if !trust {
+			verdict = "untrusted publisher"
+		} else if state == "CHANGES_REQUESTED" {
 			blocks = append(blocks, [2]string{author, ""})
 			verdict = "block"
 		} else if verdict == "block" {
@@ -130,14 +157,14 @@ func run(args []string, env func(string) string, stdout, stderr io.Writer) int {
 		}
 	}
 
-	summary := fmt.Sprintf("### Adversarial review\n\n- Head: <code>%s</code>\n- Verdicts at this head: <code>%d</code>\n\n%s", head, considered, findings.String())
+	summary := fmt.Sprintf("### Adversarial review\n\n- Head: <code>%s</code>\n- Reviews at this head: <code>%d</code>\n\n%s", head, considered, findings.String())
 	code := 1
 	switch {
 	case blocked > 0:
-		summary += "**BLOCKED** — a reviewer recorded a blocking defect at this head.\nPush the fix; the new head needs a fresh verdict.\n"
+		summary += "**BLOCKED** — a trusted publisher recorded a blocking defect at this head.\nPush the fix; the new head needs a fresh verdict.\n"
 		fail("%d blocking verdict(s) at %s", blocked, head)
 	case allowed == 0:
-		summary += "**NO VERDICT** — no reviewer has recorded an ALLOW at this head.\n\nA reviewer that did not write the change reviews the diff and records:\nPublish a GitHub review bound to this commit with `Dark-Factory-Review: allow HEAD_SHA`.\n"
+		summary += "**NO VERDICT** — no trusted publisher has recorded an ALLOW at this head.\n\nA reviewer that did not write the change reviews the diff and records:\nPublish a GitHub review bound to this commit with `Dark-Factory-Review: allow HEAD_SHA`.\n"
 		fail("no ALLOW verdict at %s", head)
 	default:
 		summary += fmt.Sprintf("**ALLOWED** — %d verdict(s) at this head, none blocking.\n", allowed)

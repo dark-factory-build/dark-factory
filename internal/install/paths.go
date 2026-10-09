@@ -3,8 +3,10 @@ package install
 import "path/filepath"
 
 const (
-	runtimesName = "runtimes"
-	changesName  = "changes"
+	// DefaultHomeName is the documented home under the operator's $HOME.
+	DefaultHomeName = ".dark-factory"
+	runtimesName    = "runtimes"
+	changesName     = "changes"
 	// LocalAPISocketName is the socket basename, exported for the one other
 	// legitimate owner of the runtimes directory (the daemon runtime parent)
 	// that must exclude exactly this name from its census.
@@ -29,6 +31,8 @@ const (
 func RuntimesPath(home string) string { return filepath.Join(home, runtimesName) }
 
 func ChangesPath(home string) string { return filepath.Join(home, changesName) }
+
+func OperatorTokenPath(home string) string { return filepath.Join(home, tokenName) }
 
 func LocalAPISocketPath(home string) string {
 	return filepath.Join(RuntimesPath(home), LocalAPISocketName)

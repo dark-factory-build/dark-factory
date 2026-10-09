@@ -13,15 +13,22 @@ import (
 const (
 	head  = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	other = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-	app   = "101" // synthetic GitHub identities; neither is privileged
-	human = "202"
-	blk   = "11111111-1111-4111-8111-111111111111"
-	fix   = "22222222-2222-4222-8222-222222222222"
+	// Synthetic GitHub identities: app is trusted by DF_REVIEW_TRUSTED_PUBLISHERS,
+	// human by its OWNER association, and outsider by neither.
+	app      = "101"
+	human    = "202"
+	outsider = "303"
+	blk      = "11111111-1111-4111-8111-111111111111"
+	fix      = "22222222-2222-4222-8222-222222222222"
 )
 
 // rec is one line of the workflow's @tsv projection.
 func rec(commit, state, author, body string) string {
-	return commit + "\t" + state + "\t" + author + "\t" + body + "\n"
+	assoc := map[string]string{app: "CONTRIBUTOR", human: "OWNER"}[author]
+	if assoc == "" {
+		assoc = "NONE"
+	}
+	return commit + "\t" + state + "\t" + author + "\t" + body + "\t" + assoc + "\n"
 }
 
 func allow(c string) string { return "Dark-Factory-Review: allow " + c }
@@ -35,15 +42,21 @@ func correcting(c, extra string) string {
 	return "Corrected. " + allow(c) + extra + " Dark-Factory-Review-Correction: " + blk + " <!-- dark-factory-operation:" + fix + ":new-digest -->"
 }
 
-// gate runs the decision over reviews and returns exit code, output, summary.
+// gate runs the decision over reviews with app trusted by id and returns
+// exit code, output, summary.
 func gate(t *testing.T, headSHA, reviews string) (int, string, string) {
+	t.Helper()
+	return gateTrusting(t, app, headSHA, reviews)
+}
+
+func gateTrusting(t *testing.T, trusted, headSHA, reviews string) (int, string, string) {
 	t.Helper()
 	dir := t.TempDir()
 	path, summary := filepath.Join(dir, "reviews"), filepath.Join(dir, "summary")
 	if err := os.WriteFile(path, []byte(reviews), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	env := map[string]string{"DF_REVIEW_HEAD_SHA": headSHA, "DF_REVIEW_REVIEWS": path, "GITHUB_STEP_SUMMARY": summary}
+	env := map[string]string{"DF_REVIEW_HEAD_SHA": headSHA, "DF_REVIEW_REVIEWS": path, "GITHUB_STEP_SUMMARY": summary, "DF_REVIEW_TRUSTED_PUBLISHERS": trusted}
 	var out strings.Builder
 	code := run(nil, func(k string) string { return env[k] }, &out, &out)
 	written, _ := os.ReadFile(summary)
@@ -87,7 +100,13 @@ func TestDecision(t *testing.T) {
 		{"blank lines are skipped", "\n" + rec(head, "COMMENTED", app, allow(head)) + "\n", true, nil},
 		{"three fields", head + "\tCOMMENTED\t" + app + "\n", false, []string{"malformed review record"}},
 		{"two fields", head + "\tCOMMENTED\n", false, []string{"malformed review record"}},
-		{"five fields", rec(head, "COMMENTED", app, allow(head)+"\tleftover"), false, []string{"malformed review record"}},
+		{"six fields", rec(head, "COMMENTED", app, allow(head)+"\tleftover"), false, []string{"malformed review record"}},
+		{"OWNER allow passes", rec(head, "COMMENTED", human, allow(head)), true, []string{"**ALLOWED**"}},
+		{"outsider allow is feedback", rec(head, "COMMENTED", outsider, "Looks fine. "+allow(head)), false, []string{"**NO VERDICT**", "untrusted publisher", "Looks fine."}},
+		{"outsider block does not veto", rec(head, "COMMENTED", app, allow(head)) + rec(head, "COMMENTED", outsider, block(head)), true, []string{"**ALLOWED**"}},
+		{"outsider CHANGES_REQUESTED does not veto", rec(head, "COMMENTED", app, allow(head)) + rec(head, "CHANGES_REQUESTED", outsider, "no"), true, []string{"**ALLOWED**"}},
+		{"outsider cannot correct", rec(head, "COMMENTED", app, blockMarked(head)) + rec(head, "COMMENTED", outsider, correcting(head, "")), false, []string{"**BLOCKED**"}},
+		{"contributor not in the list is untrusted", strings.Replace(rec(head, "COMMENTED", outsider, allow(head)), "NONE", "CONTRIBUTOR", 1), false, []string{"**NO VERDICT**"}},
 		{"control bytes are neutralised", rec(head, "COMMENTED", app, "carriage\x1b[2Ktrick  "+block(head)), false, []string{"carriage?[2Ktrick"}},
 		{"findings are escaped", rec(head, "COMMENTED", app, "Finding: <script>alert(1)</script> & the launch path. "+block(head)), false, []string{"&lt;script&gt;", "&amp; the launch path"}},
 		{"long body is bounded", rec(head, "COMMENTED", app, long+"TAIL "+block(head)), false, []string{"**BLOCKED**"}},
@@ -108,12 +127,28 @@ func TestDecision(t *testing.T) {
 		})
 	}
 
-	// Any authenticated GitHub review publisher can attest; the identity must be numeric.
-	for _, p := range []string{app, human, "303"} {
-		if code, out, _ := gate(t, head, rec(head, "COMMENTED", p, allow(head))); code != 0 {
-			t.Fatalf("publisher %q refused: %s", p, out)
+	// Maintainer associations are trusted with no list; listed ids by id.
+	for _, a := range []string{"OWNER", "MEMBER", "COLLABORATOR"} {
+		r := head + "\tCOMMENTED\t" + outsider + "\t" + allow(head) + "\t" + a + "\n"
+		if code, out, _ := gateTrusting(t, "", head, r); code != 0 {
+			t.Fatalf("%s refused: %s", a, out)
 		}
 	}
+	for trusted, pass := range map[string]bool{"": false, " ": false, "999": false, "999, 101": true} {
+		if code, out, _ := gateTrusting(t, trusted, head, rec(head, "COMMENTED", app, allow(head))); (code == 0) != pass {
+			t.Fatalf("trusted %q: exit %d %s", trusted, code, out)
+		}
+	}
+	for _, trusted := range []string{"101,", "app", "101;202", "0", "-101"} {
+		if code, out, _ := gateTrusting(t, trusted, head, rec(head, "COMMENTED", human, allow(head))); code == 0 || !strings.Contains(out, "DF_REVIEW_TRUSTED_PUBLISHERS") {
+			t.Fatalf("malformed trusted %q: exit %d %s", trusted, code, out)
+		}
+	}
+	// ponytail: interim four-field projection trusts any publisher, as before.
+	if code, out, _ := gateTrusting(t, "", head, head+"\tCOMMENTED\t"+outsider+"\t"+allow(head)+"\n"); code != 0 {
+		t.Fatalf("legacy record refused: %s", out)
+	}
+	// The publisher identity must be numeric.
 	for _, p := range []string{"", "0", " 101", "reviewer-login"} {
 		if code, out, _ := gate(t, head, rec(head, "COMMENTED", p, allow(head))); code == 0 || !strings.Contains(out, "malformed review publisher") {
 			t.Fatalf("publisher %q: exit %d %s", p, code, out)

@@ -414,6 +414,12 @@ func (daemon *Daemon) dispatch(ctx context.Context, call api.Call) api.Reply {
 			return newErrorReply(api.RemoteInternal)
 		}
 		return reply
+	case api.CallWebPair:
+		link, err := daemon.OpenBrowser(ctx)
+		if err != nil {
+			return newErrorReply(remoteErrorCode(err))
+		}
+		return api.NewContentReply(api.WebPair{Link: link})
 	case api.CallWebListClients:
 		after, ok := call.WebListAfter()
 		if !ok {

@@ -51,7 +51,8 @@ factoryctl init --home "$HOME/.dark-factory"
 factoryctl service install --home "$HOME/.dark-factory"
 ```
 
-A fresh installation opens the browser pairing page. Confirm pairing, then
+A fresh installation opens the console in your default browser, already
+paired; later, `factoryctl web pair` opens your default browser already paired. Then
 follow [Start your first worker](docs/install.md#start-your-first-worker) to
 register your checkout, enable work, and give a worker its first task. That
 short CLI setup is still required; once the worker appears, use its console

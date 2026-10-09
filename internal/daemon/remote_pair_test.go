@@ -462,7 +462,7 @@ func TestBrowserRemoteInviteHoldsAtMostFourOfTheLiveChallengeSlots(t *testing.T)
 	}
 
 	// A console looping REMOTE_INVITE cannot take a fifth of the 32 slots, so
-	// the loopback /pair page can always still mint one.
+	// the operator's web pair can always still mint one.
 	result, inviteErr := fixture.backend.RemoteInvite(ctx, client)
 	if !errors.Is(inviteErr, browser.ErrRateLimited) || result != (browserprotocol.RemoteInviteResult{}) {
 		t.Fatalf("fifth invite = %+v, %v", result, inviteErr)

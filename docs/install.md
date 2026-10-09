@@ -23,9 +23,10 @@ file, or source checkout is needed. See the intake instructions below.
 
 Create and install one managed home. Those two commands are the whole terminal
 side of setup: an install that starts a fresh service loads the launchd job,
-waits for the daemon to listen, and opens <http://127.0.0.1:43123/pair> in this
-machine's default browser, where confirming pairs that browser. A repeated
-install returns the service it found and opens nothing. `service start` is the
+waits for the daemon to answer, mints a one-shot pairing link with the home's
+operator token, and opens it in this machine's default browser, which pairs that
+browser. The link is never printed. A repeated install returns the service it
+found and opens nothing. `service start` is the
 explicit command to use after a later stop:
 
 ```sh
@@ -76,26 +77,29 @@ you want: repeating an install with a different origin refuses, printing the
 origin already installed, rather than silently keeping or dropping it. Pair a
 phone from the console's PAIR A PHONE button.
 
-Pairing never needs the terminal. Another browser on this machine pairs from the
-console's PAIR THIS BROWSER link, which goes to
-<http://127.0.0.1:43123/pair>; the daemon serves that one first-party page and
-nothing else. Pairing again there is also how a browser replaces a saved
-credential this daemon no longer accepts.
+Pairing a browser with the full grant is an operator action: `factoryctl web
+pair` mints a one-shot link (it expires after five minutes) and opens your
+default browser already paired, never printing the link. Run it to pair another browser on
+this Mac (make it the default first), or to recover when a browser's saved
+credential is no longer accepted, for example after `web revoke`. A phone or
+another machine pairs with the reduced remote grant from a paired console's PAIR
+A PHONE button. The loopback listener itself mints nothing.
 
-Inspection and revocation still run through the operator client, so those
-commands need the socket and token exported:
+Pairing, inspection and revocation run through the operator client. Operator
+commands find the default home `$HOME/.dark-factory` on their own; exporting
+`DARK_FACTORY_SOCKET` and `DARK_FACTORY_OPERATOR_TOKEN_FILE` is optional for the
+default home and required for any other:
 
 ```sh
-export DARK_FACTORY_SOCKET="$HOME/.dark-factory/runtimes/factory.sock"
-export DARK_FACTORY_OPERATOR_TOKEN_FILE="$HOME/.dark-factory/operator.token"
 factoryctl web status
+factoryctl web pair
 factoryctl web list-clients
 factoryctl web revoke CLIENT_ID --revision REVISION
 factoryctl remote status
 ```
 
-The CLI cannot delete origin-scoped browser storage; pairing afresh from the
-pair page makes that manual browser action unnecessary.
+The CLI cannot delete origin-scoped browser storage; pairing afresh with
+`factoryctl web pair` makes that manual browser action unnecessary.
 
 ## Start your first worker
 
@@ -105,6 +109,7 @@ find it; see [provider discovery](providers.md). From an existing committed
 Git checkout, run:
 
 ```sh
+# Optional for the default home:
 export DARK_FACTORY_SOCKET="$HOME/.dark-factory/runtimes/factory.sock"
 export DARK_FACTORY_OPERATOR_TOKEN_FILE="$HOME/.dark-factory/operator.token"
 factoryctl dispatch on
