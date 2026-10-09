@@ -111,6 +111,16 @@ the overseer. Its durable sequence cursor advances with enqueue; events arriving
 while it is busy stay pending. Cursor lag behind the retained journal wakes a
 conservative inspection. No model runs merely to poll an idle project.
 
+A specialist is a worker with a standing instruction. The same wake tick gives
+it one carrier task at a time (priority -100) when `specialistSchedule` says it
+is due: at once, then its cadence after each review, doubled per quiet review
+up to 8x, or a quarter cadence after one when its `idle_wake_on` classes
+(`failures`, `merges`) saw an event. Its carrier never claims shared work,
+waits while it would take the last free worker slot or exceed the project's
+`specialist_runs`, and has the overseer's 30-minute backstop. It may read the
+overseer status and observe its project's worker terminals; archiving it stops
+its live review and cancels its queued carriers in one transaction.
+
 ## Browser state
 
 The browser reads one bounded, transactionally pinned active-state snapshot

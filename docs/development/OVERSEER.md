@@ -167,6 +167,20 @@ prepared prompt is capped at 8 KiB:
 Every command below runs from the directory the session starts in, its
 private runtime home, with the clone at `repo` inside it.
 
+### Deciding specialist proposals
+
+A specialist (a worker with a standing instruction) records a proposal as an
+`observation` whose metadata says `"record_type":"proposal"`. Each open one is
+a persistent wake item, `Proposal ID from AGENT: TITLE [proposal:ID]`, until a
+`decision` resolves it: metadata `"record_type":"proposal"`, `"record_id":"ID"`
+and evidence `["proposal:ID"]`. To accept, `overseer task add` the work (to a
+worker or the shared queue, never the specialist), `content attach` the
+proposal to it, and record the decision with `"task_id"` set to that task. To
+decline or defer, record the decision without `task_id`, the reason in its
+description. Only you or the operator resolve a proposal, and an acceptance is
+refused while another accepted proposal's task is still queued, running or
+blocked: one self-generated implementation is active at a time.
+
 Read this runbook from that clone or the task-provided checkout. If neither
 is available, report the missing checkout. Scope searches to that checkout
 and the private runtime home; never search the operator’s home or personal

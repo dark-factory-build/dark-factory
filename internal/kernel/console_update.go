@@ -24,6 +24,7 @@ type AgentPatch struct {
 	IdleAfterSeconds *uint32
 	IdleInstruction  *string
 	IdleRunBudget    *uint32
+	IdleWakeOn       *string
 }
 
 // TaskPatch is the console's queue edit. A nil member leaves the durable
@@ -50,7 +51,7 @@ func (store *Store) UpdateAgent(ctx context.Context, id AgentID, expected Revisi
 // revision update share one write transaction. Keeping the authority's input
 // to these lifecycle fields prevents it from acquiring configuration controls.
 func (store *Store) UpdateAgentForOverseer(ctx context.Context, digest AttemptDigest, id AgentID, expected Revision, patch AgentPatch, at UnixMillis) (Agent, error) {
-	if patch.Paused == nil && patch.Archived == nil || patch.Paused != nil && patch.Archived != nil || patch.Model != nil || patch.ReasoningEffort != nil || patch.AccountID != nil || patch.Appearance != nil || patch.IdlePolicy != nil || patch.IdleAfterSeconds != nil || patch.IdleInstruction != nil || patch.IdleRunBudget != nil {
+	if patch.Paused == nil && patch.Archived == nil || patch.Paused != nil && patch.Archived != nil || patch.Model != nil || patch.ReasoningEffort != nil || patch.AccountID != nil || patch.Appearance != nil || patch.IdlePolicy != nil || patch.IdleAfterSeconds != nil || patch.IdleInstruction != nil || patch.IdleRunBudget != nil || patch.IdleWakeOn != nil {
 		return Agent{}, fmt.Errorf("%w: invalid overseer agent update", ErrInvalidValue)
 	}
 	return store.updateAgent(ctx, &digest, id, expected, patch, at)
@@ -59,7 +60,7 @@ func (store *Store) UpdateAgentForOverseer(ctx context.Context, digest AttemptDi
 // UpdateAgentForOperator applies the same bounded lifecycle edit without
 // inventing browser authority for the local operator.
 func (store *Store) UpdateAgentForOperator(ctx context.Context, id AgentID, expected Revision, patch AgentPatch, at UnixMillis) (Agent, error) {
-	if patch.Paused == nil && patch.Archived == nil || patch.Paused != nil && patch.Archived != nil || patch.Model != nil || patch.ReasoningEffort != nil || patch.AccountID != nil || patch.Appearance != nil || patch.IdlePolicy != nil || patch.IdleAfterSeconds != nil || patch.IdleInstruction != nil || patch.IdleRunBudget != nil {
+	if patch.Paused == nil && patch.Archived == nil || patch.Paused != nil && patch.Archived != nil || patch.Model != nil || patch.ReasoningEffort != nil || patch.AccountID != nil || patch.Appearance != nil || patch.IdlePolicy != nil || patch.IdleAfterSeconds != nil || patch.IdleInstruction != nil || patch.IdleRunBudget != nil || patch.IdleWakeOn != nil {
 		return Agent{}, fmt.Errorf("%w: invalid operator agent update", ErrInvalidValue)
 	}
 	return store.updateAgent(ctx, nil, id, expected, patch, at)
@@ -98,7 +99,7 @@ func (store *Store) updateAgent(ctx context.Context, digest *AttemptDigest, id A
 		return Agent{}, tx.Rollback(ErrConflict)
 	}
 	if patch.Archived != nil {
-		if patch.Model != nil || patch.ReasoningEffort != nil || patch.AccountID != nil || patch.Paused != nil || patch.Appearance != nil || patch.IdlePolicy != nil || patch.IdleAfterSeconds != nil || patch.IdleInstruction != nil || patch.IdleRunBudget != nil {
+		if patch.Model != nil || patch.ReasoningEffort != nil || patch.AccountID != nil || patch.Paused != nil || patch.Appearance != nil || patch.IdlePolicy != nil || patch.IdleAfterSeconds != nil || patch.IdleInstruction != nil || patch.IdleRunBudget != nil || patch.IdleWakeOn != nil {
 			return Agent{}, tx.Rollback(ErrInvalidValue)
 		}
 		if agent.Role != RoleWorker {
@@ -108,12 +109,25 @@ func (store *Store) updateAgent(ctx context.Context, digest *AttemptDigest, id A
 			return Agent{}, tx.Rollback(ErrConflict)
 		}
 		if *patch.Archived {
+			// A specialist's own reviews do not hold an archive: it stops
+			// them (stopSpecialist). Other work and open requests still do.
 			var queued, live, requests int
-			if err := tx.connection.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM tasks WHERE assigned_agent_id = ? AND status = 'queued'), EXISTS(SELECT 1 FROM runs WHERE agent_id = ? AND phase <> 'terminal'), EXISTS(SELECT 1 FROM human_requests h JOIN runs r ON r.id = h.run_id WHERE r.agent_id = ? AND h.status NOT IN ('resolved', 'stale'))`, agent.ID.Bytes(), agent.ID.Bytes(), agent.ID.Bytes()).Scan(&queued, &live, &requests); err != nil {
+			if err := tx.connection.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM tasks AS t JOIN agents AS a ON a.id = t.assigned_agent_id WHERE a.id = ?1 AND t.status = 'queued' AND NOT `+specialistCarrierSQL+`),
+				EXISTS(SELECT 1 FROM runs AS r JOIN tasks AS t ON t.id = r.task_id JOIN agents AS a ON a.id = r.agent_id WHERE a.id = ?1 AND r.phase <> 'terminal' AND NOT `+specialistCarrierSQL+`),
+				EXISTS(SELECT 1 FROM human_requests h JOIN runs r ON r.id = h.run_id WHERE r.agent_id = ?1 AND h.status NOT IN ('resolved', 'stale'))`, agent.ID.Bytes()).Scan(&queued, &live, &requests); err != nil {
 				return Agent{}, tx.Rollback(err)
 			}
 			if queued != 0 || live != 0 || requests != 0 {
 				return Agent{}, tx.Rollback(ErrConflict)
+			}
+			var actor *Run
+			if digest != nil {
+				actor = &overseer
+			}
+			if agent.Specialist() {
+				if err := store.stopSpecialist(ctx, tx, agent, actor, at); err != nil {
+					return Agent{}, tx.Rollback(err)
+				}
 			}
 		}
 		agent.Archived = *patch.Archived
@@ -143,6 +157,7 @@ func (store *Store) updateAgent(ctx context.Context, digest *AttemptDigest, id A
 	if patch.Paused != nil {
 		agent.Paused = *patch.Paused
 	}
+	wasSpecialist := agent.Specialist()
 	if patch.Appearance != nil {
 		agent.Appearance = *patch.Appearance
 	}
@@ -158,11 +173,19 @@ func (store *Store) updateAgent(ctx context.Context, digest *AttemptDigest, id A
 	if patch.IdleRunBudget != nil {
 		agent.Idle.RunBudget = *patch.IdleRunBudget
 	}
-	idleChanged := patch.IdlePolicy != nil || patch.IdleAfterSeconds != nil || patch.IdleInstruction != nil || patch.IdleRunBudget != nil
+	if patch.IdleWakeOn != nil {
+		agent.Idle.WakeOn = *patch.IdleWakeOn
+	}
+	idleChanged := patch.IdlePolicy != nil || patch.IdleAfterSeconds != nil || patch.IdleInstruction != nil || patch.IdleRunBudget != nil || patch.IdleWakeOn != nil
 	if idleChanged {
-		// Only an overseer is woken; a worker's work comes from tasks.
-		if agent.Role == RoleWorker && agent.Idle.Policy == IdleStandingInstruction {
-			return Agent{}, tx.Rollback(fmt.Errorf("%w: only an overseer takes a standing instruction", ErrInvalidValue))
+		if wasSpecialist && !agent.Specialist() {
+			var carried bool
+			if err := tx.connection.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM tasks WHERE assigned_agent_id = ? AND title = ? AND status IN ('queued', 'running'))`, agent.ID.Bytes(), overseerWakeTitle).Scan(&carried); err != nil {
+				return Agent{}, tx.Rollback(err)
+			}
+			if carried {
+				return Agent{}, tx.Rollback(fmt.Errorf("%w: a specialist with a review queued or running: pause or stop it first", ErrConflict))
+			}
 		}
 		if err := validateIdleRuleForProvider(agent.Provider, agent.Idle); err != nil {
 			return Agent{}, tx.Rollback(err)
@@ -180,8 +203,8 @@ func (store *Store) updateAgent(ctx context.Context, digest *AttemptDigest, id A
 	} else if err := validateStoredProviderControls(agent.Provider, agent.Model, agent.ReasoningEffort); err != nil {
 		return Agent{}, tx.Rollback(err)
 	}
-	result, err := tx.connection.ExecContext(ctx, `UPDATE agents SET model = ?, reasoning_effort = ?, account_id = ?, paused = ?, archived = ?, appearance = ?, idle_policy = ?, idle_after_seconds = ?, idle_instruction = ?, idle_run_budget = ?, idle_runs_used = ?, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND revision = ?`,
-		nullableString(agent.Model), nullableString(agent.ReasoningEffort), nullableID(agent.AccountID), boolInt(agent.Paused), boolInt(agent.Archived), encodeAgentAppearance(agent.Appearance), string(agent.Idle.Policy), int64(agent.Idle.AfterSeconds), agent.Idle.Instruction, int64(agent.Idle.RunBudget), int64(agent.Idle.RunsUsed), at.Int64(), id.Bytes(), expected.Int64())
+	result, err := tx.connection.ExecContext(ctx, `UPDATE agents SET model = ?, reasoning_effort = ?, account_id = ?, paused = ?, archived = ?, appearance = ?, idle_policy = ?, idle_after_seconds = ?, idle_instruction = ?, idle_run_budget = ?, idle_runs_used = ?, idle_wake_on = ?, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND revision = ?`,
+		nullableString(agent.Model), nullableString(agent.ReasoningEffort), nullableID(agent.AccountID), boolInt(agent.Paused), boolInt(agent.Archived), encodeAgentAppearance(agent.Appearance), string(agent.Idle.Policy), int64(agent.Idle.AfterSeconds), agent.Idle.Instruction, int64(agent.Idle.RunBudget), int64(agent.Idle.RunsUsed), agent.Idle.WakeOn, at.Int64(), id.Bytes(), expected.Int64())
 	if err := requireOneRow(result, err); err != nil {
 		return Agent{}, tx.Rollback(err)
 	}

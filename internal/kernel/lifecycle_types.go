@@ -972,7 +972,10 @@ type AttemptAuthority struct {
 	CurrentChangeRevision    *Revision
 	BaseCommit               []byte
 	ContinuationContexts     []ContinuationContext
-	task                     string
+	// Specialist is a specialist's review run (its carrier): it may also read
+	// its project's overseer status and observe its workers.
+	Specialist bool
+	task       string
 }
 
 func (authority AttemptAuthority) Task() string { return authority.task }

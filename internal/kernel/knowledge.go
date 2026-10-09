@@ -306,7 +306,8 @@ func validateKnowledge(ctx context.Context, c *sql.Conn, spec NewContent, expect
 			return ErrInvalidValue
 		}
 	}
-	if (m.RecordType == "") != (m.RecordID == "") {
+	// Specialist records (validateSpecialistRecord) check their own record_id.
+	if m.RecordType == "" && m.RecordID != "" || m.RecordID == "" && (m.RecordType == "human_request" || m.RecordType == "peer_question") {
 		return ErrInvalidValue
 	}
 	switch m.RecordType {
@@ -320,11 +321,14 @@ func validateKnowledge(ctx context.Context, c *sql.Conn, spec NewContent, expect
 		if err := c.QueryRowContext(ctx, `SELECT count(*) FROM production_records WHERE project_id=? AND kind='reviewer' AND identity=?`, spec.ProjectID.Bytes(), m.RecordID).Scan(&n); err != nil {
 			return err
 		}
-		if n == 0 {
+		if n == 0 && m.RecordID != "" {
 			return ErrInvalidValue
 		}
+		fallthrough
 	default:
-		return ErrInvalidValue
+		if err := validateSpecialistRecord(ctx, c, spec, m, a); err != nil {
+			return err
+		}
 	}
 	for _, entity := range m.Entities {
 		if err := validateKnowledgeEntity(ctx, c, spec.ProjectID, entity); err != nil {

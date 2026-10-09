@@ -1302,7 +1302,7 @@ func (daemon *Daemon) setProjectLimits(ctx context.Context, call api.Call) api.R
 	if err != nil {
 		return newErrorReply(api.RemoteInternal)
 	}
-	project, err := daemon.store.SetProjectLimitsWithTokens(ctx, id, expected, input.RunBudget, input.MaxRunSeconds, input.TokenBudget, at)
+	project, err := daemon.store.SetProjectLimitsWithTokens(ctx, id, expected, input.RunBudget, input.MaxRunSeconds, input.TokenBudget, input.SpecialistRuns, input.SpecialistOpenProposals, at)
 	if err != nil {
 		return newErrorReply(remoteErrorCode(err))
 	}
@@ -1377,7 +1377,7 @@ func (daemon *Daemon) setAgentIdlePolicy(ctx context.Context, call api.Call) api
 	if err != nil {
 		return newErrorReply(api.RemoteInternal)
 	}
-	agent, err := daemon.store.UpdateAgent(ctx, id, expected, kernel.AgentPatch{IdlePolicy: &policy, IdleAfterSeconds: &input.AfterSeconds, IdleInstruction: &input.Instruction, IdleRunBudget: &budget}, at)
+	agent, err := daemon.store.UpdateAgent(ctx, id, expected, kernel.AgentPatch{IdlePolicy: &policy, IdleAfterSeconds: &input.AfterSeconds, IdleInstruction: &input.Instruction, IdleRunBudget: &budget, IdleWakeOn: &input.WakeOn}, at)
 	if err != nil {
 		return newErrorReply(remoteErrorCode(err))
 	}
@@ -1728,7 +1728,8 @@ func (daemon *Daemon) overseerDigest(ctx context.Context, call api.Call) (kernel
 		return kernel.AttemptAuthority{}, kernel.AttemptDigest{}, &failure
 	}
 	authority, err := daemon.store.AuthenticateAttempt(ctx, digest)
-	if err != nil || authority.Role != kernel.RoleOrchestrator {
+	// A specialist may read the overseer status, and nothing else here.
+	if err != nil || authority.Role != kernel.RoleOrchestrator && !(authority.Specialist && call.Kind() == api.CallOverseerSnapshot) {
 		if err == nil {
 			err = kernel.ErrUnauthorized
 		}

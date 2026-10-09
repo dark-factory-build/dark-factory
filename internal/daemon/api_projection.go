@@ -25,7 +25,7 @@ func projectSnapshot(snapshot kernel.DashboardSnapshot) api.DashboardSnapshot {
 	}
 	for _, project := range snapshot.Projects {
 		result.Projects = append(result.Projects, api.ProjectSummary{
-			ID: project.ID.String(), Name: project.Name, RunBudgetLimit: project.RunBudgetLimit, RunsUsed: project.RunsUsed, MaxRunSeconds: project.MaxRunSeconds, TokenLimit: project.Tokens.TokenLimit, TokensUsed: project.Tokens.TokensUsed, Revision: uint64(project.Revision.Int64()),
+			ID: project.ID.String(), Name: project.Name, RunBudgetLimit: project.RunBudgetLimit, RunsUsed: project.RunsUsed, MaxRunSeconds: project.MaxRunSeconds, TokenLimit: project.Tokens.TokenLimit, TokensUsed: project.Tokens.TokensUsed, SpecialistRuns: project.SpecialistRuns, SpecialistOpenProposals: project.SpecialistOpenProposals, Revision: uint64(project.Revision.Int64()),
 		})
 	}
 	for _, agent := range snapshot.Agents {
@@ -90,7 +90,7 @@ func projectAgentSummary(agent kernel.AgentSummary) api.AgentSummary {
 		Model: agent.Model, ReasoningEffort: agent.ReasoningEffort,
 		ToolBudgetLimit: agent.ToolBudgetLimit, ToolCallsUsed: agent.ToolCallsUsed,
 		IdlePolicy: string(agent.Idle.Policy), IdleAfterSeconds: agent.Idle.AfterSeconds,
-		IdleInstruction: agent.Idle.Instruction, IdleRunBudget: agent.Idle.RunBudget, IdleRunsUsed: agent.Idle.RunsUsed,
+		IdleInstruction: agent.Idle.Instruction, IdleRunBudget: agent.Idle.RunBudget, IdleRunsUsed: agent.Idle.RunsUsed, IdleWakeOn: agent.Idle.WakeOn,
 		AccountID: optionalAccountText(agent.AccountID), Revision: uint64(agent.Revision.Int64()),
 	}
 }
