@@ -1064,6 +1064,21 @@ func TestServiceUpgradeStagesAndOnlyPromotionSwaps(t *testing.T) {
 	}
 }
 
+// A crash between staging the marker and its rename leaves the stage file;
+// it must not refuse the next release.
+func TestServiceUpgradeIsNotBlockedByAStaleMarkerStage(t *testing.T) {
+	fixture, next, identity := upgradeFixture(t)
+	if err := os.WriteFile(filepath.Join(ServiceDirectoryPath(fixture.home), "."+upgradeMarkerName+".stage"), []byte(`{"tar`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := ServiceUpgrade(context.Background(), fixture.home, next, identity); err != nil {
+		t.Fatalf("a stale marker stage refused the release: %v", err)
+	}
+	if marker, present, err := ReadUpgradeMarker(fixture.home); err != nil || !present || marker.Target != identity.Source() {
+		t.Fatalf("marker = %+v, %t, %v", marker, present, err)
+	}
+}
+
 // #1388: the running build validates the home before staging its successor,
 // so a file only a newer factoryd writes must not refuse the release, or no
 // release could ever add one (as public.key once did).
