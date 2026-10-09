@@ -332,3 +332,35 @@ func TestInferenceSettlesOnOneAnswer(t *testing.T) {
 		}
 	}
 }
+
+func TestCIJoinsUnitsAndNamesItsRepository(t *testing.T) {
+	graph, err := Infer("s", []Repository{
+		{ID: "org/core", Name: "core", Files: map[string][]byte{
+			"go.mod":                  []byte("module example.com/core\n"),
+			"cmd/gate/main.go":        []byte("package main\nfunc main() {}\n"),
+			".github/workflows/a.yml": []byte("on: pull_request\njobs:\n  gate:\n    steps:\n      - run: go run ./cmd/gate\n"),
+		}},
+		{ID: "org/site", Name: "site", Files: map[string][]byte{
+			"wrangler.toml":           []byte("name = \"api\"\n"),
+			".github/workflows/b.yml": []byte("on: push\njobs:\n  t:\n    steps:\n      - run: echo\n"),
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	byID := map[string]Node{}
+	labels := map[string]bool{}
+	for _, node := range graph.Nodes {
+		byID[node.ID] = node
+		labels[node.Label] = true
+	}
+	if !labels["GitHub Actions \u00b7 core"] || !labels["GitHub Actions \u00b7 site"] {
+		t.Fatalf("CI units are not named after their repository: %v", labels)
+	}
+	for _, edge := range graph.Edges {
+		if byID[edge.From].Kind == Job && edge.Kind == Calls && strings.Contains(byID[edge.To].Label, "gate") {
+			return
+		}
+	}
+	t.Fatal("the job running ./cmd/gate has no edge to the gate unit")
+}
