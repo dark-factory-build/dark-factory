@@ -135,7 +135,8 @@ queue while any item needs you: a finished (except an intake task with a diff,
 which factoryd publishes), blocked or failed worker task, an
 unanswered worker question, unpublished or corrected work, or a pull request
 factoryd escalated. An item you leave unhandled is woken again at most three
-times, 30 minutes apart, until it changes. A Change whose task is queued or
+times, 30 minutes apart, until it changes; a wake whose run never started does
+not count. A Change whose task is queued or
 running (sent back) cannot be published. A factory-wide overseer slot lets you supervise alongside
 workers even when worker capacity is one.
 

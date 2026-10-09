@@ -230,3 +230,72 @@ func TestOverseerWakeSkipsPublishedIntakeSuccess(t *testing.T) {
 		}
 	}
 }
+
+// An item's re-wakes are counted per item: wakes about other items do not use
+// them up.
+func TestOverseerRewakesCountPerItem(t *testing.T) {
+	ctx := context.Background()
+	store, worker, overseer := wakeFixture(t)
+	head := strings.Repeat("a", 40)
+	escalate(t, store, worker.ProjectID, "7", "open", head, head, 1000)
+	at := 1000 + overseerWakeSettle.Milliseconds()
+	for index, body := range []string{"", "Escalated: stuck 8", "Escalated: stuck 8", "Escalated: stuck 8", "Escalated: stuck 8"} {
+		var carrier Task
+		if index == 0 {
+			tasks, err := store.EnqueueOverseerWakeups(ctx, mustTime(t, at))
+			if err != nil || len(tasks) != 1 || !strings.Contains(tasks[0].Body, "Escalated: stuck 7") {
+				t.Fatalf("first wake = %+v, %v", tasks, err)
+			}
+			carrier = tasks[0]
+		} else {
+			var err error
+			if carrier, err = store.EnqueueTask(ctx, NewTask{ID: taskID(t, uint8(40+index)), IncarnationID: incarnationID(t, uint8(50+index)), ProjectID: overseer.ProjectID, AssignedAgentID: overseer.ID, Title: overseerWakeTitle, Body: body}, mustTime(t, at)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err := store.UpdateTask(ctx, carrier.ID, carrier.Revision, TaskPatch{Cancel: true}, mustTime(t, at+1)); err != nil {
+			t.Fatal(err)
+		}
+		at++
+	}
+	if bodies := wakeBodies(t, store, at+OverseerRewakeAfter.Milliseconds()); len(bodies) != 1 || !strings.Contains(bodies[0], "Escalated: stuck 7") {
+		t.Fatalf("re-wake after wakes about other items = %q", bodies)
+	}
+}
+
+// A carrier whose run never started was never delivered: its item stays due.
+func TestOverseerNeverStartedWakeLeavesItemDue(t *testing.T) {
+	for _, detail := range []string{NeverStartedRunDetail, "provider exited"} {
+		ctx := context.Background()
+		neverStarted, _ := NewFailureProposal(FailureProtocol, NeverStartedRunDetail)
+		store, finalizing := finalizingReleasedRun(t, RoleOrchestrator, neverStarted)
+		defer store.Close()
+		if _, err := finalizeTestRun(t, store, finalizing, 60); err != nil {
+			t.Fatal(err)
+		}
+		head := strings.Repeat("a", 40)
+		escalate(t, store, finalizing.ProjectID, "7", "open", head, head, 2)
+		// The carrier failed without starting (or, for contrast,
+		// after its run started).
+		for statement, args := range map[string][]any{
+			`UPDATE tasks SET title = ?, body = 'Escalated: stuck 7', status = 'failed', work_revision = 1, completed_at_ms = updated_at_ms WHERE id = ?`: {overseerWakeTitle, finalizing.TaskID.Bytes()},
+			`UPDATE runs SET terminal_detail = ?1, proposal_detail = ?1 WHERE id = ?2`:                                                                    {detail, finalizing.ID.Bytes()},
+		} {
+			if _, err := store.writer.ExecContext(ctx, statement, args...); err != nil {
+				t.Fatal(err)
+			}
+		}
+		overseer, _, err := store.Agent(ctx, finalizing.AgentID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		policy, after, instruction := IdleStandingInstruction, uint32(1), "Supervise."
+		if _, err := store.UpdateAgent(ctx, overseer.ID, overseer.Revision, AgentPatch{IdlePolicy: &policy, IdleAfterSeconds: &after, IdleInstruction: &instruction}, mustTime(t, 100)); err != nil {
+			t.Fatal(err)
+		}
+		bodies := wakeBodies(t, store, 2+overseerWakeSettle.Milliseconds())
+		if due := len(bodies) == 1 && strings.Contains(bodies[0], "Escalated: stuck 7"); due != (detail == NeverStartedRunDetail) {
+			t.Fatalf("detail %q: wake = %q", detail, bodies)
+		}
+	}
+}

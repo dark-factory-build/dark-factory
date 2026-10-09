@@ -30,11 +30,12 @@ const (
 // publish (it has no pull request), need one look. An accepted intake task
 // that succeeded with a diff needs none: factoryd publishes it, and the
 // Change item covers a publication that never happens. It is due when no
-// carrier was enqueued since that version, or, while it persists, when at most
-// three were and the latest is OverseerRewakeAfter old: one wake and three
-// re-wakes per item version, once the newest due item is overseerWakeSettle
-// old or the oldest overseerWakeMaxDelay old.
-const overseerWakeItems = `WITH carrier AS (SELECT created_at_ms AS at FROM tasks WHERE assigned_agent_id = ?4 AND title = ?5),
+// carrier was delivered (a failed one only if some run started) since that
+// version, or, while it persists, when at most three named it or reconciled in
+// full and the latest is OverseerRewakeAfter old: one wake and three re-wakes
+// per item version, once the newest due item is overseerWakeSettle old or the
+// oldest overseerWakeMaxDelay old.
+const overseerWakeItems = `WITH carrier AS (SELECT created_at_ms AS at, body FROM tasks AS t WHERE assigned_agent_id = ?4 AND title = ?5 AND (status <> 'failed' OR EXISTS (SELECT 1 FROM runs AS r WHERE r.task_id = t.id AND r.terminal_detail IS NOT ?9))),
 item AS (
 	SELECT t.id, t.updated_at_ms AS version, t.status IN ('blocked', 'failed') AS persistent, '' AS detail
 	FROM tasks AS t JOIN agents AS a ON a.id = t.assigned_agent_id
@@ -61,7 +62,7 @@ item AS (
 	  AND COALESCE(json_extract(document, '$.escalation'), '') <> '')
 SELECT id IS NULL, CASE WHEN id IS NULL THEN detail ELSE (` + overseerWakeLine + `) END, (` + overseerWakeCounts + `)
 FROM (SELECT *, MIN(version) OVER () AS oldest, MAX(version) OVER () AS newest FROM item
-	WHERE version > COALESCE((SELECT at FROM carrier ORDER BY at DESC LIMIT 1 OFFSET 3), -1)
+	WHERE (SELECT count(*) FROM carrier WHERE at > version AND (instr(body, lower(hex(id)) || substr(detail, 1, 64)) OR instr(body, 'wake: mode=full;'))) < 4
 	  AND (NOT EXISTS (SELECT 1 FROM carrier WHERE at > version) OR persistent AND (SELECT MAX(at) FROM carrier) + ?6 <= ?3)) AS due
 WHERE ?3 - newest >= ?7 OR ?3 - oldest >= ?8
 ORDER BY version LIMIT 33`
@@ -69,8 +70,8 @@ ORDER BY version LIMIT 33`
 // EnqueueOverseerWakeups applies one level-triggered rule to each standing
 // overseer: while it has no unfinished wake carrier and some item is due, it
 // gets one carrier naming the due items. An item is due when no carrier was
-// enqueued since it last changed, or, while it still needs the overseer, when
-// fewer than four were and the latest is OverseerRewakeAfter old.
+// delivered since it last changed, or, while it still needs the overseer, when
+// fewer than four named it and the latest is OverseerRewakeAfter old.
 func (store *Store) EnqueueOverseerWakeups(ctx context.Context, at UnixMillis) ([]Task, error) {
 	tx, err := store.beginUncheckedWrite(ctx)
 	if err != nil {
@@ -136,7 +137,7 @@ func (store *Store) EnqueueOverseerWakeups(ctx context.Context, at UnixMillis) (
 // overseerWake returns the carrier body for agent's due items, if any.
 func overseerWake(ctx context.Context, connection *sql.Conn, agent Agent, at int64) (string, bool, error) {
 	rows, err := connection.QueryContext(ctx, overseerWakeItems, agent.ProjectID.Bytes(), PublicationAttentionAfter.Milliseconds(), at,
-		agent.ID.Bytes(), overseerWakeTitle, OverseerRewakeAfter.Milliseconds(), overseerWakeSettle.Milliseconds(), overseerWakeMaxDelay.Milliseconds())
+		agent.ID.Bytes(), overseerWakeTitle, OverseerRewakeAfter.Milliseconds(), overseerWakeSettle.Milliseconds(), overseerWakeMaxDelay.Milliseconds(), NeverStartedRunDetail)
 	if err != nil {
 		return "", false, err
 	}
