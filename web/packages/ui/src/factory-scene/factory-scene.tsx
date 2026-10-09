@@ -954,7 +954,7 @@ function Station({ item, machine, selected, close }: { item: SceneStation; machi
     case "gate": body = <g><rect x={x} y={y} width={w} height={h} className={reading.evidence === "runtime" ? "dfPlant__gate dfPlant__gate--runtime" : "dfPlant__gate"} />
       <rect x={x + 2} y={y + h / 2 - 2} width="3" height="4" className="lamp" />
       <text x={x + w + 6} y={y + 12} className="dfPlant__label" fontSize="8">{shortLabel(machine.label, labelChars("gate", w))}</text>
-      <text x={x + w + 6} y={y + 23} className="dfPlant__small" fontSize="7">{reading.evidence === "runtime" ? "seen, not in code" : reading.ratePerHour > 0 ? `${rate(reading.ratePerHour)} · measured from our side` : "outside · can't see inside"}</text></g>; break;
+      <text x={x + w + 6} y={y + 23} className="dfPlant__small" fontSize="7">{reading.evidence === "runtime" ? "seen, not in code" : reading.ratePerHour > 0 ? `${rate(reading.ratePerHour)} · measured from our side` : reading.observation === "unobserved" ? "not connected" : reading.observation === "quiet" ? "no calls in 15 min" : "outside · can't see inside"}</text></g>; break;
     default: body = <g><rect x={x} y={y} width={w} height={h} className="crate" /><text x={x + w / 2} y={y + h / 2 + 3} textAnchor="middle" className="qmark" fontSize="8">?</text></g>;
   }
   return <g className={`s-${reading.observation} op-${reading.state}${selected ? " dfPlant--selected" : ""}`}>{label}{body}{plaque}{scrap}{stale}{tag}</g>;

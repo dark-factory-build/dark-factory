@@ -292,7 +292,11 @@ func (daemon *Daemon) liveGraph(projectID kernel.ProjectID, graph projectGraph) 
 		}
 	}
 	observations, coverage := store.Snapshot(now)
-	return opgraph.Overlay(projectID.String(), graph.graph, observations, coverage, aliases, now, runtimeWindow.Milliseconds())
+	live := opgraph.Overlay(projectID.String(), graph.graph, observations, coverage, aliases, now, runtimeWindow.Milliseconds())
+	if daemon.linear == nil || !daemon.linear.Connected() {
+		live.NotConnected("api.linear.app")
+	}
+	return live
 }
 
 // observeSource is one pull adapter the operator configured in

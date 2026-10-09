@@ -312,3 +312,24 @@ func TestOnlyMethodsFallToABareListener(t *testing.T) {
 		t.Fatalf("unmatched work was explained away by the listener: %+v, listener %+v", live.Summary, live.Nodes[listener.ID])
 	}
 }
+
+func TestSilentOutsideHostIsQuietUnlessNotConnected(t *testing.T) {
+	now := 100 * minute
+	cover := func(keys ...string) []Coverage {
+		return []Coverage{{Source: "factoryd", Unit: "api", Keys: keys, AsOf: now, TTL: minute}}
+	}
+	edge := [3]string{ID("s", "", "wrangler:api"), ID("s", "", "host:api.stripe.com"), string(Calls)}
+	live := Overlay("s", overlayGraph(), nil, cover("service.name", "server.address"), nil, now, 15*minute)
+	invariant(t, live)
+	if got := labels(live)["api.stripe.com"]; got.Observation != "quiet" || got.State != "idle" || live.Edges[edge].Observation != "quiet" {
+		t.Errorf("host the only caller reports on = %+v, edge %+v", got, live.Edges[edge])
+	}
+	live.NotConnected("api.stripe.com")
+	if got := labels(live)["api.stripe.com"]; got.Observation != "unobserved" || got.State != "unknown" || live.Edges[edge].Observation != "unobserved" || live.Summary.Quiet != 0 || live.Summary.Unobserved == 0 {
+		t.Errorf("unconnected host = %+v, edge %+v, summary %+v", got, live.Edges[edge], live.Summary)
+	}
+	// A caller that cannot report server.address leaves the host opaque.
+	if got := labels(Overlay("s", overlayGraph(), nil, cover("service.name"), nil, now, 15*minute))["api.stripe.com"]; got.Observation != "opaque" {
+		t.Errorf("host with an unreporting caller = %+v", got)
+	}
+}

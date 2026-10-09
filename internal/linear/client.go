@@ -47,6 +47,13 @@ func (h *Host) Instrument(wrap func(*http.Client) *http.Client) {
 	h.client = wrap(h.client)
 }
 
+// Connected is true while a key is held.
+func (h *Host) Connected() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.key != ""
+}
+
 func (h *Host) Connect(ctx context.Context, key string) ([]Team, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
