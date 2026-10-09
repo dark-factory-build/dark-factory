@@ -260,6 +260,9 @@ func (daemon *Daemon) finishReviewRouting(ctx context.Context, project kernel.Pr
 	if err != nil {
 		return err
 	}
+	if op.Submitted && (op.State == "enqueued" || op.State == "completed" || op.State == "ejected") {
+		defer func() { daemon.pipelineAt.Store(0); daemon.tickMergePipeline(ctx) }()
+	}
 	if op.Submitted && (op.State == "enqueued" || op.State == "completed") {
 		// factoryd's submitted verdict is the production review of record,
 		// shown best-effort: routing never waits on the projection.

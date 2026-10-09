@@ -493,6 +493,37 @@ func TestMergeQueueEjectionSendsBackOnceAndAMergeCloses(t *testing.T) {
 	}
 }
 
+func TestReviewVerdictWakesMergePipelinePastRefreshGate(t *testing.T) {
+	fixture, project, _, settle := publishedTask(t)
+	settle()
+	customerMode(t, fixture)
+	ctx := context.Background()
+	backend := &publicReviewBackend{}
+	fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return backend }
+
+	if _, err := reviewNow(ctx, fixture.daemon, project, publishedReviewRequest()); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for fixture.daemon.pipelineBusy.Load() && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if backend.enqueues != 1 {
+		t.Fatalf("initial verdict enqueues=%d, want 1", backend.enqueues)
+	}
+	fixture.daemon.pipelineAt.Store(time.Now().Add(productionRefreshInterval).UnixNano())
+	backend.queued = false
+	fixture.daemon.pipelineAt.Store(0)
+	fixture.daemon.tickMergePipeline(ctx)
+	deadline = time.Now().Add(2 * time.Second)
+	for backend.enqueues != 2 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if backend.enqueues != 2 {
+		t.Fatalf("woken merge pass enqueues=%d, want 2", backend.enqueues)
+	}
+}
+
 // An ejection with no failing check on the head is re-queued once by
 // factoryd; a second ejection goes back to the worker naming the merge
 // group's failures.
