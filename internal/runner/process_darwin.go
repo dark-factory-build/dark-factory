@@ -1243,7 +1243,7 @@ func (c *OwnedChild) hardCleanup() error {
 	// An observed or reaped exit is already proven; re-waiting would consume
 	// nothing and doom every retry once the one-shot event is gone.
 	if c.exitRegistered && !c.exitObserved && c.state != stateWaited && c.kq >= 0 {
-		if _, err := c.waitForExit(4 * time.Second); err != nil {
+		if _, err := c.waitForExit(attemptControlTimeout); err != nil {
 			cleanupErr = errors.Join(cleanupErr, err)
 		}
 	}

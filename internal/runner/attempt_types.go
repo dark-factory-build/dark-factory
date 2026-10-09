@@ -250,6 +250,6 @@ type AttemptEvent struct {
 	Head     uint64
 }
 
-const attemptControlTimeout = 4 * time.Second
+var attemptControlTimeout = 4 * time.Second
 
 const commandVersion = 1

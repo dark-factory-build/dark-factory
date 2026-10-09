@@ -31,7 +31,15 @@ func saturateControllerSendBuffer(t *testing.T, controller *AttemptController) {
 	}
 }
 
+func shortenControlTimeout(t *testing.T) {
+	t.Helper()
+	old := attemptControlTimeout
+	attemptControlTimeout = 300 * time.Millisecond
+	t.Cleanup(func() { attemptControlTimeout = old })
+}
+
 func TestAttemptControllerWriteFailureSpendsCapability(t *testing.T) {
+	shortenControlTimeout(t)
 	controller, peer, err := NewAttemptController()
 	if err != nil {
 		t.Fatal(err)
