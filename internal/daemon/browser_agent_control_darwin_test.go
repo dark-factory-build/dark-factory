@@ -21,7 +21,7 @@ func TestBrowserAgentReplacementPreservesHistoryAndProviderLimit(t *testing.T) {
 	}
 	request := browserprotocol.AgentControl{OperationID: strings.Repeat("01", 16), TaskID: task.ID.String(), RunID: run.ID.String(), ExpectedTaskRevision: decimalRevision(task.Revision), ExpectedRunRevision: decimalRevision(run.Revision), Action: "replace", Instruction: strings.Repeat("x", 8193), SuccessorTaskID: strings.Repeat("02", 16), SuccessorIncarnationID: strings.Repeat("03", 16)}
 	principal := terminalEffectPrincipal(fixture.client.ID, 1)
-	if _, err := fixture.backend.ControlAgent(context.Background(), principal, request); !errors.Is(err, browser.ErrTooLarge) {
+	if _, err := fixture.backend.ControlAgent(context.Background(), principal, request); !errors.Is(mapBrowserError(err), browser.ErrTooLarge) {
 		t.Fatalf("oversized replacement: %v", err)
 	}
 	unchanged, _, err := fixture.store.Run(context.Background(), run.ID)
@@ -46,7 +46,7 @@ func TestBrowserTaskHistoryRequiresPrivateTextCapability(t *testing.T) {
 	fixture := newAdapterFixture(t, kernel.BrowserCapabilityObserve|kernel.BrowserCapabilityHumanActions)
 	fixture.pair(t)
 	run := adapterRunningRun(t, fixture.store, 170)
-	if _, err := fixture.backend.TaskHistory(context.Background(), rawBrowserClient(fixture.client.ID), browserprotocol.TaskHistoryGet{TaskID: run.TaskID.String()}); !errors.Is(err, browser.ErrUnauthorized) {
+	if _, err := fixture.backend.TaskHistory(context.Background(), rawBrowserClient(fixture.client.ID), browserprotocol.TaskHistoryGet{TaskID: run.TaskID.String()}); !errors.Is(mapBrowserError(err), browser.ErrUnauthorized) {
 		t.Fatalf("private history exposed: %v", err)
 	}
 }
@@ -64,7 +64,7 @@ func TestBrowserTaskDetailSeparatesEditableInstructionFromFeedback(t *testing.T)
 	if err != nil || detail.Instruction != base || detail.Feedback != "" || detail.Revision != decimalRevision(task.Revision) {
 		t.Fatalf("detail = %+v, %v", detail, err)
 	}
-	if _, err := fixture.backend.TaskDetail(context.Background(), rawBrowserClient(fixture.client.ID), browserprotocol.TaskDetailGet{TaskID: task.ID.String(), ExpectedRevision: decimalRevision(task.Revision) + 1}); !errors.Is(err, browser.ErrStale) {
+	if _, err := fixture.backend.TaskDetail(context.Background(), rawBrowserClient(fixture.client.ID), browserprotocol.TaskDetailGet{TaskID: task.ID.String(), ExpectedRevision: decimalRevision(task.Revision) + 1}); !errors.Is(mapBrowserError(err), browser.ErrStale) {
 		t.Fatalf("stale detail = %v", err)
 	}
 }
@@ -77,7 +77,7 @@ func TestBrowserTaskDetailRequiresPrivateTextCapability(t *testing.T) {
 	if err != nil || !found {
 		t.Fatal(err)
 	}
-	if _, err := fixture.backend.TaskDetail(context.Background(), rawBrowserClient(fixture.client.ID), browserprotocol.TaskDetailGet{TaskID: task.ID.String(), ExpectedRevision: decimalRevision(task.Revision)}); !errors.Is(err, browser.ErrUnauthorized) {
+	if _, err := fixture.backend.TaskDetail(context.Background(), rawBrowserClient(fixture.client.ID), browserprotocol.TaskDetailGet{TaskID: task.ID.String(), ExpectedRevision: decimalRevision(task.Revision)}); !errors.Is(mapBrowserError(err), browser.ErrUnauthorized) {
 		t.Fatalf("private outcome detail exposed: %v", err)
 	}
 }
@@ -252,7 +252,7 @@ func TestBrowserTaskDetailRejectsEditBetweenBriefAndPeerReads(t *testing.T) {
 		t.Fatal(err)
 	}
 	head := decimalSequence(before.Head)
-	if _, err := fixture.backend.TaskDetail(ctx, rawBrowserClient(fixture.client.ID), browserprotocol.TaskDetailGet{TaskID: task.ID.String(), ExpectedRevision: decimalRevision(edited.Revision), ExpectedHead: &head}); !errors.Is(err, browser.ErrStale) {
+	if _, err := fixture.backend.TaskDetail(ctx, rawBrowserClient(fixture.client.ID), browserprotocol.TaskDetailGet{TaskID: task.ID.String(), ExpectedRevision: decimalRevision(edited.Revision), ExpectedHead: &head}); !errors.Is(mapBrowserError(err), browser.ErrStale) {
 		t.Fatalf("mixed task detail = %v", err)
 	}
 }
@@ -268,7 +268,7 @@ func TestBrowserTaskListRequiresPrivateCapabilityAndPagesCompletedWork(t *testin
 		run := adapterRunningRun(t, fixture.store, 189)
 		result, err := fixture.backend.TaskList(context.Background(), rawBrowserClient(fixture.client.ID), browserprotocol.TaskListGet{AgentID: run.AgentID.String()})
 		if !private {
-			if !errors.Is(err, browser.ErrUnauthorized) {
+			if !errors.Is(mapBrowserError(err), browser.ErrUnauthorized) {
 				t.Fatalf("unprivileged list = %+v %v", result, err)
 			}
 		} else if err != nil || result.AgentID != run.AgentID.String() || len(result.Tasks) != 0 || result.Total != 0 {

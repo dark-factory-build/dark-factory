@@ -32,7 +32,7 @@ func (backend *browserBackend) PublicWorld(ctx context.Context, rawProject strin
 	daemon := backend.owner
 	graph, err := daemon.PlantGraph(ctx, projectID)
 	if err != nil {
-		return nil, mapBrowserError(err)
+		return nil, err
 	}
 	secret, err := daemon.publicSecret()
 	if err != nil {

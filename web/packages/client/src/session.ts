@@ -135,27 +135,15 @@ export type BrowserSessionOptions = {
   onError?: (error: SessionError | ProtocolError) => void;
 };
 
-type Pending = "pair" | "auth" | "snapshot";
-type TargetPending = {
-  agentId: string;
-  expectedAgentRevision: bigint;
-  expectedHead: bigint;
-  resolve: (value: TerminalTarget | null) => void;
-  reject: (error: unknown) => void;
-};
-type HumanPending = {
-  kind: "detail" | "reply" | "cancel";
-  requestId: string;
-  expectedRevision: bigint;
-  expectedRunRevision: bigint;
-  runId?: string;
-  yielded?: boolean;
-  resolve: (value: unknown) => void;
-  reject: (error: unknown) => void;
-};
-type TaskPending = { taskId: string; expectedAgentRevision: bigint; resolve: (value: { taskId: string; revision: bigint }) => void; reject: (error: unknown) => void };
-type AgentControlPending = { operationId: string; taskId: string; runId: string; resolve: (value: AgentControlResult) => void; reject: (error: unknown) => void };
-type ConsolePending = { kind: "AGENT_UPDATE_RESULT" | "PROJECT_LIMITS_RESULT" | "TASK_UPDATE_RESULT" | "OPERATIONAL_GRAPH" | "OPERATIONAL_NODE" | "RUN_PATHS" | "TASK_LIST" | "TASK_HISTORY" | "TASK_DETAIL"; entityId: string; expectedRevision: bigint; resolve: (value: never) => void; reject: (error: unknown) => void };
+/** One outstanding request; `kind` is the reply frame type that settles it. */
+type Request = { kind: ServerControlFrame["type"]; resolve: (value: never) => void; reject: (error: unknown) => void };
+type TargetPending = Request & { agentId: string; expectedAgentRevision: bigint; expectedHead: bigint };
+type HumanPending = Request & { requestId: string; expectedRevision: bigint; expectedRunRevision: bigint; runId?: string; yielded?: boolean };
+type TaskPending = Request & { taskId: string; expectedAgentRevision: bigint };
+type AgentControlPending = Request & { operationId: string; taskId: string; runId: string };
+type ConsoleKind = "AGENT_UPDATE_RESULT" | "PROJECT_LIMITS_RESULT" | "TASK_UPDATE_RESULT" | "OPERATIONAL_GRAPH" | "OPERATIONAL_NODE" | "RUN_PATHS" | "TASK_LIST" | "TASK_HISTORY" | "TASK_DETAIL";
+type ConsolePending = Request & { entityId: string; expectedRevision: bigint };
+const IGNORE = (): void => { /* the session itself owns this request's outcome */ };
 
 export type AgentUpdateResult = Readonly<{ agentId: string; revision: bigint }>;
 export type ProjectLimitsResult = Readonly<{ projectId: string; revision: bigint }>;
@@ -181,11 +169,9 @@ export type OperationalNodeView = OperationalNodeBody;
 export type RunPathsView = Readonly<{ agentId: string; runId: string; paths: readonly string[]; telemetry?: Readonly<RunTelemetry> }>;
 /** `agentId` is the scope id: the agent, or the project for a project-scoped list. */
 export type TaskListView = Readonly<{ agentId: string; head: bigint; total: bigint; tasks: readonly TaskItem[]; hasMore: boolean }>;
-type InvitePending = { resolve: (value: RemoteInvite) => void; reject: (error: unknown) => void };
-type PushPending = { resolve: () => void; reject: (error: unknown) => void };
-type AccountPending = { operation?: ProjectContentOperation; kind: "TELEMETRY_INGEST_RESULT" | "ATTACHMENT_RETENTION_RESULT" | "FACTORY_DISPATCH_RESULT" | "PROJECT_CONTENT_RESULT" | "ACCOUNTS" | "ACCOUNT_LINK_RESULT" | "ACCOUNT_UPDATE_RESULT" | "BROWSER_CLIENTS" | "BROWSER_CLIENT_REVOKE_RESULT" | "PROJECT_CREATE_RESULT" | "REPOSITORIES" | "REPOSITORY_MUTATE_RESULT"; accountId?: string; entityId?: string; expectedRevision?: bigint; enabled?: boolean; action?: RepositoryMutateBody["action"]; resolve: (value: never) => void; reject: (error: unknown) => void };
-
-type GitHubPending = { resolve: (value: GitHubConnectionResult) => void; reject: (error: unknown) => void };
+type AccountKind = "TELEMETRY_INGEST_RESULT" | "ATTACHMENT_RETENTION_RESULT" | "FACTORY_DISPATCH_RESULT" | "PROJECT_CONTENT_RESULT" | "ACCOUNTS" | "ACCOUNT_LINK_RESULT" | "ACCOUNT_UPDATE_RESULT" | "BROWSER_CLIENTS" | "BROWSER_CLIENT_REVOKE_RESULT" | "PROJECT_CREATE_RESULT" | "REPOSITORIES" | "REPOSITORY_MUTATE_RESULT";
+type AccountCorrelation = { operation?: ProjectContentOperation; accountId?: string; entityId?: string; expectedRevision?: bigint; enabled?: boolean; action?: RepositoryMutateBody["action"] };
+type AccountPending = Request & AccountCorrelation;
 
 /** One identity the factory has granted and not revoked. */
 export type BrowserClientView = Readonly<{ clientId: string; capabilities: CapabilityMask; revision: bigint; createdAtMs: bigint }>;
@@ -260,8 +246,9 @@ export class BrowserSession {
   #capabilities = 0;
   #key: CryptoKey | undefined;
   #publicKey: Uint8Array | undefined;
-  #pending = new Map<string, Pending>();
-  #targetPending = new Map<string, TargetPending>();
+  // Every outstanding request, whatever its kind: one ERROR naming it rejects
+  // it alone, and one session end rejects them all.
+  #requests = new Map<string, Request>();
   #subscriptionID: string | undefined;
   #stateHeadFloor = 0n;
   // The published snapshot survives a refresh: readers keep coherent state
@@ -283,17 +270,7 @@ export class BrowserSession {
   #resolveConnect: (() => void) | undefined;
   #rejectConnect: ((error: unknown) => void) | undefined;
   #terminalHandles = new Set<InternalTerminalHandle>();
-  #humanPending = new Map<string, HumanPending>();
-  #attachmentPending = new Map<string, { offset: bigint; resolve: () => void; reject: (error: unknown) => void }>();
   #uploading = false;
-  #taskPending = new Map<string, TaskPending>();
-  #agentControlPending = new Map<string, AgentControlPending>();
-  #consolePending = new Map<string, ConsolePending>();
-  #invitePending = new Map<string, InvitePending>();
-  #pushPending = new Map<string, PushPending>();
-  #accountPending = new Map<string, AccountPending>();
-  #intakePending = new Map<string, { resolve: (value: IntakeView) => void; reject: (error: unknown) => void }>();
-  #githubPending = new Map<string, GitHubPending>();
   #humanDetails = new WeakSet<HumanRequestDetail>();
   #humanCancelRuns = new WeakMap<HumanRequestCancelRunDescriptor, HumanRequestDetail>();
   #generationToken: object = {};
@@ -317,15 +294,13 @@ export class BrowserSession {
     if (!validDynamicID(request.agentId) || request.repositoryId !== undefined && !validDynamicID(request.repositoryId) || request.expectedAgentRevision < 1n || request.expectedAgentRevision > MAX_SQLITE_INTEGER || request.mode !== undefined && request.mode !== "now" && request.mode !== "queue" && request.mode !== "any") return Promise.reject(new SessionError("invalid_request"));
     const bytes = new TextEncoder().encode(request.instruction).length;
     if (bytes < 1 || bytes > MAX_TASK_INSTRUCTION_BYTES || /^[ \t\r\n]*$/.test(request.instruction)) return Promise.reject(new SessionError("invalid_request"));
-    if (this.#taskPending.size >= MAX_ARRAY_ITEMS) return Promise.reject(new SessionError("rate_limited"));
+    if (this.#requests.size >= MAX_ARRAY_ITEMS) return Promise.reject(new SessionError("rate_limited"));
     let taskId: string, incarnationId: string;
     try { taskId = this.#randomID(); incarnationId = this.#randomID(); } catch (error) { return Promise.reject(error); }
     const id = this.#nextID("task-enqueue");
     let payload: string;
     try { payload = encodeClientControl({ type: "TASK_ENQUEUE", id, body: { task_id: taskId, incarnation_id: incarnationId, agent_id: request.agentId, ...(request.attachmentCount ? { attachment_count: request.attachmentCount } : {}), ...(request.repositoryId === undefined ? {} : { repository_id: request.repositoryId }), expected_agent_revision: request.expectedAgentRevision, instruction: request.instruction, ...(request.mode === "queue" || request.mode === "any" ? { mode: request.mode } : {}), ...(request.content?.length ? { content: request.content } : {}) } }); } catch (error) { return Promise.reject(error); }
-    const result = new Promise<{ taskId: string; revision: bigint }>((resolve, reject) => this.#taskPending.set(id, { taskId, expectedAgentRevision: request.expectedAgentRevision, resolve, reject }));
-    try { this.#send(payload); } catch { this.#fail(new SessionError("connection")); }
-    return result;
+    return this.#track(id, { kind: "TASK_ENQUEUE_RESULT", taskId, expectedAgentRevision: request.expectedAgentRevision }, payload);
   }
 
   /** Chunks share the existing bounded transport, including remote connections. */
@@ -343,9 +318,7 @@ export class BrowserSession {
           if (!this.#authenticated) throw new SessionError("connection");
           const id = this.#nextID("task-attachment");
           const payload = encodeClientControl({ type: "TASK_ATTACHMENT", id, body: { index, offset: BigInt(offset), size: BigInt(file.size), name: file.name, data: btoa(String.fromCharCode(...bytes)) } });
-          const ack = new Promise<void>((resolve, reject) => this.#attachmentPending.set(id, { offset: BigInt(offset + bytes.length), resolve, reject }));
-          try { this.#send(payload); } catch { this.#fail(new SessionError("connection")); }
-          await ack;
+          await this.#track(id, { kind: "TASK_ATTACHMENT_RESULT", offset: BigInt(offset + bytes.length) }, payload);
         }
       }
       return await this.enqueueAgentTask({ ...request, attachmentCount: files.length });
@@ -364,7 +337,7 @@ export class BrowserSession {
     if (!validDynamicID(request.operationId) || !validDynamicID(request.taskId) || request.expectedTaskRevision < 1n || request.expectedTaskRevision > MAX_SQLITE_INTEGER || !validAgentControlRequest(request.action, instruction, successorTaskId, successorIncarnationId)) return Promise.reject(new SessionError("invalid_request"));
     let target: TargetAuthority;
     try { target = this.#targetAuthority(request.target); } catch (error) { return Promise.reject(error); }
-    if (this.#agentControlPending.size >= MAX_ARRAY_ITEMS) return Promise.reject(new SessionError("rate_limited"));
+    if (this.#requests.size >= MAX_ARRAY_ITEMS) return Promise.reject(new SessionError("rate_limited"));
     const id = this.#nextID("agent-control");
     let payload: string;
     try {
@@ -380,9 +353,7 @@ export class BrowserSession {
         successor_incarnation_id: successorIncarnationId,
       } });
     } catch (error) { return Promise.reject(error); }
-    const result = new Promise<AgentControlResult>((resolve, reject) => this.#agentControlPending.set(id, { operationId: request.operationId, taskId: request.taskId, runId: target.descriptor.run_id, resolve, reject }));
-    try { this.#send(payload); } catch { this.#fail(new SessionError("connection")); }
-    return result;
+    return this.#track(id, { kind: "AGENT_CONTROL_RESULT", operationId: request.operationId, taskId: request.taskId, runId: target.descriptor.run_id }, payload);
   }
 
   /** Durable operator receipts are private to a task, never terminal bytes. */
@@ -464,12 +435,10 @@ export class BrowserSession {
   intake(request: IntakeBody): Promise<IntakeView> {
     try { this.#ensureLive(); } catch (error) { return Promise.reject(error); }
     if ((this.#capabilities & CAPABILITIES.administration) === 0) return Promise.reject(new SessionError("unauthorized"));
-    if (this.#intakePending.size >= MAX_ARRAY_ITEMS) return Promise.reject(new SessionError("rate_limited"));
+    if (this.#requests.size >= MAX_ARRAY_ITEMS) return Promise.reject(new SessionError("rate_limited"));
     const id = this.#nextID("intake"); let payload: string; let body = request;
     try { if (body.action === "create" && body.source_id === undefined) body = { ...body, source_id: this.#randomID() }; payload = encodeClientControl({ type: "INTAKE", id, body: body }); } catch (error) { return Promise.reject(error); }
-    const result = new Promise<IntakeView>((resolve, reject) => this.#intakePending.set(id, { resolve, reject }));
-    try { this.#send(payload); } catch { this.#fail(new SessionError("connection")); }
-    return result;
+    return this.#track(id, { kind: "INTAKE_RESULT" }, payload);
   }
 
   /** Edit one still-queued task: its brief, priority, assignment, or cancel it. A blocked task can only be cancelled or retried. */
@@ -532,14 +501,12 @@ export class BrowserSession {
     if (!this.#authenticated || (this.#capabilities & CAPABILITIES.private_human_request_detail) === 0) return Promise.reject(new SessionError("unauthorized"));
     const scopeId = "agent_id" in scope ? scope.agent_id : scope.project_id;
     if (!validDynamicID(scopeId) || (cursor.beforeUpdatedAtMs === undefined) !== (cursor.beforeTaskId === undefined) || (cursor.beforeUpdatedAtMs !== undefined && (cursor.beforeUpdatedAtMs < 1n || cursor.beforeUpdatedAtMs > MAX_SQLITE_INTEGER)) || (cursor.beforeTaskId !== undefined && !validDynamicID(cursor.beforeTaskId))) return Promise.reject(new SessionError("invalid_request"));
-    if (this.#consolePending.size >= MAX_ARRAY_ITEMS) return Promise.reject(new SessionError("rate_limited"));
+    if (this.#requests.size >= MAX_ARRAY_ITEMS) return Promise.reject(new SessionError("rate_limited"));
     const id = this.#nextID("task-list");
     const body = { ...scope, ...(cursor.beforeUpdatedAtMs === undefined ? {} : { before_updated_at_ms: cursor.beforeUpdatedAtMs, before_task_id: cursor.beforeTaskId! }) };
     let payload: string;
     try { payload = encodeClientControl({ type: "TASK_LIST_GET", id, body }); } catch (error) { return Promise.reject(error); }
-    const result = new Promise<TaskListView>((resolve, reject) => this.#consolePending.set(id, { kind: "TASK_LIST", entityId: scopeId, expectedRevision: 1n, resolve: resolve as (value: never) => void, reject }));
-    try { this.#send(payload); } catch { this.#fail(new SessionError("connection")); }
-    return result;
+    return this.#track(id, { kind: "TASK_LIST", entityId: scopeId, expectedRevision: 1n }, payload);
   }
 
   /** The provider logins present on the daemon's machine. A linked one
@@ -590,13 +557,11 @@ export class BrowserSession {
     if (!this.#authenticated) return Promise.reject(new SessionError("unauthorized"));
     const loopbackGrant = CAPABILITIES.human_actions | CAPABILITIES.terminal_input;
     if ((this.#capabilities & loopbackGrant) !== loopbackGrant) return Promise.reject(new SessionError("unauthorized"));
-    if (this.#invitePending.size >= MAX_ARRAY_ITEMS) return Promise.reject(new SessionError("rate_limited"));
+    if (this.#requests.size >= MAX_ARRAY_ITEMS) return Promise.reject(new SessionError("rate_limited"));
     const id = this.#nextID("remote-invite");
     let payload: string;
     try { payload = encodeClientControl({ type: "REMOTE_INVITE", id, body: {} }); } catch (error) { return Promise.reject(error); }
-    const result = new Promise<RemoteInvite>((resolve, reject) => this.#invitePending.set(id, { resolve, reject }));
-    try { this.#send(payload); } catch { this.#fail(new SessionError("connection")); }
-    return result;
+    return this.#track(id, { kind: "REMOTE_INVITE_RESULT" }, payload);
   }
 
   /** Reads, mints (rotating) or revokes the telemetry ingest secret. */
@@ -610,13 +575,11 @@ export class BrowserSession {
   subscribePush(subscription: PushSubscribeBody): Promise<void> {
     try { this.#ensureLive(); } catch (error) { return Promise.reject(error); }
     if (!this.#authenticated) return Promise.reject(new SessionError("unauthorized"));
-    if (this.#pushPending.size >= MAX_ARRAY_ITEMS) return Promise.reject(new SessionError("rate_limited"));
+    if (this.#requests.size >= MAX_ARRAY_ITEMS) return Promise.reject(new SessionError("rate_limited"));
     const id = this.#nextID("push-subscribe");
     let payload: string;
     try { payload = encodeClientControl({ type: "PUSH_SUBSCRIBE", id, body: subscription }); } catch (error) { return Promise.reject(error); }
-    const result = new Promise<void>((resolve, reject) => this.#pushPending.set(id, { resolve, reject }));
-    try { this.#send(payload); } catch { this.#fail(new SessionError("connection")); }
-    return result;
+    return this.#track(id, { kind: "PUSH_SUBSCRIBE_RESULT" }, payload);
   }
 
   resolveAgentTerminal(request: { agentId: string; expectedAgentRevision: bigint; expectedHead: bigint }): Promise<TerminalTarget | null> {
@@ -624,13 +587,11 @@ export class BrowserSession {
     if (!this.#authenticated) return Promise.reject(new SessionError("unauthorized"));
     if ((this.#capabilities & CAPABILITIES.observe) === 0) return Promise.reject(new SessionError("unauthorized"));
     if (!validDynamicID(request.agentId) || request.expectedAgentRevision < 1n || request.expectedAgentRevision > MAX_SQLITE_INTEGER || request.expectedHead < 0n || request.expectedHead > MAX_SQLITE_INTEGER) return Promise.reject(new SessionError("invalid_request"));
-    if (this.#targetPending.size >= MAX_ARRAY_ITEMS) return Promise.reject(new SessionError("rate_limited"));
+    if (this.#requests.size >= MAX_ARRAY_ITEMS) return Promise.reject(new SessionError("rate_limited"));
     const id = this.#nextID("terminal-target");
     let payload: string;
     try { payload = encodeClientControl({ type: "TERMINAL_TARGET_GET", id, body: { agent_id: request.agentId, expected_agent_revision: request.expectedAgentRevision, expected_head: request.expectedHead } }); } catch (error) { return Promise.reject(error); }
-    const result = new Promise<TerminalTarget | null>((resolve, reject) => this.#targetPending.set(id, { ...request, resolve, reject }));
-    try { this.#send(payload); } catch { this.#fail(new SessionError("connection")); }
-    return result;
+    return this.#track(id, { kind: "TERMINAL_TARGET", ...request }, payload);
   }
 
   openTerminal(target: TerminalTarget, options: TerminalOptions = {}): TerminalHandle {
@@ -662,7 +623,7 @@ export class BrowserSession {
     const id = this.#nextID("human-detail");
     let payload: string;
     try { payload = encodeClientControl({ type: "HUMAN_REQUEST_DETAIL_GET", id, body: { request_id: request.requestId, expected_revision: request.expectedRevision } }); } catch (error) { return Promise.reject(error); }
-    return this.#humanRequest<HumanRequestDetail>(id, { kind: "detail", requestId: request.requestId, expectedRevision: request.expectedRevision, expectedRunRevision: 0n }, payload);
+    return this.#track(id, { kind: "HUMAN_REQUEST_DETAIL", requestId: request.requestId, expectedRevision: request.expectedRevision, expectedRunRevision: 0n }, payload);
   }
 
   replyHumanRequest(detail: HumanRequestDetail, reply: string): Promise<HumanReplyResult> {
@@ -677,7 +638,7 @@ export class BrowserSession {
     try { payload = encodeClientControl({ type: "HUMAN_REQUEST_REPLY", id, body: { request_id: detail.requestId, expected_revision: detail.revision, reply } }); } catch (error) { return Promise.reject(error); }
     this.#humanDetails.delete(detail);
     this.#humanCancelRuns.delete(detail.cancelRun);
-    return this.#humanRequest<HumanReplyResult>(id, { kind: "reply", requestId: detail.requestId, expectedRevision: detail.revision, expectedRunRevision: 0n, yielded: detail.terminalTarget === null }, payload);
+    return this.#track(id, { kind: "HUMAN_REQUEST_REPLY_RESULT", requestId: detail.requestId, expectedRevision: detail.revision, expectedRunRevision: 0n, yielded: detail.terminalTarget === null }, payload);
   }
 
   cancelHumanRequest(cancelRun: HumanRequestCancelRunDescriptor): Promise<HumanCancelRunResult> {
@@ -691,7 +652,7 @@ export class BrowserSession {
     try { payload = encodeClientControl({ type: "HUMAN_REQUEST_CANCEL_RUN", id, body: { request_id: cancelRun.requestId, expected_request_revision: cancelRun.expectedRequestRevision, expected_run_revision: cancelRun.expectedRunRevision } }); } catch (error) { return Promise.reject(error); }
     this.#humanCancelRuns.delete(cancelRun);
     this.#humanDetails.delete(detail);
-    return this.#humanRequest<HumanCancelRunResult>(id, { kind: "cancel", requestId: cancelRun.requestId, expectedRevision: cancelRun.expectedRequestRevision, expectedRunRevision: cancelRun.expectedRunRevision, runId: cancelRun.runId, yielded: detail.terminalTarget === null }, payload);
+    return this.#track(id, { kind: "HUMAN_REQUEST_CANCEL_RUN_RESULT", requestId: cancelRun.requestId, expectedRevision: cancelRun.expectedRequestRevision, expectedRunRevision: cancelRun.expectedRunRevision, runId: cancelRun.runId, yielded: detail.terminalTarget === null }, payload);
   }
 
   connect(): Promise<void> {
@@ -729,7 +690,6 @@ export class BrowserSession {
   close(): void {
     if (this.#closed) return;
     this.#closed = true;
-    this.#pending.clear();
     this.#closePending(new SessionError("closed"));
     for (const handle of this.#terminalHandles) handle.terminate(new SessionError("closed"));
     this.#terminalHandles.clear();
@@ -764,7 +724,9 @@ export class BrowserSession {
     }
     let frame: ServerControlFrame;
     try { frame = decodeServerControl(data); } catch (error) {
-      this.#fail(error instanceof ProtocolError ? error : new ProtocolError("malformed"));
+      const failure = error instanceof ProtocolError ? error : new ProtocolError("malformed");
+      // A reply that still names its request fails that request alone.
+      if (!this.#authenticated || !this.#reject(replyID(data), failure)) this.#fail(failure);
       return;
     }
     if (frame.type === "UNKNOWN") return;
@@ -805,7 +767,7 @@ export class BrowserSession {
         this.#ensureLive();
         const id = this.#nextID("auth");
         this.#authAttempted = true;
-        this.#sendAuth("auth", id, encodeClientControl({ type: "AUTH_PROVE", id, body: { client_id: stored.clientId, signature } }));
+        this.#sendAuth("AUTH_RESULT", id, encodeClientControl({ type: "AUTH_PROVE", id, body: { client_id: stored.clientId, signature } }));
       }
     })();
     return this.#authPromise;
@@ -832,18 +794,18 @@ export class BrowserSession {
     const signature = await this.#sign(buildPairTranscript({ ...this.#transcriptBase(), challenge, public_key_sec1: toHex(this.#publicKey) }));
     this.#ensureLive();
     const id = this.#nextID("pair");
-    this.#sendAuth("pair", id, encodeClientControl({ type: "PAIR_PROVE", id, body: { challenge, public_key_sec1: toHex(this.#publicKey), signature } }));
+    this.#sendAuth("PAIR_RESULT", id, encodeClientControl({ type: "PAIR_PROVE", id, body: { challenge, public_key_sec1: toHex(this.#publicKey), signature } }));
   }
 
   async #authenticationFrame(frame: ServerControlFrame): Promise<void> {
     if (frame.type === "ERROR") throw new SessionError(frame.body.code, frame.body.retryable);
     if (frame.type === "PAIR_RESULT") {
-      if (!this.#pairing || !this.#pending.has(frame.id) || this.#pending.get(frame.id) !== "pair") throw new ProtocolError("malformed");
-      this.#pending.delete(frame.id);
+      if (!this.#pairing || this.#requests.get(frame.id)?.kind !== "PAIR_RESULT") throw new ProtocolError("malformed");
+      this.#requests.delete(frame.id);
       await this.#finishPair(frame);
     } else if (frame.type === "AUTH_RESULT") {
-      if (this.#pairing || !this.#pending.has(frame.id) || this.#pending.get(frame.id) !== "auth") throw new ProtocolError("malformed");
-      this.#pending.delete(frame.id);
+      if (this.#pairing || this.#requests.get(frame.id)?.kind !== "AUTH_RESULT") throw new ProtocolError("malformed");
+      this.#requests.delete(frame.id);
       this.#finishAuth(frame);
     } else {
       throw new ProtocolError("wrong_direction");
@@ -894,17 +856,16 @@ export class BrowserSession {
       return;
     }
     if (frame.type === "TASK_ATTACHMENT_RESULT") {
-      const pending = this.#attachmentPending.get(frame.id);
-      if (pending === undefined || pending.offset !== frame.body.offset) throw new ProtocolError("malformed");
-      this.#attachmentPending.delete(frame.id); pending.resolve(); return;
+      if (this.#pending<Request & { offset: bigint }>(frame.id, frame.type).offset !== frame.body.offset) throw new ProtocolError("malformed");
+      this.#settle(frame.id, undefined); return;
     }
     if (frame.type === "TASK_ENQUEUE_RESULT") {
       this.#taskResult(frame.body, frame.id);
       return;
     }
-    if (frame.type === "INTAKE_RESULT") {
-      const pending = this.#intakePending.get(frame.id); if (pending === undefined) throw new ProtocolError("malformed");
-      this.#intakePending.delete(frame.id); pending.resolve(Object.freeze(frame.body)); return;
+    if (frame.type === "INTAKE_RESULT" || frame.type === "PUSH_SUBSCRIBE_RESULT" || frame.type === "GITHUB_CONNECTION_RESULT") {
+      this.#pending(frame.id, frame.type);
+      this.#settle(frame.id, frame.type === "PUSH_SUBSCRIBE_RESULT" ? undefined : Object.freeze(frame.body)); return;
     }
     if (frame.type === "AGENT_CONTROL_RESULT") {
       this.#agentControlResult(frame.body, frame.id);
@@ -918,18 +879,10 @@ export class BrowserSession {
       this.#inviteResult(frame.body, frame.id);
       return;
     }
-    if (frame.type === "PUSH_SUBSCRIBE_RESULT") {
-      const pending = this.#pushPending.get(frame.id);
-      if (pending === undefined) throw new ProtocolError("malformed");
-      this.#pushPending.delete(frame.id);
-      pending.resolve();
-      return;
-    }
     if (frame.type === "TELEMETRY_INGEST_RESULT" || frame.type === "ATTACHMENT_RETENTION_RESULT" || frame.type === "FACTORY_DISPATCH_RESULT" || frame.type === "PROJECT_CONTENT_RESULT" || frame.type === "ACCOUNTS" || frame.type === "ACCOUNT_LINK_RESULT" || frame.type === "ACCOUNT_UPDATE_RESULT" || frame.type === "BROWSER_CLIENTS" || frame.type === "BROWSER_CLIENT_REVOKE_RESULT" || frame.type === "PROJECT_CREATE_RESULT" || frame.type === "REPOSITORIES" || frame.type === "REPOSITORY_MUTATE_RESULT") {
       this.#accountResult(frame);
       return;
     }
-    if (frame.type === "GITHUB_CONNECTION_RESULT") { this.#githubResult(frame.body, frame.id); return; }
     if (terminalControlFrame(frame)) {
       if (frame.type === "TERMINAL_EOF") { if (!this.#anyTerminal((handle) => handle.receiveEOF(frame.id, frame.body))) throw new ProtocolError("malformed"); return; }
       if (frame.type === "TERMINAL_EXIT") { if (!this.#anyTerminal((handle) => handle.receiveExit(frame.id, frame.body))) throw new ProtocolError("malformed"); return; }
@@ -950,9 +903,9 @@ export class BrowserSession {
   }
 
   #snapshot(frame: StateSnapshotFrame): void {
-    if (this.#refreshID !== frame.id || this.#pending.get(frame.id) !== "snapshot") throw new ProtocolError("malformed");
+    if (this.#refreshID !== frame.id || this.#requests.get(frame.id)?.kind !== "STATE_SNAPSHOT") throw new ProtocolError("malformed");
     this.#refreshID = undefined;
-    this.#pending.delete(frame.id);
+    this.#requests.delete(frame.id);
     // Publication is monotonic. A snapshot older than one already published,
     // or older than a head this session already observed, is never shown.
     if (frame.body.head < this.#stateHeadFloor) throw new ProtocolError("malformed");
@@ -993,7 +946,7 @@ export class BrowserSession {
   #requestSnapshot(): void {
     const id = this.#nextID("state");
     this.#refreshID = id;
-    this.#pending.set(id, "snapshot");
+    this.#requests.set(id, { kind: "STATE_SNAPSHOT", resolve: IGNORE, reject: IGNORE });
     this.#send(encodeClientControl({ type: "STATE_GET", id, body: {} }));
   }
 
@@ -1004,88 +957,43 @@ export class BrowserSession {
   }
 
   #errorFrame(frame: ErrorFrame): void {
+    const error = new SessionError(frame.body.code, frame.body.retryable);
     const id = frame.id;
-    if (id !== undefined) {
-      const target = this.#targetPending.get(id);
-      if (target !== undefined) {
-        this.#targetPending.delete(id);
-        const error = new SessionError(frame.body.code, frame.body.retryable);
-        target.reject(error);
-        if (error.retryable) this.#fail(error);
-        return;
-      }
-      const upload = this.#attachmentPending.get(id);
-      if (upload !== undefined) { this.#attachmentPending.delete(id); upload.reject(new SessionError(frame.body.code, frame.body.retryable)); return; }
-      const task = this.#taskPending.get(id);
-      if (task !== undefined) {
-        this.#taskPending.delete(id);
-        task.reject(new SessionError(frame.body.code, frame.body.retryable));
-        return;
-      }
-      const control = this.#agentControlPending.get(id);
-      if (control !== undefined) {
-        this.#agentControlPending.delete(id);
-        control.reject(new SessionError(frame.body.code, frame.body.retryable));
-        return;
-      }
-      const console = this.#consolePending.get(id);
-      if (console !== undefined) {
-        this.#consolePending.delete(id);
-        console.reject(new SessionError(frame.body.code, frame.body.retryable));
-        return;
-      }
-      const invite = this.#invitePending.get(id);
-      if (invite !== undefined) {
-        this.#invitePending.delete(id);
-        invite.reject(new SessionError(frame.body.code, frame.body.retryable));
-        return;
-      }
-      const push = this.#pushPending.get(id);
-      if (push !== undefined) {
-        this.#pushPending.delete(id);
-        push.reject(new SessionError(frame.body.code, frame.body.retryable));
-        return;
-      }
-      const account = this.#accountPending.get(id);
-      if (account !== undefined) {
-        this.#accountPending.delete(id);
-        account.reject(new SessionError(frame.body.code, frame.body.retryable));
-        return;
-      }
-      const github = this.#githubPending.get(id);
-      if (github !== undefined) {
-        this.#githubPending.delete(id);
-        github.reject(new SessionError(frame.body.code, frame.body.retryable));
-        return;
-      }
-      const intake = this.#intakePending.get(id);
-      if (intake !== undefined) {
-        this.#intakePending.delete(id);
-        intake.reject(new SessionError(frame.body.code, frame.body.retryable));
-        return;
-      }
-    }
-    if (id !== undefined && this.#anyTerminal((handle) => handle.receiveError(id, new SessionError(frame.body.code, frame.body.retryable)))) return;
-    if (id !== undefined) {
-      const pending = this.#humanPending.get(id);
-      if (pending !== undefined) {
-        this.#humanPending.delete(id);
-        const error = new SessionError(frame.body.code, frame.body.retryable);
-        pending.reject(error);
-        if (pending.kind === "detail" && error.retryable) this.#fail(error);
-        return;
-      }
-    }
-    if (id !== undefined && this.#pending.has(id)) {
-      this.#pending.delete(id);
-      this.#refreshID = undefined;
-      const error = new SessionError(frame.body.code, frame.body.retryable);
-      if (!error.retryable) {
-        notify(this.#options.onError, error);
-        return;
-      }
-    }
-    throw new SessionError(frame.body.code, frame.body.retryable);
+    // An ERROR naming no request, or the state watch, is the session's own.
+    if (id === undefined || id === this.#subscriptionID) throw error;
+    // Otherwise it ends only what it names; an id nothing awaits is spent.
+    if (!this.#reject(id, error)) this.#anyTerminal((handle) => handle.receiveError(id, error));
+  }
+
+  /** One request learns its own failure. The state refresh is the session's
+   * own request: a retryable failure ends the session, which reconnects. */
+  #reject(id: string, error: SessionError | ProtocolError): boolean {
+    const pending = this.#requests.get(id);
+    if (pending === undefined) return false;
+    this.#requests.delete(id);
+    if (pending.kind !== "STATE_SNAPSHOT") pending.reject(error);
+    else if (error instanceof SessionError && !error.retryable) { this.#refreshID = undefined; notify(this.#options.onError, error); }
+    else this.#fail(error);
+    return true;
+  }
+
+  /** The outstanding request a reply names, or the reply is malformed. */
+  #pending<T extends Request>(id: string, kind: Request["kind"]): T {
+    const pending = this.#requests.get(id);
+    if (pending === undefined || pending.kind !== kind) throw new ProtocolError("malformed");
+    return pending as T;
+  }
+
+  #settle(id: string, value: unknown): void {
+    const pending = this.#requests.get(id);
+    this.#requests.delete(id);
+    pending?.resolve(value as never);
+  }
+
+  #track<T>(id: string, entry: Omit<Request, "resolve" | "reject"> & Record<string, unknown>, payload: string): Promise<T> {
+    const result = new Promise<T>((resolve, reject) => this.#requests.set(id, { ...entry, resolve: resolve as (value: never) => void, reject }));
+    try { this.#send(payload); } catch { this.#fail(new SessionError("connection")); }
+    return result;
   }
 
   #advanceStateHead(head: bigint): void {
@@ -1094,9 +1002,9 @@ export class BrowserSession {
   }
 
   #terminalTarget(frame: Extract<ServerControlFrame, { type: "TERMINAL_TARGET" }>): void {
-    const pending = this.#targetPending.get(frame.id);
-    if (pending === undefined || frame.body.agent_id !== pending.agentId || frame.body.agent_revision !== pending.expectedAgentRevision || frame.body.head !== pending.expectedHead) throw new ProtocolError("malformed");
-    this.#targetPending.delete(frame.id);
+    const pending = this.#pending<TargetPending>(frame.id, frame.type);
+    if (frame.body.agent_id !== pending.agentId || frame.body.agent_revision !== pending.expectedAgentRevision || frame.body.head !== pending.expectedHead) throw new ProtocolError("malformed");
+    this.#requests.delete(frame.id);
     // State events and restart snapshots share this socket with private target
     // replies. A reply computed at N may arrive after canonical state has
     // already advanced to N+1; never mint or accept absence from that
@@ -1106,15 +1014,15 @@ export class BrowserSession {
       return;
     }
     if (frame.body.target === null) {
-      pending.resolve(null);
+      pending.resolve(null as never);
       return;
     }
     this.#ensureLive();
-    pending.resolve(this.#mintTarget(frame.body.target));
+    pending.resolve(this.#mintTarget(frame.body.target) as never);
   }
 
-  #sendAuth(kind: "pair" | "auth", id: string, payload: string): void {
-    this.#pending.set(id, kind);
+  #sendAuth(kind: "PAIR_RESULT" | "AUTH_RESULT", id: string, payload: string): void {
+    this.#requests.set(id, { kind, resolve: IGNORE, reject: IGNORE });
     this.#send(payload);
   }
 
@@ -1180,7 +1088,6 @@ export class BrowserSession {
     let normalized: SessionError | ProtocolError = error instanceof SessionError || error instanceof ProtocolError ? error : new SessionError("connection");
     if (this.#pairing && !(normalized instanceof ProtocolError) && (normalized.code === "connection" || normalized.code === "closed")) normalized = new SessionError("pairing_uncertain");
     this.#closed = true;
-    this.#pending.clear();
     this.#closePending(normalized);
     for (const handle of this.#terminalHandles) handle.terminate(normalized);
     this.#terminalHandles.clear();
@@ -1196,9 +1103,8 @@ export class BrowserSession {
   }
 
   #humanResult(frame: Extract<ServerControlFrame, { type: "HUMAN_REQUEST_DETAIL" | "HUMAN_REQUEST_REPLY_RESULT" | "HUMAN_REQUEST_CANCEL_RUN_RESULT" }>): void {
-    const pending = this.#humanPending.get(frame.id);
-    const kind = frame.type === "HUMAN_REQUEST_DETAIL" ? "detail" : frame.type === "HUMAN_REQUEST_REPLY_RESULT" ? "reply" : "cancel";
-    if (pending === undefined || pending.kind !== kind || frame.body.request_id !== pending.requestId) throw new ProtocolError("malformed");
+    const pending = this.#pending<HumanPending>(frame.id, frame.type);
+    if (frame.body.request_id !== pending.requestId) throw new ProtocolError("malformed");
     if (frame.type === "HUMAN_REQUEST_DETAIL") {
       if (frame.body.revision !== pending.expectedRevision) throw new ProtocolError("malformed");
       const terminalTarget = frame.body.terminal_target === null ? null : this.#mintTarget(frame.body.terminal_target);
@@ -1225,89 +1131,61 @@ export class BrowserSession {
       });
       this.#humanDetails.add(detail);
       if (cancelRun !== null) this.#humanCancelRuns.set(cancelRun, detail);
-      this.#humanPending.delete(frame.id);
-      pending.resolve(detail);
+      this.#settle(frame.id, detail);
       return;
     }
     if (frame.type === "HUMAN_REQUEST_REPLY_RESULT") {
       if (frame.body.revision !== pending.expectedRevision + (pending.yielded ? 1n : 2n)) throw new ProtocolError("malformed");
-      this.#humanPending.delete(frame.id);
-      pending.resolve(Object.freeze({ ...frame.body }));
+      this.#settle(frame.id, Object.freeze({ ...frame.body }));
       return;
     }
     if (pending.runId === undefined || frame.body.run_id !== pending.runId || frame.body.run_revision !== pending.expectedRunRevision + (pending.yielded ? 0n : 1n) || frame.body.request_revision !== pending.expectedRevision + 1n) throw new ProtocolError("malformed");
-    this.#humanPending.delete(frame.id);
-    pending.resolve(Object.freeze({ ...frame.body }));
+    this.#settle(frame.id, Object.freeze({ ...frame.body }));
   }
 
   #ensureHumanOperation(requestId: string): void {
     this.#ensureLive();
     if (!this.#authenticated) throw new SessionError("unauthorized");
-    if (this.#humanPending.size >= MAX_ARRAY_ITEMS) throw new SessionError("rate_limited");
-    for (const pending of this.#humanPending.values()) if (pending.requestId === requestId) throw new SessionError("rate_limited");
+    if (this.#requests.size >= MAX_ARRAY_ITEMS) throw new SessionError("rate_limited");
+    for (const pending of this.#requests.values()) if ((pending as Partial<HumanPending>).requestId === requestId) throw new SessionError("rate_limited");
   }
-
-  #humanRequest<T>(id: string, pending: Omit<HumanPending, "resolve" | "reject">, payload: string): Promise<T> {
-    const result = new Promise<T>((resolve, reject) => this.#humanPending.set(id, { ...pending, resolve: resolve as (value: unknown) => void, reject }));
-    try { this.#send(payload); } catch { this.#fail(new SessionError("connection")); }
-    return result;
-  }
-
-
-
-
-
-
 
   /** Every request still waiting on a result learns the session is gone, once. */
   #closePending(error: SessionError | ProtocolError): void {
-    for (const pending of [this.#attachmentPending, this.#targetPending, this.#taskPending, this.#agentControlPending, this.#consolePending, this.#invitePending, this.#pushPending, this.#accountPending, this.#intakePending, this.#githubPending, this.#humanPending]) {
-      for (const entry of pending.values()) entry.reject(error);
-      pending.clear();
-    }
+    const pending = [...this.#requests.values()];
+    this.#requests.clear();
+    for (const entry of pending) entry.reject(error);
   }
 
   /** Private GitHub settings through the paired operator administration grant. */
   githubConnection(request: GitHubConnectionBody): Promise<GitHubConnectionResult> {
     try { this.#ensureLive(); } catch (error) { return Promise.reject(error); }
     if (!this.#authenticated || (this.#capabilities & CAPABILITIES.administration) === 0) return Promise.reject(new SessionError("unauthorized"));
-    if (this.#githubPending.size >= MAX_ARRAY_ITEMS) return Promise.reject(new SessionError("rate_limited"));
+    if (this.#requests.size >= MAX_ARRAY_ITEMS) return Promise.reject(new SessionError("rate_limited"));
     const id = this.#nextID("github");
     let payload: string;
     try { payload = encodeClientControl({ type: "GITHUB_CONNECTION", id, body: request }); } catch (error) { return Promise.reject(error); }
-    const result = new Promise<GitHubConnectionResult>((resolve, reject) => this.#githubPending.set(id, { resolve, reject }));
-    try { this.#send(payload); } catch { this.#fail(new SessionError("connection")); }
-    return result;
-  }
-
-  #githubResult(body: GitHubConnectionResultBody, id: string): void {
-    const pending = this.#githubPending.get(id);
-    if (pending === undefined) throw new ProtocolError("malformed");
-    this.#githubPending.delete(id);
-    pending.resolve(Object.freeze(body));
+    return this.#track(id, { kind: "GITHUB_CONNECTION_RESULT" }, payload);
   }
   /** One shape for the console request/result pairs. */
-  #consoleRequest<T>(kind: ConsolePending["kind"], entityId: string, expectedRevision: bigint, prefix: string, encode: (id: string) => string): Promise<T> {
+  #consoleRequest<T>(kind: ConsoleKind, entityId: string, expectedRevision: bigint, prefix: string, encode: (id: string) => string): Promise<T> {
     try { this.#ensureLive(); } catch (error) { return Promise.reject(error); }
     if (!this.#authenticated) return Promise.reject(new SessionError("unauthorized"));
     const capability = kind === "TASK_HISTORY" || kind === "TASK_DETAIL" ? CAPABILITIES.private_human_request_detail : kind === "OPERATIONAL_GRAPH" || kind === "OPERATIONAL_NODE" || kind === "RUN_PATHS" ? CAPABILITIES.observe : kind === "PROJECT_LIMITS_RESULT" ? CAPABILITIES.administration : CAPABILITIES.human_actions;
     if ((this.#capabilities & capability) === 0) return Promise.reject(new SessionError("unauthorized"));
     if (!entityId.split(":").every(validDynamicID) || expectedRevision < 1n || expectedRevision > MAX_SQLITE_INTEGER) return Promise.reject(new SessionError("invalid_request"));
-    if (this.#consolePending.size >= MAX_ARRAY_ITEMS) return Promise.reject(new SessionError("rate_limited"));
+    if (this.#requests.size >= MAX_ARRAY_ITEMS) return Promise.reject(new SessionError("rate_limited"));
     const id = this.#nextID(prefix);
     let payload: string;
     try { payload = encode(id); } catch (error) { return Promise.reject(error); }
-    const result = new Promise<T>((resolve, reject) => this.#consolePending.set(id, { kind, entityId, expectedRevision, resolve: resolve as (value: never) => void, reject }));
-    try { this.#send(payload); } catch { this.#fail(new SessionError("connection")); }
-    return result;
+    return this.#track(id, { kind, entityId, expectedRevision }, payload);
   }
 
   #consoleResult(frame: Extract<ServerControlFrame, { type: "AGENT_UPDATE_RESULT" | "PROJECT_LIMITS_RESULT" | "TASK_UPDATE_RESULT" | "OPERATIONAL_GRAPH" | "OPERATIONAL_NODE" | "RUN_PATHS" | "TASK_LIST" | "TASK_HISTORY" | "TASK_DETAIL" }>): void {
-    const pending = this.#consolePending.get(frame.id);
-    if (pending === undefined || pending.kind !== frame.type) throw new ProtocolError("malformed");
+    const pending = this.#pending<ConsolePending>(frame.id, frame.type);
     const identity = frame.type === "AGENT_UPDATE_RESULT" || frame.type === "RUN_PATHS" ? frame.body.agent_id : frame.type === "TASK_LIST" ? frame.body.agent_id ?? frame.body.project_id : (frame.type === "TASK_UPDATE_RESULT" || frame.type === "TASK_HISTORY" || frame.type === "TASK_DETAIL") ? frame.body.task_id : frame.type === "OPERATIONAL_NODE" ? `${frame.body.project_id}:${frame.body.node_id}` : frame.body.project_id;
     if (identity !== pending.entityId || frame.type === "TASK_DETAIL" && frame.body.revision !== pending.expectedRevision) throw new ProtocolError("malformed");
-    this.#consolePending.delete(frame.id);
+    this.#requests.delete(frame.id);
     if (frame.type === "TASK_HISTORY") {
       pending.resolve(Object.freeze({
         taskId: frame.body.task_id,
@@ -1333,43 +1211,40 @@ export class BrowserSession {
 
 
   /** One shape for account requests; updates also correlate the returned revision. */
-  #accountRequest<T>(kind: AccountPending["kind"], capability: number, prefix: string, encode: (id: string) => string, correlation?: Pick<AccountPending, "accountId" | "entityId" | "expectedRevision" | "enabled" | "operation" | "action">): Promise<T> {
+  #accountRequest<T>(kind: AccountKind, capability: number, prefix: string, encode: (id: string) => string, correlation?: AccountCorrelation): Promise<T> {
     try { this.#ensureLive(); } catch (error) { return Promise.reject(error); }
     if (!this.#authenticated) return Promise.reject(new SessionError("unauthorized"));
     if ((this.#capabilities & capability) === 0) return Promise.reject(new SessionError("unauthorized"));
-    if (this.#accountPending.size >= MAX_ARRAY_ITEMS) return Promise.reject(new SessionError("rate_limited"));
+    if (this.#requests.size >= MAX_ARRAY_ITEMS) return Promise.reject(new SessionError("rate_limited"));
     const id = this.#nextID(prefix);
     let payload: string;
     try { payload = encode(id); } catch (error) { return Promise.reject(error); }
-    const result = new Promise<T>((resolve, reject) => this.#accountPending.set(id, { kind, ...correlation, resolve: resolve as (value: never) => void, reject }));
-    try { this.#send(payload); } catch { this.#fail(new SessionError("connection")); }
-    return result;
+    return this.#track(id, { kind, ...correlation }, payload);
   }
 
   #accountResult(frame: Extract<ServerControlFrame, { type: "TELEMETRY_INGEST_RESULT" | "ATTACHMENT_RETENTION_RESULT" | "FACTORY_DISPATCH_RESULT" | "PROJECT_CONTENT_RESULT" | "ACCOUNTS" | "ACCOUNT_LINK_RESULT" | "ACCOUNT_UPDATE_RESULT" | "BROWSER_CLIENTS" | "BROWSER_CLIENT_REVOKE_RESULT" | "PROJECT_CREATE_RESULT" | "REPOSITORIES" | "REPOSITORY_MUTATE_RESULT" }>): void {
-    const pending = this.#accountPending.get(frame.id);
-    if (pending === undefined || pending.kind !== frame.type) throw new ProtocolError("malformed");
-    if (frame.type === "ATTACHMENT_RETENTION_RESULT" || frame.type === "TELEMETRY_INGEST_RESULT") { this.#accountPending.delete(frame.id); pending.resolve(Object.freeze(frame.body) as never); return; }
+    const pending = this.#pending<AccountPending>(frame.id, frame.type);
+    if (frame.type === "ATTACHMENT_RETENTION_RESULT" || frame.type === "TELEMETRY_INGEST_RESULT") { this.#requests.delete(frame.id); pending.resolve(Object.freeze(frame.body) as never); return; }
     if (frame.type === "FACTORY_DISPATCH_RESULT") {
       if (pending.expectedRevision === undefined || pending.enabled === undefined || frame.body.revision !== pending.expectedRevision + 1n || frame.body.enabled !== pending.enabled) throw new ProtocolError("malformed");
-      this.#accountPending.delete(frame.id); pending.resolve(Object.freeze(frame.body) as never); return;
+      this.#requests.delete(frame.id); pending.resolve(Object.freeze(frame.body) as never); return;
     }
     if (frame.type === "PROJECT_CONTENT_RESULT") {
       if (pending.operation !== frame.body.operation) throw new ProtocolError("malformed");
-      this.#accountPending.delete(frame.id);
+      this.#requests.delete(frame.id);
       pending.resolve(Object.freeze(frame.body.output) as never);
       return;
     }
-    if (frame.type === "BROWSER_CLIENTS") { this.#accountPending.delete(frame.id); pending.resolve(Object.freeze({ clients: Object.freeze(frame.body.clients.map((client) => Object.freeze({ clientId: client.client_id, capabilities: client.capabilities, revision: client.revision, createdAtMs: client.created_at_ms }))), more: frame.body.more }) as never); return; }
+    if (frame.type === "BROWSER_CLIENTS") { this.#requests.delete(frame.id); pending.resolve(Object.freeze({ clients: Object.freeze(frame.body.clients.map((client) => Object.freeze({ clientId: client.client_id, capabilities: client.capabilities, revision: client.revision, createdAtMs: client.created_at_ms }))), more: frame.body.more }) as never); return; }
     if (frame.type === "PROJECT_CREATE_RESULT") {
       if (pending.entityId !== frame.body.project_id || frame.body.revision !== 1n) throw new ProtocolError("malformed");
-      this.#accountPending.delete(frame.id);
+      this.#requests.delete(frame.id);
       pending.resolve(Object.freeze({ projectId: frame.body.project_id, revision: frame.body.revision }) as never);
       return;
     }
     if (frame.type === "REPOSITORIES") {
       if (pending.entityId !== frame.body.project_id) throw new ProtocolError("malformed");
-      this.#accountPending.delete(frame.id);
+      this.#requests.delete(frame.id);
       pending.resolve(Object.freeze(frame.body.items.map((item) => Object.freeze({ ...item }))) as never);
       return;
     }
@@ -1377,41 +1252,37 @@ export class BrowserSession {
       const item = frame.body.repository;
       if (pending.action === "remove") { if (item !== undefined) throw new ProtocolError("malformed"); }
       else if (item === undefined || item.id !== pending.entityId || pending.expectedRevision !== undefined && item.revision !== pending.expectedRevision + 1n) throw new ProtocolError("malformed");
-      this.#accountPending.delete(frame.id);
+      this.#requests.delete(frame.id);
       pending.resolve(item === undefined ? undefined as never : Object.freeze({ ...item }) as never);
       return;
     }
     if (frame.type === "BROWSER_CLIENT_REVOKE_RESULT") {
       if (pending.accountId !== frame.body.client_id || pending.expectedRevision === undefined || frame.body.revision !== pending.expectedRevision + 1n) throw new ProtocolError("malformed");
-      this.#accountPending.delete(frame.id);
+      this.#requests.delete(frame.id);
       pending.resolve(Object.freeze({ clientId: frame.body.client_id, revision: frame.body.revision }) as never);
       return;
     }
-    if (frame.type === "ACCOUNTS") { this.#accountPending.delete(frame.id); pending.resolve(Object.freeze({ accounts: frame.body.accounts.map((account) => Object.freeze({ ...account })), ...(frame.body.next_offset === undefined ? {} : { next_offset: frame.body.next_offset }) }) as never); return; }
+    if (frame.type === "ACCOUNTS") { this.#requests.delete(frame.id); pending.resolve(Object.freeze({ accounts: frame.body.accounts.map((account) => Object.freeze({ ...account })), ...(frame.body.next_offset === undefined ? {} : { next_offset: frame.body.next_offset }) }) as never); return; }
     if (frame.type === "ACCOUNT_UPDATE_RESULT" && (pending.accountId !== frame.body.account_id || pending.expectedRevision === undefined || frame.body.revision !== pending.expectedRevision + 1n)) throw new ProtocolError("malformed");
-    this.#accountPending.delete(frame.id);
+    this.#requests.delete(frame.id);
     pending.resolve(Object.freeze({ accountId: frame.body.account_id, revision: frame.body.revision }) as never);
   }
 
   #inviteResult(body: RemoteInviteResultBody, id: string): void {
-    const pending = this.#invitePending.get(id);
-    if (pending === undefined) throw new ProtocolError("malformed");
-    this.#invitePending.delete(id);
-    pending.resolve(Object.freeze({ link: body.link, expiresAtMs: body.expires_at_ms, svg: body.svg }));
+    this.#pending(id, "REMOTE_INVITE_RESULT");
+    this.#settle(id, Object.freeze({ link: body.link, expiresAtMs: body.expires_at_ms, svg: body.svg }));
   }
 
   #taskResult(body: TaskEnqueueResultBody, id: string): void {
-    const pending = this.#taskPending.get(id);
-    if (pending === undefined || body.task_id !== pending.taskId || body.agent_revision !== pending.expectedAgentRevision || body.revision < 1n) throw new ProtocolError("malformed");
-    this.#taskPending.delete(id);
-    pending.resolve(Object.freeze({ taskId: body.task_id, revision: body.revision }));
+    const pending = this.#pending<TaskPending>(id, "TASK_ENQUEUE_RESULT");
+    if (body.task_id !== pending.taskId || body.agent_revision !== pending.expectedAgentRevision || body.revision < 1n) throw new ProtocolError("malformed");
+    this.#settle(id, Object.freeze({ taskId: body.task_id, revision: body.revision }));
   }
 
   #agentControlResult(body: AgentControlResultBody, id: string): void {
-    const pending = this.#agentControlPending.get(id);
-    if (pending === undefined || body.operation_id !== pending.operationId || body.task_id !== pending.taskId || body.run_id !== pending.runId) throw new ProtocolError("malformed");
-    this.#agentControlPending.delete(id);
-    pending.resolve(Object.freeze({ operationId: body.operation_id, taskId: body.task_id, runId: body.run_id, status: body.status, successorTaskId: body.successor_task_id }));
+    const pending = this.#pending<AgentControlPending>(id, "AGENT_CONTROL_RESULT");
+    if (body.operation_id !== pending.operationId || body.task_id !== pending.taskId || body.run_id !== pending.runId) throw new ProtocolError("malformed");
+    this.#settle(id, Object.freeze({ operationId: body.operation_id, taskId: body.task_id, runId: body.run_id, status: body.status, successorTaskId: body.successor_task_id }));
   }
 
   #mintTarget(descriptor: TerminalTargetDescriptor): TerminalTarget {
@@ -1568,6 +1439,10 @@ function reconnectDelay(value: number | undefined, fallback: number): number {
   return value !== undefined && Number.isFinite(value) && value >= 1 ? Math.min(Math.floor(value), 60_000) : fallback;
 }
 
+/** The request id a frame names, read only to attribute a frame that failed to decode. */
+function replyID(text: string): string {
+  try { const id = (JSON.parse(text) as { id?: unknown } | null)?.id; return typeof id === "string" ? id : ""; } catch { return ""; }
+}
 function bounded(value: string | undefined, maximum: number): boolean { return value !== undefined && new TextEncoder().encode(value).length > maximum; }
 function validAgentControlRequest(action: unknown, instruction: unknown, successorTaskId: unknown, successorIncarnationId: unknown): action is AgentControlAction {
   if (typeof instruction !== "string" || typeof successorTaskId !== "string" || typeof successorIncarnationId !== "string") return false;

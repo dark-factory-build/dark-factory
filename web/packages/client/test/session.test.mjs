@@ -2287,43 +2287,37 @@ test("closed state watches reconnect only for transport loss or retryable errors
   }
 });
 
-test("retryable read deadlines close the session and reconnect without replaying reads", { timeout: 3_000 }, async () => {
-  for (const request of ["HUMAN_REQUEST_DETAIL_GET", "TERMINAL_TARGET_GET"]) {
-    const store = new MemoryKeys();
-    const timer = new VirtualTimer();
-    const sockets = [];
-    let ready;
-    let readiness = new Promise((resolve) => { ready = resolve; });
-    const client = new BrowserClient({
-      url: "ws://127.0.0.1/browser", host: "127.0.0.1", origin: "https://preview.example", challenge,
-      keyStore: store, timer, reconnectInitialDelayMs: 10,
-      onStatus: (status) => { if (status === "ready") ready(); },
-      socketFactory: () => {
-        const socket = new Socket((current, frame) => {
-          serverFor(current);
-          if (sockets.length === 1 && frame.type === request) current.reply(encodeServerError({ code: "rate_limited", retryable: true }, frame.id));
-        });
-        sockets.push(socket);
-        return socket;
-      },
-    });
-    await client.connect();
-    await ready;
-    readiness = new Promise((resolve) => { ready = resolve; });
+test("a retryable ERROR for one read rejects that read alone and keeps the session", async () => {
+  for (const request of ["HUMAN_REQUEST_DETAIL_GET", "TERMINAL_TARGET_GET", "TASK_HISTORY_GET"]) {
+    const errors = [];
+    const { session, socket } = await openHumanSession((error) => errors.push(error));
     const pending = request === "HUMAN_REQUEST_DETAIL_GET"
-      ? client.session.getHumanRequestDetail({ requestId: "aa".repeat(16), expectedRevision: 1n })
-      : client.session.resolveAgentTerminal({ agentId: "bb".repeat(16), expectedAgentRevision: 1n, expectedHead: 1n });
-    assert.equal(lastFrame(sockets[0], request).type, request);
+      ? session.getHumanRequestDetail({ requestId: "aa".repeat(16), expectedRevision: 1n })
+      : request === "TERMINAL_TARGET_GET"
+        ? session.resolveAgentTerminal({ agentId: "bb".repeat(16), expectedAgentRevision: 1n, expectedHead: 1n })
+        : session.getTaskHistory("cc".repeat(16));
+    socket.reply(encodeServerError({ code: "rate_limited", retryable: true }, lastFrame(socket, request).id));
     await assert.rejects(pending, (error) => error instanceof SessionError && error.code === "rate_limited" && error.retryable);
-    assert.equal(client.status, "closed");
-    timer.advance(10);
-    await readiness;
-    assert.equal(sockets.length, 2);
-    const retryTypes = sockets[1].sent.map((wire) => decodeClientControl(wire).type);
-    assert.ok(!retryTypes.includes(request));
-    assert.ok(!retryTypes.some((type) => type.startsWith("TERMINAL_")));
-    client.close();
+    assert.equal(session.status, "ready");
+    assert.deepEqual(errors, []);
+    session.close();
   }
+});
+
+test("an undecodable reply for a known request rejects only that request", async () => {
+  const { session, socket } = await openHumanSession();
+  const broken = session.discoverAccounts();
+  const other = session.discoverAccounts();
+  const [first, second] = socket.sent.slice(-2).map((wire) => decodeClientControl(wire));
+  socket.reply(JSON.stringify({ type: "ACCOUNTS", id: first.id, body: { accounts: "not a list" } }));
+  await assert.rejects(broken, ProtocolError);
+  assert.equal(session.status, "ready");
+  socket.reply(encodeServerControl({ type: "ACCOUNTS", id: second.id, body: { accounts: [] } }));
+  assert.deepEqual(await other, []);
+  // A frame that names no outstanding request still ends the session.
+  socket.reply(JSON.stringify({ type: "ACCOUNTS", id: "unknown-request", body: { accounts: "not a list" } }));
+  await tick();
+  assert.equal(session.status, "closed");
 });
 
 test("optional library stays unused until requested and correlates bounded replies", async () => {

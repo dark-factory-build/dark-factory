@@ -111,7 +111,7 @@ func (backend *browserBackend) Identity(ctx context.Context) (browser.Identity, 
 	}
 	state, err := backend.store.Factory(ctx)
 	if err != nil {
-		return browser.Identity{}, mapBrowserError(err)
+		return browser.Identity{}, err
 	}
 	var result browser.Identity
 	copy(result.DaemonID[:], state.DaemonID.Bytes())
@@ -146,7 +146,7 @@ func (backend *browserBackend) Pair(ctx context.Context, request browser.PairReq
 	}
 	client, err := backend.store.RedeemBrowserPairingChallenge(ctx, kernel.HashBrowserChallenge(request.Challenge[:]), backend.boot, request.Origin, clientID, request.PublicKeySEC1[:], at)
 	if err != nil {
-		return browser.Authentication{}, mapBrowserError(err)
+		return browser.Authentication{}, err
 	}
 	return projectBrowserAuthentication(client)
 }
@@ -182,7 +182,7 @@ func (backend *browserBackend) StateSnapshot(ctx context.Context, rawClient [bro
 	defer release()
 	snapshot, err := backend.store.ReadPublicSnapshot(ctx)
 	if err != nil {
-		return browserprotocol.StateSnapshot{}, mapBrowserError(err)
+		return browserprotocol.StateSnapshot{}, err
 	}
 	return projectPublicSnapshotForClient(snapshot, backend.owner.providerAccountDefaults, client.CapabilityMask.Has(kernel.BrowserCapabilityAdministration))
 }
@@ -207,7 +207,7 @@ func (backend *browserBackend) HumanRequestDetail(ctx context.Context, rawClient
 	}
 	detail, err := backend.store.HumanRequestDetail(ctx, clientID, requestID, revision)
 	if err != nil {
-		return browserprotocol.HumanRequestDetail{}, mapBrowserError(err)
+		return browserprotocol.HumanRequestDetail{}, err
 	}
 	result := browserprotocol.HumanRequestDetail{
 		RequestID: detail.ID.String(), Revision: decimalRevision(detail.Revision), Question: detail.QuestionText, Options: detail.Options,
@@ -252,7 +252,7 @@ func (backend *browserBackend) TerminalTarget(ctx context.Context, rawClient [br
 	}
 	target, available, err := backend.store.ResolveAgentTerminalTarget(ctx, clientID, agentID, expectedAgent, expectedHead)
 	if err != nil {
-		return browserprotocol.TerminalTarget{}, mapBrowserError(err)
+		return browserprotocol.TerminalTarget{}, err
 	}
 	result := browserprotocol.TerminalTarget{AgentID: request.AgentID, AgentRevision: request.ExpectedAgentRevision, Head: request.ExpectedHead}
 	if available {
@@ -316,7 +316,7 @@ func (backend *browserBackend) EnqueueTask(ctx context.Context, rawClient [brows
 	}
 	at, err := backend.timestamp()
 	if err != nil {
-		return browserprotocol.TaskEnqueueResult{}, mapBrowserError(err)
+		return browserprotocol.TaskEnqueueResult{}, err
 	}
 	mode := kernel.BrowserEnqueueNow
 	switch request.Mode {
@@ -342,7 +342,7 @@ func (backend *browserBackend) EnqueueTask(ctx context.Context, rawClient [brows
 	}
 	result, err := backend.store.EnqueueTaskForBrowserAgentRepositoryMode(ctx, clientID, taskID, incarnationID, agentID, expectedAgentRevision, repositoryID, request.Instruction, mode, at, content, attachments...)
 	if err != nil {
-		return browserprotocol.TaskEnqueueResult{}, mapBrowserError(err)
+		return browserprotocol.TaskEnqueueResult{}, err
 	}
 	if backend.owner != nil {
 		backend.owner.notifyScheduler()
@@ -433,7 +433,7 @@ func (backend *browserBackend) UpdateAgent(ctx context.Context, rawClient [brows
 	}
 	at, err := backend.timestamp()
 	if err != nil {
-		return browserprotocol.AgentUpdateResult{}, mapBrowserError(err)
+		return browserprotocol.AgentUpdateResult{}, err
 	}
 	patch := kernel.AgentPatch{Model: request.Model, ReasoningEffort: request.ReasoningEffort}
 	if request.Appearance != nil {
@@ -489,7 +489,7 @@ func (backend *browserBackend) SetProjectLimits(ctx context.Context, rawClient [
 	}
 	at, err := backend.timestamp()
 	if err != nil {
-		return browserprotocol.ProjectLimitsResult{}, mapBrowserError(err)
+		return browserprotocol.ProjectLimitsResult{}, err
 	}
 	project, err := backend.store.SetProjectLimits(ctx, projectID, expected, uint64(request.RunBudget), request.MaxRunSeconds, at)
 	if err != nil {
@@ -513,7 +513,7 @@ func (backend *browserBackend) SetDispatch(ctx context.Context, rawClient [brows
 	}
 	at, err := backend.timestamp()
 	if err != nil {
-		return browserprotocol.FactoryDispatchResult{}, mapBrowserError(err)
+		return browserprotocol.FactoryDispatchResult{}, err
 	}
 	state, err := backend.store.SetDispatch(ctx, expected, bool(request.Enabled), at)
 	if err != nil {
@@ -537,7 +537,7 @@ func (backend *browserBackend) CreateProject(ctx context.Context, rawClient [bro
 	}
 	at, err := backend.timestamp()
 	if err != nil {
-		return browserprotocol.ProjectCreateResult{}, mapBrowserError(err)
+		return browserprotocol.ProjectCreateResult{}, err
 	}
 	project, err := registerProject(ctx, backend.store, kernel.NewProject{ID: projectID, Name: request.Name, Root: request.Root}, at)
 	if err != nil {
@@ -566,7 +566,7 @@ func (backend *browserBackend) Repositories(ctx context.Context, rawClient [brow
 	}
 	values, err := backend.store.ProjectRepositories(ctx, projectID)
 	if err != nil {
-		return browserprotocol.Repositories{}, mapBrowserError(err)
+		return browserprotocol.Repositories{}, err
 	}
 	result := browserprotocol.Repositories{ProjectID: request.ProjectID, Items: make([]browserprotocol.Repository, 0, len(values))}
 	for _, value := range values {
@@ -574,7 +574,7 @@ func (backend *browserBackend) Repositories(ctx context.Context, rawClient [brow
 		if backend.owner != nil {
 			view, err = backend.owner.RepositoryReadiness(ctx, value.ID, false)
 			if err != nil {
-				return browserprotocol.Repositories{}, mapBrowserError(err)
+				return browserprotocol.Repositories{}, err
 			}
 		}
 		result.Items = append(result.Items, browserRepository(view))
@@ -596,7 +596,7 @@ func (backend *browserBackend) MutateRepository(ctx context.Context, rawClient [
 	}
 	at, err := backend.timestamp()
 	if err != nil {
-		return browserprotocol.RepositoryMutateResult{}, mapBrowserError(err)
+		return browserprotocol.RepositoryMutateResult{}, err
 	}
 	parse := func() (kernel.RepositoryID, error) { return decodeID(request.ID, kernel.RepositoryIDFromBytes) }
 	if request.Action == "add" {
@@ -718,7 +718,7 @@ func (backend *browserBackend) UpdateTask(ctx context.Context, rawClient [browse
 	}
 	at, err := backend.timestamp()
 	if err != nil {
-		return browserprotocol.TaskUpdateResult{}, mapBrowserError(err)
+		return browserprotocol.TaskUpdateResult{}, err
 	}
 	var task kernel.Task
 	if retry {
@@ -793,7 +793,7 @@ func (backend *browserBackend) liveGraph(ctx context.Context, rawClient [browser
 	}
 	graph, err := backend.owner.PlantGraph(ctx, projectID)
 	if err != nil {
-		return opgraph.Live{}, projectGraph{}, mapBrowserError(err)
+		return opgraph.Live{}, projectGraph{}, err
 	}
 	return backend.owner.liveGraph(projectID, graph), graph, nil
 }
@@ -913,7 +913,7 @@ func consoleUpdateError(err error) error {
 	if errors.Is(err, kernel.ErrInvalidValue) {
 		return browser.ErrInvalidRequest
 	}
-	return mapBrowserError(err)
+	return err
 }
 
 // SubscribePush stores one device's alert subscription under its own client
@@ -939,7 +939,7 @@ func (backend *browserBackend) SubscribePush(ctx context.Context, rawClient [bro
 	if err := store.update(func(subscriptions map[string]browserprotocol.PushSubscribe) {
 		subscriptions[clientID.String()] = subscription
 	}); err != nil {
-		return mapBrowserError(err)
+		return err
 	}
 	return nil
 }
@@ -967,13 +967,13 @@ func (backend *browserBackend) RemoteInvite(ctx context.Context, rawClient [brow
 	}
 	invitation, err := backend.owner.RemotePair(ctx)
 	if err != nil {
-		return browserprotocol.RemoteInviteResult{}, mapBrowserError(err)
+		return browserprotocol.RemoteInviteResult{}, err
 	}
 	// The challenge is already committed. A render that fails here leaves one
 	// unredeemed challenge, which nobody can reach and which expires on its own.
 	code, err := qrSVG(invitation.Link)
 	if err != nil {
-		return browserprotocol.RemoteInviteResult{}, mapBrowserError(err)
+		return browserprotocol.RemoteInviteResult{}, err
 	}
 	return browserprotocol.RemoteInviteResult{Link: invitation.Link, ExpiresAtMS: browserprotocol.Decimal(invitation.Expires * 1000), SVG: code}, nil
 }
@@ -992,11 +992,11 @@ func (backend *browserBackend) TelemetryIngest(ctx context.Context, rawClient [b
 	}
 	relay, err := backend.owner.relayRuntime()
 	if err != nil {
-		return browserprotocol.TelemetryIngestResult{}, mapBrowserError(err)
+		return browserprotocol.TelemetryIngestResult{}, err
 	}
 	url, secret, active, err := relay.ingest(request.Action)
 	if err != nil {
-		return browserprotocol.TelemetryIngestResult{}, mapBrowserError(err)
+		return browserprotocol.TelemetryIngestResult{}, err
 	}
 	return browserprotocol.TelemetryIngestResult{URL: url, Secret: secret, Active: browserprotocol.Bool(active)}, nil
 }
@@ -1037,7 +1037,7 @@ func (backend *browserBackend) RunPaths(ctx context.Context, rawClient [browserp
 	}
 	runID, paths, err := backend.owner.RunPaths(ctx, agentID)
 	if err != nil {
-		return browserprotocol.RunPaths{}, mapBrowserError(err)
+		return browserprotocol.RunPaths{}, err
 	}
 	result := browserprotocol.RunPaths{AgentID: request.AgentID, Paths: paths}
 	if runID != (kernel.RunID{}) {
@@ -1051,7 +1051,7 @@ func (backend *browserBackend) RunPaths(ctx context.Context, rawClient [browserp
 		}
 		repositories, err := backend.store.ProjectRepositories(ctx, run.ProjectID)
 		if err != nil {
-			return browserprotocol.RunPaths{}, mapBrowserError(err)
+			return browserprotocol.RunPaths{}, err
 		}
 		if len(repositories) > 1 {
 			result.Paths = make([]string, len(paths))
@@ -1083,7 +1083,7 @@ func (backend *browserBackend) DiscoverAccounts(ctx context.Context, rawClient [
 	}
 	linked, err := backend.store.ListAccounts(ctx)
 	if err != nil {
-		return browserprotocol.Accounts{}, mapBrowserError(err)
+		return browserprotocol.Accounts{}, err
 	}
 	found := backend.owner.listedAccounts(home, linked)
 	result, err := browserprotocol.PageAccounts(found, request.Offset)
@@ -1125,15 +1125,15 @@ func (backend *browserBackend) LinkAccount(ctx context.Context, rawClient [brows
 	}
 	id, err := backend.randomIdentifier()
 	if err != nil {
-		return browserprotocol.AccountLinkResult{}, mapBrowserError(err)
+		return browserprotocol.AccountLinkResult{}, err
 	}
 	accountID, err := kernel.AccountIDFromBytes(id[:])
 	if err != nil {
-		return browserprotocol.AccountLinkResult{}, mapBrowserError(err)
+		return browserprotocol.AccountLinkResult{}, err
 	}
 	at, err := backend.timestamp()
 	if err != nil {
-		return browserprotocol.AccountLinkResult{}, mapBrowserError(err)
+		return browserprotocol.AccountLinkResult{}, err
 	}
 	account, err := backend.store.LinkAccount(ctx, kernel.NewAccount{ID: accountID, Provider: provider, Home: request.Home, Label: request.Label}, at)
 	if err != nil {
@@ -1156,7 +1156,7 @@ func (backend *browserBackend) ListBrowserClients(ctx context.Context, rawClient
 	for {
 		page, err := backend.store.ListBrowserClients(ctx, after)
 		if err != nil {
-			return browserprotocol.BrowserClients{}, mapBrowserError(err)
+			return browserprotocol.BrowserClients{}, err
 		}
 		for _, item := range page.Items {
 			if item.RevokedAt == nil {
@@ -1228,7 +1228,7 @@ func (backend *browserBackend) UpdateAccount(ctx context.Context, rawClient [bro
 	}
 	at, err := backend.timestamp()
 	if err != nil {
-		return browserprotocol.AccountUpdateResult{}, mapBrowserError(err)
+		return browserprotocol.AccountUpdateResult{}, err
 	}
 	account, err := backend.store.UpdateAccount(ctx, id, expected, request.Label, request.Remove != nil && bool(*request.Remove), at)
 	if err != nil {
@@ -1244,13 +1244,13 @@ func (backend *browserBackend) authorize(ctx context.Context, rawID [browserprot
 	}
 	release, err := backend.acquireClient(ctx, clientID)
 	if err != nil {
-		return kernel.BrowserClientID{}, nil, kernel.BrowserClient{}, mapBrowserError(err)
+		return kernel.BrowserClientID{}, nil, kernel.BrowserClient{}, err
 	}
 	client, found, err := backend.store.BrowserClient(ctx, clientID)
 	if err != nil || !found || client.RevokedAt != nil || !client.CapabilityMask.Has(capability) {
 		release()
 		if err != nil {
-			return kernel.BrowserClientID{}, nil, kernel.BrowserClient{}, mapBrowserError(err)
+			return kernel.BrowserClientID{}, nil, kernel.BrowserClient{}, err
 		}
 		return kernel.BrowserClientID{}, nil, kernel.BrowserClient{}, browser.ErrUnauthorized
 	}
@@ -1457,10 +1457,11 @@ func decimalMillis(value kernel.UnixMillis) browserprotocol.Decimal {
 	return browserprotocol.Decimal(value.Int64())
 }
 
+// ClassifyError is the one place a daemon error becomes a browser error: the
+// transport applies it to every error it answers with, so no method opts in.
+func (*browserBackend) ClassifyError(err error) error { return mapBrowserError(err) }
+
 func mapBrowserError(err error) error {
-	if err == nil {
-		return nil
-	}
 	switch {
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		// An owner-side effect that already reached a verdict keeps it. Its
@@ -1523,5 +1524,5 @@ func (backend *browserBackend) AttachmentRetention(ctx context.Context, rawClien
 		enabled = &value
 	}
 	value, err := backend.store.AttachmentRetention(ctx, enabled)
-	return browserprotocol.AttachmentRetentionResult{Enabled: browserprotocol.Bool(value)}, mapBrowserError(err)
+	return browserprotocol.AttachmentRetentionResult{Enabled: browserprotocol.Bool(value)}, err
 }
