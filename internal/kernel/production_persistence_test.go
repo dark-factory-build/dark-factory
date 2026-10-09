@@ -710,6 +710,17 @@ func TestPublishableIntakeChangeIsFactorydsUntilPublishedOrFailed(t *testing.T) 
 	if len(candidates()) != 0 {
 		t.Fatal("a recorded publish failure is retried")
 	}
+	// The operator clears a refusal whose cause is gone; the next pass
+	// publishes that revision again. Nothing else is cleared.
+	if cleared, err := store.ClearPublishFailure(ctx, worker.ProjectID, "publish-unknown-1"); err != nil || cleared {
+		t.Fatalf("cleared an absent failure: %v %v", cleared, err)
+	}
+	if cleared, err := store.ClearPublishFailure(ctx, worker.ProjectID, PublishFailureID(change.ID, found[0].Revision)); err != nil || !cleared || len(candidates()) != 1 {
+		t.Fatalf("a cleared publish failure is not retried: %v %v", cleared, err)
+	}
+	if err := store.RecordReviewOperation(ctx, worker.ProjectID, "example/factory", PublishFailureID(change.ID, found[0].Revision), failure, mustTime(t, 70)); err != nil {
+		t.Fatal(err)
+	}
 	if pending, err := store.InFlightReviewOperations(ctx); err != nil || len(pending) != 0 {
 		t.Fatalf("publish failure in flight: %+v %v", pending, err)
 	}
