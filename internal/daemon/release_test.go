@@ -250,7 +250,7 @@ func TestReleaseRecordsAFailedUpgradeAndNeverRestarts(t *testing.T) {
 		t.Fatal(err)
 	}
 	delivery := awaitRelease(t, fixture.daemon, sha, func(value kernel.ProductionDelivery) bool { return value.State == "failed" })
-	if delivery.Phase != "swap" || delivery.Reason != "upgrade: receipt" || fixture.daemon.releaseHold.Load() {
+	if delivery.Phase != "stage" || delivery.Reason != "upgrade: receipt" || fixture.daemon.releaseHold.Load() {
 		t.Fatalf("failed upgrade = %+v, hold %t", delivery, fixture.daemon.releaseHold.Load())
 	}
 	if <-events != "build /self-repository" || <-events != "upgrade" || len(events) != 0 {

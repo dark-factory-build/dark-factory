@@ -168,7 +168,7 @@ func TestOldBuildRestartedMidTrialStopsTheOrphanedChild(t *testing.T) {
 	exited := make(chan error, 1)
 	go func() { exited <- child.Wait() }()
 	t.Cleanup(func() { _ = child.Process.Kill() })
-	if err := install.WriteUpgradeMarker(home, install.UpgradeMarker{Target: strings.Repeat("7", 40), Trial: child.Process.Pid}); err != nil {
+	if err := install.WriteUpgradeMarker(home, install.UpgradeMarker{Target: strings.Repeat("7", 40), Trial: child.Process.Pid, TrialStart: processStart(child.Process.Pid)}); err != nil {
 		t.Fatal(err)
 	}
 	waitOperatorClient(t, home)
@@ -177,6 +177,57 @@ func TestOldBuildRestartedMidTrialStopsTheOrphanedChild(t *testing.T) {
 	case <-exited:
 	default:
 		t.Fatal("the orphaned trial child still runs")
+	}
+}
+
+// A pid the trial child no longer owns belongs to someone else: the boot
+// kills only the process that started when the child did.
+func TestOldBuildNeverKillsAReusedTrialPid(t *testing.T) {
+	home := stagedHome(t, "serve", strings.Repeat("7", 40))
+	other := exec.Command("/bin/sleep", "30")
+	other.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := other.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = other.Process.Kill(); _ = other.Wait() })
+	if err := install.WriteUpgradeMarker(home, install.UpgradeMarker{Target: strings.Repeat("7", 40), Trial: other.Process.Pid, TrialStart: processStart(other.Process.Pid) - 1}); err != nil {
+		t.Fatal(err)
+	}
+	bootUntilSettled(t, home)
+	if err := other.Process.Signal(syscall.Signal(0)); err != nil {
+		t.Fatalf("the boot killed an unrelated process: %v", err)
+	}
+}
+
+// A trial child proves it boots and answers as the release, and acts on
+// nothing: no recovery, scheduler (so no dispatch, intake, release or GitHub
+// tick), browser or relay, every other call refused, and its release left
+// for the supervisor.
+func TestTrialChildAnswersStatusAndActsOnNothing(t *testing.T) {
+	home := stagedHome(t, "serve", "development")
+	t.Setenv(trialEnv, "1")
+	var phases []string
+	startupPhaseHook = func(phase string) { phases = append(phases, phase) }
+	t.Cleanup(func() { startupPhaseHook = nil })
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- serve(ctx, testConfig(home)) }()
+	client := waitOperatorClient(t, home)
+	if web, err := client.WebStatus(context.Background()); err != nil || web.Build.Source != "development" {
+		t.Fatalf("web_status = %+v, %v", web, err)
+	}
+	if _, err := client.Snapshot(context.Background()); err == nil {
+		t.Fatal("a trial build answered a call other than web_status")
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("serve = %v", err)
+	}
+	if got := strings.Join(phases, ","); got != "home,store,runtime parent,supervisor spec,trial" {
+		t.Fatalf("trial phases = %s", got)
+	}
+	if _, present, _ := install.ReadUpgradeMarker(home); !present {
+		t.Fatal("the trial child settled its own release")
 	}
 }
 

@@ -47,8 +47,11 @@ parent dies mid-trial, launchd starts the old build, which kills the trial
 child's process group (recorded in the marker; launchd does not end it) and
 recovers the same way. The record is the
 production delivery `release:<sha>`. `--wait` follows it across the restart
-and exits 0 when verified, 1 when it failed after staging, and 75 when the
-call was refused or the release failed before staging.
+and exits 0 when verified, 1 when its trial failed, and 75 when the call was
+refused or the release failed while building, draining or staging. The trial
+child runs nothing but `web_status`: no recovery sweep, scheduler, intake,
+release, GitHub, browser or relay work, and every other local API call is
+refused, so a trial that fails leaves no external effect behind.
 
 factoryd also releases itself. Where the home has a registered checkout of
 dark-factory, every two minutes it reads `main`'s tip with `git ls-remote

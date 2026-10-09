@@ -29,6 +29,7 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/provider"
 	"github.com/dark-factory-build/dark-factory/internal/relayhost"
 	"github.com/dark-factory-build/dark-factory/internal/runner"
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -346,9 +347,13 @@ func serve(ctx context.Context, configuration config) error {
 		}
 		return err
 	}
+	if os.Getenv(trialEnv) != "" {
+		<-ctx.Done()
+		return owner.close()
+	}
 	// Only bin/current boots under launchd, so a marker naming this build
 	// means its trial promoted it; any other marker is a release that did not.
-	if marker, upgrading, err := install.ReadUpgradeMarker(configuration.home); os.Getenv(trialEnv) == "" && (upgrading || err != nil) {
+	if marker, upgrading, err := install.ReadUpgradeMarker(configuration.home); upgrading || err != nil {
 		if err != nil {
 			daemon.LogFactoryd(recoveryLog, "factoryd: discarding the upgrade marker: %v\n", err)
 		}
@@ -362,7 +367,7 @@ func serve(ctx context.Context, configuration config) error {
 		return err
 	}
 	// A release staged another build and shut this one down.
-	if marker, ok, _ := install.ReadUpgradeMarker(configuration.home); ok && marker.Target != selfSource() && os.Getenv(trialEnv) == "" {
+	if marker, ok, _ := install.ReadUpgradeMarker(configuration.home); ok && marker.Target != selfSource() {
 		return superviseTrial(configuration.home, configuration.args, marker)
 	}
 	return nil
@@ -389,7 +394,7 @@ func superviseTrial(home string, args []string, marker install.UpgradeMarker) er
 	var answered atomic.Bool
 	err := child.Start()
 	if err == nil {
-		marker.Trial = child.Process.Pid
+		marker.Trial, marker.TrialStart = child.Process.Pid, processStart(child.Process.Pid)
 		if err = install.WriteUpgradeMarker(home, marker); err != nil {
 			cancel()
 		}
@@ -417,9 +422,18 @@ func superviseTrial(home string, args []string, marker install.UpgradeMarker) er
 			return fmt.Errorf("%w: promoted %s", errRestart, marker.Target)
 		}
 	}
-	marker.Trial = 0
+	marker.Trial, marker.TrialStart = 0, 0
 	marker.Reason = fmt.Sprintf("the new build was not promoted (answered %t): %v", answered.Load(), cmp.Or(err, limit, errors.New("it exited")))
 	return errors.Join(fmt.Errorf("%w: %s", errRestart, marker.Reason), install.WriteUpgradeMarker(home, marker))
+}
+
+// processStart is the start time of process pid in microseconds, or 0.
+func processStart(pid int) int64 {
+	info, err := unix.SysctlKinfoProc("kern.proc.pid", pid)
+	if err != nil || info.Proc.P_pid != int32(pid) {
+		return 0
+	}
+	return info.Proc.P_starttime.Sec*1_000_000 + int64(info.Proc.P_starttime.Usec)
 }
 
 // settleRelease forgets the upgrade first: while its marker remains, the next
@@ -452,9 +466,10 @@ func openProcess(ctx context.Context, configuration config) (_ *process, resultE
 	// A release that did not promote leaves its trial child, if the
 	// supervisor died, and the database its backup held.
 	if marker, upgrading, err := install.ReadUpgradeMarker(configuration.home); os.Getenv(trialEnv) == "" && (err != nil || upgrading && marker.Target != selfSource()) {
-		// ponytail: a pid reused in the moments since the supervisor died
-		// loses its group; record the child's start time if that matters.
-		for deadline := time.Now().Add(10 * time.Second); marker.Trial > 0 && syscall.Kill(-marker.Trial, syscall.SIGKILL) == nil && time.Now().Before(deadline); {
+		// Only the process that started when the child did: a reused pid
+		// is someone else's.
+		for deadline := time.Now().Add(10 * time.Second); marker.Trial > 0 && processStart(marker.Trial) == marker.TrialStart && time.Now().Before(deadline); {
+			_ = syscall.Kill(-marker.Trial, syscall.SIGKILL)
 			time.Sleep(50 * time.Millisecond)
 		}
 		if err := install.RestoreUpgradeBackup(configuration.home); err != nil {
@@ -494,6 +509,24 @@ func openProcess(ctx context.Context, configuration config) (_ *process, resultE
 		return nil, err
 	}
 	owner.daemon.ConfigureLog(recoveryLog)
+	if os.Getenv(trialEnv) != "" {
+		// A trial child proves it boots and answers web_status as the
+		// release, and does nothing else: no recovery, runs, ticks, GitHub,
+		// browser or relay, so a trial that does not promote leaves nothing
+		// behind but the migration its backup undoes (#1390).
+		owner.daemon.AnswerStatusOnly()
+		if owner.apiAuthority, err = owner.home.OpenLocalAPI(ownedContext); err == nil {
+			owner.listener, err = api.Listen(owner.apiAuthority)
+		}
+		if err != nil {
+			return nil, err
+		}
+		owner.apiStart = true
+		go owner.accept(ownedContext, owner.listener)
+		startupPhase("trial")
+		keep = true
+		return owner, nil
+	}
 	startupPhase("maintainer")
 	if err := owner.daemon.ConfigureMaintainer(owner.home); err != nil {
 		return nil, err

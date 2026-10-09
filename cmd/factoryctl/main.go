@@ -124,7 +124,7 @@ const (
   factoryctl release SHA [--start] [--wait]
     Reads the release of merged commit SHA; --start installs it into this
     factory's service, with rollback, if it descends from the running build.
-    --wait exits 0 verified, 1 failed or rolled back, 75 refused with no effect.
+    --wait exits 0 verified, 1 failed its trial, 75 refused with no effect.
   factoryctl task read --task ID --revision REVISION [--offset N]
   factoryctl dispatch on|off [--revision REVISION]
   factoryctl capacity --workers N --revision REVISION

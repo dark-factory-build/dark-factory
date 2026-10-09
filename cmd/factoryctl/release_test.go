@@ -24,7 +24,8 @@ func TestReleaseWaitsAcrossTheRestartAndMapsTheOutcome(t *testing.T) {
 		{"started", false, nil, 0},
 		{"verified", true, []kernel.ProductionDelivery{running, {}, {State: "verified"}}, 0},
 		{"rolled back", true, []kernel.ProductionDelivery{{State: "failed", Reason: "crashed"}}, exitFailure},
-		{"swap failed", true, []kernel.ProductionDelivery{{State: "failed", Phase: "swap"}}, exitFailure},
+		{"stage failed", true, []kernel.ProductionDelivery{{State: "failed", Phase: "stage"}}, exitRefused},
+		{"trial failed", true, []kernel.ProductionDelivery{{State: "failed", Phase: "trial"}}, exitFailure},
 		{"drain timeout", true, []kernel.ProductionDelivery{{State: "failed", Phase: "drain"}}, exitRefused},
 		{"build failed", true, []kernel.ProductionDelivery{{State: "failed", Phase: "build"}}, exitRefused},
 	} {

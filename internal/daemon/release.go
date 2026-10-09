@@ -308,7 +308,7 @@ func (daemon *Daemon) release(project kernel.ProjectID, root string, source chan
 		fail(err.Error())
 		return
 	}
-	delivery.Phase = "swap"
+	delivery.Phase = "stage"
 	_ = daemon.writeRelease(ctx, project, &delivery)
 	backup := install.UpgradeBackupPath(daemon.home)
 	_ = os.Remove(backup) // BackupTo refuses whatever this could not remove.

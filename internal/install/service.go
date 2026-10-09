@@ -56,9 +56,11 @@ var serviceBinaryNames = [3]string{"factoryd", "factoryctl", "factory-runner"}
 type UpgradeMarker struct {
 	Target string `json:"target"`
 	Reason string `json:"reason,omitempty"`
-	// Trial is the process group of a running trial child, for the boot
-	// after a supervisor that died mid-trial to stop.
-	Trial int `json:"trial,omitempty"`
+	// Trial is the process group of a running trial child, and TrialStart
+	// its leader's start time, for the boot after a supervisor that died
+	// mid-trial to stop exactly that child.
+	Trial      int   `json:"trial,omitempty"`
+	TrialStart int64 `json:"trial_start,omitempty"`
 }
 
 const upgradeMarkerName = "upgrade"

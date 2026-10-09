@@ -68,7 +68,7 @@ func release(ctx context.Context, start, wait bool, call func(start bool) (kerne
 	switch {
 	case delivery.State == "verified" || !wait && delivery.State == "running":
 		return 0
-	case delivery.State == "failed" && (delivery.Phase == "build" || delivery.Phase == "drain"):
+	case delivery.State == "failed" && (delivery.Phase == "build" || delivery.Phase == "drain" || delivery.Phase == "stage"):
 		// Nothing was swapped: the factory still runs the old build.
 		return exitRefused
 	default:
