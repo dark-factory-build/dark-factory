@@ -8,11 +8,11 @@ Keep parallel work in one place instead of juggling separate agent sessions.
 
 <picture>
   <source media="(max-width: 600px)" srcset="docs/assets/factory-floor-demo-mobile.png">
-  <img src="docs/assets/factory-floor-demo.png" alt="Dark Factory floor: machines from three repositories on one shared floor, joined by belts, with faint unit areas, an outside gate, the commons and sample workers">
+  <img src="docs/assets/factory-floor-demo.png" alt="Dark Factory floor: machines from three repositories on one shared floor, joined by square belts, over faint unit areas, with an outside gate, the development block and sample workers">
 </picture>
 
-*Actual console with labelled demo data: sample workers, codebase rooms, and a
-synthetic Needs You decision. No daemon is connected.*
+*The factory floor drawn from a demo graph: three repositories' units on one
+shared floor, belts between them and sample workers. No daemon is connected.*
 
 [Get started](#quick-start) · [Website](https://www.darkfactory.build) ·
 [Console (requires pairing)](https://app.darkfactory.build) ·
