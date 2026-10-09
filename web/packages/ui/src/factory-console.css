@@ -871,9 +871,9 @@ summary.dfConsoleItem__summary { cursor: pointer; }
 .dfProduction__notice { border: 1px solid var(--df-console-rule); padding: .35rem .45rem; }
 .dfProduction__notice p { margin-top: .4rem; }
 .dfProduction__detail { min-width: 0; overflow-wrap: anywhere; }
-.dfWorkBar { display: flex; flex-wrap: wrap; gap: .25rem; align-items: center; margin-block: .6rem; }
+.dfWorkBar { display: flex; flex-wrap: nowrap; gap: .25rem; align-items: center; margin-block: .6rem; overflow-x: auto; }
 .dfWorkBar .dfConsoleRecentWork { margin: 0; padding: 0; border: 0; }
-.dfWorkBar .dfConsoleViewToggle { flex: 0 1 auto; }
+.dfWorkBar .dfConsoleViewToggle { flex: 0 0 auto; flex-wrap: nowrap; }
 .dfWorkBar > button, .dfWorkBar .dfConsoleRecentWork button { padding-inline: .4rem; }
 .dfWorkRow__head { position: relative; padding: .7rem; overflow-wrap: anywhere; }
 .dfWorkRow__head .dfConsoleItem__meta { margin-top: .3rem; }
