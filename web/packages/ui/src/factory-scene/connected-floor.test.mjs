@@ -8,7 +8,7 @@ import { commonSeating, layoutScene, standable } from "../../dist/src/factory-sc
 import { CROSSING_CLEARANCE, beltRoutes, crosses, findRoute, regionLabelBox, walkable } from "../../dist/src/factory-scene/movement.js";
 import { projectGraph } from "../../dist/src/console-view.js";
 import { publicFloor } from "../../dist/src/public-floor.js";
-import { FLOOR_FIXTURES, beltsFromMarkup, chainScene, crossings, denseScene, shuffled, withAdditions, withRemovals } from "../../../../fixtures/floor.mjs";
+import { FLOOR_FIXTURES, beltsFromMarkup, chainScene, crossings, denseScene, pathological, shuffled, withAdditions, withRemovals } from "../../../../fixtures/floor.mjs";
 
 const project = (wire) => projectGraph(new Map([["p", wire]]), ["p"]).graph;
 const floors = Object.entries(FLOOR_FIXTURES).map(([name, build]) => ({ name, wire: build(), graph: project(build()) }));
@@ -223,7 +223,8 @@ test("on dense floors no belt or overhead link passes through a machine or a lab
     const graph = denseScene(config), layout = layoutScene(graph), at = new Map(layout.stations.map((station) => [station.entityId, station]));
     const pairs = graph.flows.map((flow) => ({ key: `${flow.from} ${flow.to}`, from: at.get(flow.from), to: at.get(flow.to) }));
     const { routes, crossings: bridges, links } = beltRoutes(layout, pairs);
-    assert.equal(routes.size, pairs.length, `seed ${config.seed}: every connection is drawn, as a belt or a link`);
+    const { stubs } = beltRoutes(layout, pairs);
+    assert.equal(routes.size + stubs.size, pairs.length, `seed ${config.seed}: every connection is drawn, as a belt, a link or a pair of stubs`);
     const labels = [...layout.stations.map((station) => station.label), ...layout.regions.map(regionLabelBox)];
     for (const [key, points] of routes) for (let leg = 1; leg < points.length; leg++) {
       assert.ok(points[leg - 1].x === points[leg].x || points[leg - 1].y === points[leg].y, `seed ${config.seed}: ${key} is square`);
@@ -239,8 +240,17 @@ test("on dense floors no belt or overhead link passes through a machine or a lab
 });
 
 test("unrelated groups pack toward 16:10, not into a strip", () => {
-  for (const [name, graph] of [["12 chains", chainScene(12)], ["48 chains", chainScene(48)], ["large", floors.find((floor) => floor.name === "large").graph]]) {
+  for (const [name, graph] of [["12 chains", chainScene(12)], ["48 chains", chainScene(48)], ["large", floors.find((floor) => floor.name === "large").graph],
+    ["a chain of 20 shared machines", pathological("chain", 20)], ["a chain of 4,000 shared machines", pathological("chain", 4000)]]) {
     const layout = layoutScene(graph), aspect = layout.width / layout.height;
     assert.ok(aspect >= 1 && aspect <= 2.2, `${name}: ${layout.width}×${layout.height} is ${aspect.toFixed(2)}:1`);
+  }
+});
+
+test("every connection is drawn, as a belt, an overhead link or a pair of named stubs, even where the work runs out", () => {
+  for (const [which, size] of [["spokes", 1500], ["hub", 300], ["clique", 40]]) {
+    const graph = pathological(which, size), started = performance.now(), markup = renderToStaticMarkup(createElement(FactoryScene, { graph, workers: [] }));
+    assert.equal((markup.match(/data-belt=/g) ?? []).length, graph.flows.length, `${which}: ${graph.flows.length} flows, all drawn`);
+    assert.ok(performance.now() - started < 5000, `${which}: bounded work`);
   }
 });

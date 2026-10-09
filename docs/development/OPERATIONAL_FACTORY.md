@@ -716,7 +716,12 @@ Approach (`factory-scene/scene.ts`, `factory-scene/movement.ts`; nothing in
    free spot with the shortest weighted distance to its neighbours plus a
    charge for growing the group's bounds; if none is free it takes the
    nearest free spot on a spiral. Two bounded passes then move each station
-   to a better free spot if one exists. Then the groups are packed on
+   to a better free spot if one exists. Placement has a work cap that grows
+   with the group (5,000 tries plus 100 a footprint); a group that would
+   pass it, or that comes out longer than 2.2 times its width either way (a
+   chain), is laid instead in rows near 16:10 in placement order, each row
+   running back the way the last came, so neighbours stay side by side.
+   Then the groups are packed on
    shelves, tallest first, with a gap that keeps unrelated groups visibly
    apart; the shelf width is the one that keeps the floor smallest and
    nearest 16:10 (chains of unrelated units do not make a strip). The
@@ -761,13 +766,17 @@ Approach (`factory-scene/scene.ts`, `factory-scene/movement.ts`; nothing in
    through, at a right angle, never where the other turns and never within
    10 px of a label, a port, a junction or a machine; and every crossing is
    drawn as a bridge (a deck and two rails), unlike a junction's dot.
-   Each run is searched only in a window round its two ends, its work is
-   bounded by its length, and all runs share a budget that grows linearly
-   with their number. A connection with no belt route inside that is an
-   **overhead link**: a thin, faint, dashed line, square, laid round machine
-   bodies and labels only. It never passes through a machine or a label, but
-   it may cross or follow belts and other links and carries no bridges or
-   material; the crossing rules above are for belts alone.
+   Each run is searched only in a window round its two ends and its work is
+   bounded by its length. Belt searches share one budget and link searches
+   another, each 150,000 steps plus 200 a connection, so all the work grows
+   linearly with the number of connections. A connection with no belt route
+   inside its budget is an **overhead link**: a thin, faint, dashed line,
+   square, laid round machine bodies and labels only. It never passes
+   through a machine or a label, but it may cross or follow belts and other
+   links and carries no bridges or material; the crossing rules above are
+   for belts alone. Past the link budget too, a connection is drawn as a
+   short dashed stub out of a port at each end, naming the machine at the
+   other end. No connection is ever dropped.
 6. **Areas.** A unit's members whose footprints face each other, side to
    side or corner to corner, across no more than two aisles merge into one
    irregular region, the gap
@@ -802,9 +811,12 @@ Large, highly connected graphs make the group nearly square, so a very wide
 or very tall pane leaves margin. On dense random floors with long flows
 across the whole floor, about half the connections become overhead links.
 Rendering a floor (layout, areas and belts, measured with
-`renderToStaticMarkup`) takes about 0.1 s at 200 nodes, 0.25 s at 1,000 and
-0.85 s at 4,100 nodes with 3,900 edges on a laptop, and runs only when the
-structure changes; a reading, a worker or the agent count never reruns it.
+`renderToStaticMarkup`) takes about 0.1 s at 200 nodes, 0.3 s at 1,000 and
+1 s at 4,100 nodes with 3,900 edges on a laptop; at the documented bound,
+4,000 machines all flowing to one hub take about 1.3 s, and 800 units
+sharing one store about 1.1 s, most of their connections then being links
+or stubs. It runs only when the structure changes; a reading, a worker or
+the agent count never reruns it.
 
 Bounds: 4,096 nodes and 4,096 edges served.
 

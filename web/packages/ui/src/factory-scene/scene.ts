@@ -288,7 +288,7 @@ function floorOf() {
   const placed = new Map<string, Rect>(), index = bucketed();
   let bounds: Rect | undefined;
   return {
-    placed, index, bounds: () => bounds,
+    placed, index, bounds: () => bounds, work: 0,
     put(key: string, rect: Rect) { placed.set(key, rect); index.add(rect); bounds = bounds === undefined ? rect : union([bounds, rect]); },
     take(key: string) { const rect = placed.get(key)!; placed.delete(key); index.remove(rect); return rect; },
   };
@@ -311,6 +311,7 @@ function placeOne(key: string, width: number, height: number, floor: ReturnType<
   };
   let best = current === undefined ? undefined : { spot: current, score: score(current) - 1 };
   const consider = (spot: Rect) => {
+    floor.work++;
     if (floor.index.hits(spot)) return;
     const value = score(spot);
     if (best === undefined || value < best.score - 1e-9 || Math.abs(value - best.score) <= 1e-9 && (spot.y < best.spot.y || spot.y === best.spot.y && spot.x < best.spot.x)) best = { spot, score: value };
@@ -348,13 +349,32 @@ function placementOrder(keys: readonly string[], links: Links, placed: ReadonlyS
 
 /** A connected group laid out from nothing: placed in order, then two bounded passes that move a footprint only to a better free spot. */
 function layoutGroup(keys: readonly string[], sizes: ReadonlyMap<string, { width: number; height: number }>, links: Links) {
-  const floor = floorOf(), order = placementOrder(keys, links);
-  for (const key of order) { const { width, height } = sizes.get(key)!; floor.put(key, placeOne(key, width, height, floor, links)); }
+  // Placement has a work cap that grows with the group; a group that would pass it, or that comes out a strip (a
+  // chain), is laid in rows in placement order instead, so neighbours stay side by side and the shape stays bounded.
+  const floor = floorOf(), order = placementOrder(keys, links), cap = 5_000 + 100 * keys.length;
+  for (const key of order) { const { width, height } = sizes.get(key)!; floor.put(key, placeOne(key, width, height, floor, links)); if (floor.work > cap) return rows(order, sizes); }
   for (let pass = 0; pass < 2 && order.length > 1; pass++) for (const key of order) {
     const current = floor.take(key);
     floor.put(key, placeOne(key, current.width, current.height, floor, links, current));
+    if (floor.work > cap) return rows(order, sizes);
   }
-  return floor.placed;
+  const bounds = floor.bounds()!;
+  return bounds.width > 2.2 * bounds.height || bounds.height > 2.2 * bounds.width ? rows(order, sizes) : floor.placed;
+}
+
+/** Footprints in rows near 16:10, in order, each row running back the way the last came, so consecutive ones stay neighbours. */
+function rows(order: readonly string[], sizes: ReadonlyMap<string, { width: number; height: number }>) {
+  const area = order.reduce((sum, key) => sum + sizes.get(key)!.width * sizes.get(key)!.height, 0), shelf = Math.ceil(Math.max(...order.map((key) => sizes.get(key)!.width), Math.sqrt(area * ASPECT)));
+  const placed = new Map<string, Rect>();
+  let row: string[] = [], y = 0, forward = true;
+  const flush = () => {
+    let x = forward ? 0 : shelf;
+    for (const key of row) { const { width, height } = sizes.get(key)!; if (!forward) x -= width; placed.set(key, { x, y, width, height }); if (forward) x += width; }
+    y += Math.max(...row.map((key) => sizes.get(key)!.height)); row = []; forward = !forward;
+  };
+  for (const key of order) { if (row.length > 0 && row.reduce((sum, item) => sum + sizes.get(item)!.width, 0) + sizes.get(key)!.width > shelf) flush(); row.push(key); }
+  if (row.length > 0) flush();
+  return placed;
 }
 
 /**
@@ -527,14 +547,19 @@ function regionsOf(stations: readonly SceneStation[]): readonly SceneRegion[] {
     const rects = byUnit.get(unit)!.map(inset), blocked = (rect: SceneRect) => everyone.hits(rect, (other) => (other as { unit?: string }).unit !== unit);
     const parent = rects.map((_, index) => index), find = (index: number): number => parent[index] === index ? index : parent[index] = find(parent[index]!);
     const bridges: { at: number; rect: SceneRect }[] = [];
-    for (let i = 0; i < rects.length; i++) for (let j = i + 1; j < rects.length; j++) {
+    // Only members within bridging reach of each other are paired, found through buckets.
+    const reach = bucketed(BRIDGE);
+    rects.forEach((rect, index) => reach.add({ ...rect, index } as SceneRect));
+    const neighbours = (i: number) => { const found: number[] = []; reach.hits(rects[i]!, (other) => { const j = (other as unknown as { index: number }).index; if (j > i) found.push(j); return false; }); return found; };
+    for (let i = 0; i < rects.length; i++) for (const j of neighbours(i)) {
       const a = rects[i]!, b = rects[j]!;
       const x0 = Math.max(a.x, b.x), x1 = Math.min(a.x + a.width, b.x + b.width), y0 = Math.max(a.y, b.y), y1 = Math.min(a.y + a.height, b.y + b.height);
       // Face to face across a gap: the bridge is the span they share, as wide as the gap. Corner to corner: the band
       // between them, as wide as both, which meets each along an edge.
-      const bridge = x1 - x0 >= 12 && y1 <= y0 && y0 - y1 <= BRIDGE ? { x: x0, y: y1, width: x1 - x0, height: y0 - y1 }
-        : y1 - y0 >= 12 && x1 <= x0 && x0 - x1 <= BRIDGE ? { x: x1, y: y0, width: x0 - x1, height: y1 - y0 }
-        : x1 <= x0 && y1 <= y0 && x0 - x1 <= BRIDGE && y0 - y1 <= BRIDGE ? { x: Math.min(a.x, b.x), y: y1, width: Math.max(a.x + a.width, b.x + b.width) - Math.min(a.x, b.x), height: y0 - y1 } : undefined;
+      // A bridge narrower than half an aisle would be a stray strip; corner bands only span a single aisle.
+      const bridge = x1 - x0 >= MARGIN && y1 <= y0 && y0 - y1 <= BRIDGE ? { x: x0, y: y1, width: x1 - x0, height: y0 - y1 }
+        : y1 - y0 >= MARGIN && x1 <= x0 && x0 - x1 <= BRIDGE ? { x: x1, y: y0, width: x0 - x1, height: y1 - y0 }
+        : x1 <= x0 && y1 <= y0 && x0 - x1 <= 2 * MARGIN && y0 - y1 <= 2 * MARGIN ? { x: Math.min(a.x, b.x), y: y1, width: Math.max(a.x + a.width, b.x + b.width) - Math.min(a.x, b.x), height: y0 - y1 } : undefined;
       if (bridge === undefined || blocked(bridge)) continue;
       parent[find(i)] = find(j);
       bridges.push({ at: i, rect: bridge });
@@ -558,9 +583,10 @@ function regionsOf(stations: readonly SceneStation[]): readonly SceneRegion[] {
 /** A patch of floor made of rectangles, as non-overlapping row runs, its outline, and the top-left corner for its name. */
 function trace(parts: readonly SceneRect[]) {
   const bounds = union(parts), columns = Math.ceil(bounds.width / REGION_CELL), rows = Math.ceil(bounds.height / REGION_CELL);
-  const filled = (column: number, row: number) => column >= 0 && row >= 0 && column < columns && row < rows
-    && parts.some((rect) => { const x = bounds.x + (column + .5) * REGION_CELL, y = bounds.y + (row + .5) * REGION_CELL; return x > rect.x && x < rect.x + rect.width && y > rect.y && y < rect.y + rect.height; });
-  const mask = Array.from({ length: rows }, (_, row) => Array.from({ length: columns }, (_, column) => filled(column, row)));
+  // A cell is in the patch when its centre is inside a part: each part marks its own cells.
+  const mask = Array.from({ length: rows }, () => new Array<boolean>(columns).fill(false));
+  for (const rect of parts) for (let row = Math.max(0, Math.floor((rect.y - bounds.y) / REGION_CELL - .5) + 1); row < rows && bounds.y + (row + .5) * REGION_CELL < rect.y + rect.height; row++)
+    for (let column = Math.max(0, Math.floor((rect.x - bounds.x) / REGION_CELL - .5) + 1); column < columns && bounds.x + (column + .5) * REGION_CELL < rect.x + rect.width; column++) mask[row]![column] = true;
   const at = (column: number, row: number) => mask[row]?.[column] === true;
   const rects: SceneRect[] = [], edges: string[] = [];
   for (let row = 0; row < rows; row++) for (let column = 0; column < columns; column++) {
