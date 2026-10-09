@@ -145,6 +145,8 @@ export type SceneStation = SceneRect & Readonly<{
   unit?: string;
   /** Where a worker stands to use it. */
   anchor: ScenePoint;
+  /** Where its label is drawn: floor nobody builds on and no belt crosses. */
+  label: SceneRect;
   /** Body, label and standing spot with an aisle's half-width around them. Footprints never overlap. */
   footprint: SceneRect;
 }>;
@@ -154,16 +156,26 @@ export type SceneLayout = Readonly<{
   height: number;
   stations: readonly SceneStation[];
   /** Each unit's area: the footprints of its stations, in lobes where they are apart. Painted only; layout never reads it. */
-  regions: readonly Readonly<{ unit: string; rects: readonly SceneRect[] }>[];
-  /** The commons and the outbound line, placed as one block. */
+  regions: readonly SceneRegion[];
+  /** The development neighbourhood: the commons and the outbound line, placed as one block. */
   facilities: SceneRect;
   commons: SceneRect;
   restingTop: number;
+  /** Seats per table row and rows of each kind, from the number of agents; and the implements actually there. */
+  seats: Readonly<{ agents: number; perRow: number; rows: number; planningRows: number }>;
+  implements: readonly BreakRoomErrand[];
   /** The outbound line, one row per station. Fixed: it is there, empty, with no work. */
   line: readonly (SceneRect & Readonly<{ label: string }>)[];
   /** What nobody walks through: machine bodies, commons tables and implements. */
   solids: readonly SceneRect[];
 }>;
+
+/**
+ * One neighbourhood of a unit: members standing next to each other, merged
+ * into one irregular patch of floor. `rects` tile it without overlapping;
+ * `outline` traces its edge; `label` is where its one name goes.
+ */
+export type SceneRegion = Readonly<{ unit: string; lobe: number; rects: readonly SceneRect[]; outline: string; label: ScenePoint & Readonly<{ width: number }> }>;
 
 export type SceneWorkerPlacement = Readonly<{
   id: string;
@@ -181,14 +193,15 @@ export type SceneWorkerPlacement = Readonly<{
 export type BreakRoomErrand = "shelf" | "coffee" | "board" | "missions" | "tasks";
 
 export const PADDING = 16;
-export const COMMON_WIDTH = 192;
+/** What the commons holds: a seat for every agent at rest and at the work tables, and the implements the floor offers. */
+export type CommonsNeeds = Readonly<{ agents: number; implements: readonly BreakRoomErrand[] }>;
 export const WORKER_GAP = 40;
 export const WORKER_SIZE = 20;
 /** Half an aisle around every footprint: two neighbours leave a worker room to pass with the walking grid's slack. */
 export const MARGIN = 18;
-// The commons: implements along the top, two rows of four seats, a planning row; then the outbound line below.
-// Rows of seats are further apart than seats in a row, so the aisle behind a table is always walkable.
-const COMMON_HEIGHT = 304, RESTING_ROWS = 2, PLANNING_SEATS = 4, ROW_PITCH = 48, LINE_ROW = 32, LINE_WIDTH = 176;
+// The commons, sized to what is in it: implements along the top, two rows of four seats, a planning row; the
+// outbound line right below it. Rows of seats are further apart than seats in a row, so the aisle behind a table is always walkable.
+const ROW_PITCH = 56, LINE_ROW = 28, LINE_GAP = 8, LINE_WIDTH = 176;
 // Unrelated groups stand this much further apart than neighbours, so a disconnected group reads as one.
 const GROUP_GAP = 24;
 const ASPECT = 1.6;
@@ -225,7 +238,7 @@ function sides(machine: SceneMachine) {
   const anchor = { x: width / 2, y: Math.max(height + 16, label.y + label.height + 13) };
   const left = Math.min(0, label.x, anchor.x - WORKER_SIZE / 2) - MARGIN, top = Math.min(0, label.y) - MARGIN;
   const right = Math.max(width, label.x + label.width, anchor.x + WORKER_SIZE / 2) + MARGIN, bottom = anchor.y + WORKER_SIZE / 2 + MARGIN;
-  return { shape, width, height, anchor, footprint: { x: Math.floor(left), y: Math.floor(top), width: Math.ceil(right - Math.floor(left)), height: Math.ceil(bottom - Math.floor(top)) } };
+  return { shape, width, height, anchor, label, footprint: { x: Math.floor(left), y: Math.floor(top), width: Math.ceil(right - Math.floor(left)), height: Math.ceil(bottom - Math.floor(top)) } };
 }
 
 type Rect = { x: number; y: number; width: number; height: number };
@@ -390,7 +403,7 @@ function groupsOf(keys: readonly string[], links: Links) {
  * state, workers and the pane never do. Given the previous layout, a small
  * structural change keeps every machine that still exists where it stood.
  */
-export function layoutScene(graph: SceneGraph, previous?: SceneLayout): SceneLayout {
+export function layoutScene(graph: SceneGraph, previous?: SceneLayout, needs: CommonsNeeds = { agents: 8, implements: NOOK_ORDER }): SceneLayout {
   const pieces: Piece[] = [];
   for (const unit of graph.units) {
     pieces.push({ key: unit.id, machine: { id: unit.id, kind: "processor", label: unit.label, reading: unit.reading }, unit: unit.id });
@@ -399,30 +412,37 @@ export function layoutScene(graph: SceneGraph, previous?: SceneLayout): SceneLay
   for (const machine of [...graph.shared, ...graph.parties, ...graph.quarantine]) pieces.push({ key: machine.id, machine });
   // Input order never matters: everything below works in id order.
   pieces.sort((left, right) => compareText(left.key, right.key));
-  const facility = { width: COMMON_WIDTH + 2 * MARGIN, height: COMMON_HEIGHT + 16 + LINE_ROW * LINE_STATIONS.length + 2 * MARGIN };
+  // The commons is as big as what is in it: tables for the agents, the implements present. A different agent count is a
+  // structural change for the commons alone; with the previous layout it resizes in place and nothing else moves.
+  const present = NOOK_ORDER.filter((errand) => needs.implements.includes(errand)), perRow = Math.min(4, Math.max(1, needs.agents)), rows = Math.max(1, Math.ceil(needs.agents / perRow));
+  // Every agent can rest at once; at most half are ever planning away from a machine at once.
+  const planningRows = Math.max(1, Math.ceil(Math.ceil(needs.agents / 2) / perRow));
+  const restingAt = present.length > 0 ? 116 : 40, commonHeight = restingAt + (rows + planningRows - 1) * ROW_PITCH + 30;
+  const commonWidth = Math.max(present.length * 38 + 8, (perRow - 1) * WORKER_GAP + 48, 96);
+  const facility = { width: Math.max(commonWidth, LINE_WIDTH + 8) + 2 * MARGIN, height: commonHeight + LINE_GAP + LINE_ROW * LINE_STATIONS.length + 2 * MARGIN };
   const geometry = new Map(pieces.map((piece) => [piece.key, sides(piece.machine)]));
   const sizes = new Map([...pieces.map((piece) => [piece.key, geometry.get(piece.key)!.footprint] as const), [FACILITIES, facility] as const]);
   const keys = [...sizes.keys()];
   const links = linksOf(graph, new Set(keys));
-  const placed = (previous === undefined ? undefined : keep(previous, keys, sizes, links)) ?? cold(keys, sizes, links);
+  // A floor laid out before any agent was known (the console's first render) is no history to keep.
+  const placed = (previous === undefined || previous.seats.agents === 0 ? undefined : keep(previous, keys, sizes, links)) ?? cold(keys, sizes, links);
   // Shift to the floor's corner; a shift moves everything together.
   const all = [...placed.values()], left = Math.min(...all.map((rect) => rect.x)) - PADDING, top = Math.min(...all.map((rect) => rect.y)) - PADDING;
   const at = (key: string) => { const rect = placed.get(key)!; return { ...rect, x: rect.x - left, y: rect.y - top }; };
   const stations = pieces.map((piece): SceneStation => {
-    const { shape, width, height, anchor, footprint } = geometry.get(piece.key)!, spot = at(piece.key);
+    const { shape, width, height, anchor, label, footprint } = geometry.get(piece.key)!, spot = at(piece.key);
     const x = spot.x - footprint.x, y = spot.y - footprint.y, machine = piece.machine;
     return { key: piece.key, entityId: piece.key, ...(machine.represented === undefined ? {} : { representedIds: machine.represented }), shape, machine,
-      ...(piece.unit === undefined ? {} : { unit: piece.unit }), x, y, width, height, anchor: { x: x + anchor.x, y: y + anchor.y }, footprint: spot };
+      ...(piece.unit === undefined ? {} : { unit: piece.unit }), x, y, width, height, anchor: { x: x + anchor.x, y: y + anchor.y }, label: { ...label, x: x + label.x, y: y + label.y }, footprint: spot };
   });
-  const block = at(FACILITIES), commons = { x: block.x + MARGIN, y: block.y + MARGIN, width: COMMON_WIDTH, height: COMMON_HEIGHT };
-  const line = LINE_STATIONS.map((label, index) => ({ label, x: commons.x + 8, y: commons.y + COMMON_HEIGHT + 16 + index * LINE_ROW, width: LINE_WIDTH, height: LINE_ROW - 4 }));
-  const restingTop = commons.y + 152;
-  const units = [...new Set(stations.flatMap((station) => station.unit ?? []))].sort(compareText);
-  const regions = units.map((unit) => ({ unit, rects: stations.filter((station) => station.unit === unit).map((station) => station.footprint) }));
+  const block = at(FACILITIES), commons = { x: block.x + MARGIN, y: block.y + MARGIN, width: commonWidth, height: commonHeight };
+  const line = LINE_STATIONS.map((label, index) => ({ label, x: commons.x + 8, y: commons.y + commonHeight + LINE_GAP + index * LINE_ROW, width: LINE_WIDTH, height: LINE_ROW - 4 }));
+  const restingTop = commons.y + restingAt, seats = { agents: needs.agents, perRow, rows, planningRows };
+  const regions = regionsOf(stations);
   const width = Math.max(...[...placed.keys()].map((key) => at(key).x + at(key).width)) + PADDING;
   const height = Math.max(...[...placed.keys()].map((key) => at(key).y + at(key).height)) + PADDING;
-  const furniture = [...tables({ commons, restingTop }), ...nookPieces(commons).map((piece) => ({ x: piece.x, y: piece.y, width: 20, height: 30 }))];
-  return { width, height, stations, regions, facilities: block, commons, restingTop, line, solids: [...stations, ...furniture].map(({ x, y, width, height }) => ({ x, y, width, height })) };
+  const furniture = [...tables({ commons, restingTop, seats }), ...nookPieces(commons, present).map((piece) => ({ x: piece.x, y: piece.y, width: 20, height: 30 }))];
+  return { width, height, stations, regions, facilities: block, commons, restingTop, seats, implements: present, line, solids: [...stations, ...furniture].map(({ x, y, width, height }) => ({ x, y, width, height })) };
 }
 
 function cold(keys: readonly string[], sizes: ReadonlyMap<string, { width: number; height: number }>, links: Links) {
@@ -460,22 +480,79 @@ function keep(previous: SceneLayout, keys: readonly string[], sizes: ReadonlyMap
   return placed;
 }
 
+// Members of a unit closer than this (about one aisle and a bit) share one region; farther apart they are separate lobes.
+const BRIDGE = 2 * MARGIN + 16, REGION_INSET = 4, REGION_CELL = 6;
+
+/**
+ * Areas are painted after layout from where machines stand: a unit's members
+ * whose footprints are next to each other merge into one irregular region,
+ * the gaps between them bridged only where no other machine is in the way.
+ * Members apart make separate lobes. No region covers another machine's
+ * footprint or any floor that is not between its own members.
+ */
+function regionsOf(stations: readonly SceneStation[]): readonly SceneRegion[] {
+  const inset = (rect: SceneRect) => ({ x: rect.x + REGION_INSET, y: rect.y + REGION_INSET, width: rect.width - 2 * REGION_INSET, height: rect.height - 2 * REGION_INSET });
+  const units = [...new Set(stations.flatMap((station) => station.unit ?? []))].sort(compareText);
+  return units.flatMap((unit) => {
+    const members = stations.filter((station) => station.unit === unit), rects = members.map((station) => inset(station.footprint));
+    const blocked = occupied(stations.filter((station) => station.unit !== unit).map((station) => inset(station.footprint)));
+    const parent = rects.map((_, index) => index), find = (index: number): number => parent[index] === index ? index : parent[index] = find(parent[index]!);
+    const bridges: { at: number; rect: SceneRect }[] = [];
+    for (let i = 0; i < rects.length; i++) for (let j = i + 1; j < rects.length; j++) {
+      const a = rects[i]!, b = rects[j]!;
+      const x0 = Math.max(a.x, b.x), x1 = Math.min(a.x + a.width, b.x + b.width), y0 = Math.max(a.y, b.y), y1 = Math.min(a.y + a.height, b.y + b.height);
+      // Face to face across a gap: the bridge is the span they share, as wide as the gap.
+      const bridge = x1 - x0 >= 12 && y1 < y0 && y0 - y1 <= BRIDGE ? { x: x0, y: y1, width: x1 - x0, height: y0 - y1 }
+        : y1 - y0 >= 12 && x1 < x0 && x0 - x1 <= BRIDGE ? { x: x1, y: y0, width: x0 - x1, height: y1 - y0 } : undefined;
+      if (bridge === undefined || blocked(bridge)) continue;
+      parent[find(i)] = find(j);
+      bridges.push({ at: i, rect: bridge });
+    }
+    const lobes = new Map<number, SceneRect[]>();
+    rects.forEach((rect, index) => lobes.set(find(index), [...lobes.get(find(index)) ?? [], rect]));
+    for (const { at, rect } of bridges) lobes.get(find(at))!.push(rect);
+    return [...lobes.values()].map((parts, lobe) => ({ unit, lobe, ...trace(parts) }));
+  });
+}
+
+/** A patch of floor made of rectangles, as non-overlapping row runs, its outline, and the top-left corner for its name. */
+function trace(parts: readonly SceneRect[]) {
+  const bounds = union(parts), columns = Math.ceil(bounds.width / REGION_CELL), rows = Math.ceil(bounds.height / REGION_CELL);
+  const filled = (column: number, row: number) => column >= 0 && row >= 0 && column < columns && row < rows
+    && parts.some((rect) => { const x = bounds.x + (column + .5) * REGION_CELL, y = bounds.y + (row + .5) * REGION_CELL; return x > rect.x && x < rect.x + rect.width && y > rect.y && y < rect.y + rect.height; });
+  const mask = Array.from({ length: rows }, (_, row) => Array.from({ length: columns }, (_, column) => filled(column, row)));
+  const at = (column: number, row: number) => mask[row]?.[column] === true;
+  const rects: SceneRect[] = [], edges: string[] = [];
+  for (let row = 0; row < rows; row++) for (let column = 0; column < columns; column++) {
+    if (!at(column, row)) continue;
+    const x = bounds.x + column * REGION_CELL, y = bounds.y + row * REGION_CELL;
+    if (!at(column - 1, row)) { let end = column; while (at(end + 1, row)) end++; rects.push({ x, y, width: (end - column + 1) * REGION_CELL, height: REGION_CELL }); }
+    if (!at(column, row - 1)) edges.push(`M${x} ${y}h${REGION_CELL}`);
+    if (!at(column, row + 1)) edges.push(`M${x} ${y + REGION_CELL}h${REGION_CELL}`);
+    if (!at(column - 1, row)) edges.push(`M${x} ${y}v${REGION_CELL}`);
+    if (!at(column + 1, row)) edges.push(`M${x + REGION_CELL} ${y}v${REGION_CELL}`);
+  }
+  const top = rects[0]!;
+  return { rects, outline: edges.join(""), label: { x: top.x + 4, y: top.y + 10, width: top.width - 8 } };
+}
+
 /** The furniture in the commons: left to right along its back wall. */
-function nookPieces(commons: SceneRect) {
-  return NOOK_ORDER.map((errand, index) => ({ errand, x: commons.x + 6 + index * 38, y: commons.y + 54, stand: { x: commons.x + 12 + index * 38, y: commons.y + 120 } }));
+function nookPieces(commons: SceneRect, present: readonly BreakRoomErrand[]) {
+  return present.map((errand, index) => ({ errand, x: commons.x + 6 + index * 38, y: commons.y + 18, stand: { x: commons.x + 12 + index * 38, y: commons.y + 84 } }));
 }
 
-/** The commons tables: one per row of seats, always there. */
-function tables(layout: Pick<SceneLayout, "commons" | "restingTop">) {
-  const rows = [...Array.from({ length: RESTING_ROWS }, (_, row) => layout.restingTop + row * ROW_PITCH), planningTop(layout)];
-  return rows.map((y) => ({ x: layout.commons.x + 6, y: y + 8, width: 3 * WORKER_GAP + 36, height: 10 }));
+/** The commons tables, each with the bench its seats are on: one per row of seats, always there, and solid. Nobody walks over a sitter. */
+function tables(layout: Pick<SceneLayout, "commons" | "restingTop" | "seats">) {
+  const { rows, perRow, planningRows } = layout.seats, top = planningTop(layout);
+  return [...Array.from({ length: rows }, (_, row) => layout.restingTop + row * ROW_PITCH), ...Array.from({ length: planningRows }, (_, row) => top + row * ROW_PITCH)]
+    .map((y) => ({ x: layout.commons.x + 6, y: y + 3, width: (perRow - 1) * WORKER_GAP + 36, height: 15 }));
 }
 
-const planningTop = (layout: Pick<SceneLayout, "restingTop">) => layout.restingTop + (RESTING_ROWS - 1) * ROW_PITCH + 64;
+const planningTop = (layout: Pick<SceneLayout, "restingTop" | "seats">) => layout.restingTop + layout.seats.rows * ROW_PITCH;
 
 /** The tables drawn in the commons, as rows of seat positions. */
 export function commonTables(layout: SceneLayout) {
-  return tables(layout).map((table, index) => ({ ...table, planning: index === RESTING_ROWS }));
+  return tables(layout).map((table, index) => ({ ...table, planning: index >= layout.seats.rows }));
 }
 
 /** Newest first within a station; past the eighth, crates wait unseen behind the "+N". */
@@ -483,7 +560,7 @@ export function placeCrates(layout: SceneLayout, crates: readonly SceneCrate[]) 
   const counts = [0, 0, 0, 0] as [number, number, number, number];
   return [...crates].sort((left, right) => right.number - left.number || compareText(left.id, right.id)).map((crate) => {
     const station = layout.line[crate.station]!, slot = counts[crate.station]++;
-    return { crate, shown: slot < LINE_SLOTS, x: station.x + 16 + Math.min(slot, LINE_SLOTS) * 18, y: station.y + 22 };
+    return { crate, shown: slot < LINE_SLOTS, x: station.x + 16 + Math.min(slot, LINE_SLOTS) * 18, y: station.y + 18 };
   });
 }
 
@@ -545,16 +622,15 @@ export function placeWorkers(layout: SceneLayout, workers: readonly SceneWorker[
 }
 
 /**
- * The commons seats eight resting and four planning, four to a table. More
- * than that sit on benches along the floor's bottom edge, below everything, so
- * a crowd never moves a machine.
+ * The commons seats every agent at rest and half of them at the work tables, up to four to a table.
+ * Anyone more (a reviewer passing through) sits on a bench below the floor, so they never move a machine.
  */
 export function commonSeating(layout: SceneLayout, restingCount: number, planningCount: number) {
-  const row = (slot: number, top: number) => ({ x: layout.commons.x + 24 + (slot % 4) * WORKER_GAP, y: top + Math.floor(slot / 4) * ROW_PITCH });
+  const { perRow, rows, planningRows } = layout.seats, row = (slot: number, top: number) => ({ x: layout.commons.x + 24 + (slot % perRow) * WORKER_GAP, y: top + Math.floor(slot / perRow) * ROW_PITCH });
   let bench = 0;
   const benches = () => { const slot = bench++; return { x: PADDING + 24 + (slot % 4) * WORKER_GAP, y: layout.height + 24 + Math.floor(slot / 4) * ROW_PITCH }; };
-  const resting = Array.from({ length: restingCount }, (_, slot) => slot < 4 * RESTING_ROWS ? row(slot, layout.restingTop) : benches());
-  const planning = Array.from({ length: planningCount }, (_, slot) => slot < PLANNING_SEATS ? row(slot, planningTop(layout)) : benches());
+  const resting = Array.from({ length: restingCount }, (_, slot) => slot < perRow * rows ? row(slot, layout.restingTop) : benches());
+  const planning = Array.from({ length: planningCount }, (_, slot) => slot < perRow * planningRows ? row(slot, planningTop(layout)) : benches());
   return { resting, planning };
 }
 
@@ -566,8 +642,8 @@ const NOOK_ORDER: readonly BreakRoomErrand[] = ["board", "missions", "tasks", "s
  * Ambient turns come first in the list, so their timing never depends on the implements beside them.
  */
 export function breakRoomNook(layout: SceneLayout) {
-  const pieces = nookPieces(layout.commons);
-  return { width: COMMON_WIDTH, furniture: (["shelf", "coffee", "board", "missions", "tasks"] as const).map((errand) => ({ ...pieces.find((piece) => piece.errand === errand)!, key: String(errand) })) };
+  const pieces = nookPieces(layout.commons, layout.implements);
+  return { width: layout.commons.width, furniture: (["shelf", "coffee", "board", "missions", "tasks"] as const).flatMap((errand) => { const piece = pieces.find((item) => item.errand === errand); return piece === undefined ? [] : [{ ...piece, key: String(errand) }]; }) };
 }
 
 // Each piece of furniture is visited in turns: free for the first part of a turn, then one visitor.

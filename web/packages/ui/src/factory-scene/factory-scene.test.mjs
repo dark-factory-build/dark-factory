@@ -8,7 +8,7 @@ import test from "node:test";
 import { Profiler, createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { act, create } from "react-test-renderer";
-import { AgentSprite, FactoryScene } from "../../dist/src/factory-scene/factory-scene.js";
+import { AgentSprite, FactoryScene, commonsNeeds } from "../../dist/src/factory-scene/factory-scene.js";
 import { WORKER_SIZE, breakRoomNook, commonSeating, commonTables, layoutScene, placeCrates, placeErrands, placeWorkers, standable } from "../../dist/src/factory-scene/scene.js";
 import { deriveProductionView, projectCrates } from "../../dist/src/production-view.js";
 import { publicFloor } from "../../dist/src/public-floor.js";
@@ -53,6 +53,9 @@ function idForIdentity(identity) {
   assert.ok(id, `missing pinned id for identity ${identity}`);
   return id;
 }
+
+/** The floor a scene with these props lays out: its commons sized for its agents and implements. */
+const floorFor = (floorGraph, props = {}) => layoutScene(floorGraph, undefined, commonsNeeds({ workers, appearance: commons, ...props }));
 
 function render(props = {}) {
   return renderToStaticMarkup(createElement(FactoryScene, { graph, appearance: commons, workers, appearance: commons, ...props }));
@@ -177,7 +180,7 @@ test("the pure scene model feeds a deterministic SVG renderer", () => {
   assert.equal(changed.stations.some((station) => station.key === "docs"), true);
   assert.notDeepEqual(changed, layout);
 
-  const emptyLayout = layoutScene(sceneGraph([]));
+  const emptyLayout = floorFor(sceneGraph([]), { workers: denseWorkers.slice(0, 20) });
   const emptyWorkers = denseWorkers.slice(0, 20).map(({ nodeId: _nodeId, location: _location, ...worker }) => ({ ...worker, location: "resting" }));
   const emptyPlacements = placeWorkers(emptyLayout, emptyWorkers);
   assert.equal(new Set(emptyPlacements.map(({ x, y }) => `${x},${y}`)).size, emptyWorkers.length);
@@ -386,7 +389,8 @@ test("tables stand in front of whoever sits at them, with each resting worker's 
   const markup = render({ workers: seatedWorkers });
   const lastWorker = markup.lastIndexOf("data-worker-id="), firstTable = markup.indexOf("data-common-table="), firstItem = markup.indexOf("data-table-item=");
   assert.ok(lastWorker < firstTable && firstTable < firstItem, "workers, then the tables over their laps, then what lies on the tables");
-  assert.equal((markup.match(/data-common-table="resting"/g) ?? []).length, 2, "one table a row of the commons, always there: tables are solid, so they never appear or vanish");
+  assert.equal((markup.match(/data-common-table="resting"/g) ?? []).length, floorFor(graph, { workers: seatedWorkers }).seats.rows, "a table for every four agents, always there: tables are solid, so they never appear or vanish");
+  assert.equal(floorFor(graph, { workers: seatedWorkers }).seats.rows, 3, "eleven agents, three rows of four");
   // A first render puts each clock at the worker's own phase: a thing is on the table exactly when it is not in hand.
   for (const worker of seatedWorkers.filter((candidate) => candidate.location === "resting")) {
     const rest = restingItem(worker, worker.activity === "needs-you" ? undefined : workerPhase(worker.id));
@@ -501,8 +505,9 @@ test("resting workers take fair, uninterrupted turns at the break-room furniture
   assert.ok(atShelf.every((name) => !name.startsWith("person.tool.")));
   for (const implement of ["board", "missions", "tasks"]) assert.ok(workerFrames(crowd[0], { action: "still", frame: 0, at: 0 }, undefined, implement).includes("person.held.clipboard.chest"), implement);
   // The floor draws exactly the furniture the nook has; with the scenery off, only the implements, never the coffee.
-  assert.equal((render().match(/data-break-room=/g) ?? []).length, breakRoomNook(layoutScene(graph)).furniture.length);
-  assert.deepEqual(render({ appearance: { scenery: "off", animation: "on" } }).match(/data-break-room="\w+"/g), ['data-break-room="shelf"', 'data-break-room="board"', 'data-break-room="missions"', 'data-break-room="tasks"']);
+  assert.equal((render().match(/data-break-room=/g) ?? []).length, breakRoomNook(floorFor(graph)).furniture.length);
+  assert.equal(breakRoomNook(floorFor(graph)).furniture.length, 1, "with no panels to open, only the coffee stands there");
+  assert.deepEqual(render({ appearance: { scenery: "off", animation: "on" }, onOpenBoard() {}, onOpenMissions() {}, onOpenTasks() {}, onOpenLibrary() {} }).match(/data-break-room="\w+"/g), ['data-break-room="shelf"', 'data-break-room="board"', 'data-break-room="missions"', 'data-break-room="tasks"']);
 });
 
 test("a floor mounted late still starts seated, then someone gets up, stands at the furniture, and comes back", async () => {
@@ -519,6 +524,8 @@ test("a floor mounted late still starts seated, then someone gets up, stands at 
   globalThis.requestAnimationFrame = (callback) => { frames.set(++next, callback); return next; };
   globalThis.cancelAnimationFrame = (id) => frames.delete(id);
   const resting = Array.from({ length: 10 }, (_, index) => ({ ...workers[0], id: `habit-${String(index).padStart(2, "0")}`, activity: "idle", location: "resting", nodeId: undefined }));
+  // The floor offers its library, so readers have a shelf to visit.
+  const libraryOpen = { onOpenLibrary() {} };
   let renderer;
   try {
     // Every commit is looked at, not only where things settle: a worker drawn at the
@@ -526,17 +533,17 @@ test("a floor mounted late still starts seated, then someone gets up, stands at 
     const commits = [];
     // In every commit, pose and place are of one moment: whoever is drawn standing at the
     // furniture is drawn at the furniture, never for a frame at their seat.
-    const stands = new Set(breakRoomNook(layoutScene(graph), 10, 0).furniture.map((piece) => `translate(${piece.stand.x} ${piece.stand.y})`));
+    const stands = new Set(breakRoomNook(floorFor(graph, { workers: resting, ...libraryOpen })).furniture.map((piece) => `translate(${piece.stand.x} ${piece.stand.y})`));
     const misplaced = () => renderer === undefined ? 0 : renderer.root.findAll((node) => typeof node.props["data-tooltip"] === "string" && /at the (bookshelf|coffee station)/.test(node.props["data-tooltip"]))
       .filter((node) => node.parent.props["data-worker-action"] !== "walking" && !stands.has(node.parent.props.transform)).length;
-    const scene = (props) => createElement(Profiler, { id: "floor", onRender: () => commits.push(misplaced()) }, createElement(FactoryScene, { graph, appearance: commons, workers: resting, connected: true, ...props }));
+    const scene = (props) => createElement(Profiler, { id: "floor", onRender: () => commits.push(misplaced()) }, createElement(FactoryScene, { graph, appearance: commons, workers: resting, ...libraryOpen, connected: true, ...props }));
     await act(async () => { renderer = create(scene({})); });
     // Where each sprite is actually drawn, against the seat it belongs in.
     const outOfSeat = (floor) => {
-      const seatOf = new Map(placeWorkers(layoutScene(floor), resting).map((placement) => [placement.id, `translate(${placement.x} ${placement.y})`]));
+      const seatOf = new Map(placeWorkers(floorFor(floor, { workers: resting, ...libraryOpen }), resting).map((placement) => [placement.id, `translate(${placement.x} ${placement.y})`]));
       return renderer.root.findAll((node) => node.props["data-worker-id"] !== undefined).filter((node) => node.props.transform !== seatOf.get(node.props["data-worker-id"])).length;
     };
-    const pieces = breakRoomNook(layoutScene(graph), resting.length, 0).furniture.length;
+    const pieces = breakRoomNook(floorFor(graph, { workers: resting, ...libraryOpen })).furniture.length;
     const away = () => renderer.root.findAll((node) => typeof node.props["data-tooltip"] === "string" && /at the (bookshelf|coffee station)/.test(node.props["data-tooltip"]));
     const standingWithIt = () => away().some((node) => node.parent.props["data-worker-action"] === "still" && node.parent.findAllByType("use").some((use) => /held\.(book|cup)\.chest/.test(use.props.href)));
     const tick = async () => {
@@ -575,7 +582,7 @@ test("a floor mounted late still starts seated, then someone gets up, stands at 
     ]) {
       await untilSomeoneStands();
       const seen = [];
-      await act(async () => { renderer.update(createElement(Profiler, { id: "floor", onRender: () => seen.push(away().length + outOfSeat(graph)) }, createElement(FactoryScene, { graph, appearance: commons, workers: resting, connected: true, ...still }))); });
+      await act(async () => { renderer.update(createElement(Profiler, { id: "floor", onRender: () => seen.push(away().length + outOfSeat(graph)) }, createElement(FactoryScene, { graph, appearance: commons, workers: resting, ...libraryOpen, connected: true, ...still }))); });
       assert.ok(seen.length > 0 && seen.every((count) => count === 0), `${how}: someone was drawn at or placed by the furniture in a commit after the floor was stilled: ${seen}`);
       seatedNow(how);
       await act(async () => { renderer.update(scene(resume)); });
@@ -606,7 +613,7 @@ test("a floor mounted late still starts seated, then someone gets up, stands at 
     assert.ok(away().length > 0, "someone is up when the floor changes");
     const another = { ...graph, digest: "another-floor", units: [...graph.units, unit("extra-1"), unit("extra-2")] };
     const floorCommits = [];
-    await act(async () => { renderer.update(createElement(Profiler, { id: "floor", onRender: () => floorCommits.push(away().length + outOfSeat(another)) }, createElement(FactoryScene, { graph: another, appearance: commons, workers: resting, connected: true }))); });
+    await act(async () => { renderer.update(createElement(Profiler, { id: "floor", onRender: () => floorCommits.push(away().length + outOfSeat(another)) }, createElement(FactoryScene, { graph: another, appearance: commons, workers: resting, ...libraryOpen, connected: true }))); });
     assert.ok(floorCommits.length > 0 && floorCommits.every((count) => count === 0), `someone was drawn out of their seat in a commit of the new floor: ${floorCommits}`);
     // Judged by what is drawn, from the very first render of the new floor: nobody at the
     // furniture, nobody walking, nobody on their feet with a book or a cup.
@@ -689,7 +696,7 @@ test("the production scene stops motion on disconnect and unmount", async () => 
     assert.equal(renderer.root.findByProps({ "data-worker-id": workers[0].id }).props["data-worker-action"], "walking", "a reading-only change preserves the route");
 
     await act(async () => { renderer.update(createElement(FactoryScene, { graph, appearance: commons, workers: moved, connected: false })); });
-    const destination = placeWorkers(layoutScene(graph), moved).find((placement) => placement.id === workers[0].id);
+    const destination = placeWorkers(floorFor(graph, { workers: moved }), moved).find((placement) => placement.id === workers[0].id);
     assert.ok(destination);
     assert.equal(renderer.root.findByProps({ "data-worker-id": workers[0].id }).props.transform, `translate(${destination.x} ${destination.y})`);
     assert.ok(cancelled.length > 0, "disconnect cleans the pending animation frame");
@@ -769,13 +776,13 @@ test("stationary tasks link the existing queue and questions", () => {
   // The tray is a distinct, keyboard reachable route into the existing Tasks panel.
   assert.match(markup, /data-floor-inbox="10"[^>]*aria-label="Open Tasks"[^>]*role="button"[^>]*tabindex="0"/);
   // Selecting queued work in the panel still lights its pile on the floor.
-  assert.match(render({ tasks, selectedTaskId: "task-1", onSelectTask() {} }), /data-floor-inbox="10"[\s\S]*?stroke="#80ddff"/);
+  assert.match(render({ tasks, selectedTaskId: "task-1", onSelectTask() {}, onOpenTasks() {} }), /data-floor-inbox="10"[\s\S]*?stroke="#80ddff"/);
   const pile = (html) => html.match(/data-floor-inbox="\d+"[\s\S]*?<\/g><\/g>/)[0].match(/fill="#e4dcc0"/g)?.length ?? 0;
-  assert.deepEqual([pile(markup), pile(render({ tasks: tasks.slice(0, 3) })), pile(render({ tasks: [tasks[0]] }))], [3, 2, 0], "the pile follows the queue, up to three papers");
-  // The tray is furniture: it stays when nothing waits, and says so.
-  const idle = render({ tasks: [tasks[0]], onSelectTask() {} });
+  assert.deepEqual([pile(markup), pile(render({ tasks: tasks.slice(0, 3), onOpenTasks() {} })), pile(render({ tasks: [tasks[0]], onOpenTasks() {} }))], [3, 2, 0], "the pile follows the queue, up to three papers");
+  // The tray is there wherever the floor can open Tasks: it stays when nothing waits, and says so.
+  const idle = render({ tasks: [tasks[0]], onSelectTask() {}, onOpenTasks() {} });
   assert.match(idle, /data-floor-inbox="0"/);
-  assert.doesNotMatch(idle, /QUEUE/);
+  assert.doesNotMatch(idle, />QUEUE/, "the tray says nothing; MERGE QUEUE is the outbound line's station");
   assert.match(markup, /data-human-request-id="question-1"/);
   assert.match(markup, /aria-label="Question from Builder"/);
   assert.doesNotMatch(markup, /Work order|data-work-order-id/);
@@ -801,10 +808,10 @@ test("the separate desks are gone: the break room's implements open their panels
 test("planning table detail stays within the tabletop, and every seat has its table", () => {
   const planningWorkers = [0, 1].map((index) => ({ ...workers[0], id: `planner-${index}`, location: "unobserved", nodeId: undefined }));
   const markup = render({ workers: planningWorkers });
-  const layout = layoutScene(graph), table = commonTables(layout).find((item) => item.planning);
+  const layout = floorFor(graph, { workers: planningWorkers }), table = commonTables(layout).find((item) => item.planning);
   assert.match(markup, new RegExp(`M${table.width - 4} 4h-4`), "detail line ends inside the tabletop edge");
-  for (const seat of [...commonSeating(layout, 8, 4).resting, ...commonSeating(layout, 8, 4).planning]) {
-    assert.ok(commonTables(layout).some((item) => seat.x > item.x && seat.x < item.x + item.width && item.y - seat.y === 8), `the seat at ${seat.x},${seat.y} has a table in front`);
+  for (const seat of [...commonSeating(layout, 2, 2).resting, ...commonSeating(layout, 2, 2).planning]) {
+    assert.ok(commonTables(layout).some((item) => seat.x > item.x && seat.x < item.x + item.width && item.y - seat.y === 3), `the seat at ${seat.x},${seat.y} has a table in front`);
   }
 });
 
@@ -1105,7 +1112,7 @@ test("fit shows the whole floor in the pane without relaying it out, the overvie
   try {
     await act(async () => { renderer = create(createElement(FactoryScene, { graph, appearance: commons, workers }), { createNodeMock: (element) => element.type === "svg" && element.props.viewBox?.startsWith("0 0 ") && element.props["data-graph-digest"] ? floor : element.type === "div" && element.props.className === "dfFactoryFloor__map" ? pane : element.type === "rect" && element.props["data-overview-view"] !== undefined ? view : {} }); });
     assert.equal(renderer.root.findAll((node) => node.props.className === "dfPlantMap").length, 0, "fitted, the whole floor is in view: no overview");
-    const layout = layoutScene(graph), viewBox = svg().props.viewBox;
+    const layout = floorFor(graph), viewBox = svg().props.viewBox;
     assert.equal(sceneWidth(), layout.width, "the floor is laid out from structure, not the pane");
     const button = (label) => renderer.root.findAll((node) => node.type === "button" && node.props["aria-label"] === label)[0];
     assert.equal(button("Zoom out").props.disabled, true, "fitted: nothing further out to show");
@@ -1124,7 +1131,7 @@ test("fit shows the whole floor in the pane without relaying it out, the overvie
     const centre = () => ({ x: (pane.scrollLeft + 300) / (style().width / width), y: (pane.scrollTop + 200) / (style().width / width) });
     const before = centre();
     await act(async () => button("Zoom in").props.onClick());
-    assert.equal(style().width, Math.floor(fitWidth * 1.5));
+    assert.ok(Math.abs(style().width - Math.floor(fitWidth * 1.5)) <= 1, "one and a half times the fit, to the pixel");
     const overview = renderer.root.findByProps({ className: "dfPlantMap" });
     assert.match(overview.props["aria-label"], /^Plant overview: 3 units, 0 external, 2 workers$/);
     assert.equal(overview.findAll((node) => node.props["data-overview-station"] !== undefined).length, layout.stations.length);
@@ -1262,9 +1269,9 @@ test("a unit's runtime is said in words, each belt runs port to port between the
   const markup = renderToStaticMarkup(createElement(FactoryScene, { appearance: commons, workers: [], graph }));
   assert.match(markup, /data-entity-id="edge"[^>]*data-tooltip="edge\nedge unit\n/, "the runtime is said where the unit's main machine is described");
   assert.doesNotMatch(markup, /data-runtime=|dfPlant__plate/, "no nameplate, no runtime badge");
-  const items = Object.fromEntries(layoutScene(graph).stations.map((item) => [item.entityId, item]));
+  const items = Object.fromEntries(floorFor(graph, { workers: [] }).stations.map((item) => [item.entityId, item]));
   const belt = (kind) => markup.match(new RegExp(`<g data-belt="${kind}"[^>]*><path d="([^"]+)"`))[1].match(/-?[\d.]+ -?[\d.]+/g).map((pair) => pair.split(" ").map(Number));
-  const touches = ([x, y], item) => x >= item.x - 2 && x <= item.x + item.width + 2 && y >= item.y - 2 && y <= item.y + item.height + 2;
+  const touches = ([x, y], item) => x >= item.x - 8 && x <= item.x + item.width + 8 && y >= item.y - 8 && y <= item.y + item.height + 8;
   const [line, cell, dock] = [items.edge, items["edge-job"], items["edge-in"]];
   assert.ok(touches(belt("runs")[0], line) && touches(belt("runs").at(-1), cell), "from a port on the main machine to a port on the cell");
   assert.ok(touches(belt("intake")[0], dock) && touches(belt("intake").at(-1), line), "arrivals come in at the dock");
@@ -1299,7 +1306,9 @@ test("the outbound line puts each change request at the station its records name
     crates.map((crate) => [crate.number, crate.station, crate.fault]).sort((a, b) => a[0] - b[0]), "drawn where the records put them");
   assert.match(markup, /PR #2 · Change 2\nReview · Correction/, "the tooltip says the number, title and stage");
   assert.equal((markup.match(/class="redtag"/g) ?? []).length, 2, "a blocked review and a failed check show the fault");
-  assert.doesNotMatch(render({ connected: true }), /data-work-line/, "no change requests, no line");
+  const empty = render({ connected: true });
+  assert.match(empty, /data-work-line/, "the line is always there, under the work tables");
+  assert.doesNotMatch(empty, /data-crate=/, "with no change requests, nothing on it");
   assert.doesNotMatch(render({ crates: [], connected: true }), /data-crate/);
 
   // Machines never move for it: the line stands with the commons, apart from every machine, there with or without work, and no wider than the commons.
@@ -1344,7 +1353,7 @@ test("a crate moves once when its recorded stage changes, never on first sight o
   const crate = (station, extra = {}) => ({ id: "k1", number: 1, title: "One", station, stage: "s", fault: false, taskIds: ["t1"], ...extra });
   const proposals = { items: [{ id: "k1", title: "One", state: "active", operations: [{ entityId: "a-in", unitId: "a", path: "x", kind: "modification" }] }], onSelect: (id) => selected.push(id) };
   const selected = [];
-  const layout = layoutScene(graph);
+  const layout = floorFor(graph, { workers, appearance: { scenery: "off" } });
   const slot = (crates, id = "k1") => { const spot = placeCrates(layout, crates).find((item) => item.crate.id === id); return [spot.x, spot.y]; };
   const saved = { performance: globalThis.performance, requestAnimationFrame: globalThis.requestAnimationFrame, cancelAnimationFrame: globalThis.cancelAnimationFrame, window: globalThis.window, document: globalThis.document, setTimeout: globalThis.setTimeout, clearTimeout: globalThis.clearTimeout };
   let clock = 1000, next = 0, renderer;

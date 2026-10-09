@@ -24,6 +24,7 @@ import {
   type SceneReading,
   type SceneStation,
   type SceneUnit,
+  type CommonsNeeds,
   type SceneWorker,
   type BreakRoomErrand,
   recordedEffort,
@@ -33,7 +34,7 @@ import { DEFAULT_FLOOR_APPEARANCE, type FloorAppearance } from "../floor-appeara
 import { breakRoomHabit, restingItem, workerFrames, workerPhase } from "./appearance.js";
 import { catAt, catBed, chats, gossip, type Seat } from "./idle-life.js";
 import { endsAt, isPaper, messageAt, observe, observeCrates, send, type FloorMessage, type Seen } from "./messages.js";
-import { beltBetween, directionBetween, findRoute, pointOnRoute, samePoint, type WorkerMotion } from "./movement.js";
+import { beltRoutes, directionBetween, findRoute, pointOnRoute, samePoint, type WorkerMotion } from "./movement.js";
 import { spriteAtlas, spriteSheet, spriteSheetSize } from "./sprites/sprites.generated.js";
 
 
@@ -474,6 +475,12 @@ function SceneWorkers({ knowledgeCues, nook, onOpenBoard, nearby, errands, furni
       </g></>;
 }
 
+/** What the commons must hold on this floor: a seat for every agent (never depending on which are busy), and the implements it offers. */
+export function commonsNeeds({ workers, appearance = DEFAULT_FLOOR_APPEARANCE, onOpenBoard, onOpenMissions, onOpenTasks, onOpenLibrary }: Pick<FactorySceneProps, "workers" | "appearance" | "onOpenBoard" | "onOpenMissions" | "onOpenTasks" | "onOpenLibrary">): CommonsNeeds {
+  const offers = [["board", onOpenBoard], ["missions", onOpenMissions], ["tasks", onOpenTasks], ["shelf", onOpenLibrary], ["coffee", appearance.scenery === "off" ? undefined : true]] as const;
+  return { agents: workers.filter((worker) => worker.review === undefined).length, implements: offers.flatMap(([errand, offer]) => offer === undefined ? [] : [errand]) };
+}
+
 /** A disposable SVG projection of the operational world and current factory state. */
 export function FactoryScene({ proposals, crates, tools, onLoadNode, onInvestigate, onDiscussSource, requestedEntity, onSelectEntity, onOpenLibrary, onOpenBoard, graph, workers, appearance = DEFAULT_FLOOR_APPEARANCE, selectedWorkerId, onSelectWorker, tasks = [], peerQuestions = NO_QUESTIONS, knowledgeCues = NO_CUES, selectedTaskId, onSelectTask, onOpenTasks, onOpenMissions, onSelectHumanRequest, projectId, connected = true, reading = false }: FactorySceneProps) {
   const [selectedId, setSelectedId] = useState<string>();
@@ -512,7 +519,8 @@ export function FactoryScene({ proposals, crates, tools, onLoadNode, onInvestiga
   const inspect = (event: PointerEvent<HTMLDivElement> | FocusEvent<HTMLDivElement> | MouseEvent<HTMLDivElement>) => showTooltip((event.target as Element).closest("[data-tooltip]"));
   // Structure alone lays the floor out; a structural change keeps what still exists where it stood. Readings, workers, zoom and the pane never do.
   const previousLayout = useRef<SceneLayout>(undefined);
-  const layout = useMemo(() => previousLayout.current = layoutScene(graph, previousLayout.current), [graph.digest]);
+  const needs = commonsNeeds({ workers, appearance, onOpenBoard, onOpenMissions, onOpenTasks, onOpenLibrary });
+  const layout = useMemo(() => previousLayout.current = layoutScene(graph, previousLayout.current, needs), [graph.digest, needs.agents, needs.implements.join()]);
   const placements = useMemo(() => placeWorkers(layout, workers, appearance.social), [layout, workers, appearance.social]);
   // Live readings change without moving anything: they are looked up by id at draw time.
   const machines = new Map<string, SceneMachine>([...graph.units.flatMap((unit) => [[unit.id, { id: unit.id, kind: "processor", label: unit.label, reading: unit.reading }] as const, ...unit.machines.map((machine) => [machine.id, machine] as const)]),
@@ -535,7 +543,7 @@ export function FactoryScene({ proposals, crates, tools, onLoadNode, onInvestiga
   // Belt runs depend on where machines stand and which flows exist; readings are joined at draw time.
   const flowKey = graph.flows.map((flow) => `${flow.from} ${flow.to}`).join(",");
   const runs = useMemo(() => beltRuns(layout, graph), [layout, flowKey]);
-  const belts = runs.flatMap((run): BeltRoute[] => {
+  const belts = runs.runs.flatMap((run): BeltRoute[] => {
     const reading = run.kind === "intake" ? unitOf.get(run.to)?.reading : graph.flows.find((flow) => flow.from === run.from && flow.to === run.to)?.reading;
     return reading === undefined || run.kind === "intake" && reading.state === "unknown" ? [] : [{ ...run, reading, kind: run.kind === "intake" ? "intake" : graph.flows.find((flow) => flow.from === run.from && flow.to === run.to)!.kind }];
   });
@@ -544,7 +552,7 @@ export function FactoryScene({ proposals, crates, tools, onLoadNode, onInvestiga
   const members = new Set(litUnit === undefined ? [] : layout.stations.filter((station) => station.unit === litUnit).map((station) => station.key));
   const queued = tasks.filter((order) => order.status === "queued").length;
   // The implements are always there: each opens its panel and the tray shows the queue. Coffee is scenery only.
-  const implementsShown = nook.furniture.filter((piece) => piece.errand !== "coffee" || appearance.scenery !== "off");
+  const implementsShown = nook.furniture;
   const opens: Partial<Record<BreakRoomErrand, readonly [((projectId?: string) => void) | undefined, string, string, string]>> = {
     board: [onOpenBoard, "Discussion board", "Open discussion board", "BOARD"],
     missions: [onOpenMissions, "Missions · inspect objectives", "Open Missions", "MISSIONS"],
@@ -555,7 +563,8 @@ export function FactoryScene({ proposals, crates, tools, onLoadNode, onInvestiga
   // Changeovers are dated against the graph's own observation time, never the viewer's clock.
   const observedAt = graph.observedAt ?? 0;
   // The commons tables are always there, and solid; benches past the commons have none.
-  const tables = commonTables(layout).map(({ x, y, width, planning }) => <g key={y} data-common-table={planning ? "planning-workers" : "resting"} aria-hidden="true" pointerEvents="none" transform={`translate(${x} ${y})`}>
+  const tables = commonTables(layout).map(({ x, y, width, planning }) => <g key={y} data-common-table={planning ? "planning-workers" : "resting"} aria-hidden="true" pointerEvents="none" transform={`translate(${x} ${y + 5})`}>
+    <rect y="-5" width={width} height="5" fill="#4a4336" />
     <rect width={width} height="10" fill={planning ? "#455c5e" : "#655d4c"} stroke="#8c8871" />
     {!planning ? null : <g><rect x="1" y="1" width={width - 2} height="8" fill="#9fae9e" /><path d={`M4 3h${width - 18}v3h-7v-3 M${width - 4} 4h-4`} fill="none" stroke="#536e70" /></g>}
   </g>);
@@ -674,16 +683,23 @@ export function FactoryScene({ proposals, crates, tools, onLoadNode, onInvestiga
       </defs>
       {/* One floor: every machine stands on it and every worker walks it. */}
       <rect width={sceneWidth} height={sceneHeight} fill="url(#df-floor)" />
-      {/* Areas: a faint tint under each unit's machines, in as many lobes as they stand in. Never a wall, never a hit target. */}
-      <g data-regions="" aria-hidden="true" pointerEvents="none">{layout.regions.map((region) => <g key={region.unit} data-region={region.unit} fill={tint(region.unit)}>
-        {region.rects.map((rect, index) => <rect key={index} x={rect.x + 2} y={rect.y + 2} width={rect.width - 4} height={rect.height - 4} rx="6" />)}
+      {/* Areas: one faint patch per neighbourhood of a unit's machines, named once. Never a wall, never a hit target. */}
+      <g data-regions="" aria-hidden="true" pointerEvents="none">{layout.regions.map((region) => <g key={`${region.unit} ${region.lobe}`} data-region={region.unit} fill={tint(region.unit)}>
+        {region.rects.map((rect, index) => <rect key={index} {...rect} />)}
+        <path d={region.outline} className="dfPlant__regionEdge" stroke={tint(region.unit, .4)} />
+        <text data-region-label={region.unit} x={region.label.x} y={region.label.y} className="dfPlant__regionLabel" fontSize="7">{shortLabel(unitOf.get(region.unit)?.label ?? "", Math.max(4, Math.floor(region.label.width / 5)))}</text>
       </g>)}</g>
+      {/* Development: the break room, the work tables and the outbound line, one neighbourhood apart from the running system. */}
       <rect data-commons="" x={layout.facilities.x + 8} y={layout.facilities.y + 8} width={layout.facilities.width - 16} height={layout.facilities.height - 16} rx="6" className="dfPlant__commons" />
+      <text x={layout.commons.x} y={layout.facilities.y + 6} className="dfPlant__regionLabel" fontSize="7">DEVELOPMENT</text>
 
       <g aria-hidden="true" pointerEvents="none">
         {belts.map((belt) => <Belt key={belt.key} belt={belt} lit={members.has(belt.from) || members.has(belt.to)} />)}
-        {/* Where belts share a port they join, and say so; where they only cross, the casing shows one passing over the other. */}
-        {junctions(belts).map((point) => <circle key={`${point.x} ${point.y}`} data-junction="" cx={point.x} cy={point.y} r="2.5" className="dfPlant__junction" />)}
+        {/* Where belts share a port they join, a dot; where they cross, always square-on, one bridges the other. */}
+        {[...junctions(belts), ...runs.junctions].map((point) => <circle key={`${point.x} ${point.y}`} data-junction="" cx={point.x} cy={point.y} r="2.5" className="dfPlant__junction" />)}
+        {runs.crossings.map((crossing) => <g key={`${crossing.x} ${crossing.y}`} data-crossing={crossing.over} transform={`translate(${crossing.x} ${crossing.y})${crossing.over === "v" ? " rotate(90)" : ""}`}>
+          <rect x="-7" y="-6" width="14" height="12" className="dfPlant__bridgeDeck" /><path d="M-8 0h16" className="b-base" /><path d="M-8 -5h16M-8 5h16" className="dfPlant__bridgeRail" />
+        </g>)}
       </g>
 
       {layout.stations.map((station) => {
@@ -694,7 +710,7 @@ export function FactoryScene({ proposals, crates, tools, onLoadNode, onInvestiga
           <rect className="dfFactoryScene__focus" x={station.x - 4} y={station.y - 14} width={station.shape === "gate" ? 130 : station.width + 8} height={station.height + 18} fill="transparent" />
           <Station item={station} machine={machine} selected={selectedId === station.entityId} close={close} />
           {/* A recent deploy is a quiet tag on the machine, not a warning. */}
-          {deployed === undefined || observedAt - deployed > DAY ? null : <text data-changeover={deployed} x={station.x + 4} y={station.y - 3} className="dfPlant__small" fontSize="7">deployed</text>}
+          {deployed === undefined || observedAt - deployed > DAY ? null : <text data-changeover={deployed} x={station.x + 4} y={station.y + 10} className="dfPlant__small" fontSize="7">deployed</text>}
           {members.has(station.key) && station.key !== litUnit ? <rect data-unit-member={litUnit} className="dfFactoryScene__selection" x={station.x - 4} y={station.y - 4} width={station.width + 8} height={station.height + 8} /> : null}
           {litIds.has(station.entityId) ? <rect data-lit="" className="dfFactoryScene__selection" x={station.x - 6} y={station.y - 6} width={station.width + 12} height={station.height + 12} /> : null}
         </g>;
@@ -716,7 +732,7 @@ export function FactoryScene({ proposals, crates, tools, onLoadNode, onInvestiga
         </g>
       </g>; })}
       {[
-        { label: "Break room · ambient", seats: seating.resting, planning: false, occupied: commonResting.length, top: layout.commons.y + 30 },
+        { label: "Break room · ambient", seats: seating.resting, planning: false, occupied: commonResting.length, top: layout.commons.y + 12 },
         { label: "Work tables", seats: seating.planning, planning: true, occupied: planning.length, top: (seating.planning[0]?.y ?? 0) - 27 },
       ].filter(({ seats }) => seats.length > 0).map(({ label, seats, planning, occupied, top }) => {
         return <g key={label} role="group" aria-label={label}>
@@ -795,12 +811,11 @@ function WorkLine({ layout, crates, tasks, placements, connected, live, onLight,
     return () => cancelAnimationFrame(frame);
     // A new snapshot may land in the same millisecond as the last, so it asks for frames itself.
   }, [clock, moving, placed]);
-  if (crates === undefined || crates.length === 0) return null;
-  // One row per station, top to bottom, the belt running on from each row's end to the next row's start.
-  const belt = (station: SceneLayout["line"][number]) => station.y + 25;
+  // The line is always there, right under the work tables: one row and one belt per station, top to bottom.
+  const belt = (station: SceneLayout["line"][number]) => station.y + 19;
   return <g data-work-line="">
-    <path aria-hidden="true" d={layout.line.map((station, index) => `${index === 0 ? "M" : "L"}${station.x} ${belt(station)}H${station.x + station.width}`).join("")} className="b-base" />
-    {layout.line.map((station, index) => { const count = crates.filter((crate) => crate.station === index).length; return <g key={station.label} aria-hidden="true">
+    <path aria-hidden="true" d={layout.line.map((station) => `M${station.x} ${belt(station)}H${station.x + station.width}`).join("")} className="b-base" />
+    {layout.line.map((station, index) => { const count = (crates ?? []).filter((crate) => crate.station === index).length; return <g key={station.label} aria-hidden="true">
       <rect x={station.x} y={station.y} width="2" height={station.height} className="md" />
       <text x={station.x + 6} y={station.y + 9} className="dfPlant__label" fontSize="8">{station.label.toUpperCase()} · {count}</text>
       {count > LINE_SLOTS ? <text data-crate-overflow={count - LINE_SLOTS} x={station.x + 10 + LINE_SLOTS * 18} y={belt(station)} className="dfPlant__small" fontSize="7">+{count - LINE_SLOTS}</text> : null}
@@ -968,18 +983,18 @@ function Belt({ belt, lit }: { belt: BeltRoute; lit: boolean }) {
  * counts traffic per service but not per route can say a unit is busy
  * without saying which machine handled it: the intake carries that.
  */
-function beltRuns(layout: SceneLayout, graph: SceneGraph): readonly BeltRun[] {
+function beltRuns(layout: SceneLayout, graph: SceneGraph) {
   const at = new Map(layout.stations.map((station) => [station.key, station]));
-  const flows = graph.flows.flatMap((flow): BeltRun[] => {
-    const from = at.get(flow.from), to = at.get(flow.to);
-    return from === undefined || to === undefined ? [] : [{ key: `${flow.from} ${flow.to}`, from: flow.from, to: flow.to, kind: flow.kind, points: beltBetween(layout, from, to) }];
-  });
   const joined = new Set(graph.flows.flatMap((flow) => [`${flow.from} ${flow.to}`, `${flow.to} ${flow.from}`]));
-  const intakes = graph.units.flatMap((unit): BeltRun[] => {
+  const runs = [...graph.units.flatMap((unit) => {
     const docks = layout.stations.filter((station) => station.unit === unit.id && (station.shape === "dock" || station.shape === "manifold")), main = at.get(unit.id);
-    return docks.length !== 1 || main === undefined || joined.has(`${docks[0]!.key} ${unit.id}`) ? [] : [{ key: `intake ${unit.id}`, from: docks[0]!.key, to: unit.id, kind: "intake", points: beltBetween(layout, docks[0]!, main) }];
-  });
-  return [...intakes, ...flows];
+    return docks.length !== 1 || main === undefined || joined.has(`${docks[0]!.key} ${unit.id}`) ? [] : [{ key: `intake ${unit.id}`, from: docks[0]!, to: main, kind: "intake" }];
+  }), ...graph.flows.flatMap((flow) => {
+    const from = at.get(flow.from), to = at.get(flow.to);
+    return from === undefined || to === undefined ? [] : [{ key: `${flow.from} ${flow.to}`, from, to, kind: flow.kind }];
+  })];
+  const { routes, crossings, junctions } = beltRoutes(layout, runs);
+  return { runs: runs.map((run) => ({ key: run.key, from: run.from.key, to: run.to.key, kind: run.kind, points: routes.get(run.key)! })), crossings, junctions };
 }
 
 /** Ports two or more belts share: a junction, drawn as one. */
@@ -990,10 +1005,10 @@ function junctions(belts: readonly BeltRoute[]) {
 }
 
 /** A unit's faint area colour, from its id alone, so it is the same wherever and for whoever it is drawn. */
-function tint(unit: string) {
+function tint(unit: string, alpha = .13) {
   let hash = 0;
   for (const character of unit) hash = Math.imul(hash ^ character.charCodeAt(0), 16777619) >>> 0;
-  return `hsl(${hash % 360} 40% 60% / .13)`;
+  return `hsl(${hash % 360} 40% 60% / ${alpha})`;
 }
 
 /** What a machine is: its kind, a fold's count, and for a unit's main machine the runtime it runs on. */

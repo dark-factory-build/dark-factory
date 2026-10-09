@@ -635,7 +635,7 @@ data.
 | Latency | Dwell: items wait visibly inside a machine's window. |
 | Errors | Items drop into a scrap bin, which fills with error rate. The andon lamp turns amber or red. |
 | Retries | Items loop back on a recirculation belt. |
-| Deploy | A muted "deployed" tag over the unit's main machine for 24 hours; the tooltip gives the time. |
+| Deploy | A muted "deployed" tag on the unit's main machine for 24 hours; the tooltip gives the time. |
 | Dormant | **Observed quiet**: the machine is solid and lit, but still. |
 | Unobserved | **Greyed machine**: built but translucent and colourless, an unknown (grey-blue) lamp, plate "no telemetry", no material. Never drawn as an idle machine, whose lamp is dark. |
 | Partial | Solid machine with a half-lit lamp; the tooltip says "partly observed". |
@@ -696,8 +696,8 @@ walks) is derived from where they stand. Three things stay separate:
 - the **software graph**: units, operations, ownership, flows, evidence;
 - the **physical layout**: footprints, interaction positions, belt routes and
   the free floor workers walk on;
-- **areas**: a faint floor tint under each unit's machines, painted after
-  layout and never read by it.
+- **areas**: one faint region per neighbourhood of a unit's machines,
+  painted after layout and never read by it.
 
 Approach (`factory-scene/scene.ts`, `factory-scene/movement.ts`; nothing in
 `web/` offered graph layout or geometry, so no dependency was added):
@@ -717,8 +717,9 @@ Approach (`factory-scene/scene.ts`, `factory-scene/movement.ts`; nothing in
    charge for growing the group's bounds; if none is free it takes the
    nearest free spot on a spiral. Two bounded passes then move each station
    to a better free spot if one exists. Then the groups are packed: the
-   largest first, the commons and outbound line (one fixed block) beside
-   it, then the rest, largest first. Each tucks against a placed footprint
+   largest first, the development neighbourhood (the commons, its work
+   tables and the outbound line, one block) beside it, then the rest,
+   largest first. Each tucks against a placed footprint
    where the floor's bounds stay smallest and nearest a 16:10 shape, with a
    gap that keeps unrelated groups visibly apart. Only IDs, kinds, labels, ownership and
    flows enter; traffic, state, workers and the pane never do, so input
@@ -729,7 +730,9 @@ Approach (`factory-scene/scene.ts`, `factory-scene/movement.ts`; nothing in
    gaps that removals open. A kept station that has grown into a neighbour
    (a longer label) is placed afresh beside its neighbours. When more than a
    quarter of the stations would be placed afresh, the floor is laid out cold
-   again. A reload always starts cold; there is no stored layout.
+   again. Nothing is stored: a reload lays the same structure out exactly
+   as before, and only a structural change between sessions (machines,
+   flows, ownership, or the number of agents) can rebuild it.
 4. **Walking.** One geometry serves placement, solids, interaction positions
    and navigation. Machine bodies, the commons tables and the break-room
    implements are solid; labels, belts, area tints and the work line are
@@ -743,19 +746,43 @@ Approach (`factory-scene/scene.ts`, `factory-scene/movement.ts`; nothing in
    starts from where the worker is drawn. If no route exists the worker is
    put at its destination, marked as not walked, and never drawn through a
    machine. Execution never waits for a sprite.
-5. **Belts.** A flow leaves its machine from the side facing the other end
-   and arrives on the facing side. A straight run is used when it clears
-   every other machine; otherwise the run follows the walking grid's aisles.
-   Belts that share a port meet at a junction dot; belts that cross are
-   drawn over a dark casing, so a crossing never reads as a junction.
+5. **Belts.** Belts run on their own 8 px grid, square: every crossing is a
+   right angle. They keep off machine bodies, every label, the spots workers
+   stand at and the development block, and they leave a machine only from
+   its sides or its top, never its front. They are laid shortest first; each
+   takes the facing ports and the run cheapest in length, bends and
+   crossings. No belt runs along another, so belts between the same places
+   lie a cell apart as a bundle. A crossing goes straight through, never
+   where the other belt turns, and never within 10 px of a label, a port, a
+   junction or a machine; it is drawn as a bridge (a deck and two rails),
+   unlike a junction's dot. When every port of a machine is taken, a belt
+   joins a belt already serving it square-on, at a junction dot.
+6. **Areas.** A unit's members whose footprints face each other across no
+   more than an aisle and a bit merge into one irregular region, the gap
+   bridged only where no other machine is in the way; members further apart
+   are separate lobes. A region covers only its members' footprints and the
+   gaps between them, never another machine. Each region is named once, at
+   its top left, in floor its own footprints leave clear.
 
-The commons seats eight resting and four planning workers. A larger crowd
-sits on benches below the floor, so the scene grows but no machine moves.
+**The development neighbourhood** is the commons (break room and work
+tables) with the outbound line right below it. Its size comes from its
+contents: a seat and a table place for every agent at rest, the work tables
+for half of them, four to a table, and only the implements the floor offers
+(board, missions, tasks, library, and coffee with scenery on). The agent
+count is structural for this block alone: with the previous layout a
+different count resizes it in place, or moves it beside the floor if it no
+longer fits, and no machine moves. Which agents are busy never changes it.
+Anyone beyond its seats (a reviewer passing through) sits on a bench below
+the floor.
 
 Trade-offs: the greedy placement is not an optimiser. It keeps related
 machines close and the floor compact on the fixtures, but a long chain or a
 unit used by many others still gets some long belts, which are drawn rather
-than hidden by duplicating machines. Kept positions after a change can leave
+than hidden by duplicating machines. Square belts that keep off labels and
+standing spots are longer than straight ones (about 1.6 to 1.9 times on the
+fixtures), and on a dense floor they fill the aisles like a circuit board.
+Laying belts costs up to about half a second on the largest fixture, once
+per structural change. Kept positions after a change can leave
 holes until the next cold layout, and a new machine whose neighbours are
 surrounded takes the nearest free floor, which can be a few machines away.
 Large, highly connected graphs make the group nearly square, so a very wide

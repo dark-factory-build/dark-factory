@@ -1298,6 +1298,11 @@ summary.dfConsoleItem__summary { cursor: pointer; }
 .dfPlant__casing { fill: none; stroke: #08131d; stroke-width: 9; stroke-linejoin: round; }
 .dfPlant__casing--lit { stroke: #80ddff; opacity: .55; }
 .dfPlant__junction { fill: var(--metalhi); stroke: var(--outline); }
+/* A crossing is a bridge: a deck over the lower belt with a rail each side, never a dot. */
+.dfPlant__bridgeDeck { fill: var(--belt); }
+.dfPlant__bridgeRail { stroke: var(--metalhi); stroke-width: 1.5; fill: none; }
+.dfPlant__regionEdge { fill: none; stroke-width: 1; }
+.dfPlant__regionLabel { fill: #9db1be; letter-spacing: .04em; }
 .dfPlant .b-base { fill: none; stroke: var(--belt); stroke-width: 6; stroke-linejoin: miter; }
 .dfPlant .b-inf { fill: none; stroke: var(--unknown); stroke-width: 1.5; stroke-dasharray: 4 3; opacity: .45; }
 .dfPlant__material { fill: none; stroke: var(--item); stroke-width: 4; }

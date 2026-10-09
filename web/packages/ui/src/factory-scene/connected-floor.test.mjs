@@ -3,12 +3,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { FactoryScene } from "../../dist/src/factory-scene/factory-scene.js";
+import { FactoryScene, commonsNeeds } from "../../dist/src/factory-scene/factory-scene.js";
 import { commonSeating, layoutScene, standable } from "../../dist/src/factory-scene/scene.js";
-import { crosses, findRoute, walkable } from "../../dist/src/factory-scene/movement.js";
+import { CROSSING_CLEARANCE, crosses, findRoute, regionLabelBox, walkable } from "../../dist/src/factory-scene/movement.js";
 import { projectGraph } from "../../dist/src/console-view.js";
 import { publicFloor } from "../../dist/src/public-floor.js";
-import { FLOOR_FIXTURES, shuffled, withAdditions, withRemovals } from "../../../../fixtures/floor.mjs";
+import { FLOOR_FIXTURES, beltsFromMarkup, crossings, shuffled, withAdditions, withRemovals } from "../../../../fixtures/floor.mjs";
 
 const project = (wire) => projectGraph(new Map([["p", wire]]), ["p"]).graph;
 const floors = Object.entries(FLOOR_FIXTURES).map(([name, build]) => ({ name, wire: build(), graph: project(build()) }));
@@ -159,4 +159,60 @@ test("operator and public floors use one layout from what each may receive, and 
   const markup = renderToStaticMarkup(createElement(FactoryScene, { graph: shown.graph, workers: shown.workers, crates: shown.crates }));
   for (const secret of wire.nodes.flatMap((node) => node.paths)) assert.equal(markup.includes(secret), false, `no source path: ${secret}`);
   assert.doesNotMatch(markup, /Evidence|Loading evidence/, "no detail loader on a public floor");
+});
+
+/** Each fixture as the scene draws it: its layout (sized for no agents, as rendered here) and its belts. */
+const drawn = floors.map(({ name, graph }) => {
+  const layout = layoutScene(graph, undefined, commonsNeeds({ workers: [] })), markup = renderToStaticMarkup(createElement(FactoryScene, { graph, workers: [] }));
+  return { name, layout, markup, belts: beltsFromMarkup(markup), labels: [...layout.stations.map((station) => ({ key: station.key, rect: station.label })), ...layout.regions.map((region) => ({ key: `area ${region.unit}`, rect: regionLabelBox(region) }))] };
+});
+
+test("belts cross only square-on, and every crossing is drawn as a bridge", () => {
+  for (const { name, belts, markup } of drawn) {
+    const bridges = [...markup.matchAll(/data-crossing="[hv]" transform="translate\(([-\d.]+) ([-\d.]+)\)/g)].map(([, x, y]) => ({ x: Number(x), y: Number(y) }));
+    for (const crossing of crossings(belts)) {
+      assert.ok(crossing.angle >= 60, `${name}: a crossing at ${Math.round(crossing.x)},${Math.round(crossing.y)} is ${Math.round(crossing.angle)}°`);
+      assert.ok(bridges.some((bridge) => Math.hypot(bridge.x - crossing.x, bridge.y - crossing.y) < 2), `${name}: the crossing at ${Math.round(crossing.x)},${Math.round(crossing.y)} has a bridge`);
+    }
+  }
+});
+
+test("no crossing lands on or near a label, a port, a junction or a machine", () => {
+  for (const { name, layout, belts, labels } of drawn) {
+    const ends = belts.flatMap((belt) => [belt[0], belt.at(-1)]);
+    const away = (point, rect) => point.x < rect.x - CROSSING_CLEARANCE || point.x > rect.x + rect.width + CROSSING_CLEARANCE || point.y < rect.y - CROSSING_CLEARANCE || point.y > rect.y + rect.height + CROSSING_CLEARANCE;
+    for (const crossing of crossings(belts)) {
+      for (const { key, rect } of [...labels, ...layout.stations.map((station) => ({ key: station.key, rect: station }))]) assert.ok(away(crossing, rect), `${name}: a crossing at ${Math.round(crossing.x)},${Math.round(crossing.y)} is on ${key}`);
+      for (const end of ends) assert.ok(Math.hypot(end.x - crossing.x, end.y - crossing.y) >= CROSSING_CLEARANCE, `${name}: a crossing beside a port or junction at ${end.x},${end.y}`);
+    }
+  }
+});
+
+test("no belt runs through a label, labels never overlap each other, and no two belts run along each other", () => {
+  for (const { name, belts, labels } of drawn) {
+    for (const [index, belt] of belts.entries()) for (let leg = 1; leg < belt.length; leg++) for (const { key, rect } of labels) {
+      assert.equal(crosses(belt[leg - 1], belt[leg], rect), false, `${name}: belt ${index} runs through the label of ${key}`);
+    }
+    for (let i = 0; i < labels.length; i++) for (let j = i + 1; j < labels.length; j++) assert.equal(strictly(labels[i].rect, labels[j].rect), false, `${name}: ${labels[i].key}'s label over ${labels[j].key}'s`);
+    // Legs of two belts on one line, overlapping: one belt drawn along the other, which a reader cannot tell apart.
+    const legs = belts.flatMap((belt, index) => belt.slice(1).map((point, leg) => ({ index, a: belt[leg], b: point })));
+    for (const one of legs) for (const two of legs) {
+      if (one.index >= two.index) continue;
+      const flat = (leg) => Math.abs(leg.a.y - leg.b.y) < 0.5, upright = (leg) => Math.abs(leg.a.x - leg.b.x) < 0.5;
+      const overlap = (p0, p1, q0, q1) => Math.min(Math.max(p0, p1), Math.max(q0, q1)) - Math.max(Math.min(p0, p1), Math.min(q0, q1));
+      if (flat(one) && flat(two) && Math.abs(one.a.y - two.a.y) < 2) assert.ok(overlap(one.a.x, one.b.x, two.a.x, two.b.x) <= 2, `${name}: belts ${one.index} and ${two.index} run along each other at y=${one.a.y}`);
+      if (upright(one) && upright(two) && Math.abs(one.a.x - two.a.x) < 2) assert.ok(overlap(one.a.y, one.b.y, two.a.y, two.b.y) <= 2, `${name}: belts ${one.index} and ${two.index} run along each other at x=${one.a.x}`);
+    }
+  }
+});
+
+test("a unit's neighbouring machines are one region, named once; only members far apart make another lobe", () => {
+  const monolith = drawn.find((floor) => floor.name === "monolith");
+  assert.equal(monolith.layout.regions.length, 1, "twenty machines standing together are one area, not twenty tiles");
+  assert.equal((monolith.markup.match(/data-region-label=/g) ?? []).length, 1, "and it is named once");
+  for (const { name, layout } of drawn) {
+    const units = new Set(layout.stations.flatMap((station) => station.unit ?? []));
+    assert.ok(layout.regions.length <= layout.stations.filter((station) => station.unit !== undefined).length / 2 + units.size, `${name}: regions merge, they are not one per machine`);
+    for (const region of layout.regions) assert.ok(region.rects.some((rect) => region.label.x >= rect.x && region.label.x <= rect.x + rect.width && region.label.y - 7 >= rect.y - 7 && region.label.y <= rect.y + rect.height + 7), `${name}: ${region.unit}'s name sits on its own region`);
+  }
 });

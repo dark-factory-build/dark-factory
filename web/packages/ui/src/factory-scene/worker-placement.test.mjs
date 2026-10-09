@@ -50,27 +50,40 @@ test("nearby rest forms pairs beside a unit's main machine without duplicating s
   assert.deepEqual(common.map(({ x, y }) => ({ x, y })).sort((a, b) => a.y - b.y || a.x - b.x), commonSeating(layout, common.length, 1).resting);
 });
 
-test("the commons seats a fixed number; a crowd sits on benches below the floor and never moves a machine", () => {
-  const layout = layoutScene(units(2)), inside = (seat) => seat.x - WORKER_SIZE / 2 >= layout.commons.x && seat.x + WORKER_SIZE / 2 <= layout.commons.x + layout.commons.width && seat.y >= layout.commons.y && seat.y <= layout.commons.y + layout.commons.height;
+test("the commons seats every agent at rest and half at the work tables; anyone more sits on benches below the floor", () => {
+  const sized = (agents) => layoutScene(units(2), undefined, { agents, implements: ["board", "missions", "tasks", "shelf", "coffee"] });
+  const layout = sized(6), inside = (seat) => seat.x - WORKER_SIZE / 2 >= layout.commons.x && seat.x + WORKER_SIZE / 2 <= layout.commons.x + layout.commons.width && seat.y >= layout.commons.y && seat.y <= layout.commons.y + layout.commons.height;
   assert.deepEqual(commonSeating(layout, 0, 0), { resting: [], planning: [] });
-  for (const [rest, plan] of [[0, 1], [1, 0], [1, 1], [5, 3], [8, 4], [100, 100]]) {
+  for (const [rest, plan] of [[0, 1], [1, 0], [1, 1], [5, 3], [6, 6], [30, 30]]) {
     const seating = commonSeating(layout, rest, plan);
     assert.equal(seating.resting.length, rest);
     assert.equal(seating.planning.length, plan);
-    assert.ok(seating.resting.slice(0, 8).every(inside) && seating.planning.slice(0, 4).every(inside));
+    assert.ok(seating.resting.slice(0, 6).every(inside) && seating.planning.slice(0, 3).every(inside), "six agents: six resting seats, three at work tables");
     for (const seat of [...seating.resting.slice(8), ...seating.planning.slice(4)]) assert.ok(seat.y > layout.height, "past the commons, below everything");
     separated([...seating.resting, ...seating.planning].map((seat, index) => ({ id: index, ...seat })));
   }
+  // The commons grows with the agents and nothing else: two agents get a small one, twelve a larger one.
+  const two = sized(2).commons, twelve = sized(12).commons;
+  assert.ok(two.width * two.height < layout.commons.width * layout.commons.height && layout.commons.width * layout.commons.height < twelve.width * twelve.height);
+  assert.ok(layoutScene(units(2), undefined, { agents: 2, implements: [] }).commons.height < two.height, "implements take room only when present");
   const crowd = Array.from({ length: 40 }, (_, index) => worker(`rest-${String(index).padStart(2, "0")}`));
-  assert.deepEqual(layoutScene(units(2)), layout, "workers never enter layout");
   assert.ok(placeWorkers(layout, crowd).every((seat) => inside(seat) || seat.y > layout.height));
+});
+
+test("a change in the number of agents resizes the commons in place; no machine moves", () => {
+  const before = layoutScene(units(6), undefined, { agents: 3, implements: ["board", "coffee"] });
+  for (const agents of [1, 8, 20]) {
+    const after = layoutScene(units(6), before, { agents, implements: ["board", "coffee"] });
+    assert.deepEqual(after.stations.map(({ key, x, y }) => [key, x - after.stations[0].x, y - after.stations[0].y]), before.stations.map(({ key, x, y }) => [key, x - before.stations[0].x, y - before.stations[0].y]), `${agents} agents`);
+    for (const station of after.stations) assert.ok(!(station.footprint.x < after.facilities.x + after.facilities.width && after.facilities.x < station.footprint.x + station.footprint.width && station.footprint.y < after.facilities.y + after.facilities.height && after.facilities.y < station.footprint.y + station.footprint.height), "clear of every machine");
+  }
 });
 
 test("the commons furniture stays put whoever rests or works", () => {
   const layout = layoutScene(units(3)), nook = breakRoomNook(layout), { x, y } = layout.commons;
   assert.deepEqual(nook.furniture.map(({ errand, x: px, y: py, stand }) => ({ errand, x: px - x, y: py - y, stand: { x: stand.x - x, y: stand.y - y } })), [
-    { errand: "shelf", x: 120, y: 54, stand: { x: 126, y: 120 } }, { errand: "coffee", x: 158, y: 54, stand: { x: 164, y: 120 } },
-    { errand: "board", x: 6, y: 54, stand: { x: 12, y: 120 } }, { errand: "missions", x: 44, y: 54, stand: { x: 50, y: 120 } }, { errand: "tasks", x: 82, y: 54, stand: { x: 88, y: 120 } },
+    { errand: "shelf", x: 120, y: 18, stand: { x: 126, y: 84 } }, { errand: "coffee", x: 158, y: 18, stand: { x: 164, y: 84 } },
+    { errand: "board", x: 6, y: 18, stand: { x: 12, y: 84 } }, { errand: "missions", x: 44, y: 18, stand: { x: 50, y: 84 } }, { errand: "tasks", x: 82, y: 18, stand: { x: 88, y: 84 } },
   ]);
   for (const piece of nook.furniture) assert.ok(standable(layout, piece.stand), `${piece.errand} is used from free floor`);
 });
