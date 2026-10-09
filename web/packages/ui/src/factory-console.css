@@ -1227,20 +1227,6 @@ summary.dfConsoleItem__summary { cursor: pointer; }
 .dfProjectLibrary__views { border-bottom: 1px solid var(--df-console-rule); margin-bottom: 1rem; padding-bottom: .5rem; }
 .dfProjectLibrary__reader :is(p, pre) { line-height: 1.55; margin-block: .75rem; }
 .dfProjectLibrary__reader pre { font-family: inherit; font-size: var(--df-text-sm); }
-.dfOutcomes { min-width: 0; }
-.dfOutcomes__list { list-style: none; padding: 0; margin: 1rem 0; display: grid; gap: .5rem; }
-.dfOutcomes__list button { display: flex; justify-content: space-between; align-items: baseline; gap: 1rem; width: 100%; margin: 0; padding: 1rem; }
-.dfOutcomes__list strong { font-weight: 500; line-height: 1.4; }
-.dfOutcomes__list .dfStatus { flex-shrink: 0; }
-.dfOutcomes__detail { max-width: 78ch; margin-inline: auto; overflow-wrap: anywhere; }
-.dfOutcomes__detail h3 { margin-block: 1.25rem .5rem; font-size: var(--df-text-lg); line-height: 1.4; }
-.dfOutcomes__detail section { margin-block: 1.5rem; }
-.dfOutcomes__detail h4 { margin: 0 0 .5rem; color: var(--df-console-muted); font-size: var(--df-text-sm); }
-.dfOutcomes__detail p { margin-block: .5rem; line-height: 1.6; font-size: var(--df-text-sm); }
-.dfOutcomes__prose { white-space: pre-wrap; }
-.dfOutcomes__meta { color: var(--df-console-muted); }
-.dfOutcomes__reference { border-top: 1px solid var(--df-console-rule); padding-block: .5rem; }
-@media (max-width: 640px) { .dfOutcomes__list button { flex-direction: column; gap: .5rem; } }
 
 .dfProjectLibrary__workspace > section[aria-label="Replies"] > button { margin-top: .75rem; }
 

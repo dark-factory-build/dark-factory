@@ -1,4 +1,3 @@
-import { ProjectOutcomes } from "./project-outcomes.js";
 import { useEffect, useRef, useState } from "react";
 import type { AgentItem, ProjectContentInput, ProjectContentOperation, ProjectContentOutput, StateView } from "@dark-factory/client";
 
@@ -35,8 +34,8 @@ export function ProjectLibrary({ state, call, draft, board = false, entity = "",
   const scoped = projectID === (initialProjectId || projects[0]?.id);
   const contents = <>
     {projects.length < 2 ? null : <label>Project <select value={projectID} onChange={(event) => setProject(event.target.value)}>{projects.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>}
-    <nav className="dfProjectLibrary__actions dfProjectLibrary__views" aria-label="Library views">{[["documents", "All documents"], ["discussions", "Discussions"], ["outcomes", "Outcomes"]].map(([value, label]) => <button key={value} type="button" aria-pressed={view === value} onClick={() => setView(value!)}>{label}</button>)}</nav>
-    {view === "outcomes" ? <ProjectOutcomes key={projectID} project={projectID} call={call} /> : <LibraryDocuments key={`${projectID}:${view}:${scoped ? `${entity}:${repository}:${initialID}` : ""}`} projectID={projectID} state={state} call={call} draft={draft} board={view === "discussions"} entity={scoped ? entity : ""} repository={scoped ? repository : ""} initialID={scoped && (view === "discussions") === board ? initialID : ""} onSource={onSource} onRecord={onRecord} />}
+    <nav className="dfProjectLibrary__actions dfProjectLibrary__views" aria-label="Library views">{[["documents", "All documents"], ["discussions", "Discussions"]].map(([value, label]) => <button key={value} type="button" aria-pressed={view === value} onClick={() => setView(value!)}>{label}</button>)}</nav>
+    <LibraryDocuments key={`${projectID}:${view}:${scoped ? `${entity}:${repository}:${initialID}` : ""}`} projectID={projectID} state={state} call={call} draft={draft} board={view === "discussions"} entity={scoped ? entity : ""} repository={scoped ? repository : ""} initialID={scoped && (view === "discussions") === board ? initialID : ""} onSource={onSource} onRecord={onRecord} />
   </>;
   return open || board || initialID ? <section className="dfProjectLibrary" aria-label={board ? "Project board" : "Project library"}>{contents}</section>
     : <details className="dfConsoleSidebar__panel dfProjectLibrary" onToggle={(event) => setExpanded(event.currentTarget.open)}><summary>Project library</summary>{expanded ? contents : null}</details>;
