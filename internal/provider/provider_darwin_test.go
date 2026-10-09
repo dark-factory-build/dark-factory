@@ -131,7 +131,7 @@ func TestPrepareWebDependenciesProvisionsPinnedCorepackPnpm(t *testing.T) {
 		t.Fatal(err)
 	}
 	node := filepath.Join(toolDir, "node")
-	if err := os.WriteFile(node, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+	if err := os.WriteFile(node, []byte("#!/bin/sh\ncase \"$*\" in *--config.ignorePnpmfile=true*) exit 0 ;; *) printf ran > .pnpmfile-ran; exit 1 ;; esac\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	account := filepath.Join(root, "account")
@@ -156,8 +156,14 @@ func TestPrepareWebDependenciesProvisionsPinnedCorepackPnpm(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(working, "web", "package.json"), []byte(`{"packageManager":"pnpm@11.19.0"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(working, "web", ".pnpmfile.cjs"), []byte("require('fs').writeFileSync('.pnpmfile-ran', 'ran')"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if err := runtime.PrepareWebDependencies(context.Background(), working); err != nil {
 		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(working, "web", ".pnpmfile-ran")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("pnpmfile ran: %v", err)
 	}
 	got, err := os.ReadFile(filepath.Join(runtime.home, ".cache", "corepack", "v1", "pnpm", pnpmVersion, "bin.mjs"))
 	if err != nil || string(got) != "pinned" {

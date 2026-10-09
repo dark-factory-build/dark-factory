@@ -1256,7 +1256,7 @@ func (runtime RuntimePaths) PrepareWebDependencies(ctx context.Context, workingD
 	if toolPath == "" {
 		return fmt.Errorf("provider: Node tool is unavailable")
 	}
-	command := exec.CommandContext(ctx, filepath.Join(toolPath, "node"), filepath.Join(toolPath, "corepack"), "pnpm", "install", "--offline", "--frozen-lockfile", "--ignore-scripts")
+	command := exec.CommandContext(ctx, filepath.Join(toolPath, "node"), filepath.Join(toolPath, "corepack"), "pnpm", "install", "--offline", "--frozen-lockfile", "--ignore-scripts", "--config.ignorePnpmfile=true")
 	command.Dir = web
 	command.Env = runtime.environmentForRole(kernel.ProviderCodex, kernel.RoleWorker)
 	if output, err := command.CombinedOutput(); err != nil {
