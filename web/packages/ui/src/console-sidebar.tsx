@@ -202,7 +202,7 @@ function RecentWork({
   }, [open, Object.values(scope)[0], completionRevision]);
   const selected = page.find((task) => task.id === selectedId) ?? page[0];
   return <div className="dfConsoleRecentWork dfConsoleSidebar__section">
-    {icon ? <IconButton icon={icon} aria-label={label} title={total === undefined ? label : `${label} · ${total}`} onClick={() => setOpen(true)} /> : <button type="button" onClick={() => setOpen(true)}>{label}{total === undefined ? "" : ` · ${total}`}</button>}
+    {icon ? <IconButton icon={icon} aria-label={label} title={total === undefined ? label : `${label} · ${total}`} onClick={() => setOpen(true)}><Badge n={total === undefined ? undefined : Number(total)} /></IconButton> : <button type="button" onClick={() => setOpen(true)}>{label}{total === undefined ? "" : ` · ${total}`}</button>}
     {!open ? null : <ConsoleDialog className="dfRecentWorkDialog" label={`${label} for ${name}`} title={`${label} · ${name}`} onClose={() => setOpen(false)}>
         {failed ? <p role="alert">Recent work unavailable <button type="button" onClick={() => load(false)}>Retry</button></p> : null}
         <div className="dfRecentWorkLayout">
