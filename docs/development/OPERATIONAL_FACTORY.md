@@ -336,7 +336,11 @@ granularity is a fixed table in code, not a runtime claim.
 
   The newest successful production deployment also moves the work line: see
   *SHIPPED* in section 13. A customer's installation accepts the
-  `Deployments: read` request before its deploys show.
+  `Deployments: read` request before its deploys show. Deployments are read
+  only for a repository pinned to its GitHub id (`project repository github`,
+  through a connection the repository is delegated to). A disabled repository
+  can be pinned: the factory then reads its production state but still takes
+  no new work on it.
 - **`otlp-remote` (push):** a deployed system exports its own OpenTelemetry
   traces to its factory through the relay, on any platform and any plan. See
   *Remote ingest* below. There is no platform-specific code.
@@ -753,7 +757,10 @@ console's rule (`publicCrates`, `projectCrates`; one shared fixture,
 of its production environment: a merged crate ships once a successful one
 was created at or after its merge, and waits at the merge queue's end until
 then. The repository record keeps the newest such time once seen, so a failed
-read moves nothing. Without deployment records, SHIPPED means merged.
+read moves nothing. A repository whose last production deployment is more than
+seven days before a merge no longer deploys that way, so that merge ships: a
+repository that changes how it deploys never holds its line. Without
+deployment records, SHIPPED means merged.
 
 A `ledger` is added only for repositories GitHub serves to an anonymous
 reader: factoryd reads each repository's releases without credentials once

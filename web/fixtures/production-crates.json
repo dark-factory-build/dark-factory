@@ -1,5 +1,5 @@
 {
- "comment": "One rule, two implementations: factoryd publicCrates (Go) and projectCrates (production-view.ts) must both put these records at these stations. owner/deployed records GitHub deployments: a merged pull request ships only once a successful production deployment was created at or after its merge (12), else it waits at the end of the merge queue (13).",
+ "comment": "One rule, two implementations: factoryd publicCrates (Go) and projectCrates (production-view.ts) must both put these records at these stations. owner/deployed records GitHub deployments: a merged pull request ships only once a successful production deployment was created at or after its merge (12), else it waits at the end of the merge queue (13). owner/stale-deploys last deployed more than 7 days before its merge, so it no longer deploys this way and the merge ships (14).",
  "now": 100000000,
  "records": [
   {
@@ -400,6 +400,42 @@
     "merge": "dddddddddddddddddddddddddddddddddddddddd",
     "merged_at": "1970-01-02T03:03:20Z"
    }
+  },
+  {
+   "repository": "owner/stale-deploys",
+   "project_id": "project",
+   "kind": "repository",
+   "id": "owner/stale-deploys",
+   "visual_id": "",
+   "observed_at": 99940000,
+   "tasks": [],
+   "missions": [],
+   "document": {
+    "unavailable": "",
+    "deployed_at": -510000000
+   }
+  },
+  {
+   "repository": "owner/stale-deploys",
+   "project_id": "project",
+   "kind": "pull_request",
+   "id": "14",
+   "visual_id": "change:14",
+   "observed_at": 99940000,
+   "tasks": [],
+   "missions": [],
+   "document": {
+    "number": 14,
+    "title": "Change 14",
+    "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "state": "merged",
+    "review": {
+     "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "state": "allow"
+    },
+    "merge": "dddddddddddddddddddddddddddddddddddddddd",
+    "merged_at": "1970-01-02T03:03:20Z"
+   }
   }
  ],
  "crates": [
@@ -456,6 +492,11 @@
   [
    13,
    2,
+   false
+  ],
+  [
+   14,
+   3,
    false
   ]
  ]
