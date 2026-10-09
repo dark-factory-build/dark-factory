@@ -190,6 +190,10 @@ jobs:
     # wait for a free runner rather than fail. Every shard must pass and runs
     # to completion: a cancelled sibling would read to factoryd as an
     # infrastructure failure and hide the failing tests (#1366).
+    # Warm-cache merge-group timings (2026-10-09): packages 4:25, daemon
+    # 4:18, and source 5:11 median across runs 37998324190, 38000817821,
+    # and 38001154695; the latest queue wall time was 5:27. Any pair would
+    # exceed the slowest shard, while one Mac would take about 14 minutes.
     strategy:
       fail-fast: false
       matrix:
