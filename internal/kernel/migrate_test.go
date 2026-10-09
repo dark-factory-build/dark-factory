@@ -16,6 +16,7 @@ import (
 // 'transient') and a v36 one (also without task_automatic_events) migrate,
 // keep every row, and then record a transient failure.
 func TestCurrentAndLegacyHomesOpenWithEveryRow(t *testing.T) {
+	t.Parallel()
 	for _, version := range []int{userVersion, v37UserVersion, v36UserVersion} {
 		t.Run(fmt.Sprintf("v%d", version), func(t *testing.T) { testHomeOpensWithEveryRow(t, version) })
 	}
@@ -118,6 +119,7 @@ func snapshotRows(t *testing.T, ctx context.Context, connection *sql.Conn) map[s
 // userVersion, adds the migration step from the version before it, and
 // re-pins here.
 func TestSchemaDigestsArePinned(t *testing.T) {
+	t.Parallel()
 	sum := sha256.Sum256([]byte(strings.Join(schemaStatements, "\n")))
 	if got := hex.EncodeToString(sum[:]); got != "0fd358c97036e55d36f6805eb8e0d3999d57b7ddeb1576211e44fb7b0596d24a" {
 		t.Errorf("current schema digest = %s", got)

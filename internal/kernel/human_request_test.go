@@ -37,6 +37,7 @@ func humanDeliveryID(t *testing.T, seed byte) HumanRequestDeliveryID {
 }
 
 func TestHumanQuestionCreationProjectionDetailAndIdempotency(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, run, _ := runningOrchestratorRun(t)
 	defer store.Close()
@@ -106,6 +107,7 @@ func TestHumanQuestionCreationProjectionDetailAndIdempotency(t *testing.T) {
 }
 
 func TestCancelHumanRequestRunAtomicallyResolvesRequestAndRevokesRun(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, run, keys := runningOrchestratorRun(t)
 	defer store.Close()
@@ -164,6 +166,7 @@ func TestCancelHumanRequestRunAtomicallyResolvesRequestAndRevokesRun(t *testing.
 }
 
 func TestHumanReplyAndCancellationRaceCommitsExactlyOneDecision(t *testing.T) {
+	t.Parallel()
 	for iteration := 0; iteration < 10; iteration++ {
 		store, run, _ := runningOrchestratorRun(t)
 		client := humanQuestionClient(t, store, byte(220+iteration), BrowserCapabilityObserve|BrowserCapabilityHumanActions)
@@ -216,6 +219,7 @@ func TestHumanReplyAndCancellationRaceCommitsExactlyOneDecision(t *testing.T) {
 }
 
 func TestHumanQuestionDeliveryRecoveryAndAckAreAtMostOnce(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, run, _ := runningOrchestratorRun(t)
 	defer store.Close()
@@ -254,6 +258,7 @@ func TestHumanQuestionDeliveryRecoveryAndAckAreAtMostOnce(t *testing.T) {
 }
 
 func TestHumanQuestionReplyAuthorityAndDeliveryCollision(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, run, _ := runningOrchestratorRun(t)
 	defer store.Close()
@@ -283,6 +288,7 @@ func TestHumanQuestionReplyAuthorityAndDeliveryCollision(t *testing.T) {
 }
 
 func TestHumanQuestionRevokedClientCannotReply(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, run, _ := runningOrchestratorRun(t)
 	defer store.Close()
@@ -300,6 +306,7 @@ func TestHumanQuestionRevokedClientCannotReply(t *testing.T) {
 }
 
 func TestHumanRequestDetailRequiresLivePrivateCapabilityAndExactRevision(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, run, _ := runningOrchestratorRun(t)
 	defer store.Close()
@@ -337,6 +344,7 @@ func TestHumanRequestDetailRequiresLivePrivateCapabilityAndExactRevision(t *test
 }
 
 func TestHumanQuestionBoundAndRunUniquenessAreTransactional(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, run, _ := runningOrchestratorRun(t)
 	defer store.Close()
@@ -377,6 +385,7 @@ func TestHumanQuestionBoundAndRunUniquenessAreTransactional(t *testing.T) {
 }
 
 func TestHumanQuestionReuseExistingDoesNotOpenSecondRequest(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, run, _ := runningOrchestratorRun(t)
 	defer store.Close()
@@ -416,6 +425,7 @@ func TestHumanQuestionReuseExistingDoesNotOpenSecondRequest(t *testing.T) {
 }
 
 func TestHumanQuestionInvalidationFailureRollsBackRequestAndRun(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, run, keys := runningOrchestratorRun(t)
 	defer store.Close()
@@ -479,6 +489,7 @@ func TestHumanQuestionInvalidationFailureRollsBackRequestAndRun(t *testing.T) {
 }
 
 func TestHumanQuestionResolutionTombstoneFailureRollsBackStatusAndHead(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, run, _ := runningOrchestratorRun(t)
 	defer store.Close()
@@ -519,6 +530,7 @@ func TestHumanQuestionResolutionTombstoneFailureRollsBackStatusAndHead(t *testin
 }
 
 func TestHumanQuestionCorruptChronologyFailsClosed(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, run, _ := runningOrchestratorRun(t)
 	path := storePath(t, store)
@@ -557,6 +569,7 @@ func TestHumanQuestionCorruptChronologyFailsClosed(t *testing.T) {
 }
 
 func TestHumanQuestionUncertainDeliveryIsNotReplayedAndRestartRecovery(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, run, _ := runningOrchestratorRun(t)
 	path := storePath(t, store)
@@ -598,6 +611,7 @@ func TestHumanQuestionUncertainDeliveryIsNotReplayedAndRestartRecovery(t *testin
 }
 
 func TestHumanQuestionFinalizingStalesOpenAndMakesDeliveryUnknown(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, run, _ := runningOrchestratorRun(t)
 	defer store.Close()
@@ -650,6 +664,7 @@ func TestHumanQuestionFinalizingStalesOpenAndMakesDeliveryUnknown(t *testing.T) 
 }
 
 func TestHumanQuestionTerminalizationStalesResidualDeliveryExactlyOnce(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, run, keys := runningOrchestratorRun(t)
 	defer store.Close()
@@ -729,6 +744,7 @@ func TestHumanQuestionTerminalizationStalesResidualDeliveryExactlyOnce(t *testin
 }
 
 func TestHumanQuestionProcessExitConvergesRequestsAtomically(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	tests := []struct {
 		name       string
@@ -842,6 +858,7 @@ func assertHumanRequestInvalidation(t *testing.T, store *Store, after EventSeque
 }
 
 func TestHumanQuestionProcessExitInvalidationFailureRollsBackBothTransitions(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	// The provider exit is the only remaining direct process-exit edge.
 	for _, name := range []string{"provider"} {
@@ -884,6 +901,7 @@ func TestHumanQuestionProcessExitInvalidationFailureRollsBackBothTransitions(t *
 }
 
 func TestHumanQuestionImpossibleAdmittedRunPhasesFailClosed(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	for _, status := range []string{"delivery_unknown", "resolved"} {
 		t.Run(status, func(t *testing.T) {
@@ -910,6 +928,7 @@ func TestHumanQuestionImpossibleAdmittedRunPhasesFailClosed(t *testing.T) {
 }
 
 func TestHumanQuestionCreationRequiresExactRunningAttempt(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, run, keys := runningOrchestratorRun(t)
 	defer store.Close()
@@ -934,6 +953,7 @@ func TestHumanQuestionCreationRequiresExactRunningAttempt(t *testing.T) {
 }
 
 func TestOperatorHumanRequestsIncludesOverseerAndRejectsReplay(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, run, _ := runningOrchestratorRun(t)
 	defer store.Close()

@@ -7,6 +7,7 @@ import (
 )
 
 func TestCreateMissionForBrowserIsAtomicAndRequiresCompleteBrief(t *testing.T) {
+	t.Parallel()
 	store, _, project, agent := newAdmissionStore(t, RoleOrchestrator, 2)
 	defer store.Close()
 	client := terminalTargetClient(t, store, browserTestID(t, 201), BrowserCapabilityObserve|BrowserCapabilityHumanActions|BrowserCapabilityPrivateHumanRequestDetail)
@@ -42,6 +43,7 @@ func TestCreateMissionForBrowserIsAtomicAndRequiresCompleteBrief(t *testing.T) {
 }
 
 func TestCreateMissionForBrowserRejectsWrongProjectAndRole(t *testing.T) {
+	t.Parallel()
 	store, _, project, agent := newAdmissionStore(t, RoleOrchestrator, 2)
 	defer store.Close()
 	client := terminalTargetClient(t, store, browserTestID(t, 204), BrowserCapabilityObserve|BrowserCapabilityHumanActions|BrowserCapabilityPrivateHumanRequestDetail)
@@ -72,6 +74,7 @@ func TestCreateMissionForBrowserRejectsWrongProjectAndRole(t *testing.T) {
 }
 
 func TestMissionDelegationInheritsBindingAndReplayIgnoresOwnerRevision(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, _, project, agent := newAdmissionStore(t, RoleOrchestrator, 2)
 	defer store.Close()
@@ -118,6 +121,7 @@ func TestMissionDelegationInheritsBindingAndReplayIgnoresOwnerRevision(t *testin
 }
 
 func TestCreateMissionForBrowserRollsBackAfterOutcomeValidation(t *testing.T) {
+	t.Parallel()
 	store, _, project, agent := newAdmissionStore(t, RoleOrchestrator, 2)
 	defer store.Close()
 	client := terminalTargetClient(t, store, browserTestID(t, 212), BrowserCapabilityObserve|BrowserCapabilityHumanActions|BrowserCapabilityPrivateHumanRequestDetail)

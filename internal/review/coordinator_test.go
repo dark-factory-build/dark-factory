@@ -18,6 +18,7 @@ func (s *memoryStore) Update(_ context.Context, op Operation) error {
 	s.values = append(s.values, op)
 	return nil
 }
+func (s *memoryStore) Blocked(context.Context, uint64, string) (bool, error) { return false, nil }
 func (s *memoryStore) CreateRetry(_ context.Context, failed, retry Operation) error {
 	for index := len(s.values) - 1; index >= 0; index-- {
 		if s.values[index].ID == failed.ID {

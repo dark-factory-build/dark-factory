@@ -7,6 +7,7 @@ import (
 )
 
 func TestResourceActivationTimeIsAtomicAndDurable(t *testing.T) {
+	t.Parallel()
 	store, run, _ := admittedOrchestratorRun(t)
 	path := storePath(t, store)
 	resources := resourcesForRunTest(t, store, run.ID)
@@ -64,6 +65,7 @@ func TestResourceActivationTimeIsAtomicAndDurable(t *testing.T) {
 }
 
 func TestProcessExitBeforeResourceActivationIsRejectedWithoutFootprint(t *testing.T) {
+	t.Parallel()
 	// The runner boundary lives on RecordLiveRunnerExitAndRelease and is
 	// covered by TestProcessExitTimeIsBoundedByRunLifetime/runner/input;
 	// generic runner exit observation no longer exists.
@@ -104,6 +106,7 @@ func TestProcessExitBeforeResourceActivationIsRejectedWithoutFootprint(t *testin
 }
 
 func TestProcessExitAtResourceActivationIsAccepted(t *testing.T) {
+	t.Parallel()
 	t.Run("provider", func(t *testing.T) {
 		store, run, _ := runningOrchestratorRun(t)
 		defer store.Close()
@@ -139,6 +142,7 @@ func TestProcessExitAtResourceActivationIsAccepted(t *testing.T) {
 }
 
 func TestPersistedProcessExitBeforeResourceActivationFailsEveryBoundary(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name    string
 		column  string
@@ -220,6 +224,7 @@ func corruptPersistedExitBeforeActivation(t *testing.T, column string, prepare f
 }
 
 func TestDirectReleaseRetainsNilActivationTime(t *testing.T) {
+	t.Parallel()
 	store, run, _ := admittedOrchestratorRun(t)
 	defer store.Close()
 	failure, _ := NewFailureProposal(FailureActivation, "pre-exec cleanup")
@@ -238,6 +243,7 @@ func TestDirectReleaseRetainsNilActivationTime(t *testing.T) {
 }
 
 func TestResourceActivationTimeScannerRejectsImpossibleRows(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name   string
 		mutate func(*testing.T, *Store, Run)
