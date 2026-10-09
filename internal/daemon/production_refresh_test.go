@@ -130,7 +130,7 @@ func TestRefreshedChecksLightTheirWorkflowJobs(t *testing.T) {
 		status := live.Nodes[node.ID]
 		got[node.Label] = status.Observation + "/" + status.State
 	}
-	want := map[string]string{"CI / go": "observed/failing", "CI / Lint": "observed/active", "CI / docs": "partial/unknown", "Release / release": "partial/unknown", "GitHub Actions · r1": "partial/failing",
+	want := map[string]string{"CI / go": "observed/failing", "CI / Lint": "observed/active", "CI / docs": "partial/unknown", "Release / release": "partial/unknown", "GitHub Actions · app": "partial/failing",
 		"app": "unobserved/unknown", "No recognised entry points": "unobserved/unknown"}
 	for label, reading := range want {
 		if got[label] != reading {
