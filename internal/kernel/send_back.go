@@ -320,11 +320,9 @@ func (store *Store) retryTaskTx(ctx context.Context, tx *writeTx, digest *Attemp
 	if digest != nil || intakeLimit > 0 {
 		var automatic, withdrawn bool
 		var retries int64
-		if err := tx.connection.QueryRowContext(ctx, `SELECT ?2 = 'failed' OR EXISTS(SELECT 1 FROM task_automatic_events WHERE task_id = ?1 AND task_revision = ?5 AND kind = 'blocked_expired')
-			OR EXISTS(SELECT 1 FROM runs WHERE task_id = ?1 AND admitted_task_work_revision = ?3 AND terminal_kind = 'cancelled' AND terminal_detail = ?4),
-			EXISTS(SELECT 1 FROM intake_task_bindings AS b JOIN intake_acceptances AS a ON a.id = b.acceptance_id WHERE b.task_id = ?1 AND a.withdrawn_at_ms IS NOT NULL),
-			(SELECT count(*) FROM task_automatic_events WHERE task_id = ?1 AND kind = 'intake_retried')`,
-			id.Bytes(), task.Status.String(), task.WorkRevision.Int64(), RunLimitDetail, task.Revision.Int64()).Scan(&automatic, &withdrawn, &retries); err != nil {
+		if err := tx.connection.QueryRowContext(ctx, `SELECT `+taskEndedAutomatically+`, `+taskIssueWithdrawn+`,
+			(SELECT count(*) FROM task_automatic_events WHERE task_id = t.id AND kind = 'intake_retried') FROM tasks AS t WHERE t.id = ?`,
+			id.Bytes()).Scan(&automatic, &withdrawn, &retries); err != nil {
 			return Task{}, tx.Rollback(err)
 		}
 		if withdrawn || task.Status == TaskCancelled && !automatic || intakeLimit > 0 && (!automatic || retries >= intakeLimit) {
@@ -485,6 +483,16 @@ func sendBackTask(ctx context.Context, connection *sql.Conn, task Task, note str
 // carryPrerequisites moves consumers still waiting on a producer revision that
 // ended without success to the producer's next revision. Only a success can be
 // superseded, so a requeue, retry or send-back never strands a consumer.
+// taskEndedAutomatically holds while task t's current end is automatic: a
+// failure, a run-limit cancel of the run at its work revision, or a blocked
+// expiry recorded at its row revision. Retries and overseer wakes share it.
+const taskEndedAutomatically = `(t.status = 'failed' OR t.status = 'cancelled' AND (
+	EXISTS (SELECT 1 FROM task_automatic_events AS e WHERE e.task_id = t.id AND e.task_revision = t.revision AND e.kind = 'blocked_expired')
+	OR EXISTS (SELECT 1 FROM runs AS r WHERE r.task_id = t.id AND r.admitted_task_work_revision = t.work_revision AND r.terminal_kind = 'cancelled' AND r.terminal_detail = '` + RunLimitDetail + `')))`
+
+// taskIssueWithdrawn holds while task t's intake receipt is withdrawn.
+const taskIssueWithdrawn = `EXISTS (SELECT 1 FROM intake_task_bindings AS b JOIN intake_acceptances AS a ON a.id = b.acceptance_id WHERE b.task_id = t.id AND a.withdrawn_at_ms IS NOT NULL)`
+
 // refuseAwaitedTask keeps a task's work revision while a continuation (a
 // yield, or a stalled-item card) waits on it: moving it would strand the
 // continuation, and validation runs before a write, not at its commit.

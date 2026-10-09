@@ -32,7 +32,9 @@ const (
 // escalated head); a succeeded worker task, and a Change factoryd could not
 // publish (it has no pull request), need one look. An accepted intake task
 // that succeeded with a diff needs none: factoryd publishes it, and the
-// Change item covers a publication that never happens. An item is due when
+// Change item covers a publication that never happens. An intake task the
+// overseer could retry (an automatic end) is an item too; an operator's cancel
+// and a withdrawn issue's task are not. An item is due when
 // no carrier named it since that version; after that, at most once per
 // OverseerRewakeAfter, while no carrier that named it started (one look), or
 // while it persists and fewer than four did: one wake and three re-wakes per
@@ -58,7 +60,7 @@ const overseerItems = `WITH carrier AS (SELECT t.id AS task, t.created_at_ms AS 
 item AS (
 	SELECT t.id, t.updated_at_ms AS version, t.status IN ('blocked', 'failed') AS persistent, '' AS detail, lower(hex(t.id)) AS item_key
 	FROM tasks AS t JOIN agents AS a ON a.id = t.assigned_agent_id
-	WHERE t.project_id = ?1 AND a.role = 'worker' AND t.status IN ('succeeded', 'blocked', 'failed')
+	WHERE t.project_id = ?1 AND a.role = 'worker' AND t.status IN ('succeeded', 'blocked', 'failed') AND NOT ` + taskIssueWithdrawn + `
 	  AND NOT (t.status = 'succeeded' AND EXISTS (SELECT 1 FROM intake_task_bindings AS b WHERE b.task_id = t.id)
 	      AND EXISTS (SELECT 1 FROM changes AS c WHERE c.task_id = t.id AND c.head_commit <> c.base_commit))
 	UNION ALL SELECT r.task_id, h.created_at_ms, 1, '', lower(hex(r.task_id)) FROM human_requests AS h JOIN runs AS r ON r.id = h.run_id
@@ -74,7 +76,7 @@ item AS (
 	JOIN intake_task_bindings AS b ON b.task_id = t.id
 	JOIN intake_acceptances AS i ON i.id = b.acceptance_id
 	JOIN agents AS o ON o.id = i.overseer_agent_id
-	WHERE t.project_id = ?1 AND o.id = ?4 AND t.status IN ('failed', 'cancelled')
+	WHERE t.project_id = ?1 AND o.id = ?4 AND ` + taskEndedAutomatically + ` AND NOT ` + taskIssueWithdrawn + `
 	UNION ALL SELECT NULL, e.observed_at_ms, 1, json_extract(e.document, '$.escalation'), '[reviewer:' || e.identity || ']' FROM production_records AS e
 	JOIN production_records AS p ON p.project_id = e.project_id AND p.repository = e.repository AND p.kind = 'pull_request'
 	  AND p.identity = CAST(json_extract(e.document, '$.request.PullNumber') AS TEXT)
