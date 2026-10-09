@@ -50,6 +50,18 @@ jobs:
           git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
           git fetch --no-tags --depth=1 origin "$BASE_SHA" "$GITHUB_SHA"
           git diff --check "$BASE_SHA" "$GITHUB_SHA"
+          # A formatting slip otherwise costs a whole queue run and the
+          # entries rebuilt behind it. Same pinned Go as the macOS gate.
+          go_archive=go1.27.2.linux-amd64.tar.gz
+          curl --fail --silent --show-error --location "https://dl.google.com/go/$go_archive" -o "$RUNNER_TEMP/$go_archive"
+          checksum=$(curl --fail --silent --show-error --location "https://dl.google.com/go/$go_archive.sha256")
+          printf '%s  %s\n' "$checksum" "$RUNNER_TEMP/$go_archive" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/$go_archive" -C "$RUNNER_TEMP"
+          unformatted=
+          for file in $(git diff --name-only --diff-filter=AMR "$BASE_SHA" "$GITHUB_SHA" -- '*.go'); do
+            [ -z "$(git show "$GITHUB_SHA:$file" | "$RUNNER_TEMP/go/bin/gofmt" -l)" ] || unformatted="$unformatted $file"
+          done
+          [ -z "$unformatted" ] || { echo "::error::gofmt required:$unformatted"; exit 1; }
 
   # This classifier lives in the CODEOWNED workflow, not in a PR-publishable
   # script. The diff is the queue's whole combined tree, so entries ahead of
