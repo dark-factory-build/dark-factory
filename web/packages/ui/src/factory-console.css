@@ -421,7 +421,7 @@
 .dfFactoryConsole__deviceSince { color: var(--df-console-muted); }
 
 @media (max-width: 720px) {
-  .dfFactoryConsole__header,
+  .dfFactoryConsole__header { align-items: flex-start; flex-direction: column; }
   .dfFactoryConsole__connection { justify-items: start; }
 }
 
