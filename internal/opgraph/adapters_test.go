@@ -19,7 +19,7 @@ const otlpExport = `{"resourceSpans":[{"resource":{"attributes":[{"key":"service
  ]}]}]}`
 
 func TestOTLPExportBecomesObservationsAndKeyCoverage(t *testing.T) {
-	observations, coverage, err := DecodeOTLP([]byte(otlpExport), 10*minute)
+	observations, coverage, err := DecodeOTLP([]byte(otlpExport), 10*minute, false)
 	if err != nil || len(observations) != 2 || len(coverage) != 1 {
 		t.Fatalf("observations=%+v coverage=%+v err=%v", observations, coverage, err)
 	}
@@ -45,8 +45,34 @@ func TestOTLPExportBecomesObservationsAndKeyCoverage(t *testing.T) {
 			t.Fatal("payload attribute retained")
 		}
 	}
-	if _, _, err := DecodeOTLP([]byte("not json"), 0); err == nil {
+	if _, _, err := DecodeOTLP([]byte("not json"), 0, false); err == nil {
 		t.Fatal("garbage accepted")
+	}
+}
+
+func TestOTLPEnvironmentComesFromTheResourceAndDefaultsToLocal(t *testing.T) {
+	for key, want := range map[string]string{"deployment.environment.name": "staging", "deployment.environment": "production", "service.namespace": "local"} {
+		export := `{"resourceSpans":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"api"}},{"key":"` + key + `","value":{"stringValue":"` + want + `"}}]},"scopeSpans":[{"spans":[{"kind":2}]}]}]}`
+		observations, coverage, err := DecodeOTLP([]byte(export), 0, false)
+		if err != nil || len(observations) != 1 || len(coverage) != 1 {
+			t.Fatalf("%s: observations=%+v coverage=%+v err=%v", key, observations, coverage, err)
+		}
+		if observations[0].Environment != want || coverage[0].Environment != want || observations[0].Source != "otlp" || coverage[0].Source != "otlp" {
+			t.Fatalf("%s: observation=%+v coverage=%+v, want environment %q from otlp", key, observations[0], coverage[0], want)
+		}
+	}
+}
+
+// A relayed export has its own source and never passes as local, even when
+// it claims to be.
+func TestRemoteOTLPIsNeverLocal(t *testing.T) {
+	for claim, want := range map[string]string{"": "remote", "local": "remote", "production": "production"} {
+		export := `{"resourceSpans":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"site"}},{"key":"deployment.environment.name","value":{"stringValue":"` + claim + `"}}]},"scopeSpans":[{"spans":[{"kind":2}]}]}]}`
+		observations, coverage, err := DecodeOTLP([]byte(export), 0, true)
+		if err != nil || len(observations) != 1 || observations[0].Environment != want || observations[0].Source != "otlp-remote" ||
+			coverage[0].Environment != want || coverage[0].Source != "otlp-remote" {
+			t.Fatalf("claim %q: observations=%+v coverage=%+v err=%v", claim, observations, coverage, err)
+		}
 	}
 }
 
@@ -55,6 +81,10 @@ func TestCloudflareCoversEveryNamedScriptAtScriptGranularity(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if request.Header.Get("Authorization") != "Bearer token" {
 			writer.WriteHeader(http.StatusForbidden)
+			return
+		}
+		if request.URL.Path == "/accounts/acct/workers/domains" {
+			_, _ = writer.Write([]byte(`{"success":true,"result":[{"hostname":"Gate.darkfactory.build","service":"relay"},{"hostname":"other.dev","service":"someone-else"}]}`))
 			return
 		}
 		body, _ := io.ReadAll(request.Body)
@@ -84,6 +114,15 @@ func TestCloudflareCoversEveryNamedScriptAtScriptGranularity(t *testing.T) {
 	if _, _, err := PullCloudflare(context.Background(), server.Client(), "acct", "wrong", nil, "production", now, time.Minute); err == nil {
 		t.Fatal("refused token reported success")
 	}
+	// Custom domains belong to the unit a mapped Worker answers to; a token
+	// refused them (403) sees none, which is not an error.
+	hosts, err := CloudflareDomains(context.Background(), server.Client(), "acct", "token", map[string]string{"relay": "relay-unit"})
+	if err != nil || len(hosts) != 1 || strings.Join(hosts["relay-unit"], ",") != "gate.darkfactory.build" {
+		t.Fatalf("hosts = %v, %v", hosts, err)
+	}
+	if hosts, err := CloudflareDomains(context.Background(), server.Client(), "acct", "wrong", map[string]string{"relay": "relay-unit"}); err != nil || len(hosts) != 0 {
+		t.Fatalf("a refused domains read = %v, %v", hosts, err)
+	}
 }
 
 func TestHostileInputsStayBounded(t *testing.T) {
@@ -94,7 +133,7 @@ func TestHostileInputsStayBounded(t *testing.T) {
 		routes.WriteString(`http.HandleFunc("/r` + strconv.Itoa(index) + `", nil)` + "\n")
 	}
 	routes.WriteString("}\n")
-	graph, err := Infer("s", []Repository{{ID: "r", Name: "r", Files: map[string][]byte{"go.mod": []byte("module x\n"), "cmd/x/main.go": []byte(routes.String())}}})
+	graph, err := Infer("s", []Repository{{ID: "r", Name: "r", Files: map[string][]byte{"go.mod": []byte("module x\n"), "cmd/x/main.go": []byte(routes.String())}}}, nil)
 	if err != ErrBounds || len(graph.Nodes) != MaxNodes {
 		t.Fatalf("bounded graph: %d nodes, %v", len(graph.Nodes), err)
 	}
@@ -104,7 +143,7 @@ func TestHostileInputsStayBounded(t *testing.T) {
 		constants.WriteString("const u" + strconv.Itoa(constants.Len()) + " = 'https://a.io/'\n")
 	}
 	started := time.Now()
-	if _, err := Infer("s", []Repository{{ID: "r", Name: "r", Files: map[string][]byte{"package.json": []byte(`{"name":"x","dependencies":{"express":"4"}}`), "big.ts": []byte(constants.String())}}}); err != nil || time.Since(started) > 5*time.Second {
+	if _, err := Infer("s", []Repository{{ID: "r", Name: "r", Files: map[string][]byte{"package.json": []byte(`{"name":"x","dependencies":{"express":"4"}}`), "big.ts": []byte(constants.String())}}}, nil); err != nil || time.Since(started) > 5*time.Second {
 		t.Fatalf("large source took %v: %v", time.Since(started), err)
 	}
 	// Runtime floods neither panic nor push out the newest evidence.

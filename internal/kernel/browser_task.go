@@ -39,13 +39,18 @@ func (store *Store) EnqueueTaskForBrowserAgent(ctx context.Context, clientID Bro
 // direct instructions still require an empty, unpaused agent. Any-worker
 // work is queued with no assigned agent; admission claims it.
 func (store *Store) EnqueueTaskForBrowserAgentMode(ctx context.Context, clientID BrowserClientID, taskID TaskID, incarnationID IncarnationID, agentID AgentID, expectedAgentRevision Revision, instruction string, mode BrowserEnqueueMode, at UnixMillis) (BrowserTaskEnqueue, error) {
-	return store.EnqueueTaskForBrowserAgentRepositoryMode(ctx, clientID, taskID, incarnationID, agentID, expectedAgentRevision, RepositoryID{}, instruction, mode, at)
+	return store.EnqueueTaskForBrowserAgentRepositoryMode(ctx, clientID, taskID, incarnationID, agentID, expectedAgentRevision, RepositoryID{}, instruction, mode, at, nil)
 }
 
 // EnqueueTaskForBrowserAgentRepositoryMode retains the agent-derived project
 // while letting an administrator choose one enabled repository for this task.
-// A zero repository selects that project's durable default.
-func (store *Store) EnqueueTaskForBrowserAgentRepositoryMode(ctx context.Context, clientID BrowserClientID, taskID TaskID, incarnationID IncarnationID, agentID AgentID, expectedAgentRevision Revision, repositoryID RepositoryID, instruction string, mode BrowserEnqueueMode, at UnixMillis, attachments ...TaskAttachment) (BrowserTaskEnqueue, error) {
+// A zero repository selects that project's durable default. Content
+// references (ContentID and ContentRevision) are pinned in the same
+// transaction under the same scope checks as attach, so no worker can admit
+// the task without them; any refused reference refuses the whole enqueue.
+// A replay returns the first enqueue's pins: the console mints a new task ID
+// for every submission, so one ID never carries different content.
+func (store *Store) EnqueueTaskForBrowserAgentRepositoryMode(ctx context.Context, clientID BrowserClientID, taskID TaskID, incarnationID IncarnationID, agentID AgentID, expectedAgentRevision Revision, repositoryID RepositoryID, instruction string, mode BrowserEnqueueMode, at UnixMillis, content []TaskContentReference, attachments ...TaskAttachment) (BrowserTaskEnqueue, error) {
 	if _, err := TaskAttachmentInstruction(instruction, attachments); err != nil {
 		return BrowserTaskEnqueue{}, err
 	}
@@ -112,6 +117,11 @@ func (store *Store) EnqueueTaskForBrowserAgentRepositoryMode(ctx context.Context
 	}
 	for i, item := range attachments {
 		if _, err := tx.connection.ExecContext(ctx, `INSERT INTO task_attachments (task_id, position, name, data) VALUES (?, ?, ?, ?)`, taskID.Bytes(), i, item.Name, item.Data); err != nil {
+			return BrowserTaskEnqueue{}, tx.Rollback(err)
+		}
+	}
+	for _, item := range content {
+		if err := attachContentTx(ctx, tx, taskID, result.ProjectID, result.WorkRevision.Int64(), item.ContentID, item.ContentRevision, at); err != nil {
 			return BrowserTaskEnqueue{}, tx.Rollback(err)
 		}
 	}

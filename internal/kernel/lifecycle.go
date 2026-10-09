@@ -371,6 +371,9 @@ func (store *Store) ProposeAttemptOutcome(ctx context.Context, digest AttemptDig
 // unless the previous run ended the same way.
 const NeverStartedRunDetail = "never started: no terminal output or attempt call after launch"
 
+// RunLimitDetail cancels a worker run past its run limit: an automatic end.
+const RunLimitDetail = "Run time limit reached"
+
 // ProviderCapacityRunDetail is the provider-exit failure of a run whose
 // provider reported its model at capacity: transient, so it is retried as a
 // never-started run is.

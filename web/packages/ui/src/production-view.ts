@@ -1,3 +1,5 @@
+import type { SceneCrate } from "./factory-scene/scene.js";
+
 /** Facts persisted by the operator production projection. */
 export type ProductionRecord = Readonly<{
   project_id?: string;
@@ -50,6 +52,10 @@ export type ProductionContraption = Readonly<{
   deliveries: readonly (ProductionDelivery & { verified: boolean })[];
   reviewers: readonly ProductionReviewer[];
   completed: boolean; completedAt: number; status: string; nextAction: string;
+  /** Its repository's newest successful production deployment; absent without deployment records. */
+  deployedAt?: number;
+  /** When its records were last observed: the snapshot's own clock. */
+  observedAt: number;
 }>;
 export type ProductionView = Readonly<{
   contraptions: Readonly<Record<string, ProductionContraption>>;
@@ -65,7 +71,9 @@ export function proposedProduction(item: ProductionContraption): boolean {
   return item.pullRequest !== undefined ? !["closed", "merged"].includes(item.pullRequest.state) : item.construction?.status !== "cancelled" && !(item.construction?.status === "succeeded" && item.construction.has_changes === false);
 }
 
-const STALE_AFTER = 180_000;
+// Two production refresh intervals (factoryd productionRefreshInterval, 5 min):
+// a record is stale once a refresh was missed, not between two on time.
+const STALE_AFTER = 600_000;
 const text = (value: unknown) => typeof value === "string" ? value : "";
 const numbers = (value: unknown) => Array.isArray(value) ? value.filter((item): item is number => typeof item === "number" && Number.isSafeInteger(item) && item > 0) : [];
 const object = (value: unknown): Record<string, unknown> => value !== null && typeof value === "object" ? value as Record<string, unknown> : {};
@@ -185,6 +193,31 @@ export function productionStages(item: ProductionContraption): string[] {
   return correction ? ["Correction", ci] : merge ? [merge, ci] : [review, ci];
 }
 
+const SHIPPED_FOR = 24 * 60 * 60_000;
+/** factoryd deployingFor: a repository whose last production deployment is older than this at a merge no longer deploys that way, so the merge ships. */
+const DEPLOYING_FOR = 7 * 24 * 60 * 60_000;
+
+/**
+ * Each open or merged pull request as a crate on the floor's outbound line, at
+ * the first gate its records have not passed: review, then current-head
+ * checks, then the merge queue; merged is shipped for a day after its
+ * recorded merge, timed by the records' own latest observation, never the
+ * viewer's clock. Closed unmerged is gone. Where its repository records
+ * deployments, merged ships only once a successful production deployment was
+ * created at or after the merge, and waits at the merge queue's end until then.
+ */
+export function projectCrates(items: readonly ProductionContraption[]): SceneCrate[] {
+  const now = Math.max(0, ...items.map((item) => item.observedAt));
+  return items.flatMap((item) => {
+    const pr = item.pullRequest;
+    if (pr === undefined || pr.state !== "open" && (pr.state !== "merged" || now - item.completedAt > SHIPPED_FOR)) return [];
+    const stages = productionStages(item);
+    const station = pr.state === "merged" ? item.deployedAt === undefined || item.deployedAt >= item.completedAt || item.completedAt - item.deployedAt > DEPLOYING_FOR ? 3 : 2 : stages[0] === "Merge queued" ? 2 : item.review.allowed ? 1 : 0;
+    return [{ id: productionKey(item), number: pr.number, title: pr.title, station, stage: stages.join(" · "), taskIds: item.tasks,
+      fault: stages.some((stage) => stage === "Correction" || stage === "CI failed" || stage === "Delivery blocked") }];
+  });
+}
+
 /** Pure, bounded derivation. `now` is an explicit observation time, never a timer. */
 export function deriveProductionView(records: readonly ProductionRecord[], now = 0): ProductionView {
   const latest = latestRecords(records);
@@ -217,10 +250,10 @@ export function deriveProductionView(records: readonly ProductionRecord[], now =
     const assigned = pr ? Object.values(reviewers).filter((reviewer) => (reviewer.project_id ?? "") === item.scope.projectId && reviewer.repository === item.scope.repository && reviewer.number === pr.number && reviewer.head === pr.head) : [];
     const review = pr?.review ?? {};
     const reviewView = { head: text(review.head), state: text(review.state) || "unknown", current: reviewedSource && text(review.head) !== "" && text(review.head) === pr?.head, allowed: reviewedSource && sourceFresh && text(review.head) !== "" && text(review.head) === pr?.head && text(review.state) === "allow", sourceFresh, findings: text(review.findings), url: text(review.url) };
-    const closedUnmerged = pr?.state === "closed" && !pr.merge;
+    const closedUnmerged = pr?.state === "closed" && !pr.merge, deployedAt = object(repositoryRecord?.document).deployed_at;
     const completed = closedUnmerged || pr?.state === "merged" && pullDeliveries.length > 0 && latestDestinations(pullDeliveries).every((delivery) => delivery.verified);
     const doc = construction ? object(construction.document) : {};
-    contraptions[key] = { source, visualId: item.visualId, projectId: item.scope.projectId, repository: item.scope.repository, construction: construction ? { title: text(doc.title), phase: text(doc.phase), status: text(doc.status), head: text(doc.head), task_id: text(doc.task_id), blocked_reason: text(doc.blocked_reason), has_changes: typeof doc.has_changes === "boolean" ? doc.has_changes : undefined, needs_you: doc.needs_you === true } : undefined, pullRequest: pr, tasks: [...new Set([...(construction?.tasks ?? []), ...(pull?.tasks ?? [])])], missions: [...new Set([...(construction?.missions ?? []), ...(pull?.missions ?? [])])], linksOverflow: Boolean(construction?.links_overflow || pull?.links_overflow), review: reviewView, checks: pullChecks, deliveries: pullDeliveries, reviewers: assigned, completed: Boolean(completed), completedAt: Date.parse(pr?.merged_at ?? "") || pull?.observed_at || 0, status: completed ? (closedUnmerged ? "closed-unmerged" : "delivered") : text(pr?.state) || text(doc.status) || text(doc.phase) || "construction", nextAction: pr ? nextAction(pr, reviewView, pullChecks, pullDeliveries) : constructionNextAction(doc) };
+    contraptions[key] = { source, visualId: item.visualId, projectId: item.scope.projectId, repository: item.scope.repository, construction: construction ? { title: text(doc.title), phase: text(doc.phase), status: text(doc.status), head: text(doc.head), task_id: text(doc.task_id), blocked_reason: text(doc.blocked_reason), has_changes: typeof doc.has_changes === "boolean" ? doc.has_changes : undefined, needs_you: doc.needs_you === true } : undefined, pullRequest: pr, tasks: [...new Set([...(construction?.tasks ?? []), ...(pull?.tasks ?? [])])], missions: [...new Set([...(construction?.missions ?? []), ...(pull?.missions ?? [])])], linksOverflow: Boolean(construction?.links_overflow || pull?.links_overflow), review: reviewView, checks: pullChecks, deliveries: pullDeliveries, reviewers: assigned, completed: Boolean(completed), completedAt: Date.parse(pr?.merged_at ?? "") || pull?.observed_at || 0, deployedAt: typeof deployedAt === "number" ? deployedAt : undefined, observedAt: Math.max(pull?.observed_at ?? 0, construction?.observed_at ?? 0), status: completed ? (closedUnmerged ? "closed-unmerged" : "delivered") : text(pr?.state) || text(doc.status) || text(doc.phase) || "construction", nextAction: pr ? nextAction(pr, reviewView, pullChecks, pullDeliveries) : constructionNextAction(doc) };
   }
   return { contraptions, checks, deliveries, reviewers };
 }

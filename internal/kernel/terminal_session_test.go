@@ -8,6 +8,7 @@ import (
 )
 
 func TestActivateRunRequiresExactTerminalSessionAndRevision(t *testing.T) {
+	t.Parallel()
 	store, run, keys := admittedOrchestratorRun(t)
 	defer store.Close()
 	_, run = activateAllResources(t, store, run, keys, 20)
@@ -37,6 +38,7 @@ func TestActivateRunRequiresExactTerminalSessionAndRevision(t *testing.T) {
 }
 
 func TestTerminalSessionActivationAndLiveCloseAreDurableTransitions(t *testing.T) {
+	t.Parallel()
 	store, _, keys := runningOrchestratorRun(t)
 	defer store.Close()
 	proposal, err := NewSuccessProposal("done")
@@ -157,6 +159,7 @@ func TestTerminalSessionActivationAndLiveCloseAreDurableTransitions(t *testing.T
 }
 
 func TestTerminalSessionChronologyCorruptionFailsClosed(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name   string
 		setup  func(*testing.T) (*Store, Run)
@@ -200,6 +203,7 @@ func TestTerminalSessionChronologyCorruptionFailsClosed(t *testing.T) {
 }
 
 func TestMissingTerminalSessionFailsValidatedReadsAndOpen(t *testing.T) {
+	t.Parallel()
 	store, run, _ := admittedOrchestratorRun(t)
 	path := storePath(t, store)
 	corruptSQL(t, store, `DELETE FROM terminal_sessions WHERE run_id = ?`, run.ID.Bytes())

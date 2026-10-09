@@ -139,6 +139,7 @@ func (daemon *Daemon) publishFailed(ctx context.Context, c kernel.PublishableCha
 // body-<HEAD8 of the new head>.
 func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChange, repo, source string, call publishCall, checkout publishCheckout) error {
 	operation := func(step string) string { return uuid5("dark-factory:" + c.Change.String() + ":" + step) }
+	state := "" // completed's last observation
 	completed := func(step string, result any) (bool, error) {
 		response, err := call(ctx, "observe_operation", map[string]any{"repository": repo, "operation_id": operation(step)})
 		var observed struct {
@@ -148,6 +149,7 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 		if err == nil {
 			err = json.Unmarshal(response, &observed)
 		}
+		state = observed.State
 		if err != nil || observed.State != "completed" {
 			return false, err
 		}
@@ -287,16 +289,23 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 		Head   string `json:"head_sha"`
 		Base   string `json:"base_sha"`
 	}
-	done, err = completed("pr-"+c.Head[:8], &pull)
+	step, base := "pr-"+c.Head[:8], ""
+	done, err = completed(step, &pull)
 	if err == nil && !done {
-		var base string
-		if base, err = refHead("main"); err == nil {
-			arguments := map[string]any{"repository": repo, "operation_id": operation("pr-" + c.Head[:8]), "head": branch, "head_sha": head, "base": "main", "base_sha": base, "title": message, "body": body, "draft": false,
-				"issue_number": c.Accepted.Snapshot.IssueNumber, "close_on_merge": true} // the source issue is in repo itself
-			var response json.RawMessage
-			if response, err = call(ctx, "create_pull_request", arguments); err == nil {
-				err = json.Unmarshal(response, &pull)
-			}
+		base, err = refHead("main")
+	}
+	// A create stopped before GitHub stays planned, bound to the main it
+	// named, and conflicts once main moves: retry under this main's own id.
+	if err == nil && !done && state == "planned" {
+		step += "-" + base
+		done, err = completed(step, &pull)
+	}
+	if err == nil && !done {
+		arguments := map[string]any{"repository": repo, "operation_id": operation(step), "head": branch, "head_sha": head, "base": "main", "base_sha": base, "title": message, "body": body, "draft": false,
+			"issue_number": c.Accepted.Snapshot.IssueNumber, "close_on_merge": true} // the source issue is in repo itself
+		var response json.RawMessage
+		if response, err = call(ctx, "create_pull_request", arguments); err == nil {
+			err = json.Unmarshal(response, &pull)
 		}
 	}
 	if err == nil && pull.Number == 0 {

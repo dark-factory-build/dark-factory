@@ -18,6 +18,7 @@ import (
 )
 
 func TestDatabaseImageOpenExactSchemaAndIdentity(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	path := mustCanonicalTestDatabasePath(t, filepath.Join(t.TempDir(), "kernel.db"))
 	at := mustTime(t, 42)
@@ -68,6 +69,7 @@ func TestDatabaseImageOpenExactSchemaAndIdentity(t *testing.T) {
 }
 
 func TestFreshSchemaHasNoSelectableLaunchPolicy(t *testing.T) {
+	t.Parallel()
 	store, _ := newTestStore(t)
 	defer store.Close()
 	removedColumn := "execution" + "_mode"
@@ -83,6 +85,7 @@ func TestFreshSchemaHasNoSelectableLaunchPolicy(t *testing.T) {
 }
 
 func TestOpenRejectsForeignPathsWithoutModification(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	at := mustTime(t, 1)
 
@@ -144,6 +147,7 @@ func TestOpenRejectsForeignPathsWithoutModification(t *testing.T) {
 }
 
 func TestOpenRejectsUnknownVersionAndPartialIdentity(t *testing.T) {
+	t.Parallel()
 	for name, mutate := range map[string]func(*testing.T, *sql.DB){
 		"unknown version": func(t *testing.T, raw *sql.DB) {
 			if _, err := raw.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, userVersion+1)); err != nil {
@@ -151,7 +155,7 @@ func TestOpenRejectsUnknownVersionAndPartialIdentity(t *testing.T) {
 			}
 		},
 		"earlier version": func(t *testing.T, raw *sql.DB) {
-			if _, err := raw.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, userVersion-1)); err != nil {
+			if _, err := raw.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, v36UserVersion-1)); err != nil {
 				t.Fatal(err)
 			}
 		},
@@ -181,6 +185,7 @@ func TestOpenRejectsUnknownVersionAndPartialIdentity(t *testing.T) {
 }
 
 func TestOpenRejectsEverySchemaDrift(t *testing.T) {
+	t.Parallel()
 	tests := map[string]string{
 		"missing": `DROP INDEX tasks_canonical_queue`,
 		"extra":   `CREATE TABLE surprise(value INTEGER) STRICT`,
@@ -209,6 +214,7 @@ func TestOpenRejectsEverySchemaDrift(t *testing.T) {
 }
 
 func TestLiteralSQLiteInternalPrefixNeverHidesForeignSchema(t *testing.T) {
+	t.Parallel()
 	statements := map[string]string{
 		"table":             `CREATE TABLE sqliteXtable(value INTEGER)`,
 		"index":             `CREATE INDEX sqliteXindex ON factory(updated_at_ms)`,
@@ -261,6 +267,7 @@ func TestLiteralSQLiteInternalPrefixNeverHidesForeignSchema(t *testing.T) {
 }
 
 func TestLiteralSQLiteInternalPrefixCoversEveryInspectionPath(t *testing.T) {
+	t.Parallel()
 	path := mutatedRollbackPath(t, `CREATE TABLE sqliteXrollback(value INTEGER)`)
 	contents, err := os.ReadFile(path)
 	if err != nil {
@@ -287,6 +294,7 @@ func TestLiteralSQLiteInternalPrefixCoversEveryInspectionPath(t *testing.T) {
 }
 
 func TestLiteralImmediateExclusionAndCancelledWait(t *testing.T) {
+	t.Parallel()
 	store, path := newTestStore(t)
 	defer store.Close()
 	ctx := context.Background()
@@ -322,7 +330,7 @@ func TestLiteralImmediateExclusionAndCancelledWait(t *testing.T) {
 	project := NewProject{ID: projectID(t, 9), Name: "blocked", Root: filepath.Join(t.TempDir(), "root")}
 	_, err = store.CreateProject(deadline, project, mustTime(t, 5))
 	var unknown *OutcomeUnknownError
-	if !errors.As(err, &unknown) || !errors.Is(err, context.DeadlineExceeded) {
+	if errors.As(err, &unknown) || !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("cancelled writer error = %v", err)
 	}
 	if _, err := other.Exec(`ROLLBACK`); err != nil {

@@ -44,7 +44,7 @@ func (backend *browserBackend) AttachTerminal(ctx context.Context, request brows
 	}
 	attachment, err := backend.owner.AttachTerminal(ctx, runID, sessionID, expectedRun, expectedSession, after)
 	if err != nil {
-		return nil, mapBrowserError(err)
+		return nil, err
 	}
 	return attachment, nil
 }
@@ -56,7 +56,7 @@ func (backend *browserBackend) AcquireTerminalLease(ctx context.Context, princip
 	}
 	lease, err := backend.owner.terminalLeaseAcquire(ctx, principal, runID, sessionID, runRevision, sessionRevision)
 	if err != nil {
-		return browser.TerminalLeaseResult{}, mapBrowserError(err)
+		return browser.TerminalLeaseResult{}, err
 	}
 	return projectLease("acquired", lease), nil
 }
@@ -71,7 +71,7 @@ func (backend *browserBackend) RenewTerminalLease(ctx context.Context, principal
 	}
 	lease, err := backend.owner.terminalLeaseRenew(ctx, principal, runID, sessionID, uint64(request.Generation), runRevision, sessionRevision)
 	if err != nil {
-		return browser.TerminalLeaseResult{}, mapBrowserError(err)
+		return browser.TerminalLeaseResult{}, err
 	}
 	return projectLease("renewed", lease), nil
 }
@@ -86,7 +86,7 @@ func (backend *browserBackend) ReleaseTerminalLease(ctx context.Context, princip
 	}
 	lease, err := backend.owner.terminalLeaseRelease(ctx, principal, runID, sessionID, uint64(request.Generation), runRevision, sessionRevision)
 	if err != nil {
-		return browser.TerminalLeaseResult{}, mapBrowserError(err)
+		return browser.TerminalLeaseResult{}, err
 	}
 	return projectLease("released", lease), nil
 }
@@ -100,7 +100,7 @@ func (backend *browserBackend) ResizeTerminal(ctx context.Context, request brows
 		return browser.ErrStale
 	}
 	err = backend.owner.terminalResize(ctx, request.Principal, runID, sessionID, uint64(request.Request.Generation), runRevision, sessionRevision, request.Request.Rows, request.Request.Cols)
-	return mapBrowserError(err)
+	return err
 }
 
 func (backend *browserBackend) InputTerminal(ctx context.Context, request browser.TerminalInputRequest) (uint32, error) {
@@ -129,7 +129,7 @@ func (backend *browserBackend) InputTerminal(ctx context.Context, request browse
 			return count, errors.Join(browser.ErrTerminalUncertain, err)
 		}
 	}
-	return count, mapBrowserError(err)
+	return count, err
 }
 
 func (backend *browserBackend) ReplyHumanRequest(ctx context.Context, principal browser.Principal, request browserprotocol.HumanRequestReply) (browserprotocol.HumanRequestReplyResult, error) {
@@ -144,7 +144,7 @@ func (backend *browserBackend) ReplyHumanRequest(ctx context.Context, principal 
 	_, effectErr := backend.owner.humanReply(ctx, principal, requestID, expected, request.Reply)
 	projection, err := backend.owner.humanReplyOutcome(requestID, effectErr)
 	if err != nil {
-		return browserprotocol.HumanRequestReplyResult{}, mapBrowserError(err)
+		return browserprotocol.HumanRequestReplyResult{}, err
 	}
 	status := "resolved"
 	if projection.Status == kernel.HumanRequestDeliveryUnknown {
@@ -177,7 +177,7 @@ func (backend *browserBackend) CancelHumanRequestRun(ctx context.Context, princi
 	}
 	run, requestRow, err := backend.owner.cancelHumanRequestRun(ctx, clientID, requestID, expectedRequest, expectedRun, at)
 	if err != nil {
-		return browserprotocol.HumanRequestCancelRunResult{}, mapBrowserError(err)
+		return browserprotocol.HumanRequestCancelRunResult{}, err
 	}
 	return browserprotocol.HumanRequestCancelRunResult{RunID: run.ID.String(), RunRevision: decimalRevision(run.Revision), RequestID: requestRow.ID.String(), RequestRevision: decimalRevision(requestRow.Revision), RunRevisionChanged: run.Revision != expectedRun}, nil
 }

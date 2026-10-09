@@ -71,7 +71,7 @@ require_job() {
 assert_job_field eligibility if "github.event_name == 'pull_request'"
 require_job eligibility 'git diff --check "$BASE_SHA" "$GITHUB_SHA"'
 full_events="github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch'"
-assert_job_field scope if "$full_events"
+assert_job_field scope if ""
 assert_job_field checks needs "scope"
 assert_job_field checks if "needs.scope.result == 'success' && needs.scope.outputs.macos == 'true'"
 assert_job_field control-plane needs "scope"
@@ -103,7 +103,7 @@ expected_diagnostic_keys=$(printf '%s\n' name if env run)
     echo "live merge-rule diagnostic has unexpected step controls" >&2
     exit 1
 }
-source_condition="if: (github.event_name == 'pull_request' && needs.eligibility.result != 'success') || ((github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch') && (needs.scope.result != 'success' || (needs.scope.outputs.macos == 'true' && needs.checks.result != 'success') || (needs.scope.outputs.control_plane == 'true' && needs.control-plane.result != 'success') || (needs.scope.outputs.relay == 'true' && needs.relay.result != 'success')))"
+source_condition="if: (github.event_name == 'pull_request' && needs.eligibility.result != 'success') || (github.event_name != 'push' && (needs.scope.result != 'success' || (needs.scope.outputs.macos == 'true' && needs.checks.result != 'success') || (needs.scope.outputs.control_plane == 'true' && needs.control-plane.result != 'success') || (needs.scope.outputs.relay == 'true' && needs.relay.result != 'success')))"
 require_job required "$source_condition"
 require_job required "needs.review.result != 'success' && (github.event_name == 'merge_group' || needs.review.result != 'skipped')"
 require_job required 'rules/branches/${BASE_BRANCH}'
@@ -271,6 +271,29 @@ scope_case true false false full web/packages/ui/src/console-view.ts web/package
 run_scope workflow_dispatch '' false
 [ "$(sort "$temporary/scope-output" | tr '\n' ' ')" = \
     'control_plane=true macos=true macos_mode=full relay=true ' ]
+# A pull request runs its affected packages against the merge base; a
+# documentation-only pull request allocates no Mac.
+run_scope pull_request aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa false internal/kernel/store.go
+grep -qx 'macos_mode=affected' "$temporary/scope-output" \
+    && grep -qx 'base=cccccccccccccccccccccccccccccccccccccccc' "$temporary/scope-output" || {
+    echo "pull request scope did not select the affected gate" >&2
+    exit 1
+}
+run_scope pull_request aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa false docs/install.md
+[ "$(sort "$temporary/scope-output" | tr '\n' ' ')" = \
+    'control_plane=false macos=false macos_mode=none relay=false ' ] || {
+    echo "documentation-only pull request allocated a Mac" >&2
+    exit 1
+}
+require_job checks './scripts/local-ci.sh --affected "$AFFECTED_BASE"'
+# A push to main only warms the cache that queue runs restore.
+run_scope push '' false
+[ "$(sort "$temporary/scope-output" | tr '\n' ' ')" = \
+    'control_plane=false macos=true macos_mode=warm relay=false ' ]
+require_job checks './scripts/local-ci.sh --warm'
+require_job checks 'actions/cache/restore@'
+require_job checks 'fail-fast: false'
+require_job checks "if: github.event_name == 'push'"
 if run_scope merge_group bad false >/dev/null 2>&1; then
     echo "invalid scope commit passed" >&2
     exit 1

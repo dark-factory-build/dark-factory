@@ -25,7 +25,7 @@ import test from 'node:test';
 
 register('./ts-loader.mjs', import.meta.url);
 
-const { verifyHostToken, verifyTicket, verifyProof, nodeIdForKey } = await import('../src/tokens.ts');
+const { verifyHostToken, verifyTicket, verifyProof, nodeIdForKey, publicIdForKey } = await import('../src/tokens.ts');
 
 const fixture = JSON.parse(await readFile(fileURLToPath(new URL('../fixtures/tokens.json', import.meta.url)), 'utf8'));
 
@@ -43,6 +43,11 @@ function corrupt(token) {
 
 test('the node id derives from the fixture public key', async () => {
 	assert.equal(await nodeIdForKey(decode(fixture.publicKey, 32)), fixture.nodeId);
+});
+
+test('the public id derives from the fixture public key and is not the node id', async () => {
+	assert.equal(await publicIdForKey(decode(fixture.publicKey, 32)), fixture.publicId);
+	assert.notEqual(fixture.publicId, fixture.nodeId);
 });
 
 test('the fixture host token verifies at its own issued instant', async () => {

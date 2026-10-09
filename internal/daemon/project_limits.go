@@ -9,7 +9,6 @@ import (
 )
 
 const (
-	runLimitDetail   = "Run time limit reached"
 	stalledRunDetail = "stalled: no terminal output or attempt call for 10m; last output: "
 	// ownerlessRunAge keeps re-recovery off a run that is still between
 	// admission and live-owner registration.
@@ -45,7 +44,7 @@ func (daemon *Daemon) enforceRunLiveness(ctx context.Context, spec SupervisorSpe
 		if run.Role == kernel.RoleOrchestrator {
 			_, err = daemon.store.FailRun(ctx, run.ID, run.Revision, overseerLimit, at)
 		} else {
-			_, err = daemon.store.CancelRun(ctx, run.ID, run.Revision, runLimitDetail, at)
+			_, err = daemon.store.CancelRun(ctx, run.ID, run.Revision, kernel.RunLimitDetail, at)
 		}
 		if err != nil && !casLost(err) {
 			return err

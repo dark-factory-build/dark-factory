@@ -7,6 +7,7 @@ import (
 )
 
 func TestRepositoryGitHubIdentityRequiresProofAndPinsOnce(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, path := newTestStore(t)
 	project, err := store.CreateProject(ctx, NewProject{ID: projectID(t, 208), Name: "github", Root: "/github"}, mustTime(t, 2))

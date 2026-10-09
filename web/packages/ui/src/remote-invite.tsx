@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
-import { CAPABILITIES, type BrowserClientsView } from "@dark-factory/client";
+import { CAPABILITIES, type BrowserClientsView, type TelemetryIngest, type TelemetryIngestBody } from "@dark-factory/client";
 import type { FactoryRemoteInvite } from "./factory-app-controller.js";
-import { SectionHeader, formatTime } from "./console-kit.js";
+import { SectionHeader, Status, formatTime } from "./console-kit.js";
 
 export type RemoteInvitePanelProps = {
   invite?: FactoryRemoteInvite;
@@ -67,6 +67,49 @@ export function RemoteInvitePanel({ invite, error, onInvite, onDismiss, devices,
             );
           })}
         </ul>
+      )}
+    </section>
+  );
+}
+
+/** Where platforms push OTLP traces, and the bearer they present. A minted
+ * secret lives only in this component's state, shown once until dismissed. */
+export function TelemetryIngestPanel({ onIngest }: { onIngest: (action: TelemetryIngestBody["action"]) => Promise<TelemetryIngest> }) {
+  const [ingest, setIngest] = useState<TelemetryIngest | undefined>(undefined);
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | undefined>(undefined);
+  const run = (action: TelemetryIngestBody["action"]) => {
+    setPending(true); setError(undefined);
+    onIngest(action).then(setIngest, (failure: unknown) => setError(failure instanceof Error ? failure.message : "internal")).finally(() => setPending(false));
+  };
+  useEffect(() => { run("status"); }, []);
+  const copy = (text: string) => { void navigator.clipboard?.writeText(text).catch(() => undefined); };
+  const header = ingest?.secret ? `Authorization: Bearer ${ingest.secret}` : undefined;
+  return (
+    <section className="dfFactoryConsole__section dfFactoryConsole__pairPhone" aria-label="Telemetry ingest">
+      <SectionHeader as="h4" title="Telemetry ingest" />
+      <p>Platforms that push OpenTelemetry traces — Vercel Trace Drains, a collector — send them here; the relay forwards them to this factory.</p>
+      {ingest === undefined ? null : (
+        <>
+          <code>{ingest.url}</code>
+          <button type="button" onClick={() => copy(ingest.url)}>Copy URL</button>
+          <Status stage={ingest.active ? "ready" : "off"}>{ingest.active ? "Active" : "Off"}</Status>
+        </>
+      )}
+      {header === undefined || ingest === undefined ? null : (
+        <>
+          <code>{header}</code>
+          <button type="button" onClick={() => copy(header)}>Copy header</button>
+          <p>Shown once. Paste it as a custom header; rotating replaces it.</p>
+          <button type="button" onClick={() => setIngest({ ...ingest, secret: "" })}>Dismiss</button>
+        </>
+      )}
+      {error === undefined ? null : <p className="dfFactoryConsole__empty" role="alert">Telemetry ingest — {error.replace(/_/g, " ")}</p>}
+      {ingest === undefined ? null : (
+        <span className="dfFactoryConsole__device">
+          <button type="button" disabled={pending} onClick={() => run("mint")}>{ingest.active ? "Rotate secret" : "New secret"}</button>
+          {ingest.active ? <button type="button" className="dfDanger" disabled={pending} onClick={() => run("revoke")}>Revoke</button> : null}
+        </span>
       )}
     </section>
   );

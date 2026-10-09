@@ -79,6 +79,16 @@ type blackBoxFixture struct {
 	repo       string
 	factoryd   string
 	factoryctl string
+	// daemon is the factoryd most recently started by the harness.
+	daemon *factorydProcess
+}
+
+// factorydProcess is one harness-started factoryd. Its watcher owns Wait, so
+// a daemon that dies under a test is reported by its exit status or signal
+// instead of surfacing as a bare local API transport failure.
+type factorydProcess struct {
+	*exec.Cmd
+	exited chan struct{}
 }
 
 // TestBlackBoxDaemonLifecycle drives the real installed-shape binaries: a
@@ -189,7 +199,7 @@ func TestBlackBoxDaemonLifecycle(t *testing.T) {
 	if err := daemonC.Process.Signal(syscall.SIGTERM); err != nil {
 		t.Fatal(err)
 	}
-	if err := awaitProcessExit(daemonC, 30*time.Second); err != nil {
+	if err := daemonC.awaitExit(30 * time.Second); err != nil {
 		t.Fatalf("factoryd did not converge on SIGTERM: %v (output %q)", err, outputC.String())
 	}
 	if daemonC.ProcessState.ExitCode() != 0 {
@@ -288,22 +298,75 @@ func newBlackBoxFixture(t *testing.T) *blackBoxFixture {
 	return fixture
 }
 
-func (fixture *blackBoxFixture) startFactoryd(t *testing.T) (*exec.Cmd, *syncBuffer) {
+func (fixture *blackBoxFixture) startFactoryd(t *testing.T) (*factorydProcess, *syncBuffer) {
+	t.Helper()
+	return fixture.start(t, exec.Command(fixture.factoryd, "--home", fixture.home, "--development-browser-address", "127.0.0.1:0"))
+}
+
+func (fixture *blackBoxFixture) start(t *testing.T, command *exec.Cmd) (*factorydProcess, *syncBuffer) {
 	t.Helper()
 	output := &syncBuffer{}
-	command := exec.Command(fixture.factoryd, "--home", fixture.home, "--development-browser-address", "127.0.0.1:0")
 	// Keep startup diagnostics separate from arbitrary standard output.
 	command.Stderr = output
+	// A real factoryd never carries an attempt credential.
+	for _, entry := range os.Environ() {
+		if !strings.HasPrefix(entry, "DARK_FACTORY_ATTEMPT_") {
+			command.Env = append(command.Env, entry)
+		}
+	}
 	if err := command.Start(); err != nil {
 		t.Fatal(err)
 	}
+	daemon := &factorydProcess{Cmd: command, exited: make(chan struct{})}
+	go func() {
+		_ = command.Wait()
+		close(daemon.exited)
+	}()
 	t.Cleanup(func() {
-		if command.ProcessState == nil {
-			_ = command.Process.Kill()
-			_ = command.Wait()
-		}
+		_ = command.Process.Kill()
+		<-daemon.exited
 	})
-	return command, output
+	fixture.daemon = daemon
+	return daemon, output
+}
+
+func (daemon *factorydProcess) awaitExit(patience time.Duration) error {
+	select {
+	case <-daemon.exited:
+		return nil
+	case <-time.After(patience):
+		_ = daemon.Process.Kill()
+		return errors.New("process did not exit in time")
+	}
+}
+
+// factorydExit names how the harness factoryd ended when it is gone, and is
+// empty while it lives. The bounded wait covers the window between the socket
+// closing and the watcher reaping the process.
+func (fixture *blackBoxFixture) factorydExit() string {
+	if fixture.daemon == nil {
+		return ""
+	}
+	select {
+	case <-fixture.daemon.exited:
+		return fmt.Sprintf("; factoryd pid %d exited: %s", fixture.daemon.Process.Pid, fixture.daemon.ProcessState)
+	case <-time.After(time.Second):
+		return ""
+	}
+}
+
+// TestHarnessNamesTheSignalThatKilledFactoryd starts a stand-in through the
+// harness that SIGKILLs itself only when it inherited no attempt credential.
+func TestHarnessNamesTheSignalThatKilledFactoryd(t *testing.T) {
+	t.Setenv("DARK_FACTORY_ATTEMPT_TOKEN_FILE", "/nonexistent")
+	fixture := &blackBoxFixture{}
+	daemon, _ := fixture.start(t, exec.Command("/bin/sh", "-c", `[ -z "${DARK_FACTORY_ATTEMPT_TOKEN_FILE+set}" ] && kill -KILL $$`))
+	if err := daemon.awaitExit(10 * time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := fixture.factorydExit(), fmt.Sprintf("; factoryd pid %d exited: signal: killed", daemon.Process.Pid); got != want {
+		t.Fatalf("factoryd exit = %q, want %q", got, want)
+	}
 }
 
 func (fixture *blackBoxFixture) waitClient(t *testing.T, output func() string) *api.OperatorClient {
@@ -323,7 +386,7 @@ func (fixture *blackBoxFixture) waitClient(t *testing.T, output func() string) *
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
-	t.Fatalf("factoryd local API did not become ready: %s", startupDiagnostic(output))
+	t.Fatalf("factoryd local API did not become ready: %s%s", startupDiagnostic(output), fixture.factorydExit())
 	return nil
 }
 
@@ -384,7 +447,7 @@ func (fixture *blackBoxFixture) taskStatus(t *testing.T, client *api.OperatorCli
 	defer cancel()
 	snapshot, err := client.Snapshot(callContext)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("%v%s", err, fixture.factorydExit())
 	}
 	for _, task := range snapshot.Tasks {
 		if task.ID == taskID {
@@ -496,12 +559,12 @@ func (fixture *blackBoxFixture) killRunnerProcesses(t *testing.T) {
 	}
 }
 
-func (fixture *blackBoxFixture) sigkill(t *testing.T, command *exec.Cmd) {
+func (fixture *blackBoxFixture) sigkill(t *testing.T, daemon *factorydProcess) {
 	t.Helper()
-	if err := command.Process.Kill(); err != nil {
+	if err := daemon.Process.Kill(); err != nil {
 		t.Fatal(err)
 	}
-	if err := awaitProcessExit(command, 10*time.Second); err != nil {
+	if err := daemon.awaitExit(10 * time.Second); err != nil {
 		t.Fatal(err)
 	}
 }

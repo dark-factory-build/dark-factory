@@ -33,10 +33,12 @@ const (
 // durable Store and live attempt owners. It does not own an accept loop; the
 // caller accepts and hands one connection to HandleConnection.
 type Daemon struct {
-	log      io.Writer
-	intakeMu sync.Mutex
-	linear   *linear.Host
-	github   *maintainer.Host
+	log io.Writer
+	// statusOnly is set before the listener opens, so it needs no lock.
+	statusOnly bool
+	intakeMu   sync.Mutex
+	linear     *linear.Host
+	github     *maintainer.Host
 	// The scheduler's intake pass (tickIntake): per-source progress, guarded
 	// by intakeMu, and whether a pass is running.
 	intakePolls map[kernel.IntakeSourceID]*intakePoll
@@ -61,6 +63,10 @@ type Daemon struct {
 	// outside a paired client's gate.
 	browserRemote       func(context.Context, string)
 	productionRefreshMu sync.Mutex
+	// publicRepos caches what an anonymous GitHub reader sees of each
+	// repository the public world names (public_work.go).
+	publicRepoMu        sync.Mutex
+	publicRepos         map[string]*publicRepository
 	productionRefreshAt map[kernel.ProjectID]time.Time
 	// The scheduler's merge-pipeline pass (tickMergePipeline): the next pass
 	// time, read only by the scheduler loop, and whether a pass is running.
@@ -102,9 +108,14 @@ type Daemon struct {
 	// stale or unobserved, never as idle.
 	graphMu sync.Mutex
 	graphs  map[kernel.ProjectID]graphSnapshot
-	runtime *opgraph.Runtime
+	// graphBuilds is the one build running per project.
+	graphBuilds map[kernel.ProjectID]*graphBuild
+	runtime     *opgraph.Runtime
 	// polled is when the configured pull adapters last ran.
 	polled time.Time
+	// hosts are the hosts each platform source last reported a unit serves,
+	// by source and then service.name; the graph is inferred with them.
+	hosts map[string]map[string][]string
 
 	// providerDefaultCache holds the last read of each provider account's own
 	// configured model for a short window, on the same terms as graphs:
@@ -128,6 +139,10 @@ type Daemon struct {
 	gitExecutable atomic.Pointer[string]
 	runPathsMu    sync.Mutex
 	runPaths      map[kernel.RunID]runPathsResult
+	// telemetry holds each live or recently ended run's agent telemetry
+	// counts; like runtime, losing it reads as no telemetry, never as zero.
+	telemetryMu sync.Mutex
+	telemetry   map[kernel.RunID]*runTelemetry
 
 	attemptMu sync.Mutex
 	attempts  map[kernel.RunID]*liveAttempt
@@ -179,6 +194,10 @@ func (daemon *Daemon) livenessTimestamp() time.Time {
 	return time.Now()
 }
 
+// AnswerStatusOnly makes the daemon refuse every call but web_status: a
+// trial build must act on nothing while it proves itself.
+func (daemon *Daemon) AnswerStatusOnly() { daemon.statusOnly = true }
+
 // HandleConnection synchronously consumes exactly one authenticated request,
 // dispatches it, writes exactly one response, and closes the connection. The
 // API transport has already authenticated the domain and credential before a
@@ -191,6 +210,9 @@ func (daemon *Daemon) HandleConnection(ctx context.Context, connection *api.Conn
 	call, err := connection.Receive(ctx)
 	if err != nil {
 		return err
+	}
+	if daemon.statusOnly && call.Kind() != api.CallWebStatus {
+		return fmt.Errorf("%w: a trial build answers only web_status", kernel.ErrConflict)
 	}
 	// The overseer snapshot is observation, not provider work. Counting the
 	// request itself would make a snapshot unable to report the quiet interval
@@ -404,6 +426,12 @@ func (daemon *Daemon) dispatch(ctx context.Context, call api.Call) api.Reply {
 			return newErrorReply(api.RemoteInternal)
 		}
 		return reply
+	case api.CallWebPair:
+		link, err := daemon.OpenBrowser(ctx)
+		if err != nil {
+			return newErrorReply(remoteErrorCode(err))
+		}
+		return api.NewContentReply(api.WebPair{Link: link})
 	case api.CallWebListClients:
 		after, ok := call.WebListAfter()
 		if !ok {
@@ -1683,7 +1711,7 @@ func (daemon *Daemon) requestHuman(ctx context.Context, call api.Call) api.Reply
 	// A replayed idempotency key returns the earlier question; only a question
 	// that opened just now wakes the phones.
 	if request.CreatedAt == at {
-		go daemon.notifyPush(context.WithoutCancel(ctx), pushClient)
+		go daemon.notifyPush(context.WithoutCancel(ctx), daemon.observed(pushClient))
 	}
 	return daemon.mutation(ctx, request.Revision)
 }

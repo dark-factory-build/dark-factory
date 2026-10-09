@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -24,6 +25,7 @@ func TestParseExactWebCommands(t *testing.T) {
 	}{
 		{name: "web help", args: []string{"web", "--help"}, help: true},
 		{name: "status", args: []string{"web", "status"}, command: attemptCommand{kind: commandWebStatus}},
+		{name: "pair", args: []string{"web", "pair"}, command: attemptCommand{kind: commandWebPair}},
 		{name: "list", args: []string{"web", "list-clients"}, command: attemptCommand{kind: commandWebListClients}},
 		{name: "list after", args: []string{"web", "list-clients", "--after", id}, command: attemptCommand{kind: commandWebListClients, after: id}},
 		{name: "revoke", args: []string{"web", "revoke", id, "--revision", "7"}, command: attemptCommand{kind: commandWebRevoke, id: id, expectedRevision: 7}},
@@ -40,7 +42,7 @@ func TestParseExactWebCommands(t *testing.T) {
 
 func TestInvalidWebSyntaxStopsBeforeEnvironmentAndOpener(t *testing.T) {
 	tests := [][]string{
-		{"web", "pair"},
+		{"web", "pair", "extra"},
 		{"web", "open"},
 		{"web", "open", "--help"},
 		{"web", "list-clients", "--after=0123456789abcdef0123456789abcdef"},
@@ -184,6 +186,60 @@ func TestWebListAndRevokeUseTypedOperatorCalls(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), `"revision":2`) || stderr.Len() != 0 {
 		t.Fatalf("revoke output = %q/%q", stdout.String(), stderr.String())
+	}
+}
+
+// The pairing link is a credential: web pair hands it to the browser opener
+// and nowhere else, including when the opener fails.
+func TestWebPairHandsTheLinkOnlyToTheBrowser(t *testing.T) {
+	const link = "https://app.darkfactory.build/#df_pair=00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+	fixture := newAPIFixture(t)
+	defer fixture.close(t)
+	pair := func(call api.Call) api.Reply {
+		if call.Kind() != api.CallWebPair {
+			return mustWebErrorReply(t, api.RemoteInvalidRequest)
+		}
+		return api.NewContentReply(api.WebPair{Link: link})
+	}
+	done := serveMany(fixture.listener, pair, pair)
+	for _, openErr := range []error{nil, errors.New("no desktop")} {
+		var stdout, stderr bytes.Buffer
+		opened := []string{}
+		exit := runWithOpener(context.Background(), []string{"web", "pair"}, webEnvironment(fixture), &stdout, &stderr, func(_ context.Context, value string) error {
+			opened = append(opened, value)
+			return openErr
+		})
+		if want := map[bool]int{true: 0, false: exitFailure}[openErr == nil]; exit != want || len(opened) != 1 || opened[0] != link {
+			t.Fatalf("web pair exit %d (want %d) opened %q stderr %q", exit, want, opened, stderr.String())
+		}
+		if strings.Contains(stdout.String()+stderr.String(), "df_pair") {
+			t.Fatalf("web pair printed the link: %q / %q", stdout.String(), stderr.String())
+		}
+	}
+	awaitMany(t, done, 2)
+}
+
+// A bare operator command finds the installed home; an attempt context never
+// does, so a worker is never handed operator.token.
+func TestOperatorEnvironmentDefaultsToTheInstalledHomeOutsideAttempts(t *testing.T) {
+	environment := func(values map[string]string) func(string) string {
+		return defaultOperatorHome(func(name string) string { return values[name] })
+	}
+	bare := environment(map[string]string{"HOME": "/Users/someone"})
+	if got := bare("DARK_FACTORY_SOCKET"); got != "/Users/someone/.dark-factory/runtimes/factory.sock" {
+		t.Fatalf("default socket = %q", got)
+	}
+	if got := bare("DARK_FACTORY_OPERATOR_TOKEN_FILE"); got != "/Users/someone/.dark-factory/operator.token" {
+		t.Fatalf("default token = %q", got)
+	}
+	for _, values := range []map[string]string{
+		{"HOME": "/Users/someone", "DARK_FACTORY_ATTEMPT_TOKEN_FILE": "/private/attempt.token"},
+		{"HOME": "/Users/someone", "DARK_FACTORY_FACTORYCTL": "/usr/local/bin/factoryctl"},
+		{"HOME": "/Users/someone", "DARK_FACTORY_SOCKET": "/private/other.sock"},
+	} {
+		if got := environment(values)("DARK_FACTORY_OPERATOR_TOKEN_FILE"); got != "" {
+			t.Fatalf("%v fell back to %q", values, got)
+		}
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 )
 
 func TestSetProjectRepositoryDefaultRevisesOutgoingRepository(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, _ := newTestStore(t)
 	defer store.Close()

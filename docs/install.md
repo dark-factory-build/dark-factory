@@ -23,9 +23,10 @@ file, or source checkout is needed. See the intake instructions below.
 
 Create and install one managed home. Those two commands are the whole terminal
 side of setup: an install that starts a fresh service loads the launchd job,
-waits for the daemon to listen, and opens <http://127.0.0.1:43123/pair> in this
-machine's default browser, where confirming pairs that browser. A repeated
-install returns the service it found and opens nothing. `service start` is the
+waits for the daemon to answer, mints a one-shot pairing link with the home's
+operator token, and opens it in this machine's default browser, which pairs that
+browser. The link is never printed. A repeated install returns the service it
+found and opens nothing. `service start` is the
 explicit command to use after a later stop:
 
 ```sh
@@ -76,58 +77,40 @@ you want: repeating an install with a different origin refuses, printing the
 origin already installed, rather than silently keeping or dropping it. Pair a
 phone from the console's PAIR A PHONE button.
 
-Pairing never needs the terminal. Another browser on this machine pairs from the
-console's PAIR THIS BROWSER link, which goes to
-<http://127.0.0.1:43123/pair>; the daemon serves that one first-party page and
-nothing else. Pairing again there is also how a browser replaces a saved
-credential this daemon no longer accepts.
+Pairing a browser with the full grant is an operator action: `factoryctl web
+pair` mints a one-shot link (it expires after five minutes) and opens your
+default browser already paired, never printing the link. Run it to pair another browser on
+this Mac (make it the default first), or to recover when a browser's saved
+credential is no longer accepted, for example after `web revoke`. A phone or
+another machine pairs with the reduced remote grant from a paired console's PAIR
+A PHONE button. The loopback listener itself mints nothing.
 
-Inspection and revocation still run through the operator client, so those
-commands need the socket and token exported:
+Pairing, inspection and revocation run through the operator client. Operator
+commands find the default home `$HOME/.dark-factory` on their own; exporting
+`DARK_FACTORY_SOCKET` and `DARK_FACTORY_OPERATOR_TOKEN_FILE` is optional for the
+default home and required for any other:
 
 ```sh
-export DARK_FACTORY_SOCKET="$HOME/.dark-factory/runtimes/factory.sock"
-export DARK_FACTORY_OPERATOR_TOKEN_FILE="$HOME/.dark-factory/operator.token"
 factoryctl web status
+factoryctl web pair
 factoryctl web list-clients
 factoryctl web revoke CLIENT_ID --revision REVISION
 factoryctl remote status
 ```
 
-The CLI cannot delete origin-scoped browser storage; pairing afresh from the
-pair page makes that manual browser action unnecessary.
+The CLI cannot delete origin-scoped browser storage; pairing afresh with
+`factoryctl web pair` makes that manual browser action unnecessary.
 
 ## Start your first worker
 
-After pairing the browser, use the CLI once to create a project and its first
-worker. A signed-in `codex` CLI must be installed where the managed daemon can
-find it; see [provider discovery](providers.md). From an existing committed
-Git checkout, run:
-
-```sh
-export DARK_FACTORY_SOCKET="$HOME/.dark-factory/runtimes/factory.sock"
-export DARK_FACTORY_OPERATOR_TOKEN_FILE="$HOME/.dark-factory/operator.token"
-factoryctl dispatch on
-factoryctl project create --name "My project" --root "$PWD"
-```
-
-Copy the returned project ID into `PROJECT_ID` below. Creating the project also
-registers its checkout as the initial repository. Then copy the returned agent
-ID into `AGENT_ID`:
-
-```sh
-factoryctl agent create --project PROJECT_ID --name builder \
-  --provider codex --tool-budget 100
-factoryctl task add --project PROJECT_ID --agent AGENT_ID \
-  --title "Improve one documented setup step" \
-  --body "Read README.md and the project layout. Correct one concise setup or contributor instruction supported by the code, run git diff --check, and report the files changed."
-```
-
-Select **builder** on the paired factory floor to watch its terminal and inspect
-its result. Send feedback or queue the next instruction from that panel.
-`factoryctl account discover` and `factoryctl account list` help inspect a
-missing Codex login. Settings → Repositories also supports project creation and
-additional checkouts; worker creation currently uses the CLI.
+After pairing the browser, follow [Your first task](../README.md#your-first-task)
+from an existing committed Git checkout. A signed-in `codex` CLI must be
+installed where the managed daemon can find it; see [provider
+discovery](providers.md). Creating the project also registers its checkout as
+the initial repository. `factoryctl account discover` and `factoryctl account
+list` help inspect a missing Codex login. Settings → Repositories also supports
+project creation and additional checkouts; worker creation currently uses the
+CLI.
 
 ## Working in the console
 
@@ -149,6 +132,102 @@ queued work alone remains Ready. Pause prevents future admissions without
 stopping current work, and Show archived lets you inspect or restore a drained
 worker without erasing its history. Factory capacity counts workers; one
 overseer can run alongside them.
+
+On the floor, select the task tray for **Tasks**, the planning
+table for **Missions**, the board or the bookshelf. A mission records an
+objective and acceptance criteria for an overseer; its related work remains
+inspectable after workers finish. **Pause new work** stops new admission while
+active processes continue.
+
+The Tasks panel's **New task** form accepts pasted images, dropped files, or
+files selected with **Attach files** (up to 8 files and 8 MiB total). Add an
+instruction, review or remove the previews, then submit. Attachments commit
+with the task in the local daemon database and remain there with its history.
+Each attempt gets a fresh copy in its private runtime home, available through
+`$DARK_FACTORY_TASK_ATTACHMENTS`; uploads do not enter your Git checkout.
+Unsubmitted uploads are temporary and discarded when the connection closes.
+File contents remain unchanged; interpretation depends on the provider's tools.
+
+In **Settings → Attachment storage**, enable **Automatically remove attachments
+after 30 days** to clean up succeeded and cancelled tasks hourly while the daemon
+is running. This saved factory-wide setting is off by default and also applies
+to existing tasks. Turning it off stops future cleanup. To remove files sooner, run
+`factoryctl task update --task ID --revision REVISION --remove-attachments`.
+Queued, running, failed, and blocked tasks are protected. `factoryctl task read`
+keeps the original filenames with `removed: true`; sending cleaned tasks back
+is refused, so create a new task and attach any required files instead. Normal
+runtime cleanup already removes worker copies.
+
+Deletion frees database space for reuse. To return unused space to disk, turn
+`factoryctl dispatch off`, let all runs settle, then run
+`factoryctl storage compact`. It uses SQLite VACUUM and a WAL checkpoint while
+holding the daemon's writer gate. Compaction is optional, may need temporary
+free disk space up to twice the database size, and leaves dispatch off.
+Compaction remains explicit; automatic attachment cleanup frees database space
+for reuse without running VACUUM.
+
+## Inspect a result
+
+`factoryctl status` lists every task with its `status` and current `revision`;
+`factoryctl task read --task TASK_ID --revision REVISION` returns its
+instruction, any feedback, and the worker's `outcome`. A stale revision is
+refused (`local API revision is stale`); read the current one from `status`.
+
+A worker's commits stay in its Change: a worktree under the home's `changes/`
+directory and a private Git directory at
+`.git/dark-factory-changes/CHANGE_ID/.git` in the registered checkout, on the
+branch `factory/` plus the first 12 characters of the Change ID. Fetch it into
+your checkout to review it:
+
+```sh
+git fetch .git/dark-factory-changes/CHANGE_ID/.git factory/CHANGE_PREFIX:review/my-task
+git log --stat main..review/my-task
+```
+
+Neither `task read` nor the console names the Change yet; with several
+tasks, match the branch by its commit. Nothing is pushed or merged unless a
+GitHub connection publishes it.
+
+A failed task keeps its history: a worker that exits without reporting an
+outcome settles `failed` with the outcome `provider exited before an attempt
+outcome`. Retry it, or a cancelled task, with `factoryctl task update --task
+TASK_ID --revision REVISION --retry`, or send a completed model result back with
+`factoryctl task send-back --task TASK_ID --note TEXT` (shell tasks take no
+note, so send-back refuses them).
+
+## Try a task without a model
+
+The `shell` provider runs the task body as a `/bin/sh` script in the Change
+worktree, so the whole path (queue, Change, commit, outcome) can be exercised
+without a provider login or model cost. This uses a disposable home, socket,
+token and browser port, and a throwaway repository, so it never touches an
+installed factory. Build the three binaries from source into one directory
+first (see the [isolated daemon check](development/WORKFLOW.md#isolated-daemon-check)).
+
+```sh
+demo=/private/tmp/df-demo; bin=/path/to/built/binaries
+git init -q -b main "$demo/repo"
+printf '# Demo\n' > "$demo/repo/README.md"
+git -C "$demo/repo" add README.md && git -C "$demo/repo" commit -qm "Initial commit"
+"$bin/factoryctl" init --home "$demo/home"
+"$bin/factoryd" --home "$demo/home" --development-browser-address 127.0.0.1:43999 &
+until [ -S "$demo/home/runtimes/factory.sock" ]; do sleep 0.2; done
+export DARK_FACTORY_SOCKET="$demo/home/runtimes/factory.sock"
+export DARK_FACTORY_OPERATOR_TOKEN_FILE="$demo/home/operator.token"
+"$bin/factoryctl" dispatch on
+"$bin/factoryctl" project create --name Demo --root "$demo/repo"
+"$bin/factoryctl" agent create --project PROJECT_ID --name builder --provider shell --tool-budget 100
+"$bin/factoryctl" task add --project PROJECT_ID --agent AGENT_ID --title "Add hello.sh" \
+  --body 'printf "#!/bin/sh\necho hello\n" > hello.sh && chmod +x hello.sh && git add hello.sh && git commit -qm "Add hello.sh" && "$DARK_FACTORY_FACTORYCTL" attempt succeed --result "Added hello.sh"'
+```
+
+A few seconds later `status` shows the task `succeeded`, `task read` returns
+`"outcome":"Added hello.sh"`, and the branch fetched as above holds one commit
+by the fallback identity `Dark Factory`. A body that exits without
+`attempt succeed`, such as `./does-not-exist.sh`, settles `failed`. Stop the
+daemon with `kill %1` and delete the directory when done. The `/private/tmp`
+root matters: the home walk rejects symlinks such as `/tmp`, and a Unix socket
+path must stay short.
 
 ## Feedback and public backlog
 
@@ -339,8 +418,10 @@ SOURCE_ID --revision REVISION --issue NUMBER --hash CONTENT_HASH`. The daemon
 checks the current GitHub content again before recording acceptance. The
 daemon imports accepted work into the existing queue; comments and reactions
 do not create work. A later title/body edit needs fresh acceptance, including
-when the original issue author is trusted. Existing failed or completed work is
-not automatically retried.
+when the original issue author is trusted. While the issue stays open and
+labelled, its task is queued again up to three times after an automatic end (a
+failure, a run-limit cancel, a 24-hour blocked expiry); an operator's cancel
+sticks and completed work is not retried.
 
 factoryd polls each enabled source when its `--poll-seconds` interval is due,
 while the GitHub connection (or Linear) is configured. Poll progress is kept in
@@ -354,5 +435,7 @@ imports, not existing work. `factoryctl intake withdraw --acceptance ID`
 withdraws that approval, cancels linked queued work and requests the existing
 stop mechanism for running work. `withdrawal_pending` requires reconciliation;
 it does not promise that an offline host or running process has stopped.
+`factoryctl intake import --acceptance ID` reverses a withdrawal while the
+issue still matches, and retries its failed or cancelled task.
 
 Priority mappings support at most 25 labels and 2 KiB of JSON after escaping.

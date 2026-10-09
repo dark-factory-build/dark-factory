@@ -60,6 +60,7 @@ func TestSchedulerRetriesUncertainTerminalCompletionRead(t *testing.T) {
 }
 
 func TestSchedulerKeepsAnActiveRunAfterReconciledAbsentAdmission(t *testing.T) {
+	shrinkStoreTimeout(t)
 	fixture := newSupervisorFixture(t, supervisorProgram(t, false, false))
 	if err := fixture.store.InitializeRepositoryBase(context.Background(), fixture.spec.BaseRevision); err != nil {
 		t.Fatal(err)

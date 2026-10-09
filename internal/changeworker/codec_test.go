@@ -19,6 +19,7 @@ func TestConfigRoundTripIsExactBoundedAndPrivate(t *testing.T) {
 	want := configFixture(t)
 	want.CustomerMaintainer = true
 	want.GitAuthor = gitauthor.Identity{ID: 123, Login: "operator"}
+	want.TraceReceiverPort, want.RunID = 43123, "0123456789abcdef0123456789abcdef"
 	encoded, err := EncodeConfig(want)
 	if err != nil {
 		t.Fatal(err)
@@ -249,6 +250,9 @@ func TestConfigRejectsRawAuthorityAndInputCorruption(t *testing.T) {
 		func(v *Config) { // and, for an otherwise-valid orchestrator, a malformed one
 			v.Role, v.FinalName, v.PreviousWorkingDirectory = kernel.RoleOrchestrator, "", "relative"
 		},
+		func(v *Config) { v.RunID = "0123456789abcdef0123456789abcdef" }, // no receiver to name it to
+		func(v *Config) { v.TraceReceiverPort, v.RunID = 43123, "0123456789ABCDEF0123456789ABCDEF" },
+		func(v *Config) { v.TraceReceiverPort, v.RunID = 43123, "run,dark_factory.run.id=other" },
 		func(v *Config) { v.RepositoryRoot = "relative" },
 		func(v *Config) { v.RepositoryGitIdentity = change.RepositoryIdentity{} },
 		func(v *Config) { v.RepositoryOriginDigest = [32]byte{} },

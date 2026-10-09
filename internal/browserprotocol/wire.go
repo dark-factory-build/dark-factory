@@ -122,6 +122,8 @@ const (
 	TypeRemoteInviteResult          MessageType = "REMOTE_INVITE_RESULT"
 	TypePushSubscribe               MessageType = "PUSH_SUBSCRIBE"
 	TypePushSubscribeResult         MessageType = "PUSH_SUBSCRIBE_RESULT"
+	TypeTelemetryIngest             MessageType = "TELEMETRY_INGEST"
+	TypeTelemetryIngestResult       MessageType = "TELEMETRY_INGEST_RESULT"
 	TypeError                       MessageType = "ERROR"
 )
 
@@ -519,6 +521,10 @@ func decodeControl(data []byte, role senderRole) (ControlFrame, error) {
 		body = new(PushSubscribe)
 	case TypePushSubscribeResult:
 		body = new(PushSubscribeResult)
+	case TypeTelemetryIngest:
+		body = new(TelemetryIngest)
+	case TypeTelemetryIngestResult:
+		body = new(TelemetryIngestResult)
 	case TypeError:
 		var value struct {
 			Code      ErrorCode `json:"code"`
@@ -592,7 +598,7 @@ func idRequired(kind MessageType) bool {
 		TypeTerminalAttach, TypeTerminalAttached, TypeTerminalLeaseAcquire, TypeTerminalLeaseRenew, TypeTerminalLeaseRelease,
 		TypeTerminalLeaseResult, TypeTerminalResize, TypeTerminalResized, TypeTerminalDetach, TypeTerminalDetached,
 		TypeTerminalInputResult, TypeTerminalEOF, TypeTerminalExit, TypeTerminalReset,
-		TypeRemoteInvite, TypeRemoteInviteResult, TypePushSubscribe, TypePushSubscribeResult:
+		TypeRemoteInvite, TypeRemoteInviteResult, TypePushSubscribe, TypePushSubscribeResult, TypeTelemetryIngest, TypeTelemetryIngestResult:
 		return true
 	default:
 		return false
@@ -605,13 +611,13 @@ func typeAllowed(role senderRole, kind MessageType) bool {
 	}
 	if role == clientRole {
 		return kind == TypePairProve || kind == TypeAuthProve || kind == TypeStateGet ||
-			kind == TypeStateWatch || kind == TypeHumanRequestDetailGet || kind == TypeHumanRequestReply || kind == TypeHumanRequestCancelRun || kind == TypeTerminalTargetGet || kind == TypeTerminalAttach || kind == TypeTerminalAck || kind == TypeTerminalLeaseAcquire || kind == TypeTerminalLeaseRenew || kind == TypeTerminalLeaseRelease || kind == TypeTerminalResize || kind == TypeTerminalDetach || kind == TypeTaskAttachment || kind == TypeTaskEnqueue || kind == TypeRemoteInvite || kind == TypePushSubscribe ||
+			kind == TypeStateWatch || kind == TypeHumanRequestDetailGet || kind == TypeHumanRequestReply || kind == TypeHumanRequestCancelRun || kind == TypeTerminalTargetGet || kind == TypeTerminalAttach || kind == TypeTerminalAck || kind == TypeTerminalLeaseAcquire || kind == TypeTerminalLeaseRenew || kind == TypeTerminalLeaseRelease || kind == TypeTerminalResize || kind == TypeTerminalDetach || kind == TypeTaskAttachment || kind == TypeTaskEnqueue || kind == TypeRemoteInvite || kind == TypePushSubscribe || kind == TypeTelemetryIngest ||
 			kind == TypeAgentControl || kind == TypeTaskHistoryGet || kind == TypeTaskDetailGet || kind == TypeTaskListGet || kind == TypeAgentUpdate || kind == TypeProjectLimits || kind == TypeProjectCreate || kind == TypeRepositoriesGet || kind == TypeRepositoryMutate || kind == TypeIntake || kind == TypeTaskUpdate || kind == TypeOperationalGraphGet || kind == TypeOperationalNodeGet || kind == TypeRunPathsGet ||
 			kind == TypeAttachmentRetention || kind == TypeFactoryDispatch || kind == TypeProjectContent ||
 			kind == TypeAccountsDiscover || kind == TypeAccountLink || kind == TypeAccountUpdate || kind == TypeBrowserClientsGet || kind == TypeBrowserClientRevoke || kind == TypeGitHubConnection
 	}
 	return role == serverRole && (kind == TypeHello || kind == TypePairResult || kind == TypeAuthResult ||
-		kind == TypeStateSnapshot || kind == TypeStateChanged || kind == TypeHumanRequestDetail || kind == TypeHumanRequestReplyResult || kind == TypeHumanRequestCancelRunResult || kind == TypeTaskAttachmentResult || kind == TypeTaskEnqueueResult || kind == TypeTerminalTarget || kind == TypeTerminalAttached || kind == TypeTerminalLeaseResult || kind == TypeTerminalResized || kind == TypeTerminalDetached || kind == TypeTerminalInputResult || kind == TypeTerminalEOF || kind == TypeTerminalExit || kind == TypeTerminalReset || kind == TypeRemoteInviteResult || kind == TypePushSubscribeResult ||
+		kind == TypeStateSnapshot || kind == TypeStateChanged || kind == TypeHumanRequestDetail || kind == TypeHumanRequestReplyResult || kind == TypeHumanRequestCancelRunResult || kind == TypeTaskAttachmentResult || kind == TypeTaskEnqueueResult || kind == TypeTerminalTarget || kind == TypeTerminalAttached || kind == TypeTerminalLeaseResult || kind == TypeTerminalResized || kind == TypeTerminalDetached || kind == TypeTerminalInputResult || kind == TypeTerminalEOF || kind == TypeTerminalExit || kind == TypeTerminalReset || kind == TypeRemoteInviteResult || kind == TypePushSubscribeResult || kind == TypeTelemetryIngestResult ||
 		kind == TypeAgentControlResult || kind == TypeTaskHistory || kind == TypeTaskDetail || kind == TypeTaskList || kind == TypeAttachmentRetentionResult || kind == TypeFactoryDispatchResult || kind == TypeProjectContentResult || kind == TypeAgentUpdateResult || kind == TypeProjectLimitsResult || kind == TypeProjectCreateResult || kind == TypeRepositories || kind == TypeRepositoryMutateResult || kind == TypeIntakeResult || kind == TypeTaskUpdateResult || kind == TypeOperationalGraph || kind == TypeOperationalNode || kind == TypeRunPaths ||
 		kind == TypeAccounts || kind == TypeAccountLinkResult || kind == TypeAccountUpdateResult || kind == TypeBrowserClients || kind == TypeBrowserClientRevokeResult || kind == TypeGitHubConnectionResult)
 }
@@ -877,7 +883,7 @@ func validateBody(kind MessageType, body any) error {
 		return validTerminalControl(kind, body)
 	case TypeTerminalReset:
 		return validTerminalControl(kind, body)
-	case TypeRemoteInvite, TypeRemoteInviteResult, TypePushSubscribe, TypePushSubscribeResult:
+	case TypeRemoteInvite, TypeRemoteInviteResult, TypePushSubscribe, TypePushSubscribeResult, TypeTelemetryIngest, TypeTelemetryIngestResult:
 		return validRemoteControl(kind, body)
 	case TypeError:
 		value, ok := body.(Error)
@@ -1079,7 +1085,7 @@ func rejectNullMembers(kind MessageType, body []byte) error {
 	case TypeTaskAttachment:
 		fields = []string{"index", "offset", "size", "name", "data"}
 	case TypeTaskEnqueue:
-		fields = []string{"mode", "attachment_count"}
+		fields = []string{"mode", "attachment_count", "content"}
 	case TypeTaskUpdate:
 		fields = []string{"title", "priority", "assigned_agent_id", "status"}
 	default:

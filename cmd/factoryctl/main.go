@@ -37,13 +37,10 @@ const (
 	exitFailure                     = 1
 	maxHomeArgumentBytes            = 4096
 
-	// pairListenAddress is factoryd's fixed loopback listener and pairPageURL
-	// the first-party pair page it serves there. A successful install opens
-	// that page, so pairing a browser never needs a terminal. launchd returns
-	// from bootstrap before factoryd listens, hence the bounded wait.
-	pairListenAddress  = "127.0.0.1:43123"
-	pairPageURL        = "http://" + pairListenAddress + "/pair"
-	pairListenPatience = 10 * time.Second
+	// pairPatience bounds how long a fresh install waits for factoryd to mint
+	// its first pairing link: launchd returns from bootstrap before factoryd
+	// serves the local API and the browser transport.
+	pairPatience = 10 * time.Second
 
 	usage = `usage:
 	factoryctl review --project ID --repository OWNER/REPO --pull N --head SHA --base SHA --base-ref REF [--provider codex|claude] | --retry-operation UUID
@@ -124,14 +121,16 @@ const (
   factoryctl storage compact
     Requires dispatch off and no nonterminal runs.
   factoryctl backup create PATH | verify PATH
-  factoryctl release SHA [--wait]
-    Installs merged commit SHA into this factory's service, with rollback.
-    --wait exits 0 verified, 1 failed or rolled back, 75 refused with no effect.
+  factoryctl release SHA [--start] [--wait]
+    Reads the release of merged commit SHA; --start installs it into this
+    factory's service, with rollback, if it descends from the running build.
+    --wait exits 0 verified, 1 failed its trial, 75 refused with no effect.
   factoryctl task read --task ID --revision REVISION [--offset N]
   factoryctl dispatch on|off [--revision REVISION]
   factoryctl capacity --workers N --revision REVISION
     Worker slots only; the separate overseer lane remains available.
   factoryctl web status
+  factoryctl web pair
   factoryctl web list-clients [--after CLIENT_ID]
   factoryctl web revoke CLIENT_ID --revision REVISION
 	factoryctl content create [--id ID] --project ID --kind KIND --title TEXT [--description TEXT] [--body TEXT|--body-file PATH|--commit OID --path PATH] [--source-references TEXT]
@@ -179,6 +178,7 @@ const (
 	commandOperatorTerminalObserve
 	commandAttemptSource
 	commandWebStatus
+	commandWebPair
 	commandWebListClients
 	commandWebRevoke
 	commandRemoteStatus
@@ -355,6 +355,7 @@ func runWithOpener(ctx context.Context, args []string, getenv func(string) strin
 type serviceInspector func(context.Context, string) (install.ServiceStatus, error)
 
 func runWithDependencies(ctx context.Context, args []string, getenv func(string) string, stdout, stderr io.Writer, opener browserOpener, inspect serviceInspector) int {
+	getenv = defaultOperatorHome(getenv)
 	if len(args) > 0 && args[0] == "review" {
 		return runReview(ctx, args[1:], getenv, stdout, stderr)
 	}
@@ -394,8 +395,8 @@ func runWithDependencies(ctx context.Context, args []string, getenv func(string)
 	if command.kind == commandServiceStatus || command.kind == commandServiceInstall || command.kind == commandServiceStart || command.kind == commandServiceStop || command.kind == commandServiceUninstall {
 		return runService(ctx, command, stdout, stderr, inspect, opener)
 	}
-	if command.kind == commandWebStatus || command.kind == commandWebListClients || command.kind == commandWebRevoke {
-		return runWeb(ctx, command, getenv, stdout, stderr)
+	if command.kind == commandWebStatus || command.kind == commandWebPair || command.kind == commandWebListClients || command.kind == commandWebRevoke {
+		return runWeb(ctx, command, getenv, stdout, stderr, opener)
 	}
 	if command.kind == commandRemoteStatus {
 		return runRemote(ctx, getenv, stdout, stderr)
@@ -1147,8 +1148,7 @@ func serviceConfigFor(command attemptCommand) install.ServiceConfig {
 
 type serviceInstallOutput struct {
 	install.ServiceStatus
-	PairPage      string `json:"pair_page,omitempty"`
-	BrowserOpened bool   `json:"browser_opened"`
+	BrowserOpened bool `json:"browser_opened"`
 }
 
 func runService(ctx context.Context, command attemptCommand, stdout, stderr io.Writer, inspect serviceInspector, opener browserOpener) int {
@@ -1218,11 +1218,12 @@ func runService(ctx context.Context, command attemptCommand, stdout, stderr io.W
 		_, _ = io.WriteString(stderr, "factoryctl: the service projection is ambiguous\n")
 		return exitFailure
 	}
-	if command.kind == commandServiceInstall && pairPageOpens(existing, status.State) {
+	if command.kind == commandServiceInstall && installStartedService(existing, status.State) {
 		// The one command whose result is more than the projection. Every word
 		// of it goes in the JSON on stdout: this output is parsed, and a stray
-		// stderr line would be merged into it by any caller reading both.
-		return writeJSON(stdout, serviceInstallOutput{ServiceStatus: status, PairPage: pairPageURL, BrowserOpened: openPairPage(ctx, pairListenAddress, pairPageURL, opener)})
+		// stderr line would be merged into it by any caller reading both. The
+		// pairing link itself never appears in it.
+		return writeJSON(stdout, serviceInstallOutput{ServiceStatus: status, BrowserOpened: openPairedBrowser(ctx, command.home, opener)})
 	}
 	return writeJSON(stdout, status)
 }
@@ -1237,31 +1238,57 @@ func inspectService(ctx context.Context, command attemptCommand, config install.
 	return install.InspectServiceWithConfig(ctx, command.home, config)
 }
 
-// pairPageOpens is true only for an install that actually started the service.
-func pairPageOpens(existing, resulting install.ServiceState) bool {
+// installStartedService is true only for an install that actually started the service.
+func installStartedService(existing, resulting install.ServiceState) bool {
 	return resulting == install.ServiceRunning && existing != install.ServiceInstalled && existing != install.ServiceRunning
 }
 
-// openPairPage waits, bounded, for factoryd to accept on its loopback listener
-// and then opens the pair page exactly once, reporting whether it did. A
-// listener that never appears or an opener that fails is not an install
-// failure: the caller names the page in its own output and exits 0.
-func openPairPage(ctx context.Context, address, page string, opener browserOpener) bool {
-	return opener != nil && listenerAccepts(ctx, address) && opener(ctx, page) == nil
+// openPairedBrowser waits, bounded, for the freshly started factoryd to mint
+// a pairing link over the operator API with the home's own operator token, and
+// opens it exactly once, reporting whether it did. A factory that never becomes
+// ready or an opener that fails is not an install failure: the operator runs
+// factoryctl web pair later.
+func openPairedBrowser(ctx context.Context, home string, opener browserOpener) bool {
+	ctx, cancel := context.WithTimeout(ctx, pairPatience)
+	defer cancel()
+	for opener != nil {
+		if client, err := api.NewOperatorClient(install.LocalAPISocketPath(home), install.OperatorTokenPath(home)); err == nil {
+			if link, err := client.WebPair(ctx); err == nil {
+				return opener(ctx, link) == nil
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+	return false
 }
 
-func listenerAccepts(ctx context.Context, address string) bool {
-	deadline := time.Now().Add(pairListenPatience)
-	for {
-		connection, err := net.DialTimeout("tcp", address, time.Second)
-		if err == nil {
-			_ = connection.Close()
-			return true
+// defaultOperatorHome answers the operator socket and token with the installed
+// home's paths when neither is set and nothing marks an attempt: a worker must
+// never be handed operator.token. One set and one unset stays an error.
+func defaultOperatorHome(getenv func(string) string) func(string) string {
+	return func(name string) string {
+		value := getenv(name)
+		if value != "" || name != "DARK_FACTORY_SOCKET" && name != "DARK_FACTORY_OPERATOR_TOKEN_FILE" {
+			return value
 		}
-		if ctx.Err() != nil || !time.Now().Before(deadline) {
-			return false
+		for _, other := range []string{"DARK_FACTORY_SOCKET", "DARK_FACTORY_OPERATOR_TOKEN_FILE", "DARK_FACTORY_ATTEMPT_TOKEN_FILE", "DARK_FACTORY_TASK_ATTACHMENTS", "DARK_FACTORY_FACTORYCTL"} {
+			if getenv(other) != "" {
+				return ""
+			}
 		}
-		time.Sleep(100 * time.Millisecond)
+		home := getenv("HOME")
+		if !filepath.IsAbs(home) {
+			return ""
+		}
+		home = filepath.Join(home, install.DefaultHomeName)
+		if name == "DARK_FACTORY_SOCKET" {
+			return install.LocalAPISocketPath(home)
+		}
+		return install.OperatorTokenPath(home)
 	}
 }
 
@@ -1322,6 +1349,8 @@ func parseWeb(args []string) (attemptCommand, bool, bool) {
 	switch args[1] {
 	case "status":
 		command.kind = commandWebStatus
+	case "pair":
+		command.kind = commandWebPair
 	case "list-clients":
 		command.kind = commandWebListClients
 		stringFlag("--after", &command.after)
@@ -2570,7 +2599,7 @@ func runOverseer(ctx context.Context, command attemptCommand, getenv func(string
 	return writeJSON(stdout, result)
 }
 
-func runWeb(ctx context.Context, command attemptCommand, getenv func(string) string, stdout, stderr io.Writer) int {
+func runWeb(ctx context.Context, command attemptCommand, getenv func(string) string, stdout, stderr io.Writer, opener browserOpener) int {
 	socket := getenv("DARK_FACTORY_SOCKET")
 	if socket == "" {
 		_, _ = io.WriteString(stderr, "factoryctl: web client configuration is invalid\n")
@@ -2606,6 +2635,19 @@ func runWeb(ctx context.Context, command attemptCommand, getenv func(string) str
 			return writeWebFailure(stderr, "web status", callErr)
 		}
 		return writeJSON(stdout, result)
+	case commandWebPair:
+		// The link is a credential: it goes only to the browser, never to
+		// stdout, stderr or an error message.
+		link, callErr := client.WebPair(callContext)
+		if callErr != nil {
+			return writeWebFailure(stderr, "web pair", callErr)
+		}
+		if opener == nil || opener(callContext, link) != nil {
+			_, _ = io.WriteString(stderr, "factoryctl: web pair could not open a browser; run it again from a desktop session\n")
+			return exitFailure
+		}
+		_, _ = io.WriteString(stdout, "opened a pairing link in the default browser; it expires in 5 minutes\n")
+		return 0
 	case commandWebListClients:
 		result, callErr := client.WebListClients(callContext, command.after)
 		if callErr != nil {

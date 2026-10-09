@@ -10,30 +10,25 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/dark-factory-build/dark-factory/internal/browser"
+	"github.com/dark-factory-build/dark-factory/internal/browserprotocol"
 	"github.com/dark-factory-build/dark-factory/internal/change"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 	"github.com/dark-factory-build/dark-factory/internal/opgraph"
 )
 
-// graphFreshness bounds how stale a served graph may be, avoiding repeated
-// archive reads inside this window.
+// graphFreshness bounds how stale a graph ProjectGraph serves may be, avoiding
+// repeated archive reads inside this window. PlantGraph alone may serve an
+// older one while its refresh runs.
 const graphFreshness = 30 * time.Second
 
 // graphSource records the configured integrated target each repository was
 // read at, not its checkout HEAD.
-type graphSource struct {
-	RepositoryID string `json:"repository_id"`
-	Name         string `json:"name"`
-	Kind         string `json:"kind"` // integrated | unavailable
-	TargetRef    string `json:"target_ref"`
-	Revision     string `json:"revision"`
-	ObservedAt   int64  `json:"observed_at"`
-	Reason       string `json:"reason,omitempty"`
-}
+type graphSource = browserprotocol.GraphSource
 
 type projectGraph struct {
 	graph   opgraph.Graph
@@ -48,8 +43,20 @@ type graphSnapshot struct {
 }
 
 // ProjectGraph returns the static Operational Graph of a project's
-// repositories, regenerated from their integrated targets.
+// repositories, regenerated from their integrated targets and never older
+// than graphFreshness: knowledge writes are checked against it.
 func (daemon *Daemon) ProjectGraph(ctx context.Context, projectID kernel.ProjectID) (projectGraph, error) {
+	return daemon.projectGraph(ctx, projectID, false)
+}
+
+// PlantGraph is ProjectGraph for drawing the plant: once a graph exists, an
+// older one is served at once while its refresh runs, so a build slower than
+// a browser call never blanks the plant.
+func (daemon *Daemon) PlantGraph(ctx context.Context, projectID kernel.ProjectID) (projectGraph, error) {
+	return daemon.projectGraph(ctx, projectID, true)
+}
+
+func (daemon *Daemon) projectGraph(ctx context.Context, projectID kernel.ProjectID, stale bool) (projectGraph, error) {
 	if daemon == nil || daemon.store == nil {
 		return projectGraph{}, fmt.Errorf("%w: invalid daemon", kernel.ErrInvalidValue)
 	}
@@ -63,19 +70,79 @@ func (daemon *Daemon) ProjectGraph(ctx context.Context, projectID kernel.Project
 	if err != nil {
 		return projectGraph{}, err
 	}
-	configurationBytes, err := json.Marshal(repositories)
+	hosts := daemon.unitHosts()
+	configurationBytes, err := json.Marshal([]any{repositories, hosts})
 	if err != nil {
 		return projectGraph{}, err
 	}
 	configuration, now := string(configurationBytes), daemon.now()
 	daemon.graphMu.Lock()
 	held, ok := daemon.graphs[projectID]
-	daemon.graphMu.Unlock()
-	if ok && held.configuration == configuration && !now.Before(held.at) && now.Sub(held.at) < graphFreshness {
+	usable := ok && held.configuration == configuration
+	if usable && !now.Before(held.at) && now.Sub(held.at) < graphFreshness {
+		daemon.graphMu.Unlock()
 		return held.value, nil
 	}
-	// ponytail: two connections can read the same project at once; add a
-	// per-project build gate if the duplicated archive read ever matters.
+	// Only a build of this configuration answers this caller.
+	build := daemon.graphBuilds[projectID]
+	if build == nil || build.configuration != configuration {
+		build = &graphBuild{done: make(chan struct{}), configuration: configuration}
+		if daemon.graphBuilds == nil {
+			daemon.graphBuilds = make(map[kernel.ProjectID]*graphBuild)
+		}
+		daemon.graphBuilds[projectID] = build
+		go daemon.buildProjectGraph(projectID, repositories, hosts, configuration, now, build)
+	}
+	daemon.graphMu.Unlock()
+	if usable && stale {
+		return held.value, nil
+	}
+	select {
+	case <-build.done:
+	case <-ctx.Done():
+		return projectGraph{}, ctx.Err()
+	}
+	daemon.graphMu.Lock()
+	held, ok = daemon.graphs[projectID]
+	daemon.graphMu.Unlock()
+	if build.err != nil || !ok || held.configuration != configuration {
+		return projectGraph{}, errors.Join(build.err, errors.New("the project's graph changed while it was built"))
+	}
+	return held.value, nil
+}
+
+// graphBuild is one running graph build; err is set before done closes.
+type graphBuild struct {
+	done          chan struct{}
+	configuration string
+	err           error
+}
+
+// graphBuildLimit bounds one build. A build reads every repository's archive
+// and infers from it, which can outlast any one caller, so it runs detached:
+// a caller that gives up still leaves the graph to the next.
+const graphBuildLimit = 5 * time.Minute
+
+func (daemon *Daemon) buildProjectGraph(projectID kernel.ProjectID, repositories []kernel.ProjectRepository, hosts map[string][]string, configuration string, at time.Time, build *graphBuild) {
+	ctx, cancel := context.WithTimeout(context.Background(), graphBuildLimit)
+	defer cancel()
+	result, err := daemon.inferProjectGraph(ctx, projectID, repositories, hosts)
+	daemon.graphMu.Lock()
+	if err == nil {
+		if daemon.graphs == nil {
+			daemon.graphs = make(map[kernel.ProjectID]graphSnapshot)
+		}
+		daemon.graphs[projectID] = graphSnapshot{value: result, at: at, configuration: configuration}
+	}
+	build.err = err
+	if daemon.graphBuilds[projectID] == build {
+		delete(daemon.graphBuilds, projectID)
+	}
+	daemon.graphMu.Unlock()
+	close(build.done)
+}
+
+func (daemon *Daemon) inferProjectGraph(ctx context.Context, projectID kernel.ProjectID, repositories []kernel.ProjectRepository, hosts map[string][]string) (projectGraph, error) {
 	var result projectGraph
 	inputs := make([]opgraph.Repository, 0, len(repositories))
 	for _, repository := range repositories {
@@ -88,7 +155,8 @@ func (daemon *Daemon) ProjectGraph(ctx context.Context, projectID kernel.Project
 	}
 	// A system past the node bound is drawn as far as the bound allows,
 	// never refused whole.
-	result.graph, err = opgraph.Infer(projectID.String(), inputs)
+	var err error
+	result.graph, err = opgraph.Infer(projectID.String(), inputs, hosts)
 	if err != nil && !errors.Is(err, opgraph.ErrBounds) {
 		return projectGraph{}, err
 	}
@@ -98,13 +166,35 @@ func (daemon *Daemon) ProjectGraph(ctx context.Context, projectID kernel.Project
 	}{result.graph, result.sources})
 	digest := sha256.Sum256(encoded)
 	result.digest = hex.EncodeToString(digest[:])
-	daemon.graphMu.Lock()
-	if daemon.graphs == nil {
-		daemon.graphs = make(map[kernel.ProjectID]graphSnapshot)
-	}
-	daemon.graphs[projectID] = graphSnapshot{value: result, at: now, configuration: configuration}
-	daemon.graphMu.Unlock()
 	return result, nil
+}
+
+// setHosts records the hosts one platform source reports, replacing its last.
+func (daemon *Daemon) setHosts(source string, hosts map[string][]string) {
+	daemon.graphMu.Lock()
+	defer daemon.graphMu.Unlock()
+	if daemon.hosts == nil {
+		daemon.hosts = map[string]map[string][]string{}
+	}
+	daemon.hosts[source] = hosts
+}
+
+// unitHosts merges every source's hosts, sorted, so equal hosts configure
+// the same graph.
+func (daemon *Daemon) unitHosts() map[string][]string {
+	daemon.graphMu.Lock()
+	defer daemon.graphMu.Unlock()
+	merged := map[string][]string{}
+	for _, byUnit := range daemon.hosts {
+		for unit, hosts := range byUnit {
+			merged[unit] = append(merged[unit], hosts...)
+		}
+	}
+	for unit, hosts := range merged {
+		slices.Sort(hosts)
+		merged[unit] = slices.Compact(hosts)
+	}
+	return merged
 }
 
 // repositorySource reads one repository's integrated target archive. An
@@ -167,6 +257,33 @@ func (daemon *Daemon) observe(kind string, attributes, peer map[string]string, f
 	daemon.runtimeStore().Record(item)
 }
 
+// observedTransport records each outbound request as a client span: the
+// peer host, the method, failure (transport error or 5xx) and duration.
+// URLs, paths, queries, headers and bodies are never recorded.
+type observedTransport struct {
+	daemon *Daemon
+	next   http.RoundTripper
+}
+
+func (transport observedTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	next := transport.next
+	if next == nil {
+		next = http.DefaultTransport
+	}
+	started := time.Now()
+	response, err := next.RoundTrip(request)
+	transport.daemon.observe("client", map[string]string{"http.request.method": request.Method},
+		map[string]string{"server.address": strings.ToLower(request.URL.Hostname())}, err != nil || response.StatusCode >= 500, time.Since(started))
+	return response, err
+}
+
+// observed returns a copy of client whose requests factoryd records.
+func (daemon *Daemon) observed(client *http.Client) *http.Client {
+	copied := *client
+	copied.Transport = observedTransport{daemon: daemon, next: client.Transport}
+	return &copied
+}
+
 func (daemon *Daemon) runtimeStore() *opgraph.Runtime {
 	daemon.graphMu.Lock()
 	defer daemon.graphMu.Unlock()
@@ -177,8 +294,9 @@ func (daemon *Daemon) runtimeStore() *opgraph.Runtime {
 }
 
 // Self-observation claims exactly what factoryd instruments: its browser
-// listener and routes, and its local API socket. Background loops and
-// outbound calls are recorded when seen but not claimed, so their silence
+// listener and routes and its local API socket. It records all its outbound
+// HTTP, so only an exact HTTP host it alone calls can read quiet; launches and
+// background loops are recorded when seen but not claimed, so their silence
 // reads as partial or unobserved, never idle.
 var selfCoverageKeys = []string{"service.name", "http.route", "url.path", "rpc.method", "network.transport", "server.address", "server.port"}
 
@@ -198,36 +316,47 @@ func (daemon *Daemon) liveGraph(projectID kernel.ProjectID, graph projectGraph) 
 		}
 	}
 	observations, coverage := store.Snapshot(now)
-	return opgraph.Overlay(projectID.String(), graph.graph, observations, coverage, aliases, now, runtimeWindow.Milliseconds())
+	live := opgraph.Overlay(projectID.String(), graph.graph, observations, coverage, aliases, now, runtimeWindow.Milliseconds())
+	if daemon.linear == nil || !daemon.linear.Connected() {
+		live.NotConnected("api.linear.app", "factoryd")
+	}
+	return live
 }
 
 // observeSource is one pull adapter the operator configured in
 // <home>/observe.json. Services maps a platform name (a Worker script) to
-// the unit's service.name; the token file stays in the daemon.
+// the unit's service.name. The token sits in the file itself, inside the
+// owner-only home like operator.token, and is never served.
 type observeSource struct {
 	Adapter     string            `json:"adapter"`
 	Environment string            `json:"environment"`
 	Account     string            `json:"account"`
-	TokenFile   string            `json:"token_file"`
+	Token       string            `json:"token"`
 	Services    map[string]string `json:"services"`
 }
 
-func (daemon *Daemon) observeSources() []observeSource {
+func (daemon *Daemon) observeSources() []observeSource { return daemon.observeConfig().Sources }
+
+// observeConfig is <home>/observe.json. PublicProject opts one project's
+// public world into publishing over the relay; absent, nothing is published.
+type observeConfig struct {
+	Sources       []observeSource `json:"sources"`
+	PublicProject string          `json:"public_project"`
+}
+
+func (daemon *Daemon) observeConfig() (config observeConfig) {
 	if daemon.home == "" {
-		return nil
+		return config
 	}
 	body, err := os.ReadFile(filepath.Join(daemon.home, "observe.json"))
 	if err != nil {
-		return nil
-	}
-	var config struct {
-		Sources []observeSource `json:"sources"`
+		return config
 	}
 	if err := json.Unmarshal(body, &config); err != nil {
 		LogFactoryd(daemon.log, "factoryd: observe.json: %v\n", err)
-		return nil
+		return observeConfig{}
 	}
-	return config.Sources
+	return config
 }
 
 const pollInterval = 5 * time.Minute
@@ -249,16 +378,23 @@ func (daemon *Daemon) pollSources(sources []observeSource) {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 		defer cancel()
 		for _, source := range sources {
-			token, err := os.ReadFile(source.TokenFile)
-			if err != nil || source.Adapter != "cloudflare" {
-				LogFactoryd(daemon.log, "factoryd: observe %s: unsupported or unreadable token\n", source.Adapter)
+			if source.Adapter == "github" {
+				continue // the production refresh reads GitHub deployments
+			}
+			if source.Token == "" || source.Adapter != "cloudflare" {
+				LogFactoryd(daemon.log, "factoryd: observe %s: unsupported adapter or no token\n", source.Adapter)
 				continue
 			}
 			scripts := make([]string, 0, len(source.Services))
 			for script := range source.Services {
 				scripts = append(scripts, script)
 			}
-			observations, coverage, err := opgraph.PullCloudflare(ctx, observeClient, source.Account, strings.TrimSpace(string(token)), scripts, source.Environment, now, pollInterval)
+			if hosts, err := opgraph.CloudflareDomains(ctx, daemon.observed(observeClient), source.Account, strings.TrimSpace(source.Token), source.Services); err != nil {
+				LogFactoryd(daemon.log, "factoryd: observe cloudflare domains: %v\n", err)
+			} else {
+				daemon.setHosts("cloudflare\x00"+source.Account+"\x00"+source.Environment, hosts)
+			}
+			observations, coverage, err := opgraph.PullCloudflare(ctx, daemon.observed(observeClient), source.Account, strings.TrimSpace(source.Token), scripts, source.Environment, now, pollInterval)
 			if err != nil {
 				LogFactoryd(daemon.log, "factoryd: observe cloudflare: %v\n", err)
 				continue
@@ -276,12 +412,12 @@ func (daemon *Daemon) pollSources(sources []observeSource) {
 
 var observeClient = &http.Client{Timeout: 30 * time.Second}
 
-// ReceiveTraces folds a local OTLP/HTTP JSON export into the runtime store.
-func (backend *browserBackend) ReceiveTraces(body []byte) error {
+// ReceiveTraces folds an OTLP/HTTP JSON export into the runtime store.
+func (backend *browserBackend) ReceiveTraces(body []byte, remote bool) error {
 	if backend.owner == nil {
 		return browser.ErrNotFound
 	}
-	observations, coverage, err := opgraph.DecodeOTLP(body, backend.owner.now().UnixMilli())
+	observations, coverage, err := opgraph.DecodeOTLP(body, backend.owner.now().UnixMilli(), remote)
 	if err != nil {
 		return err
 	}

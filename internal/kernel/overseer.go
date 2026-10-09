@@ -308,9 +308,10 @@ func (store *Store) OverseerSnapshotForAttempt(ctx context.Context, digest Attem
 	if err := runs.Close(); err != nil {
 		return OverseerSnapshot{}, err
 	}
-	questionQuery, questionArgs := `SELECT `+humanRequestColumns+` FROM human_requests WHERE run_id IN (SELECT id FROM runs WHERE project_id = ?) AND status IN ('open', 'delivering', 'delivery_unknown') ORDER BY created_at_ms ASC, id ASC LIMIT ? OFFSET ?`, []any{authority.ProjectID.Bytes(), OverseerSnapshotPageSize + 1, offset}
+	// A stalled-item card is the operator's alone; the overseer never sees it.
+	questionQuery, questionArgs := `SELECT `+humanRequestColumns+` FROM human_requests WHERE run_id IN (SELECT id FROM runs WHERE project_id = ?) AND idempotency_key <> ? AND status IN ('open', 'delivering', 'delivery_unknown') ORDER BY created_at_ms ASC, id ASC LIMIT ? OFFSET ?`, []any{authority.ProjectID.Bytes(), stalledItemKey[:], OverseerSnapshotPageSize + 1, offset}
 	if request.TaskID != nil {
-		questionQuery, questionArgs = `SELECT `+humanRequestColumns+` FROM human_requests WHERE run_id IN (SELECT id FROM runs WHERE project_id = ? AND task_id = ?) AND status IN ('open', 'delivering', 'delivery_unknown') ORDER BY created_at_ms ASC, id ASC LIMIT ? OFFSET ?`, []any{authority.ProjectID.Bytes(), request.TaskID.Bytes(), OverseerSnapshotPageSize + 1, offset}
+		questionQuery, questionArgs = `SELECT `+humanRequestColumns+` FROM human_requests WHERE run_id IN (SELECT id FROM runs WHERE project_id = ? AND task_id = ?) AND idempotency_key <> ? AND status IN ('open', 'delivering', 'delivery_unknown') ORDER BY created_at_ms ASC, id ASC LIMIT ? OFFSET ?`, []any{authority.ProjectID.Bytes(), request.TaskID.Bytes(), stalledItemKey[:], OverseerSnapshotPageSize + 1, offset}
 	}
 	questions, err := read.connection.QueryContext(ctx, questionQuery, questionArgs...)
 	if err != nil {

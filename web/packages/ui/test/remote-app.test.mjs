@@ -549,6 +549,25 @@ test("a drop while a reply is in flight keeps the unknown notice", async () => {
   });
 });
 
+test("a retryable detail read says to open the question again, not that it closed", async () => {
+  let reads = 0;
+  const session = fakeSession({
+    detail: () => (++reads === 1 ? Promise.reject(new SessionError("rate_limited", true)) : detailFor(northRequest)),
+  });
+  const manager = fakeManager([northFactory()], new Map([[NORTH, session]]));
+  await withApp(props(manager), async (renderer) => {
+    await act(async () => { buttons(renderer, "dfRemote__answer")[0].props.onClick(); });
+    await settle();
+    const detail = sectionText(renderer, "dfRemote__detail");
+    assert.ok(detail.includes("Could not load this question — open it again"), detail);
+    assert.equal(detail.includes("THIS QUESTION IS NO LONGER OPEN"), false);
+    await act(async () => { buttons(renderer, "dfRemote__answer")[0].props.onClick(); });
+    await settle();
+    assert.equal(session.calls.detail.length, 2);
+    assert.ok(renderer.root.findAllByProps({ className: "dfRemote__replyText" }).length > 0, "the second read opens the question");
+  });
+});
+
 test("a replaced session cannot publish an old pending question", async () => {
   let release;
   const pending = new Promise((resolve) => { release = resolve; });

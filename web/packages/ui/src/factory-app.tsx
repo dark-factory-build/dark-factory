@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode, type SyntheticEvent } from "react";
 import { IconButton } from "./icons.js";
 import { browserEndpoint, FactoryAppController, type FactoryAppSnapshot, type FactoryAppStatus, type FactoryTerminalView } from "./factory-app-controller.js";
-import { FactoryConsole, type ConsoleDetail, type ConsoleView } from "./factory-console.js";
+import { FactoryConsole, type ConsoleDetail } from "./factory-console.js";
 import { TaskConversation, type AgentPanelView } from "./console-sidebar.js";
 import { primaryAgent } from "./console-view.js";
 import { XtermTerminal } from "./xterm-terminal.js";
@@ -20,7 +20,6 @@ export type FactoryAppProps = {
 /** Complete browser application lifecycle; hosts only render this component. */
 export function FactoryApp({ onStatusChange, browserPort }: FactoryAppProps = {}) {
   const [snapshot, setSnapshot] = useState<FactoryAppSnapshot>(INITIAL_SNAPSHOT);
-  const [view, setView] = useState<ConsoleView>("floor");
   const [detail, setDetail] = useState<ConsoleDetail>("work");
   const [agentPanel, setAgentPanel] = useState<AgentPanelView>("terminal");
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -60,34 +59,24 @@ export function FactoryApp({ onStatusChange, browserPort }: FactoryAppProps = {}
     controller.selectAgent(agent);
   }, [snapshot]);
 
-  const selectedAgentID = snapshot.selectedAgent?.id;
-  const previousSelectedAgentID = useRef<string | undefined>(selectedAgentID);
-  useEffect(() => {
-    if (previousSelectedAgentID.current === undefined && selectedAgentID !== undefined) setDetail("agent");
-    previousSelectedAgentID.current = selectedAgentID;
-  }, [selectedAgentID]);
-
-  // The floor's rooms are regenerable, so they are fetched when the floor is
-  // shown, whenever a fresh session becomes ready, and whenever the set of
-  // projects changes under them.
+  // Refresh the floor on a fresh session or a change to the project set.
   const projectKey = snapshot.state === undefined ? "" : [...snapshot.state.projects.keys()].join(" ");
   useEffect(() => {
-    if (view === "floor" && snapshot.status === "ready") owner.current?.loadGraphs();
-  }, [view, snapshot.status, projectKey]);
+    if (snapshot.status === "ready") owner.current?.loadGraphs();
+  }, [snapshot.status, projectKey]);
 
   const selectedProjectID = snapshot.selectedAgent === undefined ? undefined : snapshot.state?.agents.get(snapshot.selectedAgent.id)?.project_id;
   useEffect(() => {
     if (snapshot.status === "ready" && selectedProjectID !== undefined) void owner.current?.loadRepositories(selectedProjectID);
   }, [snapshot.status, selectedProjectID]);
 
-  // Where the running agents are working is live, not regenerable: it is polled
-  // for as long as the floor is on screen and stopped the moment it is not.
+  // Keep worker locations live while the console is connected.
   useEffect(() => {
-    if (view !== "floor" || snapshot.status !== "ready") return;
+    if (snapshot.status !== "ready") return;
     const controller = owner.current;
     controller?.watchRunPaths(true);
     return () => controller?.watchRunPaths(false);
-  }, [view, snapshot.status]);
+  }, [snapshot.status]);
 
   const controller = owner.current;
   const agentTerminal = controller === undefined || snapshot.selectedAgent === undefined ? undefined : snapshot.terminal;
@@ -103,8 +92,6 @@ export function FactoryApp({ onStatusChange, browserPort }: FactoryAppProps = {}
       selectedTaskId={selectedTaskId}
       onSelectTask={setSelectedTaskId}
       {...snapshot}
-      view={view}
-      onView={setView}
       detail={detail}
       onDetail={setDetail}
       agentPanel={agentPanel}
@@ -115,7 +102,6 @@ export function FactoryApp({ onStatusChange, browserPort }: FactoryAppProps = {}
       onSetDispatch={snapshot.dispatchAllowed ? (revision, enabled) => owner.current?.setDispatch(revision, enabled) ?? Promise.reject(new Error("closed")) : undefined}
       onAttachmentRetention={(enabled) => owner.current?.attachmentRetention(enabled) ?? Promise.reject(new Error("closed"))}
       onProjectContent={(operation, input) => owner.current?.projectContent(operation, input) ?? Promise.reject(new Error("closed"))}
-      onDraftLibraryTask={(agent, instruction) => { setDetail("agent"); setAgentPanel("terminal"); owner.current?.selectAgent(agent); owner.current?.setAgentInstructionDraft(instruction); }}
       onSaveAgentConfig={(config) => { void owner.current?.updateAgentConfig(config); }}
       onSaveAgentAppearance={(agentId, appearance) => owner.current?.updateAgentAppearance(agentId, appearance) ?? Promise.resolve(false)}
       appearanceAgentId={appearanceAgentId}
@@ -123,7 +109,7 @@ export function FactoryApp({ onStatusChange, browserPort }: FactoryAppProps = {}
       onCloseAppearance={() => setAppearanceAgentId(undefined)}
       onSaveProjectLimits={(project, limits) => { void owner.current?.updateProjectLimits(project, limits); }}
       onEditTask={(task, change) => owner.current?.editTask(task, change) ?? Promise.resolve(false)}
-      onAddTask={(agent, instruction, mode, files) => owner.current?.addTask(agent, instruction, mode, files) ?? Promise.resolve(false)}
+      onAddTask={(agent, instruction, mode, files, content) => owner.current?.addTask(agent, instruction, mode, files, content) ?? Promise.resolve(false)}
       onLoadTaskDetail={(task, peerOffset, expectedHead) => owner.current?.taskDetail(task, peerOffset, expectedHead) ?? Promise.reject(new Error("closed"))}
       onLoadTaskHistory={(task) => owner.current?.taskHistory(task) ?? Promise.reject(new Error("closed"))}
       onLoadNode={(projectId, nodeId) => owner.current?.operationalNode(projectId, nodeId) ?? Promise.reject(new Error("closed"))}
@@ -147,6 +133,7 @@ export function FactoryApp({ onStatusChange, browserPort }: FactoryAppProps = {}
       onLoadDevices={() => { void owner.current?.loadDevices(); }}
       onRevokeDevice={(device) => { void owner.current?.revokeDevice(device); }}
       onDismissRemoteInvite={() => owner.current?.dismissRemoteInvite()}
+      onTelemetryIngest={(action) => owner.current?.telemetryIngest(action) ?? Promise.reject(new Error("closed"))}
       terminalContent={terminal}
     />
   );

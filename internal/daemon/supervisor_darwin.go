@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
@@ -383,18 +384,14 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 	if err != nil {
 		return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSpawn, err)
 	}
-	var startupInput []byte
-	providerTask := rawProviderTask
+	var providerTask []byte
 	switch delivery {
 	case provider.TaskDeliveryFD11:
 		providerTask = preparedTask
-	case provider.TaskDeliveryStartupTerminal:
-		startupInput = preparedTask
 	case provider.TaskDeliveryAttemptAPI:
 		if len(preparedTask) != 0 {
 			return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSpawn, provider.ErrInvalid)
 		}
-		providerTask = nil
 	default:
 		return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSpawn, provider.ErrInvalid)
 	}
@@ -442,8 +439,18 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 		return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSource, err)
 	}
 	var localCILeaseDir string
+	var traceReceiverPort uint16
+	var telemetryRunID string
 	if worker {
 		localCILeaseDir, _ = prepareLocalCILeaseDirectory(gitCommonDir)
+		// OTel-instrumented code a worker runs, and its agent CLI's own
+		// metrics and logs, export to the OTLP receiver on the browser
+		// listener; without one, they export nowhere.
+		if web, ok := daemon.webRuntime(); ok {
+			if address, err := netip.ParseAddrPort(web.Addr()); err == nil {
+				traceReceiverPort, telemetryRunID = address.Port(), run.ID.String()
+			}
+		}
 	}
 	// An orchestrator's own working directory is a fresh runtime root every
 	// run, so it names its own agent's most recent terminal run's working
@@ -494,7 +501,7 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 		GitAuthor: daemon.gitAuthor(ctx), CustomerMaintainer: customerMaintainer, Provider: run.Provider, Role: run.Role, Model: run.Model, ReasoningEffort: run.ReasoningEffort,
 		AgentID: run.AgentID.String(), TaskIncarnationID: run.TaskIncarnationID.String(), PreviousWorkingDirectory: previousWorkingDirectory,
 		RuntimePath: gotRuntimePath, RuntimeIdentity: runtimeFileIdentity,
-		GitExecutable: spec.GitExecutable, FactoryctlExecutable: factoryctl.Path(), ToolPath: spec.ToolPath, ToolchainReadRoots: spec.ToolchainReadRoots, LocalCILeaseDir: localCILeaseDir, AccountHome: spec.AccountHome, AccountConfigDir: accountConfigDir, RepositoryRoot: repository.Root, RepositoryIdentity: repositoryIdentity, RepositoryGitIdentity: repositoryGitIdentity, RepositoryOriginDigest: repositoryOriginDigest, GitCommonDir: gitCommonDir,
+		GitExecutable: spec.GitExecutable, FactoryctlExecutable: factoryctl.Path(), ToolPath: spec.ToolPath, ToolchainReadRoots: spec.ToolchainReadRoots, LocalCILeaseDir: localCILeaseDir, TraceReceiverPort: traceReceiverPort, RunID: telemetryRunID, AccountHome: spec.AccountHome, AccountConfigDir: accountConfigDir, RepositoryRoot: repository.Root, RepositoryIdentity: repositoryIdentity, RepositoryGitIdentity: repositoryGitIdentity, RepositoryOriginDigest: repositoryOriginDigest, GitCommonDir: gitCommonDir,
 		Revision: repository.BaseRef, ChangeParent: spec.ChangeParent, FinalName: finalName,
 		AttemptSocket: spec.AttemptSocket, Retained: retained, ProviderTask: providerTask,
 	}
@@ -553,7 +560,6 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 	if err := controller.Configure(runner.AttemptSpec{
 		AttemptID: run.ID.String(), Wrapper: wrapper,
 		MarkerName: runner.InnerActivationMarkerName, ResultName: runner.AttemptResultSpoolName, ResultProof: resultProof,
-		StartupInput: startupInput,
 	}); err != nil {
 		_ = childControl.Close()
 		return daemon.failRun(run, kernel.FailureProtocol, err)
@@ -600,7 +606,9 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 		_ = childControl.Close()
 		return daemon.failRun(run, kernel.FailureInternal, err)
 	}
+	launched := time.Now()
 	child, err := runner.StartBlocked(lease, spec.RunnerExecutable, outer, true)
+	daemon.observe("client", map[string]string{}, map[string]string{"process.executable.name": filepath.Base(spec.RunnerExecutable)}, err != nil, time.Since(launched))
 	_ = childControl.Close()
 	if err != nil {
 		controllerOpen = false
@@ -761,7 +769,7 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 	// until it observes TerminalReady, but it already owns the controller and
 	// will synchronously converge it if any later step fails.
 	live := newLiveAttempt(daemon, run.ID, session.ID, controller)
-	live.callFirst = run.Provider == kernel.ProviderCodex
+	live.callFirst = run.Provider != kernel.ProviderShell
 	if worker && changeState.AvailableAt != nil && run.RunningAt != nil {
 		live.agentID, live.changeID = run.AgentID, changeState.ID
 		live.pathsSince = *changeState.AvailableAt

@@ -34,13 +34,62 @@ test("reconnect requires a new serving-runtime observation before confirming its
   try {
     await act(async () => { tree = create(createElement(Probe, { call: async () => page(build("old")) })); });
     assert.equal(state.runtime.source, "old");
+    assert.equal(state.read, true);
     await act(async () => { tree.update(createElement(Probe, {})); });
     assert.equal(state.runtime, undefined);
+    assert.equal(state.read, false);
     const pending = new Promise((done) => { resolve = done; });
     await act(async () => { tree.update(createElement(Probe, { call: () => pending })); });
     assert.equal(state.runtime, undefined);
+    assert.equal(state.read, false, "records kept from before the drop are not read on this connection");
     await act(async () => { resolve(page(build("new"))); await pending; });
     assert.equal(state.runtime.source, "new");
+    assert.equal(state.read, true);
+  } finally {
+    if (tree) await act(async () => tree.unmount());
+    if (previousDocument === undefined) delete globalThis.document; else globalThis.document = previousDocument;
+  }
+});
+
+test("switching projects is a first read too: nothing read for the new list counts until it arrives", async () => {
+  const previousDocument = globalThis.document;
+  globalThis.document = Object.assign(new EventTarget(), { visibilityState: "visible" });
+  const page = { records: [], total: 0, next_offset: 0 };
+  const seen = [];
+  let tree, resolve;
+  function Probe({ projects, call }) { const state = useProduction(projects, call); seen.push([projects.join(), state.read]); return null; }
+  try {
+    await act(async () => { tree = create(createElement(Probe, { projects: ["a"], call: async () => page })); });
+    assert.deepEqual(seen.at(-1), ["a", true]);
+    const pending = new Promise((done) => { resolve = done; });
+    seen.length = 0;
+    await act(async () => { tree.update(createElement(Probe, { projects: ["b"], call: () => pending })); });
+    assert.ok(seen.length > 0 && seen.every(([projects, read]) => projects === "b" && read === false), `not read for b, from its first render: ${JSON.stringify(seen)}`);
+    await act(async () => { resolve(page); await pending; });
+    assert.deepEqual(seen.at(-1), ["b", true]);
+  } finally {
+    if (tree) await act(async () => tree.unmount());
+    if (previousDocument === undefined) delete globalThis.document; else globalThis.document = previousDocument;
+  }
+});
+
+test("every page of the relevant set is read until next_offset is 0, with no record ceiling", async () => {
+  const previousDocument = globalThis.document;
+  globalThis.document = Object.assign(new EventTarget(), { visibilityState: "visible" });
+  const total = 300;
+  const offsets = [];
+  let state, tree;
+  const call = async (_operation, { offset, limit }) => {
+    offsets.push(offset);
+    const records = Array.from({ length: Math.min(limit, total - offset) }, (_, index) => ({ repository: "owner/repo", kind: "pull_request", id: String(offset + index), visual_id: "", observed_at: 1, document: {}, tasks: [], missions: [] }));
+    return { records, total, next_offset: offset + records.length < total ? offset + records.length : 0 };
+  };
+  function Probe() { state = useProduction(["project"], call); return null; }
+  try {
+    await act(async () => { tree = create(createElement(Probe)); });
+    assert.equal(state.records.length, total);
+    assert.equal(offsets.length, Math.ceil(total / 8));
+    assert.equal("overflow" in state, false);
   } finally {
     if (tree) await act(async () => tree.unmount());
     if (previousDocument === undefined) delete globalThis.document; else globalThis.document = previousDocument;

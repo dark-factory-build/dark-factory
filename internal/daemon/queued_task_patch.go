@@ -88,6 +88,9 @@ func prepareTaskRetry(ctx context.Context, store *kernel.Store, id kernel.TaskID
 	if assigned == (kernel.AgentID{}) {
 		assigned = task.AssignedAgentID
 	}
+	if assigned == (kernel.AgentID{}) {
+		return prepareSharedTaskText(task.Title, task.Body, attachments...)
+	}
 	agent, found, err := store.Agent(ctx, assigned)
 	if err != nil {
 		return err

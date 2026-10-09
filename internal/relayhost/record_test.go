@@ -43,7 +43,7 @@ func TestRecordCodecFailsClosedOnEveryBound(t *testing.T) {
 		{name: "truncated header", message: full[:5], want: ErrRecordTruncated},
 		{name: "truncated payload", message: full[:len(full)-1], want: ErrRecordTruncated},
 		{name: "trailing partial record", message: append(append([]byte(nil), full...), 0x02, 0x00), want: ErrRecordTruncated},
-		{name: "unknown type", message: []byte{0x06, 0, 0, 0, 1, 0, 0, 0, 0}, want: ErrRecordType},
+		{name: "unknown type", message: []byte{0x09, 0, 0, 0, 1, 0, 0, 0, 0}, want: ErrRecordType},
 		{name: "declared payload beyond bound", message: []byte{0x02, 0, 0, 0, 1, 0xff, 0xff, 0xff, 0xff}, want: ErrRecordOversized},
 		{name: "message beyond bound", message: make([]byte, MaxHostMessageBytes+1), want: ErrRecordOversized},
 	} {

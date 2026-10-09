@@ -1,32 +1,35 @@
 package browser
 
 import (
+	"compress/gzip"
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
-	"encoding/base64"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/url"
-	"sort"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
 	"github.com/dark-factory-build/dark-factory/internal/browserprotocol"
+	"github.com/dark-factory-build/dark-factory/internal/opgraph"
+	"github.com/dark-factory-build/dark-factory/internal/relayhost"
 )
 
 const (
-	Path     = "/browser"
-	PairPath = "/pair"
-	// TracesPath accepts OTLP/HTTP JSON trace exports from local processes.
+	Path = "/browser"
+	// TracesPath accepts OTLP/HTTP trace exports from local processes.
 	TracesPath = "/v1/traces"
+	// MetricsPath and LogsPath accept OTLP/HTTP agent telemetry exports.
+	MetricsPath = "/v1/metrics"
+	LogsPath    = "/v1/logs"
 	// PublicPath serves the safe public projection of one project.
 	PublicPath     = "/v1/public/"
 	maxOrigins     = 8
@@ -57,10 +60,24 @@ type Observer interface {
 	Observe(attributes map[string]string)
 }
 
-// TraceReceiver is an optional Backend capability: aggregate a local OTLP
-// trace export without retaining it.
+// ErrorClassifier is an optional Backend capability: name the backend's own
+// errors as this package's. The transport applies it once, to every error it
+// answers a request with, so no return path reaches the wire unnamed.
+type ErrorClassifier interface {
+	ClassifyError(err error) error
+}
+
+// TraceReceiver is an optional Backend capability: aggregate an OTLP trace
+// export without retaining it. remote marks one the relay carried.
 type TraceReceiver interface {
-	ReceiveTraces(body []byte) error
+	ReceiveTraces(body []byte, remote bool) error
+}
+
+// AgentTelemetryReceiver is an optional Backend capability: count a local
+// OTLP metrics or logs export (path is MetricsPath or LogsPath) against the
+// runs its resources name, keeping no record.
+type AgentTelemetryReceiver interface {
+	ReceiveAgentTelemetry(path string, body []byte, protobuf bool) error
 }
 
 // PublicProjector is an optional Backend capability: the public projection
@@ -81,8 +98,6 @@ type Server struct {
 	taskBackend        TaskBackend
 	consoleBackend     ConsoleBackend
 	githubBackend      GitHubBackend
-	pairBackend        PairBackend
-	pairPolicy         string
 	host               string
 	origins            map[string]struct{}
 	terminalAckTimeout time.Duration
@@ -133,8 +148,6 @@ func start(backend Backend, origins map[string]struct{}, listener net.Listener, 
 		taskBackend:        func() TaskBackend { value, _ := backend.(TaskBackend); return value }(),
 		consoleBackend:     func() ConsoleBackend { value, _ := backend.(ConsoleBackend); return value }(),
 		githubBackend:      func() GitHubBackend { value, _ := backend.(GitHubBackend); return value }(),
-		pairBackend:        func() PairBackend { value, _ := backend.(PairBackend); return value }(),
-		pairPolicy:         pairPolicy(origins),
 		host:               listener.Addr().String(),
 		origins:            origins,
 		terminalAckTimeout: time.Duration(browserprotocol.TerminalAckTimeoutMS) * time.Millisecond,
@@ -290,17 +303,13 @@ func (server *Server) CloseClient(clientID [browserprotocol.ClientIDSize]byte) e
 }
 
 func (server *Server) handle(writer http.ResponseWriter, request *http.Request) {
-	if observer, ok := server.backend.(Observer); ok && (request.URL.Path == Path || request.URL.Path == PairPath) {
+	if observer, ok := server.backend.(Observer); ok && request.URL.Path == Path {
 		host, port, _ := net.SplitHostPort(server.host)
 		observer.Observe(map[string]string{"network.transport": "tcp", "server.address": host, "server.port": port})
 		observer.Observe(map[string]string{"url.path": request.URL.Path, "http.request.method": request.Method})
 	}
-	if request.URL.Path == PairPath {
-		server.handlePair(writer, request)
-		return
-	}
-	if request.URL.Path == TracesPath {
-		server.handleTraces(writer, request)
+	if request.URL.Path == TracesPath || request.URL.Path == MetricsPath || request.URL.Path == LogsPath {
+		server.handleOTLP(writer, request)
 		return
 	}
 	if strings.HasPrefix(request.URL.Path, PublicPath) {
@@ -366,97 +375,6 @@ func (server *Server) handle(writer http.ResponseWriter, request *http.Request) 
 	reserved = false
 	defer func() { <-server.slots }()
 	current.run()
-}
-
-// pairPage is the only HTML the daemon serves: one confirm page whose form
-// mints a pairing link. It carries no script and no state; its stylesheet is
-// pinned by hash so the policy below can forbid every other inline source.
-const pairStyle = `body{margin:0;min-height:100vh;display:grid;place-items:center;background:#0b0d10;color:#d7dde3;font:16px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace}main{max-width:32rem;padding:2rem}h1{font-size:1.25rem;letter-spacing:.08em;margin:0 0 1rem}p{margin:0 0 1.5rem}button{font:inherit;letter-spacing:.08em;padding:.75rem 1.5rem;background:#d7dde3;color:#0b0d10;border:0;cursor:pointer}`
-
-const pairPage = "<!doctype html><meta charset=utf-8><meta name=viewport content=\"width=device-width,initial-scale=1\"><title>Pair this browser</title><style>" + pairStyle + "</style><main><h1>PAIR THIS BROWSER</h1><p>Dark Factory on this machine will trust this browser to operate the factory at app.darkfactory.build. Continue only if you opened this page yourself.</p><form method=post action=" + PairPath + "><button>PAIR THIS BROWSER</button></form></main>"
-
-// pairPolicy admits the page's own form post and, because CSP checks
-// form-action against every response in the submission's redirect chain, the
-// console origins the mint redirects to; nothing else may load or run.
-func pairPolicy(origins map[string]struct{}) string {
-	targets := make([]string, 0, len(origins))
-	for origin := range origins {
-		targets = append(targets, origin)
-	}
-	sort.Strings(targets)
-	digest := sha256.Sum256([]byte(pairStyle))
-	return "default-src 'none'; style-src 'sha256-" + base64.StdEncoding.EncodeToString(digest[:]) + "'; form-action 'self' " + strings.Join(targets, " ") + "; base-uri 'none'; frame-ancestors 'none'"
-}
-
-// handlePair admits exactly two requests, both proven by the browser's own
-// Fetch Metadata rather than by anything the page could carry: a top-level
-// document navigation to the page from the address bar (Sec-Fetch-Site none)
-// or from an allowed console origin (its Referer), and the page's own
-// same-origin form post, which mints the link and redirects to the console.
-// Everything else is 404 and mints nothing: fetch and XHR (mode cors), frames
-// (dest iframe), cross-site form posts, and navigations that arrived from any
-// other origin. Sec-Fetch-User is deliberately not required: Safari 26.5
-// sent none of it on an OS-launched navigation (Sec-Fetch-Site none, Mode
-// navigate, Dest document) nor on a real button-click POST (Site
-// same-origin), while Chrome 151 sent "?1" on both; the Referer rule already
-// refuses a scripted navigation from elsewhere, and a scripted same-origin
-// post needs script on a page that has none.
-//
-// These headers prove which browser context sent a request; they do not
-// authenticate the sender as a browser. Any local process able to connect to
-// this loopback port can send them and obtain a challenge, so the port is a
-// same-machine trust boundary, as SECURITY.md records.
-func (server *Server) handlePair(writer http.ResponseWriter, request *http.Request) {
-	header := request.Header
-	if server.pairBackend == nil || request.URL.EscapedPath() != PairPath || request.URL.RawQuery != "" || request.Host != server.host ||
-		header.Get("Sec-Fetch-Mode") != "navigate" || header.Get("Sec-Fetch-Dest") != "document" {
-		http.NotFound(writer, request)
-		return
-	}
-	writer.Header().Set("Cache-Control", "no-store")
-	writer.Header().Set("Referrer-Policy", "no-referrer")
-	switch {
-	case request.Method == http.MethodGet && (header.Get("Sec-Fetch-Site") == "none" || server.refererAllowed(header.Get("Referer"))):
-		writer.Header().Set("Content-Type", "text/html; charset=utf-8")
-		writer.Header().Set("Content-Security-Policy", server.pairPolicy)
-		writer.Header().Set("X-Content-Type-Options", "nosniff")
-		writer.Header().Set("X-Frame-Options", "DENY")
-		_, _ = io.WriteString(writer, pairPage)
-	case request.Method == http.MethodPost && header.Get("Sec-Fetch-Site") == "same-origin":
-		link, err := server.pairBackend.PairLink(request.Context())
-		if err != nil || !server.validPairLink(link) {
-			http.Error(writer, http.StatusText(http.StatusServiceUnavailable), http.StatusServiceUnavailable)
-			return
-		}
-		http.Redirect(writer, request, link, http.StatusSeeOther)
-	default:
-		http.NotFound(writer, request)
-	}
-}
-
-// validPairLink proves the redirect target before it is sent: one allowed
-// origin, the root path, and a fragment carrying exactly one challenge in
-// lowercase hex. A mint that returns anything else fails the request rather
-// than sending the browser somewhere this server did not choose.
-func (server *Server) validPairLink(link string) bool {
-	origin, challenge, found := strings.Cut(link, "/#df_pair=")
-	if !found || len(challenge) != 2*browserprotocol.ChallengeSize || challenge != strings.ToLower(challenge) {
-		return false
-	}
-	if _, err := hex.DecodeString(challenge); err != nil {
-		return false
-	}
-	_, allowed := server.origins[origin]
-	return allowed
-}
-
-func (server *Server) refererAllowed(referer string) bool {
-	parsed, err := url.Parse(referer)
-	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
-		return false
-	}
-	_, ok := server.origins[parsed.Scheme+"://"+parsed.Host]
-	return ok
 }
 
 func (server *Server) validRequest(request *http.Request) (string, bool) {
@@ -684,9 +602,23 @@ func errorFrame(err error) browserprotocol.Error {
 	case errors.Is(err, ErrRateLimited):
 		return browserprotocol.Error{Code: browserprotocol.ErrorRateLimited, Retryable: true}
 	default:
+		// Say why our own reply was refused, once per reason. ponytail: every 64th new reason forgets the rest.
+		if _, seen := refusals.LoadOrStore(err.Error(), true); !seen {
+			if refusalCount.Add(1)%64 == 0 {
+				refusals.Clear()
+			}
+			if errors.Is(err, browserprotocol.ErrMalformed) {
+				fmt.Fprintf(os.Stderr, "%s factoryd: reply refused: %v\n", time.Now().UTC().Format(time.RFC3339), err)
+			}
+		}
 		return browserprotocol.Error{Code: browserprotocol.ErrorInternal}
 	}
 }
+
+var (
+	refusals     sync.Map
+	refusalCount atomic.Int64
+)
 
 func zero16(value [16]byte) bool {
 	for _, item := range value {
@@ -697,13 +629,15 @@ func zero16(value [16]byte) bool {
 	return true
 }
 
-// handleTraces takes OTLP/HTTP JSON from local processes only: a browser
-// page carries an Origin and cannot send JSON without a preflight this
-// listener never answers. Protobuf is refused; bodies are bounded.
-func (server *Server) handleTraces(writer http.ResponseWriter, request *http.Request) {
-	receiver, ok := server.backend.(TraceReceiver)
+// handleOTLP takes OTLP/HTTP traces, metrics or logs, protobuf or JSON,
+// optionally gzipped, from local processes only: a browser page carries an
+// Origin and cannot send either type without a preflight this listener never
+// answers. Bodies are bounded before and after decompression.
+func (server *Server) handleOTLP(writer http.ResponseWriter, request *http.Request) {
+	traces, _ := server.backend.(TraceReceiver)
+	agents, _ := server.backend.(AgentTelemetryReceiver)
 	switch {
-	case !ok:
+	case request.URL.Path == TracesPath && traces == nil || request.URL.Path != TracesPath && agents == nil:
 		http.Error(writer, http.StatusText(http.StatusNotFound), http.StatusNotFound)
 		return
 	case request.Method != http.MethodPost:
@@ -712,12 +646,36 @@ func (server *Server) handleTraces(writer http.ResponseWriter, request *http.Req
 	case request.Header.Get("Origin") != "":
 		http.Error(writer, http.StatusText(http.StatusForbidden), http.StatusForbidden)
 		return
-	case !strings.HasPrefix(request.Header.Get("Content-Type"), "application/json"):
+	}
+	protobuf := strings.HasPrefix(request.Header.Get("Content-Type"), "application/x-protobuf")
+	if !protobuf && !strings.HasPrefix(request.Header.Get("Content-Type"), "application/json") {
 		http.Error(writer, http.StatusText(http.StatusUnsupportedMediaType), http.StatusUnsupportedMediaType)
 		return
 	}
-	body, err := io.ReadAll(http.MaxBytesReader(writer, request.Body, browserprotocol.MaxSnapshotBytes))
-	if err != nil || receiver.ReceiveTraces(body) != nil {
+	var reader io.Reader = http.MaxBytesReader(writer, request.Body, browserprotocol.MaxSnapshotBytes)
+	if request.Header.Get("Content-Encoding") == "gzip" {
+		unzipped, err := gzip.NewReader(reader)
+		if err != nil {
+			http.Error(writer, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
+			return
+		}
+		reader = io.LimitReader(unzipped, browserprotocol.MaxSnapshotBytes+1)
+	}
+	body, err := io.ReadAll(reader)
+	if err == nil && len(body) > browserprotocol.MaxSnapshotBytes {
+		err = errors.New("otlp export too large")
+	}
+	if err == nil && request.URL.Path != TracesPath {
+		err = agents.ReceiveAgentTelemetry(request.URL.Path, body, protobuf)
+	} else if err == nil {
+		if protobuf {
+			body, err = opgraph.OTLPProtobufJSON(body)
+		}
+		if err == nil {
+			err = traces.ReceiveTraces(body, request.Header.Get(relayhost.RemoteHeader) != "")
+		}
+	}
+	if err != nil {
 		http.Error(writer, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
 		return
 	}

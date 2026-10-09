@@ -333,6 +333,20 @@ fn declared_output_schemas_name_the_fields_the_results_carry() {
         ),
         ("create_issue", "IssueResult", &["number", "url"][..]),
         (
+            "list_deployments.deployments",
+            "DeploymentResult",
+            &[
+                "id",
+                "environment",
+                "production_environment",
+                "sha",
+                "created_at",
+                "state",
+                "updated_at",
+                "environment_host",
+            ][..],
+        ),
+        (
             "observe_pull_request_merge",
             "PullRequestMergeResult",
             &[
@@ -341,7 +355,6 @@ fn declared_output_schemas_name_the_fields_the_results_carry() {
                 "base",
                 "pull_state",
                 "state",
-                "entry_id",
                 "queue_state",
                 "merge_commit_sha",
                 "merge_group",
@@ -454,6 +467,7 @@ fn every_repository_tool_requires_the_repository_it_acts_on() {
         "update_pull_request_body",
         "submit_pull_request_review",
         "observe_pull_request_checks",
+        "list_deployments",
         "observe_pull_request_merge",
         "publish_commit",
         "enqueue_pull_request",
@@ -543,6 +557,7 @@ fn mcp_surface_is_installation_bound_and_typed() {
         "update_pull_request_body",
         "submit_pull_request_review",
         "observe_pull_request_checks",
+        "list_deployments",
         "observe_pull_request_merge",
         "publish_commit",
         "enqueue_pull_request",
@@ -654,7 +669,6 @@ fn github_refusals_stay_determinate() {
     assert!(github_app.contains("request.branch == repository.default_branch"));
     // A refusal releases the claim so the same operation ID stays retryable.
     assert!(github_app.contains("OperationTransition::Refused"));
-    assert!(github_app.contains("RefusalReason::AlreadyQueued"));
     // Reconciliation rematerializes the content-addressed request tree; a
     // copied marker and parent cannot cause a different tree to be adopted.
     assert!(github_app.contains("head.tree.sha != self.materialize_tree(token, request).await?"));

@@ -7,6 +7,7 @@ import (
 )
 
 func TestOverseerPriorContextRemainsReadableAfterUnproductivePass(t *testing.T) {
+	t.Parallel()
 	for _, outcome := range []string{"blocked", "failed", "failed-review", "empty-failure", "cancelled", "sent-back", "empty-success"} {
 		t.Run(outcome, func(t *testing.T) {
 			ctx := context.Background()

@@ -54,6 +54,12 @@ case "$1:${2-}" in
             github.com/dark-factory-build/dark-factory/internal/e2e \
             github.com/dark-factory-build/dark-factory/internal/newpackage
         ;;
+    list:-m) echo github.com/dark-factory-build/dark-factory ;;
+    list:-test)
+        printf '%s\n' \
+            'github.com/dark-factory-build/dark-factory/internal/daemon.test|fmt|github.com/dark-factory-build/dark-factory/internal/kernel' \
+            'github.com/dark-factory-build/dark-factory/internal/change.test|fmt|github.com/dark-factory-build/dark-factory/internal/change [github.com/dark-factory-build/dark-factory/internal/change.test]'
+        ;;
     vet:./...)
         [ "${DF_GATE_FAULT-}" != vet ] || { echo 'fixture vet failure' >&2; exit 1; }
         ;;
@@ -176,6 +182,37 @@ set -e
 [ "$process_status" -eq 0 ] || fail "successful process fixture failed: $process_output"
 printf '%s\n' "$process_output" | /usr/bin/grep -F 'fixture selected unknown package' >/dev/null \
     || fail "new process package was not selected: $process_output"
+# A CI shard runs only its own stages; the three shards cover every stage.
+for shard_case in '1daemon:daemon process tests' '1packages:process-sensitive Go tests' '3source:Git boundary resource census'; do
+    shard_stages=${shard_case%%[a-z]*}
+    shard=${shard_case#?}
+    shard=${shard%%:*}
+    shard_output=$(CDPATH= cd -- "$process" && \
+        PATH="$process/bin:/usr/bin:/bin" /bin/sh ./scripts/go-ci-owned.sh "$shard" 2>&1) \
+        || fail "$shard shard failed: $shard_output"
+    [ "$(printf '%s\n' "$shard_output" | /usr/bin/grep -v '^go-ci: PASS' | /usr/bin/grep -c '^go-ci: ')" -eq "$shard_stages" ] \
+        && printf '%s\n' "$shard_output" | /usr/bin/grep -F "go-ci: ${shard_case#*:}" >/dev/null \
+        || fail "$shard shard ran the wrong stages: $shard_output"
+done
+# Affected mode runs only stages whose tests depend on a changed package:
+# kernel changed, daemon's tests import kernel, change's tests do not.
+(
+    CDPATH= cd -- "$process"
+    /usr/bin/git init -q
+    /bin/mkdir -p internal/kernel
+    : >internal/kernel/kernel.go
+    /usr/bin/git add internal/kernel/kernel.go
+    /usr/bin/git -c user.name=fixture -c user.email=fixture@example.invalid commit -qm base
+    printf '%s\n' 'package kernel' >internal/kernel/kernel.go
+    /usr/bin/git -c user.name=fixture -c user.email=fixture@example.invalid commit -qam change
+)
+affected_output=$(CDPATH= cd -- "$process" && \
+    PATH="$process/bin:/usr/bin:/bin" /bin/sh ./scripts/go-ci-owned.sh --affected HEAD~1 2>&1) \
+    || fail "affected run failed: $affected_output"
+printf '%s\n' "$affected_output" | /usr/bin/grep -F 'go-ci: daemon process tests' >/dev/null \
+    && ! printf '%s\n' "$affected_output" | /usr/bin/grep -F 'go-ci: Git boundary resource census' >/dev/null \
+    && ! printf '%s\n' "$affected_output" | /usr/bin/grep -F 'go-ci: browser, daemon and runner E2E' >/dev/null \
+    || fail "affected run selected the wrong stages: $affected_output"
 if (CDPATH= cd -- "$process" && DF_GATE_FAULT=go-list \
     PATH="$process/bin:/usr/bin:/bin" /bin/sh ./scripts/go-ci-owned.sh) >"$temporary/discovery.out" 2>&1; then
     fail "failed package discovery silently skipped process tests"
@@ -396,10 +433,11 @@ EOF
     "$local_fixture/poison/corepack" "$local_fixture/poison/go" \
     "$local_fixture/scripts/go-check.sh"
 /bin/cp "$local_fixture/poison/node" "$local_fixture/poison/corepack" "$local_fixture/configured/"
-/bin/ln -s /opt/homebrew/Cellar/go/1.27.0/libexec/bin/go "$local_fixture/configured/go"
+fixture_go=$(command -v go) || fail "go is unavailable for the local-ci fixture"
+/bin/ln -s "$fixture_go" "$local_fixture/configured/go"
 /bin/chmod 755 "$local_fixture/configured/node" "$local_fixture/configured/corepack"
 for local_child in \
-    check-toolchain-pins.sh test-local-ci-environment.sh test-new-worktree.sh \
+    check-toolchain-pins.sh test-local-ci-environment.sh test-with-local-ci-lease.sh test-new-worktree.sh \
     test-release.sh test-github-step-summary.sh \
     test-repository-settings.sh \
     test-go-gates.sh test-go-e2e-tools.sh go-ci-owned.sh \
@@ -419,7 +457,7 @@ run_local_fault() {
     set +e
     local_output=$(CDPATH= cd -- "$local_fixture" && DARK_FACTORY_LOCAL_CI_LEASE_HELD=1 \
         DF_GATE_FAULT="$local_mode" \
-        PATH="$local_fixture/configured:/opt/homebrew/bin:/usr/bin:/bin" \
+        PATH="$local_fixture/configured:/usr/bin:/bin" \
         /bin/sh ./scripts/local-ci.sh "$local_gate_mode" 2>&1)
     local_status=$?
     set -e
@@ -440,7 +478,7 @@ set +e
 local_output=$(CDPATH= cd -- "$local_fixture" && \
     DARK_FACTORY_LOCAL_CI_LEASE_HELD=1 DF_GATE_FAULT=env \
     OPENAI_API_KEY=probe-secret \
-    PATH="$local_fixture/configured:/opt/homebrew/bin:/usr/bin:/bin" \
+    PATH="$local_fixture/configured:/usr/bin:/bin" \
     GIT_DIR="$temporary/poisoned-git" GIT_WORK_TREE="$temporary/poisoned-tree" \
     GIT_CONFIG_GLOBAL="$temporary/poisoned-global" GIT_CONFIG_SYSTEM="$temporary/poisoned-system" \
     GIT_CONFIG_NOSYSTEM=0 /bin/sh ./scripts/local-ci.sh 2>&1)
@@ -460,7 +498,7 @@ local_cache_root=$(sed -n '2p' "$local_fixture/cache-roots")
 run_local_mode() {
     selected_mode=$1
     local_output=$(CDPATH= cd -- "$local_fixture" && DARK_FACTORY_LOCAL_CI_LEASE_HELD=1 \
-        PATH="$local_fixture/configured:/opt/homebrew/bin:/usr/bin:/bin" \
+        PATH="$local_fixture/configured:/usr/bin:/bin" \
         /bin/sh ./scripts/local-ci.sh "$selected_mode" 2>&1)
     printf '%s\n' "$local_output" | /usr/bin/grep -F "local-ci: PASS (${selected_mode#--})" >/dev/null \
         || fail "$selected_mode did not report its selected scope: $local_output"
@@ -472,7 +510,7 @@ run_local_mode --runtime
 run_local_mode --release
 : >"$local_fixture/lease-calls"
 local_output=$(CDPATH= cd -- "$local_fixture" && DARK_FACTORY_LOCAL_CI_LEASE_HELD=1 \
-    PATH="$local_fixture/configured:/opt/homebrew/bin:/usr/bin:/bin" \
+    PATH="$local_fixture/configured:/usr/bin:/bin" \
     /bin/sh ./scripts/local-ci.sh --ui 2>&1)
 printf '%s\n' "$local_output" | /usr/bin/grep -F 'local-ci: PASS (ui)' >/dev/null \
     || fail "UI gate did not complete: $local_output"
@@ -480,13 +518,13 @@ printf '%s\n' "$local_output" | /usr/bin/grep -F 'local-ci: PASS (ui)' >/dev/nul
 for selected_mode in --ui --release --runtime; do
     : >"$local_fixture/lease-calls"
     local_output=$(CDPATH= cd -- "$local_fixture" && DARK_FACTORY_LOCAL_CI_LEASE_HELD=0 \
-        PATH="$local_fixture/configured:/opt/homebrew/bin:/usr/bin:/bin" \
+        PATH="$local_fixture/configured:/usr/bin:/bin" \
         /bin/sh ./scripts/local-ci.sh "$selected_mode" 2>&1)
     [ -s "$local_fixture/lease-calls" ] || fail "$selected_mode ran heavy checks without the lease"
 done
 set +e
 local_output=$(CDPATH= cd -- "$local_fixture" && DARK_FACTORY_LOCAL_CI_LEASE_HELD=1 \
-    DF_GATE_FAULT=ui PATH="$local_fixture/configured:/opt/homebrew/bin:/usr/bin:/bin" \
+    DF_GATE_FAULT=ui PATH="$local_fixture/configured:/usr/bin:/bin" \
     /bin/sh ./scripts/local-ci.sh --ui 2>&1)
 local_status=$?
 set -e

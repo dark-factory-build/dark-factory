@@ -482,6 +482,8 @@ func TestServerRejectsDomainFallbackAndInvalidRequests(t *testing.T) {
 		{name: "operator domain cannot read attempt task", domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"task","params":{}}`), code: RemoteForbidden},
 		{name: "attempt domain cannot read operator paths", domain: attemptDomain, bearer: attemptBearer, body: []byte(`{"method":"agent_paths","params":{"agent_id":"` + id('2') + `"}}`), code: RemoteForbidden},
 		{name: "attempt domain cannot set capacity", domain: attemptDomain, bearer: attemptBearer, body: []byte(`{"method":"set_capacity","params":{"expected_revision":1,"capacity":2}}`), code: RemoteForbidden},
+		{name: "attempt domain cannot mint a browser pairing", domain: attemptDomain, bearer: attemptBearer, body: []byte(`{"method":"web_pair","params":{}}`), code: RemoteForbidden},
+		{name: "attempt bearer cannot mint a browser pairing as operator", domain: operatorDomain, bearer: attemptBearer, body: []byte(`{"method":"web_pair","params":{}}`), code: RemoteUnauthorized},
 		{name: "attempt cannot compact", domain: attemptDomain, bearer: attemptBearer, body: []byte(`{"method":"compact_storage","params":{}}`), code: RemoteForbidden},
 		{name: "overseer cannot remove task attachments", domain: attemptDomain, bearer: attemptBearer, body: []byte(`{"method":"overseer_update_task","params":{"task_id":"` + id('3') + `","expected_revision":1,"remove_attachments":true}}`), code: RemoteInvalidRequest},
 		{name: "unknown method", domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"delete_all","params":{}}`), code: RemoteInvalidRequest},
@@ -870,15 +872,18 @@ func TestServerReceiveCancellationCutsJoinWatcher(t *testing.T) {
 				}
 				closeAPITestListener(t, listener)
 			}
+			// A leak grows the census by one per iteration. An earlier test's
+			// goroutine or descriptor may still be finishing at the baseline
+			// and go meanwhile, so only growth is a leak.
 			deadline := time.Now().Add(500 * time.Millisecond)
-			for runtime.NumGoroutine() != baselineGoroutines && time.Now().Before(deadline) {
+			for runtime.NumGoroutine() > baselineGoroutines && time.Now().Before(deadline) {
 				time.Sleep(5 * time.Millisecond)
 			}
-			if after := runtime.NumGoroutine(); after != baselineGoroutines {
-				t.Fatalf("cancelled receives changed goroutine census: before=%d after=%d", baselineGoroutines, after)
+			if after := runtime.NumGoroutine(); after > baselineGoroutines {
+				t.Fatalf("cancelled receives grew goroutine census: before=%d after=%d", baselineGoroutines, after)
 			}
-			if after := countTestFDs(t); after != baselineFDs {
-				t.Fatalf("cancelled receives changed FD census: before=%d after=%d", baselineFDs, after)
+			if after := countTestFDs(t); after > baselineFDs {
+				t.Fatalf("cancelled receives grew FD census: before=%d after=%d", baselineFDs, after)
 			}
 		})
 	}

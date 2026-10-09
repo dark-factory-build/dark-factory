@@ -46,6 +46,21 @@ const (
 	Runs      EdgeKind = "runs"      // processor -> job
 )
 
+// These typed sets, Kind and EdgeKind are the graph contract; contract_test.go holds the console to them.
+type Placement string     // where a processor runs
+type Trigger string       // what starts an ingress
+type EvidenceState string // derived by State
+type Visibility string    // how well a reading sees its node or edge
+type Activity string      // what a reading claims it is doing
+type Origin string
+
+const RuntimeProcess, RuntimeCLI, RuntimeWorker, RuntimeServer, RuntimeBrowser, RuntimeCI Placement = "process", "cli", "worker", "server", "browser", "ci"
+const TriggerRequest, TriggerTimer, TriggerMessage Trigger = "request", "timer", "message"
+const EvidenceStatic, EvidenceRuntime, EvidenceBoth, EvidenceUncertain, EvidenceContradicted EvidenceState = "static", "runtime", "both", "uncertain", "contradicted"
+const Observed, Quiet, Partial, Stale, Unobserved, Opaque Visibility = "observed", "quiet", "partial", "stale", "unobserved", "opaque"
+const Active, Degraded, Failing, Idle, StateUnknown Activity = "active", "degraded", "failing", "idle", "unknown"
+const OriginStatic, OriginRuntime Origin = "static", "runtime"
+
 // Confidence grades one piece of evidence.
 const (
 	Declared     = "declared"     // a declaration the framework itself executes
@@ -55,7 +70,7 @@ const (
 )
 
 type Evidence struct {
-	Origin     string `json:"origin"` // "static" | "runtime"
+	Origin     Origin `json:"origin"`
 	Source     string `json:"source"` // extractor or adapter
 	Detail     string `json:"detail,omitempty"`
 	Confidence string `json:"confidence"`
@@ -73,12 +88,12 @@ type Node struct {
 	Label string `json:"label"`
 	// Unit is the processor node this node runs in; empty for processors and
 	// for system-wide parties (externals, shared stores).
-	Unit string `json:"unit,omitempty"`
-	// Runtime places a processor: process, cli, worker, server, browser.
-	Runtime string `json:"runtime,omitempty"`
-	// Trigger says what starts an ingress: request, timer or message.
-	Trigger string     `json:"trigger,omitempty"`
-	Sources []Location `json:"sources,omitempty"`
+	Unit    string    `json:"unit,omitempty"`
+	Runtime Placement `json:"runtime,omitempty"`
+	// Deployed marks a processor a deployment declaration names.
+	Deployed bool       `json:"deployed,omitempty"`
+	Trigger  Trigger    `json:"trigger,omitempty"`
+	Sources  []Location `json:"sources,omitempty"`
 	// Modules are the code areas a processor runs: its package or module
 	// directories. Ownership stays inspectable without deciding placement.
 	Modules   []Location        `json:"modules,omitempty"`
@@ -100,25 +115,25 @@ type Graph struct {
 
 // State derives the evidence state: static, runtime, both, uncertain or
 // contradicted. It is never stored.
-func State(evidence []Evidence) string {
+func State(evidence []Evidence) EvidenceState {
 	static, runtime, certain := false, false, false
 	for _, item := range evidence {
 		if item.Confidence == Contradicted {
-			return "contradicted"
+			return EvidenceContradicted
 		}
-		static = static || item.Origin == "static"
-		runtime = runtime || item.Origin == "runtime"
+		static = static || item.Origin == OriginStatic
+		runtime = runtime || item.Origin == OriginRuntime
 		certain = certain || item.Confidence != Heuristic
 	}
 	switch {
 	case static && runtime:
-		return "both"
+		return EvidenceBoth
 	case runtime:
-		return "runtime"
+		return EvidenceRuntime
 	case !certain:
-		return "uncertain"
+		return EvidenceUncertain
 	default:
-		return "static"
+		return EvidenceStatic
 	}
 }
 

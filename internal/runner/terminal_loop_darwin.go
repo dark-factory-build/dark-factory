@@ -3,6 +3,7 @@
 package runner
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -45,7 +46,7 @@ func handoverGrace() time.Duration {
 // cursor. The endpoint admits only a fenced replacement and passes its
 // still-open duplex connection here. A nil handover retains protocol-1
 // close-and-drain.
-func runReleasedProviderWithHandover(child *OwnedChild, daemon, worker *os.File, reads *attemptReadSet, stagePTY *ptyStageSink, retained *terminalByteRing, startup []byte, handover *HandoverTransport, retryInterval time.Duration) (bool, error) {
+func runReleasedProviderWithHandover(child *OwnedChild, daemon, worker *os.File, reads *attemptReadSet, stagePTY *ptyStageSink, retained *terminalByteRing, handover *HandoverTransport) (bool, error) {
 	if child == nil || daemon == nil || worker == nil || reads == nil || child.ptyMaster == nil || retained == nil {
 		return false, ErrState
 	}
@@ -53,7 +54,7 @@ func runReleasedProviderWithHandover(child *OwnedChild, daemon, worker *os.File,
 	// worker output is already retained in exact order. The stage sink and this
 	// loop share that one ring by pointer: any copy here would silently drop
 	// every byte the worker writes between adoption and provider exec.
-	loop := terminalOwner{child: child, daemon: daemon, worker: worker, reads: reads, daemonOpen: true, workerOpen: true, ring: retained, handover: handover, startupSubmitRetryInterval: retryInterval}
+	loop := terminalOwner{child: child, daemon: daemon, worker: worker, reads: reads, daemonOpen: true, workerOpen: true, ring: retained, handover: handover}
 	if handover != nil {
 		handover.Current = daemon
 	}
@@ -70,44 +71,6 @@ func runReleasedProviderWithHandover(child *OwnedChild, daemon, worker *os.File,
 		}
 	}
 	loop.ptyOpen = true
-	// The worker's CLOEXEC capability has closed, proving provider exec, and the
-	// PTY is now registered. Claude receives its frozen prompt once. Shell reads
-	// its program from fd 11, and Codex reads its task through the attempt API;
-	// neither has startup PTY bytes.
-	// The prompt is typed only once the provider has taken the terminal out
-	// of canonical mode, or at a ceiling: until then the line discipline
-	// echoes every byte back as output and keeps at most a kilobyte of a
-	// line, so a long prompt typed into a provider still starting would be
-	// cut short and its echo would flood the daemon. A prompt ending in CR is
-	// then submitted by that CR as a keystroke of its own, once the provider
-	// has drawn its prompt: an interactive provider reads one chunk that
-	// carries text and a newline as a paste, and a paste does not submit. The
-	// text goes now; the CR follows from serve.
-	if len(startup) > 0 {
-		defer clear(startup)
-		alive, err := loop.awaitRawMode(stagePTY, startupRawCeiling)
-		if err != nil {
-			return loop.daemonOpen, err
-		}
-		// A provider that hung up its terminal during the gate is owed no
-		// prompt; serve reports its exit as it would any other.
-		if alive {
-			text := startup
-			if text[len(text)-1] == '\r' {
-				text = text[:len(text)-1]
-				now := time.Now()
-				loop.enterAfter, loop.enterBy = now.Add(startupEnterFloor), now.Add(startupEnterCeiling)
-			}
-			if len(text) > 0 {
-				n, err := loop.child.writePTYOwned(text, attemptControlTimeout)
-				count, status := terminalPayloadResult(n, len(text), err)
-				if status != TerminalResultOK {
-					stopErr := loop.stop()
-					return loop.daemonOpen, errors.Join(fmt.Errorf("runner: provider startup input %s after %d bytes: %w", status, count, err), stopErr)
-				}
-			}
-		}
-	}
 	if err := loop.send(TerminalFrame{Kind: TerminalReady}); err != nil {
 		return false, err
 	}
@@ -140,83 +103,41 @@ type terminalOwner struct {
 	detached         bool
 	detachedAt       time.Time
 
-	// enterAfter and enterBy bound the one pending CR owed to the provider;
-	// lastOutput is when the provider last wrote, so the CR follows a quiet
-	// prompt rather than a banner still being drawn.
+	// enterAfter and enterBy bound the one pending human-reply CR owed to the
+	// provider; lastOutput is when the provider last wrote, so the CR follows
+	// a quiet prompt rather than output still being drawn.
 	enterAfter, enterBy, lastOutput time.Time
-	startupSubmitAttempts           uint8
-	startupSubmitLast               time.Time
-	startupSubmitPending            bool
-	startupSubmitVerified           bool
-	startupSubmitRetryInterval      time.Duration
 	humanReplyCorrelation           uint64
 	humanReplyCount                 uint32
+	// folderTail holds the latest startup output until Codex's folder dialog
+	// is answered or folderUntil passes; nil afterwards. folderSeen is when the
+	// dialog was recognised; folderSent counts the CRs written for it.
+	folderTail                        []byte
+	folderUntil, folderSeen, folderAt time.Time
+	folderSent                        uint8
+	folderDone                        bool
 }
 
 // ponytail: the provider's output is opaque to the runner, so its readiness
-// is calibrated, not observed. The gate waits for canonical input to clear
-// and gives up at startupRawCeiling; the submitting CR waits for the output
-// to go quiet for startupEnterQuiet after startupEnterFloor and goes at
-// startupEnterCeiling regardless. Recognise the provider's own prompt if
-// these ever prove wrong for a CLI.
+// is calibrated, not observed. A human reply's submitting CR waits for the
+// output to go quiet for submitQuiet after submitFloor and goes at
+// submitCeiling regardless. Recognise the provider's own prompt if these ever
+// prove wrong for a CLI.
 const (
-	startupRawCeiling          = 2 * time.Second
-	startupEnterFloor          = time.Second
-	startupEnterQuiet          = 500 * time.Millisecond
-	startupEnterCeiling        = 5 * time.Second
-	startupEnterTick           = 100 * time.Millisecond
-	startupSubmitRetryInterval = time.Second
-	startupSubmitMaxAttempts   = 3 // initial CR plus two bounded retries
-	// startupVerifyRetries bounds how long after its last CR a provider may
-	// take to show authenticated startup evidence: its first model turn,
-	// which ordinary latency can stretch well past the CR retries (2 min).
-	startupVerifyRetries      = 120
+	submitFloor               = time.Second
+	submitQuiet               = 500 * time.Millisecond
+	submitCeiling             = 5 * time.Second
+	submitTick                = 100 * time.Millisecond
 	terminalPayloadWriteLimit = 250 * time.Millisecond
 	// DeferredSubmitBudget is the extra daemon effect budget for a deferred
 	// Codex submit: its paste, ceiling/tick, and standalone CR write.
-	DeferredSubmitBudget = startupEnterCeiling + 2*terminalPayloadWriteLimit + startupEnterTick
+	DeferredSubmitBudget = submitCeiling + 2*terminalPayloadWriteLimit + submitTick
 )
 
-func (o *terminalOwner) startupSubmitRetryWait() time.Duration {
-	if o.startupSubmitRetryInterval > 0 {
-		return o.startupSubmitRetryInterval
-	}
-	return startupSubmitRetryInterval
-}
-
-// awaitRawMode waits, up to the ceiling, for the provider to clear canonical
-// input on its terminal, draining what it prints meanwhile so a provider that
-// greets with more than the terminal's output buffer is not stuck before it
-// can. It answers false once the provider has hung up its terminal, so a
-// provider that dies while starting is reported as an exit, not as a failed
-// prompt. The master reflects the slave's line discipline on Darwin.
-func (o *terminalOwner) awaitRawMode(stagePTY *ptyStageSink, ceiling time.Duration) (bool, error) {
-	deadline := time.Now().Add(ceiling)
-	master := int(o.child.ptyMaster.Fd())
-	for {
-		before := o.ring.Head()
-		if err := stagePTY.drain(); err != nil {
-			return false, err
-		}
-		if o.ring.Head() != before {
-			o.lastOutput = time.Now()
-		}
-		fds := []unix.PollFd{{Fd: int32(master), Events: unix.POLLIN}}
-		if _, err := unix.Poll(fds, 0); err == nil && fds[0].Revents&(unix.POLLHUP|unix.POLLERR|unix.POLLNVAL) != 0 {
-			return false, nil
-		}
-		termios, err := unix.IoctlGetTermios(master, unix.TIOCGETA)
-		if err != nil || termios.Lflag&unix.ICANON == 0 || !time.Now().Before(deadline) {
-			return true, nil
-		}
-		time.Sleep(startupEnterTick)
-	}
-}
-
-// submitPending writes the owed CR once the provider's output has been quiet
-// for a spell after the floor (a provider that never wrote is quiet), or at
-// the ceiling regardless. A provider that has exited or closed its terminal
-// is owed nothing.
+// submitPending writes the owed human-reply CR once the provider's output has
+// been quiet for a spell after the floor (a provider that never wrote is
+// quiet), or at the ceiling regardless. A provider that has exited or closed
+// its terminal is owed nothing.
 func (o *terminalOwner) submitPending() error {
 	if o.enterBy.IsZero() {
 		return nil
@@ -225,58 +146,15 @@ func (o *terminalOwner) submitPending() error {
 		return o.rejectHumanReply()
 	}
 	now := time.Now()
-	quiet := o.lastOutput.IsZero() || now.Sub(o.lastOutput) >= startupEnterQuiet
+	quiet := o.lastOutput.IsZero() || now.Sub(o.lastOutput) >= submitQuiet
 	if now.Before(o.enterAfter) || now.Before(o.enterBy) && !quiet {
 		return nil
 	}
 	o.enterAfter, o.enterBy = time.Time{}, time.Time{}
 	_, status := o.writeTerminalPayload([]byte{'\r'})
-	if o.humanReplyCorrelation != 0 {
-		correlation, count := o.humanReplyCorrelation, o.humanReplyCount
-		o.humanReplyCorrelation, o.humanReplyCount = 0, 0
-		return o.send(TerminalFrame{Kind: TerminalHumanReplyResult, Correlation: correlation, Count: count, Status: status})
-	}
-	switch status {
-	case TerminalResultOK:
-		if !o.startupSubmitVerified {
-			o.startupSubmitAttempts = 1
-			o.startupSubmitLast = time.Now()
-			o.startupSubmitPending = true
-		}
-		return nil
-	case TerminalResultRejected:
-		return nil
-	default:
-		return fmt.Errorf("runner: provider startup submit %s", status)
-	}
-}
-
-// verifyStartupSubmit gives the provider a bounded opportunity to show that
-// the startup line was consumed. A dropped CR is recoverable; a provider that
-// remains silent after the fixed retry budget is a failed run, not an
-// indefinitely running one.
-func (o *terminalOwner) verifyStartupSubmit() error {
-	if !o.startupSubmitPending {
-		return nil
-	}
-	if time.Since(o.startupSubmitLast) < o.startupSubmitRetryWait() {
-		return nil
-	}
-	if o.startupSubmitAttempts >= startupSubmitMaxAttempts {
-		if time.Since(o.startupSubmitLast) < startupVerifyRetries*o.startupSubmitRetryWait() {
-			return nil
-		}
-		stopErr := o.stop()
-		return errors.Join(fmt.Errorf("%w after %d carriage returns", ErrStartupUnverified, o.startupSubmitAttempts), stopErr)
-	}
-	_, status := o.writeTerminalPayload([]byte{'\r'})
-	if status != TerminalResultOK {
-		stopErr := o.stop()
-		return errors.Join(fmt.Errorf("%w: retry submit %s", ErrStartupUnverified, status), stopErr)
-	}
-	o.startupSubmitAttempts++
-	o.startupSubmitLast = time.Now()
-	return nil
+	correlation, count := o.humanReplyCorrelation, o.humanReplyCount
+	o.humanReplyCorrelation, o.humanReplyCount = 0, 0
+	return o.send(TerminalFrame{Kind: TerminalHumanReplyResult, Correlation: correlation, Count: count, Status: status})
 }
 
 func (o *terminalOwner) rejectHumanReply() error {
@@ -341,7 +219,7 @@ func (o *terminalOwner) awaitProviderExec(stagePTY *ptyStageSink) error {
 				// The worker has completed every provider check and is paused
 				// immediately before exec. Forward that exact fence to the
 				// daemon and require its acknowledgement before allowing the
-				// worker to hand the PTY and startup input to the provider.
+				// worker to hand the PTY to the provider.
 				if err := o.writeDaemonFrame(frame); err != nil {
 					return err
 				}
@@ -380,6 +258,7 @@ func (o *terminalOwner) serve() (bool, error) {
 		}
 		switch ev.source {
 		case sourceTick:
+			o.folderTick(time.Now())
 			if stopped, err := o.handoverStep(); stopped || err != nil {
 				return o.daemonOpen, err
 			}
@@ -387,9 +266,6 @@ func (o *terminalOwner) serve() (bool, error) {
 				continue
 			}
 			if err := o.submitPending(); err != nil {
-				return o.daemonOpen, err
-			}
-			if err := o.verifyStartupSubmit(); err != nil {
 				return o.daemonOpen, err
 			}
 		case sourceChild:
@@ -423,11 +299,8 @@ func (o *terminalOwner) serve() (bool, error) {
 			if err := o.consumePTY(ev.bytes, ev.err); err != nil {
 				return o.daemonOpen, err
 			}
-			// A continuously readable PTY must not starve the bounded startup
-			// watchdog. Check it after every read as well as on the idle tick.
-			if err := o.verifyStartupSubmit(); err != nil {
-				return o.daemonOpen, err
-			}
+			o.answerFolderAccess(ev.bytes, time.Now())
+			o.folderTick(time.Now())
 			if stopped, err := o.handoverStep(); stopped || err != nil {
 				return o.daemonOpen, err
 			}
@@ -503,11 +376,11 @@ const (
 func (o *terminalOwner) nextEvent() (terminalReady, error) {
 	events := make([]unix.Kevent_t, 1)
 	for {
-		// While a startup CR is owed the wait is bounded, so the quiet prompt
-		// is noticed without any event arriving.
+		// While a CR is owed the wait is bounded, so the quiet prompt is
+		// noticed without any event arriving.
 		var timeout *unix.Timespec
-		if !o.enterBy.IsZero() || o.startupSubmitPending || o.handover != nil {
-			tick := unix.NsecToTimespec(int64(startupEnterTick))
+		if !o.enterBy.IsZero() || o.handover != nil || !o.folderSeen.IsZero() && !o.folderDone {
+			tick := unix.NsecToTimespec(int64(submitTick))
 			timeout = &tick
 		}
 		n, err := unix.Kevent(o.child.kq, nil, events, timeout)
@@ -596,10 +469,6 @@ func (o *terminalOwner) command(raw attemptFrame) error {
 		return o.resize(command)
 	case TerminalHumanReply:
 		return o.humanReply(command)
-	case TerminalStartupEvidence:
-		o.startupSubmitVerified = true
-		o.startupSubmitPending = false
-		return nil
 	default:
 		return ErrState
 	}
@@ -780,8 +649,7 @@ func (o *terminalOwner) input(c TerminalCommand) error {
 // humanReply is a daemon-authorized one-shot write for an exact durable
 // HumanRequest. It intentionally bypasses browser generation/sequence checks,
 // but shares the sole owner-only PTY write primitive and its fail-closed
-// result mapping with terminal input. A requested submit is delayed like the
-// startup submit so the provider receives the answer as a paste and CR as its
+// result mapping with terminal input. A requested submit is delayed so the provider receives the answer as a paste and CR as its
 // own keystroke.
 func (o *terminalOwner) humanReply(c TerminalCommand) error {
 	if !o.enterBy.IsZero() || o.humanReplyCorrelation != 0 {
@@ -791,7 +659,7 @@ func (o *terminalOwner) humanReply(c TerminalCommand) error {
 	if status == TerminalResultOK && c.Submit {
 		now := time.Now()
 		o.humanReplyCorrelation, o.humanReplyCount = c.Correlation, count
-		o.enterAfter, o.enterBy = now.Add(startupEnterFloor), now.Add(startupEnterCeiling)
+		o.enterAfter, o.enterBy = now.Add(submitFloor), now.Add(submitCeiling)
 		return nil
 	}
 	return o.send(TerminalFrame{Kind: TerminalHumanReplyResult, Correlation: c.Correlation, Count: count, Status: status})
@@ -812,6 +680,84 @@ func (o *terminalOwner) writeTerminalPayload(payload []byte) (uint32, TerminalRe
 	// authority in input, while daemon-authorized HumanRequest delivery remains
 	// a distinct deliberate operation.
 	return count, status
+}
+
+// Codex 0.160+ opens every folder the factory marks untrusted with a blocking
+// "Folder access" dialog whose default, option 1, is "Open restricted": exactly
+// the factory's intent. During the first folderWindow of a session the runner
+// answers that one dialog once with CR and never any other, so an unknown
+// dialog (for example "Trust this folder?") still stalls. The window is time,
+// not bytes: a resumed session replays its whole transcript before the dialog.
+// Only the latest output is matched, dialog footer included, so a transcript
+// quoting the dialog is not mistaken for it.
+const folderWindow = 2 * time.Minute
+
+// Codex reads its terminal for replies to its own startup queries, which no
+// one answers here, and a CR arriving meanwhile is lost. So the CR waits for
+// folderQuiet of silence and is repeated, up to three times, while Codex
+// stays silent: any output after a CR means the dialog was answered.
+const (
+	folderQuiet = time.Second
+	folderRetry = 3 * time.Second
+)
+
+func (o *terminalOwner) answerFolderAccess(data []byte, now time.Time) {
+	if o.folderDone {
+		return
+	}
+	if o.folderUntil.IsZero() {
+		o.folderUntil = now.Add(folderWindow)
+	}
+	if now.After(o.folderUntil) || o.folderSent > 0 && len(data) > 0 {
+		o.folderDone, o.folderTail = true, nil
+		return
+	}
+	if !o.folderSeen.IsZero() {
+		return
+	}
+	o.folderTail = append(o.folderTail, data...)
+	if len(o.folderTail) > 8<<10 {
+		o.folderTail = append([]byte(nil), o.folderTail[len(o.folderTail)-8<<10:]...)
+	}
+	if isCodexFolderAccessDialog(o.folderTail) {
+		o.folderSeen, o.folderTail = now, nil
+	}
+}
+
+func (o *terminalOwner) folderTick(now time.Time) {
+	if o.folderDone || o.folderSeen.IsZero() {
+		return
+	}
+	switch {
+	case o.folderSent == 0 && now.Sub(o.folderSeen) >= folderQuiet && now.Sub(o.lastOutput) >= folderQuiet,
+		o.folderSent > 0 && o.folderSent < 3 && now.Sub(o.folderAt) >= folderRetry:
+		o.folderSent, o.folderAt = o.folderSent+1, now
+		o.writeTerminalPayload([]byte{'\r'})
+	case o.folderSent >= 3 && now.Sub(o.folderAt) >= folderRetry:
+		o.folderDone = true
+	}
+}
+
+// isCodexFolderAccessDialog compares screen text with escape sequences and
+// spacing removed, because the TUI positions words with cursor moves.
+func isCodexFolderAccessDialog(output []byte) bool {
+	var text []byte
+	for i := 0; i < len(output); i++ {
+		c := output[i]
+		switch {
+		case c == 0x1b && i+1 < len(output) && output[i+1] == '[':
+			for i += 2; i < len(output) && (output[i] < 0x40 || output[i] > 0x7e); i++ {
+			}
+		case c == 0x1b && i+1 < len(output) && output[i+1] == ']':
+			for i += 2; i < len(output) && output[i] != 0x07 && !(output[i] == 0x1b && i+1 < len(output) && output[i+1] == '\\'); i++ {
+			}
+		case c == 0x1b:
+			i++
+		case c > ' ' && c != 0x7f:
+			text = append(text, c)
+		}
+	}
+	return bytes.Contains(text, []byte("Folderaccess")) && bytes.Contains(text, []byte("1.Openrestricted")) && bytes.Contains(text, []byte("2.Quit")) && bytes.Contains(text, []byte("entercontinue\u00b7escquit"))
 }
 
 func terminalPayloadResult(written, total int, err error) (uint32, TerminalResultStatus) {

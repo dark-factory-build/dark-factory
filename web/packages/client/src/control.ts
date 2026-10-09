@@ -11,7 +11,7 @@ import {
   MAX_AGENT_NAME_BYTES,
   MAX_MODEL_SOURCE_BYTES,
   MAX_ARRAY_ITEMS,
-  MAX_CONTROL_BYTES, MAX_TASK_ATTACHMENTS, MAX_TASK_ATTACHMENT_BYTES, TASK_ATTACHMENT_CHUNK_BYTES,
+  MAX_CONTROL_BYTES, MAX_TASK_ATTACHMENTS, MAX_TASK_ATTACHMENT_BYTES, MAX_TASK_CONTENT, TASK_ATTACHMENT_CHUNK_BYTES,
   MAX_FACTORY_CAPACITY,
   MAX_HUMAN_QUESTION_BYTES,
   MAX_HUMAN_REPLY_BYTES,
@@ -95,7 +95,9 @@ export type HumanRequestCancelRunResultBody = { run_id: string; run_revision: bi
 /** `mode` "any" queues the instruction for any eligible worker in the pane agent's project. */
 export type TaskAttachmentBody = { index: number; offset: bigint; size: bigint; name: string; data: string };
 export type TaskAttachmentResultBody = { offset: bigint };
-export type TaskEnqueueBody = { task_id: string; incarnation_id: string; agent_id: string; repository_id?: string; expected_agent_revision: bigint; instruction: string; mode?: "now" | "queue" | "any"; attachment_count?: number };
+export type TaskEnqueueBody = { task_id: string; incarnation_id: string; agent_id: string; repository_id?: string; expected_agent_revision: bigint; instruction: string; mode?: "now" | "queue" | "any"; attachment_count?: number; content?: TaskContentPin[] };
+/** A Library revision pinned to the task in the enqueue transaction. */
+export type TaskContentPin = { content_id: string; revision: bigint };
 export type TaskEnqueueResultBody = { task_id: string; revision: bigint; agent_revision: bigint };
 export type AgentControlAction = "message" | "interrupt" | "stop" | "replace";
 export type AgentControlBody = { operation_id: string; task_id: string; run_id: string; expected_task_revision: bigint; expected_run_revision: bigint; action: AgentControlAction; instruction: string; successor_task_id: string; successor_incarnation_id: string };
@@ -125,7 +127,7 @@ export type RepositoryMutateBody = { action: "add" | "name" | "base" | "default"
 export type RepositoryMutateResultBody = { repository?: RepositoryItem };
 export type IntakeConfiguration = { linear_team_id?: string; priority_default?: number; priority_by_label?: Record<string, number>; repository: string; target_repository_id: string; overseer_agent_id: string; label: string; policy: "manual" | "trusted_authors"; trusted_authors: string[]; poll_seconds: number; admission_limit: number };
 export type IntakeBody = { api_key?: string; action: "linear_connect" | "linear_disconnect" | "linear_teams" | "list" | "create" | "update" | "preview" | "refresh" | "enable" | "pause" | "accept" | "withdraw" | "import" | "tick"; source_id?: string; project_id?: string; configuration?: IntakeConfiguration; expected_revision?: bigint; reviewed_revision?: bigint; page?: number; issue_number?: bigint; content_hash?: string; acceptance_id?: string };
-export type IntakeSync = { last_attempt_at: bigint; last_success_at: bigint; imported_tasks: number; state: "ok" | "paused" | "error"; error: string };
+export type IntakeSync = { last_attempt_at: bigint; last_success_at: bigint; imported_tasks: number; state: "ok" | "paused" | "error"; error: string; waiting?: IntakeCandidate[] };
 export type IntakeSource = IntakeConfiguration & { id: string; project_id: string; github_repository_id: bigint; enabled: boolean; revision: bigint; sync?: IntakeSync };
 export type IntakeCandidate = { number: bigint; url: string; title: string; body: string; author: string; labels: string[]; content_hash: string; reason: string; acceptance_id?: string; task_id?: string; truncated?: boolean };
 export type IntakeResultBody = { source_id?: string; linear_teams?: { id: string; name: string; key: string }[]; state: string; sources?: IntakeSource[]; candidates?: IntakeCandidate[]; next_page?: number; reviewed_revision?: bigint; acceptance_id?: string; task_id?: string; imported_tasks?: string[] };
@@ -137,9 +139,10 @@ export const GRAPH_NODE_KINDS = ["processor", "ingress", "job", "queue", "store"
 export const GRAPH_EDGE_KINDS = ["handles", "calls", "uses", "publishes", "consumes", "runs"] as const;
 export const GRAPH_EVIDENCE = ["static", "runtime", "both", "uncertain", "contradicted"] as const;
 export const GRAPH_OBSERVATIONS = ["observed", "quiet", "partial", "stale", "unobserved", "opaque"] as const;
-export const GRAPH_STATES = ["active", "degraded", "failing", "idle", "unknown"] as const;
-const GRAPH_RUNTIMES = ["process", "cli", "worker", "server", "browser"] as const;
+export const GRAPH_STATES = ["failing", "degraded", "active", "idle", "unknown"] as const; // worst first
+export const GRAPH_RUNTIMES = ["process", "server", "worker", "browser", "cli", "ci"] as const; // the unit a path prefers first, as opgraph.Locate
 const GRAPH_TRIGGERS = ["request", "timer", "message"] as const;
+const GRAPH_ORIGINS = ["static", "runtime"] as const;
 export type GraphReading = Readonly<{ evidence: typeof GRAPH_EVIDENCE[number]; observation: typeof GRAPH_OBSERVATIONS[number]; state: typeof GRAPH_STATES[number]; rate_per_hour?: number }>;
 export type GraphNode = GraphReading & Readonly<{ id: string; kind: typeof GRAPH_NODE_KINDS[number]; label: string; unit?: string; runtime?: typeof GRAPH_RUNTIMES[number]; trigger?: typeof GRAPH_TRIGGERS[number]; paths: readonly string[]; error_permille?: number; latency_p95_ms?: number; last_seen?: number; deployed_at?: number }>;
 export type GraphEdge = GraphReading & Readonly<{ from: string; to: string; kind: typeof GRAPH_EDGE_KINDS[number] }>;
@@ -147,9 +150,11 @@ export type GraphSummary = Readonly<{ components: number; inferred: number; obse
 export type GraphSource = Readonly<{ repository_id: string; name: string; kind: "integrated" | "unavailable"; target_ref: string; revision: string; observed_at: number; reason?: string }>;
 export type OperationalGraphBody = Readonly<{ project_id: string; digest: string; observed_at: number; sources: readonly GraphSource[]; nodes: readonly GraphNode[]; edges: readonly GraphEdge[]; summary: GraphSummary; omitted: number }>;
 export type GraphLocation = Readonly<{ repository_id: string; path: string; line?: number }>;
-export type OperationalNodeBody = Readonly<{ project_id: string; node_id: string; selectors: Readonly<Record<string, string>>; evidence: readonly Readonly<{ origin: "static" | "runtime"; source: string; detail?: string; confidence: string }>[]; sources: readonly GraphLocation[]; modules: readonly GraphLocation[]; observers: readonly string[] }>;
+export type OperationalNodeBody = Readonly<{ project_id: string; node_id: string; selectors: Readonly<Record<string, string>>; evidence: readonly Readonly<{ origin: typeof GRAPH_ORIGINS[number]; source: string; detail?: string; confidence: string }>[]; sources: readonly GraphLocation[]; modules: readonly GraphLocation[]; observers: readonly string[] }>;
 export type RunPathsGetBody = { agent_id: string };
-export type RunPathsBody = { agent_id: string; run_id: string; paths: string[] };
+/** One run's recorded agent effort and spend: counts and cost, never content. */
+export type RunTelemetry = { tokens_in: number; tokens_out: number; cost_micro_usd: number; tool_calls: number; api_requests: number; quiet_seconds?: number };
+export type RunPathsBody = { agent_id: string; run_id: string; paths: string[]; telemetry?: RunTelemetry };
 export type AccountsDiscoverBody = { offset?: number };
 export type DiscoveredAccount = { provider: "claude_code" | "codex"; home: string; label: string; email: string; organization: string; default_model: string; default_reasoning_effort: string; linked_id: string; unavailable_reason?: string };
 export type AccountsBody = { accounts: DiscoveredAccount[]; next_offset?: number };
@@ -191,6 +196,9 @@ export type RemoteInviteResultBody = { link: string; expires_at_ms: bigint; svg:
 /** One device's Web Push subscription plus the VAPID key pair it minted for it, base64url without padding. */
 export type PushSubscribeBody = { endpoint: string; public_key: string; private_key: string };
 export type PushSubscribeResultBody = Record<string, never>;
+export type TelemetryIngestBody = { action: "status" | "mint" | "revoke" };
+/** `secret` is the bearer, non-empty only in the answer to a mint. */
+export type TelemetryIngestResultBody = { url: string; secret: string; active: boolean };
 const MAX_PUSH_ENDPOINT_BYTES = 2048;
 const BASE64URL = /^[A-Za-z0-9_-]+$/;
 /** The push services behind every browser that can install the remote console; the daemon refuses any other host. */
@@ -265,6 +273,7 @@ export type ServerControlFrame = { type: "ATTACHMENT_RETENTION_RESULT"; id: stri
   | { type: "TERMINAL_TARGET"; id: string; body: TerminalTargetBody }
   | { type: "REMOTE_INVITE_RESULT"; id: string; body: RemoteInviteResultBody }
   | { type: "PUSH_SUBSCRIBE_RESULT"; id: string; body: PushSubscribeResultBody }
+  | { type: "TELEMETRY_INGEST_RESULT"; id: string; body: TelemetryIngestResultBody }
   | TerminalServerControlFrame | ErrorFrame | UnknownServerControlFrame;
 export type ClientControlFrame = { type: "ATTACHMENT_RETENTION"; id: string; body: { enabled?: boolean } } | { type: "FACTORY_DISPATCH"; id: string; body: FactoryDispatchBody } | { type: "PROJECT_CONTENT"; id: string; body: ProjectContentRequest } | PairProveFrame | AuthProveFrame | StateGetFrame | StateWatchFrame | HumanRequestDetailGetFrame
   | { type: "HUMAN_REQUEST_REPLY"; id: string; body: HumanRequestReplyBody }
@@ -294,6 +303,7 @@ export type ClientControlFrame = { type: "ATTACHMENT_RETENTION"; id: string; bod
   | { type: "TERMINAL_TARGET_GET"; id: string; body: TerminalTargetGetBody }
   | { type: "REMOTE_INVITE"; id: string; body: RemoteInviteBody }
   | { type: "PUSH_SUBSCRIBE"; id: string; body: PushSubscribeBody }
+  | { type: "TELEMETRY_INGEST"; id: string; body: TelemetryIngestBody }
   | TerminalControlFrame | ErrorFrame;
 type ControlBody = ClientControlFrame["body"] | ServerControlFrame["body"];
 
@@ -428,11 +438,13 @@ function validateBody(type: ControlType, body: unknown, wire: boolean): ControlB
       if (offset > BigInt(MAX_TASK_ATTACHMENT_BYTES)) malformed(); return { offset };
     }
     case "TASK_ENQUEUE": {
-      requireKeys(body, ["task_id", "incarnation_id", "agent_id", "expected_agent_revision", "instruction"], wire, ["repository_id", "mode", "attachment_count"]);
+      requireKeys(body, ["task_id", "incarnation_id", "agent_id", "expected_agent_revision", "instruction"], wire, ["repository_id", "mode", "attachment_count", "content"]);
+      if (present(body, "content") && (!Array.isArray(body.content) || body.content.length > MAX_TASK_CONTENT)) malformed();
+      const content = present(body, "content") ? (body.content as unknown[]).map((item) => { if (!isObject(item)) malformed(); requireKeys(item, ["content_id", "revision"], wire); return { content_id: dynamicID(item.content_id), revision: decimal(item.revision, wire, true) }; }) : undefined;
       const mode = present(body, "mode") ? body.mode : undefined;
       if (mode !== undefined && mode !== "now" && mode !== "queue" && mode !== "any") malformed();
       const repository_id = present(body, "repository_id") ? dynamicID(body.repository_id) : undefined;
-      return { ...(present(body, "attachment_count") ? { attachment_count: integer(body.attachment_count, 0, MAX_TASK_ATTACHMENTS) } : {}), task_id: dynamicID(body.task_id), incarnation_id: dynamicID(body.incarnation_id), agent_id: dynamicID(body.agent_id), ...(repository_id === undefined ? {} : { repository_id }), expected_agent_revision: decimal(body.expected_agent_revision, wire, true), instruction: boundedText(body.instruction, 1, MAX_TASK_INSTRUCTION_BYTES), ...(mode === undefined ? {} : { mode }) };
+      return { ...(present(body, "attachment_count") ? { attachment_count: integer(body.attachment_count, 0, MAX_TASK_ATTACHMENTS) } : {}), task_id: dynamicID(body.task_id), incarnation_id: dynamicID(body.incarnation_id), agent_id: dynamicID(body.agent_id), ...(repository_id === undefined ? {} : { repository_id }), expected_agent_revision: decimal(body.expected_agent_revision, wire, true), instruction: boundedText(body.instruction, 1, MAX_TASK_INSTRUCTION_BYTES), ...(mode === undefined ? {} : { mode }), ...(content === undefined ? {} : { content }) };
     }
     case "TASK_ENQUEUE_RESULT": requireKeys(body, ["task_id", "revision", "agent_revision"], wire); return { task_id: dynamicID(body.task_id), revision: decimal(body.revision, wire, true), agent_revision: decimal(body.agent_revision, wire, true) };
     case "AGENT_CONTROL": {
@@ -498,7 +510,7 @@ function validateBody(type: ControlType, body: unknown, wire: boolean): ControlB
     case "OPERATIONAL_NODE": return operationalNodeBody(body, wire);
     case "RUN_PATHS_GET": requireKeys(body, ["agent_id"], wire); return { agent_id: dynamicID(body.agent_id) };
     // No live run means no rooms, so an empty run identity carries no paths.
-    case "RUN_PATHS": requireKeys(body, ["agent_id", "run_id", "paths"], wire); { if (!Array.isArray(body.paths) || body.paths.length > MAX_ARRAY_ITEMS) malformed(); if (body.run_id === "" && body.paths.length !== 0) malformed(); return { agent_id: dynamicID(body.agent_id), run_id: body.run_id === "" ? "" : dynamicID(body.run_id), paths: body.paths.map((item) => boundedText(item, 1, MAX_TASK_TITLE_BYTES)) }; }
+    case "RUN_PATHS": requireKeys(body, ["agent_id", "run_id", "paths"], wire, ["telemetry"]); { if (!Array.isArray(body.paths) || body.paths.length > MAX_ARRAY_ITEMS) malformed(); if (body.run_id === "" && (body.paths.length !== 0 || present(body, "telemetry"))) malformed(); return { agent_id: dynamicID(body.agent_id), run_id: body.run_id === "" ? "" : dynamicID(body.run_id), paths: body.paths.map((item) => boundedText(item, 1, MAX_TASK_TITLE_BYTES)), ...(present(body, "telemetry") ? { telemetry: runTelemetry(body.telemetry, wire) } : {}) }; }
     case "ACCOUNTS_DISCOVER": requireKeys(body, [], wire, ["offset"]); { const offset = present(body, "offset") ? integer(body.offset, 0, Number.MAX_SAFE_INTEGER) : undefined; return offset === undefined ? {} : { offset }; }
     case "ACCOUNTS": requireKeys(body, ["accounts"], wire, ["next_offset"]); { if (!Array.isArray(body.accounts) || body.accounts.length > MAX_SNAPSHOT_ENTITIES) malformed(); const next_offset = present(body, "next_offset") ? integer(body.next_offset, 1, Number.MAX_SAFE_INTEGER) : undefined; return { accounts: body.accounts.map((item) => discoveredAccount(item, wire)), ...(next_offset === undefined ? {} : { next_offset }) }; }
     case "ACCOUNT_LINK": requireKeys(body, ["provider", "home", "label"], wire); return { provider: accountProvider(body.provider), home: accountHome(body.home), label: boundedText(body.label, 1, MAX_AGENT_NAME_BYTES) };
@@ -535,6 +547,8 @@ function validateBody(type: ControlType, body: unknown, wire: boolean): ControlB
     case "REMOTE_INVITE": requireKeys(body, [], wire); return {};
     case "PUSH_SUBSCRIBE": requireKeys(body, ["endpoint", "public_key", "private_key"], wire); { const endpoint = boundedText(body.endpoint, 9, MAX_PUSH_ENDPOINT_BYTES); if (/[\u0000-\u001f\u007f]/.test(endpoint) || !pushServiceEndpoint(endpoint) || typeof body.public_key !== "string" || body.public_key.length !== 87 || !BASE64URL.test(body.public_key) || typeof body.private_key !== "string" || body.private_key.length === 0 || body.private_key.length > 512 || !BASE64URL.test(body.private_key)) malformed(); return { endpoint, public_key: body.public_key, private_key: body.private_key }; }
     case "PUSH_SUBSCRIBE_RESULT": requireKeys(body, [], wire); return {};
+    case "TELEMETRY_INGEST": requireKeys(body, ["action"], wire); if (body.action !== "status" && body.action !== "mint" && body.action !== "revoke") malformed(); return { action: body.action };
+    case "TELEMETRY_INGEST_RESULT": requireKeys(body, ["url", "secret", "active"], wire); { const url = boundedText(body.url, 1, MAX_REMOTE_INVITE_LINK_BYTES); if (!/^https?:\/\//.test(url) || !url.endsWith("/v1/traces") || /[\u0000-\u001f\u007f]/.test(url) || typeof body.secret !== "string" || typeof body.active !== "boolean" || body.secret !== "" && (body.secret.length !== 43 || !BASE64URL.test(body.secret) || !body.active)) malformed(); return { url, secret: body.secret, active: body.active }; }
     case "REMOTE_INVITE_RESULT": requireKeys(body, ["link", "expires_at_ms", "svg"], wire); { const link = boundedText(body.link, 1, MAX_REMOTE_INVITE_LINK_BYTES); const svg = boundedText(body.svg, 1, MAX_REMOTE_INVITE_SVG_BYTES); if (!link.startsWith(REMOTE_INVITE_LINK_PREFIX) || /[\u0000-\u001f\u007f]/.test(link) || !svg.startsWith("<svg")) malformed(); return { link, expires_at_ms: decimal(body.expires_at_ms, wire, true), svg }; }
     case "ERROR": requireKeys(body, ["code", "retryable"], wire); if (typeof body.code !== "string" || typeof body.retryable !== "boolean") malformed(); if (!(ERROR_CODES as readonly string[]).includes(body.code)) { if (!wire) malformed(); return { code: "internal", retryable: false }; } return { code: body.code as ErrorCode, retryable: body.retryable };
   }
@@ -824,17 +838,20 @@ function intakeResult(body: Record<string, unknown>, wire: boolean): IntakeResul
   const state = boundedText(body.state, 1, 128); const result: IntakeResultBody = { state };
  if (present(body,"source_id")) result.source_id=dynamicID(body.source_id);
   if (present(body,"linear_teams")) {if (!Array.isArray(body.linear_teams) || body.linear_teams.length>100) malformed();result.linear_teams=body.linear_teams.map((team)=>{if(!isObject(team))malformed();requireKeys(team,["id","name","key"],wire);return {id:boundedText(team.id,36,36),name:boundedText(team.name,1,140),key:boundedText(team.key,1,32)};});}
-  if (present(body, "sources")) { if (!Array.isArray(body.sources) || body.sources.length > MAX_SNAPSHOT_ENTITIES) malformed(); result.sources = body.sources.map((item) => { if (!isObject(item)) malformed(); requireKeys(item, ["id", "project_id", "github_repository_id", "enabled", "revision", "repository", "target_repository_id", "overseer_agent_id", "label", "policy", "trusted_authors", "poll_seconds", "admission_limit"], wire, ["sync", "linear_team_id"]); if (typeof item.enabled !== "boolean" || present(item,"linear_team_id") && decimal(item.github_repository_id,wire)!==0n) malformed(); let sync: IntakeSync | undefined; if (present(item, "sync")) { if (!isObject(item.sync)) malformed(); requireKeys(item.sync, ["last_attempt_at", "last_success_at", "imported_tasks", "state", "error"], wire); if (item.sync.state !== "ok" && item.sync.state !== "paused" && item.sync.state !== "error") malformed(); sync = { last_attempt_at: decimal(item.sync.last_attempt_at, wire), last_success_at: decimal(item.sync.last_success_at, wire), imported_tasks: integer(item.sync.imported_tasks, 0, 200), state: item.sync.state, error: boundedText(item.sync.error, 0, 128) }; } return { ...intakeConfiguration(item), id: dynamicID(item.id), project_id: dynamicID(item.project_id), github_repository_id: decimal(item.github_repository_id, wire, !present(item,"linear_team_id")), enabled: item.enabled, revision: decimal(item.revision, wire, true), ...(sync === undefined ? {} : { sync }) }; }); }
-  if (present(body, "candidates")) { if (!Array.isArray(body.candidates) || body.candidates.length > MAX_SNAPSHOT_ENTITIES) malformed(); result.candidates = body.candidates.map((item) => { if (!isObject(item)) malformed(); requireKeys(item, ["number", "url", "title", "body", "author", "labels", "content_hash", "reason"], wire, ["acceptance_id", "task_id", "truncated"]); if (!Array.isArray(item.labels) || (present(item, "truncated") && typeof item.truncated !== "boolean")) malformed(); return { number: decimal(item.number, wire, true), url: boundedText(item.url, 1, 4096), title: boundedText(item.title, 0, 900), body: boundedText(item.body, 0, 5000), author: boundedText(item.author, 0, 44), labels: item.labels.map((label) => boundedText(label, 1, 100)), content_hash: fixedHex(item.content_hash, 32), reason: boundedText(item.reason, 1, 128), ...(present(item, "acceptance_id") ? { acceptance_id: dynamicID(item.acceptance_id) } : {}), ...(present(item, "task_id") ? { task_id: dynamicID(item.task_id) } : {}), ...(present(item, "truncated") ? { truncated: item.truncated as boolean } : {}) }; }); }
+  if (present(body, "sources")) { if (!Array.isArray(body.sources) || body.sources.length > MAX_SNAPSHOT_ENTITIES) malformed(); result.sources = body.sources.map((item) => { if (!isObject(item)) malformed(); requireKeys(item, ["id", "project_id", "github_repository_id", "enabled", "revision", "repository", "target_repository_id", "overseer_agent_id", "label", "policy", "trusted_authors", "poll_seconds", "admission_limit"], wire, ["sync", "linear_team_id"]); if (typeof item.enabled !== "boolean" || present(item,"linear_team_id") && decimal(item.github_repository_id,wire)!==0n) malformed(); let sync: IntakeSync | undefined; if (present(item, "sync")) { if (!isObject(item.sync)) malformed(); requireKeys(item.sync, ["last_attempt_at", "last_success_at", "imported_tasks", "state", "error"], wire, ["waiting"]); if (item.sync.state !== "ok" && item.sync.state !== "paused" && item.sync.state !== "error" || present(item.sync, "waiting") && (!Array.isArray(item.sync.waiting) || item.sync.waiting.length > 100)) malformed(); sync = { last_attempt_at: decimal(item.sync.last_attempt_at, wire), last_success_at: decimal(item.sync.last_success_at, wire), imported_tasks: integer(item.sync.imported_tasks, 0, 200), state: item.sync.state, error: boundedText(item.sync.error, 0, 128), ...(present(item.sync, "waiting") ? { waiting: (item.sync.waiting as unknown[]).map((candidate) => intakeCandidate(candidate, wire)) } : {}) }; } return { ...intakeConfiguration(item), id: dynamicID(item.id), project_id: dynamicID(item.project_id), github_repository_id: decimal(item.github_repository_id, wire, !present(item,"linear_team_id")), enabled: item.enabled, revision: decimal(item.revision, wire, true), ...(sync === undefined ? {} : { sync }) }; }); }
+  if (present(body, "candidates")) { if (!Array.isArray(body.candidates) || body.candidates.length > MAX_SNAPSHOT_ENTITIES) malformed(); result.candidates = body.candidates.map((item) => intakeCandidate(item, wire)); }
   if (present(body, "next_page")) result.next_page = integer(body.next_page, 1, 1000); if (present(body, "reviewed_revision")) result.reviewed_revision = decimal(body.reviewed_revision, wire, true); if (present(body, "acceptance_id")) result.acceptance_id = dynamicID(body.acceptance_id); if (present(body, "task_id")) result.task_id = dynamicID(body.task_id); if (present(body, "imported_tasks")) { if (!Array.isArray(body.imported_tasks) || body.imported_tasks.length > MAX_ARRAY_ITEMS) malformed(); result.imported_tasks = body.imported_tasks.map((id) => dynamicID(id)); } return result;
 }
 
+function intakeCandidate(item: unknown, wire: boolean): IntakeCandidate {
+  if (!isObject(item)) malformed(); requireKeys(item, ["number", "url", "title", "body", "author", "labels", "content_hash", "reason"], wire, ["acceptance_id", "task_id", "truncated"]); if (!Array.isArray(item.labels) || (present(item, "truncated") && typeof item.truncated !== "boolean")) malformed(); return { number: decimal(item.number, wire, true), url: boundedText(item.url, 1, 4096), title: boundedText(item.title, 0, 900), body: boundedText(item.body, 0, 5000), author: boundedText(item.author, 0, 44), labels: item.labels.map((label) => boundedText(label, 1, 100)), content_hash: fixedHex(item.content_hash, 32), reason: boundedText(item.reason, 1, 128), ...(present(item, "acceptance_id") ? { acceptance_id: dynamicID(item.acceptance_id) } : {}), ...(present(item, "task_id") ? { task_id: dynamicID(item.task_id) } : {}), ...(present(item, "truncated") ? { truncated: item.truncated as boolean } : {}) };
+}
 function oneOf<T extends string>(value: unknown, allowed: readonly T[]): T { if (typeof value !== "string" || !(allowed as readonly string[]).includes(value)) malformed(); return value as T; }
 function graphReading(value: Record<string, unknown>): GraphReading {
   const evidence = oneOf(value.evidence, GRAPH_EVIDENCE), observation = oneOf(value.observation, GRAPH_OBSERVATIONS), state = oneOf(value.state, GRAPH_STATES);
+  // How readings combine (idle only when quiet, a rate only when observed) is
+  // the producer's rule, proven in opgraph's overlay tests; this checks shape and bounds.
   const rate = present(value, "rate_per_hour") ? integer(value.rate_per_hour, 0, Number.MAX_SAFE_INTEGER) : undefined;
-  // Idle is a claim only a covering source makes; a rate only an observation makes.
-  if (state === "idle" && observation !== "quiet" || (rate ?? 0) > 0 && (observation === "unobserved" || observation === "stale")) malformed();
   return { evidence, observation, state, ...(rate === undefined ? {} : { rate_per_hour: rate }) };
 }
 function operationalGraphBody(body: Record<string, unknown>, wire: boolean): OperationalGraphBody {
@@ -882,7 +899,7 @@ function operationalNodeBody(body: Record<string, unknown>, wire: boolean): Oper
   if (!Array.isArray(body.evidence) || body.evidence.length > 32 || !Array.isArray(body.sources) || body.sources.length > 16 || !Array.isArray(body.modules) || body.modules.length > 256 || !Array.isArray(body.observers) || body.observers.length > 16) malformed();
   const location = (item: unknown): GraphLocation => { if (!isObject(item)) malformed(); requireKeys(item, ["repository_id", "path"], wire, ["line"]); return { repository_id: dynamicID(item.repository_id), path: boundedText(item.path, 1, MAX_TASK_TITLE_BYTES), ...(present(item, "line") ? { line: integer(item.line, 0, 0xffffffff) } : {}) }; };
   return { project_id: dynamicID(body.project_id), node_id: dynamicID(body.node_id), selectors,
-    evidence: body.evidence.map((item) => { if (!isObject(item)) malformed(); requireKeys(item, ["origin", "source", "confidence"], wire, ["detail"]); return { origin: oneOf(item.origin, ["static", "runtime"] as const), source: boundedText(item.source, 1, 64), ...(present(item, "detail") ? { detail: boundedText(item.detail, 0, 256) } : {}), confidence: boundedText(item.confidence, 1, 32) }; }),
+    evidence: body.evidence.map((item) => { if (!isObject(item)) malformed(); requireKeys(item, ["origin", "source", "confidence"], wire, ["detail"]); return { origin: oneOf(item.origin, GRAPH_ORIGINS), source: boundedText(item.source, 1, 64), ...(present(item, "detail") ? { detail: boundedText(item.detail, 0, 256) } : {}), confidence: boundedText(item.confidence, 1, 32) }; }),
     sources: body.sources.map(location), modules: body.modules.map(location), observers: body.observers.map((item) => boundedText(item, 1, 64)) };
 }
 function taskItem(value: unknown, wire: boolean): TaskItem {
@@ -979,6 +996,13 @@ function capabilities(value: unknown): number { const result = integer(value, 0,
 function validID(value: string): boolean { return value.length > 0 && value.length <= 64 && [...value].every((character) => character.charCodeAt(0) >= 0x21 && character.charCodeAt(0) <= 0x7e); }
 function isControlType(value: unknown): value is ControlType { return typeof value === "string" && (CONTROL_TYPES as readonly string[]).includes(value); }
 function isObject(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null && !Array.isArray(value); }
+function runTelemetry(value: unknown, wire: boolean): RunTelemetry {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) malformed();
+  const item = value as Record<string, unknown>;
+  requireKeys(item, ["tokens_in", "tokens_out", "cost_micro_usd", "tool_calls", "api_requests"], wire, ["quiet_seconds"]);
+  const count = (key: string) => integer(item[key], 0, Number.MAX_SAFE_INTEGER);
+  return { tokens_in: count("tokens_in"), tokens_out: count("tokens_out"), cost_micro_usd: count("cost_micro_usd"), tool_calls: count("tool_calls"), api_requests: count("api_requests"), ...(present(item, "quiet_seconds") ? { quiet_seconds: count("quiet_seconds") } : {}) };
+}
 function present(value: Record<string, unknown>, key: string): boolean { return Object.prototype.hasOwnProperty.call(value, key); }
 /**
  * Every required member must be present and every member this build knows is

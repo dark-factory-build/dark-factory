@@ -1,10 +1,11 @@
 import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from "react";
-import { MAX_TASK_ATTACHMENTS, MAX_TASK_ATTACHMENT_BYTES, MAX_TASK_PRIORITY, type IntakeView, type IntakeBody, type DiscoveredAccount, type AccountItem, type AgentItem, type GitHubConnectionBody, type GitHubDelegationBody, type HumanRequestItem, type ProjectItem, type RepositoryMutation, type RepositoryView, type StateView, type TaskHistoryView, type TaskItem, type TaskListView, type TaskPeerQuestion } from "@dark-factory/client";
+import { MAX_TASK_ATTACHMENTS, MAX_TASK_ATTACHMENT_BYTES, MAX_TASK_PRIORITY, type IntakeView, type IntakeBody, type DiscoveredAccount, type AccountItem, type AgentItem, type GitHubConnectionBody, type GitHubDelegationBody, type HumanRequestItem, type ProjectItem, type RepositoryMutation, type RunTelemetry, type RepositoryView, type StateView, type TaskHistoryView, type TaskItem, type TaskListView, type TaskPeerQuestion, type TaskContentPin } from "@dark-factory/client";
 import type { FactoryEditView, FactoryHumanRequestView } from "./factory-app-controller.js";
 import type { FactoryGitHubView } from "./factory-settings-coordinator.js";
 import { rankLabel } from "./console-screens.js";
 import { AgentSprite } from "./factory-scene/factory-scene.js";
-import { agentStatus, agentCurrentTask, agentActivity, type WorkRow, type WorkState } from "./console-view.js";
+import { telemetryLine } from "./factory-scene/scene.js";
+import { agentStatus, agentCurrentTask, agentActivity, needsYou, type WorkRow, type WorkState } from "./console-view.js";
 import { productionKey, productionStages } from "./production-view.js";
 import { AnswerControls } from "./console-interactions.js";
 import { Icon, IconButton, type IconName } from "./icons.js";
@@ -56,6 +57,7 @@ export function AgentPanel({
   terminalContent,
   panel: panelProp,
   onPanel,
+  telemetry,
 }: {
   agent: AgentItem;
   state: StateView | undefined;
@@ -70,7 +72,10 @@ export function AgentPanel({
   terminalContent?: ReactNode;
   panel?: AgentPanelView;
   onPanel?: (panel: AgentPanelView) => void;
+  /** What the current run's agent CLI recorded; absent when it recorded nothing. */
+  telemetry?: RunTelemetry;
 }) {
+  const effort = telemetry === undefined ? "" : telemetryLine(telemetry);
   const activity = state === undefined ? "ready" : agentStatus(agent, state);
   const current = state === undefined ? undefined : agentCurrentTask(agent, state);
   const queued = state === undefined ? [] : [...state.tasks.values()]
@@ -108,6 +113,7 @@ export function AgentPanel({
 
       <p className="dfConsoleSidebar__status"><Status stage={archived ? "archived" : activity} /></p>
       {queueHint === undefined ? null : <p className="dfConsoleSidebar__inherit">{queueHint}</p>}
+      {effort === "" ? null : <p className="dfConsoleSidebar__inherit" aria-label={`Recorded by the agent: ${effort}`}>{effort}</p>}
 
       {archived ? null : <div className="dfConsoleViewToggle" role="group" aria-label="Agent controls">
         <button type="button" aria-pressed={panel === "terminal"} onClick={() => selectPanel("terminal")}>Terminal</button>
@@ -202,7 +208,7 @@ function RecentWork({
   }, [open, Object.values(scope)[0], completionRevision]);
   const selected = page.find((task) => task.id === selectedId) ?? page[0];
   return <div className="dfConsoleRecentWork dfConsoleSidebar__section">
-    {icon ? <IconButton icon={icon} aria-label={label} title={total === undefined ? label : `${label} · ${total}`} onClick={() => setOpen(true)} /> : <button type="button" onClick={() => setOpen(true)}>{label}{total === undefined ? "" : ` · ${total}`}</button>}
+    {icon ? <IconButton icon={icon} aria-label={label} title={total === undefined ? label : `${label} · ${total}`} onClick={() => setOpen(true)}><Badge n={total === undefined ? undefined : Number(total)} /></IconButton> : <button type="button" onClick={() => setOpen(true)}>{label}{total === undefined ? "" : ` · ${total}`}</button>}
     {!open ? null : <ConsoleDialog className="dfRecentWorkDialog" label={`${label} for ${name}`} title={`${label} · ${name}`} onClose={() => setOpen(false)}>
         {failed ? <p role="alert">Recent work unavailable <button type="button" onClick={() => load(false)}>Retry</button></p> : null}
         <div className="dfRecentWorkLayout">
@@ -282,14 +288,21 @@ function WorkRowShell({ title, chips, meta, onOpen, disabled = false, pressed, e
   </li>;
 }
 
+/** A Library revision the operator chose for the next task, named for its chip. */
+export type TaskContentChip = TaskContentPin & { title: string; project_id: string };
+export type AddTask = (agent: AgentItem, instruction: string, mode: "queue" | "any", files?: readonly File[], content?: readonly TaskContentChip[]) => Promise<boolean>;
+
 /** One list for everything open: what needs you, what is in review, running and queued. */
 export function WorkPanel({
-  state, rows, projectId, filter, onFilter, byMission, onByMission, missions, edit, ready, onEditTask, onAddTask, onLoadTaskDetail, onLoadTaskHistory, onLoadTaskList,
-  selectedTaskId, onSelectTask, selectedHumanRequest, onSelectHumanRequest, onCloseHumanRequest, requestContent, onSelectProduction, onMission, sources, onManageSources,
+  state, rows, projectId, filter, onFilter, byMission, onByMission, missions, edit, ready, onEditTask, onAddTask, taskContent = [], onTaskContent = () => undefined, onLoadTaskDetail, onLoadTaskHistory, onLoadTaskList,
+  selectedTaskId, onSelectTask, selectedHumanRequest, onSelectHumanRequest, onCloseHumanRequest, requestContent, onSelectProduction, onMission, sources, onManageSources, onIntakeAction, intake,
 }: {
   /** The local source list for the shown project; undefined until loaded. */
   sources?: readonly { id: string; repository: string; label: string; enabled: boolean }[];
   onManageSources?: () => void;
+  onIntakeAction?: (projectId: string, request: IntakeBody) => void;
+  /** The shown project's last intake outcome; a failed Accept routes to Sources for fresh content. */
+  intake?: Readonly<{ state?: string; failed: boolean; busy: boolean }>;
   selectedTaskId?: string;
   onSelectTask?: (taskId: string) => void;
   state: StateView | undefined;
@@ -304,7 +317,10 @@ export function WorkPanel({
   edit?: FactoryEditView;
   ready: boolean;
   onEditTask?: (task: TaskItem, change: TaskEdit) => Promise<boolean>;
-  onAddTask?: (agent: AgentItem, instruction: string, mode: "queue" | "any", files?: readonly File[]) => Promise<boolean>;
+  onAddTask?: AddTask;
+  /** Library revisions chosen with "Use in a new task", pinned when the task is added. */
+  taskContent?: readonly TaskContentChip[];
+  onTaskContent?: (content: readonly TaskContentChip[]) => void;
   onLoadTaskDetail?: (task: TaskItem, peerOffset?: bigint, expectedHead?: bigint) => Promise<TaskBrief>;
   onLoadTaskHistory?: (task: TaskItem) => Promise<TaskHistoryView>;
   onLoadTaskList?: (scope: TaskScope, cursor?: TaskCursor) => Promise<TaskListView>;
@@ -318,7 +334,7 @@ export function WorkPanel({
   const [overseer, setOverseer] = useState(false);
   if (state === undefined) return <section className="dfConsoleSidebar__panel" aria-label="Work"><p className="dfFactoryConsole__empty">Waiting for the latest state…</p></section>;
   const agents = [...state.agents.values()];
-  const shown = rows.filter((row) => (filter === "all" || row.state === filter) && (overseer || row.origin !== "overseer" || row.state === "needs-you"));
+  const shown = rows.filter((row) => (filter === "all" || row.state === filter || filter === "needs-you" && needsYou(row)) && (overseer || row.origin !== "overseer" || row.state === "needs-you"));
   const busy = selectedHumanRequest?.phase === "replying" || selectedHumanRequest?.phase === "cancelling";
   const owner = (task?: TaskItem) => task === undefined ? "" : task.assigned_agent_id === "" ? "Any eligible worker" : state.agents.get(task.assigned_agent_id)?.name ?? "Agent";
   const chips = (row: WorkRow) => <>
@@ -328,6 +344,12 @@ export function WorkPanel({
   </>;
   const item = (row: WorkRow) => {
     const { task, request } = row;
+    if (row.intake !== undefined) {
+      const { source, candidate } = row.intake;
+      return <WorkRowShell key={row.key} title={row.title} chips={chips(row)} meta={`${source.repository} · by ${candidate.author}`}>
+        <div className="dfConsoleSidebar__taskActions"><button type="button" aria-label={`Accept ${row.title}`} disabled={!ready || !source.enabled || intake?.busy === true || onIntakeAction === undefined} onClick={() => onIntakeAction?.(source.project_id, { action: "accept", source_id: source.id, expected_revision: source.revision, issue_number: candidate.number, content_hash: candidate.content_hash })}>Accept</button></div>
+      </WorkRowShell>;
+    }
     const named = projectId === undefined && state.projects.size > 1 ? state.projects.get(task?.project_id ?? request?.project_id ?? row.pr?.projectId ?? "")?.name : undefined;
     const blocked = task?.status === "blocked";
     const meta = [named, request === undefined ? owner(task) : `${state.agents.get(request.agent_id)?.name ?? "Agent"} asks`, blocked && formatTime(task.updated_at_ms) ? `since ${formatTime(task.updated_at_ms)}` : ""].filter(Boolean).join(" · ");
@@ -347,29 +369,37 @@ export function WorkPanel({
   return <section className="dfConsoleSidebar__panel" aria-label="Work">
     {onManageSources === undefined ? null : <p className="dfConsoleItem__meta" role="status" aria-label="Task sources">{sources === undefined ? "Sources: not loaded yet" : sources.length === 0 ? "No sources — tasks come only from New task" : `Sources: ${sources.map((item) => `${item.repository} · ${item.label === "" ? "every issue" : `label ${item.label}`}${item.enabled ? "" : " (paused)"}`).join("; ")}`} <button type="button" onClick={onManageSources}>Manage</button></p>}
     {state.factory.dispatch_enabled ? null : <p role="status">New work is paused. Queued tasks wait; active processes continue. An administrator can resume new work above.</p>}
-    {onAddTask === undefined ? null : <NewTask agents={agents} state={state} disabled={!ready || edit?.pending === true} onAddTask={onAddTask} />}
+    {onAddTask === undefined ? null : <NewTask agents={agents} state={state} disabled={!ready || edit?.pending === true} onAddTask={onAddTask} content={taskContent} onContent={onTaskContent} />}
     <div className="dfWorkBar">
       <div className="dfConsoleViewToggle" role="group" aria-label="Work filter">
-        {FILTERS.map(([value, label]) => <button key={value} type="button" aria-pressed={!byMission && filter === value} disabled={!ready} onClick={() => onFilter(value)}>{label} {value === "needs-you" ? <Badge n={rows.filter((row) => row.state === value).length} /> : null}</button>)}
+        {FILTERS.map(([value, label]) => <button key={value} type="button" aria-pressed={!byMission && filter === value} disabled={!ready} onClick={() => onFilter(value)}>{label} {value === "needs-you" ? <Badge n={rows.filter(needsYou).length} /> : null}</button>)}
         <button type="button" aria-pressed={byMission} disabled={!ready} onClick={onByMission}>By mission</button>
       </div>
       {byMission ? null : <IconButton icon="terminal" aria-label="Show overseer passes" aria-pressed={overseer} disabled={!ready} onClick={() => setOverseer(!overseer)} />}
       {projectId === undefined ? <IconButton icon="history" aria-label="History" title="Choose a project" disabled /> : <RecentWork scope={{ project_id: projectId }} name={state.projects.get(projectId)?.name ?? projectId} label="History" icon="history" completionRevision={[...state.tasks.values()].map((task) => `${task.id}:${task.revision}`).join(" ")} onLoadTaskList={onLoadTaskList} onLoadTaskDetail={onLoadTaskDetail} onLoadTaskHistory={onLoadTaskHistory} />}
     </div>
     <div hidden={byMission}>
+      {rows.some((row) => row.intake !== undefined) && (intake?.failed || !["ok", "accepted", "imported", "withdrawn", "withdrawal_pending", undefined].includes(intake?.state)) ? <p role="alert">Could not accept: {intake?.failed ? "try again" : intake?.state?.replaceAll("_", " ")}. {onManageSources === undefined ? null : <button type="button" onClick={onManageSources}>Review in Sources</button>}</p> : null}
       {shown.length === 0 ? <p className="dfFactoryConsole__empty">{filter === "all" ? "No open work" : "Nothing here"}</p> : <ul className="dfConsoleItems">{shown.map(item)}</ul>}
     </div>
     <div hidden={!byMission}>{missions}</div>
   </section>;
 }
 
-/** The target is one agent, or "any:" plus a project whose first worker names the shared queue. */
-function NewTask({ agents, state, disabled, onAddTask }: {
+/**
+ * The target is one agent, or "any:" plus a project whose first worker names the shared queue.
+ * Library context limits the targets to its project, since a pin cannot cross projects.
+ */
+function NewTask({ agents, state, disabled, onAddTask, content, onContent }: {
   agents: readonly AgentItem[];
   state: StateView;
   disabled: boolean;
-  onAddTask: (agent: AgentItem, instruction: string, mode: "queue" | "any", files?: readonly File[]) => Promise<boolean>;
+  onAddTask: AddTask;
+  content: readonly TaskContentChip[];
+  onContent: (content: readonly TaskContentChip[]) => void;
 }) {
+  const [open, setOpen] = useState(content.length > 0);
+  useEffect(() => { if (content.length > 0) setOpen(true); }, [content]);
   const [files, setFiles] = useState<readonly File[]>([]);
   const [fileError, setFileError] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -381,12 +411,13 @@ function NewTask({ agents, state, disabled, onAddTask }: {
     if (incoming.some((file) => file.size === 0 || new TextEncoder().encode(file.name).length > 255 || /[\u0000-\u001f\u007f-\u009f]/u.test(file.name))) { setFileError("Choose nonempty files with names under 256 bytes and no control characters."); return; }
     setFiles(next); setFileError("");
   };
-  const live = agents.filter((agent) => !agent.archived);
+  const scope = content[0]?.project_id;
+  const live = agents.filter((agent) => !agent.archived && (scope === undefined || agent.project_id === scope));
   const shared = [...state.projects.values()].flatMap((project) => {
     const worker = live.find((agent) => agent.project_id === project.id && agent.role === "worker");
     return worker === undefined ? [] : [{ project, worker }];
   });
-  return <details className="dfConsoleSidebar__section"><summary>New task</summary>
+  return <details className="dfConsoleSidebar__section" open={open} onToggle={(event) => setOpen(event.currentTarget.open)}><summary>New task</summary>
     <form className="dfFactoryConsole__reply" aria-label="New task"
       onDragOver={(event) => { if (event.dataTransfer.types.includes("Files")) event.preventDefault(); }}
       onDrop={(event) => { if (event.dataTransfer.files.length > 0) { event.preventDefault(); addFiles(Array.from(event.dataTransfer.files)); } }}
@@ -400,13 +431,14 @@ function NewTask({ agents, state, disabled, onAddTask }: {
       const instruction = String(data.get("instruction"));
       if (busy || agent === undefined || instruction.trim() === "") return;
       setSubmitting(true);
-      void onAddTask(agent, instruction, target.startsWith("any:") ? "any" : "queue", files).then((added) => { if (added) { form.reset(); setFiles([]); setFileError(""); } }).catch(() => setFileError("Submission failed. Your files are still here; try again.")).finally(() => setSubmitting(false));
+      void onAddTask(agent, instruction, target.startsWith("any:") ? "any" : "queue", files, content).then((added) => { if (added) { form.reset(); setFiles([]); setFileError(""); onContent([]); } }).catch(() => setFileError("Submission failed. Your files are still here; try again.")).finally(() => setSubmitting(false));
     }}>
       <label htmlFor="df-new-task-target">For</label>
       <select id="df-new-task-target" name="target" required disabled={busy}>
         {shared.map(({ project }) => <option key={project.id} value={`any:${project.id}`}>Any eligible worker · {project.name}</option>)}
         {live.map((agent) => <option key={agent.id} value={agent.id}>{agent.name}</option>)}
       </select>
+      {content.length === 0 ? null : <ul aria-label="Library context">{content.map((item) => <li key={item.content_id}><span>{item.title} · Revision {String(item.revision)}</span><button type="button" aria-label={`Remove ${item.title}`} disabled={busy} onClick={() => onContent(content.filter((other) => other !== item))}>Remove</button></li>)}</ul>}
       <label htmlFor="df-new-task-instruction">Instruction</label>
       <textarea id="df-new-task-instruction" name="instruction" rows={4} required disabled={busy} />
       <label htmlFor="df-new-task-files">Attach files</label>
@@ -952,10 +984,8 @@ function FloorAppearanceSection({ appearance, onChange, onReset }: {
 }) {
   return <section className="dfConsoleSidebar__section dfFloorAppearance" aria-label="Floor appearance">
     <h3>Floor appearance</h3>
-    <p>Saved in this browser. Automatic groups broad areas; Fine exposes directories on the same floor.</p>
+    <p>Saved in this browser.</p>
     <label>Scenery<select value={appearance.scenery} onChange={(event) => onChange({ ...appearance, scenery: event.currentTarget.value as FloorAppearance["scenery"] })}><option value="off">Off</option><option value="subtle">Subtle</option><option value="rich">Rich</option></select></label>
-    <label>Floor detail<select value={appearance.detail ?? "auto"} onChange={(event) => onChange({ ...appearance, detail: event.currentTarget.value as FloorAppearance["detail"] })}><option value="auto">Halls: routes folded past six</option><option value="fine">Stations: every route</option></select></label>
-    <label>Social furniture<select value={appearance.social ?? "nearby"} onChange={(event) => onChange({ ...appearance, social: event.currentTarget.value as FloorAppearance["social"] })}><option value="nearby">Within the base</option><option value="commons">Common tables</option></select></label>
     <label>Animation<select value={appearance.animation} onChange={(event) => onChange({ ...appearance, animation: event.currentTarget.value as FloorAppearance["animation"] })}><option value="follow-device">Follow device</option><option value="off">Off</option></select></label>
     <button type="button" onClick={onReset}>Reset floor appearance</button>
   </section>;

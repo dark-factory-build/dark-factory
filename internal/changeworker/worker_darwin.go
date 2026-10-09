@@ -115,7 +115,7 @@ func runProvider(ctx context.Context) (resultErr error) {
 		_ = cwd.Close()
 		return err
 	}
-	runtimePaths = runtimePaths.WithCustomerMaintainer(config.CustomerMaintainer)
+	runtimePaths = runtimePaths.WithCustomerMaintainer(config.CustomerMaintainer).WithTraceReceiver(config.TraceReceiverPort, config.RunID)
 	runtimePaths, err = runtimePaths.WithLocalCILeaseDirectory(config.LocalCILeaseDir)
 	if err != nil {
 		_ = cwd.Close()
@@ -185,7 +185,7 @@ func runProvider(ctx context.Context) (resultErr error) {
 			_ = cwd.Close()
 			return err
 		}
-	} else if delivery != provider.TaskDeliveryStartupTerminal && delivery != provider.TaskDeliveryAttemptAPI {
+	} else if delivery != provider.TaskDeliveryAttemptAPI {
 		_ = cwd.Close()
 		return provider.ErrInvalid
 	}

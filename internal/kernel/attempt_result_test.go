@@ -9,6 +9,7 @@ import (
 )
 
 func TestRunnerStartUncertaintyIsExactAndDurable(t *testing.T) {
+	t.Parallel()
 	store, run, keys := admittedOrchestratorRun(t)
 	path := storeTestPath(t, store)
 	ctx := context.Background()
@@ -55,6 +56,7 @@ func TestRunnerStartUncertaintyIsExactAndDurable(t *testing.T) {
 }
 
 func TestRecordUnregisteredRunnerConvergedSettlesOnlyStartingUncertainty(t *testing.T) {
+	t.Parallel()
 	store, run, _ := admittedOrchestratorRun(t)
 	defer store.Close()
 	ctx := context.Background()
@@ -92,6 +94,7 @@ func TestRecordUnregisteredRunnerConvergedSettlesOnlyStartingUncertainty(t *test
 }
 
 func TestConsumeAttemptResultIsExactSingleUseAndClosesOnlyAfterRunner(t *testing.T) {
+	t.Parallel()
 	store, run, keys := admittedOrchestratorRun(t)
 	defer func() { _ = store.Close() }()
 	path := storeTestPath(t, store)
@@ -204,6 +207,7 @@ func TestConsumeAttemptResultIsExactSingleUseAndClosesOnlyAfterRunner(t *testing
 }
 
 func TestConsumeConvergedResultMatrixAndConcurrentConflict(t *testing.T) {
+	t.Parallel()
 	store, run, keys := admittedOrchestratorRun(t)
 	defer store.Close()
 	ctx := context.Background()
@@ -267,6 +271,7 @@ func TestConsumeConvergedResultMatrixAndConcurrentConflict(t *testing.T) {
 }
 
 func TestConsumeConvergedResultAdmittedAndFinalizingMatrix(t *testing.T) {
+	t.Parallel()
 	for _, activePair := range []bool{false, true} {
 		name := "declared_pair"
 		if activePair {
@@ -330,6 +335,7 @@ func TestConsumeConvergedResultAdmittedAndFinalizingMatrix(t *testing.T) {
 }
 
 func TestProviderPairTransitionsAreAtomic(t *testing.T) {
+	t.Parallel()
 	store, run, _ := runningOrchestratorRun(t)
 	defer store.Close()
 	proposal, _ := NewFailureProposal(FailureInternal, "cleanup")
@@ -363,6 +369,7 @@ func TestProviderPairTransitionsAreAtomic(t *testing.T) {
 }
 
 func TestGenericResourceMutationsCannotBypassOwnedProcessEdges(t *testing.T) {
+	t.Parallel()
 	store, run, _ := admittedOrchestratorRun(t)
 	defer store.Close()
 	ctx := context.Background()
@@ -400,6 +407,7 @@ func TestGenericResourceMutationsCannotBypassOwnedProcessEdges(t *testing.T) {
 }
 
 func TestRuntimeAbsenceAndPreRunnerFailureEdgesAreExact(t *testing.T) {
+	t.Parallel()
 	t.Run("trusted absent", func(t *testing.T) {
 		store, run, _ := admittedOrchestratorRun(t)
 		defer store.Close()
@@ -486,6 +494,7 @@ func TestRuntimeAbsenceAndPreRunnerFailureEdgesAreExact(t *testing.T) {
 }
 
 func TestLiveRunnerExitReleaseAndResultCloseAreExact(t *testing.T) {
+	t.Parallel()
 	store, run, keys := runningStartedOrchestratorRun(t, 1800)
 	defer store.Close()
 	ctx := context.Background()
@@ -525,6 +534,7 @@ func TestLiveRunnerExitReleaseAndResultCloseAreExact(t *testing.T) {
 }
 
 func TestAttemptResultConstructorsRejectMalformedValues(t *testing.T) {
+	t.Parallel()
 	runtime, _ := NewPathResourceIdentity(1, 2)
 	process := processIdentity(t, 1500)
 	digest, _ := AttemptDigestFromBytes(make([]byte, DigestBytes))
@@ -548,6 +558,7 @@ func TestAttemptResultConstructorsRejectMalformedValues(t *testing.T) {
 }
 
 func TestAttemptResultPhaseGuardRejectsUnknownAndTerminal(t *testing.T) {
+	t.Parallel()
 	for _, phase := range []RunPhase{0, RunTerminal, RunPhase(255)} {
 		if attemptResultConsumablePhase(phase) {
 			t.Fatalf("phase %d accepted", phase)
@@ -561,6 +572,7 @@ func TestAttemptResultPhaseGuardRejectsUnknownAndTerminal(t *testing.T) {
 }
 
 func TestRecoveredPreSessionRunnerAbsenceFinalizesExactly(t *testing.T) {
+	t.Parallel()
 	store, run, keys := admittedOrchestratorRun(t)
 	defer func() { _ = store.Close() }()
 	path := storeTestPath(t, store)
@@ -623,6 +635,7 @@ func TestRecoveredPreSessionRunnerAbsenceFinalizesExactly(t *testing.T) {
 }
 
 func TestRecoveredPreSessionRunnerAbsenceFailsClosed(t *testing.T) {
+	t.Parallel()
 	t.Run("identity and phase guards", func(t *testing.T) {
 		store, run, keys := admittedOrchestratorRun(t)
 		defer store.Close()
@@ -711,6 +724,7 @@ func TestRecoveredPreSessionRunnerAbsenceFailsClosed(t *testing.T) {
 }
 
 func TestWrongResultProofDigestIsRefusedAtEveryResultSeam(t *testing.T) {
+	t.Parallel()
 	store, run, keys := admittedOrchestratorRun(t)
 	defer store.Close()
 	ctx := context.Background()
@@ -767,6 +781,7 @@ func TestWrongResultProofDigestIsRefusedAtEveryResultSeam(t *testing.T) {
 }
 
 func TestConsumeAttemptResultRefusesEveryKindWhileRunnerStarting(t *testing.T) {
+	t.Parallel()
 	store, run, keys := admittedOrchestratorRun(t)
 	defer store.Close()
 	ctx := context.Background()
@@ -861,6 +876,7 @@ func storeTestPath(t *testing.T, store *Store) string {
 }
 
 func TestNonzeroExitResultsConvergeThroughEveryResultSeam(t *testing.T) {
+	t.Parallel()
 	// The insignificant arm of the exit union differs between
 	// AttemptResultExit (raw value, false) and ProcessExit (nil-guarded zero),
 	// so a comparison of insignificant values wrongly rejects every nonzero

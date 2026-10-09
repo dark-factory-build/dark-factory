@@ -132,6 +132,48 @@ func TestBrowserTaskEnqueueCreatesPrivateDurableTaskAndWakesScheduler(t *testing
 	}
 }
 
+// Library context chosen in the New task form is pinned by the enqueue itself,
+// so the fresh task's knowledge manifest names that exact revision.
+func TestBrowserTaskEnqueuePinsLibraryRevisionIntoKnowledgeManifest(t *testing.T) {
+	ctx := context.Background()
+	fixture := newAdapterFixture(t, kernel.BrowserCapabilityObserve|kernel.BrowserCapabilityHumanActions)
+	projectID, _ := kernel.ProjectIDFromBytes(adapterID(t, 90))
+	agentID, _ := kernel.AgentIDFromBytes(adapterID(t, 91))
+	taskID, _ := kernel.TaskIDFromBytes(adapterID(t, 92))
+	incarnationID, _ := kernel.IncarnationIDFromBytes(adapterID(t, 93))
+	contentID, _ := kernel.ContentIDFromBytes(adapterID(t, 94))
+	project, err := fixture.store.CreateProject(ctx, kernel.NewProject{ID: projectID, Name: "library context", Root: "/private/library-context"}, adapterTime(t, 10))
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent, err := fixture.store.CreateAgent(ctx, kernel.NewAgent{ID: agentID, ProjectID: project.ID, Name: "idle shell", Role: kernel.RoleWorker, Provider: kernel.ProviderShell, ToolBudgetLimit: 2}, adapterTime(t, 11))
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata, _ := json.Marshal(kernel.KnowledgeMetadata{Status: "tentative"})
+	content, err := fixture.store.CreateContent(ctx, kernel.NewContent{ID: contentID, ProjectID: project.ID, Kind: kernel.ContentObservation, Title: "Deployment guide", Author: "operator:local", SourceReferences: string(metadata), ObjectFormat: "sha1", Commit: strings.Repeat("ab", 20), Path: ".dark-factory/content/guide.md", RepositoryDevice: 1, RepositoryInode: 2}, adapterTime(t, 12))
+	if err != nil {
+		t.Fatal(err)
+	}
+	connection := fixture.pair(t)
+	payload, err := testEncodeTaskEnqueue("enqueue", browserprotocol.TaskEnqueue{TaskID: taskID.String(), IncarnationID: incarnationID.String(), AgentID: agent.ID.String(), ExpectedAgentRevision: browserprotocol.Decimal(agent.Revision.Int64()), Instruction: "Follow the guide", Mode: "any", Content: []browserprotocol.TaskContent{{ContentID: content.ID.String(), Revision: browserprotocol.Decimal(content.Revision.Int64())}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapterWrite(t, connection, payload)
+	if frame := adapterRead(t, connection); frame.Type != browserprotocol.TypeTaskEnqueueResult {
+		t.Fatalf("enqueue response = %+v", frame)
+	}
+	task, found, err := fixture.store.Task(ctx, taskID)
+	if err != nil || !found {
+		t.Fatalf("task found=%v err=%v", found, err)
+	}
+	manifest, accesses, err := fixture.daemon.knowledgeAttachmentManifest(ctx, kernel.Run{ProjectID: project.ID, TaskID: task.ID, AdmittedTaskWorkRevision: task.WorkRevision, Provider: kernel.ProviderShell})
+	if want := fmt.Sprintf("%s@%d", content.ID, content.Revision.Int64()); err != nil || !strings.Contains(string(manifest), want) || len(accesses) != 1 {
+		t.Fatalf("manifest %q lacks %s: %v", manifest, want, err)
+	}
+}
+
 func TestBrowserTaskEnqueueRejectsMissingCapabilityAndStaleAgent(t *testing.T) {
 	for index, test := range []struct {
 		name         string
@@ -185,7 +227,7 @@ func TestBrowserTaskEnqueueRejectsMissingCapabilityAndStaleAgent(t *testing.T) {
 
 func TestTaskAttachmentsCountTowardsProviderInputLimit(t *testing.T) {
 	files := []kernel.TaskAttachment{{Name: "reference.png", Data: []byte{1}}}
-	body := strings.Repeat("x", runner.MaxCodexTaskBytes)
+	body := strings.Repeat("x", runner.MaxNativeTaskBytes)
 	if err := prepareTaskText(kernel.ProviderCodex, "title", body); err != nil {
 		t.Fatal(err)
 	}

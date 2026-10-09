@@ -175,3 +175,62 @@ func TestIntakePollCancelsWithdrawnQueuedWork(t *testing.T) {
 		t.Fatalf("withdrawn work = %+v err=%v", task, err)
 	}
 }
+
+func TestIntakePollKeepsWaitingIssuesForTheInbox(t *testing.T) {
+	fixture := newIntakePollFixture(t, 60)
+	fixture.issue.Author.Login = "stranger"
+	ctx := context.Background()
+	fixture.daemon.pollIntake(ctx)
+	result := fixture.daemon.Intake(ctx, api.IntakeInput{Action: "list"})
+	if fixture.lists.Load() != 1 || len(result.Sources) != 1 || result.Sources[0].Sync == nil || len(result.Sources[0].Sync.Waiting) != 1 {
+		t.Fatalf("lists=%d sources=%+v", fixture.lists.Load(), result.Sources)
+	}
+	waiting := result.Sources[0].Sync.Waiting[0]
+	if waiting.Number != 7 || waiting.Reason != "untrusted_author" || waiting.Body != "" || waiting.Title != "Polled" {
+		t.Fatalf("waiting = %+v", waiting)
+	}
+	accepted := fixture.daemon.Intake(ctx, api.IntakeInput{Action: "accept", SourceID: fixture.source.ID.String(), ExpectedRevision: uint64(fixture.source.Revision.Int64()), IssueNumber: 7, ContentHash: waiting.ContentHash})
+	if accepted.State != "accepted" {
+		t.Fatalf("accept = %+v", accepted)
+	}
+	if imported := fixture.daemon.Intake(ctx, api.IntakeInput{Action: "import", AcceptanceID: accepted.AcceptanceID}); imported.State != "imported" {
+		t.Fatalf("import = %+v", imported)
+	}
+	if tasks := fixture.tasks(t); len(tasks) != 1 || tasks[0].Status != kernel.TaskQueued {
+		t.Fatalf("tasks = %+v", tasks)
+	}
+	if result = fixture.daemon.Intake(ctx, api.IntakeInput{Action: "list"}); len(result.Sources[0].Sync.Waiting) != 0 {
+		t.Fatalf("accepted issue still waiting: %+v", result.Sources[0].Sync.Waiting)
+	}
+}
+
+func TestIntakeAcceptMidScanDoesNotRepublishTheIssue(t *testing.T) {
+	fixture := newIntakePollFixture(t, 60)
+	fixture.issue.Author.Login = "stranger"
+	two := uint32(2)
+	fixture.daemon.intakeIssues = func(_ context.Context, _ string, _ uint64, page uint32, _ string, number uint64) (maintainer.IssuePage, error) {
+		if number == 0 && page == 2 {
+			return maintainer.IssuePage{RepositoryID: 42, Issues: []maintainer.Issue{}}, nil
+		}
+		if number == 0 {
+			return maintainer.IssuePage{RepositoryID: 42, Issues: []maintainer.Issue{fixture.issue}, NextPage: &two}, nil
+		}
+		return maintainer.IssuePage{RepositoryID: 42, Issues: []maintainer.Issue{fixture.issue}}, nil
+	}
+	ctx := context.Background()
+	fixture.daemon.pollIntake(ctx) // page 1 keeps the issue in the unfinished scan
+	hash := snapshotHash(intakeSnapshot(fixture.source, fixture.issue))
+	if accepted := fixture.daemon.Intake(ctx, api.IntakeInput{Action: "accept", SourceID: fixture.source.ID.String(), ExpectedRevision: uint64(fixture.source.Revision.Int64()), IssueNumber: 7, ContentHash: hash}); accepted.State != "accepted" {
+		t.Fatalf("accept = %+v", accepted)
+	}
+	fixture.now = fixture.now.Add(5 * time.Second)
+	fixture.daemon.pollIntake(ctx) // page 2 wraps the scan and publishes it
+	if result := fixture.daemon.Intake(ctx, api.IntakeInput{Action: "list"}); len(result.Sources[0].Sync.Waiting) != 0 {
+		t.Fatalf("accepted issue republished: %+v", result.Sources[0].Sync.Waiting)
+	}
+}
+
+func snapshotHash(snapshot kernel.IntakeIssueSnapshot) string {
+	digest := snapshot.ContentHash()
+	return hex.EncodeToString(digest[:])
+}

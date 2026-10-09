@@ -104,7 +104,7 @@ export function workerFrames(worker: SceneWorker, motion?: WorkerMotion, seat?: 
     : hailing !== undefined ? `wave.${hailing}`
     : wielding ? motion.frame === 1 ? "walk.1" : "idle"
     : motion?.action === "interacting" ? `type.${motion.frame}`
-    // Standing at the shelf with a book, or at the coffee station with a cup.
+    // Standing at the shelf with a book, the coffee station with a cup, or any other implement with a clipboard.
     : errand !== undefined ? "hold"
     : worker.activity === "needs-you" ? `wave.${at === undefined ? 0 : Math.floor(at / 400) % 2}`
     : seat === "planning" ? `type.${scribble}`
@@ -142,7 +142,7 @@ export function workerFrames(worker: SceneWorker, motion?: WorkerMotion, seat?: 
   const step = walking ? pose : "stand";
   const blinking = at !== undefined && at % (3000 + hash(worker.id) % 4000) < 200;
   const glasses = spriteOptions.face[appearance.face]?.name === "glasses";
-  const held = errand !== undefined && pose === "hold" ? [`person.held.${errand === "shelf" ? "book" : "cup"}.chest`]
+  const held = errand !== undefined && pose === "hold" ? [`person.held.${errand === "shelf" ? "book" : errand === "coffee" ? "cup" : "clipboard"}.chest`]
     : pose === "sip" || pose === "hold" ? [`person.held.${rest.item}.${rest.where}`]
     : seat === "planning" && pose.startsWith("type") ? [`person.held.pencil.${scribble}`]
     : pose.startsWith("type") ? ["person.held.keyboard"]

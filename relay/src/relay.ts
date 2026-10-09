@@ -11,9 +11,14 @@ import { decodeBase64UrlExact } from './encoding.js';
 import {
 	CONTROLLER_MESSAGE_LIMIT,
 	HOST_MESSAGE_LIMIT,
+	INGEST_LIMIT,
+	PUBLIC_WORLD_LIMIT,
 	RECORD_BINARY,
 	RECORD_CLOSE,
+	RECORD_INGEST,
+	RECORD_INGEST_KEY,
 	RECORD_OPEN,
+	RECORD_PUBLISH,
 	RECORD_REVOKE,
 	RECORD_TEXT,
 	encodeRecords,
@@ -21,7 +26,7 @@ import {
 	textRecord,
 	type RelayRecord,
 } from './envelope.js';
-import { NODE_ID_PATTERN, verifyHostToken, verifyProof, verifyTicket, type TicketPurpose } from './tokens.js';
+import { NODE_ID_PATTERN, publicIdForKey, verifyHostToken, verifyProof, verifyTicket, type TicketPurpose } from './tokens.js';
 
 export const SUBPROTOCOL = 'dark-factory-relay';
 
@@ -45,12 +50,38 @@ const CONTROLLER_SOCKETS_PER_CONTROLLER = 4;
 const BURST_MESSAGES = 120;
 const SUSTAINED_MESSAGES_PER_SECOND = 60;
 
+/**
+ * Ingest byte bucket per factory: 4 MiB of burst, refilled at 1 MiB a second.
+ * Bytes, not requests: an app exporting once per invocation sends many small
+ * pushes where a collector sends a few large ones.
+ */
+const INGEST_BURST_BYTES = 4 * 1024 * 1024;
+const INGEST_BYTES_PER_SECOND = 1024 * 1024;
+/** Each push also costs this much, so empty pushes are bounded too (256 a second). */
+const INGEST_PUSH_BYTES = 4096;
+/** Flags of an INGEST record. */
+const INGEST_PROTOBUF = 1;
+const INGEST_GZIP = 2;
+
+/** A host may replace its public world at most this often; the daemon sends once a minute. */
+const PUBLISH_INTERVAL_MS = 30_000;
+
 const APPLICATION_CLOSE_MIN = 3000;
 const APPLICATION_CLOSE_MAX = 4999;
 
 export interface Env {
 	PWA_ORIGIN: string;
+	SITE_ORIGIN: string;
 	FACTORY_RELAY: DurableObjectNamespace;
+	PUBLIC_READS: RateLimit;
+	/** Unset in deployment; `wrangler dev` sets 0 so the integration tests can exhaust the burst on any clock. */
+	INGEST_BYTES_PER_SECOND?: string;
+}
+
+/** The one record a `public:<id>` object keeps: the latest world and when it arrived. */
+interface StoredWorld {
+	body: string;
+	at: number;
 }
 
 interface StoredHost {
@@ -65,6 +96,8 @@ interface Attachment {
 	role: Role;
 	connection: number;
 	controller: string;
+	/** Host only: hex SHA-256 of the ingest secret. It lives exactly as long as the socket. */
+	ingest?: string;
 }
 
 interface Bucket {
@@ -89,7 +122,9 @@ function attachmentOf(ws: WebSocket): Attachment | null {
 	const candidate = raw as Partial<Attachment>;
 	if (candidate.role !== 'host' && candidate.role !== 'controller' && candidate.role !== 'retired') return null;
 	if (typeof candidate.connection !== 'number' || typeof candidate.controller !== 'string') return null;
-	return { role: candidate.role, connection: candidate.connection, controller: candidate.controller };
+	const attachment: Attachment = { role: candidate.role, connection: candidate.connection, controller: candidate.controller };
+	if (typeof candidate.ingest === 'string') attachment.ingest = candidate.ingest;
+	return attachment;
 }
 
 /** The WebSocket protocol caps a close reason at 123 UTF-8 bytes. */
@@ -125,6 +160,10 @@ export class FactoryRelay implements DurableObject {
 	/** Rate-limit state is per live socket only; hibernation resets a bucket that
 	 * has necessarily been idle long enough to have refilled anyway. */
 	readonly #buckets = new WeakMap<WebSocket, Bucket>();
+	/** When this node last published; in memory only, like the buckets. */
+	#publishedAt = Number.NEGATIVE_INFINITY;
+	/** This node's ingest token bucket; in memory only, like the others. */
+	#ingestBucket: Bucket = { tokens: INGEST_BURST_BYTES, at: 0 };
 
 	constructor(ctx: DurableObjectState, env: Env) {
 		this.#ctx = ctx;
@@ -134,6 +173,10 @@ export class FactoryRelay implements DurableObject {
 
 	async fetch(request: Request): Promise<Response> {
 		const url = new URL(request.url);
+		// Reached only as `public:<id>`: a GET routed by the Worker, or a PUT
+		// from the node object that proved the key the id hashes.
+		if (url.pathname.startsWith('/public/')) return await this.#world(request);
+		if (url.pathname.startsWith('/ingest/')) return await this.#ingest(request);
 		const match = /^\/(host|controller)\/([^/]+)$/.exec(url.pathname);
 		if (match === null) return refuse(404);
 		const [, kind, node] = match as unknown as [string, string, string];
@@ -267,13 +310,10 @@ export class FactoryRelay implements DurableObject {
 
 	// -- socket events ------------------------------------------------------
 
-	webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): void {
+	webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): void | Promise<void> {
 		const attachment = attachmentOf(ws);
 		if (attachment === null || attachment.role === 'retired') return;
-		if (attachment.role === 'host') {
-			this.#onHostMessage(ws, message);
-			return;
-		}
+		if (attachment.role === 'host') return this.#onHostMessage(ws, message);
 		this.#onControllerMessage(ws, attachment, message);
 	}
 
@@ -294,7 +334,7 @@ export class FactoryRelay implements DurableObject {
 
 	// -- host traffic -------------------------------------------------------
 
-	#onHostMessage(ws: WebSocket, message: string | ArrayBuffer): void {
+	#onHostMessage(ws: WebSocket, message: string | ArrayBuffer): void | Promise<void> {
 		if (typeof message === 'string') {
 			// `ping` never reaches here: setWebSocketAutoResponse answers it. Any
 			// other text on the host socket is off-envelope.
@@ -314,9 +354,106 @@ export class FactoryRelay implements DurableObject {
 			);
 			return;
 		}
+		const published: Promise<void>[] = [];
 		for (const record of parsed.records) {
-			if (!this.#dispatch(ws, record)) return;
+			if (record.type === RECORD_PUBLISH) {
+				published.push(this.#publish(record.payload));
+				continue;
+			}
+			if (record.type === RECORD_INGEST_KEY) {
+				if (record.connection !== 0 || (record.payload.length !== 0 && record.payload.length !== 32)) {
+					this.#failHost(ws, CLOSE_PROTOCOL, 'malformed ingest key');
+					break;
+				}
+				const attachment = attachmentOf(ws);
+				if (attachment === null) break;
+				delete attachment.ingest;
+				if (record.payload.length === 32) attachment.ingest = hex(record.payload);
+				ws.serializeAttachment(attachment);
+				continue;
+			}
+			if (!this.#dispatch(ws, record)) break;
 		}
+		if (published.length > 0) return Promise.all(published).then(() => undefined);
+	}
+
+	// -- public world -------------------------------------------------------
+
+	/**
+	 * Stores this node's latest public world in the `public:<id>` object its key
+	 * names. A world that is too large, not a JSON object with a numeric
+	 * `generated_at`, or sooner than the interval is dropped without ending the
+	 * host: it hurts no one but its own feed. An empty payload retracts it.
+	 */
+	async #publish(payload: Uint8Array): Promise<void> {
+		const now = Date.now();
+		if (payload.length > PUBLIC_WORLD_LIMIT || now - this.#publishedAt < PUBLISH_INTERVAL_MS) return;
+		if (payload.length > 0 && typeof decodeJson(payload)?.generated_at !== 'number') return;
+		this.#publishedAt = now;
+		const stored = (await this.#ctx.storage.get<StoredHost>('host')) ?? null;
+		const key = stored === null ? null : decodeBase64UrlExact(stored.key, 32);
+		if (key === null) return;
+		const id = await publicIdForKey(key);
+		try {
+			await this.#env.FACTORY_RELAY.getByName(`public:${id}`).fetch(`https://relay/public/${id}`, {
+				method: 'PUT',
+				body: payload.slice(),
+			});
+		} catch {
+			// The next change publishes again; nothing is queued.
+		}
+	}
+
+	// -- remote ingest ------------------------------------------------------
+
+	/**
+	 * One OTLP traces push, already shaped by the Worker. The secret is checked
+	 * against the connected host's digest; without a host there is no digest,
+	 * so a stranger cannot tell an offline factory from a wrong secret. The
+	 * bucket is spent only after authentication and before the body is read,
+	 * so concurrent pushes cannot pile bodies up here. Nothing is stored.
+	 */
+	async #ingest(request: Request): Promise<Response> {
+		const host = this.#host();
+		const digest = host === null ? undefined : attachmentOf(host)?.ingest;
+		const bearer = (request.headers.get('Authorization') ?? '').slice('Bearer '.length);
+		const presented = hex(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(bearer))));
+		if (host === null || digest === undefined || presented !== digest) return refuse(401);
+		const type = request.headers.get('Content-Type') ?? '';
+		const encoding = request.headers.get('Content-Encoding') ?? '';
+		const protobuf = type.startsWith('application/x-protobuf');
+		if ((!protobuf && !type.startsWith('application/json')) || !['', 'identity', 'gzip'].includes(encoding)) return refuse(415);
+		// The Worker admitted only a Content-Length of at most 1 MiB.
+		const length = Number(request.headers.get('Content-Length')) + INGEST_PUSH_BYTES;
+		const now = Date.now();
+		const bucket = this.#ingestBucket;
+		const rate = Number(this.#env.INGEST_BYTES_PER_SECOND ?? INGEST_BYTES_PER_SECOND);
+		bucket.tokens = Math.min(INGEST_BURST_BYTES, bucket.tokens + ((now - bucket.at) / 1000) * rate);
+		bucket.at = now;
+		if (bucket.tokens < length) return refuse(429);
+		bucket.tokens -= length;
+		const body = new Uint8Array(await request.arrayBuffer());
+		if (body.length > INGEST_LIMIT) return refuse(413);
+		const payload = new Uint8Array(body.length + 1);
+		payload[0] = (protobuf ? INGEST_PROTOBUF : 0) | (encoding === 'gzip' ? INGEST_GZIP : 0);
+		payload.set(body, 1);
+		this.#sendToHost([{ type: RECORD_INGEST, connection: 0, payload }]);
+		return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
+	}
+
+	async #world(request: Request): Promise<Response> {
+		if (request.method === 'PUT') {
+			const body = await request.text();
+			if (body === '') await this.#ctx.storage.delete('world');
+			else await this.#ctx.storage.put<StoredWorld>('world', { body, at: Date.now() });
+			return new Response(null, { status: 204 });
+		}
+		const world = await this.#ctx.storage.get<StoredWorld>('world');
+		if (world === undefined) return refuse(404);
+		return new Response(world.body, {
+			status: 200,
+			headers: { 'content-type': 'application/json', 'last-modified': new Date(world.at).toUTCString() },
+		});
 	}
 
 	/** Returns false when the host socket was torn down by this record. */
@@ -482,6 +619,10 @@ function trySend(ws: WebSocket, payload: string | ArrayBuffer): void {
 	} catch {
 		// The peer vanished between lookup and send; nothing is queued for it.
 	}
+}
+
+function hex(bytes: Uint8Array): string {
+	return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
 }
 
 function decodeJson(payload: Uint8Array): Record<string, unknown> | null {

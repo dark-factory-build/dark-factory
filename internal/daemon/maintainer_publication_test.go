@@ -32,7 +32,7 @@ func TestRecordMaintainerPublicationPersistsTaskAndPullRequest(t *testing.T) {
 	if err := fixture.daemon.recordMaintainerPublication(ctx, projectID, task.ID, request, response); err != nil {
 		t.Fatal(err)
 	}
-	page, err := fixture.store.Production(ctx, projectID, 0, 8)
+	page, err := fixture.store.Production(ctx, projectID, 0, 8, kernel.UnixMillis{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -104,7 +104,7 @@ func TestMaintainerIDsEqualAcceptsEquivalentJSONValues(t *testing.T) {
 
 func readProductionPull(t *testing.T, store *kernel.Store, project kernel.ProjectID, number uint64) kernel.ProductionPullRequest {
 	t.Helper()
-	page, err := store.Production(context.Background(), project, 0, 8)
+	page, err := store.Production(context.Background(), project, 0, 8, kernel.UnixMillis{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -152,7 +152,7 @@ func TestRecordMaintainerPublicationIgnoresUnrelatedResponsesAndEnforcesProject(
 	if err := fixture.daemon.recordMaintainerPublication(ctx, projectID, task.ID, request, valid); !errors.Is(err, kernel.ErrUnauthorized) {
 		t.Fatalf("cross-project publication = %v", err)
 	}
-	page, err := fixture.store.Production(ctx, projectID, 0, 8)
+	page, err := fixture.store.Production(ctx, projectID, 0, 8, kernel.UnixMillis{})
 	if err != nil {
 		t.Fatal(err)
 	}

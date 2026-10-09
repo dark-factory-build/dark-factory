@@ -2,9 +2,13 @@ package daemon
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -124,11 +128,13 @@ func TestProjectGraphReadsOneSourcePerRepositoryAndInvalidatesConfiguration(t *t
 }
 
 // A node's paths are repository-prefixed only when more than one repository
-// feeds the project, matching run and change paths.
+// feeds the project, matching run and change paths. Every inferred runtime,
+// the CI unit's included, encodes on the wire.
 func TestGraphFramePrefixesPathsOnlyForMultipleRepositories(t *testing.T) {
 	project, first, second := strings.Repeat("a1", 16), strings.Repeat("b2", 16), strings.Repeat("c3", 16)
-	files := map[string][]byte{"go.mod": []byte("module example.com/x\n"), "cmd/x/main.go": []byte(mainSource)}
-	graph, err := opgraph.Infer(project, []opgraph.Repository{{ID: first, Name: "one", Files: files}})
+	files := map[string][]byte{"go.mod": []byte("module example.com/x\n"), "cmd/x/main.go": []byte(mainSource),
+		".github/workflows/ci.yml": []byte("on: pull_request\njobs:\n  test:\n    runs-on: macos-15\n")}
+	graph, err := opgraph.Infer(project, []opgraph.Repository{{ID: first, Name: "one", Files: files}}, nil)
 	if err != nil || len(graph.Nodes) == 0 {
 		t.Fatalf("graph = %+v, %v", graph, err)
 	}
@@ -218,5 +224,98 @@ func TestPublicSecretIsWholeOrRefused(t *testing.T) {
 	}
 	if _, err := daemon.publicSecret(); err == nil {
 		t.Fatal("a damaged secret was used")
+	}
+}
+
+// An outbound request is a client span on the gate inference drew for its
+// host, and only the host and method are kept.
+func TestOutboundRequestsLightTheirExternalGate(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.WriteHeader(http.StatusBadGateway)
+	}))
+	defer server.Close()
+	daemon := &Daemon{now: time.Now}
+	client := daemon.observed(&http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, network, server.Listener.Addr().String())
+	}}})
+	response, err := client.Get("http://API.github.com/repos/owner/secret-repo?token=hidden")
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+
+	observations, _ := daemon.runtimeStore().Snapshot(time.Now().UnixMilli())
+	if len(observations) != 1 {
+		t.Fatalf("observations = %+v", observations)
+	}
+	item := observations[0]
+	if item.Kind != "client" || item.Errors != 1 || item.Peer["server.address"] != "api.github.com" || item.Attributes["http.request.method"] != "GET" {
+		t.Fatalf("observation = %+v", item)
+	}
+	if recorded := fmt.Sprint(item); strings.Contains(recorded, "repos") || strings.Contains(recorded, "secret") || strings.Contains(recorded, "hidden") {
+		t.Fatalf("the path or query was recorded: %s", recorded)
+	}
+
+	source := "package main\nimport \"net/http\"\nfunc main() { http.Get(\"https://api.github.com/repos\") }\n"
+	graph, err := opgraph.Infer("s", []opgraph.Repository{{ID: "r", Name: "r", Files: map[string][]byte{"go.mod": []byte("module example.com/x\n"), "cmd/factoryd/main.go": []byte(source)}}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	live := opgraph.Overlay("s", graph, observations, nil, nil, time.Now().UnixMilli(), runtimeWindow.Milliseconds())
+	for _, node := range live.Graph.Nodes {
+		if node.Kind == opgraph.External && node.Selectors["server.address"] == "api.github.com" {
+			if got := live.Nodes[node.ID]; got.State != "failing" || opgraph.State(node.Evidence) == "runtime" {
+				t.Fatalf("gate = %+v, evidence %s", got, opgraph.State(node.Evidence))
+			}
+			return
+		}
+	}
+	t.Fatalf("no inferred gate for api.github.com in %+v", live.Graph.Nodes)
+}
+
+// This repository's own tree, served as two repositories with live runtime
+// evidence a sender controls, always encodes: the daemon never builds a frame
+// its own encoder refuses.
+func TestOwnRepositoryGraphEncodesWithLiveEvidence(t *testing.T) {
+	project, first, second := strings.Repeat("a1", 16), strings.Repeat("b2", 16), strings.Repeat("c3", 16)
+	root, repositories := filepath.Join("..", ".."), []opgraph.Repository{{ID: first, Name: "core", Files: map[string][]byte{}}, {ID: second, Name: "site", Files: map[string][]byte{}}}
+	for index, tops := range [][]string{{"go.mod", "cmd", ".github/workflows"}, {"web", ".github/workflows"}} {
+		for _, top := range tops {
+			if err := filepath.WalkDir(filepath.Join(root, top), func(name string, entry os.DirEntry, err error) error {
+				if err != nil || entry.IsDir() && (entry.Name() == "node_modules" || entry.Name() == "dist") {
+					return cmp.Or(err, filepath.SkipDir)
+				}
+				if !entry.IsDir() {
+					relative, _ := filepath.Rel(root, name)
+					repositories[index].Files[filepath.ToSlash(relative)], err = os.ReadFile(name)
+				}
+				return err
+			}); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	graph, err := opgraph.Infer(project, repositories, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := ""
+	for index, node := range graph.Nodes {
+		if name := node.Selectors["service.name"]; node.Kind == opgraph.Processor && name != "" {
+			// A repository path the wire cannot carry once repository-prefixed.
+			service, graph.Nodes[index].Sources = name, append(node.Sources, opgraph.Location{Repository: first, Path: strings.Repeat("deep/", 204)})
+		}
+	}
+	if service == "" {
+		t.Fatal("no unit names a service")
+	}
+	now := time.Now().UnixMilli()
+	observations := []opgraph.Observation{{Source: "otlp", Environment: "local", Kind: "internal", Start: now - 1000, End: now, Count: 1, Errors: 3, LatencyP95: 1e12,
+		Attributes: map[string]string{"service.name": service, "code.function.name": strings.Repeat("é", 300)}}}
+	live := opgraph.Overlay(project, graph, observations, nil, nil, now, runtimeWindow.Milliseconds())
+	sources := []graphSource{{RepositoryID: first, Name: "core", Kind: "integrated", Revision: strings.Repeat("d4", 20)}, {RepositoryID: second, Name: "site", Kind: "unavailable"}}
+	frame := graphFrame(project, projectGraph{graph: graph, sources: sources, digest: strings.Repeat("ab", 32)}, live, now)
+	if _, err := browserprotocol.EncodeOperationalGraph("graph", frame); err != nil || len(frame.Nodes) <= len(graph.Nodes) {
+		t.Fatalf("%d of %d nodes: %v", len(frame.Nodes), len(graph.Nodes), err)
 	}
 }

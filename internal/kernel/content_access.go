@@ -235,3 +235,78 @@ func (store *Store) RecordSuppliedContentForAttempt(ctx context.Context, digest 
 	}
 	return tx.Commit(ctx)
 }
+
+// ContentActivity is one recorded knowledge operation: a revision written, or
+// bytes of one revision supplied to or read by a run. Reads are grouped per run
+// and revision at their latest page; none establishes understanding.
+type ContentActivity struct {
+	Operation string // "revision", "supplied" or "read"
+	Content   ContentRevision
+	RunID     RunID
+	AgentID   AgentID
+	TaskID    TaskID
+	At        UnixMillis
+}
+
+type ContentActivityPage struct {
+	Items      []ContentActivity
+	NextOffset int
+}
+
+// ListContentActivity reads existing revisions and access receipts, newest first,
+// without recording anything. ponytail: neither table is indexed by time, so this
+// scans the project's revisions and receipts; add a created_at index if polling grows slow.
+func (store *Store) ListContentActivity(ctx context.Context, project ProjectID, offset, limit int) (ContentActivityPage, error) {
+	if project.zero() || offset < 0 || limit < 1 || limit > contentPageSize {
+		return ContentActivityPage{}, ErrInvalidValue
+	}
+	tx, err := store.beginRead(ctx)
+	if err != nil {
+		return ContentActivityPage{}, err
+	}
+	defer tx.Close()
+	rows, err := tx.connection.QueryContext(ctx, `SELECT e.op,c.id,c.kind,c.revision,c.title,c.author,c.source_references,c.deprecated,e.run_id,e.agent_id,e.task_id,e.at FROM (
+SELECT 'revision' AS op,id,revision,NULL AS run_id,NULL AS agent_id,NULL AS task_id,created_at_ms AS at FROM project_content_revisions WHERE project_id=?
+UNION ALL
+SELECT a.kind,a.content_id,a.content_revision,a.run_id,r.agent_id,r.task_id,max(a.created_at_ms) FROM content_accesses a JOIN runs r ON r.id=a.run_id WHERE r.project_id=? AND a.kind IN ('supplied','read') GROUP BY a.run_id,a.content_id,a.content_revision,a.kind
+) e JOIN project_content_revisions c ON c.id=e.id AND c.revision=e.revision WHERE c.project_id=? ORDER BY e.at DESC,e.op,c.id,c.revision,e.run_id LIMIT ? OFFSET ?`, project.Bytes(), project.Bytes(), project.Bytes(), limit+1, offset)
+	if err != nil {
+		return ContentActivityPage{}, err
+	}
+	defer rows.Close()
+	result := ContentActivityPage{Items: []ContentActivity{}}
+	for rows.Next() {
+		var id, run, agent, task []byte
+		var revision, at int64
+		a := ContentActivity{Content: ContentRevision{ProjectID: project}}
+		if err := rows.Scan(&a.Operation, &id, &a.Content.Kind, &revision, &a.Content.Title, &a.Content.Author, &a.Content.SourceReferences, &a.Content.Deprecated, &run, &agent, &task, &at); err != nil {
+			return ContentActivityPage{}, err
+		}
+		if len(result.Items) == limit {
+			result.NextOffset = offset + limit
+			break
+		}
+		if a.Content.ID, err = ContentIDFromBytes(id); err != nil {
+			return ContentActivityPage{}, err
+		}
+		if a.Content.Revision, err = NewRevision(revision); err != nil {
+			return ContentActivityPage{}, err
+		}
+		if a.At, err = NewUnixMillis(at); err != nil {
+			return ContentActivityPage{}, err
+		}
+		if run != nil {
+			if a.RunID, err = RunIDFromBytes(run); err != nil {
+				return ContentActivityPage{}, err
+			}
+			if a.AgentID, err = AgentIDFromBytes(agent); err != nil {
+				return ContentActivityPage{}, err
+			}
+			if a.TaskID, err = TaskIDFromBytes(task); err != nil {
+				return ContentActivityPage{}, err
+			}
+		}
+		result.Items = append(result.Items, a)
+	}
+	return result, rows.Err()
+}

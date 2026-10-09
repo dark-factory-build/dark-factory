@@ -6,6 +6,7 @@ import (
 )
 
 func TestProjectTokenCeilingStopsAdmissionUntilTheAllowanceIsRaised(t *testing.T) {
+	t.Parallel()
 	store, _, project, agent := newAdmissionStore(t, RoleOrchestrator, 1)
 	defer store.Close()
 	ctx := context.Background()
@@ -69,6 +70,7 @@ func TestProjectTokenCeilingStopsAdmissionUntilTheAllowanceIsRaised(t *testing.T
 }
 
 func TestProjectAtItsTokenCeilingAdmitsNothing(t *testing.T) {
+	t.Parallel()
 	store, _, project, agent := newAdmissionStore(t, RoleOrchestrator, 1)
 	defer store.Close()
 	ctx := context.Background()

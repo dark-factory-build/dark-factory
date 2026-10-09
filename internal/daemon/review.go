@@ -26,6 +26,14 @@ import (
 // reviewPR answers once the review operation is durable and runs it in the
 // background: a review outlasts the operator call that requested it.
 func (daemon *Daemon) reviewPR(ctx context.Context, project kernel.ProjectID, request api.ReviewRequest) (string, error) {
+	if strings.HasPrefix(request.RetryOperation, "publish-") {
+		// A refused publication is not retried at its revision; the operator
+		// clears it once the refusal's cause is gone, and the next pass publishes.
+		if cleared, err := daemon.store.ClearPublishFailure(ctx, project, request.RetryOperation); err != nil || !cleared {
+			return "", errors.New("review: publish failure not found")
+		}
+		return request.RetryOperation, nil
+	}
 	op, err := daemon.claimReview(ctx, project, request)
 	if err != nil {
 		return "", err
@@ -85,12 +93,12 @@ func (daemon *Daemon) RecoverReviewOperations(ctx context.Context) (int, error) 
 	return recovered + advanced, err
 }
 
-// reviewStuckAfter separates an interrupted verdict or enqueue write from one
-// a review goroutine is still making: a Maintainer call times out in 30s.
+// reviewStuckAfter separates an interrupted verdict write from one a review
+// goroutine is still making: a Maintainer call times out in 30s.
 const reviewStuckAfter = 2 * time.Minute
 
-// reviewEscalateAfter bounds a silent in-flight write: a verdict or enqueue
-// write that has not advanced for this long is escalated to the overseer once.
+// reviewEscalateAfter bounds a silent in-flight verdict write: one that has
+// not advanced for this long is escalated to the overseer once.
 const reviewEscalateAfter = 30 * time.Minute
 
 // customerMaintainer is true on a GitHub-connected home. Invariant: there is
@@ -135,8 +143,8 @@ func (daemon *Daemon) advanceMergePipeline(ctx context.Context) {
 }
 
 // advanceReviewOperations moves each unfinished review operation one step. It
-// resumes verdict and enqueue writes whose receipts may be lost, observes
-// enqueued heads, and retries task routing until it lands. Startup and the
+// resumes verdict writes whose receipts may be lost, advances allowed heads
+// from their pull request, and retries task routing until it lands. Startup and the
 // poll tick share it; only startup relaunches an interrupted review, and the
 // tick leaves a write younger than reviewStuckAfter to the goroutine making it.
 func (daemon *Daemon) advanceReviewOperations(ctx context.Context, startup bool) (int, error) {
@@ -161,18 +169,14 @@ func (daemon *Daemon) advanceReviewOperations(ctx context.Context, startup bool)
 		case op.State == "enqueued" && daemon.customerMaintainer():
 			var coordinator review.Coordinator
 			if coordinator, err = daemon.reviewCoordinator(ctx, operation.Project, operation.Repository); err == nil {
-				if op, err = coordinator.ObserveMerge(ctx, op); err == nil && op.State == "enqueued" {
+				if op, err = coordinator.Advance(ctx, op); err == nil && op.State == "enqueued" {
 					continue
 				}
 			}
 			if err == nil {
 				err = daemon.finishReviewRouting(ctx, operation.Project, operation.Repository, op)
 			}
-		case op.State == "enqueuing" && operation.Ended:
-			// An enqueue is resent only while its pull request is open at head.
-			op.State, op.UpdatedAt = "closed", daemon.now()
-			err = durableReviewStore{store: daemon.store, project: operation.Project, repository: operation.Repository, now: daemon.now}.Update(ctx, op)
-		case (op.State == "submitting" || op.State == "enqueuing") && stuck:
+		case op.State == "submitting" && stuck:
 			// It keeps resuming, since it may still complete; one whose resume
 			// keeps failing is escalated once, with the last error, not left silent.
 			var resumed review.Operation
@@ -250,7 +254,7 @@ func (daemon *Daemon) resumeReview(ctx context.Context, project kernel.ProjectID
 // owns the published Change. It stays pending, retried each tick, until that
 // task's feedback carries the operation marker at a new work revision; the
 // marker makes a replay idempotent. A head that cannot be routed, more than
-// two repair rounds, or an enqueue the App refused are escalated.
+// two repair rounds are escalated.
 func (daemon *Daemon) finishReviewRouting(ctx context.Context, project kernel.ProjectID, repository string, op review.Operation) error {
 	at, err := daemon.timestamp()
 	if err != nil {
@@ -268,13 +272,7 @@ func (daemon *Daemon) finishReviewRouting(ctx context.Context, project kernel.Pr
 	if !op.RoutePending {
 		return nil
 	}
-	if op.State == "failed" {
-		err = daemon.escalatePull(&op, "the merge queue did not take it: "+op.Detail)
-		op.Handled = true // escalated here: the failed pass must not escalate it again
-	} else {
-		err = daemon.routeSendBack(ctx, project, repository, &op, at)
-	}
-	if err != nil {
+	if err := daemon.routeSendBack(ctx, project, repository, &op, at); err != nil {
 		return err
 	}
 	op.RoutePending, op.UpdatedAt = false, daemon.now()
@@ -311,7 +309,7 @@ func (daemon *Daemon) escalatePull(op *review.Operation, why string) error {
 	if !daemon.customerMaintainer() {
 		return errors.New("escalation waits for the factoryd Maintainer connection")
 	}
-	op.Escalation = fmt.Sprintf("factoryd cannot advance %s#%d at exact head %s: %s", op.Request.Repository, op.Request.PullNumber, op.Request.Head, why)
+	op.Escalate(why)
 	return nil
 }
 
@@ -356,12 +354,11 @@ func (b *daemonReviewBackend) StoredPull(ctx context.Context, pull uint64, head 
 	}
 	var value struct {
 		PullRequests []struct {
-			Number    uint64 `json:"number"`
-			HeadSHA   string `json:"head_sha"`
-			BaseSHA   string `json:"base_sha"`
-			BaseRef   string `json:"base_ref"`
-			Body      string `json:"body"`
-			Mergeable *bool  `json:"mergeable"`
+			Number  uint64 `json:"number"`
+			HeadSHA string `json:"head_sha"`
+			BaseSHA string `json:"base_sha"`
+			BaseRef string `json:"base_ref"`
+			Body    string `json:"body"`
 		} `json:"pull_requests"`
 	}
 	if err := json.Unmarshal(response, &value); err != nil || len(value.PullRequests) != 1 {
@@ -371,7 +368,7 @@ func (b *daemonReviewBackend) StoredPull(ctx context.Context, pull uint64, head 
 	if pullValue.Number != pull || !strings.EqualFold(pullValue.HeadSHA, head) {
 		return review.Request{}, errors.New("review: pull head changed before review")
 	}
-	return review.Request{Repository: b.repository, PullNumber: pull, Head: strings.ToLower(pullValue.HeadSHA), Base: strings.ToLower(pullValue.BaseSHA), BaseRef: pullValue.BaseRef, Body: pullValue.Body, Provider: "codex", Mergeable: pullValue.Mergeable}, nil
+	return review.Request{Repository: b.repository, PullNumber: pull, Head: strings.ToLower(pullValue.HeadSHA), Base: strings.ToLower(pullValue.BaseSHA), BaseRef: pullValue.BaseRef, Body: pullValue.Body, Provider: "codex"}, nil
 }
 
 type durableReviewStore struct {
@@ -393,6 +390,9 @@ func (s durableReviewStore) Create(ctx context.Context, op review.Operation) err
 }
 func (s durableReviewStore) Update(ctx context.Context, op review.Operation) error {
 	return s.write(ctx, op)
+}
+func (s durableReviewStore) Blocked(ctx context.Context, pull uint64, head string) (bool, error) {
+	return s.store.ProductionReviewBlocks(ctx, s.project, s.repository, pull, head)
 }
 func (s durableReviewStore) CreateRetry(ctx context.Context, failed, retry review.Operation) error {
 	at, err := kernel.NewUnixMillis(s.now().UnixMilli())
@@ -497,7 +497,14 @@ func (b *daemonReviewBackend) Review(ctx context.Context, checkout string, reque
 			command = exec.CommandContext(ctx, tool, "-p", prompt, "--permission-mode", "plan", "--safe-mode", "--restricted", "--setting-sources", "", "--strict-mcp-config", "--tools", "Read,Grep,Glob", "--allowedTools", "Read,Grep,Glob")
 			environment = append(environment, claudeLogin(home))
 		} else {
-			command = exec.CommandContext(ctx, tool, "exec", "--disable", "computer_use", "--disable", "browser_use", "--disable", "plugins", "--ephemeral", "--ignore-user-config", "--strict-config", "-c", "approval_policy={ granular={sandbox_approval=false,rules=false,mcp_elicitations=false,request_permissions=false,skill_approval=false}}", "--sandbox", "read-only", "--ignore-rules", "--skip-git-repo-check", prompt)
+			command = exec.CommandContext(ctx, tool, "exec", "--disable", "computer_use", "--disable", "browser_use", "--disable", "plugins", "--ephemeral", "--ignore-user-config", "--strict-config", "-c", "approval_policy={ granular={sandbox_approval=false,rules=false,mcp_elicitations=false,request_permissions=false,skill_approval=false}}", "--ignore-rules", "--skip-git-repo-check")
+			// Git in the checkout reads the registered repository's objects
+			// through the alternates file ReviewCheckout wrote.
+			readable := []string{checkout}
+			if alternates, err := os.ReadFile(filepath.Join(checkout, ".git", "objects", "info", "alternates")); err == nil {
+				readable = append(readable, strings.Split(strings.TrimSpace(string(alternates)), "\n")...)
+			}
+			command.Args = append(append(command.Args, provider.CodexReadOnly(readable...)...), prompt)
 			environment = append(environment, "CODEX_HOME="+home)
 		}
 		// The CLI finds its keychain login under $USER (#1107).
@@ -514,7 +521,11 @@ func (b *daemonReviewBackend) Review(ctx context.Context, checkout string, reque
 		// streams its transcript and token count to stderr.
 		var stdout, stderr strings.Builder
 		command.Stdout, command.Stderr = &stdout, &stderr
+		launched := time.Now()
 		err := command.Run()
+		// A non-zero exit ran; only a process that never started is a failed launch.
+		var exited *exec.ExitError
+		b.daemon.observe("client", map[string]string{}, map[string]string{"process.executable.name": filepath.Base(tool)}, err != nil && !errors.As(err, &exited), time.Since(launched))
 		output := []byte(stdout.String() + stderr.String())
 		if ctx.Err() != nil {
 			return review.Verdict{}, fmt.Errorf("review: provider deadline: %w", ctx.Err())
@@ -671,14 +682,6 @@ func (b *daemonReviewBackend) Observe(ctx context.Context, operationID string) (
 		default:
 			return review.Receipt{}, errors.New("review: Maintainer returned an invalid review verdict")
 		}
-	case "enqueue_pull_request":
-		var result struct {
-			Head string `json:"head_sha"`
-		}
-		if err := json.Unmarshal(observation.Result, &result); err != nil {
-			return review.Receipt{}, errors.New("review: Maintainer returned an invalid enqueue receipt")
-		}
-		receipt.Head = strings.ToLower(result.Head)
 	default:
 		return review.Receipt{}, errors.New("review: Maintainer returned an invalid operation kind")
 	}
@@ -686,7 +689,7 @@ func (b *daemonReviewBackend) Observe(ctx context.Context, operationID string) (
 }
 
 func (b *daemonReviewBackend) Enqueue(ctx context.Context, operation review.Operation) error {
-	return b.call(ctx, "enqueue_pull_request", map[string]any{"repository": b.repository, "pull_number": operation.Request.PullNumber, "head_sha": operation.Request.Head, "base": operation.Request.BaseRef, "operation_id": operation.EnqueueID, "reviewed_body_digest": reviewedBodyDigest(operation)})
+	return b.call(ctx, "enqueue_pull_request", map[string]any{"repository": b.repository, "pull_number": operation.Request.PullNumber, "head_sha": operation.Request.Head, "base": operation.Request.BaseRef, "reviewed_body_digest": reviewedBodyDigest(operation)})
 }
 
 func reviewedBodyDigest(operation review.Operation) string {
@@ -694,69 +697,81 @@ func reviewedBodyDigest(operation review.Operation) string {
 	return "sha256:" + hex.EncodeToString(digest[:])
 }
 
-func (b *daemonReviewBackend) ObserveMerge(ctx context.Context, operation review.Operation) (review.Merge, error) {
-	response, err := b.callResponse(ctx, "observe_pull_request_merge", map[string]any{"repository": b.repository, "enqueue_operation_id": operation.EnqueueID, "pull_number": operation.Request.PullNumber, "head_sha": operation.Request.Head, "base": operation.Request.BaseRef, "reviewed_body_digest": reviewedBodyDigest(operation)})
+// ObservePull reads the pull request, then, only while it is open at the
+// operation's head and not conflicting, its merge-queue entry and, when it is
+// not queued, its required checks and newest merge-group run.
+func (b *daemonReviewBackend) ObservePull(ctx context.Context, operation review.Operation) (review.Pull, error) {
+	request := operation.Request
+	response, err := b.callResponse(ctx, "list_pull_requests", map[string]any{"repository": b.repository, "page": 1, "per_page": 1, "pull_number": request.PullNumber})
 	if err != nil {
-		// The receipt only exists for our own enqueue; a pull queued or merged
-		// by anyone else still settles from the pull request itself.
-		pull, pullErr := b.callResponse(ctx, "list_pull_requests", map[string]any{"repository": b.repository, "page": 1, "per_page": 1, "pull_number": operation.Request.PullNumber})
-		if pullErr != nil {
-			return review.Merge{}, errors.Join(err, pullErr)
-		}
-		return mergeFromPull(pull, operation, err)
+		return review.Pull{}, err
 	}
+	var page struct {
+		PullRequests []struct {
+			Number    uint64 `json:"number"`
+			HeadSHA   string `json:"head_sha"`
+			State     string `json:"state"`
+			Mergeable *bool  `json:"mergeable"`
+		} `json:"pull_requests"`
+	}
+	if json.Unmarshal(response, &page) != nil || len(page.PullRequests) != 1 || page.PullRequests[0].Number != request.PullNumber || !review.HeadRE.MatchString(page.PullRequests[0].HeadSHA) {
+		return review.Pull{}, errors.New("review: Maintainer returned an invalid pull request")
+	}
+	value := page.PullRequests[0]
+	pull := review.Pull{Head: value.HeadSHA, State: value.State, Mergeable: value.Mergeable}
+	if pull.Head != request.Head || pull.State != "open" || (pull.Mergeable != nil && !*pull.Mergeable) {
+		return pull, nil
+	}
+	response, err = b.callResponse(ctx, "observe_pull_request_merge", map[string]any{"repository": b.repository, "pull_number": request.PullNumber, "head_sha": request.Head, "base": request.BaseRef})
 	var merge struct {
 		Head  string           `json:"head_sha"`
 		State string           `json:"state"`
-		Pull  string           `json:"pull_state"`
 		Group *review.GroupRun `json:"merge_group"`
 	}
-	if json.Unmarshal(response, &merge) != nil || merge.Head != operation.Request.Head {
-		return review.Merge{}, errors.New("review: Maintainer returned an invalid merge observation")
+	if err != nil || json.Unmarshal(response, &merge) != nil || merge.Head != request.Head {
+		return review.Pull{}, errors.Join(err, errors.New("review: Maintainer returned an invalid merge observation"))
 	}
-	result := review.Merge{State: merge.State, Open: merge.Pull == "open", Group: merge.Group}
-	if merge.State != "NOT_QUEUED" || !result.Open {
-		return result, nil
+	switch merge.State {
+	case "ACTIVE_QUEUE":
+		pull.Queued = true
+		return pull, nil
+	case "MERGED":
+		pull.State = "merged"
+		return pull, nil
 	}
-	response, err = b.callResponse(ctx, "observe_pull_request_checks", map[string]any{"repository": b.repository, "pull_number": operation.Request.PullNumber, "head_sha": operation.Request.Head})
+	pull.Group = merge.Group
+	response, err = b.callResponse(ctx, "observe_pull_request_checks", map[string]any{"repository": b.repository, "pull_number": request.PullNumber, "head_sha": request.Head})
+	if err != nil {
+		return review.Pull{}, err
+	}
+	pull.Failing, pull.Pending, err = requiredChecks(response)
+	return pull, err
+}
+
+// requiredChecks reads the failing and unfinished checks the base branch's
+// rules require. An optional check that fails or never finishes decides
+// nothing: it cannot block the merge.
+func requiredChecks(response json.RawMessage) (failing []string, pending bool, err error) {
 	var checks struct {
 		Checks []struct {
 			Name       string  `json:"name"`
 			Conclusion *string `json:"conclusion"`
+			Required   bool    `json:"required"`
 		} `json:"checks"`
 	}
-	if err != nil || json.Unmarshal(response, &checks) != nil {
-		return review.Merge{}, errors.Join(err, errors.New("review: Maintainer returned invalid checks"))
+	if json.Unmarshal(response, &checks) != nil {
+		return nil, false, errors.New("review: Maintainer returned invalid checks")
 	}
 	for _, check := range checks.Checks {
-		if check.Conclusion != nil && *check.Conclusion != "success" && *check.Conclusion != "neutral" && *check.Conclusion != "skipped" {
-			result.Failing = append(result.Failing, check.Name)
+		switch {
+		case !check.Required:
+		case check.Conclusion == nil:
+			pending = true
+		case *check.Conclusion != "success" && *check.Conclusion != "neutral" && *check.Conclusion != "skipped":
+			failing = append(failing, check.Name)
 		}
 	}
-	return result, nil
-}
-
-// mergeFromPull settles an enqueued operation from a pull request read when
-// the merge receipt cannot: merged or closed ends it, open stays enqueued.
-func mergeFromPull(response json.RawMessage, operation review.Operation, cause error) (review.Merge, error) {
-	var value struct {
-		PullRequests []struct {
-			HeadSHA string `json:"head_sha"`
-			State   string `json:"state"`
-		} `json:"pull_requests"`
-	}
-	if json.Unmarshal(response, &value) != nil || len(value.PullRequests) != 1 || !strings.EqualFold(value.PullRequests[0].HeadSHA, operation.Request.Head) {
-		return review.Merge{}, cause
-	}
-	switch value.PullRequests[0].State {
-	case "merged":
-		return review.Merge{State: "MERGED_AFTER_ENQUEUE_ATTEMPT"}, nil
-	case "closed":
-		return review.Merge{State: "NOT_QUEUED"}, nil
-	case "open":
-		return review.Merge{State: "ACTIVE_QUEUE", Open: true}, nil
-	}
-	return review.Merge{}, cause
+	return failing, pending, nil
 }
 
 func (b *daemonReviewBackend) call(ctx context.Context, name string, arguments map[string]any) error {
@@ -799,9 +814,6 @@ func reviewResponseStructuredContent(request maintainerRequest, response json.Ra
 		reason := ""
 		if len(value.Result.Content) > 0 {
 			reason = ": " + strings.ToValidUTF8(value.Result.Content[0].Text[:min(len(value.Result.Content[0].Text), 300)], "")
-		}
-		if strings.HasPrefix(reason, ": conflict") || strings.HasPrefix(reason, ": refused") {
-			return nil, fmt.Errorf("%w%s", review.ErrRejected, reason)
 		}
 		return nil, errors.New("review: Maintainer rejected operation" + reason)
 	}

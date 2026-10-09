@@ -102,6 +102,18 @@ export async function nodeIdForKey(publicKey: Uint8Array): Promise<string> {
 	return encodeBase32Lower(digest.subarray(0, 20));
 }
 
+/**
+ * Public id: the node id's shape over SHA-256('dark-factory-relay/public\n' ‖
+ * node public key). A reader holding it cannot recover the node id, and only
+ * the host that proved this key can publish under it.
+ */
+export async function publicIdForKey(publicKey: Uint8Array): Promise<string> {
+	const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', concatBytes(utf8(PUBLIC_DOMAIN), publicKey)));
+	return encodeBase32Lower(digest.subarray(0, 20));
+}
+
+export const PUBLIC_DOMAIN = 'dark-factory-relay/public\n';
+
 export function withinSkew(issued: number, nowSeconds: number): boolean {
 	return Math.abs(issued - nowSeconds) <= SKEW_SECONDS;
 }

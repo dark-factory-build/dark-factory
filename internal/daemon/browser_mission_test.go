@@ -109,7 +109,7 @@ func TestBrowserMissionRoundTripAndProjectAuthority(t *testing.T) {
 	if frame.Type != browserprotocol.TypeError {
 		t.Fatalf("cross-project mission read = %+v", frame)
 	}
-	if _, err := f.backend.ProjectContent(ctx, rawBrowserClient(f.client.ID), browserprotocol.ProjectContent{Operation: "mission_tasks", Input: []byte(`{"project_id":"` + projectID.String() + `","id":"` + missionID.String() + `","limit":9}`)}); !errors.Is(err, browser.ErrInvalidRequest) {
+	if _, err := f.backend.ProjectContent(ctx, rawBrowserClient(f.client.ID), browserprotocol.ProjectContent{Operation: "mission_tasks", Input: []byte(`{"project_id":"` + projectID.String() + `","id":"` + missionID.String() + `","limit":9}`)}); !errors.Is(mapBrowserError(err), browser.ErrInvalidRequest) {
 		t.Fatalf("mission task limit = %v", err)
 	}
 }

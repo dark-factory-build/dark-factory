@@ -64,7 +64,7 @@ func knownClient(name string, table []knownClientEntry) *knownClientEntry {
 	return nil
 }
 
-func (run *inference) client(entry knownClientEntry, found owner, at Location, detail string) {
+func (run *inference) client(entry knownClientEntry, found owner, at Location, source, detail string) {
 	label := entry.system
 	edge := Uses
 	if entry.kind == External {
@@ -80,5 +80,5 @@ func (run *inference) client(entry knownClientEntry, found owner, at Location, d
 	selector := map[Kind]string{Store: "db.system.name", Queue: "messaging.system", External: "peer.service"}[entry.kind]
 	run.find(finding{owner: found, kind: entry.kind, key: key, label: label, shared: entry.shared, edge: edge,
 		selectors: map[string]string{selector: entry.system},
-		evidence:  static("manifest", detail, Inferred), at: at})
+		evidence:  static(source, detail, Inferred), at: at})
 }

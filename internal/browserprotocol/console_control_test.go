@@ -65,12 +65,8 @@ func TestConsoleControlBounds(t *testing.T) {
 		t.Fatalf("graph refused: %v", err)
 	}
 	for _, bad := range []string{
-		strings.Replace(good, `"kind":"ingress"`, `"kind":"room"`, 1),
 		strings.Replace(good, `"id":"`+node+`"`, `"id":"a1"`, 1),
 		strings.Replace(good, `"label":"GET /x"`, `"label":""`, 1),
-		// Idle is only ever a claim a covering source can make.
-		strings.Replace(good, `"observation":"quiet"`, `"observation":"unobserved"`, 1),
-		strings.Replace(good, `"state":"idle"`, `"state":"asleep"`, 1),
 		strings.Replace(good, `"paths":["a.go"],`, ``, 1),
 		strings.Replace(good, `"label"`, `"unit":"`+strings.Repeat("cd", 16)+`","label"`, 1),
 	} {
@@ -129,6 +125,10 @@ func TestRunPathsBounds(t *testing.T) {
 		runPaths(run, `""`),
 		runPaths(run, strings.Join(rooms, ",")),
 		`{"type":"RUN_PATHS","id":"x","body":{"agent_id":"` + agent + `","run_id":"` + run + `","paths":null}}`,
+		// Telemetry belongs to a run and stays within JSON's exact integers.
+		`{"type":"RUN_PATHS","id":"x","body":{"agent_id":"` + agent + `","run_id":"","paths":[],"telemetry":{"tokens_in":1,"tokens_out":0,"cost_micro_usd":0,"tool_calls":0,"api_requests":0}}}`,
+		`{"type":"RUN_PATHS","id":"x","body":{"agent_id":"` + agent + `","run_id":"` + run + `","paths":[],"telemetry":{"tokens_in":9007199254740992,"tokens_out":0,"cost_micro_usd":0,"tool_calls":0,"api_requests":0}}}`,
+		`{"type":"RUN_PATHS","id":"x","body":{"agent_id":"` + agent + `","run_id":"` + run + `","paths":[],"telemetry":{"tokens_in":-1,"tokens_out":0,"cost_micro_usd":0,"tool_calls":0,"api_requests":0}}}`,
 	} {
 		if _, err := DecodeServerControl([]byte(frame)); err != ErrMalformed {
 			t.Fatalf("%s accepted: %v", frame, err)

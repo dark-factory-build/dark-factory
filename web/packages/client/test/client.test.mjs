@@ -460,6 +460,9 @@ test("private issue controls have exact action shapes and bounded controller sta
   assert.equal(decoded.body.imported_tasks[0], task);
   const invalid = { ...result, body: { ...result.body, sources: [{ ...result.body.sources[0], sync: { ...result.body.sources[0].sync, state: "mystery" } }] } };
   expectMalformed(() => decodeServerControl(JSON.stringify(invalid)));
+  const waiting = { ...result, body: { ...result.body, sources: [{ ...result.body.sources[0], sync: { ...result.body.sources[0].sync, waiting: [{ ...result.body.candidates[0], body: "" }] } }] } };
+  assert.equal(decodeServerControl(JSON.stringify(waiting)).body.sources[0].sync.waiting[0].number, 17n);
+  expectMalformed(() => decodeServerControl(JSON.stringify({ ...waiting, body: { ...waiting.body, sources: [{ ...waiting.body.sources[0], sync: { ...waiting.body.sources[0].sync, waiting: [{ number: "17" }] } }] } })));
 });
 
 test("Linear shares intake controls without a fabricated GitHub identity or key in replies", () => {

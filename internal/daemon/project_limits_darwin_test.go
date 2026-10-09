@@ -56,7 +56,7 @@ func TestRunLimitWatchdogTerminatesOwnedProvider(t *testing.T) {
 	case <-time.After(12 * time.Second):
 		t.Fatal("watchdog did not terminate owned provider")
 	}
-	if result.err != nil || result.run.Phase != kernel.RunTerminal || result.run.Proposal == nil || result.run.Proposal.Kind() != kernel.OutcomeCancelled || result.run.Proposal.Detail() != runLimitDetail {
+	if result.err != nil || result.run.Phase != kernel.RunTerminal || result.run.Proposal == nil || result.run.Proposal.Kind() != kernel.OutcomeCancelled || result.run.Proposal.Detail() != kernel.RunLimitDetail {
 		t.Fatalf("watchdog run = %+v, err=%v", result.run, result.err)
 	}
 	fixture.assertReleased(t, result.run)

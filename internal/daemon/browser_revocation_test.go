@@ -169,7 +169,7 @@ func TestBrowserRevocationLinearizesTerminalTargetResolution(t *testing.T) {
 			t.Fatalf("target race result = %+v", target.result)
 		}
 	}
-	if _, err := fixture.backend.TerminalTarget(context.Background(), rawBrowserClient(fixture.client.ID), request); !errors.Is(err, browser.ErrUnauthorized) {
+	if _, err := fixture.backend.TerminalTarget(context.Background(), rawBrowserClient(fixture.client.ID), request); !errors.Is(mapBrowserError(err), browser.ErrUnauthorized) {
 		t.Fatalf("post-revocation target = %v, want unauthorized", err)
 	}
 	adapterAssertSocketClosed(t, connection)
@@ -208,7 +208,7 @@ func TestBrowserRevocationReportsCleanupFailureAfterDurableCommit(t *testing.T) 
 	<-backend.started
 
 	committed, err := fixture.daemon.RevokeBrowserClient(context.Background(), fixture.client.ID, fixture.client.Revision)
-	if !errors.Is(err, ErrBrowserClientCleanup) || !errors.Is(err, browser.ErrSubscriptionUnresolved) || committed.RevokedAt == nil {
+	if !errors.Is(err, ErrBrowserClientCleanup) || !errors.Is(mapBrowserError(err), browser.ErrSubscriptionUnresolved) || committed.RevokedAt == nil {
 		t.Fatalf("cleanup result = %+v, %v", committed, err)
 	}
 	stored, found, readErr := fixture.store.BrowserClient(context.Background(), fixture.client.ID)

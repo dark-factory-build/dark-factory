@@ -2,15 +2,31 @@
 set -eu
 
 script_dir=$(CDPATH= cd -- "$(/usr/bin/dirname "$0")" && pwd -P)
-[ "$#" -le 1 ] || { echo "usage: scripts/local-ci.sh [--full|--runtime|--release|--ui]" >&2; exit 2; }
+[ "$#" -le 2 ] || { echo "usage: scripts/local-ci.sh [--full|--runtime|--release|--ui|--warm] [daemon|packages|source] | --affected [BASE]" >&2; exit 2; }
 case "${1-}" in
     '') local_ci_mode=full ;;
     --full) local_ci_mode=full ;;
     --runtime) local_ci_mode=runtime ;;
     --release) local_ci_mode=release ;;
     --ui) local_ci_mode=ui ;;
-    *) echo "usage: scripts/local-ci.sh [--full|--runtime|--release|--ui]" >&2; exit 2 ;;
+    --warm) local_ci_mode=warm ;;
+    --affected) local_ci_mode=affected ;;
+    *) echo "usage: scripts/local-ci.sh [--full|--runtime|--release|--ui|--warm] [daemon|packages|source] | --affected [BASE]" >&2; exit 2 ;;
 esac
+# CI splits the full and runtime gates across parallel Macs. A shard runs one
+# part of go-ci-owned.sh; "source" also runs everything outside it. No shard
+# runs everything, as before.
+local_ci_shard=${2-}
+affected_base=
+if [ "$local_ci_mode" = affected ]; then
+    affected_base=$local_ci_shard
+    local_ci_shard=
+fi
+case "$local_ci_shard" in
+    ''|daemon|packages|source) ;;
+    *) echo "usage: scripts/local-ci.sh [--full|--runtime|--release|--ui|--warm] [daemon|packages|source] | --affected [BASE]" >&2; exit 2 ;;
+esac
+in_source_shard() { [ "$local_ci_shard" != daemon ] && [ "$local_ci_shard" != packages ]; }
 # Refuse outside Git before creating cache state; inherited Git locators must
 # not turn another repository into the target of this preflight.
 /usr/bin/env -i PATH=/usr/bin:/bin HOME=/dev/null TMPDIR=/tmp \
@@ -25,7 +41,32 @@ export DARK_FACTORY_LOCAL_CI=1
 
 if { [ "$local_ci_mode" = full ] || [ "$local_ci_mode" = release ]; } \
     && [ "${DARK_FACTORY_LOCAL_CI_LEASE_HELD-}" != 1 ]; then
-    exec "$script_dir/with-local-ci-lease.sh" "$script_dir/local-ci.sh" "--$local_ci_mode"
+    exec "$script_dir/with-local-ci-lease.sh" "$script_dir/local-ci.sh" "--$local_ci_mode" ${local_ci_shard:+"$local_ci_shard"}
+fi
+
+# CI's push-to-main job fills the compiler and package caches that merge
+# queue runs restore: everything the source gate builds, plus test binaries.
+if [ "$local_ci_mode" = warm ]; then
+    ./scripts/go-check.sh
+    # The binaries land in the unsaved cache/ child; only their compiled
+    # packages in go-build matter.
+    GOTOOLCHAIN=local "$DF_CI_GO" test -c -o "$XDG_CACHE_HOME/warm-test-binaries/" ./...
+    echo "local-ci: PASS (warm)"
+    exit 0
+fi
+
+# A pull request's own check (and a worker's pre-publish check): the source
+# gate, then only the process tests that depend on what changed since BASE.
+if [ "$local_ci_mode" = affected ]; then
+    affected_base=$(git rev-parse --verify "${affected_base:-$(git merge-base origin/main HEAD)}^{commit}")
+    ./scripts/go-check.sh
+    if [ "${DARK_FACTORY_LOCAL_CI_LEASE_HELD-}" = 1 ]; then
+        /bin/sh "$script_dir/go-ci-owned.sh" --client-built --affected "$affected_base"
+    else
+        "$script_dir/with-local-ci-lease.sh" /bin/sh "$script_dir/go-ci-owned.sh" --client-built --affected "$affected_base"
+    fi
+    echo "local-ci: PASS (affected since $affected_base)"
+    exit 0
 fi
 
 if [ "$local_ci_mode" = ui ]; then
@@ -40,10 +81,11 @@ if [ "$local_ci_mode" = ui ]; then
     exit 0
 fi
 
-if [ "$local_ci_mode" = full ]; then
+if [ "$local_ci_mode" = full ] && in_source_shard; then
     echo "local-ci: repository contract fixtures"
     ./scripts/check-toolchain-pins.sh
     ./scripts/test-local-ci-environment.sh
+    ./scripts/test-with-local-ci-lease.sh
     ./scripts/test-new-worktree.sh
     ./scripts/test-publication-parents.sh
     python3 ./scripts/test-factory-browser.py
@@ -54,24 +96,31 @@ if [ "$local_ci_mode" = full ]; then
 fi
 
 if [ "$local_ci_mode" = full ] || [ "$local_ci_mode" = runtime ]; then
-    echo "local-ci: ordinary source gate"
-    ./scripts/go-check.sh
+    if in_source_shard; then
+        echo "local-ci: ordinary source gate"
+        ./scripts/go-check.sh
+    fi
 
     echo "local-ci: process-sensitive gate"
-    ./scripts/test-go-e2e-tools.sh
+    if in_source_shard; then
+        ./scripts/test-go-e2e-tools.sh
+    fi
     if [ "${DARK_FACTORY_LOCAL_CI_LEASE_HELD-}" = 1 ]; then
-        /bin/sh "$script_dir/go-ci-owned.sh" --client-built
+        /bin/sh "$script_dir/go-ci-owned.sh" --client-built ${local_ci_shard:+"$local_ci_shard"}
     else
-        "$script_dir/with-local-ci-lease.sh" /bin/sh "$script_dir/go-ci-owned.sh" --client-built
+        "$script_dir/with-local-ci-lease.sh" /bin/sh "$script_dir/go-ci-owned.sh" --client-built ${local_ci_shard:+"$local_ci_shard"}
     fi
 fi
 
-if [ "$local_ci_mode" = full ] || [ "$local_ci_mode" = release ]; then
+if { [ "$local_ci_mode" = full ] || [ "$local_ci_mode" = release ]; } && in_source_shard; then
     echo "local-ci: release gate"
     if [ "$local_ci_mode" = release ]; then
         ./scripts/go-check.sh
     fi
     ./scripts/test-prepare-release-source.sh
-    GOTOOLCHAIN=local "$DF_CI_GO" test -count=1 ./internal/buildinfo/...
+    # The full gate already tests buildinfo in the process-sensitive packages.
+    if [ "$local_ci_mode" = release ]; then
+        GOTOOLCHAIN=local "$DF_CI_GO" test -count=1 ./internal/buildinfo/...
+    fi
 fi
-echo "local-ci: PASS ($local_ci_mode)"
+echo "local-ci: PASS ($local_ci_mode${local_ci_shard:+ $local_ci_shard})"

@@ -2,11 +2,13 @@ package buildinfo
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -14,7 +16,8 @@ const fixtureSource = "1234567890abcdef1234567890abcdef12345678"
 
 func TestReleaseArtifactInspectionRejectsWrongIdentityAndArchitecture(t *testing.T) {
 	directory := t.TempDir()
-	arm, armIdentity := buildFixture(t, directory, "factoryctl-arm", "factoryctl", "1.2.3", fixtureSource, "darwin/arm64", "")
+	t.Parallel()
+	arm, armIdentity := buildFixture(t, filepath.Join(directory, "arm"), "factoryctl", "darwin/arm64")
 	file, err := os.Open(arm)
 	if err != nil {
 		t.Fatal(err)
@@ -35,13 +38,15 @@ func TestReleaseArtifactInspectionRejectsWrongIdentityAndArchitecture(t *testing
 	assertArtifactRejected(t, arm, "factoryd", armIdentity, "wrong Go main package")
 
 	badReceipt := strings.Join([]string{"1.2.3", fixtureSource, "darwin/arm64", strings.Repeat("a", 64)}, "|")
-	bad, _ := buildFixture(t, directory, "factoryctl-bad", "factoryctl", "1.2.3", fixtureSource, "darwin/arm64", badReceipt)
+	bad, _ := buildFixture(t, filepath.Join(directory, "bad"), "factoryctl", "darwin/arm64")
+	relinkFixture(t, bad, armIdentity.Receipt(), badReceipt)
 	assertArtifactRejected(t, bad, "factoryctl", armIdentity, "linked receipt")
 }
 
 func TestSnapshotUsesOpenedObjectWhenSourcePathIsReplaced(t *testing.T) {
 	directory := t.TempDir()
-	source, identity := buildFixture(t, directory, "factoryctl", "factoryctl", "1.2.3", fixtureSource, "darwin/arm64", "")
+	t.Parallel()
+	source, identity := buildFixture(t, directory, "factoryctl", "darwin/arm64")
 	original := filepath.Join(directory, "opened-factoryctl")
 	replacement := filepath.Join(directory, "replacement-factoryctl")
 	if err := os.Rename(source, original); err != nil {
@@ -111,28 +116,78 @@ func TestArchiveBoundsAreClosed(t *testing.T) {
 	}
 }
 
-func buildFixture(t *testing.T, directory, output, component, version, source, target, linkedReceipt string) (string, Identity) {
+// fixtureRoot holds one real release build per target, shared by every test
+// in the package; TestMain removes it.
+var fixtureRoot string
+
+var fixtureBuilds = map[string]func() (string, error){
+	"darwin/arm64": sync.OnceValues(func() (string, error) { return buildTarget("darwin/arm64") }),
+	"darwin/amd64": sync.OnceValues(func() (string, error) { return buildTarget("darwin/amd64") }),
+}
+
+func TestMain(m *testing.M) {
+	root, err := os.MkdirTemp("", "buildinfo-fixtures-")
+	if err != nil {
+		panic(err)
+	}
+	fixtureRoot = root
+	code := m.Run()
+	os.RemoveAll(root)
+	os.Exit(code)
+}
+
+// buildTarget links the three release binaries for target as release 1.2.3
+// of fixtureSource, in one go build so the packages compile in parallel.
+func buildTarget(target string) (string, error) {
+	identity, _ := Expected("1.2.3", fixtureSource, target)
+	architecture := strings.TrimPrefix(target, "darwin/")
+	directory := filepath.Join(fixtureRoot, architecture)
+	command := exec.Command("go", "build", "-trimpath", "-buildvcs=false", "-ldflags", "-s -w -X github.com/dark-factory-build/dark-factory/internal/buildinfo.receipt="+identity.Receipt(), "-o", directory+"/", "../../cmd/factoryd", "../../cmd/factory-runner", "../../cmd/factoryctl")
+	command.Env = append(os.Environ(), "CGO_ENABLED=0", "GOOS=darwin", "GOARCH="+architecture, "GOENV=off", "GOAUTH=off", "GOTOOLCHAIN=local")
+	if output, err := command.CombinedOutput(); err != nil {
+		return "", fmt.Errorf("build %s fixtures: %v\n%s", target, err, output)
+	}
+	return directory, nil
+}
+
+// buildFixture copies the shared release 1.2.3 build of component for target
+// into directory, so a test may rename, retime, or relink its own copy.
+func buildFixture(t *testing.T, directory, component, target string) (string, Identity) {
 	t.Helper()
-	identity, ok := Expected(version, source, target)
+	identity, ok := Expected("1.2.3", fixtureSource, target)
 	if !ok {
 		t.Fatal("invalid fixture identity")
 	}
-	if linkedReceipt == "" {
-		linkedReceipt = identity.Receipt()
+	built, err := fixtureBuilds[target]()
+	if err != nil {
+		t.Fatal(err)
 	}
-	architecture := strings.TrimPrefix(target, "darwin/")
-	path := filepath.Join(directory, output)
-	command := exec.Command("go", "build", "-trimpath", "-buildvcs=false", "-ldflags", "-s -w -X github.com/dark-factory-build/dark-factory/internal/buildinfo.receipt="+linkedReceipt, "-o", path, "../../cmd/"+component)
-	command.Env = append(os.Environ(), "CGO_ENABLED=0", "GOOS=darwin", "GOARCH="+architecture, "GOENV=off", "GOAUTH=off", "GOTOOLCHAIN=local")
-	if output, err := command.CombinedOutput(); err != nil {
-		t.Fatalf("build fixture: %v\n%s", err, output)
+	if err := os.MkdirAll(directory, 0o755); err != nil {
+		t.Fatal(err)
 	}
-	// The linker honors the caller's umask; the artifact contract demands
+	path := filepath.Join(directory, component)
+	if err := os.WriteFile(path, readFile(t, filepath.Join(built, component)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// WriteFile honors the caller's umask; the artifact contract demands
 	// exactly 0755, so pin it instead of assuming an 022 environment.
 	if err := os.Chmod(path, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	return path, identity
+}
+
+// relinkFixture swaps the one linked receipt in a copied binary for another
+// of the same length, as a rebuild with a different -X would, without one.
+func relinkFixture(t *testing.T, path, from, to string) {
+	t.Helper()
+	content := readFile(t, path)
+	if len(from) != len(to) || bytes.Count(content, []byte(from)) != 1 {
+		t.Fatal("fixture does not carry its receipt exactly once")
+	}
+	if err := os.WriteFile(path, bytes.Replace(content, []byte(from), []byte(to), 1), 0o755); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func assertArtifactRejected(t *testing.T, path, component string, identity Identity, reason string) {

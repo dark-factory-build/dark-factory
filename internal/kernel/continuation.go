@@ -183,26 +183,8 @@ func (store *Store) yieldContinuationOnConnection(ctx context.Context, tx *write
 	if found {
 		return existing, nil
 	}
-	var raw [IDBytes]byte
-	if _, err := rand.Read(raw[:]); err != nil || raw == ([IDBytes]byte{}) {
-		if err == nil {
-			err = fmt.Errorf("%w: generated zero continuation identifier", ErrCorruptState)
-		}
-		return Continuation{}, tx.Rollback(err)
-	}
-	id, err := ContinuationIDFromBytes(raw[:])
+	id, err := insertWaitingContinuation(ctx, tx.connection, task, kind, conditionID, conditionRevision, at)
 	if err != nil {
-		return Continuation{}, tx.Rollback(err)
-	}
-	contextDigest := sha256.Sum256([]byte(fmt.Sprintf("%s:%d", task.ID.String(), task.WorkRevision.Int64())))
-	spec := NewContinuation{ID: id, ProjectID: task.ProjectID, TaskID: task.ID, TaskIncarnationID: task.IncarnationID, WorkRevision: task.WorkRevision, ContextDigest: contextDigest, ConditionKind: kind, ConditionID: conditionID, ConditionRevision: conditionRevision}
-	if err := validateContinuationSpec(spec); err != nil {
-		return Continuation{}, tx.Rollback(err)
-	}
-	if _, err := tx.connection.ExecContext(ctx, `INSERT INTO continuations(id, project_id, task_id, task_incarnation_id, work_revision, context_digest, condition_kind, condition_id, condition_revision, state, revision, created_at_ms, updated_at_ms) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, 'waiting', 1, ?, ?)`, id.Bytes(), task.ProjectID.Bytes(), task.ID.Bytes(), task.IncarnationID.Bytes(), task.WorkRevision.Int64(), contextDigest[:], string(kind), conditionID.Bytes(), conditionRevision.Int64(), at.Int64(), at.Int64()); err != nil {
-		return Continuation{}, tx.Rollback(err)
-	}
-	if err := appendInvalidations(ctx, tx.connection, at, []pendingInvalidation{{kind: EntityContinuation, id: id.Bytes(), revision: 1}}); err != nil {
 		return Continuation{}, tx.Rollback(err)
 	}
 	proposal, err := NewCancelledProposal("yielded awaiting " + string(kind))
@@ -220,6 +202,31 @@ func (store *Store) yieldContinuationOnConnection(ctx context.Context, tx *write
 		return Continuation{}, tx.Rollback(err)
 	}
 	return value, nil
+}
+
+// insertWaitingContinuation records that task's current work revision waits
+// on condition.
+func insertWaitingContinuation(ctx context.Context, connection *sql.Conn, task Task, kind ContinuationCondition, conditionID ContinuationConditionID, conditionRevision Revision, at UnixMillis) (ContinuationID, error) {
+	var raw [IDBytes]byte
+	if _, err := rand.Read(raw[:]); err != nil || raw == ([IDBytes]byte{}) {
+		if err == nil {
+			err = fmt.Errorf("%w: generated zero continuation identifier", ErrCorruptState)
+		}
+		return ContinuationID{}, err
+	}
+	id, err := ContinuationIDFromBytes(raw[:])
+	if err != nil {
+		return ContinuationID{}, err
+	}
+	contextDigest := sha256.Sum256([]byte(fmt.Sprintf("%s:%d", task.ID.String(), task.WorkRevision.Int64())))
+	spec := NewContinuation{ID: id, ProjectID: task.ProjectID, TaskID: task.ID, TaskIncarnationID: task.IncarnationID, WorkRevision: task.WorkRevision, ContextDigest: contextDigest, ConditionKind: kind, ConditionID: conditionID, ConditionRevision: conditionRevision}
+	if err := validateContinuationSpec(spec); err != nil {
+		return ContinuationID{}, err
+	}
+	if _, err := connection.ExecContext(ctx, `INSERT INTO continuations(id, project_id, task_id, task_incarnation_id, work_revision, context_digest, condition_kind, condition_id, condition_revision, state, revision, created_at_ms, updated_at_ms) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, 'waiting', 1, ?, ?)`, id.Bytes(), task.ProjectID.Bytes(), task.ID.Bytes(), task.IncarnationID.Bytes(), task.WorkRevision.Int64(), contextDigest[:], string(kind), conditionID.Bytes(), conditionRevision.Int64(), at.Int64(), at.Int64()); err != nil {
+		return ContinuationID{}, err
+	}
+	return id, appendInvalidations(ctx, connection, at, []pendingInvalidation{{kind: EntityContinuation, id: id.Bytes(), revision: 1}})
 }
 
 func continuationByCondition(ctx context.Context, connection *sql.Conn, taskID TaskID, incarnation IncarnationID, work Revision, kind ContinuationCondition, conditionID ContinuationConditionID) (Continuation, bool, error) {
@@ -363,6 +370,9 @@ func resolveHumanContinuation(ctx context.Context, tx *writeTx, requestID HumanR
 	if request.Revision != expected || request.Status != HumanRequestOpen {
 		return false, tx.Rollback(ErrRevisionConflict)
 	}
+	if !project.zero() && request.IdempotencyKey == stalledItemKey {
+		return false, tx.Rollback(ErrUnauthorized)
+	}
 	target, found, err := runByID(ctx, tx.connection, request.RunID)
 	if err != nil || !found {
 		if err == nil {
@@ -395,6 +405,14 @@ func resolveHumanContinuation(ctx context.Context, tx *writeTx, requestID HumanR
 }
 
 func resolveHumanContinuationOnConnection(ctx context.Context, tx *writeTx, request HumanRequest, continuation Continuation, deliveryID HumanRequestDeliveryID, reply string, at UnixMillis) error {
+	if request.IdempotencyKey == stalledItemKey {
+		// The resumed carrier sees what the operator answered, as far as the
+		// bound on a resolution leaves room beside the whole reply.
+		const prefix = "Operator reply to: "
+		if room := MaxHumanRequestReplyBytes - len(prefix) - 1 - len(reply); room > 0 {
+			reply = prefix + strings.ToValidUTF8(request.QuestionText[:min(len(request.QuestionText), room)], "") + "\n" + reply
+		}
+	}
 	if deliveryID.zero() {
 		var err error
 		deliveryID, err = HumanRequestDeliveryIDFromBytes(continuation.ID.Bytes())

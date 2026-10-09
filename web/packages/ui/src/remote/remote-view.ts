@@ -27,6 +27,7 @@ export const REMOTE_STATUS_GLYPH: Record<RemoteFactoryStatus, string> = {
 const DELIVERY_UNKNOWN = "Delivery unknown — check the factory";
 const NOT_DELIVERED = "Not delivered";
 export const REQUEST_CLOSED = "This question is no longer open";
+export const REQUEST_UNREAD = "Could not load this question — open it again";
 export const FACTORY_UNREACHABLE = "Factory offline — nothing was sent";
 
 /**

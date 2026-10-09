@@ -12,25 +12,19 @@ import (
 	"testing"
 )
 
-// A current home opens untouched; a v34 home (the current schema plus the
-// four tables v35 dropped) migrates and keeps every surviving row.
-func TestCurrentAndV34HomesOpenWithEveryRow(t *testing.T) {
-	for _, v34 := range []bool{false, true} {
-		t.Run(fmt.Sprintf("v34=%v", v34), func(t *testing.T) { testHomeOpensWithEveryRow(t, v34) })
+// A current home opens untouched; a v36 home (the current schema without
+// task_automatic_events) migrates and keeps every row.
+func TestCurrentAndV36HomesOpenWithEveryRow(t *testing.T) {
+	t.Parallel()
+	for _, v36 := range []bool{false, true} {
+		t.Run(fmt.Sprintf("v36=%v", v36), func(t *testing.T) { testHomeOpensWithEveryRow(t, v36) })
 	}
 }
 
-func testHomeOpensWithEveryRow(t *testing.T, v34 bool) {
+func testHomeOpensWithEveryRow(t *testing.T, v36 bool) {
 	ctx := context.Background()
 	store, path := newTestStore(t)
 	seedDurableAuthority(t, store)
-	if v34 {
-		for _, statement := range append(v34Dropped, fmt.Sprintf("PRAGMA user_version = %d", v34UserVersion)) {
-			if _, err := store.writer.ExecContext(ctx, statement); err != nil {
-				t.Fatal(err)
-			}
-		}
-	}
 	connection, err := store.readerConnection(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -38,6 +32,13 @@ func testHomeOpensWithEveryRow(t *testing.T, v34 bool) {
 	before := snapshotRows(t, ctx, connection)
 	if err := connection.Close(); err != nil {
 		t.Fatal(err)
+	}
+	if v36 {
+		for _, statement := range []string{"DROP TABLE task_automatic_events", fmt.Sprintf("PRAGMA user_version = %d", v36UserVersion)} {
+			if _, err := store.writer.ExecContext(ctx, statement); err != nil {
+				t.Fatal(err)
+			}
+		}
 	}
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
@@ -101,12 +102,13 @@ func snapshotRows(t *testing.T, ctx context.Context, connection *sql.Conn) map[s
 // userVersion, adds the migration step from the version before it, and
 // re-pins here.
 func TestSchemaDigestsArePinned(t *testing.T) {
+	t.Parallel()
 	sum := sha256.Sum256([]byte(strings.Join(schemaStatements, "\n")))
-	if got := hex.EncodeToString(sum[:]); got != "bfc5b62285b00148bc836d389f684eb3112e551952f477e27354cf35174460f0" {
+	if got := hex.EncodeToString(sum[:]); got != "819c191d4e411ad35a2f7cf19db739d0492d0f8cf1c9c5fe0bd50a5197b5bb6c" {
 		t.Errorf("current schema digest = %s", got)
 	}
-	sum = sha256.Sum256([]byte(strings.Join(v34SchemaStatements(), "\n")))
-	if got := hex.EncodeToString(sum[:]); got != "a335c0acf8d7e6926d5f27b016106a118649dfeb3efe5da787687e94fb961738" {
-		t.Errorf("v34 schema digest = %s", got)
+	sum = sha256.Sum256([]byte(strings.Join(v36SchemaStatements(), "\n")))
+	if got := hex.EncodeToString(sum[:]); got != "bfc5b62285b00148bc836d389f684eb3112e551952f477e27354cf35174460f0" {
+		t.Errorf("v36 schema digest = %s", got)
 	}
 }
