@@ -23,6 +23,7 @@ chmod 755 "$temporary/bin/lockf"
 lease_dir=$temporary/lease
 PATH="$temporary/bin:$PATH" \
     DARK_FACTORY_LOCAL_CI_DIRECTORY="$lease_dir" \
+    DARK_FACTORY_LOCAL_CI_LEASE_HELD= \
     /bin/sh "$repository_root/scripts/with-local-ci-lease.sh" \
     /bin/sh -c 'exit 7' || status=$?
 [ "${status-0}" -eq 7 ] || fail "command status was not preserved"
