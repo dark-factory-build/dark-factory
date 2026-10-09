@@ -230,7 +230,7 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 	if len(changes) == 0 && (c.Pull != 0 || diffFrom != tip) {
 		return errors.New("nothing to publish: its head " + c.Head + " changes no file from " + diffFrom)
 	}
-	message := publicationTitle(c.Accepted.Snapshot.Title)
+	message := publicationMessage(c)
 	for i := 0; i*50 < len(changes); i++ {
 		step := prefix + strconv.Itoa(i+1)
 		var commit struct {
@@ -320,6 +320,14 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 func publicationTitle(title string) string {
 	title = strings.Join(strings.Fields(title), " ")
 	return strings.ToValidUTF8(title[:min(len(title), 256)], "")
+}
+
+func publicationMessage(c kernel.PublishableChange) string {
+	title := c.Accepted.Snapshot.Title
+	if title == "" {
+		title = c.Task.Title
+	}
+	return publicationTitle(title)
 }
 
 // publicationFrom is where a first publication's commits go: the Change's
