@@ -9,7 +9,7 @@ import { Profiler, createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { act, create } from "react-test-renderer";
 import { AgentSprite, FactoryScene } from "../../dist/src/factory-scene/factory-scene.js";
-import { COMMON_WIDTH, PADDING, ROOM_LEFT, WORKER_SIZE, breakRoomNook, commonSeating, layoutScene, placeCrates, placeErrands, placeWorkers } from "../../dist/src/factory-scene/scene.js";
+import { COMMON_WIDTH, PADDING, ROOM_LEFT, WORKER_SIZE, breakRoomNook, commonSeating, fitColumns, layoutScene, placeCrates, placeErrands, placeWorkers } from "../../dist/src/factory-scene/scene.js";
 import { deriveProductionView, projectCrates } from "../../dist/src/production-view.js";
 import { publicFloor } from "../../dist/src/public-floor.js";
 import { breakRoomHabit, resolvedAppearance, restingItem, spriteOptions, workerFrames, workerPhase } from "../../dist/src/factory-scene/appearance.js";
@@ -1088,8 +1088,8 @@ test("pictured contents and occupied work slots leave door routes clear in every
   }
 });
 
-test("every footprint fits its room: no wall escape, no overlap, doorway clear, every machine reachable", () => {
-  const many = (prefix, count, kind, extra = {}) => Array.from({ length: count }, (_, index) => machine(`${prefix}-${kind}-${index}`, kind, extra));
+test("every footprint fits its room: no wall escape, no overlap of machines or labels, doorway clear, every machine reachable", () => {
+  const many = (prefix, count, kind, extra = {}) => Array.from({ length: count }, (_, index) => machine(`${prefix}-${kind}${extra.trigger ?? ""}-${index}`, kind, extra));
   const all = (prefix) => [...many(prefix, 6, "ingress", { trigger: "request" }), ...many(prefix, 12, "ingress", { trigger: "timer" }), ...many(prefix, 10, "queue"),
     ...many(prefix, 7, "store"), ...many(prefix, 20, "unknown"), ...many(prefix, 20, "job")];
   const fixtures = {
@@ -1102,6 +1102,13 @@ test("every footprint fits its room: no wall escape, no overlap, doorway clear, 
     ], { shared: [...many("shared", 20, "queue"), ...many("shared", 20, "store")], quarantine: many("ghost", 30, "unknown") }),
     larger: sceneGraph(Array.from({ length: 40 }, (_, index) => hall(`h${String(index).padStart(2, "0")}`, { band: index % 4, machines: all(`h${index}`).filter((_, at) => at % (index + 2) === 0) }))),
   };
+  const labelBox = (item) => {
+    const chars = (limit) => Math.min(Array.from(item.machine.label).length, limit) * 5;
+    if (item.shape === "line") return { x: item.x + 4, y: item.y + item.height + 4, width: 9 * 5, height: 9 };
+    if (item.shape === "dock" || item.shape === "manifold") return { x: item.x, y: item.y - 11, width: chars(22), height: 9 };
+    const width = chars(Math.max(6, Math.floor((item.width + 10) / 5)));
+    return { x: item.x + item.width / 2 - width / 2, y: item.y + item.height + 1, width, height: 9 };
+  };
   const strictly = (left, right) => left.x < right.x + right.width && right.x < left.x + left.width && left.y < right.y + right.height && right.y < left.y + left.height;
   for (const [name, graph] of Object.entries(fixtures)) {
     const layout = layoutScene(graph);
@@ -1112,6 +1119,13 @@ test("every footprint fits its room: no wall escape, no overlap, doorway clear, 
         assert.ok(item.x >= room.x && item.y >= room.y && item.x + item.width <= room.x + room.width && item.y + item.height <= room.y + room.height, `${name}: ${item.key} escapes ${room.id}`);
         assert.equal(strictly(item, doorway), false, `${name}: ${item.key} blocks ${room.id}'s doorway`);
         for (const other of room.contents.slice(at + 1)) assert.equal(overlaps(item, other), false, `${name}: ${item.key} over ${other.key}`);
+        // Labels as the station draws them, at about 5px a character of 8px monospace.
+        const label = labelBox(item);
+        assert.ok(label.x >= room.x && label.x + label.width <= room.x + room.width && label.y >= room.y, `${name}: ${item.key}'s label leaves ${room.id}`);
+        for (const other of room.contents) if (other !== item) {
+          assert.equal(strictly(label, other), false, `${name}: ${item.key}'s label over ${other.key}`);
+          assert.equal(strictly(label, labelBox(other)), false, `${name}: ${item.key}'s label over ${other.key}'s`);
+        }
       }
       if (room.kind !== "hall" || name === "larger") continue;
       const seat = placeWorkers(layout, [{ ...workers[0], location: "resting", nodeId: room.id }], "nearby")[0];
@@ -1126,6 +1140,11 @@ test("every footprint fits its room: no wall escape, no overlap, doorway clear, 
 test("halls pack on across runtimes: four halls in four bands are no taller than four in one", () => {
   const four = (band) => sceneGraph([0, 1, 2, 3].map((index) => hall(`h${index}`, { band: band ?? index })));
   assert.ok(layoutScene(four()).height <= layoutScene(four(2)).height);
+  // A landscape pane gets wider rows than an upright one, so fit fills it.
+  const eight = sceneGraph(Array.from({ length: 8 }, (_, index) => hall(`h${index}`, { band: index % 4, machines: [machine(`d${index}`, "ingress", { trigger: "request" }), machine(`s${index}`, "store")] })));
+  const wide = fitColumns(eight, 1440, 720), upright = fitColumns(eight, 390, 590);
+  const firstRow = (columns) => { const layout = layoutScene(eight, columns); return layout.rooms.filter((room) => room.y === layout.rooms[0].y).length; };
+  assert.ok(wide > upright && firstRow(wide) >= 3, `${wide} bays for a landscape pane, ${upright} upright`);
 });
 
 test("a walk between halls on one aisle keeps to that aisle", () => {
@@ -1343,13 +1362,12 @@ test("a deploy is a changeover dated by the graph, not by the viewer's clock", (
   assert.doesNotMatch(render(undefined), /data-changeover=/);
 });
 
-test("the plant overview is always there; fit shows the whole floor and every zoom path returns to it", async () => {
+test("fit shows the whole floor packed to the pane's shape, the overview only when zoomed past it, and every zoom path returns to fit", async () => {
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   const priorWindow = globalThis.window, priorObserver = globalThis.ResizeObserver;
   globalThis.window = { innerWidth: 1200, innerHeight: 800 };
   let resized;
   globalThis.ResizeObserver = class { constructor(callback) { resized = callback; } observe() {} disconnect() {} };
-  const { width } = layoutScene(graph);
   // A 600×400 pane over the floor; the floor's box follows its rendered width and the pane's scroll.
   const listeners = {};
   const pane = { scrollLeft: 0, scrollTop: 0, clientWidth: 600, clientHeight: 400, getBoundingClientRect: () => ({ left: 0, top: 0, width: pane.clientWidth, height: pane.clientHeight }), addEventListener: (name, listener) => { listeners[name] = listener; }, removeEventListener() {} };
@@ -1358,14 +1376,13 @@ test("the plant overview is always there; fit shows the whole floor and every zo
   let renderer;
   const svg = () => renderer.root.findAll((node) => node.props["data-graph-digest"] === graph.digest)[0];
   const style = () => svg()?.props.style ?? {};
-  const height = () => Number(svg().props.viewBox.split(" ")[3]);
-  const fitted = () => { const scale = Math.min(1, pane.clientWidth / width, pane.clientHeight / height()); return [Math.floor(width * scale), Math.floor(height() * scale)]; };
+  const height = () => Number(svg().props.viewBox.split(" ")[3]), sceneWidth = () => Number(svg().props.viewBox.split(" ")[2]);
+  const fitted = () => { const width = sceneWidth(), scale = Math.min(1, pane.clientWidth / width, pane.clientHeight / height()); return [Math.floor(width * scale), Math.floor(height() * scale)]; };
   const wheel = (deltaY) => act(async () => listeners.wheel({ ctrlKey: true, deltaY, clientX: 300, clientY: 200, preventDefault() {} }));
   try {
     await act(async () => { renderer = create(createElement(FactoryScene, { graph, appearance: commons, workers }), { createNodeMock: (element) => element.type === "svg" && element.props.viewBox?.startsWith("0 0 ") && element.props["data-graph-digest"] ? floor : element.type === "div" && element.props.className === "dfFactoryFloor__map" ? pane : element.type === "rect" && element.props["data-overview-view"] !== undefined ? view : {} }); });
-    const overview = renderer.root.findByProps({ className: "dfPlantMap" });
-    assert.match(overview.props["aria-label"], /^Plant overview: 3 units, 0 external, 2 workers$/);
-    assert.equal(overview.findAll((node) => node.props["data-overview-room"] !== undefined).length, layoutScene(graph).rooms.length);
+    assert.equal(renderer.root.findAll((node) => node.props.className === "dfPlantMap").length, 0, "fitted, the whole floor is in view: no overview");
+    assert.equal(sceneWidth(), layoutScene(graph, fitColumns(graph, 528, 352)).width, "rows packed to the pane's half-bay step");
     const button = (label) => renderer.root.findAll((node) => node.type === "button" && node.props["aria-label"] === label)[0];
     assert.equal(button("Zoom out").props.disabled, true, "fitted: nothing further out to show");
     assert.deepEqual([style().width, style().height], fitted(), "fit is the whole floor, bounded by the pane's height as well as its width");
@@ -1378,10 +1395,14 @@ test("the plant overview is always there; fit shows the whole floor and every zo
     pane.clientWidth = 600; pane.clientHeight = 400;
     await act(async () => resized());
     const [fitWidth] = fitted();
+    const width = sceneWidth();
     const centre = () => ({ x: (pane.scrollLeft + 300) / (style().width / width), y: (pane.scrollTop + 200) / (style().width / width) });
     const before = centre();
     await act(async () => button("Zoom in").props.onClick());
     assert.equal(style().width, Math.floor(fitWidth * 1.5));
+    const overview = renderer.root.findByProps({ className: "dfPlantMap" });
+    assert.match(overview.props["aria-label"], /^Plant overview: 3 units, 0 external, 2 workers$/);
+    assert.equal(overview.findAll((node) => node.props["data-overview-room"] !== undefined).length, layoutScene(graph, fitColumns(graph, 528, 352)).rooms.length);
     await act(async () => button("Zoom in").props.onClick());
     assert.equal(view.attributes.width, 600 / (style().width / width), "the overview window is the pane, in floor units");
     for (const axis of ["x", "y"]) assert.ok(Math.abs(centre()[axis] - before[axis]) < 2, `zoom keeps the floor's ${axis} under the pane's centre`);

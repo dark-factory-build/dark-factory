@@ -698,9 +698,12 @@ Layout is deterministic and stable:
    without breaks or headings; each hall's nameplate carries its runtime.
    Adding an edge never reorders halls. A hall's width grows with its static
    machines, so a new route can move later halls along the rows.
-2. Within a hall, stations sit in fixed zones by kind, at their drawn widths:
-   docks and timers on the left, stock and unrecognised crates on the right,
-   job cells over the main line between them. The room grows to hold them.
+2. Within a hall, stations sit in fixed zones by kind, spaced by their drawn
+   widths and labels: docks one per line on the left, timers by the
+   nameplate, stock and unrecognised crates on the right, job cells over the
+   main line between them. The room grows to hold them. Rows are as wide as
+   the pane's shape suits (four to twelve bays), chosen from the pane's size
+   alone.
 3. A shared store or queue sits in the yard beside the hall of its lowest-ID
    user.
 4. External gates follow the fence in ID order.

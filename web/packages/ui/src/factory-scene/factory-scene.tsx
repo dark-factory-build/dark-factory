@@ -4,6 +4,7 @@ import type { SceneTask } from "../console-view.js";
 import {
   PADDING,
   ROOM_LEFT,
+  fitColumns,
   layoutScene,
   commonSeating,
   WORKER_SIZE,
@@ -502,7 +503,10 @@ export function FactoryScene({ proposals, crates, tools, onLoadNode, onInvestiga
   };
   const retainFocusedTooltip = () => showTooltip(typeof document !== "undefined" && document.activeElement?.matches("[data-tooltip]") ? document.activeElement : null);
   const inspect = (event: PointerEvent<HTMLDivElement> | FocusEvent<HTMLDivElement> | MouseEvent<HTMLDivElement>) => showTooltip((event.target as Element).closest("[data-tooltip]"));
-  const layout = useMemo(() => layoutScene(graph), [graph.digest]);
+  // Rows are as wide as the pane's shape suits, chosen afresh only when the pane crosses a half-bay step.
+  const step = pane === undefined ? [0, 0] : [Math.floor(pane.width / 88), Math.floor(pane.height / 88)];
+  const columns = useMemo(() => pane === undefined ? undefined : fitColumns(graph, step[0]! * 88, step[1]! * 88), [graph.digest, step[0], step[1]]);
+  const layout = useMemo(() => layoutScene(graph, columns), [graph.digest, columns]);
   const placements = useMemo(() => placeWorkers(layout, workers, appearance.social), [layout, workers, appearance.social]);
   // Live readings change without moving anything: they are looked up by id at draw time.
   const machines = new Map<string, SceneMachine>([...graph.halls.flatMap((hall) => [[hall.id, { id: hall.id, kind: "processor", label: hall.label, reading: hall.reading }] as const, ...hall.machines.map((machine) => [machine.id, machine] as const)]),
@@ -669,8 +673,8 @@ export function FactoryScene({ proposals, crates, tools, onLoadNode, onInvestiga
 
       {layout.rooms.map((room) => {
         const hall = graph.halls.find((candidate) => candidate.id === room.id);
-        // The runtime rides in the nameplate after the name, which gives way to it.
-        const badge = hall?.runtime === undefined ? "" : ` ·${RUNTIME_TEXT[hall.runtime]}`, fits = Math.floor((room.width - 60 - badge.length * 5) / 6);
+        // The runtime rides in the nameplate after the name, which gives way to it; the plate stops short of the timers.
+        const badge = hall?.runtime === undefined ? "" : ` ·${RUNTIME_TEXT[hall.runtime]}`, plate = Math.min(room.width - 44, ...room.contents.filter((item) => item.shape === "clock" && item.y < room.y + 40).map((item) => item.x - room.x - 16)), fits = Math.floor((plate - 14 - badge.length * 5) / 6);
         return <g key={room.id} data-room-id={room.id} data-room-kind={room.kind}>
           <rect x={room.x} y={room.y} width={room.width} height={room.height} fill={room.kind === "quarantine" ? "#1b1f25" : "url(#df-floor)"} />
           {room.kind === "quarantine" ? <rect x={room.x + 2} y={room.y + 2} width={room.width - 4} height={room.height - 4} fill="none" stroke="url(#df-hazard)" strokeWidth="4" /> : <>
@@ -679,7 +683,7 @@ export function FactoryScene({ proposals, crates, tools, onLoadNode, onInvestiga
           </>}
           <rect x={room.x + 4} y={room.y + 10} width={room.width - 8} height={room.height - 12} fill="#08131d" opacity=".18" pointerEvents="none" />
           {hall === undefined ? null : <g className="dfFactoryScene__target" {...sceneAction(() => selectEntity(hall.id))} data-tooltip={machineInfo({ id: hall.id, kind: "processor", label: hall.label, reading: hall.reading }, hall)} aria-label={`Inspect ${hall.label}`}>
-            <rect className="dfFactoryScene__focus dfPlant__plate" x={room.x + 8} y={room.y + 12} width={Math.min(room.width - 44, 6 * Math.min(hall.label.length, fits) + 14 + badge.length * 5)} height="20" rx="2" />
+            <rect className="dfFactoryScene__focus dfPlant__plate" x={room.x + 8} y={room.y + 12} width={Math.min(plate, 6 * Math.min(hall.label.length, fits) + 14 + badge.length * 5)} height="20" rx="2" />
             <text x={room.x + 14} y={room.y + 26} className="dfPlant__plateText" fontSize="10">{shortLabel(hall.label, fits)}{badge === "" ? null : <tspan data-runtime={hall.runtime} className="dfPlant__small" fontSize="7">{badge}</tspan>}</text>
             {hall.reading.deployedAt === undefined || observedAt - hall.reading.deployedAt > DAY ? null : <g data-changeover={hall.reading.deployedAt}>
               {observedAt - hall.reading.deployedAt < CHANGEOVER ? <path d={`M${room.x + 6} ${room.y + 10}h${room.width - 12}M${room.x + 10} ${room.y + 10}v${room.height - 20}M${room.x + room.width - 10} ${room.y + 10}v${room.height - 20}`} className="dfPlant__scaffold" /> : null}
@@ -760,7 +764,7 @@ export function FactoryScene({ proposals, crates, tools, onLoadNode, onInvestiga
         <IconButton icon="plus" aria-label="Zoom in" disabled={zoom !== undefined && zoom >= MAX_ZOOM} onClick={() => zoomBy(1.5)} />
         <IconButton icon="fit" aria-label="Fit floor" disabled={zoom === undefined} onClick={() => setZoom(undefined)} />
       </div>
-      <PlantMap layout={layout} width={sceneWidth} height={sceneHeight} machines={machines} graph={graph} placements={placements} workers={workers} viewElement={viewElement} onCentre={centreOn} />
+      {zoom === undefined ? null : <PlantMap layout={layout} width={sceneWidth} height={sceneHeight} machines={machines} graph={graph} placements={placements} workers={workers} viewElement={viewElement} onCentre={centreOn} />}
     </div>}
     </div>
     {selected === undefined ? null : <MachineInspector key={selected.id} machine={selected} hall={hallOf.get(selected.id)} onLoadNode={onLoadNode} onInvestigate={onInvestigate}
