@@ -786,7 +786,7 @@ func (daemon *Daemon) attemptSource(ctx context.Context, call api.Call) api.Repl
 	}
 	// A shell provider has no read-only boundary for the receipt's paths.
 	if authority.Provider == kernel.ProviderShell {
-		return newErrorReply(api.RemoteUnavailable)
+		return newErrorReply(api.RemoteForbidden)
 	}
 	taskIDText, ok := call.AttemptSourceTaskID()
 	if !ok {

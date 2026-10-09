@@ -1417,6 +1417,76 @@ func TestClientSurvivesDaemonSocketRebind(t *testing.T) {
 	}
 }
 
+// A release restart drains the old daemon's in-flight request as unavailable,
+// unbinds the socket, and leaves the path absent until the new daemon binds.
+// One attempt call issued into that restart returns the new daemon's answer.
+func TestAttemptCallWaitsOutDaemonRestart(t *testing.T) {
+	bearer := testCredential('R')
+	directory := privateTestDirectory(t)
+	token := filepath.Join(directory, "token")
+	writeTestToken(t, token, bearer)
+	t.Setenv(attemptTokenFileEnv, token)
+	old, socket := testListener(t, directory)
+	client, err := NewAttemptClientFromEnvironment(socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Like factoryd, the old generation unbinds before it drains.
+	serve := func(listener *net.UnixListener, body string, beforeReply func() error) error {
+		connection, err := listener.Accept()
+		if err != nil {
+			return err
+		}
+		defer connection.Close()
+		if _, err := readTestFrame(connection); err != nil {
+			return err
+		}
+		if err := requireEOF(connection); err != nil {
+			return err
+		}
+		if err := beforeReply(); err != nil {
+			return err
+		}
+		return writeTestResponse(connection, wireAttemptDomain, body)
+	}
+	const outage = time.Second
+	done := make(chan error, 1)
+	go func() {
+		if err := serve(old, `{"ok":false,"error":"unavailable"}`, old.Close); err != nil {
+			done <- err
+			return
+		}
+		// A run that starts mid-restart still gets a client.
+		if _, err := NewAttemptClientFromEnvironment(socket); err != nil {
+			done <- err
+			return
+		}
+		time.Sleep(outage)
+		replacement, err := net.ListenUnix("unix", &net.UnixAddr{Name: socket, Net: "unix"})
+		if err != nil {
+			done <- err
+			return
+		}
+		defer replacement.Close()
+		if err := os.Chmod(socket, 0o600); err != nil {
+			done <- err
+			return
+		}
+		done <- serve(replacement, successResponse(`{"task":"after restart"}`), func() error { return nil })
+	}()
+	started := time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), RestartRetryWindow)
+	defer cancel()
+	task, err := client.Task(ctx)
+	if err != nil || task.Task != "after restart" {
+		t.Fatalf("task across restart = %+v, %v", task, err)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("call waited %v across a %v outage; bound %v", time.Since(started), outage, RestartRetryWindow)
+}
+
 func TestInputBoundsFailBeforeConnection(t *testing.T) {
 	bearer := testCredential('B')
 	directory := privateTestDirectory(t)
