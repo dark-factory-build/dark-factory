@@ -68,7 +68,7 @@ func TestBrowserProjectContentUsesExactProjectAndRevisionAuthority(t *testing.T)
 	otherID, _ := kernel.ProjectIDFromBytes(bytesOf(0x23))
 	browserContentProjectFixture(t, f, otherID, "other")
 	_, err = f.backend.ProjectContent(context.Background(), rawBrowserClient(f.client.ID), browserprotocol.ProjectContent{Operation: "body", Input: input(otherID.String(), 1)})
-	if !errors.Is(err, browser.ErrUnauthorized) {
+	if !errors.Is(mapBrowserError(err), browser.ErrUnauthorized) {
 		t.Fatalf("cross-project body = %v", err)
 	}
 	_, err = f.backend.ProjectContent(context.Background(), rawBrowserClient(f.client.ID), browserprotocol.ProjectContent{Operation: "create", Input: []byte(`{"project_id":"` + projectID.String() + `","id":"` + contentID.String() + `","kind":"procedure","title":"x"}`)})
@@ -146,7 +146,7 @@ func TestBrowserLibraryRealWireAndCapabilityBoundaries(t *testing.T) {
 				t.Fatalf("pinned body = %+v %v", body, err)
 			}
 			mismatch, _ := json.Marshal(map[string]any{"project_id": other.String(), "id": content.String(), "revision": 1, "limit": 8192})
-			if _, err := f.backend.ProjectContent(ctx, rawBrowserClient(f.client.ID), browserprotocol.ProjectContent{Operation: "body", Input: mismatch}); !errors.Is(err, browser.ErrUnauthorized) {
+			if _, err := f.backend.ProjectContent(ctx, rawBrowserClient(f.client.ID), browserprotocol.ProjectContent{Operation: "body", Input: mismatch}); !errors.Is(mapBrowserError(err), browser.ErrUnauthorized) {
 				t.Fatalf("cross-project body=%v", err)
 			}
 			hugeID, _ := kernel.ContentIDFromBytes(bytesOf(0x35))
@@ -190,7 +190,7 @@ func TestBrowserLibraryRealWireAndCapabilityBoundaries(t *testing.T) {
 				t.Fatal(err)
 			}
 			raw, _ := json.Marshal(map[string]any{"project_id": project.String(), "limit": 1})
-			if _, err := f.backend.ProjectContent(ctx, rawBrowserClient(f.client.ID), browserprotocol.ProjectContent{Operation: "list", Input: raw}); !errors.Is(err, browser.ErrUnauthorized) {
+			if _, err := f.backend.ProjectContent(ctx, rawBrowserClient(f.client.ID), browserprotocol.ProjectContent{Operation: "list", Input: raw}); !errors.Is(mapBrowserError(err), browser.ErrUnauthorized) {
 				t.Fatalf("revoked read = %v", err)
 			}
 		})

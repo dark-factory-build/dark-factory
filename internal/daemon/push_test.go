@@ -228,7 +228,7 @@ func TestBrowserSubscribePushStoresOneSubscriptionPerClient(t *testing.T) {
 
 	// A key pair that does not belong together could never be signed for.
 	_, otherPublic, _ := devicePushKeys(t)
-	if err := fixture.backend.SubscribePush(ctx, rawBrowserClient(fixture.client.ID), browserprotocol.PushSubscribe{Endpoint: subscription.Endpoint, PublicKey: otherPublic, PrivateKey: private}); !errors.Is(err, browser.ErrInvalidRequest) {
+	if err := fixture.backend.SubscribePush(ctx, rawBrowserClient(fixture.client.ID), browserprotocol.PushSubscribe{Endpoint: subscription.Endpoint, PublicKey: otherPublic, PrivateKey: private}); !errors.Is(mapBrowserError(err), browser.ErrInvalidRequest) {
 		t.Fatalf("mismatched keys: %v", err)
 	}
 	// Re-registering replaces, so a device that re-subscribed is not pushed twice.

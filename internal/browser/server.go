@@ -60,6 +60,13 @@ type Observer interface {
 	Observe(attributes map[string]string)
 }
 
+// ErrorClassifier is an optional Backend capability: name the backend's own
+// errors as this package's. The transport applies it once, to every error it
+// answers a request with, so no return path reaches the wire unnamed.
+type ErrorClassifier interface {
+	ClassifyError(err error) error
+}
+
 // TraceReceiver is an optional Backend capability: aggregate an OTLP trace
 // export without retaining it. remote marks one the relay carried.
 type TraceReceiver interface {

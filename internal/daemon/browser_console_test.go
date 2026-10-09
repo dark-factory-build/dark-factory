@@ -82,7 +82,7 @@ func TestBrowserConsoleUpdatesAdvanceTheExactRevision(t *testing.T) {
 	// The same observation cannot be spent twice.
 	if _, err := fixture.backend.UpdateAgent(ctx, client, browserprotocol.AgentUpdate{
 		AgentID: fixture.agent.ID.String(), ExpectedRevision: decimalRevision(fixture.agent.Revision), Paused: &paused,
-	}); !errors.Is(err, browser.ErrStale) {
+	}); !errors.Is(mapBrowserError(err), browser.ErrStale) {
 		t.Fatalf("replayed agent update = %v", err)
 	}
 
@@ -92,7 +92,7 @@ func TestBrowserConsoleUpdatesAdvanceTheExactRevision(t *testing.T) {
 	retry := "queued"
 	if _, err := fixture.backend.UpdateTask(ctx, client, browserprotocol.TaskUpdate{
 		TaskID: fixture.task.ID.String(), ExpectedRevision: decimalRevision(fixture.task.Revision), Status: &retry,
-	}); !errors.Is(err, browser.ErrUnauthorized) {
+	}); !errors.Is(mapBrowserError(err), browser.ErrUnauthorized) {
 		t.Fatalf("retry of a queued task = %v", err)
 	}
 	if unchanged, _, err := fixture.store.Task(ctx, fixture.task.ID); err != nil || unchanged.Revision != fixture.task.Revision {
@@ -120,7 +120,7 @@ func TestBrowserConsoleUpdatesAdvanceTheExactRevision(t *testing.T) {
 	// A task that has left the queue is a conflict, not a fresh edit.
 	if _, err := fixture.backend.UpdateTask(ctx, client, browserprotocol.TaskUpdate{
 		TaskID: fixture.task.ID.String(), ExpectedRevision: cancelled.Revision, Title: &title,
-	}); !errors.Is(err, browser.ErrStale) {
+	}); !errors.Is(mapBrowserError(err), browser.ErrStale) {
 		t.Fatalf("edit after cancel = %v", err)
 	}
 }
@@ -153,12 +153,12 @@ func TestBrowserConsoleGatesUpdatesOnHumanActionsButNotTheGraph(t *testing.T) {
 	paused, status := browserprotocol.Bool(true), "cancelled"
 	if _, err := fixture.backend.UpdateAgent(ctx, client, browserprotocol.AgentUpdate{
 		AgentID: fixture.agent.ID.String(), ExpectedRevision: decimalRevision(fixture.agent.Revision), Paused: &paused,
-	}); !errors.Is(err, browser.ErrUnauthorized) {
+	}); !errors.Is(mapBrowserError(err), browser.ErrUnauthorized) {
 		t.Fatalf("observe-only agent update = %v", err)
 	}
 	if _, err := fixture.backend.UpdateTask(ctx, client, browserprotocol.TaskUpdate{
 		TaskID: fixture.task.ID.String(), ExpectedRevision: decimalRevision(fixture.task.Revision), Status: &status,
-	}); !errors.Is(err, browser.ErrUnauthorized) {
+	}); !errors.Is(mapBrowserError(err), browser.ErrUnauthorized) {
 		t.Fatalf("observe-only task update = %v", err)
 	}
 	// A refused mutation left nothing behind.
@@ -175,12 +175,12 @@ func TestBrowserConsoleGatesUpdatesOnHumanActionsButNotTheGraph(t *testing.T) {
 	// An unknown project is not found; a caller that gave up gets a retryable
 	// answer rather than a fault.
 	unknown, _ := kernel.ProjectIDFromBytes(adapterID(t, 0x25))
-	if _, err := fixture.backend.OperationalGraph(ctx, client, browserprotocol.OperationalGraphGet{ProjectID: unknown.String()}); !errors.Is(err, browser.ErrNotFound) {
+	if _, err := fixture.backend.OperationalGraph(ctx, client, browserprotocol.OperationalGraphGet{ProjectID: unknown.String()}); !errors.Is(mapBrowserError(err), browser.ErrNotFound) {
 		t.Fatalf("unknown project graph = %v", err)
 	}
 	cancelled, cancel := context.WithCancel(ctx)
 	cancel()
-	if _, err := fixture.backend.OperationalGraph(cancelled, client, browserprotocol.OperationalGraphGet{ProjectID: fixture.project.ID.String()}); !errors.Is(err, browser.ErrRateLimited) {
+	if _, err := fixture.backend.OperationalGraph(cancelled, client, browserprotocol.OperationalGraphGet{ProjectID: fixture.project.ID.String()}); !errors.Is(mapBrowserError(err), browser.ErrRateLimited) {
 		t.Fatalf("abandoned graph request = %v", err)
 	}
 }
@@ -192,12 +192,12 @@ func TestBrowserConsoleRejectsUnusableIdentitiesAndRevisions(t *testing.T) {
 	unknownAgent, _ := kernel.AgentIDFromBytes(adapterID(t, 0x31))
 	if _, err := fixture.backend.UpdateAgent(ctx, client, browserprotocol.AgentUpdate{
 		AgentID: unknownAgent.String(), ExpectedRevision: 1,
-	}); !errors.Is(err, browser.ErrNotFound) {
+	}); !errors.Is(mapBrowserError(err), browser.ErrNotFound) {
 		t.Fatalf("unknown agent = %v", err)
 	}
 	if _, err := fixture.backend.UpdateTask(ctx, client, browserprotocol.TaskUpdate{
 		TaskID: fixture.task.ID.String(), ExpectedRevision: decimalRevision(fixture.task.Revision) + 5,
-	}); !errors.Is(err, browser.ErrStale) {
+	}); !errors.Is(mapBrowserError(err), browser.ErrStale) {
 		t.Fatalf("stale task revision = %v", err)
 	}
 	// The durable key is (agent, project) together, so a foreign agent is a
@@ -215,7 +215,7 @@ func TestBrowserConsoleRejectsUnusableIdentitiesAndRevisions(t *testing.T) {
 	assigned := stranger.ID.String()
 	if _, err := fixture.backend.UpdateTask(ctx, client, browserprotocol.TaskUpdate{
 		TaskID: fixture.task.ID.String(), ExpectedRevision: decimalRevision(fixture.task.Revision), AssignedAgentID: &assigned,
-	}); !errors.Is(err, browser.ErrStale) {
+	}); !errors.Is(mapBrowserError(err), browser.ErrStale) {
 		t.Fatalf("cross-project reassignment = %v", err)
 	}
 }
@@ -290,7 +290,7 @@ func TestBrowserConsoleAnswersInvalidRequestForARefusedLaunchControl(t *testing.
 	effort := "sideways"
 	if _, err := fixture.backend.UpdateAgent(ctx, client, browserprotocol.AgentUpdate{
 		AgentID: fixture.agent.ID.String(), ExpectedRevision: decimalRevision(fixture.agent.Revision), ReasoningEffort: &effort,
-	}); !errors.Is(err, browser.ErrInvalidRequest) {
+	}); !errors.Is(mapBrowserError(err), browser.ErrInvalidRequest) {
 		t.Fatalf("refused reasoning effort = %v", err)
 	}
 	// A revision that lost its race is still stale: the two are not the same
@@ -298,7 +298,7 @@ func TestBrowserConsoleAnswersInvalidRequestForARefusedLaunchControl(t *testing.
 	paused := browserprotocol.Bool(true)
 	if _, err := fixture.backend.UpdateAgent(ctx, client, browserprotocol.AgentUpdate{
 		AgentID: fixture.agent.ID.String(), ExpectedRevision: decimalRevision(fixture.agent.Revision) + 9, Paused: &paused,
-	}); !errors.Is(err, browser.ErrStale) {
+	}); !errors.Is(mapBrowserError(err), browser.ErrStale) {
 		t.Fatalf("stale revision = %v", err)
 	}
 	stored, found, err := fixture.store.Agent(ctx, fixture.agent.ID)
@@ -330,14 +330,14 @@ func TestBrowserAccountsNeedAdministration(t *testing.T) {
 	home := accountHomeFixture(t, fixture)
 	ctx := context.Background()
 	client := rawBrowserClient(fixture.client.ID)
-	if _, err := fixture.backend.DiscoverAccounts(ctx, client, browserprotocol.AccountsDiscover{}); !errors.Is(err, browser.ErrUnauthorized) {
+	if _, err := fixture.backend.DiscoverAccounts(ctx, client, browserprotocol.AccountsDiscover{}); !errors.Is(mapBrowserError(err), browser.ErrUnauthorized) {
 		t.Fatalf("discovery without administration = %v", err)
 	}
-	if _, err := fixture.backend.LinkAccount(ctx, client, browserprotocol.AccountLink{Provider: "codex", Home: filepath.Join(home, ".codex"), Label: "dogfood"}); !errors.Is(err, browser.ErrUnauthorized) {
+	if _, err := fixture.backend.LinkAccount(ctx, client, browserprotocol.AccountLink{Provider: "codex", Home: filepath.Join(home, ".codex"), Label: "dogfood"}); !errors.Is(mapBrowserError(err), browser.ErrUnauthorized) {
 		t.Fatalf("link without administration = %v", err)
 	}
 	renameLabel := "renamed"
-	if _, err := fixture.backend.UpdateAccount(ctx, client, browserprotocol.AccountUpdate{AccountID: strings.Repeat("01", 16), ExpectedRevision: 1, Label: &renameLabel}); !errors.Is(err, browser.ErrUnauthorized) {
+	if _, err := fixture.backend.UpdateAccount(ctx, client, browserprotocol.AccountUpdate{AccountID: strings.Repeat("01", 16), ExpectedRevision: 1, Label: &renameLabel}); !errors.Is(mapBrowserError(err), browser.ErrUnauthorized) {
 		t.Fatalf("account update without administration = %v", err)
 	}
 	if accounts, err := fixture.store.ListAccounts(ctx); err != nil || len(accounts) != 0 {
@@ -346,7 +346,7 @@ func TestBrowserAccountsNeedAdministration(t *testing.T) {
 	cleared, paused := "", browserprotocol.Bool(true)
 	if _, err := fixture.backend.UpdateAgent(ctx, client, browserprotocol.AgentUpdate{
 		AgentID: fixture.agent.ID.String(), ExpectedRevision: decimalRevision(fixture.agent.Revision), AccountID: &cleared,
-	}); !errors.Is(err, browser.ErrUnauthorized) {
+	}); !errors.Is(mapBrowserError(err), browser.ErrUnauthorized) {
 		t.Fatalf("account assignment without administration = %v", err)
 	}
 	if result, err := fixture.backend.UpdateAgent(ctx, client, browserprotocol.AgentUpdate{
@@ -379,12 +379,12 @@ func TestBrowserAccountsLinkOnlyWhatDiscoveryFound(t *testing.T) {
 
 	// A directory nobody found is not a login, whatever the browser calls it.
 	for _, absent := range []string{filepath.Join(home, ".codex-absent"), filepath.Join(t.TempDir(), ".codex")} {
-		if _, err := fixture.backend.LinkAccount(ctx, client, browserprotocol.AccountLink{Provider: "codex", Home: absent, Label: "elsewhere"}); !errors.Is(err, browser.ErrNotFound) {
+		if _, err := fixture.backend.LinkAccount(ctx, client, browserprotocol.AccountLink{Provider: "codex", Home: absent, Label: "elsewhere"}); !errors.Is(mapBrowserError(err), browser.ErrNotFound) {
 			t.Fatalf("linking %q = %v, want not found", absent, err)
 		}
 	}
 	// Nor is a login of a provider it does not belong to.
-	if _, err := fixture.backend.LinkAccount(ctx, client, browserprotocol.AccountLink{Provider: "claude_code", Home: login.Home, Label: "wrong"}); !errors.Is(err, browser.ErrNotFound) {
+	if _, err := fixture.backend.LinkAccount(ctx, client, browserprotocol.AccountLink{Provider: "claude_code", Home: login.Home, Label: "wrong"}); !errors.Is(mapBrowserError(err), browser.ErrNotFound) {
 		t.Fatalf("cross-provider link = %v", err)
 	}
 	if accounts, err := fixture.store.ListAccounts(ctx); err != nil || len(accounts) != 0 {
@@ -415,7 +415,7 @@ func TestBrowserAccountsLinkOnlyWhatDiscoveryFound(t *testing.T) {
 	if err != nil || renamed.Revision != 2 {
 		t.Fatalf("rename = %+v, %v", renamed, err)
 	}
-	if _, err := fixture.backend.UpdateAccount(ctx, client, browserprotocol.AccountUpdate{AccountID: result.AccountID, ExpectedRevision: result.Revision, Label: &renameLabel}); !errors.Is(err, browser.ErrStale) {
+	if _, err := fixture.backend.UpdateAccount(ctx, client, browserprotocol.AccountUpdate{AccountID: result.AccountID, ExpectedRevision: result.Revision, Label: &renameLabel}); !errors.Is(mapBrowserError(err), browser.ErrStale) {
 		t.Fatalf("stale rename = %v, want stale", err)
 	}
 	again, err := fixture.backend.DiscoverAccounts(ctx, client, browserprotocol.AccountsDiscover{})
@@ -583,10 +583,10 @@ func TestBrowserClientsListNewestFirstAndRevokeOthersOnly(t *testing.T) {
 		t.Fatalf("clients = %+v", listed)
 	}
 
-	if _, err := fixture.backend.RevokeBrowserClient(ctx, self, browserprotocol.BrowserClientRevoke{ClientID: fixture.client.ID.String(), ExpectedRevision: 1}); !errors.Is(err, browser.ErrInvalidRequest) {
+	if _, err := fixture.backend.RevokeBrowserClient(ctx, self, browserprotocol.BrowserClientRevoke{ClientID: fixture.client.ID.String(), ExpectedRevision: 1}); !errors.Is(mapBrowserError(err), browser.ErrInvalidRequest) {
 		t.Fatalf("self revocation = %v", err)
 	}
-	if _, err := fixture.backend.RevokeBrowserClient(ctx, self, browserprotocol.BrowserClientRevoke{ClientID: phone.ID.String(), ExpectedRevision: 9}); !errors.Is(err, browser.ErrStale) {
+	if _, err := fixture.backend.RevokeBrowserClient(ctx, self, browserprotocol.BrowserClientRevoke{ClientID: phone.ID.String(), ExpectedRevision: 9}); !errors.Is(mapBrowserError(err), browser.ErrStale) {
 		t.Fatalf("stale revocation = %v", err)
 	}
 	result, err := fixture.backend.RevokeBrowserClient(ctx, self, browserprotocol.BrowserClientRevoke{ClientID: phone.ID.String(), ExpectedRevision: 1})
@@ -599,10 +599,10 @@ func TestBrowserClientsListNewestFirstAndRevokeOthersOnly(t *testing.T) {
 	}
 
 	observer := newConsoleFixture(t, kernel.BrowserCapabilityKnownMask&^kernel.BrowserCapabilityAdministration, consoleRoot(t))
-	if _, err := observer.backend.ListBrowserClients(ctx, rawBrowserClient(observer.client.ID)); !errors.Is(err, browser.ErrUnauthorized) {
+	if _, err := observer.backend.ListBrowserClients(ctx, rawBrowserClient(observer.client.ID)); !errors.Is(mapBrowserError(err), browser.ErrUnauthorized) {
 		t.Fatalf("list without administration = %v", err)
 	}
-	if _, err := observer.backend.RevokeBrowserClient(ctx, rawBrowserClient(observer.client.ID), browserprotocol.BrowserClientRevoke{ClientID: phone.ID.String(), ExpectedRevision: 2}); !errors.Is(err, browser.ErrUnauthorized) {
+	if _, err := observer.backend.RevokeBrowserClient(ctx, rawBrowserClient(observer.client.ID), browserprotocol.BrowserClientRevoke{ClientID: phone.ID.String(), ExpectedRevision: 2}); !errors.Is(mapBrowserError(err), browser.ErrUnauthorized) {
 		t.Fatalf("revoke without administration = %v", err)
 	}
 }
@@ -614,7 +614,7 @@ func TestBrowserAttachmentRetentionRequiresAdministration(t *testing.T) {
 		enabled := browserprotocol.Bool(true)
 		result, err := fixture.backend.AttachmentRetention(context.Background(), rawBrowserClient(fixture.client.ID), browserprotocol.AttachmentRetention{Enabled: &enabled})
 		if capability == kernel.BrowserCapabilityObserve {
-			if !errors.Is(err, browser.ErrUnauthorized) {
+			if !errors.Is(mapBrowserError(err), browser.ErrUnauthorized) {
 				t.Fatalf("unauthorized update: %v", err)
 			}
 			value, err := fixture.store.AttachmentRetention(context.Background(), nil)
@@ -664,7 +664,7 @@ func TestBrowserFactoryDispatchRequiresAdministrationAndAcknowledgesRevision(t *
 		request := browserprotocol.FactoryDispatch{ExpectedRevision: browserprotocol.Decimal(state.Revision.Int64()), Enabled: browserprotocol.Bool(true)}
 		result, err := fixture.backend.SetDispatch(ctx, rawBrowserClient(fixture.client.ID), request)
 		if capability == kernel.BrowserCapabilityObserve {
-			if !errors.Is(err, browser.ErrUnauthorized) {
+			if !errors.Is(mapBrowserError(err), browser.ErrUnauthorized) {
 				t.Fatalf("unauthorized dispatch: %v", err)
 			}
 			continue
@@ -677,7 +677,7 @@ func TestBrowserFactoryDispatchRequiresAdministrationAndAcknowledgesRevision(t *
 			t.Fatalf("dispatch state: %+v %v", current, err)
 		}
 		_, err = fixture.backend.SetDispatch(ctx, rawBrowserClient(fixture.client.ID), browserprotocol.FactoryDispatch{ExpectedRevision: request.ExpectedRevision, Enabled: browserprotocol.Bool(false)})
-		if !errors.Is(err, browser.ErrStale) {
+		if !errors.Is(mapBrowserError(err), browser.ErrStale) {
 			t.Fatalf("stale dispatch: %v", err)
 		}
 	}

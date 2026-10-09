@@ -114,7 +114,7 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 		}
 		task, found, e := backend.store.Task(ctx, id)
 		if e != nil {
-			return result, mapBrowserError(e)
+			return result, e
 		}
 		if !found || task.ProjectID != project {
 			return result, browser.ErrInvalidRequest
@@ -126,11 +126,11 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 		if !factoryOnly {
 			at, e := backend.owner.timestamp()
 			if e != nil {
-				return result, mapBrowserError(e)
+				return result, e
 			}
 			observed, e := backend.store.Production(ctx, project, int(input.Offset), int(input.Limit), at)
 			if e != nil {
-				return result, mapBrowserError(e)
+				return result, e
 			}
 			page = observed
 			backend.observeProductionSources(ctx, project, page.Records)
@@ -143,7 +143,7 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 	case "activity":
 		output, err = backend.owner.contentActivity(ctx, project, int(input.Offset), int(input.Limit))
 		if err != nil {
-			return result, mapBrowserError(err)
+			return result, err
 		}
 	case "accesses":
 		id, e := browserContentIDValue(input.ID)
@@ -153,7 +153,7 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 		}
 		page, e := backend.store.ListContentRevisionAccesses(ctx, project, id, rev, int(input.Offset), int(input.Limit))
 		if e != nil {
-			return result, mapBrowserError(e)
+			return result, e
 		}
 		items := make([]map[string]any, 0, len(page.Items))
 		for _, item := range page.Items {
@@ -163,11 +163,11 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 	case "search":
 		repository, e := backend.owner.knowledgeRepository(ctx, project, input.RepositoryID)
 		if e != nil {
-			return result, mapBrowserError(e)
+			return result, e
 		}
 		page, e := backend.store.SearchKnowledge(ctx, project, repository, kernel.KnowledgeQuery{OpenOnly: input.OpenOnly, Documents: input.DocumentsOnly, Kind: kernel.ContentKind(input.Kind), Query: input.Query, Branch: input.Branch, Environment: input.Environment, Entity: input.Entity, Thread: input.Thread, Offset: int(input.Offset), Limit: int(input.Limit)})
 		if e != nil {
-			return result, mapBrowserError(e)
+			return result, e
 		}
 		out := api.ContentList{Items: []api.Content{}, NextOffset: uint64(page.NextOffset)}
 		for _, item := range page.Items {
@@ -177,7 +177,7 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 	case "list":
 		page, e := backend.store.ListContent(ctx, project, kernel.ContentKind(input.Kind), int(input.Offset), int(input.Limit))
 		if e != nil {
-			return result, mapBrowserError(e)
+			return result, e
 		}
 		out := api.ContentList{Items: []api.Content{}, NextOffset: uint64(page.NextOffset)}
 		for _, item := range page.Items {
@@ -191,7 +191,7 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 		}
 		item, e := backend.store.Content(ctx, id, int64(input.Revision))
 		if e != nil {
-			return result, mapBrowserError(e)
+			return result, e
 		}
 		if item.ProjectID != project {
 			return result, browser.ErrUnauthorized
@@ -205,18 +205,18 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 		}
 		item, e := backend.store.Content(ctx, id, rev.Int64())
 		if e != nil {
-			return result, mapBrowserError(e)
+			return result, e
 		}
 		if item.ProjectID != project {
 			return result, browser.ErrUnauthorized
 		}
 		item, sourceBody, e := backend.owner.contentBodySource(ctx, item)
 		if e != nil {
-			return result, mapBrowserError(e)
+			return result, e
 		}
 		page, e := pageContentBody(item, sourceBody, int(input.Offset), int(input.Limit))
 		if e != nil {
-			return result, mapBrowserError(e)
+			return result, e
 		}
 		output = api.ContentBody{ID: page.ID.String(), Revision: uint64(page.Revision.Int64()), Offset: uint64(page.Offset), Body: page.Body, NextOffset: uint64(page.NextOffset), Complete: page.Complete}
 	case "create", "revise":
@@ -239,7 +239,7 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 			}
 		}
 		if e = backend.owner.validateKnowledgeWrite(ctx, true, kernel.AttemptDigest{}, spec, expected); e != nil {
-			return result, mapBrowserError(e)
+			return result, e
 		}
 		var item kernel.ContentRevision
 		if request.Operation == "create" {
@@ -249,11 +249,11 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 				}
 				spec.RepositoryDevice, spec.RepositoryInode = existing.RepositoryDevice, existing.RepositoryInode
 			} else if existingErr != kernel.ErrNotFound {
-				return result, mapBrowserError(existingErr)
+				return result, existingErr
 			}
 			spec, e = backend.owner.writeContentSource(ctx, spec, 1)
 			if e != nil {
-				return result, mapBrowserError(e)
+				return result, e
 			}
 			item, e = backend.store.CreateContent(ctx, spec, at)
 		} else {
@@ -263,7 +263,7 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 			}
 			current, ce := backend.store.Content(ctx, id, rev.Int64())
 			if ce != nil {
-				return result, mapBrowserError(ce)
+				return result, ce
 			}
 			if current.ProjectID != project {
 				return result, browser.ErrUnauthorized
@@ -273,12 +273,12 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 			}
 			spec, e = backend.owner.writeContentSource(ctx, spec, input.ExpectedRevision+1)
 			if e != nil {
-				return result, mapBrowserError(e)
+				return result, e
 			}
 			item, e = backend.store.ReviseContent(ctx, rev, spec, at)
 		}
 		if e != nil {
-			return result, mapBrowserError(e)
+			return result, e
 		}
 		output = backend.owner.knowledgeDTO(ctx, item)
 	case "deprecate":
@@ -289,7 +289,7 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 		}
 		current, ce := backend.store.Content(ctx, id, rev.Int64())
 		if ce != nil {
-			return result, mapBrowserError(ce)
+			return result, ce
 		}
 		if current.ProjectID != project {
 			return result, browser.ErrUnauthorized
@@ -299,7 +299,7 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 		}
 		item, e := backend.store.DeprecateContent(ctx, id, project, rev, fmt.Sprintf("browser:%s", client.ID.String()), at)
 		if e != nil {
-			return result, mapBrowserError(e)
+			return result, e
 		}
 		output = backend.owner.knowledgeDTO(ctx, item)
 	case "outcome_list":
@@ -309,7 +309,7 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 		}
 		page, e := list(ctx, project, int(input.Offset), int(input.Limit))
 		if e != nil {
-			return result, mapBrowserError(e)
+			return result, e
 		}
 		if input.Kind == "mission" {
 			items := make([]map[string]any, 0, len(page.Items))
@@ -337,7 +337,7 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 		}
 		created, ce := backend.store.CreateMissionForBrowser(ctx, client.ID, kernel.MissionCreate{ID: id, ProjectID: project, OwnerAgentID: owner, ExpectedAgentRevision: revision, Objective: input.Objective, Criteria: input.Criteria}, at)
 		if ce != nil {
-			return result, mapBrowserError(ce)
+			return result, ce
 		}
 		out := outcomeDTO(created.Mission)
 		out.Objective, out.Criteria = "", ""
@@ -350,7 +350,7 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 		}
 		items, next, e := backend.store.ListMissionTasks(ctx, project, id, int(input.Offset), int(input.Limit))
 		if e != nil {
-			return result, mapBrowserError(e)
+			return result, e
 		}
 		tasks := make([]map[string]any, 0, len(items))
 		for _, item := range items {
@@ -369,7 +369,7 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 			item, e = backend.store.WriteOutcomeForBrowser(ctx, client.ID, kernel.NewOutcome{ID: id, ProjectID: project, Document: input.Document}, int64(input.ExpectedRevision), at)
 		}
 		if e != nil {
-			return result, mapBrowserError(e)
+			return result, e
 		}
 		out := outcomeDTO(item)
 		// The full document already includes these potentially large strings.
