@@ -539,13 +539,13 @@ func TestRefusedEnqueueBecomesAnOverseerItem(t *testing.T) {
 	if _, err := reviewNow(ctx, fixture.daemon, project, publishedReviewRequest()); err == nil {
 		t.Fatal("a refused enqueue reported success")
 	}
-	for range review.RefusalsBeforeEscalation - 1 {
+	for range review.FailuresBeforeEscalation - 1 {
 		if _, err := fixture.daemon.advanceReviewOperations(ctx, false); err != nil {
 			t.Fatal(err)
 		}
 	}
 	op := lastDurableReview(t, fixture.store, project)
-	if op.State != "enqueued" || op.RoutePending || !strings.Contains(op.Escalation, "would not take it") {
+	if op.State != "enqueued" || op.RoutePending || !strings.Contains(op.Escalation, "failed 6 passes in a row") {
 		t.Fatalf("refused enqueue operation = %+v", op)
 	}
 	overseer, err := fixture.store.CreateAgent(ctx, kernel.NewAgent{ID: mustAgentID(t, testID(234)), ProjectID: project, Name: "overseer", Role: kernel.RoleOrchestrator, Provider: kernel.ProviderCodex, ToolBudgetLimit: 2}, mustKernelTime(t, 1001))
@@ -758,11 +758,11 @@ func TestRefusedEnqueueResendsEachTickAndEndsFromThePull(t *testing.T) {
 		}
 		return lastDurableReview(t, fixture.store, project)
 	}
-	if op := tick(); op.State != "enqueued" || op.Escalation != "" || op.Refusals != 2 || backend.enqueues != 2 {
+	if op := tick(); op.State != "enqueued" || op.Escalation != "" || op.Failures != 2 || backend.enqueues != 2 {
 		t.Fatalf("refused again: %+v (enqueues %d)", op, backend.enqueues)
 	}
 	backend.enqueueRefused = false
-	if op := tick(); op.State != "enqueued" || op.Refusals != 0 || op.Enqueues != 1 || backend.enqueues != 3 {
+	if op := tick(); op.State != "enqueued" || op.Failures != 0 || op.Enqueues != 1 || backend.enqueues != 3 {
 		t.Fatalf("accepted: %+v (enqueues %d)", op, backend.enqueues)
 	}
 	backend.pull = &review.Pull{Head: publishedReviewRequest().Head, State: "closed"}

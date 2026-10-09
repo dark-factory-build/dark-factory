@@ -3699,12 +3699,12 @@ impl Authority {
         .await?;
         // The rules active on the base branch, rulesets' required status
         // checks among them; readable with Metadata read.
-        let rules: Vec<BranchRule> = github_json(
+        let rules = github_json::<Vec<BranchRule>>(
             &format!("{api}/rules/branches/{}?per_page=100", percent_encode(base)),
             token.as_str(),
         )
-        .await?;
-        let required = required_check_names(&rules);
+        .await;
+        let required = required_check_names(rules);
         if !(0..=100).contains(&response.total_count)
             || response.total_count as usize != response.check_runs.len()
         {
@@ -4621,10 +4621,15 @@ struct BranchRule {
     parameters: serde_json::Value,
 }
 
-/// The status-check names a branch's rules require.
+/// The status-check names a branch's rules require. A failed rules read
+/// requires nothing here: GitHub still enforces its required checks when the
+/// head is enqueued, so the read only decides what the caller waits on.
 #[cfg(any(target_arch = "wasm32", test))]
-fn required_check_names(rules: &[BranchRule]) -> std::collections::BTreeSet<String> {
+fn required_check_names<E>(
+    rules: Result<Vec<BranchRule>, E>,
+) -> std::collections::BTreeSet<String> {
     rules
+        .unwrap_or_default()
         .iter()
         .filter(|rule| rule.kind == "required_status_checks")
         .filter_map(|rule| rule.parameters["required_status_checks"].as_array())
@@ -7567,10 +7572,13 @@ mod tests {
         ]))
         .unwrap();
         assert_eq!(
-            required_check_names(&rules).into_iter().collect::<Vec<_>>(),
+            required_check_names(Ok::<_, ()>(rules))
+                .into_iter()
+                .collect::<Vec<_>>(),
             ["checks", "review"]
         );
-        assert!(required_check_names(&[]).is_empty());
+        // A refused or malformed rules read degrades to "nothing required".
+        assert!(required_check_names(Err::<Vec<BranchRule>, _>(Error::Rejected(404))).is_empty());
     }
 
     #[test]

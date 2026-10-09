@@ -38,7 +38,7 @@ type Operation struct {
 	Escalation   string    `json:"escalation,omitempty"` // why factoryd cannot advance it: due to the overseer
 	Handled      bool      `json:"handled,omitempty"`    // a failure already retried or escalated
 	Enqueues     int       `json:"enqueues,omitempty"`   // times factoryd put this head in the merge queue
-	Refusals     int       `json:"refusals,omitempty"`   // consecutive passes whose enqueue failed
+	Failures     int       `json:"failures,omitempty"`   // consecutive merge-stage passes that failed
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
 }
@@ -125,9 +125,9 @@ func (g *GroupRun) note(head string) string {
 	return note
 }
 
-// RefusalsBeforeEscalation is how many consecutive passes may fail to
-// enqueue before the overseer is told: 30 minutes at the 5-minute merge tick.
-const RefusalsBeforeEscalation = 6
+// FailuresBeforeEscalation is how many consecutive merge-stage passes may
+// fail before the overseer is told: 30 minutes at the 5-minute merge tick.
+const FailuresBeforeEscalation = 6
 
 type Coordinator struct {
 	Store   Store
@@ -232,8 +232,11 @@ func (c Coordinator) Advance(ctx context.Context, op Operation) (Operation, erro
 	}
 	pull, err := c.Backend.ObservePull(ctx, op)
 	if err != nil {
-		return op, err
+		return c.failedPass(ctx, op, err)
 	}
+	// A pass that observes resets the failure count and any escalation.
+	failures, escalation, enqueues := op.Failures, op.Escalation, op.Enqueues
+	op.Failures, op.Escalation = 0, ""
 	head := op.Request.Head
 	switch {
 	case !strings.EqualFold(pull.Head, head):
@@ -243,33 +246,38 @@ func (c Coordinator) Advance(ctx context.Context, op Operation) (Operation, erro
 	case pull.Mergeable != nil && !*pull.Mergeable:
 		op.State, op.RoutePending = "ejected", true
 		op.Detail = fmt.Sprintf("Exact head %s conflicts with %s. Rebase this Change onto origin/%s and resolve the conflict.", head, op.Request.BaseRef, op.Request.BaseRef)
-	case pull.Queued && op.Escalation == "" && op.Refusals == 0:
-		return op, nil
 	case pull.Queued:
-		op.Escalation, op.Refusals = "", 0
 	case len(pull.Failing) > 0:
 		op.State, op.RoutePending = "ejected", true
 		op.Detail = fmt.Sprintf("Exact head %s cannot merge. Failing checks: %s.", head, strings.Join(pull.Failing, ", "))
 	case pull.Pending:
-		return op, nil
 	case op.Enqueues >= 2:
 		// Queued, removed, re-queued once and removed again.
 		op.State, op.RoutePending, op.Detail = "ejected", true, pull.Group.note(head)
 	default:
 		if err := c.Backend.Enqueue(ctx, op); err != nil {
-			// A transient failure, or a merge landing between the read and
-			// the write, settles on a later pass; one that persists is
-			// escalated once.
-			if op.Refusals++; op.Refusals == RefusalsBeforeEscalation {
-				op.Escalate(fmt.Sprintf("the merge queue would not take it in %d passes with every required check on that head passing: %v", op.Refusals, err))
-			}
-			op.UpdatedAt = c.Now()
-			return op, errors.Join(err, c.Store.Update(ctx, op))
+			op.Failures, op.Escalation = failures, escalation
+			return c.failedPass(ctx, op, err)
 		}
-		op.Enqueues, op.Refusals, op.Escalation = op.Enqueues+1, 0, ""
+		op.Enqueues++
+	}
+	if op.State == "enqueued" && failures == 0 && escalation == "" && op.Enqueues == enqueues {
+		return op, nil // waiting, unchanged
 	}
 	op.UpdatedAt = c.Now()
 	return op, c.Store.Update(ctx, op)
+}
+
+// failedPass records a pass that could not observe the pull request or
+// enqueue its head. A transient failure, or a merge landing between the read
+// and the write, settles on a later pass; one that persists for
+// FailuresBeforeEscalation consecutive passes is escalated once.
+func (c Coordinator) failedPass(ctx context.Context, op Operation, cause error) (Operation, error) {
+	if op.Failures++; op.Failures == FailuresBeforeEscalation {
+		op.Escalate(fmt.Sprintf("its merge stage failed %d passes in a row: %v", op.Failures, cause))
+	}
+	op.UpdatedAt = c.Now()
+	return op, errors.Join(cause, c.Store.Update(ctx, op))
 }
 
 // Escalate records why factoryd cannot advance the pull request, which makes
