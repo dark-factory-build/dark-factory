@@ -12,23 +12,25 @@ import (
 	"testing"
 )
 
-// A current home opens untouched; a v34 home (the current schema plus the
-// four tables v35 dropped) migrates and keeps every surviving row.
-func TestCurrentAndV34HomesOpenWithEveryRow(t *testing.T) {
-	for _, v34 := range []bool{false, true} {
-		t.Run(fmt.Sprintf("v34=%v", v34), func(t *testing.T) { testHomeOpensWithEveryRow(t, v34) })
+// A current home opens untouched; a v35 home (the same schema) migrates its
+// 'enqueuing' review operations to 'enqueued' and keeps every other row.
+func TestCurrentAndV35HomesOpenWithEveryRow(t *testing.T) {
+	for _, v35 := range []bool{false, true} {
+		t.Run(fmt.Sprintf("v35=%v", v35), func(t *testing.T) { testHomeOpensWithEveryRow(t, v35) })
 	}
 }
 
-func testHomeOpensWithEveryRow(t *testing.T, v34 bool) {
+func testHomeOpensWithEveryRow(t *testing.T, v35 bool) {
 	ctx := context.Background()
 	store, path := newTestStore(t)
 	seedDurableAuthority(t, store)
-	if v34 {
-		for _, statement := range append(v34Dropped, fmt.Sprintf("PRAGMA user_version = %d", v34UserVersion)) {
-			if _, err := store.writer.ExecContext(ctx, statement); err != nil {
-				t.Fatal(err)
-			}
+	operation := map[string]any{"id": "allowed", "state": "enqueuing", "enqueue_id": "e", "request": map[string]any{"Repository": "example/factory", "PullNumber": 7, "Head": strings.Repeat("a", 40)}}
+	if err := store.RecordReviewOperation(ctx, projectID(t, 1), "example/factory", "allowed", operation, mustTime(t, 6)); err != nil {
+		t.Fatal(err)
+	}
+	if v35 {
+		if _, err := store.writer.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", v35UserVersion)); err != nil {
+			t.Fatal(err)
 		}
 	}
 	connection, err := store.readerConnection(ctx)
@@ -56,8 +58,13 @@ func testHomeOpensWithEveryRow(t *testing.T, v34 bool) {
 	if _, version, err := inspectIdentity(ctx, again); err != nil || version != userVersion {
 		t.Fatalf("user_version = %d, %v, want %d", version, err, userVersion)
 	}
+	if v35 {
+		for index, row := range before["production_records"] {
+			before["production_records"][index] = strings.Replace(row, `"state":"enqueuing"`, `"state":"enqueued"`, 1)
+		}
+	}
 	if after := snapshotRows(t, ctx, again); !reflect.DeepEqual(before, after) {
-		t.Fatal("opening the home changed rows")
+		t.Fatalf("opening the home changed rows:\n%v\n%v", before["production_records"], after["production_records"])
 	}
 }
 
@@ -104,9 +111,5 @@ func TestSchemaDigestsArePinned(t *testing.T) {
 	sum := sha256.Sum256([]byte(strings.Join(schemaStatements, "\n")))
 	if got := hex.EncodeToString(sum[:]); got != "bfc5b62285b00148bc836d389f684eb3112e551952f477e27354cf35174460f0" {
 		t.Errorf("current schema digest = %s", got)
-	}
-	sum = sha256.Sum256([]byte(strings.Join(v34SchemaStatements(), "\n")))
-	if got := hex.EncodeToString(sum[:]); got != "a335c0acf8d7e6926d5f27b016106a118649dfeb3efe5da787687e94fb961738" {
-		t.Errorf("v34 schema digest = %s", got)
 	}
 }
