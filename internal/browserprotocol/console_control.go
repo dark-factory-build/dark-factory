@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	"github.com/dark-factory-build/dark-factory/internal/opgraph"
 )
 
 // AttachmentRetention reads the setting when Enabled is absent, or saves it.
@@ -277,18 +279,18 @@ type GraphSource struct {
 }
 
 type GraphNode struct {
-	ID      string `json:"id"`
-	Kind    string `json:"kind"`
-	Label   string `json:"label"`
-	Unit    string `json:"unit,omitempty"`
-	Runtime string `json:"runtime,omitempty"`
-	Trigger string `json:"trigger,omitempty"`
+	ID      string            `json:"id"`
+	Kind    opgraph.Kind      `json:"kind"`
+	Label   string            `json:"label"`
+	Unit    string            `json:"unit,omitempty"`
+	Runtime opgraph.Placement `json:"runtime,omitempty"`
+	Trigger opgraph.Trigger   `json:"trigger,omitempty"`
 	// Paths are the code a node is built from, spelled as run and change
 	// paths are: repository-prefixed only in multi-repository projects.
-	Paths       []string `json:"paths"`
-	Evidence    string   `json:"evidence"`
-	Observation string   `json:"observation"`
-	State       string   `json:"state"`
+	Paths       []string              `json:"paths"`
+	Evidence    opgraph.EvidenceState `json:"evidence"`
+	Observation opgraph.Visibility    `json:"observation"`
+	State       opgraph.Activity      `json:"state"`
 	// Integers only on this wire: events per hour, errors per thousand.
 	RatePerHour   uint64 `json:"rate_per_hour,omitempty"`
 	ErrorPermille uint32 `json:"error_permille,omitempty"`
@@ -298,27 +300,16 @@ type GraphNode struct {
 }
 
 type GraphEdge struct {
-	From        string `json:"from"`
-	To          string `json:"to"`
-	Kind        string `json:"kind"`
-	Evidence    string `json:"evidence"`
-	Observation string `json:"observation"`
-	State       string `json:"state"`
-	RatePerHour uint64 `json:"rate_per_hour,omitempty"`
+	From        string                `json:"from"`
+	To          string                `json:"to"`
+	Kind        opgraph.EdgeKind      `json:"kind"`
+	Evidence    opgraph.EvidenceState `json:"evidence"`
+	Observation opgraph.Visibility    `json:"observation"`
+	State       opgraph.Activity      `json:"state"`
+	RatePerHour uint64                `json:"rate_per_hour,omitempty"`
 }
 
-type GraphSummary struct {
-	Components   uint32 `json:"components"`
-	Inferred     uint32 `json:"inferred"`
-	Observed     uint32 `json:"observed"`
-	Quiet        uint32 `json:"quiet"`
-	Partial      uint32 `json:"partial"`
-	Stale        uint32 `json:"stale"`
-	Unobserved   uint32 `json:"unobserved"`
-	Opaque       uint32 `json:"opaque"`
-	RuntimeOnly  uint32 `json:"runtime_only"`
-	Contradicted uint32 `json:"contradicted"`
-}
+type GraphSummary = opgraph.Summary
 
 type OperationalNodeGet struct {
 	ProjectID string `json:"project_id"`
@@ -337,12 +328,7 @@ type OperationalNode struct {
 	Observers []string          `json:"observers"`
 }
 
-type GraphEvidence struct {
-	Origin     string `json:"origin"`
-	Source     string `json:"source"`
-	Detail     string `json:"detail,omitempty"`
-	Confidence string `json:"confidence"`
-}
+type GraphEvidence = opgraph.Evidence
 
 type GraphLocation struct {
 	RepositoryID string `json:"repository_id"`
@@ -737,9 +723,7 @@ func validConsoleControl(kind MessageType, body any) error {
 			return bad()
 		}
 	case OperationalGraph:
-		if !validOperationalGraph(value) {
-			return bad()
-		}
+		return validOperationalGraph(value)
 	case OperationalNodeGet:
 		if validateDynamicID(value.ProjectID) != nil || validateDynamicID(value.NodeID) != nil {
 			return bad()
@@ -862,64 +846,49 @@ func validGraphRevision(value string) bool {
 	return err == nil
 }
 
-var (
-	graphKinds        = map[string]bool{"processor": true, "ingress": true, "job": true, "queue": true, "store": true, "external": true, "unknown": true}
-	graphEdgeKinds    = map[string]bool{"handles": true, "calls": true, "uses": true, "publishes": true, "consumes": true, "runs": true}
-	graphEvidence     = map[string]bool{"static": true, "runtime": true, "both": true, "uncertain": true, "contradicted": true}
-	graphObservations = map[string]bool{"observed": true, "quiet": true, "partial": true, "stale": true, "unobserved": true, "opaque": true}
-	graphStates       = map[string]bool{"active": true, "degraded": true, "failing": true, "idle": true, "unknown": true}
-	graphRuntimes     = map[string]bool{"": true, "process": true, "cli": true, "worker": true, "server": true, "browser": true, "ci": true}
-	graphTriggers     = map[string]bool{"": true, "request": true, "timer": true, "message": true}
-)
-
-func validGraphReading(evidence, observation, state string, rate uint64) bool {
-	// Idle is a claim only a source that can see the node may make, and a
-	// rate is a claim only an observation may make.
-	return graphEvidence[evidence] && graphObservations[observation] && graphStates[state] && (state != "idle" || observation == "quiet") &&
-		(rate == 0 || observation != "unobserved" && observation != "stale") && rate <= 1<<53-1
-}
-
-func validOperationalGraph(value OperationalGraph) bool {
-	if validateDynamicID(value.ProjectID) != nil || len(value.Digest) != 64 || value.ObservedAt < 0 || value.ObservedAt > 1<<53-1 ||
+// validOperationalGraph keeps shape, sizes and references; values are opgraph's
+// typed sets, never checked against a second list. The reason names the check.
+func validOperationalGraph(value OperationalGraph) error {
+	bad := func(what string) error { return fmt.Errorf("%w: graph %.12s %s", ErrMalformed, value.Digest, what) }
+	if validateDynamicID(value.ProjectID) != nil || value.ObservedAt < 0 || value.ObservedAt > 1<<53-1 ||
 		value.Sources == nil || len(value.Sources) > 256 || len(value.Nodes) > MaxSnapshotEntities || len(value.Edges) > MaxSnapshotEntities {
-		return false
+		return bad("bounds")
 	}
 	if _, err := fixedHex("digest", value.Digest, 32); err != nil {
-		return false
+		return bad("digest")
 	}
 	for _, source := range value.Sources {
 		if validateDynamicID(source.RepositoryID) != nil || validateBoundedText(source.Name, 1, MaxAgentNameBytes) != nil || (source.Kind != "integrated" && source.Kind != "unavailable") ||
 			validateBoundedText(source.TargetRef, 0, 256) != nil || !validGraphRevision(source.Revision) || source.Kind == "integrated" && source.Revision == "" ||
 			source.ObservedAt < 0 || source.ObservedAt > 1<<53-1 || validateBoundedText(source.Reason, 0, 256) != nil {
-			return false
+			return bad("source")
 		}
 	}
 	ids := make(map[string]bool, len(value.Nodes))
 	for _, node := range value.Nodes {
-		if validateDynamicID(node.ID) != nil || ids[node.ID] || !graphKinds[node.Kind] || validateBoundedText(node.Label, 1, 256) != nil ||
-			node.Unit != "" && validateDynamicID(node.Unit) != nil || !graphRuntimes[node.Runtime] || !graphTriggers[node.Trigger] ||
+		if validateDynamicID(node.ID) != nil || ids[node.ID] || validateBoundedText(node.Label, 1, 256) != nil || node.Unit != "" && validateDynamicID(node.Unit) != nil ||
 			node.Paths == nil || len(node.Paths) > 128 || node.LastSeen < 0 || node.LastSeen > 1<<53-1 || node.DeployedAt < 0 || node.DeployedAt > 1<<53-1 ||
-			!validGraphReading(node.Evidence, node.Observation, node.State, node.RatePerHour) || node.ErrorPermille > 1000 {
-			return false
+			node.RatePerHour > 1<<53-1 || node.ErrorPermille > 1000 {
+			return bad("node")
 		}
 		for _, path := range node.Paths {
 			if validateBoundedText(path, 1, MaxTaskTitleBytes) != nil {
-				return false
+				return bad("node path")
 			}
 		}
 		ids[node.ID] = true
 	}
 	for _, node := range value.Nodes {
 		if node.Unit != "" && !ids[node.Unit] {
-			return false
+			return bad("node unit")
 		}
 	}
 	for _, edge := range value.Edges {
-		if !ids[edge.From] || !ids[edge.To] || edge.From == edge.To || !graphEdgeKinds[edge.Kind] || !validGraphReading(edge.Evidence, edge.Observation, edge.State, edge.RatePerHour) {
-			return false
+		if !ids[edge.From] || !ids[edge.To] || edge.From == edge.To || edge.RatePerHour > 1<<53-1 {
+			return bad("edge")
 		}
 	}
-	return true
+	return nil
 }
 
 func validOperationalNode(value OperationalNode) bool {
@@ -934,7 +903,7 @@ func validOperationalNode(value OperationalNode) bool {
 		}
 	}
 	for _, item := range value.Evidence {
-		if (item.Origin != "static" && item.Origin != "runtime") || validateBoundedText(item.Source, 1, 64) != nil || validateBoundedText(item.Detail, 0, 256) != nil || validateBoundedText(item.Confidence, 1, 32) != nil {
+		if validateBoundedText(item.Source, 1, 64) != nil || validateBoundedText(item.Detail, 0, 256) != nil || validateBoundedText(item.Confidence, 1, 32) != nil {
 			return false
 		}
 	}

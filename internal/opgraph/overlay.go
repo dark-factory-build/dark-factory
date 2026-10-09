@@ -10,12 +10,12 @@ import (
 // can see it; State says what it is doing, and is "unknown" whenever the
 // observation cannot support a claim. Static evidence never sets State.
 type Status struct {
-	Observation string  `json:"observation"` // observed | quiet | partial | stale | unobserved | opaque
-	State       string  `json:"state"`       // active | degraded | failing | idle | unknown
-	Rate        float64 `json:"rate,omitempty"`
-	ErrorRate   float64 `json:"error_rate,omitempty"`
-	LatencyP95  float64 `json:"latency_p95_ms,omitempty"`
-	LastSeen    int64   `json:"last_seen,omitempty"`
+	Observation Visibility `json:"observation"`
+	State       Activity   `json:"state"`
+	Rate        float64    `json:"rate,omitempty"`
+	ErrorRate   float64    `json:"error_rate,omitempty"`
+	LatencyP95  float64    `json:"latency_p95_ms,omitempty"`
+	LastSeen    int64      `json:"last_seen,omitempty"`
 	// DeployedAt is the last deploy observed for this unit; a changeover,
 	// not traffic.
 	DeployedAt int64    `json:"deployed_at,omitempty"`
@@ -106,18 +106,18 @@ func Overlay(system string, static Graph, observations []Observation, coverage [
 		status := run.status(node.ID)
 		staticEvidence := false
 		for _, item := range node.Evidence {
-			staticEvidence = staticEvidence || item.Origin == "static"
+			staticEvidence = staticEvidence || item.Origin == OriginStatic
 		}
 		switch {
 		case !staticEvidence:
-			status.Observation = "stale"
+			status.Observation = Stale
 			if status.Rate > 0 {
-				status.Observation = "observed"
+				status.Observation = Observed
 			}
 		case node.Kind == External:
-			status.Observation = "opaque"
+			status.Observation = Opaque
 			if status.count == 0 && silentHost(run.builder, node, users[node.ID], current) {
-				status.Observation = "quiet"
+				status.Observation = Quiet
 			}
 		case node.Unit == "" && node.Kind != Processor:
 			status.Observation = sharedObservation(node, users[node.ID], current, status)
@@ -137,8 +137,8 @@ func Overlay(system string, static Graph, observations []Observation, coverage [
 			continue
 		}
 		parent := live.Nodes[node.Unit]
-		if child := live.Nodes[node.ID].Observation; parent != nil && (parent.Observation == "observed" || parent.Observation == "quiet") && (child == "partial" || child == "unobserved") {
-			parent.Observation = "partial"
+		if child := live.Nodes[node.ID].Observation; parent != nil && (parent.Observation == Observed || parent.Observation == Quiet) && (child == Partial || child == Unobserved) {
+			parent.Observation = Partial
 		}
 	}
 	for _, status := range live.Nodes {
@@ -157,13 +157,13 @@ func Overlay(system string, static Graph, observations []Observation, coverage [
 			copied := *live.Nodes[end]
 			status = &copied
 		case status.count > 0:
-			status.Observation = "observed"
-		case hasPeers(current[edge.From]), edge.Kind == Calls && live.Nodes[edge.To].Observation == "quiet" && byID[edge.To].Kind == External:
-			status.Observation = "quiet"
+			status.Observation = Observed
+		case hasPeers(current[edge.From]), edge.Kind == Calls && live.Nodes[edge.To].Observation == Quiet && byID[edge.To].Kind == External:
+			status.Observation = Quiet
 		case expired[edge.From]:
-			status.Observation = "stale"
+			status.Observation = Stale
 		default:
-			status.Observation = "unobserved"
+			status.Observation = Unobserved
 		}
 		status.State = state(status)
 		live.Edges[key] = status
@@ -172,26 +172,26 @@ func Overlay(system string, static Graph, observations []Observation, coverage [
 		status := live.Nodes[node.ID]
 		live.Summary.Components++
 		switch State(node.Evidence) {
-		case "runtime":
+		case EvidenceRuntime:
 			live.Summary.RuntimeOnly++
-		case "contradicted":
+		case EvidenceContradicted:
 			live.Summary.Contradicted++
 		}
-		if State(node.Evidence) != "runtime" {
+		if State(node.Evidence) != EvidenceRuntime {
 			live.Summary.Inferred++
 		}
 		switch status.Observation {
-		case "observed":
+		case Observed:
 			live.Summary.Observed++
-		case "quiet":
+		case Quiet:
 			live.Summary.Quiet++
-		case "partial":
+		case Partial:
 			live.Summary.Partial++
-		case "stale":
+		case Stale:
 			live.Summary.Stale++
-		case "unobserved":
+		case Unobserved:
 			live.Summary.Unobserved++
-		case "opaque":
+		case Opaque:
 			live.Summary.Opaque++
 		}
 	}
@@ -199,32 +199,32 @@ func Overlay(system string, static Graph, observations []Observation, coverage [
 	return live
 }
 
-func unitObservation(node *Node, current []Coverage, expired bool, status *Status) string {
+func unitObservation(node *Node, current []Coverage, expired bool, status *Status) Visibility {
 	// Traffic bound in the window is an observation whatever the coverage says.
 	if status.count > 0 {
-		return "observed"
+		return Observed
 	}
 	for _, item := range current {
 		if node.Kind == Processor || covers(item, node) {
 			if status.count > 0 {
-				return "observed"
+				return Observed
 			}
 			// Silence is only claimed for what the source has been seen to
 			// report: a static guess it never matched (a route prefix the
 			// code hid, a timer slower than any window we hold) stays partial.
-			if node.Kind != Processor && !runtimeSeen(node) || node.Trigger == "timer" {
-				return "partial"
+			if node.Kind != Processor && !runtimeSeen(node) || node.Trigger == TriggerTimer {
+				return Partial
 			}
-			return "quiet"
+			return Quiet
 		}
 	}
 	switch {
 	case len(current) > 0:
-		return "partial"
+		return Partial
 	case expired:
-		return "stale"
+		return Stale
 	}
-	return "unobserved"
+	return Unobserved
 }
 
 // silentHost: an exact outside HTTP host every caller of which is covered by
@@ -277,49 +277,49 @@ func (live *Live) NotConnected(host, service string) {
 			continue
 		}
 		switch status.Observation {
-		case "opaque":
+		case Opaque:
 			live.Summary.Opaque--
-		case "quiet":
+		case Quiet:
 			live.Summary.Quiet--
 		default:
 			continue
 		}
 		live.Summary.Unobserved++
-		status.Observation, status.State, moved[node.ID] = "unobserved", "unknown", true
+		status.Observation, status.State, moved[node.ID] = Unobserved, StateUnknown, true
 	}
 	for key, status := range live.Edges {
 		if moved[key[1]] && status.count == 0 {
-			status.Observation, status.State = "unobserved", "unknown"
+			status.Observation, status.State = Unobserved, StateUnknown
 		}
 	}
 }
 
 func runtimeSeen(node *Node) bool {
 	for _, item := range node.Evidence {
-		if item.Origin == "runtime" {
+		if item.Origin == OriginRuntime {
 			return true
 		}
 	}
 	return false
 }
 
-func sharedObservation(node *Node, users []string, current map[string][]Coverage, status *Status) string {
+func sharedObservation(node *Node, users []string, current map[string][]Coverage, status *Status) Visibility {
 	if status.count > 0 {
-		return "observed"
+		return Observed
 	}
 	seen := false
 	for _, user := range users {
 		for _, item := range current[user] {
 			if item.Peers || covers(item, node) {
-				return "quiet"
+				return Quiet
 			}
 			seen = true
 		}
 	}
 	if seen {
-		return "partial"
+		return Partial
 	}
-	return "unobserved"
+	return Unobserved
 }
 
 // covers: the source can report every selector the node binds on.
@@ -345,23 +345,23 @@ func hasPeers(items []Coverage) bool {
 	return false
 }
 
-func state(status *Status) string {
+func state(status *Status) Activity {
 	switch status.Observation {
-	case "quiet":
-		return "idle"
-	case "observed", "partial", "opaque":
+	case Quiet:
+		return Idle
+	case Observed, Partial, Opaque:
 		if status.count == 0 {
-			return "unknown"
+			return StateUnknown
 		}
 		switch ratio := float64(status.errors) / float64(status.count); {
 		case ratio >= 0.5:
-			return "failing"
+			return Failing
 		case ratio >= 0.05:
-			return "degraded"
+			return Degraded
 		}
-		return "active"
+		return Active
 	}
-	return "unknown"
+	return StateUnknown
 }
 
 type overlay struct {
@@ -409,7 +409,7 @@ func (run *overlay) count(status *Status, item Observation) {
 	status.count += item.Count
 	status.errors += item.Errors
 	status.Rate = float64(status.count) / (float64(run.window) / float64(bucket))
-	status.ErrorRate = float64(status.errors) / float64(max(status.count, 1))
+	status.ErrorRate = float64(min(status.errors, status.count)) / float64(max(status.count, 1)) // a sender may claim more errors than calls
 	status.LatencyP95 = max(status.LatencyP95, item.LatencyP95)
 }
 
@@ -423,7 +423,7 @@ func (run *overlay) observe(item Observation) {
 		return
 	}
 	runtime := func(confidence string) Evidence {
-		return Evidence{Origin: "runtime", Source: item.Source, Detail: item.Environment, Confidence: confidence}
+		return Evidence{Origin: OriginRuntime, Source: item.Source, Detail: item.Environment, Confidence: confidence}
 	}
 	if item.Kind == "client" || item.Kind == "producer" {
 		if unit == "" || len(item.Peer) == 0 {
@@ -473,7 +473,7 @@ func (run *overlay) observe(item Observation) {
 		// generic routes (/health, catch-alls) prove nothing.
 		if route := item.Attributes["http.route"]; route != "" && unit != "" && staticSegments(route) >= 2 && !strings.Contains(normaliseRoute(route), "{*}") {
 			if other := run.bind(map[string]string{"http.route": route, "http.request.method": item.Attributes["http.request.method"]}, "*"); other != nil {
-				other.Add(Evidence{Origin: "runtime", Source: item.Source, Detail: "observed served by " + run.builder.Lookup(unit).Label, Confidence: Contradicted}, nil)
+				other.Add(Evidence{Origin: OriginRuntime, Source: item.Source, Detail: "observed served by " + run.builder.Lookup(unit).Label, Confidence: Contradicted}, nil)
 			}
 		}
 		node = run.unknownNode(unit, item.Attributes)
@@ -650,7 +650,7 @@ func (run *overlay) unknownNode(unit string, attributes map[string]string) *Node
 	for name, value := range selectors {
 		node.Select(name, value)
 	}
-	run.builder.Edge(node.ID, unit, Handles, Evidence{Origin: "runtime", Source: "correlation", Detail: "unmapped", Confidence: Inferred})
+	run.builder.Edge(node.ID, unit, Handles, Evidence{Origin: OriginRuntime, Source: "correlation", Detail: "unmapped", Confidence: Inferred})
 	return node
 }
 

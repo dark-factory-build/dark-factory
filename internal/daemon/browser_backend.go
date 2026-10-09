@@ -802,10 +802,7 @@ func (backend *browserBackend) liveGraph(ctx context.Context, rawClient [browser
 // paths use the run-path spelling, so the console maps work onto nodes the
 // same way it maps it onto changes.
 func graphFrame(projectID string, graph projectGraph, live opgraph.Live, now int64) browserprotocol.OperationalGraph {
-	result := browserprotocol.OperationalGraph{ProjectID: projectID, Digest: graph.digest, ObservedAt: now, Sources: []browserprotocol.GraphSource{}}
-	for _, source := range graph.sources {
-		result.Sources = append(result.Sources, browserprotocol.GraphSource(source))
-	}
+	result := browserprotocol.OperationalGraph{ProjectID: projectID, Digest: graph.digest, ObservedAt: now, Sources: append([]browserprotocol.GraphSource{}, graph.sources...)}
 	spell := func(location opgraph.Location) string {
 		if len(graph.sources) > 1 {
 			return path.Join(location.Repository, location.Path)
@@ -814,14 +811,14 @@ func graphFrame(projectID string, graph projectGraph, live opgraph.Live, now int
 	}
 	for _, node := range live.Graph.Nodes {
 		status := live.Nodes[node.ID]
-		frame := browserprotocol.GraphNode{ID: node.ID, Kind: string(node.Kind), Label: node.Label, Unit: node.Unit, Runtime: node.Runtime, Trigger: node.Trigger,
+		frame := browserprotocol.GraphNode{ID: node.ID, Kind: node.Kind, Label: node.Label, Unit: node.Unit, Runtime: node.Runtime, Trigger: node.Trigger,
 			Paths: []string{}, Evidence: opgraph.State(node.Evidence), Observation: status.Observation, State: status.State,
-			RatePerHour: uint64(status.Rate * 60), ErrorPermille: uint32(status.ErrorRate * 1000), LatencyP95: uint32(status.LatencyP95), LastSeen: status.LastSeen, DeployedAt: status.DeployedAt}
+			RatePerHour: uint64(status.Rate * 60), ErrorPermille: uint32(status.ErrorRate * 1000), LatencyP95: uint32(min(status.LatencyP95, math.MaxUint32)), LastSeen: status.LastSeen, DeployedAt: status.DeployedAt}
 		if frame.Label == "" {
 			frame.Label = string(node.Kind)
 		}
 		for _, location := range append(append([]opgraph.Location{}, node.Modules...), node.Sources...) {
-			if spelled := spell(location); len(frame.Paths) < 128 && !slices.Contains(frame.Paths, spelled) {
+			if spelled := spell(location); len(frame.Paths) < 128 && len(spelled) <= browserprotocol.MaxTaskTitleBytes && !slices.Contains(frame.Paths, spelled) {
 				frame.Paths = append(frame.Paths, spelled)
 			}
 		}
@@ -829,13 +826,10 @@ func graphFrame(projectID string, graph projectGraph, live opgraph.Live, now int
 	}
 	for _, edge := range live.Graph.Edges {
 		status := live.Edges[[3]string{edge.From, edge.To, string(edge.Kind)}]
-		result.Edges = append(result.Edges, browserprotocol.GraphEdge{From: edge.From, To: edge.To, Kind: string(edge.Kind), Evidence: opgraph.State(edge.Evidence),
+		result.Edges = append(result.Edges, browserprotocol.GraphEdge{From: edge.From, To: edge.To, Kind: edge.Kind, Evidence: opgraph.State(edge.Evidence),
 			Observation: status.Observation, State: status.State, RatePerHour: uint64(status.Rate * 60)})
 	}
-	summary := live.Summary
-	result.Summary = browserprotocol.GraphSummary{Components: uint32(summary.Components), Inferred: uint32(summary.Inferred), Observed: uint32(summary.Observed),
-		Quiet: uint32(summary.Quiet), Partial: uint32(summary.Partial), Stale: uint32(summary.Stale), Unobserved: uint32(summary.Unobserved),
-		Opaque: uint32(summary.Opaque), RuntimeOnly: uint32(summary.RuntimeOnly), Contradicted: uint32(summary.Contradicted)}
+	result.Summary = live.Summary
 	return fitGraphFrame(result)
 }
 
@@ -864,7 +858,7 @@ func fitGraphFrame(result browserprotocol.OperationalGraph) browserprotocol.Oper
 		}
 	}
 	sort.SliceStable(result.Edges, func(i, j int) bool {
-		return result.Edges[i].Observation != "unobserved" && result.Edges[j].Observation == "unobserved"
+		return result.Edges[i].Observation != opgraph.Unobserved && result.Edges[j].Observation == opgraph.Unobserved
 	})
 	for len(result.Edges) > 0 && (total > budget || len(result.Edges) > browserprotocol.MaxSnapshotEntities) {
 		total -= size(result.Edges[len(result.Edges)-1])
@@ -900,8 +894,8 @@ func fitGraphFrame(result browserprotocol.OperationalGraph) browserprotocol.Oper
 		}
 		result.Edges = edges
 	}
-	drop(func(node browserprotocol.GraphNode) bool { return node.Evidence != "runtime" })
-	drop(func(node browserprotocol.GraphNode) bool { return node.Kind == "processor" })
+	drop(func(node browserprotocol.GraphNode) bool { return node.Evidence != opgraph.EvidenceRuntime })
+	drop(func(node browserprotocol.GraphNode) bool { return node.Kind == opgraph.Processor })
 	drop(func(browserprotocol.GraphNode) bool { return false })
 	return result
 }

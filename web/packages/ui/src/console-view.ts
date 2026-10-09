@@ -1,5 +1,5 @@
 import { productionKey, proposedProduction, type ProductionContraption } from "./production-view.js";
-import type { AgentItem, GraphNode, GraphReading, HumanRequestItem, IntakeCandidate, IntakeSource, OperationalGraphView, RunTelemetry, StateView, TaskItem } from "@dark-factory/client";
+import { GRAPH_RUNTIMES, GRAPH_STATES, type AgentItem, type GraphNode, type GraphReading, type HumanRequestItem, type IntakeCandidate, type IntakeSource, type OperationalGraphView, type RunTelemetry, type StateView, type TaskItem } from "@dark-factory/client";
 import { compareText, QUIET_SECONDS, type SceneFlow, type SceneGraph, type SceneUnit, type SceneMachine, type SceneProposal, type SceneReading, type SceneWorker } from "./factory-scene/scene.js";
 
 export type AgentActivity = "busy" | "waiting" | "needs-you" | "idle";
@@ -131,22 +131,18 @@ const reading = (value: GraphReading & { error_permille?: number; latency_p95_ms
   ...(value.deployed_at === undefined ? {} : { deployedAt: value.deployed_at }),
 });
 
-const STATE_ORDER = ["failing", "degraded", "active", "idle", "unknown"] as const;
-
 /** A fold of several machines claims only what all of them support. */
 function combine(readings: readonly SceneReading[]): SceneReading {
   const observations = new Set(readings.map((item) => item.observation));
   const observation = observations.size === 1 ? readings[0]!.observation : "partial";
   const measured = readings.filter((item) => item.state !== "unknown");
   const state = observation === "quiet" ? "idle" : measured.length === 0 ? "unknown"
-    : STATE_ORDER.find((candidate) => candidate !== "idle" && measured.some((item) => item.state === candidate)) ?? "unknown";
+    : GRAPH_STATES.find((candidate) => candidate !== "idle" && measured.some((item) => item.state === candidate)) ?? "unknown";
   const evidence = new Set(readings.map((item) => item.evidence));
   return { evidence: evidence.size === 1 ? readings[0]!.evidence : "both", observation, state,
     ratePerHour: readings.reduce((sum, item) => sum + item.ratePerHour, 0), errorPermille: Math.max(0, ...readings.map((item) => item.errorPermille)),
     latencyMs: Math.max(0, ...readings.map((item) => item.latencyMs)) };
 }
-
-const RUNTIME_ORDER = ["process", "server", "worker", "browser", "cli"];
 
 /**
  * The world projection: operational nodes become units and their machines,
@@ -221,7 +217,7 @@ export function projectGraph(graphs: ReadonlyMap<string, OperationalGraphView> |
     const score = (node: GraphNode) => Math.max(...node.paths.filter(within).map((area) => area === "." ? 0 : area.length));
     const leaf = candidates.filter((node) => node.kind !== "processor").sort((left, right) => score(right) - score(left) || compareText(left.id, right.id))[0];
     const unit = candidates.filter((node) => node.kind === "processor").sort((left, right) => score(right) - score(left)
-      || RUNTIME_ORDER.indexOf(left.runtime ?? "cli") - RUNTIME_ORDER.indexOf(right.runtime ?? "cli") || compareText(left.id, right.id))[0];
+      || GRAPH_RUNTIMES.indexOf(left.runtime ?? "cli") - GRAPH_RUNTIMES.indexOf(right.runtime ?? "cli") || compareText(left.id, right.id))[0];
     const best = leaf !== undefined && (unit === undefined || score(leaf) >= score(unit)) ? leaf : unit;
     return best === undefined ? undefined : where.get(best.id);
   };

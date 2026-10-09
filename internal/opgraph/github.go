@@ -66,7 +66,7 @@ func (run *inference) workflow(repo, name string, body []byte, at Location) {
 	}
 	pullRequest := contains(events, "pull_request") || contains(events, "pull_request_target")
 	declared := static("github-actions", path.Base(at.Path), Declared)
-	ci := run.addUnit(unit{repo: repo, root: path.Dir(at.Path), key: CIUnit(repo), label: "GitHub Actions · " + path.Base(name), runtime: "ci",
+	ci := run.addUnit(unit{repo: repo, root: path.Dir(at.Path), key: CIUnit(repo), label: "GitHub Actions · " + path.Base(name), runtime: RuntimeCI,
 		names: []string{CIUnit(repo)}, evidence: declared, at: Location{Repository: repo, Path: path.Dir(at.Path)}})
 	workflow := file.Name
 	if workflow == "" {

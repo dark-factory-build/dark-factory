@@ -189,6 +189,9 @@ test("the pure scene model feeds a deterministic SVG renderer", () => {
   // An empty floor in a wide column stays a panel, not a poster.
   assert.match(emptySvg, new RegExp(`max-width:${emptyLayout.width}px`));
   assert.ok(emptyPlacements.every(({ x, y }) => x >= 0 && y >= 0), "an empty floor still has room for everyone");
+  const emptyLabel = emptySvg.match(/<text x="([^"]+)" y="([0-9.]+)"[^>]*>NO OPERATIONAL STRUCTURE INFERRED YET<\/text>/);
+  assert.ok(emptyLabel !== null && Number(emptyLabel[2]) > emptyLayout.height && Number(emptyLabel[2]) < Number(emptySvg.match(/viewBox="0 0 [0-9.]+ ([0-9.]+)"/)[1]),
+    "the empty-floor label stands below the floor and everyone on it, inside the scene");
 });
 
 test("nothing live, runtime-only or worker-made moves a machine", () => {

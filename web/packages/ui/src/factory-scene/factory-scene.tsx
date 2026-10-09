@@ -1,5 +1,5 @@
 import { useLayoutEffect, useEffect, useMemo, useRef, useState, type MouseEvent, type FocusEvent, type PointerEvent, type KeyboardEvent, type ReactNode, type RefObject } from "react";
-import type { OperationalNodeView, PeerQuestionItem } from "@dark-factory/client";
+import { GRAPH_OBSERVATIONS, type OperationalNodeView, type PeerQuestionItem } from "@dark-factory/client";
 import type { SceneTask } from "../console-view.js";
 import {
   PADDING,
@@ -74,6 +74,8 @@ export type FactorySceneProps = Readonly<{
   connected?: boolean;
   /** The plant has not been read yet: an empty floor says so rather than claiming nothing was inferred. */
   reading?: boolean;
+  /** The error code of a refused plant read: the floor says so instead of reading. */
+  unavailable?: string;
   /** The selected agent is highlighted without changing its deterministic placement. */
   selectedWorkerId?: string;
   /** Pointer convenience only; the AGENTS list is the keyboard path. */
@@ -483,7 +485,7 @@ export function offeredFixtures({ appearance = DEFAULT_FLOOR_APPEARANCE, onOpenB
 }
 
 /** A disposable SVG projection of the operational world and current factory state. */
-export function FactoryScene({ proposals, crates, tools, onLoadNode, onInvestigate, onDiscussSource, requestedEntity, onSelectEntity, onOpenLibrary, onOpenBoard, graph, workers, appearance = DEFAULT_FLOOR_APPEARANCE, selectedWorkerId, onSelectWorker, tasks = [], peerQuestions = NO_QUESTIONS, knowledgeCues = NO_CUES, selectedTaskId, onSelectTask, onOpenTasks, onOpenMissions, onSelectHumanRequest, projectId, connected = true, reading = false }: FactorySceneProps) {
+export function FactoryScene({ proposals, crates, tools, onLoadNode, onInvestigate, onDiscussSource, requestedEntity, onSelectEntity, onOpenLibrary, onOpenBoard, graph, workers, appearance = DEFAULT_FLOOR_APPEARANCE, selectedWorkerId, onSelectWorker, tasks = [], peerQuestions = NO_QUESTIONS, knowledgeCues = NO_CUES, selectedTaskId, onSelectTask, onOpenTasks, onOpenMissions, onSelectHumanRequest, projectId, connected = true, reading = false, unavailable }: FactorySceneProps) {
   const [selectedId, setSelectedId] = useState<string>();
   // The crate pointed at or focused: the machines its change touches are lit.
   const [lit, setLit] = useState<string>();
@@ -534,8 +536,9 @@ export function FactoryScene({ proposals, crates, tools, onLoadNode, onInvestiga
   useEffect(() => { if (requestedEntity) { setSearch(""); focusEntity(requestedEntity.id); } }, [requestedEntity]);
   const nook = breakRoomNook(layout);
   const sceneWidth = layout.width;
-  // A crowd beside one machine stands below it, past the floor's edge: the scene grows, the floor does not move.
-  const sceneHeight = Math.max(layout.height, ...placements.map((placement) => placement.y + 24 + PADDING));
+  // A crowd beside one machine stands below it, and an empty plant's reason below that: the scene grows, the floor does not move.
+  const floorBottom = Math.max(layout.height, ...placements.map((placement) => placement.y + 24 + PADDING));
+  const sceneHeight = floorBottom + (layout.stations.length === 0 ? 2 * PADDING : 0);
   const fit = pane === undefined ? undefined : Math.min(1, pane.width / sceneWidth, pane.height / sceneHeight);
   // Zoomed to twice the fitted scale or more, a manifold lists its routes inside its own footprint.
   const close = zoom !== undefined && zoom >= 2 * (fit ?? 1);
@@ -727,7 +730,7 @@ export function FactoryScene({ proposals, crates, tools, onLoadNode, onInvestiga
           {sign === undefined ? <path d="M2 15v3 M14 15v3" stroke="#303b3b" strokeWidth="2" /> : <text x="8" y="23" textAnchor="middle" fill="#d4ddd2" fontSize="4">{sign}</text>}
         </g>
       </g>; })}
-      {layout.stations.length === 0 ? <text x={PADDING} y="24" fill="#9db1be" fontFamily="ui-monospace, monospace" fontSize="10">{reading ? "READING THE PLANT…" : "NO OPERATIONAL STRUCTURE INFERRED YET"}</text> : null}
+      {layout.stations.length === 0 ? <text x={PADDING} y={floorBottom + PADDING} fill="#9db1be" fontFamily="ui-monospace, monospace" fontSize="10">{unavailable !== undefined ? `PLANT UNAVAILABLE · ${unavailable}` : reading ? "READING THE PLANT…" : "NO OPERATIONAL STRUCTURE INFERRED YET"}</text> : null}
 
       {placements.filter((placement) => placement.area !== "work").map((seat) => <g key={seat.id} data-nearby-rest={seat.stationId} aria-hidden="true"><rect x={seat.x - 12} y={seat.y + 5} width="24" height="7" fill="#655948" stroke="#9b8b6b" /><path d={`M${seat.x - 8} ${seat.y + 12}v5m16-5v5`} stroke="#74664e" strokeWidth="3" /></g>)}
       <SceneWorkers knowledgeCues={knowledgeCues} nook={implementsShown} onOpenBoard={onOpenBoard} errands={appearance.scenery !== "off"} peerQuestions={peerQuestions} layout={layout} placements={placements} labels={labels} workers={workers} tasks={tasks} connected={connected} animate={appearance.animation !== "off"} selectedWorkerId={selectedWorkerId} onSelectWorker={onSelectWorker} onSelectTask={onSelectTask} onSelectHumanRequest={onSelectHumanRequest} onSelectProposal={proposals?.onSelect} />
@@ -884,7 +887,7 @@ function machineInfo(machine: SceneMachine, unit?: SceneUnit) {
 
 function Coverage({ summary }: { summary: NonNullable<SceneGraph["summary"]> }) {
   return <p className="dfPlantCoverage" role="status" aria-label="Observation coverage">
-    {(["observed", "quiet", "partial", "stale", "unobserved", "opaque"] as const).map((key, index) => <span key={key}>{index === 0 ? "" : " · "}<strong className={`dfPlantCoverage--${key}`}>{summary[key]}</strong> {OBSERVATION_TEXT[key].split(":")[0]!.toLowerCase()}</span>)}
+    {GRAPH_OBSERVATIONS.map((key, index) => <span key={key}>{index === 0 ? "" : " · "}<strong className={`dfPlantCoverage--${key}`}>{summary[key]}</strong> {OBSERVATION_TEXT[key].split(":")[0]!.toLowerCase()}</span>)}
     <small>{summary.runtime_only > 0 ? ` · ${summary.runtime_only} runtime-only` : ""}{summary.contradicted > 0 ? ` · ${summary.contradicted} contradicted` : ""}{summary.unobserved > 0 ? " · grey machines have no telemetry: unknown, not idle" : ""}</small>
   </p>;
 }

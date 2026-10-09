@@ -139,9 +139,10 @@ export const GRAPH_NODE_KINDS = ["processor", "ingress", "job", "queue", "store"
 export const GRAPH_EDGE_KINDS = ["handles", "calls", "uses", "publishes", "consumes", "runs"] as const;
 export const GRAPH_EVIDENCE = ["static", "runtime", "both", "uncertain", "contradicted"] as const;
 export const GRAPH_OBSERVATIONS = ["observed", "quiet", "partial", "stale", "unobserved", "opaque"] as const;
-export const GRAPH_STATES = ["active", "degraded", "failing", "idle", "unknown"] as const;
-const GRAPH_RUNTIMES = ["process", "cli", "worker", "server", "browser", "ci"] as const;
+export const GRAPH_STATES = ["failing", "degraded", "active", "idle", "unknown"] as const; // worst first
+export const GRAPH_RUNTIMES = ["process", "server", "worker", "browser", "cli", "ci"] as const; // the unit a path prefers first, as opgraph.Locate
 const GRAPH_TRIGGERS = ["request", "timer", "message"] as const;
+const GRAPH_ORIGINS = ["static", "runtime"] as const;
 export type GraphReading = Readonly<{ evidence: typeof GRAPH_EVIDENCE[number]; observation: typeof GRAPH_OBSERVATIONS[number]; state: typeof GRAPH_STATES[number]; rate_per_hour?: number }>;
 export type GraphNode = GraphReading & Readonly<{ id: string; kind: typeof GRAPH_NODE_KINDS[number]; label: string; unit?: string; runtime?: typeof GRAPH_RUNTIMES[number]; trigger?: typeof GRAPH_TRIGGERS[number]; paths: readonly string[]; error_permille?: number; latency_p95_ms?: number; last_seen?: number; deployed_at?: number }>;
 export type GraphEdge = GraphReading & Readonly<{ from: string; to: string; kind: typeof GRAPH_EDGE_KINDS[number] }>;
@@ -149,7 +150,7 @@ export type GraphSummary = Readonly<{ components: number; inferred: number; obse
 export type GraphSource = Readonly<{ repository_id: string; name: string; kind: "integrated" | "unavailable"; target_ref: string; revision: string; observed_at: number; reason?: string }>;
 export type OperationalGraphBody = Readonly<{ project_id: string; digest: string; observed_at: number; sources: readonly GraphSource[]; nodes: readonly GraphNode[]; edges: readonly GraphEdge[]; summary: GraphSummary; omitted: number }>;
 export type GraphLocation = Readonly<{ repository_id: string; path: string; line?: number }>;
-export type OperationalNodeBody = Readonly<{ project_id: string; node_id: string; selectors: Readonly<Record<string, string>>; evidence: readonly Readonly<{ origin: "static" | "runtime"; source: string; detail?: string; confidence: string }>[]; sources: readonly GraphLocation[]; modules: readonly GraphLocation[]; observers: readonly string[] }>;
+export type OperationalNodeBody = Readonly<{ project_id: string; node_id: string; selectors: Readonly<Record<string, string>>; evidence: readonly Readonly<{ origin: typeof GRAPH_ORIGINS[number]; source: string; detail?: string; confidence: string }>[]; sources: readonly GraphLocation[]; modules: readonly GraphLocation[]; observers: readonly string[] }>;
 export type RunPathsGetBody = { agent_id: string };
 /** One run's recorded agent effort and spend: counts and cost, never content. */
 export type RunTelemetry = { tokens_in: number; tokens_out: number; cost_micro_usd: number; tool_calls: number; api_requests: number; quiet_seconds?: number };
@@ -848,9 +849,9 @@ function intakeCandidate(item: unknown, wire: boolean): IntakeCandidate {
 function oneOf<T extends string>(value: unknown, allowed: readonly T[]): T { if (typeof value !== "string" || !(allowed as readonly string[]).includes(value)) malformed(); return value as T; }
 function graphReading(value: Record<string, unknown>): GraphReading {
   const evidence = oneOf(value.evidence, GRAPH_EVIDENCE), observation = oneOf(value.observation, GRAPH_OBSERVATIONS), state = oneOf(value.state, GRAPH_STATES);
+  // How readings combine (idle only when quiet, a rate only when observed) is
+  // the producer's rule, proven in opgraph's overlay tests; this checks shape and bounds.
   const rate = present(value, "rate_per_hour") ? integer(value.rate_per_hour, 0, Number.MAX_SAFE_INTEGER) : undefined;
-  // Idle is a claim only a covering source makes; a rate only an observation makes.
-  if (state === "idle" && observation !== "quiet" || (rate ?? 0) > 0 && (observation === "unobserved" || observation === "stale")) malformed();
   return { evidence, observation, state, ...(rate === undefined ? {} : { rate_per_hour: rate }) };
 }
 function operationalGraphBody(body: Record<string, unknown>, wire: boolean): OperationalGraphBody {
@@ -898,7 +899,7 @@ function operationalNodeBody(body: Record<string, unknown>, wire: boolean): Oper
   if (!Array.isArray(body.evidence) || body.evidence.length > 32 || !Array.isArray(body.sources) || body.sources.length > 16 || !Array.isArray(body.modules) || body.modules.length > 256 || !Array.isArray(body.observers) || body.observers.length > 16) malformed();
   const location = (item: unknown): GraphLocation => { if (!isObject(item)) malformed(); requireKeys(item, ["repository_id", "path"], wire, ["line"]); return { repository_id: dynamicID(item.repository_id), path: boundedText(item.path, 1, MAX_TASK_TITLE_BYTES), ...(present(item, "line") ? { line: integer(item.line, 0, 0xffffffff) } : {}) }; };
   return { project_id: dynamicID(body.project_id), node_id: dynamicID(body.node_id), selectors,
-    evidence: body.evidence.map((item) => { if (!isObject(item)) malformed(); requireKeys(item, ["origin", "source", "confidence"], wire, ["detail"]); return { origin: oneOf(item.origin, ["static", "runtime"] as const), source: boundedText(item.source, 1, 64), ...(present(item, "detail") ? { detail: boundedText(item.detail, 0, 256) } : {}), confidence: boundedText(item.confidence, 1, 32) }; }),
+    evidence: body.evidence.map((item) => { if (!isObject(item)) malformed(); requireKeys(item, ["origin", "source", "confidence"], wire, ["detail"]); return { origin: oneOf(item.origin, GRAPH_ORIGINS), source: boundedText(item.source, 1, 64), ...(present(item, "detail") ? { detail: boundedText(item.detail, 0, 256) } : {}), confidence: boundedText(item.confidence, 1, 32) }; }),
     sources: body.sources.map(location), modules: body.modules.map(location), observers: body.observers.map((item) => boundedText(item, 1, 64)) };
 }
 function taskItem(value: unknown, wire: boolean): TaskItem {

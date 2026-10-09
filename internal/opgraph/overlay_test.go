@@ -46,11 +46,19 @@ func server(attributes map[string]string, count, errors uint64, at int64) Observ
 	return Observation{Source: "test", Environment: "production", Kind: "server", Start: at - minute, End: at, Attributes: attributes, Count: count, Errors: errors}
 }
 
+// invariant is the only owner of how a reading's fields combine: the console
+// decodes readings without re-checking it. Idle only when quiet; a rate only
+// when something is seen.
 func invariant(t *testing.T, live Live) {
 	t.Helper()
+	for key, status := range live.Edges {
+		if status.State == Idle && status.Observation != Quiet || status.Rate > 0 && (status.Observation == Unobserved || status.Observation == Stale) {
+			t.Fatalf("edge %v reads %+v", key, status)
+		}
+	}
 	for id, status := range live.Nodes {
-		if status.State == "idle" && status.Observation != "quiet" {
-			t.Fatalf("%s is idle while %s", id, status.Observation)
+		if status.State == Idle && status.Observation != Quiet || status.Rate > 0 && (status.Observation == Unobserved || status.Observation == Stale) {
+			t.Fatalf("%s reads %+v", id, status)
 		}
 		if status.State != "unknown" && status.Observation != "quiet" && status.count == 0 {
 			t.Fatalf("%s claims %s with no observations", id, status.State)
@@ -130,9 +138,11 @@ func TestRouteGranularSourceDistinguishesQuietFromActive(t *testing.T) {
 func TestStaleCoverage(t *testing.T) {
 	now := 100 * minute
 	coverage := []Coverage{{Source: "otlp", Unit: "api", Keys: []string{"service.name", "http.route", "http.request.method"}, AsOf: now - 30*minute, TTL: 5 * minute}}
-	live := Overlay("s", overlayGraph(), nil, coverage, nil, now, 15*minute)
+	// Traffic older than the window, known and unexplained, is seen but carries no rate.
+	old := []Observation{server(map[string]string{"http.route": "/orders", "http.request.method": "POST"}, 5, 9, now-40*minute), server(map[string]string{"http.route": "/gone"}, 5, 0, now-40*minute)}
+	live := Overlay("s", overlayGraph(), old, coverage, nil, now, 15*minute)
 	invariant(t, live)
-	if got := labels(live)["orders"]; got.Observation != "stale" || got.State != "unknown" {
+	if got := labels(live)["orders"]; got.Observation != "stale" || got.State != "unknown" || got.LastSeen == 0 {
 		t.Errorf("orders = %+v", got)
 	}
 }
@@ -344,6 +354,7 @@ func TestSilentOutsideHostIsQuietUnlessNotConnected(t *testing.T) {
 		t.Errorf("host called by another unit was redrawn: %+v", got)
 	}
 	live.NotConnected("api.stripe.com", "api")
+	invariant(t, live)
 	if got := labels(live)["api.stripe.com"]; got.Observation != "unobserved" || got.State != "unknown" || live.Edges[edge].Observation != "unobserved" || live.Summary.Quiet != 0 || live.Summary.Unobserved == 0 {
 		t.Errorf("unconnected host = %+v, edge %+v, summary %+v", got, live.Edges[edge], live.Summary)
 	}

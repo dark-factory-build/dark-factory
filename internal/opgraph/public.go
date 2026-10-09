@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"math"
 	"path"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -85,15 +86,15 @@ type LedgerDay struct {
 }
 
 type PublicNode struct {
-	ID          string `json:"id"`
-	Kind        Kind   `json:"kind"`
-	Label       string `json:"label"`
-	Unit        string `json:"unit,omitempty"`
-	Runtime     string `json:"runtime,omitempty"`
-	Trigger     string `json:"trigger,omitempty"`
-	Evidence    string `json:"evidence"`
-	Observation string `json:"observation"`
-	State       string `json:"state"`
+	ID          string        `json:"id"`
+	Kind        Kind          `json:"kind"`
+	Label       string        `json:"label"`
+	Unit        string        `json:"unit,omitempty"`
+	Runtime     Placement     `json:"runtime,omitempty"`
+	Trigger     Trigger       `json:"trigger,omitempty"`
+	Evidence    EvidenceState `json:"evidence"`
+	Observation Visibility    `json:"observation"`
+	State       Activity      `json:"state"`
 	// RatePerHour is exact for a named node, else one of 0, 30, 600, 6000.
 	RatePerHour float64  `json:"rate_per_hour"`
 	Paths       []string `json:"paths,omitempty"` // named nodes only
@@ -102,13 +103,13 @@ type PublicNode struct {
 }
 
 type PublicEdge struct {
-	From        string  `json:"from"`
-	To          string  `json:"to"`
-	Kind        string  `json:"kind"`
-	Evidence    string  `json:"evidence"`
-	Observation string  `json:"observation"`
-	State       string  `json:"state"`
-	RatePerHour float64 `json:"rate_per_hour"`
+	From        string        `json:"from"`
+	To          string        `json:"to"`
+	Kind        string        `json:"kind"`
+	Evidence    EvidenceState `json:"evidence"`
+	Observation Visibility    `json:"observation"`
+	State       Activity      `json:"state"`
+	RatePerHour float64       `json:"rate_per_hour"`
 }
 
 // PublicWorker is one agent: what it is doing and which unit it is at.
@@ -127,17 +128,17 @@ type Worker struct {
 // an entrance by its trigger, a job by whether CI runs it.
 var (
 	publicNames  = map[Kind]string{Processor: "Unit", Ingress: "Entrance", Job: "Loop", Queue: "Queue", Store: "Store", External: "Outside service", Unknown: "Unknown"}
-	unitNames    = map[string]string{"browser": "Web app", "server": "Web server", "worker": "Edge function", "process": "Service", "cli": "Tool", "ci": "CI pipeline"}
-	triggerNames = map[string]string{"timer": "Timer", "message": "Inbox"}
+	unitNames    = map[Placement]string{RuntimeBrowser: "Web app", RuntimeServer: "Web server", RuntimeWorker: "Edge function", RuntimeProcess: "Service", RuntimeCLI: "Tool", RuntimeCI: "CI pipeline"}
+	triggerNames = map[Trigger]string{TriggerTimer: "Timer", TriggerMessage: "Inbox"}
 )
 
-func publicName(node Node, runtimes map[string]string) string {
+func publicName(node Node, runtimes map[string]Placement) string {
 	switch {
 	case node.Kind == Processor && unitNames[node.Runtime] != "":
 		return unitNames[node.Runtime]
 	case node.Kind == Ingress && triggerNames[node.Trigger] != "":
 		return triggerNames[node.Trigger]
-	case node.Kind == Job && runtimes[node.Unit] == "ci":
+	case node.Kind == Job && runtimes[node.Unit] == RuntimeCI:
 		return "Check"
 	}
 	return publicNames[node.Kind]
@@ -156,7 +157,7 @@ func Public(live Live, secret []byte, workers []Worker, crates []Crate, named ma
 		mac.Write([]byte(raw))
 		return hex.EncodeToString(mac.Sum(nil)[:16])
 	}
-	runtimes := map[string]string{}
+	runtimes := map[string]Placement{}
 	open := map[string]bool{} // raw node ID
 	for _, node := range live.Graph.Nodes {
 		runtimes[node.ID] = node.Runtime
@@ -226,7 +227,7 @@ func Public(live Live, secret []byte, workers []Worker, crates []Crate, named ma
 func rate(status *Status, exact bool) float64 {
 	perHour := status.Rate * 60
 	switch {
-	case status.State == "unknown" || status.State == "idle" || perHour < 1:
+	case status.State == StateUnknown || status.State == Idle || perHour < 1:
 		return 0
 	case exact:
 		return perHour
@@ -238,11 +239,13 @@ func rate(status *Status, exact bool) float64 {
 	return 6000
 }
 
+// runtimeOrder is the unit a path prefers, as the console's GRAPH_RUNTIMES.
+var runtimeOrder = []Placement{RuntimeProcess, RuntimeServer, RuntimeWorker, RuntimeBrowser, RuntimeCLI, RuntimeCI}
+
 // Locate finds the unit whose code area holds a repository path: the most
 // specific module wins, and a running unit is preferred to a tool.
 func Locate(graph Graph, repository, file string) string {
 	best, bestLength, bestRank := "", -1, 99
-	rank := map[string]int{"process": 0, "server": 1, "worker": 2, "browser": 3, "cli": 4}
 	for _, node := range graph.Nodes {
 		if node.Kind != Processor {
 			continue
@@ -255,10 +258,7 @@ func Locate(graph Graph, repository, file string) string {
 			if module.Path == "." {
 				length = 0
 			}
-			order, ok := rank[node.Runtime]
-			if !ok {
-				order = 5
-			}
+			order := slices.Index(runtimeOrder, node.Runtime)
 			if length > bestLength || length == bestLength && (order < bestRank || order == bestRank && strings.Compare(node.ID, best) < 0) {
 				best, bestLength, bestRank = node.ID, length, order
 			}
