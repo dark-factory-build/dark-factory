@@ -56,8 +56,8 @@ go=${DF_CI_GO-}
 }
 module=
 affected_packages=
+module=$("$go" list -m)
 if [ "$shard" = affected ]; then
-    module=$("$go" list -m)
     changed=$(git diff --name-only "$affected_base" HEAD --)
     if printf '%s\n' "$changed" | /usr/bin/grep -qxE 'go\.(mod|sum)'; then
         affected_packages=$("$go" list ./...)
@@ -100,6 +100,9 @@ github.com/dark-factory-build/dark-factory/internal/opgraph
 github.com/dark-factory-build/dark-factory/internal/provider
 github.com/dark-factory-build/dark-factory/internal/review
 github.com/dark-factory-build/dark-factory/internal/runner'
+process_sensitive_packages="$process_sensitive_packages
+github.com/dark-factory-build/dark-factory/cmd/factoryd
+github.com/dark-factory-build/dark-factory/cmd/factory-runner"
 is_process_sensitive() {
     printf '%s\n' "$process_sensitive_packages" | /usr/bin/grep -qxF "$1"
 }
