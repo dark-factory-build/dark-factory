@@ -237,3 +237,16 @@ export function chainScene(count) {
   }
   return { digest: `chains-${count}`, units, shared: [], parties: [], quarantine: [], flows };
 }
+
+/** Graphs at the edge of the documented bounds: every machine flowing to one hub, a store all units share, an all-to-all unit, a chain of shared machines. */
+export function pathological(which, size) {
+  const reading = { evidence: "static", observation: "unobserved", state: "unknown", ratePerHour: 0, errorPermille: 0, latencyMs: 0 };
+  const machine = (id, kind = "job") => ({ id, kind, label: id, reading }), flow = (from, to) => ({ from, to, kind: "uses", reading });
+  const pad = (n) => String(n).padStart(4, "0"), empty = { units: [], shared: [], parties: [], quarantine: [] };
+  if (which === "spokes") { const machines = Array.from({ length: size }, (_, k) => machine(`m${pad(k)}`)); return { ...empty, digest: which, units: [{ id: "hub", label: "hub", reading, machines }], flows: machines.map((item) => flow(item.id, "hub")) }; }
+  if (which === "hub") { const units = Array.from({ length: size }, (_, u) => ({ id: `u${pad(u)}`, label: `unit-${u}`, reading, machines: Array.from({ length: 4 }, (_, k) => machine(`u${pad(u)}m${k}`)) }));
+    return { ...empty, digest: which, units, shared: [machine("store", "store")], flows: units.flatMap((item) => [flow(item.id, "store"), ...item.machines.map((part) => flow(part.id, "store"))]) }; }
+  if (which === "clique") { const machines = Array.from({ length: size }, (_, k) => machine(`m${pad(k)}`)); return { ...empty, digest: which, units: [{ id: "u", label: "u", reading, machines }], flows: machines.flatMap((a) => machines.filter((b) => b !== a).map((b) => flow(a.id, b.id))) }; }
+  const chain = Array.from({ length: size }, (_, k) => machine(`c${pad(k)}`, k % 2 ? "queue" : "store"));
+  return { ...empty, digest: which, shared: chain, flows: chain.slice(1).map((item, k) => flow(chain[k].id, item.id)) };
+}
