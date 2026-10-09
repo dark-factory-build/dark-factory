@@ -1176,14 +1176,17 @@ func TestServiceReleaseVerificationRunsTheRealBinaries(t *testing.T) {
 	identity, _ := buildinfo.Expected("1.2.3", strings.Repeat("cd", 20), runtime.GOOS+"/"+runtime.GOARCH)
 	other, _ := buildinfo.Expected("1.2.3", strings.Repeat("ef", 20), runtime.GOOS+"/"+runtime.GOARCH)
 	directory := t.TempDir()
+	// One go build compiles the three binaries' packages in parallel.
+	command := exec.Command("go", "build", "-trimpath", "-buildvcs=false", "-ldflags", "-s -w -X github.com/dark-factory-build/dark-factory/internal/buildinfo.receipt="+identity.Receipt(), "-o", directory+"/")
 	for _, name := range serviceBinaryNames {
-		output := filepath.Join(directory, name)
-		command := exec.Command("go", "build", "-trimpath", "-buildvcs=false", "-ldflags", "-s -w -X github.com/dark-factory-build/dark-factory/internal/buildinfo.receipt="+identity.Receipt(), "-o", output, "../../cmd/"+name)
-		command.Env = append(os.Environ(), "CGO_ENABLED=0", "GOENV=off", "GOAUTH=off", "GOTOOLCHAIN=local")
-		if log, err := command.CombinedOutput(); err != nil {
-			t.Fatalf("build %s: %v\n%s", name, err, log)
-		}
-		if err := os.Chmod(output, 0o755); err != nil {
+		command.Args = append(command.Args, "../../cmd/"+name)
+	}
+	command.Env = append(os.Environ(), "CGO_ENABLED=0", "GOENV=off", "GOAUTH=off", "GOTOOLCHAIN=local")
+	if log, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("build release binaries: %v\n%s", err, log)
+	}
+	for _, name := range serviceBinaryNames {
+		if err := os.Chmod(filepath.Join(directory, name), 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
