@@ -11,6 +11,7 @@ import (
 )
 
 func TestActivateRunRejectsCausallyEarlyResources(t *testing.T) {
+	t.Parallel()
 	store, run, _ := admittedOrchestratorRun(t)
 	defer store.Close()
 	run = activateResourcesAt(t, store, run, 20)
@@ -28,6 +29,7 @@ func TestActivateRunRejectsCausallyEarlyResources(t *testing.T) {
 }
 
 func TestFactoryTimestampAndRevisionGuardEveryControlIntent(t *testing.T) {
+	t.Parallel()
 	store, _ := newTestStore(t)
 	defer store.Close()
 	initial, err := store.Factory(context.Background())
@@ -57,6 +59,7 @@ func TestFactoryTimestampAndRevisionGuardEveryControlIntent(t *testing.T) {
 }
 
 func TestAdmitNextRejectsBeforeFactoryTimestamp(t *testing.T) {
+	t.Parallel()
 	store, _, project, agent := newAdmissionStore(t, RoleOrchestrator, 2)
 	defer store.Close()
 	if _, err := store.EnqueueTask(context.Background(), NewTask{ID: taskID(t, 220), ProjectID: project.ID, AssignedAgentID: agent.ID, IncarnationID: incarnationID(t, 221), Title: "factory"}, mustTime(t, 5)); err != nil {
@@ -84,6 +87,7 @@ func TestAdmitNextRejectsBeforeFactoryTimestamp(t *testing.T) {
 }
 
 func TestFinalizeRunRejectsBeforeFactoryTimestamp(t *testing.T) {
+	t.Parallel()
 	failure, _ := NewFailureProposal(FailureInternal, "cleanup")
 	store, finalizing := finalizingReleasedRun(t, RoleOrchestrator, failure)
 	defer store.Close()
@@ -107,6 +111,7 @@ func TestFinalizeRunRejectsBeforeFactoryTimestamp(t *testing.T) {
 }
 
 func TestFinalizingRejectsCausallyEarlyResourceUpdate(t *testing.T) {
+	t.Parallel()
 	store, run, _ := admittedOrchestratorRun(t)
 	defer store.Close()
 	runtime := resourceOfKind(t, resourcesForRunTest(t, store, run.ID), ResourceRuntimeRoot)
@@ -125,6 +130,7 @@ func TestFinalizingRejectsCausallyEarlyResourceUpdate(t *testing.T) {
 }
 
 func TestExitDrivenFinalizingRejectsCausallyEarlyResourceUpdate(t *testing.T) {
+	t.Parallel()
 	store, run, _ := admittedOrchestratorRun(t)
 	defer store.Close()
 	runner := resourceOfKind(t, resourcesForRunTest(t, store, run.ID), ResourceRunnerProcess)
@@ -139,6 +145,7 @@ func TestExitDrivenFinalizingRejectsCausallyEarlyResourceUpdate(t *testing.T) {
 }
 
 func TestReleaseProviderRejectsBeforeExit(t *testing.T) {
+	t.Parallel()
 	proposal, _ := NewSuccessProposal("done")
 	store, run, keys := runningOrchestratorRun(t)
 	defer store.Close()
@@ -177,6 +184,7 @@ func TestReleaseProviderRejectsBeforeExit(t *testing.T) {
 }
 
 func TestFinalizeRunRejectsBeforeResourceCleanupTime(t *testing.T) {
+	t.Parallel()
 	failure, _ := NewFailureProposal(FailureInternal, "cleanup")
 	store, run := finalizingReleasedRun(t, RoleOrchestrator, failure)
 	defer store.Close()
@@ -193,6 +201,7 @@ func TestFinalizeRunRejectsBeforeResourceCleanupTime(t *testing.T) {
 }
 
 func TestRetryAdmissionCannotPrecedeQueuedTaskUpdate(t *testing.T) {
+	t.Parallel()
 	store, terminal, _, keys := retryQueuedWorker(t, 50)
 	defer store.Close()
 	before := captureWriteFootprint(t, store)
@@ -212,6 +221,7 @@ func TestRetryAdmissionCannotPrecedeQueuedTaskUpdate(t *testing.T) {
 // work revision with the note in its body, the store stays valid, and the
 // retry is admitted on the task's own Change.
 func TestSuccessfulTerminalCanBeSentBackAndRetried(t *testing.T) {
+	t.Parallel()
 	success, _ := NewSuccessProposal("finished")
 	store, finalizing := finalizingReleasedRun(t, RoleWorker, success)
 	defer store.Close()
@@ -318,6 +328,7 @@ func TestSuccessfulTerminalCanBeSentBackAndRetried(t *testing.T) {
 
 // A task that never ran has no run to go back to.
 func TestSendBackRefusesATaskWithoutARun(t *testing.T) {
+	t.Parallel()
 	store, _, project, agent := newAdmissionStore(t, RoleWorker, 2)
 	defer store.Close()
 	ctx := context.Background()
@@ -351,6 +362,7 @@ func TestSendBackRefusesATaskWithoutARun(t *testing.T) {
 // task back; before it runs, its own task, another project's task, an
 // unknown credential and (below) a worker's credential may not.
 func TestOrchestratorAttemptSendsBackAWorkerTask(t *testing.T) {
+	t.Parallel()
 	success, _ := NewSuccessProposal("finished")
 	store, finalizing := finalizingReleasedRun(t, RoleWorker, success)
 	defer store.Close()
@@ -450,6 +462,7 @@ func TestOrchestratorAttemptSendsBackAWorkerTask(t *testing.T) {
 
 // A worker's credential is never a send-back authority.
 func TestWorkerAttemptCannotSendBack(t *testing.T) {
+	t.Parallel()
 	store, run, keys := runningWorkerRun(t)
 	defer store.Close()
 	if _, err := store.SendBackTaskForAttempt(context.Background(), keys.AttemptDigest, run.TaskID, "myself", mustTime(t, 200)); !errors.Is(err, ErrUnauthorized) {
@@ -458,6 +471,7 @@ func TestWorkerAttemptCannotSendBack(t *testing.T) {
 }
 
 func TestNonSuccessTerminalAllowsQueuedRetry(t *testing.T) {
+	t.Parallel()
 	blocked, _ := NewBlockedProposal("retry")
 	failed, _ := NewFailureProposal(FailureInternal, "retry")
 	cancelled, _ := NewCancelledProposal("retry")
@@ -489,6 +503,7 @@ func TestNonSuccessTerminalAllowsQueuedRetry(t *testing.T) {
 }
 
 func TestQueuedRetryMustFollowPredecessorTerminal(t *testing.T) {
+	t.Parallel()
 	t.Run("before", func(t *testing.T) {
 		store, terminal, _, keys := retryQueuedWorker(t, 32)
 		path := storePath(t, store)
@@ -531,6 +546,7 @@ func TestQueuedRetryMustFollowPredecessorTerminal(t *testing.T) {
 }
 
 func TestHistoricalRetryMustFollowEveryPredecessor(t *testing.T) {
+	t.Parallel()
 	store, predecessor, successor := retryAdmittedWorker(t, 33, 33)
 	path := storePath(t, store)
 	corruptSQL(t, store, `UPDATE runs SET terminal_at_ms = 100, updated_at_ms = 100 WHERE id = ?`, predecessor.ID.Bytes())
@@ -540,6 +556,7 @@ func TestHistoricalRetryMustFollowEveryPredecessor(t *testing.T) {
 // A successful run may precede later history: a send-back returns a finished
 // task, a success included, to its queue.
 func TestEarlierSuccessfulRunMayPrecedeLaterHistory(t *testing.T) {
+	t.Parallel()
 	store, predecessor, successor := retryAdmittedWorker(t, 33, 33)
 	defer store.Close()
 	corruptSQL(t, store, `UPDATE runs SET proposal_kind = 'succeeded', proposal_code = NULL, proposal_detail = NULL, proposal_result = 'hidden success', terminal_kind = 'succeeded', terminal_code = NULL, terminal_detail = NULL, terminal_result = 'hidden success' WHERE id = ?`, predecessor.ID.Bytes())
@@ -555,6 +572,7 @@ func TestEarlierSuccessfulRunMayPrecedeLaterHistory(t *testing.T) {
 // abandons the available Change, keeps the store valid, and lets the task
 // retry fresh on a reserved Change four revisions on.
 func TestRefusedPublicationAbandonsTheAvailableChangeAndRetriesFresh(t *testing.T) {
+	t.Parallel()
 	success, _ := NewSuccessProposal("finished")
 	store, finalizing := finalizingReleasedRun(t, RoleWorker, success)
 	defer store.Close()
@@ -609,6 +627,7 @@ func TestRefusedPublicationAbandonsTheAvailableChangeAndRetriesFresh(t *testing.
 // A refusal is only for a published tree: an unpublished Change abandons
 // the ordinary way, and a refused settlement on it is a conflict.
 func TestRefusedSettlementNeedsAnAvailableChange(t *testing.T) {
+	t.Parallel()
 	store, run, _ := admittedWorkerRun(t)
 	defer store.Close()
 	ctx := context.Background()
@@ -640,6 +659,7 @@ func TestRefusedSettlementNeedsAnAvailableChange(t *testing.T) {
 // retries two revisions on, and one that failed with FailureSource while
 // its Change was available retains it and retries on the retained tree.
 func TestSourceFailuresThatAreNotRefusalsRetryAsBefore(t *testing.T) {
+	t.Parallel()
 	t.Run("reserved", func(t *testing.T) {
 		store, run, _ := admittedWorkerRun(t)
 		defer store.Close()
@@ -703,6 +723,7 @@ func TestSourceFailuresThatAreNotRefusalsRetryAsBefore(t *testing.T) {
 // A refusal on a retry's reopened retained Change abandons it one revision
 // on, and the next retry starts fresh two revisions later.
 func TestRefusedPublicationOnARetainedRetryAbandonsAndRetriesFresh(t *testing.T) {
+	t.Parallel()
 	blocked, _ := NewBlockedProposal("retry")
 	store, finalizing := finalizingReleasedRun(t, RoleWorker, blocked)
 	defer store.Close()
@@ -779,6 +800,7 @@ func TestRefusedPublicationOnARetainedRetryAbandonsAndRetriesFresh(t *testing.T)
 }
 
 func TestRetryHistoryAllowsMultipleNonSuccessRuns(t *testing.T) {
+	t.Parallel()
 	store, predecessor, _, keys := retryQueuedWorker(t, 33)
 	defer store.Close()
 	second, err := store.AdmitNext(context.Background(), keys, mustTime(t, 33))
@@ -857,6 +879,7 @@ func assertCorruptTaskHistory(t *testing.T, store *Store, path string, runIDs ..
 }
 
 func TestFinalizingResourceActivationMustNotFollowFinalizing(t *testing.T) {
+	t.Parallel()
 	t.Run("after finalizing", func(t *testing.T) {
 		store, run, _ := admittedOrchestratorRun(t)
 		path := storePath(t, store)
@@ -941,6 +964,7 @@ func TestFinalizingResourceActivationMustNotFollowFinalizing(t *testing.T) {
 }
 
 func TestRunningWorkerChangeCausalitySurvivesLaterPhases(t *testing.T) {
+	t.Parallel()
 	t.Run("finalizing", func(t *testing.T) {
 		store, run, keys := runningWorkerRun(t)
 		path := storePath(t, store)
@@ -1028,6 +1052,7 @@ func runningOverseerKeys(t *testing.T, store *Store, projectID ProjectID, base i
 // the ordinary recovery of a run that ended without an attempt outcome needs
 // no second agent.
 func TestRetryTaskForOverseerKeepsCurrentWorkerWithoutReplacement(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, terminal, _ := terminalPreRunningWorker(t)
 	defer store.Close()
@@ -1043,6 +1068,7 @@ func TestRetryTaskForOverseerKeepsCurrentWorkerWithoutReplacement(t *testing.T) 
 }
 
 func TestRetryTaskForOverseerAtomicallyReassignsSettledTask(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, terminal, _ := terminalPreRunningWorker(t)
 	defer store.Close()
@@ -1094,6 +1120,7 @@ func TestRetryTaskForOverseerAtomicallyReassignsSettledTask(t *testing.T) {
 // update must be refused, atomically, with no row changed, rather than
 // committing invalid chronology later validation would reject.
 func TestRetryTaskForOverseerRefusesCausallyEarlyTimestamp(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, terminal, _ := terminalPreRunningWorker(t)
 	defer store.Close()
@@ -1174,6 +1201,7 @@ func queueRetryForTerminalSeed(t *testing.T, store *Store, terminal Run, taskUpd
 }
 
 func TestTaskRunTopologyRejectsRevisionSkip(t *testing.T) {
+	t.Parallel()
 	store, terminal, _ := terminalPreRunningWorker(t)
 	defer store.Close()
 	corruptSQL(t, store, `UPDATE tasks SET work_revision = work_revision + 2, status = 'queued', result = NULL, completed_at_ms = NULL WHERE id = ?`, terminal.TaskID.Bytes())
@@ -1183,6 +1211,7 @@ func TestTaskRunTopologyRejectsRevisionSkip(t *testing.T) {
 }
 
 func TestOrphanTaskRevisionRejectedEveryBoundary(t *testing.T) {
+	t.Parallel()
 	store, path, project, agent := newAdmissionStore(t, RoleOrchestrator, 2)
 	task, err := store.EnqueueTask(context.Background(), NewTask{
 		ID: taskID(t, 240), ProjectID: project.ID, AssignedAgentID: agent.ID,
@@ -1220,6 +1249,7 @@ func TestOrphanTaskRevisionRejectedEveryBoundary(t *testing.T) {
 }
 
 func TestFreshQueuedTaskWithoutRunRemainsValidAndAdmissible(t *testing.T) {
+	t.Parallel()
 	store, path, project, agent := newAdmissionStore(t, RoleOrchestrator, 2)
 	task, err := store.EnqueueTask(context.Background(), NewTask{
 		ID: taskID(t, 243), ProjectID: project.ID, AssignedAgentID: agent.ID,
@@ -1250,6 +1280,7 @@ func TestFreshQueuedTaskWithoutRunRemainsValidAndAdmissible(t *testing.T) {
 }
 
 func TestNoRunNonQueuedTaskRejected(t *testing.T) {
+	t.Parallel()
 	store, path, project, agent := newAdmissionStore(t, RoleOrchestrator, 2)
 	task, err := store.EnqueueTask(context.Background(), NewTask{
 		ID: taskID(t, 246), ProjectID: project.ID, AssignedAgentID: agent.ID,
@@ -1277,6 +1308,7 @@ func TestNoRunNonQueuedTaskRejected(t *testing.T) {
 }
 
 func TestRunsRejectDuplicateAdmittedTaskWorkRevision(t *testing.T) {
+	t.Parallel()
 	store, terminal, _ := terminalPreRunningWorker(t)
 	defer store.Close()
 	_, err := store.writer.Exec(`INSERT INTO runs(
@@ -1303,6 +1335,7 @@ func TestRunsRejectDuplicateAdmittedTaskWorkRevision(t *testing.T) {
 }
 
 func TestTerminalRunRejectsSameRevisionLateChangeCheckpoint(t *testing.T) {
+	t.Parallel()
 	store, terminal := terminalPreRunningAvailableWorker(t)
 	defer store.Close()
 	corruptSQL(t, store, `UPDATE changes SET available_at_ms = 90, updated_at_ms = 90 WHERE id = ?`, terminal.ChangeID.Bytes())
@@ -1401,6 +1434,7 @@ func admittedWorkerRun(t *testing.T) (*Store, Run, AdmissionKeys) {
 }
 
 func TestChronologyScannersRejectImpossibleRows(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name  string
 		setup func(*testing.T) (*Store, func() error)
@@ -1548,6 +1582,7 @@ func activateResourcesAt(t *testing.T, store *Store, run Run, at int64) Run {
 // A cancelled worker task can be retried: one that ran starts its next work
 // revision; shared work cancelled before admission is queued again as it was.
 func TestRetryTaskRequeuesCancelledTask(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	cancelled, err := NewCancelledProposal("expired")
 	if err != nil {
@@ -1581,6 +1616,7 @@ func TestRetryTaskRequeuesCancelledTask(t *testing.T) {
 // cancel, a blocked expiry), never an operator's cancel, and stops at its
 // bound of recorded retries.
 func TestRetryIntakeTaskOnlyAfterAutomaticEndWithinBound(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	failed, _ := NewFailureProposal(FailureInternal, "crashed")
 	limited, _ := NewCancelledProposal(RunLimitDetail)
@@ -1656,6 +1692,7 @@ func TestRetryIntakeTaskOnlyAfterAutomaticEndWithinBound(t *testing.T) {
 // A task a continuation waits on keeps its work revision: neither a retry, a
 // send-back nor a blocked cancel may strand the continuation.
 func TestAwaitedTaskRefusesRetryAndSendBack(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	blocked, _ := NewBlockedProposal("waits on a card")
 	store, finalizing := finalizingReleasedRun(t, RoleWorker, blocked)
@@ -1695,6 +1732,7 @@ func TestAwaitedTaskRefusesRetryAndSendBack(t *testing.T) {
 // The overseer retries automatic ends only: an operator's cancel is the
 // operator's to undo.
 func TestOverseerRetryLeavesAnOperatorCancel(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, terminal, _ := terminalPreRunningWorker(t)
 	defer store.Close()
@@ -1725,6 +1763,7 @@ func TestOverseerRetryLeavesAnOperatorCancel(t *testing.T) {
 // the operator, retried again. The last retry must see the operator's cancel,
 // not the earlier expiry, for intake and the overseer alike.
 func TestRetryAfterExpiryLeavesTheOperatorsLaterCancel(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	blocked, _ := NewBlockedProposal("needs a decision")
 	for _, overseer := range []bool{false, true} {
@@ -1764,6 +1803,7 @@ func TestRetryAfterExpiryLeavesTheOperatorsLaterCancel(t *testing.T) {
 
 // The overseer leaves a withdrawn issue's task alone, even after a failure.
 func TestOverseerRetryLeavesAWithdrawnIssue(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, source := intakeExactRevisionStore(t)
 	if _, err := store.SetIntakeSourceEnabled(ctx, source.ID, source.Revision, true, mustTime(t, 6)); err != nil {

@@ -15,6 +15,7 @@ import (
 // A current home opens untouched; a v36 home (the current schema without
 // task_automatic_events) migrates and keeps every row.
 func TestCurrentAndV36HomesOpenWithEveryRow(t *testing.T) {
+	t.Parallel()
 	for _, v36 := range []bool{false, true} {
 		t.Run(fmt.Sprintf("v36=%v", v36), func(t *testing.T) { testHomeOpensWithEveryRow(t, v36) })
 	}
@@ -101,6 +102,7 @@ func snapshotRows(t *testing.T, ctx context.Context, connection *sql.Conn) map[s
 // userVersion, adds the migration step from the version before it, and
 // re-pins here.
 func TestSchemaDigestsArePinned(t *testing.T) {
+	t.Parallel()
 	sum := sha256.Sum256([]byte(strings.Join(schemaStatements, "\n")))
 	if got := hex.EncodeToString(sum[:]); got != "819c191d4e411ad35a2f7cf19db739d0492d0f8cf1c9c5fe0bd50a5197b5bb6c" {
 		t.Errorf("current schema digest = %s", got)

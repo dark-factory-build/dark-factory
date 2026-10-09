@@ -17,6 +17,7 @@ import (
 // Every public kind remains coherent; tasks use admission order, while other
 // entity collections retain raw identity order.
 func TestPublicSnapshotKeepsEveryKindInCanonicalOrder(t *testing.T) {
+	t.Parallel()
 	store, run, _ := runningOrchestratorRun(t)
 	defer store.Close()
 	ctx := context.Background()
@@ -99,6 +100,7 @@ func TestPublicSnapshotKeepsEveryKindInCanonicalOrder(t *testing.T) {
 // An empty Factory still returns a complete snapshot: the collections are
 // present and empty rather than absent or nil-typed.
 func TestPublicSnapshotOfAnEmptyFactoryIsComplete(t *testing.T) {
+	t.Parallel()
 	store, _ := newTestStore(t)
 	defer store.Close()
 	snapshot, err := store.ReadPublicSnapshot(context.Background())
@@ -119,6 +121,7 @@ func TestPublicSnapshotOfAnEmptyFactoryIsComplete(t *testing.T) {
 // The entity bound is exact and fails closed. At the limit the snapshot is
 // refused entirely; nothing partial or truncated is returned.
 func TestPublicSnapshotCountBoundFailsClosedWithoutTruncation(t *testing.T) {
+	t.Parallel()
 	for _, count := range []int{PublicStateEntityLimit - 1, PublicStateEntityLimit} {
 		t.Run(fmt.Sprintf("dynamic_%d", count), func(t *testing.T) {
 			store, _ := newTestStore(t)
@@ -144,6 +147,7 @@ func TestPublicSnapshotCountBoundFailsClosedWithoutTruncation(t *testing.T) {
 // The bound counts the factory plus every dynamic kind together, so no single
 // kind can be under its own limit while the whole is over.
 func TestPublicSnapshotCountBoundIncludesEveryDynamicKind(t *testing.T) {
+	t.Parallel()
 	store, run, _ := runningOrchestratorRun(t)
 	defer store.Close()
 	ctx := context.Background()
@@ -174,6 +178,7 @@ func TestPublicSnapshotCountBoundIncludesEveryDynamicKind(t *testing.T) {
 
 // One pinned read cannot observe a commit that lands after it began.
 func TestPublicSnapshotPinnedReadCannotMixConcurrentCommit(t *testing.T) {
+	t.Parallel()
 	store, _ := newTestStore(t)
 	defer store.Close()
 	ctx := context.Background()
@@ -205,6 +210,7 @@ func TestPublicSnapshotPinnedReadCannotMixConcurrentCommit(t *testing.T) {
 // the rows always come from the same transaction, so the project count is
 // exactly the number of commits the head accounts for.
 func TestPublicSnapshotConcurrentWriterNeverMixesHeadAndRows(t *testing.T) {
+	t.Parallel()
 	store, _ := newTestStore(t)
 	defer store.Close()
 	ctx := context.Background()
@@ -264,6 +270,7 @@ func TestPublicSnapshotConcurrentWriterNeverMixesHeadAndRows(t *testing.T) {
 // The snapshot is a positive allowlist. Private durable columns are not even
 // selected, so they cannot reach a projection.
 func TestPublicSnapshotProjectionOmitsPrivateRows(t *testing.T) {
+	t.Parallel()
 	store, _ := newTestStore(t)
 	defer store.Close()
 	ctx := context.Background()
@@ -302,6 +309,7 @@ func TestPublicSnapshotProjectionOmitsPrivateRows(t *testing.T) {
 }
 
 func TestAgentSummariesServeTheExactProviderOnEveryReadPath(t *testing.T) {
+	t.Parallel()
 	store, _ := newTestStore(t)
 	defer store.Close()
 	ctx := context.Background()
@@ -348,6 +356,7 @@ func TestAgentSummariesServeTheExactProviderOnEveryReadPath(t *testing.T) {
 }
 
 func TestPublicSnapshotRejectsMalformedDurableControls(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name    string
 		corrupt string
@@ -484,6 +493,7 @@ func publicIDs(count int, at func(int) string) []string {
 }
 
 func TestPublicSnapshotCarriesBlockedWorkerTasksButOnlyAnOrchestratorsLatest(t *testing.T) {
+	t.Parallel()
 	store, run, _ := runningOrchestratorRun(t)
 	defer store.Close()
 	ctx := context.Background()
@@ -540,6 +550,7 @@ func TestPublicSnapshotCarriesBlockedWorkerTasksButOnlyAnOrchestratorsLatest(t *
 // A blocked task's public row carries a bounded excerpt of why, cut on a rune
 // boundary; a task that never blocked carries none at all.
 func TestPublicSnapshotTruncatesBlockedReasonAndOmitsItElsewhere(t *testing.T) {
+	t.Parallel()
 	store, _, project, agent := newAdmissionStore(t, RoleWorker, 2)
 	defer store.Close()
 	ctx := context.Background()

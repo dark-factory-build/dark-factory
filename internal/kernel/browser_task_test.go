@@ -11,6 +11,7 @@ import (
 )
 
 func TestEnqueueTaskForBrowserAgentBindsAuthorityAndKeepsInstructionPrivate(t *testing.T) {
+	t.Parallel()
 	store, _, project, agent := newAdmissionStore(t, RoleOrchestrator, 2)
 	defer store.Close()
 	ctx := context.Background()
@@ -91,6 +92,7 @@ func TestEnqueueTaskForBrowserAgentBindsAuthorityAndKeepsInstructionPrivate(t *t
 }
 
 func TestEnqueueTaskForBrowserAgentRejectsUnauthorizedStaleAndPaused(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name       string
 		capability BrowserCapabilityMask
@@ -150,6 +152,7 @@ func TestEnqueueTaskForBrowserAgentRejectsUnauthorizedStaleAndPaused(t *testing.
 }
 
 func TestEnqueueTaskForBrowserAgentRejectsInvalidInstruction(t *testing.T) {
+	t.Parallel()
 	store, _, _, agent := newAdmissionStore(t, RoleOrchestrator, 2)
 	defer store.Close()
 	client := terminalTargetClient(t, store, browserTestID(t, 210), BrowserCapabilityObserve|BrowserCapabilityHumanActions)
@@ -161,6 +164,7 @@ func TestEnqueueTaskForBrowserAgentRejectsInvalidInstruction(t *testing.T) {
 }
 
 func TestEnqueueTaskForBrowserAgentRequiresIdleAgent(t *testing.T) {
+	t.Parallel()
 	t.Run("queued task permits only its exact creation replay", func(t *testing.T) {
 		store, _, _, agent := newAdmissionStore(t, RoleOrchestrator, 2)
 		defer store.Close()
@@ -231,6 +235,7 @@ func TestEnqueueTaskForBrowserAgentRequiresIdleAgent(t *testing.T) {
 }
 
 func TestEnqueueTaskForBrowserAgentConcurrentTabsCreateExactlyOneTask(t *testing.T) {
+	t.Parallel()
 	store, _, _, agent := newAdmissionStore(t, RoleOrchestrator, 2)
 	defer store.Close()
 	client := terminalTargetClient(t, store, browserTestID(t, 231), BrowserCapabilityObserve|BrowserCapabilityHumanActions)
@@ -310,6 +315,7 @@ func pauseBrowserTaskAgent(t *testing.T, store *Store, agent Agent) Agent {
 }
 
 func TestBrowserQueueAcceptsBusyPausedAgentWithoutChangingCurrentWork(t *testing.T) {
+	t.Parallel()
 	store, _, _, agent := newAdmissionStore(t, RoleOrchestrator, 2)
 	defer store.Close()
 	ctx := context.Background()
@@ -336,6 +342,7 @@ func TestBrowserQueueAcceptsBusyPausedAgentWithoutChangingCurrentWork(t *testing
 }
 
 func TestBrowserTaskReplayRetainsRepositoryAfterSettingsChange(t *testing.T) {
+	t.Parallel()
 	for _, explicit := range []bool{false, true} {
 		name := "default"
 		if explicit {
@@ -388,6 +395,7 @@ func TestBrowserTaskReplayRetainsRepositoryAfterSettingsChange(t *testing.T) {
 }
 
 func TestBrowserEnqueuePinsContentAtomically(t *testing.T) {
+	t.Parallel()
 	store, _, project, agent := newAdmissionStore(t, RoleOrchestrator, 2)
 	defer store.Close()
 	ctx := context.Background()

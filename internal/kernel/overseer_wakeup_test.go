@@ -69,6 +69,7 @@ func escalate(t *testing.T, store *Store, project ProjectID, number, state, head
 // escalated head, and only once settled: its newest item a minute old, or its
 // oldest five minutes old.
 func TestOverseerEscalationWake(t *testing.T) {
+	t.Parallel()
 	head, moved := strings.Repeat("a", 40), strings.Repeat("b", 40)
 	settle, maxDelay := overseerWakeSettle.Milliseconds(), overseerWakeMaxDelay.Milliseconds()
 	for _, test := range []struct {
@@ -108,6 +109,7 @@ func TestOverseerEscalationWake(t *testing.T) {
 // A Change factoryd could not publish has no pull request; its escalation
 // wakes the overseer once all the same.
 func TestOverseerPublishFailureWake(t *testing.T) {
+	t.Parallel()
 	store, worker, _ := wakeFixture(t)
 	insert := `INSERT INTO production_records (project_id, repository, kind, identity, visual_id, document, observed_at_ms) VALUES (?, 'example/factory', 'reviewer', 'publish-x-1', '', ?, 1000)`
 	if _, err := store.writer.ExecContext(context.Background(), insert, worker.ProjectID.Bytes(), `{"id":"publish-x-1","state":"publish_failed","handled":true,"request":{"PullNumber":0,"Head":""},"escalation":"factoryd cannot publish change x for task t: refused"}`); err != nil {
@@ -122,6 +124,7 @@ func TestOverseerPublishFailureWake(t *testing.T) {
 // A cancelled worker task is informational; a blocked one wakes the overseer
 // with one summary line and project counts.
 func TestOverseerWakeSummarisesTasks(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, worker, _ := wakeFixture(t)
 	cancelled, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 10), IncarnationID: incarnationID(t, 11), ProjectID: worker.ProjectID, AssignedAgentID: worker.ID, Title: "cancelled"}, mustTime(t, 5))
@@ -173,6 +176,7 @@ func TestOverseerWakeSummarisesTasks(t *testing.T) {
 
 // Lines that overflow the provider bound are dropped first, then escalations.
 func TestOverseerWakeInstructionFallsBackToFull(t *testing.T) {
+	t.Parallel()
 	line := "- " + strings.Repeat("x", 200)
 	lines := make([]string, 50) // > 8 KiB with Codex
 	for index := range lines {
@@ -191,6 +195,7 @@ func TestOverseerWakeInstructionFallsBackToFull(t *testing.T) {
 // A succeeded intake task with a diff is factoryd's to publish; any other
 // success still gets the overseer's one look.
 func TestOverseerWakeSkipsPublishedIntakeSuccess(t *testing.T) {
+	t.Parallel()
 	for _, intake := range []bool{false, true} {
 		ctx := context.Background()
 		succeeded, _ := NewSuccessProposal("done")
@@ -237,6 +242,7 @@ func TestOverseerWakeSkipsPublishedIntakeSuccess(t *testing.T) {
 // not use them up, while a bare instruction (the causal record overflowed) or
 // a full wake counts for every item. Each wake here ran.
 func TestOverseerRewakesCountPerItem(t *testing.T) {
+	t.Parallel()
 	for other, due := range map[string]bool{"Factory causal wake: mode=targeted; \nEscalated: stuck 8": true, "Supervise.": false} {
 		ctx := context.Background()
 		store, worker, overseer := wakeFixture(t)
@@ -270,6 +276,7 @@ func TestOverseerRewakesCountPerItem(t *testing.T) {
 // OverseerRewakeAfter like any wake, but only one that started counts toward
 // the item's re-wakes (stalledCard drives that count to the item's card).
 func TestOverseerNeverStartedWakeLeavesItemDue(t *testing.T) {
+	t.Parallel()
 	for _, detail := range []string{NeverStartedRunDetail, "provider exited"} {
 		ctx := context.Background()
 		neverStarted, _ := NewFailureProposal(FailureProtocol, NeverStartedRunDetail)
@@ -364,6 +371,7 @@ func settleCarrier(t *testing.T, store *Store, at int64, seed byte, detail strin
 // OverseerRewakeAfter. An item past its re-wakes becomes one NEEDS YOU card,
 // raised once, whose reply resumes the last carrier with the question.
 func TestOverseerRewakesCountPerItemAndStartedOnly(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, _, last, card, at, _ := stalledCard(t)
 	delivery, _ := HumanRequestDeliveryIDFromBytes(bytes.Repeat([]byte{7}, IDBytes))
@@ -383,6 +391,7 @@ func TestOverseerRewakesCountPerItemAndStartedOnly(t *testing.T) {
 // Only a human answers a stalled-item card: the overseer neither sees it in
 // its snapshot nor resolves it.
 func TestStalledCardIsTheOperatorsAlone(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, worker, _, card, at, next := stalledCard(t)
 	overseer, _, err := store.Agent(ctx, agentID(t, 3))
@@ -415,6 +424,7 @@ func TestStalledCardIsTheOperatorsAlone(t *testing.T) {
 // A stalled-item card closes once its items (every escalated PR it names)
 // resolve on their own.
 func TestStalledCardClosesWhenItsItemResolves(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, _, last, _, at, _ := stalledCard(t)
 	if _, err := store.writer.ExecContext(ctx, `UPDATE production_records SET document = json_set(document, '$.state', 'closed') WHERE kind = 'pull_request'`); err != nil {
@@ -433,6 +443,7 @@ func TestStalledCardClosesWhenItsItemResolves(t *testing.T) {
 // whether it is stalled: the item's card stays open rather than closing and
 // leaving the item neither woken nor carded.
 func TestStalledCardSurvivesANeverStartedWake(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, worker, _, card, at, next := stalledCard(t)
 	if _, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 88), IncarnationID: incarnationID(t, 89), ProjectID: worker.ProjectID, AssignedAgentID: agentID(t, 3), Title: overseerWakeTitle, Body: "Factory causal wake: mode=full"}, mustTime(t, at)); err != nil {
@@ -448,6 +459,7 @@ func TestStalledCardSurvivesANeverStartedWake(t *testing.T) {
 
 // A card the operator cancelled is not raised again on the same wake run.
 func TestCancelledStalledCardStaysCancelled(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, _, _, card, at, _ := stalledCard(t)
 	tx, err := store.beginValidatedWrite(ctx)

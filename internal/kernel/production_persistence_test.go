@@ -13,6 +13,7 @@ import (
 )
 
 func TestProductionPersistsFinalizedConstructionPublicationAndRebase(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	proposal, err := NewSuccessProposal("published")
 	if err != nil {
@@ -131,6 +132,7 @@ func TestProductionPersistsFinalizedConstructionPublicationAndRebase(t *testing.
 }
 
 func TestPublishedReviewChangesAreSentBackToOriginExactlyOnce(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	proposal, err := NewSuccessProposal("published")
 	if err != nil {
@@ -170,6 +172,7 @@ func TestPublishedReviewChangesAreSentBackToOriginExactlyOnce(t *testing.T) {
 // overseer's row is the newer one, and the sent-back branch is no longer
 // publishable.
 func TestPublishedReviewSendBackReachesTheWorkerNotThePublisher(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	proposal, err := NewSuccessProposal("published")
 	if err != nil {
@@ -227,6 +230,7 @@ func TestPublishedReviewSendBackReachesTheWorkerNotThePublisher(t *testing.T) {
 // unpublished, and none once it is published. A worker takes no standing
 // instruction at all.
 func TestOverseerWakeRule(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	proposal, err := NewSuccessProposal("published")
 	if err != nil {
@@ -313,6 +317,7 @@ func TestOverseerWakeRule(t *testing.T) {
 }
 
 func TestProductionPublicationUsesOwnedChangeForTransformedHead(t *testing.T) {
+	t.Parallel()
 	for _, historical := range []bool{false, true} {
 		t.Run(fmt.Sprint("historical=", historical), func(t *testing.T) {
 			ctx := context.Background()
@@ -449,6 +454,7 @@ func TestProductionPublicationUsesOwnedChangeForTransformedHead(t *testing.T) {
 }
 
 func TestProductionObservationUsesVerifiedHeadRepositoryForTransformedHead(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	proposal, err := NewSuccessProposal("published")
 	if err != nil {
@@ -517,6 +523,7 @@ func TestProductionObservationUsesVerifiedHeadRepositoryForTransformedHead(t *te
 }
 
 func TestProductionSurvivesReopen(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, path := newTestStore(t)
 	project, err := store.CreateProject(ctx, NewProject{ID: projectID(t, 250), Name: "production", Root: "/production"}, mustTime(t, 2))
@@ -573,6 +580,7 @@ func containsString(values []string, want string) bool {
 // publish failure is recorded at its revision; that failure is never in
 // flight, so nothing retries it.
 func TestPublishableIntakeChangeIsFactorydsUntilPublishedOrFailed(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	proposal, err := NewSuccessProposal("done")
 	if err != nil {

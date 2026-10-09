@@ -11,6 +11,7 @@ import (
 )
 
 func TestAdmitNextSelectsCanonicalCurrentQueueInsideTransaction(t *testing.T) {
+	t.Parallel()
 	t.Run("priority then creation time", func(t *testing.T) {
 		store, _, project, agent := newAdmissionStore(t, RoleOrchestrator, 4)
 		defer store.Close()
@@ -38,6 +39,7 @@ func TestAdmitNextSelectsCanonicalCurrentQueueInsideTransaction(t *testing.T) {
 }
 
 func TestAdmitNextSelectsGlobalPriorityWithoutCallerNomination(t *testing.T) {
+	t.Parallel()
 	store, _, project, firstAgent := newAdmissionStore(t, RoleOrchestrator, 4)
 	defer store.Close()
 	ctx := context.Background()
@@ -70,6 +72,7 @@ func TestAdmitNextSelectsGlobalPriorityWithoutCallerNomination(t *testing.T) {
 }
 
 func TestAdmissionSerializesOnlyDeclaredConflictPaths(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, _, project, firstAgent := newAdmissionStore(t, RoleWorker, 2)
 	defer store.Close()
@@ -97,6 +100,7 @@ func TestAdmissionSerializesOnlyDeclaredConflictPaths(t *testing.T) {
 }
 
 func TestAdmissionWaitsForExactProducerWorkRevision(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, _, project, producerAgent := newAdmissionStore(t, RoleOrchestrator, 2)
 	defer store.Close()
@@ -124,6 +128,7 @@ func TestAdmissionWaitsForExactProducerWorkRevision(t *testing.T) {
 }
 
 func TestAdmissionConsumesExactSuccessfulProducerRevision(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	proposal, _ := NewSuccessProposal("producer result")
 	store, finalizing := finalizingReleasedRun(t, RoleOrchestrator, proposal)
@@ -232,6 +237,7 @@ func TestAdmissionConsumesExactSuccessfulProducerRevision(t *testing.T) {
 }
 
 func TestAdmissionAllowsIndependentConflictPathsInParallel(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, _, project, firstAgent := newAdmissionStore(t, RoleWorker, 2)
 	defer store.Close()
@@ -255,6 +261,7 @@ func TestAdmissionAllowsIndependentConflictPathsInParallel(t *testing.T) {
 }
 
 func TestAdmitNextUsesSeparateWorkerAndOverseerSlots(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, _, project, worker := newAdmissionStore(t, RoleWorker, 1)
 	defer store.Close()
@@ -279,6 +286,7 @@ func TestAdmitNextUsesSeparateWorkerAndOverseerSlots(t *testing.T) {
 }
 
 func TestAdmitNextSkipsCapacityBlockedRoleBeforePriority(t *testing.T) {
+	t.Parallel()
 	t.Run("worker full admits lower-priority overseer", func(t *testing.T) {
 		ctx := context.Background()
 		store, _, project, worker := newAdmissionStore(t, RoleWorker, 1)
@@ -340,6 +348,7 @@ func TestAdmitNextSkipsCapacityBlockedRoleBeforePriority(t *testing.T) {
 }
 
 func TestAdmitNextSkipsIneligibleGlobalHead(t *testing.T) {
+	t.Parallel()
 	store, _, project, busyAgent := newAdmissionStore(t, RoleWorker, 4)
 	defer store.Close()
 	ctx := context.Background()
@@ -382,6 +391,7 @@ func TestAdmitNextSkipsIneligibleGlobalHead(t *testing.T) {
 }
 
 func TestAdmitNextDistinguishesEmptyFromIneligibleQueue(t *testing.T) {
+	t.Parallel()
 	t.Run("empty", func(t *testing.T) {
 		store, _, _, _ := newAdmissionStore(t, RoleOrchestrator, 2)
 		defer store.Close()
@@ -410,6 +420,7 @@ func TestAdmitNextDistinguishesEmptyFromIneligibleQueue(t *testing.T) {
 }
 
 func TestAdmissionFreezesProviderModelAndEffort(t *testing.T) {
+	t.Parallel()
 	store, _ := newTestStore(t)
 	defer store.Close()
 	ctx := context.Background()
@@ -465,6 +476,7 @@ func TestAdmissionFreezesProviderModelAndEffort(t *testing.T) {
 }
 
 func TestShellLaunchControlCorruptionFailsClosed(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name      string
 		statement string
@@ -545,6 +557,7 @@ func TestShellLaunchControlCorruptionFailsClosed(t *testing.T) {
 }
 
 func TestAdmissionCreatesExactDeclaredTerminalSession(t *testing.T) {
+	t.Parallel()
 	store, _, _, agent := newAdmissionStore(t, RoleOrchestrator, 4)
 	defer store.Close()
 	if _, err := store.EnqueueTask(context.Background(), NewTask{ID: taskID(t, 221), ProjectID: agent.ProjectID, AssignedAgentID: agent.ID, IncarnationID: incarnationID(t, 222), Title: "session"}, mustTime(t, 5)); err != nil {
@@ -566,6 +579,7 @@ func TestAdmissionCreatesExactDeclaredTerminalSession(t *testing.T) {
 }
 
 func TestAdmissionGatesHaveZeroFootprint(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name   string
 		mutate func(*testing.T, *Store, Agent)
@@ -613,6 +627,7 @@ func TestAdmissionGatesHaveZeroFootprint(t *testing.T) {
 }
 
 func TestAdmissionDoesNotGateOrchestratorOnLegacyToolBudget(t *testing.T) {
+	t.Parallel()
 	store, _, project, agent := newAdmissionStore(t, RoleOrchestrator, 2)
 	defer store.Close()
 	if _, err := store.EnqueueTask(context.Background(), NewTask{ID: taskID(t, 63), ProjectID: project.ID, AssignedAgentID: agent.ID, IncarnationID: incarnationID(t, 64), Title: "supervise"}, mustTime(t, 5)); err != nil {
@@ -628,6 +643,7 @@ func TestAdmissionDoesNotGateOrchestratorOnLegacyToolBudget(t *testing.T) {
 }
 
 func TestAdmissionCreatesExactWorkerFootprintAndReconciles(t *testing.T) {
+	t.Parallel()
 	store, _, project, agent := newAdmissionStore(t, RoleWorker, 2)
 	defer store.Close()
 	task, err := store.EnqueueTask(context.Background(), NewTask{ID: taskID(t, 70), ProjectID: project.ID, AssignedAgentID: agent.ID, IncarnationID: incarnationID(t, 71), Title: "worker"}, mustTime(t, 5))
@@ -677,6 +693,7 @@ func TestAdmissionCreatesExactWorkerFootprintAndReconciles(t *testing.T) {
 }
 
 func TestAdmissionRejectsNonCanonicalOwnershipLocators(t *testing.T) {
+	t.Parallel()
 	store, _, project, agent := newAdmissionStore(t, RoleWorker, 2)
 	defer store.Close()
 	_, err := store.EnqueueTask(context.Background(), NewTask{ID: taskID(t, 75), ProjectID: project.ID, AssignedAgentID: agent.ID, IncarnationID: incarnationID(t, 76), Title: "locator"}, mustTime(t, 5))
@@ -703,6 +720,7 @@ func TestAdmissionRejectsNonCanonicalOwnershipLocators(t *testing.T) {
 }
 
 func TestIndependentStoresCannotAdmitSameAgentOrTask(t *testing.T) {
+	t.Parallel()
 	store, path, project, agent := newAdmissionStore(t, RoleOrchestrator, 4)
 	task, err := store.EnqueueTask(context.Background(), NewTask{ID: taskID(t, 80), ProjectID: project.ID, AssignedAgentID: agent.ID, IncarnationID: incarnationID(t, 81), Title: "race"}, mustTime(t, 5))
 	if err != nil {
@@ -757,6 +775,7 @@ func TestIndependentStoresCannotAdmitSameAgentOrTask(t *testing.T) {
 }
 
 func TestIndependentStoresSerializeDifferentAgentsAtGlobalCapacity(t *testing.T) {
+	t.Parallel()
 	store, path, project, firstAgent := newAdmissionStore(t, RoleOrchestrator, 1)
 	secondAgent, err := store.CreateAgent(context.Background(), NewAgent{
 		ID: agentID(t, 101), ProjectID: project.ID, Name: "second capacity contender",
@@ -834,6 +853,7 @@ func TestIndependentStoresSerializeDifferentAgentsAtGlobalCapacity(t *testing.T)
 }
 
 func TestAdmissionTaskGuardFailureRollsBackEntireFootprint(t *testing.T) {
+	t.Parallel()
 	store, _, project, agent := newAdmissionStore(t, RoleWorker, 2)
 	defer store.Close()
 	task, err := store.EnqueueTask(context.Background(), NewTask{ID: taskID(t, 105), ProjectID: project.ID, AssignedAgentID: agent.ID, IncarnationID: incarnationID(t, 106), Title: "guarded"}, mustTime(t, 5))
@@ -859,6 +879,7 @@ func TestAdmissionTaskGuardFailureRollsBackEntireFootprint(t *testing.T) {
 }
 
 func TestAdmissionRequiresEveryDeclaredResourceInsert(t *testing.T) {
+	t.Parallel()
 	for _, kind := range []ResourceKind{ResourceRuntimeRoot, ResourceRunnerProcess, ResourceProviderProcess, ResourceProviderGroup} {
 		t.Run(kind.String(), func(t *testing.T) {
 			store, _, project, agent := newAdmissionStore(t, RoleWorker, 2)
@@ -891,6 +912,7 @@ func TestAdmissionRequiresEveryDeclaredResourceInsert(t *testing.T) {
 }
 
 func TestAdmissionRequiresTerminalSessionInsert(t *testing.T) {
+	t.Parallel()
 	store, _, project, agent := newAdmissionStore(t, RoleOrchestrator, 2)
 	defer store.Close()
 	task, err := store.EnqueueTask(context.Background(), NewTask{ID: taskID(t, 119), ProjectID: project.ID, AssignedAgentID: agent.ID, IncarnationID: incarnationID(t, 120), Title: "terminal insert guard"}, mustTime(t, 5))
@@ -928,6 +950,7 @@ func admissionFootprint(t *testing.T, store *Store) admissionCounts {
 }
 
 func TestOverseerAdmissionCapacityIsProjectScoped(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, _, firstProject, firstOverseer := newAdmissionStore(t, RoleOrchestrator, 1)
 	defer store.Close()
@@ -1028,6 +1051,7 @@ func terminalSessionForRunTest(t testing.TB, store *Store, runID RunID) Terminal
 }
 
 func TestAdmissionValidatesBeforeMutationAndReconciliation(t *testing.T) {
+	t.Parallel()
 	for _, role := range []AgentRole{RoleWorker, RoleOrchestrator} {
 		for _, replay := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/replay=%v", role, replay), func(t *testing.T) {
@@ -1059,6 +1083,7 @@ func TestAdmissionValidatesBeforeMutationAndReconciliation(t *testing.T) {
 }
 
 func TestEmptyAdmissionDoesNotValidateUnrelatedHistoryOrWrite(t *testing.T) {
+	t.Parallel()
 	store, _, _, _ := newAdmissionStore(t, RoleWorker, 2)
 	defer store.Close()
 	corruptSQL(t, store, `UPDATE invalidations SET sequence = 100 WHERE sequence = 1`)
@@ -1075,6 +1100,7 @@ func TestEmptyAdmissionDoesNotValidateUnrelatedHistoryOrWrite(t *testing.T) {
 // A task text starting "review handoff" is ordinary work: any provider may be
 // assigned it and admission treats it like any other task.
 func TestReviewHandoffTextIsAnOrdinaryTask(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, err := createTestStore(ctx, filepath.Join(t.TempDir(), "kernel.db"), FactoryConfig{DispatchEnabled: true, Capacity: 2}, mustTime(t, 1))
 	if err != nil {
@@ -1102,6 +1128,7 @@ func TestReviewHandoffTextIsAnOrdinaryTask(t *testing.T) {
 // requeue, a retry, a send-back) carries its consumers' pins forward: only a
 // success can be superseded, so nothing else may strand a consumer.
 func TestUnsucceededProducerCarriesPrerequisitePins(t *testing.T) {
+	t.Parallel()
 	neverStarted, _ := NewFailureProposal(FailureProtocol, NeverStartedRunDetail)
 	overseerLimit, _ := NewFailureProposal(FailureProtocol, OverseerRunLimitDetail)
 	failed, _ := NewFailureProposal(FailureInternal, "retry")
