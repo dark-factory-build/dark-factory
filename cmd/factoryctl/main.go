@@ -354,6 +354,7 @@ func runWithOpener(ctx context.Context, args []string, getenv func(string) strin
 type serviceInspector func(context.Context, string) (install.ServiceStatus, error)
 
 func runWithDependencies(ctx context.Context, args []string, getenv func(string) string, stdout, stderr io.Writer, opener browserOpener, inspect serviceInspector) int {
+	getenv = defaultOperatorHome(getenv)
 	if len(args) > 0 && args[0] == "review" {
 		return runReview(ctx, args[1:], getenv, stdout, stderr)
 	}
@@ -1250,7 +1251,7 @@ func openPairedBrowser(ctx context.Context, home string, opener browserOpener) b
 	ctx, cancel := context.WithTimeout(ctx, pairPatience)
 	defer cancel()
 	for opener != nil {
-		if client, err := api.NewOperatorClient(install.LocalAPISocketPath(home), filepath.Join(home, "operator.token")); err == nil {
+		if client, err := api.NewOperatorClient(install.LocalAPISocketPath(home), install.OperatorTokenPath(home)); err == nil {
 			if link, err := client.WebPair(ctx); err == nil {
 				return opener(ctx, link) == nil
 			}
@@ -1262,6 +1263,32 @@ func openPairedBrowser(ctx context.Context, home string, opener browserOpener) b
 		}
 	}
 	return false
+}
+
+// defaultOperatorHome answers the operator socket and token with the installed
+// home's paths when neither is set and nothing marks an attempt: a worker must
+// never be handed operator.token. One set and one unset stays an error.
+func defaultOperatorHome(getenv func(string) string) func(string) string {
+	return func(name string) string {
+		value := getenv(name)
+		if value != "" || name != "DARK_FACTORY_SOCKET" && name != "DARK_FACTORY_OPERATOR_TOKEN_FILE" {
+			return value
+		}
+		for _, other := range []string{"DARK_FACTORY_SOCKET", "DARK_FACTORY_OPERATOR_TOKEN_FILE", "DARK_FACTORY_ATTEMPT_TOKEN_FILE", "DARK_FACTORY_TASK_ATTACHMENTS", "DARK_FACTORY_FACTORYCTL"} {
+			if getenv(other) != "" {
+				return ""
+			}
+		}
+		home := getenv("HOME")
+		if !filepath.IsAbs(home) {
+			return ""
+		}
+		home = filepath.Join(home, install.DefaultHomeName)
+		if name == "DARK_FACTORY_SOCKET" {
+			return install.LocalAPISocketPath(home)
+		}
+		return install.OperatorTokenPath(home)
+	}
 }
 
 // serviceSourceDirectory is the invoking factoryctl's own resolved directory:

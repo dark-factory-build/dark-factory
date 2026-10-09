@@ -219,6 +219,30 @@ func TestWebPairHandsTheLinkOnlyToTheBrowser(t *testing.T) {
 	awaitMany(t, done, 2)
 }
 
+// A bare operator command finds the installed home; an attempt context never
+// does, so a worker is never handed operator.token.
+func TestOperatorEnvironmentDefaultsToTheInstalledHomeOutsideAttempts(t *testing.T) {
+	environment := func(values map[string]string) func(string) string {
+		return defaultOperatorHome(func(name string) string { return values[name] })
+	}
+	bare := environment(map[string]string{"HOME": "/Users/someone"})
+	if got := bare("DARK_FACTORY_SOCKET"); got != "/Users/someone/.dark-factory/runtimes/factory.sock" {
+		t.Fatalf("default socket = %q", got)
+	}
+	if got := bare("DARK_FACTORY_OPERATOR_TOKEN_FILE"); got != "/Users/someone/.dark-factory/operator.token" {
+		t.Fatalf("default token = %q", got)
+	}
+	for _, values := range []map[string]string{
+		{"HOME": "/Users/someone", "DARK_FACTORY_ATTEMPT_TOKEN_FILE": "/private/attempt.token"},
+		{"HOME": "/Users/someone", "DARK_FACTORY_FACTORYCTL": "/usr/local/bin/factoryctl"},
+		{"HOME": "/Users/someone", "DARK_FACTORY_SOCKET": "/private/other.sock"},
+	} {
+		if got := environment(values)("DARK_FACTORY_OPERATOR_TOKEN_FILE"); got != "" {
+			t.Fatalf("%v fell back to %q", values, got)
+		}
+	}
+}
+
 func TestWebRevokeReportsCommittedCleanupUncertainty(t *testing.T) {
 	fixture := newAPIFixture(t)
 	defer fixture.close(t)

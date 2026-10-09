@@ -78,19 +78,19 @@ origin already installed, rather than silently keeping or dropping it. Pair a
 phone from the console's PAIR A PHONE button.
 
 Pairing a browser with the full grant is an operator action: `factoryctl web
-pair` mints a one-shot link (it expires after five minutes) and opens it in this
-machine's default browser, never printing it. Run it to pair another browser on
+pair` mints a one-shot link (it expires after five minutes) and opens your
+default browser already paired, never printing the link. Run it to pair another browser on
 this Mac (make it the default first), or to recover when a browser's saved
 credential is no longer accepted, for example after `web revoke`. A phone or
 another machine pairs with the reduced remote grant from a paired console's PAIR
 A PHONE button. The loopback listener itself mints nothing.
 
-Pairing, inspection and revocation run through the operator client, so those
-commands need the socket and token exported:
+Pairing, inspection and revocation run through the operator client. Operator
+commands find the default home `$HOME/.dark-factory` on their own; exporting
+`DARK_FACTORY_SOCKET` and `DARK_FACTORY_OPERATOR_TOKEN_FILE` is optional for the
+default home and required for any other:
 
 ```sh
-export DARK_FACTORY_SOCKET="$HOME/.dark-factory/runtimes/factory.sock"
-export DARK_FACTORY_OPERATOR_TOKEN_FILE="$HOME/.dark-factory/operator.token"
 factoryctl web status
 factoryctl web pair
 factoryctl web list-clients
@@ -109,6 +109,7 @@ find it; see [provider discovery](providers.md). From an existing committed
 Git checkout, run:
 
 ```sh
+# Optional for the default home:
 export DARK_FACTORY_SOCKET="$HOME/.dark-factory/runtimes/factory.sock"
 export DARK_FACTORY_OPERATOR_TOKEN_FILE="$HOME/.dark-factory/operator.token"
 factoryctl dispatch on
