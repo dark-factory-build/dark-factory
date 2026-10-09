@@ -146,13 +146,14 @@ export function FactoryFloor({
     ].join("\n"), "any");
   };
   return <div className="dfFactoryFloor">
-    <div className="dfFactoryFloor__scene">
     <FactoryScene
       tools={<>
         {onOpenActivity === undefined ? null : <KnowledgeActivityList items={activity} state={state} onOpen={onOpenActivity} />}
+        {unplaced + refused.length + unavailable.length === 0 ? null : <details className="dfFloorMenu" name="floor-tools"><summary>Notices · {unplaced + refused.length + unavailable.length}</summary><div className="dfFloorMenu__body">
         {unplaced > 0 ? <p className="dfFactoryEntityTools__notice" role="status">{unplaced} {unplaced === 1 ? "change is" : "changes are"} not fully placed on the floor; its pull request in Work lists every path.</p> : null}
         {refused.length > 0 ? <p className="dfFactoryEntityTools__notice" role="status">Plant unavailable: {refused.join(", ")}; retrying.</p> : null}
         {unavailable.length > 0 ? <p className="dfFactoryEntityTools__notice" role="status">Source unavailable for {unavailable.map((source) => source.name).join(", ")}; those units cannot be inferred.</p> : null}
+        </div></details>}
       </>}
       onLoadNode={onLoadNode === undefined ? undefined : (nodeId) => { const project = projectOf(nodeId); return project === undefined ? Promise.reject(new Error("unknown node")) : onLoadNode(project, nodeId); }}
       onInvestigate={investigate}
@@ -187,7 +188,6 @@ export function FactoryFloor({
         else { const reviewer = proposed.reviewers.find((actor) => actor.id === workerID); if (reviewer?.review) onSelectChange?.(reviewer.review.proposalId); }
       }}
     />
-    </div>
   </div>;
 }
 

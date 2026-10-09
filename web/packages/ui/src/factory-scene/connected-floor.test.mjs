@@ -37,10 +37,8 @@ test("no machine, label or standing spot overlaps another, and every standing sp
       const { footprint: f } = station;
       assert.ok(station.x >= f.x && station.y >= f.y && station.x + station.width <= f.x + f.width && station.y + station.height <= f.y + f.height, `${name}: ${station.entityId} inside its footprint`);
       assert.ok(f.x >= 0 && f.y >= 0 && f.x + f.width <= layout.width && f.y + f.height <= layout.height, `${name}: ${station.entityId} inside the world`);
-      assert.equal(strictly(f, layout.facilities), false, `${name}: ${station.entityId} clear of the line`);
       assert.ok(standable(layout, station.anchor), `${name}: ${station.entityId}'s standing spot is free floor`);
     }
-    assert.ok(layout.facilities.x + layout.facilities.width <= layout.width && layout.facilities.y + layout.facilities.height <= layout.height, `${name}: fit includes the facilities`);
     const seat = placeWorkers(layout, [{ id: "idler", name: "idler", role: "worker", activity: "idle", location: "resting" }])[0];
     for (const station of layout.stations) assertWalk(layout, seat, findRoute(layout, seat, station.anchor), station.anchor, `${name}: rest to ${station.entityId}`);
   }
@@ -60,7 +58,7 @@ test("traffic, faults and state, however dramatic, move nothing: machines, furni
     const loud = { ...graph, units: graph.units.map((unit) => ({ ...unit, reading: { ...unit.reading, state: "failing", ratePerHour: 1e7, errorPermille: 999, latencyMs: 60000 } })),
       flows: graph.flows.map((flow) => ({ ...flow, reading: { ...flow.reading, observation: "observed", state: "active", ratePerHour: 1e7 } })) };
     const quiet = layoutScene(graph), busy = layoutScene(loud);
-    assert.deepEqual([busy.stations.map(({ entityId: key, x, y }) => [key, x, y]), busy.facilities, busy.solids], [quiet.stations.map(({ entityId: key, x, y }) => [key, x, y]), quiet.facilities, quiet.solids], name);
+    assert.deepEqual([busy.stations.map(({ entityId: key, x, y }) => [key, x, y]), busy.solids], [quiet.stations.map(({ entityId: key, x, y }) => [key, x, y]), quiet.solids], name);
   }
 });
 

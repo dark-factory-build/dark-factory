@@ -1,7 +1,7 @@
 import type { PeerQuestionItem } from "@dark-factory/client";
 import type { SceneTask } from "../console-view.js";
 import { pointOnRoute, type Route } from "./movement.js";
-import type { SceneCrate, ScenePoint } from "./scene.js";
+import type { ScenePoint } from "./scene.js";
 
 /**
  * Things that really passed between people on the floor: work handed from the
@@ -79,18 +79,4 @@ export function messageAt(message: FloorMessage, destination: ScenePoint, at: nu
     hailing: since >= 0 && since < HAIL && message.from !== undefined ? "from" : landed && flown - message.travel < HAIL && message.to !== undefined ? "to" : undefined,
     landed: landed && flown - message.travel < REPLY,
   };
-}
-
-/**
- * A crate moves only when its recorded station changed since the last look. A
- * crate first seen at review has just been opened, and may come from its
- * author; one first seen anywhere else was already there. The first look moves nothing.
- */
-export function observeCrates(before: ReadonlyMap<string, SceneCrate["station"]> | undefined, crates: readonly SceneCrate[]) {
-  const seen = new Map(crates.map((crate) => [crate.id, crate.station]));
-  if (before === undefined) return { seen, moves: [] };
-  return { seen, moves: crates.flatMap((crate) => {
-    const was = before.get(crate.id);
-    return was === crate.station || was === undefined && crate.station !== 0 ? [] : [{ crate, from: was }];
-  }) };
 }

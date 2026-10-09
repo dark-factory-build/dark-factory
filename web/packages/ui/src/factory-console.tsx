@@ -12,16 +12,13 @@ import { MissionsPanel } from "./missions-panel.js";
 import { RemoteInvitePanel, TelemetryIngestPanel } from "./remote-invite.js";
 import { agentTelemetry, needsYou, workRows } from "./console-view.js";
 import { IconButton } from "./icons.js";
-import { Badge, SectionHeader } from "./console-kit.js";
+import { Badge } from "./console-kit.js";
 import { SpriteEditor } from "./factory-scene/sprite-editor.js";
 import { DEFAULT_FLOOR_APPEARANCE, loadFloorAppearance, resetFloorAppearance, saveFloorAppearance, type FloorAppearance } from "./floor-appearance.js";
 
-export type ConsoleView = "floor" | "agents";
 export type ConsoleDetail = "work" | "agent" | "floor";
 
 export type FactoryConsoleProps = FactoryAppSnapshot & {
-  view?: ConsoleView;
-  onView?: (view: ConsoleView) => void;
   selectedTaskId?: string;
   onSelectTask?: (taskId: string | undefined) => void;
   detail?: ConsoleDetail;
@@ -112,8 +109,6 @@ export function FactoryConsole({
   runPaths,
   lastRunPaths,
   edit,
-  view = "floor",
-  onView,
   detail,
   onDetail,
   selectedTaskId,
@@ -180,6 +175,13 @@ export function FactoryConsole({
 }: FactoryConsoleProps) {
   // This is browser presentation only: it deliberately shares neither the
   // controller nor its durable/runtime settings path.
+  const [browsingAgents, setBrowsingAgents] = useState(false);
+  useEffect(() => { setBrowsingAgents(false); }, [selectedAgent?.id]);
+  const chooseAgent = onSelectAgent === undefined ? undefined : (agent: AgentItem) => {
+    setBrowsingAgents(false);
+    onSelectAgent(agent);
+  };
+  const showAgents = () => { setBrowsingAgents(true); onDetail?.("agent"); };
   const [floorAppearance, setFloorAppearance] = useState<FloorAppearance>(DEFAULT_FLOOR_APPEARANCE);
   const floorAppearanceLoaded = useRef(false);
   useEffect(() => {
@@ -314,43 +316,27 @@ export function FactoryConsole({
         )}
 
         {onDetail === undefined ? null : <nav className="dfMobileNav dfConsoleViewToggle" aria-label="Console views">
-          <button type="button" aria-pressed={detail === "floor" && view === "floor"} disabled={!ready} onClick={() => { onView?.("floor"); onDetail("floor"); }}>Floor</button>
-          <button type="button" aria-pressed={detail === "floor" && view === "agents"} disabled={!ready || onView === undefined} onClick={() => { onView?.("agents"); onDetail("floor"); }}>Agents</button>
+          <button type="button" aria-pressed={detail === "floor"} disabled={!ready} onClick={() => { onDetail("floor"); }}>Floor</button>
+          <button type="button" aria-pressed={detail !== "floor" && selectedDetail === "agent"} disabled={!ready} onClick={showAgents}>Agents</button>
           <IconButton icon="list" aria-pressed={detail !== "floor" && selectedDetail === "work"} disabled={!ready} onClick={showWork}>Work <Badge n={waiting} /></IconButton>
           <IconButton icon="chat" disabled={!ready} onClick={() => openKnowledge(true)}>Board</IconButton>
           <IconButton icon="book" disabled={!ready} onClick={() => openKnowledge(false)}>Library</IconButton>
         </nav>}
         <div className="dfConsoleLayout">
-          <section className="dfConsoleLayout__left dfFactoryConsole__section" aria-label={view === "floor" ? "Factory floor" : "Agents"}>
-            <SectionHeader as="h2" hidden title={view === "floor" ? "Factory floor" : "Agents"} actions={
-              <div className="dfConsoleViewToggle" role="group" aria-label="Left view">
-                {(["floor", "agents"] as const).map((option) => (
-                  <button
-                    key={option}
-                    type="button"
-                    aria-pressed={view === option}
-                    disabled={!ready || onView === undefined}
-                    onClick={() => onView?.(option)}
-                  >
-                    {option === "floor" ? "Floor" : "Agents"}
-                  </button>
-                ))}
-              </div>} />
-            {view === "floor"
-              ? <FactoryFloor activity={knowledgeActivity.recent} activityCues={knowledgeActivity.cues} onOpenActivity={ready ? openActivity : undefined} requestedEntity={requestedEntity} onOpenBoard={(project, entity, id, repository) => openKnowledge(true, project, entity, id, repository)} changes={productionItems} changesRead={productionData.read} selectedChange={selectedProduction} onSelectChange={selectProduction} onProjectContent={onProjectContent} onOpenLibrary={(id) => openKnowledge(false, id)} onOpenTasks={ready ? (id) => openWork(id, false) : undefined} onOpenMissions={ready ? (id) => openWork(id, true) : undefined} projectId={projectId} floorAppearance={floorAppearance} selectedTaskId={selectedTask?.id} onSelectTask={ready ? goTask : undefined} selectedAgentId={selectedDetail === "agent" ? selectedAgent?.id : undefined} state={scopedState} graphs={graphs} graphErrors={graphErrors} onLoadNode={onLoadNode} onAddTask={ready ? onAddTask : undefined} runPaths={runPaths} lastRunPaths={lastRunPaths} onSelectAgent={ready ? onSelectAgent : undefined} onSelectHumanRequest={ready ? selectRequest : undefined} connected={ready} />
-              : <AgentList state={scopedState} selectedAgentId={selectedAgent?.id} ready={ready} onSelectAgent={ready ? onSelectAgent : undefined} />}
+          <section className="dfConsoleLayout__left dfFactoryConsole__section" aria-label="Factory floor">
+            <FactoryFloor activity={knowledgeActivity.recent} activityCues={knowledgeActivity.cues} onOpenActivity={ready ? openActivity : undefined} requestedEntity={requestedEntity} onOpenBoard={(project, entity, id, repository) => openKnowledge(true, project, entity, id, repository)} changes={productionItems} changesRead={productionData.read} selectedChange={selectedProduction} onSelectChange={selectProduction} onProjectContent={onProjectContent} onOpenLibrary={(id) => openKnowledge(false, id)} onOpenTasks={ready ? (id) => openWork(id, false) : undefined} onOpenMissions={ready ? (id) => openWork(id, true) : undefined} projectId={projectId} floorAppearance={floorAppearance} selectedTaskId={selectedTask?.id} onSelectTask={ready ? goTask : undefined} selectedAgentId={selectedDetail === "agent" ? selectedAgent?.id : undefined} state={scopedState} graphs={graphs} graphErrors={graphErrors} onLoadNode={onLoadNode} onAddTask={ready ? onAddTask : undefined} runPaths={runPaths} lastRunPaths={lastRunPaths} onSelectAgent={ready ? chooseAgent : undefined} onSelectHumanRequest={ready ? selectRequest : undefined} connected={ready} />
           </section>
 
           <aside className="dfConsoleSidebar" aria-label="Selected detail">
             <div className="dfConsoleViewToggle" role="group" aria-label="Right panel">
               <IconButton icon="list" aria-pressed={selectedDetail === "work"} disabled={!ready || onDetail === undefined} onClick={showWork}>Work <Badge n={waiting} /></IconButton>
-              <IconButton icon="terminal" aria-pressed={selectedDetail === "agent"} disabled={!ready || onDetail === undefined} onClick={() => onDetail?.("agent")}>Agent</IconButton>
+              <IconButton icon="terminal" aria-pressed={selectedDetail === "agent"} disabled={!ready || onDetail === undefined} onClick={showAgents}>Agents</IconButton>
               <IconButton icon="chat" disabled={!ready} onClick={() => openKnowledge(true)}>Board</IconButton>
               <IconButton icon="book" disabled={!ready} onClick={() => openKnowledge(false)}>Library</IconButton>
             </div>
             {editError === undefined ? null : <p className="dfFactoryConsole__terminalError" role="alert">{editError}</p>}
             <div hidden={selectedDetail !== "work"}>
-              <div hidden={!shownProduction}><ProductionPanel items={productionItems} selected={selectedProduction} onSelect={selectProduction} state={state} call={ready ? onProjectContent : undefined} connected={ready} error={[productionData.error, ...productionData.notices].filter(Boolean).join(" ")} active={selectedDetail === "work" && shownProduction} onMission={openMission} onAgent={ready ? onSelectAgent : undefined} onOpenTask={setRelatedTask} /></div>
+              <div hidden={!shownProduction}><ProductionPanel items={productionItems} selected={selectedProduction} onSelect={selectProduction} state={state} call={ready ? onProjectContent : undefined} connected={ready} error={[productionData.error, ...productionData.notices].filter(Boolean).join(" ")} active={selectedDetail === "work" && shownProduction} onMission={openMission} onAgent={ready ? chooseAgent : undefined} onOpenTask={setRelatedTask} /></div>
               <div hidden={shownProduction}><WorkPanel
                 state={scopedState}
                 rows={rows}
@@ -359,7 +345,7 @@ export function FactoryConsole({
                 onFilter={(value) => { setWorkFilter(value); setByMission(false); }}
                 byMission={byMission}
                 onByMission={() => setByMission(!byMission)}
-                missions={<MissionsPanel production={productionItems} onProduction={selectProduction} requestedMission={requestedMission} state={scopedState} projectId={projectId} active={selectedDetail === "work" && byMission && !shownProduction} call={ready ? onProjectContent : undefined} onSelectAgent={ready ? onSelectAgent : undefined} onOpenTask={ready ? setRelatedTask : undefined} />}
+                missions={<MissionsPanel production={productionItems} onProduction={selectProduction} requestedMission={requestedMission} state={scopedState} projectId={projectId} active={selectedDetail === "work" && byMission && !shownProduction} call={ready ? onProjectContent : undefined} onSelectAgent={ready ? chooseAgent : undefined} onOpenTask={ready ? setRelatedTask : undefined} />}
                 edit={edit}
                 ready={ready}
                 onEditTask={onEditTask}
@@ -391,7 +377,12 @@ export function FactoryConsole({
               /></div>
             </div>
             <div hidden={selectedDetail !== "agent"}>
-              {agent === undefined ? <p className="dfFactoryConsole__empty">Select an agent to open controls</p> : <AgentPanel
+              <div hidden={agent !== undefined && !browsingAgents} aria-label="Agents">
+                {selectedDetail !== "agent" || agent !== undefined && !browsingAgents ? null : <AgentList state={scopedState} selectedAgentId={selectedAgent?.id} ready={ready} onSelectAgent={ready ? chooseAgent : undefined} />}
+              </div>
+              <div hidden={agent === undefined || browsingAgents}>
+              <button type="button" disabled={!ready} onClick={showAgents}>All agents</button>
+              {agent === undefined ? null : <AgentPanel
                 key={agent.id}
                 agent={agent}
                 state={scopedState}
@@ -407,6 +398,7 @@ export function FactoryConsole({
                 onPanel={onAgentPanel}
                 telemetry={agentTelemetry(agent, scopedState, runPaths)}
               />}
+              </div>
             </div>
             {inspectedTask === undefined ? null : <ConsoleDialog key={inspectedTask.id} label="Task details" title="Task" onClose={() => { if (relatedTask) setRelatedTask(undefined); else onSelectTask?.(undefined); }}>
               <TaskDetail key={inspectedTask.id} task={inspectedTask} onLoadTaskDetail={onLoadTaskDetail} onLoadTaskHistory={onLoadTaskHistory} />
@@ -416,7 +408,7 @@ export function FactoryConsole({
         </div>
       </main>
       {!libraryOpen ? null : <ConsoleDialog key={knowledgeView.board ? "board" : "library"} label={knowledgeView.board ? "Discussion board" : "Project library"} title={knowledgeView.board ? "Board" : "Library"} className="dfLibraryDialog" onClose={() => setLibraryOpen(false)}>
-        <ProjectLibrary open initialProjectId={knowledgeView.project} key={`${knowledgeView.project}:${knowledgeView.board}:${knowledgeView.entity}:${knowledgeView.id}:${knowledgeView.revision}`} board={knowledgeView.board} repository={knowledgeView.repository} entity={knowledgeView.entity} initialID={knowledgeView.id} initialRevision={knowledgeView.revision} onSource={(entity) => { selectProject(entity.split(":")[0]); setRequestedEntity({ id: entity.slice(entity.indexOf(":") + 1) }); setLibraryOpen(false); onView?.("floor"); }} onRecord={openKnowledgeRecord} state={state} call={ready ? onProjectContent : undefined} onUseInTask={onAddTask === undefined ? undefined : (chip) => { setTaskContent((chips) => [...chips.filter((item) => item.project_id === chip.project_id && item.content_id !== chip.content_id), chip]); setLibraryOpen(false); openWork(chip.project_id, false); }} />
+        <ProjectLibrary open initialProjectId={knowledgeView.project} key={`${knowledgeView.project}:${knowledgeView.board}:${knowledgeView.entity}:${knowledgeView.id}:${knowledgeView.revision}`} board={knowledgeView.board} repository={knowledgeView.repository} entity={knowledgeView.entity} initialID={knowledgeView.id} initialRevision={knowledgeView.revision} onSource={(entity) => { selectProject(entity.split(":")[0]); setRequestedEntity({ id: entity.slice(entity.indexOf(":") + 1) }); setLibraryOpen(false); onDetail?.("floor"); }} onRecord={openKnowledgeRecord} state={state} call={ready ? onProjectContent : undefined} onUseInTask={onAddTask === undefined ? undefined : (chip) => { setTaskContent((chips) => [...chips.filter((item) => item.project_id === chip.project_id && item.content_id !== chip.content_id), chip]); setLibraryOpen(false); openWork(chip.project_id, false); }} />
       </ConsoleDialog>}
       {settingsOpen !== true ? null : (
         <SettingsDialog

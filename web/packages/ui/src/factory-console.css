@@ -539,8 +539,7 @@
 .dfConsoleRow__agent { flex: 0 1 auto; min-width: 0; overflow-wrap: anywhere; color: var(--df-console-muted); font-size: var(--df-text-xs); }
 
 /* single screen ------------------------------------------------------------
-   One screen: the floor or the agent list on the left, what needs you on the
-   right, and one sidebar that replaces the right column while it is open.
+   One screen: the floor on the left, work and agent controls on the right.
    ------------------------------------------------------------------------ */
 
 .dfFactoryConsole__header { flex-wrap: wrap; }
@@ -574,7 +573,10 @@
 }
 
 .dfConsoleLayout .dfFactoryConsole__section { margin: 0; }
-.dfConsoleLayout__left { min-width: 0; }
+.dfConsoleLayout__left { min-width: 0; padding: 0; }
+.dfFactoryFloor { height: 100%; min-height: 0; }
+.dfFactoryFloor__scene { position: relative; display: flex; flex-direction: column; height: min(80svh, 800px); min-height: 0; }
+.dfFactoryFloor > .dfFactoryFloor__scene { height: 100%; }
 
 .dfConsoleSidebar__feedback { white-space: pre-wrap; overflow-wrap: anywhere; }
 
@@ -699,7 +701,7 @@ summary.dfConsoleItem__summary { cursor: pointer; }
   .dfFactoryConsole__header,
   .dfConsoleLayout { width: 100%; }
   .dfConsoleLayout { flex: 1 1 auto; min-height: 0; }
-  .dfConsoleLayout__left,
+  .dfConsoleLayout__left { min-height: 0; overflow: hidden; }
   .dfConsoleSidebar { min-height: 0; overflow-y: auto; }
   .dfConsoleSidebar { position: static; align-self: stretch; max-height: none; }
 }
@@ -742,21 +744,22 @@ summary.dfConsoleItem__summary { cursor: pointer; }
 
 @media (max-width: 1024px) {
   .dfConsoleLayout { grid-template-columns: minmax(0, 1fr); }
-  .dfFactoryConsole { display: block; height: auto; overflow: visible; }
-  .dfConsoleSidebar { position: static; max-height: none; }
+  .dfFactoryConsole { display: flex; flex-direction: column; height: 100svh; min-height: 0; overflow: hidden; }
+  .dfConsoleLayout { flex: 1; min-height: 0; width: 100%; }
+  .dfConsoleLayout__left { min-height: 0; overflow: hidden; }
+  .dfConsoleSidebar { position: static; max-height: 100%; min-height: 0; }
 }
 
 /* A fixed pane the whole floor is fitted into; zooming in scrolls it. */
-.dfFactoryFloor__map { overflow: auto; height: min(70vh, 720px); scrollbar-color: #638095 #17252f; }
+.dfFactoryFloor__map { position: absolute; inset: 0; overflow: auto; height: 100%; scrollbar-color: #638095 #17252f; }
 /* The plant overview stays in the floor's corner whatever is zoomed or scrolled. */
-.dfFactoryFloor__viewport { position: relative; }
+.dfFactoryFloor__viewport { position: relative; flex: 1; min-height: 0; }
 .dfPlantOverview { position: absolute; right: .75rem; bottom: .75rem; max-width: 40%; display: grid; gap: .25rem; justify-items: end; }
 .dfPlantOverview__zoom { display: flex; gap: .25rem; }
 .dfPlantOverview__zoom button { padding: .25rem; line-height: 0; background: #122027; }
 .dfPlantOverview__zoom .dfPlantOverview__toggle { min-width: 1.75rem; line-height: 1; font: 11px ui-monospace, monospace; }
 .dfPlantMap { display: block; max-width: 100%; height: auto; background: #08131d; border: 1px solid #3c5051; box-shadow: 0 2px 8px rgba(0, 0, 0, .5); cursor: crosshair; touch-action: none; shape-rendering: crispEdges; }
 .dfPlantMap__ground { fill: #08131d; }
-.dfPlantMap__development { fill: #2a3437; }
 .dfPlantMap__station { fill: #4a515b; }
 .dfPlantMap__station.s-observed, .dfPlantMap__station.s-quiet { fill: #5ad38a; }
 .dfPlantMap__station.s-partial { fill: #c9a640; }
@@ -829,21 +832,31 @@ summary.dfConsoleItem__summary { cursor: pointer; }
 .dfMissions textarea { display: block; width: 100%; min-height: 6rem; padding: 0.65rem; resize: vertical; color: var(--df-console-text); background: var(--df-console-background); border: 1px solid var(--df-console-rule); font: inherit; }
 
 /* One floor: source search, projection controls and proposal selection stay reachable. */
-.dfFactoryEntityTools { display: flex; align-items: baseline; flex-wrap: wrap; gap: .5rem; padding: .5rem; background: #122027; border-bottom: 1px solid #3c5051; }
+.dfFactoryEntityTools { display: flex; flex: none; align-items: center; gap: .6rem; height: 2.75rem; padding: .35rem .6rem; overflow-x: auto; white-space: nowrap; font-size: var(--df-text-xs); background: #122027; border-bottom: 1px solid #3c5051; }
+.dfFactoryEntityTools > * { flex: none; }
+.dfWorkLine { display: flex; align-items: center; gap: .6rem; }
+.dfWorkLine strong { color: #edba6b; font-variant-numeric: tabular-nums; }
+.dfWorkLine__crate { display: inline-block; width: .65rem; height: .5rem; margin-right: .5rem; background: #d98a3a; border: 1px solid #f5bf73; }
+.dfWorkLine [data-fault] .dfWorkLine__crate { border-color: #f77b70; }
+:is(.dfFloorMenu, .dfKnowledgeActivity) > summary { cursor: pointer; }
+:is(.dfFloorMenu, .dfKnowledgeActivity)[open] > summary { color: var(--df-console-accent); }
+.dfFactoryEntityTools .dfFloorMenu__body { position: absolute; z-index: 10; top: 2.75rem; left: .5rem; right: .5rem; max-height: min(24rem, 55svh); overflow: auto; padding: .75rem; white-space: normal; background: #122027; border: 1px solid #3c5051; box-shadow: 0 6px 16px #0008; }
+.dfFloorMenu__body button { display: block; width: 100%; text-align: left; }
+.dfFloorMenu__body > * + * { margin-top: .4rem; }
 .dfFactoryEntityTools label { display: flex; align-items: center; gap: .5rem; flex: 1 1 24rem; }
 .dfFactoryEntityTools input { width: 100%; min-width: 0; flex: 1; color: inherit; background: var(--df-console-background); border: 1px solid var(--df-console-rule); padding: .5rem; font: inherit; }
 .dfFactoryEntityTools__results { order: 1; flex-basis: 100%; display: flex; flex-wrap: wrap; gap: .4rem; max-height: 9rem; overflow: auto; }
 .dfFactoryEntityTools__results button { max-width: 100%; overflow-wrap: anywhere; font-size: var(--df-text-xs); }
 .dfFactoryEntityTools__notice { flex-basis: 100%; display: flex; align-items: baseline; flex-wrap: wrap; gap: .4rem; margin: 0; font-size: var(--df-text-xs); }
 .dfFactoryEntityTools__selection { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: min(100%, 32rem); }
-.dfKnowledgeActivity[open] { flex-basis: 100%; overflow-wrap: anywhere; }
+.dfKnowledgeActivity { overflow-wrap: anywhere; }
 .dfKnowledgeActivity ul, .dfBoardQuestions ul { list-style: none; margin: .4rem 0; padding: 0; display: grid; gap: .35rem; }
 .dfKnowledgeActivity button { max-width: 100%; overflow-wrap: anywhere; text-align: left; }
 /* A recorded operation appears once, briefly; ambient life never uses this mark. */
 .dfKnowledgeCue { animation: dfKnowledgeCue 400ms ease-out both; }
 @keyframes dfKnowledgeCue { from { opacity: 0; } to { opacity: 1; } }
 @media (prefers-reduced-motion: reduce) { .dfKnowledgeCue { animation: none; } }
-.dfMachineInspector { padding-top: .75rem; }
+.dfMachineInspector { position: absolute; z-index: 5; bottom: 0; left: 0; right: 0; max-height: 55%; overflow: auto; padding: .75rem; background: var(--df-console-surface); border-top: 1px solid var(--df-console-rule); }
 .dfMachineInspector table { font-size: var(--df-text-xs); }
 .dfMachineInspector td, .dfMachineInspector th { overflow-wrap: normal; text-align: left; padding: .25rem .65rem .25rem 0; vertical-align: top; }
 .dfMachineInspector > button { margin: .25rem .35rem .5rem 0; }
@@ -1293,7 +1306,6 @@ summary.dfConsoleItem__summary { cursor: pointer; }
 .dfPlant .s-opaque .dfPlant__gate { fill: url(#df-fog); }
 .dfPlant__gate--runtime { stroke: var(--amber); stroke-dasharray: 2 2; }
 /* The outbound line's block: on the shared floor, not a room. */
-.dfPlant__development { fill: #2b3437; stroke: #3c4a4c; stroke-width: 1; stroke-dasharray: 3 3; }
 /* A belt lies on a dark casing, so one belt crossing another reads as passing over it, never as joining it. */
 .dfPlant__casing { fill: none; stroke: #08131d; stroke-width: 9; stroke-linejoin: round; }
 .dfPlant__casing--lit { stroke: #80ddff; opacity: .55; }

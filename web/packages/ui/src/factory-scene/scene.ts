@@ -127,7 +127,6 @@ export type SceneCrate = Readonly<{
 }>;
 
 export const LINE_STATIONS = ["Review", "Checks", "Merge queue", "Shipped"] as const;
-export const LINE_SLOTS = 8;
 
 export type SceneRect = Readonly<{ x: number; y: number; width: number; height: number }>;
 
@@ -156,14 +155,10 @@ export type SceneLayout = Readonly<{
   stations: readonly SceneStation[];
   /** Each unit's area: the footprints of its stations, in lobes where they are apart. Painted only; layout never reads it. */
   regions: readonly SceneRegion[];
-  /** The outbound line's block. Fixed size. */
-  facilities: SceneRect;
   /** The five fixtures, each in free floor between machines. They depend on the machines alone, never on who is offered or who is here. */
   fixtures: readonly SceneFixture[];
   /** The fixtures this floor shows. */
   implements: readonly BreakRoomErrand[];
-  /** The outbound line, one row per station. Fixed: it is there, empty, with no work. */
-  line: readonly (SceneRect & Readonly<{ label: string }>)[];
   /** What nobody walks through: machine bodies and fixtures. */
   solids: readonly SceneRect[];
 }>;
@@ -197,7 +192,6 @@ export const PADDING = 16;
 export const WORKER_SIZE = 20;
 /** Half an aisle around every footprint: two neighbours leave a worker room to pass with the walking grid's slack. */
 export const MARGIN = 18;
-const LINE_ROW = 28, LINE_WIDTH = 176;
 // Unrelated groups stand this much further apart than neighbours, so a disconnected group reads as one.
 const GROUP_GAP = 24;
 const ASPECT = 1.6;
@@ -378,13 +372,13 @@ function rows(order: readonly string[], sizes: ReadonlyMap<string, { width: numb
 }
 
 /**
- * Groups on shelves, tallest first, the outbound line's block last. The shelf width is the
+ * Groups on shelves, tallest first. The shelf width is the
  * one, among the widths the groups' running sums offer, that keeps the floor
  * smallest and nearest 16:10, whatever the pane.
  */
-function packGroups(groups: readonly ReadonlyMap<string, Rect>[], facility: Rect) {
-  const boxes = [...groups.map((group) => ({ group, bounds: union([...group.values()]) })).sort((a, b) => b.bounds.height - a.bounds.height || compareText([...a.group.keys()][0]!, [...b.group.keys()][0]!)),
-    { group: new Map([[FACILITIES, facility]]), bounds: facility }];
+function packGroups(groups: readonly ReadonlyMap<string, Rect>[]) {
+  if (groups.length === 0) return new Map<string, Rect>();
+  const boxes = groups.map((group) => ({ group, bounds: union([...group.values()]) })).sort((a, b) => b.bounds.height - a.bounds.height || compareText([...a.group.keys()][0]!, [...b.group.keys()][0]!));
   const shelve = (shelf: number) => {
     const out = new Map<string, Rect>();
     let x = 0, y = 0, tallest = 0, wide = 0;
@@ -394,7 +388,7 @@ function packGroups(groups: readonly ReadonlyMap<string, Rect>[], facility: Rect
       x += bounds.width + GROUP_GAP; tallest = Math.max(tallest, bounds.height); wide = Math.max(wide, x - GROUP_GAP);
     }
     const high = y + tallest;
-    return { out, cost: wide * high * (1 + 2 * Math.abs(Math.log(wide / high / ASPECT))) };
+    return { out, cost: wide * high * (1 + 4 * Math.abs(Math.log(wide / high / ASPECT))) };
   };
   let sum = 0;
   const widths = [...new Set([Math.max(...boxes.map(({ bounds }) => bounds.width)), ...boxes.map(({ bounds }) => sum += bounds.width + GROUP_GAP)])];
@@ -403,7 +397,6 @@ function packGroups(groups: readonly ReadonlyMap<string, Rect>[], facility: Rect
 }
 
 type Piece = { key: string; machine: SceneMachine; unit?: string };
-const FACILITIES = "facilities";
 
 /** Ownership weighs most, then flows; a runtime-only machine leans only on the unit it claims. Traffic never enters. */
 function linksOf(graph: SceneGraph, keys: ReadonlySet<string>) {
@@ -432,10 +425,9 @@ function groupsOf(keys: readonly string[], links: Links) {
   return groups.sort((left, right) => right.length - left.length || compareText(left[0]!, right[0]!));
 }
 
-/** The machinery's floor: the machines, the outbound line's block and the fixtures, which depend on the machines alone. */
-export type SceneMachinery = Pick<SceneLayout, "width" | "height" | "stations" | "regions" | "facilities" | "fixtures">;
+/** The machinery's floor: the machines and the fixtures, which depend on the machines alone. */
+export type SceneMachinery = Pick<SceneLayout, "width" | "height" | "stations" | "regions" | "fixtures">;
 
-const RESERVE = { x: 0, y: 0, width: LINE_WIDTH + 8 + 2 * MARGIN, height: LINE_ROW * LINE_STATIONS.length + 2 * MARGIN };
 // A fixture is 20 by 30; its zone adds room to stand in front of it and a walkway round it.
 const ZONE_W = 36, ZONE_H = 88;
 
@@ -461,7 +453,7 @@ export function placeMachinery(graph: SceneGraph, previous?: SceneMachinery): Sc
   const keys = [...sizes.keys()], links = linksOf(graph, new Set(keys));
   const placed = (previous === undefined ? undefined : keep(previous, keys, sizes, links)) ?? cold(keys, sizes, links);
   // Shift to the floor's corner; a shift moves everything together.
-  const all = [...placed.values()], left = Math.min(...all.map((rect) => rect.x)) - PADDING, top = Math.min(...all.map((rect) => rect.y)) - PADDING;
+  const all = [...placed.values()], left = (all.length === 0 ? 0 : Math.min(...all.map((rect) => rect.x))) - PADDING, top = (all.length === 0 ? 0 : Math.min(...all.map((rect) => rect.y))) - PADDING;
   const at = (key: string) => { const rect = placed.get(key)!; return { ...rect, x: rect.x - left, y: rect.y - top }; };
   const stations = pieces.map((piece): SceneStation => {
     const { shape, width, height, anchor, label, footprint } = geometry.get(piece.key)!, spot = at(piece.key);
@@ -469,9 +461,9 @@ export function placeMachinery(graph: SceneGraph, previous?: SceneMachinery): Sc
     return { entityId: piece.key, ...(machine.represented === undefined ? {} : { representedIds: machine.represented }), shape, machine,
       ...(piece.unit === undefined ? {} : { unit: piece.unit }), x, y, width, height, anchor: { x: x + anchor.x, y: y + anchor.y }, label: { ...label, x: x + label.x, y: y + label.y }, footprint: spot };
   });
-  const width = Math.max(...all.map((rect) => rect.x + rect.width)) - left + PADDING, height = Math.max(...all.map((rect) => rect.y + rect.height)) - top + PADDING;
-  const facilities = at(FACILITIES), fixtures = placeFixtures([...stations.map((station) => station.footprint), facilities], width, height);
-  return { width, height: Math.max(height, ...fixtures.map((piece) => piece.y + ZONE_H + PADDING)), stations, regions: regionsOf(stations), facilities, fixtures };
+  const width = Math.max(240, ...all.map((rect) => rect.x + rect.width)) - left + PADDING, height = Math.max(160, ...all.map((rect) => rect.y + rect.height)) - top + PADDING;
+  const fixtures = placeFixtures(stations.map((station) => station.footprint), width, height);
+  return { width, height: Math.max(height, ...fixtures.map((piece) => piece.y + ZONE_H + PADDING)), stations, regions: regionsOf(stations), fixtures };
 }
 
 /**
@@ -493,10 +485,9 @@ function placeFixtures(blocks: readonly SceneRect[], width: number, height: numb
 
 /** The floor with the fixtures this floor shows; which they are never moves a machine or a fixture. */
 export function furnish(machinery: SceneMachinery, offered: readonly BreakRoomErrand[]): SceneLayout {
-  const present = NOOK_ORDER.filter((errand) => offered.includes(errand)), { facilities } = machinery;
-  const line = LINE_STATIONS.map((label, index) => ({ label, x: facilities.x + MARGIN + 8, y: facilities.y + MARGIN + index * LINE_ROW, width: LINE_WIDTH, height: LINE_ROW - 4 }));
+  const present = NOOK_ORDER.filter((errand) => offered.includes(errand));
   const furniture = machinery.fixtures.filter((piece) => present.includes(piece.errand)).map((piece) => ({ x: piece.x, y: piece.y, width: 20, height: 30 }));
-  return { ...machinery, implements: present, line, solids: [...machinery.stations, ...furniture].map(({ x, y, width, height }) => ({ x, y, width, height })) };
+  return { ...machinery, implements: present, solids: [...machinery.stations, ...furniture].map(({ x, y, width, height }) => ({ x, y, width, height })) };
 }
 
 export function layoutScene(graph: SceneGraph, previous?: SceneMachinery, offered: readonly BreakRoomErrand[] = NOOK_ORDER): SceneLayout {
@@ -504,7 +495,7 @@ export function layoutScene(graph: SceneGraph, previous?: SceneMachinery, offere
 }
 
 function cold(keys: readonly string[], sizes: ReadonlyMap<string, { width: number; height: number }>, links: Links) {
-  return packGroups(groupsOf(keys, links).map((group) => layoutGroup(group, sizes, links)), RESERVE);
+  return packGroups(groupsOf(keys, links).map((group) => layoutGroup(group, sizes, links)));
 }
 
 /**
@@ -525,8 +516,6 @@ function keep(previous: SceneMachinery, keys: readonly string[], sizes: Readonly
   }
   const fresh = keys.filter((key) => !floor.placed.has(key));
   if (fresh.length > Math.max(4, keys.length / 4)) return undefined;
-  const block = { ...RESERVE, x: previous.facilities.x, y: previous.facilities.y };
-  floor.put(FACILITIES, block);
   for (const key of placementOrder(fresh, links, new Set(floor.placed.keys()))) { const { width, height } = sizes.get(key)!; floor.put(key, placeOne(key, width, height, floor, links)); }
   return floor.placed;
 }
@@ -605,15 +594,6 @@ function trace(parts: readonly SceneRect[]) {
   }
   const top = rects[0]!;
   return { rects, outline: edges.join(""), label: { x: top.x + 4, y: top.y + 10, width: top.width - 8 } };
-}
-
-/** Newest first within a station; past the eighth, crates wait unseen behind the "+N". */
-export function placeCrates(layout: SceneLayout, crates: readonly SceneCrate[]) {
-  const counts = [0, 0, 0, 0] as [number, number, number, number];
-  return [...crates].sort((left, right) => right.number - left.number || compareText(left.id, right.id)).map((crate) => {
-    const station = layout.line[crate.station]!, slot = counts[crate.station]++;
-    return { crate, shown: slot < LINE_SLOTS, x: station.x + 16 + Math.min(slot, LINE_SLOTS) * 18, y: station.y + 18 };
-  });
 }
 
 /** Whether a worker standing here clears every solid. */
