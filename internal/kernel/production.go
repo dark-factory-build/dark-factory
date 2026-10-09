@@ -224,7 +224,7 @@ func (store *Store) PublishingProjects(ctx context.Context) ([]ProjectID, error)
 const MaxObservationChecks = 256
 
 func validProductionObservation(project ProjectID, observation ProductionObservation, at UnixMillis) bool {
-	return !project.zero() && productionRepository.MatchString(observation.Repository) && observation.ObservedAt >= 1 && observation.ObservedAt <= at.Int64()+5000 && observation.Overflow >= 0 && validOutcomeText(observation.Unavailable, 256) && len(observation.PullRequests) <= 256 && len(observation.Checks) <= MaxObservationChecks && len(observation.Reviewers) <= 256 && len(observation.Deliveries) <= 128
+	return !project.zero() && productionRepository.MatchString(observation.Repository) && observation.ObservedAt >= 1 && observation.ObservedAt <= at.Int64()+5000 && observation.Overflow >= 0 && validOutcomeText(observation.Unavailable, 256) && len(observation.PullRequests) <= 256 && len(observation.Checks) <= MaxObservationChecks && len(observation.Reviewers) <= 256 && len(observation.Deliveries) <= 128 && (observation.DeployedAt == nil || *observation.DeployedAt >= 0)
 }
 
 // RecordProductionObservation accepts facts only from the operator authority.
@@ -347,7 +347,21 @@ func (store *Store) recordProductionObservation(ctx context.Context, c *sql.Conn
 			return err
 		}
 	}
-	if err := write("repository", observation.Repository, "", map[string]any{"unavailable": observation.Unavailable, "overflow": observation.Overflow}); err != nil {
+	health := map[string]any{"unavailable": observation.Unavailable, "overflow": observation.Overflow}
+	// Deployment records are kept once seen, and only move forward: a refresh
+	// that could not read them never ships or unships a merged pull request.
+	var deployed sql.NullInt64
+	if err := c.QueryRowContext(ctx, `SELECT json_extract(document, '$.deployed_at') FROM production_records WHERE project_id = ? AND repository = ? AND kind = 'repository' AND identity = ?`,
+		project.Bytes(), observation.Repository, observation.Repository).Scan(&deployed); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if observation.DeployedAt != nil {
+		deployed.Int64, deployed.Valid = max(deployed.Int64, *observation.DeployedAt), true
+	}
+	if deployed.Valid {
+		health["deployed_at"] = deployed.Int64
+	}
+	if err := write("repository", observation.Repository, "", health); err != nil {
 		return err
 	}
 	return nil

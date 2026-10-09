@@ -76,6 +76,8 @@ type Node struct {
 	Unit string `json:"unit,omitempty"`
 	// Runtime places a processor: process, cli, worker, server, browser.
 	Runtime string `json:"runtime,omitempty"`
+	// Deployed marks a processor a deployment declaration names.
+	Deployed bool `json:"deployed,omitempty"`
 	// Trigger says what starts an ingress: request, timer or message.
 	Trigger string     `json:"trigger,omitempty"`
 	Sources []Location `json:"sources,omitempty"`

@@ -86,7 +86,7 @@ export type AgentSpriteProps = Readonly<{
 }>;
 
 const FRAME = spriteAtlas.frame;
-const DAY = 24 * 60 * 60_000, CHANGEOVER = 10 * 60_000;
+const DAY = 24 * 60 * 60_000;
 const NO_QUESTIONS: readonly PeerQuestionItem[] = [];
 export type KnowledgeCueView = Readonly<{ key: string; agentId: string; board: boolean; reading: boolean; label: string; open?: () => void }>;
 const NO_CUES: readonly KnowledgeCueView[] = [];
@@ -693,10 +693,8 @@ export function FactoryScene({ proposals, crates, tools, onLoadNode, onInvestiga
           {...sceneAction(() => selectEntity(station.entityId))} aria-label={`Inspect ${machine.label}`} className="dfFactoryScene__target">
           <rect className="dfFactoryScene__focus" x={station.x - 4} y={station.y - 14} width={station.shape === "gate" ? 130 : station.width + 8} height={station.height + 18} fill="transparent" />
           <Station item={station} machine={machine} selected={selectedId === station.entityId} close={close} />
-          {deployed === undefined || observedAt - deployed > DAY ? null : <g data-changeover={deployed}>
-            {observedAt - deployed < CHANGEOVER ? <rect x={station.x - 5} y={station.y - 5} width={station.width + 10} height={station.height + 10} className="dfPlant__scaffold" /> : null}
-            <rect x={station.x + station.width - 8} y={station.y - 10} width="16" height="12" className="dfPlant__changed" /><text x={station.x + station.width} y={station.y - 1} textAnchor="middle" className="dfPlant__changedText" fontSize="9">Δ</text>
-          </g>}
+          {/* A recent deploy is a quiet tag on the machine, not a warning. */}
+          {deployed === undefined || observedAt - deployed > DAY ? null : <text data-changeover={deployed} x={station.x + 4} y={station.y - 3} className="dfPlant__small" fontSize="7">deployed</text>}
           {members.has(station.key) && station.key !== litUnit ? <rect data-unit-member={litUnit} className="dfFactoryScene__selection" x={station.x - 4} y={station.y - 4} width={station.width + 8} height={station.height + 8} /> : null}
           {litIds.has(station.entityId) ? <rect data-lit="" className="dfFactoryScene__selection" x={station.x - 6} y={station.y - 6} width={station.width + 12} height={station.height + 12} /> : null}
         </g>;
@@ -890,7 +888,7 @@ function machineInfo(machine: SceneMachine, unit?: SceneUnit) {
 function Coverage({ summary }: { summary: NonNullable<SceneGraph["summary"]> }) {
   return <p className="dfPlantCoverage" role="status" aria-label="Observation coverage">
     {(["observed", "quiet", "partial", "stale", "unobserved", "opaque"] as const).map((key, index) => <span key={key}>{index === 0 ? "" : " · "}<strong className={`dfPlantCoverage--${key}`}>{summary[key]}</strong> {OBSERVATION_TEXT[key].split(":")[0]!.toLowerCase()}</span>)}
-    <small>{summary.runtime_only > 0 ? ` · ${summary.runtime_only} runtime-only` : ""}{summary.contradicted > 0 ? ` · ${summary.contradicted} contradicted` : ""}</small>
+    <small>{summary.runtime_only > 0 ? ` · ${summary.runtime_only} runtime-only` : ""}{summary.contradicted > 0 ? ` · ${summary.contradicted} contradicted` : ""}{summary.unobserved > 0 ? " · grey machines have no telemetry: unknown, not idle" : ""}</small>
   </p>;
 }
 

@@ -1,5 +1,5 @@
 {
- "comment": "One rule, two implementations: factoryd publicCrates (Go) and projectCrates (production-view.ts) must both put these records at these stations.",
+ "comment": "One rule, two implementations: factoryd publicCrates (Go) and projectCrates (production-view.ts) must both put these records at these stations. owner/deployed records GitHub deployments: a merged pull request ships only once a successful production deployment was created at or after its merge (12), else it waits at the end of the merge queue (13). owner/stale-deploys last deployed more than 7 days before its merge, so it no longer deploys this way and the merge ships (14).",
  "now": 100000000,
  "records": [
   {
@@ -342,6 +342,100 @@
      11
     ]
    }
+  },
+  {
+   "repository": "owner/deployed",
+   "project_id": "project",
+   "kind": "repository",
+   "id": "owner/deployed",
+   "visual_id": "",
+   "observed_at": 99940000,
+   "tasks": [],
+   "missions": [],
+   "document": {
+    "unavailable": "",
+    "deployed_at": 97000000
+   }
+  },
+  {
+   "repository": "owner/deployed",
+   "project_id": "project",
+   "kind": "pull_request",
+   "id": "12",
+   "visual_id": "change:12",
+   "observed_at": 99940000,
+   "tasks": [],
+   "missions": [],
+   "document": {
+    "number": 12,
+    "title": "Change 12",
+    "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "state": "merged",
+    "review": {
+     "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "state": "allow"
+    },
+    "merge": "dddddddddddddddddddddddddddddddddddddddd",
+    "merged_at": "1970-01-02T02:46:40Z"
+   }
+  },
+  {
+   "repository": "owner/deployed",
+   "project_id": "project",
+   "kind": "pull_request",
+   "id": "13",
+   "visual_id": "change:13",
+   "observed_at": 99940000,
+   "tasks": [],
+   "missions": [],
+   "document": {
+    "number": 13,
+    "title": "Change 13",
+    "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "state": "merged",
+    "review": {
+     "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "state": "allow"
+    },
+    "merge": "dddddddddddddddddddddddddddddddddddddddd",
+    "merged_at": "1970-01-02T03:03:20Z"
+   }
+  },
+  {
+   "repository": "owner/stale-deploys",
+   "project_id": "project",
+   "kind": "repository",
+   "id": "owner/stale-deploys",
+   "visual_id": "",
+   "observed_at": 99940000,
+   "tasks": [],
+   "missions": [],
+   "document": {
+    "unavailable": "",
+    "deployed_at": -510000000
+   }
+  },
+  {
+   "repository": "owner/stale-deploys",
+   "project_id": "project",
+   "kind": "pull_request",
+   "id": "14",
+   "visual_id": "change:14",
+   "observed_at": 99940000,
+   "tasks": [],
+   "missions": [],
+   "document": {
+    "number": 14,
+    "title": "Change 14",
+    "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "state": "merged",
+    "review": {
+     "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "state": "allow"
+    },
+    "merge": "dddddddddddddddddddddddddddddddddddddddd",
+    "merged_at": "1970-01-02T03:03:20Z"
+   }
   }
  ],
  "crates": [
@@ -389,6 +483,21 @@
    11,
    1,
    true
+  ],
+  [
+   12,
+   3,
+   false
+  ],
+  [
+   13,
+   2,
+   false
+  ],
+  [
+   14,
+   3,
+   false
   ]
  ]
 }

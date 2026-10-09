@@ -101,6 +101,17 @@ test('two principals: callback, pagination, refresh, replay, grants and revocati
           return json([]);
         }
         if (url.pathname === '/repos/team/shared/pulls/12') return json({...pull, state: 'closed'});
+        if (url.pathname === '/repos/team/shared/deployments') {
+          assert.equal(url.searchParams.get('per_page'), '2');
+          return json([
+            { id: 41, url: 'https://api.github.com/repos/team/shared/deployments/41', environment: 'Production', production_environment: true, sha: 'c'.repeat(40), ref: 'main', created_at: '2026-10-01T10:00:00Z', payload: { token: 'never' }, description: 'never', creator: { login: 'never' } },
+            { id: 40, environment: 'Preview', production_environment: false, sha: 'd'.repeat(40), ref: 'topic', created_at: '2026-10-01T09:00:00Z' },
+          ]);
+        }
+        if (url.pathname.startsWith('/repos/team/shared/deployments/')) {
+          assert.equal(url.searchParams.get('per_page'), '1');
+          return json(url.pathname.endsWith('/41/statuses') ? [{ state: 'success', created_at: '2026-10-01T10:01:00Z', updated_at: '2026-10-01T10:02:00Z', target_url: 'https://never.example', description: 'never' }] : []);
+        }
         if (url.pathname === '/repos/team/shared/issues' || url.pathname === '/repos/team/shared/issues/9' || url.pathname === '/repos/team/shared/issues/10') {
           if (url.pathname.endsWith('/issues')) {
             assert.equal(url.searchParams.get('per_page'), '25');
@@ -256,6 +267,16 @@ test('two principals: callback, pagination, refresh, replay, grants and revocati
     assert.equal(exactPull.next_page, null, 'an exact lookup never advertises another page');
     assert.equal(exactPull.pull_requests[0].number, 12, 'exact lookups retain closed PRs for recovery');
     assert.equal((await call(bob, 'list_pull_requests', {...pullArgs, repository: 'team/guessed'})).status, 401);
+    const deploymentArgs = {repository: 'team/shared', per_page: 2};
+    assert.match((await (await call(bob, 'list_deployments', deploymentArgs)).json()).result.content[0].text, /deployments/, 'an installation without Deployments read is refused by name');
+    permissionSet.deployments = 'read';
+    assert.deepEqual((await (await call(bob, 'list_deployments', deploymentArgs)).json()).result.structuredContent, {deployments: [
+      {id: 41, environment: 'Production', production_environment: true, sha: 'c'.repeat(40), ref: 'main', created_at: '2026-10-01T10:00:00Z', state: 'success', updated_at: '2026-10-01T10:02:00Z'},
+      {id: 40, environment: 'Preview', production_environment: false, sha: 'd'.repeat(40), ref: 'topic', created_at: '2026-10-01T09:00:00Z', state: 'pending', updated_at: '2026-10-01T09:00:00Z'},
+    ]}, 'newest status per deployment; none is pending; no URLs, payloads or creators');
+    assert.deepEqual(requestedPermissions.at(-1), {deployments: 'read', metadata: 'read'});
+    assert.equal((await (await call(bob, 'list_deployments', {...deploymentArgs, per_page: 31})).json()).result.isError, true);
+    delete permissionSet.deployments;
     unavailable = '/repos/team/shared/pulls';
     for (const status of [403, 404, 429, 503]) {
       unavailableStatus = status;

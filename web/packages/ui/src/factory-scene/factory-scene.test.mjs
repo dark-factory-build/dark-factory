@@ -1069,19 +1069,16 @@ test("the coverage header shows the summary numbers", () => {
   const summary = { components: 7, inferred: 6, observed: 3, quiet: 1, partial: 1, stale: 0, unobserved: 1, opaque: 1, runtime_only: 1, contradicted: 0 };
   const markup = render({ graph: { ...graph, summary }, workers: [] });
   const header = markup.match(/aria-label="Observation coverage"[^>]*>(.*?)<\/p>/)[1].replace(/<[^>]+>/g, "");
-  assert.equal(header, "3 observed · 1 observed, quiet · 1 partly observed · 0 stale · 1 no telemetry · 1 external · 1 runtime-only", "observation counts add up to the components");
+  assert.equal(header, "3 observed · 1 observed, quiet · 1 partly observed · 0 stale · 1 no telemetry · 1 external · 1 runtime-only · grey machines have no telemetry: unknown, not idle", "observation counts add up to the components");
   assert.doesNotMatch(render({ workers: [] }), /Observation coverage/, "no summary, no claim");
 });
 
 test("a deploy is a changeover dated by the graph, not by the viewer's clock", () => {
   const at = 1_760_000_000_000;
   const render = (deployedAt) => renderToStaticMarkup(createElement(FactoryScene, { graph: sceneGraph([unit("unit", { reading: { ...busy, deployedAt } })], { observedAt: at }), workers: [] }));
-  const fresh = render(at - 60_000);
-  assert.match(fresh, /data-changeover=/);
-  assert.match(fresh, /dfPlant__scaffold/);
-  const earlier = render(at - 3 * 60 * 60_000);
-  assert.match(earlier, /data-changeover=/);
-  assert.doesNotMatch(earlier, /dfPlant__scaffold/);
+  assert.match(render(at - 60_000), /data-changeover="[^"]*"[^>]*>deployed</, "a quiet deployed tag, not a warning");
+  assert.doesNotMatch(render(at - 60_000), /dfPlant__scaffold|dfPlant__changed/);
+  assert.match(render(at - 3 * 60 * 60_000), /data-changeover=/);
   assert.doesNotMatch(render(at - 2 * 24 * 60 * 60_000), /data-changeover=/);
   assert.doesNotMatch(render(undefined), /data-changeover=/);
 });
