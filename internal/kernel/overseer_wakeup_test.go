@@ -104,16 +104,62 @@ func TestOverseerEscalationWake(t *testing.T) {
 }
 
 // A Change factoryd could not publish has no pull request; its escalation
-// wakes the overseer once all the same.
+// wakes the overseer exactly once, and the unpublished Change it names is not
+// re-woken while that refusal stands.
 func TestOverseerPublishFailureWake(t *testing.T) {
-	store, worker, _ := wakeFixture(t)
-	insert := `INSERT INTO production_records (project_id, repository, kind, identity, visual_id, document, observed_at_ms) VALUES (?, 'example/factory', 'reviewer', 'publish-x-1', '', ?, 1000)`
-	if _, err := store.writer.ExecContext(context.Background(), insert, worker.ProjectID.Bytes(), `{"id":"publish-x-1","state":"publish_failed","handled":true,"request":{"PullNumber":0,"Head":""},"escalation":"factoryd cannot publish change x for task t: refused"}`); err != nil {
+	ctx := context.Background()
+	succeeded, _ := NewSuccessProposal("done")
+	store, finalizing := finalizingReleasedRun(t, RoleWorker, succeeded)
+	defer store.Close()
+	change, _, err := store.Change(ctx, *finalizing.ChangeID)
+	if err != nil {
 		t.Fatal(err)
 	}
-	bodies := wakeBodies(t, store, 1000+overseerWakeSettle.Milliseconds())
-	if len(bodies) != 1 || strings.Count(bodies[0], "Escalated: ") != 1 || !strings.Contains(bodies[0], "\nEscalated: factoryd cannot publish change x for task t: refused") {
-		t.Fatalf("wake = %q", bodies)
+	moved, _ := NewCommitID(change.Selection.format, bytes.Repeat([]byte{0xd2}, change.Selection.format.oidLength()))
+	settlement, _ := NewRetainedChangeSettlement(change.Revision, &moved)
+	if _, err := store.FinalizeWorkerRun(ctx, finalizing.ID, finalizing.Revision, settlement, mustTime(t, 80)); err != nil {
+		t.Fatal(err)
+	}
+	if change, _, err = store.Change(ctx, change.ID); err != nil {
+		t.Fatal(err)
+	}
+	id := PublishFailureID(change.ID, change.Revision)
+	// The intake binding is all the rule reads; its acceptance row is not.
+	for _, statement := range []struct {
+		sql  string
+		args []any
+	}{
+		{`PRAGMA foreign_keys = OFF`, nil},
+		{`INSERT INTO intake_task_bindings(task_id, acceptance_id) VALUES (?, zeroblob(16))`, []any{finalizing.TaskID.Bytes()}},
+		{`PRAGMA foreign_keys = ON`, nil},
+		{`INSERT INTO production_records (project_id, repository, kind, identity, visual_id, document, observed_at_ms) VALUES (?, 'example/factory', 'reviewer', ?, '', ?, 90)`, []any{finalizing.ProjectID.Bytes(), id,
+			`{"id":"` + id + `","state":"publish_failed","handled":true,"request":{"PullNumber":0,"Head":""},"escalation":"factoryd cannot publish change x for task t: the created commit is not verified by GitHub"}`}},
+	} {
+		if _, err := store.writer.ExecContext(ctx, statement.sql, statement.args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	overseer, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 3), ProjectID: finalizing.ProjectID, Name: "overseer", Role: RoleOrchestrator, Provider: ProviderCodex, ToolBudgetLimit: 2}, mustTime(t, 82))
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, after, instruction := IdleStandingInstruction, uint32(1), "Supervise."
+	if _, err := store.UpdateAgent(ctx, overseer.ID, overseer.Revision, AgentPatch{IdlePolicy: &policy, IdleAfterSeconds: &after, IdleInstruction: &instruction}, mustTime(t, 83)); err != nil {
+		t.Fatal(err)
+	}
+	at := 80 + PublicationAttentionAfter.Milliseconds()
+	tasks, err := store.EnqueueOverseerWakeups(ctx, mustTime(t, at))
+	if err != nil || len(tasks) != 1 || strings.Count(tasks[0].Body, "Escalated: ") != 1 || strings.Contains(tasks[0].Body, "\n- ") ||
+		!strings.Contains(tasks[0].Body, "\nEscalated: factoryd cannot publish change x for task t: the created commit is not verified by GitHub") {
+		t.Fatalf("wake = %+v, %v", tasks, err)
+	}
+	if _, err := store.UpdateTask(ctx, tasks[0].ID, tasks[0].Revision, TaskPatch{Cancel: true}, mustTime(t, at+1)); err != nil {
+		t.Fatal(err)
+	}
+	for rewake := range 4 {
+		if bodies := wakeBodies(t, store, at+1+int64(rewake+1)*OverseerRewakeAfter.Milliseconds()); len(bodies) != 0 {
+			t.Fatalf("re-wake %d for the same refusal = %q", rewake+1, bodies)
+		}
 	}
 }
 

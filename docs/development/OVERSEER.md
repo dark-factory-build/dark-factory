@@ -321,9 +321,13 @@ and replaces its body. The App refuses your `publish_commit` and
 `create_pull_request` on that branch. When it cannot
 (a refused path, a symlink, a file over the bound, an indeterminate write), it
 wakes you once with `Escalated: factoryd cannot publish change CHANGE for task
-TASK: ...` and never retries that Change revision: send the task back to fix
-the cause, or raise it with `attempt request-human`. What follows is for
-the work factoryd does not publish.
+TASK: ...` and never retries that Change revision, nor wakes you for it again:
+send the task back if the Change itself is the cause. A refusal outside the
+Change (the App, the Worker or GitHub refusing the write) is the operator's:
+raise one `attempt request-human` quoting the refusal text verbatim and naming
+every Change it strands, then succeed. Do not re-verify its receipts on later
+wakes, and record only the observed refusal, never an inferred cause, in any
+lesson. What follows is for the work factoryd does not publish.
 
 The branch is `factory/<first 12 hex of change_id>`. The task's
 `work_revision` from section 1 says which publication this is:

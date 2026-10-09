@@ -29,7 +29,8 @@ const (
 // escalated head); a succeeded worker task, and a Change factoryd could not
 // publish (it has no pull request), need one look. An accepted intake task
 // that succeeded with a diff needs none: factoryd publishes it, and the
-// Change item covers a publication that never happens. It is due when no
+// Change item covers a publication that never happens, except one factoryd
+// escalated: that escalation is its one look, not re-woken while it stands. It is due when no
 // carrier was delivered (a failed one only if some run started) since that
 // version, or, while it persists, when at most three named it or were not
 // targeted (a full wake, or a bare instruction) and the latest is
@@ -48,6 +49,7 @@ item AS (
 	UNION ALL SELECT c.task_id, c.updated_at_ms, 1, '' FROM changes AS c JOIN tasks AS t ON t.id = c.task_id
 	WHERE c.project_id = ?1 AND t.status = 'succeeded' AND c.head_commit IS NOT NULL AND c.base_commit IS NOT NULL
 	  AND c.head_commit <> c.base_commit AND c.updated_at_ms + ?2 <= ?3
+	  AND NOT EXISTS (SELECT 1 FROM production_records AS r WHERE r.project_id = c.project_id AND r.kind = 'reviewer' AND r.identity = 'publish-' || lower(hex(c.id)) || '-' || c.revision)
 	  AND (NOT EXISTS (SELECT 1 FROM publication_tasks AS p WHERE p.change_id = c.id)
 	       OR EXISTS (SELECT 1 FROM publication_tasks AS p JOIN production_records AS r
 	           ON r.project_id = p.project_id AND r.repository = p.repository AND r.kind = 'pull_request' AND r.identity = CAST(p.pull_number AS TEXT)
