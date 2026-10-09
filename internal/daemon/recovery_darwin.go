@@ -652,8 +652,11 @@ func recoveredConsumedAttemptResult(run kernel.Run, runtimeRoot, providerProcess
 	return kernel.NewInnerConvergedAttemptResult(run.ID, run.CredentialDigest, run.ResultProofDigest(), runtimeRoot.Identity, providerProcess.Identity, exit)
 }
 
+// A variable only so tests can force a pass to yield after one bounded call.
+var runtimeCleanupPass = 4 * time.Second
+
 func (daemon *Daemon) removeRecordedRuntime(ctx context.Context, parent *RuntimeParent, runID kernel.RunID, fileIdentity runner.FileIdentity) error {
-	deadline := time.Now().Add(4 * time.Second)
+	deadline := time.Now().Add(runtimeCleanupPass)
 	for {
 		done, err := RemoveRecordedRuntime(ctx, parent, runID.String(), fileIdentity)
 		if err != nil {
