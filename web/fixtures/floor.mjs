@@ -150,9 +150,9 @@ export function crossings(belts) {
   return found;
 }
 
-/** The belts a rendered floor draws: the first path of every element marked data-belt. */
-export function beltsFromMarkup(html) {
-  return [...html.matchAll(/<(?:g|path)[^>]*data-belt="[^"]*"[^>]*>/g)].map((match) => {
+/** The belts a rendered floor draws (the first path of every element marked data-belt); "links" for its overhead links, "all" for both. */
+export function beltsFromMarkup(html, which = "belts") {
+  return [...html.matchAll(/<(?:g|path)[^>]*data-belt="[^"]*"[^>]*>/g)].filter((match) => which === "all" || match[0].includes("data-link") === (which === "links")).map((match) => {
     const d = (match[0].match(/ d="([^"]+)"/) ?? html.slice(match.index).match(/ d="([^"]+)"/))[1];
     return [...d.matchAll(/(-?[\d.]+)[ ,](-?[\d.]+)/g)].map(([, x, y]) => ({ x: Number(x), y: Number(y) }));
   });
@@ -207,4 +207,33 @@ export function displacement(before, after) {
   const sx = median(moves.map((move) => move.dx)), sy = median(moves.map((move) => move.dy));
   const distances = moves.map((move) => Math.hypot(move.dx - sx, move.dy - sy));
   return { retained: moves.length, moved: distances.filter((value) => value > 0.5).length, mean: round(mean(distances)), max: round(Math.max(0, ...distances)) };
+}
+
+/** A random floor graph (scene shape) with dense, long flows across it: the reviewer's stress fixture, deterministic by seed. */
+export function denseScene({ seed = 1, units = 6, per = 4, shared = 3, parties = 2, flows = 1.5 }) {
+  let state = seed >>> 0 || 1;
+  const random = () => (state = Math.imul(state ^ (state >>> 15), 2246822507) + 0x9e3779b9 >>> 0, (state >>> 8) / 16777216);
+  const reading = { evidence: "static", observation: "unobserved", state: "unknown", ratePerHour: 0, errorPermille: 0, latencyMs: 0 };
+  const kinds = ["ingress", "job", "store", "queue", "unknown"], ids = [], unitsOut = [], sharedOut = [], partiesOut = [], links = [], seen = new Set();
+  for (let u = 0; u < units; u++) {
+    const id = `u${String(u).padStart(4, "0")}`, machines = [];
+    for (let k = 0; k < per; k++) { const kind = kinds[Math.floor(random() * kinds.length)]; machines.push({ id: `${id}m${k}`, kind, label: `${kind}-${u}-${k}`, reading, ...(kind === "ingress" ? { trigger: random() < .3 ? "timer" : "request" } : {}) }); ids.push(`${id}m${k}`); }
+    unitsOut.push({ id, label: `unit-${u}`, runtime: "server", reading, machines }); ids.push(id);
+  }
+  for (let i = 0; i < shared; i++) { sharedOut.push({ id: `s${i}`, kind: random() < .5 ? "store" : "queue", label: `shared-${i}`, reading }); ids.push(`s${i}`); }
+  for (let i = 0; i < parties; i++) { partiesOut.push({ id: `x${i}`, kind: "external", label: `ext-${i}.example`, reading }); ids.push(`x${i}`); }
+  for (let i = 0; i < ids.length * flows; i++) { const a = ids[Math.floor(random() * ids.length)], b = ids[Math.floor(random() * ids.length)]; if (a === b || seen.has(a + b)) continue; seen.add(a + b); links.push({ from: a, to: b, kind: "calls", reading }); }
+  return { digest: `dense-${seed}`, units: unitsOut, shared: sharedOut, parties: partiesOut, quarantine: [], flows: links };
+}
+
+/** Chains of three linked units and nothing else between chains: unrelated groups for packing. */
+export function chainScene(count) {
+  const reading = { evidence: "static", observation: "unobserved", state: "unknown", ratePerHour: 0, errorPermille: 0, latencyMs: 0 }, kinds = ["ingress", "store", "queue", "job"], units = [], flows = [];
+  for (let u = 0; u < count; u++) {
+    const id = `u${String(u).padStart(4, "0")}`;
+    units.push({ id, label: `unit-${u}`, reading, machines: kinds.map((kind, k) => ({ id: `${id}m${k}`, kind, label: `${kind}-${k}`, reading, ...(kind === "ingress" ? { trigger: "request" } : {}) })) });
+    kinds.forEach((kind, k) => flows.push(kind === "ingress" ? { from: `${id}m${k}`, to: id, kind: "handles", reading } : { from: id, to: `${id}m${k}`, kind: "uses", reading }));
+    if (u % 3) flows.push({ from: id, to: `u${String(u - 1).padStart(4, "0")}`, kind: "calls", reading });
+  }
+  return { digest: `chains-${count}`, units, shared: [], parties: [], quarantine: [], flows };
 }
