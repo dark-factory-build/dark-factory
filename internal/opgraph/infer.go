@@ -71,6 +71,7 @@ type inference struct {
 	units     []*unit
 	findings  []finding
 	calls     []call
+	jobs      []jobText
 	packages  []jsPackage
 	hints     []listenHint
 	bindings  []serviceBinding
@@ -334,6 +335,7 @@ func (run *inference) resolve(system string, repositories []Repository) (Graph, 
 		}
 	}
 	run.resolveCalls(units, builder)
+	run.linkJobs(units, builder)
 	for _, binding := range run.bindings {
 		for _, from := range units {
 			for _, to := range units {
