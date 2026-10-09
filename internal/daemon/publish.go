@@ -133,11 +133,21 @@ func (daemon *Daemon) publishFailed(ctx context.Context, c kernel.PublishableCha
 	if readErr != nil {
 		return errors.Join(err, readErr)
 	}
-	failed := review.Operation{ID: id, State: "publish_failed", Handled: true, Detail: why, CreatedAt: now, UpdatedAt: now}
+	failed := review.Operation{ID: id, State: "publish_failed", Retryable: publicationFailureRetryable(err), Handled: true, Detail: why, CreatedAt: now, UpdatedAt: now}
 	if !repeat {
 		failed.Escalation = fmt.Sprintf("factoryd cannot publish change %s for task %s: %s", c.Change, c.Task.ID, why)
 	}
 	return durableReviewStore{store: daemon.store, project: c.Task.ProjectID, repository: repo, now: daemon.now}.Create(ctx, failed)
+}
+
+// publicationFailureRetryable distinguishes a Maintainer refusal from a
+// change-caused validation failure. The former can be a branch or worker
+// precondition that changes outside factoryd; invalid_input is the App's
+// deterministic rejection of this Change and must remain terminal.
+func publicationFailureRetryable(err error) bool {
+	text := err.Error()
+	return strings.Contains(text, "review: Maintainer rejected operation: refused:") ||
+		strings.Contains(text, "review: Maintainer rejected operation: conflict:")
 }
 
 // publishPull is the overseer runbook's publication, made deterministic:

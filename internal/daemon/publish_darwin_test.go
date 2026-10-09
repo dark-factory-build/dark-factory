@@ -20,13 +20,14 @@ import (
 // fakePublishMaintainer is the App's journal: one result per operation id,
 // a replay of a completed id answered from it.
 type fakePublishMaintainer struct {
-	main     string
-	tip      string // the pull request branch's head
-	journal  map[string]json.RawMessage
-	planned  map[string]bool  // ids a write stopped before GitHub
-	writes   []map[string]any // every write sent
-	refuse   string           // a path publish_commit refuses
-	loseNext bool             // the next write lands but its response is lost
+	main           string
+	tip            string // the pull request branch's head
+	journal        map[string]json.RawMessage
+	planned        map[string]bool  // ids a write stopped before GitHub
+	writes         []map[string]any // every write sent
+	refuse         string           // a path publish_commit refuses
+	externalRefuse bool             // the Maintainer refuses before the App can apply it
+	loseNext       bool             // the next write lands but its response is lost
 }
 
 func (f *fakePublishMaintainer) call(_ context.Context, name string, arguments map[string]any) (json.RawMessage, error) {
@@ -58,6 +59,9 @@ func (f *fakePublishMaintainer) call(_ context.Context, name string, arguments m
 		}
 		for _, entry := range arguments["changes"].([]map[string]any) {
 			if f.refuse != "" && strings.HasPrefix(entry["path"].(string), f.refuse) {
+				if f.externalRefuse {
+					return nil, fmt.Errorf("review: Maintainer rejected operation: refused: branch precondition")
+				}
 				return nil, fmt.Errorf("refused: %s cannot be written", f.refuse)
 			}
 		}
@@ -366,6 +370,27 @@ func TestRefusedPublicationEscalatesOnce(t *testing.T) {
 	op = review.Operation{}
 	if err != nil || !found || json.Unmarshal(document, &op) != nil || op.State != "publish_failed" || op.Escalation != "" || !strings.Contains(op.Detail, "refused: .github/workflows") {
 		t.Fatalf("repeat failure record = %s %v %v", document, found, err)
+	}
+}
+
+func TestExternalPublicationRefusalRetriesWhenItClears(t *testing.T) {
+	fixture, c, source, app, checkout := publishFixture(t, 1, false)
+	app.refuse, app.externalRefuse = "f00.txt", true
+	ctx := context.Background()
+	if err := fixture.daemon.publishChange(ctx, c, "team/repo", source, app.call, checkout); err != nil {
+		t.Fatal(err)
+	}
+	document, found, err := fixture.store.ReviewOperation(ctx, c.Task.ProjectID, kernel.PublishFailureID(c.Change, c.Revision))
+	var op review.Operation
+	if err != nil || !found || json.Unmarshal(document, &op) != nil || !op.Retryable {
+		t.Fatalf("external refusal = %s %v %v", document, found, err)
+	}
+	app.refuse, app.externalRefuse = "", false
+	if err := fixture.daemon.publishChange(ctx, c, "team/repo", source, app.call, checkout); err != nil {
+		t.Fatal(err)
+	}
+	if len(app.writes) != 3 {
+		t.Fatalf("writes after refusal cleared = %d, want 3", len(app.writes))
 	}
 }
 

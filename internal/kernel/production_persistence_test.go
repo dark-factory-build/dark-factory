@@ -708,7 +708,7 @@ func TestPublishableIntakeChangeIsFactorydsUntilPublishedOrFailed(t *testing.T) 
 	if len(candidates()) != 1 || !closed() {
 		t.Fatal("an overseer-owned intake task counted as a second worker task")
 	}
-	failure := map[string]any{"id": PublishFailureID(change.ID, found[0].Revision), "state": "publish_failed", "handled": true, "escalation": "factoryd cannot publish", "request": map[string]any{}}
+	failure := map[string]any{"id": PublishFailureID(change.ID, found[0].Revision), "state": "publish_failed", "retryable": true, "handled": true, "escalation": "factoryd cannot publish", "request": map[string]any{}}
 	if err := store.RecordReviewOperation(ctx, worker.ProjectID, "example/factory", PublishFailureID(change.ID, found[0].Revision), failure, mustTime(t, 70)); err != nil {
 		t.Fatal(err)
 	}
@@ -719,6 +719,13 @@ func TestPublishableIntakeChangeIsFactorydsUntilPublishedOrFailed(t *testing.T) 
 	// revision is retried.
 	if found, err := store.PublishableChanges(ctx, mustTime(t, 70+PublishRetryAfter.Milliseconds())); err != nil || len(found) != 1 {
 		t.Fatalf("a publish failure past its window is not retried: %+v %v", found, err)
+	}
+	// A change-caused refusal is terminal even after the retry window.
+	if err := store.RecordReviewOperation(ctx, worker.ProjectID, "example/factory", PublishFailureID(change.ID, found[0].Revision), map[string]any{"id": PublishFailureID(change.ID, found[0].Revision), "state": "publish_failed", "handled": true, "request": map[string]any{}}, mustTime(t, 70)); err != nil {
+		t.Fatal(err)
+	}
+	if found, err := store.PublishableChanges(ctx, mustTime(t, 70+PublishRetryAfter.Milliseconds())); err != nil || len(found) != 0 {
+		t.Fatalf("a permanent publish failure was retried: %+v %v", found, err)
 	}
 	if pending, err := store.InFlightReviewOperations(ctx); err != nil || len(pending) != 0 {
 		t.Fatalf("publish failure in flight: %+v %v", pending, err)
