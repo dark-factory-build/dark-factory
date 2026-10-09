@@ -758,6 +758,18 @@ func storedProductionReview(ctx context.Context, c *sql.Conn, project ProjectID,
 	return pr.Review, true
 }
 
+// ProductionReviewBlocks reports a block of record at this exact head: no
+// plain ALLOW clears it (RecordProductionReview), and neither does the gate.
+func (store *Store) ProductionReviewBlocks(ctx context.Context, project ProjectID, repo string, number uint64, head string) (bool, error) {
+	tx, err := store.beginRead(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Close()
+	review, ok := storedProductionReview(ctx, tx.connection, project, strings.ToLower(repo), number)
+	return ok && review.State == "block" && strings.EqualFold(review.Head, head), nil
+}
+
 func (store *Store) RecordProductionReview(ctx context.Context, project ProjectID, repo string, number uint64, review ProductionReview, at UnixMillis) error {
 	if project.zero() || !productionRepository.MatchString(repo) || number == 0 || number > 1<<53-1 || !productionSHA(review.Head) || !validOutcomeText(review.State, 64) || !validOutcomeText(review.Findings, maxProductionReviewFindings) || !validOutcomeText(review.OperationID, 128) || !productionURL(review.URL) {
 		return ErrInvalidValue

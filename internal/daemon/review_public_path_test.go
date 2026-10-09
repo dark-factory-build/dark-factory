@@ -130,6 +130,29 @@ func reviewNow(ctx context.Context, daemon *Daemon, project kernel.ProjectID, re
 	return op.ID, err
 }
 
+// #1300: a second review's ALLOW at a head factoryd already blocked was
+// enqueued, and the queue's review job failed on the standing block.
+func TestAllowAtABlockedHeadIsNotEnqueued(t *testing.T) {
+	fixture, project := reviewPublicFixture(t)
+	backend := &publicReviewBackend{requestChanges: true}
+	fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return backend }
+	request := api.ReviewRequest{Repository: "team/repo", PullNumber: 12, Head: strings.Repeat("a", 40), Base: strings.Repeat("b", 40), BaseRef: "main", Provider: "codex"}
+	if _, err := reviewNow(context.Background(), fixture.daemon, project, request); err != nil {
+		t.Fatal(err)
+	}
+	backend.requestChanges = false
+	id, _ := reviewNow(context.Background(), fixture.daemon, project, request)
+	var op review.Operation
+	document, _, err := fixture.store.ReviewOperation(context.Background(), project, id)
+	if err != nil || json.Unmarshal(document, &op) != nil || backend.enqueues != 0 || op.State != "failed" || !strings.Contains(op.Detail, "blocking verdict of record") {
+		t.Fatalf("allow over a same-head block: operation=%+v enqueues=%d", op, backend.enqueues)
+	}
+	request.Head = strings.Repeat("c", 40) // a new head needs no correction
+	if _, err := reviewNow(context.Background(), fixture.daemon, project, request); err != nil || backend.enqueues != 1 {
+		t.Fatalf("allow at a new head: err=%v enqueues=%d", err, backend.enqueues)
+	}
+}
+
 type blockedReviewBackend struct {
 	*publicReviewBackend
 	release chan struct{}
