@@ -351,7 +351,7 @@ func TestRefusedPublicationEscalatesOnce(t *testing.T) {
 	}
 	document, found, err := fixture.store.ReviewOperation(ctx, c.Task.ProjectID, kernel.PublishFailureID(c.Change, c.Revision))
 	var op review.Operation
-	if err != nil || !found || json.Unmarshal(document, &op) != nil || op.State != "publish_failed" || !op.Handled ||
+	if err != nil || !found || json.Unmarshal(document, &op) != nil || !strings.Contains(string(document), `"retryable":false`) || op.State != "publish_failed" || !op.Handled ||
 		!strings.HasPrefix(op.Escalation, "factoryd cannot publish change "+c.Change.String()+" for task "+c.Task.ID.String()+": ") || !strings.Contains(op.Escalation, "refused: .github/workflows") {
 		t.Fatalf("failure record = %s %v %v", document, found, err)
 	}
