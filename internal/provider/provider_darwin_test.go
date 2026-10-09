@@ -1347,7 +1347,7 @@ func TestCodexPermissionsBoundReadsAndRejectOversizedPolicy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, rule := range []string{`":root"="deny"`, `":minimal"="read"`, tomlBasicString(request.workingDirectory) + `="write"`, tomlBasicString(request.runtime.token) + `="read"`, tomlBasicString(request.runtime.socket) + `="allow"`} {
+	for _, rule := range []string{`":root"="deny"`, `":minimal"="read"`, `"/private/tmp"="deny"`, `"/private/var/tmp"="deny"`, tomlBasicString(request.workingDirectory) + `="write"`, tomlBasicString(request.runtime.token) + `="read"`, tomlBasicString(request.runtime.socket) + `="allow"`} {
 		if !strings.Contains(policy, rule) {
 			t.Fatalf("policy omitted rule %q", rule)
 		}
@@ -1474,7 +1474,6 @@ func TestNativeOrchestratorDoesNotProjectSharedGoModuleCache(t *testing.T) {
 }
 
 // Opt-in local proof with an installed Codex CLI; no model or account access.
-// Keep fixtures outside the system temp roots permitted by :minimal.
 func TestCodexToolchainSandbox(t *testing.T) {
 	codex := os.Getenv("DARK_FACTORY_TEST_CODEX")
 	if codex == "" {
@@ -1506,6 +1505,14 @@ func TestCodexToolchainSandbox(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(software, "library"), []byte("fixture library"), 0600); err != nil {
 		t.Fatal(err)
 	}
+	shared, err := os.MkdirTemp("/private/tmp", "toolchain-proof-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(shared)
+	if err := os.WriteFile(filepath.Join(shared, "sentinel"), []byte("fixture sentinel"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	installation, runtime, _ := nativeFixture(t, kernel.ProviderCodex)
 	runtime.home, runtime.temp, runtime.accountHome = filepath.Join(root, "home"), filepath.Join(root, "tmp"), filepath.Join(root, "account")
 	runtime.toolchainReadRoots = software
@@ -1533,8 +1540,11 @@ func TestCodexToolchainSandbox(t *testing.T) {
  printf cache > "$HOME/cache"
  if /bin/cat "$2" >/dev/null 2>&1; then exit 31; fi
  if printf bad > "$1/write" 2>/dev/null; then exit 32; fi
+ if /bin/cat "$3/sentinel" >/dev/null 2>&1; then exit 34; fi
+ if printf bad > "$3/write" 2>/dev/null; then exit 35; fi
+ if printf bad > "/private/var/tmp/toolchain-proof-$$" 2>/dev/null; then exit 36; fi
  `
-	if out, err := run("/bin/sh", "-c", script, "proof", software, secret); err != nil {
+	if out, err := run("/bin/sh", "-c", script, "proof", software, secret, shared); err != nil {
 		t.Fatalf("sandbox isolation: %v\n%s", err, out)
 	}
 	gitDirectory := filepath.Join(root, "repository", ".git")
