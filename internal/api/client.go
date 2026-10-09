@@ -693,13 +693,13 @@ func (client client) call(ctx context.Context, method string, params, output any
 	}
 	defer cancel()
 	// An attempt outlives factoryd generations. A restart unbinds the socket
-	// and drains in-flight requests as unavailable; neither was acted on, so
-	// the call waits the restart out instead of handing the run a blocker.
-	// An outcome's unavailable reply may follow its commit and is not retried.
+	// and drains in-flight requests as unavailable, so the call waits the
+	// restart out instead of handing the run a blocker. A mutation's
+	// unavailable reply may follow its commit, so only reads replay it.
 	retryUntil := time.Now().Add(RestartRetryWindow)
 	for {
 		err := client.exchange(ctx, method, encoded, output)
-		retry := !outcomeMethod(method) && unavailable(err)
+		retry := readMethod(method) && unavailable(err)
 		if errors.Is(err, errUndelivered) {
 			err, retry = ErrTransport, true
 		}
@@ -845,6 +845,14 @@ func (client client) revalidate(before socketRecord) error {
 func unavailable(err error) bool {
 	var remote *RemoteError
 	return errors.As(err, &remote) && remote.code == RemoteUnavailable
+}
+
+func readMethod(method string) bool {
+	switch method {
+	case "task", "source", "peer_status", "overseer_snapshot", "terminal_observe", "attempt_content_list", "attempt_content_read", "attempt_content_body", "attempt_content_attachments", "attempt_outcome_read", "attempt_outcome_list":
+		return true
+	}
+	return false
 }
 
 func outcomeMethod(method string) bool {

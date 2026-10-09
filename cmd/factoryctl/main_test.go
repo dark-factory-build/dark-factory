@@ -731,8 +731,7 @@ func TestRuntimeErrorsAreFixedAndPrivate(t *testing.T) {
 		{api.RemoteConflict, "local API request conflicts with durable state"},
 		{api.RemoteRevisionConflict, "local API revision is stale"},
 		{api.RemoteTooLarge, "local API request exceeds a bound"},
-		// Unavailable is retried across a restart, not a final answer; the
-		// operator test pins its text.
+		{api.RemoteUnavailable, "local API is unavailable"},
 		{api.RemoteInternal, "local API failed internally"},
 	}
 	for _, test := range tests {
