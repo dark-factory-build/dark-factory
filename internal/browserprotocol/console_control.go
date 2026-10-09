@@ -868,7 +868,7 @@ var (
 	graphEvidence     = map[string]bool{"static": true, "runtime": true, "both": true, "uncertain": true, "contradicted": true}
 	graphObservations = map[string]bool{"observed": true, "quiet": true, "partial": true, "stale": true, "unobserved": true, "opaque": true}
 	graphStates       = map[string]bool{"active": true, "degraded": true, "failing": true, "idle": true, "unknown": true}
-	graphRuntimes     = map[string]bool{"": true, "process": true, "cli": true, "worker": true, "server": true, "browser": true}
+	graphRuntimes     = map[string]bool{"": true, "process": true, "cli": true, "worker": true, "server": true, "browser": true, "ci": true}
 	graphTriggers     = map[string]bool{"": true, "request": true, "timer": true, "message": true}
 )
 
