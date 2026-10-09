@@ -349,14 +349,17 @@ function placementOrder(keys: readonly string[], links: Links, placed: ReadonlyS
 
 /** A connected group laid out from nothing: placed in order, then two bounded passes that move a footprint only to a better free spot. */
 function layoutGroup(keys: readonly string[], sizes: ReadonlyMap<string, { width: number; height: number }>, links: Links) {
-  // Placement has a work cap that grows with the group; a group that would pass it, or that comes out a strip (a
-  // chain), is laid in rows in placement order instead, so neighbours stay side by side and the shape stays bounded.
-  const floor = floorOf(), order = placementOrder(keys, links), cap = 5_000 + 100 * keys.length;
+  // Placement has a work cap in proportion to the links it has to honour (ordinary groups use a fifth of it); only a
+  // runaway group, such as thousands of machines all linked to one hub, passes it. That group, or one that comes out a
+  // strip (a chain), is laid in rows in placement order instead, so neighbours stay side by side and the shape stays
+  // bounded. Refinement has its own cap of the same size and simply stops there.
+  const floor = floorOf(), order = placementOrder(keys, links), cap = 4_000 + 200 * keys.reduce((sum, key) => sum + (links.get(key)?.size ?? 0), 0);
   for (const key of order) { const { width, height } = sizes.get(key)!; floor.put(key, placeOne(key, width, height, floor, links)); if (floor.work > cap) return rows(order, sizes); }
-  for (let pass = 0; pass < 2 && order.length > 1; pass++) for (const key of order) {
+  floor.work = 0;
+  for (let pass = 0; pass < 2 && order.length > 1 && floor.work <= cap; pass++) for (const key of order) {
+    if (floor.work > cap) break;
     const current = floor.take(key);
     floor.put(key, placeOne(key, current.width, current.height, floor, links, current));
-    if (floor.work > cap) return rows(order, sizes);
   }
   const bounds = floor.bounds()!;
   return bounds.width > 2.2 * bounds.height || bounds.height > 2.2 * bounds.width ? rows(order, sizes) : floor.placed;

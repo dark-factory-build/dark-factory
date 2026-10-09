@@ -254,3 +254,43 @@ test("every connection is drawn, as a belt, an overhead link or a pair of named 
     assert.ok(performance.now() - started < 5000, `${which}: bounded work`);
   }
 });
+
+test("a store shared by forty services is laid out near them, not in fallback rows", () => {
+  const reading = { evidence: "static", observation: "unobserved", state: "unknown", ratePerHour: 0, errorPermille: 0, latencyMs: 0 }, units = [], flows = [];
+  for (let u = 0; u < 40; u++) {
+    const id = `u${String(u).padStart(3, "0")}`;
+    units.push({ id, label: `svc-${u}`, reading, machines: ["ingress", "store", "job"].map((kind, k) => ({ id: `${id}m${k}`, kind, label: `${kind}-${u}`, reading })) });
+    flows.push({ from: id, to: "s0", kind: "uses", reading });
+  }
+  const layout = layoutScene({ digest: "shared", units, shared: [{ id: "s0", kind: "store", label: "shared-0", reading }], parties: [], quarantine: [], flows });
+  const store = layout.stations.find((station) => station.entityId === "s0"), mains = layout.stations.filter((station) => station.unit === station.entityId);
+  const mean = mains.reduce((sum, station) => sum + Math.hypot(station.x - store.x, station.y - store.y), 0) / mains.length;
+  // Fallback rows put the store in a corner, about 940 px from the average service; placed around it, about 500.
+  assert.ok(mean < 650, `mean service-to-store distance ${Math.round(mean)}`);
+  assert.ok(new Set(layout.stations.map((station) => station.footprint.y)).size > layout.stations.length / 4, "not laid in a few equal rows");
+});
+
+test("stubs each have their own port, and their names touch no machine, label, belt, link or other name", () => {
+  let stubs = 0, named = 0;
+  for (const graph of [denseScene({ seed: 2, units: 10, per: 6, shared: 5, flows: 2 }), denseScene({ seed: 9, units: 30, per: 6, shared: 10, parties: 8, flows: 1.5 }), pathological("hub", 300), pathological("spokes", 1200)]) {
+    const layout = layoutScene(graph), at = new Map(layout.stations.map((station) => [station.entityId, station]));
+    const { routes, stubs: ends } = beltRoutes(layout, graph.flows.map((flow) => ({ key: `${flow.from} ${flow.to}`, from: at.get(flow.from), to: at.get(flow.to) })));
+    const solids = [...layout.stations, ...layout.stations.map((station) => station.label), ...layout.regions.map(regionLabelBox)], ports = new Set(), texts = [];
+    const legs = [...routes.values()].flatMap((points) => points.slice(1).map((point, index) => [points[index], point]));
+    for (const end of [...ends.values()].flat()) {
+      if (end === undefined) continue;
+      stubs++;
+      const port = `${end.points[0].x},${end.points[0].y}`;
+      assert.equal(ports.has(port), false, `two stubs share the port at ${port}`);
+      ports.add(port);
+      for (const rect of solids) assert.equal(crosses(end.points[0], end.points[1], { x: rect.x + 1, y: rect.y + 1, width: rect.width - 2, height: rect.height - 2 }), false, "a stub through a machine or label");
+      if (end.text === undefined) continue;
+      named++;
+      const box = end.text;
+      for (const rect of [...solids, ...texts]) assert.equal(strictly(box, rect), false, `${end.text.value} over something`);
+      for (const [a, b] of legs) assert.equal(crosses(a, b, box), false, `${end.text.value} over a belt or link`);
+      texts.push(box);
+    }
+  }
+  assert.ok(stubs > 0 && named > 0, `the fixtures exercise stubs (${stubs}, ${named} named)`);
+});

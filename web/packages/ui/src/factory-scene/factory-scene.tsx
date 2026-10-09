@@ -36,7 +36,7 @@ import { DEFAULT_FLOOR_APPEARANCE, type FloorAppearance } from "../floor-appeara
 import { breakRoomHabit, restingItem, workerFrames, workerPhase } from "./appearance.js";
 import { catAt, catBed, chats, gossip, type Seat } from "./idle-life.js";
 import { endsAt, isPaper, messageAt, observe, observeCrates, send, type FloorMessage, type Seen } from "./messages.js";
-import { beltRoutes, directionBetween, findRoute, pointOnRoute, samePoint, type WorkerMotion } from "./movement.js";
+import { beltRoutes, type BeltStub, directionBetween, findRoute, pointOnRoute, samePoint, type WorkerMotion } from "./movement.js";
 import { spriteAtlas, spriteSheet, spriteSheetSize } from "./sprites/sprites.generated.js";
 
 
@@ -960,7 +960,7 @@ function Station({ item, machine, selected, close }: { item: SceneStation; machi
   return <g className={`s-${reading.observation} op-${reading.state}${selected ? " dfPlant--selected" : ""}`}>{label}{body}{plaque}{scrap}{stale}{tag}</g>;
 }
 
-type BeltRun = Readonly<{ key: string; from: string; to: string; kind: string; points: readonly ScenePoint[]; link: boolean; stubs?: readonly (readonly ScenePoint[])[]; names?: readonly string[] }>;
+type BeltRun = Readonly<{ key: string; from: string; to: string; kind: string; points: readonly ScenePoint[]; link: boolean; stubs?: readonly (BeltStub | undefined)[] }>;
 type BeltRoute = BeltRun & Readonly<{ reading: SceneReading }>;
 
 /**
@@ -973,9 +973,10 @@ function Belt({ belt, lit }: { belt: BeltRoute; lit: boolean }) {
   const d = `M${belt.points.map((point) => `${point.x} ${point.y}`).join(" L")}`;
   const reading = belt.reading, casing = <path d={d} className={lit ? "dfPlant__casing dfPlant__casing--lit" : "dfPlant__casing"} />;
   // A connection the belts could not lay is an overhead link: faint, dashed, round machines and labels, never a belt.
-  if (belt.stubs !== undefined) return <g data-belt={belt.kind} data-stub="" data-observation={reading.observation}>{belt.stubs.map((stub, index) => <g key={index}>
-    <path d={`M${stub.map((point) => `${point.x} ${point.y}`).join(" L")}`} className={lit ? "dfPlant__link dfPlant__link--lit" : "dfPlant__link"} />
-    <text x={stub.at(-1)!.x + (stub.at(-1)!.x < stub[0]!.x ? -2 : 2)} y={stub.at(-1)!.y - 3} textAnchor={stub.at(-1)!.x < stub[0]!.x ? "end" : "start"} className="dfPlant__small" fontSize="6">→ {shortLabel(belt.names![index]!, 14)}</text>
+  if (belt.stubs !== undefined) return <g data-belt={belt.kind} data-stub="" data-observation={reading.observation}>{belt.stubs.map((stub, index) => stub === undefined ? null : <g key={index}>
+    <title>{`Connected to ${stub.name}`}</title>
+    <path d={`M${stub.points.map((point) => `${point.x} ${point.y}`).join(" L")}`} className={lit ? "dfPlant__link dfPlant__link--lit" : "dfPlant__link"} />
+    {stub.text === undefined ? null : <text data-stub-name="" x={stub.text.x} y={stub.text.y + 6} className="dfPlant__small" fontSize="6">{stub.text.value}</text>}
   </g>)}</g>;
   if (belt.link) return <path d={d} className={lit ? "dfPlant__link dfPlant__link--lit" : "dfPlant__link"} data-belt={belt.kind} data-link="" data-observation={reading.observation} />;
   if (reading.observation === "unobserved" || reading.observation === "stale" || reading.observation === "opaque" && reading.ratePerHour === 0 || reading.observation === "partial" && reading.state === "unknown") {
@@ -1008,14 +1009,14 @@ function beltRuns(layout: SceneMachinery, graph: SceneGraph) {
   })];
   const { routes, crossings, junctions, links, stubs } = beltRoutes(layout, runs);
   // Every connection is drawn: a belt, an overhead link, or, past every budget, a stub at each end naming the other.
-  return { runs: runs.map((run) => ({ key: run.key, from: run.from.entityId, to: run.to.entityId, kind: run.kind, points: routes.get(run.key) ?? stubs.get(run.key)![0]!, link: links.has(run.key),
-    ...(stubs.has(run.key) ? { stubs: stubs.get(run.key)!, names: [run.to.machine.label, run.from.machine.label] } : {}) })), crossings, junctions };
+  return { runs: runs.map((run) => ({ key: run.key, from: run.from.entityId, to: run.to.entityId, kind: run.kind, points: routes.get(run.key) ?? stubs.get(run.key)!.find((end) => end !== undefined)?.points ?? [], link: links.has(run.key),
+    ...(stubs.has(run.key) ? { stubs: stubs.get(run.key)! } : {}) })), crossings, junctions };
 }
 
 /** Ports two or more belts share: a junction, drawn as one. */
 function junctions(belts: readonly BeltRoute[]) {
   const counts = new Map<string, { point: ScenePoint; count: number }>();
-  for (const belt of belts) for (const point of [belt.points[0]!, belt.points.at(-1)!]) { const key = `${point.x} ${point.y}`; counts.set(key, { point, count: (counts.get(key)?.count ?? 0) + 1 }); }
+  for (const belt of belts) if (belt.stubs === undefined) for (const point of [belt.points[0]!, belt.points.at(-1)!]) { const key = `${point.x} ${point.y}`; counts.set(key, { point, count: (counts.get(key)?.count ?? 0) + 1 }); }
   return [...counts.values()].filter(({ count }) => count > 1).map(({ point }) => point);
 }
 

@@ -716,9 +716,11 @@ Approach (`factory-scene/scene.ts`, `factory-scene/movement.ts`; nothing in
    free spot with the shortest weighted distance to its neighbours plus a
    charge for growing the group's bounds; if none is free it takes the
    nearest free spot on a spiral. Two bounded passes then move each station
-   to a better free spot if one exists. Placement has a work cap that grows
-   with the group (5,000 tries plus 100 a footprint); a group that would
-   pass it, or that comes out longer than 2.2 times its width either way (a
+   to a better free spot if one exists. Placement has a work cap in
+   proportion to the links it must honour (4,000 tries plus 200 a link end;
+   ordinary groups, a store shared by forty services included, use a fifth
+   of it). Only a runaway group, such as thousands of machines all linked
+   to one hub, passes it; that group, or that comes out longer than 2.2 times its width either way (a
    chain), is laid instead in rows near 16:10 in placement order, each row
    running back the way the last came, so neighbours stay side by side.
    Then the groups are packed on
@@ -775,8 +777,12 @@ Approach (`factory-scene/scene.ts`, `factory-scene/movement.ts`; nothing in
    through a machine or a label, but it may cross or follow belts and other
    links and carries no bridges or material; the crossing rules above are
    for belts alone. Past the link budget too, a connection is drawn as a
-   short dashed stub out of a port at each end, naming the machine at the
-   other end. No connection is ever dropped.
+   short dashed stub out of a free port of its own at each end. Each stub
+   names the machine at the other end where the name touches no machine,
+   label, belt, link or other name (a few spots by its end, then a shorter
+   name); otherwise the name is the stub's title. A machine with no port
+   left shows no stub, and the other end still names it. No connection is
+   ever dropped.
 6. **Areas.** A unit's members whose footprints face each other, side to
    side or corner to corner, across no more than two aisles merge into one
    irregular region, the gap

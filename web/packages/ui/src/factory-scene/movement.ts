@@ -164,6 +164,10 @@ export const CROSSING_CLEARANCE = 10;
 const H = 1, V = 2;
 
 export type BeltCrossing = Readonly<{ x: number; y: number; over: "h" | "v" }>;
+/** One end of a connection drawn as stubs: out of its own port, naming the other end; the name is drawn only where it touches nothing. */
+export type BeltStub = Readonly<{ points: readonly ScenePoint[]; name: string; text?: SceneRect & Readonly<{ value: string }> }>;
+// A stub's name is set in a 6px monospace face, about this wide a character.
+const STUB_CHAR = 3.7;
 type Floor = Pick<SceneLayout, "width" | "height" | "stations" | "regions" | "facilities">;
 
 /** What a belt keeps off: machine bodies, every label, where workers stand, and the development block. */
@@ -278,7 +282,8 @@ export function beltRoutes(layout: Floor, pairs: readonly Readonly<{ key: string
     }
     return undefined;
   };
-  const routes = new Map<string, readonly ScenePoint[]>(), crossings: BeltCrossing[] = [], junctions: ScenePoint[] = [], links = new Set<string>(), stubs = new Map<string, readonly (readonly ScenePoint[])[]>();
+  const routes = new Map<string, readonly ScenePoint[]>(), crossings: BeltCrossing[] = [], junctions: ScenePoint[] = [], links = new Set<string>(), stubs = new Map<string, readonly (BeltStub | undefined)[]>();
+  const trail = new Uint8Array(size), texted = new Uint8Array(size), stubbed: { key: string; ends: ({ points: ScenePoint[]; out: number; name: string } | undefined)[] }[] = [];
   // Each machine's laid belts, as the straight cells another belt may join square-on, with their direction.
   const runsAt = new Map<string, Map<number, number>>();
   const middle = (station: SceneStation) => ({ x: station.x + station.width / 2, y: station.y + station.height / 2 });
@@ -311,11 +316,19 @@ export function beltRoutes(layout: Floor, pairs: readonly Readonly<{ key: string
       if (found !== undefined) best = { ...found, start, end };
       link = true;
     }
-    // Past both budgets a connection is still drawn: a short stub out of each machine's facing port, each naming the other end.
+    // Past both budgets a connection is still drawn: a short stub out of a free port of each machine, its own, each to be
+    // named after the other end once everything else is laid.
     if (best === undefined) {
-      const stub = (station: SceneStation, toward: SceneStation) => { const port = sidesOf(station, middle(toward)).flatMap((side) => portsOf(station, side, false))[0];
-        return port === undefined ? [{ x: station.x, y: station.y + station.height / 2 }, { x: station.x - 2 * BELT_CELL, y: station.y + station.height / 2 }] : [port.edge, centre(port.cell)]; };
-      stubs.set(pair.key, [stub(pair.from, pair.to), stub(pair.to, pair.from)]);
+      // A machine with every port taken shows no stub; the other end's stub still names it. Only when neither has a port
+      // left does one share a port, so the connection is never dropped.
+      const ends = ([[pair.from, pair.to], [pair.to, pair.from]] as const).map(([station, toward], index, both) => {
+        const ports = sidesOf(station, middle(toward)).flatMap((side) => portsOf(station, side, false)), free = (item: (typeof ports)[number]) => !used.has(item.key) && occupied[item.cell] === 0;
+        const port = ports.find(free) ?? (index === 0 && !sidesOf(both[1]![0], middle(both[1]![1])).flatMap((side) => portsOf(both[1]![0], side, false)).some(free) ? ports[0] : undefined);
+        if (port === undefined) return undefined;
+        used.add(port.key); occupied[port.cell] = H | V; mark(near, port.cell);
+        return { points: [port.edge, centre(port.cell)], out: port.out, name: toward.machine.label };
+      });
+      stubbed.push({ key: pair.key, ends });
       continue;
     }
     const cells = best.cells;
@@ -324,7 +337,7 @@ export function beltRoutes(layout: Floor, pairs: readonly Readonly<{ key: string
     const points = [best.start.edge, ...corners, ...(best.end.key === "" ? [] : [best.end.edge])];
     // A run laid from the far end is drawn the way material moves.
     routes.set(pair.key, reversed ? points.reverse() : points);
-    if (link) { links.add(pair.key); continue; }
+    if (link) { links.add(pair.key); for (const cell of cells) trail[cell] = 1; continue; }
     used.add(best.start.key); if (best.end.key !== "") used.add(best.end.key); else junctions.push(best.end.edge);
     cells.forEach((cell, index) => {
       const before = cells[index - 1], after = cells[index + 1];
@@ -344,6 +357,32 @@ export function beltRoutes(layout: Floor, pairs: readonly Readonly<{ key: string
       runsAt.set(station.entityId, runs);
     }
   }
+  // A stub's name goes where it touches nothing: no machine, label, belt, link or other name. A few spots by its end are
+  // tried, then a shorter name; failing all, the name is left to the stub's title.
+  const free = (box: SceneRect) => {
+    if (box.x < 0 || box.y < 0 || box.x + box.width > layout.width || box.y + box.height > layout.height) return false;
+    for (let row = Math.floor(box.y / BELT_CELL); row <= Math.floor((box.y + box.height) / BELT_CELL); row++) for (let column = Math.floor(box.x / BELT_CELL); column <= Math.floor((box.x + box.width) / BELT_CELL); column++) {
+      const cell = row * columns + column;
+      if (blocked[cell] === 1 || occupied[cell] !== 0 || trail[cell] === 1 || texted[cell] === 1) return false;
+    }
+    return true;
+  };
+  // Ends stay in order, from then to; a machine with no port left has none.
+  for (const { key, ends } of stubbed) stubs.set(key, ends.map((end) => {
+    if (end === undefined) return undefined;
+    const at = end.points[1]!, full = `→ ${end.name}`;
+    for (const value of [full.length > 16 ? `${full.slice(0, 15)}…` : full, full.length > 8 ? `${full.slice(0, 7)}…` : undefined]) {
+      if (value === undefined) continue;
+      const width = value.length * STUB_CHAR, height = 7;
+      const spots = end.out === 0 ? [[at.x + 6, at.y - 4], [at.x + 6, at.y - 12], [at.x + 6, at.y + 4]] : end.out === 1 ? [[at.x - 6 - width, at.y - 4], [at.x - 6 - width, at.y - 12], [at.x - 6 - width, at.y + 4]]
+        : [[at.x - width / 2, at.y - 14], [at.x + 6, at.y - 10], [at.x - 6 - width, at.y - 10]];
+      const spot = spots.map(([x, y]) => ({ x: Math.round(x!), y: Math.round(y!), width, height })).find(free);
+      if (spot === undefined) continue;
+      for (let row = Math.floor(spot.y / BELT_CELL); row <= Math.floor((spot.y + spot.height) / BELT_CELL); row++) for (let column = Math.floor(spot.x / BELT_CELL); column <= Math.floor((spot.x + spot.width) / BELT_CELL); column++) texted[row * columns + column] = 1;
+      return { points: end.points, name: end.name, text: { ...spot, value } };
+    }
+    return { points: end.points, name: end.name };
+  }));
   return { routes, crossings, junctions, links, stubs };
 }
 
