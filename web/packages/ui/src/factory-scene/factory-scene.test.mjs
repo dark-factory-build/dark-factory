@@ -275,7 +275,7 @@ test("the pure scene model feeds a deterministic SVG renderer", () => {
   assert.match(readingSvg, /READING THE PLANT…/);
   assert.doesNotMatch(readingSvg, /NO OPERATIONAL STRUCTURE/);
   // An empty floor in a wide column stays a panel, not a poster.
-  assert.match(emptySvg, new RegExp(`min-width:${Math.min(emptyLayout.width, 864)}px`));
+  assert.match(emptySvg, new RegExp(`max-width:${emptyLayout.width}px`));
   assert.match(emptySvg, /aria-label="Break room · ambient"/);
   const emptyLabel = emptySvg.match(/<text x="([^"]+)" y="([0-9.]+)"[^>]*>NO OPERATIONAL STRUCTURE INFERRED YET<\/text>/);
   const emptyHeight = Number(emptySvg.match(/viewBox="0 0 [^ ]+ ([0-9.]+)"/)[1]);
@@ -1343,18 +1343,24 @@ test("a deploy is a changeover dated by the graph, not by the viewer's clock", (
   assert.doesNotMatch(render(undefined), /data-changeover=/);
 });
 
-test("the plant overview is always there and zoom scales the one floor about the pane's centre", async () => {
+test("the plant overview is always there; fit shows the whole floor and every zoom path returns to it", async () => {
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
-  const priorWindow = globalThis.window;
+  const priorWindow = globalThis.window, priorObserver = globalThis.ResizeObserver;
   globalThis.window = { innerWidth: 1200, innerHeight: 800 };
+  let resized;
+  globalThis.ResizeObserver = class { constructor(callback) { resized = callback; } observe() {} disconnect() {} };
   const { width } = layoutScene(graph);
   // A 600×400 pane over the floor; the floor's box follows its rendered width and the pane's scroll.
-  const pane = { scrollLeft: 0, scrollTop: 0, clientWidth: 600, clientHeight: 400, getBoundingClientRect: () => ({ left: 0, top: 0, width: 600, height: 400 }) };
-  const floor = { getBoundingClientRect: () => ({ left: -pane.scrollLeft, top: -pane.scrollTop, width: floorWidth() }) };
+  const listeners = {};
+  const pane = { scrollLeft: 0, scrollTop: 0, clientWidth: 600, clientHeight: 400, getBoundingClientRect: () => ({ left: 0, top: 0, width: pane.clientWidth, height: pane.clientHeight }), addEventListener: (name, listener) => { listeners[name] = listener; }, removeEventListener() {} };
+  const floor = { getBoundingClientRect: () => ({ left: -pane.scrollLeft, top: -pane.scrollTop, width: style().width }) };
   const view = { attributes: {}, setAttribute(name, value) { this.attributes[name] = Number(value); } };
   let renderer;
-  const style = () => renderer.root.findAll((node) => node.props["data-graph-digest"] === graph.digest)[0]?.props.style ?? {};
-  const floorWidth = () => typeof style().width === "number" ? style().width : 900;
+  const svg = () => renderer.root.findAll((node) => node.props["data-graph-digest"] === graph.digest)[0];
+  const style = () => svg()?.props.style ?? {};
+  const height = () => Number(svg().props.viewBox.split(" ")[3]);
+  const fitted = () => { const scale = Math.min(1, pane.clientWidth / width, pane.clientHeight / height()); return [Math.floor(width * scale), Math.floor(height() * scale)]; };
+  const wheel = (deltaY) => act(async () => listeners.wheel({ ctrlKey: true, deltaY, clientX: 300, clientY: 200, preventDefault() {} }));
   try {
     await act(async () => { renderer = create(createElement(FactoryScene, { graph, appearance: commons, workers }), { createNodeMock: (element) => element.type === "svg" && element.props.viewBox?.startsWith("0 0 ") && element.props["data-graph-digest"] ? floor : element.type === "div" && element.props.className === "dfFactoryFloor__map" ? pane : element.type === "rect" && element.props["data-overview-view"] !== undefined ? view : {} }); });
     const overview = renderer.root.findByProps({ className: "dfPlantMap" });
@@ -1362,21 +1368,36 @@ test("the plant overview is always there and zoom scales the one floor about the
     assert.equal(overview.findAll((node) => node.props["data-overview-room"] !== undefined).length, layoutScene(graph).rooms.length);
     const button = (label) => renderer.root.findAll((node) => node.type === "button" && node.props["aria-label"] === label)[0];
     assert.equal(button("Zoom out").props.disabled, true, "fitted: nothing further out to show");
-    const centre = () => ({ x: (pane.scrollLeft + 300) / (floorWidth() / width), y: (pane.scrollTop + 200) / (floorWidth() / width) });
+    assert.deepEqual([style().width, style().height], fitted(), "fit is the whole floor, bounded by the pane's height as well as its width");
+    assert.ok(style().width <= 600 && style().height <= 400);
+    // A tall pane (a phone held upright) fits by width; the fit follows the pane, never the floor's own size.
+    pane.clientWidth = 300; pane.clientHeight = 900;
+    await act(async () => resized());
+    assert.deepEqual([style().width, style().height], fitted());
+    assert.ok(style().width >= 299 && style().width <= 300, "the whole width of the upright pane");
+    pane.clientWidth = 600; pane.clientHeight = 400;
+    await act(async () => resized());
+    const [fitWidth] = fitted();
+    const centre = () => ({ x: (pane.scrollLeft + 300) / (style().width / width), y: (pane.scrollTop + 200) / (style().width / width) });
     const before = centre();
     await act(async () => button("Zoom in").props.onClick());
-    assert.equal(style().width, 1350);
+    assert.equal(style().width, Math.floor(fitWidth * 1.5));
     await act(async () => button("Zoom in").props.onClick());
-    assert.equal(style().width, 2025);
-    assert.equal(view.attributes.width, 600 / (2025 / width), "the overview window is the pane, in floor units");
-    for (const axis of ["x", "y"]) assert.ok(Math.abs(centre()[axis] - before[axis]) < 1, `zoom keeps the floor's ${axis} under the pane's centre`);
+    assert.equal(view.attributes.width, 600 / (style().width / width), "the overview window is the pane, in floor units");
+    for (const axis of ["x", "y"]) assert.ok(Math.abs(centre()[axis] - before[axis]) < 2, `zoom keeps the floor's ${axis} under the pane's centre`);
+    // A pinch out after button zooms returns to fit: the wheel sees the current zoom, not the one at mount.
+    await wheel(1000);
+    assert.equal(style().width, fitWidth, "pinching back to fit lands on fit");
+    assert.equal(button("Zoom out").props.disabled, true);
+    await wheel(-100);
+    assert.ok(style().width > fitWidth, "a pinch in zooms from the fit scale");
     // At the limit a further zoom changes nothing, and leaves nothing for the next change to replay.
-    for (let index = 0; index < 4; index += 1) await act(async () => button("Zoom in").props.onClick());
+    for (let index = 0; index < 8; index += 1) await act(async () => button("Zoom in").props.onClick());
     assert.equal(style().width, width * 4);
     pane.scrollLeft = pane.scrollTop = 0;
     await act(async () => button("Zoom in").props.onClick());
     await act(async () => button("Fit floor").props.onClick());
-    assert.equal(style().width, "100%");
+    assert.equal(style().width, fitWidth);
     assert.deepEqual([pane.scrollLeft, pane.scrollTop], [0, 0], "fit applies no stale zoom anchor");
     // An empty plant has no overview and nothing to zoom.
     await act(async () => renderer.update(createElement(FactoryScene, { graph: sceneGraph([]), appearance: commons, workers: [] })));
@@ -1384,7 +1405,49 @@ test("the plant overview is always there and zoom scales the one floor about the
   } finally {
     await act(async () => renderer?.unmount());
     globalThis.window = priorWindow;
+    globalThis.ResizeObserver = priorObserver;
   }
+});
+
+test("a fold's inspector lists its routes and shows only the chosen route's evidence", async () => {
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+  const folded = sceneGraph([hall("api", { machines: [machine("api", "processor"), machine("api:docks", "ingress", { label: "3 routes", represented: ["n0", "n1", "n2"], routes: ["/a", "/b", "/c"] })] })]);
+  const pending = new Map(), loads = [];
+  const onLoadNode = (id) => { loads.push(id); return new Promise((resolve, reject) => pending.set(id, { resolve, reject })); };
+  const detail = (id) => ({ selectors: { node: id }, evidence: [], sources: [], modules: [], observers: [] });
+  let renderer;
+  const inspector = () => renderer.root.findByProps({ "aria-label": "Machine inspector" });
+  const text = () => JSON.stringify(renderer.toJSON());
+  const click = (label) => act(async () => inspector().findAllByType("button").find((button) => button.children.join("") === label).props.onClick());
+  try {
+    await act(async () => { renderer = create(createElement(FactoryScene, { graph: folded, appearance: commons, workers: [], onLoadNode, requestedEntity: { id: "api:docks" } })); });
+    assert.deepEqual(inspector().findByProps({ "aria-label": "Folded routes" }).findAllByType("button").map((button) => button.children.join("")), ["/a", "/b", "/c"]);
+    assert.deepEqual(loads, [], "a fold loads nothing until a route is chosen");
+    await click("/a");
+    assert.deepEqual(loads, ["n0"]);
+    assert.match(text(), /Loading evidence…/);
+    // Back and on to another route before the first answers: the late answer is never shown.
+    await click("Back to folded routes");
+    await click("/b");
+    await act(async () => pending.get("n0").resolve(detail("n0")));
+    assert.match(text(), /Loading evidence…/);
+    assert.doesNotMatch(text(), /"n0"/);
+    await act(async () => pending.get("n1").resolve(detail("n1")));
+    assert.deepEqual(inspector().findAllByType("dd").map((term) => term.findByType("code").children.join("")), ["n1"]);
+    await click("Back to folded routes");
+    await click("/c");
+    await act(async () => pending.get("n2").reject(new Error("gone")));
+    assert.match(text(), /Evidence unavailable\./);
+  } finally {
+    await act(async () => renderer?.unmount());
+  }
+  // A public floor names the routes without loading anything.
+  let publicRenderer;
+  await act(async () => { publicRenderer = create(createElement(FactoryScene, { graph: folded, appearance: commons, workers: [], requestedEntity: { id: "api:docks" } })); });
+  const list = publicRenderer.root.findByProps({ "aria-label": "Folded routes" });
+  assert.deepEqual(list.findAllByType("li").map((item) => item.children.join("")), ["/a", "/b", "/c"]);
+  assert.equal(list.findAllByType("button").length, 0, "public floors have no evidence to load");
+  await act(async () => publicRenderer.unmount());
 });
 
 test("zooming to twice the fitted scale lists a manifold's routes inside its unmoved footprint", async () => {
