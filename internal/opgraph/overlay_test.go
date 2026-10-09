@@ -319,8 +319,16 @@ func TestSilentOutsideHostIsQuietUnlessNotConnected(t *testing.T) {
 		return []Coverage{{Source: "factoryd", Unit: "api", Keys: keys, Peers: peers, AsOf: now, TTL: minute}}
 	}
 	edge := [3]string{ID("s", "", "wrangler:api"), ID("s", "", "host:api.stripe.com"), string(Calls)}
-	live := Overlay("s", overlayGraph(), nil, cover(true, "service.name", "server.address"), nil, now, 15*minute)
+	graph := overlayGraph()
+	storeID, unitID := ID("s", "", "store:db"), ID("s", "", "wrangler:api")
+	graph.Nodes = append(graph.Nodes, Node{ID: storeID, Kind: Store, Label: "db", Evidence: []Evidence{static("go-ast", "", Inferred)}})
+	graph.Edges = append(graph.Edges, Edge{From: unitID, To: storeID, Kind: Uses, Evidence: []Evidence{static("go-ast", "", Inferred)}})
+	live := Overlay("s", graph, nil, cover(true, "service.name", "server.address"), nil, now, 15*minute)
 	invariant(t, live)
+	// Peer reporting sees outbound calls only: an unseen store is not a silent one.
+	if got := live.Edges[[3]string{unitID, storeID, string(Uses)}]; got == nil || got.Observation != "unobserved" {
+		t.Errorf("uses edge to a store under a peer-reporting caller = %+v", got)
+	}
 	if got := labels(live)["api.stripe.com"]; got.Observation != "quiet" || got.State != "idle" || live.Edges[edge].Observation != "quiet" {
 		t.Errorf("host the only caller reports on = %+v, edge %+v", got, live.Edges[edge])
 	}

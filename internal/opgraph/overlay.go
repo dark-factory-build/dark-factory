@@ -157,7 +157,7 @@ func Overlay(system string, static Graph, observations []Observation, coverage [
 			status = &copied
 		case status.count > 0:
 			status.Observation = "observed"
-		case hasPeers(current[edge.From]), live.Nodes[edge.To].Observation == "quiet" && byID[edge.To].Kind == External:
+		case edge.Kind == Calls && hasPeers(current[edge.From]), live.Nodes[edge.To].Observation == "quiet" && byID[edge.To].Kind == External:
 			status.Observation = "quiet"
 		case expired[edge.From]:
 			status.Observation = "stale"
@@ -292,7 +292,7 @@ func sharedObservation(node *Node, users []string, current map[string][]Coverage
 	seen := false
 	for _, user := range users {
 		for _, item := range current[user] {
-			if item.Peers || covers(item, node) {
+			if covers(item, node) {
 				return "quiet"
 			}
 			seen = true
