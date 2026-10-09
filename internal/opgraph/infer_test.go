@@ -335,12 +335,12 @@ func TestInferenceSettlesOnOneAnswer(t *testing.T) {
 
 func TestCIJoinsUnitsAndNamesItsRepository(t *testing.T) {
 	graph, err := Infer("s", []Repository{
-		{ID: "org/core", Name: "core", Files: map[string][]byte{
+		{ID: "r-core", Name: "org/core", Files: map[string][]byte{
 			"go.mod":                  []byte("module example.com/core\n"),
 			"cmd/gate/main.go":        []byte("package main\nfunc main() {}\n"),
 			".github/workflows/a.yml": []byte("on: pull_request\njobs:\n  gate:\n    steps:\n      - run: go run ./cmd/gate\n"),
 		}},
-		{ID: "org/site", Name: "site", Files: map[string][]byte{
+		{ID: "r-site", Name: "org/site", Files: map[string][]byte{
 			"wrangler.toml":           []byte("name = \"api\"\n"),
 			".github/workflows/b.yml": []byte("on: push\njobs:\n  t:\n    steps:\n      - run: echo\n"),
 		}},

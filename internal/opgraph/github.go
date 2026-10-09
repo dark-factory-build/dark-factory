@@ -31,7 +31,7 @@ func workflowFile(name string) bool {
 // the repository's CI unit. Only jobs a pull request triggers bind to check
 // runs, since the broker reads checks of pull request heads alone; the rest
 // stay unbound, so CI silence never claims them idle.
-func (run *inference) workflow(repo string, body []byte, at Location) {
+func (run *inference) workflow(repo, name string, body []byte, at Location) {
 	var file struct {
 		Name string `yaml:"name"`
 		On   any    `yaml:"on"`
@@ -66,7 +66,7 @@ func (run *inference) workflow(repo string, body []byte, at Location) {
 	}
 	pullRequest := contains(events, "pull_request") || contains(events, "pull_request_target")
 	declared := static("github-actions", path.Base(at.Path), Declared)
-	ci := run.addUnit(unit{repo: repo, root: path.Dir(at.Path), key: CIUnit(repo), label: "GitHub Actions · " + path.Base(repo), runtime: "ci",
+	ci := run.addUnit(unit{repo: repo, root: path.Dir(at.Path), key: CIUnit(repo), label: "GitHub Actions · " + path.Base(name), runtime: "ci",
 		names: []string{CIUnit(repo)}, evidence: declared, at: Location{Repository: repo, Path: path.Dir(at.Path)}})
 	workflow := file.Name
 	if workflow == "" {

@@ -22,7 +22,7 @@ func (run *inference) declarations(repository Repository, names []string) {
 		here := owner{repo: repository.ID, file: name}
 		switch {
 		case workflowFile(name):
-			run.workflow(repository.ID, body, at)
+			run.workflow(repository.ID, repository.Name, body, at)
 		case strings.HasPrefix(base, "wrangler."):
 			run.wrangler(repository.ID, dir, base, body, at)
 		case strings.HasPrefix(base, "docker-compose") || strings.HasPrefix(base, "compose."):
