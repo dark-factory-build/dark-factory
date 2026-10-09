@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/dark-factory-build/dark-factory/internal/browser"
+	"github.com/dark-factory-build/dark-factory/internal/browserprotocol"
 	"github.com/dark-factory-build/dark-factory/internal/change"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 	"github.com/dark-factory-build/dark-factory/internal/opgraph"
@@ -26,15 +27,7 @@ const graphFreshness = 30 * time.Second
 
 // graphSource records the configured integrated target each repository was
 // read at, not its checkout HEAD.
-type graphSource struct {
-	RepositoryID string `json:"repository_id"`
-	Name         string `json:"name"`
-	Kind         string `json:"kind"` // integrated | unavailable
-	TargetRef    string `json:"target_ref"`
-	Revision     string `json:"revision"`
-	ObservedAt   int64  `json:"observed_at"`
-	Reason       string `json:"reason,omitempty"`
-}
+type graphSource = browserprotocol.GraphSource
 
 type projectGraph struct {
 	graph   opgraph.Graph

@@ -522,9 +522,6 @@ test("operational graph decoding refuses unsupported readings and dangling refer
  const bad = {
   "unknown kind": (b) => { b.nodes[1].kind = "repository"; },
   "malformed id": (b) => { b.nodes[1].id = "nope"; },
-  "idle unless quiet": (b) => { b.nodes[1].state = "idle"; },
-  "rate on unobserved": (b) => { Object.assign(b.nodes[1], { observation: "unobserved", state: "unknown", rate_per_hour: 5 }); },
-  "rate on stale": (b) => { Object.assign(b.nodes[1], { observation: "stale", state: "unknown", rate_per_hour: 5 }); },
   "unit missing": (b) => { b.nodes[1].unit = "ff".repeat(16); },
   "edge to missing node": (b) => { b.edges[0].to = "ff".repeat(16); },
   "self edge": (b) => { b.edges[0].to = b.edges[0].from; },
@@ -532,6 +529,10 @@ test("operational graph decoding refuses unsupported readings and dangling refer
   "unknown evidence": (b) => { b.nodes[1].evidence = "guess"; },
  };
  for (const [name, change] of Object.entries(bad)) assert.throws(() => decode(change), ProtocolError, name);
+ // How readings combine is the producer's rule (the invariant in opgraph's overlay_test.go); the decoder does not second-guess it.
+ for (const reading of [{ state: "idle" }, { observation: "unobserved", state: "unknown", rate_per_hour: 5 }, { observation: "stale", state: "unknown", rate_per_hour: 5 }]) {
+  assert.deepEqual(Object.entries(reading).map(([key]) => decode((b) => { Object.assign(b.nodes[1], reading); return b; }).body.nodes[1][key]), Object.values(reading));
+ }
  assert.equal(decode((b) => { b.nodes[1].future = "additive"; return b; }).body.nodes[1].future, undefined);
 });
 

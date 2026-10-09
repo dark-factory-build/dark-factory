@@ -22,7 +22,8 @@ func Infer(system string, repositories []Repository) (Graph, error) {
 
 // unit is a deployable unit found in a repository before identities exist.
 type unit struct {
-	repo, root, key, label, runtime string
+	repo, root, key, label string
+	runtime                Placement
 	// deployed units come from deployment declarations and win over units
 	// guessed from code at the same root.
 	deployed bool
@@ -51,7 +52,7 @@ type finding struct {
 	kind      Kind
 	key       string
 	label     string
-	trigger   string
+	trigger   Trigger
 	shared    bool // a system-wide party, not a per-unit copy
 	edge      EdgeKind
 	selectors map[string]string
@@ -123,7 +124,7 @@ func (run *inference) find(found finding) {
 }
 
 func static(source, detail, confidence string) Evidence {
-	return Evidence{Origin: "static", Source: source, Detail: detail, Confidence: confidence}
+	return Evidence{Origin: OriginStatic, Source: source, Detail: detail, Confidence: confidence}
 }
 
 // units drops code-guessed units shadowed by a deployment declaration.
@@ -159,7 +160,7 @@ func (run *inference) effectiveUnits() []*unit {
 }
 
 // ownerUnits resolves an owner to unit IDs.
-func (run *inference) ownerUnits(units []*unit, found owner, kind Kind, trigger string) []*unit {
+func (run *inference) ownerUnits(units []*unit, found owner, kind Kind, trigger Trigger) []*unit {
 	if len(found.units) > 0 {
 		result := []*unit{}
 		for _, candidate := range units {
@@ -217,7 +218,7 @@ func (run *inference) dependents(units []*unit, found owner) []*unit {
 	return result
 }
 
-func choose(candidates []*unit, browser bool, kind Kind, trigger string) []*unit {
+func choose(candidates []*unit, browser bool, kind Kind, trigger Trigger) []*unit {
 	pick := func(keep func(*unit) bool) []*unit {
 		result := []*unit{}
 		for _, candidate := range candidates {
@@ -227,12 +228,12 @@ func choose(candidates []*unit, browser bool, kind Kind, trigger string) []*unit
 		}
 		return result
 	}
-	if hasBrowser := len(pick(func(u *unit) bool { return u.runtime == "browser" })) > 0; hasBrowser {
-		candidates = pick(func(u *unit) bool { return (u.runtime == "browser") == browser })
+	if hasBrowser := len(pick(func(u *unit) bool { return u.runtime == RuntimeBrowser })) > 0; hasBrowser {
+		candidates = pick(func(u *unit) bool { return (u.runtime == RuntimeBrowser) == browser })
 	}
 	role := ""
 	switch {
-	case kind == Ingress && trigger == "request":
+	case kind == Ingress && trigger == TriggerRequest:
 		role = "web"
 	case kind == Job:
 		role = "worker"
@@ -252,7 +253,7 @@ func (run *inference) resolve(system string, repositories []Repository) (Graph, 
 	for _, repository := range repositories {
 		found := false
 		for _, candidate := range units {
-			found = found || candidate.repo == repository.ID && candidate.runtime != "ci" // CI builds the code; it is not the code
+			found = found || candidate.repo == repository.ID && candidate.runtime != RuntimeCI // CI builds the code; it is not the code
 		}
 		// A library repository belongs to the units depending on it.
 		for _, library := range run.packages {
@@ -289,10 +290,10 @@ func (run *inference) resolve(system string, repositories []Repository) (Graph, 
 		}
 	}
 	for _, candidate := range units {
-		if candidate.runtime == "browser" {
+		if candidate.runtime == RuntimeBrowser {
 			// The framework serves its browser code from the server unit.
 			for _, server := range units {
-				if server.repo == candidate.repo && server.root == candidate.root && server.runtime == "server" {
+				if server.repo == candidate.repo && server.root == candidate.root && server.runtime == RuntimeServer {
 					builder.Edge(candidate.id, server.id, Calls, static("nextjs", "browser code loads from its server", Declared))
 				}
 			}
@@ -308,7 +309,7 @@ func (run *inference) resolve(system string, repositories []Repository) (Graph, 
 	run.reachScripts(units, repositories)
 	run.applyHints(units)
 	for _, hint := range run.hostHints {
-		for _, owned := range run.ownerUnits(units, hint.owner, Ingress, "request") {
+		for _, owned := range run.ownerUnits(units, hint.owner, Ingress, TriggerRequest) {
 			owned.hosts = append(owned.hosts, hint.host)
 		}
 	}
@@ -339,7 +340,7 @@ func (run *inference) resolve(system string, repositories []Repository) (Graph, 
 	for _, binding := range run.bindings {
 		for _, from := range units {
 			for _, to := range units {
-				if from.key == binding.from && to.runtime == "worker" && contains(to.names, binding.to) {
+				if from.key == binding.from && to.runtime == RuntimeWorker && contains(to.names, binding.to) {
 					builder.Edge(from.id, to.id, Calls, static("wrangler", "service binding", Declared))
 				}
 			}
@@ -348,10 +349,10 @@ func (run *inference) resolve(system string, repositories []Repository) (Graph, 
 	for _, candidate := range units {
 		node := builder.Lookup(candidate.id)
 		if node.Runtime == "" {
-			node.Runtime = "cli"
+			node.Runtime = RuntimeCLI
 			for _, edge := range builder.edges {
 				if edge.To == node.ID && edge.Kind == Handles {
-					node.Runtime = "process"
+					node.Runtime = RuntimeProcess
 				}
 			}
 		}
@@ -373,7 +374,7 @@ func (run *inference) applyHints(units []*unit) {
 		}
 		var open []int
 		for index, found := range run.findings {
-			if found.kind == Ingress && found.trigger == "request" && found.selectors["network.transport"] == "tcp" && found.selectors["server.port"] == "" {
+			if found.kind == Ingress && found.trigger == TriggerRequest && found.selectors["network.transport"] == "tcp" && found.selectors["server.port"] == "" {
 				for _, key := range found.owner.units {
 					if key == candidate.key {
 						open = append(open, index)
@@ -388,7 +389,7 @@ func (run *inference) applyHints(units []*unit) {
 		found := &run.findings[open[0]]
 		found.selectors["server.address"], found.selectors["server.port"] = host, port
 		found.label += " " + addresses[0].addr
-		run.findings = append(run.findings, finding{owner: found.owner, kind: Ingress, key: found.key, trigger: "request",
+		run.findings = append(run.findings, finding{owner: found.owner, kind: Ingress, key: found.key, trigger: TriggerRequest,
 			evidence: static("go-ast", "listen address named by "+addresses[0].at.Path, Heuristic), at: addresses[0].at, selectors: map[string]string{}})
 	}
 }
