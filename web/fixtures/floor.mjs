@@ -130,6 +130,26 @@ const length = (points) => points.slice(1).reduce((sum, point, index) => sum + M
 const mean = (values) => values.length === 0 ? 0 : values.reduce((sum, value) => sum + value, 0) / values.length;
 const round = (value) => Math.round(value * 10) / 10, ratio = (value) => Math.round(value * 100) / 100;
 
+/** Where two belts cross: proper intersections of their legs away from a port they share (a junction), with the angle of each, in degrees. */
+export function crossings(belts) {
+  const side = (a, b, c) => Math.sign((b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x));
+  const near = (p, q) => Math.hypot(p.x - q.x, p.y - q.y) < 2;
+  const found = [];
+  for (let i = 0; i < belts.length; i++) for (let j = i + 1; j < belts.length; j++) {
+    const ends = [belts[i][0], belts[i].at(-1)].filter((end) => [belts[j][0], belts[j].at(-1)].some((other) => near(end, other)));
+    for (let a = 1; a < belts[i].length; a++) for (let b = 1; b < belts[j].length; b++) {
+      const [p, q, r, s] = [belts[i][a - 1], belts[i][a], belts[j][b - 1], belts[j][b]];
+      if (side(p, q, r) * side(p, q, s) >= 0 || side(r, s, p) * side(r, s, q) >= 0) continue;
+      const t = ((r.x - p.x) * (s.y - r.y) - (r.y - p.y) * (s.x - r.x)) / ((q.x - p.x) * (s.y - r.y) - (q.y - p.y) * (s.x - r.x));
+      const at = { x: p.x + t * (q.x - p.x), y: p.y + t * (q.y - p.y) };
+      if (ends.some((end) => Math.hypot(end.x - at.x, end.y - at.y) < 12)) continue;
+      const angle = Math.abs(Math.atan2(q.y - p.y, q.x - p.x) - Math.atan2(s.y - r.y, s.x - r.x)) * 180 / Math.PI % 180;
+      found.push({ ...at, angle: Math.min(angle, 180 - angle) });
+    }
+  }
+  return found;
+}
+
 /** The belts a rendered floor draws: the first path of every element marked data-belt. */
 export function beltsFromMarkup(html) {
   return [...html.matchAll(/<(?:g|path)[^>]*data-belt="[^"]*"[^>]*>/g)].map((match) => {
@@ -172,7 +192,7 @@ export function measureFloor(view) {
     stations: view.stations.length,
     bodyOverlaps: overlap,
     interaction: { positions: anchored.length, reachableClear: reachable.length, meanWalkFromRest: round(mean(fromRest.filter(({ points }) => points).map(({ points }) => length([view.rest, ...points])))) },
-    connections: { belts: belts.length, total: round(belts.reduce((sum, value) => sum + value, 0)), mean: round(mean(belts)), max: round(Math.max(0, ...belts)) },
+    connections: { belts: belts.length, crossings: crossings(view.belts).length, minCrossingAngle: Math.round(Math.min(90, ...crossings(view.belts).map((item) => item.angle))), total: round(belts.reduce((sum, value) => sum + value, 0)), mean: round(mean(belts)), max: round(Math.max(0, ...belts)) },
     routes: { pairs: pairs.length, meanWalk: round(mean(pairs.map((pair) => pair.walked))), meanStraight: round(mean(pairs.map((pair) => pair.straight))),
       meanDetour: ratio(mean(pairs.map((pair) => pair.walked / pair.straight))), maxDetour: ratio(Math.max(0, ...pairs.map((pair) => pair.walked / pair.straight))),
       clipped: pairs.filter((pair) => !pair.clear).length },
