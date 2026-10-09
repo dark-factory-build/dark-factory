@@ -15,10 +15,6 @@ import (
 // HeadRE matches one exact commit sha; the merge-queue gate reuses it.
 var HeadRE = regexp.MustCompile(`^[0-9a-f]{40}$`)
 
-// ErrRejected is the Maintainer answering conflict or refused: resending the
-// same operation cannot succeed.
-var ErrRejected = errors.New("review: Maintainer rejected operation")
-
 type Request struct {
 	Repository string
 	PullNumber uint64
@@ -27,12 +23,10 @@ type Request struct {
 	BaseRef    string
 	Body       string
 	Provider   string
-	Mergeable  *bool
 }
 
 type Operation struct {
 	ID           string    `json:"id"`
-	EnqueueID    string    `json:"enqueue_id,omitempty"`
 	Request      Request   `json:"request"`
 	State        string    `json:"state"`
 	Retryable    bool      `json:"retryable,omitempty"`
@@ -43,7 +37,7 @@ type Operation struct {
 	RoutePending bool      `json:"route_pending,omitempty"`
 	Escalation   string    `json:"escalation,omitempty"` // why factoryd cannot advance it: due to the overseer
 	Handled      bool      `json:"handled,omitempty"`    // a failure already retried or escalated
-	Requeued     bool      `json:"requeued,omitempty"`   // re-enqueued once after an ejection
+	Enqueues     int       `json:"enqueues,omitempty"`   // times factoryd put this head in the merge queue
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
 }
@@ -77,22 +71,25 @@ type Backend interface {
 	CloneReadOnly(context.Context, Request) (string, func(), error)
 	Review(context.Context, string, Request) (Verdict, error)
 	Submit(context.Context, Operation, Verdict) error
+	// Enqueue ensures the exact head is in its base's merge queue; a head
+	// already queued is success.
 	Enqueue(context.Context, Operation) error
 	// Observe reads the Maintainer's receipt for one operation id.
 	Observe(context.Context, string) (Receipt, error)
-	// ObserveMerge reads the merge queue's view of an enqueued exact head.
-	ObserveMerge(context.Context, Operation) (Merge, error)
+	// ObservePull reads the pull request once for the operation's exact head.
+	ObservePull(context.Context, Operation) (Pull, error)
 }
 
-// Merge is one merge-queue observation: State is the Maintainer's
-// ACTIVE_QUEUE, MERGED_AFTER_ENQUEUE_ATTEMPT or NOT_QUEUED, and Failing names
-// the head's failing checks when an open pull request is no longer queued.
-// Group is the newest completed merge-group run that built this head, if any.
-type Merge struct {
-	State   string
-	Open    bool
-	Failing []string
-	Group   *GroupRun
+// Pull is one observation of a published pull request. Queue, checks and
+// merge group are read only while it is open at the operation's head.
+type Pull struct {
+	Head      string
+	State     string // open, closed or merged
+	Mergeable *bool  // nil while GitHub computes it
+	Queued    bool
+	Failing   []string  // checks at the head that finished unsuccessfully
+	Pending   bool      // a check at the head has not finished
+	Group     *GroupRun // the newest completed merge-group run that built the head
 }
 
 type GroupRun struct {
@@ -108,35 +105,12 @@ type GroupJob struct {
 	Annotations []string `json:"annotations"`
 }
 
-// runnerLost are GitHub's own annotations for a job that never finished on
-// its runner; the code did not fail.
-var runnerLost = regexp.MustCompile(`(?i)runner has received a shutdown signal|lost communication with the server`)
-
-// defect reports a merge-group run that failed on the code it built, as
-// opposed to infrastructure: a cancelled run, a job that never started, or a
-// lost runner. The head merged with its base is what GitHub would merge, so
-// the defect is the author's to fix.
-func (g *GroupRun) defect() bool {
-	if g == nil || (g.Conclusion != "failure" && g.Conclusion != "timed_out") {
-		return false
-	}
-	// A job that was cancelled or never started fails the jobs downstream of
-	// it, such as an always() aggregate, so it decides the run on its own.
-	failed := false
-	for _, job := range g.Jobs {
-		switch {
-		case job.Conclusion == "cancelled" || job.Conclusion == "startup_failure" || runnerLost.MatchString(strings.Join(job.Annotations, "\n")):
-			return false
-		case job.Conclusion == "failure" || job.Conclusion == "timed_out":
-			failed = true
-		}
-	}
-	return failed
-}
-
 func (g *GroupRun) note(head string) string {
+	if g == nil {
+		return fmt.Sprintf("The merge queue removed exact head %s twice without merging it, with every check on that head passing, and no merge-group run that built it was readable. Rebase onto current origin/main and check the change against it.", head)
+	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "The merge queue removed exact head %s without merging it: merge-group run %d failed (%s). Fix the failures below against current origin/main.", head, g.ID, g.URL)
+	fmt.Fprintf(&b, "The merge queue removed exact head %s twice without merging it: merge-group run %d failed (%s). Fix the failures below against current origin/main.", head, g.ID, g.URL)
 	for _, job := range g.Jobs {
 		fmt.Fprintf(&b, "\n\nJob %s (%s):", job.Name, job.Conclusion)
 		for _, line := range job.Annotations {
@@ -197,7 +171,7 @@ func Prepare(request Request, now func() time.Time) (Operation, error) {
 
 // Resume continues an operation already durably claimed by the caller.
 func (c Coordinator) Resume(ctx context.Context, op Operation) (Operation, error) {
-	if err := validate(op.Request); err != nil || c.Store == nil || c.Backend == nil || c.Now == nil || op.ID == "" || (op.State != "running" && op.State != "submitting" && op.State != "enqueuing") {
+	if err := validate(op.Request); err != nil || c.Store == nil || c.Backend == nil || c.Now == nil || op.ID == "" || (op.State != "running" && op.State != "submitting") {
 		if err == nil {
 			err = errors.New("review: incomplete coordinator")
 		}
@@ -205,9 +179,6 @@ func (c Coordinator) Resume(ctx context.Context, op Operation) (Operation, error
 	}
 	if op.State == "submitting" {
 		return c.reconcileSubmitting(ctx, op, nil)
-	}
-	if op.State == "enqueuing" {
-		return c.reconcileEnqueuing(ctx, op, nil)
 	}
 	checkout, cleanup, err := c.Backend.CloneReadOnly(ctx, op.Request)
 	if err != nil {
@@ -232,67 +203,72 @@ func (c Coordinator) Resume(ctx context.Context, op Operation) (Operation, error
 }
 
 func (c Coordinator) finishSubmitted(ctx context.Context, op Operation) (Operation, error) {
-	op.Submitted = true
-	if op.Verdict == "allow" {
-		var err error
-		op.EnqueueID, err = operationID()
-		if err != nil {
-			return c.fail(ctx, op, err, false)
-		}
-		op.State, op.UpdatedAt = "enqueuing", c.Now()
-		if err := c.Store.Update(ctx, op); err != nil {
-			return Operation{}, err
-		}
-		if err := c.Backend.Enqueue(ctx, op); err != nil {
-			return c.reconcileEnqueuing(ctx, op, err)
-		}
-		op.State = "enqueued"
-	} else {
-		op.State = "completed"
+	op.Submitted, op.State, op.UpdatedAt = true, "enqueued", c.Now()
+	if op.Verdict != "allow" {
 		// Routing task feedback is a separate durable step. Keep the
 		// completed operation recoverable until that step has committed.
-		op.RoutePending = true
+		op.State, op.RoutePending = "completed", true
 	}
-	op.UpdatedAt = c.Now()
-	if err := c.Store.Update(ctx, op); err != nil {
-		return Operation{}, err
+	if err := c.Store.Update(ctx, op); err != nil || op.State != "enqueued" {
+		return op, err
 	}
-	return op, nil
+	return c.Advance(ctx, op)
 }
 
-// ObserveMerge advances an enqueued operation from the merge queue: merged,
-// closed, or ejected while the pull request is still open. A failing check
-// on the head, or a merge-group run that failed on the code it built, goes
-// back to the author, routed like a REQUEST_CHANGES. Any other ejection
-// (infrastructure, or no run found) is re-enqueued once and escalated if the
-// same head is ejected again.
-func (c Coordinator) ObserveMerge(ctx context.Context, op Operation) (Operation, error) {
+// Advance moves an allowed exact head one step toward merge, deciding from
+// one observation of its pull request. It sends the head back to its author
+// when it conflicts, a check on it fails, or the queue removes it again after
+// the one re-queue; it never decides from a write's journal or error text.
+// A wrong enqueue cannot merge unreviewed code: the merge group's gate still
+// requires an ALLOW at the exact head.
+func (c Coordinator) Advance(ctx context.Context, op Operation) (Operation, error) {
 	if op.State != "enqueued" {
 		return op, errors.New("review: operation is not enqueued")
 	}
-	merge, err := c.Backend.ObserveMerge(ctx, op)
-	switch {
-	case err != nil:
+	pull, err := c.Backend.ObservePull(ctx, op)
+	if err != nil {
 		return op, err
-	case merge.State == "MERGED_AFTER_ENQUEUE_ATTEMPT":
-		op.State = "merged"
-	case merge.State != "NOT_QUEUED":
-		return op, nil
-	case !merge.Open:
-		op.State = "closed"
-	case len(merge.Failing) == 0 && merge.Group.defect():
-		op.State, op.RoutePending, op.Detail = "ejected", true, merge.Group.note(op.Request.Head)
-	case len(merge.Failing) == 0 && !op.Requeued:
-		op.Requeued = true
-		return c.finishSubmitted(ctx, op)
-	case len(merge.Failing) == 0:
-		return c.fail(ctx, op, fmt.Errorf("the merge queue removed exact head %s again after factoryd re-enqueued it, with no failing check on that head: its merge-group run failed", op.Request.Head), false)
-	default:
+	}
+	head := op.Request.Head
+	switch {
+	case !strings.EqualFold(pull.Head, head):
+		op.State = "superseded"
+	case pull.State == "merged" || pull.State == "closed":
+		op.State = pull.State
+	case pull.Mergeable != nil && !*pull.Mergeable:
 		op.State, op.RoutePending = "ejected", true
-		op.Detail = fmt.Sprintf("The merge queue removed exact head %s without merging it. Failing checks: %s.", op.Request.Head, strings.Join(merge.Failing, ", "))
+		op.Detail = fmt.Sprintf("Exact head %s conflicts with %s. Rebase this Change onto origin/%s and resolve the conflict.", head, op.Request.BaseRef, op.Request.BaseRef)
+	case pull.Queued && op.Escalation == "":
+		return op, nil
+	case pull.Queued:
+		op.Escalation = ""
+	case len(pull.Failing) > 0:
+		op.State, op.RoutePending = "ejected", true
+		op.Detail = fmt.Sprintf("Exact head %s cannot merge. Failing checks: %s.", head, strings.Join(pull.Failing, ", "))
+	case pull.Pending:
+		return op, nil
+	case op.Enqueues >= 2:
+		// Queued, removed, re-queued once and removed again.
+		op.State, op.RoutePending, op.Detail = "ejected", true, pull.Group.note(head)
+	default:
+		if err := c.Backend.Enqueue(ctx, op); err != nil {
+			if op.Escalation != "" {
+				return op, err
+			}
+			op.Escalate("the merge queue would not take it with every check on that head passing: " + err.Error())
+			op.UpdatedAt = c.Now()
+			return op, errors.Join(err, c.Store.Update(ctx, op))
+		}
+		op.Enqueues, op.Escalation = op.Enqueues+1, ""
 	}
 	op.UpdatedAt = c.Now()
 	return op, c.Store.Update(ctx, op)
+}
+
+// Escalate records why factoryd cannot advance the pull request, which makes
+// it an item due to the project's overseer.
+func (op *Operation) Escalate(why string) {
+	op.Escalation = fmt.Sprintf("factoryd cannot advance %s#%d at exact head %s: %s", op.Request.Repository, op.Request.PullNumber, op.Request.Head, why)
 }
 
 func (c Coordinator) reconcileSubmitting(ctx context.Context, op Operation, cause error) (Operation, error) {
@@ -324,62 +300,6 @@ func (c Coordinator) reconcileSubmitting(ctx context.Context, op Operation, caus
 	}
 }
 
-func (c Coordinator) reconcileEnqueuing(ctx context.Context, op Operation, cause error) (Operation, error) {
-	receipt, err := c.Backend.Observe(ctx, op.EnqueueID)
-	if err != nil {
-		if cause != nil {
-			return op, errors.Join(cause, err)
-		}
-		return op, err
-	}
-	switch receipt.State {
-	case "completed":
-		if receipt.Kind != "enqueue_pull_request" || receipt.Head != op.Request.Head {
-			return c.fail(ctx, op, errors.New("review: enqueue receipt does not match operation"), false)
-		}
-		op.State, op.Escalation, op.UpdatedAt = "enqueued", "", c.Now()
-		if err := c.Store.Update(ctx, op); err != nil {
-			return Operation{}, err
-		}
-		return op, nil
-	case "missing":
-		if cause == nil {
-			cause = errors.New("review: enqueue operation is missing")
-		}
-		return c.fail(ctx, op, cause, false)
-	case "planned":
-		// The broker claimed the enqueue but never ran it; resending the same
-		// operation id resumes that claim (canary 6, #1167).
-		err := c.Backend.Enqueue(ctx, op)
-		if errors.Is(err, ErrRejected) && strings.Contains(err.Error(), "rejected before execution") {
-			pull, pullErr := c.Backend.StoredPull(ctx, op.Request.PullNumber, op.Request.Head)
-			if pullErr == nil && pull.Mergeable != nil && !*pull.Mergeable {
-				op.State, op.RoutePending, op.Detail, op.UpdatedAt = "ejected", true, "The published pull request conflicts with origin/main. Rebase this Change onto origin/main and resolve the conflict.", c.Now()
-				return op, c.Store.Update(ctx, op)
-			}
-			// GitHub refused before executing and the broker released the
-			// claim: the pull request is not enqueueable yet (checks running
-			// or queued, #1236, #1276). Each tick resends it while it is open.
-			return op, err
-		} else if errors.Is(err, ErrRejected) {
-			// The pull request moved on (merged, closed, queued or a new
-			// head): end it and route the refusal to the overseer once.
-			return c.fail(ctx, op, err, false)
-		} else if err != nil {
-			return op, err
-		}
-		op.State, op.Escalation, op.UpdatedAt = "enqueued", "", c.Now()
-		return op, c.Store.Update(ctx, op)
-	case "executing", "indeterminate":
-		if cause == nil {
-			cause = fmt.Errorf("review: enqueue operation is %s", receipt.State)
-		}
-		return op, cause
-	default:
-		return op, errors.New("review: invalid enqueue operation state")
-	}
-}
-
 // Retry starts a new durable attempt for a failed operation. The original
 // failure remains immutable history; the request is reused so the retry cannot
 // silently move to a different pull-request head.
@@ -406,9 +326,6 @@ func (c Coordinator) ReserveRetry(ctx context.Context, failed Operation) (Operat
 
 func (c Coordinator) fail(ctx context.Context, op Operation, cause error, retryable bool) (Operation, error) {
 	op.State, op.Detail, op.Retryable, op.UpdatedAt = "failed", cause.Error(), retryable, c.Now()
-	// An ALLOW whose enqueue did not happen stays pending, in the same write,
-	// until the overseer has been told.
-	op.RoutePending = op.EnqueueID != ""
 	if err := c.Store.Update(ctx, op); err != nil {
 		return Operation{}, errors.Join(cause, err)
 	}

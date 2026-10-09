@@ -100,10 +100,7 @@ A plain GitHub approval without the explicit verdict does not satisfy this
 gate. Pending and dismissed reviews do not count. A trusted block or
 `CHANGES_REQUESTED` at the same head wins over an allow, whichever trusted
 publisher recorded it.
-A new head requires fresh review. An operation-bound correction must come from
-the original block's publisher and name that exact operation. The publisher
-attests that the finding was resolved or withdrawn; another publisher's
-correction or an ordinary second opinion cannot clear a same-head block.
+A new head requires fresh review; nothing clears a block at the same head.
 The Maintainer App is another publisher of the same record. Its automated
 intake retains its own operation journal and uncertainty handling.
 

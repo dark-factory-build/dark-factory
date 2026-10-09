@@ -199,27 +199,19 @@ repository gate. factoryd's reviewer records the exact-head verdict format
 described in [WORKFLOW.md](WORKFLOW.md). The App's operation journal still
 governs its own submission and recovery path.
 
-Merge queue enqueue is the only merge operation. Before enqueue, the broker re-reads the PR and requires
-the bound base, head and SHA-256 digest of the independently reviewed rendered
-body after claiming the durable operation. A known mismatch refuses the write;
-an uncertain outcome is never blindly replayed. The GraphQL mutation supplies
-`expectedHeadOid`, never `jump`, and the broker reconciles the exact queue entry.
-Only the head check is atomic: GitHub has no expected-body condition on enqueue,
-so a body edit can race with the final network call. The digest is a checked
-precondition, not an atomic body lock or a guarantee that metadata stays unchanged
-while queued. Adding another read cannot remove that limit. Existing completed
-legacy operations keep their original digest-free identity and stored result;
-new enqueue operations require the reviewed-body digest. The enqueue result
-reports the state the entry was created in, which makes an immediately
-`UNMERGEABLE` entry visible. An entry already present before the durable claim
-is refused as external; it is never adopted as an App enqueue. The read-only
-merge observer first binds to the completed durable App enqueue attempt, then
-distinguishes its active exact entry, a merged PR after that attempt with its
-merge commit, and an exact PR whose recorded entry is no longer in the queue.
-The last state deliberately does not guess whether the entry was ejected or
-manually removed. The durable entry ID is returned in every state; a generic
-`merged: true` response alone is not reported as queue lineage. GitHub tests
-the exact PR head against the queue's latest base before merging.
+Merge queue enqueue is the only merge operation, and it is an idempotent
+"ensure queued at this head": it journals nothing, an entry already present at
+the head is success, and every call re-reads GitHub before writing. Before
+enqueue, the broker re-reads the PR and requires the bound base, head and
+SHA-256 digest of the independently reviewed rendered body; a mismatch refuses
+the write. The GraphQL mutation supplies `expectedHeadOid`, never `jump`, and a
+lost response is settled by reading the exact queue entry. Only the head check
+is atomic: GitHub has no expected-body condition on enqueue, so a body edit can
+race with the final network call. The digest is a checked precondition, not an
+atomic body lock. The result reports the entry's state, which makes an
+immediately `UNMERGEABLE` entry visible. The read-only merge observer reports
+the exact head's active entry, its merge with the merge commit, or no entry.
+GitHub tests the exact PR head against the queue's latest base before merging.
 
 Every request binds the App installation, repository numeric ID, permission
 revision, operation kind, exact expected base and head where applicable,

@@ -354,7 +354,6 @@ fn declared_output_schemas_name_the_fields_the_results_carry() {
                 "base",
                 "pull_state",
                 "state",
-                "entry_id",
                 "queue_state",
                 "merge_commit_sha",
                 "merge_group",
@@ -669,7 +668,6 @@ fn github_refusals_stay_determinate() {
     assert!(github_app.contains("request.branch == repository.default_branch"));
     // A refusal releases the claim so the same operation ID stays retryable.
     assert!(github_app.contains("OperationTransition::Refused"));
-    assert!(github_app.contains("RefusalReason::AlreadyQueued"));
     // Reconciliation rematerializes the content-addressed request tree; a
     // copied marker and parent cannot cause a different tree to be adopted.
     assert!(github_app.contains("head.tree.sha != self.materialize_tree(token, request).await?"));
