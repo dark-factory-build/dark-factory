@@ -155,7 +155,12 @@ func stallNextRun(t *testing.T, fixture *supervisorFixture, output bool) kernel.
 	case <-time.After(12 * time.Second):
 		t.Fatal("stall did not stop the provider")
 	}
-	if result.err != nil || result.run.Phase != kernel.RunTerminal || result.run.Proposal == nil || result.run.Proposal.Code() != kernel.FailureProtocol {
+	// A stall after output is a protocol failure; one before is transient.
+	code := kernel.FailureTransient
+	if output {
+		code = kernel.FailureProtocol
+	}
+	if result.err != nil || result.run.Phase != kernel.RunTerminal || result.run.Proposal == nil || result.run.Proposal.Code() != code {
 		t.Fatalf("stalled run = %+v, err=%v", result.run, result.err)
 	}
 	return result.run

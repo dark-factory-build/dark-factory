@@ -107,17 +107,83 @@ func TestOverseerEscalationWake(t *testing.T) {
 }
 
 // A Change factoryd could not publish has no pull request; its escalation
-// wakes the overseer once all the same.
+// wakes the overseer exactly once, the unpublished Change it names is not
+// re-woken while that refusal stands, and it becomes one NEEDS YOU card.
 func TestOverseerPublishFailureWake(t *testing.T) {
 	t.Parallel()
-	store, worker, _ := wakeFixture(t)
-	insert := `INSERT INTO production_records (project_id, repository, kind, identity, visual_id, document, observed_at_ms) VALUES (?, 'example/factory', 'reviewer', 'publish-x-1', '', ?, 1000)`
-	if _, err := store.writer.ExecContext(context.Background(), insert, worker.ProjectID.Bytes(), `{"id":"publish-x-1","state":"publish_failed","handled":true,"request":{"PullNumber":0,"Head":""},"escalation":"factoryd cannot publish change x for task t: refused"}`); err != nil {
+	ctx := context.Background()
+	succeeded, _ := NewSuccessProposal("done")
+	store, finalizing := finalizingReleasedRun(t, RoleWorker, succeeded)
+	defer store.Close()
+	change, _, err := store.Change(ctx, *finalizing.ChangeID)
+	if err != nil {
 		t.Fatal(err)
 	}
-	bodies := wakeBodies(t, store, 1000+overseerWakeSettle.Milliseconds())
-	if len(bodies) != 1 || strings.Count(bodies[0], "Escalated: ") != 1 || !strings.Contains(bodies[0], "\nEscalated: factoryd cannot publish change x for task t: refused") {
-		t.Fatalf("wake = %q", bodies)
+	moved, _ := NewCommitID(change.Selection.format, bytes.Repeat([]byte{0xd2}, change.Selection.format.oidLength()))
+	settlement, _ := NewRetainedChangeSettlement(change.Revision, &moved)
+	if _, err := store.FinalizeWorkerRun(ctx, finalizing.ID, finalizing.Revision, settlement, mustTime(t, 80)); err != nil {
+		t.Fatal(err)
+	}
+	if change, _, err = store.Change(ctx, change.ID); err != nil {
+		t.Fatal(err)
+	}
+	id := PublishFailureID(change.ID, change.Revision)
+	refusal := "factoryd cannot publish change " + change.ID.String() + " for task " + finalizing.TaskID.String() + ": the created commit is not verified by GitHub"
+	// factoryd's record of the refusal; its hourly repeat drops the escalation.
+	failed := func(escalation string) string {
+		return `{"id":"` + id + `","state":"publish_failed","handled":true,"detail":"the created commit is not verified by GitHub","request":{"PullNumber":0,"Head":""}` + escalation + `}`
+	}
+	// The intake binding is all the rule reads; its acceptance row is not.
+	for _, statement := range []struct {
+		sql  string
+		args []any
+	}{
+		{`PRAGMA foreign_keys = OFF`, nil},
+		{`INSERT INTO intake_task_bindings(task_id, acceptance_id) VALUES (?, zeroblob(16))`, []any{finalizing.TaskID.Bytes()}},
+		{`PRAGMA foreign_keys = ON`, nil},
+		{`INSERT INTO production_records (project_id, repository, kind, identity, visual_id, document, observed_at_ms) VALUES (?, 'example/factory', 'reviewer', ?, '', ?, 90)`, []any{finalizing.ProjectID.Bytes(), id, failed(`,"escalation":"` + refusal + `"`)}},
+	} {
+		if _, err := store.writer.ExecContext(ctx, statement.sql, statement.args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	overseer, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 3), ProjectID: finalizing.ProjectID, Name: "overseer", Role: RoleOrchestrator, Provider: ProviderCodex, ToolBudgetLimit: 2}, mustTime(t, 82))
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, after, instruction := IdleStandingInstruction, uint32(1), "Supervise."
+	if _, err := store.UpdateAgent(ctx, overseer.ID, overseer.Revision, AgentPatch{IdlePolicy: &policy, IdleAfterSeconds: &after, IdleInstruction: &instruction}, mustTime(t, 83)); err != nil {
+		t.Fatal(err)
+	}
+	at := 80 + PublicationAttentionAfter.Milliseconds()
+	tasks, err := store.EnqueueOverseerWakeups(ctx, mustTime(t, at))
+	if err != nil || len(tasks) != 1 || strings.Count(tasks[0].Body, "Escalated: ") != 1 || strings.Contains(tasks[0].Body, "\n- ") ||
+		!strings.Contains(tasks[0].Body, "\nEscalated: "+refusal) {
+		t.Fatalf("wake = %+v, %v", tasks, err)
+	}
+	settleCarrier(t, store, at+1, 90, "ran")
+	for rewake := range 4 {
+		if _, err := store.writer.ExecContext(ctx, `UPDATE production_records SET document = ?, observed_at_ms = ? WHERE identity = ?`, failed(""), at+int64(rewake+1)*OverseerRewakeAfter.Milliseconds(), id); err != nil {
+			t.Fatal(err)
+		}
+		if bodies := wakeBodies(t, store, at+1+int64(rewake+1)*OverseerRewakeAfter.Milliseconds()); len(bodies) != 0 {
+			t.Fatalf("re-wake %d for the same refusal = %q", rewake+1, bodies)
+		}
+	}
+	// The refusal is the operator's: one NEEDS YOU card naming it.
+	if requests, err := store.OperatorHumanRequests(ctx); err != nil || len(requests) != 1 || requests[0].TaskID != tasks[0].ID ||
+		!strings.Contains(requests[0].QuestionText, "Escalated: "+refusal+" [reviewer:"+id+"]") {
+		t.Fatalf("operator escalation = %+v, %v", requests, err)
+	}
+	// A later retry publishes it: the card closes by itself.
+	head := hex.EncodeToString(moved.Bytes())
+	pr := ProductionPullRequest{Number: 7, Title: "Ship", URL: "https://github.com/example/factory/pull/7", Head: head, Branch: "factory/" + change.ID.String()[:12], Base: "main", State: "open", Review: ProductionReview{Head: head, State: "unknown"}}
+	if err := store.RecordPublication(ctx, finalizing.ProjectID, finalizing.TaskID, "example/factory", pr, mustTime(t, at+5*OverseerRewakeAfter.Milliseconds())); err != nil {
+		t.Fatal(err)
+	}
+	wakeBodies(t, store, at+5*OverseerRewakeAfter.Milliseconds()+1)
+	if requests, err := store.OperatorHumanRequests(ctx); err != nil || len(requests) != 0 {
+		t.Fatalf("published Change kept its card = %+v, %v", requests, err)
 	}
 }
 
