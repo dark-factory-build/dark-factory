@@ -169,7 +169,7 @@ Edges carry the same evidence and states.
 A **system** is a Dark Factory project. Its registered repositories are its
 sources; the site, relay and control plane are not separate demos. Each node
 records its repository and source paths, so ownership stays inspectable.
-Repository does not decide placement: halls are deployment units, and one
+Repository does not decide placement: units are deployment units, and one
 repository can hold several units (`dark-factory` holds factoryd, factoryctl,
 factory-runner, the relay Worker and the control-plane Worker).
 
@@ -329,8 +329,8 @@ granularity is a fixed table in code, not a runtime claim.
     observation (`source` `github`, environment from GitHub, `End` its
     status time) on a unit: the repository's only deployed unit, or the one
     `observe.json`'s `services` names for that environment; with several and
-    no mapping it lands on none, and the hall stays as it was. The overlay
-    already turns a deploy into `deployed_at` and the hall's changeover; no
+    no mapping it lands on none, and the unit stays as it was. The overlay
+    already turns a deploy into `deployed_at` and the unit's changeover; no
     plant or site code changes. `failure`/`error` count as errors on that
     unit; `in_progress`/`queued` are not drawn.
   - *SHIPPED means deployed:* a merged crate moves from SHIPPED to deployed
@@ -369,7 +369,7 @@ Pull adapters are configured in `observe.json` in the factory home:
   `operator.token`, and is never served.
 - factoryd polls each source at most every five minutes, in the background,
   for the last five minutes.
-- With no configuration, the remote halls truthfully read `unobserved`.
+- With no configuration, the remote units truthfully read `unobserved`.
 
 Local processes export with the standard
 `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://127.0.0.1:43123/v1/traces` (the
@@ -526,7 +526,7 @@ Correlation runs for each observation:
 2. **No unit.** An observation whose `service.name` names no unit of this
    project (and no alias) is not this project's. Runtime evidence is
    factory-wide, so it may belong to another project. It never binds into a
-   hall and never enters this project's quarantine. A name that two units
+   unit and never enters this project's quarantine. A name that two units
    answer to binds nowhere at all.
    Client and producer spans bind to the party or the ingress they name:
    - a shared store or queue by its selectors;
@@ -607,7 +607,7 @@ repositories ── static extractors ─┐
 adapters ─> observations ─ correlate ┘      + runtime state + coverage
                                               │   OPERATIONAL_GRAPH frame
 browser:  graph + work state (tasks, runs, run paths, proposals)
-            └─> world.ts   (halls, stations, flows, worker targets)
+            └─> world.ts   (units, stations, flows, worker targets)
                   └─> layout.ts / factory-scene.tsx / movement / idle life
 ```
 
@@ -626,15 +626,14 @@ data.
 
 | Meaning | Picture |
 | --- | --- |
-| Deployment unit | A **hall**: a walled production building with the unit's name plate. Repository is a coloured tag on the plate, not a wall. |
-| Ingress | An **intake dock** on the hall's left wall. Arriving material comes in from the yard. More than six routes fold into one manifold with a count; zoomed in to twice the fitted scale or more, the manifold lists its routes inside its own footprint. |
-| Processor work | The hall's **main line**: a press or assembler. |
+| Deployment unit | Its **main line** (a press or assembler, named for the unit) and the machines it owns, standing together on the one shared floor over a faint tint: its **area**. An area is paint, not a wall or a door; it may come in several lobes. The unit's runtime is said in its tooltip and inspector. Selecting the main line lights every machine the unit owns and every belt touching them. |
+| Ingress | An **intake dock** beside its unit's main line. More than six routes fold into one manifold with a count; zoomed in to twice the fitted scale or more, the manifold lists its routes inside its own footprint. |
 | Job | A **cell** with an arm, standing on a base; its belt rises from the main line into the base. |
-| Timer ingress | A **clock** on the hall wall, sending a pulse. |
-| Queue | An **accumulation conveyor** between halls. Backlog piles up visibly on it. |
+| Timer ingress | A **clock** beside its unit, sending a pulse. |
+| Queue | An **accumulation conveyor**, one machine however many units use it, standing near them on neutral floor. Backlog piles up visibly on it. |
 | Store | A **silo**, tank or rack store. Reads and writes are pipe pulses. |
-| External | Gates in the **perimeter fence**, with lorries or pipes passing through. Opaque parties sit behind fog-hatched gates. |
-| Unknown | A **quarantine bay** of crates marked `?`. |
+| External | A **gate** to the outside near whoever calls it, labelled with how much of it can be seen; opaque parties sit behind fog-hatched gates. |
+| Unknown | A crate marked `?`, on neutral floor near the unit it claims, if any; never inside an area. |
 
 | Physical state | Picture |
 | --- | --- |
@@ -669,11 +668,15 @@ and those are exactly latency, backlog, errors and retries.
 There is one detailed floor, and the viewer zooms and scrolls it. Detail
 never depends on data:
 
-- **Overview** (always visible): a minimap of the whole plant in the floor's
-  corner. It shows halls coloured by coverage, gates, workers and the visible
-  window. Clicking or dragging it moves the floor.
-- **Floor** (zoomable): one station per node. Ingress beyond 6 per hall always
-  folds into a manifold, and the quarantine bay aggregates unknowns. Zoom
+- **Overview** (zoomed past fit only): a minimap of the whole plant in the
+  floor's corner, a quarter of the pane on a phone. It shows machines
+  coloured by coverage, areas, workers and the visible window; clicking or
+  dragging it moves the floor. It folds to a button, and the browser
+  remembers that.
+- **Floor** (zoomable): one station per node. Ingress beyond 6 per unit always
+  folds into a manifold. Fit shows the whole floor, facilities and externals
+  included, by the pane's width and height; the pane's size comes from CSS
+  and is watched, never the floor. Zoom
   (buttons, or ctrl/pinch and the wheel) scales the floor without moving
   anything on it. At twice the fitted scale or more, a manifold lists its
   routes by label inside its own footprint; there is no detail setting.
@@ -690,25 +693,79 @@ Selectors, evidence and the full source list come from
 `OPERATIONAL_NODE_GET` when the inspector opens. This keeps 4,096 nodes inside
 the 1 MiB frame.
 
-Layout is deterministic and stable:
+### The connected floor
 
-1. Halls are packed into rows in runtime order: browser units, then edge and
-   server units (Workers, web servers), then long-running processes, then
-   command-line tools; within a runtime, by ID. Rows run on across runtimes
-   without breaks or headings; each hall's nameplate carries its runtime.
-   Adding an edge never reorders halls. A hall's width grows with its static
-   machines, so a new route can move later halls along the rows.
-2. Within a hall, stations sit in fixed zones by kind, spaced by their drawn
-   widths and labels: docks one per line on the left, timers by the
-   nameplate, stock and unrecognised crates on the right, job cells over the
-   main line between them. The room grows to hold them. Rows are as wide as
-   the pane's shape suits (four to twelve bays), chosen from the pane's size
-   alone.
-3. A shared store or queue sits in the yard beside the hall of its lowest-ID
-   user.
-4. External gates follow the fence in ID order.
-5. Runtime-only nodes go only into the quarantine bay, so live data never
-   moves static machines.
+There are no halls. The floor is one connected space: machines are placed
+first, at their drawn sizes, and everything else (areas, aisles, belts,
+walks) is derived from where they stand. Three things stay separate:
+
+- the **software graph**: units, operations, ownership, flows, evidence;
+- the **physical layout**: footprints, interaction positions, belt routes and
+  the free floor workers walk on;
+- **areas**: a faint floor tint under each unit's machines, painted after
+  layout and never read by it.
+
+Approach (`factory-scene/scene.ts`, `factory-scene/movement.ts`; nothing in
+`web/` offered graph layout or geometry, so no dependency was added):
+
+1. **Footprints.** Every station's footprint is its body, its label and the
+   spot a worker stands at to use it, grown by a margin on every side.
+   Footprints never overlap; the margins of two neighbours make an aisle wide
+   enough for a worker, so every interaction position is reachable by
+   construction.
+2. **Placement.** Stations are linked by ownership (a member to its unit's
+   main machine, weighted most) and by flows; a runtime-only node is linked
+   only to the unit the graph says it claims. Linked stations form connected
+   groups. Within a group, the most linked station goes first, then the
+   station most linked to those already placed (ties by ID). Each is tried
+   against every side and corner of every placed neighbour and takes the
+   free spot with the shortest weighted distance to its neighbours plus a
+   charge for growing the group's bounds; if none is free it takes the
+   nearest free spot on a spiral. Two bounded passes then move each station
+   to a better free spot if one exists. Then the groups are packed: the
+   largest first, the commons and outbound line (one fixed block) beside
+   it, then the rest, largest first. Each tucks against a placed footprint
+   where the floor's bounds stay smallest and nearest a 16:10 shape, with a
+   gap that keeps unrelated groups visibly apart. Only IDs, kinds, labels, ownership and
+   flows enter; traffic, state, workers and the pane never do, so input
+   order, a busy hour, zoom or a resize cannot move anything.
+3. **Stability.** Given the previous layout, a structural change keeps every
+   station that still exists where it was, places new ones beside their
+   placed neighbours (or beside the floor for a new group), and leaves the
+   gaps that removals open. A kept station that has grown into a neighbour
+   (a longer label) is placed afresh beside its neighbours. When more than a
+   quarter of the stations would be placed afresh, the floor is laid out cold
+   again. A reload always starts cold; there is no stored layout.
+4. **Walking.** One geometry serves placement, solids, interaction positions
+   and navigation. Machine bodies, the commons tables and the break-room
+   implements are solid; labels, belts, area tints and the work line are
+   floor markings. Workers walk an occupancy grid (6 px cells; a cell is
+   free when a worker anywhere in it clears every solid) with
+   diagonal steps that never cut a corner, then the path is pulled straight
+   wherever the exact segment clears every solid by a worker's radius. A
+   seat or a standing place inside a table's or machine's clearance is
+   reached by one short step from the nearest free cell; nobody walks the
+   length of a table past the people at it. A walk always
+   starts from where the worker is drawn. If no route exists the worker is
+   put at its destination, marked as not walked, and never drawn through a
+   machine. Execution never waits for a sprite.
+5. **Belts.** A flow leaves its machine from the side facing the other end
+   and arrives on the facing side. A straight run is used when it clears
+   every other machine; otherwise the run follows the walking grid's aisles.
+   Belts that share a port meet at a junction dot; belts that cross are
+   drawn over a dark casing, so a crossing never reads as a junction.
+
+The commons seats eight resting and four planning workers. A larger crowd
+sits on benches below the floor, so the scene grows but no machine moves.
+
+Trade-offs: the greedy placement is not an optimiser. It keeps related
+machines close and the floor compact on the fixtures, but a long chain or a
+unit used by many others still gets some long belts, which are drawn rather
+than hidden by duplicating machines. Kept positions after a change can leave
+holes until the next cold layout, and a new machine whose neighbours are
+surrounded takes the nearest free floor, which can be a few machines away.
+Large, highly connected graphs make the group nearly square, so a very wide
+or very tall pane leaves margin.
 
 Bounds: 4,096 nodes and 4,096 edges served.
 
@@ -720,12 +777,13 @@ The plant is what the software does. Workers are what agents do to it.
   the paths (longest prefix). With no node match it falls back to the unit
   whose source root contains them. The worker walks to that machine and
   works there.
-- With no sample, the worker waits in the hall's office. With no task, the
-  worker rests.
+- With no sample, the worker waits at the planning tables. With no task, the
+  worker rests in the commons, or beside its unit's main line when rest is
+  set to nearby.
 - Reviewers carry a clipboard at the changed machines. CI and checks show on
-  the hall's test rig while the Change's checks run. A merge followed by a
+  the outbound line's Checks station while the Change's checks run. A merge followed by a
   deploy observation for that unit plays the changeover.
-- A machine whose state is `failing`, or a quarantine bay with unknowns, is
+- A machine whose state is `failing`, or an unexplained crate, is
   inspectable. The inspector's **Investigate** action creates an ordinary
   task. The task carries only the node ID, kind, static label, source paths
   and counts. Runtime-only selector values come from unauthenticated local
@@ -750,11 +808,11 @@ One state, two projections, both computed by factoryd:
   "CI pipeline"), an ingress by its trigger ("Entrance", "Timer",
   "Inbox"), a job by its unit ("Check" in CI, else "Loop", short enough
   to fit its station), then "Store", "Queue", "Outside service" and "Unknown"
-- hall grouping, edges and their evidence state
+- unit grouping, edges and their evidence state
 - coverage and operational state
 - bucketed activity: none, low, medium or high, from log₂ of rate
 
-Workers appear as an anonymous count by activity and location (hall), with
+Workers appear as an anonymous count by activity and location (unit), with
 no names or task text. Deploy and changeover events carry no versions.
 
 The outbound work line appears as crates: each open pull request, and each
@@ -850,7 +908,7 @@ learns nothing it could use to dial `/host` or `/controller`.
   a later start retracts it.
 
 What remains visible is the shape (node and edge counts), bucketed activity,
-hall-level worker presence and, for a live feed, when it last changed. That is acceptable for public repositories,
+unit-level worker presence and, for a live feed, when it last changed. That is acceptable for public repositories,
 and it is stated on the page.
 
 ## 14. Security and privacy

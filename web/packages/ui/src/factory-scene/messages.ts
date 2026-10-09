@@ -43,7 +43,7 @@ export function observe(before: Seen | undefined, tasks: readonly SceneTask[], q
   return { seen, events };
 }
 
-/** One event in flight. A pulse keeps to the corridors people walk; paper flies straight over everything. */
+/** One event in flight. A pulse keeps to the floor people walk; paper flies straight over everything. */
 export type FloorMessage = FloorEvent & Readonly<{ startedAt: number; origin: ScenePoint; route?: Route; travel: number }>;
 /** Questions and answers are pulses; everything else is paper. */
 export const isPaper = (kind: FloorEvent["kind"]) => kind !== "ask" && kind !== "answer";

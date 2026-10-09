@@ -24,10 +24,10 @@ const record = (id, paths, overrides = {}) => ({ project_id: "project", reposito
 const items = (records, now = 1000) => Object.values(deriveProductionView([{ project_id: "project", repository: "owner/factory", kind: "repository", id: "repo", visual_id: "", observed_at: 1000, document: {}, tasks: [], missions: [] }, ...records], now).contraptions);
 
 test("request docks fold into one manifold past six, carrying their labels", () => {
-  const few = prepare(graphWith(base(3))).graph.halls.find((hall) => hall.id === hex(1));
+  const few = prepare(graphWith(base(3))).graph.units.find((item) => item.id === hex(1));
   assert.equal(few.machines.filter((machine) => machine.kind === "ingress").length, 3, "up to six docks are all shown");
   const nodes = base(8);
-  const auto = prepare(graphWith(nodes)).graph.halls.find((hall) => hall.id === hex(1)).machines.filter((machine) => machine.kind === "ingress");
+  const auto = prepare(graphWith(nodes)).graph.units.find((item) => item.id === hex(1)).machines.filter((machine) => machine.kind === "ingress");
   assert.equal(auto.length, 1);
   assert.equal(auto[0].represented.length, 8);
   assert.deepEqual(auto[0].routes, ["/r10", "/r11", "/r12", "/r13", "/r14", "/r15", "/r16", "/r17"]);
@@ -37,27 +37,29 @@ test("request docks fold into one manifold past six, carrying their labels", () 
   assert.equal(folded.locate(project.id, "internal/alpha/r13.go").machine, auto[0].id);
 });
 
-test("runtime-only and unknown nodes are quarantined, externals become gates and shared stores go to the yard", () => {
+test("runtime-only and unknown nodes stay unexplained, externals become gates, and shared stores belong to no unit", () => {
   const { graph, where } = prepare(graphWith(base(2)));
   assert.deepEqual(ids(graph.quarantine), [hex(60)]);
-  assert.equal(graph.halls.some((hall) => hall.machines.some((machine) => machine.id === hex(60))), false, "never inside a hall");
+  assert.equal(graph.units.some((item) => item.machines.some((machine) => machine.id === hex(60))), false, "never one of a unit's machines");
   assert.deepEqual(ids(graph.parties), [hex(50)]);
   assert.deepEqual(ids(graph.shared), [hex(40)]);
-  assert.equal(where.get(hex(40)).hall, "yard");
-  assert.equal(where.get(hex(60)).hall, "quarantine");
-  assert.equal(where.get(hex(50)).hall, undefined);
+  for (const id of [40, 50, 60]) assert.equal(where.get(hex(id)).unit, undefined, "no owner invented");
+  assert.equal(where.get(hex(30)).unit, hex(1));
   const layout = layoutScene(graph);
-  assert.equal(layout.gates.length, 1);
-  assert.deepEqual(layout.rooms.filter((room) => room.kind !== "hall").map((room) => [room.id, room.kind]), [["yard", "yard"], ["quarantine", "quarantine"]]);
-  // A runtime-only node with a unit is still the runtime's claim, not the code's.
+  assert.deepEqual(layout.stations.filter((station) => station.shape === "gate").map((station) => station.key), [hex(50)]);
+  assert.equal(layout.stations.filter((station) => station.key === hex(40)).length, 1, "a shared store is one machine, never one per user");
+  assert.deepEqual(layout.regions.map((region) => region.unit).sort(), [hex(1), hex(2)], "areas are units' alone; shared, external and unexplained machines stand on neutral floor");
+  // A runtime-only node with a unit is still the runtime's claim, not the code's: it stands near the unit, outside its area.
   const claimed = prepare(graphWith([...base(2), graphNode(61, "ingress", "/seen", { unit: hex(1), evidence: "runtime", ...observed })])).graph;
   assert.deepEqual(ids(claimed.quarantine), [hex(60), hex(61)].sort());
+  assert.equal(claimed.quarantine.find((machine) => machine.id === hex(61)).claims, hex(1));
+  assert.equal(layoutScene(claimed).stations.find((station) => station.key === hex(61)).unit, undefined);
 });
 
 test("a folded manifold never claims idle unless every member is quiet", () => {
   const docks = (readings) => base(8).map((item, index) => index >= 2 && index < 10 ? { ...item, ...readings[index - 2] } : item);
   const reading = (name) => ({ quiet: quiet, observed: observed, unobserved: {} }[name]);
-  const manifold = (names) => prepare(graphWith(docks(names.map(reading)))).graph.halls[0].machines.find((machine) => machine.represented !== undefined).reading;
+  const manifold = (names) => prepare(graphWith(docks(names.map(reading)))).graph.units[0].machines.find((machine) => machine.represented !== undefined).reading;
   assert.equal(manifold(Array(8).fill("quiet")).state, "idle");
   assert.equal(manifold(Array(8).fill("quiet")).observation, "quiet");
   for (const names of [[..."quiet,quiet,quiet,quiet,quiet,quiet,quiet,unobserved".split(",")], [..."quiet,quiet,quiet,quiet,quiet,quiet,quiet,observed".split(",")]]) {
@@ -119,7 +121,7 @@ test("flows join the machines that picture their endpoints, keep the busiest of 
   const { graph } = prepare(graphWith(nodes, [
     edge(2, 10, "calls"), edge(2, 11, "calls", observed), edge(10, 1, "handles"), edge(1, 30, "uses"), edge(1, 50, "calls"), edge(10, 60, "calls"), edge(10, 11, "calls"),
   ]));
-  const folded = graph.halls[0].machines.find((machine) => machine.represented !== undefined).id;
+  const folded = graph.units[0].machines.find((machine) => machine.represented !== undefined).id;
   const flow = (from, to) => graph.flows.find((item) => item.from === from && item.to === to);
   assert.equal(flow(hex(2), folded).reading.ratePerHour, 60, "two routes behind one manifold are one belt, as busy as the busiest");
   assert.ok(flow(folded, hex(1)), "a folded route still hands its work to the unit");
@@ -127,7 +129,7 @@ test("flows join the machines that picture their endpoints, keep the busiest of 
   assert.equal(graph.flows.length, 5, "an edge between two routes of one manifold is inside one machine");
 });
 
-test("overlap stays separate; changes mark the machines they touch and never move a hall", () => {
+test("overlap stays separate; changes mark the machines they touch and never move one", () => {
   const prepared = prepare(graphWith(base(2)));
   const changes = items([record("1", [{ status: "modified", path: "internal/alpha/store/state.go" }, { status: "added", path: "new/area/dispatcher.go" }, { status: "deleted", path: "web/old.ts" }, { status: "renamed", old_path: "web/old-name.ts", path: "new/area/routes.ts" }]), record("2", [{ status: "modified", path: "internal/alpha/store/state.go" }])]);
   const projected = projectProposals(prepared, changes);
@@ -137,7 +139,7 @@ test("overlap stays separate; changes mark the machines they touch and never mov
   assert.notEqual(projected.proposals[0].id, projected.proposals[1].id);
   assert.deepEqual(projected.proposals[0].operations.map((op) => op.kind), ["modification", "addition", "removal", "move"]);
   assert.equal(projected.proposals[0].operations[1].entityId, undefined, "a path no machine owns is unplaced, never invented");
-  assert.equal(projected.proposals[0].operations[2].roomId, hex(2));
+  assert.equal(projected.proposals[0].operations[2].unitId, hex(2));
   assert.equal(projected.proposals[0].operations[3].previousPath, "web/old-name.ts");
   for (const state of ["closed", "merged"]) assert.equal(projectProposals(prepared, items([record("1", [], { state })])).proposals.length, 0);
 });
@@ -188,11 +190,10 @@ test("thirty proposals draw no floor Changes button or Help", async () => {
   } finally { if (tree) await act(async () => tree.unmount()); }
 });
 
-test("a repository nothing recognised is one hall with its marker inside, not quarantine", () => {
+test("a repository nothing recognised is one unit with its marker beside it, not quarantine", () => {
   const graph = graphWith([unit(1, "worker", ["."], { runtime: "process" }), graphNode(2, "unknown", "No recognised entry points", { unit: hex(1), evidence: "uncertain" })]);
   const prepared = projectGraph(new Map([["project", graph]]), ["project"]);
   assert.equal(prepared.graph.quarantine.length, 0);
   const layout = layoutScene(prepared.graph);
-  assert.deepEqual(layout.rooms.map((room) => room.kind), ["hall"]);
-  assert.ok(layout.rooms[0].contents.some((item) => item.entityId === hex(2) && item.shape === "crate"));
+  assert.deepEqual(layout.stations.map((station) => [station.key, station.unit, station.shape]), [[hex(1), hex(1), "line"], [hex(2), hex(1), "crate"]]);
 });

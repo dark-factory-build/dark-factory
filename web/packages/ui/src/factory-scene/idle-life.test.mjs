@@ -6,7 +6,7 @@ import { act, create } from "react-test-renderer";
 import { FactoryScene } from "../../dist/src/factory-scene/factory-scene.js";
 import { catAt, catBed, chats, gossip } from "../../dist/src/factory-scene/idle-life.js";
 import { workerFrames } from "../../dist/src/factory-scene/appearance.js";
-import { hallsOf } from "../../../../fixtures/scene.mjs";
+import { unitsOf } from "../../../../fixtures/scene.mjs";
 import { spriteAtlas } from "../../dist/src/factory-scene/sprites/sprites.generated.js";
 
 const seats = (ids, free = () => true) => ids.map((id, slot) => ({ x: 72 + slot * 40, y: 400, id, free: id !== undefined && free(id) }));
@@ -115,7 +115,7 @@ test("neighbours talk one conversation at a time, in turn, and never about thems
 });
 
 test("the floor shows the cat, what is said and the heart, and none of it without scenery or a clock", async () => {
-  const graph = hallsOf([..."abcdefghi"]);
+  const graph = unitsOf([..."abcdefghi"]);
   const workers = ["ada", "grace", "linus"].map((id) => ({ id, name: id[0].toUpperCase() + id.slice(1), role: "worker", provider: "codex", activity: "idle", location: "resting" }));
   const still = renderToStaticMarkup(createElement(FactoryScene, { graph, appearance: commons, workers }));
   // The server's clock is 0: the cat is wherever this epoch's haunt is, settled.
@@ -195,7 +195,7 @@ test("the cat shares its time evenly among a long table's gaps, and an empty flo
     for (let epoch = 0; epoch < 3000; epoch += 1) for (const t of [5_500, 7_000, 8_500, 10_000, 11_500, 13_000, 40_000]) { const cat = catAt(row, epoch * 45_000 + t); if (cat.y !== 400 || cat.moving) continue; if (cat.frame.startsWith("sleep")) naps.add(cat.x); if (cat.pettedBy !== undefined) strokes.add(cat.x); }
     assert.deepEqual([naps.size, strokes.size], [length - 1, length - 1], `a table of ${length}: naps at ${[...naps]}, strokes at ${[...strokes]}`);
   }
-  const graph = hallsOf(["repo"]);
+  const graph = unitsOf(["repo"]);
   const empty = renderToStaticMarkup(createElement(FactoryScene, { graph, appearance: commons, workers: [] }));
   assert.match(empty, /data-cat="sleep.0"[^>]*aria-label="The cat, asleep"/);
 });

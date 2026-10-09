@@ -3,28 +3,27 @@ import type { OperationalNodeView, PeerQuestionItem } from "@dark-factory/client
 import type { SceneTask } from "../console-view.js";
 import {
   PADDING,
-  ROOM_LEFT,
-  fitColumns,
   layoutScene,
   commonSeating,
+  commonTables,
   WORKER_SIZE,
+  labelChars,
   placeWorkers,
   placeErrands,
   breakRoomNook,
   proposalsForEntity,
   placeCrates,
+  stationOf,
   LINE_SLOTS,
-  type RoomContent,
   type SceneCrate,
-  type SceneFlow,
   type SceneGraph,
-  type SceneHall,
   type SceneLayout,
   type SceneMachine,
   type ScenePoint,
   type SceneProposal,
   type SceneReading,
-  type SceneRoomLayout,
+  type SceneStation,
+  type SceneUnit,
   type SceneWorker,
   type BreakRoomErrand,
   recordedEffort,
@@ -34,7 +33,7 @@ import { DEFAULT_FLOOR_APPEARANCE, type FloorAppearance } from "../floor-appeara
 import { breakRoomHabit, restingItem, workerFrames, workerPhase } from "./appearance.js";
 import { catAt, catBed, chats, gossip, type Seat } from "./idle-life.js";
 import { endsAt, isPaper, messageAt, observe, observeCrates, send, type FloorMessage, type Seen } from "./messages.js";
-import { directionBetween, pointOnRoute, routeFromCurrent, routeBetween, samePoint, type WorkerMotion } from "./movement.js";
+import { beltBetween, directionBetween, findRoute, pointOnRoute, samePoint, type WorkerMotion } from "./movement.js";
 import { spriteAtlas, spriteSheet, spriteSheetSize } from "./sprites/sprites.generated.js";
 
 
@@ -47,7 +46,7 @@ export type FactorySceneProps = Readonly<{
   /** Read one machine's evidence when its inspector opens. */
   onLoadNode?: (nodeId: string) => Promise<OperationalNodeView>;
   /** Queue an investigation of a machine as an ordinary task. */
-  onInvestigate?: (machine: SceneMachine, hall?: SceneHall) => void;
+  onInvestigate?: (machine: SceneMachine, unit?: SceneUnit) => void;
   onDiscussSource?: (nodeId: string) => void;
   requestedEntity?: { id: string };
   onSelectEntity?: (entityId: string | undefined) => void;
@@ -135,8 +134,10 @@ export function AgentSprite({ agent, activity, size }: AgentSpriteProps) {
 type MotionState = Readonly<{
   placement: ReturnType<typeof placeWorkers>[number];
   point: { x: number; y: number };
-  route?: ReturnType<typeof routeBetween>;
+  route?: ReturnType<typeof findRoute>;
   startedAt?: number;
+  /** No walk exists to where it was sent: it is drawn there, and says so. */
+  stranded?: boolean;
 }>;
 
 const WALK_SPEED = 96;
@@ -146,7 +147,7 @@ function now() { return typeof performance === "undefined" ? 0 : performance.now
 function motionPoint(motion: MotionState, at: number) {
   if (motion.route === undefined || motion.startedAt === undefined) return { point: motion.point, walking: false };
   const travelled = Math.max(0, (at - motion.startedAt) / 1000 * WALK_SPEED);
-  if (travelled >= motion.route.length) return { point: pointOnRoute(motion.point, motion.route, motion.route.length), walking: false };
+  if (travelled >= motion.route.length) return { point: motion.route.points.at(-1) ?? motion.point, walking: false };
   let previous = motion.point;
   let remaining = travelled;
   for (const point of motion.route.points) {
@@ -198,7 +199,7 @@ function useSceneMotion(layout: ReturnType<typeof layoutScene>, seated: ReturnTy
     const byId = new Map(workers.map((worker) => [worker.id, worker]));
     // With the scenery off there are no ambient errands, only recorded visits.
     const ambient = errandsBefore.current = errandClock === undefined ? seated
-      : placeErrands(seated, breakRoomNook(layout, 0, 0, nearby), (id) => { const worker = byId.get(id); return worker === undefined ? undefined : breakRoomHabit(worker); }, errandClock, errandsBefore.current);
+      : placeErrands(seated, breakRoomNook(layout), (id) => { const worker = byId.get(id); return worker === undefined ? undefined : breakRoomHabit(worker); }, errandClock, errandsBefore.current);
     // A recorded visit outranks an ambient one: whoever idled at that piece sits back down.
     const taken = new Set([...visits.values()].map((piece) => piece.key));
     return ambient.map((placement, index) => { const piece = visits.get(placement.id); return piece !== undefined && placement.area === "resting" ? { ...seated[index]!, errand: piece.errand, errandKey: `use ${piece.key}`, ...piece.stand } : placement.errandKey !== undefined && taken.has(placement.errandKey) ? seated[index]! : placement; });
@@ -220,14 +221,15 @@ function useSceneMotion(layout: ReturnType<typeof layoutScene>, seated: ReturnTy
         continue;
       }
       const current = motionPoint(old, at).point;
-      const unchanged = old.placement.area === placement.area && old.placement.roomId === placement.roomId && samePoint(old.placement, placement);
+      const unchanged = old.placement.area === placement.area && old.placement.stationId === placement.stationId && samePoint(old.placement, placement);
       if (unchanged) {
         next.set(placement.id, motionPoint(old, at).walking ? { ...old, point: old.point } : { placement, point: placement });
         continue;
       }
-      const route = routeFromCurrent(layout, current, placement);
+      // Retargeted from where it is drawn; with no walk there it is put there, marked, never drawn through a machine.
+      const route = findRoute(layout, current, placement);
       next.set(placement.id, route === undefined || route.length === 0
-        ? { placement, point: placement }
+        ? { placement, point: placement, ...(route === undefined ? { stranded: true } : {}) }
         : { placement, point: current, route, startedAt: at });
     }
     motions.current = next;
@@ -262,7 +264,7 @@ function useSceneMotion(layout: ReturnType<typeof layoutScene>, seated: ReturnTy
 
   // Remembered motion lags a render behind what it is told. Where nothing may move, or the
   // floor it was worked out on has been replaced, everyone is simply drawn where they belong.
-  const output = new Map<string, Readonly<{ x: number; y: number; motion: WorkerMotion; placement: ReturnType<typeof placeWorkers>[number] }>>();
+  const output = new Map<string, Readonly<{ x: number; y: number; motion: WorkerMotion; placement: ReturnType<typeof placeWorkers>[number]; stranded?: boolean }>>();
   for (const placement of placements) {
     const state = moving && motionsFloor.current === floorDigest ? motions.current.get(placement.id) : undefined;
     const current = state === undefined ? { point: placement, walking: false } : motionPoint(state, clock);
@@ -270,6 +272,7 @@ function useSceneMotion(layout: ReturnType<typeof layoutScene>, seated: ReturnTy
     output.set(placement.id, {
       // The placement this motion is actually on: pose and position are always of one moment.
       placement: state?.placement ?? placement,
+      ...(state?.stranded ? { stranded: true } : {}),
       ...current.point,
       motion: current.walking
         ? { action: "walking", direction: current.direction!, frame: Math.floor((at ?? clock) / 150) % 2 as 0 | 1, at }
@@ -302,8 +305,8 @@ function SceneWorkers({ knowledgeCues, nook, onOpenBoard, nearby, errands, furni
   knowledgeCues: readonly KnowledgeCueView[];
 }) {
   // Inventory/dependency metadata may change without changing a route's geometry.
-  const geometryKey = useMemo(() => JSON.stringify([layout.width, layout.height, layout.restingTop, layout.corridors, layout.rooms.map(({ id, x, y, width, height, door }) => [id, x, y, width, height, door])]), [layout]);
-  const active = useMemo(() => new Set(workers.filter((worker) => worker.location === "working" && worker.activity === "busy" && seated.some((placement) => placement.id === worker.id && placement.area === "room" && layout.rooms.find((room) => room.id === placement.roomId)?.contents.some((item) => item.workSurface))).map((worker) => worker.id)), [workers, seated, layout]);
+  const geometryKey = useMemo(() => JSON.stringify([layout.width, layout.height, layout.solids]), [layout]);
+  const active = useMemo(() => new Set(workers.filter((worker) => worker.location === "working" && worker.activity === "busy" && seated.some((placement) => placement.id === worker.id && placement.area === "work")).map((worker) => worker.id)), [workers, seated]);
   const reduced = useReducedMotion();
   const mail = useRef<readonly (FloorMessage & { end?: { x: number; y: number } })[]>([]);
   // Who is up using an implement because of a recorded event, and until when.
@@ -335,7 +338,7 @@ function SceneWorkers({ knowledgeCues, nook, onOpenBoard, nearby, errands, furni
       // Someone idling in the break room gets up and uses the implement instead; anyone at work stays put and the message flies.
       const who = event.kind === "post" ? event.from : event.kind === "ask" || event.kind === "answer" ? undefined : event.to;
       const piece = nook.find((item) => item.errand === (event.kind === "assign" ? "tasks" : cue?.board ? "board" : "shelf"));
-      if (who !== undefined && piece !== undefined && !reduced && seated.some((placement) => placement.id === who && placement.area === "resting" && placement.roomId === undefined)) {
+      if (who !== undefined && piece !== undefined && !reduced && seated.some((placement) => placement.id === who && placement.area === "resting" && placement.stationId === undefined)) {
         if (!visits.current.has(who)) visits.current.set(who, { piece, until: started + VISIT });
         return [];
       }
@@ -344,7 +347,7 @@ function SceneWorkers({ knowledgeCues, nook, onOpenBoard, nearby, errands, furni
       const origin = (event.kind === "post" ? positions.get(event.from!) : from) ?? (event.kind === "read" ? furniture : centre("tasks")), agent = cue?.agentId;
       if (to === undefined || origin === undefined || event.from !== undefined && from === undefined || kept.some((message) => message.key === event.key) || agent !== undefined && recording.has(agent)) return [];
       if (agent !== undefined) recording.add(agent);
-      return [{ ...send(event, started, origin, from === undefined || seat === undefined || isPaper(event.kind) ? undefined : routeBetween(layout, from, seat), Math.hypot(to.x - origin.x, to.y - origin.y)), end: seat === undefined ? to : undefined }];
+      return [{ ...send(event, started, origin, from === undefined || seat === undefined || isPaper(event.kind) ? undefined : findRoute(layout, from, seat), Math.hypot(to.x - origin.x, to.y - origin.y)), end: seat === undefined ? to : undefined }];
     })].slice(-16);
   }, [tasks, peerQuestions, connected, knowledgeCues.map((cue) => cue.key).join(" ")]);
   const flights = at === undefined ? [] : mail.current.flatMap((message) => { const to = message.end ?? positions.get(message.to!); return to === undefined ? [] : [{ message, ...messageAt(message, to, at) }]; });
@@ -371,7 +374,7 @@ function SceneWorkers({ knowledgeCues, nook, onOpenBoard, nearby, errands, furni
   });
   const rows = [...new Set(seats.map((seat) => seat.y))].map((y) => seats.filter((seat) => seat.y === y));
   // The cat has the first table; every table has its talk.
-  const bed = errands ? catBed(rows[0] ?? []) ?? { x: PADDING + 72, y: layout.restingTop - 30 } : undefined;
+  const bed = errands ? catBed(rows[0] ?? []) ?? { x: layout.commons.x + 56, y: layout.restingTop - 30 } : undefined;
   const cat = errands ? catAt(rows[0] ?? [], at) ?? { ...bed!, frame: "sleep.0" as const, west: false, moving: false } : undefined;
   const news = useMemo(() => gossip(workers, tasks), [workers, tasks]);
   const talk = rows.flatMap((row) => chats(row, news, at));
@@ -384,7 +387,7 @@ function SceneWorkers({ knowledgeCues, nook, onOpenBoard, nearby, errands, furni
   return <>
       {bed === undefined ? null : <g aria-hidden="true" pointerEvents="none" data-cat-bed="" transform={`translate(${bed.x} ${bed.y}) scale(${WORKER_SIZE / FRAME})`}><Frame name="cat.bed" x={3} y={-4} /></g>}
       {cat !== undefined && cat.y !== rows[0]?.[0]?.y ? puss : null}
-      {/* A question and its answer run along the corridors people walk, under their feet; each opens the Board that lists it. */}
+      {/* A question and its answer run along the floor people walk, under their feet; each opens the Board that lists it. */}
       {flights.map(({ message, point, trail }) => point === undefined || isPaper(message.kind) ? null : <g key={message.key} data-pulse={message.kind} fill={message.kind === "ask" ? "#80ddff" : "#9fe7b0"} {...(onOpenBoard === undefined ? { "aria-hidden": true, pointerEvents: "none" } : { className: "dfFactoryScene__target", "aria-label": `Direct ${message.kind === "ask" ? "question" : "answer"} · open the Board`, ...sceneAction(() => onOpenBoard(projectOf(message.subject))) })}>
         {trail.map((spot, index) => <circle key={index} cx={spot.x} cy={spot.y} r="1.5" opacity={.5 - index * .15} />)}
         <circle cx={point.x} cy={point.y} r="6" opacity=".22" /><circle cx={point.x} cy={point.y} r="2.5" />
@@ -395,19 +398,19 @@ function SceneWorkers({ knowledgeCues, nook, onOpenBoard, nearby, errands, furni
         const position = positions.get(told.id) ?? { ...told, placement: told, motion: { action: "still", frame: 0 } as WorkerMotion };
         // Drawn as where their motion has them, which is a render behind where they have just been told to go.
         const placement = position.placement;
-        const room = placement.roomId === undefined ? undefined : { label: labels.get(placement.roomId) ?? "" };
+        const at = placement.stationId === undefined ? undefined : labels.get(placement.stationId);
         const location = worker.location === "working"
-          ? `at the machine its observed changes touch${worker.locationLabel === undefined ? "" : ` in ${worker.locationLabel}`}; ${placement.area === "room" ? "representative position, not exact file inspection" : placement.area === "outside" ? "outside displayed halls" : "worker area at capacity"}`
+          ? `at the machine its observed changes touch${worker.locationLabel === undefined ? "" : ` in ${worker.locationLabel}`}; ${placement.area === "work" ? "representative position, not exact file inspection" : placement.area === "outside" ? "outside the machines shown" : "worker area at capacity"}`
           : worker.location === "unobserved" ? "working; location not yet observed"
           : worker.location === "last-observed" && worker.locationLabel !== undefined ? `last observed near changes in ${worker.locationLabel}; resting area`
           : worker.paused ? "paused in resting area" : "ready in resting area";
 
         const attention = tasks.flatMap((order) => order.agentId === worker.id ? order.humanRequestIds : []);
-        const sitting = placement.area !== "room" && placement.errand === undefined && position.motion.action !== "walking";
+        const sitting = placement.area !== "work" && placement.errand === undefined && position.motion.action !== "walking";
         const stroking = cat?.pettedBy === worker.id ? cat.pettedFor : undefined;
         const chat = talk.find(({ between }) => between.includes(worker.id));
         const said = chat === undefined ? "" : `\n${workerById.get(chat.between[0])!.name}: ${chat.remark.line}${chat.replied ? `\n${workerById.get(chat.between[1])!.name}: ${chat.remark.reply}` : ""}`;
-        const frames = workerFrames(worker, position.motion, placement.area === "room" || placement.errand !== undefined ? undefined : placement.area === "resting" ? "resting" : "planning", placement.errand, stroking, hailing.get(worker.id));
+        const frames = workerFrames(worker, position.motion, placement.area === "work" || placement.errand !== undefined ? undefined : placement.area === "resting" ? "resting" : "planning", placement.errand, stroking, hailing.get(worker.id));
         const asking = waiting.flatMap(({ asker, asked }) => asker === worker.id && workerById.has(asked ?? "") ? [`\nAsked ${workerById.get(asked!)!.name} · waiting for an answer`] : asked === worker.id && workerById.has(asker ?? "") ? [`\nHas a question from ${workerById.get(asker!)!.name}`] : []);
         const peerQuestionCount = peerQuestionsByAgent.get(worker.id) ?? 0;
         const peerTaskID = peerQuestions.find((question) => !question.answered && (agentOf.get(question.source_task_id) === worker.id || agentOf.get(question.target_task_id) === worker.id))?.source_task_id;
@@ -423,6 +426,7 @@ function SceneWorkers({ knowledgeCues, nook, onOpenBoard, nearby, errands, furni
             data-worker-location={worker.location ?? "resting"}
             data-worker-action={position.motion.action}
             data-worker-facing={position.motion.action === "walking" ? position.motion.direction : undefined}
+            data-worker-route={position.stranded ? "unavailable" : undefined}
             transform={`translate(${position.x} ${position.y})`}
             className={worker.id === selectedWorkerId ? "dfFactoryScene__worker dfFactoryScene__worker--selected" : "dfFactoryScene__worker"}
           >
@@ -431,7 +435,7 @@ function SceneWorkers({ knowledgeCues, nook, onOpenBoard, nearby, errands, furni
               <g data-seated={sitting ? placement.area === "resting" ? "coffee" : "planning" : undefined} data-active-pose={position.motion.action === "interacting" ? position.motion.frame : undefined}><g transform={`scale(${WORKER_SIZE / FRAME})${bob === 0 ? "" : ` translate(0 ${bob})`}${facingWest ? " scale(-1 1)" : ""}`}>{frames.map((frame) => <Frame key={frame} name={frame} x={-8} y={-8} />)}</g>
               </g>
             </g>
-            <g role="img" className="dfFactoryScene__target" data-tooltip={`${worker.name} · ${worker.activity}${worker.review ? `\nReview assignment: ${worker.review.scope}; representative visit, not exact file inspection` : ""}\n${placement.area === "room" ? `Working at ${worker.locationLabel ?? room?.label ?? "observed changes"}` : placement.errand !== undefined ? `${placement.errandKey?.startsWith("use ") ? "Recorded use" : "Taking a break"} · at the ${IMPLEMENT_NAMES[placement.errand]}` : placement.area === "resting" ? `${worker.paused ? "Paused · taking a break" : "Taking a break"}${stroking === undefined ? "" : " · fussing the cat"}${said}` : worker.location === "unobserved" ? "Planning · location not yet observed" : "Planning · work outside the halls shown"}${worker.telemetry === undefined ? "" : recordedEffort(worker.telemetry)}${[...new Set(asking)].join("")}`} aria-label={`${worker.name}, ${worker.review ? "reviewer" : worker.role}, ${worker.activity}, ${worker.review?.scope ?? location}`} {...sceneAction(worker.review && onSelectProposal ? () => onSelectProposal(worker.review!.proposalId) : onSelectWorker === undefined ? undefined : () => onSelectWorker(worker.id))}>
+            <g role="img" className="dfFactoryScene__target" data-tooltip={`${worker.name} · ${worker.activity}${worker.review ? `\nReview assignment: ${worker.review.scope}; representative visit, not exact file inspection` : ""}\n${placement.area === "work" ? `Working at ${worker.locationLabel ?? at ?? "observed changes"}` : placement.errand !== undefined ? `${placement.errandKey?.startsWith("use ") ? "Recorded use" : "Taking a break"} · at the ${IMPLEMENT_NAMES[placement.errand]}` : placement.area === "resting" ? `${worker.paused ? "Paused · taking a break" : "Taking a break"}${stroking === undefined ? "" : " · fussing the cat"}${said}` : worker.location === "unobserved" ? "Planning · location not yet observed" : "Planning · work outside the machines shown"}${worker.telemetry === undefined ? "" : recordedEffort(worker.telemetry)}${[...new Set(asking)].join("")}`} aria-label={`${worker.name}, ${worker.review ? "reviewer" : worker.role}, ${worker.activity}, ${worker.review?.scope ?? location}`} {...sceneAction(worker.review && onSelectProposal ? () => onSelectProposal(worker.review!.proposalId) : onSelectWorker === undefined ? undefined : () => onSelectWorker(worker.id))}>
                 <rect className="dfFactoryScene__focus" x={-12} y={-12} width="24" height="24" rx="3" fill="transparent" />
             </g>
             {worker.review === undefined ? null : <g aria-hidden="true"><rect x="7" y="1" width="10" height="13" fill="#e1d1aa" stroke="#5c787b" /><text x="12" y="10" textAnchor="middle" fill="#203d46" fontSize="8">R</text></g>}
@@ -448,7 +452,7 @@ function SceneWorkers({ knowledgeCues, nook, onOpenBoard, nearby, errands, furni
       {/* On the table in front of each of them: a planner's lit lamp, or the one thing a resting worker has until it is in their hand. */}
       {placements.map((told) => {
         const worker = workerById.get(told.id), position = positions.get(told.id), placement = position?.placement ?? told;
-        if (worker === undefined || placement.area === "room" || placement.errand !== undefined || position?.motion.action === "walking") return null;
+        if (worker === undefined || placement.area === "work" || placement.errand !== undefined || position?.motion.action === "walking") return null;
         if (placement.area !== "resting") return !connected ? null : <g key={placement.id} data-planning-light="" aria-hidden="true" pointerEvents="none" transform={`translate(${position?.x ?? placement.x} ${(position?.y ?? placement.y) + TABLE_DROP})`}><circle cx="7" cy="-16" r="14" fill="url(#df-lamplight)" /><path d="M12 -18v-5h-5" fill="none" stroke="#788379" strokeWidth="2" /><path d="M4 -20h6" stroke="#dfc38f" strokeWidth="3" /></g>;
         const rest = restingItem(worker, worker.activity === "needs-you" || cat?.pettedBy === worker.id || hailing.has(worker.id) ? undefined : position?.motion.at);
         return rest.where !== "table" ? null : <g key={placement.id} aria-hidden="true" pointerEvents="none" data-table-item={rest.item} transform={`translate(${position?.x ?? placement.x} ${position?.y ?? placement.y}) scale(${WORKER_SIZE / FRAME})`}>
@@ -481,6 +485,9 @@ export function FactoryScene({ proposals, crates, tools, onLoadNode, onInvestiga
   const floorElement = useRef<SVGSVGElement>(null);
   // Scene pixels per scene unit; undefined fits the whole floor to its pane.
   const [zoom, setZoom] = useState<number>();
+  // Past fit, the overview can be folded to a button; the choice is this browser's.
+  const [mapHidden, setMapHiddenState] = useState(() => { try { return typeof localStorage !== "undefined" && localStorage.getItem(OVERVIEW_KEY) === "hidden"; } catch { return false; } });
+  const setMapHidden = (hidden: boolean) => { setMapHiddenState(hidden); try { localStorage.setItem(OVERVIEW_KEY, hidden ? "hidden" : "shown"); } catch { /* blocked storage: the choice lasts this visit */ } };
   // Fitted, the whole floor is in view, never enlarged into a poster. The pane's size is set by CSS, never by the floor inside it, so fitting cannot feed back into it.
   const [pane, setPane] = useState<{ width: number; height: number }>();
   // The overview's window follows scrolling without rerendering the floor.
@@ -503,32 +510,38 @@ export function FactoryScene({ proposals, crates, tools, onLoadNode, onInvestiga
   };
   const retainFocusedTooltip = () => showTooltip(typeof document !== "undefined" && document.activeElement?.matches("[data-tooltip]") ? document.activeElement : null);
   const inspect = (event: PointerEvent<HTMLDivElement> | FocusEvent<HTMLDivElement> | MouseEvent<HTMLDivElement>) => showTooltip((event.target as Element).closest("[data-tooltip]"));
-  // Rows are as wide as the pane's shape suits, chosen afresh only when the pane crosses a half-bay step.
-  const step = pane === undefined ? [0, 0] : [Math.floor(pane.width / 88), Math.floor(pane.height / 88)];
-  const columns = useMemo(() => pane === undefined ? undefined : fitColumns(graph, step[0]! * 88, step[1]! * 88), [graph.digest, step[0], step[1]]);
-  const layout = useMemo(() => layoutScene(graph, columns), [graph.digest, columns]);
+  // Structure alone lays the floor out; a structural change keeps what still exists where it stood. Readings, workers, zoom and the pane never do.
+  const previousLayout = useRef<SceneLayout>(undefined);
+  const layout = useMemo(() => previousLayout.current = layoutScene(graph, previousLayout.current), [graph.digest]);
   const placements = useMemo(() => placeWorkers(layout, workers, appearance.social), [layout, workers, appearance.social]);
   // Live readings change without moving anything: they are looked up by id at draw time.
-  const machines = new Map<string, SceneMachine>([...graph.halls.flatMap((hall) => [[hall.id, { id: hall.id, kind: "processor", label: hall.label, reading: hall.reading }] as const, ...hall.machines.map((machine) => [machine.id, machine] as const)]),
+  const machines = new Map<string, SceneMachine>([...graph.units.flatMap((unit) => [[unit.id, { id: unit.id, kind: "processor", label: unit.label, reading: unit.reading }] as const, ...unit.machines.map((machine) => [machine.id, machine] as const)]),
     ...[...graph.shared, ...graph.parties, ...graph.quarantine].map((machine) => [machine.id, machine] as const)]);
-  const hallOf = new Map(graph.halls.flatMap((hall) => [[hall.id, hall] as const, ...hall.machines.map((machine) => [machine.id, hall] as const)]));
-  const labels = new Map<string, string>([...graph.halls.map((hall) => [hall.id, hall.label] as const), ["yard", "Shared yard"], ["quarantine", "Quarantine"]]);
-  const contentById = new Map(layout.rooms.flatMap((room) => room.contents.map((item) => [item.entityId, { item, room }] as const)));
-  const focusEntity = (id: string) => { selectEntity(id); const found = contentById.get(id); if (found) Array.from(mapElement.current?.querySelectorAll("[data-room-id]") ?? []).find((element) => element.getAttribute("data-room-id") === found.room.id)?.scrollIntoView({ block: "center", inline: "center", behavior: "instant" }); };
+  const unitOf = new Map(graph.units.flatMap((unit) => [[unit.id, unit] as const, ...unit.machines.map((machine) => [machine.id, unit] as const)]));
+  const labels = new Map([...machines].map(([id, machine]) => [id, machine.label] as const));
+  const focusEntity = (id: string) => { selectEntity(id); const station = stationOf(layout, id); if (station) Array.from(mapElement.current?.querySelectorAll("[data-entity-id]") ?? []).find((element) => element.getAttribute("data-entity-id") === station.key)?.scrollIntoView({ block: "center", inline: "center", behavior: "instant" }); };
   useEffect(() => { if (requestedEntity) { setSearch(""); focusEntity(requestedEntity.id); } }, [requestedEntity]);
   const resting = placements.filter((placement) => placement.area === "resting");
-  const planning = placements.filter((placement) => placement.area !== "room" && placement.area !== "resting");
-  const commonResting = resting.filter((placement) => placement.roomId === undefined);
+  const planning = placements.filter((placement) => placement.area !== "work" && placement.area !== "resting");
+  const commonResting = resting.filter((placement) => placement.stationId === undefined);
   const seating = commonSeating(layout, commonResting.length, planning.length);
-  const seats = [...seating.resting, ...seating.planning];
-  const commonBottom = Math.max(layout.restingTop, ...seats.map(({ y }) => y)) + 32;
-  const nook = breakRoomNook(layout, commonResting.length, planning.length, appearance.social === "nearby");
+  const nook = breakRoomNook(layout);
   const sceneWidth = layout.width;
-  const sceneHeight = Math.max(layout.height, commonBottom, 112, ...placements.map((placement) => placement.y + 24)) + 2 * PADDING;
+  // A crowd past the commons sits on benches below the floor: the scene grows, the floor does not move.
+  const sceneHeight = Math.max(layout.height, ...placements.map((placement) => placement.y + 24 + PADDING));
   const fit = pane === undefined ? undefined : Math.min(1, pane.width / sceneWidth, pane.height / sceneHeight);
   // Zoomed to twice the fitted scale or more, a manifold lists its routes inside its own footprint.
   const close = zoom !== undefined && zoom >= 2 * (fit ?? 1);
-  const belts = useMemo(() => [...hallIntake(layout, graph.halls), ...routeFlows(layout, graph.flows)], [layout, graph.halls, graph.flows]);
+  // Belt runs depend on where machines stand and which flows exist; readings are joined at draw time.
+  const flowKey = graph.flows.map((flow) => `${flow.from} ${flow.to}`).join(",");
+  const runs = useMemo(() => beltRuns(layout, graph), [layout, flowKey]);
+  const belts = runs.flatMap((run): BeltRoute[] => {
+    const reading = run.kind === "intake" ? unitOf.get(run.to)?.reading : graph.flows.find((flow) => flow.from === run.from && flow.to === run.to)?.reading;
+    return reading === undefined || run.kind === "intake" && reading.state === "unknown" ? [] : [{ ...run, reading, kind: run.kind === "intake" ? "intake" : graph.flows.find((flow) => flow.from === run.from && flow.to === run.to)!.kind }];
+  });
+  // Selecting a unit's main machine lights every machine it owns and every belt touching them, wherever they stand.
+  const litUnit = selectedId !== undefined && unitOf.get(selectedId)?.id === selectedId ? selectedId : undefined;
+  const members = new Set(litUnit === undefined ? [] : layout.stations.filter((station) => station.unit === litUnit).map((station) => station.key));
   const queued = tasks.filter((order) => order.status === "queued").length;
   // The implements are always there: each opens its panel and the tray shows the queue. Coffee is scenery only.
   const implementsShown = nook.furniture.filter((piece) => piece.errand !== "coffee" || appearance.scenery !== "off");
@@ -541,13 +554,11 @@ export function FactoryScene({ proposals, crates, tools, onLoadNode, onInvestiga
   const animate = connected && appearance.animation !== "off";
   // Changeovers are dated against the graph's own observation time, never the viewer's clock.
   const observedAt = graph.observedAt ?? 0;
-  const tables = [{ seats: seating.resting, planning: false }, { seats: seating.planning, planning: true }].flatMap(({ seats, planning }) =>
-    [...new Set(seats.map((seat) => seat.y))].map((y) => { const row = seats.filter((seat) => seat.y === y), first = row[0]!;
-      const tableWidth = row.at(-1)!.x - first.x + 36;
-      return <g key={`${planning} ${y}`} data-common-table={planning ? "planning-workers" : "resting"} aria-hidden="true" pointerEvents="none" transform={`translate(${first.x} ${y + TABLE_DROP})`}>
-        <rect x="-18" y="-21" width={tableWidth} height="10" fill={planning ? "#455c5e" : "#655d4c"} stroke="#8c8871" />
-        {!planning ? null : <g><rect x="-17" y="-20" width={tableWidth - 2} height="8" fill="#9fae9e" /><path d={`M-14 -18h${Math.max(12, tableWidth - 18)}v3h-7v-3 M${tableWidth - 22} -17h4`} fill="none" stroke="#536e70" /></g>}
-      </g>; }));
+  // The commons tables are always there, and solid; benches past the commons have none.
+  const tables = commonTables(layout).map(({ x, y, width, planning }) => <g key={y} data-common-table={planning ? "planning-workers" : "resting"} aria-hidden="true" pointerEvents="none" transform={`translate(${x} ${y})`}>
+    <rect width={width} height="10" fill={planning ? "#455c5e" : "#655d4c"} stroke="#8c8871" />
+    {!planning ? null : <g><rect x="1" y="1" width={width - 2} height="8" fill="#9fae9e" /><path d={`M4 3h${width - 18}v3h-7v-3 M${width - 4} 4h-4`} fill="none" stroke="#536e70" /></g>}
+  </g>);
   const selected = selectedId === undefined ? undefined : machines.get(selectedId);
   // Where the pane and the floor are, in client pixels, and how many pixels a scene unit is.
   const frame = () => {
@@ -641,7 +652,7 @@ export function FactoryScene({ proposals, crates, tools, onLoadNode, onInvestiga
       className={animate ? "dfPlant dfPlant--moving" : "dfPlant"}
       style={(zoom ?? fit) === undefined ? { display: "block", width: "100%", maxWidth: sceneWidth, height: "auto", margin: "0 auto" } : { display: "block", width: Math.floor(sceneWidth * (zoom ?? fit)!), height: Math.floor(sceneHeight * (zoom ?? fit)!), margin: "0 auto" }}
     >
-      <desc>{`${graph.halls.length} units, ${graph.shared.length} shared stores, ${graph.parties.length} external parties, ${graph.quarantine.length} unexplained runtime paths, ${workers.length} workers`}</desc>
+      <desc>{`${graph.units.length} units, ${graph.shared.length} shared stores, ${graph.parties.length} external parties, ${graph.quarantine.length} unexplained runtime paths, ${workers.length} workers`}</desc>
       <defs>
         {/* The sheet enters the document once; every frame is a window on it. */}
         <image id="df-sheet" href={spriteSheet} width={spriteSheetSize.width} height={spriteSheetSize.height} style={{ imageRendering: "pixelated" }} />
@@ -655,71 +666,41 @@ export function FactoryScene({ proposals, crates, tools, onLoadNode, onInvestiga
           <path d="M1 2h13v9H1z M17 1h13v10H17z M-6 14H7v8H-6z M10 14h13v9H10z M26 14h12v8H26z" fill="#273134" stroke="#242e31" strokeWidth="1" />
           <path d="M3 3h9 M19 2h8 M12 15h8" stroke="#2a3437" strokeWidth="1" />
         </pattern>
-        <pattern id="df-wall" patternUnits="userSpaceOnUse" width="24" height="12">
-          <rect width="24" height="12" fill="#41494a" />
-          <path d="M0 0h24 M0 6h24 M12 0v6 M0 6v6 M24 6v6" stroke="#20292d" strokeWidth="2" />
-        </pattern>
         <pattern id="df-fog" patternUnits="userSpaceOnUse" width="6" height="6" patternTransform="rotate(45)"><rect width="6" height="6" fill="#2c3139" /><path d="M0 0v6" stroke="#4a515b" strokeWidth="2" /></pattern>
-        <pattern id="df-hazard" patternUnits="userSpaceOnUse" width="12" height="12" patternTransform="rotate(45)"><rect width="12" height="12" fill="#1a1d22" /><rect width="6" height="12" fill="#e6b93a" /></pattern>
         <radialGradient id="df-lamplight" cx="50%" cy="45%" r="60%">
           <stop offset="0" stopColor="#f2dab0" stopOpacity=".24" />
           <stop offset="1" stopColor="#f2dab0" stopOpacity="0" />
         </radialGradient>
       </defs>
-      <rect width={sceneWidth} height={sceneHeight} fill="#08131d" />
-      {layout.corridors.map((corridor, index) => <rect key={index} data-corridor="" {...corridor} fill="url(#df-floor)" />)}
-      <rect x={PADDING} y={16} width={ROOM_LEFT - PADDING} height={commonBottom - 16} fill="url(#df-floor)" />
-      {layout.headings.map((heading) => <text key={heading.y} data-floor-heading={heading.label} x={heading.x} y={heading.y + 11} className="dfPlant__heading" fontSize="9">{heading.label}</text>)}
+      {/* One floor: every machine stands on it and every worker walks it. */}
+      <rect width={sceneWidth} height={sceneHeight} fill="url(#df-floor)" />
+      {/* Areas: a faint tint under each unit's machines, in as many lobes as they stand in. Never a wall, never a hit target. */}
+      <g data-regions="" aria-hidden="true" pointerEvents="none">{layout.regions.map((region) => <g key={region.unit} data-region={region.unit} fill={tint(region.unit)}>
+        {region.rects.map((rect, index) => <rect key={index} x={rect.x + 2} y={rect.y + 2} width={rect.width - 4} height={rect.height - 4} rx="6" />)}
+      </g>)}</g>
+      <rect data-commons="" x={layout.facilities.x + 8} y={layout.facilities.y + 8} width={layout.facilities.width - 16} height={layout.facilities.height - 16} rx="6" className="dfPlant__commons" />
 
-      {layout.rooms.map((room) => {
-        const hall = graph.halls.find((candidate) => candidate.id === room.id);
-        // The runtime rides in the nameplate after the name, which gives way to it; the plate stops short of the timers.
-        const badge = hall?.runtime === undefined ? "" : ` ·${RUNTIME_TEXT[hall.runtime]}`, plate = Math.min(room.width - 44, ...room.contents.filter((item) => item.shape === "clock" && item.y < room.y + 40).map((item) => item.x - room.x - 16)), fits = Math.floor((plate - 14 - badge.length * 5) / 6);
-        return <g key={room.id} data-room-id={room.id} data-room-kind={room.kind}>
-          <rect x={room.x} y={room.y} width={room.width} height={room.height} fill={room.kind === "quarantine" ? "#1b1f25" : "url(#df-floor)"} />
-          {room.kind === "quarantine" ? <rect x={room.x + 2} y={room.y + 2} width={room.width - 4} height={room.height - 4} fill="none" stroke="url(#df-hazard)" strokeWidth="4" /> : <>
-            <rect x={room.x} y={room.y} width={room.width} height="10" fill="url(#df-wall)" />
-            <path data-room-walls="" d={`M${room.door.x - 16},${room.door.y} H${room.x} V${room.y} M${room.x + room.width},${room.y} V${room.door.y} H${room.door.x + 16}`} fill="none" stroke="#465355" strokeWidth="4" />
-          </>}
-          <rect x={room.x + 4} y={room.y + 10} width={room.width - 8} height={room.height - 12} fill="#08131d" opacity=".18" pointerEvents="none" />
-          {hall === undefined ? null : <g className="dfFactoryScene__target" {...sceneAction(() => selectEntity(hall.id))} data-tooltip={machineInfo({ id: hall.id, kind: "processor", label: hall.label, reading: hall.reading }, hall)} aria-label={`Inspect ${hall.label}`}>
-            <rect className="dfFactoryScene__focus dfPlant__plate" x={room.x + 8} y={room.y + 12} width={Math.min(plate, 6 * Math.min(hall.label.length, fits) + 14 + badge.length * 5)} height="20" rx="2" />
-            <text x={room.x + 14} y={room.y + 26} className="dfPlant__plateText" fontSize="10">{shortLabel(hall.label, fits)}{badge === "" ? null : <tspan data-runtime={hall.runtime} className="dfPlant__small" fontSize="7">{badge}</tspan>}</text>
-            {hall.reading.deployedAt === undefined || observedAt - hall.reading.deployedAt > DAY ? null : <g data-changeover={hall.reading.deployedAt}>
-              {observedAt - hall.reading.deployedAt < CHANGEOVER ? <path d={`M${room.x + 6} ${room.y + 10}h${room.width - 12}M${room.x + 10} ${room.y + 10}v${room.height - 20}M${room.x + room.width - 10} ${room.y + 10}v${room.height - 20}`} className="dfPlant__scaffold" /> : null}
-              <rect x={room.x + room.width - 30} y={room.y + 14} width="22" height="14" className="dfPlant__changed" /><text x={room.x + room.width - 19} y={room.y + 24} textAnchor="middle" className="dfPlant__changedText" fontSize="10">Δ</text>
-            </g>}
+      <g aria-hidden="true" pointerEvents="none">
+        {belts.map((belt) => <Belt key={belt.key} belt={belt} lit={members.has(belt.from) || members.has(belt.to)} />)}
+        {/* Where belts share a port they join, and say so; where they only cross, the casing shows one passing over the other. */}
+        {junctions(belts).map((point) => <circle key={`${point.x} ${point.y}`} data-junction="" cx={point.x} cy={point.y} r="2.5" className="dfPlant__junction" />)}
+      </g>
+
+      {layout.stations.map((station) => {
+        const machine = machines.get(station.entityId) ?? station.machine, unit = unitOf.get(station.entityId), deployed = station.unit === station.key ? unit?.reading.deployedAt : undefined;
+        return <g key={station.key} data-entity-id={station.entityId} data-observation={machine.reading.observation} data-state={machine.reading.state} data-shape={station.shape} data-unit={station.unit}
+          data-tooltip={machineInfo(machine, unit)}
+          {...sceneAction(() => selectEntity(station.entityId))} aria-label={`Inspect ${machine.label}`} className="dfFactoryScene__target">
+          <rect className="dfFactoryScene__focus" x={station.x - 4} y={station.y - 14} width={station.shape === "gate" ? 130 : station.width + 8} height={station.height + 18} fill="transparent" />
+          <Station item={station} machine={machine} selected={selectedId === station.entityId} close={close} />
+          {deployed === undefined || observedAt - deployed > DAY ? null : <g data-changeover={deployed}>
+            {observedAt - deployed < CHANGEOVER ? <rect x={station.x - 5} y={station.y - 5} width={station.width + 10} height={station.height + 10} className="dfPlant__scaffold" /> : null}
+            <rect x={station.x + station.width - 8} y={station.y - 10} width="16" height="12" className="dfPlant__changed" /><text x={station.x + station.width} y={station.y - 1} textAnchor="middle" className="dfPlant__changedText" fontSize="9">Δ</text>
           </g>}
+          {members.has(station.key) && station.key !== litUnit ? <rect data-unit-member={litUnit} className="dfFactoryScene__selection" x={station.x - 4} y={station.y - 4} width={station.width + 8} height={station.height + 8} /> : null}
+          {litIds.has(station.entityId) ? <rect data-lit="" className="dfFactoryScene__selection" x={station.x - 6} y={station.y - 6} width={station.width + 12} height={station.height + 12} /> : null}
         </g>;
       })}
-
-      <g aria-hidden="true" pointerEvents="none">{belts.map((belt) => <Belt key={belt.key} belt={belt} />)}</g>
-
-      {layout.rooms.flatMap((room) => room.contents.map((item) => {
-        const machine = machines.get(item.entityId) ?? item.machine;
-        return <g key={item.key} data-entity-id={item.entityId} data-observation={machine.reading.observation} data-state={machine.reading.state} data-shape={item.shape}
-          data-tooltip={machineInfo(machine, hallOf.get(machine.id))}
-          {...sceneAction(() => selectEntity(item.entityId))} aria-label={`Inspect ${machine.label}`} className="dfFactoryScene__target">
-          <rect className="dfFactoryScene__focus" x={item.x - 4} y={item.y - 14} width={item.width + 8} height={item.height + 18} fill="transparent" />
-          <Station item={item} machine={machine} selected={selectedId === item.entityId} close={close} />
-          {litIds.has(item.entityId) ? <rect data-lit="" className="dfFactoryScene__selection" x={item.x - 6} y={item.y - 6} width={item.width + 12} height={item.height + 12} /> : null}
-        </g>;
-      }))}
-
-      <g data-fence="">
-        <path d={`M${layout.fence} 24V${layout.height}`} className="dfPlant__fence" />
-        {layout.gates.map((gate) => {
-          const machine = machines.get(gate.machine.id) ?? gate.machine;
-          return <g key={gate.machine.id} data-entity-id={gate.machine.id} data-observation={machine.reading.observation} data-state={machine.reading.state} className={`dfFactoryScene__target s-${machine.reading.observation} op-${machine.reading.state}`}
-            data-tooltip={machineInfo(machine)} {...sceneAction(() => selectEntity(gate.machine.id))} aria-label={`Inspect ${machine.label}`}>
-            <rect className="dfFactoryScene__focus" x={gate.x - 4} y={gate.y - 4} width={130} height={gate.height + 8} fill="transparent" />
-            <rect x={gate.x} y={gate.y} width={gate.width} height={gate.height} className={machine.reading.evidence === "runtime" ? "dfPlant__gate dfPlant__gate--runtime" : "dfPlant__gate"} />
-            <rect x={gate.x + 2} y={gate.y + gate.height / 2 - 2} width="3" height="4" className="lamp" />
-            <text x={gate.x + gate.width + 6} y={gate.y + 12} className="dfPlant__label" fontSize="8">{shortLabel(machine.label, 20)}</text>
-            <text x={gate.x + gate.width + 6} y={gate.y + 23} className="dfPlant__small" fontSize="7">{machine.reading.evidence === "runtime" ? "seen, not in code" : machine.reading.ratePerHour > 0 ? `${rate(machine.reading.ratePerHour)} · measured from our side` : "can't see inside"}</text>
-          </g>;
-        })}
-      </g>
 
       <WorkLine layout={layout} crates={crates} tasks={tasks} placements={placements} connected={connected} live={animate} onLight={setLit} onSelect={proposals?.onSelect} />
 
@@ -737,13 +718,12 @@ export function FactoryScene({ proposals, crates, tools, onLoadNode, onInvestiga
         </g>
       </g>; })}
       {[
-        { label: "Break room · ambient", seats: seating.resting, planning: false, occupied: commonResting.length },
-        { label: "Work tables", seats: seating.planning, planning: true, occupied: planning.length },
-      ].filter(({ seats }) => seats.length > 0).map(({ label, seats, planning, occupied }) => {
-        const top = seats[0]!.y;
+        { label: "Break room · ambient", seats: seating.resting, planning: false, occupied: commonResting.length, top: layout.commons.y + 30 },
+        { label: "Work tables", seats: seating.planning, planning: true, occupied: planning.length, top: (seating.planning[0]?.y ?? 0) - 27 },
+      ].filter(({ seats }) => seats.length > 0).map(({ label, seats, planning, occupied, top }) => {
         return <g key={label} role="group" aria-label={label}>
           {/* The break room's sign hangs over its implements, clear of whoever stands at them. */}
-          <text x={seats[0]!.x - 18} y={planning ? top - 27 : 46} fill="#9db1be" fontFamily="ui-monospace, monospace" fontSize="8">{label}</text>
+          <text x={layout.commons.x + 6} y={top} fill="#9db1be" fontFamily="ui-monospace, monospace" fontSize="8">{label}</text>
           {/* A stool only where someone sits; the tables stand in front of them, drawn after the workers. */}
           {seats.slice(0, occupied).map((seat, index) => <g key={index} aria-hidden="true" data-common-seat={planning ? "planning" : "resting"} transform={`translate(${seat.x} ${seat.y})`}>
             <rect x="-7" y="3" width="14" height="6" rx="2" fill="#655948" stroke="#897c61" />
@@ -751,23 +731,24 @@ export function FactoryScene({ proposals, crates, tools, onLoadNode, onInvestiga
           </g>)}
         </g>;
       })}
-      {layout.rooms.length === 0 ? <text x={ROOM_LEFT} y="24" fill="#9db1be" fontFamily="ui-monospace, monospace" fontSize="10">{reading ? "READING THE PLANT…" : "NO OPERATIONAL STRUCTURE INFERRED YET"}</text> : null}
+      {layout.stations.length === 0 ? <text x={PADDING} y="24" fill="#9db1be" fontFamily="ui-monospace, monospace" fontSize="10">{reading ? "READING THE PLANT…" : "NO OPERATIONAL STRUCTURE INFERRED YET"}</text> : null}
 
-      {placements.filter((placement) => placement.area === "resting" && placement.roomId !== undefined).map((seat) => <g key={seat.id} data-nearby-rest={seat.roomId} aria-hidden="true"><rect x={seat.x - 12} y={seat.y + 5} width="24" height="7" fill="#655948" stroke="#9b8b6b" /><path d={`M${seat.x - 8} ${seat.y + 12}v5m16-5v5`} stroke="#74664e" strokeWidth="3" /></g>)}
-      <SceneWorkers knowledgeCues={knowledgeCues} nook={implementsShown} onOpenBoard={onOpenBoard} nearby={appearance.social === "nearby"} errands={appearance.scenery !== "off"} restingSeats={[...resting.filter((seat) => seat.roomId !== undefined), ...seating.resting]} peerQuestions={peerQuestions} furniture={tables} layout={layout} placements={placements} labels={labels} workers={workers} tasks={tasks} connected={connected} animate={appearance.animation !== "off"} selectedWorkerId={selectedWorkerId} onSelectWorker={onSelectWorker} onSelectTask={onSelectTask} onSelectHumanRequest={onSelectHumanRequest} onSelectProposal={proposals?.onSelect} />
+      {placements.filter((placement) => placement.area === "resting" && placement.stationId !== undefined).map((seat) => <g key={seat.id} data-nearby-rest={seat.stationId} aria-hidden="true"><rect x={seat.x - 12} y={seat.y + 5} width="24" height="7" fill="#655948" stroke="#9b8b6b" /><path d={`M${seat.x - 8} ${seat.y + 12}v5m16-5v5`} stroke="#74664e" strokeWidth="3" /></g>)}
+      <SceneWorkers knowledgeCues={knowledgeCues} nook={implementsShown} onOpenBoard={onOpenBoard} nearby={appearance.social === "nearby"} errands={appearance.scenery !== "off"} restingSeats={[...resting.filter((seat) => seat.stationId !== undefined), ...seating.resting]} peerQuestions={peerQuestions} furniture={tables} layout={layout} placements={placements} labels={labels} workers={workers} tasks={tasks} connected={connected} animate={appearance.animation !== "off"} selectedWorkerId={selectedWorkerId} onSelectWorker={onSelectWorker} onSelectTask={onSelectTask} onSelectHumanRequest={onSelectHumanRequest} onSelectProposal={proposals?.onSelect} />
     </svg>
     {tooltip === undefined ? null : <div ref={tooltipElement} className="dfFactoryTooltip" role="tooltip" style={{ left: tooltip.x, top: tooltip.y, maxHeight: tooltip.room }}>{tooltip.text}</div>}
     </div>
-    {layout.rooms.length === 0 ? null : <div className="dfPlantOverview">
+    {layout.stations.length === 0 ? null : <div className="dfPlantOverview">
       <div className="dfPlantOverview__zoom" role="group" aria-label="Zoom">
         <IconButton icon="minus" aria-label="Zoom out" disabled={zoom === undefined} onClick={() => zoomBy(1 / 1.5)} />
         <IconButton icon="plus" aria-label="Zoom in" disabled={zoom !== undefined && zoom >= MAX_ZOOM} onClick={() => zoomBy(1.5)} />
         <IconButton icon="fit" aria-label="Fit floor" disabled={zoom === undefined} onClick={() => setZoom(undefined)} />
+        {zoom === undefined ? null : <button type="button" className="dfPlantOverview__toggle" aria-pressed={!mapHidden} aria-label={mapHidden ? "Show overview" : "Hide overview"} onClick={() => setMapHidden(!mapHidden)}>{mapHidden ? "Map" : "×"}</button>}
       </div>
-      {zoom === undefined ? null : <PlantMap layout={layout} width={sceneWidth} height={sceneHeight} machines={machines} graph={graph} placements={placements} workers={workers} viewElement={viewElement} onCentre={centreOn} />}
+      {zoom === undefined || mapHidden ? null : <PlantMap layout={layout} width={sceneWidth} height={sceneHeight} machines={machines} graph={graph} placements={placements} workers={workers} viewElement={viewElement} onCentre={centreOn} pane={pane} />}
     </div>}
     </div>
-    {selected === undefined ? null : <MachineInspector key={selected.id} machine={selected} hall={hallOf.get(selected.id)} onLoadNode={onLoadNode} onInvestigate={onInvestigate}
+    {selected === undefined ? null : <MachineInspector key={selected.id} machine={selected} unit={unitOf.get(selected.id)} onLoadNode={onLoadNode} onInvestigate={onInvestigate}
       proposals={proposals === undefined ? [] : proposalsForEntity(proposals.items, selected.id)} onSelectProposal={proposals?.onSelect}
       onFocus={() => focusEntity(selected.id)} onDiscuss={onDiscussSource === undefined ? undefined : () => onDiscussSource(selected.id)} onClose={() => selectEntity(undefined)} />}
     </>
@@ -775,9 +756,10 @@ export function FactoryScene({ proposals, crates, tools, onLoadNode, onInvestiga
 }
 
 const MAX_ZOOM = 4;
+const OVERVIEW_KEY = "dfFloorOverview";
 
 /**
- * Change requests on the outbound line to the fence. A crate stands where its
+ * Change requests on the outbound line. A crate stands where its
  * records put it and moves only when they change: once along the line, or,
  * when just opened, from the agent whose task opened it. Reconnecting is a
  * first look, never a replay.
@@ -816,13 +798,14 @@ function WorkLine({ layout, crates, tasks, placements, connected, live, onLight,
     // A new snapshot may land in the same millisecond as the last, so it asks for frames itself.
   }, [clock, moving, placed]);
   if (crates === undefined || crates.length === 0) return null;
-  const belt = layout.line[0]!.y + 28;
+  // One row per station, top to bottom, the belt running on from each row's end to the next row's start.
+  const belt = (station: SceneLayout["line"][number]) => station.y + 25;
   return <g data-work-line="">
-    <path aria-hidden="true" d={`M${layout.line[0]!.x} ${belt + 3}H${layout.fence}`} className="b-base" />
+    <path aria-hidden="true" d={layout.line.map((station, index) => `${index === 0 ? "M" : "L"}${station.x} ${belt(station)}H${station.x + station.width}`).join("")} className="b-base" />
     {layout.line.map((station, index) => { const count = crates.filter((crate) => crate.station === index).length; return <g key={station.label} aria-hidden="true">
       <rect x={station.x} y={station.y} width="2" height={station.height} className="md" />
       <text x={station.x + 6} y={station.y + 9} className="dfPlant__label" fontSize="8">{station.label.toUpperCase()} · {count}</text>
-      {count > LINE_SLOTS ? <text data-crate-overflow={count - LINE_SLOTS} x={station.x + 10 + LINE_SLOTS * 18} y={belt + 3} className="dfPlant__small" fontSize="7">+{count - LINE_SLOTS}</text> : null}
+      {count > LINE_SLOTS ? <text data-crate-overflow={count - LINE_SLOTS} x={station.x + 10 + LINE_SLOTS * 18} y={belt(station)} className="dfPlant__small" fontSize="7">+{count - LINE_SLOTS}</text> : null}
     </g>; })}
     {placed.filter((spot) => spot.shown).map(({ crate, x, y }) => {
       const flight = moving ? flights.current.find((candidate) => candidate.key === crate.id) : undefined;
@@ -841,13 +824,14 @@ function WorkLine({ layout, crates, tasks, placements, connected, live, onLight,
 }
 
 /**
- * The plant at a glance, always in view: halls painted by coverage, gates on
- * the fence, where workers are and the window the floor shows. Pointing at it
- * moves the floor there.
+ * The plant at a glance once zoomed past fit: machines painted by coverage,
+ * areas, where workers are and the window the floor shows. Pointing at it
+ * moves the floor there. On a phone-width pane it is a quarter of the pane.
  */
-function PlantMap({ layout, width, height, machines, graph, placements, workers, viewElement, onCentre }: {
+function PlantMap({ layout, width, height, machines, graph, placements, workers, viewElement, onCentre, pane }: {
   layout: SceneLayout; width: number; height: number; machines: ReadonlyMap<string, SceneMachine>; graph: SceneGraph;
   placements: ReturnType<typeof placeWorkers>; workers: readonly SceneWorker[]; viewElement: RefObject<SVGRectElement | null>; onCentre: (x: number, y: number) => void;
+  pane?: { width: number; height: number };
 }) {
   const go = (event: PointerEvent<SVGSVGElement>) => {
     if (event.type === "pointermove" && event.buttons !== 1) return;
@@ -855,18 +839,19 @@ function PlantMap({ layout, width, height, machines, graph, placements, workers,
     onCentre((event.clientX - box.left) / box.width * width, (event.clientY - box.top) / box.height * height);
   };
   const needs = new Set(workers.filter((worker) => worker.activity === "needs-you").map((worker) => worker.id));
-  const halls = graph.halls.length;
-  // At most 12rem wide or 10rem tall, whichever the plant's shape reaches first.
-  return <svg className="dfPlantMap" viewBox={`0 0 ${width} ${height}`} style={{ width: `min(12rem, ${(10 * width / height).toFixed(2)}rem)` }} role="img" aria-label={`Plant overview: ${halls} ${halls === 1 ? "unit" : "units"}, ${graph.parties.length} external, ${workers.length} workers`}
+  const units = graph.units.length;
+  // At most 12rem wide or 10rem tall, whichever the plant's shape reaches first; on a narrow pane, a quarter of it.
+  const narrow = pane !== undefined && pane.width < 600;
+  return <svg className="dfPlantMap" viewBox={`0 0 ${width} ${height}`} style={{ width: narrow ? `${Math.round(Math.min(pane.width / 4, 0.4 * pane.height * width / height))}px` : `min(12rem, ${(10 * width / height).toFixed(2)}rem)` }} role="img" aria-label={`Plant overview: ${units} ${units === 1 ? "unit" : "units"}, ${graph.parties.length} external, ${workers.length} workers`}
     onPointerDown={go} onPointerMove={go}>
     <rect width={width} height={height} className="dfPlantMap__ground" />
-    {layout.rooms.map((room) => {
-      const reading = machines.get(room.id)?.reading;
-      return <rect key={room.id} data-overview-room={room.id} x={room.x} y={room.y} width={room.width} height={room.height}
-        className={`dfPlantMap__room dfPlantMap__room--${room.kind} s-${reading?.observation ?? "unobserved"} op-${reading?.state ?? "unknown"}`} />;
+    {layout.regions.map((region) => <g key={region.unit} fill={tint(region.unit)}>{region.rects.map((rect, index) => <rect key={index} {...rect} />)}</g>)}
+    <rect {...layout.facilities} className="dfPlantMap__commons" />
+    {layout.stations.map((station) => {
+      const reading = (machines.get(station.entityId) ?? station.machine).reading;
+      return <rect key={station.key} data-overview-station={station.key} x={station.x} y={station.y} width={station.width} height={station.height}
+        className={`dfPlantMap__station${station.shape === "gate" ? " dfPlantMap__station--external" : ""} s-${reading.observation} op-${reading.state}`} />;
     })}
-    <path d={`M${layout.fence} 24V${layout.height}`} className="dfPlantMap__fence" />
-    {layout.gates.map((gate) => <rect key={gate.machine.id} x={gate.x} y={gate.y} width={gate.width} height={gate.height} className={`dfPlantMap__gate s-${(machines.get(gate.machine.id) ?? gate.machine).reading.observation}`} />)}
     {placements.map((placement) => <circle key={placement.id} cx={placement.x} cy={placement.y} r="10" className={needs.has(placement.id) ? "dfPlantMap__worker dfPlantMap__worker--needs" : "dfPlantMap__worker"} />)}
     <rect ref={viewElement} data-overview-view="" width={width} height={height} className="dfPlantMap__view" />
   </svg>;
@@ -884,7 +869,7 @@ function rate(perHour: number) {
 }
 
 // What a unit's runtime is, in words that never read as the factory's own workers.
-const RUNTIME_TEXT: Record<NonNullable<SceneHall["runtime"]>, string> = {
+const RUNTIME_TEXT: Record<NonNullable<SceneUnit["runtime"]>, string> = {
   browser: "browser", server: "server", worker: "edge", process: "daemon", cli: "cli", ci: "ci",
 };
 const OBSERVATION_TEXT: Record<SceneReading["observation"], string> = {
@@ -895,11 +880,11 @@ const EVIDENCE_TEXT: Record<SceneReading["evidence"], string> = {
 };
 
 /** What a machine is, what we know of it and how. Never claims more than the reading does. */
-function machineInfo(machine: SceneMachine, hall?: SceneHall) {
+function machineInfo(machine: SceneMachine, unit?: SceneUnit) {
   const reading = machine.reading;
   const deployed = reading.deployedAt === undefined ? "" : `\nDeployed ${new Date(reading.deployedAt).toLocaleString([], { dateStyle: "short", timeStyle: "short" })}`;
   const activity = reading.state === "unknown" ? "" : reading.state === "idle" ? " · idle" : ` · ${reading.state} · ${rate(reading.ratePerHour)}${reading.errorPermille > 0 ? ` · ${reading.errorPermille / 10}% errors` : ""}${reading.latencyMs > 0 ? ` · p95 ${reading.latencyMs} ms` : ""}`;
-  return `${machine.label}\n${machine.represented === undefined ? machine.kind : `${machine.represented.length} ${machine.kind} nodes`}${hall !== undefined && hall.id !== machine.id ? ` in ${hall.label}` : machine.owner ? ` from ${machine.owner}` : ""}\n${OBSERVATION_TEXT[reading.observation]}${activity}\n${EVIDENCE_TEXT[reading.evidence]}${deployed}`;
+  return `${machine.label}\n${kindText(machine, unit)}${unit !== undefined && unit.id !== machine.id ? ` in ${unit.label}` : machine.owner ? ` from ${machine.owner}` : ""}\n${OBSERVATION_TEXT[reading.observation]}${activity}\n${EVIDENCE_TEXT[reading.evidence]}${deployed}`;
 }
 
 function Coverage({ summary }: { summary: NonNullable<SceneGraph["summary"]> }) {
@@ -910,7 +895,7 @@ function Coverage({ summary }: { summary: NonNullable<SceneGraph["summary"]> }) 
 }
 
 /** One machine, pictured by its kind; its observation and state are its paint, lamp and motion. */
-function Station({ item, machine, selected, close }: { item: RoomContent; machine: SceneMachine; selected: boolean; close: boolean }) {
+function Station({ item, machine, selected, close }: { item: SceneStation; machine: SceneMachine; selected: boolean; close: boolean }) {
   const { x, y, width: w, height: h } = item, reading = machine.reading;
   // A cell's body is its base; every other station carries its lamp at the top.
   const ly = item.shape === "cell" ? y + h - 7 : y + 3;
@@ -925,15 +910,14 @@ function Station({ item, machine, selected, close }: { item: RoomContent; machin
   const stale = reading.observation === "stale" ? <text x={x} y={y + h + 9} className="dfPlant__small" fontSize="7">last seen {reading.lastSeen === undefined ? "earlier" : new Date(reading.lastSeen).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</text> : null;
   const tag = reading.evidence === "runtime" ? <g><rect x={x - 5} y={y - 6} width="10" height="11" className="qtag" /><text x={x} y={y + 3} textAnchor="middle" className="qmark" fontSize="8">?</text></g>
     : reading.evidence === "contradicted" ? <rect x={x - 4} y={y - 4} width="8" height="8" className="redtag" /> : null;
-  // Docks have the wall beside them for a label; everything else is labelled under its own footprint.
-  const label = item.shape === "line" ? null : item.shape === "dock" || item.shape === "manifold"
-    ? <text x={x} y={y - 3} className="dfPlant__label" fontSize="8">{shortLabel(machine.label, 22)}</text>
-    : <text x={x + w / 2} y={y + h + 9} textAnchor="middle" className="dfPlant__label" fontSize="8">{shortLabel(machine.label, Math.max(6, Math.floor((w + 10) / 5)))}</text>;
+  // Docks are labelled above, a gate beside it, everything else under its own footprint; layout reserved exactly this much.
+  const label = item.shape === "gate" ? null : item.shape === "dock" || item.shape === "manifold"
+    ? <text x={x} y={y - 3} className="dfPlant__label" fontSize="8">{shortLabel(machine.label, labelChars(item.shape, w))}</text>
+    : <text x={x + w / 2} y={y + h + 9} textAnchor="middle" className="dfPlant__label" fontSize="8">{shortLabel(machine.label, labelChars(item.shape, w))}</text>;
   let body: ReactNode;
   switch (item.shape) {
     case "line": body = <g><rect x={x + 3} y={y + h} width={w - 2} height="3" className="shd" /><rect x={x} y={y} width={w} height={h} className="m" /><rect x={x + 1} y={y + 1} width={w - 2} height="4" className="mh" />
-      {window(x + 8, y + 12, w - 30, h - 22)}<rect x={x + w - 18} y={y + 12} width="10" height={h - 22} className="md" />{lamp}
-      <text x={x + 4} y={y + h + 12} className="dfPlant__label" fontSize="8">main line</text></g>; break;
+      {window(x + 8, y + 12, w - 30, h - 22)}<rect x={x + w - 18} y={y + 12} width="10" height={h - 22} className="md" />{lamp}</g>; break;
     case "dock": body = <g><rect x={x} y={y} width={w} height={h} className="dock" />{[0, 1, 2].map((index) => <rect key={index} x={x + 3 + index * 6} y={y + h - 5} width="4" height="3" className="chev" />)}<rect x={x + w - 14} y={y + 4} width="10" height={h - 8} className="win" />{lamp}</g>; break;
     case "manifold": {
       const routes = machine.routes ?? [], rows = Math.floor((h - 4) / 5);
@@ -946,99 +930,83 @@ function Station({ item, machine, selected, close }: { item: RoomContent; machin
     case "cell": body = <g><rect x={x} y={y + h - 10} width={w} height="10" className="m" /><rect x={x + w / 2 - 3} y={y + 4} width="6" height={h - 14} className="md arm" /><rect x={x + w / 2 - 8} y={y + 2} width="16" height="5" className="mh arm" />{lamp}</g>; break;
     case "silo": body = <g><rect x={x + 2} y={y + h} width={w - 2} height="3" className="shd" /><rect x={x + 3} y={y} width={w - 6} height={h} className="m" /><rect x={x} y={y + 3} width={w} height={h - 6} className="m" /><rect x={x + 3} y={y + 2} width={w - 6} height="3" className="mh" />{window(x + 6, y + 10, w - 12, 8)}{lamp}</g>; break;
     case "conveyor": body = <g><path d={`M${x} ${y + h / 2}h${w}`} className="b-base" />{window(x + 4, y + 2, w - 8, h - 4)}</g>; break;
+    // An outside party: a gate whose inside cannot be seen, labelled beside it with how much of it is.
+    case "gate": body = <g><rect x={x} y={y} width={w} height={h} className={reading.evidence === "runtime" ? "dfPlant__gate dfPlant__gate--runtime" : "dfPlant__gate"} />
+      <rect x={x + 2} y={y + h / 2 - 2} width="3" height="4" className="lamp" />
+      <text x={x + w + 6} y={y + 12} className="dfPlant__label" fontSize="8">{shortLabel(machine.label, labelChars("gate", w))}</text>
+      <text x={x + w + 6} y={y + 23} className="dfPlant__small" fontSize="7">{reading.evidence === "runtime" ? "seen, not in code" : reading.ratePerHour > 0 ? `${rate(reading.ratePerHour)} · measured from our side` : "outside · can't see inside"}</text></g>; break;
     default: body = <g><rect x={x} y={y} width={w} height={h} className="crate" /><text x={x + w / 2} y={y + h / 2 + 3} textAnchor="middle" className="qmark" fontSize="8">?</text></g>;
   }
   return <g className={`s-${reading.observation} op-${reading.state}${selected ? " dfPlant--selected" : ""}`}>{label}{body}{plaque}{scrap}{stale}{tag}</g>;
 }
 
-type BeltRoute = Readonly<{ key: string; points: readonly ScenePoint[]; reading: SceneReading; kind: string }>;
+type BeltRun = Readonly<{ key: string; from: string; to: string; kind: string; points: readonly ScenePoint[] }>;
+type BeltRoute = BeltRun & Readonly<{ reading: SceneReading }>;
 
 /**
  * Material moves only where a flow was observed: belt density reads as rate
  * and speed is fixed. An edge nobody can see is a dashed blueprint run, never
- * an empty belt.
+ * an empty belt. Every belt lies on a dark casing, so where two cross one
+ * plainly passes over the other.
  */
-function Belt({ belt }: { belt: BeltRoute }) {
+function Belt({ belt, lit }: { belt: BeltRoute; lit: boolean }) {
   const d = `M${belt.points.map((point) => `${point.x} ${point.y}`).join(" L")}`;
-  const reading = belt.reading;
+  const reading = belt.reading, casing = <path d={d} className={lit ? "dfPlant__casing dfPlant__casing--lit" : "dfPlant__casing"} />;
   if (reading.observation === "unobserved" || reading.observation === "stale" || reading.observation === "opaque" && reading.ratePerHour === 0 || reading.observation === "partial" && reading.state === "unknown") {
-    return <path d={d} className="b-inf" data-belt={belt.kind} data-observation={reading.observation} />;
+    return <g data-belt={belt.kind} data-observation={reading.observation}>{casing}<path d={d} className="b-inf" /></g>;
   }
   const spacing = reading.ratePerHour === 0 ? 0 : Math.max(5, Math.round(48 / Math.log2(2 + reading.ratePerHour / 60)));
   return <g data-belt={belt.kind} data-observation={reading.observation} data-state={reading.state}>
-    <path d={d} className="b-base" />
+    {casing}<path d={d} className="b-base" />
     {spacing === 0 ? null : <path d={d} className={`dfPlant__material${reading.state === "failing" || reading.state === "degraded" ? " dfPlant__material--faulty" : ""}`} strokeDasharray={`3 ${spacing}`} />}
     {reading.evidence === "runtime" ? <circle cx={belt.points[Math.floor(belt.points.length / 2)]!.x} cy={belt.points[Math.floor(belt.points.length / 2)]!.y} r="4" className="qtag" /> : null}
   </g>;
 }
 
 /**
- * A hall's own intake: the unit's reading carried from its only dock, else
- * its door, to its main line. A source that counts traffic per service but not per route (a
- * platform's per-script analytics) can say a unit is busy without saying
- * which machine handled it, so the hall moves while its machines stay
- * partial. A unit with no known state has no intake drawn at all.
+ * Every belt's run, from where machines stand: one per flow, port to port,
+ * and a unit's own intake from its only dock (or the manifold folding its
+ * docks) to its main machine, where no flow already joins them. A source that
+ * counts traffic per service but not per route can say a unit is busy
+ * without saying which machine handled it: the intake carries that.
  */
-function hallIntake(layout: SceneLayout, halls: readonly SceneHall[]): readonly BeltRoute[] {
-  return halls.flatMap((hall) => {
-    const room = layout.rooms.find((candidate) => candidate.id === hall.id);
-    const line = room?.contents.find((item) => item.entityId === hall.id);
-    if (room === undefined || line === undefined || hall.reading.state === "unknown") return [];
-    // One dock (or the manifold that folds them all) is where every arrival comes in; with several, which one is unknown.
-    const [dock, other] = room.contents.filter((item) => item.shape === "manifold" || item.shape === "dock");
-    if (dock !== undefined && other === undefined) {
-      const sx = dock.x + dock.width, sy = dock.y + dock.height / 2, mx = (sx + line.x) / 2, ey = line.y + line.height / 2;
-      return [{ key: `intake ${hall.id}`, kind: "intake", reading: hall.reading, points: [{ x: sx, y: sy }, { x: mx, y: sy }, { x: mx, y: ey }, { x: line.x, y: ey }] }];
-    }
-    const x = line.x + line.width / 2, below = line.y + line.height;
-    return [{ key: `intake ${hall.id}`, kind: "intake", reading: hall.reading, points: [room.door, { x: room.door.x, y: below + 8 }, { x, y: below + 8 }, { x, y: below }] }];
+function beltRuns(layout: SceneLayout, graph: SceneGraph): readonly BeltRun[] {
+  const at = new Map(layout.stations.map((station) => [station.key, station]));
+  const flows = graph.flows.flatMap((flow): BeltRun[] => {
+    const from = at.get(flow.from), to = at.get(flow.to);
+    return from === undefined || to === undefined ? [] : [{ key: `${flow.from} ${flow.to}`, from: flow.from, to: flow.to, kind: flow.kind, points: beltBetween(layout, from, to) }];
   });
+  const joined = new Set(graph.flows.flatMap((flow) => [`${flow.from} ${flow.to}`, `${flow.to} ${flow.from}`]));
+  const intakes = graph.units.flatMap((unit): BeltRun[] => {
+    const docks = layout.stations.filter((station) => station.unit === unit.id && (station.shape === "dock" || station.shape === "manifold")), main = at.get(unit.id);
+    return docks.length !== 1 || main === undefined || joined.has(`${docks[0]!.key} ${unit.id}`) ? [] : [{ key: `intake ${unit.id}`, from: docks[0]!.key, to: unit.id, kind: "intake", points: beltBetween(layout, docks[0]!, main) }];
+  });
+  return [...intakes, ...flows];
 }
 
-/**
- * Orthogonal belt runs: inside a hall directly between machines; between
- * halls out of the door, along corridors and the spine, in at the far door;
- * to a party along the corridor to the fence.
- */
-function routeFlows(layout: SceneLayout, flows: readonly SceneFlow[]): readonly BeltRoute[] {
-  const at = new Map<string, { item?: RoomContent; room?: SceneRoomLayout; gate?: SceneLayout["gates"][number] }>();
-  for (const room of layout.rooms) for (const item of room.contents) at.set(item.entityId, { item, room });
-  for (const gate of layout.gates) at.set(gate.machine.id, { gate });
-  const spineX = ROOM_LEFT - 16;
-  const lane = (room: SceneRoomLayout) => room.door.y + 16;
-  const center = (item: RoomContent): ScenePoint => ({ x: item.x + item.width / 2, y: item.y + item.height / 2 });
-  return flows.flatMap((flow) => {
-    // Handles runs from the dock into the unit; draw every belt in the direction work moves.
-    const from = at.get(flow.from), to = at.get(flow.to);
-    if (from === undefined || to === undefined) return [];
-    const key = `${flow.from} ${flow.to}`;
-    if (from.item && to.item && from.room === to.room) {
-      const a = center(from.item), b = center(to.item);
-      // A cell stands on its base above the line, so its belt joins top and bottom; others join side to side.
-      if (from.item.shape === "cell" || to.item.shape === "cell") {
-        const sy = a.y < b.y ? from.item.y + from.item.height : from.item.y, ey = a.y < b.y ? to.item.y : to.item.y + to.item.height;
-        return [{ key, kind: flow.kind, reading: flow.reading, points: [{ x: a.x, y: sy }, { x: a.x, y: (sy + ey) / 2 }, { x: b.x, y: (sy + ey) / 2 }, { x: b.x, y: ey }] }];
-      }
-      const sx = a.x < b.x ? from.item.x + from.item.width : from.item.x, ex = a.x < b.x ? to.item.x : to.item.x + to.item.width;
-      return [{ key, kind: flow.kind, reading: flow.reading, points: [{ x: sx, y: a.y }, { x: (sx + ex) / 2, y: a.y }, { x: (sx + ex) / 2, y: b.y }, { x: ex, y: b.y }] }];
-    }
-    if (from.room === undefined || from.item === undefined) return [];
-    const start = center(from.item), out: ScenePoint[] = [{ x: start.x, y: from.item.y + from.item.height }, { x: start.x, y: from.room.door.y - 6 }, { x: from.room.door.x, y: from.room.door.y - 6 }, from.room.door, { x: from.room.door.x, y: lane(from.room) }];
-    if (to.gate) {
-      const gateY = to.gate.y + to.gate.height / 2;
-      return [{ key, kind: flow.kind, reading: flow.reading, points: [...out, { x: layout.fence - 12, y: lane(from.room) }, { x: layout.fence - 12, y: gateY }, { x: to.gate.x, y: gateY }] }];
-    }
-    if (to.room === undefined || to.item === undefined) return [];
-    const end = center(to.item);
-    const into: ScenePoint[] = [{ x: to.room.door.x, y: lane(to.room) }, to.room.door, { x: to.room.door.x, y: to.room.door.y - 6 }, { x: end.x, y: to.room.door.y - 6 }, { x: end.x, y: to.item.y + to.item.height }];
-    const across = lane(from.room) === lane(to.room) ? [] : [{ x: spineX, y: lane(from.room) }, { x: spineX, y: lane(to.room) }];
-    return [{ key, kind: flow.kind, reading: flow.reading, points: [...out, ...across, ...into] }];
-  });
+/** Ports two or more belts share: a junction, drawn as one. */
+function junctions(belts: readonly BeltRoute[]) {
+  const counts = new Map<string, { point: ScenePoint; count: number }>();
+  for (const belt of belts) for (const point of [belt.points[0]!, belt.points.at(-1)!]) { const key = `${point.x} ${point.y}`; counts.set(key, { point, count: (counts.get(key)?.count ?? 0) + 1 }); }
+  return [...counts.values()].filter(({ count }) => count > 1).map(({ point }) => point);
+}
+
+/** A unit's faint area colour, from its id alone, so it is the same wherever and for whoever it is drawn. */
+function tint(unit: string) {
+  let hash = 0;
+  for (const character of unit) hash = Math.imul(hash ^ character.charCodeAt(0), 16777619) >>> 0;
+  return `hsl(${hash % 360} 40% 60% / .13)`;
+}
+
+/** What a machine is: its kind, a fold's count, and for a unit's main machine the runtime it runs on. */
+function kindText(machine: SceneMachine, unit?: SceneUnit) {
+  return machine.represented !== undefined ? `${machine.represented.length} ${machine.kind} nodes`
+    : unit?.id === machine.id && unit.runtime !== undefined ? `${RUNTIME_TEXT[unit.runtime]} unit` : machine.kind;
 }
 
 /** The inspector loads evidence only when opened; runtime-only values are shown as data. */
-function MachineInspector({ machine, hall, onLoadNode, onInvestigate, proposals, onSelectProposal, onFocus, onDiscuss, onClose }: {
-  machine: SceneMachine; hall?: SceneHall; onLoadNode?: (id: string) => Promise<OperationalNodeView>; onInvestigate?: (machine: SceneMachine, hall?: SceneHall) => void;
+function MachineInspector({ machine, unit, onLoadNode, onInvestigate, proposals, onSelectProposal, onFocus, onDiscuss, onClose }: {
+  machine: SceneMachine; unit?: SceneUnit; onLoadNode?: (id: string) => Promise<OperationalNodeView>; onInvestigate?: (machine: SceneMachine, unit?: SceneUnit) => void;
   proposals: readonly SceneProposal[]; onSelectProposal?: (id: string) => void; onFocus: () => void; onDiscuss?: () => void; onClose: () => void;
 }) {
   // A fold lists its members; the one chosen is inspected here, and only its own answer is ever shown.
@@ -1058,12 +1026,12 @@ function MachineInspector({ machine, hall, onLoadNode, onInvestigate, proposals,
   const worth = reading.state === "failing" || reading.state === "degraded" || reading.evidence === "runtime" || reading.evidence === "contradicted" || reading.observation === "unobserved";
   return <section className="dfRoomDetails" aria-label="Machine inspector">
     <h3>{machine.label}</h3>
-    <p>{machine.represented === undefined ? machine.kind : `${machine.represented.length} folded ${machine.kind} nodes`}{hall !== undefined && hall.id !== machine.id ? ` in ${hall.label}` : ""}</p>
+    <p>{machine.represented === undefined ? kindText(machine, unit) : `${machine.represented.length} folded ${machine.kind} nodes`}{unit !== undefined && unit.id !== machine.id ? ` in ${unit.label}` : ""}</p>
     <p className={`dfPlantReading s-${reading.observation} op-${reading.state}`}>{OBSERVATION_TEXT[reading.observation]}{reading.state === "unknown" ? "" : ` · ${reading.state}`}{reading.ratePerHour > 0 ? ` · ${rate(reading.ratePerHour)}` : ""}{reading.errorPermille > 0 ? ` · ${reading.errorPermille / 10}% errors` : ""}{reading.latencyMs > 0 ? ` · p95 ${reading.latencyMs} ms` : ""}</p>
     <p>{EVIDENCE_TEXT[reading.evidence]}</p>
     <button type="button" onClick={onFocus}>Focus on floor</button>
     {onDiscuss ? <button type="button" onClick={onDiscuss}>Discuss this machine</button> : null}
-    {onInvestigate && worth ? <button type="button" disabled={asked} onClick={() => { setAsked(true); onInvestigate(machine, hall); }}>{asked ? "Investigation queued" : "Investigate"}</button> : null}
+    {onInvestigate && worth ? <button type="button" disabled={asked} onClick={() => { setAsked(true); onInvestigate(machine, unit); }}>{asked ? "Investigation queued" : "Investigate"}</button> : null}
     <button type="button" onClick={onClose}>Close</button>
     {proposals.length === 0 ? null : <div aria-label="Changes affecting this machine">{proposals.map((proposal) => <button type="button" key={proposal.id} onClick={() => onSelectProposal?.(proposal.id)}>{proposal.title}</button>)}</div>}
     {folded === undefined ? null : member === undefined

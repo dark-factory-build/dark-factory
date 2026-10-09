@@ -4,9 +4,9 @@ import { createElement } from "react";
 import { act, create } from "react-test-renderer";
 import { FactoryScene } from "../../dist/src/factory-scene/factory-scene.js";
 import { breakRoomNook, layoutScene, placeWorkers } from "../../dist/src/factory-scene/scene.js";
-import { routeBetween } from "../../dist/src/factory-scene/movement.js";
+import { findRoute } from "../../dist/src/factory-scene/movement.js";
 import { workerFrames } from "../../dist/src/factory-scene/appearance.js";
-import { hallsOf } from "../../../../fixtures/scene.mjs";
+import { unitsOf } from "../../../../fixtures/scene.mjs";
 import { endsAt, messageAt, observe, send } from "../../dist/src/factory-scene/messages.js";
 
 const task = (id, agentId, status) => ({ id, agentId, projectId: "p", title: id, status, humanRequestIds: [] });
@@ -78,8 +78,8 @@ test("a pulse keeps to its route, paper flies over, and each end raises a hand i
   assert.ok(workerFrames(worker, { action: "walking", frame: 0, direction: "south", at: 0 }, undefined, undefined, undefined, 1).some((name) => name.endsWith(".walk.0")), "nobody stops walking to wave");
 });
 
-test("the floor sends a question down the corridors, its answer back, and new work from the tray", async () => {
-  const graph = hallsOf([..."abcdefghi"]);
+test("the floor sends a question along the walk between them, its answer back, and new work from the tray", async () => {
+  const graph = unitsOf([..."abcdefghi"]);
   const workers = [
     { id: "ada", name: "Ada", role: "worker", provider: "codex", activity: "busy", location: "working", nodeId: "a" },
     { id: "grace", name: "Grace", role: "worker", provider: "codex", activity: "busy", location: "working", nodeId: "h" },
@@ -88,7 +88,7 @@ test("the floor sends a question down the corridors, its answer back, and new wo
   ];
   const tasks = [task("t-ada", "ada", "running"), task("t-grace", "grace", "running"), task("t-linus", "linus", "queued"), task("t-margaret", "margaret", "queued")];
   const layout = layoutScene(graph), placements = placeWorkers(layout, workers);
-  const route = routeBetween(layout, placements.find(({ id }) => id === "ada"), placements.find(({ id }) => id === "grace"));
+  const route = findRoute(layout, placements.find(({ id }) => id === "ada"), placements.find(({ id }) => id === "grace"));
   const onRoute = (point) => { let from = placements.find(({ id }) => id === "ada"); for (const to of route.points) { const d = Math.hypot(to.x - from.x, to.y - from.y), d1 = Math.hypot(point.x - from.x, point.y - from.y), d2 = Math.hypot(to.x - point.x, to.y - point.y); if (Math.abs(d1 + d2 - d) < 0.01) return true; from = to; } return false; };
 
   const saved = { setTimeout: globalThis.setTimeout, clearTimeout: globalThis.clearTimeout, performance: globalThis.performance, requestAnimationFrame: globalThis.requestAnimationFrame, cancelAnimationFrame: globalThis.cancelAnimationFrame, window: globalThis.window, document: globalThis.document };
@@ -192,7 +192,7 @@ test("the floor sends a question down the corridors, its answer back, and new wo
 });
 
 test("recorded operations fly between the agent and the shelf or board, open what they used, and never replay", async () => {
-  const graph = hallsOf([..."abc"]);
+  const graph = unitsOf([..."abc"]);
   const workers = [
     { id: "ada", name: "Ada", role: "worker", provider: "codex", activity: "busy", location: "working", nodeId: "a" },
     { id: "grace", name: "Grace", role: "worker", provider: "codex", activity: "busy", location: "working", nodeId: "c" },
@@ -240,7 +240,7 @@ test("recorded operations fly between the agent and the shelf or board, open wha
     assert.deepEqual(ada(), before, "the agent never moves for it");
     assert.ok(marks("agent").some((node) => node.props["data-knowledge-key"] === "r1"), "then it rests beside the agent");
 
-    // The writer is walking to another hall when it posts: the paper leaves the sprite, not either seat.
+    // The writer is walking to another machine when it posts: the paper leaves the sprite, not either seat.
     const seat = point(renderer.root.findByProps({ "data-worker-id": "grace" }));
     const moved = workers.map((worker) => worker.id === "grace" ? { ...worker, nodeId: "a" } : worker);
     await act(async () => { renderer.update(scene({ workers: moved, knowledgeCues: [cue("r1", "ada", false, true)] })); });
@@ -281,7 +281,7 @@ test("recorded operations fly between the agent and the shelf or board, open wha
 });
 
 test("a recorded read sends an idle worker to the shelf once; a busy one stays put; nothing replays", async () => {
-  const graph = hallsOf([..."ab"]);
+  const graph = unitsOf([..."ab"]);
   const workers = [
     { id: "ada", name: "Ada", role: "worker", provider: "codex", activity: "busy", location: "working", nodeId: "a" },
     { id: "linus", name: "Linus", role: "worker", provider: "codex", activity: "idle", location: "resting" },
@@ -301,7 +301,7 @@ test("a recorded read sends an idle worker to the shelf once; a busy one stays p
   const tick = async (ms) => { await act(async () => { clock += ms; const bag = frames.size > 0 ? frames : timers; const [id, callback] = [...bag].at(-1); bag.delete(id); callback(clock); }); };
   const where = (id) => renderer.root.findByProps({ "data-worker-id": id }).props.transform;
   const pose = (id) => renderer.root.findByProps({ "data-worker-id": id }).findAllByType("use").map((use) => use.props.href);
-  const stand = breakRoomNook(layoutScene(graph), 0, 0).furniture.find((piece) => piece.errand === "shelf").stand;
+  const stand = breakRoomNook(layoutScene(graph)).furniture.find((piece) => piece.errand === "shelf").stand;
   // Scenery off: no ambient errands, so any walk to the shelf is the recorded one.
   const scene = (props) => createElement(FactoryScene, { graph, workers, tasks, appearance: { scenery: "off", animation: "follow-device" }, ...props });
   // Counts arrivals at the shelf over a stretch of floor time.
@@ -330,7 +330,7 @@ test("a recorded read sends an idle worker to the shelf once; a busy one stays p
     const xy = (node) => node.props.transform.match(/translate\(([-\d.]+) ([-\d.]+)\)/).slice(1).map(Number);
     const box = ([x, y]) => ({ left: x - 9, right: x + 9, top: y - 9, bottom: y + 9 });
     const [overHead, overImplement] = [xy(cues("agent").find((node) => node.props["data-knowledge-key"] === "r1")), xy(cues("board")[0])];
-    const nook = breakRoomNook(layoutScene(graph), 0, 0).furniture, board = nook.find((piece) => piece.errand === "board");
+    const nook = breakRoomNook(layoutScene(graph)).furniture, board = nook.find((piece) => piece.errand === "board");
     const signs = { board: "BOARD", missions: "MISSIONS", tasks: "TASKS", shelf: "LIBRARY" };
     for (const piece of nook.filter((item) => signs[item.errand])) {
       // The sign: 4 sprite units of text, scaled to the floor, under the implement's 16-unit frame.
