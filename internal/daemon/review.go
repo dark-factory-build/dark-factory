@@ -26,14 +26,6 @@ import (
 // reviewPR answers once the review operation is durable and runs it in the
 // background: a review outlasts the operator call that requested it.
 func (daemon *Daemon) reviewPR(ctx context.Context, project kernel.ProjectID, request api.ReviewRequest) (string, error) {
-	if strings.HasPrefix(request.RetryOperation, "publish-") {
-		// A refused publication is not retried at its revision; the operator
-		// clears it once the refusal's cause is gone, and the next pass publishes.
-		if cleared, err := daemon.store.ClearPublishFailure(ctx, project, request.RetryOperation); err != nil || !cleared {
-			return "", errors.New("review: publish failure not found")
-		}
-		return request.RetryOperation, nil
-	}
 	op, err := daemon.claimReview(ctx, project, request)
 	if err != nil {
 		return "", err

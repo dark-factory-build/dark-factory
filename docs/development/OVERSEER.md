@@ -330,8 +330,9 @@ and replaces its body. The App refuses your `publish_commit` and
 `create_pull_request` on that branch. When it cannot
 (a refused path, a symlink, a file over the bound, an indeterminate write), it
 wakes you once with `Escalated: factoryd cannot publish change CHANGE for task
-TASK: ...` and never retries that Change revision: send the task back to fix
-the cause, or raise it with `attempt request-human`. What follows is for
+TASK: ...` and retries that Change revision on its own an hour later, without
+waking you again: send the task back if the Change itself is the cause, or
+raise it with `attempt request-human`. What follows is for
 the work factoryd does not publish.
 
 The branch is `factory/<first 12 hex of change_id>`. The task's
