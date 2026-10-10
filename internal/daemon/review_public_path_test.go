@@ -651,14 +651,14 @@ func TestCodeownersRefusalEscalatesAndRecoversAfterApproval(t *testing.T) {
 	}
 	waitForMergePipeline(t, fixture.daemon)
 	op := lastDurableReview(t, fixture.store, project)
-	if op.Refused == false || !op.OwnerApproval || backend.enqueues != 1 || !strings.Contains(op.Escalation, "#12") || !strings.Contains(op.Escalation, "CODEOWNERS-protected path") {
+	if op.Refused == false || !op.OwnerApproval || backend.enqueues != 2 || !strings.Contains(op.Escalation, "#12") || !strings.Contains(op.Escalation, "CODEOWNERS-protected path") {
 		t.Fatalf("owner approval escalation = %+v enqueues=%d", op, backend.enqueues)
 	}
 	backend.enqueueRefusal = ""
 	if _, err := fixture.daemon.advanceReviewOperations(context.Background(), false); err != nil {
 		t.Fatal(err)
 	}
-	if backend.enqueues != 2 || lastDurableReview(t, fixture.store, project).OwnerApproval {
+	if backend.enqueues != 3 || lastDurableReview(t, fixture.store, project).OwnerApproval {
 		t.Fatalf("owner approval did not recover after retry: enqueues=%d", backend.enqueues)
 	}
 }
@@ -864,15 +864,15 @@ func TestRefusedEnqueueResendsEachTickAndEndsFromThePull(t *testing.T) {
 		}
 		return lastDurableReview(t, fixture.store, project)
 	}
-	if op := tick(); op.State != "enqueued" || op.Escalation != "" || op.Failures != 2 || backend.enqueues != 2 {
+	if op := tick(); op.State != "enqueued" || op.Escalation != "" || op.Failures != 2 || backend.enqueues != 3 {
 		t.Fatalf("refused again: %+v (enqueues %d)", op, backend.enqueues)
 	}
 	backend.enqueueRefusal = ""
-	if op := tick(); op.State != "enqueued" || op.Failures != 0 || op.Enqueues != 1 || backend.enqueues != 3 {
+	if op := tick(); op.State != "enqueued" || op.Failures != 0 || op.Enqueues != 1 || backend.enqueues != 4 {
 		t.Fatalf("accepted: %+v (enqueues %d)", op, backend.enqueues)
 	}
 	backend.pull = &review.Pull{Head: publishedReviewRequest().Head, State: "closed"}
-	if op := tick(); op.State != "closed" || backend.enqueues != 3 {
+	if op := tick(); op.State != "closed" || backend.enqueues != 4 {
 		t.Fatalf("closed pull: %+v (enqueues %d)", op, backend.enqueues)
 	}
 }
