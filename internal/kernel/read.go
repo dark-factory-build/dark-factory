@@ -218,7 +218,7 @@ func scanTask(scanner rowScanner) (Task, bool, error) {
 	rev, revisionErr := NewRevision(revision)
 	created, createdErr := NewUnixMillis(createdAt)
 	updated, updatedErr := NewUnixMillis(updatedAt)
-	if idErr != nil || projectErr != nil || agentErr != nil || incarnationErr != nil || workRevisionErr != nil || statusErr != nil || revisionErr != nil || createdErr != nil || updatedErr != nil || byteLen(title) < 1 || byteLen(title) > 1024 || byteLen(body) > 131072 || priority < -1_000_000 || priority > 1_000_000 || updatedAt < createdAt {
+	if idErr != nil || projectErr != nil || agentErr != nil || incarnationErr != nil || workRevisionErr != nil || statusErr != nil || revisionErr != nil || createdErr != nil || updatedErr != nil || byteLen(title) < 1 || byteLen(title) > 1024 || byteLen(body) > MaxContinuationTaskBytes || priority < -1_000_000 || priority > 1_000_000 || updatedAt < createdAt {
 		return Task{}, false, fmt.Errorf("%w: invalid task row", ErrCorruptState)
 	}
 	if agentID.zero() && status != TaskQueued && status != TaskCancelled {

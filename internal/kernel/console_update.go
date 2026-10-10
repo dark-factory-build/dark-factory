@@ -389,7 +389,7 @@ func (store *Store) updateTask(ctx context.Context, digest *AttemptDigest, id Ta
 	if patch.Cancel {
 		status, completed = TaskCancelled.String(), at.Int64()
 	}
-	if byteLen(task.Title) < 1 || byteLen(task.Title) > 1024 || byteLen(task.Body) > 131072 || task.Priority < -1_000_000 || task.Priority > 1_000_000 {
+	if byteLen(task.Title) < 1 || byteLen(task.Title) > 1024 || byteLen(task.Body) > MaxContinuationTaskBytes || task.Priority < -1_000_000 || task.Priority > 1_000_000 {
 		return Task{}, tx.Rollback(fmt.Errorf("%w: invalid task update", ErrInvalidValue))
 	}
 	var sentBack any

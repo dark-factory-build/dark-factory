@@ -452,7 +452,7 @@ func validateNewAgent(spec NewAgent) error {
 }
 
 func validateNewTask(spec NewTask) error {
-	if spec.ID.zero() || spec.ProjectID.zero() || spec.IncarnationID.zero() || byteLen(spec.Title) < 1 || byteLen(spec.Title) > 1024 || byteLen(spec.Body) > 131072 || spec.Priority < -1_000_000 || spec.Priority > 1_000_000 {
+	if spec.ID.zero() || spec.ProjectID.zero() || spec.IncarnationID.zero() || byteLen(spec.Title) < 1 || byteLen(spec.Title) > 1024 || byteLen(spec.Body) > MaxContinuationTaskBytes || spec.Priority < -1_000_000 || spec.Priority > 1_000_000 {
 		return fmt.Errorf("%w: invalid task", ErrInvalidValue)
 	}
 	seenPrerequisites := make(map[TaskID]bool, len(spec.Prerequisites))
