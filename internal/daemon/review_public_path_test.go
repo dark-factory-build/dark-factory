@@ -552,7 +552,7 @@ func TestMergeQueueEjectionWithNoHeadFailureRequeuesOnceThenSendsBack(t *testing
 	}
 }
 
-// An enqueue the App refused as UNPROCESSABLE retries each merge pass and
+// An enqueue the App refused as UNPROCESSABLE gets a small retry budget and
 // remains one escalated overseer item.
 func TestRefusedEnqueueBecomesAnOverseerItem(t *testing.T) {
 	fixture, project, _, settle := publishedTask(t)
@@ -573,7 +573,7 @@ func TestRefusedEnqueueBecomesAnOverseerItem(t *testing.T) {
 		}
 	}
 	op := lastDurableReview(t, fixture.store, project)
-	if op.State != "enqueued" || op.Handled || op.Retryable || !op.Refused || backend.enqueues != 4 || backend.reviews != 1 || !strings.Contains(op.Escalation, "refuses this exact head") || !strings.Contains(op.Escalation, "UNPROCESSABLE") {
+	if op.State != "enqueued" || op.Handled || op.Retryable || !op.Refused || backend.enqueues != review.RefusedRetryLimit || op.RefusedAttempts != review.RefusedRetryLimit || backend.reviews != 1 || !strings.Contains(op.Escalation, "refuses this exact head") || !strings.Contains(op.Escalation, "UNPROCESSABLE") {
 		t.Fatalf("refused enqueue operation = %+v enqueues=%d reviews=%d", op, backend.enqueues, backend.reviews)
 	}
 	overseer, err := fixture.store.CreateAgent(ctx, kernel.NewAgent{ID: mustAgentID(t, testID(234)), ProjectID: project, Name: "overseer", Role: kernel.RoleOrchestrator, Provider: kernel.ProviderCodex, ToolBudgetLimit: 2}, mustKernelTime(t, 1001))
