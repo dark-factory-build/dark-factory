@@ -423,7 +423,7 @@ func validEnqueueTaskInput(input EnqueueTaskInput) bool {
 			return false
 		}
 	}
-	return validID(input.ID) && validID(input.ProjectID) && validOptionalID(input.RepositoryID) && validOptionalID(input.AssignedAgentID) && validID(input.IncarnationID) && validText(input.Title, 1, 1024) && validText(input.Body, 0, 131072) && input.Priority >= -1_000_000 && input.Priority <= 1_000_000 && len(input.Content) <= 8
+	return validID(input.ID) && validID(input.ProjectID) && validOptionalID(input.RepositoryID) && validOptionalID(input.AssignedAgentID) && validID(input.IncarnationID) && validText(input.Title, 1, 1024) && validText(input.Body, 0, kernel.MaxContinuationTaskBytes) && input.Priority >= -1_000_000 && input.Priority <= 1_000_000 && len(input.Content) <= 8
 }
 
 func (client *OperatorClient) UpdateTask(ctx context.Context, input OverseerTaskUpdateInput) (MutationResult, error) {
@@ -1209,7 +1209,7 @@ func validSnapshot(snapshot DashboardSnapshot) bool {
 
 func validOverseerTaskCreateInput(input OverseerTaskCreateInput) bool {
 	return validID(input.ID) && validOptionalID(input.AssignedAgentID) && validID(input.IncarnationID) && input.ID != input.IncarnationID &&
-		validText(input.Title, 1, 1024) && validText(input.Body, 0, 131072) && input.Priority >= -1_000_000 && input.Priority <= 1_000_000
+		validText(input.Title, 1, 1024) && validText(input.Body, 0, kernel.MaxContinuationTaskBytes) && input.Priority >= -1_000_000 && input.Priority <= 1_000_000
 }
 
 func validOverseerTaskUpdateInput(input OverseerTaskUpdateInput) bool {
@@ -1222,7 +1222,7 @@ func validOverseerTaskUpdateInput(input OverseerTaskUpdateInput) bool {
 	if input.Retry && (input.Title != nil || input.Body != nil || input.Priority != nil || input.Cancel) {
 		return false
 	}
-	if input.Title != nil && !validText(*input.Title, 1, 1024) || input.Body != nil && !validText(*input.Body, 0, 131072) {
+	if input.Title != nil && !validText(*input.Title, 1, 1024) || input.Body != nil && !validText(*input.Body, 0, kernel.MaxContinuationTaskBytes) {
 		return false
 	}
 	if input.Priority != nil && (*input.Priority < -1_000_000 || *input.Priority > 1_000_000) {
