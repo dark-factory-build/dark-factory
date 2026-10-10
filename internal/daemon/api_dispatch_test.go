@@ -2029,7 +2029,7 @@ func TestDaemonOperatorReadsAdmitOnlySpecialistCarrier(t *testing.T) {
 		t.Fatal(err)
 	}
 	policy, after, instruction := kernel.IdleStandingInstruction, uint32(3600), "Review the factory."
-	if _, err := fixture.store.UpdateAgent(ctx, agent.ID, agent.Revision, kernel.AgentPatch{IdlePolicy: &policy, IdleAfterSeconds: &after, IdleInstruction: &instruction}, mustKernelTime(t, 2000)); err != nil {
+	if _, err := fixture.store.UpdateAgent(ctx, agent.ID, agent.Revision, kernel.AgentPatch{IdlePolicy: &policy, IdleAfterSeconds: &after, IdleInstruction: &instruction}, agent.UpdatedAt); err != nil {
 		t.Fatal(err)
 	}
 	for name, invoke := range map[string]func() error{
