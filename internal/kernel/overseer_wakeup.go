@@ -425,6 +425,75 @@ func raiseStalledItems(ctx context.Context, tx *writeTx, agent Agent, at UnixMil
 	return nil
 }
 
+// OverseerItem is one of an overseer's items as the operator sees it: Due in
+// its next wake (Line as the wake names it), or stalled since Carrier last
+// named it.
+type OverseerItem struct {
+	Agent   AgentID
+	Due     bool
+	Line    string
+	Carrier []byte
+}
+
+// OverseerItems reads, for each standing overseer of project, the items its
+// next wake names and the items it left stalled, by the wake's own queries.
+func (store *Store) OverseerItems(ctx context.Context, project ProjectID, at UnixMillis, health ...OverseerHealth) ([]OverseerItem, error) {
+	read, err := store.beginRead(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer read.Close()
+	rows, err := read.connection.QueryContext(ctx, `SELECT `+agentColumns+` FROM agents WHERE project_id = ? AND role = 'orchestrator' AND idle_policy = 'standing_instruction' AND archived = 0 ORDER BY id`, project.Bytes())
+	if err != nil {
+		return nil, err
+	}
+	var agents []Agent
+	for rows.Next() {
+		agent, found, err := scanAgent(rows)
+		if err != nil || !found {
+			return nil, errors.Join(err, ErrCorruptState, rows.Close())
+		}
+		agents = append(agents, agent)
+	}
+	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
+		return nil, err
+	}
+	var items []OverseerItem
+	for _, agent := range agents {
+		for _, due := range []bool{true, false} {
+			query := overseerStalledItems
+			if due {
+				query = overseerWakeItems
+			}
+			rows, err := read.connection.QueryContext(ctx, query, overseerItemArgs(agent, at.Int64(), health)...)
+			if err != nil {
+				return nil, err
+			}
+			for rows.Next() {
+				item := OverseerItem{Agent: agent.ID, Due: due}
+				var escalation, ripe bool
+				var key, counts string
+				if due {
+					err = rows.Scan(&escalation, &item.Line, &key, &counts)
+				} else {
+					err = rows.Scan(&item.Carrier, &item.Line, &ripe)
+				}
+				if err != nil {
+					return nil, errors.Join(err, rows.Close())
+				}
+				if escalation {
+					item.Line += " " + key
+				}
+				items = append(items, item)
+			}
+			if err := errors.Join(rows.Err(), rows.Close()); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return items, nil
+}
+
 // overseerWake returns the carrier body for agent's due items, if any.
 func overseerWake(ctx context.Context, connection *sql.Conn, agent Agent, at int64, health []OverseerHealth) (string, bool, error) {
 	rows, err := connection.QueryContext(ctx, overseerWakeItems, overseerItemArgs(agent, at, health)...)

@@ -83,10 +83,11 @@ type Daemon struct {
 	pipelineAt   atomic.Int64 // unix nanoseconds of the next merge-stage pass
 	pipelineBusy atomic.Bool
 	// The scheduler's Change reclaim pass (tickChangeReclaim), alike, and the
-	// Changes it kept, each logged once; only the pass in flight touches it.
+	// Changes it kept, each logged once with its project and reason; healthMu
+	// guards it for the operator's health read.
 	reclaimAt   atomic.Int64
 	reclaimBusy atomic.Bool
-	keptChanges map[kernel.ChangeID]bool
+	keptChanges map[kernel.ChangeID][2]string
 	store       *kernel.Store
 	now         func() time.Time
 	// livenessClock is deliberately separate from now. The latter is also
@@ -315,7 +316,7 @@ func (daemon *Daemon) markAttemptAPICall(ctx context.Context, call api.Call) {
 func (daemon *Daemon) dispatch(ctx context.Context, call api.Call) api.Reply {
 	switch call.Kind() {
 	case api.CallHealth:
-		return daemon.health(ctx)
+		return daemon.health(ctx, call)
 	case api.CallSnapshot:
 		return daemon.snapshot(ctx)
 	case api.CallHumanRequests:
@@ -1046,11 +1047,70 @@ func (daemon *Daemon) notifyPeerDelivery(ctx context.Context, question kernel.Pe
 	return err
 }
 
-func (daemon *Daemon) health(ctx context.Context) api.Reply {
+func (daemon *Daemon) health(ctx context.Context, call api.Call) api.Reply {
 	if _, err := daemon.store.Factory(ctx); err != nil {
 		return newErrorReply(remoteErrorCode(err))
 	}
-	return api.NewHealthReply(api.HealthStatus{Ready: true})
+	project, _ := call.HealthProject()
+	if project == "" {
+		return api.NewHealthReply(api.HealthStatus{Ready: true})
+	}
+	id, err := decodeID(project, kernel.ProjectIDFromBytes)
+	if err != nil {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	status, err := daemon.oversight(ctx, id)
+	if err != nil {
+		return newErrorReply(remoteErrorCode(err))
+	}
+	return api.NewHealthReply(status)
+}
+
+// oversight is what factoryd waits on in project (api.HealthStatus).
+func (daemon *Daemon) oversight(ctx context.Context, project kernel.ProjectID) (api.HealthStatus, error) {
+	status := api.HealthStatus{Ready: true, KeptChanges: map[string]int{}}
+	at, err := daemon.timestamp()
+	if err != nil {
+		return status, err
+	}
+	health := daemon.overseerHealth()
+	for _, held := range health {
+		if held.Project == (kernel.ProjectID{}) || held.Project == project {
+			status.Conditions = append(status.Conditions, api.HealthCondition{Key: held.Key, Detail: held.Detail, SinceMS: held.Since.Int64()})
+		}
+	}
+	items, err := daemon.store.OverseerItems(ctx, project, at, health...)
+	if err != nil {
+		return status, err
+	}
+	for _, item := range items {
+		view := api.OverseerItem{AgentID: item.Agent.String(), State: "stalled", Line: item.Line, CarrierTaskID: hex.EncodeToString(item.Carrier)}
+		if item.Due {
+			view.State = "due"
+		}
+		status.OverseerItems = append(status.OverseerItems, view)
+	}
+	daemon.healthMu.Lock()
+	for _, kept := range daemon.keptChanges {
+		if kept[0] == project.String() {
+			status.KeptChanges[kept[1]]++
+		}
+	}
+	daemon.healthMu.Unlock()
+	repositories, err := daemon.store.ProjectRepositories(ctx, project)
+	if err != nil {
+		return status, err
+	}
+	// ponytail: one bounded fetch check per repository, in turn, as
+	// project repository fetch runs it; parallelise if projects grow many.
+	for _, repository := range repositories {
+		view, err := daemon.RepositoryReadiness(ctx, repository.ID, true)
+		if err != nil {
+			return status, err
+		}
+		status.Repositories = append(status.Repositories, view)
+	}
+	return status, nil
 }
 
 func (daemon *Daemon) snapshot(ctx context.Context) api.Reply {

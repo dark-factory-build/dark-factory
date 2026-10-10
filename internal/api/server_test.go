@@ -1375,7 +1375,7 @@ func TestAuthenticatedDispatchRefreshesTransportDeadline(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	if status, err := client.Health(ctx); err != nil || !status.Ready {
+	if status, err := client.Health(ctx, ""); err != nil || !status.Ready {
 		t.Fatalf("delayed authenticated response = %+v, %v", status, err)
 	}
 	if err := <-done; err != nil {
