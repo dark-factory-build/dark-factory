@@ -52,8 +52,11 @@ Exactly one per review. Weak findings: a `tentative` observation, not a proposal
    "contribution"` and `task_id` of the task, or `record_id: "issue:#N"` for
    an issue (one of the two is required). A contribution naming an active
    task is attached to it automatically and its worker's next run receives
-   it. Use `attempt peer ask` only when the task is running and the point is
-   urgent. This is also how to recommend a smaller solution or better
+   it. A contribution or amendment naming a task also creates its durable
+   peer question automatically; use `attempt peer ask` for an urgent point
+   that is not being recorded as a contribution. Questions may target queued,
+   running, blocked, or recently finished tasks. This is also how to recommend
+   a smaller solution or better
    acceptance criteria; it is advice, never an edit or reassignment. To judge
    an exact commit use `record_type: "review"` with `source_revision` = that
    full SHA (required); it never approves or blocks a merge. Research
