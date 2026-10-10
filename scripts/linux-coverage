@@ -73,7 +73,6 @@ test internal/daemon/repository_readiness_darwin_test.go shared L08
 test internal/daemon/runtime_darwin_test.go linux-equivalent L03
 test internal/daemon/scheduler_darwin_test.go shared L08
 test internal/daemon/settlement_darwin_test.go shared L08
-test internal/daemon/shell_provider_e2e_darwin_test.go shared L08
 test internal/daemon/success_source_proposal_darwin_test.go shared L08
 test internal/daemon/supervisor_admitted_identity_darwin_test.go linux-equivalent L04
 test internal/daemon/supervisor_control_eof_darwin_test.go shared L08
@@ -87,6 +86,7 @@ test internal/e2e/browser_pty_darwin_test.go linux-equivalent L08
 test internal/e2e/daemon_blackbox_darwin_test.go shared L08
 test internal/e2e/daemon_handover_darwin_test.go shared L08
 test internal/e2e/database_darwin_test.go shared L08
+test internal/e2e/orchestrator_acceptance_darwin_test.go shared L08
 test internal/e2e/service_blackbox_darwin_test.go linux-equivalent L11
 test internal/install/install_darwin_test.go linux-equivalent L03
 test internal/install/local_api_darwin_test.go linux-equivalent L03
