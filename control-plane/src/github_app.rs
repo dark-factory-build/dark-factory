@@ -761,6 +761,9 @@ pub(crate) struct CheckResult {
     pub(crate) url: String,
     /// The pull request's base branch rules require this check by name.
     pub(crate) required: bool,
+    /// A failed check's failure annotations: the failing tests CI names.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) annotations: Vec<String>,
 }
 
 impl AppAuthority {
@@ -3719,13 +3722,24 @@ impl Authority {
         {
             return Err(OperationError::Unavailable);
         }
-        let mut checks = response
-            .check_runs
-            .into_iter()
-            .map(CheckResult::try_from)
-            .collect::<Result<Vec<_>, _>>()?;
-        for check in &mut checks {
+        let mut checks = Vec::with_capacity(response.check_runs.len());
+        let mut annotated = 0;
+        for run in response.check_runs {
+            let id = run.id;
+            let mut check = CheckResult::try_from(run)?;
             check.required = required.contains(&check.name);
+            // Best effort, as for a merge group: an unreadable list names no tests.
+            if failed(check.conclusion.as_deref()) && annotated < MERGE_GROUP_JOBS {
+                annotated += 1;
+                let annotations: Vec<Annotation> = github_json(
+                    &format!("{api}/check-runs/{id}/annotations?per_page=100"),
+                    token.as_str(),
+                )
+                .await
+                .unwrap_or_default();
+                check.annotations = failure_lines(annotations);
+            }
+            checks.push(check);
         }
         checks.sort_by(|left, right| left.name.cmp(&right.name));
         Ok(ChecksResult {
@@ -4561,6 +4575,7 @@ struct CheckRuns {
 #[cfg(target_arch = "wasm32")]
 #[derive(Deserialize)]
 struct CheckRun {
+    id: i64,
     name: String,
     status: String,
     conclusion: Option<String>,
@@ -4599,6 +4614,7 @@ impl TryFrom<CheckRun> for CheckResult {
             conclusion: check.conclusion,
             url: check.html_url,
             required: false,
+            annotations: Vec::new(),
         })
     }
 }
@@ -4716,21 +4732,26 @@ impl WorkflowJob {
         failed(self.conclusion.as_deref())
     }
 
-    /// Bounded failure annotations: the failing test lines CI writes, and
-    /// GitHub's own notes on a cancelled job or lost runner.
     fn into_result(self, annotations: Vec<Annotation>) -> MergeGroupJob {
         MergeGroupJob {
             name: bounded_line(&self.name),
             conclusion: self.conclusion.unwrap_or_default(),
-            annotations: annotations
-                .into_iter()
-                .filter(|annotation| annotation.annotation_level == "failure")
-                .map(|annotation| bounded_line(&annotation.message))
-                .filter(|line| !line.is_empty())
-                .take(MERGE_GROUP_ANNOTATIONS)
-                .collect(),
+            annotations: failure_lines(annotations),
         }
     }
+}
+
+/// Bounded failure annotations: the failing test lines CI writes, and
+/// GitHub's own notes on a cancelled job or lost runner.
+#[cfg(any(target_arch = "wasm32", test))]
+fn failure_lines(annotations: Vec<Annotation>) -> Vec<String> {
+    annotations
+        .into_iter()
+        .filter(|annotation| annotation.annotation_level == "failure")
+        .map(|annotation| bounded_line(&annotation.message))
+        .filter(|line| !line.is_empty())
+        .take(MERGE_GROUP_ANNOTATIONS)
+        .collect()
 }
 
 #[cfg(any(target_arch = "wasm32", test))]

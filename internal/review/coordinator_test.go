@@ -84,7 +84,7 @@ func (b *fakeBackend) ObservePull(_ context.Context, op Operation) (Pull, error)
 		return Pull{}, b.observeErr
 	}
 	if b.pull == nil {
-		return Pull{Head: op.Request.Head, State: "open"}, nil
+		return Pull{Head: op.Request.Head, State: "open", Checks: []string{"required=success"}}, nil
 	}
 	return *b.pull, nil
 }
@@ -202,6 +202,55 @@ func TestRequestChangesResponseLossIsReconciledForRouting(t *testing.T) {
 	op, err := c.Start(context.Background(), request)
 	if err != nil || op.State != "completed" || !op.Submitted || !op.RoutePending {
 		t.Fatalf("reconciled request changes=%+v err=%v backend=%+v", op, err, backend)
+	}
+}
+
+type pollingBackend struct {
+	fakeBackend
+	pulls []Pull
+}
+
+func (b *pollingBackend) ObservePull(_ context.Context, op Operation) (Pull, error) {
+	pull := b.pulls[0]
+	if len(b.pulls) > 1 {
+		b.pulls = b.pulls[1:]
+	}
+	if pull.Head == "" {
+		pull.Head, pull.State = op.Request.Head, "open"
+	}
+	return pull, nil
+}
+
+// #1582: review waits for the published head's required checks. A red head
+// goes back to its author naming the failing tests, and spends no review.
+func TestReviewWaitsForTheHeadsRequiredChecks(t *testing.T) {
+	checksPoll = time.Millisecond
+	defer func() { checksPoll = time.Minute }()
+	conflicting, failed := false, Pull{Failing: []string{"required"}, Tests: strings.Split("--- FAIL: TestA (0.01s),1,2,3,4,5,6,7,8,9,10", ",")}
+	for _, test := range []struct {
+		name    string
+		pulls   []Pull
+		age     time.Duration
+		state   string
+		reviews int
+		detail  string
+	}{
+		{name: "red after running", pulls: []Pull{{}, {Pending: true}, failed}, state: "ejected", detail: "Not reviewed: its checks failed. Exact head " + reviewRequest().Head + " cannot merge. Failing checks: required.\n- --- FAIL: TestA (0.01s)\n"},
+		{name: "green after running", pulls: []Pull{{Pending: true}, {Checks: []string{"required=success"}}}, state: "enqueued", reviews: 1},
+		{name: "no required check past the grace", pulls: []Pull{{}}, age: checksGrace, state: "enqueued", reviews: 1},
+		{name: "still running past the grace", pulls: []Pull{{Pending: true}, {Checks: []string{"required=success"}}}, age: checksGrace, state: "enqueued", reviews: 1},
+		{name: "conflict", pulls: []Pull{{Mergeable: &conflicting}}, state: "ejected", detail: "conflicts with main"},
+		{name: "head moved", pulls: []Pull{{Head: strings.Repeat("c", 40), State: "open"}}, state: "superseded"},
+	} {
+		backend := &pollingBackend{pulls: test.pulls}
+		c := Coordinator{Store: &memoryStore{}, Backend: backend, Now: time.Now}
+		op, err := c.Resume(context.Background(), Operation{ID: "op", Request: reviewRequest(), State: "running", CreatedAt: time.Now().Add(-test.age)})
+		if err != nil || op.State != test.state || backend.reviews != test.reviews || op.RoutePending != (test.state == "ejected") || !strings.Contains(op.Detail, test.detail) {
+			t.Fatalf("%s: operation=%+v err=%v reviews=%d", test.name, op, err, backend.reviews)
+		}
+		if strings.Contains(op.Detail, "\n- 10") {
+			t.Fatalf("%s: more than ten failing tests: %q", test.name, op.Detail)
+		}
 	}
 }
 

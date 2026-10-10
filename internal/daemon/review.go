@@ -832,26 +832,27 @@ func (b *daemonReviewBackend) ObservePull(ctx context.Context, operation review.
 	if err != nil {
 		return review.Pull{}, err
 	}
-	pull.Failing, pull.Pending, pull.Checks, err = requiredChecks(response)
-	return pull, err
+	return pull, requiredChecks(response, &pull)
 }
 
 // requiredChecks reads the failing and unfinished checks the base branch's
 // rules require. An optional check that fails or never finishes decides
-// nothing: it cannot block the merge.
-func requiredChecks(response json.RawMessage) (failing []string, pending bool, states []string, err error) {
+// nothing: it cannot block the merge, but its failing tests explain one.
+func requiredChecks(response json.RawMessage, pull *review.Pull) error {
 	var checks struct {
 		Checks []struct {
-			Name       string  `json:"name"`
-			Status     string  `json:"status"`
-			Conclusion *string `json:"conclusion"`
-			Required   bool    `json:"required"`
+			Name        string   `json:"name"`
+			Status      string   `json:"status"`
+			Conclusion  *string  `json:"conclusion"`
+			Required    bool     `json:"required"`
+			Annotations []string `json:"annotations"`
 		} `json:"checks"`
 	}
 	if json.Unmarshal(response, &checks) != nil {
-		return nil, false, nil, errors.New("review: Maintainer returned invalid checks")
+		return errors.New("review: Maintainer returned invalid checks")
 	}
 	for _, check := range checks.Checks {
+		pull.Tests = append(pull.Tests, check.Annotations...)
 		if !check.Required {
 			continue
 		}
@@ -859,16 +860,16 @@ func requiredChecks(response json.RawMessage) (failing []string, pending bool, s
 		if check.Conclusion != nil {
 			conclusion = *check.Conclusion
 		}
-		states = append(states, check.Name+"="+conclusion)
+		pull.Checks = append(pull.Checks, check.Name+"="+conclusion)
 		switch {
 		case check.Conclusion == nil:
-			pending = true
+			pull.Pending = true
 		case *check.Conclusion != "success" && *check.Conclusion != "neutral" && *check.Conclusion != "skipped":
-			failing = append(failing, check.Name)
+			pull.Failing = append(pull.Failing, check.Name)
 		}
 	}
-	sort.Strings(states)
-	return failing, pending, states, nil
+	sort.Strings(pull.Checks)
+	return nil
 }
 
 func (b *daemonReviewBackend) call(ctx context.Context, name string, arguments map[string]any) error {
