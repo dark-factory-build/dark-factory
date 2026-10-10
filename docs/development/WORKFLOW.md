@@ -4,15 +4,7 @@ This is a reference for local development, checks, releases, and installation.
 
 ## Local development
 
-The worktree helper fetches the configured origin default branch before creating
-the branch and checkout:
-
-```sh
-./scripts/new-worktree.sh <slug>
-cd .worktrees/<slug>
-```
-
-Prefer deleting obsolete behavior and duplicated machinery over compatibility
+Create a worktree as [CONTRIBUTING.md](../../CONTRIBUTING.md) shows. Prefer deleting obsolete behavior and duplicated machinery over compatibility
 code, feature flags, or speculative abstractions.
 
 The routine source check is:
@@ -45,7 +37,7 @@ and `--release` runs the source check plus release and packaging fixtures. The s
 protected CI workflow chooses these modes from the complete merge-queue diff;
 uncertain or mixed paths use the full gate.
 
-For CI edits, run the affected gate fixtures and source checks, adding a full
+For CI edits, run the affected source checks, adding a full
 local run where that resolves a concrete risk. Authors and reviewers do not
 repeat the entire suite merely because a PR is about to enter the queue.
 

@@ -876,11 +876,22 @@ func transitionHumanRequestsForRun(ctx context.Context, connection *sql.Conn, ru
 		if preserveCondition != nil && bytes.Equal(item.id.Bytes(), preserveCondition.Bytes()) {
 			continue
 		}
-		var continuationWaiting int
-		if err := connection.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM continuations WHERE condition_kind='human_request' AND condition_id=? AND state IN ('waiting','queued'))`, item.id.Bytes()).Scan(&continuationWaiting); err != nil {
+		var continuationID []byte
+		var continuationRevision int64
+		var continuationWaiting, taskTerminal int
+		if err := connection.QueryRowContext(ctx, `SELECT c.id, c.revision,
+			EXISTS(SELECT 1 FROM tasks t JOIN runs r ON r.task_id = t.id AND r.task_incarnation_id = t.incarnation_id AND r.admitted_task_work_revision = t.work_revision
+				WHERE r.id = ? AND t.status NOT IN ('queued', 'running')
+				  AND NOT (r.terminal_kind = 'cancelled' AND r.terminal_detail = 'yielded awaiting human_request'))
+			FROM continuations c WHERE c.condition_kind='human_request' AND c.condition_id=? AND c.state IN ('waiting','queued')
+			ORDER BY c.revision DESC LIMIT 1`, runID.Bytes(), item.id.Bytes()).Scan(&continuationID, &continuationRevision, &taskTerminal); err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return nil, err
 		}
-		if continuationWaiting != 0 {
+		continuationWaiting = 0
+		if len(continuationID) != 0 {
+			continuationWaiting = 1
+		}
+		if continuationWaiting != 0 && !(terminal && taskTerminal != 0) {
 			continue
 		}
 		if isCancel {
@@ -925,6 +936,17 @@ func transitionHumanRequestsForRun(ctx context.Context, connection *sql.Conn, ru
 			return nil, err
 		}
 		pending = append(pending, pendingInvalidation{kind: EntityHumanRequest, id: item.id.Bytes(), revision: item.revision.Int64() + 1, deleted: target == HumanRequestStale || target == HumanRequestResolved})
+		if target == HumanRequestStale && continuationWaiting != 0 {
+			continuation, err := ContinuationIDFromBytes(continuationID)
+			if err != nil {
+				return nil, fmt.Errorf("%w: invalid stale human continuation", ErrCorruptState)
+			}
+			result, err := connection.ExecContext(ctx, `UPDATE continuations SET state='cancelled', resolution_detail=?, resolved_at_ms=?, revision=revision+1, updated_at_ms=? WHERE id=? AND state IN ('waiting','queued') AND revision=?`, "human request stale: task terminal", at.Int64(), at.Int64(), continuation.Bytes(), continuationRevision)
+			if err := requireOneRow(result, err); err != nil {
+				return nil, err
+			}
+			pending = append(pending, pendingInvalidation{kind: EntityContinuation, id: continuation.Bytes(), revision: continuationRevision + 1})
+		}
 	}
 	return pending, nil
 }

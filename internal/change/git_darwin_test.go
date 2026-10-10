@@ -1122,6 +1122,32 @@ func TestFreshSelectionStartsFromOriginDefaultBranchNotCheckout(t *testing.T) {
 	}
 }
 
+// A repair of a pull request a person opened starts from the pull request's
+// head, which the registered checkout and its base branch do not have.
+func TestFreshSelectionFetchesAPullRequestHeadNotOnTheBase(t *testing.T) {
+	ctx := context.Background()
+	fixture := newLocalGitFixture(t, "sha1")
+	remote := newLocalGitFixture(t, "sha1")
+	runFixtureGit(t, fixture.git, fixture.repository, "remote", "add", "origin", remote.repository)
+	// Fixture-only local transport; production keeps Git's protocol policy.
+	runFixtureGit(t, fixture.git, fixture.repository, "config", "protocol.file.allow", "always")
+	runFixtureGit(t, remote.git, remote.repository, "commit", "--quiet", "--allow-empty", "-m", "pull request work")
+	head := strings.TrimSpace(runFixtureGitOutput(t, remote.git, remote.repository, "rev-parse", "HEAD"))
+	runFixtureGit(t, remote.git, remote.repository, "update-ref", "refs/pull/7/head", head)
+	runFixtureGit(t, remote.git, remote.repository, "reset", "--quiet", "--hard", "HEAD~1")
+	source, err := InspectRepositorySource(ctx, fixture.git, fixture.repository, "", fixture.identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	selected, err := SelectRegisteredGit(ctx, fixture.git, fixture.repository, "refs/pull/7/head", source)
+	if err != nil || selected.Base().Hex() != head {
+		t.Fatalf("base=%s want pull request head %s: %v", selected.Base().Hex(), head, err)
+	}
+	if _, err := SelectRegisteredGit(ctx, fixture.git, fixture.repository, "refs/pull/8/head", source); err == nil || !strings.Contains(err.Error(), "source refresh failed") {
+		t.Fatalf("selected a pull request the origin does not have: %v", err)
+	}
+}
+
 // The test-only Git entry points below drive native Git through the same
 // authority as production without the private-administration layout.
 
