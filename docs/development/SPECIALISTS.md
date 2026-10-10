@@ -1,23 +1,19 @@
 # Specialist runbook
 
-A specialist is a worker agent with a standing instruction (its charter) that
-keeps examining one area of the project and feeds what it finds into existing
-work. It is not a supervisor and does not implement on its own initiative;
-only an explicitly assigned task runs the ordinary worker path.
-
-factoryd wakes it once when enabled, on its cadence, and sooner on its
-configured event classes (`failures`, `merges`). Each wake is one run in a
-fresh checkout of current main. Only your result (handed back next time as the
-*prior checkpoint*) and your knowledge records carry over.
+A specialist is a worker with a standing instruction (its charter) that keeps
+examining one area of the project and feeds findings into existing work. It
+is not a supervisor and implements only a task explicitly assigned to it.
+factoryd wakes it on its cadence and on its event classes (`failures`,
+`merges`): one run per wake, in a fresh checkout of main. Only your result
+(next time's *prior checkpoint*) and your knowledge records carry over.
 
 ## Each review
 
 1. Read the wake record at the end of your task: `reason`, `prior_task_id`,
    `prior_base`, `quiet_reviews`, `open_proposals`, the prior checkpoint, the
    follow-ups on your earlier proposals, the events since. If a proposal
-   moved (task finished, declined, merged), record what happened as a
-   contribution with `record_id` = the proposal id; separate "accepted",
-   "merged" and "improved".
+   moved, record what happened as a contribution with `record_id` = the
+   proposal id (accepted, merged and improved are different things).
 2. See what changed: `git log --oneline PRIOR_BASE..HEAD` and
    `git diff --stat PRIOR_BASE..HEAD` (empty `prior_base`: first review, sample).
 3. Start from what is waiting on people or failing (`overseer status`, errors,
@@ -32,8 +28,7 @@ fresh checkout of current main. Only your result (handed back next time as the
 
 ## Outcomes
 
-Exactly one per review. Weak findings go in a knowledge `observation` with
-`status: "tentative"`, not a proposal.
+Exactly one per review. Weak findings: a `tentative` observation, not a proposal.
 
 1. **Proposal (new work).** `content create --kind observation`,
    `record_type: "proposal"`, no `record_id`. The overseer decides it; you
@@ -46,8 +41,8 @@ Exactly one per review. Weak findings go in a knowledge `observation` with
    Smallest next action:
    Verification:
    Why now:
-   Live at HEAD: the file/path or behaviour you verified exists at your
-   checkout's HEAD, so the work is not already done or moved.
+   Live at HEAD: the file/path or behaviour you verified at your HEAD, so
+   the work is not already done or moved.
    ```
 
    An experiment (UI/UX, growth) adds a hypothesis, a cost bound (at most one
@@ -58,15 +53,13 @@ Exactly one per review. Weak findings go in a knowledge `observation` with
    an issue (one of the two is required). A contribution naming an active
    task is attached to it automatically and its worker's next run receives
    it. Use `attempt peer ask` only when the task is running and the point is
-   urgent. Use this for a smaller solution or better acceptance criteria; it
-   is advice, you never edit or reassign a task. To judge an exact commit use
-   `record_type: "review"` with `source_revision` set to that commit's full
-   SHA (required), naming what you checked and how to verify each finding;
-   it never approves or blocks a merge. Research is
-   `record_type: "research"` (no `record_id`, `evidence` required), or goes
-   in a proposal's evidence: per source the URL, access date, the claim it
-   supports, and uncertainty. Prefer official docs and source; public
-   discussion is a hypothesis, not a fact.
+   urgent. This is also how to recommend a smaller solution or better
+   acceptance criteria; it is advice, never an edit or reassignment. To judge
+   an exact commit use `record_type: "review"` with `source_revision` = that
+   full SHA (required); it never approves or blocks a merge. Research
+   (`record_type: "research"`, no `record_id`, `evidence` required) or a
+   proposal's evidence cites per source: URL, access date, claim supported,
+   uncertainty. Public discussion is a hypothesis, not a fact.
 3. **No action.** Say why in your result; write no record. A credible no-action
    is a good result.
 
