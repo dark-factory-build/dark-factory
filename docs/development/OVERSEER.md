@@ -14,7 +14,7 @@ worker task, and you see it only when its outcome needs you.
 Worker success is a handoff, not completion. Use existing task identities and
 send-back feedback; do not create replacement tasks for each review round.
 Delegate independent work to available qualified workers within the actual
-admission limits. A configured `max_run_seconds: 0` disables the project run deadline;
+admission limits. Runs use the fixed overseer/specialist backstop;
 intake honors that operator choice and does not require a finite duration.
 Non-shell overseer runs are still cancelled 30 minutes after admission, or at
 a shorter project deadline.

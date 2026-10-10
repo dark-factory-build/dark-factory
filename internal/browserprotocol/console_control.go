@@ -62,13 +62,12 @@ type AgentUpdateResult struct {
 	Revision Decimal `json:"revision"`
 }
 
-// ProjectLimits replaces the future run allowance and per-run ceiling. A zero
-// allowance or duration explicitly means unlimited.
+// ProjectLimits edits the specialist admission limits.
 type ProjectLimits struct {
-	ProjectID        string  `json:"project_id"`
-	ExpectedRevision Decimal `json:"expected_revision"`
-	RunBudget        Decimal `json:"run_budget"`
-	MaxRunSeconds    uint32  `json:"max_run_seconds"`
+	ProjectID               string  `json:"project_id"`
+	ExpectedRevision        Decimal `json:"expected_revision"`
+	SpecialistRuns          *uint32 `json:"specialist_runs,omitempty"`
+	SpecialistOpenProposals *uint32 `json:"specialist_open_proposals,omitempty"`
 }
 
 type ProjectLimitsResult struct {
@@ -638,7 +637,7 @@ func validConsoleControl(kind MessageType, body any) error {
 			return bad()
 		}
 	case ProjectLimits:
-		if validateDynamicID(value.ProjectID) != nil || value.ExpectedRevision == 0 || uint64(value.RunBudget) > MaxSQLiteInteger || value.MaxRunSeconds > 86400 {
+		if validateDynamicID(value.ProjectID) != nil || value.ExpectedRevision == 0 || value.SpecialistRuns != nil && *value.SpecialistRuns > 16 || value.SpecialistOpenProposals != nil && *value.SpecialistOpenProposals > 32 {
 			return bad()
 		}
 	case ProjectLimitsResult:

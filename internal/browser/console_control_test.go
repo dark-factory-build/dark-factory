@@ -233,7 +233,7 @@ var consoleRequests = []struct {
 	{browserprotocol.TypeAgentUpdate, browserprotocol.TypeAgentUpdateResult,
 		`{"type":"AGENT_UPDATE","id":"console-agent","body":{"agent_id":"` + consoleAgentID + `","expected_revision":"7","paused":true}}`},
 	{browserprotocol.TypeProjectLimits, browserprotocol.TypeProjectLimitsResult,
-		`{"type":"PROJECT_LIMITS","id":"console-limits","body":{"project_id":"` + consoleProjectID + `","expected_revision":"7","run_budget":"12","max_run_seconds":900}}`},
+		`{"type":"PROJECT_LIMITS","id":"console-limits","body":{"project_id":"` + consoleProjectID + `","expected_revision":"7","specialist_runs":12,"specialist_open_proposals":24}}`},
 	{browserprotocol.TypeFactoryDispatch, browserprotocol.TypeFactoryDispatchResult,
 		`{"type":"FACTORY_DISPATCH","id":"console-dispatch","body":{"expected_revision":"7","enabled":true}}`},
 	{browserprotocol.TypeIntake, browserprotocol.TypeIntakeResult,

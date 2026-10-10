@@ -324,7 +324,7 @@ func (client *OperatorClient) RemoveProjectRepository(ctx context.Context, id st
 }
 
 func (client *OperatorClient) SetProjectLimits(ctx context.Context, input ProjectLimitsInput) (MutationResult, error) {
-	if !validID(input.ProjectID) || input.ExpectedRevision == 0 || input.RunBudget > uint64(^uint64(0)>>1) || input.MaxRunSeconds > 86400 {
+	if !validID(input.ProjectID) || input.ExpectedRevision == 0 {
 		return MutationResult{}, ErrInvalidInput
 	}
 	return client.client.mutate(ctx, "project_limits", input)
@@ -1150,7 +1150,7 @@ func validSnapshot(snapshot DashboardSnapshot) bool {
 		return false
 	}
 	for _, project := range snapshot.Projects {
-		if !validID(project.ID) || !validText(project.Name, 1, 128) || project.RunBudgetLimit != 0 && project.RunsUsed > project.RunBudgetLimit || project.MaxRunSeconds > 86400 || project.Revision == 0 {
+		if !validID(project.ID) || !validText(project.Name, 1, 128) || project.Revision == 0 {
 			return false
 		}
 	}

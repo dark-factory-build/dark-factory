@@ -491,7 +491,7 @@ func (backend *browserBackend) SetProjectLimits(ctx context.Context, rawClient [
 	if err != nil {
 		return browserprotocol.ProjectLimitsResult{}, err
 	}
-	project, err := backend.store.SetProjectLimits(ctx, projectID, expected, uint64(request.RunBudget), request.MaxRunSeconds, at)
+	project, err := backend.store.SetProjectLimitsWithTokens(ctx, projectID, expected, 0, 0, nil, request.SpecialistRuns, request.SpecialistOpenProposals, at)
 	if err != nil {
 		return browserprotocol.ProjectLimitsResult{}, consoleUpdateError(err)
 	}
@@ -1392,7 +1392,7 @@ func projectFactory(item kernel.FactorySummary) browserprotocol.FactoryItem {
 }
 
 func projectProject(item kernel.ProjectSummary) browserprotocol.ProjectItem {
-	return browserprotocol.ProjectItem{ID: item.ID.String(), Name: item.Name, RunBudgetLimit: browserprotocol.Decimal(item.RunBudgetLimit), RunsUsed: browserprotocol.Decimal(item.RunsUsed), MaxRunSeconds: item.MaxRunSeconds, SpecialistRuns: item.SpecialistRuns, SpecialistOpenProposals: item.SpecialistOpenProposals, Revision: decimalRevision(item.Revision)}
+	return browserprotocol.ProjectItem{ID: item.ID.String(), Name: item.Name, RunsUsed: browserprotocol.Decimal(item.RunsUsed), SpecialistRuns: item.SpecialistRuns, SpecialistOpenProposals: item.SpecialistOpenProposals, Revision: decimalRevision(item.Revision)}
 }
 
 // projectAgentForClient resolves what the agent will actually run with. An agent that

@@ -270,7 +270,7 @@ func TestDaemonDispatchesOperatorCallsAndBoundsProjection(t *testing.T) {
 	assertNoSchedulerWake(t, fixture.daemon)
 
 	done = fixture.serve(t)
-	limits, err := client.SetProjectLimits(ctx, api.ProjectLimitsInput{ProjectID: projectInput.ID, ExpectedRevision: projectResult.Revision, RunBudget: 3, MaxRunSeconds: 60})
+	limits, err := client.SetProjectLimits(ctx, api.ProjectLimitsInput{ProjectID: projectInput.ID, ExpectedRevision: projectResult.Revision, SpecialistRuns: func() *uint32 { n := uint32(3); return &n }()})
 	if err != nil || limits.Revision != projectResult.Revision+1 {
 		t.Fatalf("set project limits = %+v, %v", limits, err)
 	}
@@ -278,7 +278,7 @@ func TestDaemonDispatchesOperatorCallsAndBoundsProjection(t *testing.T) {
 	assertNoSchedulerWake(t, fixture.daemon)
 
 	done = fixture.serve(t)
-	if _, err := client.SetProjectLimits(ctx, api.ProjectLimitsInput{ProjectID: projectInput.ID, ExpectedRevision: projectResult.Revision, RunBudget: 3, MaxRunSeconds: 60}); err == nil {
+	if _, err := client.SetProjectLimits(ctx, api.ProjectLimitsInput{ProjectID: projectInput.ID, ExpectedRevision: projectResult.Revision, SpecialistRuns: func() *uint32 { n := uint32(3); return &n }()}); err == nil {
 		t.Fatal("stale project limits accepted")
 	}
 	waitDispatch(t, done)
@@ -1357,41 +1357,6 @@ func TestDaemonOverseerBackstopFreesLaneWhenProjectLimitIsDisabled(t *testing.T)
 	}
 }
 
-// An overseer past its project limit is requeued like one at the backstop,
-// and a project limit equal to the backstop is no different; a worker past
-// its limit is cancelled.
-func TestOverseerPastAProjectLimitIsRequeuedAndAWorkerCancelled(t *testing.T) {
-	ctx := context.Background()
-	for _, test := range []struct {
-		seed   byte
-		role   string
-		limit  uint32
-		kind   kernel.OutcomeKind
-		detail string
-	}{
-		{57, "orchestrator", 60, kernel.OutcomeFailed, kernel.OverseerRunLimitDetail},
-		{67, "orchestrator", kernel.MaxOverseerRunSeconds, kernel.OutcomeFailed, kernel.OverseerRunLimitDetail},
-		{77, "worker", 60, kernel.OutcomeCancelled, kernel.RunLimitDetail},
-	} {
-		fixture := newDispatchFixture(t)
-		active := prepareActiveAttemptInProjectWithProvider(t, fixture, test.seed, testID(test.seed), test.role, "codex")
-		project, _, err := fixture.store.Project(ctx, active.run.ProjectID)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := fixture.store.SetProjectLimits(ctx, project.ID, project.Revision, project.RunBudgetLimit, test.limit, active.run.AdmittedAt); err != nil {
-			t.Fatal(err)
-		}
-		fixture.daemon.now = func() time.Time { return time.UnixMilli(active.run.AdmittedAt.Int64() + int64(test.limit)*1000) }
-		if err := fixture.daemon.enforceRunLiveness(ctx, SupervisorSpec{}); err != nil {
-			t.Fatal(err)
-		}
-		if run, _, err := fixture.store.Run(ctx, active.run.ID); err != nil || run.Proposal == nil || run.Proposal.Kind() != test.kind || run.Proposal.Detail() != test.detail {
-			t.Fatalf("%s past a %ds limit = %+v, err=%v", test.role, test.limit, run, err)
-		}
-	}
-}
-
 func TestDaemonConcurrentAttemptOutcomesHaveOneDurableWinner(t *testing.T) {
 	fixture := newDispatchFixture(t)
 	active := prepareActiveAttempt(t, fixture, 71)
@@ -1561,14 +1526,14 @@ func TestProjectionHasNoPrivateFieldsAndKeepsEmptySlices(t *testing.T) {
 	projected := projectSnapshot(kernel.DashboardSnapshot{
 		Head:     head,
 		Factory:  kernel.FactorySummary{Capacity: 2, Revision: revision},
-		Projects: []kernel.ProjectSummary{{ID: projectID, Name: "project", RunBudgetLimit: 8, RunsUsed: 3, MaxRunSeconds: 900, Revision: revision}},
+		Projects: []kernel.ProjectSummary{{ID: projectID, Name: "project", RunsUsed: 3, Revision: revision}},
 		Agents:   []kernel.AgentSummary{{ID: agentID, ProjectID: projectID, Name: "agent", Role: "worker", Provider: "codex", Revision: revision}},
 		Tasks:    []kernel.TaskSummary{{ID: taskID, ProjectID: projectID, AssignedAgentID: agentID, IncarnationID: incarnationID, WorkRevision: revision, Title: "title", Status: "queued", Priority: 3, Revision: revision}},
 	})
 	if projected.Head != 0 || projected.Projects == nil || projected.Agents == nil || projected.Tasks == nil {
 		t.Fatalf("projection emptiness/head = %+v", projected)
 	}
-	if projected.Projects[0].Name != "project" || projected.Projects[0].RunBudgetLimit != 8 || projected.Projects[0].RunsUsed != 3 || projected.Projects[0].MaxRunSeconds != 900 || projected.Agents[0].Provider != "codex" || projected.Tasks[0].Title != "title" {
+	if projected.Projects[0].Name != "project" || projected.Projects[0].RunsUsed != 3 || projected.Agents[0].Provider != "codex" || projected.Tasks[0].Title != "title" {
 		t.Fatalf("projection fields = %+v", projected)
 	}
 }

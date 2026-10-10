@@ -849,7 +849,7 @@ func decodeCall(domain byte, bearer credential, encoded []byte) (Call, RemoteErr
 			return Call{}, RemoteInvalidRequest
 		}
 	case CallProjectLimits:
-		if err := decodeExact(request.Params, &call.projectLimits); err != nil || !validID(call.projectLimits.ProjectID) || call.projectLimits.ExpectedRevision == 0 || call.projectLimits.RunBudget > uint64(^uint64(0)>>1) || call.projectLimits.MaxRunSeconds > 86400 {
+		if err := decodeExact(request.Params, &call.projectLimits); err != nil || !validID(call.projectLimits.ProjectID) || call.projectLimits.ExpectedRevision == 0 {
 			return Call{}, RemoteInvalidRequest
 		}
 	case CallCreateAgent:

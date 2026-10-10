@@ -21,27 +21,22 @@ The overseer may choose among these workers, pause, reorder, stop, and send
 work back; it cannot raise model, account, or project limits through its
 scoped controls.
 
-Set a finite per-run duration before enabling intake; zero disables the project
-ceiling. Non-shell overseer runs are always cancelled after at most 30 minutes:
+Non-shell overseer runs are always cancelled after at most 30 minutes. Specialist
+review limits can be adjusted before enabling intake:
 
 ```sh
 factoryctl status
 factoryctl project limits --project PROJECT_ID --revision REVISION \
-  --run-budget 0 --max-run-seconds 2700
+  --specialist-runs 0 --specialist-open-proposals 0
 ```
 
-The allowance adds this many future admissions to the recorded count; it does
-not erase history. Zero disables that ceiling. Duration starts at admission,
-includes startup and human waiting, and cancels overdue work through the
-normal owned-process cleanup.
+These limits apply only to specialist review scheduling; normal project
+admission has no lifetime run or token ceiling.
 
-Add `--token-budget N` to the same command to cap provider tokens. Each settled
+Provider token usage is retained per project for status and efficiency metrics. Each settled
 run adds what it spent, read from the provider's own session log (Claude Code
 transcripts and Codex rollouts, for work in that run's directory since its
-admission). Once `tokens_used` reaches a nonzero `token_limit`, the project
-admits nothing more; running work finishes. Like the run allowance, the budget
-is additional to what is already recorded, and zero removes the ceiling.
-`factoryctl status` reports both figures per project. This counts billable
+admitted work finishes. `factoryctl status` reports usage per project. This counts billable
 tokens, not money: Codex counts uncached input plus output, while Claude counts
 input plus cache creation plus output, excluding cache reads. The shell provider spends none,
 and a run adopted by recovery after a daemon restart records none. Legacy

@@ -609,10 +609,7 @@ type FactorySummary struct {
 type ProjectSummary struct {
 	ID                      string `json:"id"`
 	Name                    string `json:"name"`
-	RunBudgetLimit          uint64 `json:"run_budget_limit"`
 	RunsUsed                uint64 `json:"runs_used"`
-	MaxRunSeconds           uint32 `json:"max_run_seconds"`
-	TokenLimit              uint64 `json:"token_limit"`
 	TokensUsed              uint64 `json:"tokens_used"`
 	Revision                uint64 `json:"revision"`
 	SpecialistRuns          uint32 `json:"specialist_runs"`
@@ -951,11 +948,6 @@ type ProjectRepositories struct {
 type ProjectLimitsInput struct {
 	ProjectID        string `json:"project_id"`
 	ExpectedRevision uint64 `json:"expected_revision"`
-	RunBudget        uint64 `json:"run_budget"`
-	MaxRunSeconds    uint32 `json:"max_run_seconds"`
-	// TokenBudget permits this many more provider tokens than are already
-	// recorded; zero removes the ceiling and absent leaves it as it is.
-	TokenBudget *uint64 `json:"token_budget,omitempty"`
 	// The specialist limits; absent leaves each as it is.
 	SpecialistRuns          *uint32 `json:"specialist_runs,omitempty"`
 	SpecialistOpenProposals *uint32 `json:"specialist_open_proposals,omitempty"`

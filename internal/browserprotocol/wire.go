@@ -1081,7 +1081,7 @@ func rejectNullMembers(kind MessageType, body []byte) error {
 	case TypeFactoryDispatch:
 		fields = []string{"expected_revision", "enabled"}
 	case TypeProjectLimits:
-		fields = []string{"run_budget", "max_run_seconds"}
+		fields = []string{"specialist_runs", "specialist_open_proposals"}
 	case TypeTaskAttachment:
 		fields = []string{"index", "offset", "size", "name", "data"}
 	case TypeTaskEnqueue:

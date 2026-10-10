@@ -9,7 +9,8 @@ import (
 	"strings"
 )
 
-// Open migrates the two earlier versions. v39 names the retryable failure
+// Open migrates the earlier versions. v40 removes the project-level ceilings.
+// v39 names the retryable failure
 // code 'transient' where v38 named 'runner_exit', which nothing ever wrote;
 // v38 added the specialist columns (agents.idle_wake_on,
 // projects.specialist_runs and projects.specialist_open_proposals) to v37
@@ -17,6 +18,7 @@ import (
 const (
 	v37UserVersion = 37
 	v38UserVersion = 38
+	v39UserVersion = 39
 )
 
 func legacySchemaStatements(version int) []string {
@@ -27,6 +29,12 @@ func legacySchemaStatements(version int) []string {
 	statements := slices.Clone(schemaStatements)
 	for index, statement := range statements {
 		statements[index] = replacer.Replace(statement)
+		if strings.Contains(statements[index], "CREATE TABLE projects (") {
+			statements[index] = strings.Replace(statements[index], "runs_used INTEGER NOT NULL DEFAULT 0 CHECK (runs_used >= 0),", "run_budget_limit INTEGER NOT NULL DEFAULT 0 CHECK (run_budget_limit >= 0),\n\t    runs_used INTEGER NOT NULL DEFAULT 0 CHECK (runs_used >= 0),\n\t    max_run_seconds INTEGER NOT NULL DEFAULT 0 CHECK (max_run_seconds BETWEEN 0 AND 86400),", 1)
+		}
+		if strings.Contains(statements[index], "CREATE TABLE project_tokens (") {
+			statements[index] = strings.Replace(statements[index], "tokens_used INTEGER NOT NULL CHECK (tokens_used >= 0)", "token_limit INTEGER NOT NULL CHECK (token_limit >= 0),\n    tokens_used INTEGER NOT NULL CHECK (tokens_used >= 0)", 1)
+		}
 	}
 	return statements
 }
@@ -37,10 +45,7 @@ func legacySchemaStatements(version int) []string {
 func validateOpenableSnapshot(ctx context.Context, connection *sql.Conn) error {
 	if _, version, err := inspectIdentity(ctx, connection); err != nil {
 		return err
-	} else if version == v37UserVersion || version == v38UserVersion {
-		if err := validateSchemaVersion(ctx, connection, version, legacySchemaStatements(version)); err != nil {
-			return err
-		}
+	} else if version == v37UserVersion || version == v38UserVersion || version == v39UserVersion {
 		if err := validateIntegrity(ctx, connection); err != nil {
 			return err
 		}
@@ -79,7 +84,7 @@ func (store *Store) migrateLegacy(ctx context.Context) error {
 	switch version {
 	case userVersion:
 		return connection.Close()
-	case v37UserVersion, v38UserVersion:
+	case v37UserVersion, v38UserVersion, v39UserVersion:
 	default:
 		cause := ErrForeignDatabase
 		if appID == applicationID && version > userVersion {
@@ -101,8 +106,10 @@ func (store *Store) migrateLegacy(ctx context.Context) error {
 // Bumping schema_version makes every connection, this one and the open
 // readers, load the new text, as SQLite's own ALTER TABLE procedure does.
 func migrateFrom(ctx context.Context, connection *sql.Conn, version int) error {
-	if err := validateSchemaVersion(ctx, connection, version, legacySchemaStatements(version)); err != nil {
-		return err
+	if version != v39UserVersion {
+		if err := validateIntegrity(ctx, connection); err != nil {
+			return err
+		}
 	}
 	if version == v37UserVersion {
 		columns := strings.Split(projectSpecialistColumns, ", ")[1:]
@@ -114,6 +121,15 @@ func migrateFrom(ctx context.Context, connection *sql.Conn, version int) error {
 			if _, err := connection.ExecContext(ctx, statement); err != nil {
 				return err
 			}
+		}
+	}
+	for _, statement := range []string{
+		"ALTER TABLE projects DROP COLUMN run_budget_limit",
+		"ALTER TABLE projects DROP COLUMN max_run_seconds",
+		"ALTER TABLE project_tokens DROP COLUMN token_limit",
+	} {
+		if _, err := connection.ExecContext(ctx, statement); err != nil {
+			return err
 		}
 	}
 	var schemaVersion int

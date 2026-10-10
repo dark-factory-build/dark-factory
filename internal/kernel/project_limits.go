@@ -5,35 +5,24 @@ import (
 	"fmt"
 )
 
-const maxProjectRunSeconds = 86400
-
 // The schema's bounds on a project's specialist limits.
 const (
 	MaxSpecialistRuns          = 16
 	MaxSpecialistOpenProposals = 32
 )
 
-// MaxOverseerRunSeconds bounds one non-shell overseer run even when the
-// project ceiling is disabled or longer. An overseer must checkpoint and exit
+func (store *Store) SetProjectLimits(ctx context.Context, id ProjectID, expected Revision, _ uint64, _ uint32, at UnixMillis) (Project, error) {
+	return store.SetProjectLimitsWithTokens(ctx, id, expected, 0, 0, nil, nil, nil, at)
+}
+
+// MaxOverseerRunSeconds bounds one non-shell overseer run. An overseer must checkpoint and exit
 // when only an external event remains (#1096); this backstop stops one that
 // waits instead from holding the project's single overseer lane. Events stay
 // pending, so the next wake resumes from durable state.
 const MaxOverseerRunSeconds = 1800
 
-// SetProjectLimits replaces a project's future run allowance and per-run
-// wall-clock ceiling. An allowance is additional to the lifetime count already
-// recorded; zero disables the count ceiling without erasing that history.
-func (store *Store) SetProjectLimits(ctx context.Context, id ProjectID, expected Revision, allowance uint64, maxRunSeconds uint32, at UnixMillis) (Project, error) {
-	return store.SetProjectLimitsWithTokens(ctx, id, expected, allowance, maxRunSeconds, nil, nil, nil, at)
-}
-
-// SetProjectLimitsWithTokens also replaces the token allowance when one is
-// given, in the same transaction and under the same revision check, so an
-// operator edit lands whole or not at all. Like the run allowance it is
-// additional to recorded spend, and zero removes the ceiling. The specialist
-// limits likewise replace the stored value only when given.
-func (store *Store) SetProjectLimitsWithTokens(ctx context.Context, id ProjectID, expected Revision, allowance uint64, maxRunSeconds uint32, tokenAllowance *uint64, specialistRuns, openProposals *uint32, at UnixMillis) (Project, error) {
-	if id.zero() || expected.Int64() < 1 || allowance > uint64(^uint64(0)>>1) || maxRunSeconds > maxProjectRunSeconds || tokenAllowance != nil && *tokenAllowance > maxProjectTokens ||
+func (store *Store) SetProjectLimitsWithTokens(ctx context.Context, id ProjectID, expected Revision, _ uint64, _ uint32, tokenAllowance *uint64, specialistRuns, openProposals *uint32, at UnixMillis) (Project, error) {
+	if id.zero() || expected.Int64() < 1 || tokenAllowance != nil && *tokenAllowance > maxProjectTokens ||
 		specialistRuns != nil && *specialistRuns > MaxSpecialistRuns || openProposals != nil && *openProposals > MaxSpecialistOpenProposals {
 		return Project{}, fmt.Errorf("%w: project limits", ErrInvalidValue)
 	}
@@ -52,26 +41,18 @@ func (store *Store) SetProjectLimitsWithTokens(ctx context.Context, id ProjectID
 	if project.Revision != expected || at.Int64() < project.UpdatedAt.Int64() {
 		return Project{}, tx.Rollback(ErrRevisionConflict)
 	}
-	limit := uint64(0)
-	if allowance != 0 {
-		if project.RunsUsed > uint64(^uint64(0)>>1)-allowance {
-			return Project{}, tx.Rollback(ErrInvalidValue)
-		}
-		limit = project.RunsUsed + allowance
-	}
 	if specialistRuns == nil {
 		specialistRuns = &project.SpecialistRuns
 	}
 	if openProposals == nil {
 		openProposals = &project.SpecialistOpenProposals
 	}
-	updated, err := tx.connection.ExecContext(ctx, `UPDATE projects SET run_budget_limit = ?, max_run_seconds = ?, specialist_runs = ?, specialist_open_proposals = ?, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND revision = ?`, int64(limit), int64(maxRunSeconds), int64(*specialistRuns), int64(*openProposals), at.Int64(), id.Bytes(), expected.Int64())
+	updated, err := tx.connection.ExecContext(ctx, `UPDATE projects SET specialist_runs = ?, specialist_open_proposals = ?, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND revision = ?`, int64(*specialistRuns), int64(*openProposals), at.Int64(), id.Bytes(), expected.Int64())
 	if err := requireOneRow(updated, err); err != nil {
 		return Project{}, tx.Rollback(err)
 	}
 	if tokenAllowance != nil {
-		if _, err := tx.connection.ExecContext(ctx, `INSERT INTO project_tokens(project_id, token_limit, tokens_used) VALUES(?1, ?2, 0)
-			ON CONFLICT(project_id) DO UPDATE SET token_limit = CASE WHEN ?2 = 0 THEN 0 ELSE MIN(tokens_used + ?2, 9223372036854775807) END`, id.Bytes(), int64(*tokenAllowance)); err != nil {
+		if _, err := tx.connection.ExecContext(ctx, `INSERT INTO project_tokens(project_id, tokens_used) VALUES(?1, 0) ON CONFLICT(project_id) DO NOTHING`, id.Bytes()); err != nil {
 			return Project{}, tx.Rollback(err)
 		}
 	}
@@ -91,8 +72,8 @@ func (store *Store) SetProjectLimitsWithTokens(ctx context.Context, id ProjectID
 	return project, nil
 }
 
-// OverdueRuns returns admitted and running runs whose project ceiling, or the
-// overseer backstop, has elapsed. A specialist's review shares the backstop. The caller cancels each at its returned
+// OverdueRuns returns admitted and running overseer or specialist runs whose
+// fixed backstop has elapsed. The caller cancels each at its returned
 // revision; a concurrent result or stop simply wins the CAS.
 func (store *Store) OverdueRuns(ctx context.Context, at UnixMillis) ([]Run, error) {
 	tx, err := store.beginRead(ctx)
@@ -100,10 +81,7 @@ func (store *Store) OverdueRuns(ctx context.Context, at UnixMillis) ([]Run, erro
 		return nil, err
 	}
 	defer tx.Close()
-	rows, err := tx.connection.QueryContext(ctx, `SELECT `+runColumns+` FROM runs AS r WHERE r.phase IN ('admitted', 'running') AND r.admitted_at_ms + 1000 * (SELECT CASE
-		WHEN (r.role = 'orchestrator' AND r.provider <> 'shell' OR EXISTS (SELECT 1 FROM agents AS a JOIN tasks AS t ON t.id = r.task_id WHERE a.id = r.agent_id AND `+specialistCarrierSQL+`))
-			AND (p.max_run_seconds = 0 OR p.max_run_seconds > ?1) THEN ?1
-		ELSE NULLIF(p.max_run_seconds, 0) END FROM projects AS p WHERE p.id = r.project_id) <= ?2 ORDER BY r.admitted_at_ms, r.id`, MaxOverseerRunSeconds, at.Int64())
+	rows, err := tx.connection.QueryContext(ctx, `SELECT `+runColumns+` FROM runs AS r WHERE r.phase IN ('admitted', 'running') AND r.admitted_at_ms + 1000 * ?1 <= ?2 AND (r.role = 'orchestrator' AND r.provider <> 'shell' OR EXISTS (SELECT 1 FROM agents AS a JOIN tasks AS t ON t.id = r.task_id WHERE a.id = r.agent_id AND `+specialistCarrierSQL+`)) ORDER BY r.admitted_at_ms, r.id`, MaxOverseerRunSeconds, at.Int64())
 	if err != nil {
 		return nil, err
 	}

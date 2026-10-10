@@ -54,20 +54,20 @@ func projectByID(ctx context.Context, connection *sql.Conn, id ProjectID) (Proje
 	return scanProject(connection.QueryRowContext(ctx, `SELECT `+projectColumns+` FROM projects WHERE id = ?`, id.Bytes()))
 }
 
-const projectColumns = `id, name, root, run_budget_limit, runs_used, max_run_seconds, revision, created_at_ms, updated_at_ms, specialist_runs, specialist_open_proposals`
+const projectColumns = `id, name, root, runs_used, revision, created_at_ms, updated_at_ms, specialist_runs, specialist_open_proposals`
 
 func scanProject(scanner rowScanner) (Project, bool, error) {
 	var rawID []byte
 	var name, root string
-	var revision, createdAt, updatedAt, runBudget, runsUsed, maxRunSeconds, specialistRuns, openProposals int64
-	if err := scanner.Scan(&rawID, &name, &root, &runBudget, &runsUsed, &maxRunSeconds, &revision, &createdAt, &updatedAt, &specialistRuns, &openProposals); err != nil {
+	var revision, createdAt, updatedAt, runsUsed, specialistRuns, openProposals int64
+	if err := scanner.Scan(&rawID, &name, &root, &runsUsed, &revision, &createdAt, &updatedAt, &specialistRuns, &openProposals); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return Project{}, false, nil
 		}
 		return Project{}, false, fmt.Errorf("scan project: %w", err)
 	}
 	id, err := ProjectIDFromBytes(rawID)
-	if err != nil || byteLen(name) < 1 || byteLen(name) > 128 || !validAbsolutePath(root) || runBudget < 0 || runsUsed < 0 || (runBudget != 0 && runsUsed > runBudget) || maxRunSeconds < 0 || maxRunSeconds > 86400 || updatedAt < createdAt || specialistRuns < 0 || specialistRuns > MaxSpecialistRuns || openProposals < 0 || openProposals > MaxSpecialistOpenProposals {
+	if err != nil || byteLen(name) < 1 || byteLen(name) > 128 || !validAbsolutePath(root) || runsUsed < 0 || updatedAt < createdAt || specialistRuns < 0 || specialistRuns > MaxSpecialistRuns || openProposals < 0 || openProposals > MaxSpecialistOpenProposals {
 		return Project{}, false, fmt.Errorf("%w: invalid project row", ErrCorruptState)
 	}
 	rev, err := NewRevision(revision)
@@ -82,7 +82,7 @@ func scanProject(scanner rowScanner) (Project, bool, error) {
 	if err != nil {
 		return Project{}, false, fmt.Errorf("%w: invalid project update time", ErrCorruptState)
 	}
-	return Project{ID: id, Name: name, Root: root, RunBudgetLimit: uint64(runBudget), RunsUsed: uint64(runsUsed), MaxRunSeconds: uint32(maxRunSeconds), SpecialistRuns: uint32(specialistRuns), SpecialistOpenProposals: uint32(openProposals), Revision: rev, CreatedAt: created, UpdatedAt: updated}, true, nil
+	return Project{ID: id, Name: name, Root: root, RunsUsed: uint64(runsUsed), SpecialistRuns: uint32(specialistRuns), SpecialistOpenProposals: uint32(openProposals), Revision: rev, CreatedAt: created, UpdatedAt: updated}, true, nil
 }
 
 func agentByID(ctx context.Context, connection *sql.Conn, id AgentID) (Agent, bool, error) {
@@ -387,21 +387,21 @@ func (store *Store) Snapshot(ctx context.Context) (DashboardSnapshot, error) {
 		Factory: FactorySummary{DispatchEnabled: state.DispatchEnabled, Capacity: state.Capacity, ActiveRuns: activeRuns, Revision: state.Revision},
 	}
 	count := 0
-	projectRows, err := tx.connection.QueryContext(ctx, `SELECT p.id, p.name, p.run_budget_limit, p.runs_used, p.max_run_seconds, p.revision, COALESCE(k.token_limit, 0), COALESCE(k.tokens_used, 0), p.specialist_runs, p.specialist_open_proposals FROM projects AS p LEFT JOIN project_tokens AS k ON k.project_id = p.id ORDER BY p.id LIMIT ?`, SnapshotEntityLimit+1)
+	projectRows, err := tx.connection.QueryContext(ctx, `SELECT p.id, p.name, p.runs_used, p.revision, COALESCE(k.tokens_used, 0), p.specialist_runs, p.specialist_open_proposals FROM projects AS p LEFT JOIN project_tokens AS k ON k.project_id = p.id ORDER BY p.id LIMIT ?`, SnapshotEntityLimit+1)
 	if err != nil {
 		return DashboardSnapshot{}, fmt.Errorf("read project summaries: %w", err)
 	}
 	for projectRows.Next() {
 		var rawID []byte
 		var name string
-		var runBudget, runsUsed, maxRunSeconds, rawRevision, tokenLimit, tokensUsed, specialistRuns, openProposals int64
-		if err := projectRows.Scan(&rawID, &name, &runBudget, &runsUsed, &maxRunSeconds, &rawRevision, &tokenLimit, &tokensUsed, &specialistRuns, &openProposals); err != nil {
+		var runsUsed, rawRevision, tokensUsed, specialistRuns, openProposals int64
+		if err := projectRows.Scan(&rawID, &name, &runsUsed, &rawRevision, &tokensUsed, &specialistRuns, &openProposals); err != nil {
 			projectRows.Close()
 			return DashboardSnapshot{}, fmt.Errorf("scan project summary: %w", err)
 		}
 		id, idErr := ProjectIDFromBytes(rawID)
 		revision, revisionErr := NewRevision(rawRevision)
-		if idErr != nil || revisionErr != nil || byteLen(name) < 1 || byteLen(name) > 128 || runBudget < 0 || runsUsed < 0 || runBudget != 0 && runsUsed > runBudget || maxRunSeconds < 0 || maxRunSeconds > 86400 {
+		if idErr != nil || revisionErr != nil || byteLen(name) < 1 || byteLen(name) > 128 || runsUsed < 0 || tokensUsed < 0 {
 			projectRows.Close()
 			return DashboardSnapshot{}, fmt.Errorf("%w: invalid project summary", ErrCorruptState)
 		}
@@ -410,7 +410,7 @@ func (store *Store) Snapshot(ctx context.Context) (DashboardSnapshot, error) {
 			projectRows.Close()
 			return DashboardSnapshot{}, ErrSnapshotTooLarge
 		}
-		snapshot.Projects = append(snapshot.Projects, ProjectSummary{ID: id, Name: name, RunBudgetLimit: uint64(runBudget), RunsUsed: uint64(runsUsed), MaxRunSeconds: uint32(maxRunSeconds), Tokens: ProjectTokens{TokenLimit: uint64(tokenLimit), TokensUsed: uint64(tokensUsed)}, SpecialistRuns: uint32(specialistRuns), SpecialistOpenProposals: uint32(openProposals), Revision: revision})
+		snapshot.Projects = append(snapshot.Projects, ProjectSummary{ID: id, Name: name, RunsUsed: uint64(runsUsed), Tokens: ProjectTokens{TokensUsed: uint64(tokensUsed)}, SpecialistRuns: uint32(specialistRuns), SpecialistOpenProposals: uint32(openProposals), Revision: revision})
 	}
 	if err := projectRows.Close(); err != nil {
 		return DashboardSnapshot{}, err

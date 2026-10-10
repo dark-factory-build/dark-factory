@@ -44,7 +44,7 @@ export type AuthResultBody = { client_id: string; capabilities: CapabilityMask }
 export type ErrorBody = { code: ErrorCode; retryable: boolean };
 
 export type FactoryItem = { dispatch_enabled: boolean; capacity: number; active_runs: number; revision: bigint };
-export type ProjectItem = { id: string; name: string; run_budget_limit: bigint; runs_used: bigint; max_run_seconds: number; specialist_runs: number; specialist_open_proposals: number; revision: bigint };
+export type ProjectItem = { id: string; name: string; runs_used: bigint; specialist_runs: number; specialist_open_proposals: number; revision: bigint };
 /**
  * `model` and `reasoning_effort` are the agent's own overrides; empty means it
  * inherits. `effective_*` is what the run will actually use, and `model_source`
@@ -115,7 +115,7 @@ export type TaskListGetBody = { agent_id?: string; project_id?: string; before_u
 export type TaskListBody = { agent_id?: string; project_id?: string; head: bigint; total: bigint; tasks: TaskItem[]; has_more: boolean };
 export type AgentUpdateBody = { agent_id: string; expected_revision: bigint; appearance?: SpriteAppearance; model?: string; reasoning_effort?: string; account_id?: string; paused?: boolean; archived?: boolean; idle_policy?: IdlePolicy; idle_after_seconds?: number; idle_instruction?: string; idle_run_budget?: number; idle_wake_on?: IdleWakeOn };
 export type AgentUpdateResultBody = { agent_id: string; revision: bigint };
-export type ProjectLimitsBody = { project_id: string; expected_revision: bigint; run_budget: bigint; max_run_seconds: number };
+export type ProjectLimitsBody = { project_id: string; expected_revision: bigint; specialist_runs?: number; specialist_open_proposals?: number };
 export type ProjectLimitsResultBody = { project_id: string; revision: bigint };
 export type FactoryDispatchBody = { expected_revision: bigint; enabled: boolean };
 export type FactoryDispatchResultBody = { revision: bigint; enabled: boolean };
@@ -495,7 +495,7 @@ function validateBody(type: ControlType, body: unknown, wire: boolean): ControlB
     }
     case "AGENT_UPDATE": requireKeys(body, ["agent_id", "expected_revision"], wire, ["appearance", "model", "reasoning_effort", "account_id", "paused", "archived", "idle_policy", "idle_after_seconds", "idle_instruction", "idle_run_budget", "idle_wake_on"]); { const result: AgentUpdateBody = { agent_id: dynamicID(body.agent_id), expected_revision: decimal(body.expected_revision, wire, true) }; if (present(body, "appearance")) result.appearance = spriteAppearance(body.appearance, wire); if (present(body, "model")) result.model = boundedText(body.model, 0, MAX_AGENT_MODEL_BYTES); if (present(body, "reasoning_effort")) result.reasoning_effort = boundedText(body.reasoning_effort, 0, MAX_AGENT_MODEL_BYTES); if (present(body, "account_id")) result.account_id = body.account_id === "" ? "" : dynamicID(body.account_id); if (present(body, "paused")) { if (typeof body.paused !== "boolean") malformed(); result.paused = body.paused; } if (present(body, "archived")) { if (typeof body.archived !== "boolean") malformed(); result.archived = body.archived; } if (present(body, "idle_policy")) result.idle_policy = idlePolicy(body.idle_policy); if (present(body, "idle_after_seconds")) result.idle_after_seconds = integer(body.idle_after_seconds, 0, MAX_IDLE_AFTER_SECONDS); if (present(body, "idle_instruction")) result.idle_instruction = boundedText(body.idle_instruction, 0, MAX_TASK_INSTRUCTION_BYTES); if (present(body, "idle_run_budget")) result.idle_run_budget = integer(body.idle_run_budget, 0, MAX_IDLE_RUN_BUDGET); if (present(body, "idle_wake_on")) result.idle_wake_on = wakeOn(body.idle_wake_on); return result; }
     case "AGENT_UPDATE_RESULT": requireKeys(body, ["agent_id", "revision"], wire); return { agent_id: dynamicID(body.agent_id), revision: decimal(body.revision, wire, true) };
-    case "PROJECT_LIMITS": requireKeys(body, ["project_id", "expected_revision", "run_budget", "max_run_seconds"], wire); return { project_id: dynamicID(body.project_id), expected_revision: decimal(body.expected_revision, wire, true), run_budget: decimal(body.run_budget, wire), max_run_seconds: integer(body.max_run_seconds, 0, 86400) };
+    case "PROJECT_LIMITS": requireKeys(body, ["project_id", "expected_revision"], wire, ["specialist_runs", "specialist_open_proposals"]); return { project_id: dynamicID(body.project_id), expected_revision: decimal(body.expected_revision, wire, true), ...(present(body, "specialist_runs") ? { specialist_runs: integer(body.specialist_runs, 0, 16) } : {}), ...(present(body, "specialist_open_proposals") ? { specialist_open_proposals: integer(body.specialist_open_proposals, 0, 32) } : {}) };
     case "PROJECT_LIMITS_RESULT": requireKeys(body, ["project_id", "revision"], wire); return { project_id: dynamicID(body.project_id), revision: decimal(body.revision, wire, true) };
     case "PROJECT_CREATE": requireKeys(body, ["project_id", "name", "root"], wire); return { project_id: dynamicID(body.project_id), name: boundedText(body.name, 1, MAX_PROJECT_NAME_BYTES), root: boundedText(body.root, 1, 4096) };
     case "PROJECT_CREATE_RESULT": requireKeys(body, ["project_id", "revision"], wire); return { project_id: dynamicID(body.project_id), revision: decimal(body.revision, wire, true) };
@@ -691,14 +691,11 @@ function factoryItem(value: unknown, wire: boolean): FactoryItem {
   if (active_runs > capacity + 1) malformed(); return { dispatch_enabled: value.dispatch_enabled, capacity, active_runs, revision: decimal(value.revision, wire, true) };
 }
 function projectItem(value: unknown, wire: boolean): ProjectItem {
-  if (!isObject(value)) malformed(); requireKeys(value, ["id", "name", "specialist_runs", "specialist_open_proposals", "revision"], wire, ["run_budget_limit", "runs_used", "max_run_seconds"]);
-  const run_budget_limit = present(value, "run_budget_limit") ? decimal(value.run_budget_limit, wire) : 0n;
+  if (!isObject(value)) malformed(); requireKeys(value, ["id", "name", "specialist_runs", "specialist_open_proposals", "revision"], wire, ["runs_used"]);
   const runs_used = present(value, "runs_used") ? decimal(value.runs_used, wire) : 0n;
-  const max_run_seconds = present(value, "max_run_seconds") ? integer(value.max_run_seconds, 0, 86400) : 0;
   const specialist_runs = integer(value.specialist_runs, 0, 16);
   const specialist_open_proposals = integer(value.specialist_open_proposals, 0, 32);
-  if (run_budget_limit !== 0n && runs_used > run_budget_limit) malformed();
-  return { id: dynamicID(value.id), name: boundedText(value.name, 1, MAX_PROJECT_NAME_BYTES), run_budget_limit, runs_used, max_run_seconds, specialist_runs, specialist_open_proposals, revision: decimal(value.revision, wire, true) };
+  return { id: dynamicID(value.id), name: boundedText(value.name, 1, MAX_PROJECT_NAME_BYTES), runs_used, specialist_runs, specialist_open_proposals, revision: decimal(value.revision, wire, true) };
 }
 function spriteAppearance(value: unknown, wire: boolean): SpriteAppearance {
   if (!isObject(value)) malformed();

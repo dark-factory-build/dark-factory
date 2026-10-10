@@ -70,6 +70,15 @@ func downgradeHome(t *testing.T, store *Store, version int) {
 	if version == v37UserVersion {
 		statements = append(statements, "ALTER TABLE agents DROP COLUMN idle_wake_on", "ALTER TABLE projects DROP COLUMN specialist_open_proposals", "ALTER TABLE projects DROP COLUMN specialist_runs")
 	}
+	if version == v37UserVersion || version == v38UserVersion {
+		statements = append(statements,
+			"ALTER TABLE projects ADD COLUMN run_budget_limit INTEGER NOT NULL DEFAULT 0 CHECK (run_budget_limit >= 0)",
+			"ALTER TABLE projects ADD COLUMN max_run_seconds INTEGER NOT NULL DEFAULT 0 CHECK (max_run_seconds BETWEEN 0 AND 86400)",
+			"ALTER TABLE project_tokens ADD COLUMN token_limit INTEGER NOT NULL CHECK (token_limit >= 0)",
+			"PRAGMA writable_schema = ON",
+			`UPDATE sqlite_schema SET sql = replace(sql, 'tokens_used INTEGER NOT NULL CHECK (tokens_used >= 0), token_limit INTEGER NOT NULL CHECK (token_limit >= 0)', 'token_limit INTEGER NOT NULL CHECK (token_limit >= 0),\n    tokens_used INTEGER NOT NULL CHECK (tokens_used >= 0)') WHERE name = 'project_tokens'`,
+			"PRAGMA writable_schema = OFF")
+	}
 	if version != userVersion {
 		statements = append(statements, "PRAGMA writable_schema = ON",
 			`UPDATE sqlite_schema SET sql = replace(sql, '''transient''', '''runner_exit''') WHERE name = 'runs'`,
@@ -173,7 +182,7 @@ func snapshotRows(t *testing.T, ctx context.Context, connection *sql.Conn) map[s
 func TestSchemaDigestsArePinned(t *testing.T) {
 	t.Parallel()
 	sum := sha256.Sum256([]byte(strings.Join(schemaStatements, "\n")))
-	if got := hex.EncodeToString(sum[:]); got != "3a54481cb3246bb70309c06135c4b61d5efc739bcf5c38b6432aa4b698f5f25b" {
+	if got := hex.EncodeToString(sum[:]); got != "6985bf991c091fccffe066b70f516840837116f81d4ed256c7b4c810c281d7d7" {
 		t.Errorf("current schema digest = %s", got)
 	}
 	sum = sha256.Sum256([]byte(strings.Join(legacySchemaStatements(v38UserVersion), "\n")))

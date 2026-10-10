@@ -566,8 +566,8 @@ export class FactoryAppController {
     return false;
   }
 
-  /** Save one project's future allowance against its exact revision. */
-  async updateProjectLimits(project: Pick<ProjectItem, "id" | "revision">, limits: { runBudget: bigint; maxRunSeconds: number }): Promise<void> {
+  /** Save specialist limits against the project's exact revision. */
+  async updateProjectLimits(project: Pick<ProjectItem, "id" | "revision">, limits: { specialistRuns?: number; specialistOpenProposals?: number }): Promise<void> {
     const session = this.#client?.session;
     if (this.#closed || this.#status !== "ready" || session === undefined || this.#edit?.pending === true) return;
     const generation = this.#generation;
