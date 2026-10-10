@@ -87,13 +87,38 @@ func TestRepositoryReadinessFetchesExactNondefaultBranchWithoutChangingCheckout(
 	if got := supervisorGitOutput(t, git, "-C", root, "status", "--porcelain"); got != status {
 		t.Fatal("fetch altered operator work")
 	}
-	if _, verified, err := fixture.store.RepositorySourceIdentity(ctx, id); err != nil || !verified {
+	first, verified, err := fixture.store.RepositorySourceIdentity(ctx, id)
+	if err != nil || !verified {
 		t.Fatalf("explicit first claim: %v %v", verified, err)
 	}
-	supervisorGit(t, git, "-C", root, "remote", "set-url", "origin", filepath.Join(parent, "replacement.git"))
+	replacement := filepath.Join(parent, "replacement.git")
+	supervisorGit(t, git, "-C", root, "remote", "set-url", "origin", replacement)
 	view, err = fixture.daemon.RepositoryReadiness(ctx, id, true)
-	if err != nil || view.FetchState != "setup_required" || !strings.Contains(view.ReadinessMessage, "registered checkout identity changed") {
-		t.Fatalf("changed origin accepted: %+v %v", view, err)
+	if err != nil || view.FetchState != "setup_required" {
+		t.Fatalf("unfetchable origin accepted: %+v %v", view, err)
+	}
+	if got, _, err := fixture.store.RepositorySourceIdentity(ctx, id); err != nil || got != first {
+		t.Fatalf("failed check re-pinned: %+v %v", got, err)
+	}
+	pinned := func(value kernel.RepositorySourceIdentity) change.RepositorySourceIdentity {
+		root, _ := change.NewRepositoryIdentity(value.RootDevice, value.RootInode)
+		git, _ := change.NewRepositoryIdentity(value.GitDevice, value.GitInode)
+		return change.RepositorySourceIdentity{Root: root, Git: git, OriginDigest: value.OriginDigest, PublicationRepository: value.PublicationRepository}
+	}
+	supervisorGit(t, git, "clone", "--bare", bare, replacement)
+	if _, err := change.SelectRegisteredGit(ctx, git, root, "refs/remotes/origin/release", pinned(first)); err == nil || !strings.Contains(err.Error(), "registered checkout identity changed") {
+		t.Fatalf("selection re-pinned: %v", err)
+	}
+	view, err = fixture.daemon.RepositoryReadiness(ctx, id, true)
+	if err != nil || view.FetchState != "ready" {
+		t.Fatalf("operator re-pin: %+v %v", view, err)
+	}
+	repinned, _, err := fixture.store.RepositorySourceIdentity(ctx, id)
+	if err != nil || repinned.OriginDigest == first.OriginDigest || repinned.RootInode != first.RootInode || repinned.GitInode != first.GitInode {
+		t.Fatalf("re-pinned identity: %+v %v", repinned, err)
+	}
+	if _, err := change.SelectRegisteredGit(ctx, git, root, "refs/remotes/origin/release", pinned(repinned)); err != nil {
+		t.Fatalf("selection after re-pin: %v", err)
 	}
 }
 
