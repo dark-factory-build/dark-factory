@@ -227,8 +227,8 @@ administration under the project's `.git/dark-factory-changes/<Change ID>/.git`;
 legacy retained Changes may still use the project's canonical administration.
 factoryd reclaims them itself by the rule in ARCHITECTURE.md (Verification
 and storage), with these same proofs, so manual removal is now the exception:
-a legacy Change on the canonical administration, or one factoryd kept and
-logged. Use the exact settled source receipt's `git_directory`, not an assumed
+a Change factoryd kept and logged. Its removal also deletes the worktree's
+ignored files (build output, tool caches): they are not committed work. Use the exact settled source receipt's `git_directory`, not an assumed
 canonical branch. Remove one only after the same
 proof: its task is terminal and not queued for correction, no run owns it,
 its branch tip is merged into freshly fetched `origin/main` (or its squash

@@ -255,61 +255,83 @@ func (store *Store) RecordChangeWorktree(ctx context.Context, id ChangeID, expec
 }
 
 // A retained Change's worktree may be reclaimed once nothing of value is left
-// in it: its task neither queued nor running (nor blocked, which may be
-// retried, unless for changeReclaimAfterEnd), and the work is empty, merged
-// at its exact head, given up (failed or cancelled) for changeReclaimAfterEnd,
-// or succeeded and never published for changeReclaimAfterSuccess. The daemon
-// adds the filesystem half: the worktree is clean, verifies, and uses its own
-// private Git administration.
+// in it: its task has ended (succeeded, failed or cancelled), and the work is
+// empty, or given up: merged at its exact head, failed or cancelled (with no
+// open pull request) for changeReclaimAfterEnd, or succeeded and never
+// published for changeReclaimAfterSuccess. The daemon adds the filesystem
+// half: the worktree is clean and verifies, and only given-up work leaves a
+// legacy shared-administration worktree or a Git-free copy.
 const (
 	changeReclaimAfterEnd     = 14 * 24 * time.Hour
 	changeReclaimAfterSuccess = 30 * 24 * time.Hour
 )
 
-// reclaimableChange is that rule over c (changes) and t (its task), with ?1
-// the latest blocked or ended time for changeReclaimAfterEnd and ?2 for
+// reclaimEnded and reclaimGivenUp are that rule over c (changes) and t (its
+// task), with ?1 the latest end for changeReclaimAfterEnd and ?2 for
 // changeReclaimAfterSuccess. A retained Change has no current run.
-const reclaimableChange = `c.phase = 'retained' AND c.head_commit IS NOT NULL
-	AND (t.status IN ('succeeded', 'failed', 'cancelled') OR t.status = 'blocked' AND t.updated_at_ms <= ?1)
-	AND (c.head_commit = c.base_commit
-		OR EXISTS (SELECT 1 FROM publication_tasks p JOIN production_records r ON r.project_id = p.project_id AND r.repository = p.repository AND r.kind = 'pull_request' AND r.identity = CAST(p.pull_number AS TEXT)
-			WHERE (p.change_id = c.id OR p.task_id = c.task_id) AND json_extract(r.document, '$.state') = 'merged' AND lower(json_extract(r.document, '$.head')) = lower(hex(c.head_commit)))
-		OR t.status IN ('failed', 'cancelled') AND t.completed_at_ms <= ?1
+const (
+	reclaimEnded   = `c.phase = 'retained' AND t.status IN ('succeeded', 'failed', 'cancelled')`
+	reclaimGivenUp = `(EXISTS (SELECT 1 FROM ` + changePullRequests + ` AND json_extract(r.document, '$.state') = 'merged' AND lower(json_extract(r.document, '$.head')) = lower(hex(c.head_commit)))
+		OR t.status IN ('failed', 'cancelled') AND t.completed_at_ms <= ?1 AND NOT EXISTS (SELECT 1 FROM ` + changePullRequests + ` AND json_extract(r.document, '$.state') = 'open')
 		OR t.status = 'succeeded' AND t.completed_at_ms <= ?2 AND NOT EXISTS (SELECT 1 FROM publication_tasks p WHERE p.change_id = c.id OR p.task_id = c.task_id))`
+)
+
+// changePullRequests joins the pull requests published for c or its task.
+const changePullRequests = `publication_tasks p JOIN production_records r ON r.project_id = p.project_id AND r.repository = p.repository AND r.kind = 'pull_request' AND r.identity = CAST(p.pull_number AS TEXT)
+	WHERE (p.change_id = c.id OR p.task_id = c.task_id)`
+
+// ReclaimableChange is a retained Change the kernel half of the reclaim rule
+// allows, and whether its work is given up rather than only empty.
+type ReclaimableChange struct {
+	Change
+	GivenUp bool
+}
 
 // ReclaimableChanges lists the retained Changes the kernel half of the
 // reclaim rule allows at at, oldest first.
-func (store *Store) ReclaimableChanges(ctx context.Context, at UnixMillis) ([]Change, error) {
+func (store *Store) ReclaimableChanges(ctx context.Context, at UnixMillis) ([]ReclaimableChange, error) {
 	tx, err := store.beginRead(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Close()
-	rows, err := tx.connection.QueryContext(ctx, `SELECT `+changeColumns+` FROM changes WHERE id IN (SELECT c.id FROM changes c JOIN tasks t ON t.id = c.task_id WHERE `+reclaimableChange+`) ORDER BY updated_at_ms, id`, reclaimCutoffs(at)...)
+	rows, err := tx.connection.QueryContext(ctx, `SELECT `+changeColumns+`, EXISTS (SELECT 1 FROM changes c JOIN tasks t ON t.id = c.task_id WHERE c.id = changes.id AND `+reclaimEnded+` AND `+reclaimGivenUp+`)
+		FROM changes WHERE id IN (SELECT c.id FROM changes c JOIN tasks t ON t.id = c.task_id WHERE `+reclaimEnded+` AND (c.head_commit = c.base_commit OR `+reclaimGivenUp+`)) ORDER BY updated_at_ms, id`, reclaimCutoffs(at)...)
 	if err != nil {
 		return nil, err
 	}
-	var changes []Change
+	var changes []ReclaimableChange
 	for rows.Next() {
-		change, _, err := scanChange(rows)
+		var candidate ReclaimableChange
+		candidate.Change, _, err = scanChange(scanWith{rows, &candidate.GivenUp})
 		if err != nil {
 			return nil, errors.Join(err, rows.Close())
 		}
-		changes = append(changes, change)
+		changes = append(changes, candidate)
 	}
 	return changes, errors.Join(rows.Err(), rows.Close())
 }
 
+// scanWith scans one more column after the ones its caller asks for.
+type scanWith struct {
+	rows  *sql.Rows
+	extra any
+}
+
+func (scanner scanWith) Scan(dest ...any) error {
+	return scanner.rows.Scan(append(dest, scanner.extra)...)
+}
+
 // ReclaimChange records that the daemon removed a retained Change's worktree
-// and private Git administration: the Change is abandoned, as one whose
-// worktree is gone, so the task's retry makes a fresh worktree. The rule is
-// checked again in the same transaction. The Change keeps the time it
+// and Git state: the Change is abandoned, as one whose worktree is gone, so
+// the task's retry makes a fresh worktree. The rule, given up when givenUp,
+// is checked again in the same transaction. The Change keeps the time it
 // settled, so history and the console still place it where its work ended.
-func (store *Store) ReclaimChange(ctx context.Context, id ChangeID, expected Revision, at UnixMillis) (Change, error) {
+func (store *Store) ReclaimChange(ctx context.Context, id ChangeID, expected Revision, givenUp bool, at UnixMillis) (Change, error) {
 	return store.advanceChange(ctx, id, expected, at, func(change Change, connection *sql.Conn) (bool, error) {
 		result, err := connection.ExecContext(ctx, `UPDATE changes SET phase = 'abandoned', object_format = NULL, base_commit = NULL, repository_dev = NULL, repository_inode = NULL, head_commit = NULL, prepared_at_ms = NULL, available_at_ms = NULL, revision = revision + 1
-			WHERE id = ?4 AND revision = ?5 AND updated_at_ms <= ?3 AND EXISTS (SELECT 1 FROM changes c JOIN tasks t ON t.id = c.task_id WHERE c.id = changes.id AND `+reclaimableChange+`)`,
-			append(reclaimCutoffs(at), at.Int64(), id.Bytes(), expected.Int64())...)
+			WHERE id = ?4 AND revision = ?5 AND updated_at_ms <= ?3 AND EXISTS (SELECT 1 FROM changes c JOIN tasks t ON t.id = c.task_id WHERE c.id = changes.id AND `+reclaimEnded+` AND (c.head_commit = c.base_commit AND NOT ?6 OR `+reclaimGivenUp+`))`,
+			append(reclaimCutoffs(at), at.Int64(), id.Bytes(), expected.Int64(), givenUp)...)
 		return false, requireOneRow(result, err)
 	})
 }

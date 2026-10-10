@@ -390,7 +390,7 @@ func TestRetainedRetryHistoryLoadsAndHistoricalFinalizationReplays(t *testing.T)
 }
 
 // settleRetainedRetry retries first on its retained Change and settles that
-// retry, blocked, retained again at 80.
+// retry, failed, retained again at 80.
 func settleRetainedRetry(t *testing.T, store *Store, first Run) (Run, ChangeSettlement) {
 	t.Helper()
 	_, secondKeys := queueRetryForTerminal(t, store, first, 40)
@@ -404,8 +404,8 @@ func settleRetainedRetry(t *testing.T, store *Store, first Run) (Run, ChangeSett
 	if err != nil {
 		t.Fatal(err)
 	}
-	blocked, _ := NewBlockedProposal("retry again")
-	if _, err := store.ProposeAttemptOutcome(context.Background(), secondKeys.AttemptDigest, blocked, mustTime(t, 70)); err != nil {
+	failed, _ := NewFailureProposal(FailureAttempt, "retry again")
+	if _, err := store.ProposeAttemptOutcome(context.Background(), secondKeys.AttemptDigest, failed, mustTime(t, 70)); err != nil {
 		t.Fatal(err)
 	}
 	observeMissingProcessExits(t, store, secondRunning.ID, 71)

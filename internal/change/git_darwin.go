@@ -1377,13 +1377,16 @@ func inspectWorktree(ctx context.Context, gitExecutable, repositoryRoot string, 
 	return facts, err
 }
 
-// RemoveWorktree reclaims the Change worktree at path and the Change's
-// private Git administration. The worktree must verify on its own branch at
-// head, use its private administration and be clean; Git removes it without
-// force, so it refuses uncommitted work as well. A worktree already gone
-// leaves only that administration to remove, and both gone is done. Nothing
-// else in the repository is touched.
-func RemoveWorktree(ctx context.Context, gitExecutable, repositoryRoot string, expected RepositoryIdentity, path string, head ObjectID) error {
+// RemoveWorktree reclaims the Change at path. A worktree must verify on its
+// own branch at head and be clean; Git removes it without force, so it
+// refuses uncommitted work as well, and deletes ignored files with it. A
+// private worktree's administration goes too, while its branch is at head. A
+// legacy worktree on the project's shared administration, and a Git-free copy
+// (head nil), are removed only when given up is set (the work is merged or
+// past its age); the legacy branch is then deleted only at head, and nothing
+// else in the shared administration is touched. What is already gone is
+// skipped, so a removal interrupted part way completes.
+func RemoveWorktree(ctx context.Context, gitExecutable, repositoryRoot string, expected RepositoryIdentity, path string, head *ObjectID, givenUp bool) error {
 	if err := validateWorktreePath(path); err != nil {
 		return err
 	}
@@ -1393,31 +1396,51 @@ func RemoveWorktree(ctx context.Context, gitExecutable, repositoryRoot string, e
 	}
 	defer authority.close()
 	admin := GitDirectoryForChange(authority.repositoryRoot, path)
-	if _, err := os.Lstat(path); err == nil {
+	branch := "refs/heads/" + BranchName(filepath.Base(path))
+	info, err := os.Lstat(path)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+	case err != nil:
+		return newGitError(gitFailurePrivateIO)
+	case head == nil:
+		if _, gitErr := os.Lstat(filepath.Join(path, ".git")); !givenUp || !info.IsDir() || !errors.Is(gitErr, os.ErrNotExist) {
+			return &ValidationError{Reason: "the Git-free Change copy is not given up"}
+		}
+		return os.RemoveAll(path)
+	default:
 		facts, err := authority.inspectWorktree(ctx, path)
 		switch {
 		case err != nil:
 			return err
-		case facts.GitDirectory() != admin:
-			return &ValidationError{Reason: "the Change uses the project's shared Git administration"}
 		case facts.Dirty():
 			return &ValidationError{Reason: "the Change worktree has uncommitted work"}
-		case !facts.Head().equal(head) || facts.Branch() != BranchName(filepath.Base(path)):
+		case !facts.Head().equal(*head) || "refs/heads/"+facts.Branch() != branch:
 			return &ValidationError{Reason: "the Change worktree is not at its recorded head"}
+		case facts.GitDirectory() != admin && !givenUp:
+			return &ValidationError{Reason: "the Change uses the project's shared Git administration and is not given up"}
 		}
-		if _, err := authority.succeed(ctx, maxGitSelectionOutput, "--git-dir", admin, "worktree", "remove", path); err != nil {
+		if _, err := authority.succeed(ctx, maxGitSelectionOutput, "--git-dir", facts.GitDirectory(), "worktree", "remove", path); err != nil {
 			return err
 		}
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return newGitError(gitFailurePrivateIO)
+		if facts.GitDirectory() != admin {
+			_, err := authority.succeed(ctx, maxGitSelectionOutput, "--git-dir", facts.GitDirectory(), "update-ref", "-d", branch, head.Hex())
+			return err
+		}
 	}
-	if _, err := os.Lstat(admin); errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Lstat(admin); errors.Is(err, os.ErrNotExist) || head == nil {
 		return nil
 	} else if err != nil {
 		return newGitError(gitFailurePrivateIO)
 	}
 	if err := validatePrivateGitAdmin(admin); err != nil {
 		return err
+	}
+	tip, err := authority.succeed(ctx, maxGitSelectionOutput, "--git-dir", admin, "rev-parse", "--verify", "--end-of-options", branch+"^{commit}")
+	if err != nil {
+		return err
+	}
+	if branch, err := parseGitOID(head.format, bytes.TrimSpace(tip)); err != nil || !branch.equal(*head) {
+		return &ValidationError{Reason: "the Change branch is not at its recorded head"}
 	}
 	return os.RemoveAll(filepath.Dir(admin))
 }

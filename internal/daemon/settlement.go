@@ -154,31 +154,28 @@ func (daemon *Daemon) retainedSettlement(ctx context.Context, changeParent strin
 	return kernel.NewRetainedChangeSettlement(changeState.Revision, &head)
 }
 
-// changeReclaimBatch bounds one reclaim pass, so the backlog drains a few
-// Changes a second without long writer holds or I/O spikes.
+// changeReclaimBatch bounds the Changes one reclaim pass inspects, so the
+// backlog drains a few a minute without long writer holds or I/O spikes.
 const changeReclaimBatch = 4
 
-// tickChangeReclaim starts a reclaim pass off the scheduler loop: at once
-// after a full batch, otherwise a minute after the last pass.
+// tickChangeReclaim starts a reclaim pass off the scheduler loop, a minute
+// after the last one.
 func (daemon *Daemon) tickChangeReclaim(ctx context.Context) {
 	if daemon.now().UnixNano() < daemon.reclaimAt.Load() || !daemon.reclaimBusy.CompareAndSwap(false, true) {
 		return
 	}
 	go func() {
 		defer daemon.reclaimBusy.Store(false)
-		next := time.Minute
-		if daemon.reclaimChanges(ctx) == changeReclaimBatch {
-			next = 0
-		}
-		daemon.reclaimAt.Store(daemon.now().Add(next).UnixNano())
+		daemon.reclaimChanges(ctx)
+		daemon.reclaimAt.Store(daemon.now().Add(time.Minute).UnixNano())
 	}()
 }
 
-// reclaimChanges removes the worktree and private Git administration of up
-// to changeReclaimBatch retained Changes the kernel's rule allows, then
-// records each abandoned, as a Change whose worktree is gone: the task's
-// retry makes a fresh one. A Change whose worktree is dirty, unverifiable,
-// off its recorded head or on the shared legacy administration is kept and
+// reclaimChanges inspects up to changeReclaimBatch retained Changes the
+// kernel's rule allows, removes each one's worktree and Git state
+// (change.RemoveWorktree), and records it abandoned, as a Change whose
+// worktree is gone: the task's retry makes a fresh one. A Change reopened
+// since the rule was read is skipped; one RemoveWorktree refuses is kept and
 // logged once. A removal whose record failed is found again next pass and,
 // with nothing left on disk, only recorded.
 func (daemon *Daemon) reclaimChanges(ctx context.Context) int {
@@ -195,25 +192,35 @@ func (daemon *Daemon) reclaimChanges(ctx context.Context) int {
 	if daemon.keptChanges == nil {
 		daemon.keptChanges = map[kernel.ChangeID]bool{}
 	}
-	reclaimed := 0
+	inspected, reclaimed := 0, 0
 	for _, candidate := range candidates {
-		if reclaimed == changeReclaimBatch || ctx.Err() != nil {
+		if inspected == changeReclaimBatch || ctx.Err() != nil {
 			break
 		}
 		if daemon.keptChanges[candidate.ID] {
 			continue
 		}
-		route, err := daemon.repositoryForChange(ctx, candidate)
+		inspected++
+		// A retry or send-back may have reopened it since the rule was read.
+		current, found, err := daemon.store.Change(ctx, candidate.ID)
+		task, taskFound, taskErr := daemon.store.Task(ctx, candidate.TaskID)
+		if err != nil || taskErr != nil || !found || !taskFound || current.Phase != kernel.ChangeRetained || current.Revision != candidate.Revision ||
+			task.Status != kernel.TaskSucceeded && task.Status != kernel.TaskFailed && task.Status != kernel.TaskCancelled {
+			continue
+		}
+		route, err := daemon.repositoryForChange(ctx, candidate.Change)
 		var repository change.RepositoryIdentity
-		var head change.ObjectID
+		var head *change.ObjectID
 		if err == nil {
 			repository, err = changeRepositoryIdentity(candidate.Selection.RepositoryIdentity())
 		}
-		if err == nil {
-			_, head, err = changeCommit(*candidate.HeadCommit)
+		if err == nil && candidate.HeadCommit != nil {
+			var id change.ObjectID
+			_, id, err = changeCommit(*candidate.HeadCommit)
+			head = &id
 		}
 		if err == nil {
-			err = change.RemoveWorktree(ctx, *git, route.Root, repository, filepath.Join(*parent, candidate.ID.String()), head)
+			err = change.RemoveWorktree(ctx, *git, route.Root, repository, filepath.Join(*parent, candidate.ID.String()), head, candidate.GivenUp)
 		}
 		if err != nil {
 			daemon.keptChanges[candidate.ID] = true
@@ -221,7 +228,7 @@ func (daemon *Daemon) reclaimChanges(ctx context.Context) int {
 			continue
 		}
 		if at, err = daemon.timestamp(); err == nil {
-			_, err = daemon.store.ReclaimChange(ctx, candidate.ID, candidate.Revision, at)
+			_, err = daemon.store.ReclaimChange(ctx, candidate.ID, candidate.Revision, candidate.GivenUp, at)
 		}
 		if err != nil {
 			LogFactoryd(daemon.log, "factoryd: record reclaimed Change %s: %v\n", candidate.ID, err)

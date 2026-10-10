@@ -397,13 +397,14 @@ func TestReclaimableChangesFollowTheRule(t *testing.T) {
 		{name: "empty work", at: 34, want: true},
 		{name: "queued", setup: []string{`UPDATE tasks SET status = 'queued', completed_at_ms = NULL`}, at: end, want: false},
 		{name: "running", setup: []string{`UPDATE tasks SET status = 'running', completed_at_ms = NULL`}, at: end, want: false},
-		{name: "blocked recently", setup: []string{`UPDATE tasks SET status = 'blocked', blocked_reason = 'why', completed_at_ms = NULL`}, at: end - 1, want: false},
-		{name: "blocked long", setup: []string{`UPDATE tasks SET status = 'blocked', blocked_reason = 'why', completed_at_ms = NULL`}, at: end, want: true},
-		{name: "blocked long with work", setup: []string{work, `UPDATE tasks SET status = 'blocked', blocked_reason = 'why', completed_at_ms = NULL`}, at: end, want: false},
+		{name: "blocked", setup: []string{`UPDATE tasks SET status = 'blocked', blocked_reason = 'why', completed_at_ms = NULL`}, at: success, want: false},
 		{name: "failed work recently", setup: []string{work}, at: end - 1, want: false},
 		{name: "failed work long", setup: []string{work}, at: end, want: true},
+		{name: "Git-free copy recently", setup: []string{`UPDATE changes SET head_commit = NULL`}, at: end - 1, want: false},
+		{name: "Git-free copy long", setup: []string{`UPDATE changes SET head_commit = NULL`}, at: end, want: true},
 		{name: "cancelled work long", setup: []string{work, `UPDATE tasks SET status = 'cancelled'`}, at: end, want: true},
-		{name: "merged at head", setup: []string{work, `UPDATE tasks SET status = 'blocked', blocked_reason = 'why', completed_at_ms = NULL`, publish("merged", `lower(hex(head_commit))`)}, at: end, want: true},
+		{name: "failed work long with an open pull request", setup: []string{work, publish("open", `lower(hex(head_commit))`)}, at: end, want: false},
+		{name: "merged at head", setup: []string{work, publish("merged", `lower(hex(head_commit))`)}, at: 34, want: true},
 		{name: "merged elsewhere", setup: []string{work, publish("merged", `'00'`)}, at: 34, want: false},
 		{name: "open", setup: []string{work, publish("open", `lower(hex(head_commit))`)}, at: 34, want: false},
 		{name: "succeeded unpublished recently", setup: []string{work, `UPDATE tasks SET status = 'succeeded', result = 'ok'`}, at: success - 1, want: false},
@@ -418,7 +419,7 @@ func TestReclaimableChangesFollowTheRule(t *testing.T) {
 				corruptSQL(t, store, statement)
 			}
 			reclaimable, err := store.ReclaimableChanges(context.Background(), mustTime(t, test.at))
-			if err != nil || len(reclaimable) > 1 || (len(reclaimable) == 1) != test.want || test.want && reclaimable[0].ID != *terminal.ChangeID {
+			if err != nil || len(reclaimable) > 1 || (len(reclaimable) == 1) != test.want || test.want && (reclaimable[0].ID != *terminal.ChangeID || reclaimable[0].GivenUp != (len(test.setup) > 0)) {
 				t.Fatalf("reclaimable = %+v, %v; want %v", reclaimable, err, test.want)
 			}
 		})
@@ -440,18 +441,19 @@ func TestReclaimChangeAbandonsOnceAndTheRetryStartsFresh(t *testing.T) {
 			gap = 3
 		}
 		retained, _, _ := store.Change(ctx, *terminal.ChangeID)
-		// The retained retry ended blocked: its Change waits out the blocked
-		// window before it may be reclaimed.
-		at := terminal.TerminalAt.Int64() + changeReclaimAfterEnd.Milliseconds()
+		at := terminal.TerminalAt.Int64() + 1
+		if _, err := store.ReclaimChange(ctx, retained.ID, retained.Revision, true, mustTime(t, at)); !errors.Is(err, ErrRevisionConflict) {
+			t.Fatalf("reclaim of empty work as given up = %v", err)
+		}
 		before := captureWriteFootprint(t, store)
-		reclaimed, err := store.ReclaimChange(ctx, retained.ID, retained.Revision, mustTime(t, at))
+		reclaimed, err := store.ReclaimChange(ctx, retained.ID, retained.Revision, false, mustTime(t, at))
 		if err != nil || reclaimed.Phase != ChangeAbandoned || reclaimed.Revision.Int64() != retained.Revision.Int64()+1 || reclaimed.SettledRunID == nil || *reclaimed.SettledRunID != terminal.ID {
 			t.Fatalf("reclaimed = %+v, %v", reclaimed, err)
 		}
 		if after := captureWriteFootprint(t, store); after.invalidations != before.invalidations+1 {
 			t.Fatalf("reclaim invalidations = %d -> %d", before.invalidations, after.invalidations)
 		}
-		if _, err := store.ReclaimChange(ctx, retained.ID, retained.Revision, mustTime(t, at+1)); !errors.Is(err, ErrRevisionConflict) {
+		if _, err := store.ReclaimChange(ctx, retained.ID, retained.Revision, false, mustTime(t, at+1)); !errors.Is(err, ErrRevisionConflict) {
 			t.Fatalf("second reclaim = %v", err)
 		}
 		_, keys := queueRetryForTerminalSeed(t, store, terminal, at+2, 230)

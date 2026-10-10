@@ -718,14 +718,17 @@ func TestSettlementWaitsForWriterUsingLifecycleContext(t *testing.T) {
 
 // A reclaim pass removes a retained Change with nothing in it and records it
 // abandoned; one whose removal already happened before a crash is only
-// recorded; a dirty or unverifiable one is kept and reported once.
+// recorded; a dirty or unverifiable one is kept and reported once. A legacy
+// worktree on the shared administration goes, with its branch, only once its
+// work is given up (here: failed 14 days ago).
 func TestReclaimChangesRemovesEmptyWorkAndKeepsDirtyWork(t *testing.T) {
 	ctx := context.Background()
 	for _, test := range []struct {
-		name  string
-		setup func(t *testing.T, path, admin string)
-		want  int
-		kept  string
+		name        string
+		legacy, old bool
+		setup       func(t *testing.T, path, admin string)
+		want        int
+		kept        string
 	}{
 		{name: "empty", want: 1},
 		{name: "removed before a crash", want: 1, setup: func(t *testing.T, path, admin string) {
@@ -739,19 +742,33 @@ func TestReclaimChangesRemovesEmptyWorkAndKeepsDirtyWork(t *testing.T) {
 				t.Fatal(err)
 			}
 		}},
+		{name: "legacy empty", legacy: true, kept: "shared Git administration"},
+		{name: "legacy given up", legacy: true, old: true, want: 1},
 		{name: "unverifiable", kept: "unsupported authority", setup: func(t *testing.T, _, admin string) {
 			settlementGit(t, change.TrustedGitExecutable, admin, "config", "remote.origin.url", "https://example.invalid/repo.git")
 		}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			fixture := newRecoveryFixtureWithRole(t, 0x83, kernel.RoleWorker)
-			changeState, path, admin := fixture.privateSettlementWorktree(t)
+			repository := filepath.Join(filepath.Dir(filepath.Dir(fixture.parentPath)), "repo")
+			var changeState kernel.Change
+			var path, admin string
+			if test.legacy {
+				changeState, path = fixture.settlementWorktree(t)
+				admin = change.GitDirectoryForChange(repository, path)
+			} else {
+				changeState, path, admin = fixture.privateSettlementWorktree(t)
+			}
 			fixture.failBeforeRuntime(t)
+
 			if settled, err := fixture.daemon.settleRun(ctx, fixture.changeParent, fixture.run.ID); err != nil || settled.Phase != kernel.RunTerminal {
 				t.Fatalf("settled = %+v, %v", settled, err)
 			}
 			if test.setup != nil {
 				test.setup(t, path, admin)
+			}
+			if test.old {
+				fixture.daemon.now = func() time.Time { return time.UnixMilli(9000 + (14 * 24 * time.Hour).Milliseconds()) }
 			}
 			var log bytes.Buffer
 			fixture.daemon.log = &log
@@ -781,6 +798,9 @@ func TestReclaimChangesRemovesEmptyWorkAndKeepsDirtyWork(t *testing.T) {
 				if _, err := os.Lstat(gone); !errors.Is(err, os.ErrNotExist) {
 					t.Fatalf("%s survived reclaim: %v", gone, err)
 				}
+			}
+			if branches := settlementGit(t, change.TrustedGitExecutable, repository, "branch", "--list", "factory/*"); branches != "" {
+				t.Fatalf("branches after reclaim = %q", branches)
 			}
 		})
 	}
