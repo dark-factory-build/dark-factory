@@ -613,6 +613,7 @@ func TestRefusedEnqueueBecomesAnOverseerItem(t *testing.T) {
 	if _, err := reviewNow(ctx, fixture.daemon, project, publishedReviewRequest()); !errors.Is(err, review.ErrRefused) {
 		t.Fatalf("a refused enqueue reported %v", err)
 	}
+	waitForMergePipeline(t, fixture.daemon)
 	now, offset := fixture.daemon.now, time.Duration(0)
 	fixture.daemon.now = func() time.Time { return now().Add(offset) }
 	for range 3 {
@@ -648,6 +649,7 @@ func TestCodeownersRefusalEscalatesAndRecoversAfterApproval(t *testing.T) {
 	if _, err := reviewNow(context.Background(), fixture.daemon, project, publishedReviewRequest()); !errors.Is(err, review.ErrOwnerApproval) {
 		t.Fatalf("owner approval refusal reported %v", err)
 	}
+	waitForMergePipeline(t, fixture.daemon)
 	op := lastDurableReview(t, fixture.store, project)
 	if op.Refused == false || !op.OwnerApproval || backend.enqueues != 1 || !strings.Contains(op.Escalation, "#12") || !strings.Contains(op.Escalation, "CODEOWNERS-protected path") {
 		t.Fatalf("owner approval escalation = %+v enqueues=%d", op, backend.enqueues)
@@ -849,8 +851,12 @@ func TestRefusedEnqueueResendsEachTickAndEndsFromThePull(t *testing.T) {
 	ctx := context.Background()
 	backend := &publicReviewBackend{enqueueRefusal: "RATE_LIMITED"}
 	fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return backend }
-	if _, err := reviewNow(ctx, fixture.daemon, project, publishedReviewRequest()); err == nil || backend.enqueues != 1 {
+	if _, err := reviewNow(ctx, fixture.daemon, project, publishedReviewRequest()); err == nil {
 		t.Fatalf("refused enqueue err=%v enqueues=%d", err, backend.enqueues)
+	}
+	waitForMergePipeline(t, fixture.daemon)
+	if backend.enqueues != 1 {
+		t.Fatalf("initial enqueue count=%d", backend.enqueues)
 	}
 	tick := func() review.Operation {
 		if _, err := fixture.daemon.advanceReviewOperations(ctx, false); err != nil {
