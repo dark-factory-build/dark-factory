@@ -9,17 +9,19 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 )
 
-// A current home opens untouched; a v39 home (with a continuations table), a
+// A current home opens untouched; a v40 home (with a continuations table), a
+// v39 one (also with browser_security_events), a
 // v38 one (also with runs naming 'runner_exit' for 'transient') and a v37 one
 // (also without the specialist columns) migrate, keep every row, and then
 // record a transient failure.
 func TestCurrentAndLegacyHomesOpenWithEveryRow(t *testing.T) {
 	t.Parallel()
-	for _, version := range []int{userVersion, v39UserVersion, v38UserVersion, v37UserVersion} {
+	for _, version := range []int{userVersion, v40UserVersion, v39UserVersion, v38UserVersion, v37UserVersion} {
 		t.Run(fmt.Sprintf("v%d", version), func(t *testing.T) { testHomeOpensWithEveryRow(t, version) })
 	}
 }
@@ -70,7 +72,7 @@ func downgradeHome(t *testing.T, store *Store, version int, extra ...string) {
 	t.Helper()
 	var statements []string
 	if version < userVersion {
-		statements = append(v39Continuations,
+		statements = append(slices.Clone(v40Continuations),
 			`INSERT INTO continuations(id, project_id, task_id, task_incarnation_id, work_revision, context_digest, condition_kind, condition_id, condition_revision, state, resolution_detail, revision, created_at_ms, updated_at_ms, resolved_at_ms)
 			SELECT randomblob(16), r.project_id, r.task_id, r.task_incarnation_id, r.admitted_task_work_revision, randomblob(32), 'human_request', h.id, 1, h.continuation, coalesce(h.continuation_reply, iif(h.continuation = 'cancelled', 'cancelled', NULL)), 1, h.created_at_ms, h.updated_at_ms, iif(h.continuation = 'waiting', NULL, h.updated_at_ms)
 			FROM human_requests AS h JOIN runs AS r ON r.id = h.run_id WHERE h.continuation IS NOT NULL`,
@@ -79,13 +81,17 @@ func downgradeHome(t *testing.T, store *Store, version int, extra ...string) {
 			`UPDATE sqlite_schema SET sql = replace(sql, '''peer_question''))', '''peer_question'', ''continuation''))') WHERE name = 'invalidations'`,
 			"PRAGMA writable_schema = OFF", fmt.Sprintf("PRAGMA user_version = %d", version))
 	}
+	if version < v40UserVersion {
+		statements = append(append(statements, browserSecurityEventStatements...),
+			`INSERT INTO browser_security_events(kind, client_id, occurred_at_ms) VALUES('challenge_minted', NULL, 1)`)
+	}
 	if version == v37UserVersion {
 		statements = append(statements, "ALTER TABLE agents DROP COLUMN idle_wake_on", "ALTER TABLE projects DROP COLUMN specialist_open_proposals", "ALTER TABLE projects DROP COLUMN specialist_runs")
 	}
 	if version < v39UserVersion {
 		statements = append(statements, "PRAGMA writable_schema = ON",
 			`UPDATE sqlite_schema SET sql = replace(sql, '''transient''', '''runner_exit''') WHERE name = 'runs'`,
-			"PRAGMA writable_schema = OFF", fmt.Sprintf("PRAGMA user_version = %d", version))
+			"PRAGMA writable_schema = OFF")
 	}
 	for _, statement := range append(statements, extra...) {
 		if _, err := store.writer.ExecContext(context.Background(), statement); err != nil {
@@ -221,8 +227,12 @@ func snapshotRows(t *testing.T, ctx context.Context, connection *sql.Conn) map[s
 func TestSchemaDigestsArePinned(t *testing.T) {
 	t.Parallel()
 	sum := sha256.Sum256([]byte(strings.Join(schemaStatements, "\n")))
-	if got := hex.EncodeToString(sum[:]); got != "e6aee06f7f4049f89af27e06bd73782d66e94ca34c6680074807038a9429aa08" {
+	if got := hex.EncodeToString(sum[:]); got != "eac1732ec587d300a18fdbe1058ffc64468f1abf9ff20ad0c765cbab1e8de5d0" {
 		t.Errorf("current schema digest = %s", got)
+	}
+	sum = sha256.Sum256([]byte(strings.Join(legacySchemaStatements(v40UserVersion), "\n")))
+	if got := hex.EncodeToString(sum[:]); got != "97d786b424ca0c3097e97738821298f75b60f3a29c49629fdc47de5dba623268" {
+		t.Errorf("v40 schema digest = %s", got)
 	}
 	sum = sha256.Sum256([]byte(strings.Join(legacySchemaStatements(v39UserVersion), "\n")))
 	if got := hex.EncodeToString(sum[:]); got != "3a54481cb3246bb70309c06135c4b61d5efc739bcf5c38b6432aa4b698f5f25b" {

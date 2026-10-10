@@ -141,6 +141,7 @@ type OperatorHumanRequest struct {
 	AgentID      AgentID
 	Status       HumanRequestStatus
 	Revision     Revision
+	RunRevision  Revision
 	QuestionText string
 	Options      []string
 }

@@ -36,12 +36,13 @@ var (
 
 // BuildRelease builds the three release binaries of the source tree at dir,
 // commit source, for target ("darwin/arm64") into out as an exact release
-// identity, with the Go toolchain dir's go.mod names. go resolves on the PATH
-// in environment; prepare, when set, adjusts each command before it runs.
+// identity, with the toolchain line of dir's go.mod (its go line stays at the
+// floor worker hosts run). go resolves on the PATH in environment; prepare,
+// when set, adjusts each command before it runs.
 func BuildRelease(ctx context.Context, dir, source, target, out string, environment []string, prepare func(*exec.Cmd)) (Identity, error) {
 	version, versionErr := os.ReadFile(filepath.Join(dir, "VERSION"))
 	module, moduleErr := os.ReadFile(filepath.Join(dir, "go.mod"))
-	goVersion := regexp.MustCompile(`(?m)^go ([0-9]+\.[0-9]+\.[0-9]+)$`).FindSubmatch(module)
+	goVersion := regexp.MustCompile(`(?m)^toolchain go([0-9]+\.[0-9]+\.[0-9]+)$`).FindSubmatch(module)
 	identity, ok := Expected(strings.TrimSpace(string(version)), source, target)
 	if versionErr != nil || moduleErr != nil || goVersion == nil || !ok {
 		return Identity{}, errors.New("release source has no exact VERSION or go.mod toolchain")

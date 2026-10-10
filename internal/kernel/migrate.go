@@ -9,8 +9,9 @@ import (
 	"strings"
 )
 
-// Open migrates the three earlier versions. v40 folds the continuations
-// table onto the human request each row awaited; v39 names the retryable
+// Open migrates the four earlier versions. v41 folds the continuations
+// table onto the human request each row awaited; v40 drops
+// browser_security_events, a log nothing read; v39 names the retryable
 // failure code 'transient' where v38 named 'runner_exit', which nothing ever
 // wrote; v38 added the specialist columns (agents.idle_wake_on,
 // projects.specialist_runs and projects.specialist_open_proposals) to v37
@@ -19,11 +20,23 @@ const (
 	v37UserVersion = 37
 	v38UserVersion = 38
 	v39UserVersion = 39
+	v40UserVersion = 40
 )
 
-// v39Continuations are the statements v40 dropped, which stood before the
+var browserSecurityEventStatements = []string{
+	`CREATE TABLE browser_security_events (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT CHECK (sequence >= 1),
+    kind TEXT NOT NULL CHECK (kind IN ('challenge_minted', 'challenge_abandoned', 'client_paired', 'duplicate_fingerprint', 'client_revoked')),
+    client_id BLOB CHECK (client_id IS NULL OR (length(client_id) = 16 AND client_id <> zeroblob(16))) REFERENCES browser_clients(id),
+    occurred_at_ms INTEGER NOT NULL CHECK (occurred_at_ms >= 0),
+    CHECK ((kind IN ('challenge_minted', 'challenge_abandoned') AND client_id IS NULL) OR (kind NOT IN ('challenge_minted', 'challenge_abandoned') AND client_id IS NOT NULL))
+) STRICT`,
+	`CREATE INDEX browser_security_events_client ON browser_security_events(client_id, sequence)`,
+}
+
+// v40Continuations are the statements v41 dropped, which stood before the
 // invalidations table.
-var v39Continuations = []string{
+var v40Continuations = []string{
 	`CREATE TABLE continuations (
     id BLOB PRIMARY KEY CHECK (length(id) = 16 AND id <> zeroblob(16)),
     project_id BLOB NOT NULL CHECK (length(project_id) = 16) REFERENCES projects(id),
@@ -58,17 +71,22 @@ func legacySchemaStatements(version int) []string {
 		pairs = append(pairs, agentWakeOnColumn, "", projectSpecialistColumns, "")
 	}
 	replacer := strings.NewReplacer(pairs...)
-	at := slices.IndexFunc(schemaStatements, func(statement string) bool { return strings.HasPrefix(statement, "CREATE TABLE invalidations") })
-	statements := slices.Insert(slices.Clone(schemaStatements), at, v39Continuations...)
+	statements := slices.Clone(schemaStatements)
+	if version < v40UserVersion {
+		at := slices.IndexFunc(statements, func(statement string) bool { return strings.HasPrefix(statement, "CREATE TABLE browser_clients ") }) + 1
+		statements = slices.Insert(statements, at, browserSecurityEventStatements...)
+	}
+	at := slices.IndexFunc(statements, func(statement string) bool { return strings.HasPrefix(statement, "CREATE TABLE invalidations") })
+	statements = slices.Insert(statements, at, v40Continuations...)
 	for index, statement := range statements {
 		statements[index] = replacer.Replace(statement)
 	}
 	return statements
 }
 
-// validateOpenableSnapshot accepts a current database or an exact v37, v38 or
-// v39 one, whose durable controls are checked inside the migration before it
-// commits.
+// validateOpenableSnapshot accepts a current database or an exact v37, v38,
+// v39 or v40 one, whose durable controls are checked inside the migration
+// before it commits.
 func validateOpenableSnapshot(ctx context.Context, connection *sql.Conn) error {
 	if _, version, err := inspectIdentity(ctx, connection); err != nil {
 		return err
@@ -95,10 +113,10 @@ func validateContentGitPins(ctx context.Context, connection *sql.Conn) error {
 	return nil
 }
 
-// migrateLegacy takes an exact v37, v38 or v39 home to the current schema in one
-// transaction, or leaves it byte-untouched and refuses; it refuses any other
-// earlier version. Open calls it with the writer before the store is
-// published, and before refreshing its pinned sidecar facts, which the
+// migrateLegacy takes an exact v37, v38, v39 or v40 home to the current
+// schema in one transaction, or leaves it byte-untouched and refuses; it
+// refuses any other earlier version. Open calls it with the writer before the
+// store is published, and before refreshing its pinned sidecar facts, which the
 // sidecar binding relies on. The migration is one way: the rollback plan for
 // an operator home is the pre-upgrade copy docs/install.md tells them to take.
 func (store *Store) migrateLegacy(ctx context.Context) error {
@@ -114,7 +132,7 @@ func (store *Store) migrateLegacy(ctx context.Context) error {
 	switch version {
 	case userVersion:
 		return connection.Close()
-	case v37UserVersion, v38UserVersion, v39UserVersion:
+	case v37UserVersion, v38UserVersion, v39UserVersion, v40UserVersion:
 	default:
 		cause := ErrForeignDatabase
 		if appID == applicationID && version > userVersion {
@@ -131,11 +149,11 @@ func (store *Store) migrateLegacy(ctx context.Context) error {
 	return connection.Close()
 }
 
-// migrateFrom adds columns and rewrites checks in place: no row can violate
-// a rewritten check, since the value it drops was never written or its rows
-// are moved or pruned first. Bumping schema_version makes every connection,
-// this one and the open readers, load the new text, as SQLite's own ALTER
-// TABLE procedure does.
+// migrateFrom adds and drops tables and columns and rewrites checks in
+// place: no row can violate a rewritten check, since the value it drops was
+// never written or its rows are moved first. Bumping schema_version makes
+// every connection, this one and the open readers, load the new text, as
+// SQLite's own ALTER TABLE procedure does.
 func migrateFrom(ctx context.Context, connection *sql.Conn, version int) error {
 	if err := validateSchemaVersion(ctx, connection, version, legacySchemaStatements(version)); err != nil {
 		return err
@@ -171,6 +189,11 @@ func migrateFrom(ctx context.Context, connection *sql.Conn, version int) error {
 		`UPDATE invalidations SET entity_kind = 'human_request' WHERE entity_kind = 'continuation'`)
 	for _, statement := range statements {
 		if _, err := connection.ExecContext(ctx, statement); err != nil {
+			return err
+		}
+	}
+	if version < v40UserVersion {
+		if _, err := connection.ExecContext(ctx, "DROP TABLE browser_security_events"); err != nil {
 			return err
 		}
 	}

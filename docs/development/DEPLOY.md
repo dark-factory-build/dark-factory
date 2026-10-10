@@ -79,7 +79,10 @@ dark-factory, every two minutes it reads `main`'s tip with `git ls-remote
 origin` (no GitHub REST call) and releases that tip when no `release:<sha>`
 record exists. A recorded tip, running, verified or failed, is never started
 again: a failed release waits for a newer tip or a manual `factoryctl release
-<commit-sha> --start`.
+<commit-sha> --start`. While the newest release failed, the project overseer is
+woken once and the operator gets one NEEDS YOU card naming the release, its
+phase and its reason; a later release failing for the same cause (phase and
+reason up to its first colon) raises nothing more.
 Merged work is not followed up after release; a `Closes #N` footer closes its
 issue on merge.
 The build that introduces `factoryctl release` cannot be released by the

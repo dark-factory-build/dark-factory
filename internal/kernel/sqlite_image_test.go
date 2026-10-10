@@ -328,6 +328,13 @@ func TestOpenRejectsUnsafeWALSidecarsWithoutMutation(t *testing.T) {
 			if err := os.Chmod(path+"-wal", os.ModeSetuid|0o600); err != nil {
 				t.Fatal(err)
 			}
+			info, err := os.Stat(path + "-wal")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if info.Mode()&os.ModeSetuid == 0 {
+				t.Skip("filesystem does not preserve setuid mode bits")
+			}
 		},
 		"wrong WAL checksum": func(t *testing.T, path string) {
 			path, _ = walSnapshotFixtureAt(t, filepath.Dir(path), filepath.Base(path), "")
@@ -585,7 +592,6 @@ func TestOpenFreshRollbackRequiresExactChronology(t *testing.T) {
 		"revision":               `UPDATE factory SET revision = 2`,
 		"head":                   `UPDATE factory SET next_invalidation_sequence = 2`,
 		"floor":                  `UPDATE factory SET next_invalidation_sequence = 2, invalidation_floor = 2`,
-		"retained sequence row":  `INSERT INTO sqlite_sequence(name, seq) VALUES('browser_security_events', 1)`,
 		"internal analyze state": `ANALYZE`,
 		"free pages":             `CREATE TABLE discarded(value BLOB); INSERT INTO discarded VALUES(zeroblob(32768)); DROP TABLE discarded`,
 	} {

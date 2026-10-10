@@ -22,19 +22,28 @@ func TestMaintainerRejectionCarriesTheBrokerReason(t *testing.T) {
 // failure is not (#1510).
 func TestOnlyAnUnprocessableEnqueueRefusalIsTerminal(t *testing.T) {
 	for text, terminal := range map[string]bool{
-		"refused: The request was refused: rejected before execution as UNPROCESSABLE.":              true,
-		"refused: The request was refused: rejected before execution as UNPROCESSABLE+RATE_LIMITED.": false,
-		"refused: The request was refused: rejected before execution as RATE_LIMITED.":               false,
-		"refused: The request was refused: the queue read found no merge queue on the base branch.":  false,
-		"indeterminate: The operation outcome is indeterminate and was not repeated.":                false,
+		"refused: The request was refused: rejected before execution as UNPROCESSABLE.":                                                        true,
+		"refused: The request was refused: rejected before execution as UNPROCESSABLE: Pull request head no longer matches the expected head.": true,
+		"refused: The request was refused: rejected before execution as UNPROCESSABLE+RATE_LIMITED.":                                           false,
+		"refused: The request was refused: rejected before execution as RATE_LIMITED.":                                                         false,
+		"refused: The request was refused: the queue read found no merge queue on the base branch.":                                            false,
+		"indeterminate: The operation outcome is indeterminate and was not repeated.":                                                          false,
 	} {
 		response, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 1, "result": map[string]any{"isError": true, "content": []any{map[string]string{"type": "text", "text": text}}}})
 		_, err := reviewResponseStructuredContent(maintainerRequest{JSONRPC: "2.0", ID: json.RawMessage(`1`)}, response)
-		if err = enqueueRefused(err); err == nil || errors.Is(err, review.ErrRefused) != terminal {
+		// GitHub's own reason rides into the text the overseer is shown (#1614).
+		if err = enqueueRefused(err); err == nil || errors.Is(err, review.ErrRefused) != terminal || !strings.Contains(err.Error(), text) {
 			t.Errorf("%q: err=%v", text, err)
 		}
 	}
 	if enqueueRefused(nil) != nil {
 		t.Fatal("success became a refusal")
+	}
+}
+
+func TestCodeownersEnqueueRefusalIsOwnerApproval(t *testing.T) {
+	err := errors.New("review: Maintainer rejected operation: refused: The request was refused: required CODEOWNERS approval is missing.")
+	if !errors.Is(enqueueRefused(err), review.ErrOwnerApproval) {
+		t.Fatalf("err=%v", enqueueRefused(err))
 	}
 }
