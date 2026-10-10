@@ -468,6 +468,13 @@ func TestSpecialistCarrierTitleCannotBeForgedByOverseerOrTaskUpdate(t *testing.T
 	if _, err := store.UpdateTask(ctx, task.ID, task.Revision, TaskPatch{Title: &title}, mustTime(t, 44)); !errors.Is(err, ErrInvalidValue) {
 		t.Fatalf("task update carrier forge = %v", err)
 	}
+	carrier, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 127), ProjectID: run.ProjectID, AssignedAgentID: worker.ID, IncarnationID: incarnationID(t, 128), Title: overseerWakeTitle}, mustTime(t, 45))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.UpdateTask(ctx, carrier.ID, carrier.Revision, TaskPatch{Cancel: true}, mustTime(t, 46)); err != nil {
+		t.Fatalf("carrier cancellation = %v", err)
+	}
 	plainStore, plainRun, _ := runningWorkerRun(t)
 	defer plainStore.Close()
 	plainAgent, _, err := plainStore.Agent(ctx, plainRun.AgentID)

@@ -340,7 +340,9 @@ func (store *Store) updateTask(ctx context.Context, digest *AttemptDigest, id Ta
 	if patch.Priority != nil {
 		task.Priority = *patch.Priority
 	}
+	assignedAgentChanged := false
 	if patch.AssignedAgentID != nil {
+		assignedAgentChanged = *patch.AssignedAgentID != task.AssignedAgentID
 		agent, found, err := agentByID(ctx, tx.connection, *patch.AssignedAgentID)
 		if err != nil {
 			return Task{}, tx.Rollback(err)
@@ -355,7 +357,7 @@ func (store *Store) updateTask(ctx context.Context, digest *AttemptDigest, id Ta
 		}
 		task.AssignedAgentID = agent.ID
 	}
-	if task.Title == overseerWakeTitle && !task.AssignedAgentID.zero() {
+	if assignedAgentChanged && task.Title == overseerWakeTitle && !task.AssignedAgentID.zero() {
 		agent, found, err := agentByID(ctx, tx.connection, task.AssignedAgentID)
 		if err != nil {
 			return Task{}, tx.Rollback(err)
