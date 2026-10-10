@@ -151,9 +151,13 @@ func TestCodexContinuationContextPreservesMaximumOriginalTask(t *testing.T) {
 	revision, _ := kernel.NewRevision(1)
 	task := bytes.Repeat([]byte{'x'}, runner.MaxNativeTaskBytes)
 	contexts := []kernel.ContinuationContext{{ConditionKind: kernel.ConditionHumanRequest, ConditionID: condition, ConditionRevision: revision, ResolutionDetail: "continue"}}
-	framed, err := attemptTaskWithContinuationContext(kernel.ProviderCodex, task, contexts)
-	if err != nil || !bytes.HasPrefix(framed, task) || !bytes.Contains(framed, []byte("condition=human_request")) {
-		t.Fatalf("maximum Codex API continuation framing: bytes=%d err=%v", len(framed), err)
+	framed, err := taskWithContinuationContext(kernel.ProviderCodex, task, contexts, runner.MaxNativeTaskBytes)
+	if err == nil || framed != nil {
+		t.Fatalf("maximum Codex inline continuation framing: bytes=%d err=%v", len(framed), err)
+	}
+	attemptFramed, err := attemptTaskWithContinuationContext(kernel.ProviderCodex, task, contexts)
+	if err != nil || !bytes.HasPrefix(attemptFramed, task) || !bytes.Contains(attemptFramed, []byte("condition=human_request")) {
+		t.Fatalf("maximum Codex attempt continuation framing: bytes=%d err=%v", len(attemptFramed), err)
 	}
 	launchTask, err := providerTaskForContinuationLaunch(kernel.ProviderCodex, task, contexts)
 	if err != nil || !bytes.Contains(launchTask, []byte("condition=human_request")) {
