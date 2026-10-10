@@ -2794,6 +2794,6 @@ test("a specialist is grouped, states what it is doing and owes, and Stop archiv
   assert.deepEqual(edits, [{ archived: true }]);
   const running = baseState({ agents: state.agents, humanRequests: new Map(), tasks: new Map([...fixtureState.tasks, ["c1".repeat(16), { ...fixtureState.tasks.get(ids.task), id: "c1".repeat(16), title: "Standing instruction", status: "running", assigned_agent_id: specialist.id }]]) });
   const live = renderToStaticMarkup(createElement(FactoryConsole, { status: "ready", detail: "agent", state: running, selectedAgent: { id: specialist.id, name: specialist.name, revision: specialist.revision }, onSaveAgentConfig() {} }));
-  assert.match(live, /working: a review is running/);
+  assert.match(live, /reviewing: Keep the docs true to the code\./, "a running review is its remit at work");
   assert.match(live, /Stop specialist/);
 });
