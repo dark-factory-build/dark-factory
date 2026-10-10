@@ -1797,7 +1797,7 @@ func TestDaemonSourceRefusesProviderWithoutReadOnlyBoundary(t *testing.T) {
 	done := fixture.serve(t)
 	_, err := active.client.Source(context.Background(), testID(73))
 	var remote *api.RemoteError
-	if !errors.As(err, &remote) || remote.Code() != api.RemoteUnavailable {
+	if !errors.As(err, &remote) || remote.Code() != api.RemoteForbidden {
 		t.Fatalf("unprotected source = %v", err)
 	}
 	waitDispatch(t, done)
