@@ -1394,8 +1394,14 @@ func RebaseWorktree(ctx context.Context, selection Selection, path string) (Work
 	if result.exitCode != 0 {
 		abort := append([]string{}, gitArgs[:len(gitArgs)-2]...)
 		abort = append(abort, "rebase", "--abort")
-		_, _ = authority.run(ctx, maxGitSelectionOutput, abort...)
-		return WorktreeFacts{}, ErrRebaseConflict
+		aborted, abortErr := authority.run(ctx, maxGitSelectionOutput, abort...)
+		if abortErr != nil {
+			return WorktreeFacts{}, abortErr
+		}
+		if aborted.exitCode == 0 {
+			return WorktreeFacts{}, ErrRebaseConflict
+		}
+		return WorktreeFacts{}, newGitError(gitFailureProcess)
 	}
 	return authority.inspectWorktree(ctx, path)
 }
