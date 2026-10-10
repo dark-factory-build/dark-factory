@@ -14,7 +14,7 @@ import (
 const continuationTaskFetchInstruction = `This is resumed work. Run "$DARK_FACTORY_FACTORYCTL" attempt task before doing anything else to read the complete original task and Factory continuation context.`
 
 func providerTaskWithContinuationContext(kind kernel.Provider, task []byte, contexts []kernel.ContinuationContext) ([]byte, error) {
-	limit := runner.MaxProviderTaskBytes
+	limit := kernel.MaxContinuationTaskBytes
 	return taskWithContinuationContext(kind, task, contexts, limit)
 }
 

@@ -956,13 +956,19 @@ func tomlBasicString(value string) string {
 // the same closed delivery value, which the Change worker must compare before
 // exec.
 func PrepareTask(kind kernel.Provider, task []byte) (TaskDelivery, []byte, error) {
-	if len(task) == 0 || len(task) > runner.MaxProviderTaskBytes || !utf8.Valid(task) || bytes.IndexByte(task, 0) >= 0 {
+	if len(task) == 0 || !utf8.Valid(task) || bytes.IndexByte(task, 0) >= 0 {
 		return 0, nil, ErrInvalid
 	}
 	switch kind {
 	case kernel.ProviderShell:
+		if len(task) > runner.MaxProviderTaskBytes {
+			return 0, nil, ErrInvalid
+		}
 		return TaskDeliveryFD11, bytes.Clone(task), nil
 	case kernel.ProviderClaudeCode, kernel.ProviderCodex:
+		if len(task) > kernel.MaxContinuationTaskBytes {
+			return 0, nil, ErrInvalid
+		}
 		return TaskDeliveryAttemptAPI, nil, nil
 	default:
 		return 0, nil, ErrInvalid
