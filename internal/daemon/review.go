@@ -330,6 +330,12 @@ func (daemon *Daemon) resumeReview(ctx context.Context, project kernel.ProjectID
 	if err != nil {
 		return op, err
 	}
+	defer func() {
+		if op.Submitted && (op.State == "enqueued" || op.State == "completed" || op.State == "ejected") {
+			daemon.pipelineAt.Store(0)
+			daemon.tickMergePipeline(ctx)
+		}
+	}()
 	op, err = coordinator.Resume(ctx, op)
 	return op, errors.Join(err, daemon.finishReviewRouting(ctx, project, repository, op))
 }
@@ -344,9 +350,6 @@ func (daemon *Daemon) finishReviewRouting(ctx context.Context, project kernel.Pr
 	at, err := daemon.timestamp()
 	if err != nil {
 		return err
-	}
-	if op.Submitted && (op.State == "enqueued" || op.State == "completed" || op.State == "ejected") {
-		defer func() { daemon.pipelineAt.Store(0); daemon.tickMergePipeline(ctx) }()
 	}
 	if op.Submitted && (op.State == "enqueued" || op.State == "completed") {
 		// factoryd's submitted verdict is the production review of record,
