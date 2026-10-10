@@ -583,16 +583,13 @@ func overseerWakeInstruction(provider Provider, instruction, counts string, line
 	priorID := ""
 	if prior != nil {
 		priorID = prior.String()
-		if provider == ProviderCodex {
-			instruction = ""
-		}
 	}
 	for {
 		mode := "targeted"
 		if full {
 			mode = "full"
 		}
-		body := strings.TrimPrefix(instruction+"\n\nFactory causal wake: mode="+mode+"; prior_task_id="+priorID+"; "+counts+". mode=full requires fixed-head reconciliation.", "\n\n")
+		body := instruction + "\n\nFactory causal wake: mode=" + mode + "; prior_task_id=" + priorID + "; " + counts + ". mode=full requires fixed-head reconciliation."
 		for _, line := range slices.Concat(lines, escalations) {
 			body += "\n" + line
 		}

@@ -152,7 +152,14 @@ func runProvider(ctx context.Context) (resultErr error) {
 		_ = cwd.Close()
 		return err
 	}
-	delivery, program, err := prepareProviderTask(config.Provider, config.ProviderTask)
+	providerTask := config.ProviderTask
+	argv := launch.Argv()
+	if config.Role == kernel.RoleOrchestrator && config.Provider == kernel.ProviderCodex && len(argv) > 1 && argv[1] == "resume" {
+		if marker := bytes.Index(providerTask, []byte("\n\nFactory causal wake:")); marker >= 0 {
+			providerTask = providerTask[marker+2:]
+		}
+	}
+	delivery, program, err := prepareProviderTask(config.Provider, providerTask)
 	if err != nil {
 		_ = cwd.Close()
 		return err
