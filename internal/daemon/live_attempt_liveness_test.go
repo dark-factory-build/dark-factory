@@ -72,7 +72,7 @@ func TestRunLivenessFailsOnlyAQuietAttempt(t *testing.T) {
 	}
 }
 
-func TestRunLivenessFailsAttemptThatNeverBecomesReady(t *testing.T) {
+func TestRunLivenessFailsAttemptWithNeitherLivenessSignal(t *testing.T) {
 	fixture := newDispatchFixture(t)
 	active := prepareActiveAttempt(t, fixture, 141)
 	ctx := context.Background()
@@ -106,7 +106,8 @@ func TestRunLivenessFailsAttemptThatNeverBecomesReady(t *testing.T) {
 }
 
 // Terminal output proves that a native run started even before its first
-// durable attempt operation.
+// durable attempt operation; authenticated attempt activity is an equivalent
+// liveness signal.
 func TestRunLivenessKeepsAttemptThatHasTerminalOutput(t *testing.T) {
 	fixture := newDispatchFixture(t)
 	active := prepareActiveAttempt(t, fixture, 211)

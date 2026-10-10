@@ -29,7 +29,8 @@ const (
 	liveAttemptCredit           = 1 << 20
 	liveAttemptEffectLimit      = 4 * time.Second
 	stalledRunLivenessThreshold = 10 * time.Minute
-	// firstOutputBudget bounds a run that never produced terminal output.
+	// firstOutputBudget bounds a run with neither terminal output nor
+	// authenticated attempt activity.
 	// Admission to running was 23 s at p99 over 3708 live runs; it is requeued
 	// once.
 	firstOutputBudget = 3 * time.Minute
