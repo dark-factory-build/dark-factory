@@ -1205,6 +1205,14 @@ func validOverseerSnapshot(snapshot OverseerSnapshot) bool {
 	if !validID(snapshot.ProjectID) || snapshot.Head == 0 || snapshot.Agents == nil || snapshot.Tasks == nil || snapshot.Runs == nil || snapshot.Questions == nil || snapshot.PeerQuestions == nil || snapshot.History == nil || snapshot.Handoffs == nil || len(snapshot.Agents) > kernel.OverseerSnapshotPageSize || len(snapshot.Tasks) > kernel.OverseerSnapshotPageSize || len(snapshot.Runs) > kernel.OverseerSnapshotPageSize || len(snapshot.Questions) > kernel.OverseerSnapshotPageSize || len(snapshot.PeerQuestions) > 1 || len(snapshot.History) > kernel.OverseerSnapshotPageSize || len(snapshot.Handoffs) > kernel.OverseerSnapshotPageSize {
 		return false
 	}
+	if snapshot.Factoryd.Calls != nil && len(snapshot.Factoryd.Calls) > 32 {
+		return false
+	}
+	for _, call := range snapshot.Factoryd.Calls {
+		if !validText(call.Name, 1, 256) || call.Count == 0 || call.LatencyP95MS < 0 {
+			return false
+		}
+	}
 	for _, handoff := range snapshot.Handoffs {
 		if !validRetainedChangeHandoff(handoff) {
 			return false
