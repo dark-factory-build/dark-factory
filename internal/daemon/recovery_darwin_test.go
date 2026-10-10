@@ -459,7 +459,7 @@ func TestRecoverySweepSettlesRunWhoseRunnerNeverStarted(t *testing.T) {
 		t.Fatalf("disposition = %+v", disposition)
 	}
 	run := fixture.currentRun(t)
-	if run.Phase != kernel.RunTerminal || run.Terminal == nil || run.Terminal.Code() != kernel.FailureProtocol || run.Terminal.Detail() != kernel.NeverStartedRunDetail {
+	if run.Phase != kernel.RunTerminal || run.Terminal == nil || run.Terminal.Code() != kernel.FailureTransient || run.Terminal.Detail() != kernel.NeverStartedRunDetail {
 		t.Fatalf("recovered run = %+v", run)
 	}
 	if task, found, err := fixture.store.Task(context.Background(), run.TaskID); err != nil || !found || task.Status != kernel.TaskQueued {

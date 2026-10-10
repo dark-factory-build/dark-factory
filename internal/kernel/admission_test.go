@@ -1129,8 +1129,8 @@ func TestReviewHandoffTextIsAnOrdinaryTask(t *testing.T) {
 // success can be superseded, so nothing else may strand a consumer.
 func TestUnsucceededProducerCarriesPrerequisitePins(t *testing.T) {
 	t.Parallel()
-	neverStarted, _ := NewFailureProposal(FailureProtocol, NeverStartedRunDetail)
-	overseerLimit, _ := NewFailureProposal(FailureProtocol, OverseerRunLimitDetail)
+	neverStarted, _ := NewFailureProposal(FailureTransient, NeverStartedRunDetail)
+	overseerLimit, _ := NewFailureProposal(FailureTransient, OverseerRunLimitDetail)
 	failed, _ := NewFailureProposal(FailureInternal, "retry")
 	for _, test := range []struct {
 		name     string

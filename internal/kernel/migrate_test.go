@@ -12,16 +12,17 @@ import (
 	"testing"
 )
 
-// A current home opens untouched; a v37 home (the current schema without the
-// specialist columns) migrates and keeps every row.
-func TestCurrentAndV37HomesOpenWithEveryRow(t *testing.T) {
+// A current home opens untouched; a v38 home (runs naming 'runner_exit' for
+// 'transient') and a v37 one (also without the specialist columns) migrate,
+// keep every row, and then record a transient failure.
+func TestCurrentAndLegacyHomesOpenWithEveryRow(t *testing.T) {
 	t.Parallel()
-	for _, v37 := range []bool{false, true} {
-		t.Run(fmt.Sprintf("v37=%v", v37), func(t *testing.T) { testHomeOpensWithEveryRow(t, v37) })
+	for _, version := range []int{userVersion, v38UserVersion, v37UserVersion} {
+		t.Run(fmt.Sprintf("v%d", version), func(t *testing.T) { testHomeOpensWithEveryRow(t, version) })
 	}
 }
 
-func testHomeOpensWithEveryRow(t *testing.T, v37 bool) {
+func testHomeOpensWithEveryRow(t *testing.T, version int) {
 	ctx := context.Background()
 	store, path := newTestStore(t)
 	seedDurableAuthority(t, store)
@@ -33,16 +34,7 @@ func testHomeOpensWithEveryRow(t *testing.T, v37 bool) {
 	if err := connection.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if v37 {
-		for _, statement := range []string{"ALTER TABLE agents DROP COLUMN idle_wake_on", "ALTER TABLE projects DROP COLUMN specialist_open_proposals", "ALTER TABLE projects DROP COLUMN specialist_runs", fmt.Sprintf("PRAGMA user_version = %d", v37UserVersion)} {
-			if _, err := store.writer.ExecContext(ctx, statement); err != nil {
-				t.Fatal(err)
-			}
-		}
-	}
-	if err := store.Close(); err != nil {
-		t.Fatal(err)
-	}
+	downgradeHome(t, store, version)
 
 	reopened, err := Open(ctx, path)
 	if err != nil {
@@ -59,6 +51,83 @@ func testHomeOpensWithEveryRow(t *testing.T, v37 bool) {
 	}
 	if after := snapshotRows(t, ctx, again); !reflect.DeepEqual(before, after) {
 		t.Fatal("opening the home changed rows")
+	}
+	// The migrating writer itself enforces the new check.
+	tx, err := reopened.writer.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `UPDATE runs SET phase = 'finalizing', proposal_kind = 'failed', proposal_code = 'transient', proposal_detail = 'x', credential_revoked_at_ms = 5, finalizing_at_ms = 5 WHERE id = ?`, runID(t, 5).Bytes()); err != nil {
+		t.Fatalf("record a transient failure: %v", err)
+	}
+}
+
+// downgradeHome turns a current home into an exact earlier one and closes it.
+func downgradeHome(t *testing.T, store *Store, version int) {
+	t.Helper()
+	var statements []string
+	if version == v37UserVersion {
+		statements = append(statements, "ALTER TABLE agents DROP COLUMN idle_wake_on", "ALTER TABLE projects DROP COLUMN specialist_open_proposals", "ALTER TABLE projects DROP COLUMN specialist_runs")
+	}
+	if version != userVersion {
+		statements = append(statements, "PRAGMA writable_schema = ON",
+			`UPDATE sqlite_schema SET sql = replace(sql, '''transient''', '''runner_exit''') WHERE name = 'runs'`,
+			"PRAGMA writable_schema = OFF", fmt.Sprintf("PRAGMA user_version = %d", version))
+	}
+	for _, statement := range statements {
+		if _, err := store.writer.ExecContext(context.Background(), statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A v38 or v37 never-started failure keeps its retry across the migration: a run
+// finalizing at the upgrade still requeues its task, and a terminal one still
+// counts as the previous run that ended the same way.
+func TestLegacyRetryableFailuresMigrate(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		version  int
+		terminal bool
+	}{{v38UserVersion, false}, {v38UserVersion, true}, {v37UserVersion, false}, {v37UserVersion, true}} {
+		version, terminal := test.version, test.terminal
+		t.Run(fmt.Sprintf("v%d/terminal=%v", version, terminal), func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			legacy, _ := NewFailureProposal(FailureProtocol, NeverStartedRunDetail)
+			store, run := finalizingReleasedRun(t, RoleOrchestrator, legacy)
+			var path string
+			if err := store.writer.QueryRowContext(ctx, `SELECT file FROM pragma_database_list WHERE name = 'main'`).Scan(&path); err != nil {
+				t.Fatal(err)
+			}
+			if terminal {
+				if _, err := finalizeTestRun(t, store, run, 60); err != nil {
+					t.Fatal(err)
+				}
+			}
+			downgradeHome(t, store, version)
+			reopened, err := Open(ctx, path)
+			if err != nil {
+				t.Fatalf("Open home: %v", err)
+			}
+			defer reopened.Close()
+			if !terminal {
+				if run, err = finalizeTestRun(t, reopened, run, 60); err != nil {
+					t.Fatal(err)
+				}
+				if task, _, err := reopened.Task(ctx, run.TaskID); err != nil || task.Status != TaskQueued {
+					t.Fatalf("task after finalization = %v, %v, want queued", task.Status, err)
+				}
+			}
+			var codes string
+			if err := reopened.writer.QueryRowContext(ctx, `SELECT proposal_code || '/' || terminal_code FROM runs WHERE id = ?`, run.ID.Bytes()).Scan(&codes); err != nil || codes != "transient/transient" {
+				t.Fatalf("run codes = %q, %v", codes, err)
+			}
+		})
 	}
 }
 
@@ -104,10 +173,14 @@ func snapshotRows(t *testing.T, ctx context.Context, connection *sql.Conn) map[s
 func TestSchemaDigestsArePinned(t *testing.T) {
 	t.Parallel()
 	sum := sha256.Sum256([]byte(strings.Join(schemaStatements, "\n")))
-	if got := hex.EncodeToString(sum[:]); got != "29c9a3043f03be927336f6331f7c7ce24bcab875fb4607fc55003b688739fc2e" {
+	if got := hex.EncodeToString(sum[:]); got != "3a54481cb3246bb70309c06135c4b61d5efc739bcf5c38b6432aa4b698f5f25b" {
 		t.Errorf("current schema digest = %s", got)
 	}
-	sum = sha256.Sum256([]byte(strings.Join(v37SchemaStatements(), "\n")))
+	sum = sha256.Sum256([]byte(strings.Join(legacySchemaStatements(v38UserVersion), "\n")))
+	if got := hex.EncodeToString(sum[:]); got != "29c9a3043f03be927336f6331f7c7ce24bcab875fb4607fc55003b688739fc2e" {
+		t.Errorf("v38 schema digest = %s", got)
+	}
+	sum = sha256.Sum256([]byte(strings.Join(legacySchemaStatements(v37UserVersion), "\n")))
 	if got := hex.EncodeToString(sum[:]); got != "819c191d4e411ad35a2f7cf19db739d0492d0f8cf1c9c5fe0bd50a5197b5bb6c" {
 		t.Errorf("v37 schema digest = %s", got)
 	}
