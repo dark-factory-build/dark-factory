@@ -396,10 +396,7 @@ func (store *Store) updateTask(ctx context.Context, digest *AttemptDigest, id Ta
 	if task.SentBackInstructionBytes != nil {
 		sentBack = *task.SentBackInstructionBytes
 	}
-	var taskResult any = task.Result
-	if retire {
-		taskResult = nil
-	}
+	var taskResult any
 	result, err := tx.connection.ExecContext(ctx, `UPDATE tasks SET title = ?, body = ?, sent_back_instruction_bytes = ?, priority = ?, assigned_agent_id = ?, status = ?, result = ?, completed_at_ms = ?, blocked_reason = NULL, work_revision = work_revision + ?, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND status = ? AND revision = ?`,
 		task.Title, task.Body, sentBack, task.Priority, nullableAgentID(task.AssignedAgentID), status, taskResult, completed, bump, at.Int64(), id.Bytes(), task.Status.String(), expected.Int64())
 	if err := requireOneRow(result, err); err != nil {
