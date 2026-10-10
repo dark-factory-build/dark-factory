@@ -706,10 +706,10 @@ func TestKnownProductionPullsIsOneBoundedQuery(t *testing.T) {
 		t.Fatal(err)
 	}
 	connection.Close()
-	read := func(want int) (int, map[uint64]bool) {
+	read := func(want int) int {
 		t.Helper()
 		statements = 0
-		pulls, published, err := store.KnownProductionPulls(ctx, project.ID, "Example/Factory", 100)
+		pulls, err := store.KnownProductionPulls(ctx, project.ID, "Example/Factory", 100)
 		if err != nil || len(pulls) != want {
 			t.Fatalf("pulls=%d want=%d err=%v", len(pulls), want, err)
 		}
@@ -718,7 +718,7 @@ func TestKnownProductionPullsIsOneBoundedQuery(t *testing.T) {
 				t.Fatalf("non-open pull %+v", pull)
 			}
 		}
-		return statements, published
+		return statements
 	}
 	observe := func(at int64, first, count uint64) {
 		t.Helper()
@@ -735,24 +735,12 @@ func TestKnownProductionPullsIsOneBoundedQuery(t *testing.T) {
 		}
 	}
 	observe(10, 1, 2)
-	few, _ := read(1)
+	few := read(1)
 	for batch := uint64(0); batch < 6; batch++ {
 		observe(int64(11+batch), 3+batch*200, 200)
 	}
-	// Only a review operation for the pull's recorded head counts.
-	for id, head := range map[string]string{"op-3": strings.Repeat("A", 40), "op-5": strings.Repeat("b", 40)} {
-		pull := uint64(3)
-		if id == "op-5" {
-			pull = 5
-		}
-		operation := map[string]any{"id": id, "state": "ejected", "request": map[string]any{"PullNumber": pull, "Head": head}}
-		if err := store.RecordReviewOperation(ctx, project.ID, "example/factory", id, operation, mustTime(t, 20)); err != nil {
-			t.Fatal(err)
-		}
-	}
-	many, reviewed := read(100)
-	if few == 0 || many != few || len(reviewed) != 1 || !reviewed[3] {
-		t.Fatalf("statements few=%d many=%d reviewed=%v", few, many, reviewed)
+	if many := read(100); few == 0 || many != few {
+		t.Fatalf("statements few=%d many=%d", few, many)
 	}
 }
 
@@ -788,6 +776,30 @@ func TestSettledProductionChecks(t *testing.T) {
 	settled, err := store.SettledProductionChecks(ctx, project.ID, "Example/Factory")
 	if err != nil || len(settled) != 1 || !settled[ProductionHead{Number: 1, Head: a}] {
 		t.Fatalf("settled %v, %v", settled, err)
+	}
+}
+
+// #1669: a review operation counts for its exact pull head in any state,
+// past the refresh's 100 known pulls; an observed reviewer row does not.
+func TestReviewedProductionHeads(t *testing.T) {
+	t.Parallel()
+	store, _, project, _ := newAdmissionStore(t, RoleOrchestrator, 2)
+	defer store.Close()
+	ctx := context.Background()
+	a := strings.Repeat("a", 40)
+	for id, pull := range map[string]uint64{"op-1": 1, "op-101": 101} {
+		operation := map[string]any{"id": id, "state": "ejected", "request": map[string]any{"PullNumber": pull, "Head": strings.ToUpper(a)}}
+		if err := store.RecordReviewOperation(ctx, project.ID, "example/factory", id, operation, mustTime(t, 10)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	reviewer := ProductionReviewer{ID: "seen", Number: 2, Head: a, Name: "codex", Provider: "codex", State: "commented", URL: "https://github.com/example/factory/pull/2"}
+	if err := store.RecordProductionObservation(ctx, project.ID, ProductionObservation{Repository: "example/factory", ObservedAt: 10, Reviewers: []ProductionReviewer{reviewer}}, mustTime(t, 10)); err != nil {
+		t.Fatal(err)
+	}
+	reviewed, err := store.ReviewedProductionHeads(ctx, project.ID, "Example/Factory")
+	if err != nil || len(reviewed) != 2 || !reviewed[ProductionHead{Number: 1, Head: a}] || !reviewed[ProductionHead{Number: 101, Head: a}] {
+		t.Fatalf("reviewed %v, %v", reviewed, err)
 	}
 }
 

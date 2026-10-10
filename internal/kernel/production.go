@@ -712,44 +712,37 @@ func (store *Store) RecordPublicationWithReviewOperation(ctx context.Context, pr
 	return tx.Commit(ctx)
 }
 
-// KnownProductionPulls reads the repository's pull requests last seen open,
-// and which of them have a review operation for their recorded head, in one
-// query: a refresh paging the UI-ordered Production view cost a sorted UNION
-// per eight rows.
-func (store *Store) KnownProductionPulls(ctx context.Context, project ProjectID, repo string, limit int) ([]ProductionPullRequest, map[uint64]bool, error) {
+// KnownProductionPulls reads the repository's pull requests last seen open in
+// one query: a refresh paging the UI-ordered Production view cost a sorted
+// UNION per eight rows.
+func (store *Store) KnownProductionPulls(ctx context.Context, project ProjectID, repo string, limit int) ([]ProductionPullRequest, error) {
 	if project.zero() || limit < 1 {
-		return nil, nil, ErrInvalidValue
+		return nil, ErrInvalidValue
 	}
 	tx, err := store.beginRead(ctx)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	defer tx.Close()
-	rows, err := tx.connection.QueryContext(ctx, `SELECT r.document, EXISTS (SELECT 1 FROM production_records o WHERE o.project_id = r.project_id AND o.repository = r.repository AND o.kind = 'reviewer'
-			AND json_extract(o.document, '$.request.PullNumber') = CAST(r.identity AS INTEGER) AND lower(json_extract(o.document, '$.request.Head')) = lower(json_extract(r.document, '$.head')))
-		FROM production_records r WHERE r.project_id = ? AND r.repository = ? AND r.kind = 'pull_request' AND json_extract(r.document, '$.state') = 'open'
-		ORDER BY CAST(r.identity AS INTEGER) LIMIT ?`, project.Bytes(), strings.ToLower(repo), limit)
+	rows, err := tx.connection.QueryContext(ctx, `SELECT document FROM production_records WHERE project_id = ? AND repository = ? AND kind = 'pull_request' AND json_extract(document, '$.state') = 'open'
+		ORDER BY CAST(identity AS INTEGER) LIMIT ?`, project.Bytes(), strings.ToLower(repo), limit)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	defer rows.Close()
-	pulls, reviewed := []ProductionPullRequest{}, map[uint64]bool{}
+	pulls := []ProductionPullRequest{}
 	for rows.Next() {
 		var body string
-		var operation bool
-		if err := rows.Scan(&body, &operation); err != nil {
-			return nil, nil, err
+		if err := rows.Scan(&body); err != nil {
+			return nil, err
 		}
 		var pull ProductionPullRequest
 		if json.Unmarshal([]byte(body), &pull) != nil {
 			continue
 		}
 		pulls = append(pulls, pull)
-		if operation {
-			reviewed[pull.Number] = true
-		}
 	}
-	return pulls, reviewed, rows.Err()
+	return pulls, rows.Err()
 }
 
 // ProductionHead is one pull request at one head commit.
@@ -790,6 +783,36 @@ func (store *Store) SettledProductionChecks(ctx context.Context, project Project
 		settled[head] = true
 	}
 	return settled, rows.Err()
+}
+
+// ReviewedProductionHeads is every pull head with a review operation in any
+// state, whichever pulls the refresh's bounded known list holds.
+func (store *Store) ReviewedProductionHeads(ctx context.Context, project ProjectID, repo string) (map[ProductionHead]bool, error) {
+	if project.zero() {
+		return nil, ErrInvalidValue
+	}
+	tx, err := store.beginRead(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Close()
+	rows, err := tx.connection.QueryContext(ctx, `SELECT DISTINCT json_extract(document, '$.request.PullNumber'), lower(COALESCE(json_extract(document, '$.request.Head'), ''))
+		FROM production_records WHERE project_id = ? AND repository = ? AND kind = 'reviewer' AND json_extract(document, '$.request.PullNumber') IS NOT NULL`, project.Bytes(), strings.ToLower(repo))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	reviewed := map[ProductionHead]bool{}
+	for rows.Next() {
+		var head ProductionHead
+		var number int64
+		if err := rows.Scan(&number, &head.Head); err != nil {
+			return nil, err
+		}
+		head.Number = uint64(number)
+		reviewed[head] = true
+	}
+	return reviewed, rows.Err()
 }
 
 // RecordProductionReview preserves the exact commit covered by a review.

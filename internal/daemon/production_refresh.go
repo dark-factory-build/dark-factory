@@ -52,10 +52,13 @@ func (daemon *Daemon) refreshProduction(ctx context.Context, project kernel.Proj
 		if !verified || !pinned || identity.PublicationRepository == "" {
 			continue
 		}
-		known, reviewed, err := daemon.store.KnownProductionPulls(ctx, project, identity.PublicationRepository, productionRefreshPRLimit)
-		var settled map[kernel.ProductionHead]bool
+		known, err := daemon.store.KnownProductionPulls(ctx, project, identity.PublicationRepository, productionRefreshPRLimit)
+		var settled, reviewed map[kernel.ProductionHead]bool
 		if err == nil {
 			settled, err = daemon.store.SettledProductionChecks(ctx, project, identity.PublicationRepository)
+		}
+		if err == nil {
+			reviewed, err = daemon.store.ReviewedProductionHeads(ctx, project, identity.PublicationRepository)
 		}
 		var observation kernel.ProductionObservation
 		if err == nil {
@@ -65,7 +68,7 @@ func (daemon *Daemon) refreshProduction(ctx context.Context, project kernel.Proj
 			LogFactoryd(daemon.log, "factoryd: refresh %s: %v\n", identity.PublicationRepository, err)
 			continue
 		}
-		corrections := unreviewedProductionHeads(known, reviewed, observation.PullRequests)
+		corrections := unreviewedProductionHeads(reviewed, observation.PullRequests)
 		at, err := daemon.timestamp()
 		if err != nil {
 			return err
@@ -128,16 +131,10 @@ func (daemon *Daemon) refreshProductionDetached(project kernel.ProjectID) {
 // unreviewedProductionHeads are the open pulls whose observed head has no
 // review operation: a new head, and a head already open (and perhaps red)
 // before factoryd reviewed changed pulls in every bound repository (#1669).
-func unreviewedProductionHeads(known []kernel.ProductionPullRequest, reviewed map[uint64]bool, observed []kernel.ProductionPullRequest) []kernel.ProductionPullRequest {
-	prior := make(map[uint64]string, len(known))
-	for _, pull := range known {
-		if reviewed[pull.Number] {
-			prior[pull.Number] = pull.Head
-		}
-	}
+func unreviewedProductionHeads(reviewed map[kernel.ProductionHead]bool, observed []kernel.ProductionPullRequest) []kernel.ProductionPullRequest {
 	unreviewed := make([]kernel.ProductionPullRequest, 0)
 	for _, pull := range observed {
-		if pull.State == "open" && !strings.EqualFold(prior[pull.Number], pull.Head) {
+		if pull.State == "open" && !reviewed[kernel.ProductionHead{Number: pull.Number, Head: strings.ToLower(pull.Head)}] {
 			unreviewed = append(unreviewed, pull)
 		}
 	}

@@ -25,10 +25,9 @@ func TestRefreshRereadsOnlyPullsLastSeenOpen(t *testing.T) {
 // its review; #4 is new; #5 is closed.
 func TestRefreshReviewsEveryUnreviewedOpenHead(t *testing.T) {
 	a, b := strings.Repeat("a", 40), strings.Repeat("b", 40)
-	known := []kernel.ProductionPullRequest{{Number: 1, Head: a, State: "open"}, {Number: 2, Head: a, State: "open"}, {Number: 3, Head: a, State: "open"}, {Number: 5, Head: a, State: "open"}}
 	observed := []kernel.ProductionPullRequest{{Number: 1, Head: strings.ToUpper(a), State: "open"}, {Number: 2, Head: a, State: "open"}, {Number: 3, Head: b, State: "open"}, {Number: 4, Head: b, State: "open"}, {Number: 5, Head: a, State: "closed"}}
 	var numbers []uint64
-	for _, pull := range unreviewedProductionHeads(known, map[uint64]bool{1: true, 3: true}, observed) {
+	for _, pull := range unreviewedProductionHeads(map[kernel.ProductionHead]bool{{Number: 1, Head: a}: true, {Number: 3, Head: a}: true}, observed) {
 		numbers = append(numbers, pull.Number)
 	}
 	if fmt.Sprint(numbers) != "[2 3 4]" {
