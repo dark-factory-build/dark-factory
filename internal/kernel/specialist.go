@@ -357,13 +357,13 @@ func validateSpecialistRecord(ctx context.Context, c *sql.Conn, spec NewContent,
 		if m.RecordID != "" {
 			return ErrInvalidValue
 		}
-		if a == nil {
-			return nil
-		}
 		if m.MissionID != "" {
 			if err := validateMissionRecord(ctx, c, spec.ProjectID, m, a, false); err != nil {
 				return err
 			}
+		}
+		if a == nil {
+			return nil
 		}
 		var mine, open, limit int
 		if err := c.QueryRowContext(ctx, `SELECT
