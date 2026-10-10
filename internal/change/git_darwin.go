@@ -174,7 +174,7 @@ func refreshTrackingRevision(ctx context.Context, spec gitCommandSpec, revision 
 			return nil, err
 		}
 		if result.exitCode != 0 {
-			return nil, &ValidationError{Reason: "source refresh failed; configured remote source was not selected"}
+			return nil, refreshFailure(result.stderr)
 		}
 		return result.output, nil
 	}
@@ -248,7 +248,7 @@ func refreshTrackingRevision(ctx context.Context, spec gitCommandSpec, revision 
 			return target, nil
 		}
 		if !isGitLockFailure(result.stderr) || attempt == gitLockRetries {
-			return "", &ValidationError{Reason: "source refresh failed; configured remote source was not selected"}
+			return "", refreshFailure(result.stderr)
 		}
 		select {
 		case <-ctx.Done():
@@ -257,6 +257,29 @@ func refreshTrackingRevision(ctx context.Context, spec gitCommandSpec, revision 
 		}
 		delay = min(delay*2, gitLockRetryMaxDelay)
 	}
+}
+
+// refreshFailure names why a source refresh failed from a closed set of
+// reasons. Git's stderr can carry remote URLs and server text, so it is
+// classified here and never returned.
+func refreshFailure(stderr []byte) error {
+	text := strings.ToLower(string(stderr))
+	reason := "Git exited with an error"
+	for _, known := range []struct {
+		reason   string
+		patterns []string
+	}{
+		{"the remote required authentication this sealed fetch could not supply", []string{"could not read username", "could not read password", "authentication failed", "terminal prompts disabled", "permission denied (publickey", "returned error: 401", "returned error: 403", "repository not found"}},
+		{"the remote host was unreachable", []string{"could not resolve host", "connection refused", "timed out", "network is unreachable"}},
+		{"the configured remote branch does not exist", []string{"couldn't find remote ref"}},
+		{"the configured remote does not exist", []string{"does not appear to be a git repository"}},
+	} {
+		if slices.ContainsFunc(known.patterns, func(pattern string) bool { return strings.Contains(text, pattern) }) {
+			reason = known.reason
+			break
+		}
+	}
+	return &ValidationError{Reason: "source refresh failed (" + reason + "); configured remote source was not selected"}
 }
 
 // factoryBaseRef is the ref in the registered repository that holds the last
