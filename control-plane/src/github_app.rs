@@ -137,11 +137,14 @@ pub(crate) enum RefusalReason {
     NoEffect,
     /// The queue read answered, and its answer carried no merge queue for
     /// the base branch -- stated as the observation, because `entries:
-    /// None` is also the shape of a null repository. The decision doc
-    /// calls a queueless branch unsupported and fails closed rather than
-    /// falling back to a merge.
+    /// None` is also the shape of a null repository. Enqueue merges such a
+    /// head directly instead (#1702).
     #[error("the queue read found no merge queue on the base branch")]
     NoMergeQueue,
+    /// A base with no merge queue merges directly, and a check at the head
+    /// has not finished or did not pass.
+    #[error("a check at the head has not passed")]
+    ChecksNotPassed,
     /// The App is not installed on the named repository, or the installation
     /// cannot see it. Distinguished from a mutation's own `NOT_FOUND` because
     /// on a surface where the caller names the repository this is the likeliest
@@ -1507,6 +1510,7 @@ impl AppAuthority {
                     // A queued entry ends with GitHub pushing the squash commit
                     // to the default branch, and push capability for an
                     // installation token derives from `contents: write` (#371).
+                    ("checks", "read"),
                     ("contents", "write"),
                     ("merge_queues", "write"),
                     ("metadata", "read"),
@@ -1521,14 +1525,20 @@ impl AppAuthority {
         if request.base != repository.default_branch {
             return Err(OperationError::Conflict);
         }
-        if let Some(result) = self.0.reconcile_enqueue(&token, &request).await? {
-            return Ok(result);
-        }
+        let queueless = match self.0.reconcile_enqueue(&token, &request).await {
+            Ok(Some(result)) => return Ok(result),
+            Ok(None) => false,
+            Err(OperationError::Refused(RefusalReason::NoMergeQueue)) => true,
+            Err(error) => return Err(error),
+        };
         let pull = self
             .0
             .verify_pull_request_head(&token, request.pull_number, &request.head_sha)
             .await?;
         revalidate_enqueue_pull(&pull, &request)?;
+        if queueless {
+            return self.0.merge_head(&token, &pull.node_id, &request).await;
+        }
         match self.0.enqueue_entry(&token, &pull.node_id, &request).await {
             Err(OperationError::Refused(reason)) => Err(OperationError::Refused(reason)),
             Err(_) => self
@@ -1635,7 +1645,7 @@ impl AppAuthority {
             );
             return Ok(result);
         }
-        match self
+        let entry = match self
             .0
             .read_queue_entry(
                 &token,
@@ -1643,8 +1653,12 @@ impl AppAuthority {
                 request.pull_number,
                 &request.head_sha,
             )
-            .await?
+            .await
         {
+            Err(OperationError::Refused(RefusalReason::NoMergeQueue)) => None,
+            entry => entry?,
+        };
+        match entry {
             Some(entry) => {
                 valid_text(&entry.id, 1, 256, true)?;
                 if !valid_queue_state(&entry.state) {
@@ -3318,6 +3332,51 @@ impl Authority {
             .transpose()
     }
 
+    /// A base with no merge queue merges the exact head directly, once every
+    /// check at that head has passed: no queue reruns them.
+    async fn merge_head(
+        &self,
+        token: &RepositoryToken,
+        pull_node_id: &str,
+        request: &EnqueuePullRequest,
+    ) -> Result<EnqueueResult, OperationError> {
+        let checks = ObservePullRequestChecks {
+            repository: request.repository.clone(),
+            pull_number: request.pull_number,
+            head_sha: request.head_sha.clone(),
+        };
+        if self
+            .checks(token, checks, &request.base)
+            .await?
+            .checks
+            .iter()
+            .any(|check| check.conclusion.is_none() || failed(check.conclusion.as_deref()))
+        {
+            return Err(OperationError::Refused(RefusalReason::ChecksNotPassed));
+        }
+        let (_, failure): (Option<serde_json::Value>, Option<GraphQlFailure>) = github_graphql(
+            &token.token,
+            "mutation($pull:ID!,$head:GitObjectID!){\
+             mergePullRequest(input:{pullRequestId:$pull,expectedHeadOid:$head,mergeMethod:SQUASH}){\
+             clientMutationId}}",
+            &serde_json::json!({"pull": pull_node_id, "head": request.head_sha}),
+        )
+        .await?;
+        if let Some(GraphQlFailure::Rejected(kinds)) = failure {
+            return Err(OperationError::Refused(RefusalReason::Rejected(kinds)));
+        }
+        // Whatever the mutation answered, the pull request says whether this
+        // head merged.
+        Ok(EnqueueResult {
+            pull_number: request.pull_number,
+            head_sha: request.head_sha.clone(),
+            entry_id: self
+                .merged_pull_commit(token, request.pull_number, &request.head_sha)
+                .await?,
+            state_when_recorded: "MERGED".to_owned(),
+        })
+    }
+
     async fn merged_pull_commit(
         &self,
         token: &RepositoryToken,
@@ -3403,7 +3462,7 @@ impl Authority {
             .and_then(|queue| queue.entries)
         else {
             // The read answered, and its answer carried no queue for this
-            // branch. Enqueue treats that as unsupported; observation maps it
+            // branch. Enqueue merges directly instead; observation maps it
             // to NOT_QUEUED because no entry is present.
             return Err(OperationError::Refused(RefusalReason::NoMergeQueue));
         };
