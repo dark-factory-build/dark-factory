@@ -233,6 +233,14 @@ func TestOverseerFailedReleaseEscalatesOncePerCause(t *testing.T) {
 	if bodies := wakeBodies(t, store, at+settle); len(bodies) != 1 || !strings.Contains(bodies[0], "factoryd release:"+strings.Repeat("d", 40)+" failed in phase trial") {
 		t.Fatalf("new cause wake = %q", bodies)
 	}
+	// A manual retry of that commit fails with the first cause again: its
+	// record no longer shows the change of cause, but the wake naming it does.
+	settleCarrier(t, store, at+settle+1, 52, "ran")
+	at += rewake
+	release('d', "failed", "drain", "drain_timeout: run 4 is admitted", at)
+	if bodies := wakeBodies(t, store, at+settle); len(bodies) != 1 || !strings.Contains(bodies[0], "factoryd release:"+strings.Repeat("d", 40)+" failed in phase drain") {
+		t.Fatalf("returning cause wake = %q", bodies)
+	}
 }
 
 // A cancelled worker task is informational; a blocked one wakes the overseer
