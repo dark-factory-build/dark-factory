@@ -153,6 +153,20 @@ func (daemon *Daemon) advanceReviewOperations(ctx context.Context, startup bool)
 		err = nil
 		stuck := startup || daemon.now().Sub(op.UpdatedAt) > reviewStuckAfter
 		switch {
+		case op.RoutePending && op.State == "ejected" && strings.Contains(op.Detail, "conflicts with"):
+			var rebased bool
+			rebased, err = daemon.tryAutoRebase(ctx, operation.Project, operation.Repository, op)
+			if err == nil && rebased {
+				daemon.publishSettledChanges(ctx)
+				_ = daemon.refreshProduction(ctx, operation.Project)
+				op.State, op.RoutePending, op.UpdatedAt = "superseded", false, daemon.now()
+				err = durableReviewStore{store: daemon.store, project: operation.Project, repository: operation.Repository, now: daemon.now}.Update(ctx, op)
+				if err == nil {
+					continue
+				}
+			} else if err == nil {
+				err = daemon.finishReviewRouting(ctx, operation.Project, operation.Repository, op)
+			}
 		case op.RoutePending:
 			err = daemon.finishReviewRouting(ctx, operation.Project, operation.Repository, op)
 		case op.State == "running" && startup:

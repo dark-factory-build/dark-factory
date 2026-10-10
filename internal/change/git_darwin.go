@@ -21,6 +21,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/dark-factory-build/dark-factory/internal/gitauthor"
 	"golang.org/x/sys/unix"
 )
 
@@ -1383,7 +1384,10 @@ func RebaseWorktree(ctx context.Context, selection Selection, path string) (Work
 	// repository as --git-dir would select its unrelated HEAD and index.
 	gitArgs := []string{"-c", "core.hooksPath=/dev/null", "-c", "protocol.file.allow=always", "-C", path}
 	gitArgs = append(gitArgs, "rebase", "refs/remotes/origin/main")
-	result, err := authority.run(ctx, maxGitSelectionOutput, gitArgs...)
+	result, err := authority.runWithEnvironment(ctx, maxGitSelectionOutput, []string{
+		"GIT_COMMITTER_NAME=" + gitauthor.AutomationName,
+		"GIT_COMMITTER_EMAIL=" + gitauthor.AutomationEmail,
+	}, gitArgs...)
 	if err != nil {
 		return WorktreeFacts{}, err
 	}
