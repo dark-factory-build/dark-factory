@@ -4,8 +4,44 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"unicode/utf8"
 )
+
+// bindMissionDecision carries the mission context from a driver's proposal to
+// the task accepted by the overseer. The decision remains the authority edge;
+// this is only the durable association used by mission progress views.
+func bindMissionDecision(ctx context.Context, c *sql.Conn, project ProjectID, raw string, at UnixMillis) error {
+	if !strings.HasPrefix(strings.TrimSpace(raw), "{") {
+		return nil
+	}
+	m, err := ParseKnowledgeMetadata(raw)
+	if err != nil || m.RecordType != "proposal" || m.RecordID == "" || m.TaskID == "" {
+		return nil
+	}
+	proposal, err := knowledgeID(m.RecordID)
+	if err != nil {
+		return err
+	}
+	var proposalRaw string
+	if err := c.QueryRowContext(ctx, `SELECT source_references FROM project_content_revisions WHERE id=? AND project_id=? AND kind='observation' AND deprecated=0 AND revision=(SELECT MAX(revision) FROM project_content_revisions WHERE id=?)`, proposal, project.Bytes(), proposal).Scan(&proposalRaw); err != nil {
+		return err
+	}
+	proposalMeta, err := ParseKnowledgeMetadata(proposalRaw)
+	if err != nil || proposalMeta.MissionID == "" {
+		return nil
+	}
+	mission, err := knowledgeID(proposalMeta.MissionID)
+	if err != nil {
+		return err
+	}
+	task, err := knowledgeID(m.TaskID)
+	if err != nil {
+		return err
+	}
+	_, err = c.ExecContext(ctx, `INSERT OR IGNORE INTO mission_task_bindings(mission_id, task_id, parent_task_id, project_id, created_at_ms) SELECT ?, ?, NULL, ?, ? WHERE EXISTS (SELECT 1 FROM tasks WHERE id=? AND project_id=?)`, mission, task, project.Bytes(), at.Int64(), task, project.Bytes())
+	return err
+}
 
 // ContentKind is a string so ordinary project content can grow without a
 // closed Go enum or a daemon release.
@@ -128,6 +164,9 @@ func createContentTx(ctx context.Context, tx *writeTx, spec NewContent, at UnixM
 	if _, err := tx.connection.ExecContext(ctx, `INSERT INTO content_repository_bindings(content_id, content_revision, repository_id) VALUES(?, 1, ?)`, spec.ID.Bytes(), repository.ID.Bytes()); err != nil {
 		return ContentRevision{}, tx.Rollback(err)
 	}
+	if err := bindMissionDecision(ctx, tx.connection, spec.ProjectID, spec.SourceReferences, at); err != nil {
+		return ContentRevision{}, tx.Rollback(err)
+	}
 	result, err := contentByRevision(ctx, tx.connection, spec.ID, 1)
 	if err != nil {
 		return ContentRevision{}, tx.Rollback(err)
@@ -204,6 +243,9 @@ func reviseContentTx(ctx context.Context, tx *writeTx, expected Revision, spec N
 		return ContentRevision{}, tx.Rollback(err)
 	}
 	if _, err := tx.connection.ExecContext(ctx, `INSERT INTO content_repository_bindings(content_id, content_revision, repository_id) VALUES(?, ?, ?)`, spec.ID.Bytes(), next, repositoryID); err != nil {
+		return ContentRevision{}, tx.Rollback(err)
+	}
+	if err := bindMissionDecision(ctx, tx.connection, spec.ProjectID, spec.SourceReferences, at); err != nil {
 		return ContentRevision{}, tx.Rollback(err)
 	}
 	result, err := contentByRevision(ctx, tx.connection, spec.ID, next)

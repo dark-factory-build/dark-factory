@@ -360,6 +360,11 @@ func validateSpecialistRecord(ctx context.Context, c *sql.Conn, spec NewContent,
 		if a == nil {
 			return nil
 		}
+		if m.MissionID != "" {
+			if err := validateMissionRecord(ctx, c, spec.ProjectID, m, a, false); err != nil {
+				return err
+			}
+		}
 		var mine, open, limit int
 		if err := c.QueryRowContext(ctx, `SELECT
 			(SELECT count(DISTINCT c.id) FROM project_content_revisions AS c WHERE c.author GLOB 'run:' || ?3 || ' *' AND c.id <> ?2 AND `+latestProposalSQL+`),
@@ -390,11 +395,22 @@ func validateSpecialistRecord(ctx context.Context, c *sql.Conn, spec NewContent,
 		if proposals == 0 {
 			return fmt.Errorf("%w: unknown proposal", ErrInvalidValue)
 		}
+		if m.MissionID != "" {
+			if err := validateMissionRecord(ctx, c, spec.ProjectID, m, a, true); err != nil {
+				return err
+			}
+		}
 		// One self-generated implementation is active at a time.
 		if a != nil && m.TaskID != "" && active != 0 {
 			return fmt.Errorf("%w: an accepted proposal's task is still active", ErrConflict)
 		}
 	default:
+		if m.RecordType == "assessment" {
+			if spec.Kind != ContentObservation || m.MissionID == "" {
+				return ErrInvalidValue
+			}
+			return validateMissionRecord(ctx, c, spec.ProjectID, m, a, false)
+		}
 		return ErrInvalidValue
 	}
 	return nil

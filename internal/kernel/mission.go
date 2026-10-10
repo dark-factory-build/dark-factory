@@ -18,6 +18,7 @@ type MissionCreate struct {
 	ExpectedAgentRevision Revision
 	Objective             string
 	Criteria              string
+	DriverAgentID         AgentID
 }
 
 type MissionCreateResult struct {
@@ -128,6 +129,15 @@ func (store *Store) CreateMissionForBrowser(ctx context.Context, clientID Browse
 	if !found || agent.ProjectID != spec.ProjectID || agent.Role != RoleOrchestrator || agent.Archived {
 		return MissionCreateResult{}, tx.Rollback(ErrRevisionConflict)
 	}
+	if !spec.DriverAgentID.zero() {
+		driver, found, e := agentByID(ctx, tx.connection, spec.DriverAgentID)
+		if e != nil {
+			return MissionCreateResult{}, tx.Rollback(e)
+		}
+		if !found || driver.ProjectID != spec.ProjectID || !driver.Specialist() || driver.Archived {
+			return MissionCreateResult{}, tx.Rollback(ErrRevisionConflict)
+		}
+	}
 	title := spec.Objective
 	if len(title) > 1024 {
 		title = title[:1024]
@@ -146,7 +156,11 @@ func (store *Store) CreateMissionForBrowser(ctx context.Context, clientID Browse
 	}
 	if replay {
 		mission, e := outcomeOnConnection(ctx, tx.connection, spec.ProjectID, spec.ID, 0)
-		if e != nil || mission.Document.Kind != "mission" || mission.Document.Objective != spec.Objective || mission.Document.Criteria != spec.Criteria || mission.Document.AnchorTaskID != taskID.String() {
+		driverID := ""
+		if !spec.DriverAgentID.zero() {
+			driverID = spec.DriverAgentID.String()
+		}
+		if e != nil || mission.Document.Kind != "mission" || mission.Document.Objective != spec.Objective || mission.Document.Criteria != spec.Criteria || mission.Document.AnchorTaskID != taskID.String() || mission.Document.DriverAgentID != driverID {
 			if e == nil {
 				e = ErrConflict
 			}
@@ -167,7 +181,11 @@ func (store *Store) CreateMissionForBrowser(ctx context.Context, clientID Browse
 	if _, err = tx.connection.ExecContext(ctx, `INSERT INTO mission_task_bindings (mission_id, task_id, parent_task_id, project_id, created_at_ms) VALUES (?, ?, NULL, ?, ?)`, spec.ID.Bytes(), anchor.ID.Bytes(), spec.ProjectID.Bytes(), at.Int64()); err != nil {
 		return MissionCreateResult{}, tx.Rollback(err)
 	}
-	mission, err := writeOutcomeTx(ctx, tx, nil, "browser:"+client.ID.String(), "human", NewOutcome{ID: spec.ID, ProjectID: spec.ProjectID, Document: OutcomeDocument{Kind: "mission", Objective: spec.Objective, Criteria: spec.Criteria, AnchorTaskID: anchor.ID.String(), AnchorWorkRevision: 1, State: "open"}}, 0, at)
+	driverID := ""
+	if !spec.DriverAgentID.zero() {
+		driverID = spec.DriverAgentID.String()
+	}
+	mission, err := writeOutcomeTx(ctx, tx, nil, "browser:"+client.ID.String(), "human", NewOutcome{ID: spec.ID, ProjectID: spec.ProjectID, Document: OutcomeDocument{Kind: "mission", Objective: spec.Objective, Criteria: spec.Criteria, AnchorTaskID: anchor.ID.String(), AnchorWorkRevision: 1, DriverAgentID: driverID, State: "open"}}, 0, at)
 	if err != nil {
 		return MissionCreateResult{}, tx.Rollback(err)
 	}
