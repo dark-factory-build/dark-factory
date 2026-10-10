@@ -241,7 +241,8 @@ func (daemon *Daemon) HandleConnection(ctx context.Context, connection *api.Conn
 	}
 	dispatchContext, cancel := context.WithTimeout(ctx, defaultDispatchTimeout)
 	defer cancel()
-	if call.Kind() == api.CallMaintainer || call.Kind() == api.CallIntake {
+	// A project's health runs its repositories' fetch checks (oversight).
+	if project, _ := call.HealthProject(); call.Kind() == api.CallMaintainer || call.Kind() == api.CallIntake || project != "" {
 		cancel()
 		dispatchContext, cancel = context.WithTimeout(ctx, 90*time.Second)
 		defer cancel()
@@ -1102,7 +1103,8 @@ func (daemon *Daemon) oversight(ctx context.Context, project kernel.ProjectID) (
 		return status, err
 	}
 	// ponytail: one bounded fetch check per repository, in turn, as
-	// project repository fetch runs it; parallelise if projects grow many.
+	// project repository fetch runs it, within the call's 90s dispatch budget
+	// (HandleConnection); parallelise if projects grow many.
 	for _, repository := range repositories {
 		view, err := daemon.RepositoryReadiness(ctx, repository.ID, true)
 		if err != nil {
