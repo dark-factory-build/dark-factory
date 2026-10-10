@@ -103,7 +103,7 @@ var schemaStatements = []string{
 	    root TEXT NOT NULL CHECK (length(CAST(root AS BLOB)) BETWEEN 1 AND 4096 AND substr(root, 1, 1) = '/'),
 	    verification_policy TEXT NOT NULL CHECK (verification_policy IN ('none', 'rust_workspace_test', 'go_workspace_test')),
 	    runs_used INTEGER NOT NULL DEFAULT 0 CHECK (runs_used >= 0),
-    revision INTEGER NOT NULL CHECK (revision >= 1),
+	    revision INTEGER NOT NULL CHECK (revision >= 1),
     created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
     updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= created_at_ms)
 ` + projectSpecialistColumns + `) STRICT, WITHOUT ROWID`,
