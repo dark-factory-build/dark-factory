@@ -545,7 +545,7 @@ const overseerWakeLine = `SELECT printf('- %s "%s" %s rev=%d', lower(hex(t.id)),
 		WHERE u.task_id = t.id AND h.status IN ('open', 'delivering', 'delivery_unknown') LIMIT 1)), 1, 120), char(10), ' '), '')
 FROM tasks AS t WHERE t.id = due.id`
 
-const overseerWakeCounts = `WITH open_pr AS (SELECT CAST(json_extract(p.document, '$.number') AS INTEGER) AS number, json_extract(p.document, '$.head') AS head,
+const overseerWakeCounts = `WITH open_pr AS (SELECT p.repository, CAST(json_extract(p.document, '$.number') AS INTEGER) AS number, json_extract(p.document, '$.head') AS head,
 	json_extract(p.document, '$.mergeable') AS mergeable, lower(COALESCE(json_extract(p.document, '$.merge_state'), '')) AS merge_state,
 	lower(COALESCE(json_extract(p.document, '$.merge_queue'), '')) AS merge_queue,
 	lower(COALESCE(json_extract(p.document, '$.review.state'), '')) AS review
@@ -554,7 +554,7 @@ const overseerWakeCounts = `WITH open_pr AS (SELECT CAST(json_extract(p.document
 		AND pt.pull_number = CAST(json_extract(p.document, '$.number') AS INTEGER))),
 	classified AS (SELECT open_pr.*,
 	EXISTS (SELECT 1 FROM production_records AS c, json_each(c.document, '$.pull_requests') AS n
-		WHERE c.project_id = ?1 AND c.kind = 'check' AND json_extract(c.document, '$.scope') = 'head'
+		WHERE c.project_id = ?1 AND c.repository = open_pr.repository AND c.kind = 'check' AND json_extract(c.document, '$.scope') = 'head'
 		  AND lower(json_extract(c.document, '$.revision')) = lower(open_pr.head) AND CAST(n.value AS INTEGER) = open_pr.number
 		  AND json_extract(c.document, '$.conclusion') IN ('failure', 'timed_out', 'action_required', 'cancelled', 'startup_failure')) AS failing
 	FROM open_pr)
