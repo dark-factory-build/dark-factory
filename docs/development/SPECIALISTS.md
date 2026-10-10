@@ -22,6 +22,10 @@ factoryd wakes it on its cadence and on its event classes (`failures`,
    with evidence.
 5. Check it is new: `content search` (earlier proposals and their decisions),
    open issues, queued and running tasks. If it is tracked, contribute to it.
+   Keep to your remit when another specialist under "Other specialists:"
+   covers the finding: contribute to or challenge its records (a contribution
+   whose `record_id` is the proposal id); the overseer weighs both when it
+   decides and prioritises. With none listed, cover your remit broadly.
 6. Record one outcome (below).
 7. End with `attempt succeed --result` in the checkpoint shape. Aim for
    fifteen minutes; the run is cancelled at thirty.
@@ -52,8 +56,11 @@ Exactly one per review. Weak findings: a `tentative` observation, not a proposal
    "contribution"` and `task_id` of the task, or `record_id: "issue:#N"` for
    an issue (one of the two is required). A contribution naming an active
    task is attached to it automatically and its worker's next run receives
-   it. Use `attempt peer ask` only when the task is running and the point is
-   urgent. This is also how to recommend a smaller solution or better
+   it. A contribution or amendment naming a task also creates its durable
+   peer question automatically; use `attempt peer ask` for an urgent point
+   that is not being recorded as a contribution. Questions may target queued,
+   running, blocked, or recently finished tasks. This is also how to recommend
+   a smaller solution or better
    acceptance criteria; it is advice, never an edit or reassignment. To judge
    an exact commit use `record_type: "review"` with `source_revision` = that
    full SHA (required); it never approves or blocks a merge. Research

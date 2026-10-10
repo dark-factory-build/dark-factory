@@ -154,7 +154,8 @@ func selectGitWithTrust(ctx context.Context, gitExecutable, repositoryRoot, revi
 // Retained Changes refresh their current base in factoryd before the worker
 // runs (FetchBase). HEAD means the origin's default branch, never the
 // registered checkout's own HEAD; only a checkout without an origin follows
-// its local HEAD and upstream. Explicit local revisions never refresh source.
+// its local HEAD and upstream. refs/pull/N/head is the origin's pull request
+// head. Explicit local revisions never refresh source.
 func refreshTrackingRevision(ctx context.Context, spec gitCommandSpec, revision string, verify func() error) (string, error) {
 	run := func(arguments ...string) ([]byte, error) {
 		spec.arguments = append([]string{"-C", spec.repository}, arguments...)
@@ -203,11 +204,13 @@ func refreshTrackingRevision(ctx context.Context, spec gitCommandSpec, revision 
 			return "", &ValidationError{Reason: "configured remote source is invalid"}
 		}
 		branch = "refs/heads/" + branch
+	} else if strings.HasPrefix(revision, "refs/pull/") {
+		remote, branch = "origin", revision
 	}
 	if remote == "" || remote == "." {
 		return revision, nil
 	}
-	if strings.HasPrefix(remote, "-") || !strings.HasPrefix(branch, "refs/heads/") {
+	if strings.HasPrefix(remote, "-") || !strings.HasPrefix(branch, "refs/heads/") && !strings.HasPrefix(branch, "refs/pull/") {
 		return "", &ValidationError{Reason: "configured remote source is invalid"}
 	}
 	// The base lands in a factory-owned ref, never a branch, tracking ref or
@@ -1375,6 +1378,74 @@ func inspectWorktree(ctx context.Context, gitExecutable, repositoryRoot string, 
 		invalid.Worktree = true
 	}
 	return facts, err
+}
+
+// RemoveWorktree reclaims the Change at path. A worktree must verify on its
+// own branch at head and be clean; Git removes it without force, so it
+// refuses uncommitted work as well, and deletes ignored files with it. A
+// private worktree's administration goes too, while its branch is at head. A
+// legacy worktree on the project's shared administration, and a Git-free copy
+// (head nil), are removed only when given up is set (the work is merged or
+// past its age); the legacy branch is then deleted only at head, and nothing
+// else in the shared administration is touched. What is already gone is
+// skipped, so a removal interrupted part way completes.
+func RemoveWorktree(ctx context.Context, gitExecutable, repositoryRoot string, expected RepositoryIdentity, path string, head *ObjectID, givenUp bool) error {
+	if err := validateWorktreePath(path); err != nil {
+		return err
+	}
+	authority, err := openGitAuthority(gitExecutable, repositoryRoot, expected, nil, true)
+	if err != nil {
+		return err
+	}
+	defer authority.close()
+	admin := GitDirectoryForChange(authority.repositoryRoot, path)
+	branch := "refs/heads/" + BranchName(filepath.Base(path))
+	info, err := os.Lstat(path)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+	case err != nil:
+		return newGitError(gitFailurePrivateIO)
+	case head == nil:
+		if _, gitErr := os.Lstat(filepath.Join(path, ".git")); !givenUp || !info.IsDir() || !errors.Is(gitErr, os.ErrNotExist) {
+			return &ValidationError{Reason: "the Git-free Change copy is not given up"}
+		}
+		return os.RemoveAll(path)
+	default:
+		facts, err := authority.inspectWorktree(ctx, path)
+		switch {
+		case err != nil:
+			return err
+		case facts.Dirty():
+			return &ValidationError{Reason: "the Change worktree has uncommitted work"}
+		case !facts.Head().equal(*head) || "refs/heads/"+facts.Branch() != branch:
+			return &ValidationError{Reason: "the Change worktree is not at its recorded head"}
+		case facts.GitDirectory() != admin && !givenUp:
+			return &ValidationError{Reason: "the Change uses the project's shared Git administration and is not given up"}
+		}
+		if _, err := authority.succeed(ctx, maxGitSelectionOutput, "--git-dir", facts.GitDirectory(), "worktree", "remove", path); err != nil {
+			return err
+		}
+		if facts.GitDirectory() != admin {
+			_, err := authority.succeed(ctx, maxGitSelectionOutput, "--git-dir", facts.GitDirectory(), "update-ref", "-d", branch, head.Hex())
+			return err
+		}
+	}
+	if _, err := os.Lstat(admin); errors.Is(err, os.ErrNotExist) || head == nil {
+		return nil
+	} else if err != nil {
+		return newGitError(gitFailurePrivateIO)
+	}
+	if err := validatePrivateGitAdmin(admin); err != nil {
+		return err
+	}
+	tip, err := authority.succeed(ctx, maxGitSelectionOutput, "--git-dir", admin, "rev-parse", "--verify", "--end-of-options", branch+"^{commit}")
+	if err != nil {
+		return err
+	}
+	if branch, err := parseGitOID(head.format, bytes.TrimSpace(tip)); err != nil || !branch.equal(*head) {
+		return &ValidationError{Reason: "the Change branch is not at its recorded head"}
+	}
+	return os.RemoveAll(filepath.Dir(admin))
 }
 
 // DescendsFrom reports whether the worktree's head descends from base: the

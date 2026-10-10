@@ -2,7 +2,9 @@ package kernel
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"fmt"
 	"strings"
 	"unicode/utf8"
@@ -177,10 +179,64 @@ func createContentTx(ctx context.Context, tx *writeTx, spec NewContent, at UnixM
 	if err := validateRepositoryBindings(ctx, tx.connection); err != nil {
 		return ContentRevision{}, tx.Rollback(err)
 	}
+	if authorTask != nil {
+		if err := createSpecialistPeerQuestionTx(ctx, tx, *authorTask, spec, at); err != nil {
+			return ContentRevision{}, tx.Rollback(err)
+		}
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return ContentRevision{}, err
 	}
 	return result, nil
+}
+
+func createSpecialistPeerQuestionTx(ctx context.Context, tx *writeTx, source TaskID, spec NewContent, at UnixMillis) error {
+	metadata, err := ParseKnowledgeMetadata(spec.SourceReferences)
+	if err != nil || (metadata.RecordType != "contribution" && metadata.RecordType != "amendment") || metadata.TaskID == "" {
+		return nil
+	}
+	rawTarget, err := hex.DecodeString(metadata.TaskID)
+	if err != nil {
+		return ErrInvalidValue
+	}
+	targetID, err := TaskIDFromBytes(rawTarget)
+	if err != nil {
+		return err
+	}
+	target, found, err := taskByID(ctx, tx.connection, targetID)
+	if err != nil || !found {
+		if err == nil {
+			err = ErrInvalidValue
+		}
+		return err
+	}
+	if target.ID == source {
+		return nil
+	}
+	if target.ProjectID != spec.ProjectID || !peerQuestionTargetStatus(target, at.Int64()) {
+		return ErrUnauthorized
+	}
+	question := fmt.Sprintf("Specialist %s %s: %s", metadata.RecordType, spec.ID, spec.Title)
+	if spec.Description != "" {
+		question += "\n" + spec.Description
+	}
+	if len(question) > MaxPeerQuestionBytes {
+		question = strings.TrimSpace(question[:MaxPeerQuestionBytes])
+		for !utf8.ValidString(question) {
+			question = question[:len(question)-1]
+		}
+	}
+	var raw [IDBytes]byte
+	if _, err := rand.Read(raw[:]); err != nil || raw == [IDBytes]byte{} {
+		if err == nil {
+			err = ErrCorruptState
+		}
+		return err
+	}
+	if _, err := tx.connection.ExecContext(ctx, `INSERT INTO peer_questions(id, project_id, source_task_id, target_task_id, idempotency_key, question_text, recipient_delivery_state, answer_delivery_state, revision, created_at_ms, updated_at_ms) VALUES(?, ?, ?, ?, ?, ?, 'pending', 'pending', 1, ?, ?)`, raw[:], spec.ProjectID.Bytes(), source.Bytes(), target.ID.Bytes(), spec.ID.Bytes(), question, at.Int64(), at.Int64()); err != nil {
+		return err
+	}
+	return appendInvalidations(ctx, tx.connection, at, []pendingInvalidation{{kind: EntityPeerQuestion, id: raw[:], revision: 1}})
 }
 
 func (store *Store) ReviseContent(ctx context.Context, expected Revision, spec NewContent, at UnixMillis) (ContentRevision, error) {
@@ -494,6 +550,14 @@ func attachContentTx(ctx context.Context, tx *writeTx, task TaskID, project Proj
 	}
 	if status != TaskQueued.String() {
 		return ErrConflict
+	}
+	var busy bool
+	if err := tx.connection.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM project_content_revisions AS p WHERE p.id = ?2 AND p.revision = ?5 AND `+proposalRevisionSQL+`)
+		AND EXISTS (SELECT 1 FROM tasks AS t WHERE `+activeImplementationSQL+`)`, project.Bytes(), content.Bytes(), nil, task.String(), revision.Int64()).Scan(&busy); err != nil {
+		return err
+	}
+	if busy {
+		return fmt.Errorf("%w: an accepted proposal's task is still active", ErrConflict)
 	}
 	var references int
 	if err := tx.connection.QueryRowContext(ctx, `SELECT COUNT(*) FROM task_content_references WHERE task_id = ? AND task_work_revision = ?`, task.Bytes(), taskWorkRevision).Scan(&references); err != nil {
