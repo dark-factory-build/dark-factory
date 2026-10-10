@@ -23,8 +23,13 @@ test("fixture server advertises only after binding and has a bounded lifecycle",
   assert.match(firstOutput, /http:\/\/127\.0\.0\.1:5196\/\?fixture/);
   assert.equal(firstOutput.trim(), "http://127.0.0.1:5196/?fixture");
   const second = spawnPreview();
+  const secondReady = second.ready.then(
+    () => new Error("occupied preview unexpectedly emitted a URL"),
+    (error) => error,
+  );
   const [secondError, secondOutput] = await Promise.all([second.stderr, second.stdout]);
   await second.exit;
+  assert.match((await secondReady).message, /stdout closed before producing output/);
   assert.match(secondError, /EADDRINUSE/);
   assert.doesNotMatch(secondOutput, /http:\/\/127\.0\.0\.1:5196/);
   first.kill("SIGINT");
