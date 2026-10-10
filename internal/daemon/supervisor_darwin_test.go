@@ -524,13 +524,10 @@ func runSupervisorClaudeFixture() error {
 		return fmt.Errorf("launch argv lacks the native task prompt")
 	}
 	prompt := os.Args[len(os.Args)-1]
-	taskPath, found := strings.CutPrefix(prompt, "Complete only the exact Factory task below.")
+	const taskFileMarker = "\n\nRead the exact Factory task, including its pinned source and continuation context, from "
+	_, taskPath, found := strings.Cut(prompt, taskFileMarker)
 	if !found {
 		return fmt.Errorf("launch prompt lacks exact task path")
-	}
-	_, taskPath, found = strings.Cut(taskPath, " from ")
-	if !found {
-		return fmt.Errorf("launch prompt lacks exact task file")
 	}
 	taskPath = strings.TrimSuffix(taskPath, ".")
 	taskBytes, err := os.ReadFile(taskPath)

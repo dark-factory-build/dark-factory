@@ -326,10 +326,11 @@ func TestDaemonDispatchesOperatorCallsAndBoundsProjection(t *testing.T) {
 		t.Fatalf("refused task was persisted: found=%v, err=%v", found, err)
 	}
 
+	taskBody := strings.Repeat("x", runner.MaxProviderTaskBytes)
 	done = fixture.serve(t)
 	taskResult, err := client.EnqueueTask(ctx, api.EnqueueTaskInput{
 		ID: testID(3), ProjectID: projectInput.ID, AssignedAgentID: testID(2), IncarnationID: testID(4),
-		Title: "public title", Body: strings.Repeat("x", runner.MaxProviderTaskBytes), Priority: 7,
+		Title: "public title", Body: taskBody, Priority: 7,
 	})
 	if err != nil || taskResult.Revision != 1 || taskResult.Head != 6 {
 		t.Fatalf("enqueue task = %+v, %v", taskResult, err)
@@ -370,7 +371,7 @@ func TestDaemonDispatchesOperatorCallsAndBoundsProjection(t *testing.T) {
 		t.Fatalf("durable agent = %+v, found=%v, err=%v", agent, found, err)
 	}
 	task, found, err := fixture.store.Task(ctx, mustTaskID(t, testID(3)))
-	if err != nil || !found || task.Body != "private task body sentinel" {
+	if err != nil || !found || task.Body != taskBody {
 		t.Fatalf("durable task = %+v, found=%v, err=%v", task, found, err)
 	}
 }
@@ -596,7 +597,10 @@ func TestDaemonDispatchesSendBackThroughBothDomains(t *testing.T) {
 	}
 	waitDispatch(t, done)
 	done = fixture.serve(t)
-	if _, err := operator.EnqueueTask(ctx, api.EnqueueTaskInput{ID: claudeTask, ProjectID: active.run.ProjectID.String(), AssignedAgentID: claude, IncarnationID: testID(63), Title: "typed", Body: strings.Repeat("x", runner.MaxProviderTaskBytes)}); err != nil {
+	const fitsNote = "fits"
+	sentBackOverhead := len(kernel.SentBackBody(kernel.Task{Body: "x", WorkRevision: mustRevision(t, 1)}, fitsNote)) - 1
+	claudeBody := strings.Repeat("x", runner.MaxProviderTaskBytes-sentBackOverhead)
+	if _, err := operator.EnqueueTask(ctx, api.EnqueueTaskInput{ID: claudeTask, ProjectID: active.run.ProjectID.String(), AssignedAgentID: claude, IncarnationID: testID(63), Title: "typed", Body: claudeBody}); err != nil {
 		t.Fatal(err)
 	}
 	waitDispatch(t, done)
@@ -607,7 +611,7 @@ func TestDaemonDispatchesSendBackThroughBothDomains(t *testing.T) {
 	waitDispatch(t, done)
 	// A note that fits reaches the kernel, which refuses the queued task.
 	done = fixture.serve(t)
-	if _, err := operator.SendBackTask(ctx, api.SendBackInput{TaskID: claudeTask, Note: "fits"}); !errors.As(err, &remote) || remote.Code() != api.RemoteConflict {
+	if _, err := operator.SendBackTask(ctx, api.SendBackInput{TaskID: claudeTask, Note: fitsNote}); !errors.As(err, &remote) || remote.Code() != api.RemoteConflict {
 		t.Fatalf("operator sending back a queued task = %v", err)
 	}
 	waitDispatch(t, done)
