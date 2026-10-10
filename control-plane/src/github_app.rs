@@ -121,9 +121,9 @@ pub(crate) enum OperationError {
     Unavailable,
 }
 
-/// Why GitHub refused, said with typed classifications only. GitHub's
-/// error text can quote caller input, so the text never rides along -- the
-/// same discipline `github_graphql` applies to its logging.
+/// Why GitHub refused: typed classifications, plus GitHub's own bounded
+/// refusal line where it gave one, because the class alone cannot tell a
+/// missing approval from a moved head (#1614).
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub(crate) enum RefusalReason {
     /// The mutation was rejected before execution, and these are the typed
@@ -163,14 +163,16 @@ pub(crate) enum RefusalReason {
 
 /// Which pre-execution rejection classes appeared. More than one can:
 /// GitHub reports one error per problem, so the set is carried whole
-/// rather than collapsed to whichever arrived first.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+/// rather than collapsed to whichever arrived first. `message` is the first
+/// error's text, one bounded line.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct RejectionKinds {
     not_found: bool,
     forbidden: bool,
     unprocessable: bool,
     rate_limited: bool,
     codeowners_approval: bool,
+    message: String,
 }
 
 impl std::fmt::Display for RejectionKinds {
@@ -198,6 +200,9 @@ impl std::fmt::Display for RejectionKinds {
             // crate-visible, so the impossible value must at least read as
             // what it is rather than trailing off mid-sentence.
             formatter.write_str("no recorded class")?;
+        }
+        if !self.message.is_empty() {
+            write!(formatter, ": {}", self.message)?;
         }
         Ok(())
     }
@@ -3290,7 +3295,7 @@ impl Authority {
             .and_then(|data| data.enqueue)
             .and_then(|payload| payload.entry);
         if entry.is_none() {
-            if let Some(GraphQlFailure::Rejected(kinds)) = failure {
+            if let Some(GraphQlFailure::Rejected(kinds)) = &failure {
                 if kinds.codeowners_approval {
                     return Err(OperationError::Refused(RefusalReason::CodeownersApproval));
                 }
@@ -4960,6 +4965,9 @@ fn classify_graphql_errors(errors: &[GraphQlError]) -> Option<GraphQlFailure> {
             Some("RATE_LIMITED") => kinds.rate_limited = true,
             _ => return Some(GraphQlFailure::Unknown),
         }
+        if kinds.message.is_empty() {
+            kinds.message = bounded_line(&error.message);
+        }
     }
     Some(GraphQlFailure::Rejected(kinds))
 }
@@ -5007,7 +5015,7 @@ fn enqueue_outcome(
 /// the identical response means "I could not find out", which is never a
 /// refusal of the operation being reconciled.
 #[cfg(any(target_arch = "wasm32", test))]
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 enum GraphQlFailure {
     /// Every error names a class GitHub rejects *before* running the
     /// operation, so no effect was produced. Which classes appeared rides
@@ -5275,25 +5283,28 @@ mod tests {
         }
     }
 
+    /// GitHub's own refusal line reaches the text factoryd wraps, so a
+    /// refused enqueue names its cause instead of only its class (#1614).
     #[test]
     fn sourced_enqueue_refusals_keep_the_real_root_error_shape() {
-        for name in [
-            "enqueue-refused-before-codeowners-approval",
-            "enqueue-refused-for-head-conflict",
+        for (name, kinds) in [
+            (
+                "enqueue-refused-before-codeowners-approval",
+                "UNPROCESSABLE+CODEOWNERS_APPROVAL",
+            ),
+            ("enqueue-refused-for-head-conflict", "UNPROCESSABLE"),
         ] {
             let response = fixture(name)["response"].clone();
             let errors: Vec<GraphQlError> =
                 serde_json::from_value(response["errors"].clone()).unwrap();
-            assert!(matches!(
-                classify_graphql_errors(&errors),
-                Some(GraphQlFailure::Rejected(kinds))
-                    if kinds.to_string()
-                        == if name == "enqueue-refused-before-codeowners-approval" {
-                            "UNPROCESSABLE+CODEOWNERS_APPROVAL"
-                        } else {
-                            "UNPROCESSABLE"
-                        }
-            ));
+            let message = errors[0].message.clone();
+            assert_eq!(
+                enqueue_outcome(None, classify_graphql_errors(&errors))
+                    .err()
+                    .unwrap()
+                    .to_string(),
+                format!("the request was refused: rejected before execution as {kinds}: {message}")
+            );
             assert!(response["data"]["enqueuePullRequest"].is_null());
         }
     }
@@ -6165,14 +6176,20 @@ mod tests {
 
         // An entry came back. That is the effect, whatever rode alongside it.
         assert!(enqueue_outcome(Some(entry()), None).is_ok());
-        assert!(enqueue_outcome(Some(entry()), Some(GraphQlFailure::Rejected(forbidden))).is_ok());
+        assert!(
+            enqueue_outcome(
+                Some(entry()),
+                Some(GraphQlFailure::Rejected(forbidden.clone()))
+            )
+            .is_ok()
+        );
         assert!(enqueue_outcome(Some(entry()), Some(GraphQlFailure::Unknown)).is_ok());
 
         // No entry, rejected before execution: determinate, the same
         // operation ID stays retryable, and the refusal carries the classes
         // the classification recorded rather than a fresh guess.
         assert!(matches!(
-            enqueue_outcome(None, Some(GraphQlFailure::Rejected(forbidden))),
+            enqueue_outcome(None, Some(GraphQlFailure::Rejected(forbidden.clone()))),
             Err(OperationError::Refused(RefusalReason::Rejected(kinds))) if kinds == forbidden
         ));
         // No entry, and an error class that may follow a server-side timeout

@@ -425,6 +425,75 @@ func raiseStalledItems(ctx context.Context, tx *writeTx, agent Agent, at UnixMil
 	return nil
 }
 
+// OverseerItem is one of an overseer's items as the operator sees it: Due in
+// its next wake (Line as the wake names it), or stalled since Carrier last
+// named it.
+type OverseerItem struct {
+	Agent   AgentID
+	Due     bool
+	Line    string
+	Carrier []byte
+}
+
+// OverseerItems reads, for each standing overseer of project, the items its
+// next wake names and the items it left stalled, by the wake's own queries.
+func (store *Store) OverseerItems(ctx context.Context, project ProjectID, at UnixMillis, health ...OverseerHealth) ([]OverseerItem, error) {
+	read, err := store.beginRead(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer read.Close()
+	rows, err := read.connection.QueryContext(ctx, `SELECT `+agentColumns+` FROM agents WHERE project_id = ? AND role = 'orchestrator' AND idle_policy = 'standing_instruction' AND archived = 0 ORDER BY id`, project.Bytes())
+	if err != nil {
+		return nil, err
+	}
+	var agents []Agent
+	for rows.Next() {
+		agent, found, err := scanAgent(rows)
+		if err != nil || !found {
+			return nil, errors.Join(err, ErrCorruptState, rows.Close())
+		}
+		agents = append(agents, agent)
+	}
+	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
+		return nil, err
+	}
+	var items []OverseerItem
+	for _, agent := range agents {
+		for _, due := range []bool{true, false} {
+			query := overseerStalledItems
+			if due {
+				query = overseerWakeItems
+			}
+			rows, err := read.connection.QueryContext(ctx, query, overseerItemArgs(agent, at.Int64(), health)...)
+			if err != nil {
+				return nil, err
+			}
+			for rows.Next() {
+				item := OverseerItem{Agent: agent.ID, Due: due}
+				var escalation, ripe bool
+				var key, counts string
+				if due {
+					err = rows.Scan(&escalation, &item.Line, &key, &counts)
+				} else {
+					err = rows.Scan(&item.Carrier, &item.Line, &ripe)
+				}
+				if err != nil {
+					return nil, errors.Join(err, rows.Close())
+				}
+				if escalation {
+					item.Line += " " + key
+				}
+				items = append(items, item)
+			}
+			if err := errors.Join(rows.Err(), rows.Close()); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return items, nil
+}
+
 // overseerWake returns the carrier body for agent's due items, if any.
 func overseerWake(ctx context.Context, connection *sql.Conn, agent Agent, at int64, health []OverseerHealth) (string, bool, error) {
 	rows, err := connection.QueryContext(ctx, overseerWakeItems, overseerItemArgs(agent, at, health)...)
@@ -467,7 +536,7 @@ func overseerWake(ctx context.Context, connection *sql.Conn, agent Agent, at int
 // overseerWakeLine summarises one due task in a line: identity, title, status,
 // work revision, its latest Change head, its pull request and why it waits.
 const overseerWakeLine = `SELECT printf('- %s "%s" %s rev=%d', lower(hex(t.id)), replace(substr(t.title, 1, 60), char(10), ' '), t.status, t.work_revision)
-	|| COALESCE((SELECT printf(' change=%s@%s', substr(lower(hex(c.id)), 1, 12), substr(lower(hex(c.head_commit)), 1, 8)) FROM changes AS c
+	|| COALESCE((SELECT printf(' change=%s@%s', substr(lower(hex(c.id)), 1, 12), lower(hex(c.head_commit))) FROM changes AS c
 		WHERE c.task_id = t.id AND c.head_commit IS NOT NULL ORDER BY c.updated_at_ms DESC LIMIT 1), '')
 	|| COALESCE((SELECT printf(' PR #%d %s/%s', p.pull_number, json_extract(r.document, '$.state'), json_extract(r.document, '$.review.state'))
 		FROM publication_tasks AS p JOIN production_records AS r ON r.project_id = p.project_id AND r.repository = p.repository AND r.kind = 'pull_request' AND r.identity = CAST(p.pull_number AS TEXT)
@@ -476,8 +545,23 @@ const overseerWakeLine = `SELECT printf('- %s "%s" %s rev=%d', lower(hex(t.id)),
 		WHERE u.task_id = t.id AND h.status IN ('open', 'delivering', 'delivery_unknown') LIMIT 1)), 1, 120), char(10), ' '), '')
 FROM tasks AS t WHERE t.id = due.id`
 
-const overseerWakeCounts = `SELECT printf('worker tasks queued=%d running=%d; open PRs=%d', COALESCE(SUM(t.status = 'queued'), 0), COALESCE(SUM(t.status = 'running'), 0),
-	(SELECT count(*) FROM production_records WHERE project_id = ?1 AND kind = 'pull_request' AND json_extract(document, '$.state') = 'open'))
+const overseerWakeCounts = `WITH open_pr AS (SELECT p.repository, CAST(json_extract(p.document, '$.number') AS INTEGER) AS number, json_extract(p.document, '$.head') AS head,
+	json_extract(p.document, '$.mergeable') AS mergeable, lower(COALESCE(json_extract(p.document, '$.merge_state'), '')) AS merge_state,
+	lower(COALESCE(json_extract(p.document, '$.merge_queue'), '')) AS merge_queue,
+	lower(COALESCE(json_extract(p.document, '$.review.state'), '')) AS review
+	FROM production_records AS p WHERE p.project_id = ?1 AND p.kind = 'pull_request' AND json_extract(p.document, '$.state') = 'open'
+	AND EXISTS (SELECT 1 FROM publication_tasks AS pt WHERE pt.project_id = p.project_id AND pt.repository = p.repository
+		AND pt.pull_number = CAST(json_extract(p.document, '$.number') AS INTEGER))),
+	classified AS (SELECT open_pr.*,
+	EXISTS (SELECT 1 FROM production_records AS c, json_each(c.document, '$.pull_requests') AS n
+		WHERE c.project_id = ?1 AND c.repository = open_pr.repository AND c.kind = 'check' AND json_extract(c.document, '$.scope') = 'head'
+		  AND lower(json_extract(c.document, '$.revision')) = lower(open_pr.head) AND CAST(n.value AS INTEGER) = open_pr.number
+		  AND json_extract(c.document, '$.conclusion') IN ('failure', 'timed_out', 'action_required', 'cancelled', 'startup_failure')) AS failing
+	FROM open_pr)
+SELECT printf('worker tasks queued=%d running=%d; open factory PRs conflicting=%d failing=%d approved-not-queued=%d', COALESCE(SUM(t.status = 'queued'), 0), COALESCE(SUM(t.status = 'running'), 0),
+	(SELECT COALESCE(SUM(merge_state = 'dirty' OR COALESCE(mergeable = 0, 0)), 0) FROM classified),
+	(SELECT COALESCE(SUM(failing), 0) FROM classified),
+	(SELECT COALESCE(SUM(review = 'allow' AND NOT failing AND merge_state <> 'dirty' AND COALESCE(mergeable, 1) <> 0 AND merge_queue = 'none'), 0) FROM classified))
 FROM tasks AS t LEFT JOIN agents AS a ON a.id = t.assigned_agent_id
 WHERE t.project_id = ?1 AND t.status IN ('queued', 'running') AND COALESCE(a.role, 'worker') = 'worker'`
 

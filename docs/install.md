@@ -212,8 +212,10 @@ A failed task keeps its history: a worker that exits without reporting an
 outcome settles `failed` with the outcome `provider exited before an attempt
 outcome`. Retry it, or a cancelled task, with `factoryctl task update --task
 TASK_ID --revision REVISION --retry`, or send a completed model result back with
-`factoryctl task send-back --task TASK_ID --note TEXT` (shell tasks take no
-note, so send-back refuses them).
+`factoryctl task send-back --task TASK_ID --head SHA --note TEXT` (shell tasks take no
+note, so send-back refuses them). `--head` is the Change head the note was
+observed at; a note about any other head is refused with the current one, so a
+worker never runs on a stale premise. A task with no Change head omits it.
 
 When factoryd cannot publish a finished Change, it records the failure and
 escalates it to the project's overseer once. A Maintainer refusal, conflict or
@@ -351,7 +353,9 @@ nothing about the factory's fetch. A `gh auth git-credential` helper fails here:
 GitHub deploy key for that repository with an SSH origin and an absolute,
 passphrase-free key:
 `git -C CHECKOUT config core.sshCommand "/usr/bin/ssh -i /ABSOLUTE/KEY -o IdentitiesOnly=yes -o UserKnownHostsFile=/ABSOLUTE/known_hosts"`.
-Then rerun the fetch check.
+Then rerun the fetch check. Work and reviews refuse a checkout whose remotes
+changed since they were pinned; a passing fetch check of the same checkout is
+the only way to re-pin its changed origin.
 
 Use `factoryctl project repository github --id REPOSITORY_ID` to bind its
 configured publication repository to the live GitHub connection. Fetch readiness
@@ -359,9 +363,10 @@ and publication binding are separate checks. A verified publication binding
 still requires live write permission for every publication operation.
 
 Once a repository is bound to a project, factoryd reviews the pull requests it
-publishes there. It does not review other pull requests on its own: start one
-with `factoryctl review --project PROJECT_ID --repository OWNER/REPO --pull N
---head HEAD_SHA --base BASE_SHA --base-ref BRANCH`. A blocking verdict or
+publishes there and changed pull requests it observes there. To review an
+unchanged pull request manually, use `factoryctl review --project PROJECT_ID
+--repository OWNER/REPO --pull N --head HEAD_SHA --base BASE_SHA --base-ref
+BRANCH`. A blocking verdict or
 merge-queue ejection on a head that has not moved goes back to the task that
 published the pull request. For a same-repository pull request factoryd did
 not publish, it first creates one `Repair OWNER/REPO#N` worker task and

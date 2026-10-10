@@ -320,8 +320,8 @@ func TestOverseerWakeSummarisesTasks(t *testing.T) {
 		t.Fatal(err)
 	}
 	bodies := wakeBodies(t, store, 80+overseerWakeSettle.Milliseconds())
-	want := "Supervise.\n\nFactory causal wake: mode=full; prior_task_id=; worker tasks queued=1 running=0; open PRs=1. mode=full requires fixed-head reconciliation.\n- " +
-		finalizing.TaskID.String() + ` "verify" blocked rev=1 change=` + change.ID.String()[:12] + `@d2d2d2d2 PR #7 open/unknown: needs a decision`
+	want := "Supervise.\n\nFactory causal wake: mode=full; prior_task_id=; worker tasks queued=1 running=0; open factory PRs conflicting=0 failing=0 approved-not-queued=0. mode=full requires fixed-head reconciliation.\n- " +
+		finalizing.TaskID.String() + ` "verify" blocked rev=1 change=` + change.ID.String()[:12] + `@` + strings.Repeat("d2", 20) + ` PR #7 open/unknown: needs a decision`
 	if len(bodies) != 1 || bodies[0] != want {
 		t.Fatalf("wake = %q\nwant %q", bodies, want)
 	}
@@ -760,5 +760,25 @@ func TestOverseerHealthWake(t *testing.T) {
 	wakeBodies(t, store, at+1)
 	if requests, err := store.OperatorHumanRequests(ctx); err != nil || len(requests) != 0 {
 		t.Fatalf("cleared condition kept its card = %+v, %v", requests, err)
+	}
+}
+
+// The operator reads a due item as the overseer's next wake names it, and
+// each stalled item (7, and 20 to 23 the re-wakes of 7 also named) with the
+// carrier that last named it.
+func TestOverseerItemsShowStalledAndDue(t *testing.T) {
+	t.Parallel()
+	store, worker, last, _, at, _ := stalledCard(t)
+	head := strings.Repeat("a", 40)
+	escalate(t, store, worker.ProjectID, "30", "open", head, head, at)
+	items, err := store.OverseerItems(context.Background(), worker.ProjectID, mustTime(t, at+overseerWakeMaxDelay.Milliseconds()))
+	if err != nil || len(items) != 6 || !items[0].Due || items[0].Line != "Escalated: stuck 30 [reviewer:op30]" {
+		t.Fatalf("items = %+v, %v", items, err)
+	}
+	for index, item := range items[1:] {
+		want := fmt.Sprintf("Escalated: stuck %d [reviewer:op%[1]d]", map[bool]int{true: 7, false: 19 + index}[index == 0])
+		if item.Due || item.Line != want || !bytes.Equal(item.Carrier, last.ID.Bytes()) {
+			t.Fatalf("stalled item %d = %+v, want %q", index, item, want)
+		}
 	}
 }

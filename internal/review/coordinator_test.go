@@ -385,10 +385,10 @@ func TestIndeterminateEnqueueIsSettledByTheNextObservation(t *testing.T) {
 // mergeability can clear without either signal changing.
 func TestRefusedEnqueueRetriesWithoutHeadObservationChange(t *testing.T) {
 	store := &memoryStore{}
-	backend := &fakeBackend{pull: &Pull{Head: reviewRequest().Head, State: "open"}, enqueueErr: fmt.Errorf("%w (rejected before execution as UNPROCESSABLE)", ErrRefused)}
+	backend := &fakeBackend{pull: &Pull{Head: reviewRequest().Head, State: "open"}, enqueueErr: fmt.Errorf("%w (rejected before execution as UNPROCESSABLE: Pull request head no longer matches the expected head)", ErrRefused)}
 	c := Coordinator{Store: store, Backend: backend, Now: func() time.Time { return time.Unix(20, 0) }}
 	op, err := c.Advance(context.Background(), Operation{ID: "op", Request: reviewRequest(), State: "enqueued", Verdict: "allow", Submitted: true})
-	if !errors.Is(err, ErrRefused) || op.State != "enqueued" || !op.Refused || op.Escalation == "" || len(store.values) != 1 {
+	if !errors.Is(err, ErrRefused) || op.State != "enqueued" || !op.Refused || !strings.Contains(op.Escalation, "head no longer matches the expected head") || len(store.values) != 1 {
 		t.Fatalf("operation=%+v err=%v", op, err)
 	}
 	backend.enqueueErr = nil

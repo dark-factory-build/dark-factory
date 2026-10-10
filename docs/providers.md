@@ -95,10 +95,10 @@ worktrees, which are not automatically converted. This changes ordinary Git
 state ownership, not provider permissions or arbitrary-path access. The
 branch head is the work: read it with `git --git-dir=$git_directory`. An
 accepted response without that receipt is unusable; never reconstruct a path
-or select a project-latest tree. A Codex orchestrator's local commands are
-granted the repository's Git directory read-only; they do not receive the
-daemon database, the Changes parent, or the daemon home. A later work
-revision or Change revision, or a branch that moved since settlement, is
+or select a project-latest tree. An orchestrator's local commands (Codex or
+Claude) are granted the Git directory of every enabled repository of its
+project read-only; they do not receive the daemon database, the
+Changes parent, or the daemon home. A later work revision or Change revision, or a branch that moved since settlement, is
 refused.
 overseer publishes through the Maintainer App. On a GitHub-connected home an
 orchestrator of either provider is launched with factoryd's Maintainer server

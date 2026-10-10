@@ -81,6 +81,9 @@ Every record carries `status` (`tentative` unless verified), `evidence`
   for one task), including its factoryd section if present.
 - `attempt terminal observe --project P --task T --run R`: bounded, redacted;
   read the window that answers your question.
+- The operator's read views, through your attempt: `attempt status`,
+  `attempt human list`, `attempt intake list|config [--project ID]` and
+  `attempt task read --task ID --revision N`. Their write forms are refused.
 - Your checkout. Run tests or builds only if your question needs them.
 - GitHub, unauthenticated only (60 requests an hour shared by this machine;
   never use a token; use few): issues, PRs, Actions runs, e.g.

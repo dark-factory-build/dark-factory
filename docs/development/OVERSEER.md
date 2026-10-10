@@ -566,7 +566,10 @@ head is reviewed and enqueued. Resolve that cause or raise it with
 `attempt request-human` naming the pull request; never start another review.
 
 A send-back of your own (for example a `dirty` worktree, section 1) carries a
-pointer note, never pasted findings.
+pointer note, never pasted findings, and `--head` naming the Change head you
+observed it at (the full head your wake line shows after `change=ID@`). A note
+about any other head is refused as a `conflict` that names the current head:
+observe the premise again there, and send it back only if it still holds.
 
 Never recover a task ID or a Change path from SQLite. The task/status
 handoff is authoritative and cross-project, stale, refused, missing, or

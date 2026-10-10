@@ -47,6 +47,7 @@ type SupervisorSpec struct {
 	// provider release frame has been written; it can report a lost
 	// acknowledgement without replacing that irreversible write.
 	activateOuter            func(*runner.OwnedChild) (runner.FileIdentity, error)
+	afterOuterConfiguration  func(*runner.OwnedChild) error
 	afterAdmission           func() error
 	beforeProviderStateCheck func() error
 	afterProviderRelease     func() error
