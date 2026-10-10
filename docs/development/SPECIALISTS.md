@@ -22,6 +22,10 @@ factoryd wakes it on its cadence and on its event classes (`failures`,
    with evidence.
 5. Check it is new: `content search` (earlier proposals and their decisions),
    open issues, queued and running tasks. If it is tracked, contribute to it.
+   Keep to your remit when another specialist under "Other specialists:"
+   covers the finding: contribute to or challenge its records (a contribution
+   whose `record_id` is the proposal id); the overseer weighs both when it
+   decides and prioritises. With none listed, cover your remit broadly.
 6. Record one outcome (below).
 7. End with `attempt succeed --result` in the checkpoint shape. Aim for
    fifteen minutes; the run is cancelled at thirty.

@@ -545,3 +545,34 @@ func TestArchiveStopsSpecialist(t *testing.T) {
 		t.Fatalf("shared task = %+v", task)
 	}
 }
+
+func TestSpecialistWakeListsOtherSpecialists(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store, _, project, a := newAdmissionStore(t, RoleWorker, 4)
+	defer store.Close()
+	a = makeSpecialist(t, store, a, "failures", 10)
+	for i, name := range []string{"ops", "gone"} {
+		b, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, byte(60+i)), ProjectID: project.ID, Name: name, Role: RoleWorker, Provider: ProviderCodex, ToolBudgetLimit: 5}, mustTime(t, 4))
+		if err != nil {
+			t.Fatal(err)
+		}
+		b = makeSpecialist(t, store, b, "failures", 10)
+		instruction := name + " remit line\nsecond line"
+		if _, err := store.writer.Exec(`UPDATE agents SET idle_instruction = ?, archived = ? WHERE id = ?`, instruction, i, b.ID.Bytes()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var found bool
+	for _, body := range wakeBodies(t, store, 20) {
+		if strings.HasPrefix(body, "Review the factory.") {
+			found = true
+			if !strings.Contains(body, "\nOther specialists:\n- ops: ops remit line\n") || strings.Contains(body, "- a:") || strings.Contains(body, "gone") || strings.Contains(body, "second line") {
+				t.Fatalf("wake body = %q", body)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("no wake for the first specialist")
+	}
+}
