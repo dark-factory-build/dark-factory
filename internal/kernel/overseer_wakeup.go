@@ -35,7 +35,8 @@ const (
 // keyed by its cause and dated by when it first failed so, which factoryd
 // carries over every release that fails the same way, a same-commit retry
 // included (RecordDelivery): it wakes once, never re-wakes, and so becomes
-// one NEEDS YOU card. An accepted intake task that succeeded with a diff (or
+// one NEEDS YOU card. So does a pull request waiting on its code owner's
+// approval, which no overseer can give. An accepted intake task that succeeded with a diff (or
 // whose published Change was since reclaimed) needs none: factoryd publishes
 // it, and the Change item covers a publication that never happens. While
 // factoryd records
@@ -91,7 +92,8 @@ item AS (
 	JOIN intake_acceptances AS i ON i.id = b.acceptance_id
 	JOIN agents AS o ON o.id = i.overseer_agent_id
 	WHERE t.project_id = ?1 AND o.id = ?4 AND ` + taskEndedAutomatically + ` AND NOT ` + taskIssueWithdrawn + `
-	UNION ALL SELECT NULL, e.observed_at_ms, 3, 'Escalated: ' || json_extract(e.document, '$.escalation'), '[reviewer:' || e.identity || ']' FROM production_records AS e
+	UNION ALL SELECT NULL, e.observed_at_ms, CASE WHEN json_extract(e.document, '$.owner_approval') THEN 0 ELSE 3 END,
+	  'Escalated: ' || json_extract(e.document, '$.escalation'), '[reviewer:' || e.identity || ']' FROM production_records AS e
 	JOIN production_records AS p ON p.project_id = e.project_id AND p.repository = e.repository AND p.kind = 'pull_request'
 	  AND p.identity = CAST(json_extract(e.document, '$.request.PullNumber') AS TEXT)
 	WHERE e.project_id = ?1 AND e.kind = 'reviewer' AND COALESCE(json_extract(e.document, '$.escalation'), '') <> ''
