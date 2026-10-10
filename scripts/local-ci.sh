@@ -39,7 +39,7 @@ fi
 if [ "$local_ci_mode" = affected ]; then
     affected_base=$(git rev-parse --verify "${affected_base:-$(git merge-base origin/main HEAD)}^{commit}")
     ./scripts/go-check.sh
-    [ "${DARK_FACTORY_LOCAL_CI_LEASE_HELD-}" = 1 ] && /bin/sh "$script_dir/go-ci-owned.sh" --client-built --affected "$affected_base" || "$script_dir/with-local-ci-lease.sh" /bin/sh "$script_dir/go-ci-owned.sh" --client-built --affected "$affected_base"
+    if [ "${DARK_FACTORY_LOCAL_CI_LEASE_HELD-}" = 1 ]; then /bin/sh "$script_dir/go-ci-owned.sh" --client-built --affected "$affected_base"; else "$script_dir/with-local-ci-lease.sh" /bin/sh "$script_dir/go-ci-owned.sh" --client-built --affected "$affected_base"; fi
     echo "local-ci: PASS (affected since $affected_base)"
     exit 0
 fi
