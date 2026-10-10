@@ -810,12 +810,8 @@ func (b *daemonReviewBackend) ObservePull(ctx context.Context, operation review.
 	if pull.Head != request.Head || pull.State != "open" || (pull.Mergeable != nil && !*pull.Mergeable) {
 		return pull, nil
 	}
-	response, err = b.callResponse(ctx, "observe_pull_request_merge", map[string]any{"repository": b.repository, "pull_number": request.PullNumber, "head_sha": request.Head, "base": request.BaseRef})
-	var merge struct {
-		Head  string           `json:"head_sha"`
-		State string           `json:"state"`
-		Group *review.GroupRun `json:"merge_group"`
-	}
+	response, err = b.callResponse(ctx, "observe_pull_request_merge", observePullRequestMergeArguments(b.repository, request.PullNumber, request.Head, request.BaseRef))
+	var merge observePullRequestMergeResponse
 	if err != nil || json.Unmarshal(response, &merge) != nil || merge.Head != request.Head {
 		return review.Pull{}, errors.Join(err, errors.New("review: Maintainer returned an invalid merge observation"))
 	}
@@ -833,6 +829,21 @@ func (b *daemonReviewBackend) ObservePull(ctx context.Context, operation review.
 		return review.Pull{}, err
 	}
 	return pull, requiredChecks(response, &pull)
+}
+
+type observePullRequestMergeResponse struct {
+	PullNumber  uint64           `json:"pull_number"`
+	Head        string           `json:"head_sha"`
+	Base        string           `json:"base"`
+	PullState   string           `json:"pull_state"`
+	State       string           `json:"state"`
+	QueueState  *string          `json:"queue_state"`
+	MergeCommit *string          `json:"merge_commit_sha"`
+	Group       *review.GroupRun `json:"merge_group"`
+}
+
+func observePullRequestMergeArguments(repository string, pullNumber uint64, head, base string) map[string]any {
+	return map[string]any{"repository": repository, "pull_number": pullNumber, "head_sha": head, "base": base}
 }
 
 // requiredChecks reads the failing and unfinished checks the base branch's

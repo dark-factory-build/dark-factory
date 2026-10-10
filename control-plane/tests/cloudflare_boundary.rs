@@ -421,6 +421,41 @@ fn declared_output_schemas_name_the_fields_the_results_carry() {
     }
 }
 
+#[test]
+fn observe_merge_surface_matches_shared_contract() {
+    let contract: serde_json::Value = serde_json::from_str(&project_file(
+        "../protocol/maintainer/observe_pull_request_merge.json",
+    ))
+    .expect("valid shared maintainer contract");
+    let mcp = project_file("src/mcp.rs");
+    let name = contract["name"].as_str().unwrap();
+    let start = mcp.find(&format!(r#""name": "{name}""#)).unwrap();
+    let rest = &mcp[start..];
+    let end = rest[1..]
+        .find(r#""name": ""#)
+        .map_or(rest.len(), |offset| offset + 1);
+    let tool = &rest[..end];
+    for (schema_name, contract_name) in [("inputSchema", "request"), ("outputSchema", "response")] {
+        let schema_start = tool.find(&format!(r#""{schema_name}": {{"#)).unwrap();
+        let schema = object_at(tool, schema_start);
+        let actual_required: serde_json::Value =
+            serde_json::from_str(&own_required_in(&schema)).unwrap();
+        assert_eq!(
+            actual_required, contract[contract_name]["required"],
+            "{schema_name} required fields drifted"
+        );
+        let properties_start = schema.find(r#""properties": {"#).unwrap();
+        let properties = object_at(&schema, properties_start);
+        let expected_properties = contract[contract_name]["properties"].as_object().unwrap();
+        for field in expected_properties.keys() {
+            assert!(
+                properties.contains(&format!(r#""{field}": {{"#)),
+                "{schema_name} is missing {field}"
+            );
+        }
+    }
+}
+
 /// Which repository an operation acts on is now caller-supplied, so the tool
 /// schema is the only thing that makes a caller send it. A tool whose handler
 /// reads `request.repository` while its `inputSchema` does not require one
