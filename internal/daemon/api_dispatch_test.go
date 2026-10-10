@@ -313,7 +313,6 @@ func TestDaemonDispatchesOperatorCallsAndBoundsProjection(t *testing.T) {
 	waitDispatch(t, done)
 	assertNoSchedulerWake(t, fixture.daemon)
 
-	done = fixture.serve(t)
 	_, err = client.EnqueueTask(ctx, api.EnqueueTaskInput{
 		ID: testID(3), ProjectID: projectInput.ID, AssignedAgentID: testID(2), IncarnationID: testID(4),
 		Title: "oversized", Body: strings.Repeat("x", kernel.MaxContinuationTaskBytes+1), Priority: 7,
@@ -321,7 +320,6 @@ func TestDaemonDispatchesOperatorCallsAndBoundsProjection(t *testing.T) {
 	if !errors.Is(err, api.ErrInvalidInput) {
 		t.Fatalf("oversized Codex task must be refused before admission: %v", err)
 	}
-	waitDispatch(t, done)
 	assertNoSchedulerWake(t, fixture.daemon)
 	if _, found, err := fixture.store.Task(ctx, mustTaskID(t, testID(3))); err != nil || found {
 		t.Fatalf("refused task was persisted: found=%v, err=%v", found, err)
