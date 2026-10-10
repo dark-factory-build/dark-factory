@@ -343,6 +343,12 @@ func TestOverseerWakeInstructionFallsBackToFull(t *testing.T) {
 	if body := overseerWakeInstruction(ProviderCodex, "Supervise.", "counts", lines[:1], nil, &prior, false); !strings.Contains(body, "mode=targeted; prior_task_id="+prior.String()) || !strings.HasSuffix(body, "\n"+line) {
 		t.Fatalf("targeted body = %q", body)
 	}
+	if body := overseerWakeInstruction(ProviderCodex, "Supervise.", "counts", nil, nil, &prior, false); strings.Contains(body, "Supervise.") || !strings.HasPrefix(body, "Factory causal wake: ") {
+		t.Fatalf("resumed Codex wake repeated standing instruction = %q", body)
+	}
+	if body := overseerWakeInstruction(ProviderClaudeCode, "Supervise.", "counts", nil, nil, &prior, false); !strings.HasPrefix(body, "Supervise.\n\nFactory causal wake: ") {
+		t.Fatalf("fresh Claude wake lost standing instruction = %q", body)
+	}
 }
 
 // A succeeded intake task with a diff is factoryd's to publish, and stays so
