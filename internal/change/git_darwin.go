@@ -40,9 +40,9 @@ const (
 	gitPipeDrainGrace     = time.Second
 )
 
-// ErrRebaseConflict means Git stopped a rebase because the Change needs a
-// human/worker to resolve textual conflicts. The worktree is returned to its
-// pre-rebase state before this error is reported.
+// ErrRebaseConflict means Git stopped a rebase and a successful abort restored
+// the Change worktree, so a human/worker must resolve textual conflicts.
+// Operational failures are returned separately so the caller can retry them.
 var ErrRebaseConflict = errors.New("Change rebase conflicts with the current base")
 
 type gitCommandSpec struct {
@@ -1363,8 +1363,9 @@ func FetchBase(ctx context.Context, selection Selection, path string) error {
 
 // RebaseWorktree rebases a retained Change onto the selected current base.
 // The caller must have fetched selection.base to refs/remotes/origin/main
-// first. A clean rebase leaves the Change branch at its new head; a conflict
-// is aborted so the existing worker send-back path can inspect a clean tree.
+// first. A clean rebase leaves the Change branch at its new head; a textual
+// conflict is reported only after a successful abort, while operational Git
+// failures remain retryable by the caller.
 func RebaseWorktree(ctx context.Context, selection Selection, path string) (WorktreeFacts, error) {
 	if !selection.valid() {
 		return WorktreeFacts{}, &ValidationError{Reason: "worktree selection is invalid"}
