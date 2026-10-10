@@ -558,7 +558,7 @@ const taskIssueWithdrawn = `EXISTS (SELECT 1 FROM intake_task_bindings AS b JOIN
 // continuation, and validation runs before a write, not at its commit.
 func refuseAwaitedTask(ctx context.Context, connection *sql.Conn, id TaskID) error {
 	var awaited bool
-	if err := connection.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM continuations WHERE task_id = ? AND state IN ('waiting', 'queued'))`, id.Bytes()).Scan(&awaited); err != nil {
+	if err := connection.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM human_requests h JOIN runs r ON r.id = h.run_id WHERE r.task_id = ? AND h.continuation IN ('waiting', 'queued'))`, id.Bytes()).Scan(&awaited); err != nil {
 		return err
 	}
 	if awaited {

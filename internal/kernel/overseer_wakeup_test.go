@@ -452,7 +452,7 @@ func TestOverseerRewakesCountPerItemAndStartedOnly(t *testing.T) {
 		t.Fatalf("resumed carrier = %+v, %v", resumed, err)
 	}
 	var resolution string
-	if err := store.writer.QueryRowContext(ctx, `SELECT resolution_detail FROM continuations WHERE condition_id = ?`, card.ID.Bytes()).Scan(&resolution); err != nil ||
+	if err := store.writer.QueryRowContext(ctx, `SELECT continuation_reply FROM human_requests WHERE id = ?`, card.ID.Bytes()).Scan(&resolution); err != nil ||
 		!strings.HasPrefix(resolution, "Operator reply to: "+card.QuestionText) || !strings.HasSuffix(resolution, "\nclose #7") {
 		t.Fatalf("resumed context = %q, %v", resolution, err)
 	}
@@ -540,15 +540,7 @@ func TestCancelledStalledCardStaysCancelled(t *testing.T) {
 	if err != nil {
 		t.Fatal(tx.Rollback(err))
 	}
-	run, _, err := runByID(ctx, tx.connection, request.RunID)
-	if err != nil {
-		t.Fatal(tx.Rollback(err))
-	}
-	continuation, _, err := humanRequestContinuation(ctx, tx.connection, request, run)
-	if err != nil {
-		t.Fatal(tx.Rollback(err))
-	}
-	if err := cancelHumanContinuationOnConnection(ctx, tx, request, continuation, mustTime(t, at+1)); err != nil {
+	if err := cancelHumanContinuationOnConnection(ctx, tx, request, mustTime(t, at+1)); err != nil {
 		t.Fatal(tx.Rollback(err))
 	}
 	if err := tx.Commit(ctx); err != nil {

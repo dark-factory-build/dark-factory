@@ -56,9 +56,6 @@ func validateDurableEntityControls(ctx context.Context, connection *sql.Conn) (F
 	if err := validatePeerQuestions(ctx, connection); err != nil {
 		return FactoryState{}, err
 	}
-	if err := validateContinuations(ctx, connection); err != nil {
-		return FactoryState{}, err
-	}
 	if err := validateIntake(ctx, connection); err != nil {
 		return FactoryState{}, err
 	}
@@ -131,71 +128,6 @@ func validateIntake(ctx context.Context, connection *sql.Conn) error {
 	return nil
 }
 
-func validateContinuations(ctx context.Context, connection *sql.Conn) error {
-	rows, err := connection.QueryContext(ctx, `SELECT id FROM continuations ORDER BY id`)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var raw []byte
-		if err := rows.Scan(&raw); err != nil {
-			return err
-		}
-		id, err := ContinuationIDFromBytes(raw)
-		if err != nil {
-			return fmt.Errorf("%w: continuation identifier", ErrCorruptState)
-		}
-		continuation, found, err := continuationByID(ctx, connection, id)
-		if err != nil {
-			return err
-		}
-		if !found || continuation.ID != id {
-			return fmt.Errorf("%w: continuation lookup", ErrCorruptState)
-		}
-		switch continuation.State {
-		case ContinuationWaiting:
-			if continuation.ResolutionDetail != "" || continuation.ResolvedAt != nil {
-				return fmt.Errorf("%w: waiting continuation is resolved", ErrCorruptState)
-			}
-		case ContinuationQueued, ContinuationResolved, ContinuationCancelled:
-			if continuation.ResolutionDetail == "" || continuation.ResolvedAt == nil {
-				return fmt.Errorf("%w: resolved continuation lacks resolution", ErrCorruptState)
-			}
-		default:
-			return fmt.Errorf("%w: unknown continuation state", ErrCorruptState)
-		}
-		var taskProject []byte
-		var taskIncarnation []byte
-		var taskWork, taskRevision int64
-		var taskStatus string
-		if err := connection.QueryRowContext(ctx, `SELECT project_id, incarnation_id, work_revision, status, revision FROM tasks WHERE id = ?`, continuation.TaskID.Bytes()).Scan(&taskProject, &taskIncarnation, &taskWork, &taskStatus, &taskRevision); err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				return fmt.Errorf("%w: continuation task is missing", ErrCorruptState)
-			}
-			return err
-		}
-		project, err := ProjectIDFromBytes(taskProject)
-		if err != nil || project != continuation.ProjectID {
-			return fmt.Errorf("%w: continuation project relationship", ErrCorruptState)
-		}
-		incarnation, err := IncarnationIDFromBytes(taskIncarnation)
-		if err != nil || incarnation != continuation.TaskIncarnationID || taskRevision < 1 {
-			return fmt.Errorf("%w: continuation task identity", ErrCorruptState)
-		}
-		if (continuation.State == ContinuationWaiting || continuation.State == ContinuationQueued) && taskWork != continuation.WorkRevision.Int64() {
-			return fmt.Errorf("%w: continuation task identity", ErrCorruptState)
-		}
-		// Queued continuations retain the task's current lifecycle row until
-		// admission is wired to the continuation queue. Historical resolved
-		// rows likewise outlive the task state that created them.
-		if continuation.State == ContinuationWaiting && taskStatus != TaskRunning.String() && taskStatus != TaskCancelled.String() && taskStatus != TaskFailed.String() && taskStatus != TaskBlocked.String() && taskStatus != TaskSucceeded.String() {
-			return fmt.Errorf("%w: continuation task state", ErrCorruptState)
-		}
-	}
-	return rows.Err()
-}
-
 func validatePeerQuestions(ctx context.Context, connection *sql.Conn) error {
 	rows, err := connection.QueryContext(ctx, `SELECT `+peerQuestionColumns+` FROM peer_questions ORDER BY id`)
 	if err != nil {
@@ -220,11 +152,15 @@ func validatePeerQuestions(ctx context.Context, connection *sql.Conn) error {
 
 func validateHumanRequests(ctx context.Context, connection *sql.Conn) error {
 	var unresolved int64
-	if err := connection.QueryRowContext(ctx, `SELECT COUNT(*) FROM human_requests WHERE status IN ('open', 'delivering', 'delivery_unknown')`).Scan(&unresolved); err != nil {
+	var stranded bool
+	// An awaited request's run holds its task's current work revision.
+	if err := connection.QueryRowContext(ctx, `SELECT (SELECT COUNT(*) FROM human_requests WHERE status IN ('open', 'delivering', 'delivery_unknown')),
+		EXISTS(SELECT 1 FROM human_requests AS h JOIN runs AS r ON r.id = h.run_id JOIN tasks AS t ON t.id = r.task_id
+			WHERE h.continuation IN ('waiting', 'queued') AND (t.incarnation_id <> r.task_incarnation_id OR t.work_revision <> r.admitted_task_work_revision))`).Scan(&unresolved, &stranded); err != nil {
 		return err
 	}
-	if unresolved < 0 || unresolved > MaxOpenHumanRequests {
-		return fmt.Errorf("%w: human request bound exceeded", ErrCorruptState)
+	if unresolved < 0 || unresolved > MaxOpenHumanRequests || stranded {
+		return fmt.Errorf("%w: human request bound exceeded or continuation stranded", ErrCorruptState)
 	}
 	rows, err := connection.QueryContext(ctx, `SELECT `+humanRequestColumns+` FROM human_requests ORDER BY id`)
 	if err != nil {
@@ -247,13 +183,9 @@ func validateHumanRequests(ctx context.Context, connection *sql.Conn) error {
 			return err
 		}
 		validPhase := false
-		var continuationWaiting int
-		if err := connection.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM continuations WHERE condition_kind='human_request' AND condition_id=? AND state IN ('waiting','queued'))`, request.ID.Bytes()).Scan(&continuationWaiting); err != nil {
-			return err
-		}
 		switch request.Status {
 		case HumanRequestOpen, HumanRequestDelivering:
-			validPhase = phase == RunRunning.String() || continuationWaiting != 0 && (phase == RunFinalizing.String() || phase == RunTerminal.String())
+			validPhase = phase == RunRunning.String() || request.Continuation == ContinuationWaiting && (phase == RunFinalizing.String() || phase == RunTerminal.String())
 		case HumanRequestDeliveryUnknown:
 			// Recovery can discover an uncertain delivery while the run is
 			// still running; finalization preserves that uncertainty until

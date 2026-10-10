@@ -270,14 +270,11 @@ func raiseStalledItems(ctx context.Context, tx *writeTx, agent Agent, at UnixMil
 		if _, err := rand.Read(request[:]); err != nil {
 			return err
 		}
-		if _, err := connection.ExecContext(ctx, `INSERT INTO human_requests(id, run_id, idempotency_key, kind, reason_code, question_text, options_json, status, revision, created_at_ms, updated_at_ms) VALUES(?, ?, ?, 'question', 'provider_question', ?, '[]', 'open', 1, ?, ?)`,
+		if _, err := connection.ExecContext(ctx, `INSERT INTO human_requests(id, run_id, idempotency_key, kind, reason_code, question_text, options_json, status, revision, created_at_ms, updated_at_ms, continuation) VALUES(?, ?, ?, 'question', 'provider_question', ?, '[]', 'open', 1, ?, ?, 'waiting')`,
 			request[:], run, stalledItemKey[:], strings.ToValidUTF8(question[:min(len(question), MaxHumanRequestQuestionBytes)], ""), at.Int64(), at.Int64()); err != nil {
 			return err
 		}
 		if err := appendInvalidations(ctx, connection, at, []pendingInvalidation{{kind: EntityHumanRequest, id: request[:], revision: 1}}); err != nil {
-			return err
-		}
-		if _, err := insertWaitingContinuation(ctx, connection, task, ConditionHumanRequest, ContinuationConditionID(request), Revision{value: 1}, at); err != nil {
 			return err
 		}
 	}
@@ -308,18 +305,10 @@ func raiseStalledItems(ctx context.Context, tx *writeTx, agent Agent, at UnixMil
 		if err != nil || !found {
 			return errors.Join(err, ErrCorruptState)
 		}
-		run, found, err := runByID(ctx, connection, request.RunID)
-		if err != nil || !found {
-			return errors.Join(err, ErrCorruptState)
-		}
-		continuation, found, err := humanRequestContinuation(ctx, connection, request, run)
-		if err != nil || !found {
-			return errors.Join(err, ErrCorruptState)
-		}
 		if err := validate(); err != nil {
 			return err
 		}
-		if err := cancelHumanContinuationOnConnection(ctx, tx, request, continuation, at); err != nil {
+		if err := cancelHumanContinuationOnConnection(ctx, tx, request, at); err != nil {
 			return err
 		}
 	}

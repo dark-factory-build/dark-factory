@@ -1708,7 +1708,8 @@ func TestAwaitedTaskRefusesRetryAndSendBack(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := insertWaitingContinuation(ctx, tx.connection, task, ConditionHumanRequest, ContinuationConditionID(humanKey(9)), mustRevision(t, 1), mustTime(t, 61)); err != nil {
+	request := humanKey(9)
+	if _, err := tx.connection.ExecContext(ctx, `INSERT INTO human_requests(id, run_id, idempotency_key, kind, reason_code, question_text, status, revision, created_at_ms, updated_at_ms, continuation) VALUES(?1, ?2, ?1, 'question', 'provider_question', 'card', 'open', 1, 61, 61, 'waiting')`, request[:], finalizing.ID.Bytes()); err != nil {
 		t.Fatal(tx.Rollback(err))
 	}
 	if err := tx.Commit(ctx); err != nil {

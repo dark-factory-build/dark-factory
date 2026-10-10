@@ -325,7 +325,7 @@ func (store *Store) ConsumeAttemptResult(ctx context.Context, result AttemptResu
 		if err := moveTerminalToReleasing(ctx, tx.connection, footprint.session, at); err != nil {
 			return Run{}, tx.Rollback(err)
 		}
-		requestInvalidations, transitionErr := transitionHumanRequestsForRun(ctx, tx.connection, run.ID, at, false, nil, nil)
+		requestInvalidations, transitionErr := transitionHumanRequestsForRun(ctx, tx.connection, run.ID, at, false, nil)
 		if transitionErr != nil {
 			return Run{}, tx.Rollback(transitionErr)
 		}

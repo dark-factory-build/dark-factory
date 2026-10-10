@@ -1,6 +1,7 @@
 package kernel
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"errors"
@@ -11,7 +12,7 @@ import (
 
 func TestContinuationTaskFitsCodexProviderLimit(t *testing.T) {
 	t.Parallel()
-	context := ContinuationContext{ConditionKind: ConditionHumanRequest, ConditionRevision: mustRevision(t, 1), ResolutionDetail: strings.Repeat("答", 4096)}
+	context := ContinuationContext{ResolutionDetail: strings.Repeat("答", 4096)}
 	if ContinuationTaskFits(ProviderCodex, strings.Repeat("x", 8192), []ContinuationContext{context}) {
 		t.Fatal("exact-limit Codex task was admitted without room for causal context")
 	}
@@ -23,7 +24,7 @@ func TestContinuationTaskFitsCodexProviderLimit(t *testing.T) {
 func TestQuestionYieldCannotBeStrandedByImmediateResolution(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	store, run, keys := runningWorkerRun(t)
+	store, _, keys := runningWorkerRun(t)
 	defer store.Close()
 
 	request, err := store.CreateHumanQuestionAndYieldForAttempt(ctx, keys.AttemptDigest, NewHumanQuestion{
@@ -38,12 +39,8 @@ func TestQuestionYieldCannotBeStrandedByImmediateResolution(t *testing.T) {
 	// The reply is delivered as soon as the atomic request/yield call returns.
 	// The request and its waiting condition must already be durable together;
 	// there is no observable interval in which a reply can strand the wake edge.
-	var condition ContinuationConditionID
-	copy(condition[:], request.ID.Bytes())
-	continuation := continuationForRequest(t, store, run, condition)
-	read, found, err := store.Continuation(ctx, continuation)
-	if err != nil || !found || read.State != ContinuationWaiting || read.ConditionRevision != request.Revision {
-		t.Fatalf("atomic question/yield continuation: %+v found=%v err=%v", read, found, err)
+	if read := requestForTest(t, store, request.ID); read.Continuation != ContinuationWaiting || read.Revision != request.Revision {
+		t.Fatalf("atomic question/yield continuation: %+v", read)
 	}
 }
 
@@ -76,14 +73,12 @@ func TestYieldedHumanReplyPersistsFullSchemaBound(t *testing.T) {
 	for _, size := range []int{4097, MaxHumanRequestReplyBytes} {
 		t.Run(fmt.Sprint(size), func(t *testing.T) {
 			ctx := context.Background()
-			store, run, keys, path := runningWorkerRunWithPath(t)
+			store, _, keys, path := runningWorkerRunWithPath(t)
 			request, err := store.CreateHumanQuestionAndYieldForAttempt(ctx, keys.AttemptDigest, NewHumanQuestion{IdempotencyKey: humanKey(byte(size % 251)), QuestionText: "full reply"}, mustTime(t, 40))
 			if err != nil {
 				t.Fatal(err)
 			}
-			var condition ContinuationConditionID
-			copy(condition[:], request.ID.Bytes())
-			continuationID := continuationForRequest(t, store, run, condition)
+			request = requestForTest(t, store, request.ID)
 			reply := strings.Repeat("r", size)
 			deliveryKey := humanKey(byte(size%251 + 1))
 			deliveryID, err := HumanRequestDeliveryIDFromBytes(deliveryKey[:])
@@ -94,11 +89,7 @@ func TestYieldedHumanReplyPersistsFullSchemaBound(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			continuation, found, err := continuationByID(ctx, tx.connection, continuationID)
-			if err != nil || !found {
-				t.Fatalf("read yielded continuation: found=%v err=%v", found, err)
-			}
-			if err := resolveHumanContinuationOnConnection(ctx, tx, request, continuation, deliveryID, reply, mustTime(t, 50)); err != nil {
+			if err := resolveHumanContinuationOnConnection(ctx, tx, request, deliveryID, reply, mustTime(t, 50)); err != nil {
 				t.Fatalf("resolve %d-byte reply: %v", size, err)
 			}
 			if err := tx.Commit(ctx); err != nil {
@@ -113,55 +104,31 @@ func TestYieldedHumanReplyPersistsFullSchemaBound(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer reopened.Close()
-			persisted, found, err := reopened.Continuation(ctx, continuationID)
-			if err != nil || !found || persisted.ResolutionDetail != reply {
-				t.Fatalf("persisted %d-byte reply: len=%d found=%v err=%v", size, len(persisted.ResolutionDetail), found, err)
+			if persisted := requestForTest(t, reopened, request.ID); persisted.ContinuationReply != reply {
+				t.Fatalf("persisted %d-byte reply: len=%d", size, len(persisted.ContinuationReply))
 			}
 		})
 	}
 }
 
-func continuationForRequest(t *testing.T, store *Store, run Run, condition ContinuationConditionID) ContinuationID {
+func requestForTest(t *testing.T, store *Store, id HumanRequestID) HumanRequest {
 	t.Helper()
 	readTx, err := store.beginRead(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer readTx.Close()
-	continuation, found, err := continuationByCondition(context.Background(), readTx.connection, run.TaskID, run.TaskIncarnationID, run.AdmittedTaskWorkRevision, ConditionHumanRequest, condition)
+	request, found, err := humanRequestByID(context.Background(), readTx.connection, id)
 	if err != nil || !found {
-		t.Fatalf("continuation for request: %+v found=%v err=%v", continuation, found, err)
+		t.Fatalf("human request: %+v found=%v err=%v", request, found, err)
 	}
-	return continuation.ID
-}
-
-func TestContinuationSpecRejectsUnknownConditionAndZeroTarget(t *testing.T) {
-	t.Parallel()
-	spec := NewContinuation{ConditionKind: ConditionHumanRequest}
-	if err := validateContinuationSpec(spec); err == nil {
-		t.Fatal("zero continuation spec was accepted")
-	}
-	spec.ConditionKind = ContinuationCondition("unknown")
-	if err := validateContinuationSpec(spec); err == nil {
-		t.Fatal("unknown continuation condition was accepted")
-	}
-}
-
-func TestContinuationConditionIDRoundTripsBytes(t *testing.T) {
-	t.Parallel()
-	var want ContinuationConditionID
-	want[0], want[15] = 1, 255
-	got := ContinuationConditionID{}
-	copy(got[:], want.Bytes())
-	if got != want || got.zero() {
-		t.Fatalf("condition id round trip = %x, want %x", got, want)
-	}
+	return request
 }
 
 func TestCreateHumanQuestionAndYieldIsAtomic(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	store, run, keys := runningWorkerRun(t)
+	store, _, keys := runningWorkerRun(t)
 	defer store.Close()
 
 	request, err := store.CreateHumanQuestionAndYieldForAttempt(ctx, keys.AttemptDigest, NewHumanQuestion{
@@ -176,16 +143,8 @@ func TestCreateHumanQuestionAndYieldIsAtomic(t *testing.T) {
 	if _, err := store.AuthenticateAttempt(ctx, keys.AttemptDigest); !errors.Is(err, ErrUnauthorized) {
 		t.Fatalf("old attempt credential after atomic yield = %v", err)
 	}
-	readTx, err := store.beginRead(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer readTx.Close()
-	var condition ContinuationConditionID
-	copy(condition[:], request.ID.Bytes())
-	continuation, found, err := continuationByCondition(ctx, readTx.connection, run.TaskID, run.TaskIncarnationID, run.AdmittedTaskWorkRevision, ConditionHumanRequest, condition)
-	if err != nil || !found || continuation.State != ContinuationWaiting {
-		t.Fatalf("atomic continuation = %+v found=%v err=%v", continuation, found, err)
+	if continuation := requestForTest(t, store, request.ID).Continuation; continuation != ContinuationWaiting {
+		t.Fatalf("atomic continuation = %q", continuation)
 	}
 }
 
@@ -195,26 +154,18 @@ func TestResolvedContinuationPromotesThenReentersProviderAdmission(t *testing.T)
 	proposal, _ := NewBlockedProposal("waiting for continuation")
 	store, run := finalizingReleasedRun(t, RoleOrchestrator, proposal)
 	defer store.Close()
-	condition := ContinuationConditionID{}
-	conditionBytes := humanKey(226)
-	copy(condition[:], conditionBytes[:])
-	spec := NewContinuation{
-		ID: continuationIDForTest(t, 227), ProjectID: run.ProjectID, TaskID: run.TaskID,
-		TaskIncarnationID: run.TaskIncarnationID, WorkRevision: run.AdmittedTaskWorkRevision,
-		ContextDigest: sha256.Sum256([]byte("admission-continuation")), ConditionKind: ConditionHumanRequest,
-		ConditionID: condition, ConditionRevision: mustRevision(t, 1),
-	}
+	request := humanKey(226)
 	// Production queues continuations only through a human reply; insert the
-	// resolved row directly to exercise promotion and admission alone.
+	// resolved request directly to exercise promotion and admission alone.
 	at := mustTime(t, 83)
 	tx, err := store.beginValidatedWrite(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := tx.connection.ExecContext(ctx, `INSERT INTO continuations(id, project_id, task_id, task_incarnation_id, work_revision, context_digest, condition_kind, condition_id, condition_revision, state, resolution_detail, resolved_at_ms, revision, created_at_ms, updated_at_ms) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 1, 'queued', 'continue', ?, 1, ?, ?)`, spec.ID.Bytes(), spec.ProjectID.Bytes(), spec.TaskID.Bytes(), spec.TaskIncarnationID.Bytes(), spec.WorkRevision.Int64(), spec.ContextDigest[:], string(spec.ConditionKind), spec.ConditionID.Bytes(), at.Int64(), at.Int64(), at.Int64()); err != nil {
+	if _, err := tx.connection.ExecContext(ctx, `INSERT INTO human_requests(id, run_id, idempotency_key, kind, reason_code, question_text, status, delivery_id, delivery_started_at_ms, resolution_kind, closed_at_ms, revision, created_at_ms, updated_at_ms, continuation, continuation_reply) VALUES(?1, ?2, ?1, 'question', 'provider_question', 'continue?', 'resolved', ?1, ?3, 'reply', ?3, 1, ?3, ?3, 'queued', 'continue')`, request[:], run.ID.Bytes(), at.Int64()); err != nil {
 		t.Fatal(tx.Rollback(err))
 	}
-	if err := appendInvalidations(ctx, tx.connection, at, []pendingInvalidation{{kind: EntityContinuation, id: spec.ID.Bytes(), revision: 1}}); err != nil {
+	if err := appendInvalidations(ctx, tx.connection, at, []pendingInvalidation{{kind: EntityHumanRequest, id: request[:], revision: 1}}); err != nil {
 		t.Fatal(tx.Rollback(err))
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -241,25 +192,13 @@ func TestResolvedContinuationPromotesThenReentersProviderAdmission(t *testing.T)
 		t.Fatalf("fresh admission continuation contexts = %+v", admission.Run.ContinuationContexts)
 	}
 	context := admission.Run.ContinuationContexts[0]
-	if context.ContextDigest != spec.ContextDigest || context.ConditionKind != ConditionHumanRequest ||
-		context.ConditionID != condition || context.ConditionRevision != spec.ConditionRevision ||
-		context.ResolutionDetail != "continue" {
+	if context.ContextDigest != sha256.Sum256([]byte(fmt.Sprintf("%s:%d", run.TaskID, run.AdmittedTaskWorkRevision.Int64()))) ||
+		!bytes.Equal(context.RequestID.Bytes(), request[:]) || context.ResolutionDetail != "continue" {
 		t.Fatalf("fresh admission continuation context = %+v", context)
 	}
-	resolved, found, err := store.Continuation(ctx, spec.ID)
-	if err != nil || !found || resolved.State != ContinuationResolved {
-		t.Fatalf("resolved continuation after admission: %+v found=%v err=%v", resolved, found, err)
+	if resolved := requestForTest(t, store, context.RequestID); resolved.Continuation != ContinuationResolved {
+		t.Fatalf("resolved continuation after admission: %+v", resolved)
 	}
-}
-
-func continuationIDForTest(t *testing.T, seed byte) ContinuationID {
-	t.Helper()
-	value := humanKey(seed)
-	id, err := ContinuationIDFromBytes(value[:])
-	if err != nil {
-		t.Fatal(err)
-	}
-	return id
 }
 
 func TestReusedHumanQuestionYieldsAtomically(t *testing.T) {
@@ -267,7 +206,7 @@ func TestReusedHumanQuestionYieldsAtomically(t *testing.T) {
 	for _, reuse := range []bool{false, true} {
 		t.Run(fmt.Sprint(reuse), func(t *testing.T) {
 			ctx := context.Background()
-			store, run, keys := runningWorkerRun(t)
+			store, _, keys := runningWorkerRun(t)
 			defer store.Close()
 			input := NewHumanQuestion{IdempotencyKey: humanKey(234), QuestionText: "existing question"}
 			original, err := store.CreateHumanQuestionForAttempt(ctx, keys.AttemptDigest, input, mustTime(t, 40))
@@ -286,9 +225,9 @@ func TestReusedHumanQuestionYieldsAtomically(t *testing.T) {
 			if _, err := store.AuthenticateAttempt(ctx, keys.AttemptDigest); !errors.Is(err, ErrUnauthorized) {
 				t.Fatalf("old authority: %v", err)
 			}
-			var condition ContinuationConditionID
-			copy(condition[:], request.ID.Bytes())
-			continuationForRequest(t, store, run, condition)
+			if continuation := requestForTest(t, store, request.ID).Continuation; continuation != ContinuationWaiting {
+				t.Fatalf("reused question continuation = %q", continuation)
+			}
 		})
 	}
 }

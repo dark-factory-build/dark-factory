@@ -302,7 +302,7 @@ func (store *Store) ObserveProviderExit(ctx context.Context, runID RunID, expect
 		if err := moveTerminalToReleasing(ctx, tx.connection, session, at); err != nil {
 			return Run{}, tx.Rollback(err)
 		}
-		requestInvalidations, transitionErr := transitionHumanRequestsForRun(ctx, tx.connection, run.ID, at, false, nil, nil)
+		requestInvalidations, transitionErr := transitionHumanRequestsForRun(ctx, tx.connection, run.ID, at, false, nil)
 		if transitionErr != nil {
 			return Run{}, tx.Rollback(transitionErr)
 		}
