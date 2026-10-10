@@ -603,11 +603,12 @@ func TestCodeownersRefusalNamesPullAndProtectedPath(t *testing.T) {
 	if op.Refused == false || !op.OwnerApproval || backend.enqueues != 1 || !strings.Contains(op.Escalation, "#12") || !strings.Contains(op.Escalation, "CODEOWNERS-protected path") {
 		t.Fatalf("owner approval escalation = %+v enqueues=%d", op, backend.enqueues)
 	}
+	backend.enqueueRefusal = ""
 	if _, err := fixture.daemon.advanceReviewOperations(context.Background(), false); err != nil {
 		t.Fatal(err)
 	}
-	if backend.enqueues != 1 {
-		t.Fatalf("owner approval was retried: %d", backend.enqueues)
+	if backend.enqueues != 2 || lastDurableReview(t, fixture.store, project).OwnerApproval {
+		t.Fatalf("owner approval did not recover after retry: enqueues=%d", backend.enqueues)
 	}
 }
 
