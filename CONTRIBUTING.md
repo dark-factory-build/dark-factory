@@ -67,7 +67,9 @@ public projection factoryd serves at `/v1/public/PROJECT`) through the exported
 that world or anything under `packages/ui/src`, rerun, and reload the file. The
 preview is static: no animation, selection or live updates. The test fixture
 builders in `web/fixtures/scene.mjs` and `web/fixtures/graph.mjs` cover shapes
-the example does not.
+the example does not. `corepack pnpm run preview:floor fixture` instead serves
+the whole `FactoryConsole` over the labelled `web/fixtures/state.mjs` state on
+`http://127.0.0.1:5196/?fixture`, equally static.
 
 ## Where to start
 
