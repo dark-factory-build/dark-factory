@@ -9,6 +9,7 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/browser"
 	"github.com/dark-factory-build/dark-factory/internal/browserprotocol"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
+	"github.com/dark-factory-build/dark-factory/internal/runner"
 )
 
 func TestBrowserAgentReplacementPreservesHistoryAndProviderLimit(t *testing.T) {
@@ -19,7 +20,7 @@ func TestBrowserAgentReplacementPreservesHistoryAndProviderLimit(t *testing.T) {
 	if err != nil || !found {
 		t.Fatal(err)
 	}
-	request := browserprotocol.AgentControl{OperationID: strings.Repeat("01", 16), TaskID: task.ID.String(), RunID: run.ID.String(), ExpectedTaskRevision: decimalRevision(task.Revision), ExpectedRunRevision: decimalRevision(run.Revision), Action: "replace", Instruction: strings.Repeat("x", 8193), SuccessorTaskID: strings.Repeat("02", 16), SuccessorIncarnationID: strings.Repeat("03", 16)}
+	request := browserprotocol.AgentControl{OperationID: strings.Repeat("01", 16), TaskID: task.ID.String(), RunID: run.ID.String(), ExpectedTaskRevision: decimalRevision(task.Revision), ExpectedRunRevision: decimalRevision(run.Revision), Action: "replace", Instruction: strings.Repeat("x", runner.MaxProviderTaskBytes+1), SuccessorTaskID: strings.Repeat("02", 16), SuccessorIncarnationID: strings.Repeat("03", 16)}
 	principal := terminalEffectPrincipal(fixture.client.ID, 1)
 	if _, err := fixture.backend.ControlAgent(context.Background(), principal, request); !errors.Is(mapBrowserError(err), browser.ErrTooLarge) {
 		t.Fatalf("oversized replacement: %v", err)

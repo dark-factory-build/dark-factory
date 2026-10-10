@@ -22,6 +22,7 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/api"
 	"github.com/dark-factory-build/dark-factory/internal/install"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
+	"github.com/dark-factory-build/dark-factory/internal/runner"
 )
 
 type dispatchFixture struct {
@@ -316,7 +317,7 @@ func TestDaemonDispatchesOperatorCallsAndBoundsProjection(t *testing.T) {
 	done = fixture.serve(t)
 	_, err = client.EnqueueTask(ctx, api.EnqueueTaskInput{
 		ID: testID(3), ProjectID: projectInput.ID, AssignedAgentID: testID(2), IncarnationID: testID(4),
-		Title: "oversized", Body: strings.Repeat("x", 8193), Priority: 7,
+		Title: "oversized", Body: strings.Repeat("x", runner.MaxProviderTaskBytes+1), Priority: 7,
 	})
 	var oversized *api.RemoteError
 	if !errors.As(err, &oversized) || oversized.Code() != api.RemoteInvalidRequest {
@@ -603,7 +604,7 @@ func TestDaemonDispatchesSendBackThroughBothDomains(t *testing.T) {
 	}
 	waitDispatch(t, done)
 	done = fixture.serve(t)
-	if _, err := operator.SendBackTask(ctx, api.SendBackInput{TaskID: claudeTask, Note: strings.Repeat("&", 1300)}); !errors.As(err, &remote) || remote.Code() != api.RemoteTooLarge {
+	if _, err := operator.SendBackTask(ctx, api.SendBackInput{TaskID: claudeTask, Note: strings.Repeat("&", runner.MaxProviderTaskBytes)}); !errors.As(err, &remote) || remote.Code() != api.RemoteTooLarge {
 		t.Fatalf("a note past the provider's prompt = %v", err)
 	}
 	waitDispatch(t, done)
@@ -632,7 +633,7 @@ func TestDaemonDispatchesSendBackThroughBothDomains(t *testing.T) {
 	}
 	waitDispatch(t, done)
 	done = fixture.serve(t)
-	if _, err := active.client.SendBack(ctx, api.SendBackInput{TaskID: foreign, Note: strings.Repeat("&", 1300)}); !errors.As(err, &remote) || remote.Code() != api.RemoteUnauthorized {
+	if _, err := active.client.SendBack(ctx, api.SendBackInput{TaskID: foreign, Note: strings.Repeat("&", runner.MaxProviderTaskBytes)}); !errors.As(err, &remote) || remote.Code() != api.RemoteUnauthorized {
 		t.Fatalf("another project's task with an oversized note = %v", err)
 	}
 	waitDispatch(t, done)
@@ -1736,7 +1737,7 @@ func TestTaskEnqueuePreflightPreservesReplayAndOverseerAuthority(t *testing.T) {
 	}
 	for _, target := range []string{testID(250), testID(221), active.run.AgentID.String()} {
 		done = fixture.serve(t)
-		_, err := active.client.OverseerEnqueueTask(ctx, api.OverseerTaskCreateInput{ID: testID(213), AssignedAgentID: target, IncarnationID: testID(214), Title: "not authorized", Body: strings.Repeat("x", 8193)})
+		_, err := active.client.OverseerEnqueueTask(ctx, api.OverseerTaskCreateInput{ID: testID(213), AssignedAgentID: target, IncarnationID: testID(214), Title: "not authorized", Body: strings.Repeat("x", runner.MaxProviderTaskBytes+1)})
 		waitDispatch(t, done)
 		var remote *api.RemoteError
 		if !errors.As(err, &remote) || remote.Code() != api.RemoteUnauthorized {

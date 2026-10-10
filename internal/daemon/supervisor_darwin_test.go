@@ -517,12 +517,21 @@ func TestSupervisorRunsOrchestratorInItsPrivateHomeWithoutAChange(t *testing.T) 
 }
 
 // runSupervisorClaudeFixture stands in for the Claude CLI: it starts from
-// the bootstrap prompt, the last argv element after "--", with nothing typed
-// into its terminal, and fetches its task through the attempt API as that
-// prompt says. The task never appears in argv.
+// the launch prompt, then reads the exact task from the private file named by
+// that prompt. The task never appears in argv or requires the attempt API.
 func runSupervisorClaudeFixture() error {
-	if len(os.Args) < 2 || os.Args[len(os.Args)-2] != "--" || !strings.Contains(os.Args[len(os.Args)-1], `argv ["attempt","task"] before doing anything else`) {
-		return fmt.Errorf("launch argv lacks the bootstrap prompt")
+	if len(os.Args) < 2 || os.Args[len(os.Args)-2] != "--" || !strings.Contains(os.Args[len(os.Args)-1], "Read the exact Factory task") {
+		return fmt.Errorf("launch argv lacks the native task prompt")
+	}
+	taskBytes, err := os.ReadFile(provider.NativeTaskPath(os.Getenv("HOME")))
+	if err != nil {
+		return err
+	}
+	task := string(taskBytes)
+	for _, arg := range os.Args {
+		if strings.Contains(arg, task) {
+			return fmt.Errorf("task reached argv")
+		}
 	}
 	client, err := api.NewAttemptClientFromEnvironment(os.Getenv("DARK_FACTORY_SOCKET"))
 	if err != nil {
@@ -530,15 +539,6 @@ func runSupervisorClaudeFixture() error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	task, err := client.Task(ctx)
-	if err != nil {
-		return err
-	}
-	for _, arg := range os.Args {
-		if strings.Contains(arg, task.Task) {
-			return fmt.Errorf("task reached argv")
-		}
-	}
 	result := "exact"
 	// Stand in for the real CLI's own transcript write, so a later launch's
 	// on-disk check (provider.claudeSessionSelection) can observe this exact
