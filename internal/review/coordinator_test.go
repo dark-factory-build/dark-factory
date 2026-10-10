@@ -35,15 +35,16 @@ func (s *memoryStore) CreateRetry(_ context.Context, failed, retry Operation) er
 }
 
 type fakeBackend struct {
-	reviews    int
-	killed     bool
-	submitErr  error
-	event      string
-	submitted  bool
-	enqueues   int
-	enqueueErr error
-	observeErr error
-	pull       *Pull
+	reviews      int
+	killed       bool
+	submitErr    error
+	event        string
+	submitted    bool
+	enqueues     int
+	enqueueCalls int
+	enqueueErr   error
+	observeErr   error
+	pull         *Pull
 }
 
 func (b *fakeBackend) CloneReadOnly(context.Context, Request) (string, func(), error) {
@@ -65,6 +66,7 @@ func (b *fakeBackend) Submit(context.Context, Operation, Verdict) error {
 	return b.submitErr
 }
 func (b *fakeBackend) Enqueue(context.Context, Operation) error {
+	b.enqueueCalls++
 	if b.enqueueErr == nil {
 		b.enqueues++
 	}
@@ -319,6 +321,31 @@ func TestRefusedEnqueueIsTerminalForTheHead(t *testing.T) {
 	}
 	if _, err := c.ReserveRetry(context.Background(), op); err == nil {
 		t.Fatal("a refused head was retried")
+	}
+}
+
+func TestRefusedEnqueueWaitsForRequiredApprovalThenRetriesOncePerRefresh(t *testing.T) {
+	store := &memoryStore{}
+	backend := &fakeBackend{
+		pull:       &Pull{Head: reviewRequest().Head, State: "open", ReviewDecision: "REVIEW_REQUIRED"},
+		enqueueErr: fmt.Errorf("%w (rejected before execution as UNPROCESSABLE)", ErrRefused),
+	}
+	c := Coordinator{Store: store, Backend: backend, Now: func() time.Time { return time.Unix(20, 0) }}
+	op := Operation{ID: "op", Request: reviewRequest(), State: "enqueued", Verdict: "allow", Submitted: true}
+
+	waiting, err := c.Advance(context.Background(), op)
+	if err != nil || waiting.State != "enqueued" || backend.enqueueCalls != 1 || len(store.values) != 0 {
+		t.Fatalf("unapproved refusal: operation=%+v err=%v calls=%d writes=%d", waiting, err, backend.enqueueCalls, len(store.values))
+	}
+	if _, err := c.Advance(context.Background(), waiting); err != nil || backend.enqueueCalls != 2 {
+		t.Fatalf("unapproved refresh: err=%v calls=%d", err, backend.enqueueCalls)
+	}
+
+	backend.pull.ReviewDecision = "APPROVED"
+	backend.enqueueErr = nil
+	queued, err := c.Advance(context.Background(), waiting)
+	if err != nil || queued.State != "enqueued" || queued.Enqueues != 1 || backend.enqueueCalls != 3 || backend.enqueues != 1 {
+		t.Fatalf("approval retry: operation=%+v err=%v backend=%+v", queued, err, backend)
 	}
 }
 

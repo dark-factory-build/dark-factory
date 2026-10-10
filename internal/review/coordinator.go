@@ -87,13 +87,14 @@ type Backend interface {
 // Pull is one observation of a published pull request. Queue, checks and
 // merge group are read only while it is open at the operation's head.
 type Pull struct {
-	Head      string
-	State     string // open, closed or merged
-	Mergeable *bool  // nil while GitHub computes it
-	Queued    bool
-	Failing   []string  // required checks at the head that finished unsuccessfully
-	Pending   bool      // a required check at the head has not finished
-	Group     *GroupRun // the newest completed merge-group run that built the head
+	Head           string
+	State          string // open, closed or merged
+	Mergeable      *bool  // nil while GitHub computes it
+	ReviewDecision string // APPROVED, REVIEW_REQUIRED or CHANGES_REQUESTED
+	Queued         bool
+	Failing        []string  // required checks at the head that finished unsuccessfully
+	Pending        bool      // a required check at the head has not finished
+	Group          *GroupRun // the newest completed merge-group run that built the head
 }
 
 type GroupRun struct {
@@ -128,9 +129,8 @@ func (g *GroupRun) note(head string) string {
 	return note
 }
 
-// ErrRefused marks an enqueue GitHub refused as UNPROCESSABLE: a head the
-// queue will not take, such as one whose required check never ran. The same
-// request at the same head gets the same answer, so it is not repeated.
+// ErrRefused marks an enqueue GitHub refused as UNPROCESSABLE. The refusal may
+// be terminal, or may wait for a review/check state that can change later.
 var ErrRefused = errors.New("the merge queue refuses this exact head, so factoryd will not enqueue it again; a new head is reviewed afresh")
 
 // FailuresBeforeEscalation is how many consecutive merge-stage passes may
@@ -275,7 +275,12 @@ func (c Coordinator) Advance(ctx context.Context, op Operation) (Operation, erro
 		op.State, op.RoutePending, op.Detail = "ejected", true, pull.Group.note(head)
 	default:
 		if err := c.Backend.Enqueue(ctx, op); errors.Is(err, ErrRefused) {
-			// Terminal for this head: failed, it is escalated once and never re-enqueued.
+			// Missing approval or a required check can clear without a new head.
+			// Leave the operation waiting so the next refresh gets one attempt.
+			if pull.ReviewDecision == "REVIEW_REQUIRED" || pull.Pending {
+				return op, nil
+			}
+			// Terminal for this head: fail it, escalate once, and never re-enqueue.
 			return c.fail(ctx, op, err, false)
 		} else if err != nil {
 			op.Failures, op.Escalation = failures, escalation

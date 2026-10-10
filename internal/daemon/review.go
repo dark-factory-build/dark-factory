@@ -694,17 +694,18 @@ func (b *daemonReviewBackend) ObservePull(ctx context.Context, operation review.
 	}
 	var page struct {
 		PullRequests []struct {
-			Number    uint64 `json:"number"`
-			HeadSHA   string `json:"head_sha"`
-			State     string `json:"state"`
-			Mergeable *bool  `json:"mergeable"`
+			Number         uint64 `json:"number"`
+			HeadSHA        string `json:"head_sha"`
+			State          string `json:"state"`
+			Mergeable      *bool  `json:"mergeable"`
+			ReviewDecision string `json:"review_decision"`
 		} `json:"pull_requests"`
 	}
 	if json.Unmarshal(response, &page) != nil || len(page.PullRequests) != 1 || page.PullRequests[0].Number != request.PullNumber || !review.HeadRE.MatchString(page.PullRequests[0].HeadSHA) {
 		return review.Pull{}, errors.New("review: Maintainer returned an invalid pull request")
 	}
 	value := page.PullRequests[0]
-	pull := review.Pull{Head: value.HeadSHA, State: value.State, Mergeable: value.Mergeable}
+	pull := review.Pull{Head: value.HeadSHA, State: value.State, Mergeable: value.Mergeable, ReviewDecision: value.ReviewDecision}
 	if pull.Head != request.Head || pull.State != "open" || (pull.Mergeable != nil && !*pull.Mergeable) {
 		return pull, nil
 	}
