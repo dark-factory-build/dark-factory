@@ -702,6 +702,19 @@ func TestGitErrorNamesOperationWithoutExposingArguments(t *testing.T) {
 	}
 }
 
+func TestReviewCheckoutCarriesRegisteredSSHCommandIntoFetch(t *testing.T) {
+	args, err := reviewCheckoutSSHArgs(gitCapture{exitCode: 0, output: []byte("/usr/bin/ssh -i /private/key")})
+	if err != nil || !reflect.DeepEqual(args, []string{"-c", "core.sshCommand=/usr/bin/ssh -i /private/key"}) {
+		t.Fatalf("ssh args = %#v, %v", args, err)
+	}
+	if args, err := reviewCheckoutSSHArgs(gitCapture{exitCode: 1}); err != nil || args != nil {
+		t.Fatalf("missing ssh command = %#v, %v", args, err)
+	}
+	if _, err := reviewCheckoutSSHArgs(gitCapture{exitCode: 0, output: []byte("bad\ncommand")}); err == nil {
+		t.Fatal("newline in registered SSH command accepted")
+	}
+}
+
 func TestReadGitCapturePreservesBoundedReaderContract(t *testing.T) {
 	wrappedEOF := fmt.Errorf("wrapped: %w", io.EOF)
 	tests := []struct {
