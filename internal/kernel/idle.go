@@ -38,7 +38,7 @@ func validateIdleRuleForProvider(provider Provider, rule IdleRule) error {
 	if err := validateIdleRule(rule); err != nil {
 		return err
 	}
-	if rule.Policy == IdleStandingInstruction && provider != ProviderShell && byteLen(rule.Instruction) > runner.MaxNativeTaskBytes {
+	if rule.Policy == IdleStandingInstruction && provider != ProviderShell && byteLen(rule.Instruction) > runner.MaxProviderTaskBytes {
 		return fmt.Errorf("%w: standing instruction exceeds provider delivery bound", ErrInvalidValue)
 	}
 	return nil
