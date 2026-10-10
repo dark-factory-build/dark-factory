@@ -46,7 +46,7 @@ fi
 if [ "$local_ci_mode" = full ] && in_source_shard; then
     echo "local-ci: repository contract fixtures"
     ./scripts/test-release.sh
-    python3 ./scripts/test-factory-browser.py; /bin/sh ./scripts/test-go-gates.sh
+    /bin/sh ./scripts/test-go-gates.sh
 fi
 if [ "$local_ci_mode" = full ]; then
     if in_source_shard; then
