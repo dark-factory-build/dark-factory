@@ -78,8 +78,7 @@ recovery signal. Do not reconstruct an unchanged project merely because the
 overseer woke. Status returns four entries from each collection. When
 `next_offset` is set, continue with `overseer status --offset N --head HEAD`; reuse
 the returned head exactly. A stale head restarts at page one. The first page also
-carries `factoryd`, the daemon's own last-15-minute timings and recent log
-signatures (see SPECIALISTS.md, Sources); read it before blaming a worker for a
+carries `factoryd`, the daemon's own last-15-minute call timings (see SPECIALISTS.md, Sources); read it before blaming a worker for a
 slow or failed local API call. Use `overseer status
 --task ID` for one task. Its objective and result arrive in 4,096-rune chunks;
 continue with `--text-offset N --head HEAD` while `next_text_offset` is set. Failed and cancelled tasks expose the exact settled run detail in `result`, while retaining their actual status. Read that report before deciding to retry: a failed review can contain actionable findings for the original worker, not an empty or crashed attempt. Use the `overseer` commands to

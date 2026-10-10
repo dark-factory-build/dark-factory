@@ -99,10 +99,9 @@ returns only with new evidence and a reference to the earlier decision.
   you; first page, `--task ID` for one task). It lists workers, queues,
   outcomes, failures and retries.
 - factoryd's own health: the first status page's `factoryd` section. `calls`
-  lists the slowest scheduler ticks, local API methods and browser routes of
-  the last 15 minutes (count, failed, slowest `max_ms`); `log` lists up to 16
-  distinct redacted lines factoryd logged, with count and first/last time. It
-  is in memory: a restart empties it.
+  lists the slowest scheduler ticks and local API methods of the last 15
+  minutes (count, failed, slowest `max_ms`). It is in memory: a restart
+  empties it.
 - Terminal diagnostics: `attempt terminal observe --project P --task T --run R`
   for a worker run in your project: bounded and redacted. Read the window that
   answers your question, not whole transcripts.
