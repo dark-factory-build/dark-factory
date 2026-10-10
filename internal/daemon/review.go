@@ -301,6 +301,19 @@ func (daemon *Daemon) tryAutoRebase(ctx context.Context, project kernel.ProjectI
 	return err == nil, err
 }
 
+func (daemon *Daemon) repairPublishedConflict(ctx context.Context, project kernel.ProjectID, repository string, op review.Operation) error {
+	rebased, err := daemon.tryAutoRebase(ctx, project, repository, op)
+	if err != nil {
+		return err
+	}
+	if rebased {
+		daemon.publishSettledChanges(ctx)
+		op.State, op.RoutePending, op.UpdatedAt = "superseded", false, daemon.now()
+		return (durableReviewStore{store: daemon.store, project: project, repository: repository, now: daemon.now}).Update(ctx, op)
+	}
+	return daemon.finishReviewRouting(ctx, project, repository, op)
+}
+
 func (daemon *Daemon) reviewCoordinator(ctx context.Context, project kernel.ProjectID, repository string) (review.Coordinator, error) {
 	targets, _, unbound, err := daemon.projectMaintainerRepositories(ctx, project)
 	if err != nil {

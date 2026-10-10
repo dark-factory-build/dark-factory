@@ -320,7 +320,7 @@ func TestOverseerWakeSummarisesTasks(t *testing.T) {
 		t.Fatal(err)
 	}
 	bodies := wakeBodies(t, store, 80+overseerWakeSettle.Milliseconds())
-	want := "Supervise.\n\nFactory causal wake: mode=full; prior_task_id=; worker tasks queued=1 running=0; open PRs=1. mode=full requires fixed-head reconciliation.\n- " +
+	want := "Supervise.\n\nFactory causal wake: mode=full; prior_task_id=; worker tasks queued=1 running=0; open factory PRs conflicting=0 failing=0 approved-not-queued=0. mode=full requires fixed-head reconciliation.\n- " +
 		finalizing.TaskID.String() + ` "verify" blocked rev=1 change=` + change.ID.String()[:12] + `@d2d2d2d2 PR #7 open/unknown: needs a decision`
 	if len(bodies) != 1 || bodies[0] != want {
 		t.Fatalf("wake = %q\nwant %q", bodies, want)
