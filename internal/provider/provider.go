@@ -1170,9 +1170,7 @@ func (runtime RuntimePaths) environmentForRole(kind kernel.Provider, role kernel
 					"OTEL_EXPORTER_OTLP_LOGS_ENDPOINT="+receiver+"/v1/logs")
 			}
 		}
-		if kind == kernel.ProviderClaudeCode {
-			environment = append(environment, "DF_CI_CACHE_ROOT="+filepath.Join(runtime.home, ".cache", "dark-factory", "local-ci", "trusted"))
-		}
+		environment = append(environment, "DF_CI_CACHE_ROOT="+filepath.Join(runtime.home, ".cache", "dark-factory", "local-ci", "trusted"))
 	}
 	environment = append(environment, AccountEnvironment(kind, runtime.accountHome, runtime.accountConfig)...)
 	if runtime.localCILeaseDir != "" {
