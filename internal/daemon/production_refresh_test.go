@@ -60,6 +60,17 @@ func TestRefreshReadsQueueStateForApprovedPulls(t *testing.T) {
 	}
 }
 
+func TestRefreshRejectsStaleQueueObservation(t *testing.T) {
+	head := strings.Repeat("a", 40)
+	pull := kernel.ProductionPullRequest{Number: 7, Head: head, Base: "main"}
+	call := func(_ context.Context, _ json.RawMessage, _ map[string]uint64) (json.RawMessage, error) {
+		return json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"structuredContent":{"pull_number":7,"head_sha":"` + strings.Repeat("b", 40) + `","state":"NOT_QUEUED"}}}`), nil
+	}
+	if _, err := readMaintainerMergeQueue(context.Background(), call, "o/r", 1, pull); err == nil {
+		t.Fatal("stale merge observation accepted")
+	}
+}
+
 // #1404: the refresh read pull requests but never their checks, so no check
 // record was stored once the host controller was deleted. It reads checks
 // only while they can change: #7's head settled, #8's stored checks are
