@@ -69,7 +69,7 @@ type Daemon struct {
 	publicRepos         map[string]*publicRepository
 	productionRefreshAt map[kernel.ProjectID]time.Time
 	// What factoryd knows of its health only in memory, for the overseer's
-	// wake (overseerHealth): each held condition, and the streak of logged
+	// wake (overseerHealth): each held condition, and the streak of
 	// Maintainer faults.
 	healthMu         sync.Mutex
 	heldHealth       map[string]kernel.OverseerHealth

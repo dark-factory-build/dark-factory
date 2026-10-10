@@ -127,7 +127,7 @@ func TestRepeatedMaintainerFaultsWakeTheOverseer(t *testing.T) {
 	if _, err := pullRequestObservation(ctx, call, "o/r", 1, nil, nil, fault); err == nil {
 		t.Fatal("unavailable refresh read")
 	}
-	if body := healthWake(t, fixture); !strings.Contains(body, "\nHealth since 1970-01-01T00:16:40Z: 3 Maintainer faults in factoryd.stderr.log, last at 1970-01-01T00:16:40Z: ") ||
+	if body := healthWake(t, fixture); !strings.Contains(body, "\nHealth since 1970-01-01T00:16:40Z: 3 Maintainer faults, last at 1970-01-01T00:16:40Z: ") ||
 		!strings.Contains(body, "the Maintainer answered 503 [health:maintainer]") {
 		t.Fatalf("wake = %q", body)
 	}

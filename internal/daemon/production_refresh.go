@@ -178,7 +178,7 @@ func (daemon *Daemon) holdHealth(key string, project kernel.ProjectID, detail st
 	daemon.heldHealth[key] = held
 }
 
-// noteMaintainerFault counts a logged Maintainer failure: an unavailable
+// noteMaintainerFault counts a Maintainer failure: an unavailable
 // Maintainer (its 503s) or an answer outside its contract. Faults closer
 // than two merge-stage passes apart are one streak.
 func (daemon *Daemon) noteMaintainerFault(err error) {
@@ -214,7 +214,7 @@ func (daemon *Daemon) overseerHealth() []kernel.OverseerHealth {
 	if faults := daemon.maintainerFaults; faults.count >= 3 && now.Sub(faults.last) <= 2*productionRefreshInterval {
 		if since, err := kernel.NewUnixMillis(faults.first.UnixMilli()); err == nil {
 			health = append(health, kernel.OverseerHealth{Key: "maintainer", Since: since,
-				Detail: fmt.Sprintf("%d Maintainer faults in factoryd.stderr.log, last at %s: %s", faults.count, faults.last.UTC().Format(time.RFC3339), faults.fault)})
+				Detail: fmt.Sprintf("%d Maintainer faults, last at %s: %s", faults.count, faults.last.UTC().Format(time.RFC3339), faults.fault)})
 		}
 	}
 	return health
