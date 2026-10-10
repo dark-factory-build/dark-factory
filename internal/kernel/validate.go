@@ -335,50 +335,6 @@ func validateBrowserAuthority(ctx context.Context, connection *sql.Conn) error {
 	if challengeCount < 0 || challengeCount > 32 {
 		return fmt.Errorf("%w: browser pairing challenge retention exceeded", ErrCorruptState)
 	}
-	var count int64
-	if err := connection.QueryRowContext(ctx, `SELECT COUNT(*) FROM browser_security_events`).Scan(&count); err != nil {
-		return err
-	}
-	if count > EventRetentionLimit {
-		return fmt.Errorf("%w: browser security event retention exceeded", ErrCorruptState)
-	}
-	rows, err = connection.QueryContext(ctx, `SELECT sequence, kind, client_id, occurred_at_ms FROM browser_security_events ORDER BY sequence`)
-	if err != nil {
-		return err
-	}
-	var previous int64
-	for rows.Next() {
-		var sequence, occurred int64
-		var kind string
-		var client nullableBlob
-		if err := rows.Scan(&sequence, &kind, &client, &occurred); err != nil {
-			rows.Close()
-			return err
-		}
-		parsedKind := BrowserSecurityEventKind(kind)
-		if sequence < 1 || sequence <= previous || !validBrowserSecurityKind(parsedKind) || isBrowserChallengeEvent(parsedKind) != !client.valid || occurred < 0 {
-			rows.Close()
-			return fmt.Errorf("%w: invalid browser security event", ErrCorruptState)
-		}
-		if client.valid {
-			id, err := BrowserClientIDFromBytes(client.bytes)
-			if err != nil {
-				rows.Close()
-				return fmt.Errorf("%w: invalid browser event client", ErrCorruptState)
-			}
-			if _, found, err := browserClientByID(ctx, connection, id); err != nil || !found {
-				rows.Close()
-				if err == nil {
-					err = ErrCorruptState
-				}
-				return err
-			}
-		}
-		previous = sequence
-	}
-	if err := closeValidatedBrowserRows(rows); err != nil {
-		return err
-	}
 	rows, err = connection.QueryContext(ctx, `SELECT id, run_id, state, lease_client_id, lease_generation, lease_expires_at_ms, last_input_sequence FROM terminal_sessions`)
 	if err != nil {
 		return err
@@ -524,6 +480,9 @@ const (
 	workerChangeSettledAbandonedPrepared
 	workerChangeSettledAbandonedAvailableFresh
 	workerChangeSettledAbandonedAvailableRetained
+	// workerChangeReclaimed is a retained Change the daemon later abandoned
+	// after removing its worktree: one revision past its settlement.
+	workerChangeReclaimed
 )
 
 const (
@@ -538,7 +497,7 @@ func (ownership workerChangeOwnership) available() bool {
 func (ownership workerChangeOwnership) settled() bool {
 	switch ownership {
 	case workerChangeSettledRetainedRetry, workerChangeSettledRetainedFresh, workerChangeSettledAbandonedReserved, workerChangeSettledAbandonedPrepared,
-		workerChangeSettledAbandonedAvailableFresh, workerChangeSettledAbandonedAvailableRetained:
+		workerChangeSettledAbandonedAvailableFresh, workerChangeSettledAbandonedAvailableRetained, workerChangeReclaimed:
 		return true
 	default:
 		return false
@@ -604,6 +563,8 @@ func classifyWorkerChangeOwnership(ctx context.Context, connection *sql.Conn, ru
 		ownership = workerChangeSettledAbandonedAvailableFresh
 	case change.Phase == ChangeAbandoned && delta == 1 && provenance == workerChangeRetained && change.SettledRunID != nil && *change.SettledRunID == run.ID && refusedPublication(run):
 		ownership = workerChangeSettledAbandonedAvailableRetained
+	case change.Phase == ChangeAbandoned && (delta == 2 && provenance == workerChangeRetained || delta == 4 && provenance == workerChangeFresh) && change.SettledRunID != nil && *change.SettledRunID == run.ID && !refusedPublication(run):
+		ownership = workerChangeReclaimed
 	default:
 		return 0, fmt.Errorf("%w: impossible worker Change revision", ErrCorruptState)
 	}
@@ -690,14 +651,21 @@ func workerChangeProvenanceForRun(ctx context.Context, connection *sql.Conn, run
 			continue
 		}
 		if provenance == workerChangeRetained {
-			if delta != 2 {
+			switch delta {
+			case 2:
+			case 3:
+				// The predecessor's retained Change was reclaimed: +1
+				// settled, +1 abandoned, +1 reopened reserved.
+				provenance = workerChangeFresh
+			default:
 				return 0, fmt.Errorf("%w: invalid retained Change retry gap", ErrCorruptState)
 			}
 			continue
 		}
 		switch delta {
-		case 2, 3:
-			// A fresh abandoned predecessor stays on the fresh path.
+		case 2, 3, 5:
+			// A fresh abandoned predecessor stays on the fresh path; +5 is
+			// one retained at +3 and then reclaimed.
 		case 4:
 			provenance = workerChangeRetained
 		default:
@@ -771,7 +739,8 @@ func loadRunRelationshipsWithTopology(ctx context.Context, connection *sql.Conn,
 					}
 					return runRelationships{}, err
 				}
-				if run.TerminalAt == nil || value.UpdatedAt.Int64() > run.TerminalAt.Int64() {
+				lateRebase := run.TerminalAt != nil && value.AvailableAt != nil && value.AvailableAt.Int64() <= run.TerminalAt.Int64() && value.HeadCommit != nil && value.Selection != nil && !value.HeadCommit.equal(value.Selection.commit)
+				if run.TerminalAt == nil || value.UpdatedAt.Int64() > run.TerminalAt.Int64() && !lateRebase {
 					return runRelationships{}, fmt.Errorf("%w: terminal run predates Change settlement", ErrCorruptState)
 				}
 			}
@@ -1187,7 +1156,7 @@ func resourcesMatchRunPhase(phase RunPhase, resources []Resource) bool {
 }
 
 func validateProjects(ctx context.Context, connection *sql.Conn) error {
-	rows, err := connection.QueryContext(ctx, `SELECT id, name, root, run_budget_limit, runs_used, max_run_seconds, revision, created_at_ms, updated_at_ms FROM projects`)
+	rows, err := connection.QueryContext(ctx, `SELECT `+projectColumns+` FROM projects`)
 	if err != nil {
 		return err
 	}
@@ -1349,7 +1318,8 @@ func validateChanges(ctx context.Context, connection *sql.Conn) error {
 			return err
 		}
 		ownership, ownershipErr := classifyWorkerChangeOwnership(ctx, connection, run, change)
-		if run.Phase != RunTerminal || ownershipErr != nil || !ownership.settled() || run.TerminalAt == nil || change.UpdatedAt.Int64() > run.TerminalAt.Int64() {
+		lateRebase := run.TerminalAt != nil && change.AvailableAt != nil && change.AvailableAt.Int64() <= run.TerminalAt.Int64() && change.HeadCommit != nil && change.Selection != nil && !change.HeadCommit.equal(change.Selection.commit)
+		if run.Phase != RunTerminal || ownershipErr != nil || !ownership.settled() || run.TerminalAt == nil || change.UpdatedAt.Int64() > run.TerminalAt.Int64() && !lateRebase {
 			return fmt.Errorf("%w: invalid Change settlement authority", ErrCorruptState)
 		}
 	}

@@ -178,7 +178,10 @@ mod cloudflare {
     use super::*;
     use crate::{
         BrokerState,
-        github_app::{Error as GitHubError, RepositoryName, github_json, read_github_response},
+        github_app::{
+            Error as GitHubError, MAX_GITHUB_RESPONSE_BYTES, RepositoryName, github_request,
+            read_github_response,
+        },
     };
     use axum::{
         body::Bytes,
@@ -436,10 +439,60 @@ mod cloudflare {
         Ok(response)
     }
 
+    /// The owner-token GitHub REST calls one request makes, and the quota
+    /// GitHub reported on the last of them. The host is told both, so factoryd
+    /// can account for and back off its share of the owner's quota (#1510).
+    #[derive(Default)]
+    struct Quota {
+        calls: std::cell::Cell<u32>,
+        last: std::cell::Cell<Option<[u64; 3]>>,
+    }
+    const RATE_LIMIT_HEADERS: [&str; 3] = [
+        "x-ratelimit-remaining",
+        "x-ratelimit-limit",
+        "x-ratelimit-reset",
+    ];
+    impl Quota {
+        async fn json<T: serde::de::DeserializeOwned>(
+            &self,
+            url: &str,
+            token: &str,
+        ) -> Result<T, GitHubError> {
+            let response = github_request(Method::Get, url, token, None).await?;
+            self.calls.set(self.calls.get().saturating_add(1));
+            let value = |name| response.headers().get(name).ok().flatten()?.parse().ok();
+            if let [Some(remaining), Some(limit), Some(reset)] = RATE_LIMIT_HEADERS.map(value) {
+                self.last.set(Some([remaining, limit, reset]));
+            }
+            let bytes = read_github_response(response, url, MAX_GITHUB_RESPONSE_BYTES).await?;
+            serde_json::from_slice(&bytes).map_err(|_| GitHubError::Unavailable)
+        }
+    }
+
     pub(crate) async fn durable(
         storage: &Storage,
         env: &Env,
+        request: Request,
+    ) -> worker::Result<Response> {
+        let quota = Quota::default();
+        let mut response = respond(storage, env, request, &quota).await?;
+        if quota.calls.get() > 0 {
+            let headers = response.headers_mut();
+            headers.set("x-github-requests", &quota.calls.get().to_string())?;
+            if let Some(last) = quota.last.get() {
+                for (name, value) in RATE_LIMIT_HEADERS.into_iter().zip(last) {
+                    headers.set(name, &value.to_string())?;
+                }
+            }
+        }
+        Ok(response)
+    }
+
+    async fn respond(
+        storage: &Storage,
+        env: &Env,
         mut request: Request,
+        quota: &Quota,
     ) -> worker::Result<Response> {
         let oauth = match OAuth::load(env) {
             Ok(v) => v,
@@ -515,11 +568,13 @@ mod cloudflare {
             // Consume before network I/O. Failed exchange requires a fresh flow.
             storage.put(SESSION_KEY, &connection).await?;
             let tokens = match oauth.exchange(json!({"code":code,"redirect_uri":oauth.callback,"code_verifier":pending.verifier})).await { Ok(tokens) => tokens, Err(error) => return github_failure(error) };
-            let user: User =
-                match github_json("https://api.github.com/user", &tokens.access_token).await {
-                    Ok(user) => user,
-                    Err(error) => return github_failure(error),
-                };
+            let user: User = match quota
+                .json("https://api.github.com/user", &tokens.access_token)
+                .await
+            {
+                Ok(user) => user,
+                Err(error) => return github_failure(error),
+            };
             if user.id <= 0 {
                 return denied();
             }
@@ -580,7 +635,9 @@ mod cloudflare {
                     storage.put(SESSION_KEY, &connection).await?;
                     return denied();
                 }
-                if let Err(error) = refresh_and_verify(storage, &oauth, &mut connection).await {
+                if let Err(error) =
+                    refresh_and_verify(storage, &oauth, &mut connection, quota).await
+                {
                     return github_failure(error);
                 }
                 connection.confirmation = None;
@@ -604,7 +661,7 @@ mod cloudflare {
             }
             return denied();
         }
-        if let Err(error) = refresh_and_verify(storage, &oauth, &mut connection).await {
+        if let Err(error) = refresh_and_verify(storage, &oauth, &mut connection, quota).await {
             return github_failure(error);
         }
         let token = &connection
@@ -647,7 +704,8 @@ mod cloudflare {
             else {
                 return denied();
             };
-            if let Err(error) = authorize(token, oauth.app_id, delegated, true, false).await {
+            if let Err(error) = authorize(quota, token, oauth.app_id, delegated, true, false).await
+            {
                 return github_failure(error);
             }
             if let Some(source) = source {
@@ -658,7 +716,9 @@ mod cloudflare {
                 else {
                     return denied();
                 };
-                if let Err(error) = authorize(token, oauth.app_id, source, false, false).await {
+                if let Err(error) =
+                    authorize(quota, token, oauth.app_id, source, false, false).await
+                {
                     return github_failure(error);
                 }
             }
@@ -683,7 +743,9 @@ mod cloudflare {
             // Status contains private delegation metadata, so access loss is
             // checked here too, not only before repository operations.
             for delegated in &connection.repositories {
-                if let Err(error) = authorize(token, oauth.app_id, delegated, false, false).await {
+                if let Err(error) =
+                    authorize(quota, token, oauth.app_id, delegated, false, false).await
+                {
                     return github_failure(error);
                 }
             }
@@ -730,11 +792,14 @@ mod cloudflare {
                     // of the authenticated customer's GitHub authorization.
                     Err(_) => return github_failure(GitHubError::Unavailable),
                 };
-                let response: InstallationPage = match github_json(
-                    &format!("https://api.github.com/user/installations?per_page=100&page={page}"),
-                    token,
-                )
-                .await
+                let response: InstallationPage = match quota
+                    .json(
+                        &format!(
+                            "https://api.github.com/user/installations?per_page=100&page={page}"
+                        ),
+                        token,
+                    )
+                    .await
                 {
                     Ok(v) => v,
                     Err(error) => return github_failure(error),
@@ -760,10 +825,10 @@ mod cloudflare {
             else {
                 return reply(json!({"error":"invalid_installation"}), 400);
             };
-            if let Err(error) = installation(token, oauth.app_id, installation_id).await {
+            if let Err(error) = installation(quota, token, oauth.app_id, installation_id).await {
                 return github_failure(error);
             }
-            let response: RepositoryPage = match github_json(&format!("https://api.github.com/user/installations/{installation_id}/repositories?per_page=100&page={page}"),token).await { Ok(v) => v, Err(error) => return github_failure(error) };
+            let response: RepositoryPage = match quota.json(&format!("https://api.github.com/user/installations/{installation_id}/repositories?per_page=100&page={page}"),token).await { Ok(v) => v, Err(error) => return github_failure(error) };
             if page == 1000 && response.repositories.len() == 100 {
                 return reply(json!({"error":"pagination_limit"}), 503);
             }
@@ -792,7 +857,9 @@ mod cloudflare {
                 {
                     return denied();
                 }
-                if let Err(error) = authorize(token, oauth.app_id, delegated, false, false).await {
+                if let Err(error) =
+                    authorize(quota, token, oauth.app_id, delegated, false, false).await
+                {
                     return github_failure(error);
                 }
             }
@@ -829,8 +896,15 @@ mod cloudflare {
                 else {
                     return denied();
                 };
-                if let Err(error) =
-                    authorize(token, oauth.app_id, delegated, write, require_private).await
+                if let Err(error) = authorize(
+                    quota,
+                    token,
+                    oauth.app_id,
+                    delegated,
+                    write,
+                    require_private,
+                )
+                .await
                 {
                     return github_failure(error);
                 }
@@ -850,7 +924,7 @@ mod cloudflare {
                         return denied();
                     };
                     if let Err(error) =
-                        authorize(token, oauth.app_id, delegated_source, false, false).await
+                        authorize(quota, token, oauth.app_id, delegated_source, false, false).await
                     {
                         return github_failure(error);
                     }
@@ -901,6 +975,7 @@ mod cloudflare {
         storage: &Storage,
         oauth: &OAuth,
         connection: &mut Connection,
+        quota: &Quota,
     ) -> Result<(), GitHubError> {
         let tokens = connection
             .tokens
@@ -929,7 +1004,9 @@ mod cloudflare {
             .tokens
             .as_ref()
             .ok_or(GitHubError::Rejected(401))?;
-        let user: User = github_json("https://api.github.com/user", &tokens.access_token).await?;
+        let user: User = quota
+            .json("https://api.github.com/user", &tokens.access_token)
+            .await?;
         if connection.user.as_ref().map(|u| u.id) != Some(user.id)
             || crate::github_app::GitAuthor::from_github(user.id, &user.login).is_err()
         {
@@ -946,15 +1023,21 @@ mod cloudflare {
     struct RepositoryPage {
         repositories: Vec<Repository>,
     }
-    async fn installation(token: &str, app_id: i64, id: i64) -> Result<(), GitHubError> {
+    async fn installation(
+        quota: &Quota,
+        token: &str,
+        app_id: i64,
+        id: i64,
+    ) -> Result<(), GitHubError> {
         // ponytail: scan at most 100,000 installations; beyond that refuse,
         // then replace with a GitHub direct user-installation lookup if added.
         for page in 1..=1000 {
-            let response: InstallationPage = github_json(
-                &format!("https://api.github.com/user/installations?per_page=100&page={page}"),
-                token,
-            )
-            .await?;
+            let response: InstallationPage = quota
+                .json(
+                    &format!("https://api.github.com/user/installations?per_page=100&page={page}"),
+                    token,
+                )
+                .await?;
             if response
                 .installations
                 .iter()
@@ -969,17 +1052,18 @@ mod cloudflare {
         Err(GitHubError::Rejected(401))
     }
     async fn authorize(
+        quota: &Quota,
         token: &str,
         app_id: i64,
         delegated: &Delegation,
         write: bool,
         require_private: bool,
     ) -> Result<(), GitHubError> {
-        installation(token, app_id, delegated.installation_id).await?;
+        installation(quota, token, app_id, delegated.installation_id).await?;
         // The intersection endpoint proves this precise repository still belongs
         // to this user's installation. A repository-visible App token cannot.
         for page in 1..=1000 {
-            let response: RepositoryPage = github_json(&format!("https://api.github.com/user/installations/{}/repositories?per_page=100&page={page}",delegated.installation_id),token).await?;
+            let response: RepositoryPage = quota.json(&format!("https://api.github.com/user/installations/{}/repositories?per_page=100&page={page}",delegated.installation_id),token).await?;
             if let Some(repository) = response
                 .repositories
                 .iter()

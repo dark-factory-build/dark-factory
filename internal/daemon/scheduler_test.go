@@ -3,10 +3,12 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -131,6 +133,34 @@ func TestSchedulerWakeAndPollCannotRaceHeldUnobservedProbe(t *testing.T) {
 	}
 }
 
+// Shutdown cancels a scheduler write that may be waiting in BEGIN IMMEDIATE.
+// That BEGIN wrote nothing, so its error is the shutdown, not an unknown
+// outcome that RunScheduler must report (the merge-queue flake).
+func TestSchedulerShutdownDuringBeginIsCleanShutdown(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "kernel.sqlite")
+	store, err := createTestStore(context.Background(), path, kernel.FactoryConfig{DispatchEnabled: true, Capacity: 2}, schedulerTime(t, 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	lock, err := sql.Open("sqlite3", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	lock.SetMaxOpenConns(1)
+	if _, err := lock.Exec("BEGIN IMMEDIATE"); err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Exec("ROLLBACK")
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(100*time.Millisecond, cancel)
+	_, err = store.PromoteQueuedContinuations(ctx, schedulerTime(t, 2))
+	if err == nil || !schedulerOnlyCancellation(err, ctx.Err()) {
+		t.Fatalf("cancelled BEGIN = %v, want a clean shutdown", err)
+	}
+}
+
 func TestSchedulerCancellationBeforeAdmissionObservation(t *testing.T) {
 	daemon := newSchedulerTestDaemon(t)
 	for iteration := 0; iteration < 32; iteration++ {
@@ -186,7 +216,11 @@ func TestSchedulerUnobservedCompletionPreservesUnexpectedErrors(t *testing.T) {
 				}
 				return kernel.Run{}, cause
 			}}
-			if err := daemon.RunScheduler(ctx, spec); !errors.Is(err, kernel.ErrCorruptState) || !errors.Is(err, cause) {
+			if !stopping {
+				if log := schedulerFailureLog(t, daemon, spec, nil); !strings.Contains(log, kernel.ErrCorruptState.Error()) || !strings.Contains(log, cause.Error()) {
+					t.Fatalf("unobserved completion lost unexpected failure: %s", log)
+				}
+			} else if err := daemon.RunScheduler(ctx, spec); !errors.Is(err, kernel.ErrCorruptState) || !errors.Is(err, cause) {
 				t.Fatalf("unobserved completion lost unexpected failure: %v", err)
 			}
 		})
@@ -236,9 +270,8 @@ func TestSchedulerRejectsDuplicateAdmissionObservation(t *testing.T) {
 		spec.admissionObserved(false)
 		return kernel.Run{}, fmt.Errorf("%w: empty", kernel.ErrConflict)
 	}}
-	err := daemon.RunScheduler(context.Background(), spec)
-	if !errors.Is(err, kernel.ErrCorruptState) {
-		t.Fatalf("duplicate observation = %v", err)
+	if log := schedulerFailureLog(t, daemon, spec, nil); !strings.Contains(log, "duplicate admission observation") {
+		t.Fatalf("duplicate observation: %s", log)
 	}
 }
 
@@ -249,9 +282,8 @@ func TestSchedulerRejectsUnexpectedNoAdmissionResult(t *testing.T) {
 		spec.admissionObserved(false)
 		return kernel.Run{}, sentinel
 	}}
-	err := daemon.RunScheduler(context.Background(), spec)
-	if !errors.Is(err, sentinel) || !errors.Is(err, kernel.ErrCorruptState) {
-		t.Fatalf("unexpected no-admission result = %v", err)
+	if log := schedulerFailureLog(t, daemon, spec, nil); !strings.Contains(log, sentinel.Error()) || !strings.Contains(log, kernel.ErrCorruptState.Error()) {
+		t.Fatalf("unexpected no-admission result: %s", log)
 	}
 }
 
@@ -267,13 +299,14 @@ func TestSchedulerPreservesUnsettledAttemptError(t *testing.T) {
 		<-ctx.Done()
 		return kernel.Run{}, ctx.Err()
 	}}
-	err := daemon.RunScheduler(context.Background(), spec)
-	if !errors.Is(err, cause) || !schedulerOutcomeUnknown(err) {
-		t.Fatalf("unsettled attempt cause lost: %v", err)
+	if log := schedulerFailureLog(t, daemon, spec, nil); !strings.Contains(log, cause.Error()) {
+		t.Fatalf("unsettled attempt cause lost: %s", log)
 	}
 }
 
-func TestSchedulerStopsAndJoinsAfterNonterminalCompletion(t *testing.T) {
+// A failure must not cancel other attempts: cancellation is shutdown, which
+// hands a live attempt to the next daemon and leaves this one without it.
+func TestSchedulerFailureKeepsOtherAttemptsRunning(t *testing.T) {
 	daemon := newSchedulerTestDaemon(t)
 	sentinel := errors.New("durable run remained nonterminal")
 	var calls atomic.Int64
@@ -290,9 +323,15 @@ func TestSchedulerStopsAndJoinsAfterNonterminalCompletion(t *testing.T) {
 		},
 		scheduledCompletion: func(kernel.Run) error { return sentinel },
 	}
-	err := daemon.RunScheduler(context.Background(), spec)
-	if !errors.Is(err, sentinel) {
-		t.Fatalf("nonterminal completion = %v", err)
+	log := schedulerFailureLog(t, daemon, spec, func() {
+		select {
+		case <-joined:
+			t.Fatal("a failed completion cancelled the next attempt")
+		default:
+		}
+	})
+	if !strings.Contains(log, sentinel.Error()) {
+		t.Fatalf("nonterminal completion: %s", log)
 	}
 	select {
 	case <-joined:
@@ -301,7 +340,7 @@ func TestSchedulerStopsAndJoinsAfterNonterminalCompletion(t *testing.T) {
 	}
 }
 
-func TestSchedulerStopsAfterPersistentUncertainCompletionRead(t *testing.T) {
+func TestSchedulerLogsPersistentUncertainCompletionRead(t *testing.T) {
 	daemon := newSchedulerTestDaemon(t)
 	sentinel := errors.New("durable completion unreadable")
 	var attempts atomic.Int64
@@ -322,9 +361,8 @@ func TestSchedulerStopsAfterPersistentUncertainCompletionRead(t *testing.T) {
 			return kernel.Run{}, ctx.Err()
 		},
 	}
-	err := daemon.RunScheduler(context.Background(), spec)
-	if !errors.Is(err, sentinel) || completionReads.Load() != supervisorReconcileAttempts {
-		t.Fatalf("persistent completion = %v after %d reads", err, completionReads.Load())
+	if log := schedulerFailureLog(t, daemon, spec, nil); !strings.Contains(log, sentinel.Error()) || completionReads.Load() != supervisorReconcileAttempts {
+		t.Fatalf("persistent completion after %d reads: %s", completionReads.Load(), log)
 	}
 	select {
 	case <-joined:
@@ -582,8 +620,13 @@ func TestSchedulerPreservesAdmittedRunWhenAttemptCompletionIsUnknown(t *testing.
 	runID := schedulerRunID(t, 7)
 	sentinel := errors.New("completion remains unknown")
 	var completed kernel.Run
+	var calls atomic.Int64
 	spec := SupervisorSpec{
-		scheduledAttempt: func(_ context.Context, spec SupervisorSpec) (kernel.Run, error) {
+		scheduledAttempt: func(ctx context.Context, spec SupervisorSpec) (kernel.Run, error) {
+			if calls.Add(1) > 1 {
+				<-ctx.Done()
+				return kernel.Run{}, ctx.Err()
+			}
 			spec.admissionObserved(true)
 			return kernel.Run{ID: runID, Phase: kernel.RunFinalizing}, kernel.NewOutcomeUnknownError(sentinel)
 		},
@@ -592,10 +635,98 @@ func TestSchedulerPreservesAdmittedRunWhenAttemptCompletionIsUnknown(t *testing.
 			return sentinel
 		},
 	}
-	err := daemon.RunScheduler(context.Background(), spec)
-	if !errors.Is(err, sentinel) || completed.ID != runID || completed.Phase != kernel.RunFinalizing {
-		t.Fatalf("unknown completion lost admitted run: run=%+v err=%v", completed, err)
+	log := schedulerFailureLog(t, daemon, spec, nil)
+	if !strings.Contains(log, sentinel.Error()) || completed.ID != runID || completed.Phase != kernel.RunFinalizing {
+		t.Fatalf("unknown completion lost admitted run: run=%+v log=%s", completed, log)
 	}
+}
+
+// A tick failure that repeats on the same data is logged once per backoff
+// window and retried; the scheduler never ends factoryd, which keeps serving.
+func TestSchedulerRetriesARepeatingTickFailureWithBackoff(t *testing.T) {
+	daemon := newSchedulerTestDaemon(t)
+	log := &schedulerLog{}
+	daemon.ConfigureLog(log)
+	daemon.now = func() time.Time { return time.UnixMilli(-1) }
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	polls := make(chan time.Time)
+	done := make(chan error, 1)
+	go func() {
+		done <- daemon.RunScheduler(ctx, SupervisorSpec{schedulerPoll: polls, scheduledAttempt: func(_ context.Context, spec SupervisorSpec) (kernel.Run, error) {
+			spec.admissionObserved(false)
+			return kernel.Run{}, fmt.Errorf("%w: empty", kernel.ErrConflict)
+		}})
+	}()
+	// Ticks fail on polls 1, 3 and 6, after pauses of 1 and 2 polls; poll 7
+	// is taken by the third pause, so all three failures are logged.
+	for range 7 {
+		select {
+		case polls <- time.Now():
+		case err := <-done:
+			t.Fatalf("scheduler stopped on a repeating tick failure: %v", err)
+		}
+	}
+	if failures := strings.Count(log.String(), "scheduler paused"); failures != 3 {
+		t.Fatalf("failures logged=%d\n%s", failures, log.String())
+	}
+	if _, err := daemon.WebStatus(ctx); err != nil {
+		t.Fatalf("web_status while the scheduler retries: %v", err)
+	}
+	if reply := daemon.snapshot(ctx); reply.Failed() {
+		t.Fatal("console snapshot failed while the scheduler retries")
+	}
+	cancel()
+	if err := waitSchedulerDone(t, done); err != nil {
+		t.Fatalf("scheduler shutdown = %v", err)
+	}
+}
+
+type schedulerLog struct {
+	mu   sync.Mutex
+	text strings.Builder
+}
+
+func (log *schedulerLog) Write(data []byte) (int, error) {
+	log.mu.Lock()
+	defer log.mu.Unlock()
+	return log.text.Write(data)
+}
+
+func (log *schedulerLog) String() string {
+	log.mu.Lock()
+	defer log.mu.Unlock()
+	return log.text.String()
+}
+
+// schedulerFailureLog runs the scheduler until it logs a failure, calls
+// paused while it is still running, then shuts it down cleanly.
+func schedulerFailureLog(t *testing.T, daemon *Daemon, spec SupervisorSpec, paused func()) string {
+	t.Helper()
+	log := &schedulerLog{}
+	daemon.ConfigureLog(log)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- daemon.RunScheduler(ctx, spec) }()
+	for deadline := time.Now().Add(2 * time.Second); !strings.Contains(log.String(), "scheduler paused"); time.Sleep(time.Millisecond) {
+		select {
+		case err := <-done:
+			t.Fatalf("scheduler stopped on a failure: %v", err)
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("scheduler logged no failure")
+		}
+	}
+	if paused != nil {
+		paused()
+	}
+	cancel()
+	if err := waitSchedulerDone(t, done); err != nil {
+		t.Fatalf("scheduler shutdown after a failure = %v", err)
+	}
+	return log.String()
 }
 
 func TestSchedulerPausedDispatchDefersAutomaticWorkUntilResume(t *testing.T) {

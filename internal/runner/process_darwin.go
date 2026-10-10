@@ -1227,6 +1227,9 @@ func (c *OwnedChild) Close() error {
 	}
 	return c.closePTY()
 }
+
+var hardCleanupExitWait = 4 * time.Second // var only so package tests can shorten it
+
 func (c *OwnedChild) hardCleanup() error {
 	if c == nil || c.cmd == nil {
 		return nil
@@ -1243,7 +1246,7 @@ func (c *OwnedChild) hardCleanup() error {
 	// An observed or reaped exit is already proven; re-waiting would consume
 	// nothing and doom every retry once the one-shot event is gone.
 	if c.exitRegistered && !c.exitObserved && c.state != stateWaited && c.kq >= 0 {
-		if _, err := c.waitForExit(4 * time.Second); err != nil {
+		if _, err := c.waitForExit(hardCleanupExitWait); err != nil {
 			cleanupErr = errors.Join(cleanupErr, err)
 		}
 	}

@@ -14,21 +14,25 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// testStragglerPass replaces one sweep scan in package tests; production is nil.
+var testStragglerPass func(pass int) (bool, error)
+
 // killRunStragglers kills every process of this user whose TMPDIR is inside
 // the run's private runtime root: descendants that left the
 // provider's group and session (setsid, double fork) and now live on under
 // launchd (#1403). Only the run's own processes are given those paths.
+// ARCHITECTURE.md records why this numeric-PID sweep stays Darwin-only. Every
+// error is unresolved: cleanup was not proved, so no result may be published.
 func killRunStragglers(runtime *os.File) error {
 	root, err := fdPath(runtime)
-	if err != nil {
-		return err
-	}
-	for pass := 0; pass < 100; pass++ {
-		processes, err := unix.SysctlKinfoProcSlice("kern.proc.uid", os.Getuid())
-		if err != nil {
-			return err
-		}
+	for pass := 0; err == nil && pass < 100; pass++ {
+		var processes []unix.KinfoProc
 		found := false
+		if testStragglerPass != nil {
+			found, err = testStragglerPass(pass)
+		} else {
+			processes, err = unix.SysctlKinfoProcSlice("kern.proc.uid", os.Getuid())
+		}
 		for _, process := range processes {
 			pid := int(process.Proc.P_pid)
 			if pid != os.Getpid() && process.Proc.P_stat != darwinZombieState && environmentNames(pid, root) {
@@ -36,12 +40,15 @@ func killRunStragglers(runtime *os.File) error {
 				_ = unix.Kill(pid, unix.SIGKILL)
 			}
 		}
-		if !found {
+		if err == nil && !found {
 			return nil
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	return fmt.Errorf("runner: run processes outlived the run")
+	if err == nil {
+		err = fmt.Errorf("run processes outlived the run")
+	}
+	return fmt.Errorf("%w: run-process sweep: %v", ErrUnresolved, err)
 }
 
 // environmentNames reports whether pid's exec-time TMPDIR resolves inside root. kern.procargs2 is argc, the exec path and its NUL

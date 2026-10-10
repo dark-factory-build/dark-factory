@@ -10,9 +10,11 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
@@ -50,12 +52,21 @@ type Config struct {
 	Address        string
 	AllowedOrigins []string
 	Backend        Backend
+	// Console is the signed console bundle served at ConsolePath; nil serves none.
+	Console []byte
 }
 
 // Observer is an optional Backend capability: the daemon watching its own
 // listener. Only fixed protocol names reach it, never request content.
 type Observer interface {
 	Observe(attributes map[string]string)
+}
+
+// ErrorClassifier is an optional Backend capability: name the backend's own
+// errors as this package's. The transport applies it once, to every error it
+// answers a request with, so no return path reaches the wire unnamed.
+type ErrorClassifier interface {
+	ClassifyError(err error) error
 }
 
 // TraceReceiver is an optional Backend capability: aggregate an OTLP trace
@@ -91,6 +102,7 @@ type Server struct {
 	githubBackend      GitHubBackend
 	host               string
 	origins            map[string]struct{}
+	console            []byte
 	terminalAckTimeout time.Duration
 	http               *http.Server
 	now                func() time.Time
@@ -127,10 +139,10 @@ func Listen(config Config) (*Server, error) {
 	if err != nil {
 		return nil, fmt.Errorf("browser: listen: %w", err)
 	}
-	return start(config.Backend, origins, listener, time.Now), nil
+	return start(config.Backend, origins, config.Console, listener, time.Now), nil
 }
 
-func start(backend Backend, origins map[string]struct{}, listener net.Listener, clock func() time.Time) *Server {
+func start(backend Backend, origins map[string]struct{}, console []byte, listener net.Listener, clock func() time.Time) *Server {
 	ctx, cancel := context.WithCancel(context.Background())
 	server := &Server{
 		now:                clock,
@@ -141,6 +153,7 @@ func start(backend Backend, origins map[string]struct{}, listener net.Listener, 
 		githubBackend:      func() GitHubBackend { value, _ := backend.(GitHubBackend); return value }(),
 		host:               listener.Addr().String(),
 		origins:            origins,
+		console:            console,
 		terminalAckTimeout: time.Duration(browserprotocol.TerminalAckTimeoutMS) * time.Millisecond,
 		ctx:                ctx,
 		cancel:             cancel,
@@ -305,6 +318,10 @@ func (server *Server) handle(writer http.ResponseWriter, request *http.Request) 
 	}
 	if strings.HasPrefix(request.URL.Path, PublicPath) {
 		server.handlePublic(writer, request)
+		return
+	}
+	if request.URL.Path == ConsolePath {
+		server.handleConsole(writer, request)
 		return
 	}
 	if request.URL.Path != Path || request.URL.EscapedPath() != Path || request.URL.RawQuery != "" {
@@ -593,9 +610,23 @@ func errorFrame(err error) browserprotocol.Error {
 	case errors.Is(err, ErrRateLimited):
 		return browserprotocol.Error{Code: browserprotocol.ErrorRateLimited, Retryable: true}
 	default:
+		// Say why our own reply was refused, once per reason. ponytail: every 64th new reason forgets the rest.
+		if _, seen := refusals.LoadOrStore(err.Error(), true); !seen {
+			if refusalCount.Add(1)%64 == 0 {
+				refusals.Clear()
+			}
+			if errors.Is(err, browserprotocol.ErrMalformed) {
+				fmt.Fprintf(os.Stderr, "%s factoryd: reply refused: %v\n", time.Now().UTC().Format(time.RFC3339), err)
+			}
+		}
 		return browserprotocol.Error{Code: browserprotocol.ErrorInternal}
 	}
 }
+
+var (
+	refusals     sync.Map
+	refusalCount atomic.Int64
+)
 
 func zero16(value [16]byte) bool {
 	for _, item := range value {

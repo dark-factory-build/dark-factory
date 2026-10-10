@@ -1961,8 +1961,10 @@ func buildWitnessBinary(t *testing.T, output, value string) {
 	}
 	goBinary := filepath.Join(runtime.GOROOT(), "bin", "go")
 	command := exec.Command(goBinary, "build", "-o", output, source)
-	environment := []string{"GOENV=off", "GOWORK=off", "GOTOOLCHAIN=local", "CGO_ENABLED=0", "GOCACHE=" + t.TempDir(), "TMPDIR=" + t.TempDir()}
-	for _, key := range []string{"GOMODCACHE", "GOPATH", "GOTMPDIR"} {
+	environment := []string{"GOENV=off", "GOWORK=off", "GOTOOLCHAIN=local", "CGO_ENABLED=0", "TMPDIR=" + t.TempDir()}
+	// The caller's build cache (named, or found from HOME) keeps each witness
+	// a link step instead of a cold standard-library compile.
+	for _, key := range []string{"GOCACHE", "HOME", "GOMODCACHE", "GOPATH", "GOTMPDIR"} {
 		if value := os.Getenv(key); value != "" {
 			environment = append(environment, key+"="+value)
 		}

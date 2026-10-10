@@ -74,7 +74,8 @@ with tempfile.TemporaryDirectory(prefix='factory-browser-proof-') as temporary:
             assert not list(directories[-1].glob('*.png'))
             result = tool(process, 'browser_navigate', {'url': args.url})
             assert not result.get('isError'), text(result)
-            assert 'fixture' in text(result).lower(), 'actual labelled fixture was not rendered'
+            result = tool(process, 'browser_evaluate', {'function': '() => "console:" + document.querySelectorAll(".dfFactoryConsole").length + ",label:" + document.body.innerText.startsWith("Fixture:")'})
+            assert 'console:1,label:true' in text(result), 'labelled fixture console was not rendered'
         for process in processes:
             children.update(descendants(process.pid))
         assert children, 'real browser processes were not observed'

@@ -4,15 +4,7 @@ This is a reference for local development, checks, releases, and installation.
 
 ## Local development
 
-The worktree helper fetches the configured origin default branch before creating
-the branch and checkout:
-
-```sh
-./scripts/new-worktree.sh <slug>
-cd .worktrees/<slug>
-```
-
-Prefer deleting obsolete behavior and duplicated machinery over compatibility
+Create a worktree as [CONTRIBUTING.md](../../CONTRIBUTING.md) shows. Prefer deleting obsolete behavior and duplicated machinery over compatibility
 code, feature flags, or speculative abstractions.
 
 The routine source check is:
@@ -23,19 +15,13 @@ The routine source check is:
 
 It runs Go formatting, vetting, ordinary short tests, the TypeScript build and
 tests, and `git diff --check`. It does not acquire the process lease. During
-implementation, run this check plus the focused tests for the changed package
-that your environment can run. A factory worker reports a check its sandbox
-cannot run as "verified by gate" instead of blocking on it.
+implementation, run the focused tests for the changed package.
 
-The full local gate runs before every review, at the exact head and outside
-any worker sandbox. A failure is rerun once at the head (a pass then counts,
-and the failure is kept as flake evidence). The reproducing failures are the
-tests that failed in both head runs. With none in common the failure is a flake
-and review proceeds; otherwise the gate runs once at the base, and the
-reproducing failures the base does not share go back to the author by name.
-Head failures with no parsed test names go back without a base run. A wrapper
-failure where nothing ran is a host blocker, never author work. Run it yourself when broad local integration proof
-is needed:
+factoryd reviews a published head only once its required pull-request check
+passes; a red head goes back to its author naming the failing tests, unreviewed.
+The protected merge queue's required CI is the full gate on the combined tree,
+and a queue ejection also comes back naming the failing checks. Run the full
+local gate yourself when broad local integration proof is needed:
 
 ```sh
 ./scripts/local-ci.sh
@@ -49,7 +35,7 @@ and `--release` runs the source check plus release and packaging fixtures. The s
 protected CI workflow chooses these modes from the complete merge-queue diff;
 uncertain or mixed paths use the full gate.
 
-For CI edits, run the affected gate fixtures and source checks, adding a full
+For CI edits, run the affected source checks, adding a full
 local run where that resolves a concrete risk. Authors and reviewers do not
 repeat the entire suite merely because a PR is about to enter the queue.
 
@@ -98,20 +84,13 @@ gh api -X POST repos/OWNER/REPO/pulls/N/reviews -f commit_id=HEAD \
 Dark-Factory-Review: allow HEAD"
 ```
 
-Interim: until the workflow projects `author_association` (a follow-up change
-that also deletes this mode), the gate receives four-field records and trusts
-every publisher, as it did before.
-
 A review carries `Dark-Factory-Review: allow HEAD`, `block` or `note`
 (`factoryctl review` writes it). Use `block` for an unresolved finding or `note` for evidence without approval.
 A plain GitHub approval without the explicit verdict does not satisfy this
 gate. Pending and dismissed reviews do not count. A trusted block or
 `CHANGES_REQUESTED` at the same head wins over an allow, whichever trusted
 publisher recorded it.
-A new head requires fresh review. An operation-bound correction must come from
-the original block's publisher and name that exact operation. The publisher
-attests that the finding was resolved or withdrawn; another publisher's
-correction or an ordinary second opinion cannot clear a same-head block.
+A new head requires fresh review; nothing clears a block at the same head.
 The Maintainer App is another publisher of the same record. Its automated
 intake retains its own operation journal and uncertainty handling.
 
@@ -144,6 +123,15 @@ rejected. Decisions and lessons require evidence. Authors come from authenticate
 identity; agent notes cannot create project briefs, promote current guidance, or
 revise another author's protected knowledge. Operator capability is required for
 promotion. Text cannot grant capabilities.
+
+Specialist records are observations by `record_type`: a `proposal` (one per
+run, at most the project's `specialist_open_proposals` open per agent); a
+`contribution` or `amendment` naming its `task_id` or a free-form `record_id`
+such as `issue:#12`; a `review` bound to the `source_revision` it examined
+(its `record_id`, if any, is a reviewer record); `research` citing at least
+one `evidence` entry; and a `follow_up` whose `record_id` is a proposal. A `decision`
+with `"record_type":"proposal"` and the proposal's `record_id` resolves it; only
+an overseer attempt or the operator may write one.
 
 Task preparation freezes a bounded selection of exact document revisions,
 prioritizing explicit attachments and the project brief. The normal knowledge
@@ -195,6 +183,16 @@ ID. Inspect the returned `human_reply.state`; `delivery_unknown` means input
 may have been delivered and must not be replayed. Operator credentials are
 required; a worker attempt token does not grant this authority.
 
+Cancel a settled or unwanted open request without resuming its run:
+
+```sh
+factoryctl human cancel --request ID --revision REVISION --run-revision RUN_REVISION
+```
+
+Both revisions come from `human list`. This is the browser card's cancel: a
+live run is cancelled and revoked, a yielded overseer's continuation is
+dropped. A stale or repeated cancel is refused with a revision conflict.
+
 For CLI supervision, `factoryctl status` includes agent model, reasoning,
 standing-instruction policy and counters, and tool-budget counters. Read a
 revision-bound task with `factoryctl task read --task ID --revision REVISION
@@ -227,8 +225,11 @@ Factory-owned Change worktrees live under the daemon home's `changes`
 directory on `factory/<12 hex>` branches. New Changes use their own bare Git
 administration under the project's `.git/dark-factory-changes/<Change ID>/.git`;
 legacy retained Changes may still use the project's canonical administration.
-Use the exact settled source receipt's `git_directory`, not an assumed canonical
-branch. Remove one only after the same
+factoryd reclaims them itself by the rule in ARCHITECTURE.md (Verification
+and storage), with these same proofs, so manual removal is now the exception:
+a Change factoryd kept and logged. Its removal also deletes the worktree's
+ignored files (build output, tool caches): they are not committed work. Use the exact settled source receipt's `git_directory`, not an assumed
+canonical branch. Remove one only after the same
 proof: its task is terminal and not queued for correction, no run owns it,
 its branch tip is merged into freshly fetched `origin/main` (or its squash
 merge is verified as above), and the worktree has no uncommitted work. Then
@@ -278,7 +279,7 @@ cache for subsequent merge-queue refs. The default manual runner remains
 `dark-factory-mac`; its Go patch version may differ. Queue caches alone do not
 establish reuse across different queue refs.
 
-Process-sensitive checks take one blocking `lockf` lock from the common Git
+Process-sensitive checks take one blocking `lockf` (Linux: `flock`) lock from the common Git
 directory, so linked worktrees cannot stack process-heavy Go runs. A contender
 waits; the kernel releases the lock when its holder exits. The routine
 `go-check.sh` remains outside that lease.
@@ -302,7 +303,8 @@ go build -o "$df_dev_root/factory-runner" ./cmd/factory-runner
 df_dev_home="$df_dev_root/factory"
 "$df_dev_root/factoryctl" init --home "$df_dev_home"
 "$df_dev_root/factoryctl" doctor --home "$df_dev_home"
-"$df_dev_root/factoryd" --home "$df_dev_home" &
+"$df_dev_root/factoryd" --home "$df_dev_home" \
+  --development-browser-address 127.0.0.1:43999 &
 
 until [ -S "$df_dev_home/runtimes/factory.sock" ]; do sleep 0.2; done
 export DARK_FACTORY_SOCKET="$df_dev_home/runtimes/factory.sock"
@@ -311,7 +313,8 @@ export DARK_FACTORY_OPERATOR_TOKEN_FILE="$df_dev_home/operator.token"
 ```
 
 The root is under `/private/tmp` because `/tmp` is a symlink on macOS and the
-home walk rejects symlinks. Run `doctor` while the home is stopped. Every
+home walk rejects symlinks. The browser address keeps the check off an
+installed factory's `127.0.0.1:43123`. Run `doctor` while the home is stopped. Every
 operator request needs both client environment variables.
 
 Lifecycle fixtures use a tiny temporary Git repository and the shell provider.

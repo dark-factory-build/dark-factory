@@ -535,6 +535,7 @@ func TestHardCleanupConvergesAfterObservedExit(t *testing.T) {
 // keeps retry viable: a lost one-shot exit event costs one bounded timeout,
 // after which the reaped state converges instead of retrying a closed kqueue.
 func TestHardCleanupRetriesConvergeAfterLostExitEvent(t *testing.T) {
+	shortenWait(t, &hardCleanupExitWait)
 	started := startedPTYChildForCleanup(t)
 	child := started.child
 	if err := child.cmd.Process.Kill(); err != nil {

@@ -100,13 +100,13 @@ func TestRunLivenessFailsAttemptThatNeverBecomesReady(t *testing.T) {
 	}
 	tick(firstOutputBudget)
 	run, found, err := fixture.store.Run(ctx, active.run.ID)
-	if err != nil || !found || run.Phase != kernel.RunFinalizing || run.Proposal == nil || run.Proposal.Code() != kernel.FailureProtocol || run.Proposal.Detail() != kernel.NeverStartedRunDetail {
+	if err != nil || !found || run.Phase != kernel.RunFinalizing || run.Proposal == nil || run.Proposal.Code() != kernel.FailureTransient || run.Proposal.Detail() != kernel.NeverStartedRunDetail {
 		t.Fatalf("never-ready run = %+v found=%v err=%v", run, found, err)
 	}
 }
 
-// A Codex run must call the attempt API first, so a TUI that paints without
-// one is stuck and is requeued as never started at the short budget.
+// A Claude or Codex run must call the attempt API first, so a TUI that paints
+// without one is stuck and is requeued as never started at the short budget.
 func TestRunLivenessFailsCallFirstAttemptThatPaintsWithoutACall(t *testing.T) {
 	fixture := newDispatchFixture(t)
 	active := prepareActiveAttempt(t, fixture, 211)

@@ -222,3 +222,22 @@ func TestOverseerSnapshotRequiresAnExactSourcePathForEachHandoff(t *testing.T) {
 		}
 	}
 }
+
+// An attempt-domain operator read must carry its attempt digest, or factoryd
+// could not tell a specialist's carrier from any other credential.
+func TestAttemptOperatorReadsCarryTheAttemptDigest(t *testing.T) {
+	for _, body := range []string{
+		`{"method":"attempt_snapshot","params":{}}`,
+		`{"method":"attempt_human_requests","params":{}}`,
+		`{"method":"attempt_task_read","params":{"task_id":"22222222222222222222222222222222","expected_revision":1}}`,
+		`{"method":"attempt_intake","params":{"action":"list"}}`,
+	} {
+		call, code := decodeCall(attemptDomain, testCredential('A'), []byte(body))
+		if _, attempt := call.AttemptDigest(); code != "" || !attempt {
+			t.Fatalf("%s: code=%q attempt=%v", body, code, attempt)
+		}
+		if _, code := decodeCall(operatorDomain, testCredential('A'), []byte(body)); code != RemoteForbidden {
+			t.Fatalf("%s accepted in the operator domain: %q", body, code)
+		}
+	}
+}

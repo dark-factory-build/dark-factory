@@ -299,8 +299,7 @@ func (current *connection) serve() {
 			if !ok {
 				if err := current.closeSubscription(); err != nil {
 					current.recordCleanup(err)
-					mapped := errorFrame(err)
-					current.sendError(subscriptionID, mapped.Code, mapped.Retryable)
+					current.fail(subscriptionID, err)
 				}
 				return
 			}
@@ -360,9 +359,7 @@ func (current *connection) serve() {
 				continue
 			}
 			if err := current.admit(frame.ID); err != nil {
-				mapped := errorFrame(err)
-				current.sendError(frame.ID, mapped.Code, mapped.Retryable)
-				if errors.Is(err, ErrRateLimited) {
+				if errors.Is(current.fail(frame.ID, err), ErrRateLimited) {
 					// The window admits the client again shortly; only a
 					// repeated id is a violation that ends the connection.
 					continue
@@ -387,13 +384,6 @@ func (current *connection) dispatch(frame browserprotocol.ControlFrame) bool {
 	switch body := frame.Body.(type) {
 	case browserprotocol.StateGet:
 		snapshot, snapshotErr := current.server.backend.StateSnapshot(ctx, current.principal.ClientID)
-		if ctx.Err() != nil {
-			// A read that outran its call budget is retryable busyness the
-			// client reconnects on, as the backend already classifies it; the
-			// raw context error would read as a permanent internal fault.
-			err = ErrRateLimited
-			break
-		}
 		if snapshotErr != nil {
 			err = snapshotErr
 			break
@@ -415,10 +405,6 @@ func (current *connection) dispatch(frame browserprotocol.ControlFrame) bool {
 		return true
 	case browserprotocol.HumanRequestDetailGet:
 		detail, backendErr := current.server.backend.HumanRequestDetail(ctx, current.principal.ClientID, body)
-		if ctx.Err() != nil {
-			err = ErrRateLimited
-			break
-		}
 		if backendErr != nil {
 			err = backendErr
 			break
@@ -430,10 +416,6 @@ func (current *connection) dispatch(frame browserprotocol.ControlFrame) bool {
 		payload, err = browserprotocol.EncodeHumanRequestDetail(frame.ID, detail)
 	case browserprotocol.TerminalTargetGet:
 		target, backendErr := current.server.backend.TerminalTarget(ctx, current.principal.ClientID, body)
-		if ctx.Err() != nil {
-			err = ErrRateLimited
-			break
-		}
 		if backendErr != nil {
 			err = backendErr
 			break
@@ -902,10 +884,6 @@ func (current *connection) dispatch(frame browserprotocol.ControlFrame) bool {
 			return false
 		}
 		subscription, backendErr := current.server.backend.WatchState(ctx, current.principal.ClientID, body.AfterHead)
-		if ctx.Err() != nil {
-			err = current.discardSubscription(subscription, ErrRateLimited)
-			break
-		}
 		if backendErr != nil {
 			err = current.discardSubscription(subscription, backendErr)
 			break
@@ -935,8 +913,7 @@ func (current *connection) dispatch(frame browserprotocol.ControlFrame) bool {
 		return false
 	}
 	if err != nil {
-		mapped := errorFrame(err)
-		current.sendError(frame.ID, mapped.Code, mapped.Retryable)
+		err = current.fail(frame.ID, err)
 		return !errors.Is(err, ErrUnauthorized) && !errors.Is(err, ErrSubscriptionUnresolved)
 	}
 	if current.write(payload) != nil {
@@ -1445,9 +1422,7 @@ func (current *connection) observe(frame browserprotocol.ControlFrame) {
 		payload, err = browserprotocol.EncodeHumanRequestCancelRunResult(frame.ID, result)
 	}
 	if err != nil {
-		mapped := errorFrame(err)
-		current.sendError(frame.ID, mapped.Code, mapped.Retryable)
-		if errors.Is(err, ErrUnauthorized) || errors.Is(err, errBackendResult) {
+		if err = current.fail(frame.ID, err); errors.Is(err, ErrUnauthorized) || errors.Is(err, errBackendResult) {
 			current.stop()
 		}
 		return
@@ -1455,6 +1430,20 @@ func (current *connection) observe(frame browserprotocol.ControlFrame) {
 	if write(payload) != nil {
 		current.stop()
 	}
+}
+
+// fail answers one request with err, classified here once for every method:
+// the backend names its own errors, and anything unnamed is internal. It
+// returns both the classified and the original error, so the caller still
+// sees its own transport causes (an unresolved subscription) beside them.
+func (current *connection) fail(id string, err error) error {
+	classified := err
+	if classifier, ok := current.server.backend.(ErrorClassifier); ok {
+		classified = classifier.ClassifyError(err)
+	}
+	mapped := errorFrame(classified)
+	current.sendError(id, mapped.Code, mapped.Retryable)
+	return errors.Join(classified, err)
 }
 
 func (current *connection) sendError(id string, code browserprotocol.ErrorCode, retryable bool) {

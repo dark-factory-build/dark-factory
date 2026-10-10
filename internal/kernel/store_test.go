@@ -3,6 +3,7 @@ package kernel
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -14,6 +15,7 @@ import (
 )
 
 func TestEntityCreationReconciliationAndRelationships(t *testing.T) {
+	t.Parallel()
 	store, _ := newTestStore(t)
 	defer store.Close()
 	ctx := context.Background()
@@ -126,6 +128,7 @@ func TestEntityCreationReconciliationAndRelationships(t *testing.T) {
 }
 
 func TestProviderLaunchControlsAtAgentCreation(t *testing.T) {
+	t.Parallel()
 	store, _ := newTestStore(t)
 	defer store.Close()
 	ctx := context.Background()
@@ -181,6 +184,7 @@ func TestProviderLaunchControlsAtAgentCreation(t *testing.T) {
 }
 
 func TestLegacyClaudeUltraAgentRemainsReadable(t *testing.T) {
+	t.Parallel()
 	store, _ := newTestStore(t)
 	defer store.Close()
 	ctx := context.Background()
@@ -205,6 +209,7 @@ func TestLegacyClaudeUltraAgentRemainsReadable(t *testing.T) {
 }
 
 func TestStateAndInvalidationRollbackTogether(t *testing.T) {
+	t.Parallel()
 	t.Run("state failure has no invalidation", func(t *testing.T) {
 		store, _ := newTestStore(t)
 		defer store.Close()
@@ -258,6 +263,7 @@ func TestStateAndInvalidationRollbackTogether(t *testing.T) {
 }
 
 func TestDispatchCapacityRevisionGuards(t *testing.T) {
+	t.Parallel()
 	store, _ := newTestStore(t)
 	defer store.Close()
 	ctx := context.Background()
@@ -305,6 +311,7 @@ func TestDispatchCapacityRevisionGuards(t *testing.T) {
 // factory floor advances and exactly EventRetentionLimit rows remain,
 // contiguous ending at the new head.
 func TestInvalidationRetentionPrunesToLimit(t *testing.T) {
+	t.Parallel()
 	store, _ := newTestStore(t)
 	defer store.Close()
 	ctx := context.Background()
@@ -312,11 +319,34 @@ func TestInvalidationRetentionPrunesToLimit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for index := 0; index < EventRetentionLimit+1; index++ {
-		state, err = store.SetDispatch(ctx, state.Revision, !state.DispatchEnabled, mustTime(t, int64(index+2)))
-		if err != nil {
+	// Seed the first EventRetentionLimit factory mutations in one writer
+	// transaction with the writes setFactory makes (validating the whole log
+	// per mutation is quadratic); the public mutation below validates the
+	// seeded log and crosses the limit.
+	seed, err := store.beginValidatedWrite(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer seed.Close()
+	for index := 0; index < EventRetentionLimit; index++ {
+		revision := int64(index + 2)
+		if _, err := seed.connection.ExecContext(ctx, `UPDATE factory SET dispatch_enabled = 1 - dispatch_enabled, revision = ?, updated_at_ms = ? WHERE singleton = 1`, revision, revision); err != nil {
 			t.Fatalf("mutation %d: %v", index, err)
 		}
+		if err := appendInvalidations(ctx, seed.connection, mustTime(t, revision), []pendingInvalidation{{kind: EntityFactory, id: factoryEntityID[:], revision: revision}}); err != nil {
+			t.Fatalf("mutation %d: %v", index, err)
+		}
+	}
+	if err := seed.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	seed.Close()
+	if state, err = store.Factory(ctx); err != nil {
+		t.Fatal(err)
+	}
+	state, err = store.SetDispatch(ctx, state.Revision, !state.DispatchEnabled, mustTime(t, EventRetentionLimit+2))
+	if err != nil {
+		t.Fatal(err)
 	}
 	if state.Head.Int64() != EventRetentionLimit+1 || state.Floor.Int64() != 2 {
 		t.Fatalf("retention metadata = %+v", state)
@@ -328,6 +358,7 @@ func TestInvalidationRetentionPrunesToLimit(t *testing.T) {
 }
 
 func TestInvalidationLogRetainsExactChangeAndRunChronology(t *testing.T) {
+	t.Parallel()
 	store, _, _ := admittedWorkerRun(t)
 	defer store.Close()
 	invalidations := invalidationsAfter(t, store, mustSequence(t, 0))
@@ -349,6 +380,7 @@ func TestInvalidationLogRetainsExactChangeAndRunChronology(t *testing.T) {
 }
 
 func TestFactoryMutationRequiresExactlyOneRow(t *testing.T) {
+	t.Parallel()
 	store, _ := newTestStore(t)
 	defer store.Close()
 	if _, err := store.writer.Exec(`CREATE TRIGGER suppress_factory_update BEFORE UPDATE OF dispatch_enabled ON factory BEGIN SELECT RAISE(IGNORE); END`); err != nil {
@@ -367,6 +399,7 @@ func TestFactoryMutationRequiresExactlyOneRow(t *testing.T) {
 }
 
 func TestReadTransactionPinsSnapshotBeforeConcurrentWrite(t *testing.T) {
+	t.Parallel()
 	store, _ := newTestStore(t)
 	defer store.Close()
 	ctx := context.Background()
@@ -396,6 +429,7 @@ func TestReadTransactionPinsSnapshotBeforeConcurrentWrite(t *testing.T) {
 }
 
 func TestSnapshotInvalidationLogAgreementAndPrivateStateBoundary(t *testing.T) {
+	t.Parallel()
 	store, _ := newTestStore(t)
 	defer store.Close()
 	ctx := context.Background()
@@ -461,6 +495,7 @@ func TestSnapshotInvalidationLogAgreementAndPrivateStateBoundary(t *testing.T) {
 }
 
 func TestSnapshotRejectsCapPlusOne(t *testing.T) {
+	t.Parallel()
 	store, _ := newTestStore(t)
 	defer store.Close()
 	tx, err := store.writer.Begin()
@@ -492,6 +527,7 @@ func TestSnapshotRejectsCapPlusOne(t *testing.T) {
 }
 
 func TestCorruptControlsFailClosedOnReadAndReopen(t *testing.T) {
+	t.Parallel()
 	tests := map[string]func(*testing.T, *Store){
 		"boolean": func(t *testing.T, store *Store) {
 			corruptSQL(t, store, `UPDATE factory SET dispatch_enabled = 2`)
@@ -541,6 +577,7 @@ func TestCorruptControlsFailClosedOnReadAndReopen(t *testing.T) {
 }
 
 func TestOpenRefusesHiddenCorruptionWithoutFilesystemMutation(t *testing.T) {
+	t.Parallel()
 	tests := map[string]string{
 		"agent provider":     `UPDATE agents SET provider = 'unknown'`,
 		"task incarnation":   `UPDATE tasks SET incarnation_id = zeroblob(15)`,
@@ -570,6 +607,7 @@ func TestOpenRefusesHiddenCorruptionWithoutFilesystemMutation(t *testing.T) {
 }
 
 func TestOpenPromotesOnlyExactFreshRollbackDatabaseToWAL(t *testing.T) {
+	t.Parallel()
 	image, err := NewDatabaseImage(context.Background(), FactoryConfig{DispatchEnabled: true, Capacity: 7}, mustTime(t, 91))
 	if err != nil {
 		t.Fatal(err)
@@ -609,6 +647,7 @@ func TestOpenPromotesOnlyExactFreshRollbackDatabaseToWAL(t *testing.T) {
 }
 
 func TestOpenRefusesRetainedRollbackDatabaseWithoutMutation(t *testing.T) {
+	t.Parallel()
 	store, path := newTestStore(t)
 	project := NewProject{ID: projectID(t, 91), Name: "retained", Root: filepath.Join(t.TempDir(), "project")}
 	if _, err := store.CreateProject(context.Background(), project, mustTime(t, 2)); err != nil {
@@ -636,6 +675,7 @@ func TestOpenRefusesRetainedRollbackDatabaseWithoutMutation(t *testing.T) {
 }
 
 func TestSnapshotAndPublicReadRejectHiddenControlsInPinnedSnapshot(t *testing.T) {
+	t.Parallel()
 	tests := map[string]struct {
 		corrupt string
 		repair  string
@@ -685,6 +725,7 @@ func TestSnapshotAndPublicReadRejectHiddenControlsInPinnedSnapshot(t *testing.T)
 }
 
 func TestCapacityAllowsOneOverseerBeyondWorkersAndRejectsExcessSnapshots(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, _, _ := runningOrchestratorRun(t)
 	defer store.Close()
@@ -730,6 +771,7 @@ func TestCapacityAllowsOneOverseerBeyondWorkersAndRejectsExcessSnapshots(t *test
 }
 
 func TestChangeCommitmentSchemaUsesFrozenBounds(t *testing.T) {
+	t.Parallel()
 	store, _ := newTestStore(t)
 	defer store.Close()
 	ctx := context.Background()
@@ -834,6 +876,11 @@ func corruptSQL(t *testing.T, store *Store, statement string, args ...any) {
 		t.Fatal(err)
 	}
 	defer connection.Close()
+	corruptSQLOnConnection(t, connection, statement, args...)
+}
+
+func corruptSQLOnConnection(t *testing.T, connection *sql.Conn, statement string, args ...any) {
+	t.Helper()
 	// The fixed connection set cannot replace a poisoned connection, so
 	// restore the pragmas instead of discarding it.
 	defer connection.ExecContext(context.Background(), `PRAGMA ignore_check_constraints = OFF; PRAGMA foreign_keys = ON`)
@@ -970,6 +1017,7 @@ func invalidationsAfter(t *testing.T, store *Store, after EventSequence) []struc
 }
 
 func TestExplicitFactoryControlInvalidatesEarlierPauseAuthority(t *testing.T) {
+	t.Parallel()
 	for _, duringPause := range []bool{false, true} {
 		t.Run(fmt.Sprint(duringPause), func(t *testing.T) {
 			ctx := context.Background()

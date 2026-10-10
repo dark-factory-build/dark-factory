@@ -148,7 +148,7 @@ func (daemon *Daemon) Intake(ctx context.Context, input api.IntakeInput) api.Int
 			}
 			return api.IntakeResult{State: "withdrawn", AcceptanceID: id.String(), TaskID: accepted.TaskID.String()}
 		}
-		task, importErr := daemon.importAcceptedIntake(ctx, accepted)
+		task, importErr := daemon.importAcceptedIntake(ctx, accepted, true, nil)
 		if importErr != nil {
 			return intakeFailure(importErr)
 		}
@@ -332,7 +332,13 @@ func (daemon *Daemon) exactIntakeIssue(ctx context.Context, source kernel.Intake
 	}
 	return page.Issues[0], nil
 }
-func (daemon *Daemon) importAcceptedIntake(ctx context.Context, accepted kernel.IntakeAcceptance) (kernel.Task, error) {
+
+// importAcceptedIntake imports an accepted issue whose content still matches.
+// A tick passes the issue it just listed, so it is not fetched again.
+// The issue owns its task's liveness: a task that ended automatically is
+// retried within kernel.IntakeRetryLimit. The operator's import retries a failed or
+// cancelled task unbounded; the kernel's import lifts a withdrawal.
+func (daemon *Daemon) importAcceptedIntake(ctx context.Context, accepted kernel.IntakeAcceptance, operator bool, listed *maintainer.Issue) (kernel.Task, error) {
 	sources, err := daemon.store.ProjectIntakeSources(ctx, accepted.ProjectID)
 	if err != nil {
 		return kernel.Task{}, err
@@ -341,8 +347,10 @@ func (daemon *Daemon) importAcceptedIntake(ctx context.Context, accepted kernel.
 		if !source.Enabled || source.LinearTeamID != accepted.Snapshot.LinearTeamID || source.GitHubRepositoryID != accepted.Snapshot.GitHubRepositoryID || source.TargetRepositoryID != accepted.RepositoryID {
 			continue
 		}
-		issue, err := daemon.exactIntakeIssue(ctx, source, accepted.Snapshot.IssueNumber)
-		if err != nil {
+		issue := maintainer.Issue{}
+		if listed != nil && listed.Number == accepted.Snapshot.IssueNumber {
+			issue = *listed
+		} else if issue, err = daemon.exactIntakeIssue(ctx, source, accepted.Snapshot.IssueNumber); err != nil {
 			return kernel.Task{}, err
 		}
 		snapshot := intakeSnapshot(source, issue)
@@ -355,6 +363,24 @@ func (daemon *Daemon) importAcceptedIntake(ctx context.Context, accepted kernel.
 		}
 		priority := kernel.IntakePriority(source, issue.Labels)
 		task, err := daemon.store.ImportIntakeAcceptanceWithPriority(ctx, accepted.ID, at, source, priority)
+		if err == nil && (task.Status == kernel.TaskFailed || task.Status == kernel.TaskCancelled) {
+			retried, retryErr := task, prepareTaskRetry(ctx, daemon.store, task.ID, task.Revision, kernel.AgentID{})
+			if retryErr == nil && operator {
+				retried, retryErr = daemon.store.RetryTaskForOperator(ctx, task.ID, task.Revision, kernel.AgentID{}, at)
+			} else if retryErr == nil {
+				retried, retryErr = daemon.store.RetryIntakeTask(ctx, task.ID, task.Revision, at)
+			}
+			// A tick that cannot retry (an operator's cancel, the bound, a race)
+			// is not an intake failure; the task stays as it is.
+			switch {
+			case retryErr == nil:
+				task = retried
+			case operator:
+				err = retryErr
+			case !errors.Is(retryErr, kernel.ErrConflict) && !errors.Is(retryErr, kernel.ErrRevisionConflict):
+				LogFactoryd(daemon.log, "factoryd: intake retry of task %s: %v\n", task.ID, retryErr)
+			}
+		}
 		if err == nil && task.Status == kernel.TaskQueued && task.Priority != priority {
 			task, err = daemon.store.UpdateTaskForOperator(ctx, task.ID, task.Revision, kernel.TaskPatch{Priority: &priority}, at)
 		}
@@ -420,6 +446,9 @@ func (daemon *Daemon) previewIntake(ctx context.Context, source kernel.IntakeSou
 	defer cancel()
 	result := api.IntakeResult{SourceID: source.ID.String(), State: "ok", ReviewedRevision: uint64(source.Revision.Int64()), Candidates: []api.IntakeCandidate{}, ImportedTasks: []string{}}
 	failure := func(err error) api.IntakeResult {
+		if tick { // the poll keeps only the state; keep the cause visible
+			LogFactoryd(daemon.log, "factoryd: intake source %s: %v\n", source.ID, err)
+		}
 		result.State = intakeFailure(err).State
 		return result
 	}
@@ -453,7 +482,7 @@ func (daemon *Daemon) previewIntake(ctx context.Context, source kernel.IntakeSou
 		result.AcceptanceProgress = true
 		for index, accepted := range pending {
 			result.AcceptanceCursor = accepted.ID.String()
-			task, err := daemon.importAcceptedIntake(ctx, accepted)
+			task, err := daemon.importAcceptedIntake(ctx, accepted, false, nil)
 			if err == nil {
 				result.ImportedTasks = append(result.ImportedTasks, task.ID.String())
 			} else if !errors.Is(err, kernel.ErrConflict) && !errors.Is(err, kernel.ErrRevisionConflict) {
@@ -510,7 +539,7 @@ func (daemon *Daemon) previewIntake(ctx context.Context, source kernel.IntakeSou
 			if err != nil {
 				return failure(err)
 			}
-			task, err := daemon.importAcceptedIntake(ctx, accepted)
+			task, err := daemon.importAcceptedIntake(ctx, accepted, false, &issue)
 			if err != nil {
 				return failure(err)
 			}
@@ -522,15 +551,15 @@ func (daemon *Daemon) previewIntake(ctx context.Context, source kernel.IntakeSou
 		if tick && found && reason == string(kernel.IntakeAlreadyAccepted) {
 			_, imported, err := daemon.store.Task(ctx, accepted.TaskID)
 			if err != nil {
-				return intakeFailure(err)
+				return failure(err)
 			}
 			if imported || len(result.ImportedTasks) < int(source.AdmissionLimit) {
-				task, err := daemon.importAcceptedIntake(ctx, accepted)
+				task, err := daemon.importAcceptedIntake(ctx, accepted, false, &issue)
 				if err == nil && !imported {
 					result.ImportedTasks = append(result.ImportedTasks, task.ID.String())
 					candidate.Reason = "imported"
 				} else if err != nil && !errors.Is(err, kernel.ErrConflict) && !errors.Is(err, kernel.ErrRevisionConflict) {
-					return intakeFailure(err)
+					return failure(err)
 				}
 			}
 		}

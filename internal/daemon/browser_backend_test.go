@@ -323,7 +323,7 @@ func TestBrowserProjectLimitsPreserveUsedAndRejectStaleEdits(t *testing.T) {
 	if err != nil || !found || current.RunBudgetLimit != 3 || current.RunsUsed != 0 || current.MaxRunSeconds != 60 || updated.Revision != decimalRevision(current.Revision) {
 		t.Fatalf("updated project = %+v, result=%+v, found=%v, err=%v", current, updated, found, err)
 	}
-	if _, err := fixture.backend.SetProjectLimits(ctx, rawBrowserClient(fixture.client.ID), browserprotocol.ProjectLimits{ProjectID: project.ID.String(), ExpectedRevision: decimalRevision(project.Revision), RunBudget: 1, MaxRunSeconds: 60}); !errors.Is(err, browser.ErrStale) {
+	if _, err := fixture.backend.SetProjectLimits(ctx, rawBrowserClient(fixture.client.ID), browserprotocol.ProjectLimits{ProjectID: project.ID.String(), ExpectedRevision: decimalRevision(project.Revision), RunBudget: 1, MaxRunSeconds: 60}); !errors.Is(mapBrowserError(err), browser.ErrStale) {
 		t.Fatalf("stale browser edit = %v", err)
 	}
 	result, err := fixture.backend.SetProjectLimits(ctx, rawBrowserClient(fixture.client.ID), browserprotocol.ProjectLimits{ProjectID: project.ID.String(), ExpectedRevision: decimalRevision(current.Revision), RunBudget: 0, MaxRunSeconds: 0})
@@ -360,7 +360,7 @@ func TestBrowserAdapterObserveOnlyCannotReadPrivateDetail(t *testing.T) {
 	requestID, _ := kernel.HumanRequestIDFromBytes(adapterID(t, 90))
 	revision, _ := kernel.NewRevision(1)
 	_, err := fixture.backend.HumanRequestDetail(context.Background(), rawBrowserClient(fixture.client.ID), browserprotocol.HumanRequestDetailGet{RequestID: requestID.String(), ExpectedRevision: decimalRevision(revision)})
-	if !errors.Is(err, browser.ErrUnauthorized) {
+	if !errors.Is(mapBrowserError(err), browser.ErrUnauthorized) {
 		t.Fatalf("observe-only private detail = %v", err)
 	}
 }
@@ -417,7 +417,7 @@ func TestBrowserAdapterTerminalTargetProjectsExactActiveAndNoTarget(t *testing.T
 	}
 	stale := noTargetRequest
 	stale.ExpectedHead++
-	if _, err := fixture.backend.TerminalTarget(context.Background(), rawBrowserClient(fixture.client.ID), stale); !errors.Is(err, browser.ErrStale) {
+	if _, err := fixture.backend.TerminalTarget(context.Background(), rawBrowserClient(fixture.client.ID), stale); !errors.Is(mapBrowserError(err), browser.ErrStale) {
 		t.Fatalf("stale head error = %v", err)
 	}
 }
@@ -593,7 +593,7 @@ func TestBrowserAdapterSubscriptionReloadsAuthorityAndJoins(t *testing.T) {
 	if err != nil || revoked.RevokedAt == nil {
 		t.Fatal(err)
 	}
-	if _, err := fixture.backend.WatchState(context.Background(), rawBrowserClient(fixture.client.ID), decimalSequence(state.Head)); !errors.Is(err, browser.ErrUnauthorized) {
+	if _, err := fixture.backend.WatchState(context.Background(), rawBrowserClient(fixture.client.ID), decimalSequence(state.Head)); !errors.Is(mapBrowserError(err), browser.ErrUnauthorized) {
 		t.Fatalf("post-revoke subscription = %v", err)
 	}
 }
@@ -610,7 +610,7 @@ func TestBrowserAdapterWatchRefusesAnAfterHeadAboveTheDurableHead(t *testing.T) 
 		t.Fatal(err)
 	}
 	head := decimalSequence(state.Head)
-	if _, err := fixture.backend.WatchState(context.Background(), rawBrowserClient(fixture.client.ID), head+1); !errors.Is(err, browser.ErrStale) {
+	if _, err := fixture.backend.WatchState(context.Background(), rawBrowserClient(fixture.client.ID), head+1); !errors.Is(mapBrowserError(err), browser.ErrStale) {
 		t.Fatalf("future after_head = %v, want ErrStale", err)
 	}
 	// Nothing is registered and no producer is started. A store read that
@@ -714,7 +714,7 @@ func TestDaemonCloseJoinsHijackedBrowserConnectionsBeforeStoreClose(t *testing.T
 	if _, err := store.Factory(context.Background()); err != nil {
 		t.Fatalf("browser close prematurely closed Store: %v", err)
 	}
-	if _, err := daemon.ListenBrowser("127.0.0.1:0", []string{adapterOrigin}); !errors.Is(err, browser.ErrUnauthorized) {
+	if _, err := daemon.ListenBrowser("127.0.0.1:0", []string{adapterOrigin}); !errors.Is(mapBrowserError(err), browser.ErrUnauthorized) {
 		t.Fatalf("browser listener after daemon close = %v", err)
 	}
 }
@@ -1165,7 +1165,7 @@ func TestBrowserRepositoryReadinessUsesPrivateOperatorBoundary(t *testing.T) {
 		_ = connection.Close(websocket.StatusNormalClosure, "")
 		result, err := fixture.backend.MutateRepository(ctx, rawBrowserClient(fixture.client.ID), browserprotocol.RepositoryMutate{Action: "fetch", ID: kernel.RepositoryID(project.ID).String()})
 		if !admin {
-			if !errors.Is(err, browser.ErrUnauthorized) {
+			if !errors.Is(mapBrowserError(err), browser.ErrUnauthorized) {
 				t.Fatalf("unprivileged readiness: %v", err)
 			}
 			continue

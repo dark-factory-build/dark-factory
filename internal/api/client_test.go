@@ -38,12 +38,6 @@ type wireFixture struct {
 	once      sync.Once
 }
 
-func (client *OperatorClient) Health(ctx context.Context) (HealthStatus, error) {
-	var result HealthStatus
-	err := client.client.call(ctx, "health", struct{}{}, &result)
-	return result, err
-}
-
 func newWireFixture(t testing.TB, bearer credential, response func(net.Conn, []byte) error) *wireFixture {
 	t.Helper()
 	directory := privateTestDirectory(t)
@@ -320,7 +314,7 @@ func TestOperatorClientMethodsUseExactPrivateWire(t *testing.T) {
 		invoke   func(*OperatorClient) error
 	}{
 		{name: "health", response: successResponse(`{"ready":true}`), request: `{"method":"health","params":{}}`, invoke: func(client *OperatorClient) error {
-			status, err := client.Health(context.Background())
+			status, err := client.Health(context.Background(), "")
 			if err == nil && !status.Ready {
 				return errors.New("health was not ready")
 			}
@@ -739,7 +733,7 @@ func TestResponseFramingIsExactBoundedAndStrict(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			_, err = client.Health(context.Background())
+			_, err = client.Health(context.Background(), "")
 			if test.remote != "" {
 				var remote *RemoteError
 				if !errors.As(err, &remote) || remote.Code() != test.remote {
@@ -907,7 +901,7 @@ func TestDeadlineClosesOneShotConnectionPromptly(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 	started := time.Now()
-	_, err = client.Health(ctx)
+	_, err = client.Health(ctx, "")
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("deadline error = %v", err)
 	}
@@ -942,7 +936,7 @@ func TestClientFormattingAndErrorsNeverExposeBearerOrPaths(t *testing.T) {
 			t.Fatalf("client formatting exposed private value: %s", formatted)
 		}
 	}
-	_, err = client.Health(context.Background())
+	_, err = client.Health(context.Background(), "")
 	if err == nil {
 		t.Fatal("remote refusal succeeded")
 	}
@@ -1112,7 +1106,7 @@ func TestTokenAndSocketPathsFailClosed(t *testing.T) {
 		if err := os.Rename(replacement, token); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := client.Health(context.Background()); !errors.Is(err, ErrInvalidClient) {
+		if _, err := client.Health(context.Background(), ""); !errors.Is(err, ErrInvalidClient) {
 			t.Fatalf("replacement token = %v", err)
 		}
 	})
@@ -1137,7 +1131,7 @@ func TestTokenAndSocketPathsFailClosed(t *testing.T) {
 			t.Fatal(err)
 		}
 		writeTestToken(t, token, bearer)
-		if _, err := client.Health(context.Background()); !errors.Is(err, ErrInvalidClient) {
+		if _, err := client.Health(context.Background(), ""); !errors.Is(err, ErrInvalidClient) {
 			t.Fatalf("replacement token parent = %v", err)
 		}
 	})
@@ -1345,7 +1339,7 @@ func TestSocketParentSwapAfterDialIsRejected(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := client.Health(context.Background()); !errors.Is(err, ErrInvalidClient) {
+	if _, err := client.Health(context.Background(), ""); !errors.Is(err, ErrInvalidClient) {
 		t.Fatalf("socket parent swap = %v", err)
 	}
 	if err := <-done; err != nil {
@@ -1387,7 +1381,7 @@ func TestClientSurvivesDaemonSocketRebind(t *testing.T) {
 		return done
 	}
 	firstDone := serveHealth(listener)
-	if _, err := client.Health(context.Background()); err != nil {
+	if _, err := client.Health(context.Background(), ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := <-firstDone; err != nil {
@@ -1397,7 +1391,7 @@ func TestClientSurvivesDaemonSocketRebind(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Between generations the path is absent: retryable, not a broken client.
-	if _, err := client.Health(context.Background()); !errors.Is(err, ErrTransport) {
+	if _, err := client.Health(context.Background(), ""); !errors.Is(err, ErrTransport) {
 		t.Fatalf("absent socket = %v, want ErrTransport", err)
 	}
 	replacement, err := net.ListenUnix("unix", &net.UnixAddr{Name: socket, Net: "unix"})
@@ -1409,11 +1403,111 @@ func TestClientSurvivesDaemonSocketRebind(t *testing.T) {
 		t.Fatal(err)
 	}
 	secondDone := serveHealth(replacement)
-	if _, err := client.Health(context.Background()); err != nil {
+	if _, err := client.Health(context.Background(), ""); err != nil {
 		t.Fatalf("health after daemon socket rebind = %v", err)
 	}
 	if err := <-secondDone; err != nil {
 		t.Fatal(err)
+	}
+}
+
+// A release restart drains the old daemon's in-flight request as unavailable,
+// unbinds the socket, and leaves the path absent until the new daemon binds.
+// One attempt call issued into that restart returns the new daemon's answer.
+func TestAttemptCallWaitsOutDaemonRestart(t *testing.T) {
+	bearer := testCredential('R')
+	directory := privateTestDirectory(t)
+	token := filepath.Join(directory, "token")
+	writeTestToken(t, token, bearer)
+	t.Setenv(attemptTokenFileEnv, token)
+	old, socket := testListener(t, directory)
+	client, err := NewAttemptClientFromEnvironment(socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Like factoryd, the old generation unbinds before it drains.
+	serve := func(listener *net.UnixListener, body string, beforeReply func() error) error {
+		connection, err := listener.Accept()
+		if err != nil {
+			return err
+		}
+		defer connection.Close()
+		if _, err := readTestFrame(connection); err != nil {
+			return err
+		}
+		if err := requireEOF(connection); err != nil {
+			return err
+		}
+		if err := beforeReply(); err != nil {
+			return err
+		}
+		return writeTestResponse(connection, wireAttemptDomain, body)
+	}
+	const outage = time.Second
+	// The new generation keeps listening after it answers: the client
+	// revalidates the socket once the reply is read.
+	replacements := make(chan *net.UnixListener, 1)
+	defer func() {
+		select {
+		case replacement := <-replacements:
+			replacement.Close()
+		default:
+		}
+	}()
+	done := make(chan error, 1)
+	go func() {
+		if err := serve(old, `{"ok":false,"error":"unavailable"}`, old.Close); err != nil {
+			done <- err
+			return
+		}
+		// A run that starts mid-restart still gets a client.
+		if _, err := NewAttemptClientFromEnvironment(socket); err != nil {
+			done <- err
+			return
+		}
+		time.Sleep(outage)
+		replacement, err := net.ListenUnix("unix", &net.UnixAddr{Name: socket, Net: "unix"})
+		if err != nil {
+			done <- err
+			return
+		}
+		replacements <- replacement
+		// factoryd proves its binding before it makes the socket private.
+		time.Sleep(10 * restartRetryInterval)
+		if err := os.Chmod(socket, 0o600); err != nil {
+			done <- err
+			return
+		}
+		done <- serve(replacement, successResponse(`{"task":"after restart"}`), func() error { return nil })
+	}()
+	started := time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), RestartRetryWindow)
+	defer cancel()
+	task, err := client.Task(ctx)
+	if err != nil || task.Task != "after restart" {
+		t.Fatalf("task across restart = %+v, %v", task, err)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("call waited %v across a %v outage; bound %v", time.Since(started), outage, RestartRetryWindow)
+}
+
+// A caller's deadline still ends a call that is waiting out a restart, and
+// the call reports the deadline rather than the outage.
+func TestAttemptRestartRetryHonorsDeadline(t *testing.T) {
+	directory := privateTestDirectory(t)
+	token := filepath.Join(directory, "token")
+	writeTestToken(t, token, testCredential('D'))
+	t.Setenv(attemptTokenFileEnv, token)
+	client, err := NewAttemptClientFromEnvironment(filepath.Join(directory, "api.sock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*restartRetryInterval/2)
+	defer cancel()
+	if _, err := client.Task(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("deadline during restart = %v", err)
 	}
 }
 
@@ -1527,7 +1621,7 @@ func TestFocusedClientCallsDoNotRetainGoroutinesOrFDs(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := client.Health(context.Background()); err != nil {
+		if _, err := client.Health(context.Background(), ""); err != nil {
 			t.Fatal(err)
 		}
 		<-fixture.request

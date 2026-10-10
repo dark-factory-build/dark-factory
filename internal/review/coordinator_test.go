@@ -19,6 +19,7 @@ func (s *memoryStore) Update(_ context.Context, op Operation) error {
 	s.values = append(s.values, op)
 	return nil
 }
+func (s *memoryStore) Blocked(context.Context, uint64, string) (bool, error) { return false, nil }
 func (s *memoryStore) CreateRetry(_ context.Context, failed, retry Operation) error {
 	for index := len(s.values) - 1; index >= 0; index-- {
 		if s.values[index].ID == failed.ID {
@@ -34,13 +35,16 @@ func (s *memoryStore) CreateRetry(_ context.Context, failed, retry Operation) er
 }
 
 type fakeBackend struct {
-	reviews             int
-	killed              bool
-	submitErr           error
-	event               string
-	submitted, enqueued bool
-	merge               Merge
-	storedPull          Request
+	reviews         int
+	killed          bool
+	submitErr       error
+	event           string
+	submitted       bool
+	enqueues        int
+	enqueueAttempts int
+	enqueueErr      error
+	observeErr      error
+	pull            *Pull
 }
 
 func (b *fakeBackend) CloneReadOnly(context.Context, Request) (string, func(), error) {
@@ -61,15 +65,30 @@ func (b *fakeBackend) Submit(context.Context, Operation, Verdict) error {
 	b.submitted = true
 	return b.submitErr
 }
-func (b *fakeBackend) Enqueue(context.Context, Operation) error { b.enqueued = true; return nil }
+func (b *fakeBackend) Enqueue(context.Context, Operation) error {
+	b.enqueueAttempts++
+	if b.enqueueErr == nil {
+		b.enqueues++
+	}
+	return b.enqueueErr
+}
 func (b *fakeBackend) Observe(context.Context, string) (Receipt, error) {
 	return Receipt{State: "missing"}, nil
 }
 func (b *fakeBackend) StoredPull(context.Context, uint64, string) (Request, error) {
-	return b.storedPull, nil
+	return Request{}, nil
 }
-func (b *fakeBackend) ObserveMerge(context.Context, Operation) (Merge, error) {
-	return b.merge, nil
+
+// ObservePull defaults to the pull request open at the operation's head,
+// mergeable, unqueued and with every check passed.
+func (b *fakeBackend) ObservePull(_ context.Context, op Operation) (Pull, error) {
+	if b.observeErr != nil {
+		return Pull{}, b.observeErr
+	}
+	if b.pull == nil {
+		return Pull{Head: op.Request.Head, State: "open", Checks: []string{"required=success"}}, nil
+	}
+	return *b.pull, nil
 }
 
 type observedBackend struct {
@@ -89,7 +108,7 @@ func TestStartPersistsBeforeProviderAndEnqueuesExactHead(t *testing.T) {
 	store, backend := &memoryStore{}, &fakeBackend{}
 	c := Coordinator{Store: store, Backend: backend, Now: func() time.Time { return time.Unix(10, 0) }}
 	op, err := c.Start(context.Background(), reviewRequest())
-	if err != nil || op.State != "enqueued" || op.EnqueueID == "" || op.EnqueueID == op.ID || !backend.submitted || !backend.enqueued {
+	if err != nil || op.State != "enqueued" || op.Enqueues != 1 || !backend.submitted || backend.enqueues != 1 {
 		t.Fatalf("operation=%+v err=%v backend=%+v", op, err, backend)
 	}
 	if len(store.values) < 1 || store.values[0].State != "running" {
@@ -129,7 +148,7 @@ func TestRetryRerunsTheSameExactHeadAfterProviderLaunchFailure(t *testing.T) {
 	}
 	backend.killed = false
 	second, err := c.Retry(context.Background(), first)
-	if err != nil || second.State != "enqueued" || second.Request.Head != first.Request.Head || !backend.enqueued {
+	if err != nil || second.State != "enqueued" || second.Request.Head != first.Request.Head || backend.enqueues != 1 {
 		t.Fatalf("retry operation=%+v err=%v backend=%+v", second, err, backend)
 	}
 	if _, err := c.Retry(context.Background(), first); err == nil {
@@ -172,7 +191,7 @@ func TestSubmitResponseLossIsReconciledBeforeEnqueue(t *testing.T) {
 	store := &memoryStore{}
 	c := Coordinator{Store: store, Backend: backend, Now: time.Now}
 	op, err := c.Start(context.Background(), request)
-	if err != nil || op.State != "enqueued" || !op.Submitted || backend.submitted == false || !backend.enqueued {
+	if err != nil || op.State != "enqueued" || !op.Submitted || backend.submitted == false || backend.enqueues != 1 {
 		t.Fatalf("reconciled submit=%+v err=%v backend=%+v", op, err, backend)
 	}
 }
@@ -188,192 +207,252 @@ func TestRequestChangesResponseLossIsReconciledForRouting(t *testing.T) {
 	}
 }
 
-func TestObserveMergeMarksMergedAndEjectsOnceWithFailingChecks(t *testing.T) {
-	enqueued := Operation{ID: "op", EnqueueID: "enqueue", Request: reviewRequest(), State: "enqueued", Verdict: "allow", Submitted: true}
+type pollingBackend struct {
+	fakeBackend
+	pulls []Pull
+}
+
+func (b *pollingBackend) ObservePull(_ context.Context, op Operation) (Pull, error) {
+	pull := b.pulls[0]
+	if len(b.pulls) > 1 {
+		b.pulls = b.pulls[1:]
+	}
+	if pull.Head == "" {
+		pull.Head, pull.State = op.Request.Head, "open"
+	}
+	return pull, nil
+}
+
+// #1582: review waits for the published head's required checks. A red head
+// goes back to its author naming the failing tests, and spends no review.
+func TestReviewWaitsForTheHeadsRequiredChecks(t *testing.T) {
+	checksPoll = time.Millisecond
+	defer func() { checksPoll = time.Minute }()
+	conflicting, failed := false, Pull{Failing: []string{"required"}, Tests: strings.Split("--- FAIL: TestA (0.01s),1,2,3,4,5,6,7,8,9,10", ",")}
 	for _, test := range []struct {
-		merge Merge
-		state string
+		name    string
+		pulls   []Pull
+		age     time.Duration
+		state   string
+		reviews int
+		detail  string
 	}{
-		{merge: Merge{State: "ACTIVE_QUEUE", Open: true}, state: "enqueued"},
-		{merge: Merge{State: "MERGED_AFTER_ENQUEUE_ATTEMPT"}, state: "merged"},
-		{merge: Merge{State: "NOT_QUEUED"}, state: "closed"},
-		{merge: Merge{State: "NOT_QUEUED", Open: true, Failing: []string{"ci / go", "ci / ui"}}, state: "ejected"},
+		{name: "red after running", pulls: []Pull{{}, {Pending: true}, failed}, state: "ejected", detail: "Not reviewed: its checks failed. Exact head " + reviewRequest().Head + " cannot merge. Failing checks: required.\n- --- FAIL: TestA (0.01s)\n"},
+		{name: "green after running", pulls: []Pull{{Pending: true}, {Checks: []string{"required=success"}}}, state: "enqueued", reviews: 1},
+		{name: "no required check past the grace", pulls: []Pull{{}}, age: checksGrace, state: "enqueued", reviews: 1},
+		{name: "still running past the grace", pulls: []Pull{{Pending: true}, {Checks: []string{"required=success"}}}, age: checksGrace, state: "enqueued", reviews: 1},
+		{name: "conflict", pulls: []Pull{{Mergeable: &conflicting}}, state: "ejected", detail: "conflicts with main"},
+		{name: "head moved", pulls: []Pull{{Head: strings.Repeat("c", 40), State: "open"}}, state: "superseded"},
 	} {
-		store := &memoryStore{}
-		c := Coordinator{Store: store, Backend: &fakeBackend{merge: test.merge}, Now: func() time.Time { return time.Unix(20, 0) }}
-		op, err := c.ObserveMerge(context.Background(), enqueued)
-		if err != nil || op.State != test.state || op.RoutePending != (test.state == "ejected") || len(store.values) != map[bool]int{true: 0, false: 1}[test.state == "enqueued"] {
-			t.Fatalf("%+v: operation=%+v err=%v records=%d", test.merge, op, err, len(store.values))
+		backend := &pollingBackend{pulls: test.pulls}
+		c := Coordinator{Store: &memoryStore{}, Backend: backend, Now: time.Now}
+		op, err := c.Resume(context.Background(), Operation{ID: "op", Request: reviewRequest(), State: "running", CreatedAt: time.Now().Add(-test.age)})
+		if err != nil || op.State != test.state || backend.reviews != test.reviews || op.RoutePending != (test.state == "ejected") || !strings.Contains(op.Detail, test.detail) {
+			t.Fatalf("%s: operation=%+v err=%v reviews=%d", test.name, op, err, backend.reviews)
 		}
-		if test.state == "ejected" {
-			if !strings.Contains(op.Detail, "ci / go, ci / ui") || !strings.Contains(op.Detail, enqueued.Request.Head) {
-				t.Fatalf("ejection note = %q", op.Detail)
-			}
-			// The ejected head is no longer enqueued, so a later tick cannot eject it twice.
-			if _, err := c.ObserveMerge(context.Background(), op); err == nil {
-				t.Fatal("an ejected operation was observed again")
-			}
+		if strings.Contains(op.Detail, "\n- 10") {
+			t.Fatalf("%s: more than ten failing tests: %q", test.name, op.Detail)
 		}
 	}
 }
 
-// Merge-group checks run on the queue's merge commit, so an ejection with no
-// failing check on the head goes back to enqueuing once, never to the author,
-// and a second ejection of the same head fails for the overseer.
-func TestEjectionWithNoHeadFailureReenqueuesOnceThenEscalates(t *testing.T) {
-	enqueued := Operation{ID: "op", EnqueueID: "enqueue", Request: reviewRequest(), State: "enqueued", Verdict: "allow", Submitted: true}
-	store, backend := &memoryStore{}, &fakeBackend{merge: Merge{State: "NOT_QUEUED", Open: true}}
-	c := Coordinator{Store: store, Backend: backend, Now: func() time.Time { return time.Unix(20, 0) }}
-	op, err := c.ObserveMerge(context.Background(), enqueued)
-	if err != nil || op.State != "enqueued" || !op.Requeued || op.RoutePending || !backend.enqueued || op.EnqueueID == enqueued.EnqueueID || len(store.values) != 2 || store.values[0].State != "enqueuing" {
-		t.Fatalf("re-enqueue operation=%+v err=%v records=%+v", op, err, store.values)
-	}
-	again, err := c.ObserveMerge(context.Background(), op)
-	if err == nil || again.State != "failed" || again.Retryable || !again.RoutePending || !strings.Contains(again.Detail, "again") || !strings.Contains(again.Detail, op.Request.Head) {
-		t.Fatalf("second ejection=%+v err=%v", again, err)
-	}
-	// A failing check on the head itself still goes back to its author.
-	backend.merge.Failing = []string{"ci / go"}
-	if ejected, err := c.ObserveMerge(context.Background(), op); err != nil || ejected.State != "ejected" || !ejected.RoutePending || !strings.Contains(ejected.Detail, "Failing checks: ci / go.") {
-		t.Fatalf("head failure after re-enqueue=%+v err=%v", ejected, err)
-	}
-}
-
-// A merge-group run that failed on the code it built goes back to the author
-// with the run, job and failing tests, and the head is not re-enqueued; a
-// run lost to infrastructure is still re-enqueued exactly once (#1366).
-func TestFailedMergeGroupRunSendsCorrectionUnlessInfrastructure(t *testing.T) {
-	enqueued := Operation{ID: "op", EnqueueID: "enqueue", Request: reviewRequest(), State: "enqueued", Verdict: "allow", Submitted: true}
-	failed := &GroupRun{ID: 37527118828, URL: "https://github.com/o/r/actions/runs/37527118828", Conclusion: "failure", Jobs: []GroupJob{
-		{Name: "checks", Conclusion: "failure", Annotations: []string{"--- FAIL: TestDaemonServesTaskOnlyToLiveAttempt (0.41s)", "not ok 12 - board and shelves open peer views of one Library workspace"}},
+// Each pass decides from one observation of the pull request.
+func TestAdvanceDecidesFromOnePullObservation(t *testing.T) {
+	head := reviewRequest().Head
+	conflicting, group := false, &GroupRun{ID: 37527118828, URL: "https://github.com/o/r/actions/runs/37527118828", Conclusion: "failure", Jobs: []GroupJob{
+		{Name: "checks", Conclusion: "failure", Annotations: []string{"--- FAIL: TestDaemonServesTaskOnlyToLiveAttempt (0.41s)"}},
 	}}
-	store, backend := &memoryStore{}, &fakeBackend{merge: Merge{State: "NOT_QUEUED", Open: true, Group: failed}}
-	c := Coordinator{Store: store, Backend: backend, Now: func() time.Time { return time.Unix(20, 0) }}
-	op, err := c.ObserveMerge(context.Background(), enqueued)
-	if err != nil || op.State != "ejected" || !op.RoutePending || op.Requeued || backend.enqueued || len(store.values) != 1 {
-		t.Fatalf("failed merge group=%+v err=%v enqueued=%v", op, err, backend.enqueued)
+	open := func(change func(*Pull)) *Pull {
+		pull := &Pull{Head: head, State: "open"}
+		change(pull)
+		return pull
 	}
-	for _, want := range []string{enqueued.Request.Head, "37527118828", "Job checks (failure)", "TestDaemonServesTaskOnlyToLiveAttempt", "board and shelves open peer views"} {
-		if !strings.Contains(op.Detail, want) {
-			t.Fatalf("correction %q lacks %q", op.Detail, want)
-		}
-	}
-	for _, infra := range []*GroupRun{
-		{ID: 1, Conclusion: "cancelled", Jobs: []GroupJob{{Name: "checks", Conclusion: "cancelled"}}},
-		{ID: 2, Conclusion: "failure", Jobs: []GroupJob{{Name: "checks", Conclusion: "failure", Annotations: []string{"The self-hosted runner lost communication with the server."}}}},
-		{ID: 3, Conclusion: "failure", Jobs: []GroupJob{{Name: "checks", Conclusion: "startup_failure"}}},
-		// The always() aggregate fails because a gate never started.
-		{ID: 4, Conclusion: "failure", Jobs: []GroupJob{{Name: "checks", Conclusion: "startup_failure"}, {Name: "required", Conclusion: "failure", Annotations: []string{"Process completed with exit code 1."}}}},
-		{ID: 5, Conclusion: "failure", Jobs: []GroupJob{{Name: "required", Conclusion: "failure"}, {Name: "checks", Conclusion: "cancelled"}}},
+	for _, test := range []struct {
+		name       string
+		enqueues   int
+		failures   int
+		escalation string
+		escalated  bool // an escalation is recorded afterwards
+		pull       *Pull
+		enqueueErr error
+		state      string
+		calls      int // enqueue calls
+		writes     int
+		detail     string
+	}{
+		{name: "head moved", pull: &Pull{Head: strings.Repeat("c", 40), State: "open"}, state: "superseded", writes: 1},
+		{name: "merged", pull: &Pull{Head: head, State: "merged"}, state: "merged", writes: 1},
+		{name: "closed", pull: &Pull{Head: head, State: "closed"}, state: "closed", writes: 1},
+		{name: "conflict", pull: open(func(p *Pull) { p.Mergeable = &conflicting; p.Queued = true }), state: "ejected", writes: 1, detail: "conflicts with main. Rebase this Change onto origin/main"},
+		{name: "failing check at head", enqueues: 1, pull: open(func(p *Pull) { p.Failing = []string{"ci / go", "ci / ui"}; p.Pending = true }), state: "ejected", writes: 1, detail: "Failing checks: ci / go, ci / ui."},
+		{name: "queued", enqueues: 1, pull: open(func(p *Pull) { p.Queued = true }), state: "enqueued"},
+		{name: "queued clears an escalation", enqueues: 1, failures: FailuresBeforeEscalation, escalation: "stalled", pull: open(func(p *Pull) { p.Queued = true }), state: "enqueued", writes: 1},
+		{name: "checks running", pull: open(func(p *Pull) { p.Pending = true }), state: "enqueued"},
+		{name: "allowed and not queued", state: "enqueued", calls: 1, writes: 1},
+		{name: "ejected once is re-queued", enqueues: 1, pull: open(func(p *Pull) { p.Group = group }), state: "enqueued", calls: 1, writes: 1},
+		{name: "ejected again names the group", enqueues: 2, pull: open(func(p *Pull) { p.Group = group }), state: "ejected", writes: 1, detail: "run 37527118828 failed"},
+		{name: "ejected again with no group", enqueues: 2, state: "ejected", writes: 1, detail: "no merge-group run that built it was readable"},
+		{name: "a refused enqueue waits", enqueueErr: errors.New("refused"), state: "enqueued", writes: 1},
+		{name: "a persisting refusal escalates", failures: FailuresBeforeEscalation - 1, enqueueErr: errors.New("refused"), state: "enqueued", writes: 1, escalated: true},
+		{name: "an escalated refusal is not escalated again", failures: FailuresBeforeEscalation, escalation: "stalled", enqueueErr: errors.New("refused"), state: "enqueued", writes: 1, escalated: true},
 	} {
-		store, backend := &memoryStore{}, &fakeBackend{merge: Merge{State: "NOT_QUEUED", Open: true, Group: infra}}
+		store, backend := &memoryStore{}, &fakeBackend{pull: test.pull, enqueueErr: test.enqueueErr}
 		c := Coordinator{Store: store, Backend: backend, Now: func() time.Time { return time.Unix(20, 0) }}
-		op, err := c.ObserveMerge(context.Background(), enqueued)
-		if err != nil || op.State != "enqueued" || !op.Requeued || !backend.enqueued {
-			t.Fatalf("infrastructure run %d=%+v err=%v", infra.ID, op, err)
+		before := Operation{ID: "op", Request: reviewRequest(), State: "enqueued", Verdict: "allow", Submitted: true, Enqueues: test.enqueues, Failures: test.failures, Escalation: test.escalation}
+		op, err := c.Advance(context.Background(), before)
+		if (err != nil) != (test.enqueueErr != nil) || op.State != test.state || op.RoutePending != (test.state == "ejected") || backend.enqueues != test.calls || len(store.values) != test.writes || !strings.Contains(op.Detail, test.detail) {
+			t.Fatalf("%s: operation=%+v err=%v enqueues=%d writes=%d", test.name, op, err, backend.enqueues, len(store.values))
 		}
-		if again, err := c.ObserveMerge(context.Background(), op); err == nil || again.State != "failed" {
-			t.Fatalf("infrastructure run %d re-enqueued twice: %+v", infra.ID, again)
+		if test.state == "ejected" && !strings.Contains(op.Detail, head) {
+			t.Fatalf("%s: send-back %q does not name the head", test.name, op.Detail)
+		}
+		if (op.Escalation != "") != test.escalated || (test.escalation != "" && test.escalated && op.Escalation != test.escalation) {
+			t.Fatalf("%s: escalation=%q", test.name, op.Escalation)
+		}
+		if test.calls == 1 && op.Enqueues != test.enqueues+1 {
+			t.Fatalf("%s: enqueues=%d", test.name, op.Enqueues)
 		}
 	}
 }
 
-// A planned enqueue was claimed by the broker but never run: resuming
-// resends the same operation id and the operation becomes enqueued.
-func TestResumeResendsAPlannedEnqueue(t *testing.T) {
+// #1376: a conflicting pull request whose enqueue GitHub refuses went back
+// to "enqueuing" every five minutes for hours. It is now sent back once,
+// without an enqueue, and the sent-back operation is never advanced again.
+func TestConflictingPullIsSentBackOnceInsteadOfLooping(t *testing.T) {
+	conflicting := false
 	store := &memoryStore{}
-	backend := &observedBackend{receipt: Receipt{State: "planned"}}
-	c := Coordinator{Store: store, Backend: backend, Now: func() time.Time { return time.Unix(10, 0) }}
-	op, err := Prepare(reviewRequest(), c.Now)
-	if err != nil {
-		t.Fatal(err)
+	backend := &fakeBackend{pull: &Pull{Head: reviewRequest().Head, State: "open", Mergeable: &conflicting}, enqueueErr: errors.New("rejected before execution as UNPROCESSABLE")}
+	c := Coordinator{Store: store, Backend: backend, Now: func() time.Time { return time.Unix(20, 0) }}
+	op, err := c.Advance(context.Background(), Operation{ID: "op", Request: reviewRequest(), State: "enqueued", Verdict: "allow", Submitted: true})
+	if err != nil || op.State != "ejected" || !op.RoutePending || op.Escalation != "" || len(store.values) != 1 {
+		t.Fatalf("operation=%+v err=%v writes=%d", op, err, len(store.values))
 	}
-	op.State, op.Verdict, op.Submitted, op.EnqueueID = "enqueuing", "allow", true, "enqueue-1"
-	got, err := c.Resume(context.Background(), op)
-	if err != nil || got.State != "enqueued" || !backend.enqueued {
-		t.Fatalf("operation=%+v err=%v enqueued=%v", got, err, backend.enqueued)
+	if _, err := c.Advance(context.Background(), op); err == nil || len(store.values) != 1 || backend.enqueues != 0 {
+		t.Fatalf("a sent-back operation advanced again: err=%v writes=%d", err, len(store.values))
 	}
 }
 
-type conflictBackend struct{ observedBackend }
-
-func (b *conflictBackend) Enqueue(context.Context, Operation) error {
-	return ErrRejected
-}
-
-// A planned enqueue the Maintainer refuses as a conflict ends; it is not
-// resent forever (the pull request was merged under it, #1167 and #1179).
-func TestResumeFailsAPlannedEnqueueTheMaintainerRefuses(t *testing.T) {
-	c := Coordinator{Store: &memoryStore{}, Backend: &conflictBackend{observedBackend{receipt: Receipt{State: "planned"}}}, Now: func() time.Time { return time.Unix(10, 0) }}
-	op, err := Prepare(reviewRequest(), c.Now)
-	if err != nil {
-		t.Fatal(err)
-	}
-	op.State, op.Verdict, op.Submitted, op.EnqueueID = "enqueuing", "allow", true, "enqueue-1"
-	got, err := c.Resume(context.Background(), op)
-	if !errors.Is(err, ErrRejected) || got.State != "failed" || got.Retryable || !got.RoutePending {
-		t.Fatalf("operation=%+v err=%v", got, err)
-	}
-}
-
-type refusingBackend struct {
-	observedBackend
-	refuse error
-}
-
-func (b *refusingBackend) Enqueue(context.Context, Operation) error {
-	if b.refuse != nil {
-		return b.refuse
-	}
-	b.enqueued = true
-	return nil
-}
-
-func TestResumeSendsBackAConflictingPlannedEnqueue(t *testing.T) {
-	request := reviewRequest()
-	mergeable := false
-	request.Mergeable = &mergeable
+func TestRefusedDirtyPullIsSentBackWithoutEscalation(t *testing.T) {
 	store := &memoryStore{}
-	backend := &refusingBackend{observedBackend: observedBackend{fakeBackend: fakeBackend{storedPull: request}, receipt: Receipt{State: "planned"}}, refuse: fmt.Errorf("%w: refused: rejected before execution", ErrRejected)}
-	c := Coordinator{Store: store, Backend: backend, Now: func() time.Time { return time.Unix(10, 0) }}
-	op, err := Prepare(request, c.Now)
-	if err != nil {
-		t.Fatal(err)
-	}
-	op.State, op.Verdict, op.Submitted, op.EnqueueID = "enqueuing", "allow", true, "enqueue-1"
-	got, err := c.Resume(context.Background(), op)
-	if err != nil || got.State != "ejected" || !got.RoutePending || len(store.values) != 1 || !strings.Contains(got.Detail, "Rebase this Change onto origin/main") {
-		t.Fatalf("operation=%+v err=%v records=%+v", got, err, store.values)
+	backend := &fakeBackend{pull: &Pull{Head: reviewRequest().Head, State: "open", MergeStateStatus: "DIRTY"}, enqueueErr: fmt.Errorf("%w (rejected before execution as UNPROCESSABLE)", ErrRefused)}
+	c := Coordinator{Store: store, Backend: backend, Now: func() time.Time { return time.Unix(20, 0) }}
+	op, err := c.Advance(context.Background(), Operation{ID: "op", Request: reviewRequest(), State: "enqueued", Verdict: "allow", Submitted: true})
+	if err != nil || op.State != "ejected" || !op.RoutePending || op.Escalation != "" || backend.enqueueAttempts != 0 || len(store.values) != 1 {
+		t.Fatalf("dirty refusal = %+v err=%v enqueues=%d writes=%d", op, err, backend.enqueues, len(store.values))
 	}
 }
 
-// An enqueue GitHub refused before executing (checks still running, #1236)
-// stays enqueuing however long it waits (#1276), and a later tick's resend
-// enqueues it, clearing its escalation. A conflict still ends at once.
-func TestResumeResendsAnEnqueueRefusedBeforeExecution(t *testing.T) {
-	notYet := fmt.Errorf("%w: refused: The request was refused: rejected before execution as UNPROCESSABLE.", ErrRejected)
-	now := time.Unix(10, 0)
+func TestRefusedCleanPullStopsAfterRetryLimit(t *testing.T) {
 	store := &memoryStore{}
-	backend := &refusingBackend{observedBackend{receipt: Receipt{State: "planned"}}, notYet}
-	c := Coordinator{Store: store, Backend: backend, Now: func() time.Time { return now }}
-	op, err := Prepare(reviewRequest(), c.Now)
-	if err != nil {
-		t.Fatal(err)
+	backend := &fakeBackend{pull: &Pull{Head: reviewRequest().Head, State: "open", MergeStateStatus: "CLEAN"}, enqueueErr: fmt.Errorf("%w (rejected before execution as UNPROCESSABLE)", ErrRefused)}
+	c := Coordinator{Store: store, Backend: backend, Now: func() time.Time { return time.Unix(20, 0) }}
+	op := Operation{ID: "op", Request: reviewRequest(), State: "enqueued", Verdict: "allow", Submitted: true}
+	for range RefusedRetryLimit + 1 {
+		var err error
+		op, err = c.Advance(context.Background(), op)
+		if !errors.Is(err, ErrRefused) || op.State != "enqueued" {
+			t.Fatalf("refused pass = %+v err=%v", op, err)
+		}
 	}
-	op.State, op.Verdict, op.Submitted, op.EnqueueID, op.Escalation = "enqueuing", "allow", true, "enqueue-1", "stalled"
-	if got, err := c.Resume(context.Background(), op); !errors.Is(err, ErrRejected) || got.State != "enqueuing" || len(store.values) != 0 {
-		t.Fatalf("refused: operation=%+v err=%v writes=%d", got, err, len(store.values))
+	if backend.enqueueAttempts != RefusedRetryLimit || op.RefusedAttempts != RefusedRetryLimit {
+		t.Fatalf("retry cap = %+v attempts=%d", op, backend.enqueueAttempts)
 	}
-	now = now.Add(31 * time.Minute)
-	if got, err := c.Resume(context.Background(), op); !errors.Is(err, ErrRejected) || got.State != "enqueuing" || len(store.values) != 0 {
-		t.Fatalf("31 minutes: operation=%+v err=%v writes=%d", got, err, len(store.values))
+}
+
+// An enqueue whose outcome is unknown leaves nothing sticky behind: the next
+// pass reads the pull request again and goes on from what it shows.
+func TestIndeterminateEnqueueIsSettledByTheNextObservation(t *testing.T) {
+	store := &memoryStore{}
+	backend := &fakeBackend{enqueueErr: errors.New("the outcome is indeterminate")}
+	c := Coordinator{Store: store, Backend: backend, Now: func() time.Time { return time.Unix(20, 0) }}
+	op, err := c.Advance(context.Background(), Operation{ID: "op", Request: reviewRequest(), State: "enqueued", Verdict: "allow", Submitted: true})
+	if err == nil || op.State != "enqueued" || op.Escalation != "" || op.Failures != 1 {
+		t.Fatalf("indeterminate: operation=%+v err=%v", op, err)
 	}
-	backend.refuse = nil
-	if got, err := c.Resume(context.Background(), op); err != nil || got.State != "enqueued" || got.Escalation != "" || !backend.enqueued {
-		t.Fatalf("resend: operation=%+v err=%v", got, err)
+	// It landed after all: the queue shows it, and the count clears.
+	backend.pull = &Pull{Head: op.Request.Head, State: "open", Queued: true}
+	if landed, err := c.Advance(context.Background(), op); err != nil || landed.State != "enqueued" || landed.Failures != 0 {
+		t.Fatalf("landed: operation=%+v err=%v", landed, err)
 	}
-	now, backend.refuse = time.Unix(10, 0), fmt.Errorf("%w: conflict: The request conflicts with the pull request.", ErrRejected)
-	if got, err := c.Resume(context.Background(), op); !errors.Is(err, ErrRejected) || got.State != "failed" {
-		t.Fatalf("conflict: operation=%+v err=%v", got, err)
+	// It did not land: the next pass simply ensures it is queued.
+	backend.pull, backend.enqueueErr = nil, nil
+	if queued, err := c.Advance(context.Background(), op); err != nil || queued.State != "enqueued" || queued.Failures != 0 || queued.Enqueues != 1 {
+		t.Fatalf("retried: operation=%+v err=%v", queued, err)
+	}
+}
+
+// A transient refusal retries even when checks and review state are unchanged:
+// mergeability can clear without either signal changing.
+func TestRefusedEnqueueRetriesWithoutHeadObservationChange(t *testing.T) {
+	store := &memoryStore{}
+	backend := &fakeBackend{pull: &Pull{Head: reviewRequest().Head, State: "open"}, enqueueErr: fmt.Errorf("%w (rejected before execution as UNPROCESSABLE: Pull request head no longer matches the expected head)", ErrRefused)}
+	c := Coordinator{Store: store, Backend: backend, Now: func() time.Time { return time.Unix(20, 0) }}
+	op, err := c.Advance(context.Background(), Operation{ID: "op", Request: reviewRequest(), State: "enqueued", Verdict: "allow", Submitted: true})
+	if !errors.Is(err, ErrRefused) || op.State != "enqueued" || !op.Refused || !strings.Contains(op.Escalation, "head no longer matches the expected head") || len(store.values) != 1 {
+		t.Fatalf("operation=%+v err=%v", op, err)
+	}
+	backend.enqueueErr = nil
+	if queued, err := c.Advance(context.Background(), op); err != nil || queued.State != "enqueued" || queued.Refused || queued.Escalation != "" || queued.Enqueues != 1 || backend.enqueues != 1 {
+		t.Fatalf("unchanged refusal did not retry: operation=%+v err=%v enqueues=%d", queued, err, backend.enqueues)
+	}
+}
+
+func TestOwnerApprovalRefusalEscalatesOnce(t *testing.T) {
+	store := &memoryStore{}
+	backend := &fakeBackend{pull: &Pull{Head: reviewRequest().Head, State: "open", MergeStateStatus: "BLOCKED"}, enqueueErr: fmt.Errorf("%w (required approval is missing for .github/workflows/ci.yml)", ErrOwnerApproval)}
+	c := Coordinator{Store: store, Backend: backend, Now: func() time.Time { return time.Unix(20, 0) }}
+	op, err := c.Advance(context.Background(), Operation{ID: "op", Request: reviewRequest(), State: "enqueued", Verdict: "allow", Submitted: true})
+	if !errors.Is(err, ErrOwnerApproval) || !op.Refused || !op.OwnerApproval || backend.enqueues != 0 || !strings.Contains(op.Escalation, "#7") || !strings.Contains(op.Escalation, ".github/workflows/ci.yml") {
+		t.Fatalf("owner approval refusal = %+v err=%v enqueues=%d", op, err, backend.enqueues)
+	}
+	backend.enqueueErr = nil
+	if next, err := c.Advance(context.Background(), op); err != nil || backend.enqueues != 1 || next.Refused || next.OwnerApproval || next.Enqueues != 1 {
+		t.Fatalf("owner approval did not recover: %+v err=%v enqueues=%d", next, err, backend.enqueues)
+	}
+}
+
+// Any other enqueue failure is escalated only once it has persisted for
+// FailuresBeforeEscalation consecutive passes, and only once.
+func TestPersistingEnqueueFailureEscalatesOnceAfterTheGracePasses(t *testing.T) {
+	store := &memoryStore{}
+	c := Coordinator{Store: store, Backend: &fakeBackend{enqueueErr: errors.New("rejected before execution as RATE_LIMITED")}, Now: func() time.Time { return time.Unix(20, 0) }}
+	op := Operation{ID: "op", Request: reviewRequest(), State: "enqueued", Verdict: "allow", Submitted: true}
+	for pass := 1; pass <= FailuresBeforeEscalation+2; pass++ {
+		next, err := c.Advance(context.Background(), op)
+		if err == nil || next.State != "enqueued" || next.Failures != pass || (next.Escalation != "") != (pass >= FailuresBeforeEscalation) {
+			t.Fatalf("pass %d: operation=%+v err=%v", pass, next, err)
+		}
+		if pass > FailuresBeforeEscalation && next.Escalation != op.Escalation {
+			t.Fatalf("pass %d re-escalated: %q", pass, next.Escalation)
+		}
+		op = next
+	}
+	if !strings.Contains(op.Escalation, "RATE_LIMITED") {
+		t.Fatalf("escalation = %q", op.Escalation)
+	}
+}
+
+// A pass that cannot observe the pull request (a rules read refused, a base
+// retargeted) counts toward the same escalation, and any pass that observes,
+// waiting included, starts the count again: no failure stalls silently.
+func TestPersistentObservationFailureEscalatesOnce(t *testing.T) {
+	store := &memoryStore{}
+	backend := &fakeBackend{observeErr: errors.New("observe_pull_request_merge: conflict")}
+	c := Coordinator{Store: store, Backend: backend, Now: func() time.Time { return time.Unix(20, 0) }}
+	op := Operation{ID: "op", Request: reviewRequest(), State: "enqueued", Verdict: "allow", Submitted: true, Enqueues: 1}
+	for pass := 1; pass <= FailuresBeforeEscalation+1; pass++ {
+		next, err := c.Advance(context.Background(), op)
+		if err == nil || next.State != "enqueued" || next.Failures != pass || (next.Escalation != "") != (pass >= FailuresBeforeEscalation) || (pass > FailuresBeforeEscalation && next.Escalation != op.Escalation) {
+			t.Fatalf("pass %d: operation=%+v err=%v", pass, next, err)
+		}
+		op = next
+	}
+	if !strings.Contains(op.Escalation, "failed 6 passes in a row: observe_pull_request_merge: conflict") || len(store.values) != FailuresBeforeEscalation+1 {
+		t.Fatalf("escalation=%q writes=%d", op.Escalation, len(store.values))
+	}
+	// Observing again, even only to wait on a running check, resets both.
+	backend.observeErr, backend.pull = nil, &Pull{Head: op.Request.Head, State: "open", Pending: true}
+	if waited, err := c.Advance(context.Background(), op); err != nil || waited.Failures != 0 || waited.Escalation != "" || len(store.values) != FailuresBeforeEscalation+2 {
+		t.Fatalf("waiting pass: operation=%+v err=%v writes=%d", waited, err, len(store.values))
 	}
 }

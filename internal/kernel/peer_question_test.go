@@ -10,6 +10,7 @@ import (
 func peerKey(seed byte) [IDBytes]byte { return humanKey(seed) }
 
 func TestPeerQuestionIsTaskLinkedIdempotentAndPrivate(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, source, _ := runningWorkerRun(t)
 	defer store.Close()
@@ -55,6 +56,7 @@ func TestPeerQuestionIsTaskLinkedIdempotentAndPrivate(t *testing.T) {
 }
 
 func TestPeerQuestionRejectsCrossProjectButIsProviderNeutral(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, source, _ := runningWorkerRun(t)
 	defer store.Close()
@@ -95,6 +97,7 @@ func TestPeerQuestionRejectsCrossProjectButIsProviderNeutral(t *testing.T) {
 }
 
 func TestPeerQuestionClaudeAndCodexExchangeQuestionsAndAnswers(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, codex, _ := runningWorkerRun(t)
 	defer store.Close()
@@ -144,6 +147,7 @@ func TestPeerQuestionClaudeAndCodexExchangeQuestionsAndAnswers(t *testing.T) {
 }
 
 func TestPeerQuestionAllowsWorkerOverseerConversation(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, worker, overseer, _ := runningWorkerAndOverseer(t)
 	defer store.Close()
@@ -169,6 +173,7 @@ func TestPeerQuestionAllowsWorkerOverseerConversation(t *testing.T) {
 }
 
 func TestPeerTargetsAndHistoryPageWithoutLeakingOtherProjects(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, source, _ := runningWorkerRun(t)
 	defer store.Close()
@@ -207,6 +212,7 @@ func TestPeerTargetsAndHistoryPageWithoutLeakingOtherProjects(t *testing.T) {
 }
 
 func TestPeerPagesRejectChangedHeadAndRestartFromNewest(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, source, _ := runningWorkerRun(t)
 	defer store.Close()
@@ -264,6 +270,7 @@ func TestPeerPagesRejectChangedHeadAndRestartFromNewest(t *testing.T) {
 }
 
 func TestOverseerPeerPageRejectsPeerInvalidation(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, worker, overseer, _ := runningWorkerAndOverseer(t)
 	defer store.Close()
@@ -294,6 +301,7 @@ func TestOverseerPeerPageRejectsPeerInvalidation(t *testing.T) {
 }
 
 func TestPeerAnswerReplaysAfterDeliveryRevisionAdvances(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, source, _ := runningWorkerRun(t)
 	defer store.Close()
@@ -329,6 +337,7 @@ func TestPeerAnswerReplaysAfterDeliveryRevisionAdvances(t *testing.T) {
 }
 
 func TestPeerQuestionRefusesStaleAttemptsAndWrongRecipient(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, source, _ := runningWorkerRun(t)
 	defer store.Close()
@@ -366,6 +375,7 @@ func TestPeerQuestionRefusesStaleAttemptsAndWrongRecipient(t *testing.T) {
 }
 
 func TestPeerDeliveryNoticeNeverContainsPeerText(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, source, _ := runningWorkerRun(t)
 	defer store.Close()

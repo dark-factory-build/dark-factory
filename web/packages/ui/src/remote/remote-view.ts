@@ -24,10 +24,11 @@ export const REMOTE_STATUS_GLYPH: Record<RemoteFactoryStatus, string> = {
   error: "!",
 };
 
-const DELIVERY_UNKNOWN = "DELIVERY UNKNOWN — CHECK THE FACTORY";
-const NOT_DELIVERED = "NOT DELIVERED";
-export const REQUEST_CLOSED = "THIS QUESTION IS NO LONGER OPEN";
-export const FACTORY_UNREACHABLE = "FACTORY OFFLINE — NOTHING WAS SENT";
+const DELIVERY_UNKNOWN = "Delivery unknown — check the factory";
+const NOT_DELIVERED = "Not delivered";
+export const REQUEST_CLOSED = "This question is no longer open";
+export const REQUEST_UNREAD = "Could not load this question — open it again";
+export const FACTORY_UNREACHABLE = "Factory offline — nothing was sent";
 
 /**
  * The banner a factory's own connection state earns. A state a person can do
@@ -37,19 +38,19 @@ export const FACTORY_UNREACHABLE = "FACTORY OFFLINE — NOTHING WAS SENT";
 export function remoteFactoryBanner(status: RemoteFactoryStatus): string | undefined {
   switch (status) {
     case "revoked":
-      return "ACCESS REVOKED";
+      return "Access revoked";
     // The node still routes, but the daemon behind it is not the bound one.
     case "mismatch":
-      return "FACTORY IDENTITY MISMATCH";
+      return "Factory identity mismatch";
     // The relay would refuse this ticket, so it is never presented again.
     case "expired":
-      return "INVITATION EXPIRED · PAIR AGAIN";
+      return "Invitation expired · pair again";
     // The manager only reports error for a binding no reconnection repairs.
     case "error":
-      return "FACTORY REFUSED · PAIR AGAIN";
+      return "Factory refused · pair again";
     case "offline":
     case "connecting":
-      return "FACTORY OFFLINE";
+      return "Factory offline";
     default:
       return undefined;
   }
@@ -92,27 +93,27 @@ export function remoteDeliveryNotice(error: unknown): string {
   return code !== undefined && REFUSED.has(code) ? NOT_DELIVERED : DELIVERY_UNKNOWN;
 }
 
-export const INVITATION_UNREADABLE = "THAT LINK IS NOT A FACTORY INVITATION";
-export const INVITATION_SPENT = "THIS INVITATION HAS EXPIRED OR WAS ALREADY USED";
+export const INVITATION_UNREADABLE = "That link is not a factory invitation";
+export const INVITATION_SPENT = "This invitation has expired or was already used";
 
 const PAIR_FAILURES = new Map<string, string>([
   ["invalid_request", INVITATION_UNREADABLE],
-  ["unauthorized", "THE FACTORY REFUSED THIS INVITATION"],
-  ["pairing_required", "THE FACTORY REFUSED THIS INVITATION"],
-  ["pairing_uncertain", "PAIRING RESULT UNKNOWN — CHECK THE FACTORY BEFORE PAIRING AGAIN"],
-  ["storage_unavailable", "THIS BROWSER CANNOT STORE A FACTORY KEY"],
-  ["crypto_unavailable", "THIS BROWSER CANNOT PAIR"],
-  ["connection", "THE RELAY REFUSED THE CONNECTION"],
-  ["closed", "THE RELAY REFUSED THE CONNECTION"],
-  ["malformed", "THE FACTORY ANSWERED WITH SOMETHING THIS DEVICE COULD NOT READ"],
+  ["unauthorized", "The factory refused this invitation"],
+  ["pairing_required", "The factory refused this invitation"],
+  ["pairing_uncertain", "Pairing result unknown — check the factory before pairing again"],
+  ["storage_unavailable", "This browser cannot store a factory key"],
+  ["crypto_unavailable", "This browser cannot pair"],
+  ["connection", "The relay refused the connection"],
+  ["closed", "The relay refused the connection"],
+  ["malformed", "The factory answered with something this device could not read"],
 ]);
 
 export function remotePairFailure(error: unknown): string {
   // An identity failure, not a refusal: the invitation was answered, but not
   // by the daemon it named.
-  if (error instanceof RemoteDaemonMismatchError) return "A DIFFERENT FACTORY ANSWERED FOR THIS NODE";
+  if (error instanceof RemoteDaemonMismatchError) return "A different factory answered for this node";
   const code = errorCode(error);
-  return (code === undefined ? undefined : PAIR_FAILURES.get(code)) ?? "PAIRING DID NOT COMPLETE";
+  return (code === undefined ? undefined : PAIR_FAILURES.get(code)) ?? "Pairing did not complete";
 }
 
 export type RemoteProjectGroup = Readonly<{

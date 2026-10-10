@@ -93,7 +93,9 @@ test("disconnected source and revision evidence remains readable without enabled
     await act(async () => { tree = create(createElement(ProductionPanel, { items: [item], selected: productionKey(item), onSelect() {}, connected: false, onOpenTask() {}, onMission() {} })); });
     const source = tree.root.findByProps({ "aria-label": "Before and proposed source" });
     assert.equal(source.props.open, undefined);
-    const markup = renderToStaticMarkup(createElement(ProductionPanel, { items: [item], selected: productionKey(item), onSelect() {}, connected: false }));
+    const state = { tasks: new Map(), projects: new Map(), agents: new Map() };
+    assert.doesNotMatch(renderToStaticMarkup(createElement(ProductionPanel, { items: [], onSelect() {}, connected: false })), /last observed/i, "never connected observes nothing");
+    const markup = renderToStaticMarkup(createElement(ProductionPanel, { items: [item], selected: productionKey(item), onSelect() {}, state, connected: false }));
     for (const evidence of ["Last observed state", "Disconnected. This is the last observed state.", "Source details out of date", "before.go", "after.go", "observed-dirty-tree", "Commit checks and approval do not cover these edits.", active.pullRequest.head]) assert.ok(markup.includes(evidence));
     assert.ok(tree.root.findAllByType("button").filter((button) => button.children.join("").startsWith("Open ")).every((button) => button.props.disabled));
     assert.equal(tree.root.findAllByType("button").find((button) => button.props.children.some?.((child) => child === "Back to Work")).props.disabled, undefined);

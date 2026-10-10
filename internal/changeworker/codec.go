@@ -79,11 +79,14 @@ type Config struct {
 	// GitCommonDir is the project repository's Git directory, which the
 	// worktree's commits and refs live in and a provider's local commands
 	// are granted: written by a worker, read by an orchestrator.
-	GitCommonDir  string
-	Revision      string
-	ChangeParent  string
-	FinalName     string
-	AttemptSocket string
+	GitCommonDir string
+	// ProjectGitDirs are the project's other enabled repositories' Git
+	// directories, which an orchestrator reads to publish their Changes.
+	ProjectGitDirs []string
+	Revision       string
+	ChangeParent   string
+	FinalName      string
+	AttemptSocket  string
 	// Retained is the Change to reopen instead of making a fresh worktree.
 	Retained *Result
 	// ProviderTask selects and verifies the provider's closed delivery path.
@@ -145,6 +148,7 @@ type configWire struct {
 	RepositoryGitIdentity    identityWire       `json:"repository_git_identity"`
 	RepositoryOriginDigest   [32]byte           `json:"repository_origin_digest"`
 	GitCommonDir             string             `json:"git_common_dir"`
+	ProjectGitDirs           []string           `json:"project_git_dirs,omitempty"`
 	Revision                 string             `json:"revision"`
 	ChangeParent             string             `json:"change_parent"`
 	FinalName                string             `json:"final_name"`
@@ -163,7 +167,7 @@ func EncodeConfig(config Config) ([]byte, error) {
 		RuntimePath: config.RuntimePath, RuntimeIdentity: identityWire{Device: config.RuntimeIdentity.Device, Inode: config.RuntimeIdentity.Inode},
 		GitExecutable: config.GitExecutable, FactoryctlExecutable: config.FactoryctlExecutable, ToolPath: config.ToolPath, ToolchainReadRoots: config.ToolchainReadRoots, LocalCILeaseDir: config.LocalCILeaseDir, TraceReceiverPort: config.TraceReceiverPort, RunID: config.RunID, AccountHome: config.AccountHome, AccountConfigDir: config.AccountConfigDir,
 		RepositoryGitIdentity: identityWire{Device: config.RepositoryGitIdentity.Device(), Inode: config.RepositoryGitIdentity.Inode()}, RepositoryOriginDigest: config.RepositoryOriginDigest,
-		RepositoryRoot: config.RepositoryRoot, RepositoryIdentity: identityWire{Device: config.RepositoryIdentity.Device(), Inode: config.RepositoryIdentity.Inode()}, GitCommonDir: config.GitCommonDir, Revision: config.Revision,
+		RepositoryRoot: config.RepositoryRoot, RepositoryIdentity: identityWire{Device: config.RepositoryIdentity.Device(), Inode: config.RepositoryIdentity.Inode()}, GitCommonDir: config.GitCommonDir, ProjectGitDirs: config.ProjectGitDirs, Revision: config.Revision,
 		ChangeParent: config.ChangeParent, FinalName: config.FinalName,
 		AttemptSocket: config.AttemptSocket, ProviderTask: bytes.Clone(config.ProviderTask),
 	}
@@ -206,7 +210,7 @@ func DecodeConfig(encoded []byte) (Config, error) {
 		RuntimePath: wire.RuntimePath, RuntimeIdentity: runner.FileIdentity{Device: wire.RuntimeIdentity.Device, Inode: wire.RuntimeIdentity.Inode},
 		GitExecutable: wire.GitExecutable, FactoryctlExecutable: wire.FactoryctlExecutable, ToolPath: wire.ToolPath, ToolchainReadRoots: wire.ToolchainReadRoots, LocalCILeaseDir: wire.LocalCILeaseDir, TraceReceiverPort: wire.TraceReceiverPort, RunID: wire.RunID, AccountHome: wire.AccountHome, AccountConfigDir: wire.AccountConfigDir,
 		RepositoryGitIdentity: repositoryGitIdentity, RepositoryOriginDigest: wire.RepositoryOriginDigest,
-		RepositoryRoot: wire.RepositoryRoot, RepositoryIdentity: repositoryIdentity, GitCommonDir: wire.GitCommonDir, Revision: wire.Revision,
+		RepositoryRoot: wire.RepositoryRoot, RepositoryIdentity: repositoryIdentity, GitCommonDir: wire.GitCommonDir, ProjectGitDirs: wire.ProjectGitDirs, Revision: wire.Revision,
 		ChangeParent: wire.ChangeParent, FinalName: wire.FinalName,
 		AttemptSocket: wire.AttemptSocket, Retained: retained, ProviderTask: bytes.Clone(wire.ProviderTask),
 	}
@@ -228,6 +232,11 @@ func validateConfig(config Config) error {
 	}
 	if filepath.Base(config.GitCommonDir) != ".git" || filepath.Dir(config.GitCommonDir) != config.RepositoryRoot {
 		return invalidContract(nil)
+	}
+	for _, path := range config.ProjectGitDirs {
+		if config.Role != kernel.RoleOrchestrator || !validAbsolute(path, maximumLocatorBytes) || filepath.Base(path) != ".git" || path == config.GitCommonDir {
+			return invalidContract(nil)
+		}
 	}
 	if config.LocalCILeaseDir != "" && (!validAbsolute(config.LocalCILeaseDir, maximumLocatorBytes) || filepath.Base(config.LocalCILeaseDir) != "dark-factory-local-ci") {
 		return ErrInvalidContract
@@ -272,7 +281,7 @@ func validateConfig(config Config) error {
 }
 
 func prepareProviderTask(kind kernel.Provider, task []byte) (provider.TaskDelivery, []byte, error) {
-	if kind == kernel.ProviderCodex {
+	if kind != kernel.ProviderShell {
 		if len(task) != 0 {
 			return 0, nil, provider.ErrInvalid
 		}

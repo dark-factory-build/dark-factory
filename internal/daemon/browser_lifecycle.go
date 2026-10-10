@@ -9,6 +9,7 @@ import (
 
 	"github.com/dark-factory-build/dark-factory/internal/browser"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
+	"github.com/dark-factory-build/dark-factory/internal/relayhost"
 )
 
 const browserCleanupTimeout = 5 * time.Second
@@ -40,6 +41,14 @@ func (daemon *Daemon) ListenBrowser(address string, allowedOrigins []string) (*B
 	if daemon == nil || daemon.store == nil {
 		return nil, fmt.Errorf("%w: invalid browser daemon", kernel.ErrInvalidValue)
 	}
+	var console []byte
+	if daemon.home != "" {
+		identity, err := relayhost.LoadOrCreate(daemon.home)
+		if err != nil {
+			return nil, err
+		}
+		console = relayhost.SignConsole(identity, browser.Console())
+	}
 	daemon.browserMu.Lock()
 	defer daemon.browserMu.Unlock()
 	if daemon.browserClosing {
@@ -49,12 +58,13 @@ func (daemon *Daemon) ListenBrowser(address string, allowedOrigins []string) (*B
 	if err != nil {
 		return nil, err
 	}
-	server, err := browser.Listen(browser.Config{Address: address, AllowedOrigins: allowedOrigins, Backend: backend})
+	server, err := browser.Listen(browser.Config{Address: address, AllowedOrigins: allowedOrigins, Backend: backend, Console: console})
 	if err != nil {
 		_ = backend.close()
 		return nil, err
 	}
 	runtime := &BrowserRuntime{daemon: daemon, server: server, backend: backend, origins: append([]string(nil), allowedOrigins...)}
+	daemon.console = console
 	if daemon.browsers == nil {
 		daemon.browsers = make(map[*BrowserRuntime]struct{})
 	}

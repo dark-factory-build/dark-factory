@@ -154,7 +154,7 @@ async fn tick() { let mut every = tokio::time::interval(Duration::from_secs(5));
 }
 
 func TestInferLanguages(t *testing.T) {
-	graph, err := Infer("system", languageFixtures())
+	graph, err := Infer("system", languageFixtures(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -245,7 +245,7 @@ func TestInferLanguages(t *testing.T) {
 // state leaks into it.
 func TestParsedInferenceIsDeterministic(t *testing.T) {
 	encode := func(repositories []Repository) string {
-		graph, err := Infer("system", repositories)
+		graph, err := Infer("system", repositories, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -277,7 +277,7 @@ func TestBadFilesDegradeAlone(t *testing.T) {
 		"src/unicode.ts":      []byte("const s = '日本語😀';\napp.put('/unicode', h)\n"),
 		"src/unterminated.rb": []byte("get \"/x\n"),
 	}}}
-	graph, err := Infer("system", repositories)
+	graph, err := Infer("system", repositories, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

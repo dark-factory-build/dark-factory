@@ -92,7 +92,7 @@ func TestRepositoryReadinessFetchesExactNondefaultBranchWithoutChangingCheckout(
 	}
 	supervisorGit(t, git, "-C", root, "remote", "set-url", "origin", filepath.Join(parent, "replacement.git"))
 	view, err = fixture.daemon.RepositoryReadiness(ctx, id, true)
-	if err != nil || view.FetchState != "setup_required" {
+	if err != nil || view.FetchState != "setup_required" || !strings.Contains(view.ReadinessMessage, "registered checkout identity changed") {
 		t.Fatalf("changed origin accepted: %+v %v", view, err)
 	}
 }
@@ -120,7 +120,7 @@ func TestRepositoryReadinessPrivateRemoteDenialNeverInheritsCredentialsOrStderr(
 	t.Setenv("GIT_CONFIG_KEY_0", "http.extraHeader")
 	t.Setenv("GIT_CONFIG_VALUE_0", "Authorization: Bearer PRIVATE_TEST_CREDENTIAL")
 	view, err := fixture.daemon.RepositoryReadiness(context.Background(), id, true)
-	if err != nil || view.FetchState != "setup_required" || view.ReadinessMessage == "" {
+	if err != nil || view.FetchState != "setup_required" || !strings.Contains(view.ReadinessMessage, "remote required authentication") {
 		t.Fatalf("denial: %+v %v", view, err)
 	}
 	if requests.Load() == 0 || authenticated.Load() {

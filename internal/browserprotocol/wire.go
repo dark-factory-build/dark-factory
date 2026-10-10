@@ -1075,7 +1075,7 @@ func rejectNullMembers(kind MessageType, body []byte) error {
 	case TypeTerminalExit:
 		fields = []string{"session_id", "exit_code", "exit_signal", "aborted"}
 	case TypeAgentUpdate:
-		fields = []string{"appearance", "model", "reasoning_effort", "account_id", "paused", "idle_policy", "idle_after_seconds", "idle_instruction", "idle_run_budget"}
+		fields = []string{"appearance", "model", "reasoning_effort", "account_id", "paused", "idle_policy", "idle_after_seconds", "idle_instruction", "idle_run_budget", "idle_wake_on"}
 	case TypeAttachmentRetention, TypeAttachmentRetentionResult:
 		fields = []string{"enabled"}
 	case TypeFactoryDispatch:

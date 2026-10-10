@@ -20,6 +20,7 @@ func sourceOutcome() OutcomeDocument {
 }
 
 func TestOutcomeDocumentBounds(t *testing.T) {
+	t.Parallel()
 	d := sourceOutcome()
 	d.Links = make([]OutcomeLink, OutcomeLinkLimit+1)
 	if _, err := d.MarshalBounded(); err == nil {
@@ -28,6 +29,7 @@ func TestOutcomeDocumentBounds(t *testing.T) {
 }
 
 func TestOutcomeObjectiveHashIncludesExactWorkRevision(t *testing.T) {
+	t.Parallel()
 	one, _ := NewRevision(1)
 	two, _ := NewRevision(2)
 	if outcomeObjectiveHash("title", "body", one) == outcomeObjectiveHash("title", "body", two) {
@@ -36,6 +38,7 @@ func TestOutcomeObjectiveHashIncludesExactWorkRevision(t *testing.T) {
 }
 
 func TestOutcomeSourceReplayHistoryAndMetadata(t *testing.T) {
+	t.Parallel()
 	store, _ := newTestStore(t)
 	defer store.Close()
 	project, err := store.CreateProject(context.Background(), NewProject{ID: projectID(t, 90), Name: "outcomes", Root: "/outcomes"}, mustTime(t, 1))
@@ -81,6 +84,7 @@ func TestOutcomeSourceReplayHistoryAndMetadata(t *testing.T) {
 }
 
 func TestWorkerMayOnlyProposeItsExactAnchor(t *testing.T) {
+	t.Parallel()
 	store, run, keys := runningWorkerRun(t)
 	defer store.Close()
 	anchored := OutcomeDocument{Kind: "outcome", Objective: "worker finding", Criteria: "record evidence", AnchorTaskID: run.TaskID.String(), AnchorWorkRevision: uint64(run.AdmittedTaskWorkRevision.Int64()), State: "proposed"}
@@ -102,6 +106,7 @@ func TestWorkerMayOnlyProposeItsExactAnchor(t *testing.T) {
 }
 
 func TestOutcomeObjectiveEditMustReopenAcceptance(t *testing.T) {
+	t.Parallel()
 	store, _ := newTestStore(t)
 	defer store.Close()
 	project, err := store.CreateProject(context.Background(), NewProject{ID: projectID(t, 105), Name: "outcomes-acceptance", Root: "/outcomes-acceptance"}, mustTime(t, 1))
@@ -134,6 +139,7 @@ func TestOutcomeObjectiveEditMustReopenAcceptance(t *testing.T) {
 }
 
 func TestBrowserOutcomeWriterUsesLiveHumanAuthority(t *testing.T) {
+	t.Parallel()
 	store, _ := newBrowserStore(t)
 	defer store.Close()
 	ctx := context.Background()
@@ -168,6 +174,7 @@ func TestBrowserOutcomeWriterUsesLiveHumanAuthority(t *testing.T) {
 }
 
 func TestUnusedOutcomesDoNotEnterSnapshotOrAdmission(t *testing.T) {
+	t.Parallel()
 	store, _, project, agent := newAdmissionStore(t, RoleWorker, 2)
 	defer store.Close()
 	ctx := context.Background()
@@ -196,6 +203,7 @@ func TestUnusedOutcomesDoNotEnterSnapshotOrAdmission(t *testing.T) {
 }
 
 func TestUnusedOutcomesDoNotAddAdmissionQueries(t *testing.T) {
+	t.Parallel()
 	type observed struct {
 		result     AdmissionResult
 		statements int
@@ -223,6 +231,7 @@ func TestUnusedOutcomesDoNotAddAdmissionQueries(t *testing.T) {
 }
 
 func TestOutcomeAnchorBecomesStaleAndProjectIdentityIsStable(t *testing.T) {
+	t.Parallel()
 	store, _ := newTestStore(t)
 	defer store.Close()
 	project, err := store.CreateProject(context.Background(), NewProject{ID: projectID(t, 110), Name: "outcomes-stale", Root: "/outcomes-stale"}, mustTime(t, 1))
@@ -279,6 +288,7 @@ func TestOutcomeAnchorBecomesStaleAndProjectIdentityIsStable(t *testing.T) {
 }
 
 func TestStoredComparisonRowDoesNotBreakOutcomeList(t *testing.T) {
+	t.Parallel()
 	store, _ := newTestStore(t)
 	defer store.Close()
 	ctx := context.Background()

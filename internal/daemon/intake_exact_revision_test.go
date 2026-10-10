@@ -97,7 +97,8 @@ func TestIntakeTickMaterializesOnlyExactAcceptedRevision(t *testing.T) {
 		t.Fatal("stale replay amended accepted work")
 	}
 
-	// A withdrawn receipt cannot materialize again, even with matching content.
+	// A withdrawn receipt does not materialize again by acceptance or tick,
+	// even with matching content; only the operator's import reinstates it.
 	issue.Body = "edited after acceptance"
 	if got := fixture.daemon.Intake(ctx, api.IntakeInput{Action: "withdraw", AcceptanceID: second.AcceptanceID}); got.State != "withdrawn" {
 		t.Fatalf("withdraw: %+v", got)
@@ -105,12 +106,12 @@ func TestIntakeTickMaterializesOnlyExactAcceptedRevision(t *testing.T) {
 	if got := accept(); got.State != "withdrawn" || got.AcceptanceID != second.AcceptanceID {
 		t.Fatalf("re-accept withdrawn: %+v", got)
 	}
-	if got := fixture.daemon.Intake(ctx, api.IntakeInput{Action: "import", AcceptanceID: second.AcceptanceID}); got.State != "conflict" {
-		t.Fatalf("withdrawn import: %+v", got)
-	}
 	requireNoImport("withdrawn", string(kernel.IntakeWithdrawn))
 	decoded, _ := decodeID(second.TaskID, kernel.TaskIDFromBytes)
 	if task, _, err := fixture.store.Task(ctx, decoded); err != nil || task.Status != kernel.TaskCancelled {
 		t.Fatalf("withdrawn task = %+v, %v", task, err)
+	}
+	if got := fixture.daemon.Intake(ctx, api.IntakeInput{Action: "import", AcceptanceID: second.AcceptanceID}); got.State != "imported" || got.TaskID != second.TaskID {
+		t.Fatalf("operator import of withdrawn receipt: %+v", got)
 	}
 }

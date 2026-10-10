@@ -1,5 +1,4 @@
 export type FloorAppearance = Readonly<{
-  social?: "nearby" | "commons";
   scenery: "off" | "subtle" | "rich";
   animation: "follow-device" | "off";
 }>;
@@ -8,7 +7,6 @@ const STORAGE_KEY = "dark-factory.floor-appearance";
 
 export const DEFAULT_FLOOR_APPEARANCE: FloorAppearance = {
   scenery: "rich",
-  social: "nearby",
   animation: "follow-device",
 };
 
@@ -24,7 +22,6 @@ export function readFloorAppearance(value: string | null): FloorAppearance {
     if (candidate !== null && typeof candidate === "object" && !Array.isArray(candidate)) parsed = candidate as Record<string, unknown>;
   } catch { /* browser-local preferences must never break the console */ }
   return {
-    social: oneOf(parsed.social, ["nearby", "commons"] as const, "nearby"),
     scenery: oneOf(parsed.scenery, ["off", "subtle", "rich"], DEFAULT_FLOOR_APPEARANCE.scenery),
     animation: oneOf(parsed.animation, ["follow-device", "off"], DEFAULT_FLOOR_APPEARANCE.animation),
   };

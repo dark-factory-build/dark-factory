@@ -6,10 +6,13 @@ import (
 )
 
 var (
-	ErrInvalidValue     = errors.New("invalid kernel value")
-	ErrBusy             = errors.New("sqlite writer busy")
-	ErrCorruptState     = errors.New("corrupt kernel state")
-	ErrForeignDatabase  = errors.New("foreign or incompatible database")
+	ErrInvalidValue    = errors.New("invalid kernel value")
+	ErrBusy            = errors.New("sqlite writer busy")
+	ErrCorruptState    = errors.New("corrupt kernel state")
+	ErrForeignDatabase = errors.New("foreign or incompatible database")
+	// ErrNewerSchema is the one foreign database a newer build wrote: this
+	// application's store at a user_version above this build's.
+	ErrNewerSchema      = fmt.Errorf("%w: written by a newer build", ErrForeignDatabase)
 	ErrRevisionConflict = errors.New("revision conflict")
 	ErrConflict         = errors.New("kernel entity conflicts with durable state")
 	ErrNotFound         = errors.New("kernel entity not found")

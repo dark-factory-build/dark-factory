@@ -21,6 +21,7 @@ func accountID(t *testing.T, seed byte) AccountID {
 // (provider, home) because that pair is the login's identity, and an agent may
 // only select one that exists and matches its own provider.
 func TestAccountLinkingAndAgentSelection(t *testing.T) {
+	t.Parallel()
 	store, _ := newTestStore(t)
 	defer store.Close()
 	ctx := context.Background()
@@ -117,6 +118,7 @@ func TestAccountLinkingAndAgentSelection(t *testing.T) {
 }
 
 func TestAccountUpdateRenamesAndUnlinksUnusedAccounts(t *testing.T) {
+	t.Parallel()
 	store, _ := newTestStore(t)
 	defer store.Close()
 	ctx := context.Background()
@@ -141,6 +143,7 @@ func TestAccountUpdateRenamesAndUnlinksUnusedAccounts(t *testing.T) {
 }
 
 func TestAccountUpdateRefusesReferencedAccount(t *testing.T) {
+	t.Parallel()
 	store, _ := newTestStore(t)
 	defer store.Close()
 	ctx := context.Background()
@@ -161,6 +164,7 @@ func TestAccountUpdateRefusesReferencedAccount(t *testing.T) {
 }
 
 func TestAccountWritesDeferUnrelatedCorruptionButRejectAffectedCorruption(t *testing.T) {
+	t.Parallel()
 	t.Run("unrelated corruption is deferred to open", func(t *testing.T) {
 		store, path := newTestStore(t)
 		project, err := store.CreateProject(context.Background(), NewProject{ID: projectID(t, 30), Name: "unrelated", Root: filepath.Join(t.TempDir(), "root")}, mustTime(t, 1))

@@ -9,6 +9,7 @@ import (
 )
 
 func TestTaskRepositoryBindingSnapshotsDefaultAndScopesConflict(t *testing.T) {
+	t.Parallel()
 	store, _ := newTestStore(t)
 	if err := store.InitializeRepositoryBase(context.Background(), "HEAD"); err != nil {
 		t.Fatal(err)
@@ -65,6 +66,7 @@ func TestTaskRepositoryBindingSnapshotsDefaultAndScopesConflict(t *testing.T) {
 }
 
 func TestRepositoryDisableAndRemovalRespectBindings(t *testing.T) {
+	t.Parallel()
 	store, _ := newTestStore(t)
 	defer store.Close()
 	ctx := context.Background()
@@ -114,6 +116,7 @@ func repositoryID(t *testing.T, value byte) RepositoryID {
 }
 
 func TestInheritedRepositoryBasePinsOnceAcrossRestart(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, path := newTestStore(t)
 	project, err := store.CreateProject(ctx, NewProject{ID: projectID(t, 130), Name: "legacy", Root: filepath.Join(t.TempDir(), "legacy")}, mustTime(t, 2))
@@ -191,6 +194,7 @@ func TestInheritedRepositoryBasePinsOnceAcrossRestart(t *testing.T) {
 }
 
 func TestRepositoryBaseInitializationPreservesBootArgumentBounds(t *testing.T) {
+	t.Parallel()
 	store, _ := newTestStore(t)
 	defer store.Close()
 	ctx := context.Background()

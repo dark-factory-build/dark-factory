@@ -29,7 +29,7 @@ func TestAttemptTaskReturnsExactProviderLimitWithCausalContext(t *testing.T) {
 		provider kernel.Provider
 		taskSize int
 	}{
-		{name: "codex", provider: kernel.ProviderCodex, taskSize: runner.MaxCodexTaskBytes},
+		{name: "codex", provider: kernel.ProviderCodex, taskSize: runner.MaxNativeTaskBytes},
 		{name: "claude", provider: kernel.ProviderClaudeCode, taskSize: runner.MaxProviderTaskBytes},
 	} {
 		t.Run(test.name, func(t *testing.T) {

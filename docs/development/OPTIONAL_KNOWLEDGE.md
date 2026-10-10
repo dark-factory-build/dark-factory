@@ -74,7 +74,7 @@ There is no campaign scheduler or autonomous optimization loop.
 
 ## Browser use
 
-The break room's planning table opens **Missions**, scoped to a project. Creating a mission
+The planning table on the floor opens **Missions**, scoped to a project. Creating a mission
 atomically saves the existing outcome record and queues a normal task for its
 selected overseer. Delegated tasks retain their mission association; standalone
 tasks remain valid. Mission details show durable related work and link to the

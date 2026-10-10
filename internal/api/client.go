@@ -32,7 +32,13 @@ const (
 	responsePrelude          = 1
 	outcomeReceiptBytes      = 32
 	requestTimeout           = 5 * time.Second
-	attemptTokenFileEnv      = "DARK_FACTORY_ATTEMPT_TOKEN_FILE"
+	// RestartRetryWindow covers a release restart: launchd respawns factoryd
+	// at once, and the new daemon rebinds after opening and recovering its
+	// store. An attempt call retries what that daemon provably did not act on
+	// for this long before it surfaces the failure.
+	RestartRetryWindow   = 30 * time.Second
+	restartRetryInterval = 100 * time.Millisecond
+	attemptTokenFileEnv  = "DARK_FACTORY_ATTEMPT_TOKEN_FILE"
 )
 
 type credential [credentialBytes]byte
@@ -45,6 +51,7 @@ type client struct {
 	tokenPath  string
 	token      tokenRecord
 	domain     byte
+	prefix     string
 }
 
 type OperatorClient struct{ client client }
@@ -78,6 +85,18 @@ func NewAttemptClientFromEnvironment(socketPath string) (*AttemptClient, error) 
 	return &AttemptClient{client: base}, nil
 }
 
+// NewAttemptReaderFromEnvironment sends the operator client's read views
+// (snapshot, human requests, task read, intake list) with the attempt
+// credential. factoryd answers them for a specialist's review run only.
+func NewAttemptReaderFromEnvironment(socketPath string) (*OperatorClient, error) {
+	attempt, err := NewAttemptClientFromEnvironment(socketPath)
+	if err != nil {
+		return nil, err
+	}
+	attempt.client.prefix = "attempt_"
+	return &OperatorClient{client: attempt.client}, nil
+}
+
 func newClient(socketPath, tokenPath string, domain byte) (client, error) {
 	if domain != operatorDomain && domain != attemptDomain || !validCanonicalPath(socketPath, install.MaxSocketPathBytes) {
 		return client{}, ErrInvalidClient
@@ -86,7 +105,9 @@ func newClient(socketPath, tokenPath string, domain byte) (client, error) {
 	if err != nil {
 		return client{}, err
 	}
-	if _, err := inspectSocket(socketPath); err != nil {
+	// An attempt client may start while factoryd restarts; call retries the
+	// socket instead of reporting a broken client.
+	if _, err := inspectSocket(socketPath); err != nil && domain != attemptDomain {
 		return client{}, err
 	}
 	return client{socketPath: socketPath, tokenPath: tokenPath, token: token, domain: domain}, nil
@@ -176,6 +197,15 @@ func (client *OperatorClient) RemoteStatus(ctx context.Context) (RemoteStatus, e
 	return result, nil
 }
 
+// Health is factoryd's readiness, with project's oversight when project is set.
+func (client *OperatorClient) Health(ctx context.Context, project string) (HealthStatus, error) {
+	var result HealthStatus
+	err := client.client.call(ctx, "health", struct {
+		ProjectID string `json:"project_id,omitempty"`
+	}{project}, &result)
+	return result, err
+}
+
 func (client *OperatorClient) Snapshot(ctx context.Context) (DashboardSnapshot, error) {
 	var result DashboardSnapshot
 	if err := client.client.call(ctx, "snapshot", struct{}{}, &result); err != nil {
@@ -217,6 +247,13 @@ func (client *OperatorClient) HumanReply(ctx context.Context, input OverseerHuma
 		return MutationResult{}, ErrInvalidInput
 	}
 	return client.client.mutate(ctx, "human_reply", input)
+}
+
+func (client *OperatorClient) HumanCancel(ctx context.Context, input HumanCancelInput) (MutationResult, error) {
+	if !validHumanCancelInput(input) {
+		return MutationResult{}, ErrInvalidInput
+	}
+	return client.client.mutate(ctx, "human_cancel", input)
 }
 
 func (client *OperatorClient) StopRun(ctx context.Context, input OverseerRunStopInput) (MutationResult, error) {
@@ -338,7 +375,7 @@ func (client *OperatorClient) SetAgentIdlePolicy(ctx context.Context, input Agen
 
 // SendBackTask returns a finished task to its queue with a note.
 func (client *OperatorClient) SendBackTask(ctx context.Context, input SendBackInput) (MutationResult, error) {
-	if !validID(input.TaskID) || !validText(input.Note, 1, 8192) {
+	if !validID(input.TaskID) || input.Head != "" && !validCommitHex(input.Head) || !validText(input.Note, 1, 8192) {
 		return MutationResult{}, ErrInvalidInput
 	}
 	return client.client.mutate(ctx, "send_back_task", input)
@@ -373,10 +410,20 @@ func (client *OperatorClient) ReadTask(ctx context.Context, input TaskReadInput)
 }
 
 func (client *OperatorClient) EnqueueTask(ctx context.Context, input EnqueueTaskInput) (MutationResult, error) {
-	if !validID(input.ID) || !validID(input.ProjectID) || !validOptionalID(input.RepositoryID) || !validOptionalID(input.AssignedAgentID) || !validID(input.IncarnationID) || !validText(input.Title, 1, 1024) || !validText(input.Body, 0, 131072) || input.Priority < -1_000_000 || input.Priority > 1_000_000 {
+	if !validEnqueueTaskInput(input) {
 		return MutationResult{}, ErrInvalidInput
 	}
 	return client.client.mutate(ctx, "enqueue_task", input)
+}
+
+// validEnqueueTaskInput bounds content pins like the console (eight per task).
+func validEnqueueTaskInput(input EnqueueTaskInput) bool {
+	for _, pin := range input.Content {
+		if !validID(pin.ContentID) || pin.ContentRevision == 0 || pin.ContentRevision > uint64(^uint64(0)>>1) {
+			return false
+		}
+	}
+	return validID(input.ID) && validID(input.ProjectID) && validOptionalID(input.RepositoryID) && validOptionalID(input.AssignedAgentID) && validID(input.IncarnationID) && validText(input.Title, 1, 1024) && validText(input.Body, 0, 131072) && input.Priority >= -1_000_000 && input.Priority <= 1_000_000 && len(input.Content) <= 8
 }
 
 func (client *OperatorClient) UpdateTask(ctx context.Context, input OverseerTaskUpdateInput) (MutationResult, error) {
@@ -413,7 +460,7 @@ func (client *OperatorClient) BackupVerify(ctx context.Context, path string) (ke
 }
 
 func (client *OperatorClient) UpdateAgent(ctx context.Context, input OverseerAgentUpdateInput) (MutationResult, error) {
-	if !validID(input.AgentID) || input.ExpectedRevision == 0 {
+	if !validID(input.AgentID) || input.ExpectedRevision == 0 || input.Appearance != nil && !validText(*input.Appearance, 0, 64) {
 		return MutationResult{}, ErrInvalidInput
 	}
 	return client.client.mutate(ctx, "operator_update_agent", input)
@@ -557,7 +604,7 @@ func (client *AttemptClient) TerminalObserve(ctx context.Context, input Terminal
 // SendBack returns a finished task of the attempt's project to its queue
 // with a note; only an orchestrator's attempt is allowed to.
 func (client *AttemptClient) SendBack(ctx context.Context, input SendBackInput) (MutationResult, error) {
-	if !validID(input.TaskID) || !validText(input.Note, 1, 8192) {
+	if !validID(input.TaskID) || input.Head != "" && !validCommitHex(input.Head) || !validText(input.Note, 1, 8192) {
 		return MutationResult{}, ErrInvalidInput
 	}
 	return client.client.mutate(ctx, "send_back", input)
@@ -671,6 +718,7 @@ func (client client) call(ctx context.Context, method string, params, output any
 	if err != nil || !current.same(client.token) {
 		return ErrInvalidClient
 	}
+	method = client.prefix + method
 	encoded, err := json.Marshal(requestEnvelope{Method: method, Params: params})
 	if err != nil || len(encoded)+requestPrelude > maxFrameBytes {
 		return ErrInvalidInput
@@ -684,26 +732,51 @@ func (client client) call(ctx context.Context, method string, params, output any
 		ctx, cancel = context.WithTimeout(ctx, requestTimeout)
 	}
 	defer cancel()
+	// An attempt outlives factoryd generations. A restart unbinds the socket
+	// and drains in-flight requests as unavailable, so the call waits the
+	// restart out instead of handing the run a blocker. A mutation's
+	// unavailable reply may follow its commit, so only reads replay it.
+	retryUntil := time.Now().Add(RestartRetryWindow)
+	for {
+		err := client.exchange(ctx, method, encoded, output)
+		retry := readMethod(method) && unavailable(err)
+		var failure undelivered
+		if errors.As(err, &failure) {
+			err, retry = failure.err, true
+		}
+		if !retry || client.domain != attemptDomain || time.Now().After(retryUntil) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(restartRetryInterval):
+		}
+	}
+}
+
+func (client client) exchange(ctx context.Context, method string, encoded []byte, output any) error {
 	before, err := inspectSocket(client.socketPath)
 	// The daemon deliberately rebinds this canonical socket during a clean
 	// handover. The path and its private parent remain the authority; the
 	// socket inode is generation-scoped and must not be pinned in a client
 	// that can outlive one daemon generation. Between the old daemon's unlink
 	// and the new one's bind the path is absent: that is a transport outage
-	// to retry, not an invalid client.
+	// to retry, not an invalid client. The new socket is bound before it is
+	// made private, so an invalid one is retried too: nothing was sent.
 	if err != nil {
-		if _, statErr := os.Lstat(client.socketPath); errors.Is(statErr, fs.ErrNotExist) {
-			return classifyTransport(ctx)
+		if socketAbsent(client.socketPath) {
+			return classifyUndelivered(ctx, ErrTransport)
 		}
-		return ErrInvalidClient
+		return classifyUndelivered(ctx, ErrInvalidClient)
 	}
 	connection, err := (&net.Dialer{}).DialContext(ctx, "unix", client.socketPath)
 	if err != nil {
-		return classifyTransport(ctx)
+		return classifyUndelivered(ctx, ErrTransport)
 	}
 	defer connection.Close()
 	if err := verifySocketConnection(connection, before); err != nil {
-		return err
+		return classifyUndelivered(ctx, err)
 	}
 	if err := setConnectionDeadline(connection, ctx); err != nil {
 		return classifyTransport(ctx)
@@ -780,7 +853,9 @@ func (client client) call(ctx context.Context, method string, params, output any
 	if err := requireEOF(connection); err != nil {
 		return classifyFrameError(ctx, err)
 	}
-	if err := client.revalidate(before); err != nil {
+	// A draining daemon may answer after its socket is gone. Unavailable
+	// carries nothing to trust, so it stays retryable rather than invalid.
+	if err := client.revalidate(before); err != nil && !unavailable(responseErr) {
 		return err
 	}
 	return responseErr
@@ -807,6 +882,19 @@ func (client client) revalidate(before socketRecord) error {
 		return ErrInvalidClient
 	}
 	return nil
+}
+
+func unavailable(err error) bool {
+	var remote *RemoteError
+	return errors.As(err, &remote) && remote.code == RemoteUnavailable
+}
+
+func readMethod(method string) bool {
+	switch method {
+	case "task", "source", "peer_status", "overseer_snapshot", "terminal_observe", "attempt_snapshot", "attempt_human_requests", "attempt_task_read", "attempt_intake", "attempt_content_list", "attempt_content_read", "attempt_content_body", "attempt_content_attachments", "attempt_outcome_read", "attempt_outcome_list":
+		return true
+	}
+	return false
 }
 
 func outcomeMethod(method string) bool {
@@ -1147,6 +1235,14 @@ func validOverseerSnapshot(snapshot OverseerSnapshot) bool {
 	if !validID(snapshot.ProjectID) || snapshot.Head == 0 || snapshot.Agents == nil || snapshot.Tasks == nil || snapshot.Runs == nil || snapshot.Questions == nil || snapshot.PeerQuestions == nil || snapshot.History == nil || snapshot.Handoffs == nil || len(snapshot.Agents) > kernel.OverseerSnapshotPageSize || len(snapshot.Tasks) > kernel.OverseerSnapshotPageSize || len(snapshot.Runs) > kernel.OverseerSnapshotPageSize || len(snapshot.Questions) > kernel.OverseerSnapshotPageSize || len(snapshot.PeerQuestions) > 1 || len(snapshot.History) > kernel.OverseerSnapshotPageSize || len(snapshot.Handoffs) > kernel.OverseerSnapshotPageSize {
 		return false
 	}
+	if snapshot.Factoryd.Calls != nil && len(snapshot.Factoryd.Calls) > 32 {
+		return false
+	}
+	for _, call := range snapshot.Factoryd.Calls {
+		if !validText(call.Name, 1, 256) || call.Count == 0 || call.LatencyP95MS < 0 {
+			return false
+		}
+	}
 	for _, handoff := range snapshot.Handoffs {
 		if !validRetainedChangeHandoff(handoff) {
 			return false
@@ -1329,6 +1425,31 @@ func validTaskStatus(status string) bool {
 	default:
 		return false
 	}
+}
+
+// undelivered is a failure before any request byte reached a daemon: nothing
+// was acted on, so call may retry it before it reports err.
+type undelivered struct{ err error }
+
+func (failure undelivered) Error() string { return failure.err.Error() }
+
+// socketAbsent is the gap between daemon generations: the private parent
+// stands and only the socket name is missing.
+func socketAbsent(path string) bool {
+	root, _, err := openPrivateParent(path)
+	if err != nil {
+		return false
+	}
+	defer root.Close()
+	_, err = root.Lstat(filepath.Base(path))
+	return errors.Is(err, fs.ErrNotExist)
+}
+
+func classifyUndelivered(ctx context.Context, err error) error {
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return ctxErr
+	}
+	return undelivered{err}
 }
 
 func classifyTransport(ctx context.Context) error {

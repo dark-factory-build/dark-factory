@@ -228,6 +228,7 @@ func TestTerminalPayloadResultPreservesExactWriteOutcome(t *testing.T) {
 }
 
 func TestTerminalOwnerWriteFailurePoisonsDaemonCapability(t *testing.T) {
+	shortenWait(t, &attemptControlTimeout)
 	daemon, peer, err := newControlPair("terminal-owner", "terminal-peer")
 	if err != nil {
 		t.Fatal(err)

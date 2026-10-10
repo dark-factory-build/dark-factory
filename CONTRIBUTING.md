@@ -8,7 +8,7 @@ deterministic providers.
 ## Local development
 
 ```sh
-./scripts/new-worktree.sh <slug>
+git fetch origin main && git worktree add -b <slug> .worktrees/<slug> origin/main
 cd .worktrees/<slug>
 go build ./...
 ```
@@ -35,7 +35,9 @@ fixtures, process and lifecycle checks, and release/package fixtures. Fixed
 component boundaries; the release mode also runs the routine source check.
 CI selects a mode from the complete merge-queue diff;
 uncertain or mixed changes use the full gate. Dark Factory is macOS-only,
-so the gate is macOS-only. A focused `-race`
+so the macOS gate is the product gate; a Linux leg runs the same scripts but
+tests only packages `scripts/linux-coverage` marks proved, and that file must
+classify every Darwin-only test. A focused `-race`
 check covers concurrency or ownership changes without imposing broad stress
 on unrelated changes.
 
@@ -46,6 +48,30 @@ The gate checks:
 - The SQLite schema is defined in `internal/kernel/schema.go`. A change bumps
   `userVersion` and adds one migration step from the version before it,
   proven on a copy of a live home; Open refuses every other version.
+
+## Console development without Go
+
+The console in `web/` needs only Node 22 or later with Corepack; no Go, provider
+login or running factory. The routine and full gates above still need Go, and
+`./scripts/go-check.sh --ui` is not a Go-free route. From `web/`:
+
+```sh
+corepack pnpm install --frozen-lockfile
+corepack pnpm test
+corepack pnpm run preview:floor
+```
+
+`preview:floor` builds the packages and renders
+[`packages/ui/examples/floor-preview.mjs`](web/packages/ui/examples/floor-preview.mjs)
+to a static HTML file whose path it prints. It feeds a small `PublicWorld` (the
+public projection factoryd serves at `/v1/public/PROJECT`) through the exported
+`publicFloor` and `FactoryScene`, the same way an embedding page would. Edit
+that world or anything under `packages/ui/src`, rerun, and reload the file. The
+preview is static: no animation, selection or live updates. The test fixture
+builders in `web/fixtures/scene.mjs` and `web/fixtures/graph.mjs` cover shapes
+the example does not. `corepack pnpm run preview:floor fixture` instead serves
+the whole `FactoryConsole` over the labelled `web/fixtures/state.mjs` state on
+`http://127.0.0.1:5196/?fixture`, equally static.
 
 ## Where to start
 

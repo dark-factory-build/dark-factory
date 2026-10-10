@@ -31,7 +31,17 @@ func saturateControllerSendBuffer(t *testing.T, controller *AttemptController) {
 	}
 }
 
+// shortenWait makes a production bound short for one test, so a test that
+// must wait out the bound does not spend the full production value.
+func shortenWait(t *testing.T, wait *time.Duration) {
+	t.Helper()
+	previous := *wait
+	*wait = 100 * time.Millisecond
+	t.Cleanup(func() { *wait = previous })
+}
+
 func TestAttemptControllerWriteFailureSpendsCapability(t *testing.T) {
+	shortenWait(t, &attemptControlTimeout)
 	controller, peer, err := NewAttemptController()
 	if err != nil {
 		t.Fatal(err)

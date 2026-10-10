@@ -10,7 +10,7 @@ import { ProjectLibrary } from "../dist/src/project-library.js";
 import { CUE_LIMIT, CUE_MS, activityTarget, useKnowledgeActivity } from "../dist/src/project-board.js";
 import { FactoryScene } from "../dist/src/factory-scene/factory-scene.js";
 import { fixtureState, fixtureGraphs } from "../../../fixtures/state.mjs";
-import { hall, machine, sceneGraph } from "../../../fixtures/scene.mjs";
+import { unit, machine, sceneGraph } from "../../../fixtures/scene.mjs";
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 const words = (node) => typeof node === "string" ? node : (node.children ?? []).map(words).join("");
@@ -138,7 +138,7 @@ test("activity from a previous project scope is never shown or opened from the n
 });
 
 test("cues appear where agents already are, without moving anyone, and stay inspectable", () => {
-  const graph = sceneGraph([hall("repo", { band: 1 }), hall("src", { machines: [machine("src-job", "job")] })]);
+  const graph = sceneGraph([unit("repo"), unit("src", { machines: [machine("src-job", "job")] })]);
   const workers = [
     { id: "busy", name: "Busy", role: "worker", provider: "codex", activity: "busy", location: "working", nodeId: "src" },
     { id: "idle", name: "Idle", role: "worker", provider: "codex", activity: "idle" },

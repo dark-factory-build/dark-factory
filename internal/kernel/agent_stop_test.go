@@ -8,6 +8,7 @@ import (
 )
 
 func TestReplaceTaskIsAtomicAndReplayBindsObjective(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, run, _ := runningOrchestratorRun(t)
 	defer store.Close()
@@ -62,6 +63,7 @@ func TestReplaceTaskIsAtomicAndReplayBindsObjective(t *testing.T) {
 }
 
 func TestStopRunForOperatorUsesExactCASAndIdempotency(t *testing.T) {
+	t.Parallel()
 	store, run, _ := runningOrchestratorRun(t)
 	defer store.Close()
 	task, _, err := store.Task(context.Background(), run.TaskID)
@@ -86,6 +88,7 @@ func TestStopRunForOperatorUsesExactCASAndIdempotency(t *testing.T) {
 }
 
 func TestReplacementAdmissionStaysAheadOfItsWorkersQueueOnly(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, running, _ := runningWorkerRun(t)
 	defer store.Close()
@@ -141,6 +144,7 @@ func TestReplacementAdmissionStaysAheadOfItsWorkersQueueOnly(t *testing.T) {
 }
 
 func TestStopTaskRevalidatesBrowserAuthority(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, run, _ := runningOrchestratorRun(t)
 	defer store.Close()
@@ -158,6 +162,7 @@ func TestStopTaskRevalidatesBrowserAuthority(t *testing.T) {
 }
 
 func TestStopRunForAttemptTargetsOnlyWorkers(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, worker, overseer, _ := runningWorkerAndOverseer(t)
 	defer store.Close()
@@ -170,7 +175,7 @@ func TestStopRunForAttemptTargetsOnlyWorkers(t *testing.T) {
 		t.Fatal(err)
 	}
 	withLegacyOrchestratorTarget(t, store, worker.ID, func(tx *writeTx) {
-		_, err := store.stopRunTx(ctx, tx, TaskInterventionRequest{OperationID: operation, TaskID: task.ID, RunID: worker.ID, ExpectedTaskRevision: task.Revision, ExpectedRunRevision: worker.Revision, Actor: TaskInterventionOrchestrator, ActorRunID: &overseer.ID, Kind: TaskInterventionStop}, nil, mustTime(t, 400))
+		_, err := store.stopRunTx(ctx, tx, TaskInterventionRequest{OperationID: operation, TaskID: task.ID, RunID: worker.ID, ExpectedTaskRevision: task.Revision, ExpectedRunRevision: worker.Revision, Actor: TaskInterventionOrchestrator, ActorRunID: &overseer.ID, Kind: TaskInterventionStop}, nil, mustTime(t, 400), true)
 		if !errors.Is(err, ErrUnauthorized) {
 			t.Fatalf("legacy orchestrator target stop = %v", err)
 		}
@@ -194,6 +199,7 @@ func TestStopRunForAttemptTargetsOnlyWorkers(t *testing.T) {
 }
 
 func TestReplacementRetainsDisabledRepositoryAndOriginalBaseAfterDefaultChange(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, run, _ := runningWorkerRun(t)
 	defer store.Close()

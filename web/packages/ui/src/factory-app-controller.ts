@@ -1,5 +1,6 @@
 import {
   type BrowserClientsView,
+  type IdleWakeOn,
   MAX_TERMINAL_PAYLOAD,
   CAPABILITIES,
   MAX_TASK_INSTRUCTION_BYTES,
@@ -131,6 +132,8 @@ export type FactoryAppSnapshot = Readonly<{
   terminal?: FactoryTerminalView;
   /** Regenerable structure per project, empty until the daemon serves it. */
   graphs?: ReadonlyMap<string, OperationalGraphView>;
+  /** The error code of each project's last refused graph read, until one is served. */
+  graphErrors?: ReadonlyMap<string, string>;
   /** Repository directories each running agent's live run is changing. */
   runPaths?: ReadonlyMap<string, RunPathSample>;
   /** Most recent observed paths remain an annotation after that run ends. */
@@ -263,6 +266,7 @@ export class FactoryAppController {
   #pendingTerminalInput = new Uint8Array(0);
   #pendingTerminalResize: { rows: number; cols: number } | undefined;
   #graphs: ReadonlyMap<string, OperationalGraphView> = new Map();
+  #graphErrors: ReadonlyMap<string, string> = new Map();
   #graphPending = new Set<string>();
   #runPaths: ReadonlyMap<string, RunPathSample> = new Map();
   #lastRunPaths: ReadonlyMap<string, RunPathSample> = new Map();
@@ -419,16 +423,20 @@ export class FactoryAppController {
           if (!this.#current(generation)) return;
           const first = !this.#graphs.has(projectId);
           this.#graphs = new Map(this.#graphs).set(projectId, graph);
+          this.#graphErrors = new Map([...this.#graphErrors].filter(([id]) => id !== projectId));
           this.#publish();
-          // A project served for the first time has halls its running agents can stand in:
+          // A project served for the first time has machines its running agents can stand at:
           // ask now, or as soon as the round in flight is answered. A refresh waits for the tick.
           if (!first || this.#runPathsTimer === undefined) return;
           if (this.#runPathsPending) this.#runPathsDue = true;
           else this.#pollRunPaths();
         },
         // A refused answer keeps the structure last served for that project
-        // rather than emptying its block of rooms for one cycle.
-        () => { this.#graphPending.delete(projectId); },
+        // rather than emptying its block of rooms for one cycle, and says why.
+        (error: unknown) => {
+          this.#graphPending.delete(projectId);
+          if (this.#current(generation)) { this.#graphErrors = new Map(this.#graphErrors).set(projectId, finiteError(error).code); this.#publish(); }
+        },
       );
     }
   }
@@ -516,7 +524,7 @@ export class FactoryAppController {
    * the controls the caller changed are sent; an omitted one is left alone,
    * and an empty change is not a write at all.
    */
-  async updateAgentConfig(config: { model?: string; reasoningEffort?: string; accountId?: string; paused?: boolean; archived?: boolean; idlePolicy?: "wait" | "standing_instruction"; idleAfterSeconds?: number; idleInstruction?: string; idleRunBudget?: number }): Promise<void> {
+  async updateAgentConfig(config: { model?: string; reasoningEffort?: string; accountId?: string; paused?: boolean; archived?: boolean; idlePolicy?: "wait" | "standing_instruction"; idleAfterSeconds?: number; idleInstruction?: string; idleRunBudget?: number; idleWakeOn?: IdleWakeOn }): Promise<void> {
     const selected = this.#selectedAgent;
     const session = this.#client?.session;
     if (this.#closed || this.#status !== "ready" || selected === undefined || session === undefined || this.#edit?.pending === true) return;
@@ -998,9 +1006,10 @@ export class FactoryAppController {
         }
       }
     }
-    // A graph belongs to a project; a project that is gone has no halls.
-    if ([...this.#graphs.keys()].some((projectId) => !state.projects.has(projectId))) {
+    // A graph belongs to a project; a project that is gone has no machines and no refusal.
+    if ([...this.#graphs.keys(), ...this.#graphErrors.keys()].some((projectId) => !state.projects.has(projectId))) {
       this.#graphs = new Map([...this.#graphs].filter(([projectId]) => state.projects.has(projectId)));
+      this.#graphErrors = new Map([...this.#graphErrors].filter(([projectId]) => state.projects.has(projectId)));
     }
     const selectedAgent = this.#selectedAgent;
     const replacementAgentID = this.#terminalReplacement?.agentId;
@@ -1455,6 +1464,7 @@ export class FactoryAppController {
       state: this.#state,
       error: this.#error,
       graphs: this.#graphs,
+      graphErrors: this.#graphErrors,
       runPaths: this.#runPaths,
       lastRunPaths: this.#lastRunPaths,
       edit: this.#edit,

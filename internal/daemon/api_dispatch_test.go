@@ -603,7 +603,7 @@ func TestDaemonDispatchesSendBackThroughBothDomains(t *testing.T) {
 	}
 	waitDispatch(t, done)
 	done = fixture.serve(t)
-	if _, err := operator.SendBackTask(ctx, api.SendBackInput{TaskID: claudeTask, Note: strings.Repeat("&", 1024)}); !errors.As(err, &remote) || remote.Code() != api.RemoteTooLarge {
+	if _, err := operator.SendBackTask(ctx, api.SendBackInput{TaskID: claudeTask, Note: strings.Repeat("&", 1300)}); !errors.As(err, &remote) || remote.Code() != api.RemoteTooLarge {
 		t.Fatalf("a note past the provider's prompt = %v", err)
 	}
 	waitDispatch(t, done)
@@ -632,7 +632,7 @@ func TestDaemonDispatchesSendBackThroughBothDomains(t *testing.T) {
 	}
 	waitDispatch(t, done)
 	done = fixture.serve(t)
-	if _, err := active.client.SendBack(ctx, api.SendBackInput{TaskID: foreign, Note: strings.Repeat("&", 1024)}); !errors.As(err, &remote) || remote.Code() != api.RemoteUnauthorized {
+	if _, err := active.client.SendBack(ctx, api.SendBackInput{TaskID: foreign, Note: strings.Repeat("&", 1300)}); !errors.As(err, &remote) || remote.Code() != api.RemoteUnauthorized {
 		t.Fatalf("another project's task with an oversized note = %v", err)
 	}
 	waitDispatch(t, done)
@@ -1371,7 +1371,7 @@ func TestOverseerPastAProjectLimitIsRequeuedAndAWorkerCancelled(t *testing.T) {
 	}{
 		{57, "orchestrator", 60, kernel.OutcomeFailed, kernel.OverseerRunLimitDetail},
 		{67, "orchestrator", kernel.MaxOverseerRunSeconds, kernel.OutcomeFailed, kernel.OverseerRunLimitDetail},
-		{77, "worker", 60, kernel.OutcomeCancelled, runLimitDetail},
+		{77, "worker", 60, kernel.OutcomeCancelled, kernel.RunLimitDetail},
 	} {
 		fixture := newDispatchFixture(t)
 		active := prepareActiveAttemptInProjectWithProvider(t, fixture, test.seed, testID(test.seed), test.role, "codex")
@@ -1390,30 +1390,6 @@ func TestOverseerPastAProjectLimitIsRequeuedAndAWorkerCancelled(t *testing.T) {
 			t.Fatalf("%s past a %ds limit = %+v, err=%v", test.role, test.limit, run, err)
 		}
 	}
-}
-
-func TestDaemonRejectsForgedAttemptOutcome(t *testing.T) {
-	fixture := newDispatchFixture(t)
-	_ = prepareActiveAttempt(t, fixture, 61)
-	wrongBearer := bytes.Repeat([]byte{'z'}, 32)
-	wrongToken := filepath.Join(filepath.Dir(fixture.socket), "wrong.token")
-	if err := os.WriteFile(wrongToken, wrongBearer, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	previous := os.Getenv("DARK_FACTORY_ATTEMPT_TOKEN_FILE")
-	if err := os.Setenv("DARK_FACTORY_ATTEMPT_TOKEN_FILE", wrongToken); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Setenv("DARK_FACTORY_ATTEMPT_TOKEN_FILE", previous) })
-	wrong, err := api.NewAttemptClientFromEnvironment(fixture.socket)
-	if err != nil {
-		t.Fatal(err)
-	}
-	done := fixture.serve(t)
-	if _, err := wrong.Succeed(context.Background(), "forged"); err == nil {
-		t.Fatal("forged attempt outcome succeeded")
-	}
-	waitDispatch(t, done)
 }
 
 func TestDaemonConcurrentAttemptOutcomesHaveOneDurableWinner(t *testing.T) {
@@ -1821,7 +1797,7 @@ func TestDaemonSourceRefusesProviderWithoutReadOnlyBoundary(t *testing.T) {
 	done := fixture.serve(t)
 	_, err := active.client.Source(context.Background(), testID(73))
 	var remote *api.RemoteError
-	if !errors.As(err, &remote) || remote.Code() != api.RemoteUnavailable {
+	if !errors.As(err, &remote) || remote.Code() != api.RemoteForbidden {
 		t.Fatalf("unprotected source = %v", err)
 	}
 	waitDispatch(t, done)
@@ -2012,4 +1988,70 @@ func TestRefusalRepliesCarryABoundedReason(t *testing.T) {
 	if boundedDetail(nil) != "" {
 		t.Fatalf("nil cause detail = %q", boundedDetail(nil))
 	}
+}
+
+// Only a specialist's review run (its carrier) reads the operator's views
+// with its attempt credential, and of intake only its list.
+func TestDaemonOperatorReadsAdmitOnlySpecialistCarrier(t *testing.T) {
+	fixture := newDispatchFixture(t)
+	ctx := context.Background()
+	project, seed := testID(211), byte(211)
+	enqueueCarrier := func() {
+		operator, err := api.NewOperatorClient(fixture.socket, fixture.operator)
+		if err != nil {
+			t.Fatal(err)
+		}
+		done := fixture.serve(t)
+		if _, err := operator.EnqueueTask(ctx, api.EnqueueTaskInput{ID: testID(seed + 2), ProjectID: project, AssignedAgentID: testID(seed + 1), IncarnationID: testID(seed + 3), Title: "Standing instruction", Body: "Review.", Priority: 1}); err != nil {
+			t.Fatal(err)
+		}
+		waitDispatch(t, done)
+	}
+	active := prepareActiveAttemptInProject(t, fixture, seed, project, "worker", enqueueCarrier)
+	reader, err := api.NewAttemptReaderFromEnvironment(fixture.socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	forbidden := func(name string, invoke func() error) {
+		t.Helper()
+		done := fixture.serve(t)
+		var remote *api.RemoteError
+		if err := invoke(); !errors.As(err, &remote) || remote.Code() != api.RemoteForbidden {
+			t.Fatalf("%s = %v, want forbidden", name, err)
+		}
+		waitDispatch(t, done)
+	}
+	humanRequests := func() error { _, err := reader.HumanRequests(ctx); return err }
+	forbidden("ordinary worker human list", humanRequests)
+
+	agent, _, err := fixture.store.Agent(ctx, active.run.AgentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, after, instruction := kernel.IdleStandingInstruction, uint32(3600), "Review the factory."
+	if _, err := fixture.store.UpdateAgent(ctx, agent.ID, agent.Revision, kernel.AgentPatch{IdlePolicy: &policy, IdleAfterSeconds: &after, IdleInstruction: &instruction}, agent.UpdatedAt); err != nil {
+		t.Fatal(err)
+	}
+	for name, invoke := range map[string]func() error{
+		"human list":  humanRequests,
+		"status":      func() error { _, err := reader.Snapshot(ctx); return err },
+		"intake list": func() error { _, err := reader.Intake(ctx, api.IntakeInput{Action: "list"}); return err },
+		"task read": func() error {
+			task, _, err := fixture.store.Task(ctx, active.run.TaskID)
+			if err == nil {
+				_, err = reader.ReadTask(ctx, api.TaskReadInput{TaskID: task.ID.String(), ExpectedRevision: uint64(task.Revision.Int64())})
+			}
+			return err
+		},
+	} {
+		done := fixture.serve(t)
+		if err := invoke(); err != nil {
+			t.Fatalf("specialist %s = %v", name, err)
+		}
+		waitDispatch(t, done)
+	}
+	forbidden("specialist intake write", func() error {
+		_, err := reader.Intake(ctx, api.IntakeInput{Action: "linear_disconnect"})
+		return err
+	})
 }

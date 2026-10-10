@@ -97,7 +97,12 @@ func (store *Store) OverseerSnapshotForAttempt(ctx context.Context, digest Attem
 		return OverseerSnapshot{}, err
 	}
 	defer read.Close()
-	authority, err := overseerRun(ctx, read.connection, digest)
+	// A specialist reads its project's status too; every overseer write
+	// stays with the orchestrator (overseerRun).
+	authority, err := authenticateAttempt(ctx, read.connection, digest)
+	if err == nil && authority.Role != RoleOrchestrator && !authority.Specialist {
+		err = ErrUnauthorized
+	}
 	if err != nil {
 		return OverseerSnapshot{}, err
 	}
@@ -308,9 +313,10 @@ func (store *Store) OverseerSnapshotForAttempt(ctx context.Context, digest Attem
 	if err := runs.Close(); err != nil {
 		return OverseerSnapshot{}, err
 	}
-	questionQuery, questionArgs := `SELECT `+humanRequestColumns+` FROM human_requests WHERE run_id IN (SELECT id FROM runs WHERE project_id = ?) AND status IN ('open', 'delivering', 'delivery_unknown') ORDER BY created_at_ms ASC, id ASC LIMIT ? OFFSET ?`, []any{authority.ProjectID.Bytes(), OverseerSnapshotPageSize + 1, offset}
+	// A stalled-item card is the operator's alone; the overseer never sees it.
+	questionQuery, questionArgs := `SELECT `+humanRequestColumns+` FROM human_requests WHERE run_id IN (SELECT id FROM runs WHERE project_id = ?) AND idempotency_key <> ? AND status IN ('open', 'delivering', 'delivery_unknown') ORDER BY created_at_ms ASC, id ASC LIMIT ? OFFSET ?`, []any{authority.ProjectID.Bytes(), stalledItemKey[:], OverseerSnapshotPageSize + 1, offset}
 	if request.TaskID != nil {
-		questionQuery, questionArgs = `SELECT `+humanRequestColumns+` FROM human_requests WHERE run_id IN (SELECT id FROM runs WHERE project_id = ? AND task_id = ?) AND status IN ('open', 'delivering', 'delivery_unknown') ORDER BY created_at_ms ASC, id ASC LIMIT ? OFFSET ?`, []any{authority.ProjectID.Bytes(), request.TaskID.Bytes(), OverseerSnapshotPageSize + 1, offset}
+		questionQuery, questionArgs = `SELECT `+humanRequestColumns+` FROM human_requests WHERE run_id IN (SELECT id FROM runs WHERE project_id = ? AND task_id = ?) AND idempotency_key <> ? AND status IN ('open', 'delivering', 'delivery_unknown') ORDER BY created_at_ms ASC, id ASC LIMIT ? OFFSET ?`, []any{authority.ProjectID.Bytes(), request.TaskID.Bytes(), stalledItemKey[:], OverseerSnapshotPageSize + 1, offset}
 	}
 	questions, err := read.connection.QueryContext(ctx, questionQuery, questionArgs...)
 	if err != nil {
@@ -470,7 +476,7 @@ func overseerRun(ctx context.Context, connection *sql.Conn, digest AttemptDigest
 // orchestrator's project. The task identity remains the durable idempotency
 // key; a retry with different immutable task data conflicts.
 func (store *Store) EnqueueTaskForOverseer(ctx context.Context, digest AttemptDigest, spec NewTask, at UnixMillis) (Task, error) {
-	if err := validateNewTask(spec); err != nil {
+	if err := validateNonCarrierTask(spec); err != nil {
 		return Task{}, err
 	}
 	tx, err := store.beginValidatedWrite(ctx)

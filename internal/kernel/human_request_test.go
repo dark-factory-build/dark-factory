@@ -37,6 +37,7 @@ func humanDeliveryID(t *testing.T, seed byte) HumanRequestDeliveryID {
 }
 
 func TestHumanQuestionCreationProjectionDetailAndIdempotency(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, run, _ := runningOrchestratorRun(t)
 	defer store.Close()
@@ -106,6 +107,16 @@ func TestHumanQuestionCreationProjectionDetailAndIdempotency(t *testing.T) {
 }
 
 func TestCancelHumanRequestRunAtomicallyResolvesRequestAndRevokesRun(t *testing.T) {
+	t.Parallel()
+	for _, operator := range []bool{false, true} {
+		t.Run(map[bool]string{false: "browser", true: "operator"}[operator], func(t *testing.T) {
+			t.Parallel()
+			testCancelHumanRequestRun(t, operator)
+		})
+	}
+}
+
+func testCancelHumanRequestRun(t *testing.T, operator bool) {
 	ctx := context.Background()
 	store, run, keys := runningOrchestratorRun(t)
 	defer store.Close()
@@ -123,6 +134,12 @@ func TestCancelHumanRequestRunAtomicallyResolvesRequestAndRevokesRun(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
+	cancel := func(expectedRequest, expectedRun Revision, at UnixMillis) (Run, HumanRequest, error) {
+		if operator {
+			return store.CancelHumanRequestRunForOperator(ctx, request.ID, expectedRequest, expectedRun, at)
+		}
+		return store.CancelHumanRequestRun(ctx, client.ID, request.ID, expectedRequest, expectedRun, at)
+	}
 	before, err := store.Factory(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -132,7 +149,7 @@ func TestCancelHumanRequestRunAtomicallyResolvesRequestAndRevokesRun(t *testing.
 		"stale run":     {request.Revision, mustRevision(t, run.Revision.Int64()+1)},
 	} {
 		t.Run(name, func(t *testing.T) {
-			if _, _, err := store.CancelHumanRequestRun(ctx, client.ID, request.ID, revisions[0], revisions[1], mustTime(t, 401)); !errors.Is(err, ErrRevisionConflict) {
+			if _, _, err := cancel(revisions[0], revisions[1], mustTime(t, 401)); !errors.Is(err, ErrRevisionConflict) {
 				t.Fatalf("cancellation = %v", err)
 			}
 		})
@@ -149,7 +166,7 @@ func TestCancelHumanRequestRunAtomicallyResolvesRequestAndRevokesRun(t *testing.
 	if err != nil || unchangedRun.Revision != run.Revision || unchangedRun.Phase != RunRunning || unchangedRequest.Revision != request.Revision || unchangedRequest.Status != HumanRequestOpen || unchangedFactory.Head != before.Head {
 		t.Fatalf("stale cancellation changed state: run=%+v request=%+v factory=%+v err=%v", unchangedRun, unchangedRequest, unchangedFactory, err)
 	}
-	cancelled, resolved, err := store.CancelHumanRequestRun(ctx, client.ID, request.ID, request.Revision, run.Revision, mustTime(t, 401))
+	cancelled, resolved, err := cancel(request.Revision, run.Revision, mustTime(t, 401))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -158,12 +175,13 @@ func TestCancelHumanRequestRunAtomicallyResolvesRequestAndRevokesRun(t *testing.
 		t.Fatalf("cancel result = run=%+v request=%+v", cancelled, resolved)
 	}
 	assertHumanRequestInvalidation(t, store, before.Head, request.ID, resolved.Revision, true)
-	if _, _, err := store.CancelHumanRequestRun(ctx, client.ID, request.ID, request.Revision, run.Revision, mustTime(t, 402)); !errors.Is(err, ErrRevisionConflict) {
+	if _, _, err := cancel(request.Revision, run.Revision, mustTime(t, 402)); !errors.Is(err, ErrRevisionConflict) {
 		t.Fatalf("duplicate cancellation = %v", err)
 	}
 }
 
 func TestHumanReplyAndCancellationRaceCommitsExactlyOneDecision(t *testing.T) {
+	t.Parallel()
 	for iteration := 0; iteration < 10; iteration++ {
 		store, run, _ := runningOrchestratorRun(t)
 		client := humanQuestionClient(t, store, byte(220+iteration), BrowserCapabilityObserve|BrowserCapabilityHumanActions)
@@ -216,6 +234,7 @@ func TestHumanReplyAndCancellationRaceCommitsExactlyOneDecision(t *testing.T) {
 }
 
 func TestHumanQuestionDeliveryRecoveryAndAckAreAtMostOnce(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, run, _ := runningOrchestratorRun(t)
 	defer store.Close()
@@ -254,6 +273,7 @@ func TestHumanQuestionDeliveryRecoveryAndAckAreAtMostOnce(t *testing.T) {
 }
 
 func TestHumanQuestionReplyAuthorityAndDeliveryCollision(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, run, _ := runningOrchestratorRun(t)
 	defer store.Close()
@@ -283,6 +303,7 @@ func TestHumanQuestionReplyAuthorityAndDeliveryCollision(t *testing.T) {
 }
 
 func TestHumanQuestionRevokedClientCannotReply(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, run, _ := runningOrchestratorRun(t)
 	defer store.Close()
@@ -300,6 +321,7 @@ func TestHumanQuestionRevokedClientCannotReply(t *testing.T) {
 }
 
 func TestHumanRequestDetailRequiresLivePrivateCapabilityAndExactRevision(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, run, _ := runningOrchestratorRun(t)
 	defer store.Close()
@@ -337,6 +359,7 @@ func TestHumanRequestDetailRequiresLivePrivateCapabilityAndExactRevision(t *test
 }
 
 func TestHumanQuestionBoundAndRunUniquenessAreTransactional(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, run, _ := runningOrchestratorRun(t)
 	defer store.Close()
@@ -377,6 +400,7 @@ func TestHumanQuestionBoundAndRunUniquenessAreTransactional(t *testing.T) {
 }
 
 func TestHumanQuestionReuseExistingDoesNotOpenSecondRequest(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, run, _ := runningOrchestratorRun(t)
 	defer store.Close()
@@ -416,6 +440,7 @@ func TestHumanQuestionReuseExistingDoesNotOpenSecondRequest(t *testing.T) {
 }
 
 func TestHumanQuestionInvalidationFailureRollsBackRequestAndRun(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, run, keys := runningOrchestratorRun(t)
 	defer store.Close()
@@ -479,6 +504,7 @@ func TestHumanQuestionInvalidationFailureRollsBackRequestAndRun(t *testing.T) {
 }
 
 func TestHumanQuestionResolutionTombstoneFailureRollsBackStatusAndHead(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, run, _ := runningOrchestratorRun(t)
 	defer store.Close()
@@ -519,6 +545,7 @@ func TestHumanQuestionResolutionTombstoneFailureRollsBackStatusAndHead(t *testin
 }
 
 func TestHumanQuestionCorruptChronologyFailsClosed(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, run, _ := runningOrchestratorRun(t)
 	path := storePath(t, store)
@@ -557,6 +584,7 @@ func TestHumanQuestionCorruptChronologyFailsClosed(t *testing.T) {
 }
 
 func TestHumanQuestionUncertainDeliveryIsNotReplayedAndRestartRecovery(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, run, _ := runningOrchestratorRun(t)
 	path := storePath(t, store)
@@ -598,6 +626,7 @@ func TestHumanQuestionUncertainDeliveryIsNotReplayedAndRestartRecovery(t *testin
 }
 
 func TestHumanQuestionFinalizingStalesOpenAndMakesDeliveryUnknown(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, run, _ := runningOrchestratorRun(t)
 	defer store.Close()
@@ -650,6 +679,7 @@ func TestHumanQuestionFinalizingStalesOpenAndMakesDeliveryUnknown(t *testing.T) 
 }
 
 func TestHumanQuestionTerminalizationStalesResidualDeliveryExactlyOnce(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, run, keys := runningOrchestratorRun(t)
 	defer store.Close()
@@ -729,6 +759,7 @@ func TestHumanQuestionTerminalizationStalesResidualDeliveryExactlyOnce(t *testin
 }
 
 func TestHumanQuestionProcessExitConvergesRequestsAtomically(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	tests := []struct {
 		name       string
@@ -842,6 +873,7 @@ func assertHumanRequestInvalidation(t *testing.T, store *Store, after EventSeque
 }
 
 func TestHumanQuestionProcessExitInvalidationFailureRollsBackBothTransitions(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	// The provider exit is the only remaining direct process-exit edge.
 	for _, name := range []string{"provider"} {
@@ -884,6 +916,7 @@ func TestHumanQuestionProcessExitInvalidationFailureRollsBackBothTransitions(t *
 }
 
 func TestHumanQuestionImpossibleAdmittedRunPhasesFailClosed(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	for _, status := range []string{"delivery_unknown", "resolved"} {
 		t.Run(status, func(t *testing.T) {
@@ -910,6 +943,7 @@ func TestHumanQuestionImpossibleAdmittedRunPhasesFailClosed(t *testing.T) {
 }
 
 func TestHumanQuestionCreationRequiresExactRunningAttempt(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, run, keys := runningOrchestratorRun(t)
 	defer store.Close()
@@ -934,6 +968,7 @@ func TestHumanQuestionCreationRequiresExactRunningAttempt(t *testing.T) {
 }
 
 func TestOperatorHumanRequestsIncludesOverseerAndRejectsReplay(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, run, _ := runningOrchestratorRun(t)
 	defer store.Close()

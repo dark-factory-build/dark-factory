@@ -1,10 +1,11 @@
 # Repository context
 
-Dark Factory is a Darwin-first Go runtime: `factoryd` owns durable work and
+Dark Factory is a macOS-only Go runtime: `factoryd` owns durable work and
 provider processes, while `factoryctl` and the loopback web console use the
 same local API. It is not a hosted runtime, coding model, or general agent
-framework. The shell-provider and real Codex loops are proven; real Claude work
-is not.
+framework. The shell-provider and real Codex loops are proven; a Claude Code
+worker is proven by one live run and a Claude Code overseer by fixtures only.
+Console development under `web/` is portable and needs only Node.
 
 Dark Factory applies constraints to agents it launches through runtime
 configuration and enforcement. Those constraints do not govern agents working
@@ -21,30 +22,12 @@ When fixing a defect or a flaky test, look first for the shared root cause
 across related issues and fix the whole class once, with the least code and
 product surface; never weaken a test to make it pass.
 
+Pass agent-posted issue and pull-request comment bodies with `--body-file`,
+never as a command-line argument.
+
 ## Agent check loop
 
-During implementation, run `./scripts/go-check.sh` and the focused tests for
-the changed risk that your environment can run. Process-sensitive Go tests use
-`-count=1` and run through `./scripts/with-local-ci-lease.sh`, which keeps one
-heavy process run on the Mac without making source checks wait. Use
-`./scripts/local-ci.sh --ui`, `--runtime`, or `--release` when working across
-that component boundary.
-
-The full gate is the protected merge queue's required CI on the combined tree;
-factoryd reviews the exact head without running it first, and a queue
-ejection comes back to the author naming the failing checks. A factory worker that
-cannot run a check inside its sandbox (a nested `sandbox-exec`, system Perl,
-the daemon supervisor fixtures, the full gate itself) does not block on it:
-it lists that check as "verified by gate" in its result and finishes.
-
-Record the exact head, the checks run, and the checks left to the gate. For CI
-changes, also run the affected gate fixtures. Get the independent review with
-`factoryctl review` (factoryd records the exact-head verdict). An independent reviewer
-reproduces relevant risks. Do not repeat the full suite for each edit,
-reviewer, or enqueue: the protected merge queue checks the actual combined
-tree, widening mixed or uncertain inputs. Agent-posted issue or pull-request
-comments must use `./scripts/gh-comment.sh`; pass the comment body through
-`--body-file` or stdin, never as a command-line argument.
+Run focused tests as you work. factoryd sends a head back if its PR check fails.
 
 ## Writing code: the ponytail ladder
 
@@ -75,6 +58,8 @@ The ladder runs after you understand the problem, not instead of it: read the ta
 Bug fix = root cause, not symptom: a report names a symptom. Grep every caller of the function you touch and fix the shared function once — one guard there is a smaller diff than one per caller, and patching only the path the ticket names leaves a sibling caller still broken.
 
 Rules:
+
+- Issues and Library lessons state observed evidence and a live acceptance signal, and mark inferred causes as hypotheses.
 
 - No abstractions that weren't explicitly requested.
 - No new dependency if it can be avoided.

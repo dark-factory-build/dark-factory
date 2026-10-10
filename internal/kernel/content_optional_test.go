@@ -72,6 +72,7 @@ func traceAdmission(t *testing.T, store *Store, keys AdmissionKeys, at UnixMilli
 }
 
 func TestUnusedProjectContentDoesNotEnterOrdinaryAdmissionPath(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	type observed struct {
 		result    AdmissionResult

@@ -210,7 +210,7 @@ func serve(w http.ResponseWriter, request *http.Request) {
 			t.Fatalf("public world leaks %q: %s", private, first)
 		}
 	}
-	if string(first) != string(second) || !strings.Contains(string(first), `"activity":`) {
+	if string(first) != string(second) || !strings.Contains(string(first), `"rate_per_hour":`) {
 		t.Fatalf("public world unstable or empty: %s", first)
 	}
 	if info, err := os.Stat(filepath.Join(fixture.daemon.home, "public.key")); err != nil || info.Mode().Perm() != 0o600 {

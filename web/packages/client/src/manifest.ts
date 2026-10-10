@@ -13,6 +13,9 @@ export const MAX_TERMINAL_PAYLOAD = 8 * 1024;
 export const TERMINAL_HEADER_BYTES = 40;
 export const MAX_JSON_DEPTH = 16;
 export const MAX_ARRAY_ITEMS = 32;
+/** The daemon admits 1,024 request ids per connection per minute, of any kind
+ * (browser maxRequests); more outstanding at once could never all be answered. */
+export const MAX_OUTSTANDING_REQUESTS = 1024;
 export const MAX_OBJECT_MEMBERS = 32;
 /** Only bounded server observations may exceed MAX_CONTROL_BYTES. */
 export const MAX_SNAPSHOT_BYTES = 1024 * 1024;

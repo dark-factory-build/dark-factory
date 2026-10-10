@@ -6,6 +6,7 @@ import (
 )
 
 func TestProjectRunAllowanceCountsAdmissionsOnce(t *testing.T) {
+	t.Parallel()
 	store, _, project, agent := newAdmissionStore(t, RoleOrchestrator, 1)
 	defer store.Close()
 	ctx := context.Background()
@@ -40,6 +41,7 @@ func TestProjectRunAllowanceCountsAdmissionsOnce(t *testing.T) {
 }
 
 func TestProjectLimitsUseAdditionalAllowanceAndDefaultToDisabled(t *testing.T) {
+	t.Parallel()
 	store, _ := newTestStore(t)
 	defer store.Close()
 	ctx := context.Background()
@@ -68,6 +70,7 @@ func TestProjectLimitsUseAdditionalAllowanceAndDefaultToDisabled(t *testing.T) {
 }
 
 func TestOverseerRunHasBackstopBelowDisabledOrLongerProjectLimit(t *testing.T) {
+	t.Parallel()
 	for _, role := range []AgentRole{RoleOrchestrator, RoleWorker} {
 		t.Run(role.String(), func(t *testing.T) {
 			store, _, project, agent := newAdmissionStore(t, role, 1)
@@ -123,6 +126,7 @@ func TestOverseerRunHasBackstopBelowDisabledOrLongerProjectLimit(t *testing.T) {
 }
 
 func TestAdmissionSkipsExhaustedProjectBeforePriority(t *testing.T) {
+	t.Parallel()
 	for _, role := range []AgentRole{RoleWorker, RoleOrchestrator} {
 		t.Run(role.String(), func(t *testing.T) {
 			store, _, exhausted, exhaustedAgent := newAdmissionStore(t, role, 4)

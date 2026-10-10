@@ -63,6 +63,7 @@ func withLegacyOrchestratorTarget(t *testing.T, store *Store, target RunID, acti
 }
 
 func TestTaskInterventionAttemptReceiptPreventsPendingReplay(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, runningWorker, runningOverseer, overseerKeys := runningWorkerAndOverseer(t)
 	defer store.Close()
@@ -123,6 +124,7 @@ func TestTaskInterventionAttemptReceiptPreventsPendingReplay(t *testing.T) {
 }
 
 func TestOperatorInterventionReservationUsesExactCASAndIdempotency(t *testing.T) {
+	t.Parallel()
 	store, worker, _ := runningOrchestratorRun(t)
 	defer store.Close()
 	task, _, err := store.Task(context.Background(), worker.TaskID)
@@ -147,6 +149,7 @@ func TestOperatorInterventionReservationUsesExactCASAndIdempotency(t *testing.T)
 }
 
 func TestTaskInterventionForAttemptRejectsLegacyOrchestratorTarget(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, worker, overseer, _ := runningWorkerAndOverseer(t)
 	defer store.Close()

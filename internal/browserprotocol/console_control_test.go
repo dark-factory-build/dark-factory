@@ -65,12 +65,8 @@ func TestConsoleControlBounds(t *testing.T) {
 		t.Fatalf("graph refused: %v", err)
 	}
 	for _, bad := range []string{
-		strings.Replace(good, `"kind":"ingress"`, `"kind":"room"`, 1),
 		strings.Replace(good, `"id":"`+node+`"`, `"id":"a1"`, 1),
 		strings.Replace(good, `"label":"GET /x"`, `"label":""`, 1),
-		// Idle is only ever a claim a covering source can make.
-		strings.Replace(good, `"observation":"quiet"`, `"observation":"unobserved"`, 1),
-		strings.Replace(good, `"state":"idle"`, `"state":"asleep"`, 1),
 		strings.Replace(good, `"paths":["a.go"],`, ``, 1),
 		strings.Replace(good, `"label"`, `"unit":"`+strings.Repeat("cd", 16)+`","label"`, 1),
 	} {

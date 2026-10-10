@@ -73,6 +73,14 @@ test("work rows sort attention first and fold a finished task's open PR into one
   assert.deepEqual(workRows(undefined, []), []);
 });
 
+test("an unlinked open PR with no task is still actionable in review", () => {
+  const pr = { visualId: "unlinked", projectId: fixtureState.projects.keys().next().value, repository: "o/r", tasks: [], missions: [], pullRequest: { number: 8, title: "Unlinked change", state: "open", head: "a".repeat(40) }, review: { state: "block" }, checks: [{ state: "completed", conclusion: "failure" }], deliveries: [], reviewers: [], completed: false, completedAt: 0, status: "open", nextAction: "A current-head check is not successful." };
+  const rows = workRows({ ...fixtureState, tasks: new Map(), humanRequests: new Map() }, [pr]);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].state, "in-review");
+  assert.equal(rows[0].pr, pr);
+});
+
 test("home ordering puts active work first and finished work last", () => {
   const ordered = orderTasksForHome(fixtureState).map((item) => item.status);
   assert.deepEqual(ordered, ["running", "queued", "succeeded", "failed"]);

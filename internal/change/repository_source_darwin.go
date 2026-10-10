@@ -7,10 +7,32 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 )
+
+func reviewCheckoutGitError(operation string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("review checkout %s: %w", operation, err)
+}
+
+func reviewCheckoutSSHArgs(result gitCapture) ([]string, error) {
+	if result.exitCode == 1 {
+		return nil, nil
+	}
+	if result.exitCode != 0 {
+		return nil, newGitError(gitFailureProcess)
+	}
+	command := strings.TrimSpace(string(result.output))
+	if command == "" || strings.ContainsAny(command, "\x00\r\n") {
+		return nil, &ValidationError{Reason: "registered SSH command is invalid"}
+	}
+	return []string{"-c", "core.sshCommand=" + command}, nil
+}
 
 // ReviewCheckout makes path a disposable clone checked out at exactly head,
 // the head of ref (a pull request's or a branch's), with base present. The
@@ -34,17 +56,25 @@ func ReviewCheckout(ctx context.Context, gitExecutable, root string, expected Re
 	defer authority.close()
 	actual, err := authority.sourceIdentity(ctx)
 	if err != nil {
-		return err
+		return reviewCheckoutGitError("inspect", err)
 	}
 	if actual.Root != expected.Root || actual.Git != expected.Git || actual.OriginDigest != expected.OriginDigest {
 		return &ValidationError{Reason: "registered checkout identity changed"}
 	}
 	origin, err := authority.succeed(ctx, maxGitSelectionOutput, "-C", root, "remote", "get-url", "--", "origin")
 	if err != nil {
-		return err
+		return reviewCheckoutGitError("remote", err)
+	}
+	sshCommand, err := authority.run(ctx, maxGitSelectionOutput, "-C", root, "config", "--local", "--get", "core.sshCommand")
+	if err != nil {
+		return reviewCheckoutGitError("config", err)
+	}
+	sshArgs, err := reviewCheckoutSSHArgs(sshCommand)
+	if err != nil {
+		return reviewCheckoutGitError("config", err)
 	}
 	if _, err := authority.succeed(ctx, maxGitSelectionOutput, "init", "--quiet", "--", path); err != nil {
-		return err
+		return reviewCheckoutGitError("init", err)
 	}
 	if err := os.WriteFile(filepath.Join(path, ".git", "objects", "info", "alternates"), []byte(filepath.Join(root, ".git", "objects")+"\n"), 0o600); err != nil {
 		return newGitError(gitFailurePrivateIO)
@@ -52,24 +82,25 @@ func ReviewCheckout(ctx context.Context, gitExecutable, root string, expected Re
 	// The origin is the registered, digest-bound remote, so a local-path
 	// origin (a mirror, or a test fixture) is as trusted as a GitHub one.
 	fetch := []string{"-C", path, "-c", "core.hooksPath=/dev/null", "-c", "protocol.file.allow=always", "fetch", "--quiet", "--no-tags", "--no-recurse-submodules", "--no-write-fetch-head", "--no-auto-maintenance", "--end-of-options", strings.TrimSpace(string(origin)), "+refs/heads/" + strings.TrimPrefix(baseRef, "refs/heads/") + ":refs/review/base"}
+	fetch = append(fetch[:4], append(sshArgs, fetch[4:]...)...)
 	checkout := head
 	if ref != "" {
 		fetch, checkout = append(fetch, "+"+ref+":refs/review/head"), "refs/review/head"
 	}
 	if _, err := authority.succeed(ctx, maxGitSelectionOutput, fetch...); err != nil {
-		return err
+		return reviewCheckoutGitError("fetch", err)
 	}
 	if ref == "" {
 		if merged, err := authority.run(ctx, maxGitSelectionOutput, "-C", path, "merge-base", "--is-ancestor", head, "refs/review/base"); err != nil || merged.exitCode != 0 {
-			return errors.Join(&ValidationError{Reason: "commit is not merged into the base"}, err)
+			return errors.Join(&ValidationError{Reason: "commit is not merged into the base"}, reviewCheckoutGitError("merge-base", err))
 		}
 	}
 	if _, err := authority.succeed(ctx, maxGitSelectionOutput, "-C", path, "-c", "core.hooksPath=/dev/null", "checkout", "--quiet", "--detach", checkout); err != nil {
-		return err
+		return reviewCheckoutGitError("checkout", err)
 	}
 	checked, err := authority.run(ctx, maxGitSelectionOutput, "-C", path, "rev-parse", "HEAD^{commit}", base+"^{commit}")
 	if err != nil {
-		return err
+		return reviewCheckoutGitError("rev-parse", err)
 	}
 	if checked.exitCode != 0 || string(checked.output) != head+"\n"+base+"\n" {
 		return &ValidationError{Reason: "pull request head or base differs from the requested review"}

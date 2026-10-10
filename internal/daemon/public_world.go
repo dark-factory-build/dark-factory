@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/dark-factory-build/dark-factory/internal/browser"
@@ -31,7 +32,7 @@ func (backend *browserBackend) PublicWorld(ctx context.Context, rawProject strin
 	daemon := backend.owner
 	graph, err := daemon.PlantGraph(ctx, projectID)
 	if err != nil {
-		return nil, mapBrowserError(err)
+		return nil, err
 	}
 	secret, err := daemon.publicSecret()
 	if err != nil {
@@ -77,7 +78,11 @@ func (backend *browserBackend) PublicWorld(ctx context.Context, rawProject strin
 	if err != nil {
 		return nil, err
 	}
-	world := opgraph.Public(daemon.liveGraph(projectID, graph), secret, workers, crates, daemon.now().UnixMilli())
+	named, err := daemon.publicNames(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
+	world := opgraph.Public(daemon.liveGraph(projectID, graph), secret, workers, crates, named, daemon.now().UnixMilli())
 	world.Ledger = ledger
 	encoded, err := json.Marshal(world)
 	// Past the relay's bound, the oldest merges are listed no more, then the
@@ -108,6 +113,33 @@ type publicFeed struct {
 	sent []byte // nil until the first publish of this run
 	on   any    // the relay connection it was queued on
 	at   time.Time
+}
+
+// publicNames is the set of names that may be published: the IDs and
+// lowercase owner/names of the project's repositories GitHub serves anonymously.
+func (daemon *Daemon) publicNames(ctx context.Context, project kernel.ProjectID) (map[string]bool, error) {
+	repositories, err := daemon.store.ProjectRepositories(ctx, project)
+	if err != nil {
+		return nil, err
+	}
+	ids, names := map[string]string{}, []string{}
+	for _, repository := range repositories {
+		identity, found, err := daemon.store.RepositorySourceIdentity(ctx, repository.ID)
+		if err != nil {
+			return nil, err
+		}
+		if name := strings.ToLower(identity.PublicationRepository); found && name != "" {
+			ids[name] = repository.ID.String()
+			names = append(names, name)
+		}
+	}
+	named := map[string]bool{}
+	for name, entry := range daemon.publicRepositories(names) {
+		if entry.public {
+			named[name], named[ids[name]] = true, true
+		}
+	}
+	return named, nil
 }
 
 // publishPublicWorld publishes the PublicWorld bytes of the project named by

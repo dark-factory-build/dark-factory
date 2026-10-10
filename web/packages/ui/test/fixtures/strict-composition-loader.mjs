@@ -3,6 +3,8 @@ const counters = globalThis.__darkFactoryStrictProbe ??= { clients: 0, states: 0
 export class SessionError extends Error { constructor(code) { super(code); this.name = "SessionError"; this.code = code; this.retryable = false; } }
 export class RemoteDaemonMismatchError extends SessionError { constructor(nodeId) { super("unauthorized"); this.name = "RemoteDaemonMismatchError"; this.nodeId = nodeId; } }
 export class ProtocolError extends Error { constructor(code) { super(code); this.name = "ProtocolError"; this.code = code; } }
+// The graph value sets are the real ones: one definition, never a probe copy.
+export { GRAPH_OBSERVATIONS, GRAPH_RUNTIMES, GRAPH_STATES } from "${new URL("../../../client/dist/src/control.js", import.meta.url).href}";
 export const MAX_SNAPSHOT_ENTITIES = 4096;
 export const MAX_TERMINAL_PAYLOAD = 4096;
 export const MAX_TERMINAL_ROWS = 4096;

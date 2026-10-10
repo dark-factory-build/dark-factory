@@ -39,10 +39,8 @@ type fakeBackend struct {
 	authErr        error
 	authWait       bool
 	stateErr       error
-	stateWait      bool
 	detailErr      error
 	subErr         error
-	subWait        bool
 	subFactory     func() StateSubscription
 	snapshot       browserprotocol.StateSnapshot
 	snapshotFunc   func(int) browserprotocol.StateSnapshot
@@ -119,11 +117,8 @@ func (backend *fakeBackend) StateSnapshot(ctx context.Context, client [16]byte) 
 	backend.mu.Lock()
 	backend.stateCalls++
 	backend.clients = append(backend.clients, client)
-	wait, snapshot, backendErr, snapshotFunc, call := backend.stateWait, backend.snapshot, backend.stateErr, backend.snapshotFunc, backend.stateCalls
+	snapshot, backendErr, snapshotFunc, call := backend.snapshot, backend.stateErr, backend.snapshotFunc, backend.stateCalls
 	backend.mu.Unlock()
-	if wait {
-		<-ctx.Done()
-	}
 	if snapshotFunc != nil {
 		return snapshotFunc(call), backendErr
 	}
@@ -162,11 +157,8 @@ func (backend *fakeBackend) WatchState(ctx context.Context, client [16]byte, _ b
 	backend.mu.Lock()
 	backend.subCalls++
 	backend.clients = append(backend.clients, client)
-	wait, defaultSubscription, factory, err := backend.subWait, backend.sub, backend.subFactory, backend.subErr
+	defaultSubscription, factory, err := backend.sub, backend.subFactory, backend.subErr
 	backend.mu.Unlock()
-	if wait {
-		<-ctx.Done()
-	}
 	var subscription StateSubscription = defaultSubscription
 	if factory != nil {
 		subscription = factory()
@@ -896,7 +888,7 @@ func startHeldClockServer(t *testing.T, backend Backend) (*Server, *atomic.Int64
 	if err != nil {
 		t.Fatal(err)
 	}
-	server := start(backend, map[string]struct{}{testOrigin: {}, devOrigin: {}}, listener, func() time.Time { return time.Unix(0, clock.Load()) })
+	server := start(backend, map[string]struct{}{testOrigin: {}, devOrigin: {}}, nil, listener, func() time.Time { return time.Unix(0, clock.Load()) })
 	t.Cleanup(func() {
 		if err := server.Close(); err != nil {
 			t.Errorf("close: %v", err)

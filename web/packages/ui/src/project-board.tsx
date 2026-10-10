@@ -90,10 +90,10 @@ export function useKnowledgeActivity(projects: readonly string[], call: ProjectC
 
 /** The floor's list of recorded operations: the keyboard path, and the only one for agents not drawn. */
 export function KnowledgeActivityList({ items, state, onOpen }: { items: readonly KnowledgeActivity[]; state?: StateView; onOpen?: (item: KnowledgeActivity) => void }) {
-  return <details className="dfKnowledgeActivity"><summary>Activity · {items.length}</summary>
+  return <details className="dfKnowledgeActivity" name="floor-tools"><summary>Activity · {items.length}</summary><div className="dfFloorMenu__body">
     <p>Recorded Board and Library operations. A read records the text served, not understanding.</p>
     {items.length === 0 ? <p>No recorded activity yet.</p> : <ul>{items.map((item) => <li key={item.key}><button type="button" disabled={!onOpen} onClick={() => onOpen?.(item)}>{activityLabel(item, state)}</button> <small>{onBoard(item) ? "Board" : "Library"}</small></li>)}</ul>}
-  </details>;
+  </div></details>;
 }
 
 /**

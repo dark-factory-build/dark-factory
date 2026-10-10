@@ -62,7 +62,6 @@
 }
 
 .dfFactoryConsole__header,
-.dfFactoryConsole__sectionHeading,
 .dfFactoryConsole__cardTitle {
   display: flex;
   align-items: baseline;
@@ -79,7 +78,6 @@
 }
 
 .dfFactoryConsole__eyebrow,
-.dfFactoryConsole__sectionHeading,
 .dfFactoryConsole__card p,
 .dfFactoryConsole__card small,
 .dfFactoryConsole__status,
@@ -89,7 +87,6 @@
 .dfFactoryConsole__reply label { font-size: var(--df-text-sm); letter-spacing: 0.02em; }
 
 .dfFactoryConsole__eyebrow,
-.dfFactoryConsole__sectionHeading span,
 .dfFactoryConsole__card p,
 .dfFactoryConsole__card small {
   color: var(--df-console-muted);
@@ -196,13 +193,6 @@
   background: var(--df-console-surface);
   border: 1px solid var(--df-console-rule);
 }
-
-.dfFactoryConsole__sectionHeading {
-  margin-bottom: 1rem;
-  padding-bottom: 0.7rem;
-  border-bottom: 1px solid var(--df-console-rule);
-}
-
 
 .dfFactoryConsole__list {
   display: grid;
@@ -426,14 +416,12 @@
   font-size: var(--df-text-xs);
 }
 
-.dfFactoryConsole__pairPhone .dfFactoryConsole__sectionHeading { width: 100%; margin-top: 0.5rem; }
 .dfFactoryConsole__devices { display: grid; gap: 0.4rem; width: 100%; margin: 0; padding: 0; list-style: none; }
 .dfFactoryConsole__device { display: flex; flex-wrap: wrap; align-items: center; gap: 0.6rem; }
 .dfFactoryConsole__deviceSince { color: var(--df-console-muted); }
 
 @media (max-width: 720px) {
-  .dfFactoryConsole__header,
-  .dfFactoryConsole__sectionHeading { align-items: flex-start; flex-direction: column; }
+  .dfFactoryConsole__header { align-items: flex-start; flex-direction: column; }
   .dfFactoryConsole__connection { justify-items: start; }
 }
 
@@ -539,8 +527,7 @@
 .dfConsoleRow__agent { flex: 0 1 auto; min-width: 0; overflow-wrap: anywhere; color: var(--df-console-muted); font-size: var(--df-text-xs); }
 
 /* single screen ------------------------------------------------------------
-   One screen: the floor or the agent list on the left, what needs you on the
-   right, and one sidebar that replaces the right column while it is open.
+   One screen: the floor on the left, work and agent controls on the right.
    ------------------------------------------------------------------------ */
 
 .dfFactoryConsole__header { flex-wrap: wrap; }
@@ -574,7 +561,10 @@
 }
 
 .dfConsoleLayout .dfFactoryConsole__section { margin: 0; }
-.dfConsoleLayout__left { min-width: 0; }
+.dfConsoleLayout__left { min-width: 0; padding: 0; }
+.dfFactoryFloor { height: 100%; min-height: 0; }
+.dfFactoryFloor__scene { position: relative; display: flex; flex-direction: column; height: min(80svh, 800px); min-height: 0; }
+.dfFactoryFloor > .dfFactoryFloor__scene { height: 100%; }
 
 .dfConsoleSidebar__feedback { white-space: pre-wrap; overflow-wrap: anywhere; }
 
@@ -699,7 +689,7 @@ summary.dfConsoleItem__summary { cursor: pointer; }
   .dfFactoryConsole__header,
   .dfConsoleLayout { width: 100%; }
   .dfConsoleLayout { flex: 1 1 auto; min-height: 0; }
-  .dfConsoleLayout__left,
+  .dfConsoleLayout__left { min-height: 0; overflow: hidden; }
   .dfConsoleSidebar { min-height: 0; overflow-y: auto; }
   .dfConsoleSidebar { position: static; align-self: stretch; max-height: none; }
 }
@@ -742,30 +732,29 @@ summary.dfConsoleItem__summary { cursor: pointer; }
 
 @media (max-width: 1024px) {
   .dfConsoleLayout { grid-template-columns: minmax(0, 1fr); }
-  .dfFactoryConsole { display: block; height: auto; overflow: visible; }
-  .dfConsoleSidebar { position: static; max-height: none; }
+  .dfFactoryConsole { display: flex; flex-direction: column; height: 100svh; min-height: 0; overflow: hidden; }
+  .dfConsoleLayout { flex: 1; min-height: 0; width: 100%; }
+  .dfConsoleLayout__left { min-height: 0; overflow: hidden; }
+  .dfConsoleSidebar { position: static; max-height: 100%; min-height: 0; }
 }
 
-.dfFactoryFloor__map { overflow: auto; max-height: 70vh; scrollbar-color: #638095 #17252f; }
+/* A fixed pane the whole floor is fitted into; zooming in scrolls it. */
+.dfFactoryFloor__map { position: absolute; inset: 0; overflow: auto; height: 100%; scrollbar-color: #638095 #17252f; }
 /* The plant overview stays in the floor's corner whatever is zoomed or scrolled. */
-.dfFactoryFloor__viewport { position: relative; }
+.dfFactoryFloor__viewport { position: relative; flex: 1; min-height: 0; }
 .dfPlantOverview { position: absolute; right: .75rem; bottom: .75rem; max-width: 40%; display: grid; gap: .25rem; justify-items: end; }
 .dfPlantOverview__zoom { display: flex; gap: .25rem; }
 .dfPlantOverview__zoom button { padding: .25rem; line-height: 0; background: #122027; }
+.dfPlantOverview__zoom .dfPlantOverview__toggle { min-width: 1.75rem; line-height: 1; font: 11px ui-monospace, monospace; }
 .dfPlantMap { display: block; max-width: 100%; height: auto; background: #08131d; border: 1px solid #3c5051; box-shadow: 0 2px 8px rgba(0, 0, 0, .5); cursor: crosshair; touch-action: none; shape-rendering: crispEdges; }
 .dfPlantMap__ground { fill: #08131d; }
-.dfPlantMap__room { fill: #2a3437; stroke: #08131d; stroke-width: 6; }
-.dfPlantMap__room.s-observed, .dfPlantMap__room.s-quiet { fill: #2f6b4a; }
-.dfPlantMap__room.s-partial { fill: #6b5a24; }
-.dfPlantMap__room.s-unobserved { fill: #262e36; }
-.dfPlantMap__room.s-stale { fill: #3a3f45; }
-.dfPlantMap__room.op-degraded { stroke: #f2c94c; }
-.dfPlantMap__room.op-failing { stroke: #ff5f56; }
-.dfPlantMap__room--yard { fill: #2a3437; }
-.dfPlantMap__room--quarantine { fill: #1b1f25; stroke: #e6b93a; stroke-dasharray: 12 8; }
-.dfPlantMap__fence { stroke: #6d7782; stroke-width: 4; stroke-dasharray: 10 6; }
-.dfPlantMap__gate { fill: #4a515b; }
-.dfPlantMap__gate.s-observed, .dfPlantMap__gate.s-quiet { fill: #5ad38a; }
+.dfPlantMap__station { fill: #4a515b; }
+.dfPlantMap__station.s-observed, .dfPlantMap__station.s-quiet { fill: #5ad38a; }
+.dfPlantMap__station.s-partial { fill: #c9a640; }
+.dfPlantMap__station.s-stale { fill: #3a3f45; }
+.dfPlantMap__station.op-degraded { fill: #f2c94c; }
+.dfPlantMap__station.op-failing { fill: #ff5f56; }
+.dfPlantMap__station--external { stroke: #8f99a6; stroke-width: 4; }
 .dfPlantMap__worker { fill: #e5d5ad; }
 .dfPlantMap__worker--needs { fill: #f2c94c; }
 .dfPlantMap__view { fill: rgba(128, 221, 255, .08); stroke: #80ddff; stroke-width: 6; pointer-events: none; }
@@ -831,29 +820,40 @@ summary.dfConsoleItem__summary { cursor: pointer; }
 .dfMissions textarea { display: block; width: 100%; min-height: 6rem; padding: 0.65rem; resize: vertical; color: var(--df-console-text); background: var(--df-console-background); border: 1px solid var(--df-console-rule); font: inherit; }
 
 /* One floor: source search, projection controls and proposal selection stay reachable. */
-.dfFactoryEntityTools { display: flex; align-items: baseline; flex-wrap: wrap; gap: .5rem; padding: .5rem; background: #122027; border-bottom: 1px solid #3c5051; }
+.dfFactoryEntityTools { display: flex; flex: none; align-items: center; gap: .6rem; height: 2.75rem; padding: .35rem .6rem; overflow-x: auto; white-space: nowrap; font-size: var(--df-text-xs); background: #122027; border-bottom: 1px solid #3c5051; }
+.dfFactoryEntityTools > * { flex: none; }
+.dfWorkLine { display: flex; align-items: center; gap: .6rem; }
+.dfWorkLine strong { color: #edba6b; font-variant-numeric: tabular-nums; }
+.dfWorkLine__crate { display: inline-block; width: .65rem; height: .5rem; margin-right: .5rem; background: #d98a3a; border: 1px solid #f5bf73; }
+.dfWorkLine [data-fault] .dfWorkLine__crate { border-color: #f77b70; }
+:is(.dfFloorMenu, .dfKnowledgeActivity) > summary { cursor: pointer; }
+:is(.dfFloorMenu, .dfKnowledgeActivity)[open] > summary { color: var(--df-console-accent); }
+.dfFactoryEntityTools .dfFloorMenu__body { position: absolute; z-index: 10; top: 2.75rem; left: .5rem; right: .5rem; max-height: min(24rem, 55svh); overflow: auto; padding: .75rem; white-space: normal; background: #122027; border: 1px solid #3c5051; box-shadow: 0 6px 16px #0008; }
+.dfFloorMenu__body button { display: block; width: 100%; text-align: left; }
+.dfFloorMenu__body > * + * { margin-top: .4rem; }
 .dfFactoryEntityTools label { display: flex; align-items: center; gap: .5rem; flex: 1 1 24rem; }
 .dfFactoryEntityTools input { width: 100%; min-width: 0; flex: 1; color: inherit; background: var(--df-console-background); border: 1px solid var(--df-console-rule); padding: .5rem; font: inherit; }
 .dfFactoryEntityTools__results { order: 1; flex-basis: 100%; display: flex; flex-wrap: wrap; gap: .4rem; max-height: 9rem; overflow: auto; }
 .dfFactoryEntityTools__results button { max-width: 100%; overflow-wrap: anywhere; font-size: var(--df-text-xs); }
 .dfFactoryEntityTools__notice { flex-basis: 100%; display: flex; align-items: baseline; flex-wrap: wrap; gap: .4rem; margin: 0; font-size: var(--df-text-xs); }
 .dfFactoryEntityTools__selection { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: min(100%, 32rem); }
-.dfKnowledgeActivity[open] { flex-basis: 100%; overflow-wrap: anywhere; }
+.dfKnowledgeActivity { overflow-wrap: anywhere; }
 .dfKnowledgeActivity ul, .dfBoardQuestions ul { list-style: none; margin: .4rem 0; padding: 0; display: grid; gap: .35rem; }
 .dfKnowledgeActivity button { max-width: 100%; overflow-wrap: anywhere; text-align: left; }
 /* A recorded operation appears once, briefly; ambient life never uses this mark. */
 .dfKnowledgeCue { animation: dfKnowledgeCue 400ms ease-out both; }
 @keyframes dfKnowledgeCue { from { opacity: 0; } to { opacity: 1; } }
 @media (prefers-reduced-motion: reduce) { .dfKnowledgeCue { animation: none; } }
-.dfRoomDetails { padding-top: .75rem; }
-.dfRoomDetails table { font-size: var(--df-text-xs); }
-.dfRoomDetails td, .dfRoomDetails th { overflow-wrap: normal; text-align: left; padding: .25rem .65rem .25rem 0; vertical-align: top; }
-.dfRoomDetails > button { margin: .25rem .35rem .5rem 0; }
-.dfRoomDetails button { max-width: 100%; overflow-wrap: anywhere; }
+.dfMachineInspector { position: absolute; z-index: 5; bottom: 0; left: 0; right: 0; max-height: 55%; overflow: auto; padding: .75rem; background: var(--df-console-surface); border-top: 1px solid var(--df-console-rule); }
+.dfMachineInspector table { font-size: var(--df-text-xs); }
+.dfMachineInspector td, .dfMachineInspector th { overflow-wrap: normal; text-align: left; padding: .25rem .65rem .25rem 0; vertical-align: top; }
+.dfMachineInspector > button { margin: .25rem .35rem .5rem 0; }
+.dfMachineInspector button { max-width: 100%; overflow-wrap: anywhere; }
+.dfMachineInspector__members { max-height: 16rem; overflow: auto; padding: 0; list-style: none; display: grid; gap: .25rem; justify-items: start; }
 
 /* Source identity is exact, including on phone-sized inspectors. */
 .dfFactoryFloor [role="status"], .dfFactoryFloor code, .dfProduction code { overflow-wrap: anywhere; word-break: break-word; }
-.dfFactoryFloor section, .dfRoomDetails, .dfProduction__detail { min-width: 0; }
+.dfFactoryFloor section, .dfMachineInspector, .dfProduction__detail { min-width: 0; }
 
 .dfProduction table { table-layout: fixed; width: 100%; font-size: var(--df-text-xs); }
 .dfProduction table th:first-child { width: 6rem; white-space: nowrap; }
@@ -872,9 +872,9 @@ summary.dfConsoleItem__summary { cursor: pointer; }
 .dfProduction__notice { border: 1px solid var(--df-console-rule); padding: .35rem .45rem; }
 .dfProduction__notice p { margin-top: .4rem; }
 .dfProduction__detail { min-width: 0; overflow-wrap: anywhere; }
-.dfWorkBar { display: flex; flex-wrap: wrap; gap: .25rem; align-items: center; margin-block: .6rem; }
+.dfWorkBar { display: flex; flex-wrap: nowrap; gap: .25rem; align-items: center; margin-block: .6rem; overflow-x: auto; }
 .dfWorkBar .dfConsoleRecentWork { margin: 0; padding: 0; border: 0; }
-.dfWorkBar .dfConsoleViewToggle { flex: 0 1 auto; }
+.dfWorkBar .dfConsoleViewToggle { flex: 0 0 auto; flex-wrap: nowrap; }
 .dfWorkBar > button, .dfWorkBar .dfConsoleRecentWork button { padding-inline: .4rem; }
 .dfWorkRow__head { position: relative; padding: .7rem; overflow-wrap: anywhere; }
 .dfWorkRow__head .dfConsoleItem__meta { margin-top: .3rem; }
@@ -908,7 +908,6 @@ summary.dfConsoleItem__summary { cursor: pointer; }
 }
 
 .dfRemote .dfFactoryConsole__eyebrow,
-.dfRemote .dfFactoryConsole__sectionHeading,
 .dfRemote .dfFactoryConsole__card p,
 .dfRemote .dfFactoryConsole__card small,
 .dfRemote button,
@@ -1257,15 +1256,12 @@ summary.dfConsoleItem__summary { cursor: pointer; }
 .dfPlant {
   --metal: #687282; --metal2: #454c57; --metalhi: #909aa8; --win: #0e1115; --outline: #0b0b0b;
   --belt: #0e1013; --item: #e0843a; --ok: #5ad38a; --amber: #f2c94c; --red: #ff5f56; --lampoff: #2c3139;
-  --bp: #4cc3e6; --unknown: #7f93a8; --plate: #e5d5ad; --plateink: #191d24; --label: #c4c9d0; --hazard: #e6b93a; --shadow: rgba(0, 0, 0, .45);
+  --bp: #4cc3e6; --unknown: #7f93a8; --label: #c4c9d0; --hazard: #e6b93a; --shadow: rgba(0, 0, 0, .45);
   shape-rendering: crispEdges;
 }
 .dfPlant text { font-family: ui-monospace, monospace; }
-.dfPlant__heading { fill: #b9cad5; font-weight: 700; text-transform: uppercase; letter-spacing: .08em; }
 .dfPlant__label { fill: var(--label); }
 .dfPlant__small { fill: #8f99a6; }
-.dfPlant__plate { fill: var(--plate); stroke: var(--outline); }
-.dfPlant__plateText { fill: var(--plateink); font-weight: 700; }
 .dfPlant .shd { fill: var(--shadow); }
 .dfPlant .m { fill: var(--metal); stroke: var(--outline); stroke-width: 1; }
 .dfPlant .md { fill: var(--metal2); }
@@ -1296,7 +1292,19 @@ summary.dfConsoleItem__summary { cursor: pointer; }
 .dfPlant__gate { fill: var(--metal2); stroke: var(--outline); }
 .dfPlant .s-opaque .dfPlant__gate { fill: url(#df-fog); }
 .dfPlant__gate--runtime { stroke: var(--amber); stroke-dasharray: 2 2; }
-.dfPlant__fence { stroke: #59616e; stroke-width: 3; stroke-dasharray: 6 3; fill: none; }
+/* The outbound line's block: on the shared floor, not a room. */
+/* A belt lies on a dark casing, so one belt crossing another reads as passing over it, never as joining it. */
+.dfPlant__casing { fill: none; stroke: #08131d; stroke-width: 9; stroke-linejoin: round; }
+.dfPlant__casing--lit { stroke: #80ddff; opacity: .55; }
+.dfPlant__junction { fill: var(--metalhi); stroke: var(--outline); }
+/* An overhead link: a connection no belt could be laid for, drawn faint and dashed round machines and labels. */
+.dfPlant__link { fill: none; stroke: #9db1be; stroke-width: 1.5; stroke-dasharray: 2 4; opacity: .7; }
+.dfPlant__link--lit { stroke: #80ddff; opacity: 1; }
+/* A crossing is a bridge: a deck over the lower belt with a rail each side, never a dot. */
+.dfPlant__bridgeDeck { fill: var(--belt); }
+.dfPlant__bridgeRail { stroke: var(--metalhi); stroke-width: 1.5; fill: none; }
+.dfPlant__regionEdge { fill: none; stroke-width: 1; }
+.dfPlant__regionLabel { fill: #9db1be; letter-spacing: .04em; }
 .dfPlant .b-base { fill: none; stroke: var(--belt); stroke-width: 6; stroke-linejoin: miter; }
 .dfPlant .b-inf { fill: none; stroke: var(--unknown); stroke-width: 1.5; stroke-dasharray: 4 3; opacity: .45; }
 .dfPlant__material { fill: none; stroke: var(--item); stroke-width: 4; }

@@ -1,8 +1,10 @@
 #!/bin/sh
 # One repository-wide local-CI lock, shared by every checkout of this
-# repository. lockf blocks until the lock is free and the kernel releases it
-# when the holder exits, so there is no stale state to detect or recover.
+# repository. lockf (flock on Linux) blocks until the lock is free and the
+# kernel releases it when the holder exits, so there is no stale state to
+# detect or recover.
 set -eu
+lock="lockf -k"; [ "$(uname -s)" != Linux ] || lock=flock
 
 [ "$#" -gt 0 ] || { echo "local-ci: lease wrapper requires a command" >&2; exit 64; }
 [ "${DARK_FACTORY_LOCAL_CI_LEASE_HELD-}" != 1 ] || {
@@ -20,4 +22,15 @@ if [ -z "$lease_dir" ]; then
 fi
 (umask 077 && mkdir -p "$lease_dir/.dark-factory-local-ci.lock")
 export DARK_FACTORY_LOCAL_CI_LEASE_HELD=1
-exec lockf -k "$lease_dir/.dark-factory-local-ci.lock/descriptor" "$@"
+lease_log=$lease_dir/.dark-factory-local-ci.lock/lease.log
+lease_requested_at=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+export lease_log lease_requested_at
+exec $lock "$lease_dir/.dark-factory-local-ci.lock/descriptor" sh -c '
+    lease_acquired_at=$(date -u "+%Y-%m-%dT%H:%M:%SZ")
+    lease_status=0
+    "$@" || lease_status=$?
+    lease_released_at=$(date -u "+%Y-%m-%dT%H:%M:%SZ")
+    printf "command=%s requested_at=%s acquired_at=%s released_at=%s\\n" \
+        "$*" "$lease_requested_at" "$lease_acquired_at" "$lease_released_at" >>"$lease_log"
+    exit "$lease_status"
+' sh "$@"

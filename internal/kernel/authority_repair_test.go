@@ -8,6 +8,7 @@ import (
 )
 
 func TestRunningAuthorityRejectsCorruptTaskRelationships(t *testing.T) {
+	t.Parallel()
 	tests := map[string]string{
 		"queued state":        `UPDATE tasks SET status = 'queued'`,
 		"terminal state":      `UPDATE tasks SET status = 'failed', completed_at_ms = 99`,
@@ -35,6 +36,7 @@ func TestRunningAuthorityRejectsCorruptTaskRelationships(t *testing.T) {
 }
 
 func TestRunningAuthorityRejectsCorruptChangeRelationships(t *testing.T) {
+	t.Parallel()
 	tests := map[string]string{
 		"project":     `UPDATE changes SET project_id = X'94949494949494949494949494949494'`,
 		"task":        `UPDATE changes SET task_id = X'95959595959595959595959595959595'`,
@@ -51,6 +53,7 @@ func TestRunningAuthorityRejectsCorruptChangeRelationships(t *testing.T) {
 }
 
 func TestTerminalRunRejectsMismatchedTaskOutcome(t *testing.T) {
+	t.Parallel()
 	proposal, _ := NewSuccessProposal("verified result")
 	store, finalizing := finalizingReleasedRun(t, RoleOrchestrator, proposal)
 	path := storePath(t, store)
@@ -77,6 +80,7 @@ func TestTerminalRunRejectsMismatchedTaskOutcome(t *testing.T) {
 }
 
 func TestAdmissionRejectsOverlapWithDurableRuntime(t *testing.T) {
+	t.Parallel()
 	store, _, project, firstAgent := newAdmissionStore(t, RoleWorker, 4)
 	defer store.Close()
 	_, _ = store.EnqueueTask(context.Background(), NewTask{ID: taskID(t, 190), ProjectID: project.ID, AssignedAgentID: firstAgent.ID, IncarnationID: incarnationID(t, 191), Title: "first"}, mustTime(t, 5))
@@ -122,6 +126,7 @@ func TestAdmissionRejectsOverlapWithDurableRuntime(t *testing.T) {
 }
 
 func TestInjectedRuntimeOwnershipOverlapFailsReadsAndOpen(t *testing.T) {
+	t.Parallel()
 	store, _, project, firstAgent := newAdmissionStore(t, RoleWorker, 4)
 	path := storePath(t, store)
 	if _, err := store.EnqueueTask(context.Background(), NewTask{ID: taskID(t, 201), ProjectID: project.ID, AssignedAgentID: firstAgent.ID, IncarnationID: incarnationID(t, 202), Title: "first"}, mustTime(t, 5)); err != nil {

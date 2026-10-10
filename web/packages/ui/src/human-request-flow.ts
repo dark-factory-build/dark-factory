@@ -27,6 +27,8 @@ export type HumanRequestFlowOptions<Scope> = Readonly<{
   unavailableNotice?: string;
   unavailableError?: SessionError | ProtocolError;
   absentNotice?: string;
+  /** A read that failed for any reason but the request being gone: open it again. */
+  loadFailureNotice?: string;
   actionFailureNotice?: (error: unknown) => string | undefined;
 }>;
 
@@ -115,7 +117,9 @@ export class HumanRequestFlow<Scope> {
       },
       (error) => {
         if (!this.#owns(next, session)) { this.#fence(next); return; }
-        this.#end(next, notice ?? this.#options.absentNotice, error);
+        // Only the factory saying the request is gone means it is no longer open.
+        const gone = error instanceof SessionError && (error.code === "not_found" || error.code === "stale");
+        this.#end(next, notice ?? (gone ? this.#options.absentNotice : this.#options.loadFailureNotice), error);
       },
     );
   }

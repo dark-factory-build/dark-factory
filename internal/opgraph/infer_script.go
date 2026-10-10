@@ -104,14 +104,14 @@ func (x *script) route(method, route string, found Evidence, at span) {
 		method = ""
 	}
 	x.run.find(finding{owner: x.owner(), kind: Ingress, key: "http:" + strings.TrimSpace(method+" "+route), label: strings.TrimSpace(method + " " + route),
-		trigger: "request", edge: Handles, selectors: map[string]string{"http.request.method": method, "http.route": route}, evidence: found, at: x.at(at)})
+		trigger: TriggerRequest, edge: Handles, selectors: map[string]string{"http.request.method": method, "http.route": route}, evidence: found, at: x.at(at)})
 }
 
 // function is a job (a background worker) or a timer ingress named by code.
 func (x *script) function(kind Kind, name string, found Evidence, at span) {
-	edge, trigger := Runs, ""
+	edge, trigger := Runs, Trigger("")
 	if kind == Ingress {
-		edge, trigger = Handles, "timer"
+		edge, trigger = Handles, TriggerTimer
 	}
 	x.run.find(finding{owner: x.owner(), kind: kind, key: "fn:" + name, label: name, trigger: trigger, edge: edge,
 		selectors: map[string]string{"code.function.name": name}, evidence: found, at: x.at(at)})
@@ -316,7 +316,7 @@ func (x *script) javascript(nextRoots []string) {
 		switch {
 		case cron && (call.name == "schedule" || call.name == "CronJob") && len(call.args) > 0:
 			if schedule, ok := x.str(call.args[0]); ok {
-				x.run.find(finding{owner: x.owner(), kind: Ingress, key: "cron:" + schedule, label: "cron " + schedule, trigger: "timer", edge: Handles,
+				x.run.find(finding{owner: x.owner(), kind: Ingress, key: "cron:" + schedule, label: "cron " + schedule, trigger: TriggerTimer, edge: Handles,
 					evidence: evidence(true, call.name), at: x.at(call.span)})
 			}
 		case call.name == "setInterval" && call.object == "" && !x.browser:
@@ -382,7 +382,7 @@ func (run *inference) nextRoute(repo, root, name string, exports []string) {
 	at := Location{Repository: repo, Path: name}
 	for _, method := range methods {
 		run.find(finding{owner: owner{repo: repo, file: name}, kind: Ingress, key: "http:" + strings.TrimSpace(method+" "+route),
-			label: strings.TrimSpace(method + " " + route), trigger: "request", edge: Handles,
+			label: strings.TrimSpace(method + " " + route), trigger: TriggerRequest, edge: Handles,
 			selectors: map[string]string{"http.request.method": method, "http.route": route},
 			evidence:  static("nextjs", "file convention", Declared), at: at})
 	}
@@ -846,7 +846,7 @@ func (x *script) springApplication() {
 	if root == "." {
 		label = x.repository.Name
 	}
-	x.run.addUnit(unit{repo: x.repository.ID, root: root, key: "spring:" + root, label: label, runtime: "process", role: "web",
+	x.run.addUnit(unit{repo: x.repository.ID, root: root, key: "spring:" + root, label: label, runtime: RuntimeProcess, role: "web",
 		names: []string{label}, evidence: static("spring", "@SpringBootApplication", Declared), at: Location{Repository: x.repository.ID, Path: x.file}})
 }
 

@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test, { mock } from "node:test";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { SessionError } from "@dark-factory/client";
+import { FactoryConsole } from "../dist/src/index.js";
 import { FactoryAppController } from "../dist/src/factory-app-controller.js";
 import { fixtureGraph, fixtureState } from "../../../fixtures/state.mjs";
 
@@ -764,6 +767,33 @@ test("every project's operational graph is fetched, kept by id, and refreshed wh
   // A floor belongs to its project; when that project is gone, so is it.
   context.emitState({ ...fixtureState, projects: new Map([[projects[0], fixtureState.projects.get(projects[0])]]) });
   assert.deepEqual([...context.latest().graphs.keys()], [projects[0]]);
+});
+
+test("a refused graph read shows the plant unavailable with its code, not still reading", async () => {
+  const context = harness({ getOperationalGraph: async () => { throw new SessionError("internal"); } });
+  context.controller.start();
+  context.emitState(fixtureState);
+  context.emitStatus("ready");
+  context.controller.loadGraphs();
+  await settle();
+  const markup = renderToStaticMarkup(createElement(FactoryConsole, { ...context.latest(), view: "floor" }));
+  assert.match(markup, /PLANT UNAVAILABLE · .*internal/);
+  assert.doesNotMatch(markup, /READING THE PLANT/);
+});
+
+test("one refused project is marked while the others are drawn, and forgotten with its project", async () => {
+  const [served, refused] = [...fixtureState.projects.keys()];
+  const context = harness({ getOperationalGraph: async (id) => { if (id === refused) throw new SessionError("not_found"); return graphOf(id, "ab".repeat(32)); } });
+  context.controller.start();
+  context.emitState(fixtureState);
+  context.emitStatus("ready");
+  context.controller.loadGraphs();
+  await settle();
+  const markup = renderToStaticMarkup(createElement(FactoryConsole, { ...context.latest(), view: "floor" }));
+  assert.ok(markup.includes(`Plant unavailable: ${fixtureState.projects.get(refused).name} · not_found`), "the refused project is named with its code");
+  assert.doesNotMatch(markup, /PLANT UNAVAILABLE|READING THE PLANT/, "the served project's machines are still drawn");
+  context.emitState({ ...fixtureState, projects: new Map([[served, fixtureState.projects.get(served)]]) });
+  assert.deepEqual([...context.latest().graphErrors.keys()], []);
 });
 
 test("a graph answer that outlives its controller or its project is never kept", async () => {

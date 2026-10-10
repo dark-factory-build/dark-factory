@@ -62,7 +62,7 @@ func (backend *browserBackend) WatchState(ctx context.Context, rawClient [browse
 	state, headErr := backend.store.Factory(ctx)
 	release()
 	if headErr != nil {
-		return nil, mapBrowserError(headErr)
+		return nil, headErr
 	}
 	// A watcher can only ever announce a head the durable store has reached, so
 	// an after_head above the current head would install a producer that never
@@ -174,7 +174,7 @@ func (backend *browserBackend) observe(ctx context.Context, done chan struct{}, 
 		if err != nil {
 			watches := backend.snapshotSubscriptions()
 			for _, watch := range watches {
-				backend.finishWatch(watch, mapBrowserError(err))
+				backend.finishWatch(watch, err)
 			}
 			continue
 		}

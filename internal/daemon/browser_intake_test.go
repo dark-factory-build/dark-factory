@@ -62,7 +62,7 @@ func TestBrowserIntakePreviewAllowsStateAndRevocationDuringRemoteRead(t *testing
 		t.Fatalf("revocation stalled behind remote preview: %v", err)
 	}
 	close(release)
-	if err := <-result; !errors.Is(err, browser.ErrUnauthorized) {
+	if err := <-result; !errors.Is(mapBrowserError(err), browser.ErrUnauthorized) {
 		t.Fatalf("revoked preview exposed private result: %v", err)
 	}
 }
@@ -100,7 +100,7 @@ func TestBrowserRemoteSettingsAllowRevocationAndHideResults(t *testing.T) {
 				t.Fatalf("revocation stalled behind %s: %v", call.name, err)
 			}
 			close(release)
-			if err := <-result; !errors.Is(err, browser.ErrUnauthorized) {
+			if err := <-result; !errors.Is(mapBrowserError(err), browser.ErrUnauthorized) {
 				t.Fatalf("revoked %s exposed a private result: %v", call.name, err)
 			}
 		})

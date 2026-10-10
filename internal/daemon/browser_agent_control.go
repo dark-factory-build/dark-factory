@@ -56,7 +56,7 @@ func (backend *browserBackend) ControlAgent(ctx context.Context, principal brows
 			}
 			current, found, readErr := backend.store.Task(ctx, task)
 			if readErr != nil {
-				return browserprotocol.AgentControlResult{}, mapBrowserError(readErr)
+				return browserprotocol.AgentControlResult{}, readErr
 			}
 			if !found {
 				return browserprotocol.AgentControlResult{}, browser.ErrNotFound
@@ -68,12 +68,12 @@ func (backend *browserBackend) ControlAgent(ctx context.Context, principal brows
 		}
 		at, timeErr := backend.timestamp()
 		if timeErr != nil {
-			return browserprotocol.AgentControlResult{}, mapBrowserError(timeErr)
+			return browserprotocol.AgentControlResult{}, timeErr
 		}
 		receipt, err = backend.store.StopRunForBrowser(ctx, clientID, spec, successor, at)
 	}
 	if err != nil {
-		return browserprotocol.AgentControlResult{}, mapBrowserError(err)
+		return browserprotocol.AgentControlResult{}, err
 	}
 	backend.owner.notifyScheduler()
 	result := browserprotocol.AgentControlResult{OperationID: request.OperationID, TaskID: request.TaskID, RunID: request.RunID}
@@ -109,14 +109,14 @@ func (backend *browserBackend) TaskHistory(ctx context.Context, rawClient [brows
 	}
 	task, found, err := backend.store.Task(ctx, taskID)
 	if err != nil {
-		return browserprotocol.TaskHistory{}, mapBrowserError(err)
+		return browserprotocol.TaskHistory{}, err
 	}
 	if !found {
 		return browserprotocol.TaskHistory{}, browser.ErrNotFound
 	}
 	history, err := backend.store.TaskInterventions(ctx, task.ProjectID, taskID)
 	if err != nil {
-		return browserprotocol.TaskHistory{}, mapBrowserError(err)
+		return browserprotocol.TaskHistory{}, err
 	}
 	result := browserprotocol.TaskHistory{TaskID: request.TaskID, Entries: []browserprotocol.TaskHistoryEntry{}}
 	for _, item := range history {
@@ -137,7 +137,7 @@ func (backend *browserBackend) TaskHistory(ctx context.Context, rawClient [brows
 			result.Entries = result.Entries[:len(result.Entries)-1]
 			break
 		} else if err != nil {
-			return browserprotocol.TaskHistory{}, mapBrowserError(err)
+			return browserprotocol.TaskHistory{}, err
 		}
 	}
 	return result, nil
@@ -173,13 +173,13 @@ func (backend *browserBackend) TaskDetail(ctx context.Context, rawClient [browse
 	} else {
 		state, err := backend.store.Factory(ctx)
 		if err != nil {
-			return browserprotocol.TaskDetail{}, mapBrowserError(err)
+			return browserprotocol.TaskDetail{}, err
 		}
 		expectedHead = state.Head
 	}
 	task, found, err := backend.store.Task(ctx, taskID)
 	if err != nil {
-		return browserprotocol.TaskDetail{}, mapBrowserError(err)
+		return browserprotocol.TaskDetail{}, err
 	}
 	if !found {
 		return browserprotocol.TaskDetail{}, browser.ErrNotFound
@@ -196,7 +196,7 @@ func (backend *browserBackend) TaskDetail(ctx context.Context, rawClient [browse
 	outcome, outcomeMore := taskDetailTextChunk(outcomeText, uint64(request.TextOffset))
 	questions, nextPeerOffset, head, err := backend.store.PeerQuestionsForTask(ctx, task.ID, uint64(request.PeerOffset), expectedHead)
 	if err != nil {
-		return browserprotocol.TaskDetail{}, mapBrowserError(err)
+		return browserprotocol.TaskDetail{}, err
 	}
 	result := browserprotocol.TaskDetail{TaskID: task.ID.String(), Revision: decimalRevision(task.Revision), Head: decimalSequence(head), Instruction: instruction, Feedback: feedback, PeerQuestions: []browserprotocol.TaskPeerQuestion{}}
 	if outcomeText != "" {
@@ -244,7 +244,7 @@ func taskDetailRuneOffset(value string, count uint64) int {
 func (backend *browserBackend) prepareAgentInstruction(ctx context.Context, agentID kernel.AgentID, instruction string) error {
 	agent, found, err := backend.store.Agent(ctx, agentID)
 	if err != nil {
-		return mapBrowserError(err)
+		return err
 	}
 	if !found {
 		return browser.ErrNotFound
@@ -290,7 +290,7 @@ func (backend *browserBackend) TaskList(ctx context.Context, rawClient [browserp
 	}
 	page, err := backend.store.ReadTaskList(ctx, agentID, projectID, beforeAt, beforeID)
 	if err != nil {
-		return browserprotocol.TaskList{}, mapBrowserError(err)
+		return browserprotocol.TaskList{}, err
 	}
 	result := browserprotocol.TaskList{AgentID: request.AgentID, ProjectID: request.ProjectID, Head: browserprotocol.Decimal(page.Head.Int64()), Total: browserprotocol.Decimal(page.Total), Tasks: []browserprotocol.TaskItem{}, HasMore: browserprotocol.Bool(page.HasMore)}
 	for _, task := range page.Tasks {

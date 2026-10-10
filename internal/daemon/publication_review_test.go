@@ -129,7 +129,7 @@ func TestRestartResumesPublicationReviewWithoutDuplicateSubmit(t *testing.T) {
 	}
 	// An interrupted claim is still running, so startup resumes it once.
 	recovered := waitForDurableReview(t, fixture.store, projectID, func(op review.Operation) bool { return op.State == "enqueued" })
-	if recovered.ID != prepared.ID || recovered.State != "enqueued" || backend.reviews != 1 || backend.submits != 1 || backend.enqueues != 1 || len(backend.journal) != 2 {
+	if recovered.ID != prepared.ID || recovered.State != "enqueued" || backend.reviews != 1 || backend.submits != 1 || backend.enqueues != 1 || len(backend.journal) != 1 {
 		t.Fatalf("recovered operation=%+v backend=%+v", recovered, backend)
 	}
 	if count, err := restarted.RecoverReviewOperations(context.Background()); err != nil || count != 0 {
@@ -139,13 +139,11 @@ func TestRestartResumesPublicationReviewWithoutDuplicateSubmit(t *testing.T) {
 
 func TestRestartReconcilesUncertainExternalReviewWritesWithoutDuplicateWrites(t *testing.T) {
 	for _, test := range []struct {
-		name         string
-		failAt       int
-		wantSubmits  int
-		wantEnqueues int
+		name        string
+		failAt      int
+		wantSubmits int
 	}{
 		{name: "submit", failAt: 2, wantSubmits: 1},
-		{name: "enqueue", failAt: 3, wantSubmits: 1, wantEnqueues: 1},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			fixture, projectID := reviewPublicFixture(t)
@@ -159,20 +157,11 @@ func TestRestartReconcilesUncertainExternalReviewWritesWithoutDuplicateWrites(t 
 				t.Fatal("simulated restart boundary unexpectedly completed")
 			}
 			before := lastDurableReview(t, fixture.store, projectID)
-			hasEnqueueReceipt := before.EnqueueID != ""
 			wantState := "submitting"
-			if test.wantEnqueues == 1 {
-				wantState = "enqueuing"
-			}
-			if before.State != wantState || before.Verdict != "allow" || before.Request.Head != head || hasEnqueueReceipt != (test.wantEnqueues == 1) || before.Submitted != (test.wantEnqueues == 1) || backend.submits != test.wantSubmits || backend.enqueues != test.wantEnqueues {
+			if before.State != wantState || before.Verdict != "allow" || before.Request.Head != head || before.Submitted || backend.submits != test.wantSubmits || backend.enqueues != 0 {
 				t.Fatalf("boundary operation=%+v backend=%+v", before, backend)
 			}
-			backend.observations = map[string]review.Receipt{}
-			if before.State == "submitting" {
-				backend.observations[before.ID] = review.Receipt{State: "completed", Kind: "submit_pull_request_review", Head: head, Event: "ALLOW"}
-			} else {
-				backend.observations[before.EnqueueID] = review.Receipt{State: "completed", Kind: "enqueue_pull_request", Head: head}
-			}
+			backend.observations = map[string]review.Receipt{before.ID: {State: "completed", Kind: "submit_pull_request_review", Head: head, Event: "ALLOW"}}
 
 			restarted, err := newDaemon(fixture.store, func() time.Time { return time.Unix(7, 0) })
 			if err != nil {

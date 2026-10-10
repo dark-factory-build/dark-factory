@@ -3,6 +3,7 @@ package relayhost
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
@@ -432,7 +433,7 @@ func TestAnUnknownRecordTypeDropsTheRelayConnection(t *testing.T) {
 	fixture := newHarness(t, nil)
 	host := fixture.relay.accept(t)
 	session := fixture.openSession(t, host, 61)
-	host.sendRaw(t, []byte{0x09, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00})
+	host.sendRaw(t, []byte{0x0a, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00})
 	session.waitClosed(t)
 	next := fixture.relay.accept(t)
 	if next.payload.Sequence != host.payload.Sequence+1 {
@@ -781,5 +782,27 @@ func TestOneSessionCannotPinMemoryWithLargeUndrainedFrames(t *testing.T) {
 	current.mu.Unlock()
 	if !current.deliver(Record{Type: RecordBinary, Connection: 1, Payload: payload}) {
 		t.Fatal("draining one record did not release its bytes")
+	}
+}
+
+// Every relay connection carries the signed console once, framed as the page
+// shells verify it: the node key, its signature, then the bundle.
+func TestConsoleIsPublishedSignedOnEveryConnection(t *testing.T) {
+	var console []byte
+	fixture := newHarness(t, func(config *Config) {
+		console = SignConsole(config.Identity, []byte("bundle"))
+		config.Console = console
+	})
+	key := fixture.identity.PublicKey()
+	if !bytes.Equal(console[:ed25519.PublicKeySize], key) || string(console[ed25519.PublicKeySize+ed25519.SignatureSize:]) != "bundle" ||
+		!ed25519.Verify(key, append([]byte(consoleDomain), "bundle"...), console[ed25519.PublicKeySize:ed25519.PublicKeySize+ed25519.SignatureSize]) {
+		t.Fatalf("signed console = %x", console)
+	}
+	for range 2 {
+		host := fixture.relay.accept(t)
+		if record := host.expect(t, RecordConsole, 0); !bytes.Equal(record.Payload, console) {
+			t.Fatalf("console record carried %x", record.Payload)
+		}
+		host.sendRaw(t, []byte{0x0a, 0, 0, 0, 0, 0, 0, 0, 0}) // drop the connection
 	}
 }

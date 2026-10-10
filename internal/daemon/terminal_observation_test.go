@@ -164,7 +164,7 @@ func TestTerminalObservationAPIReadsExactBoundedSnapshot(t *testing.T) {
 	if err := fixture.daemon.registerLiveAttempt(live); err != nil {
 		t.Fatal(err)
 	}
-	startLiveAttempt(live, ctx)
+	startLiveAttempt(live, context.Background())
 	t.Cleanup(func() { _ = live.close(); _ = peer.Close() })
 	data := []byte("compile\nAuthorization: Bearer secret-value\ndone\n")
 	input := api.TerminalObserveInput{ProjectID: active.run.ProjectID.String(), TaskID: active.run.TaskID.String(), RunID: active.run.ID.String(), MaxBytes: 65536}
@@ -333,6 +333,7 @@ func TestTerminalObservationTargetAuthorizationMatrix(t *testing.T) {
 
 	worker := kernel.AttemptAuthority{ProjectID: project, TaskID: workerTask, RunID: workerRunID, Role: kernel.RoleWorker}
 	overseer := kernel.AttemptAuthority{ProjectID: project, Role: kernel.RoleOrchestrator}
+	specialist := kernel.AttemptAuthority{ProjectID: project, TaskID: workerTask, RunID: workerRunID, Role: kernel.RoleWorker, Specialist: true}
 	target := func(projectID kernel.ProjectID, taskID kernel.TaskID, runID kernel.RunID, role kernel.AgentRole) kernel.Run {
 		return kernel.Run{ProjectID: projectID, TaskID: taskID, ID: runID, Role: role}
 	}
@@ -350,6 +351,9 @@ func TestTerminalObservationTargetAuthorizationMatrix(t *testing.T) {
 		{name: "worker cannot read sibling run", authority: worker, project: project, task: siblingTask, run: target(project, siblingTask, siblingRunID, kernel.RoleWorker)},
 		{name: "overseer cannot read overseer run", authority: overseer, project: project, task: siblingTask, run: target(project, siblingTask, siblingRunID, kernel.RoleOrchestrator)},
 		{name: "overseer cannot cross project", authority: overseer, project: foreignProject, task: siblingTask, run: target(foreignProject, siblingTask, siblingRunID, kernel.RoleWorker)},
+		{name: "specialist reads a sibling worker", authority: specialist, project: project, task: siblingTask, run: target(project, siblingTask, siblingRunID, kernel.RoleWorker), allowed: true},
+		{name: "specialist cannot read overseer run", authority: specialist, project: project, task: siblingTask, run: target(project, siblingTask, siblingRunID, kernel.RoleOrchestrator)},
+		{name: "specialist cannot cross project", authority: specialist, project: foreignProject, task: siblingTask, run: target(foreignProject, siblingTask, siblingRunID, kernel.RoleWorker)},
 		{name: "worker cannot use stale run identity", authority: worker, project: project, task: workerTask, run: target(project, workerTask, siblingRunID, kernel.RoleWorker)},
 	}
 	for _, test := range tests {
@@ -381,7 +385,7 @@ func TestOperatorTerminalObservationReadsExactRunningWorkerAndOverseer(t *testin
 	if err := fixture.daemon.registerLiveAttempt(live); err != nil {
 		t.Fatal(err)
 	}
-	startLiveAttempt(live, ctx)
+	startLiveAttempt(live, context.Background())
 	t.Cleanup(func() { _ = live.close(); _ = peer.Close() })
 	data := []byte("worker output\nAuthorization: Bearer secret-value\n")
 	read := func(target activeAttempt) api.TerminalObservation {

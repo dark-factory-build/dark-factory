@@ -85,7 +85,7 @@ func TestBlackBoxDaemonHandoverReplacesFactorydUnderALiveProvider(t *testing.T) 
 	if err := daemonA.Process.Signal(syscall.SIGTERM); err != nil {
 		t.Fatal(err)
 	}
-	if err := awaitProcessExit(daemonA, 30*time.Second); err != nil {
+	if err := daemonA.awaitExit(30 * time.Second); err != nil {
 		t.Fatalf("factoryd A did not converge on SIGTERM: %v (output %q)", err, outputA.String())
 	}
 	if daemonA.ProcessState.ExitCode() != 0 {
@@ -160,7 +160,7 @@ func TestBlackBoxDaemonHandoverReplacesFactorydUnderALiveProvider(t *testing.T) 
 	if err := daemonB.Process.Signal(syscall.SIGTERM); err != nil {
 		t.Fatal(err)
 	}
-	if err := awaitProcessExit(daemonB, 30*time.Second); err != nil {
+	if err := daemonB.awaitExit(30 * time.Second); err != nil {
 		t.Fatalf("factoryd B did not converge on SIGTERM: %v (output %q)", err, outputB.String())
 	}
 	if daemonB.ProcessState.ExitCode() != 0 {

@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 )
 
@@ -25,23 +27,12 @@ func PullCloudflare(ctx context.Context, client *http.Client, account, token str
   } } } }`
 	body, _ := json.Marshal(map[string]any{"query": query, "variables": map[string]string{
 		"account": account, "from": now.Add(-window).UTC().Format(time.RFC3339), "to": now.UTC().Format(time.RFC3339)}})
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, CloudflareEndpoint, bytes.NewReader(body))
+	raw, status, err := cloudflare(ctx, client, http.MethodPost, CloudflareEndpoint, token, bytes.NewReader(body))
 	if err != nil {
 		return nil, nil, err
 	}
-	request.Header.Set("Authorization", "Bearer "+token)
-	request.Header.Set("Content-Type", "application/json")
-	response, err := client.Do(request)
-	if err != nil {
-		return nil, nil, err
-	}
-	defer response.Body.Close()
-	raw, err := io.ReadAll(io.LimitReader(response.Body, 4<<20))
-	if err != nil {
-		return nil, nil, err
-	}
-	if response.StatusCode != http.StatusOK {
-		return nil, nil, fmt.Errorf("cloudflare analytics: HTTP %d", response.StatusCode)
+	if status != http.StatusOK {
+		return nil, nil, fmt.Errorf("cloudflare analytics: HTTP %d", status)
 	}
 	var result struct {
 		Data struct {
@@ -89,4 +80,49 @@ func PullCloudflare(ctx context.Context, client *http.Client, account, token str
 		coverage = append(coverage, Coverage{Source: "cloudflare", Environment: environment, Unit: script, Keys: []string{"service.name"}, AsOf: end, TTL: 2 * window.Milliseconds()})
 	}
 	return observations, coverage, nil
+}
+
+// CloudflareDomains reads the custom domains each mapped Worker serves, by
+// the unit's service.name. A token without Workers Scripts Read is refused
+// with 403: the domains are not visible, which is not an error.
+func CloudflareDomains(ctx context.Context, client *http.Client, account, token string, services map[string]string) (map[string][]string, error) {
+	raw, status, err := cloudflare(ctx, client, http.MethodGet, strings.TrimSuffix(CloudflareEndpoint, "/graphql")+"/accounts/"+url.PathEscape(account)+"/workers/domains", token, nil)
+	if err != nil || status == http.StatusForbidden {
+		return nil, err
+	}
+	if status != http.StatusOK {
+		return nil, fmt.Errorf("cloudflare domains: HTTP %d", status)
+	}
+	var result struct {
+		Result []struct {
+			Hostname string `json:"hostname"`
+			Service  string `json:"service"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return nil, err
+	}
+	hosts := map[string][]string{}
+	for _, domain := range result.Result {
+		if unit := services[domain.Service]; unit != "" && domain.Hostname != "" {
+			hosts[unit] = append(hosts[unit], strings.ToLower(domain.Hostname))
+		}
+	}
+	return hosts, nil
+}
+
+func cloudflare(ctx context.Context, client *http.Client, method, address, token string, body io.Reader) ([]byte, int, error) {
+	request, err := http.NewRequestWithContext(ctx, method, address, body)
+	if err != nil {
+		return nil, 0, err
+	}
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("Content-Type", "application/json")
+	response, err := client.Do(request)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer response.Body.Close()
+	raw, err := io.ReadAll(io.LimitReader(response.Body, 4<<20))
+	return raw, response.StatusCode, err
 }

@@ -25,7 +25,7 @@ func (store *Store) StopRunForBrowser(ctx context.Context, clientID BrowserClien
 		return TaskIntervention{}, ErrUnauthorized
 	}
 	request.Actor, request.ActorBrowserClientID = TaskInterventionOperator, &clientID
-	return store.stopRunTx(ctx, tx, request, successor, at)
+	return store.stopRunTx(ctx, tx, request, successor, at, true)
 }
 
 // StopRunForActor applies the same CAS and durable intervention receipt for an
@@ -57,7 +57,7 @@ func (store *Store) StopRunForActor(ctx context.Context, actor TaskInterventionA
 	default:
 		return TaskIntervention{}, ErrInvalidValue
 	}
-	return store.stopRunTx(ctx, tx, request, successor, at)
+	return store.stopRunTx(ctx, tx, request, successor, at, true)
 }
 
 // StopRunForOperator is retained for callers that already have an operator
@@ -70,7 +70,8 @@ func (store *Store) StopRunForAttempt(ctx context.Context, digest AttemptDigest,
 	return store.StopRunForActor(ctx, TaskInterventionOrchestrator, digest, request, successor, at)
 }
 
-func (store *Store) stopRunTx(ctx context.Context, tx *writeTx, request TaskInterventionRequest, successor *NewTask, at UnixMillis) (TaskIntervention, error) {
+// stopRunTx commits tx with the stop unless the caller (an archive) commits it.
+func (store *Store) stopRunTx(ctx context.Context, tx *writeTx, request TaskInterventionRequest, successor *NewTask, at UnixMillis, commit bool) (TaskIntervention, error) {
 	if request.Payload != "" || request.SuccessorTaskID != nil || request.Kind != TaskInterventionStop && request.Kind != TaskInterventionReplace || (request.Kind == TaskInterventionReplace) != (successor != nil) {
 		return TaskIntervention{}, ErrInvalidValue
 	}
@@ -170,7 +171,7 @@ func (store *Store) stopRunTx(ctx context.Context, tx *writeTx, request TaskInte
 	}
 	// enterFinalizing commits this shared transaction, including the receipt and
 	// optional successor above, so a stop is durable before it returns.
-	if _, err := store.enterFinalizing(ctx, tx, run, request.ExpectedRunRevision, proposal, at, nil, nil); err != nil {
+	if _, err := store.enterFinalizingWithCommit(ctx, tx, run, request.ExpectedRunRevision, proposal, at, nil, nil, commit); err != nil {
 		return TaskIntervention{}, err
 	}
 	return receipt, nil

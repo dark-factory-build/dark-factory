@@ -557,8 +557,10 @@ func (store *Store) ImportIntakeAcceptanceWithPriority(ctx context.Context, id I
 	return store.importIntakeAcceptance(ctx, id, at, priority, source)
 }
 
+// importIntakeAcceptance validates only before it writes: every intake poll
+// replays each imported issue, and a whole-store walk each overran the poll.
 func (store *Store) importIntakeAcceptance(ctx context.Context, id IntakeAcceptanceID, at UnixMillis, priority int64, expectedSource ...IntakeSource) (Task, error) {
-	tx, err := store.beginValidatedWrite(ctx)
+	tx, err := store.beginUncheckedWrite(ctx)
 	if err != nil {
 		return Task{}, err
 	}
@@ -571,7 +573,28 @@ func (store *Store) importIntakeAcceptance(ctx context.Context, id IntakeAccepta
 		return Task{}, tx.Rollback(err)
 	}
 	if accepted.WithdrawnAt != nil {
-		return Task{}, tx.Rollback(ErrConflict)
+		// Importing a withdrawn receipt again lifts its withdrawal (for the
+		// latest content only) and retries its failed or cancelled task in the
+		// same write, through the operator retry: a task that never ran stays
+		// at its work revision, and one a continuation waits on is refused.
+		task, found, err := taskByID(ctx, tx.connection, accepted.TaskID)
+		if err != nil {
+			return Task{}, tx.Rollback(err)
+		}
+		latest, latestFound, err := latestIntakeAcceptance(ctx, tx.connection, accepted.Snapshot, accepted.ProjectID, accepted.RepositoryID)
+		if err != nil {
+			return Task{}, tx.Rollback(err)
+		}
+		if !found || task.Status != TaskFailed && task.Status != TaskCancelled || !latestFound || latest.ID != accepted.ID {
+			return Task{}, tx.Rollback(ErrConflict)
+		}
+		if err := validateDurableControls(ctx, tx.connection); err != nil {
+			return Task{}, tx.Rollback(err)
+		}
+		if _, err := tx.connection.ExecContext(ctx, `UPDATE intake_acceptances SET withdrawn_at_ms = NULL WHERE id = ?`, id.Bytes()); err != nil {
+			return Task{}, tx.Rollback(err)
+		}
+		return store.retryTaskTx(ctx, tx, nil, task.ID, task.Revision, AgentID{}, at, 0)
 	}
 	if len(expectedSource) > 1 {
 		return Task{}, tx.Rollback(ErrInvalidValue)
@@ -595,7 +618,7 @@ func (store *Store) importIntakeAcceptance(ctx context.Context, id IntakeAccepta
 	// Accepted work goes straight to any idle worker; the overseer wakes only
 	// for its outcome (overseer_wakeup.go).
 	spec := NewTask{Priority: priority, ID: accepted.TaskID, IncarnationID: accepted.IncarnationID, ProjectID: accepted.ProjectID, RepositoryID: accepted.RepositoryID, Title: accepted.Snapshot.Title, Body: intakeTaskBody(accepted)}
-	if err := validateNewTask(spec); err != nil {
+	if err := validateNonCarrierTask(spec); err != nil {
 		return Task{}, tx.Rollback(err)
 	}
 	existing, replay, err := intakeTaskReplay(ctx, tx.connection, spec)
@@ -610,16 +633,16 @@ func (store *Store) importIntakeAcceptance(ctx context.Context, id IntakeAccepta
 			}
 			return Task{}, tx.Rollback(err)
 		}
-		if err := tx.Rollback(nil); err != nil {
-			return Task{}, err
-		}
-		return existing, nil
+		return existing, tx.Rollback(nil)
 	}
 	latest, found, err := latestIntakeAcceptance(ctx, tx.connection, accepted.Snapshot, accepted.ProjectID, accepted.RepositoryID)
-	if err != nil || !found || latest.ID != accepted.ID {
-		if err == nil {
-			err = ErrConflict
-		}
+	if err == nil && (!found || latest.ID != accepted.ID) {
+		err = ErrConflict
+	}
+	if err == nil {
+		err = validateDurableControls(ctx, tx.connection)
+	}
+	if err != nil {
 		return Task{}, tx.Rollback(err)
 	}
 	value, err := insertTaskOnConnection(ctx, tx.connection, spec, at)

@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -320,16 +321,26 @@ func TestReconciliationWaitsForBriefWriterContention(t *testing.T) {
 		err error
 	}
 	cause := errors.New("writer contention")
+	// The clock is read immediately before the durable failure write.
+	writing := make(chan struct{})
+	var once sync.Once
+	fixture.daemon.now = func() time.Time { once.Do(func() { close(writing) }); return time.Now() }
 	completed := make(chan result, 1)
 	go func() {
 		run, err := fixture.daemon.failRunBeforeRuntime(context.Background(), fixture.run, fixture.keys.Resources.RuntimeRoot, kernel.FailureInternal, cause)
 		completed <- result{run: run, err: err}
 	}()
 
-	// The retired 250ms reconciliation window exhausted all three attempts
-	// before this writer releases; the shared two-second store bound must wait
-	// and preserve the admitted run's durable failure transition.
-	time.Sleep(time.Second)
+	// The write must wait out the held writer rather than give up, and
+	// preserve the admitted run's durable failure transition. Hold it from
+	// the first write past the retired 3 x 250ms reconciliation window, which
+	// would have exhausted its attempts and failed here.
+	<-writing
+	select {
+	case outcome := <-completed:
+		t.Fatalf("reconciliation finished while the writer was held: %+v, %v", outcome.run, outcome.err)
+	case <-time.After(time.Second):
+	}
 	if _, err := connection.ExecContext(context.Background(), "ROLLBACK"); err != nil {
 		t.Fatal(err)
 	}
@@ -448,7 +459,7 @@ func TestRecoverySweepSettlesRunWhoseRunnerNeverStarted(t *testing.T) {
 		t.Fatalf("disposition = %+v", disposition)
 	}
 	run := fixture.currentRun(t)
-	if run.Phase != kernel.RunTerminal || run.Terminal == nil || run.Terminal.Code() != kernel.FailureProtocol || run.Terminal.Detail() != kernel.NeverStartedRunDetail {
+	if run.Phase != kernel.RunTerminal || run.Terminal == nil || run.Terminal.Code() != kernel.FailureTransient || run.Terminal.Detail() != kernel.NeverStartedRunDetail {
 		t.Fatalf("recovered run = %+v", run)
 	}
 	if task, found, err := fixture.store.Task(context.Background(), run.TaskID); err != nil || !found || task.Status != kernel.TaskQueued {
@@ -904,10 +915,13 @@ func TestContinueUnsettledRunFinishesBoundedRuntimeRemoval(t *testing.T) {
 	}
 	fixture.writeArtifact(t, body)
 	root := filepath.Join(fixture.parentPath, fixture.run.ID.String())
-	// A four-second pass makes at most 162 calls of 256 effects (including
-	// the exact-deadline case). 85,000 files exceed TWO passes, so both the
-	// initial sweep yields and ContinueUnsettledRun must retry pending cleanup.
-	for i := 0; i < 85000; i++ {
+	// A pass that expires after one 256-effect call leaves 600 files needing
+	// three calls, so both the initial sweep yields and ContinueUnsettledRun
+	// must retry pending cleanup.
+	savedPass := runtimeCleanupPass
+	runtimeCleanupPass = time.Nanosecond
+	t.Cleanup(func() { runtimeCleanupPass = savedPass })
+	for i := 0; i < 600; i++ {
 		if err := os.WriteFile(filepath.Join(root, runtimeHomeName, fmt.Sprintf("file-%05d", i)), nil, 0600); err != nil {
 			t.Fatal(err)
 		}
@@ -941,6 +955,7 @@ func TestConvergenceWritesUseLifecycleContext(t *testing.T) {
 	for _, edge := range []string{"consume result", "runner absence"} {
 		for _, cancelRequest := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/cancel=%v", edge, cancelRequest), func(t *testing.T) {
+				shrinkStoreTimeout(t)
 				fixture := newRecoveryFixture(t, 0x80)
 				runtimeIdentity := fixture.stageRuntime(t)
 				fixture.beginRunnerStart(t)
@@ -1260,4 +1275,10 @@ func TestLivenessTickRecoversOnlyOldOwnerlessRuns(t *testing.T) {
 	if run := tick(updated + ownerlessRunAge.Milliseconds()); run.Phase != kernel.RunTerminal {
 		t.Fatalf("ownerless finalizing run with a result did not settle: %+v", run)
 	}
+}
+
+func shrinkStoreTimeout(t *testing.T) {
+	saved := liveAttemptStoreTimeout
+	liveAttemptStoreTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { liveAttemptStoreTimeout = saved })
 }

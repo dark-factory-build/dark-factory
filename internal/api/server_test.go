@@ -317,9 +317,9 @@ func TestServerDecodesClosedMethodMatrix(t *testing.T) {
 				t.Fatalf("failure detail = %q, %t", detail, ok)
 			}
 		}},
-		{name: "send back", domain: attemptDomain, bearer: attemptBearer, body: `{"method":"send_back","params":{"task_id":"0123456789abcdef0123456789abcdef","note":"private-note-sentinel"}}`, kind: CallSendBack, check: func(t *testing.T, call Call) {
+		{name: "send back", domain: attemptDomain, bearer: attemptBearer, body: `{"method":"send_back","params":{"task_id":"0123456789abcdef0123456789abcdef","head":"0123456789abcdef0123456789abcdef01234567","note":"private-note-sentinel"}}`, kind: CallSendBack, check: func(t *testing.T, call Call) {
 			input, ok := call.SendBackInput()
-			if !ok || input.TaskID != "0123456789abcdef0123456789abcdef" || input.Note != "private-note-sentinel" {
+			if !ok || input.TaskID != "0123456789abcdef0123456789abcdef" || input.Head != "0123456789abcdef0123456789abcdef01234567" || input.Note != "private-note-sentinel" {
 				t.Fatalf("send-back input = %+v, %t", input, ok)
 			}
 			if _, ok := call.AttemptDigest(); !ok {
@@ -486,6 +486,8 @@ func TestServerRejectsDomainFallbackAndInvalidRequests(t *testing.T) {
 		{name: "attempt bearer cannot mint a browser pairing as operator", domain: operatorDomain, bearer: attemptBearer, body: []byte(`{"method":"web_pair","params":{}}`), code: RemoteUnauthorized},
 		{name: "attempt cannot compact", domain: attemptDomain, bearer: attemptBearer, body: []byte(`{"method":"compact_storage","params":{}}`), code: RemoteForbidden},
 		{name: "overseer cannot remove task attachments", domain: attemptDomain, bearer: attemptBearer, body: []byte(`{"method":"overseer_update_task","params":{"task_id":"` + id('3') + `","expected_revision":1,"remove_attachments":true}}`), code: RemoteInvalidRequest},
+		{name: "overseer cannot edit agent appearance", domain: attemptDomain, bearer: attemptBearer, body: []byte(`{"method":"overseer_update_agent","params":{"agent_id":"` + id('3') + `","expected_revision":1,"appearance":""}}`), code: RemoteInvalidRequest},
+		{name: "enqueue refuses a ninth content pin", domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"enqueue_task","params":{"id":"` + id('3') + `","project_id":"` + id('4') + `","assigned_agent_id":"","incarnation_id":"` + id('5') + `","title":"t","body":"","priority":0,"content":[` + strings.TrimSuffix(strings.Repeat(`{"content_id":"`+id('6')+`","content_revision":1},`, 9), ",") + `]}}`), code: RemoteInvalidRequest},
 		{name: "unknown method", domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"delete_all","params":{}}`), code: RemoteInvalidRequest},
 		{name: "null params", domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"health","params":null}`), code: RemoteInvalidRequest},
 		{name: "array params", domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"health","params":[]}`), code: RemoteInvalidRequest},
@@ -507,6 +509,7 @@ func TestServerRejectsDomainFallbackAndInvalidRequests(t *testing.T) {
 		{name: "send back task attempt domain", domain: attemptDomain, bearer: attemptBearer, body: []byte(`{"method":"send_back_task","params":{"task_id":"0123456789abcdef0123456789abcdef","note":"n"}}`), code: RemoteForbidden},
 		{name: "send back short task", domain: attemptDomain, bearer: attemptBearer, body: []byte(`{"method":"send_back","params":{"task_id":"0123456789abcdef","note":"n"}}`), code: RemoteInvalidRequest},
 		{name: "send back empty note", domain: attemptDomain, bearer: attemptBearer, body: []byte(`{"method":"send_back","params":{"task_id":"0123456789abcdef0123456789abcdef","note":""}}`), code: RemoteInvalidRequest},
+		{name: "send back short head", domain: attemptDomain, bearer: attemptBearer, body: []byte(`{"method":"send_back","params":{"task_id":"0123456789abcdef0123456789abcdef","head":"0123abc","note":"n"}}`), code: RemoteInvalidRequest},
 		{name: "send back oversized note", domain: attemptDomain, bearer: attemptBearer, body: []byte(`{"method":"send_back","params":{"task_id":"0123456789abcdef0123456789abcdef","note":"` + strings.Repeat("x", 8193) + `"}}`), code: RemoteInvalidRequest},
 		{name: "request human zero key", domain: attemptDomain, bearer: attemptBearer, body: []byte(`{"method":"request_human","params":{"idempotency_key":"00000000000000000000000000000000","question":"question"}}`), code: RemoteInvalidRequest},
 		{name: "request human uppercase key", domain: attemptDomain, bearer: attemptBearer, body: []byte(`{"method":"request_human","params":{"idempotency_key":"0123456789ABCDEF0123456789abcdef","question":"question"}}`), code: RemoteInvalidRequest},
@@ -872,15 +875,18 @@ func TestServerReceiveCancellationCutsJoinWatcher(t *testing.T) {
 				}
 				closeAPITestListener(t, listener)
 			}
+			// A leak grows the census by one per iteration. An earlier test's
+			// goroutine or descriptor may still be finishing at the baseline
+			// and go meanwhile, so only growth is a leak.
 			deadline := time.Now().Add(500 * time.Millisecond)
-			for runtime.NumGoroutine() != baselineGoroutines && time.Now().Before(deadline) {
+			for runtime.NumGoroutine() > baselineGoroutines && time.Now().Before(deadline) {
 				time.Sleep(5 * time.Millisecond)
 			}
-			if after := runtime.NumGoroutine(); after != baselineGoroutines {
-				t.Fatalf("cancelled receives changed goroutine census: before=%d after=%d", baselineGoroutines, after)
+			if after := runtime.NumGoroutine(); after > baselineGoroutines {
+				t.Fatalf("cancelled receives grew goroutine census: before=%d after=%d", baselineGoroutines, after)
 			}
-			if after := countTestFDs(t); after != baselineFDs {
-				t.Fatalf("cancelled receives changed FD census: before=%d after=%d", baselineFDs, after)
+			if after := countTestFDs(t); after > baselineFDs {
+				t.Fatalf("cancelled receives grew FD census: before=%d after=%d", baselineFDs, after)
 			}
 		})
 	}
@@ -1372,7 +1378,7 @@ func TestAuthenticatedDispatchRefreshesTransportDeadline(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	if status, err := client.Health(ctx); err != nil || !status.Ready {
+	if status, err := client.Health(ctx, ""); err != nil || !status.Ready {
 		t.Fatalf("delayed authenticated response = %+v, %v", status, err)
 	}
 	if err := <-done; err != nil {

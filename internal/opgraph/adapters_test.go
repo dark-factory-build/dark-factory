@@ -83,6 +83,10 @@ func TestCloudflareCoversEveryNamedScriptAtScriptGranularity(t *testing.T) {
 			writer.WriteHeader(http.StatusForbidden)
 			return
 		}
+		if request.URL.Path == "/accounts/acct/workers/domains" {
+			_, _ = writer.Write([]byte(`{"success":true,"result":[{"hostname":"Gate.darkfactory.build","service":"relay"},{"hostname":"other.dev","service":"someone-else"}]}`))
+			return
+		}
 		body, _ := io.ReadAll(request.Body)
 		_ = json.Unmarshal(body, &asked)
 		_, _ = writer.Write([]byte(`{"data":{"viewer":{"accounts":[{"workersInvocationsAdaptive":[
@@ -110,6 +114,15 @@ func TestCloudflareCoversEveryNamedScriptAtScriptGranularity(t *testing.T) {
 	if _, _, err := PullCloudflare(context.Background(), server.Client(), "acct", "wrong", nil, "production", now, time.Minute); err == nil {
 		t.Fatal("refused token reported success")
 	}
+	// Custom domains belong to the unit a mapped Worker answers to; a token
+	// refused them (403) sees none, which is not an error.
+	hosts, err := CloudflareDomains(context.Background(), server.Client(), "acct", "token", map[string]string{"relay": "relay-unit"})
+	if err != nil || len(hosts) != 1 || strings.Join(hosts["relay-unit"], ",") != "gate.darkfactory.build" {
+		t.Fatalf("hosts = %v, %v", hosts, err)
+	}
+	if hosts, err := CloudflareDomains(context.Background(), server.Client(), "acct", "wrong", map[string]string{"relay": "relay-unit"}); err != nil || len(hosts) != 0 {
+		t.Fatalf("a refused domains read = %v, %v", hosts, err)
+	}
 }
 
 func TestHostileInputsStayBounded(t *testing.T) {
@@ -120,7 +133,7 @@ func TestHostileInputsStayBounded(t *testing.T) {
 		routes.WriteString(`http.HandleFunc("/r` + strconv.Itoa(index) + `", nil)` + "\n")
 	}
 	routes.WriteString("}\n")
-	graph, err := Infer("s", []Repository{{ID: "r", Name: "r", Files: map[string][]byte{"go.mod": []byte("module x\n"), "cmd/x/main.go": []byte(routes.String())}}})
+	graph, err := Infer("s", []Repository{{ID: "r", Name: "r", Files: map[string][]byte{"go.mod": []byte("module x\n"), "cmd/x/main.go": []byte(routes.String())}}}, nil)
 	if err != ErrBounds || len(graph.Nodes) != MaxNodes {
 		t.Fatalf("bounded graph: %d nodes, %v", len(graph.Nodes), err)
 	}
@@ -130,7 +143,7 @@ func TestHostileInputsStayBounded(t *testing.T) {
 		constants.WriteString("const u" + strconv.Itoa(constants.Len()) + " = 'https://a.io/'\n")
 	}
 	started := time.Now()
-	if _, err := Infer("s", []Repository{{ID: "r", Name: "r", Files: map[string][]byte{"package.json": []byte(`{"name":"x","dependencies":{"express":"4"}}`), "big.ts": []byte(constants.String())}}}); err != nil || time.Since(started) > 5*time.Second {
+	if _, err := Infer("s", []Repository{{ID: "r", Name: "r", Files: map[string][]byte{"package.json": []byte(`{"name":"x","dependencies":{"express":"4"}}`), "big.ts": []byte(constants.String())}}}, nil); err != nil || time.Since(started) > 5*time.Second {
 		t.Fatalf("large source took %v: %v", time.Since(started), err)
 	}
 	// Runtime floods neither panic nor push out the newest evidence.

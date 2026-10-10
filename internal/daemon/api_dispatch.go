@@ -33,10 +33,12 @@ const (
 // durable Store and live attempt owners. It does not own an accept loop; the
 // caller accepts and hands one connection to HandleConnection.
 type Daemon struct {
-	log      io.Writer
-	intakeMu sync.Mutex
-	linear   *linear.Host
-	github   *maintainer.Host
+	log io.Writer
+	// statusOnly is set before the listener opens, so it needs no lock.
+	statusOnly bool
+	intakeMu   sync.Mutex
+	linear     *linear.Host
+	github     *maintainer.Host
 	// The scheduler's intake pass (tickIntake): per-source progress, guarded
 	// by intakeMu, and whether a pass is running.
 	intakePolls map[kernel.IntakeSourceID]*intakePoll
@@ -66,12 +68,28 @@ type Daemon struct {
 	publicRepoMu        sync.Mutex
 	publicRepos         map[string]*publicRepository
 	productionRefreshAt map[kernel.ProjectID]time.Time
+	// What factoryd knows of its health only in memory, for the overseer's
+	// wake (overseerHealth): each held condition, and the streak of
+	// Maintainer faults.
+	healthMu         sync.Mutex
+	heldHealth       map[string]kernel.OverseerHealth
+	maintainerFaults struct {
+		first, last time.Time
+		count       int
+		fault       string
+	}
 	// The scheduler's merge-pipeline pass (tickMergePipeline): the next pass
 	// time, read only by the scheduler loop, and whether a pass is running.
 	pipelineAt   atomic.Int64 // unix nanoseconds of the next merge-stage pass
 	pipelineBusy atomic.Bool
-	store        *kernel.Store
-	now          func() time.Time
+	// The scheduler's Change reclaim pass (tickChangeReclaim), alike, and the
+	// Changes it kept, each logged once with its project and reason; healthMu
+	// guards it for the operator's health read.
+	reclaimAt   atomic.Int64
+	reclaimBusy atomic.Bool
+	keptChanges map[kernel.ChangeID][2]string
+	store       *kernel.Store
+	now         func() time.Time
 	// livenessClock is deliberately separate from now. The latter is also
 	// used by supervisor ordering tests and may be an injected, blocking
 	// clock; liveness telemetry must never enter that ordering boundary.
@@ -92,6 +110,9 @@ type Daemon struct {
 	browserLifecycleMu sync.Mutex
 	browsers           map[*BrowserRuntime]struct{}
 	browserClosing     bool
+	// console is the signed console bundle, its first 32 bytes the node
+	// public key (relayhost.SignConsole); nil without a home or a bundle.
+	console []byte
 	// relay is the optional outbound relay connector. It is a client of the
 	// browser listener above, not a second authority, so it shares that
 	// listener's lifecycle gate.
@@ -111,6 +132,9 @@ type Daemon struct {
 	runtime     *opgraph.Runtime
 	// polled is when the configured pull adapters last ran.
 	polled time.Time
+	// hosts are the hosts each platform source last reported a unit serves,
+	// by source and then service.name; the graph is inferred with them.
+	hosts map[string]map[string][]string
 
 	// providerDefaultCache holds the last read of each provider account's own
 	// configured model for a short window, on the same terms as graphs:
@@ -189,6 +213,10 @@ func (daemon *Daemon) livenessTimestamp() time.Time {
 	return time.Now()
 }
 
+// AnswerStatusOnly makes the daemon refuse every call but web_status: a
+// trial build must act on nothing while it proves itself.
+func (daemon *Daemon) AnswerStatusOnly() { daemon.statusOnly = true }
+
 // HandleConnection synchronously consumes exactly one authenticated request,
 // dispatches it, writes exactly one response, and closes the connection. The
 // API transport has already authenticated the domain and credential before a
@@ -202,6 +230,9 @@ func (daemon *Daemon) HandleConnection(ctx context.Context, connection *api.Conn
 	if err != nil {
 		return err
 	}
+	if daemon.statusOnly && call.Kind() != api.CallWebStatus {
+		return fmt.Errorf("%w: a trial build answers only web_status", kernel.ErrConflict)
+	}
 	// The overseer snapshot is observation, not provider work. Counting the
 	// request itself would make a snapshot unable to report the quiet interval
 	// it is observing; authenticated attempt work calls still re-arm liveness.
@@ -210,7 +241,8 @@ func (daemon *Daemon) HandleConnection(ctx context.Context, connection *api.Conn
 	}
 	dispatchContext, cancel := context.WithTimeout(ctx, defaultDispatchTimeout)
 	defer cancel()
-	if call.Kind() == api.CallMaintainer || call.Kind() == api.CallIntake {
+	// A project's health runs its repositories' fetch checks (oversight).
+	if project, _ := call.HealthProject(); call.Kind() == api.CallMaintainer || call.Kind() == api.CallIntake || project != "" {
 		cancel()
 		dispatchContext, cancel = context.WithTimeout(ctx, 90*time.Second)
 		defer cancel()
@@ -284,14 +316,22 @@ func (daemon *Daemon) markAttemptAPICall(ctx context.Context, call api.Call) {
 // methods; there is no forwarding service layer here.
 func (daemon *Daemon) dispatch(ctx context.Context, call api.Call) api.Reply {
 	switch call.Kind() {
+	case api.CallSnapshot, api.CallHumanRequests, api.CallTaskRead, api.CallIntake:
+		if raw, attempt := call.AttemptDigest(); attempt && !daemon.specialistRead(ctx, raw, call) {
+			return newErrorReply(api.RemoteForbidden)
+		}
+	}
+	switch call.Kind() {
 	case api.CallHealth:
-		return daemon.health(ctx)
+		return daemon.health(ctx, call)
 	case api.CallSnapshot:
 		return daemon.snapshot(ctx)
 	case api.CallHumanRequests:
 		return daemon.humanRequests(ctx)
 	case api.CallHumanReply:
 		return daemon.humanReplyOperator(ctx, call)
+	case api.CallHumanCancel:
+		return daemon.humanCancelOperator(ctx, call)
 	case api.CallCreateProject:
 		return daemon.createProject(ctx, call)
 	case api.CallProjectRepository:
@@ -487,6 +527,19 @@ func (daemon *Daemon) dispatch(ctx context.Context, call api.Call) api.Reply {
 	}
 }
 
+// specialistRead admits a specialist's review run (its carrier) to the
+// operator's read views, and of intake only its list; every other attempt,
+// and every write, is refused.
+func (daemon *Daemon) specialistRead(ctx context.Context, raw api.AttemptDigest, call api.Call) bool {
+	digest, err := attemptDigest(raw)
+	if err != nil {
+		return false
+	}
+	authority, err := daemon.store.AuthenticateAttempt(ctx, digest)
+	intake, _ := call.IntakeInput()
+	return err == nil && authority.Specialist && (call.Kind() != api.CallIntake || intake.Action == "list")
+}
+
 func (daemon *Daemon) agentPaths(ctx context.Context, call api.Call) api.Reply {
 	input, ok := call.AgentPathsInput()
 	if !ok {
@@ -627,7 +680,7 @@ func (daemon *Daemon) humanRequests(ctx context.Context) api.Reply {
 	}
 	result := api.HumanRequestList{Requests: make([]api.HumanRequest, 0, len(requests))}
 	for _, request := range requests {
-		result.Requests = append(result.Requests, api.HumanRequest{ID: request.ID.String(), RunID: request.RunID.String(), TaskID: request.TaskID.String(), AgentID: request.AgentID.String(), Status: request.Status.String(), Revision: uint64(request.Revision.Int64()), Question: request.QuestionText, Options: append([]string{}, request.Options...)})
+		result.Requests = append(result.Requests, api.HumanRequest{ID: request.ID.String(), RunID: request.RunID.String(), TaskID: request.TaskID.String(), AgentID: request.AgentID.String(), Status: request.Status.String(), Revision: uint64(request.Revision.Int64()), RunRevision: uint64(request.RunRevision.Int64()), Question: request.QuestionText, Options: append([]string{}, request.Options...)})
 	}
 	return api.NewHumanRequestListReply(result)
 }
@@ -689,6 +742,33 @@ func (daemon *Daemon) humanReplyOperator(ctx context.Context, call api.Call) api
 		return newErrorReply(remoteErrorCode(err))
 	}
 	return daemon.overseerHumanReplyMutation(projection)
+}
+
+func (daemon *Daemon) humanCancelOperator(ctx context.Context, call api.Call) api.Reply {
+	input, ok := call.HumanCancelInput()
+	if !ok {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	requestID, err := decodeID(input.RequestID, kernel.HumanRequestIDFromBytes)
+	if err != nil {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	expectedRequest, requestErr := kernel.NewRevision(int64(input.ExpectedRevision))
+	expectedRun, runErr := kernel.NewRevision(int64(input.ExpectedRunRevision))
+	if requestErr != nil || runErr != nil {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	at, err := daemon.timestamp()
+	if err != nil {
+		return newErrorReply(api.RemoteInternal)
+	}
+	_, request, err := daemon.fenceHumanRequestCancel(func() (kernel.Run, kernel.HumanRequest, error) {
+		return daemon.store.CancelHumanRequestRunForOperator(ctx, requestID, expectedRequest, expectedRun, at)
+	})
+	if err != nil {
+		return newErrorReply(remoteErrorCode(err))
+	}
+	return daemon.overseerHumanReplyMutation(kernel.HumanRequestProjection{ID: request.ID, Revision: request.Revision, Status: request.Status})
 }
 
 func (daemon *Daemon) attemptTask(ctx context.Context, call api.Call) api.Reply {
@@ -774,7 +854,7 @@ func (daemon *Daemon) attemptSource(ctx context.Context, call api.Call) api.Repl
 	}
 	// A shell provider has no read-only boundary for the receipt's paths.
 	if authority.Provider == kernel.ProviderShell {
-		return newErrorReply(api.RemoteUnavailable)
+		return newErrorReply(api.RemoteForbidden)
 	}
 	taskIDText, ok := call.AttemptSourceTaskID()
 	if !ok {
@@ -1016,11 +1096,71 @@ func (daemon *Daemon) notifyPeerDelivery(ctx context.Context, question kernel.Pe
 	return err
 }
 
-func (daemon *Daemon) health(ctx context.Context) api.Reply {
+func (daemon *Daemon) health(ctx context.Context, call api.Call) api.Reply {
 	if _, err := daemon.store.Factory(ctx); err != nil {
 		return newErrorReply(remoteErrorCode(err))
 	}
-	return api.NewHealthReply(api.HealthStatus{Ready: true})
+	project, _ := call.HealthProject()
+	if project == "" {
+		return api.NewHealthReply(api.HealthStatus{Ready: true})
+	}
+	id, err := decodeID(project, kernel.ProjectIDFromBytes)
+	if err != nil {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	status, err := daemon.oversight(ctx, id)
+	if err != nil {
+		return newErrorReply(remoteErrorCode(err))
+	}
+	return api.NewHealthReply(status)
+}
+
+// oversight is what factoryd waits on in project (api.HealthStatus).
+func (daemon *Daemon) oversight(ctx context.Context, project kernel.ProjectID) (api.HealthStatus, error) {
+	status := api.HealthStatus{Ready: true, KeptChanges: map[string]int{}}
+	at, err := daemon.timestamp()
+	if err != nil {
+		return status, err
+	}
+	health := daemon.overseerHealth()
+	for _, held := range health {
+		if held.Project == (kernel.ProjectID{}) || held.Project == project {
+			status.Conditions = append(status.Conditions, api.HealthCondition{Key: held.Key, Detail: held.Detail, SinceMS: held.Since.Int64()})
+		}
+	}
+	items, err := daemon.store.OverseerItems(ctx, project, at, health...)
+	if err != nil {
+		return status, err
+	}
+	for _, item := range items {
+		view := api.OverseerItem{AgentID: item.Agent.String(), State: "stalled", Line: item.Line, CarrierTaskID: hex.EncodeToString(item.Carrier)}
+		if item.Due {
+			view.State = "due"
+		}
+		status.OverseerItems = append(status.OverseerItems, view)
+	}
+	daemon.healthMu.Lock()
+	for _, kept := range daemon.keptChanges {
+		if kept[0] == project.String() {
+			status.KeptChanges[kept[1]]++
+		}
+	}
+	daemon.healthMu.Unlock()
+	repositories, err := daemon.store.ProjectRepositories(ctx, project)
+	if err != nil {
+		return status, err
+	}
+	// ponytail: one bounded fetch check per repository, in turn, as
+	// project repository fetch runs it, within the call's 90s dispatch budget
+	// (HandleConnection); parallelise if projects grow many.
+	for _, repository := range repositories {
+		view, err := daemon.RepositoryReadiness(ctx, repository.ID, true)
+		if err != nil {
+			return status, err
+		}
+		status.Repositories = append(status.Repositories, view)
+	}
+	return status, nil
 }
 
 func (daemon *Daemon) snapshot(ctx context.Context) api.Reply {
@@ -1290,7 +1430,7 @@ func (daemon *Daemon) setProjectLimits(ctx context.Context, call api.Call) api.R
 	if err != nil {
 		return newErrorReply(api.RemoteInternal)
 	}
-	project, err := daemon.store.SetProjectLimitsWithTokens(ctx, id, expected, input.RunBudget, input.MaxRunSeconds, input.TokenBudget, at)
+	project, err := daemon.store.SetProjectLimitsWithTokens(ctx, id, expected, input.RunBudget, input.MaxRunSeconds, input.TokenBudget, input.SpecialistRuns, input.SpecialistOpenProposals, at)
 	if err != nil {
 		return newErrorReply(remoteErrorCode(err))
 	}
@@ -1365,7 +1505,7 @@ func (daemon *Daemon) setAgentIdlePolicy(ctx context.Context, call api.Call) api
 	if err != nil {
 		return newErrorReply(api.RemoteInternal)
 	}
-	agent, err := daemon.store.UpdateAgent(ctx, id, expected, kernel.AgentPatch{IdlePolicy: &policy, IdleAfterSeconds: &input.AfterSeconds, IdleInstruction: &input.Instruction, IdleRunBudget: &budget}, at)
+	agent, err := daemon.store.UpdateAgent(ctx, id, expected, kernel.AgentPatch{IdlePolicy: &policy, IdleAfterSeconds: &input.AfterSeconds, IdleInstruction: &input.Instruction, IdleRunBudget: &budget, IdleWakeOn: &input.WakeOn}, at)
 	if err != nil {
 		return newErrorReply(remoteErrorCode(err))
 	}
@@ -1413,10 +1553,19 @@ func (daemon *Daemon) enqueueTask(ctx context.Context, call api.Call) api.Reply 
 	if err != nil {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
+	content := make([]kernel.TaskContentReference, len(input.Content))
+	for i, pin := range input.Content {
+		if content[i].ContentID, err = decodeID(pin.ContentID, kernel.ContentIDFromBytes); err != nil {
+			return newErrorReply(api.RemoteInvalidRequest)
+		}
+		if content[i].ContentRevision, err = kernel.NewRevision(int64(pin.ContentRevision)); err != nil {
+			return newErrorReply(api.RemoteInvalidRequest)
+		}
+	}
 	if err := prepareTaskEnqueue(ctx, daemon.store, spec, false); err != nil {
 		return newErrorReply(remoteErrorCode(err))
 	}
-	task, err := daemon.store.EnqueueTask(ctx, spec, at)
+	task, err := daemon.store.EnqueueTask(ctx, spec, at, content...)
 	if err != nil {
 		return newErrorReply(remoteErrorCode(err))
 	}
@@ -1639,15 +1788,18 @@ func (daemon *Daemon) sendBack(ctx context.Context, call api.Call) api.Reply {
 	}
 	var task kernel.Task
 	if attempt {
-		task, err = daemon.store.SendBackTaskForAttempt(ctx, digest, taskID, input.Note, at)
-		if err != nil {
-			return newErrorReply(remoteErrorCode(err))
-		}
+		task, err = daemon.store.SendBackTaskForAttempt(ctx, digest, taskID, input.Head, input.Note, at)
 	} else {
-		task, err = daemon.store.SendBackTask(ctx, taskID, current.Revision, input.Note, at)
-		if err != nil {
-			return newErrorReply(remoteErrorCode(err))
+		task, err = daemon.store.SendBackTask(ctx, taskID, current.Revision, input.Head, input.Note, at)
+	}
+	if err != nil {
+		// A stale head names the Change head to observe instead.
+		if errors.Is(err, kernel.ErrSuperseded) {
+			if reply, replyErr := api.NewErrorDetailReply(api.RemoteConflict, boundedDetail(err)); replyErr == nil {
+				return reply
+			}
 		}
+		return newErrorReply(remoteErrorCode(err))
 	}
 	// The task is queued again; the scheduler should not wait for its tick.
 	daemon.notifyScheduler()
@@ -1716,7 +1868,8 @@ func (daemon *Daemon) overseerDigest(ctx context.Context, call api.Call) (kernel
 		return kernel.AttemptAuthority{}, kernel.AttemptDigest{}, &failure
 	}
 	authority, err := daemon.store.AuthenticateAttempt(ctx, digest)
-	if err != nil || authority.Role != kernel.RoleOrchestrator {
+	// A specialist may read the overseer status, and nothing else here.
+	if err != nil || authority.Role != kernel.RoleOrchestrator && !(authority.Specialist && call.Kind() == api.CallOverseerSnapshot) {
 		if err == nil {
 			err = kernel.ErrUnauthorized
 		}
@@ -1762,6 +1915,7 @@ func (daemon *Daemon) overseerSnapshot(ctx context.Context, call api.Call) api.R
 	if err != nil {
 		return newErrorReply(api.RemoteUnavailable)
 	}
+	projected.Factoryd = daemon.factorydHealth()
 	reply, err := api.NewOverseerSnapshotReply(projected)
 	if err != nil {
 		return newErrorReply(api.RemoteInternal)
@@ -1970,8 +2124,16 @@ func (daemon *Daemon) operatorUpdateTask(ctx context.Context, call api.Call) api
 
 func (daemon *Daemon) operatorUpdateAgent(ctx context.Context, call api.Call) api.Reply {
 	input, ok := call.OverseerAgentUpdateInput()
-	if !ok || input.ExpectedRevision > uint64(^uint64(0)>>1) || input.Paused == nil && input.Archived == nil || input.Paused != nil && input.Archived != nil {
+	if !ok || input.ExpectedRevision > uint64(^uint64(0)>>1) {
 		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	patch := kernel.AgentPatch{Paused: input.Paused, Archived: input.Archived}
+	if input.Appearance != nil {
+		appearance, err := kernel.DecodeAgentAppearance(*input.Appearance)
+		if err != nil {
+			return newErrorReply(api.RemoteInvalidRequest)
+		}
+		patch.Appearance = &appearance
 	}
 	id, err := decodeID(input.AgentID, kernel.AgentIDFromBytes)
 	if err != nil {
@@ -1985,7 +2147,7 @@ func (daemon *Daemon) operatorUpdateAgent(ctx context.Context, call api.Call) ap
 	if err != nil {
 		return newErrorReply(api.RemoteInternal)
 	}
-	agent, err := daemon.store.UpdateAgentForOperator(ctx, id, expected, kernel.AgentPatch{Paused: input.Paused, Archived: input.Archived}, at)
+	agent, err := daemon.store.UpdateAgentForOperator(ctx, id, expected, patch, at)
 	if err != nil {
 		return newErrorReply(remoteErrorCode(err))
 	}
