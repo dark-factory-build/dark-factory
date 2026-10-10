@@ -279,7 +279,7 @@ func (daemon *Daemon) routeSendBack(ctx context.Context, project kernel.ProjectI
 	task, err := daemon.store.SendBackPublishedReview(ctx, project, repository, op.Request.PullNumber, op.ID, op.Request.Head, note, at)
 	switch {
 	case errors.Is(err, kernel.ErrSuperseded), errors.Is(err, kernel.ErrNotFound):
-		// No factory task published it: its author reads the verdict on GitHub.
+		// A moved head, a fork, or no bound repository: its author reads the verdict on GitHub.
 		err = nil
 	case errors.Is(err, kernel.ErrInvalidValue):
 		err = daemon.escalatePull(op, "its send-back reached no task:\n\n"+note)
