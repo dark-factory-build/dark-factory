@@ -516,12 +516,15 @@ func TestSupervisorRunsOrchestratorInItsPrivateHomeWithoutAChange(t *testing.T) 
 }
 
 // runSupervisorClaudeFixture stands in for the Claude CLI: it starts from
-// the bootstrap prompt, the last argv element after "--", with nothing typed
-// into its terminal, and fetches its task through the attempt API as that
-// prompt says. The task never appears in argv.
+// the bootstrap prompt, reads the factoryd-written task file, and never calls
+// attempt task. The task never appears in argv.
 func runSupervisorClaudeFixture() error {
-	if len(os.Args) < 2 || os.Args[len(os.Args)-2] != "--" || !strings.Contains(os.Args[len(os.Args)-1], `argv ["attempt","task"] before doing anything else`) {
+	if len(os.Args) < 2 || os.Args[len(os.Args)-2] != "--" || !strings.Contains(os.Args[len(os.Args)-1], "DARK_FACTORY_TASK_FILE") {
 		return fmt.Errorf("launch argv lacks the bootstrap prompt")
+	}
+	task, err := os.ReadFile(os.Getenv("DARK_FACTORY_TASK_FILE"))
+	if err != nil || !strings.Contains(string(task), "Codify the operator scripts") {
+		return fmt.Errorf("factoryd task file = %q, %v", task, err)
 	}
 	client, err := api.NewAttemptClientFromEnvironment(os.Getenv("DARK_FACTORY_SOCKET"))
 	if err != nil {
@@ -529,12 +532,8 @@ func runSupervisorClaudeFixture() error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	task, err := client.Task(ctx)
-	if err != nil {
-		return err
-	}
 	for _, arg := range os.Args {
-		if strings.Contains(arg, task.Task) {
+		if strings.Contains(arg, string(task)) {
 			return fmt.Errorf("task reached argv")
 		}
 	}
@@ -558,9 +557,8 @@ func runSupervisorClaudeFixture() error {
 	return err
 }
 
-// Claude starts from the bootstrap prompt and fetches a task longer than a
-// terminal line through the attempt API, as Codex does, through the real
-// runner, worker and PTY.
+// Claude starts from the bootstrap prompt and reads a task longer than a
+// terminal line from factoryd's file, through the real runner, worker and PTY.
 func TestSupervisorClaudeFetchesALongTaskThroughTheAttemptAPI(t *testing.T) {
 	task := strings.Repeat("Codify the operator scripts and the deploy order. ", 128)
 	fixture := newSupervisorFixture(t, "unused shell task")
