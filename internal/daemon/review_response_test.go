@@ -40,9 +40,18 @@ func TestOnlyAnUnprocessableEnqueueRefusalIsTerminal(t *testing.T) {
 }
 
 func TestCodeownersEnqueueRefusalIsOwnerApproval(t *testing.T) {
-	err := maintainerRejection("refused: The request was refused: required CODEOWNERS approval is missing.")
-	if !errors.Is(err, review.ErrOwnerApproval) {
-		t.Fatalf("err=%v", err)
+	for _, why := range []string{"required CODEOWNERS approval is missing.", "rejected before execution as UNPROCESSABLE: Waiting on code owner review from baziyer."} {
+		if err := maintainerRejection("refused: The request was refused: " + why); !errors.Is(err, review.ErrOwnerApproval) {
+			t.Fatalf("err=%v", err)
+		}
+	}
+}
+
+func TestCodeOwnedNamesOnlyOwnedChangedPaths(t *testing.T) {
+	codeowners := "# merge authority\n/.github/workflows/ @o\n/docs/development/WORKFLOW.md @o\n*.rs @o\n/control-plane/src/free.rs\n"
+	changed := []string{".github/workflows/ci.yml", "docs/development/WORKFLOW.md", "docs/WORKFLOW.md", "internal/review/coordinator.go", "control-plane/src/lib.rs", "control-plane/src/free.rs", ".github/workflows", ""}
+	if got := strings.Join(codeOwned(codeowners, changed), ","); got != ".github/workflows/ci.yml,docs/development/WORKFLOW.md,control-plane/src/lib.rs" {
+		t.Fatalf("owned = %s", got)
 	}
 }
 

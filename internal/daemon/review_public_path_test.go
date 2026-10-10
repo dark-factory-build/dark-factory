@@ -649,21 +649,26 @@ func TestCodeownersRefusalEscalatesAndRecoversAfterApproval(t *testing.T) {
 	fixture, project, _, settle := publishedTask(t)
 	settle()
 	customerMode(t, fixture)
-	backend := &publicReviewBackend{enqueueRefusal: "required CODEOWNERS approval is missing"}
+	backend := &publicReviewBackend{enqueueRefusal: "UNPROCESSABLE: Waiting on code owner review from baziyer"}
 	fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return backend }
 	if _, err := reviewNow(context.Background(), fixture.daemon, project, publishedReviewRequest()); !errors.Is(err, review.ErrOwnerApproval) {
 		t.Fatalf("owner approval refusal reported %v", err)
 	}
 	waitForMergePipeline(t, fixture.daemon)
 	op := lastDurableReview(t, fixture.store, project)
-	if op.Refused == false || !op.OwnerApproval || backend.enqueues != 2 || !strings.Contains(op.Escalation, "#12") || !strings.Contains(op.Escalation, "CODEOWNERS-protected path") {
+	if op.Refused == false || !op.OwnerApproval || backend.enqueues != 1 || !strings.Contains(op.Escalation, "#12") || !strings.Contains(op.Escalation, "CODEOWNERS-protected path") {
 		t.Fatalf("owner approval escalation = %+v enqueues=%d", op, backend.enqueues)
 	}
+	// #1698: the refused head waits for its owner instead of re-enqueueing every pass.
 	backend.enqueueRefusal = ""
+	if _, err := fixture.daemon.advanceReviewOperations(context.Background(), false); err != nil || backend.enqueues != 1 {
+		t.Fatalf("unapproved head re-enqueued: enqueues=%d err=%v", backend.enqueues, err)
+	}
+	backend.pull = &review.Pull{Head: op.Request.Head, State: "open", Review: "APPROVED", Checks: []string{"required=success"}}
 	if _, err := fixture.daemon.advanceReviewOperations(context.Background(), false); err != nil {
 		t.Fatal(err)
 	}
-	if backend.enqueues != 3 || lastDurableReview(t, fixture.store, project).OwnerApproval {
+	if backend.enqueues != 2 || lastDurableReview(t, fixture.store, project).OwnerApproval {
 		t.Fatalf("owner approval did not recover after retry: enqueues=%d", backend.enqueues)
 	}
 }

@@ -406,6 +406,11 @@ func TestOwnerApprovalRefusalEscalatesOnce(t *testing.T) {
 		t.Fatalf("owner approval refusal = %+v err=%v enqueues=%d", op, err, backend.enqueues)
 	}
 	backend.enqueueErr = nil
+	// #1698: the same observation waits for the owner, still escalated, without another enqueue.
+	if waiting, err := c.Advance(context.Background(), op); err != nil || backend.enqueues != 0 || !waiting.OwnerApproval || waiting.Escalation != op.Escalation {
+		t.Fatalf("owner approval retried before approval: %+v err=%v enqueues=%d", waiting, err, backend.enqueues)
+	}
+	backend.pull.Review, backend.pull.MergeStateStatus = "APPROVED", "CLEAN"
 	if next, err := c.Advance(context.Background(), op); err != nil || backend.enqueues != 1 || next.Refused || next.OwnerApproval || next.Enqueues != 1 {
 		t.Fatalf("owner approval did not recover: %+v err=%v enqueues=%d", next, err, backend.enqueues)
 	}

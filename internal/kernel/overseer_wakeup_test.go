@@ -106,6 +106,31 @@ func TestOverseerEscalationWake(t *testing.T) {
 	}
 }
 
+// #1698: a pull request waiting on its code owner wakes the overseer once,
+// never re-wakes, and becomes one NEEDS YOU card naming it.
+func TestOverseerOwnerApprovalEscalationIsOneCard(t *testing.T) {
+	t.Parallel()
+	store, worker, _ := wakeFixture(t)
+	head := strings.Repeat("a", 40)
+	escalate(t, store, worker.ProjectID, "7", "open", head, head, 1000)
+	if _, err := store.writer.ExecContext(context.Background(), `UPDATE production_records SET document = json_set(document, '$.owner_approval', json('true')) WHERE kind = 'reviewer'`); err != nil {
+		t.Fatal(err)
+	}
+	at := 1000 + overseerWakeSettle.Milliseconds()
+	if bodies := wakeBodies(t, store, at); len(bodies) != 1 || !strings.Contains(bodies[0], "Escalated: stuck 7") {
+		t.Fatalf("wake = %q", bodies)
+	}
+	settleCarrier(t, store, at+1, 31, "ran")
+	for rewake := range int64(3) {
+		if bodies := wakeBodies(t, store, at+(rewake+1)*OverseerRewakeAfter.Milliseconds()+10); len(bodies) != 0 {
+			t.Fatalf("re-wake %d = %q", rewake+1, bodies)
+		}
+	}
+	if requests, err := store.OperatorHumanRequests(context.Background()); err != nil || len(requests) != 1 || !strings.Contains(requests[0].QuestionText, "Escalated: stuck 7 [reviewer:op7]") {
+		t.Fatalf("owner card = %+v, %v", requests, err)
+	}
+}
+
 // A Change factoryd could not publish has no pull request; its escalation
 // wakes the overseer exactly once, the unpublished Change it names is not
 // re-woken while that refusal stands, and it becomes one NEEDS YOU card.

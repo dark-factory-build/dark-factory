@@ -295,6 +295,10 @@ func (c Coordinator) Advance(ctx context.Context, op Operation) (Operation, erro
 	case op.Enqueues >= 2:
 		// Queued, removed, re-queued once and removed again.
 		op.State, op.RoutePending, op.Detail = "ejected", true, pull.Group.note(head)
+	case op.OwnerApproval:
+		// Only the owner's approval, which changes the observation, unblocks it.
+		op.Escalation = escalation
+		return op, nil
 	default:
 		if op.RefusedAttempts >= RefusedRetryLimit {
 			op.Escalation = escalation
