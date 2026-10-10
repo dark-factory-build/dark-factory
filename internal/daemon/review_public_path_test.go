@@ -590,7 +590,7 @@ func TestRefusedEnqueueBecomesAnOverseerItem(t *testing.T) {
 	}
 }
 
-func TestCodeownersRefusalNamesPullAndProtectedPath(t *testing.T) {
+func TestCodeownersRefusalEscalatesAndRecoversAfterApproval(t *testing.T) {
 	fixture, project, _, settle := publishedTask(t)
 	settle()
 	customerMode(t, fixture)
