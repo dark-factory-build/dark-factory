@@ -276,6 +276,10 @@ func (runtime RuntimePaths) telemetryReceiver() string {
 	return "http://127.0.0.1:" + strconv.Itoa(int(runtime.traceReceiverPort))
 }
 
+func (runtime RuntimePaths) TaskFile() string {
+	return filepath.Join(runtime.home, "factory-task")
+}
+
 func NewRuntimePaths(home, temp, socket, token, factoryctl, gitCeiling, toolPath, accountHome, accountConfig, toolchainReadRoots string) (RuntimePaths, error) {
 	runtime := RuntimePaths{
 		home: home, temp: temp, socket: socket, token: token,
@@ -1117,7 +1121,7 @@ func (runtime RuntimePaths) valid() bool {
 func (runtime RuntimePaths) environmentForRole(kind kernel.Provider, role kernel.AgentRole) []string {
 	environment := []string{
 		"DARK_FACTORY_TASK_ATTACHMENTS=" + filepath.Join(runtime.home, "task-attachments"),
-		"DARK_FACTORY_TASK_FILE=" + filepath.Join(runtime.home, "factory-task"),
+		"DARK_FACTORY_TASK_FILE=" + runtime.TaskFile(),
 		"DARK_FACTORY_SOCKET=" + runtime.socket,
 		"DARK_FACTORY_ATTEMPT_TOKEN_FILE=" + runtime.token,
 		"DARK_FACTORY_FACTORYCTL=" + runtime.factoryctl,

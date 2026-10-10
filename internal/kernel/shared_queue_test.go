@@ -238,7 +238,7 @@ func sentBackSharedTask(t *testing.T) (*Store, Task, Agent, Agent) {
 		store.Close()
 		t.Fatalf("settled task = %+v", settled)
 	}
-	returned, err := store.SendBackTask(ctx, task.ID, settled.Revision, "fix the test", mustTime(t, 50))
+	returned, err := store.SendBackTask(ctx, task.ID, settled.Revision, changeHead(t, store, task.ID), "fix the test", mustTime(t, 50))
 	if err != nil {
 		store.Close()
 		t.Fatal(err)
@@ -324,7 +324,7 @@ func TestSharedTaskWaitsForAnEligibleWorker(t *testing.T) {
 	if err != nil || !edited.AssignedAgentID.zero() || edited.Priority != 3 {
 		t.Fatalf("edited task = %+v, %v", edited, err)
 	}
-	if _, err := store.SendBackTask(ctx, task.ID, edited.Revision, "note", mustTime(t, 13)); !errors.Is(err, ErrConflict) {
+	if _, err := store.SendBackTask(ctx, task.ID, edited.Revision, "", "note", mustTime(t, 13)); !errors.Is(err, ErrConflict) {
 		t.Fatalf("send-back of unclaimed task = %v", err)
 	}
 	cancelled, err := store.UpdateTask(ctx, task.ID, edited.Revision, TaskPatch{Cancel: true}, mustTime(t, 14))

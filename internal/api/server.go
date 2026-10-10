@@ -74,6 +74,7 @@ const (
 	CallOperatorWorkerOperation
 	CallHumanRequests
 	CallHumanReply
+	CallHumanCancel
 	CallContentCreate
 	CallContentRevise
 	CallContentDeprecate
@@ -141,6 +142,7 @@ type Call struct {
 	workerOperation    WorkerOperationInput
 	overseerReply      OverseerHumanReplyInput
 	humanReply         OverseerHumanReplyInput
+	humanCancel        HumanCancelInput
 	content            ContentInput
 	contentList        ContentListInput
 	contentRead        ContentReadInput
@@ -192,7 +194,7 @@ func (call Call) AttemptDigest() (AttemptDigest, bool) {
 		return AttemptDigest{}, false
 	}
 	switch call.kind {
-	case CallMaintainer, CallAttemptTask, CallAttemptSource, CallSucceed, CallBlock, CallFail, CallRequestHuman, CallPeerStatus, CallPeerAsk, CallPeerAnswer, CallTerminalObserve, CallSendBack, CallOverseerSnapshot, CallOverseerEnqueueTask, CallOverseerUpdateTask, CallOverseerUpdateAgent, CallOverseerStopRun, CallOverseerReplaceRun, CallOverseerMessageWorker, CallOverseerInterruptWorker, CallOverseerReplyHuman, CallContentCreate, CallContentRevise, CallContentDeprecate, CallContentList, CallContentRead, CallContentBody, CallContentAttach, CallContentAttachments, CallOutcomeWrite, CallOutcomeRead, CallOutcomeList:
+	case CallSnapshot, CallHumanRequests, CallTaskRead, CallIntake, CallMaintainer, CallAttemptTask, CallAttemptSource, CallSucceed, CallBlock, CallFail, CallRequestHuman, CallPeerStatus, CallPeerAsk, CallPeerAnswer, CallTerminalObserve, CallSendBack, CallOverseerSnapshot, CallOverseerEnqueueTask, CallOverseerUpdateTask, CallOverseerUpdateAgent, CallOverseerStopRun, CallOverseerReplaceRun, CallOverseerMessageWorker, CallOverseerInterruptWorker, CallOverseerReplyHuman, CallContentCreate, CallContentRevise, CallContentDeprecate, CallContentList, CallContentRead, CallContentBody, CallContentAttach, CallContentAttachments, CallOutcomeWrite, CallOutcomeRead, CallOutcomeList:
 		return call.digest, true
 	default:
 		return AttemptDigest{}, false
@@ -245,6 +247,10 @@ func (call Call) OverseerHumanReplyInput() (OverseerHumanReplyInput, bool) {
 
 func (call Call) HumanReplyInput() (OverseerHumanReplyInput, bool) {
 	return call.humanReply, call.kind == CallHumanReply
+}
+
+func (call Call) HumanCancelInput() (HumanCancelInput, bool) {
+	return call.humanCancel, call.kind == CallHumanCancel
 }
 
 func (call Call) CreateProjectInput() (CreateProjectInput, bool) {
@@ -973,7 +979,7 @@ func decodeCall(domain byte, bearer credential, encoded []byte) (Call, RemoteErr
 			return Call{}, RemoteInvalidRequest
 		}
 	case CallSendBack, CallSendBackTask:
-		if err := decodeExact(request.Params, &call.sendBack); err != nil || !validID(call.sendBack.TaskID) || !validText(call.sendBack.Note, 1, 8192) {
+		if err := decodeExact(request.Params, &call.sendBack); err != nil || !validID(call.sendBack.TaskID) || call.sendBack.Head != "" && !validCommitHex(call.sendBack.Head) || !validText(call.sendBack.Note, 1, 8192) {
 			return Call{}, RemoteInvalidRequest
 		}
 	case CallOverseerEnqueueTask:
@@ -1061,6 +1067,10 @@ func decodeCall(domain byte, bearer credential, encoded []byte) (Call, RemoteErr
 		}
 	case CallHumanReply:
 		if err := decodeExact(request.Params, &call.humanReply); err != nil || !validID(call.humanReply.OperationID) || !validID(call.humanReply.RequestID) || call.humanReply.ExpectedRevision == 0 || !validText(call.humanReply.Reply, 1, 8192) {
+			return Call{}, RemoteInvalidRequest
+		}
+	case CallHumanCancel:
+		if err := decodeExact(request.Params, &call.humanCancel); err != nil || !validHumanCancelInput(call.humanCancel) {
 			return Call{}, RemoteInvalidRequest
 		}
 	case CallWebRevokeClient:
@@ -1238,8 +1248,20 @@ func methodKind(method string) (CallKind, byte) {
 		return CallOutcomeList, attemptDomain
 	case "human_requests":
 		return CallHumanRequests, operatorDomain
+	// A specialist's review run reads these operator views; factoryd refuses
+	// every other attempt.
+	case "attempt_snapshot":
+		return CallSnapshot, attemptDomain
+	case "attempt_human_requests":
+		return CallHumanRequests, attemptDomain
+	case "attempt_task_read":
+		return CallTaskRead, attemptDomain
+	case "attempt_intake":
+		return CallIntake, attemptDomain
 	case "human_reply":
 		return CallHumanReply, operatorDomain
+	case "human_cancel":
+		return CallHumanCancel, operatorDomain
 	case "operator_stop_run":
 		return CallOperatorStopRun, operatorDomain
 	case "operator_replace_run":
@@ -1338,7 +1360,7 @@ func replyMatches(kind CallKind, reply replyKind) bool {
 		return reply == replyOverseerSnapshot
 	case CallProjectRepository:
 		return reply == replyContent
-	case CallCreateProject, CallProjectLimits, CallCreateAgent, CallAgentIdlePolicy, CallAccountLink, CallAgentSelectAccount, CallAgentSelectModel, CallEnqueueTask, CallSetDispatch, CallSetCapacity, CallCompactStorage, CallBackupCreate, CallSucceed, CallBlock, CallFail, CallRequestHuman, CallPeerAsk, CallPeerAnswer, CallSendBack, CallSendBackTask, CallOverseerEnqueueTask, CallOverseerUpdateTask, CallOverseerUpdateAgent, CallOverseerStopRun, CallOverseerReplaceRun, CallOverseerMessageWorker, CallOverseerInterruptWorker, CallOverseerReplyHuman, CallOperatorUpdateTask, CallOperatorUpdateAgent, CallOperatorStopRun, CallOperatorReplaceRun, CallOperatorMessageWorker, CallOperatorInterruptWorker, CallHumanReply:
+	case CallCreateProject, CallProjectLimits, CallCreateAgent, CallAgentIdlePolicy, CallAccountLink, CallAgentSelectAccount, CallAgentSelectModel, CallEnqueueTask, CallSetDispatch, CallSetCapacity, CallCompactStorage, CallBackupCreate, CallSucceed, CallBlock, CallFail, CallRequestHuman, CallPeerAsk, CallPeerAnswer, CallSendBack, CallSendBackTask, CallOverseerEnqueueTask, CallOverseerUpdateTask, CallOverseerUpdateAgent, CallOverseerStopRun, CallOverseerReplaceRun, CallOverseerMessageWorker, CallOverseerInterruptWorker, CallOverseerReplyHuman, CallOperatorUpdateTask, CallOperatorUpdateAgent, CallOperatorStopRun, CallOperatorReplaceRun, CallOperatorMessageWorker, CallOperatorInterruptWorker, CallHumanReply, CallHumanCancel:
 		return reply == replyMutation
 	case CallBackupVerify:
 		return reply == replyContent

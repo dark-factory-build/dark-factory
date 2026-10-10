@@ -148,7 +148,7 @@ func runProvider(ctx context.Context) (resultErr error) {
 		}
 	}
 	if config.Provider != kernel.ProviderShell {
-		if err := os.WriteFile(filepath.Join(runtimePaths.home, "factory-task"), config.ProviderTask, 0o600); err != nil {
+		if err := os.WriteFile(runtimePaths.TaskFile(), config.ProviderTask, 0o600); err != nil {
 			_ = cwd.Close()
 			return err
 		}

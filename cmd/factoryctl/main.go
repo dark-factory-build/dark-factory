@@ -73,12 +73,13 @@ const (
   factoryctl attempt peer ask --task ID --idempotency-key HEX32 --question TEXT
   factoryctl attempt peer answer --question ID --revision REVISION --idempotency-key HEX32 --answer TEXT
   factoryctl attempt terminal observe --project ID --task ID --run ID [--cursor N] [--max-bytes N]
+  factoryctl attempt status | human list | intake list|config [--project ID] | task read --task ID --revision REVISION [--offset N] (a specialist's review run only)
   factoryctl terminal observe --project ID --task ID --run ID [--cursor N] [--max-bytes N] [--text]
-  factoryctl attempt send-back --task ID --note TEXT
+  factoryctl attempt send-back --task ID [--head SHA] --note TEXT
   factoryctl overseer status [--task ID] [--offset N --head HEAD] [--text-offset RUNES --head HEAD]
 	factoryctl overseer task add --agent ID|any --title TEXT [--body TEXT] [--priority N] [--prerequisite TASK_ID:WORK_REVISION ...] [--conflict-path PATH ...] [--task-id ID --incarnation-id ID]
   factoryctl overseer task update --task ID --revision REVISION [--title TEXT] [--body TEXT] [--priority N] [--agent ID] [--cancel] [--retry]
-  factoryctl overseer task send-back --task ID --note TEXT
+  factoryctl overseer task send-back --task ID [--head SHA] --note TEXT
   factoryctl overseer agent pause|resume|archive|restore --agent ID --revision REVISION
   factoryctl overseer worker stop --operation-id ID --task ID --task-revision REVISION --run ID --run-revision REVISION
   factoryctl overseer worker replace --operation-id ID --task ID --task-revision REVISION --run ID --run-revision REVISION --successor-task ID --successor-incarnation ID --instruction TEXT
@@ -87,6 +88,7 @@ const (
   factoryctl overseer human reply --operation-id ID --request ID --revision REVISION --reply TEXT
   factoryctl human list
   factoryctl human reply --operation-id ID --request ID --revision REVISION --reply TEXT
+  factoryctl human cancel --request ID --revision REVISION --run-revision REVISION
   factoryctl project create --name TEXT --root ABSOLUTE
   factoryctl project repository list --project ID
 	factoryctl project repository add --project ID --name TEXT --root ABSOLUTE --base REF [--id HEX32]
@@ -119,7 +121,7 @@ const (
     --project prints what factoryd waits on there instead: held health conditions,
     the overseers' due and stalled items, Changes reclaim keeps by reason, and
     each repository's readiness (running the project repository fetch check).
-  factoryctl task send-back --task ID --note TEXT
+  factoryctl task send-back --task ID [--head SHA] --note TEXT
   factoryctl task update --task ID --revision REVISION [--title TEXT] [--body TEXT] [--priority N] [--agent ID] [--cancel] [--retry]
   factoryctl task update --task ID --revision REVISION --remove-attachments
     Only succeeded/cancelled tasks; retained filenames are marked removed.
@@ -227,6 +229,7 @@ const (
 	commandOverseerReplyHuman
 	commandHumanList
 	commandHumanReply
+	commandHumanCancel
 	commandWorkerOperation
 	commandContentCreate
 	commandContentRevise
@@ -247,6 +250,7 @@ type attemptCommand struct {
 	kind              commandKind
 	removeAttachments bool
 	operatorControl   bool
+	attemptRead       bool
 	home              string
 	idempotencyKey    string
 	text              string
@@ -411,7 +415,7 @@ func runWithDependencies(ctx context.Context, args []string, getenv func(string)
 	if command.kind == commandRemoteStatus {
 		return runRemote(ctx, getenv, stdout, stderr)
 	}
-	if command.kind == commandAgentPaths || command.kind == commandOperatorTerminalObserve || command.kind == commandWorkerOperation || command.kind == commandProjectCreate || command.kind == commandProjectRepository || command.kind == commandIntake || command.kind == commandProjectLimits || command.kind == commandAgentCreate || command.kind == commandAgentIdlePolicy || command.kind == commandAccountsDiscover || command.kind == commandAccountsList || command.kind == commandAccountLink || command.kind == commandAgentSelectAccount || command.kind == commandAgentSelectModel || command.kind == commandTaskAdd || command.kind == commandTaskSendBack || command.kind == commandTaskRead || command.kind == commandDispatch || command.kind == commandCapacity || command.kind == commandStatus || command.kind == commandCompactStorage || command.kind == commandBackupCreate || command.kind == commandBackupVerify || command.kind == commandHumanList || command.kind == commandHumanReply {
+	if command.kind == commandAgentPaths || command.kind == commandOperatorTerminalObserve || command.kind == commandWorkerOperation || command.kind == commandProjectCreate || command.kind == commandProjectRepository || command.kind == commandIntake || command.kind == commandProjectLimits || command.kind == commandAgentCreate || command.kind == commandAgentIdlePolicy || command.kind == commandAccountsDiscover || command.kind == commandAccountsList || command.kind == commandAccountLink || command.kind == commandAgentSelectAccount || command.kind == commandAgentSelectModel || command.kind == commandTaskAdd || command.kind == commandTaskSendBack || command.kind == commandTaskRead || command.kind == commandDispatch || command.kind == commandCapacity || command.kind == commandStatus || command.kind == commandCompactStorage || command.kind == commandBackupCreate || command.kind == commandBackupVerify || command.kind == commandHumanList || command.kind == commandHumanReply || command.kind == commandHumanCancel {
 		return runOperator(ctx, command, getenv, stdout, stderr)
 	}
 	if command.kind >= commandContentCreate && command.kind <= commandContentAttachments && len(args) > 0 && args[0] == "content" {
@@ -525,7 +529,7 @@ func runWithDependencies(ctx context.Context, args []string, getenv func(string)
 	case commandPeerAnswer:
 		result, err = client.PeerAnswer(callContext, api.PeerAnswerInput{QuestionID: command.id, ExpectedRevision: command.expectedRevision, IdempotencyKey: command.idempotencyKey, Answer: command.text})
 	case commandSendBack:
-		result, err = client.SendBack(callContext, api.SendBackInput{TaskID: command.id, Note: command.text})
+		result, err = client.SendBack(callContext, api.SendBackInput{TaskID: command.id, Head: command.sourceCommit, Note: command.text})
 	default:
 		err = api.ErrInvalidInput
 	}
@@ -691,6 +695,13 @@ func parse(args []string) (attemptCommand, bool, bool) {
 		if len(args) == 2 && args[1] == "list" {
 			return attemptCommand{kind: commandHumanList}, false, true
 		}
+		if len(args) >= 2 && args[1] == "cancel" {
+			values, ok := pairedFlagValues(args[2:], false, "--request", "--revision", "--run-revision")
+			revision, _ := strconv.ParseUint(values["--revision"], 10, 64)
+			runRevision, _ := strconv.ParseUint(values["--run-revision"], 10, 64)
+			ok = ok && validHumanRequestKey(values["--request"]) && validRevision(values["--revision"]) && validRevision(values["--run-revision"])
+			return attemptCommand{kind: commandHumanCancel, id: values["--request"], expectedRevision: revision, runRevision: runRevision}, false, ok
+		}
 		if len(args) < 2 || args[1] != "reply" {
 			return attemptCommand{}, false, false
 		}
@@ -751,6 +762,11 @@ func parse(args []string) (attemptCommand, bool, bool) {
 	}
 	if args[1] == "outcome" {
 		return parseOutcome(args)
+	}
+	if args[1] == "status" || args[1] == "human" || args[1] == "intake" || args[1] == "task" && len(args) > 2 {
+		command, help, ok := parse(args[1:])
+		command.attemptRead = true
+		return command, help, ok && (command.kind == commandStatus && command.project == "" || command.kind == commandHumanList || command.kind == commandTaskRead || command.kind == commandIntake && command.intake.Action == "list")
 	}
 	switch args[1] {
 	case "task":
@@ -875,8 +891,8 @@ func parse(args []string) (attemptCommand, bool, bool) {
 			}
 		}
 	case "send-back":
-		values, ok := pairedFlagValues(args[2:], true, "--task", "--note")
-		return attemptCommand{kind: commandSendBack, id: values["--task"], text: values["--note"]}, false, ok && validHumanRequestKey(values["--task"]) && validOperatorText(values["--note"], 1, 8192)
+		values, ok := pairedFlagValues(args[2:], true, "--task", "--head", "--note")
+		return attemptCommand{kind: commandSendBack, id: values["--task"], sourceCommit: values["--head"], text: values["--note"]}, false, ok && validHumanRequestKey(values["--task"]) && validOperatorText(values["--note"], 1, 8192)
 	}
 	return attemptCommand{}, false, false
 }
@@ -1608,7 +1624,7 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 	case "task add":
 		command.kind, names = commandTaskAdd, []string{"--project", "--repository", "--agent", "--title", "--body", "--priority", "--content", "--task-id", "--incarnation-id"}
 	case "task send-back":
-		command.kind, names = commandTaskSendBack, []string{"--task", "--note"}
+		command.kind, names = commandTaskSendBack, []string{"--task", "--head", "--note"}
 	case "task read":
 		command.kind, names = commandTaskRead, []string{"--task", "--revision", "--offset"}
 	default:
@@ -1701,6 +1717,8 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 			command.id = value
 		case name == "--offset" && command.kind == commandTaskRead && isCount:
 			command.offset = count
+		case name == "--head" && command.kind == commandTaskSendBack:
+			command.sourceCommit = value
 		case name == "--note" && command.kind == commandTaskSendBack && validOperatorText(value, 1, 8192):
 			command.text = value
 		case name == "--priority" && command.kind == commandTaskAdd:
@@ -1892,6 +1910,7 @@ func parseOverseer(args []string) (attemptCommand, bool, bool) {
 		return key(value) || command.kind == commandOverseerTaskAdd && value == "any"
 	})
 	validatedStringFlag("--task", &command.id, key)
+	validatedStringFlag("--head", &command.sourceCommit, func(string) bool { return command.kind == commandOverseerTaskSendBack })
 	validatedStringFlag("--request", &command.id, key)
 	validatedStringFlag("--run", &command.run, key)
 	validatedStringFlag("--successor-task", &command.project, key)
@@ -2181,11 +2200,14 @@ func newOperatorID() (string, error) {
 func runOperator(ctx context.Context, command attemptCommand, getenv func(string) string, stdout, stderr io.Writer) int {
 	socket := getenv("DARK_FACTORY_SOCKET")
 	token := getenv("DARK_FACTORY_OPERATOR_TOKEN_FILE")
-	if socket == "" || token == "" {
+	if socket == "" || token == "" && !command.attemptRead {
 		_, _ = io.WriteString(stderr, "factoryctl: operator client configuration is invalid\n")
 		return exitFailure
 	}
 	client, err := api.NewOperatorClient(socket, token)
+	if command.attemptRead {
+		client, err = api.NewAttemptReaderFromEnvironment(socket)
+	}
 	if err != nil {
 		_, _ = io.WriteString(stderr, "factoryctl: operator client configuration is invalid\n")
 		return exitFailure
@@ -2271,6 +2293,12 @@ func runOperator(ctx context.Context, command attemptCommand, getenv func(string
 		result, callErr := client.HumanReply(callContext, api.OverseerHumanReplyInput{OperationID: command.operationID, RequestID: command.id, ExpectedRevision: command.expectedRevision, Reply: command.text})
 		if callErr != nil {
 			return writeWebFailure(stderr, "human reply", callErr)
+		}
+		return writeJSON(stdout, result)
+	case commandHumanCancel:
+		result, callErr := client.HumanCancel(callContext, api.HumanCancelInput{RequestID: command.id, ExpectedRevision: command.expectedRevision, ExpectedRunRevision: command.runRevision})
+		if callErr != nil {
+			return writeWebFailure(stderr, "human cancel", callErr)
 		}
 		return writeJSON(stdout, result)
 	case commandAccountsDiscover:
@@ -2446,7 +2474,7 @@ func runOperator(ctx context.Context, command attemptCommand, getenv func(string
 			Revision      uint64 `json:"revision"`
 		}{ID: id, IncarnationID: incarnation, Head: result.Head, Revision: result.Revision})
 	case commandTaskSendBack:
-		result, callErr := client.SendBackTask(callContext, api.SendBackInput{TaskID: command.id, Note: command.text})
+		result, callErr := client.SendBackTask(callContext, api.SendBackInput{TaskID: command.id, Head: command.sourceCommit, Note: command.text})
 		if callErr != nil {
 			return writeWebFailure(stderr, "task send-back", callErr)
 		}
@@ -2607,7 +2635,7 @@ func runOverseer(ctx context.Context, command attemptCommand, getenv func(string
 		}
 		result, err = client.OverseerUpdateTask(callContext, input)
 	case commandOverseerTaskSendBack:
-		result, err = client.SendBack(callContext, api.SendBackInput{TaskID: command.id, Note: command.text})
+		result, err = client.SendBack(callContext, api.SendBackInput{TaskID: command.id, Head: command.sourceCommit, Note: command.text})
 	case commandOverseerAgentUpdate:
 		input := api.OverseerAgentUpdateInput{AgentID: command.agent, ExpectedRevision: command.expectedRevision}
 		if command.archiveSet {

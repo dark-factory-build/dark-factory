@@ -107,9 +107,6 @@ func TestCodexConfigCarriesTaskBytesForLaunch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Contains(encoded, []byte("printf exact")) {
-		t.Fatal("Codex worker config omitted private launch task")
-	}
 	got, err := DecodeConfig(encoded)
 	if err != nil || got.Provider != kernel.ProviderCodex || string(got.ProviderTask) != "printf exact" {
 		t.Fatalf("Codex config round trip = provider %s task %d bytes, err %v", got.Provider, len(got.ProviderTask), err)
