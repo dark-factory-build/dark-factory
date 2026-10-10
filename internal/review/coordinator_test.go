@@ -35,15 +35,16 @@ func (s *memoryStore) CreateRetry(_ context.Context, failed, retry Operation) er
 }
 
 type fakeBackend struct {
-	reviews    int
-	killed     bool
-	submitErr  error
-	event      string
-	submitted  bool
-	enqueues   int
-	enqueueErr error
-	observeErr error
-	pull       *Pull
+	reviews         int
+	killed          bool
+	submitErr       error
+	event           string
+	submitted       bool
+	enqueues        int
+	enqueueAttempts int
+	enqueueErr      error
+	observeErr      error
+	pull            *Pull
 }
 
 func (b *fakeBackend) CloneReadOnly(context.Context, Request) (string, func(), error) {
@@ -65,6 +66,7 @@ func (b *fakeBackend) Submit(context.Context, Operation, Verdict) error {
 	return b.submitErr
 }
 func (b *fakeBackend) Enqueue(context.Context, Operation) error {
+	b.enqueueAttempts++
 	if b.enqueueErr == nil {
 		b.enqueues++
 	}
@@ -335,7 +337,7 @@ func TestRefusedDirtyPullIsSentBackWithoutEscalation(t *testing.T) {
 	backend := &fakeBackend{pull: &Pull{Head: reviewRequest().Head, State: "open", MergeStateStatus: "DIRTY"}, enqueueErr: fmt.Errorf("%w (rejected before execution as UNPROCESSABLE)", ErrRefused)}
 	c := Coordinator{Store: store, Backend: backend, Now: func() time.Time { return time.Unix(20, 0) }}
 	op, err := c.Advance(context.Background(), Operation{ID: "op", Request: reviewRequest(), State: "enqueued", Verdict: "allow", Submitted: true})
-	if err != nil || op.State != "ejected" || !op.RoutePending || op.Escalation != "" || backend.enqueues != 1 || len(store.values) != 1 {
+	if err != nil || op.State != "ejected" || !op.RoutePending || op.Escalation != "" || backend.enqueueAttempts != 0 || len(store.values) != 1 {
 		t.Fatalf("dirty refusal = %+v err=%v enqueues=%d writes=%d", op, err, backend.enqueues, len(store.values))
 	}
 }
@@ -352,8 +354,8 @@ func TestRefusedCleanPullStopsAfterRetryLimit(t *testing.T) {
 			t.Fatalf("refused pass = %+v err=%v", op, err)
 		}
 	}
-	if backend.enqueues != RefusedRetryLimit || op.RefusedAttempts != RefusedRetryLimit {
-		t.Fatalf("retry cap = %+v enqueues=%d", op, backend.enqueues)
+	if backend.enqueueAttempts != RefusedRetryLimit || op.RefusedAttempts != RefusedRetryLimit {
+		t.Fatalf("retry cap = %+v attempts=%d", op, backend.enqueueAttempts)
 	}
 }
 

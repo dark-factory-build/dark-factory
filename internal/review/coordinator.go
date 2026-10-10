@@ -294,6 +294,7 @@ func (c Coordinator) Advance(ctx context.Context, op Operation) (Operation, erro
 		op.State, op.RoutePending, op.Detail = "ejected", true, pull.Group.note(head)
 	default:
 		if op.RefusedAttempts >= RefusedRetryLimit {
+			op.Escalation = escalation
 			op.UpdatedAt = c.Now()
 			return op, errors.Join(ErrRefused, c.Store.Update(ctx, op))
 		}
@@ -322,6 +323,7 @@ func (c Coordinator) Advance(ctx context.Context, op Operation) (Operation, erro
 			return c.failedPass(ctx, op, err)
 		}
 		op.Enqueues++
+		op.Refused, op.RefusedObservation, op.RefusedAttempts, op.OwnerApproval = false, "", 0, false
 	}
 	if op.State == "enqueued" && failures == 0 && escalation == "" && op.Enqueues == enqueues {
 		return op, nil // waiting, unchanged
