@@ -15,9 +15,6 @@ const continuationTaskFetchInstruction = `This is resumed work. Run "$DARK_FACTO
 
 func providerTaskWithContinuationContext(kind kernel.Provider, task []byte, contexts []kernel.ContinuationContext) ([]byte, error) {
 	limit := runner.MaxProviderTaskBytes
-	if kind != kernel.ProviderShell {
-		limit = runner.MaxNativeTaskBytes
-	}
 	return taskWithContinuationContext(kind, task, contexts, limit)
 }
 
