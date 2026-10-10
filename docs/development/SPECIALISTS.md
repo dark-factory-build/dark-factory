@@ -110,9 +110,12 @@ returns only with new evidence and a reference to the earlier decision.
 - The public web, when your provider offers it (Claude Code: WebSearch and
   WebFetch). Check that it works before relying on it, and report it as
   unavailable if it does not.
-- The interface: if `factory_browser` is available, run the console fixture
-  from your checkout on `http://127.0.0.1:5196/?fixture` and use it. A fixture
-  shows simulated data; say so when you report on it.
+- The interface: if `factory_browser` is available, run
+  `cd web && corepack pnpm install --frozen-lockfile && corepack pnpm run preview:floor fixture`
+  from your checkout and open `http://127.0.0.1:5196/?fixture`. It is the
+  whole console over simulated data, rendered once as static markup: layout,
+  copy and phone width are reviewable; clicks, keyboard flow and action
+  feedback are not. Say so when you report on it.
 
 ## Research records
 
