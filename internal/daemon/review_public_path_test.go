@@ -855,6 +855,8 @@ func TestRefusedEnqueueResendsEachTickAndEndsFromThePull(t *testing.T) {
 		t.Fatalf("refused enqueue err=%v enqueues=%d", err, backend.enqueues)
 	}
 	waitForMergePipeline(t, fixture.daemon)
+	// reviewNow's verdict wake consumes the first refusal retry; explicit ticks
+	// below verify the remaining retry behavior.
 	if backend.enqueues != 2 {
 		t.Fatalf("initial enqueue count=%d", backend.enqueues)
 	}
