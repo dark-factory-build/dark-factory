@@ -135,6 +135,11 @@ func createContentTx(ctx context.Context, tx *writeTx, spec NewContent, at UnixM
 	if err := validateRepositoryBindings(ctx, tx.connection); err != nil {
 		return ContentRevision{}, tx.Rollback(err)
 	}
+	if authorTask != nil {
+		if err := attachSpecialistRecordTx(ctx, tx, spec, at); err != nil {
+			return ContentRevision{}, tx.Rollback(err)
+		}
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return ContentRevision{}, err
 	}
@@ -380,7 +385,7 @@ func (store *Store) AttachContentToTask(ctx context.Context, task TaskID, projec
 		}
 		return tx.Rollback(err)
 	}
-	if err := attachContentTx(ctx, tx, task, project, taskWorkRevision, content, revision, at); err != nil {
+	if err := attachContentTx(ctx, tx, task, project, taskWorkRevision, content, revision, at, false); err != nil {
 		return tx.Rollback(err)
 	}
 	return tx.Commit(ctx)
@@ -412,13 +417,13 @@ func (store *Store) AttachContentForOrchestrator(ctx context.Context, digest Att
 	if err := contentScope(ctx, tx.connection, authority, content, revision.Int64()); err != nil {
 		return tx.Rollback(err)
 	}
-	if err := attachContentTx(ctx, tx, task, authority.ProjectID, taskWorkRevision, content, revision, at); err != nil {
+	if err := attachContentTx(ctx, tx, task, authority.ProjectID, taskWorkRevision, content, revision, at, false); err != nil {
 		return tx.Rollback(err)
 	}
 	return tx.Commit(ctx)
 }
 
-func attachContentTx(ctx context.Context, tx *writeTx, task TaskID, project ProjectID, taskWorkRevision int64, content ContentID, revision Revision, at UnixMillis) error {
+func attachContentTx(ctx context.Context, tx *writeTx, task TaskID, project ProjectID, taskWorkRevision int64, content ContentID, revision Revision, at UnixMillis, active bool) error {
 	var contentProject []byte
 	if err := tx.connection.QueryRowContext(ctx, "SELECT project_id FROM project_content_revisions WHERE id = ? AND revision = ?", content.Bytes(), revision.Int64()).Scan(&contentProject); err != nil {
 		if err == sql.ErrNoRows {
@@ -447,7 +452,7 @@ func attachContentTx(ctx context.Context, tx *writeTx, task TaskID, project Proj
 		}
 		return err
 	}
-	if status != TaskQueued.String() {
+	if status != TaskQueued.String() && !(active && (status == TaskRunning.String() || status == TaskBlocked.String())) {
 		return ErrConflict
 	}
 	var references int
