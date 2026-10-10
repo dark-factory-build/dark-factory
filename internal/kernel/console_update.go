@@ -329,6 +329,9 @@ func (store *Store) updateTask(ctx context.Context, digest *AttemptDigest, id Ta
 		}
 	}
 	if patch.Title != nil {
+		if *patch.Title == overseerWakeTitle {
+			return Task{}, tx.Rollback(fmt.Errorf("%w: reserved standing instruction title", ErrInvalidValue))
+		}
 		task.Title = *patch.Title
 	}
 	if patch.Body != nil {
@@ -337,7 +340,9 @@ func (store *Store) updateTask(ctx context.Context, digest *AttemptDigest, id Ta
 	if patch.Priority != nil {
 		task.Priority = *patch.Priority
 	}
+	assignedAgentChanged := false
 	if patch.AssignedAgentID != nil {
+		assignedAgentChanged = *patch.AssignedAgentID != task.AssignedAgentID
 		agent, found, err := agentByID(ctx, tx.connection, *patch.AssignedAgentID)
 		if err != nil {
 			return Task{}, tx.Rollback(err)
@@ -351,6 +356,18 @@ func (store *Store) updateTask(ctx context.Context, digest *AttemptDigest, id Ta
 			return Task{}, tx.Rollback(ErrUnauthorized)
 		}
 		task.AssignedAgentID = agent.ID
+	}
+	if assignedAgentChanged && task.Title == overseerWakeTitle && !task.AssignedAgentID.zero() {
+		agent, found, err := agentByID(ctx, tx.connection, task.AssignedAgentID)
+		if err != nil {
+			return Task{}, tx.Rollback(err)
+		}
+		if !found {
+			return Task{}, tx.Rollback(ErrCorruptState)
+		}
+		if agent.Role == RoleWorker && agent.Idle.Policy == IdleStandingInstruction {
+			return Task{}, tx.Rollback(fmt.Errorf("%w: reserved standing instruction title", ErrInvalidValue))
+		}
 	}
 	bump := 0
 	if retire {

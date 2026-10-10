@@ -613,7 +613,7 @@ func (store *Store) importIntakeAcceptance(ctx context.Context, id IntakeAccepta
 	// Accepted work goes straight to any idle worker; the overseer wakes only
 	// for its outcome (overseer_wakeup.go).
 	spec := NewTask{Priority: priority, ID: accepted.TaskID, IncarnationID: accepted.IncarnationID, ProjectID: accepted.ProjectID, RepositoryID: accepted.RepositoryID, Title: accepted.Snapshot.Title, Body: intakeTaskBody(accepted)}
-	if err := validateNewTask(spec); err != nil {
+	if err := validateNonCarrierTask(spec); err != nil {
 		return Task{}, tx.Rollback(err)
 	}
 	existing, replay, err := intakeTaskReplay(ctx, tx.connection, spec)

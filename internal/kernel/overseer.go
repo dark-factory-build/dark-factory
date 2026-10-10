@@ -476,7 +476,7 @@ func overseerRun(ctx context.Context, connection *sql.Conn, digest AttemptDigest
 // orchestrator's project. The task identity remains the durable idempotency
 // key; a retry with different immutable task data conflicts.
 func (store *Store) EnqueueTaskForOverseer(ctx context.Context, digest AttemptDigest, spec NewTask, at UnixMillis) (Task, error) {
-	if err := validateNewTask(spec); err != nil {
+	if err := validateNonCarrierTask(spec); err != nil {
 		return Task{}, err
 	}
 	tx, err := store.beginValidatedWrite(ctx)
