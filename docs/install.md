@@ -195,6 +195,13 @@ TASK_ID --revision REVISION --retry`, or send a completed model result back with
 `factoryctl task send-back --task TASK_ID --note TEXT` (shell tasks take no
 note, so send-back refuses them).
 
+When factoryd cannot publish a finished Change, it records the failure and
+escalates it to the project's overseer once. A Maintainer refusal, conflict or
+unavailability, or a repository disabled for new work, is retried for the same
+Change revision about hourly, so a cause fixed outside factoryd heals itself.
+Any other rejection, such as invalid input caused by the Change, is final for
+that Change revision: send the task back so a corrected revision can publish.
+
 ## Try a task without a model
 
 The `shell` provider runs the task body as a `/bin/sh` script in the Change
@@ -338,6 +345,14 @@ Use `factoryctl project repository github --id REPOSITORY_ID` to bind its
 configured publication repository to the live GitHub connection. Fetch readiness
 and publication binding are separate checks. A verified publication binding
 still requires live write permission for every publication operation.
+
+Once a repository is bound to a project, factoryd also reviews its open pull
+requests, including ones it did not publish. When a blocking verdict or
+merge-queue ejection lands on a same-repository pull request whose head has not
+moved, factoryd creates one `Repair OWNER/REPO#N` worker task and publishes its
+result to that pull request's own branch. Repair is limited to two rounds;
+after that the pull request is escalated to the project's overseer. A pull
+request from a fork only receives the verdict on GitHub.
 
 ## Project repositories (v0.4.0+)
 
