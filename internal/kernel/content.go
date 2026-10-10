@@ -568,18 +568,41 @@ func (store *Store) TaskContentReferences(ctx context.Context, project ProjectID
 	return taskContentReferencesOnConnection(ctx, connection, project, task, workRevision)
 }
 
-func taskContentReferencesOnConnection(ctx context.Context, connection *sql.Conn, project ProjectID, task TaskID, workRevision Revision) ([]TaskContentReference, error) {
+// TaskContentReferencesCarried is what a run is supplied: every attachment of
+// the task at or before the run's work revision, newest first, one per content
+// id, so a record attached before a send-back still reaches the corrected run.
+func (store *Store) TaskContentReferencesCarried(ctx context.Context, project ProjectID, task TaskID, workRevision Revision) ([]TaskContentReference, error) {
 	if project.zero() || task.zero() || workRevision.Int64() < 1 {
 		return nil, fmt.Errorf("%w: invalid task content reference", ErrInvalidValue)
 	}
-	rows, err := connection.QueryContext(ctx, `SELECT task_id, project_id, task_work_revision, content_id, content_revision, attached_at_ms FROM task_content_references WHERE task_id = ? AND project_id = ? AND task_work_revision = ? ORDER BY content_id, content_revision LIMIT ?`, task.Bytes(), project.Bytes(), workRevision.Int64(), contentPageSize+1)
+	connection, err := store.readerConnection(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer connection.Close()
+	return queryTaskContentReferences(ctx, connection, project, task, workRevision, true)
+}
+
+func taskContentReferencesOnConnection(ctx context.Context, connection *sql.Conn, project ProjectID, task TaskID, workRevision Revision) ([]TaskContentReference, error) {
+	return queryTaskContentReferences(ctx, connection, project, task, workRevision, false)
+}
+
+func queryTaskContentReferences(ctx context.Context, connection *sql.Conn, project ProjectID, task TaskID, workRevision Revision, carried bool) ([]TaskContentReference, error) {
+	if project.zero() || task.zero() || workRevision.Int64() < 1 {
+		return nil, fmt.Errorf("%w: invalid task content reference", ErrInvalidValue)
+	}
+	rows, err := connection.QueryContext(ctx, `SELECT task_id, project_id, task_work_revision, content_id, content_revision, attached_at_ms FROM task_content_references WHERE task_id = ? AND project_id = ? AND (task_work_revision = ?3 OR ?5 AND task_work_revision < ?3) ORDER BY CASE WHEN ?5 THEN attached_at_ms END DESC, CASE WHEN ?5 THEN task_work_revision END DESC, content_id, content_revision LIMIT ?4`, task.Bytes(), project.Bytes(), workRevision.Int64(), contentPageSize+1, carried)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	var result []TaskContentReference
+	seen := map[ContentID]bool{}
 	for rows.Next() {
 		if len(result) == contentPageSize {
+			if carried {
+				break
+			}
 			return nil, fmt.Errorf("%w: task content references exceed bound", ErrInvalidValue)
 		}
 		var rawTask, rawProject, rawContent []byte
@@ -596,6 +619,10 @@ func taskContentReferencesOnConnection(ctx context.Context, connection *sql.Conn
 		if e1 != nil || e2 != nil || e3 != nil || e4 != nil || e5 != nil || e6 != nil {
 			return nil, fmt.Errorf("%w: invalid task content reference row", ErrCorruptState)
 		}
+		if carried && seen[cid] {
+			continue
+		}
+		seen[cid] = true
 		result = append(result, TaskContentReference{TaskID: tid, ProjectID: pid, TaskWorkRevision: tr, ContentID: cid, ContentRevision: cr, AttachedAt: at})
 	}
 	return result, rows.Err()
