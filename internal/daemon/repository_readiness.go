@@ -54,7 +54,7 @@ func (daemon *Daemon) RepositoryReadiness(ctx context.Context, id kernel.Reposit
 		source = current
 	}
 	// Only this explicit check re-pins a deliberately changed origin of the
-	// same checkout, once the sealed fetch succeeds through it. Selection,
+	// same checkout, once a sealed fetch succeeds through it. Selection,
 	// review and workers keep refusing a changed origin.
 	known, moved := source, source
 	moved.OriginDigest, moved.PublicationRepository = current.OriginDigest, current.PublicationRepository
@@ -67,7 +67,13 @@ func (daemon *Daemon) RepositoryReadiness(ctx context.Context, id kernel.Reposit
 		return api.ProjectRepository{}, kernel.ErrCorruptState
 	}
 	expected := change.RepositorySourceIdentity{Root: root, Git: git, OriginDigest: source.OriginDigest, PublicationRepository: source.PublicationRepository}
-	if _, err := change.SelectRegisteredGit(bounded, change.TrustedGitExecutable, repository.Root, repository.BaseRef, expected); err != nil {
+	_, err = change.SelectRegisteredGit(bounded, change.TrustedGitExecutable, repository.Root, repository.BaseRef, expected)
+	if err == nil && source != known {
+		// The base may be a commit, a local branch or another remote, so only a
+		// fetch through origin itself proves the changed origin.
+		err = change.ProbeOrigin(bounded, change.TrustedGitExecutable, repository.Root, expected)
+	}
+	if err != nil {
 		// A validation reason is closed and path-safe; Git's own stderr never
 		// leaves selection.
 		if invalid := (*change.ValidationError)(nil); errors.As(err, &invalid) {

@@ -122,6 +122,45 @@ func TestRepositoryReadinessFetchesExactNondefaultBranchWithoutChangingCheckout(
 	}
 }
 
+func TestRepositoryReadinessLocalBaseRepinsOnlyAFetchableOrigin(t *testing.T) {
+	ctx := context.Background()
+	git := change.TrustedGitExecutable
+	root := contentRepositoryFixture(t)
+	parent, err := os.MkdirTemp("/private/tmp", "dark-factory-readiness-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(parent) })
+	origin := filepath.Join(parent, "origin.git")
+	supervisorGit(t, git, "clone", "--bare", root, origin)
+	supervisorGit(t, git, "-C", root, "remote", "add", "origin", origin)
+	supervisorGit(t, git, "-C", root, "config", "protocol.file.allow", "always")
+	// An explicit commit base selects without fetching anything.
+	fixture, id := readinessProject(t, root, strings.TrimSpace(supervisorGitOutput(t, git, "-C", root, "rev-parse", "HEAD")))
+	if view, err := fixture.daemon.RepositoryReadiness(ctx, id, true); err != nil || view.FetchState != "ready" {
+		t.Fatalf("first claim: %+v %v", view, err)
+	}
+	first, _, err := fixture.store.RepositorySourceIdentity(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacement := filepath.Join(parent, "replacement.git")
+	supervisorGit(t, git, "-C", root, "remote", "set-url", "origin", replacement)
+	if view, err := fixture.daemon.RepositoryReadiness(ctx, id, true); err != nil || view.FetchState != "setup_required" {
+		t.Fatalf("unfetchable origin with a local base: %+v %v", view, err)
+	}
+	if got, _, err := fixture.store.RepositorySourceIdentity(ctx, id); err != nil || got != first {
+		t.Fatalf("unfetchable origin re-pinned: %+v %v", got, err)
+	}
+	supervisorGit(t, git, "clone", "--bare", origin, replacement)
+	if view, err := fixture.daemon.RepositoryReadiness(ctx, id, true); err != nil || view.FetchState != "ready" {
+		t.Fatalf("fetchable origin: %+v %v", view, err)
+	}
+	if got, _, err := fixture.store.RepositorySourceIdentity(ctx, id); err != nil || got.OriginDigest == first.OriginDigest {
+		t.Fatalf("fetchable origin not re-pinned: %+v %v", got, err)
+	}
+}
+
 func TestRepositoryReadinessPrivateRemoteDenialNeverInheritsCredentialsOrStderr(t *testing.T) {
 	var requests atomic.Int32
 	var authenticated atomic.Bool

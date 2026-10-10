@@ -85,6 +85,31 @@ func ReviewCheckout(ctx context.Context, gitExecutable, root string, expected Re
 	return nil
 }
 
+// ProbeOrigin proves the checkout's own origin answers a sealed fetch, whatever
+// the configured base fetches from. It changes no refs.
+func ProbeOrigin(ctx context.Context, gitExecutable, root string, expected RepositorySourceIdentity) error {
+	authority, err := openGitAuthority(gitExecutable, root, expected.Root, nil, true)
+	if err != nil {
+		return err
+	}
+	defer authority.close()
+	actual, err := authority.sourceIdentity(ctx)
+	if err != nil {
+		return err
+	}
+	if actual.Root != expected.Root || actual.Git != expected.Git || actual.OriginDigest != expected.OriginDigest {
+		return &ValidationError{Reason: "registered checkout identity changed"}
+	}
+	result, err := authority.run(ctx, maxGitSelectionOutput, "-C", root, "ls-remote", "--exit-code", "origin", "HEAD")
+	if err != nil {
+		return err
+	}
+	if result.exitCode != 0 {
+		return refreshFailure(result.stderr)
+	}
+	return nil
+}
+
 // InspectRepositorySource proves the configured root and base without fetching
 // or changing refs. An empty base only inspects identity; normal source selection
 // still refreshes and validates tracking revisions.
