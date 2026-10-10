@@ -2005,9 +2005,6 @@ func TestSupervisorActivationErrorAfterDurableMarkerJoinsInnerOwner(t *testing.T
 	if _, statErr := os.Stat(filepath.Join(runtimePath, runner.AttemptResultSpoolName)); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("consumed attempt result was not removed: %v", statErr)
 	}
-	if observation := runner.ObserveProcess(observedInner); observation.Presence != runner.Absent {
-		t.Fatalf("activation ambiguity left inner owner alive: %+v", observation)
-	}
 	for _, resource := range fixture.resources(t, run.ID) {
 		switch resource.Kind {
 		case kernel.ResourceProviderProcess:
@@ -2031,6 +2028,11 @@ func TestSupervisorActivationErrorAfterDurableMarkerJoinsInnerOwner(t *testing.T
 				t.Fatalf("activation ambiguity left outer alive: %+v", observation)
 			}
 		}
+	}
+	// A missing released provider leaves the zero identity, which observes as
+	// Unknown rather than Absent.
+	if observation := runner.ObserveProcess(observedInner); observation.Presence != runner.Absent {
+		t.Fatalf("activation ambiguity left inner owner alive: %+v", observation)
 	}
 }
 
