@@ -590,17 +590,17 @@ func TestRefusedEnqueueBecomesAnOverseerItem(t *testing.T) {
 	}
 }
 
-func TestCodeownersRefusalNamesPullAndPath(t *testing.T) {
+func TestCodeownersRefusalNamesPullAndProtectedPath(t *testing.T) {
 	fixture, project, _, settle := publishedTask(t)
 	settle()
 	customerMode(t, fixture)
-	backend := &publicReviewBackend{enqueueRefusal: "UNPROCESSABLE+CODEOWNERS_APPROVAL for .github/workflows/ci.yml"}
+	backend := &publicReviewBackend{enqueueRefusal: "required CODEOWNERS approval is missing"}
 	fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return backend }
 	if _, err := reviewNow(context.Background(), fixture.daemon, project, publishedReviewRequest()); !errors.Is(err, review.ErrOwnerApproval) {
 		t.Fatalf("owner approval refusal reported %v", err)
 	}
 	op := lastDurableReview(t, fixture.store, project)
-	if op.Refused == false || !op.OwnerApproval || backend.enqueues != 1 || !strings.Contains(op.Escalation, "#12") || !strings.Contains(op.Escalation, ".github/workflows/ci.yml") {
+	if op.Refused == false || !op.OwnerApproval || backend.enqueues != 1 || !strings.Contains(op.Escalation, "#12") || !strings.Contains(op.Escalation, "CODEOWNERS-protected path") {
 		t.Fatalf("owner approval escalation = %+v enqueues=%d", op, backend.enqueues)
 	}
 	if _, err := fixture.daemon.advanceReviewOperations(context.Background(), false); err != nil {

@@ -40,7 +40,7 @@ func TestOnlyAnUnprocessableEnqueueRefusalIsTerminal(t *testing.T) {
 }
 
 func TestCodeownersEnqueueRefusalIsOwnerApproval(t *testing.T) {
-	err := errors.New("review: Maintainer rejected operation: refused: The request was refused: rejected before execution as UNPROCESSABLE+CODEOWNERS_APPROVAL.")
+	err := errors.New("review: Maintainer rejected operation: refused: The request was refused: required CODEOWNERS approval is missing.")
 	if !errors.Is(enqueueRefused(err), review.ErrOwnerApproval) {
 		t.Fatalf("err=%v", enqueueRefused(err))
 	}

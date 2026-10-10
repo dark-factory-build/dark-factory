@@ -130,8 +130,8 @@ pub(crate) enum RefusalReason {
     /// error classes GitHub returned at the mutation root.
     #[error("rejected before execution as {0}")]
     Rejected(RejectionKinds),
-    #[error("required CODEOWNERS approval is missing for {0}")]
-    CodeownersApproval(String),
+    #[error("required CODEOWNERS approval is missing")]
+    CodeownersApproval,
     /// The mutation answered with neither an effect nor an error.
     #[error("answered with neither an effect nor an error")]
     NoEffect,
@@ -3289,41 +3289,12 @@ impl Authority {
         if entry.is_none() {
             if let Some(GraphQlFailure::Rejected(kinds)) = failure {
                 if kinds.codeowners_approval {
-                    return Err(OperationError::Refused(RefusalReason::CodeownersApproval(
-                        self.codeowners_path(token, request.pull_number).await,
-                    )));
+                    return Err(OperationError::Refused(RefusalReason::CodeownersApproval));
                 }
             }
         }
         let entry = enqueue_outcome(entry, failure)?;
         entry.into_result(request)
-    }
-
-    async fn codeowners_path(&self, token: &RepositoryToken, pull_number: i64) -> String {
-        #[derive(Deserialize)]
-        struct File {
-            filename: String,
-        }
-        let files: Vec<File> = match github_json(
-            &format!(
-                "https://api.github.com/repos/{}/{}/pulls/{pull_number}/files?per_page=100",
-                token.repository.owner, token.repository.name
-            ),
-            token.token.as_str(),
-        )
-        .await
-        {
-            Ok(files) => files,
-            Err(_) => return "a CODEOWNERS-protected path".into(),
-        };
-        files
-            .into_iter()
-            .find_map(|file| {
-                valid_repository_path(&file.filename)
-                    .ok()
-                    .map(|_| file.filename)
-            })
-            .unwrap_or_else(|| "a CODEOWNERS-protected path".into())
     }
 
     /// Answer "is this pull request queued at the head I stated?" by reading
