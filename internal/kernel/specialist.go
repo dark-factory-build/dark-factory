@@ -403,6 +403,11 @@ func validateSpecialistRecord(ctx context.Context, c *sql.Conn, spec NewContent,
 		if m.RecordID != "" {
 			return ErrInvalidValue
 		}
+		if m.MissionID != "" {
+			if err := validateMissionRecord(ctx, c, spec.ProjectID, m, a, false); err != nil {
+				return err
+			}
+		}
 		if a == nil {
 			return nil
 		}
@@ -434,10 +439,21 @@ func validateSpecialistRecord(ctx context.Context, c *sql.Conn, spec NewContent,
 		if proposals == 0 {
 			return fmt.Errorf("%w: unknown proposal", ErrInvalidValue)
 		}
+		if m.MissionID != "" {
+			if err := validateMissionRecord(ctx, c, spec.ProjectID, m, a, true); err != nil {
+				return err
+			}
+		}
 		if a != nil && m.TaskID != "" && active != 0 {
 			return fmt.Errorf("%w: an accepted proposal's task is still active", ErrConflict)
 		}
 	default:
+		if m.RecordType == "assessment" {
+			if spec.Kind != ContentObservation || m.MissionID == "" {
+				return ErrInvalidValue
+			}
+			return validateMissionRecord(ctx, c, spec.ProjectID, m, a, false)
+		}
 		return ErrInvalidValue
 	}
 	return nil
