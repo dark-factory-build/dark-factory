@@ -93,8 +93,8 @@ func newClient(socketPath, tokenPath string, domain byte) (client, error) {
 		return client{}, err
 	}
 	// An attempt client may start while factoryd restarts; call retries the
-	// absent socket instead of reporting a broken client.
-	if _, err := inspectSocket(socketPath); err != nil && (domain != attemptDomain || !socketAbsent(socketPath)) {
+	// socket instead of reporting a broken client.
+	if _, err := inspectSocket(socketPath); err != nil && domain != attemptDomain {
 		return client{}, err
 	}
 	return client{socketPath: socketPath, tokenPath: tokenPath, token: token, domain: domain}, nil
@@ -700,8 +700,9 @@ func (client client) call(ctx context.Context, method string, params, output any
 	for {
 		err := client.exchange(ctx, method, encoded, output)
 		retry := readMethod(method) && unavailable(err)
-		if errors.Is(err, errUndelivered) {
-			err, retry = ErrTransport, true
+		var failure undelivered
+		if errors.As(err, &failure) {
+			err, retry = failure.err, true
 		}
 		if !retry || client.domain != attemptDomain || time.Now().After(retryUntil) {
 			return err
@@ -721,20 +722,21 @@ func (client client) exchange(ctx context.Context, method string, encoded []byte
 	// socket inode is generation-scoped and must not be pinned in a client
 	// that can outlive one daemon generation. Between the old daemon's unlink
 	// and the new one's bind the path is absent: that is a transport outage
-	// to retry, not an invalid client.
+	// to retry, not an invalid client. The new socket is bound before it is
+	// made private, so an invalid one is retried too: nothing was sent.
 	if err != nil {
 		if socketAbsent(client.socketPath) {
-			return classifyUndelivered(ctx)
+			return classifyUndelivered(ctx, ErrTransport)
 		}
-		return ErrInvalidClient
+		return classifyUndelivered(ctx, ErrInvalidClient)
 	}
 	connection, err := (&net.Dialer{}).DialContext(ctx, "unix", client.socketPath)
 	if err != nil {
-		return classifyUndelivered(ctx)
+		return classifyUndelivered(ctx, ErrTransport)
 	}
 	defer connection.Close()
 	if err := verifySocketConnection(connection, before); err != nil {
-		return err
+		return classifyUndelivered(ctx, err)
 	}
 	if err := setConnectionDeadline(connection, ctx); err != nil {
 		return classifyTransport(ctx)
@@ -1377,9 +1379,11 @@ func validTaskStatus(status string) bool {
 	}
 }
 
-// errUndelivered is a transport failure before any request byte reached a
-// daemon: nothing was acted on, so call may retry it.
-var errUndelivered = errors.New("local API daemon is not accepting")
+// undelivered is a failure before any request byte reached a daemon: nothing
+// was acted on, so call may retry it before it reports err.
+type undelivered struct{ err error }
+
+func (failure undelivered) Error() string { return failure.err.Error() }
 
 // socketAbsent is the gap between daemon generations: the private parent
 // stands and only the socket name is missing.
@@ -1393,11 +1397,11 @@ func socketAbsent(path string) bool {
 	return errors.Is(err, fs.ErrNotExist)
 }
 
-func classifyUndelivered(ctx context.Context) error {
-	if err := ctx.Err(); err != nil {
-		return err
+func classifyUndelivered(ctx context.Context, err error) error {
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return ctxErr
 	}
-	return errUndelivered
+	return undelivered{err}
 }
 
 func classifyTransport(ctx context.Context) error {

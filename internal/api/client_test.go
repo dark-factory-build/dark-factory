@@ -1468,6 +1468,8 @@ func TestAttemptCallWaitsOutDaemonRestart(t *testing.T) {
 			return
 		}
 		defer replacement.Close()
+		// factoryd proves its binding before it makes the socket private.
+		time.Sleep(10 * restartRetryInterval)
 		if err := os.Chmod(socket, 0o600); err != nil {
 			done <- err
 			return
