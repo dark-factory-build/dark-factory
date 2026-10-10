@@ -561,7 +561,7 @@ const overseerWakeCounts = `WITH open_pr AS (SELECT p.repository, CAST(json_extr
 SELECT printf('worker tasks queued=%d running=%d; open factory PRs conflicting=%d failing=%d approved-not-queued=%d', COALESCE(SUM(t.status = 'queued'), 0), COALESCE(SUM(t.status = 'running'), 0),
 	(SELECT COALESCE(SUM(merge_state = 'dirty' OR COALESCE(mergeable = 0, 0)), 0) FROM classified),
 	(SELECT COALESCE(SUM(failing), 0) FROM classified),
-	(SELECT COALESCE(SUM(review = 'allow' AND NOT failing AND merge_state <> 'dirty' AND COALESCE(mergeable, 1) <> 0 AND merge_queue IN ('', 'none', 'unknown')), 0) FROM classified))
+	(SELECT COALESCE(SUM(review = 'allow' AND NOT failing AND merge_state <> 'dirty' AND COALESCE(mergeable, 1) <> 0 AND merge_queue = 'none'), 0) FROM classified))
 FROM tasks AS t LEFT JOIN agents AS a ON a.id = t.assigned_agent_id
 WHERE t.project_id = ?1 AND t.status IN ('queued', 'running') AND COALESCE(a.role, 'worker') = 'worker'`
 

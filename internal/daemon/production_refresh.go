@@ -343,6 +343,15 @@ func pullRequestObservation(ctx context.Context, call maintainerMCP, repository 
 		if review, ok := prior[value.Number]; ok && strings.EqualFold(review.Head, value.Head) {
 			pr.Review = review
 		}
+		if pr.Review.State == "allow" {
+			pr.MergeQueue = "unknown"
+			if queue, err := readMaintainerMergeQueue(ctx, call, repository, githubID, pr); err != nil {
+				fault(err)
+				result.Unavailable = "merge_queue"
+			} else {
+				pr.MergeQueue = queue
+			}
+		}
 		result.PullRequests = append(result.PullRequests, pr)
 	}
 	// Every pull read here is open or was open at the last refresh. Its
@@ -370,6 +379,21 @@ func pullRequestObservation(ctx context.Context, call maintainerMCP, repository 
 		result.Checks = append(result.Checks, checks...)
 	}
 	return result, nil
+}
+
+func readMaintainerMergeQueue(ctx context.Context, call maintainerMCP, repository string, githubID uint64, pr kernel.ProductionPullRequest) (string, error) {
+	content, err := maintainerTool(ctx, call, repository, githubID, "observe_pull_request_merge", observePullRequestMergeArguments(repository, pr.Number, pr.Head, pr.Base))
+	if err != nil {
+		return "", err
+	}
+	var merge observePullRequestMergeResponse
+	if json.Unmarshal(content, &merge) != nil || merge.PullNumber != pr.Number || merge.Head != pr.Head {
+		return "", errors.New("Maintainer returned an invalid merge observation")
+	}
+	if merge.State == "ACTIVE_QUEUE" {
+		return "active", nil
+	}
+	return "none", nil
 }
 
 // recordCIObservations is the github adapter: the checks a refresh read

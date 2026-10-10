@@ -35,6 +35,31 @@ func TestRefreshRepairsAnUnqueuedPullThatBecomesConflicting(t *testing.T) {
 	}
 }
 
+func TestRefreshReadsQueueStateForApprovedPulls(t *testing.T) {
+	head := strings.Repeat("a", 40)
+	pull := kernel.ProductionPullRequest{Number: 7, Head: head, Base: "main"}
+	for _, test := range []struct {
+		state, want string
+	}{
+		{"ACTIVE_QUEUE", "active"},
+		{"NOT_QUEUED", "none"},
+	} {
+		t.Run(test.state, func(t *testing.T) {
+			call := func(_ context.Context, request json.RawMessage, _ map[string]uint64) (json.RawMessage, error) {
+				if !strings.Contains(string(request), "observe_pull_request_merge") {
+					t.Fatalf("unexpected request %s", request)
+				}
+				content := fmt.Sprintf(`{"pull_number":7,"head_sha":"%s","state":"%s"}`, head, test.state)
+				return json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"structuredContent":` + content + `}}`), nil
+			}
+			got, err := readMaintainerMergeQueue(context.Background(), call, "o/r", 1, pull)
+			if err != nil || got != test.want {
+				t.Fatalf("queue=%q err=%v, want %q", got, err, test.want)
+			}
+		})
+	}
+}
+
 // #1404: the refresh read pull requests but never their checks, so no check
 // record was stored once the host controller was deleted. It reads checks
 // only while they can change: #7's head settled, #8's stored checks are
