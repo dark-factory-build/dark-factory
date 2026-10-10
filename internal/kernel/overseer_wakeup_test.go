@@ -242,8 +242,9 @@ func TestOverseerFailedReleaseEscalatesOncePerCause(t *testing.T) {
 		t.Fatalf("returning cause wake = %q", bodies)
 	}
 	// Causes that differ only after a long shared prefix (a temporary
-	// directory's generated name) are distinct, even on a same-commit retry.
-	for round, directory := range []string{"1", "2"} {
+	// directory's generated name), or only in a bracket, are distinct, even
+	// on a same-commit retry.
+	for round, directory := range []string{"1", "2", "]", ")"} {
 		settleCarrier(t, store, at+settle+1, byte(73+21*round), "ran")
 		at += rewake
 		release('d', "failed", "build", "mkdir "+strings.Repeat("/x", 50)+"/dark-factory-release-"+directory+": no space left on device", at)
