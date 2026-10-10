@@ -2016,6 +2016,9 @@ func TestSupervisorActivationErrorAfterDurableMarkerJoinsInnerOwner(t *testing.T
 			if resource.State != kernel.ResourceReleased {
 				t.Fatalf("released provider = %+v, observed inner %+v", resource, observedInner)
 			}
+			if observation := runner.ObserveProcess(observedInner); observation.Presence != runner.Absent {
+				t.Fatalf("activation ambiguity left inner owner alive: %+v", observation)
+			}
 		case kernel.ResourceRunnerProcess:
 			identity, identityErr := runnerIdentity(resource.Identity)
 			if identityErr != nil {
