@@ -231,7 +231,7 @@ func (store *Store) UpdateTask(ctx context.Context, id TaskID, expected Revision
 	return store.updateTask(ctx, nil, id, expected, patch, at)
 }
 
-// UpdateTaskForOverseer edits a queued worker task, or cancels a blocked one,
+// UpdateTaskForOverseer edits a queued worker task, or retires a terminal one,
 // in the running orchestrator's project, with authorization checked in the update transaction.
 func (store *Store) UpdateTaskForOverseer(ctx context.Context, digest AttemptDigest, id TaskID, expected Revision, patch TaskPatch, at UnixMillis) (Task, error) {
 	return store.updateTask(ctx, &digest, id, expected, patch, at)
@@ -313,10 +313,22 @@ func (store *Store) updateTask(ctx context.Context, digest *AttemptDigest, id Ta
 			return Task{}, tx.Rollback(err)
 		}
 	}
-	// A blocked task can only be cancelled. Its settled run stays matched to the
-	// old work revision, so the cancelled row takes the next one, exactly as a
-	// retry followed by a queued cancel would leave it.
-	retire := task.Status == TaskBlocked && patch.Cancel && patch.Title == nil && patch.Body == nil && patch.Priority == nil && patch.AssignedAgentID == nil
+	// A terminal worker task can only be retired. Its settled run stays matched
+	// to the old work revision, so the cancelled row takes the next one, exactly
+	// as a retry followed by a queued cancel would leave it. A successful task is
+	// eligible only while its Change has not been published.
+	retire := patch.Cancel && patch.Title == nil && patch.Body == nil && patch.Priority == nil && patch.AssignedAgentID == nil && (task.Status == TaskBlocked || task.Status == TaskFailed)
+	if digest != nil && patch.Cancel && task.Status == TaskSucceeded && patch.Title == nil && patch.Body == nil && patch.Priority == nil && patch.AssignedAgentID == nil {
+		var unpublished bool
+		if err := tx.connection.QueryRowContext(ctx, `SELECT EXISTS (
+			SELECT 1 FROM changes AS c
+			WHERE c.task_id = ? AND c.task_incarnation_id = ?
+			  AND NOT EXISTS (SELECT 1 FROM publication_tasks AS p WHERE p.change_id = c.id)
+		)`, task.ID.Bytes(), task.IncarnationID.Bytes()).Scan(&unpublished); err != nil {
+			return Task{}, tx.Rollback(err)
+		}
+		retire = unpublished
+	}
 	if task.Status != TaskQueued && !retire {
 		return Task{}, tx.Rollback(ErrConflict)
 	}
