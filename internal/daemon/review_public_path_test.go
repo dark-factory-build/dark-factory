@@ -18,7 +18,8 @@ import (
 
 type publicReviewBackend struct {
 	killed, submitAmbiguous, requestChanges bool
-	enqueueRefused, queued                  bool
+	queued                                  bool
+	enqueueRefusal                          string // the broker's refusal class, if any
 	reviews, submits, enqueues              int
 	enqueuedBase, enqueuedSHA, enqueuedBody string
 	journal                                 map[string]string
@@ -56,8 +57,8 @@ func (b *publicReviewBackend) Submit(_ context.Context, operation review.Operati
 func (b *publicReviewBackend) Enqueue(_ context.Context, operation review.Operation) error {
 	b.enqueues++
 	b.enqueuedBase, b.enqueuedSHA, b.enqueuedBody = operation.Request.BaseRef, operation.Request.Base, operation.Request.Body
-	if b.enqueueRefused {
-		return enqueueRefused(errors.New("review: Maintainer rejected operation: refused: The request was refused: rejected before execution as UNPROCESSABLE."))
+	if b.enqueueRefusal != "" {
+		return enqueueRefused(errors.New("review: Maintainer rejected operation: refused: The request was refused: rejected before execution as " + b.enqueueRefusal + "."))
 	}
 	b.queued = true
 	return nil
@@ -559,7 +560,7 @@ func TestRefusedEnqueueBecomesAnOverseerItem(t *testing.T) {
 	settle()
 	customerMode(t, fixture)
 	ctx := context.Background()
-	backend := &publicReviewBackend{enqueueRefused: true}
+	backend := &publicReviewBackend{enqueueRefusal: "UNPROCESSABLE"}
 	fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return backend }
 	if _, err := reviewNow(ctx, fixture.daemon, project, publishedReviewRequest()); !errors.Is(err, review.ErrRefused) {
 		t.Fatalf("a refused enqueue reported %v", err)
@@ -767,15 +768,16 @@ func TestStuckSubmitEscalatesOnceAndKeepsResuming(t *testing.T) {
 	}
 }
 
-// An enqueue GitHub refuses with every required check passed is resent each
-// tick without escalating; it is queued when GitHub accepts it, and ends when
-// its pull request closes.
+// An enqueue GitHub refuses in a way a later attempt may pass (RATE_LIMITED,
+// unlike UNPROCESSABLE, #1510) with every required check passed is resent
+// each tick without escalating; it is queued when GitHub accepts it, and ends
+// when its pull request closes.
 func TestRefusedEnqueueResendsEachTickAndEndsFromThePull(t *testing.T) {
 	fixture, project, _, settle := publishedTask(t)
 	settle()
 	customerMode(t, fixture)
 	ctx := context.Background()
-	backend := &publicReviewBackend{enqueueRefused: true}
+	backend := &publicReviewBackend{enqueueRefusal: "RATE_LIMITED"}
 	fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return backend }
 	if _, err := reviewNow(ctx, fixture.daemon, project, publishedReviewRequest()); err == nil || backend.enqueues != 1 {
 		t.Fatalf("refused enqueue err=%v enqueues=%d", err, backend.enqueues)
@@ -789,7 +791,7 @@ func TestRefusedEnqueueResendsEachTickAndEndsFromThePull(t *testing.T) {
 	if op := tick(); op.State != "enqueued" || op.Escalation != "" || op.Failures != 2 || backend.enqueues != 2 {
 		t.Fatalf("refused again: %+v (enqueues %d)", op, backend.enqueues)
 	}
-	backend.enqueueRefused = false
+	backend.enqueueRefusal = ""
 	if op := tick(); op.State != "enqueued" || op.Failures != 0 || op.Enqueues != 1 || backend.enqueues != 3 {
 		t.Fatalf("accepted: %+v (enqueues %d)", op, backend.enqueues)
 	}
