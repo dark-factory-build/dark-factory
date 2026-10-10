@@ -1350,6 +1350,9 @@ test("header PRs follow recorded stages, light affected machines and open Work",
     assert.equal(target().props["data-crate-station"], 2);
     await act(async () => { tree.update(createElement(FactoryScene, { ...props, connected: false, crates: [crate] })); });
     assert.equal(target().props.disabled, true);
-    assert.ok(JSON.stringify(tree.toJSON()).includes("Disconnected"));
+    assert.ok(JSON.stringify(tree.toJSON()).includes("Disconnected · showing last known changes"));
+    await act(async () => { tree.update(createElement(FactoryScene, { ...props, connected: false, crates: undefined })); });
+    assert.ok(JSON.stringify(tree.toJSON()).includes("Not connected yet"));
+    assert.equal(JSON.stringify(tree.toJSON()).includes("last known"), false, "a never-connected line claims no remembered changes");
   } finally { if (tree) await act(async () => tree.unmount()); }
 });
