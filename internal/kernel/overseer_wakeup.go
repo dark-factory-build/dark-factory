@@ -105,6 +105,8 @@ counted AS (SELECT numbered.*, count(at) AS named, MAX(at) AS named_at, count(CA
 const proposalNotesSQL = `COALESCE((SELECT ' (' || count(*) || ' notes from ' || group_concat(DISTINCT COALESCE(a.name, 'the operator')) || ')'
 		FROM project_content_revisions AS n LEFT JOIN agents AS a ON a.id = unhex(substr(n.author, instr(n.author, ' agent:') + 7, 32))
 		WHERE n.project_id = c.project_id AND n.kind = 'observation' AND n.deprecated = 0
+		  AND n.revision = (SELECT MAX(revision) FROM project_content_revisions WHERE id = n.id)
+		  AND json_extract(CASE WHEN json_valid(n.source_references) THEN n.source_references ELSE '{}' END, '$.record_type') = 'contribution'
 		  AND lower(json_extract(CASE WHEN json_valid(n.source_references) THEN n.source_references ELSE '{}' END, '$.record_id')) = lower(hex(c.id))
 		HAVING count(*) > 0), '')`
 

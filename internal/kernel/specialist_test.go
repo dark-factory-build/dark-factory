@@ -293,6 +293,18 @@ func TestSpecialistOverseerItems(t *testing.T) {
 	if _, err := store.CreateContent(ctx, challenge, mustTime(t, at)); err != nil {
 		t.Fatal(err)
 	}
+	revised := challenge
+	if _, err := store.ReviseContent(ctx, Revision{value: 1}, revised, mustTime(t, at)); err != nil {
+		t.Fatal(err)
+	}
+	withdrawn := knowledgeSpec(t, worker.ProjectID, 84, ContentObservation, KnowledgeMetadata{Status: "tentative", RecordType: "contribution", RecordID: proposal.ID.String()})
+	if _, err := store.CreateContent(ctx, withdrawn, mustTime(t, at)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DeprecateContent(ctx, withdrawn.ID, worker.ProjectID, Revision{value: 1}, "operator:local", mustTime(t, at)); err != nil {
+		t.Fatal(err)
+	}
+	// A revised note counts once and a withdrawn one not at all.
 	line := "\nProposal " + proposal.ID.String() + " from worker: Split the gate (1 notes from the operator) [proposal:" + proposal.ID.String() + "]"
 	at += overseerWakeSettle.Milliseconds()
 	if bodies := wakeBodies(t, store, at); len(bodies) != 1 || !strings.Contains(bodies[0], line) {
