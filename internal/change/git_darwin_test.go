@@ -987,7 +987,7 @@ func TestFreshSelectionFetchesConfiguredUpstreamWithoutMovingCheckout(t *testing
 			t.Fatalf("parallel fresh selection: %v", err)
 		}
 	}
-	for _, policy := range []string{"HEAD", "refs/remotes/upstream/" + strings.TrimPrefix(branch, "refs/heads/")} {
+	for _, policy := range []string{"HEAD", localBranch, "refs/heads/" + localBranch, "refs/remotes/upstream/" + strings.TrimPrefix(branch, "refs/heads/")} {
 		selected, err := SelectGit(context.Background(), fixture.git, fixture.repository, policy, fixture.identity)
 		if err != nil || selected.Base().Hex() != want {
 			t.Fatalf("policy=%s source=%s want=%s err=%v", policy, selected.Base().Hex(), want, err)
@@ -1033,8 +1033,9 @@ func TestFreshSelectionFetchesConfiguredUpstreamWithoutMovingCheckout(t *testing
 	if _, err := SelectGit(context.Background(), fixture.git, fixture.repository, "HEAD", fixture.identity); err == nil {
 		t.Fatal("broken tracking configuration silently selected local source")
 	}
-	// Explicit local pins and detached HEAD remain usable without the remote.
-	for _, policy := range []string{fixture.base.Hex(), "refs/heads/" + localBranch} {
+	// An explicit commit pin remains usable without the remote; a configured
+	// local branch must refuse a broken upstream rather than use its stale tip.
+	for _, policy := range []string{fixture.base.Hex()} {
 		selected, err := SelectGit(context.Background(), fixture.git, fixture.repository, policy, fixture.identity)
 		if err != nil || selected.Base().Hex() != fixture.base.Hex() {
 			t.Fatalf("local policy=%s err=%v", policy, err)
