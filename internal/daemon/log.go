@@ -29,7 +29,8 @@ func (daemon *Daemon) factorydHealth() *api.FactorydHealth {
 	observations, _ := daemon.runtimeStore().Snapshot(now)
 	byName := map[string]*api.FactorydCalls{}
 	for _, item := range observations {
-		if item.Source != "factoryd" || item.Kind != "internal" && item.Kind != "server" || item.End <= now-runtimeWindow.Milliseconds() {
+		// Server calls are the local API's (browser frames are observed untimed).
+		if item.Source != "factoryd" || item.Kind != "internal" && (item.Kind != "server" || item.Attributes["network.transport"] != "unix") || item.End <= now-runtimeWindow.Milliseconds() {
 			continue
 		}
 		name := path.Base(item.Attributes["code.function.name"] + item.Attributes["rpc.method"])

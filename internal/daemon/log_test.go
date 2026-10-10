@@ -38,6 +38,7 @@ func TestFactorydHealthProjectsOwnTimingsSlowestFirst(t *testing.T) {
 	daemon.observe("internal", map[string]string{"code.function.name": schedulerFunction}, nil, true, time.Second)
 	daemon.observe("server", map[string]string{"network.transport": "unix", "rpc.method": "content.create"}, nil, true, 3*time.Second)
 	daemon.observe("client", map[string]string{"http.request.method": "GET"}, map[string]string{"server.address": "api.github.com"}, false, time.Minute)
+	daemon.observe("server", map[string]string{"url.path": "/browser", "rpc.method": "STATE_GET"}, nil, false, 0)
 	health := daemon.factorydHealth()
 	want := []api.FactorydCalls{{Name: "daemon.Daemon.RunScheduler", Count: 2, Failed: 1, MaxMs: 22_000}, {Name: "content.create", Count: 1, Failed: 1, MaxMs: 3_000}}
 	if health.WindowMs != uint64(runtimeWindow.Milliseconds()) || !reflect.DeepEqual(health.Calls, want) {
