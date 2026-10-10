@@ -349,12 +349,12 @@ func TestTaskAddMintsDistinctTaskAndIncarnationIdentities(t *testing.T) {
 		return reply
 	})
 	var stdout, stderr bytes.Buffer
-	exit := run(context.Background(), []string{"task", "add", "--project", projectID, "--agent", agentID, "--title", "Probe the flaky gate", "--body", "private body", "--priority", "-3"}, webEnvironment(fixture), &stdout, &stderr)
+	exit := run(context.Background(), []string{"task", "add", "--project", projectID, "--agent", agentID, "--title", "Probe the flaky gate", "--body", "private body", "--priority", "-3", "--content", strings.Repeat("44", 16) + ":2," + strings.Repeat("55", 16) + ":1"}, webEnvironment(fixture), &stdout, &stderr)
 	awaitServer(t, done)
 	if exit != 0 || stderr.Len() != 0 {
 		t.Fatalf("task add = exit %d stderr %q", exit, stderr.String())
 	}
-	if received.ProjectID != projectID || received.AssignedAgentID != agentID || received.Title != "Probe the flaky gate" || received.Body != "private body" || received.Priority != -3 {
+	if received.ProjectID != projectID || received.AssignedAgentID != agentID || received.Title != "Probe the flaky gate" || received.Body != "private body" || received.Priority != -3 || len(received.Content) != 2 || received.Content[0] != (api.ContentPinInput{ContentID: strings.Repeat("44", 16), ContentRevision: 2}) || received.Content[1].ContentRevision != 1 {
 		t.Fatalf("daemon received %+v", received)
 	}
 	if !validHumanRequestKey(received.ID) || !validHumanRequestKey(received.IncarnationID) || received.ID == received.IncarnationID {
@@ -554,6 +554,39 @@ func TestAgentSelectModelCarriesRevisionCheckedControls(t *testing.T) {
 	awaitServer(t, done)
 	if exit != 0 || stderr.Len() != 0 || received != (api.AgentModelSelectInput{AgentID: agentID, ExpectedRevision: 7, Model: "gpt-5.6-luna", ReasoningEffort: "medium"}) {
 		t.Fatalf("select model = exit %d stderr %q received %+v", exit, stderr.String(), received)
+	}
+}
+
+func TestAgentAppearanceUsesOperatorAgentUpdate(t *testing.T) {
+	agentID := strings.Repeat("22", 16)
+	for _, args := range [][]string{{"--appearance", "1/2/3"}, {"--appearance", ""}, {"--appearance", "auto"}} {
+		_, _, ok := parse(append([]string{"agent", "appearance", "--agent", agentID}, args...))
+		if ok {
+			t.Fatalf("parse %q accepted", args)
+		}
+	}
+	for look, want := range map[string]string{"auto": "", "1/2/3/4/5/6/7/8/9": "1/2/3/4/5/6/7/8/9"} {
+		fixture := newAPIFixture(t)
+		var received api.OverseerAgentUpdateInput
+		done := serveOne(fixture.listener, func(call api.Call) api.Reply {
+			var ok bool
+			received, ok = call.OverseerAgentUpdateInput()
+			if !ok || call.Kind() != api.CallOperatorUpdateAgent {
+				t.Errorf("call = %v, ok = %v", call.Kind(), ok)
+			}
+			reply, err := api.NewMutationReply(api.MutationResult{Head: 10, Revision: 8})
+			if err != nil {
+				t.Fatal(err)
+			}
+			return reply
+		})
+		var stdout, stderr bytes.Buffer
+		exit := run(context.Background(), []string{"agent", "appearance", "--agent", agentID, "--revision", "7", "--appearance", look}, webEnvironment(fixture), &stdout, &stderr)
+		awaitServer(t, done)
+		fixture.close(t)
+		if exit != 0 || stderr.Len() != 0 || received.AgentID != agentID || received.ExpectedRevision != 7 || received.Paused != nil || received.Archived != nil || received.Appearance == nil || *received.Appearance != want {
+			t.Fatalf("appearance %q = exit %d stderr %q received %+v", look, exit, stderr.String(), received)
+		}
 	}
 }
 

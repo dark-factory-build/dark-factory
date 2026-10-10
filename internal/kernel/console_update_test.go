@@ -184,7 +184,11 @@ func TestUpdateAgentAppearancePersistsAndResetsAtomically(t *testing.T) {
 		t.Fatalf("custom appearance = %+v, %v", updated.Appearance, err)
 	}
 	automatic := AgentAppearance{Automatic: true}
-	reset, err := store.UpdateAgent(ctx, agent.ID, updated.Revision, AgentPatch{Appearance: &automatic}, mustTime(t, 7))
+	paused := true
+	if _, err := store.UpdateAgentForOperator(ctx, agent.ID, updated.Revision, AgentPatch{Appearance: &automatic, Paused: &paused}, mustTime(t, 7)); !errors.Is(err, ErrInvalidValue) {
+		t.Fatalf("operator appearance with lifecycle edit = %v", err)
+	}
+	reset, err := store.UpdateAgentForOperator(ctx, agent.ID, updated.Revision, AgentPatch{Appearance: &automatic}, mustTime(t, 7))
 	if err != nil || reset.Appearance != automatic {
 		t.Fatalf("automatic appearance = %+v, %v", reset.Appearance, err)
 	}

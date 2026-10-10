@@ -381,10 +381,20 @@ func (client *OperatorClient) ReadTask(ctx context.Context, input TaskReadInput)
 }
 
 func (client *OperatorClient) EnqueueTask(ctx context.Context, input EnqueueTaskInput) (MutationResult, error) {
-	if !validID(input.ID) || !validID(input.ProjectID) || !validOptionalID(input.RepositoryID) || !validOptionalID(input.AssignedAgentID) || !validID(input.IncarnationID) || !validText(input.Title, 1, 1024) || !validText(input.Body, 0, 131072) || input.Priority < -1_000_000 || input.Priority > 1_000_000 {
+	if !validEnqueueTaskInput(input) {
 		return MutationResult{}, ErrInvalidInput
 	}
 	return client.client.mutate(ctx, "enqueue_task", input)
+}
+
+// validEnqueueTaskInput bounds content pins like the console (eight per task).
+func validEnqueueTaskInput(input EnqueueTaskInput) bool {
+	for _, pin := range input.Content {
+		if !validID(pin.ContentID) || pin.ContentRevision == 0 || pin.ContentRevision > uint64(^uint64(0)>>1) {
+			return false
+		}
+	}
+	return validID(input.ID) && validID(input.ProjectID) && validOptionalID(input.RepositoryID) && validOptionalID(input.AssignedAgentID) && validID(input.IncarnationID) && validText(input.Title, 1, 1024) && validText(input.Body, 0, 131072) && input.Priority >= -1_000_000 && input.Priority <= 1_000_000 && len(input.Content) <= 8
 }
 
 func (client *OperatorClient) UpdateTask(ctx context.Context, input OverseerTaskUpdateInput) (MutationResult, error) {
@@ -421,7 +431,7 @@ func (client *OperatorClient) BackupVerify(ctx context.Context, path string) (ke
 }
 
 func (client *OperatorClient) UpdateAgent(ctx context.Context, input OverseerAgentUpdateInput) (MutationResult, error) {
-	if !validID(input.AgentID) || input.ExpectedRevision == 0 {
+	if !validID(input.AgentID) || input.ExpectedRevision == 0 || input.Appearance != nil && !validText(*input.Appearance, 0, 64) {
 		return MutationResult{}, ErrInvalidInput
 	}
 	return client.client.mutate(ctx, "operator_update_agent", input)
