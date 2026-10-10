@@ -1701,7 +1701,7 @@ func TestTaskEnqueuePreflightPreservesReplayAndOverseerAuthority(t *testing.T) {
 	waitDispatch(t, done)
 	// Simulate a task accepted by the old operator route before this check.
 	incarnation, _ := decodeID(testID(212), kernel.IncarnationIDFromBytes)
-	spec := kernel.NewTask{ID: mustTaskID(t, testID(211)), ProjectID: active.run.ProjectID, AssignedAgentID: mustAgentID(t, workerID), IncarnationID: incarnation, Title: "legacy", Body: strings.Repeat("x", kernel.MaxContinuationTaskBytes)}
+	spec := kernel.NewTask{ID: mustTaskID(t, testID(211)), ProjectID: active.run.ProjectID, AssignedAgentID: mustAgentID(t, workerID), IncarnationID: incarnation, Title: "legacy", Body: strings.Repeat("x", kernel.MaxContinuationTaskBytes-1)}
 	at, _ := kernel.NewUnixMillis(1000)
 	legacy, err := fixture.store.EnqueueTask(ctx, spec, at)
 	if err != nil {
@@ -1733,7 +1733,7 @@ func TestTaskEnqueuePreflightPreservesReplayAndOverseerAuthority(t *testing.T) {
 	}
 	for _, target := range []string{testID(250), testID(221), active.run.AgentID.String()} {
 		done = fixture.serve(t)
-		_, err := active.client.OverseerEnqueueTask(ctx, api.OverseerTaskCreateInput{ID: testID(213), AssignedAgentID: target, IncarnationID: testID(214), Title: "not authorized", Body: strings.Repeat("x", kernel.MaxContinuationTaskBytes+1)})
+		_, err := active.client.OverseerEnqueueTask(ctx, api.OverseerTaskCreateInput{ID: testID(213), AssignedAgentID: target, IncarnationID: testID(214), Title: "not authorized", Body: strings.Repeat("x", kernel.MaxContinuationTaskBytes)})
 		waitDispatch(t, done)
 		var remote *api.RemoteError
 		if !errors.As(err, &remote) || remote.Code() != api.RemoteUnauthorized {
