@@ -52,7 +52,7 @@ func (daemon *Daemon) refreshProduction(ctx context.Context, project kernel.Proj
 		if !verified || !pinned || identity.PublicationRepository == "" {
 			continue
 		}
-		known, published, err := daemon.store.KnownProductionPulls(ctx, project, identity.PublicationRepository, productionRefreshPRLimit)
+	known, _, err := daemon.store.KnownProductionPulls(ctx, project, identity.PublicationRepository, productionRefreshPRLimit)
 		var settled map[kernel.ProductionHead]bool
 		if err == nil {
 			settled, err = daemon.store.SettledProductionChecks(ctx, project, identity.PublicationRepository)
@@ -81,9 +81,6 @@ func (daemon *Daemon) refreshProduction(ctx context.Context, project kernel.Proj
 		}
 		prepared := make([]review.Operation, 0, len(corrections))
 		for _, correction := range corrections {
-			if !published[correction.Number] {
-				continue
-			}
 			op, err := daemon.preparePublishedReview(ctx, project, identity.PublicationRepository, correction.Number, correction.Head)
 			if err != nil {
 				return err
