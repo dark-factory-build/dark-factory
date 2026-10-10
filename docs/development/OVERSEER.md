@@ -174,8 +174,9 @@ A specialist (a worker with a standing instruction) records a proposal as an
 a persistent wake item, `Proposal ID from AGENT: TITLE [proposal:ID]`, until a
 `decision` resolves it: metadata `"record_type":"proposal"`, `"record_id":"ID"`
 and evidence `["proposal:ID"]`, with `"status":"tentative"`: an attempt credential
-cannot write `current`, and is refused as unauthorized if it tries. To accept, `overseer task add` the work (to a
-worker or the shared queue, never the specialist), `content attach` the
+cannot write `current`, and is refused as unauthorized if it tries. To accept, first search queued and running tasks for existing work on it (one
+task per proposal), then `overseer task add` the work (to a
+worker or the shared queue, never the specialist) and `content attach` the
 proposal to it, and record the decision with `"task_id"` set to that task. To
 decline or defer, record the decision without `task_id`, the reason in its
 description. Only you or the operator resolve a proposal, and an acceptance is
@@ -575,7 +576,7 @@ Stop handling this change for now.
 ## 6. Hand off and finish
 
 If a merged PR touched `cmd/` or `internal/`, it may need a live-service
-reinstall, and if it touched `web/`, it may need a site re-vendor. Before a
+reinstall; a `web/` change ships in that same build. Before a
 runtime reinstall request, run `"$DARK_FACTORY_FACTORYCTL" --build-identity`.
 With its exact `source` as `installed`, run `git -C repo fetch origin "$installed" "<merge-commit>"`, then verify each with `git -C repo rev-parse --verify "<revision>^{commit}"`. Run `git -C repo merge-base --is-ancestor
 <merge-commit> "$installed"`: status 0 means that merge is already installed,
@@ -583,7 +584,7 @@ so skip that request and never recommend an older merge; only status 1 says it
 is absent. Require `"release": true`; a missing, malformed, or development
 identity, a fetch or verification failure, or any other ancestry error warrants
 a human request to verify the installed source, not a claim that the merge is
-absent. If the runtime merge is absent, or the site needs a re-vendor, raise
+absent. If the runtime merge is absent, raise
 one human request naming the merge commit and applicable deployment, then wait
 as below. A
 worker run whose worktree was gone at settlement ends failed with that
