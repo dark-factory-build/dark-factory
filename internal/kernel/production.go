@@ -382,6 +382,22 @@ func (store *Store) RecordDelivery(ctx context.Context, project ProjectID, repos
 		return err
 	}
 	defer tx.Close()
+	// Releases run one at a time, so the newest release record is this one's
+	// predecessor, or itself once it has started.
+	if strings.HasPrefix(delivery.ID, "release:") {
+		var state string
+		err := tx.connection.QueryRowContext(ctx, `SELECT json_extract(document, '$.state'), COALESCE(json_extract(document, '$.cause'), ''), COALESCE(json_extract(document, '$.failed_at'), 0)
+			FROM production_records WHERE project_id = ? AND kind = 'delivery' AND identity LIKE 'release:%' ORDER BY observed_at_ms DESC LIMIT 1`, project.Bytes()).Scan(&state, &delivery.Cause, &delivery.FailedAt)
+		if errors.Is(err, sql.ErrNoRows) || state == "verified" {
+			err, delivery.Cause, delivery.FailedAt = nil, "", 0
+		}
+		if err != nil {
+			return tx.Rollback(err)
+		}
+		if head, _, _ := strings.Cut(delivery.Reason, ":"); delivery.State == "failed" && delivery.Cause != delivery.Phase+" "+head {
+			delivery.Cause, delivery.FailedAt = delivery.Phase+" "+head, at.Int64()
+		}
+	}
 	if err := productionRecordOnConnection(ctx, tx.connection, project, repository, "delivery", delivery.ID, "", delivery, at.Int64()); err != nil {
 		return tx.Rollback(err)
 	}
@@ -791,6 +807,27 @@ func storedProductionReview(ctx context.Context, c *sql.Conn, project ProjectID,
 
 // ProductionReviewBlocks reports a block of record at this exact head: no
 // plain ALLOW clears it (RecordProductionReview), and neither does the gate.
+// TaskOpenPullRequest reports the open pull request task's work is published
+// on, the one SendBackPublishedReview would route to, and its observed head:
+// a fresh Change for that task starts there, never at the base.
+func (store *Store) TaskOpenPullRequest(ctx context.Context, task TaskID) (ProductionPullRequest, bool, error) {
+	tx, err := store.beginRead(ctx)
+	if err != nil {
+		return ProductionPullRequest{}, false, err
+	}
+	defer tx.Close()
+	var document string
+	err = tx.connection.QueryRowContext(ctx, `SELECT r.document FROM publication_tasks p JOIN production_records r ON r.project_id = p.project_id AND r.repository = p.repository AND r.kind = 'pull_request' AND r.identity = CAST(p.pull_number AS TEXT) WHERE p.task_id = ? AND json_extract(r.document, '$.state') = 'open' ORDER BY p.created_at_ms DESC LIMIT 1`, task.Bytes()).Scan(&document)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ProductionPullRequest{}, false, nil
+	}
+	var pr ProductionPullRequest
+	if err == nil && (json.Unmarshal([]byte(document), &pr) != nil || pr.Number == 0 || !productionSHA(pr.Head)) {
+		err = ErrCorruptState
+	}
+	return pr, err == nil, err
+}
+
 func (store *Store) ProductionReviewBlocks(ctx context.Context, project ProjectID, repo string, number uint64, head string) (bool, error) {
 	tx, err := store.beginRead(ctx)
 	if err != nil {
