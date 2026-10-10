@@ -746,6 +746,17 @@ func TestPublishableIntakeChangeIsFactorydsUntilPublishedOrFailed(t *testing.T) 
 	if err := store.writer.QueryRowContext(ctx, `SELECT count(*) FROM publication_tasks WHERE task_id = ? AND change_id = ?`, worker.TaskID.Bytes(), change.ID.Bytes()).Scan(&linked); err != nil || linked != 1 {
 		t.Fatalf("publication linked to its Change: %d %v", linked, err)
 	}
+	// A factoryd rebase changes only the retained head timestamp, not the
+	// worker revision; that first-publication correction remains publishable.
+	if _, err := store.writer.ExecContext(ctx, `UPDATE changes SET updated_at_ms = 72 WHERE id = ?`, change.ID.Bytes()); err != nil {
+		t.Fatal(err)
+	}
+	if found := candidates(); len(found) != 1 || found[0].Pull != 5 {
+		t.Fatalf("first-publication rebase correction candidates = %+v", found)
+	}
+	if _, err := store.writer.ExecContext(ctx, `UPDATE changes SET updated_at_ms = 70 WHERE id = ?`, change.ID.Bytes()); err != nil {
+		t.Fatal(err)
+	}
 	if len(candidates()) != 0 || !closed() {
 		t.Fatal("a published intake branch is open to the overseer, or published again")
 	}
@@ -790,5 +801,43 @@ func TestPublishableIntakeChangeIsFactorydsUntilPublishedOrFailed(t *testing.T) 
 	}
 	if found := candidates(); len(found) != 1 || found[0].Pull != 0 || !closed() {
 		t.Fatalf("an unpublished retried Change: candidates=%+v closed=%v", found, closed())
+	}
+}
+
+// A pull request a person opened has no factory Change. Its repair task's
+// fresh Change starts at the pull request's observed head, so the lookup
+// names that head while the pull request is open, and nothing otherwise.
+func TestHostPullRequestRepairTaskNamesTheReviewedHead(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	proposal, err := NewSuccessProposal("done")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, worker := finalizingReleasedRun(t, RoleWorker, proposal)
+	defer store.Close()
+	if err := store.BindRepositorySource(ctx, RepositoryID(worker.ProjectID), RepositorySourceIdentity{RootDevice: 61, RootInode: 62, GitDevice: 61, GitInode: 63, OriginDigest: [32]byte{1}, PublicationRepository: "example/factory"}); err != nil {
+		t.Fatal(err)
+	}
+	head := strings.Repeat("e", 40)
+	if err := store.RecordProductionReview(ctx, worker.ProjectID, "example/factory", 9, ProductionReview{Head: head, State: "block"}, mustTime(t, 70)); err != nil {
+		t.Fatal(err)
+	}
+	repair, err := store.SendBackPublishedReview(ctx, worker.ProjectID, "example/factory", 9, "review-op", head, "fix the finding", mustTime(t, 71))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pr, found, err := store.TaskOpenPullRequest(ctx, repair.ID)
+	if err != nil || !found || pr.Number != 9 || pr.Head != head {
+		t.Fatalf("repair pull request=%+v found=%v err=%v", pr, found, err)
+	}
+	if _, found, err := store.TaskOpenPullRequest(ctx, worker.TaskID); err != nil || found {
+		t.Fatalf("unpublished task found=%v err=%v", found, err)
+	}
+	if _, err := store.writer.ExecContext(ctx, `UPDATE production_records SET document = json_set(document, '$.state', 'closed') WHERE kind = 'pull_request' AND identity = '9'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, found, err := store.TaskOpenPullRequest(ctx, repair.ID); err != nil || found {
+		t.Fatalf("closed pull request found=%v err=%v", found, err)
 	}
 }

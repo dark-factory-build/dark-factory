@@ -29,10 +29,15 @@ const (
 // overseer acts on it (a blocked or failed worker task, an unanswered worker
 // question, finished work not yet published or corrected behind its open pull
 // request, a pull request factoryd escalated while it stays open at the
-// escalated head); a succeeded worker task needs one look. An accepted intake
-// task that succeeded with a diff (or whose published Change was since
-// reclaimed) needs none: factoryd publishes it, and the
-// Change item covers a publication that never happens. While factoryd records
+// escalated head, the newest self-release while it failed or retries a
+// failure); a succeeded worker task needs one look. A failed release is
+// keyed by its cause and dated by when it first failed so, which factoryd
+// carries over every release that fails the same way, a same-commit retry
+// included (RecordDelivery): it wakes once, never re-wakes, and so becomes
+// one NEEDS YOU card. An accepted intake task that succeeded with a diff (or
+// whose published Change was since reclaimed) needs none: factoryd publishes
+// it, and the Change item covers a publication that never happens. While
+// factoryd records
 // that Change revision's publication refused, the item is that refusal, at the
 // Change's version however often the hourly retry repeats it. An intake task the
 // overseer could retry (an automatic end) is an item too; an operator's cancel
@@ -91,6 +96,12 @@ item AS (
 	WHERE e.project_id = ?1 AND e.kind = 'reviewer' AND COALESCE(json_extract(e.document, '$.escalation'), '') <> ''
 	  AND COALESCE(json_extract(e.document, '$.route_pending'), 0) = 0 AND json_extract(p.document, '$.state') = 'open'
 	  AND lower(json_extract(p.document, '$.head')) = lower(json_extract(e.document, '$.request.Head'))
+	UNION ALL SELECT NULL, COALESCE(json_extract(d.document, '$.failed_at'), d.observed_at_ms), 0, CASE json_extract(d.document, '$.state')
+	  WHEN 'failed' THEN printf('Escalated: factoryd %s failed in phase %s: %s', d.identity, json_extract(d.document, '$.phase'), replace(json_extract(d.document, '$.reason'), char(10), ' '))
+	  ELSE printf('Escalated: factoryd %s is %s after a release failed in phase %s', d.identity, json_extract(d.document, '$.state'), replace(json_extract(d.document, '$.cause'), char(10), ' ')) END,
+	  '[release:' || lower(hex(json_extract(d.document, '$.cause'))) || ']'
+	FROM (SELECT * FROM production_records WHERE project_id = ?1 AND kind = 'delivery' AND identity LIKE 'release:%' ORDER BY observed_at_ms DESC LIMIT 1) AS d
+	WHERE json_extract(d.document, '$.state') <> 'verified' AND COALESCE(json_extract(d.document, '$.cause'), '') <> ''
 	UNION ALL SELECT NULL, c.created_at_ms, 3, 'Proposal ' || lower(hex(c.id)) || ' from ' || COALESCE((SELECT name FROM agents WHERE id = ` + authorAgentSQL + `), 'the operator') || ': '
 		|| replace(substr(c.title, 1, 100), char(10), ' ') || ` + proposalNotesSQL + `, '[proposal:' || lower(hex(c.id)) || ']'
 	FROM project_content_revisions AS c WHERE c.project_id = ?1 AND ` + openProposalSQL + `),
@@ -131,6 +142,10 @@ func (store *Store) EnqueueOverseerWakeups(ctx context.Context, at UnixMillis) (
 		return nil, err
 	}
 	defer tx.Close()
+	factory, err := factoryState(ctx, tx.connection)
+	if err != nil {
+		return nil, tx.Rollback(err)
+	}
 	rows, err := tx.connection.QueryContext(ctx, `SELECT `+agentColumns+` FROM agents AS a
 		WHERE idle_policy = 'standing_instruction' AND paused = 0 AND archived = 0
 		  AND NOT EXISTS (SELECT 1 FROM tasks WHERE assigned_agent_id = a.id AND title = ? AND status IN ('queued', 'running'))
@@ -167,7 +182,25 @@ func (store *Store) EnqueueOverseerWakeups(ctx context.Context, at UnixMillis) (
 		return validateDurableControls(ctx, tx.connection)
 	}
 	var tasks []Task
+	changed := false
 	for _, agent := range agents {
+		cursor, found, err := overseerWakeCursor(ctx, tx.connection, agent.ID)
+		if err != nil {
+			return nil, tx.Rollback(err)
+		}
+		// A cursor is deliberately not advanced while a carrier is queued or
+		// running. Events arriving during the provider run therefore remain
+		// visible to the next wake instead of being lost at the poll boundary.
+		if !found {
+			cursor = 0
+		}
+		var active int
+		if err := tx.connection.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM tasks WHERE assigned_agent_id = ? AND title = ? AND status IN ('queued', 'running'))`, agent.ID.Bytes(), overseerWakeTitle).Scan(&active); err != nil {
+			return nil, tx.Rollback(err)
+		}
+		if active != 0 {
+			continue
+		}
 		var body string
 		due, priority := false, int64(overseerWakePriority)
 		if agent.Specialist() {
@@ -191,24 +224,57 @@ func (store *Store) EnqueueOverseerWakeups(ctx context.Context, at UnixMillis) (
 			}
 		}
 		if !due {
-			continue
+			// The cursor still records that this quiet poll inspected the current
+			// journal head; no task is created and no provider run can start.
+		} else {
+			if err := validate(); err != nil {
+				return nil, tx.Rollback(err)
+			}
+			task, err := enqueueStandingTaskWithBody(ctx, tx.connection, agent, body, priority, at)
+			if err != nil {
+				return nil, tx.Rollback(err)
+			}
+			tasks = append(tasks, task)
+			changed = true
 		}
-		if err := validate(); err != nil {
-			return nil, tx.Rollback(err)
+		if cursor != factory.Head.Int64() || !found {
+			if err := setOverseerWakeCursor(ctx, tx.connection, agent, factory.Head.Int64()); err != nil {
+				return nil, tx.Rollback(err)
+			}
+			changed = true
 		}
-		task, err := enqueueStandingTaskWithBody(ctx, tx.connection, agent, body, priority, at)
-		if err != nil {
-			return nil, tx.Rollback(err)
-		}
-		tasks = append(tasks, task)
 	}
-	if !validated {
+	if !validated && !changed {
 		return nil, tx.Rollback(nil)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
 	return tasks, nil
+}
+
+func overseerWakeCursor(ctx context.Context, connection *sql.Conn, agentID AgentID) (int64, bool, error) {
+	var sequence int64
+	err := connection.QueryRowContext(ctx, `SELECT invalidation_sequence FROM overseer_wake_cursors WHERE agent_id = ?`, agentID.Bytes()).Scan(&sequence)
+	if err == sql.ErrNoRows {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, err
+	}
+	if sequence < 0 {
+		return 0, false, fmt.Errorf("%w: invalid overseer wake cursor", ErrCorruptState)
+	}
+	return sequence, true, nil
+}
+
+func setOverseerWakeCursor(ctx context.Context, connection *sql.Conn, agent Agent, sequence int64) error {
+	if sequence < 0 {
+		return fmt.Errorf("%w: invalid overseer wake cursor", ErrInvalidValue)
+	}
+	_, err := connection.ExecContext(ctx, `INSERT INTO overseer_wake_cursors(agent_id, project_id, invalidation_sequence) VALUES(?, ?, ?)
+		ON CONFLICT(agent_id) DO UPDATE SET project_id = excluded.project_id, invalidation_sequence = excluded.invalidation_sequence`, agent.ID.Bytes(), agent.ProjectID.Bytes(), sequence)
+	return err
 }
 
 func overseerItemArgs(agent Agent, at int64) []any {

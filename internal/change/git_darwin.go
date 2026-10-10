@@ -21,6 +21,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/dark-factory-build/dark-factory/internal/gitauthor"
 	"golang.org/x/sys/unix"
 )
 
@@ -38,6 +39,11 @@ const (
 	gitTerminateGrace     = 250 * time.Millisecond
 	gitPipeDrainGrace     = time.Second
 )
+
+// ErrRebaseConflict means Git stopped a rebase and a successful abort restored
+// the Change worktree, so a human/worker must resolve textual conflicts.
+// Operational failures are returned separately so the caller can retry them.
+var ErrRebaseConflict = errors.New("Change rebase conflicts with the current base")
 
 type gitCommandSpec struct {
 	program     string
@@ -154,7 +160,9 @@ func selectGitWithTrust(ctx context.Context, gitExecutable, repositoryRoot, revi
 // Retained Changes refresh their current base in factoryd before the worker
 // runs (FetchBase). HEAD means the origin's default branch, never the
 // registered checkout's own HEAD; only a checkout without an origin follows
-// its local HEAD and upstream. Explicit local revisions never refresh source.
+// its local HEAD and upstream. refs/pull/N/head is the origin's pull request
+// head. Local branch revisions follow their configured upstream; explicit
+// non-branch revisions never refresh source.
 func refreshTrackingRevision(ctx context.Context, spec gitCommandSpec, revision string, verify func() error) (string, error) {
 	run := func(arguments ...string) ([]byte, error) {
 		spec.arguments = append([]string{"-C", spec.repository}, arguments...)
@@ -171,6 +179,7 @@ func refreshTrackingRevision(ctx context.Context, spec gitCommandSpec, revision 
 		return result.output, nil
 	}
 	var remote, branch string
+	var err error
 	if revision == "HEAD" {
 		remotes, err := run("remote")
 		if err != nil {
@@ -203,11 +212,20 @@ func refreshTrackingRevision(ctx context.Context, spec gitCommandSpec, revision 
 			return "", &ValidationError{Reason: "configured remote source is invalid"}
 		}
 		branch = "refs/heads/" + branch
+	} else if strings.HasPrefix(revision, "refs/pull/") {
+		remote, branch = "origin", revision
+	} else {
+		// A configured local branch is still a source policy, not a pin. Follow
+		// its upstream so a stale operator branch cannot become a Change base.
+		remote, branch, revision, err = localUpstream(run, revision)
+		if err != nil {
+			return "", err
+		}
 	}
 	if remote == "" || remote == "." {
 		return revision, nil
 	}
-	if strings.HasPrefix(remote, "-") || !strings.HasPrefix(branch, "refs/heads/") {
+	if strings.HasPrefix(remote, "-") || !strings.HasPrefix(branch, "refs/heads/") && !strings.HasPrefix(branch, "refs/pull/") {
 		return "", &ValidationError{Reason: "configured remote source is invalid"}
 	}
 	// The base lands in a factory-owned ref, never a branch, tracking ref or
@@ -1353,6 +1371,52 @@ func FetchBase(ctx context.Context, selection Selection, path string) error {
 		return validatePrivateGitAdmin(admin)
 	}
 	return nil
+}
+
+// RebaseWorktree rebases a retained Change onto the selected current base.
+// The caller must have fetched selection.base to refs/remotes/origin/main
+// first. A clean rebase leaves the Change branch at its new head; a textual
+// conflict is reported only after a successful abort, while operational Git
+// failures remain retryable by the caller.
+func RebaseWorktree(ctx context.Context, selection Selection, path string) (WorktreeFacts, error) {
+	if !selection.valid() {
+		return WorktreeFacts{}, &ValidationError{Reason: "worktree selection is invalid"}
+	}
+	if err := validateWorktreePath(path); err != nil {
+		return WorktreeFacts{}, err
+	}
+	authority, err := openGitAuthority(selection.gitExecutable, selection.repositoryRoot, selection.repository.root, nil, true)
+	if err != nil {
+		return WorktreeFacts{}, err
+	}
+	defer authority.close()
+	if _, err := authority.inspectWorktree(ctx, path); err != nil {
+		return WorktreeFacts{}, err
+	}
+	// Use the linked worktree's .git indirection. Passing the private bare
+	// repository as --git-dir would select its unrelated HEAD and index.
+	gitArgs := []string{"-c", "core.hooksPath=/dev/null", "-c", "protocol.file.allow=always", "-C", path}
+	gitArgs = append(gitArgs, "rebase", "refs/remotes/origin/main")
+	result, err := authority.runWithEnvironment(ctx, maxGitSelectionOutput, []string{
+		"GIT_COMMITTER_NAME=" + gitauthor.AutomationName,
+		"GIT_COMMITTER_EMAIL=" + gitauthor.AutomationEmail,
+	}, gitArgs...)
+	if err != nil {
+		return WorktreeFacts{}, err
+	}
+	if result.exitCode != 0 {
+		abort := append([]string{}, gitArgs[:len(gitArgs)-2]...)
+		abort = append(abort, "rebase", "--abort")
+		aborted, abortErr := authority.run(ctx, maxGitSelectionOutput, abort...)
+		if abortErr != nil {
+			return WorktreeFacts{}, abortErr
+		}
+		if aborted.exitCode == 0 {
+			return WorktreeFacts{}, ErrRebaseConflict
+		}
+		return WorktreeFacts{}, newGitError(gitFailureProcess)
+	}
+	return authority.inspectWorktree(ctx, path)
 }
 
 // InspectWorktree verifies that path is a linked worktree of the repository

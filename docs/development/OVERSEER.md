@@ -134,8 +134,8 @@ instruction configured, factoryd keeps one wake task at the head of your
 queue while any item needs you: a finished (except an intake task with a diff,
 which factoryd publishes), blocked or failed worker task, an
 unanswered worker question, unpublished or corrected work, or a pull request
-factoryd escalated. An item you leave unhandled is woken again at most three
-times (a publish failure never), 30 minutes apart, until it changes; only wakes that named it (or
+factoryd escalated, or the failed self-release. An item you leave unhandled is woken again at most three
+times (a publish failure or failed release never), 30 minutes apart, until it changes; only wakes that named it (or
 named no item at all) and actually started count. Half an hour after its last wake, factoryd raises a
 NEEDS YOU card naming what is still unresolved. Only a human answers it, so
 your status never lists it: the operator's reply (console or `factoryctl human
@@ -390,12 +390,16 @@ below against `repo/.git` instead of `$git_directory`.
 A worker that integrated a merged prerequisite has main in its head's
 ancestry. Copying that head's files onto `from` reproduces the tree but not
 the ancestry, so GitHub merges main's own hunks against main again and
-reports a conflict that no source correction can clear. Let the script decide
-what the publication's parents are:
+reports a conflict that no source correction can clear. Choose the
+publication's parents:
 
 ```sh
-set -- $(repo/scripts/publication-parents.sh repo/.git "$from" "$head_commit" "$(git -C repo rev-parse origin/main)" "$branch_exists")
-from=$1 diff_from=$2 merge_parent=$3
+integrated=$(git -C repo merge-base "$head_commit" origin/main)
+diff_from=$from merge_parent=-
+if ! git -C repo merge-base --is-ancestor "$integrated" "$from"; then
+    diff_from=$integrated
+    if [ "$branch_exists" = 1 ]; then merge_parent=$integrated; else from=$integrated; fi
+fi
 ```
 
 `diff_from` replaces `from` in every diff below. When the branch does not

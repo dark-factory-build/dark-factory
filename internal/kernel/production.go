@@ -382,6 +382,22 @@ func (store *Store) RecordDelivery(ctx context.Context, project ProjectID, repos
 		return err
 	}
 	defer tx.Close()
+	// Releases run one at a time, so the newest release record is this one's
+	// predecessor, or itself once it has started.
+	if strings.HasPrefix(delivery.ID, "release:") {
+		var state string
+		err := tx.connection.QueryRowContext(ctx, `SELECT json_extract(document, '$.state'), COALESCE(json_extract(document, '$.cause'), ''), COALESCE(json_extract(document, '$.failed_at'), 0)
+			FROM production_records WHERE project_id = ? AND kind = 'delivery' AND identity LIKE 'release:%' ORDER BY observed_at_ms DESC LIMIT 1`, project.Bytes()).Scan(&state, &delivery.Cause, &delivery.FailedAt)
+		if errors.Is(err, sql.ErrNoRows) || state == "verified" {
+			err, delivery.Cause, delivery.FailedAt = nil, "", 0
+		}
+		if err != nil {
+			return tx.Rollback(err)
+		}
+		if head, _, _ := strings.Cut(delivery.Reason, ":"); delivery.State == "failed" && delivery.Cause != delivery.Phase+" "+head {
+			delivery.Cause, delivery.FailedAt = delivery.Phase+" "+head, at.Int64()
+		}
+	}
 	if err := productionRecordOnConnection(ctx, tx.connection, project, repository, "delivery", delivery.ID, "", delivery, at.Int64()); err != nil {
 		return tx.Rollback(err)
 	}
@@ -565,7 +581,6 @@ func (store *Store) PublishableChanges(ctx context.Context, at UnixMillis) ([]Pu
 		JOIN tasks t ON t.id = c.task_id AND t.incarnation_id = c.task_incarnation_id
 		LEFT JOIN intake_task_bindings b ON b.task_id = c.task_id LEFT JOIN intake_acceptances a ON a.id = b.acceptance_id
 		LEFT JOIN publication_tasks p ON p.task_id = c.task_id AND c.updated_at_ms > p.created_at_ms
-		  AND (t.work_revision > 1 OR p.change_id IS NULL)
 		  AND EXISTS (SELECT 1 FROM production_records r WHERE r.project_id = p.project_id AND r.repository = p.repository AND r.kind = 'pull_request'
 		      AND r.identity = CAST(p.pull_number AS TEXT) AND json_extract(r.document, '$.state') = 'open')
 		WHERE c.phase = 'retained' AND t.status = 'succeeded' AND a.withdrawn_at_ms IS NULL AND c.head_commit <> c.base_commit
@@ -573,10 +588,12 @@ func (store *Store) PublishableChanges(ctx context.Context, at UnixMillis) ([]Pu
 		  AND (p.pull_number IS NOT NULL OR NOT EXISTS (SELECT 1 FROM publication_tasks q WHERE q.change_id = c.id OR q.task_id = c.task_id))
 		  AND NOT EXISTS (SELECT 1 FROM production_records r WHERE r.project_id = c.project_id AND r.kind = 'reviewer'
 		      AND r.identity = 'publish-' || lower(hex(c.id)) || '-' || c.revision
+		      AND r.observed_at_ms <= ?
+		      AND (p.pull_number IS NULL OR r.observed_at_ms >= p.created_at_ms)
 		      AND (json_extract(r.document, '$.retryable') = 0 OR
 		          ((json_extract(r.document, '$.retryable') = 1 OR json_extract(r.document, '$.retryable') IS NULL)
 		              AND r.observed_at_ms + ? > ?)))
-		ORDER BY c.updated_at_ms`, PublishRetryAfter.Milliseconds(), at.Int64())
+		ORDER BY c.updated_at_ms`, at.Int64(), PublishRetryAfter.Milliseconds(), at.Int64())
 	if err != nil {
 		return nil, err
 	}
@@ -790,6 +807,27 @@ func storedProductionReview(ctx context.Context, c *sql.Conn, project ProjectID,
 
 // ProductionReviewBlocks reports a block of record at this exact head: no
 // plain ALLOW clears it (RecordProductionReview), and neither does the gate.
+// TaskOpenPullRequest reports the open pull request task's work is published
+// on, the one SendBackPublishedReview would route to, and its observed head:
+// a fresh Change for that task starts there, never at the base.
+func (store *Store) TaskOpenPullRequest(ctx context.Context, task TaskID) (ProductionPullRequest, bool, error) {
+	tx, err := store.beginRead(ctx)
+	if err != nil {
+		return ProductionPullRequest{}, false, err
+	}
+	defer tx.Close()
+	var document string
+	err = tx.connection.QueryRowContext(ctx, `SELECT r.document FROM publication_tasks p JOIN production_records r ON r.project_id = p.project_id AND r.repository = p.repository AND r.kind = 'pull_request' AND r.identity = CAST(p.pull_number AS TEXT) WHERE p.task_id = ? AND json_extract(r.document, '$.state') = 'open' ORDER BY p.created_at_ms DESC LIMIT 1`, task.Bytes()).Scan(&document)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ProductionPullRequest{}, false, nil
+	}
+	var pr ProductionPullRequest
+	if err == nil && (json.Unmarshal([]byte(document), &pr) != nil || pr.Number == 0 || !productionSHA(pr.Head)) {
+		err = ErrCorruptState
+	}
+	return pr, err == nil, err
+}
+
 func (store *Store) ProductionReviewBlocks(ctx context.Context, project ProjectID, repo string, number uint64, head string) (bool, error) {
 	tx, err := store.beginRead(ctx)
 	if err != nil {

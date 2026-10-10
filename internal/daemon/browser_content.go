@@ -41,6 +41,7 @@ type browserContentInput struct {
 	Location              string                 `json:"location"`
 	Judgment              string                 `json:"judgment"`
 	OwnerAgentID          string                 `json:"owner_agent_id"`
+	DriverAgentID         string                 `json:"driver_agent_id"`
 	ExpectedAgentRevision uint64                 `json:"expected_agent_revision"`
 }
 
@@ -335,7 +336,15 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 		if e != nil || re != nil || ie != nil || input.ExpectedAgentRevision == 0 || input.Objective == "" || input.Criteria == "" {
 			return result, browser.ErrInvalidRequest
 		}
-		created, ce := backend.store.CreateMissionForBrowser(ctx, client.ID, kernel.MissionCreate{ID: id, ProjectID: project, OwnerAgentID: owner, ExpectedAgentRevision: revision, Objective: input.Objective, Criteria: input.Criteria}, at)
+		var driver kernel.AgentID
+		if input.DriverAgentID != "" {
+			var de error
+			driver, de = decodeID(input.DriverAgentID, kernel.AgentIDFromBytes)
+			if de != nil {
+				return result, browser.ErrInvalidRequest
+			}
+		}
+		created, ce := backend.store.CreateMissionForBrowser(ctx, client.ID, kernel.MissionCreate{ID: id, ProjectID: project, OwnerAgentID: owner, ExpectedAgentRevision: revision, Objective: input.Objective, Criteria: input.Criteria, DriverAgentID: driver}, at)
 		if ce != nil {
 			return result, ce
 		}
