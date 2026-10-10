@@ -214,7 +214,7 @@ func TestKnowledgeLaunchKeepsExactTaskWithContext(t *testing.T) {
 	f := newDispatchFixture(t)
 	active := prepareActiveAttemptInProjectWithProvider(t, f, 81, testID(81), "orchestrator", "claude_code")
 	lesson := seedContextKnowledge(t, f, active.run.ProjectID, 201, kernel.ContentLesson, kernel.KnowledgeMetadata{Status: "tentative", Evidence: []string{"source"}}, "a useful lesson")
-	task := bytes.Repeat([]byte{'t'}, runner.MaxProviderTaskBytes)
+	task := bytes.Repeat([]byte{'t'}, runner.MaxProviderTaskBytes-knowledgeContextBytes)
 	launch, _, err := f.daemon.prepareKnowledgeTask(context.Background(), active.run, task, true)
 	if err != nil {
 		t.Fatal(err)
