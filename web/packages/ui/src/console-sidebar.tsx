@@ -6,7 +6,7 @@ import { rankLabel } from "./console-screens.js";
 import { activityLabel, type KnowledgeActivity } from "./project-board.js";
 import { AgentSprite } from "./factory-scene/factory-scene.js";
 import { telemetryLine } from "./factory-scene/scene.js";
-import { agentStatus, agentCurrentTask, agentActivity, isSpecialist, needsYou, type WorkRow, type WorkState } from "./console-view.js";
+import { agentStatus, agentCurrentTask, agentActivity, isSpecialist, needsYou, specialistStatus, type WorkRow, type WorkState } from "./console-view.js";
 import { productionKey, productionStages } from "./production-view.js";
 import { AnswerControls } from "./console-interactions.js";
 import { Icon, IconButton, type IconName } from "./icons.js";
@@ -118,7 +118,7 @@ export function AgentPanel({
         </div>
       </div>
 
-      {specialist && state !== undefined ? <SpecialistSummary agent={agent} state={state} activity={activity} pending={edit?.pending === true} ready={ready} contributions={contributions} onOpenActivity={onOpenActivity} onSaveConfig={onSaveConfig} /> : <p className="dfConsoleSidebar__status"><Status stage={archived ? "archived" : activity} /></p>}
+      {specialist && state !== undefined ? <SpecialistSummary agent={agent} state={state} pending={edit?.pending === true} ready={ready} contributions={contributions} onOpenActivity={onOpenActivity} onSaveConfig={onSaveConfig} /> : <p className="dfConsoleSidebar__status"><Status stage={archived ? "archived" : activity} /></p>}
       {queueHint === undefined || specialist ? null : <p className="dfConsoleSidebar__inherit">{queueHint}</p>}
       {effort === "" ? null : <p className="dfConsoleSidebar__inherit" aria-label={`Recorded by the agent: ${effort}`}>{effort}</p>}
 
@@ -146,25 +146,13 @@ export function AgentPanel({
   );
 }
 
-const WAITING: Record<string, string> = { budget: "review budget used", queued: "queued behind other work", capacity: "waiting for a free background slot" };
-const clock = (ms: number) => new Date(ms).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
-
 /** What a specialist is doing, owes and has done; nothing here is inferred beyond what the factory serves. */
-function SpecialistSummary({ agent, state, activity, pending, ready, contributions, onOpenActivity, onSaveConfig }: {
-  agent: AgentItem; state: StateView; activity: string; pending: boolean; ready: boolean;
+function SpecialistSummary({ agent, state, pending, ready, contributions, onOpenActivity, onSaveConfig }: {
+  agent: AgentItem; state: StateView; pending: boolean; ready: boolean;
   contributions: readonly KnowledgeActivity[]; onOpenActivity?: (item: KnowledgeActivity) => void; onSaveConfig?: (config: AgentConfigEdit) => void;
 }) {
   const info = agent.specialist;
-  const failed = info !== undefined && state.tasks.get(info.last_review_task_id)?.status === "failed";
-  const [stage, text] = agent.archived ? ["stopped", "stopped"]
-    : activity === "working" || activity === "needs-you" ? [activity, activity === "working" ? "working: a review is running" : "needs you"]
-    : agent.paused ? ["paused", "paused: no new reviews"]
-    : failed ? ["failed", "failed: its latest review failed; open it under Recent work"]
-    : info?.waiting && WAITING[info.waiting] ? ["waiting", `waiting: ${WAITING[info.waiting]}`]
-    : ["ready", "ready: between reviews"];
-  const wake = (agent.idle_wake_on ?? "") === "" ? "" : ` or sooner on ${(agent.idle_wake_on ?? "").replace(",", " and ")}`;
-  const next = agent.archived || agent.paused || info === undefined || info.next_review_at_ms === 0 ? "" : `Next review ${clock(info.next_review_at_ms)}${info.next_reason === "" ? "" : ` (${info.next_reason})`}${wake}`;
-  const remit = agent.idle_instruction.split("\n", 1)[0]!.slice(0, 120);
+  const { stage, text, next, remit } = specialistStatus(agent, state);
   const mine = contributions.filter((item) => item.agent_id === agent.id);
   return <>
     <p className="dfConsoleSidebar__status"><Status stage={stage}>{text}</Status></p>
